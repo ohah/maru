@@ -1614,10 +1614,14 @@ pub const ExternalPumpStorage = struct {
             _ = out.closeUncommittedOwned(.invariant_failure);
             return failed(.invariant_failure, .consumed_and_closed);
         }
-        client_mod.Client.finishExternalPumpTransfer(
+        const finish_outcome = client_mod.Client.finishExternalPumpTransfer(
             &out.client_transfer,
             &out.owned_client,
         );
+        if (finish_outcome == .quarantined) {
+            _ = out.closeUncommittedOwned(.invariant_failure);
+            return failed(.invariant_failure, .consumed_and_closed);
+        }
         out.lifecycle = .adopting;
         out.semantic_state = .adopting;
         retain_active_reservation = reserve_process_owner;
@@ -4834,12 +4838,30 @@ test "paired transfer publishes current seed only inside stable storage" {
     try std.testing.expectEqualStrings("/repo", owned.cwd());
     try std.testing.expectEqualStrings("zsh", owned.foregroundProcesses()[0].slice());
     try std.testing.expect(storage.owned_evidence.?.validate(&storage.owned_client.?));
+    const rx_state = switch (storage.owned_client.?.io_mode) {
+        .external => |*state| state,
+        .blocking => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(
+        client_external_mode.RxProvenanceLifecycle.bound,
+        rx_state.rx_provenance.lifecycle,
+    );
+    try std.testing.expectEqual(@as(u64, 12), rx_state.rx_provenance.identity.?.attach_instance_id);
+    try std.testing.expectEqual(
+        @intFromPtr(&storage.owned_client),
+        rx_state.rx_provenance.identity.?.destination_slot_addr,
+    );
+    try std.testing.expect(client_external_mode.parserSealValid(
+        rx_state,
+        &storage.owned_client.?.parser,
+    ));
 }
 
 test "prepared Client transfer binds token destination profile and parser content" {
     var fixture = try TestClient.init();
     defer fixture.deinitPeer();
     defer fixture.client.deinit();
+    fixture.client.attach_instance_id = 77;
     try fixture.client.parser.push("pending");
     const fd = fixture.client.fd;
     const parser_ptr = fixture.client.parser.buf.items.ptr;

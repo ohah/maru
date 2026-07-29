@@ -4669,6 +4669,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 seal_addr: usize = 0,
                 parser_addr: usize = 0,
                 identity: RxIdentity = .{},
+                destination_slot_len: usize = 0,
                 allocator_ptr_addr: usize = 0,
                 allocator_vtable_addr: usize = 0,
                 expected_major: u16 = 0,
@@ -4683,6 +4684,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             };
             const RxProvenance = struct {
                 identity: ?RxIdentity = null,
+                destination_slot_len: usize = 0,
                 rx_absolute_next: u64 = 0,
                 buffer_start_absolute: u64 = 0,
                 parser_seal: ParserAuthoritySeal = .{},
@@ -4721,6 +4723,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 external_tx: std.ArrayListUnmanaged(ExternalTxFrame) = .empty,
                 external_tx_bytes: usize = 0,
                 rx_provenance: RxProvenance = .{},
+                rx_operation_busy: bool = false,
             };
             const PreparedLifecycle = enum { empty, prepared, committed, aborted };
             const PreparedRxBind = struct {
@@ -4730,6 +4733,9 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 destination_slot_len: usize = 0,
                 normalized_addr: usize = 0,
                 identity: ?RxIdentity = null,
+                allocator_ptr_addr: usize = 0,
+                allocator_vtable_addr: usize = 0,
+                expected_major: u16 = 0,
                 unread_len: u64 = 0,
                 unread_digest: [32]u8 = [_]u8{0} ** 32,
                 digest: external_owner_seal.Digest = [_]u8{0} ** 32,
@@ -4746,8 +4752,14 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 source_seal: ParserAuthoritySeal = .{},
                 unread_digest: [32]u8 = [_]u8{0} ** 32,
                 allocator: std.mem.Allocator = std.heap.page_allocator,
+                allocator_ptr_addr: usize = 0,
+                allocator_vtable_addr: usize = 0,
+                replacement_addr: usize = 0,
+                replacement_len: usize = 0,
+                final_items_len: usize = 0,
                 replacement: ?[]u8 = null,
                 cleanup_replacement: ?[]u8 = null,
+                cleanup_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
                 digest: external_owner_seal.Digest = [_]u8{0} ** 32,
                 lifecycle: PreparedLifecycle = .empty,
             };
@@ -4760,8 +4772,13 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 header: ?protocol.Header = null,
                 frame_digest: [32]u8 = [_]u8{0} ** 32,
                 allocator: std.mem.Allocator = std.heap.page_allocator,
+                allocator_ptr_addr: usize = 0,
+                allocator_vtable_addr: usize = 0,
+                payload_addr: usize = 0,
+                payload_len: usize = 0,
                 payload: ?[]u8 = null,
                 cleanup_payload: ?[]u8 = null,
+                cleanup_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
                 lifecycle: PreparedLifecycle = .empty,
             };
             const RxPrepareError = error{
@@ -4791,6 +4808,13 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 destination_slot_len: usize,
                 out: *PreparedRxBind,
             ) RxPrepareError!void;
+            fn commitPreparedRxBind(
+                state: *State,
+                parser: *const framing.FrameParser,
+                prepared: *PreparedRxBind,
+                destination_slot_addr: usize,
+                destination_slot_len: usize,
+            ) void;
             fn prepareAdmit(
                 state: *State,
                 parser: *framing.FrameParser,
@@ -4808,8 +4832,19 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             fn commitAdmitUnchecked(
                 state: *State,
                 parser: *framing.FrameParser,
+                bytes: []const u8,
                 prepared: *PreparedRxAppend,
             ) void;
+            fn commitPreparedAdmit(
+                state: *State,
+                parser: *framing.FrameParser,
+                bytes: []const u8,
+                prepared: *PreparedRxAppend,
+            ) RxPrepareError!void;
+            fn abortPreparedAdmit(
+                state: *State,
+                prepared: *PreparedRxAppend,
+            ) RxPrepareError!void;
             fn nextOutcomeWithRange(
                 state: *State,
                 parser: *framing.FrameParser,
@@ -4839,6 +4874,9 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             seal-mismatched backing은 dereference 전에
             거부한다. 지원 범위는 structurally invalid 또는 seal-mismatched descriptor이며, process 내부 임의
             memory corruption의 mapped/readable 여부나 seal+descriptor 동시 위조를 탐지한다고 주장하지 않는다.
+            allocator callback은 Maru wrapper 재진입과 callback이 보유한 parser/state descriptor·content 포인터의
+            변조까지 탐지·terminal/quarantine한다. callback이 자신이 소유하지 않은 live backing을 임의 `free`하고
+            유효한 descriptor처럼 남기는 행위는 일반 process memory corruption과 같아 지원 범위 밖이다.
             unread/frame/read-buffer content digest는 allocator callback을 건너는 `PreparedRxBind`,
             `PreparedRxAppend`, `RxParseScratch`에만 ephemeral하게 둔다. replacement append는 어차피 복사할 unread
             전체를 O(unread), payload allocation은 exact current frame만 O(frame) hash한다. capacity-spare
@@ -4852,9 +4890,13 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             state의 exact `.unbound` canonical 값, nonzero `attach_instance_id`, destination slot final range,
             normalize replacement의 unread bytes/len과 allocator/parser descriptor를 bind token에 봉인한다.
             OOM/malformed/stale token은 source parser/state/destination mutation 0이다.
-            `Client.finishExternalPumpTransfer`의 기존 no-fail suffix는 normalize를 final parser에 commit한 직후
-            copied `State.rx_provenance`에 `PreparedRxBind.commitUnchecked`를 실행한다. commit은 새 검증/할당/callback
-            없이 `identity={attach_instance_id,destination_slot_addr}`, 다음 두 scalar, parser seal, `.bound`를 한 번
+            `Client.finishExternalPumpTransfer`의 기존 no-fail suffix는 normalize owner를 callback 전에 tombstone하고
+            old backing cleanup 뒤 descriptor/content를 재검증한다. normalize outcome이 `.quarantined`면 Client를
+            unusable, RX를 terminal로 publish하고 bind하지 않으며 `ExternalPumpStorage.initInPlace`는
+            `.invariant_failure/.consumed_and_closed`를 반환한다. `.committed`일 때만 copied
+            `State.rx_provenance`에 `commitPreparedRxBind`를 실행한다. bind commit은 새
+            할당/callback 없이 unread digest, descriptor, allocator/major를 최종 검증하고
+            `identity={attach_instance_id,destination_slot_addr}`, 다음 두 scalar, parser seal, `.bound`를 한 번
             publish한다. `destination_slot_addr`와 `destination_slot_len`은 empty optional payload layout을
             추측하지 않고 기존 transfer가 이미 seal하는 final `*?Client` slot의 address와 `@sizeOf(?Client)`
             범위와 정확히 같다.
@@ -4875,6 +4917,9 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             `PreparedRxBind` identity/initial 값만 bind하며 매 read마다 변하는 live scalar를 넣지 않는다.
             live scalar/seal은 RX wrapper와 teardown owner가 검증하고, callback-scoped projection은 operation lease
             아래 Client outer snapshot으로 State drift를 감지하되 별도 persistent projection registry를 만들지 않는다.
+            `State.rx_operation_busy`가 이 connection의 RX operation lease 단일 출처다. append prepare 성공부터
+            checked commit 또는 state-aware `abortPreparedAdmit`까지, parse 진입부터 outcome/실패 반환까지 true이며
+            allocator callback의 wrapper 재진입은 `InvalidState`/invalid result로 mutation 0 거부한다.
 
             lifecycle/mutation 표는 다음으로 닫는다.
 
@@ -4914,7 +4959,8 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             capacity가 충분하면 exclusive operation lease 아래 source descriptor, read-buffer address/len과
             expected start만 seal하고 같은 aggregate caller가 callback 없이 즉시 commit한다. 이 경로의
             unread/read content hash는 0이며 prepare와 commit 사이 outer action을 허용하지 않는다.
-            부족하면 source mutation/compaction 전에 exact final replacement를 allocate하고, allocator callback 반환
+            부족하면 source mutation/compaction 전에 resident cap 이하의 checked geometric capacity를 가진 final
+            replacement를 allocate하고, final items len과 allocation capacity를 별도로 seal한다. allocator callback 반환
             뒤 parser/provenance seal, expected start와 caller read-buffer address/len/content digest를 다시 검증한다.
             성공 commit은 callback 없이 replacement에 unread+read bytes를 copy하거나 validated spare capacity에
             append하고, old/replacement cleanup authority를 freeze한 no-fail swap 뒤 parser seal과
@@ -4922,11 +4968,12 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             OOM/drift는 logical/physical parser와 provenance mutation 0이다. 이미 socket에서 소비한 bytes의 prepare
             실패는 connection terminal이며 semantic/ledger/TX publish 0이지만 socket read 0은 주장하지 않는다.
             `PreparedRxAppend`는 final address와 state/parser/read buffer/source seal에 묶인
-            `empty→prepared→committed|aborted` owner다. `abort/deinit`은 primary/cleanup replacement slice와 allocator
-            seal 중 canonical authority 하나만 골라 exact once free하고 tombstone한다. commit은 replacement
+            `empty→prepared→committed|aborted` owner다. prepared 상태의 raw `deinit`은 외부 API가 아니며
+            state-aware `abortPreparedAdmit`만 lease와 primary/cleanup replacement slice, allocator seal의 canonical
+            authority를 callback 전에 함께 tombstone한 뒤 exact once free한다. commit은 replacement
             ownership을 parser swap으로 넘기고 old backing은 callback-hidden frozen local cleanup authority로
             옮긴 뒤 token을 committed tombstone으로 만든다. outer authority/revoke가 prepare와 commit 사이
-            바뀌면 abort가 leak 없이 끝나며 copied/moved/stale/double commit/deinit은 mutation/free 0이다.
+            바뀌면 abort가 leak 없이 끝나며 copied/moved/stale/double commit/abort는 mutation/free 0이다.
             `commitAdmitUnchecked`의 바로 위 aggregate caller는 ReleaseFast branch로 token final address,
             parser/provenance/read-buffer/source seal과 no-callback suffix precondition을 마지막으로 재검증한다.
             unchecked leaf와 이 caller는 각각 exact-one callsite이며 boundary gate가 새 caller를 거부한다.
@@ -4942,10 +4989,11 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             buffer가 비면 `buffer_start_absolute == rx_absolute_next`다. compaction은 물리 head만 바꾸며 두
             absolute scalar를 바꾸지 않고 commit 뒤 parser seal만 갱신한다.
             `RxParseScratch`도 final-address `empty→prepared→committed|aborted` owner다. 성공은 payload ownership을
-            `ExternalRxOutcome.frame.frame`으로 move하고 scratch를 tombstone하며, failure/outer abort는 sealed
-            primary/cleanup payload 중 canonical 하나를 callback-hidden local로 옮겨 free한다. free callback 뒤
-            source scalar는 frozen snapshot으로 복원·재검증하고, callback이 cleanup authority까지 다시 바꾸어
-            복원이 불가능하면 panic/free 재시도 대신 bounded quarantine한다.
+            `ExternalRxOutcome.frame.frame`으로 move하고 scratch를 tombstone한다. scratch의 `.prepared` 상태는
+            `nextOutcomeWithRange` 호출 밖으로 노출되지 않는다. allocation/검증 실패는 scratch publish 전 local
+            cleanup owner가, publish 뒤 no-fail consume suffix는 성공 move가 각각 단독 소유한다. cleanup callback
+            전에 payload authority를 tombstone하고 RX operation lease가 wrapper 재진입을 막으므로 source
+            State/parser 복원 권위를 scratch에 중복 저장하지 않는다.
 
             client-local recovery response barrier는 move-owned `ExternalRxOutcome.frame.range.end_absolute`이고,
             host recovery ACK barrier는 ACK가 fully sent된 순간 같은 external state의
@@ -4975,7 +5023,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               dereference/panic 없이 typed terminal이다.
             - append replacement와 payload allocation callback이 parser head/backing/content, provenance,
               expected-start 또는 caller read bytes를 바꾸면 callback 반환 뒤 source consume/publish 0으로 terminal이다.
-              allocation fail-index, prepared abandon, copied/moved/stale/double commit/deinit과 cleanup callback
+              allocation fail-index, state-aware prepared abort, copied/moved/stale/double commit/abort와 cleanup callback
               재변조도 exact-once free 또는 bounded quarantine으로 닫는다.
             - `u64` max-1/max/exhaustion, checked sub/add underflow/overflow, resident exact/cap+1과 read min 계산을
               syscall-injected oracle로 검증한다.
@@ -4984,7 +5032,8 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             - external transfer/adoption seal은 provenance exact carry와 drift rejection, moved/dead tombstone을
               검증한다. cross-storage/prior-bind identity range·watermark는 offset이 같아도 거부한다.
               1-byte drip N bytes의 persistent content-hash work는 0이고 total ephemeral hashed bytes는 실제
-              allocated/copied unread+frame bytes의 선형 상한임을 counter oracle로 검증한다.
+              allocated/copied unread+frame bytes의 선형 상한이며 geometric backing growth 횟수도 O(log N)임을
+              counter oracle로 검증한다.
               d2의 EAGAIN/read-interest/64-frame scheduling과 e/f2의 sealed barrier commit/stale·double permit은
               후속 gate다.
 

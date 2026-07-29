@@ -1370,6 +1370,8 @@ const ExternalPumpTransferLifecycle = enum {
     aborted,
 };
 
+pub const ExternalPumpFinishOutcome = enum { ready, quarantined };
+
 /// Address-bound capability for moving one Client into one final optional slot.
 ///
 /// Parser normalization is staged in separate storage; preparation never mutates either owner.
@@ -1384,10 +1386,12 @@ pub const PreparedExternalPumpTransfer = struct {
     allocator_vtable_addr: usize = 0,
     profile: ?ExternalTransferProfile = null,
     parser_replacement: framing.PreparedNormalizeExact = .{},
+    rx_bind: client_external_mode.PreparedRxBind = .{},
     lifecycle: ExternalPumpTransferLifecycle = .empty,
 
     pub fn deinit(self: *PreparedExternalPumpTransfer) void {
         if (self.saved_self_addr != 0 and self.saved_self_addr != @intFromPtr(self)) return;
+        self.rx_bind.deinit();
         self.parser_replacement.deinit();
         self.lifecycle = .aborted;
     }
@@ -1397,6 +1401,10 @@ pub const PreparedExternalPumpTransfer = struct {
         source: *const Client,
         destination: *const ?Client,
     ) bool {
+        const external_state = switch (source.io_mode) {
+            .external => |*state| state,
+            .blocking => return false,
+        };
         return self.lifecycle == .prepared and
             self.saved_self_addr == @intFromPtr(self) and
             self.source_addr == @intFromPtr(source) and
@@ -1409,8 +1417,14 @@ pub const PreparedExternalPumpTransfer = struct {
             std.meta.eql(self.profile orelse return false, source.externalTransferProfile() orelse return false) and
             source.ownership == .standalone and
             !source.unusable and source.fd >= 0 and
-            source.io_mode == .external and
-            self.parser_replacement.validate(&source.parser);
+            self.parser_replacement.validate(&source.parser) and
+            self.rx_bind.validate(
+                external_state,
+                source.attach_instance_id,
+                &self.parser_replacement,
+                @intFromPtr(destination),
+                @sizeOf(?Client),
+            );
     }
 };
 
@@ -4385,7 +4399,8 @@ pub const Client = struct {
         };
         if (out.lifecycle != .empty or
             out.saved_self_addr != 0 or
-            out.parser_replacement.saved_self_addr != 0)
+            out.parser_replacement.saved_self_addr != 0 or
+            out.rx_bind.saved_self_addr != 0)
             return error.MalformedParser;
         if (destination.* != null) return error.DestinationOccupied;
         if (self.ownership == .external_pump) return error.AlreadyBound;
@@ -4400,6 +4415,21 @@ pub const Client = struct {
             error.ResidentTooLarge => error.ResidentTooLarge,
             error.MalformedState => error.MalformedParser,
             error.OutOfMemory => error.OutOfMemory,
+        };
+        const external_state = switch (self.io_mode) {
+            .external => |*state| state,
+            .blocking => unreachable,
+        };
+        client_external_mode.prepareRxBind(
+            external_state,
+            self.attach_instance_id,
+            &out.parser_replacement,
+            @intFromPtr(destination),
+            @sizeOf(?Client),
+            &out.rx_bind,
+        ) catch {
+            out.parser_replacement.deinit();
+            return error.MalformedParser;
         };
         out.saved_self_addr = @intFromPtr(out);
         out.source_addr = @intFromPtr(self);
@@ -4445,20 +4475,44 @@ pub const Client = struct {
     pub fn finishExternalPumpTransfer(
         prepared: *PreparedExternalPumpTransfer,
         destination: *?Client,
-    ) void {
+    ) ExternalPumpFinishOutcome {
         if (prepared.lifecycle != .owners_moved or
             prepared.saved_self_addr != @intFromPtr(prepared) or
             prepared.destination_addr != @intFromPtr(destination) or
             destination.* == null)
             @panic("invalid external pump transfer finish");
-        destination.*.?.parser.commitPreparedNormalizeExact(
+        const external_state = switch (destination.*.?.io_mode) {
+            .external => |*state| state,
+            .blocking => @panic("external pump destination lost RX state"),
+        };
+        if (external_state.rx_operation_busy)
+            @panic("external pump destination RX bind is already busy");
+        external_state.rx_operation_busy = true;
+        const normalize_outcome = destination.*.?.parser.commitPreparedNormalizeExact(
             &prepared.parser_replacement,
+        );
+        if (normalize_outcome == .quarantined) {
+            external_state.rx_provenance = .{ .lifecycle = .terminal };
+            external_state.rx_operation_busy = false;
+            destination.*.?.unusable = true;
+            prepared.source_addr = 0;
+            prepared.profile = null;
+            prepared.lifecycle = .committed;
+            return .quarantined;
+        }
+        client_external_mode.commitPreparedRxBind(
+            external_state,
+            &destination.*.?.parser,
+            &prepared.rx_bind,
+            @intFromPtr(destination),
+            @sizeOf(?Client),
         );
         // The source Client is a tombstone its caller may already have reused. Drop the staging
         // copies so nothing downstream can mistake this spent token for a description of it.
         prepared.source_addr = 0;
         prepared.profile = null;
         prepared.lifecycle = .committed;
+        return .ready;
     }
 
     /// Allocation-free P5c3 Phase A fold. The reducer and source encoder are initialized inside

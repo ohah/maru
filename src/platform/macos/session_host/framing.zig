@@ -33,6 +33,7 @@ pub const ParseError = error{
 };
 pub const EncodeError = error{ PayloadTooLarge, OutOfMemory };
 pub const NormalizeError = error{ ResidentTooLarge, MalformedState, OutOfMemory };
+pub const NormalizeCommitOutcome = enum { committed, quarantined };
 
 const NormalizeLifecycle = enum { empty, prepared, committed, aborted };
 
@@ -63,9 +64,15 @@ pub const PreparedNormalizeExact = struct {
         if (self.lifecycle == .prepared) {
             const replacement = canonicalReplacement(self);
             const allocator = canonicalAllocator(self);
+            self.replacement = null;
+            self.normalize_primary_allocator = null;
+            self.normalize_cleanup_allocator = null;
+            self.cleanup_replacement = null;
+            self.lifecycle = .aborted;
             if (replacement) |bytes| {
                 if (allocator) |owner| owner.free(bytes);
             }
+            return;
         }
         self.replacement = null;
         self.normalize_primary_allocator = null;
@@ -340,19 +347,53 @@ pub const FrameParser = struct {
     pub fn commitPreparedNormalizeExact(
         self: *FrameParser,
         prepared: *PreparedNormalizeExact,
-    ) void {
+    ) NormalizeCommitOutcome {
         if (!prepared.validate(self)) @panic("invalid prepared parser normalization");
-        self.buf.deinit(self.allocator);
-        self.buf = if (prepared.cleanup_replacement) |replacement| .{
-            .items = replacement,
-            .capacity = replacement.len,
+        const allocator = self.allocator;
+        var old = self.buf;
+        const replacement = prepared.cleanup_replacement;
+        const final_buf: std.ArrayListUnmanaged(u8) = if (replacement) |owned| .{
+            .items = owned,
+            .capacity = owned.len,
         } else .empty;
+        // Publish and tombstone every ownership header before the old-backing free callback.
+        // The caller validates normalized content and immutable parser metadata again after this
+        // callback, so re-entry cannot silently authorize a different bind.
+        self.buf = final_buf;
         self.head = 0;
         prepared.replacement = null;
         prepared.normalize_primary_allocator = null;
         prepared.normalize_cleanup_allocator = null;
         prepared.cleanup_replacement = null;
         prepared.lifecycle = .committed;
+        const final_allocator = self.allocator;
+        const final_expected_major = self.expected_major;
+        var final_digest = [_]u8{0} ** 32;
+        if (final_buf.items.len != 0)
+            std.crypto.hash.Blake3.hash(final_buf.items, &final_digest, .{});
+        old.deinit(allocator);
+        const descriptor_matches =
+            @intFromPtr(self.allocator.ptr) == @intFromPtr(final_allocator.ptr) and
+            @intFromPtr(self.allocator.vtable) == @intFromPtr(final_allocator.vtable) and
+            self.expected_major == final_expected_major and
+            self.head == 0 and
+            self.buf.capacity == final_buf.capacity and
+            self.buf.items.len == final_buf.items.len and
+            (self.buf.capacity == 0 or
+                @intFromPtr(self.buf.items.ptr) == @intFromPtr(final_buf.items.ptr));
+        var observed_digest = [_]u8{0} ** 32;
+        if (descriptor_matches and final_buf.items.len != 0)
+            std.crypto.hash.Blake3.hash(final_buf.items, &observed_digest, .{});
+        const content_matches = descriptor_matches and
+            std.mem.eql(u8, &final_digest, &observed_digest);
+        if (!content_matches) {
+            self.allocator = final_allocator;
+            self.expected_major = final_expected_major;
+            self.buf = .empty;
+            self.head = 0;
+            return .quarantined;
+        }
+        return .committed;
     }
 
     /// Rebind a validated token after its parser value is moved byte-for-byte to final storage.
@@ -673,7 +714,10 @@ test "framing: prepared normalize preserves source until no-fail commit" {
     try std.testing.expectEqual(source_addr, sliceAddress(parser.buf.items));
     try std.testing.expectEqual(@as(usize, 4), parser.head);
     try std.testing.expect(prepared.validate(&parser));
-    parser.commitPreparedNormalizeExact(&prepared);
+    try std.testing.expectEqual(
+        NormalizeCommitOutcome.committed,
+        parser.commitPreparedNormalizeExact(&prepared),
+    );
     try std.testing.expectEqualStrings("unread", parser.buf.items);
     try std.testing.expectEqual(@as(usize, 0), parser.head);
     try std.testing.expectEqual(parser.buf.items.len, parser.buf.capacity);
@@ -695,7 +739,10 @@ test "framing: prepared normalize releases retained capacity when unread is empt
     try std.testing.expect(prepared.replacement == null);
     try std.testing.expect(prepared.validate(&parser));
 
-    parser.commitPreparedNormalizeExact(&prepared);
+    try std.testing.expectEqual(
+        NormalizeCommitOutcome.committed,
+        parser.commitPreparedNormalizeExact(&prepared),
+    );
     try std.testing.expectEqual(@as(usize, 0), parser.buf.capacity);
     try std.testing.expectEqual(@as(usize, 0), parser.buf.items.len);
     try std.testing.expectEqual(@as(usize, 0), parser.head);
@@ -808,4 +855,96 @@ test "framing: prepared normalize rejects parser backing that aliases its owner"
     );
     parser.buf = .empty; // the forged stack alias was never owned.
     parser.deinit();
+}
+
+const NormalizeReentrantFreeAllocator = struct {
+    parent: std.mem.Allocator,
+    target: ?*PreparedNormalizeExact = null,
+    free_calls: usize = 0,
+    reentered: bool = false,
+
+    fn allocator(self: *NormalizeReentrantFreeAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(
+        context: *anyopaque,
+        len: usize,
+        alignment: std.mem.Alignment,
+        ret_addr: usize,
+    ) ?[*]u8 {
+        const self: *NormalizeReentrantFreeAllocator = @ptrCast(@alignCast(context));
+        return self.parent.vtable.alloc(self.parent.ptr, len, alignment, ret_addr);
+    }
+
+    fn resize(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ret_addr: usize,
+    ) bool {
+        const self: *NormalizeReentrantFreeAllocator = @ptrCast(@alignCast(context));
+        return self.parent.vtable.resize(
+            self.parent.ptr,
+            memory,
+            alignment,
+            new_len,
+            ret_addr,
+        );
+    }
+
+    fn remap(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ret_addr: usize,
+    ) ?[*]u8 {
+        const self: *NormalizeReentrantFreeAllocator = @ptrCast(@alignCast(context));
+        return self.parent.vtable.remap(
+            self.parent.ptr,
+            memory,
+            alignment,
+            new_len,
+            ret_addr,
+        );
+    }
+
+    fn free(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        ret_addr: usize,
+    ) void {
+        const self: *NormalizeReentrantFreeAllocator = @ptrCast(@alignCast(context));
+        self.free_calls += 1;
+        if (!self.reentered) {
+            self.reentered = true;
+            if (self.target) |target| target.deinit();
+        }
+        self.parent.vtable.free(self.parent.ptr, memory, alignment, ret_addr);
+    }
+};
+
+test "framing: prepared normalize tombstones before allocator free callback reentry" {
+    var probe = NormalizeReentrantFreeAllocator{ .parent = std.testing.allocator };
+    var parser = FrameParser.init(probe.allocator());
+    defer {
+        probe.target = null;
+        parser.deinit();
+    }
+    try parser.push("pending");
+    var prepared: PreparedNormalizeExact = .{};
+    try parser.prepareNormalizeExact(&prepared, parser.residentBytes());
+    probe.target = &prepared;
+    prepared.deinit();
+    try std.testing.expect(probe.reentered);
+    try std.testing.expectEqual(@as(usize, 1), probe.free_calls);
+    try std.testing.expect(prepared.lifecycle == .aborted);
 }

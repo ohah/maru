@@ -666,9 +666,13 @@ fn parseDockEntry(encoded: []const u8) DockEntryParseError!dock_panel.PersistedE
         .pdf
     else
         return error.UnsupportedDockValue;
-    const parsed_mode = dock_panel.Mode.parseWorkspaceName(mode_raw) orelse return error.UnsupportedDockValue;
-    // kind에서 더 이상 허용하지 않는 모드(예: 라이브 프리뷰 백로그화 뒤 저장된 markdown live-preview)는 defaultFor로
-    // clamp해 복원을 거부하지 않고 조용히 마이그레이션한다(§2.2). 파싱 자체는 성공하므로 포맷 하위호환은 유지된다.
+    // 폐기된 라이브 프리뷰로 저장된 옛 entry는 그 kind의 기본 모드로 마이그레이션한다(docs/file-panel.md §1·§5).
+    // 여기서 흡수하지 않으면 아래 UnsupportedDockValue가 그 창의 도크 전체를 빈 상태로 강등해 파일 탭이 사라진다.
+    const parsed_mode = if (std.mem.eql(u8, mode_raw, dock_panel.legacy_live_preview_mode_name))
+        dock_panel.Mode.defaultFor(kind)
+    else
+        dock_panel.Mode.parseWorkspaceName(mode_raw) orelse return error.UnsupportedDockValue;
+    // kind에서 더 이상 허용하지 않는 모드도 defaultFor로 clamp해 복원을 거부하지 않고 조용히 마이그레이션한다.
     const mode = if (parsed_mode.allowedFor(kind)) parsed_mode else dock_panel.Mode.defaultFor(kind);
     const active = if (std.mem.eql(u8, active_raw, "0"))
         false

@@ -98,9 +98,9 @@ run = "zig build macos-mermaid-helper-build"
 description = "Run the isolated Mermaid helper lifecycle smoke"
 run = "zig build macos-mermaid-helper-smoke"
 
-[tasks.macos-live-preview-perf]
-description = "Run the native live-preview performance artifact gate"
-run = "zig build -Doptimize=ReleaseSafe macos-live-preview-perf"
+[tasks.macos-mermaid-perf]
+description = "Run the native Mermaid performance artifact gate"
+run = "zig build -Doptimize=ReleaseSafe macos-mermaid-perf"
 
 [tasks.macos-app-build]
 description = "Build the runnable macOS Swift app host dev shell"
@@ -213,10 +213,6 @@ run = "bun run --cwd web web:build"
 [tasks."web:test"]
 description = "Run file-panel renderer and sanitizer tests"
 run = "bun run --cwd web web:test"
-
-[tasks."web:live-preview-perf"]
-description = "Run the deterministic Markdown live-preview performance gate"
-run = "bun run --cwd web web:live-preview-perf"
 
 [tasks."web:lint"]
 description = "Lint file-panel TypeScript with oxlint"

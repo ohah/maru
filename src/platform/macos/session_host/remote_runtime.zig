@@ -1173,7 +1173,7 @@ pub const RemoteRuntime = struct {
     /// 어겼다는 뜻이고, 그 연결로 이후 RPC를 계속 보내는 쪽이 더 위험하다.
     fn decodeNotificationResponse(self: *RemoteRuntime, resp: []const u8) client_mod.ClientError!?Notification {
         // std.json.parseFromSlice 대신 **수동 디코드** — parseFromSlice가 숫자 파서(f128 소프트플로트 ___divtf3/___fixtfti
-        // 등)를 링크로 끌어와, 이 경로가 live가 되면 ReleaseSafe 제품 빌드(macos-live-preview-perf)가 undefined symbol로
+        // 등)를 링크로 끌어와, 이 경로가 live가 되면 ReleaseSafe 제품 빌드(macos-mermaid-perf)가 undefined symbol로
         // 깨진다(code-review 후속). 파싱은 selected_text/link_at과 **같은 strict 디코더**를 쓴다 — 응답 schema 위반을
         // RPC마다 다르게 다루지 않는다는 §"같은 major" 불변식을 알림 경로도 함께 지킨다.
         const obj = decodeStrictObject(self.allocator, resp) catch |err| {

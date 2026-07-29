@@ -60,9 +60,8 @@ pub const HeaderModeDescriptor = struct {
     label: []const u8,
 };
 
-/// ABI ordinal과 독립인 헤더 시각 순서와 label의 단일 출처. **라이브 프리뷰는 백로그(2026-07-22 사용자 결정)**라
-/// markdown·svg 모두 `읽기|소스`만 노출한다. 라이브 재도입 시 여기 `.live_preview`("라이브")를 다시 넣고 markdown을
-/// 별도 리스트로 분기한다. kind가 늘어나면 여기 모드 리스트만 더한다 — layout/render/hit-test는 `modesForKind`를 순회한다.
+/// ABI ordinal과 독립인 헤더 시각 순서와 label의 단일 출처. markdown·svg 모두 `읽기|소스`를 노출한다.
+/// kind가 늘어나면 여기 모드 리스트만 더한다 — layout/render/hit-test는 `modesForKind`를 순회한다.
 pub const header_modes = [_]HeaderModeDescriptor{
     .{ .mode = .read, .label = "읽기" },
     .{ .mode = .source_edit, .label = "소스" },
@@ -374,7 +373,6 @@ test "파일 헤더 밴드 control rect는 우측 정렬되고 좁은 밴드에�
     // markdown 헤더는 읽기|소스 2모드다(라이브 백로그).
     const read = headerModeRect(header, 10, .markdown, .read, false, false).?;
     const edit = headerModeRect(header, 10, .markdown, .source_edit, false, false).?;
-    try std.testing.expectEqual(@as(?Rect, null), headerModeRect(header, 10, .markdown, .live_preview, false, false)); // 라이브 없음
     try std.testing.expectEqual(control.x, read.x);
     try std.testing.expectEqual(read.x + read.w, edit.x);
     try std.testing.expectEqual(control.x + control.w, edit.x + edit.w);
@@ -422,9 +420,8 @@ test "헤더 mode 슬롯은 kind별로 나뉜다 (markdown thirds, svg halves) b
         try std.testing.expect(d.label.len > 0);
     }
     try std.testing.expectEqual(@as(?u16, both.mode_end), md_prev);
-    // svg: 2개 슬롯(읽기·소스), 라이브 없음.
+    // svg: 2개 슬롯(읽기·소스).
     try std.testing.expectEqual(@as(usize, 2), modesForKind(.svg).len);
-    try std.testing.expect(headerModeCellRange(both, .svg, .live_preview) == null);
     const svg_read = headerModeCellRange(both, .svg, .read).?;
     const svg_source = headerModeCellRange(both, .svg, .source_edit).?;
     try std.testing.expectEqual(both.control_start, svg_read.start);

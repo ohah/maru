@@ -945,7 +945,7 @@ struct MermaidHelperSmoke {
         checks["perf_tick_pipe_io_zero"] = perfDiagnostics.mainThreadPipeIO == 0
         checks["perf_tick_blocking_wait_zero"] = perfDiagnostics.mainThreadBlockingWaits == 0
         let performance: [String: Any] = [
-            "schema": "maru.live-preview-macos.v1",
+            "schema": "maru.mermaid-macos.v1",
             "scenario": "fp11f-mermaid-cold-start-restart-1000-ticks",
             "ticks": 1_000,
             "worker_token_cap": MARU_LIVE_PREVIEW_MAX_WORKERS,
@@ -1114,7 +1114,7 @@ struct MermaidHelperSmoke {
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let data = try JSONSerialization.data(withJSONObject: performance, options: [.prettyPrinted, .sortedKeys])
-            try data.write(to: directory.appendingPathComponent("live-preview-macos.json"), options: .atomic)
+            try data.write(to: directory.appendingPathComponent("mermaid-macos.json"), options: .atomic)
         } catch {
             fail("performance artifact write failed: \(error)")
         }

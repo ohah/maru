@@ -95,8 +95,8 @@ var app_instance_lease_slot: LeaseSlot = .{};
 // 여기서는 ABI 표면으로 re-export만 한다.
 pub const EventKind = session_mod.EventKind;
 
-test "ABI v147 app instance lease result values match the C header" {
-    try std.testing.expectEqual(@as(u32, 147), abi_version);
+test "ABI v148 app instance lease result values match the C header" {
+    try std.testing.expectEqual(@as(u32, 148), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -206,23 +206,15 @@ test "Swift workspace checkpoint validates the assembled manifest before backup 
     try std.testing.expect(count_gate < write);
 }
 
-test "ABI v133 live preview raw mode route and asset role values match the C header" {
+test "ABI file panel mode, key route, and asset role values match the C header" {
     try std.testing.expectEqual(@as(u32, c.MARU_FILE_PANEL_MODE_READ), @intFromEnum(maru.session.dock_panel.Mode.read));
     try std.testing.expectEqual(@as(u32, c.MARU_FILE_PANEL_MODE_SOURCE_EDIT), @intFromEnum(maru.session.dock_panel.Mode.source_edit));
-    try std.testing.expectEqual(@as(u32, c.MARU_FILE_PANEL_MODE_LIVE_PREVIEW), @intFromEnum(maru.session.dock_panel.Mode.live_preview));
     try std.testing.expectEqual(@as(u32, c.MARU_WEB_KEY_ROUTE_PASS_THROUGH), @intFromEnum(maru.config.keybinding.WebKeyRoute.pass_through));
     try std.testing.expectEqual(@as(u32, c.MARU_WEB_KEY_ROUTE_APP_ACTION), @intFromEnum(maru.config.keybinding.WebKeyRoute.app_action));
     try std.testing.expectEqual(@as(u32, c.MARU_WEB_KEY_ROUTE_CONSUME_UNBOUND), @intFromEnum(maru.config.keybinding.WebKeyRoute.consume_unbound));
     try std.testing.expectEqual(@as(u32, c.MARU_WEB_KEY_ROUTE_WEB_EDITOR), @intFromEnum(maru.config.keybinding.WebKeyRoute.web_editor));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_ASSET_ROLE_APP), @intFromEnum(maru.session.app_scheme.AppAssetRole.app));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_ASSET_ROLE_RENDER), @intFromEnum(maru.session.app_scheme.AppAssetRole.render));
-    try std.testing.expectEqual(@sizeOf(c.MaruAppHostLivePreviewCandidate), @sizeOf(LivePreviewCandidateAbi));
-    try std.testing.expectEqual(@alignOf(c.MaruAppHostLivePreviewCandidate), @alignOf(LivePreviewCandidateAbi));
-    try std.testing.expectEqual(@offsetOf(c.MaruAppHostLivePreviewCandidate, "surface_id"), @offsetOf(LivePreviewCandidateAbi, "surface_id"));
-    try std.testing.expectEqual(@offsetOf(c.MaruAppHostLivePreviewCandidate, "priority"), @offsetOf(LivePreviewCandidateAbi, "priority"));
-    try std.testing.expectEqual(@as(usize, c.MARU_LIVE_PREVIEW_MAX_WORKERS), maru.session.live_preview_budget.max_workers);
-    try std.testing.expectEqual(@as(usize, c.MARU_LIVE_PREVIEW_SOURCE_BYTES_PER_WORKER) * maru.session.live_preview_budget.max_workers, maru.session.live_preview_budget.max_source_bytes);
-    try std.testing.expectEqual(@as(usize, c.MARU_LIVE_PREVIEW_RESULT_BYTES_PER_WORKER) * maru.session.live_preview_budget.max_workers, maru.session.live_preview_budget.max_result_bytes);
 }
 
 pub const KeyCode = enum(u32) {
@@ -2114,15 +2106,6 @@ pub fn resolveAppAsset(io: std.Io, role: maru.session.app_scheme.AppAssetRole, r
         const expected = std.fmt.bufPrint(&expected_buf, "{s}/{s}", .{ root_real, clean }) catch return AppAssetError.Reject;
         if (!std.mem.eql(u8, cand_real, expected)) return AppAssetError.Reject;
     }
-    // hardlink는 realpath가 alias 이름을 그대로 보존하므로 공식 worker inode와도 대조한다. app role도 공식 URL 외
-    // alias/case variant는 거부해 worker bundle의 공개 경로를 하나로 고정한다.
-    if (!std.mem.eql(u8, clean, "live-preview-worker.js")) {
-        var worker_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const worker_path = std.fmt.bufPrint(&worker_buf, "{s}/live-preview-worker.js", .{root_real}) catch return AppAssetError.Reject;
-        if (dir.statFile(io, worker_path, .{})) |worker_st| {
-            if (worker_st.kind == .file and worker_st.inode == st.inode) return AppAssetError.Reject;
-        } else |_| {}
-    }
     if (cand_real.len > out.len) return AppAssetError.Reject;
     @memcpy(out[0..cand_real.len], cand_real);
     return out[0..cand_real.len];
@@ -2201,14 +2184,6 @@ pub export fn maru_macos_app_read_app_asset(
     const stat = file.stat(io) catch return -2;
     if (stat.kind != .file or stat.size > out_cap) return -2;
 
-    if (!std.mem.eql(u8, clean, "live-preview-worker.js")) {
-        if (root.openFile(io, "live-preview-worker.js", .{ .follow_symlinks = false })) |worker| {
-            defer worker.close(io);
-            if (worker.stat(io)) |worker_stat| {
-                if (worker_stat.kind == .file and worker_stat.inode == stat.inode) return -1;
-            } else |_| {}
-        } else |_| {}
-    }
     const len: usize = @intCast(stat.size);
     const read = file.readPositionalAll(io, op[0..len], 0) catch return -2;
     if (read != len) return -2;
@@ -2368,7 +2343,7 @@ const FileBridgeContext = struct {
         session_mod.mermaidCoordinator().revokeRenderer(self.surface_id, renderer);
     }
 
-    fn livePreviewReady(raw: *anyopaque, editor_epoch: u64) anyerror!void {
+    fn rendererReady(raw: *anyopaque, editor_epoch: u64) anyerror!void {
         const self: *FileBridgeContext = @ptrCast(@alignCast(raw));
         if (!self.session.filePanelMermaidDocumentActive(self.surface_id, editor_epoch))
             return error.StaleDocument;
@@ -2400,7 +2375,7 @@ pub export fn maru_macos_app_session_bridge_dispatch(
         .open_link_fn = FileBridgeContext.openLink,
         .render_mermaid_fn = FileBridgeContext.renderMermaid,
         .revoke_mermaid_fn = FileBridgeContext.revokeMermaid,
-        .live_preview_ready_fn = FileBridgeContext.livePreviewReady,
+        .renderer_ready_fn = FileBridgeContext.rendererReady,
     };
     const reply = maru.session.control_bridge.dispatchBridgeWithFileAccess(
         allocator,
@@ -2420,50 +2395,6 @@ pub export fn maru_macos_app_session_bridge_dispatch(
 pub export fn maru_macos_app_session_file_panel_document_terminated(session: ?*AppSession, surface_id: u64) u32 {
     const app_session = session orelse return 0;
     return app_session.filePanelDocumentTerminated(surface_id);
-}
-
-pub const LivePreviewCandidateAbi = extern struct {
-    surface_id: u64,
-    priority: u32,
-    reserved: u32 = 0,
-};
-
-var live_preview_budget: maru.session.live_preview_budget.LivePreviewBudget = .{};
-
-pub export fn maru_macos_live_preview_budget_reconcile(
-    candidates_ptr: ?[*]const LivePreviewCandidateAbi,
-    candidate_count: usize,
-    out_ptr: ?[*]u64,
-    out_cap: usize,
-) i32 {
-    if (candidate_count > 0 and candidates_ptr == null) return -1;
-    if (out_cap < maru.session.live_preview_budget.max_workers or out_ptr == null) return -1;
-    const raw = if (candidates_ptr) |ptr| ptr[0..candidate_count] else &.{};
-    for (raw) |candidate| {
-        if (candidate.surface_id == 0 or candidate.reserved != 0) return -1;
-        if (candidate.priority != 1 and candidate.priority != 2) return -1;
-    }
-    const written = live_preview_budget.reconcileMapped(raw, struct {
-        fn map(candidate: LivePreviewCandidateAbi) maru.session.live_preview_budget.Candidate {
-            return .{
-                .surface_id = candidate.surface_id,
-                .priority = if (candidate.priority == 2) .focused else .visible,
-            };
-        }
-    }.map, out_ptr.?[0..out_cap]);
-    return @intCast(written);
-}
-
-test "live preview budget ABI validates and prioritizes focused surface" {
-    var candidates = [_]LivePreviewCandidateAbi{
-        .{ .surface_id = 1, .priority = 1 },
-        .{ .surface_id = 2, .priority = 2 },
-    };
-    var out: [maru.session.live_preview_budget.max_workers]u64 = undefined;
-    try std.testing.expectEqual(@as(i32, 2), maru_macos_live_preview_budget_reconcile(&candidates, candidates.len, &out, out.len));
-    try std.testing.expectEqualSlices(u64, &.{ 2, 1 }, out[0..2]);
-    candidates[0].priority = 9;
-    try std.testing.expectEqual(@as(i32, -1), maru_macos_live_preview_budget_reconcile(&candidates, candidates.len, &out, out.len));
 }
 
 const mermaid_protocol = maru.session.mermaid_protocol;
@@ -3073,13 +3004,12 @@ test "maru_macos_app_resolve_app_asset export: 정상=len>0, traversal=-1, 부�
     try std.testing.expectEqual(@as(i64, -4), maru_macos_app_resolve_app_asset(0, null, 0, "index.html", 10, &out, out.len));
 }
 
-test "maru_macos_app_read_app_asset reads one no-follow fd and rejects worker aliases" {
+test "maru_macos_app_read_app_asset reads one no-follow fd and rejects path escapes" {
     const io = std.testing.io;
     var root_tmp = std.testing.tmpDir(.{});
     defer root_tmp.cleanup();
     try root_tmp.dir.writeFile(io, .{ .sub_path = "index.html", .data = "safe" });
-    try root_tmp.dir.writeFile(io, .{ .sub_path = "live-preview-worker.js", .data = "worker" });
-    try std.Io.Dir.hardLink(root_tmp.dir, "live-preview-worker.js", root_tmp.dir, "bundle.js", io, .{});
+    try root_tmp.dir.writeFile(io, .{ .sub_path = "bundle.js", .data = "shell" });
     try root_tmp.dir.symLink(io, "index.html", "app.css", .{});
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root_abs = root_buf[0..try root_tmp.dir.realPath(io, &root_buf)];
@@ -3089,7 +3019,6 @@ test "maru_macos_app_read_app_asset reads one no-follow fd and rejects worker al
     try std.testing.expectEqual(@as(i64, 4), len);
     try std.testing.expectEqualStrings("safe", out[0..@intCast(len)]);
     try std.testing.expectEqual(@as(i64, -1), maru_macos_app_read_app_asset(0, root_abs.ptr, root_abs.len, "sub/page.html", 13, &out, out.len));
-    try std.testing.expectEqual(@as(i64, -1), maru_macos_app_read_app_asset(1, root_abs.ptr, root_abs.len, "bundle.js", 9, &out, out.len));
     try std.testing.expectEqual(@as(i64, -2), maru_macos_app_read_app_asset(1, root_abs.ptr, root_abs.len, "app.css", 7, &out, out.len));
 }
 
@@ -3116,17 +3045,18 @@ test "resolveAppAsset: 정상 파일 서빙 + 빈 경로 → index" {
     try std.testing.expectError(AppAssetError.Reject, resolveAppAsset(io, .app, root_abs, "sub/page.html", &out3));
 }
 
-test "resolveAppAsset: live preview worker is served only to the app role" {
+test "resolveAppAsset: render role rejects in-root aliases of its closed asset set" {
     const io = std.testing.io;
     var root_tmp = std.testing.tmpDir(.{});
     defer root_tmp.cleanup();
-    try root_tmp.dir.writeFile(io, .{ .sub_path = "live-preview-worker.js", .data = "self.onmessage=()=>{}" });
+    try root_tmp.dir.writeFile(io, .{ .sub_path = "index.html", .data = "shell-only" });
+    try root_tmp.dir.symLink(io, "index.html", "bundle.js", .{});
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root_abs = root_buf[0..try root_tmp.dir.realPath(io, &root_buf)];
     var out: [std.fs.max_path_bytes]u8 = undefined;
-    const app_worker = try resolveAppAsset(io, .app, root_abs, "live-preview-worker.js", &out);
-    try std.testing.expect(std.mem.endsWith(u8, app_worker, "/live-preview-worker.js"));
-    try std.testing.expectError(AppAssetError.Reject, resolveAppAsset(io, .render, root_abs, "live-preview-worker.js", &out));
+    // render origin은 canonical 상대 경로까지 정확히 같아야 한다. 허용 이름(bundle.js)을 다른 파일로 향하게 한
+    // in-root symlink가 통과하면 `script-src 'self'`인 renderer가 shell 전용 자산 bytes를 읽을 수 있다.
+    try std.testing.expectError(AppAssetError.Reject, resolveAppAsset(io, .render, root_abs, "bundle.js", &out));
 }
 
 test "resolveAppAsset: Mermaid runtime is helper-only even when present under the app root" {
@@ -3140,27 +3070,6 @@ test "resolveAppAsset: Mermaid runtime is helper-only even when present under th
     try std.testing.expectError(AppAssetError.Reject, resolveAppAsset(io, .app, root_abs, "mermaid-helper.js", &out));
     try std.testing.expectError(AppAssetError.Reject, resolveAppAsset(io, .app, root_abs, "MERMAID-HELPER.JS", &out));
     try std.testing.expectError(AppAssetError.Reject, resolveAppAsset(io, .render, root_abs, "mermaid-helper.js", &out));
-}
-
-test "resolveAppAsset: worker symlink hardlink and case aliases are denied" {
-    const io = std.testing.io;
-    var root_tmp = std.testing.tmpDir(.{});
-    defer root_tmp.cleanup();
-    try root_tmp.dir.writeFile(io, .{ .sub_path = "live-preview-worker.js", .data = "worker" });
-    try root_tmp.dir.symLink(io, "live-preview-worker.js", "bundle.js", .{});
-    try std.Io.Dir.hardLink(root_tmp.dir, "live-preview-worker.js", root_tmp.dir, "app.css", io, .{});
-    try std.Io.Dir.hardLink(root_tmp.dir, "live-preview-worker.js", root_tmp.dir, "worker-alias.js", io, .{});
-    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const root_abs = root_buf[0..try root_tmp.dir.realPath(io, &root_buf)];
-    var out: [std.fs.max_path_bytes]u8 = undefined;
-    try std.testing.expectError(AppAssetError.Reject, resolveAppAsset(io, .render, root_abs, "bundle.js", &out));
-    try std.testing.expectError(AppAssetError.Reject, resolveAppAsset(io, .render, root_abs, "app.css", &out));
-    try std.testing.expectError(AppAssetError.Reject, resolveAppAsset(io, .app, root_abs, "worker-alias.js", &out));
-    _ = resolveAppAsset(io, .app, root_abs, "LIVE-PREVIEW-WORKER.JS", &out) catch |err| {
-        try std.testing.expect(err == AppAssetError.Reject or err == AppAssetError.NotFound);
-        return;
-    };
-    return error.TestUnexpectedResult;
 }
 
 test "resolveAppAsset: traversal(`..`)·whitelist 밖 → Reject(5c-1 문자열 단계)" {

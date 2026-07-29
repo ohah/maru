@@ -904,27 +904,27 @@ pub fn build(b: *std.Build) void {
         const macos_mermaid_helper_smoke_step = b.step("macos-mermaid-helper-smoke", "Run the isolated Mermaid helper lifecycle smoke");
         macos_mermaid_helper_smoke_step.dependOn(&macos_mermaid_smoke_assert.step);
 
-        const macos_live_preview_perf_validate = b.addRunArtifact(perf_validate_exe);
-        macos_live_preview_perf_validate.addArgs(&.{
-            "live-preview-macos",
-            "tests/artifacts/perf/live-preview-macos.json",
+        const macos_mermaid_perf_validate = b.addRunArtifact(perf_validate_exe);
+        macos_mermaid_perf_validate.addArgs(&.{
+            "mermaid-macos",
+            "tests/artifacts/perf/mermaid-macos.json",
         });
-        macos_live_preview_perf_validate.setCwd(b.path("."));
-        macos_live_preview_perf_validate.has_side_effects = true;
-        macos_live_preview_perf_validate.step.dependOn(&macos_mermaid_smoke_assert.step);
+        macos_mermaid_perf_validate.setCwd(b.path("."));
+        macos_mermaid_perf_validate.has_side_effects = true;
+        macos_mermaid_perf_validate.step.dependOn(&macos_mermaid_smoke_assert.step);
 
         // JSON 예산과 별개 축: 공용 tick 파일에 FS·WebView·process·pipe·sleep·blocking-wait API가
         // 새로 유입되면 실패시키는 source-policy gate(operation-site 계측을 tick에서 배제).
-        const macos_live_preview_source_policy = b.addSystemCommand(&.{
+        const macos_mermaid_source_policy = b.addSystemCommand(&.{
             "sh", "-eu", "-c",
             "if /usr/bin/grep -En 'FileManager|WKWebView|Process\\(|Pipe\\(|sleep\\(|waitUntilExit|Data\\(contentsOf:|write\\(to:' src/platform/macos/MermaidProductTick.swift; then " ++
                 "echo 'forbidden capability in MermaidProductTick.swift' >&2; exit 1; fi",
         });
-        macos_live_preview_source_policy.setCwd(b.path("."));
+        macos_mermaid_source_policy.setCwd(b.path("."));
 
-        const macos_live_preview_perf_step = b.step("macos-live-preview-perf", "Run the native live-preview performance artifact gate");
-        macos_live_preview_perf_step.dependOn(&macos_live_preview_perf_validate.step);
-        macos_live_preview_perf_step.dependOn(&macos_live_preview_source_policy.step);
+        const macos_mermaid_perf_step = b.step("macos-mermaid-perf", "Run the native Mermaid performance artifact gate");
+        macos_mermaid_perf_step.dependOn(&macos_mermaid_perf_validate.step);
+        macos_mermaid_perf_step.dependOn(&macos_mermaid_source_policy.step);
 
         // bare 터미널 실행파일은 HiDPI(NSHighResolutionCapable)를 신뢰성 있게 못 켠다. 정식
         // .app 번들을 만들고 그 안의 바이너리를 직접 실행하면, AppKit이 실행파일 경로에서
@@ -1091,7 +1091,7 @@ pub fn build(b: *std.Build) void {
         const macos_app_smoke_fixture = b.addSystemCommand(&.{
             "sh", "-eu", "-c",
             "mkdir -p zig-out/maru-macos-app; " ++
-                "cp tests/fixtures/file-panel/fp4-viewer.md zig-out/maru-macos-app/fp10d-live-preview.md; " ++
+                "cp tests/fixtures/file-panel/fp4-viewer.md zig-out/maru-macos-app/markdown-preview.md; " ++
                 "cp tests/fixtures/file-panel/fixture.svg zig-out/maru-macos-app/fixture.svg",
         });
         macos_app_smoke_fixture.setCwd(b.path("."));
@@ -1099,7 +1099,7 @@ pub fn build(b: *std.Build) void {
         macos_app_smoke.setCwd(b.path("."));
         macos_app_smoke.setEnvironmentVariable("MARU_MACOS_APP_SMOKE_MS", "15000");
         macos_app_smoke.setEnvironmentVariable("MARU_FILE_PANEL_EDIT_SMOKE", "1");
-        macos_app_smoke.setEnvironmentVariable("MARU_FILE_PANEL", b.pathFromRoot("zig-out/maru-macos-app/fp10d-live-preview.md"));
+        macos_app_smoke.setEnvironmentVariable("MARU_FILE_PANEL", b.pathFromRoot("zig-out/maru-macos-app/markdown-preview.md"));
         // 5c-2c: bare 실행파일(비-번들)은 Bundle.main.resourceURL/web가 없으므로, maru-app:// resolve 정책 C-ABI 링크를
         // 소스 asset root로 검증하게 override를 준다(스킴 핸들러 정책은 root 무관하게 그 아래로 샌드박스). docs/web-panel.md §7.1 ⑤.
         // **절대 경로**로 준다(리뷰11 [4]) — resolveAppAsset는 cwd 기준으로 realpath하므로 상대 경로는 실행 cwd가 repo
@@ -1120,13 +1120,7 @@ pub fn build(b: *std.Build) void {
                 "/usr/bin/grep -Eq '^file_viewer_images=1$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^file_viewer_loaded_images=1$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^file_viewer_editor_hydrated=true$' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '^file_viewer_live_projection=running$' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '^file_viewer_live_projection_decorations=[1-9][0-9]*$' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '^file_viewer_live_projection_generation=[1-9][0-9]*$' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '^file_viewer_live_general_fragments=0$' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '^file_viewer_live_atomic_mounted=[2-8]$' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '^file_viewer_live_atomic_rendered=[2-8]$' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '^file_viewer_live_mermaid_request=ok$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^file_viewer_mermaid_request=ok$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^file_viewer_mermaid_navigation_in_flight=true$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^file_viewer_mermaid_navigation_cancelled=true$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^mermaid_pending_replies=0$' \"$summary\"; " ++
@@ -1138,21 +1132,21 @@ pub fn build(b: *std.Build) void {
                 "/usr/bin/grep -Eq '^mermaid_request_frames=2$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^mermaid_terminal_results=1$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^mermaid_deadline_expirations=1$' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '^file_viewer_default_mode=live-preview$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^file_viewer_default_mode=read$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^file_viewer_edit=true$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^file_viewer_cmd_s_route=web-editor$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^file_viewer_disk_saved=true$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^file_viewer_write=true$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^file_viewer_dirty_sync_recovered=true$' \"$summary\"; " ++
-                "/usr/bin/grep -Eq 'FP10d actual Cmd\\+S marker' zig-out/maru-macos-app/fp10d-live-preview.md; " ++
+                "/usr/bin/grep -Eq 'FP10d actual Cmd\\+S marker' zig-out/maru-macos-app/markdown-preview.md; " ++
                 "/usr/bin/grep -Eq '^file_viewer_under_page_background=true$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^file_viewer_critical_style=true$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^file_panel_mode_unknown_rejected=true$' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '^web_role_scheme_app_worker_status=200$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^web_role_scheme_app_shell_status=200$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^web_role_scheme_app_mermaid_status=404$' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '^web_role_scheme_app_worker_self=true$' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '^web_role_scheme_render_worker_status=404$' \"$summary\"; " ++
-                "/usr/bin/grep -Eq '^web_role_scheme_render_worker_csp=missing$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^web_role_scheme_app_worker_none=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^web_role_scheme_render_shell_status=404$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^web_role_scheme_render_shell_csp=missing$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^web_role_scheme_render_document_status=200$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^web_role_scheme_render_document_none=true$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^renderer_bridge_type=undefined$' \"$summary\"; " ++

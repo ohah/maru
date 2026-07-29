@@ -8,7 +8,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 147u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 148u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -16,13 +16,9 @@
 #define MARU_APP_INSTANCE_LEASE_INVALID_PATH 4u
 #define MARU_FILE_PANEL_MODE_READ 0u
 #define MARU_FILE_PANEL_MODE_SOURCE_EDIT 1u
-#define MARU_FILE_PANEL_MODE_LIVE_PREVIEW 2u
 #define MARU_FILE_TREE_ROOT_PICK_NONE 0u
 #define MARU_FILE_TREE_ROOT_PICK_REPLACE 1u
 #define MARU_FILE_TREE_ROOT_PICK_ADD 2u
-#define MARU_LIVE_PREVIEW_MAX_WORKERS 8u
-#define MARU_LIVE_PREVIEW_SOURCE_BYTES_PER_WORKER 8388608u
-#define MARU_LIVE_PREVIEW_RESULT_BYTES_PER_WORKER 2097152u
 #define MARU_MERMAID_PROTOCOL_MAX_SOURCE_BYTES 32768u
 #define MARU_MERMAID_PROTOCOL_MAX_SVG_BYTES 524288u
 #define MARU_MERMAID_PROTOCOL_MAX_REQUEST_FRAME_BYTES 40960u
@@ -865,7 +861,7 @@ uint32_t maru_macos_app_session_file_panel_shell_kind(
     const uint8_t **out_ptr,
     size_t *out_len
 );
-/* 도크 entry의 mode(0=read, 1=source-edit, 2=live-preview). 도크가 아니면 -1. v132. */
+/* 도크 entry의 mode(0=read, 1=source-edit). 도크가 아니면 -1. v132. */
 int32_t maru_macos_app_session_file_panel_mode(MaruAppHostSession *session, uint64_t surface_id);
 /* explicit file WKWebView primary-down을 Zig FocusOwner/DockPanel group에 반영한다. 1=승인, 0=stale/아님. v124. */
 uint32_t maru_macos_app_session_focus_file_panel_surface(MaruAppHostSession *session, uint64_t surface_id);
@@ -901,7 +897,7 @@ uint64_t maru_macos_app_session_take_file_tree_restore_surface_action(MaruAppHos
    explorer root)를 1회 drain한다. 0이 아니면 복원 모델이 저장 파일을 표현하지 못하므로 호출자가 이번 실행의
    checkpoint를 막아 마지막 완전본을 보존한다. v144. */
 uint32_t maru_macos_app_session_take_workspace_restore_dropped(MaruAppHostSession *session);
-/* GPU 헤더 토글이 바꾼 mode를 1회 drain한다. 반환 -1=없음, 0=read, 1=source-edit, 2=live-preview. v132. */
+/* GPU 헤더 토글이 바꾼 mode를 1회 drain한다. 반환 -1=없음, 0=read, 1=source-edit. v132. */
 int32_t maru_macos_app_session_take_file_panel_mode_action(MaruAppHostSession *session, uint64_t *surface_id_out);
 /* PendingDockFocus의 native firstResponder action을 mode refresh와 독립적으로 drain한다. 0=없음. v131. */
 uint64_t maru_macos_app_session_take_pending_dock_focus_action(MaruAppHostSession *session);
@@ -1373,23 +1369,6 @@ int64_t maru_macos_app_read_app_asset(
     const uint8_t *request_path_ptr,
     size_t request_path_len,
     uint8_t *out_ptr,
-    size_t out_cap
-);
-
-/* FP10b 앱 전역 live-preview worker 후보. priority: 1=visible, 2=focused. 숨김/non-live는 제출하지 않는다. */
-typedef struct MaruAppHostLivePreviewCandidate {
-    uint64_t surface_id;
-    uint32_t priority;
-    uint32_t reserved;
-} MaruAppHostLivePreviewCandidate;
-
-/* 현재 visible 후보를 제출하면 Zig LivePreviewBudget이 최대 8개의 desired surface_id를 out에 쓴다.
-   focused 우선, 나머지는 직전 selection을 유지한다. 실제 running/enabling reservation은 Swift reducer가
-   revoke-first로 전이한다. 반환은 쓴 개수, 잘못된 포인터/priority는 -1. v133. */
-int32_t maru_macos_live_preview_budget_reconcile(
-    const MaruAppHostLivePreviewCandidate *candidates,
-    size_t candidate_count,
-    uint64_t *out_surface_ids,
     size_t out_cap
 );
 

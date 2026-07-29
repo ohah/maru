@@ -33,20 +33,11 @@ jobs:
             bun-${{ runner.os }}-
       - run: bun install --cwd web --frozen-lockfile
       - run: mise run web:check
-      - run: mise run web:live-preview-perf
       - name: Upload zntc bundle evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: maru-web-build
           path: web/dist/**
-          if-no-files-found: error
-          retention-days: 14
-      - name: Upload live-preview performance evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: maru-live-preview-performance
-          path: tests/artifacts/perf/live-preview.json
           if-no-files-found: error
           retention-days: 14

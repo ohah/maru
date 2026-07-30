@@ -15,6 +15,8 @@ import TaskList from "@tiptap/extension-task-list";
 import TaskItem from "@tiptap/extension-task-item";
 import Image from "@tiptap/extension-image";
 import { Table, TableRow, TableCell, TableHeader } from "@tiptap/extension-table";
+import { mountRichToolbar, type ToolbarMount } from "./ui/toolbar-mount";
+import type { ToolbarItem } from "./ui/toolbar";
 
 /**
  * 리치가 문서모델로 표현하지 못해 **저장할 때 잃어버리는** 문법을 찾는다.
@@ -165,39 +167,19 @@ const toolbar_groups: ToolbarButton[][] = [
   ],
 ];
 
-function buildToolbar(host: HTMLElement, editor: Editor): () => void {
-  const bar = host.ownerDocument.createElement("div");
-  bar.className = "maru-rich-toolbar";
-  const syncers: Array<() => void> = [];
-
-  for (const [index, group] of toolbar_groups.entries()) {
-    if (index > 0) {
-      const separator = host.ownerDocument.createElement("span");
-      separator.className = "maru-rich-toolbar-separator";
-      bar.appendChild(separator);
-    }
-    for (const button of group) {
-      const el = host.ownerDocument.createElement("button");
-      el.type = "button";
-      el.className = "maru-rich-toolbar-button";
-      el.textContent = button.label;
-      el.title = button.title;
-      // 툴바 클릭이 편집기 selection을 빼앗으면 명령이 엉뚱한 위치에 적용된다.
-      el.addEventListener("mousedown", (event) => event.preventDefault());
-      el.addEventListener("click", () => button.run(editor));
-      bar.appendChild(el);
-      const isActive = button.isActive;
-      if (isActive !== undefined) {
-        syncers.push(() => {
-          el.dataset.active = isActive(editor) ? "true" : "false";
-        });
-      }
-    }
-  }
-  host.appendChild(bar);
-  return () => {
-    for (const sync of syncers) sync();
-  };
+/** 선언한 그룹을 현재 편집기 상태로 평가해 표현 계층에 넘길 항목으로 만든다. */
+function toolbarItems(editor: Editor): ToolbarItem[][] {
+  return toolbar_groups.map((group) =>
+    group.map((button) => ({
+      id: button.title,
+      label: button.label,
+      title: button.title,
+      // `isActive`가 없는 버튼(구분선 삽입 등)은 토글이 아니므로 `undefined`를 그대로 넘긴다. `?? false`로 접으면
+      // 표현 계층이 "꺼진 토글"로 그려 `aria-pressed="false"`가 붙는다(toolbar.tsx의 `active` 주석 참고).
+      active: button.isActive?.(editor),
+      run: () => button.run(editor),
+    })),
+  );
 }
 
 export function createRichEditor(
@@ -243,9 +225,19 @@ export function createRichEditor(
     onSelectionUpdate: () => syncToolbar(),
   });
 
-  syncToolbar = buildToolbar(shell, editor);
+  const toolbarHost = doc.createElement("div");
+  shell.appendChild(toolbarHost);
+  // 마운트 실패를 삼키지 않는다. 제품(WKWebView)에서 툴바가 통째로 비어 있는데 콘솔에도 아무 흔적이 없어
+  // 원인 추적이 사용자 왕복이 됐다. 실패 사실을 DOM에 남겨 native 진단이 읽을 수 있게 한다.
+  let toolbar: ToolbarMount;
+  try {
+    toolbar = mountRichToolbar(toolbarHost, () => toolbarItems(editor));
+  } catch (error) {
+    doc.body.dataset.richToolbarError = String(error);
+    throw error;
+  }
+  syncToolbar = toolbar.sync;
   shell.appendChild(content);
-  syncToolbar();
 
   // 리치가 표현하지 못하는 문법이 있으면 편집을 막는다. **내용이 바뀔 때마다 다시 판정한다** — 생성 시
   // 한 번만 보면, 소스에서 frontmatter를 붙였다 리치로 돌아온 문서에는 잠금이 걸리지 않는다(그 반대도 마찬가지).
@@ -288,7 +280,10 @@ export function createRichEditor(
       syncToolbar();
     },
     focus: () => editor.commands.focus(),
-    destroy: () => editor.destroy(),
+    destroy: () => {
+      toolbar.destroy();
+      editor.destroy();
+    },
     setEditable: (editable: boolean) => {
       closeLocked = !editable;
       // 표현 불가 잠금이 걸린 문서는 close lock이 풀려도 계속 잠긴 상태여야 한다.

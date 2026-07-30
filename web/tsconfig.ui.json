@@ -1,0 +1,15 @@
+{
+  "//": "React UI 표면(src/ui/**)의 타입 게이트. tsconfig.json 전체는 기존 src/*.ts에 미해결 오류가 남아 있어 게이트로 쓸 수 없고, 그렇다고 새 .tsx를 아무 검사 없이 두면 prop 이름이 틀려도 그대로 배포된다 — React 19는 렌더 예외를 던지지 않고 빈 트리를 남기므로 사용자에게는 빈 툴바로만 보인다. 그래서 새 표면만 좁게 검사한다(기존 코드 정리는 별도 작업).",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "target": "ES2023",
+    "jsx": "react-jsx",
+    "types": []
+  },
+  "include": ["src/ui/**/*.ts", "src/ui/**/*.tsx"]
+}

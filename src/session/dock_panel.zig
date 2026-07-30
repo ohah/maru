@@ -5,6 +5,22 @@ const split_tree = @import("split_tree.zig");
 /// 런타임 기본을 사용한다는 뜻이다. FP1이 아직 정해지지 않은 픽셀/point 정책을 선점하지 않게 하는 sentinel이다.
 pub const Side = enum { right, bottom };
 
+/// 도크가 담는 뷰. 도크는 하나이고 그 안에서 무엇을 그릴지만 고른다(docs/file-explorer.md §3.5) — 폭·접기·포커스·
+/// 영속은 뷰와 무관하게 도크가 계속 소유한다. 새 뷰를 더할 때 workspace 리더는 **모르는 값을 `explorer`로 clamp**해
+/// 옛 버전이 새 파일을 만나도 창을 통째로 버리지 않는다.
+pub const View = enum {
+    explorer,
+    source_control,
+
+    /// workspace 텍스트 → 뷰. 모르는 이름은 null이고 호출자가 기본값으로 clamp한다.
+    pub fn parse(name: []const u8) ?View {
+        inline for (@typeInfo(View).@"enum".fields) |field| {
+            if (std.mem.eql(u8, name, field.name)) return @field(View, field.name);
+        }
+        return null;
+    }
+};
+
 /// 창 하나가 보존하는 파일 entry 상한. workspace.v1이 window 한 줄에 반복 키를 두는 FP1 포맷이므로 reader의
 /// 손상-input 작업량 bound와 live 모델의 저장 가능 상태를 같은 계약으로 맞춘다. 비활성 WKWebView 해제 상한(기본 8)과
 /// 달리 이 값은 가벼운 탭 metadata 수 상한이다.
@@ -180,6 +196,7 @@ pub const PersistedState = struct {
     side: Side = .right,
     size: u32 = 0,
     collapsed: bool = false,
+    view: View = .explorer,
     /// Explorer launcher로 한 번 열린 도크인지. content와 분리해 explicit-empty 도크도 재시작 뒤 유지한다.
     presented: bool = false,
     entries: []const PersistedEntry = &.{},
@@ -198,6 +215,8 @@ pub const DockPanel = struct {
     size: u32 = 0,
     collapsed: bool = false,
     presented: bool = false,
+    /// 지금 그리는 뷰(docs/file-explorer.md §3.5). 도크 자체의 배치 상태와 같은 급이라 여기 산다.
+    view: View = .explorer,
     /// `restore`가 채우는 복원 목록. 호출자가 Term으로 **이관하면 비운다**(path 소유도 함께 넘어간다).
     restored: std.ArrayList(Entry) = .empty,
     /// 복원 당시 활성이던 entry의 index(없으면 null).
@@ -229,6 +248,7 @@ pub const DockPanel = struct {
         panel.size = state.size;
         panel.collapsed = state.collapsed;
         panel.presented = state.presented;
+        panel.view = state.view;
 
         try panel.appendRestored(state.entries);
         return panel;

@@ -15,6 +15,7 @@ const file_tree_navigation = maru.session.file_tree_navigation;
 const file_tree_mutation = maru.session.file_tree_mutation;
 const file_tree_icon = chrome.file_tree_icon;
 const file_tree_scrollbar = chrome.components.file_tree_scrollbar;
+const dock_view_bar = chrome.components.dock_view_bar;
 const file_panel_bridge = maru.session.file_panel_bridge;
 const control_surface = maru.session.control_surface; // Track C A1: 컨트롤 플레인 Surface 엔티티 DTO(collector가 채운다)
 const web_panel_layout = maru.session.web_panel_layout; // Phase 4c: 웹 패널 본문 rect·px→pt y-flip·surface diff 순수 계산(4a) 소비(docs/web-panel.md §10 4c·§14)
@@ -3166,6 +3167,40 @@ pub const AppSession = struct {
 
     fn dockHasContent(self: *const AppSession) bool {
         return self.fileEntryCountConst() > 0 or (self.file_tree_initialized and self.file_tree.hasContent());
+    }
+
+    /// 현재 뷰가 스위처의 몇 번째 슬롯인지. chrome 컴포넌트는 도메인 enum을 모르므로(레이어 경계) 이 대응은
+    /// session 쪽인 여기가 소유한다 — 순서가 두 곳에 흩어지면 그린 자리와 눌리는 자리가 어긋난다.
+    fn dockViewSlotIndex(self: *const AppSession) usize {
+        return switch (self.dock.view) {
+            .explorer => 0,
+            .source_control => 1,
+        };
+    }
+
+    /// 현재 뷰의 헤더 제목. 헤더는 뷰마다 다르지만 rect·렌더 경로는 하나다(§3.5).
+    fn dockViewTitle(self: *const AppSession) []const u8 {
+        return switch (self.dock.view) {
+            .explorer => "탐색기",
+            .source_control => "소스 컨트롤",
+        };
+    }
+
+    fn dockViewForSlot(index: usize) ?dock_panel.View {
+        return switch (index) {
+            0 => .explorer,
+            1 => .source_control,
+            else => null,
+        };
+    }
+
+    /// 뷰 전환. 같은 뷰면 no-op이라 불필요한 재그리기를 만들지 않는다. 트리를 떠날 때는 키보드 포커스도 함께
+    /// 돌려준다 — 보이지 않는 트리가 키 입력을 계속 먹으면 안 된다(docs/file-explorer.md §3.5).
+    fn setDockView(self: *AppSession, view: dock_panel.View) void {
+        if (self.dock.view == view) return;
+        self.dock.view = view;
+        if (view != .explorer and self.fileTreeFocused()) self.restoreFileTreeFocus();
+        self.metal_dirty = true;
     }
 
     fn dockGeometry(self: *const AppSession) dock_layout.Geometry {
@@ -11678,6 +11713,8 @@ pub const AppSession = struct {
     }
 
     fn fileTreeRowAt(self: *const AppSession, x_px: f64, y_px: f64) ?usize {
+        // 다른 뷰를 보는 중이면 트리 행은 화면에 없다 — 좌표가 같은 rect 안이어도 hit이 되면 안 된다(§3.5).
+        if (self.dock.view != .explorer) return null;
         if (!self.dockVisible() or self.cell_height_px == 0) return null;
         const tree_rect = self.dockGeometry().tree_content;
         if (!layout_math.pointInRect(x_px, y_px, tree_rect)) return null;
@@ -11859,6 +11896,12 @@ pub const AppSession = struct {
         if (!self.dock_initialized or !self.dock.presented) return;
         self.cancelPendingDockFocus();
         if (self.dock.collapsed) self.activateFilePanelDockControl();
+        // 다른 뷰를 보는 중이면 먼저 탐색기로 되돌린다 — 보이지 않는 트리에 키 입력이 가면 안 된다
+        // (docs/file-explorer.md §3.5). 접힘 해제와 같은 급의 "포커스 전에 보이게 만든다" 처리다.
+        if (self.dock.view != .explorer) {
+            self.dock.view = .explorer;
+            self.metal_dirty = true;
+        }
         const restore_surface: ?u64 = switch (self.focus_owner) {
             .file_tree => |owner| owner.restore_surface,
             // workspace 소유 중 활성 Term이 파일이면 그 surface가 Esc 복원 대상이다(옛 `.dock_surface`).
@@ -19864,6 +19907,21 @@ pub const AppSession = struct {
             }
             if (self.dockVisible()) {
                 const dg = self.dockGeometry();
+                // 뷰 스위처가 트리보다 먼저다 — 바는 트리 위에 있고 rect가 겹치지 않지만, 순서를 명시해
+                // 나중에 바가 커져도 트리 클릭에 먹히지 않게 한다(docs/file-explorer.md §3.5).
+                if (dg.view_bar.h > 0 and layout_math.pointInRect(x_px, y_px, dg.view_bar)) {
+                    if (x_px >= 0 and y_px >= 0) {
+                        if (dock_view_bar.slotAtPoint(
+                            .{ .x = dg.view_bar.x, .y = dg.view_bar.y, .w = dg.view_bar.w, .h = dg.view_bar.h },
+                            self.cell_width_px,
+                            @intFromFloat(x_px),
+                            @intFromFloat(y_px),
+                        )) |slot| {
+                            if (dockViewForSlot(slot)) |view| self.setDockView(view);
+                        }
+                    }
+                    return; // 바 안의 여백 클릭도 트리로 흘려보내지 않는다.
+                }
                 if (self.beginFileTreeScrollbarGesture(x_px, y_px)) return;
                 if (self.fileTreeRowAt(x_px, y_px)) |row_index| {
                     if (self.file_tree_rows.items[row_index] == .empty and layout_math.pointInRect(x_px, y_px, dg.tree_content)) {
@@ -23598,6 +23656,7 @@ pub const AppSession = struct {
             .size = self.dock.size,
             .collapsed = self.dock.collapsed,
             .presented = self.dock.presented,
+            .view = self.dock.view,
             .entries = entries,
         };
     }
@@ -25774,13 +25833,34 @@ pub const AppSession = struct {
             if (self.dockVisible()) {
                 const dg = self.dockGeometry();
                 self.appendBarBgQuad(dg.tree, self.chromeQuadBg(self.sidebarBg()));
+                // 뷰 스위처 한 행(docs/file-explorer.md §3.5). 활성 슬롯만 배경으로 표시해 "지금 보는 뷰"를 남긴다.
+                if (dg.view_bar.w > 0 and dg.view_bar.h > 0) {
+                    self.appendBarBgQuad(dg.view_bar, self.chromeQuadBg(self.sidebarBg()));
+                    if (dock_view_bar.slotRect(.{
+                        .x = dg.view_bar.x,
+                        .y = dg.view_bar.y,
+                        .w = dg.view_bar.w,
+                        .h = dg.view_bar.h,
+                    }, self.cell_width_px, self.dockViewSlotIndex())) |slot| {
+                        self.appendBarBgQuad(
+                            .{ .x = slot.x, .y = slot.y, .w = slot.w, .h = slot.h },
+                            self.chromeQuadBg(self.sidebarActiveBg()),
+                        );
+                    }
+                    self.appendBarBgQuad(.{
+                        .x = dg.view_bar.x,
+                        .y = dg.view_bar.y + dg.view_bar.h -| 1,
+                        .w = dg.view_bar.w,
+                        .h = 1,
+                    }, self.dividerColor());
+                }
                 if (dg.tree_header.w > 0 and dg.tree_header.h > 0) self.appendBarBgQuad(.{
                     .x = dg.tree_header.x,
                     .y = dg.tree_header.y + dg.tree_header.h -| 1,
                     .w = dg.tree_header.w,
                     .h = 1,
                 }, self.dividerColor());
-                if (dg.tree_content.w > 0 and self.cell_height_px > 0) {
+                if (self.dock.view == .explorer and dg.tree_content.w > 0 and self.cell_height_px > 0) {
                     const start = self.fileTreeEffectiveScroll();
                     const visible: usize = @intCast(dg.tree_content.h / self.cell_height_px);
                     const end = @min(self.file_tree_rows.items.len, start + visible);
@@ -26103,8 +26183,17 @@ pub const AppSession = struct {
                         const visible_rows: u16 = @intCast(@min(dg.tree_content.h / self.cell_height_px, @as(u32, std.math.maxInt(u16))));
                         const dock_fg: terminal.Color = .{ .rgb = self.mutedForeground() };
                         const dock_active_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
+                        if (tree_cols > 0 and dg.view_bar.h > 0) {
+                            if (coretext_frame_builder.buildDockViewBarDrawList(self.allocator, tree_cols, self.dockViewSlotIndex(), dock_active_fg, dock_fg)) |bdl| {
+                                self.collectShaped(&collected, bdl, pane_frame_builder, .{ .pane = .{
+                                    .origin_x = dg.view_bar.x,
+                                    .origin_y = dg.view_bar.y,
+                                    .colors = tabbar_colors,
+                                } });
+                            } else |_| {}
+                        }
                         if (tree_cols > 0 and dg.tree_header.h > 0) {
-                            if (coretext_frame_builder.buildFileTreeHeaderDrawList(self.allocator, tree_cols, dock_active_fg)) |hdl| {
+                            if (coretext_frame_builder.buildFileTreeHeaderDrawList(self.allocator, tree_cols, dock_active_fg, self.dockViewTitle())) |hdl| {
                                 self.collectShaped(&collected, hdl, pane_frame_builder, .{ .pane = .{
                                     .origin_x = dg.tree_header.x,
                                     .origin_y = dg.tree_header.y,
@@ -26112,7 +26201,7 @@ pub const AppSession = struct {
                                 } });
                             } else |_| {}
                         }
-                        if (tree_content_cols > 0 and visible_rows > 0) {
+                        if (self.dock.view == .explorer and tree_content_cols > 0 and visible_rows > 0) {
                             const reserved_cols: u16 = if (self.fileTreeScrollbarGeometry() != null)
                                 @intCast(@min(
                                     file_tree_scrollbar.reservedColumns(dg.tree_content.w, self.cell_width_px),
@@ -37797,6 +37886,14 @@ test "flagPrefixedLabel: running=●+이름, 아니면 이름만" {
 // agentDisplayVisible(pollAgentKinds/State의 metal_dirty 게이트)은 **화면에 running 표시가 보이는 탭**만 true —
 // 접힘/최소크롬 + 비활성 탭이면 진짜 안 보여 false(백그라운드 Term churn으로 헛 재렌더 방지). 여기선 단일 탭이라
 // (탭0=활성) 탭바(paneBarHeightPx>0)만으로도 true이고, 접힘+비활성으로 만들면 false가 되는 걸 고정한다.
+test "도크 뷰 스위처: 슬롯 index 대응과 포커스 되돌림" {
+    // chrome 컴포넌트는 도메인 enum을 모르므로(레이어 경계) 뷰↔슬롯 대응은 session이 소유한다. 두 곳에
+    // 흩어지면 그린 자리와 눌리는 자리가 어긋나므로 왕복을 여기서 못박는다.
+    try std.testing.expectEqual(dock_panel.View.explorer, AppSession.dockViewForSlot(0).?);
+    try std.testing.expectEqual(dock_panel.View.source_control, AppSession.dockViewForSlot(1).?);
+    try std.testing.expect(AppSession.dockViewForSlot(chrome.components.dock_view_bar.slot_count) == null);
+}
+
 test "agentDisplayVisible: 카드·탭바 안 보이면 false (재렌더 게이트)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

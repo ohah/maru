@@ -68,7 +68,7 @@
 > socket callback을 추가하지 않는다. 구조 이동보다 먼저 `advanceValidatedPartial` exact-one 결과의
 > before/after/header/range/identity가 classified intent seal에 포함되고 traversal이 sealed after만
 > 소비하는지 고정한다. 외부 제품 owner→pump와 내부 pump→traversal callsite를 각각 exact-one으로 검사한다.
-> d2c는 **설계 gate C0와 구현 gate C1을 완료했고 C2~C5는 구현 전**이다. C1은 split
+> d2c는 **설계 gate C0와 구현 gate C1을 완료했고 C2 계약은 문서 확정·구현 전, C3~C5는 구현 전**이다. C1은 split
 > frame/read budget policy, Client parser provenance와 storage/lease에 이중 봉인된 resident cap,
 > read DTO/constants/final-address scratch layout, 모든 positive limit tie와 accepted
 > `< / == / >` stop 표를 고정한다. lease는 Client/parser 주소와 전체 provenance를 thread-local snapshot에도
@@ -76,9 +76,14 @@
 > `+1`인 진행만 snapshot을 갱신한다. no-progress generation 재봉인은 거부한다. 일관되게 재봉인된 callback drift는
 > terminal 복원, 복원 불가능한 descriptor drift는 bounded quarantine, teardown callback 뒤 cap/digest는
 > canonical zero가 되는 hostile test를 포함한다. 이 증거를 Debug/ReleaseFast·boundary·전체 check로
-> 고정한 뒤 C1을 merge한다. C2 opaque-guarded
-> admit/tombstone-before-callback/no-free
-> quarantine, C3 injected cumulative collector+value-only authority seam, C4 private pump
+> 고정한 뒤 C1을 merge한다. C2는 `ReplacementAllocationGuard.check`의 capture-before-allocation,
+> validate-allocated, capture-before-cleanup, validate-after-cleanup phase와 value-only authority seal을
+> 사용한다. allocation 반환 뒤 guard/alias/seal 검증 실패는 candidate write/free 0의
+> `allocation_quarantined`, publication 뒤 old-backing cleanup drift는 canonical parser terminal의
+> `post_commit_quarantined`다. cleanup은 allocator/range/seal을 frozen local로 옮기고 primary+mirror와
+> allocator authority를 callback 전에 tombstone으로 만든 뒤 prepared를 다시 읽지 않는다. synthetic
+> allocation fail-index, alias, callback drift/reentry, pre/post-commit exact-one free와 no-free 상한을
+> Debug/ReleaseFast에서 고정한다. C3 injected cumulative collector+value-only authority seam, C4 private pump
 > integration+final drain evidence, C5 POSIX 제품 facade+실제 socketpair의 다섯 구현 gate를 순서대로 닫는다.
 > collector는 최초 `maxReadable` allowance 안에서 최대 1 MiB를 누적한 뒤 `staged_len>0`일 때만 guarded
 > admit exact-one과 `traverseBuffered` exact-one을 실행한다. initial complete backlog는 traversal exact-one,

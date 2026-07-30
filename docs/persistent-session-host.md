@@ -7533,6 +7533,206 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 complete backlog는 admit 0/traversal exact-one, zero-prefix would-block은 둘 다 0이며 각 분기 뒤
                 final 조건에서만 drain evidence를 mint/consume한다. 아직 제품 owner는 기존 buffered facade를
                 유지하고 새 경로는 private product-compilable test adapter만 call한다.
+
+                C4의 private adapter 입력은 canonical `RxTurnOps{buffered,transport}`이고 read callback 외 authority callback은
+                caller가 주입하지 않는다. pump가 held `ExternalWholeTurnLease`에서
+                `ProductRxReadAuthority`를 stack-local로 만들고, `current()`가 매 호출마다 final-address
+                storage/lease/scratch/Client/fd/parser seal, inherited owner digest와 정렬된 protected range
+                projection을 다시 계산한다. read callback context와 ops descriptor는 이 projection과 서로
+                disjoint해야 하며 제품 authority view에 test-only 우회 필드는 없다.
+
+                C4 private helper 이름은 `pumpInjectedRxUnderHeldLease`다. d2d가 소유하는 미래
+                `prepareRxTurn`과 permit/whole-turn 책임을 앞당기거나 같은 이름으로 중복 구현하지 않는다.
+                분기와 소유권은 다음 순서 하나다.
+
+                1. inherited blocker와 live-screen head를 기존 buffered-first 규칙으로 먼저 처리한다.
+                2. initial parser가 `complete_or_error`이면 read/admit 0으로 기존 traversal+aggregate를 exact once
+                   실행한다.
+                3. parser가 empty/incomplete이고 turn이 readable이 아니면 read/admit/traversal 0으로 scheduling
+                   SSOT만 호출한다.
+                4. readable이면 `maxReadable` 결과를 한 번 계산해 `.invalid/.counter_exhausted`는 read 0
+                   terminal, `.resident_exhausted/.turn_exhausted`는 read 0 scheduling/terminal 표로 닫고,
+                   positive allowance만 C3 `collectInjected`에 넘긴다.
+                5. collector terminal은 admit/traversal 0 terminal이다. stopped 결과는 prefix 길이와 무관하게
+                   same-stack `StoppedBorrow`를 exact once 빌린다. zero-prefix would-block은 guarded admit/
+                   traversal만 0이며 sealed would-block seed consume 뒤 반드시 `settleStopped`해 다음 generation
+                   ready로 돌아간다.
+                6. positive prefix는 같은 borrow를 유지한 채
+                   `ProductReplacementAllocationGuard`가 owner-range projection을 allocation 전후/cleanup 전후
+                   재검증한 guarded prepare→commit 또는 abort를 exact once 수행한다. ordinary completion은
+                   `resetFinishedPreparedAdmit`, quarantine completion은
+                   `accountGuardedAdmitQuarantine→finalizeQuarantinedPreparedAdmit`으로 닫는다.
+                7. admit 성공 뒤 parser traversal과 aggregate는 기존 함수 하나를 재사용하며 collector bytes를
+                   parser input으로 다시 분류하지 않는다. `TurnResult.rx_read_bytes`는 admit 성공한 prefix만,
+                   `rx_bytes/rx_frames`는 traversal이 소비한 wire만 센다.
+                8. traversal/aggregate 뒤 borrow와 raw would-block observation이 아직 살아 있을 때만 C4c가
+                   C3 module에 추가하는 `mintBorrowedWouldBlockSeed` exact-once seam으로 address-bound seed를 얻고 drain evidence를
+                   mint/consume한다. drain 가능/불가능/terminal 모든 분기에서 마지막으로
+                   `settleStopped`를 exact once 호출하며, scheduling은 settlement 뒤 value-only 결과만으로
+                   결정한다.
+
+                `RxDrainEvidence`는 scratch에 final-address로 embed하고 공개 DTO로 반환하지 않는다. validated
+                would-block seed, stopped receipt, post-admit/traversal parser seal, held lease,
+                owner snapshot, read-attempt generation과 budget bit를 한 digest로 묶는다. final parser empty,
+                terminal 없음, frame/read budget 미소진, 같은 storage/lease/scratch/parser generation일 때만
+                prepare할 수 있고 같은 no-callback suffix에서 즉시 consume해
+                `socket_rx_drained=true`를 `client_pump.decide`에 한 번 전달한다. copied/moved/stale/double
+                evidence, incomplete/complete parser, allowance/attempt stop, EOF/error/EINTR terminal은
+                authority mutation 0으로 거부한다.
+
+                이 seed/active-use API는 완료된 C3 collector 자체를 다시 여는 것이 아니라 C4c가 소유하는
+                integration seam이며, C4c green 전에는 C4 구현으로 표시하지 않는다. canonical 계약은 다음과
+                같다.
+
+                ```zig
+                const BorrowUsePermit = struct {
+                    saved_self_addr: usize,
+                    scratch_addr: usize,
+                    scratch_generation: u64,
+                    receipt_digest: external_owner_seal.Digest,
+                    borrow_addr: usize,
+                    authorized_seed_addr: usize,
+                    authorized_seed_len: usize,
+                    guard_context: *anyopaque,
+                    guard_context_len: usize,
+                    guard_current: *const fn (
+                        context: *anyopaque,
+                        scratch_addr: usize,
+                    ) ?bool,
+                    seed_lifecycle: enum { unminted, prepared, consumed, aborted },
+                    seed_digest: external_owner_seal.Digest,
+                    lifecycle: enum { empty, active, released, aborted },
+                    digest: external_owner_seal.Digest,
+                };
+
+                const BorrowUseGuardOps = struct {
+                    context: *anyopaque,
+                    context_len: usize,
+                    current: *const fn (
+                        context: *anyopaque,
+                        scratch_addr: usize,
+                    ) ?bool,
+                };
+
+                const WouldBlockSeed = struct {
+                    saved_self_addr: usize,
+                    scratch_addr: usize,
+                    scratch_generation: u64,
+                    receipt_digest: external_owner_seal.Digest,
+                    borrow_addr: usize,
+                    attempt_generation: u64,
+                    lifecycle: enum { empty, prepared, consumed, aborted },
+                    digest: external_owner_seal.Digest,
+                };
+
+                pub fn beginStoppedUse(
+                    scratch: *ExternalRxReadScratch,
+                    receipt: *const CollectReceipt,
+                    borrow: *const StoppedBorrow,
+                    guard: *const BorrowUseGuardOps,
+                    authorized_seed_out: *WouldBlockSeed,
+                    out: *BorrowUsePermit,
+                ) bool;
+                pub fn mintBorrowedWouldBlockSeed(
+                    scratch: *ExternalRxReadScratch,
+                    receipt: *const CollectReceipt,
+                    borrow: *const StoppedBorrow,
+                    permit: *BorrowUsePermit,
+                    out: *WouldBlockSeed,
+                ) bool;
+                pub fn consumeWouldBlockSeed(
+                    scratch: *ExternalRxReadScratch,
+                    permit: *BorrowUsePermit,
+                    seed: *WouldBlockSeed,
+                ) ?u64;
+                pub fn abortWouldBlockSeed(
+                    scratch: *ExternalRxReadScratch,
+                    permit: *BorrowUsePermit,
+                    seed: *WouldBlockSeed,
+                ) bool;
+                pub fn endStoppedUse(
+                    scratch: *ExternalRxReadScratch,
+                    receipt: *const CollectReceipt,
+                    borrow: *const StoppedBorrow,
+                    permit: *BorrowUsePermit,
+                ) bool;
+                ```
+
+                `beginStoppedUse`는 guarded allocation callback 전에 scratch에 active permit final address/digest를
+                publish하고 C4 scratch 안의 exact authorized seed output address/length와 frozen
+                `BorrowUseGuardOps` descriptor를 permit에 봉인한다. permit의 `seed_lifecycle`이 seed 정산 SSOT이고
+                scratch의 active-permit digest가 이를 mirror한다. mint/consume/abort는 scratch+permit+canonical
+                seed를 함께 검증하고 permit lifecycle/digest와 scratch mirror를 같은 no-callback suffix에서
+                갱신한다. unminted가 “seed 없음”의 유일한 표현이다.
+
+                C4 pump는 allocator/guard/traversal/aggregate처럼 user callback이 가능한 호출 전체를 감싸는
+                private final-address `CallbackRegionToken`
+                `{saved_self_addr,thread_id,scratch_addr,permit_addr,epoch,lifecycle,digest}`을 caller-owned
+                pristine stack out-param에 in-place mint하고 defer로만 해제한다. thread-local latch는 canonical
+                `token_addr`도 봉인한다. 단순 bool/set-clear가
+                아니며 active token이 있으면 같은/다른 Client·scratch의 nested pump/region acquire를 mutation
+                0으로 거부한다. epoch는 checked monotonic counter이고 max 값까지 한 번만 쓰며 max-exhausted
+                acquire는 token/latch/counter mutation 0으로 실패한다. release는
+                `&token == token.saved_self_addr == latch.token_addr`, token digest/lifecycle과 현재
+                thread/epoch/scratch/permit 주소가 모두 같은 outer owner만 성공하고 canonical token을 consumed
+                tombstone한다. stale/copied/moved/double/cross-thread/nested release는 latch를 바꾸지 않는다.
+                `BorrowUseGuardOps.current`는 이 private latch와 held lease/scratch authority를 투영한다.
+                permit이 active이면 `settleStopped`는 false이고 `teardown`은 busy다. `endStoppedUse`는 active
+                permit만 받되 guard가 callback-active/null/drift이거나 seed가 prepared이면 false이며, 이 실패는
+                모두 scratch/receipt/borrow/permit/seed mutation 0이다. callback은 canonical permit pointer까지 캡처해도 private latch를 해제할 수 없다.
+                callback/aggregate/evidence가 끝난 뒤 guard current가 false이고 seed가 consumed/aborted 또는
+                unminted임을 확인한 `endStoppedUse`만 permit을 exact once release하며, 그 뒤
+                `settleStopped`가 가능하다. copied/moved/stale/double permit과 canonical
+                scratch·receipt·borrow·permit 전부를 캡처한 callback의
+                `endStoppedUse→settleStopped/teardown` 연쇄 재진입도 거부한다.
+                active+guard-false+seed unminted/consumed/aborted는 end exact once 성공 후 replay가 실패하고,
+                active+guard-true/null/drift 또는 prepared seed는 모든 입력이 불변임을 fixture가 고정한다.
+                outer A callback→다른 B pump/region acquire 시도→A로 복귀→A end/settle/teardown 연쇄 fixture는
+                B mutation 0, A token 계속 active, A scratch/permit/seed/generation 불변을 고정한다.
+                original token byte-copy/move release mutation 0+latch active, original exact-once release,
+                cross-thread/double release와 epoch max/max-exhausted acquire를 고정한다.
+
+                `mintBorrowedWouldBlockSeed`는 raw scratch field나 copyable drained bool을 공개하지 않는다.
+                canonical scratch/receipt/borrow final address와 generation/digest를 다시 대조하고 would-block
+                observation의 attempt generation을 address-bound `WouldBlockSeed`에 봉인한다. out은 permit의
+                exact authorized seed address/length와 같아야 하며 exact/partial/one-past/overflow/permit
+                overlap은 거부한다. seed는 borrow가 살아 있는 동안 C4 scratch final address에만 mint되고 drain evidence consume 또는 abort가
+                exact once tombstone한다. `settleStopped` 전 seed 미정산, callback 중 settle/teardown 재진입,
+                copied/moved/stale/double seed는 모두 mutation 0이다.
+
+                C4 TDD gate는 private adapter fixture에서 initial complete backlog, empty/incomplete 각각의
+                readable=false/true 조합, positive bytes→would-block, exact allowance stop, two consecutive
+                zero-prefix would-block와 첫 turn 직후 teardown, EOF/error/EINTR,
+                pre-read `.invalid/.counter_exhausted/.resident_exhausted/.turn_exhausted` 각각의 callback/read/
+                admit/traversal/scheduling 결과,
+                prepare/commit/abort/quarantine 각 결과, parser/lease/owner/ops callback drift, read 64/current
+                128 상한, storage/scratch/Client/fd/read-context/protected-range projection 각 필드 drift,
+                admit/traversal/aggregate exact-one, positive-prefix would-block의 final empty/incomplete,
+                traversal terminal/frame-budget stop, drain evidence와 would-block seed copied/moved/stale/double,
+                guarded allocator/cleanup callback의 borrow/receipt/scratch/permit 캡처 후
+                end→settle/teardown 연쇄 재진입, permit copied/moved/stale/double,
+                unminted/prepared/consumed/aborted seed end 분기와 authorized output
+                exact/partial/one-past/overflow/overlap을
+                Debug/ReleaseFast로 고정한다. boundary는 C3 synthetic 외 `collectInjected` 제품 callsite exact 1,
+                C4 private adapter 밖 raw read scratch field 접근 0, `prepareAdmitGuarded`/commit/abort와 세
+                completion API 제품 callsite가 adapter exact-one, POSIX syscall과 external owner product
+                `RxTurnOps` callsite는 C5 전 0임을 검사한다.
+
+                구현은 네 merge-reviewable 내부 gate로 자른다. **C4a**는 기존
+                `pumpBufferedRxUnderHeldLease`에서 scheduling과 중복되지 않는
+                `traverseAndCommitBufferedUnderHeldLease` 하나를 추출하고 현재 buffered matrix가 완전히
+                동일함을 고정한다. **C4b**는 `buildRxOwnerAuthoritySnapshot` 하나가 Client/parser/provenance,
+                ledger/live/metadata/response owner inventory와 digest를 만들고 `ProductIntentAuthority`,
+                `ProductRxReadAuthority`, `ProductReplacementAllocationGuard`가 각각 projection만 소비하게 한다.
+                C3의 16-range leaf map은 같은 snapshot의 named compile-time projection이다. builder는
+                `current()`와 allocation/cleanup guard의 각 pre/post validation 호출마다 새 immutable snapshot을
+                scratch final address에 rebuild하고 generation/digest를 직전 expected snapshot과 exact
+                비교한다. callback 경계를 넘어 snapshot을 cache하지 않으며, 각 검증은 builder exact-one이고
+                한 검증 안에서만 세 projection이 owner graph를 다시 walk하지 않는다. hostile fixture는
+                phase별 rebuild call count와 generation/digest drift를 고정한다. **C4c**는 C4-owned
+                active-use permit, would-block seed handoff와 drain evidence lifecycle을 C3 module에 추가한다.
+                **C4d**에서만 `pumpInjectedRxUnderHeldLease`와 private product-compilable `RxTurnOps` fixture를
+                연결한다. 네 gate가 모두 green이기 전에는 C4 구현으로 표시하지 않는다.
               - **C5 product closure:** `external_pump_owner`가 `RxTurnOps`의 exact-one 제품 entry를 사용하고 POSIX
                 adapter가 errno만 `RxReadOutcome`으로 변환한다. 실제 Darwin socketpair, readable+writable
                 syscall-order, 전체 hostile/product matrix와 boundary/full check를 통과하고 기존

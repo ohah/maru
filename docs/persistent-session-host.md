@@ -7738,7 +7738,14 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 허용한다. 두 경로 모두 C2가 요구하는 최초 replacement authority seal을 반환하며, builder
                 실패를 무조건 수락하거나 cleanup phase 검증을 생략하지 않는다. stale/copy/context·candidate·
                 parser/inventory/storage/lease drift는 quarantine한다. **C4c**는 C4-owned
-                active-use permit과 would-block seed handoff lifecycle을 C3 module에 추가한다.
+                active-use permit과 would-block seed handoff lifecycle을 C3 module에 추가한다. C4d가
+                `prepared_admit`을 변경하는 동안에는 별도 final-address
+                `PreparedAdmitUsePermit`이 read scratch의 prepared-admit 이외 모든 필드와 active stopped-use
+                permit을 동결한다. begin은 canonical scratch와 pristine prepared-admit을 봉인하고, finish는
+                guarded admit의 reset/quarantine completion 뒤 prepared-admit이 다시 pristine인지와 나머지
+                scratch가 callback 전 값 그대로인지 검증한 뒤에만 read scratch digest를 재봉인한다. active
+                prepared-admit use 중 seed/end/settle/teardown은 거부하며, callback drift를 일반 reseal로
+                합법화하지 않는다.
                 **C4d**에서만 pump-private drain evidence lifecycle과
                 `pumpInjectedRxUnderHeldLease`, private product-compilable `RxTurnOps` fixture를 연결한다.
                 네 gate가 모두 green이기 전에는 C4 구현으로 표시하지 않는다.

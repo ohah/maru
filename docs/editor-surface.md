@@ -48,8 +48,8 @@
 
 **2026-07-31 정정(코드 대조).** 위 세 항목은 그 사이 file-panel 구현이 진행되며 모두 사실이 아니게 됐다.
 
-- `unsafe-inline` 항목은 **그대로 유효하다**(2026-07-31 WKWebView 실측 — §7.2 표). 다만 대상이 바뀌었다: editor의 미래 문제가
-  아니라 **이미 출하된 소스 모드의 현재 결함**이다. CM6는 뜨지만 자기 스타일(baseTheme·구문 하이라이트)이 차단된다.
+- `unsafe-inline`은 **file-panel이 FP12b(2026-07-22)에서 app origin 한정으로 이미 열었다.** 이 문서가 "Phase 0.5A에서
+  확정한다"고 남겨 둔 결정은 그 사이 사용자 결정으로 닫혔고, editor가 할 일은 없다(§7.2).
 - CM6는 **제품 WebKit에서 이미 돈다** — "돈 적이 없다"는 무효이고, 남은 미검증은 MergeView뿐이다(§7.4).
 - zntc는 **`0.1.4`로 pin되어 CM6를 포함해 번들된다** — `0.1.3` 제약은 해소됐다(§7.1).
 
@@ -60,10 +60,13 @@
 - `PanelKind`는 단순 trust bit가 아니다. label·DTO·layout·host config·복원 모델에 관여하는 의미 있는 종류다. 현재 `{ markdown, browser }`뿐이므로 editor를 markdown 라우트로 위장하면 권한과 lifecycle이 결합된다.
 - 현행 trusted markdown bridge는 named `WKContentWorld`에만 존재하고 page world의 `window.maru`는 의도적으로 없다. 제품 smoke에서도 isolated probe=`object`, page-world probe=`undefined`, bridge hello=`0.1.0`을 확인했다.
 - control dispatcher에는 metadata뿐 아니라 browser 전용 authenticated/deferred 경로가 이미 있다. 그러나 editor/file용 generic dispatcher와 제품 capability fd 발급 경로는 없다.
-- 현행 CSP는 `src/session/app_scheme.zig`의 **전역 상수 하나**(`csp_header`)이고 Swift가 export로 읽어 모든 `maru-app://`
-  응답에 붙인다. 값은 `default-src 'none'; script-src 'self'; img-src 'self' data:; style-src 'self'; connect-src 'none';`
-  `frame-src maru-app://render; base-uri 'none'; form-action 'none'`이다 — `frame-src`가 renderer origin 하나로 열린 것 외에
-  **라우트별 분기는 여전히 없다**(§7.2 선행조건은 유효).
+- **CSP는 이미 role별로 갈려 있다**(`src/session/app_scheme.zig` — FP12b, 2026-07-22 사용자 결정). Swift 스킴 핸들러가
+  `AppAssetRole`에 맞는 헤더를 응답마다 붙인다. 초판이 적은 "전역 상수 하나, 라우트별 분기 없음"은 **무효**다.
+  - `app_csp_header`(신뢰 shell): `… style-src 'self' 'unsafe-inline'; frame-src maru-app://render …`
+  - `render_csp_header`(격리 렌더): `… style-src 'self' 'sha256-Xeh9es1…'; frame-src 'none' …`
+  - 둘 다 `worker-src 'none'`·`connect-src 'none'`.
+  app origin의 `'unsafe-inline'`은 정확히 **CM6 style-mod 주입** 때문에 열렸고(그 결정 주석이 "소스 에디터 하이라이트가
+  전부 기본색이 되던 근본원인"이라고 적고 있다), render origin은 비신뢰 HTML을 materialize하므로 hash 핀을 유지한다.
 - control socket 최대 frame은 1 MiB다. 브리지 응답도 현재 fixed 8 KiB라 큰 문서 전송 경로로 사용할 수 없다.
 - **file-panel 진행 상태(2026-07-31 코드 대조)**: 이 문서가 "미래형"으로 적었던 전제 대부분이 **이미 현재형**이다.
   - **FP16 구조가 현재 계약이다**([file-panel.md](file-panel.md) 머리말): 파일 콘텐츠는 도크가 아니라 **워크스페이스
@@ -76,15 +79,9 @@
     한계는 해소됐다.
   - **웹 스택은 React + Tailwind + shadcn/ui**로 바뀌었다([file-panel.md](file-panel.md) §2.1, 2026-07-29 사용자 결정).
     "프레임워크 없음"을 전제한 §7.1 서술은 무효다.
-  - **CM6는 엄격 CSP에서 "뜨지만, 자기 스타일은 차단된다"(실측 2026-07-31).** 소스 모드가 출하 중인 것은 사실이나,
-    §1.1의 `unsafe-inline` 항목은 **해소된 것이 아니라 여전히 살아 있다**. WKWebView 실측(§7.2 표)에서 `style-src 'self'`는
-    ⑴ 마크업 `<style>`, ⑵ **JS로 만든 `<style>` + `textContent`**, ⑶ CSSOM `insertRule`, ⑷ `style=` 속성을 **모두 차단**했다.
-    style-mod(CM6가 쓰는 주입기)는 문서 루트에서 ⑵ 경로를 타므로(`style-mod/src/style-mod.js:135` — `adoptedStyleSheets`는
-    `!root.head`, 즉 ShadowRoot일 때만), **CM6 baseTheme과 `syntaxHighlighting(HighlightStyle)`이 제품에서 적용되지 않는다.**
-    `web/src/source-language.ts:138`이 실제로 `syntaxHighlighting`을 쓰고 `app.css`에는 토큰 클래스가 하나도 없다(변수만 있다)
-    — 즉 **구문 색이 제품에서 나오지 않을 가능성이 매우 높다**. app.css가 `.cm-editor/.cm-scroller/.cm-content/.cm-gutters`
-    레이아웃을 손으로 다시 선언하고 있는 것도 baseTheme이 차단된 상태를 수동으로 메운 모습과 일치한다. **이건 editor의 미래
-    문제가 아니라 이미 출하된 소스 모드의 현재 결함**이므로 §7.2에 조치와 함께 적었다.
+  - **CM6 스타일 문제는 file-panel이 FP12b에서 이미 풀었다.** §1.1이 남긴 `unsafe-inline` 항목은 app origin 한정 완화로
+    해소됐고(위 CSP 항목), 그 완화가 **정확히 CM6 style-mod 주입** 때문이라는 것이 결정 주석에 적혀 있다. editor가 새로
+    결정하거나 배관할 CSP 작업은 없다 — MergeView도 같은 app origin에 마운트되므로 그대로 덮인다(§7.2).
 
 ## 3. 권장 구조 — 우측 도크(목록) + 파일 Term(본문)
 
@@ -180,7 +177,7 @@ editor는 file-panel의 **신뢰 shell origin 브리지를 그대로 쓴다** �
 
 **핵심 escalation**: file-panel의 `maru.file.*`는 **경로 인자가 없다** — 파일 Term을 열 때 핀된 **단일 경로** 하나에만 read/write한다(웹앱이 경로를 못 고르는 게 안전장치). 그런데 git diff 리뷰·편집은 **변경 세트의 여러 파일**을 열고 그 안에서 write해야 하므로, editor는 핀-단일-경로를 **`EditorGrant`(grant-root + 상대 경로)**로 넓힌다. 이게 §3.1 신뢰 계단의 실제 단차이며, 넓힌 만큼 경로 안전 규칙(아래)을 강제한다.
 
-`EditorGrant`는 JS가 고르는 bearer nonce가 아니라 native host가 도크 editor entry 생성 시 결합하는 리소스 권한이다.
+`EditorGrant`는 JS가 고르는 bearer nonce가 아니라 native host가 diff/editor **파일 Term** 생성 시 결합하는 리소스 권한이다.
 
 ```text
 EditorGrant {
@@ -527,38 +524,29 @@ JS toolchain(zntc/`web/` Bun workspace)은 **FP2로 이미 도입 완료**됐으
 
 `script-src 'unsafe-eval'`이나 remote source는 열지 않는다.
 
-**WKWebView 실측(2026-07-31).** `style-src` 값을 바꿔 가며 네 가지 주입 경로가 적용되는지 쟀다(macOS WebKit, 동일 문서).
+**결정은 이미 닫혀 있다(FP12b, 2026-07-22).** app origin은 `style-src 'self' 'unsafe-inline'`, render origin은 hash 핀이다
+(§2). 그 완화의 이유가 바로 CM6 style-mod 주입이고, **MergeView도 같은 app origin에 마운트되므로 추가 CSP 작업이 없다.**
+
+**왜 `'self'`나 hash로는 안 되는지**를 실측으로 남긴다(WKWebView, 동일 문서에서 `style-src`만 바꿔 측정 — 2026-07-31).
 
 | `style-src` | 마크업 `<style>` | JS 생성 `<style>`+`textContent` | CSSOM `insertRule` | `style=` 속성 |
 |---|---|---|---|---|
 | (CSP 없음) | 적용 | 적용 | 적용 | 적용 |
-| **`'self'` (현행 제품)** | **차단** | **차단** | **차단**(`sheet`이 `null`) | **차단** |
+| `'self'` | **차단** | **차단** | **차단**(`sheet`이 `null`) | **차단** |
 | `'unsafe-inline'` | 적용 | 적용 | 적용 | 적용 |
 
-**`'self'`는 인라인 스타일을 하나도 허용하지 않는다** — 소스 표현식은 *외부* 스타일시트 로드에만 적용되고, 인라인은
-`'unsafe-inline'`(또는 nonce/hash)이라야 한다. CSSOM 우회도 통하지 않는다: `<style>` 자체가 차단되면 `sheet`이 `null`이라
-`insertRule`을 부를 대상이 없다.
+`'self'` 같은 소스 표현식은 *외부* 스타일시트 로드에만 적용되고 인라인은 전혀 허용하지 않는다. CSSOM 우회도 통하지 않는다 —
+`<style>` 자체가 차단되면 `sheet`이 `null`이라 `insertRule`을 부를 대상이 없다. style-mod는 문서 루트에서
+`<style>`+`textContent` 경로를 타므로(`adoptedStyleSheets`는 ShadowRoot일 때만) hash 핀으로도 고정할 수 없다(내용이 런타임에
+조립된다). FP12b의 결론과 같고, 이 표는 그 결론을 재확인한 기록이다.
 
-**따라서 §1.1의 `unsafe-inline` 항목은 해소되지 않았고, 이미 출하된 소스 모드에도 적용된다.** style-mod(CM6의 주입기)는
-문서 루트에서 `<style>`+`textContent` 경로를 타므로(`adoptedStyleSheets`는 ShadowRoot일 때만) **CM6 baseTheme과
-`syntaxHighlighting(HighlightStyle)`이 제품에서 적용되지 않는다.** `web/src/source-language.ts`가 실제로
-`syntaxHighlighting(maruHighlightStyle)`을 쓰는데 `app.css`에는 토큰 클래스가 없고 변수만 있으므로, **제품의 구문 색은
-나오지 않는 상태로 보인다**(제품 GUI 확인은 남았다 — §11).
+**editor가 지킬 불변식 둘.**
 
-선택지는 셋이고, editor가 아니라 **file-panel 소스 모드가 먼저 답해야 한다**.
+1. **render origin의 hash 핀을 건드리지 않는다.** MergeView·diff 스타일이 격리 렌더 문서로 새면 sanitizer 우회 시 style 주입
+   벡터가 열린다. diff는 신뢰 shell(app origin)에서만 그린다.
+2. **`'unsafe-inline'`을 다른 origin으로 넓히지 않는다.** browser 패널·읽기 뷰는 그대로 둔다.
 
-1. **라우트별 CSP 분기** — CM6를 마운트하는 신뢰 shell 문서에만 `style-src 'self' 'unsafe-inline'`을 주고, 격리 렌더 origin·
-   browser·읽기 뷰는 엄격 유지. 현행 `csp_header`는 전역 상수 하나라 이 분기 배관 자체가 신규 작업이다.
-2. **nonce** — style-mod는 `nonce`를 지원하고(`styleTag.setAttribute("nonce", …)`), CM6는 `EditorView.cspNonce` facet으로
-   그것을 넘긴다. 응답마다 nonce를 발급해 CSP 헤더와 문서에 함께 실으면 `'unsafe-inline'` 없이 CM6 스타일만 허용할 수 있다.
-   **가장 좁은 완화**이지만 scheme handler가 응답별 헤더를 만들어야 하므로 1안과 같은 배관이 필요하다.
-3. **정적 CSS 생성** — HighlightStyle을 빌드 타임에 CSS로 뽑아 `app.css`에 넣는다. CSP를 전혀 건드리지 않지만 CM6 내부
-   클래스 이름(`ͼ…` 해시)에 의존해 버전 업그레이드마다 깨진다.
-
-**권장은 2안(nonce)**이다 — 완화 범위가 "이 문서의 이 스타일 태그"로 한정되고, MergeView가 무엇을 주입하든 함께 해결된다.
-어느 쪽이든 **editor 때문에 markdown 읽기 뷰·격리 렌더 정책을 약화하지 않는다**는 불변식을 테스트로 고정한다. 또한 이 결함이
-jsdom 테스트를 통과했다는 사실 자체가 게이트 공백이다 — jsdom은 CSP를 강제하지 않으므로 **CSP 위반 계측은 제품 WKWebView
-경로에서만 가능**하다(§7.4).
+남은 확인은 CSP가 아니라 **MergeView가 app origin 밖으로 스타일을 내보내지 않는지**이며, E0.5A에서 함께 본다.
 
 ### 7.3 필수 semantic oracle
 
@@ -650,8 +638,8 @@ editor event는 처음부터 하나의 domain schema를 공유하되 문서 원�
 
 - committed editor smoke asset/harness. 사용자 승인 전 production `PanelKind`/ABI/wire는 바꾸지 않는다.
 - **CM6 MergeView** 제품 WebKit 통과 확인. **편집 경로는 이 gate에서 빠진다** — file-panel 소스 모드로 이미 출하돼 검증됐다(§2).
-- MergeView 렌더·chunk 마커·accept/reject 상호작용. **CSP는 이미 답이 나왔다**(§7.2 실측: `'self'`는 CM6 스타일을 전부 차단)
-  — 따라서 이 gate는 "위반이 있는지"가 아니라 **선택한 완화(권장 nonce)가 MergeView까지 덮는지**를 확인한다.
+- MergeView 렌더·chunk 마커·accept/reject 상호작용. **CSP 완화는 이미 있으므로**(§7.2) 이 gate가 볼 것은 위반 수가 아니라
+  **MergeView 스타일이 app origin 밖(격리 렌더)으로 새지 않는지**다.
 - 1/2/4 diff 파일 Term에서 web-process RSS, hidden/background CPU와 close 뒤 회수 측정
 - **종료:** §7.4(MergeView WebKit) green + CSP 위반 수 + dependency/bundle/RSS·resource scaling 보고. MergeView가 막히면
   대안 diff 렌더를 같은 gate로 비교.
@@ -669,8 +657,7 @@ editor event는 처음부터 하나의 domain schema를 공유하되 문서 원�
 - `web/` workspace에 `@codemirror/merge` 추가 + reproducible build(zntc pin은 이미 `0.1.4` — §7.1).
 - **도크 소스 컨트롤 뷰**(§3.5) — 뷰 스위처 배관, 섹션·행 chrome, 빈 상태, 갱신 시점. 읽기 전용이므로 스테이지 버튼·커밋
   메시지 입력은 아직 없다.
-- **diff 파일 Term** — 파일 entry `diff` kind + 브리지 `diff.list`/`diff.open` method. **CSP 완화(§7.2)는 선행**이며
-  file-panel 소스 모드와 공유한다.
+- **diff 파일 Term** — 파일 entry `diff` kind + 브리지 `diff.list`/`diff.open` method. CSP는 손대지 않는다(§7.2).
 - semantic oracle + 제품 WKWebView regression
 - git comparison/status matrix와 external diff/textconv 실행 차단
 - 에이전트 턴 base(§6.1)는 §10.11에서 v1 채택 시 이 단계에 포함, 아니면 E2 후속.
@@ -712,9 +699,9 @@ editor event는 처음부터 하나의 domain schema를 공유하되 문서 원�
 0b. **에디터 엔진 = CM6 (확정, 2026-07-17 · §1.1).** git diff는 `@codemirror/merge` MergeView/unifiedMergeView, hunk staging은 acceptChunk/rejectChunk. Monaco는 채택하지 않는다(WebKit RED가 diff 표시에도 걸리고, 마크다운이 CM6라 엔진 이원화). 이 확정이 §7.1·§7.4·§9의 Monaco 조건부 항목을 CM6 기준으로 바꿨다. **남은 엔진 관련 결정은 없다.**
 1. `PanelKind.editor`와 ABI/wire 확장 — **(a′)에서는 필요 없다.** 0을 뒤집을 때만 되살아난다.
 2. `@codemirror/merge` 의존 추가 (zntc pin은 `0.1.4`로 이미 해소 — §7.1)
-3. **CM6 스타일을 어떻게 허용할지 — 결정이 살아 있고 우선순위가 올라갔다.** 실측상 현행 `style-src 'self'`는 CM6 baseTheme·
-   구문 하이라이트를 차단하므로(§7.2) 이건 editor 착수 전에 **이미 출하된 소스 모드**가 답해야 한다. 후보: ⑴ 라우트별
-   `'unsafe-inline'`, ⑵ **nonce(권장 — `EditorView.cspNonce`)**, ⑶ 빌드 타임 정적 CSS 생성.
+3. ~~editor origin 한정 `style-src 'unsafe-inline'` 허용 여부~~ → **소멸(FP12b, 2026-07-22 사용자 결정으로 이미 닫힘).**
+   app origin은 `'unsafe-inline'`, render origin은 hash 핀이며 그 완화 이유가 CM6 style-mod다(§2·§7.2). editor는 그 위에
+   얹기만 한다.
 4. 최초 workspace/file/git grant UX와 native `root_id`/root descriptor 발급·회수
 5. 새 파일의 기본 mode 및 기존 ownership/ACL/xattr/hard-link 보존·거부·실패 정책
 6. 최초 지원 파일 크기·diff page·bridge/socket payload 상한
@@ -744,8 +731,7 @@ editor event는 처음부터 하나의 domain schema를 공유하되 문서 원�
 - **`@codemirror/merge` 번들 가능성은 확인됐다(PoC 2026-07-31).** `@codemirror/merge@6.12.2`를 실제 앱 엔트리에 넣어
   zntc `0.1.4`로 번들했고, 산출물이 파싱되며 크기는 **+31 KiB**(2,752,306 → 2,784,419 bytes)다. CM6 코어가 이미 들어 있어
   증분이 작다. 3 MiB 예산 여유는 약 353 KiB 남는다. **아직 확인 안 된 것은 MergeView의 런타임 동작과 CSP 영향**이다.
-- **제품 GUI에서 소스 모드 구문 색이 실제로 안 나오는지 눈으로 확인하지 못했다.** §7.2 결론은 WebKit 실측 + 코드 대조에
-  근거한 추론이며, 확인 즉시 file-panel 쪽 결함으로 등록해야 한다.
+- **MergeView 스타일이 app origin에만 머무는지 미확인**이다(§7.2 불변식 1). 격리 렌더 문서로 새면 hash 핀이 깨진다.
 - safe-save는 요구사항만 검증됐고 구현되지 않았다.
 - 제품 file capability 발급, editor bridge, DocumentRegistry, watcher, diff service는 모두 미구현이다.
 - bundle size 외 실제 WKWebView web-process RSS, first interactive, large-file latency 예산은 미측정이다.

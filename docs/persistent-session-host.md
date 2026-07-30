@@ -7572,7 +7572,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 allocator/free, guard/current, parser traversal 또는 scheduling callback을 호출하지 않는다.
                 인증 불가 결과는 child를 임의 zero/reset하지 않고 outer scratch terminal-retained로 남긴다.
 
-                **S3-D — drain evidence one-shot capability (구현, 최종 적대적 재감사 대기):** `RxDrainEvidence`는 pump scratch에
+                **S3-D — drain evidence one-shot capability:** `RxDrainEvidence`는 pump scratch에
                 final-address로 embed하고 공개 DTO나 copyable drained bool로 반환하지 않는다. canonical layout은
                 다음 필드를 모두 봉인한다.
 
@@ -7951,7 +7951,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 네 gate가 모두 green이기 전에는 C4 core integration 구현으로 표시하지 않는다. C4 전체
                 완료 표시는 별도 S3-D와 나머지 named matrix까지 green이어야 한다.
 
-                **C4a~C4d core integration 및 S3-D 구현, 최종 적대적 재감사 대기:** private pump가
+                **C4a~C4d core integration 및 S3-D:** private pump가
                 collector·guarded admit·buffered traversal·aggregate의 기본 경로를 held lease 안에서 조립한다.
                 final-address callback token과
                 `PreparedAdmitUsePermit` begin→finish→exact reset, phase-aware replacement cleanup guard가
@@ -7960,15 +7960,44 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 positive-prefix admission/traversal의 현재 smoke, guarded/quarantine completion exact-one과
                 제품 callsite allowlist를 검증했다. S3-D는 leaf-owned prepared/consumed projection과
                 pump-private prepare→arm→settle→consume lifecycle, fresh owner/blocker 재검증, finished
-                exact reset을 연결했다. A~G와 leaf full geometry matrix는 제품/leaf 테스트로 고정했다.
-                최종 SSOT·유지보수·보안 적대적 재감사와 그 지적사항을 닫기 전에는 S3-D와 C4 전체를
-                완료로 표시하지 않는다.
-                POSIX syscall과 `external_pump_owner` 제품 `RxTurnOps` 진입은 C5 전까지 0이다.
+                exact reset을 연결한다. A~G와 leaf full geometry matrix는 제품/leaf 테스트로 고정한다.
+                POSIX syscall과 `external_pump_owner` 제품 `RxTurnOps` 진입은 C5 경계가 소유한다.
               - **C5 product closure:** `external_pump_owner`가 `RxTurnOps`의 exact-one 제품 entry를 사용하고 POSIX
-                adapter가 errno만 `RxReadOutcome`으로 변환한다. 실제 Darwin socketpair, readable+writable
-                syscall-order, 전체 hostile/product matrix와 boundary/full check를 통과하고 기존
-                `pumpBufferedRx`/`BufferedRxOps` 제품 facade callsite를 0으로 만들거나 제거한 뒤 d2c를 구현으로
-                표시한다.
+                adapter가 socket `recv(2)`의 결과와 errno만 `RxReadOutcome`으로 변환한다. `rc > 0`은
+                `.bytes(n)`, `rc == 0`은 `.eof`, `EAGAIN`/`EWOULDBLOCK`은 `.would_block`, `EINTR`은
+                `.interrupted`, 나머지 errno는 `.socket_error`다. adapter는 parser, ledger, scheduling,
+                terminal, retry 횟수 또는 drain authority를 해석하지 않는다.
+
+                제품 facade는 caller의 `BufferedRxOps`와 final-address storage/scratch만 받고, facade-local
+                nonzero POSIX context와 `RxReadOps`를 조립해 public `ExternalPumpStorage.pumpRxTurn`에
+                `RxTurnOps{buffered, transport}`를 정확히 한 번 전달한다. transport callback을 caller가
+                바꾸는 별도 제품 entry는 두지 않는다. 기존 buffered-only `pumpBufferedRx`,
+                buffered-only public `pumpRxTurn(BufferedRxOps)`, private
+                `pumpInjectedRxTurnForTest`는 제거한다. buffered-only mechanics를 직접 검증하는 module-local
+                fixture만 private test helper를 사용할 수 있으며 제품 boundary 밖 callsite는 0이다.
+
+                실제 Darwin `SOCK_STREAM` socketpair 제품 fixture는 다음을 고정한다.
+
+                - readable=false면 `recv` 0이고 기존 buffered/inherited 처리만 수행한다.
+                - readable=true에서 positive frame 뒤 kernel queue가 empty이면 positive read와 후속
+                  would-block을 같은 bounded turn에서 관측하고 `rx_read_bytes`, parser/owner 결과와
+                  scheduling을 C4 matrix와 동일하게 보존한다.
+                - peer half-close는 `.eof`, invalid/closed descriptor는 `.socket_error`로 terminalize하며
+                  staged prefix를 consumer에 publish하지 않는다.
+                - nonblocking empty socket은 `.would_block`이고 zero-prefix·parser empty·owner blocker 0에서만
+                  one-shot drain evidence가 `socket_rx_drained=true`를 publish한다.
+                - `{readable=true,writable=true}`에서도 d2 adapter의 첫 syscall은 `recv`다. d2는 TX syscall을
+                  소유하지 않으므로 이 turn의 write syscall은 0이며, 실제 TX는 f3 whole-turn만 수행한다.
+                - 제품 POSIX callback은 attempt 64, EINTR 8/9, invalid callback length 같은 synthetic
+                  hostile 정책을 재구현하지 않는다. 이 정책은 C3/C4 injected matrix를 재사용하고 C5는 실제
+                  errno mapping, fd, syscall 순서와 제품 facade exact-one wiring만 추가로 증명한다.
+
+                boundary는 `external_pump_owner`의 public facade와
+                `ExternalPumpStorage.pumpRxTurn(RxTurnOps)` callsite를 각각 exact-one으로 고정하고,
+                `pumpBufferedRx`/buffered-only public facade callsite 0, POSIX `recv` definition exact-one,
+                다른 session-host module의 raw `recv`를 이 adapter의 우회 경로로 사용하지 않음을 검사한다.
+                Debug/ReleaseFast `test-session-host`, 실제 socketpair product fixture, `check-boundaries`와 전체
+                `mise run check`가 모두 같은 계약의 merge gate다.
 
             - **d2d — RX-first whole-turn composition:** caller-owned scratch와 private one-shot permit의 exact
               계약은 아래와 같다. scratch는 1 MiB read backing과 최대 64개의 prepared intent/payload owner를

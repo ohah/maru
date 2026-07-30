@@ -1745,6 +1745,115 @@ test "d2c pre-entry partial transition has one product decision source" {
     );
 }
 
+test "d2c C1 read foundation has no collector syscall or movable outer scratch" {
+    const allocator = std.testing.allocator;
+    const read_foundation = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/client_external_rx_read.zig",
+    );
+    defer allocator.free(read_foundation);
+
+    // C1 publishes only closed DTOs, fixed budgets, and final-address storage. Transport
+    // collection and the POSIX adapter belong to C3 and C5 respectively.
+    inline for (.{
+        "pub fn collect",
+        "std.posix.read",
+        "std.c.read",
+        "recv(",
+        "traverseBuffered",
+        "ExternalPumpStorage",
+        "external_inbox_ledger",
+        "client_external_rx_turn",
+    }) |forbidden|
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            countOccurrences(read_foundation, forbidden),
+        );
+
+    var dir = try std.Io.Dir.cwd().openDir(
+        std.testing.io,
+        "src",
+        .{ .iterate = true },
+    );
+    defer dir.close(std.testing.io);
+    var walker = try dir.walk(allocator);
+    defer walker.deinit();
+    var product_imports: usize = 0;
+    var collector_calls: usize = 0;
+    var owner_heap_creates: usize = 0;
+    var pump_product_type_tokens: usize = 0;
+    var pump_fixture_type_tokens: usize = 0;
+    var owner_type_tokens: usize = 0;
+    while (try walker.next(std.testing.io)) |entry| {
+        if (entry.kind != .file or
+            !std.mem.endsWith(u8, entry.basename, ".zig"))
+            continue;
+        const path = try std.fmt.allocPrint(allocator, "src/{s}", .{entry.path});
+        defer allocator.free(path);
+        const source = try readZigFileZ(allocator, path);
+        defer allocator.free(source);
+        product_imports += countOccurrences(
+            source,
+            "@import(\"client_external_rx_read.zig\")",
+        );
+        collector_calls += countOccurrences(
+            source,
+            "client_external_rx_read.collect",
+        );
+        if (std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/external_pump_owner.zig",
+        )) {
+            owner_heap_creates += countOccurrences(
+                source,
+                "create(client_external_pump.ExternalRxTurnScratch)",
+            );
+        }
+
+        // Exact identifier allowlists catch multiline declarations, arrays, by-value returns,
+        // and explicit stack construction rather than relying on one-line `var` spelling.
+        const product_end = std.mem.indexOf(u8, source, "\ntest \"") orelse
+            source.len;
+        var tokenizer = std.zig.Tokenizer.init(source);
+        while (true) {
+            const token = tokenizer.next();
+            if (token.tag == .eof) break;
+            if (token.tag != .identifier or
+                !std.mem.eql(
+                    u8,
+                    source[token.loc.start..token.loc.end],
+                    "ExternalRxTurnScratch",
+                ))
+                continue;
+            if (std.mem.eql(
+                u8,
+                entry.path,
+                "platform/macos/session_host/client_external_pump.zig",
+            )) {
+                if (token.loc.start < product_end)
+                    pump_product_type_tokens += 1
+                else
+                    pump_fixture_type_tokens += 1;
+            } else if (std.mem.eql(
+                u8,
+                entry.path,
+                "platform/macos/session_host/external_pump_owner.zig",
+            )) {
+                owner_type_tokens += 1;
+            } else {
+                return error.TestUnexpectedResult;
+            }
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), product_imports);
+    try std.testing.expectEqual(@as(usize, 0), collector_calls);
+    try std.testing.expectEqual(@as(usize, 1), owner_heap_creates);
+    try std.testing.expectEqual(@as(usize, 9), pump_product_type_tokens);
+    try std.testing.expectEqual(@as(usize, 41), pump_fixture_type_tokens);
+    try std.testing.expectEqual(@as(usize, 3), owner_type_tokens);
+}
+
 test "d2b3d live owner substrate stays private with one buffered product traversal" {
     const allocator = std.testing.allocator;
     var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });

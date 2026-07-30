@@ -45,6 +45,7 @@ pub const ParserAuthoritySeal = struct {
     head: usize = 0,
     buffer_start_absolute: u64 = 0,
     rx_absolute_next: u64 = 0,
+    resident_cap: usize = 0,
     generation: u64 = 0,
     digest: owner_seal.Digest = [_]u8{0} ** 32,
 };
@@ -54,6 +55,7 @@ pub const RxProvenance = struct {
     destination_slot_len: usize = 0,
     rx_absolute_next: u64 = 0,
     buffer_start_absolute: u64 = 0,
+    resident_cap: usize = 0,
     parser_seal: ParserAuthoritySeal = .{},
     lifecycle: RxProvenanceLifecycle = .unbound,
 };
@@ -68,13 +70,39 @@ pub const ExternalRxFrame = struct {
     pair_seal: ExternalRxFrameSeal,
 };
 
-pub const MaxReadableResult = union(enum) {
+pub const ReadableAllowance = struct {
     bytes: usize,
+    resident_limited: bool,
+    turn_limited: bool,
+    counter_limited: bool,
+};
+
+pub const MaxReadableResult = union(enum) {
+    bytes: ReadableAllowance,
     turn_exhausted,
     resident_exhausted,
     counter_exhausted,
     invalid,
 };
+
+fn positiveReadableAllowance(
+    resident_remaining: usize,
+    turn_rx_remaining: usize,
+    counter_remaining: usize,
+) ReadableAllowance {
+    const bytes = @min(
+        resident_remaining,
+        turn_rx_remaining,
+        counter_remaining,
+    );
+    std.debug.assert(bytes != 0);
+    return .{
+        .bytes = bytes,
+        .resident_limited = bytes == resident_remaining,
+        .turn_limited = bytes == turn_rx_remaining,
+        .counter_limited = bytes == counter_remaining,
+    };
+}
 
 pub const Freshness = enum { fresh, stale, invalid };
 
@@ -104,6 +132,54 @@ pub const State = struct {
     }
 };
 
+var pristine_rx_append_allocator_context: u8 = 0;
+
+fn pristineRxAppendAlloc(
+    _: *anyopaque,
+    _: usize,
+    _: std.mem.Alignment,
+    _: usize,
+) ?[*]u8 {
+    return null;
+}
+
+fn pristineRxAppendResize(
+    _: *anyopaque,
+    _: []u8,
+    _: std.mem.Alignment,
+    _: usize,
+    _: usize,
+) bool {
+    return false;
+}
+
+fn pristineRxAppendRemap(
+    _: *anyopaque,
+    _: []u8,
+    _: std.mem.Alignment,
+    _: usize,
+    _: usize,
+) ?[*]u8 {
+    return null;
+}
+
+fn pristineRxAppendFree(
+    _: *anyopaque,
+    _: []u8,
+    _: std.mem.Alignment,
+    _: usize,
+) void {}
+
+const pristine_rx_append_allocator: std.mem.Allocator = .{
+    .ptr = &pristine_rx_append_allocator_context,
+    .vtable = &.{
+        .alloc = pristineRxAppendAlloc,
+        .resize = pristineRxAppendResize,
+        .remap = pristineRxAppendRemap,
+        .free = pristineRxAppendFree,
+    },
+};
+
 const PreparedLifecycle = enum { empty, prepared, committed, aborted };
 
 pub const PreparedRxBind = struct {
@@ -116,6 +192,7 @@ pub const PreparedRxBind = struct {
     allocator_ptr_addr: usize = 0,
     allocator_vtable_addr: usize = 0,
     expected_major: u16 = 0,
+    resident_cap: usize = 0,
     unread_len: u64 = 0,
     unread_digest: owner_seal.Digest = [_]u8{0} ** 32,
     digest: owner_seal.Digest = [_]u8{0} ** 32,
@@ -146,6 +223,8 @@ pub const PreparedRxBind = struct {
             self.allocator_ptr_addr != normalized.allocator_ptr_addr or
             self.allocator_vtable_addr != normalized.allocator_vtable_addr or
             self.expected_major != normalized.expected_major or
+            self.resident_cap == 0 or
+            self.unread_len > self.resident_cap or
             !std.meta.eql(source_state.rx_provenance, RxProvenance{}) or
             self.unread_len != normalized.replacement_len)
             return false;
@@ -170,7 +249,7 @@ pub const PreparedRxAppend = struct {
     bytes_digest: owner_seal.Digest = [_]u8{0} ** 32,
     source_seal: ParserAuthoritySeal = .{},
     unread_digest: owner_seal.Digest = [_]u8{0} ** 32,
-    allocator: std.mem.Allocator = std.heap.page_allocator,
+    allocator: std.mem.Allocator = pristine_rx_append_allocator,
     allocator_ptr_addr: usize = 0,
     allocator_vtable_addr: usize = 0,
     replacement_addr: usize = 0,
@@ -274,8 +353,8 @@ pub const PayloadAllocationGuard = struct {
     ) PayloadAllocationVerdict,
 };
 
-const parser_seal_domain = "MARURXP1";
-const parser_seal_version: u16 = 1;
+const parser_seal_domain = "MARURXP2";
+const parser_seal_version: u16 = 2;
 
 fn bytesDigest(bytes: []const u8) owner_seal.Digest {
     var writer = owner_seal.Writer.init("rx-bytes.v1");
@@ -320,10 +399,40 @@ pub const testing = if (builtin.is_test) struct {
     pub fn sealExternalRxFrame(frame: *ExternalRxFrame) void {
         frame.pair_seal = externalRxFrameDigest(frame);
     }
+
+    pub fn forgeResealedResidentCap(
+        state: *State,
+        parser: *const framing.FrameParser,
+        resident_cap: usize,
+    ) bool {
+        if (state.rx_provenance.parser_seal.generation == std.math.maxInt(u64))
+            return false;
+        state.rx_provenance.resident_cap = resident_cap;
+        state.rx_provenance.parser_seal = makeParserSeal(
+            parser,
+            &state.rx_provenance,
+            state.rx_provenance.parser_seal.generation + 1,
+        ) orelse return false;
+        return parserSealValid(state, parser);
+    }
+
+    pub fn forgeResealedNoProgress(
+        state: *State,
+        parser: *const framing.FrameParser,
+    ) bool {
+        if (state.rx_provenance.parser_seal.generation == std.math.maxInt(u64))
+            return false;
+        state.rx_provenance.parser_seal = makeParserSeal(
+            parser,
+            &state.rx_provenance,
+            state.rx_provenance.parser_seal.generation + 1,
+        ) orelse return false;
+        return parserSealValid(state, parser);
+    }
 } else struct {};
 
 fn rxBindDigest(prepared: *const PreparedRxBind) owner_seal.Digest {
-    var writer = owner_seal.Writer.init("rx-bind.v1");
+    var writer = owner_seal.Writer.init("rx-bind.v2");
     writer.writeUsize(prepared.saved_self_addr);
     writer.writeUsize(prepared.source_state_addr);
     writer.writeUsize(prepared.destination_slot_addr);
@@ -335,6 +444,7 @@ fn rxBindDigest(prepared: *const PreparedRxBind) owner_seal.Digest {
     writer.writeUsize(prepared.allocator_ptr_addr);
     writer.writeUsize(prepared.allocator_vtable_addr);
     writer.writeU16(prepared.expected_major);
+    writer.writeUsize(prepared.resident_cap);
     writer.writeU64(prepared.unread_len);
     writer.writeBytes(&prepared.unread_digest);
     return writer.finish();
@@ -400,6 +510,23 @@ fn appendOutputPristine(out: *const PreparedRxAppend) bool {
         out.lifecycle == .empty;
 }
 
+pub fn preparedRxAppendPristine(out: *const PreparedRxAppend) bool {
+    return appendOutputPristine(out) and
+        out.expected_start == 0 and
+        out.bytes_addr == 0 and
+        out.bytes_len == 0 and
+        std.mem.allEqual(u8, &out.bytes_digest, 0) and
+        std.meta.eql(out.source_seal, ParserAuthoritySeal{}) and
+        std.mem.allEqual(u8, &out.unread_digest, 0) and
+        out.allocator_ptr_addr == 0 and
+        out.allocator_vtable_addr == 0 and
+        out.allocator.ptr == pristine_rx_append_allocator.ptr and
+        out.allocator.vtable == pristine_rx_append_allocator.vtable and
+        out.final_items_len == 0 and
+        std.mem.allEqual(u8, &out.cleanup_digest, 0) and
+        std.mem.allEqual(u8, &out.digest, 0);
+}
+
 fn parseCleanupDigest(scratch: *const RxParseScratch) owner_seal.Digest {
     var writer = owner_seal.Writer.init("rx-parse-cleanup.v1");
     writer.writeUsize(scratch.saved_self_addr);
@@ -457,6 +584,7 @@ fn parserSealDigest(seal: *const ParserAuthoritySeal) owner_seal.Digest {
     writer.writeUsize(seal.head);
     writer.writeU64(seal.buffer_start_absolute);
     writer.writeU64(seal.rx_absolute_next);
+    writer.writeUsize(seal.resident_cap);
     writer.writeU64(seal.generation);
     return writer.finish();
 }
@@ -519,6 +647,7 @@ fn makeParserSeal(
         .head = parser.head,
         .buffer_start_absolute = provenance.buffer_start_absolute,
         .rx_absolute_next = provenance.rx_absolute_next,
+        .resident_cap = provenance.resident_cap,
         .generation = generation,
     };
     seal.digest = parserSealDigest(&seal);
@@ -548,6 +677,8 @@ pub fn parserSealValid(
             (if (parser.buf.capacity == 0) 0 else @intFromPtr(parser.buf.items.ptr)) or
         seal.buffer_start_absolute != provenance.buffer_start_absolute or
         seal.rx_absolute_next != provenance.rx_absolute_next or
+        seal.resident_cap != provenance.resident_cap or
+        seal.resident_cap == 0 or
         seal.generation == 0 or
         !parserDescriptorValid(parser, @intFromPtr(seal)) or
         rangesOverlap(
@@ -585,6 +716,7 @@ pub fn maxReadable(
 ) MaxReadableResult {
     if (state.rx_operation_busy or !parserSealValid(state, parser)) return .invalid;
     const provenance = state.rx_provenance;
+    if (resident_cap != provenance.resident_cap) return .invalid;
     if (provenance.buffer_start_absolute > provenance.rx_absolute_next)
         return .invalid;
     const buffered = std.math.sub(
@@ -609,8 +741,11 @@ pub fn maxReadable(
         std.math.maxInt(usize)
     else
         @intCast(counter_remaining_u64);
-    const result = @min(turn_rx_remaining, resident_remaining, counter_remaining);
-    return if (result == 0) .counter_exhausted else .{ .bytes = result };
+    return .{ .bytes = positiveReadableAllowance(
+        resident_remaining,
+        turn_rx_remaining,
+        counter_remaining,
+    ) };
 }
 
 pub fn isFresh(
@@ -1141,6 +1276,7 @@ pub fn prepareRxBind(
     source_state: *const State,
     attach_instance_id: u64,
     normalized: *const framing.PreparedNormalizeExact,
+    resident_cap: usize,
     destination_slot_addr: usize,
     destination_slot_len: usize,
     out: *PreparedRxBind,
@@ -1148,11 +1284,13 @@ pub fn prepareRxBind(
     if (!std.meta.eql(source_state.rx_provenance, RxProvenance{}))
         return error.InvalidState;
     if (source_state.rx_operation_busy) return error.InvalidState;
-    if (attach_instance_id == 0 or destination_slot_addr == 0 or destination_slot_len == 0)
+    if (attach_instance_id == 0 or resident_cap == 0 or
+        destination_slot_addr == 0 or destination_slot_len == 0)
         return error.InvalidIdentity;
     _ = std.math.add(usize, destination_slot_addr, destination_slot_len) catch
         return error.ArithmeticOverflow;
     if (normalized.saved_self_addr != @intFromPtr(normalized) or
+        normalized.replacement_len > resident_cap or
         normalized.replacement_len > std.math.maxInt(u64))
         return error.InvalidDescriptor;
     const out_addr = @intFromPtr(out);
@@ -1198,6 +1336,7 @@ pub fn prepareRxBind(
             .allocator_ptr_addr = normalized.allocator_ptr_addr,
             .allocator_vtable_addr = normalized.allocator_vtable_addr,
             .expected_major = normalized.expected_major,
+            .resident_cap = resident_cap,
             .unread_len = 0,
             .unread_digest = bytesDigest(""),
             .lifecycle = .prepared,
@@ -1219,6 +1358,7 @@ pub fn prepareRxBind(
         .allocator_ptr_addr = normalized.allocator_ptr_addr,
         .allocator_vtable_addr = normalized.allocator_vtable_addr,
         .expected_major = normalized.expected_major,
+        .resident_cap = resident_cap,
         .unread_len = @intCast(unread.len),
         .unread_digest = bytesDigest(unread),
         .lifecycle = .prepared,
@@ -1237,6 +1377,7 @@ pub fn commitPreparedRxBind(
         prepared.saved_self_addr != @intFromPtr(prepared) or
         prepared.destination_slot_addr != destination_slot_addr or
         prepared.destination_slot_len != destination_slot_len or
+        prepared.resident_cap == 0 or
         !std.meta.eql(state.rx_provenance, RxProvenance{}) or
         !std.mem.eql(u8, &prepared.digest, &rxBindDigest(prepared)) or
         parser.head != 0 or parser.buf.items.len != prepared.unread_len or
@@ -1273,6 +1414,7 @@ pub fn commitPreparedRxBind(
         .destination_slot_len = destination_slot_len,
         .rx_absolute_next = prepared.unread_len,
         .buffer_start_absolute = 0,
+        .resident_cap = prepared.resident_cap,
         .lifecycle = .bound,
     };
     state.rx_provenance.parser_seal =
@@ -1502,6 +1644,7 @@ test "prepared RX bind opens a bind-local epoch on normalized unread bytes" {
         &state,
         77,
         &normalized,
+        8,
         @intFromPtr(&destination_slot),
         @sizeOf(usize),
         &prepared,
@@ -1547,6 +1690,7 @@ test "prepared RX bind rejects zero identity and stale or copied authority" {
             &state,
             0,
             &normalized,
+            1,
             @intFromPtr(&destination_slot),
             @sizeOf(usize),
             &prepared,
@@ -1556,6 +1700,7 @@ test "prepared RX bind rejects zero identity and stale or copied authority" {
         &state,
         9,
         &normalized,
+        1,
         @intFromPtr(&destination_slot),
         @sizeOf(usize),
         &prepared,
@@ -1580,6 +1725,68 @@ test "prepared RX bind rejects zero identity and stale or copied authority" {
     prepared.deinit();
 }
 
+test "C1 readable allowance preserves every positive last-byte limit tie" {
+    const Case = struct {
+        resident: usize,
+        turn: usize,
+        counter: usize,
+        expected: ReadableAllowance,
+    };
+    const cases = [_]Case{
+        .{ .resident = 1, .turn = 2, .counter = 3, .expected = .{
+            .bytes = 1,
+            .resident_limited = true,
+            .turn_limited = false,
+            .counter_limited = false,
+        } },
+        .{ .resident = 2, .turn = 1, .counter = 3, .expected = .{
+            .bytes = 1,
+            .resident_limited = false,
+            .turn_limited = true,
+            .counter_limited = false,
+        } },
+        .{ .resident = 3, .turn = 2, .counter = 1, .expected = .{
+            .bytes = 1,
+            .resident_limited = false,
+            .turn_limited = false,
+            .counter_limited = true,
+        } },
+        .{ .resident = 1, .turn = 1, .counter = 2, .expected = .{
+            .bytes = 1,
+            .resident_limited = true,
+            .turn_limited = true,
+            .counter_limited = false,
+        } },
+        .{ .resident = 1, .turn = 2, .counter = 1, .expected = .{
+            .bytes = 1,
+            .resident_limited = true,
+            .turn_limited = false,
+            .counter_limited = true,
+        } },
+        .{ .resident = 2, .turn = 1, .counter = 1, .expected = .{
+            .bytes = 1,
+            .resident_limited = false,
+            .turn_limited = true,
+            .counter_limited = true,
+        } },
+        .{ .resident = 1, .turn = 1, .counter = 1, .expected = .{
+            .bytes = 1,
+            .resident_limited = true,
+            .turn_limited = true,
+            .counter_limited = true,
+        } },
+    };
+    for (cases) |case|
+        try std.testing.expectEqual(
+            case.expected,
+            positiveReadableAllowance(
+                case.resident,
+                case.turn,
+                case.counter,
+            ),
+        );
+}
+
 test "max readable uses tagged precedence and checked RX ceilings" {
     var state = State{ .saved_flags = 7 };
     defer state.deinit(std.testing.allocator);
@@ -1596,6 +1803,7 @@ test "max readable uses tagged precedence and checked RX ceilings" {
         &state,
         11,
         &normalized,
+        8,
         @intFromPtr(&destination_slot),
         @sizeOf(usize),
         &prepared,
@@ -1612,12 +1820,31 @@ test "max readable uses tagged precedence and checked RX ceilings" {
         @sizeOf(usize),
     );
 
-    try std.testing.expectEqual(
-        @as(usize, 5),
-        maxReadable(&state, &parser, 8, 9).bytes,
-    );
-    try std.testing.expect(maxReadable(&state, &parser, 3, 9) == .resident_exhausted);
+    const resident_limited = maxReadable(&state, &parser, 8, 9).bytes;
+    try std.testing.expectEqual(@as(usize, 5), resident_limited.bytes);
+    try std.testing.expect(resident_limited.resident_limited);
+    try std.testing.expect(!resident_limited.turn_limited);
+    try std.testing.expect(!resident_limited.counter_limited);
+    const turn_limited = maxReadable(&state, &parser, 8, 2).bytes;
+    try std.testing.expectEqual(@as(usize, 2), turn_limited.bytes);
+    try std.testing.expect(!turn_limited.resident_limited);
+    try std.testing.expect(turn_limited.turn_limited);
+    try std.testing.expect(!turn_limited.counter_limited);
+    const tied = maxReadable(&state, &parser, 8, 5).bytes;
+    try std.testing.expect(tied.resident_limited);
+    try std.testing.expect(tied.turn_limited);
+    try std.testing.expect(!tied.counter_limited);
+    try std.testing.expect(maxReadable(&state, &parser, 3, 9) == .invalid);
     try std.testing.expect(maxReadable(&state, &parser, 8, 0) == .turn_exhausted);
+
+    state.rx_provenance.rx_absolute_next = std.math.maxInt(u64) - 2;
+    state.rx_provenance.buffer_start_absolute = std.math.maxInt(u64) - 5;
+    try std.testing.expect(resealParserAuthority(&state, &parser));
+    const counter_limited = maxReadable(&state, &parser, 8, 9).bytes;
+    try std.testing.expectEqual(@as(usize, 2), counter_limited.bytes);
+    try std.testing.expect(!counter_limited.resident_limited);
+    try std.testing.expect(!counter_limited.turn_limited);
+    try std.testing.expect(counter_limited.counter_limited);
 
     state.rx_provenance.rx_absolute_next = std.math.maxInt(u64);
     state.rx_provenance.buffer_start_absolute = std.math.maxInt(u64) - 3;
@@ -1626,6 +1853,61 @@ test "max readable uses tagged precedence and checked RX ceilings" {
 
     parser.head = parser.buf.items.len + 1;
     try std.testing.expect(maxReadable(&state, &parser, 8, 9) == .invalid);
+}
+
+test "max readable rejects a parser that already fills its sealed resident cap" {
+    var state = State{ .saved_flags = 7 };
+    defer state.deinit(std.testing.allocator);
+    var parser = framing.FrameParser.init(std.testing.allocator);
+    defer parser.deinit();
+    try parser.push("abc");
+    const resident_cap = parser.buf.capacity;
+    const filler = try std.testing.allocator.alloc(
+        u8,
+        resident_cap - parser.buf.items.len,
+    );
+    defer std.testing.allocator.free(filler);
+    @memset(filler, 'x');
+    try parser.push(filler);
+    var normalized: framing.PreparedNormalizeExact = .{};
+    defer normalized.deinit();
+    try parser.prepareNormalizeExact(&normalized, resident_cap);
+    var destination_slot: usize = 0;
+    var prepared: PreparedRxBind = .{};
+    defer prepared.deinit();
+    try prepareRxBind(
+        &state,
+        12,
+        &normalized,
+        resident_cap,
+        @intFromPtr(&destination_slot),
+        @sizeOf(usize),
+        &prepared,
+    );
+    try std.testing.expectEqual(
+        framing.NormalizeCommitOutcome.committed,
+        parser.commitPreparedNormalizeExact(&normalized),
+    );
+    commitPreparedRxBind(
+        &state,
+        &parser,
+        &prepared,
+        @intFromPtr(&destination_slot),
+        @sizeOf(usize),
+    );
+    try std.testing.expect(
+        maxReadable(&state, &parser, resident_cap, 9) == .resident_exhausted,
+    );
+    try std.testing.expect(
+        maxReadable(&state, &parser, resident_cap, 0) == .resident_exhausted,
+    );
+    state.rx_provenance.rx_absolute_next = std.math.maxInt(u64);
+    state.rx_provenance.buffer_start_absolute =
+        std.math.maxInt(u64) - @as(u64, @intCast(resident_cap));
+    try std.testing.expect(resealParserAuthority(&state, &parser));
+    try std.testing.expect(
+        maxReadable(&state, &parser, resident_cap, 0) == .counter_exhausted,
+    );
 }
 
 fn bindParserForTest(
@@ -1643,6 +1925,7 @@ fn bindParserForTest(
         state,
         attach_instance_id,
         &normalized,
+        protocol.max_binary_chunk + protocol.header_size,
         @intFromPtr(destination_slot),
         @sizeOf(usize),
         &prepared,

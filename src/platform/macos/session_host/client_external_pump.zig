@@ -10,6 +10,7 @@ const c = std.c;
 const posix = std.posix;
 const client_mod = @import("client.zig");
 const client_external_mode = @import("client_external_mode.zig");
+const client_external_rx_read = @import("client_external_rx_read.zig");
 const client_external_rx_turn = @import("client_external_rx_turn.zig");
 const client_external_adoption = @import("client_external_adoption.zig");
 const client_pump = @import("client_pump.zig");
@@ -1229,12 +1230,17 @@ pub const AccessError = error{
 pub const ScreenConsumeError =
     AccessError || external_inbox_ledger.ScreenRetirementError || error{TransactionBusy};
 
+pub const max_rx_resident_bytes: usize =
+    protocol.max_binary_chunk + protocol.header_size;
+pub const max_guarded_admit_quarantine_bytes: usize =
+    max_rx_resident_bytes;
+
 const InitOptions = struct {
     failpoint: enum {
         none,
         after_paired_take,
     } = .none,
-    resident_cap: usize = protocol.max_binary_chunk + protocol.header_size,
+    resident_cap: usize = max_rx_resident_bytes,
     /// Unit fixtures may construct independent owners in one test process to exercise re-entry
     /// and failure precedence. Product builds can never bypass the process reservation.
     test_skip_process_owner_reservation: bool = false,
@@ -1250,7 +1256,8 @@ pub const max_cross_owner_quarantine_bytes: usize =
     (4 * protocol.max_client_queue) +
     (4 * protocol.max_control_json) +
     external_rx_intent.max_intent_quarantine_bytes +
-    max_rx_aggregate_quarantine_bytes;
+    max_rx_aggregate_quarantine_bytes +
+    max_guarded_admit_quarantine_bytes;
 
 pub const CrossOwnerQuarantineStatus = struct {
     latched: bool,
@@ -1267,6 +1274,12 @@ threadlocal var initializing_storage_addr: usize = 0;
 threadlocal var active_external_operation_addr: usize = 0;
 threadlocal var active_external_lease_addr: usize = 0;
 threadlocal var active_external_lease_generation: u64 = 0;
+threadlocal var active_external_rx_resident_cap: usize = 0;
+threadlocal var active_external_rx_resident_cap_digest: external_owner_seal.Digest = [_]u8{0} ** 32;
+threadlocal var active_external_rx_client_addr: usize = 0;
+threadlocal var active_external_rx_parser_addr: usize = 0;
+threadlocal var active_external_rx_provenance: client_external_mode.RxProvenance = .{};
+threadlocal var active_external_rx_authority_digest: external_owner_seal.Digest = [_]u8{0} ** 32;
 var cross_owner_quarantine_latched: std.atomic.Value(bool) = .init(false);
 var cross_owner_quarantine_events: std.atomic.Value(u64) = .init(0);
 var active_storage_addr: std.atomic.Value(usize) = .init(0);
@@ -1284,6 +1297,12 @@ pub const ExternalWholeTurnLease = struct {
     scratch_addr: usize = 0,
     scratch_len: usize = 0,
     operation_generation: u64 = 0,
+    rx_resident_cap: usize = 0,
+    rx_resident_cap_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    rx_client_addr: usize = 0,
+    rx_parser_addr: usize = 0,
+    rx_provenance: client_external_mode.RxProvenance = .{},
+    rx_authority_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
     lifecycle: WholeTurnLeaseLifecycle = .empty,
     digest: external_owner_seal.Digest = [_]u8{0} ** 32,
 };
@@ -1952,6 +1971,7 @@ pub const ExternalRxTurnScratch = struct {
     snapshot: InheritedRxBlockerSnapshot = .{},
     live_consume: LiveScreenConsumePermit = .{},
     traversal: client_external_rx_turn.Scratch = .{},
+    read: client_external_rx_read.ExternalRxReadScratch = .{},
     client_ranges: client_mod.ExternalSourceOwnerRangeScratch = undefined,
     authority_ranges: external_owner_range.Scratch = .{},
     aggregate_ranges: external_owner_range.Scratch = .{},
@@ -1967,6 +1987,9 @@ pub const ExternalRxTurnScratch = struct {
         out.traversal = .{};
         if (!client_external_rx_turn.Scratch.initInPlace(&out.traversal))
             return false;
+        out.read = .{};
+        if (!client_external_rx_read.ExternalRxReadScratch.initInPlace(&out.read))
+            return false;
         out.authority_ranges.reset();
         out.aggregate_ranges.reset();
         out.authority_ranges_generation = 0;
@@ -1974,16 +1997,23 @@ pub const ExternalRxTurnScratch = struct {
     }
 };
 
-const max_external_rx_turn_scratch_bytes: usize = 2 * 1024 * 1024;
+const max_external_rx_turn_structural_bytes: usize = 2 * 1024 * 1024;
+const max_external_rx_turn_scratch_bytes: usize =
+    max_external_rx_turn_structural_bytes +
+    client_external_rx_read.max_external_rx_read_scratch_bytes;
 
 comptime {
+    if (@sizeOf(ExternalRxTurnScratch) -
+        @sizeOf(client_external_rx_read.ExternalRxReadScratch) >
+        max_external_rx_turn_structural_bytes)
+        @compileError("external RX turn structural scratch exceeds 2 MiB");
     if (@sizeOf(ExternalRxTurnScratch) > max_external_rx_turn_scratch_bytes)
-        @compileError("external RX turn scratch exceeds 2 MiB");
+        @compileError("external RX turn scratch exceeds 3.25 MiB");
 }
 
 const ProductIntentAuthority = struct {
     storage: *ExternalPumpStorage,
-    lease: *const ExternalWholeTurnLease,
+    lease: *ExternalWholeTurnLease,
     scratch: *ExternalRxTurnScratch,
 
     fn current(raw: *anyopaque) ?external_rx_intent.AuthorityView {
@@ -2076,6 +2106,25 @@ const ProductIntentAuthority = struct {
         return .{
             .context = self,
             .current = current,
+        };
+    }
+};
+
+const ProductParserProgress = struct {
+    storage: *ExternalPumpStorage,
+    lease: *ExternalWholeTurnLease,
+
+    fn refresh(raw: *anyopaque) bool {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        return self.storage.refreshWholeTurnRxAuthorityAfterParserProgress(
+            self.lease,
+        );
+    }
+
+    fn ops(self: *@This()) client_external_rx_turn.ParserProgressOps {
+        return .{
+            .context = self,
+            .refresh = refresh,
         };
     }
 };
@@ -4614,14 +4663,166 @@ fn commitDestinationWriteUnchecked(
 }
 
 fn wholeTurnLeaseDigest(lease: ExternalWholeTurnLease) external_owner_seal.Digest {
-    var writer = external_owner_seal.Writer.init("MARUWTL1");
+    var writer = external_owner_seal.Writer.init("MARUWTL2");
     writer.writeUsize(lease.saved_self_addr);
     writer.writeUsize(lease.storage_addr);
     writer.writeUsize(lease.scratch_addr);
     writer.writeUsize(lease.scratch_len);
     writer.writeU64(lease.operation_generation);
+    writer.writeUsize(lease.rx_resident_cap);
+    writer.writeBytes(&lease.rx_resident_cap_digest);
+    writer.writeUsize(lease.rx_client_addr);
+    writer.writeUsize(lease.rx_parser_addr);
+    writer.writeBytes(&lease.rx_authority_digest);
     writer.writeU8(@intFromEnum(lease.lifecycle));
     return writer.finish();
+}
+
+fn rxAuthorityDigest(
+    client_addr: usize,
+    parser_addr: usize,
+    provenance: client_external_mode.RxProvenance,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARURXA1");
+    writer.writeUsize(client_addr);
+    writer.writeUsize(parser_addr);
+    writer.writeBool(provenance.identity != null);
+    if (provenance.identity) |identity| {
+        writer.writeU64(identity.attach_instance_id);
+        writer.writeUsize(identity.destination_slot_addr);
+    }
+    writer.writeUsize(provenance.destination_slot_len);
+    writer.writeU64(provenance.rx_absolute_next);
+    writer.writeU64(provenance.buffer_start_absolute);
+    writer.writeUsize(provenance.resident_cap);
+    writer.writeBytes(&provenance.parser_seal.digest);
+    writer.writeU64(provenance.parser_seal.generation);
+    writer.writeU8(@intFromEnum(provenance.lifecycle));
+    return writer.finish();
+}
+
+fn rxResidentCapDigest(
+    storage_addr: usize,
+    rx_resident_cap: usize,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARURCP1");
+    writer.writeUsize(storage_addr);
+    writer.writeUsize(rx_resident_cap);
+    return writer.finish();
+}
+
+fn rxResidentCapValid(storage: *const ExternalPumpStorage) bool {
+    return storage.saved_self_addr == @intFromPtr(storage) and
+        storage.rx_resident_cap != 0 and
+        storage.rx_resident_cap <= max_rx_resident_bytes and
+        std.mem.eql(
+            u8,
+            &storage.rx_resident_cap_digest,
+            &rxResidentCapDigest(
+                @intFromPtr(storage),
+                storage.rx_resident_cap,
+            ),
+        );
+}
+
+fn clientRxResidentCap(client: *const client_mod.Client) ?usize {
+    const state = switch (client.io_mode) {
+        .external => |*external| external,
+        .blocking => return null,
+    };
+    if (!client_external_mode.parserSealValid(state, &client.parser))
+        return null;
+    return state.rx_provenance.resident_cap;
+}
+
+fn rxResidentCapOwnerValid(storage: *const ExternalPumpStorage) bool {
+    if (!rxResidentCapValid(storage)) return false;
+    const client = if (storage.owned_client) |*owned| owned else return false;
+    return clientRxResidentCap(client) == storage.rx_resident_cap;
+}
+
+fn restoreRxResidentCapFromClient(storage: *ExternalPumpStorage) bool {
+    const client = if (storage.owned_client) |*owned| owned else return false;
+    const resident_cap = clientRxResidentCap(client) orelse return false;
+    if (resident_cap == 0 or resident_cap > max_rx_resident_bytes)
+        return false;
+    storage.saved_self_addr = @intFromPtr(storage);
+    storage.rx_resident_cap = resident_cap;
+    storage.rx_resident_cap_digest =
+        rxResidentCapDigest(@intFromPtr(storage), resident_cap);
+    return true;
+}
+
+const RxResidentCapAuthoritySnapshot = struct {
+    storage_addr: usize,
+    client_addr: usize,
+    parser_addr: usize,
+    resident_cap: usize,
+    resident_cap_digest: external_owner_seal.Digest,
+    provenance: client_external_mode.RxProvenance,
+};
+
+fn snapshotRxResidentCapAuthority(
+    storage: *const ExternalPumpStorage,
+) ?RxResidentCapAuthoritySnapshot {
+    if (!rxResidentCapOwnerValid(storage)) return null;
+    const client = if (storage.owned_client) |*owned| owned else return null;
+    const state = switch (client.io_mode) {
+        .external => |*external| external,
+        .blocking => return null,
+    };
+    return .{
+        .storage_addr = @intFromPtr(storage),
+        .client_addr = @intFromPtr(client),
+        .parser_addr = @intFromPtr(&client.parser),
+        .resident_cap = storage.rx_resident_cap,
+        .resident_cap_digest = storage.rx_resident_cap_digest,
+        .provenance = state.rx_provenance,
+    };
+}
+
+fn rxResidentCapAuthorityMatches(
+    storage: *const ExternalPumpStorage,
+    snapshot: RxResidentCapAuthoritySnapshot,
+) bool {
+    if (snapshot.storage_addr != @intFromPtr(storage) or
+        storage.rx_resident_cap != snapshot.resident_cap or
+        !std.mem.eql(
+            u8,
+            &storage.rx_resident_cap_digest,
+            &snapshot.resident_cap_digest,
+        ))
+        return false;
+    const client = if (storage.owned_client) |*owned| owned else return false;
+    if (snapshot.client_addr != @intFromPtr(client) or
+        snapshot.parser_addr != @intFromPtr(&client.parser))
+        return false;
+    const state = switch (client.io_mode) {
+        .external => |*external| external,
+        .blocking => return false,
+    };
+    return std.meta.eql(state.rx_provenance, snapshot.provenance) and
+        rxResidentCapOwnerValid(storage);
+}
+
+fn restoreRxResidentCapAuthority(
+    storage: *ExternalPumpStorage,
+    snapshot: RxResidentCapAuthoritySnapshot,
+) bool {
+    if (snapshot.storage_addr != @intFromPtr(storage)) return false;
+    const client = if (storage.owned_client) |*owned| owned else return false;
+    if (snapshot.client_addr != @intFromPtr(client) or
+        snapshot.parser_addr != @intFromPtr(&client.parser))
+        return false;
+    const state = switch (client.io_mode) {
+        .external => |*external| external,
+        .blocking => return false,
+    };
+    storage.saved_self_addr = snapshot.storage_addr;
+    storage.rx_resident_cap = snapshot.resident_cap;
+    storage.rx_resident_cap_digest = snapshot.resident_cap_digest;
+    state.rx_provenance = snapshot.provenance;
+    return rxResidentCapAuthorityMatches(storage, snapshot);
 }
 
 fn screenPendingSummaryDigest(
@@ -5003,6 +5204,8 @@ fn releaseActiveStorage(address: usize) void {
 pub const ExternalPumpStorage = struct {
     lifecycle: StorageLifecycle = .empty,
     saved_self_addr: usize = 0,
+    rx_resident_cap: usize = 0,
+    rx_resident_cap_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
     semantic_state: client_pump.ExternalPumpState = .constructing,
     evidence_snapshot: AttachmentEvidence = .{
         .runtime_id = 0,
@@ -6662,6 +6865,16 @@ pub const ExternalPumpStorage = struct {
         )) {
             return failed(.overlapping_storage, .preserved);
         }
+        // The cap becomes parser-allocation authority. Reject invalid policy before reserving the
+        // process owner or invoking any source allocator so failure is observably pre-mutation.
+        if (options.resident_cap == 0 or
+            options.resident_cap > max_rx_resident_bytes)
+            return failed(.resident_too_large, .preserved);
+        const expected_rx_resident_cap = options.resident_cap;
+        const expected_rx_resident_cap_digest = rxResidentCapDigest(
+            @intFromPtr(out),
+            expected_rx_resident_cap,
+        );
         if (cross_owner_quarantine_latched.load(.acquire))
             return failed(.process_quarantined, .preserved);
         const out_addr = @intFromPtr(out);
@@ -6721,6 +6934,11 @@ pub const ExternalPumpStorage = struct {
         out.* = .{
             .lifecycle = .constructing,
             .saved_self_addr = @intFromPtr(out),
+            .rx_resident_cap = options.resident_cap,
+            .rx_resident_cap_digest = rxResidentCapDigest(
+                @intFromPtr(out),
+                options.resident_cap,
+            ),
             .semantic_state = .constructing,
             .evidence_snapshot = evidence.attachment,
             .operation_generation = 0,
@@ -6745,8 +6963,16 @@ pub const ExternalPumpStorage = struct {
         };
         // The allocations above run arbitrary allocator code. Re-prove that this transaction still
         // owns the destination before trusting any field it published.
-        if (out.lifecycle != .constructing or out.saved_self_addr != @intFromPtr(out)) {
+        if (out.lifecycle != .constructing or
+            out.rx_resident_cap != expected_rx_resident_cap or
+            !std.mem.eql(
+                u8,
+                &out.rx_resident_cap_digest,
+                &expected_rx_resident_cap_digest,
+            ) or !rxResidentCapValid(out))
+        {
             out.client_transfer.deinit();
+            out.* = .{};
             return failed(.invariant_failure, .preserved);
         }
         if (!out.client_transfer.validate(source, &out.owned_client) or
@@ -6774,7 +7000,14 @@ pub const ExternalPumpStorage = struct {
             };
         };
         owner_proof_live = true;
-        if (out.lifecycle != .constructing or out.saved_self_addr != @intFromPtr(out)) {
+        if (out.lifecycle != .constructing or
+            out.rx_resident_cap != expected_rx_resident_cap or
+            !std.mem.eql(
+                u8,
+                &out.rx_resident_cap_digest,
+                &expected_rx_resident_cap_digest,
+            ) or !rxResidentCapValid(out))
+        {
             out.client_transfer.deinit();
             out.* = .{};
             return failed(.invariant_failure, .preserved);
@@ -6812,7 +7045,14 @@ pub const ExternalPumpStorage = struct {
         // descriptor between validation and the paired take. Public re-entry sees `.normalizing`.
         owner_proof.deinit();
         owner_proof_live = false;
-        if (out.lifecycle != .normalizing or out.saved_self_addr != @intFromPtr(out)) {
+        if (out.lifecycle != .normalizing or
+            out.rx_resident_cap != expected_rx_resident_cap or
+            !std.mem.eql(
+                u8,
+                &out.rx_resident_cap_digest,
+                &expected_rx_resident_cap_digest,
+            ) or !rxResidentCapValid(out))
+        {
             _ = out.closeUncommittedOwned(.invariant_failure);
             return failed(.invariant_failure, .consumed_and_closed);
         }
@@ -6828,6 +7068,10 @@ pub const ExternalPumpStorage = struct {
             _ = out.closeUncommittedOwned(.invariant_failure);
             return failed(.invariant_failure, .consumed_and_closed);
         }
+        if (!rxResidentCapOwnerValid(out)) {
+            _ = out.closeUncommittedOwned(.invariant_failure);
+            return failed(.invariant_failure, .consumed_and_closed);
+        }
         out.lifecycle = .adopting;
         out.semantic_state = .adopting;
         retain_active_reservation = reserve_process_owner;
@@ -6838,6 +7082,9 @@ pub const ExternalPumpStorage = struct {
     /// construction as authority adoption.
     pub fn requireActive(self: *ExternalPumpStorage) AccessError!void {
         try self.requireAddress();
+        if ((self.lifecycle == .adopting or self.lifecycle == .live) and
+            !rxResidentCapOwnerValid(self))
+            return error.InvalidDescriptor;
         return switch (self.lifecycle) {
             .empty => error.Empty,
             .adopting, .adoption_preparing, .constructing, .normalizing => error.NotActive,
@@ -6889,8 +7136,20 @@ pub const ExternalPumpStorage = struct {
             return error.InvalidDescriptor;
         if (!self.wholeTurnScratchDisjoint(scratch_addr, scratch_len))
             return error.InvalidDescriptor;
+        if (!self.wholeTurnScratchDisjoint(
+            out_addr,
+            @sizeOf(ExternalWholeTurnLease),
+        ))
+            return error.InvalidDescriptor;
         if (self.operation_generation == std.math.maxInt(u64))
             return error.GenerationExhausted;
+        const rx_authority = snapshotRxResidentCapAuthority(self) orelse
+            return error.InvalidDescriptor;
+        const rx_authority_digest = rxAuthorityDigest(
+            rx_authority.client_addr,
+            rx_authority.parser_addr,
+            rx_authority.provenance,
+        );
         active_external_operation_addr = @intFromPtr(self);
         self.operation_reentry_latched = false;
         self.operation_generation += 1;
@@ -6900,11 +7159,23 @@ pub const ExternalPumpStorage = struct {
             .scratch_addr = scratch_addr,
             .scratch_len = scratch_len,
             .operation_generation = self.operation_generation,
+            .rx_resident_cap = self.rx_resident_cap,
+            .rx_resident_cap_digest = self.rx_resident_cap_digest,
+            .rx_client_addr = rx_authority.client_addr,
+            .rx_parser_addr = rx_authority.parser_addr,
+            .rx_provenance = rx_authority.provenance,
+            .rx_authority_digest = rx_authority_digest,
             .lifecycle = .acquired,
         };
         out.digest = wholeTurnLeaseDigest(out.*);
         active_external_lease_addr = out_addr;
         active_external_lease_generation = self.operation_generation;
+        active_external_rx_resident_cap = self.rx_resident_cap;
+        active_external_rx_resident_cap_digest = self.rx_resident_cap_digest;
+        active_external_rx_client_addr = rx_authority.client_addr;
+        active_external_rx_parser_addr = rx_authority.parser_addr;
+        active_external_rx_provenance = rx_authority.provenance;
+        active_external_rx_authority_digest = rx_authority_digest;
     }
 
     pub fn validateWholeTurnLease(
@@ -6924,11 +7195,171 @@ pub const ExternalPumpStorage = struct {
             self.saved_self_addr == @intFromPtr(self) and
             active_external_lease_addr == @intFromPtr(lease) and
             active_external_lease_generation == self.operation_generation and
+            active_external_rx_resident_cap == self.rx_resident_cap and
+            std.mem.eql(
+                u8,
+                &active_external_rx_resident_cap_digest,
+                &self.rx_resident_cap_digest,
+            ) and
+            activeWholeTurnRxAuthorityMatches(self) and
             lease.saved_self_addr == @intFromPtr(lease) and
             lease.storage_addr == @intFromPtr(self) and
             lease.operation_generation == self.operation_generation and
+            lease.rx_resident_cap == self.rx_resident_cap and
+            std.mem.eql(
+                u8,
+                &lease.rx_resident_cap_digest,
+                &self.rx_resident_cap_digest,
+            ) and
+            lease.rx_client_addr == active_external_rx_client_addr and
+            lease.rx_parser_addr == active_external_rx_parser_addr and
+            std.meta.eql(
+                lease.rx_provenance,
+                active_external_rx_provenance,
+            ) and
+            std.mem.eql(
+                u8,
+                &lease.rx_authority_digest,
+                &active_external_rx_authority_digest,
+            ) and
             lease.lifecycle == .acquired and
             std.mem.eql(u8, &lease.digest, &wholeTurnLeaseDigest(lease.*));
+    }
+
+    fn activeWholeTurnRxAuthorityMatches(
+        self: *const ExternalPumpStorage,
+    ) bool {
+        if (!std.mem.eql(
+            u8,
+            &active_external_rx_authority_digest,
+            &rxAuthorityDigest(
+                active_external_rx_client_addr,
+                active_external_rx_parser_addr,
+                active_external_rx_provenance,
+            ),
+        )) return false;
+        const client = if (self.owned_client) |*owned| owned else return false;
+        if (@intFromPtr(client) != active_external_rx_client_addr or
+            @intFromPtr(&client.parser) != active_external_rx_parser_addr)
+            return false;
+        const state = switch (client.io_mode) {
+            .external => |*external| external,
+            .blocking => return false,
+        };
+        return std.meta.eql(
+            state.rx_provenance,
+            active_external_rx_provenance,
+        ) and rxResidentCapOwnerValid(self);
+    }
+
+    fn restoreActiveWholeTurnRxAuthority(
+        self: *ExternalPumpStorage,
+    ) bool {
+        const client = if (self.owned_client) |*owned| owned else return false;
+        if (@intFromPtr(client) != active_external_rx_client_addr or
+            @intFromPtr(&client.parser) != active_external_rx_parser_addr or
+            !std.mem.eql(
+                u8,
+                &active_external_rx_authority_digest,
+                &rxAuthorityDigest(
+                    active_external_rx_client_addr,
+                    active_external_rx_parser_addr,
+                    active_external_rx_provenance,
+                ),
+            ))
+            return false;
+        const state = switch (client.io_mode) {
+            .external => |*external| external,
+            .blocking => return false,
+        };
+        const current_provenance = state.rx_provenance;
+        self.saved_self_addr = @intFromPtr(self);
+        self.rx_resident_cap = active_external_rx_resident_cap;
+        self.rx_resident_cap_digest =
+            active_external_rx_resident_cap_digest;
+        state.rx_provenance = active_external_rx_provenance;
+        if (self.activeWholeTurnRxAuthorityMatches()) return true;
+        state.rx_provenance = current_provenance;
+        return false;
+    }
+
+    fn refreshWholeTurnRxAuthorityAfterParserProgress(
+        self: *ExternalPumpStorage,
+        lease: *ExternalWholeTurnLease,
+    ) bool {
+        if (active_external_operation_addr != @intFromPtr(self) or
+            active_external_lease_addr != @intFromPtr(lease) or
+            lease.saved_self_addr != @intFromPtr(lease) or
+            lease.lifecycle != .acquired or
+            !std.mem.eql(u8, &lease.digest, &wholeTurnLeaseDigest(lease.*)) or
+            lease.rx_client_addr != active_external_rx_client_addr or
+            lease.rx_parser_addr != active_external_rx_parser_addr or
+            !std.meta.eql(
+                lease.rx_provenance,
+                active_external_rx_provenance,
+            ))
+            return false;
+        const client = if (self.owned_client) |*owned| owned else return false;
+        if (@intFromPtr(client) != active_external_rx_client_addr or
+            @intFromPtr(&client.parser) != active_external_rx_parser_addr)
+            return false;
+        const state = switch (client.io_mode) {
+            .external => |*external| external,
+            .blocking => return false,
+        };
+        const before = active_external_rx_provenance;
+        const after = state.rx_provenance;
+        const before_unread = std.math.sub(
+            usize,
+            before.parser_seal.items_len,
+            before.parser_seal.head,
+        ) catch return false;
+        const after_unread = std.math.sub(
+            usize,
+            after.parser_seal.items_len,
+            after.parser_seal.head,
+        ) catch return false;
+        const consumed = std.math.sub(
+            u64,
+            after.buffer_start_absolute,
+            before.buffer_start_absolute,
+        ) catch return false;
+        const consumed_usize = std.math.cast(usize, consumed) orelse return false;
+        if (!client_external_mode.parserSealValid(state, &client.parser) or
+            before.identity == null or
+            !std.meta.eql(before.identity, after.identity) or
+            before.destination_slot_len != after.destination_slot_len or
+            before.rx_absolute_next != after.rx_absolute_next or
+            before.resident_cap != after.resident_cap or
+            before.lifecycle != after.lifecycle or
+            consumed == 0 or
+            consumed_usize > before_unread or
+            after_unread != before_unread - consumed_usize or
+            before.parser_seal.generation == std.math.maxInt(u64) or
+            after.parser_seal.generation != before.parser_seal.generation + 1 or
+            self.rx_resident_cap != after.resident_cap or
+            !rxResidentCapValid(self))
+            return false;
+        const authority_digest = rxAuthorityDigest(
+            active_external_rx_client_addr,
+            active_external_rx_parser_addr,
+            after,
+        );
+        active_external_rx_provenance = after;
+        active_external_rx_authority_digest = authority_digest;
+        lease.rx_provenance = after;
+        lease.rx_authority_digest = authority_digest;
+        lease.digest = wholeTurnLeaseDigest(lease.*);
+        return self.activeWholeTurnRxAuthorityMatches();
+    }
+
+    fn clearActiveWholeTurnRxAuthority() void {
+        active_external_rx_resident_cap = 0;
+        active_external_rx_resident_cap_digest = [_]u8{0} ** 32;
+        active_external_rx_client_addr = 0;
+        active_external_rx_parser_addr = 0;
+        active_external_rx_provenance = .{};
+        active_external_rx_authority_digest = [_]u8{0} ** 32;
     }
 
     pub fn releaseWholeTurnLease(
@@ -6947,6 +7378,7 @@ pub const ExternalPumpStorage = struct {
             lease.* = .{ .lifecycle = .released };
             active_external_lease_addr = 0;
             active_external_lease_generation = 0;
+            clearActiveWholeTurnRxAuthority();
             active_external_operation_addr = 0;
             return .released;
         }
@@ -6956,7 +7388,8 @@ pub const ExternalPumpStorage = struct {
         // lease cannot reach this branch. Restore the lifecycle proven at acquire so a hostile
         // storage-header drift cannot forge moved/dead and bypass cleanup. If the lease descriptor
         // drifted, do not dereference it again after the identity verdict.
-        self.saved_self_addr = @intFromPtr(self);
+        if (!self.restoreActiveWholeTurnRxAuthority())
+            latchCrossOwnerQuarantine();
         self.lifecycle = .live;
         self.semantic_state = .{ .terminal = .{
             .reason = .invariant_failure,
@@ -6964,6 +7397,7 @@ pub const ExternalPumpStorage = struct {
         } };
         active_external_lease_addr = 0;
         active_external_lease_generation = 0;
+        clearActiveWholeTurnRxAuthority();
         active_external_operation_addr = 0;
         return .aborted_terminal;
     }
@@ -7252,7 +7686,7 @@ pub const ExternalPumpStorage = struct {
 
     fn pumpBufferedRxUnderHeldLease(
         self: *ExternalPumpStorage,
-        lease: *const ExternalWholeTurnLease,
+        lease: *ExternalWholeTurnLease,
         turn: client_pump.TurnInput,
         ops: *const BufferedRxOps,
         scratch: *ExternalRxTurnScratch,
@@ -7342,6 +7776,11 @@ pub const ExternalPumpStorage = struct {
             .scratch = scratch,
         };
         const authority_ops = authority.ops();
+        var parser_progress = ProductParserProgress{
+            .storage = self,
+            .lease = lease,
+        };
+        const parser_progress_ops = parser_progress.ops();
         var payload_guard_owner = ProductPayloadAllocationGuard{
             .authority = &authority,
         };
@@ -7392,6 +7831,7 @@ pub const ExternalPumpStorage = struct {
             .payload_guard = &payload_guard,
             .target_stream_id = self.evidence_snapshot.stream_id,
             .partial = partial,
+            .parser_progress = parser_progress_ops,
         });
         const summary = switch (traversal) {
             .terminal => |failure| {
@@ -7416,7 +7856,7 @@ pub const ExternalPumpStorage = struct {
                         .complete_or_error => .complete_or_error,
                     },
                     .socket_rx_drained = false,
-                    .rx_budget_exhausted = empty.budget_exhausted,
+                    .rx_frame_budget_exhausted = empty.budget_exhausted,
                 });
                 result.rx_bytes = empty.rx_bytes;
                 result.rx_frames = empty.rx_frames;
@@ -7524,7 +7964,7 @@ pub const ExternalPumpStorage = struct {
                 .complete_or_error => .complete_or_error,
             },
             .socket_rx_drained = false,
-            .rx_budget_exhausted = budget_exhausted,
+            .rx_frame_budget_exhausted = budget_exhausted,
         });
         result.rx_bytes = rx_bytes;
         result.rx_frames = rx_frames;
@@ -7648,6 +8088,8 @@ pub const ExternalPumpStorage = struct {
             },
         }
         writer.writeBytes(&self.owner_authority_seal.digest);
+        writer.writeUsize(self.rx_resident_cap);
+        writer.writeBytes(&self.rx_resident_cap_digest);
         writer.writeU64(self.operation_generation);
         return writer.finish();
     }
@@ -8053,6 +8495,33 @@ pub const ExternalPumpStorage = struct {
     }
 
     pub fn prepareAdoption(
+        self: *ExternalPumpStorage,
+        now_ns: i128,
+        cleanup_scratch: *ExternalPumpCleanupScratch,
+    ) AdoptionPrepareStatus {
+        const cap_authority = snapshotRxResidentCapAuthority(self) orelse {
+            if (!restoreRxResidentCapFromClient(self))
+                return self.quarantineImmediateTerminal();
+            return self.finishImmediateTerminal(
+                .invariant_failure,
+                cleanup_scratch,
+            );
+        };
+        const result = self.prepareAdoptionInner(now_ns, cleanup_scratch);
+        if (result == .terminal_latched or
+            rxResidentCapAuthorityMatches(self, cap_authority))
+            return result;
+        if (!restoreRxResidentCapAuthority(self, cap_authority))
+            return self.quarantineImmediateTerminal();
+        if (result == .prepared_adopted)
+            self.resetPreparedAdoption();
+        return self.finishImmediateTerminal(
+            .invariant_failure,
+            cleanup_scratch,
+        );
+    }
+
+    fn prepareAdoptionInner(
         self: *ExternalPumpStorage,
         now_ns: i128,
         cleanup_scratch: *ExternalPumpCleanupScratch,
@@ -8959,6 +9428,13 @@ pub const ExternalPumpStorage = struct {
             return .dead;
         if (self.lifecycle != .adopting or self.semantic_state != .adopting)
             return self.latchCommitTerminal();
+        if (!rxResidentCapOwnerValid(self)) {
+            _ = restoreRxResidentCapFromClient(self);
+            return self.latchCommitTerminal();
+        }
+        const cap_authority =
+            snapshotRxResidentCapAuthority(self) orelse
+            return self.latchCommitTerminal();
 
         active_external_operation_addr = @intFromPtr(self);
         defer active_external_operation_addr = 0;
@@ -8970,6 +9446,11 @@ pub const ExternalPumpStorage = struct {
         // Failure injection is test-only and runs before the final validation/permit mint. Once
         // the permit exists, no generic recorder receives a mutable sealed owner graph.
         recorder.beforePermit(&plan.backlog, &self.inbox_ledger);
+        if (!rxResidentCapAuthorityMatches(self, cap_authority)) {
+            if (!restoreRxResidentCapAuthority(self, cap_authority))
+                latchCrossOwnerQuarantine();
+            return self.latchCommitTerminal();
+        }
         var source_ranges: client_mod.ExternalSourceOwnerRangeScratch = .{};
         const owner_backings_disjoint = self.validatedOwnerBackingDisjointness(
             client,
@@ -9001,6 +9482,17 @@ pub const ExternalPumpStorage = struct {
             plan,
         );
         seed_retirement.retire();
+        if (!rxResidentCapAuthorityMatches(self, cap_authority)) {
+            if (!restoreRxResidentCapAuthority(self, cap_authority))
+                latchCrossOwnerQuarantine();
+            self.saved_self_addr = @intFromPtr(self);
+            self.lifecycle = .live;
+            self.semantic_state = .{ .terminal = .{
+                .reason = .invariant_failure,
+                .fd_disposition = .owner_cleanup,
+            } };
+            return .terminal_latched;
+        }
         return .adopted;
     }
 
@@ -9195,9 +9687,22 @@ pub const ExternalPumpStorage = struct {
             .constructing, .normalizing, .adoption_preparing, .tearing_down => return .transaction_busy,
             .adopting, .live => {},
         }
+        var cap_invariant = false;
+        if (!rxResidentCapOwnerValid(self)) {
+            cap_invariant = true;
+            if (!restoreRxResidentCapFromClient(self)) {
+                active_external_operation_addr = @intFromPtr(self);
+                defer active_external_operation_addr = 0;
+                return self.quarantineOwnerTeardown(cleanup_scratch, false);
+            }
+        }
         active_external_operation_addr = @intFromPtr(self);
         defer active_external_operation_addr = 0;
-        return self.teardownUnderHeldOperationLease(cleanup_scratch);
+        const result = self.teardownUnderHeldOperationLease(cleanup_scratch);
+        return if (cap_invariant and result == .cleaned)
+            .cleaned_with_invariant
+        else
+            result;
     }
 
     fn prepareLiveOwnerTeardown(
@@ -9365,6 +9870,9 @@ pub const ExternalPumpStorage = struct {
             .empty, .dead => return .already_dead,
             else => return .transaction_busy,
         }
+        if (!rxResidentCapOwnerValid(self) and
+            !restoreRxResidentCapFromClient(self))
+            return self.quarantineOwnerTeardown(cleanup_scratch, false);
         if (cleanupScratchOverlapsStorage(self, cleanup_scratch))
             return self.quarantineOwnerTeardown(cleanup_scratch, false);
         if (!cleanup_scratch.isReady())
@@ -9691,6 +10199,8 @@ pub const ExternalPumpStorage = struct {
         self.owner_incarnation = 0;
         self.owner_incarnation_seal = .{};
         self.owner_event_projection_generation = 0;
+        self.rx_resident_cap = 0;
+        self.rx_resident_cap_digest = [_]u8{0} ** 32;
         self.operation_generation = operation_generation;
         self.owner_teardown_generation = next_generation;
         self.intent_scratch_reservation = .{};
@@ -9809,6 +10319,8 @@ pub const ExternalPumpStorage = struct {
     fn requireAddress(self: *const ExternalPumpStorage) AccessError!void {
         if (self.saved_self_addr != 0 and self.saved_self_addr != @intFromPtr(self))
             return error.MovedStorage;
+        if (self.saved_self_addr != 0 and !rxResidentCapValid(self))
+            return error.InvalidDescriptor;
     }
 
     fn closeUncommittedOwned(
@@ -9851,6 +10363,8 @@ pub const ExternalPumpStorage = struct {
                 .had_sticky_invariant = true,
             };
         const ledger_result = self.inbox_ledger.finish();
+        self.rx_resident_cap = 0;
+        self.rx_resident_cap_digest = [_]u8{0} ** 32;
         self.lifecycle = .dead;
         releaseActiveStorage(@intFromPtr(self));
         if (drain_report.drained_active_count != 0 or
@@ -10791,11 +11305,14 @@ const AllocatorCallbackProbe = struct {
         idle,
         init_reentry,
         different_init_reentry,
+        init_cap_drift,
         proof_alloc_mode_drift,
         proof_alloc_profile_drift,
         proof_free_mutation,
+        proof_free_cap_drift,
         prepare_reentry,
         prepare_teardown,
+        prepare_cap_drift,
         cross_prepare_reentry,
         prepare_cleanup_teardown,
         prepare_preflight_oom_drift,
@@ -10805,6 +11322,7 @@ const AllocatorCallbackProbe = struct {
         cleanup_authority_drift,
         cleanup_nested_descriptor_drift,
         suffix_storage_drift,
+        teardown_cap_drift,
         intent_scratch_reentry,
         aggregate_commit_drift,
     };
@@ -10923,6 +11441,22 @@ const AllocatorCallbackProbe = struct {
             self.saved_compatibility_profile = self.source.?.compatibility_profile;
             self.source.?.connection_profile = null;
             self.source.?.compatibility_profile = null;
+        } else if (self.mode == .init_cap_drift and !self.fired and
+            self.storage.?.client_transfer.lifecycle == .prepared)
+        {
+            self.fired = true;
+            self.storage.?.rx_resident_cap = 1;
+            self.storage.?.rx_resident_cap_digest =
+                rxResidentCapDigest(@intFromPtr(self.storage.?), 1);
+        } else if (self.mode == .prepare_cap_drift and !self.fired and
+            self.storage.?.lifecycle == .adoption_preparing)
+        {
+            self.fired = true;
+            const changed: usize =
+                if (self.storage.?.rx_resident_cap == 1) 2 else 1;
+            self.storage.?.rx_resident_cap = changed;
+            self.storage.?.rx_resident_cap_digest =
+                rxResidentCapDigest(@intFromPtr(self.storage.?), changed);
         }
         return self.parent.vtable.alloc(
             self.parent.ptr,
@@ -10989,6 +11523,13 @@ const AllocatorCallbackProbe = struct {
             // This is the mutation that used to fit between final proof and Client move. It now
             // touches only the moved-from tombstone; the destination owner is already independent.
             self.source.?.pending_event_bytes = std.math.maxInt(usize);
+        } else if (!self.fired and self.mode == .proof_free_cap_drift and
+            self.storage.?.lifecycle == .normalizing)
+        {
+            self.fired = true;
+            self.storage.?.rx_resident_cap = 1;
+            self.storage.?.rx_resident_cap_digest =
+                rxResidentCapDigest(@intFromPtr(self.storage.?), 1);
         } else if (!self.fired and self.mode == .teardown_reentry and
             self.storage.?.lifecycle == .tearing_down)
         {
@@ -11049,6 +11590,13 @@ const AllocatorCallbackProbe = struct {
             self.screen_copies.?[0].view = foreign;
             self.screen_wrappers.?[0].allocation_ptr = foreign.ptr;
             self.screen_wrappers.?[0].logical_len = foreign.len;
+        } else if (!self.fired and self.mode == .teardown_cap_drift and
+            self.storage.?.lifecycle == .tearing_down)
+        {
+            self.fired = true;
+            self.storage.?.rx_resident_cap = 1;
+            self.storage.?.rx_resident_cap_digest =
+                rxResidentCapDigest(@intFromPtr(self.storage.?), 1);
         } else if (!self.fired and self.mode == .suffix_storage_drift and
             (self.storage.?.lifecycle == .adoption_preparing or
                 self.storage.?.lifecycle == .tearing_down))
@@ -11961,6 +12509,58 @@ test "external pump init allocator callback sees the in-flight latch before allo
     try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(&storage));
 }
 
+test "C1 init rejects paired resident cap drift at allocation and final free callbacks" {
+    inline for (.{ AllocatorCallbackProbe.Mode.init_cap_drift, .proof_free_cap_drift }) |mode| {
+        var probe = AllocatorCallbackProbe{ .parent = std.testing.allocator };
+        var fixture = try TestClient.initWithAllocator(probe.allocator());
+        defer fixture.deinitPeer();
+        defer fixture.client.deinit();
+        var seed: runtime_metadata_wire.InitialMetadataSeed = .unsupported;
+        var evidence: PreparedAdoptionEvidence = .{};
+        defer evidence.deinit();
+        try sealAttachEvidence(
+            &evidence,
+            92,
+            &fixture.client,
+            valid_evidence,
+            &seed,
+        );
+        var storage: ExternalPumpStorage = .{};
+        probe.storage = &storage;
+        probe.source = &fixture.client;
+        probe.evidence = &evidence;
+        probe.mode = mode;
+
+        const failure = ExternalPumpStorage.initInPlaceWithOptions(
+            &storage,
+            &fixture.client,
+            &evidence,
+            .{ .test_skip_process_owner_reservation = true },
+        ).failed;
+
+        try std.testing.expect(probe.fired);
+        try std.testing.expectEqual(InitFailureReason.invariant_failure, failure.reason);
+        switch (mode) {
+            .init_cap_drift => {
+                try std.testing.expectEqual(
+                    SourceDisposition.preserved,
+                    failure.source_disposition,
+                );
+                try std.testing.expectEqual(StorageLifecycle.empty, storage.lifecycle);
+                try std.testing.expect(evidence.validate(&fixture.client));
+            },
+            .proof_free_cap_drift => {
+                try std.testing.expectEqual(
+                    SourceDisposition.consumed_and_closed,
+                    failure.source_disposition,
+                );
+                try std.testing.expectEqual(StorageLifecycle.dead, storage.lifecycle);
+            },
+            else => unreachable,
+        }
+    }
+}
+
 test "external pump init latch rejects a different nested destination too" {
     var probe = AllocatorCallbackProbe{ .parent = std.testing.allocator };
     var outer_fixture = try TestClient.initWithAllocator(probe.allocator());
@@ -12014,6 +12614,78 @@ test "external pump init latch rejects a different nested destination too" {
     try std.testing.expect(nested_evidence.validate(&nested_fixture.client));
     try std.testing.expect(nested_fixture.client.fd >= 0);
     try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(&outer_storage));
+}
+
+test "C1 adoption callback cap drift cannot publish prepared or live authority" {
+    var probe = AllocatorCallbackProbe{ .parent = std.testing.allocator };
+    var fixture = try TestClient.initWithAllocator(probe.allocator());
+    defer fixture.deinitPeer();
+    defer fixture.client.deinit();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    probe.storage = &storage;
+    probe.mode = .prepare_cap_drift;
+
+    try std.testing.expectEqual(
+        std.meta.Tag(AdoptionPrepareStatus).terminal_latched,
+        std.meta.activeTag(prepareAdoptionForTest(&storage)),
+    );
+    try std.testing.expect(probe.fired);
+    try std.testing.expect(storage.lifecycle == .dead);
+}
+
+test "C1 commit rejects between-operation and recorder callback cap drift" {
+    inline for (.{ false, true }) |during_callback| {
+        var fixture = try TestClient.init();
+        defer fixture.deinitPeer();
+        var storage: ExternalPumpStorage = .{};
+        try std.testing.expect(
+            initTestStorage(&storage, &fixture.client, valid_evidence) ==
+                .initialized,
+        );
+        try std.testing.expect(
+            prepareAdoptionForTest(&storage) == .prepared_adopted,
+        );
+
+        const Recorder = struct {
+            storage: *ExternalPumpStorage,
+            mutate: bool,
+            fired: bool = false,
+
+            fn beforePermit(
+                self: *@This(),
+                _: *client_external_adoption.PreparedScreenBacklog,
+                _: *external_inbox_ledger.ExternalInboxLedger,
+            ) void {
+                if (!self.mutate) return;
+                self.fired = true;
+                self.storage.rx_resident_cap = 1;
+                self.storage.rx_resident_cap_digest =
+                    rxResidentCapDigest(@intFromPtr(self.storage), 1);
+            }
+
+            fn record(_: *@This(), _: CommitPhase) void {}
+        };
+        var recorder = Recorder{
+            .storage = &storage,
+            .mutate = during_callback,
+        };
+        if (!during_callback) {
+            storage.rx_resident_cap = 1;
+            storage.rx_resident_cap_digest =
+                rxResidentCapDigest(@intFromPtr(&storage), 1);
+        }
+
+        try std.testing.expectEqual(
+            CommitAdoptionResult.terminal_latched,
+            storage.commitAdoptionWithRecorder(Recorder, &recorder),
+        );
+        try std.testing.expectEqual(during_callback, recorder.fired);
+        try std.testing.expectEqual(StorageLifecycle.dead, storage.lifecycle);
+    }
 }
 
 test "external pump proof allocation mode drift is a preserved typed failure" {
@@ -17435,7 +18107,54 @@ test "c3c-3 aggregate teardown overwrites allocator callback mutation from hidde
     try std.testing.expect(!ledger.generation_exhausted);
     try std.testing.expectEqual(@as(u64, 0), ledger.mutation_epoch);
     try std.testing.expect(!ledger.invariant_failed);
+    try std.testing.expectEqual(@as(usize, 0), storage.rx_resident_cap);
+    try std.testing.expect(std.mem.eql(
+        u8,
+        &storage.rx_resident_cap_digest,
+        &([_]u8{0} ** 32),
+    ));
     try std.testing.expect(cleanup_scratch.isReady());
+}
+
+test "C1 aggregate teardown overwrites callback-mutated resident cap" {
+    var probe = AllocatorCallbackProbe{ .parent = std.testing.allocator };
+    var fixture = try TestClient.initWithAllocator(probe.allocator());
+    defer fixture.deinitPeer();
+    const payload = try fixture.client.allocator.dupe(u8, "screen");
+    try fixture.client.pending_batches.append(fixture.client.allocator, .{
+        .is_snapshot = false,
+        .stream_id = valid_evidence.stream_id,
+        .bytes = payload,
+        .allocator = fixture.client.allocator,
+    });
+    fixture.client.pending_batch_bytes = payload.len;
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expectEqual(
+        CommitAdoptionResult.adopted,
+        storage.commitAdoption(),
+    );
+    probe.storage = &storage;
+    probe.mode = .teardown_cap_drift;
+    var cleanup_scratch: ExternalPumpCleanupScratch = .{};
+    try std.testing.expect(cleanup_scratch.initInPlace());
+
+    try std.testing.expectEqual(
+        TeardownResult.cleaned,
+        storage.teardown(&cleanup_scratch),
+    );
+    try std.testing.expect(probe.fired);
+    try std.testing.expectEqual(StorageLifecycle.dead, storage.lifecycle);
+    try std.testing.expectEqual(@as(usize, 0), storage.rx_resident_cap);
+    try std.testing.expect(std.mem.eql(
+        u8,
+        &storage.rx_resident_cap_digest,
+        &([_]u8{0} ** 32),
+    ));
 }
 
 test "c3c-3 aggregate teardown quarantines moved scratch and exhausted generation before callbacks" {
@@ -18815,6 +19534,304 @@ test "external pump storage normalize failures preserve every observable source 
         try std.testing.expectEqual(stream_ptr, fixture.client.pending_stream.items.ptr);
         try std.testing.expectEqual(StorageLifecycle.empty, storage.lifecycle);
     }
+}
+
+test "C1 resident cap rejects invalid policy before source mutation or allocation" {
+    inline for (.{ @as(usize, 0), max_rx_resident_bytes + 1 }) |invalid_cap| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        var fixture = try TestClient.initWithAllocator(failing.allocator());
+        defer fixture.deinitPeer();
+        defer fixture.client.deinit();
+        var seed: runtime_metadata_wire.InitialMetadataSeed = .unsupported;
+        var evidence: PreparedAdoptionEvidence = .{};
+        defer evidence.deinit();
+        try sealAttachEvidence(
+            &evidence,
+            81,
+            &fixture.client,
+            valid_evidence,
+            &seed,
+        );
+        const alloc_index_before = failing.alloc_index;
+        const fd_before = fixture.client.fd;
+        const attach_instance_before = fixture.client.attach_instance_id;
+        const parser_ptr_before = fixture.client.parser.buf.items.ptr;
+        const parser_len_before = fixture.client.parser.buf.items.len;
+        var storage: ExternalPumpStorage = .{};
+
+        const failure = ExternalPumpStorage.initInPlaceWithOptions(
+            &storage,
+            &fixture.client,
+            &evidence,
+            .{
+                .resident_cap = invalid_cap,
+                .test_skip_process_owner_reservation = true,
+            },
+        ).failed;
+
+        try std.testing.expectEqual(
+            InitFailureReason.resident_too_large,
+            failure.reason,
+        );
+        try std.testing.expectEqual(SourceDisposition.preserved, failure.source_disposition);
+        try std.testing.expectEqual(alloc_index_before, failing.alloc_index);
+        try std.testing.expectEqual(fd_before, fixture.client.fd);
+        try std.testing.expectEqual(attach_instance_before, fixture.client.attach_instance_id);
+        try std.testing.expectEqual(parser_ptr_before, fixture.client.parser.buf.items.ptr);
+        try std.testing.expectEqual(parser_len_before, fixture.client.parser.buf.items.len);
+        try std.testing.expect(evidence.validate(&fixture.client));
+        try std.testing.expectEqual(@as(usize, 0), storage.saved_self_addr);
+        try std.testing.expectEqual(StorageLifecycle.empty, storage.lifecycle);
+        try std.testing.expect(storage.owned_client == null);
+        try std.testing.expect(storage.owned_evidence == null);
+        try std.testing.expectEqual(@as(usize, 0), storage.rx_resident_cap);
+        try std.testing.expect(storage.inbox_ledger.accountingView().pristine_zero);
+    }
+}
+
+test "C1 resident cap is sealed through storage lease and owner authority" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorageWithOptions(
+            &storage,
+            &fixture.client,
+            valid_evidence,
+            .{ .resident_cap = 1 },
+        ) == .initialized,
+    );
+    try std.testing.expectEqual(@as(usize, 1), storage.rx_resident_cap);
+    try std.testing.expect(std.mem.eql(
+        u8,
+        &storage.rx_resident_cap_digest,
+        &rxResidentCapDigest(@intFromPtr(&storage), 1),
+    ));
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+
+    var turn_scratch = struct {
+        snapshot: InheritedRxBlockerSnapshot = .{},
+    }{};
+    var lease: ExternalWholeTurnLease = .{};
+    try storage.acquireWholeTurnLease(
+        &lease,
+        @intFromPtr(&turn_scratch),
+        @sizeOf(@TypeOf(turn_scratch)),
+    );
+    const owner_digest_before = storage.inheritedOwnerDigest();
+    try std.testing.expectEqual(@as(usize, 1), lease.rx_resident_cap);
+
+    storage.rx_resident_cap = 2;
+    storage.rx_resident_cap_digest =
+        rxResidentCapDigest(@intFromPtr(&storage), 2);
+    try std.testing.expect(!storage.validateWholeTurnLease(&lease));
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &owner_digest_before,
+        &storage.inheritedOwnerDigest(),
+    ));
+    try std.testing.expectEqual(
+        WholeTurnReleaseResult.aborted_terminal,
+        storage.releaseWholeTurnLease(&lease),
+    );
+    try std.testing.expectEqual(@as(usize, 1), storage.rx_resident_cap);
+    try std.testing.expect(std.mem.eql(
+        u8,
+        &storage.rx_resident_cap_digest,
+        &rxResidentCapDigest(@intFromPtr(&storage), 1),
+    ));
+    try std.testing.expectEqual(
+        TeardownResult.cleaned,
+        teardownForTest(&storage),
+    );
+}
+
+test "C1 whole-turn lease rejects Client parser provenance drift" {
+    resetCrossOwnerQuarantineForTest();
+    defer resetCrossOwnerQuarantineForTest();
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorageWithOptions(
+            &storage,
+            &fixture.client,
+            valid_evidence,
+            .{ .resident_cap = 8 },
+        ) == .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+
+    var turn_scratch = struct {
+        snapshot: InheritedRxBlockerSnapshot = .{},
+    }{};
+    var lease: ExternalWholeTurnLease = .{};
+    try storage.acquireWholeTurnLease(
+        &lease,
+        @intFromPtr(&turn_scratch),
+        @sizeOf(@TypeOf(turn_scratch)),
+    );
+    const client = &storage.owned_client.?;
+    const state = switch (client.io_mode) {
+        .external => |*external| external,
+        .blocking => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(client_external_mode.testing.forgeResealedResidentCap(
+        state,
+        &client.parser,
+        7,
+    ));
+    try std.testing.expect(!storage.validateWholeTurnLease(&lease));
+    try std.testing.expectEqual(
+        WholeTurnReleaseResult.aborted_terminal,
+        storage.releaseWholeTurnLease(&lease),
+    );
+    try std.testing.expect(client_external_mode.parserSealValid(
+        state,
+        &client.parser,
+    ));
+    try std.testing.expectEqual(
+        TeardownResult.cleaned,
+        teardownForTest(&storage),
+    );
+}
+
+test "C1 trusted parser refresh rejects resealed generation without consume" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorageWithOptions(
+            &storage,
+            &fixture.client,
+            valid_evidence,
+            .{ .resident_cap = 8 },
+        ) == .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+
+    var turn_scratch = struct {
+        snapshot: InheritedRxBlockerSnapshot = .{},
+    }{};
+    var lease: ExternalWholeTurnLease = .{};
+    try storage.acquireWholeTurnLease(
+        &lease,
+        @intFromPtr(&turn_scratch),
+        @sizeOf(@TypeOf(turn_scratch)),
+    );
+    const client = &storage.owned_client.?;
+    const state = switch (client.io_mode) {
+        .external => |*external| external,
+        .blocking => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(client_external_mode.testing.forgeResealedNoProgress(
+        state,
+        &client.parser,
+    ));
+    try std.testing.expect(
+        !storage.refreshWholeTurnRxAuthorityAfterParserProgress(&lease),
+    );
+    try std.testing.expect(!storage.validateWholeTurnLease(&lease));
+    try std.testing.expectEqual(
+        WholeTurnReleaseResult.aborted_terminal,
+        storage.releaseWholeTurnLease(&lease),
+    );
+    try std.testing.expect(client_external_mode.parserSealValid(
+        state,
+        &client.parser,
+    ));
+    try std.testing.expectEqual(
+        TeardownResult.cleaned,
+        teardownForTest(&storage),
+    );
+}
+
+test "C1 unrecoverable parser descriptor drift latches quarantine exactly once" {
+    resetCrossOwnerQuarantineForTest();
+    defer resetCrossOwnerQuarantineForTest();
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorageWithOptions(
+            &storage,
+            &fixture.client,
+            valid_evidence,
+            .{ .resident_cap = 8 },
+        ) == .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+
+    var turn_scratch = struct {
+        snapshot: InheritedRxBlockerSnapshot = .{},
+    }{};
+    var lease: ExternalWholeTurnLease = .{};
+    try storage.acquireWholeTurnLease(
+        &lease,
+        @intFromPtr(&turn_scratch),
+        @sizeOf(@TypeOf(turn_scratch)),
+    );
+    const client = &storage.owned_client.?;
+    const expected_major = client.parser.expected_major;
+    client.parser.expected_major +%= 1;
+    try std.testing.expect(!storage.validateWholeTurnLease(&lease));
+    try std.testing.expectEqual(
+        WholeTurnReleaseResult.aborted_terminal,
+        storage.releaseWholeTurnLease(&lease),
+    );
+    const quarantine = crossOwnerQuarantineStatus();
+    try std.testing.expect(quarantine.latched);
+    try std.testing.expectEqual(@as(u64, 1), quarantine.event_count);
+    try std.testing.expectEqual(
+        max_cross_owner_quarantine_bytes,
+        quarantine.leaked_bytes_upper_bound,
+    );
+
+    client.parser.expected_major = expected_major;
+    try std.testing.expect(client_external_mode.parserSealValid(
+        switch (client.io_mode) {
+            .external => |*external| external,
+            .blocking => return error.TestUnexpectedResult,
+        },
+        &client.parser,
+    ));
+    resetCrossOwnerQuarantineForTest();
+    try std.testing.expectEqual(
+        TeardownResult.cleaned,
+        teardownForTest(&storage),
+    );
+}
+
+test "C1 teardown restores paired storage cap drift from Client authority" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorageWithOptions(
+            &storage,
+            &fixture.client,
+            valid_evidence,
+            .{ .resident_cap = 7 },
+        ) == .initialized,
+    );
+    storage.rx_resident_cap = 3;
+    storage.rx_resident_cap_digest =
+        rxResidentCapDigest(@intFromPtr(&storage), 3);
+    try std.testing.expectEqual(
+        TeardownResult.cleaned_with_invariant,
+        teardownForTest(&storage),
+    );
+    try std.testing.expectEqual(StorageLifecycle.dead, storage.lifecycle);
+    try std.testing.expectEqual(@as(usize, 0), storage.rx_resident_cap);
+    try std.testing.expect(std.mem.eql(
+        u8,
+        &storage.rx_resident_cap_digest,
+        &([_]u8{0} ** 32),
+    ));
 }
 
 test "external pump storage rejects source overlap before reading destination state" {

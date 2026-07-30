@@ -4492,6 +4492,7 @@ pub const Client = struct {
             external_state,
             self.attach_instance_id,
             &out.parser_replacement,
+            resident_cap,
             @intFromPtr(destination),
             @sizeOf(?Client),
             &out.rx_bind,

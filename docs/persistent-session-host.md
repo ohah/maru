@@ -6773,10 +6773,11 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             존재함, `advanceValidatedPartial` call이 classifier implementation에만 존재함, unguarded parser
             call·raw `FrameParser.buf/head` 접근·socket read가 0임을 검증한다.
 
-            - **d2c — injected nonblocking read/admit:** mechanics는 d1의 `maxReadable`,
-              `prepareAdmit→commitPreparedAdmit|abortPreparedAdmit`, `nextOutcomeWithRange`만 사용하며
-              `FrameParser.buf/head`, absolute offset, framing decode를 재구현하지 않는다. 제품 callback과 fixture
-              callback은 다음 닫힌 결과를 공유한다.
+            - **d2c — injected nonblocking read/admit:** mechanics는 d1의 `maxReadable`과 guarded
+              `prepareAdmit→commitPreparedAdmit|abortPreparedAdmit`만 사용한다. parser outcome/classification은
+              기존 `client_external_rx_turn.traverseBuffered` exact-one call만 소유하며 d2c가
+              `nextOutcomeWithRange`, `FrameParser.buf/head`, absolute offset 또는 framing decode를 직접
+              호출·재구현하지 않는다. 제품 callback과 fixture callback은 다음 닫힌 결과를 공유한다.
 
               ```zig
               const RxReadOutcome = union(enum) {
@@ -6800,40 +6801,229 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                   buffered: BufferedRxOps,
                   transport: RxReadOps,
               };
+
+              const RxReadAuthorityView = struct {
+                  storage_addr: usize,
+                  lease_addr: usize,
+                  scratch_addr: usize,
+                  scratch_generation: u64,
+                  client_addr: usize,
+                  fd: posix.fd_t,
+                  parser_addr: usize,
+                  parser_seal: client_external_mode.ParserAuthoritySeal,
+                  owner_snapshot_digest: external_owner_seal.Digest,
+              };
+
+              const RxReadAuthorityOps = struct {
+                  context: *anyopaque,
+                  current: *const fn (context: *anyopaque) ?RxReadAuthorityView,
+              };
+
+              const RxReadableAllowance = struct {
+                  bytes: usize,
+                  resident_limited: bool,
+                  turn_limited: bool,
+                  counter_limited: bool,
+              };
+
+              const max_rx_read_attempts_per_turn: usize = 64;
+              const max_rx_read_bytes_per_turn: usize = 1024 * 1024;
+              const max_rx_staged_prefix_validation_bytes_per_turn: usize =
+                  max_rx_read_attempts_per_turn * max_rx_read_bytes_per_turn;
               ```
 
-              실제 socket에서 accept한 bytes는 turn당 정확히 최대 1 MiB이며 `n <= destination.len`을 callback
-              반환 직후 검증한다. `.bytes`는 `1...destination.len`만 허용하고 0은 `.eof`가 아니라 invalid
-              callback terminal이다. read destination 길이는 항상 `maxReadable.bytes` 이하이고 zero-length read는
-              호출하지 않는다. d2c부터 final-address `ExternalRxTurnScratch`가 1 MiB read backing을 소유하고 d2d는
-              같은 backing에 authority permit을 추가해 합성한다. callback 반환 뒤 storage operation lease,
-              scratch lifecycle/digest, destination exact
-              addr/len, parser/provenance/authority generation을 bytes dereference/admit 전에 다시 검증한다. EINTR은
-              한 RX turn의 연속 read 기준 최대 8회이고 성공 bytes 또는 `would_block`에서 카운터를 reset한다.
-              9번째 연속 EINTR은 socket terminal이다. `would_block`만 같은
-              aggregate call의 local drain evidence를 만든다. EOF/hard error, requested 초과, invalid seal/counter,
-              incomplete+resident exhaustion, admit OOM/drift는 authority false의 typed terminal이며
-              semantic/ledger/TX publish 0이다. 한 read가 65개 frame을 담아도 bytes admission은 허용하고 64개만
-              parse한 뒤 backlog를 다음 immediate turn으로 넘긴다.
+              read/admit/traversal은 한 held-lease transaction에서 다음 순서로 선형화한다.
 
-              `.would_block`은 아래 aggregate-private final-address evidence만 준비한다. 이 evidence는
-              `pumpRxTurn` 호출 밖으로 반환하지 않고 final parser empty와 generation을 재검증한 뒤 같은 no-callback
-              suffix에서 scheduling fact로 consume한다.
+              1. inherited blocker 또는 complete parser backlog가 있으면 socket callback은 0이고 기존 buffered
+                 traversal만 실행한다.
+              2. parser가 empty/incomplete이고 `turn.readable=true`이면 `maxReadable`을 정확히 한 번 호출해
+                 resident/counter/turn cap을 모두 반영한 최초 allowance를 확정한다. parser capacity나 현재
+                 backing 크기에서 resident cap을 역추론하지 않는다.
+              3. transport-only collector가 final-address 1 MiB backing에 여러 `.bytes(n)` 결과를 누적한다.
+                 각 destination은 남은 allowance의 exact prefix이고 cumulative accepted bytes는 turn당
+                 1 MiB 이하이다. `.would_block` 또는 allowance 소진에서 수집을 끝내며 이 동안 parser는
+                 mutation하지 않는다.
+              4. `staged_len>0`이면 staged prefix 전체를 guarded `prepareAdmit→commit`으로 정확히 한 번
+                 admit하고 `traverseBuffered`를 정확히 한 번 실행한다. bytes마다 admit/traversal을 반복하거나
+                 첫 staged intent를 보존한 채 두 번째 read를 시작하지 않는다. initial complete backlog는
+                 admit 0/read 0/traversal exact-one이다. empty/incomplete parser에서 zero-prefix
+                 `.would_block`이면 admit/traversal은 0이며 empty만 drain evidence 후보, incomplete는
+                 evidence 0과 `read_interest=true`다.
+              5. aggregate commit/abort 뒤에만 scheduling fact를 계산한다. 한 read 또는 누적 read가 65개 frame을
+                 담아도 admission은 허용하고 traversal은 64개만 처리해 65번째를 다음 immediate turn에 남긴다.
+
+              실제 socket에서 accept한 bytes는 turn당 최대 1 MiB이며 `n <= destination.len`을 callback
+              반환 직후 검증한다. `.bytes`는 `1...destination.len`만 허용하고 0은 `.eof`가 아니라 invalid
+              callback terminal이다. read destination 길이는 최초 `maxReadable.bytes` allowance의 남은 값과
+              backing 잔여 길이 이하이고 zero-length read는 호출하지 않는다.
+
+              C1부터 `client_external_rx_read.zig`가 callback 없는 DTO/constants와 final-address
+              `ExternalRxReadScratch` layout을 정의하고, caller heap에 pin된 `ExternalRxTurnScratch`가 기존
+              snapshot/live-consume/traversal/range scratch에 **더해** read collector sub-owner,
+              그 sub-owner 내부의 단일 1 MiB backing, guarded-admit scratch와 raw would-block observation을
+              embed한다. C3는 같은 모듈과 같은 backing owner에 collector 동작만 추가하며 별도 backing이나
+              두 번째 scratch 타입을 만들지 않는다. outer scratch의
+              digest는 1 MiB 전체를 매 callback마다 hash하지 않고 backing descriptor, staged length와 staged
+              prefix digest를 봉인한다. d2d는 같은 additive layout에 authority permit만 추가한다.
+
+              callback 진입은 copyable `RxReadOps` 자체를 권위로 삼지 않는다. collector-private final-address
+              `RxReadAttemptPermit`이 storage/whole-turn lease, scratch address+generation, exact destination,
+              `Client` address+fd, parser address+seal/generation/absolute watermark, inherited/owner snapshot,
+              ops descriptor address와 frozen context/function, attempt generation을 봉인한다. callback 전
+              `.callback_active`, 검증된 반환 뒤 `.returned`, consume/abort 뒤 tombstone으로 전이한다.
+              C3 leaf는 pump/ledger/storage 타입을 import하지 않고 opaque `RxReadAuthorityOps.current()`가
+              반환하는 value-only `RxReadAuthorityView`를 callback 전후 exact 비교한다. C3 dedicated fixture는
+              synthetic authority를 제공하고 C4의 `ProductRxReadAuthority`만 held lease, storage, Client/fd,
+              parser seal과 `rxReadAuthorityDigest`를 실제 owner graph에서 투영한다.
+              callback 반환 뒤 result tag/length 또는 destination bytes를 신뢰하기 전에 permit, lease, scratch,
+              destination, `Client.fd`, parser/provenance, owner snapshot과 live ops descriptor를 모두 재검증한다.
+              copied/moved/reentrant/mutated permit은 bytes dereference/admit/free 0 terminal이다.
+
+              EINTR은 한 RX turn의 연속 read 기준 최대 8회이고 성공 bytes 또는 `would_block`에서 카운터를
+              reset한다. 각 retry는 새 attempt generation으로 permit을 다시 봉인하며 9번째 연속 EINTR은 socket
+              terminal이다. `.interrupted/.would_block/.eof/.socket_error`가 반환되면 callback destination은
+              untrusted discard 영역으로 취급해 staged length에 포함하거나 hash/admit/read하지 않는다. 다음
+              callback은 새 exact destination으로 그 영역을 덮어쓰고 `.bytes(n)`의 첫 `n` bytes만 승인한다.
+              반면 기존 staged prefix의 length/content digest mutation은 모든 outcome에서 금지한다.
+              EOF/hard error, requested 초과, invalid seal/counter,
+              incomplete+resident exhaustion, admit OOM/drift는 authority false의 typed terminal이며
+              semantic/ledger/TX publish 0이다.
+
+              callback attempt는 EINTR와 successful `.bytes`를 포함해 turn당 총 64회다. 64번째 validated
+              callback 뒤에도 `.would_block`/allowance stop에 도달하지 못하면 `.attempt_budget_exhausted`로
+              collector를 닫고 drain evidence 0, `rx_read_budget_exhausted=true`,
+              `immediate_rx=true`, `read_interest=false`를 반환한다. 65번째 callback은 0이다. 같은 attempt에서
+              EOF/error/EINTR-9 terminal은 attempt-budget stop보다 우선한다. staged prefix는 callback 전에
+              chunk seal descriptor/digest만 검증하고, callback 뒤 accepted cumulative prefix content를 최대 한
+              번 hash한 뒤 새 accepted prefix만 새 chunk로 봉인한다. full-prefix hostile mutation 검사의 분석적 work bound는 checked
+              `max_rx_staged_prefix_validation_bytes_per_turn = 64 MiB`이며 이를 넘기는 callback/digest loop를
+              만들지 않는다. C3는 attempt 1/64/65, 64회 1-byte success와 staged prefix mutation을 검증한다.
+
+              d2c가 사용하는 guarded admit은 replacement allocator 결과를 typed write/free 전에 pump의 전체
+              owner-range authority와 callback 전후 seal로 검사한다. storage/lease/scratch/read backing,
+              `Client`/parser/parser backing, intent/aggregate, ledger/live/metadata/response owner와 겹치거나
+              callback 뒤 authority가 drift한 allocation은 `.AllocationQuarantined`이며 write/free 0의 bounded
+              quarantine으로 수렴한다. disjoint와 allocator authority가 증명된 allocation만 abort/free할 수
+              있다. commit 뒤 old-backing free callback이 parser를 terminal로 만든 경우도 성공으로 오인하지
+              않고 typed quarantined/terminal 결과로 pump에 전달한다.
+              `client_external_mode`는 pump를 import하거나 전체 inventory를 재구현하지 않고
+              `ReplacementAllocationGuard{context,check}` opaque callback을 받는다. C2 synthetic guard가 leaf
+              계약을 검증하고, C4의 product guard만 기존 authority-range inventory를 exact once 투영한다.
+              mode는 `.committed/.ordinary_failure/.allocation_quarantined/.post_commit_quarantined` typed
+              outcome만 반환하며 global cross-owner latch는 만지지 않는다. C4 pump가 quarantine outcome을 받아
+              latch를 한 번만 기록한다.
+
+              guarded abort/free는 disjoint와 cleanup digest가 증명된 allocator/ptr/len을 frozen local로 옮긴
+              뒤 replacement primary와 cleanup mirror를 callback **전에** consumed/aborted tombstone으로
+              만든다. 목표 `State.rx_operation_busy`와 parser terminal state도 callback 전에 확정한다. free
+              callback 뒤 live prepared token을 cleanup authority로 다시 읽지 않으며 lease/scratch/parser drift가
+              있으면 canonical terminal descriptor를 복원하고 latch용 typed quarantine outcome을 반환한다.
+              commit의 old-backing free도 같은 tombstone-before-callback, frozen cleanup, callback 뒤 canonical
+              restore 규율을 사용해 free exact once와 double-free 0을 고정한다.
+
+              `max_rx_resident_bytes`는 `protocol.max_binary_chunk + protocol.header_size`이며
+              `InitOptions.resident_cap`은 `1...max_rx_resident_bytes`만 허용한다. cap 초과/0은 source mutation과
+              allocation 전에 거부한다. replacement allocation의 no-free 최대치는
+              `max_guarded_admit_quarantine_bytes = max_rx_resident_bytes`다. 기존
+              `max_cross_owner_quarantine_bytes`는 checked addition으로 이 값을 정확히 한 번 더하며 overflow는
+              compile error다. quarantine event/accounting은 actual leaked length가 이 named bound 이하인지
+              검증하고 같은 replacement를 다른 quarantine 항목에 중복 가산하지 않는다.
+
+              scratch 크기 예산은 기존 read 전 structural 상한
+              `max_external_rx_turn_structural_bytes = 2 MiB`, exact read backing 1 MiB,
+              `max_external_rx_read_metadata_bytes = 256 KiB`의 checked sum이다.
+              `max_external_rx_read_scratch_bytes = 1.25 MiB`,
+              `max_external_rx_turn_scratch_bytes = 3.25 MiB`를 compile-time `@sizeOf` gate로 각각 고정하고
+              임의 상향하지 않는다. 제품과 fixture는 outer scratch를 owner 수명당 heap-pinned exact-one
+              allocate/init/free하며 함수 stack/by-value 생성·copy와 turn별 allocation은 tokenizer boundary상 0이다.
+
+              `ExternalPumpStorage`는 adoption 때 사용한 `rx_resident_cap`을 immutable sealed field로 보존한다.
+              `maxReadable`과 guarded admit은 매 turn 같은 값을 사용하며 init/adopt/teardown과 authority digest가
+              이 값을 검증한다. `TurnResult.rx_bytes`는 기존대로 이번 traversal이 소비한 wire bytes이고,
+              새 `TurnResult.rx_read_bytes`는 이번 turn에 kernel/transport에서 accept해 admit한 bytes다.
+              1 MiB cap accounting은 `rx_read_bytes` 기준이며 두 counter를 합치거나 parser backlog bytes를 새
+              socket read로 계상하지 않는다.
+
+              `.would_block` 반환 시에는 아직 parser generation이 admit/traversal 전이므로 raw read-transaction
+              observation만 scratch에 봉인한다. guarded admit과 traversal/aggregate가 끝난 뒤 final parser가
+              exact empty이고 현재 lease/scratch/owner snapshot, byte/frame budget과 terminal 상태가 모두
+              유효할 때만 아래 aggregate-private final-address evidence를 mint한다. evidence는 `pumpRxTurn`
+              호출 밖으로 반환하지 않고 같은 no-callback suffix에서 scheduling fact로 exact once consume한다.
 
               ```zig
               const RxDrainEvidence = struct {
                   saved_self_addr: usize,
                   storage_addr: usize,
+                  lease_addr: usize,
+                  scratch_addr: usize,
+                  scratch_generation: u64,
+                  parser_addr: usize,
                   turn_generation: u64,
                   parser_generation: u64,
+                  parser_seal_digest: external_owner_seal.Digest,
                   rx_absolute_next: u64,
+                  read_attempt_generation: u64,
+                  owner_snapshot_digest: external_owner_seal.Digest,
                   lifecycle: enum { empty, prepared, consumed, aborted },
                   digest: external_owner_seal.Digest,
               };
               ```
 
               copied/moved/stale/double/cross-storage/cross-turn/cross-parser-generation evidence는 mutation/wire 0으로
-              거부한다.
+              거부한다. parser incomplete/complete, 64-frame 또는 1 MiB cap stop, EOF/error/EINTR에는 evidence를
+              consume하지 않는다. `socket_rx_drained=true`는 current evidence를 consume한 같은 no-callback
+              suffix에서만 `client_pump.decide`로 투영하고 public/copyable raw drained bool은 권위가 아니다.
+              evidence의 `read_attempt_generation`은 scratch의 latest validated would-block observation과 같아야
+              한다. `owner_snapshot_digest`는 `rxReadAuthorityDigest` 하나이며 inherited/live owner,
+              Client owner/incarnation과 immutable `rx_resident_cap` authority를 포함한다.
+
+              최초 `maxReadable`은 단순 byte 수가 아니라 같은 계산에서 나온 `RxReadableAllowance`의
+              resident/turn/counter limit bit를 함께 반환해 collector 종료 원인을 보존한다. pump나 collector가
+              allowance를 다시 계산하지 않는다. 종료 규칙은 다음과 같다.
+
+              - pre-read `.invalid`와 `.counter_exhausted`는 callback/admit/traversal 0 terminal이다.
+              - counter-limited 마지막 byte를 accept한 경우 admit/traversal/aggregate cleanup 뒤에도 terminal이며
+                drain evidence와 lower mutation authority는 0이다.
+              - resident-limited allowance를 소진하고 final parser가 incomplete이면 resource terminal이다.
+                final parser가 empty이면 drain evidence 없이 `immediate_rx=true`, `read_interest=false`로 다음
+                zero-time turn을 요청한다.
+              - turn 1 MiB allowance를 소진하면 final readiness와 관계없이 drain evidence 없이
+                `immediate_rx=true`, `read_interest=false`다.
+              - validated `.would_block`만 final parser empty에서 drain evidence를 mint할 수 있다. incomplete면
+                `immediate_rx=false`, `read_interest=true`, authority false다.
+
+              d2c는 다음 다섯 merge gate를 순서대로 닫으며 C1~C5 전부 green이기 전에는 d2c 구현으로 표시하지
+              않는다.
+
+              - **C1 pure foundation:** `client_pump` decision table이 complete/frame-or-byte-budget stop에서
+                `read_interest=false`, incomplete+would-block에서 `read_interest=true`를 반환하도록 고정한다.
+                기존 ambiguous `rx_budget_exhausted`는 `rx_frame_budget_exhausted`와
+                `rx_read_budget_exhausted`로 분리하고 둘을 각각 decision table에서 검증한다. storage의 sealed
+                `rx_resident_cap`과 `client_external_rx_read.zig`의 DTO/constants/final-address
+                `ExternalRxReadScratch`+단일 1 MiB backing layout을 outer scratch에 additive하게 embed하되 callable
+                collector, socket callback과 제품 read callsite는 0이다. `maxReadable` 결과는
+                `RxReadableAllowance` limit bit를 보존하며 pre-read/last-byte resident·turn·counter 표를 pure
+                fixture로 고정한다. 2 MiB structural+1 MiB backing+256 KiB metadata의 exact outer size budget과
+                heap exact-one/stack-copy 0 boundary도 이 gate가 소유한다.
+              - **C2 guarded admit:** `client_external_mode`에 opaque `ReplacementAllocationGuard`, typed
+                commit/quarantine outcome과 tombstone-before-callback cleanup을 추가한다. synthetic guard로
+                allocation fail-index, alias, callback drift/reentry와 no-free quarantine을 검증하며 product
+                owner inventory와 제품 read callsite는 아직 0이다.
+              - **C3 injected collector:** C1의 동일 transport-only module/scratch/backing에 cumulative collector
+                동작과 `RxReadAuthorityOps` seam을 추가해 ops/fd/destination/staged-prefix seal, EINTR 0/8/9,
+                bytes/would-block/EOF/error, attempt 1/64/65, 64 MiB staged-prefix validation work bound와 1 MiB
+                allowance를 소유한다. pump/storage/ledger/traversal import와 실제 syscall은 0이며 dedicated
+                synthetic-authority test root만 call한다.
+              - **C4 private pump integration:** held lease 안에서 buffered-first→collector 뒤
+                `staged_len>0`이면 guarded admit exact-one→traversal exact-one→aggregate를 실행한다. initial
+                complete backlog는 admit 0/traversal exact-one, zero-prefix would-block은 둘 다 0이며 각 분기 뒤
+                final 조건에서만 drain evidence를 mint/consume한다. 아직 제품 owner는 기존 buffered facade를
+                유지하고 새 경로는 private product-compilable test adapter만 call한다.
+              - **C5 product closure:** `external_pump_owner`가 `RxTurnOps`의 exact-one 제품 entry를 사용하고 POSIX
+                adapter가 errno만 `RxReadOutcome`으로 변환한다. 실제 Darwin socketpair, readable+writable
+                syscall-order, 전체 hostile/product matrix와 boundary/full check를 통과하고 기존
+                `pumpBufferedRx`/`BufferedRxOps` 제품 facade callsite를 0으로 만들거나 제거한 뒤 d2c를 구현으로
+                표시한다.
 
             - **d2d — RX-first whole-turn composition:** caller-owned scratch와 private one-shot permit의 exact
               계약은 아래와 같다. scratch는 1 MiB read backing과 최대 64개의 prepared intent/payload owner를
@@ -6856,11 +7046,17 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
 
               const ExternalRxTurnScratch = struct {
                   saved_self_addr: usize,
-                  read_buffer: [1024 * 1024]u8,
-                  rx: ExternalRxIntentHandle,
+                  lifecycle: ExternalRxTurnScratchLifecycle,
+                  snapshot: InheritedRxBlockerSnapshot,
+                  live_consume: LiveScreenConsumePermit,
+                  traversal: client_external_rx_turn.Scratch,
+                  read: ExternalRxReadScratch,
                   drain: RxDrainEvidence,
                   permit: PreparedAuthorityPermit,
-                  lifecycle: enum { empty, ready, busy, spent },
+                  client_ranges: client.ExternalSourceOwnerRangeScratch,
+                  authority_ranges: external_owner_range.Scratch,
+                  aggregate_ranges: external_owner_range.Scratch,
+                  authority_ranges_generation: u64,
                   digest: external_owner_seal.Digest,
               };
 
@@ -6869,7 +7065,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                   self: *ExternalPumpStorage,
                   turn_lease: *const ExternalWholeTurnLease,
                   turn: client_pump.TurnInput,
-                  ops: *const RxOps,
+                  ops: *const RxTurnOps,
                   scratch: *ExternalRxTurnScratch,
               ) client_pump.TurnResult;
 
@@ -6877,7 +7073,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               pub fn pumpRxTurn(
                   self: *ExternalPumpStorage,
                   turn: client_pump.TurnInput,
-                  ops: *const RxOps,
+                  ops: *const RxTurnOps,
                   scratch: *ExternalRxTurnScratch,
               ) client_pump.TurnResult;
 
@@ -6976,8 +7172,11 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             - injected callback이 bytes, EINTR 0/8/9, would-block, EOF, hard error, requested+1, admit OOM/drift,
               resident/counter exact boundary를 검증한다. accepted bytes 1 MiB/cap+1과 one-read multi-frame도
               포함한다.
-            - header 1/31/32 byte와 payload 마지막 1 byte partial 뒤 would-block에서 TX 0,
-              `read_interest=true`, raw deadline 보존을 검증하고 다음 byte가 revoke를 완성하면 terminal이다.
+              - header 1/31/32 byte와 payload 마지막 1 byte partial 뒤 would-block에서 TX 0,
+              `read_interest=true`를 검증하고 다음 byte가 revoke를 완성하면 terminal이다. d2c의 product facade는
+              deadline source가 아직 없으므로 `PolicyInput.deadlines=null`만 전달한다. raw/partial/control/recovery
+              deadline의 storage source와 product pass-through는 d2e/f에서 결합하며, d2c 완료 증거는 기존
+              `client_pump` pure deadline regression만 유지하고 product deadline wiring을 주장하지 않는다.
             - both-readable+writable 실제 socketpair에서 revoke가 frame 1/64/65에 있을 때 terminal 판정 전 peer
               TX 0이다. 65번째 revoke는 첫 turn immediate/authority false, zero-time 다음 turn terminal이다.
             - optional unknown 64개 뒤 revoke, foreign screen/event/response, 같은 turn의

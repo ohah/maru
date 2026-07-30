@@ -8258,6 +8258,15 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               `Seed/CurrentView`를 투영해 permit prepare/validate/abort/reset을 수행한다. private
               `prepareRxTurn` 내부 `client_pump.decide` callsite는 0이다.
 
+              variant tag와 `policy.terminal`의 위 조합이 어긋나면 outer는 drained authority를 사용하지 않고
+              `.invariant_failure`로 fail-close한다. `client_pump.decide`가 deadline으로 terminal을 새로 만든
+              경우에도 storage semantic terminal latch는 즉시 바꾸지 않는다. held lease가 active인 동안
+              consumed/finished drain evidence와 이미 settle된 stopped-read tombstone graph를 주소·generation·
+              digest로 먼저 검증해 callback-free terminal cleanup을 끝낸 뒤, 최종 보존된 terminal reason을
+              `semantic_state`에 exact-one 반영한다. 따라서 정상 `deadline_exceeded`가 cleanup 자체의
+              `invariant_failure`로 덮이거나, policy 결과가 terminal인데 storage만 active로 남는 두 상태를 모두
+              허용하지 않는다.
+
               `Seed`의 inherited digest는 `snapshotInheritedRxBlockersUnderHeldLease` 직후 immutable local copy로
               freeze하고, consumed snapshot tombstone에서 재구성하지 않는다. permit prepare 직전 pump는 current
               owner/parser/lease/**finished drain**을 다시 투영한 `CurrentView`가 seed와 exact match하는지 확인한다.

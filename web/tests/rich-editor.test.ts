@@ -24,8 +24,8 @@ function mountRich(dom: ReturnType<typeof Object>, markdown: string) {
 }
 
 describe("rich editing mode", () => {
-  test("markdown structure survives a document-model round trip", () => {
-    withEditorDom((dom) => {
+  test("markdown structure survives a document-model round trip", async () => {
+    await withEditorDom(async (dom) => {
       const source = [
         "# 제목",
         "",
@@ -61,8 +61,8 @@ describe("rich editing mode", () => {
     });
   });
 
-  test("한글 본문과 인라인 코드가 왕복에서 보존된다", () => {
-    withEditorDom((dom) => {
+  test("한글 본문과 인라인 코드가 왕복에서 보존된다", async () => {
+    await withEditorDom(async (dom) => {
       const source = "한글 본문과 `인라인 코드`가 섞인 문단입니다.";
       const rich = mountRich(dom, source);
       try {
@@ -75,12 +75,14 @@ describe("rich editing mode", () => {
     });
   });
 
-  test("toolbar buttons change the serialized markdown, not just the DOM", () => {
-    withEditorDom((dom) => {
+  test("toolbar buttons change the serialized markdown, not just the DOM", async () => {
+    await withEditorDom(async (dom) => {
       const rich = mountRich(dom, "평범한 문단");
       try {
         const doc = (globalThis as unknown as { document: Document }).document;
-        const buttons = [...doc.querySelectorAll<HTMLButtonElement>(".maru-rich-toolbar-button")];
+        // 기다리지 않는다. `createRichEditor`가 돌아온 시점에 툴바가 DOM에 있어야 한다는 계약을 여기서 함께
+        // 고정한다(toolbar-mount.tsx가 첫 렌더를 flushSync로 동기화한다). 폴링을 넣으면 그 계약이 깨져도 통과한다.
+        const buttons = [...doc.querySelectorAll<HTMLButtonElement>("[data-toolbar-button]")];
         expect(buttons.length).toBeGreaterThan(8);
 
         const heading1 = buttons.find((b) => b.title === "제목 1");
@@ -99,8 +101,36 @@ describe("rich editing mode", () => {
     });
   });
 
-  test("이미지와 표는 확장이 보존한다", () => {
-    withEditorDom((dom) => {
+  test("툴바 버튼은 배경을 스스로 지정하고, 토글이 아닌 버튼은 눌림 상태를 갖지 않는다", async () => {
+    // 둘 다 눈에 보이지 않는 회귀라 클래스·속성으로 고정한다.
+    // ⑴ preflight를 빼서 UA 기본 `background: ButtonFace`가 남는다 — 명시하지 않으면 버튼이 회색 칩으로 그려지고
+    //    라이트 모드에서는 그 회색이 활성 하이라이트보다 진해 **활성 표시가 반전돼** 보인다.
+    // ⑵ `isActive`가 없는 명령(구분선 삽입)에 `aria-pressed="false"`를 달면 보조기술이 토글로 읽고, 눌러도 상태가
+    //    안 바뀌니 사용자가 실패로 여겨 반복 실행한다(구분선이 여러 개 삽입된다).
+    await withEditorDom(async (dom) => {
+      const rich = mountRich(dom, "평범한 문단");
+      try {
+        const doc = (globalThis as unknown as { document: Document }).document;
+        const buttons = [...doc.querySelectorAll<HTMLButtonElement>("[data-toolbar-button]")];
+        const inactive = buttons.find((b) => b.getAttribute("data-active") === "false");
+        expect(inactive?.className).toContain("bg-transparent");
+        // 활성 버튼은 선택 배경이 이겨야 한다(tailwind-merge가 뒤 클래스를 남긴다).
+        const active = buttons.find((b) => b.getAttribute("data-active") === "true");
+        expect(active?.className).toContain("bg-accent-selected");
+        expect(active?.className).not.toContain("bg-transparent");
+
+        const rule = buttons.find((b) => b.title === "구분선");
+        expect(rule).toBeDefined();
+        expect(rule?.hasAttribute("aria-pressed")).toBe(false);
+        expect(rule?.hasAttribute("data-active")).toBe(false);
+      } finally {
+        rich.destroy();
+      }
+    });
+  });
+
+  test("이미지와 표는 확장이 보존한다", async () => {
+    await withEditorDom(async (dom) => {
       const source = "![alt](img.png)\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n";
       const rich = mountRich(dom, source);
       try {
@@ -116,7 +146,7 @@ describe("rich editing mode", () => {
     });
   });
 
-  test("표현할 수 없는 문법이 있는 문서는 편집을 잠근다", () => {
+  test("표현할 수 없는 문법이 있는 문서는 편집을 잠근다", async () => {
     // 저장 경로가 열려 있으면 왕복에서 원문이 파괴된다 — frontmatter는 제목으로 변질되고 태그·각주는 사라진다.
     expect(unsupportedRichSyntax("---\ntitle: 문서\n---\n\n본문")).toContain("YAML frontmatter");
     expect(unsupportedRichSyntax("텍스트[^1]\n\n[^1]: 각주")).toContain("각주");
@@ -136,7 +166,7 @@ describe("rich editing mode", () => {
     // frontmatter는 문서 첫 줄의 `---`만이다. 절 구분선으로 `---`를 두 번 쓴 평범한 문서를 잠그면 안 된다.
     expect(unsupportedRichSyntax("제목\n---\n\n본문\n\n---\n\n다음 절")).toEqual([]);
 
-    withEditorDom((dom) => {
+    await withEditorDom(async (dom) => {
       const rich = mountRich(dom, "---\ntitle: 문서\n---\n\n본문");
       try {
         const doc = (globalThis as unknown as { document: Document }).document;
@@ -148,10 +178,10 @@ describe("rich editing mode", () => {
     });
   });
 
-  test("내용이 바뀌면 잠금도 다시 판정한다", () => {
+  test("내용이 바뀌면 잠금도 다시 판정한다", async () => {
     // 생성 시 한 번만 보면, 소스에서 frontmatter를 붙였다 리치로 돌아온 문서에 잠금이 걸리지 않아
     // 그대로 저장돼 원문이 파괴된다. 반대로 frontmatter를 지운 문서가 영영 읽기 전용으로 남는 것도 막는다.
-    withEditorDom((dom) => {
+    await withEditorDom(async (dom) => {
       const doc = (globalThis as unknown as { document: Document }).document;
       const rich = mountRich(dom, "# 깨끗한 문서");
       try {
@@ -170,8 +200,8 @@ describe("rich editing mode", () => {
     });
   });
 
-  test("close lock이 풀려도 표현 불가 잠금은 유지된다", () => {
-    withEditorDom((dom) => {
+  test("close lock이 풀려도 표현 불가 잠금은 유지된다", async () => {
+    await withEditorDom(async (dom) => {
       const doc = (globalThis as unknown as { document: Document }).document;
       const rich = mountRich(dom, "---\ntitle: 문서\n---\n\n본문");
       try {
@@ -185,8 +215,8 @@ describe("rich editing mode", () => {
     });
   });
 
-  test("setMarkdown replaces the document for external disk reloads", () => {
-    withEditorDom((dom) => {
+  test("setMarkdown replaces the document for external disk reloads", async () => {
+    await withEditorDom(async (dom) => {
       const rich = mountRich(dom, "처음 내용");
       try {
         rich.setMarkdown("## 디스크에서 바뀐 내용");

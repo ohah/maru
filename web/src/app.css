@@ -1,9 +1,51 @@
-@import "tailwindcss";
+/* preflight(Tailwind 기본 리셋)는 **일부러 뺀다.** 이 문서 영역은 마크다운 렌더 결과가 주인이고, preflight의
+ * `h1~h6{font-size:inherit}`·`ul{list-style:none}`이 제목 크기와 불릿을 통째로 지운다(실제로 겪었다 — 읽기
+ * 프리뷰가 밋밋한 본문으로 렌더됐다). 이 앱은 자체 리셋을 이미 갖고 있으므로 theme+utilities만 들인다. */
+@layer theme, base, components, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
 
 /* 터미널 색상 테마를 Tailwind 토큰으로 **참조만** 한다(docs/file-panel.md §2.1b). 값의 출처는 계속 native가
    주입하는 `--maru-*` CSS 변수이므로, 테마를 바꾸면 유틸리티 클래스도 함께 따라온다. Tailwind 기본 팔레트를
    쓰면 그 부분만 안 따라오는 이중 체계가 된다. `inline`이라야 var() 참조가 값으로 전개된다. */
+/* shadcn 시맨틱 토큰. 값의 단일 출처는 두 곳이다 — native가 주입하는 `--maru-*`와 OS 시스템 색(Canvas/
+ * CanvasText/AccentColor). 리터럴 색을 여기 박으면 터미널 테마·OS 라이트다크를 그 부분만 안 따라간다
+ * (docs/file-panel.md §2.1b). shadcn 컴포넌트는 이 이름들만 참조하므로 그대로 붙여도 테마를 따른다. */
+:root {
+  --background: Canvas;
+  --foreground: CanvasText;
+  --muted: color-mix(in srgb, CanvasText 4%, Canvas);
+  --muted-foreground: color-mix(in srgb, CanvasText 60%, Canvas);
+  --border: color-mix(in srgb, CanvasText 14%, Canvas);
+  --accent: color-mix(in srgb, CanvasText 8%, Canvas);
+  --accent-foreground: CanvasText;
+  --popover: Canvas;
+  --popover-foreground: CanvasText;
+  --primary: AccentColor;
+  --primary-foreground: Canvas;
+  --ring: AccentColor;
+  /* 활성 버튼 표시. 알파가 아니라 Canvas와 섞은 **불투명색**이다 — 알파는 뒤에 무엇이 오느냐에 따라
+     결과가 달라져 원래 룩과 어긋난다. */
+  --accent-selected: color-mix(in srgb, AccentColor 18%, Canvas);
+  --accent-selected-border: color-mix(in srgb, AccentColor 55%, Canvas);
+  --radius: 0.25rem;
+}
+
 @theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-border: var(--border);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-ring: var(--ring);
+  --color-accent-selected: var(--accent-selected);
+  --color-accent-selected-border: var(--accent-selected-border);
+  --radius-sm: var(--radius);
   --color-syntax-keyword: var(--maru-syntax-keyword);
   --color-syntax-string: var(--maru-syntax-string);
   --color-syntax-comment: var(--maru-syntax-comment);
@@ -12,7 +54,7 @@
   /* 나머지 색은 시스템 색을 그대로 쓴다 — 편집기 chrome은 OS 라이트/다크를 따라간다. */
   --color-canvas: Canvas;
   --color-canvas-text: CanvasText;
-  --color-accent: AccentColor;
+  --color-accent: var(--accent);
 }
 
 :root {
@@ -199,45 +241,7 @@ body {
   line-height: 1.5;
 }
 
-.maru-rich-toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.125rem;
-  padding: 0.25rem 0.4rem;
-  border-bottom: 1px solid color-mix(in srgb, CanvasText 14%, Canvas);
-  background: color-mix(in srgb, CanvasText 4%, Canvas);
-}
-
-.maru-rich-toolbar-separator {
-  width: 1px;
-  height: 1rem;
-  margin: 0 0.25rem;
-  background: color-mix(in srgb, CanvasText 16%, Canvas);
-}
-
-.maru-rich-toolbar-button {
-  min-width: 1.75rem;
-  padding: 0.15rem 0.35rem;
-  border: 1px solid transparent;
-  border-radius: 4px;
-  background: transparent;
-  color: CanvasText;
-  font-family: var(--maru-editor-font-family, ui-monospace, monospace);
-  font-size: 0.8125rem;
-  line-height: 1.2;
-  cursor: default;
-}
-
-.maru-rich-toolbar-button:hover {
-  background: color-mix(in srgb, CanvasText 8%, Canvas);
-}
-
 /* 지금 selection이 그 서식 안에 있음을 표시한다 — 버튼을 누르기 전에 현재 상태를 알 수 있어야 한다. */
-.maru-rich-toolbar-button[data-active="true"] {
-  border-color: color-mix(in srgb, AccentColor 55%, Canvas);
-  background: color-mix(in srgb, AccentColor 18%, Canvas);
-}
 
 .maru-rich-content {
   flex: 1 1 auto;

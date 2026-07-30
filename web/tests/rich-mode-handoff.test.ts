@@ -17,7 +17,7 @@ type Harness = {
   renders: string[];
   /** 브리지 read가 돌려줄 내용. 외부 디스크 변경을 흉내 낼 때 바꾼다. */
   diskContent: string;
-  cleanup: () => void;
+  cleanup: () => Promise<void>;
 };
 
 async function bootMarkdownShell(initial: string): Promise<Harness> {
@@ -107,7 +107,14 @@ async function bootMarkdownShell(initial: string): Promise<Harness> {
     set diskContent(next: string) {
       state.diskContent = next;
     },
-    cleanup: () => {
+    cleanup: async () => {
+      // **편집기를 실제로 파괴한다.** 매크로태스크 한 턴을 흘리는 것만으로는 부족하다 — CodeMirror의 measure
+      // 루프는 rAF로 자기를 다시 예약하고, ProseMirror는 트랜잭션 뒤 scrollToSelection을 지연 실행한다. 살아 있는
+      // 편집기를 두고 globals를 걷으면 그 콜백이 `window is not defined`·`getClientRects is not a function`으로
+      // 터지면서 **다음 테스트 파일 헤딩 아래에** uncaught 오류로 붙는다(실제로 그렇게 나왔다).
+      // 제품이 쓰는 종료 경로(`pagehide` → editor.destroy())를 그대로 태워 예약된 작업을 먼저 끊는다.
+      dom.window.dispatchEvent(new dom.window.Event("pagehide"));
+      await new Promise((resolve) => setTimeout(resolve, 0));
       for (const [name, descriptor] of previous) {
         if (descriptor === undefined) delete (globalThis as Record<string, unknown>)[name];
         else Object.defineProperty(globalThis, name, descriptor);
@@ -117,10 +124,15 @@ async function bootMarkdownShell(initial: string): Promise<Harness> {
   };
 }
 
-/** 툴바 버튼을 title로 찾아 누른다 — 실제 편집 명령 경로를 그대로 탄다. */
+/**
+ * 툴바 버튼을 title로 찾아 누른다 — 실제 편집 명령 경로를 그대로 탄다.
+ *
+ * 마운트를 기다리지 않는다. 툴바 첫 렌더는 동기이므로(toolbar-mount.tsx), 폴링을 넣으면 그 계약이 깨져도
+ * 테스트가 통과해 버린다.
+ */
 function clickToolbar(dom: JSDOM, title: string): void {
   const button = [
-    ...dom.window.document.querySelectorAll<HTMLButtonElement>(".maru-rich-toolbar-button"),
+    ...dom.window.document.querySelectorAll<HTMLButtonElement>("[data-toolbar-button]"),
   ].find((el) => el.title === title);
   if (button === undefined) throw new Error(`toolbar button not found: ${title}`);
   button.dispatchEvent(new dom.window.Event("click", { bubbles: true }));
@@ -152,7 +164,7 @@ describe("rich mode hand-off", () => {
       expect(rendered).toContain("처음");
       expect(rendered).not.toContain("# 처음"); // 제목이 본문으로 낮아진 편집이 반영됐다
     } finally {
-      harness.cleanup();
+      await harness.cleanup();
     }
   });
 
@@ -175,7 +187,7 @@ describe("rich mode hand-off", () => {
       for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
       expect(harness.writes).toEqual([]); // 디스크로 나간 바이트가 없어야 한다
     } finally {
-      harness.cleanup();
+      await harness.cleanup();
     }
   });
 
@@ -199,7 +211,7 @@ describe("rich mode hand-off", () => {
       expect(rendered).toContain("외부에서 바뀐 문서");
       expect(rendered).not.toContain("# 처음");
     } finally {
-      harness.cleanup();
+      await harness.cleanup();
     }
   });
 
@@ -218,7 +230,7 @@ describe("rich mode hand-off", () => {
       expect(cmText ?? "").toContain(">"); // 리치에서 건 인용이 소스 문서에 확정됐다
       expect(cmText ?? "").toContain("처음");
     } finally {
-      harness.cleanup();
+      await harness.cleanup();
     }
   });
 });

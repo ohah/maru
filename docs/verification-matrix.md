@@ -68,7 +68,7 @@
 > socket callback을 추가하지 않는다. 구조 이동보다 먼저 `advanceValidatedPartial` exact-one 결과의
 > before/after/header/range/identity가 classified intent seal에 포함되고 traversal이 sealed after만
 > 소비하는지 고정한다. 외부 제품 owner→pump와 내부 pump→traversal callsite를 각각 exact-one으로 검사한다.
-> d2c는 **설계 gate C0와 구현 gate C1~C2를 완료했고 C3~C5는 구현 전**이다. C1은 split
+> d2c는 **설계 gate C0와 구현 gate C1~C3를 완료했고 C4~C5는 구현 전**이다. C1은 split
 > frame/read budget policy, Client parser provenance와 storage/lease에 이중 봉인된 resident cap,
 > read DTO/constants/final-address scratch layout, 모든 positive limit tie와 accepted
 > `< / == / >` stop 표를 고정한다. lease는 Client/parser 주소와 전체 provenance를 thread-local snapshot에도
@@ -93,14 +93,19 @@
 > abort·precommit·postcommit callback drift, exact-one free와 no-free/exact-once 상한을 Debug/ReleaseFast에서
 > 고정했다. tokenizer boundary는 guarded/legacy direct callsite가 mode 밖 0이고 기존 buffered product
 > fixture의 `testing.admitBuffered` 세 callsite만 허용하며 pump/ledger/owner-range/global quarantine import를
-> 금지한다. C3는 collector 계약과 hostile matrix를 문서 확정했고 구현 전이다. value-only
+> 금지한다. C3 injected collector와 completion/accounting gate는 구현했다. value-only
 > `CollectResult`는 rejected/stopped/terminal을 분리하고 scheduling/parser 판정은 C4에 남긴다.
 > receipt는 frozen allowance를 봉인하고 sealed borrow/stoppedBytes/settle API만 C4에 prefix를 넘긴다.
 > ready→collecting→spent→borrowed→ready와 teardown-only terminal, current(pre)→read→current(post),
 > stopped prefix 보존 대 terminal 전부 폐기, attempt 64/EINTR 9 우선순위, full-prefix scan 64 MiB,
 > read 64/current 128 callback 상한, context extent와 callback-local protected range 16개,
 > ordinary prepared tombstone의 mode-owned safe reset, quarantine latch accounting receipt를 요구하는
-> 별도 finalizer 및 synthetic-only boundary가 구현 gate다. C4 private pump
+> 별도 finalizer 및 synthetic-only boundary를 Debug/ReleaseFast component와 ReleaseFast boundary로
+> 고정했다. zero/nonzero parser backing, parser seal structural digest, pre/read/post hostile mutation,
+> attempt permit 전 필드, protected range count/sort/overlap/overflow/partial leaf, stopped prefix 사후 변조,
+> receipt/borrow alias·replay·settle mismatch, canonical terminal/teardown, ordinary/quarantine cross-finalizer,
+> tag/phase/bound/cap/generation/replay와 같은-token 두 thread accounting event exact-one을 자동 검증한다.
+> C4 private pump
 > integration+final drain evidence, C5 POSIX 제품 facade+실제 socketpair의 다섯 구현 gate를 순서대로 닫는다.
 > C3 collector는 최초 `maxReadable` allowance 안에서 최대 1 MiB를 누적한다. allowance/would-block/
 > attempt-budget stop은 validated staged prefix를 보존하고 EOF/error/EINTR-9/authority·descriptor·prefix

@@ -7054,8 +7054,10 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               pre-commit exact-one free, post-commit old-backing exact-one free와 no-free quarantine 상한을
               Debug/ReleaseFast에서 고정한다.
 
-              C2 boundary는 `client_external_mode`의 pump/storage/ledger/owner-range/global-quarantine import와
-              mutation 0, synthetic guarded-admit test callsite만 허용, collector/POSIX/
+              C2 guarded-admit core boundary는 `client_external_mode`의 pump/storage/ledger/owner-range import와
+              global-quarantine mutation 0, synthetic guarded-admit test callsite만 허용한다. 같은 mode 파일에
+              추가되는 C3 completion suffix만 neutral `checked_event_counter`를 import해 pump가 전달한 counter를
+              preflight 뒤 증가시킨다. collector/POSIX/
               `client_external_pump`/`external_pump_owner` 제품 guarded-admit callsite 0, legacy unguarded
               replacement callsite 0을 tokenizer로 검사한다. C4에서만 product owner-range inventory를 exact-once
               투영하고 quarantine DTO를 global latch/accounting에 exact once 소비한다.
@@ -7352,14 +7354,22 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 mismatched/copy/moved/stale/double receipt와 ordinary token은 mutation/accounting 0으로 거부한다.
                 C4만 ordinary 또는 quarantine finalizer 중 정확히 하나를 호출하고, C3 `settleStopped`는 pristine
                 검사만 하며 token을 직접 변경하지 않는다.
-                `accountGuardedAdmitQuarantine`은 final-address pristine `out`, token address, named tag/phase,
-                named global bound 이하의 upper bound를 callback 없이 검증한 뒤
-                `latchCrossOwnerQuarantine`의 event generation을 exact once commit한다. 그 commit 성공 뒤에만
-                같은 generation과 `.accounted` lifecycle을 가진 receipt digest를 out에 publish하고 token
-                completion을 `quarantine_accounted`로 원자 전환한다. out
-                alias/moved/non-pristine, cap 초과, latch generation overflow는 global mutation과 receipt publish
-                0이고, 동일 typed outcome의 재호출은 token이 더 이상 `quarantine_pending`이 아니므로 중복 event를
-                만들지 않는다.
+                `accountGuardedAdmitQuarantine`은 token final address의 process-global reservation을 먼저 잡는다.
+                reservation 뒤 pump의 named global bound 검사와 mode의 final-address pristine `out`, token address,
+                tag/phase/bound preflight는 실패할 수 있지만 counter·token·receipt mutation은 0이다. preflight가
+                끝나면 mode가 neutral `checked_event_counter.increment`로 event generation을 exact once
+                commit한다. 그 commit 성공 뒤의 callback-free no-fail suffix만 같은 generation과 `.accounted`
+                lifecycle을 가진 receipt digest를 out에 publish하고 token completion을
+                `quarantine_accounted`로 전환한다. out alias/moved/non-pristine, cap 초과, generation overflow는
+                global mutation과 receipt publish 0이고, 동일 typed outcome의 재호출은 token이 더 이상
+                `quarantine_pending`이 아니므로 중복 event를 만들지 않는다.
+                mode의 `markQuarantinedPreparedAdmitAccounted`는 Zig 파일 모듈 간 호출 때문에 `pub`이지만 제품
+                capability는 아니다. pump의 `accountGuardedAdmitQuarantine`만 process-global event counter를
+                전달하고 mode가 preflight 뒤 latch와 completion을 exact once 조합한다. 그 밖의 identifier
+                reference는 tokenizer boundary상 0이다. adapter는 token을 읽기 전에 process-global
+                address reservation을 CAS로 잡아 같은 token의 동시 accounting 중 하나만 진입시킨다.
+                event counter가 global quarantine의 관측 SSOT이고 `latched`는 `event_count != 0`으로 도출한다.
+                event commit 뒤에는 callback 없는 no-fail publish suffix만 남는다.
 
                 `teardown`은 allocator/free callback을 호출하지 않는 C3 metadata close leaf다.
 
@@ -7382,6 +7392,11 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 replay를 자동 검증하고 unaccounted 분기는 `needs_outer_cleanup`에 남는다. collecting callback의
                 teardown 재진입은 busy이고 outer owner만 callback 반환 뒤 다시 닫을 수 있다. teardown은
                 generation을 증가시키거나 wrap하지 않으며 closed replay는 accounting/free 0이다.
+                callback 또는 invalid-ready preflight의 terminal 전이는 caller가 제공한 손상 metadata를
+                재봉인하지 않는다. frozen generation과 embedded prepared token만 보존하고
+                attempt/chunk/raw/receipt/borrow/work counter를 canonical zero로 만든 teardown-only tombstone을
+                게시한다. prepared token이 non-pristine이면 이 tombstone도 계속
+                `needs_outer_cleanup`을 반환한다.
 
                 outcome과 staged prefix의 폐쇄 규칙은 다음 표가 SSOT다.
 
@@ -7458,6 +7473,13 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 싣지 않는다. read/authority ops descriptor는 C3가 final-address `@sizeOf` 범위로 직접 검증하므로
                 set에 중복하지 않는다. C4 outer disjoint proof와 `owner_snapshot_digest`가 전체 owner/container
                 authority를 단독 소유하고, leaf projection의 named compile-time count가 16 이하임을 고정한다.
+                두 callback context는 서로 disjoint한 별도 range여야 하며 같은 range 공유는 거부한다.
+                parser capacity가 0인 canonical empty parser는
+                `backing_addr/items_len/head == 0`이고 parser backing range가 없어야 한다. capacity가 양수일
+                때만 exact `{backing_addr,capacity}` leaf가 protected set에 한 번 존재해야 한다. projection의
+                parser seal은 mode의 value-only structural validator가 domain/version, original
+                seal/parser address, identity/allocator, bounds/generation과 private digest를 검증한 뒤에만
+                authority view digest에 포함한다.
 
                 따라서 허용 예외는 하나의 모호한 protected-container overlap이 아니다. collector가 직접
                 `@offsetOf`/`@sizeOf`로 검증하는 `ExternalRxReadScratch.backing`의 exact subrange만 destination이며,
@@ -7495,8 +7517,9 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 1씩, C4 전 product callsite 0을 고정한다. C4에서는 하나의 tagged outcome branch만 ordinary
                 reset 또는 `global latch account+receipt issue → quarantine finalizer` 중 하나를 상호배타적으로
                 exact once 호출한다. `PreparedRxAppend`의 direct `.{} ` reset은 mode 밖 0이다. accounting
-                receipt의 construction/digest/`.accounted` 전이는 global latch adapter exact 1만 소유하고 mode는
-                검증·consume만 한다. `accountGuardedAdmitQuarantine` definition도 pump exact 1, C3 synthetic
+                receipt의 construction/digest/`.accounted` 전이는 mode의 accounting suffix exact 1이 소유한다.
+                pump adapter는 process-global reservation과 counter authority를 제공하고 이 suffix를 exact once
+                호출한다. `accountGuardedAdmitQuarantine` definition도 pump exact 1, C3 synthetic
                 wrapper direct callsite exact 1, C4 전 product callsite 0이며 C4 tagged branch에서만 exact once다.
                 outer `ExternalRxTurnScratch`의 owner heap exact-one/stack·by-value copy 0 규칙은 그대로 유지한다.
                 hostile matrix는 pre/post current 각각의 scratch/prefix/ops/context/fd/parser/owner drift,

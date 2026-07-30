@@ -1808,6 +1808,26 @@ pub fn build(b: *std.Build) void {
         run_external_rx_turn_tests.setCwd(b.path("."));
         test_step.dependOn(&run_external_rx_turn_tests.step);
         session_host_step.dependOn(&run_external_rx_turn_tests.step);
+
+        // C3 collector fixtures inject authority/read callbacks without making the transport-only
+        // leaf or the product barrel depend on hostile test owners.
+        const external_rx_read_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/client_external_rx_read_test_support.zig",
+                ),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+        });
+        const run_external_rx_read_tests = b.addRunArtifact(
+            external_rx_read_tests,
+        );
+        run_external_rx_read_tests.setCwd(b.path("."));
+        test_step.dependOn(&run_external_rx_read_tests.step);
+        session_host_step.dependOn(&run_external_rx_read_tests.step);
     }
 
     // Opt-in external oracle: validates committed goldens against system libvterm.

@@ -9,6 +9,7 @@ const sidebar_component = maru.chrome.components.sidebar; // 활동 시각 표�
 const text_layout = maru.chrome.text_layout; // chrome 텍스트 셀 배치(분절·폭·말줄임) 단일 출처 — docs/layering-and-portability.md §7.9 CT-OWN
 const text_field = maru.chrome.components.text_field; // 주소창 편집 밴드 단일 레이아웃 소스(fieldLayout — docs/text-field-editor.md §3)
 const file_tree_icon = maru.chrome.file_tree_icon;
+const dock_view_bar = maru.chrome.components.dock_view_bar;
 const dock_layout = maru.session.dock_layout;
 const dock_panel = maru.session.dock_panel;
 const file_tree = maru.session.file_tree;
@@ -809,17 +810,55 @@ pub fn buildFilePanelHeaderDrawList(
 pub const file_tree_inset_cols: u16 = 1;
 
 /// Artifact의 우측 독립 탐색기 제목 행. 실제 tree rows와 별도 draw list라 스크롤·클릭 인덱스에 섞이지 않는다.
+/// 도크 뷰 스위처 한 행(docs/file-explorer.md §3.5). 슬롯마다 아이콘 1셀을 그리고 현재 뷰만 강조색을 쓴다.
+/// 새 아이콘 자산을 만들지 않고 기존 `IconKind`(folder·git)를 재사용한다 — 합성 glyph 파이프라인·라이선스 기록을
+/// 건드리지 않기 위해서다. 슬롯 자리는 chrome의 `dock_view_bar`가 계산한 것과 **같은 셀 수**를 쓴다.
+pub fn buildDockViewBarDrawList(
+    allocator: std.mem.Allocator,
+    cols: u16,
+    active_index: usize,
+    active_fg: terminal.Color,
+    muted_fg: terminal.Color,
+) !renderer.DrawList {
+    var cells: std.ArrayList(renderer.DrawCell) = .empty;
+    errdefer cells.deinit(allocator);
+    const kinds = [_]file_tree_icon.IconKind{ .folder, .git };
+    const slot_cols: u16 = @intCast(dock_view_bar.slot_cols);
+    for (kinds, 0..) |kind, index| {
+        // 아이콘은 슬롯 가운데(좌측 여백 1셀 뒤). 슬롯이 화면 밖이면 그리지 않는다.
+        const col: u16 = @as(u16, @intCast(index)) *| slot_cols +| 1;
+        if (col >= cols) break;
+        const cp = file_tree_icon.codepointFromRaw(@intFromEnum(kind)) orelse continue;
+        try cells.append(allocator, .{
+            .row = 0,
+            .col = col,
+            .codepoint = cp,
+            .width = 1,
+            .style = .{ .foreground = if (index == active_index) active_fg else muted_fg, .bold = index == active_index },
+        });
+    }
+    return .{
+        .size = .{ .cols = @max(cols, 1), .rows = 1 },
+        .cursor = .{ .row = 0, .col = 0, .visible = false },
+        .dirty = .{ .start_row = 0, .end_row = 0 },
+        .cells = try cells.toOwnedSlice(allocator),
+        .grapheme_pool = try allocator.alloc(u32, 0),
+        .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
+    };
+}
+
 pub fn buildFileTreeHeaderDrawList(
     allocator: std.mem.Allocator,
     cols: u16,
     fg: terminal.Color,
+    label: []const u8,
 ) !renderer.DrawList {
     var cells: std.ArrayList(renderer.DrawCell) = .empty;
     errdefer cells.deinit(allocator);
     var pool: std.ArrayList(u32) = .empty; // cluster 본체(NFD 자모·결합 문자) — DrawList.grapheme_pool로 넘어간다
     errdefer pool.deinit(allocator);
     if (cols > file_tree_inset_cols)
-        _ = try appendEllipsizedTitle(allocator, &cells, &pool, "탐색기", 0, file_tree_inset_cols, cols, .{ .foreground = fg, .bold = true }, false, .head);
+        _ = try appendEllipsizedTitle(allocator, &cells, &pool, label, 0, file_tree_inset_cols, cols, .{ .foreground = fg, .bold = true }, false, .head);
     // pool을 **먼저** 떼어 낸다: 리터럴 안에서 마지막에 평가하면 cells 소유권이 이미 넘어간 뒤라
     // `errdefer cells.deinit`이 no-op이 되고, pool 할당 실패 시 cells 슬라이스가 샌다(code-review max).
     const owned_pool = try pool.toOwnedSlice(allocator);

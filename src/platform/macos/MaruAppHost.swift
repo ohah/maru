@@ -2912,6 +2912,11 @@ final class MaruWebPanelView: NSView {
             appURL = Self.trustedShellURL(document: 1, language: filePanelLanguage, shellKind: filePanelShellKind) // query는 origin을 바꾸지 않는다.
         }
         self.webView = WKWebView(frame: NSRect(origin: .zero, size: frameRect.size), configuration: config)
+        // MARU_DEBUG일 때만 Safari 웹 인스펙터를 연다. 파일 패널 콘텐츠는 WKWebView 임베딩이라 Playwright로
+        // 재현되지 않는 계층이 있다(레이아웃·주입 CSS·번들 신선도). 그 계층을 눈으로 볼 유일한 창구다.
+        if #available(macOS 13.3, *), ProcessInfo.processInfo.environment["MARU_DEBUG"] != nil {
+            self.webView.isInspectable = true
+        }
         if filePanelKind == 2 {
             // 격리 파일 문서(image/pdf/media)는 네이티브 뷰어라 확대를 OS에 맡긴다(기본값이 false라 명시 활성화).
             self.webView.allowsMagnification = true

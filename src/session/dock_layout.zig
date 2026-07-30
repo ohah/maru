@@ -33,9 +33,12 @@ pub const Geometry = struct {
     terminal: Rect,
     dock: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     divider: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
-    /// FP16: 도크에 남은 건 탐색기뿐이라 트리가 **도크 전체**다. 옛 `editor`/`tab_bar`/`header`/`content`
-    /// (그룹 split tree의 좌측 칼럼과 그 chrome)와 그 둘을 가르던 `tree_divider`는 대상이 사라져 없앴다 —
-    /// 파일 탭 바·헤더 밴드는 이제 워크스페이스 pane이 소유한다(§3.1).
+    /// 도크 최상단 뷰 스위처 한 행(docs/file-explorer.md §3.5). 도크가 너무 낮아 한 행도 못 넣으면 0 높이로
+    /// 접고 현재 뷰가 전부를 쓴다 — 스위처가 콘텐츠를 굶기지 않는다.
+    view_bar: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
+    /// 현재 뷰 영역 = 도크에서 `view_bar`를 뺀 나머지. FP16에서 도크에 남은 건 탐색기뿐이었고 그때는 이게
+    /// 도크 전체였다. 옛 `editor`/`tab_bar`/`header`/`content`(그룹 split tree의 좌측 칼럼과 그 chrome)와 그 둘을
+    /// 가르던 `tree_divider`는 대상이 사라져 없앴다 — 파일 탭 바·헤더 밴드는 이제 워크스페이스 pane이 소유한다(§3.1).
     tree: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     /// Artifact의 독립 탐색기 chrome. tree 전체 배경 안에서 제목 한 행과 실제 스크롤 rows를 분리해,
     /// 첫 project root가 제목처럼 보이거나 최근 파일에 밀리지 않게 한다.
@@ -274,16 +277,21 @@ pub fn compute(in: Input) Geometry {
 fn fromDock(workspace: Rect, terminal: Rect, dock: Rect, divider: Rect, chrome_h: u32, dock_size_px: u32, cell_width_px: u32, scale_milli: u32) Geometry {
     _ = cell_width_px;
     _ = scale_milli;
-    // 탐색기 헤더("탐색기" 한 행)는 도크 최상단에 붙고, 그 아래가 스크롤되는 rows다.
-    const tree_header_h = @min(chrome_h, dock.h);
+    // 도크 최상단이 뷰 스위처 한 행이고, 그 아래가 현재 뷰(헤더 한 행 + 스크롤 본문)다. 낮은 도크에서는
+    // 스위처부터 접어 콘텐츠를 남긴다 — 두 행을 다 넣지 못할 때 본문이 0이 되는 쪽이 더 나쁘다.
+    const view_bar_h = if (dock.h > chrome_h) chrome_h else 0;
+    const view_area_y = dock.y + view_bar_h;
+    const view_area_h = dock.h -| view_bar_h;
+    const tree_header_h = @min(chrome_h, view_area_h);
     return .{
         .workspace = workspace,
         .terminal = terminal,
         .dock = dock,
         .divider = divider,
-        .tree = dock,
-        .tree_header = .{ .x = dock.x, .y = dock.y, .w = dock.w, .h = tree_header_h },
-        .tree_content = .{ .x = dock.x, .y = dock.y + tree_header_h, .w = dock.w, .h = dock.h -| tree_header_h },
+        .view_bar = .{ .x = dock.x, .y = dock.y, .w = dock.w, .h = view_bar_h },
+        .tree = .{ .x = dock.x, .y = view_area_y, .w = dock.w, .h = view_area_h },
+        .tree_header = .{ .x = dock.x, .y = view_area_y, .w = dock.w, .h = tree_header_h },
+        .tree_content = .{ .x = dock.x, .y = view_area_y + tree_header_h, .w = dock.w, .h = view_area_h -| tree_header_h },
         .dock_size_px = dock_size_px,
     };
 }
@@ -339,8 +347,13 @@ test "right and bottom dock geometry share terminal and chrome boundaries" {
     try std.testing.expectEqual(Rect{ .x = 240, .y = 40, .w = 1360, .h = 960 }, right.workspace);
     try std.testing.expectEqual(@as(u32, 600), right.dock.w);
     try std.testing.expectEqual(right.divider.x + right.divider.w, right.dock.x);
-    // FP16: 도크 = 트리 전체. 옛 editor 칼럼과 그 chrome(tab_bar/header/content)은 없다.
-    try std.testing.expectEqual(right.dock, right.tree);
+    // 도크 = 뷰 바 + 현재 뷰 영역(§3.5). 옛 editor 칼럼과 그 chrome(tab_bar/header/content)은 없다.
+    try std.testing.expectEqual(right.dock.x, right.view_bar.x);
+    try std.testing.expectEqual(right.dock.y, right.view_bar.y);
+    try std.testing.expectEqual(right.dock.w, right.view_bar.w);
+    try std.testing.expectEqual(right.dock.h, right.view_bar.h + right.tree.h); // 남김없이 나뉜다
+    try std.testing.expectEqual(right.view_bar.y + right.view_bar.h, right.tree.y);
+    try std.testing.expectEqual(right.dock.w, right.tree.w);
     try std.testing.expectEqual(right.tree.y + right.tree_header.h, right.tree_content.y);
     try std.testing.expectEqual(right.tree.h, right.tree_header.h + right.tree_content.h);
 
@@ -349,6 +362,22 @@ test "right and bottom dock geometry share terminal and chrome boundaries" {
     try std.testing.expectEqual(@as(u32, 400), bottom.dock.h);
     try std.testing.expectEqual(bottom.divider.y + bottom.divider.h, bottom.dock.y);
     try std.testing.expectEqual(base.sidebar_width_px, bottom.dock.x);
+}
+
+test "낮은 도크에서는 뷰 바부터 접어 콘텐츠를 남긴다" {
+    // chrome 한 행(cell_height 20 × scale 2000 → 40px)도 못 넣는 높이면 바를 0으로 접는다. 두 행을 억지로
+    // 넣어 본문이 0이 되는 쪽이 더 나쁘다(스위처가 콘텐츠를 굶기지 않는다 — docs/file-explorer.md §3.5).
+    // chrome 한 행(cell_height_px)보다 낮은 도크를 직접 만들어 계약만 본다 — compute의 pt 클램프를 거치면
+    // 이 경계를 재현하기 어렵다(하한이 먼저 걸린다).
+    const dock = Rect{ .x = 0, .y = 100, .w = 300, .h = 12 };
+    const tiny = fromDock(.{ .x = 0, .y = 0, .w = 300, .h = 112 }, .{ .x = 0, .y = 0, .w = 300, .h = 100 }, dock, .{ .x = 0, .y = 96, .w = 300, .h = 4 }, 20, 12, 10, 1000);
+    try std.testing.expectEqual(@as(u32, 0), tiny.view_bar.h);
+    try std.testing.expectEqual(dock.h, tiny.tree.h);
+    try std.testing.expectEqual(dock.y, tiny.tree.y);
+    // 한 행이 들어가면 바가 서고 그만큼 뷰 영역이 줄어든다.
+    const roomy = fromDock(.{ .x = 0, .y = 0, .w = 300, .h = 200 }, .{ .x = 0, .y = 0, .w = 300, .h = 100 }, .{ .x = 0, .y = 100, .w = 300, .h = 100 }, .{ .x = 0, .y = 96, .w = 300, .h = 4 }, 20, 100, 10, 1000);
+    try std.testing.expectEqual(@as(u32, 20), roomy.view_bar.h);
+    try std.testing.expectEqual(@as(u32, 80), roomy.tree.h);
 }
 
 test "dock geometry collapses and clamps to leave a terminal floor" {

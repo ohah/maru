@@ -317,6 +317,8 @@ fn writeWindow(w: *std.Io.Writer, win: Window) !void {
     if (win.dock.side != .right) try w.print(" dock-side={s}", .{@tagName(win.dock.side)});
     if (win.dock.size != 0) try w.print(" dock-size={d}", .{win.dock.size});
     if (win.dock.collapsed) try w.writeAll(" dock-collapsed=1");
+    // 기본값(explorer)은 쓰지 않는다 — 옛 리더가 모르는 키를 만나지 않게 하고 파일도 짧게 유지한다.
+    if (win.dock.view != .explorer) try w.print(" dock-view={s}", .{@tagName(win.dock.view)});
     const explorer_has_roots = if (win.explorer.roots) |roots| roots.len != 0 else false;
     if (win.dock.presented and !dockStateHasEntries(win.dock) and !explorer_has_roots)
         try w.writeAll(" dock-presented=1");
@@ -552,6 +554,12 @@ fn parseWindow(a: std.mem.Allocator, lines: *LineIter, limits: *ParseLimits) Par
     } else .right;
     const dock_size = try f.getUint("dock-size", u32, 0);
     const dock_collapsed = (try f.getUint("dock-collapsed", u8, 0)) != 0;
+    // 모르는 뷰 이름은 `explorer`로 clamp한다(docs/file-explorer.md §3.5). side와 달리 도크 전체를 포기하지
+    // 않는 이유는 뷰가 **표시 선택**일 뿐이라, 못 그리는 뷰를 만나도 탐색기로 열면 사용자가 잃는 게 없기 때문이다.
+    const dock_view: dock_panel.View = if (f.find("dock-view")) |field| blk: {
+        if (field.is_quoted) return error.BadLine;
+        break :blk dock_panel.View.parse(field.raw) orelse .explorer;
+    } else .explorer;
     const dock_presented_requested = (try f.getUint("dock-presented", u8, 0)) != 0;
     const explorer_roots_field = f.find("dock-tree-roots");
     const explorer_parse = parseExplorerRoots(a, explorer_roots_field);
@@ -565,6 +573,7 @@ fn parseWindow(a: std.mem.Allocator, lines: *LineIter, limits: *ParseLimits) Par
         .side = dock_side,
         .size = dock_size,
         .collapsed = dock_collapsed,
+        .view = dock_view,
     };
     var dock_with_presented = dock;
     dock_with_presented.presented = dock_presented_requested or dockStateHasEntries(dock) or
@@ -2203,7 +2212,26 @@ test "workspace dock FP1: 기본 상태는 키를 생략하고 옛 파일은 기
     try std.testing.expectEqual(dock_panel.Side.right, dock.side);
     try std.testing.expectEqual(@as(u32, 0), dock.size);
     try std.testing.expect(!dock.collapsed);
+    try std.testing.expectEqual(dock_panel.View.explorer, dock.view);
     try std.testing.expectEqual(@as(usize, 0), dock.entries.len);
+}
+
+test "workspace: 도크 뷰는 왕복하고 모르는 뷰는 탐색기로 clamp된다" {
+    // 뷰는 도크의 **표시 선택**이라, 못 읽는 값을 만나도 창을 버리지 않고 탐색기로 연다(docs/file-explorer.md §3.5).
+    const windows = [_]Window{.{ .tabs = &.{}, .dock = .{ .view = .source_control, .presented = true } }};
+    const text = try serialize(std.testing.allocator, .{ .windows = &windows });
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "dock-view=source_control") != null);
+
+    var parsed = try parse(std.testing.allocator, text);
+    defer parsed.deinit();
+    try std.testing.expectEqual(dock_panel.View.source_control, parsed.workspace.windows[0].dock.view);
+
+    // 미래 뷰 이름 → 탐색기로 clamp(도크의 나머지 상태는 그대로).
+    var future = try parse(std.testing.allocator, header ++ "\nwindow tabs=0 active-tab=0 dock-size=321 dock-view=timeline\n");
+    defer future.deinit();
+    try std.testing.expectEqual(dock_panel.View.explorer, future.workspace.windows[0].dock.view);
+    try std.testing.expectEqual(@as(u32, 321), future.workspace.windows[0].dock.size);
 }
 
 test "workspace Explorer v137: packed explicit roots and empty presented dock round trip" {

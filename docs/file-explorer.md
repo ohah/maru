@@ -48,9 +48,41 @@ root picker callback은 path를 소유한 bounded backend request만 제출한�
 
 **스크롤바·아이콘(같은 tree snapshot 소비)**: rows가 viewport를 넘을 때만 tree content 우측에 GPU thumb를 표시한다. 중립 `src/chrome/components/file_tree_scrollbar.zig`의 total/visible/effective-scroll 공용 geometry를 render·hover·track click·drag가 함께 쓰고, L4 `AppSession`은 `PointerGestureOwner.file_tree_scrollbar`와 fade timer만 소유한다. resize/root 교체/rebuild가 generation 또는 geometry를 무효화하면 drag를 취소한다. row renderer는 track 폭+우측 inset의 실제 px를 cell 폭으로 올림한 열 수를 예약하며, 손상된 초협폭에서 콘텐츠 셀이 남지 않으면 track 아래에 glyph를 겹쳐 그리지 않는다. 중립 `src/chrome/file_tree_icon.zig`은 row projection 때 각 materialized row당 최대 한 번, filesystem/MIME 조회 없이 basename/extension을 ASCII-insensitive semantic `IconKind`로 분류하고 renderer/platform은 저장된 kind를 coverage PUA로만 lower한다. 폴더 open/closed와 source/test/docs/assets/config/dependency/output 이름군, 주요 개발 언어·web·data/config·git·image/document/archive/package 파일군, generic fallback을 제공한다. 아이콘은 모두 theme foreground 단색이고 focused selection에서는 contrast foreground를 쓴다. disclosure/icon/label 열과 우측 dirty/conflict slot은 겹치지 않는다. 제품-path artifact는 row projection 방문≤16,384, row당 classify≤1, pointer/frame당 geometry build≤1, allocation과 dock layout rebuild 0, thumb quad≤1을 실제 counter로 검증한다. filesystem/MIME·worker·lock·CoreText 부재는 숫자 0인 척하는 sentinel을 두지 않고 중립 모듈 import 경계와 코드 검토 대상으로 명시한다. 상세 hard gate는 [performance-budget.md](performance-budget.md#파일-탐색기-scrollbaricon-예산)가 소유한다. 기존 Octicons 자산으로 표현할 수 없는 SVG를 추가하면 exact name/version/source/license를 `third-party-licenses.md`에 기록하고 generator의 manifest/hash/`--check`가 coverage/C/Zig registry drift를 실패시킨 뒤에만 포함한다.
 
+## 3.5 도크 뷰 스위처 (여러 뷰를 담는 하나의 도크)
+
+**도크는 이제 뷰 하나가 아니라 뷰 여러 개를 담는 컬럼이다.** 상단에 아이콘 한 줄(뷰 바)이 있고 그 아래가 **현재 뷰**의
+헤더 + 본문이다. 탐색기는 그중 하나이며, 소스 컨트롤 뷰가 두 번째로 들어온다(내용 계약은
+[editor-surface.md](editor-surface.md) §3.5가 소유한다 — 여기서 재서술하지 않는다).
+
+```text
+┌ 도크(우측 고정) ────────────────┐
+│ [탐색기] [소스 컨트롤]          │ ← 뷰 바: 아이콘 줄(chrome 1행)
+├─────────────────────────────────┤
+│ 현재 뷰 헤더 (예: "탐색기")     │ ← Geometry.tree_header
+├─────────────────────────────────┤
+│ 현재 뷰 본문 (스크롤)           │ ← Geometry.tree_content
+└─────────────────────────────────┘
+```
+
+**새 도크를 만들지 않는다.** 폭 조절(outer divider)·접기·`⌘⇧E` 왕복·`FocusOwner.file_tree`·workspace 영속은 **뷰와 무관하게
+도크 하나가 계속 소유**한다. 뷰는 그 안에서 무엇을 그릴지만 고른다. 이 선택이 "도크를 종류별로 늘리지 않는다"는 FP16 방향과
+같은 결이다 — 컬럼이 둘이 되면 폭·접힘·포커스 규칙이 통째로 이중이 된다.
+
+- **기하**: `Geometry.view_bar`가 도크 최상단 한 행이고, `tree`(=현재 뷰 영역)·`tree_header`·`tree_content`가 그만큼 아래로
+  내려간다. 도크가 아주 낮아 한 행도 못 넣으면 뷰 바를 0 높이로 접고 현재 뷰가 전부를 쓴다(스위처가 콘텐츠를 굶기지 않는다).
+- **슬롯 기하는 중립 모듈**(`src/chrome/components/dock_view_bar.zig`)이 소유하고 render·hover·hit-test가 같은 계산을
+  공유한다(스크롤바·아이콘과 같은 패턴). 슬롯 폭은 셀 단위로 올림해 GPU 셀 정렬을 유지한다.
+- **선택 상태**: `DockPanel.view`가 소유하고 workspace에 저장한다(`dock-view`). 재시작 때 소스 컨트롤을 보고 있었으면 그대로
+  돌아온다. **모르는 값은 `explorer`로 clamp**한다 — 뷰가 나중에 늘어도 옛 파일이 fail-close되지 않게 하기 위함이고,
+  이는 mode 복원이 `defaultFor`로 clamp하는 것과 같은 관용이다.
+- **포커스와 `⌘⇧E`**: 트리 키보드 포커스(`FocusOwner.file_tree`)는 **탐색기 뷰일 때만** 유효하다. 다른 뷰를 보는 중에
+  `focus_file_tree`/`⌘⇧E`가 오면 먼저 뷰를 탐색기로 되돌린 뒤 포커스를 준다 — 보이지 않는 트리에 키 입력이 가지 않게 한다.
+- **v1 범위**: 뷰 바는 두 슬롯(탐색기·소스 컨트롤)만 그린다. 목업의 나머지 칸은 자리만 두고 그리지 않는다 — 누를 수 없는
+  아이콘을 띄우지 않는다.
+
 ## 4. 트리 계약
 
-- **배치**: 트리가 **도크 전체**다 — `Geometry.tree = dock`이고 `editor`/`tab_bar`/`header`/`content`/`tree_divider` rect와 그 hit-test·드래그(`treeDividerHitRect`·`treeSizePtForPointer`·`dock_tree_divider` 제스처)는 삭제됐다. 도크 폭이 곧 트리 폭이라 폭 조절은 outer divider 하나뿐이다(`dock.tree_size`와 `dock-tree-size` 키는 B-4에서 제거했다 — 도크 폭이 곧 트리 폭이라 잴 것이 없다). 부작용: **트리 좌측 가장자리가 outer divider의 grab band와 겹친다**(옛 배치에선 트리가 우측이라 안 겹쳤다). 그래서 `min_editor_cols`(28셀)·`min_tree_cols`(12셀)·`default_tree_cols`(18셀) 상수와 editor↔tree divider도 함께 사라졌다(B-4에서 삭제). 남은 폭 하한은 pt 기준 `min_right_pt`를 계속 강제한다(`@max(requested_px, @min(min_dock, max_dock))`). 옛 420pt 기본·240pt 하한은 **editor + tree를 함께 담던 시절의 값**이라 트리 전용에는 과했다(화면 절반 가까이 차지 — 사용자 확인 2026-07-28). 좌측 사이드바와 같은 성격의 목록 열이므로 그쪽 기준으로 맞춘다: **기본 180pt·하한 120pt**(`theme.SidebarConfig.width_pt`의 기본·범위와 같은 값. 레이어가 달라 상수는 공유하지 않고 값만 맞춘다). bottom은 가로 띠라 성격이 달라(폭이 아니라 높이) 300/160pt를 유지한다. 폭 조절은 이제 **terminal↔dock outer divider 하나**가 담당하며, 그 divider가 곧 트리 폭이다(현행 `dock-size`가 그 값이다 — `dock-tree-size`는 **키 자체가 제거**돼 더는 쓰지도 읽지도 않고, 옛 파일의 그 키는 unknown field 관용으로 조용히 무시된다). 확장 grab band·live reframe·mouse-down offset 보존 계약은 outer divider에 그대로 남는다. **트리 자체는 WKWebView가 아니라 GPU 셀 chrome이므로 도크에 web surface가 하나도 없고**, 그 결과 §4의 도크-aware 예외 둘이 제거된다.
+- **배치**: 트리가 **도크의 현재 뷰 영역 전체**다 — `Geometry.tree = dock - view_bar`(§3.5)이고 `editor`/`tab_bar`/`header`/`content`/`tree_divider` rect와 그 hit-test·드래그(`treeDividerHitRect`·`treeSizePtForPointer`·`dock_tree_divider` 제스처)는 삭제됐다. 도크 폭이 곧 트리 폭이라 폭 조절은 outer divider 하나뿐이다(`dock.tree_size`와 `dock-tree-size` 키는 B-4에서 제거했다 — 도크 폭이 곧 트리 폭이라 잴 것이 없다). 부작용: **트리 좌측 가장자리가 outer divider의 grab band와 겹친다**(옛 배치에선 트리가 우측이라 안 겹쳤다). 그래서 `min_editor_cols`(28셀)·`min_tree_cols`(12셀)·`default_tree_cols`(18셀) 상수와 editor↔tree divider도 함께 사라졌다(B-4에서 삭제). 남은 폭 하한은 pt 기준 `min_right_pt`를 계속 강제한다(`@max(requested_px, @min(min_dock, max_dock))`). 옛 420pt 기본·240pt 하한은 **editor + tree를 함께 담던 시절의 값**이라 트리 전용에는 과했다(화면 절반 가까이 차지 — 사용자 확인 2026-07-28). 좌측 사이드바와 같은 성격의 목록 열이므로 그쪽 기준으로 맞춘다: **기본 180pt·하한 120pt**(`theme.SidebarConfig.width_pt`의 기본·범위와 같은 값. 레이어가 달라 상수는 공유하지 않고 값만 맞춘다). bottom은 가로 띠라 성격이 달라(폭이 아니라 높이) 300/160pt를 유지한다. 폭 조절은 이제 **terminal↔dock outer divider 하나**가 담당하며, 그 divider가 곧 트리 폭이다(현행 `dock-size`가 그 값이다 — `dock-tree-size`는 **키 자체가 제거**돼 더는 쓰지도 읽지도 않고, 옛 파일의 그 키는 unknown field 관용으로 조용히 무시된다). 확장 grab band·live reframe·mouse-down offset 보존 계약은 outer divider에 그대로 남는다. **트리 자체는 WKWebView가 아니라 GPU 셀 chrome이므로 도크에 web surface가 하나도 없고**, 그 결과 §4의 도크-aware 예외 둘이 제거된다.
 - **루트**: inferred mode에서는 열린 파일이 git repo 안이면 repo 루트, 밖이면 부모 폴더를 합류시킨다. explicit mode에서는 open/add/remove 명령만 표시 root를 바꾼다. 서로 겹치지 않는 루트는 멀티루트 섹션으로 두고, parent/child로 겹치면 가장 바깥 ancestor 하나로 정규화한다. root가 없으면 cwd를 암묵 추가하지 않고 빈 안내를 표시한다.
 - **내용**: 폴더 접기(lazy 열거), 파일 클릭=열기(§6), 열린 파일 하이라이트 + dirty 점, **최근 파일 접이식 섹션**(파일 열람 히스토리 흡수처).
 - **선택과 키보드 포커스(ABI v127)**: 트리는 row index가 아니라 `절대 경로 + row kind` identity로 transient selection을 소유한다. scan 완료·접기·FSEvents rebuild로 row index가 바뀌어도 같은 row가 남으면 선택을 복원하고, 사라지면 가장 가까운 조작 가능한 조상/이웃으로 결정적으로 이동한다. 클릭 또는 `focus_file_tree`가 Zig의 단일 `FocusOwner`를 `.file_tree { restore_surface: ?surface_id }`로 바꾸고 Metal view를 first responder로 만든다. 현재 구현의 기본 `⌘⇧E`는 이 action에 연결되어 있으며, FP9에서 §3.4의 `toggle_file_panel_focus`로 기본 chord만 이전한다. surface id는 앱 전역 비재사용이라 generation token을 겸하며 Esc 때 entry와 native WKWebView 존재를 다시 검증한다. `file_tree_focus`는 이 union의 파생 getter일 뿐 별도 mutable boolean이 아니다. 선택과 keyboard focus는 workspace에 저장하지 않는다. 포커스 중 선택은 theme accent 배경과 WCAG 4.5 이상 대비가 나는 파생 전경을 marker·이름·dirty/conflict 표시 전체에 적용하고, 포커스 밖에서는 dim으로 그린다. active 파일 표시는 별도 marker로 유지한다.

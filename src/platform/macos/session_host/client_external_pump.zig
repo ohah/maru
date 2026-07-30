@@ -10,6 +10,7 @@ const c = std.c;
 const posix = std.posix;
 const client_mod = @import("client.zig");
 const client_external_mode = @import("client_external_mode.zig");
+const checked_event_counter = @import("checked_event_counter.zig");
 const client_external_rx_read = @import("client_external_rx_read.zig");
 const client_external_rx_turn = @import("client_external_rx_turn.zig");
 const client_external_adoption = @import("client_external_adoption.zig");
@@ -1285,8 +1286,8 @@ threadlocal var active_external_rx_client_addr: usize = 0;
 threadlocal var active_external_rx_parser_addr: usize = 0;
 threadlocal var active_external_rx_provenance: client_external_mode.RxProvenance = .{};
 threadlocal var active_external_rx_authority_digest: external_owner_seal.Digest = [_]u8{0} ** 32;
-var cross_owner_quarantine_latched: std.atomic.Value(bool) = .init(false);
 var cross_owner_quarantine_events: std.atomic.Value(u64) = .init(0);
+var guarded_admit_accounting_prepared_addr: std.atomic.Value(usize) = .init(0);
 var active_storage_addr: std.atomic.Value(usize) = .init(0);
 
 const WholeTurnLeaseLifecycle = enum {
@@ -4912,8 +4913,8 @@ fn inheritedSnapshotDigest(
 }
 
 pub fn crossOwnerQuarantineStatus() CrossOwnerQuarantineStatus {
-    const latched = cross_owner_quarantine_latched.load(.acquire);
     const events = cross_owner_quarantine_events.load(.acquire);
+    const latched = events != 0;
     return .{
         .latched = latched,
         .event_count = events,
@@ -5184,18 +5185,63 @@ comptime {
 
 fn resetCrossOwnerQuarantineForTest() void {
     cross_owner_quarantine_events.store(0, .release);
-    cross_owner_quarantine_latched.store(false, .release);
+}
+
+fn tryLatchCrossOwnerQuarantineEvent() ?u64 {
+    return checked_event_counter.increment(&cross_owner_quarantine_events);
 }
 
 fn latchCrossOwnerQuarantine() void {
-    _ = cross_owner_quarantine_latched.cmpxchgStrong(
-        false,
-        true,
+    _ = tryLatchCrossOwnerQuarantineEvent();
+}
+
+pub fn accountGuardedAdmitQuarantine(
+    prepared: *client_external_mode.PreparedRxAppend,
+    outcome_tag: client_external_mode.GuardedQuarantineOutcomeTag,
+    quarantine: client_external_mode.GuardedAdmitQuarantine,
+    out: *client_external_mode.GuardedQuarantineAccountingReceipt,
+) bool {
+    const prepared_addr = @intFromPtr(prepared);
+    if (guarded_admit_accounting_prepared_addr.cmpxchgStrong(
+        0,
+        prepared_addr,
         .acq_rel,
         .acquire,
-    );
-    _ = cross_owner_quarantine_events.fetchAdd(1, .acq_rel);
+    ) != null)
+        return false;
+    defer {
+        _ = guarded_admit_accounting_prepared_addr.cmpxchgStrong(
+            prepared_addr,
+            0,
+            .acq_rel,
+            .acquire,
+        );
+    }
+    if (quarantine.quarantined_bytes_upper_bound >
+        max_guarded_admit_quarantine_bytes)
+        return false;
+    if (!client_external_mode.markQuarantinedPreparedAdmitAccounted(
+        prepared,
+        outcome_tag,
+        quarantine,
+        &cross_owner_quarantine_events,
+        out,
+    )) {
+        return false;
+    }
+    return true;
 }
+
+pub const quarantine_testing = if (builtin.is_test) struct {
+    pub fn reset() void {
+        resetCrossOwnerQuarantineForTest();
+        guarded_admit_accounting_prepared_addr.store(0, .release);
+    }
+
+    pub fn forceEventGeneration(value: u64) void {
+        cross_owner_quarantine_events.store(value, .release);
+    }
+} else struct {};
 
 fn releaseActiveStorage(address: usize) void {
     _ = active_storage_addr.cmpxchgStrong(
@@ -6880,7 +6926,7 @@ pub const ExternalPumpStorage = struct {
             @intFromPtr(out),
             expected_rx_resident_cap,
         );
-        if (cross_owner_quarantine_latched.load(.acquire))
+        if (cross_owner_quarantine_events.load(.acquire) != 0)
             return failed(.process_quarantined, .preserved);
         const out_addr = @intFromPtr(out);
         if (initializing_storage_addr != 0)
@@ -8531,7 +8577,7 @@ pub const ExternalPumpStorage = struct {
         now_ns: i128,
         cleanup_scratch: *ExternalPumpCleanupScratch,
     ) AdoptionPrepareStatus {
-        if (cross_owner_quarantine_latched.load(.acquire))
+        if (cross_owner_quarantine_events.load(.acquire) != 0)
             return .terminal_latched;
         if (self.saved_self_addr != @intFromPtr(self))
             return .terminal_latched;
@@ -9443,7 +9489,7 @@ pub const ExternalPumpStorage = struct {
 
         active_external_operation_addr = @intFromPtr(self);
         defer active_external_operation_addr = 0;
-        if (cross_owner_quarantine_latched.load(.acquire))
+        if (cross_owner_quarantine_events.load(.acquire) != 0)
             return self.latchCommitTerminal();
         const client = if (self.owned_client) |*owned| owned else return self.latchCommitTerminal();
         const evidence = if (self.owned_evidence) |*owned| owned else return self.latchCommitTerminal();
@@ -9633,13 +9679,7 @@ pub const ExternalPumpStorage = struct {
             .reason = .invariant_failure,
             .fd_disposition = .owner_cleanup,
         } };
-        _ = cross_owner_quarantine_latched.cmpxchgStrong(
-            false,
-            true,
-            .acq_rel,
-            .acquire,
-        );
-        _ = cross_owner_quarantine_events.fetchAdd(1, .acq_rel);
+        latchCrossOwnerQuarantine();
         self.prepared_adoption = .{ .lifecycle = .aborted_tombstone };
         self.client_cleanup_take = .{ .lifecycle = .aborted };
         if (self.owned_client) |*owned| owned.deinit();
@@ -10297,13 +10337,7 @@ pub const ExternalPumpStorage = struct {
             .reason = .invariant_failure,
             .fd_disposition = .owner_cleanup,
         } };
-        _ = cross_owner_quarantine_latched.cmpxchgStrong(
-            false,
-            true,
-            .acq_rel,
-            .acquire,
-        );
-        _ = cross_owner_quarantine_events.fetchAdd(1, .acq_rel);
+        latchCrossOwnerQuarantine();
         if (scratch_trusted)
             cleanup_scratch.lifecycle = .poisoned;
         self.owner_incarnation = 0;
@@ -21945,7 +21979,7 @@ test "product payload guard rejects exact and partial guard authority aliases" {
             ),
         );
     }
-    try std.testing.expect(cross_owner_quarantine_latched.load(.acquire));
+    try std.testing.expect(cross_owner_quarantine_events.load(.acquire) != 0);
     try std.testing.expectEqual(
         @as(u64, cases.len),
         cross_owner_quarantine_events.load(.acquire),

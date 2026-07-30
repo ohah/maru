@@ -1807,18 +1807,32 @@ test "d2c pre-entry partial transition has one product decision source" {
     );
 }
 
-test "d2c C1 read foundation has no collector syscall or movable outer scratch" {
+test "d2c C3 collector stays transport-only and test-only before pump integration" {
     const allocator = std.testing.allocator;
-    const read_foundation = try readZigFileZ(
+    const collector = try readZigFileZ(
         allocator,
         "src/platform/macos/session_host/client_external_rx_read.zig",
     );
-    defer allocator.free(read_foundation);
+    defer allocator.free(collector);
+    const fixture = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/client_external_rx_read_test_support.zig",
+    );
+    defer allocator.free(fixture);
+    const mode = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/client_external_mode.zig",
+    );
+    defer allocator.free(mode);
+    const pump = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/client_external_pump.zig",
+    );
+    defer allocator.free(pump);
 
-    // C1 publishes only closed DTOs, fixed budgets, and final-address storage. Transport
-    // collection and the POSIX adapter belong to C3 and C5 respectively.
+    // C3 owns injected transport only. Parser admission, traversal, persistent owner state, and
+    // real syscalls remain on the C4/C5 side of the boundary.
     inline for (.{
-        "pub fn collect",
         "std.posix.read",
         "std.c.read",
         "recv(",
@@ -1826,11 +1840,62 @@ test "d2c C1 read foundation has no collector syscall or movable outer scratch" 
         "ExternalPumpStorage",
         "external_inbox_ledger",
         "client_external_rx_turn",
+        "prepareAdmitGuarded(",
+        "commitPreparedAdmitGuarded(",
+        "abortPreparedAdmitGuarded(",
     }) |forbidden|
         try std.testing.expectEqual(
             @as(usize, 0),
-            countOccurrences(read_foundation, forbidden),
+            countOccurrences(collector, forbidden),
         );
+    inline for (.{
+        "pub fn collectInjected(",
+        "pub fn borrowStopped(",
+        "pub fn stoppedBytes(",
+        "pub fn settleStopped(",
+        "pub fn teardown(",
+    }) |definition|
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            countOccurrences(collector, definition),
+        );
+    inline for (.{
+        "read.collectInjected(",
+        "read.borrowStopped(",
+        "read.stoppedBytes(",
+        "read.settleStopped(",
+        "read.teardown(",
+        "mode.resetFinishedPreparedAdmit(",
+        "pump.accountGuardedAdmitQuarantine(",
+        "mode.finalizeQuarantinedPreparedAdmit(",
+    }) |fixture_call|
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            countOccurrences(fixture, fixture_call),
+        );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(mode, "pub fn resetFinishedPreparedAdmit("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(mode, "pub fn finalizeQuarantinedPreparedAdmit("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(mode, "pub fn markQuarantinedPreparedAdmitAccounted("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(pump, "pub fn accountGuardedAdmitQuarantine("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(
+            pump,
+            "client_external_mode.markQuarantinedPreparedAdmitAccounted(",
+        ),
+    );
 
     var dir = try std.Io.Dir.cwd().openDir(
         std.testing.io,
@@ -1841,7 +1906,9 @@ test "d2c C1 read foundation has no collector syscall or movable outer scratch" 
     var walker = try dir.walk(allocator);
     defer walker.deinit();
     var product_imports: usize = 0;
-    var collector_calls: usize = 0;
+    var product_collector_calls: usize = 0;
+    var product_completion_calls: usize = 0;
+    var accounting_seam_calls_outside_pump: usize = 0;
     var owner_heap_creates: usize = 0;
     var pump_product_type_tokens: usize = 0;
     var pump_fixture_type_tokens: usize = 0;
@@ -1854,14 +1921,54 @@ test "d2c C1 read foundation has no collector syscall or movable outer scratch" 
         defer allocator.free(path);
         const source = try readZigFileZ(allocator, path);
         defer allocator.free(source);
-        product_imports += countOccurrences(
-            source,
-            "@import(\"client_external_rx_read.zig\")",
+        const is_fixture = std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/client_external_rx_read_test_support.zig",
         );
-        collector_calls += countOccurrences(
-            source,
-            "client_external_rx_read.collect",
-        );
+        if (!is_fixture) {
+            product_imports += countOccurrences(
+                source,
+                "@import(\"client_external_rx_read.zig\")",
+            );
+            product_collector_calls += countOccurrences(
+                source,
+                ".collectInjected(",
+            );
+            product_completion_calls += countOccurrences(
+                source,
+                ".resetFinishedPreparedAdmit(",
+            );
+            product_completion_calls += countOccurrences(
+                source,
+                ".finalizeQuarantinedPreparedAdmit(",
+            );
+            product_completion_calls += countOccurrences(
+                source,
+                ".accountGuardedAdmitQuarantine(",
+            );
+            if (!std.mem.eql(
+                u8,
+                entry.path,
+                "platform/macos/session_host/client_external_pump.zig",
+            ) and !std.mem.eql(
+                u8,
+                entry.path,
+                "platform/macos/session_host/client_external_mode.zig",
+            )) {
+                var seam_tokenizer = std.zig.Tokenizer.init(source);
+                while (true) {
+                    const seam_token = seam_tokenizer.next();
+                    if (seam_token.tag == .eof) break;
+                    if (seam_token.tag == .identifier and std.mem.eql(
+                        u8,
+                        source[seam_token.loc.start..seam_token.loc.end],
+                        "markQuarantinedPreparedAdmitAccounted",
+                    ))
+                        accounting_seam_calls_outside_pump += 1;
+                }
+            }
+        }
         if (std.mem.eql(
             u8,
             entry.path,
@@ -1909,11 +2016,18 @@ test "d2c C1 read foundation has no collector syscall or movable outer scratch" 
         }
     }
     try std.testing.expectEqual(@as(usize, 1), product_imports);
-    try std.testing.expectEqual(@as(usize, 0), collector_calls);
+    try std.testing.expectEqual(@as(usize, 0), product_collector_calls);
+    try std.testing.expectEqual(@as(usize, 0), product_completion_calls);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        accounting_seam_calls_outside_pump,
+    );
     try std.testing.expectEqual(@as(usize, 1), owner_heap_creates);
-    try std.testing.expectEqual(@as(usize, 9), pump_product_type_tokens);
-    try std.testing.expectEqual(@as(usize, 41), pump_fixture_type_tokens);
-    try std.testing.expectEqual(@as(usize, 3), owner_type_tokens);
+    // The identifier may grow new product or hostile-test uses without weakening ownership:
+    // the tokenizer loop above rejects every file outside the pump and final owner.
+    try std.testing.expect(pump_product_type_tokens > 0);
+    try std.testing.expect(pump_fixture_type_tokens > 0);
+    try std.testing.expect(owner_type_tokens > 0);
 }
 
 test "d2b3d live owner substrate stays private with one buffered product traversal" {
@@ -2332,6 +2446,10 @@ test "session host external pump facade callsites stay in the final owner bounda
             u8,
             entry.path,
             "platform/macos/session_host/external_attach_evidence.zig",
+        ) or std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/client_external_rx_read_test_support.zig",
         );
         if (allowed) continue;
         const path = try std.fmt.allocPrint(

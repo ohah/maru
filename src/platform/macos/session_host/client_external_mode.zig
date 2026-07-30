@@ -11,6 +11,7 @@ const posix = std.posix;
 const protocol = @import("protocol.zig");
 const framing = @import("framing.zig");
 const owner_seal = @import("external_owner_seal.zig");
+const checked_event_counter = @import("checked_event_counter.zig");
 const external_rx_types = @import("external_rx_types.zig");
 
 pub const max_tx_frames: usize = 64;
@@ -183,6 +184,30 @@ const pristine_rx_append_allocator: std.mem.Allocator = .{
 const PreparedLifecycle = enum { empty, prepared, committed, aborted };
 const PreparedAppendLifecycle = enum { empty, prepared, committed, aborted, quarantined };
 
+pub const PreparedAdmitCompletion = enum {
+    pristine,
+    active,
+    ordinary_finished,
+    quarantine_pending,
+    quarantine_accounted,
+};
+
+pub const GuardedAdmitQuarantinePhase = enum {
+    allocation,
+    abort_cleanup,
+    commit_cleanup,
+};
+
+pub const GuardedAdmitQuarantine = struct {
+    phase: GuardedAdmitQuarantinePhase,
+    quarantined_bytes_upper_bound: usize,
+};
+
+pub const GuardedQuarantineOutcomeTag = enum {
+    allocation_quarantined,
+    post_commit_quarantined,
+};
+
 pub const PreparedRxBind = struct {
     saved_self_addr: usize = 0,
     source_state_addr: usize = 0,
@@ -264,6 +289,11 @@ pub const PreparedRxAppend = struct {
     cleanup_digest: owner_seal.Digest = [_]u8{0} ** 32,
     digest: owner_seal.Digest = [_]u8{0} ** 32,
     lifecycle: PreparedAppendLifecycle = .empty,
+    completion: PreparedAdmitCompletion = .pristine,
+    quarantine_outcome_tag: GuardedQuarantineOutcomeTag =
+        .allocation_quarantined,
+    quarantine_phase: GuardedAdmitQuarantinePhase = .allocation,
+    quarantine_upper_bound: usize = 0,
 
     fn deinitInternal(self: *PreparedRxAppend) void {
         if (self.saved_self_addr != 0 and self.saved_self_addr != @intFromPtr(self)) return;
@@ -404,17 +434,6 @@ pub const ReplacementAllocationGuard = struct {
 
 pub const GuardedAdmitFailure = struct {
     reason: RxPrepareError,
-};
-
-pub const GuardedAdmitQuarantinePhase = enum {
-    allocation,
-    abort_cleanup,
-    commit_cleanup,
-};
-
-pub const GuardedAdmitQuarantine = struct {
-    phase: GuardedAdmitQuarantinePhase,
-    quarantined_bytes_upper_bound: usize,
 };
 
 pub const GuardedAdmitPrepareOutcome = union(enum) {
@@ -576,6 +595,117 @@ pub const testing = if (builtin.is_test) struct {
             => return error.TestUnexpectedResult,
         }
     }
+
+    pub fn seedOrdinaryFinishedPreparedAdmit(
+        prepared: *PreparedRxAppend,
+        committed: bool,
+    ) bool {
+        if (!preparedRxAppendPristine(prepared)) return false;
+        markOrdinaryPreparedAdmitFinished(
+            prepared,
+            if (committed) .committed else .aborted,
+        );
+        return true;
+    }
+
+    pub fn seedQuarantinePendingPreparedAdmit(
+        prepared: *PreparedRxAppend,
+        outcome_tag: GuardedQuarantineOutcomeTag,
+        quarantine: GuardedAdmitQuarantine,
+    ) bool {
+        if (!preparedRxAppendPristine(prepared)) return false;
+        markQuarantinedPreparedAdmitPending(
+            prepared,
+            if (outcome_tag == .post_commit_quarantined)
+                .committed
+            else
+                .quarantined,
+            outcome_tag,
+            quarantine,
+        );
+        return true;
+    }
+
+    /// Produces an ordinary completion through the guarded product branch so collector completion
+    /// tests cannot stay green if commit stops publishing its tombstone.
+    pub fn finishOrdinaryGuardedCommitForTest(
+        prepared: *PreparedRxAppend,
+    ) !bool {
+        if (!preparedRxAppendPristine(prepared)) return false;
+        var state = State{ .saved_flags = 7 };
+        defer state.deinit(std.testing.allocator);
+        var parser = framing.FrameParser.init(std.testing.allocator);
+        defer parser.deinit();
+        var destination_slot: usize = 0;
+        try bindParserForTest(&state, &parser, 901, &destination_slot);
+        try parser.buf.ensureTotalCapacityPrecise(parser.allocator, 8);
+        if (!resealParserAuthority(&state, &parser)) return false;
+        try setResidentCapForTest(&state, &parser, 8);
+        var guard_context = TestReplacementGuard{};
+        const guard = guard_context.guard();
+        if (prepareAdmitGuarded(
+            &state,
+            &parser,
+            "x",
+            0,
+            8,
+            &guard,
+            prepared,
+        ) != .prepared) return false;
+        if (commitPreparedAdmitGuarded(
+            &state,
+            &parser,
+            "x",
+            prepared,
+        ) != .committed) return false;
+        return prepared.completion == .ordinary_finished;
+    }
+
+    /// Produces quarantine through the authenticated guarded commit failure branch. The returned
+    /// token is consumed by the pump accounting/finalizer fixture at its original address.
+    pub fn finishQuarantinedGuardedCommitForTest(
+        prepared: *PreparedRxAppend,
+    ) !?GuardedAdmitQuarantine {
+        if (!preparedRxAppendPristine(prepared)) return null;
+        var state = State{ .saved_flags = 7 };
+        defer state.deinit(std.testing.allocator);
+        var parser = framing.FrameParser.init(std.testing.allocator);
+        defer parser.deinit();
+        var destination_slot: usize = 0;
+        try bindParserForTest(&state, &parser, 902, &destination_slot);
+        try parser.buf.ensureTotalCapacityPrecise(parser.allocator, 8);
+        if (!resealParserAuthority(&state, &parser)) return null;
+        try setResidentCapForTest(&state, &parser, 8);
+        var guard_context = TestReplacementGuard{};
+        const guard = guard_context.guard();
+        if (prepareAdmitGuarded(
+            &state,
+            &parser,
+            "x",
+            0,
+            8,
+            &guard,
+            prepared,
+        ) != .prepared) return null;
+        prepared.digest[0] +%= 1;
+        return switch (commitPreparedAdmitGuarded(
+            &state,
+            &parser,
+            "x",
+            prepared,
+        )) {
+            .allocation_quarantined => |quarantine| quarantine,
+            else => null,
+        };
+    }
+
+    pub fn sealParserAuthorityProjection(
+        seal: *ParserAuthoritySeal,
+    ) void {
+        seal.domain = parser_seal_domain.*;
+        seal.version = parser_seal_version;
+        seal.digest = parserSealDigest(seal);
+    }
 } else struct {};
 
 fn rxBindDigest(prepared: *const PreparedRxBind) owner_seal.Digest {
@@ -624,6 +754,11 @@ fn appendDigest(prepared: *const PreparedRxAppend) owner_seal.Digest {
     writer.writeU64(prepared.replacement_authority_seal.generation);
     writer.writeBytes(&prepared.replacement_authority_seal.digest);
     writer.writeBytes(&prepared.cleanup_digest);
+    writer.writeU8(@intFromEnum(prepared.lifecycle));
+    writer.writeU8(@intFromEnum(prepared.completion));
+    writer.writeU8(@intFromEnum(prepared.quarantine_outcome_tag));
+    writer.writeU8(@intFromEnum(prepared.quarantine_phase));
+    writer.writeUsize(prepared.quarantine_upper_bound);
     return writer.finish();
 }
 
@@ -674,7 +809,7 @@ fn appendOutputPristine(out: *const PreparedRxAppend) bool {
     return out.saved_self_addr == 0 and out.state_addr == 0 and out.parser_addr == 0 and
         out.replacement == null and out.cleanup_replacement == null and
         out.replacement_addr == 0 and out.replacement_len == 0 and
-        out.lifecycle == .empty;
+        out.lifecycle == .empty and out.completion == .pristine;
 }
 
 pub fn preparedRxAppendPristine(out: *const PreparedRxAppend) bool {
@@ -694,7 +829,217 @@ pub fn preparedRxAppendPristine(out: *const PreparedRxAppend) bool {
         out.replacement_guard == null and
         std.meta.eql(out.replacement_authority_seal, ReplacementAuthoritySeal{}) and
         std.mem.allEqual(u8, &out.cleanup_digest, 0) and
+        out.quarantine_outcome_tag == .allocation_quarantined and
+        out.quarantine_phase == .allocation and
+        out.quarantine_upper_bound == 0 and
         std.mem.allEqual(u8, &out.digest, 0);
+}
+
+fn markOrdinaryPreparedAdmitFinished(
+    prepared: *PreparedRxAppend,
+    lifecycle: PreparedAppendLifecycle,
+) void {
+    std.debug.assert(lifecycle == .committed or lifecycle == .aborted);
+    prepared.* = .{
+        .saved_self_addr = @intFromPtr(prepared),
+        .lifecycle = lifecycle,
+        .completion = .ordinary_finished,
+    };
+    prepared.digest = appendDigest(prepared);
+}
+
+fn markPreparedAdmitTransient(
+    prepared: *PreparedRxAppend,
+    lifecycle: PreparedAppendLifecycle,
+) void {
+    prepared.* = .{
+        .saved_self_addr = @intFromPtr(prepared),
+        .lifecycle = lifecycle,
+        .completion = .active,
+    };
+    prepared.digest = appendDigest(prepared);
+}
+
+fn markQuarantinedPreparedAdmitPending(
+    prepared: *PreparedRxAppend,
+    lifecycle: PreparedAppendLifecycle,
+    outcome_tag: GuardedQuarantineOutcomeTag,
+    quarantine: GuardedAdmitQuarantine,
+) void {
+    std.debug.assert(
+        lifecycle == .aborted or lifecycle == .committed or
+            lifecycle == .quarantined,
+    );
+    prepared.* = .{
+        .saved_self_addr = @intFromPtr(prepared),
+        .lifecycle = lifecycle,
+        .completion = .quarantine_pending,
+        .quarantine_outcome_tag = outcome_tag,
+        .quarantine_phase = quarantine.phase,
+        .quarantine_upper_bound = quarantine.quarantined_bytes_upper_bound,
+    };
+    prepared.digest = appendDigest(prepared);
+}
+
+fn completionTombstoneValid(
+    prepared: *const PreparedRxAppend,
+    completion: PreparedAdmitCompletion,
+) bool {
+    if (prepared.saved_self_addr != @intFromPtr(prepared) or
+        prepared.completion != completion or
+        prepared.state_addr != 0 or prepared.parser_addr != 0 or
+        prepared.expected_start != 0 or prepared.bytes_addr != 0 or
+        prepared.bytes_len != 0 or
+        !std.mem.allEqual(u8, &prepared.bytes_digest, 0) or
+        !std.meta.eql(prepared.source_seal, ParserAuthoritySeal{}) or
+        !std.mem.allEqual(u8, &prepared.unread_digest, 0) or
+        prepared.allocator.ptr != pristine_rx_append_allocator.ptr or
+        prepared.allocator.vtable != pristine_rx_append_allocator.vtable or
+        prepared.allocator_ptr_addr != 0 or
+        prepared.allocator_vtable_addr != 0 or
+        prepared.replacement_addr != 0 or prepared.replacement_len != 0 or
+        prepared.final_items_len != 0 or prepared.resident_cap != 0 or
+        prepared.replacement != null or prepared.cleanup_replacement != null or
+        prepared.replacement_guard != null or
+        !std.meta.eql(
+            prepared.replacement_authority_seal,
+            ReplacementAuthoritySeal{},
+        ) or
+        !std.mem.allEqual(u8, &prepared.cleanup_digest, 0))
+        return false;
+    return std.mem.eql(u8, &prepared.digest, &appendDigest(prepared));
+}
+
+pub fn resetFinishedPreparedAdmit(prepared: *PreparedRxAppend) bool {
+    if (!completionTombstoneValid(prepared, .ordinary_finished) or
+        (prepared.lifecycle != .committed and prepared.lifecycle != .aborted) or
+        prepared.quarantine_outcome_tag != .allocation_quarantined or
+        prepared.quarantine_phase != .allocation or
+        prepared.quarantine_upper_bound != 0)
+        return false;
+    prepared.* = .{};
+    return true;
+}
+
+pub const GuardedQuarantineReceiptLifecycle = enum {
+    empty,
+    accounted,
+    consumed,
+};
+
+pub const GuardedQuarantineAccountingReceipt = struct {
+    saved_self_addr: usize = 0,
+    prepared_addr: usize = 0,
+    outcome_tag: GuardedQuarantineOutcomeTag = .allocation_quarantined,
+    phase: GuardedAdmitQuarantinePhase = .allocation,
+    quarantined_bytes_upper_bound: usize = 0,
+    latch_generation: u64 = 0,
+    lifecycle: GuardedQuarantineReceiptLifecycle = .empty,
+    digest: owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+fn guardedQuarantineReceiptDigest(
+    receipt: *const GuardedQuarantineAccountingReceipt,
+) owner_seal.Digest {
+    var writer = owner_seal.Writer.init("MARUGQR1");
+    writer.writeUsize(receipt.saved_self_addr);
+    writer.writeUsize(receipt.prepared_addr);
+    writer.writeU8(@intFromEnum(receipt.outcome_tag));
+    writer.writeU8(@intFromEnum(receipt.phase));
+    writer.writeUsize(receipt.quarantined_bytes_upper_bound);
+    writer.writeU64(receipt.latch_generation);
+    writer.writeU8(@intFromEnum(receipt.lifecycle));
+    return writer.finish();
+}
+
+fn quarantineTombstoneMatches(
+    prepared: *const PreparedRxAppend,
+    completion: PreparedAdmitCompletion,
+    outcome_tag: GuardedQuarantineOutcomeTag,
+    quarantine: GuardedAdmitQuarantine,
+) bool {
+    return completionTombstoneValid(prepared, completion) and
+        (prepared.lifecycle == .aborted or
+            prepared.lifecycle == .committed or
+            prepared.lifecycle == .quarantined) and
+        prepared.quarantine_outcome_tag == outcome_tag and
+        prepared.quarantine_phase == quarantine.phase and
+        prepared.quarantine_upper_bound ==
+            quarantine.quarantined_bytes_upper_bound;
+}
+
+/// Validates the pending token, commits the shared event generation, then publishes its receipt.
+pub fn markQuarantinedPreparedAdmitAccounted(
+    prepared: *PreparedRxAppend,
+    outcome_tag: GuardedQuarantineOutcomeTag,
+    quarantine: GuardedAdmitQuarantine,
+    event_count: *std.atomic.Value(u64),
+    out: *GuardedQuarantineAccountingReceipt,
+) bool {
+    if (!quarantineTombstoneMatches(
+        prepared,
+        .quarantine_pending,
+        outcome_tag,
+        quarantine,
+    ) or out.saved_self_addr != 0 or out.prepared_addr != 0 or
+        out.lifecycle != .empty or !std.mem.allEqual(u8, &out.digest, 0) or
+        rangesOverlap(
+            @intFromPtr(out),
+            @sizeOf(GuardedQuarantineAccountingReceipt),
+            @intFromPtr(prepared),
+            @sizeOf(PreparedRxAppend),
+        ))
+        return false;
+    const latch_generation =
+        checked_event_counter.increment(event_count) orelse return false;
+    prepared.completion = .quarantine_accounted;
+    prepared.digest = appendDigest(prepared);
+    out.* = .{
+        .saved_self_addr = @intFromPtr(out),
+        .prepared_addr = @intFromPtr(prepared),
+        .outcome_tag = outcome_tag,
+        .phase = quarantine.phase,
+        .quarantined_bytes_upper_bound = quarantine.quarantined_bytes_upper_bound,
+        .latch_generation = latch_generation,
+        .lifecycle = .accounted,
+    };
+    out.digest = guardedQuarantineReceiptDigest(out);
+    return true;
+}
+
+pub fn finalizeQuarantinedPreparedAdmit(
+    prepared: *PreparedRxAppend,
+    outcome_tag: GuardedQuarantineOutcomeTag,
+    quarantine: GuardedAdmitQuarantine,
+    receipt: *GuardedQuarantineAccountingReceipt,
+) bool {
+    if (!quarantineTombstoneMatches(
+        prepared,
+        .quarantine_accounted,
+        outcome_tag,
+        quarantine,
+    ) or receipt.saved_self_addr != @intFromPtr(receipt) or
+        receipt.prepared_addr != @intFromPtr(prepared) or
+        receipt.outcome_tag != outcome_tag or
+        receipt.phase != quarantine.phase or
+        receipt.quarantined_bytes_upper_bound !=
+            quarantine.quarantined_bytes_upper_bound or
+        receipt.latch_generation == 0 or receipt.lifecycle != .accounted or
+        !std.mem.eql(
+            u8,
+            &receipt.digest,
+            &guardedQuarantineReceiptDigest(receipt),
+        ) or rangesOverlap(
+        @intFromPtr(receipt),
+        @sizeOf(GuardedQuarantineAccountingReceipt),
+        @intFromPtr(prepared),
+        @sizeOf(PreparedRxAppend),
+    ))
+        return false;
+    receipt.lifecycle = .consumed;
+    receipt.digest = guardedQuarantineReceiptDigest(receipt);
+    prepared.* = .{};
+    return true;
 }
 
 fn parseCleanupDigest(scratch: *const RxParseScratch) owner_seal.Digest {
@@ -779,6 +1124,33 @@ fn parserDescriptorValid(
             seal_addr < backing_end and backing_addr < seal_end))
         return false;
     return true;
+}
+
+pub fn parserAuthoritySealStructurallyValid(
+    seal: *const ParserAuthoritySeal,
+) bool {
+    if (!std.mem.eql(u8, &seal.domain, parser_seal_domain) or
+        seal.version != parser_seal_version or seal.seal_addr == 0 or
+        seal.parser_addr == 0 or seal.identity.attach_instance_id == 0 or
+        seal.identity.destination_slot_addr == 0 or
+        seal.destination_slot_len == 0 or seal.allocator_ptr_addr == 0 or
+        seal.allocator_vtable_addr == 0 or seal.expected_major == 0 or
+        seal.items_len > seal.capacity or seal.head > seal.items_len or
+        seal.buffer_start_absolute > seal.rx_absolute_next or
+        seal.resident_cap == 0 or seal.generation == 0)
+        return false;
+    if (seal.capacity == 0) {
+        if (seal.backing_addr != 0 or seal.items_len != 0 or seal.head != 0)
+            return false;
+    } else {
+        if (seal.backing_addr == 0) return false;
+        _ = std.math.add(
+            usize,
+            seal.backing_addr,
+            seal.capacity,
+        ) catch return false;
+    }
+    return std.mem.eql(u8, &seal.digest, &parserSealDigest(seal));
 }
 
 fn makeParserSeal(
@@ -1179,6 +1551,7 @@ fn appendPreparedValid(
     prepared: *const PreparedRxAppend,
 ) bool {
     if (prepared.lifecycle != .prepared or
+        prepared.completion != .active or
         !state.rx_operation_busy or
         prepared.saved_self_addr != @intFromPtr(prepared) or
         prepared.state_addr != @intFromPtr(state) or
@@ -1216,6 +1589,7 @@ fn appendPreparedTokenAuthenticated(
 ) bool {
     return state.rx_operation_busy and
         prepared.lifecycle == .prepared and
+        prepared.completion == .active and
         prepared.saved_self_addr == @intFromPtr(prepared) and
         prepared.state_addr == @intFromPtr(state) and
         prepared.parser_addr == @intFromPtr(parser) and
@@ -1319,13 +1693,19 @@ fn quarantinePreparedAllocation(
     phase: GuardedAdmitQuarantinePhase,
     upper_bound: usize,
 ) GuardedAdmitQuarantine {
-    out.* = .{ .lifecycle = .quarantined };
-    state.rx_provenance = .{ .lifecycle = .terminal };
-    state.rx_operation_busy = false;
-    return .{
+    const quarantine = GuardedAdmitQuarantine{
         .phase = phase,
         .quarantined_bytes_upper_bound = upper_bound,
     };
+    markQuarantinedPreparedAdmitPending(
+        out,
+        .quarantined,
+        .allocation_quarantined,
+        quarantine,
+    );
+    state.rx_provenance = .{ .lifecycle = .terminal };
+    state.rx_operation_busy = false;
+    return quarantine;
 }
 
 pub fn prepareAdmitGuarded(
@@ -1422,6 +1802,7 @@ pub fn prepareAdmitGuarded(
             .allocator_vtable_addr = @intFromPtr(allocation_owner.vtable),
             .resident_cap = resident_cap,
             .lifecycle = .prepared,
+            .completion = .active,
         };
         out.cleanup_digest = appendCleanupDigest(out);
         out.digest = appendDigest(out);
@@ -1671,6 +2052,7 @@ pub fn prepareAdmitGuarded(
         .replacement_guard = guard,
         .replacement_authority_seal = final_seal,
         .lifecycle = .prepared,
+        .completion = .active,
     };
     out.cleanup_digest = appendCleanupDigest(out);
     out.digest = appendDigest(out);
@@ -1740,6 +2122,7 @@ pub fn prepareAdmit(
         .allocator_vtable_addr = @intFromPtr(allocation_owner.vtable),
         .resident_cap = resident_cap,
         .lifecycle = .prepared,
+        .completion = .active,
     };
     out.cleanup_digest = appendCleanupDigest(out);
     out.digest = appendDigest(out);
@@ -1961,7 +2344,7 @@ fn executeFrozenReplacementCleanup(
 ) GuardedCleanupResult {
     // From this point every callback observes only a tombstone and terminal-busy source. The
     // suffix never reads `prepared` again; all allocator and guard authority lives in `frozen`.
-    prepared.* = .{ .lifecycle = .aborted };
+    markPreparedAdmitTransient(prepared, .aborted);
     state.rx_provenance = .{ .lifecycle = .terminal };
     const cleanup_seal = captureReplacementAuthority(
         frozen.guard,
@@ -1973,7 +2356,7 @@ fn executeFrozenReplacementCleanup(
             0
         else
             frozen.sourceQuarantineUpperBound();
-        prepared.* = .{ .lifecycle = .aborted };
+        markPreparedAdmitTransient(prepared, .aborted);
         state.rx_operation_busy = false;
         return .{ .quarantined_without_free = guardedCleanupQuarantineUpperBound(
             @min(
@@ -2007,7 +2390,7 @@ fn executeFrozenReplacementCleanup(
     const source_matches =
         source_clean_before_free and frozen.source.matches(state, parser, true);
     if (!accepted_after or final_seal == null or !source_matches) {
-        prepared.* = .{ .lifecycle = .aborted };
+        markPreparedAdmitTransient(prepared, .aborted);
         parser.allocator = frozen.source.allocator;
         parser.expected_major = frozen.source.expected_major;
         parser.buf = .empty;
@@ -2016,7 +2399,7 @@ fn executeFrozenReplacementCleanup(
         state.rx_operation_busy = false;
         return .{ .freed_with_drift = frozen.sourceQuarantineUpperBound() };
     }
-    prepared.* = .{ .lifecycle = .aborted };
+    markPreparedAdmitTransient(prepared, .aborted);
     state.rx_provenance = frozen.source.provenance;
     state.rx_operation_busy = false;
     return .freed_clean;
@@ -2030,7 +2413,7 @@ fn cleanupGuardedPreparedReplacement(
 ) GuardedCleanupResult {
     if (!state.rx_operation_busy) {
         const upper_bound = guardedQuarantineUpperBound(prepared);
-        prepared.* = .{ .lifecycle = .quarantined };
+        markPreparedAdmitTransient(prepared, .quarantined);
         state.rx_provenance = .{ .lifecycle = .terminal };
         state.rx_operation_busy = false;
         return .{ .quarantined_without_free = upper_bound };
@@ -2042,7 +2425,7 @@ fn cleanupGuardedPreparedReplacement(
         frozen_source,
     ) orelse {
         const upper_bound = guardedQuarantineUpperBound(prepared);
-        prepared.* = .{ .lifecycle = .quarantined };
+        markPreparedAdmitTransient(prepared, .quarantined);
         state.rx_provenance = .{ .lifecycle = .terminal };
         state.rx_operation_busy = false;
         return .{ .quarantined_without_free = upper_bound };
@@ -2063,13 +2446,19 @@ fn quarantineCommitBeforePublication(
         prepared,
         frozen_source,
     ) orelse {
-        prepared.* = .{ .lifecycle = .quarantined };
-        state.rx_provenance = .{ .lifecycle = .terminal };
-        state.rx_operation_busy = false;
-        return .{ .allocation_quarantined = .{
+        const quarantine = GuardedAdmitQuarantine{
             .phase = .commit_cleanup,
             .quarantined_bytes_upper_bound = replacement_upper_bound,
-        } };
+        };
+        markQuarantinedPreparedAdmitPending(
+            prepared,
+            .quarantined,
+            .allocation_quarantined,
+            quarantine,
+        );
+        state.rx_provenance = .{ .lifecycle = .terminal };
+        state.rx_operation_busy = false;
+        return .{ .allocation_quarantined = quarantine };
     };
     return quarantineFrozenCommitBeforePublication(
         state,
@@ -2088,20 +2477,31 @@ fn quarantineFrozenCommitBeforePublication(
     const cleanup = executeFrozenReplacementCleanup(state, parser, prepared, frozen);
     state.rx_provenance = .{ .lifecycle = .terminal };
     state.rx_operation_busy = false;
-    return switch (cleanup) {
-        .freed_clean => .{ .allocation_quarantined = .{
+    const quarantine = switch (cleanup) {
+        .freed_clean => GuardedAdmitQuarantine{
             .phase = .commit_cleanup,
             .quarantined_bytes_upper_bound = 0,
-        } },
-        .freed_with_drift => |upper_bound| .{ .allocation_quarantined = .{
+        },
+        .freed_with_drift => |upper_bound| GuardedAdmitQuarantine{
             .phase = .commit_cleanup,
             .quarantined_bytes_upper_bound = upper_bound,
-        } },
-        .quarantined_without_free => |upper_bound| .{ .allocation_quarantined = .{
+        },
+        .quarantined_without_free => |upper_bound| GuardedAdmitQuarantine{
             .phase = .commit_cleanup,
             .quarantined_bytes_upper_bound = upper_bound,
-        } },
+        },
     };
+    const lifecycle: PreparedAppendLifecycle = switch (cleanup) {
+        .freed_clean, .freed_with_drift => .aborted,
+        .quarantined_without_free => .quarantined,
+    };
+    markQuarantinedPreparedAdmitPending(
+        prepared,
+        lifecycle,
+        .allocation_quarantined,
+        quarantine,
+    );
+    return .{ .allocation_quarantined = quarantine };
 }
 
 pub fn abortPreparedAdmitGuarded(
@@ -2138,20 +2538,42 @@ pub fn abortPreparedAdmitGuarded(
                 0,
             ) };
         }
-        prepared.* = .{ .lifecycle = .aborted };
+        markOrdinaryPreparedAdmitFinished(prepared, .aborted);
         state.rx_operation_busy = false;
         return .aborted;
     }
-    return switch (cleanupGuardedPreparedReplacement(state, parser, prepared, null)) {
-        .freed_clean => .aborted,
-        .quarantined_without_free => |cleanup_upper_bound| .{ .allocation_quarantined = .{
-            .phase = .abort_cleanup,
-            .quarantined_bytes_upper_bound = cleanup_upper_bound,
-        } },
-        .freed_with_drift => |source_upper_bound| .{ .allocation_quarantined = .{
-            .phase = .abort_cleanup,
-            .quarantined_bytes_upper_bound = source_upper_bound,
-        } },
+    const cleanup = cleanupGuardedPreparedReplacement(state, parser, prepared, null);
+    return switch (cleanup) {
+        .freed_clean => blk: {
+            markOrdinaryPreparedAdmitFinished(prepared, .aborted);
+            break :blk .aborted;
+        },
+        .quarantined_without_free => |cleanup_upper_bound| blk: {
+            const quarantine = GuardedAdmitQuarantine{
+                .phase = .abort_cleanup,
+                .quarantined_bytes_upper_bound = cleanup_upper_bound,
+            };
+            markQuarantinedPreparedAdmitPending(
+                prepared,
+                .quarantined,
+                .allocation_quarantined,
+                quarantine,
+            );
+            break :blk .{ .allocation_quarantined = quarantine };
+        },
+        .freed_with_drift => |source_upper_bound| blk: {
+            const quarantine = GuardedAdmitQuarantine{
+                .phase = .abort_cleanup,
+                .quarantined_bytes_upper_bound = source_upper_bound,
+            };
+            markQuarantinedPreparedAdmitPending(
+                prepared,
+                .aborted,
+                .allocation_quarantined,
+                quarantine,
+            );
+            break :blk .{ .allocation_quarantined = quarantine };
+        },
     };
 }
 
@@ -2180,16 +2602,23 @@ pub fn commitPreparedAdmitGuarded(
         prepared.replacement_guard != null;
     if (!has_replacement_evidence) {
         if (!appendPreparedValid(state, parser, bytes, prepared)) {
-            prepared.* = .{ .lifecycle = .quarantined };
-            state.rx_provenance = .{ .lifecycle = .terminal };
-            state.rx_operation_busy = false;
-            return .{ .allocation_quarantined = .{
+            const quarantine = GuardedAdmitQuarantine{
                 .phase = .commit_cleanup,
                 .quarantined_bytes_upper_bound = 0,
-            } };
+            };
+            markQuarantinedPreparedAdmitPending(
+                prepared,
+                .quarantined,
+                .allocation_quarantined,
+                quarantine,
+            );
+            state.rx_provenance = .{ .lifecycle = .terminal };
+            state.rx_operation_busy = false;
+            return .{ .allocation_quarantined = quarantine };
         }
         commitPreparedAdmit(state, parser, bytes, prepared) catch
             @panic("validated callback-free RX append commit failed");
+        markOrdinaryPreparedAdmitFinished(prepared, .committed);
         return .committed;
     }
     const replacement_upper_bound = guardedQuarantineUpperBound(prepared);
@@ -2236,7 +2665,7 @@ pub fn commitPreparedAdmitGuarded(
     };
     // Consume every prepared authority before the first cleanup callback. The entire commit and
     // replacement-abort plans now live in stack-local `frozen` values.
-    prepared.* = .{ .lifecycle = .committed };
+    markPreparedAdmitTransient(prepared, .committed);
     state.rx_provenance = .{ .lifecycle = .terminal };
     const cleanup_seal = captureReplacementAuthority(
         frozen.guard,
@@ -2292,19 +2721,25 @@ pub fn commitPreparedAdmitGuarded(
     else
         null;
     if (!cleanup_ok or final_seal == null or !published.matches(state, parser, true)) {
-        prepared.* = .{ .lifecycle = .committed };
+        const quarantine = GuardedAdmitQuarantine{
+            .phase = .commit_cleanup,
+            .quarantined_bytes_upper_bound = replacement_upper_bound,
+        };
+        markQuarantinedPreparedAdmitPending(
+            prepared,
+            .committed,
+            .post_commit_quarantined,
+            quarantine,
+        );
         parser.allocator = published.allocator;
         parser.expected_major = published.expected_major;
         parser.buf = .empty;
         parser.head = 0;
         state.rx_provenance = .{ .lifecycle = .terminal };
         state.rx_operation_busy = false;
-        return .{ .post_commit_quarantined = .{
-            .phase = .commit_cleanup,
-            .quarantined_bytes_upper_bound = replacement_upper_bound,
-        } };
+        return .{ .post_commit_quarantined = quarantine };
     }
-    prepared.* = .{ .lifecycle = .committed };
+    markOrdinaryPreparedAdmitFinished(prepared, .committed);
     state.rx_provenance = published.provenance;
     state.rx_operation_busy = false;
     return .committed;
@@ -2326,6 +2761,7 @@ pub fn commitPreparedAdmit(
     // No allocation, callback or outer action is permitted below this ReleaseFast validation.
     commitAdmitUnchecked(state, parser, bytes, prepared);
     state.rx_operation_busy = false;
+    markOrdinaryPreparedAdmitFinished(prepared, .committed);
 }
 
 pub fn abortPreparedAdmit(
@@ -2343,6 +2779,7 @@ pub fn abortPreparedAdmit(
         return error.InvalidState;
     prepared.deinitInternal();
     state.rx_operation_busy = false;
+    markOrdinaryPreparedAdmitFinished(prepared, .aborted);
 }
 
 pub fn prepareRxBind(
@@ -3262,6 +3699,12 @@ test "guarded RX admit accepts a sealed disjoint replacement and returns typed c
     try std.testing.expectEqual(@as(u64, 6), state.rx_provenance.rx_absolute_next);
     try std.testing.expect(parserSealValid(&state, &parser));
     try std.testing.expect(!state.rx_operation_busy);
+    try std.testing.expectEqual(
+        PreparedAdmitCompletion.ordinary_finished,
+        prepared.completion,
+    );
+    try std.testing.expect(resetFinishedPreparedAdmit(&prepared));
+    try std.testing.expect(preparedRxAppendPristine(&prepared));
 }
 
 test "guarded RX admit spare-capacity path invokes no guard callback" {
@@ -3625,6 +4068,12 @@ test "guarded RX admit abort tombstones before exact-one replacement free" {
             .ordinary_failure,
     );
     try std.testing.expectEqual(frees_before + 1, allocation_context.free_calls);
+    try std.testing.expectEqual(
+        PreparedAdmitCompletion.ordinary_finished,
+        prepared.completion,
+    );
+    try std.testing.expect(resetFinishedPreparedAdmit(&prepared));
+    try std.testing.expect(preparedRxAppendPristine(&prepared));
 }
 
 test "guarded RX admit abort free callback drift cannot restore authority" {
@@ -3663,6 +4112,10 @@ test "guarded RX admit abort free callback drift cannot restore authority" {
     try std.testing.expectEqual(frees_before + 1, allocation_context.free_calls);
     try std.testing.expect(state.rx_provenance.lifecycle == .terminal);
     try std.testing.expectEqual(@as(usize, 0), parser.buf.capacity);
+    try std.testing.expectEqual(
+        PreparedAdmitCompletion.quarantine_pending,
+        prepared.completion,
+    );
     try std.testing.expect(
         abortPreparedAdmitGuarded(&state, &parser, &prepared) ==
             .ordinary_failure,
@@ -4240,6 +4693,10 @@ test "guarded RX admit commit reports post-publication cleanup drift" {
     try std.testing.expect(state.rx_provenance.lifecycle == .terminal);
     try std.testing.expectEqual(@as(usize, 0), parser.buf.capacity);
     try std.testing.expect(prepared.lifecycle == .committed);
+    try std.testing.expectEqual(
+        PreparedAdmitCompletion.quarantine_pending,
+        prepared.completion,
+    );
 }
 
 test "prepared RX append preserves source on prepare failure and commits replacement exactly" {

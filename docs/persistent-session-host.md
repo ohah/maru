@@ -6681,6 +6681,74 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             `advanceValidatedPartial` 결과를 소비하도록 고정한다. 분해와 proof seal이 green이 아니면 d2c
             socket callback을 추가하지 않는다.
 
+            구조 분해 뒤의 dependency와 authority 계약은 다음과 같다.
+
+            - `client_external_rx_turn.zig`는 `client_external_mode`의 sealed parser API,
+              `external_rx_intent.moveFrame`과 partial view 타입만 단방향 import한다.
+              `ExternalPumpStorage`, ledger, persistent owner, socket/fd와 callback을 알지 않는다.
+            - `traverseBuffered`는 caller가 이미 검증한 external parser/state, final-address parse scratch와
+              intent handle, authority/allocation guard, target stream과 기존 partial view만 빌린다. 반환값은
+              pointer-free `TraversalSummary` 또는 닫힌 `TraversalFailure`이며 payload나 mutation capability를
+              반환하지 않는다. intent payload의 유일한 owner는 호출 전후 모두 caller의 sealed handle이다.
+            - `TraversalSummary`는 `rx_bytes`, `rx_frames`, `classified_count`, final parser readiness,
+              frame budget exhaustion과 intent owner에 봉인된 final partial view만 담는다.
+              `TraversalFailure`는 protocol/resource/invariant/quarantine 원인과 이미 소비한 byte/frame 수만
+              담는다. traversal은 실패 전에 intent를 canonical terminal 또는 aborted tombstone으로 닫으며
+              cleanup capability를 반환하지 않는다. pump는 이 결과를 재분류하지 않고 기존 terminal policy로
+              한 번만 번역한다.
+            - `client_external_pump.zig`의 owner-held orchestration은 inherited blocker와 live FIFO를 먼저
+              처리하고, scratch/authority/allocation guard를 준비한 뒤 `traverseBuffered`를 정확히 한 번 호출한다.
+              그 뒤에만 aggregate prepare/commit 또는 canonical abort를 수행한다. traversal module은
+              `ExternalWholeTurnLease`를 만들거나 해제할 수 없다.
+            - 대형 hostile fixture의 wire/owner 생성은 test 전용
+              `client_external_rx_turn_test_support.zig`로 이동한다. 제품 module이 test-support를 import하거나
+              test-support가 private owner writer를 새로 정의하는 것은 boundary gate가 금지한다.
+
+            ```zig
+            const TraversalInput = struct {
+                state: *client_external_mode.State,
+                parser: *framing.FrameParser,
+                parse_scratch: *client_external_mode.RxParseScratch,
+                intent: *external_rx_intent.ExternalRxIntentHandle,
+                authority: external_rx_intent.AuthorityOps,
+                payload_guard: *const client_external_mode.PayloadAllocationGuard,
+                target_stream_id: u64,
+                partial: ?external_rx_demux.ValidatedPartialView,
+            };
+
+            const TraversalSummary = struct {
+                rx_bytes: usize,
+                rx_frames: usize,
+                classified_count: u8,
+                final_readiness: client_external_mode.RxParserReadiness,
+                budget_exhausted: bool,
+                partial: ?external_rx_demux.ValidatedPartialView,
+            };
+
+            const TraversalFailure = struct {
+                reason: enum {
+                    protocol_error,
+                    resource_exhausted,
+                    invariant_failure,
+                    allocation_quarantined,
+                },
+                rx_bytes: usize,
+                rx_frames: usize,
+            };
+            ```
+
+            TDD gate는 extraction 전 기존 d2b3d 행위 캡처를 먼저 고정한다. 1/31/32-byte header,
+            payload-last-byte partial, optional skip, 1/64/65 frame, partial continuation/end/mismatch/cap+1,
+            late terminal, parser allocation fail-index와 payload alias quarantine을 같은 fixture table로
+            extraction 전후 실행한다. 구조 이동에 앞서 classifier가
+            `advanceValidatedPartial`을 정확히 한 번 계산하고 그 before/after/header/range/identity를
+            intent owner digest에 봉인한다. `moveFrame` 성공 뒤 traversal은 검증된 intent accessor가 돌려주는
+            after view만 다음 frame 입력으로 사용하며 partial 전이를 다시 계산하지 않는다.
+            추가 tokenizer gate는 `traverseBuffered` definition exact-one,
+            제품 call exact-one, `nextOutcomeWithRangeGuarded`와 `moveFrame` call이 traversal module에만
+            존재함, `advanceValidatedPartial` call이 classifier implementation에만 존재함, unguarded parser
+            call·raw `FrameParser.buf/head` 접근·socket read가 0임을 검증한다.
+
             - **d2c — injected nonblocking read/admit:** mechanics는 d1의 `maxReadable`,
               `prepareAdmit→commitPreparedAdmit|abortPreparedAdmit`, `nextOutcomeWithRange`만 사용하며
               `FrameParser.buf/head`, absolute offset, framing decode를 재구현하지 않는다. 제품 callback과 fixture
@@ -6695,7 +6763,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                   socket_error,
               };
 
-              const RxOps = struct {
+              const RxReadOps = struct {
                   context: *anyopaque,
                   read: *const fn (
                       context: *anyopaque,
@@ -6703,13 +6771,22 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                       destination: []u8,
                   ) RxReadOutcome,
               };
+
+              const RxTurnOps = struct {
+                  buffered: BufferedRxOps,
+                  transport: RxReadOps,
+              };
               ```
 
               실제 socket에서 accept한 bytes는 turn당 정확히 최대 1 MiB이며 `n <= destination.len`을 callback
-              반환 직후 검증한다. read destination 길이는 항상 `maxReadable.bytes` 이하이고 zero-length read는
-              호출하지 않는다. callback 반환 뒤 storage operation lease, scratch lifecycle/digest, destination exact
+              반환 직후 검증한다. `.bytes`는 `1...destination.len`만 허용하고 0은 `.eof`가 아니라 invalid
+              callback terminal이다. read destination 길이는 항상 `maxReadable.bytes` 이하이고 zero-length read는
+              호출하지 않는다. d2c부터 final-address `ExternalRxTurnScratch`가 1 MiB read backing을 소유하고 d2d는
+              같은 backing에 authority permit을 추가해 합성한다. callback 반환 뒤 storage operation lease,
+              scratch lifecycle/digest, destination exact
               addr/len, parser/provenance/authority generation을 bytes dereference/admit 전에 다시 검증한다. EINTR은
-              방향당 최대 8회이고 9번째는 socket terminal이다. `would_block`만 같은
+              한 RX turn의 연속 read 기준 최대 8회이고 성공 bytes 또는 `would_block`에서 카운터를 reset한다.
+              9번째 연속 EINTR은 socket terminal이다. `would_block`만 같은
               aggregate call의 local drain evidence를 만든다. EOF/hard error, requested 초과, invalid seal/counter,
               incomplete+resident exhaustion, admit OOM/drift는 authority false의 typed terminal이며
               semantic/ledger/TX publish 0이다. 한 read가 65개 frame을 담아도 bytes admission은 허용하고 64개만

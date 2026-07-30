@@ -166,6 +166,7 @@ const BorrowLifecycle = enum { empty, borrowed, settled, aborted };
 const BorrowUseLifecycle = enum { empty, active, released, aborted };
 const WouldBlockSeedLifecycle = enum { empty, prepared, consumed, aborted };
 const PermitSeedLifecycle = enum { unminted, prepared, consumed, aborted };
+const PreparedAdmitUseLifecycle = enum { empty, active, finished, aborted };
 
 pub const StoppedBorrow = struct {
     saved_self_addr: usize = 0,
@@ -212,6 +213,23 @@ pub const BorrowUsePermit = struct {
     seed_lifecycle: PermitSeedLifecycle = .unminted,
     seed_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
     lifecycle: BorrowUseLifecycle = .empty,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+pub const PreparedAdmitUsePermit = struct {
+    saved_self_addr: usize = 0,
+    scratch_addr: usize = 0,
+    scratch_generation: u64 = 0,
+    receipt_addr: usize = 0,
+    borrow_addr: usize = 0,
+    use_permit_addr: usize = 0,
+    seed_addr: usize = 0,
+    frozen_outer_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    frozen_receipt: CollectReceipt = undefined,
+    frozen_borrow: StoppedBorrow = .{},
+    frozen_use_permit: BorrowUsePermit = .{},
+    frozen_seed: WouldBlockSeed = .{},
+    lifecycle: PreparedAdmitUseLifecycle = .empty,
     digest: external_owner_seal.Digest = [_]u8{0} ** 32,
 };
 
@@ -283,6 +301,9 @@ pub const ExternalRxReadScratch = struct {
     active_borrow_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
     active_use_permit_addr: usize = 0,
     active_use_permit_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    active_prepared_use_permit_addr: usize = 0,
+    active_prepared_use_permit_digest: external_owner_seal.Digest =
+        [_]u8{0} ** 32,
     validation_bytes_checked: usize = 0,
     backing: [max_rx_read_bytes_per_turn]u8 = undefined,
     digest: external_owner_seal.Digest = [_]u8{0} ** 32,
@@ -307,6 +328,8 @@ pub const ExternalRxReadScratch = struct {
         out.active_borrow_digest = [_]u8{0} ** 32;
         out.active_use_permit_addr = 0;
         out.active_use_permit_digest = [_]u8{0} ** 32;
+        out.active_prepared_use_permit_addr = 0;
+        out.active_prepared_use_permit_digest = [_]u8{0} ** 32;
         out.validation_bytes_checked = 0;
         out.digest = scratchDigest(out);
         return true;
@@ -338,6 +361,12 @@ pub const ExternalRxReadScratch = struct {
             !std.mem.allEqual(u8, &self.active_borrow_digest, 0) or
             self.active_use_permit_addr != 0 or
             !std.mem.allEqual(u8, &self.active_use_permit_digest, 0) or
+            self.active_prepared_use_permit_addr != 0 or
+            !std.mem.allEqual(
+                u8,
+                &self.active_prepared_use_permit_digest,
+                0,
+            ) or
             self.validation_bytes_checked != 0 or
             !std.mem.eql(u8, &self.digest, &scratchDigest(self)))
             return false;
@@ -387,6 +416,8 @@ fn scratchDigest(
     writer.writeBytes(&scratch.active_borrow_digest);
     writer.writeUsize(scratch.active_use_permit_addr);
     writer.writeBytes(&scratch.active_use_permit_digest);
+    writer.writeUsize(scratch.active_prepared_use_permit_addr);
+    writer.writeBytes(&scratch.active_prepared_use_permit_digest);
     writer.writeUsize(scratch.validation_bytes_checked);
     return writer.finish();
 }
@@ -447,6 +478,63 @@ fn borrowUsePermitDigest(
     writer.writeUsize(@intFromPtr(permit.guard_current));
     writer.writeU8(@intFromEnum(permit.seed_lifecycle));
     writer.writeBytes(&permit.seed_digest);
+    writer.writeU8(@intFromEnum(permit.lifecycle));
+    return writer.finish();
+}
+
+fn scratchPreparedOuterDigest(
+    scratch: *const ExternalRxReadScratch,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARURPO1");
+    writer.writeUsize(scratch.saved_self_addr);
+    writer.writeU64(scratch.generation);
+    writer.writeU8(@intFromEnum(scratch.lifecycle));
+    writer.writeUsize(@intFromPtr(&scratch.backing));
+    writer.writeUsize(scratch.backing.len);
+    writer.writeUsize(scratch.staged_len);
+    writer.writeU8(scratch.attempt_count);
+    writer.writeU8(scratch.chunk_count);
+    writer.writeU8(scratch.consecutive_interrupts);
+    for (scratch.chunks) |chunk| {
+        writer.writeUsize(chunk.start);
+        writer.writeUsize(chunk.len);
+        writer.writeBytes(&chunk.digest);
+    }
+    writer.writeUsize(scratch.attempt.saved_self_addr);
+    writer.writeU64(scratch.attempt.attempt_generation);
+    writer.writeUsize(scratch.attempt.destination_addr);
+    writer.writeUsize(scratch.attempt.destination_len);
+    writer.writeUsize(scratch.attempt.ops_addr);
+    writer.writeU8(@intFromEnum(scratch.attempt.lifecycle));
+    writer.writeBytes(&scratch.attempt.digest);
+    writer.writeU64(scratch.would_block.attempt_generation);
+    writer.writeU8(@intFromEnum(scratch.would_block.lifecycle));
+    writer.writeBytes(&scratch.would_block.digest);
+    writer.writeBytes(&scratch.spent_receipt_digest);
+    writer.writeUsize(scratch.active_borrow_addr);
+    writer.writeBytes(&scratch.active_borrow_digest);
+    writer.writeUsize(scratch.active_use_permit_addr);
+    writer.writeBytes(&scratch.active_use_permit_digest);
+    writer.writeUsize(scratch.validation_bytes_checked);
+    return writer.finish();
+}
+
+fn preparedAdmitUsePermitDigest(
+    permit: *const PreparedAdmitUsePermit,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARURPU1");
+    writer.writeUsize(permit.saved_self_addr);
+    writer.writeUsize(permit.scratch_addr);
+    writer.writeU64(permit.scratch_generation);
+    writer.writeUsize(permit.receipt_addr);
+    writer.writeUsize(permit.borrow_addr);
+    writer.writeUsize(permit.use_permit_addr);
+    writer.writeUsize(permit.seed_addr);
+    writer.writeBytes(&permit.frozen_outer_digest);
+    writer.writeBytes(&receiptDigest(&permit.frozen_receipt));
+    writer.writeBytes(&borrowDigest(&permit.frozen_borrow));
+    writer.writeBytes(&borrowUsePermitDigest(&permit.frozen_use_permit));
+    writer.writeBytes(&wouldBlockSeedDigest(&permit.frozen_seed));
     writer.writeU8(@intFromEnum(permit.lifecycle));
     return writer.finish();
 }
@@ -1365,6 +1453,163 @@ pub fn beginStoppedUse(
     return true;
 }
 
+fn preparedAdmitUsePermitMatches(
+    scratch: *const ExternalRxReadScratch,
+    permit: *const PreparedAdmitUsePermit,
+) bool {
+    return permit.saved_self_addr == @intFromPtr(permit) and
+        permit.scratch_addr == @intFromPtr(scratch) and
+        permit.scratch_generation == scratch.generation and
+        permit.lifecycle == .active and
+        std.mem.eql(
+            u8,
+            &permit.digest,
+            &preparedAdmitUsePermitDigest(permit),
+        ) and
+        scratch.active_prepared_use_permit_addr == @intFromPtr(permit) and
+        std.mem.eql(
+            u8,
+            &scratch.active_prepared_use_permit_digest,
+            &permit.digest,
+        );
+}
+
+fn preparedAdmitFrozenStateMatches(
+    scratch: *const ExternalRxReadScratch,
+    receipt: *const CollectReceipt,
+    borrow: *const StoppedBorrow,
+    use_permit: *const BorrowUsePermit,
+    seed: *const WouldBlockSeed,
+    permit: *const PreparedAdmitUsePermit,
+) bool {
+    return preparedAdmitUsePermitMatches(scratch, permit) and
+        permit.receipt_addr == @intFromPtr(receipt) and
+        permit.borrow_addr == @intFromPtr(borrow) and
+        permit.use_permit_addr == @intFromPtr(use_permit) and
+        permit.seed_addr == @intFromPtr(seed) and
+        std.mem.eql(
+            u8,
+            &permit.frozen_outer_digest,
+            &scratchPreparedOuterDigest(scratch),
+        ) and
+        std.meta.eql(permit.frozen_receipt, receipt.*) and
+        std.meta.eql(permit.frozen_borrow, borrow.*) and
+        std.meta.eql(permit.frozen_use_permit, use_permit.*) and
+        std.meta.eql(permit.frozen_seed, seed.*);
+}
+
+pub fn beginPreparedAdmitUse(
+    scratch: *ExternalRxReadScratch,
+    receipt: *const CollectReceipt,
+    borrow: *const StoppedBorrow,
+    use_permit: *BorrowUsePermit,
+    authorized_seed: *const WouldBlockSeed,
+    out: *PreparedAdmitUsePermit,
+) bool {
+    const ranges = [_]ProtectedRange{
+        .{ .addr = @intFromPtr(scratch), .len = @sizeOf(ExternalRxReadScratch) },
+        .{ .addr = @intFromPtr(receipt), .len = @sizeOf(CollectReceipt) },
+        .{ .addr = @intFromPtr(borrow), .len = @sizeOf(StoppedBorrow) },
+        .{ .addr = @intFromPtr(use_permit), .len = @sizeOf(BorrowUsePermit) },
+        .{ .addr = @intFromPtr(authorized_seed), .len = @sizeOf(WouldBlockSeed) },
+        .{ .addr = @intFromPtr(out), .len = @sizeOf(PreparedAdmitUsePermit) },
+    };
+    for (ranges, 0..) |left, index| {
+        if (rangeEnd(left.addr, left.len) == null) return false;
+        for (ranges[index + 1 ..]) |right|
+            if (rangesOverlap(left.addr, left.len, right.addr, right.len))
+                return false;
+    }
+    if (scratch.active_prepared_use_permit_addr != 0 or
+        !std.mem.allEqual(
+            u8,
+            &scratch.active_prepared_use_permit_digest,
+            0,
+        ) or
+        !client_external_mode.preparedRxAppendPristine(
+            &scratch.prepared_admit,
+        ) or
+        !permitMatchesBorrow(scratch, receipt, borrow, use_permit) or
+        !authorizedSeedMatchesPermit(scratch, use_permit) or
+        out.saved_self_addr != 0 or out.lifecycle != .empty or
+        !guardInactiveForOperation(
+            scratch,
+            use_permit,
+            receipt,
+            borrow,
+            authorized_seed,
+        ))
+        return false;
+    out.* = .{
+        .saved_self_addr = @intFromPtr(out),
+        .scratch_addr = @intFromPtr(scratch),
+        .scratch_generation = scratch.generation,
+        .receipt_addr = @intFromPtr(receipt),
+        .borrow_addr = @intFromPtr(borrow),
+        .use_permit_addr = @intFromPtr(use_permit),
+        .seed_addr = @intFromPtr(authorized_seed),
+        .frozen_outer_digest = scratchPreparedOuterDigest(scratch),
+        .frozen_receipt = receipt.*,
+        .frozen_borrow = borrow.*,
+        .frozen_use_permit = use_permit.*,
+        .frozen_seed = authorized_seed.*,
+        .lifecycle = .active,
+    };
+    out.digest = preparedAdmitUsePermitDigest(out);
+    scratch.active_prepared_use_permit_addr = @intFromPtr(out);
+    scratch.active_prepared_use_permit_digest = out.digest;
+    scratch.digest = scratchDigest(scratch);
+    return true;
+}
+
+pub fn finishPreparedAdmitUse(
+    scratch: *ExternalRxReadScratch,
+    receipt: *const CollectReceipt,
+    borrow: *const StoppedBorrow,
+    use_permit: *BorrowUsePermit,
+    authorized_seed: *const WouldBlockSeed,
+    permit: *PreparedAdmitUsePermit,
+) bool {
+    if (!preparedAdmitFrozenStateMatches(
+        scratch,
+        receipt,
+        borrow,
+        use_permit,
+        authorized_seed,
+        permit,
+    ) or !client_external_mode.preparedRxAppendPristine(
+        &scratch.prepared_admit,
+    ))
+        return false;
+    const frozen_token = permit.*;
+    const frozen_prepared = scratch.prepared_admit;
+    if (!guardInactiveForOperation(
+        scratch,
+        use_permit,
+        receipt,
+        borrow,
+        authorized_seed,
+    ) or !std.meta.eql(frozen_token, permit.*) or
+        !std.meta.eql(frozen_prepared, scratch.prepared_admit) or
+        !preparedAdmitFrozenStateMatches(
+            scratch,
+            receipt,
+            borrow,
+            use_permit,
+            authorized_seed,
+            permit,
+        ) or !client_external_mode.preparedRxAppendPristine(
+        &scratch.prepared_admit,
+    ))
+        return false;
+    permit.lifecycle = .finished;
+    permit.digest = preparedAdmitUsePermitDigest(permit);
+    scratch.active_prepared_use_permit_addr = 0;
+    scratch.active_prepared_use_permit_digest = [_]u8{0} ** 32;
+    scratch.digest = scratchDigest(scratch);
+    return true;
+}
+
 fn seedMatchesPermit(
     scratch: *const ExternalRxReadScratch,
     permit: *const BorrowUsePermit,
@@ -1397,7 +1642,13 @@ pub fn mintBorrowedWouldBlockSeed(
     permit: *BorrowUsePermit,
     out: *WouldBlockSeed,
 ) bool {
-    if (@intFromPtr(out) != permit.authorized_seed_addr or
+    if (scratch.active_prepared_use_permit_addr != 0 or
+        !std.mem.allEqual(
+            u8,
+            &scratch.active_prepared_use_permit_digest,
+            0,
+        ) or
+        @intFromPtr(out) != permit.authorized_seed_addr or
         rangesOverlap(
             @intFromPtr(out),
             @sizeOf(WouldBlockSeed),
@@ -1445,7 +1696,12 @@ fn accountWouldBlockSeed(
     seed: *WouldBlockSeed,
     lifecycle: WouldBlockSeedLifecycle,
 ) ?u64 {
-    if (!seedMatchesPermit(scratch, permit, seed, .prepared))
+    if (scratch.active_prepared_use_permit_addr != 0 or
+        !std.mem.allEqual(
+            u8,
+            &scratch.active_prepared_use_permit_digest,
+            0,
+        ) or !seedMatchesPermit(scratch, permit, seed, .prepared))
         return null;
     const generation = seed.attempt_generation;
     if (!guardInactiveForOperation(
@@ -1519,7 +1775,12 @@ pub fn endStoppedUse(
     borrow: *const StoppedBorrow,
     permit: *BorrowUsePermit,
 ) bool {
-    if (!permitMatchesBorrow(scratch, receipt, borrow, permit) or
+    if (scratch.active_prepared_use_permit_addr != 0 or
+        !std.mem.allEqual(
+            u8,
+            &scratch.active_prepared_use_permit_digest,
+            0,
+        ) or !permitMatchesBorrow(scratch, receipt, borrow, permit) or
         permit.seed_lifecycle == .prepared or
         !authorizedSeedMatchesPermit(scratch, permit) or
         !guardInactiveForOperation(
@@ -1548,6 +1809,12 @@ pub fn settleStopped(
 ) bool {
     if (scratch.active_use_permit_addr != 0 or
         !std.mem.allEqual(u8, &scratch.active_use_permit_digest, 0) or
+        scratch.active_prepared_use_permit_addr != 0 or
+        !std.mem.allEqual(
+            u8,
+            &scratch.active_prepared_use_permit_digest,
+            0,
+        ) or
         stoppedBytes(scratch, receipt, borrow) == null or
         !client_external_mode.preparedRxAppendPristine(
             &scratch.prepared_admit,
@@ -1579,6 +1846,13 @@ pub fn teardown(
     if (scratch.active_use_permit_addr != 0 or
         !std.mem.allEqual(u8, &scratch.active_use_permit_digest, 0))
         return .busy;
+    if (scratch.active_prepared_use_permit_addr != 0 or
+        !std.mem.allEqual(
+            u8,
+            &scratch.active_prepared_use_permit_digest,
+            0,
+        ))
+        return .busy;
     if (!client_external_mode.preparedRxAppendPristine(
         &scratch.prepared_admit,
     ))
@@ -1595,6 +1869,12 @@ pub fn teardown(
             std.mem.allEqual(u8, &scratch.active_borrow_digest, 0) and
             scratch.active_use_permit_addr == 0 and
             std.mem.allEqual(u8, &scratch.active_use_permit_digest, 0) and
+            scratch.active_prepared_use_permit_addr == 0 and
+            std.mem.allEqual(
+                u8,
+                &scratch.active_prepared_use_permit_digest,
+                0,
+            ) and
             scratch.validation_bytes_checked == 0 and
             stagedPrefixIntact(scratch) and
             std.mem.eql(u8, &scratch.digest, &scratchDigest(scratch));
@@ -1624,6 +1904,12 @@ pub fn teardown(
             std.mem.allEqual(u8, &scratch.active_borrow_digest, 0) and
             scratch.active_use_permit_addr == 0 and
             std.mem.allEqual(u8, &scratch.active_use_permit_digest, 0) and
+            scratch.active_prepared_use_permit_addr == 0 and
+            std.mem.allEqual(
+                u8,
+                &scratch.active_prepared_use_permit_digest,
+                0,
+            ) and
             scratch.validation_bytes_checked == 0 and
             stagedPrefixIntact(scratch),
         else => false,
@@ -1837,6 +2123,16 @@ const BorrowUseSeedMutation = enum {
     digest,
 };
 
+const PreparedUseGuardMutation = enum {
+    scratch,
+    receipt,
+    borrow,
+    use_permit,
+    seed,
+    token,
+    prepared,
+};
+
 const BorrowUseGuardProbe = struct {
     state: ?bool = false,
     seed: ?*WouldBlockSeed = null,
@@ -1845,6 +2141,10 @@ const BorrowUseGuardProbe = struct {
     mutate_receipt: bool = false,
     borrow: ?*StoppedBorrow = null,
     mutate_borrow: bool = false,
+    scratch: ?*ExternalRxReadScratch = null,
+    use_permit: ?*BorrowUsePermit = null,
+    prepared_token: ?*PreparedAdmitUsePermit = null,
+    prepared_mutation: ?PreparedUseGuardMutation = null,
 
     fn current(context: *anyopaque, _: usize) ?bool {
         const self: *BorrowUseGuardProbe = @ptrCast(@alignCast(context));
@@ -1865,6 +2165,15 @@ const BorrowUseGuardProbe = struct {
             self.receipt.?.attempts +%= 1;
         if (self.mutate_borrow)
             self.borrow.?.bytes_len +%= 1;
+        if (self.prepared_mutation) |mutation| switch (mutation) {
+            .scratch => self.scratch.?.staged_len +%= 1,
+            .receipt => self.receipt.?.attempts +%= 1,
+            .borrow => self.borrow.?.bytes_len +%= 1,
+            .use_permit => self.use_permit.?.digest[0] +%= 1,
+            .seed => self.seed.?.digest[0] +%= 1,
+            .token => self.prepared_token.?.digest[0] +%= 1,
+            .prepared => self.scratch.?.prepared_admit.expected_start = 1,
+        };
         return self.state;
     }
 };
@@ -2240,4 +2549,251 @@ test "C4c end revalidates receipt borrow and authorized seed after guard callbac
             &permit,
         ));
     }
+}
+
+test "C4d prepared admit permit blocks stopped-use authority until pristine finish" {
+    const scratch = try std.testing.allocator.create(ExternalRxReadScratch);
+    defer std.testing.allocator.destroy(scratch);
+    var receipt: CollectReceipt = undefined;
+    var borrow: StoppedBorrow = .{};
+    try makeStoppedWouldBlockFixture(scratch, &receipt, &borrow);
+    var guard_probe: BorrowUseGuardProbe = .{};
+    const guard = BorrowUseGuardOps{
+        .context = &guard_probe,
+        .context_len = @sizeOf(BorrowUseGuardProbe),
+        .current = BorrowUseGuardProbe.current,
+    };
+    var seed: WouldBlockSeed = .{};
+    var use_permit: BorrowUsePermit = .{};
+    try std.testing.expect(beginStoppedUse(
+        scratch,
+        &receipt,
+        &borrow,
+        &guard,
+        &seed,
+        &use_permit,
+    ));
+    var prepared_permit: PreparedAdmitUsePermit = .{};
+    try std.testing.expect(beginPreparedAdmitUse(
+        scratch,
+        &receipt,
+        &borrow,
+        &use_permit,
+        &seed,
+        &prepared_permit,
+    ));
+    try std.testing.expect(!mintBorrowedWouldBlockSeed(
+        scratch,
+        &receipt,
+        &borrow,
+        &use_permit,
+        &seed,
+    ));
+    try std.testing.expect(!endStoppedUse(
+        scratch,
+        &receipt,
+        &borrow,
+        &use_permit,
+    ));
+    try std.testing.expect(!settleStopped(
+        scratch,
+        &receipt,
+        &borrow,
+        .{ .staged = .consumed, .would_block = .consumed },
+    ));
+    try std.testing.expectEqual(
+        ReadScratchTeardownResult.busy,
+        teardown(scratch),
+    );
+    scratch.prepared_admit.expected_start = 1;
+    try std.testing.expect(!finishPreparedAdmitUse(
+        scratch,
+        &receipt,
+        &borrow,
+        &use_permit,
+        &seed,
+        &prepared_permit,
+    ));
+    scratch.prepared_admit = .{};
+    try std.testing.expect(finishPreparedAdmitUse(
+        scratch,
+        &receipt,
+        &borrow,
+        &use_permit,
+        &seed,
+        &prepared_permit,
+    ));
+    try std.testing.expect(!finishPreparedAdmitUse(
+        scratch,
+        &receipt,
+        &borrow,
+        &use_permit,
+        &seed,
+        &prepared_permit,
+    ));
+    try std.testing.expect(mintBorrowedWouldBlockSeed(
+        scratch,
+        &receipt,
+        &borrow,
+        &use_permit,
+        &seed,
+    ));
+}
+
+test "C4d prepared admit finish rejects every callback-visible authority drift" {
+    inline for (std.meta.tags(PreparedUseGuardMutation)) |mutation| {
+        const scratch = try std.testing.allocator.create(ExternalRxReadScratch);
+        defer std.testing.allocator.destroy(scratch);
+        var receipt: CollectReceipt = undefined;
+        var borrow: StoppedBorrow = .{};
+        try makeStoppedWouldBlockFixture(scratch, &receipt, &borrow);
+        var guard_probe: BorrowUseGuardProbe = .{};
+        const guard = BorrowUseGuardOps{
+            .context = &guard_probe,
+            .context_len = @sizeOf(BorrowUseGuardProbe),
+            .current = BorrowUseGuardProbe.current,
+        };
+        var seed: WouldBlockSeed = .{};
+        var use_permit: BorrowUsePermit = .{};
+        try std.testing.expect(beginStoppedUse(
+            scratch,
+            &receipt,
+            &borrow,
+            &guard,
+            &seed,
+            &use_permit,
+        ));
+        var prepared_permit: PreparedAdmitUsePermit = .{};
+        try std.testing.expect(beginPreparedAdmitUse(
+            scratch,
+            &receipt,
+            &borrow,
+            &use_permit,
+            &seed,
+            &prepared_permit,
+        ));
+        const frozen_receipt = receipt;
+        const frozen_borrow = borrow;
+        const frozen_use_permit = use_permit;
+        const frozen_seed = seed;
+        const frozen_token = prepared_permit;
+        const frozen_staged_len = scratch.staged_len;
+        guard_probe.scratch = scratch;
+        guard_probe.receipt = &receipt;
+        guard_probe.borrow = &borrow;
+        guard_probe.use_permit = &use_permit;
+        guard_probe.seed = &seed;
+        guard_probe.prepared_token = &prepared_permit;
+        guard_probe.prepared_mutation = mutation;
+        try std.testing.expect(!finishPreparedAdmitUse(
+            scratch,
+            &receipt,
+            &borrow,
+            &use_permit,
+            &seed,
+            &prepared_permit,
+        ));
+        try std.testing.expectEqual(
+            ReadScratchTeardownResult.busy,
+            teardown(scratch),
+        );
+
+        receipt = frozen_receipt;
+        borrow = frozen_borrow;
+        use_permit = frozen_use_permit;
+        seed = frozen_seed;
+        prepared_permit = frozen_token;
+        scratch.staged_len = frozen_staged_len;
+        scratch.prepared_admit = .{};
+        guard_probe.prepared_mutation = null;
+        try std.testing.expect(finishPreparedAdmitUse(
+            scratch,
+            &receipt,
+            &borrow,
+            &use_permit,
+            &seed,
+            &prepared_permit,
+        ));
+    }
+}
+
+test "C4d prepared admit permit rejects alias overflow copy and stale credentials" {
+    const scratch = try std.testing.allocator.create(ExternalRxReadScratch);
+    defer std.testing.allocator.destroy(scratch);
+    var receipt: CollectReceipt = undefined;
+    var borrow: StoppedBorrow = .{};
+    try makeStoppedWouldBlockFixture(scratch, &receipt, &borrow);
+    var guard_probe: BorrowUseGuardProbe = .{};
+    const guard = BorrowUseGuardOps{
+        .context = &guard_probe,
+        .context_len = @sizeOf(BorrowUseGuardProbe),
+        .current = BorrowUseGuardProbe.current,
+    };
+    var seed: WouldBlockSeed = .{};
+    var use_permit: BorrowUsePermit = .{};
+    try std.testing.expect(beginStoppedUse(
+        scratch,
+        &receipt,
+        &borrow,
+        &guard,
+        &seed,
+        &use_permit,
+    ));
+    const alias: *PreparedAdmitUsePermit = @ptrCast(@alignCast(&use_permit));
+    try std.testing.expect(!beginPreparedAdmitUse(
+        scratch,
+        &receipt,
+        &borrow,
+        &use_permit,
+        &seed,
+        alias,
+    ));
+    const overflow_addr = std.math.maxInt(usize) &
+        ~(@as(usize, @alignOf(PreparedAdmitUsePermit)) - 1);
+    const overflow: *PreparedAdmitUsePermit = @ptrFromInt(overflow_addr);
+    try std.testing.expect(!beginPreparedAdmitUse(
+        scratch,
+        &receipt,
+        &borrow,
+        &use_permit,
+        &seed,
+        overflow,
+    ));
+    var prepared_permit: PreparedAdmitUsePermit = .{};
+    try std.testing.expect(beginPreparedAdmitUse(
+        scratch,
+        &receipt,
+        &borrow,
+        &use_permit,
+        &seed,
+        &prepared_permit,
+    ));
+    var copied = prepared_permit;
+    try std.testing.expect(!finishPreparedAdmitUse(
+        scratch,
+        &receipt,
+        &borrow,
+        &use_permit,
+        &seed,
+        &copied,
+    ));
+    const canonical = prepared_permit;
+    prepared_permit.scratch_generation +%= 1;
+    try std.testing.expect(!finishPreparedAdmitUse(
+        scratch,
+        &receipt,
+        &borrow,
+        &use_permit,
+        &seed,
+        &prepared_permit,
+    ));
+    prepared_permit = canonical;
+    try std.testing.expect(finishPreparedAdmitUse(
+        scratch,
+        &receipt,
+        &borrow,
+        &use_permit,
+        &seed,
+        &prepared_permit,
+    ));
 }

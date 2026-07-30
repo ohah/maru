@@ -6923,6 +6923,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               };
               const ReplacementGuardPhase = enum {
                   capture_before_allocate,
+                  capture_after_allocate,
                   validate_allocated,
                   capture_after_validate,
                   capture_before_cleanup,
@@ -6949,7 +6950,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               };
               const GuardedAdmitQuarantine = struct {
                   phase: enum { allocation, abort_cleanup, commit_cleanup },
-                  leaked_bytes: usize,
+                  quarantined_bytes_upper_bound: usize,
               };
               const GuardedAdmitPrepareOutcome = union(enum) {
                   prepared,
@@ -6971,8 +6972,10 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
 
               공개 함수명은 `prepareAdmitGuarded`, `commitPreparedAdmitGuarded`,
               `abortPreparedAdmitGuarded`다. quarantine DTO는 pointer·allocator·free capability를 노출하지
-              않는다. 같은 candidate의 결과는 prepared tombstone 또는 canonical terminal 전이와 함께 한 번만
-              반환되며 stale/double commit·abort는 leaked bytes를 다시 보고하지 않는 `ordinary_failure`다.
+              않는다. raw allocator는 요청 길이와 pointer만 반환하므로 이 값은 실제 leak 단정이 아니라
+              candidate에 보수적으로 부과하는 resident-cap 이하 상한이다. 같은 candidate의 결과는 prepared
+              tombstone 또는 canonical terminal 전이와 함께 한 번만 반환되며 stale/double commit·abort는
+              quarantine bytes를 다시 보고하지 않는 `ordinary_failure`다.
               기존 `prepareAdmit`/`commitPreparedAdmit`/`abortPreparedAdmit`는 C2 동안 callback-free
               no-replacement test helper만 허용하고 replacement allocation 제품·fixture callsite는 0이다. guarded
               API가 unguarded allocation 함수를 호출하는 구현은 금지한다.
@@ -6980,7 +6983,9 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               mode는 guard descriptor(context/check 주소), state/parser final address, 전체 provenance/parser
               seal, allocator ptr/vtable, input addr/len/digest, prepared final address/pristine, resident cap을
               allocation 전 frozen local seal에 함께 넣는다. `capture_before_allocate` 뒤 raw allocation callback,
-              raw addr/len checked arithmetic과 local alias 검사, frozen descriptor의
+              candidate가 null/OOM이어도 `capture_after_allocate`와 local frozen seal 비교를 먼저 한다. 두
+              seal이 같은 OOM만 ordinary failure이고 OOM callback drift는 candidate charge 0의 terminal
+              quarantine이다. pointer가 있으면 raw addr와 **요청한 target capacity**의 checked arithmetic 및 local alias 검사, frozen descriptor의
               `validate_allocated`, `capture_after_validate` 순서로 실행한다. 두 capture와 accepted seal은
               generation/digest가 exact-equal이어야 한다. raw pointer는 이 순서를 모두 통과하기 전 typed slice
               변환·hash·read·write·free 0이다. allocated validation은 candidate가 길이
@@ -6992,17 +6997,18 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
 
               | 경계 | 결과 | parser/counter | prepared/busy | free/quarantine |
               | --- | --- | --- | --- | --- |
-              | preflight 입력·cap·overflow 실패 또는 raw allocation OOM | `ordinary_failure` | source exact 보존 | pristine, busy false | free 0, quarantine 0 |
+              | callback 전 preflight 입력·cap·overflow 실패 또는 seal-preserving raw allocation OOM | `ordinary_failure` | source exact 보존 | pristine, busy false | free 0, quarantine 0 |
+              | null/OOM allocation callback authority drift | `allocation_quarantined` | canonical terminal | callback 없이 tombstone, busy false | free 0, upper-bound charge 0 exact once |
               | no-replacement spare-capacity commit | `committed` | append+reseal | committed, busy false | callback/free/quarantine 0 |
-              | raw addr overflow·wrong length·local/product alias·alloc/check callback drift | `allocation_quarantined` | canonical terminal, counter 증가 0 | callback 없이 tombstone, busy false | candidate free 0, leaked bytes exact once |
-              | prepared 성공 뒤 commit 전 token/input/source drift, cleanup guard valid | `ordinary_failure` | source exact 보존 | callback 전 aborted tombstone와 terminal-busy, 반환 시 busy false | replacement exact-one free |
-              | prepared 성공 뒤 commit 전 cleanup guard invalid/drift | `allocation_quarantined` | canonical terminal | callback 없이 tombstone, busy false | replacement free 0, leaked bytes exact once |
+              | raw addr overflow·local/product alias·alloc/check callback drift | `allocation_quarantined` | canonical terminal, counter 증가 0 | callback 없이 tombstone, busy false | candidate free 0, upper-bound charge exact once |
+              | prepared 성공 뒤 commit 전 token/input/source drift, cleanup guard valid | `allocation_quarantined` | leaf mutation 0이나 원본 복원은 주장하지 않고 canonical terminal | callback 전 aborted tombstone와 terminal-busy, busy false로 종결 | replacement exact-one free, upper-bound charge 0 |
+              | prepared 성공 뒤 commit 전 cleanup guard invalid/drift | `allocation_quarantined` | canonical terminal | callback 없이 tombstone, busy false | replacement free 0, upper-bound charge exact once |
               | safe abort | `aborted` | source exact 보존 | callback 전 aborted tombstone와 terminal-busy, 반환 시 bound authority 복원·busy false | replacement exact-one free |
               | abort free callback drift/reentry | `allocation_quarantined` | canonical terminal | callback 전 tombstone, busy false로 종결 | replacement free exact once, 추가 free 0 |
               | replacement publish+reseal 뒤 old-backing cleanup 정상 | `committed` | 새 bytes/counter authoritative | callback 전 committed tombstone, 반환 시 busy false | old backing exact-one free |
-              | commit old-backing callback 뒤 descriptor/content/provenance drift | `post_commit_quarantined` | rollback 금지, canonical terminal | callback 전 committed tombstone, busy false로 종결 | old backing exact-one free, 새 backing은 free 0·leaked bytes exact once |
+              | commit old-backing callback 뒤 descriptor/content/provenance drift | `post_commit_quarantined` | rollback 금지, canonical terminal | callback 전 committed tombstone, busy false로 종결 | old backing exact-one free, 새 backing은 free 0·upper-bound charge exact once |
 
-              publication 전 failure에서 “source exact 보존”은 cleanup callback 동안에는 재진입을 막기 위해
+              publication 전 safe abort의 “source exact 보존”은 cleanup callback 동안에는 재진입을 막기 위해
               terminal-busy projection을 먼저 publish하고, callback 뒤 frozen source descriptor/content/provenance와
               guard seal이 모두 일치할 때만 bound authority를 복원한다는 뜻이다. 그 검증이 실패하면 ordinary로
               되돌리지 않고 canonical terminal quarantine이다. publication 뒤 old-backing callback drift는 새
@@ -7022,7 +7028,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               allocation 전에 거부한다. replacement allocation의 no-free 최대치는
               `max_guarded_admit_quarantine_bytes = max_rx_resident_bytes`다. 기존
               `max_cross_owner_quarantine_bytes`는 checked addition으로 이 값을 정확히 한 번 더하며 overflow는
-              compile error다. quarantine event/accounting은 actual leaked length가 이 named bound 이하인지
+              compile error다. quarantine event/accounting은 charged upper bound가 이 named bound 이하인지
               검증하고 같은 replacement를 다른 quarantine 항목에 중복 가산하지 않는다.
 
               C2에서 guard callback은 allocation/free를 직접 수행하거나 candidate contents를 읽지 않는다.

@@ -1918,6 +1918,7 @@ pub const LiveScreenApplyResult = enum {
 
 pub const BufferedRxOps = struct {
     context: *anyopaque,
+    context_len: usize = 0,
     /// Synchronous immutable borrow. The callback must not retain `view`, `view.bytes`, or any
     /// derived pointer after returning; either result invalidates the borrow immediately.
     apply_live_screen: *const fn (
@@ -1929,6 +1930,14 @@ pub const BufferedRxOps = struct {
 const RxTurnOps = struct {
     buffered: BufferedRxOps,
     transport: client_external_rx_read.RxReadOps,
+};
+
+const FrozenRxTurnOps = struct {
+    saved_self_addr: usize = 0,
+    original_ops_addr: usize = 0,
+    fd: posix.fd_t = -1,
+    ops: RxTurnOps = undefined,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
 };
 
 const LiveScreenConsumeLifecycle = enum {
@@ -2351,6 +2360,25 @@ fn finishPumpCallbackRegion(
     return releaseCallbackRegion(authority) == .released;
 }
 
+fn finishAndValidateRxTurnCallback(
+    storage: *ExternalPumpStorage,
+    lease: *ExternalWholeTurnLease,
+    scratch: *ExternalRxTurnScratch,
+    original: *const RxTurnOps,
+    frozen: *const FrozenRxTurnOps,
+    authority: *CallbackReleaseAuthority,
+) bool {
+    if (!finishPumpCallbackRegion(scratch, authority))
+        return false;
+    return validateFrozenRxTurnOps(
+        storage,
+        lease,
+        scratch,
+        original,
+        frozen,
+    );
+}
+
 fn callbackRegionCurrent(
     raw: *anyopaque,
     scratch_addr: usize,
@@ -2523,6 +2551,191 @@ fn buildRxOwnerAuthoritySnapshot(
     return &scratch.authority_snapshot;
 }
 
+fn frozenRxTurnOpsDigest(
+    frozen: *const FrozenRxTurnOps,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARUFRO1");
+    writer.writeUsize(frozen.saved_self_addr);
+    writer.writeUsize(frozen.original_ops_addr);
+    writer.writeU64(@as(u32, @bitCast(frozen.fd)));
+    writer.writeUsize(@intFromPtr(frozen.ops.buffered.context));
+    writer.writeUsize(frozen.ops.buffered.context_len);
+    writer.writeUsize(@intFromPtr(frozen.ops.buffered.apply_live_screen));
+    writer.writeUsize(@intFromPtr(frozen.ops.transport.context));
+    writer.writeUsize(frozen.ops.transport.context_len);
+    writer.writeUsize(@intFromPtr(frozen.ops.transport.read));
+    return writer.finish();
+}
+
+fn rxTurnOpsOuterRangeValid(
+    original: *const RxTurnOps,
+    frozen: *const FrozenRxTurnOps,
+    snapshot: *const RxOwnerAuthoritySnapshot,
+    scratch: *ExternalRxTurnScratch,
+) bool {
+    const outer = external_owner_range.Range{
+        .start = @intFromPtr(original),
+        .len = @sizeOf(RxTurnOps),
+    };
+    _ = std.math.add(usize, outer.start, outer.len) catch return false;
+    if (rangesOverlap(
+        outer.start,
+        outer.len,
+        @intFromPtr(frozen),
+        @sizeOf(FrozenRxTurnOps),
+    ))
+        return false;
+    const fixed = [_]external_owner_range.Range{
+        .{ .start = snapshot.storage_addr, .len = snapshot.storage_len },
+        .{ .start = snapshot.lease_addr, .len = snapshot.lease_len },
+        .{ .start = snapshot.scratch_addr, .len = snapshot.scratch_len },
+        .{
+            .start = snapshot.parser_seal.backing_addr,
+            .len = snapshot.parser_seal.capacity,
+        },
+    };
+    for (fixed) |blocked|
+        if (blocked.len != 0 and rangesOverlap(
+            outer.start,
+            outer.len,
+            blocked.start,
+            blocked.len,
+        ))
+            return false;
+    for (scratch.authority_ranges.ranges[0..snapshot.inventory_count]) |blocked|
+        if (rangesOverlap(outer.start, outer.len, blocked.start, blocked.len))
+            return false;
+    return true;
+}
+
+fn rxTurnOpsRangesValid(
+    original: *const RxTurnOps,
+    frozen: *const FrozenRxTurnOps,
+    snapshot: *const RxOwnerAuthoritySnapshot,
+    scratch: *ExternalRxTurnScratch,
+) bool {
+    if (!rxTurnOpsOuterRangeValid(original, frozen, snapshot, scratch))
+        return false;
+    if (frozen.saved_self_addr != @intFromPtr(frozen) or
+        frozen.original_ops_addr != @intFromPtr(original) or
+        frozen.fd != snapshot.fd or
+        frozen.ops.buffered.context_len == 0 or
+        frozen.ops.transport.context_len == 0 or
+        @intFromPtr(frozen.ops.buffered.context) == 0 or
+        @intFromPtr(frozen.ops.transport.context) == 0 or
+        !std.meta.eql(original.*, frozen.ops) or
+        !std.mem.eql(u8, &frozen.digest, &frozenRxTurnOpsDigest(frozen)))
+        return false;
+    const leaves = [_]external_owner_range.Range{
+        .{
+            .start = @intFromPtr(&original.buffered),
+            .len = @sizeOf(BufferedRxOps),
+        },
+        .{
+            .start = @intFromPtr(&original.transport),
+            .len = @sizeOf(client_external_rx_read.RxReadOps),
+        },
+        .{
+            .start = @intFromPtr(original.buffered.context),
+            .len = original.buffered.context_len,
+        },
+        .{
+            .start = @intFromPtr(original.transport.context),
+            .len = original.transport.context_len,
+        },
+        .{
+            .start = @intFromPtr(frozen),
+            .len = @sizeOf(FrozenRxTurnOps),
+        },
+    };
+    for (leaves, 0..) |candidate, index| {
+        if (candidate.start == 0 or candidate.len == 0)
+            return false;
+        _ = std.math.add(usize, candidate.start, candidate.len) catch
+            return false;
+        for (leaves[index + 1 ..]) |other| {
+            if (rangesOverlap(
+                candidate.start,
+                candidate.len,
+                other.start,
+                other.len,
+            ))
+                return false;
+        }
+        const fixed = [_]external_owner_range.Range{
+            .{ .start = snapshot.storage_addr, .len = snapshot.storage_len },
+            .{ .start = snapshot.lease_addr, .len = snapshot.lease_len },
+            .{ .start = snapshot.scratch_addr, .len = snapshot.scratch_len },
+            .{
+                .start = snapshot.parser_seal.backing_addr,
+                .len = snapshot.parser_seal.capacity,
+            },
+        };
+        for (fixed) |blocked| {
+            if (blocked.len != 0 and rangesOverlap(
+                candidate.start,
+                candidate.len,
+                blocked.start,
+                blocked.len,
+            ))
+                return false;
+        }
+        for (scratch.authority_ranges.ranges[0..snapshot.inventory_count]) |blocked| {
+            if (rangesOverlap(
+                candidate.start,
+                candidate.len,
+                blocked.start,
+                blocked.len,
+            ))
+                return false;
+        }
+    }
+    return true;
+}
+
+fn freezeRxTurnOps(
+    storage: *ExternalPumpStorage,
+    lease: *ExternalWholeTurnLease,
+    scratch: *ExternalRxTurnScratch,
+    original: *const RxTurnOps,
+    out: *FrozenRxTurnOps,
+) bool {
+    if (out.saved_self_addr != 0) return false;
+    const snapshot = buildRxOwnerAuthoritySnapshot(
+        storage,
+        lease,
+        scratch,
+    ) orelse return false;
+    if (!rxTurnOpsOuterRangeValid(original, out, snapshot, scratch))
+        return false;
+    out.* = .{
+        .saved_self_addr = @intFromPtr(out),
+        .original_ops_addr = @intFromPtr(original),
+        .fd = snapshot.fd,
+        .ops = original.*,
+    };
+    out.digest = frozenRxTurnOpsDigest(out);
+    if (!rxTurnOpsRangesValid(original, out, snapshot, scratch)) {
+        return false;
+    }
+    return true;
+}
+
+fn validateFrozenRxTurnOps(
+    storage: *ExternalPumpStorage,
+    lease: *ExternalWholeTurnLease,
+    scratch: *ExternalRxTurnScratch,
+    original: *const RxTurnOps,
+    frozen: *const FrozenRxTurnOps,
+) bool {
+    const snapshot = buildRxOwnerAuthoritySnapshot(
+        storage,
+        lease,
+        scratch,
+    ) orelse return false;
+    return rxTurnOpsRangesValid(original, frozen, snapshot, scratch);
+}
+
 fn intentAuthorityFromSnapshot(
     snapshot: *const RxOwnerAuthoritySnapshot,
     scratch: *ExternalRxTurnScratch,
@@ -2597,6 +2810,8 @@ const ProductRxReadAuthority = struct {
     lease: *ExternalWholeTurnLease,
     scratch: *ExternalRxTurnScratch,
     read_ops: *const client_external_rx_read.RxReadOps,
+    original_ops: *const RxTurnOps,
+    frozen_ops: *const FrozenRxTurnOps,
 
     fn current(raw: *anyopaque) ?client_external_rx_read.RxReadAuthorityView {
         const self: *@This() = @ptrCast(@alignCast(raw));
@@ -2605,6 +2820,13 @@ const ProductRxReadAuthority = struct {
             self.lease,
             self.scratch,
         ) orelse return null;
+        if (!rxTurnOpsRangesValid(
+            self.original_ops,
+            self.frozen_ops,
+            snapshot,
+            self.scratch,
+        ))
+            return null;
         if (self.read_ops.context_len == 0 or
             @intFromPtr(self.read_ops.context) == 0 or
             @intFromPtr(self.read_ops.read) == 0 or
@@ -9192,7 +9414,7 @@ pub const ExternalPumpStorage = struct {
         self: *ExternalPumpStorage,
         lease: *ExternalWholeTurnLease,
         turn: client_pump.TurnInput,
-        ops: *const RxTurnOps,
+        original_ops: *const RxTurnOps,
         scratch: *ExternalRxTurnScratch,
     ) client_pump.TurnResult {
         if (active_callback_region_addr != 0) {
@@ -9203,6 +9425,21 @@ pub const ExternalPumpStorage = struct {
                 .inherited_blocker = true,
             });
         }
+        var frozen_ops: FrozenRxTurnOps = .{};
+        if (!freezeRxTurnOps(
+            self,
+            lease,
+            scratch,
+            original_ops,
+            &frozen_ops,
+        ))
+            return self.terminalInjectedRxTurn(
+                .invariant_failure,
+                0,
+                0,
+                0,
+            );
+        const ops = &frozen_ops.ops;
         self.snapshotInheritedRxBlockersUnderHeldLease(
             lease,
             &scratch.snapshot,
@@ -9254,7 +9491,14 @@ pub const ExternalPumpStorage = struct {
                 &ops.buffered,
                 &scratch.live_consume,
             );
-            if (!finishPumpCallbackRegion(scratch, &callback_release))
+            if (!finishAndValidateRxTurnCallback(
+                self,
+                lease,
+                scratch,
+                original_ops,
+                &frozen_ops,
+                &callback_release,
+            ))
                 return self.terminalInjectedRxTurn(
                     .invariant_failure,
                     0,
@@ -9320,7 +9564,14 @@ pub const ExternalPumpStorage = struct {
                 snapshot.live_partial_pending,
                 scratch,
             );
-            if (!finishPumpCallbackRegion(scratch, &callback_release))
+            if (!finishAndValidateRxTurnCallback(
+                self,
+                lease,
+                scratch,
+                original_ops,
+                &frozen_ops,
+                &callback_release,
+            ))
                 return self.terminalInjectedRxTurn(
                     .invariant_failure,
                     0,
@@ -9407,6 +9658,8 @@ pub const ExternalPumpStorage = struct {
             .lease = lease,
             .scratch = scratch,
             .read_ops = &ops.transport,
+            .original_ops = original_ops,
+            .frozen_ops = &frozen_ops,
         };
         const authority_ops = read_authority.ops();
         var read_callback_release: CallbackReleaseAuthority = .{};
@@ -9430,7 +9683,14 @@ pub const ExternalPumpStorage = struct {
                 .authority_ops = &authority_ops,
             },
         );
-        if (!finishPumpCallbackRegion(scratch, &read_callback_release))
+        if (!finishAndValidateRxTurnCallback(
+            self,
+            lease,
+            scratch,
+            original_ops,
+            &frozen_ops,
+            &read_callback_release,
+        ))
             return self.terminalInjectedRxTurn(
                 .invariant_failure,
                 0,
@@ -9541,8 +9801,12 @@ pub const ExternalPumpStorage = struct {
                     );
                     switch (prepare) {
                         .ordinary_failure => {
-                            if (!finishPumpCallbackRegion(
+                            if (!finishAndValidateRxTurnCallback(
+                                self,
+                                lease,
                                 scratch,
+                                original_ops,
+                                &frozen_ops,
                                 &admit_callback_release,
                             ))
                                 terminal_reason = .invariant_failure
@@ -9550,8 +9814,12 @@ pub const ExternalPumpStorage = struct {
                                 terminal_reason = .resource_exhausted;
                         },
                         .allocation_quarantined => |quarantine| {
-                            if (!finishPumpCallbackRegion(
+                            if (!finishAndValidateRxTurnCallback(
+                                self,
+                                lease,
                                 scratch,
+                                original_ops,
+                                &frozen_ops,
                                 &admit_callback_release,
                             ) or
                                 !completeGuardedAdmitQuarantine(
@@ -9588,57 +9856,78 @@ pub const ExternalPumpStorage = struct {
                                         lease,
                                         stopped_bytes.len,
                                     );
-                                    admitted = reset and refreshed;
+                                    admitted = reset and refreshed and
+                                        validateFrozenRxTurnOps(
+                                            self,
+                                            lease,
+                                            scratch,
+                                            original_ops,
+                                            &frozen_ops,
+                                        );
                                     if (!admitted)
                                         terminal_reason = .invariant_failure;
                                 },
                                 .ordinary_failure => {
-                                    var abort_callback_release: CallbackReleaseAuthority = .{};
-                                    if (!beginPumpCallbackRegion(
+                                    if (!validateFrozenRxTurnOps(
                                         self,
                                         lease,
                                         scratch,
-                                        &abort_callback_release,
+                                        original_ops,
+                                        &frozen_ops,
                                     )) {
                                         terminal_reason = .invariant_failure;
                                     } else {
-                                        const aborted = client_external_mode
-                                            .abortPreparedAdmitGuarded(
-                                            rx_state,
-                                            &client.parser,
-                                            &scratch.read.prepared_admit,
-                                        );
-                                        if (!finishPumpCallbackRegion(
+                                        var abort_callback_release: CallbackReleaseAuthority = .{};
+                                        if (!beginPumpCallbackRegion(
+                                            self,
+                                            lease,
                                             scratch,
                                             &abort_callback_release,
                                         )) {
                                             terminal_reason = .invariant_failure;
-                                        } else switch (aborted) {
-                                            .aborted => {
-                                                if (!client_external_mode
-                                                    .resetFinishedPreparedAdmit(
-                                                    &scratch.read.prepared_admit,
-                                                ))
-                                                    terminal_reason =
-                                                        .invariant_failure
-                                                else
-                                                    terminal_reason =
-                                                        .invariant_failure;
-                                            },
-                                            .ordinary_failure => terminal_reason = .invariant_failure,
-                                            .allocation_quarantined => |quarantine| {
-                                                if (!completeGuardedAdmitQuarantine(
-                                                    &scratch.read.prepared_admit,
-                                                    .allocation_quarantined,
-                                                    quarantine,
-                                                    &scratch.quarantine_receipt,
-                                                ))
-                                                    terminal_reason =
-                                                        .invariant_failure
-                                                else
-                                                    terminal_reason =
-                                                        .invariant_failure;
-                                            },
+                                        } else {
+                                            const aborted = client_external_mode
+                                                .abortPreparedAdmitGuarded(
+                                                rx_state,
+                                                &client.parser,
+                                                &scratch.read.prepared_admit,
+                                            );
+                                            if (!finishAndValidateRxTurnCallback(
+                                                self,
+                                                lease,
+                                                scratch,
+                                                original_ops,
+                                                &frozen_ops,
+                                                &abort_callback_release,
+                                            )) {
+                                                terminal_reason = .invariant_failure;
+                                            } else switch (aborted) {
+                                                .aborted => {
+                                                    if (!client_external_mode
+                                                        .resetFinishedPreparedAdmit(
+                                                        &scratch.read.prepared_admit,
+                                                    ))
+                                                        terminal_reason =
+                                                            .invariant_failure
+                                                    else
+                                                        terminal_reason =
+                                                            .invariant_failure;
+                                                },
+                                                .ordinary_failure => terminal_reason = .invariant_failure,
+                                                .allocation_quarantined => |quarantine| {
+                                                    if (!completeGuardedAdmitQuarantine(
+                                                        &scratch.read.prepared_admit,
+                                                        .allocation_quarantined,
+                                                        quarantine,
+                                                        &scratch.quarantine_receipt,
+                                                    ))
+                                                        terminal_reason =
+                                                            .invariant_failure
+                                                    else
+                                                        terminal_reason =
+                                                            .invariant_failure;
+                                                },
+                                            }
                                         }
                                     }
                                 },
@@ -9698,8 +9987,12 @@ pub const ExternalPumpStorage = struct {
                         snapshot.live_partial_pending,
                         scratch,
                     );
-                    if (!finishPumpCallbackRegion(
+                    if (!finishAndValidateRxTurnCallback(
+                        self,
+                        lease,
                         scratch,
+                        original_ops,
+                        &frozen_ops,
                         &traversal_callback_release,
                     ))
                         terminal_reason = .invariant_failure;
@@ -24011,6 +24304,36 @@ test "C4b shared owner snapshot rebuilds freshly and projects each authority" {
     try std.testing.expectEqual(@as(u64, 2), scratch.authority_snapshot_build_count);
     try std.testing.expectEqual(first_count, second.inventory_count);
     try std.testing.expectEqualSlices(u8, &first_digest, &second.digest);
+    var range_probe: FrozenRxTurnOps = .{};
+    const scratch_addr = @intFromPtr(scratch);
+    const scratch_end = scratch_addr + @sizeOf(ExternalRxTurnScratch);
+    try std.testing.expect(!rxTurnOpsOuterRangeValid(
+        @ptrCast(scratch),
+        &range_probe,
+        second,
+        scratch,
+    ));
+    try std.testing.expect(!rxTurnOpsOuterRangeValid(
+        @ptrFromInt(scratch_end - @alignOf(RxTurnOps)),
+        &range_probe,
+        second,
+        scratch,
+    ));
+    try std.testing.expect(rxTurnOpsOuterRangeValid(
+        @ptrFromInt(scratch_end),
+        &range_probe,
+        second,
+        scratch,
+    ));
+    try std.testing.expect(!rxTurnOpsOuterRangeValid(
+        @ptrFromInt(
+            std.math.maxInt(usize) &
+                ~(@as(usize, @alignOf(RxTurnOps)) - 1),
+        ),
+        &range_probe,
+        second,
+        scratch,
+    ));
 
     var intent = ProductIntentAuthority{
         .storage = &storage,
@@ -24033,17 +24356,43 @@ test "C4b shared owner snapshot rebuilds freshly and projects each authority" {
             return .would_block;
         }
     };
-    var read_probe = ReadProbe{};
-    const read_ops = client_external_rx_read.RxReadOps{
-        .context = &read_probe,
-        .context_len = @sizeOf(ReadProbe),
-        .read = ReadProbe.read,
+    const BufferedProbe = struct {
+        fn apply(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
     };
+    var read_probe = ReadProbe{};
+    var buffered_probe: u8 = 0;
+    const turn_ops = RxTurnOps{
+        .buffered = .{
+            .context = &buffered_probe,
+            .context_len = @sizeOf(u8),
+            .apply_live_screen = BufferedProbe.apply,
+        },
+        .transport = .{
+            .context = &read_probe,
+            .context_len = @sizeOf(ReadProbe),
+            .read = ReadProbe.read,
+        },
+    };
+    var frozen_ops = FrozenRxTurnOps{
+        .saved_self_addr = 0,
+        .original_ops_addr = @intFromPtr(&turn_ops),
+        .fd = second.fd,
+        .ops = turn_ops,
+    };
+    frozen_ops.saved_self_addr = @intFromPtr(&frozen_ops);
+    frozen_ops.digest = frozenRxTurnOpsDigest(&frozen_ops);
     var read_authority = ProductRxReadAuthority{
         .storage = &storage,
         .lease = &lease,
         .scratch = scratch,
-        .read_ops = &read_ops,
+        .read_ops = &frozen_ops.ops.transport,
+        .original_ops = &turn_ops,
+        .frozen_ops = &frozen_ops,
     };
     const read_view = ProductRxReadAuthority.current(&read_authority) orelse
         return error.TestUnexpectedResult;
@@ -24300,9 +24649,11 @@ test "C4d drifted A callback releases TLS and leaves B reusable after nested blo
         }
     };
     var b_probe: u8 = 0;
+    var b_buffered_probe: u8 = 0;
     const b_ops = RxTurnOps{
         .buffered = .{
-            .context = &b_probe,
+            .context = &b_buffered_probe,
+            .context_len = @sizeOf(u8),
             .apply_live_screen = BProbe.apply,
         },
         .transport = .{
@@ -24345,9 +24696,11 @@ test "C4d drifted A callback releases TLS and leaves B reusable after nested blo
         .scratch_b = scratch_b,
         .b_ops = &b_ops,
     };
+    var a_buffered_probe: u8 = 0;
     const a_ops = RxTurnOps{
         .buffered = .{
-            .context = &a_probe,
+            .context = &a_buffered_probe,
+            .context_len = @sizeOf(u8),
             .apply_live_screen = AProbe.apply,
         },
         .transport = .{
@@ -24819,6 +25172,18 @@ test "C4d product replacement cleanup requires validated capture and seals abort
 }
 
 test "C4d injected zero-prefix would-block settles and publishes drain once" {
+    const ApplyProbe = struct {
+        apply_calls: *usize,
+
+        fn apply(
+            raw: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.apply_calls.* += 1;
+            return .applied;
+        }
+    };
     const Probe = struct {
         read_calls: usize = 0,
         apply_calls: usize = 0,
@@ -24831,15 +25196,6 @@ test "C4d injected zero-prefix would-block settles and publishes drain once" {
             const self: *@This() = @ptrCast(@alignCast(raw));
             self.read_calls += 1;
             return .would_block;
-        }
-
-        fn apply(
-            raw: *anyopaque,
-            _: external_inbox_ledger.PayloadView,
-        ) LiveScreenApplyResult {
-            const self: *@This() = @ptrCast(@alignCast(raw));
-            self.apply_calls += 1;
-            return .applied;
         }
     };
 
@@ -24859,10 +25215,12 @@ test "C4d injected zero-prefix would-block settles and publishes drain once" {
     scratch.* = .{};
     try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
     var probe = Probe{};
+    var apply_probe = ApplyProbe{ .apply_calls = &probe.apply_calls };
     const ops = RxTurnOps{
         .buffered = .{
-            .context = &probe,
-            .apply_live_screen = Probe.apply,
+            .context = &apply_probe,
+            .context_len = @sizeOf(ApplyProbe),
+            .apply_live_screen = ApplyProbe.apply,
         },
         .transport = .{
             .context = &probe,
@@ -24885,7 +25243,350 @@ test "C4d injected zero-prefix would-block settles and publishes drain once" {
     try std.testing.expect(scratch.read.isReady());
 }
 
+test "C4d product RX turn preflight rejects context alias with owner scratch" {
+    const Probe = struct {
+        read_calls: usize = 0,
+
+        fn read(
+            raw: *anyopaque,
+            _: posix.fd_t,
+            _: []u8,
+        ) client_external_rx_read.RxReadOutcome {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.read_calls += 1;
+            return .would_block;
+        }
+
+        fn apply(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
+    };
+
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    defer _ = teardownForTest(&storage);
+
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    var probe = Probe{};
+    const ops = RxTurnOps{
+        .buffered = .{
+            .context = scratch,
+            .context_len = @sizeOf(ExternalRxTurnScratch),
+            .apply_live_screen = Probe.apply,
+        },
+        .transport = .{
+            .context = &probe,
+            .context_len = @sizeOf(Probe),
+            .read = Probe.read,
+        },
+    };
+    const result = storage.pumpInjectedRxTurnForTest(
+        .{ .readable = true, .writable = false, .now_ns = 1 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expectEqual(
+        client_pump.TerminalReason.invariant_failure,
+        result.terminal.?.reason,
+    );
+    try std.testing.expectEqual(@as(usize, 0), probe.read_calls);
+    try std.testing.expectEqual(@as(usize, 0), active_callback_region_addr);
+    try std.testing.expectEqual(@as(usize, 0), active_callback_release_addr);
+}
+
+test "C4d product RX turn context range preflight rejects overlap and overflow before callbacks" {
+    const RejectCase = enum {
+        exact_scratch,
+        partial_scratch,
+        mutual_context_overlap,
+        overflow,
+        outer_exact_scratch,
+        outer_partial_scratch,
+    };
+    const Probe = struct {
+        var callback_calls: usize = 0;
+
+        fn read(
+            _: *anyopaque,
+            _: posix.fd_t,
+            _: []u8,
+        ) client_external_rx_read.RxReadOutcome {
+            callback_calls += 1;
+            return .would_block;
+        }
+
+        fn apply(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            callback_calls += 1;
+            return .applied;
+        }
+    };
+    const Harness = struct {
+        fn run(case: RejectCase) !void {
+            var fixture = try TestClient.init();
+            defer fixture.deinitPeer();
+            var storage: ExternalPumpStorage = .{};
+            try std.testing.expect(
+                initTestStorage(&storage, &fixture.client, valid_evidence) ==
+                    .initialized,
+            );
+            try std.testing.expect(
+                prepareAdoptionForTest(&storage) == .prepared_adopted,
+            );
+            try std.testing.expect(storage.commitAdoption() == .adopted);
+            defer _ = teardownForTest(&storage);
+
+            const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+            defer std.testing.allocator.destroy(scratch);
+            scratch.* = .{};
+            try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+            var buffered_context: [2]u8 = .{ 0, 0 };
+            var transport_context: u8 = 0;
+            var ops = RxTurnOps{
+                .buffered = .{
+                    .context = &buffered_context,
+                    .context_len = buffered_context.len,
+                    .apply_live_screen = Probe.apply,
+                },
+                .transport = .{
+                    .context = &transport_context,
+                    .context_len = @sizeOf(u8),
+                    .read = Probe.read,
+                },
+            };
+            const scratch_addr = @intFromPtr(scratch);
+            const scratch_end = scratch_addr + @sizeOf(ExternalRxTurnScratch);
+            const overflow_addr = std.math.maxInt(usize) &
+                ~(@as(usize, @alignOf(usize)) - 1);
+            const passed_ops: *const RxTurnOps = switch (case) {
+                .exact_scratch => blk: {
+                    ops.buffered.context = scratch;
+                    ops.buffered.context_len = @sizeOf(ExternalRxTurnScratch);
+                    break :blk &ops;
+                },
+                .partial_scratch => blk: {
+                    ops.buffered.context = @ptrFromInt(scratch_end - 1);
+                    ops.buffered.context_len = 2;
+                    break :blk &ops;
+                },
+                .mutual_context_overlap => blk: {
+                    ops.buffered.context = &buffered_context;
+                    ops.buffered.context_len = buffered_context.len;
+                    ops.transport.context = @ptrFromInt(
+                        @intFromPtr(&buffered_context) + 1,
+                    );
+                    ops.transport.context_len = 1;
+                    break :blk &ops;
+                },
+                .overflow => blk: {
+                    ops.buffered.context = @ptrFromInt(overflow_addr);
+                    ops.buffered.context_len = @sizeOf(usize);
+                    break :blk &ops;
+                },
+                .outer_exact_scratch => @ptrCast(scratch),
+                .outer_partial_scratch => @ptrFromInt(
+                    scratch_end - @alignOf(RxTurnOps),
+                ),
+            };
+            Probe.callback_calls = 0;
+            const result = storage.pumpInjectedRxTurnForTest(
+                .{ .readable = true, .writable = false, .now_ns = 1 },
+                passed_ops,
+                scratch,
+            );
+            try std.testing.expectEqual(
+                client_pump.TerminalReason.invariant_failure,
+                result.terminal.?.reason,
+            );
+            try std.testing.expectEqual(@as(usize, 0), Probe.callback_calls);
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                active_callback_region_addr,
+            );
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                active_callback_release_addr,
+            );
+        }
+    };
+
+    inline for (std.meta.tags(RejectCase)) |case|
+        try Harness.run(case);
+}
+
+test "C4d product RX turn accepts real adjacent one-past scratch context" {
+    const AdjacentOwner = struct {
+        scratch: ExternalRxTurnScratch,
+        one_past_context: u8,
+    };
+    comptime {
+        if (@offsetOf(AdjacentOwner, "one_past_context") !=
+            @sizeOf(ExternalRxTurnScratch))
+            @compileError("one-past context fixture must be physically adjacent");
+    }
+    const Probe = struct {
+        read_calls: usize = 0,
+
+        fn read(
+            raw: *anyopaque,
+            _: posix.fd_t,
+            _: []u8,
+        ) client_external_rx_read.RxReadOutcome {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.read_calls += 1;
+            return .would_block;
+        }
+
+        fn apply(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
+    };
+
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    defer _ = teardownForTest(&storage);
+
+    const owner = try std.testing.allocator.create(AdjacentOwner);
+    defer std.testing.allocator.destroy(owner);
+    owner.* = .{ .scratch = .{}, .one_past_context = 0 };
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(&owner.scratch));
+    try std.testing.expectEqual(
+        @intFromPtr(&owner.scratch) + @sizeOf(ExternalRxTurnScratch),
+        @intFromPtr(&owner.one_past_context),
+    );
+    var probe = Probe{};
+    const ops = RxTurnOps{
+        .buffered = .{
+            .context = &owner.one_past_context,
+            .context_len = @sizeOf(u8),
+            .apply_live_screen = Probe.apply,
+        },
+        .transport = .{
+            .context = &probe,
+            .context_len = @sizeOf(Probe),
+            .read = Probe.read,
+        },
+    };
+    const result = storage.pumpInjectedRxTurnForTest(
+        .{ .readable = true, .writable = false, .now_ns = 1 },
+        &ops,
+        &owner.scratch,
+    );
+    try std.testing.expect(result.terminal == null);
+    try std.testing.expectEqual(@as(usize, 1), probe.read_calls);
+}
+
+test "C4d product RX callback descriptor mutation is terminal after hidden release" {
+    const ApplyProbe = struct {
+        fn apply(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
+    };
+    const ReadProbe = struct {
+        ops: *RxTurnOps,
+        read_calls: usize = 0,
+
+        fn read(
+            raw: *anyopaque,
+            _: posix.fd_t,
+            _: []u8,
+        ) client_external_rx_read.RxReadOutcome {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.read_calls += 1;
+            self.ops.transport.context_len +%= 1;
+            return .would_block;
+        }
+    };
+
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    defer _ = teardownForTest(&storage);
+
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    var ops: RxTurnOps = undefined;
+    var apply_probe: u8 = 0;
+    var read_probe = ReadProbe{ .ops = &ops };
+    ops = .{
+        .buffered = .{
+            .context = &apply_probe,
+            .context_len = @sizeOf(u8),
+            .apply_live_screen = ApplyProbe.apply,
+        },
+        .transport = .{
+            .context = &read_probe,
+            .context_len = @sizeOf(ReadProbe),
+            .read = ReadProbe.read,
+        },
+    };
+    const result = storage.pumpInjectedRxTurnForTest(
+        .{ .readable = true, .writable = false, .now_ns = 1 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expectEqual(
+        client_pump.TerminalReason.invariant_failure,
+        result.terminal.?.reason,
+    );
+    try std.testing.expectEqual(@as(usize, 1), read_probe.read_calls);
+    try std.testing.expectEqual(@as(usize, 0), active_callback_region_addr);
+    try std.testing.expectEqual(@as(usize, 0), active_callback_release_addr);
+    try std.testing.expectEqual(
+        ExternalRxTurnScratchLifecycle.ready,
+        scratch.lifecycle,
+    );
+}
+
 test "C4d injected positive prefix admits once traverses and preserves read accounting" {
+    const ApplyProbe = struct {
+        apply_calls: *usize,
+
+        fn apply(
+            raw: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.apply_calls.* += 1;
+            return .applied;
+        }
+    };
     const Probe = struct {
         wire: []const u8,
         sent: bool = false,
@@ -24904,15 +25605,6 @@ test "C4d injected positive prefix admits once traverses and preserves read acco
             @memcpy(destination[0..self.wire.len], self.wire);
             self.sent = true;
             return .{ .bytes = self.wire.len };
-        }
-
-        fn apply(
-            raw: *anyopaque,
-            _: external_inbox_ledger.PayloadView,
-        ) LiveScreenApplyResult {
-            const self: *@This() = @ptrCast(@alignCast(raw));
-            self.apply_calls += 1;
-            return .applied;
         }
     };
 
@@ -24942,10 +25634,12 @@ test "C4d injected positive prefix admits once traverses and preserves read acco
     scratch.* = .{};
     try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
     var probe = Probe{ .wire = wire };
+    var apply_probe = ApplyProbe{ .apply_calls = &probe.apply_calls };
     const ops = RxTurnOps{
         .buffered = .{
-            .context = &probe,
-            .apply_live_screen = Probe.apply,
+            .context = &apply_probe,
+            .context_len = @sizeOf(ApplyProbe),
+            .apply_live_screen = ApplyProbe.apply,
         },
         .transport = .{
             .context = &probe,

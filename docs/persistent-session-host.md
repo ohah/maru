@@ -7969,21 +7969,26 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 terminal, retry 횟수 또는 drain authority를 해석하지 않는다.
 
                 제품 facade는 caller의 `BufferedRxOps`와 final-address storage/scratch만 받고, facade-local
-                nonzero POSIX context와 `RxReadOps`를 조립해 public `ExternalPumpStorage.pumpRxTurn`에
+                nonzero POSIX context와 call-local `RxReadOps`를 조립해 public
+                `ExternalPumpStorage.pumpRxTurn`에
                 `RxTurnOps{buffered, transport}`를 정확히 한 번 전달한다. transport callback을 caller가
                 바꾸는 별도 제품 entry는 두지 않는다. 기존 buffered-only `pumpBufferedRx`,
                 buffered-only public `pumpRxTurn(BufferedRxOps)`, private
                 `pumpInjectedRxTurnForTest`는 제거한다. buffered-only mechanics를 직접 검증하는 module-local
                 fixture만 private test helper를 사용할 수 있으며 제품 boundary 밖 callsite는 0이다.
 
-                실제 Darwin `SOCK_STREAM` socketpair 제품 fixture는 다음을 고정한다.
+                실제 Darwin fd/socketpair 제품·adapter fixture는 다음을 고정한다.
 
                 - readable=false면 `recv` 0이고 기존 buffered/inherited 처리만 수행한다.
                 - readable=true에서 positive frame 뒤 kernel queue가 empty이면 positive read와 후속
                   would-block을 같은 bounded turn에서 관측하고 `rx_read_bytes`, parser/owner 결과와
                   scheduling을 C4 matrix와 동일하게 보존한다.
-                - peer half-close는 `.eof`, invalid/closed descriptor는 `.socket_error`로 terminalize하며
-                  staged prefix를 consumer에 publish하지 않는다.
+                - socketpair peer half-close는 `.eof`, pipe의 non-socket descriptor는 제품 pump에서
+                  `.socket_error`로 terminalize하며 staged prefix를 consumer에 publish하지 않는다. terminal
+                  scratch replay는 lifecycle gate에서 `.invariant_failure`로 fail-close하고 추가 syscall은 0이다.
+                  closed fd의 EBADF mapping은 adapter 직접 fixture가 검증한다. storage가 소유한 fd를 fixture가
+                  외부에서 close하는 것은 fd 번호 재사용 뒤 teardown이 무관한 descriptor를 닫을 수 있는
+                  ownership 위반이므로 제품 pump gate로 사용하지 않는다.
                 - nonblocking empty socket은 `.would_block`이고 zero-prefix·parser empty·owner blocker 0에서만
                   one-shot drain evidence가 `socket_rx_drained=true`를 publish한다.
                 - `{readable=true,writable=true}`에서도 d2 adapter의 첫 syscall은 `recv`다. d2는 TX syscall을

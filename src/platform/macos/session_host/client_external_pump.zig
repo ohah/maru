@@ -1928,7 +1928,7 @@ pub const BufferedRxOps = struct {
     ) LiveScreenApplyResult,
 };
 
-const RxTurnOps = struct {
+pub const RxTurnOps = struct {
     buffered: BufferedRxOps,
     transport: client_external_rx_read.RxReadOps,
 };
@@ -11118,10 +11118,9 @@ pub const ExternalPumpStorage = struct {
         return result;
     }
 
-    /// Temporary d2 buffered-only mechanics facade. Non-test product code must call it only
-    /// through `external_pump_owner.pumpBufferedRx`. d2c adds socket reads; f3 removes this RX-only
-    /// entry after `pumpWholeTurn` becomes the sole mutation authority.
-    pub fn pumpRxTurn(
+    /// Module-local buffered mechanics fixture. Product code must enter through the full
+    /// `RxTurnOps` transaction below so readiness can never bypass the transport authority.
+    fn pumpBufferedRxForTest(
         self: *ExternalPumpStorage,
         turn: client_pump.TurnInput,
         ops: *const BufferedRxOps,
@@ -11167,9 +11166,9 @@ pub const ExternalPumpStorage = struct {
         return result;
     }
 
-    /// Product-compilable C4 fixture adapter. C5 alone may wire a POSIX transport or external
-    /// owner callsite; until then this entry is exercised only by tests in this module.
-    fn pumpInjectedRxTurnForTest(
+    /// Runs one complete RX transaction. The product owner supplies the sole POSIX transport;
+    /// module-local hostile fixtures use the same entry with injected read outcomes.
+    pub fn pumpRxTurn(
         self: *ExternalPumpStorage,
         turn: client_pump.TurnInput,
         ops: *const RxTurnOps,
@@ -16496,7 +16495,7 @@ test "d2b3d product partial continues across turns and publishes one completed F
         .context = &probe,
         .apply_live_screen = ApplyProbe.apply,
     };
-    const first = storage.pumpRxTurn(
+    const first = storage.pumpBufferedRxForTest(
         .{ .readable = true, .writable = false, .now_ns = 1 },
         &ops,
         scratch,
@@ -16545,7 +16544,7 @@ test "d2b3d product partial continues across turns and publishes one completed F
             &client_after_first.parser,
         ),
     );
-    const second = storage.pumpRxTurn(
+    const second = storage.pumpBufferedRxForTest(
         .{ .readable = true, .writable = false, .now_ns = 2 },
         &ops,
         scratch,
@@ -16560,7 +16559,7 @@ test "d2b3d product partial continues across turns and publishes one completed F
     try std.testing.expectEqual(@as(usize, 0), probe.calls);
     try std.testing.expect(!crossOwnerQuarantineStatus().latched);
 
-    const third = storage.pumpRxTurn(
+    const third = storage.pumpBufferedRxForTest(
         .{ .readable = false, .writable = false, .now_ns = 3 },
         &ops,
         scratch,
@@ -16618,7 +16617,7 @@ test "d2b3d deferred retirement callback drift is quarantined without blessing a
     );
     defer std.testing.allocator.free(first_wire);
     try admitBufferedProductWireForTest(&storage, first_wire);
-    try std.testing.expect(storage.pumpRxTurn(
+    try std.testing.expect(storage.pumpBufferedRxForTest(
         .{ .readable = true, .writable = false, .now_ns = 1 },
         &ops,
         scratch,
@@ -16636,7 +16635,7 @@ test "d2b3d deferred retirement callback drift is quarantined without blessing a
     defer std.testing.allocator.free(second_wire);
     try admitBufferedProductWireForTest(&storage, second_wire);
     allocator_probe.mode = .aggregate_commit_drift;
-    const result = storage.pumpRxTurn(
+    const result = storage.pumpBufferedRxForTest(
         .{ .readable = true, .writable = false, .now_ns = 2 },
         &ops,
         scratch,
@@ -16696,7 +16695,7 @@ test "d2b3d incompatible product partial is terminal without retiring the prior 
         .context = &context,
         .apply_live_screen = Apply.run,
     };
-    try std.testing.expect(storage.pumpRxTurn(
+    try std.testing.expect(storage.pumpBufferedRxForTest(
         .{ .readable = true, .writable = false, .now_ns = 1 },
         &ops,
         scratch,
@@ -16715,7 +16714,7 @@ test "d2b3d incompatible product partial is terminal without retiring the prior 
     );
     defer std.testing.allocator.free(incompatible);
     try admitBufferedProductWireForTest(&storage, incompatible);
-    const result = storage.pumpRxTurn(
+    const result = storage.pumpBufferedRxForTest(
         .{ .readable = true, .writable = false, .now_ns = 2 },
         &ops,
         scratch,
@@ -16776,7 +16775,7 @@ test "d2b3d product partial cap plus one is terminal and preserves the sealed ro
         .context = &context,
         .apply_live_screen = Apply.run,
     };
-    const full = storage.pumpRxTurn(
+    const full = storage.pumpBufferedRxForTest(
         .{ .readable = true, .writable = false, .now_ns = 1 },
         &ops,
         scratch,
@@ -16796,7 +16795,7 @@ test "d2b3d product partial cap plus one is terminal and preserves the sealed ro
     const accounting_before = storage.inbox_ledger.accountingView();
 
     try admitBufferedProductWireForTest(&storage, one);
-    const overflow = storage.pumpRxTurn(
+    const overflow = storage.pumpBufferedRxForTest(
         .{ .readable = true, .writable = false, .now_ns = 2 },
         &ops,
         scratch,
@@ -17024,7 +17023,7 @@ test "d2b3d product facade traverses the adopted Client parser and consumes its 
         .context = &probe,
         .apply_live_screen = ApplyProbe.apply,
     };
-    const first = storage.pumpRxTurn(
+    const first = storage.pumpBufferedRxForTest(
         .{ .readable = true, .writable = false, .now_ns = 1 },
         &ops,
         scratch,
@@ -17048,7 +17047,7 @@ test "d2b3d product facade traverses the adopted Client parser and consumes its 
     defer std.testing.allocator.free(deferred_wire);
     try admitBufferedProductWireForTest(&storage, deferred_wire);
     const parser_bytes_before_inherited = client.parser.bufferedBytes();
-    const second = storage.pumpRxTurn(
+    const second = storage.pumpBufferedRxForTest(
         .{ .readable = false, .writable = false, .now_ns = 2 },
         &ops,
         scratch,
@@ -17064,7 +17063,7 @@ test "d2b3d product facade traverses the adopted Client parser and consumes its 
         client.parser.bufferedBytes(),
     );
 
-    const third = storage.pumpRxTurn(
+    const third = storage.pumpBufferedRxForTest(
         .{ .readable = true, .writable = false, .now_ns = 3 },
         &ops,
         scratch,
@@ -17073,7 +17072,7 @@ test "d2b3d product facade traverses the adopted Client parser and consumes its 
     try std.testing.expectEqual(@as(usize, 1), third.rx_frames);
     try std.testing.expectEqual(@as(usize, 1), probe.calls);
     try std.testing.expectEqual(@as(u8, 1), storage.live_screen.len);
-    const fourth = storage.pumpRxTurn(
+    const fourth = storage.pumpBufferedRxForTest(
         .{ .readable = false, .writable = false, .now_ns = 4 },
         &ops,
         scratch,
@@ -17140,7 +17139,7 @@ test "d2b3d product facade commits 64 and leaves the 65th parser frame unread" {
         .context = &context,
         .apply_live_screen = Apply.run,
     };
-    const result = storage.pumpRxTurn(
+    const result = storage.pumpBufferedRxForTest(
         .{ .readable = true, .writable = false, .now_ns = 1 },
         &ops,
         scratch,
@@ -17152,7 +17151,7 @@ test "d2b3d product facade commits 64 and leaves the 65th parser frame unread" {
     try std.testing.expectEqual(@as(u8, 64), storage.live_screen.len);
     try std.testing.expectEqual(one.len, client.parser.bufferedBytes());
     for (0..64) |index| {
-        const inherited = storage.pumpRxTurn(
+        const inherited = storage.pumpBufferedRxForTest(
             .{
                 .readable = true,
                 .writable = false,
@@ -17169,7 +17168,7 @@ test "d2b3d product facade commits 64 and leaves the 65th parser frame unread" {
         );
         try std.testing.expectEqual(one.len, client.parser.bufferedBytes());
     }
-    const final = storage.pumpRxTurn(
+    const final = storage.pumpBufferedRxForTest(
         .{ .readable = true, .writable = false, .now_ns = 66 },
         &ops,
         scratch,
@@ -17249,7 +17248,7 @@ test "d2b3d product facade preserves incomplete parser tails after committed and
             .context = &context,
             .apply_live_screen = Apply.run,
         };
-        const result = storage.pumpRxTurn(
+        const result = storage.pumpBufferedRxForTest(
             .{ .readable = true, .writable = false, .now_ns = 1 },
             &ops,
             scratch,
@@ -17320,7 +17319,7 @@ test "d2b3d sibling whole-turn busy is retry scheduling without terminal mutatio
         .apply_live_screen = Apply.run,
     };
     const before = second.semantic_state;
-    const result = second.pumpRxTurn(
+    const result = second.pumpBufferedRxForTest(
         .{ .readable = true, .writable = false, .now_ns = 1 },
         &ops,
         scratch,
@@ -17412,7 +17411,7 @@ test "d2b3d inherited product owners stop parser and allocation before mutation"
             .context = &context,
             .apply_live_screen = Apply.run,
         };
-        const result = storage.pumpRxTurn(
+        const result = storage.pumpBufferedRxForTest(
             .{ .readable = true, .writable = false, .now_ns = 1 },
             &ops,
             scratch,
@@ -17510,7 +17509,7 @@ test "d2b3d product facade rejects copied scratch and parser seal drift before p
             .context = &context,
             .apply_live_screen = Apply.run,
         };
-        const result = storage.pumpRxTurn(
+        const result = storage.pumpBufferedRxForTest(
             .{ .readable = true, .writable = false, .now_ns = 1 },
             &ops,
             scratch,
@@ -17607,14 +17606,14 @@ test "d2b3d product live callback payload and owner drift preserve FIFO and ledg
             .context = &probe,
             .apply_live_screen = Probe.run,
         };
-        try std.testing.expect(storage.pumpRxTurn(
+        try std.testing.expect(storage.pumpBufferedRxForTest(
             .{ .readable = true, .writable = false, .now_ns = 1 },
             &ops,
             scratch,
         ).terminal == null);
         const fifo = storage.live_screen;
         const accounting = storage.inbox_ledger.accountingView();
-        const result = storage.pumpRxTurn(
+        const result = storage.pumpBufferedRxForTest(
             .{ .readable = false, .writable = false, .now_ns = 2 },
             &ops,
             scratch,
@@ -17709,7 +17708,7 @@ test "d2b3d late protocol terminals abort accepted screen and response prefixes"
             .context = &context,
             .apply_live_screen = Apply.run,
         };
-        const result = storage.pumpRxTurn(
+        const result = storage.pumpBufferedRxForTest(
             .{ .readable = true, .writable = false, .now_ns = 1 },
             &ops,
             scratch,
@@ -17772,7 +17771,7 @@ test "d2b3d product response publishes a blocker and the next turn traverses zer
         .context = &context,
         .apply_live_screen = Apply.run,
     };
-    const first = storage.pumpRxTurn(
+    const first = storage.pumpBufferedRxForTest(
         .{ .readable = true, .writable = false, .now_ns = 1 },
         &ops,
         scratch,
@@ -17787,7 +17786,7 @@ test "d2b3d product response publishes a blocker and the next turn traverses zer
     try std.testing.expectEqualStrings("product-response", pending.payload.bytes());
     try std.testing.expect(storage.pendingResponseValid());
 
-    const second = storage.pumpRxTurn(
+    const second = storage.pumpBufferedRxForTest(
         .{ .readable = true, .writable = false, .now_ns = 2 },
         &ops,
         scratch,
@@ -17880,7 +17879,7 @@ test "d2b3d product mixed owners abort atomically on a late terminal event" {
         .context = &context,
         .apply_live_screen = Apply.run,
     };
-    const result = storage.pumpRxTurn(
+    const result = storage.pumpBufferedRxForTest(
         .{ .readable = true, .writable = false, .now_ns = 1 },
         &ops,
         scratch,
@@ -17961,7 +17960,7 @@ test "d2b3d product traversal commits 64 alternating event and screen intents" {
         .context = &context,
         .apply_live_screen = Apply.run,
     };
-    const result = storage.pumpRxTurn(
+    const result = storage.pumpBufferedRxForTest(
         .{ .readable = true, .writable = false, .now_ns = 1 },
         &ops,
         scratch,
@@ -18068,7 +18067,7 @@ fn checkD2b3dProductPumpAllocationFailure(
         .context = &context,
         .apply_live_screen = Apply.run,
     };
-    const result = storage.pumpRxTurn(
+    const result = storage.pumpBufferedRxForTest(
         .{ .readable = true, .writable = false, .now_ns = 1 },
         &ops,
         scratch,
@@ -18146,7 +18145,7 @@ test "d2b3d aggregate allocation cannot alias caller whole-turn scratch" {
         .context = &context,
         .apply_live_screen = Apply.run,
     };
-    const result = storage.pumpRxTurn(
+    const result = storage.pumpBufferedRxForTest(
         .{ .readable = true, .writable = false, .now_ns = 1 },
         &ops,
         scratch,
@@ -18221,7 +18220,7 @@ test "d2b3d aggregate allocation cannot alias active intent owner before free pr
         .context = &context,
         .apply_live_screen = Apply.run,
     };
-    const result = storage.pumpRxTurn(
+    const result = storage.pumpBufferedRxForTest(
         .{ .readable = true, .writable = false, .now_ns = 1 },
         &ops,
         scratch,
@@ -18295,7 +18294,7 @@ test "d2b3d aggregate allocation cannot alias active parser backing before write
         .context = &context,
         .apply_live_screen = Apply.run,
     };
-    const result = storage.pumpRxTurn(
+    const result = storage.pumpBufferedRxForTest(
         .{ .readable = true, .writable = false, .now_ns = 1 },
         &ops,
         scratch,
@@ -18395,7 +18394,7 @@ test "d2b3d parser payload cannot write caller whole-turn scratch before alias p
         .context = &context,
         .apply_live_screen = Apply.run,
     };
-    const result = storage.pumpRxTurn(
+    const result = storage.pumpBufferedRxForTest(
         .{ .readable = true, .writable = false, .now_ns = 1 },
         &ops,
         scratch,
@@ -25587,7 +25586,7 @@ test "C4d drifted A callback releases TLS and leaves B reusable after nested blo
             _: []u8,
         ) client_external_rx_read.RxReadOutcome {
             const self: *@This() = @ptrCast(@alignCast(raw));
-            self.nested = self.storage_b.pumpInjectedRxTurnForTest(
+            self.nested = self.storage_b.pumpRxTurn(
                 .{ .readable = true, .writable = false, .now_ns = 1 },
                 self.b_ops,
                 self.scratch_b,
@@ -25615,7 +25614,7 @@ test "C4d drifted A callback releases TLS and leaves B reusable after nested blo
             .read = AProbe.read,
         },
     };
-    const a_result = storage_a.pumpInjectedRxTurnForTest(
+    const a_result = storage_a.pumpRxTurn(
         .{ .readable = true, .writable = false, .now_ns = 1 },
         &a_ops,
         scratch_a,
@@ -25633,7 +25632,7 @@ test "C4d drifted A callback releases TLS and leaves B reusable after nested blo
         ExternalRxTurnScratchLifecycle.ready,
         scratch_b.lifecycle,
     );
-    const b_result = storage_b.pumpInjectedRxTurnForTest(
+    const b_result = storage_b.pumpRxTurn(
         .{ .readable = true, .writable = false, .now_ns = 2 },
         &b_ops,
         scratch_b,
@@ -26137,7 +26136,7 @@ test "C4d injected zero-prefix would-block settles and publishes drain once" {
     var drain_recorder = RxDrainTestRecorder{};
     rx_drain_test_recorder = &drain_recorder;
     defer rx_drain_test_recorder = null;
-    const result = storage.pumpInjectedRxTurnForTest(
+    const result = storage.pumpRxTurn(
         .{ .readable = true, .writable = false, .now_ns = 1 },
         &ops,
         scratch,
@@ -26172,7 +26171,7 @@ test "C4d injected zero-prefix would-block settles and publishes drain once" {
         &stale_copy,
     ));
 
-    const second = storage.pumpInjectedRxTurnForTest(
+    const second = storage.pumpRxTurn(
         .{ .readable = true, .writable = false, .now_ns = 2 },
         &ops,
         scratch,
@@ -26286,7 +26285,7 @@ test "C4d injected zero-prefix would-block settles and publishes drain once" {
     try std.testing.expect(!storage.resetFinishedRxDrainEvidence(scratch));
     try std.testing.expect(std.meta.eql(reset_once, scratch.drain_evidence));
 
-    const third = storage.pumpInjectedRxTurnForTest(
+    const third = storage.pumpRxTurn(
         .{ .readable = true, .writable = false, .now_ns = 3 },
         &ops,
         scratch,
@@ -26418,7 +26417,7 @@ test "S3-D incomplete positive prefix cannot mint or consume drain evidence" {
             .read = ReadProbe.read,
         },
     };
-    const result = storage.pumpInjectedRxTurnForTest(
+    const result = storage.pumpRxTurn(
         .{ .readable = true, .writable = false, .now_ns = 1 },
         &ops,
         scratch,
@@ -26498,7 +26497,7 @@ test "S3-D read attempt budget cannot publish drain evidence" {
             .read = ReadProbe.read,
         },
     };
-    const result = storage.pumpInjectedRxTurnForTest(
+    const result = storage.pumpRxTurn(
         .{ .readable = true, .writable = false, .now_ns = 1 },
         &ops,
         scratch,
@@ -26590,7 +26589,7 @@ test "S3-D frame budget cannot publish drain evidence" {
             .read = ReadProbe.read,
         },
     };
-    const result = storage.pumpInjectedRxTurnForTest(
+    const result = storage.pumpRxTurn(
         .{ .readable = true, .writable = false, .now_ns = 1 },
         &ops,
         scratch,
@@ -26661,7 +26660,7 @@ test "S3-D consume and abort reject authority drift move stale and replay" {
             .read = ReadProbe.read,
         },
     };
-    const initial = storage.pumpInjectedRxTurnForTest(
+    const initial = storage.pumpRxTurn(
         .{ .readable = true, .writable = false, .now_ns = 1 },
         &ops,
         scratch,
@@ -26856,7 +26855,7 @@ test "C4d product RX turn preflight rejects context alias with owner scratch" {
             .read = Probe.read,
         },
     };
-    const result = storage.pumpInjectedRxTurnForTest(
+    const result = storage.pumpRxTurn(
         .{ .readable = true, .writable = false, .now_ns = 1 },
         &ops,
         scratch,
@@ -26967,7 +26966,7 @@ test "C4d product RX turn context range preflight rejects overlap and overflow b
                 ),
             };
             Probe.callback_calls = 0;
-            const result = storage.pumpInjectedRxTurnForTest(
+            const result = storage.pumpRxTurn(
                 .{ .readable = true, .writable = false, .now_ns = 1 },
                 passed_ops,
                 scratch,
@@ -27055,7 +27054,7 @@ test "C4d product RX turn accepts real adjacent one-past scratch context" {
             .read = Probe.read,
         },
     };
-    const result = storage.pumpInjectedRxTurnForTest(
+    const result = storage.pumpRxTurn(
         .{ .readable = true, .writable = false, .now_ns = 1 },
         &ops,
         &owner.scratch,
@@ -27119,7 +27118,7 @@ test "C4d product RX callback descriptor mutation is terminal after hidden relea
             .read = ReadProbe.read,
         },
     };
-    const result = storage.pumpInjectedRxTurnForTest(
+    const result = storage.pumpRxTurn(
         .{ .readable = true, .writable = false, .now_ns = 1 },
         &ops,
         scratch,
@@ -27145,7 +27144,7 @@ test "C4d product RX callback descriptor mutation is terminal after hidden relea
         ExternalRxTurnScratchLifecycle.terminal,
         scratch.lifecycle,
     );
-    const replay = storage.pumpInjectedRxTurnForTest(
+    const replay = storage.pumpRxTurn(
         .{ .readable = true, .writable = false, .now_ns = 2 },
         &ops,
         scratch,
@@ -27226,7 +27225,7 @@ test "C4d injected EOF and socket error retain one canonical terminal scratch" {
                 .read = ReadProbe.read,
             },
         };
-        const result = storage.pumpInjectedRxTurnForTest(
+        const result = storage.pumpRxTurn(
             .{ .readable = true, .writable = false, .now_ns = 1 },
             &ops,
             scratch,
@@ -27370,7 +27369,7 @@ test "C4d injected terminal seam matrix closes the product graph exactly once" {
             injected_rx_failpoint_hits = 0;
         }
         const before_events = cross_owner_quarantine_events.load(.acquire);
-        const result = storage.pumpInjectedRxTurnForTest(
+        const result = storage.pumpRxTurn(
             .{ .readable = true, .writable = false, .now_ns = 1 },
             &ops,
             scratch,
@@ -27451,7 +27450,7 @@ test "C4d injected terminal seam matrix closes the product graph exactly once" {
         try std.testing.expect(storage.semantic_state == .terminal);
 
         const calls_before_replay = read_probe.calls;
-        const replay = storage.pumpInjectedRxTurnForTest(
+        const replay = storage.pumpRxTurn(
             .{ .readable = true, .writable = false, .now_ns = 2 },
             &ops,
             scratch,
@@ -27538,7 +27537,7 @@ test "C4d injected positive prefix admits once traverses and preserves read acco
             .read = Probe.read,
         },
     };
-    const first = storage.pumpInjectedRxTurnForTest(
+    const first = storage.pumpRxTurn(
         .{ .readable = true, .writable = false, .now_ns = 1 },
         &ops,
         scratch,
@@ -27565,7 +27564,7 @@ test "C4d injected positive prefix admits once traverses and preserves read acco
         scratch.read.active_prepared_use_permit_addr,
     );
 
-    const blocked = storage.pumpInjectedRxTurnForTest(
+    const blocked = storage.pumpRxTurn(
         .{ .readable = true, .writable = false, .now_ns = 2 },
         &ops,
         scratch,
@@ -27582,7 +27581,7 @@ test "C4d injected positive prefix admits once traverses and preserves read acco
     );
     try std.testing.expect(rxDrainEvidencePristine(&scratch.drain_evidence));
 
-    const second = storage.pumpInjectedRxTurnForTest(
+    const second = storage.pumpRxTurn(
         .{ .readable = false, .writable = false, .now_ns = 3 },
         &ops,
         scratch,
@@ -27593,7 +27592,7 @@ test "C4d injected positive prefix admits once traverses and preserves read acco
     try std.testing.expectEqual(@as(u8, 0), storage.live_screen.len);
 
     probe.sent = false;
-    const third = storage.pumpInjectedRxTurnForTest(
+    const third = storage.pumpRxTurn(
         .{ .readable = true, .writable = false, .now_ns = 4 },
         &ops,
         scratch,

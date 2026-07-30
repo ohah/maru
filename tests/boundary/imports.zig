@@ -2085,7 +2085,8 @@ test "d2c C4 collector integration stays transport-leaf and pump-private" {
             }
         }
     }
-    try std.testing.expectEqual(@as(usize, 1), product_imports);
+    // C4 mechanics and C5's sole POSIX product owner are the only consumers of the RX leaf.
+    try std.testing.expectEqual(@as(usize, 2), product_imports);
     try std.testing.expectEqual(@as(usize, 1), product_collector_calls);
     try std.testing.expectEqual(@as(usize, 2), product_completion_calls);
     try std.testing.expectEqual(@as(usize, 1), product_prepared_use_begin_calls);
@@ -2692,13 +2693,68 @@ test "d2b3d live owner substrate stays private with one buffered product travers
         "src/platform/macos/session_host/external_pump_owner.zig",
     );
     defer allocator.free(product_owner);
+    const mechanics_source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/client_external_pump.zig",
+    );
+    defer allocator.free(mechanics_source);
+    const product_owner_end = std.mem.indexOf(
+        u8,
+        product_owner,
+        "const client_mod = @import(\"client.zig\");",
+    ) orelse return error.TestUnexpectedResult;
+    const product_owner_boundary = product_owner[0..product_owner_end];
     try std.testing.expectEqual(
         @as(usize, 1),
-        std.mem.count(u8, product_owner, ".pumpRxTurn("),
+        std.mem.count(u8, product_owner_boundary, ".pumpRxTurn("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        std.mem.count(
+            u8,
+            product_owner_boundary,
+            "client_external_pump.RxTurnOps{",
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        std.mem.count(u8, product_owner_boundary, "pub fn pumpRx("),
     );
     try std.testing.expectEqual(
         @as(usize, 0),
-        std.mem.count(u8, product_owner, "nextOutcomeWithRange("),
+        std.mem.count(u8, product_owner_boundary, "pumpBufferedRx"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        std.mem.count(u8, product_owner_boundary, "c.recv("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        std.mem.count(u8, product_owner_boundary, "c.send("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        std.mem.count(u8, product_owner_boundary, "c.write("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        std.mem.count(u8, product_owner_boundary, "c.read("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        std.mem.count(u8, mechanics_source, "pub const RxTurnOps = struct"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        std.mem.count(u8, mechanics_source, "pub fn pumpRxTurn("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        std.mem.count(u8, mechanics_source, "pumpInjectedRxTurnForTest"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        std.mem.count(u8, product_owner_boundary, "nextOutcomeWithRange("),
     );
 }
 

@@ -7538,8 +7538,11 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 caller가 주입하지 않는다. pump가 held `ExternalWholeTurnLease`에서
                 `ProductRxReadAuthority`를 stack-local로 만들고, `current()`가 매 호출마다 final-address
                 storage/lease/scratch/Client/fd/parser seal, inherited owner digest와 정렬된 protected range
-                projection을 다시 계산한다. read callback context와 ops descriptor는 이 projection과 서로
-                disjoint해야 하며 제품 authority view에 test-only 우회 필드는 없다.
+                projection을 다시 계산한다. adapter 진입 전에 `RxTurnOps`, `buffered`, `transport` 세
+                descriptor와 두 callback context를 frozen value로 복사하고, storage/lease/full outer
+                scratch/parser backing/전체 owner inventory 및 서로에 대해 exact·partial·one-past·overflow
+                disjoint를 검증한다. callback은 frozen function/context로만 호출하고, callback 뒤 같은
+                projection과 descriptor 값을 다시 검증한다. 제품 authority view에 test-only 우회 필드는 없다.
 
                 C4 private helper 이름은 `pumpInjectedRxUnderHeldLease`다. d2d가 소유하는 미래
                 `prepareRxTurn`과 permit/whole-turn 책임을 앞당기거나 같은 이름으로 중복 구현하지 않는다.
@@ -7570,6 +7573,13 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                    mint/consume한다. drain 가능/불가능/terminal 모든 분기에서 마지막으로
                    `settleStopped`를 exact once 호출하며, scheduling은 settlement 뒤 value-only 결과만으로
                    결정한다.
+
+                어떤 단계가 실패해도 outer wrapper가 무조건 scratch를 `ready`로 되돌리지 않는다. 단일
+                no-callback terminal finalizer가 guarded quarantine completion, prepared-admit permit,
+                would-block seed, stopped-use permit과 borrow를 순서대로 정산하고 모든 child가 pristine인
+                경우에만 `ready`를 publish한다. 합법적 cleanup authority로 복구할 수 없는 callback drift,
+                active token 또는 non-pristine prepared owner는 scratch를 sealed `terminal`로 남긴다.
+                terminal scratch는 다음 turn에 재사용하지 않으며 teardown/recovery owner만 처리한다.
 
                 `RxDrainEvidence`는 scratch에 final-address로 embed하고 공개 DTO로 반환하지 않는다. validated
                 would-block seed, stopped receipt, post-admit/traversal parser seal, held lease,
@@ -7676,6 +7686,11 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 `&token == token.saved_self_addr == latch.token_addr`, token digest/lifecycle과 현재
                 thread/epoch/scratch/permit 주소가 모두 같은 outer owner만 성공하고 canonical token을 consumed
                 tombstone한다. stale/copied/moved/double/cross-thread/nested release는 latch를 바꾸지 않는다.
+                acquire는 callback에 노출되지 않는 stack-local
+                `CallbackReleaseAuthority{token_addr,thread_id,epoch,scratch_addr,permit_addr,digest}`도 함께
+                봉인한다. defer suffix는 public token이 callback에서 변조돼도 hidden authority와 TLS의 exact
+                owner가 일치하면 TLS latch를 반드시 회수하며, public token과 outer scratch는 terminal
+                quarantine한다. 이 hidden 회수는 stale/copied token이 직접 release하는 공개 경로가 아니다.
                 `BorrowUseGuardOps.current`는 이 private latch와 held lease/scratch authority를 투영한다.
                 permit이 active이면 `settleStopped`는 false이고 `teardown`은 busy다. `endStoppedUse`는 active
                 permit만 받되 guard가 callback-active/null/drift이거나 seed가 prepared이면 false이며, 이 실패는

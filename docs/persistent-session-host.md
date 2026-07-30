@@ -7088,37 +7088,16 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               기록한다. teardown callback 뒤 dead header는 resident cap과 digest를 canonical zero로 재게시한다.
 
               `.would_block` 반환 시에는 아직 parser generation이 admit/traversal 전이므로 raw read-transaction
-              observation만 scratch에 봉인한다. guarded admit과 traversal/aggregate가 끝난 뒤 final parser가
-              exact empty이고 현재 lease/scratch/owner snapshot, byte/frame budget과 terminal 상태가 모두
-              유효할 때만 아래 aggregate-private final-address evidence를 mint한다. evidence는 `pumpRxTurn`
-              호출 밖으로 반환하지 않고 같은 no-callback suffix에서 scheduling fact로 exact once consume한다.
-
-              ```zig
-              const RxDrainEvidence = struct {
-                  saved_self_addr: usize,
-                  storage_addr: usize,
-                  lease_addr: usize,
-                  scratch_addr: usize,
-                  scratch_generation: u64,
-                  parser_addr: usize,
-                  turn_generation: u64,
-                  parser_generation: u64,
-                  parser_seal_digest: external_owner_seal.Digest,
-                  rx_absolute_next: u64,
-                  read_attempt_generation: u64,
-                  owner_snapshot_digest: external_owner_seal.Digest,
-                  lifecycle: enum { empty, prepared, consumed, aborted },
-                  digest: external_owner_seal.Digest,
-              };
-              ```
-
-              copied/moved/stale/double/cross-storage/cross-turn/cross-parser-generation evidence는 mutation/wire 0으로
-              거부한다. parser incomplete/complete, 64-frame 또는 1 MiB cap stop, EOF/error/EINTR에는 evidence를
-              consume하지 않는다. `socket_rx_drained=true`는 current evidence를 consume한 같은 no-callback
-              suffix에서만 `client_pump.decide`로 투영하고 public/copyable raw drained bool은 권위가 아니다.
-              evidence의 `read_attempt_generation`은 scratch의 latest validated would-block observation과 같아야
-              한다. `owner_snapshot_digest`는 `rxReadAuthorityDigest` 하나이며 inherited/live owner,
-              Client owner/incarnation과 immutable `rx_resident_cap` authority를 포함한다.
+              observation만 scratch에 봉인한다. guarded admit과 traversal/aggregate가 끝난 뒤 final parser와
+              inherited/live owner blocker까지 확정된 시점의 canonical evidence schema, lifecycle, API와
+              publication 순서는 C4의 **S3-D — drain evidence one-shot capability** 절 하나만 소유한다.
+              이 앞 절은 별도 `RxDrainEvidence` 타입을 정의하지 않는다. S3-D evidence는 `pumpRxTurn` 호출
+              밖으로 반환하지 않으며 copied/moved/stale/double/cross-storage/cross-turn/
+              cross-parser-generation 사용을 mutation/wire 0으로 거부한다. parser incomplete/complete,
+              inherited/live owner backlog, 64-frame 또는 1 MiB cap stop, EOF/error/EINTR에는 evidence를
+              consume하지 않는다. `socket_rx_drained=true`는 S3-D current evidence를 consume한 같은
+              no-callback suffix에서만 `client_pump.decide`로 투영하고 public/copyable raw drained bool은
+              권위가 아니다.
 
               최초 `maxReadable`은 단순 byte 수가 아니라 같은 계산에서 나온 `RxReadableAllowance`의
               resident/turn/counter limit bit를 함께 반환해 collector 종료 원인을 보존한다. pump나 collector가
@@ -7528,7 +7507,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 attempt 1/63/64/65, EINTR 8/9와 attempt-64 동률, current/read 재진입, would-block
                 observation moved/stale/double/cross-generation, generation max, spent reset과 terminal no-reset을
                 Debug/ReleaseFast와 boundary에서 고정한다.
-              - **C4 private pump integration (구현):** held lease 안에서 buffered-first→collector 뒤
+              - **C4 private pump integration (core integration 구현, S3-D 미완료):** held lease 안에서 buffered-first→collector 뒤
                 `staged_len>0`이면 guarded admit exact-one→traversal exact-one→aggregate를 실행한다. initial
                 complete backlog는 admit 0/traversal exact-one, zero-prefix would-block은 둘 다 0이며 각 분기 뒤
                 final 조건에서만 drain evidence를 mint/consume한다. 아직 제품 owner는 기존 buffered facade를
@@ -7592,14 +7571,142 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 allocator/free, guard/current, parser traversal 또는 scheduling callback을 호출하지 않는다.
                 인증 불가 결과는 child를 임의 zero/reset하지 않고 outer scratch terminal-retained로 남긴다.
 
-                `RxDrainEvidence`는 scratch에 final-address로 embed하고 공개 DTO로 반환하지 않는다. validated
-                would-block seed, stopped receipt, post-admit/traversal parser seal, held lease,
-                owner snapshot, read-attempt generation과 budget bit를 한 digest로 묶는다. final parser empty,
-                terminal 없음, frame/read budget 미소진, 같은 storage/lease/scratch/parser generation일 때만
-                prepare할 수 있고 같은 no-callback suffix에서 즉시 consume해
-                `socket_rx_drained=true`를 `client_pump.decide`에 한 번 전달한다. copied/moved/stale/double
-                evidence, incomplete/complete parser, allowance/attempt stop, EOF/error/EINTR terminal은
-                authority mutation 0으로 거부한다.
+                **S3-D — drain evidence one-shot capability (미구현):** `RxDrainEvidence`는 pump scratch에
+                final-address로 embed하고 공개 DTO나 copyable drained bool로 반환하지 않는다. canonical layout은
+                다음 필드를 모두 봉인한다.
+
+                ```zig
+                const RxDrainEvidence = struct {
+                    domain: [8]u8,
+                    version: u16,
+                    saved_self_addr: usize,
+                    storage_addr: usize,
+                    lease_addr: usize,
+                    lease_generation: u64,
+                    operation_generation: u64,
+                    read_scratch_addr: usize,
+                    pre_settle_scratch_generation: u64,
+                    expected_post_settle_generation: u64,
+                    receipt_addr: usize,
+                    receipt_digest: external_owner_seal.Digest,
+                    borrow_addr: usize,
+                    borrow_digest: external_owner_seal.Digest,
+                    permit_addr: usize,
+                    permit_digest: external_owner_seal.Digest,
+                    seed_addr: usize,
+                    prepared_seed_digest: external_owner_seal.Digest,
+                    consumed_seed_digest: external_owner_seal.Digest,
+                    read_attempt_generation: u64,
+                    parser_addr: usize,
+                    parser_seal: client_external_mode.ParserAuthoritySeal,
+                    final_readiness: client_external_mode.ParserReadiness,
+                    rx_frame_budget_exhausted: bool,
+                    rx_read_budget_exhausted: bool,
+                    owner_inventory_generation: u64,
+                    owner_snapshot_digest: external_owner_seal.Digest,
+                    inherited_blocker_snapshot_digest: external_owner_seal.Digest,
+                    final_owner_blockers_clear: bool,
+                    lifecycle: enum {
+                        empty,
+                        prepared,
+                        armed,
+                        consumed,
+                        aborted,
+                        finished,
+                    },
+                    digest: external_owner_seal.Digest,
+                };
+
+                fn prepareRxDrainEvidence(
+                    storage: *ExternalPumpStorage,
+                    lease: *ExternalWholeTurnLease,
+                    scratch: *ExternalRxTurnScratch,
+                    receipt: *const client_external_rx_read.CollectReceipt,
+                    borrow: *const client_external_rx_read.StoppedBorrow,
+                    permit: *const client_external_rx_read.BorrowUsePermit,
+                    seed: *const client_external_rx_read.WouldBlockSeed,
+                    final: RxDrainFinalState,
+                    out: *RxDrainEvidence,
+                ) bool;
+                fn armRxDrainEvidence(
+                    scratch: *ExternalRxTurnScratch,
+                    permit: *const client_external_rx_read.BorrowUsePermit,
+                    seed: *const client_external_rx_read.WouldBlockSeed,
+                    consumed_attempt_generation: u64,
+                    evidence: *RxDrainEvidence,
+                ) bool;
+                fn consumeRxDrainEvidence(
+                    storage: *ExternalPumpStorage,
+                    lease: *ExternalWholeTurnLease,
+                    scratch: *ExternalRxTurnScratch,
+                    settlement: client_external_rx_read.StoppedDisposition,
+                    evidence: *RxDrainEvidence,
+                ) bool;
+                fn abortRxDrainEvidence(evidence: *RxDrainEvidence) bool;
+                fn finishRxDrainEvidence(evidence: *RxDrainEvidence) bool;
+                fn resetFinishedRxDrainEvidence(evidence: *RxDrainEvidence) bool;
+                ```
+
+                `prepareRxDrainEvidence`는 callback region이 inactive이고 held lease가 current인 상태에서
+                canonical would-block receipt/borrow/active permit/prepared seed, final parser `.empty`, terminal
+                없음, frame/read budget 미소진, fresh owner snapshot과 fresh inherited/live blocker
+                snapshot이 모두 clear임을 함께 검증한 뒤
+                `empty→prepared`만 수행한다. 모든 입력과 out의 exact/partial/one-past/overflow/overlap을
+                거부하고 실패 시 mutation 0이다. 이어 `consumeWouldBlockSeed`가 canonical seed를 consumed로
+                바꾼 뒤 `armRxDrainEvidence`가 같은 seed address, attempt generation, permit의 consumed
+                lifecycle과 consumed digest를 재검증해 `prepared→armed`로 전이한다.
+
+                그 뒤 순서는 `endStoppedUse → settleStopped → consumeRxDrainEvidence` 하나다.
+                `consumeRxDrainEvidence`는 settlement가 sealed
+                `{staged=consumed|discarded, would_block=consumed}`이고 read scratch generation이 정확히
+                `pre+1`인지, held lease/storage/operation generation, final parser seal/readiness `.empty`,
+                두 budget false, fresh owner inventory/snapshot digest가 prepare 때 권위와 같은지,
+                inherited/live blocker snapshot이 여전히 current이고 blocker가 0인지 다시 검증한다.
+                traversal/aggregate가 live-screen 또는 다른 inherited owner backlog를 만들었으면
+                evidence를 consume하지 않고 `socket_rx_drained=false`, `authority_clear=false`와 해당
+                scheduling blocker를 보존한다. callback/allocator/traversal/authority callback이 없는 suffix에서만
+                `armed→consumed`가 성공한다. 그 반환값만 local `socket_rx_drained=true`의 유일한 출처이며,
+                즉시 `client_pump.decide`에 한 번 전달한다. evidence consume과 decide 사이에는 mutation 가능한
+                호출이 0이다.
+
+                terminal, incomplete/complete parser, allowance/attempt/frame budget stop, EOF/error/EINTR,
+                seed abort 또는 settlement 실패는 `abortRxDrainEvidence`로 prepared/armed evidence를 exact once
+                `aborted` tombstone으로 닫고 drained는 false다. copied/moved/stale/double/cross-generation
+                consume/abort는 모든 authority와 원본 evidence mutation 0으로 실패한다. consumed/aborted
+                canonical tombstone만 `finishRxDrainEvidence`가 `finished`로 닫을 수 있고 다음 turn 전
+                `resetFinishedRxDrainEvidence`가 final address/digest와 outer scratch active latch 0을 검증해
+                pristine으로 되돌린다. 제품 pump의 evidence 직접 `.{} ` 대입은 금지한다.
+
+                S3-D product adapter gate는 leaf hostile matrix를 복제하지 않고 다음 연결 책임 A~G를
+                Debug/ReleaseFast로 고정한다.
+
+                - **A:** zero-prefix would-block에서 parser와 inherited/live owner blocker가 모두 empty이면
+                  prepare/arm/settle/consume exact-one, drained/authority-clear true와 두 연속 turn의
+                  old-evidence stale 거부·canonical reset. 같은 경로에 pre-existing blocker가 있으면 evidence
+                  0, drained/authority-clear false와 blocker scheduling을 보존한다.
+                - **B:** positive-prefix→would-block→final parser empty에서 admit/traversal/aggregate 뒤 같은
+                  receipt/seed와 fresh blocker snapshot을 대조한다. traversal이 live-screen backlog를
+                  publish한 대표 frame은 evidence abort exact-one, drained/authority-clear false,
+                  inherited-work scheduling을 보존한다. owner backlog를 만들지 않는 positive fixture만
+                  evidence consume과 drained true를 허용하며 두 경우 모두
+                  `rx_read_bytes/rx_bytes/rx_frames`를 보존한다.
+                - **C:** positive-prefix final incomplete 또는 frame/read budget exhausted에서 evidence abort
+                  exact-one, drained false.
+                - **D:** traversal terminal, EOF, socket error 대표 경로에서 evidence 미발급 또는 abort,
+                  drained false. EINTR/attempt 상세 우선순위는 C3 leaf 증거를 재사용한다.
+                - **E:** lease generation, parser seal, owner inventory digest, receipt/seed copy drift와
+                  evidence copy/move/stale/double consume를 table-driven으로 거부하고 mutation 0/drained false.
+                - **F:** recorder가 evidence consume `<` drained publication `<` decide 순서와 consume~decide
+                  사이 callback 0을 고정하며, evidence 밖 직접 `socket_rx_drained=true` 제품 callsite는 0이다.
+                - **G:** consumed/aborted evidence 직접 zero 금지, reset exact-once와 prior-turn evidence의
+                  새 scratch generation ABA 거부.
+
+                C3 leaf가 이미 고정한 EINTR 8/9, attempt 64/65, exact allowance, EOF/socket-error prefix 폐기,
+                pre/post authority·descriptor·protected-range drift, stopped borrow alias/replay/settlement,
+                accounting/finalizer exact-once와 C4c leaf의 seed authorized-address alias/abort,
+                seed callback mutation, receipt/borrow 재검증, permit copy/stale/overflow는 S3-D adapter에서
+                전 조합을 반복하지 않는다. 대신 A~G가 그 leaf capability를 제품 순서로 조립하고 fresh owner
+                authority와 scheduling publication 사이에 틈이 없음을 증명한다.
 
                 이 seed/active-use API는 완료된 C3 collector 자체를 다시 여는 것이 아니라 C4c가 소유하는
                 integration seam이며, C4c green 전에는 C4 구현으로 표시하지 않는다. canonical 계약은 다음과
@@ -7776,15 +7883,21 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 검증한 뒤에만 pristine으로 되돌린다. 제품 pump의 token 직접 zero 대입은 금지한다.
                 **C4d**에서만 pump-private drain evidence lifecycle과
                 `pumpInjectedRxUnderHeldLease`, private product-compilable `RxTurnOps` fixture를 연결한다.
-                네 gate가 모두 green이기 전에는 C4 구현으로 표시하지 않는다.
+                네 gate가 모두 green이기 전에는 C4 core integration 구현으로 표시하지 않는다. C4 전체
+                완료 표시는 별도 S3-D와 나머지 named matrix까지 green이어야 한다.
 
-                **C4a~C4d 구현 완료:** private pump가 collector·guarded admit·buffered traversal·aggregate와
-                drain evidence를 held lease 안에서 조립한다. final-address callback token과
+                **C4a~C4d core integration 구현, S3-D 미완료:** private pump가
+                collector·guarded admit·buffered traversal·aggregate의 기본 경로를 held lease 안에서 조립한다.
+                final-address callback token과
                 `PreparedAdmitUsePermit` begin→finish→exact reset, phase-aware replacement cleanup guard가
                 nested callback, stale/copy/context/candidate, parser/inventory/storage/lease drift를
-                fail-close한다. 같은 pinned scratch의 연속 positive turn, zero-prefix would-block,
-                positive-prefix admission/traversal, guarded/quarantine completion exact-one과 제품 callsite
-                allowlist를 Debug/ReleaseFast `test-session-host` 및 ReleaseFast `check-boundaries`로 검증했다.
+                fail-close한다. 같은 pinned scratch의 연속 positive turn, zero-prefix would-block과
+                positive-prefix admission/traversal의 현재 smoke, guarded/quarantine completion exact-one과
+                제품 callsite allowlist는 검증했다. 그러나 현재 `RxDrainEvidence`의 즉시
+                prepare-and-consume helper와 두 adapter smoke는 위 S3-D one-shot authority, A~G 또는 C4 전체
+                hostile matrix의 완료 증거가 아니다. S3-D와 나머지 named C4 matrix가
+                Debug/ReleaseFast `test-session-host` 및 ReleaseFast `check-boundaries`에서 green이기 전에는
+                C4 전체를 완료로 표시하지 않는다.
                 POSIX syscall과 `external_pump_owner` 제품 `RxTurnOps` 진입은 C5 전까지 0이다.
               - **C5 product closure:** `external_pump_owner`가 `RxTurnOps`의 exact-one 제품 entry를 사용하고 POSIX
                 adapter가 errno만 `RxReadOutcome`으로 변환한다. 실제 Darwin socketpair, readable+writable

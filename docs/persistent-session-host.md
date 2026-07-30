@@ -8060,6 +8060,15 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                  generation max와 prepare/abort 사이 owner/parser/drain drift는 lower mutation 0의 terminal로
                  닫는다. Debug/ReleaseFast, boundary와 전체 check가 모두 green이어야 d2d를 구현으로 표시한다.
 
+              **D0 구현 완료:** `client_external_turn_authority.zig`가 canonical nested `Seed`,
+              address-bound permit/cleanup lifecycle, reflection 기반 seal transcript와 explicit enum ordinal을
+              소유한다. permit/cleanup destination의 checked range disjoint, generation·role·budget eligibility,
+              stale/copy/tamper/double transition mutation 0을 14개 focused test로 검증한다. boundary는 제품
+              source 전체에서 pump만 sole importer임을 고정하고 D0 lifecycle 제품 callsite와 future
+              `consume` 정의/callsite가 0임을 검증한다. Debug/ReleaseFast `test-session-host`,
+              `check-boundaries`, 전체 `mise run check`가 green이다. D1~D3 전에는 d2d 전체를 구현 완료로
+              표시하지 않는다.
+
               ```zig
               // Pump가 current owners에서 투영하는 pointer-free immutable DTO. Leaf는 이 값의
               // address/generation/opaque digest exact match만 판정한다.

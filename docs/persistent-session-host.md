@@ -6671,7 +6671,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               publish 0 terminal이다.
 
             **d2c 진입 전 구조 분해 gate:** d2b3d merge 뒤 socket read를 추가하기 전에 transport-independent
-            buffered traversal/partial policy와 그 대형 hostile fixture를
+            buffered traversal/partial policy와 traversal 전용 hostile fixture를
             `client_external_rx_turn.zig` 및 전용 test-support 경계로 이동한다. d2c의 socket read/drain mechanics는
             별도 모듈이 소유하고, `client_external_pump.zig`에는 stable storage, owner transaction,
             aggregate-private capability와 최종 orchestration만 남긴다. 이 gate의 완료 기준은 줄 수가 아니라
@@ -6683,13 +6683,26 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
 
             구조 분해 뒤의 dependency와 authority 계약은 다음과 같다.
 
-            - `client_external_rx_turn.zig`는 `client_external_mode`의 sealed parser API,
-              `external_rx_intent.moveFrame`과 partial view 타입만 단방향 import한다.
-              `ExternalPumpStorage`, ledger, persistent owner, socket/fd와 callback을 알지 않는다.
+            - `client_external_rx_turn.zig`는 `std`, test-build 판별용 `builtin`, `framing`,
+              `external_owner_seal`, `client_external_mode`의 sealed parser API,
+              `external_rx_intent.moveFrame`과 `external_rx_demux.ValidatedPartialView`만 단방향
+              import한다.
+              `ExternalPumpStorage`, ledger, persistent owner, socket/fd, transport read callback과
+              live-screen consumer callback을 알지 않는다. 봉인된 authority와 allocation-guard callback만
+              leaf 계약으로 호출한다.
             - `traverseBuffered`는 caller가 이미 검증한 external parser/state, final-address parse scratch와
               intent handle, authority/allocation guard, target stream과 기존 partial view만 빌린다. 반환값은
               pointer-free `TraversalSummary` 또는 닫힌 `TraversalFailure`이며 payload나 mutation capability를
               반환하지 않는다. intent payload의 유일한 owner는 호출 전후 모두 caller의 sealed handle이다.
+              embedded traversal scratch는 final-address, generation, `ready→busy→closed` lifecycle과 digest를
+              소유한다. copied/moved/stale scratch는 parser consume·write·free 전에 거부한다.
+              parser payload allocation은 caller guard보다 먼저 traversal scratch 전체, mandatory guard와
+              input 범위의 disjoint를 검사하고 callback 뒤 같은 seal을 재검증한다.
+              진입은 `.ready`만 허용하고 즉시 `.busy`로 전이하며 모든 반환 경로는 `.closed`다.
+              `no_intents`와 `terminal`은 intent를 canonical tombstone으로 닫고, `staged`만 caller의
+              sealed intent handle에 유일 ownership을 남긴다. pump가 aggregate commit 또는 abort를 끝낸
+              뒤 다음 turn을 열 때는 `external_rx_intent.resetForNextTurn`을 먼저 완료하고
+              `Scratch.resetForNextTurn`으로 generation을 올린다. 어느 reset이라도 실패하면 terminal이다.
             - `TraversalSummary`는 `rx_bytes`, `rx_frames`, `classified_count`, final parser readiness,
               frame budget exhaustion과 intent owner에 봉인된 final partial view만 담는다.
               `TraversalFailure`는 protocol/resource/invariant/quarantine 원인과 이미 소비한 byte/frame 수만
@@ -6702,14 +6715,23 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               `ExternalWholeTurnLease`를 만들거나 해제할 수 없다.
             - 대형 hostile fixture의 wire/owner 생성은 test 전용
               `client_external_rx_turn_test_support.zig`로 이동한다. 제품 module이 test-support를 import하거나
-              test-support가 private owner writer를 새로 정의하는 것은 boundary gate가 금지한다.
+              test-support가 private owner writer를 새로 정의하는 것은 boundary gate가 금지한다. 이 파일은
+              `build.zig`의 dedicated test root로만 컴파일하며 제품 barrel test graph에도 import하지 않는다.
 
             ```zig
+            const Scratch = struct {
+                saved_self_addr: usize,
+                generation: u64,
+                lifecycle: enum { empty, ready, busy, closed },
+                parse: client_external_mode.RxParseScratch,
+                intent: external_rx_intent.ExternalRxIntentHandle,
+                digest: external_owner_seal.Digest,
+            };
+
             const TraversalInput = struct {
                 state: *client_external_mode.State,
                 parser: *framing.FrameParser,
-                parse_scratch: *client_external_mode.RxParseScratch,
-                intent: *external_rx_intent.ExternalRxIntentHandle,
+                scratch: *Scratch,
                 authority: external_rx_intent.AuthorityOps,
                 payload_guard: *const client_external_mode.PayloadAllocationGuard,
                 target_stream_id: u64,
@@ -6737,10 +6759,12 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             };
             ```
 
-            TDD gate는 extraction 전 기존 d2b3d 행위 캡처를 먼저 고정한다. 1/31/32-byte header,
+            TDD gate는 기존 pump owner 통합 matrix를 그대로 유지하고, 분리된 leaf test root에서도
+            1/31/32-byte header,
             payload-last-byte partial, optional skip, 1/64/65 frame, partial continuation/end/mismatch/cap+1,
-            late terminal, parser allocation fail-index와 payload alias quarantine을 같은 fixture table로
-            extraction 전후 실행한다. 구조 이동에 앞서 classifier가
+            late terminal, parser allocation fail-index와 payload alias quarantine을 실행한다. 즉 단일
+            fixture table의 extraction 전후 비교가 아니라 기존 제품 owner matrix와 새 leaf traversal matrix가
+            함께 green이어야 한다. 구조 이동에 앞서 classifier가
             `advanceValidatedPartial`을 정확히 한 번 계산하고 그 before/after/header/range/identity를
             intent owner digest에 봉인한다. `moveFrame` 성공 뒤 traversal은 검증된 intent accessor가 돌려주는
             after view만 다음 frame 입력으로 사용하며 partial 전이를 다시 계산하지 않는다.

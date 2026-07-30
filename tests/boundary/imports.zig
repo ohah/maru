@@ -61,7 +61,7 @@ test "d2b3b classified intent mechanics stay private and test-only at the pump b
         if (std.mem.eql(u8, entry.path, pump_path)) {
             pump_seen = true;
             try std.testing.expectEqual(
-                @as(usize, 2),
+                @as(usize, 0),
                 countOccurrences(source, "external_rx_intent.moveFrame("),
             );
             try std.testing.expectEqual(
@@ -1535,6 +1535,216 @@ test "validated metadata token construction and materialization stay in classifi
     try std.testing.expectEqual(@as(usize, 1), product_classifier_call_count);
 }
 
+test "d2c pre-entry partial transition has one product decision source" {
+    const allocator = std.testing.allocator;
+    const demux = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/external_rx_demux.zig",
+    );
+    defer allocator.free(demux);
+    const pump = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/client_external_pump.zig",
+    );
+    defer allocator.free(pump);
+    const traversal = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/client_external_rx_turn.zig",
+    );
+    defer allocator.free(traversal);
+    const demux_product_end =
+        std.mem.indexOf(u8, demux, "\ntest \"") orelse
+        return error.TestUnexpectedResult;
+    const pump_product_end =
+        std.mem.indexOf(u8, pump, "\ntest \"") orelse
+        return error.TestUnexpectedResult;
+
+    var demux_advance_identifiers: usize = 0;
+    var demux_tokenizer = std.zig.Tokenizer.init(demux);
+    while (true) {
+        const token = demux_tokenizer.next();
+        if (token.tag == .eof or token.loc.start >= demux_product_end) break;
+        if (token.tag != .identifier) continue;
+        if (std.mem.eql(
+            u8,
+            demux[token.loc.start..token.loc.end],
+            "advanceValidatedPartial",
+        )) demux_advance_identifiers += 1;
+    }
+    // One definition and one classifier call. Traversal consumes the sealed result.
+    try std.testing.expectEqual(@as(usize, 2), demux_advance_identifiers);
+
+    var pump_advance_identifiers: usize = 0;
+    var pump_traversal_identifiers: usize = 0;
+    var pump_tokenizer = std.zig.Tokenizer.init(pump);
+    while (true) {
+        const token = pump_tokenizer.next();
+        if (token.tag == .eof or token.loc.start >= pump_product_end) break;
+        if (token.tag != .identifier) continue;
+        const spelling = pump[token.loc.start..token.loc.end];
+        if (std.mem.eql(u8, spelling, "advanceValidatedPartial"))
+            pump_advance_identifiers += 1;
+        if (std.mem.eql(u8, spelling, "traverseBuffered"))
+            pump_traversal_identifiers += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 0), pump_advance_identifiers);
+    try std.testing.expectEqual(@as(usize, 1), pump_traversal_identifiers);
+
+    var traversal_move_identifiers: usize = 0;
+    var traversal_partial_identifiers: usize = 0;
+    var traversal_parser_identifiers: usize = 0;
+    var traversal_tokenizer = std.zig.Tokenizer.init(traversal);
+    while (true) {
+        const token = traversal_tokenizer.next();
+        if (token.tag == .eof) break;
+        if (token.tag != .identifier) continue;
+        const spelling = traversal[token.loc.start..token.loc.end];
+        if (std.mem.eql(u8, spelling, "moveFrame"))
+            traversal_move_identifiers += 1;
+        if (std.mem.eql(u8, spelling, "partialAfterMove"))
+            traversal_partial_identifiers += 1;
+        if (std.mem.eql(u8, spelling, "nextOutcomeWithRangeGuarded"))
+            traversal_parser_identifiers += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), traversal_move_identifiers);
+    try std.testing.expectEqual(@as(usize, 1), traversal_partial_identifiers);
+    try std.testing.expectEqual(@as(usize, 1), traversal_parser_identifiers);
+    inline for (.{
+        "ExternalPumpStorage",
+        "ExternalWholeTurnLease",
+        "LiveScreenConsumePermit",
+        "PreparedRxAggregate",
+        "external_inbox_ledger",
+        "external_pump_owner",
+        "std.posix",
+        "std.c",
+    }) |forbidden|
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            countOccurrences(traversal, forbidden),
+        );
+
+    var dir = try std.Io.Dir.cwd().openDir(
+        std.testing.io,
+        "src",
+        .{ .iterate = true },
+    );
+    defer dir.close(std.testing.io);
+    var walker = try dir.walk(allocator);
+    defer walker.deinit();
+    while (try walker.next(std.testing.io)) |entry| {
+        if (entry.kind != .file or
+            !std.mem.endsWith(u8, entry.basename, ".zig"))
+            continue;
+        const path = try std.fmt.allocPrint(allocator, "src/{s}", .{entry.path});
+        defer allocator.free(path);
+        const source = try readZigFileZ(allocator, path);
+        defer allocator.free(source);
+        if (!std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/client_external_rx_turn_test_support.zig",
+        ))
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                countOccurrences(
+                    source,
+                    "client_external_rx_turn_test_support.zig",
+                ),
+            );
+        var traverse_count: usize = 0;
+        var move_count: usize = 0;
+        var guarded_parser_count: usize = 0;
+        var unguarded_parser_count: usize = 0;
+        const product_end = if (std.mem.indexOf(u8, source, "\ntest \"")) |start|
+            start
+        else
+            source.len;
+        var tokenizer = std.zig.Tokenizer.init(source);
+        while (true) {
+            const token = tokenizer.next();
+            if (token.tag == .eof) break;
+            if (token.tag != .identifier) continue;
+            const spelling = source[token.loc.start..token.loc.end];
+            if (std.mem.eql(u8, spelling, "traverseBuffered"))
+                traverse_count += 1;
+            if (token.loc.start >= product_end) continue;
+            if (std.mem.eql(u8, spelling, "moveFrame"))
+                move_count += 1;
+            if (std.mem.eql(u8, spelling, "nextOutcomeWithRangeGuarded"))
+                guarded_parser_count += 1;
+            if (std.mem.eql(u8, spelling, "nextOutcomeWithRange"))
+                unguarded_parser_count += 1;
+        }
+        const expected: usize = if (std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/client_external_rx_turn.zig",
+        ) or std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/client_external_pump.zig",
+        ))
+            1
+        else if (std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/client_external_rx_turn_test_support.zig",
+        ))
+            2
+        else
+            0;
+        try std.testing.expectEqual(expected, traverse_count);
+        const expected_move: usize = if (std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/external_rx_intent.zig",
+        ))
+            1
+        else if (std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/client_external_rx_turn.zig",
+        ))
+            2
+        else
+            0;
+        try std.testing.expectEqual(expected_move, move_count);
+        const expected_guarded: usize = if (std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/client_external_mode.zig",
+        ))
+            2
+        else if (std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/client_external_rx_turn.zig",
+        ))
+            1
+        else
+            0;
+        try std.testing.expectEqual(expected_guarded, guarded_parser_count);
+        const expected_unguarded: usize = if (std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/client_external_mode.zig",
+        ))
+            1
+        else
+            0;
+        try std.testing.expectEqual(expected_unguarded, unguarded_parser_count);
+    }
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        countOccurrences(traversal, ".buf"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        countOccurrences(traversal, ".head"),
+    );
+}
+
 test "d2b3d live owner substrate stays private with one buffered product traversal" {
     const allocator = std.testing.allocator;
     var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
@@ -1584,7 +1794,7 @@ test "d2b3d live owner substrate stays private with one buffered product travers
             std.mem.count(u8, source, "pub fn pumpRxTurn("),
         );
         try std.testing.expectEqual(
-            @as(usize, 1),
+            @as(usize, 0),
             std.mem.count(
                 u8,
                 source,
@@ -2010,6 +2220,10 @@ test "session host stable pump storage and Client transfer stay in mechanics bou
             u8,
             entry.path,
             "platform/macos/session_host/client_external_mode.zig",
+        ) or std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/client_external_rx_turn_test_support.zig",
         );
         const storage_type_allowed = mechanics_file or std.mem.eql(
             u8,

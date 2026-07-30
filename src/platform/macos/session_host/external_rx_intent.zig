@@ -332,6 +332,12 @@ pub const MoveResult = enum {
     poisoned,
 };
 
+pub const PartialAfterMoveResult = union(enum) {
+    unchanged,
+    advanced: ?external_rx_demux.ValidatedPartialView,
+    invalid_state,
+};
+
 pub const MoveScreenResult = enum {
     moved,
     invalid_state,
@@ -943,6 +949,29 @@ pub fn borrowClassifiedEvent(
         .allocator = owner.allocator,
         .payload_digest = owner.payload_digest,
         .candidate = candidate,
+    };
+}
+
+/// Returns the partial cursor already decided by the classifier and sealed into the moved owner.
+/// Traversal must consume this value instead of independently replaying the transition policy.
+pub fn partialAfterMove(
+    handle: *ExternalRxIntentHandle,
+    intent_index: u8,
+) PartialAfterMoveResult {
+    const scratch = validateHandleAndScratch(handle, .ready, .ready) orelse
+        return .invalid_state;
+    if (intent_index >= scratch.intent_count) return .invalid_state;
+    const owner = switch (scratch.intents[intent_index]) {
+        .classified => |*value| value,
+        else => return .invalid_state,
+    };
+    if (!ownerValid(owner, scratch)) return .invalid_state;
+    return switch (owner.classification) {
+        .screen_candidate => |candidate| .{
+            .advanced = candidate.partial_after,
+        },
+        .event_candidate, .response_candidate => .unchanged,
+        .protocol_terminal => .invalid_state,
     };
 }
 
@@ -3093,6 +3122,8 @@ fn writeClassification(
             writeHeader(writer, candidate.header);
             writeRange(writer, candidate.range);
             writer.writeBytes(&candidate.pair_seal);
+            writeOptionalPartial(writer, candidate.partial_before);
+            writeOptionalPartial(writer, candidate.partial_after);
         },
         .event_candidate => |candidate| {
             writer.writeU8(2);
@@ -3109,6 +3140,22 @@ fn writeClassification(
         },
         .protocol_terminal => writer.writeU8(4),
     }
+}
+
+fn writeOptionalPartial(
+    writer: *external_owner_seal.Writer,
+    partial: ?external_rx_demux.ValidatedPartialView,
+) void {
+    if (partial) |value| {
+        writer.writeBool(true);
+        writer.writeU64(value.stream_id);
+        writer.writeBool(value.is_snapshot);
+        writer.writeU64(value.identity.attach_instance_id);
+        writer.writeUsize(value.identity.destination_slot_addr);
+        writer.writeU64(value.start_absolute);
+        writer.writeU64(value.end_absolute);
+        writer.writeU8(value.chunk_count);
+    } else writer.writeBool(false);
 }
 
 fn allocatorMatches(
@@ -3442,6 +3489,22 @@ test "d2b3b first copied outcome move wins and abort frees once" {
         ),
     );
     try std.testing.expect(source == .incomplete);
+    const partial = switch (partialAfterMove(&handle, 0)) {
+        .advanced => |after| after orelse return error.TestUnexpectedResult,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(u8, 1), partial.chunk_count);
+    const scratch: *ExternalRxIntentScratch = @ptrFromInt(handle.scratch_addr);
+    const expected_owner = scratch.intents[0];
+    scratch.intents[0].classified.classification
+        .screen_candidate.partial_after.?.chunk_count = 2;
+    try std.testing.expect(
+        partialAfterMove(&handle, 0) == .invalid_state,
+    );
+    scratch.intents[0] = expected_owner;
+    try std.testing.expect(
+        partialAfterMove(&handle, 1) == .invalid_state,
+    );
     try std.testing.expectEqual(
         MoveResult.replay,
         moveFrame(

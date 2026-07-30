@@ -16,6 +16,8 @@ pub const ScreenCandidate = struct {
     header: protocol.Header,
     range: external_rx_types.RxRange,
     pair_seal: client_external_mode.ExternalRxFrameSeal,
+    partial_before: ?ValidatedPartialView,
+    partial_after: ?ValidatedPartialView,
 };
 
 pub const EventCandidate = struct {
@@ -197,7 +199,7 @@ fn classifyScreen(
     target_stream_id: u64,
     partial: ?ValidatedPartialView,
 ) ExternalWireClass {
-    _ = advanceValidatedPartial(
+    const after = advanceValidatedPartial(
         partial,
         header,
         range,
@@ -208,6 +210,8 @@ fn classifyScreen(
         .header = header,
         .range = range,
         .pair_seal = pair_seal,
+        .partial_before = partial,
+        .partial_after = after,
     } };
 }
 
@@ -423,6 +427,39 @@ test "external RX demux enforces partial stream kind contiguity and interleave r
         9,
         foreign_identity,
     ) == .protocol_terminal);
+}
+
+test "screen classification carries the exact partial transition result" {
+    const identity = testIdentity();
+    var payload = [_]u8{'a'};
+    const first = makeFrame(.{
+        .major = protocol.version_major,
+        .kind = .snapshot_chunk,
+        .stream_id = 7,
+        .flags = 0,
+    }, &payload);
+    const classified = classifyExternalRx(&first, identity, 7, null);
+    const candidate = switch (classified) {
+        .screen_candidate => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    const after = candidate.partial_after orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 7), after.stream_id);
+    try std.testing.expect(after.is_snapshot);
+    try std.testing.expectEqual(first.range.start_absolute, after.start_absolute);
+    try std.testing.expectEqual(first.range.end_absolute, after.end_absolute);
+    try std.testing.expectEqual(@as(u8, 1), after.chunk_count);
+
+    var final_frame = first;
+    final_frame.frame.header.flags = protocol.Flags.end_stream;
+    client_external_mode.testing.sealExternalRxFrame(&final_frame);
+    const final_classified = classifyExternalRx(&final_frame, identity, 7, null);
+    const final_candidate = switch (final_classified) {
+        .screen_candidate => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(final_candidate.partial_after == null);
 }
 
 test "external RX demux is mutation-free across accepted and terminal classifications" {

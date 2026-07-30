@@ -1788,6 +1788,26 @@ pub fn build(b: *std.Build) void {
         run_external_pump_storage_tests.setCwd(b.path("."));
         test_step.dependOn(&run_external_pump_storage_tests.step);
         session_host_step.dependOn(&run_external_pump_storage_tests.step);
+
+        // Buffered traversal fixtures stay outside the product barrel so test-only authority and
+        // hostile allocators cannot become reachable from the shipped session-host module graph.
+        const external_rx_turn_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/client_external_rx_turn_test_support.zig",
+                ),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+        });
+        const run_external_rx_turn_tests = b.addRunArtifact(
+            external_rx_turn_tests,
+        );
+        run_external_rx_turn_tests.setCwd(b.path("."));
+        test_step.dependOn(&run_external_rx_turn_tests.step);
+        session_host_step.dependOn(&run_external_rx_turn_tests.step);
     }
 
     // Opt-in external oracle: validates committed goldens against system libvterm.

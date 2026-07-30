@@ -93,9 +93,18 @@
 > abort·precommit·postcommit callback drift, exact-one free와 no-free/exact-once 상한을 Debug/ReleaseFast에서
 > 고정했다. tokenizer boundary는 guarded/legacy direct callsite가 mode 밖 0이고 기존 buffered product
 > fixture의 `testing.admitBuffered` 세 callsite만 허용하며 pump/ledger/owner-range/global quarantine import를
-> 금지한다. C3 injected cumulative collector+value-only authority seam, C4 private pump
+> 금지한다. C3는 collector 계약과 hostile matrix를 문서 확정했고 구현 전이다. value-only
+> `CollectResult`는 rejected/stopped/terminal을 분리하고 scheduling/parser 판정은 C4에 남긴다.
+> receipt는 frozen allowance를 봉인하고 sealed borrow/stoppedBytes/settle API만 C4에 prefix를 넘긴다.
+> ready→collecting→spent→borrowed→ready와 teardown-only terminal, current(pre)→read→current(post),
+> stopped prefix 보존 대 terminal 전부 폐기, attempt 64/EINTR 9 우선순위, full-prefix scan 64 MiB,
+> read 64/current 128 callback 상한, context extent와 callback-local protected range 16개,
+> ordinary prepared tombstone의 mode-owned safe reset, quarantine latch accounting receipt를 요구하는
+> 별도 finalizer 및 synthetic-only boundary가 구현 gate다. C4 private pump
 > integration+final drain evidence, C5 POSIX 제품 facade+실제 socketpair의 다섯 구현 gate를 순서대로 닫는다.
-> collector는 최초 `maxReadable` allowance 안에서 최대 1 MiB를 누적한 뒤 `staged_len>0`일 때만 guarded
+> C3 collector는 최초 `maxReadable` allowance 안에서 최대 1 MiB를 누적한다. allowance/would-block/
+> attempt-budget stop은 validated staged prefix를 보존하고 EOF/error/EINTR-9/authority·descriptor·prefix
+> terminal은 전부 폐기해 C4 admit 0이다. C4는 `staged_len>0`일 때만 guarded
 > admit exact-one과 `traverseBuffered` exact-one을 실행한다. initial complete backlog는 traversal exact-one,
 > zero-prefix would-block은 admit/traversal 0이다. allowance는 resident/turn/counter limit bit를 보존하고
 > 각각의 terminal/immediate 표를 C1에서 고정한다. 기존 `TurnResult.rx_bytes`는 parser-consumed wire bytes,
@@ -105,8 +114,10 @@
 > C1~C5의 Debug/ReleaseFast component, hostile allocator/callback matrix, boundary, 실제 socketpair와 전체
 > `mise run check`가 모두 green이기 전에는 d2c 또는 2b2d2를 구현으로 표시하지 않는다. d2c product deadline
 > wiring은 입력 source가 생기는 d2e/f 범위이며 d2c는 null-deadline product와 pure deadline regression만
-> 완료 증거로 삼는다. collector callback은 total attempt 64와 staged-prefix validation 64 MiB analytic work
-> cap을 갖고 65번째 callback은 0이다. outer scratch는 기존 structural 2 MiB+read backing 1 MiB+metadata
+> 완료 증거로 삼는다. collector callback은 read 64, hostile authority 128, full-prefix scan 64회와
+> staged-prefix validation 64 MiB analytic work cap을 갖고 65번째 read/129번째 authority callback은 0이다.
+> C3 module의 pump/storage/ledger/traversal/POSIX/admit import·call은 0, product collector callsite는 0,
+> dedicated synthetic test root만 exact-one callsite를 갖는다. outer scratch는 기존 structural 2 MiB+read backing 1 MiB+metadata
 > 256 KiB의 exact 3.25 MiB compile-time cap이며 제품/fixture heap exact-one, stack/by-value 생성 0을 검사한다.
 > limit bit 동률은 counter terminal → resident+incomplete resource terminal → turn immediate →
 > resident+empty immediate 순서로 해석하며, C1 pure table이 단독·2-way·3-way와 accepted `< / == / >`

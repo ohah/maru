@@ -48,7 +48,8 @@
 
 **2026-07-31 정정(코드 대조).** 위 세 항목은 그 사이 file-panel 구현이 진행되며 모두 사실이 아니게 됐다.
 
-- `unsafe-inline`은 **편집 경로에 필요하지 않았다** — CM6 소스 편집기가 엄격 `style-src 'self'`로 출하 중이다(§2·§7.2).
+- `unsafe-inline` 항목은 **그대로 유효하다**(2026-07-31 WKWebView 실측 — §7.2 표). 다만 대상이 바뀌었다: editor의 미래 문제가
+  아니라 **이미 출하된 소스 모드의 현재 결함**이다. CM6는 뜨지만 자기 스타일(baseTheme·구문 하이라이트)이 차단된다.
 - CM6는 **제품 WebKit에서 이미 돈다** — "돈 적이 없다"는 무효이고, 남은 미검증은 MergeView뿐이다(§7.4).
 - zntc는 **`0.1.4`로 pin되어 CM6를 포함해 번들된다** — `0.1.3` 제약은 해소됐다(§7.1).
 
@@ -75,10 +76,15 @@
     한계는 해소됐다.
   - **웹 스택은 React + Tailwind + shadcn/ui**로 바뀌었다([file-panel.md](file-panel.md) §2.1, 2026-07-29 사용자 결정).
     "프레임워크 없음"을 전제한 §7.1 서술은 무효다.
-  - **CM6가 엄격 CSP에서 동작한다(실측).** 위 `style-src 'self'`(unsafe-inline 없음) 그대로 소스 모드가 출하 중이다.
-    maru의 CM6 설정은 `syntaxHighlighting`/`EditorView.theme` StyleModule을 쓰지 않고 정적 `app.css`의 `.cm-*` 규칙과
-    `--maru-syntax-*` 변수로 칠하며, CM6 코어가 만드는 스타일시트는 CSSOM `insertRule` 경로라 `style-src`에 걸리지 않는다.
-    **§1.1이 "여전히 필요하다"고 적은 `unsafe-inline`은 최소한 편집 경로에서는 필요하지 않았다**(MergeView는 별도 — §7.2).
+  - **CM6는 엄격 CSP에서 "뜨지만, 자기 스타일은 차단된다"(실측 2026-07-31).** 소스 모드가 출하 중인 것은 사실이나,
+    §1.1의 `unsafe-inline` 항목은 **해소된 것이 아니라 여전히 살아 있다**. WKWebView 실측(§7.2 표)에서 `style-src 'self'`는
+    ⑴ 마크업 `<style>`, ⑵ **JS로 만든 `<style>` + `textContent`**, ⑶ CSSOM `insertRule`, ⑷ `style=` 속성을 **모두 차단**했다.
+    style-mod(CM6가 쓰는 주입기)는 문서 루트에서 ⑵ 경로를 타므로(`style-mod/src/style-mod.js:135` — `adoptedStyleSheets`는
+    `!root.head`, 즉 ShadowRoot일 때만), **CM6 baseTheme과 `syntaxHighlighting(HighlightStyle)`이 제품에서 적용되지 않는다.**
+    `web/src/source-language.ts:138`이 실제로 `syntaxHighlighting`을 쓰고 `app.css`에는 토큰 클래스가 하나도 없다(변수만 있다)
+    — 즉 **구문 색이 제품에서 나오지 않을 가능성이 매우 높다**. app.css가 `.cm-editor/.cm-scroller/.cm-content/.cm-gutters`
+    레이아웃을 손으로 다시 선언하고 있는 것도 baseTheme이 차단된 상태를 수동으로 메운 모습과 일치한다. **이건 editor의 미래
+    문제가 아니라 이미 출하된 소스 모드의 현재 결함**이므로 §7.2에 조치와 함께 적었다.
 
 ## 3. 권장 구조 — 우측 도크(목록) + 파일 Term(본문)
 
@@ -256,6 +262,11 @@ editor **L2 코어**(정책·상태)는 신규 파일로 나눠 `app_session.zig
 
 ### 3.5 우측 도크 소스 컨트롤 뷰 (시각 구조·정보 계층)
 
+**권한 경계.** 이 뷰는 **native chrome**이라 `EditorGrant`/`git_read`의 대상이 아니다 — 그 grant들은 *웹 브리지*가 넘는 경계를
+게이트하는 장치이고(§3.2), 도크는 웹이 아니다. 사용자가 연 창에서 사용자의 저장소를 읽는 것이므로 추가 승인 계단을 만들지 않는다.
+반대로 **diff 본문을 그리는 파일 Term은 웹**이므로 `diff.open`은 그대로 grant 게이트를 통과해야 한다. 이 비대칭이 §3 경계의
+직접적 귀결이다.
+
 **시각 구조 기준 = 사용자 제공 목업(2026-07-31).** 레퍼런스 앱의 코드·DOM은 사용하지 않고 **배치와 정보 계층만** 받아
 maru GPU chrome으로 독립 구현한다([project-rules.md](project-rules.md) 레퍼런스 경계, [no-external-ref](pr-checklist.md)).
 아래 구조는 그 목업을 Maru 용어로 옮긴 것이다.
@@ -290,17 +301,23 @@ maru GPU chrome으로 독립 구현한다([project-rules.md](project-rules.md) �
 여러 뷰를 갖는 것**이며, 폭·접기·`⌘⇧E` 왕복·포커스 축(`FocusOwner.file_tree`)은 그대로 공유한다. 뷰 선택은 창별 chrome 상태이고
 workspace에 영속한다(탐색기로 되돌아오는 재시작을 강요하지 않는다).
 
-**헤더 3줄의 출처와 경계.**
+**헤더 3줄의 출처와 경계**(명령은 2026-07-31 실측).
 
 | 줄 | 내용 | 출처 | v1 |
 |---|---|---|---|
 | 1 | 리뷰 대상(PR 번호·제목) | **로컬 git 밖** — GitHub API/`gh` 필요 | **범위 밖**(§10.12) |
-| 2 | 현재 브랜치 | `HEAD` symbolic-ref | 포함 |
-| 3 | upstream·ahead/behind | `@{u}` + `rev-list --count --left-right` | 포함 |
+| 2 | 현재 브랜치 | `git symbolic-ref --short HEAD` | 포함 |
+| 3 | **비교 기준 + ahead/behind** | `git rev-parse --abbrev-ref origin/HEAD` → `git rev-list --count --left-right <base>...HEAD` | 포함 |
 
-**PR 헤더는 v1에 넣지 않는다.** 네트워크·인증·호스트별 API가 붙는 순간 이 문서의 경계(로컬 git read-only, `git_read` grant)를
-넘고, 실패 모드(토큰 만료·rate limit·사설 호스트)가 리뷰 UI 전체의 신뢰도를 떨어뜨린다. 목업의 자리는 남겨 두되 v1은 2·3줄만
-채우고, PR 연동은 §10.12 결정 뒤 별도 슬라이스로 얹는다. upstream이 없으면 3줄은 `upstream 없음`으로 접는다.
+**3줄의 기준은 `@{u}`가 아니라 기본 브랜치다.** 목업이 `→ origin/main`을 보여 주는데, PR 브랜치의 `@{u}`는 보통
+`origin/<자기 브랜치>`라 그걸 쓰면 항상 `0 0`이 나온다(실측 확인). 리뷰가 알고 싶은 것은 "기본 브랜치 대비 내 브랜치"이므로
+**`origin/HEAD`가 가리키는 기본 브랜치를 기준으로 쓴다** — 이 값은 네트워크 없이 로컬에서 읽힌다(실측: `origin/main`).
+`origin/HEAD`가 없으면(clone 방식에 따라 없을 수 있다) 사용자가 기준을 고르게 하고, 그 선택을 workspace에 기억한다.
+`@{u}`는 별도로 "push 됐는지"를 보여 주는 데만 쓴다.
+
+**PR 헤더는 v1에 넣지 않는다.** 네트워크·인증·호스트별 API가 붙는 순간 이 문서의 경계(로컬 git read-only)를 넘고, 실패
+모드(토큰 만료·rate limit·사설 호스트)가 리뷰 UI 전체의 신뢰도를 떨어뜨린다. 목업의 자리는 남겨 두되 v1은 2·3줄만 채우고,
+PR 연동은 §10.12 결정 뒤 별도 슬라이스로 얹는다.
 
 **섹션 모델.** 목업의 세 묶음은 git 비교 기준(§6)과 1:1로 대응한다 — 뭉개지 않는다.
 
@@ -309,18 +326,30 @@ workspace에 영속한다(탐색기로 되돌아오는 재시작을 강요하지
 | 스테이지된 변경 | `HEAD ↔ index` | `M`·`A`·`D`·`R` | index↔HEAD diff 열기 |
 | 변경 사항 | `index ↔ worktree` | `M`·`D` | worktree↔index diff 열기 |
 | 추적되지 않은 파일 | worktree 전용 | `U` | 파일 그대로 열기(비교 대상 없음) |
-| 브랜치에 COMMIT 됨 | `merge-base(upstream) ↔ HEAD` | `M`·`A`·`D` | 그 커밋 범위 diff 열기 |
+| 브랜치에 COMMIT 됨 | `merge-base(기본 브랜치) ↔ HEAD` | `M`·`A`·`D` | 그 커밋 범위 diff 열기 |
+
+**기준을 못 잡으면 그 섹션만 숨긴다.** "브랜치에 COMMIT 됨"은 기본 브랜치가 있어야 계산되므로, `origin/HEAD`도 없고 사용자가
+기준을 고르지도 않았으면 나머지 세 섹션만 보여 준다(오류로 취급하지 않는다).
 
 목업에는 "스테이지된 변경"이 비어 보이지 않지만(스테이지가 없는 상태), 섹션 자체는 4개가 정본이다. **개수가 0인 섹션은 숨긴다** —
 빈 헤더 네 줄이 컬럼 위쪽을 잡아먹지 않게 한다. 섹션 접힘 상태는 뷰 상태로 기억한다.
 
 **행의 정보 계층.** `아이콘 · 파일명 · 흐린 상대경로 · +N -N · 상태 문자` 순이고, 폭이 좁아지면 **경로가 먼저 말줄임**된다
 (파일명·증감·상태는 끝까지 유지 — 셋이 스캔의 축이다). 말줄임은 chrome 공통 `appendEllipsizedTitle` 경로를 쓴다(한글 자모가
-흩어지지 않게 — [chrome 셀 cluster 계약](grapheme-clustering.md)). 증감 숫자는 `diff.list`의 `hunk_summary`에서 오고, binary·
-too_large 파일은 숫자 대신 `bin`·`—`을 쓴다(0/0으로 거짓 표시하지 않는다).
+흩어지지 않게 — [chrome 셀 cluster 계약](grapheme-clustering.md)).
 
-**행 클릭 = 파일 Term 열기.** 파일 하나를 고르면 diff kind 파일 Term이 열리고(이미 열려 있으면 활성화 — FP16의 "파일 1개 =
-창당 Term 1개" 불변식을 그대로 따른다), 도크는 목록으로 남는다. **도크 안에서 diff를 그리지 않는다**(§3의 경계).
+**증감 숫자는 목록에 필수다.** 그래서 §6의 `diff.list`는 `added_lines`/`removed_lines`를 선택이 아닌 **필수 필드**로 둔다
+(`hunk_summary?`는 헝크 단위 요약이라 별개이고 계속 선택이다). 출처는 `git diff --numstat`이고(실측), **binary는 numstat이 `-\t-\t경로`로 표시**하므로 그대로 `bin`으로 옮긴다 —
+`0/0`으로 거짓 표시하지 않는다. `status --porcelain=v2` 한 번으로 네 섹션의 상태 문자를 모두 얻지만 **증감은 들어 있지 않으므로**
+`--numstat`을 staged·worktree 두 번 더 부른다(실측 확인). rename은 `--find-renames`가 필요하다.
+
+**행 클릭 = 파일 Term 열기.** 파일 하나를 고르면 diff kind 파일 Term이 열리고 도크는 목록으로 남는다. **도크 안에서 diff를
+그리지 않는다**(§3의 경계).
+
+FP16의 "파일 1개 = 창당 Term 1개" 불변식과의 관계를 명시한다 — **유일성 키는 경로가 아니라 `(경로, kind)`다.** 같은 `README.md`를
+읽기 모드로 보면서 그 파일의 diff도 함께 보는 것은 정상적인 리뷰 흐름이라, diff Term이 markdown Term을 빼앗거나 kind를 갈아
+끼우면 안 된다. 이 확장은 FP16 불변식의 **예외가 아니라 키의 명시화**이며, 구현 시 [file-panel.md](file-panel.md)의 유일성 조회
+지점과 함께 갱신한다(그 문서가 키의 단일 출처다).
 
 **주 동작 버튼.** 목업의 `＋ 모두 스테이지`는 **write 동작**이라 `git_read` grant 밖이다. 읽기 전용 v1(E1)에서는 이 버튼과 커밋
 메시지 입력을 **표시하지 않는다** — 누를 수 없는 버튼을 띄워 두는 것보다 없는 편이 정직하다. stage/unstage/commit이 들어오는
@@ -333,9 +362,13 @@ too_large 파일은 숫자 대신 `bin`·`—`을 쓴다(0/0으로 거짓 표시
 `변경 사항 없음`. ⑶ unborn(첫 커밋 전) → 섹션은 `추적되지 않은 파일`만 나온다. 셋 다 오류가 아니라 정상 상태이므로 경고색을
 쓰지 않는다.
 
-**갱신 시점.** 목록은 폴링하지 않는다. ⑴ 도크 뷰가 소스 컨트롤로 바뀔 때, ⑵ 파일 Term 저장 성공 뒤, ⑶ §5.2 디렉터리 watcher가
-worktree 변경을 알릴 때, ⑷ 사용자가 헤더 새로고침을 누를 때 다시 읽는다. 에이전트가 파일을 바꾸는 동안 목록이 계속 흔들리지
-않도록 watcher 신호는 합쳐서(coalesce) 적용한다.
+**갱신 시점.** 목록은 폴링하지 않는다. ⑴ 도크 뷰가 소스 컨트롤로 바뀔 때, ⑵ 파일 Term 저장 성공 뒤, ⑶ 창이 다시 포커스를
+받을 때, ⑷ 사용자가 헤더 새로고침을 누를 때 다시 읽는다.
+
+**저장소 전체 watcher는 v1에 넣지 않는다.** §5.2의 watcher는 *열린 문서의 디렉터리*를 보는 것이고, worktree 전체를 보는 것은
+다른 비용 문제다 — 대형 저장소·`node_modules`·`.git` 내부 churn(index.lock·objects)이 이벤트를 쏟아 낸다. 에이전트가 파일을
+바꾸는 동안 목록이 저절로 갱신되는 것은 분명 바람직하지만, 그건 **감시 범위·필터·coalesce를 따로 설계해야 하는 별도 슬라이스**다.
+v1은 위 네 시점으로 충분하고, 그중 ⑶이 "터미널에서 에이전트가 일하고 도크로 돌아온다"는 실제 흐름을 덮는다.
 
 ## 4. 문서 권위와 저장 CAS
 
@@ -424,7 +457,9 @@ L4 macOS host가 open document를 디렉터리별로 묶어 `DispatchSource` 또
 
 전체 저장소의 before/after blob을 한 응답에 싣는 `diff.read`는 사용하지 않는다.
 
-- `diff.list`: `{path, old_path?, status, binary, before_size, after_size, hunk_summary?}` metadata를 pagination해서 반환한다.
+- `diff.list`: `{path, old_path?, status, binary, before_size, after_size, added_lines, removed_lines, hunk_summary?}` metadata를
+  pagination해서 반환한다. **`added_lines`/`removed_lines`는 필수**다 — 도크 목록 행이 항상 `+N -N`을 그리기 때문이고(§3.5),
+  출처인 `git diff --numstat`이 그 값을 공짜로 준다. binary는 numstat이 `-`를 주므로 숫자 대신 `binary=true`로 옮긴다.
 - `diff.list` 첫 응답은 `diff_snapshot_id`와 stable cursor를 발급한다. pagination 중 index/worktree가 바뀌면 서로 다른 시점의 목록을 섞지 않고 `stale_snapshot`으로 다시 시작하게 한다.
 - `diff.open`: `{diff_snapshot_id, path}`로 한 파일의 original/modified를 명시적 byte 상한 안에서 반환한다. 너무 크거나 binary면 typed `too_large`/`binary` 결과와 external-open fallback을 준다.
 - UI bridge와 외부 socket은 같은 의미 DTO를 쓰되 각각의 transport 상한 안에서 chunk/page한다.
@@ -492,22 +527,38 @@ JS toolchain(zntc/`web/` Bun workspace)은 **FP2로 이미 도입 완료**됐으
 
 `script-src 'unsafe-eval'`이나 remote source는 열지 않는다.
 
-**초판의 전제를 실측으로 정정한다.** §1.1은 "`style-src 'unsafe-inline'`은 여전히 필요하다"고 적었지만, **CM6 소스 편집기는
-현행 엄격 CSP(`style-src 'self'`, unsafe-inline 없음)에서 제품에 출하돼 있다**(§2 코드 대조). 성립한 이유는 둘이다 —
-⑴ maru는 `syntaxHighlighting`/`EditorView.theme` StyleModule 대신 정적 `app.css`(`.cm-*` + `--maru-syntax-*`)로 칠하고,
-⑵ CM6 코어가 만드는 스타일시트는 CSSOM `insertRule` 경로라 `style-src`의 인라인 규칙에 걸리지 않는다. **따라서 라우트별 CSP
-분기는 지금 선행 조건이 아니다.**
+**WKWebView 실측(2026-07-31).** `style-src` 값을 바꿔 가며 네 가지 주입 경로가 적용되는지 쟀다(macOS WebKit, 동일 문서).
 
-남은 미지수는 **`@codemirror/merge`(MergeView)** 하나다. MergeView가 chunk 하이라이트를 StyleModule이나 마크업 `style=`
-속성으로 넣으면 그때 위반이 생긴다. 그래서 E1의 첫 작업은 **MergeView를 현행 CSP 그대로 붙여 위반이 나오는지 세는 것**이고,
-그 결과에 따라 둘 중 하나를 택한다.
+| `style-src` | 마크업 `<style>` | JS 생성 `<style>`+`textContent` | CSSOM `insertRule` | `style=` 속성 |
+|---|---|---|---|---|
+| (CSP 없음) | 적용 | 적용 | 적용 | 적용 |
+| **`'self'` (현행 제품)** | **차단** | **차단** | **차단**(`sheet`이 `null`) | **차단** |
+| `'unsafe-inline'` | 적용 | 적용 | 적용 | 적용 |
 
-1. 위반 0 → **아무것도 완화하지 않는다.** 이 경우 §10.3 결정 항목은 소멸한다.
-2. 위반 발생 → 먼저 **정적 CSS로 대체 가능한지** 본다(소스 편집기에 이미 통한 방법). 그래도 남으면 그때 CSP를
-   **문서(라우트)별**로 분기해 CM6 MergeView를 마운트하는 신뢰 shell 문서에만 `'unsafe-inline'`을 주고, 격리 렌더 origin·
-   browser·읽기 뷰는 엄격 유지한다. 현행 `csp_header`는 전역 상수 하나이므로(§2) 이 분기 배관 자체가 신규 작업이다.
+**`'self'`는 인라인 스타일을 하나도 허용하지 않는다** — 소스 표현식은 *외부* 스타일시트 로드에만 적용되고, 인라인은
+`'unsafe-inline'`(또는 nonce/hash)이라야 한다. CSSOM 우회도 통하지 않는다: `<style>` 자체가 차단되면 `sheet`이 `null`이라
+`insertRule`을 부를 대상이 없다.
 
-어느 쪽이든 **editor 때문에 markdown 읽기 뷰·격리 렌더 정책을 약화하지 않는다**는 불변식을 테스트로 고정한다.
+**따라서 §1.1의 `unsafe-inline` 항목은 해소되지 않았고, 이미 출하된 소스 모드에도 적용된다.** style-mod(CM6의 주입기)는
+문서 루트에서 `<style>`+`textContent` 경로를 타므로(`adoptedStyleSheets`는 ShadowRoot일 때만) **CM6 baseTheme과
+`syntaxHighlighting(HighlightStyle)`이 제품에서 적용되지 않는다.** `web/src/source-language.ts`가 실제로
+`syntaxHighlighting(maruHighlightStyle)`을 쓰는데 `app.css`에는 토큰 클래스가 없고 변수만 있으므로, **제품의 구문 색은
+나오지 않는 상태로 보인다**(제품 GUI 확인은 남았다 — §11).
+
+선택지는 셋이고, editor가 아니라 **file-panel 소스 모드가 먼저 답해야 한다**.
+
+1. **라우트별 CSP 분기** — CM6를 마운트하는 신뢰 shell 문서에만 `style-src 'self' 'unsafe-inline'`을 주고, 격리 렌더 origin·
+   browser·읽기 뷰는 엄격 유지. 현행 `csp_header`는 전역 상수 하나라 이 분기 배관 자체가 신규 작업이다.
+2. **nonce** — style-mod는 `nonce`를 지원하고(`styleTag.setAttribute("nonce", …)`), CM6는 `EditorView.cspNonce` facet으로
+   그것을 넘긴다. 응답마다 nonce를 발급해 CSP 헤더와 문서에 함께 실으면 `'unsafe-inline'` 없이 CM6 스타일만 허용할 수 있다.
+   **가장 좁은 완화**이지만 scheme handler가 응답별 헤더를 만들어야 하므로 1안과 같은 배관이 필요하다.
+3. **정적 CSS 생성** — HighlightStyle을 빌드 타임에 CSS로 뽑아 `app.css`에 넣는다. CSP를 전혀 건드리지 않지만 CM6 내부
+   클래스 이름(`ͼ…` 해시)에 의존해 버전 업그레이드마다 깨진다.
+
+**권장은 2안(nonce)**이다 — 완화 범위가 "이 문서의 이 스타일 태그"로 한정되고, MergeView가 무엇을 주입하든 함께 해결된다.
+어느 쪽이든 **editor 때문에 markdown 읽기 뷰·격리 렌더 정책을 약화하지 않는다**는 불변식을 테스트로 고정한다. 또한 이 결함이
+jsdom 테스트를 통과했다는 사실 자체가 게이트 공백이다 — jsdom은 CSP를 강제하지 않으므로 **CSP 위반 계측은 제품 WKWebView
+경로에서만 가능**하다(§7.4).
 
 ### 7.3 필수 semantic oracle
 
@@ -599,7 +650,8 @@ editor event는 처음부터 하나의 domain schema를 공유하되 문서 원�
 
 - committed editor smoke asset/harness. 사용자 승인 전 production `PanelKind`/ABI/wire는 바꾸지 않는다.
 - **CM6 MergeView** 제품 WebKit 통과 확인. **편집 경로는 이 gate에서 빠진다** — file-panel 소스 모드로 이미 출하돼 검증됐다(§2).
-- MergeView 렌더·chunk 마커·accept/reject 상호작용 + **현행 엄격 CSP에서의 위반 수 계측**(§7.2 — 0이면 완화 자체가 불필요).
+- MergeView 렌더·chunk 마커·accept/reject 상호작용. **CSP는 이미 답이 나왔다**(§7.2 실측: `'self'`는 CM6 스타일을 전부 차단)
+  — 따라서 이 gate는 "위반이 있는지"가 아니라 **선택한 완화(권장 nonce)가 MergeView까지 덮는지**를 확인한다.
 - 1/2/4 diff 파일 Term에서 web-process RSS, hidden/background CPU와 close 뒤 회수 측정
 - **종료:** §7.4(MergeView WebKit) green + CSP 위반 수 + dependency/bundle/RSS·resource scaling 보고. MergeView가 막히면
   대안 diff 렌더를 같은 gate로 비교.
@@ -617,8 +669,8 @@ editor event는 처음부터 하나의 domain schema를 공유하되 문서 원�
 - `web/` workspace에 `@codemirror/merge` 추가 + reproducible build(zntc pin은 이미 `0.1.4` — §7.1).
 - **도크 소스 컨트롤 뷰**(§3.5) — 뷰 스위처 배관, 섹션·행 chrome, 빈 상태, 갱신 시점. 읽기 전용이므로 스테이지 버튼·커밋
   메시지 입력은 아직 없다.
-- **diff 파일 Term** — 파일 entry `diff` kind + 브리지 `diff.list`/`diff.open` method. 라우트별 CSP는 §7.2 계측 결과가
-  요구할 때만.
+- **diff 파일 Term** — 파일 entry `diff` kind + 브리지 `diff.list`/`diff.open` method. **CSP 완화(§7.2)는 선행**이며
+  file-panel 소스 모드와 공유한다.
 - semantic oracle + 제품 WKWebView regression
 - git comparison/status matrix와 external diff/textconv 실행 차단
 - 에이전트 턴 base(§6.1)는 §10.11에서 v1 채택 시 이 단계에 포함, 아니면 E2 후속.
@@ -660,8 +712,9 @@ editor event는 처음부터 하나의 domain schema를 공유하되 문서 원�
 0b. **에디터 엔진 = CM6 (확정, 2026-07-17 · §1.1).** git diff는 `@codemirror/merge` MergeView/unifiedMergeView, hunk staging은 acceptChunk/rejectChunk. Monaco는 채택하지 않는다(WebKit RED가 diff 표시에도 걸리고, 마크다운이 CM6라 엔진 이원화). 이 확정이 §7.1·§7.4·§9의 Monaco 조건부 항목을 CM6 기준으로 바꿨다. **남은 엔진 관련 결정은 없다.**
 1. `PanelKind.editor`와 ABI/wire 확장 — **(a′)에서는 필요 없다.** 0을 뒤집을 때만 되살아난다.
 2. `@codemirror/merge` 의존 추가 (zntc pin은 `0.1.4`로 이미 해소 — §7.1)
-3. ~~editor origin 한정 `style-src 'unsafe-inline'` 허용 여부~~ → **조건부 소멸.** CM6 편집기가 엄격 CSP로 출하 중이므로
-   (§2·§7.2) MergeView 계측에서 위반이 0이면 이 결정 자체가 사라진다. 위반이 나올 때만 라우트별 분기를 결정한다.
+3. **CM6 스타일을 어떻게 허용할지 — 결정이 살아 있고 우선순위가 올라갔다.** 실측상 현행 `style-src 'self'`는 CM6 baseTheme·
+   구문 하이라이트를 차단하므로(§7.2) 이건 editor 착수 전에 **이미 출하된 소스 모드**가 답해야 한다. 후보: ⑴ 라우트별
+   `'unsafe-inline'`, ⑵ **nonce(권장 — `EditorView.cspNonce`)**, ⑶ 빌드 타임 정적 CSS 생성.
 4. 최초 workspace/file/git grant UX와 native `root_id`/root descriptor 발급·회수
 5. 새 파일의 기본 mode 및 기존 ownership/ACL/xattr/hard-link 보존·거부·실패 정책
 6. 최초 지원 파일 크기·diff page·bridge/socket payload 상한
@@ -688,8 +741,11 @@ editor event는 처음부터 하나의 domain schema를 공유하되 문서 원�
   이동은 탐색기 트리와 공유해야 하는데, 그 공유 표면이 [file-explorer.md](file-explorer.md)에 아직 뷰 하나 기준으로만 적혀 있다.
 - 제품 WKWebView에서 **MergeView는 미검증**이다(편집 경로는 출하 검증 완료 — §2). E0.5A가 MergeView와 그 CSP 영향을 처음 본다.
 - 임시 PoC 하니스와 결과 artifact가 저장소에 없으므로 재현성은 E0.5A가 닫아야 한다.
-- **`@codemirror/merge`가 현행 번들러(zntc `0.1.4`)에서 깨지지 않는지 미확인**이다. CM6 코어·lang 확장은 이미 번들되지만
-  merge 확장은 아직 넣어 본 적이 없다.
+- **`@codemirror/merge` 번들 가능성은 확인됐다(PoC 2026-07-31).** `@codemirror/merge@6.12.2`를 실제 앱 엔트리에 넣어
+  zntc `0.1.4`로 번들했고, 산출물이 파싱되며 크기는 **+31 KiB**(2,752,306 → 2,784,419 bytes)다. CM6 코어가 이미 들어 있어
+  증분이 작다. 3 MiB 예산 여유는 약 353 KiB 남는다. **아직 확인 안 된 것은 MergeView의 런타임 동작과 CSP 영향**이다.
+- **제품 GUI에서 소스 모드 구문 색이 실제로 안 나오는지 눈으로 확인하지 못했다.** §7.2 결론은 WebKit 실측 + 코드 대조에
+  근거한 추론이며, 확인 즉시 file-panel 쪽 결함으로 등록해야 한다.
 - safe-save는 요구사항만 검증됐고 구현되지 않았다.
 - 제품 file capability 발급, editor bridge, DocumentRegistry, watcher, diff service는 모두 미구현이다.
 - bundle size 외 실제 WKWebView web-process RSS, first interactive, large-file latency 예산은 미측정이다.

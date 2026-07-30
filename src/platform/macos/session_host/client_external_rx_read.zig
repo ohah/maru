@@ -1610,6 +1610,48 @@ pub fn finishPreparedAdmitUse(
     return true;
 }
 
+pub fn resetFinishedPreparedAdmitUse(
+    scratch: *ExternalRxReadScratch,
+    permit: *PreparedAdmitUsePermit,
+) bool {
+    if (rangeEnd(
+        @intFromPtr(scratch),
+        @sizeOf(ExternalRxReadScratch),
+    ) == null or rangeEnd(
+        @intFromPtr(permit),
+        @sizeOf(PreparedAdmitUsePermit),
+    ) == null or rangesOverlap(
+        @intFromPtr(scratch),
+        @sizeOf(ExternalRxReadScratch),
+        @intFromPtr(permit),
+        @sizeOf(PreparedAdmitUsePermit),
+    ) or
+        scratch.saved_self_addr != @intFromPtr(scratch) or
+        scratch.generation == 0 or
+        scratch.active_prepared_use_permit_addr != 0 or
+        !std.mem.allEqual(
+            u8,
+            &scratch.active_prepared_use_permit_digest,
+            0,
+        ) or
+        !client_external_mode.preparedRxAppendPristine(
+            &scratch.prepared_admit,
+        ) or
+        !std.mem.eql(u8, &scratch.digest, &scratchDigest(scratch)) or
+        permit.saved_self_addr != @intFromPtr(permit) or
+        permit.scratch_addr != @intFromPtr(scratch) or
+        permit.scratch_generation != scratch.generation or
+        permit.lifecycle != .finished or
+        !std.mem.eql(
+            u8,
+            &permit.digest,
+            &preparedAdmitUsePermitDigest(permit),
+        ))
+        return false;
+    permit.* = .{};
+    return true;
+}
+
 fn seedMatchesPermit(
     scratch: *const ExternalRxReadScratch,
     permit: *const BorrowUsePermit,
@@ -2213,6 +2255,51 @@ fn makeStoppedWouldBlockFixture(
     try std.testing.expect(borrowStopped(scratch, receipt, borrow));
 }
 
+fn makeFinishedPreparedUseFixture(
+    scratch: *ExternalRxReadScratch,
+    receipt: *CollectReceipt,
+    borrow: *StoppedBorrow,
+    guard_probe: *BorrowUseGuardProbe,
+    seed: *WouldBlockSeed,
+    use_permit: *BorrowUsePermit,
+    prepared_permit: *PreparedAdmitUsePermit,
+) !void {
+    try makeStoppedWouldBlockFixture(scratch, receipt, borrow);
+    guard_probe.* = .{};
+    const guard = BorrowUseGuardOps{
+        .context = guard_probe,
+        .context_len = @sizeOf(BorrowUseGuardProbe),
+        .current = BorrowUseGuardProbe.current,
+    };
+    seed.* = .{};
+    use_permit.* = .{};
+    try std.testing.expect(beginStoppedUse(
+        scratch,
+        receipt,
+        borrow,
+        &guard,
+        seed,
+        use_permit,
+    ));
+    prepared_permit.* = .{};
+    try std.testing.expect(beginPreparedAdmitUse(
+        scratch,
+        receipt,
+        borrow,
+        use_permit,
+        seed,
+        prepared_permit,
+    ));
+    try std.testing.expect(finishPreparedAdmitUse(
+        scratch,
+        receipt,
+        borrow,
+        use_permit,
+        seed,
+        prepared_permit,
+    ));
+}
+
 test "C4c active stopped use accounts would-block seed before settlement" {
     const scratch = try std.testing.allocator.create(ExternalRxReadScratch);
     defer std.testing.allocator.destroy(scratch);
@@ -2794,6 +2881,100 @@ test "C4d prepared admit permit rejects alias overflow copy and stale credential
         &borrow,
         &use_permit,
         &seed,
+        &prepared_permit,
+    ));
+}
+
+test "C4d finished prepared admit reset rejects every noncanonical authority" {
+    const scratch = try std.testing.allocator.create(ExternalRxReadScratch);
+    defer std.testing.allocator.destroy(scratch);
+    var receipt: CollectReceipt = undefined;
+    var borrow: StoppedBorrow = .{};
+    var guard_probe: BorrowUseGuardProbe = .{};
+    var seed: WouldBlockSeed = .{};
+    var use_permit: BorrowUsePermit = .{};
+    var prepared_permit: PreparedAdmitUsePermit = .{};
+    try makeFinishedPreparedUseFixture(
+        scratch,
+        &receipt,
+        &borrow,
+        &guard_probe,
+        &seed,
+        &use_permit,
+        &prepared_permit,
+    );
+    const canonical_permit = prepared_permit;
+    const canonical_scratch = scratch.*;
+
+    var copied = prepared_permit;
+    try std.testing.expect(!resetFinishedPreparedAdmitUse(
+        scratch,
+        &copied,
+    ));
+    prepared_permit.digest[0] +%= 1;
+    try std.testing.expect(!resetFinishedPreparedAdmitUse(
+        scratch,
+        &prepared_permit,
+    ));
+    prepared_permit = canonical_permit;
+    prepared_permit.scratch_generation +%= 1;
+    prepared_permit.digest = preparedAdmitUsePermitDigest(&prepared_permit);
+    try std.testing.expect(!resetFinishedPreparedAdmitUse(
+        scratch,
+        &prepared_permit,
+    ));
+    prepared_permit = canonical_permit;
+
+    scratch.active_prepared_use_permit_addr = @intFromPtr(&prepared_permit);
+    scratch.active_prepared_use_permit_digest = prepared_permit.digest;
+    scratch.digest = scratchDigest(scratch);
+    try std.testing.expect(!resetFinishedPreparedAdmitUse(
+        scratch,
+        &prepared_permit,
+    ));
+    scratch.* = canonical_scratch;
+    scratch.prepared_admit.expected_start = 1;
+    scratch.digest = scratchDigest(scratch);
+    try std.testing.expect(!resetFinishedPreparedAdmitUse(
+        scratch,
+        &prepared_permit,
+    ));
+    scratch.* = canonical_scratch;
+
+    const other = try std.testing.allocator.create(ExternalRxReadScratch);
+    defer std.testing.allocator.destroy(other);
+    other.* = .{};
+    try std.testing.expect(ExternalRxReadScratch.initInPlace(other));
+    try std.testing.expect(!resetFinishedPreparedAdmitUse(
+        other,
+        &prepared_permit,
+    ));
+    const alias: *PreparedAdmitUsePermit = @ptrCast(@alignCast(scratch));
+    try std.testing.expect(!resetFinishedPreparedAdmitUse(scratch, alias));
+    const overflow_addr = std.math.maxInt(usize) &
+        ~(@as(usize, @alignOf(PreparedAdmitUsePermit)) - 1);
+    const overflow: *PreparedAdmitUsePermit = @ptrFromInt(overflow_addr);
+    try std.testing.expect(!resetFinishedPreparedAdmitUse(
+        scratch,
+        overflow,
+    ));
+
+    try std.testing.expect(resetFinishedPreparedAdmitUse(
+        scratch,
+        &prepared_permit,
+    ));
+    try std.testing.expectEqual(@as(usize, 0), prepared_permit.saved_self_addr);
+    try std.testing.expectEqual(
+        PreparedAdmitUseLifecycle.empty,
+        prepared_permit.lifecycle,
+    );
+    try std.testing.expect(std.mem.allEqual(
+        u8,
+        &prepared_permit.digest,
+        0,
+    ));
+    try std.testing.expect(!resetFinishedPreparedAdmitUse(
+        scratch,
         &prepared_permit,
     ));
 }

@@ -1903,6 +1903,34 @@ test "d2c C4 collector integration stays transport-leaf and pump-private" {
             "client_external_mode.markQuarantinedPreparedAdmitAccounted(",
         ),
     );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(pump, "fn resetCompletedPreparedAdmit("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(pump, "fn finalizeGuardedAdmitQuarantine("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(pump, "fn completeGuardedAdmitQuarantine("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 4),
+        countOccurrences(pump, "resetCompletedPreparedAdmit("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 3),
+        countOccurrences(pump, "finalizeGuardedAdmitQuarantine("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 7),
+        countOccurrences(pump, "completeGuardedAdmitQuarantine("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        countOccurrences(pump, "accountGuardedAdmitQuarantine("),
+    );
 
     var dir = try std.Io.Dir.cwd().openDir(
         std.testing.io,
@@ -1919,6 +1947,7 @@ test "d2c C4 collector integration stays transport-leaf and pump-private" {
     var product_prepared_use_finish_calls: usize = 0;
     var product_prepared_use_reset_calls: usize = 0;
     var accounting_seam_calls_outside_pump: usize = 0;
+    var completion_helper_calls_outside_pump: usize = 0;
     var owner_heap_creates: usize = 0;
     var pump_product_type_tokens: usize = 0;
     var pump_fixture_type_tokens: usize = 0;
@@ -1940,6 +1969,24 @@ test "d2c C4 collector integration stays transport-leaf and pump-private" {
             "platform/macos/session_host/client_external_rx_read_test_support.zig",
         );
         if (!is_fixture) {
+            if (!std.mem.eql(
+                u8,
+                entry.path,
+                "platform/macos/session_host/client_external_pump.zig",
+            )) {
+                completion_helper_calls_outside_pump += countOccurrences(
+                    product_source,
+                    "resetCompletedPreparedAdmit(",
+                );
+                completion_helper_calls_outside_pump += countOccurrences(
+                    product_source,
+                    "finalizeGuardedAdmitQuarantine(",
+                );
+                completion_helper_calls_outside_pump += countOccurrences(
+                    product_source,
+                    "completeGuardedAdmitQuarantine(",
+                );
+            }
             product_imports += countOccurrences(
                 source,
                 "@import(\"client_external_rx_read.zig\")",
@@ -2040,13 +2087,17 @@ test "d2c C4 collector integration stays transport-leaf and pump-private" {
     }
     try std.testing.expectEqual(@as(usize, 1), product_imports);
     try std.testing.expectEqual(@as(usize, 1), product_collector_calls);
-    try std.testing.expectEqual(@as(usize, 3), product_completion_calls);
+    try std.testing.expectEqual(@as(usize, 2), product_completion_calls);
     try std.testing.expectEqual(@as(usize, 1), product_prepared_use_begin_calls);
     try std.testing.expectEqual(@as(usize, 1), product_prepared_use_finish_calls);
     try std.testing.expectEqual(@as(usize, 1), product_prepared_use_reset_calls);
     try std.testing.expectEqual(
         @as(usize, 0),
         accounting_seam_calls_outside_pump,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        completion_helper_calls_outside_pump,
     );
     try std.testing.expectEqual(@as(usize, 1), owner_heap_creates);
     // The identifier may grow new product or hostile-test uses without weakening ownership:

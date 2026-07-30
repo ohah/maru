@@ -2041,6 +2041,35 @@ threadlocal var active_callback_scratch_addr: usize = 0;
 threadlocal var active_callback_permit_addr: usize = 0;
 threadlocal var callback_region_epoch: u64 = 0;
 
+const InjectedRxFailpoint = enum {
+    none,
+    after_stopped_begin,
+    after_prepared_begin,
+    after_prepare,
+    after_commit,
+    after_traversal,
+    after_seed_mint,
+    after_seed_consume,
+    before_end,
+    before_settle,
+};
+
+threadlocal var injected_rx_failpoint: InjectedRxFailpoint = .none;
+threadlocal var injected_rx_failpoint_scratch_addr: usize = 0;
+threadlocal var injected_rx_failpoint_hits: u8 = 0;
+
+fn hitInjectedRxFailpoint(
+    scratch: *ExternalRxTurnScratch,
+    point: InjectedRxFailpoint,
+) bool {
+    if (!builtin.is_test or injected_rx_failpoint != point or
+        injected_rx_failpoint_scratch_addr != @intFromPtr(scratch) or
+        injected_rx_failpoint_hits != 0)
+        return false;
+    injected_rx_failpoint_hits = 1;
+    return true;
+}
+
 const RxOwnerAuthoritySnapshot = struct {
     saved_self_addr: usize = 0,
     storage_addr: usize = 0,
@@ -9116,6 +9145,249 @@ pub const ExternalPumpStorage = struct {
         return result;
     }
 
+    /// Closes the callback-free RX ownership graph before the outer turn releases its lease.
+    ///
+    /// This is deliberately the only terminal epilogue for the injected product path.  It must
+    /// never invoke transport, allocator, projection, or retirement callbacks: callback-bearing
+    /// mechanics have already returned, and their hidden TLS authority must be gone before any
+    /// terminal evidence is interpreted.
+    fn finalizeInjectedRxTerminalUnderHeldLease(
+        self: *ExternalPumpStorage,
+        lease: *ExternalWholeTurnLease,
+        scratch: *ExternalRxTurnScratch,
+        result: client_pump.TurnResult,
+    ) client_pump.TurnResult {
+        var terminal = result;
+        if (terminal.terminal == null) {
+            terminal = self.terminalInjectedRxTurn(
+                .invariant_failure,
+                result.rx_read_bytes,
+                result.rx_bytes,
+                result.rx_frames,
+            );
+        }
+        if (active_callback_region_addr != 0 or
+            active_callback_release_addr != 0 or
+            active_callback_storage_addr != 0 or
+            active_callback_lease_addr != 0 or
+            active_callback_scratch_addr != 0 or
+            active_callback_permit_addr != 0)
+        {
+            scratch.lifecycle = .terminal;
+            return self.terminalInjectedRxTurn(
+                .invariant_failure,
+                terminal.rx_read_bytes,
+                terminal.rx_bytes,
+                terminal.rx_frames,
+            );
+        }
+
+        switch (scratch.callback_region.lifecycle) {
+            .empty => {
+                if (!callbackRegionTokenPristine(&scratch.callback_region))
+                    scratch.lifecycle = .terminal;
+            },
+            .consumed => {
+                if (!resetConsumedCallbackRegion(
+                    scratch,
+                    &scratch.callback_region,
+                )) scratch.lifecycle = .terminal;
+            },
+            .active, .quarantined => scratch.lifecycle = .terminal,
+        }
+
+        const client = if (self.owned_client) |*owned| owned else {
+            scratch.lifecycle = .terminal;
+            return self.terminalInjectedRxTurn(
+                .invariant_failure,
+                terminal.rx_read_bytes,
+                terminal.rx_bytes,
+                terminal.rx_frames,
+            );
+        };
+        const rx_state = switch (client.io_mode) {
+            .external => |*state| state,
+            .blocking => {
+                scratch.lifecycle = .terminal;
+                return self.terminalInjectedRxTurn(
+                    .invariant_failure,
+                    terminal.rx_read_bytes,
+                    terminal.rx_bytes,
+                    terminal.rx_frames,
+                );
+            },
+        };
+
+        const prepared_result =
+            client_external_mode.terminalizePreparedAdmitNoCallback(
+                rx_state,
+                &client.parser,
+                &scratch.read.prepared_admit,
+            );
+        var prepared_closed = true;
+        switch (prepared_result) {
+            .pristine => {},
+            .ordinary_finished => {
+                prepared_closed = resetCompletedPreparedAdmit(
+                    &scratch.read.prepared_admit,
+                );
+            },
+            .quarantine_pending => |pending| {
+                prepared_closed = completeGuardedAdmitQuarantine(
+                    &scratch.read.prepared_admit,
+                    pending.outcome_tag,
+                    pending.quarantine,
+                    &scratch.quarantine_receipt,
+                );
+            },
+            .quarantine_accounted => |accounted| {
+                prepared_closed = finalizeGuardedAdmitQuarantine(
+                    &scratch.read.prepared_admit,
+                    accounted.outcome_tag,
+                    accounted.quarantine,
+                    &scratch.quarantine_receipt,
+                );
+            },
+            .terminalized => |pending| {
+                prepared_closed = completeGuardedAdmitQuarantine(
+                    &scratch.read.prepared_admit,
+                    pending.outcome_tag,
+                    pending.quarantine,
+                    &scratch.quarantine_receipt,
+                );
+            },
+            .unrecoverable => prepared_closed = false,
+        }
+
+        // A stopped graph exists only after the receipt has been published. Include every public
+        // edge in the predicate so a corrupted primary edge cannot hide a still-live mirror.
+        const stopped_graph_present =
+            scratch.stopped_borrow.saved_self_addr != 0 or
+            scratch.borrow_use_permit.saved_self_addr != 0 or
+            scratch.would_block_seed.saved_self_addr != 0 or
+            scratch.prepared_admit_use_permit.saved_self_addr != 0 or
+            scratch.read.active_borrow_addr != 0 or
+            scratch.read.active_use_permit_addr != 0 or
+            scratch.read.active_prepared_use_permit_addr != 0;
+        if (prepared_closed and stopped_graph_present) {
+            const graph_result = client_external_rx_read.terminalizeStoppedGraphNoCallback(
+                &scratch.read,
+                &scratch.collect_receipt,
+                &scratch.stopped_borrow,
+                &scratch.borrow_use_permit,
+                &scratch.would_block_seed,
+                &scratch.prepared_admit_use_permit,
+            );
+            prepared_closed = switch (graph_result) {
+                .closed, .already_closed => true,
+                .unrecoverable => blk: {
+                    // `endStoppedUse` has already removed the active permit edge at the
+                    // before-settle seam.  That graph is no longer eligible for the active-graph
+                    // closer, but its frozen disposition is sufficient for the ordinary
+                    // callback-free settle+teardown path.
+                    if (scratch.borrow_use_permit.lifecycle != .released or
+                        scratch.stopped_borrow.lifecycle != .borrowed or
+                        scratch.read.active_use_permit_addr != 0 or
+                        scratch.read.active_prepared_use_permit_addr != 0)
+                        break :blk false;
+                    var disposition =
+                        client_external_rx_read.StoppedDisposition{
+                            .staged = if (terminal.rx_read_bytes != 0)
+                                .consumed
+                            else
+                                .discarded,
+                            .would_block = .not_present,
+                        };
+                    if (scratch.collect_receipt.stop == .would_block) {
+                        disposition.would_block =
+                            switch (scratch.would_block_seed.lifecycle) {
+                                .consumed => .consumed,
+                                .aborted => .aborted,
+                                else => break :blk false,
+                            };
+                    }
+                    if (!client_external_rx_read.settleStopped(
+                        &scratch.read,
+                        &scratch.collect_receipt,
+                        &scratch.stopped_borrow,
+                        disposition,
+                    )) break :blk false;
+                    break :blk client_external_rx_read.teardown(
+                        &scratch.read,
+                    ) == .closed;
+                },
+            };
+        }
+
+        switch (scratch.drain_evidence.lifecycle) {
+            .empty => {
+                if (!std.mem.allEqual(
+                    u8,
+                    std.mem.asBytes(&scratch.drain_evidence),
+                    0,
+                )) prepared_closed = false;
+            },
+            .prepared, .consumed => {
+                const evidence = &scratch.drain_evidence;
+                const evidence_valid =
+                    evidence.saved_self_addr == @intFromPtr(evidence) and
+                    evidence.storage_addr == @intFromPtr(self) and
+                    evidence.lease_addr == @intFromPtr(lease) and
+                    evidence.scratch_addr == @intFromPtr(&scratch.read) and
+                    evidence.scratch_generation == scratch.read.generation and
+                    evidence.parser_addr == @intFromPtr(&client.parser) and
+                    evidence.read_attempt_generation != 0 and
+                    std.mem.eql(
+                        u8,
+                        &evidence.digest,
+                        &drainEvidenceDigest(evidence),
+                    );
+                if (!evidence_valid) {
+                    prepared_closed = false;
+                } else if (evidence.lifecycle == .prepared) {
+                    evidence.lifecycle = .aborted;
+                    evidence.digest = drainEvidenceDigest(evidence);
+                }
+            },
+            .aborted => {
+                const evidence = &scratch.drain_evidence;
+                if (evidence.saved_self_addr != @intFromPtr(evidence) or
+                    evidence.storage_addr != @intFromPtr(self) or
+                    evidence.lease_addr != @intFromPtr(lease) or
+                    evidence.scratch_addr != @intFromPtr(&scratch.read) or
+                    !std.mem.eql(
+                        u8,
+                        &evidence.digest,
+                        &drainEvidenceDigest(evidence),
+                    ))
+                    prepared_closed = false;
+            },
+        }
+        // Traversal may leave its heap scratch reserved by the storage for reuse, but it may not
+        // leave a movable aggregate or an in-progress traversal behind.  Do not destroy either
+        // here: destruction owns allocator callbacks and belongs to the later storage teardown.
+        const traversal_closed = switch (scratch.traversal.lifecycle) {
+            .ready, .closed => true,
+            .empty, .busy => false,
+        };
+        const aggregate_retained =
+            self.intentScratchReservationValid() and
+            self.rxAggregateReservationValid() and
+            self.rx_aggregate_reservation.lifecycle != .active and
+            self.rx_aggregate_reservation.lifecycle != .destroying;
+        prepared_closed =
+            prepared_closed and traversal_closed and aggregate_retained;
+        if (!prepared_closed)
+            terminal = self.terminalInjectedRxTurn(
+                .invariant_failure,
+                terminal.rx_read_bytes,
+                terminal.rx_bytes,
+                terminal.rx_frames,
+            );
+        scratch.lifecycle = .terminal;
+        return terminal;
+    }
+
     fn completeGuardedAdmitQuarantine(
         prepared: *client_external_mode.PreparedRxAppend,
         outcome_tag: client_external_mode.GuardedQuarantineOutcomeTag,
@@ -9127,7 +9399,27 @@ pub const ExternalPumpStorage = struct {
             outcome_tag,
             quarantine,
             receipt,
-        ) and client_external_mode.finalizeQuarantinedPreparedAdmit(
+        ) and finalizeGuardedAdmitQuarantine(
+            prepared,
+            outcome_tag,
+            quarantine,
+            receipt,
+        );
+    }
+
+    fn resetCompletedPreparedAdmit(
+        prepared: *client_external_mode.PreparedRxAppend,
+    ) bool {
+        return client_external_mode.resetFinishedPreparedAdmit(prepared);
+    }
+
+    fn finalizeGuardedAdmitQuarantine(
+        prepared: *client_external_mode.PreparedRxAppend,
+        outcome_tag: client_external_mode.GuardedQuarantineOutcomeTag,
+        quarantine: client_external_mode.GuardedAdmitQuarantine,
+        receipt: *client_external_mode.GuardedQuarantineAccountingReceipt,
+    ) bool {
+        return client_external_mode.finalizeQuarantinedPreparedAdmit(
             prepared,
             outcome_tag,
             quarantine,
@@ -9747,6 +10039,8 @@ pub const ExternalPumpStorage = struct {
                 0,
                 0,
             );
+        if (hitInjectedRxFailpoint(scratch, .after_stopped_begin))
+            return self.terminalInjectedRxTurn(.invariant_failure, 0, 0, 0);
         const stopped_bytes = client_external_rx_read.stoppedBytes(
             &scratch.read,
             &scratch.collect_receipt,
@@ -9773,6 +10067,16 @@ pub const ExternalPumpStorage = struct {
                 );
             if (!prepared_use_started) {
                 terminal_reason = .invariant_failure;
+            } else if (hitInjectedRxFailpoint(
+                scratch,
+                .after_prepared_begin,
+            )) {
+                return self.terminalInjectedRxTurn(
+                    .invariant_failure,
+                    0,
+                    0,
+                    0,
+                );
             } else {
                 var replacement_guard_owner = ProductReplacementAllocationGuard{
                     .storage = self,
@@ -9799,6 +10103,22 @@ pub const ExternalPumpStorage = struct {
                         &replacement_guard,
                         &scratch.read.prepared_admit,
                     );
+                    if (hitInjectedRxFailpoint(scratch, .after_prepare)) {
+                        _ = finishAndValidateRxTurnCallback(
+                            self,
+                            lease,
+                            scratch,
+                            original_ops,
+                            &frozen_ops,
+                            &admit_callback_release,
+                        );
+                        return self.terminalInjectedRxTurn(
+                            .invariant_failure,
+                            0,
+                            0,
+                            0,
+                        );
+                    }
                     switch (prepare) {
                         .ordinary_failure => {
                             if (!finishAndValidateRxTurnCallback(
@@ -9840,6 +10160,21 @@ pub const ExternalPumpStorage = struct {
                                     stopped_bytes,
                                     &scratch.read.prepared_admit,
                                 );
+                            if (hitInjectedRxFailpoint(
+                                scratch,
+                                .after_commit,
+                            )) {
+                                _ = finishPumpCallbackRegion(
+                                    scratch,
+                                    &admit_callback_release,
+                                );
+                                return self.terminalInjectedRxTurn(
+                                    .invariant_failure,
+                                    0,
+                                    0,
+                                    0,
+                                );
+                            }
                             if (!finishPumpCallbackRegion(
                                 scratch,
                                 &admit_callback_release,
@@ -9847,8 +10182,7 @@ pub const ExternalPumpStorage = struct {
                                 terminal_reason = .invariant_failure;
                             } else switch (commit) {
                                 .committed => {
-                                    const reset = client_external_mode
-                                        .resetFinishedPreparedAdmit(
+                                    const reset = resetCompletedPreparedAdmit(
                                         &scratch.read.prepared_admit,
                                     );
                                     const refreshed = reset and self
@@ -9903,8 +10237,7 @@ pub const ExternalPumpStorage = struct {
                                                 terminal_reason = .invariant_failure;
                                             } else switch (aborted) {
                                                 .aborted => {
-                                                    if (!client_external_mode
-                                                        .resetFinishedPreparedAdmit(
+                                                    if (!resetCompletedPreparedAdmit(
                                                         &scratch.read.prepared_admit,
                                                     ))
                                                         terminal_reason =
@@ -9996,6 +10329,16 @@ pub const ExternalPumpStorage = struct {
                         &traversal_callback_release,
                     ))
                         terminal_reason = .invariant_failure;
+                    if (hitInjectedRxFailpoint(
+                        scratch,
+                        .after_traversal,
+                    ))
+                        return self.terminalInjectedRxTurn(
+                            .invariant_failure,
+                            stopped_bytes.len,
+                            0,
+                            0,
+                        );
                 }
             }
         }
@@ -10016,6 +10359,13 @@ pub const ExternalPumpStorage = struct {
             )) {
                 terminal_reason = .invariant_failure;
             } else {
+                if (hitInjectedRxFailpoint(scratch, .after_seed_mint))
+                    return self.terminalInjectedRxTurn(
+                        .invariant_failure,
+                        if (admitted) stopped_bytes.len else 0,
+                        0,
+                        0,
+                    );
                 const completed = if (mechanics) |value| switch (value) {
                     .completed => |summary| summary.final_readiness == .empty and
                         !summary.budget_exhausted,
@@ -10028,6 +10378,16 @@ pub const ExternalPumpStorage = struct {
                             &scratch.read,
                             &scratch.borrow_use_permit,
                             &scratch.would_block_seed,
+                        );
+                    if (hitInjectedRxFailpoint(
+                        scratch,
+                        .after_seed_consume,
+                    ))
+                        return self.terminalInjectedRxTurn(
+                            .invariant_failure,
+                            if (admitted) stopped_bytes.len else 0,
+                            0,
+                            0,
                         );
                     if (generation) |attempt_generation| {
                         socket_rx_drained =
@@ -10051,6 +10411,13 @@ pub const ExternalPumpStorage = struct {
                 }
             }
         }
+        if (hitInjectedRxFailpoint(scratch, .before_end))
+            return self.terminalInjectedRxTurn(
+                .invariant_failure,
+                if (admitted) stopped_bytes.len else 0,
+                0,
+                0,
+            );
         if (!client_external_rx_read.endStoppedUse(
             &scratch.read,
             &scratch.collect_receipt,
@@ -10058,6 +10425,13 @@ pub const ExternalPumpStorage = struct {
             &scratch.borrow_use_permit,
         ))
             terminal_reason = .invariant_failure;
+        if (hitInjectedRxFailpoint(scratch, .before_settle))
+            return self.terminalInjectedRxTurn(
+                .invariant_failure,
+                if (admitted) stopped_bytes.len else 0,
+                0,
+                0,
+            );
         if (!client_external_rx_read.settleStopped(
             &scratch.read,
             &scratch.collect_receipt,
@@ -10340,8 +10714,13 @@ pub const ExternalPumpStorage = struct {
         );
         scratch.snapshot = .{};
         scratch.live_consume = .{};
-        if (scratch.lifecycle != .terminal and
-            scratch.callback_region.lifecycle == .consumed and
+        if (result.terminal != null or scratch.lifecycle == .terminal) {
+            result = self.finalizeInjectedRxTerminalUnderHeldLease(
+                &lease,
+                scratch,
+                result,
+            );
+        } else if (scratch.callback_region.lifecycle == .consumed and
             !resetConsumedCallbackRegion(
                 scratch,
                 &scratch.callback_region,
@@ -10350,7 +10729,7 @@ pub const ExternalPumpStorage = struct {
         if (scratch.lifecycle != .terminal and
             callbackRegionTokenPristine(&scratch.callback_region))
             scratch.lifecycle = .ready
-        else
+        else if (result.terminal == null)
             result = self.terminalInjectedRxTurn(
                 .invariant_failure,
                 result.rx_read_bytes,
@@ -25568,10 +25947,318 @@ test "C4d product RX callback descriptor mutation is terminal after hidden relea
     try std.testing.expectEqual(@as(usize, 1), read_probe.read_calls);
     try std.testing.expectEqual(@as(usize, 0), active_callback_region_addr);
     try std.testing.expectEqual(@as(usize, 0), active_callback_release_addr);
+    try std.testing.expectEqual(@as(usize, 0), active_callback_storage_addr);
+    try std.testing.expectEqual(@as(usize, 0), active_callback_lease_addr);
+    try std.testing.expectEqual(@as(usize, 0), active_callback_scratch_addr);
+    try std.testing.expectEqual(@as(usize, 0), active_callback_permit_addr);
+    try std.testing.expect(callbackRegionTokenPristine(
+        &scratch.callback_region,
+    ));
+    try std.testing.expect(client_external_mode.preparedRxAppendPristine(
+        &scratch.read.prepared_admit,
+    ));
     try std.testing.expectEqual(
-        ExternalRxTurnScratchLifecycle.ready,
+        ExternalRxTurnScratchLifecycle.terminal,
         scratch.lifecycle,
     );
+    const replay = storage.pumpInjectedRxTurnForTest(
+        .{ .readable = true, .writable = false, .now_ns = 2 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expectEqual(
+        client_pump.TerminalReason.invariant_failure,
+        replay.terminal.?.reason,
+    );
+    try std.testing.expectEqual(@as(usize, 1), read_probe.read_calls);
+    try std.testing.expectEqual(
+        ExternalRxTurnScratchLifecycle.terminal,
+        scratch.lifecycle,
+    );
+}
+
+test "C4d injected EOF and socket error retain one canonical terminal scratch" {
+    const ApplyProbe = struct {
+        fn apply(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
+    };
+    const ReadProbe = struct {
+        outcome: client_external_rx_read.RxReadOutcome,
+        calls: usize = 0,
+
+        fn read(
+            raw: *anyopaque,
+            _: posix.fd_t,
+            _: []u8,
+        ) client_external_rx_read.RxReadOutcome {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            return self.outcome;
+        }
+    };
+    const Case = struct {
+        outcome: client_external_rx_read.RxReadOutcome,
+        reason: client_pump.TerminalReason,
+    };
+    const cases = [_]Case{
+        .{ .outcome = .eof, .reason = .eof },
+        .{ .outcome = .socket_error, .reason = .socket_error },
+    };
+
+    for (cases) |case| {
+        var fixture = try TestClient.init();
+        defer fixture.deinitPeer();
+        var storage: ExternalPumpStorage = .{};
+        try std.testing.expect(
+            initTestStorage(&storage, &fixture.client, valid_evidence) ==
+                .initialized,
+        );
+        try std.testing.expect(
+            prepareAdoptionForTest(&storage) == .prepared_adopted,
+        );
+        try std.testing.expect(storage.commitAdoption() == .adopted);
+        defer _ = teardownForTest(&storage);
+
+        const scratch =
+            try std.testing.allocator.create(ExternalRxTurnScratch);
+        defer std.testing.allocator.destroy(scratch);
+        scratch.* = .{};
+        try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+        var apply_probe: u8 = 0;
+        var read_probe = ReadProbe{ .outcome = case.outcome };
+        const ops = RxTurnOps{
+            .buffered = .{
+                .context = &apply_probe,
+                .context_len = @sizeOf(u8),
+                .apply_live_screen = ApplyProbe.apply,
+            },
+            .transport = .{
+                .context = &read_probe,
+                .context_len = @sizeOf(ReadProbe),
+                .read = ReadProbe.read,
+            },
+        };
+        const result = storage.pumpInjectedRxTurnForTest(
+            .{ .readable = true, .writable = false, .now_ns = 1 },
+            &ops,
+            scratch,
+        );
+        try std.testing.expectEqual(case.reason, result.terminal.?.reason);
+        try std.testing.expectEqual(@as(usize, 1), read_probe.calls);
+        try std.testing.expectEqual(
+            ExternalRxTurnScratchLifecycle.terminal,
+            scratch.lifecycle,
+        );
+        try std.testing.expect(callbackRegionTokenPristine(
+            &scratch.callback_region,
+        ));
+        try std.testing.expectEqual(@as(usize, 0), active_callback_region_addr);
+        try std.testing.expectEqual(@as(usize, 0), active_callback_release_addr);
+        try std.testing.expect(client_external_mode.preparedRxAppendPristine(
+            &scratch.read.prepared_admit,
+        ));
+    }
+}
+
+test "C4d injected terminal seam matrix closes the product graph exactly once" {
+    const ApplyProbe = struct {
+        fn apply(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
+    };
+    const ReadProbe = struct {
+        wire: []const u8,
+        sent: bool = false,
+        calls: usize = 0,
+
+        fn read(
+            raw: *anyopaque,
+            _: posix.fd_t,
+            destination: []u8,
+        ) client_external_rx_read.RxReadOutcome {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            if (self.sent) return .would_block;
+            if (destination.len < self.wire.len) return .socket_error;
+            @memcpy(destination[0..self.wire.len], self.wire);
+            self.sent = true;
+            return .{ .bytes = self.wire.len };
+        }
+    };
+    const points = [_]InjectedRxFailpoint{
+        .after_stopped_begin,
+        .after_prepared_begin,
+        .after_prepare,
+        .after_commit,
+        .after_traversal,
+        .after_seed_mint,
+        .after_seed_consume,
+        .before_end,
+        .before_settle,
+    };
+
+    try std.testing.expectEqual(InjectedRxFailpoint.none, injected_rx_failpoint);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        injected_rx_failpoint_scratch_addr,
+    );
+    try std.testing.expectEqual(@as(u8, 0), injected_rx_failpoint_hits);
+    for (points) |point| {
+        resetCrossOwnerQuarantineForTest();
+        defer resetCrossOwnerQuarantineForTest();
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var fixture = try TestClient.initWithAllocator(arena.allocator());
+        defer fixture.deinitPeer();
+        var storage: ExternalPumpStorage = .{};
+        try std.testing.expect(
+            initTestStorage(&storage, &fixture.client, valid_evidence) ==
+                .initialized,
+        );
+        try std.testing.expect(
+            prepareAdoptionForTest(&storage) == .prepared_adopted,
+        );
+        try std.testing.expect(storage.commitAdoption() == .adopted);
+
+        const wire = try framing.encodeFrame(
+            std.testing.allocator,
+            .{
+                .kind = .delta_chunk,
+                .stream_id = valid_evidence.stream_id,
+                .flags = protocol.Flags.end_stream,
+            },
+            "terminal-seam",
+        );
+        defer std.testing.allocator.free(wire);
+        const scratch =
+            try std.testing.allocator.create(ExternalRxTurnScratch);
+        defer std.testing.allocator.destroy(scratch);
+        defer _ = teardownForTest(&storage);
+        scratch.* = .{};
+        try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+        var apply_probe: u8 = 0;
+        var read_probe = ReadProbe{ .wire = wire };
+        const ops = RxTurnOps{
+            .buffered = .{
+                .context = &apply_probe,
+                .context_len = @sizeOf(u8),
+                .apply_live_screen = ApplyProbe.apply,
+            },
+            .transport = .{
+                .context = &read_probe,
+                .context_len = @sizeOf(ReadProbe),
+                .read = ReadProbe.read,
+            },
+        };
+        injected_rx_failpoint = point;
+        injected_rx_failpoint_scratch_addr = @intFromPtr(scratch);
+        injected_rx_failpoint_hits = 0;
+        defer {
+            injected_rx_failpoint = .none;
+            injected_rx_failpoint_scratch_addr = 0;
+            injected_rx_failpoint_hits = 0;
+        }
+        const before_events = cross_owner_quarantine_events.load(.acquire);
+        const result = storage.pumpInjectedRxTurnForTest(
+            .{ .readable = true, .writable = false, .now_ns = 1 },
+            &ops,
+            scratch,
+        );
+        try std.testing.expectEqual(
+            client_pump.TerminalReason.invariant_failure,
+            result.terminal.?.reason,
+        );
+        try std.testing.expectEqual(@as(u8, 1), injected_rx_failpoint_hits);
+        try std.testing.expectEqual(
+            ExternalRxTurnScratchLifecycle.terminal,
+            scratch.lifecycle,
+        );
+        try std.testing.expectEqual(@as(usize, 0), active_callback_region_addr);
+        try std.testing.expectEqual(@as(usize, 0), active_callback_release_addr);
+        try std.testing.expectEqual(@as(usize, 0), active_callback_storage_addr);
+        try std.testing.expectEqual(@as(usize, 0), active_callback_lease_addr);
+        try std.testing.expectEqual(@as(usize, 0), active_callback_scratch_addr);
+        try std.testing.expectEqual(@as(usize, 0), active_callback_permit_addr);
+        try std.testing.expect(
+            callbackRegionTokenPristine(&scratch.callback_region),
+        );
+        try std.testing.expect(
+            scratch.read.lifecycle == .terminal or
+                scratch.read.lifecycle == .closed,
+        );
+        try std.testing.expect(
+            scratch.stopped_borrow.lifecycle == .aborted or
+                scratch.stopped_borrow.lifecycle == .settled,
+        );
+        try std.testing.expect(
+            scratch.borrow_use_permit.lifecycle == .aborted or
+                scratch.borrow_use_permit.lifecycle == .released,
+        );
+        try std.testing.expect(
+            scratch.would_block_seed.lifecycle == .empty or
+                scratch.would_block_seed.lifecycle == .consumed or
+                scratch.would_block_seed.lifecycle == .aborted,
+        );
+        try std.testing.expect(
+            scratch.prepared_admit_use_permit.lifecycle == .empty or
+                scratch.prepared_admit_use_permit.lifecycle == .aborted or
+                scratch.prepared_admit_use_permit.lifecycle == .finished,
+        );
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            scratch.read.active_borrow_addr,
+        );
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            scratch.read.active_use_permit_addr,
+        );
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            scratch.read.active_prepared_use_permit_addr,
+        );
+        try std.testing.expect(client_external_mode.preparedRxAppendPristine(
+            &scratch.read.prepared_admit,
+        ));
+        try std.testing.expect(storage.intentScratchReservationValid());
+        try std.testing.expect(storage.rxAggregateReservationValid());
+        const after_events = cross_owner_quarantine_events.load(.acquire);
+        const expected_quarantine_delta: u64 =
+            @intFromBool(point == .after_prepare or point == .after_commit);
+        try std.testing.expectEqual(
+            before_events + expected_quarantine_delta,
+            after_events,
+        );
+        try std.testing.expectEqual(
+            if (point == .after_prepare)
+                client_external_mode.GuardedQuarantineReceiptLifecycle.consumed
+            else
+                client_external_mode.GuardedQuarantineReceiptLifecycle.empty,
+            scratch.quarantine_receipt.lifecycle,
+        );
+        try std.testing.expectEqual(@as(usize, 0), active_external_lease_addr);
+        try std.testing.expectEqual(@as(u64, 0), active_external_lease_generation);
+        try std.testing.expect(storage.semantic_state == .terminal);
+
+        const calls_before_replay = read_probe.calls;
+        const replay = storage.pumpInjectedRxTurnForTest(
+            .{ .readable = true, .writable = false, .now_ns = 2 },
+            &ops,
+            scratch,
+        );
+        try std.testing.expect(replay.terminal != null);
+        try std.testing.expectEqual(calls_before_replay, read_probe.calls);
+        try std.testing.expectEqual(@as(u8, 1), injected_rx_failpoint_hits);
+        try std.testing.expectEqual(after_events, cross_owner_quarantine_events.load(
+            .acquire,
+        ));
+    }
 }
 
 test "C4d injected positive prefix admits once traverses and preserves read accounting" {

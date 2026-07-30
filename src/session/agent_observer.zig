@@ -22,6 +22,12 @@ pub const Detection = struct {
     visible_running: bool = false,
     /// 매치했으나 상태를 바꾸지 말라는 규칙(skip_state_update)이 이긴 경우. Stabilizer가 직전 상태를 유지한다.
     skip: bool = false,
+
+    /// 화면·OSC에서 실제로 본 근거가 있는지. 없으면 **약한 신호**이며(현재는 PTY activity 폴백 하나) 근거 있는
+    /// 직전 상태를 즉시 덮지 못한다. 단일 출처는 docs/agent-session.md «상태 모델과 우선순위» 신호 세기 중재.
+    pub fn hasVisibleEvidence(self: Detection) bool {
+        return self.visible_idle or self.visible_blocker or self.visible_running;
+    }
 };
 
 /// 화면 tail을 평면 하단 N행 대신 구조 region으로 나눈다. `screen`은 기존 whole tail이고, 나머지는 프롬프트
@@ -63,7 +69,9 @@ const Rule = struct {
     leading_codepoint_ranges: []const CodepointRange = &.{},
     /// 설정되면 평면 all/any/none 대신 이 게이트로 판정한다(중첩 조건용).
     gate: ?Gate = null,
-    /// 화면 규칙은 scrollback 성격의 오래된 문구가 아니라 현재 composer/footer 가까이에서만 유효하다.
+    /// **일시적 오버레이 규칙 전용** 거리 게이트. 권한 확인·중단 배너처럼 스크롤되는 출력 문구는 위로 밀린 뒤에는
+    /// 현재 근거가 아니므로 하단 거리로 유효 범위를 제한한다. 반대로 입력 프롬프트·실행 footer 같은 **상시 chrome**에는
+    /// 걸지 않는다 — 사용자 입력이 길어지면 chrome이 스스로 밀려나 근거가 사라지기 때문이다(실측).
     max_lines_from_bottom: ?u8 = null,
     /// 매치돼도 상태를 바꾸지 않고 직전 상태를 유지한다(전이·로딩 중간 화면 오탐 억제). state는 unknown이어야 한다.
     skip_state_update: bool = false,
@@ -95,7 +103,10 @@ const claude_rules = [_]Rule{
     .{ .id = "progress_running", .state = .running, .priority = 895, .region = .progress, .any = &.{ "4;1", "4;2", "4;3", "4;4" }, .visible_running = true },
     // 작업 중에도 composer가 열려 있어 live_prompt와 동시에 매치되므로 idle보다 우선한다(실측).
     .{ .id = "working_title", .state = .running, .priority = 950, .region = .title, .leading_codepoint_ranges = &.{braille_block}, .visible_running = true },
-    .{ .id = "working_footer", .state = .running, .priority = 890, .region = .screen, .any = &.{ "esc to interrupt", "esc to stop" }, .max_lines_from_bottom = 4, .visible_running = true },
+    // 실행 footer도 상시 chrome이라 거리 게이트를 걸지 않는다. 사용자 statusLine이 여러 줄이거나 입력이 여러 행이면
+    // footer가 스스로 위로 밀려 근거가 사라지고, 그 화면에는 idle 근거도 없어 판정이 폴백으로 떨어진다(실측).
+    // 잔상 방지는 거리가 아니라 위치 tiebreak가 맡는다 — 아래로 돌아온 프롬프트가 위쪽 옛 footer를 이긴다.
+    .{ .id = "working_footer", .state = .running, .priority = 890, .region = .screen, .any = &.{ "esc to interrupt", "esc to stop" }, .visible_running = true },
 };
 
 const codex_rules = [_]Rule{
@@ -103,14 +114,33 @@ const codex_rules = [_]Rule{
     .{ .id = "confirmation_prompt", .state = .blocked, .priority = 990, .region = .screen, .any = &.{ "press enter to confirm or esc to cancel", "press enter to confirm or esc to go back", "press enter to continue", "allow command?", "enter to submit answer", "enter to submit all" }, .max_lines_from_bottom = 6, .visible_blocker = true },
     .{ .id = "interrupted_prompt", .state = .idle, .priority = 885, .region = .screen, .all = &.{"conversation interrupted"}, .max_lines_from_bottom = 4, .visible_idle = true },
     // Codex는 turn 실행 중에도 아래 composer를 열어 steering 입력을 받는다. 따라서 prompt가 더 아래에 있어도
-    // `esc to interrupt`가 현재 tail에 함께 보이면 idle 근거가 아니다(실제 0.144.5 UI).
-    .{ .id = "live_prompt", .state = .idle, .priority = 900, .region = .screen, .line_prefixes = &.{ "›", "❯" }, .none = &.{ "allow command?", "esc to interrupt" }, .max_lines_from_bottom = 4, .visible_idle = true },
+    // `esc to interrupt`가 현재 tail에 함께 보이면 idle 근거가 아니다(실제 0.144.5 UI). 즉 codex에서는 "아래=최신"
+    // tiebreak가 성립하지 않고 `esc to interrupt` 문구가 turn 진행의 discriminator다.
+    //
+    // 하단 거리 게이트는 뺐다. codex composer는 박스 테두리 없이 `› 입력` + 빈 행 + `Context …` 상태줄(상수 2행)
+    // 구조라(실측 0.146.0), 입력이 4행이 되면 마커의 하단 거리가 5가 되어 **유일한 idle 근거가 사라진다.** 그러면
+    // pty_activity 폴백만 남아 타이핑 에코가 running으로 단정됐다(사용자 보고 증상). 프롬프트 아래에 상태줄이 상수로
+    // 붙어서 `prompt_anchor`("마커 아래가 모두 공백") 정의에도 걸리지 않으므로 region 이관 대신 `screen`을 유지한다.
+    //
+    // discriminator는 실측 footer 문구 그대로 **닫는 괄호까지** 쓴다: `• Working (3s • esc to interrupt)`. 괄호 없는
+    // 느슨한 `esc to interrupt`로 두면 에이전트가 **산문에서 그 표현을 언급**하기만 해도(터미널을 만드는 저장소에서는
+    // 흔하다) 이 규칙이 idle을 지우고 아래 working_footer가 거짓 running을 세운다. 반대 위험(provider가 문구를 바꿔
+    // 근거를 잃음)은 폴백으로 degrade될 뿐이라, 거짓 running보다 근거 상실을 택했다.
+    .{ .id = "live_prompt", .state = .idle, .priority = 900, .region = .screen, .line_prefixes = &.{ "›", "❯" }, .none = &.{ "allow command?", "esc to interrupt)" }, .visible_idle = true },
     // OSC 9;4(ConEmu progress)는 실측에서 두 provider 모두 emit하지 않았다 — 현재 발화하지 않는 규칙이다.
     // 표준 기반 데이터라 존치하되 근거 있는 값으로 오해하지 않도록 남긴다(docs/agent-session.md «실측 신호 기록»).
     .{ .id = "progress_idle", .state = .idle, .priority = 870, .region = .progress, .all = &.{"4;0"}, .visible_idle = true },
     .{ .id = "progress_running", .state = .running, .priority = 895, .region = .progress, .any = &.{ "4;1", "4;2", "4;3", "4;4" }, .visible_running = true },
     .{ .id = "working_title", .state = .running, .priority = 950, .region = .title, .leading_codepoint_ranges = &.{braille_block}, .visible_running = true },
-    .{ .id = "working_footer", .state = .running, .priority = 890, .region = .screen, .all = &.{ "working", "esc to interrupt" }, .max_lines_from_bottom = 4, .visible_running = true },
+    // live_prompt의 `none`과 **같은 문자열**을 쓴다. 한쪽만 좁으면(예: `Working` 단어를 함께 요구) provider가 문구를
+    // 바꿀 때 "프롬프트도 아니고 실행도 아닌" 화면이 생겨 근거 공백이 나고, 폴백이 그 틈을 메우며 오판한다. 같은
+    // discriminator를 공유하면 두 규칙이 구성상 상호배타가 되어 공백이 없다. 거리 게이트를 뺀 이유는 실측 배치에서
+    // footer가 live composer **위**에 와서(에코 → footer → steering composer → 상태줄) 하단 거리가 6이 되고,
+    // 그러면 **실제 작업 중에도** running 근거가 사라지기 때문이다(반대 방향 결함).
+    //
+    // claude와 달리 codex는 문구를 좁게(닫는 괄호 포함) 잡는다. claude는 프롬프트가 항상 footer보다 아래라 위치
+    // tiebreak가 산문 오탐을 막아 주지만, codex는 그 전제가 반대여서 문구 자체가 유일한 방어선이다.
+    .{ .id = "working_footer", .state = .running, .priority = 890, .region = .screen, .any = &.{"esc to interrupt)"}, .visible_running = true },
 };
 
 pub fn detect(agent: Agent, input: Input) Detection {
@@ -250,9 +280,30 @@ fn validateGate(comptime gate: Gate, comptime rule_id: []const u8) void {
     for (gate.not) |sub| validateGate(sub, rule_id);
 }
 
+/// 상태를 세우는 규칙은 반드시 `visible_*` 근거 플래그를 하나 이상 든다. Stabilizer의 신호 세기 중재가
+/// "근거 없는 상태 = 약한 신호"로 판정하므로, 플래그를 빠뜨린 규칙은 조용히 약한 신호로 강등돼 근거 있는 직전
+/// 상태를 못 이긴다. 그런 데이터 실수를 런타임이 아니라 **빌드에서** 잡아, 약한 신호 생산자를 PTY activity 폴백
+/// 하나로 못박는다. `skip_state_update`는 상태를 세우지 않으므로 반대로 근거 플래그가 없어야 한다.
+fn validateRuleEvidence(comptime rule: Rule) void {
+    const flagged = rule.visible_idle or rule.visible_blocker or rule.visible_running;
+    if (rule.skip_state_update) {
+        if (rule.state != .unknown or flagged)
+            @compileError("agent_observer rule '" ++ rule.id ++ "': skip 규칙은 state=unknown이고 visible_* 플래그가 없어야 합니다");
+        return;
+    }
+    if (rule.state != .unknown and !flagged)
+        @compileError("agent_observer rule '" ++ rule.id ++ "': 상태를 세우는 규칙은 visible_* 근거 플래그가 있어야 합니다");
+}
+
 comptime {
-    for (claude_rules) |rule| if (rule.gate) |g| validateGate(g, rule.id);
-    for (codex_rules) |rule| if (rule.gate) |g| validateGate(g, rule.id);
+    for (claude_rules) |rule| {
+        if (rule.gate) |g| validateGate(g, rule.id);
+        validateRuleEvidence(rule);
+    }
+    for (codex_rules) |rule| {
+        if (rule.gate) |g| validateGate(g, rule.id);
+        validateRuleEvidence(rule);
+    }
 }
 
 fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
@@ -391,17 +442,26 @@ fn lineText(lines: *const LineScan, idx: usize) []const u8 {
 }
 
 /// 현재 입력 프롬프트 라인. 마지막 프롬프트라도 그 아래에 실제 출력이 남아 있으면 scrollback 잔상이므로
-/// 현재 프롬프트가 아니다. "현재"의 구조적 정의: 프롬프트와 그 아래 첫 수평선 사이가 비어 있거나(박스 안 입력줄),
-/// 수평선이 없으면 프롬프트 아래가 모두 공백일 것. 하단 거리(행 수) 대신 구조로 판정하므로 상태줄이 몇 줄이든
-/// 영향받지 않고, 선택지 목록(`❯ 1. Yes` 아래 다른 항목이 이어짐)도 현재 입력 프롬프트로 오인하지 않는다.
+/// 현재 프롬프트가 아니다. "현재"의 구조적 정의는 두 갈래다.
+///
+/// - **박스 본문 갈래**: 프롬프트가 박스 상단 테두리 **바로 아래 첫 줄**이고 아래에도 닫는 수평선이 있으면, 그 사이는
+///   사용자가 입력 중인 여러 행이다. 내용이 있어도 잔상 근거가 아니다 — 실측(claude)에서 입력 2행부터 이 검사가
+///   프롬프트를 지워 idle 근거를 잃었다. "바로 아래 첫 줄"을 요구하는 이유는, 그렇지 않으면 위쪽 잔상 프롬프트와
+///   아래 어딘가의 수평선(에이전트 출력에 흔한 구분선)만으로 잔상이 현재 프롬프트로 승격되기 때문이다.
+/// - **공백 갈래**: 그 밖에는 프롬프트 아래가 모두 공백일 것. 닫는 테두리가 없는 선택지 목록(`❯ 1. Yes` 아래에 다른
+///   항목이 이어짐)과 출력이 이어지는 잔상 프롬프트가 여기서 걸러진다.
+///
+/// 어느 갈래든 하단 거리(행 수)는 보지 않으므로 상태줄이 몇 줄이든, 입력이 몇 행이든 영향받지 않는다.
 fn lastPromptLineIndex(lines: *const LineScan) ?usize {
     var i: usize = lines.count;
     while (i > 0) {
         i -= 1;
         if (!isPromptLine(lineText(lines, i))) continue;
-        const limit = firstRuleBelow(lines, i) orelse lines.count;
+        if (firstRuleBelow(lines, i) != null) {
+            if (nearestRuleAbove(lines, i)) |above| if (above + 1 == i) return i;
+        }
         var j = i + 1;
-        while (j < limit) : (j += 1) {
+        while (j < lines.count) : (j += 1) {
             if (std.mem.trim(u8, lineText(lines, j), " \t\r").len != 0) return null;
         }
         return i;
@@ -502,6 +562,10 @@ pub const Stabilizer = struct {
     current: State = .unknown,
     last_evidence_ms: u64 = 0,
     evidence_missing: bool = false,
+    /// 현재 상태가 화면·OSC 근거(`visible_*`)로 세워졌는지. 근거 없는 약한 신호(현재는 PTY activity 폴백 하나)가
+    /// 근거 있는 상태를 즉시 덮지 못하게 하는 판단 재료다. 이게 없으면 타이핑 에코 같은 output이 근거 있는 idle을
+    /// 곧바로 running으로 바꿔, 규칙 데이터를 고쳐도 같은 증상이 다른 화면에서 재발한다.
+    evidence_backed: bool = false,
 
     pub const evidence_grace_ms: u64 = 700;
 
@@ -527,16 +591,34 @@ pub const Stabilizer = struct {
             return self.current;
         }
         if (detection.state != .unknown) {
+            // 신호 세기 중재: 화면·OSC 근거가 없는 상태(약한 신호)는 근거 있는 직전 상태를 즉시 덮지 못한다.
+            // 근거의 grace가 만료될 때까지 보류하고, 그 안에 같은 근거가 다시 오면 약한 신호는 버려진다.
+            // 무기한 보류는 하지 않는다 — grace가 지나면 약한 신호가 이제 가장 최신 근거이므로 반영한다.
+            if (!detection.hasVisibleEvidence() and self.evidence_backed and
+                self.current != .unknown and self.current != detection.state)
+            {
+                self.evidence_missing = true;
+                if (!self.graceExpired(now_ms)) return self.current;
+            }
             self.current = detection.state;
+            self.evidence_backed = detection.hasVisibleEvidence();
             self.last_evidence_ms = now_ms +| 1;
             self.evidence_missing = false;
             return self.current;
         }
         self.evidence_missing = true;
         if (self.current == .unknown) return .unknown;
-        const last_ms = self.last_evidence_ms -| 1;
-        if (self.last_evidence_ms == 0 or now_ms -| last_ms >= evidence_grace_ms) self.current = .unknown;
+        if (self.graceExpired(now_ms)) {
+            self.current = .unknown;
+            self.evidence_backed = false;
+        }
         return self.current;
+    }
+
+    /// 직전 근거가 grace를 넘겼는지. `last_evidence_ms`는 "아직 근거 없음"을 0으로 구분하려고 +1 저장한다.
+    fn graceExpired(self: Stabilizer, now_ms: u64) bool {
+        if (self.last_evidence_ms == 0) return true;
+        return now_ms -| (self.last_evidence_ms -| 1) >= evidence_grace_ms;
     }
 };
 
@@ -574,7 +656,8 @@ test "codex interruption screen becomes idle even after output activity" {
 
 test "current running footer beats a prior prompt or interruption in the screen tail" {
     try std.testing.expectEqual(State.running, detect(.claude, .{ .screen = "❯ previous prompt\nWorking… esc to interrupt" }).state);
-    try std.testing.expectEqual(State.running, detect(.codex, .{ .screen = "■ Conversation interrupted\n› previous prompt\nWorking\nEsc to interrupt" }).state);
+    // codex footer는 실측 문구(닫는 괄호 포함)로 적는다 — 산문 오탐을 막으려고 규칙이 괄호까지 요구한다.
+    try std.testing.expectEqual(State.running, detect(.codex, .{ .screen = "■ Conversation interrupted\n› previous prompt\n• Working (2s • Esc to interrupt)" }).state);
     try std.testing.expectEqual(State.running, detect(.codex, .{ .screen = "■ Conversation interrupted", .osc_progress = "4;2", .osc_title = "✳" }).state);
     try std.testing.expectEqual(State.running, detect(.claude, .{ .osc_progress = "4;2", .osc_title = "✳" }).state);
 }
@@ -772,6 +855,187 @@ test "claude 실측: 작업 중에는 composer가 열려 있어도 스피너 타
     const d = detect(.claude, .{ .screen = screen, .osc_title = "⠂ 터미널에 대한 haiku 작성" });
     try std.testing.expectEqual(State.running, d.state);
     try std.testing.expect(d.visible_running);
+}
+
+// ── 실 화면 캡처 기반 fixture (codex 0.146.0, tmux 80×24) ────────────────────
+// 사용자 입력이 여러 행이 되면 상시 chrome(composer·실행 footer)이 스스로 위로 밀린다. 캡처로 확인한 배치:
+// idle은 `› 입력` + 빈 행 + `Context …` 상태줄(상수 2행), 실행 중은 `› 에코` → `• Working (… esc to interrupt)`
+// → `› steering 입력` → `tab to queue message …` 순으로 **실행 footer가 live composer보다 위**에 온다.
+// 수평선 폭만 가독성을 위해 줄였고 마커·문구·행 구성은 캡처 그대로다(docs/agent-session.md «실측 신호 기록»).
+
+test "codex 실측: composer 입력이 여러 행이어도 타이핑이 running으로 보이지 않는다" {
+    // 입력 4행이면 `›` 마커의 하단 거리가 5가 되어, 거리 게이트가 있던 시절엔 유일한 idle 근거가 사라졌다.
+    // 그러면 PTY activity 폴백만 남아 **타이핑 에코가 running으로 단정**된다(사용자 보고 증상).
+    const screen =
+        "  Tip: Try the Desktop app. Run 'codex app' or visit\n" ++
+        "  https://chatgpt.com/codex?app-landing-page=true\n" ++
+        "\n" ++
+        "\n" ++
+        "› please refactor the observer module so that the distance guard no longer\n" ++
+        "  decides whether the composer is current, and add fixtures and also please\n" ++
+        "  double check the stabilizer arbitration path because weak signals must not\n" ++
+        "  override evidence backed states in any case\n" ++
+        "\n" ++
+        "  Context 0% used · weekly 67% left · gpt-5.6-sol low\n";
+    const d = detect(.codex, .{ .screen = screen, .output_active = true });
+    try std.testing.expectEqual(State.idle, d.state);
+    try std.testing.expect(d.visible_idle);
+    try std.testing.expect(!std.mem.eql(u8, d.rule_id, "pty_activity"));
+}
+
+test "codex 실측: 입력이 12행을 넘는 composer도 tail에 들어오면 idle이다" {
+    // 실측(0.146.0): composer는 입력 행 수만큼 제한 없이 자란다(개행 18행까지 확인). 규칙 쪽은 행 수에 무관하지만,
+    // platform이 넘기는 tail 행 상한이 짧으면 마커 자체가 tail 밖으로 나가 근거가 사라진다. 그 상한이 이 화면을
+    // 계속 실어 주는지가 회귀 지점이라, 규칙이 이 모양에서 idle을 내는 것을 여기서 못박는다.
+    const screen =
+        "› line1\n  line2\n  line3\n  line4\n  line5\n  line6\n  line7\n" ++
+        "  line8\n  line9\n  line10\n  line11\n  line12\n  line13\n  line14\n" ++
+        "\n" ++
+        "  Context 4% used · weekly 67% left · gpt-5.6-sol low\n";
+    const d = detect(.codex, .{ .screen = screen, .output_active = true });
+    try std.testing.expectEqual(State.idle, d.state);
+    try std.testing.expect(d.visible_idle);
+}
+
+test "codex 실측: 실행 중 steering 배치는 output이 조용해도 running이다" {
+    // footer의 하단 거리가 6이라, 거리 게이트가 있으면 **실제 작업 중에도** running 근거가 사라진다(반대 방향 결함).
+    // output_active=false로 두어 폴백이 아니라 화면 근거로 running이 나오는지 못박는다.
+    const screen =
+        "  20\n" ++
+        "\n" ++
+        "› write a detailed 12 line haiku sequence about terminals, thinking carefully\n" ++
+        "  about each line\n" ++
+        "\n" ++
+        "\n" ++
+        "• Working (3s • esc to interrupt)\n" ++
+        "\n" ++
+        "\n" ++
+        "› also please make sure the last line rhymes with the first line and keep the\n" ++
+        "  whole thing under twenty words total in the end\n" ++
+        "\n" ++
+        "  tab to queue message                                        96% context left\n";
+    const d = detect(.codex, .{ .screen = screen, .output_active = false });
+    try std.testing.expectEqual(State.running, d.state);
+    try std.testing.expect(d.visible_running);
+}
+
+test "codex 실측: turn이 끝나 footer가 사라진 화면은 idle이다" {
+    // `• Working …` 행은 turn 종료 시 화면에서 사라진다(스크롤로 남지 않는다) → `esc to interrupt` 부재가 완료 근거다.
+    const screen =
+        "  19\n" ++
+        "\n" ++
+        "  20\n" ++
+        "\n" ++
+        "\n" ++
+        "› Implement {feature}\n" ++
+        "\n" ++
+        "  Context 4% used · weekly 67% left · gpt-5.6-sol low\n";
+    const d = detect(.codex, .{ .screen = screen });
+    try std.testing.expectEqual(State.idle, d.state);
+    try std.testing.expect(d.visible_idle);
+}
+
+test "codex: 산문에 언급된 esc to interrupt는 running 근거가 아니다" {
+    // 적대적 검증에서 나온 케이스. footer 문구를 괄호 없이 느슨하게 잡으면, 에이전트가 그 표현을 설명하기만 해도
+    // idle 근거가 지워지고 거짓 running이 선다. 터미널을 만드는 저장소에서는 이 산문이 실제로 나온다.
+    const screen =
+        "● 규칙은 화면에 `esc to interrupt` 문구가 보이는지로 판정합니다.\n" ++
+        "  그 문구가 사라지면 turn이 끝난 것으로 봅니다.\n" ++
+        "\n" ++
+        "› \n" ++
+        "\n" ++
+        "  Context 7% used · weekly 61% left · gpt-5.6-sol low\n";
+    const d = detect(.codex, .{ .screen = screen });
+    try std.testing.expectEqual(State.idle, d.state);
+    try std.testing.expect(d.visible_idle);
+}
+
+test "claude 실측: 입력이 여러 행이어도 입력 줄이 idle 근거다" {
+    // claude 박스는 여러 행 입력을 상·하단 수평선 사이에 담는다. 그 본문은 사용자 입력이므로 프롬프트가 잔상이라는
+    // 근거가 아니다. 여기서는 OSC 타이틀을 비워, ✳ 타이틀에 가려지지 않고 화면만으로 판정되는지 확인한다.
+    const screen =
+        "\n" ++
+        "  tmux focus-events off · add 'set -g focus-events on' to ~/.tmux.conf\n" ++
+        "────────────────────────────────────\n" ++
+        "❯ please refactor the observer module so that the distance guard no longer\n" ++
+        "  decides whether the composer is current, and add fixtures grounded in real\n" ++
+        "  captures\n" ++
+        "────────────────────────────────────\n" ++
+        "  codexprobe\n" ++
+        "  Opus 5 (1M context) │ █ xhigh\n" ++
+        "  ⏸ manual mode on\n";
+    const d = detect(.claude, .{ .screen = screen });
+    try std.testing.expectEqual(State.idle, d.state);
+    try std.testing.expect(d.visible_idle);
+}
+
+test "claude 실측: 박스 밖 선택지 목록은 여러 행이어도 입력 프롬프트가 아니다" {
+    // 박스 본문 허용이 선택지 목록까지 열어 주면 안 된다. 신뢰 확인 화면은 마커 아래에 수평선이 없으므로
+    // “아래가 모두 공백” 판정이 그대로 적용돼 프롬프트로 승격되지 않는다(blocker 문구를 뺀 최소 화면으로 확인).
+    const screen =
+        " Quick safety check: Is this a project you created or one you trust?\n" ++
+        "\n" ++
+        " ❯ 1. Yes, I trust this folder\n" ++
+        "   2. No, exit\n";
+    try std.testing.expectEqual(State.unknown, detect(.claude, .{ .screen = screen }).state);
+}
+
+test "claude: 출력 구분선만 아래에 있는 잔상 프롬프트는 현재 프롬프트가 아니다" {
+    // 적대적 검증에서 나온 케이스. 박스 본문 허용을 "아래에 수평선이 있으면"으로 두면, 에이전트 출력에 흔한 구분선
+    // 하나만으로 위쪽 잔상 프롬프트가 현재 프롬프트로 승격된다. 그래서 프롬프트가 박스 상단 바로 아래 첫 줄일 것을
+    // 함께 요구한다(composer는 항상 그 형태다).
+    const screen =
+        "❯ 예전 프롬프트\n" ++
+        "● Reading files…\n" ++
+        "────────────────\n" ++
+        "  더 많은 출력\n";
+    try std.testing.expectEqual(State.unknown, detect(.claude, .{ .screen = screen }).state);
+}
+
+test "실행 footer 규칙은 아래 상태줄이 길어도 무효화되지 않는다" {
+    // 상시 chrome 규칙에는 하단 거리 게이트를 걸지 않는다. 사용자 statusLine이 4행이면 거리 게이트가 실행 근거까지
+    // 지워 버린다(그 화면에는 idle 근거도 없어 결과가 unknown이 된다).
+    const screen =
+        "────────────────────────────────────\n" ++
+        "❯ steering input row one\n" ++
+        "  steering input row two\n" ++
+        "────────────────────────────────────\n" ++
+        "  esc to interrupt\n" ++
+        "  yoonhb\n" ++
+        "  ctx 3% │ 5h 8% (00:20)\n" ++
+        "  Opus 5 (1M context) │ █ xhigh\n" ++
+        "  ⏸ manual mode on\n";
+    const d = detect(.claude, .{ .screen = screen });
+    try std.testing.expectEqual(State.running, d.state);
+    try std.testing.expect(d.visible_running);
+}
+
+// ── 신호 세기 중재 ──────────────────────────────────────────────────────────
+
+test "약한 신호는 근거 있는 상태를 즉시 덮지 못하고 grace 만료 뒤에만 반영된다" {
+    var s: Stabilizer = .{};
+    const strong_idle: Detection = .{ .state = .idle, .rule_id = "live_prompt", .visible_idle = true };
+    const weak_running: Detection = .{ .state = .running, .rule_id = "pty_activity" };
+    try std.testing.expectEqual(State.idle, s.observe(strong_idle, 1_000));
+    // 타이핑 에코도 output이므로 폴백은 running을 말한다. 화면 근거가 없는 그 말이 idle을 덮으면 안 된다.
+    try std.testing.expectEqual(State.idle, s.observe(weak_running, 1_100));
+    try std.testing.expectEqual(State.idle, s.observe(weak_running, 1_600));
+    try std.testing.expect(s.needsExpiryProbe());
+    // 같은 근거가 다시 오면 grace가 갱신되어 계속 idle이다.
+    try std.testing.expectEqual(State.idle, s.observe(strong_idle, 1_650));
+    try std.testing.expectEqual(State.idle, s.observe(weak_running, 2_300));
+    // 근거가 grace 안에 재확인되지 않으면 그때 약한 신호가 최신 근거가 된다(무기한 보류 금지).
+    try std.testing.expectEqual(State.running, s.observe(weak_running, 2_351));
+    try std.testing.expect(!s.needsExpiryProbe());
+}
+
+test "근거 있는 상태가 없거나 같은 상태면 약한 신호를 그대로 반영한다" {
+    var s: Stabilizer = .{};
+    const weak_running: Detection = .{ .state = .running, .rule_id = "pty_activity" };
+    try std.testing.expectEqual(State.running, s.observe(weak_running, 10));
+    try std.testing.expectEqual(State.running, s.observe(weak_running, 110));
+    // 강한 근거는 언제나 즉시 이긴다.
+    try std.testing.expectEqual(State.idle, s.observe(.{ .state = .idle, .rule_id = "live_prompt", .visible_idle = true }, 120));
 }
 
 test "claude 실측: 폴더 신뢰 확인 화면은 blocked이고 선택지를 입력 프롬프트로 오인하지 않는다" {

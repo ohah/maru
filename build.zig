@@ -1768,6 +1768,24 @@ pub fn build(b: *std.Build) void {
     const session_host_step = b.step("test-session-host", "MRSH protocol/framing codec unit tests (session host)");
     session_host_step.dependOn(&run_session_host_tests.step);
     if (target.result.os.tag == .macos) {
+        // The d2d authority proof is a pure leaf with its own hostile lifecycle matrix. Compile it
+        // independently so pump reachability cannot accidentally become the only test root.
+        const external_turn_authority_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/client_external_turn_authority.zig",
+                ),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        const run_external_turn_authority_tests = b.addRunArtifact(
+            external_turn_authority_tests,
+        );
+        run_external_turn_authority_tests.setCwd(b.path("."));
+        test_step.dependOn(&run_external_turn_authority_tests.step);
+        session_host_step.dependOn(&run_external_turn_authority_tests.step);
+
         // The stable external-pump storage is intentionally not re-exported by the session_host
         // barrel: only the future final owner may import its raw mechanics. Compile its inline TDD
         // suite as a dedicated root while keeping it in both default and focused host gates.

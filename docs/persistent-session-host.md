@@ -8033,9 +8033,9 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               1. **D0 lifecycle/SSOT:** 별도 pure leaf `client_external_turn_authority.zig`가
                  `AuthorityGeneration`, immutable seed/view와 private product permit을 소유한다. permit의
                  empty→prepared→aborted tombstone, final-address/digest/generation 검증과 spent reset을 pure
-                 hostile matrix와 boundary red로 먼저 고정한다. `consumed` tag는 wire/layout 예약만 하며 consume
-                 함수와 제품 callsite는 f3 전까지 0이다. leaf는 `ExternalPumpStorage`를 import하거나 callback
-                 ops를 받지 않는다.
+                 hostile matrix와 boundary red로 먼저 고정한다. `consumed` tag는 wire/layout 예약만 하며
+                 canonical future symbol `consume`의 함수 정의와 제품 callsite는 f3 전까지 0이다. leaf는
+                 `ExternalPumpStorage`를 import하거나 callback ops를 받지 않는다.
               2. **D1 prepare leaf:** 기존 C5 RX mechanics를 caller-held mutable `ExternalWholeTurnLease` 아래
                  private `prepareRxTurn` exact-one leaf로 둔다. parser/admit 진행은 기존
                  `refreshWholeTurnRxAuthorityAfterAdmit/ParserProgress`가 같은 lease provenance와 digest를
@@ -8104,17 +8104,33 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               };
               const CurrentView = Seed;
 
-              const FinalParserReadiness = enum { empty, incomplete, complete_or_error };
-              const FinishedDrainLifecycle = enum { finished };
-              const AttachmentRole = enum { controller, observer };
-              const OwnerAuthorityFlow = enum { initial_fence, clear };
+              const FinalParserReadiness = enum(u8) {
+                  empty = 0,
+                  incomplete = 1,
+                  complete_or_error = 2,
+              };
+              const FinishedDrainLifecycle = enum(u8) { finished = 0 };
+              // 기존 owner/evidence seal transcript ordinal을 보존한다.
+              const AttachmentRole = enum(u8) { observer = 0, controller = 1 };
+              const OwnerAuthorityFlow = enum(u8) { initial_fence = 0, clear = 1 };
+              const PermitLifecycle = enum(u8) {
+                  empty = 0,
+                  prepared = 1,
+                  consumed = 2,
+                  aborted = 3,
+              };
+              const CleanupLifecycle = enum(u8) {
+                  empty = 0,
+                  prepared = 1,
+                  consumed = 2,
+              };
 
               const FrozenCleanupSeed = struct {
                   saved_self_addr: usize,
                   permit_addr: usize,
                   scratch_addr: usize,
                   seed: Seed,
-                  lifecycle: enum { empty, prepared, consumed },
+                  lifecycle: CleanupLifecycle,
                   digest: external_owner_seal.Digest,
               };
 
@@ -8124,39 +8140,10 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                   version: u16,
                   saved_self_addr: usize,
                   cleanup_seed_addr: usize,
-                  storage_addr: usize,
-                  owner_incarnation: u64,
-                  owner_incarnation_digest: external_owner_seal.Digest,
-                  scratch_addr: usize,
-                  scratch_turn_generation: u64,
-                  lease_addr: usize,
-                  operation_generation: u64,
-                  lease_digest: external_owner_seal.Digest,
-                  client_addr: usize,
-                  parser_addr: usize,
-                  parser_generation: u64,
-                  parser_seal_digest: external_owner_seal.Digest,
-                  rx_provenance_digest: external_owner_seal.Digest,
-                  rx_absolute_next: u64,
-                  drain_evidence_addr: usize,
-                  drain_read_attempt_generation: u64,
-                  drain_evidence_digest: external_owner_seal.Digest,
-                  inherited_blocker_snapshot_digest: external_owner_seal.Digest,
-                  final_owner_snapshot_digest: external_owner_seal.Digest,
-                  final_parser_readiness: FinalParserReadiness,
-                  drain_evidence_lifecycle: FinishedDrainLifecycle,
-                  final_blockers_clear: bool,
-                  read_budget_remaining: bool,
-                  frame_budget_remaining: bool,
-                  work_budget_remaining: bool,
-                  terminal_or_revoke: bool,
-                  semantic_active: bool,
-                  reentry_clear: bool,
-                  attachment_role: AttachmentRole,
-                  authority_flow: OwnerAuthorityFlow,
-                  owner_authority_seal_digest: external_owner_seal.Digest,
-                  authority_generation: AuthorityGeneration,
-                  lifecycle: enum { empty, prepared, consumed, aborted },
+                  // Seed를 canonical projection 하나로 보존해 schema 추가/순서 변경이
+                  // permit copy와 seal transcript에서 따로 drift하지 않게 한다.
+                  seed: Seed,
+                  lifecycle: PermitLifecycle,
                   digest: external_owner_seal.Digest,
               };
 

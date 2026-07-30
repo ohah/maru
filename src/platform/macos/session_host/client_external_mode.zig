@@ -181,6 +181,7 @@ const pristine_rx_append_allocator: std.mem.Allocator = .{
 };
 
 const PreparedLifecycle = enum { empty, prepared, committed, aborted };
+const PreparedAppendLifecycle = enum { empty, prepared, committed, aborted, quarantined };
 
 pub const PreparedRxBind = struct {
     saved_self_addr: usize = 0,
@@ -255,15 +256,25 @@ pub const PreparedRxAppend = struct {
     replacement_addr: usize = 0,
     replacement_len: usize = 0,
     final_items_len: usize = 0,
+    resident_cap: usize = 0,
     replacement: ?[]u8 = null,
     cleanup_replacement: ?[]u8 = null,
+    replacement_guard: ?ReplacementAllocationGuard = null,
+    replacement_authority_seal: ReplacementAuthoritySeal = .{},
     cleanup_digest: owner_seal.Digest = [_]u8{0} ** 32,
     digest: owner_seal.Digest = [_]u8{0} ** 32,
-    lifecycle: PreparedLifecycle = .empty,
+    lifecycle: PreparedAppendLifecycle = .empty,
 
     fn deinitInternal(self: *PreparedRxAppend) void {
         if (self.saved_self_addr != 0 and self.saved_self_addr != @intFromPtr(self)) return;
         if (self.lifecycle == .prepared) {
+            // A guarded replacement may only be freed through abort/commit, where the opaque
+            // owner-range authority can be revalidated. Generic teardown deliberately drops the
+            // capability instead of calling an allocator with an unproven descriptor.
+            if (self.replacement_guard != null) {
+                self.* = .{ .lifecycle = .quarantined };
+                return;
+            }
             const replacement = canonicalAppendReplacement(self);
             const allocator = self.allocator;
             self.replacement = null;
@@ -353,6 +364,78 @@ pub const PayloadAllocationGuard = struct {
     ) PayloadAllocationVerdict,
 };
 
+pub const ReplacementAuthoritySeal = struct {
+    generation: u64 = 0,
+    digest: owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+pub const ReplacementGuardPhase = enum {
+    capture_before_allocate,
+    capture_after_allocate,
+    validate_allocated,
+    capture_after_validate,
+    capture_before_cleanup,
+    validate_after_cleanup,
+    capture_after_cleanup_validate,
+};
+
+pub const ReplacementCandidate = struct {
+    addr: usize,
+    len: usize,
+};
+
+pub const ReplacementGuardResult = union(enum) {
+    seal: ReplacementAuthoritySeal,
+    accepted: ReplacementAuthoritySeal,
+    quarantined,
+};
+
+/// Opaque owner-range authority supplied by the pump layer. This leaf freezes the descriptor and
+/// compares value-only seals; it never imports or reconstructs pump/storage/ledger ownership.
+pub const ReplacementAllocationGuard = struct {
+    context: *anyopaque,
+    check: *const fn (
+        context: *anyopaque,
+        phase: ReplacementGuardPhase,
+        expected: ?ReplacementAuthoritySeal,
+        candidate: ?ReplacementCandidate,
+    ) ReplacementGuardResult,
+};
+
+pub const GuardedAdmitFailure = struct {
+    reason: RxPrepareError,
+};
+
+pub const GuardedAdmitQuarantinePhase = enum {
+    allocation,
+    abort_cleanup,
+    commit_cleanup,
+};
+
+pub const GuardedAdmitQuarantine = struct {
+    phase: GuardedAdmitQuarantinePhase,
+    quarantined_bytes_upper_bound: usize,
+};
+
+pub const GuardedAdmitPrepareOutcome = union(enum) {
+    prepared,
+    ordinary_failure: GuardedAdmitFailure,
+    allocation_quarantined: GuardedAdmitQuarantine,
+};
+
+pub const GuardedAdmitCommitOutcome = union(enum) {
+    committed,
+    ordinary_failure: GuardedAdmitFailure,
+    allocation_quarantined: GuardedAdmitQuarantine,
+    post_commit_quarantined: GuardedAdmitQuarantine,
+};
+
+pub const GuardedAdmitAbortOutcome = union(enum) {
+    aborted,
+    ordinary_failure: GuardedAdmitFailure,
+    allocation_quarantined: GuardedAdmitQuarantine,
+};
+
 const parser_seal_domain = "MARURXP2";
 const parser_seal_version: u16 = 2;
 
@@ -429,6 +512,70 @@ pub const testing = if (builtin.is_test) struct {
         ) orelse return false;
         return parserSealValid(state, parser);
     }
+
+    /// Test-only injection for already-buffered product fixtures. C2 keeps the real pump and
+    /// collector callsite closed; tests reach the guarded leaf through this synthetic authority.
+    pub fn admitBuffered(
+        state: *State,
+        parser: *framing.FrameParser,
+        bytes: []const u8,
+        resident_cap: usize,
+    ) !void {
+        const SyntheticGuard = struct {
+            seal: ReplacementAuthoritySeal = .{
+                .generation = 1,
+                .digest = [_]u8{0x39} ** 32,
+            },
+
+            fn check(
+                raw: *anyopaque,
+                phase: ReplacementGuardPhase,
+                expected: ?ReplacementAuthoritySeal,
+                candidate: ?ReplacementCandidate,
+            ) ReplacementGuardResult {
+                const self: *@This() = @ptrCast(@alignCast(raw));
+                return switch (phase) {
+                    .capture_before_allocate,
+                    .capture_after_allocate,
+                    .capture_after_validate,
+                    .capture_before_cleanup,
+                    .capture_after_cleanup_validate,
+                    => .{ .seal = self.seal },
+                    .validate_allocated, .validate_after_cleanup => if (expected != null and
+                        std.meta.eql(expected.?, self.seal) and candidate != null)
+                        .{ .accepted = self.seal }
+                    else
+                        .quarantined,
+                };
+            }
+        };
+        var context = SyntheticGuard{};
+        const guard = ReplacementAllocationGuard{
+            .context = &context,
+            .check = SyntheticGuard.check,
+        };
+        var prepared: PreparedRxAppend = .{};
+        switch (prepareAdmitGuarded(
+            state,
+            parser,
+            bytes,
+            state.rx_provenance.rx_absolute_next,
+            resident_cap,
+            &guard,
+            &prepared,
+        )) {
+            .prepared => {},
+            .ordinary_failure => |failure| return failure.reason,
+            .allocation_quarantined => return error.TestUnexpectedResult,
+        }
+        switch (commitPreparedAdmitGuarded(state, parser, bytes, &prepared)) {
+            .committed => {},
+            .ordinary_failure => |failure| return failure.reason,
+            .allocation_quarantined,
+            .post_commit_quarantined,
+            => return error.TestUnexpectedResult,
+        }
+    }
 } else struct {};
 
 fn rxBindDigest(prepared: *const PreparedRxBind) owner_seal.Digest {
@@ -466,6 +613,16 @@ fn appendDigest(prepared: *const PreparedRxAppend) owner_seal.Digest {
     writer.writeUsize(prepared.replacement_addr);
     writer.writeUsize(prepared.replacement_len);
     writer.writeUsize(prepared.final_items_len);
+    writer.writeUsize(prepared.resident_cap);
+    if (prepared.replacement_guard) |guard| {
+        writer.writeUsize(@intFromPtr(guard.context));
+        writer.writeUsize(@intFromPtr(guard.check));
+    } else {
+        writer.writeUsize(0);
+        writer.writeUsize(0);
+    }
+    writer.writeU64(prepared.replacement_authority_seal.generation);
+    writer.writeBytes(&prepared.replacement_authority_seal.digest);
     writer.writeBytes(&prepared.cleanup_digest);
     return writer.finish();
 }
@@ -477,6 +634,16 @@ fn appendCleanupDigest(prepared: *const PreparedRxAppend) owner_seal.Digest {
     writer.writeUsize(prepared.allocator_vtable_addr);
     writer.writeUsize(prepared.replacement_addr);
     writer.writeUsize(prepared.replacement_len);
+    writer.writeUsize(prepared.resident_cap);
+    if (prepared.replacement_guard) |guard| {
+        writer.writeUsize(@intFromPtr(guard.context));
+        writer.writeUsize(@intFromPtr(guard.check));
+    } else {
+        writer.writeUsize(0);
+        writer.writeUsize(0);
+    }
+    writer.writeU64(prepared.replacement_authority_seal.generation);
+    writer.writeBytes(&prepared.replacement_authority_seal.digest);
     return writer.finish();
 }
 
@@ -523,6 +690,9 @@ pub fn preparedRxAppendPristine(out: *const PreparedRxAppend) bool {
         out.allocator.ptr == pristine_rx_append_allocator.ptr and
         out.allocator.vtable == pristine_rx_append_allocator.vtable and
         out.final_items_len == 0 and
+        out.resident_cap == 0 and
+        out.replacement_guard == null and
+        std.meta.eql(out.replacement_authority_seal, ReplacementAuthoritySeal{}) and
         std.mem.allEqual(u8, &out.cleanup_digest, 0) and
         std.mem.allEqual(u8, &out.digest, 0);
 }
@@ -1039,6 +1209,474 @@ fn appendPreparedValid(
         next_items_len <= parser.buf.capacity;
 }
 
+fn appendPreparedTokenAuthenticated(
+    state: *const State,
+    parser: *const framing.FrameParser,
+    prepared: *const PreparedRxAppend,
+) bool {
+    return state.rx_operation_busy and
+        prepared.lifecycle == .prepared and
+        prepared.saved_self_addr == @intFromPtr(prepared) and
+        prepared.state_addr == @intFromPtr(state) and
+        prepared.parser_addr == @intFromPtr(parser) and
+        prepared.source_seal.generation != std.math.maxInt(u64) and
+        std.mem.eql(u8, &prepared.digest, &appendDigest(prepared));
+}
+
+fn replacementSealValid(seal: ReplacementAuthoritySeal) bool {
+    return seal.generation != 0 and !std.mem.allEqual(u8, &seal.digest, 0);
+}
+
+fn sameReplacementSeal(
+    a: ReplacementAuthoritySeal,
+    b: ReplacementAuthoritySeal,
+) bool {
+    return a.generation == b.generation and
+        std.mem.eql(u8, &a.digest, &b.digest);
+}
+
+fn captureReplacementAuthority(
+    guard: ReplacementAllocationGuard,
+    phase: ReplacementGuardPhase,
+    expected: ?ReplacementAuthoritySeal,
+    candidate: ?ReplacementCandidate,
+) ?ReplacementAuthoritySeal {
+    const result = guard.check(guard.context, phase, expected, candidate);
+    const seal = switch (result) {
+        .seal => |seal| seal,
+        else => return null,
+    };
+    if (!replacementSealValid(seal)) return null;
+    if (expected) |prior| {
+        if (!sameReplacementSeal(prior, seal)) return null;
+    }
+    return seal;
+}
+
+fn validateReplacementCandidate(
+    guard: ReplacementAllocationGuard,
+    phase: ReplacementGuardPhase,
+    expected: ReplacementAuthoritySeal,
+    candidate: ReplacementCandidate,
+) bool {
+    const result = guard.check(guard.context, phase, expected, candidate);
+    const seal = switch (result) {
+        .accepted => |seal| seal,
+        else => return false,
+    };
+    return replacementSealValid(seal) and sameReplacementSeal(expected, seal);
+}
+
+fn replacementLocalAuthorityDigest(
+    state: *const State,
+    parser: *const framing.FrameParser,
+    bytes: []const u8,
+    resident_cap: usize,
+    out: *const PreparedRxAppend,
+    guard: ReplacementAllocationGuard,
+) owner_seal.Digest {
+    var writer = owner_seal.Writer.init("rx-replacement-local.v1");
+    writer.writeUsize(@intFromPtr(state));
+    writer.writeUsize(@intFromPtr(parser));
+    writer.writeUsize(@intFromPtr(out));
+    writer.writeUsize(@intFromPtr(guard.context));
+    writer.writeUsize(@intFromPtr(guard.check));
+    GuardedSourceSnapshot.capture(state, parser).writeDigest(&writer);
+    writer.writeUsize(resident_cap);
+    writer.writeUsize(if (bytes.len == 0) 0 else @intFromPtr(bytes.ptr));
+    writer.writeUsize(bytes.len);
+    writer.writeBytes(bytes);
+    writer.writeUsize(@intFromBool(appendOutputPristine(out)));
+    writer.writeUsize(@intFromBool(state.rx_operation_busy));
+    return writer.finish();
+}
+
+fn replacementLocalAuthorityStillAddressable(
+    state: *const State,
+    parser: *const framing.FrameParser,
+    bytes: []const u8,
+    resident_cap: usize,
+    out: *const PreparedRxAppend,
+    guard: ReplacementAllocationGuard,
+    source_seal: ParserAuthoritySeal,
+    allocation_owner: std.mem.Allocator,
+) bool {
+    return state.rx_operation_busy and
+        appendOutputPristine(out) and
+        parserSealValid(state, parser) and
+        std.meta.eql(source_seal, state.rx_provenance.parser_seal) and
+        state.rx_provenance.resident_cap == resident_cap and
+        @intFromPtr(parser.allocator.ptr) == @intFromPtr(allocation_owner.ptr) and
+        @intFromPtr(parser.allocator.vtable) == @intFromPtr(allocation_owner.vtable) and
+        (bytes.len == 0 or @intFromPtr(bytes.ptr) != 0) and
+        @intFromPtr(guard.context) != 0 and
+        @intFromPtr(guard.check) != 0;
+}
+
+fn quarantinePreparedAllocation(
+    state: *State,
+    out: *PreparedRxAppend,
+    phase: GuardedAdmitQuarantinePhase,
+    upper_bound: usize,
+) GuardedAdmitQuarantine {
+    out.* = .{ .lifecycle = .quarantined };
+    state.rx_provenance = .{ .lifecycle = .terminal };
+    state.rx_operation_busy = false;
+    return .{
+        .phase = phase,
+        .quarantined_bytes_upper_bound = upper_bound,
+    };
+}
+
+pub fn prepareAdmitGuarded(
+    state: *State,
+    parser: *framing.FrameParser,
+    bytes: []const u8,
+    expected_start: u64,
+    resident_cap: usize,
+    guard_ptr: *const ReplacementAllocationGuard,
+    out: *PreparedRxAppend,
+) GuardedAdmitPrepareOutcome {
+    const fail = struct {
+        fn result(reason: RxPrepareError) GuardedAdmitPrepareOutcome {
+            return .{ .ordinary_failure = .{ .reason = reason } };
+        }
+    }.result;
+    if (state.rx_operation_busy) return fail(error.InvalidState);
+    if (!parserSealValid(state, parser)) return fail(error.InvalidSeal);
+    if (resident_cap == 0 or
+        resident_cap > protocol.max_binary_chunk + protocol.header_size)
+        return fail(error.ResidentCap);
+    if (state.rx_provenance.resident_cap != resident_cap)
+        return fail(error.InvalidState);
+    const parser_backing_addr =
+        if (parser.buf.capacity == 0) 0 else @intFromPtr(parser.buf.items.ptr);
+    if (rangesOverlap(@intFromPtr(out), @sizeOf(PreparedRxAppend), @intFromPtr(state), @sizeOf(State)) or
+        rangesOverlap(
+            @intFromPtr(out),
+            @sizeOf(PreparedRxAppend),
+            @intFromPtr(parser),
+            @sizeOf(framing.FrameParser),
+        ) or
+        rangesOverlap(
+            @intFromPtr(out),
+            @sizeOf(PreparedRxAppend),
+            parser_backing_addr,
+            parser.buf.capacity,
+        ))
+        return fail(error.InvalidDescriptor);
+    if (expected_start != state.rx_provenance.rx_absolute_next)
+        return fail(error.InvalidState);
+    if (!appendOutputPristine(out)) return fail(error.InvalidState);
+    const guard_ptr_addr = @intFromPtr(guard_ptr);
+    if (rangesOverlap(guard_ptr_addr, @sizeOf(ReplacementAllocationGuard), @intFromPtr(state), @sizeOf(State)) or
+        rangesOverlap(
+            guard_ptr_addr,
+            @sizeOf(ReplacementAllocationGuard),
+            @intFromPtr(parser),
+            @sizeOf(framing.FrameParser),
+        ) or
+        rangesOverlap(
+            guard_ptr_addr,
+            @sizeOf(ReplacementAllocationGuard),
+            @intFromPtr(out),
+            @sizeOf(PreparedRxAppend),
+        ) or
+        rangesOverlap(
+            guard_ptr_addr,
+            @sizeOf(ReplacementAllocationGuard),
+            parser_backing_addr,
+            parser.buf.capacity,
+        ))
+        return fail(error.InvalidDescriptor);
+    const unread_len = std.math.sub(usize, parser.buf.items.len, parser.head) catch
+        return fail(error.InvalidDescriptor);
+    const next_unread_len = std.math.add(usize, unread_len, bytes.len) catch
+        return fail(error.ArithmeticOverflow);
+    if (next_unread_len > resident_cap) return fail(error.ResidentCap);
+    _ = std.math.add(u64, expected_start, @as(u64, @intCast(bytes.len))) catch
+        return fail(error.ArithmeticOverflow);
+    const bytes_addr = if (bytes.len == 0) 0 else @intFromPtr(bytes.ptr);
+    if (rangesOverlap(guard_ptr_addr, @sizeOf(ReplacementAllocationGuard), bytes_addr, bytes.len) or
+        rangesOverlap(bytes_addr, bytes.len, @intFromPtr(state), @sizeOf(State)) or
+        rangesOverlap(bytes_addr, bytes.len, @intFromPtr(parser), @sizeOf(framing.FrameParser)) or
+        rangesOverlap(bytes_addr, bytes.len, @intFromPtr(out), @sizeOf(PreparedRxAppend)) or
+        rangesOverlap(bytes_addr, bytes.len, parser_backing_addr, parser.buf.capacity))
+        return fail(error.InvalidDescriptor);
+    const next_items_len = std.math.add(usize, parser.buf.items.len, bytes.len) catch
+        return fail(error.ArithmeticOverflow);
+    const source_seal = state.rx_provenance.parser_seal;
+    const allocation_owner = parser.allocator;
+    if (next_items_len <= parser.buf.capacity) {
+        state.rx_operation_busy = true;
+        out.* = .{
+            .saved_self_addr = @intFromPtr(out),
+            .state_addr = @intFromPtr(state),
+            .parser_addr = @intFromPtr(parser),
+            .expected_start = expected_start,
+            .bytes_addr = bytes_addr,
+            .bytes_len = bytes.len,
+            .source_seal = source_seal,
+            .allocator = allocation_owner,
+            .allocator_ptr_addr = @intFromPtr(allocation_owner.ptr),
+            .allocator_vtable_addr = @intFromPtr(allocation_owner.vtable),
+            .resident_cap = resident_cap,
+            .lifecycle = .prepared,
+        };
+        out.cleanup_digest = appendCleanupDigest(out);
+        out.digest = appendDigest(out);
+        return .prepared;
+    }
+
+    const unread = parser.buf.items[parser.head..];
+    const unread_digest = bytesDigest(unread);
+    const read_digest = bytesDigest(bytes);
+    const doubled_capacity = std.math.mul(
+        usize,
+        @max(parser.buf.capacity, 8),
+        2,
+    ) catch resident_cap;
+    const target_capacity = @min(
+        resident_cap,
+        @max(next_unread_len, doubled_capacity),
+    );
+    const guard = guard_ptr.*;
+    const guard_context_addr = @intFromPtr(guard.context);
+    if (rangesOverlap(guard_context_addr, 1, @intFromPtr(state), @sizeOf(State)) or
+        rangesOverlap(guard_context_addr, 1, @intFromPtr(parser), @sizeOf(framing.FrameParser)) or
+        rangesOverlap(guard_context_addr, 1, @intFromPtr(out), @sizeOf(PreparedRxAppend)) or
+        rangesOverlap(guard_context_addr, 1, bytes_addr, bytes.len) or
+        rangesOverlap(guard_context_addr, 1, parser_backing_addr, parser.buf.capacity))
+        return fail(error.InvalidDescriptor);
+    state.rx_operation_busy = true;
+    const local_before = replacementLocalAuthorityDigest(
+        state,
+        parser,
+        bytes,
+        resident_cap,
+        out,
+        guard,
+    );
+    const authority_before = captureReplacementAuthority(
+        guard,
+        .capture_before_allocate,
+        null,
+        null,
+    ) orelse {
+        return .{ .allocation_quarantined = quarantinePreparedAllocation(
+            state,
+            out,
+            .allocation,
+            0,
+        ) };
+    };
+    if (!replacementLocalAuthorityStillAddressable(
+        state,
+        parser,
+        bytes,
+        resident_cap,
+        out,
+        guard,
+        source_seal,
+        allocation_owner,
+    )) {
+        return .{ .allocation_quarantined = quarantinePreparedAllocation(
+            state,
+            out,
+            .allocation,
+            0,
+        ) };
+    }
+    const local_after_capture = replacementLocalAuthorityDigest(
+        state,
+        parser,
+        bytes,
+        resident_cap,
+        out,
+        guard,
+    );
+    if (!std.mem.eql(u8, &local_before, &local_after_capture)) {
+        return .{ .allocation_quarantined = quarantinePreparedAllocation(
+            state,
+            out,
+            .allocation,
+            0,
+        ) };
+    }
+    const raw_replacement = allocation_owner.rawAlloc(
+        target_capacity,
+        .of(u8),
+        @returnAddress(),
+    );
+    const candidate = if (raw_replacement) |raw| ReplacementCandidate{
+        .addr = @intFromPtr(raw),
+        .len = target_capacity,
+    } else null;
+    const authority_after_allocate = captureReplacementAuthority(
+        guard,
+        .capture_after_allocate,
+        authority_before,
+        candidate,
+    );
+    if (!replacementLocalAuthorityStillAddressable(
+        state,
+        parser,
+        bytes,
+        resident_cap,
+        out,
+        guard,
+        source_seal,
+        allocation_owner,
+    )) {
+        return .{ .allocation_quarantined = quarantinePreparedAllocation(
+            state,
+            out,
+            .allocation,
+            if (candidate) |value| value.len else 0,
+        ) };
+    }
+    const local_after_allocate = replacementLocalAuthorityDigest(
+        state,
+        parser,
+        bytes,
+        resident_cap,
+        out,
+        guard,
+    );
+    if (authority_after_allocate == null or
+        !std.mem.eql(u8, &local_before, &local_after_allocate))
+    {
+        return .{ .allocation_quarantined = quarantinePreparedAllocation(
+            state,
+            out,
+            .allocation,
+            if (candidate) |value| value.len else 0,
+        ) };
+    }
+    if (raw_replacement == null) {
+        state.rx_operation_busy = false;
+        return fail(error.OutOfMemory);
+    }
+    const accepted_seal = authority_after_allocate.?;
+    const replacement_addr = candidate.?.addr;
+    _ = std.math.add(usize, replacement_addr, target_capacity) catch {
+        return .{ .allocation_quarantined = quarantinePreparedAllocation(
+            state,
+            out,
+            .allocation,
+            target_capacity,
+        ) };
+    };
+    if (rangesOverlap(replacement_addr, target_capacity, @intFromPtr(state), @sizeOf(State)) or
+        rangesOverlap(
+            replacement_addr,
+            target_capacity,
+            @intFromPtr(parser),
+            @sizeOf(framing.FrameParser),
+        ) or
+        rangesOverlap(
+            replacement_addr,
+            target_capacity,
+            @intFromPtr(out),
+            @sizeOf(PreparedRxAppend),
+        ) or
+        rangesOverlap(replacement_addr, target_capacity, bytes_addr, bytes.len) or
+        rangesOverlap(
+            replacement_addr,
+            target_capacity,
+            parser_backing_addr,
+            parser.buf.capacity,
+        ) or
+        replacement_addr == @intFromPtr(guard.context) or
+        !validateReplacementCandidate(
+            guard,
+            .validate_allocated,
+            accepted_seal,
+            candidate.?,
+        ))
+    {
+        return .{ .allocation_quarantined = quarantinePreparedAllocation(
+            state,
+            out,
+            .allocation,
+            target_capacity,
+        ) };
+    }
+    const final_seal = captureReplacementAuthority(
+        guard,
+        .capture_after_validate,
+        accepted_seal,
+        candidate,
+    ) orelse {
+        return .{ .allocation_quarantined = quarantinePreparedAllocation(
+            state,
+            out,
+            .allocation,
+            target_capacity,
+        ) };
+    };
+    if (!replacementLocalAuthorityStillAddressable(
+        state,
+        parser,
+        bytes,
+        resident_cap,
+        out,
+        guard,
+        source_seal,
+        allocation_owner,
+    )) {
+        return .{ .allocation_quarantined = quarantinePreparedAllocation(
+            state,
+            out,
+            .allocation,
+            target_capacity,
+        ) };
+    }
+    const local_after_validate = replacementLocalAuthorityDigest(
+        state,
+        parser,
+        bytes,
+        resident_cap,
+        out,
+        guard,
+    );
+    if (!std.mem.eql(u8, &local_before, &local_after_validate)) {
+        return .{ .allocation_quarantined = quarantinePreparedAllocation(
+            state,
+            out,
+            .allocation,
+            target_capacity,
+        ) };
+    }
+    const replacement = raw_replacement.?[0..target_capacity];
+    out.* = .{
+        .saved_self_addr = @intFromPtr(out),
+        .state_addr = @intFromPtr(state),
+        .parser_addr = @intFromPtr(parser),
+        .expected_start = expected_start,
+        .bytes_addr = bytes_addr,
+        .bytes_len = bytes.len,
+        .bytes_digest = read_digest,
+        .source_seal = source_seal,
+        .unread_digest = unread_digest,
+        .allocator = allocation_owner,
+        .allocator_ptr_addr = @intFromPtr(allocation_owner.ptr),
+        .allocator_vtable_addr = @intFromPtr(allocation_owner.vtable),
+        .replacement_addr = replacement_addr,
+        .replacement_len = replacement.len,
+        .final_items_len = next_unread_len,
+        .resident_cap = resident_cap,
+        .replacement = replacement,
+        .cleanup_replacement = replacement,
+        .replacement_guard = guard,
+        .replacement_authority_seal = final_seal,
+        .lifecycle = .prepared,
+    };
+    out.cleanup_digest = appendCleanupDigest(out);
+    out.digest = appendDigest(out);
+    return .prepared;
+}
+
 pub fn prepareAdmit(
     state: *State,
     parser: *framing.FrameParser,
@@ -1084,75 +1722,11 @@ pub fn prepareAdmit(
         return error.InvalidDescriptor;
     const next_items_len = std.math.add(usize, parser.buf.items.len, bytes.len) catch
         return error.ArithmeticOverflow;
-    const needs_replacement = next_items_len > parser.buf.capacity;
+    if (next_items_len > parser.buf.capacity) return error.InvalidState;
     const source_seal = state.rx_provenance.parser_seal;
     const allocation_owner = parser.allocator;
     state.rx_operation_busy = true;
     errdefer state.rx_operation_busy = false;
-    if (!needs_replacement) {
-        out.* = .{
-            .saved_self_addr = @intFromPtr(out),
-            .state_addr = @intFromPtr(state),
-            .parser_addr = @intFromPtr(parser),
-            .expected_start = expected_start,
-            .bytes_addr = bytes_addr,
-            .bytes_len = bytes.len,
-            .source_seal = source_seal,
-            .allocator = allocation_owner,
-            .allocator_ptr_addr = @intFromPtr(allocation_owner.ptr),
-            .allocator_vtable_addr = @intFromPtr(allocation_owner.vtable),
-            .lifecycle = .prepared,
-        };
-        out.cleanup_digest = appendCleanupDigest(out);
-        out.digest = appendDigest(out);
-        return;
-    }
-    const unread = parser.buf.items[parser.head..];
-    const unread_digest = bytesDigest(unread);
-    const read_digest = bytesDigest(bytes);
-    const doubled_capacity = std.math.mul(
-        usize,
-        @max(parser.buf.capacity, 8),
-        2,
-    ) catch resident_cap;
-    const target_capacity = @min(
-        resident_cap,
-        @max(next_unread_len, doubled_capacity),
-    );
-    const replacement = allocation_owner.alloc(u8, target_capacity) catch
-        return error.OutOfMemory;
-    errdefer allocation_owner.free(replacement);
-    if (!parserSealValid(state, parser) or
-        !std.meta.eql(source_seal, state.rx_provenance.parser_seal) or
-        !appendOutputPristine(out) or
-        !std.mem.eql(u8, &unread_digest, &bytesDigest(parser.buf.items[parser.head..])) or
-        !std.mem.eql(u8, &read_digest, &bytesDigest(bytes)))
-        return error.InvalidSeal;
-    const replacement_addr = if (replacement.len == 0) 0 else @intFromPtr(replacement.ptr);
-    _ = std.math.add(usize, replacement_addr, replacement.len) catch
-        return error.InvalidDescriptor;
-    if (replacement.len != target_capacity or replacement.len < next_unread_len or
-        rangesOverlap(replacement_addr, replacement.len, @intFromPtr(state), @sizeOf(State)) or
-        rangesOverlap(
-            replacement_addr,
-            replacement.len,
-            @intFromPtr(parser),
-            @sizeOf(framing.FrameParser),
-        ) or
-        rangesOverlap(
-            replacement_addr,
-            replacement.len,
-            @intFromPtr(out),
-            @sizeOf(PreparedRxAppend),
-        ) or
-        rangesOverlap(replacement_addr, replacement.len, bytes_addr, bytes.len) or
-        rangesOverlap(
-            replacement_addr,
-            replacement.len,
-            parser_backing_addr,
-            parser.buf.capacity,
-        ))
-        return error.InvalidDescriptor;
     out.* = .{
         .saved_self_addr = @intFromPtr(out),
         .state_addr = @intFromPtr(state),
@@ -1160,17 +1734,11 @@ pub fn prepareAdmit(
         .expected_start = expected_start,
         .bytes_addr = bytes_addr,
         .bytes_len = bytes.len,
-        .bytes_digest = read_digest,
         .source_seal = source_seal,
-        .unread_digest = unread_digest,
         .allocator = allocation_owner,
         .allocator_ptr_addr = @intFromPtr(allocation_owner.ptr),
         .allocator_vtable_addr = @intFromPtr(allocation_owner.vtable),
-        .replacement_addr = replacement_addr,
-        .replacement_len = replacement.len,
-        .final_items_len = next_unread_len,
-        .replacement = replacement,
-        .cleanup_replacement = replacement,
+        .resident_cap = resident_cap,
         .lifecycle = .prepared,
     };
     out.cleanup_digest = appendCleanupDigest(out);
@@ -1185,65 +1753,561 @@ fn commitAdmitUnchecked(
 ) void {
     if (!appendPreparedValid(state, parser, bytes, prepared))
         @panic("invalid prepared RX append");
+    if (prepared.replacement != null or
+        prepared.cleanup_replacement != null or
+        prepared.replacement_len != 0 or
+        prepared.replacement_guard != null)
+        @panic("guarded RX append entered callback-free commit");
     const next_absolute = std.math.add(
         u64,
         state.rx_provenance.rx_absolute_next,
         @as(u64, @intCast(bytes.len)),
     ) catch @panic("RX append counter overflow");
-    if (prepared.replacement) |replacement| {
-        const unread = parser.buf.items[parser.head..];
-        @memcpy(replacement[0..unread.len], unread);
-        @memcpy(replacement[unread.len..prepared.final_items_len], bytes);
-        var old = parser.buf;
-        const cleanup_allocator = prepared.allocator;
-        parser.buf = .{
-            .items = replacement[0..prepared.final_items_len],
-            .capacity = replacement.len,
-        };
-        parser.head = 0;
-        prepared.replacement = null;
-        prepared.cleanup_replacement = null;
-        prepared.lifecycle = .committed;
-        state.rx_provenance.rx_absolute_next = next_absolute;
-        if (!resealParserAuthority(state, parser)) @panic("RX append reseal failed");
-        // The old-backing free is the only callback in this suffix. Freeze the newly published
-        // descriptor/scalars and restore them after the callback so re-entry cannot leave a
-        // half-valid authority record. Never reread the prepared token after the callback.
-        const frozen_buf = parser.buf;
-        const frozen_head = parser.head;
-        const frozen_provenance = state.rx_provenance;
-        const frozen_allocator = parser.allocator;
-        const frozen_expected_major = parser.expected_major;
-        const frozen_content_digest = bytesDigest(frozen_buf.items);
-        old.deinit(cleanup_allocator);
-        const descriptor_matches =
-            @intFromPtr(parser.allocator.ptr) == @intFromPtr(frozen_allocator.ptr) and
-            @intFromPtr(parser.allocator.vtable) == @intFromPtr(frozen_allocator.vtable) and
-            parser.expected_major == frozen_expected_major and
-            parser.head == frozen_head and
-            parser.buf.capacity == frozen_buf.capacity and
-            parser.buf.items.len == frozen_buf.items.len and
-            (parser.buf.capacity == 0 or
-                @intFromPtr(parser.buf.items.ptr) == @intFromPtr(frozen_buf.items.ptr)) and
-            std.meta.eql(state.rx_provenance, frozen_provenance);
-        if (!descriptor_matches or
-            !std.mem.eql(u8, &frozen_content_digest, &bytesDigest(frozen_buf.items)))
-        {
-            // The final allocation may have been invalidated by hostile callback code. Do not
-            // resurrect or free a possibly dangling descriptor; quarantine at most resident-cap
-            // bytes and make every later RX entry fail closed.
-            parser.allocator = frozen_allocator;
-            parser.expected_major = frozen_expected_major;
-            parser.buf = .empty;
-            parser.head = 0;
-            state.rx_provenance = .{ .lifecycle = .terminal };
-        }
-        return;
-    }
     parser.buf.appendSliceAssumeCapacity(bytes);
     state.rx_provenance.rx_absolute_next = next_absolute;
     if (!resealParserAuthority(state, parser)) @panic("RX append reseal failed");
     prepared.lifecycle = .committed;
+}
+
+const GuardedSourceSnapshot = struct {
+    provenance: RxProvenance,
+    saved_flags: c_int,
+    tx_items_addr: usize,
+    tx_items_len: usize,
+    tx_capacity: usize,
+    tx_bytes: usize,
+    allocator: std.mem.Allocator,
+    expected_major: u16,
+    items_addr: usize,
+    items_len: usize,
+    capacity: usize,
+    head: usize,
+    content_digest: owner_seal.Digest,
+
+    fn capture(
+        state: *const State,
+        parser: *const framing.FrameParser,
+    ) GuardedSourceSnapshot {
+        return .{
+            .provenance = state.rx_provenance,
+            .saved_flags = state.saved_flags,
+            .tx_items_addr = if (state.external_tx.capacity == 0) 0 else @intFromPtr(state.external_tx.items.ptr),
+            .tx_items_len = state.external_tx.items.len,
+            .tx_capacity = state.external_tx.capacity,
+            .tx_bytes = state.external_tx_bytes,
+            .allocator = parser.allocator,
+            .expected_major = parser.expected_major,
+            .items_addr = if (parser.buf.capacity == 0) 0 else @intFromPtr(parser.buf.items.ptr),
+            .items_len = parser.buf.items.len,
+            .capacity = parser.buf.capacity,
+            .head = parser.head,
+            .content_digest = bytesDigest(parser.buf.items),
+        };
+    }
+
+    fn writeDigest(
+        self: GuardedSourceSnapshot,
+        writer: *owner_seal.Writer,
+    ) void {
+        writer.writeUsize(@as(usize, @as(u32, @bitCast(self.saved_flags))));
+        writer.writeUsize(self.tx_items_addr);
+        writer.writeUsize(self.tx_items_len);
+        writer.writeUsize(self.tx_capacity);
+        writer.writeUsize(self.tx_bytes);
+        if (self.provenance.identity) |identity| {
+            writer.writeUsize(1);
+            writer.writeU64(identity.attach_instance_id);
+            writer.writeUsize(identity.destination_slot_addr);
+        } else {
+            writer.writeUsize(0);
+            writer.writeU64(0);
+            writer.writeUsize(0);
+        }
+        writer.writeUsize(self.provenance.destination_slot_len);
+        writer.writeU64(self.provenance.rx_absolute_next);
+        writer.writeU64(self.provenance.buffer_start_absolute);
+        writer.writeUsize(self.provenance.resident_cap);
+        writer.writeUsize(@intFromEnum(self.provenance.lifecycle));
+        writer.writeBytes(&self.provenance.parser_seal.digest);
+        writer.writeUsize(@intFromPtr(self.allocator.ptr));
+        writer.writeUsize(@intFromPtr(self.allocator.vtable));
+        writer.writeU16(self.expected_major);
+        writer.writeUsize(self.items_addr);
+        writer.writeUsize(self.items_len);
+        writer.writeUsize(self.capacity);
+        writer.writeUsize(self.head);
+        writer.writeBytes(&self.content_digest);
+    }
+
+    fn matches(
+        self: GuardedSourceSnapshot,
+        state: *const State,
+        parser: *const framing.FrameParser,
+        expect_terminal: bool,
+    ) bool {
+        const provenance_matches = if (expect_terminal)
+            std.meta.eql(
+                state.rx_provenance,
+                RxProvenance{ .lifecycle = .terminal },
+            )
+        else
+            std.meta.eql(state.rx_provenance, self.provenance);
+        return provenance_matches and
+            state.saved_flags == self.saved_flags and
+            state.external_tx.items.len == self.tx_items_len and
+            state.external_tx.capacity == self.tx_capacity and
+            state.external_tx_bytes == self.tx_bytes and
+            (self.tx_capacity == 0 or
+                @intFromPtr(state.external_tx.items.ptr) == self.tx_items_addr) and
+            @intFromPtr(parser.allocator.ptr) == @intFromPtr(self.allocator.ptr) and
+            @intFromPtr(parser.allocator.vtable) == @intFromPtr(self.allocator.vtable) and
+            parser.expected_major == self.expected_major and
+            parser.buf.items.len == self.items_len and
+            parser.buf.capacity == self.capacity and
+            parser.head == self.head and
+            (self.capacity == 0 or @intFromPtr(parser.buf.items.ptr) == self.items_addr) and
+            std.mem.eql(u8, &self.content_digest, &bytesDigest(parser.buf.items));
+    }
+};
+
+const GuardedCleanupResult = union(enum) {
+    freed_clean,
+    quarantined_without_free: usize,
+    freed_with_drift: usize,
+};
+
+pub const max_guarded_admit_quarantine_bytes: usize =
+    2 * (protocol.max_binary_chunk + protocol.header_size);
+
+fn guardedQuarantineUpperBound(prepared: *const PreparedRxAppend) usize {
+    const hard_cap = protocol.max_binary_chunk + protocol.header_size;
+    if (!guardedPreparedCleanupAuthority(prepared) or
+        prepared.resident_cap == 0 or prepared.resident_cap > hard_cap)
+        return hard_cap;
+    return @min(prepared.replacement_len, prepared.resident_cap);
+}
+
+fn guardedCleanupQuarantineUpperBound(
+    replacement_upper_bound: usize,
+    source_upper_bound: usize,
+) usize {
+    return @min(
+        std.math.add(
+            usize,
+            replacement_upper_bound,
+            source_upper_bound,
+        ) catch max_guarded_admit_quarantine_bytes,
+        max_guarded_admit_quarantine_bytes,
+    );
+}
+
+fn guardedPreparedCleanupAuthority(
+    prepared: *const PreparedRxAppend,
+) bool {
+    if (prepared.lifecycle != .prepared or
+        prepared.saved_self_addr != @intFromPtr(prepared) or
+        prepared.replacement == null or
+        prepared.replacement_guard == null or
+        !replacementSealValid(prepared.replacement_authority_seal) or
+        prepared.resident_cap == 0 or
+        prepared.replacement_len == 0 or
+        prepared.replacement_len > prepared.resident_cap or
+        !std.mem.eql(u8, &prepared.digest, &appendDigest(prepared)))
+        return false;
+    return canonicalAppendReplacement(prepared) != null;
+}
+
+const FrozenReplacementCleanup = struct {
+    replacement: []u8,
+    allocator: std.mem.Allocator,
+    guard: ReplacementAllocationGuard,
+    candidate: ReplacementCandidate,
+    authority_seal: ReplacementAuthoritySeal,
+    source: GuardedSourceSnapshot,
+
+    fn capture(
+        state: *const State,
+        parser: *const framing.FrameParser,
+        prepared: *const PreparedRxAppend,
+        frozen_source: ?GuardedSourceSnapshot,
+    ) ?FrozenReplacementCleanup {
+        if (!guardedPreparedCleanupAuthority(prepared)) return null;
+        return .{
+            .replacement = canonicalAppendReplacement(prepared) orelse return null,
+            .allocator = prepared.allocator,
+            .guard = prepared.replacement_guard.?,
+            .candidate = .{
+                .addr = prepared.replacement_addr,
+                .len = prepared.replacement_len,
+            },
+            .authority_seal = prepared.replacement_authority_seal,
+            .source = frozen_source orelse GuardedSourceSnapshot.capture(state, parser),
+        };
+    }
+
+    fn sourceQuarantineUpperBound(self: FrozenReplacementCleanup) usize {
+        return @min(
+            self.source.capacity,
+            protocol.max_binary_chunk + protocol.header_size,
+        );
+    }
+};
+
+fn executeFrozenReplacementCleanup(
+    state: *State,
+    parser: *framing.FrameParser,
+    prepared: *PreparedRxAppend,
+    frozen: FrozenReplacementCleanup,
+) GuardedCleanupResult {
+    // From this point every callback observes only a tombstone and terminal-busy source. The
+    // suffix never reads `prepared` again; all allocator and guard authority lives in `frozen`.
+    prepared.* = .{ .lifecycle = .aborted };
+    state.rx_provenance = .{ .lifecycle = .terminal };
+    const cleanup_seal = captureReplacementAuthority(
+        frozen.guard,
+        .capture_before_cleanup,
+        frozen.authority_seal,
+        frozen.candidate,
+    ) orelse {
+        const source_upper_bound = if (frozen.source.matches(state, parser, true))
+            0
+        else
+            frozen.sourceQuarantineUpperBound();
+        prepared.* = .{ .lifecycle = .aborted };
+        state.rx_operation_busy = false;
+        return .{ .quarantined_without_free = guardedCleanupQuarantineUpperBound(
+            @min(
+                frozen.replacement.len,
+                protocol.max_binary_chunk + protocol.header_size,
+            ),
+            source_upper_bound,
+        ) };
+    };
+    const source_clean_before_free = frozen.source.matches(state, parser, true);
+    frozen.allocator.rawFree(
+        frozen.replacement,
+        .of(u8),
+        @returnAddress(),
+    );
+    const accepted_after = validateReplacementCandidate(
+        frozen.guard,
+        .validate_after_cleanup,
+        cleanup_seal,
+        frozen.candidate,
+    );
+    const final_seal = if (accepted_after)
+        captureReplacementAuthority(
+            frozen.guard,
+            .capture_after_cleanup_validate,
+            cleanup_seal,
+            frozen.candidate,
+        )
+    else
+        null;
+    const source_matches =
+        source_clean_before_free and frozen.source.matches(state, parser, true);
+    if (!accepted_after or final_seal == null or !source_matches) {
+        prepared.* = .{ .lifecycle = .aborted };
+        parser.allocator = frozen.source.allocator;
+        parser.expected_major = frozen.source.expected_major;
+        parser.buf = .empty;
+        parser.head = 0;
+        state.rx_provenance = .{ .lifecycle = .terminal };
+        state.rx_operation_busy = false;
+        return .{ .freed_with_drift = frozen.sourceQuarantineUpperBound() };
+    }
+    prepared.* = .{ .lifecycle = .aborted };
+    state.rx_provenance = frozen.source.provenance;
+    state.rx_operation_busy = false;
+    return .freed_clean;
+}
+
+fn cleanupGuardedPreparedReplacement(
+    state: *State,
+    parser: *framing.FrameParser,
+    prepared: *PreparedRxAppend,
+    frozen_source: ?GuardedSourceSnapshot,
+) GuardedCleanupResult {
+    if (!state.rx_operation_busy) {
+        const upper_bound = guardedQuarantineUpperBound(prepared);
+        prepared.* = .{ .lifecycle = .quarantined };
+        state.rx_provenance = .{ .lifecycle = .terminal };
+        state.rx_operation_busy = false;
+        return .{ .quarantined_without_free = upper_bound };
+    }
+    const frozen = FrozenReplacementCleanup.capture(
+        state,
+        parser,
+        prepared,
+        frozen_source,
+    ) orelse {
+        const upper_bound = guardedQuarantineUpperBound(prepared);
+        prepared.* = .{ .lifecycle = .quarantined };
+        state.rx_provenance = .{ .lifecycle = .terminal };
+        state.rx_operation_busy = false;
+        return .{ .quarantined_without_free = upper_bound };
+    };
+    return executeFrozenReplacementCleanup(state, parser, prepared, frozen);
+}
+
+fn quarantineCommitBeforePublication(
+    state: *State,
+    parser: *framing.FrameParser,
+    prepared: *PreparedRxAppend,
+    replacement_upper_bound: usize,
+    frozen_source: ?GuardedSourceSnapshot,
+) GuardedAdmitCommitOutcome {
+    const frozen = FrozenReplacementCleanup.capture(
+        state,
+        parser,
+        prepared,
+        frozen_source,
+    ) orelse {
+        prepared.* = .{ .lifecycle = .quarantined };
+        state.rx_provenance = .{ .lifecycle = .terminal };
+        state.rx_operation_busy = false;
+        return .{ .allocation_quarantined = .{
+            .phase = .commit_cleanup,
+            .quarantined_bytes_upper_bound = replacement_upper_bound,
+        } };
+    };
+    return quarantineFrozenCommitBeforePublication(
+        state,
+        parser,
+        prepared,
+        frozen,
+    );
+}
+
+fn quarantineFrozenCommitBeforePublication(
+    state: *State,
+    parser: *framing.FrameParser,
+    prepared: *PreparedRxAppend,
+    frozen: FrozenReplacementCleanup,
+) GuardedAdmitCommitOutcome {
+    const cleanup = executeFrozenReplacementCleanup(state, parser, prepared, frozen);
+    state.rx_provenance = .{ .lifecycle = .terminal };
+    state.rx_operation_busy = false;
+    return switch (cleanup) {
+        .freed_clean => .{ .allocation_quarantined = .{
+            .phase = .commit_cleanup,
+            .quarantined_bytes_upper_bound = 0,
+        } },
+        .freed_with_drift => |upper_bound| .{ .allocation_quarantined = .{
+            .phase = .commit_cleanup,
+            .quarantined_bytes_upper_bound = upper_bound,
+        } },
+        .quarantined_without_free => |upper_bound| .{ .allocation_quarantined = .{
+            .phase = .commit_cleanup,
+            .quarantined_bytes_upper_bound = upper_bound,
+        } },
+    };
+}
+
+pub fn abortPreparedAdmitGuarded(
+    state: *State,
+    parser: *framing.FrameParser,
+    prepared: *PreparedRxAppend,
+) GuardedAdmitAbortOutcome {
+    if (!state.rx_operation_busy or
+        prepared.saved_self_addr != @intFromPtr(prepared) or
+        prepared.state_addr != @intFromPtr(state) or
+        prepared.parser_addr != @intFromPtr(parser))
+        return .{ .ordinary_failure = .{ .reason = error.InvalidState } };
+    if (!appendPreparedTokenAuthenticated(state, parser, prepared)) {
+        return .{ .allocation_quarantined = quarantinePreparedAllocation(
+            state,
+            prepared,
+            .abort_cleanup,
+            protocol.max_binary_chunk + protocol.header_size,
+        ) };
+    }
+    const has_replacement_evidence = prepared.replacement != null or
+        prepared.cleanup_replacement != null or
+        prepared.replacement_len != 0 or
+        prepared.replacement_guard != null;
+    if (!has_replacement_evidence) {
+        if (prepared.expected_start != state.rx_provenance.rx_absolute_next or
+            !std.meta.eql(prepared.source_seal, state.rx_provenance.parser_seal) or
+            !parserSealValid(state, parser))
+        {
+            return .{ .allocation_quarantined = quarantinePreparedAllocation(
+                state,
+                prepared,
+                .abort_cleanup,
+                0,
+            ) };
+        }
+        prepared.* = .{ .lifecycle = .aborted };
+        state.rx_operation_busy = false;
+        return .aborted;
+    }
+    return switch (cleanupGuardedPreparedReplacement(state, parser, prepared, null)) {
+        .freed_clean => .aborted,
+        .quarantined_without_free => |cleanup_upper_bound| .{ .allocation_quarantined = .{
+            .phase = .abort_cleanup,
+            .quarantined_bytes_upper_bound = cleanup_upper_bound,
+        } },
+        .freed_with_drift => |source_upper_bound| .{ .allocation_quarantined = .{
+            .phase = .abort_cleanup,
+            .quarantined_bytes_upper_bound = source_upper_bound,
+        } },
+    };
+}
+
+pub fn commitPreparedAdmitGuarded(
+    state: *State,
+    parser: *framing.FrameParser,
+    bytes: []const u8,
+    prepared: *PreparedRxAppend,
+) GuardedAdmitCommitOutcome {
+    if (!state.rx_operation_busy or
+        prepared.saved_self_addr != @intFromPtr(prepared) or
+        prepared.state_addr != @intFromPtr(state) or
+        prepared.parser_addr != @intFromPtr(parser))
+        return .{ .ordinary_failure = .{ .reason = error.InvalidState } };
+    if (!appendPreparedTokenAuthenticated(state, parser, prepared)) {
+        return .{ .allocation_quarantined = quarantinePreparedAllocation(
+            state,
+            prepared,
+            .commit_cleanup,
+            protocol.max_binary_chunk + protocol.header_size,
+        ) };
+    }
+    const has_replacement_evidence = prepared.replacement != null or
+        prepared.cleanup_replacement != null or
+        prepared.replacement_len != 0 or
+        prepared.replacement_guard != null;
+    if (!has_replacement_evidence) {
+        if (!appendPreparedValid(state, parser, bytes, prepared)) {
+            prepared.* = .{ .lifecycle = .quarantined };
+            state.rx_provenance = .{ .lifecycle = .terminal };
+            state.rx_operation_busy = false;
+            return .{ .allocation_quarantined = .{
+                .phase = .commit_cleanup,
+                .quarantined_bytes_upper_bound = 0,
+            } };
+        }
+        commitPreparedAdmit(state, parser, bytes, prepared) catch
+            @panic("validated callback-free RX append commit failed");
+        return .committed;
+    }
+    const replacement_upper_bound = guardedQuarantineUpperBound(prepared);
+    if (!appendPreparedValid(state, parser, bytes, prepared)) {
+        return quarantineCommitBeforePublication(
+            state,
+            parser,
+            prepared,
+            replacement_upper_bound,
+            null,
+        );
+    }
+
+    const frozen = FrozenReplacementCleanup.capture(
+        state,
+        parser,
+        prepared,
+        null,
+    ) orelse {
+        const quarantine = quarantinePreparedAllocation(
+            state,
+            prepared,
+            .commit_cleanup,
+            replacement_upper_bound,
+        );
+        return .{ .allocation_quarantined = quarantine };
+    };
+    const next_absolute = std.math.add(
+        u64,
+        state.rx_provenance.rx_absolute_next,
+        @as(u64, @intCast(bytes.len)),
+    ) catch return quarantineCommitBeforePublication(
+        state,
+        parser,
+        prepared,
+        replacement_upper_bound,
+        null,
+    );
+    const final_items_len = prepared.final_items_len;
+    const input_digest = bytesDigest(bytes);
+    const old_candidate = if (frozen.source.capacity == 0) null else ReplacementCandidate{
+        .addr = frozen.source.items_addr,
+        .len = frozen.source.capacity,
+    };
+    // Consume every prepared authority before the first cleanup callback. The entire commit and
+    // replacement-abort plans now live in stack-local `frozen` values.
+    prepared.* = .{ .lifecycle = .committed };
+    state.rx_provenance = .{ .lifecycle = .terminal };
+    const cleanup_seal = captureReplacementAuthority(
+        frozen.guard,
+        .capture_before_cleanup,
+        frozen.authority_seal,
+        old_candidate,
+    ) orelse return quarantineFrozenCommitBeforePublication(
+        state,
+        parser,
+        prepared,
+        frozen,
+    );
+    if (!frozen.source.matches(state, parser, true) or
+        !std.mem.eql(u8, &input_digest, &bytesDigest(bytes)))
+        return quarantineFrozenCommitBeforePublication(
+            state,
+            parser,
+            prepared,
+            frozen,
+        );
+    state.rx_provenance = frozen.source.provenance;
+    const unread = parser.buf.items[parser.head..];
+    @memcpy(frozen.replacement[0..unread.len], unread);
+    @memcpy(frozen.replacement[unread.len..final_items_len], bytes);
+    var old = parser.buf;
+    parser.buf = .{
+        .items = frozen.replacement[0..final_items_len],
+        .capacity = frozen.replacement.len,
+    };
+    parser.head = 0;
+    state.rx_provenance.rx_absolute_next = next_absolute;
+    if (!resealParserAuthority(state, parser))
+        @panic("guarded RX append no-callback reseal failed");
+    const published = GuardedSourceSnapshot.capture(state, parser);
+    state.rx_provenance = .{ .lifecycle = .terminal };
+    old.deinit(frozen.allocator);
+    const cleanup_ok = if (old_candidate) |candidate|
+        validateReplacementCandidate(
+            frozen.guard,
+            .validate_after_cleanup,
+            cleanup_seal,
+            candidate,
+        )
+    else
+        true;
+    const final_seal = if (cleanup_ok)
+        captureReplacementAuthority(
+            frozen.guard,
+            .capture_after_cleanup_validate,
+            cleanup_seal,
+            old_candidate,
+        )
+    else
+        null;
+    if (!cleanup_ok or final_seal == null or !published.matches(state, parser, true)) {
+        prepared.* = .{ .lifecycle = .committed };
+        parser.allocator = published.allocator;
+        parser.expected_major = published.expected_major;
+        parser.buf = .empty;
+        parser.head = 0;
+        state.rx_provenance = .{ .lifecycle = .terminal };
+        state.rx_operation_busy = false;
+        return .{ .post_commit_quarantined = .{
+            .phase = .commit_cleanup,
+            .quarantined_bytes_upper_bound = replacement_upper_bound,
+        } };
+    }
+    prepared.* = .{ .lifecycle = .committed };
+    state.rx_provenance = published.provenance;
+    state.rx_operation_busy = false;
+    return .committed;
 }
 
 pub fn commitPreparedAdmit(
@@ -1252,6 +2316,11 @@ pub fn commitPreparedAdmit(
     bytes: []const u8,
     prepared: *PreparedRxAppend,
 ) RxPrepareError!void {
+    if (prepared.replacement != null or
+        prepared.cleanup_replacement != null or
+        prepared.replacement_len != 0 or
+        prepared.replacement_guard != null)
+        return error.InvalidState;
     if (!appendPreparedValid(state, parser, bytes, prepared))
         return error.InvalidSeal;
     // No allocation, callback or outer action is permitted below this ReleaseFast validation.
@@ -1266,7 +2335,11 @@ pub fn abortPreparedAdmit(
     if (!state.rx_operation_busy or
         prepared.lifecycle != .prepared or
         prepared.saved_self_addr != @intFromPtr(prepared) or
-        prepared.state_addr != @intFromPtr(state))
+        prepared.state_addr != @intFromPtr(state) or
+        prepared.replacement != null or
+        prepared.cleanup_replacement != null or
+        prepared.replacement_len != 0 or
+        prepared.replacement_guard != null)
         return error.InvalidState;
     prepared.deinitInternal();
     state.rx_operation_busy = false;
@@ -1943,23 +3016,1230 @@ fn bindParserForTest(
     );
 }
 
+fn setResidentCapForTest(
+    state: *State,
+    parser: *const framing.FrameParser,
+    resident_cap: usize,
+) !void {
+    if (state.rx_provenance.resident_cap == resident_cap) return;
+    try std.testing.expect(testing.forgeResealedResidentCap(
+        state,
+        parser,
+        resident_cap,
+    ));
+}
+
 fn admitForTest(
     state: *State,
     parser: *framing.FrameParser,
     bytes: []const u8,
     resident_cap: usize,
 ) !void {
+    try setResidentCapForTest(state, parser, resident_cap);
+    var guard_context = TestReplacementGuard{};
+    const guard = guard_context.guard();
     var prepared: PreparedRxAppend = .{};
-    defer prepared.deinitInternal();
-    try prepareAdmit(
+    if (prepareAdmitGuarded(
         state,
         parser,
         bytes,
         state.rx_provenance.rx_absolute_next,
         resident_cap,
+        &guard,
+        &prepared,
+    ) != .prepared) return error.TestUnexpectedResult;
+    if (commitPreparedAdmitGuarded(state, parser, bytes, &prepared) != .committed)
+        return error.TestUnexpectedResult;
+}
+
+const TestReplacementGuard = struct {
+    const Fault = enum {
+        none,
+        wrong_capture_tag,
+        zero_after_allocate,
+        drift_after_allocate,
+    };
+
+    calls: usize = 0,
+    reject_phase: ?ReplacementGuardPhase = null,
+    state: ?*State = null,
+    parser: ?*framing.FrameParser = null,
+    prepared: ?*PreparedRxAppend = null,
+    reenter: bool = false,
+    blocked_reentries: usize = 0,
+    mutate_parser_phase: ?ReplacementGuardPhase = null,
+    mutate_prepared_phase: ?ReplacementGuardPhase = null,
+    fault: Fault = .none,
+    seal: ReplacementAuthoritySeal = .{
+        .generation = 1,
+        .digest = [_]u8{0x5a} ** 32,
+    },
+
+    fn check(
+        raw: *anyopaque,
+        phase: ReplacementGuardPhase,
+        expected: ?ReplacementAuthoritySeal,
+        candidate: ?ReplacementCandidate,
+    ) ReplacementGuardResult {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        self.calls += 1;
+        if (self.reenter) {
+            if (maxReadable(self.state.?, self.parser.?, 1, 1) == .invalid)
+                self.blocked_reentries += 1;
+        }
+        if (self.mutate_parser_phase == phase) self.parser.?.head +%= 1;
+        if (self.mutate_prepared_phase == phase) {
+            self.prepared.?.replacement = null;
+            self.prepared.?.cleanup_replacement = null;
+            self.prepared.?.allocator = pristine_rx_append_allocator;
+            self.prepared.?.digest = [_]u8{0} ** 32;
+        }
+        if (self.reject_phase == phase) return .quarantined;
+        if (self.fault == .wrong_capture_tag and
+            phase == .capture_before_allocate)
+            return .{ .accepted = self.seal };
+        if (self.fault == .zero_after_allocate and
+            phase == .capture_after_allocate)
+            return .{ .seal = .{} };
+        if (self.fault == .drift_after_allocate and
+            phase == .capture_after_allocate)
+        {
+            var drifted = self.seal;
+            drifted.generation += 1;
+            return .{ .seal = drifted };
+        }
+        return switch (phase) {
+            .capture_before_allocate,
+            .capture_after_allocate,
+            .capture_after_validate,
+            .capture_before_cleanup,
+            .capture_after_cleanup_validate,
+            => .{ .seal = self.seal },
+            .validate_allocated, .validate_after_cleanup => if (expected != null and
+                std.meta.eql(expected.?, self.seal) and candidate != null)
+                .{ .accepted = self.seal }
+            else
+                .quarantined,
+        };
+    }
+
+    fn guard(self: *@This()) ReplacementAllocationGuard {
+        return .{ .context = self, .check = check };
+    }
+};
+
+const GuardedAdmitTestAllocator = struct {
+    child: std.mem.Allocator,
+    mode: enum {
+        normal,
+        oom,
+        oom_mutate_state,
+        alias,
+        overflow_address,
+        mutate_parser_after_free,
+    } = .normal,
+    state: ?*State = null,
+    parser: ?*framing.FrameParser = null,
+    alias_addr: usize = 0,
+    alloc_calls: usize = 0,
+    free_calls: usize = 0,
+    reenter: bool = false,
+    blocked_reentries: usize = 0,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    fn alloc(
+        raw: *anyopaque,
+        len: usize,
+        alignment: std.mem.Alignment,
+        return_address: usize,
+    ) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        self.alloc_calls += 1;
+        if (self.reenter and
+            maxReadable(self.state.?, self.parser.?, 1, 1) == .invalid)
+            self.blocked_reentries += 1;
+        return switch (self.mode) {
+            .oom => null,
+            .oom_mutate_state => blk: {
+                self.state.?.saved_flags +%= 1;
+                break :blk null;
+            },
+            .alias => @ptrFromInt(self.alias_addr),
+            .overflow_address => @ptrFromInt(std.math.maxInt(usize) - 1),
+            else => self.child.rawAlloc(len, alignment, return_address),
+        };
+    }
+
+    fn resize(
+        _: *anyopaque,
+        _: []u8,
+        _: std.mem.Alignment,
+        _: usize,
+        _: usize,
+    ) bool {
+        return false;
+    }
+
+    fn remap(
+        _: *anyopaque,
+        _: []u8,
+        _: std.mem.Alignment,
+        _: usize,
+        _: usize,
+    ) ?[*]u8 {
+        return null;
+    }
+
+    fn free(
+        raw: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        return_address: usize,
+    ) void {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        self.free_calls += 1;
+        if (self.reenter and
+            maxReadable(self.state.?, self.parser.?, 1, 1) == .invalid)
+            self.blocked_reentries += 1;
+        self.child.rawFree(memory, alignment, return_address);
+        if (self.mode == .mutate_parser_after_free) {
+            self.parser.?.head +%= 1;
+        }
+    }
+
+    const vtable: std.mem.Allocator.VTable = .{
+        .alloc = alloc,
+        .resize = resize,
+        .remap = remap,
+        .free = free,
+    };
+};
+
+fn exactParserForGuardedAdmitTest(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+) !framing.FrameParser {
+    var parser = framing.FrameParser.init(allocator);
+    if (bytes.len == 0) return parser;
+    const backing = try allocator.alloc(u8, bytes.len);
+    @memcpy(backing, bytes);
+    parser.buf = .{ .items = backing, .capacity = backing.len };
+    return parser;
+}
+
+test "guarded RX admit accepts a sealed disjoint replacement and returns typed commit" {
+    var state = State{ .saved_flags = 7 };
+    defer state.deinit(std.testing.allocator);
+    var parser = framing.FrameParser.init(std.testing.allocator);
+    defer parser.deinit();
+    try parser.push("abc");
+    var destination_slot: usize = 0;
+    try bindParserForTest(&state, &parser, 301, &destination_slot);
+    try setResidentCapForTest(&state, &parser, 6);
+    var guard_context = TestReplacementGuard{};
+    const guard = guard_context.guard();
+    var prepared: PreparedRxAppend = .{};
+    try std.testing.expectEqual(
+        GuardedAdmitPrepareOutcome.prepared,
+        prepareAdmitGuarded(
+            &state,
+            &parser,
+            "def",
+            state.rx_provenance.rx_absolute_next,
+            6,
+            &guard,
+            &prepared,
+        ),
+    );
+    try std.testing.expectEqual(
+        GuardedAdmitCommitOutcome.committed,
+        commitPreparedAdmitGuarded(&state, &parser, "def", &prepared),
+    );
+    try std.testing.expectEqualStrings("abcdef", parser.buf.items);
+    try std.testing.expectEqual(@as(u64, 6), state.rx_provenance.rx_absolute_next);
+    try std.testing.expect(parserSealValid(&state, &parser));
+    try std.testing.expect(!state.rx_operation_busy);
+}
+
+test "guarded RX admit spare-capacity path invokes no guard callback" {
+    var state = State{ .saved_flags = 7 };
+    defer state.deinit(std.testing.allocator);
+    var parser = framing.FrameParser.init(std.testing.allocator);
+    defer parser.deinit();
+    var destination_slot: usize = 0;
+    try bindParserForTest(&state, &parser, 302, &destination_slot);
+    try parser.buf.ensureTotalCapacityPrecise(parser.allocator, 8);
+    try std.testing.expect(resealParserAuthority(&state, &parser));
+    try setResidentCapForTest(&state, &parser, 8);
+    var guard_context = TestReplacementGuard{};
+    const guard = guard_context.guard();
+    var prepared: PreparedRxAppend = .{};
+    try std.testing.expect(
+        prepareAdmitGuarded(&state, &parser, "xy", 0, 8, &guard, &prepared) ==
+            .prepared,
+    );
+    try std.testing.expectEqual(@as(usize, 0), guard_context.calls);
+    try std.testing.expect(
+        commitPreparedAdmitGuarded(&state, &parser, "xy", &prepared) ==
+            .committed,
+    );
+    try std.testing.expectEqual(@as(usize, 0), guard_context.calls);
+    try std.testing.expectEqualStrings("xy", parser.buf.items);
+}
+
+test "guarded RX admit rejects invalid or unsealed resident caps before callbacks" {
+    var state = State{ .saved_flags = 7 };
+    defer state.deinit(std.testing.allocator);
+    var parser = framing.FrameParser.init(std.testing.allocator);
+    defer parser.deinit();
+    var destination_slot: usize = 0;
+    try bindParserForTest(&state, &parser, 312, &destination_slot);
+    var guard_context = TestReplacementGuard{};
+    const guard = guard_context.guard();
+    inline for (.{ @as(usize, 0), protocol.max_binary_chunk + protocol.header_size + 1, 7 }) |cap| {
+        var prepared: PreparedRxAppend = .{};
+        const outcome = prepareAdmitGuarded(
+            &state,
+            &parser,
+            "",
+            0,
+            cap,
+            &guard,
+            &prepared,
+        );
+        switch (outcome) {
+            .ordinary_failure => {},
+            else => return error.TestUnexpectedResult,
+        }
+        try std.testing.expect(preparedRxAppendPristine(&prepared));
+    }
+    try std.testing.expectEqual(@as(usize, 0), guard_context.calls);
+    try std.testing.expect(parserSealValid(&state, &parser));
+}
+
+test "guarded RX admit never frees an allocator alias and reports it once" {
+    var backing: [256]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&backing);
+    var allocation_context = GuardedAdmitTestAllocator{
+        .child = fba.allocator(),
+    };
+    const allocator = allocation_context.allocator();
+    var state = State{ .saved_flags = 7 };
+    defer state.deinit(allocator);
+    allocation_context.state = &state;
+    var parser = try exactParserForGuardedAdmitTest(allocator, "abc");
+    defer parser.deinit();
+    allocation_context.parser = &parser;
+    var destination_slot: usize = 0;
+    try bindParserForTest(&state, &parser, 303, &destination_slot);
+    try setResidentCapForTest(&state, &parser, 6);
+    allocation_context.alias_addr = @intFromPtr(&state);
+    allocation_context.mode = .alias;
+    const frees_before = allocation_context.free_calls;
+    var guard_context = TestReplacementGuard{};
+    const guard = guard_context.guard();
+    var prepared: PreparedRxAppend = .{};
+    const outcome = prepareAdmitGuarded(
+        &state,
+        &parser,
+        "def",
+        3,
+        6,
+        &guard,
         &prepared,
     );
-    try commitPreparedAdmit(state, parser, bytes, &prepared);
+    switch (outcome) {
+        .allocation_quarantined => |quarantine| {
+            try std.testing.expectEqual(
+                GuardedAdmitQuarantinePhase.allocation,
+                quarantine.phase,
+            );
+            try std.testing.expectEqual(@as(usize, 6), quarantine.quarantined_bytes_upper_bound);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(frees_before, allocation_context.free_calls);
+    try std.testing.expect(state.rx_provenance.lifecycle == .terminal);
+    try std.testing.expect(prepared.lifecycle == .quarantined);
+    try std.testing.expect(
+        abortPreparedAdmitGuarded(&state, &parser, &prepared) ==
+            .ordinary_failure,
+    );
+    try std.testing.expectEqual(frees_before, allocation_context.free_calls);
+}
+
+test "guarded RX admit rejects every local owner alias before typed conversion" {
+    const AliasTarget = enum {
+        parser,
+        prepared,
+        input,
+        old_backing,
+        guard_context,
+        partial_state,
+    };
+    inline for (std.meta.tags(AliasTarget)) |target| {
+        var backing: [256]u8 = undefined;
+        var fba = std.heap.FixedBufferAllocator.init(&backing);
+        var allocation_context = GuardedAdmitTestAllocator{
+            .child = fba.allocator(),
+        };
+        const allocator = allocation_context.allocator();
+        var state = State{ .saved_flags = 7 };
+        defer state.deinit(allocator);
+        var parser = try exactParserForGuardedAdmitTest(allocator, "abc");
+        defer parser.deinit();
+        allocation_context.state = &state;
+        allocation_context.parser = &parser;
+        var destination_slot: usize = 0;
+        try bindParserForTest(
+            &state,
+            &parser,
+            @as(u64, 321) + @as(u64, @intFromEnum(target)),
+            &destination_slot,
+        );
+        try setResidentCapForTest(&state, &parser, 6);
+        var guard_context = TestReplacementGuard{};
+        const guard = guard_context.guard();
+        var prepared: PreparedRxAppend = .{};
+        var input = [_]u8{ 'd', 'e', 'f' };
+        allocation_context.alias_addr = switch (target) {
+            .parser => @intFromPtr(&parser),
+            .prepared => @intFromPtr(&prepared),
+            .input => @intFromPtr(&input),
+            .old_backing => @intFromPtr(parser.buf.items.ptr),
+            .guard_context => @intFromPtr(&guard_context),
+            .partial_state => @intFromPtr(&state) + 1,
+        };
+        allocation_context.mode = .alias;
+        const frees_before = allocation_context.free_calls;
+        const outcome = prepareAdmitGuarded(
+            &state,
+            &parser,
+            &input,
+            3,
+            6,
+            &guard,
+            &prepared,
+        );
+        switch (outcome) {
+            .allocation_quarantined => {},
+            else => return error.TestUnexpectedResult,
+        }
+        try std.testing.expectEqual(frees_before, allocation_context.free_calls);
+        try std.testing.expect(state.rx_provenance.lifecycle == .terminal);
+    }
+}
+
+test "guarded RX admit rejects overflow and external guard denial before pointer use" {
+    inline for (.{ false, true }) |guard_rejects| {
+        var backing: [256]u8 = undefined;
+        var fba = std.heap.FixedBufferAllocator.init(&backing);
+        var allocation_context = GuardedAdmitTestAllocator{
+            .child = fba.allocator(),
+        };
+        const allocator = allocation_context.allocator();
+        var state = State{ .saved_flags = 7 };
+        defer state.deinit(allocator);
+        var parser = try exactParserForGuardedAdmitTest(allocator, "abc");
+        defer parser.deinit();
+        allocation_context.state = &state;
+        allocation_context.parser = &parser;
+        var destination_slot: usize = 0;
+        try bindParserForTest(
+            &state,
+            &parser,
+            if (guard_rejects) 309 else 308,
+            &destination_slot,
+        );
+        try setResidentCapForTest(&state, &parser, 6);
+        allocation_context.mode = if (guard_rejects) .normal else .overflow_address;
+        var guard_context = TestReplacementGuard{
+            .reject_phase = if (guard_rejects) .validate_allocated else null,
+        };
+        const guard = guard_context.guard();
+        const frees_before = allocation_context.free_calls;
+        var prepared: PreparedRxAppend = .{};
+        const outcome = prepareAdmitGuarded(
+            &state,
+            &parser,
+            "def",
+            3,
+            6,
+            &guard,
+            &prepared,
+        );
+        switch (outcome) {
+            .allocation_quarantined => |quarantine| try std.testing.expectEqual(
+                @as(usize, 6),
+                quarantine.quarantined_bytes_upper_bound,
+            ),
+            else => return error.TestUnexpectedResult,
+        }
+        try std.testing.expectEqual(frees_before, allocation_context.free_calls);
+        try std.testing.expect(state.rx_provenance.lifecycle == .terminal);
+    }
+}
+
+test "guarded RX admit rejects wrong guard tags and invalid authority seals" {
+    inline for (.{
+        TestReplacementGuard.Fault.wrong_capture_tag,
+        TestReplacementGuard.Fault.zero_after_allocate,
+        TestReplacementGuard.Fault.drift_after_allocate,
+    }) |fault| {
+        var backing: [256]u8 = undefined;
+        var fba = std.heap.FixedBufferAllocator.init(&backing);
+        var allocation_context = GuardedAdmitTestAllocator{
+            .child = fba.allocator(),
+        };
+        const allocator = allocation_context.allocator();
+        var state = State{ .saved_flags = 7 };
+        defer state.deinit(allocator);
+        var parser = try exactParserForGuardedAdmitTest(allocator, "abc");
+        defer parser.deinit();
+        allocation_context.state = &state;
+        allocation_context.parser = &parser;
+        var destination_slot: usize = 0;
+        try bindParserForTest(
+            &state,
+            &parser,
+            @as(u64, 317) + @as(u64, @intFromEnum(fault)),
+            &destination_slot,
+        );
+        try setResidentCapForTest(&state, &parser, 6);
+        var guard_context = TestReplacementGuard{ .fault = fault };
+        const guard = guard_context.guard();
+        const frees_before = allocation_context.free_calls;
+        var prepared: PreparedRxAppend = .{};
+        const outcome = prepareAdmitGuarded(
+            &state,
+            &parser,
+            "def",
+            3,
+            6,
+            &guard,
+            &prepared,
+        );
+        switch (outcome) {
+            .allocation_quarantined => {},
+            else => return error.TestUnexpectedResult,
+        }
+        try std.testing.expectEqual(frees_before, allocation_context.free_calls);
+        try std.testing.expect(state.rx_provenance.lifecycle == .terminal);
+    }
+}
+
+test "guarded RX admit distinguishes seal-preserving OOM from OOM callback drift" {
+    inline for (.{ false, true }) |mutates| {
+        var backing: [256]u8 = undefined;
+        var fba = std.heap.FixedBufferAllocator.init(&backing);
+        var allocation_context = GuardedAdmitTestAllocator{
+            .child = fba.allocator(),
+        };
+        const allocator = allocation_context.allocator();
+        var state = State{ .saved_flags = 7 };
+        defer state.deinit(allocator);
+        allocation_context.state = &state;
+        var parser = try exactParserForGuardedAdmitTest(allocator, "abc");
+        defer parser.deinit();
+        allocation_context.parser = &parser;
+        var destination_slot: usize = 0;
+        try bindParserForTest(
+            &state,
+            &parser,
+            if (mutates) 305 else 304,
+            &destination_slot,
+        );
+        try setResidentCapForTest(&state, &parser, 6);
+        allocation_context.mode = if (mutates) .oom_mutate_state else .oom;
+        var guard_context = TestReplacementGuard{};
+        const guard = guard_context.guard();
+        var prepared: PreparedRxAppend = .{};
+        const outcome = prepareAdmitGuarded(
+            &state,
+            &parser,
+            "def",
+            3,
+            6,
+            &guard,
+            &prepared,
+        );
+        if (mutates) {
+            switch (outcome) {
+                .allocation_quarantined => |quarantine| try std.testing.expectEqual(
+                    @as(usize, 0),
+                    quarantine.quarantined_bytes_upper_bound,
+                ),
+                else => return error.TestUnexpectedResult,
+            }
+            try std.testing.expect(state.rx_provenance.lifecycle == .terminal);
+        } else {
+            switch (outcome) {
+                .ordinary_failure => |failure| try std.testing.expectEqual(
+                    error.OutOfMemory,
+                    failure.reason,
+                ),
+                else => return error.TestUnexpectedResult,
+            }
+            try std.testing.expect(parserSealValid(&state, &parser));
+            try std.testing.expect(preparedRxAppendPristine(&prepared));
+        }
+        try std.testing.expect(!state.rx_operation_busy);
+    }
+}
+
+test "guarded RX admit abort tombstones before exact-one replacement free" {
+    var backing: [512]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&backing);
+    var allocation_context = GuardedAdmitTestAllocator{
+        .child = fba.allocator(),
+    };
+    const allocator = allocation_context.allocator();
+    var state = State{ .saved_flags = 7 };
+    defer state.deinit(allocator);
+    var parser = try exactParserForGuardedAdmitTest(allocator, "abc");
+    defer parser.deinit();
+    allocation_context.state = &state;
+    allocation_context.parser = &parser;
+    var destination_slot: usize = 0;
+    try bindParserForTest(&state, &parser, 306, &destination_slot);
+    try setResidentCapForTest(&state, &parser, 6);
+    var guard_context = TestReplacementGuard{};
+    const guard = guard_context.guard();
+    var prepared: PreparedRxAppend = .{};
+    try std.testing.expect(
+        prepareAdmitGuarded(&state, &parser, "def", 3, 6, &guard, &prepared) ==
+            .prepared,
+    );
+    const frees_before = allocation_context.free_calls;
+    try std.testing.expect(
+        abortPreparedAdmitGuarded(&state, &parser, &prepared) == .aborted,
+    );
+    try std.testing.expectEqual(frees_before + 1, allocation_context.free_calls);
+    try std.testing.expect(prepared.lifecycle == .aborted);
+    try std.testing.expect(parserSealValid(&state, &parser));
+    try std.testing.expect(
+        abortPreparedAdmitGuarded(&state, &parser, &prepared) ==
+            .ordinary_failure,
+    );
+    try std.testing.expectEqual(frees_before + 1, allocation_context.free_calls);
+}
+
+test "guarded RX admit abort free callback drift cannot restore authority" {
+    var backing: [512]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&backing);
+    var allocation_context = GuardedAdmitTestAllocator{
+        .child = fba.allocator(),
+    };
+    const allocator = allocation_context.allocator();
+    var state = State{ .saved_flags = 7 };
+    defer state.deinit(allocator);
+    var parser = try exactParserForGuardedAdmitTest(allocator, "abc");
+    defer parser.deinit();
+    allocation_context.state = &state;
+    allocation_context.parser = &parser;
+    var destination_slot: usize = 0;
+    try bindParserForTest(&state, &parser, 328, &destination_slot);
+    try setResidentCapForTest(&state, &parser, 6);
+    var guard_context = TestReplacementGuard{};
+    const guard = guard_context.guard();
+    var prepared: PreparedRxAppend = .{};
+    try std.testing.expect(
+        prepareAdmitGuarded(&state, &parser, "def", 3, 6, &guard, &prepared) ==
+            .prepared,
+    );
+    allocation_context.mode = .mutate_parser_after_free;
+    const frees_before = allocation_context.free_calls;
+    const outcome = abortPreparedAdmitGuarded(&state, &parser, &prepared);
+    switch (outcome) {
+        .allocation_quarantined => |quarantine| try std.testing.expectEqual(
+            @as(usize, 3),
+            quarantine.quarantined_bytes_upper_bound,
+        ),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(frees_before + 1, allocation_context.free_calls);
+    try std.testing.expect(state.rx_provenance.lifecycle == .terminal);
+    try std.testing.expectEqual(@as(usize, 0), parser.buf.capacity);
+    try std.testing.expect(
+        abortPreparedAdmitGuarded(&state, &parser, &prepared) ==
+            .ordinary_failure,
+    );
+    try std.testing.expectEqual(frees_before + 1, allocation_context.free_calls);
+}
+
+test "legacy RX admit APIs reject guarded replacement tokens in ReleaseFast" {
+    var backing: [512]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&backing);
+    var allocation_context = GuardedAdmitTestAllocator{
+        .child = fba.allocator(),
+    };
+    const allocator = allocation_context.allocator();
+    var state = State{ .saved_flags = 7 };
+    defer state.deinit(allocator);
+    var parser = try exactParserForGuardedAdmitTest(allocator, "abc");
+    defer parser.deinit();
+    allocation_context.state = &state;
+    allocation_context.parser = &parser;
+    var destination_slot: usize = 0;
+    try bindParserForTest(&state, &parser, 316, &destination_slot);
+    try setResidentCapForTest(&state, &parser, 6);
+    var guard_context = TestReplacementGuard{};
+    const guard = guard_context.guard();
+    var prepared: PreparedRxAppend = .{};
+    try std.testing.expect(
+        prepareAdmitGuarded(&state, &parser, "def", 3, 6, &guard, &prepared) ==
+            .prepared,
+    );
+    try std.testing.expectError(
+        error.InvalidState,
+        commitPreparedAdmit(&state, &parser, "def", &prepared),
+    );
+    try std.testing.expectError(
+        error.InvalidState,
+        abortPreparedAdmit(&state, &prepared),
+    );
+    try std.testing.expect(state.rx_operation_busy);
+    try std.testing.expect(
+        abortPreparedAdmitGuarded(&state, &parser, &prepared) == .aborted,
+    );
+}
+
+test "guarded RX admit rejects moved and stale tokens without duplicate cleanup" {
+    var backing: [512]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&backing);
+    var allocation_context = GuardedAdmitTestAllocator{
+        .child = fba.allocator(),
+    };
+    const allocator = allocation_context.allocator();
+    var state = State{ .saved_flags = 7 };
+    defer state.deinit(allocator);
+    var parser = try exactParserForGuardedAdmitTest(allocator, "abc");
+    defer parser.deinit();
+    allocation_context.state = &state;
+    allocation_context.parser = &parser;
+    var destination_slot: usize = 0;
+    try bindParserForTest(&state, &parser, 327, &destination_slot);
+    try setResidentCapForTest(&state, &parser, 6);
+    var guard_context = TestReplacementGuard{};
+    const guard = guard_context.guard();
+    var prepared: PreparedRxAppend = .{};
+    try std.testing.expect(
+        prepareAdmitGuarded(&state, &parser, "def", 3, 6, &guard, &prepared) ==
+            .prepared,
+    );
+    var moved = prepared;
+    const frees_before = allocation_context.free_calls;
+    try std.testing.expect(
+        commitPreparedAdmitGuarded(&state, &parser, "def", &moved) ==
+            .ordinary_failure,
+    );
+    try std.testing.expectEqual(frees_before, allocation_context.free_calls);
+    try std.testing.expect(state.rx_operation_busy);
+    try std.testing.expect(
+        abortPreparedAdmitGuarded(&state, &parser, &prepared) == .aborted,
+    );
+    try std.testing.expectEqual(frees_before + 1, allocation_context.free_calls);
+    try std.testing.expect(
+        commitPreparedAdmitGuarded(&state, &parser, "def", &prepared) ==
+            .ordinary_failure,
+    );
+    try std.testing.expectEqual(frees_before + 1, allocation_context.free_calls);
+}
+
+test "guard and allocator callbacks observe the RX operation as busy" {
+    var backing: [512]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&backing);
+    var allocation_context = GuardedAdmitTestAllocator{
+        .child = fba.allocator(),
+    };
+    const allocator = allocation_context.allocator();
+    var state = State{ .saved_flags = 7 };
+    defer state.deinit(allocator);
+    var parser = try exactParserForGuardedAdmitTest(allocator, "abc");
+    defer parser.deinit();
+    allocation_context.state = &state;
+    allocation_context.parser = &parser;
+    var destination_slot: usize = 0;
+    try bindParserForTest(&state, &parser, 310, &destination_slot);
+    try setResidentCapForTest(&state, &parser, 6);
+    const allocator_callbacks_before =
+        allocation_context.alloc_calls + allocation_context.free_calls;
+    allocation_context.reenter = true;
+    var guard_context = TestReplacementGuard{
+        .state = &state,
+        .parser = &parser,
+        .reenter = true,
+    };
+    const guard = guard_context.guard();
+    var prepared: PreparedRxAppend = .{};
+    try std.testing.expect(
+        prepareAdmitGuarded(&state, &parser, "def", 3, 6, &guard, &prepared) ==
+            .prepared,
+    );
+    try std.testing.expect(
+        abortPreparedAdmitGuarded(&state, &parser, &prepared) == .aborted,
+    );
+    try std.testing.expectEqual(guard_context.calls, guard_context.blocked_reentries);
+    try std.testing.expect(guard_context.blocked_reentries >= 6);
+    try std.testing.expectEqual(
+        allocation_context.alloc_calls + allocation_context.free_calls -
+            allocator_callbacks_before,
+        allocation_context.blocked_reentries,
+    );
+    try std.testing.expect(!state.rx_operation_busy);
+}
+
+test "cleanup guard source mutation is never adopted or published" {
+    inline for (.{ false, true }) |commits| {
+        var backing: [512]u8 = undefined;
+        var fba = std.heap.FixedBufferAllocator.init(&backing);
+        var allocation_context = GuardedAdmitTestAllocator{
+            .child = fba.allocator(),
+        };
+        const allocator = allocation_context.allocator();
+        var state = State{ .saved_flags = 7 };
+        defer state.deinit(allocator);
+        var parser = try exactParserForGuardedAdmitTest(allocator, "abc");
+        defer parser.deinit();
+        allocation_context.state = &state;
+        allocation_context.parser = &parser;
+        var destination_slot: usize = 0;
+        try bindParserForTest(
+            &state,
+            &parser,
+            if (commits) 315 else 314,
+            &destination_slot,
+        );
+        try setResidentCapForTest(&state, &parser, 6);
+        var guard_context = TestReplacementGuard{
+            .state = &state,
+            .parser = &parser,
+            .mutate_parser_phase = .capture_before_cleanup,
+        };
+        const guard = guard_context.guard();
+        var prepared: PreparedRxAppend = .{};
+        try std.testing.expect(
+            prepareAdmitGuarded(&state, &parser, "def", 3, 6, &guard, &prepared) ==
+                .prepared,
+        );
+        const frees_before = allocation_context.free_calls;
+        if (commits) {
+            const outcome =
+                commitPreparedAdmitGuarded(&state, &parser, "def", &prepared);
+            switch (outcome) {
+                .allocation_quarantined => |quarantine| try std.testing.expectEqual(
+                    @as(usize, 3),
+                    quarantine.quarantined_bytes_upper_bound,
+                ),
+                else => return error.TestUnexpectedResult,
+            }
+        } else {
+            const outcome =
+                abortPreparedAdmitGuarded(&state, &parser, &prepared);
+            switch (outcome) {
+                .allocation_quarantined => |quarantine| try std.testing.expectEqual(
+                    @as(usize, 3),
+                    quarantine.quarantined_bytes_upper_bound,
+                ),
+                else => return error.TestUnexpectedResult,
+            }
+        }
+        try std.testing.expectEqual(frees_before + 1, allocation_context.free_calls);
+        try std.testing.expect(state.rx_provenance.lifecycle == .terminal);
+        try std.testing.expectEqual(@as(usize, 0), parser.buf.capacity);
+        try std.testing.expect(!state.rx_operation_busy);
+    }
+}
+
+test "corrupted replacement classification charges the hard cap exactly once" {
+    const Corruption = enum { erase_all, lower_length };
+    inline for (.{ false, true }) |commits| {
+        inline for (.{ Corruption.erase_all, Corruption.lower_length }) |corruption| {
+            var backing: [512]u8 = undefined;
+            var fba = std.heap.FixedBufferAllocator.init(&backing);
+            var allocation_context = GuardedAdmitTestAllocator{
+                .child = fba.allocator(),
+            };
+            const allocator = allocation_context.allocator();
+            var state = State{ .saved_flags = 7 };
+            defer state.deinit(allocator);
+            var parser = try exactParserForGuardedAdmitTest(allocator, "abc");
+            defer parser.deinit();
+            allocation_context.state = &state;
+            allocation_context.parser = &parser;
+            var destination_slot: usize = 0;
+            try bindParserForTest(
+                &state,
+                &parser,
+                338 +
+                    @as(usize, @intFromBool(commits)) * 2 +
+                    @as(usize, @intFromEnum(corruption)),
+                &destination_slot,
+            );
+            try setResidentCapForTest(&state, &parser, 6);
+            var guard_context = TestReplacementGuard{};
+            const guard = guard_context.guard();
+            var prepared: PreparedRxAppend = .{};
+            try std.testing.expect(
+                prepareAdmitGuarded(
+                    &state,
+                    &parser,
+                    "def",
+                    3,
+                    6,
+                    &guard,
+                    &prepared,
+                ) == .prepared,
+            );
+            switch (corruption) {
+                .erase_all => {
+                    prepared.replacement = null;
+                    prepared.cleanup_replacement = null;
+                    prepared.replacement_addr = 0;
+                    prepared.replacement_len = 0;
+                    prepared.replacement_guard = null;
+                    prepared.replacement_authority_seal = .{};
+                },
+                .lower_length => prepared.replacement_len = 1,
+            }
+            const frees_before = allocation_context.free_calls;
+            if (commits) {
+                const outcome =
+                    commitPreparedAdmitGuarded(&state, &parser, "def", &prepared);
+                switch (outcome) {
+                    .allocation_quarantined => |quarantine| try std.testing.expectEqual(
+                        protocol.max_binary_chunk + protocol.header_size,
+                        quarantine.quarantined_bytes_upper_bound,
+                    ),
+                    else => return error.TestUnexpectedResult,
+                }
+                try std.testing.expect(
+                    commitPreparedAdmitGuarded(&state, &parser, "def", &prepared) ==
+                        .ordinary_failure,
+                );
+            } else {
+                const outcome =
+                    abortPreparedAdmitGuarded(&state, &parser, &prepared);
+                switch (outcome) {
+                    .allocation_quarantined => |quarantine| try std.testing.expectEqual(
+                        protocol.max_binary_chunk + protocol.header_size,
+                        quarantine.quarantined_bytes_upper_bound,
+                    ),
+                    else => return error.TestUnexpectedResult,
+                }
+                try std.testing.expect(
+                    abortPreparedAdmitGuarded(&state, &parser, &prepared) ==
+                        .ordinary_failure,
+                );
+            }
+            try std.testing.expectEqual(frees_before, allocation_context.free_calls);
+            try std.testing.expect(state.rx_provenance.lifecycle == .terminal);
+            try std.testing.expect(!state.rx_operation_busy);
+        }
+    }
+}
+
+test "cleanup rejection charges replacement and drifted source exactly once" {
+    inline for (.{ false, true }) |commits| {
+        var backing: [512]u8 = undefined;
+        var fba = std.heap.FixedBufferAllocator.init(&backing);
+        var allocation_context = GuardedAdmitTestAllocator{
+            .child = fba.allocator(),
+        };
+        const allocator = allocation_context.allocator();
+        var state = State{ .saved_flags = 7 };
+        defer state.deinit(allocator);
+        var parser = try exactParserForGuardedAdmitTest(allocator, "abc");
+        defer parser.deinit();
+        allocation_context.state = &state;
+        allocation_context.parser = &parser;
+        var destination_slot: usize = 0;
+        try bindParserForTest(
+            &state,
+            &parser,
+            if (commits) 337 else 336,
+            &destination_slot,
+        );
+        try setResidentCapForTest(&state, &parser, 6);
+        var guard_context = TestReplacementGuard{
+            .state = &state,
+            .parser = &parser,
+            .reject_phase = .capture_before_cleanup,
+            .mutate_parser_phase = .capture_before_cleanup,
+        };
+        const guard = guard_context.guard();
+        var prepared: PreparedRxAppend = .{};
+        try std.testing.expect(
+            prepareAdmitGuarded(&state, &parser, "def", 3, 6, &guard, &prepared) ==
+                .prepared,
+        );
+        const frees_before = allocation_context.free_calls;
+        if (commits) {
+            const outcome =
+                commitPreparedAdmitGuarded(&state, &parser, "def", &prepared);
+            switch (outcome) {
+                .allocation_quarantined => |quarantine| try std.testing.expectEqual(
+                    @as(usize, 9),
+                    quarantine.quarantined_bytes_upper_bound,
+                ),
+                else => return error.TestUnexpectedResult,
+            }
+            try std.testing.expect(
+                commitPreparedAdmitGuarded(&state, &parser, "def", &prepared) ==
+                    .ordinary_failure,
+            );
+        } else {
+            const outcome =
+                abortPreparedAdmitGuarded(&state, &parser, &prepared);
+            switch (outcome) {
+                .allocation_quarantined => |quarantine| try std.testing.expectEqual(
+                    @as(usize, 9),
+                    quarantine.quarantined_bytes_upper_bound,
+                ),
+                else => return error.TestUnexpectedResult,
+            }
+            try std.testing.expect(
+                abortPreparedAdmitGuarded(&state, &parser, &prepared) ==
+                    .ordinary_failure,
+            );
+        }
+        try std.testing.expectEqual(frees_before, allocation_context.free_calls);
+        try std.testing.expect(state.rx_provenance.lifecycle == .terminal);
+        try std.testing.expect(!state.rx_operation_busy);
+    }
+}
+
+test "cleanup callbacks see only a tombstone and cannot rewrite frozen authority" {
+    inline for (.{ false, true }) |commits| {
+        var backing: [512]u8 = undefined;
+        var fba = std.heap.FixedBufferAllocator.init(&backing);
+        var allocation_context = GuardedAdmitTestAllocator{
+            .child = fba.allocator(),
+        };
+        const allocator = allocation_context.allocator();
+        var state = State{ .saved_flags = 7 };
+        defer state.deinit(allocator);
+        var parser = try exactParserForGuardedAdmitTest(allocator, "abc");
+        defer parser.deinit();
+        allocation_context.state = &state;
+        allocation_context.parser = &parser;
+        var destination_slot: usize = 0;
+        try bindParserForTest(
+            &state,
+            &parser,
+            if (commits) 334 else 333,
+            &destination_slot,
+        );
+        try setResidentCapForTest(&state, &parser, 6);
+        var prepared: PreparedRxAppend = .{};
+        var guard_context = TestReplacementGuard{
+            .prepared = &prepared,
+            .mutate_prepared_phase = .capture_before_cleanup,
+        };
+        const guard = guard_context.guard();
+        try std.testing.expect(
+            prepareAdmitGuarded(&state, &parser, "def", 3, 6, &guard, &prepared) ==
+                .prepared,
+        );
+        const frees_before = allocation_context.free_calls;
+        if (commits) {
+            try std.testing.expect(
+                commitPreparedAdmitGuarded(&state, &parser, "def", &prepared) ==
+                    .committed,
+            );
+            try std.testing.expect(prepared.lifecycle == .committed);
+            try std.testing.expectEqualStrings("abcdef", parser.buf.items);
+        } else {
+            try std.testing.expect(
+                abortPreparedAdmitGuarded(&state, &parser, &prepared) == .aborted,
+            );
+            try std.testing.expect(prepared.lifecycle == .aborted);
+            try std.testing.expectEqualStrings("abc", parser.buf.items);
+        }
+        try std.testing.expectEqual(frees_before + 1, allocation_context.free_calls);
+        try std.testing.expect(!state.rx_operation_busy);
+    }
+}
+
+test "guarded RX admit never frees a corrupted cleanup mirror" {
+    var backing: [512]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&backing);
+    var allocation_context = GuardedAdmitTestAllocator{
+        .child = fba.allocator(),
+    };
+    const allocator = allocation_context.allocator();
+    var state = State{ .saved_flags = 7 };
+    defer state.deinit(allocator);
+    var parser = try exactParserForGuardedAdmitTest(allocator, "abc");
+    defer parser.deinit();
+    allocation_context.state = &state;
+    allocation_context.parser = &parser;
+    var destination_slot: usize = 0;
+    try bindParserForTest(&state, &parser, 311, &destination_slot);
+    try setResidentCapForTest(&state, &parser, 6);
+    var guard_context = TestReplacementGuard{};
+    const guard = guard_context.guard();
+    var prepared: PreparedRxAppend = .{};
+    try std.testing.expect(
+        prepareAdmitGuarded(&state, &parser, "def", 3, 6, &guard, &prepared) ==
+            .prepared,
+    );
+    const frees_before = allocation_context.free_calls;
+    prepared.cleanup_replacement = null;
+    const outcome = commitPreparedAdmitGuarded(&state, &parser, "def", &prepared);
+    switch (outcome) {
+        .allocation_quarantined => |quarantine| try std.testing.expectEqual(
+            protocol.max_binary_chunk + protocol.header_size,
+            quarantine.quarantined_bytes_upper_bound,
+        ),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(frees_before, allocation_context.free_calls);
+    try std.testing.expect(state.rx_provenance.lifecycle == .terminal);
+    try std.testing.expect(prepared.lifecycle == .quarantined);
+}
+
+test "guarded RX admit rejects independently corrupted cleanup authorities" {
+    const Mutation = enum { primary, allocator, authority_seal };
+    inline for (std.meta.tags(Mutation)) |mutation| {
+        var backing: [512]u8 = undefined;
+        var fba = std.heap.FixedBufferAllocator.init(&backing);
+        var allocation_context = GuardedAdmitTestAllocator{
+            .child = fba.allocator(),
+        };
+        const allocator = allocation_context.allocator();
+        var state = State{ .saved_flags = 7 };
+        defer state.deinit(allocator);
+        var parser = try exactParserForGuardedAdmitTest(allocator, "abc");
+        defer parser.deinit();
+        allocation_context.state = &state;
+        allocation_context.parser = &parser;
+        var destination_slot: usize = 0;
+        try bindParserForTest(
+            &state,
+            &parser,
+            @as(u64, 329) + @as(u64, @intFromEnum(mutation)),
+            &destination_slot,
+        );
+        try setResidentCapForTest(&state, &parser, 6);
+        var guard_context = TestReplacementGuard{};
+        const guard = guard_context.guard();
+        var prepared: PreparedRxAppend = .{};
+        try std.testing.expect(
+            prepareAdmitGuarded(&state, &parser, "def", 3, 6, &guard, &prepared) ==
+                .prepared,
+        );
+        switch (mutation) {
+            .primary => prepared.replacement = null,
+            .allocator => prepared.allocator = pristine_rx_append_allocator,
+            .authority_seal => prepared.replacement_authority_seal.generation += 1,
+        }
+        const frees_before = allocation_context.free_calls;
+        const outcome =
+            commitPreparedAdmitGuarded(&state, &parser, "def", &prepared);
+        switch (outcome) {
+            .allocation_quarantined => |quarantine| try std.testing.expectEqual(
+                protocol.max_binary_chunk + protocol.header_size,
+                quarantine.quarantined_bytes_upper_bound,
+            ),
+            else => return error.TestUnexpectedResult,
+        }
+        try std.testing.expectEqual(frees_before, allocation_context.free_calls);
+        try std.testing.expect(state.rx_provenance.lifecycle == .terminal);
+    }
+}
+
+test "guarded RX admit safe-frees replacement but terminalizes source drift" {
+    var backing: [512]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&backing);
+    var allocation_context = GuardedAdmitTestAllocator{
+        .child = fba.allocator(),
+    };
+    const allocator = allocation_context.allocator();
+    var state = State{ .saved_flags = 7 };
+    defer state.deinit(allocator);
+    var parser = try exactParserForGuardedAdmitTest(allocator, "abc");
+    defer parser.deinit();
+    allocation_context.state = &state;
+    allocation_context.parser = &parser;
+    var destination_slot: usize = 0;
+    try bindParserForTest(&state, &parser, 313, &destination_slot);
+    try setResidentCapForTest(&state, &parser, 6);
+    var guard_context = TestReplacementGuard{};
+    const guard = guard_context.guard();
+    var read_buffer = [_]u8{ 'd', 'e', 'f' };
+    var prepared: PreparedRxAppend = .{};
+    try std.testing.expect(
+        prepareAdmitGuarded(
+            &state,
+            &parser,
+            &read_buffer,
+            3,
+            6,
+            &guard,
+            &prepared,
+        ) == .prepared,
+    );
+    read_buffer[0] = 'x';
+    const frees_before = allocation_context.free_calls;
+    const outcome = commitPreparedAdmitGuarded(
+        &state,
+        &parser,
+        &read_buffer,
+        &prepared,
+    );
+    switch (outcome) {
+        .allocation_quarantined => |quarantine| try std.testing.expectEqual(
+            @as(usize, 0),
+            quarantine.quarantined_bytes_upper_bound,
+        ),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(frees_before + 1, allocation_context.free_calls);
+    try std.testing.expect(state.rx_provenance.lifecycle == .terminal);
+    try std.testing.expect(prepared.lifecycle == .aborted);
+}
+
+test "guarded RX admit commit reports post-publication cleanup drift" {
+    var backing: [512]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&backing);
+    var allocation_context = GuardedAdmitTestAllocator{
+        .child = fba.allocator(),
+    };
+    const allocator = allocation_context.allocator();
+    var state = State{ .saved_flags = 7 };
+    defer state.deinit(allocator);
+    var parser = try exactParserForGuardedAdmitTest(allocator, "abc");
+    defer parser.deinit();
+    allocation_context.state = &state;
+    allocation_context.parser = &parser;
+    var destination_slot: usize = 0;
+    try bindParserForTest(&state, &parser, 307, &destination_slot);
+    try setResidentCapForTest(&state, &parser, 6);
+    var guard_context = TestReplacementGuard{};
+    const guard = guard_context.guard();
+    var prepared: PreparedRxAppend = .{};
+    try std.testing.expect(
+        prepareAdmitGuarded(&state, &parser, "def", 3, 6, &guard, &prepared) ==
+            .prepared,
+    );
+    allocation_context.mode = .mutate_parser_after_free;
+    const frees_before = allocation_context.free_calls;
+    const outcome = commitPreparedAdmitGuarded(&state, &parser, "def", &prepared);
+    switch (outcome) {
+        .post_commit_quarantined => |quarantine| try std.testing.expectEqual(
+            @as(usize, 6),
+            quarantine.quarantined_bytes_upper_bound,
+        ),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(frees_before + 1, allocation_context.free_calls);
+    try std.testing.expect(state.rx_provenance.lifecycle == .terminal);
+    try std.testing.expectEqual(@as(usize, 0), parser.buf.capacity);
+    try std.testing.expect(prepared.lifecycle == .committed);
 }
 
 test "prepared RX append preserves source on prepare failure and commits replacement exactly" {
@@ -1988,17 +4268,25 @@ test "prepared RX append preserves source on prepare failure and commits replace
     try std.testing.expectEqual(source_len, parser.buf.items.len);
     try std.testing.expectEqual(@as(u64, 3), state.rx_provenance.rx_absolute_next);
 
+    try setResidentCapForTest(&state, &parser, 6);
+    var guard_context = TestReplacementGuard{};
+    const guard = guard_context.guard();
     var prepared: PreparedRxAppend = .{};
-    defer prepared.deinitInternal();
-    try prepareAdmit(
-        &state,
-        &parser,
-        "def",
-        state.rx_provenance.rx_absolute_next,
-        6,
-        &prepared,
+    try std.testing.expect(
+        prepareAdmitGuarded(
+            &state,
+            &parser,
+            "def",
+            state.rx_provenance.rx_absolute_next,
+            6,
+            &guard,
+            &prepared,
+        ) == .prepared,
     );
-    try commitPreparedAdmit(&state, &parser, "def", &prepared);
+    try std.testing.expect(
+        commitPreparedAdmitGuarded(&state, &parser, "def", &prepared) ==
+            .committed,
+    );
     try std.testing.expectEqualStrings("abcdef", parser.buf.items);
     try std.testing.expectEqual(@as(u64, 6), state.rx_provenance.rx_absolute_next);
     try std.testing.expect(parserSealValid(&state, &parser));
@@ -2041,8 +4329,14 @@ test "prepared RX append lease rejects reentry and abort clears authority before
     defer parser.deinit();
     var destination_slot: usize = 0;
     try bindParserForTest(&state, &parser, 33, &destination_slot);
+    try setResidentCapForTest(&state, &parser, 1);
+    var guard_context = TestReplacementGuard{};
+    const guard = guard_context.guard();
     var prepared: PreparedRxAppend = .{};
-    try prepareAdmit(&state, &parser, "x", 0, 1, &prepared);
+    try std.testing.expect(
+        prepareAdmitGuarded(&state, &parser, "x", 0, 1, &guard, &prepared) ==
+            .prepared,
+    );
     try std.testing.expect(state.rx_operation_busy);
     try std.testing.expect(maxReadable(&state, &parser, 1, 1) == .invalid);
     var scratch: RxParseScratch = .{};
@@ -2050,7 +4344,9 @@ test "prepared RX append lease rejects reentry and abort clears authority before
         error.InvalidState,
         nextOutcomeWithRange(&state, &parser, &scratch),
     );
-    try abortPreparedAdmit(&state, &prepared);
+    try std.testing.expect(
+        abortPreparedAdmitGuarded(&state, &parser, &prepared) == .aborted,
+    );
     try std.testing.expect(!state.rx_operation_busy);
     try std.testing.expect(prepared.lifecycle == .aborted);
 }

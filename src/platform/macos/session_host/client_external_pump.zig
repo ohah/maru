@@ -1233,7 +1233,12 @@ pub const ScreenConsumeError =
 pub const max_rx_resident_bytes: usize =
     protocol.max_binary_chunk + protocol.header_size;
 pub const max_guarded_admit_quarantine_bytes: usize =
-    max_rx_resident_bytes;
+    client_external_mode.max_guarded_admit_quarantine_bytes;
+
+comptime {
+    if (max_guarded_admit_quarantine_bytes != 2 * max_rx_resident_bytes)
+        @compileError("guarded admit quarantine budget drift");
+}
 
 const InitOptions = struct {
     failpoint: enum {
@@ -13094,20 +13099,11 @@ fn admitBufferedProductWireForTest(
         .external => |*state| state,
         .blocking => return error.TestUnexpectedResult,
     };
-    var append: client_external_mode.PreparedRxAppend = .{};
-    try client_external_mode.prepareAdmit(
+    try client_external_mode.testing.admitBuffered(
         rx_state,
         &client.parser,
         wire,
-        rx_state.rx_provenance.rx_absolute_next,
         protocol.max_binary_chunk + protocol.header_size,
-        &append,
-    );
-    try client_external_mode.commitPreparedAdmit(
-        rx_state,
-        &client.parser,
-        wire,
-        &append,
     );
 }
 
@@ -13774,20 +13770,11 @@ test "d2b3d product facade traverses the adopted Client parser and consumes its 
         .external => |*state| state,
         .blocking => return error.TestUnexpectedResult,
     };
-    var append: client_external_mode.PreparedRxAppend = .{};
-    try client_external_mode.prepareAdmit(
+    try client_external_mode.testing.admitBuffered(
         rx_state,
         &client.parser,
         wire,
-        rx_state.rx_provenance.rx_absolute_next,
         protocol.max_binary_chunk + protocol.header_size,
-        &append,
-    );
-    try client_external_mode.commitPreparedAdmit(
-        rx_state,
-        &client.parser,
-        wire,
-        &append,
     );
 
     const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
@@ -13900,20 +13887,11 @@ test "d2b3d product facade commits 64 and leaves the 65th parser frame unread" {
         .external => |*state| state,
         .blocking => return error.TestUnexpectedResult,
     };
-    var append: client_external_mode.PreparedRxAppend = .{};
-    try client_external_mode.prepareAdmit(
+    try client_external_mode.testing.admitBuffered(
         rx_state,
         &client.parser,
         wire,
-        rx_state.rx_provenance.rx_absolute_next,
         protocol.max_binary_chunk + protocol.header_size,
-        &append,
-    );
-    try client_external_mode.commitPreparedAdmit(
-        rx_state,
-        &client.parser,
-        wire,
-        &append,
     );
     const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
     defer std.testing.allocator.destroy(scratch);

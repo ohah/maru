@@ -68,7 +68,7 @@
 > socket callback을 추가하지 않는다. 구조 이동보다 먼저 `advanceValidatedPartial` exact-one 결과의
 > before/after/header/range/identity가 classified intent seal에 포함되고 traversal이 sealed after만
 > 소비하는지 고정한다. 외부 제품 owner→pump와 내부 pump→traversal callsite를 각각 exact-one으로 검사한다.
-> d2c는 **설계 gate C0와 구현 gate C1을 완료했고 C2 계약은 문서 확정·구현 전, C3~C5는 구현 전**이다. C1은 split
+> d2c는 **설계 gate C0와 구현 gate C1~C2를 완료했고 C3~C5는 구현 전**이다. C1은 split
 > frame/read budget policy, Client parser provenance와 storage/lease에 이중 봉인된 resident cap,
 > read DTO/constants/final-address scratch layout, 모든 positive limit tie와 accepted
 > `< / == / >` stop 표를 고정한다. lease는 Client/parser 주소와 전체 provenance를 thread-local snapshot에도
@@ -81,9 +81,19 @@
 > 사용한다. allocation 반환 뒤 guard/alias/seal 검증 실패는 candidate write/free 0의
 > `allocation_quarantined`, publication 뒤 old-backing cleanup drift는 canonical parser terminal의
 > `post_commit_quarantined`다. cleanup은 allocator/range/seal을 frozen local로 옮기고 primary+mirror와
-> allocator authority를 callback 전에 tombstone으로 만든 뒤 prepared를 다시 읽지 않는다. synthetic
-> allocation fail-index, alias, callback drift/reentry, pre/post-commit exact-one free와 no-free 상한을
-> Debug/ReleaseFast에서 고정한다. C3 injected cumulative collector+value-only authority seam, C4 private pump
+> allocator authority를 callback 전에 tombstone으로 만든 뒤 prepared를 다시 읽지 않는다.
+> `FrozenReplacementCleanup`과 canonical `GuardedSourceSnapshot`이 callback 전 source/input/allocator/
+> replacement authority를 동결하며, callback drift로 기존 parser backing을 잃는 경우에도 source capacity를
+> bounded quarantine 상한에 포함한다. cleanup guard가 source를 변조한 뒤 거부하는 abort·precommit은
+> replacement+frozen source capacity의 saturating aggregate를 exact once 보고하고 replay는 0이다.
+> synthetic allocation fail-index, state/parser/prepared/input/
+> old-backing/guard-context exact alias와 partial-state alias, overflow, OOM callback drift,
+> replacement evidence 전체 삭제·길이 축소, invalid guard tag·zero/mismatched seal,
+> allocator/guard reentry, primary/mirror/allocator/seal 독립 변조, moved/stale/double token,
+> abort·precommit·postcommit callback drift, exact-one free와 no-free/exact-once 상한을 Debug/ReleaseFast에서
+> 고정했다. tokenizer boundary는 guarded/legacy direct callsite가 mode 밖 0이고 기존 buffered product
+> fixture의 `testing.admitBuffered` 세 callsite만 허용하며 pump/ledger/owner-range/global quarantine import를
+> 금지한다. C3 injected cumulative collector+value-only authority seam, C4 private pump
 > integration+final drain evidence, C5 POSIX 제품 facade+실제 socketpair의 다섯 구현 gate를 순서대로 닫는다.
 > collector는 최초 `maxReadable` allowance 안에서 최대 1 MiB를 누적한 뒤 `staged_len>0`일 때만 guarded
 > admit exact-one과 `traverseBuffered` exact-one을 실행한다. initial complete backlog는 traversal exact-one,

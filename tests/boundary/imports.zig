@@ -1106,6 +1106,68 @@ test "session host RX unchecked append has one validating aggregate caller" {
     );
 }
 
+test "session host guarded RX admit remains a C2 synthetic leaf" {
+    const allocator = std.testing.allocator;
+    const root = "src/platform/macos/session_host";
+    var guarded_calls_outside_mode: usize = 0;
+    var legacy_calls_outside_mode: usize = 0;
+    var synthetic_fixture_calls_in_pump: usize = 0;
+    var synthetic_fixture_calls_elsewhere: usize = 0;
+    var dir = try std.Io.Dir.cwd().openDir(std.testing.io, root, .{ .iterate = true });
+    defer dir.close(std.testing.io);
+    var walker = try dir.walk(allocator);
+    defer walker.deinit();
+    while (try walker.next(std.testing.io)) |entry| {
+        if (entry.kind != .file or
+            !std.mem.endsWith(u8, entry.basename, ".zig"))
+            continue;
+        const path = try std.fmt.allocPrint(
+            allocator,
+            "{s}/{s}",
+            .{ root, entry.path },
+        );
+        defer allocator.free(path);
+        const source = try readZigFileZ(allocator, path);
+        defer allocator.free(source);
+        if (std.mem.eql(u8, entry.path, "client_external_mode.zig")) {
+            inline for (.{
+                "@import(\"client_external_pump.zig\")",
+                "@import(\"external_inbox_ledger.zig\")",
+                "@import(\"external_owner_range.zig\")",
+                "@import(\"external_pump_owner.zig\")",
+                "cross_owner_quarantine_latched",
+                "cross_owner_quarantine_events",
+                "CrossOwnerQuarantineStatus",
+            }) |forbidden|
+                try std.testing.expect(!std.mem.containsAtLeast(
+                    u8,
+                    source,
+                    1,
+                    forbidden,
+                ));
+            continue;
+        }
+        guarded_calls_outside_mode += countOccurrences(source, "prepareAdmitGuarded(");
+        guarded_calls_outside_mode += countOccurrences(source, "commitPreparedAdmitGuarded(");
+        guarded_calls_outside_mode += countOccurrences(source, "abortPreparedAdmitGuarded(");
+        legacy_calls_outside_mode += countOccurrences(source, "prepareAdmit(");
+        legacy_calls_outside_mode += countOccurrences(source, "commitPreparedAdmit(");
+        legacy_calls_outside_mode += countOccurrences(source, "abortPreparedAdmit(");
+        if (std.mem.eql(u8, entry.path, "client_external_pump.zig"))
+            synthetic_fixture_calls_in_pump +=
+                countOccurrences(source, "client_external_mode.testing.admitBuffered(")
+        else
+            synthetic_fixture_calls_elsewhere +=
+                countOccurrences(source, "client_external_mode.testing.admitBuffered(");
+    }
+    // C2 has only the mode-local synthetic authority. C4 is the first gate allowed to project the
+    // product owner inventory and open a pump callsite.
+    try std.testing.expectEqual(@as(usize, 0), guarded_calls_outside_mode);
+    try std.testing.expectEqual(@as(usize, 0), legacy_calls_outside_mode);
+    try std.testing.expectEqual(@as(usize, 3), synthetic_fixture_calls_in_pump);
+    try std.testing.expectEqual(@as(usize, 0), synthetic_fixture_calls_elsewhere);
+}
+
 test "session host external RX DTO and classifier preserve neutral ownership boundaries" {
     const allocator = std.testing.allocator;
     const types_source = try readZigFileZ(

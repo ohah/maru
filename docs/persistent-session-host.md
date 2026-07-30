@@ -7729,7 +7729,15 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 scratch final address에 rebuild하고 generation/digest를 직전 expected snapshot과 exact
                 비교한다. callback 경계를 넘어 snapshot을 cache하지 않으며, 각 검증은 builder exact-one이고
                 한 검증 안에서만 세 projection이 owner graph를 다시 walk하지 않는다. hostile fixture는
-                phase별 rebuild call count와 generation/digest drift를 고정한다. **C4c**는 C4-owned
+                phase별 rebuild call count와 generation/digest drift를 고정한다. 단 C2 guarded replacement가
+                commit/abort cleanup callback 전에 parser provenance를 의도적으로 terminal-busy로 바꾸는
+                구간은 일반 `current()` snapshot으로 거짓 실패시키지 않는다. replacement guard가 최초 source
+                snapshot과 allocated candidate를 final-address state에 봉인하고, cleanup phase마다 static
+                lease/storage identity와 source/inventory를 다시 검증한다. abort cleanup은 source와 inventory가
+                그대로여야 하고, commit cleanup은 old source에서 검증된 published replacement로의 전이만
+                허용한다. 두 경로 모두 C2가 요구하는 최초 replacement authority seal을 반환하며, builder
+                실패를 무조건 수락하거나 cleanup phase 검증을 생략하지 않는다. stale/copy/context·candidate·
+                parser/inventory/storage/lease drift는 quarantine한다. **C4c**는 C4-owned
                 active-use permit과 would-block seed handoff lifecycle을 C3 module에 추가한다.
                 **C4d**에서만 pump-private drain evidence lifecycle과
                 `pumpInjectedRxUnderHeldLease`, private product-compilable `RxTurnOps` fixture를 연결한다.

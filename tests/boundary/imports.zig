@@ -1106,10 +1106,11 @@ test "session host RX unchecked append has one validating aggregate caller" {
     );
 }
 
-test "session host guarded RX admit remains a C2 synthetic leaf" {
+test "session host guarded RX admit has one C4 pump product callsite" {
     const allocator = std.testing.allocator;
     const root = "src/platform/macos/session_host";
-    var guarded_calls_outside_mode: usize = 0;
+    var guarded_calls_in_pump: usize = 0;
+    var guarded_calls_elsewhere: usize = 0;
     var legacy_calls_outside_mode: usize = 0;
     var synthetic_fixture_calls_in_pump: usize = 0;
     var synthetic_fixture_calls_elsewhere: usize = 0;
@@ -1147,9 +1148,14 @@ test "session host guarded RX admit remains a C2 synthetic leaf" {
                 ));
             continue;
         }
-        guarded_calls_outside_mode += countOccurrences(source, "prepareAdmitGuarded(");
-        guarded_calls_outside_mode += countOccurrences(source, "commitPreparedAdmitGuarded(");
-        guarded_calls_outside_mode += countOccurrences(source, "abortPreparedAdmitGuarded(");
+        const guarded_calls =
+            countOccurrences(source, "prepareAdmitGuarded(") +
+            countOccurrences(source, "commitPreparedAdmitGuarded(") +
+            countOccurrences(source, "abortPreparedAdmitGuarded(");
+        if (std.mem.eql(u8, entry.path, "client_external_pump.zig"))
+            guarded_calls_in_pump += guarded_calls
+        else
+            guarded_calls_elsewhere += guarded_calls;
         legacy_calls_outside_mode += countOccurrences(source, "prepareAdmit(");
         legacy_calls_outside_mode += countOccurrences(source, "commitPreparedAdmit(");
         legacy_calls_outside_mode += countOccurrences(source, "abortPreparedAdmit(");
@@ -1160,9 +1166,10 @@ test "session host guarded RX admit remains a C2 synthetic leaf" {
             synthetic_fixture_calls_elsewhere +=
                 countOccurrences(source, "client_external_mode.testing.admitBuffered(");
     }
-    // C2 has only the mode-local synthetic authority. C4 is the first gate allowed to project the
-    // product owner inventory and open a pump callsite.
-    try std.testing.expectEqual(@as(usize, 0), guarded_calls_outside_mode);
+    // C2 keeps the guarded leaf mode-local. C4 projects product owner inventory through one
+    // prepare/commit/abort callsite set in the pump and nowhere else.
+    try std.testing.expectEqual(@as(usize, 3), guarded_calls_in_pump);
+    try std.testing.expectEqual(@as(usize, 0), guarded_calls_elsewhere);
     try std.testing.expectEqual(@as(usize, 0), legacy_calls_outside_mode);
     try std.testing.expectEqual(@as(usize, 3), synthetic_fixture_calls_in_pump);
     try std.testing.expectEqual(@as(usize, 0), synthetic_fixture_calls_elsewhere);
@@ -1807,7 +1814,7 @@ test "d2c pre-entry partial transition has one product decision source" {
     );
 }
 
-test "d2c C3 collector stays transport-only and test-only before pump integration" {
+test "d2c C4 collector integration stays transport-leaf and pump-private" {
     const allocator = std.testing.allocator;
     const collector = try readZigFileZ(
         allocator,
@@ -1908,6 +1915,9 @@ test "d2c C3 collector stays transport-only and test-only before pump integratio
     var product_imports: usize = 0;
     var product_collector_calls: usize = 0;
     var product_completion_calls: usize = 0;
+    var product_prepared_use_begin_calls: usize = 0;
+    var product_prepared_use_finish_calls: usize = 0;
+    var product_prepared_use_reset_calls: usize = 0;
     var accounting_seam_calls_outside_pump: usize = 0;
     var owner_heap_creates: usize = 0;
     var pump_product_type_tokens: usize = 0;
@@ -1946,6 +1956,18 @@ test "d2c C3 collector stays transport-only and test-only before pump integratio
             product_completion_calls += countOccurrences(
                 source,
                 ".accountGuardedAdmitQuarantine(",
+            );
+            product_prepared_use_begin_calls += countOccurrences(
+                source,
+                ".beginPreparedAdmitUse(",
+            );
+            product_prepared_use_finish_calls += countOccurrences(
+                source,
+                ".finishPreparedAdmitUse(",
+            );
+            product_prepared_use_reset_calls += countOccurrences(
+                source,
+                ".resetFinishedPreparedAdmitUse(",
             );
             if (!std.mem.eql(
                 u8,
@@ -2016,8 +2038,11 @@ test "d2c C3 collector stays transport-only and test-only before pump integratio
         }
     }
     try std.testing.expectEqual(@as(usize, 1), product_imports);
-    try std.testing.expectEqual(@as(usize, 0), product_collector_calls);
-    try std.testing.expectEqual(@as(usize, 0), product_completion_calls);
+    try std.testing.expectEqual(@as(usize, 1), product_collector_calls);
+    try std.testing.expectEqual(@as(usize, 3), product_completion_calls);
+    try std.testing.expectEqual(@as(usize, 1), product_prepared_use_begin_calls);
+    try std.testing.expectEqual(@as(usize, 1), product_prepared_use_finish_calls);
+    try std.testing.expectEqual(@as(usize, 1), product_prepared_use_reset_calls);
     try std.testing.expectEqual(
         @as(usize, 0),
         accounting_seam_calls_outside_pump,

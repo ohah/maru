@@ -1926,6 +1926,11 @@ pub const BufferedRxOps = struct {
     ) LiveScreenApplyResult,
 };
 
+const RxTurnOps = struct {
+    buffered: BufferedRxOps,
+    transport: client_external_rx_read.RxReadOps,
+};
+
 const LiveScreenConsumeLifecycle = enum {
     empty,
     prepared,
@@ -1971,6 +1976,37 @@ const ExternalRxTurnScratchLifecycle = enum {
     terminal,
 };
 
+const CallbackRegionLifecycle = enum { empty, ready, active };
+
+const CallbackRegionToken = struct {
+    saved_self_addr: usize = 0,
+    scratch_addr: usize = 0,
+    permit_addr: usize = 0,
+    thread_id: std.Thread.Id = undefined,
+    epoch: u64 = 0,
+    lifecycle: CallbackRegionLifecycle = .empty,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+const RxDrainEvidenceLifecycle = enum { empty, prepared, consumed, aborted };
+
+const RxDrainEvidence = struct {
+    saved_self_addr: usize = 0,
+    storage_addr: usize = 0,
+    lease_addr: usize = 0,
+    scratch_addr: usize = 0,
+    scratch_generation: u64 = 0,
+    parser_addr: usize = 0,
+    parser_generation: u64 = 0,
+    read_attempt_generation: u64 = 0,
+    owner_snapshot_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    lifecycle: RxDrainEvidenceLifecycle = .empty,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+threadlocal var active_callback_region_addr: usize = 0;
+threadlocal var callback_region_epoch: u64 = 0;
+
 const RxOwnerAuthoritySnapshot = struct {
     saved_self_addr: usize = 0,
     storage_addr: usize = 0,
@@ -2013,6 +2049,14 @@ pub const ExternalRxTurnScratch = struct {
     authority_snapshot_build_count: u64 = 0,
     aggregate_ranges: external_owner_range.Scratch = .{},
     authority_ranges_generation: u64 = 0,
+    collect_receipt: client_external_rx_read.CollectReceipt = undefined,
+    stopped_borrow: client_external_rx_read.StoppedBorrow = .{},
+    borrow_use_permit: client_external_rx_read.BorrowUsePermit = .{},
+    would_block_seed: client_external_rx_read.WouldBlockSeed = .{},
+    prepared_admit_use_permit: client_external_rx_read.PreparedAdmitUsePermit = .{},
+    drain_evidence: RxDrainEvidence = .{},
+    callback_region: CallbackRegionToken = .{},
+    quarantine_receipt: client_external_mode.GuardedQuarantineAccountingReceipt = .{},
 
     pub fn initInPlace(out: *ExternalRxTurnScratch) bool {
         if (out.saved_self_addr != 0 or out.lifecycle != .empty)
@@ -2032,6 +2076,21 @@ pub const ExternalRxTurnScratch = struct {
         out.authority_snapshot_build_count = 0;
         out.aggregate_ranges.reset();
         out.authority_ranges_generation = 0;
+        out.collect_receipt = undefined;
+        out.stopped_borrow = .{};
+        out.borrow_use_permit = .{};
+        out.would_block_seed = .{};
+        out.prepared_admit_use_permit = .{};
+        out.drain_evidence = .{};
+        out.callback_region = .{
+            .saved_self_addr = @intFromPtr(&out.callback_region),
+            .scratch_addr = @intFromPtr(out),
+            .permit_addr = @intFromPtr(&out.borrow_use_permit),
+            .thread_id = std.Thread.getCurrentId(),
+            .lifecycle = .ready,
+        };
+        out.callback_region.digest = callbackRegionDigest(&out.callback_region);
+        out.quarantine_receipt = .{};
         return true;
     }
 };
@@ -2048,6 +2107,69 @@ comptime {
         @compileError("external RX turn structural scratch exceeds 2 MiB");
     if (@sizeOf(ExternalRxTurnScratch) > max_external_rx_turn_scratch_bytes)
         @compileError("external RX turn scratch exceeds 3.25 MiB");
+}
+
+fn callbackRegionDigest(
+    token: *const CallbackRegionToken,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARUCBR1");
+    writer.writeUsize(token.saved_self_addr);
+    writer.writeUsize(token.scratch_addr);
+    writer.writeUsize(token.permit_addr);
+    writer.writeUsize(@intCast(token.thread_id));
+    writer.writeU64(token.epoch);
+    writer.writeU8(@intFromEnum(token.lifecycle));
+    return writer.finish();
+}
+
+fn callbackRegionTokenValid(
+    token: *const CallbackRegionToken,
+) bool {
+    return token.saved_self_addr == @intFromPtr(token) and
+        token.scratch_addr != 0 and token.permit_addr != 0 and
+        token.thread_id == std.Thread.getCurrentId() and
+        std.mem.eql(u8, &token.digest, &callbackRegionDigest(token));
+}
+
+fn acquireCallbackRegion(token: *CallbackRegionToken) bool {
+    if (!callbackRegionTokenValid(token) or token.lifecycle != .ready or
+        active_callback_region_addr != 0 or
+        callback_region_epoch == std.math.maxInt(u64))
+        return false;
+    callback_region_epoch += 1;
+    token.epoch = callback_region_epoch;
+    token.lifecycle = .active;
+    token.digest = callbackRegionDigest(token);
+    active_callback_region_addr = @intFromPtr(token);
+    return true;
+}
+
+fn releaseCallbackRegion(token: *CallbackRegionToken) bool {
+    if (!callbackRegionTokenValid(token) or token.lifecycle != .active or
+        active_callback_region_addr != @intFromPtr(token) or
+        token.epoch != callback_region_epoch)
+        return false;
+    active_callback_region_addr = 0;
+    token.lifecycle = .ready;
+    token.digest = callbackRegionDigest(token);
+    return true;
+}
+
+fn callbackRegionCurrent(
+    raw: *anyopaque,
+    scratch_addr: usize,
+) ?bool {
+    const token: *CallbackRegionToken = @ptrCast(@alignCast(raw));
+    const expected_read_addr = std.math.add(
+        usize,
+        token.scratch_addr,
+        @offsetOf(ExternalRxTurnScratch, "read"),
+    ) catch return null;
+    if (!callbackRegionTokenValid(token) or
+        expected_read_addr != scratch_addr)
+        return null;
+    return token.lifecycle == .active and
+        active_callback_region_addr == @intFromPtr(token);
 }
 
 fn rxOwnerAuthoritySnapshotDigest(
@@ -2256,6 +2378,61 @@ const ProductRxReadAuthority = struct {
                 &snapshot.parser_seal,
             ))
             return null;
+        const descriptor = external_owner_range.Range{
+            .start = @intFromPtr(self.read_ops),
+            .len = @sizeOf(client_external_rx_read.RxReadOps),
+        };
+        const context = external_owner_range.Range{
+            .start = @intFromPtr(self.read_ops.context),
+            .len = self.read_ops.context_len,
+        };
+        const authority_self = external_owner_range.Range{
+            .start = @intFromPtr(self),
+            .len = @sizeOf(@This()),
+        };
+        const fixed = [_]external_owner_range.Range{
+            .{ .start = snapshot.storage_addr, .len = snapshot.storage_len },
+            .{ .start = snapshot.lease_addr, .len = snapshot.lease_len },
+            .{ .start = snapshot.scratch_addr, .len = snapshot.scratch_len },
+            authority_self,
+            .{
+                .start = snapshot.parser_seal.backing_addr,
+                .len = snapshot.parser_seal.capacity,
+            },
+        };
+        const candidates = [_]external_owner_range.Range{
+            descriptor,
+            context,
+        };
+        for (candidates, 0..) |candidate, index| {
+            if (candidate.start == 0 or candidate.len == 0) return null;
+            _ = std.math.add(usize, candidate.start, candidate.len) catch
+                return null;
+            for (candidates[index + 1 ..]) |other|
+                if (rangesOverlap(
+                    candidate.start,
+                    candidate.len,
+                    other.start,
+                    other.len,
+                ))
+                    return null;
+            for (fixed) |blocked|
+                if (rangesOverlap(
+                    candidate.start,
+                    candidate.len,
+                    blocked.start,
+                    blocked.len,
+                ))
+                    return null;
+            for (self.scratch.authority_ranges.ranges[0..snapshot.inventory_count]) |blocked|
+                if (rangesOverlap(
+                    candidate.start,
+                    candidate.len,
+                    blocked.start,
+                    blocked.len,
+                ))
+                    return null;
+        }
 
         var protected = [_]client_external_rx_read.ProtectedRange{.{}} **
             client_external_rx_read.max_rx_read_protected_ranges;
@@ -2325,10 +2502,234 @@ fn snapshotMatchesReplacementSeal(
         std.mem.eql(u8, &seal.digest, &snapshot.digest);
 }
 
+const ProductReplacementGuardPhase = enum {
+    empty,
+    allocating,
+    allocation_captured,
+    allocated,
+    cleanup_abort,
+    cleanup_abort_validated,
+    cleanup_commit,
+    cleanup_commit_validated,
+    completed,
+};
+
+fn productReplacementInventoryDigest(
+    ranges: []const external_owner_range.Range,
+    excluded: ?external_owner_range.Range,
+    generation: u64,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARURGI1");
+    writer.writeU64(generation);
+    var count: usize = 0;
+    for (ranges) |range| {
+        if (excluded) |skip|
+            if (range.start == skip.start and range.len == skip.len)
+                continue;
+        count += 1;
+    }
+    writer.writeUsize(count);
+    for (ranges) |range| {
+        if (excluded) |skip|
+            if (range.start == skip.start and range.len == skip.len)
+                continue;
+        writer.writeUsize(range.start);
+        writer.writeUsize(range.len);
+    }
+    return writer.finish();
+}
+
+fn rebuildProductReplacementInventory(
+    storage: *ExternalPumpStorage,
+    scratch: *ExternalRxTurnScratch,
+) bool {
+    const client = if (storage.owned_client) |*owned| owned else return false;
+    const ranges = &scratch.authority_ranges;
+    ranges.reset();
+    client.appendExternalOwnerRangesForTeardown(
+        &scratch.client_ranges,
+        ranges,
+    ) catch return false;
+    storage.inbox_ledger.appendActiveOwnerRanges(ranges) catch return false;
+    storage.owner_metadata.appendActiveOwnerRanges(storage, ranges) catch
+        return false;
+    switch (storage.pending_response) {
+        .none => {},
+        .pending => |pending| ranges.append(
+            pending.seal.payload_addr,
+            pending.seal.payload_len,
+        ) catch return false,
+        .terminal => return false,
+    }
+    const forbidden = [_]external_owner_range.Range{
+        .{ .start = @intFromPtr(storage), .len = @sizeOf(ExternalPumpStorage) },
+        .{ .start = @intFromPtr(scratch), .len = @sizeOf(ExternalRxTurnScratch) },
+    };
+    ranges.validate(&forbidden) catch return false;
+    return true;
+}
+
 const ProductReplacementAllocationGuard = struct {
     storage: *ExternalPumpStorage,
     lease: *ExternalWholeTurnLease,
     scratch: *ExternalRxTurnScratch,
+    saved_self_addr: usize = 0,
+    storage_addr: usize = 0,
+    lease_addr: usize = 0,
+    scratch_addr: usize = 0,
+    operation_generation: u64 = 0,
+    original_seal: client_external_mode.ReplacementAuthoritySeal = .{},
+    source_seal: client_external_mode.ParserAuthoritySeal = .{},
+    source_inventory_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    replacement_candidate: client_external_mode.ReplacementCandidate =
+        .{ .addr = 0, .len = 0 },
+    admitted_len: usize = 0,
+    phase: ProductReplacementGuardPhase = .empty,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+
+    fn stateDigest(self: *const @This()) external_owner_seal.Digest {
+        var writer = external_owner_seal.Writer.init("MARURGS1");
+        writer.writeUsize(self.saved_self_addr);
+        writer.writeUsize(self.storage_addr);
+        writer.writeUsize(self.lease_addr);
+        writer.writeUsize(self.scratch_addr);
+        writer.writeU64(self.operation_generation);
+        writer.writeU64(self.original_seal.generation);
+        writer.writeBytes(&self.original_seal.digest);
+        writer.writeBytes(&self.source_seal.digest);
+        writer.writeBytes(&self.source_inventory_digest);
+        writer.writeUsize(self.replacement_candidate.addr);
+        writer.writeUsize(self.replacement_candidate.len);
+        writer.writeUsize(self.admitted_len);
+        writer.writeU8(@intFromEnum(self.phase));
+        return writer.finish();
+    }
+
+    fn stateValid(self: *const @This()) bool {
+        return self.saved_self_addr == @intFromPtr(self) and
+            self.storage_addr == @intFromPtr(self.storage) and
+            self.lease_addr == @intFromPtr(self.lease) and
+            self.scratch_addr == @intFromPtr(self.scratch) and
+            self.operation_generation == self.storage.operation_generation and
+            self.phase != .empty and
+            std.mem.eql(u8, &self.digest, &self.stateDigest());
+    }
+
+    fn staticLeaseValid(self: *const @This()) bool {
+        return active_external_operation_addr == @intFromPtr(self.storage) and
+            active_external_lease_addr == @intFromPtr(self.lease) and
+            active_external_lease_generation ==
+                self.storage.operation_generation and
+            self.storage.saved_self_addr == @intFromPtr(self.storage) and
+            self.storage.lifecycle == .live and
+            self.storage.semantic_state == .active and
+            self.lease.saved_self_addr == @intFromPtr(self.lease) and
+            self.lease.storage_addr == @intFromPtr(self.storage) and
+            self.lease.scratch_addr == @intFromPtr(self.scratch) and
+            self.lease.scratch_len == @sizeOf(ExternalRxTurnScratch) and
+            self.lease.operation_generation == self.operation_generation and
+            self.lease.rx_client_addr == active_external_rx_client_addr and
+            self.lease.rx_parser_addr == active_external_rx_parser_addr and
+            std.meta.eql(
+                self.lease.rx_provenance,
+                active_external_rx_provenance,
+            ) and
+            self.lease.lifecycle == .acquired and
+            std.mem.eql(
+                u8,
+                &self.lease.digest,
+                &wholeTurnLeaseDigest(self.lease.*),
+            );
+    }
+
+    fn parserMatchesSource(self: *const @This()) bool {
+        const client = if (self.storage.owned_client) |*owned|
+            owned
+        else
+            return false;
+        const state = switch (client.io_mode) {
+            .external => |*external| external,
+            .blocking => return false,
+        };
+        const seal = self.source_seal;
+        const backing_addr =
+            if (client.parser.buf.capacity == 0)
+                0
+            else
+                @intFromPtr(client.parser.buf.items.ptr);
+        return state.rx_provenance.lifecycle == .terminal and
+            @intFromPtr(&client.parser) == seal.parser_addr and
+            @intFromPtr(client.parser.allocator.ptr) ==
+                seal.allocator_ptr_addr and
+            @intFromPtr(client.parser.allocator.vtable) ==
+                seal.allocator_vtable_addr and
+            client.parser.expected_major == seal.expected_major and
+            backing_addr == seal.backing_addr and
+            client.parser.buf.items.len == seal.items_len and
+            client.parser.buf.capacity == seal.capacity and
+            client.parser.head == seal.head;
+    }
+
+    fn parserMatchesPublishedReplacement(self: *const @This()) bool {
+        const client = if (self.storage.owned_client) |*owned|
+            owned
+        else
+            return false;
+        const state = switch (client.io_mode) {
+            .external => |*external| external,
+            .blocking => return false,
+        };
+        const unread = std.math.sub(
+            usize,
+            self.source_seal.items_len,
+            self.source_seal.head,
+        ) catch return false;
+        const expected_len = std.math.add(
+            usize,
+            unread,
+            self.admitted_len,
+        ) catch return false;
+        return state.rx_provenance.lifecycle == .terminal and
+            client.parser.buf.capacity == self.replacement_candidate.len and
+            client.parser.buf.items.len == expected_len and
+            client.parser.head == 0 and
+            @intFromPtr(client.parser.buf.items.ptr) ==
+                self.replacement_candidate.addr and
+            @intFromPtr(client.parser.allocator.ptr) ==
+                self.source_seal.allocator_ptr_addr and
+            @intFromPtr(client.parser.allocator.vtable) ==
+                self.source_seal.allocator_vtable_addr and
+            client.parser.expected_major == self.source_seal.expected_major;
+    }
+
+    fn terminalInventoryValid(
+        self: *@This(),
+        excluded: external_owner_range.Range,
+    ) bool {
+        if (!self.staticLeaseValid() or
+            !rebuildProductReplacementInventory(self.storage, self.scratch))
+            return false;
+        return std.mem.eql(
+            u8,
+            &self.source_inventory_digest,
+            &productReplacementInventoryDigest(
+                self.scratch.authority_ranges
+                    .ranges[0..self.scratch.authority_ranges.len],
+                excluded,
+                self.scratch.authority_ranges_generation,
+            ),
+        );
+    }
+
+    fn originalResult(
+        self: *const @This(),
+        accepted: bool,
+    ) client_external_mode.ReplacementGuardResult {
+        return if (accepted)
+            .{ .accepted = self.original_seal }
+        else
+            .{ .seal = self.original_seal };
+    }
 
     fn check(
         raw: *anyopaque,
@@ -2337,29 +2738,182 @@ const ProductReplacementAllocationGuard = struct {
         candidate: ?client_external_mode.ReplacementCandidate,
     ) client_external_mode.ReplacementGuardResult {
         const self: *@This() = @ptrCast(@alignCast(raw));
+        if (self.phase == .empty) {
+            if (phase != .capture_before_allocate or expected != null or
+                candidate != null or self.saved_self_addr != 0)
+                return .quarantined;
+            const snapshot = buildRxOwnerAuthoritySnapshot(
+                self.storage,
+                self.lease,
+                self.scratch,
+            ) orelse return .quarantined;
+            const seal = client_external_mode.ReplacementAuthoritySeal{
+                .generation = snapshot.operation_generation,
+                .digest = snapshot.digest,
+            };
+            self.saved_self_addr = @intFromPtr(self);
+            self.storage_addr = @intFromPtr(self.storage);
+            self.lease_addr = @intFromPtr(self.lease);
+            self.scratch_addr = @intFromPtr(self.scratch);
+            self.operation_generation = snapshot.operation_generation;
+            self.original_seal = seal;
+            self.source_seal = snapshot.parser_seal;
+            self.source_inventory_digest = productReplacementInventoryDigest(
+                self.scratch.authority_ranges
+                    .ranges[0..self.scratch.authority_ranges.len],
+                .{
+                    .start = snapshot.parser_seal.backing_addr,
+                    .len = snapshot.parser_seal.capacity,
+                },
+                snapshot.inventory_generation,
+            );
+            self.phase = .allocating;
+            self.digest = self.stateDigest();
+            return .{ .seal = seal };
+        }
+        if (!self.stateValid()) return .quarantined;
+        const prior = expected orelse return .quarantined;
+        if (prior.generation != self.original_seal.generation or
+            !std.mem.eql(
+                u8,
+                &prior.digest,
+                &self.original_seal.digest,
+            ))
+            return .quarantined;
+
+        if (phase == .capture_before_cleanup) {
+            const checked = candidate;
+            const source_candidate: ?client_external_mode.ReplacementCandidate =
+                if (self.source_seal.capacity == 0)
+                    null
+                else
+                    .{
+                        .addr = self.source_seal.backing_addr,
+                        .len = self.source_seal.capacity,
+                    };
+            if (checked != null and
+                std.meta.eql(checked.?, self.replacement_candidate))
+            {
+                if (!self.parserMatchesSource() or
+                    !self.terminalInventoryValid(.{
+                        .start = self.source_seal.backing_addr,
+                        .len = self.source_seal.capacity,
+                    }))
+                    return .quarantined;
+                self.phase = .cleanup_abort;
+            } else if (std.meta.eql(checked, source_candidate)) {
+                if (!self.parserMatchesSource() or
+                    !self.terminalInventoryValid(.{
+                        .start = self.source_seal.backing_addr,
+                        .len = self.source_seal.capacity,
+                    }))
+                    return .quarantined;
+                self.phase = .cleanup_commit;
+            } else {
+                return .quarantined;
+            }
+            self.digest = self.stateDigest();
+            return self.originalResult(false);
+        }
+
+        if (phase == .validate_after_cleanup or
+            phase == .capture_after_cleanup_validate)
+        {
+            const valid = switch (self.phase) {
+                .cleanup_abort => candidate != null and std.meta.eql(
+                    candidate.?,
+                    self.replacement_candidate,
+                ) and self.parserMatchesSource() and
+                    self.terminalInventoryValid(.{
+                        .start = self.source_seal.backing_addr,
+                        .len = self.source_seal.capacity,
+                    }),
+                .cleanup_commit => blk: {
+                    const source_candidate =
+                        if (self.source_seal.capacity == 0)
+                            null
+                        else
+                            client_external_mode.ReplacementCandidate{
+                                .addr = self.source_seal.backing_addr,
+                                .len = self.source_seal.capacity,
+                            };
+                    const candidate_ok = std.meta.eql(candidate, source_candidate);
+                    const parser_ok = self.parserMatchesPublishedReplacement();
+                    const inventory_ok = self.terminalInventoryValid(.{
+                        .start = self.replacement_candidate.addr,
+                        .len = self.replacement_candidate.len,
+                    });
+                    break :blk candidate_ok and parser_ok and inventory_ok;
+                },
+                .cleanup_abort_validated => phase ==
+                    .capture_after_cleanup_validate and
+                    candidate != null and
+                    std.meta.eql(candidate.?, self.replacement_candidate) and
+                    self.parserMatchesSource() and
+                    self.terminalInventoryValid(.{
+                        .start = self.source_seal.backing_addr,
+                        .len = self.source_seal.capacity,
+                    }),
+                .cleanup_commit_validated => blk: {
+                    if (phase != .capture_after_cleanup_validate)
+                        break :blk false;
+                    const source_candidate =
+                        if (self.source_seal.capacity == 0)
+                            null
+                        else
+                            client_external_mode.ReplacementCandidate{
+                                .addr = self.source_seal.backing_addr,
+                                .len = self.source_seal.capacity,
+                            };
+                    break :blk std.meta.eql(candidate, source_candidate) and
+                        self.parserMatchesPublishedReplacement() and
+                        self.terminalInventoryValid(.{
+                            .start = self.replacement_candidate.addr,
+                            .len = self.replacement_candidate.len,
+                        });
+                },
+                else => false,
+            };
+            if (!valid) return .quarantined;
+            if (phase == .validate_after_cleanup) {
+                self.phase = switch (self.phase) {
+                    .cleanup_abort => .cleanup_abort_validated,
+                    .cleanup_commit => .cleanup_commit_validated,
+                    else => unreachable,
+                };
+                self.digest = self.stateDigest();
+            } else {
+                self.phase = .completed;
+                self.digest = self.stateDigest();
+            }
+            return self.originalResult(
+                phase == .validate_after_cleanup,
+            );
+        }
+
         const snapshot = buildRxOwnerAuthoritySnapshot(
             self.storage,
             self.lease,
             self.scratch,
         ) orelse return .quarantined;
-        const seal = client_external_mode.ReplacementAuthoritySeal{
-            .generation = snapshot.operation_generation,
-            .digest = snapshot.digest,
-        };
-        if (expected) |prior|
-            if (!snapshotMatchesReplacementSeal(snapshot, prior))
-                return .quarantined;
+        if (!snapshotMatchesReplacementSeal(snapshot, self.original_seal))
+            return .quarantined;
         return switch (phase) {
-            .capture_before_allocate,
-            .capture_after_allocate,
-            .capture_after_validate,
-            .capture_before_cleanup,
-            .capture_after_cleanup_validate,
-            => .{ .seal = seal },
-            .validate_allocated,
-            .validate_after_cleanup,
-            => blk: {
+            .capture_after_allocate => blk: {
+                if (self.phase != .allocating)
+                    break :blk .quarantined;
+                self.replacement_candidate = candidate orelse
+                    .{ .addr = 0, .len = 0 };
+                self.phase = .allocation_captured;
+                self.digest = self.stateDigest();
+                break :blk self.originalResult(false);
+            },
+            .validate_allocated => blk: {
+                if (self.phase != .allocation_captured)
+                    break :blk .quarantined;
                 const checked = candidate orelse break :blk .quarantined;
+                if (!std.meta.eql(checked, self.replacement_candidate))
+                    break :blk .quarantined;
                 if (rangesOverlap(
                     checked.addr,
                     checked.len,
@@ -2375,8 +2929,17 @@ const ProductReplacementAllocationGuard = struct {
                     checked.addr,
                     checked.len,
                 )) break :blk .quarantined;
-                break :blk .{ .accepted = seal };
+                self.phase = .allocated;
+                self.digest = self.stateDigest();
+                break :blk self.originalResult(true);
             },
+            .capture_after_validate => if (self.phase == .allocated and
+                candidate != null and
+                std.meta.eql(candidate.?, self.replacement_candidate))
+                self.originalResult(false)
+            else
+                .quarantined,
+            else => .quarantined,
         };
     }
 
@@ -7676,6 +8239,77 @@ pub const ExternalPumpStorage = struct {
         return self.activeWholeTurnRxAuthorityMatches();
     }
 
+    fn refreshWholeTurnRxAuthorityAfterAdmit(
+        self: *ExternalPumpStorage,
+        lease: *ExternalWholeTurnLease,
+        admitted: usize,
+    ) bool {
+        if (admitted == 0 or
+            active_external_operation_addr != @intFromPtr(self) or
+            active_external_lease_addr != @intFromPtr(lease) or
+            lease.saved_self_addr != @intFromPtr(lease) or
+            lease.lifecycle != .acquired or
+            !std.mem.eql(u8, &lease.digest, &wholeTurnLeaseDigest(lease.*)) or
+            lease.rx_client_addr != active_external_rx_client_addr or
+            lease.rx_parser_addr != active_external_rx_parser_addr or
+            !std.meta.eql(
+                lease.rx_provenance,
+                active_external_rx_provenance,
+            ))
+            return false;
+        const client = if (self.owned_client) |*owned| owned else return false;
+        const state = switch (client.io_mode) {
+            .external => |*external| external,
+            .blocking => return false,
+        };
+        const before = active_external_rx_provenance;
+        const after = state.rx_provenance;
+        const before_unread = std.math.sub(
+            usize,
+            before.parser_seal.items_len,
+            before.parser_seal.head,
+        ) catch return false;
+        const after_unread = std.math.sub(
+            usize,
+            after.parser_seal.items_len,
+            after.parser_seal.head,
+        ) catch return false;
+        const next_absolute = std.math.add(
+            u64,
+            before.rx_absolute_next,
+            admitted,
+        ) catch return false;
+        const next_unread = std.math.add(
+            usize,
+            before_unread,
+            admitted,
+        ) catch return false;
+        if (!client_external_mode.parserSealValid(state, &client.parser) or
+            !std.meta.eql(before.identity, after.identity) or
+            before.destination_slot_len != after.destination_slot_len or
+            before.buffer_start_absolute != after.buffer_start_absolute or
+            after.rx_absolute_next != next_absolute or
+            after_unread != next_unread or
+            before.resident_cap != after.resident_cap or
+            before.lifecycle != after.lifecycle or
+            before.parser_seal.generation == std.math.maxInt(u64) or
+            after.parser_seal.generation != before.parser_seal.generation + 1 or
+            self.rx_resident_cap != after.resident_cap or
+            !rxResidentCapValid(self))
+            return false;
+        const authority_digest = rxAuthorityDigest(
+            active_external_rx_client_addr,
+            active_external_rx_parser_addr,
+            after,
+        );
+        active_external_rx_provenance = after;
+        active_external_rx_authority_digest = authority_digest;
+        lease.rx_provenance = after;
+        lease.rx_authority_digest = authority_digest;
+        lease.digest = wholeTurnLeaseDigest(lease.*);
+        return self.activeWholeTurnRxAuthorityMatches();
+    }
+
     fn clearActiveWholeTurnRxAuthority() void {
         active_external_rx_resident_cap = 0;
         active_external_rx_resident_cap_digest = [_]u8{0} ** 32;
@@ -8009,6 +8643,110 @@ pub const ExternalPumpStorage = struct {
         terminal: BufferedTraversalCommitTerminal,
     };
 
+    fn terminalInjectedRxTurn(
+        self: *ExternalPumpStorage,
+        reason: client_pump.TerminalReason,
+        rx_read_bytes: usize,
+        rx_bytes: usize,
+        rx_frames: usize,
+    ) client_pump.TurnResult {
+        var result = self.terminalRxTurn(reason, rx_bytes, rx_frames);
+        result.rx_read_bytes = rx_read_bytes;
+        return result;
+    }
+
+    fn completeGuardedAdmitQuarantine(
+        prepared: *client_external_mode.PreparedRxAppend,
+        outcome_tag: client_external_mode.GuardedQuarantineOutcomeTag,
+        quarantine: client_external_mode.GuardedAdmitQuarantine,
+        receipt: *client_external_mode.GuardedQuarantineAccountingReceipt,
+    ) bool {
+        return accountGuardedAdmitQuarantine(
+            prepared,
+            outcome_tag,
+            quarantine,
+            receipt,
+        ) and client_external_mode.finalizeQuarantinedPreparedAdmit(
+            prepared,
+            outcome_tag,
+            quarantine,
+            receipt,
+        );
+    }
+
+    fn drainEvidenceDigest(
+        evidence: *const RxDrainEvidence,
+    ) external_owner_seal.Digest {
+        var writer = external_owner_seal.Writer.init("MARURDE1");
+        writer.writeUsize(evidence.saved_self_addr);
+        writer.writeUsize(evidence.storage_addr);
+        writer.writeUsize(evidence.lease_addr);
+        writer.writeUsize(evidence.scratch_addr);
+        writer.writeU64(evidence.scratch_generation);
+        writer.writeUsize(evidence.parser_addr);
+        writer.writeU64(evidence.parser_generation);
+        writer.writeU64(evidence.read_attempt_generation);
+        writer.writeBytes(&evidence.owner_snapshot_digest);
+        writer.writeU8(@intFromEnum(evidence.lifecycle));
+        return writer.finish();
+    }
+
+    fn prepareAndConsumeDrainEvidence(
+        self: *ExternalPumpStorage,
+        lease: *ExternalWholeTurnLease,
+        scratch: *ExternalRxTurnScratch,
+        attempt_generation: u64,
+    ) bool {
+        const client = if (self.owned_client) |*owned| owned else return false;
+        const state = switch (client.io_mode) {
+            .external => |*external| external,
+            .blocking => return false,
+        };
+        const readiness = client_external_mode.parserReadiness(
+            state,
+            &client.parser,
+        ) catch return false;
+        if (readiness != .empty) return false;
+        const snapshot = buildRxOwnerAuthoritySnapshot(
+            self,
+            lease,
+            scratch,
+        ) orelse return false;
+        const evidence = &scratch.drain_evidence;
+        if (evidence.saved_self_addr != 0 or evidence.lifecycle != .empty)
+            return false;
+        evidence.* = .{
+            .saved_self_addr = @intFromPtr(evidence),
+            .storage_addr = @intFromPtr(self),
+            .lease_addr = @intFromPtr(lease),
+            .scratch_addr = @intFromPtr(&scratch.read),
+            .scratch_generation = scratch.read.generation,
+            .parser_addr = @intFromPtr(&client.parser),
+            .parser_generation = state.rx_provenance.parser_seal.generation,
+            .read_attempt_generation = attempt_generation,
+            .owner_snapshot_digest = snapshot.digest,
+            .lifecycle = .prepared,
+        };
+        evidence.digest = drainEvidenceDigest(evidence);
+        if (evidence.saved_self_addr != @intFromPtr(evidence) or
+            evidence.storage_addr != @intFromPtr(self) or
+            evidence.lease_addr != @intFromPtr(lease) or
+            evidence.scratch_addr != @intFromPtr(&scratch.read) or
+            evidence.scratch_generation != scratch.read.generation or
+            evidence.parser_addr != @intFromPtr(&client.parser) or
+            evidence.parser_generation !=
+                state.rx_provenance.parser_seal.generation or
+            !std.mem.eql(
+                u8,
+                &evidence.digest,
+                &drainEvidenceDigest(evidence),
+            ))
+            return false;
+        evidence.lifecycle = .consumed;
+        evidence.digest = drainEvidenceDigest(evidence);
+        return true;
+    }
+
     /// Runs only the closed buffered parser and aggregate mechanics. The caller retains inherited
     /// blocker ordering, readiness policy, terminal publication, and scheduling.
     fn traverseAndCommitBufferedUnderHeldLease(
@@ -8211,6 +8949,601 @@ pub const ExternalPumpStorage = struct {
         } };
     }
 
+    fn pumpInjectedRxUnderHeldLease(
+        self: *ExternalPumpStorage,
+        lease: *ExternalWholeTurnLease,
+        turn: client_pump.TurnInput,
+        ops: *const RxTurnOps,
+        scratch: *ExternalRxTurnScratch,
+    ) client_pump.TurnResult {
+        if (active_callback_region_addr != 0) {
+            return client_pump.decide(.{
+                .turn = turn,
+                .parser = .empty,
+                .socket_rx_drained = false,
+                .inherited_blocker = true,
+            });
+        }
+        self.snapshotInheritedRxBlockersUnderHeldLease(
+            lease,
+            &scratch.snapshot,
+        ) catch return self.terminalInjectedRxTurn(
+            .invariant_failure,
+            0,
+            0,
+            0,
+        );
+        const snapshot = scratch.snapshot;
+        _ = self.validateAndConsumeInheritedSnapshot(
+            lease,
+            &scratch.snapshot,
+        ) catch return self.terminalInjectedRxTurn(
+            .invariant_failure,
+            0,
+            0,
+            0,
+        );
+        const existing_consumer_blocker =
+            snapshot.committed_screen_pending or
+            snapshot.metadata_projection_pending or
+            snapshot.resize_projection_pending or
+            snapshot.response_correlation_pending;
+        if (existing_consumer_blocker) {
+            return client_pump.decide(.{
+                .turn = turn,
+                .parser = .empty,
+                .socket_rx_drained = false,
+                .inherited_blocker = true,
+            });
+        }
+        if (snapshot.live_screen_pending) {
+            if (!acquireCallbackRegion(&scratch.callback_region))
+                return self.terminalInjectedRxTurn(
+                    .invariant_failure,
+                    0,
+                    0,
+                    0,
+                );
+            const consume = self.consumeLiveScreenHeadUnderHeldLease(
+                lease,
+                &ops.buffered,
+                &scratch.live_consume,
+            );
+            if (!releaseCallbackRegion(&scratch.callback_region))
+                return self.terminalInjectedRxTurn(
+                    .invariant_failure,
+                    0,
+                    0,
+                    0,
+                );
+            return switch (consume) {
+                .consumed, .retry => client_pump.decide(.{
+                    .turn = turn,
+                    .parser = .empty,
+                    .socket_rx_drained = false,
+                    .inherited_blocker = true,
+                }),
+                .no_work, .invalid_state => self.terminalInjectedRxTurn(
+                    .invariant_failure,
+                    0,
+                    0,
+                    0,
+                ),
+            };
+        }
+
+        const client = if (self.owned_client) |*owned|
+            owned
+        else
+            return self.terminalInjectedRxTurn(.invariant_failure, 0, 0, 0);
+        const rx_state = switch (client.io_mode) {
+            .external => |*state| state,
+            .blocking => return self.terminalInjectedRxTurn(
+                .invariant_failure,
+                0,
+                0,
+                0,
+            ),
+        };
+        const initial_readiness = client_external_mode.parserReadiness(
+            rx_state,
+            &client.parser,
+        ) catch return self.terminalInjectedRxTurn(
+            .invariant_failure,
+            0,
+            0,
+            0,
+        );
+        if (initial_readiness == .complete_or_error) {
+            if (!acquireCallbackRegion(&scratch.callback_region))
+                return self.terminalInjectedRxTurn(
+                    .invariant_failure,
+                    0,
+                    0,
+                    0,
+                );
+            const mechanics = self.traverseAndCommitBufferedUnderHeldLease(
+                lease,
+                client,
+                rx_state,
+                snapshot.live_partial_pending,
+                scratch,
+            );
+            if (!releaseCallbackRegion(&scratch.callback_region))
+                return self.terminalInjectedRxTurn(
+                    .invariant_failure,
+                    0,
+                    0,
+                    0,
+                );
+            return switch (mechanics) {
+                .terminal => |terminal| self.terminalInjectedRxTurn(
+                    terminal.reason,
+                    0,
+                    terminal.rx_bytes,
+                    terminal.rx_frames,
+                ),
+                .completed => |completed| blk: {
+                    var result = client_pump.decide(.{
+                        .turn = turn,
+                        .parser = switch (completed.final_readiness) {
+                            .empty => .empty,
+                            .incomplete => .incomplete,
+                            .complete_or_error => .complete_or_error,
+                        },
+                        .socket_rx_drained = false,
+                        .rx_frame_budget_exhausted = completed.budget_exhausted,
+                    });
+                    result.rx_bytes = completed.rx_bytes;
+                    result.rx_frames = completed.rx_frames;
+                    break :blk result;
+                },
+            };
+        }
+        if (!turn.readable) {
+            return client_pump.decide(.{
+                .turn = turn,
+                .parser = switch (initial_readiness) {
+                    .empty => .empty,
+                    .incomplete => .incomplete,
+                    .complete_or_error => unreachable,
+                },
+                .socket_rx_drained = false,
+            });
+        }
+
+        const allowance = switch (client_external_mode.maxReadable(
+            rx_state,
+            &client.parser,
+            self.rx_resident_cap,
+            client_external_rx_read.max_rx_read_bytes_per_turn,
+        )) {
+            .invalid, .counter_exhausted => return self.terminalInjectedRxTurn(
+                .invariant_failure,
+                0,
+                0,
+                0,
+            ),
+            .resident_exhausted => {
+                if (initial_readiness == .incomplete)
+                    return self.terminalInjectedRxTurn(
+                        .resource_exhausted,
+                        0,
+                        0,
+                        0,
+                    );
+                return client_pump.decide(.{
+                    .turn = turn,
+                    .parser = .empty,
+                    .socket_rx_drained = false,
+                    .rx_read_budget_exhausted = true,
+                });
+            },
+            .turn_exhausted => return client_pump.decide(.{
+                .turn = turn,
+                .parser = switch (initial_readiness) {
+                    .empty => .empty,
+                    .incomplete => .incomplete,
+                    .complete_or_error => unreachable,
+                },
+                .socket_rx_drained = false,
+                .rx_read_budget_exhausted = true,
+            }),
+            .bytes => |positive| positive,
+        };
+        var read_authority = ProductRxReadAuthority{
+            .storage = self,
+            .lease = lease,
+            .scratch = scratch,
+            .read_ops = &ops.transport,
+        };
+        const authority_ops = read_authority.ops();
+        if (!acquireCallbackRegion(&scratch.callback_region))
+            return self.terminalInjectedRxTurn(
+                .invariant_failure,
+                0,
+                0,
+                0,
+            );
+        const collected = client_external_rx_read.collectInjected(
+            &scratch.read,
+            .{
+                .allowance = allowance,
+                .read_ops = &ops.transport,
+                .authority_ops = &authority_ops,
+            },
+        );
+        if (!releaseCallbackRegion(&scratch.callback_region))
+            return self.terminalInjectedRxTurn(
+                .invariant_failure,
+                0,
+                0,
+                0,
+            );
+        const receipt = switch (collected) {
+            .rejected => return self.terminalInjectedRxTurn(
+                .invariant_failure,
+                0,
+                0,
+                0,
+            ),
+            .terminal => |terminal| return self.terminalInjectedRxTurn(
+                switch (terminal.reason) {
+                    .eof => .eof,
+                    .socket_error => .socket_error,
+                    else => .invariant_failure,
+                },
+                0,
+                0,
+                0,
+            ),
+            .stopped => |stopped| stopped,
+        };
+        scratch.collect_receipt = receipt;
+        if (!client_external_rx_read.borrowStopped(
+            &scratch.read,
+            &scratch.collect_receipt,
+            &scratch.stopped_borrow,
+        ))
+            return self.terminalInjectedRxTurn(
+                .invariant_failure,
+                0,
+                0,
+                0,
+            );
+        const guard_ops = client_external_rx_read.BorrowUseGuardOps{
+            .context = &scratch.callback_region,
+            .context_len = @sizeOf(CallbackRegionToken),
+            .current = callbackRegionCurrent,
+        };
+        if (!client_external_rx_read.beginStoppedUse(
+            &scratch.read,
+            &scratch.collect_receipt,
+            &scratch.stopped_borrow,
+            &guard_ops,
+            &scratch.would_block_seed,
+            &scratch.borrow_use_permit,
+        ))
+            return self.terminalInjectedRxTurn(
+                .invariant_failure,
+                0,
+                0,
+                0,
+            );
+        const stopped_bytes = client_external_rx_read.stoppedBytes(
+            &scratch.read,
+            &scratch.collect_receipt,
+            &scratch.stopped_borrow,
+        ) orelse return self.terminalInjectedRxTurn(
+            .invariant_failure,
+            0,
+            0,
+            0,
+        );
+        var admitted = false;
+        var mechanics: ?BufferedTraversalCommitResult = null;
+        var terminal_reason: ?client_pump.TerminalReason = null;
+
+        if (stopped_bytes.len != 0) {
+            const prepared_use_started =
+                client_external_rx_read.beginPreparedAdmitUse(
+                    &scratch.read,
+                    &scratch.collect_receipt,
+                    &scratch.stopped_borrow,
+                    &scratch.borrow_use_permit,
+                    &scratch.would_block_seed,
+                    &scratch.prepared_admit_use_permit,
+                );
+            if (!prepared_use_started) {
+                terminal_reason = .invariant_failure;
+            } else {
+                var replacement_guard_owner = ProductReplacementAllocationGuard{
+                    .storage = self,
+                    .lease = lease,
+                    .scratch = scratch,
+                    .admitted_len = stopped_bytes.len,
+                };
+                const replacement_guard = replacement_guard_owner.ops();
+                if (!acquireCallbackRegion(&scratch.callback_region))
+                    terminal_reason = .invariant_failure
+                else {
+                    const prepare = client_external_mode.prepareAdmitGuarded(
+                        rx_state,
+                        &client.parser,
+                        stopped_bytes,
+                        rx_state.rx_provenance.rx_absolute_next,
+                        self.rx_resident_cap,
+                        &replacement_guard,
+                        &scratch.read.prepared_admit,
+                    );
+                    switch (prepare) {
+                        .ordinary_failure => {
+                            if (!releaseCallbackRegion(&scratch.callback_region))
+                                terminal_reason = .invariant_failure
+                            else
+                                terminal_reason = .resource_exhausted;
+                        },
+                        .allocation_quarantined => |quarantine| {
+                            if (!releaseCallbackRegion(&scratch.callback_region) or
+                                !completeGuardedAdmitQuarantine(
+                                    &scratch.read.prepared_admit,
+                                    .allocation_quarantined,
+                                    quarantine,
+                                    &scratch.quarantine_receipt,
+                                ))
+                                terminal_reason = .invariant_failure
+                            else
+                                terminal_reason = .invariant_failure;
+                        },
+                        .prepared => {
+                            const commit =
+                                client_external_mode.commitPreparedAdmitGuarded(
+                                    rx_state,
+                                    &client.parser,
+                                    stopped_bytes,
+                                    &scratch.read.prepared_admit,
+                                );
+                            if (!releaseCallbackRegion(&scratch.callback_region)) {
+                                terminal_reason = .invariant_failure;
+                            } else switch (commit) {
+                                .committed => {
+                                    const reset = client_external_mode
+                                        .resetFinishedPreparedAdmit(
+                                        &scratch.read.prepared_admit,
+                                    );
+                                    const refreshed = reset and self
+                                        .refreshWholeTurnRxAuthorityAfterAdmit(
+                                        lease,
+                                        stopped_bytes.len,
+                                    );
+                                    admitted = reset and refreshed;
+                                    if (!admitted)
+                                        terminal_reason = .invariant_failure;
+                                },
+                                .ordinary_failure => {
+                                    if (!acquireCallbackRegion(
+                                        &scratch.callback_region,
+                                    )) {
+                                        terminal_reason = .invariant_failure;
+                                    } else {
+                                        const aborted = client_external_mode
+                                            .abortPreparedAdmitGuarded(
+                                            rx_state,
+                                            &client.parser,
+                                            &scratch.read.prepared_admit,
+                                        );
+                                        if (!releaseCallbackRegion(
+                                            &scratch.callback_region,
+                                        )) {
+                                            terminal_reason = .invariant_failure;
+                                        } else switch (aborted) {
+                                            .aborted => {
+                                                if (!client_external_mode
+                                                    .resetFinishedPreparedAdmit(
+                                                    &scratch.read.prepared_admit,
+                                                ))
+                                                    terminal_reason =
+                                                        .invariant_failure
+                                                else
+                                                    terminal_reason =
+                                                        .invariant_failure;
+                                            },
+                                            .ordinary_failure => terminal_reason = .invariant_failure,
+                                            .allocation_quarantined => |quarantine| {
+                                                if (!completeGuardedAdmitQuarantine(
+                                                    &scratch.read.prepared_admit,
+                                                    .allocation_quarantined,
+                                                    quarantine,
+                                                    &scratch.quarantine_receipt,
+                                                ))
+                                                    terminal_reason =
+                                                        .invariant_failure
+                                                else
+                                                    terminal_reason =
+                                                        .invariant_failure;
+                                            },
+                                        }
+                                    }
+                                },
+                                .allocation_quarantined => |quarantine| {
+                                    if (!completeGuardedAdmitQuarantine(
+                                        &scratch.read.prepared_admit,
+                                        .allocation_quarantined,
+                                        quarantine,
+                                        &scratch.quarantine_receipt,
+                                    ))
+                                        terminal_reason = .invariant_failure
+                                    else
+                                        terminal_reason = .invariant_failure;
+                                },
+                                .post_commit_quarantined => |quarantine| {
+                                    if (!completeGuardedAdmitQuarantine(
+                                        &scratch.read.prepared_admit,
+                                        .post_commit_quarantined,
+                                        quarantine,
+                                        &scratch.quarantine_receipt,
+                                    ))
+                                        terminal_reason = .invariant_failure
+                                    else
+                                        terminal_reason = .invariant_failure;
+                                },
+                            }
+                        },
+                    }
+                }
+                if (!client_external_rx_read.finishPreparedAdmitUse(
+                    &scratch.read,
+                    &scratch.collect_receipt,
+                    &scratch.stopped_borrow,
+                    &scratch.borrow_use_permit,
+                    &scratch.would_block_seed,
+                    &scratch.prepared_admit_use_permit,
+                ) or !client_external_rx_read.resetFinishedPreparedAdmitUse(
+                    &scratch.read,
+                    &scratch.prepared_admit_use_permit,
+                ))
+                    terminal_reason = .invariant_failure;
+            }
+            if (admitted and terminal_reason == null) {
+                if (!acquireCallbackRegion(&scratch.callback_region)) {
+                    terminal_reason = .invariant_failure;
+                } else {
+                    mechanics = self.traverseAndCommitBufferedUnderHeldLease(
+                        lease,
+                        client,
+                        rx_state,
+                        snapshot.live_partial_pending,
+                        scratch,
+                    );
+                    if (!releaseCallbackRegion(&scratch.callback_region))
+                        terminal_reason = .invariant_failure;
+                }
+            }
+        }
+
+        var socket_rx_drained = false;
+        var would_block_disposition: client_external_rx_read.StoppedDisposition =
+            .{
+                .staged = if (admitted) .consumed else .discarded,
+                .would_block = .not_present,
+            };
+        if (scratch.collect_receipt.stop == .would_block) {
+            if (!client_external_rx_read.mintBorrowedWouldBlockSeed(
+                &scratch.read,
+                &scratch.collect_receipt,
+                &scratch.stopped_borrow,
+                &scratch.borrow_use_permit,
+                &scratch.would_block_seed,
+            )) {
+                terminal_reason = .invariant_failure;
+            } else {
+                const completed = if (mechanics) |value| switch (value) {
+                    .completed => |summary| summary.final_readiness == .empty and
+                        !summary.budget_exhausted,
+                    .terminal => false,
+                } else stopped_bytes.len == 0 and
+                    initial_readiness == .empty;
+                if (terminal_reason == null and completed) {
+                    const generation =
+                        client_external_rx_read.consumeWouldBlockSeed(
+                            &scratch.read,
+                            &scratch.borrow_use_permit,
+                            &scratch.would_block_seed,
+                        );
+                    if (generation) |attempt_generation| {
+                        socket_rx_drained =
+                            self.prepareAndConsumeDrainEvidence(
+                                lease,
+                                scratch,
+                                attempt_generation,
+                            );
+                    }
+                    if (!socket_rx_drained)
+                        terminal_reason = .invariant_failure;
+                    would_block_disposition.would_block = .consumed;
+                } else {
+                    if (!client_external_rx_read.abortWouldBlockSeed(
+                        &scratch.read,
+                        &scratch.borrow_use_permit,
+                        &scratch.would_block_seed,
+                    ))
+                        terminal_reason = .invariant_failure;
+                    would_block_disposition.would_block = .aborted;
+                }
+            }
+        }
+        if (!client_external_rx_read.endStoppedUse(
+            &scratch.read,
+            &scratch.collect_receipt,
+            &scratch.stopped_borrow,
+            &scratch.borrow_use_permit,
+        ))
+            terminal_reason = .invariant_failure;
+        if (!client_external_rx_read.settleStopped(
+            &scratch.read,
+            &scratch.collect_receipt,
+            &scratch.stopped_borrow,
+            would_block_disposition,
+        ))
+            terminal_reason = .invariant_failure;
+
+        const read_bytes = if (admitted) stopped_bytes.len else 0;
+        if (terminal_reason) |reason|
+            return self.terminalInjectedRxTurn(reason, read_bytes, 0, 0);
+        const completed = if (mechanics) |value| switch (value) {
+            .terminal => |terminal| return self.terminalInjectedRxTurn(
+                terminal.reason,
+                read_bytes,
+                terminal.rx_bytes,
+                terminal.rx_frames,
+            ),
+            .completed => |summary| summary,
+        } else BufferedTraversalCommitSummary{
+            .rx_bytes = 0,
+            .rx_frames = 0,
+            .final_readiness = initial_readiness,
+            .budget_exhausted = false,
+        };
+        const final_parser: client_pump.ParserReadiness =
+            switch (completed.final_readiness) {
+                .empty => .empty,
+                .incomplete => .incomplete,
+                .complete_or_error => .complete_or_error,
+            };
+        const allowance_stop =
+            client_external_rx_read.classifyAcceptedAllowanceStop(
+                scratch.collect_receipt.allowance,
+                scratch.collect_receipt.accepted_bytes,
+                if (final_parser == .empty) .empty else .incomplete,
+            );
+        if (allowance_stop == .counter_terminal)
+            return self.terminalInjectedRxTurn(
+                .invariant_failure,
+                read_bytes,
+                completed.rx_bytes,
+                completed.rx_frames,
+            );
+        if (allowance_stop == .resident_incomplete_terminal)
+            return self.terminalInjectedRxTurn(
+                .resource_exhausted,
+                read_bytes,
+                completed.rx_bytes,
+                completed.rx_frames,
+            );
+        var result = client_pump.decide(.{
+            .turn = turn,
+            .parser = final_parser,
+            .socket_rx_drained = socket_rx_drained,
+            .rx_frame_budget_exhausted = completed.budget_exhausted,
+            .rx_read_budget_exhausted = scratch.collect_receipt.stop == .attempt_budget_exhausted or
+                allowance_stop == .immediate,
+        });
+        result.rx_read_bytes = read_bytes;
+        result.rx_bytes = completed.rx_bytes;
+        result.rx_frames = completed.rx_frames;
+        return result;
+    }
+
     fn pumpBufferedRxUnderHeldLease(
         self: *ExternalPumpStorage,
         lease: *ExternalWholeTurnLease,
@@ -8369,6 +9702,68 @@ pub const ExternalPumpStorage = struct {
         if (self.releaseWholeTurnLease(&lease) != .released) {
             result = self.terminalRxTurn(
                 .invariant_failure,
+                result.rx_bytes,
+                result.rx_frames,
+            );
+        }
+        return result;
+    }
+
+    /// Product-compilable C4 fixture adapter. C5 alone may wire a POSIX transport or external
+    /// owner callsite; until then this entry is exercised only by tests in this module.
+    fn pumpInjectedRxTurnForTest(
+        self: *ExternalPumpStorage,
+        turn: client_pump.TurnInput,
+        ops: *const RxTurnOps,
+        scratch: *ExternalRxTurnScratch,
+    ) client_pump.TurnResult {
+        if (scratch.saved_self_addr != @intFromPtr(scratch) or
+            scratch.lifecycle != .ready or
+            scratch.callback_region.lifecycle != .ready or
+            active_callback_region_addr != 0)
+            return self.terminalRxTurn(.invariant_failure, 0, 0);
+        var lease: ExternalWholeTurnLease = .{};
+        self.acquireWholeTurnLease(
+            &lease,
+            @intFromPtr(scratch),
+            @sizeOf(ExternalRxTurnScratch),
+        ) catch |err| return switch (err) {
+            error.TransactionBusy => client_pump.decide(.{
+                .turn = turn,
+                .parser = .empty,
+                .socket_rx_drained = false,
+                .inherited_blocker = true,
+            }),
+            else => self.terminalRxTurn(.invariant_failure, 0, 0),
+        };
+        scratch.lifecycle = .busy;
+        scratch.snapshot = .{};
+        scratch.live_consume = .{};
+        scratch.stopped_borrow = .{};
+        scratch.borrow_use_permit = .{};
+        scratch.would_block_seed = .{};
+        scratch.drain_evidence = .{};
+        scratch.quarantine_receipt = .{};
+        scratch.callback_region.permit_addr =
+            @intFromPtr(&scratch.borrow_use_permit);
+        scratch.callback_region.thread_id = std.Thread.getCurrentId();
+        scratch.callback_region.epoch = callback_region_epoch;
+        scratch.callback_region.digest =
+            callbackRegionDigest(&scratch.callback_region);
+        scratch.authority_ranges_generation = self.operation_generation;
+        var result = self.pumpInjectedRxUnderHeldLease(
+            &lease,
+            turn,
+            ops,
+            scratch,
+        );
+        scratch.snapshot = .{};
+        scratch.live_consume = .{};
+        scratch.lifecycle = .ready;
+        if (self.releaseWholeTurnLease(&lease) != .released) {
+            result = self.terminalInjectedRxTurn(
+                .invariant_failure,
+                result.rx_read_bytes,
                 result.rx_bytes,
                 result.rx_frames,
             );
@@ -13702,6 +15097,7 @@ test "d2b3d deferred retirement callback drift is quarantined without blessing a
     try std.testing.expect(storage.commitAdoption() == .adopted);
     const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
     defer std.testing.allocator.destroy(scratch);
+    defer _ = teardownForTest(&storage);
     scratch.* = .{};
     try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
     var context: u8 = 0;
@@ -22399,6 +23795,373 @@ test "C4b shared owner snapshot rebuilds freshly and projects each authority" {
             null,
         ) == .quarantined,
     );
+}
+
+test "C4d product replacement guard rejects phase copy candidate parser inventory and lease drift" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    defer _ = teardownForTest(&storage);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    var lease: ExternalWholeTurnLease = .{};
+    try storage.acquireWholeTurnLease(
+        &lease,
+        @intFromPtr(scratch),
+        @sizeOf(ExternalRxTurnScratch),
+    );
+    defer {
+        scratch.lifecycle = .ready;
+        _ = storage.releaseWholeTurnLease(&lease);
+    }
+    scratch.lifecycle = .busy;
+    scratch.authority_ranges_generation = storage.operation_generation;
+
+    var candidate: u8 = 0;
+    const candidate_range = client_external_mode.ReplacementCandidate{
+        .addr = @intFromPtr(&candidate),
+        .len = 1,
+    };
+    var guard = ProductReplacementAllocationGuard{
+        .storage = &storage,
+        .lease = &lease,
+        .scratch = scratch,
+        .admitted_len = 1,
+    };
+    const captured = ProductReplacementAllocationGuard.check(
+        &guard,
+        .capture_before_allocate,
+        null,
+        null,
+    );
+    const seal = switch (captured) {
+        .seal => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(
+        ProductReplacementAllocationGuard.check(
+            &guard,
+            .validate_allocated,
+            seal,
+            candidate_range,
+        ) == .quarantined,
+    );
+    var copied = guard;
+    try std.testing.expect(
+        ProductReplacementAllocationGuard.check(
+            &copied,
+            .capture_after_allocate,
+            seal,
+            candidate_range,
+        ) == .quarantined,
+    );
+    try std.testing.expect(
+        ProductReplacementAllocationGuard.check(
+            &guard,
+            .capture_after_allocate,
+            seal,
+            candidate_range,
+        ) == .seal,
+    );
+    var wrong_candidate = candidate_range;
+    wrong_candidate.addr +%= 1;
+    try std.testing.expect(
+        ProductReplacementAllocationGuard.check(
+            &guard,
+            .validate_allocated,
+            seal,
+            wrong_candidate,
+        ) == .quarantined,
+    );
+    try std.testing.expect(
+        ProductReplacementAllocationGuard.check(
+            &guard,
+            .validate_allocated,
+            seal,
+            candidate_range,
+        ) == .accepted,
+    );
+
+    const client = &storage.owned_client.?;
+    client.parser.expected_major +%= 1;
+    try std.testing.expect(
+        ProductReplacementAllocationGuard.check(
+            &guard,
+            .capture_after_validate,
+            seal,
+            candidate_range,
+        ) == .quarantined,
+    );
+    client.parser.expected_major -%= 1;
+    lease.digest[0] +%= 1;
+    try std.testing.expect(
+        ProductReplacementAllocationGuard.check(
+            &guard,
+            .capture_after_validate,
+            seal,
+            candidate_range,
+        ) == .quarantined,
+    );
+    lease.digest[0] -%= 1;
+    try std.testing.expect(
+        ProductReplacementAllocationGuard.check(
+            &guard,
+            .capture_after_validate,
+            seal,
+            candidate_range,
+        ) == .seal,
+    );
+
+    var inventory_guard = ProductReplacementAllocationGuard{
+        .storage = &storage,
+        .lease = &lease,
+        .scratch = scratch,
+        .admitted_len = 1,
+    };
+    const inventory_captured = ProductReplacementAllocationGuard.check(
+        &inventory_guard,
+        .capture_before_allocate,
+        null,
+        null,
+    );
+    const inventory_seal = switch (inventory_captured) {
+        .seal => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    storage.pending_response = .terminal;
+    try std.testing.expect(
+        ProductReplacementAllocationGuard.check(
+            &inventory_guard,
+            .capture_after_allocate,
+            inventory_seal,
+            candidate_range,
+        ) == .quarantined,
+    );
+    storage.pending_response = .none;
+
+    var alias_guard = ProductReplacementAllocationGuard{
+        .storage = &storage,
+        .lease = &lease,
+        .scratch = scratch,
+        .admitted_len = 1,
+    };
+    const alias_captured = ProductReplacementAllocationGuard.check(
+        &alias_guard,
+        .capture_before_allocate,
+        null,
+        null,
+    );
+    const alias_seal = switch (alias_captured) {
+        .seal => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    const alias_candidate = client_external_mode.ReplacementCandidate{
+        .addr = @intFromPtr(scratch),
+        .len = @sizeOf(ExternalRxTurnScratch),
+    };
+    try std.testing.expect(
+        ProductReplacementAllocationGuard.check(
+            &alias_guard,
+            .capture_after_allocate,
+            alias_seal,
+            alias_candidate,
+        ) == .seal,
+    );
+    try std.testing.expect(
+        ProductReplacementAllocationGuard.check(
+            &alias_guard,
+            .validate_allocated,
+            alias_seal,
+            alias_candidate,
+        ) == .quarantined,
+    );
+}
+
+test "C4d injected zero-prefix would-block settles and publishes drain once" {
+    const Probe = struct {
+        read_calls: usize = 0,
+        apply_calls: usize = 0,
+
+        fn read(
+            raw: *anyopaque,
+            _: posix.fd_t,
+            _: []u8,
+        ) client_external_rx_read.RxReadOutcome {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.read_calls += 1;
+            return .would_block;
+        }
+
+        fn apply(
+            raw: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.apply_calls += 1;
+            return .applied;
+        }
+    };
+
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    defer _ = teardownForTest(&storage);
+
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    var probe = Probe{};
+    const ops = RxTurnOps{
+        .buffered = .{
+            .context = &probe,
+            .apply_live_screen = Probe.apply,
+        },
+        .transport = .{
+            .context = &probe,
+            .context_len = @sizeOf(Probe),
+            .read = Probe.read,
+        },
+    };
+    const result = storage.pumpInjectedRxTurnForTest(
+        .{ .readable = true, .writable = false, .now_ns = 1 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(result.terminal == null);
+    try std.testing.expect(result.authority_clear);
+    try std.testing.expectEqual(@as(usize, 1), probe.read_calls);
+    try std.testing.expectEqual(@as(usize, 0), probe.apply_calls);
+    try std.testing.expectEqual(@as(usize, 0), result.rx_read_bytes);
+    try std.testing.expectEqual(@as(usize, 0), result.rx_bytes);
+    try std.testing.expectEqual(@as(usize, 0), result.rx_frames);
+    try std.testing.expect(scratch.read.isReady());
+}
+
+test "C4d injected positive prefix admits once traverses and preserves read accounting" {
+    const Probe = struct {
+        wire: []const u8,
+        sent: bool = false,
+        read_calls: usize = 0,
+        apply_calls: usize = 0,
+
+        fn read(
+            raw: *anyopaque,
+            _: posix.fd_t,
+            destination: []u8,
+        ) client_external_rx_read.RxReadOutcome {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.read_calls += 1;
+            if (self.sent) return .would_block;
+            if (destination.len < self.wire.len) return .socket_error;
+            @memcpy(destination[0..self.wire.len], self.wire);
+            self.sent = true;
+            return .{ .bytes = self.wire.len };
+        }
+
+        fn apply(
+            raw: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.apply_calls += 1;
+            return .applied;
+        }
+    };
+
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+
+    const wire = try framing.encodeFrame(
+        std.testing.allocator,
+        .{
+            .kind = .delta_chunk,
+            .stream_id = valid_evidence.stream_id,
+            .flags = protocol.Flags.end_stream,
+        },
+        "c4d",
+    );
+    defer std.testing.allocator.free(wire);
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    defer _ = teardownForTest(&storage);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    var probe = Probe{ .wire = wire };
+    const ops = RxTurnOps{
+        .buffered = .{
+            .context = &probe,
+            .apply_live_screen = Probe.apply,
+        },
+        .transport = .{
+            .context = &probe,
+            .context_len = @sizeOf(Probe),
+            .read = Probe.read,
+        },
+    };
+    const first = storage.pumpInjectedRxTurnForTest(
+        .{ .readable = true, .writable = false, .now_ns = 1 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(first.terminal == null);
+    try std.testing.expect(first.authority_clear);
+    try std.testing.expectEqual(@as(usize, 2), probe.read_calls);
+    try std.testing.expectEqual(wire.len, first.rx_read_bytes);
+    try std.testing.expectEqual(wire.len, first.rx_bytes);
+    try std.testing.expectEqual(@as(usize, 1), first.rx_frames);
+    try std.testing.expectEqual(@as(u8, 1), storage.live_screen.len);
+    try std.testing.expect(scratch.read.isReady());
+    try std.testing.expect(
+        scratch.prepared_admit_use_permit.lifecycle == .empty,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        scratch.read.active_prepared_use_permit_addr,
+    );
+
+    const second = storage.pumpInjectedRxTurnForTest(
+        .{ .readable = false, .writable = false, .now_ns = 2 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(second.terminal == null);
+    try std.testing.expect(second.inherited_work_ready);
+    try std.testing.expectEqual(@as(usize, 1), probe.apply_calls);
+    try std.testing.expectEqual(@as(u8, 0), storage.live_screen.len);
+
+    probe.sent = false;
+    const third = storage.pumpInjectedRxTurnForTest(
+        .{ .readable = true, .writable = false, .now_ns = 3 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(third.terminal == null);
+    try std.testing.expectEqual(wire.len, third.rx_read_bytes);
+    try std.testing.expectEqual(wire.len, third.rx_bytes);
+    try std.testing.expectEqual(@as(usize, 1), third.rx_frames);
 }
 
 test "product payload guard rejects exact and partial guard authority aliases" {

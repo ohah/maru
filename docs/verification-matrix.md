@@ -68,6 +68,23 @@
 > socket callback을 추가하지 않는다. 구조 이동보다 먼저 `advanceValidatedPartial` exact-one 결과의
 > before/after/header/range/identity가 classified intent seal에 포함되고 traversal이 sealed after만
 > 소비하는지 고정한다. 외부 제품 owner→pump와 내부 pump→traversal callsite를 각각 exact-one으로 검사한다.
+> d2c는 **설계 gate C0만 확정했고 구현 전**이다. C1 split frame/read budget policy+sealed resident
+> cap+read DTO/constants/final-address scratch layout, C2 opaque-guarded admit/tombstone-before-callback/no-free
+> quarantine, C3 injected cumulative collector+value-only authority seam, C4 private pump
+> integration+final drain evidence, C5 POSIX 제품 facade+실제 socketpair의 다섯 구현 gate를 순서대로 닫는다.
+> collector는 최초 `maxReadable` allowance 안에서 최대 1 MiB를 누적한 뒤 `staged_len>0`일 때만 guarded
+> admit exact-one과 `traverseBuffered` exact-one을 실행한다. initial complete backlog는 traversal exact-one,
+> zero-prefix would-block은 admit/traversal 0이다. allowance는 resident/turn/counter limit bit를 보존하고
+> 각각의 terminal/immediate 표를 C1에서 고정한다. 기존 `TurnResult.rx_bytes`는 parser-consumed wire bytes,
+> `rx_read_bytes`는 새 transport-accepted bytes로 분리한다. raw would-block observation은 admit/traversal 전
+> parser generation을 authority로 쓰지 않고, final parser exact-empty/current lease·scratch·owner snapshot에서
+> mint한 one-shot `RxDrainEvidence`만 같은 no-callback suffix에서 scheduling fact로 consume한다.
+> C1~C5의 Debug/ReleaseFast component, hostile allocator/callback matrix, boundary, 실제 socketpair와 전체
+> `mise run check`가 모두 green이기 전에는 d2c 또는 2b2d2를 구현으로 표시하지 않는다. d2c product deadline
+> wiring은 입력 source가 생기는 d2e/f 범위이며 d2c는 null-deadline product와 pure deadline regression만
+> 완료 증거로 삼는다. collector callback은 total attempt 64와 staged-prefix validation 64 MiB analytic work
+> cap을 갖고 65번째 callback은 0이다. outer scratch는 기존 structural 2 MiB+read backing 1 MiB+metadata
+> 256 KiB의 exact 3.25 MiB compile-time cap이며 제품/fixture heap exact-one, stack/by-value 생성 0을 검사한다.
 > 현재 **d2b3a~d와 d2c 진입 전 구조 분해 gate는 구현**이다. 구조 분해 증거는 final-address
 > `Scratch`의 generation/lifecycle seal, transport-independent exact-one `traverseBuffered`,
 > dedicated test root, partial before/after intent seal, pump의 direct parser/moveFrame 0과

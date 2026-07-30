@@ -60,6 +60,12 @@ pub const Input = struct {
     payload_guard: *const client_external_mode.PayloadAllocationGuard,
     target_stream_id: u64,
     partial: ?external_rx_demux.ValidatedPartialView,
+    parser_progress: ?ParserProgressOps = null,
+};
+
+pub const ParserProgressOps = struct {
+    context: *anyopaque,
+    refresh: *const fn (*anyopaque) bool,
 };
 
 pub const Summary = struct {
@@ -305,6 +311,21 @@ pub fn traverseBuffered(input: Input) Result {
             rx_bytes,
             rx_frames,
         );
+        if (input.parser_progress) |progress| {
+            if (!progress.refresh(progress.context)) {
+                switch (outcome) {
+                    .frame => |frame| if (frame.frame.payload.len != 0)
+                        input.parser.allocator.free(frame.frame.payload),
+                    .incomplete, .skipped => {},
+                }
+                return closeFailure(
+                    input,
+                    .invariant_failure,
+                    rx_bytes,
+                    rx_frames,
+                );
+            }
+        }
         const range = switch (outcome) {
             .incomplete => {
                 final_readiness = .incomplete;

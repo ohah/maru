@@ -68,8 +68,16 @@
 > socket callback을 추가하지 않는다. 구조 이동보다 먼저 `advanceValidatedPartial` exact-one 결과의
 > before/after/header/range/identity가 classified intent seal에 포함되고 traversal이 sealed after만
 > 소비하는지 고정한다. 외부 제품 owner→pump와 내부 pump→traversal callsite를 각각 exact-one으로 검사한다.
-> d2c는 **설계 gate C0만 확정했고 구현 전**이다. C1 split frame/read budget policy+sealed resident
-> cap+read DTO/constants/final-address scratch layout, C2 opaque-guarded admit/tombstone-before-callback/no-free
+> d2c는 **설계 gate C0와 구현 gate C1을 완료했고 C2~C5는 구현 전**이다. C1은 split
+> frame/read budget policy, Client parser provenance와 storage/lease에 이중 봉인된 resident cap,
+> read DTO/constants/final-address scratch layout, 모든 positive limit tie와 accepted
+> `< / == / >` stop 표를 고정한다. lease는 Client/parser 주소와 전체 provenance를 thread-local snapshot에도
+> 봉인하며 positive consume의 unread 감소량과 buffer-start 증가량이 일치하고 parser generation이 정확히
+> `+1`인 진행만 snapshot을 갱신한다. no-progress generation 재봉인은 거부한다. 일관되게 재봉인된 callback drift는
+> terminal 복원, 복원 불가능한 descriptor drift는 bounded quarantine, teardown callback 뒤 cap/digest는
+> canonical zero가 되는 hostile test를 포함한다. 이 증거를 Debug/ReleaseFast·boundary·전체 check로
+> 고정한 뒤 C1을 merge한다. C2 opaque-guarded
+> admit/tombstone-before-callback/no-free
 > quarantine, C3 injected cumulative collector+value-only authority seam, C4 private pump
 > integration+final drain evidence, C5 POSIX 제품 facade+실제 socketpair의 다섯 구현 gate를 순서대로 닫는다.
 > collector는 최초 `maxReadable` allowance 안에서 최대 1 MiB를 누적한 뒤 `staged_len>0`일 때만 guarded
@@ -85,6 +93,9 @@
 > 완료 증거로 삼는다. collector callback은 total attempt 64와 staged-prefix validation 64 MiB analytic work
 > cap을 갖고 65번째 callback은 0이다. outer scratch는 기존 structural 2 MiB+read backing 1 MiB+metadata
 > 256 KiB의 exact 3.25 MiB compile-time cap이며 제품/fixture heap exact-one, stack/by-value 생성 0을 검사한다.
+> limit bit 동률은 counter terminal → resident+incomplete resource terminal → turn immediate →
+> resident+empty immediate 순서로 해석하며, C1 pure table이 단독·2-way·3-way와 accepted `< / == / >`
+> allowance를 모두 검증한다.
 > 현재 **d2b3a~d와 d2c 진입 전 구조 분해 gate는 구현**이다. 구조 분해 증거는 final-address
 > `Scratch`의 generation/lifecycle seal, transport-independent exact-one `traverseBuffered`,
 > dedicated test root, partial before/after intent seal, pump의 direct parser/moveFrame 0과

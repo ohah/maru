@@ -99,6 +99,7 @@ const Harness = struct {
             &out.state,
             77,
             &normalized,
+            protocol.max_binary_chunk + protocol.header_size,
             @intFromPtr(&out.destination_slot),
             @sizeOf(usize),
             &prepared,

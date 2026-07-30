@@ -82,6 +82,10 @@ src/
                         final-address Scratch lifecycle·mandatory allocation guard·failure cleanup과
                         guarded parser traversal·intent move·partial cursor를 소유; storage/ledger/socket import 0 —
                         **구현됨, P3-d2c 진입 전 구조 분해**),
+                        client_external_rx_read.zig(external mode의 nonblocking RX read DTO,
+                        `client_external_mode.maxReadable` allowance re-export·동률 stop classifier,
+                        1 MiB read/256 KiB metadata 예산과 final-address `ExternalRxReadScratch`를 소유;
+                        collector·POSIX syscall·pump/storage/ledger/traversal import는 후속 gate 전까지 0),
                         client_external_rx_turn_test_support.zig(해당 traversal의 hostile wire/owner fixture 전용,
                         제품 import 0 — **구현됨, P3-d2c 진입 전 구조 분해**),
                         handoff_inventory.zig(session host 동일 PID exec upgrade U0 — terminal core/scrollback page,

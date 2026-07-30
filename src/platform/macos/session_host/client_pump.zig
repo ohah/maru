@@ -38,6 +38,7 @@ pub const ExternalPumpTerminal = struct {
 
 pub const TurnResult = struct {
     rx_bytes: usize = 0,
+    rx_read_bytes: usize = 0,
     rx_frames: usize = 0,
     tx_bytes: usize = 0,
     tx_frames: usize = 0,
@@ -126,7 +127,8 @@ pub const PolicyInput = struct {
     turn: TurnInput,
     parser: ParserReadiness,
     socket_rx_drained: bool,
-    rx_budget_exhausted: bool = false,
+    rx_frame_budget_exhausted: bool = false,
+    rx_read_budget_exhausted: bool = false,
     tx_pending: bool = false,
     control_ready: bool = false,
     inherited_blocker: bool = false,
@@ -167,10 +169,14 @@ pub fn decide(input: PolicyInput) TurnResult {
         return result;
     }
 
-    result.immediate_rx = input.rx_budget_exhausted or input.parser == .complete_or_error;
+    result.immediate_rx = input.rx_frame_budget_exhausted or
+        input.rx_read_budget_exhausted or
+        input.parser == .complete_or_error;
+    if (result.immediate_rx) result.read_interest = false;
     result.authority_clear = input.socket_rx_drained and
         input.parser == .empty and
-        !input.rx_budget_exhausted;
+        !input.rx_frame_budget_exhausted and
+        !input.rx_read_budget_exhausted;
     result.write_interest = input.tx_pending and result.authority_clear;
     if (!result.authority_clear) result.control_ready = false;
     return result;
@@ -308,7 +314,7 @@ test "client pump inherited blocker suppresses parser socket and lower authority
         .turn = .{ .readable = true, .writable = true, .now_ns = 39 },
         .parser = .complete_or_error,
         .socket_rx_drained = true,
-        .rx_budget_exhausted = true,
+        .rx_frame_budget_exhausted = true,
         .tx_pending = true,
         .control_ready = true,
         .inherited_blocker = true,
@@ -343,6 +349,7 @@ test "client pump only clears authority after would-block and an empty parser" {
     });
     try std.testing.expect(!partial.authority_clear);
     try std.testing.expect(!partial.immediate_rx);
+    try std.testing.expect(partial.read_interest);
     try std.testing.expect(!partial.control_ready);
     try std.testing.expect(!partial.write_interest);
 
@@ -353,17 +360,31 @@ test "client pump only clears authority after would-block and an empty parser" {
     });
     try std.testing.expect(!backlog.authority_clear);
     try std.testing.expect(backlog.immediate_rx);
+    try std.testing.expect(!backlog.read_interest);
 
-    const budget = decide(.{
+    const frame_budget = decide(.{
         .turn = .{ .readable = true, .writable = true, .now_ns = 1 },
         .parser = .empty,
         .socket_rx_drained = true,
-        .rx_budget_exhausted = true,
+        .rx_frame_budget_exhausted = true,
         .tx_pending = true,
     });
-    try std.testing.expect(budget.immediate_rx);
-    try std.testing.expect(!budget.authority_clear);
-    try std.testing.expect(!budget.write_interest);
+    try std.testing.expect(frame_budget.immediate_rx);
+    try std.testing.expect(!frame_budget.authority_clear);
+    try std.testing.expect(!frame_budget.write_interest);
+    try std.testing.expect(!frame_budget.read_interest);
+
+    const read_budget = decide(.{
+        .turn = .{ .readable = true, .writable = true, .now_ns = 1 },
+        .parser = .empty,
+        .socket_rx_drained = true,
+        .rx_read_budget_exhausted = true,
+        .tx_pending = true,
+    });
+    try std.testing.expect(read_budget.immediate_rx);
+    try std.testing.expect(!read_budget.authority_clear);
+    try std.testing.expect(!read_budget.write_interest);
+    try std.testing.expect(!read_budget.read_interest);
 }
 
 test "client pump terminal outcomes expose no poll interest" {

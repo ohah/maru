@@ -6944,6 +6944,16 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               1 MiB cap accounting은 `rx_read_bytes` 기준이며 두 counter를 합치거나 parser backlog bytes를 새
               socket read로 계상하지 않는다.
 
+              whole-turn lease는 storage cap seal만 복제하지 않는다. acquire 시 final-address Client/parser와
+              전체 `RxProvenance`를 lease 및 thread-local authority에 함께 봉인하고 모든 validate/release가
+              storage+Client 이중 authority를 대조한다. parser consume처럼 제품이 허용한 진행만 identity,
+              destination, resident cap, absolute-next 불변, unread 감소량과 positive
+              `buffer_start_absolute` 증가량 일치, parser generation 정확히 `+1`을 확인한
+              no-callback suffix에서 snapshot을 갱신한다. allocator/read callback이 provenance를 일관되게
+              변조하고 재봉인하더라도 이 trusted-progress 경로 밖이면 lease release는 frozen provenance를
+              복원하고 terminal로 수렴한다. parser descriptor까지 달라 복원이 불가능하면 bounded quarantine을
+              기록한다. teardown callback 뒤 dead header는 resident cap과 digest를 canonical zero로 재게시한다.
+
               `.would_block` 반환 시에는 아직 parser generation이 admit/traversal 전이므로 raw read-transaction
               observation만 scratch에 봉인한다. guarded admit과 traversal/aggregate가 끝난 뒤 final parser가
               exact empty이고 현재 lease/scratch/owner snapshot, byte/frame budget과 terminal 상태가 모두
@@ -6992,6 +7002,14 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               - validated `.would_block`만 final parser empty에서 drain evidence를 mint할 수 있다. incomplete면
                 `immediate_rx=false`, `read_interest=true`, authority false다.
 
+              여러 limit bit가 같은 마지막 바이트에서 동시에 켜지면 종료 우선순위는
+              **counter terminal → resident+incomplete resource terminal → turn immediate →
+              resident+empty immediate**다. 따라서 resident+turn 동률 뒤 incomplete parser는 resident
+              terminal이고, counter가 포함된 모든 동률은 counter terminal이다. C1의 pure
+              `classifyAcceptedAllowanceStop`이 accepted `< / == / > allowance`, final empty/incomplete,
+              resident/turn/counter 단독·2-way·3-way 동률을 이 표로 고정하며 C3 collector는 이 결과를
+              재해석하지 않는다.
+
               d2c는 다음 다섯 merge gate를 순서대로 닫으며 C1~C5 전부 green이기 전에는 d2c 구현으로 표시하지
               않는다.
 
@@ -7003,8 +7021,12 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 `ExternalRxReadScratch`+단일 1 MiB backing layout을 outer scratch에 additive하게 embed하되 callable
                 collector, socket callback과 제품 read callsite는 0이다. `maxReadable` 결과는
                 `RxReadableAllowance` limit bit를 보존하며 pre-read/last-byte resident·turn·counter 표를 pure
-                fixture로 고정한다. 2 MiB structural+1 MiB backing+256 KiB metadata의 exact outer size budget과
-                heap exact-one/stack-copy 0 boundary도 이 gate가 소유한다.
+                fixture로 고정한다. 동률 종료 우선순위는 counter terminal → resident+incomplete terminal →
+                turn immediate → resident+empty immediate다. 2 MiB structural+1 MiB backing+256 KiB metadata의 exact outer size budget과
+                heap exact-one/stack-copy 0 boundary도 이 gate가 소유한다. whole-turn lease의 Client/parser/
+                provenance snapshot, trusted positive-consume/parser generation `+1` refresh,
+                no-progress 재봉인 거부, 재봉인 drift terminal 복원과
+                teardown callback 뒤 resident-cap canonical zero도 이 gate가 소유한다.
               - **C2 guarded admit:** `client_external_mode`에 opaque `ReplacementAllocationGuard`, typed
                 commit/quarantine outcome과 tombstone-before-callback cleanup을 추가한다. synthetic guard로
                 allocation fail-index, alias, callback drift/reentry와 no-free quarantine을 검증하며 product

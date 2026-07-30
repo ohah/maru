@@ -7580,6 +7580,17 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 경우에만 `ready`를 publish한다. 합법적 cleanup authority로 복구할 수 없는 callback drift,
                 active token 또는 non-pristine prepared owner는 scratch를 sealed `terminal`로 남긴다.
                 terminal scratch는 다음 turn에 재사용하지 않으며 teardown/recovery owner만 처리한다.
+                이 finalizer가 callback-owning API를 몰래 재호출하지 않도록 leaf는 두 typed seam만 추가한다.
+                `client_external_mode.terminalizePreparedAdmitNoCallback`은 authenticated active prepared를
+                free 없이 bounded quarantine tombstone으로 바꾸거나 기존 ordinary/quarantine completion을
+                식별하며 parser provenance를 terminal로 만든다. pump는 반환된 quarantine을 기존 shared
+                accounting→finalize 경로로 exact once 닫는다.
+                `client_external_rx_read.terminalizeStoppedGraphNoCallback`은 prepared-admit이 pristine 또는
+                위 completion으로 닫혔음을 확인한 뒤 `PreparedAdmitUsePermit → WouldBlockSeed →
+                BorrowUsePermit → StoppedBorrow` 순서의 frozen address/digest graph를 callback 없이
+                aborted/terminal tombstone으로 바꾸고 read scratch를 terminal seal한다. 어느 seam도
+                allocator/free, guard/current, parser traversal 또는 scheduling callback을 호출하지 않는다.
+                인증 불가 결과는 child를 임의 zero/reset하지 않고 outer scratch terminal-retained로 남긴다.
 
                 `RxDrainEvidence`는 scratch에 final-address로 embed하고 공개 DTO로 반환하지 않는다. validated
                 would-block seed, stopped receipt, post-admit/traversal parser seal, held lease,

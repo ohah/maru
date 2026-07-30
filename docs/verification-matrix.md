@@ -59,6 +59,14 @@
 > inherited blocker와 teardown만 허용하며 exact take/correlation은 2b2f2에서 개방한다.
 > owner가 nonempty 가능해지기 전 d2b3a teardown capability가 항상 선행해야 한다. d2b3d까지 전부
 > green이기 전에는 d2b3 또는 d2b를 완료로 표시하지 않는다.
+> d2c socket read 전 구조 분해는 별도 선행 gate다. `client_external_rx_turn.zig`가 sealed parser
+> traversal과 partial transition만 소유하고 pump/storage/ledger/socket을 import하지 않는지,
+> `client_external_pump.zig`에는 owner-held exact-one orchestration만 남는지 tokenizer boundary로
+> 검증한다. 기존 d2b3d의 header/partial/optional/1·64·65/late-terminal/allocation-alias hostile
+> matrix를 extraction 전후 동일하게 Debug/ReleaseFast로 실행하며, 이 gate가 green이기 전에는 d2c
+> socket callback을 추가하지 않는다. 구조 이동보다 먼저 `advanceValidatedPartial` exact-one 결과의
+> before/after/header/range/identity가 classified intent seal에 포함되고 traversal이 sealed after만
+> 소비하는지 고정한다. 외부 제품 owner→pump와 내부 pump→traversal callsite를 각각 exact-one으로 검사한다.
 > 현재 **d2b3a~d는 구현**이다. d2b3a 증거는 private final-address owner 3종,
 > 공통 `ResponsePayloadSeal`·`FrozenResponsePayloadCleanup`, partial 1+screen 64+response의 canonical aggregate
 > teardown, 동일 `LiveOwnerBlockerProjection`의 true→tombstone false, descriptor/content/allocator drift의

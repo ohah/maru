@@ -78,6 +78,10 @@ src/
                         src/main.zig hidden 서브커맨드),
                         client.zig(GUI/CLI 측 host connect·hello·host_id 확정·read-only command 왕복 — server dispatch의 대칭,
                         순수 JSON helper·fork host roundtrip smoke, macOS 전용 — **구현됨, P3-e1**),
+                        client_external_rx_turn.zig(external mode의 transport-independent sealed parser traversal,
+                        intent move와 partial transition만 소유; storage/ledger/socket import 0),
+                        client_external_rx_turn_test_support.zig(해당 traversal의 hostile wire/owner fixture 전용,
+                        제품 import 0),
                         handoff_inventory.zig(session host 동일 PID exec upgrade U0 — terminal core/scrollback page,
                         PTY/reader/queue, Surface/owner registry/runtime link, RuntimeManager/host registry/socket owner field를
                         serialized/reconstructed/inherited_resource/must_be_empty로 compile-time 전수 분류; 실제 codec/exec는

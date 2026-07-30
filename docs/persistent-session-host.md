@@ -6913,6 +6913,102 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               outcome만 반환하며 global cross-owner latch는 만지지 않는다. C4 pump가 quarantine outcome을 받아
               latch를 한 번만 기록한다.
 
+              C2의 공개 leaf 계약은 frame payload용 기존 `PayloadAllocationGuard`와 별도인 다음 타입으로
+              고정한다.
+
+              ```zig
+              const ReplacementAuthoritySeal = struct {
+                  generation: u64,
+                  digest: owner_seal.Digest,
+              };
+              const ReplacementGuardPhase = enum {
+                  capture_before_allocate,
+                  validate_allocated,
+                  capture_after_validate,
+                  capture_before_cleanup,
+                  validate_after_cleanup,
+                  capture_after_cleanup_validate,
+              };
+              const ReplacementCandidate = struct { addr: usize, len: usize };
+              const ReplacementGuardResult = union(enum) {
+                  seal: ReplacementAuthoritySeal,
+                  accepted: ReplacementAuthoritySeal,
+                  quarantined,
+              };
+              const ReplacementAllocationGuard = struct {
+                  context: *anyopaque,
+                  check: *const fn (
+                      *anyopaque,
+                      ReplacementGuardPhase,
+                      ?ReplacementAuthoritySeal,
+                      ?ReplacementCandidate,
+                  ) ReplacementGuardResult,
+              };
+              const GuardedAdmitFailure = struct {
+                  reason: RxPrepareError,
+              };
+              const GuardedAdmitQuarantine = struct {
+                  phase: enum { allocation, abort_cleanup, commit_cleanup },
+                  leaked_bytes: usize,
+              };
+              const GuardedAdmitPrepareOutcome = union(enum) {
+                  prepared,
+                  ordinary_failure: GuardedAdmitFailure,
+                  allocation_quarantined: GuardedAdmitQuarantine,
+              };
+              const GuardedAdmitCommitOutcome = union(enum) {
+                  committed,
+                  ordinary_failure: GuardedAdmitFailure,
+                  allocation_quarantined: GuardedAdmitQuarantine,
+                  post_commit_quarantined: GuardedAdmitQuarantine,
+              };
+              const GuardedAdmitAbortOutcome = union(enum) {
+                  aborted,
+                  ordinary_failure: GuardedAdmitFailure,
+                  allocation_quarantined: GuardedAdmitQuarantine,
+              };
+              ```
+
+              공개 함수명은 `prepareAdmitGuarded`, `commitPreparedAdmitGuarded`,
+              `abortPreparedAdmitGuarded`다. quarantine DTO는 pointer·allocator·free capability를 노출하지
+              않는다. 같은 candidate의 결과는 prepared tombstone 또는 canonical terminal 전이와 함께 한 번만
+              반환되며 stale/double commit·abort는 leaked bytes를 다시 보고하지 않는 `ordinary_failure`다.
+              기존 `prepareAdmit`/`commitPreparedAdmit`/`abortPreparedAdmit`는 C2 동안 callback-free
+              no-replacement test helper만 허용하고 replacement allocation 제품·fixture callsite는 0이다. guarded
+              API가 unguarded allocation 함수를 호출하는 구현은 금지한다.
+
+              mode는 guard descriptor(context/check 주소), state/parser final address, 전체 provenance/parser
+              seal, allocator ptr/vtable, input addr/len/digest, prepared final address/pristine, resident cap을
+              allocation 전 frozen local seal에 함께 넣는다. `capture_before_allocate` 뒤 raw allocation callback,
+              raw addr/len checked arithmetic과 local alias 검사, frozen descriptor의
+              `validate_allocated`, `capture_after_validate` 순서로 실행한다. 두 capture와 accepted seal은
+              generation/digest가 exact-equal이어야 한다. raw pointer는 이 순서를 모두 통과하기 전 typed slice
+              변환·hash·read·write·free 0이다. allocated validation은 candidate가 길이
+              `1...resident_cap`이고 storage/lease/scratch/read backing, Client/parser/backing,
+              intent/aggregate, ledger/live/metadata/response owner 전부와 disjoint일 때만 accepted다. guard가
+              phase와 맞지 않는 result, generation 0·불일치, zero digest를 반환해도 fail-closed quarantine이다.
+
+              결과와 observable state는 다음 표가 SSOT다.
+
+              | 경계 | 결과 | parser/counter | prepared/busy | free/quarantine |
+              | --- | --- | --- | --- | --- |
+              | preflight 입력·cap·overflow 실패 또는 raw allocation OOM | `ordinary_failure` | source exact 보존 | pristine, busy false | free 0, quarantine 0 |
+              | no-replacement spare-capacity commit | `committed` | append+reseal | committed, busy false | callback/free/quarantine 0 |
+              | raw addr overflow·wrong length·local/product alias·alloc/check callback drift | `allocation_quarantined` | canonical terminal, counter 증가 0 | callback 없이 tombstone, busy false | candidate free 0, leaked bytes exact once |
+              | prepared 성공 뒤 commit 전 token/input/source drift, cleanup guard valid | `ordinary_failure` | source exact 보존 | callback 전 aborted tombstone와 terminal-busy, 반환 시 busy false | replacement exact-one free |
+              | prepared 성공 뒤 commit 전 cleanup guard invalid/drift | `allocation_quarantined` | canonical terminal | callback 없이 tombstone, busy false | replacement free 0, leaked bytes exact once |
+              | safe abort | `aborted` | source exact 보존 | callback 전 aborted tombstone와 terminal-busy, 반환 시 bound authority 복원·busy false | replacement exact-one free |
+              | abort free callback drift/reentry | `allocation_quarantined` | canonical terminal | callback 전 tombstone, busy false로 종결 | replacement free exact once, 추가 free 0 |
+              | replacement publish+reseal 뒤 old-backing cleanup 정상 | `committed` | 새 bytes/counter authoritative | callback 전 committed tombstone, 반환 시 busy false | old backing exact-one free |
+              | commit old-backing callback 뒤 descriptor/content/provenance drift | `post_commit_quarantined` | rollback 금지, canonical terminal | callback 전 committed tombstone, busy false로 종결 | old backing exact-one free, 새 backing은 free 0·leaked bytes exact once |
+
+              publication 전 failure에서 “source exact 보존”은 cleanup callback 동안에는 재진입을 막기 위해
+              terminal-busy projection을 먼저 publish하고, callback 뒤 frozen source descriptor/content/provenance와
+              guard seal이 모두 일치할 때만 bound authority를 복원한다는 뜻이다. 그 검증이 실패하면 ordinary로
+              되돌리지 않고 canonical terminal quarantine이다. publication 뒤 old-backing callback drift는 새
+              backing을 다시 free하거나 old descriptor를 복원하지 않고 `post_commit_quarantined`로 끝낸다. 이미
+              publication된 bytes/counter를 성공으로 보고하지 않으며 이후 RX 진입은 0이다.
+
               guarded abort/free는 disjoint와 cleanup digest가 증명된 allocator/ptr/len을 frozen local로 옮긴
               뒤 replacement primary와 cleanup mirror를 callback **전에** consumed/aborted tombstone으로
               만든다. 목표 `State.rx_operation_busy`와 parser terminal state도 callback 전에 확정한다. free
@@ -6928,6 +7024,23 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               `max_cross_owner_quarantine_bytes`는 checked addition으로 이 값을 정확히 한 번 더하며 overflow는
               compile error다. quarantine event/accounting은 actual leaked length가 이 named bound 이하인지
               검증하고 같은 replacement를 다른 quarantine 항목에 중복 가산하지 않는다.
+
+              C2에서 guard callback은 allocation/free를 직접 수행하거나 candidate contents를 읽지 않는다.
+              mode는 callback 전 `rx_operation_busy=true`를 먼저 publish하고 모든 callback suffix에서 이를
+              유지하므로 guard·allocator의 동기 재진입은 `InvalidState`이고 allocation/read/write/free 0이다.
+              cleanup 직전에는 frozen allocator identity/range/seal을 local value로 옮기고 prepared의
+              `replacement`, `cleanup_replacement`, allocator authority와 cleanup digest를 pristine sentinel로
+              지운 뒤 lifecycle을 `.aborted` 또는 `.committed`로 만든다. callback 뒤에는 prepared를 다시 읽지
+              않는다. synthetic allocator/guard fixture는 allocation fail-index 전수, state/parser/out/bytes/
+              old-backing alias, guard seal drift, allocation/free callback 재진입, primary/mirror 한쪽 변조,
+              pre-commit exact-one free, post-commit old-backing exact-one free와 no-free quarantine 상한을
+              Debug/ReleaseFast에서 고정한다.
+
+              C2 boundary는 `client_external_mode`의 pump/storage/ledger/owner-range/global-quarantine import와
+              mutation 0, synthetic guarded-admit test callsite만 허용, collector/POSIX/
+              `client_external_pump`/`external_pump_owner` 제품 guarded-admit callsite 0, legacy unguarded
+              replacement callsite 0을 tokenizer로 검사한다. C4에서만 product owner-range inventory를 exact-once
+              투영하고 quarantine DTO를 global latch/accounting에 exact once 소비한다.
 
               scratch 크기 예산은 기존 read 전 structural 상한
               `max_external_rx_turn_structural_bytes = 2 MiB`, exact read backing 1 MiB,

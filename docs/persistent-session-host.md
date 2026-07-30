@@ -7730,9 +7730,10 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 비교한다. callback 경계를 넘어 snapshot을 cache하지 않으며, 각 검증은 builder exact-one이고
                 한 검증 안에서만 세 projection이 owner graph를 다시 walk하지 않는다. hostile fixture는
                 phase별 rebuild call count와 generation/digest drift를 고정한다. **C4c**는 C4-owned
-                active-use permit, would-block seed handoff와 drain evidence lifecycle을 C3 module에 추가한다.
-                **C4d**에서만 `pumpInjectedRxUnderHeldLease`와 private product-compilable `RxTurnOps` fixture를
-                연결한다. 네 gate가 모두 green이기 전에는 C4 구현으로 표시하지 않는다.
+                active-use permit과 would-block seed handoff lifecycle을 C3 module에 추가한다.
+                **C4d**에서만 pump-private drain evidence lifecycle과
+                `pumpInjectedRxUnderHeldLease`, private product-compilable `RxTurnOps` fixture를 연결한다.
+                네 gate가 모두 green이기 전에는 C4 구현으로 표시하지 않는다.
               - **C5 product closure:** `external_pump_owner`가 `RxTurnOps`의 exact-one 제품 entry를 사용하고 POSIX
                 adapter가 errno만 `RxReadOutcome`으로 변환한다. 실제 Darwin socketpair, readable+writable
                 syscall-order, 전체 hostile/product matrix와 boundary/full check를 통과하고 기존

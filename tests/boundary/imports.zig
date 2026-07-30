@@ -1931,6 +1931,9 @@ test "d2c C4 collector integration stays transport-leaf and pump-private" {
         defer allocator.free(path);
         const source = try readZigFileZ(allocator, path);
         defer allocator.free(source);
+        const product_end = std.mem.indexOf(u8, source, "\ntest \"") orelse
+            source.len;
+        const product_source = source[0..product_end];
         const is_fixture = std.mem.eql(
             u8,
             entry.path,
@@ -1942,31 +1945,31 @@ test "d2c C4 collector integration stays transport-leaf and pump-private" {
                 "@import(\"client_external_rx_read.zig\")",
             );
             product_collector_calls += countOccurrences(
-                source,
+                product_source,
                 ".collectInjected(",
             );
             product_completion_calls += countOccurrences(
-                source,
+                product_source,
                 ".resetFinishedPreparedAdmit(",
             );
             product_completion_calls += countOccurrences(
-                source,
+                product_source,
                 ".finalizeQuarantinedPreparedAdmit(",
             );
             product_completion_calls += countOccurrences(
-                source,
+                product_source,
                 ".accountGuardedAdmitQuarantine(",
             );
             product_prepared_use_begin_calls += countOccurrences(
-                source,
+                product_source,
                 ".beginPreparedAdmitUse(",
             );
             product_prepared_use_finish_calls += countOccurrences(
-                source,
+                product_source,
                 ".finishPreparedAdmitUse(",
             );
             product_prepared_use_reset_calls += countOccurrences(
-                source,
+                product_source,
                 ".resetFinishedPreparedAdmitUse(",
             );
             if (!std.mem.eql(
@@ -2004,8 +2007,6 @@ test "d2c C4 collector integration stays transport-leaf and pump-private" {
 
         // Exact identifier allowlists catch multiline declarations, arrays, by-value returns,
         // and explicit stack construction rather than relying on one-line `var` spelling.
-        const product_end = std.mem.indexOf(u8, source, "\ntest \"") orelse
-            source.len;
         var tokenizer = std.zig.Tokenizer.init(source);
         while (true) {
             const token = tokenizer.next();

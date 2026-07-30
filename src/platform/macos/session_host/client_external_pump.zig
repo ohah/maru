@@ -2507,6 +2507,7 @@ const ProductReplacementGuardPhase = enum {
     allocating,
     allocation_captured,
     allocated,
+    validated_captured,
     cleanup_abort,
     cleanup_abort_validated,
     cleanup_commit,
@@ -2782,6 +2783,8 @@ const ProductReplacementAllocationGuard = struct {
             return .quarantined;
 
         if (phase == .capture_before_cleanup) {
+            if (self.phase != .validated_captured)
+                return .quarantined;
             const checked = candidate;
             const source_candidate: ?client_external_mode.ReplacementCandidate =
                 if (self.source_seal.capacity == 0)
@@ -2933,12 +2936,14 @@ const ProductReplacementAllocationGuard = struct {
                 self.digest = self.stateDigest();
                 break :blk self.originalResult(true);
             },
-            .capture_after_validate => if (self.phase == .allocated and
-                candidate != null and
-                std.meta.eql(candidate.?, self.replacement_candidate))
-                self.originalResult(false)
-            else
-                .quarantined,
+            .capture_after_validate => blk: {
+                if (self.phase != .allocated or candidate == null or
+                    !std.meta.eql(candidate.?, self.replacement_candidate))
+                    break :blk .quarantined;
+                self.phase = .validated_captured;
+                self.digest = self.stateDigest();
+                break :blk self.originalResult(false);
+            },
             else => .quarantined,
         };
     }
@@ -23984,6 +23989,253 @@ test "C4d product replacement guard rejects phase copy candidate parser inventor
             alias_candidate,
         ) == .quarantined,
     );
+}
+
+test "C4d product replacement cleanup requires validated capture and seals abort and zero-cap commit" {
+    const Helper = struct {
+        fn advance(
+            guard: *ProductReplacementAllocationGuard,
+            candidate: client_external_mode.ReplacementCandidate,
+        ) !client_external_mode.ReplacementAuthoritySeal {
+            const captured = ProductReplacementAllocationGuard.check(
+                guard,
+                .capture_before_allocate,
+                null,
+                null,
+            );
+            const seal = switch (captured) {
+                .seal => |value| value,
+                else => return error.TestUnexpectedResult,
+            };
+            try std.testing.expect(
+                ProductReplacementAllocationGuard.check(
+                    guard,
+                    .capture_after_allocate,
+                    seal,
+                    candidate,
+                ) == .seal,
+            );
+            try std.testing.expect(
+                ProductReplacementAllocationGuard.check(
+                    guard,
+                    .validate_allocated,
+                    seal,
+                    candidate,
+                ) == .accepted,
+            );
+            return seal;
+        }
+
+        fn captureValidated(
+            guard: *ProductReplacementAllocationGuard,
+            seal: client_external_mode.ReplacementAuthoritySeal,
+            candidate: client_external_mode.ReplacementCandidate,
+        ) !void {
+            try std.testing.expect(
+                ProductReplacementAllocationGuard.check(
+                    guard,
+                    .capture_after_validate,
+                    seal,
+                    candidate,
+                ) == .seal,
+            );
+        }
+    };
+
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    defer _ = teardownForTest(&storage);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    var lease: ExternalWholeTurnLease = .{};
+    try storage.acquireWholeTurnLease(
+        &lease,
+        @intFromPtr(scratch),
+        @sizeOf(ExternalRxTurnScratch),
+    );
+    defer {
+        scratch.lifecycle = .ready;
+        _ = storage.releaseWholeTurnLease(&lease);
+    }
+    scratch.lifecycle = .busy;
+    scratch.authority_ranges_generation = storage.operation_generation;
+
+    const client = &storage.owned_client.?;
+    const state = switch (client.io_mode) {
+        .external => |*external| external,
+        .blocking => return error.TestUnexpectedResult,
+    };
+    const bound_provenance = state.rx_provenance;
+    var candidate_byte: u8 = 0;
+    const candidate = client_external_mode.ReplacementCandidate{
+        .addr = @intFromPtr(&candidate_byte),
+        .len = 1,
+    };
+
+    var skipped = ProductReplacementAllocationGuard{
+        .storage = &storage,
+        .lease = &lease,
+        .scratch = scratch,
+        .admitted_len = 1,
+    };
+    const skipped_seal = try Helper.advance(&skipped, candidate);
+    state.rx_provenance = .{ .lifecycle = .terminal };
+    try std.testing.expect(
+        ProductReplacementAllocationGuard.check(
+            &skipped,
+            .capture_before_cleanup,
+            skipped_seal,
+            candidate,
+        ) == .quarantined,
+    );
+    state.rx_provenance = bound_provenance;
+
+    var aborted = ProductReplacementAllocationGuard{
+        .storage = &storage,
+        .lease = &lease,
+        .scratch = scratch,
+        .admitted_len = 1,
+    };
+    const abort_seal = try Helper.advance(&aborted, candidate);
+    try Helper.captureValidated(&aborted, abort_seal, candidate);
+    try std.testing.expect(
+        ProductReplacementAllocationGuard.check(
+            &aborted,
+            .capture_after_validate,
+            abort_seal,
+            candidate,
+        ) == .quarantined,
+    );
+    state.rx_provenance = .{ .lifecycle = .terminal };
+    try std.testing.expect(
+        ProductReplacementAllocationGuard.check(
+            &aborted,
+            .capture_before_cleanup,
+            abort_seal,
+            candidate,
+        ) == .seal,
+    );
+    try std.testing.expect(
+        ProductReplacementAllocationGuard.check(
+            &aborted,
+            .validate_after_cleanup,
+            abort_seal,
+            candidate,
+        ) == .accepted,
+    );
+    try std.testing.expect(
+        ProductReplacementAllocationGuard.check(
+            &aborted,
+            .validate_after_cleanup,
+            abort_seal,
+            candidate,
+        ) == .quarantined,
+    );
+    try std.testing.expect(
+        ProductReplacementAllocationGuard.check(
+            &aborted,
+            .capture_after_cleanup_validate,
+            abort_seal,
+            candidate,
+        ) == .seal,
+    );
+    try std.testing.expect(
+        ProductReplacementAllocationGuard.check(
+            &aborted,
+            .capture_after_cleanup_validate,
+            abort_seal,
+            candidate,
+        ) == .quarantined,
+    );
+    state.rx_provenance = bound_provenance;
+
+    var abort_drift = ProductReplacementAllocationGuard{
+        .storage = &storage,
+        .lease = &lease,
+        .scratch = scratch,
+        .admitted_len = 1,
+    };
+    const drift_seal = try Helper.advance(&abort_drift, candidate);
+    try Helper.captureValidated(&abort_drift, drift_seal, candidate);
+    state.rx_provenance = .{ .lifecycle = .terminal };
+    try std.testing.expect(
+        ProductReplacementAllocationGuard.check(
+            &abort_drift,
+            .capture_before_cleanup,
+            drift_seal,
+            candidate,
+        ) == .seal,
+    );
+    client.parser.expected_major +%= 1;
+    try std.testing.expect(
+        ProductReplacementAllocationGuard.check(
+            &abort_drift,
+            .validate_after_cleanup,
+            drift_seal,
+            candidate,
+        ) == .quarantined,
+    );
+    client.parser.expected_major -%= 1;
+    state.rx_provenance = bound_provenance;
+
+    try std.testing.expectEqual(@as(usize, 0), client.parser.buf.capacity);
+    const replacement = try client.parser.allocator.alloc(u8, 1);
+    defer client.parser.allocator.free(replacement);
+    var committed = ProductReplacementAllocationGuard{
+        .storage = &storage,
+        .lease = &lease,
+        .scratch = scratch,
+        .admitted_len = 1,
+    };
+    const commit_candidate = client_external_mode.ReplacementCandidate{
+        .addr = @intFromPtr(replacement.ptr),
+        .len = replacement.len,
+    };
+    const commit_seal = try Helper.advance(&committed, commit_candidate);
+    try Helper.captureValidated(&committed, commit_seal, commit_candidate);
+    const source_buf = client.parser.buf;
+    const source_head = client.parser.head;
+    state.rx_provenance = .{ .lifecycle = .terminal };
+    try std.testing.expect(
+        ProductReplacementAllocationGuard.check(
+            &committed,
+            .capture_before_cleanup,
+            commit_seal,
+            null,
+        ) == .seal,
+    );
+    client.parser.buf.items = replacement;
+    client.parser.buf.capacity = replacement.len;
+    client.parser.head = 0;
+    try std.testing.expect(
+        ProductReplacementAllocationGuard.check(
+            &committed,
+            .validate_after_cleanup,
+            commit_seal,
+            null,
+        ) == .accepted,
+    );
+    try std.testing.expect(
+        ProductReplacementAllocationGuard.check(
+            &committed,
+            .capture_after_cleanup_validate,
+            commit_seal,
+            null,
+        ) == .seal,
+    );
+    client.parser.buf = source_buf;
+    client.parser.head = source_head;
+    state.rx_provenance = bound_provenance;
 }
 
 test "C4d injected zero-prefix would-block settles and publishes drain once" {

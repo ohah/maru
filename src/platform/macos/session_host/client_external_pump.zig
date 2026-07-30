@@ -10,6 +10,7 @@ const c = std.c;
 const posix = std.posix;
 const client_mod = @import("client.zig");
 const client_external_mode = @import("client_external_mode.zig");
+const client_external_rx_turn = @import("client_external_rx_turn.zig");
 const client_external_adoption = @import("client_external_adoption.zig");
 const client_pump = @import("client_pump.zig");
 const compatibility = @import("compatibility.zig");
@@ -1950,8 +1951,7 @@ pub const ExternalRxTurnScratch = struct {
     lifecycle: ExternalRxTurnScratchLifecycle = .empty,
     snapshot: InheritedRxBlockerSnapshot = .{},
     live_consume: LiveScreenConsumePermit = .{},
-    parse: client_external_mode.RxParseScratch = .{},
-    intent: external_rx_intent.ExternalRxIntentHandle = .{},
+    traversal: client_external_rx_turn.Scratch = .{},
     client_ranges: client_mod.ExternalSourceOwnerRangeScratch = undefined,
     authority_ranges: external_owner_range.Scratch = .{},
     aggregate_ranges: external_owner_range.Scratch = .{},
@@ -1964,8 +1964,9 @@ pub const ExternalRxTurnScratch = struct {
         out.lifecycle = .ready;
         out.snapshot = .{};
         out.live_consume = .{};
-        out.parse = .{};
-        out.intent = .{};
+        out.traversal = .{};
+        if (!client_external_rx_turn.Scratch.initInPlace(&out.traversal))
+            return false;
         out.authority_ranges.reset();
         out.aggregate_ranges.reset();
         out.authority_ranges_generation = 0;
@@ -2088,6 +2089,20 @@ const ProductPayloadAllocationGuard = struct {
         allocation_len: usize,
     ) client_external_mode.PayloadAllocationVerdict {
         const self: *@This() = @ptrCast(@alignCast(raw));
+        if (rangesOverlap(
+            allocation_addr,
+            allocation_len,
+            @intFromPtr(self),
+            @sizeOf(@This()),
+        ) or rangesOverlap(
+            allocation_addr,
+            allocation_len,
+            @intFromPtr(self.authority),
+            @sizeOf(ProductIntentAuthority),
+        )) {
+            latchCrossOwnerQuarantine();
+            return .reject_no_free;
+        }
         const view = ProductIntentAuthority.current(self.authority) orelse {
             latchCrossOwnerQuarantine();
             return .reject_no_free;
@@ -7331,17 +7346,22 @@ pub const ExternalPumpStorage = struct {
             .authority = &authority,
         };
         const payload_guard = payload_guard_owner.ops();
-        const intent_result = if (scratch.intent.lifecycle == .empty)
+        const intent_result = if (scratch.traversal.intent.lifecycle == .empty)
             self.createIntentScratch(
-                &scratch.intent,
+                &scratch.traversal.intent,
                 client.parser.allocator,
                 authority_ops,
             )
         else switch (external_rx_intent.resetForNextTurn(
-            &scratch.intent,
+            &scratch.traversal.intent,
             authority_ops,
         )) {
-            .ready => external_rx_intent.CreateResult.allocated,
+            .ready => if (client_external_rx_turn.Scratch.resetForNextTurn(
+                &scratch.traversal,
+            ))
+                external_rx_intent.CreateResult.allocated
+            else
+                external_rx_intent.CreateResult.authority_drift,
             .invalid_state => external_rx_intent.CreateResult.authority_drift,
         };
         if (intent_result != .allocated)
@@ -7354,192 +7374,78 @@ pub const ExternalPumpStorage = struct {
                 0,
             );
 
-        var rx_bytes: usize = 0;
-        var rx_frames: usize = 0;
-        var classified_count: u8 = 0;
-        var budget_exhausted = false;
-        var final_readiness = initial_readiness;
-        var partial = if (snapshot.live_partial_pending)
+        const partial = if (snapshot.live_partial_pending)
             self.validatedPartialContinuation() orelse
                 return self.abortClassifiedRxTurn(
-                    &scratch.intent,
+                    &scratch.traversal.intent,
                     .invariant_failure,
                     0,
                     0,
                 )
         else
             null;
-        while (rx_frames < external_rx_intent.max_intents) {
-            const readiness = client_external_mode.parserReadiness(
-                rx_state,
-                &client.parser,
-            ) catch return self.abortClassifiedRxTurn(
-                &scratch.intent,
-                .invariant_failure,
-                rx_bytes,
-                rx_frames,
-            );
-            final_readiness = readiness;
-            if (readiness != .complete_or_error) break;
-            scratch.parse = .{};
-            var outcome = client_external_mode.nextOutcomeWithRangeGuarded(
-                rx_state,
-                &client.parser,
-                &scratch.parse,
-                &payload_guard,
-            ) catch |err| return self.abortClassifiedRxTurn(
-                &scratch.intent,
-                blk: {
-                    if (err == error.AllocationQuarantined)
-                        latchCrossOwnerQuarantine();
-                    break :blk switch (err) {
-                        error.Protocol => .protocol_error,
-                        error.OutOfMemory => .resource_exhausted,
-                        else => .invariant_failure,
-                    };
-                },
-                rx_bytes,
-                rx_frames,
-            );
-            const range = switch (outcome) {
-                .incomplete => {
-                    final_readiness = .incomplete;
-                    break;
-                },
-                .skipped => |range| range,
-                .frame => |frame| frame.range,
-            };
-            const span = std.math.sub(
-                u64,
-                range.end_absolute,
-                range.start_absolute,
-            ) catch return self.abortClassifiedRxTurn(
-                &scratch.intent,
-                .invariant_failure,
-                rx_bytes,
-                rx_frames,
-            );
-            rx_bytes = std.math.add(
-                usize,
-                rx_bytes,
-                std.math.cast(usize, span) orelse
-                    return self.abortClassifiedRxTurn(
-                        &scratch.intent,
-                        .resource_exhausted,
-                        rx_bytes,
-                        rx_frames,
-                    ),
-            ) catch return self.abortClassifiedRxTurn(
-                &scratch.intent,
-                .resource_exhausted,
-                rx_bytes,
-                rx_frames,
-            );
-            rx_frames += 1;
-            switch (outcome) {
-                .incomplete, .skipped => {},
-                .frame => {
-                    const frame_header = outcome.frame.frame.header;
-                    const frame_range = outcome.frame.range;
-                    const move = external_rx_intent.moveFrame(
-                        &scratch.intent,
-                        &outcome,
-                        authority_ops,
-                        self.evidence_snapshot.stream_id,
-                        partial,
-                    );
-                    scratch.parse = .{};
-                    switch (move) {
-                        .classified => {
-                            classified_count += 1;
-                            if (frame_header.kind == .snapshot_chunk or
-                                frame_header.kind == .delta_chunk)
-                            {
-                                partial = external_rx_demux
-                                    .advanceValidatedPartial(
-                                    partial,
-                                    frame_header,
-                                    frame_range,
-                                    self.evidence_snapshot.stream_id,
-                                ) catch return self.abortClassifiedRxTurn(
-                                    &scratch.intent,
-                                    .invariant_failure,
-                                    rx_bytes,
-                                    rx_frames,
-                                );
-                            }
-                        },
-                        .protocol_terminal => return self.terminalRxTurn(
-                            .protocol_error,
-                            rx_bytes,
-                            rx_frames,
-                        ),
-                        .capacity => return self.abortClassifiedRxTurn(
-                            &scratch.intent,
-                            .resource_exhausted,
-                            rx_bytes,
-                            rx_frames,
-                        ),
-                        .invalid_source, .authority_drift, .replay, .alias, .poisoned => return self.abortClassifiedRxTurn(
-                            &scratch.intent,
-                            .invariant_failure,
-                            rx_bytes,
-                            rx_frames,
-                        ),
-                    }
-                },
-            }
-        }
-        if (rx_frames == external_rx_intent.max_intents) {
-            final_readiness = client_external_mode.parserReadiness(
-                rx_state,
-                &client.parser,
-            ) catch return self.abortClassifiedRxTurn(
-                &scratch.intent,
-                .invariant_failure,
-                rx_bytes,
-                rx_frames,
-            );
-            budget_exhausted = final_readiness == .complete_or_error;
-        }
-        if (classified_count == 0) {
-            if (external_rx_intent.abortAll(&scratch.intent) != .cleaned)
+        const traversal = client_external_rx_turn.traverseBuffered(.{
+            .state = rx_state,
+            .parser = &client.parser,
+            .scratch = &scratch.traversal,
+            .authority = authority_ops,
+            .payload_guard = &payload_guard,
+            .target_stream_id = self.evidence_snapshot.stream_id,
+            .partial = partial,
+        });
+        const summary = switch (traversal) {
+            .terminal => |failure| {
+                if (failure.reason == .allocation_quarantined)
+                    latchCrossOwnerQuarantine();
                 return self.terminalRxTurn(
-                    .invariant_failure,
-                    rx_bytes,
-                    rx_frames,
+                    switch (failure.reason) {
+                        .protocol_error => .protocol_error,
+                        .resource_exhausted => .resource_exhausted,
+                        .invariant_failure, .allocation_quarantined => .invariant_failure,
+                    },
+                    failure.rx_bytes,
+                    failure.rx_frames,
                 );
-            var result = client_pump.decide(.{
-                .turn = turn,
-                .parser = switch (final_readiness) {
-                    .empty => .empty,
-                    .incomplete => .incomplete,
-                    .complete_or_error => .complete_or_error,
-                },
-                .socket_rx_drained = false,
-                .rx_budget_exhausted = budget_exhausted,
-            });
-            result.rx_bytes = rx_bytes;
-            result.rx_frames = rx_frames;
-            return result;
-        }
+            },
+            .no_intents => |empty| {
+                var result = client_pump.decide(.{
+                    .turn = turn,
+                    .parser = switch (empty.final_readiness) {
+                        .empty => .empty,
+                        .incomplete => .incomplete,
+                        .complete_or_error => .complete_or_error,
+                    },
+                    .socket_rx_drained = false,
+                    .rx_budget_exhausted = empty.budget_exhausted,
+                });
+                result.rx_bytes = empty.rx_bytes;
+                result.rx_frames = empty.rx_frames;
+                return result;
+            },
+            .staged => |staged| staged,
+        };
+        const rx_bytes = summary.rx_bytes;
+        const rx_frames = summary.rx_frames;
+        const classified_count = summary.classified_count;
+        const final_readiness = summary.final_readiness;
+        const budget_exhausted = summary.budget_exhausted;
 
         switch (self.createRxAggregateWithAuthority(
             lease,
-            &scratch.intent,
+            &scratch.traversal.intent,
             client.parser.allocator,
             authority_ops,
             &scratch.aggregate_ranges,
         )) {
             .allocated => {},
             .out_of_memory => return self.abortClassifiedRxTurn(
-                &scratch.intent,
+                &scratch.traversal.intent,
                 .resource_exhausted,
                 rx_bytes,
                 rx_frames,
             ),
             .invalid_state, .authority_drift, .quarantined => return self.abortClassifiedRxTurn(
-                &scratch.intent,
+                &scratch.traversal.intent,
                 .invariant_failure,
                 rx_bytes,
                 rx_frames,
@@ -7548,7 +7454,7 @@ pub const ExternalPumpStorage = struct {
         for (0..classified_count) |intent_index| {
             const move_result = self.moveScreenIntoRxAggregate(
                 lease,
-                &scratch.intent,
+                &scratch.traversal.intent,
                 @intCast(intent_index),
                 authority_ops,
             );
@@ -7556,7 +7462,7 @@ pub const ExternalPumpStorage = struct {
                 .wrong_intent => continue,
                 .staged => {},
                 else => {
-                    _ = self.abortRxAggregate(lease, &scratch.intent);
+                    _ = self.abortRxAggregate(lease, &scratch.traversal.intent);
                     return self.terminalRxTurn(
                         .invariant_failure,
                         rx_bytes,
@@ -7566,7 +7472,7 @@ pub const ExternalPumpStorage = struct {
             }
             const transfer_result = self.transferScreenToLedger(
                 lease,
-                &scratch.intent,
+                &scratch.traversal.intent,
                 @intCast(intent_index),
             );
             const admit_result = if (transfer_result == .staged)
@@ -7577,7 +7483,7 @@ pub const ExternalPumpStorage = struct {
             else
                 RxAggregateTransferResult.invalid_state;
             if (transfer_result != .staged or admit_result != .staged) {
-                _ = self.abortRxAggregate(lease, &scratch.intent);
+                _ = self.abortRxAggregate(lease, &scratch.traversal.intent);
                 return self.terminalRxTurn(
                     .resource_exhausted,
                     rx_bytes,
@@ -7587,10 +7493,10 @@ pub const ExternalPumpStorage = struct {
         }
         const finalize_result = self.finalizeRxAggregate(
             lease,
-            &scratch.intent,
+            &scratch.traversal.intent,
         );
         if (finalize_result != .finalized) {
-            _ = self.abortRxAggregate(lease, &scratch.intent);
+            _ = self.abortRxAggregate(lease, &scratch.traversal.intent);
             return self.terminalRxTurn(
                 .protocol_error,
                 rx_bytes,
@@ -7599,11 +7505,11 @@ pub const ExternalPumpStorage = struct {
         }
         const commit_result = self.commitRxAggregate(
             lease,
-            &scratch.intent,
+            &scratch.traversal.intent,
         );
         if (commit_result != .committed) {
             if (commit_result == .invalid_state)
-                _ = self.abortRxAggregate(lease, &scratch.intent);
+                _ = self.abortRxAggregate(lease, &scratch.traversal.intent);
             return self.terminalRxTurn(
                 .invariant_failure,
                 rx_bytes,
@@ -10025,7 +9931,7 @@ fn moveIntentFrameForTest(
     target_stream_id: u64,
 ) external_rx_intent.MoveResult {
     if (comptime !builtin.is_test) unreachable;
-    return external_rx_intent.moveFrame(
+    return client_external_rx_turn.testing.moveFrameForFixture(
         handle,
         source,
         authority_ops,
@@ -21009,4 +20915,44 @@ test "external pump storage overlap arithmetic covers partial and adjacent range
     try std.testing.expect(!rangesOverlap(100, 20, 80, 20));
     try std.testing.expect(!rangesOverlap(100, 20, 120, 20));
     try std.testing.expect(rangesOverlap(std.math.maxInt(usize) - 1, 4, 0, 1));
+}
+
+test "product payload guard rejects exact and partial guard authority aliases" {
+    resetCrossOwnerQuarantineForTest();
+    defer resetCrossOwnerQuarantineForTest();
+    var authority: ProductIntentAuthority = undefined;
+    var guard = ProductPayloadAllocationGuard{ .authority = &authority };
+    const cases = [_]struct { address: usize, len: usize }{
+        .{
+            .address = @intFromPtr(&guard),
+            .len = @sizeOf(ProductPayloadAllocationGuard),
+        },
+        .{
+            .address = @intFromPtr(&guard) + 1,
+            .len = 1,
+        },
+        .{
+            .address = @intFromPtr(&authority),
+            .len = @sizeOf(ProductIntentAuthority),
+        },
+        .{
+            .address = @intFromPtr(&authority) + 1,
+            .len = 1,
+        },
+    };
+    for (cases) |case| {
+        try std.testing.expectEqual(
+            client_external_mode.PayloadAllocationVerdict.reject_no_free,
+            ProductPayloadAllocationGuard.check(
+                &guard,
+                case.address,
+                case.len,
+            ),
+        );
+    }
+    try std.testing.expect(cross_owner_quarantine_latched.load(.acquire));
+    try std.testing.expectEqual(
+        @as(u64, cases.len),
+        cross_owner_quarantine_events.load(.acquire),
+    );
 }

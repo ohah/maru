@@ -8004,49 +8004,237 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 Debug/ReleaseFast `test-session-host`, 실제 socketpair product fixture, `check-boundaries`와 전체
                 `mise run check`가 모두 같은 계약의 merge gate다.
 
-            - **d2d — RX-first whole-turn composition:** caller-owned scratch와 private one-shot permit의 exact
-              계약은 아래와 같다. scratch는 1 MiB read backing과 최대 64개의 prepared intent/payload owner를
-              가지며 storage inline cap에 포함하지 않는다. caller가 heap-pinned final address에 `initInPlace`하고
-              storage/Client/parser/ledger/backing과 range-disjoint임을 preflight한다. 호출 전 ready, 호출 뒤
-              모든 intent/permit/drain이 committed/aborted tombstone이어야 하며 callback/turn 밖 borrow는
-              escape하지 않는다.
+            - **d2d — RX-first whole-turn composition:** caller-owned outer scratch와 private one-shot permit의
+              exact 계약은 아래와 같다. outer scratch는 final-address traversal handle, 1.25 MiB bounded read
+              backing, C4 authority children과 d2d permit을 가진다. inline traversal scratch의 intent handle은
+              현재 classified intent를 소유하고, storage의 sealed `rx_aggregate_handle`과
+              `rx_aggregate_reservation`이 최대 64개 prepared intent/payload의 별도 bounded aggregate heap
+              allocation을 소유한다. d2d는 이 owner를 scratch로 이관하지 않는다. aggregate allocation은
+              storage inline cap에 포함하지 않으며 outer scratch의 compile-time 상한은 구조 2 MiB+read
+              1.25 MiB의 3.25 MiB다. caller가 outer scratch를 heap-pinned final address에 `initInPlace`하고
+              storage/Client/parser/ledger/backing과 range-disjoint임을 preflight한다. 호출 전 ready다.
+              reusable nonterminal return은 intent/permit/cleanup seed/callback/borrow가 committed/aborted
+              tombstone을 거쳐 pristine으로 reset되고 다음 turn generation을 가지며, authenticated
+              `drain_evidence=.finished`만 다음 entry reset을 위해 남을 수 있다. ordinary terminal은 canonical
+              terminal scratch, authority corruption은 terminal-only poisoned scratch라 재사용하지 않는다.
+              tombstone 전이는 test recorder로 관측하지만 반환된 재사용 가능 scratch에는 spent permit을 남기지
+              않고 callback/turn 밖 borrow도 escape하지 않는다.
+
+              d2d의 merge 범위는 **RX가 lower suffix를 실행해도 되는 조건을 private permit으로 증명하고,
+              임시 RX-only adapter가 그 permit을 같은 lease에서 반드시 abort하는 데까지**다. permit을 consume해
+              TX/input/control mutation을 실행하는 owner, request/response correlation, recovery commit,
+              revoke notification과 실제 write/EAGAIN/error 처리는 각각 d2e/f1/f2/f3가 소유한다. 따라서 d2d
+              제품 fixture의 `writable=true`는 RX-first와 lower syscall/mutation 0을 증명하지만 실제 TX 성공을
+              뜻하지 않는다. 아래 최종 f3 설명과 send 직전 검증 항목은 d2d가 미리 고정하는 permit 계약의
+              소비자 요구사항이며, d2d 자체 완료 증거로 계산하지 않는다.
+
+              d2d는 다음 네 gate를 순서대로 닫는다.
+
+              1. **D0 lifecycle/SSOT:** 별도 pure leaf `client_external_turn_authority.zig`가
+                 `AuthorityGeneration`, immutable seed/view와 private product permit을 소유한다. permit의
+                 empty→prepared→aborted tombstone, final-address/digest/generation 검증과 spent reset을 pure
+                 hostile matrix와 boundary red로 먼저 고정한다. `consumed` tag는 wire/layout 예약만 하며 consume
+                 함수와 제품 callsite는 f3 전까지 0이다. leaf는 `ExternalPumpStorage`를 import하거나 callback
+                 ops를 받지 않는다.
+              2. **D1 prepare leaf:** 기존 C5 RX mechanics를 caller-held mutable `ExternalWholeTurnLease` 아래
+                 private `prepareRxTurn` exact-one leaf로 둔다. parser/admit 진행은 기존
+                 `refreshWholeTurnRxAuthorityAfterAdmit/ParserProgress`가 같은 lease provenance와 digest를
+                 갱신한다. leaf는 `socket_rx_drained`가 없는 private tagged `RxPreparation`을 반환한다. outer는
+                 consumed drain evidence를 fresh 검증해 `client_pump.decide`와 drained scheduling publication을
+                 exact-one 수행하고, 이어 `finishRxDrainEvidence`로 evidence를 `.finished`로 닫는다. 그 뒤
+                 no-callback held-lease suffix만 finished evidence에서 permit seed를 투영한다. terminal,
+                 inherited blocker, parser nonempty, frame/read/work budget stop, final blocker, drain 미증명 중
+                 하나라도 있으면 permit prepare는 0이고 lower authority도 0이다.
+              3. **D2 adapter abort:** public 임시 `pumpRxTurn`은 lease acquire→`prepareRxTurn`→outer
+                 decide/publication→drain finish→permit prepare/fresh validate→abort→spent tombstone
+                 검증→같은 current view에서 `resetSpent`→permit/cleanup seed pristine 검증→lease release를 한
+                 경로로 닫는다. return 시 유효 prepared permit과 spent permit이 모두 0, active callback/borrow/
+                 drain 0이며 `TurnResult.authority_clear`만 scheduling 관측값으로 남는다.
+              4. **D3 product/hostile evidence:** actual socketpair의
+                 (a) zero-prefix empty would-block+readable+writable에서 read first, lower TX/input/control
+                 admission 0과 permit prepare→abort→reset exact-one,
+                 (b) complete positive frame→would-block에서 RX admit/traverse는 허용하되 owner backlog 때문에
+                 permit prepare 0, `authority_clear=false`, lower TX/input/control admission 0을 분리해 검증한다.
+                 injected inherited/parser/budget/terminal 표도 같은 lower authority 0을 고정한다.
+                 copied/moved/stale/double/cross-storage permit,
+                 generation max와 prepare/abort 사이 owner/parser/drain drift는 lower mutation 0의 terminal로
+                 닫는다. Debug/ReleaseFast, boundary와 전체 check가 모두 green이어야 d2d를 구현으로 표시한다.
 
               ```zig
-              const PreparedAuthorityPermit = struct {
-                  saved_self_addr: usize,
+              // Pump가 current owners에서 투영하는 pointer-free immutable DTO. Leaf는 이 값의
+              // address/generation/opaque digest exact match만 판정한다.
+              const Seed = struct {
+                  permit_addr: usize,
+                  cleanup_seed_addr: usize,
                   storage_addr: usize,
+                  owner_incarnation: u64,
+                  owner_incarnation_digest: external_owner_seal.Digest,
+                  scratch_addr: usize,
+                  scratch_turn_generation: u64,
+                  lease_addr: usize,
+                  // ExternalWholeTurnLease.operation_generation의 canonical alias다.
                   operation_generation: u64,
+                  lease_digest: external_owner_seal.Digest,
+                  client_addr: usize,
+                  parser_addr: usize,
                   parser_generation: u64,
+                  parser_seal_digest: external_owner_seal.Digest,
+                  rx_provenance_digest: external_owner_seal.Digest,
                   rx_absolute_next: u64,
+                  drain_evidence_addr: usize,
+                  // RxDrainEvidence.read_attempt_generation의 canonical alias다.
+                  drain_read_attempt_generation: u64,
+                  drain_evidence_digest: external_owner_seal.Digest,
+                  // snapshot을 consume tombstone으로 덮기 전 frozen copy의 digest다.
+                  inherited_blocker_snapshot_digest: external_owner_seal.Digest,
+                  final_owner_snapshot_digest: external_owner_seal.Digest,
+                  final_parser_readiness: FinalParserReadiness,
+                  drain_evidence_lifecycle: FinishedDrainLifecycle,
+                  final_blockers_clear: bool,
+                  read_budget_remaining: bool,
+                  frame_budget_remaining: bool,
+                  work_budget_remaining: bool,
+                  terminal_or_revoke: bool,
+                  semantic_active: bool,
+                  reentry_clear: bool,
+                  attachment_role: AttachmentRole,
+                  authority_flow: OwnerAuthorityFlow,
+                  owner_authority_seal_digest: external_owner_seal.Digest,
+                  authority_generation: AuthorityGeneration,
+              };
+              const CurrentView = Seed;
+
+              const FinalParserReadiness = enum { empty, incomplete, complete_or_error };
+              const FinishedDrainLifecycle = enum { finished };
+              const AttachmentRole = enum { controller, observer };
+              const OwnerAuthorityFlow = enum { initial_fence, clear };
+
+              const FrozenCleanupSeed = struct {
+                  saved_self_addr: usize,
+                  permit_addr: usize,
+                  scratch_addr: usize,
+                  seed: Seed,
+                  lifecycle: enum { empty, prepared, consumed },
+                  digest: external_owner_seal.Digest,
+              };
+
+              // `client_external_turn_authority.zig`가 소유하는 sealed lifecycle record.
+              const PreparedAuthorityPermit = struct {
+                  domain: [8]u8,
+                  version: u16,
+                  saved_self_addr: usize,
+                  cleanup_seed_addr: usize,
+                  storage_addr: usize,
+                  owner_incarnation: u64,
+                  owner_incarnation_digest: external_owner_seal.Digest,
+                  scratch_addr: usize,
+                  scratch_turn_generation: u64,
+                  lease_addr: usize,
+                  operation_generation: u64,
+                  lease_digest: external_owner_seal.Digest,
+                  client_addr: usize,
+                  parser_addr: usize,
+                  parser_generation: u64,
+                  parser_seal_digest: external_owner_seal.Digest,
+                  rx_provenance_digest: external_owner_seal.Digest,
+                  rx_absolute_next: u64,
+                  drain_evidence_addr: usize,
+                  drain_read_attempt_generation: u64,
+                  drain_evidence_digest: external_owner_seal.Digest,
+                  inherited_blocker_snapshot_digest: external_owner_seal.Digest,
+                  final_owner_snapshot_digest: external_owner_seal.Digest,
+                  final_parser_readiness: FinalParserReadiness,
+                  drain_evidence_lifecycle: FinishedDrainLifecycle,
+                  final_blockers_clear: bool,
+                  read_budget_remaining: bool,
+                  frame_budget_remaining: bool,
+                  work_budget_remaining: bool,
+                  terminal_or_revoke: bool,
+                  semantic_active: bool,
+                  reentry_clear: bool,
+                  attachment_role: AttachmentRole,
+                  authority_flow: OwnerAuthorityFlow,
+                  owner_authority_seal_digest: external_owner_seal.Digest,
                   authority_generation: AuthorityGeneration,
                   lifecycle: enum { empty, prepared, consumed, aborted },
                   digest: external_owner_seal.Digest,
               };
 
-              const ExternalRxTurnScratch = struct {
-                  saved_self_addr: usize,
-                  lifecycle: ExternalRxTurnScratchLifecycle,
-                  snapshot: InheritedRxBlockerSnapshot,
-                  live_consume: LiveScreenConsumePermit,
-                  traversal: client_external_rx_turn.Scratch,
-                  read: ExternalRxReadScratch,
-                  drain: RxDrainEvidence,
-                  permit: PreparedAuthorityPermit,
-                  client_ranges: client.ExternalSourceOwnerRangeScratch,
-                  authority_ranges: external_owner_range.Scratch,
-                  aggregate_ranges: external_owner_range.Scratch,
-                  authority_ranges_generation: u64,
-                  digest: external_owner_seal.Digest,
+              // Leaf public surface. DTO/permit 외 owner pointer와 callback은 받거나 반환하지 않는다.
+              const PrepareResult = enum {
+                  prepared,
+                  ineligible,
+                  invalid_seed,
+                  destination_not_empty,
+              };
+              const AbortResult = enum { aborted, invalid_authority };
+              const CleanupAbortResult = enum { aborted, invalid_authority };
+              pub fn prepare(
+                  out: *PreparedAuthorityPermit,
+                  cleanup: *FrozenCleanupSeed,
+                  seed: Seed,
+              ) PrepareResult;
+              pub fn validate(
+                  permit: *const PreparedAuthorityPermit,
+                  current: CurrentView,
+              ) bool;
+              pub fn abort(
+                  permit: *PreparedAuthorityPermit,
+                  current: CurrentView,
+              ) AbortResult;
+              pub fn abortForCleanup(
+                  permit: *PreparedAuthorityPermit,
+                  cleanup: *FrozenCleanupSeed,
+              ) CleanupAbortResult;
+              pub fn resetSpent(
+                  permit: *PreparedAuthorityPermit,
+                  cleanup: *FrozenCleanupSeed,
+                  current: CurrentView,
+              ) bool;
+
+              // C5 canonical outer scratch에 추가되는 d2d delta만 표시한다. C4 final-address children,
+              // `drain_evidence`, callback region, borrow/use permits와 quarantine receipt는 그대로 유지한다.
+              const ExternalWholeTurnScratchDelta = struct {
+                  authority_permit: PreparedAuthorityPermit,
+                  authority_cleanup_seed: FrozenCleanupSeed,
+                  turn_generation: u64,
+              };
+
+              // d2d~f2는 canonical allocation/layout을 하나만 유지한다.
+              const ExternalWholeTurnScratch = ExternalRxTurnScratch;
+
+              const RxPolicyFacts = struct {
+                  turn: client_pump.TurnInput,
+                  parser: client_pump.ParserReadiness,
+                  rx_frame_budget_exhausted: bool,
+                  rx_read_budget_exhausted: bool,
+                  work_budget_exhausted: bool,
+                  inherited_blocker: bool,
+                  terminal: ?client_pump.ExternalPumpTerminal,
+                  deadlines: [5]?i128,
+              };
+
+              const RxPreparedSummary = struct {
+                  policy: RxPolicyFacts,
+                  rx_read_bytes: usize,
+                  rx_bytes: usize,
+                  rx_frames: usize,
+              };
+
+              const RxPreparation = union(enum) {
+                  terminal: RxPreparedSummary,
+                  without_drain: RxPreparedSummary,
+                  drained: RxPreparedSummary,
               };
 
               // Private exact-one leaf. Caller already owns the storage operation lease.
               fn prepareRxTurn(
                   self: *ExternalPumpStorage,
-                  turn_lease: *const ExternalWholeTurnLease,
+                  turn_lease: *ExternalWholeTurnLease,
                   turn: client_pump.TurnInput,
                   ops: *const RxTurnOps,
                   scratch: *ExternalRxTurnScratch,
-              ) client_pump.TurnResult;
+              ) RxPreparation;
 
               // d2 product adapter: prepares RX and aborts any permit before releasing the lease.
               pub fn pumpRxTurn(
@@ -8065,9 +8253,71 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               ) client_pump.TurnResult;
               ```
 
-              acquire 실패는 pristine lease out의 `.empty`를 mutation 없이 보존하고 global lease를 잡지 않는다.
-              성공 lease는 outer defer의 `releaseWholeTurnLease` 하나만 `.released`로 전이하며 copied/moved/double
-              release는 storage/global lease mutation 0이다.
+              `RxPreparation`은 permit pointer/view 또는 `socket_rx_drained` 같은 copyable authority bool을 담지
+              않는다. `.terminal`은 `policy.terminal != null`, `.without_drain`은 terminal null이지만
+              authenticated drained scheduling fact가 없으며, `.drained`는 mutation permit이 아니라
+              **consumed drain evidence가 scratch에 존재한다는 synchronous scheduling branch**다. outer는 pinned
+              scratch의 evidence를 fresh 검증한 뒤에만 `PolicyInput.socket_rx_drained=true`를 조립해
+              `client_pump.decide`를 exact-one 호출하고 evidence를 finish한다. 그 뒤 scratch에서 새
+              `Seed/CurrentView`를 투영해 permit prepare/validate/abort/reset을 수행한다. private
+              `prepareRxTurn` 내부 `client_pump.decide` callsite는 0이다.
+
+              `Seed`의 inherited digest는 `snapshotInheritedRxBlockersUnderHeldLease` 직후 immutable local copy로
+              freeze하고, consumed snapshot tombstone에서 재구성하지 않는다. permit prepare 직전 pump는 current
+              owner/parser/lease/**finished drain**을 다시 투영한 `CurrentView`가 seed와 exact match하는지 확인한다.
+              drain generation의 canonical source는 `RxDrainEvidence.read_attempt_generation`이고 evidence lifecycle은
+              exact `.finished`다. mutation permit은 `attachment_role=.controller`,
+              `authority_flow=.clear`, valid owner-authority seal과
+              authority generation이 `.tracked(n>0)`일 때만 가능하다. `.untracked`와 `.tracked(0)`은
+              role과 무관하게 permit prepare mutation 0이며, observer는
+              `.tracked(0)`을 포함해 유효한 read-only attachment지만 permit은 ineligible이고,
+              `controller/tracked(0)`은 기존 authority SSOT대로 invalid다. budget 하나라도 소진,
+              `terminal_or_revoke=true`, `semantic_active=false`, `reentry_clear=false`, blocker false가 아니거나
+              parser readiness가 exact `.empty`가 아니면 leaf `prepare`는 `.ineligible`로 permit/cleanup mutation
+              0을 반환한다. malformed/final-address/digest 불일치는 `.invalid_seed`, non-pristine destination은
+              `.destination_not_empty`이고 모두 mutation 0이다. abort 계열의 비성공도 `.invalid_authority`이며
+              mutation 0이다.
+
+              `work_budget_remaining`의 canonical 계산은
+              `summary.rx_frames < external_rx_intent.max_intents`다. skipped/optional unknown도 `rx_frames`에
+              포함한다. parser가 empty라 기존 `Summary.budget_exhausted=false`여도 exact 64 frame/work를
+              소비했으면 false다. `read_budget_remaining`은 C4 canonical `!read_budget_exhausted`
+              (attempt stop+allowance stop 포함), `frame_budget_remaining`은 `!summary.budget_exhausted`다.
+              outer는 `PolicyInput.rx_frame_budget_exhausted =
+              facts.rx_frame_budget_exhausted || facts.work_budget_exhausted`로 매핑해 scheduling
+              `authority_clear`도 permit eligibility와 어긋나지 않게 한다.
+
+              scratch `turn_generation`은 `initInPlace`에서 1로 시작한다. 각 entry는 generation max를 먼저
+              거부하고, 이전 authenticated finished drain을 reset한 뒤 permit/cleanup seed/callback/borrow children
+              pristine을 확인하고 current generation을 turn에 봉인한 다음에만 lease를 acquire한다.
+              모든 reusable nonterminal branch는 중앙 `resetForNextTurn` epilogue 하나를 통과한다. prepared
+              경로는 abort→spent 검증→same-lease permit/cleanup reset, permit 0 경로는 두 destination pristine,
+              공통으로 intent/callback/borrow closure를 검증한 뒤 checked `+1`로 next generation을 만들고 ready를
+              반환한다. 따라서 permit 0 경로도 cross-turn stale view와 generation을 공유하지 않는다. ordinary
+              terminal과 poison은 generation을 올리거나 ready로 reset하지 않는다. max인 ready scratch의 다음
+              entry는 lease acquire와 scratch/permit mutation 0으로 terminalize하며 wrap하지 않는다.
+
+              `FrozenCleanupSeed`는 permit과 함께 scratch final address에 prepare되고 permit에서 재구성하지 않는다.
+              successful `prepare`만 permit=`prepared`와 cleanup seed=`prepared`를 한 atomic publication으로
+              만들고 다른 결과는 둘 다 mutation 0이다. normal abort는 permit을 `aborted`로 만든 뒤
+              `resetSpent`가 `(permit aborted, cleanup prepared, fresh CurrentView)`를 exact 검증해 둘 다
+              pristine으로 reset한다. `abortForCleanup`은 intact frozen seed로 permit=`aborted`,
+              cleanup=`consumed` tombstone을 만들고 scratch가 terminal-only이므로 reset하지 않는다.
+              정상 abort와 `resetSpent`는 fresh `CurrentView` exact match가 필요하다. prepare 뒤 owner/parser/drain drift,
+              public reentry latch 또는 semantic terminal이 생기면 lower suffix는 0이고 callback-free
+              `abortForCleanup`만 canonical lease/final address, permit 자체 seal과 scratch-owned frozen cleanup
+              seed를 검증해 terminal 상태에서도 aborted tombstone으로 닫는다. permit 또는 cleanup seed 자체
+              descriptor/digest까지 untrusted라 cleanup이 안전하지 않으면
+              permit에 쓰지 않고 scratch를 terminal-only poison, storage를 `.invariant_failure`로 만들며 canonical
+              lease finalizer만 실행한다. 이 경우 함수 밖에 **유효한** prepared authority는 없고 scratch는 reset/
+              reuse할 수 없다. intact 기존 terminal reason은 보존하지만 permit/lease authority drift가 있으면
+              `.invariant_failure`가 우선한다.
+
+              acquire 실패는 pristine lease out의 `.empty`를 보존하고 global lease를 잡지 않는다. 단 같은 storage의
+              nested public entry는 기존 d2b1 SSOT대로 `operation_reentry_latched=true`를 기록할 수 있으며, 이
+              latch 이외 mutation은 0이다. 성공 lease는 outer exact-one release finalizer만 `.released`로
+              전이하며 copied/moved/double release는 storage/global lease mutation 0이다. acquire 뒤 모든
+              failpoint와 early result가 이 finalizer를 통과함을 자동 검증한다.
 
               outer `pumpRxTurn`/`pumpWholeTurn`이 `ExternalPumpStorage` canonical operation lease를 먼저 잡고,
               private `prepareRxTurn` 안에서만 d1의 short-lived `rx_operation_busy`를 사용한다.
@@ -8140,52 +8390,55 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             실제 TX write를 구현하지 않고 내부 permit을 같은 lease에서 abort한다. 최종 f3 whole-turn만 내부 permit을
             consume하며 같은 readiness의 RX에서 terminal/revoke가 나오면 write/admission은 0이다.
 
-            d2 component/product gate는 Debug/ReleaseFast에서 다음을 모두 고정한다.
+            아래는 d2d부터 f3까지의 **단계별 owner가 누적해 고정하는 전체 gate 목록**이다. d2d 완료는 위
+            D0~D3와 아래 `[d2d]` 항목만 계산하며, `[d2e]`·`[f1]`·`[f2]`·`[f3]` 항목은 각 후속
+            owner가 구현하기 전까지 해당 단계의 미완료 증거다.
 
-            - pure classifier가 own/foreign stream, stream 0 response, flags/request-ID, known-unexpected kind와
+            - **[d2d]** pure classifier가 own/foreign stream, stream 0 response, flags/request-ID, known-unexpected kind와
               partial batch의 event/response/stream/snapshot-kind/end mismatch 전수를 allocation/mutation 0으로
               분류한다.
-            - socket 없는 turn이 inherited blocker에서 기존 consumer/projector wake만 반환하고 raw pending queue
+            - **[d2d]** socket 없는 turn이 inherited blocker에서 기존 consumer/projector wake만 반환하고 raw pending queue
               접근·parser/socket 0인지, blocker 해소 뒤 buffered parser를 처리하는지 검증한다. known+optional
               1/64/65, complete backlog의 read syscall 0과 canonical ledger final-zero도 고정한다.
-            - injected callback이 bytes, EINTR 0/8/9, would-block, EOF, hard error, requested+1, admit OOM/drift,
+            - **[d2d]** injected callback이 bytes, EINTR 0/8/9, would-block, EOF, hard error, requested+1, admit OOM/drift,
               resident/counter exact boundary를 검증한다. accepted bytes 1 MiB/cap+1과 one-read multi-frame도
               포함한다.
-              - header 1/31/32 byte와 payload 마지막 1 byte partial 뒤 would-block에서 TX 0,
-              `read_interest=true`를 검증하고 다음 byte가 revoke를 완성하면 terminal이다. d2c의 product facade는
-              deadline source가 아직 없으므로 `PolicyInput.deadlines=null`만 전달한다. raw/partial/control/recovery
-              deadline의 storage source와 product pass-through는 d2e/f에서 결합하며, d2c 완료 증거는 기존
-              `client_pump` pure deadline regression만 유지하고 product deadline wiring을 주장하지 않는다.
-            - both-readable+writable 실제 socketpair에서 revoke가 frame 1/64/65에 있을 때 terminal 판정 전 peer
+              - **[d2d]** header 1/31/32 byte와 payload 마지막 1 byte partial 뒤 would-block에서 TX 0,
+                `read_interest=true`를 검증하고 다음 byte가 revoke를 완성하면 terminal이다. d2d까지 product
+                facade는 `PolicyInput.deadlines=null`만 전달한다.
+              - **[d2e/f]** raw/partial/control/recovery deadline의 storage source와 product pass-through를
+                결합한다. d2d 완료 증거는 기존 `client_pump` pure deadline regression만 유지하고 product
+                deadline wiring을 주장하지 않는다.
+            - **[d2d]** both-readable+writable 실제 socketpair에서 revoke가 frame 1/64/65에 있을 때 terminal 판정 전 peer
               TX 0이다. 65번째 revoke는 첫 turn immediate/authority false, zero-time 다음 turn terminal이다.
-            - optional unknown 64개 뒤 revoke, foreign screen/event/response, 같은 turn의
+            - **[d2d]** optional unknown 64개 뒤 revoke, foreign screen/event/response, 같은 turn의
               response candidate→snapshot→revoke/ended 순열에서 lower semantic/control/input/TX publish 0과 exact
               cleanup을 검증한다. response expected-kind/request correlation은 f2 fixture가 소유한다.
-            - inherited blocker+parser backlog+kernel readable+writable에서 consumer/projector wake 이외
+            - **[d2d]** inherited blocker+parser backlog+kernel readable+writable에서 consumer/projector wake 이외
               parser/read/write/admission 0을 검증한다. common work budget 64/cap+1과 blocker 해소 뒤 zero-time
               continuation도 고정한다.
-            - terminal/deadline×inherited×parser empty/incomplete/complete×budget decision table과
+            - **[d2d]** terminal×inherited×parser empty/incomplete/complete×budget decision table과
               stale/copy/cross-turn/cross-storage inherited false snapshot, snapshot 뒤 owner generation drift를
               검증한다. invalid snapshot은 parser readiness/outcome과 socket syscall 0이다. screen pending
               summary는 1/4,096 retained에서 O(1) counter가 같고 consume 뒤 reseal되며 init/adopt/last-consume/
               quarantine/teardown lifecycle과 live FIFO head/len seal drift를 함께 고정한다.
-            - drain evidence와 authority permit의 stale/double/cross-storage/cross-generation 사용,
+            - **[d2d]** drain evidence와 authority permit의 stale/double/cross-storage/cross-generation 사용,
               turn/public-method 재진입, allocation fail-index와 payload exact-once move/free를 검증한다.
               fixture-only pure policy와 실제 socketpair 제품 경로를 별도로 표시한다.
-            - partial first/continuation/end 뒤 ledger lease가 first-start→last-end `RxRange`를 보존하는지,
+            - **[d2d]** partial first/continuation/end 뒤 ledger lease가 first-start→last-end `RxRange`를 보존하는지,
               barrier 직전/이후 1-byte 경계와 identity/token generation drift를 검증한다. adopted `.untracked`
               provenance는 external freshness에 사용할 수 없다. compact start/span max/cap+1, checked end
               overflow, incoming-start!=old-end, 다른 ledger identity와 A→B→A replay도 mutation 0이다.
               validate/relabel/merge/view/authority digest 전 경로에서 provenance가 보존되는지 고정한다.
               `ExternalPumpStorage` 512 KiB inline budget과
               slot semantic size가 Debug/ReleaseFast compile-time gate를 유지한다.
-            - response candidate가 d2 return 뒤 f2 take 전 payload/content/allocator mutation, copy/double/stale
+            - **[f2]** response candidate가 d2 return 뒤 f2 take 전 payload/content/allocator mutation, copy/double/stale
               request/authority generation을 만나면 f2 publish 0으로 terminal인지 검증한다.
-            - send 직전 permit digest/generation drift, 첫 TX syscall 시 lifecycle=`consumed`, partial/EAGAIN/error 뒤
+            - **[f3]** send 직전 permit digest/generation drift, 첫 TX syscall 시 lifecycle=`consumed`, partial/EAGAIN/error 뒤
               double consume/retry 0과 permit 경계 reentry를 syscall-order oracle로 검증한다.
-            - 64 intent 각 슬롯의 cleanup fail-index, d2 permit abort 중 reentry, scratch reset 뒤 prior view 사용과
+            - **[d2d]** 64 intent 각 슬롯의 cleanup fail-index, d2 permit abort 중 reentry, scratch reset 뒤 prior view 사용과
               temporary d2 adapter의 f3 retirement boundary를 검증한다.
-            - 1/2/64 live mutation의 prepare/allocation/aggregate-final-validation fail-index 전수에서 ledger,
+            - **[d2d]** 1/2/64 live mutation의 prepare/allocation/aggregate-final-validation fail-index 전수에서 ledger,
               `LivePartialBatch`, `PendingResponseOwner` consumer publish 0과 source final-zero를 검증한다.
               first→continuation→end와 두 batch 뒤 late malformed/revoke도 전체 abort이고, 성공만 FIFO exact
               token/generation/accounting을 한 no-fail suffix로 publish한다. 1/64 completed screen은 token-only
@@ -8197,15 +8450,15 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               aggregate callback-free freeze가 선행됐으며 ledger/owner final-zero 또는 pre-freeze quarantine만
               가능한지 검증한다. live token은 canonical ledger freeze가 한 번만 cleanup하고 별도 release count는
               0이어야 한다.
-            - prepared live merge의 destination token/accounting drift에서 기존 partial payload/range 불변,
+            - **[d2d]** prepared live merge의 destination token/accounting drift에서 기존 partial payload/range 불변,
               source/replacement exact cleanup과 deferred retirement callback의 post-publication 관측만 허용됨을
               검증한다.
-            - mutation-index disposition은 unused tail, superseded intermediate와 final roots를 전수 비교하고,
+            - **[d2d]** mutation-index disposition은 unused tail, superseded intermediate와 final roots를 전수 비교하고,
               intermediate token replay/duplicate final root/reset 전 미소비 final root를 publish 0으로 거부한다.
               legacy `mergeInto`/`release` wrapper도 같은 live mutation leaf와 epoch/accounting 결과를 내는지
               boundary/product fixture로 고정한다. merge token output과 release의 no-final-root가 private
               no-fail suffix에서 publish되고 commit 뒤 fallible disposition 판정이 없는지도 고정한다.
-            - retirement의 cleanup owner 상호간 또는 published replacement와의 exact·partial alias를 mutation/free 0
+            - **[d2d]** retirement의 cleanup owner 상호간 또는 published replacement와의 exact·partial alias를 mutation/free 0
               terminal로 거부하고, 첫 allocator callback이 handle/후속 descriptor를 변조하거나 retire로
               재진입해도 frozen 후속 target 전부와 exact-once free가 유지되는지 검증한다. descriptor/digest drift는
               free/retry 0의 bounded quarantine인지도 고정한다. `FrozenPayloadCleanup`은 module-private이고
@@ -8213,10 +8466,10 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               replacement aggregate는 exact `external_inbox_ledger.max_bytes`, cleanup aggregate는 exact
               `external_inbox_ledger.max_bytes + protocol.max_binary_chunk + protocol.header_size`와 각각 cap+1/
               checked overflow를 allocation 전 검증하며 abort/quarantine에서도 count/byte high-water를 기록한다.
-            - 이전 turn pending response 뒤 다음 immediate turn 첫 frame revoke면 f2 take 0, response canonical
+            - **[f2/f3]** 이전 turn pending response 뒤 다음 immediate turn 첫 frame revoke면 f2 take 0, response canonical
               drop과 TX/control publish 0인지, permit consume 뒤 첫 TX callback이 authority/parser를 drift시키면
               두 번째 syscall/consume 0인지 검증한다.
-            - `AuthorityGeneration.untracked/tracked`와 operation/parser generation max/exhaustion에서 permit 발급
+            - **[d2d]** `AuthorityGeneration.untracked/tracked`와 operation/parser generation max/exhaustion에서 permit 발급
               0을 검증한다.
 
           - **2b2e — closed recovery + consumer commit:** recovery transition은 다음 충돌표를 따른다.

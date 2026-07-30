@@ -2107,6 +2107,230 @@ test "d2c C4 collector integration stays transport-leaf and pump-private" {
     try std.testing.expect(owner_type_tokens > 0);
 }
 
+test "d2c S3-D drain evidence is one-shot and has one scheduling publication" {
+    const allocator = std.testing.allocator;
+    const pump = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/client_external_pump.zig",
+    );
+    defer allocator.free(pump);
+    const rx_read = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/client_external_rx_read.zig",
+    );
+    defer allocator.free(rx_read);
+    const product_end = std.mem.indexOf(u8, pump, "\ntest \"") orelse
+        pump.len;
+    const product = pump[0..product_end];
+
+    // S3-D owns one declaration and an exact allowlist of product orchestration edges. Abort and
+    // finish intentionally occur in both the ordinary suffix and the terminal finalizer.
+    inline for (.{
+        .{ "prepareRxDrainEvidence", 2 },
+        .{ "armRxDrainEvidence", 2 },
+        .{ "consumeRxDrainEvidence", 2 },
+        .{ "abortRxDrainEvidence", 3 },
+        .{ "finishRxDrainEvidence", 5 },
+        .{ "resetFinishedRxDrainEvidence", 2 },
+    }) |entry| {
+        const helper = entry[0];
+        const expected_occurrences: usize = entry[1];
+        const declaration = try std.fmt.allocPrint(
+            allocator,
+            "fn {s}(",
+            .{helper},
+        );
+        defer allocator.free(declaration);
+        const use = try std.fmt.allocPrint(allocator, "{s}(", .{helper});
+        defer allocator.free(use);
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            countOccurrences(product, declaration),
+        );
+        try std.testing.expectEqual(
+            expected_occurrences,
+            countOccurrences(product, use),
+        );
+    }
+
+    // The pre-S3-D combined helper bypasses the prepared/armed/settled capability lifecycle.
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        countOccurrences(product, "prepareAndConsumeDrainEvidence"),
+    );
+
+    // Lifecycle reset must use the authenticated reset helper, never assignment to the embedded
+    // field. The field declaration itself uses `:` and is intentionally allowed.
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        countOccurrences(product, ".drain_evidence ="),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        countOccurrences(product, "drain_evidence = .{}"),
+    );
+
+    // A consumed evidence capability is projected through one local value into decide. No product
+    // branch may manufacture the scheduling fact with a true literal.
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        countOccurrences(product, "socket_rx_drained = true"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(product, "var socket_rx_drained = false"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(product, ".socket_rx_drained = socket_rx_drained"),
+    );
+
+    // Tokenization keeps the authority as a real private product type rather than text in a
+    // comment or test fixture.
+    var tokenizer = std.zig.Tokenizer.init(pump);
+    var evidence_identifier_count: usize = 0;
+    while (true) {
+        const token = tokenizer.next();
+        if (token.tag == .eof or token.loc.start >= product_end) break;
+        if (token.tag == .identifier and std.mem.eql(
+            u8,
+            product[token.loc.start..token.loc.end],
+            "RxDrainEvidence",
+        ))
+            evidence_identifier_count += 1;
+    }
+    try std.testing.expect(evidence_identifier_count > 0);
+
+    // The C3 leaf is the sole owner of the private receipt/borrow/permit/seed graph. Pump code
+    // receives two authenticated value-only projections instead of reconstructing leaf digests.
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(rx_read, "pub const DrainSeedAuthorityPhase ="),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(rx_read, "pub const DrainSeedAuthorityProjection = struct {"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(rx_read, "pub fn snapshotDrainSeedAuthority("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        countOccurrences(product, ".snapshotDrainSeedAuthority("),
+    );
+
+    const projection_start = std.mem.indexOf(
+        u8,
+        rx_read,
+        "pub const DrainSeedAuthorityProjection = struct {",
+    ) orelse return error.TestUnexpectedResult;
+    const projection_tail = rx_read[projection_start..];
+    const projection_end_rel = std.mem.indexOf(u8, projection_tail, "};") orelse
+        return error.TestUnexpectedResult;
+    const projection_end = projection_start + projection_end_rel + 2;
+    var projection_tokenizer = std.zig.Tokenizer.init(rx_read);
+    var phase_fields: usize = 0;
+    var continuity_fields: usize = 0;
+    var digest_fields: usize = 0;
+    var raw_digest_fields: usize = 0;
+    while (true) {
+        const token = projection_tokenizer.next();
+        if (token.tag == .eof or token.loc.start >= projection_end) break;
+        if (token.loc.start < projection_start or token.tag != .identifier) continue;
+        const identifier = rx_read[token.loc.start..token.loc.end];
+        if (std.mem.eql(u8, identifier, "phase")) phase_fields += 1;
+        if (std.mem.eql(u8, identifier, "continuity_digest"))
+            continuity_fields += 1;
+        if (std.mem.eql(u8, identifier, "digest")) digest_fields += 1;
+        inline for (.{
+            "receipt_digest",
+            "borrow_digest",
+            "permit_digest",
+            "seed_digest",
+        }) |forbidden| {
+            if (std.mem.eql(u8, identifier, forbidden)) {
+                raw_digest_fields += 1;
+            }
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), phase_fields);
+    try std.testing.expectEqual(@as(usize, 1), continuity_fields);
+    try std.testing.expectEqual(@as(usize, 1), digest_fields);
+    try std.testing.expectEqual(@as(usize, 0), raw_digest_fields);
+
+    // Each product projection call carries one explicit phase; no third phase/call may appear.
+    var phase_cursor: usize = 0;
+    inline for (.{ ".prepared,", ".consumed," }) |phase| {
+        const call_start = std.mem.indexOfPos(
+            u8,
+            product,
+            phase_cursor,
+            ".snapshotDrainSeedAuthority(",
+        ) orelse return error.TestUnexpectedResult;
+        const call_end = std.mem.indexOfPos(
+            u8,
+            product,
+            call_start,
+            ") orelse",
+        ) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            countOccurrences(product[call_start..call_end], phase),
+        );
+        phase_cursor = call_end;
+    }
+
+    // Parser authority is a typed seal. Byte-casting it in the pump would bypass its structural
+    // contract even if the resulting digest happened to remain stable.
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        countOccurrences(product, "asBytes(&evidence.parser_seal"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        countOccurrences(product, "asBytes(&state.rx_provenance.parser_seal"),
+    );
+
+    // After the one-shot consume returns, the local fact must flow directly to the unique decide
+    // projection. This narrow suffix may not reclassify terminal/budget/blockers, invoke callbacks,
+    // rebuild authority, or mutate storage/scratch.
+    const consume_start = std.mem.lastIndexOf(
+        u8,
+        product,
+        "self.consumeRxDrainEvidence(",
+    ) orelse return error.TestUnexpectedResult;
+    const consume_end = std.mem.indexOfPos(
+        u8,
+        product,
+        consume_start,
+        ");",
+    ) orelse return error.TestUnexpectedResult;
+    const publication = std.mem.indexOfPos(
+        u8,
+        product,
+        consume_end,
+        ".socket_rx_drained = socket_rx_drained",
+    ) orelse return error.TestUnexpectedResult;
+    const publication_suffix = product[consume_end + 2 .. publication];
+    inline for (.{
+        "terminalInjectedRxTurn(",
+        "classifyAcceptedAllowanceStop(",
+        "liveOwnerBlockerProjection(",
+        "currentDrainBlockerProjection(",
+        "buildRxOwnerAuthoritySnapshot(",
+        "acquirePumpCallbackRegion(",
+        "finishPumpCallbackRegion(",
+        "terminal_reason =",
+        "self.",
+        "scratch.",
+    }) |forbidden|
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            countOccurrences(publication_suffix, forbidden),
+        );
+}
+
 test "d2b3d live owner substrate stays private with one buffered product traversal" {
     const allocator = std.testing.allocator;
     var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });

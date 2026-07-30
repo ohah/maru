@@ -1358,6 +1358,7 @@ const InheritedSnapshotLifecycle = enum {
 pub const InheritedRxBlockerSnapshot = struct {
     saved_self_addr: usize = 0,
     storage_addr: usize = 0,
+    owner_incarnation: u64 = 0,
     lease_addr: usize = 0,
     operation_generation: u64 = 0,
     committed_screen_pending: bool = false,
@@ -2017,21 +2018,56 @@ const CallbackReleaseAuthority = struct {
 
 const CallbackReleaseResult = enum { released, quarantined, invalid_authority };
 
-const RxDrainEvidenceLifecycle = enum { empty, prepared, consumed, aborted };
+const RxDrainEvidenceLifecycle = enum {
+    empty,
+    prepared,
+    armed,
+    consumed,
+    aborted,
+    finished,
+};
 
 const RxDrainEvidence = struct {
+    domain: [8]u8 = [_]u8{0} ** 8,
+    version: u16 = 0,
     saved_self_addr: usize = 0,
     storage_addr: usize = 0,
+    owner_incarnation: u64 = 0,
+    owner_incarnation_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
     lease_addr: usize = 0,
-    scratch_addr: usize = 0,
-    scratch_generation: u64 = 0,
-    parser_addr: usize = 0,
-    parser_generation: u64 = 0,
+    lease_generation: u64 = 0,
+    operation_generation: u64 = 0,
+    read_scratch_addr: usize = 0,
+    pre_settle_scratch_generation: u64 = 0,
+    expected_post_settle_generation: u64 = 0,
+    receipt_addr: usize = 0,
+    borrow_addr: usize = 0,
+    permit_addr: usize = 0,
+    seed_addr: usize = 0,
+    seed_authority_continuity_digest: external_owner_seal.Digest =
+        [_]u8{0} ** 32,
+    prepared_seed_authority_digest: external_owner_seal.Digest =
+        [_]u8{0} ** 32,
+    consumed_seed_authority_digest: external_owner_seal.Digest =
+        [_]u8{0} ** 32,
     read_attempt_generation: u64 = 0,
+    parser_addr: usize = 0,
+    parser_seal: client_external_mode.ParserAuthoritySeal = .{},
+    final_readiness: client_external_mode.RxParserReadiness = .empty,
+    rx_frame_budget_exhausted: bool = false,
+    rx_read_budget_exhausted: bool = false,
+    owner_inventory_generation: u64 = 0,
     owner_snapshot_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    inherited_blocker_snapshot_digest: external_owner_seal.Digest =
+        [_]u8{0} ** 32,
+    final_owner_blockers_clear: bool = false,
     lifecycle: RxDrainEvidenceLifecycle = .empty,
     digest: external_owner_seal.Digest = [_]u8{0} ** 32,
 };
+
+fn rxDrainEvidencePristine(evidence: *const RxDrainEvidence) bool {
+    return std.meta.eql(evidence.*, RxDrainEvidence{});
+}
 
 threadlocal var active_callback_region_addr: usize = 0;
 threadlocal var active_callback_release_addr: usize = 0;
@@ -2057,6 +2093,21 @@ const InjectedRxFailpoint = enum {
 threadlocal var injected_rx_failpoint: InjectedRxFailpoint = .none;
 threadlocal var injected_rx_failpoint_scratch_addr: usize = 0;
 threadlocal var injected_rx_failpoint_hits: u8 = 0;
+
+const RxDrainTestEvent = enum { consumed, published, decide };
+const RxDrainTestRecorder = struct {
+    events: [3]RxDrainTestEvent = undefined,
+    len: u8 = 0,
+};
+threadlocal var rx_drain_test_recorder: ?*RxDrainTestRecorder = null;
+
+fn recordRxDrainTestEvent(event: RxDrainTestEvent) void {
+    if (!builtin.is_test) return;
+    const recorder = rx_drain_test_recorder orelse return;
+    if (recorder.len == recorder.events.len) return;
+    recorder.events[recorder.len] = event;
+    recorder.len += 1;
+}
 
 fn hitInjectedRxFailpoint(
     scratch: *ExternalRxTurnScratch,
@@ -2122,7 +2173,8 @@ pub const ExternalRxTurnScratch = struct {
     quarantine_receipt: client_external_mode.GuardedQuarantineAccountingReceipt = .{},
 
     pub fn initInPlace(out: *ExternalRxTurnScratch) bool {
-        if (out.saved_self_addr != 0 or out.lifecycle != .empty)
+        if (out.saved_self_addr != 0 or out.lifecycle != .empty or
+            !rxDrainEvidencePristine(&out.drain_evidence))
             return false;
         out.saved_self_addr = @intFromPtr(out);
         out.lifecycle = .ready;
@@ -2144,7 +2196,6 @@ pub const ExternalRxTurnScratch = struct {
         out.borrow_use_permit = .{};
         out.would_block_seed = .{};
         out.prepared_admit_use_permit = .{};
-        out.drain_evidence = .{};
         out.callback_region = .{};
         out.quarantine_receipt = .{};
         return true;
@@ -9321,45 +9372,32 @@ pub const ExternalPumpStorage = struct {
 
         switch (scratch.drain_evidence.lifecycle) {
             .empty => {
-                if (!std.mem.allEqual(
-                    u8,
-                    std.mem.asBytes(&scratch.drain_evidence),
-                    0,
-                )) prepared_closed = false;
-            },
-            .prepared, .consumed => {
-                const evidence = &scratch.drain_evidence;
-                const evidence_valid =
-                    evidence.saved_self_addr == @intFromPtr(evidence) and
-                    evidence.storage_addr == @intFromPtr(self) and
-                    evidence.lease_addr == @intFromPtr(lease) and
-                    evidence.scratch_addr == @intFromPtr(&scratch.read) and
-                    evidence.scratch_generation == scratch.read.generation and
-                    evidence.parser_addr == @intFromPtr(&client.parser) and
-                    evidence.read_attempt_generation != 0 and
-                    std.mem.eql(
-                        u8,
-                        &evidence.digest,
-                        &drainEvidenceDigest(evidence),
-                    );
-                if (!evidence_valid) {
+                if (!rxDrainEvidencePristine(&scratch.drain_evidence))
                     prepared_closed = false;
-                } else if (evidence.lifecycle == .prepared) {
-                    evidence.lifecycle = .aborted;
-                    evidence.digest = drainEvidenceDigest(evidence);
-                }
             },
-            .aborted => {
+            .prepared, .armed => {
+                if (!self.abortRxDrainEvidence(
+                    lease,
+                    scratch,
+                ) or !finishRxDrainEvidence(scratch))
+                    prepared_closed = false;
+            },
+            .consumed, .aborted => {
                 const evidence = &scratch.drain_evidence;
-                if (evidence.saved_self_addr != @intFromPtr(evidence) or
-                    evidence.storage_addr != @intFromPtr(self) or
-                    evidence.lease_addr != @intFromPtr(lease) or
-                    evidence.scratch_addr != @intFromPtr(&scratch.read) or
-                    !std.mem.eql(
-                        u8,
-                        &evidence.digest,
-                        &drainEvidenceDigest(evidence),
-                    ))
+                if (!self.rxDrainEvidenceCurrentForCleanup(
+                    lease,
+                    scratch,
+                    evidence,
+                ) or !finishRxDrainEvidence(scratch))
+                    prepared_closed = false;
+            },
+            .finished => {
+                const evidence = &scratch.drain_evidence;
+                if (!self.rxDrainEvidenceCurrentForCleanup(
+                    lease,
+                    scratch,
+                    evidence,
+                ))
                     prepared_closed = false;
             },
         }
@@ -9430,25 +9468,149 @@ pub const ExternalPumpStorage = struct {
     fn drainEvidenceDigest(
         evidence: *const RxDrainEvidence,
     ) external_owner_seal.Digest {
-        var writer = external_owner_seal.Writer.init("MARURDE1");
+        var writer = external_owner_seal.Writer.init("MARURDE2");
+        writer.writeBytes(&evidence.domain);
+        writer.writeU16(evidence.version);
         writer.writeUsize(evidence.saved_self_addr);
         writer.writeUsize(evidence.storage_addr);
+        writer.writeU64(evidence.owner_incarnation);
+        writer.writeBytes(&evidence.owner_incarnation_digest);
         writer.writeUsize(evidence.lease_addr);
-        writer.writeUsize(evidence.scratch_addr);
-        writer.writeU64(evidence.scratch_generation);
-        writer.writeUsize(evidence.parser_addr);
-        writer.writeU64(evidence.parser_generation);
+        writer.writeU64(evidence.lease_generation);
+        writer.writeU64(evidence.operation_generation);
+        writer.writeUsize(evidence.read_scratch_addr);
+        writer.writeU64(evidence.pre_settle_scratch_generation);
+        writer.writeU64(evidence.expected_post_settle_generation);
+        writer.writeUsize(evidence.receipt_addr);
+        writer.writeUsize(evidence.borrow_addr);
+        writer.writeUsize(evidence.permit_addr);
+        writer.writeUsize(evidence.seed_addr);
+        writer.writeBytes(&evidence.seed_authority_continuity_digest);
+        writer.writeBytes(&evidence.prepared_seed_authority_digest);
+        writer.writeBytes(&evidence.consumed_seed_authority_digest);
         writer.writeU64(evidence.read_attempt_generation);
+        writer.writeUsize(evidence.parser_addr);
+        client_external_rx_read.writeParserSeal(
+            &writer,
+            &evidence.parser_seal,
+        );
+        writer.writeU8(@intFromEnum(evidence.final_readiness));
+        writer.writeBool(evidence.rx_frame_budget_exhausted);
+        writer.writeBool(evidence.rx_read_budget_exhausted);
+        writer.writeU64(evidence.owner_inventory_generation);
         writer.writeBytes(&evidence.owner_snapshot_digest);
+        writer.writeBytes(&evidence.inherited_blocker_snapshot_digest);
+        writer.writeBool(evidence.final_owner_blockers_clear);
         writer.writeU8(@intFromEnum(evidence.lifecycle));
         return writer.finish();
     }
 
-    fn prepareAndConsumeDrainEvidence(
+    fn rxDrainEvidenceSealed(evidence: *const RxDrainEvidence) bool {
+        return std.mem.eql(u8, &evidence.domain, "MARURDE2") and
+            evidence.version == 1 and
+            evidence.saved_self_addr == @intFromPtr(evidence) and
+            !std.mem.allEqual(u8, &evidence.digest, 0) and
+            std.mem.eql(
+                u8,
+                &evidence.digest,
+                &drainEvidenceDigest(evidence),
+            );
+    }
+
+    const DrainBlockerProjection = struct {
+        digest: external_owner_seal.Digest,
+        all_clear: bool,
+    };
+
+    const RxDrainFinalState = struct {
+        parser_readiness: client_external_mode.RxParserReadiness,
+        policy_parser: client_pump.ParserReadiness,
+        parser_seal: client_external_mode.ParserAuthoritySeal,
+        allowance_stop: client_external_rx_read.AcceptedAllowanceStop,
+        frame_budget_exhausted: bool,
+        read_budget_exhausted: bool,
+        terminal: bool,
+        blockers: DrainBlockerProjection,
+        owner_inventory_generation: u64,
+        owner_snapshot_digest: external_owner_seal.Digest,
+
+        fn eligible(self: @This()) bool {
+            return !self.terminal and
+                self.parser_readiness == .empty and
+                self.policy_parser == .empty and
+                self.allowance_stop == .continue_collecting and
+                !self.frame_budget_exhausted and
+                !self.read_budget_exhausted and
+                self.blockers.all_clear;
+        }
+    };
+
+    fn currentDrainBlockerProjection(
+        self: *const ExternalPumpStorage,
+    ) ?DrainBlockerProjection {
+        const live = self.liveOwnerBlockerProjection() orelse return null;
+        const resize_pending = switch (self.owner_resize) {
+            .none => false,
+            .current => |current| current.pending,
+        };
+        const all_clear =
+            self.screen_pending_summary.retained_count == 0 and
+            !self.metadata_pending_summary.pending and
+            !live.partial_pending and !live.screen_pending and
+            !live.response_pending and !resize_pending;
+        var writer = external_owner_seal.Writer.init("MARUDBP1");
+        writer.writeU64(self.operation_generation);
+        writer.writeUsize(self.screen_pending_summary.retained_count);
+        writer.writeU64(self.screen_pending_summary.generation);
+        writer.writeBool(self.metadata_pending_summary.pending);
+        writer.writeU64(self.metadata_pending_summary.revision);
+        writer.writeBool(live.partial_pending);
+        writer.writeBool(live.screen_pending);
+        writer.writeBool(live.response_pending);
+        writer.writeBool(resize_pending);
+        writer.writeBytes(&self.inheritedOwnerDigest());
+        return .{ .digest = writer.finish(), .all_clear = all_clear };
+    }
+
+    fn rxDrainEvidenceCurrentForCleanup(
         self: *ExternalPumpStorage,
         lease: *ExternalWholeTurnLease,
         scratch: *ExternalRxTurnScratch,
-        attempt_generation: u64,
+        evidence: *const RxDrainEvidence,
+    ) bool {
+        const read_generation_current = switch (evidence.lifecycle) {
+            .prepared, .armed => scratch.read.generation ==
+                evidence.pre_settle_scratch_generation or
+                scratch.read.generation ==
+                    evidence.expected_post_settle_generation,
+            .consumed, .aborted, .finished => scratch.read.generation ==
+                evidence.expected_post_settle_generation,
+            .empty => false,
+        };
+        return active_callback_region_addr == 0 and
+            active_callback_release_addr == 0 and
+            ownerIncarnationValid(self) and
+            self.validateWholeTurnLease(lease) and
+            rxDrainEvidenceSealed(evidence) and
+            evidence.storage_addr == @intFromPtr(self) and
+            evidence.owner_incarnation == self.owner_incarnation and
+            std.mem.eql(
+                u8,
+                &evidence.owner_incarnation_digest,
+                &self.owner_incarnation_seal.digest,
+            ) and
+            evidence.lease_addr == @intFromPtr(lease) and
+            evidence.lease_generation == lease.operation_generation and
+            evidence.operation_generation == self.operation_generation and
+            evidence.read_scratch_addr == @intFromPtr(&scratch.read) and
+            read_generation_current;
+    }
+
+    fn prepareRxDrainEvidence(
+        self: *ExternalPumpStorage,
+        lease: *ExternalWholeTurnLease,
+        scratch: *ExternalRxTurnScratch,
+        final: RxDrainFinalState,
     ) bool {
         const client = if (self.owned_client) |*owned| owned else return false;
         const state = switch (client.io_mode) {
@@ -9459,44 +9621,291 @@ pub const ExternalPumpStorage = struct {
             state,
             &client.parser,
         ) catch return false;
-        if (readiness != .empty) return false;
+        const seed_authority = client_external_rx_read
+            .snapshotDrainSeedAuthority(
+            &scratch.read,
+            &scratch.collect_receipt,
+            &scratch.stopped_borrow,
+            &scratch.borrow_use_permit,
+            &scratch.would_block_seed,
+            .prepared,
+        ) orelse return false;
+        if (active_callback_region_addr != 0 or
+            active_callback_release_addr != 0 or
+            !ownerIncarnationValid(self) or
+            !self.validateWholeTurnLease(lease) or
+            readiness != final.parser_readiness or !final.eligible())
+            return false;
         const snapshot = buildRxOwnerAuthoritySnapshot(
             self,
             lease,
             scratch,
         ) orelse return false;
+        const blocker = self.currentDrainBlockerProjection() orelse return false;
+        if (!blocker.all_clear or
+            !std.mem.eql(u8, &blocker.digest, &final.blockers.digest) or
+            !std.meta.eql(
+                state.rx_provenance.parser_seal,
+                final.parser_seal,
+            ) or snapshot.inventory_generation !=
+            final.owner_inventory_generation or
+            !std.mem.eql(
+                u8,
+                &snapshot.digest,
+                &final.owner_snapshot_digest,
+            ))
+            return false;
         const evidence = &scratch.drain_evidence;
         if (evidence.saved_self_addr != 0 or evidence.lifecycle != .empty)
             return false;
         evidence.* = .{
+            .domain = "MARURDE2".*,
+            .version = 1,
             .saved_self_addr = @intFromPtr(evidence),
             .storage_addr = @intFromPtr(self),
+            .owner_incarnation = self.owner_incarnation,
+            .owner_incarnation_digest = self.owner_incarnation_seal.digest,
             .lease_addr = @intFromPtr(lease),
-            .scratch_addr = @intFromPtr(&scratch.read),
-            .scratch_generation = scratch.read.generation,
+            .lease_generation = lease.operation_generation,
+            .operation_generation = self.operation_generation,
+            .read_scratch_addr = @intFromPtr(&scratch.read),
+            .pre_settle_scratch_generation = scratch.read.generation,
+            .expected_post_settle_generation = std.math.add(u64, scratch.read.generation, 1) catch return false,
+            .receipt_addr = seed_authority.receipt_addr,
+            .borrow_addr = seed_authority.borrow_addr,
+            .permit_addr = seed_authority.permit_addr,
+            .seed_addr = seed_authority.seed_addr,
+            .seed_authority_continuity_digest = seed_authority.continuity_digest,
+            .prepared_seed_authority_digest = seed_authority.digest,
+            .read_attempt_generation = seed_authority.attempt_generation,
             .parser_addr = @intFromPtr(&client.parser),
-            .parser_generation = state.rx_provenance.parser_seal.generation,
-            .read_attempt_generation = attempt_generation,
+            .parser_seal = state.rx_provenance.parser_seal,
+            .final_readiness = readiness,
+            .rx_frame_budget_exhausted = final.frame_budget_exhausted,
+            .rx_read_budget_exhausted = final.read_budget_exhausted,
+            .owner_inventory_generation = snapshot.inventory_generation,
             .owner_snapshot_digest = snapshot.digest,
+            .inherited_blocker_snapshot_digest = blocker.digest,
+            .final_owner_blockers_clear = blocker.all_clear,
             .lifecycle = .prepared,
         };
         evidence.digest = drainEvidenceDigest(evidence);
-        if (evidence.saved_self_addr != @intFromPtr(evidence) or
+        if (!rxDrainEvidenceSealed(evidence) or
             evidence.storage_addr != @intFromPtr(self) or
-            evidence.lease_addr != @intFromPtr(lease) or
-            evidence.scratch_addr != @intFromPtr(&scratch.read) or
-            evidence.scratch_generation != scratch.read.generation or
-            evidence.parser_addr != @intFromPtr(&client.parser) or
-            evidence.parser_generation !=
-                state.rx_provenance.parser_seal.generation or
+            evidence.owner_incarnation != self.owner_incarnation or
             !std.mem.eql(
                 u8,
-                &evidence.digest,
-                &drainEvidenceDigest(evidence),
+                &evidence.owner_incarnation_digest,
+                &self.owner_incarnation_seal.digest,
+            ) or
+            evidence.lease_addr != @intFromPtr(lease) or
+            evidence.read_scratch_addr != @intFromPtr(&scratch.read) or
+            evidence.pre_settle_scratch_generation != scratch.read.generation or
+            evidence.parser_addr != @intFromPtr(&client.parser) or
+            !std.meta.eql(
+                evidence.parser_seal,
+                state.rx_provenance.parser_seal,
+            ))
+            return false;
+        return true;
+    }
+
+    fn armRxDrainEvidence(
+        scratch: *ExternalRxTurnScratch,
+        consumed_attempt_generation: u64,
+    ) bool {
+        if (active_callback_region_addr != 0 or
+            active_callback_release_addr != 0)
+            return false;
+        const evidence = &scratch.drain_evidence;
+        const seed_authority = client_external_rx_read
+            .snapshotDrainSeedAuthority(
+            &scratch.read,
+            &scratch.collect_receipt,
+            &scratch.stopped_borrow,
+            &scratch.borrow_use_permit,
+            &scratch.would_block_seed,
+            .consumed,
+        ) orelse return false;
+        if (evidence.lifecycle != .prepared or
+            !rxDrainEvidenceSealed(evidence) or
+            evidence.read_scratch_addr != @intFromPtr(&scratch.read) or
+            evidence.permit_addr != @intFromPtr(&scratch.borrow_use_permit) or
+            evidence.seed_addr != @intFromPtr(&scratch.would_block_seed) or
+            evidence.read_attempt_generation != consumed_attempt_generation or
+            evidence.receipt_addr != seed_authority.receipt_addr or
+            evidence.borrow_addr != seed_authority.borrow_addr or
+            evidence.permit_addr != seed_authority.permit_addr or
+            evidence.seed_addr != seed_authority.seed_addr or
+            !std.mem.eql(
+                u8,
+                &evidence.seed_authority_continuity_digest,
+                &seed_authority.continuity_digest,
+            ) or
+            evidence.read_attempt_generation !=
+                seed_authority.attempt_generation)
+            return false;
+        evidence.consumed_seed_authority_digest = seed_authority.digest;
+        evidence.lifecycle = .armed;
+        evidence.digest = drainEvidenceDigest(evidence);
+        return true;
+    }
+
+    fn consumeRxDrainEvidence(
+        self: *ExternalPumpStorage,
+        lease: *ExternalWholeTurnLease,
+        scratch: *ExternalRxTurnScratch,
+        settlement: client_external_rx_read.StoppedDisposition,
+    ) bool {
+        const evidence = &scratch.drain_evidence;
+        const client = if (self.owned_client) |*owned| owned else return false;
+        const state = switch (client.io_mode) {
+            .external => |*external| external,
+            .blocking => return false,
+        };
+        const readiness = client_external_mode.parserReadiness(
+            state,
+            &client.parser,
+        ) catch return false;
+        const expected_staged: @TypeOf(settlement.staged) =
+            if (scratch.collect_receipt.accepted_bytes == 0)
+                .discarded
+            else
+                .consumed;
+        if (evidence.lifecycle != .armed or
+            active_callback_region_addr != 0 or
+            active_callback_release_addr != 0 or
+            !ownerIncarnationValid(self) or
+            !self.validateWholeTurnLease(lease) or
+            !rxDrainEvidenceSealed(evidence) or
+            evidence.storage_addr != @intFromPtr(self) or
+            evidence.owner_incarnation != self.owner_incarnation or
+            !std.mem.eql(
+                u8,
+                &evidence.owner_incarnation_digest,
+                &self.owner_incarnation_seal.digest,
+            ) or
+            evidence.lease_addr != @intFromPtr(lease) or
+            evidence.lease_generation != lease.operation_generation or
+            evidence.operation_generation != self.operation_generation or
+            evidence.read_scratch_addr != @intFromPtr(&scratch.read) or
+            evidence.receipt_addr != @intFromPtr(&scratch.collect_receipt) or
+            evidence.borrow_addr != @intFromPtr(&scratch.stopped_borrow) or
+            evidence.permit_addr != @intFromPtr(&scratch.borrow_use_permit) or
+            evidence.seed_addr != @intFromPtr(&scratch.would_block_seed) or
+            scratch.read.generation !=
+                evidence.expected_post_settle_generation or
+            settlement.staged != expected_staged or
+            settlement.would_block != .consumed or
+            evidence.parser_addr != @intFromPtr(&client.parser) or
+            !std.meta.eql(evidence.parser_seal, state.rx_provenance.parser_seal) or
+            readiness != evidence.final_readiness or readiness != .empty or
+            evidence.rx_frame_budget_exhausted or
+            evidence.rx_read_budget_exhausted)
+            return false;
+        const snapshot = buildRxOwnerAuthoritySnapshot(
+            self,
+            lease,
+            scratch,
+        ) orelse return false;
+        const blocker = self.currentDrainBlockerProjection() orelse return false;
+        if (snapshot.inventory_generation !=
+            evidence.owner_inventory_generation or
+            !std.mem.eql(
+                u8,
+                &snapshot.digest,
+                &evidence.owner_snapshot_digest,
+            ) or !blocker.all_clear or !evidence.final_owner_blockers_clear or
+            !std.mem.eql(
+                u8,
+                &blocker.digest,
+                &evidence.inherited_blocker_snapshot_digest,
             ))
             return false;
         evidence.lifecycle = .consumed;
         evidence.digest = drainEvidenceDigest(evidence);
+        recordRxDrainTestEvent(.consumed);
+        return true;
+    }
+
+    fn finishRxDrainEvidence(
+        scratch: *ExternalRxTurnScratch,
+    ) bool {
+        const evidence = &scratch.drain_evidence;
+        if (active_callback_region_addr != 0 or
+            active_callback_release_addr != 0 or
+            (evidence.lifecycle != .consumed and
+                evidence.lifecycle != .aborted) or
+            !rxDrainEvidenceSealed(evidence))
+            return false;
+        evidence.lifecycle = .finished;
+        evidence.digest = drainEvidenceDigest(evidence);
+        return true;
+    }
+
+    fn abortRxDrainEvidence(
+        self: *ExternalPumpStorage,
+        lease: *ExternalWholeTurnLease,
+        scratch: *ExternalRxTurnScratch,
+    ) bool {
+        const evidence = &scratch.drain_evidence;
+        if ((evidence.lifecycle != .prepared and
+            evidence.lifecycle != .armed) or
+            active_callback_region_addr != 0 or
+            active_callback_release_addr != 0 or
+            !self.rxDrainEvidenceCurrentForCleanup(
+                lease,
+                scratch,
+                evidence,
+            ))
+            return false;
+        evidence.lifecycle = .aborted;
+        evidence.digest = drainEvidenceDigest(evidence);
+        return true;
+    }
+
+    fn resetFinishedRxDrainEvidence(
+        self: *ExternalPumpStorage,
+        scratch: *ExternalRxTurnScratch,
+    ) bool {
+        const evidence = &scratch.drain_evidence;
+        const snapshot = &scratch.authority_snapshot;
+        if (scratch.saved_self_addr != @intFromPtr(scratch) or
+            scratch.lifecycle != .ready or
+            active_callback_region_addr != 0 or
+            active_callback_release_addr != 0 or
+            evidence.lifecycle != .finished or
+            !rxDrainEvidenceSealed(evidence) or
+            evidence.storage_addr != @intFromPtr(self) or
+            !ownerIncarnationValid(self) or
+            evidence.owner_incarnation != self.owner_incarnation or
+            !std.mem.eql(
+                u8,
+                &evidence.owner_incarnation_digest,
+                &self.owner_incarnation_seal.digest,
+            ) or
+            evidence.operation_generation != self.operation_generation or
+            evidence.read_scratch_addr != @intFromPtr(&scratch.read) or
+            scratch.read.generation !=
+                evidence.expected_post_settle_generation or
+            snapshot.saved_self_addr != @intFromPtr(snapshot) or
+            snapshot.storage_addr != @intFromPtr(self) or
+            snapshot.scratch_addr != @intFromPtr(scratch) or
+            snapshot.operation_generation != self.operation_generation or
+            snapshot.inventory_generation !=
+                evidence.owner_inventory_generation or
+            !std.mem.eql(
+                u8,
+                &snapshot.digest,
+                &rxOwnerAuthoritySnapshotDigest(snapshot),
+            ) or
+            !std.mem.eql(
+                u8,
+                &snapshot.digest,
+                &evidence.owner_snapshot_digest,
+            ))
+            return false;
+        evidence.* = .{};
         return true;
     }
 
@@ -10343,7 +10752,87 @@ pub const ExternalPumpStorage = struct {
             }
         }
 
+        const read_bytes = if (admitted) stopped_bytes.len else 0;
+        var mechanics_terminal: ?BufferedTraversalCommitTerminal = null;
+        const completed = if (mechanics) |value| switch (value) {
+            .terminal => |terminal| blk: {
+                mechanics_terminal = terminal;
+                break :blk BufferedTraversalCommitSummary{
+                    .rx_bytes = terminal.rx_bytes,
+                    .rx_frames = terminal.rx_frames,
+                    .final_readiness = .complete_or_error,
+                    .budget_exhausted = false,
+                };
+            },
+            .completed => |summary| summary,
+        } else BufferedTraversalCommitSummary{
+            .rx_bytes = 0,
+            .rx_frames = 0,
+            .final_readiness = initial_readiness,
+            .budget_exhausted = false,
+        };
+        const final_parser: client_pump.ParserReadiness =
+            switch (completed.final_readiness) {
+                .empty => .empty,
+                .incomplete => .incomplete,
+                .complete_or_error => .complete_or_error,
+            };
+        const allowance_stop =
+            client_external_rx_read.classifyAcceptedAllowanceStop(
+                scratch.collect_receipt.allowance,
+                scratch.collect_receipt.accepted_bytes,
+                if (final_parser == .empty) .empty else .incomplete,
+            );
+        const final_blockers = self.currentDrainBlockerProjection() orelse
+            return self.terminalInjectedRxTurn(
+                .invariant_failure,
+                read_bytes,
+                completed.rx_bytes,
+                completed.rx_frames,
+            );
+        const final_owner_snapshot = buildRxOwnerAuthoritySnapshot(
+            self,
+            lease,
+            scratch,
+        ) orelse return self.terminalInjectedRxTurn(
+            .invariant_failure,
+            read_bytes,
+            completed.rx_bytes,
+            completed.rx_frames,
+        );
+        if (!client_external_mode.parserSealValid(
+            rx_state,
+            &client.parser,
+        ))
+            return self.terminalInjectedRxTurn(
+                .invariant_failure,
+                read_bytes,
+                completed.rx_bytes,
+                completed.rx_frames,
+            );
+        const read_budget_exhausted =
+            scratch.collect_receipt.stop == .attempt_budget_exhausted or
+            allowance_stop == .immediate;
+        const allowance_terminal =
+            allowance_stop == .counter_terminal or
+            allowance_stop == .resident_incomplete_terminal or
+            allowance_stop == .invalid;
+        const drain_final = RxDrainFinalState{
+            .parser_readiness = completed.final_readiness,
+            .policy_parser = final_parser,
+            .parser_seal = rx_state.rx_provenance.parser_seal,
+            .allowance_stop = allowance_stop,
+            .frame_budget_exhausted = completed.budget_exhausted,
+            .read_budget_exhausted = read_budget_exhausted,
+            .terminal = terminal_reason != null or
+                mechanics_terminal != null or allowance_terminal,
+            .blockers = final_blockers,
+            .owner_inventory_generation = final_owner_snapshot.inventory_generation,
+            .owner_snapshot_digest = final_owner_snapshot.digest,
+        };
+
         var socket_rx_drained = false;
+        var drain_prepared = false;
         var would_block_disposition: client_external_rx_read.StoppedDisposition =
             .{
                 .staged = if (admitted) .consumed else .discarded,
@@ -10366,13 +10855,17 @@ pub const ExternalPumpStorage = struct {
                         0,
                         0,
                     );
-                const completed = if (mechanics) |value| switch (value) {
-                    .completed => |summary| summary.final_readiness == .empty and
-                        !summary.budget_exhausted,
-                    .terminal => false,
-                } else stopped_bytes.len == 0 and
-                    initial_readiness == .empty;
-                if (terminal_reason == null and completed) {
+                if (drain_final.eligible()) {
+                    drain_prepared = self.prepareRxDrainEvidence(
+                        lease,
+                        scratch,
+                        drain_final,
+                    );
+                    if (!drain_prepared) {
+                        terminal_reason = .invariant_failure;
+                    }
+                }
+                if (drain_prepared) {
                     const generation =
                         client_external_rx_read.consumeWouldBlockSeed(
                             &scratch.read,
@@ -10390,14 +10883,12 @@ pub const ExternalPumpStorage = struct {
                             0,
                         );
                     if (generation) |attempt_generation| {
-                        socket_rx_drained =
-                            self.prepareAndConsumeDrainEvidence(
-                                lease,
-                                scratch,
-                                attempt_generation,
-                            );
+                        if (drain_prepared and !armRxDrainEvidence(
+                            scratch,
+                            attempt_generation,
+                        )) terminal_reason = .invariant_failure;
                     }
-                    if (!socket_rx_drained)
+                    if (generation == null)
                         terminal_reason = .invariant_failure;
                     would_block_disposition.would_block = .consumed;
                 } else {
@@ -10440,36 +10931,25 @@ pub const ExternalPumpStorage = struct {
         ))
             terminal_reason = .invariant_failure;
 
-        const read_bytes = if (admitted) stopped_bytes.len else 0;
-        if (terminal_reason) |reason|
-            return self.terminalInjectedRxTurn(reason, read_bytes, 0, 0);
-        const completed = if (mechanics) |value| switch (value) {
-            .terminal => |terminal| return self.terminalInjectedRxTurn(
+        if (terminal_reason) |reason| {
+            if (drain_prepared and
+                self.abortRxDrainEvidence(lease, scratch))
+                _ = finishRxDrainEvidence(scratch);
+            return self.terminalInjectedRxTurn(
+                reason,
+                read_bytes,
+                completed.rx_bytes,
+                completed.rx_frames,
+            );
+        }
+        if (mechanics_terminal) |terminal|
+            return self.terminalInjectedRxTurn(
                 terminal.reason,
                 read_bytes,
                 terminal.rx_bytes,
                 terminal.rx_frames,
-            ),
-            .completed => |summary| summary,
-        } else BufferedTraversalCommitSummary{
-            .rx_bytes = 0,
-            .rx_frames = 0,
-            .final_readiness = initial_readiness,
-            .budget_exhausted = false,
-        };
-        const final_parser: client_pump.ParserReadiness =
-            switch (completed.final_readiness) {
-                .empty => .empty,
-                .incomplete => .incomplete,
-                .complete_or_error => .complete_or_error,
-            };
-        const allowance_stop =
-            client_external_rx_read.classifyAcceptedAllowanceStop(
-                scratch.collect_receipt.allowance,
-                scratch.collect_receipt.accepted_bytes,
-                if (final_parser == .empty) .empty else .incomplete,
             );
-        if (allowance_stop == .counter_terminal)
+        if (allowance_stop == .counter_terminal or allowance_stop == .invalid)
             return self.terminalInjectedRxTurn(
                 .invariant_failure,
                 read_bytes,
@@ -10483,17 +10963,42 @@ pub const ExternalPumpStorage = struct {
                 completed.rx_bytes,
                 completed.rx_frames,
             );
+
+        if (drain_prepared) {
+            socket_rx_drained = self.consumeRxDrainEvidence(
+                lease,
+                scratch,
+                would_block_disposition,
+            );
+            if (socket_rx_drained)
+                recordRxDrainTestEvent(.published);
+        }
+        recordRxDrainTestEvent(.decide);
         var result = client_pump.decide(.{
             .turn = turn,
             .parser = final_parser,
             .socket_rx_drained = socket_rx_drained,
+            .inherited_blocker = !drain_final.blockers.all_clear,
             .rx_frame_budget_exhausted = completed.budget_exhausted,
-            .rx_read_budget_exhausted = scratch.collect_receipt.stop == .attempt_budget_exhausted or
-                allowance_stop == .immediate,
+            .rx_read_budget_exhausted = read_budget_exhausted,
         });
         result.rx_read_bytes = read_bytes;
         result.rx_bytes = completed.rx_bytes;
         result.rx_frames = completed.rx_frames;
+        if (drain_prepared and !socket_rx_drained)
+            return self.terminalInjectedRxTurn(
+                .invariant_failure,
+                read_bytes,
+                completed.rx_bytes,
+                completed.rx_frames,
+            );
+        if (socket_rx_drained and !finishRxDrainEvidence(scratch))
+            return self.terminalInjectedRxTurn(
+                .invariant_failure,
+                read_bytes,
+                completed.rx_bytes,
+                completed.rx_frames,
+            );
         return result;
     }
 
@@ -10683,6 +11188,13 @@ pub const ExternalPumpStorage = struct {
             !callbackRegionTokenPristine(&scratch.callback_region) or
             active_callback_region_addr != 0)
             return self.terminalRxTurn(.invariant_failure, 0, 0);
+        switch (scratch.drain_evidence.lifecycle) {
+            .empty => if (!rxDrainEvidencePristine(&scratch.drain_evidence))
+                return self.terminalRxTurn(.invariant_failure, 0, 0),
+            .finished => if (!self.resetFinishedRxDrainEvidence(scratch))
+                return self.terminalRxTurn(.invariant_failure, 0, 0),
+            else => return self.terminalRxTurn(.invariant_failure, 0, 0),
+        }
         var lease: ExternalWholeTurnLease = .{};
         self.acquireWholeTurnLease(
             &lease,
@@ -10703,7 +11215,6 @@ pub const ExternalPumpStorage = struct {
         scratch.stopped_borrow = .{};
         scratch.borrow_use_permit = .{};
         scratch.would_block_seed = .{};
-        scratch.drain_evidence = .{};
         scratch.quarantine_receipt = .{};
         scratch.authority_ranges_generation = self.operation_generation;
         var result = self.pumpInjectedRxUnderHeldLease(
@@ -14666,6 +15177,22 @@ fn initTestStorageWithOptions(
     attachment: AttachmentEvidence,
     options: InitOptions,
 ) InitResult {
+    return initTestStorageWithAttachInstanceForTest(
+        out,
+        source,
+        attachment,
+        options,
+        1,
+    );
+}
+
+fn initTestStorageWithAttachInstanceForTest(
+    out: *ExternalPumpStorage,
+    source: *client_mod.Client,
+    attachment: AttachmentEvidence,
+    options: InitOptions,
+    attach_instance_id: u64,
+) InitResult {
     var test_options = options;
     test_options.test_skip_process_owner_reservation = true;
     var seed: runtime_metadata_wire.InitialMetadataSeed = switch (source.metadata_support) {
@@ -14677,7 +15204,7 @@ fn initTestStorageWithOptions(
     defer evidence.deinit();
     sealAttachEvidence(
         &evidence,
-        1,
+        attach_instance_id,
         source,
         attachment,
         &seed,
@@ -24633,10 +25160,10 @@ test "C4b shared owner snapshot rebuilds freshly and projects each authority" {
     );
     try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
     try std.testing.expect(storage.commitAdoption() == .adopted);
-    defer _ = teardownForTest(&storage);
 
     const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
     defer std.testing.allocator.destroy(scratch);
+    defer _ = teardownForTest(&storage);
     scratch.* = .{};
     try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
     const invalid_raw_cases = [_]usize{
@@ -25607,6 +26134,9 @@ test "C4d injected zero-prefix would-block settles and publishes drain once" {
             .read = Probe.read,
         },
     };
+    var drain_recorder = RxDrainTestRecorder{};
+    rx_drain_test_recorder = &drain_recorder;
+    defer rx_drain_test_recorder = null;
     const result = storage.pumpInjectedRxTurnForTest(
         .{ .readable = true, .writable = false, .now_ns = 1 },
         &ops,
@@ -25619,7 +26149,661 @@ test "C4d injected zero-prefix would-block settles and publishes drain once" {
     try std.testing.expectEqual(@as(usize, 0), result.rx_read_bytes);
     try std.testing.expectEqual(@as(usize, 0), result.rx_bytes);
     try std.testing.expectEqual(@as(usize, 0), result.rx_frames);
+    try std.testing.expectEqual(@as(u8, 3), drain_recorder.len);
+    try std.testing.expectEqual(
+        [_]RxDrainTestEvent{ .consumed, .published, .decide },
+        drain_recorder.events,
+    );
+    rx_drain_test_recorder = null;
     try std.testing.expect(scratch.read.isReady());
+    try std.testing.expectEqual(
+        RxDrainEvidenceLifecycle.finished,
+        scratch.drain_evidence.lifecycle,
+    );
+    try std.testing.expect(ExternalPumpStorage.rxDrainEvidenceSealed(
+        &scratch.drain_evidence,
+    ));
+    const first_generation = scratch.drain_evidence.read_attempt_generation;
+    const first_operation_generation =
+        scratch.drain_evidence.operation_generation;
+    const first_digest = scratch.drain_evidence.digest;
+    var stale_copy = scratch.drain_evidence;
+    try std.testing.expect(!ExternalPumpStorage.rxDrainEvidenceSealed(
+        &stale_copy,
+    ));
+
+    const second = storage.pumpInjectedRxTurnForTest(
+        .{ .readable = true, .writable = false, .now_ns = 2 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(second.terminal == null);
+    try std.testing.expect(second.authority_clear);
+    try std.testing.expectEqual(@as(usize, 2), probe.read_calls);
+    try std.testing.expectEqual(
+        RxDrainEvidenceLifecycle.finished,
+        scratch.drain_evidence.lifecycle,
+    );
+    try std.testing.expect(ExternalPumpStorage.rxDrainEvidenceSealed(
+        &scratch.drain_evidence,
+    ));
+    try std.testing.expectEqual(
+        first_generation,
+        scratch.drain_evidence.read_attempt_generation,
+    );
+    try std.testing.expect(
+        scratch.drain_evidence.operation_generation >
+            first_operation_generation,
+    );
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &first_digest,
+        &scratch.drain_evidence.digest,
+    ));
+
+    scratch.drain_evidence.lifecycle = .consumed;
+    scratch.drain_evidence.digest =
+        ExternalPumpStorage.drainEvidenceDigest(&scratch.drain_evidence);
+    const before_callback_finish = scratch.drain_evidence;
+    active_callback_region_addr = @intFromPtr(scratch);
+    try std.testing.expect(!ExternalPumpStorage.armRxDrainEvidence(
+        scratch,
+        scratch.drain_evidence.read_attempt_generation,
+    ));
+    try std.testing.expect(!ExternalPumpStorage.finishRxDrainEvidence(scratch));
+    active_callback_region_addr = 0;
+    try std.testing.expect(std.meta.eql(
+        before_callback_finish,
+        scratch.drain_evidence,
+    ));
+    try std.testing.expect(ExternalPumpStorage.finishRxDrainEvidence(scratch));
+
+    const pristine = scratch.drain_evidence;
+    inline for ([_][]const u8{
+        "storage_addr",
+        "lease_generation",
+        "parser_addr",
+        "owner_inventory_generation",
+        "receipt_addr",
+        "seed_addr",
+        "prepared_seed_authority_digest",
+    }) |field_name| {
+        if (comptime std.mem.eql(u8, field_name, "storage_addr"))
+            scratch.drain_evidence.storage_addr +%= 1
+        else if (comptime std.mem.eql(u8, field_name, "lease_generation"))
+            scratch.drain_evidence.lease_generation +%= 1
+        else if (comptime std.mem.eql(u8, field_name, "parser_addr"))
+            scratch.drain_evidence.parser_addr +%= 1
+        else if (comptime std.mem.eql(
+            u8,
+            field_name,
+            "owner_inventory_generation",
+        ))
+            scratch.drain_evidence.owner_inventory_generation +%= 1
+        else if (comptime std.mem.eql(u8, field_name, "receipt_addr"))
+            scratch.drain_evidence.receipt_addr +%= 1
+        else if (comptime std.mem.eql(u8, field_name, "seed_addr"))
+            scratch.drain_evidence.seed_addr +%= 1
+        else
+            scratch.drain_evidence.prepared_seed_authority_digest[0] ^= 1;
+        const corrupted = scratch.drain_evidence;
+        try std.testing.expect(!ExternalPumpStorage.rxDrainEvidenceSealed(
+            &scratch.drain_evidence,
+        ));
+        try std.testing.expect(!storage.resetFinishedRxDrainEvidence(scratch));
+        try std.testing.expect(std.meta.eql(
+            corrupted,
+            scratch.drain_evidence,
+        ));
+        scratch.drain_evidence = pristine;
+        try std.testing.expect(ExternalPumpStorage.rxDrainEvidenceSealed(
+            &scratch.drain_evidence,
+        ));
+    }
+
+    var foreign_storage = storage;
+    const before_foreign_reset = scratch.drain_evidence;
+    try std.testing.expect(
+        !foreign_storage.resetFinishedRxDrainEvidence(scratch),
+    );
+    try std.testing.expect(std.meta.eql(
+        before_foreign_reset,
+        scratch.drain_evidence,
+    ));
+    var moved_scratch = scratch.*;
+    const before_moved_reset = moved_scratch.drain_evidence;
+    try std.testing.expect(
+        !storage.resetFinishedRxDrainEvidence(&moved_scratch),
+    );
+    try std.testing.expect(std.meta.eql(
+        before_moved_reset,
+        moved_scratch.drain_evidence,
+    ));
+
+    try std.testing.expect(storage.resetFinishedRxDrainEvidence(scratch));
+    try std.testing.expect(rxDrainEvidencePristine(&scratch.drain_evidence));
+    const reset_once = scratch.drain_evidence;
+    try std.testing.expect(!storage.resetFinishedRxDrainEvidence(scratch));
+    try std.testing.expect(std.meta.eql(reset_once, scratch.drain_evidence));
+
+    const third = storage.pumpInjectedRxTurnForTest(
+        .{ .readable = true, .writable = false, .now_ns = 3 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(third.terminal == null);
+    try std.testing.expect(third.authority_clear);
+    try std.testing.expectEqual(@as(usize, 3), probe.read_calls);
+    try std.testing.expectEqual(
+        RxDrainEvidenceLifecycle.finished,
+        scratch.drain_evidence.lifecycle,
+    );
+    try std.testing.expect(
+        scratch.drain_evidence.operation_generation >
+            first_operation_generation,
+    );
+    try std.testing.expect(!ExternalPumpStorage.rxDrainEvidenceSealed(
+        &stale_copy,
+    ));
+
+    const evidence_before_reconstruction = scratch.drain_evidence;
+    try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(&storage));
+    storage = .{};
+    var replacement_fixture = try TestClient.init();
+    defer replacement_fixture.deinitPeer();
+    try std.testing.expect(
+        initTestStorageWithAttachInstanceForTest(
+            &storage,
+            &replacement_fixture.client,
+            valid_evidence,
+            .{ .test_skip_process_owner_reservation = true },
+            2,
+        ) == .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    try std.testing.expect(!storage.resetFinishedRxDrainEvidence(scratch));
+    try std.testing.expect(std.meta.eql(
+        evidence_before_reconstruction,
+        scratch.drain_evidence,
+    ));
+
+    try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(&storage));
+    storage = .{};
+    var third_fixture = try TestClient.init();
+    defer third_fixture.deinitPeer();
+    try std.testing.expect(
+        initTestStorageWithAttachInstanceForTest(
+            &storage,
+            &third_fixture.client,
+            valid_evidence,
+            .{ .test_skip_process_owner_reservation = true },
+            3,
+        ) == .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    try std.testing.expect(!storage.resetFinishedRxDrainEvidence(scratch));
+    try std.testing.expect(std.meta.eql(
+        evidence_before_reconstruction,
+        scratch.drain_evidence,
+    ));
+}
+
+test "S3-D incomplete positive prefix cannot mint or consume drain evidence" {
+    const ApplyProbe = struct {
+        fn apply(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
+    };
+    const ReadProbe = struct {
+        byte: u8,
+        sent: bool = false,
+        calls: usize = 0,
+
+        fn read(
+            raw: *anyopaque,
+            _: posix.fd_t,
+            destination: []u8,
+        ) client_external_rx_read.RxReadOutcome {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            if (self.sent) return .would_block;
+            self.sent = true;
+            destination[0] = self.byte;
+            return .{ .bytes = 1 };
+        }
+    };
+
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    // The incomplete parser retains the intent handle embedded in this scratch.
+    defer _ = teardownForTest(&storage);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    const wire = try framing.encodeFrame(
+        std.testing.allocator,
+        .{
+            .kind = .delta_chunk,
+            .stream_id = valid_evidence.stream_id,
+            .flags = protocol.Flags.end_stream,
+        },
+        "incomplete",
+    );
+    defer std.testing.allocator.free(wire);
+    var apply_context: u8 = 0;
+    var read_probe = ReadProbe{ .byte = wire[0] };
+    const ops = RxTurnOps{
+        .buffered = .{
+            .context = &apply_context,
+            .context_len = @sizeOf(u8),
+            .apply_live_screen = ApplyProbe.apply,
+        },
+        .transport = .{
+            .context = &read_probe,
+            .context_len = @sizeOf(ReadProbe),
+            .read = ReadProbe.read,
+        },
+    };
+    const result = storage.pumpInjectedRxTurnForTest(
+        .{ .readable = true, .writable = false, .now_ns = 1 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(result.terminal == null);
+    try std.testing.expect(!result.authority_clear);
+    try std.testing.expectEqual(@as(usize, 2), read_probe.calls);
+    try std.testing.expectEqual(RxDrainEvidenceLifecycle.empty, scratch.drain_evidence.lifecycle);
+    try std.testing.expect(rxDrainEvidencePristine(&scratch.drain_evidence));
+}
+
+test "S3-D read attempt budget cannot publish drain evidence" {
+    const ApplyProbe = struct {
+        fn apply(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
+    };
+    const ReadProbe = struct {
+        wire: []const u8,
+        offset: usize = 0,
+        calls: usize = 0,
+
+        fn read(
+            raw: *anyopaque,
+            _: posix.fd_t,
+            destination: []u8,
+        ) client_external_rx_read.RxReadOutcome {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            if (self.offset == self.wire.len) return .would_block;
+            destination[0] = self.wire[self.offset];
+            self.offset += 1;
+            return .{ .bytes = 1 };
+        }
+    };
+
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+
+    const payload = [_]u8{'x'} ** (client_external_rx_read.max_rx_read_attempts_per_turn * 2);
+    const wire = try framing.encodeFrame(
+        std.testing.allocator,
+        .{
+            .kind = .delta_chunk,
+            .stream_id = valid_evidence.stream_id,
+            .flags = protocol.Flags.end_stream,
+        },
+        &payload,
+    );
+    defer std.testing.allocator.free(wire);
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    defer _ = teardownForTest(&storage);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    var apply_context: u8 = 0;
+    var read_probe = ReadProbe{ .wire = wire };
+    const ops = RxTurnOps{
+        .buffered = .{
+            .context = &apply_context,
+            .context_len = @sizeOf(u8),
+            .apply_live_screen = ApplyProbe.apply,
+        },
+        .transport = .{
+            .context = &read_probe,
+            .context_len = @sizeOf(ReadProbe),
+            .read = ReadProbe.read,
+        },
+    };
+    const result = storage.pumpInjectedRxTurnForTest(
+        .{ .readable = true, .writable = false, .now_ns = 1 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(result.terminal == null);
+    try std.testing.expect(!result.authority_clear);
+    try std.testing.expectEqual(
+        client_external_rx_read.max_rx_read_attempts_per_turn,
+        read_probe.calls,
+    );
+    try std.testing.expectEqual(
+        client_external_rx_read.max_rx_read_attempts_per_turn,
+        result.rx_read_bytes,
+    );
+    try std.testing.expectEqual(
+        RxDrainEvidenceLifecycle.empty,
+        scratch.drain_evidence.lifecycle,
+    );
+    try std.testing.expect(rxDrainEvidencePristine(&scratch.drain_evidence));
+}
+
+test "S3-D frame budget cannot publish drain evidence" {
+    const ApplyProbe = struct {
+        fn apply(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
+    };
+    const ReadProbe = struct {
+        wire: []const u8,
+        sent: bool = false,
+
+        fn read(
+            raw: *anyopaque,
+            _: posix.fd_t,
+            destination: []u8,
+        ) client_external_rx_read.RxReadOutcome {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (self.sent) return .would_block;
+            @memcpy(destination[0..self.wire.len], self.wire);
+            self.sent = true;
+            return .{ .bytes = self.wire.len };
+        }
+    };
+
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+
+    var wire: std.ArrayList(u8) = .empty;
+    defer wire.deinit(std.testing.allocator);
+    for (0..external_rx_intent.max_intents + 1) |_| {
+        const frame = try framing.encodeFrame(
+            std.testing.allocator,
+            .{
+                .kind = .delta_chunk,
+                .stream_id = valid_evidence.stream_id,
+                .flags = protocol.Flags.end_stream,
+            },
+            "",
+        );
+        defer std.testing.allocator.free(frame);
+        try wire.appendSlice(std.testing.allocator, frame);
+    }
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    defer _ = teardownForTest(&storage);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    var apply_context: u8 = 0;
+    var read_probe = ReadProbe{ .wire = wire.items };
+    const ops = RxTurnOps{
+        .buffered = .{
+            .context = &apply_context,
+            .context_len = @sizeOf(u8),
+            .apply_live_screen = ApplyProbe.apply,
+        },
+        .transport = .{
+            .context = &read_probe,
+            .context_len = @sizeOf(ReadProbe),
+            .read = ReadProbe.read,
+        },
+    };
+    const result = storage.pumpInjectedRxTurnForTest(
+        .{ .readable = true, .writable = false, .now_ns = 1 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(result.terminal == null);
+    try std.testing.expect(!result.authority_clear);
+    try std.testing.expect(result.inherited_work_ready);
+    try std.testing.expectEqual(
+        external_rx_intent.max_intents,
+        result.rx_frames,
+    );
+    try std.testing.expectEqual(
+        RxDrainEvidenceLifecycle.empty,
+        scratch.drain_evidence.lifecycle,
+    );
+    try std.testing.expect(rxDrainEvidencePristine(&scratch.drain_evidence));
+}
+
+test "S3-D consume and abort reject authority drift move stale and replay" {
+    const ApplyProbe = struct {
+        fn apply(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
+    };
+    const ReadProbe = struct {
+        calls: usize = 0,
+
+        fn read(
+            raw: *anyopaque,
+            _: posix.fd_t,
+            _: []u8,
+        ) client_external_rx_read.RxReadOutcome {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            return .would_block;
+        }
+    };
+
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    defer _ = teardownForTest(&storage);
+
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    var apply_context: u8 = 0;
+    var read_probe = ReadProbe{};
+    const ops = RxTurnOps{
+        .buffered = .{
+            .context = &apply_context,
+            .context_len = @sizeOf(u8),
+            .apply_live_screen = ApplyProbe.apply,
+        },
+        .transport = .{
+            .context = &read_probe,
+            .context_len = @sizeOf(ReadProbe),
+            .read = ReadProbe.read,
+        },
+    };
+    const initial = storage.pumpInjectedRxTurnForTest(
+        .{ .readable = true, .writable = false, .now_ns = 1 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(initial.terminal == null);
+    try std.testing.expect(initial.authority_clear);
+    try std.testing.expectEqual(
+        RxDrainEvidenceLifecycle.finished,
+        scratch.drain_evidence.lifecycle,
+    );
+
+    var lease: ExternalWholeTurnLease = .{};
+    try storage.acquireWholeTurnLease(
+        &lease,
+        @intFromPtr(scratch),
+        @sizeOf(ExternalRxTurnScratch),
+    );
+    defer if (lease.lifecycle == .acquired) {
+        scratch.lifecycle = .ready;
+        _ = storage.releaseWholeTurnLease(&lease);
+    };
+    scratch.lifecycle = .busy;
+    scratch.authority_ranges_generation = storage.operation_generation;
+    const client = if (storage.owned_client) |*owned| owned else return error.TestUnexpectedResult;
+    const state = switch (client.io_mode) {
+        .external => |*external| external,
+        .blocking => return error.TestUnexpectedResult,
+    };
+    const snapshot = buildRxOwnerAuthoritySnapshot(
+        &storage,
+        &lease,
+        scratch,
+    ) orelse return error.TestUnexpectedResult;
+    const blocker = storage.currentDrainBlockerProjection() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(blocker.all_clear);
+
+    var armed = scratch.drain_evidence;
+    armed.lease_addr = @intFromPtr(&lease);
+    armed.lease_generation = lease.operation_generation;
+    armed.operation_generation = storage.operation_generation;
+    armed.read_scratch_addr = @intFromPtr(&scratch.read);
+    armed.pre_settle_scratch_generation = scratch.read.generation - 1;
+    armed.expected_post_settle_generation = scratch.read.generation;
+    armed.receipt_addr = @intFromPtr(&scratch.collect_receipt);
+    armed.borrow_addr = @intFromPtr(&scratch.stopped_borrow);
+    armed.permit_addr = @intFromPtr(&scratch.borrow_use_permit);
+    armed.seed_addr = @intFromPtr(&scratch.would_block_seed);
+    armed.parser_addr = @intFromPtr(&client.parser);
+    armed.parser_seal = state.rx_provenance.parser_seal;
+    armed.final_readiness = .empty;
+    armed.rx_frame_budget_exhausted = false;
+    armed.rx_read_budget_exhausted = false;
+    armed.owner_inventory_generation = snapshot.inventory_generation;
+    armed.owner_snapshot_digest = snapshot.digest;
+    armed.inherited_blocker_snapshot_digest = blocker.digest;
+    armed.final_owner_blockers_clear = true;
+    armed.lifecycle = .armed;
+    armed.digest = ExternalPumpStorage.drainEvidenceDigest(&armed);
+
+    inline for ([_]u8{ 0, 1, 2, 3, 4, 5 }) |field| {
+        scratch.drain_evidence = armed;
+        switch (field) {
+            0 => scratch.drain_evidence.lease_generation +%= 1,
+            1 => scratch.drain_evidence.parser_seal.generation +%= 1,
+            2 => scratch.drain_evidence.owner_inventory_generation +%= 1,
+            3 => scratch.drain_evidence.owner_snapshot_digest[0] ^= 1,
+            4 => scratch.drain_evidence.receipt_addr +%= 1,
+            5 => scratch.drain_evidence.seed_addr +%= 1,
+            else => unreachable,
+        }
+        scratch.drain_evidence.digest =
+            ExternalPumpStorage.drainEvidenceDigest(&scratch.drain_evidence);
+        const drifted = scratch.drain_evidence;
+        try std.testing.expect(!storage.consumeRxDrainEvidence(
+            &lease,
+            scratch,
+            .{ .staged = .discarded, .would_block = .consumed },
+        ));
+        try std.testing.expect(std.meta.eql(
+            drifted,
+            scratch.drain_evidence,
+        ));
+    }
+
+    scratch.drain_evidence = armed;
+    var moved = scratch.*;
+    const moved_before = moved.drain_evidence;
+    try std.testing.expect(!storage.consumeRxDrainEvidence(
+        &lease,
+        &moved,
+        .{ .staged = .discarded, .would_block = .consumed },
+    ));
+    try std.testing.expect(std.meta.eql(moved_before, moved.drain_evidence));
+
+    inline for ([_]u8{ 0, 1, 2, 3 }) |field| {
+        scratch.drain_evidence = armed;
+        switch (field) {
+            0 => scratch.drain_evidence.lease_generation +%= 1,
+            1 => scratch.drain_evidence.owner_incarnation +%= 1,
+            2 => scratch.drain_evidence.operation_generation +%= 1,
+            3 => scratch.drain_evidence.read_scratch_addr +%= 1,
+            else => unreachable,
+        }
+        scratch.drain_evidence.digest =
+            ExternalPumpStorage.drainEvidenceDigest(&scratch.drain_evidence);
+        const drifted = scratch.drain_evidence;
+        try std.testing.expect(!storage.abortRxDrainEvidence(
+            &lease,
+            scratch,
+        ));
+        try std.testing.expect(std.meta.eql(
+            drifted,
+            scratch.drain_evidence,
+        ));
+    }
+
+    scratch.drain_evidence = armed;
+    try std.testing.expect(storage.abortRxDrainEvidence(&lease, scratch));
+    const aborted = scratch.drain_evidence;
+    try std.testing.expect(!storage.abortRxDrainEvidence(&lease, scratch));
+    try std.testing.expect(std.meta.eql(aborted, scratch.drain_evidence));
+
+    scratch.drain_evidence = armed;
+    try std.testing.expect(storage.consumeRxDrainEvidence(
+        &lease,
+        scratch,
+        .{ .staged = .discarded, .would_block = .consumed },
+    ));
+    const consumed = scratch.drain_evidence;
+    try std.testing.expect(!storage.consumeRxDrainEvidence(
+        &lease,
+        scratch,
+        .{ .staged = .discarded, .would_block = .consumed },
+    ));
+    try std.testing.expect(std.meta.eql(consumed, scratch.drain_evidence));
+    try std.testing.expect(ExternalPumpStorage.finishRxDrainEvidence(scratch));
+    scratch.lifecycle = .ready;
+    try std.testing.expectEqual(
+        WholeTurnReleaseResult.released,
+        storage.releaseWholeTurnLease(&lease),
+    );
 }
 
 test "C4d product RX turn preflight rejects context alias with owner scratch" {
@@ -26061,6 +27245,18 @@ test "C4d injected EOF and socket error retain one canonical terminal scratch" {
         try std.testing.expect(client_external_mode.preparedRxAppendPristine(
             &scratch.read.prepared_admit,
         ));
+        try std.testing.expect(
+            scratch.drain_evidence.lifecycle == .empty or
+                scratch.drain_evidence.lifecycle == .finished,
+        );
+        if (scratch.drain_evidence.lifecycle == .empty)
+            try std.testing.expect(rxDrainEvidencePristine(
+                &scratch.drain_evidence,
+            ))
+        else
+            try std.testing.expect(ExternalPumpStorage.rxDrainEvidenceSealed(
+                &scratch.drain_evidence,
+            ));
     }
 }
 
@@ -26144,7 +27340,15 @@ test "C4d injected terminal seam matrix closes the product graph exactly once" {
         scratch.* = .{};
         try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
         var apply_probe: u8 = 0;
-        var read_probe = ReadProbe{ .wire = wire };
+        var read_probe = ReadProbe{
+            .wire = wire,
+            // A committed screen frame is now an inherited blocker, so the drain-only late seams
+            // use the canonical zero-prefix would-block path. Earlier seams still need a positive
+            // prefix to exercise guarded admit and traversal.
+            .sent = point == .after_seed_consume or
+                point == .before_end or
+                point == .before_settle,
+        };
         const ops = RxTurnOps{
             .buffered = .{
                 .context = &apply_probe,
@@ -26340,12 +27544,18 @@ test "C4d injected positive prefix admits once traverses and preserves read acco
         scratch,
     );
     try std.testing.expect(first.terminal == null);
-    try std.testing.expect(first.authority_clear);
+    try std.testing.expect(!first.authority_clear);
+    try std.testing.expect(first.inherited_work_ready);
     try std.testing.expectEqual(@as(usize, 2), probe.read_calls);
     try std.testing.expectEqual(wire.len, first.rx_read_bytes);
     try std.testing.expectEqual(wire.len, first.rx_bytes);
     try std.testing.expectEqual(@as(usize, 1), first.rx_frames);
     try std.testing.expectEqual(@as(u8, 1), storage.live_screen.len);
+    try std.testing.expectEqual(
+        RxDrainEvidenceLifecycle.empty,
+        scratch.drain_evidence.lifecycle,
+    );
+    try std.testing.expect(rxDrainEvidencePristine(&scratch.drain_evidence));
     try std.testing.expect(scratch.read.isReady());
     try std.testing.expect(
         scratch.prepared_admit_use_permit.lifecycle == .empty,
@@ -26355,19 +27565,36 @@ test "C4d injected positive prefix admits once traverses and preserves read acco
         scratch.read.active_prepared_use_permit_addr,
     );
 
+    const blocked = storage.pumpInjectedRxTurnForTest(
+        .{ .readable = true, .writable = false, .now_ns = 2 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(blocked.terminal == null);
+    try std.testing.expect(!blocked.authority_clear);
+    try std.testing.expect(blocked.inherited_work_ready);
+    try std.testing.expectEqual(@as(usize, 2), probe.read_calls);
+    try std.testing.expectEqual(@as(usize, 1), probe.apply_calls);
+    try std.testing.expectEqual(@as(u8, 0), storage.live_screen.len);
+    try std.testing.expectEqual(
+        RxDrainEvidenceLifecycle.empty,
+        scratch.drain_evidence.lifecycle,
+    );
+    try std.testing.expect(rxDrainEvidencePristine(&scratch.drain_evidence));
+
     const second = storage.pumpInjectedRxTurnForTest(
-        .{ .readable = false, .writable = false, .now_ns = 2 },
+        .{ .readable = false, .writable = false, .now_ns = 3 },
         &ops,
         scratch,
     );
     try std.testing.expect(second.terminal == null);
-    try std.testing.expect(second.inherited_work_ready);
+    try std.testing.expect(!second.inherited_work_ready);
     try std.testing.expectEqual(@as(usize, 1), probe.apply_calls);
     try std.testing.expectEqual(@as(u8, 0), storage.live_screen.len);
 
     probe.sent = false;
     const third = storage.pumpInjectedRxTurnForTest(
-        .{ .readable = true, .writable = false, .now_ns = 3 },
+        .{ .readable = true, .writable = false, .now_ns = 4 },
         &ops,
         scratch,
     );

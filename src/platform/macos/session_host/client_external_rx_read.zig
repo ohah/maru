@@ -172,6 +172,7 @@ pub const StoppedBorrow = struct {
     saved_self_addr: usize = 0,
     scratch_addr: usize = 0,
     scratch_generation: u64 = 0,
+    receipt_addr: usize = 0,
     receipt_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
     bytes_addr: usize = 0,
     bytes_len: usize = 0,
@@ -447,6 +448,7 @@ fn borrowDigest(borrow: *const StoppedBorrow) external_owner_seal.Digest {
     writer.writeUsize(borrow.saved_self_addr);
     writer.writeUsize(borrow.scratch_addr);
     writer.writeU64(borrow.scratch_generation);
+    writer.writeUsize(borrow.receipt_addr);
     writer.writeBytes(&borrow.receipt_digest);
     writer.writeUsize(borrow.bytes_addr);
     writer.writeUsize(borrow.bytes_len);
@@ -589,7 +591,7 @@ fn stoppedGraphRangesDisjoint(
     return true;
 }
 
-fn writeParserSeal(
+pub fn writeParserSeal(
     writer: *external_owner_seal.Writer,
     seal: *const client_external_mode.ParserAuthoritySeal,
 ) void {
@@ -1281,6 +1283,7 @@ pub fn borrowStopped(
         .saved_self_addr = @intFromPtr(out),
         .scratch_addr = @intFromPtr(scratch),
         .scratch_generation = scratch.generation,
+        .receipt_addr = @intFromPtr(receipt),
         .receipt_digest = receipt.digest,
         .bytes_addr = bytes_addr,
         .bytes_len = scratch.staged_len,
@@ -1325,6 +1328,7 @@ pub fn stoppedBytes(
         borrow.saved_self_addr != @intFromPtr(borrow) or
         borrow.scratch_addr != @intFromPtr(scratch) or
         borrow.scratch_generation != scratch.generation or
+        borrow.receipt_addr != @intFromPtr(receipt) or
         borrow.bytes_addr != @intFromPtr(&scratch.backing) or
         borrow.bytes_len != scratch.staged_len or
         borrow.lifecycle != .borrowed or
@@ -2016,6 +2020,97 @@ pub fn consumeWouldBlockSeed(
     seed: *WouldBlockSeed,
 ) ?u64 {
     return accountWouldBlockSeed(scratch, permit, seed, .consumed);
+}
+
+pub const DrainSeedAuthorityPhase = enum { prepared, consumed };
+
+pub const DrainSeedAuthorityProjection = struct {
+    phase: DrainSeedAuthorityPhase,
+    scratch_addr: usize,
+    scratch_generation: u64,
+    receipt_addr: usize,
+    borrow_addr: usize,
+    permit_addr: usize,
+    seed_addr: usize,
+    attempt_generation: u64,
+    continuity_digest: external_owner_seal.Digest,
+    digest: external_owner_seal.Digest,
+};
+
+fn drainSeedGraphDisjoint(
+    scratch: *const ExternalRxReadScratch,
+    receipt: *const CollectReceipt,
+    borrow: *const StoppedBorrow,
+    permit: *const BorrowUsePermit,
+    seed: *const WouldBlockSeed,
+) bool {
+    const ranges = [_]struct { addr: usize, len: usize }{
+        .{ .addr = @intFromPtr(scratch), .len = @sizeOf(ExternalRxReadScratch) },
+        .{ .addr = @intFromPtr(receipt), .len = @sizeOf(CollectReceipt) },
+        .{ .addr = @intFromPtr(borrow), .len = @sizeOf(StoppedBorrow) },
+        .{ .addr = @intFromPtr(permit), .len = @sizeOf(BorrowUsePermit) },
+        .{ .addr = @intFromPtr(seed), .len = @sizeOf(WouldBlockSeed) },
+    };
+    for (ranges, 0..) |left, left_index| {
+        _ = std.math.add(usize, left.addr, left.len) catch return false;
+        for (ranges[left_index + 1 ..]) |right|
+            if (rangesOverlap(left.addr, left.len, right.addr, right.len))
+                return false;
+    }
+    return true;
+}
+
+pub fn snapshotDrainSeedAuthority(
+    scratch: *const ExternalRxReadScratch,
+    receipt: *const CollectReceipt,
+    borrow: *const StoppedBorrow,
+    permit: *const BorrowUsePermit,
+    seed: *const WouldBlockSeed,
+    phase: DrainSeedAuthorityPhase,
+) ?DrainSeedAuthorityProjection {
+    if (!drainSeedGraphDisjoint(
+        scratch,
+        receipt,
+        borrow,
+        permit,
+        seed,
+    ) or !permitMatchesBorrow(scratch, receipt, borrow, permit))
+        return null;
+    const lifecycle: WouldBlockSeedLifecycle = switch (phase) {
+        .prepared => .prepared,
+        .consumed => .consumed,
+    };
+    if (!seedMatchesPermit(scratch, permit, seed, lifecycle))
+        return null;
+    var continuity_writer = external_owner_seal.Writer.init("MARUDSC1");
+    continuity_writer.writeUsize(@intFromPtr(scratch));
+    continuity_writer.writeU64(scratch.generation);
+    continuity_writer.writeUsize(@intFromPtr(receipt));
+    continuity_writer.writeUsize(@intFromPtr(borrow));
+    continuity_writer.writeUsize(@intFromPtr(permit));
+    continuity_writer.writeUsize(@intFromPtr(seed));
+    continuity_writer.writeU64(seed.attempt_generation);
+    const continuity = continuity_writer.finish();
+    var digest_writer = external_owner_seal.Writer.init("MARUDSP1");
+    digest_writer.writeU8(@intFromEnum(phase));
+    digest_writer.writeBytes(&continuity);
+    digest_writer.writeBytes(&receipt.digest);
+    digest_writer.writeBytes(&borrow.digest);
+    digest_writer.writeBytes(&permit.digest);
+    digest_writer.writeBytes(&seed.digest);
+    const result = DrainSeedAuthorityProjection{
+        .phase = phase,
+        .scratch_addr = @intFromPtr(scratch),
+        .scratch_generation = scratch.generation,
+        .receipt_addr = @intFromPtr(receipt),
+        .borrow_addr = @intFromPtr(borrow),
+        .permit_addr = @intFromPtr(permit),
+        .seed_addr = @intFromPtr(seed),
+        .attempt_generation = seed.attempt_generation,
+        .continuity_digest = continuity,
+        .digest = digest_writer.finish(),
+    };
+    return result;
 }
 
 pub fn abortWouldBlockSeed(
@@ -3165,6 +3260,273 @@ test "C4c active stopped use accounts would-block seed before settlement" {
         },
     ));
     try std.testing.expectEqual(ReadScratchTeardownResult.closed, teardown(scratch));
+}
+
+test "S3-D drain seed projection preserves continuity across its linear phase" {
+    const scratch = try std.testing.allocator.create(ExternalRxReadScratch);
+    defer std.testing.allocator.destroy(scratch);
+    var receipt: CollectReceipt = undefined;
+    var borrow: StoppedBorrow = .{};
+    try makeStoppedWouldBlockFixture(scratch, &receipt, &borrow);
+    var guard_probe: BorrowUseGuardProbe = .{};
+    var guard = BorrowUseGuardOps{
+        .context = &guard_probe,
+        .context_len = @sizeOf(BorrowUseGuardProbe),
+        .current = BorrowUseGuardProbe.current,
+    };
+    var seed: WouldBlockSeed = .{};
+    var permit: BorrowUsePermit = .{};
+    try std.testing.expect(beginStoppedUse(
+        scratch,
+        &receipt,
+        &borrow,
+        &guard,
+        &seed,
+        &permit,
+    ));
+    try std.testing.expect(mintBorrowedWouldBlockSeed(
+        scratch,
+        &receipt,
+        &borrow,
+        &permit,
+        &seed,
+    ));
+    const callback_calls_before_snapshot = guard_probe.callback_calls;
+    const prepared = snapshotDrainSeedAuthority(
+        scratch,
+        &receipt,
+        &borrow,
+        &permit,
+        &seed,
+        .prepared,
+    ).?;
+    try std.testing.expectEqual(
+        callback_calls_before_snapshot,
+        guard_probe.callback_calls,
+    );
+    try std.testing.expectEqual(
+        @as(?u64, prepared.attempt_generation),
+        consumeWouldBlockSeed(scratch, &permit, &seed),
+    );
+    const callback_calls_before_consumed_snapshot = guard_probe.callback_calls;
+    const consumed = snapshotDrainSeedAuthority(
+        scratch,
+        &receipt,
+        &borrow,
+        &permit,
+        &seed,
+        .consumed,
+    ).?;
+    try std.testing.expectEqual(
+        callback_calls_before_consumed_snapshot,
+        guard_probe.callback_calls,
+    );
+    try std.testing.expectEqual(DrainSeedAuthorityPhase.prepared, prepared.phase);
+    try std.testing.expectEqual(DrainSeedAuthorityPhase.consumed, consumed.phase);
+    try std.testing.expect(std.mem.eql(
+        u8,
+        &prepared.continuity_digest,
+        &consumed.continuity_digest,
+    ));
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &prepared.digest,
+        &consumed.digest,
+    ));
+    try std.testing.expectEqual(prepared.scratch_addr, consumed.scratch_addr);
+    try std.testing.expectEqual(prepared.receipt_addr, consumed.receipt_addr);
+    try std.testing.expectEqual(prepared.borrow_addr, consumed.borrow_addr);
+    try std.testing.expectEqual(prepared.permit_addr, consumed.permit_addr);
+    try std.testing.expectEqual(prepared.seed_addr, consumed.seed_addr);
+}
+
+test "S3-D drain seed projection rejects copied and drifted authority without mutation" {
+    const scratch = try std.testing.allocator.create(ExternalRxReadScratch);
+    defer std.testing.allocator.destroy(scratch);
+    var receipt: CollectReceipt = undefined;
+    var borrow: StoppedBorrow = .{};
+    try makeStoppedWouldBlockFixture(scratch, &receipt, &borrow);
+    var guard_probe: BorrowUseGuardProbe = .{};
+    var guard = BorrowUseGuardOps{
+        .context = &guard_probe,
+        .context_len = @sizeOf(BorrowUseGuardProbe),
+        .current = BorrowUseGuardProbe.current,
+    };
+    var seed: WouldBlockSeed = .{};
+    var permit: BorrowUsePermit = .{};
+    try std.testing.expect(beginStoppedUse(
+        scratch,
+        &receipt,
+        &borrow,
+        &guard,
+        &seed,
+        &permit,
+    ));
+    try std.testing.expect(mintBorrowedWouldBlockSeed(
+        scratch,
+        &receipt,
+        &borrow,
+        &permit,
+        &seed,
+    ));
+
+    var copied_receipt = receipt;
+    var copied_borrow = borrow;
+    var copied_permit = permit;
+    var copied_seed = seed;
+    const callback_calls_before_snapshot = guard_probe.callback_calls;
+    inline for (.{
+        .{ &copied_receipt, &borrow, &permit, &seed },
+        .{ &receipt, &copied_borrow, &permit, &seed },
+        .{ &receipt, &borrow, &copied_permit, &seed },
+        .{ &receipt, &borrow, &permit, &copied_seed },
+    }) |graph| {
+        const before_scratch = scratch.*;
+        const before_receipt = receipt;
+        const before_borrow = borrow;
+        const before_permit = permit;
+        const before_seed = seed;
+        try std.testing.expect(snapshotDrainSeedAuthority(
+            scratch,
+            graph[0],
+            graph[1],
+            graph[2],
+            graph[3],
+            .prepared,
+        ) == null);
+        try std.testing.expect(std.mem.eql(
+            u8,
+            std.mem.asBytes(&before_scratch),
+            std.mem.asBytes(scratch),
+        ));
+        try std.testing.expect(std.mem.eql(
+            u8,
+            std.mem.asBytes(&before_receipt),
+            std.mem.asBytes(&receipt),
+        ));
+        try std.testing.expect(std.mem.eql(
+            u8,
+            std.mem.asBytes(&before_borrow),
+            std.mem.asBytes(&borrow),
+        ));
+        try std.testing.expect(std.mem.eql(
+            u8,
+            std.mem.asBytes(&before_permit),
+            std.mem.asBytes(&permit),
+        ));
+        try std.testing.expect(std.mem.eql(
+            u8,
+            std.mem.asBytes(&before_seed),
+            std.mem.asBytes(&seed),
+        ));
+        try std.testing.expectEqual(
+            callback_calls_before_snapshot,
+            guard_probe.callback_calls,
+        );
+    }
+
+    const original_receipt = receipt;
+    const original_borrow = borrow;
+    const original_permit = permit;
+    const original_seed = seed;
+    inline for ([_]u8{ 0, 1, 2, 3 }) |field| {
+        switch (field) {
+            0 => receipt.attempts +%= 1,
+            1 => borrow.digest[0] ^= 1,
+            2 => permit.digest[0] ^= 1,
+            3 => seed.digest[0] ^= 1,
+            else => unreachable,
+        }
+        try std.testing.expect(snapshotDrainSeedAuthority(
+            scratch,
+            &receipt,
+            &borrow,
+            &permit,
+            &seed,
+            .prepared,
+        ) == null);
+        receipt = original_receipt;
+        borrow = original_borrow;
+        permit = original_permit;
+        seed = original_seed;
+    }
+    try std.testing.expectEqual(
+        callback_calls_before_snapshot,
+        guard_probe.callback_calls,
+    );
+}
+
+test "S3-D drain seed graph preflight rejects overlap and overflow and permits adjacency" {
+    const Graph = struct {
+        fn valid(addresses: [5]usize) bool {
+            return drainSeedGraphDisjoint(
+                @ptrFromInt(addresses[0]),
+                @ptrFromInt(addresses[1]),
+                @ptrFromInt(addresses[2]),
+                @ptrFromInt(addresses[3]),
+                @ptrFromInt(addresses[4]),
+            );
+        }
+    };
+    const alignment = comptime @max(
+        @alignOf(ExternalRxReadScratch),
+        @alignOf(CollectReceipt),
+        @alignOf(StoppedBorrow),
+        @alignOf(BorrowUsePermit),
+        @alignOf(WouldBlockSeed),
+    );
+    const sizes = [_]usize{
+        @sizeOf(ExternalRxReadScratch),
+        @sizeOf(CollectReceipt),
+        @sizeOf(StoppedBorrow),
+        @sizeOf(BorrowUsePermit),
+        @sizeOf(WouldBlockSeed),
+    };
+    var addresses: [5]usize = undefined;
+    addresses[0] = 0x10000000;
+    for (1..addresses.len) |index| {
+        addresses[index] = std.mem.alignForward(
+            usize,
+            addresses[index - 1] + sizes[index - 1],
+            alignment,
+        );
+    }
+    try std.testing.expect(Graph.valid(addresses));
+
+    var isolated: [5]usize = undefined;
+    for (0..isolated.len) |index|
+        isolated[index] = 0x20000000 + index * 0x400000;
+    inline for (0..5) |left| {
+        inline for (left + 1..5) |right| {
+            var overlapped = isolated;
+            overlapped[right] = overlapped[left];
+            try std.testing.expect(!Graph.valid(overlapped));
+
+            var partially_overlapped = isolated;
+            partially_overlapped[right] =
+                partially_overlapped[left] + alignment;
+            try std.testing.expect(!Graph.valid(partially_overlapped));
+
+            var adjacent = isolated;
+            adjacent[right] = adjacent[left] + sizes[left];
+            try std.testing.expect(Graph.valid(adjacent));
+        }
+    }
+
+    inline for (0..5) |index| {
+        var overflowed = addresses;
+        const type_alignment = comptime switch (index) {
+            0 => @alignOf(ExternalRxReadScratch),
+            1 => @alignOf(CollectReceipt),
+            2 => @alignOf(StoppedBorrow),
+            3 => @alignOf(BorrowUsePermit),
+            4 => @alignOf(WouldBlockSeed),
+            else => unreachable,
+        };
+        overflowed[index] =
+            std.math.maxInt(usize) - type_alignment + 1;
+        try std.testing.expect(!Graph.valid(overflowed));
+    }
 }
 
 test "C4c stopped use rejects seed output alias and supports abort" {

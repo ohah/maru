@@ -1176,6 +1176,34 @@ fn drainQueuedTestOutput(
     return error.TestUnexpectedResult;
 }
 
+fn drainAttachedPairOutputAndProducers(
+    owner: *Owner,
+    first: AttachedTestClient,
+    second: AttachedTestClient,
+) !void {
+    var buf: [4096]u8 = undefined;
+    for (0..1000) |_| {
+        _ = try owner.pollOnce(0);
+        for ([_]c.fd_t{ first.fd, second.fd }) |fd| {
+            while (true) {
+                const rc = c.recv(fd, &buf, buf.len, posix.MSG.DONTWAIT);
+                if (rc > 0) continue;
+                if (rc == 0) return error.TestUnexpectedResult;
+                if (posix.errno(rc) == .AGAIN) break;
+                return error.TestUnexpectedResult;
+            }
+        }
+        const first_admission = owner.clients[first.index].?.admission;
+        const second_admission = owner.clients[second.index].?.admission;
+        if ((try owner.reactor.get(first_admission)).pending_bytes == 0 and
+            (try owner.reactor.get(second_admission)).pending_bytes == 0 and
+            owner.producer_remaining[first.index] == 0 and
+            owner.producer_remaining[second.index] == 0)
+            return;
+    }
+    return error.TestUnexpectedResult;
+}
+
 fn admittedKeyExcept(
     owner: *Owner,
     excluded: ?connection_slot.ConnectionKey,
@@ -3016,6 +3044,23 @@ test "poll owner keeps committed controller after partial revocation write and o
     defer {
         if (next.fd >= 0) _ = c.close(next.fd);
     }
+    // The attach helper proves that the peer received the response and final snapshot chunk, but
+    // a platform scheduling boundary may still leave cadence/sibling output resident or scheduled
+    // in either server slot. This fixture starts specifically at the revocation partial-write
+    // boundary, so freeze unrelated producer cadence and establish an exact quiescent precondition
+    // before issuing the takeover.
+    owner.next_cadence_ns = std.math.maxInt(u64);
+    try drainAttachedPairOutputAndProducers(&owner, old, next);
+    try testing.expectEqual(
+        @as(usize, 0),
+        (try owner.reactor.get(owner.clients[old.index].?.admission)).pending_bytes,
+    );
+    try testing.expectEqual(
+        @as(usize, 0),
+        (try owner.reactor.get(owner.clients[next.index].?.admission)).pending_bytes,
+    );
+    try testing.expectEqual(@as(usize, 0), owner.producer_remaining[old.index]);
+    try testing.expectEqual(@as(usize, 0), owner.producer_remaining[next.index]);
     const next_subscription = server.subscriptions.resolveLocal(.{
         .connection = owner.clients[next.index].?.admission.key,
         .stream_id = 1,

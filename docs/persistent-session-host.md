@@ -7745,7 +7745,9 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 guarded admit의 reset/quarantine completion 뒤 prepared-admit이 다시 pristine인지와 나머지
                 scratch가 callback 전 값 그대로인지 검증한 뒤에만 read scratch digest를 재봉인한다. active
                 prepared-admit use 중 seed/end/settle/teardown은 거부하며, callback drift를 일반 reseal로
-                합법화하지 않는다.
+                합법화하지 않는다. finish 뒤 token은 sealed `finished` tombstone이고, 다음 turn 전에는
+                `resetFinishedPreparedAdmitUse`가 final address/digest와 scratch의 active latch 0을 exact
+                검증한 뒤에만 pristine으로 되돌린다. 제품 pump의 token 직접 zero 대입은 금지한다.
                 **C4d**에서만 pump-private drain evidence lifecycle과
                 `pumpInjectedRxUnderHeldLease`, private product-compilable `RxTurnOps` fixture를 연결한다.
                 네 gate가 모두 green이기 전에는 C4 구현으로 표시하지 않는다.

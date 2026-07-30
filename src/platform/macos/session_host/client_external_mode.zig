@@ -921,6 +921,131 @@ pub fn resetFinishedPreparedAdmit(prepared: *PreparedRxAppend) bool {
     return true;
 }
 
+pub const TerminalizedPreparedAdmit = struct {
+    outcome_tag: GuardedQuarantineOutcomeTag,
+    quarantine: GuardedAdmitQuarantine,
+};
+
+pub const TerminalizePreparedAdmitResult = union(enum) {
+    pristine,
+    ordinary_finished,
+    quarantine_pending: TerminalizedPreparedAdmit,
+    quarantine_accounted: TerminalizedPreparedAdmit,
+    terminalized: TerminalizedPreparedAdmit,
+    unrecoverable,
+};
+
+fn terminalizedPreparedAdmit(
+    prepared: *const PreparedRxAppend,
+) TerminalizedPreparedAdmit {
+    return .{
+        .outcome_tag = prepared.quarantine_outcome_tag,
+        .quarantine = .{
+            .phase = prepared.quarantine_phase,
+            .quarantined_bytes_upper_bound = prepared.quarantine_upper_bound,
+        },
+    };
+}
+
+/// Closes a guarded prepared-admit token without invoking allocator or guard callbacks.
+/// Replacement ownership is deliberately quarantined rather than freed.
+pub fn terminalizePreparedAdmitNoCallback(
+    state: *State,
+    parser: *framing.FrameParser,
+    prepared: *PreparedRxAppend,
+) TerminalizePreparedAdmitResult {
+    const state_addr = @intFromPtr(state);
+    const parser_addr = @intFromPtr(parser);
+    const prepared_addr = @intFromPtr(prepared);
+    if (rangesOverlap(state_addr, @sizeOf(State), parser_addr, @sizeOf(framing.FrameParser)) or
+        rangesOverlap(state_addr, @sizeOf(State), prepared_addr, @sizeOf(PreparedRxAppend)) or
+        rangesOverlap(
+            parser_addr,
+            @sizeOf(framing.FrameParser),
+            prepared_addr,
+            @sizeOf(PreparedRxAppend),
+        ))
+        return .unrecoverable;
+
+    if (preparedRxAppendPristine(prepared)) return .pristine;
+    if (completionTombstoneValid(prepared, .ordinary_finished) and
+        (prepared.lifecycle == .committed or prepared.lifecycle == .aborted) and
+        prepared.quarantine_outcome_tag == .allocation_quarantined and
+        prepared.quarantine_phase == .allocation and
+        prepared.quarantine_upper_bound == 0)
+        return .ordinary_finished;
+    if (completionTombstoneValid(prepared, .quarantine_pending) and
+        (prepared.lifecycle == .aborted or
+            prepared.lifecycle == .committed or
+            prepared.lifecycle == .quarantined) and
+        prepared.quarantine_upper_bound <= max_guarded_admit_quarantine_bytes)
+        return .{ .quarantine_pending = terminalizedPreparedAdmit(prepared) };
+    if (completionTombstoneValid(prepared, .quarantine_accounted) and
+        (prepared.lifecycle == .aborted or
+            prepared.lifecycle == .committed or
+            prepared.lifecycle == .quarantined) and
+        prepared.quarantine_upper_bound <= max_guarded_admit_quarantine_bytes)
+        return .{ .quarantine_accounted = terminalizedPreparedAdmit(prepared) };
+
+    if (!appendPreparedTokenAuthenticated(state, parser, prepared))
+        return .unrecoverable;
+    const hard_cap = protocol.max_binary_chunk + protocol.header_size;
+    if (prepared.resident_cap == 0 or prepared.resident_cap > hard_cap)
+        return .unrecoverable;
+    const has_replacement_evidence = prepared.replacement != null or
+        prepared.cleanup_replacement != null or
+        prepared.replacement_addr != 0 or
+        prepared.replacement_len != 0 or
+        prepared.final_items_len != 0 or
+        prepared.replacement_guard != null or
+        !std.meta.eql(
+            prepared.replacement_authority_seal,
+            ReplacementAuthoritySeal{},
+        );
+    const upper_bound: usize = if (has_replacement_evidence) blk: {
+        if (!guardedPreparedCleanupAuthority(prepared))
+            return .unrecoverable;
+        break :blk guardedQuarantineUpperBound(prepared);
+    } else blk: {
+        if (prepared.replacement != null or
+            prepared.cleanup_replacement != null or
+            prepared.replacement_addr != 0 or prepared.replacement_len != 0 or
+            prepared.final_items_len != 0 or
+            prepared.replacement_guard != null or
+            !std.meta.eql(
+                prepared.replacement_authority_seal,
+                ReplacementAuthoritySeal{},
+            ) or
+            @intFromPtr(prepared.allocator.ptr) !=
+                prepared.allocator_ptr_addr or
+            @intFromPtr(prepared.allocator.vtable) !=
+                prepared.allocator_vtable_addr or
+            !std.mem.eql(
+                u8,
+                &prepared.cleanup_digest,
+                &appendCleanupDigest(prepared),
+            ))
+            return .unrecoverable;
+        break :blk 0;
+    };
+    const closed = TerminalizedPreparedAdmit{
+        .outcome_tag = .allocation_quarantined,
+        .quarantine = .{
+            .phase = .abort_cleanup,
+            .quarantined_bytes_upper_bound = upper_bound,
+        },
+    };
+    markQuarantinedPreparedAdmitPending(
+        prepared,
+        .quarantined,
+        closed.outcome_tag,
+        closed.quarantine,
+    );
+    state.rx_provenance = .{ .lifecycle = .terminal };
+    state.rx_operation_busy = false;
+    return .{ .terminalized = closed };
+}
+
 pub const GuardedQuarantineReceiptLifecycle = enum {
     empty,
     accounted,
@@ -3731,6 +3856,272 @@ test "guarded RX admit spare-capacity path invokes no guard callback" {
     );
     try std.testing.expectEqual(@as(usize, 0), guard_context.calls);
     try std.testing.expectEqualStrings("xy", parser.buf.items);
+}
+
+test "terminal prepared admit no-callback classifies pristine ordinary and quarantine replay" {
+    var state = State{ .saved_flags = 0 };
+    var parser = framing.FrameParser.init(std.testing.allocator);
+    defer parser.deinit();
+
+    var prepared: PreparedRxAppend = .{};
+    try std.testing.expect(
+        terminalizePreparedAdmitNoCallback(
+            &state,
+            &parser,
+            &prepared,
+        ) == .pristine,
+    );
+    try std.testing.expect(testing.seedOrdinaryFinishedPreparedAdmit(
+        &prepared,
+        true,
+    ));
+    try std.testing.expect(
+        terminalizePreparedAdmitNoCallback(
+            &state,
+            &parser,
+            &prepared,
+        ) == .ordinary_finished,
+    );
+    try std.testing.expect(resetFinishedPreparedAdmit(&prepared));
+
+    const quarantine = GuardedAdmitQuarantine{
+        .phase = .commit_cleanup,
+        .quarantined_bytes_upper_bound = max_guarded_admit_quarantine_bytes,
+    };
+    try std.testing.expect(testing.seedQuarantinePendingPreparedAdmit(
+        &prepared,
+        .post_commit_quarantined,
+        quarantine,
+    ));
+    const pending = terminalizePreparedAdmitNoCallback(
+        &state,
+        &parser,
+        &prepared,
+    );
+    try std.testing.expect(pending == .quarantine_pending);
+    try std.testing.expectEqual(
+        quarantine,
+        pending.quarantine_pending.quarantine,
+    );
+    try std.testing.expectEqual(
+        GuardedQuarantineOutcomeTag.post_commit_quarantined,
+        pending.quarantine_pending.outcome_tag,
+    );
+    var event_count = std.atomic.Value(u64).init(0);
+    var receipt: GuardedQuarantineAccountingReceipt = .{};
+    try std.testing.expect(markQuarantinedPreparedAdmitAccounted(
+        &prepared,
+        .post_commit_quarantined,
+        quarantine,
+        &event_count,
+        &receipt,
+    ));
+    try std.testing.expect(
+        terminalizePreparedAdmitNoCallback(
+            &state,
+            &parser,
+            &prepared,
+        ) == .quarantine_accounted,
+    );
+
+    const alias: *PreparedRxAppend = @ptrCast(@alignCast(&state));
+    try std.testing.expect(
+        terminalizePreparedAdmitNoCallback(
+            &state,
+            &parser,
+            alias,
+        ) == .unrecoverable,
+    );
+    const overflow_addr = (std.math.maxInt(usize) -
+        @sizeOf(PreparedRxAppend) / 2) &
+        ~(@as(usize, @alignOf(PreparedRxAppend)) - 1);
+    const overflow: *PreparedRxAppend = @ptrFromInt(overflow_addr);
+    try std.testing.expect(
+        terminalizePreparedAdmitNoCallback(
+            &state,
+            &parser,
+            overflow,
+        ) == .unrecoverable,
+    );
+}
+
+test "terminal prepared admit no-callback closes active spare capacity at zero bound" {
+    var state = State{ .saved_flags = 7 };
+    defer state.deinit(std.testing.allocator);
+    var parser = framing.FrameParser.init(std.testing.allocator);
+    defer parser.deinit();
+    var destination_slot: usize = 0;
+    try bindParserForTest(&state, &parser, 700, &destination_slot);
+    try parser.buf.ensureTotalCapacityPrecise(parser.allocator, 8);
+    try std.testing.expect(resealParserAuthority(&state, &parser));
+    try setResidentCapForTest(&state, &parser, 8);
+    var guard_context = TestReplacementGuard{};
+    const guard = guard_context.guard();
+    var prepared: PreparedRxAppend = .{};
+    try std.testing.expect(
+        prepareAdmitGuarded(&state, &parser, "xy", 0, 8, &guard, &prepared) ==
+            .prepared,
+    );
+    const closed = terminalizePreparedAdmitNoCallback(
+        &state,
+        &parser,
+        &prepared,
+    );
+    try std.testing.expect(closed == .terminalized);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        closed.terminalized.quarantine.quarantined_bytes_upper_bound,
+    );
+    try std.testing.expectEqual(@as(usize, 0), guard_context.calls);
+    try std.testing.expect(state.rx_provenance.lifecycle == .terminal);
+    try std.testing.expect(!state.rx_operation_busy);
+}
+
+test "terminal prepared admit no-callback quarantines replacement without callbacks" {
+    var fixed_bytes: [4096]u8 align(64) = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&fixed_bytes);
+    const allocator = fixed.allocator();
+    var state = State{ .saved_flags = 7 };
+    defer state.deinit(allocator);
+    var parser = try exactParserForGuardedAdmitTest(allocator, "abc");
+    defer parser.deinit();
+    var destination_slot: usize = 0;
+    try bindParserForTest(&state, &parser, 701, &destination_slot);
+    try setResidentCapForTest(&state, &parser, 6);
+    var guard_context = TestReplacementGuard{};
+    const guard = guard_context.guard();
+    var prepared: PreparedRxAppend = .{};
+    try std.testing.expect(
+        prepareAdmitGuarded(
+            &state,
+            &parser,
+            "def",
+            state.rx_provenance.rx_absolute_next,
+            6,
+            &guard,
+            &prepared,
+        ) == .prepared,
+    );
+    const calls_before = guard_context.calls;
+    const replacement_len = prepared.replacement_len;
+    const closed = terminalizePreparedAdmitNoCallback(
+        &state,
+        &parser,
+        &prepared,
+    );
+    try std.testing.expect(closed == .terminalized);
+    try std.testing.expectEqual(
+        replacement_len,
+        closed.terminalized.quarantine.quarantined_bytes_upper_bound,
+    );
+    try std.testing.expectEqual(calls_before, guard_context.calls);
+    try std.testing.expect(state.rx_provenance.lifecycle == .terminal);
+    try std.testing.expect(!state.rx_operation_busy);
+    try std.testing.expect(prepared.completion == .quarantine_pending);
+    try std.testing.expect(
+        terminalizePreparedAdmitNoCallback(
+            &state,
+            &parser,
+            &prepared,
+        ) == .quarantine_pending,
+    );
+}
+
+test "terminal prepared admit no-callback rejects copy mirror cap and digest drift without mutation" {
+    var fixed_bytes: [4096]u8 align(64) = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&fixed_bytes);
+    const allocator = fixed.allocator();
+    var state = State{ .saved_flags = 7 };
+    defer state.deinit(allocator);
+    var parser = try exactParserForGuardedAdmitTest(allocator, "abc");
+    defer parser.deinit();
+    var destination_slot: usize = 0;
+    try bindParserForTest(&state, &parser, 702, &destination_slot);
+    try setResidentCapForTest(&state, &parser, 6);
+    var guard_context = TestReplacementGuard{};
+    const guard = guard_context.guard();
+    var prepared: PreparedRxAppend = .{};
+    try std.testing.expect(
+        prepareAdmitGuarded(
+            &state,
+            &parser,
+            "def",
+            state.rx_provenance.rx_absolute_next,
+            6,
+            &guard,
+            &prepared,
+        ) == .prepared,
+    );
+    const state_before = state;
+    const canonical = prepared;
+
+    var copied = prepared;
+    try std.testing.expect(
+        terminalizePreparedAdmitNoCallback(
+            &state,
+            &parser,
+            &copied,
+        ) == .unrecoverable,
+    );
+    try std.testing.expect(std.meta.eql(state_before, state));
+
+    prepared.cleanup_replacement = null;
+    try std.testing.expect(
+        terminalizePreparedAdmitNoCallback(
+            &state,
+            &parser,
+            &prepared,
+        ) == .unrecoverable,
+    );
+    try std.testing.expect(std.meta.eql(state_before, state));
+    prepared = canonical;
+
+    prepared.replacement = null;
+    try std.testing.expect(
+        terminalizePreparedAdmitNoCallback(
+            &state,
+            &parser,
+            &prepared,
+        ) == .unrecoverable,
+    );
+    try std.testing.expect(std.meta.eql(state_before, state));
+    prepared = canonical;
+
+    prepared.replacement_len = prepared.resident_cap + 1;
+    prepared.cleanup_digest = appendCleanupDigest(&prepared);
+    prepared.digest = appendDigest(&prepared);
+    try std.testing.expect(
+        terminalizePreparedAdmitNoCallback(
+            &state,
+            &parser,
+            &prepared,
+        ) == .unrecoverable,
+    );
+    try std.testing.expect(std.meta.eql(state_before, state));
+    prepared = canonical;
+
+    prepared.resident_cap = std.math.maxInt(usize);
+    prepared.cleanup_digest = appendCleanupDigest(&prepared);
+    prepared.digest = appendDigest(&prepared);
+    try std.testing.expect(
+        terminalizePreparedAdmitNoCallback(
+            &state,
+            &parser,
+            &prepared,
+        ) == .unrecoverable,
+    );
+    try std.testing.expect(std.meta.eql(state_before, state));
+    prepared = canonical;
+
+    prepared.digest[0] +%= 1;
+    try std.testing.expect(
+        terminalizePreparedAdmitNoCallback(
+            &state,
+            &parser,
+            &prepared,
+        ) == .unrecoverable,
+    );
+    try std.testing.expect(std.meta.eql(state_before, state));
 }
 
 test "guarded RX admit rejects invalid or unsealed resident caps before callbacks" {

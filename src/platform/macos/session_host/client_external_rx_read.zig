@@ -1256,20 +1256,38 @@ fn permitMatchesBorrow(
         permit.borrow_addr == @intFromPtr(borrow);
 }
 
-fn guardInactive(
+fn guardInactiveForOperation(
     scratch: *ExternalRxReadScratch,
     permit: *BorrowUsePermit,
+    receipt: ?*const CollectReceipt,
+    borrow: ?*const StoppedBorrow,
+    seed: ?*const WouldBlockSeed,
 ) bool {
     if (!permitMatchesScratch(scratch, permit)) return false;
     const before_scratch = scratch.digest;
     const before_permit = permit.digest;
+    const before_receipt = if (receipt) |value| value.* else null;
+    const before_borrow = if (borrow) |value| value.* else null;
+    const before_seed = if (seed) |value| value.* else null;
     const state = permit.guard_current(
         permit.guard_context,
         @intFromPtr(scratch),
-    ) orelse return false;
-    return !state and
+    );
+    return state != null and !state.? and
         std.mem.eql(u8, &before_scratch, &scratch.digest) and
         std.mem.eql(u8, &before_permit, &permit.digest) and
+        (if (receipt) |value|
+            std.meta.eql(before_receipt.?, value.*)
+        else
+            true) and
+        (if (borrow) |value|
+            std.meta.eql(before_borrow.?, value.*)
+        else
+            true) and
+        (if (seed) |value|
+            std.meta.eql(before_seed.?, value.*)
+        else
+            true) and
         permitMatchesScratch(scratch, permit);
 }
 
@@ -1395,7 +1413,13 @@ pub fn mintBorrowedWouldBlockSeed(
             u8,
             &scratch.would_block.digest,
             &wouldBlockDigest(&scratch.would_block),
-        ) or !guardInactive(scratch, permit))
+        ) or !guardInactiveForOperation(
+        scratch,
+        permit,
+        receipt,
+        borrow,
+        out,
+    ))
         return false;
     out.* = .{
         .saved_self_addr = @intFromPtr(out),
@@ -1421,10 +1445,18 @@ fn accountWouldBlockSeed(
     seed: *WouldBlockSeed,
     lifecycle: WouldBlockSeedLifecycle,
 ) ?u64 {
-    if (!seedMatchesPermit(scratch, permit, seed, .prepared) or
-        !guardInactive(scratch, permit))
+    if (!seedMatchesPermit(scratch, permit, seed, .prepared))
         return null;
     const generation = seed.attempt_generation;
+    if (!guardInactiveForOperation(
+        scratch,
+        permit,
+        null,
+        null,
+        seed,
+    ) or !seedMatchesPermit(scratch, permit, seed, .prepared) or
+        seed.attempt_generation != generation)
+        return null;
     seed.lifecycle = lifecycle;
     seed.digest = wouldBlockSeedDigest(seed);
     permit.seed_lifecycle = switch (lifecycle) {
@@ -1456,6 +1488,31 @@ pub fn abortWouldBlockSeed(
     return accountWouldBlockSeed(scratch, permit, seed, .aborted) != null;
 }
 
+fn authorizedSeedMatchesPermit(
+    scratch: *const ExternalRxReadScratch,
+    permit: *const BorrowUsePermit,
+) bool {
+    if (!permitMatchesScratch(scratch, permit)) return false;
+    const seed: *const WouldBlockSeed =
+        @ptrFromInt(permit.authorized_seed_addr);
+    return switch (permit.seed_lifecycle) {
+        .unminted => std.meta.eql(seed.*, WouldBlockSeed{}),
+        .prepared => false,
+        .consumed => seedMatchesPermit(
+            scratch,
+            permit,
+            seed,
+            .consumed,
+        ),
+        .aborted => seedMatchesPermit(
+            scratch,
+            permit,
+            seed,
+            .aborted,
+        ),
+    };
+}
+
 pub fn endStoppedUse(
     scratch: *ExternalRxReadScratch,
     receipt: *const CollectReceipt,
@@ -1464,7 +1521,16 @@ pub fn endStoppedUse(
 ) bool {
     if (!permitMatchesBorrow(scratch, receipt, borrow, permit) or
         permit.seed_lifecycle == .prepared or
-        !guardInactive(scratch, permit))
+        !authorizedSeedMatchesPermit(scratch, permit) or
+        !guardInactiveForOperation(
+            scratch,
+            permit,
+            receipt,
+            borrow,
+            @ptrFromInt(permit.authorized_seed_addr),
+        ) or
+        !permitMatchesBorrow(scratch, receipt, borrow, permit) or
+        !authorizedSeedMatchesPermit(scratch, permit))
         return false;
     permit.lifecycle = .released;
     permit.digest = borrowUsePermitDigest(permit);
@@ -1760,11 +1826,45 @@ test "C1 accepted allowance stop table fixes every limit tie precedence" {
     );
 }
 
+const BorrowUseSeedMutation = enum {
+    saved_self_addr,
+    scratch_addr,
+    scratch_generation,
+    receipt_digest,
+    borrow_addr,
+    attempt_generation,
+    lifecycle,
+    digest,
+};
+
 const BorrowUseGuardProbe = struct {
     state: ?bool = false,
+    seed: ?*WouldBlockSeed = null,
+    seed_mutation: ?BorrowUseSeedMutation = null,
+    receipt: ?*CollectReceipt = null,
+    mutate_receipt: bool = false,
+    borrow: ?*StoppedBorrow = null,
+    mutate_borrow: bool = false,
 
     fn current(context: *anyopaque, _: usize) ?bool {
         const self: *BorrowUseGuardProbe = @ptrCast(@alignCast(context));
+        if (self.seed_mutation) |mutation| {
+            const seed = self.seed.?;
+            switch (mutation) {
+                .saved_self_addr => seed.saved_self_addr +%= 1,
+                .scratch_addr => seed.scratch_addr +%= 1,
+                .scratch_generation => seed.scratch_generation +%= 1,
+                .receipt_digest => seed.receipt_digest[0] +%= 1,
+                .borrow_addr => seed.borrow_addr +%= 1,
+                .attempt_generation => seed.attempt_generation +%= 1,
+                .lifecycle => seed.lifecycle = .aborted,
+                .digest => seed.digest[0] +%= 1,
+            }
+        }
+        if (self.mutate_receipt)
+            self.receipt.?.attempts +%= 1;
+        if (self.mutate_borrow)
+            self.borrow.?.bytes_len +%= 1;
         return self.state;
     }
 };
@@ -1988,4 +2088,156 @@ test "C4c stopped use rejects seed output alias and supports abort" {
         &borrow,
         &permit,
     ));
+}
+
+test "C4c guard cannot bless any callback-mutated seed field" {
+    inline for (std.meta.tags(BorrowUseSeedMutation)) |mutation| {
+        const scratch = try std.testing.allocator.create(ExternalRxReadScratch);
+        defer std.testing.allocator.destroy(scratch);
+        var receipt: CollectReceipt = undefined;
+        var borrow: StoppedBorrow = .{};
+        try makeStoppedWouldBlockFixture(scratch, &receipt, &borrow);
+        var guard_probe: BorrowUseGuardProbe = .{};
+        const guard = BorrowUseGuardOps{
+            .context = &guard_probe,
+            .context_len = @sizeOf(BorrowUseGuardProbe),
+            .current = BorrowUseGuardProbe.current,
+        };
+        var seed: WouldBlockSeed = .{};
+        var permit: BorrowUsePermit = .{};
+        try std.testing.expect(beginStoppedUse(
+            scratch,
+            &receipt,
+            &borrow,
+            &guard,
+            &seed,
+            &permit,
+        ));
+        try std.testing.expect(mintBorrowedWouldBlockSeed(
+            scratch,
+            &receipt,
+            &borrow,
+            &permit,
+            &seed,
+        ));
+        const canonical_seed = seed;
+        const scratch_digest = scratch.digest;
+        const permit_digest = permit.digest;
+        guard_probe.seed = &seed;
+        guard_probe.seed_mutation = mutation;
+        try std.testing.expect(
+            consumeWouldBlockSeed(scratch, &permit, &seed) == null,
+        );
+        try std.testing.expectEqual(
+            BorrowUseLifecycle.active,
+            permit.lifecycle,
+        );
+        try std.testing.expectEqualSlices(
+            u8,
+            &scratch_digest,
+            &scratch.digest,
+        );
+        try std.testing.expectEqualSlices(
+            u8,
+            &permit_digest,
+            &permit.digest,
+        );
+        try std.testing.expectEqual(
+            ReadScratchTeardownResult.busy,
+            teardown(scratch),
+        );
+
+        // Detected callback corruption is never blessed. The caller-owned hostile fixture restores
+        // its credential from the frozen pre-callback value before the ordinary abort cleanup.
+        seed = canonical_seed;
+        guard_probe.seed_mutation = null;
+        try std.testing.expect(abortWouldBlockSeed(
+            scratch,
+            &permit,
+            &seed,
+        ));
+        try std.testing.expect(endStoppedUse(
+            scratch,
+            &receipt,
+            &borrow,
+            &permit,
+        ));
+    }
+}
+
+test "C4c end revalidates receipt borrow and authorized seed after guard callback" {
+    inline for (.{ "receipt", "borrow" }) |target| {
+        const scratch = try std.testing.allocator.create(ExternalRxReadScratch);
+        defer std.testing.allocator.destroy(scratch);
+        var receipt: CollectReceipt = undefined;
+        var borrow: StoppedBorrow = .{};
+        try makeStoppedWouldBlockFixture(scratch, &receipt, &borrow);
+        var guard_probe: BorrowUseGuardProbe = .{};
+        const guard = BorrowUseGuardOps{
+            .context = &guard_probe,
+            .context_len = @sizeOf(BorrowUseGuardProbe),
+            .current = BorrowUseGuardProbe.current,
+        };
+        var seed: WouldBlockSeed = .{};
+        var permit: BorrowUsePermit = .{};
+        try std.testing.expect(beginStoppedUse(
+            scratch,
+            &receipt,
+            &borrow,
+            &guard,
+            &seed,
+            &permit,
+        ));
+        try std.testing.expect(mintBorrowedWouldBlockSeed(
+            scratch,
+            &receipt,
+            &borrow,
+            &permit,
+            &seed,
+        ));
+        try std.testing.expect(
+            consumeWouldBlockSeed(scratch, &permit, &seed) != null,
+        );
+        const canonical_receipt = receipt;
+        const canonical_borrow = borrow;
+        const scratch_digest = scratch.digest;
+        const permit_digest = permit.digest;
+        guard_probe.receipt = &receipt;
+        guard_probe.borrow = &borrow;
+        if (std.mem.eql(u8, target, "receipt"))
+            guard_probe.mutate_receipt = true
+        else
+            guard_probe.mutate_borrow = true;
+        try std.testing.expect(!endStoppedUse(
+            scratch,
+            &receipt,
+            &borrow,
+            &permit,
+        ));
+        try std.testing.expectEqualSlices(
+            u8,
+            &scratch_digest,
+            &scratch.digest,
+        );
+        try std.testing.expectEqualSlices(
+            u8,
+            &permit_digest,
+            &permit.digest,
+        );
+        try std.testing.expectEqual(
+            ReadScratchTeardownResult.busy,
+            teardown(scratch),
+        );
+
+        receipt = canonical_receipt;
+        borrow = canonical_borrow;
+        guard_probe.mutate_receipt = false;
+        guard_probe.mutate_borrow = false;
+        try std.testing.expect(endStoppedUse(
+            scratch,
+            &receipt,
+            &borrow,
+            &permit,
+        ));
+    }
 }

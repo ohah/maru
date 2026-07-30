@@ -23,6 +23,7 @@ const external_owner_range = @import("external_owner_range.zig");
 const external_source_decision = @import("external_source_decision.zig");
 const external_rx_types = @import("external_rx_types.zig");
 const external_rx_intent = @import("external_rx_intent.zig");
+const external_rx_demux = @import("external_rx_demux.zig");
 const framing = @import("framing.zig");
 const protocol = @import("protocol.zig");
 const resize_wire = @import("resize_wire.zig");
@@ -1334,6 +1335,7 @@ pub const InheritedRxBlockerSnapshot = struct {
     lease_addr: usize = 0,
     operation_generation: u64 = 0,
     committed_screen_pending: bool = false,
+    live_partial_pending: bool = false,
     live_screen_pending: bool = false,
     metadata_projection_pending: bool = false,
     resize_projection_pending: bool = false,
@@ -1349,6 +1351,10 @@ pub const InheritedRxBlockerSnapshot = struct {
             (self.committed_screen_pending or self.live_screen_pending or
                 self.metadata_projection_pending or self.resize_projection_pending or
                 self.response_correlation_pending);
+    }
+
+    pub fn hasPartialContinuation(self: *const InheritedRxBlockerSnapshot) bool {
+        return self.lifecycle == .prepared and self.live_partial_pending;
     }
 };
 
@@ -1728,6 +1734,11 @@ const FrozenScreenDestinationPlan = struct {
     expected_screen_generation: u64 = 0,
     next_screen_generation: u64 = 0,
     expected_partial_empty: bool = true,
+    expected_partial_token: external_inbox_ledger.Token =
+        .{ .slot = 0, .generation = 0 },
+    expected_partial_generation: u64 = 0,
+    expected_partial_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    next_partial_generation: u64 = 0,
     entries: [external_inbox_ledger.max_live_mutations]ScreenDestinationEntry =
         [_]ScreenDestinationEntry{.{}} ** external_inbox_ledger.max_live_mutations,
     entry_count: u8 = 0,
@@ -1869,9 +1880,288 @@ comptime {
 }
 
 const LiveOwnerBlockerProjection = struct {
-    screen_or_partial_pending: bool,
+    partial_pending: bool,
+    screen_pending: bool,
     response_pending: bool,
 };
+
+pub const LiveScreenApplyResult = enum {
+    applied,
+    retry,
+};
+
+pub const BufferedRxOps = struct {
+    context: *anyopaque,
+    /// Synchronous immutable borrow. The callback must not retain `view`, `view.bytes`, or any
+    /// derived pointer after returning; either result invalidates the borrow immediately.
+    apply_live_screen: *const fn (
+        context: *anyopaque,
+        view: external_inbox_ledger.PayloadView,
+    ) LiveScreenApplyResult,
+};
+
+const LiveScreenConsumeLifecycle = enum {
+    empty,
+    prepared,
+    consumed,
+    aborted,
+};
+
+const LiveScreenConsumePermit = struct {
+    saved_self_addr: usize = 0,
+    storage_addr: usize = 0,
+    lease_addr: usize = 0,
+    operation_generation: u64 = 0,
+    fifo_generation: u64 = 0,
+    fifo_head: u8 = 0,
+    fifo_len: u8 = 0,
+    token: external_inbox_ledger.Token = .{ .slot = 0, .generation = 0 },
+    semantic: external_inbox_ledger.ObservedBatchSemantic = .{
+        .stream_id = 0,
+        .is_snapshot = false,
+    },
+    payload_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    live_batch: external_inbox_ledger.PreparedLiveBatch = .{},
+    retirement: external_inbox_ledger.PreparedLiveRetirement = .{},
+    dispositions: [external_inbox_ledger.max_live_mutations]external_inbox_ledger.LiveCommitDisposition =
+        [_]external_inbox_ledger.LiveCommitDisposition{.unused} **
+        external_inbox_ledger.max_live_mutations,
+    live_commit: external_inbox_ledger.PreparedLiveCommit = .{},
+    lifecycle: LiveScreenConsumeLifecycle = .empty,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+const LiveScreenConsumeResult = enum {
+    consumed,
+    retry,
+    no_work,
+    invalid_state,
+};
+
+const ExternalRxTurnScratchLifecycle = enum {
+    empty,
+    ready,
+    busy,
+    terminal,
+};
+
+pub const ExternalRxTurnScratch = struct {
+    saved_self_addr: usize = 0,
+    lifecycle: ExternalRxTurnScratchLifecycle = .empty,
+    snapshot: InheritedRxBlockerSnapshot = .{},
+    live_consume: LiveScreenConsumePermit = .{},
+    parse: client_external_mode.RxParseScratch = .{},
+    intent: external_rx_intent.ExternalRxIntentHandle = .{},
+    client_ranges: client_mod.ExternalSourceOwnerRangeScratch = undefined,
+    authority_ranges: external_owner_range.Scratch = .{},
+    aggregate_ranges: external_owner_range.Scratch = .{},
+    authority_ranges_generation: u64 = 0,
+
+    pub fn initInPlace(out: *ExternalRxTurnScratch) bool {
+        if (out.saved_self_addr != 0 or out.lifecycle != .empty)
+            return false;
+        out.saved_self_addr = @intFromPtr(out);
+        out.lifecycle = .ready;
+        out.snapshot = .{};
+        out.live_consume = .{};
+        out.parse = .{};
+        out.intent = .{};
+        out.authority_ranges.reset();
+        out.aggregate_ranges.reset();
+        out.authority_ranges_generation = 0;
+        return true;
+    }
+};
+
+const max_external_rx_turn_scratch_bytes: usize = 2 * 1024 * 1024;
+
+comptime {
+    if (@sizeOf(ExternalRxTurnScratch) > max_external_rx_turn_scratch_bytes)
+        @compileError("external RX turn scratch exceeds 2 MiB");
+}
+
+const ProductIntentAuthority = struct {
+    storage: *ExternalPumpStorage,
+    lease: *const ExternalWholeTurnLease,
+    scratch: *ExternalRxTurnScratch,
+
+    fn current(raw: *anyopaque) ?external_rx_intent.AuthorityView {
+        const self: *ProductIntentAuthority = @ptrCast(@alignCast(raw));
+        const storage = self.storage;
+        const scratch = self.scratch;
+        if (!storage.validateWholeTurnLease(self.lease) or
+            scratch.saved_self_addr != @intFromPtr(scratch) or
+            scratch.lifecycle != .busy or
+            scratch.authority_ranges_generation == 0)
+            return null;
+        const client = if (storage.owned_client) |*owned|
+            owned
+        else
+            return null;
+        const rx_state = switch (client.io_mode) {
+            .external => |*state| state,
+            .blocking => return null,
+        };
+        if (!client_external_mode.parserSealValid(rx_state, &client.parser))
+            return null;
+
+        const ranges = &scratch.authority_ranges;
+        ranges.reset();
+        client.appendExternalOwnerRangesForTeardown(
+            &scratch.client_ranges,
+            ranges,
+        ) catch return null;
+        storage.inbox_ledger.appendActiveOwnerRanges(ranges) catch return null;
+        storage.owner_metadata.appendActiveOwnerRanges(
+            storage,
+            ranges,
+        ) catch return null;
+        switch (storage.pending_response) {
+            .none => {},
+            .pending => |pending| ranges.append(
+                pending.seal.payload_addr,
+                pending.seal.payload_len,
+            ) catch return null,
+            .terminal => return null,
+        }
+        const forbidden = [_]external_owner_range.Range{
+            .{
+                .start = @intFromPtr(storage),
+                .len = @sizeOf(ExternalPumpStorage),
+            },
+            .{
+                .start = @intFromPtr(self.lease),
+                .len = @sizeOf(ExternalWholeTurnLease),
+            },
+            .{
+                .start = @intFromPtr(scratch),
+                .len = @sizeOf(ExternalRxTurnScratch),
+            },
+        };
+        ranges.validate(&forbidden) catch return null;
+        const identity = rx_state.rx_provenance.identity orelse return null;
+        const digest = external_rx_intent.sealAuthorityRanges(
+            ranges.ranges[0..ranges.len],
+            scratch.authority_ranges_generation,
+        ) orelse return null;
+        const reservation = storage.intent_scratch_reservation;
+        return .{
+            .storage_addr = @intFromPtr(storage),
+            .storage_len = @sizeOf(ExternalPumpStorage),
+            .operation_generation = storage.operation_generation,
+            .parser_generation = rx_state.rx_provenance.parser_seal.generation,
+            .buffer_start_absolute = rx_state.rx_provenance.buffer_start_absolute,
+            .identity = identity,
+            .allocator = client.parser.allocator,
+            .forbidden_ranges = ranges.ranges[0..ranges.len],
+            .forbidden_ranges_generation = scratch.authority_ranges_generation,
+            .forbidden_ranges_digest = digest,
+            .operation_scratch_addr = self.lease.scratch_addr,
+            .operation_scratch_len = self.lease.scratch_len,
+            .operation_lease_addr = @intFromPtr(self.lease),
+            .operation_lease_len = @sizeOf(ExternalWholeTurnLease),
+            .reservation_handle_addr = switch (reservation.lifecycle) {
+                .active, .destroying => reservation.handle_addr,
+                .empty, .poisoned_tombstone => 0,
+            },
+            .reservation_generation = switch (reservation.lifecycle) {
+                .active, .destroying => reservation.generation,
+                .empty, .poisoned_tombstone => 0,
+            },
+        };
+    }
+
+    fn ops(self: *ProductIntentAuthority) external_rx_intent.AuthorityOps {
+        return .{
+            .context = self,
+            .current = current,
+        };
+    }
+};
+
+const ProductPayloadAllocationGuard = struct {
+    authority: *ProductIntentAuthority,
+
+    fn check(
+        raw: *anyopaque,
+        allocation_addr: usize,
+        allocation_len: usize,
+    ) client_external_mode.PayloadAllocationVerdict {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        const view = ProductIntentAuthority.current(self.authority) orelse {
+            latchCrossOwnerQuarantine();
+            return .reject_no_free;
+        };
+        if (!external_rx_intent.allocationDisjointFromAuthority(
+            view,
+            allocation_addr,
+            allocation_len,
+        )) {
+            latchCrossOwnerQuarantine();
+            return .reject_no_free;
+        }
+        return .accepted;
+    }
+
+    fn ops(self: *@This()) client_external_mode.PayloadAllocationGuard {
+        return .{
+            .context = self,
+            .check = check,
+        };
+    }
+};
+
+fn writeObservedBatchSemantic(
+    writer: *external_owner_seal.Writer,
+    semantic: external_inbox_ledger.ObservedBatchSemantic,
+) void {
+    writer.writeU64(semantic.stream_id);
+    writer.writeBool(semantic.is_snapshot);
+    switch (semantic.recovery_intent) {
+        .none => writer.writeU8(0),
+        .host => |epoch| {
+            writer.writeU8(1);
+            writer.writeU64(epoch);
+        },
+        .client => |epoch| {
+            writer.writeU8(2);
+            writer.writeU64(epoch);
+        },
+    }
+    switch (semantic.provenance) {
+        .untracked => writer.writeU8(0),
+        .external => |range| {
+            writer.writeU8(1);
+            writer.writeU64(range.identity.attach_instance_id);
+            writer.writeUsize(range.identity.destination_slot_addr);
+            writer.writeU64(range.start_absolute);
+            writer.writeU64(range.end_absolute);
+        },
+    }
+}
+
+fn liveScreenConsumePermitDigest(
+    permit: *const LiveScreenConsumePermit,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARULSC1");
+    writer.writeUsize(permit.saved_self_addr);
+    writer.writeUsize(permit.storage_addr);
+    writer.writeUsize(permit.lease_addr);
+    writer.writeU64(permit.operation_generation);
+    writer.writeU64(permit.fifo_generation);
+    writer.writeU8(permit.fifo_head);
+    writer.writeU8(permit.fifo_len);
+    writer.writeU16(permit.token.slot);
+    writer.writeU64(permit.token.generation);
+    writeObservedBatchSemantic(&writer, permit.semantic);
+    writer.writeBytes(&permit.payload_digest);
+    writer.writeUsize(permit.live_batch.saved_self_addr);
+    writer.writeBytes(&permit.live_batch.digest);
+    writer.writeUsize(permit.live_commit.saved_self_addr);
+    writer.writeBytes(&permit.live_commit.digest);
+    writer.writeU8(@intFromEnum(permit.lifecycle));
+    return writer.finish();
+}
 
 fn livePartialDigest(
     storage: *const ExternalPumpStorage,
@@ -2245,6 +2535,11 @@ fn screenDestinationPlanDigest(
     writer.writeU64(plan.expected_screen_generation);
     writer.writeU64(plan.next_screen_generation);
     writer.writeBool(plan.expected_partial_empty);
+    writer.writeU16(plan.expected_partial_token.slot);
+    writer.writeU64(plan.expected_partial_token.generation);
+    writer.writeU64(plan.expected_partial_generation);
+    writer.writeBytes(&plan.expected_partial_digest);
+    writer.writeU64(plan.next_partial_generation);
     writer.writeU8(plan.entry_count);
     writer.writeU8(plan.partial_count);
     writer.writeU8(plan.completed_count);
@@ -2364,6 +2659,93 @@ fn screenTransferSemantic(
         } };
 }
 
+fn continuedScreenTransferSemantic(
+    storage: *const ExternalPumpStorage,
+    aggregate: *const PreparedRxAggregate,
+    transfer: *const ScreenTransferOwner,
+    mutation_index: u8,
+) ?external_inbox_ledger.PayloadSemantic {
+    var start_absolute = transfer.range.start_absolute;
+    var prior_chunk_count: u8 = 0;
+    var recovery_intent: external_inbox_ledger.RecoveryIntent = .none;
+    var cursor = mutation_index;
+    while (cursor != 0) {
+        const prior_mutation = cursor - 1;
+        var prior_transfer: ?*const ScreenTransferOwner = null;
+        for (&aggregate.screen_transfers) |*candidate| {
+            if ((candidate.lifecycle == .batch_owned or
+                candidate.lifecycle == .mutation_bound) and
+                candidate.mutation_index == prior_mutation)
+            {
+                prior_transfer = candidate;
+                break;
+            }
+        }
+        const prior = prior_transfer orelse return null;
+        const prior_semantic = screenTransferSemantic(prior) orelse return null;
+        if (prior_semantic != .partial or
+            prior.range.end_absolute != start_absolute)
+            return null;
+        start_absolute = prior.range.start_absolute;
+        prior_chunk_count = std.math.add(u8, prior_chunk_count, 1) catch
+            return null;
+        cursor = prior_mutation;
+    }
+    switch (storage.live_partial) {
+        .assembling => |assembling| {
+            const observed = storage.inbox_ledger.partialSnapshot(
+                assembling.ledger_token,
+            ) catch return null;
+            const range = switch (observed.provenance) {
+                .external => |range| range,
+                .untracked => return null,
+            };
+            if (range.end_absolute != start_absolute or
+                !std.meta.eql(range.identity, transfer.range.identity))
+                return null;
+            start_absolute = range.start_absolute;
+            prior_chunk_count = std.math.add(
+                u8,
+                prior_chunk_count,
+                observed.chunk_count,
+            ) catch return null;
+            recovery_intent = observed.recovery_intent;
+        },
+        .none => {},
+        .terminal => return null,
+    }
+    const span = std.math.sub(
+        u64,
+        transfer.range.end_absolute,
+        start_absolute,
+    ) catch return null;
+    const compact_span = std.math.cast(u32, span) orelse return null;
+    const provenance: external_inbox_ledger.StoredRxBatchProvenance =
+        .{ .external = .{
+            .start_absolute = start_absolute,
+            .span = compact_span,
+        } };
+    return if (protocol.Flags.hasEndStream(transfer.header.flags))
+        .{ .completed = .{
+            .stream_id = transfer.header.stream_id,
+            .is_snapshot = transfer.header.kind == .snapshot_chunk,
+            .recovery_intent = recovery_intent,
+            .provenance = provenance,
+        } }
+    else
+        .{ .partial = .{
+            .stream_id = transfer.header.stream_id,
+            .is_snapshot = transfer.header.kind == .snapshot_chunk,
+            .chunk_count = std.math.add(
+                u8,
+                prior_chunk_count,
+                1,
+            ) catch return null,
+            .recovery_intent = recovery_intent,
+            .provenance = provenance,
+        } };
+}
+
 fn validateRxAggregateScreenGraph(
     storage: *const ExternalPumpStorage,
     aggregate: *const PreparedRxAggregate,
@@ -2428,10 +2810,21 @@ fn validateRxAggregateScreenGraph(
                     transfer.batch_addr != @intFromPtr(&aggregate.live_batch) or
                     transfer.mutation_index >=
                         aggregate.live_batch.mutation_count or
-                    !storage.inbox_ledger.validatePreparedLiveAdmissionBinding(
+                    !storage.inbox_ledger.validatePreparedLiveScreenBinding(
                         &aggregate.live_batch,
                         transfer.mutation_index,
-                        screenTransferSemantic(transfer) orelse return false,
+                        switch (aggregate.live_batch.mutations[
+                            transfer.mutation_index
+                        ]) {
+                            .merge => continuedScreenTransferSemantic(
+                                storage,
+                                aggregate,
+                                transfer,
+                                transfer.mutation_index,
+                            ) orelse return false,
+                            else => screenTransferSemantic(transfer) orelse
+                                return false,
+                        },
                         transfer.payload_digest,
                     ))
                     return false;
@@ -2488,13 +2881,23 @@ fn prepareScreenDestinationPlan(
             .unused => return false,
         }
     }
+    const existing_partial = switch (storage.live_partial) {
+        .none => null,
+        .assembling => |assembling| assembling,
+        .terminal => return false,
+    };
     if (partial_count != aggregate.live_commit.final_partial_count or
         completed_count != aggregate.live_commit.final_completed_count or
         partial_count > 1 or
-        partial_count != 0 and storage.live_partial != .none or
         storage.live_screen.len + completed_count >
             external_inbox_ledger.max_live_mutations)
         return false;
+    const next_partial_generation: u64 = if (existing_partial) |partial|
+        std.math.add(u64, partial.generation, 1) catch return false
+    else if (partial_count != 0)
+        @as(u64, 1)
+    else
+        @as(u64, 0);
     const next_generation = if (completed_count == 0)
         storage.live_screen.generation
     else
@@ -2514,6 +2917,19 @@ fn prepareScreenDestinationPlan(
         .expected_screen_generation = storage.live_screen.generation,
         .next_screen_generation = next_generation,
         .expected_partial_empty = storage.live_partial == .none,
+        .expected_partial_token = if (existing_partial) |partial|
+            partial.ledger_token
+        else
+            .{ .slot = 0, .generation = 0 },
+        .expected_partial_generation = if (existing_partial) |partial|
+            partial.generation
+        else
+            0,
+        .expected_partial_digest = if (existing_partial) |partial|
+            partial.owner_digest
+        else
+            [_]u8{0} ** 32,
+        .next_partial_generation = next_partial_generation,
         .entries = entries,
         .entry_count = @intCast(entry_count),
         .partial_count = @intCast(partial_count),
@@ -3952,6 +4368,28 @@ fn validateScreenDestinationPlan(
     aggregate: *const PreparedRxAggregate,
 ) bool {
     const plan = &aggregate.screen_destination;
+    const expected_partial_valid = switch (storage.live_partial) {
+        .none => plan.expected_partial_empty and
+            plan.expected_partial_token.generation == 0 and
+            plan.expected_partial_token.slot == 0 and
+            plan.expected_partial_generation == 0 and
+            std.mem.allEqual(u8, &plan.expected_partial_digest, 0) and
+            plan.next_partial_generation == if (plan.partial_count == 0)
+                @as(u64, 0)
+            else
+                @as(u64, 1),
+        .assembling => |partial| !plan.expected_partial_empty and
+            std.meta.eql(plan.expected_partial_token, partial.ledger_token) and
+            plan.expected_partial_generation == partial.generation and
+            std.mem.eql(
+                u8,
+                &plan.expected_partial_digest,
+                &partial.owner_digest,
+            ) and
+            plan.next_partial_generation ==
+                (std.math.add(u64, partial.generation, 1) catch return false),
+        .terminal => false,
+    };
     if (plan.saved_self_addr != @intFromPtr(plan) or
         plan.aggregate_addr != @intFromPtr(aggregate) or
         plan.storage_addr != @intFromPtr(storage) or
@@ -3972,7 +4410,7 @@ fn validateScreenDestinationPlan(
             u8,
             &plan.expected_screen_digest,
             &storage.live_screen.owner_digest,
-        ) or plan.expected_partial_empty != (storage.live_partial == .none) or
+        ) or !expected_partial_valid or
         plan.entry_count != plan.partial_count + plan.completed_count or
         plan.partial_count != aggregate.live_commit.final_partial_count or
         plan.completed_count != aggregate.live_commit.final_completed_count or
@@ -4007,16 +4445,18 @@ fn commitScreenDestinationPlanUnchecked(
         @ptrFromInt(write.source_backing_addr);
     const transfer: *ScreenTransferOwner =
         @ptrFromInt(write.prepared_backing_addr);
+    if (!plan.expected_partial_empty and write.mutation_index == 0)
+        storage.live_partial = .none;
     if (phase == .partial) {
         const target: *@TypeOf(storage.live_partial) =
             @ptrFromInt(write.target_addr);
         target.* = .{ .assembling = .{
             .ledger_token = write.screen_token,
-            .generation = 1,
+            .generation = plan.next_partial_generation,
             .owner_digest = livePartialDigest(
                 storage,
                 write.screen_token,
-                1,
+                plan.next_partial_generation,
             ),
         } };
     } else if (phase == .completed) {
@@ -4232,6 +4672,7 @@ fn inheritedSnapshotDigest(
     writer.writeUsize(snapshot.lease_addr);
     writer.writeU64(snapshot.operation_generation);
     writer.writeBool(snapshot.committed_screen_pending);
+    writer.writeBool(snapshot.live_partial_pending);
     writer.writeBool(snapshot.live_screen_pending);
     writer.writeBool(snapshot.metadata_projection_pending);
     writer.writeBool(snapshot.resize_projection_pending);
@@ -4498,7 +4939,7 @@ comptime {
     if (@sizeOf(ExternalPumpCleanupScratch) >
         max_external_pump_cleanup_scratch_bytes)
         @compileError("external pump cleanup scratch exceeds 1 MiB");
-    const callback_local_bytes =
+    const teardown_callback_local_bytes =
         @sizeOf(external_inbox_ledger.FrozenLedgerCleanup) +
         @sizeOf(external_event_materialization.FrozenOwnerMetadataCleanup) +
         @sizeOf(client_mod.FrozenExternalAdoptionTakeCleanup) +
@@ -4509,6 +4950,13 @@ comptime {
         @sizeOf(client_mod.Client) +
         @sizeOf(PreparedAdoptionEvidence) +
         rx_aggregate_abort_frame_bytes;
+    const rx_aggregate_commit_callback_frame_bytes =
+        @sizeOf(FrozenAggregateCleanup) +
+        @sizeOf(PreparedRxAggregate);
+    const callback_local_bytes = @max(
+        teardown_callback_local_bytes,
+        rx_aggregate_commit_callback_frame_bytes,
+    );
     if (callback_local_bytes > max_external_pump_callback_local_bytes)
         @compileError("external pump callback-hidden locals exceed 768 KiB");
 }
@@ -4574,6 +5022,7 @@ pub const ExternalPumpStorage = struct {
     owner_incarnation_seal: OwnerIncarnationSeal = .{},
     owner_event_projection_generation: u64 = 0,
     operation_generation: u64 = 0,
+    operation_reentry_latched: bool = false,
     owner_teardown_generation: u64 = 0,
     intent_scratch_generation: u64 = 0,
     intent_scratch_reservation: IntentScratchReservation = .{},
@@ -4758,13 +5207,12 @@ pub const ExternalPumpStorage = struct {
         };
     }
 
-    fn createIntentScratchForTest(
+    fn createIntentScratch(
         self: *ExternalPumpStorage,
         handle: *external_rx_intent.ExternalRxIntentHandle,
         allocator: std.mem.Allocator,
         authority_ops: external_rx_intent.AuthorityOps,
     ) external_rx_intent.CreateResult {
-        if (comptime !builtin.is_test) unreachable;
         if (self.lifecycle != .live or
             !self.intentScratchReservationValid() or
             self.intent_scratch_reservation.lifecycle != .empty or
@@ -4908,10 +5356,49 @@ pub const ExternalPumpStorage = struct {
         allocator: std.mem.Allocator,
         ranges: *external_owner_range.Scratch,
     ) RxAggregateCreateResult {
+        if (comptime !builtin.is_test) unreachable;
+        return self.createRxAggregateImpl(
+            lease,
+            intent_handle,
+            allocator,
+            null,
+            ranges,
+        );
+    }
+
+    fn createRxAggregateWithAuthority(
+        self: *ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        intent_handle: *external_rx_intent.ExternalRxIntentHandle,
+        allocator: std.mem.Allocator,
+        authority_ops: external_rx_intent.AuthorityOps,
+        ranges: *external_owner_range.Scratch,
+    ) RxAggregateCreateResult {
+        return self.createRxAggregateImpl(
+            lease,
+            intent_handle,
+            allocator,
+            authority_ops,
+            ranges,
+        );
+    }
+
+    fn createRxAggregateImpl(
+        self: *ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        intent_handle: *external_rx_intent.ExternalRxIntentHandle,
+        allocator: std.mem.Allocator,
+        authority_ops: ?external_rx_intent.AuthorityOps,
+        ranges: *external_owner_range.Scratch,
+    ) RxAggregateCreateResult {
         if (external_owner_cleanup.callbackActive() or
             !self.validateWholeTurnLease(lease) or
-            lease.scratch_addr != @intFromPtr(ranges) or
-            lease.scratch_len != @sizeOf(external_owner_range.Scratch) or
+            !rangeContains(
+                lease.scratch_addr,
+                lease.scratch_len,
+                @intFromPtr(ranges),
+                @sizeOf(external_owner_range.Scratch),
+            ) or
             !self.intentScratchReservationValid() or
             self.intent_scratch_reservation.lifecycle != .active or
             self.intent_scratch_reservation.handle_addr != @intFromPtr(intent_handle) or
@@ -4930,39 +5417,133 @@ pub const ExternalPumpStorage = struct {
             return .invalid_state;
         const operation_generation = self.operation_generation;
         const intent_reservation = self.intent_scratch_reservation;
-        const aggregate: *PreparedRxAggregate = if (retained)
-            @ptrFromInt(self.rx_aggregate_handle.aggregate_addr)
+        const authority_before = if (authority_ops) |ops|
+            ops.current(ops.context) orelse return .authority_drift
         else
-            allocator.create(PreparedRxAggregate) catch return .out_of_memory;
-        const allocation_addr = @intFromPtr(aggregate);
-        const allocation_len = @sizeOf(PreparedRxAggregate);
-        if (!self.validateWholeTurnLease(lease) or
-            self.operation_generation != operation_generation or
-            !std.meta.eql(intent_reservation, self.intent_scratch_reservation) or
-            !self.rxAggregateReservationValid() or
-            self.rx_aggregate_reservation.lifecycle != .empty or
-            (if (retained)
-                !retainedRxAggregateValid(self)
-            else
-                !rxAggregateHandlePristine(&self.rx_aggregate_handle)))
-        {
-            if (!retained) allocator.destroy(aggregate);
-            return .authority_drift;
-        }
+            null;
+        if (authority_before) |view|
+            if (@intFromPtr(view.allocator.ptr) !=
+                @intFromPtr(allocator.ptr) or
+                @intFromPtr(view.allocator.vtable) !=
+                    @intFromPtr(allocator.vtable))
+                return .authority_drift;
+        const inventory_forbidden = [_]external_owner_range.Range{
+            .{
+                .start = @intFromPtr(self),
+                .len = @sizeOf(ExternalPumpStorage),
+            },
+            .{
+                .start = @intFromPtr(lease),
+                .len = @sizeOf(ExternalWholeTurnLease),
+            },
+            .{
+                .start = @intFromPtr(ranges),
+                .len = @sizeOf(external_owner_range.Scratch),
+            },
+        };
         ranges.reset();
         external_rx_intent.appendBoundOwnerRanges(
             intent_handle,
             ranges,
         ) catch {
-            if (!retained) allocator.destroy(aggregate);
-            self.poisonRxAggregateReservation();
+            self.rejectForgedRxAggregateAllocation();
             return .quarantined;
         };
-        self.inbox_ledger.appendActiveOwnerRanges(ranges) catch {
-            if (!retained) allocator.destroy(aggregate);
-            self.poisonRxAggregateReservation();
+        if (authority_before) |view|
+            for (view.forbidden_ranges) |range|
+                ranges.append(range.start, range.len) catch {
+                    self.rejectForgedRxAggregateAllocation();
+                    return .quarantined;
+                };
+        ranges.validate(&inventory_forbidden) catch {
+            self.rejectForgedRxAggregateAllocation();
             return .quarantined;
         };
+        for (ranges.ranges[0..ranges.len]) |range| {
+            if (rangesOverlap(
+                range.start,
+                range.len,
+                lease.scratch_addr,
+                lease.scratch_len,
+            ) and !(range.start == @intFromPtr(intent_handle) and
+                range.len == @sizeOf(external_rx_intent.ExternalRxIntentHandle)))
+            {
+                self.rejectForgedRxAggregateAllocation();
+                return .quarantined;
+            }
+        }
+        const inventory_digest = external_rx_intent.sealAuthorityRanges(
+            ranges.ranges[0..ranges.len],
+            operation_generation,
+        ) orelse {
+            self.rejectForgedRxAggregateAllocation();
+            return .quarantined;
+        };
+        const allocation_len = @sizeOf(PreparedRxAggregate);
+        const allocation_addr = if (retained)
+            self.rx_aggregate_handle.aggregate_addr
+        else
+            @intFromPtr(allocator.rawAlloc(
+                allocation_len,
+                .of(PreparedRxAggregate),
+                @returnAddress(),
+            ) orelse return .out_of_memory);
+        if (!retained and
+            (allocation_addr % @alignOf(PreparedRxAggregate) != 0 or
+                rangesOverlap(
+                    allocation_addr,
+                    allocation_len,
+                    @intFromPtr(self),
+                    @sizeOf(ExternalPumpStorage),
+                ) or rangesOverlap(
+                allocation_addr,
+                allocation_len,
+                @intFromPtr(lease),
+                @sizeOf(ExternalWholeTurnLease),
+            ) or rangesOverlap(
+                allocation_addr,
+                allocation_len,
+                lease.scratch_addr,
+                lease.scratch_len,
+            ) or rangesOverlap(
+                allocation_addr,
+                allocation_len,
+                @intFromPtr(ranges),
+                @sizeOf(external_owner_range.Scratch),
+            ) or rangesOverlap(
+                allocation_addr,
+                allocation_len,
+                @intFromPtr(intent_handle),
+                @sizeOf(external_rx_intent.ExternalRxIntentHandle),
+            )))
+        {
+            // A hostile allocator returned caller/storage authority. It is not allocator-owned,
+            // so quarantine must not call destroy on the forged pointer.
+            self.rejectForgedRxAggregateAllocation();
+            return .quarantined;
+        }
+        const aggregate: *PreparedRxAggregate = @ptrFromInt(allocation_addr);
+        const authority_after = if (authority_ops) |ops|
+            ops.current(ops.context) orelse {
+                self.rejectForgedRxAggregateAllocation();
+                return .quarantined;
+            }
+        else
+            null;
+        ranges.reset();
+        external_rx_intent.appendBoundOwnerRanges(
+            intent_handle,
+            ranges,
+        ) catch {
+            self.rejectForgedRxAggregateAllocation();
+            return .quarantined;
+        };
+        if (authority_after) |view|
+            for (view.forbidden_ranges) |range|
+                ranges.append(range.start, range.len) catch {
+                    self.rejectForgedRxAggregateAllocation();
+                    return .quarantined;
+                };
         const forbidden = [_]external_owner_range.Range{
             .{
                 .start = @intFromPtr(self),
@@ -4982,24 +5563,42 @@ pub const ExternalPumpStorage = struct {
             },
         };
         ranges.validate(&forbidden) catch {
-            if (!retained) allocator.destroy(aggregate);
-            self.poisonRxAggregateReservation();
+            // The allocation may be an alias of one of the active owners in `ranges`; never free
+            // an untrusted overlapping pointer.
+            self.rejectForgedRxAggregateAllocation();
             return .quarantined;
         };
-        if (rangesOverlap(
-            allocation_addr,
-            allocation_len,
-            @intFromPtr(lease),
-            @sizeOf(ExternalWholeTurnLease),
-        ) or rangesOverlap(
-            allocation_addr,
-            allocation_len,
-            @intFromPtr(ranges),
-            @sizeOf(external_owner_range.Scratch),
-        )) {
-            if (!retained) allocator.destroy(aggregate);
-            self.poisonRxAggregateReservation();
+        const current_inventory_digest = external_rx_intent.sealAuthorityRanges(
+            ranges.ranges[0..ranges.len],
+            operation_generation,
+        ) orelse {
+            self.rejectForgedRxAggregateAllocation();
             return .quarantined;
+        };
+        if (!std.mem.eql(
+            u8,
+            &inventory_digest,
+            &current_inventory_digest,
+        ) or !std.meta.eql(authority_before, authority_after)) {
+            self.rejectForgedRxAggregateAllocation();
+            return .quarantined;
+        }
+        if (!self.validateWholeTurnLease(lease) or
+            self.operation_generation != operation_generation or
+            !std.meta.eql(intent_reservation, self.intent_scratch_reservation) or
+            !self.rxAggregateReservationValid() or
+            self.rx_aggregate_reservation.lifecycle != .empty or
+            (if (retained)
+                !retainedRxAggregateValid(self)
+            else
+                !rxAggregateHandlePristine(&self.rx_aggregate_handle)))
+        {
+            if (!retained) allocator.rawFree(
+                @as([*]u8, @ptrCast(aggregate))[0..allocation_len],
+                .of(PreparedRxAggregate),
+                @returnAddress(),
+            );
+            return .authority_drift;
         }
         const generation = self.rx_aggregate_generation + 1;
         aggregate.* = .{
@@ -5204,21 +5803,67 @@ pub const ExternalPumpStorage = struct {
             self.inbox_ledger.beginLiveBatch(
                 &aggregate.live_batch,
                 transfer.ledger_payload.allocator,
-                .{
-                    .attach_instance_id = self.owner_incarnation,
-                    .destination_slot_addr = @intFromPtr(self),
-                },
+                transfer.range.identity,
             ) catch return .rejected;
             aggregate.digest = preparedRxAggregateDigest(aggregate);
         }
         const mutation_index = aggregate.live_batch.mutation_count;
         const semantic = screenTransferSemantic(transfer) orelse
             return .rejected;
-        _ = self.inbox_ledger.prepareLiveAdmission(
-            &aggregate.live_batch,
-            semantic,
-            &transfer.ledger_payload,
-        ) catch return .rejected;
+        var merge_destination: ?external_inbox_ledger.LiveTokenRef = null;
+        if (mutation_index == 0) {
+            merge_destination = switch (self.live_partial) {
+                .assembling => |assembling| .{ .existing = assembling.ledger_token },
+                .none => null,
+                .terminal => return .invalid_state,
+            };
+        } else {
+            for (aggregate.screen_transfers[0..intent_index]) |prior| {
+                if ((prior.lifecycle != .batch_owned and
+                    prior.lifecycle != .mutation_bound) or
+                    prior.mutation_index + 1 != mutation_index)
+                    continue;
+                const prior_semantic = screenTransferSemantic(&prior) orelse
+                    return .rejected;
+                if (prior_semantic == .partial)
+                    merge_destination =
+                        .{ .planned = prior.mutation_index };
+            }
+        }
+        if (merge_destination) |destination| {
+            const merged_semantic = continuedScreenTransferSemantic(
+                self,
+                aggregate,
+                transfer,
+                mutation_index,
+            ) orelse return .rejected;
+            var source = external_inbox_ledger.PreparedLiveMergeSource{
+                .owned = transfer.ledger_payload,
+            };
+            transfer.ledger_payload =
+                external_inbox_ledger.OwnedPayload.empty(
+                    transfer.ledger_payload.allocator,
+                );
+            var replacement: external_inbox_ledger.PreparedLiveReplacement =
+                .coalesced;
+            self.inbox_ledger.prepareLiveMerge(
+                &aggregate.live_batch,
+                destination,
+                merged_semantic,
+                transfer.range,
+                &source,
+                &replacement,
+            ) catch {
+                transfer.ledger_payload = source.owned;
+                return .rejected;
+            };
+        } else {
+            _ = self.inbox_ledger.prepareLiveAdmission(
+                &aggregate.live_batch,
+                semantic,
+                &transfer.ledger_payload,
+            ) catch return .rejected;
+        }
         transfer.batch_addr = @intFromPtr(&aggregate.live_batch);
         transfer.mutation_index = mutation_index;
         transfer.lifecycle = .batch_owned;
@@ -5395,8 +6040,7 @@ pub const ExternalPumpStorage = struct {
                 @intFromPtr(aggregate),
                 @intFromPtr(self),
                 aggregate.turn_generation,
-            ) or !validateScreenDestinationPlan(self, aggregate) or
-                aggregate.live_commit.expected_cleanup_count != 0))
+            ) or !validateScreenDestinationPlan(self, aggregate)))
             return .invalid_state;
         var event_cleanup: FrozenAggregateCleanup = .{};
         if (!prepareEventAggregateCleanup(
@@ -5429,13 +6073,35 @@ pub const ExternalPumpStorage = struct {
         appendEventAggregateCleanupUnchecked(aggregate, &event_cleanup);
         aggregate.lifecycle = .committed;
         aggregate.digest = preparedRxAggregateDigest(aggregate);
+        const callback_entry_digest = aggregate.digest;
+        var expected_after_callbacks = aggregate.*;
+        if (proof_count != 0)
+            expected_after_callbacks.retirement = .{ .lifecycle = .retired };
+        expected_after_callbacks.digest =
+            preparedRxAggregateDigest(&expected_after_callbacks);
         self.retainRxAggregateAllocation(aggregate);
         const retire_result = if (proof_count == 0)
             external_inbox_ledger.RetireLiveResult.retired
         else
             aggregate.retirement.retire();
         const event_finish = finishFrozenAggregateCleanup(&event_cleanup);
-        if (retire_result == .quarantined or !event_finish) {
+        const callback_state_valid =
+            std.mem.eql(u8, &aggregate.digest, &callback_entry_digest) and
+            std.meta.eql(
+                aggregate.retirement,
+                expected_after_callbacks.retirement,
+            );
+        aggregate.digest = expected_after_callbacks.digest;
+        const aggregate_state_valid =
+            std.meta.eql(aggregate.*, expected_after_callbacks);
+        if (!callback_state_valid or !aggregate_state_valid) {
+            // Restore only the callback-hidden, precomputed canonical state. Never seal callback
+            // mutations as new authority; retained teardown can now retire the committed graph.
+            aggregate.* = expected_after_callbacks;
+        }
+        if (retire_result == .quarantined or !event_finish or
+            !callback_state_valid or !aggregate_state_valid)
+        {
             latchCrossOwnerQuarantine();
             return .quarantined;
         }
@@ -5834,13 +6500,52 @@ pub const ExternalPumpStorage = struct {
         latchCrossOwnerQuarantine();
     }
 
-    fn liveScreenOrPartialPending(self: *const ExternalPumpStorage) bool {
-        const partial_pending = switch (self.live_partial) {
+    fn rejectForgedRxAggregateAllocation(self: *ExternalPumpStorage) void {
+        // No aggregate authority was ever acquired, so keep both reservation owners canonical.
+        // This lets terminal teardown destroy the already-bound intent scratch and Client while
+        // the process-wide latch prevents any future adoption after the hostile allocator event.
+        self.semantic_state = .{ .terminal = .{
+            .reason = .invariant_failure,
+            .fd_disposition = .owner_cleanup,
+        } };
+        latchCrossOwnerQuarantine();
+    }
+
+    fn livePartialPending(self: *const ExternalPumpStorage) bool {
+        return switch (self.live_partial) {
             .assembling => true,
             else => false,
         };
-        return partial_pending or
-            (self.live_screen.lifecycle == .active and self.live_screen.len != 0);
+    }
+
+    fn validatedPartialContinuation(
+        self: *const ExternalPumpStorage,
+    ) ?external_rx_demux.ValidatedPartialView {
+        const assembling = switch (self.live_partial) {
+            .assembling => |assembling| assembling,
+            else => return null,
+        };
+        if (!self.livePartialValid()) return null;
+        const semantic = self.inbox_ledger.partialSnapshot(
+            assembling.ledger_token,
+        ) catch return null;
+        const range = switch (semantic.provenance) {
+            .external => |range| range,
+            .untracked => return null,
+        };
+        return .{
+            .stream_id = semantic.stream_id,
+            .is_snapshot = semantic.is_snapshot,
+            .identity = range.identity,
+            .start_absolute = range.start_absolute,
+            .end_absolute = range.end_absolute,
+            .chunk_count = semantic.chunk_count,
+        };
+    }
+
+    fn liveScreenPending(self: *const ExternalPumpStorage) bool {
+        return self.live_screen.lifecycle == .active and
+            self.live_screen.len != 0;
     }
 
     fn responsePending(self: *const ExternalPumpStorage) bool {
@@ -5857,7 +6562,8 @@ pub const ExternalPumpStorage = struct {
     ) ?LiveOwnerBlockerProjection {
         if (!self.liveOwnersValid()) return null;
         return .{
-            .screen_or_partial_pending = self.liveScreenOrPartialPending(),
+            .partial_pending = self.livePartialPending(),
+            .screen_pending = self.liveScreenPending(),
             .response_pending = self.responsePending(),
         };
     }
@@ -6136,7 +6842,11 @@ pub const ExternalPumpStorage = struct {
         scratch_addr: usize,
         scratch_len: usize,
     ) AccessError!void {
-        if (active_external_operation_addr != 0) return error.TransactionBusy;
+        if (active_external_operation_addr != 0) {
+            if (active_external_operation_addr == @intFromPtr(self))
+                self.operation_reentry_latched = true;
+            return error.TransactionBusy;
+        }
         try self.requireActive();
         if (!std.meta.eql(out.*, ExternalWholeTurnLease{}))
             return error.InvalidDescriptor;
@@ -6167,6 +6877,7 @@ pub const ExternalPumpStorage = struct {
         if (self.operation_generation == std.math.maxInt(u64))
             return error.GenerationExhausted;
         active_external_operation_addr = @intFromPtr(self);
+        self.operation_reentry_latched = false;
         self.operation_generation += 1;
         out.* = .{
             .saved_self_addr = out_addr,
@@ -6292,6 +7003,677 @@ pub const ExternalPumpStorage = struct {
         return blocked;
     }
 
+    fn validateLiveScreenConsumePermit(
+        self: *ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        permit: *const LiveScreenConsumePermit,
+    ) bool {
+        if (!self.validateWholeTurnLease(lease) or
+            self.operation_reentry_latched or
+            permit.saved_self_addr != @intFromPtr(permit) or
+            permit.storage_addr != @intFromPtr(self) or
+            permit.lease_addr != @intFromPtr(lease) or
+            permit.operation_generation != self.operation_generation or
+            permit.lifecycle != .prepared or
+            !std.mem.eql(
+                u8,
+                &permit.digest,
+                &liveScreenConsumePermitDigest(permit),
+            ) or !self.liveScreenValid())
+            return false;
+        const backlog = &self.live_screen;
+        if (backlog.lifecycle != .active or backlog.len == 0 or
+            permit.fifo_generation != backlog.generation or
+            permit.fifo_head != backlog.head or
+            permit.fifo_len != backlog.len or
+            !std.meta.eql(permit.token, backlog.tokens[backlog.head]) or
+            !self.inbox_ledger.validatePreparedLiveCommit(
+                &permit.live_batch,
+                &permit.retirement,
+                &permit.dispositions,
+                &permit.live_commit,
+                @intFromPtr(permit),
+                @intFromPtr(self),
+                self.operation_generation,
+            ))
+            return false;
+        const view = self.inbox_ledger.borrow(
+            permit.token,
+            .completed,
+        ) catch return false;
+        return std.meta.eql(view.semantic.completed, permit.semantic) and
+            std.mem.eql(
+                u8,
+                &external_owner_cleanup.contentDigest(view.bytes),
+                &permit.payload_digest,
+            );
+    }
+
+    /// Applies exactly one completed live-screen FIFO head. The callback executes while the
+    /// whole-turn lease excludes teardown and sibling mutation. Its success is only advisory until
+    /// every owner seal and the checked ledger retirement are revalidated after it returns.
+    fn consumeLiveScreenHeadUnderHeldLease(
+        self: *ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        ops: *const BufferedRxOps,
+        permit: *LiveScreenConsumePermit,
+    ) LiveScreenConsumeResult {
+        if (!self.validateWholeTurnLease(lease) or
+            !std.meta.eql(permit.*, LiveScreenConsumePermit{}) or
+            !rangeContains(
+                lease.scratch_addr,
+                lease.scratch_len,
+                @intFromPtr(permit),
+                @sizeOf(LiveScreenConsumePermit),
+            ) or !self.liveScreenValid())
+            return .invalid_state;
+        const backlog = &self.live_screen;
+        if (backlog.lifecycle == .empty and backlog.len == 0)
+            return .no_work;
+        if (backlog.lifecycle != .active or backlog.len == 0 or
+            backlog.generation == std.math.maxInt(u64))
+            return .invalid_state;
+        const token = backlog.tokens[backlog.head];
+        const view = self.inbox_ledger.borrow(
+            token,
+            .completed,
+        ) catch return .invalid_state;
+        const semantic = switch (view.semantic) {
+            .completed => |completed| completed,
+            else => return .invalid_state,
+        };
+        const identity = switch (semantic.provenance) {
+            .external => |range| range.identity,
+            .untracked => return .invalid_state,
+        };
+        self.inbox_ledger.beginLiveBatch(
+            &permit.live_batch,
+            if (self.owned_client) |*owned|
+                owned.parser.allocator
+            else
+                return .invalid_state,
+            identity,
+        ) catch return .invalid_state;
+        self.inbox_ledger.prepareLiveRelease(
+            &permit.live_batch,
+            .{ .existing = token },
+            .completed,
+        ) catch return .invalid_state;
+        self.inbox_ledger.finishLiveBatch(
+            &permit.live_batch,
+        ) catch return .invalid_state;
+        self.inbox_ledger.prepareLiveCommit(
+            &permit.live_batch,
+            &permit.retirement,
+            &permit.dispositions,
+            @intFromPtr(permit),
+            @intFromPtr(self),
+            self.operation_generation,
+            &permit.live_commit,
+        ) catch return .invalid_state;
+        permit.saved_self_addr = @intFromPtr(permit);
+        permit.storage_addr = @intFromPtr(self);
+        permit.lease_addr = @intFromPtr(lease);
+        permit.operation_generation = self.operation_generation;
+        permit.fifo_generation = backlog.generation;
+        permit.fifo_head = backlog.head;
+        permit.fifo_len = backlog.len;
+        permit.token = token;
+        permit.semantic = semantic;
+        permit.payload_digest = external_owner_cleanup.contentDigest(view.bytes);
+        permit.lifecycle = .prepared;
+        permit.digest = liveScreenConsumePermitDigest(permit);
+        const callback_entry_permit = permit.*;
+
+        const callback_result = ops.apply_live_screen(ops.context, view);
+        const callback_authority_valid =
+            self.validateLiveScreenConsumePermit(lease, permit);
+        self.operation_reentry_latched = false;
+        if (!callback_authority_valid) {
+            permit.* = callback_entry_permit;
+            if (!self.abortLiveScreenConsumePermit(permit))
+                latchCrossOwnerQuarantine();
+            return .invalid_state;
+        }
+        if (callback_result == .retry) {
+            if (!self.abortLiveScreenConsumePermit(permit)) {
+                latchCrossOwnerQuarantine();
+                return .invalid_state;
+            }
+            return .retry;
+        }
+
+        const next_len = backlog.len - 1;
+        const next_generation = backlog.generation + 1;
+        const next_head: u8 = @intCast(
+            (@as(usize, backlog.head) + 1) %
+                external_inbox_ledger.max_live_mutations,
+        );
+        backlog.tokens[backlog.head] = .{ .slot = 0, .generation = 0 };
+        if (next_len == 0) {
+            backlog.* = .{};
+        } else {
+            backlog.head = next_head;
+            backlog.len = next_len;
+            backlog.generation = next_generation;
+            backlog.owner_digest = liveScreenDigest(self, backlog);
+        }
+        self.inbox_ledger.consumePreparedLiveCommitUnchecked(
+            &permit.live_batch,
+            &permit.retirement,
+            &permit.dispositions,
+            &permit.live_commit,
+        );
+        const retire_result = permit.retirement.retire();
+        permit.* = .{ .lifecycle = .consumed };
+        if (retire_result != .retired)
+            return .invalid_state;
+        return .consumed;
+    }
+
+    fn abortLiveScreenConsumePermit(
+        self: *ExternalPumpStorage,
+        permit: *LiveScreenConsumePermit,
+    ) bool {
+        if (self.inbox_ledger.abortPreparedLiveCommit(
+            &permit.live_batch,
+            &permit.retirement,
+            &permit.dispositions,
+            &permit.live_commit,
+        ) != .aborted)
+            return false;
+        if (!external_inbox_ledger.ExternalInboxLedger
+            .resetPreparedLiveCommit(&permit.live_commit))
+            return false;
+        if (self.inbox_ledger.abortPreparedLiveBatch(
+            &permit.live_batch,
+        ) != .aborted)
+            return false;
+        permit.* = .{ .lifecycle = .aborted };
+        return true;
+    }
+
+    fn terminalRxTurn(
+        self: *ExternalPumpStorage,
+        reason: client_pump.TerminalReason,
+        rx_bytes: usize,
+        rx_frames: usize,
+    ) client_pump.TurnResult {
+        const terminal = client_pump.ExternalPumpTerminal{
+            .reason = reason,
+            .fd_disposition = .owner_cleanup,
+        };
+        self.semantic_state = .{ .terminal = terminal };
+        var result = client_pump.decide(.{
+            .turn = .{
+                .readable = false,
+                .writable = false,
+                .now_ns = 0,
+            },
+            .parser = .empty,
+            .socket_rx_drained = false,
+            .terminal = terminal,
+        });
+        result.rx_bytes = rx_bytes;
+        result.rx_frames = rx_frames;
+        return result;
+    }
+
+    fn abortClassifiedRxTurn(
+        self: *ExternalPumpStorage,
+        handle: *external_rx_intent.ExternalRxIntentHandle,
+        reason: client_pump.TerminalReason,
+        rx_bytes: usize,
+        rx_frames: usize,
+    ) client_pump.TurnResult {
+        if (external_rx_intent.abortAll(handle) != .cleaned)
+            return self.terminalRxTurn(
+                .invariant_failure,
+                rx_bytes,
+                rx_frames,
+            );
+        return self.terminalRxTurn(reason, rx_bytes, rx_frames);
+    }
+
+    fn pumpBufferedRxUnderHeldLease(
+        self: *ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        turn: client_pump.TurnInput,
+        ops: *const BufferedRxOps,
+        scratch: *ExternalRxTurnScratch,
+    ) client_pump.TurnResult {
+        self.snapshotInheritedRxBlockersUnderHeldLease(
+            lease,
+            &scratch.snapshot,
+        ) catch return self.terminalRxTurn(
+            .invariant_failure,
+            0,
+            0,
+        );
+        const snapshot = scratch.snapshot;
+        _ = self.validateAndConsumeInheritedSnapshot(
+            lease,
+            &scratch.snapshot,
+        ) catch return self.terminalRxTurn(
+            .invariant_failure,
+            0,
+            0,
+        );
+        const existing_consumer_blocker =
+            snapshot.committed_screen_pending or
+            snapshot.metadata_projection_pending or
+            snapshot.resize_projection_pending or
+            snapshot.response_correlation_pending;
+        if (existing_consumer_blocker) {
+            return client_pump.decide(.{
+                .turn = turn,
+                .parser = .empty,
+                .socket_rx_drained = false,
+                .inherited_blocker = true,
+            });
+        }
+        if (snapshot.live_screen_pending) {
+            const consume = self.consumeLiveScreenHeadUnderHeldLease(
+                lease,
+                ops,
+                &scratch.live_consume,
+            );
+            return switch (consume) {
+                .consumed, .retry => client_pump.decide(.{
+                    .turn = turn,
+                    .parser = .empty,
+                    .socket_rx_drained = false,
+                    .inherited_blocker = true,
+                }),
+                .no_work, .invalid_state => self.terminalRxTurn(
+                    .invariant_failure,
+                    0,
+                    0,
+                ),
+            };
+        }
+
+        const client = if (self.owned_client) |*owned|
+            owned
+        else
+            return self.terminalRxTurn(.invariant_failure, 0, 0);
+        const rx_state = switch (client.io_mode) {
+            .external => |*state| state,
+            .blocking => return self.terminalRxTurn(
+                .invariant_failure,
+                0,
+                0,
+            ),
+        };
+        const initial_readiness = client_external_mode.parserReadiness(
+            rx_state,
+            &client.parser,
+        ) catch return self.terminalRxTurn(.invariant_failure, 0, 0);
+        if (initial_readiness != .complete_or_error) {
+            return client_pump.decide(.{
+                .turn = turn,
+                .parser = switch (initial_readiness) {
+                    .empty => .empty,
+                    .incomplete => .incomplete,
+                    .complete_or_error => unreachable,
+                },
+                .socket_rx_drained = false,
+            });
+        }
+
+        var authority = ProductIntentAuthority{
+            .storage = self,
+            .lease = lease,
+            .scratch = scratch,
+        };
+        const authority_ops = authority.ops();
+        var payload_guard_owner = ProductPayloadAllocationGuard{
+            .authority = &authority,
+        };
+        const payload_guard = payload_guard_owner.ops();
+        const intent_result = if (scratch.intent.lifecycle == .empty)
+            self.createIntentScratch(
+                &scratch.intent,
+                client.parser.allocator,
+                authority_ops,
+            )
+        else switch (external_rx_intent.resetForNextTurn(
+            &scratch.intent,
+            authority_ops,
+        )) {
+            .ready => external_rx_intent.CreateResult.allocated,
+            .invalid_state => external_rx_intent.CreateResult.authority_drift,
+        };
+        if (intent_result != .allocated)
+            return self.terminalRxTurn(
+                if (intent_result == .out_of_memory)
+                    .resource_exhausted
+                else
+                    .invariant_failure,
+                0,
+                0,
+            );
+
+        var rx_bytes: usize = 0;
+        var rx_frames: usize = 0;
+        var classified_count: u8 = 0;
+        var budget_exhausted = false;
+        var final_readiness = initial_readiness;
+        var partial = if (snapshot.live_partial_pending)
+            self.validatedPartialContinuation() orelse
+                return self.abortClassifiedRxTurn(
+                    &scratch.intent,
+                    .invariant_failure,
+                    0,
+                    0,
+                )
+        else
+            null;
+        while (rx_frames < external_rx_intent.max_intents) {
+            const readiness = client_external_mode.parserReadiness(
+                rx_state,
+                &client.parser,
+            ) catch return self.abortClassifiedRxTurn(
+                &scratch.intent,
+                .invariant_failure,
+                rx_bytes,
+                rx_frames,
+            );
+            final_readiness = readiness;
+            if (readiness != .complete_or_error) break;
+            scratch.parse = .{};
+            var outcome = client_external_mode.nextOutcomeWithRangeGuarded(
+                rx_state,
+                &client.parser,
+                &scratch.parse,
+                &payload_guard,
+            ) catch |err| return self.abortClassifiedRxTurn(
+                &scratch.intent,
+                blk: {
+                    if (err == error.AllocationQuarantined)
+                        latchCrossOwnerQuarantine();
+                    break :blk switch (err) {
+                        error.Protocol => .protocol_error,
+                        error.OutOfMemory => .resource_exhausted,
+                        else => .invariant_failure,
+                    };
+                },
+                rx_bytes,
+                rx_frames,
+            );
+            const range = switch (outcome) {
+                .incomplete => {
+                    final_readiness = .incomplete;
+                    break;
+                },
+                .skipped => |range| range,
+                .frame => |frame| frame.range,
+            };
+            const span = std.math.sub(
+                u64,
+                range.end_absolute,
+                range.start_absolute,
+            ) catch return self.abortClassifiedRxTurn(
+                &scratch.intent,
+                .invariant_failure,
+                rx_bytes,
+                rx_frames,
+            );
+            rx_bytes = std.math.add(
+                usize,
+                rx_bytes,
+                std.math.cast(usize, span) orelse
+                    return self.abortClassifiedRxTurn(
+                        &scratch.intent,
+                        .resource_exhausted,
+                        rx_bytes,
+                        rx_frames,
+                    ),
+            ) catch return self.abortClassifiedRxTurn(
+                &scratch.intent,
+                .resource_exhausted,
+                rx_bytes,
+                rx_frames,
+            );
+            rx_frames += 1;
+            switch (outcome) {
+                .incomplete, .skipped => {},
+                .frame => {
+                    const frame_header = outcome.frame.frame.header;
+                    const frame_range = outcome.frame.range;
+                    const move = external_rx_intent.moveFrame(
+                        &scratch.intent,
+                        &outcome,
+                        authority_ops,
+                        self.evidence_snapshot.stream_id,
+                        partial,
+                    );
+                    scratch.parse = .{};
+                    switch (move) {
+                        .classified => {
+                            classified_count += 1;
+                            if (frame_header.kind == .snapshot_chunk or
+                                frame_header.kind == .delta_chunk)
+                            {
+                                partial = external_rx_demux
+                                    .advanceValidatedPartial(
+                                    partial,
+                                    frame_header,
+                                    frame_range,
+                                    self.evidence_snapshot.stream_id,
+                                ) catch return self.abortClassifiedRxTurn(
+                                    &scratch.intent,
+                                    .invariant_failure,
+                                    rx_bytes,
+                                    rx_frames,
+                                );
+                            }
+                        },
+                        .protocol_terminal => return self.terminalRxTurn(
+                            .protocol_error,
+                            rx_bytes,
+                            rx_frames,
+                        ),
+                        .capacity => return self.abortClassifiedRxTurn(
+                            &scratch.intent,
+                            .resource_exhausted,
+                            rx_bytes,
+                            rx_frames,
+                        ),
+                        .invalid_source, .authority_drift, .replay, .alias, .poisoned => return self.abortClassifiedRxTurn(
+                            &scratch.intent,
+                            .invariant_failure,
+                            rx_bytes,
+                            rx_frames,
+                        ),
+                    }
+                },
+            }
+        }
+        if (rx_frames == external_rx_intent.max_intents) {
+            final_readiness = client_external_mode.parserReadiness(
+                rx_state,
+                &client.parser,
+            ) catch return self.abortClassifiedRxTurn(
+                &scratch.intent,
+                .invariant_failure,
+                rx_bytes,
+                rx_frames,
+            );
+            budget_exhausted = final_readiness == .complete_or_error;
+        }
+        if (classified_count == 0) {
+            if (external_rx_intent.abortAll(&scratch.intent) != .cleaned)
+                return self.terminalRxTurn(
+                    .invariant_failure,
+                    rx_bytes,
+                    rx_frames,
+                );
+            var result = client_pump.decide(.{
+                .turn = turn,
+                .parser = switch (final_readiness) {
+                    .empty => .empty,
+                    .incomplete => .incomplete,
+                    .complete_or_error => .complete_or_error,
+                },
+                .socket_rx_drained = false,
+                .rx_budget_exhausted = budget_exhausted,
+            });
+            result.rx_bytes = rx_bytes;
+            result.rx_frames = rx_frames;
+            return result;
+        }
+
+        switch (self.createRxAggregateWithAuthority(
+            lease,
+            &scratch.intent,
+            client.parser.allocator,
+            authority_ops,
+            &scratch.aggregate_ranges,
+        )) {
+            .allocated => {},
+            .out_of_memory => return self.abortClassifiedRxTurn(
+                &scratch.intent,
+                .resource_exhausted,
+                rx_bytes,
+                rx_frames,
+            ),
+            .invalid_state, .authority_drift, .quarantined => return self.abortClassifiedRxTurn(
+                &scratch.intent,
+                .invariant_failure,
+                rx_bytes,
+                rx_frames,
+            ),
+        }
+        for (0..classified_count) |intent_index| {
+            const move_result = self.moveScreenIntoRxAggregate(
+                lease,
+                &scratch.intent,
+                @intCast(intent_index),
+                authority_ops,
+            );
+            switch (move_result) {
+                .wrong_intent => continue,
+                .staged => {},
+                else => {
+                    _ = self.abortRxAggregate(lease, &scratch.intent);
+                    return self.terminalRxTurn(
+                        .invariant_failure,
+                        rx_bytes,
+                        rx_frames,
+                    );
+                },
+            }
+            const transfer_result = self.transferScreenToLedger(
+                lease,
+                &scratch.intent,
+                @intCast(intent_index),
+            );
+            const admit_result = if (transfer_result == .staged)
+                self.admitScreenToLiveBatch(
+                    lease,
+                    @intCast(intent_index),
+                )
+            else
+                RxAggregateTransferResult.invalid_state;
+            if (transfer_result != .staged or admit_result != .staged) {
+                _ = self.abortRxAggregate(lease, &scratch.intent);
+                return self.terminalRxTurn(
+                    .resource_exhausted,
+                    rx_bytes,
+                    rx_frames,
+                );
+            }
+        }
+        const finalize_result = self.finalizeRxAggregate(
+            lease,
+            &scratch.intent,
+        );
+        if (finalize_result != .finalized) {
+            _ = self.abortRxAggregate(lease, &scratch.intent);
+            return self.terminalRxTurn(
+                .protocol_error,
+                rx_bytes,
+                rx_frames,
+            );
+        }
+        const commit_result = self.commitRxAggregate(
+            lease,
+            &scratch.intent,
+        );
+        if (commit_result != .committed) {
+            if (commit_result == .invalid_state)
+                _ = self.abortRxAggregate(lease, &scratch.intent);
+            return self.terminalRxTurn(
+                .invariant_failure,
+                rx_bytes,
+                rx_frames,
+            );
+        }
+        var result = client_pump.decide(.{
+            .turn = turn,
+            .parser = switch (final_readiness) {
+                .empty => .empty,
+                .incomplete => .incomplete,
+                .complete_or_error => .complete_or_error,
+            },
+            .socket_rx_drained = false,
+            .rx_budget_exhausted = budget_exhausted,
+        });
+        result.rx_bytes = rx_bytes;
+        result.rx_frames = rx_frames;
+        return result;
+    }
+
+    /// Temporary d2 buffered-only mechanics facade. Non-test product code must call it only
+    /// through `external_pump_owner.pumpBufferedRx`. d2c adds socket reads; f3 removes this RX-only
+    /// entry after `pumpWholeTurn` becomes the sole mutation authority.
+    pub fn pumpRxTurn(
+        self: *ExternalPumpStorage,
+        turn: client_pump.TurnInput,
+        ops: *const BufferedRxOps,
+        scratch: *ExternalRxTurnScratch,
+    ) client_pump.TurnResult {
+        if (scratch.saved_self_addr != @intFromPtr(scratch) or
+            scratch.lifecycle != .ready)
+            return self.terminalRxTurn(.invariant_failure, 0, 0);
+        var lease: ExternalWholeTurnLease = .{};
+        self.acquireWholeTurnLease(
+            &lease,
+            @intFromPtr(scratch),
+            @sizeOf(ExternalRxTurnScratch),
+        ) catch |err| return switch (err) {
+            error.TransactionBusy => client_pump.decide(.{
+                .turn = turn,
+                .parser = .empty,
+                .socket_rx_drained = false,
+                .inherited_blocker = true,
+            }),
+            else => self.terminalRxTurn(.invariant_failure, 0, 0),
+        };
+        scratch.lifecycle = .busy;
+        scratch.snapshot = .{};
+        scratch.live_consume = .{};
+        scratch.authority_ranges_generation = self.operation_generation;
+        var result = self.pumpBufferedRxUnderHeldLease(
+            &lease,
+            turn,
+            ops,
+            scratch,
+        );
+        scratch.snapshot = .{};
+        scratch.live_consume = .{};
+        scratch.lifecycle = .ready;
+        if (self.releaseWholeTurnLease(&lease) != .released) {
+            result = self.terminalRxTurn(
+                .invariant_failure,
+                result.rx_bytes,
+                result.rx_frames,
+            );
+        }
+        return result;
+    }
+
     fn expectedInheritedSnapshot(
         self: *const ExternalPumpStorage,
         lease: *const ExternalWholeTurnLease,
@@ -6310,7 +7692,8 @@ pub const ExternalPumpStorage = struct {
             .lease_addr = @intFromPtr(lease),
             .operation_generation = self.operation_generation,
             .committed_screen_pending = self.screen_pending_summary.retained_count != 0,
-            .live_screen_pending = live_blockers.screen_or_partial_pending,
+            .live_partial_pending = live_blockers.partial_pending,
+            .live_screen_pending = live_blockers.screen_pending,
             .metadata_projection_pending = self.metadata_pending_summary.pending,
             .resize_projection_pending = switch (self.owner_resize) {
                 .none => false,
@@ -7896,8 +9279,11 @@ pub const ExternalPumpStorage = struct {
     ) TeardownResult {
         if (self.saved_self_addr != 0 and self.saved_self_addr != @intFromPtr(self))
             return .moved_storage;
-        if (active_external_operation_addr != 0)
+        if (active_external_operation_addr != 0) {
+            if (active_external_operation_addr == @intFromPtr(self))
+                self.operation_reentry_latched = true;
             return .transaction_busy;
+        }
         switch (self.lifecycle) {
             .empty, .dead => return .already_dead,
             .constructing, .normalizing, .adoption_preparing, .tearing_down => return .transaction_busy,
@@ -8080,7 +9466,9 @@ pub const ExternalPumpStorage = struct {
         const has_retained_aggregate = retainedRxAggregateValid(self);
         if (!has_retained_aggregate and
             !rxAggregateHandlePristine(&self.rx_aggregate_handle))
+        {
             return self.quarantineOwnerTeardown(cleanup_scratch, true);
+        }
         if (has_retained_aggregate) {
             const aggregate: *const PreparedRxAggregate =
                 @ptrFromInt(self.rx_aggregate_handle.aggregate_addr);
@@ -8119,13 +9507,18 @@ pub const ExternalPumpStorage = struct {
         self.inbox_ledger.beginOwnerTeardown(
             next_generation,
             &cleanup_scratch.ledger_permit,
-        ) catch return self.quarantineOwnerTeardown(cleanup_scratch, true);
+        ) catch {
+            return self.quarantineOwnerTeardown(cleanup_scratch, true);
+        };
         if (!self.prepareLiveOwnerTeardown(
             &cleanup_scratch.live_prepared,
             &cleanup_scratch.live_frozen,
-        )) return self.quarantineOwnerTeardown(cleanup_scratch, true);
-        if (!self.intentScratchReservationValid())
+        )) {
             return self.quarantineOwnerTeardown(cleanup_scratch, true);
+        }
+        if (!self.intentScratchReservationValid()) {
+            return self.quarantineOwnerTeardown(cleanup_scratch, true);
+        }
         if (self.intent_scratch_reservation.lifecycle == .active) {
             const handle: *external_rx_intent.ExternalRxIntentHandle =
                 @ptrFromInt(self.intent_scratch_reservation.handle_addr);
@@ -8134,7 +9527,9 @@ pub const ExternalPumpStorage = struct {
                 @intFromPtr(self),
                 self.intent_scratch_reservation.generation,
                 &cleanup_scratch.intent_destroy_prepared,
-            )) return self.quarantineOwnerTeardown(cleanup_scratch, true);
+            )) {
+                return self.quarantineOwnerTeardown(cleanup_scratch, true);
+            }
         }
 
         if (self.committed_screen.requiresTypedCleanup()) {
@@ -8181,10 +9576,13 @@ pub const ExternalPumpStorage = struct {
                 cleanup_scratch,
                 @sizeOf(ExternalPumpCleanupScratch),
                 &cleanup_scratch.range_scratch.source,
-            ) catch return self.quarantineOwnerTeardown(cleanup_scratch, true);
+            ) catch {
+                return self.quarantineOwnerTeardown(cleanup_scratch, true);
+            };
         }
-        if (!self.prepareAggregateOwnerRangeProof(cleanup_scratch))
+        if (!self.prepareAggregateOwnerRangeProof(cleanup_scratch)) {
             return self.quarantineOwnerTeardown(cleanup_scratch, true);
+        }
         if (!self.validatePreparedLiveOwnerTeardown(
             &cleanup_scratch.live_prepared,
             &cleanup_scratch.live_frozen,
@@ -8632,6 +10030,7 @@ fn moveIntentFrameForTest(
         source,
         authority_ops,
         target_stream_id,
+        null,
     );
 }
 
@@ -9501,6 +10900,7 @@ const AllocatorCallbackProbe = struct {
         cleanup_nested_descriptor_drift,
         suffix_storage_drift,
         intent_scratch_reentry,
+        aggregate_commit_drift,
     };
 
     parent: std.mem.Allocator,
@@ -9693,11 +11093,20 @@ const AllocatorCallbackProbe = struct {
         {
             self.fired = true;
             self.nested_intent_create =
-                self.storage.?.createIntentScratchForTest(
+                self.storage.?.createIntentScratch(
                     self.intent_handle.?,
                     self.allocator(),
                     self.intent_authority.?.ops(),
                 );
+        } else if (!self.fired and self.mode == .aggregate_commit_drift and
+            self.storage.?.lifecycle == .live and
+            self.storage.?.rx_aggregate_handle.lifecycle == .retained)
+        {
+            self.fired = true;
+            const aggregate: *PreparedRxAggregate = @ptrFromInt(
+                self.storage.?.rx_aggregate_handle.aggregate_addr,
+            );
+            aggregate.destination_write_count +%= 1;
         } else if (!self.fired and self.mode == .commit_cleanup_reentry and
             self.storage.?.lifecycle == .tearing_down)
         {
@@ -9850,6 +11259,193 @@ const AllocationCountProbe = struct {
         const self: *AllocationCountProbe = @ptrCast(@alignCast(context));
         self.free_count += 1;
         self.last_free_alignment = alignment;
+        self.parent.vtable.free(
+            self.parent.ptr,
+            memory,
+            alignment,
+            ret_addr,
+        );
+    }
+};
+
+const AggregateAliasAllocator = struct {
+    parent: std.mem.Allocator,
+    target: ?[*]u8 = null,
+    target_len: usize = @sizeOf(PreparedRxAggregate),
+    returned_target: bool = false,
+    freed_target: usize = 0,
+
+    fn allocator(self: *AggregateAliasAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(
+        raw: *anyopaque,
+        len: usize,
+        alignment: std.mem.Alignment,
+        ret_addr: usize,
+    ) ?[*]u8 {
+        const self: *AggregateAliasAllocator = @ptrCast(@alignCast(raw));
+        if (!self.returned_target and self.target != null and
+            len == self.target_len)
+        {
+            self.returned_target = true;
+            return self.target.?;
+        }
+        return self.parent.vtable.alloc(
+            self.parent.ptr,
+            len,
+            alignment,
+            ret_addr,
+        );
+    }
+
+    fn resize(
+        raw: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ret_addr: usize,
+    ) bool {
+        const self: *AggregateAliasAllocator = @ptrCast(@alignCast(raw));
+        if (self.target != null and memory.ptr == self.target.?) return false;
+        return self.parent.vtable.resize(
+            self.parent.ptr,
+            memory,
+            alignment,
+            new_len,
+            ret_addr,
+        );
+    }
+
+    fn remap(
+        raw: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ret_addr: usize,
+    ) ?[*]u8 {
+        const self: *AggregateAliasAllocator = @ptrCast(@alignCast(raw));
+        if (self.target != null and memory.ptr == self.target.?) return null;
+        return self.parent.vtable.remap(
+            self.parent.ptr,
+            memory,
+            alignment,
+            new_len,
+            ret_addr,
+        );
+    }
+
+    fn free(
+        raw: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        ret_addr: usize,
+    ) void {
+        const self: *AggregateAliasAllocator = @ptrCast(@alignCast(raw));
+        if (self.target != null and memory.ptr == self.target.? and
+            memory.len == self.target_len)
+        {
+            self.freed_target += 1;
+            return;
+        }
+        self.parent.vtable.free(
+            self.parent.ptr,
+            memory,
+            alignment,
+            ret_addr,
+        );
+    }
+};
+
+const AggregateIntentAliasAllocator = struct {
+    parent: std.mem.Allocator,
+    intent_target: ?[*]u8 = null,
+    returned_intent_as_aggregate: bool = false,
+    intent_target_free_count: usize = 0,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(
+        raw: *anyopaque,
+        len: usize,
+        alignment: std.mem.Alignment,
+        ret_addr: usize,
+    ) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        if (len == @sizeOf(PreparedRxAggregate) and
+            self.intent_target != null and
+            !self.returned_intent_as_aggregate)
+        {
+            self.returned_intent_as_aggregate = true;
+            return self.intent_target.?;
+        }
+        const result = self.parent.vtable.alloc(
+            self.parent.ptr,
+            len,
+            alignment,
+            ret_addr,
+        );
+        if (len == external_rx_intent.testing.scratch_allocation_bytes)
+            self.intent_target = result;
+        return result;
+    }
+
+    fn resize(
+        raw: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ret_addr: usize,
+    ) bool {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        return self.parent.vtable.resize(
+            self.parent.ptr,
+            memory,
+            alignment,
+            new_len,
+            ret_addr,
+        );
+    }
+
+    fn remap(
+        raw: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ret_addr: usize,
+    ) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        return self.parent.vtable.remap(
+            self.parent.ptr,
+            memory,
+            alignment,
+            new_len,
+            ret_addr,
+        );
+    }
+
+    fn free(
+        raw: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        ret_addr: usize,
+    ) void {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        if (self.intent_target != null and memory.ptr == self.intent_target.?)
+            self.intent_target_free_count += 1;
         self.parent.vtable.free(
             self.parent.ptr,
             memory,
@@ -10911,6 +12507,2131 @@ test "d2b1 whole-turn lease snapshots inherited blockers once at final addresses
     try std.testing.expectEqual(generation, storage.operation_generation);
 }
 
+fn admitBufferedProductWireForTest(
+    storage: *ExternalPumpStorage,
+    wire: []const u8,
+) !void {
+    const client = &storage.owned_client.?;
+    const rx_state = switch (client.io_mode) {
+        .external => |*state| state,
+        .blocking => return error.TestUnexpectedResult,
+    };
+    var append: client_external_mode.PreparedRxAppend = .{};
+    try client_external_mode.prepareAdmit(
+        rx_state,
+        &client.parser,
+        wire,
+        rx_state.rx_provenance.rx_absolute_next,
+        protocol.max_binary_chunk + protocol.header_size,
+        &append,
+    );
+    try client_external_mode.commitPreparedAdmit(
+        rx_state,
+        &client.parser,
+        wire,
+        &append,
+    );
+}
+
+fn admitBufferedProductFramesForTest(
+    storage: *ExternalPumpStorage,
+    frames: []const []const u8,
+) !void {
+    var total: usize = 0;
+    for (frames) |frame|
+        total = try std.math.add(usize, total, frame.len);
+    const wire = try std.testing.allocator.alloc(u8, total);
+    defer std.testing.allocator.free(wire);
+    var offset: usize = 0;
+    for (frames) |frame| {
+        @memcpy(wire[offset..][0..frame.len], frame);
+        offset += frame.len;
+    }
+    try admitBufferedProductWireForTest(storage, wire);
+}
+
+const d2b3d_metadata_payload =
+    "{\"event\":\"runtime.metadata\",\"metadata_revision\":2,\"metadata\":{\"cwd\":\"/repo\",\"window_title\":\"work\",\"ssh_remote_dest\":null,\"semantic_state\":0,\"alt_active\":false,\"app_cursor_keys\":false,\"app_keypad\":false,\"kitty_flags\":0,\"alternate_scroll\":false,\"mouse_tracking\":false,\"mouse_tracking_mode\":0,\"bracketed_paste\":false,\"bell_count\":0,\"clipboard_write_seq\":0,\"clipboard_read_seq\":0,\"clipboard_read_target\":\"\",\"observer_generation\":1,\"title_generation\":2,\"cols\":80,\"rows\":24,\"foreground_available\":false,\"foreground_pgid\":null,\"processes\":[]}}";
+
+test "d2b3d partial continuation is sealed without becoming a consumer blocker" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+
+    try seedSyntheticLiveOwnersForTest(&storage, std.testing.allocator);
+    const identity = external_rx_types.RxIdentity{
+        .attach_instance_id = storage.owner_incarnation,
+        .destination_slot_addr = @intFromPtr(&storage),
+    };
+    var release_batch: external_inbox_ledger.PreparedLiveBatch = .{};
+    try storage.inbox_ledger.beginLiveBatch(
+        &release_batch,
+        std.testing.allocator,
+        identity,
+    );
+    for (storage.live_screen.tokens[0..storage.live_screen.len]) |token|
+        try storage.inbox_ledger.prepareLiveRelease(
+            &release_batch,
+            .{ .existing = token },
+            .completed,
+        );
+    try storage.inbox_ledger.finishLiveBatch(&release_batch);
+    var release_retirement =
+        external_inbox_ledger.PreparedLiveRetirement.init(std.testing.allocator);
+    var release_dispositions =
+        [_]external_inbox_ledger.LiveCommitDisposition{.unused} **
+        external_inbox_ledger.max_live_mutations;
+    _ = try storage.inbox_ledger.commitPreparedLiveBatch(
+        &release_batch,
+        &release_retirement,
+        &release_dispositions,
+    );
+    try std.testing.expectEqual(
+        external_inbox_ledger.RetireLiveResult.retired,
+        release_retirement.retire(),
+    );
+    switch (storage.pending_response) {
+        .pending => |*pending| pending.payload.deinit(),
+        else => unreachable,
+    }
+    storage.pending_response = .none;
+    storage.live_screen = .{};
+    try std.testing.expect(storage.liveOwnersValid());
+
+    var turn_scratch = struct {
+        snapshot: InheritedRxBlockerSnapshot = .{},
+        padding: [64]u8 = [_]u8{0} ** 64,
+    }{};
+    var lease: ExternalWholeTurnLease = .{};
+    try storage.acquireWholeTurnLease(
+        &lease,
+        @intFromPtr(&turn_scratch),
+        @sizeOf(@TypeOf(turn_scratch)),
+    );
+    try storage.snapshotInheritedRxBlockersUnderHeldLease(
+        &lease,
+        &turn_scratch.snapshot,
+    );
+    try std.testing.expect(turn_scratch.snapshot.live_partial_pending);
+    try std.testing.expect(turn_scratch.snapshot.hasPartialContinuation());
+    try std.testing.expect(!turn_scratch.snapshot.live_screen_pending);
+    try std.testing.expect(!turn_scratch.snapshot.hasBlocker());
+    try std.testing.expect(
+        !(try storage.validateAndConsumeInheritedSnapshot(
+            &lease,
+            &turn_scratch.snapshot,
+        )),
+    );
+    try std.testing.expectEqual(
+        WholeTurnReleaseResult.released,
+        storage.releaseWholeTurnLease(&lease),
+    );
+    try std.testing.expectEqual(
+        TeardownResult.cleaned,
+        teardownForTest(&storage),
+    );
+}
+
+test "d2b3d product partial continues across turns and publishes one completed FIFO owner" {
+    const ApplyProbe = struct {
+        calls: usize = 0,
+        bytes: [2]u8 = [_]u8{0} ** 2,
+
+        fn apply(
+            raw: *anyopaque,
+            view: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            if (view.bytes.len != self.bytes.len) return .retry;
+            @memcpy(&self.bytes, view.bytes);
+            return .applied;
+        }
+    };
+
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+
+    const first_wire = try framing.encodeFrame(
+        std.testing.allocator,
+        .{
+            .kind = .delta_chunk,
+            .stream_id = valid_evidence.stream_id,
+        },
+        "a",
+    );
+    defer std.testing.allocator.free(first_wire);
+    try admitBufferedProductWireForTest(&storage, first_wire);
+
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    var probe = ApplyProbe{};
+    const ops = BufferedRxOps{
+        .context = &probe,
+        .apply_live_screen = ApplyProbe.apply,
+    };
+    const first = storage.pumpRxTurn(
+        .{ .readable = true, .writable = false, .now_ns = 1 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(first.terminal == null);
+    try std.testing.expectEqual(@as(usize, 1), first.rx_frames);
+    try std.testing.expect(storage.live_partial == .assembling);
+    try std.testing.expect(storage.live_screen.lifecycle == .empty);
+    try std.testing.expect(storage.liveOwnersValid());
+    try std.testing.expect(!crossOwnerQuarantineStatus().latched);
+    const continuation = storage.validatedPartialContinuation() orelse
+        return error.TestUnexpectedResult;
+    const client_after_first = &storage.owned_client.?;
+    const rx_after_first = switch (client_after_first.io_mode) {
+        .external => |*state| state,
+        .blocking => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(
+        continuation.end_absolute,
+        rx_after_first.rx_provenance.rx_absolute_next,
+    );
+    try std.testing.expect(std.meta.eql(
+        continuation.identity,
+        rx_after_first.rx_provenance.identity.?,
+    ));
+    try std.testing.expectEqual(@as(u8, 1), continuation.chunk_count);
+
+    const second_wire = try framing.encodeFrame(
+        std.testing.allocator,
+        .{
+            .kind = .delta_chunk,
+            .stream_id = valid_evidence.stream_id,
+            .flags = protocol.Flags.end_stream,
+        },
+        "b",
+    );
+    defer std.testing.allocator.free(second_wire);
+    try admitBufferedProductWireForTest(&storage, second_wire);
+    try std.testing.expectEqual(
+        continuation.end_absolute,
+        rx_after_first.rx_provenance.buffer_start_absolute,
+    );
+    try std.testing.expect(
+        client_external_mode.parserSealValid(
+            rx_after_first,
+            &client_after_first.parser,
+        ),
+    );
+    const second = storage.pumpRxTurn(
+        .{ .readable = true, .writable = false, .now_ns = 2 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expectEqual(
+        @as(?client_pump.ExternalPumpTerminal, null),
+        second.terminal,
+    );
+    try std.testing.expectEqual(@as(usize, 1), second.rx_frames);
+    try std.testing.expect(storage.live_partial == .none);
+    try std.testing.expectEqual(@as(u8, 1), storage.live_screen.len);
+    try std.testing.expectEqual(@as(usize, 0), probe.calls);
+    try std.testing.expect(!crossOwnerQuarantineStatus().latched);
+
+    const third = storage.pumpRxTurn(
+        .{ .readable = false, .writable = false, .now_ns = 3 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(third.terminal == null);
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expectEqualStrings("ab", &probe.bytes);
+    try std.testing.expect(storage.live_partial == .none);
+    try std.testing.expect(storage.live_screen.lifecycle == .empty);
+    try std.testing.expect(!crossOwnerQuarantineStatus().latched);
+    try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(&storage));
+}
+
+test "d2b3d deferred retirement callback drift is quarantined without blessing aggregate authority" {
+    resetCrossOwnerQuarantineForTest();
+    defer resetCrossOwnerQuarantineForTest();
+    const Apply = struct {
+        fn run(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
+    };
+    var allocator_probe = AllocatorCallbackProbe{
+        .parent = std.testing.allocator,
+    };
+    var fixture = try TestClient.initWithAllocator(allocator_probe.allocator());
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    allocator_probe.storage = &storage;
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    var context: u8 = 0;
+    const ops = BufferedRxOps{
+        .context = &context,
+        .apply_live_screen = Apply.run,
+    };
+    const first_wire = try framing.encodeFrame(
+        std.testing.allocator,
+        .{
+            .kind = .delta_chunk,
+            .stream_id = valid_evidence.stream_id,
+        },
+        "a",
+    );
+    defer std.testing.allocator.free(first_wire);
+    try admitBufferedProductWireForTest(&storage, first_wire);
+    try std.testing.expect(storage.pumpRxTurn(
+        .{ .readable = true, .writable = false, .now_ns = 1 },
+        &ops,
+        scratch,
+    ).terminal == null);
+
+    const second_wire = try framing.encodeFrame(
+        std.testing.allocator,
+        .{
+            .kind = .delta_chunk,
+            .stream_id = valid_evidence.stream_id,
+            .flags = protocol.Flags.end_stream,
+        },
+        "b",
+    );
+    defer std.testing.allocator.free(second_wire);
+    try admitBufferedProductWireForTest(&storage, second_wire);
+    allocator_probe.mode = .aggregate_commit_drift;
+    const result = storage.pumpRxTurn(
+        .{ .readable = true, .writable = false, .now_ns = 2 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(allocator_probe.fired);
+    try std.testing.expectEqual(
+        client_pump.TerminalReason.invariant_failure,
+        result.terminal.?.reason,
+    );
+    try std.testing.expect(crossOwnerQuarantineStatus().latched);
+    const aggregate: *const PreparedRxAggregate =
+        @ptrFromInt(storage.rx_aggregate_handle.aggregate_addr);
+    try std.testing.expectEqual(@as(u8, 1), aggregate.destination_write_count);
+    try std.testing.expect(retainedRxAggregateValid(&storage));
+    try std.testing.expectEqual(
+        TeardownResult.cleaned,
+        teardownForTest(&storage),
+    );
+}
+
+test "d2b3d incompatible product partial is terminal without retiring the prior owner" {
+    const Apply = struct {
+        fn run(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
+    };
+
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    const first_wire = try framing.encodeFrame(
+        std.testing.allocator,
+        .{
+            .kind = .delta_chunk,
+            .stream_id = valid_evidence.stream_id,
+        },
+        "a",
+    );
+    defer std.testing.allocator.free(first_wire);
+    try admitBufferedProductWireForTest(&storage, first_wire);
+
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    var context: u8 = 0;
+    const ops = BufferedRxOps{
+        .context = &context,
+        .apply_live_screen = Apply.run,
+    };
+    try std.testing.expect(storage.pumpRxTurn(
+        .{ .readable = true, .writable = false, .now_ns = 1 },
+        &ops,
+        scratch,
+    ).terminal == null);
+    const partial_before = storage.live_partial.assembling;
+    const accounting_before = storage.inbox_ledger.accountingView();
+
+    const incompatible = try framing.encodeFrame(
+        std.testing.allocator,
+        .{
+            .kind = .snapshot_chunk,
+            .stream_id = valid_evidence.stream_id,
+            .flags = protocol.Flags.end_stream,
+        },
+        "b",
+    );
+    defer std.testing.allocator.free(incompatible);
+    try admitBufferedProductWireForTest(&storage, incompatible);
+    const result = storage.pumpRxTurn(
+        .{ .readable = true, .writable = false, .now_ns = 2 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expectEqual(
+        client_pump.TerminalReason.protocol_error,
+        result.terminal.?.reason,
+    );
+    try std.testing.expect(std.meta.eql(
+        partial_before,
+        storage.live_partial.assembling,
+    ));
+    try std.testing.expect(std.meta.eql(
+        accounting_before,
+        storage.inbox_ledger.accountingView(),
+    ));
+    try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(&storage));
+}
+
+test "d2b3d product partial cap plus one is terminal and preserves the sealed root" {
+    const Apply = struct {
+        fn run(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
+    };
+
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    const one = try framing.encodeFrame(
+        std.testing.allocator,
+        .{
+            .kind = .delta_chunk,
+            .stream_id = valid_evidence.stream_id,
+        },
+        "x",
+    );
+    defer std.testing.allocator.free(one);
+    var frames: [external_inbox_ledger.max_batch_chunks][]const u8 = undefined;
+    @memset(&frames, one);
+    try admitBufferedProductFramesForTest(&storage, &frames);
+
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    var context: u8 = 0;
+    const ops = BufferedRxOps{
+        .context = &context,
+        .apply_live_screen = Apply.run,
+    };
+    const full = storage.pumpRxTurn(
+        .{ .readable = true, .writable = false, .now_ns = 1 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(full.terminal == null);
+    try std.testing.expectEqual(
+        @as(usize, external_inbox_ledger.max_batch_chunks),
+        full.rx_frames,
+    );
+    const partial_before = storage.live_partial.assembling;
+    const continuation = storage.validatedPartialContinuation() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        @as(u8, external_inbox_ledger.max_batch_chunks),
+        continuation.chunk_count,
+    );
+    const accounting_before = storage.inbox_ledger.accountingView();
+
+    try admitBufferedProductWireForTest(&storage, one);
+    const overflow = storage.pumpRxTurn(
+        .{ .readable = true, .writable = false, .now_ns = 2 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expectEqual(
+        client_pump.TerminalReason.protocol_error,
+        overflow.terminal.?.reason,
+    );
+    try std.testing.expect(std.meta.eql(
+        partial_before,
+        storage.live_partial.assembling,
+    ));
+    try std.testing.expect(std.meta.eql(
+        accounting_before,
+        storage.inbox_ledger.accountingView(),
+    ));
+    try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(&storage));
+}
+
+test "d2b3d live screen consume retries without mutation then retires one FIFO head" {
+    const ApplyProbe = struct {
+        result: LiveScreenApplyResult = .retry,
+        calls: usize = 0,
+        stream_id: u64 = 0,
+        bytes: [1]u8 = .{0},
+        storage: ?*ExternalPumpStorage = null,
+        cleanup_scratch: ?*ExternalPumpCleanupScratch = null,
+        reenter: bool = false,
+        nested_teardown: ?TeardownResult = null,
+
+        fn apply(
+            raw: *anyopaque,
+            view: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            self.stream_id = view.semantic.completed.stream_id;
+            self.bytes[0] = view.bytes[0];
+            if (self.reenter)
+                self.nested_teardown = self.storage.?.teardown(
+                    self.cleanup_scratch.?,
+                );
+            return self.result;
+        }
+    };
+
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    defer _ = teardownForTest(&storage);
+    try seedSyntheticLiveOwnersForTest(&storage, std.testing.allocator);
+    storage.live_partial = .none;
+    switch (storage.pending_response) {
+        .pending => |*pending| pending.payload.deinit(),
+        else => unreachable,
+    }
+    storage.pending_response = .none;
+    try std.testing.expect(storage.liveOwnersValid());
+
+    var scratch = struct {
+        permit: LiveScreenConsumePermit = .{},
+        padding: [64]u8 = [_]u8{0} ** 64,
+    }{};
+    var lease: ExternalWholeTurnLease = .{};
+    try storage.acquireWholeTurnLease(
+        &lease,
+        @intFromPtr(&scratch),
+        @sizeOf(@TypeOf(scratch)),
+    );
+    const original_head = storage.live_screen.head;
+    const original_len = storage.live_screen.len;
+    const original_generation = storage.live_screen.generation;
+    const original_accounting = storage.inbox_ledger.accountingView();
+    var cleanup_scratch: ExternalPumpCleanupScratch = .{};
+    try std.testing.expect(ExternalPumpCleanupScratch.initInPlace(
+        &cleanup_scratch,
+    ));
+    var probe = ApplyProbe{
+        .storage = &storage,
+        .cleanup_scratch = &cleanup_scratch,
+    };
+    const ops = BufferedRxOps{
+        .context = &probe,
+        .apply_live_screen = ApplyProbe.apply,
+    };
+    try std.testing.expectEqual(
+        LiveScreenConsumeResult.retry,
+        storage.consumeLiveScreenHeadUnderHeldLease(
+            &lease,
+            &ops,
+            &scratch.permit,
+        ),
+    );
+    try std.testing.expectEqual(original_head, storage.live_screen.head);
+    try std.testing.expectEqual(original_len, storage.live_screen.len);
+    try std.testing.expectEqual(
+        original_generation,
+        storage.live_screen.generation,
+    );
+    try std.testing.expect(std.meta.eql(
+        original_accounting,
+        storage.inbox_ledger.accountingView(),
+    ));
+    try std.testing.expect(std.meta.eql(
+        scratch.permit,
+        LiveScreenConsumePermit{ .lifecycle = .aborted },
+    ));
+
+    scratch.permit = .{};
+    probe.reenter = true;
+    probe.result = .applied;
+    try std.testing.expectEqual(
+        LiveScreenConsumeResult.invalid_state,
+        storage.consumeLiveScreenHeadUnderHeldLease(
+            &lease,
+            &ops,
+            &scratch.permit,
+        ),
+    );
+    try std.testing.expectEqual(
+        TeardownResult.transaction_busy,
+        probe.nested_teardown.?,
+    );
+    try std.testing.expectEqual(original_head, storage.live_screen.head);
+    try std.testing.expectEqual(original_len, storage.live_screen.len);
+    try std.testing.expectEqual(
+        original_generation,
+        storage.live_screen.generation,
+    );
+    try std.testing.expect(std.meta.eql(
+        original_accounting,
+        storage.inbox_ledger.accountingView(),
+    ));
+    try std.testing.expect(std.meta.eql(
+        scratch.permit,
+        LiveScreenConsumePermit{ .lifecycle = .aborted },
+    ));
+
+    scratch.permit = .{};
+    probe.reenter = false;
+    try std.testing.expectEqual(
+        LiveScreenConsumeResult.consumed,
+        storage.consumeLiveScreenHeadUnderHeldLease(
+            &lease,
+            &ops,
+            &scratch.permit,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 3), probe.calls);
+    try std.testing.expectEqual(@as(u64, 1000), probe.stream_id);
+    try std.testing.expectEqual(@as(u8, 's'), probe.bytes[0]);
+    try std.testing.expectEqual(original_len - 1, storage.live_screen.len);
+    try std.testing.expectEqual(original_generation + 1, storage.live_screen.generation);
+    try std.testing.expectEqual(
+        original_accounting.charged_items - 1,
+        storage.inbox_ledger.accountingView().charged_items,
+    );
+    try std.testing.expect(storage.liveOwnersValid());
+    try std.testing.expectEqual(
+        WholeTurnReleaseResult.released,
+        storage.releaseWholeTurnLease(&lease),
+    );
+}
+
+test "d2b3d product facade traverses the adopted Client parser and consumes its live FIFO" {
+    const ApplyProbe = struct {
+        calls: usize = 0,
+        bytes: [6]u8 = [_]u8{0} ** 6,
+
+        fn apply(
+            raw: *anyopaque,
+            view: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            @memcpy(&self.bytes, view.bytes);
+            return .applied;
+        }
+    };
+
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+
+    const wire = try framing.encodeFrame(
+        std.testing.allocator,
+        .{
+            .kind = .delta_chunk,
+            .stream_id = valid_evidence.stream_id,
+            .flags = protocol.Flags.end_stream,
+        },
+        "screen",
+    );
+    defer std.testing.allocator.free(wire);
+    const client = &storage.owned_client.?;
+    const rx_state = switch (client.io_mode) {
+        .external => |*state| state,
+        .blocking => return error.TestUnexpectedResult,
+    };
+    var append: client_external_mode.PreparedRxAppend = .{};
+    try client_external_mode.prepareAdmit(
+        rx_state,
+        &client.parser,
+        wire,
+        rx_state.rx_provenance.rx_absolute_next,
+        protocol.max_binary_chunk + protocol.header_size,
+        &append,
+    );
+    try client_external_mode.commitPreparedAdmit(
+        rx_state,
+        &client.parser,
+        wire,
+        &append,
+    );
+
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    var probe = ApplyProbe{};
+    const ops = BufferedRxOps{
+        .context = &probe,
+        .apply_live_screen = ApplyProbe.apply,
+    };
+    const first = storage.pumpRxTurn(
+        .{ .readable = true, .writable = false, .now_ns = 1 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(first.terminal == null);
+    try std.testing.expectEqual(@as(usize, 1), first.rx_frames);
+    try std.testing.expectEqual(wire.len, first.rx_bytes);
+    try std.testing.expectEqual(LiveScreenLifecycle.active, storage.live_screen.lifecycle);
+    try std.testing.expectEqual(@as(u8, 1), storage.live_screen.len);
+    try std.testing.expectEqual(@as(usize, 0), probe.calls);
+
+    const deferred_wire = try framing.encodeFrame(
+        std.testing.allocator,
+        .{
+            .kind = .delta_chunk,
+            .stream_id = valid_evidence.stream_id,
+            .flags = protocol.Flags.end_stream,
+        },
+        "second",
+    );
+    defer std.testing.allocator.free(deferred_wire);
+    try admitBufferedProductWireForTest(&storage, deferred_wire);
+    const parser_bytes_before_inherited = client.parser.bufferedBytes();
+    const second = storage.pumpRxTurn(
+        .{ .readable = false, .writable = false, .now_ns = 2 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(second.terminal == null);
+    try std.testing.expect(second.inherited_work_ready);
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expectEqualStrings("screen", &probe.bytes);
+    try std.testing.expectEqual(LiveScreenLifecycle.empty, storage.live_screen.lifecycle);
+    try std.testing.expectEqual(@as(u8, 0), storage.live_screen.len);
+    try std.testing.expectEqual(
+        parser_bytes_before_inherited,
+        client.parser.bufferedBytes(),
+    );
+
+    const third = storage.pumpRxTurn(
+        .{ .readable = true, .writable = false, .now_ns = 3 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(third.terminal == null);
+    try std.testing.expectEqual(@as(usize, 1), third.rx_frames);
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expectEqual(@as(u8, 1), storage.live_screen.len);
+    const fourth = storage.pumpRxTurn(
+        .{ .readable = false, .writable = false, .now_ns = 4 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(fourth.terminal == null);
+    try std.testing.expectEqual(@as(usize, 2), probe.calls);
+    try std.testing.expectEqualStrings("second", &probe.bytes);
+    try std.testing.expectEqual(@as(u8, 0), storage.live_screen.len);
+    try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(&storage));
+}
+
+test "d2b3d product facade commits 64 and leaves the 65th parser frame unread" {
+    const Apply = struct {
+        fn run(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
+    };
+
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+
+    const one = try framing.encodeFrame(
+        std.testing.allocator,
+        .{
+            .kind = .delta_chunk,
+            .stream_id = valid_evidence.stream_id,
+            .flags = protocol.Flags.end_stream,
+        },
+        "x",
+    );
+    defer std.testing.allocator.free(one);
+    const wire = try std.testing.allocator.alloc(u8, one.len * 65);
+    defer std.testing.allocator.free(wire);
+    for (0..65) |index|
+        @memcpy(wire[index * one.len ..][0..one.len], one);
+
+    const client = &storage.owned_client.?;
+    const rx_state = switch (client.io_mode) {
+        .external => |*state| state,
+        .blocking => return error.TestUnexpectedResult,
+    };
+    var append: client_external_mode.PreparedRxAppend = .{};
+    try client_external_mode.prepareAdmit(
+        rx_state,
+        &client.parser,
+        wire,
+        rx_state.rx_provenance.rx_absolute_next,
+        protocol.max_binary_chunk + protocol.header_size,
+        &append,
+    );
+    try client_external_mode.commitPreparedAdmit(
+        rx_state,
+        &client.parser,
+        wire,
+        &append,
+    );
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    var context: u8 = 0;
+    const ops = BufferedRxOps{
+        .context = &context,
+        .apply_live_screen = Apply.run,
+    };
+    const result = storage.pumpRxTurn(
+        .{ .readable = true, .writable = false, .now_ns = 1 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(result.terminal == null);
+    try std.testing.expectEqual(@as(usize, 64), result.rx_frames);
+    try std.testing.expectEqual(one.len * 64, result.rx_bytes);
+    try std.testing.expect(result.immediate_rx);
+    try std.testing.expectEqual(@as(u8, 64), storage.live_screen.len);
+    try std.testing.expectEqual(one.len, client.parser.bufferedBytes());
+    for (0..64) |index| {
+        const inherited = storage.pumpRxTurn(
+            .{
+                .readable = true,
+                .writable = false,
+                .now_ns = @intCast(index + 2),
+            },
+            &ops,
+            scratch,
+        );
+        try std.testing.expect(inherited.terminal == null);
+        try std.testing.expect(inherited.inherited_work_ready);
+        try std.testing.expectEqual(
+            @as(u8, @intCast(63 - index)),
+            storage.live_screen.len,
+        );
+        try std.testing.expectEqual(one.len, client.parser.bufferedBytes());
+    }
+    const final = storage.pumpRxTurn(
+        .{ .readable = true, .writable = false, .now_ns = 66 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(final.terminal == null);
+    try std.testing.expectEqual(@as(usize, 1), final.rx_frames);
+    try std.testing.expectEqual(@as(u8, 1), storage.live_screen.len);
+    try std.testing.expectEqual(@as(usize, 0), client.parser.bufferedBytes());
+    try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(&storage));
+}
+
+test "d2b3d product facade preserves incomplete parser tails after committed and skipped frames" {
+    const Apply = struct {
+        fn run(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
+    };
+
+    inline for (.{ false, true }) |skip_first| {
+        var fixture = try TestClient.init();
+        defer fixture.deinitPeer();
+        var storage: ExternalPumpStorage = .{};
+        try std.testing.expect(
+            initTestStorage(&storage, &fixture.client, valid_evidence) ==
+                .initialized,
+        );
+        try std.testing.expect(
+            prepareAdoptionForTest(&storage) == .prepared_adopted,
+        );
+        try std.testing.expect(storage.commitAdoption() == .adopted);
+
+        const first = try framing.encodeFrame(
+            std.testing.allocator,
+            if (skip_first)
+                .{
+                    .kind = @enumFromInt(55001),
+                    .flags = protocol.Flags.optional,
+                }
+            else
+                .{
+                    .kind = .delta_chunk,
+                    .stream_id = valid_evidence.stream_id,
+                    .flags = protocol.Flags.end_stream,
+                },
+            if (skip_first) "ignored" else "screen",
+        );
+        defer std.testing.allocator.free(first);
+        const incomplete = try framing.encodeFrame(
+            std.testing.allocator,
+            .{
+                .kind = .delta_chunk,
+                .stream_id = valid_evidence.stream_id,
+                .flags = protocol.Flags.end_stream,
+            },
+            "tail",
+        );
+        defer std.testing.allocator.free(incomplete);
+        const prefix_len = protocol.header_size - 1;
+        const wire = try std.testing.allocator.alloc(
+            u8,
+            first.len + prefix_len,
+        );
+        defer std.testing.allocator.free(wire);
+        @memcpy(wire[0..first.len], first);
+        @memcpy(wire[first.len..], incomplete[0..prefix_len]);
+        try admitBufferedProductWireForTest(&storage, wire);
+
+        const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+        defer std.testing.allocator.destroy(scratch);
+        scratch.* = .{};
+        try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+        var context: u8 = 0;
+        const ops = BufferedRxOps{
+            .context = &context,
+            .apply_live_screen = Apply.run,
+        };
+        const result = storage.pumpRxTurn(
+            .{ .readable = true, .writable = false, .now_ns = 1 },
+            &ops,
+            scratch,
+        );
+        try std.testing.expect(result.terminal == null);
+        try std.testing.expectEqual(@as(usize, 1), result.rx_frames);
+        try std.testing.expectEqual(first.len, result.rx_bytes);
+        try std.testing.expect(!result.immediate_rx);
+        try std.testing.expect(!result.authority_clear);
+        try std.testing.expectEqual(
+            prefix_len,
+            storage.owned_client.?.parser.bufferedBytes(),
+        );
+        if (!skip_first)
+            try std.testing.expectEqual(
+                @as(u8, 1),
+                storage.live_screen.len,
+            );
+        try std.testing.expectEqual(
+            TeardownResult.cleaned,
+            teardownForTest(&storage),
+        );
+    }
+}
+
+test "d2b3d sibling whole-turn busy is retry scheduling without terminal mutation" {
+    const Apply = struct {
+        fn run(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
+    };
+    var first_fixture = try TestClient.init();
+    defer first_fixture.deinitPeer();
+    var second_fixture = try TestClient.init();
+    defer second_fixture.deinitPeer();
+    var first: ExternalPumpStorage = .{};
+    var second: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&first, &first_fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(
+        initTestStorage(&second, &second_fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&first) == .prepared_adopted);
+    try std.testing.expect(first.commitAdoption() == .adopted);
+    try std.testing.expect(prepareAdoptionForTest(&second) == .prepared_adopted);
+    try std.testing.expect(second.commitAdoption() == .adopted);
+
+    var held_scratch: u8 = 0;
+    var held: ExternalWholeTurnLease = .{};
+    try first.acquireWholeTurnLease(
+        &held,
+        @intFromPtr(&held_scratch),
+        @sizeOf(@TypeOf(held_scratch)),
+    );
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    var context: u8 = 0;
+    const ops = BufferedRxOps{
+        .context = &context,
+        .apply_live_screen = Apply.run,
+    };
+    const before = second.semantic_state;
+    const result = second.pumpRxTurn(
+        .{ .readable = true, .writable = false, .now_ns = 1 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(result.terminal == null);
+    try std.testing.expect(result.inherited_work_ready);
+    try std.testing.expect(std.meta.eql(before, second.semantic_state));
+    try std.testing.expectEqual(
+        WholeTurnReleaseResult.released,
+        first.releaseWholeTurnLease(&held),
+    );
+    try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(&first));
+    try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(&second));
+}
+
+test "d2b3d inherited product owners stop parser and allocation before mutation" {
+    const Apply = struct {
+        fn run(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
+    };
+    const Case = enum { committed_screen, metadata, resize };
+    inline for (std.meta.tags(Case)) |case| {
+        var fixture = try TestClient.init();
+        defer fixture.deinitPeer();
+        switch (case) {
+            .committed_screen => {
+                const payload =
+                    try fixture.client.allocator.dupe(u8, "inherited");
+                try fixture.client.pending_batches.append(
+                    fixture.client.allocator,
+                    .{
+                        .is_snapshot = false,
+                        .stream_id = valid_evidence.stream_id,
+                        .bytes = payload,
+                        .allocator = fixture.client.allocator,
+                    },
+                );
+                fixture.client.pending_batch_bytes = payload.len;
+            },
+            .metadata => {
+                fixture.client.metadata_support = .supported;
+                try appendTestEvent(
+                    &fixture.client,
+                    d2b3d_metadata_payload,
+                );
+            },
+            .resize => {
+                fixture.client.metadata_support = .supported;
+                try appendTestEvent(&fixture.client,
+                    \\{"event":"runtime.resized","data":{"runtime_id":"000000000000000000000000000000aa","cols":132,"rows":43,"resize_generation":9,"reason":"controller"}}
+                );
+            },
+        }
+        var storage: ExternalPumpStorage = .{};
+        try std.testing.expect(
+            initTestStorage(&storage, &fixture.client, valid_evidence) ==
+                .initialized,
+        );
+        try std.testing.expect(
+            prepareAdoptionForTest(&storage) == .prepared_adopted,
+        );
+        try std.testing.expect(storage.commitAdoption() == .adopted);
+        const wire = try framing.encodeFrame(
+            std.testing.allocator,
+            .{
+                .kind = .delta_chunk,
+                .stream_id = valid_evidence.stream_id,
+                .flags = protocol.Flags.end_stream,
+            },
+            "must-remain-parser-resident",
+        );
+        defer std.testing.allocator.free(wire);
+        try admitBufferedProductWireForTest(&storage, wire);
+        const parser_bytes = storage.owned_client.?.parser.bufferedBytes();
+        const accounting = storage.inbox_ledger.accountingView();
+        const intent_reservation = storage.intent_scratch_reservation;
+        const aggregate_reservation = storage.rx_aggregate_reservation;
+        const scratch =
+            try std.testing.allocator.create(ExternalRxTurnScratch);
+        defer std.testing.allocator.destroy(scratch);
+        scratch.* = .{};
+        try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+        var context: u8 = 0;
+        const ops = BufferedRxOps{
+            .context = &context,
+            .apply_live_screen = Apply.run,
+        };
+        const result = storage.pumpRxTurn(
+            .{ .readable = true, .writable = false, .now_ns = 1 },
+            &ops,
+            scratch,
+        );
+        try std.testing.expect(result.terminal == null);
+        try std.testing.expect(result.inherited_work_ready);
+        try std.testing.expectEqual(@as(usize, 0), result.rx_frames);
+        try std.testing.expectEqual(
+            parser_bytes,
+            storage.owned_client.?.parser.bufferedBytes(),
+        );
+        try std.testing.expect(std.meta.eql(
+            accounting,
+            storage.inbox_ledger.accountingView(),
+        ));
+        try std.testing.expect(std.meta.eql(
+            intent_reservation,
+            storage.intent_scratch_reservation,
+        ));
+        try std.testing.expect(std.meta.eql(
+            aggregate_reservation,
+            storage.rx_aggregate_reservation,
+        ));
+        switch (case) {
+            .committed_screen => try std.testing.expect(
+                storage.committed_screen.retained_count != 0,
+            ),
+            .metadata => try std.testing.expect(
+                storage.metadata_pending_summary.pending,
+            ),
+            .resize => try std.testing.expect(
+                !storage.metadata_pending_summary.pending and
+                    storage.owner_resize.current.pending,
+            ),
+        }
+        try std.testing.expectEqual(
+            TeardownResult.cleaned,
+            teardownForTest(&storage),
+        );
+    }
+}
+
+test "d2b3d product facade rejects copied scratch and parser seal drift before publish" {
+    const Apply = struct {
+        fn run(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
+    };
+    inline for (.{ false, true }) |drift_parser| {
+        var fixture = try TestClient.init();
+        defer fixture.deinitPeer();
+        var storage: ExternalPumpStorage = .{};
+        try std.testing.expect(
+            initTestStorage(&storage, &fixture.client, valid_evidence) ==
+                .initialized,
+        );
+        try std.testing.expect(
+            prepareAdoptionForTest(&storage) == .prepared_adopted,
+        );
+        try std.testing.expect(storage.commitAdoption() == .adopted);
+        const wire = try framing.encodeFrame(
+            std.testing.allocator,
+            .{
+                .kind = .delta_chunk,
+                .stream_id = valid_evidence.stream_id,
+                .flags = protocol.Flags.end_stream,
+            },
+            "hostile",
+        );
+        defer std.testing.allocator.free(wire);
+        try admitBufferedProductWireForTest(&storage, wire);
+        const parser_bytes = storage.owned_client.?.parser.bufferedBytes();
+        const original =
+            try std.testing.allocator.create(ExternalRxTurnScratch);
+        defer std.testing.allocator.destroy(original);
+        original.* = .{};
+        try std.testing.expect(ExternalRxTurnScratch.initInPlace(original));
+        const copied = try std.testing.allocator.create(ExternalRxTurnScratch);
+        defer std.testing.allocator.destroy(copied);
+        copied.* = original.*;
+        const scratch = if (drift_parser) original else copied;
+        const client = &storage.owned_client.?;
+        const rx_state = switch (client.io_mode) {
+            .external => |*state| state,
+            .blocking => return error.TestUnexpectedResult,
+        };
+        const saved_seal = rx_state.rx_provenance.parser_seal;
+        if (drift_parser)
+            rx_state.rx_provenance.parser_seal.digest[0] ^= 1;
+        var context: u8 = 0;
+        const ops = BufferedRxOps{
+            .context = &context,
+            .apply_live_screen = Apply.run,
+        };
+        const result = storage.pumpRxTurn(
+            .{ .readable = true, .writable = false, .now_ns = 1 },
+            &ops,
+            scratch,
+        );
+        try std.testing.expectEqual(
+            client_pump.TerminalReason.invariant_failure,
+            result.terminal.?.reason,
+        );
+        try std.testing.expectEqual(
+            parser_bytes,
+            client.parser.bufferedBytes(),
+        );
+        try std.testing.expect(storage.live_screen.lifecycle == .empty);
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            storage.inbox_ledger.accountingView().charged_items,
+        );
+        if (drift_parser)
+            rx_state.rx_provenance.parser_seal = saved_seal;
+        try std.testing.expectEqual(
+            TeardownResult.cleaned,
+            teardownForTest(&storage),
+        );
+    }
+}
+
+test "d2b3d product live callback payload and owner drift preserve FIFO and ledger" {
+    const Probe = struct {
+        const Mode = enum { payload, owner };
+        mode: Mode,
+        storage: *ExternalPumpStorage,
+        payload: ?[]u8 = null,
+        saved_byte: u8 = 0,
+        saved_generation: u64 = 0,
+
+        fn run(
+            raw: *anyopaque,
+            view: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            switch (self.mode) {
+                .payload => {
+                    self.payload = @constCast(view.bytes);
+                    self.saved_byte = self.payload.?[0];
+                    self.payload.?[0] ^= 1;
+                },
+                .owner => {
+                    self.saved_generation = self.storage.live_screen.generation;
+                    self.storage.live_screen.generation +%= 1;
+                },
+            }
+            return .applied;
+        }
+
+        fn restore(self: *@This()) void {
+            switch (self.mode) {
+                .payload => self.payload.?[0] = self.saved_byte,
+                .owner => self.storage.live_screen.generation =
+                    self.saved_generation,
+            }
+        }
+    };
+    inline for (std.meta.tags(Probe.Mode)) |mode| {
+        resetCrossOwnerQuarantineForTest();
+        var fixture = try TestClient.init();
+        defer fixture.deinitPeer();
+        var storage: ExternalPumpStorage = .{};
+        try std.testing.expect(
+            initTestStorage(&storage, &fixture.client, valid_evidence) ==
+                .initialized,
+        );
+        try std.testing.expect(
+            prepareAdoptionForTest(&storage) == .prepared_adopted,
+        );
+        try std.testing.expect(storage.commitAdoption() == .adopted);
+        const wire = try framing.encodeFrame(
+            std.testing.allocator,
+            .{
+                .kind = .delta_chunk,
+                .stream_id = valid_evidence.stream_id,
+                .flags = protocol.Flags.end_stream,
+            },
+            "callback",
+        );
+        defer std.testing.allocator.free(wire);
+        try admitBufferedProductWireForTest(&storage, wire);
+        const scratch =
+            try std.testing.allocator.create(ExternalRxTurnScratch);
+        defer std.testing.allocator.destroy(scratch);
+        scratch.* = .{};
+        try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+        var probe = Probe{ .mode = mode, .storage = &storage };
+        const ops = BufferedRxOps{
+            .context = &probe,
+            .apply_live_screen = Probe.run,
+        };
+        try std.testing.expect(storage.pumpRxTurn(
+            .{ .readable = true, .writable = false, .now_ns = 1 },
+            &ops,
+            scratch,
+        ).terminal == null);
+        const fifo = storage.live_screen;
+        const accounting = storage.inbox_ledger.accountingView();
+        const result = storage.pumpRxTurn(
+            .{ .readable = false, .writable = false, .now_ns = 2 },
+            &ops,
+            scratch,
+        );
+        try std.testing.expectEqual(
+            client_pump.TerminalReason.invariant_failure,
+            result.terminal.?.reason,
+        );
+        probe.restore();
+        try std.testing.expectEqual(fifo.head, storage.live_screen.head);
+        try std.testing.expectEqual(fifo.len, storage.live_screen.len);
+        try std.testing.expectEqual(
+            fifo.generation,
+            storage.live_screen.generation,
+        );
+        try std.testing.expect(std.meta.eql(
+            accounting,
+            storage.inbox_ledger.accountingView(),
+        ));
+        try std.testing.expectEqual(
+            TeardownResult.cleaned,
+            teardownForTest(&storage),
+        );
+        resetCrossOwnerQuarantineForTest();
+    }
+}
+
+test "d2b3d late protocol terminals abort accepted screen and response prefixes" {
+    const Apply = struct {
+        fn run(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
+    };
+    const Case = enum {
+        screen_then_move_terminal,
+        screen_then_unknown_required,
+        screen_then_bad_major,
+        response_then_bad_major,
+    };
+    inline for (std.meta.tags(Case)) |case| {
+        var fixture = try TestClient.init();
+        defer fixture.deinitPeer();
+        var storage: ExternalPumpStorage = .{};
+        try std.testing.expect(
+            initTestStorage(&storage, &fixture.client, valid_evidence) ==
+                .initialized,
+        );
+        try std.testing.expect(
+            prepareAdoptionForTest(&storage) == .prepared_adopted,
+        );
+        try std.testing.expect(storage.commitAdoption() == .adopted);
+        const prefix = try framing.encodeFrame(
+            std.testing.allocator,
+            if (case == .response_then_bad_major)
+                .{ .kind = .response, .request_id = 91 }
+            else
+                .{
+                    .kind = .delta_chunk,
+                    .stream_id = valid_evidence.stream_id,
+                    .flags = protocol.Flags.end_stream,
+                },
+            "prefix",
+        );
+        defer std.testing.allocator.free(prefix);
+        const terminal = try framing.encodeFrame(
+            std.testing.allocator,
+            switch (case) {
+                .screen_then_move_terminal => .{ .kind = .ping },
+                .screen_then_unknown_required => .{
+                    .kind = @enumFromInt(55001),
+                },
+                .screen_then_bad_major, .response_then_bad_major => .{
+                    .major = protocol.version_major + 1,
+                    .kind = .ping,
+                },
+            },
+            "",
+        );
+        defer std.testing.allocator.free(terminal);
+        const frames = [_][]const u8{ prefix, terminal };
+        try admitBufferedProductFramesForTest(&storage, &frames);
+        const scratch =
+            try std.testing.allocator.create(ExternalRxTurnScratch);
+        defer std.testing.allocator.destroy(scratch);
+        scratch.* = .{};
+        try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+        var context: u8 = 0;
+        const ops = BufferedRxOps{
+            .context = &context,
+            .apply_live_screen = Apply.run,
+        };
+        const result = storage.pumpRxTurn(
+            .{ .readable = true, .writable = false, .now_ns = 1 },
+            &ops,
+            scratch,
+        );
+        try std.testing.expectEqual(
+            client_pump.TerminalReason.protocol_error,
+            result.terminal.?.reason,
+        );
+        try std.testing.expect(storage.live_partial == .none);
+        try std.testing.expect(storage.live_screen.lifecycle == .empty);
+        try std.testing.expect(storage.pending_response == .none);
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            storage.inbox_ledger.accountingView().charged_items,
+        );
+        try std.testing.expectEqual(
+            TeardownResult.cleaned,
+            teardownForTest(&storage),
+        );
+    }
+}
+
+test "d2b3d product response publishes a blocker and the next turn traverses zero RX" {
+    const Apply = struct {
+        fn run(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
+    };
+
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+
+    const wire = try framing.encodeFrame(
+        std.testing.allocator,
+        .{
+            .kind = .response,
+            .request_id = 77,
+        },
+        "product-response",
+    );
+    defer std.testing.allocator.free(wire);
+    try admitBufferedProductWireForTest(&storage, wire);
+
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    var context: u8 = 0;
+    const ops = BufferedRxOps{
+        .context = &context,
+        .apply_live_screen = Apply.run,
+    };
+    const first = storage.pumpRxTurn(
+        .{ .readable = true, .writable = false, .now_ns = 1 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(first.terminal == null);
+    try std.testing.expectEqual(@as(usize, 1), first.rx_frames);
+    const pending = switch (storage.pending_response) {
+        .pending => |*value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(u64, 77), pending.request_id);
+    try std.testing.expectEqualStrings("product-response", pending.payload.bytes());
+    try std.testing.expect(storage.pendingResponseValid());
+
+    const second = storage.pumpRxTurn(
+        .{ .readable = true, .writable = false, .now_ns = 2 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(second.terminal == null);
+    try std.testing.expect(second.inherited_work_ready);
+    try std.testing.expectEqual(@as(usize, 0), second.rx_frames);
+    try std.testing.expectEqual(@as(usize, 0), second.rx_bytes);
+    try std.testing.expect(storage.pendingResponseValid());
+    try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(&storage));
+}
+
+test "d2b3d product mixed owners abort atomically on a late terminal event" {
+    const Apply = struct {
+        fn run(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
+    };
+
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    fixture.client.metadata_support = .supported;
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    var fence: projection_test.PreparedInitialFenceClear = .{};
+    try std.testing.expect(projection_test.prepare(&storage, &fence));
+    try std.testing.expectEqual(
+        projection_test.InitialFenceClearResult.cleared,
+        projection_test.commit(&storage, &fence),
+    );
+    const metadata_before = storage.owner_metadata;
+    const accounting_before = storage.inbox_ledger.accountingView();
+
+    const metadata_wire = try framing.encodeFrame(
+        std.testing.allocator,
+        .{
+            .kind = .event,
+            .stream_id = valid_evidence.stream_id,
+        },
+        d2b3d_metadata_payload,
+    );
+    defer std.testing.allocator.free(metadata_wire);
+    const screen_wire = try framing.encodeFrame(
+        std.testing.allocator,
+        .{
+            .kind = .delta_chunk,
+            .stream_id = valid_evidence.stream_id,
+            .flags = protocol.Flags.end_stream,
+        },
+        "screen-before-terminal",
+    );
+    defer std.testing.allocator.free(screen_wire);
+    const response_wire = try framing.encodeFrame(
+        std.testing.allocator,
+        .{
+            .kind = .response,
+            .request_id = 92,
+        },
+        "response-before-terminal",
+    );
+    defer std.testing.allocator.free(response_wire);
+    const terminal_wire = try framing.encodeFrame(
+        std.testing.allocator,
+        .{
+            .kind = .event,
+            .stream_id = valid_evidence.stream_id,
+        },
+        "{\"event\":\"runtime.ended\"}",
+    );
+    defer std.testing.allocator.free(terminal_wire);
+    try admitBufferedProductFramesForTest(
+        &storage,
+        &.{ metadata_wire, screen_wire, response_wire, terminal_wire },
+    );
+
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    var context: u8 = 0;
+    const ops = BufferedRxOps{
+        .context = &context,
+        .apply_live_screen = Apply.run,
+    };
+    const result = storage.pumpRxTurn(
+        .{ .readable = true, .writable = false, .now_ns = 1 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expectEqual(
+        client_pump.TerminalReason.protocol_error,
+        result.terminal.?.reason,
+    );
+    try std.testing.expectEqual(@as(usize, 4), result.rx_frames);
+    try std.testing.expect(std.meta.eql(metadata_before, storage.owner_metadata));
+    try std.testing.expect(storage.live_partial == .none);
+    try std.testing.expect(storage.live_screen.lifecycle == .empty);
+    try std.testing.expect(storage.pending_response == .none);
+    try std.testing.expect(std.meta.eql(
+        accounting_before,
+        storage.inbox_ledger.accountingView(),
+    ));
+    try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(&storage));
+}
+
+test "d2b3d product traversal commits 64 alternating event and screen intents" {
+    const Apply = struct {
+        fn run(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
+    };
+
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    fixture.client.metadata_support = .supported;
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    var fence: projection_test.PreparedInitialFenceClear = .{};
+    try std.testing.expect(projection_test.prepare(&storage, &fence));
+    try std.testing.expectEqual(
+        projection_test.InitialFenceClearResult.cleared,
+        projection_test.commit(&storage, &fence),
+    );
+
+    const metadata_wire = try framing.encodeFrame(
+        std.testing.allocator,
+        .{
+            .kind = .event,
+            .stream_id = valid_evidence.stream_id,
+        },
+        d2b3d_metadata_payload,
+    );
+    defer std.testing.allocator.free(metadata_wire);
+    const screen_wire = try framing.encodeFrame(
+        std.testing.allocator,
+        .{
+            .kind = .delta_chunk,
+            .stream_id = valid_evidence.stream_id,
+            .flags = protocol.Flags.end_stream,
+        },
+        "mixed-screen",
+    );
+    defer std.testing.allocator.free(screen_wire);
+    var frames: [64][]const u8 = undefined;
+    for (&frames, 0..) |*frame, index|
+        frame.* = if (index % 2 == 0) metadata_wire else screen_wire;
+    try admitBufferedProductFramesForTest(&storage, &frames);
+
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    var context: u8 = 0;
+    const ops = BufferedRxOps{
+        .context = &context,
+        .apply_live_screen = Apply.run,
+    };
+    const result = storage.pumpRxTurn(
+        .{ .readable = true, .writable = false, .now_ns = 1 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(result.terminal == null);
+    try std.testing.expectEqual(@as(usize, 64), result.rx_frames);
+    try std.testing.expectEqual(@as(u8, 32), storage.live_screen.len);
+    const metadata = storage.owner_metadata.metadataStateSummary(&storage) orelse
+        return error.TestUnexpectedResult;
+    switch (metadata) {
+        .current => |current| {
+            try std.testing.expectEqual(@as(u64, 2), current.revision);
+            try std.testing.expect(current.pending);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(storage.metadataPendingSummaryValid());
+    const aggregate: *const PreparedRxAggregate =
+        @ptrFromInt(storage.rx_aggregate_handle.aggregate_addr);
+    try std.testing.expectEqual(@as(u8, 64), aggregate.destination_write_count);
+    for (0..64) |index| {
+        try std.testing.expectEqual(
+            @as(u8, @intCast(index)),
+            aggregate.destination_writes[index].intent_index,
+        );
+        try std.testing.expectEqual(
+            if (index % 2 == 0)
+                external_rx_intent.IntentCommitSlotKind.event
+            else
+                external_rx_intent.IntentCommitSlotKind.screen,
+            aggregate.intent_commit.slot_kinds[index],
+        );
+    }
+    try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(&storage));
+}
+
+fn checkD2b3dProductPumpAllocationFailure(
+    allocator: std.mem.Allocator,
+) !void {
+    const Apply = struct {
+        fn run(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
+    };
+
+    var fixture = try TestClient.initWithAllocator(allocator);
+    defer fixture.deinitPeer();
+    var source_owned = true;
+    defer if (source_owned) fixture.client.deinit();
+    var storage: ExternalPumpStorage = .{};
+    switch (initTestStorage(&storage, &fixture.client, valid_evidence)) {
+        .initialized => source_owned = false,
+        .failed => |failure| {
+            try std.testing.expectEqual(
+                InitFailureReason.out_of_memory,
+                failure.reason,
+            );
+            try std.testing.expectEqual(
+                SourceDisposition.preserved,
+                failure.source_disposition,
+            );
+            return error.OutOfMemory;
+        },
+    }
+    defer {
+        if (storage.lifecycle != .dead)
+            _ = teardownForTest(&storage);
+    }
+
+    switch (prepareAdoptionForTest(&storage)) {
+        .prepared_adopted => {},
+        .retryable_preserved => |reason| {
+            try std.testing.expectEqual(
+                RetryablePrepareReason.out_of_memory,
+                reason,
+            );
+            return error.OutOfMemory;
+        },
+        .recovery_committed, .terminal_latched => return error.OutOfMemory,
+    }
+    if (storage.commitAdoption() != .adopted)
+        return error.OutOfMemory;
+
+    const wire = try framing.encodeFrame(
+        allocator,
+        .{
+            .kind = .delta_chunk,
+            .stream_id = valid_evidence.stream_id,
+            .flags = protocol.Flags.end_stream,
+        },
+        "allocation-gate",
+    );
+    defer allocator.free(wire);
+    try admitBufferedProductWireForTest(&storage, wire);
+    const scratch = try allocator.create(ExternalRxTurnScratch);
+    defer allocator.destroy(scratch);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    var context: u8 = 0;
+    const ops = BufferedRxOps{
+        .context = &context,
+        .apply_live_screen = Apply.run,
+    };
+    const result = storage.pumpRxTurn(
+        .{ .readable = true, .writable = false, .now_ns = 1 },
+        &ops,
+        scratch,
+    );
+    if (result.terminal) |terminal| {
+        try std.testing.expectEqual(
+            client_pump.TerminalReason.resource_exhausted,
+            terminal.reason,
+        );
+        // The storage reservation owns an address inside `scratch`; owner teardown must destroy
+        // that reservation before the caller releases its final-address turn scratch.
+        try std.testing.expectEqual(
+            TeardownResult.cleaned,
+            teardownForTest(&storage),
+        );
+        return error.OutOfMemory;
+    }
+    try std.testing.expectEqual(@as(usize, 1), result.rx_frames);
+    try std.testing.expectEqual(@as(u8, 1), storage.live_screen.len);
+    try std.testing.expectEqual(
+        TeardownResult.cleaned,
+        teardownForTest(&storage),
+    );
+}
+
+test "d2b3d product pump preserves final-zero at every allocation fail index" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        checkD2b3dProductPumpAllocationFailure,
+        .{},
+    );
+}
+
+test "d2b3d aggregate allocation cannot alias caller whole-turn scratch" {
+    resetCrossOwnerQuarantineForTest();
+    defer resetCrossOwnerQuarantineForTest();
+    const Apply = struct {
+        fn run(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
+    };
+    var alias_allocator = AggregateAliasAllocator{
+        .parent = std.testing.allocator,
+    };
+    var fixture = try TestClient.initWithAllocator(alias_allocator.allocator());
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    const wire = try framing.encodeFrame(
+        std.testing.allocator,
+        .{
+            .kind = .delta_chunk,
+            .stream_id = valid_evidence.stream_id,
+            .flags = protocol.Flags.end_stream,
+        },
+        "alias",
+    );
+    defer std.testing.allocator.free(wire);
+    try admitBufferedProductWireForTest(&storage, wire);
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    alias_allocator.target = @ptrCast(scratch);
+    var context: u8 = 0;
+    const ops = BufferedRxOps{
+        .context = &context,
+        .apply_live_screen = Apply.run,
+    };
+    const result = storage.pumpRxTurn(
+        .{ .readable = true, .writable = false, .now_ns = 1 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(alias_allocator.returned_target);
+    try std.testing.expectEqual(@as(usize, 0), alias_allocator.freed_target);
+    try std.testing.expectEqual(
+        client_pump.TerminalReason.invariant_failure,
+        result.terminal.?.reason,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        storage.inbox_ledger.accountingView().charged_items,
+    );
+    try std.testing.expect(rxAggregateHandlePristine(
+        &storage.rx_aggregate_handle,
+    ));
+    try std.testing.expect(storage.rxAggregateReservationValid());
+    try std.testing.expect(storage.intentScratchReservationValid());
+    try std.testing.expect(storage.liveOwnersValid());
+    const cleanup =
+        try std.testing.allocator.create(ExternalPumpCleanupScratch);
+    defer std.testing.allocator.destroy(cleanup);
+    cleanup.* = .{};
+    try std.testing.expect(ExternalPumpCleanupScratch.initInPlace(cleanup));
+    try std.testing.expectEqual(
+        TeardownResult.cleaned,
+        storage.teardown(cleanup),
+    );
+}
+
+test "d2b3d aggregate allocation cannot alias active intent owner before free proof" {
+    resetCrossOwnerQuarantineForTest();
+    defer resetCrossOwnerQuarantineForTest();
+    const Apply = struct {
+        fn run(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
+    };
+    var alias_allocator = AggregateIntentAliasAllocator{
+        .parent = std.testing.allocator,
+    };
+    var fixture = try TestClient.initWithAllocator(alias_allocator.allocator());
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    const wire = try framing.encodeFrame(
+        std.testing.allocator,
+        .{
+            .kind = .delta_chunk,
+            .stream_id = valid_evidence.stream_id,
+            .flags = protocol.Flags.end_stream,
+        },
+        "intent-alias",
+    );
+    defer std.testing.allocator.free(wire);
+    try admitBufferedProductWireForTest(&storage, wire);
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    var context: u8 = 0;
+    const ops = BufferedRxOps{
+        .context = &context,
+        .apply_live_screen = Apply.run,
+    };
+    const result = storage.pumpRxTurn(
+        .{ .readable = true, .writable = false, .now_ns = 1 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(alias_allocator.returned_intent_as_aggregate);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        alias_allocator.intent_target_free_count,
+    );
+    try std.testing.expectEqual(
+        client_pump.TerminalReason.invariant_failure,
+        result.terminal.?.reason,
+    );
+    try std.testing.expect(rxAggregateHandlePristine(
+        &storage.rx_aggregate_handle,
+    ));
+    try std.testing.expect(storage.rxAggregateReservationValid());
+    try std.testing.expect(storage.intentScratchReservationValid());
+    try std.testing.expectEqual(
+        TeardownResult.cleaned,
+        teardownForTest(&storage),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        alias_allocator.intent_target_free_count,
+    );
+}
+
+test "d2b3d aggregate allocation cannot alias active parser backing before write or free" {
+    resetCrossOwnerQuarantineForTest();
+    defer resetCrossOwnerQuarantineForTest();
+    const Apply = struct {
+        fn run(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
+    };
+    var alias_allocator = AggregateAliasAllocator{
+        .parent = std.testing.allocator,
+    };
+    var fixture = try TestClient.initWithAllocator(alias_allocator.allocator());
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    const wire = try framing.encodeFrame(
+        std.testing.allocator,
+        .{
+            .kind = .delta_chunk,
+            .stream_id = valid_evidence.stream_id,
+            .flags = protocol.Flags.end_stream,
+        },
+        "parser-alias",
+    );
+    defer std.testing.allocator.free(wire);
+    try admitBufferedProductWireForTest(&storage, wire);
+    const parser = &storage.owned_client.?.parser;
+    alias_allocator.target = parser.buf.items.ptr;
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    var context: u8 = 0;
+    const ops = BufferedRxOps{
+        .context = &context,
+        .apply_live_screen = Apply.run,
+    };
+    const result = storage.pumpRxTurn(
+        .{ .readable = true, .writable = false, .now_ns = 1 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(alias_allocator.returned_target);
+    try std.testing.expectEqual(@as(usize, 0), alias_allocator.freed_target);
+    try std.testing.expectEqual(
+        client_pump.TerminalReason.invariant_failure,
+        result.terminal.?.reason,
+    );
+    var first_word_bytes: [@sizeOf(usize)]u8 = undefined;
+    @memcpy(
+        &first_word_bytes,
+        parser.buf.items.ptr[0..@sizeOf(usize)],
+    );
+    try std.testing.expect(
+        std.mem.readInt(
+            usize,
+            &first_word_bytes,
+            builtin.cpu.arch.endian(),
+        ) != @intFromPtr(parser.buf.items.ptr),
+    );
+    const rx_state = switch (storage.owned_client.?.io_mode) {
+        .external => |*state| state,
+        .blocking => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(client_external_mode.parserSealValid(
+        rx_state,
+        parser,
+    ));
+    try std.testing.expect(rxAggregateHandlePristine(
+        &storage.rx_aggregate_handle,
+    ));
+    try std.testing.expect(storage.rxAggregateReservationValid());
+    try std.testing.expectEqual(
+        TeardownResult.cleaned,
+        teardownForTest(&storage),
+    );
+}
+
+test "d2b3d parser payload cannot write caller whole-turn scratch before alias proof" {
+    resetCrossOwnerQuarantineForTest();
+    defer resetCrossOwnerQuarantineForTest();
+    const Apply = struct {
+        fn run(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
+    };
+    var alias_allocator = AggregateAliasAllocator{
+        .parent = std.testing.allocator,
+        .target_len = 5,
+    };
+    var fixture = try TestClient.initWithAllocator(alias_allocator.allocator());
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    const wire = try framing.encodeFrame(
+        std.testing.allocator,
+        .{
+            .kind = .delta_chunk,
+            .stream_id = valid_evidence.stream_id,
+            .flags = protocol.Flags.end_stream,
+        },
+        "guard",
+    );
+    defer std.testing.allocator.free(wire);
+    try admitBufferedProductWireForTest(&storage, wire);
+    const parser_before = storage.owned_client.?.parser.bufferedBytes();
+    const parser_head_before = storage.owned_client.?.parser.head;
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    const sentinel_index = external_owner_range.max_ranges - 1;
+    scratch.aggregate_ranges.ranges[sentinel_index] = .{
+        .start = 0x5a5a5a5a5a5a5a5a,
+        .len = 0xa5a5a5a5a5a5a5a5,
+    };
+    var sentinel_before: [@sizeOf(external_owner_range.Range)]u8 = undefined;
+    @memcpy(
+        &sentinel_before,
+        std.mem.asBytes(&scratch.aggregate_ranges.ranges[sentinel_index]),
+    );
+    alias_allocator.target = @ptrCast(
+        &scratch.aggregate_ranges.ranges[sentinel_index],
+    );
+    var context: u8 = 0;
+    const ops = BufferedRxOps{
+        .context = &context,
+        .apply_live_screen = Apply.run,
+    };
+    const result = storage.pumpRxTurn(
+        .{ .readable = true, .writable = false, .now_ns = 1 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(alias_allocator.returned_target);
+    try std.testing.expectEqual(@as(usize, 0), alias_allocator.freed_target);
+    try std.testing.expectEqual(
+        client_pump.TerminalReason.invariant_failure,
+        result.terminal.?.reason,
+    );
+    try std.testing.expectEqual(@as(usize, 0), result.rx_frames);
+    try std.testing.expectEqual(
+        parser_before,
+        storage.owned_client.?.parser.bufferedBytes(),
+    );
+    try std.testing.expectEqual(
+        parser_head_before,
+        storage.owned_client.?.parser.head,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &sentinel_before,
+        std.mem.asBytes(&scratch.aggregate_ranges.ranges[sentinel_index]),
+    );
+    try std.testing.expectEqual(
+        TeardownResult.cleaned,
+        teardownForTest(&storage),
+    );
+}
+
 test "d2b1 whole-turn lease rejects copy alias stale snapshot and nested operation" {
     var fixture = try TestClient.init();
     defer fixture.deinitPeer();
@@ -11371,7 +15092,8 @@ test "d2b3a synthetic nonempty live owners block and teardown to final zero" {
     try std.testing.expectEqual(StorageLifecycle.dead, storage.lifecycle);
     try std.testing.expect(storage.liveOwnersValid());
     const tombstone_projection = storage.liveOwnerBlockerProjection().?;
-    try std.testing.expect(!tombstone_projection.screen_or_partial_pending);
+    try std.testing.expect(!tombstone_projection.partial_pending);
+    try std.testing.expect(!tombstone_projection.screen_pending);
     try std.testing.expect(!tombstone_projection.response_pending);
     const accounting = storage.inbox_ledger.accountingView();
     try std.testing.expect(accounting.valid);
@@ -15316,7 +19038,7 @@ test "d2b3b storage admits one intent scratch and aggregate teardown destroys it
     var handle: external_rx_intent.ExternalRxIntentHandle = .{};
     try std.testing.expectEqual(
         external_rx_intent.CreateResult.allocated,
-        storage.createIntentScratchForTest(
+        storage.createIntentScratch(
             &handle,
             std.testing.allocator,
             probe.ops(),
@@ -15330,7 +19052,7 @@ test "d2b3b storage admits one intent scratch and aggregate teardown destroys it
     var second_handle: external_rx_intent.ExternalRxIntentHandle = .{};
     try std.testing.expectEqual(
         external_rx_intent.CreateResult.authority_drift,
-        storage.createIntentScratchForTest(
+        storage.createIntentScratch(
             &second_handle,
             std.testing.allocator,
             probe.ops(),
@@ -15385,7 +19107,7 @@ test "d2b3c heap aggregate binds one intent reservation and destroys under lease
     var intent_handle: external_rx_intent.ExternalRxIntentHandle = .{};
     try std.testing.expectEqual(
         external_rx_intent.CreateResult.allocated,
-        storage.createIntentScratchForTest(
+        storage.createIntentScratch(
             &intent_handle,
             std.testing.allocator,
             probe.ops(),
@@ -15560,7 +19282,7 @@ fn exerciseRxAggregateAbortStage(
     var intent_handle: external_rx_intent.ExternalRxIntentHandle = .{};
     try std.testing.expectEqual(
         external_rx_intent.CreateResult.allocated,
-        storage.createIntentScratchForTest(
+        storage.createIntentScratch(
             &intent_handle,
             std.testing.allocator,
             probe.ops(),
@@ -15722,7 +19444,7 @@ test "d2b3c aggregate commit publishes one completed screen token atomically" {
     };
     try std.testing.expectEqual(
         external_rx_intent.CreateResult.allocated,
-        storage.createIntentScratchForTest(
+        storage.createIntentScratch(
             &intent_handle,
             std.testing.allocator,
             probe.ops(),
@@ -16023,7 +19745,7 @@ test "d2b3c response-only aggregate publishes one sealed pending owner" {
     var intent_handle: external_rx_intent.ExternalRxIntentHandle = .{};
     try std.testing.expectEqual(
         external_rx_intent.CreateResult.allocated,
-        storage.createIntentScratchForTest(
+        storage.createIntentScratch(
             &intent_handle,
             std.testing.allocator,
             probe.ops(),
@@ -16147,7 +19869,7 @@ test "d2b3c fixed writers preserve response then screen intent order" {
     var intent_handle: external_rx_intent.ExternalRxIntentHandle = .{};
     try std.testing.expectEqual(
         external_rx_intent.CreateResult.allocated,
-        storage.createIntentScratchForTest(
+        storage.createIntentScratch(
             &intent_handle,
             std.testing.allocator,
             probe.ops(),
@@ -16322,7 +20044,7 @@ fn exerciseD2b3cMetadataEvent(
     var intent_handle: external_rx_intent.ExternalRxIntentHandle = .{};
     try std.testing.expectEqual(
         external_rx_intent.CreateResult.allocated,
-        storage.createIntentScratchForTest(
+        storage.createIntentScratch(
             &intent_handle,
             std.testing.allocator,
             probe.ops(),
@@ -16686,7 +20408,7 @@ fn exerciseD2b3cResizeCase(case: D2b3cResizeCase) !void {
     var intent_handle: external_rx_intent.ExternalRxIntentHandle = .{};
     try std.testing.expectEqual(
         external_rx_intent.CreateResult.allocated,
-        storage.createIntentScratchForTest(
+        storage.createIntentScratch(
             &intent_handle,
             std.testing.allocator,
             probe.ops(),
@@ -16839,7 +20561,7 @@ fn exerciseD2b3cTerminalEventCase(case: D2b3cTerminalEventCase) !void {
     var intent_handle: external_rx_intent.ExternalRxIntentHandle = .{};
     try std.testing.expectEqual(
         external_rx_intent.CreateResult.allocated,
-        storage.createIntentScratchForTest(
+        storage.createIntentScratch(
             &intent_handle,
             std.testing.allocator,
             probe.ops(),
@@ -16968,7 +20690,7 @@ test "d2b3b quarantined scratch create blocks repeated allocation and counts onc
     var handle: external_rx_intent.ExternalRxIntentHandle = .{};
     try std.testing.expectEqual(
         external_rx_intent.CreateResult.quarantined,
-        storage.createIntentScratchForTest(
+        storage.createIntentScratch(
             &handle,
             fixed.allocator(),
             probe.ops(),
@@ -16981,7 +20703,7 @@ test "d2b3b quarantined scratch create blocks repeated allocation and counts onc
     var second: external_rx_intent.ExternalRxIntentHandle = .{};
     try std.testing.expectEqual(
         external_rx_intent.CreateResult.authority_drift,
-        storage.createIntentScratchForTest(
+        storage.createIntentScratch(
             &second,
             fixed.allocator(),
             probe.ops(),
@@ -17017,7 +20739,7 @@ test "d2b3b aggregate teardown aborts a nonempty intent scratch before destroy" 
     var handle: external_rx_intent.ExternalRxIntentHandle = .{};
     try std.testing.expectEqual(
         external_rx_intent.CreateResult.allocated,
-        storage.createIntentScratchForTest(
+        storage.createIntentScratch(
             &handle,
             std.testing.allocator,
             probe.ops(),
@@ -17100,7 +20822,7 @@ test "d2b3b scratch free callback cannot recreate reservation during teardown" {
     allocator_probe.intent_authority = &authority_probe;
     try std.testing.expectEqual(
         external_rx_intent.CreateResult.allocated,
-        storage.createIntentScratchForTest(
+        storage.createIntentScratch(
             &handle,
             allocator_probe.allocator(),
             authority_probe.ops(),
@@ -17150,7 +20872,7 @@ test "d2b3b poisoned intent teardown latches quarantine exactly once" {
     var handle: external_rx_intent.ExternalRxIntentHandle = .{};
     try std.testing.expectEqual(
         external_rx_intent.CreateResult.allocated,
-        storage.createIntentScratchForTest(
+        storage.createIntentScratch(
             &handle,
             std.heap.page_allocator,
             probe.ops(),

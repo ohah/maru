@@ -61,7 +61,7 @@ test "d2b3b classified intent mechanics stay private and test-only at the pump b
         if (std.mem.eql(u8, entry.path, pump_path)) {
             pump_seen = true;
             try std.testing.expectEqual(
-                @as(usize, 1),
+                @as(usize, 2),
                 countOccurrences(source, "external_rx_intent.moveFrame("),
             );
             try std.testing.expectEqual(
@@ -75,7 +75,7 @@ test "d2b3b classified intent mechanics stay private and test-only at the pump b
                 ) == 1 and
                     countOccurrences(
                         source,
-                        "fn createIntentScratchForTest(",
+                        "fn createIntentScratch(",
                     ) == 1,
             );
             const move_start = std.mem.indexOf(
@@ -94,22 +94,18 @@ test "d2b3b classified intent mechanics stay private and test-only at the pump b
                 source[move_start..move_end],
                 "if (comptime !builtin.is_test) unreachable;",
             ) != null);
-            const create_start = std.mem.indexOf(
-                u8,
-                source,
-                "fn createIntentScratchForTest(",
-            ) orelse return error.TestUnexpectedResult;
-            const create_end = std.mem.indexOfPos(
-                u8,
-                source,
-                create_start,
-                "fn liveScreenOrPartialPending(",
-            ) orelse return error.TestUnexpectedResult;
-            try std.testing.expect(std.mem.indexOf(
-                u8,
-                source[create_start..create_end],
-                "if (comptime !builtin.is_test) unreachable;",
-            ) != null);
+            const first_test = std.mem.indexOf(u8, source, "\ntest \"") orelse
+                return error.TestUnexpectedResult;
+            // d2b3d promotes the storage-bound scratch creator from a test wrapper to one product
+            // traversal caller. The pre-test source contains its declaration, product call, and
+            // the allocator-reentry probe call used by the hostile teardown matrix.
+            try std.testing.expectEqual(
+                @as(usize, 3),
+                countOccurrences(
+                    source[0..first_test],
+                    "createIntentScratch(",
+                ),
+            );
         }
     }
     try std.testing.expect(owner_seen);
@@ -642,7 +638,7 @@ test "session host unchecked teardown authority cannot escape anywhere in src" {
         .{
             .name = "consumePreparedLiveCommitUnchecked",
             .owner_suffixes = &.{"platform/macos/session_host/external_inbox_ledger.zig"},
-            .pump_references = 1,
+            .pump_references = 2,
         },
         .{
             .name = "commitLiveBatchAbortUnchecked",
@@ -1080,9 +1076,9 @@ test "session host live commit permit keeps checked consume ledger-private" {
     }
     try std.testing.expectEqual(@as(usize, 0), checked_outside_ledger);
     try std.testing.expectEqual(@as(usize, 1), unchecked_definitions);
-    // d2b3c opens exactly one product callsite. Both removing it and bypassing the aggregate with
-    // another caller violate the single-writer boundary.
-    try std.testing.expectEqual(@as(usize, 1), unchecked_pump_calls);
+    // d2b3c owns the aggregate commit suffix and d2b3d adds one head-only live FIFO release
+    // suffix. Any third caller would bypass one of those two sealed owner transactions.
+    try std.testing.expectEqual(@as(usize, 2), unchecked_pump_calls);
 }
 
 fn countOccurrences(haystack: []const u8, needle: []const u8) usize {
@@ -1539,7 +1535,7 @@ test "validated metadata token construction and materialization stay in classifi
     try std.testing.expectEqual(@as(usize, 1), product_classifier_call_count);
 }
 
-test "d2b3a live owner substrate stays private and has no product writer" {
+test "d2b3d live owner substrate stays private with one buffered product traversal" {
     const allocator = std.testing.allocator;
     var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
     defer dir.close(std.testing.io);
@@ -1583,6 +1579,26 @@ test "d2b3a live owner substrate stays private and has no product writer" {
             try std.testing.expect(
                 std.mem.indexOf(u8, source, forbidden_writer) == null,
             );
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            std.mem.count(u8, source, "pub fn pumpRxTurn("),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            std.mem.count(
+                u8,
+                source,
+                "client_external_mode.nextOutcomeWithRangeGuarded(",
+            ),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            std.mem.count(
+                u8,
+                source,
+                "client_external_mode.nextOutcomeWithRange(",
+            ),
+        );
         const activation_start = std.mem.indexOf(
             u8,
             source,
@@ -1639,9 +1655,9 @@ test "d2b3a live owner substrate stays private and has no product writer" {
                 "storage.live_partial = .{ .assembling",
             ),
         );
-        // d2b3c's test-only aggregate writer publishes through the exact presealed destination
-        // address instead of naming the persistent field a second time. Keep that fixed writer
-        // unique; d2b3d is the gate that may add the product traversal callsite.
+        // The aggregate writer publishes through the exact presealed destination address instead
+        // of naming the persistent field a second time. d2b3d opens one product traversal facade,
+        // but it must keep this fixed writer unique and must not expose a second public writer.
         try std.testing.expectEqual(
             @as(usize, 1),
             std.mem.count(u8, source, "target.* = .{ .assembling"),
@@ -1716,11 +1732,11 @@ test "d2b3a live owner substrate stays private and has no product writer" {
             return error.TestUnexpectedResult;
         const product_source = source[0..first_test];
         try std.testing.expectEqual(
-            @as(usize, 1),
+            @as(usize, 2),
             std.mem.count(u8, product_source, "commitRxAggregate("),
         );
-        // The declaration is the only pre-test occurrence. Test-only product exercises may grow
-        // with the hostile matrix without weakening the no-product-caller boundary.
+        // The declaration plus the one buffered product traversal call are the only pre-test
+        // occurrences. Test-only exercises may grow without opening another product caller.
         try std.testing.expect(
             std.mem.count(u8, source, "commitRxAggregate(") >= 2,
         );
@@ -1798,7 +1814,7 @@ test "d2b3a live owner substrate stays private and has no product writer" {
             std.mem.count(u8, source, "storage.live_partial = .{"),
         );
         try std.testing.expectEqual(
-            @as(usize, 1),
+            @as(usize, 2),
             std.mem.count(u8, source, "storage.live_screen ="),
         );
         try std.testing.expectEqual(
@@ -1840,7 +1856,7 @@ test "d2b3a live owner substrate stays private and has no product writer" {
             std.mem.count(u8, source, "&self.live_partial"),
         );
         try std.testing.expectEqual(
-            @as(usize, 3),
+            @as(usize, 5),
             std.mem.count(u8, source, "&self.live_screen"),
         );
         try std.testing.expectEqual(
@@ -1875,6 +1891,19 @@ test "d2b3a live owner substrate stays private and has no product writer" {
         );
     }
     try std.testing.expectEqual(@as(usize, 1), owner_module_count);
+    const product_owner = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/external_pump_owner.zig",
+    );
+    defer allocator.free(product_owner);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        std.mem.count(u8, product_owner, ".pumpRxTurn("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        std.mem.count(u8, product_owner, "nextOutcomeWithRange("),
+    );
 }
 
 fn containsForbiddenExternalBuiltin(source: [:0]const u8) bool {

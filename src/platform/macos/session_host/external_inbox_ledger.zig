@@ -2942,6 +2942,48 @@ pub const ExternalInboxLedger = struct {
             );
     }
 
+    pub fn validatePreparedLiveScreenBinding(
+        self: *const ExternalInboxLedger,
+        batch: *const PreparedLiveBatch,
+        mutation_index: u8,
+        semantic: PayloadSemantic,
+        payload_digest: owner_seal.Digest,
+    ) bool {
+        if (self.validatePreparedLiveAdmissionBinding(
+            batch,
+            mutation_index,
+            semantic,
+            payload_digest,
+        )) return true;
+        if (batch.saved_self_addr != @intFromPtr(batch) or
+            batch.ledger_addr != @intFromPtr(self) or
+            mutation_index >= batch.mutation_count)
+            return false;
+        const merge = switch (batch.mutations[mutation_index]) {
+            .merge => |*value| value,
+            else => return false,
+        };
+        const source = switch (merge.source) {
+            .owned => |*payload_owner| payload_owner,
+            .existing => return false,
+        };
+        return merge.saved_self_addr ==
+            @intFromPtr(&batch.mutations[mutation_index]) and
+            merge.batch_addr == @intFromPtr(batch) and
+            merge.ledger_addr == @intFromPtr(self) and
+            std.meta.eql(merge.next_semantic, semantic) and
+            std.mem.eql(
+                u8,
+                &payload_digest,
+                &owner_cleanup.contentDigest(source.bytes()),
+            ) and
+            std.mem.eql(
+                u8,
+                &merge.digest,
+                &liveMutationDigest(batch, mutation_index),
+            );
+    }
+
     pub fn prepareLiveMerge(
         self: *ExternalInboxLedger,
         batch: *PreparedLiveBatch,

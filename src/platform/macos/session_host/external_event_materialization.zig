@@ -615,6 +615,28 @@ pub const OwnerMetadataState = struct {
         };
     }
 
+    /// Adds the one canonical metadata backing to a cross-owner authority inventory.
+    ///
+    /// Logical and cleanup descriptors intentionally alias the same allocation, so appending both
+    /// would manufacture a duplicate-owner failure. The paired authority seal proves they describe
+    /// the same backing before this method exports it.
+    pub fn appendActiveOwnerRanges(
+        self: *const OwnerMetadataState,
+        stable_parent: *const anyopaque,
+        out: *owner_range.Scratch,
+    ) owner_range.Error!void {
+        if (self.storage_addr != @intFromPtr(stable_parent) or !self.isCommitted())
+            return error.InvalidRange;
+        switch (self.metadata) {
+            .unsupported, .unavailable => {},
+            .current => |current| if (current.logical_seal.backing_present)
+                try out.append(
+                    current.logical_seal.backing_addr,
+                    current.logical_seal.backing_len,
+                ),
+        }
+    }
+
     /// Scalar-only baseline used by the live event reducer. The owning DTO and its backing remain
     /// private to this owner; the reducer receives only the revision and the two immutable
     /// provenance digests needed to bind an `.initial` candidate.

@@ -5990,6 +5990,16 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 socketpair 제품 fixture는 실제 `Client` parser backing에 frame을 넣어 public facade만 호출하며
                 test-only create/stage/finalize/commit helper를 직접 호출하지 않는다.
 
+                allocator callback의 반환 포인터는 typed pointer가 아니다. intent scratch, parser frame payload,
+                aggregate는 모두 `rawAlloc`의 integer address에서 정렬·checked end·whole-turn scratch/lease와
+                callback 전후의 sealed Client/parser/intent/ledger/live-owner inventory disjoint를 먼저
+                증명한다. parser payload는 이 제품 guard가 통과하기 전 copy와 parser consume이 0이고,
+                aggregate는 callback 전 inventory를 봉인한 뒤 callback 후 current inventory를 재수집해 같은
+                seal인지 확인한다. proof 전 실패·misalignment·owner alias는 dereference/write/free 0의 bounded
+                quarantine이며, full-disjoint proof 뒤의 ordinary scalar drift만 captured allocator cleanup을
+                허용한다. hostile gate는 operation scratch, active intent allocation, parser backing 반환을
+                각각 독립적으로 고정한다.
+
               ```zig
               const ClassifiedIntentOwner = struct {
                   saved_self_addr: usize,
@@ -6660,6 +6670,17 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               take/abort만 허용한다. duplicate pending, stale/copy/double/cross-generation take는 response
               publish 0 terminal이다.
 
+            **d2c 진입 전 구조 분해 gate:** d2b3d merge 뒤 socket read를 추가하기 전에 transport-independent
+            buffered traversal/partial policy와 그 대형 hostile fixture를
+            `client_external_rx_turn.zig` 및 전용 test-support 경계로 이동한다. d2c의 socket read/drain mechanics는
+            별도 모듈이 소유하고, `client_external_pump.zig`에는 stable storage, owner transaction,
+            aggregate-private capability와 최종 orchestration만 남긴다. 이 gate의 완료 기준은 줄 수가 아니라
+            (1) parser/classifier/ledger를 다시 구현하지 않는 단방향 import, (2) 제품 exact-one owner callsite,
+            (3) tokenizer 기반 definition/call allowlist, (4) d2b3d Debug/ReleaseFast·hostile matrix 무변경
+            green이다. partial transition proof는 intent seal에 포함해 classifier와 traversal이 같은
+            `advanceValidatedPartial` 결과를 소비하도록 고정한다. 분해와 proof seal이 green이 아니면 d2c
+            socket callback을 추가하지 않는다.
+
             - **d2c — injected nonblocking read/admit:** mechanics는 d1의 `maxReadable`,
               `prepareAdmit→commitPreparedAdmit|abortPreparedAdmit`, `nextOutcomeWithRange`만 사용하며
               `FrameParser.buf/head`, absolute offset, framing decode를 재구현하지 않는다. 제품 callback과 fixture
@@ -7132,8 +7153,9 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
         공유하고 leave가 남은 budget 중 최대 100 ms를 쓴다. signal/revoke/error cleanup은 active/latest와 detach를
         버리고 하나의 100 ms deadline 안에서 leave를 시도한 뒤 즉시 raw restore/signal forwarding으로 간다.
 
-    **P5c3c-1a~2a, 2b1, 2b2a~c2와 2b2c3-c3a1~c3c-3b, 2b2d1, 2b2d2a는 구현 완료다.
-    2b2d2b~f3, P5c3c-2b3와 P5c3c-3a~3b는 계획 상태다.**
+    **P5c3c-1a~2a, 2b1, 2b2a~c2와 2b2c3-c3a1~c3c-3b, 2b2d1, 2b2d2a,
+    2b2d2b의 d2a~b는 구현 완료다. 2b2d2b의 d2c~d와 2b2e~f3, P5c3c-2b3,
+    P5c3c-3a~3b는 계획 상태다.**
     2b2c3 전체는 후속 통합 gate가 green이 아니므로 아직 계획 상태다. 각 slice는 P5c3a~b의 Debug/ReleaseFast gate를 재실행하고 다음 slice가 실제
     consumer로 쓰지 않는 임시 public API는 만들지 않는다.
 

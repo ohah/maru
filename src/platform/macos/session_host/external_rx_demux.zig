@@ -53,6 +53,51 @@ pub const ValidatedPartialView = struct {
     chunk_count: u8,
 };
 
+pub const PartialTransitionError = error{ProtocolTerminal};
+
+/// Single source of truth for the parser-side partial-screen transition. Persistent ledger
+/// materialization may encode the result differently, but it must not independently decide
+/// stream/kind/range continuity or the chunk cap.
+pub fn advanceValidatedPartial(
+    existing: ?ValidatedPartialView,
+    header: protocol.Header,
+    range: external_rx_types.RxRange,
+    target_stream_id: u64,
+) PartialTransitionError!?ValidatedPartialView {
+    if (header.stream_id != target_stream_id or
+        header.request_id != 0 or
+        protocol.Flags.hasUnknownBits(header.flags) or
+        protocol.Flags.isOptional(header.flags) or
+        header.flags & ~protocol.Flags.end_stream != 0)
+        return error.ProtocolTerminal;
+    if (existing) |partial| {
+        if (partial.stream_id != target_stream_id or
+            partial.stream_id != header.stream_id or
+            partial.is_snapshot != (header.kind == .snapshot_chunk) or
+            partial.chunk_count == 0 or
+            partial.chunk_count >= protocol.max_screen_batch_chunks or
+            !std.meta.eql(partial.identity, range.identity) or
+            partial.start_absolute >= partial.end_absolute or
+            partial.end_absolute != range.start_absolute)
+            return error.ProtocolTerminal;
+    }
+    if (protocol.Flags.hasEndStream(header.flags)) return null;
+    return .{
+        .stream_id = header.stream_id,
+        .is_snapshot = header.kind == .snapshot_chunk,
+        .identity = range.identity,
+        .start_absolute = if (existing) |partial|
+            partial.start_absolute
+        else
+            range.start_absolute,
+        .end_absolute = range.end_absolute,
+        .chunk_count = if (existing) |partial|
+            partial.chunk_count + 1
+        else
+            1,
+    };
+}
+
 pub fn classifyExternalRx(
     paired: *const client_external_mode.ExternalRxFrame,
     expected_identity: external_rx_types.RxIdentity,
@@ -152,24 +197,12 @@ fn classifyScreen(
     target_stream_id: u64,
     partial: ?ValidatedPartialView,
 ) ExternalWireClass {
-    if (header.stream_id != target_stream_id or
-        header.request_id != 0 or
-        protocol.Flags.hasUnknownBits(header.flags) or
-        protocol.Flags.isOptional(header.flags) or
-        header.flags & ~protocol.Flags.end_stream != 0)
-        return .protocol_terminal;
-
-    if (partial) |existing| {
-        if (existing.stream_id != target_stream_id or
-            existing.stream_id != header.stream_id or
-            existing.is_snapshot != (header.kind == .snapshot_chunk) or
-            existing.chunk_count == 0 or
-            existing.chunk_count >= protocol.max_screen_batch_chunks or
-            !std.meta.eql(existing.identity, range.identity) or
-            existing.start_absolute >= existing.end_absolute or
-            existing.end_absolute != range.start_absolute)
-            return .protocol_terminal;
-    }
+    _ = advanceValidatedPartial(
+        partial,
+        header,
+        range,
+        target_stream_id,
+    ) catch return .protocol_terminal;
 
     return .{ .screen_candidate = .{
         .header = header,

@@ -5,6 +5,7 @@
 //! the exact-once frame payload transfer, replay watermarks, and callback-hidden abort cleanup.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const client_external_mode = @import("client_external_mode.zig");
 const external_owner_seal = @import("external_owner_seal.zig");
 const external_owner_range = @import("external_owner_range.zig");
@@ -40,6 +41,13 @@ pub const AuthorityView = struct {
         @setEvalBranchQuota(10_000);
         break :blk authorityRangesDigest(&.{}, 1);
     },
+    /// Product-owned operation scratch which must never become allocator-owned intent state.
+    /// This is carried as a sealed authority scalar instead of being appended to
+    /// `forbidden_ranges`: that range array is itself stored inside the operation scratch.
+    operation_scratch_addr: usize = 0,
+    operation_scratch_len: usize = 0,
+    operation_lease_addr: usize = 0,
+    operation_lease_len: usize = 0,
     reservation_handle_addr: usize,
     reservation_generation: u64,
 };
@@ -280,6 +288,10 @@ const ExternalRxIntentScratch = struct {
     digest: external_owner_seal.Digest,
 };
 
+pub const testing = if (builtin.is_test) struct {
+    pub const scratch_allocation_bytes = @sizeOf(ExternalRxIntentScratch);
+} else struct {};
+
 pub const ExternalRxIntentHandle = struct {
     saved_self_addr: usize = 0,
     scratch_addr: usize = 0,
@@ -418,10 +430,16 @@ pub fn allocate(
         return .authority_drift;
     if (!authorityViewValid(before) or before.reservation_handle_addr != 0)
         return .authority_drift;
-    const scratch = allocator.create(ExternalRxIntentScratch) catch
-        return .out_of_memory;
-    const allocation_addr = @intFromPtr(scratch);
-    if (scratchRangeAliasesAuthority(allocation_addr, handle, before)) {
+    const allocation_len = @sizeOf(ExternalRxIntentScratch);
+    const allocation_bytes = allocator.rawAlloc(
+        allocation_len,
+        .of(ExternalRxIntentScratch),
+        @returnAddress(),
+    ) orelse return .out_of_memory;
+    const allocation_addr = @intFromPtr(allocation_bytes);
+    if (allocation_addr % @alignOf(ExternalRxIntentScratch) != 0 or
+        scratchRangeAliasesAuthority(allocation_addr, handle, before))
+    {
         // The callback returned memory already claimed by another sealed owner. Its allocator
         // descriptor is therefore not trusted cleanup authority; freeing it could destroy that
         // owner. Leave the bounded allocation quarantined and publish no handle.
@@ -440,12 +458,17 @@ pub fn allocate(
         return .quarantined;
     }
     if (!std.meta.eql(before, after) or !handlePristine(handle)) {
-        allocator.destroy(scratch);
+        allocator.rawFree(
+            allocation_bytes[0..allocation_len],
+            .of(ExternalRxIntentScratch),
+            @returnAddress(),
+        );
         // The disjoint current inventory proved the allocation can be freed. Publish the caller's
         // canonical failure value only after the free callback, overwriting callback mutation.
         handle.* = .{};
         return .authority_drift;
     }
+    const scratch: *ExternalRxIntentScratch = @ptrFromInt(allocation_addr);
     scratch.* = .{
         .saved_self_addr = allocation_addr,
         .handle_addr = @intFromPtr(handle),
@@ -531,6 +554,7 @@ pub fn moveFrame(
     source: *client_external_mode.ExternalRxOutcome,
     authority_ops: AuthorityOps,
     target_stream_id: u64,
+    partial: ?external_rx_demux.ValidatedPartialView,
 ) MoveResult {
     const scratch = validateHandleAndScratch(handle, .ready, .ready) orelse
         return .poisoned;
@@ -576,7 +600,7 @@ pub fn moveFrame(
         paired,
         before.identity,
         target_stream_id,
-        null,
+        partial,
     );
     const frozen_pair = paired.*;
     const commit = authority_ops.current(authority_ops.context) orelse {
@@ -629,7 +653,7 @@ pub fn moveFrame(
         commit_paired,
         commit.identity,
         target_stream_id,
-        null,
+        partial,
     );
     if (!std.meta.eql(classification, commit_classification))
         return .authority_drift;
@@ -1984,8 +2008,7 @@ pub fn prepareDestroy(
 ) bool {
     if (prepared.saved_self_addr != 0 or prepared.lifecycle != .empty)
         return false;
-    const scratch = validateHandleAnyReadyState(handle) orelse
-        return false;
+    const scratch = validateHandleAnyReadyState(handle) orelse return false;
     if (handle.storage_addr != storage_addr or
         handle.reservation_generation != reservation_generation or
         reservation_generation == 0 or
@@ -2170,6 +2193,14 @@ fn authorityViewValid(view: AuthorityView) bool {
         view.operation_generation != 0 and view.parser_generation != 0 and
         view.identity.attach_instance_id != 0 and
         view.identity.destination_slot_addr != 0 and
+        ((view.operation_scratch_addr == 0 and
+            view.operation_scratch_len == 0) or
+            (view.operation_scratch_addr != 0 and
+                view.operation_scratch_len != 0)) and
+        ((view.operation_lease_addr == 0 and
+            view.operation_lease_len == 0) or
+            (view.operation_lease_addr != 0 and
+                view.operation_lease_len != 0)) and
         view.forbidden_ranges_generation != 0 and
         authorityRangesStructurallyValid(view.forbidden_ranges) and
         std.mem.eql(
@@ -2179,6 +2210,63 @@ fn authorityViewValid(view: AuthorityView) bool {
                 view.forbidden_ranges,
                 view.forbidden_ranges_generation,
             ),
+        );
+}
+
+fn rangeAliasesOperationAuthority(
+    addr: usize,
+    len: usize,
+    view: AuthorityView,
+) bool {
+    return rangesOverlap(
+        addr,
+        len,
+        view.operation_scratch_addr,
+        view.operation_scratch_len,
+    ) or rangesOverlap(
+        addr,
+        len,
+        view.operation_lease_addr,
+        view.operation_lease_len,
+    );
+}
+
+/// Validates an allocator result against the sealed product authority without dereferencing it.
+/// Callers must use this before typed conversion, writes, or cleanup of a pointer returned by an
+/// allocator callback. `false` means ownership is unprovable and therefore also forbids free.
+pub fn allocationDisjointFromAuthority(
+    view: AuthorityView,
+    addr: usize,
+    len: usize,
+) bool {
+    if (!authorityViewValid(view) or addr == 0 or len == 0)
+        return false;
+    _ = std.math.add(usize, addr, len) catch return false;
+    return !rangesOverlap(
+        addr,
+        len,
+        view.storage_addr,
+        view.storage_len,
+    ) and
+        !rangeAliasesOperationAuthority(addr, len, view) and
+        !rangeAliasesInventory(addr, len, view.forbidden_ranges) and
+        !rangesOverlap(
+            addr,
+            len,
+            if (view.forbidden_ranges.len == 0)
+                0
+            else
+                @intFromPtr(view.forbidden_ranges.ptr),
+            view.forbidden_ranges.len * @sizeOf(external_owner_range.Range),
+        ) and
+        !rangesOverlap(
+            addr,
+            len,
+            view.reservation_handle_addr,
+            if (view.reservation_handle_addr == 0)
+                0
+            else
+                @sizeOf(ExternalRxIntentHandle),
         );
 }
 
@@ -2299,6 +2387,10 @@ fn framePayloadAliasesAuthority(
         payload.len,
         @intFromPtr(handle),
         @sizeOf(ExternalRxIntentHandle),
+    ) or rangeAliasesOperationAuthority(
+        addr,
+        payload.len,
+        view,
     ) or rangeAliasesInventory(
         addr,
         payload.len,
@@ -2336,6 +2428,10 @@ fn rangeAliasesAuthorityOwners(
         len,
         @intFromPtr(handle),
         @sizeOf(ExternalRxIntentHandle),
+    ) or rangeAliasesOperationAuthority(
+        addr,
+        len,
+        view,
     ) or rangeAliasesInventory(
         addr,
         len,
@@ -2482,6 +2578,10 @@ fn scratchRangeAliasesAuthority(
         scratch_len,
         view.storage_addr,
         view.storage_len,
+    ) or rangeAliasesOperationAuthority(
+        scratch_addr,
+        scratch_len,
+        view,
     ) or rangeAliasesInventory(
         scratch_addr,
         scratch_len,
@@ -3167,8 +3267,93 @@ const FreeCountingAllocator = struct {
     }
 };
 
+const HostileAddressAllocator = struct {
+    target: [*]u8,
+    free_count: usize = 0,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(
+        raw: *anyopaque,
+        _: usize,
+        _: std.mem.Alignment,
+        _: usize,
+    ) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        return self.target;
+    }
+
+    fn resize(
+        _: *anyopaque,
+        _: []u8,
+        _: std.mem.Alignment,
+        _: usize,
+        _: usize,
+    ) bool {
+        return false;
+    }
+
+    fn remap(
+        _: *anyopaque,
+        _: []u8,
+        _: std.mem.Alignment,
+        _: usize,
+        _: usize,
+    ) ?[*]u8 {
+        return null;
+    }
+
+    fn free(
+        raw: *anyopaque,
+        _: []u8,
+        _: std.mem.Alignment,
+        _: usize,
+    ) void {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        self.free_count += 1;
+    }
+};
+
 fn testIdentity() external_rx_types.RxIdentity {
     return .{ .attach_instance_id = 9, .destination_slot_addr = 0x9000 };
+}
+
+test "d2b3d intent allocation rejects misaligned operation scratch before write or free" {
+    var storage_marker: u8 = 0;
+    var caller_scratch =
+        [_]u8{0x5a} ** (@sizeOf(ExternalRxIntentScratch) + 2);
+    const before = caller_scratch;
+    var allocator = HostileAddressAllocator{
+        .target = @ptrCast(&caller_scratch[1]),
+    };
+    var authority = TestAuthority{ .view = .{
+        .storage_addr = @intFromPtr(&storage_marker),
+        .storage_len = 1,
+        .operation_generation = 1,
+        .parser_generation = 1,
+        .buffer_start_absolute = 0,
+        .identity = testIdentity(),
+        .allocator = allocator.allocator(),
+        .operation_scratch_addr = @intFromPtr(&caller_scratch),
+        .operation_scratch_len = caller_scratch.len,
+        .reservation_handle_addr = 0,
+        .reservation_generation = 0,
+    } };
+    var handle: ExternalRxIntentHandle = .{};
+    try std.testing.expectEqual(
+        CreateResult.quarantined,
+        allocate(&handle, allocator.allocator(), authority.ops()),
+    );
+    try std.testing.expect(handlePristine(&handle));
+    try std.testing.expectEqual(@as(usize, 0), allocator.free_count);
+    try std.testing.expectEqualSlices(u8, &before, &caller_scratch);
 }
 
 fn makeTestOutcome(
@@ -3253,6 +3438,7 @@ test "d2b3b first copied outcome move wins and abort frees once" {
             &source,
             authority.ops(),
             7,
+            null,
         ),
     );
     try std.testing.expect(source == .incomplete);
@@ -3263,6 +3449,7 @@ test "d2b3b first copied outcome move wins and abort frees once" {
             &copied,
             authority.ops(),
             7,
+            null,
         ),
     );
     try std.testing.expectEqual(AbortResult.cleaned, abortAll(&handle));
@@ -3339,6 +3526,7 @@ test "d2b3b owner preserves every accepted demux candidate without reclassificat
                 &source,
                 authority.ops(),
                 7,
+                null,
             ),
         );
         try std.testing.expect(source == .incomplete);
@@ -3408,7 +3596,7 @@ test "d2b3c mixed event and response intents move into sealed neutral slots once
         next_absolute = authority.view.buffer_start_absolute;
         try std.testing.expectEqual(
             MoveResult.classified,
-            moveFrame(&handle, &source, authority.ops(), 7),
+            moveFrame(&handle, &source, authority.ops(), 7, null),
         );
     }
 
@@ -3602,7 +3790,7 @@ test "d2b3b authority and generation drift preserve source before exact move" {
     authority.next_view = drifted;
     try std.testing.expectEqual(
         MoveResult.authority_drift,
-        moveFrame(&handle, &source, authority.ops(), 7),
+        moveFrame(&handle, &source, authority.ops(), 7, null),
     );
     try std.testing.expect(source == .frame);
     drifted = authority.view;
@@ -3612,7 +3800,7 @@ test "d2b3b authority and generation drift preserve source before exact move" {
     authority.view = drifted;
     try std.testing.expectEqual(
         MoveResult.authority_drift,
-        moveFrame(&handle, &source, authority.ops(), 7),
+        moveFrame(&handle, &source, authority.ops(), 7, null),
     );
     try std.testing.expect(source == .frame);
 
@@ -3625,6 +3813,7 @@ test "d2b3b authority and generation drift preserve source before exact move" {
             &source,
             authority.ops(),
             7,
+            null,
         ),
     );
     try std.testing.expectEqual(AbortResult.cleaned, abortAll(&handle));
@@ -3684,7 +3873,7 @@ test "d2b3b second current callback source mutation is rejected before tombstone
     authority.mutate_source_on_call = authority.call_count + 1;
     try std.testing.expectEqual(
         MoveResult.authority_drift,
-        moveFrame(&handle, &source, authority.ops(), 7),
+        moveFrame(&handle, &source, authority.ops(), 7, null),
     );
     try std.testing.expect(source == .frame);
 
@@ -3699,7 +3888,7 @@ test "d2b3b second current callback source mutation is rejected before tombstone
     authority.mutate_source_on_call = authority.call_count + 1;
     try std.testing.expectEqual(
         MoveResult.authority_drift,
-        moveFrame(&handle, &source, authority.ops(), 7),
+        moveFrame(&handle, &source, authority.ops(), 7, null),
     );
     try std.testing.expect(source == .frame);
     try std.testing.expectEqual(
@@ -3712,7 +3901,7 @@ test "d2b3b second current callback source mutation is rejected before tombstone
     authority.mutate_source_on_call = std.math.maxInt(usize);
     try std.testing.expectEqual(
         MoveResult.classified,
-        moveFrame(&handle, &source, authority.ops(), 7),
+        moveFrame(&handle, &source, authority.ops(), 7, null),
     );
     try std.testing.expectEqual(AbortResult.cleaned, abortAll(&handle));
     var prepared: PreparedDestroy = .{};
@@ -3760,7 +3949,7 @@ test "d2b3b terminal after accepted intent tombstones all owners before cleanup"
         accepted.frame.range.end_absolute;
     try std.testing.expectEqual(
         MoveResult.classified,
-        moveFrame(&handle, &accepted, authority.ops(), 7),
+        moveFrame(&handle, &accepted, authority.ops(), 7, null),
     );
     var terminal = try makeTestOutcomeWithHeader(
         std.testing.allocator,
@@ -3773,7 +3962,7 @@ test "d2b3b terminal after accepted intent tombstones all owners before cleanup"
         terminal.frame.range.end_absolute;
     try std.testing.expectEqual(
         MoveResult.protocol_terminal,
-        moveFrame(&handle, &terminal, authority.ops(), 7),
+        moveFrame(&handle, &terminal, authority.ops(), 7, null),
     );
     try std.testing.expect(terminal == .incomplete);
     const scratch: *ExternalRxIntentScratch =
@@ -3837,7 +4026,7 @@ test "d2b3b zero-length accepted owner aborts without poison" {
     authority.view.buffer_start_absolute = protocol.header_size;
     try std.testing.expectEqual(
         MoveResult.classified,
-        moveFrame(&handle, &source, authority.ops(), 7),
+        moveFrame(&handle, &source, authority.ops(), 7, null),
     );
     try std.testing.expectEqual(AbortResult.cleaned, abortAll(&handle));
     var prepared: PreparedDestroy = .{};
@@ -3884,6 +4073,39 @@ test "d2b3b hostile allocator cannot place scratch in sealed owner range" {
         allocate(&handle, counting.allocator(), authority.ops()),
     );
     try std.testing.expect(handlePristine(&handle));
+    try std.testing.expectEqual(@as(usize, 0), counting.free_count);
+}
+
+test "d2b3d hostile allocator cannot place intent scratch in whole-turn scratch" {
+    var storage_marker: u8 = 0;
+    var operation_scratch: [
+        @sizeOf(ExternalRxIntentScratch) +
+            @alignOf(ExternalRxIntentScratch)
+    ]u8 align(@alignOf(ExternalRxIntentScratch)) =
+        [_]u8{0xa5} ** (@sizeOf(ExternalRxIntentScratch) +
+            @alignOf(ExternalRxIntentScratch));
+    var fixed = std.heap.FixedBufferAllocator.init(&operation_scratch);
+    var counting = FreeCountingAllocator{ .parent = fixed.allocator() };
+    var authority = TestAuthority{ .view = .{
+        .storage_addr = @intFromPtr(&storage_marker),
+        .storage_len = 1,
+        .operation_generation = 1,
+        .parser_generation = 1,
+        .buffer_start_absolute = 0,
+        .identity = testIdentity(),
+        .allocator = counting.allocator(),
+        .operation_scratch_addr = @intFromPtr(&operation_scratch),
+        .operation_scratch_len = operation_scratch.len,
+        .reservation_handle_addr = 0,
+        .reservation_generation = 0,
+    } };
+    var handle: ExternalRxIntentHandle = .{};
+    try std.testing.expectEqual(
+        CreateResult.quarantined,
+        allocate(&handle, counting.allocator(), authority.ops()),
+    );
+    try std.testing.expect(handlePristine(&handle));
+    // The hostile pointer is caller-owned scratch, so quarantine must never free it.
     try std.testing.expectEqual(@as(usize, 0), counting.free_count);
 }
 
@@ -3962,7 +4184,7 @@ test "d2b3b payload cannot alias a sealed parser or live owner range" {
     authority.view.buffer_start_absolute = paired.range.end_absolute;
     try std.testing.expectEqual(
         MoveResult.alias,
-        moveFrame(&handle, &source, authority.ops(), 7),
+        moveFrame(&handle, &source, authority.ops(), 7, null),
     );
     try std.testing.expect(source == .frame);
     try std.testing.expectEqual(AbortResult.cleaned, abortAll(&handle));
@@ -4028,7 +4250,7 @@ test "d2b3b bind move and reset reject a newly conflicting owner inventory" {
         sealAuthorityRanges(&conflicting, 1).?;
     try std.testing.expectEqual(
         MoveResult.authority_drift,
-        moveFrame(&handle, &source, authority.ops(), 7),
+        moveFrame(&handle, &source, authority.ops(), 7, null),
     );
     try std.testing.expect(source == .frame);
     authority.view.forbidden_ranges = &.{};
@@ -4036,7 +4258,7 @@ test "d2b3b bind move and reset reject a newly conflicting owner inventory" {
         sealAuthorityRanges(&.{}, 1).?;
     try std.testing.expectEqual(
         MoveResult.classified,
-        moveFrame(&handle, &source, authority.ops(), 7),
+        moveFrame(&handle, &source, authority.ops(), 7, null),
     );
     try std.testing.expectEqual(AbortResult.cleaned, abortAll(&handle));
 
@@ -4167,6 +4389,7 @@ test "d2b3b frozen response-style cleanup rejects owner content drift without fr
             &source,
             authority.ops(),
             7,
+            null,
         ),
     );
     const scratch: *ExternalRxIntentScratch = @ptrFromInt(handle.scratch_addr);

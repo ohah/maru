@@ -6948,8 +6948,13 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               const GuardedAdmitFailure = struct {
                   reason: RxPrepareError,
               };
+              const GuardedAdmitQuarantinePhase = enum {
+                  allocation,
+                  abort_cleanup,
+                  commit_cleanup,
+              };
               const GuardedAdmitQuarantine = struct {
-                  phase: enum { allocation, abort_cleanup, commit_cleanup },
+                  phase: GuardedAdmitQuarantinePhase,
                   quarantined_bytes_upper_bound: usize,
               };
               const GuardedAdmitPrepareOutcome = union(enum) {
@@ -7164,6 +7169,342 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 bytes/would-block/EOF/error, attempt 1/64/65, 64 MiB staged-prefix validation work bound와 1 MiB
                 allowance를 소유한다. pump/storage/ledger/traversal import와 실제 syscall은 0이며 dedicated
                 synthetic-authority test root만 call한다.
+
+                C3의 공개 API와 결과 대수는 다음과 같다. `read_ops`와 `authority_ops`는 copyable value가 아니라
+                final-address descriptor pointer로 받으며, fd는 caller 인자가 아니라 첫 authority view에서만
+                얻는다. collector는 parser final state, scheduling, guarded admit, traversal을 알지 못한다.
+
+                ```zig
+                const CollectInput = struct {
+                    allowance: RxReadableAllowance,
+                    read_ops: *const RxReadOps,
+                    authority_ops: *const RxReadAuthorityOps,
+                };
+                const CollectStop = enum {
+                    would_block,
+                    allowance_reached,
+                    attempt_budget_exhausted,
+                };
+                const CollectReceipt = struct {
+                    scratch_addr: usize,
+                    scratch_generation: u64,
+                    allowance: RxReadableAllowance,
+                    accepted_bytes: usize,
+                    attempts: u8,
+                    stop: CollectStop,
+                    digest: external_owner_seal.Digest,
+                };
+                const CollectRejectReason = enum {
+                    stale_or_moved,
+                    busy_or_spent,
+                };
+                const CollectTerminalReason = enum {
+                    invalid_preflight,
+                    generation_exhausted,
+                    authority_missing,
+                    authority_drift,
+                    invalid_destination,
+                    invalid_callback_result,
+                    staged_prefix_drift,
+                    interrupt_limit,
+                    eof,
+                    socket_error,
+                    scratch_corruption,
+                };
+                const CollectResult = union(enum) {
+                    rejected: CollectRejectReason,
+                    stopped: CollectReceipt,
+                    terminal: struct {
+                        reason: CollectTerminalReason,
+                        attempts: u8,
+                    },
+                };
+                pub fn collectInjected(
+                    scratch: *ExternalRxReadScratch,
+                    input: CollectInput,
+                ) CollectResult;
+                const StoppedBorrow = struct {
+                    saved_self_addr: usize,
+                    scratch_addr: usize,
+                    scratch_generation: u64,
+                    receipt_digest: external_owner_seal.Digest,
+                    bytes_addr: usize,
+                    bytes_len: usize,
+                    lifecycle: enum { empty, borrowed, settled, aborted },
+                    digest: external_owner_seal.Digest,
+                };
+                const StoppedDisposition = struct {
+                    staged: enum { consumed, discarded },
+                    would_block: enum { not_present, consumed, aborted },
+                };
+                pub fn borrowStopped(
+                    scratch: *ExternalRxReadScratch,
+                    receipt: *const CollectReceipt,
+                    out: *StoppedBorrow,
+                ) bool;
+                pub fn stoppedBytes(
+                    scratch: *const ExternalRxReadScratch,
+                    receipt: *const CollectReceipt,
+                    borrow: *const StoppedBorrow,
+                ) ?[]const u8;
+                pub fn settleStopped(
+                    scratch: *ExternalRxReadScratch,
+                    receipt: *const CollectReceipt,
+                    borrow: *StoppedBorrow,
+                    disposition: StoppedDisposition,
+                ) bool;
+                const ReadScratchTeardownResult = enum {
+                    closed,
+                    already_closed,
+                    busy,
+                    needs_outer_cleanup,
+                    stale_or_moved,
+                };
+                pub fn teardown(
+                    scratch: *ExternalRxReadScratch,
+                ) ReadScratchTeardownResult;
+                ```
+
+                `CollectResult`는 slice, pointer, permit, authority view, raw would-block digest를 반환하지 않는다.
+                `rejected`는 copied/moved/stale/double/reentrant 진입의 mutation 0 결과이며 현재 collecting owner를
+                닫지 않는다. receipt는 scratch final address, generation, frozen allowance 전체, accepted bytes,
+                attempt/stop과 digest를 봉인한다. `stopped`만 C4가 `borrowStopped`로 같은 scratch generation의
+                검증된 staged prefix를 exact once borrow할 수 있다. scratch는 borrow 성공과 함께 `borrowed`가
+                되므로 copied receipt의 두 번째 borrow, moved output, stale/cross-generation receipt는 backing
+                dereference와 mutation 0으로 거부된다. `stoppedBytes`는 borrow만 믿지 않고 scratch final
+                address/current `.borrowed` lifecycle/generation, receipt digest, borrow self seal과
+                accepted==staged를 descriptor-first로 다시 대조한 뒤 slice를 만든다. settle 뒤 ready generation이
+                바뀐 old/copy borrow는 backing dereference 0이다. C4는 이 same-stack immutable view만 즉시 guarded
+                admit에 사용하고 보관하지 않는다.
+                raw would-block 권위는 scratch 안의 `RawWouldBlockObservation` 하나뿐이고 public result의
+                `.would_block`은 권위 없는 stop tag다. C4는 borrow→guarded admit→traversal 뒤 final parser
+                empty/incomplete를 얻은 다음 receipt의 frozen allowance만 사용해 C1
+                `classifyAcceptedAllowanceStop`을 exact once 호출한다. borrow/settle barrier는
+                `receipt.accepted_bytes == scratch.staged_len <= receipt.allowance.bytes`와 allowance limit bits를
+                재검증한다.
+                `immediate_rx`, `read_interest`, `rx_read_budget_exhausted`, `RxDrainEvidence`는 C4 책임이며 C3 결과에
+                중복하지 않는다.
+
+                scratch lifecycle은 `empty → ready → collecting → spent → borrowed → ready`이고 callback/authority/prefix
+                실패는 `collecting → terminal`이다. 모든 정상 stop은 `spent`이며 C4가 staged prefix와 raw
+                would-block을 consume/abort하고 embedded `prepared_admit`을 canonical pristine으로 만든 뒤에만
+                `settleStopped`가 borrow/receipt/raw observation을 tombstone하고 generation을 checked `+1`한
+                ready metadata로 원자 reset/reseal한다. disposition의 would-block 값은 receipt stop과 exact
+                대응해야 하며 non-would-block에 `consumed/aborted`, would-block에 `not_present`는 거부한다. C3는
+                `prepared_admit`을 entry/exit pristine invariant로 검사할 뿐 prepare/commit/abort/deinit하거나
+                allocator authority를 읽지 않는다. `terminal`은 teardown-only이고 reset할 수 없다.
+                generation max는 첫 callback 전에 terminal이며 wrap하지 않는다. 모든 결과에서 live attempt는
+                `consumed` 또는 `aborted` tombstone이고 callback-active permit이 반환 밖으로 남지 않는다.
+                collect/borrow/stoppedBytes/settle/teardown을 포함한 모든 scratch API는 `.collecting` 중 reentry를
+                mutation 0으로 거부한다.
+
+                C4가 guarded admit을 마친 token을 임의 `.{} ` 대입으로 숨기지 않도록 C2 mode가 completion
+                finalization을 소유한다. `PreparedRxAppend`의 sealed completion은
+                `active / ordinary_finished / quarantine_pending / quarantine_accounted / pristine`을 구분한다. ordinary
+                committed/aborted 결과만 `ordinary_finished`이고 모든
+                `allocation_quarantined`/`post_commit_quarantined` 결과는 lifecycle 모양과 무관하게
+                `quarantine_pending`이다.
+
+                `resetFinishedPreparedAdmit`은 callback-free leaf로 final-address token의
+                `ordinary_finished`, `.committed`/`.aborted`와 replacement/cleanup/guard/allocator live evidence
+                0을 전체 digest로 확인한 경우만 pristine으로 전환한다. `.prepared`,
+                `quarantine_pending`, moved/stale token과 live evidence가 하나라도 있는 token은 mutation 0으로
+                거부한다.
+
+                quarantine token은 별도 `finalizeQuarantinedPreparedAdmit`만 닫는다. C4 global quarantine
+                latch가 typed guarded outcome의 tag/phase/upper bound를 exact once 반영한 뒤 다음
+                address-bound receipt를 발급한다.
+
+                ```zig
+                const GuardedQuarantineOutcomeTag = enum {
+                    allocation_quarantined,
+                    post_commit_quarantined,
+                };
+                const GuardedQuarantineAccountingReceipt = struct {
+                    saved_self_addr: usize,
+                    prepared_addr: usize,
+                    outcome_tag: GuardedQuarantineOutcomeTag,
+                    phase: GuardedAdmitQuarantinePhase,
+                    quarantined_bytes_upper_bound: usize,
+                    latch_generation: u64,
+                    lifecycle: enum { empty, accounted, consumed },
+                    digest: external_owner_seal.Digest,
+                };
+                pub fn finalizeQuarantinedPreparedAdmit(
+                    prepared: *PreparedRxAppend,
+                    outcome_tag: GuardedQuarantineOutcomeTag,
+                    quarantine: GuardedAdmitQuarantine,
+                    receipt: *GuardedQuarantineAccountingReceipt,
+                ) bool;
+                // C4 client_external_pump adapter
+                pub fn accountGuardedAdmitQuarantine(
+                    prepared: *PreparedRxAppend,
+                    outcome_tag: GuardedQuarantineOutcomeTag,
+                    quarantine: GuardedAdmitQuarantine,
+                    out: *GuardedQuarantineAccountingReceipt,
+                ) bool;
+                ```
+
+                mode leaf는 receipt final address/digest와 token address, outcome tag/phase/bound, nonzero latch
+                generation, `quarantine_accounted` completion을 exact match한다. 신뢰 가능한 live free authority가
+                이미 없고 bounded loss를 의도적으로 포기하는 terminal token일 때 receipt를 callback 전에
+                consumed tombstone한 뒤 token descriptor를 pristine으로 만든다. receipt 없는/unaccounted 결과,
+                mismatched/copy/moved/stale/double receipt와 ordinary token은 mutation/accounting 0으로 거부한다.
+                C4만 ordinary 또는 quarantine finalizer 중 정확히 하나를 호출하고, C3 `settleStopped`는 pristine
+                검사만 하며 token을 직접 변경하지 않는다.
+                `accountGuardedAdmitQuarantine`은 final-address pristine `out`, token address, named tag/phase,
+                named global bound 이하의 upper bound를 callback 없이 검증한 뒤
+                `latchCrossOwnerQuarantine`의 event generation을 exact once commit한다. 그 commit 성공 뒤에만
+                같은 generation과 `.accounted` lifecycle을 가진 receipt digest를 out에 publish하고 token
+                completion을 `quarantine_accounted`로 원자 전환한다. out
+                alias/moved/non-pristine, cap 초과, latch generation overflow는 global mutation과 receipt publish
+                0이고, 동일 typed outcome의 재호출은 token이 더 이상 `quarantine_pending`이 아니므로 중복 event를
+                만들지 않는다.
+
+                `teardown`은 allocator/free callback을 호출하지 않는 C3 metadata close leaf다.
+
+                | 진입 상태 | `prepared_admit` | 결과·mutation |
+                | --- | --- | --- |
+                | moved/copied/self seal invalid | 무관 | `stale_or_moved`, mutation 0 |
+                | `collecting` | 무관 | `busy`, outer collecting owner 유지, mutation 0 |
+                | `ready` | pristine | staged/chunk/attempt/raw observation canonical zero를 확인하고 `closed` |
+                | `spent` | pristine | staged/chunk/raw observation을 scratch-side aborted tombstone한 뒤 `closed` |
+                | `borrowed` | pristine | scratch-side borrow authority와 staged/raw observation을 aborted tombstone한 뒤 `closed`; 외부 borrow copy는 이후 live scratch 검증에 실패 |
+                | `terminal` | pristine | terminal metadata를 tombstone하고 `closed` |
+                | `ready/spent/borrowed/terminal` | active/quarantine-pending/live evidence 또는 non-pristine | `needs_outer_cleanup`, mutation 0 |
+                | `closed` | canonical | `already_closed`, mutation 0 |
+
+                C3는 non-pristine prepared token을 inspect/free/reset하지 않는다. C4/outer aggregate teardown은
+                guarded abort/commit의 typed outcome을 먼저 처리한다. ordinary 결과는
+                `resetFinishedPreparedAdmit`, quarantine 결과는 global latch exact-once accounting receipt와
+                `finalizeQuarantinedPreparedAdmit`으로 pristine을 증명한 뒤 C3 `teardown`을 exact once 호출한다.
+                allocation/precommit/postcommit quarantine 각각의 accounted/unaccounted, mismatched receipt,
+                replay를 자동 검증하고 unaccounted 분기는 `needs_outer_cleanup`에 남는다. collecting callback의
+                teardown 재진입은 busy이고 outer owner만 callback 반환 뒤 다시 닫을 수 있다. teardown은
+                generation을 증가시키거나 wrap하지 않으며 closed replay는 accounting/free 0이다.
+
+                outcome과 staged prefix의 폐쇄 규칙은 다음 표가 SSOT다.
+
+                | 마지막 관측 | 기존 staged 0 | 기존 staged >0 | attempt/streak | destination | 최종 상태·결과 |
+                | --- | --- | --- | --- | --- | --- |
+                | valid `.bytes(n)`, `1...destination.len`, 누계 `< allowance` | n seal | 기존+n seal | attempt +1, EINTR streak 0 | 반환 n만 승인; 나머지 tail 폐기 | 다음 attempt |
+                | valid `.bytes(n)`로 누계 `== allowance` | n 보존 | 기존+n 보존 | attempt +1, streak 0 | 반환 n만 승인 | `spent / allowance_reached` |
+                | validated `.would_block` | 0 보존 | 기존 staged 보존 | attempt +1 | 전체 destination 폐기·읽기 0 | raw observation 봉인 뒤 `spent / would_block` |
+                | `.interrupted`, 새 streak `<=8`, attempt `<64` | 0 보존 | 기존 staged 보존 | attempt +1, streak +1 | 전체 destination 폐기·읽기 0 | retry |
+                | `.interrupted`, 새 streak `<=8`, attempt `==64` | 0 보존 | 기존 staged 보존 | attempt 64 | 전체 destination 폐기·읽기 0 | `spent / attempt_budget_exhausted` |
+                | attempt 64가 끝났고 추가 시도 필요 | 0 보존 | 기존 staged 보존 | 65번째 callback 0 | 접근 0 | `spent / attempt_budget_exhausted` |
+                | 9번째 연속 `.interrupted` — attempt 64와 동률이어도 우선 | 폐기 | 전부 폐기 | attempt +1, streak 9 | 전체 destination 폐기·읽기 0 | `terminal / interrupt_limit`, C4 admit 0 |
+                | validated `.eof` 또는 `.socket_error` | 폐기 | 전부 폐기 | attempt +1 | 전체 destination 폐기·읽기 0 | typed terminal, C4 admit 0 |
+                | `.bytes(0)`·`bytes > destination.len`·unknown/corrupt result | 폐기 | 전부 폐기 | attempt +1 | destination read/hash 0 | `terminal / invalid_callback_result`, C4 admit 0 |
+                | pre/post authority null·drift, descriptor/alias/scratch drift | 폐기 | 전부 폐기 | 시작한 read만 attempt +1 | descriptor-first 실패 뒤 backing dereference 0 | typed terminal, C4 admit 0 |
+                | staged prefix digest 불일치 | 폐기 | 전부 폐기 | attempt +1 | 새 chunk publish 0 | `terminal / staged_prefix_drift`, C4 admit 0 |
+
+                모든 read invocation은 EINTR을 포함해 64회 예산을 하나 소비한다. 9번째 연속 EINTR은 64번째 attempt와
+                겹쳐도 terminal이 attempt-budget stop보다 우선한다. bytes는 streak를 0으로 돌리고 would-block은
+                stop이므로 별도 streak publish가 없다. EOF/error/EINTR-9/authority·descriptor·prefix 실패는 이미
+                staged된 bytes도 신뢰 경계 밖으로 폐기해 admit 0이다. 반면 allowance/would-block/attempt-budget은
+                validated prefix를 `spent`로 보존하므로 C4가 accepted bytes를 exact once admit한다.
+
+                한 attempt의 callback 순서는 고정한다.
+
+                1. ready seal, allowance positive bits, generation, final descriptor 주소와 protected ranges를
+                   callback 없이 검증한 뒤 `collecting`을 먼저 publish한다.
+                2. `read_ops`·`authority_ops` descriptor 주소와 context/function pointer, context의 sealed
+                   nonzero byte length, scratch/staged descriptor를
+                   frozen local에 옮긴다.
+                3. hostile callback인 `authority_ops.current(pre)`를 호출한다. null 또는 callback 뒤
+                   scratch/descriptor drift는 terminal이며 read 0이다.
+                4. authority view와 checked arithmetic으로 destination을 정확히
+                   `scratch.backing[staged_len .. staged_len+remaining]`으로 만든다. destination은 non-empty이고
+                   staged prefix와 disjoint하며 scratch의 backing 전후 metadata/permit/would-block DTO,
+                   read/authority descriptors와 authority view의 bounded protected ranges와 겹치지 않아야 한다.
+                   두 callback context의 전체 `{addr,len}` 범위는 descriptor가 직접 봉인하고 protected range
+                   set에도 exact once 같은 값으로 존재해야 한다.
+                5. final-address `ReadAttemptPermit`을 `.callback_active`로 봉인한 뒤 frozen read function/context/fd로
+                   read callback을 한 번 호출하고 result union을 즉시 value로 복사한다.
+                6. live callback authority를 다시 읽기 전에 permit을 frozen plan으로 `.returned` tombstone한다.
+                   그 뒤 hostile `authority_ops.current(post)`를 호출하고 pre view와 exact equality 및 frozen
+                   descriptor를 descriptor-first로 검증한다. post-current가 permit을 다시 변조해도 반환 전
+                   frozen local에서 `.aborted`/`.consumed` tombstone을 무조건 재게시한다.
+                7. callback 결과를 검증한다. non-byte 결과와 invalid byte count는 destination을 읽거나 hash하지
+                   않는다. `.bytes(n)`만 old chunk seals와 새 `n` bytes를 한 cumulative pass로 검증·봉인한다.
+                   callback이 destination 전체를 써도 반환 n 뒤 tail은 어떤 digest/evidence에도 들어가지 않는다.
+                8. permit을 `.consumed` 또는 `.aborted`로 tombstone한 뒤 위 표의 `spent`/`terminal` 결과를 publish한다.
+
+                `current()`도 arbitrary injected callback이다. collector는 첫 `current()` 전에 already collecting이라
+                동기 재진입은 `rejected` mutation 0이고, pre/post current와 read callback 어느 쪽이 scratch,
+                ops/context, fd/parser/owner view를 바꾸어도 nested operation을 승인하지 않는다. callback 뒤에는
+                frozen plan과 descriptor-first scalar 인증을 통과하기 전 backing slice/hash를 만들지 않는다.
+                `RxReadOps`와 `RxReadAuthorityOps`는 각각 `context_len`을 추가하며 context addr/len checked end는
+                nonzero여야 한다. `RxReadAuthorityView`는 fd/parser seal/owner snapshot 외에 다음 작은
+                callback-local range set을 value-only로 포함한다.
+
+                ```zig
+                const ProtectedRange = struct { addr: usize, len: usize };
+                const max_rx_read_protected_ranges: usize = 16;
+                // view fields
+                protected_range_count: u8,
+                protected_ranges:
+                    [max_rx_read_protected_ranges]ProtectedRange,
+                view_digest: external_owner_seal.Digest,
+                ```
+
+                used entry는 addr/len nonzero, checked end, addr 오름차순, strict non-overlap이고 unused slot은
+                canonical zero다. count 0/cap 초과, duplicate/overlap/overflow/unsorted, context range exact-one
+                부재는 pre-read terminal이다. set에는 parser backing, 두 callback context와 C4가 명시적으로
+                열거한 ledger/live/metadata/response의 **서로 겹치지 않는 allocation leaf backing**처럼 canonical
+                read backing과 원래 disjoint인 callback-reachable leaf range만 싣는다. `ExternalPumpStorage`,
+                whole `Client`/parser/lease, outer turn scratch처럼 leaf를 포함하는 object/container range는
+                싣지 않는다. read/authority ops descriptor는 C3가 final-address `@sizeOf` 범위로 직접 검증하므로
+                set에 중복하지 않는다. C4 outer disjoint proof와 `owner_snapshot_digest`가 전체 owner/container
+                authority를 단독 소유하고, leaf projection의 named compile-time count가 16 이하임을 고정한다.
+
+                따라서 허용 예외는 하나의 모호한 protected-container overlap이 아니다. collector가 직접
+                `@offsetOf`/`@sizeOf`로 검증하는 `ExternalRxReadScratch.backing`의 exact subrange만 destination이며,
+                scratch의 backing 전후 metadata와 모든 used protected range는 destination뿐 아니라 full canonical
+                backing과도 disjoint여야 한다. 이 규칙 때문에 containing outer scratch는 range set에서 제외된다.
+                이 leaf는 range의 owner type을 import하거나 재구성하지 않는다.
+
+                staged mutation 검증은 attempt당 full-prefix scan **최대 한 번**이다. pre-current 전에 별도 full
+                hash를 만들지 않고, 기존 `ChunkSeal`을 callback 뒤 순서대로 다시 계산해 old prefix를 검증한다.
+                `.bytes(n)`이면 같은 단일 pass의 마지막에 새 n을 계산해 chunk/cumulative seal을 갱신한다.
+                valid non-byte result는 old prefix만 scan하며 destination은 읽지 않는다. precedence는
+                authority/descriptor/scratch drift → invalid callback result → valid-result old-prefix drift →
+                outcome 의미 순서다. 따라서 invalid byte count/tag는 backing scan 없이
+                `invalid_callback_result`, valid would-block/EINTR/EOF/error와 prefix drift가 겹치면
+                `staged_prefix_drift`다. attempt i의 scanned prefix가
+                최대 1 MiB이므로 64회 합은 checked
+                `max_rx_staged_prefix_validation_bytes_per_turn = 64 MiB` 이하이다. read callback 64회,
+                authority callback 128회, full-prefix pass 64회가 별도 compile-time checked 상한이며 65번째
+                read/129번째 authority callback은 0이다. fixture의 analytic counter가 각 callback/outcome
+                matrix에서 실제 scan bytes와 상한을 검증하고 wall-clock을 증거로 쓰지 않는다.
+
+                C3 boundary는 `client_external_rx_read`의 pump/storage/ledger/traversal/POSIX syscall import와
+                `prepareAdmitGuarded`/commit/abort call 0, `collectInjected` definition exact 1을 고정한다.
+                production callsite는 0이고 dedicated
+                `client_external_rx_read_test_support.zig`만 synthetic authority/read fixture로 호출한다.
+                `borrowStopped`/수정된 `stoppedBytes(scratch, receipt, borrow)`/`settleStopped`/`teardown`도
+                definition exact 1이다. C3 test-support는 반복 fixture가 거치는 qualified wrapper 하나에서
+                `collectInjected`, `borrowStopped`, `stoppedBytes`, `settleStopped`, `teardown`을 각각 direct
+                callsite exact 1로 호출하며 C4 전 product callsite는 모두 0이다. C4 boundary는 scratch
+                backing/staged/chunk/raw observation direct field read 0과 세 handoff API 및 teardown exact-one
+                경로를 예약한다.
+
+                completion boundary는 mode의 `resetFinishedPreparedAdmit`과
+                `finalizeQuarantinedPreparedAdmit` definition exact 1, C3 synthetic wrapper direct callsite exact
+                1씩, C4 전 product callsite 0을 고정한다. C4에서는 하나의 tagged outcome branch만 ordinary
+                reset 또는 `global latch account+receipt issue → quarantine finalizer` 중 하나를 상호배타적으로
+                exact once 호출한다. `PreparedRxAppend`의 direct `.{} ` reset은 mode 밖 0이다. accounting
+                receipt의 construction/digest/`.accounted` 전이는 global latch adapter exact 1만 소유하고 mode는
+                검증·consume만 한다. `accountGuardedAdmitQuarantine` definition도 pump exact 1, C3 synthetic
+                wrapper direct callsite exact 1, C4 전 product callsite 0이며 C4 tagged branch에서만 exact once다.
+                outer `ExternalRxTurnScratch`의 owner heap exact-one/stack·by-value copy 0 규칙은 그대로 유지한다.
+                hostile matrix는 pre/post current 각각의 scratch/prefix/ops/context/fd/parser/owner drift,
+                canonical destination과 모든 protected range의 exact·partial·one-past·overflow alias,
+                full destination write 뒤 bytes 0/cap+1/non-byte, 모든 outcome의 prefix mutation,
+                attempt 1/63/64/65, EINTR 8/9와 attempt-64 동률, current/read 재진입, would-block
+                observation moved/stale/double/cross-generation, generation max, spent reset과 terminal no-reset을
+                Debug/ReleaseFast와 boundary에서 고정한다.
               - **C4 private pump integration:** held lease 안에서 buffered-first→collector 뒤
                 `staged_len>0`이면 guarded admit exact-one→traversal exact-one→aggregate를 실행한다. initial
                 complete backlog는 admit 0/traversal exact-one, zero-prefix would-block은 둘 다 0이며 각 분기 뒤

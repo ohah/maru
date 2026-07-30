@@ -55,18 +55,30 @@ Term별 observer는 다음 입력을 함께 사용한다.
 2. **live screen tail**: 현재 viewport의 마지막 텍스트 콘텐츠를 기준으로 bounded 행을 공백 정규화해 provider별 manifest와 매칭한다.
    fullscreen TUI가 resize 뒤 아래쪽에 빈 행을 남겨도 trailing blank padding은 tail 위치 계산에서 제외한다.
    scrollback 전체를 읽지 않으며 현재 화면에 없는 과거 문구는 상태 근거로 쓰지 않는다.
+   행 상한은 **상시 chrome이 사용자 입력 길이에 밀려 tail 밖으로 나가지 않을 만큼** 넉넉히 둔다 — composer는 입력
+   행 수만큼 자라므로(실측), 상한이 짧으면 입력이 길어질 때 프롬프트 마커가 tail을 벗어나 근거가 사라진다. 오래된
+   오버레이 문구가 현재 근거로 끌려오는 것은 행 상한이 아니라 오버레이 규칙의 거리 게이트가 막는다.
 3. **OSC metadata**: 터미널 코어가 이미 파싱한 title과 progress를 문자열 입력으로 제공한다. progress는
    [ConEmu specific OSC](https://conemu.github.io/en/AnsiEscapeCodes.html#ConEmu_specific_OSC)가 정의한
    OSC `9;4;state[;progress]` 본문을 bounded 문자열로 보존한 값이다. 기존처럼 알림으로 발사하지 않고 observer의
    보조 입력으로만 쓴다. OSC는 agent가 실제로 보낸 값일 때만 신호이며 Maru가 provider 훅을 주입해 만들지 않는다.
-4. **PTY output activity**: agent가 foreground인 동안 새 output이 지속되면 `running` 근거다. 다만 출력이 잠시
-   멈췄다는 사실만으로 `idle`로 내리지 않는다. 느린 API·긴 도구 실행은 조용할 수 있기 때문이다.
+4. **PTY output activity**: agent가 foreground인 동안 새 output이 지속된다는 사실은 **약한 신호**다. 화면·OSC 근거가
+   하나도 없을 때만 `running` 폴백으로 쓰고, 근거 있는 직전 상태를 즉시 뒤집지는 못한다(아래 «상태 모델과 우선순위»
+   의 신호 세기 중재). output에는 사용자가 타이핑한 에코와 composer 재그리기가 섞여 있어서, 출력이 있다는 사실만으로
+   작업 중을 단정하면 **입력만 해도 running**이 된다. 반대로 출력이 잠시 멈췄다는 사실만으로 `idle`로 내리지도 않는다.
+   느린 API·긴 도구 실행은 조용할 수 있기 때문이다.
 
 screen/OSC/provider 패턴은 코드에 하드코딩된 거대한 switch 대신 작은 manifest 데이터로 둔다. manifest는
 `agent`, `state`, 화면 region(아래 «화면 region 모델과 규칙 게이트» 참조), 불리언 게이트(`all`/`any`/`not`·`contains`/`line_prefix`),
 `skip_state_update`, `visible_idle`, `visible_blocker`, `visible_running` 메타를 표현한다. 정규식·임의 코드 실행·외부 다운로드는
 넣지 않는다 — 선형 정규식 엔진이 없어 손수 짠 패턴은 catastrophic backtracking 위험이 있고, 원격 규칙은 서명 없는 신뢰가
 되기 때문이다. 빌드에 포함된 manifest만 사용하며 fixture가 근거다.
+
+manifest 데이터 실수는 런타임이 아니라 **빌드에서** 잡는다. 게이트에 양성 매처가 있어야 하고(없으면 규칙이 모든 화면에서
+조용히 발화한다), **상태를 세우는 규칙은 `visible_*` 근거 플래그를 하나 이상 들어야 한다.** 후자는 신호 세기 중재의 전제다 —
+플래그를 빠뜨린 규칙은 조용히 약한 신호로 강등돼 근거 있는 직전 상태를 이기지 못한다. 이 검증이 “약한 신호 생산자는 PTY
+activity 폴백 하나”라는 불변식을 데이터 차원에서 못박는다. `skip_state_update`는 상태를 세우지 않으므로 반대로 근거 플래그가
+없어야 한다.
 
 ## 상태 모델과 우선순위
 
@@ -79,14 +91,40 @@ screen/OSC/provider 패턴은 코드에 하드코딩된 거대한 switch 대신 
 
 현재 화면의 blocker가 최우선이다. 같은 화면 tail에 idle/running 문구가 함께 있으면 고정 문자열 우선순위가 아니라
 **더 아래에 보이는 하단 chrome**을 현재 증거로 택한다. prompt보다 아래의 `Esc to interrupt` footer는 running이고,
-과거 footer보다 아래에 새 prompt가 돌아오면 idle이다. 화면 규칙은 provider별 하단 4~6줄 안에서만 유효하므로 tail 위쪽의
-과거 prompt나 `Conversation interrupted` 문구는 새 작업 상태를 덮지 않는다. 화면 근거가 없을 때만 OSC progress/title,
-recent PTY activity 순으로 보조한다.
+과거 footer보다 아래에 새 prompt가 돌아오면 idle이다. 화면 근거가 없을 때만 OSC progress/title, recent PTY activity
+순으로 보조한다.
+
+단 “아래=최신”은 provider마다 성립하지 않는다. codex는 실행 표시를 composer **위**에 그리고 그 **아래**에 steering
+composer를 계속 열어 둔다(실측). 그래서 codex는 실행 footer 문구를 turn 진행의 단일 discriminator로 쓰고, 입력
+프롬프트 규칙의 `none`과 실행 footer 규칙의 `any`가 **같은 문자열을 공유**해 두 규칙이 구성상 상호배타가 되게 한다.
+같은 문자열을 쓰는 이유는 근거 공백을 만들지 않기 위함이다 — 한쪽이 좁으면(예: `Working` 단어를 함께 요구) provider가
+문구를 바꿀 때 “프롬프트도 아니고 실행도 아닌” 화면이 생겨 판정이 폴백으로 떨어진다.
+
+그 공유 문자열은 실측 footer를 **닫는 괄호까지** 적는다(`… • esc to interrupt)`). 괄호 없이 느슨하게 두면 에이전트가
+그 표현을 **산문으로 설명**하기만 해도 idle 근거가 지워지고 거짓 running이 선다 — 터미널을 만드는 저장소에서는 실제로
+나오는 문장이다. 반대 위험(provider가 문구를 바꿔 근거를 잃음)은 폴백으로 degrade될 뿐이므로 **거짓 running보다 근거
+상실을 택했다.** claude에는 이 좁히기가 필요 없다 — claude는 프롬프트가 항상 실행 chrome보다 아래라 위치 tiebreak가
+산문 오탐을 이미 막는다. 즉 문구를 좁히는 것은 “아래=최신”이 성립하지 않는 provider에만 필요한 보상이다.
+
+**항상 보이는 chrome 규칙에는 하단 거리 게이트를 걸지 않는다.** 입력 프롬프트와 실행 footer는 화면에 상주하는
+chrome이고, 사용자가 여러 줄을 입력하면 그 chrome이 스스로 위로 밀린다. 거리 게이트를 걸면 **입력이 길어질수록 근거가
+사라져** 판정이 폴백으로 떨어진다(실측: codex 입력 4행부터 idle 근거 0개 → PTY activity 폴백이 타이핑을 running으로
+단정). 거리 게이트는 권한 확인·중단 배너처럼 **일시적 오버레이** 규칙에만 남긴다 — 그 문구는 chrome이 아니라 스크롤되는
+출력이라, 위로 밀린 뒤에는 실제로 현재 근거가 아니다. 현재성 판정의 1차 수단은 구조 region(마커 앵커·수평선)과 위치
+tiebreak이며, 거리 게이트는 구조 앵커가 없는 오버레이 규칙의 보조 수단이다.
 
 명시 증거는 즉시 publish한다. 화면 재그리기의 짧은 공백에는 직전 상태를 최대 700ms 유지하지만, 그 안에 같은 상태의
 근거가 다시 오지 않으면 `unknown`으로 내린다. 침묵이나 timeout으로 `idle`을 만들지 않으며, `running`·`blocked`도
 무기한 보존하지 않는다. 따라서 느린 작업은 명시 UI/OSC가 없으면 일시적으로 `unknown`일 수 있지만, ESC 뒤 사라진
 running 문구가 영구 고착되지는 않는다.
+
+**신호 세기 중재.** 화면·OSC 근거(`visible_idle`/`visible_blocker`/`visible_running`) 없이 나온 상태는 **약한 신호**다.
+약한 신호는 근거 있는 직전 상태와 다를 때 그 상태를 즉시 덮지 못하고, 직전 근거의 grace가 만료될 때까지 보류된다.
+grace 안에 같은 근거가 다시 오면 약한 신호는 버려지고, 다시 오지 않으면 그때 약한 신호가 최신 근거가 되어 publish된다.
+근거 있는 상태가 없을 때(`unknown`)나 약한 신호가 직전 상태와 같을 때는 보류 없이 그대로 반영한다. 현재 약한 신호를
+내는 경로는 PTY activity 폴백 하나다. 이 중재가 없으면 타이핑 에코 같은 output이 근거 있는 idle을 곧바로 running으로
+덮는다 — 규칙 데이터를 고쳐 근거 공백을 메워도, 폴백이 강한 근거를 이길 수 있는 구조가 남아 있으면 같은 증상이 다른
+화면에서 재발한다.
 
 `interrupted`는 새 observer의 상태가 아니다. 터미널은 ESC가 provider의 turn 중단인지 메뉴 닫기인지 일반화해 알 수
 없고, provider별 내부 이벤트를 읽지 않는다는 경계와 충돌한다. 대신 중단 후 실제 화면이 idle이면 `idle`, 질문 화면이면
@@ -125,6 +163,23 @@ v1 provider allowlist는 현재 UI·브랜드가 있는 claude/codex다. manifes
 - 타이틀: idle은 마커 없는 사용자명, running은 브라유 스피너 + 사용자명, blocked는 `[ ! ] Action Required | <이름>`.
 - 화면: composer `› …`가 **idle·running 모두** 표시된다. 실행 표시는 `• Working (Ns • esc to interrupt)`,
   중단은 `■ Conversation interrupted - …`, 승인 화면은 `Press enter to confirm or esc to cancel`.
+
+**codex (0.146.0 추가 관측 — composer 배치와 다중 행 입력)**
+
+거리 게이트를 뺀 근거다. 아래는 80×24 tmux pane 캡처 그대로다.
+
+- composer에는 **박스 테두리가 없다.** bare `› <입력>` 한 덩어리이고, 그 아래에 빈 행 1개와 상태줄 1개가 **상수로**
+  붙는다(idle: `Context 0% used · weekly 67% left · <모델>`). 즉 프롬프트 마커 아래에 항상 콘텐츠가 있어
+  `prompt_anchor`(“마커 아래가 모두 공백”) 정의에 걸리지 않는다 → codex 규칙은 `screen` region을 유지한다.
+- 입력이 길어지면 composer가 **여러 행으로 자라며 위로 밀린다.** 마커 기준 하단 거리는 입력 1행에서 2, 2행에서 3,
+  **4행에서 5**가 되어 `max_lines_from_bottom = 4`를 넘긴다. 이 순간 codex의 유일한 idle 근거가 사라진다.
+- 실행 중 배치는 위에서 아래로 `› <제출한 메시지 에코>` → `• Working (3s • esc to interrupt)` → `› <steering 입력>`
+  → 상태줄 `tab to queue message … % context left`다. 즉 **실행 footer가 live composer보다 위**에 있고, 제출한 메시지도
+  transcript에 같은 `›` 마커로 에코된다. 그래서 위치 tiebreak만으로는 running을 지킬 수 없고 `esc to interrupt`
+  discriminator가 필요하다. 또 이 배치에서 footer의 하단 거리는 6이라, 거리 게이트가 걸려 있으면 **실제 작업 중에도**
+  running 근거가 사라진다(반대 방향 결함).
+- turn이 끝나면 `• Working …` 행은 화면에서 사라진다(스크롤로 남지 않는다). 따라서 `esc to interrupt` 존재 여부가
+  turn 진행 여부와 1:1로 대응한다.
 
 **공통**
 
@@ -205,16 +260,32 @@ visible blocker는 향후 attention refresh가 필요할 때만 별도 이벤트
 
 ## 화면 region 모델과 규칙 게이트
 
-> 베이스와 결정을 명시한다. 현재 규칙은 하단 N행 평면 tail에 `all/any/none` 평면 조건과 `max_lines_from_bottom` 거리
-> 게이트를 걸고, 같은 화면의 idle/running 충돌은 **더 아래(더 최신 chrome)** 위치가 이기는 tiebreak로 푼다. 거리 게이트는
-> 입력 박스가 상단·하단 테두리에 더해 별도 footer 구분선을 함께 그리거나(다중 수평선), 실행 중에도 아래 composer가 열릴
-> 때 오판할 수 있다. 그래서 거리 휴리스틱을 **구조적 region**으로 보강하고 평면 조건을 **중첩 게이트**로 확장한다. 강점인
-> 위치 tiebreak와 `line_prefix`는 유지한다. 정규식·외부 다운로드는 계속 배제한다(사유는 manifest 절).
+> 베이스와 결정을 명시한다. 출발점은 하단 N행 평면 tail에 `all/any/none` 평면 조건과 `max_lines_from_bottom` 거리
+> 게이트를 걸고, 같은 화면의 idle/running 충돌은 **더 아래(더 최신 chrome)** 위치가 이기는 tiebreak로 푸는 설계였다.
+> 거리 게이트는 입력 박스가 상단·하단 테두리에 더해 별도 footer 구분선을 함께 그리거나(다중 수평선), 실행 중에도 아래
+> composer가 열릴 때 오판할 수 있다. 그래서 거리 휴리스틱을 **구조적 region**으로 보강하고 평면 조건을 **중첩 게이트**로
+> 확장한다. 강점인 위치 tiebreak와 `line_prefix`는 유지한다. 정규식·외부 다운로드는 계속 배제한다(사유는 manifest 절).
+
+거리 게이트는 **상시 chrome 규칙(입력 프롬프트·실행 footer)에서 제거했다.** 사용자 입력이 여러 행이 되면 chrome이
+스스로 위로 밀려 근거가 사라지기 때문이다(«상태 모델과 우선순위»·«실측 신호 기록»). 남은 사용처는 권한 확인·중단 배너
+같은 일시적 오버레이 규칙이며, 그 규칙들이 오래된 문구를 현재 근거로 끌어오지 않게 막는 역할을 계속 맡는다.
+
+**region 모델이 모든 provider에 맞지는 않는다.** `prompt_anchor`/`box_body`/`footer`는 “프롬프트 아래가 비어 있고 실행
+chrome은 프롬프트 밑에 온다”는 박스형 배치를 전제한다. codex 0.146.0은 프롬프트 아래에 상태줄이 상수로 붙고 실행
+표시는 프롬프트 **위**에 오므로 이 전제가 깨진다. 따라서 codex 규칙은 `screen` region + `esc to interrupt` discriminator를
+쓰고, 구조 region 이관은 claude처럼 배치가 맞는 provider에만 적용한다. 맞지 않는 배치를 억지로 region에 끼우려고 새 휴리스틱을
+추가하지 않는다.
 
 **화면 region.** 화면 tail을 평면 하단 N행 대신 순수 문자열 슬라이싱으로 구조 region으로 나눈다(할당·정규식 없음).
 
 - `whole_tail` — 기존 bounded 하단 tail(폴백 기준).
 - `prompt_anchor` — 마지막 프롬프트 마커 라인. 마커는 `❯`/`›`이며, 앞의 박스 세로선 `│`와 공백을 벗긴 뒤 판정한다.
+  “현재” 프롬프트의 정의는 두 갈래다. 마커가 **박스 상단 테두리 바로 아래 첫 줄**이고 아래에도 닫는 수평선이 있으면
+  그 사이는 **박스 본문 = 사용자가 입력 중인 여러 행**이므로 내용이 있어도 잔상 근거가 아니다(실측: claude는 입력
+  2행부터 여기에 걸려 idle 근거를 잃었다). 그 밖에는 마커 아래가 모두 공백일 것 — 닫는 테두리가 없는 선택지 목록
+  (`❯ 1. Yes` 아래 항목이 이어짐)과, 출력이 이어지는 잔상 프롬프트가 여기서 걸러진다. “상단 바로 아래 첫 줄”을 함께
+  요구하는 이유는, 그렇지 않으면 잔상 프롬프트와 **에이전트 출력에 흔한 구분선** 하나만으로 잔상이 현재 프롬프트로
+  승격되기 때문이다. 어느 갈래든 하단 거리는 보지 않는다.
 - `box_body` — 프롬프트 박스 상단 테두리와 그 아래 첫 수평선 사이(사용자가 입력 중인 본문).
 - `output` — 프롬프트 마커/박스 위, 첫 수평선 이전(에이전트 출력 영역).
 - `footer` — 프롬프트 마커/박스 아래, 마지막 수평선 이후(`esc to interrupt` 등 실행 chrome).
@@ -315,7 +386,9 @@ P1 이후 Maru는 provider **hook event**를 설치하지 않고 과거 mapping 
 - screen snapshot은 변경 sequence가 바뀐 Term만 읽고 idle 안정 상태에서는 재스캔을 건너뛴다. trailing blank 행은
   최대 256행 cell scan으로만 건너뛰며 실제 UTF-8 복사는 마지막 콘텐츠 기준 bounded 행에 한정한다. 그보다 큰 blank
   padding은 오래된 화면 근거를 끌어오지 않고 `unknown`으로 안전하게 실패한다.
-- screen tail은 행·바이트 상한을 두고, 매 poll heap 전체 화면 복사를 피한다.
+- screen tail은 행·바이트 상한을 함께 둔다. 행 상한은 상시 chrome이 tail 안에 남도록 화면 높이급으로 잡고, 실제 복사량은
+  바이트 상한이 조인다 — 직렬화가 cols 기준 worst-case(코드포인트 4바이트)로 행 수를 다시 줄이므로 넓은 창에서는 자동으로
+  더 적은 행을 읽는다. idle 안정 상태에서는 재스캔 자체를 건너뛰므로 이 상한이 상시 비용이 되지 않는다.
 - process probe는 foreground pgid 변화 시 즉시, 식별된 agent는 낮은 주기로 재확인한다.
 - debug event는 kind, 이전/새 상태, 선택된 manifest rule id, visible flags, activity age만 남긴다. 화면 텍스트·OSC 원문·
   cwd·argv 전체는 로그에 남기지 않는다.
@@ -332,6 +405,13 @@ P1 이후 Maru는 provider **hook event**를 설치하지 않고 과거 mapping 
 
 - 순수 fixture: claude/codex 각각 idle/running/blocked, scrollback의 과거 blocker 무시, OSC-only 보조, 상충 신호 우선순위.
 - 전이 테스트: output activity→running, visible idle 즉시 전환, evidence loss 700ms grace 뒤 unknown, process exit/kind change reset.
+- 다중 행 입력(실측 캡처): codex composer 입력이 1·2·4행일 때 모두 `visible_idle` 근거가 유지되고, output이 흐르는
+  동안에도 PTY activity 폴백으로 떨어지지 않음(타이핑이 running으로 보이지 않는다).
+- tail 행 상한: 입력이 12행을 넘는 composer에서도 프롬프트 마커가 tail 안에 남는지(옛 12행 상한의 회귀 방지).
+- 실행 중 steering(실측 배치: 메시지 에코 → `• Working (… esc to interrupt)` → steering composer → 상태줄): output이
+  조용해도 `visible_running` 근거로 running이 유지됨(폴백에 의존하지 않는다).
+- 신호 세기 중재: 근거 있는 idle 직후의 약한 running(PTY activity)은 grace 안에는 idle을 덮지 못하고, 같은 근거가 다시
+  오면 계속 idle, grace가 만료되면 running으로 반영됨. 근거 있는 상태가 없거나 약한 신호가 직전 상태와 같으면 즉시 반영.
 - ESC 회귀: running 화면에서 ESC 뒤 idle fixture가 오면 다음 publish가 running이 아니며 완료 알림도 생성하지 않음.
 - 다중 Term: background blocked가 workspace 대표가 되고, running Term의 탭 플래그와 dirty gate가 정확히 갱신됨.
 - region 슬라이서: prompt 마커 앵커가 다중 수평선(box 상·하단 + footer 구분선)에서 footer/output을 정확히 분리, 둥근·이중
@@ -346,10 +426,27 @@ P1 이후 Maru는 provider **hook event**를 설치하지 않고 과거 mapping 
 ## 한계
 
 provider가 UI 문구·OSC를 바꾸면 manifest fixture 갱신이 필요하다. 텍스트 기반 판정은 false positive/negative가 가능하므로
-모호할 때는 `unknown`으로 실패한다. terminal observer 하나로 provider 내부 완료 의미, 마지막 답변, 정확한 session id를
-동시에 얻을 수 없다는 제한을 제품 계약으로 숨기지 않는다.
+모호할 때는 `unknown`으로 실패한다.
 
-«실측 신호 기록»은 claude 2.1.218·codex 0.145.0을 특정 설정에서 관측한 결과다. provider가 UI 문구·스피너 프레임·상태줄
+terminal observer 하나로 provider 내부 완료 의미, 마지막 답변, 정확한 session id를 동시에 얻을 수 없다는 제한을 제품
+계약으로 숨기지 않는다.
+
+codex의 실행 footer discriminator는 문자열이므로, 에이전트 출력이 **닫는 괄호까지 포함한 실측 문구를 그대로** 재현하면
+여전히 오판한다(tail 행 상한 안에 있어야 하므로 범위는 제한된다). 사용자가 그 문구를 composer에 그대로 타이핑하는 경우도
+같다. 구조 region으로 좁히는 것이 정답이지만 codex 배치가 region 전제를 만족하지 않아(«화면 region 모델») 지금은 문자열
+discriminator를 쓴다. 반대로 provider가 footer 문구를 바꾸면 running 근거를 잃고 PTY activity 폴백으로 degrade된다 —
+이 선택의 근거는 «상태 모델과 우선순위»에 적었다.
+
+박스 본문을 사용자 입력으로 인정하면서, **박스 안에 그려지는 선택 메뉴**(예: 모델·effort 선택)도 입력 프롬프트로 잡힌다.
+blocker 문구가 있는 화면은 blocker 우선 규칙이 그대로 이기므로 권한 확인은 영향받지 않지만, blocker 문구가 없는 메뉴는
+`unknown`이 아니라 `idle`로 표시된다. 사용자가 조작 가능한 화면이라는 점에서 `idle`(“입력 가능한 화면”)의 정의에 어긋나지
+않아 그대로 둔다.
+
+tail 행 상한도 유한하므로, composer가 상한보다 더 크게 자라면(화면 대부분을 입력으로 채우는 경우) 프롬프트 마커가 다시
+tail을 벗어나 근거가 사라진다. 그때는 폴백으로 degrade되며, 이 구조적 상한은 없앨 수 없다 — 상한을 화면 높이급으로 둬
+현실적인 입력 길이를 덮는 것이 대응이다.
+
+«실측 신호 기록»은 claude 2.1.218·codex 0.145.0/0.146.0을 특정 설정에서 관측한 결과다. provider가 UI 문구·스피너 프레임·상태줄
 구성을 바꾸면 규칙과 기록을 함께 갱신해야 한다. 멀티플렉서 환경은 실제로 확인했고 결과는 «실측 신호 기록»에 적었다 —
 kind·타이틀·provider 알림이 함께 사라져 **상태 판정 자체가 동작하지 않는다.** 이 환경의 지원은 kind 판정 경로가 선행
 조건이며 별도 트랙이다.

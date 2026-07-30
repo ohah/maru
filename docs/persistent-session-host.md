@@ -7208,6 +7208,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                     saved_self_addr: usize,
                     scratch_addr: usize,
                     scratch_generation: u64,
+                    receipt_addr: usize,
                     receipt_digest: external_owner_seal.Digest,
                     bytes_addr: usize,
                     bytes_len: usize,
@@ -7571,7 +7572,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 allocator/free, guard/current, parser traversal 또는 scheduling callback을 호출하지 않는다.
                 인증 불가 결과는 child를 임의 zero/reset하지 않고 outer scratch terminal-retained로 남긴다.
 
-                **S3-D — drain evidence one-shot capability (미구현):** `RxDrainEvidence`는 pump scratch에
+                **S3-D — drain evidence one-shot capability (구현, 최종 적대적 재감사 대기):** `RxDrainEvidence`는 pump scratch에
                 final-address로 embed하고 공개 DTO나 copyable drained bool로 반환하지 않는다. canonical layout은
                 다음 필드를 모두 봉인한다.
 
@@ -7581,6 +7582,8 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                     version: u16,
                     saved_self_addr: usize,
                     storage_addr: usize,
+                    owner_incarnation: u64,
+                    owner_incarnation_digest: external_owner_seal.Digest,
                     lease_addr: usize,
                     lease_generation: u64,
                     operation_generation: u64,
@@ -7597,7 +7600,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                     read_attempt_generation: u64,
                     parser_addr: usize,
                     parser_seal: client_external_mode.ParserAuthoritySeal,
-                    final_readiness: client_external_mode.ParserReadiness,
+                    final_readiness: client_external_mode.RxParserReadiness,
                     rx_frame_budget_exhausted: bool,
                     rx_read_budget_exhausted: bool,
                     owner_inventory_generation: u64,
@@ -7616,32 +7619,31 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 };
 
                 fn prepareRxDrainEvidence(
-                    storage: *ExternalPumpStorage,
+                    self: *ExternalPumpStorage,
                     lease: *ExternalWholeTurnLease,
                     scratch: *ExternalRxTurnScratch,
-                    prepared_seed_authority:
-                        client_external_rx_read.DrainSeedAuthorityProjection,
                     final: RxDrainFinalState,
-                    out: *RxDrainEvidence,
                 ) bool;
                 fn armRxDrainEvidence(
                     scratch: *ExternalRxTurnScratch,
-                    prepared_seed_authority:
-                        client_external_rx_read.DrainSeedAuthorityProjection,
-                    consumed_seed_authority:
-                        client_external_rx_read.DrainSeedAuthorityProjection,
-                    evidence: *RxDrainEvidence,
+                    consumed_attempt_generation: u64,
                 ) bool;
                 fn consumeRxDrainEvidence(
-                    storage: *ExternalPumpStorage,
+                    self: *ExternalPumpStorage,
                     lease: *ExternalWholeTurnLease,
                     scratch: *ExternalRxTurnScratch,
                     settlement: client_external_rx_read.StoppedDisposition,
-                    evidence: *RxDrainEvidence,
                 ) bool;
-                fn abortRxDrainEvidence(evidence: *RxDrainEvidence) bool;
-                fn finishRxDrainEvidence(evidence: *RxDrainEvidence) bool;
-                fn resetFinishedRxDrainEvidence(evidence: *RxDrainEvidence) bool;
+                fn abortRxDrainEvidence(
+                    self: *ExternalPumpStorage,
+                    lease: *ExternalWholeTurnLease,
+                    scratch: *ExternalRxTurnScratch,
+                ) bool;
+                fn finishRxDrainEvidence(scratch: *ExternalRxTurnScratch) bool;
+                fn resetFinishedRxDrainEvidence(
+                    self: *ExternalPumpStorage,
+                    scratch: *ExternalRxTurnScratch,
+                ) bool;
                 ```
 
                 위 여섯 pump helper와 C3 `snapshotDrainSeedAuthority`가 canonical exact 이름이다. combined
@@ -7728,19 +7730,30 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 `resetFinishedRxDrainEvidence`가 final address/digest와 outer scratch active latch 0을 검증해
                 pristine으로 되돌린다. 제품 pump의 evidence 직접 `.{} ` 대입은 금지한다.
 
+                cleanup authority와 drain scheduling eligibility는 분리한다. consume은 fresh parser/owner/
+                inherited blocker snapshot을 모두 재검증한다. terminal cleanup에서 abort는 sealed evidence의
+                storage incarnation, held lease, operation/read generation과 final address를 인증하고,
+                finish는 그 abort/consume이 만든 canonical sealed tombstone과 TLS 비활성만 확인한다. reset은
+                다음 turn 전 storage incarnation, operation/read generation, final address와 owner snapshot을
+                다시 인증한다. prepare 뒤 새 blocker나 terminal parser state가 생겼다는 이유로 tombstone
+                정리를 막지 않으며, 이 cleanup 성공을 drained 또는 authority-clear로 재해석하지 않는다.
+
                 S3-D product adapter gate는 leaf hostile matrix를 복제하지 않고 다음 연결 책임 A~G를
                 Debug/ReleaseFast로 고정한다.
 
                 - **A:** zero-prefix would-block에서 parser와 inherited/live owner blocker가 모두 empty이면
                   prepare/arm/settle/consume exact-one, drained/authority-clear true와 두 연속 turn의
-                  old-evidence stale 거부·canonical reset. 같은 경로에 pre-existing blocker가 있으면 evidence
-                  0, drained/authority-clear false와 blocker scheduling을 보존한다.
+                  old-evidence stale 거부·canonical reset. pre-existing blocker가 있으면 buffered-first가
+                  transport read보다 먼저 이를 처리하며 그 turn의 read/evidence 발급은 0이다. 처리 뒤에도
+                  blocker가 남으면 drained/authority-clear false와 blocker scheduling을 보존한다.
                 - **B:** positive-prefix→would-block→final parser empty에서 admit/traversal/aggregate 뒤 같은
                   receipt/seed와 fresh blocker snapshot을 대조한다. traversal이 live-screen backlog를
                   publish한 대표 frame은 evidence abort exact-one, drained/authority-clear false,
-                  inherited-work scheduling을 보존한다. owner backlog를 만들지 않는 positive fixture만
-                  evidence consume과 drained true를 허용하며 두 경우 모두
-                  `rx_read_bytes/rx_bytes/rx_frames`를 보존한다.
+                  inherited-work scheduling을 보존한다. 현재 protocol의 complete positive frame은 반드시
+                  screen/metadata/resize/response owner 중 하나를 publish하므로 backlog 없는 positive
+                  drain-success 경로는 존재하지 않는다. positive prefix에서 drained true를 합성하는
+                  fixture를 두지 않고, 유일한 drain-success 제품 경로는 owner backlog가 없는 zero-prefix
+                  would-block이다. 두 경로 모두 `rx_read_bytes/rx_bytes/rx_frames`를 보존한다.
                 - **C:** positive-prefix final incomplete 또는 frame/read budget exhausted에서 evidence abort
                   exact-one, drained false.
                 - **D:** traversal terminal, EOF, socket error 대표 경로에서 evidence 미발급 또는 abort,
@@ -7938,18 +7951,18 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 네 gate가 모두 green이기 전에는 C4 core integration 구현으로 표시하지 않는다. C4 전체
                 완료 표시는 별도 S3-D와 나머지 named matrix까지 green이어야 한다.
 
-                **C4a~C4d core integration 구현, S3-D 미완료:** private pump가
+                **C4a~C4d core integration 및 S3-D 구현, 최종 적대적 재감사 대기:** private pump가
                 collector·guarded admit·buffered traversal·aggregate의 기본 경로를 held lease 안에서 조립한다.
                 final-address callback token과
                 `PreparedAdmitUsePermit` begin→finish→exact reset, phase-aware replacement cleanup guard가
                 nested callback, stale/copy/context/candidate, parser/inventory/storage/lease drift를
                 fail-close한다. 같은 pinned scratch의 연속 positive turn, zero-prefix would-block과
                 positive-prefix admission/traversal의 현재 smoke, guarded/quarantine completion exact-one과
-                제품 callsite allowlist는 검증했다. 그러나 현재 `RxDrainEvidence`의 즉시
-                prepare-and-consume helper와 두 adapter smoke는 위 S3-D one-shot authority, A~G 또는 C4 전체
-                hostile matrix의 완료 증거가 아니다. S3-D와 나머지 named C4 matrix가
-                Debug/ReleaseFast `test-session-host` 및 ReleaseFast `check-boundaries`에서 green이기 전에는
-                C4 전체를 완료로 표시하지 않는다.
+                제품 callsite allowlist를 검증했다. S3-D는 leaf-owned prepared/consumed projection과
+                pump-private prepare→arm→settle→consume lifecycle, fresh owner/blocker 재검증, finished
+                exact reset을 연결했다. A~G와 leaf full geometry matrix는 제품/leaf 테스트로 고정했다.
+                최종 SSOT·유지보수·보안 적대적 재감사와 그 지적사항을 닫기 전에는 S3-D와 C4 전체를
+                완료로 표시하지 않는다.
                 POSIX syscall과 `external_pump_owner` 제품 `RxTurnOps` 진입은 C5 전까지 0이다.
               - **C5 product closure:** `external_pump_owner`가 `RxTurnOps`의 exact-one 제품 entry를 사용하고 POSIX
                 adapter가 errno만 `RxReadOutcome`으로 변환한다. 실제 Darwin socketpair, readable+writable

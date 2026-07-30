@@ -68,8 +68,8 @@
 > socket callback을 추가하지 않는다. 구조 이동보다 먼저 `advanceValidatedPartial` exact-one 결과의
 > before/after/header/range/identity가 classified intent seal에 포함되고 traversal이 sealed after만
 > 소비하는지 고정한다. 외부 제품 owner→pump와 내부 pump→traversal callsite를 각각 exact-one으로 검사한다.
-> d2c는 **설계 gate C0와 구현 gate C1~C3 및 C4a~C4d core integration을 완료했고,
-> S3-D drain evidence와 나머지 C4 named matrix 및 C5는 구현 전**이다. C1은 split
+> d2c는 **설계 gate C0와 구현 gate C1~C3, C4a~C4d core integration 및 S3-D를 완료했고,
+> C4 최종 적대적 재감사와 C5는 구현 전**이다. C1은 split
 > frame/read budget policy, Client parser provenance와 storage/lease에 이중 봉인된 resident cap,
 > read DTO/constants/final-address scratch layout, 모든 positive limit tie와 accepted
 > `< / == / >` stop 표를 고정한다. lease는 Client/parser 주소와 전체 provenance를 thread-local snapshot에도
@@ -106,11 +106,16 @@
 > attempt permit 전 필드, protected range count/sort/overlap/overflow/partial leaf, stopped prefix 사후 변조,
 > receipt/borrow alias·replay·settle mismatch, canonical terminal/teardown, ordinary/quarantine cross-finalizer,
 > tag/phase/bound/cap/generation/replay와 같은-token 두 thread accounting event exact-one을 자동 검증한다.
-> C4 private pump의 기본 integration smoke는 구현했지만 final drain evidence는 아직
-> S3-D one-shot capability gate가 남았다. receipt/borrow/permit/seed, settle 전후 scratch generation,
-> parser/budget/lease/owner snapshot과 fresh inherited/live blocker zero를 봉인하고 재검증한 뒤에만
-> `socket_rx_drained=true`를 publish하는 A~G adapter matrix를 닫아야 C4 완료다. 그 뒤 C5 POSIX 제품
-> facade+실제 socketpair를 마지막 구현 gate로 닫는다.
+> C4 private pump core와 S3-D의 leaf-owned prepared/consumed projection,
+> pump-private prepare→arm→settle→consume lifecycle, fresh owner/blocker 재검증, finished exact reset은
+> 구현했다. 이 core/projection과 현재 smoke·구조 경계는 Debug/ReleaseFast와 boundary에서 green이다.
+> A는 pre-existing backlog를 buffered-first로 처리하는 동안 transport read/evidence 발급을 금지하고,
+> B는 모든 positive complete frame이 owner backlog를 만든다는 protocol invariant를 고정한다. C의
+> frame/read-budget stop, F의 실제 consume→publication→decide recorder, G의 same-address incarnation
+> ABA·exact reset, leaf의 full pairwise exact/partial/adjacent/overflow matrix도 구현했다. E의
+> consume/abort authority drift와 moved/stale/double 제품 matrix도 구현했다. 최종 SSOT·유지보수·보안
+> 적대적 재감사와 그 지적사항을 닫기 전에는 C4 전체를 완료로 표시하지
+> 않는다. 그 뒤 C5 POSIX 제품 facade+실제 socketpair를 마지막 구현 gate로 닫는다.
 > C3 `snapshotDrainSeedAuthority`는 prepared/consumed phase의 exact address graph, private digest/range와
 > attempt continuity를 callback 0/mutation 0으로 인증한 value-only projection만 반환한다. C4 pump는 raw
 > receipt/borrow/permit/seed field를 재해석하지 않고 두 projection continuity만 비교한다. full final

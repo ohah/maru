@@ -538,10 +538,14 @@ const agent_activity_window_ms: u64 = 500; // 이 안의 마지막 PTY output은
 /// 실측(codex 0.146.0)에서 composer는 입력 행 수만큼 제한 없이 자라, 입력 13행부터 프롬프트 마커가 12행 tail 밖으로
 /// 밀려 idle 근거가 사라졌다. 상시 chrome(프롬프트 마커·실행 footer)은 입력 길이와 무관하게 tail 안에 남아야 하므로
 /// 화면 높이급으로 둔다. 오래된 오버레이 문구가 현재 근거로 끌려오는 것은 행 수가 아니라 오버레이 규칙의 거리
-/// 게이트가 막는다(docs/agent-session.md «상태 모델과 우선순위»). 실제 복사량은 byte 상한이 함께 조이고,
-/// dumpRecentTextUtf8이 cols 기준 worst-case로 행 수를 다시 줄이므로 넓은 창에서는 자동으로 더 적게 읽는다.
+/// 게이트가 막는다(docs/agent-session.md «상태 모델과 우선순위»).
+///
+/// byte 상한은 **행 상한을 잘라먹지 않을 만큼** 크게 잡는다. `dumpRecentTextUtf8`이 `max_bytes / (cols*4 + 1)`로 행 수를
+/// 다시 계산하므로, 32KiB로 두면 320칸에서 25행·640칸에서 12행으로 줄어 이 상수가 대체하려던 한계가 넓은 창에서 그대로
+/// 되살아난다(코드 리뷰에서 재현). 128KiB면 640칸에서도 48행이 유지된다. worst-case 가정(모든 셀 4바이트)일 뿐이고
+/// 실제 복사량은 화면 내용만큼이라, ASCII 화면에서는 여전히 수십 KiB다.
 const agent_screen_tail_rows: usize = 48;
-const agent_screen_tail_bytes: usize = 32 * 1024;
+const agent_screen_tail_bytes: usize = 128 * 1024;
 const agent_spin_interval_ms: u32 = 133; // running 스피너 프레임 주기(옛 30Hz 4틱 ≈133ms).
 // synchronized output(DECSET 2026) ESU-유실 복구 deadline. BSU(2026h) 후 ESU(2026l)가
 // 영영 안 오면(앱 크래시·SSH 끊김·버그) frame 투영이 무한정 막혀 화면이 freeze되므로, 이 한도를 넘는 hold는
@@ -50016,29 +50020,33 @@ test "관측 tail 상한은 여러 행 composer의 프롬프트 마커를 계속
     // tail 상한이 짧으면 프롬프트 마커가 tail 밖으로 밀려 **유일한 idle 근거가 사라지고** PTY activity 폴백이 타이핑을
     // running으로 단정한다. 실제 상수 + 실제 코어 직렬화 + 순수 observer를 함께 통과시켜 제품 경로를 못박는다
     // (PTY·GUI 없이 검증 가능한 구간이다).
+    // **넓은 창까지 확인한다.** `dumpRecentTextUtf8`이 `max_bytes / (cols*4 + 1)`로 행 수를 다시 계산하므로, byte 상한이
+    // 작으면 행 상수가 조용히 무력화된다 — 32KiB일 때 640칸에서 12행으로 되돌아갔다(코드 리뷰에서 재현).
     const allocator = std.testing.allocator;
     const observer = maru.session.agent_observer;
-    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 80, .rows = 24 });
-    defer core.deinit();
+    inline for (.{ 80, 320, 640 }) |cols| {
+        var core = try terminal.TerminalCore.init(allocator, .{ .cols = cols, .rows = 30 });
+        defer core.deinit();
 
-    try core.write("› line1\r\n");
-    var row: usize = 2;
-    while (row <= 14) : (row += 1) {
-        var buf: [32]u8 = undefined;
-        try core.write(try std.fmt.bufPrint(&buf, "  line{d}\r\n", .{row}));
+        try core.write("› line1\r\n");
+        var row: usize = 2;
+        while (row <= 14) : (row += 1) {
+            var buf: [32]u8 = undefined;
+            try core.write(try std.fmt.bufPrint(&buf, "  line{d}\r\n", .{row}));
+        }
+        try core.write("\r\n  Context 4% used · weekly 67% left · gpt-5.6-sol low");
+
+        const tail = try core.dumpRecentTextUtf8(allocator, agent_screen_tail_rows, agent_screen_tail_bytes);
+        defer allocator.free(tail);
+        try std.testing.expect(std.mem.indexOf(u8, tail, "›") != null);
+        try std.testing.expectEqual(observer.State.idle, observer.detect(.codex, .{ .screen = tail, .output_active = true }).state);
+
+        // non-vacuous: 옛 12행 상한으로 같은 화면을 읽으면 마커가 빠지고 폴백이 running을 세운다.
+        const short_tail = try core.dumpRecentTextUtf8(allocator, 12, agent_screen_tail_bytes);
+        defer allocator.free(short_tail);
+        try std.testing.expect(std.mem.indexOf(u8, short_tail, "›") == null);
+        try std.testing.expectEqual(observer.State.running, observer.detect(.codex, .{ .screen = short_tail, .output_active = true }).state);
     }
-    try core.write("\r\n  Context 4% used · weekly 67% left · gpt-5.6-sol low");
-
-    const tail = try core.dumpRecentTextUtf8(allocator, agent_screen_tail_rows, agent_screen_tail_bytes);
-    defer allocator.free(tail);
-    try std.testing.expect(std.mem.indexOf(u8, tail, "›") != null);
-    try std.testing.expectEqual(observer.State.idle, observer.detect(.codex, .{ .screen = tail, .output_active = true }).state);
-
-    // non-vacuous: 옛 12행 상한으로 같은 화면을 읽으면 마커가 빠지고 폴백이 running을 세운다.
-    const short_tail = try core.dumpRecentTextUtf8(allocator, 12, agent_screen_tail_bytes);
-    defer allocator.free(short_tail);
-    try std.testing.expect(std.mem.indexOf(u8, short_tail, "›") == null);
-    try std.testing.expectEqual(observer.State.running, observer.detect(.codex, .{ .screen = short_tail, .output_active = true }).state);
 }
 
 test "agent representative prioritizes blocked over running over active idle" {

@@ -49,9 +49,20 @@ const Gate = struct {
     line_prefix: []const []const u8 = &.{},
     /// 앞 공백을 벗긴 첫 코드포인트가 이 범위 중 하나(OR)에 드는 라인이 있는지.
     leading_codepoint_ranges: []const CodepointRange = &.{},
+    /// **같은 한 줄** 안에서 prefix와 모든 contains를 동시에 만족하는 라인이 있는지. 평면 `contains`는 화면 전체를
+    /// 훑어 서로 다른 줄의 조각을 조합해 버리므로, chrome 한 줄의 모양을 지정할 때는 이 leaf를 쓴다 — 에이전트가
+    /// 그 문구를 여러 줄에 흩어 언급하는 산문과 실제 chrome 한 줄을 구분하는 유일한 수단이다.
+    line: ?LineMatch = null,
     all: []const Gate = &.{},
     any: []const Gate = &.{},
     not: []const Gate = &.{},
+};
+
+/// 한 줄 안의 모양. `prefix`는 앞 공백(과 박스 세로선)을 벗긴 뒤 비교하고, `contains`는 그 줄 안에서 대소문자 무시
+/// 부분일치를 **모두** 요구한다. 둘 다 비면 양성 매처가 없으므로 빌드에서 거부한다(validateGate).
+const LineMatch = struct {
+    prefix: []const u8 = "",
+    contains: []const []const u8 = &.{},
 };
 
 /// 빌드에 포함되는 작은 manifest 행. v1은 정규식 엔진 없이 문자열 조건·구조 region만 쓴다.
@@ -89,10 +100,17 @@ const CodepointRange = struct { lo: u21, hi: u21 };
 const braille_block = CodepointRange{ .lo = 0x2800, .hi = 0x28FF };
 
 const claude_rules = [_]Rule{
-    .{ .id = "permission_prompt", .state = .blocked, .priority = 1000, .region = .screen, .all = &.{"do you want to proceed?"}, .any = &.{ "esc to cancel", "yes", "tab to amend" }, .max_lines_from_bottom = 6, .visible_blocker = true },
-    .{ .id = "selection_prompt", .state = .blocked, .priority = 990, .region = .screen, .all = &.{ "enter to select", "esc to cancel" }, .max_lines_from_bottom = 6, .visible_blocker = true },
+    // `any`의 선택지는 **선택지 줄의 실측 모양**(`❯ 1. Yes…`)을 쓴다. 맨 단어 `yes`는 화면 어디에나 있어서, 위쪽 산문의
+    // `Do you want to proceed?`와 아래 composer에 사용자가 친 `yes …`가 조합돼 거짓 blocked를 만들었다(코드 리뷰에서
+    // 재현). 거리 게이트가 근거 전체(가장 위 근거)를 재게 바뀌었으므로 이제 두 근거가 떨어져 있으면 통과하지 못한다.
+    //
+    // 거리 상한 10의 근거는 실측이다(claude 2.1.x, 100×30). 권한 다이얼로그는 composer·statusLine을 **대체**하고 마지막
+    // 줄이 `Esc to cancel · Tab to amend · …` 힌트다. 옵션 3개일 때 `Do you want to proceed?`가 하단에서 5행이고 옵션이
+    // 하나 늘 때마다 1행씩 밀리므로, 6으로 두면 옵션 4개부터 다이얼로그를 놓친다. 10이면 옵션 8개까지 덮는다.
+    .{ .id = "permission_prompt", .state = .blocked, .priority = 1000, .region = .screen, .all = &.{"do you want to proceed?"}, .any = &.{ "esc to cancel", "1. yes", "tab to amend" }, .max_lines_from_bottom = 10, .visible_blocker = true },
+    .{ .id = "selection_prompt", .state = .blocked, .priority = 990, .region = .screen, .all = &.{ "enter to select", "esc to cancel" }, .max_lines_from_bottom = 10, .visible_blocker = true },
     // 폴더 신뢰 확인 등 확정형 선택 화면(실측: `❯ 1. Yes…` + `Enter to confirm · Esc to cancel`).
-    .{ .id = "confirm_prompt", .state = .blocked, .priority = 985, .region = .screen, .all = &.{ "enter to confirm", "esc to cancel" }, .max_lines_from_bottom = 6, .visible_blocker = true },
+    .{ .id = "confirm_prompt", .state = .blocked, .priority = 985, .region = .screen, .all = &.{ "enter to confirm", "esc to cancel" }, .max_lines_from_bottom = 10, .visible_blocker = true },
     // 입력 줄은 하단 거리가 아니라 구조로 집는다. 사용자 statusLine 커스텀이 상태줄을 여러 줄로 만들면 거리
     // 가드가 현재 프롬프트를 잔상으로 오인하므로(실측), prompt_anchor가 프롬프트 라인 자체를 앵커로 쓴다.
     .{ .id = "live_prompt", .state = .idle, .priority = 900, .region = .prompt_anchor, .line_prefixes = &.{"❯"}, .visible_idle = true },
@@ -105,42 +123,56 @@ const claude_rules = [_]Rule{
     .{ .id = "working_title", .state = .running, .priority = 950, .region = .title, .leading_codepoint_ranges = &.{braille_block}, .visible_running = true },
     // 실행 footer도 상시 chrome이라 거리 게이트를 걸지 않는다. 사용자 statusLine이 여러 줄이거나 입력이 여러 행이면
     // footer가 스스로 위로 밀려 근거가 사라지고, 그 화면에는 idle 근거도 없어 판정이 폴백으로 떨어진다(실측).
-    // 잔상 방지는 거리가 아니라 위치 tiebreak가 맡는다 — 아래로 돌아온 프롬프트가 위쪽 옛 footer를 이긴다.
-    .{ .id = "working_footer", .state = .running, .priority = 890, .region = .screen, .any = &.{ "esc to interrupt", "esc to stop" }, .visible_running = true },
+    //
+    // 대신 region을 `footer`(프롬프트 박스 **아래**)로 좁힌다. `screen`으로 두면 사용자가 composer 본문에 그 문구를
+    // 타이핑하는 것만으로 위치 tiebreak가 footer 손을 들어 준다 — live_prompt의 위치는 프롬프트 **라인 시작** offset인데
+    // 본문에 있는 문구는 그보다 아래(큰 offset)라서 항상 이긴다(코드 리뷰에서 재현). 구조로 자르면 입력 본문은
+    // box_body이고 실행 chrome만 footer라 그 조합이 성립하지 않는다.
+    .{ .id = "working_footer", .state = .running, .priority = 890, .region = .footer, .any = &.{ "esc to interrupt", "esc to stop" }, .visible_running = true },
 };
+
+/// codex turn 진행의 단일 discriminator: 실행 footer **한 줄**의 모양이다(실측 `• Working (3s • esc to interrupt)`).
+/// 한 줄 안에서 판정하는 이유는 두 가지 오탐을 동시에 막기 위함이다. ⑴ 평면 `all`로 두면 화면 전체에서 `working`과
+/// `esc to interrupt`를 **서로 다른 줄에서** 주워 조합한다. ⑵ 문구를 `esc to interrupt)`처럼 붙여 쓰면 footer 뒤에
+/// 다른 항목이 붙거나 wrap으로 `)`가 다음 줄로 밀릴 때 매치가 사라지고, 그 순간 아래 live_prompt가 **근거 있는 idle**을
+/// 세워 작업 중인 세션이 "대기중"으로 보인다(코드 리뷰에서 재현). 불릿 prefix까지 요구해 산문 인용도 대부분 걸러 낸다 —
+/// codex 출력 불릿도 `•`를 쓰므로 완벽한 분리는 아니고, 그 잔여는 docs «한계»에 적었다.
+const codex_working_line = LineMatch{ .prefix = "•", .contains = &.{ "working", "esc to interrupt" } };
 
 const codex_rules = [_]Rule{
     .{ .id = "action_required_title", .state = .blocked, .priority = 1000, .region = .title, .all = &.{"action required"}, .visible_blocker = true },
     .{ .id = "confirmation_prompt", .state = .blocked, .priority = 990, .region = .screen, .any = &.{ "press enter to confirm or esc to cancel", "press enter to confirm or esc to go back", "press enter to continue", "allow command?", "enter to submit answer", "enter to submit all" }, .max_lines_from_bottom = 6, .visible_blocker = true },
     .{ .id = "interrupted_prompt", .state = .idle, .priority = 885, .region = .screen, .all = &.{"conversation interrupted"}, .max_lines_from_bottom = 4, .visible_idle = true },
     // Codex는 turn 실행 중에도 아래 composer를 열어 steering 입력을 받는다. 따라서 prompt가 더 아래에 있어도
-    // `esc to interrupt`가 현재 tail에 함께 보이면 idle 근거가 아니다(실제 0.144.5 UI). 즉 codex에서는 "아래=최신"
-    // tiebreak가 성립하지 않고 `esc to interrupt` 문구가 turn 진행의 discriminator다.
+    // 실행 footer가 현재 tail에 함께 보이면 idle 근거가 아니다. 즉 codex에서는 "아래=최신" tiebreak가 성립하지 않고
+    // footer 한 줄(`codex_working_line`)이 turn 진행의 discriminator다.
     //
     // 하단 거리 게이트는 뺐다. codex composer는 박스 테두리 없이 `› 입력` + 빈 행 + `Context …` 상태줄(상수 2행)
     // 구조라(실측 0.146.0), 입력이 4행이 되면 마커의 하단 거리가 5가 되어 **유일한 idle 근거가 사라진다.** 그러면
     // pty_activity 폴백만 남아 타이핑 에코가 running으로 단정됐다(사용자 보고 증상). 프롬프트 아래에 상태줄이 상수로
     // 붙어서 `prompt_anchor`("마커 아래가 모두 공백") 정의에도 걸리지 않으므로 region 이관 대신 `screen`을 유지한다.
     //
-    // discriminator는 실측 footer 문구 그대로 **닫는 괄호까지** 쓴다: `• Working (3s • esc to interrupt)`. 괄호 없는
-    // 느슨한 `esc to interrupt`로 두면 에이전트가 **산문에서 그 표현을 언급**하기만 해도(터미널을 만드는 저장소에서는
-    // 흔하다) 이 규칙이 idle을 지우고 아래 working_footer가 거짓 running을 세운다. 반대 위험(provider가 문구를 바꿔
-    // 근거를 잃음)은 폴백으로 degrade될 뿐이라, 거짓 running보다 근거 상실을 택했다.
-    .{ .id = "live_prompt", .state = .idle, .priority = 900, .region = .screen, .line_prefixes = &.{ "›", "❯" }, .none = &.{ "allow command?", "esc to interrupt)" }, .visible_idle = true },
+    // `allow command?`는 `not`에서 뺐다. 승인 화면은 confirmation_prompt(blocker)가 절대 우선으로 이미 이기므로 중복인데,
+    // tail이 넓어지면 **이미 승인이 끝난 오래된 문구**가 유일한 idle 근거를 지워 폴백이 타이핑을 running으로 만든다
+    // (코드 리뷰에서 재현). blocker 쪽은 거리 게이트로 현재성을 보고, idle 쪽은 그 문구를 아예 보지 않는다.
+    .{ .id = "live_prompt", .state = .idle, .priority = 900, .region = .screen, .visible_idle = true, .gate = .{
+        .any = &.{ .{ .line_prefix = &.{"›"} }, .{ .line_prefix = &.{"❯"} } },
+        .not = &.{.{ .line = codex_working_line }},
+    } },
     // OSC 9;4(ConEmu progress)는 실측에서 두 provider 모두 emit하지 않았다 — 현재 발화하지 않는 규칙이다.
     // 표준 기반 데이터라 존치하되 근거 있는 값으로 오해하지 않도록 남긴다(docs/agent-session.md «실측 신호 기록»).
     .{ .id = "progress_idle", .state = .idle, .priority = 870, .region = .progress, .all = &.{"4;0"}, .visible_idle = true },
     .{ .id = "progress_running", .state = .running, .priority = 895, .region = .progress, .any = &.{ "4;1", "4;2", "4;3", "4;4" }, .visible_running = true },
     .{ .id = "working_title", .state = .running, .priority = 950, .region = .title, .leading_codepoint_ranges = &.{braille_block}, .visible_running = true },
-    // live_prompt의 `none`과 **같은 문자열**을 쓴다. 한쪽만 좁으면(예: `Working` 단어를 함께 요구) provider가 문구를
-    // 바꿀 때 "프롬프트도 아니고 실행도 아닌" 화면이 생겨 근거 공백이 나고, 폴백이 그 틈을 메우며 오판한다. 같은
-    // discriminator를 공유하면 두 규칙이 구성상 상호배타가 되어 공백이 없다. 거리 게이트를 뺀 이유는 실측 배치에서
-    // footer가 live composer **위**에 와서(에코 → footer → steering composer → 상태줄) 하단 거리가 6이 되고,
-    // 그러면 **실제 작업 중에도** running 근거가 사라지기 때문이다(반대 방향 결함).
+    // live_prompt의 `not`과 **같은 게이트**를 쓴다. 한쪽만 좁으면 provider가 문구를 바꿀 때 "프롬프트도 아니고 실행도
+    // 아닌" 화면이 생겨 근거 공백이 나고, 폴백이 그 틈을 메우며 오판한다. 같은 discriminator를 공유하면 두 규칙이
+    // 구성상 상호배타가 되어 공백이 없다. 거리 게이트를 뺀 이유는 실측 배치에서 footer가 live composer **위**에 와서
+    // (에코 → footer → steering composer → 상태줄) 하단 거리가 6이 되고, 그러면 **실제 작업 중에도** running 근거가
+    // 사라지기 때문이다(반대 방향 결함).
     //
-    // claude와 달리 codex는 문구를 좁게(닫는 괄호 포함) 잡는다. claude는 프롬프트가 항상 footer보다 아래라 위치
-    // tiebreak가 산문 오탐을 막아 주지만, codex는 그 전제가 반대여서 문구 자체가 유일한 방어선이다.
-    .{ .id = "working_footer", .state = .running, .priority = 890, .region = .screen, .any = &.{"esc to interrupt)"}, .visible_running = true },
+    // claude는 프롬프트가 항상 실행 chrome보다 위라 region(`footer`)으로 자를 수 있지만, codex는 실행 표시가 프롬프트
+    // **위**에 와서 그 구조가 성립하지 않는다. 그래서 codex는 region 대신 **한 줄 모양**으로 좁힌다.
+    .{ .id = "working_footer", .state = .running, .priority = 890, .region = .screen, .visible_running = true, .gate = .{ .line = codex_working_line } },
 };
 
 pub fn detect(agent: Agent, input: Input) Detection {
@@ -205,24 +237,39 @@ fn matchPosition(rule: Rule, input: Input, lines: *const LineScan) ?usize {
         return base + (gateMatchPosition(g, haystack) orelse return null);
     }
     var latest: usize = 0;
+    // 거리 게이트는 **가장 위 근거**를 기준으로 잰다. 가장 아래 근거만 보면 조건이 여럿인 규칙이 20행 떨어진 조각을
+    // 조합해도 통과해, 위쪽 산문 + 아래쪽 사용자 입력으로 거짓 blocked가 섰다(코드 리뷰에서 재현). 오버레이 문구는
+    // 실제로 붙어 있으므로 "근거 전체가 하단 N행 안"이 원래 의도다.
+    var earliest: ?usize = null;
     for (rule.all) |needle| {
         const pos = lastIndexOfIgnoreCase(haystack, needle) orelse return null;
         latest = @max(latest, pos);
+        earliest = @min(earliest orelse pos, pos);
     }
     if (rule.any.len > 0) {
         var found: ?usize = null;
         for (rule.any) |needle| if (lastIndexOfIgnoreCase(haystack, needle)) |pos| {
             found = @max(found orelse 0, pos);
         };
-        latest = @max(latest, found orelse return null);
+        const pos = found orelse return null;
+        latest = @max(latest, pos);
+        earliest = @min(earliest orelse pos, pos);
     }
     for (rule.none) |needle| if (containsIgnoreCase(haystack, needle)) return null;
-    if (rule.line_prefixes.len > 0) latest = @max(latest, lastLinePrefixPosition(haystack, rule.line_prefixes) orelse return null);
-    if (rule.leading_codepoint_ranges.len > 0) latest = @max(latest, lastLeadingCodepointPosition(haystack, rule.leading_codepoint_ranges) orelse return null);
-    if (rule.all.len == 0 and rule.any.len == 0 and rule.line_prefixes.len == 0 and rule.leading_codepoint_ranges.len == 0) return null;
+    if (rule.line_prefixes.len > 0) {
+        const pos = lastLinePrefixPosition(haystack, rule.line_prefixes) orelse return null;
+        latest = @max(latest, pos);
+        earliest = @min(earliest orelse pos, pos);
+    }
+    if (rule.leading_codepoint_ranges.len > 0) {
+        const pos = lastLeadingCodepointPosition(haystack, rule.leading_codepoint_ranges) orelse return null;
+        latest = @max(latest, pos);
+        earliest = @min(earliest orelse pos, pos);
+    }
+    const anchor = earliest orelse return null;
     if (rule.max_lines_from_bottom) |max_lines| {
         var lines_after: usize = 0;
-        for (haystack[latest..]) |byte| if (byte == '\n') {
+        for (haystack[anchor..]) |byte| if (byte == '\n') {
             lines_after += 1;
         };
         if (lines_after >= max_lines) return null;
@@ -249,6 +296,10 @@ fn gateMatchPosition(gate: Gate, text: []const u8) ?usize {
         latest = @max(latest, lastLeadingCodepointPosition(text, gate.leading_codepoint_ranges) orelse return null);
         positive = true;
     }
+    if (gate.line) |line| {
+        latest = @max(latest, lastLineMatchPosition(text, line) orelse return null);
+        positive = true;
+    }
     for (gate.all) |sub| {
         latest = @max(latest, gateMatchPosition(sub, text) orelse return null);
         positive = true;
@@ -269,8 +320,9 @@ fn gateMatchPosition(gate: Gate, text: []const u8) ?usize {
 /// 양성 매처가 없는 게이트는 모든 텍스트에 매치되어 규칙이 조용히 전역 발화한다. 데이터 실수를 런타임이 아니라
 /// **빌드에서** 잡는다. `not` 안의 게이트도 같은 이유로 양성 매처가 있어야 한다(비면 항상 매치되어 규칙이 죽는다).
 fn gateHasPositiveMatcher(gate: Gate) bool {
+    const line_positive = if (gate.line) |line| line.prefix.len > 0 or line.contains.len > 0 else false;
     return gate.contains.len > 0 or gate.line_prefix.len > 0 or
-        gate.leading_codepoint_ranges.len > 0 or gate.all.len > 0 or gate.any.len > 0;
+        gate.leading_codepoint_ranges.len > 0 or line_positive or gate.all.len > 0 or gate.any.len > 0;
 }
 
 fn validateGate(comptime gate: Gate, comptime rule_id: []const u8) void {
@@ -345,6 +397,28 @@ fn lastLeadingCodepointPosition(text: []const u8, ranges: []const CodepointRange
             }
         }
         position += line_raw.len + 1;
+    }
+    return latest;
+}
+
+/// 같은 한 줄 안에서 prefix와 모든 contains를 만족하는 라인 가운데 가장 아래 위치. 평면 `contains`가 서로 다른 줄의
+/// 조각을 조합해 오탐하는 것을 막는 유일한 leaf다(리뷰에서 실제 오탐 4건이 모두 이 조합에서 나왔다).
+fn lastLineMatchPosition(text: []const u8, match: LineMatch) ?usize {
+    var position: usize = 0;
+    var latest: ?usize = null;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line_raw| : (position += line_raw.len + 1) {
+        const line = std.mem.trimStart(u8, line_raw, " \t\r");
+        const indent = line_raw.len - line.len;
+        if (match.prefix.len > 0 and !std.mem.startsWith(u8, promptContent(line), match.prefix)) continue;
+        var all_present = true;
+        for (match.contains) |needle| {
+            if (!containsIgnoreCase(line, needle)) {
+                all_present = false;
+                break;
+            }
+        }
+        if (all_present) latest = position + indent;
     }
     return latest;
 }
@@ -448,8 +522,10 @@ fn lineText(lines: *const LineScan, idx: usize) []const u8 {
 ///   사용자가 입력 중인 여러 행이다. 내용이 있어도 잔상 근거가 아니다 — 실측(claude)에서 입력 2행부터 이 검사가
 ///   프롬프트를 지워 idle 근거를 잃었다. "바로 아래 첫 줄"을 요구하는 이유는, 그렇지 않으면 위쪽 잔상 프롬프트와
 ///   아래 어딘가의 수평선(에이전트 출력에 흔한 구분선)만으로 잔상이 현재 프롬프트로 승격되기 때문이다.
-/// - **공백 갈래**: 그 밖에는 프롬프트 아래가 모두 공백일 것. 닫는 테두리가 없는 선택지 목록(`❯ 1. Yes` 아래에 다른
-///   항목이 이어짐)과 출력이 이어지는 잔상 프롬프트가 여기서 걸러진다.
+/// - **공백 갈래**: 그 밖에는 프롬프트와 그 아래 첫 수평선 사이가 비어 있을 것(수평선이 없으면 화면 끝까지). 닫는
+///   테두리가 없는 선택지 목록(`❯ 1. Yes` 아래에 다른 항목이 이어짐)과 출력이 이어지는 잔상 프롬프트가 여기서 걸러진다.
+///   스캔을 **박스 안으로 한정**하는 것이 중요하다 — 화면 끝까지 훑으면 박스 아래 상태줄이 비-공백이라, 박스 안 두 번째
+///   입력 행이 마커로 시작하는 경우(프롬프트 예시를 붙여넣기) 현재 프롬프트를 못 찾고 근거를 잃는다(코드 리뷰에서 재현).
 ///
 /// 어느 갈래든 하단 거리(행 수)는 보지 않으므로 상태줄이 몇 줄이든, 입력이 몇 행이든 영향받지 않는다.
 fn lastPromptLineIndex(lines: *const LineScan) ?usize {
@@ -457,11 +533,12 @@ fn lastPromptLineIndex(lines: *const LineScan) ?usize {
     while (i > 0) {
         i -= 1;
         if (!isPromptLine(lineText(lines, i))) continue;
-        if (firstRuleBelow(lines, i) != null) {
+        const limit = firstRuleBelow(lines, i) orelse lines.count;
+        if (limit != lines.count) {
             if (nearestRuleAbove(lines, i)) |above| if (above + 1 == i) return i;
         }
         var j = i + 1;
-        while (j < lines.count) : (j += 1) {
+        while (j < limit) : (j += 1) {
             if (std.mem.trim(u8, lineText(lines, j), " \t\r").len != 0) return null;
         }
         return i;
@@ -663,7 +740,9 @@ test "current running footer beats a prior prompt or interruption in the screen 
 }
 
 test "codex steering composer below a working footer remains running" {
-    const d = detect(.codex, .{ .screen = "Working (8s · esc to interrupt)\n› Add a follow-up" });
+    // footer 줄은 실측 모양(`• Working (…)`)으로 적는다. 규칙이 **한 줄 안에서** 불릿 + `working` + `esc to interrupt`를
+    // 요구하므로, 불릿 없는 합성 문구는 더 이상 footer로 인정되지 않는다(산문 인용 오탐을 막는 대가).
+    const d = detect(.codex, .{ .screen = "• Working (8s · esc to interrupt)\n› Add a follow-up" });
     try std.testing.expectEqual(State.running, d.state);
     try std.testing.expect(d.visible_running);
 }
@@ -1008,6 +1087,123 @@ test "실행 footer 규칙은 아래 상태줄이 길어도 무효화되지 않�
     const d = detect(.claude, .{ .screen = screen });
     try std.testing.expectEqual(State.running, d.state);
     try std.testing.expect(d.visible_running);
+}
+
+// ── 코드 리뷰 재현 회귀 (max 리뷰에서 실제로 오판이 재현된 화면) ──────────────
+
+test "claude: composer 본문에 든 esc to interrupt는 실행 근거가 아니다" {
+    // live_prompt의 위치는 프롬프트 **라인 시작** offset이라, 본문에 있는 문구는 항상 그보다 아래(큰 offset)다.
+    // working_footer가 `screen`이던 동안에는 위치 tiebreak가 무조건 footer 손을 들어, 이 기능을 물어보는 문장을
+    // 타이핑하는 것만으로 스피너가 돌았다. region을 footer로 좁혀 입력 본문(box_body)과 실행 chrome을 구조로 가른다.
+    const screen =
+        "────────────────────\n" ++
+        "❯ esc to interrupt 는 어떻게 판정되나요\n" ++
+        "  두 번째 입력 행\n" ++
+        "────────────────────\n" ++
+        "  yoonhb\n";
+    const d = detect(.claude, .{ .screen = screen });
+    try std.testing.expectEqual(State.idle, d.state);
+    try std.testing.expect(d.visible_idle);
+}
+
+test "claude: 박스 안 두 번째 입력 행이 마커로 시작해도 현재 프롬프트를 찾는다" {
+    // 공백 갈래 스캔이 박스를 넘어 화면 끝까지 가면, 아래 상태줄이 비-공백이라 근거를 통째로 잃는다.
+    const screen =
+        "────────────────────\n" ++
+        "❯ 예시를 보여줘\n" ++
+        "❯ 이런 프롬프트 말이야\n" ++
+        "────────────────────\n" ++
+        "  yoonhb\n";
+    const d = detect(.claude, .{ .screen = screen });
+    try std.testing.expectEqual(State.idle, d.state);
+    try std.testing.expect(d.visible_idle);
+}
+
+test "claude: 멀리 떨어진 조건 조각이 조합돼 blocked를 만들지 않는다" {
+    // 거리 게이트를 **가장 아래 근거**로만 재던 동안에는, 위쪽 산문의 질문과 아래 composer에 사용자가 친 `yes`가
+    // 조합돼 거짓 blocked가 섰다. blocked는 절대 우선이라 카드가 입력 대기로 표시되고 워크스페이스 대표까지 됐다.
+    const screen =
+        "Do you want to proceed?\no1\no2\no3\no4\no5\no6\no7\no8\n" ++
+        "────────────────────\n" ++
+        "❯ yes 좋아요\n" ++
+        "────────────────────\n" ++
+        "  yoonhb\n";
+    const d = detect(.claude, .{ .screen = screen });
+    try std.testing.expectEqual(State.idle, d.state);
+    try std.testing.expect(!d.visible_blocker);
+}
+
+test "claude 실측: 권한 다이얼로그는 옵션이 늘어도 blocked다" {
+    // 실측(2.1.x, 100×30): 다이얼로그가 composer·statusLine을 **대체**하고 마지막 줄이 힌트다. 질문은 옵션 3개일 때
+    // 하단에서 5행이고 옵션마다 1행씩 밀린다 — 거리 상한이 6이면 옵션 4개부터 놓친다.
+    const real =
+        "⏺ Running 1 shell command…\n" ++
+        "  ⎿  $ date +%s > stamp.txt\n" ++
+        "\n" ++
+        "──────────────────────────────\n" ++
+        " Bash command\n" ++
+        "\n" ++
+        "   date +%s > stamp.txt\n" ++
+        "   Write current epoch timestamp to stamp.txt\n" ++
+        "\n" ++
+        " Do you want to proceed?\n" ++
+        " ❯ 1. Yes\n" ++
+        "   2. Yes, and always allow access to codexprobe/ from this project\n" ++
+        "   3. No\n" ++
+        "\n" ++
+        " Esc to cancel · Tab to amend · ctrl+e to explain";
+    const d = detect(.claude, .{ .screen = real });
+    try std.testing.expectEqual(State.blocked, d.state);
+    try std.testing.expect(d.visible_blocker);
+
+    const five_options =
+        " Do you want to proceed?\n ❯ 1. Yes\n   2. B\n   3. C\n   4. D\n   5. No\n\n Esc to cancel · Tab to amend";
+    try std.testing.expectEqual(State.blocked, detect(.claude, .{ .screen = five_options }).state);
+}
+
+test "codex 실측: footer 뒤에 다른 항목이 붙어도 running이다" {
+    // 문구를 `esc to interrupt)`처럼 괄호까지 붙여 요구하면, footer 뒤에 항목이 하나 붙거나 wrap으로 `)`가 다음 줄로
+    // 밀리는 순간 running 근거가 사라진다. 그때 아래 composer가 **근거 있는 idle**을 세워, 작업 중인 세션이 turn 내내
+    // "대기중"으로 보인다(코드 리뷰에서 재현 — 거짓 running을 피하려다 더 나쁜 거짓 idle을 만든 셈이었다).
+    const screen = "› echo\n• Working (3s • esc to interrupt • ctrl+t for details)\n› steer\n  tab to queue message\n";
+    const d = detect(.codex, .{ .screen = screen, .output_active = false });
+    try std.testing.expectEqual(State.running, d.state);
+    try std.testing.expect(d.visible_running);
+}
+
+test "codex: 승인이 끝난 오래된 allow command?는 idle 근거를 지우지 않는다" {
+    // `none`에 두면 tail이 넓어질 때 이미 승인된 문구가 유일한 idle 근거를 지우고, confirmation_prompt는 거리 게이트
+    // 밖이라 blocked도 못 나와 폴백이 타이핑을 running으로 만든다. 승인 화면 자체는 blocker 우선 규칙이 이미 이긴다.
+    const screen = "Allow command?\nout1\nout2\nout3\nout4\nout5\nout6\nout7\n› \n\n  Context 4% used\n";
+    const d = detect(.codex, .{ .screen = screen, .output_active = true });
+    try std.testing.expectEqual(State.idle, d.state);
+    try std.testing.expect(d.visible_idle);
+    // 현재 승인 화면은 그대로 blocked여야 한다(중복이라 뺀 것이지 약화가 아니다).
+    try std.testing.expectEqual(State.blocked, detect(.codex, .{ .screen = "Allow command?\n› 1. Yes\n" }).state);
+}
+
+test "codex: 산문에 인용된 footer 리터럴은 running 근거가 아니다" {
+    // 같은 줄에 `working`과 `esc to interrupt`가 함께 있어도, 실행 footer는 불릿으로 시작하는 한 줄이라는 모양까지
+    // 요구하므로 문장 안 인용은 걸러진다. 리뷰가 지적한 대로 이 저장소 문서·fixture에 그 리터럴이 실제로 들어 있다.
+    const screen =
+        "● `• Working (3s • esc to interrupt)` 문구 한 줄로 판정합니다\n" ++
+        "\n" ++
+        "› \n" ++
+        "\n" ++
+        "  Context 7% used · weekly 61% left · gpt-5.6-sol low\n";
+    const d = detect(.codex, .{ .screen = screen });
+    try std.testing.expectEqual(State.idle, d.state);
+    try std.testing.expect(d.visible_idle);
+}
+
+test "같은 줄 게이트는 서로 다른 줄의 조각을 조합하지 않는다" {
+    try std.testing.expect(lastLineMatchPosition("working\nesc to interrupt", .{ .contains = &.{ "working", "esc to interrupt" } }) == null);
+    try std.testing.expect(lastLineMatchPosition("• Working (3s • esc to interrupt)", .{ .prefix = "•", .contains = &.{ "working", "esc to interrupt" } }) != null);
+    // 불릿이 없으면 매치하지 않는다(문장 안 인용 방어).
+    try std.testing.expect(lastLineMatchPosition("● 인용: Working esc to interrupt", .{ .prefix = "•", .contains = &.{ "working", "esc to interrupt" } }) == null);
+    // 여러 줄이 맞으면 가장 아래(최신) 위치를 쓴다.
+    const two = "• Working (1s • esc to interrupt)\n• Working (2s • esc to interrupt)";
+    try std.testing.expectEqual(std.mem.lastIndexOf(u8, two, "• Working").?, lastLineMatchPosition(two, .{ .prefix = "•", .contains = &.{"esc to interrupt"} }).?);
 }
 
 // ── 신호 세기 중재 ──────────────────────────────────────────────────────────

@@ -1,5 +1,129 @@
 const std = @import("std");
 
+test "d2d whole-turn authority stays a pure owner-free leaf" {
+    const allocator = std.testing.allocator;
+    const leaf = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/client_external_turn_authority.zig",
+    );
+    defer allocator.free(leaf);
+    const forbidden = [_][]const u8{
+        "client_external_pump",
+        "client.zig",
+        "client_pump",
+        "ExternalPumpStorage",
+        "external_inbox_ledger",
+        "external_rx_intent",
+        "external_rx_turn",
+        "callback",
+    };
+    for (forbidden) |needle|
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            countOccurrences(leaf, needle),
+        );
+    const lifecycle_apis = [_][]const u8{
+        "pub fn prepare(",
+        "pub fn validate(",
+        "pub fn abort(",
+        "pub fn abortForCleanup(",
+        "pub fn resetSpent(",
+    };
+    for (lifecycle_apis) |signature|
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            countOccurrences(leaf, signature),
+        );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        countOccurrences(leaf, "pub fn consume("),
+    );
+
+    const pump = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/client_external_pump.zig",
+    );
+    defer allocator.free(pump);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(
+            pump,
+            "@import(\"client_external_turn_authority.zig\")",
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(
+            pump,
+            "pub const AuthorityGeneration = client_external_turn_authority.AuthorityGeneration;",
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(
+            pump,
+            "pub const AttachmentRole = client_external_turn_authority.AttachmentRole;",
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(
+            pump,
+            "pub const OwnerAuthorityFlow = client_external_turn_authority.OwnerAuthorityFlow;",
+        ),
+    );
+
+    var importers: usize = 0;
+    var lifecycle_calls: usize = 0;
+    var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
+    defer dir.close(std.testing.io);
+    var walker = try dir.walk(allocator);
+    defer walker.deinit();
+    while (try walker.next(std.testing.io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig"))
+            continue;
+        const path = try std.fmt.allocPrint(allocator, "src/{s}", .{entry.path});
+        defer allocator.free(path);
+        const source = try readZigFileZ(allocator, path);
+        defer allocator.free(source);
+        const references = countOccurrences(
+            source,
+            "client_external_turn_authority.zig",
+        );
+        if (std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/client_external_pump.zig",
+        )) {
+            try std.testing.expectEqual(@as(usize, 1), references);
+            try std.testing.expect(joinedStringLiteralsContain(
+                source,
+                "client_external_turn_authority.zig",
+            ));
+            importers += references;
+        } else {
+            try std.testing.expectEqual(@as(usize, 0), references);
+            try std.testing.expect(!joinedStringLiteralsContain(
+                source,
+                "client_external_turn_authority.zig",
+            ));
+        }
+        for ([_][]const u8{
+            "client_external_turn_authority.prepare(",
+            "client_external_turn_authority.validate(",
+            "client_external_turn_authority.abort(",
+            "client_external_turn_authority.abortForCleanup(",
+            "client_external_turn_authority.resetSpent(",
+            "client_external_turn_authority.consume(",
+        }) |call|
+            lifecycle_calls += countOccurrences(source, call);
+    }
+    try std.testing.expectEqual(@as(usize, 1), importers);
+    // D0 owns only the type/lifecycle leaf. D2 adds the sole prepare/abort/reset adapter caller;
+    // the future consume caller remains zero until f3.
+    try std.testing.expectEqual(@as(usize, 0), lifecycle_calls);
+}
+
 test "session host neutral cleanup leaf has no owner reverse dependencies" {
     const allocator = std.testing.allocator;
     const source = try readZigFileZ(

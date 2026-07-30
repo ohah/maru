@@ -13,6 +13,7 @@ const client_external_mode = @import("client_external_mode.zig");
 const checked_event_counter = @import("checked_event_counter.zig");
 const client_external_rx_read = @import("client_external_rx_read.zig");
 const client_external_rx_turn = @import("client_external_rx_turn.zig");
+const client_external_turn_authority = @import("client_external_turn_authority.zig");
 const client_external_adoption = @import("client_external_adoption.zig");
 const client_pump = @import("client_pump.zig");
 const compatibility = @import("compatibility.zig");
@@ -39,10 +40,7 @@ comptime {
     _ = external_rx_intent.max_intent_quarantine_bytes;
 }
 
-pub const AttachmentRole = enum {
-    observer,
-    controller,
-};
+pub const AttachmentRole = client_external_turn_authority.AttachmentRole;
 
 /// Immutable evidence captured at attach publication. Live authority is adopted in 2b2c and must
 /// not be inferred by mutating this snapshot.
@@ -283,10 +281,7 @@ fn metadataTagMatches(
     };
 }
 
-pub const AuthorityGeneration = union(enum) {
-    untracked,
-    tracked: u64,
-};
+pub const AuthorityGeneration = client_external_turn_authority.AuthorityGeneration;
 
 pub const PreparedAttachmentAuthority = struct {
     role: AttachmentRole,
@@ -417,10 +412,7 @@ fn ownerIncarnationValid(storage: *const ExternalPumpStorage) bool {
         std.mem.eql(u8, &seal.digest, &ownerIncarnationDigest(seal));
 }
 
-pub const OwnerAuthorityFlow = enum {
-    initial_fence,
-    clear,
-};
+pub const OwnerAuthorityFlow = client_external_turn_authority.OwnerAuthorityFlow;
 
 pub const OwnerAuthorityState = union(enum) {
     empty,

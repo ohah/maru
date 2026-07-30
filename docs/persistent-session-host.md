@@ -7528,7 +7528,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 attempt 1/63/64/65, EINTR 8/9와 attempt-64 동률, current/read 재진입, would-block
                 observation moved/stale/double/cross-generation, generation max, spent reset과 terminal no-reset을
                 Debug/ReleaseFast와 boundary에서 고정한다.
-              - **C4 private pump integration:** held lease 안에서 buffered-first→collector 뒤
+              - **C4 private pump integration (구현):** held lease 안에서 buffered-first→collector 뒤
                 `staged_len>0`이면 guarded admit exact-one→traversal exact-one→aggregate를 실행한다. initial
                 complete backlog는 admit 0/traversal exact-one, zero-prefix would-block은 둘 다 0이며 각 분기 뒤
                 final 조건에서만 drain evidence를 mint/consume한다. 아직 제품 owner는 기존 buffered facade를
@@ -7751,6 +7751,15 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 **C4d**에서만 pump-private drain evidence lifecycle과
                 `pumpInjectedRxUnderHeldLease`, private product-compilable `RxTurnOps` fixture를 연결한다.
                 네 gate가 모두 green이기 전에는 C4 구현으로 표시하지 않는다.
+
+                **C4a~C4d 구현 완료:** private pump가 collector·guarded admit·buffered traversal·aggregate와
+                drain evidence를 held lease 안에서 조립한다. final-address callback token과
+                `PreparedAdmitUsePermit` begin→finish→exact reset, phase-aware replacement cleanup guard가
+                nested callback, stale/copy/context/candidate, parser/inventory/storage/lease drift를
+                fail-close한다. 같은 pinned scratch의 연속 positive turn, zero-prefix would-block,
+                positive-prefix admission/traversal, guarded/quarantine completion exact-one과 제품 callsite
+                allowlist를 Debug/ReleaseFast `test-session-host` 및 ReleaseFast `check-boundaries`로 검증했다.
+                POSIX syscall과 `external_pump_owner` 제품 `RxTurnOps` 진입은 C5 전까지 0이다.
               - **C5 product closure:** `external_pump_owner`가 `RxTurnOps`의 exact-one 제품 entry를 사용하고 POSIX
                 adapter가 errno만 `RxReadOutcome`으로 변환한다. 실제 Darwin socketpair, readable+writable
                 syscall-order, 전체 hostile/product matrix와 boundary/full check를 통과하고 기존

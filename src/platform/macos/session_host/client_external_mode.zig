@@ -250,9 +250,28 @@ pub const RxParseError = error{
     InvalidState,
     InvalidDescriptor,
     InvalidSeal,
+    AllocationQuarantined,
     ArithmeticOverflow,
     Protocol,
     OutOfMemory,
+};
+
+pub const PayloadAllocationVerdict = enum {
+    accepted,
+    reject_no_free,
+};
+
+/// Optional product guard for allocator output that must be checked against owner ranges which
+/// this parser leaf does not own. It runs immediately after `rawAlloc`, before typed conversion,
+/// payload copy, parser consume, or cleanup. A rejection deliberately leaves the untrusted address
+/// unfreed because allocator ownership has not been proven.
+pub const PayloadAllocationGuard = struct {
+    context: *anyopaque,
+    check: *const fn (
+        context: *anyopaque,
+        allocation_addr: usize,
+        allocation_len: usize,
+    ) PayloadAllocationVerdict,
 };
 
 const parser_seal_domain = "MARURXP1";
@@ -680,6 +699,15 @@ pub fn nextOutcomeWithRange(
     parser: *framing.FrameParser,
     scratch: *RxParseScratch,
 ) RxParseError!ExternalRxOutcome {
+    return nextOutcomeWithRangeGuarded(state, parser, scratch, null);
+}
+
+pub fn nextOutcomeWithRangeGuarded(
+    state: *State,
+    parser: *framing.FrameParser,
+    scratch: *RxParseScratch,
+    allocation_guard: ?*const PayloadAllocationGuard,
+) RxParseError!ExternalRxOutcome {
     if (state.rx_operation_busy) return error.InvalidState;
     if (!parserSealValid(state, parser)) return error.InvalidSeal;
     state.rx_operation_busy = true;
@@ -750,9 +778,52 @@ pub fn nextOutcomeWithRange(
     const frame_digest = bytesDigest(pending[0..total]);
     const allocation_owner = parser.allocator;
     const payload_len: usize = @intCast(header.payload_len);
-    const payload = allocation_owner.alloc(u8, payload_len) catch
-        return error.OutOfMemory;
-    errdefer allocation_owner.free(payload);
+    const raw_payload = if (payload_len == 0)
+        null
+    else
+        allocation_owner.rawAlloc(
+            payload_len,
+            .of(u8),
+            @returnAddress(),
+        ) orelse return error.OutOfMemory;
+    const payload_addr = if (raw_payload) |bytes| @intFromPtr(bytes) else 0;
+    _ = std.math.add(usize, payload_addr, payload_len) catch
+        return error.AllocationQuarantined;
+    if (payload_len != 0 and
+        (rangesOverlap(payload_addr, payload_len, @intFromPtr(state), @sizeOf(State)) or
+            rangesOverlap(
+                payload_addr,
+                payload_len,
+                @intFromPtr(parser),
+                @sizeOf(framing.FrameParser),
+            ) or
+            rangesOverlap(
+                payload_addr,
+                payload_len,
+                @intFromPtr(scratch),
+                @sizeOf(RxParseScratch),
+            ) or
+            rangesOverlap(payload_addr, payload_len, backing_addr, parser.buf.capacity)))
+        return error.AllocationQuarantined;
+    if (payload_len != 0) {
+        if (allocation_guard) |guard| {
+            if (guard.check(
+                guard.context,
+                payload_addr,
+                payload_len,
+            ) != .accepted)
+                return error.AllocationQuarantined;
+        }
+    }
+    const payload: []u8 = if (raw_payload) |bytes|
+        bytes[0..payload_len]
+    else
+        &.{};
+    errdefer if (raw_payload) |bytes| allocation_owner.rawFree(
+        bytes[0..payload_len],
+        .of(u8),
+        @returnAddress(),
+    );
     if (!parserSealValid(state, parser) or
         !std.meta.eql(source_seal, state.rx_provenance.parser_seal) or
         !parseScratchPristine(scratch))
@@ -761,24 +832,8 @@ pub fn nextOutcomeWithRange(
     if (current_pending.len < total or
         !std.mem.eql(u8, &frame_digest, &bytesDigest(current_pending[0..total])))
         return error.InvalidSeal;
-    const payload_addr = @intFromPtr(payload.ptr);
-    _ = std.math.add(usize, payload_addr, payload.len) catch
-        return error.InvalidDescriptor;
     if (payload.len != payload_len or
-        rangesOverlap(payload_addr, payload.len, @intFromPtr(state), @sizeOf(State)) or
-        rangesOverlap(
-            payload_addr,
-            payload.len,
-            @intFromPtr(parser),
-            @sizeOf(framing.FrameParser),
-        ) or
-        rangesOverlap(
-            payload_addr,
-            payload.len,
-            @intFromPtr(scratch),
-            @sizeOf(RxParseScratch),
-        ) or
-        rangesOverlap(payload_addr, payload.len, backing_addr, parser.buf.capacity))
+        (payload.len != 0 and payload_addr == 0))
         return error.InvalidDescriptor;
     scratch.* = .{
         .saved_self_addr = @intFromPtr(scratch),

@@ -68,7 +68,7 @@
 > socket callback을 추가하지 않는다. 구조 이동보다 먼저 `advanceValidatedPartial` exact-one 결과의
 > before/after/header/range/identity가 classified intent seal에 포함되고 traversal이 sealed after만
 > 소비하는지 고정한다. 외부 제품 owner→pump와 내부 pump→traversal callsite를 각각 exact-one으로 검사한다.
-> d2c는 **설계 gate C0와 구현 gate C1~C3를 완료했고 C4~C5는 구현 전**이다. C1은 split
+> d2c는 **설계 gate C0와 구현 gate C1~C3 및 C4a~C4c를 완료했고, C4d와 C5는 구현 전**이다. C1은 split
 > frame/read budget policy, Client parser provenance와 storage/lease에 이중 봉인된 resident cap,
 > read DTO/constants/final-address scratch layout, 모든 positive limit tie와 accepted
 > `< / == / >` stop 표를 고정한다. lease는 Client/parser 주소와 전체 provenance를 thread-local snapshot에도

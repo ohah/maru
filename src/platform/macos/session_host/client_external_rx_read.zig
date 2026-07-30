@@ -1707,6 +1707,18 @@ pub fn terminalizeStoppedGraphNoCallback(
         prepared_use,
     ))
         return .unrecoverable;
+    if (settledStoppedGraphClosed(
+        scratch,
+        receipt,
+        borrow,
+        use_permit,
+        seed,
+        prepared_use,
+    )) {
+        scratch.lifecycle = .terminal;
+        scratch.digest = scratchDigest(scratch);
+        return .closed;
+    }
     if (scratch.lifecycle == .terminal) {
         const borrow_closed = switch (borrow.lifecycle) {
             .empty => borrow.saved_self_addr == 0,
@@ -1894,6 +1906,102 @@ pub fn terminalizeStoppedGraphNoCallback(
     scratch.lifecycle = .terminal;
     scratch.digest = scratchDigest(scratch);
     return .closed;
+}
+
+fn settledStoppedGraphClosed(
+    scratch: *const ExternalRxReadScratch,
+    receipt: *const CollectReceipt,
+    borrow: *const StoppedBorrow,
+    use_permit: *const BorrowUsePermit,
+    seed: *const WouldBlockSeed,
+    prepared_use: *const PreparedAdmitUsePermit,
+) bool {
+    if (!scratch.isReady() or
+        receipt.scratch_addr != @intFromPtr(scratch) or
+        receipt.scratch_generation == 0 or
+        receipt.scratch_generation == std.math.maxInt(u64) or
+        scratch.generation != receipt.scratch_generation + 1 or
+        !std.mem.eql(u8, &receipt.digest, &receiptDigest(receipt)) or
+        borrow.saved_self_addr != @intFromPtr(borrow) or
+        borrow.scratch_addr != @intFromPtr(scratch) or
+        borrow.scratch_generation != receipt.scratch_generation or
+        borrow.receipt_addr != @intFromPtr(receipt) or
+        !std.mem.eql(u8, &borrow.receipt_digest, &receipt.digest) or
+        (borrow.lifecycle != .settled and borrow.lifecycle != .aborted) or
+        !std.mem.eql(u8, &borrow.digest, &borrowDigest(borrow)) or
+        use_permit.saved_self_addr != @intFromPtr(use_permit) or
+        use_permit.scratch_addr != @intFromPtr(scratch) or
+        use_permit.scratch_generation != receipt.scratch_generation or
+        !std.mem.eql(u8, &use_permit.receipt_digest, &receipt.digest) or
+        use_permit.borrow_addr != @intFromPtr(borrow) or
+        (use_permit.lifecycle != .released and
+            use_permit.lifecycle != .aborted) or
+        !std.mem.eql(
+            u8,
+            &use_permit.digest,
+            &borrowUsePermitDigest(use_permit),
+        ))
+        return false;
+
+    const seed_closed = switch (seed.lifecycle) {
+        .empty => receipt.stop != .would_block and
+            seed.saved_self_addr == 0 and
+            seed.scratch_addr == 0 and
+            seed.scratch_generation == 0 and
+            std.mem.allEqual(u8, &seed.receipt_digest, 0) and
+            seed.borrow_addr == 0 and
+            seed.attempt_generation == 0 and
+            std.mem.allEqual(u8, &seed.digest, 0) and
+            use_permit.seed_lifecycle == .unminted and
+            std.mem.allEqual(u8, &use_permit.seed_digest, 0),
+        .consumed, .aborted => receipt.stop == .would_block and
+            seed.saved_self_addr == @intFromPtr(seed) and
+            seed.scratch_addr == @intFromPtr(scratch) and
+            seed.scratch_generation == receipt.scratch_generation and
+            std.mem.eql(u8, &seed.receipt_digest, &receipt.digest) and
+            seed.borrow_addr == @intFromPtr(borrow) and
+            std.mem.eql(u8, &seed.digest, &wouldBlockSeedDigest(seed)) and
+            use_permit.authorized_seed_addr == @intFromPtr(seed) and
+            use_permit.authorized_seed_len == @sizeOf(WouldBlockSeed) and
+            use_permit.seed_lifecycle ==
+                @as(PermitSeedLifecycle, switch (seed.lifecycle) {
+                    .consumed => .consumed,
+                    .aborted => .aborted,
+                    else => unreachable,
+                }) and
+            std.mem.eql(u8, &use_permit.seed_digest, &seed.digest),
+        .prepared => false,
+    };
+    if (!seed_closed) return false;
+
+    return switch (prepared_use.lifecycle) {
+        .empty => prepared_use.saved_self_addr == 0 and
+            prepared_use.scratch_addr == 0 and
+            prepared_use.scratch_generation == 0 and
+            prepared_use.receipt_addr == 0 and
+            prepared_use.borrow_addr == 0 and
+            prepared_use.use_permit_addr == 0 and
+            prepared_use.seed_addr == 0 and
+            std.mem.allEqual(u8, &prepared_use.frozen_outer_digest, 0) and
+            prepared_use.frozen_borrow.saved_self_addr == 0 and
+            prepared_use.frozen_use_permit.saved_self_addr == 0 and
+            prepared_use.frozen_seed.saved_self_addr == 0 and
+            std.mem.allEqual(u8, &prepared_use.digest, 0),
+        .finished, .aborted => prepared_use.saved_self_addr ==
+            @intFromPtr(prepared_use) and
+            prepared_use.scratch_addr == @intFromPtr(scratch) and
+            prepared_use.scratch_generation == receipt.scratch_generation and
+            prepared_use.receipt_addr == @intFromPtr(receipt) and
+            prepared_use.borrow_addr == @intFromPtr(borrow) and
+            prepared_use.use_permit_addr == @intFromPtr(use_permit) and
+            prepared_use.seed_addr == @intFromPtr(seed) and
+            std.mem.eql(
+                u8,
+                &prepared_use.digest,
+                &preparedAdmitUsePermitDigest(prepared_use),
+            ),
+        .active => false,
+    };
 }
 
 fn seedMatchesPermit(
@@ -2592,6 +2700,60 @@ fn makeStoppedWouldBlockFixture(
     try std.testing.expect(borrowStopped(scratch, receipt, borrow));
 }
 
+fn makeSettledWouldBlockFixture(
+    scratch: *ExternalRxReadScratch,
+    receipt: *CollectReceipt,
+    borrow: *StoppedBorrow,
+    guard_probe: *BorrowUseGuardProbe,
+    seed: *WouldBlockSeed,
+    use_permit: *BorrowUsePermit,
+) !void {
+    try makeStoppedWouldBlockFixture(scratch, receipt, borrow);
+    guard_probe.* = .{};
+    const guard = BorrowUseGuardOps{
+        .context = guard_probe,
+        .context_len = @sizeOf(BorrowUseGuardProbe),
+        .current = BorrowUseGuardProbe.current,
+    };
+    seed.* = .{};
+    use_permit.* = .{};
+    try std.testing.expect(beginStoppedUse(
+        scratch,
+        receipt,
+        borrow,
+        &guard,
+        seed,
+        use_permit,
+    ));
+    try std.testing.expect(mintBorrowedWouldBlockSeed(
+        scratch,
+        receipt,
+        borrow,
+        use_permit,
+        seed,
+    ));
+    try std.testing.expect(consumeWouldBlockSeed(
+        scratch,
+        use_permit,
+        seed,
+    ) != null);
+    try std.testing.expect(endStoppedUse(
+        scratch,
+        receipt,
+        borrow,
+        use_permit,
+    ));
+    try std.testing.expect(settleStopped(
+        scratch,
+        receipt,
+        borrow,
+        .{
+            .staged = .discarded,
+            .would_block = .consumed,
+        },
+    ));
+}
+
 fn makeActivePreparedUseFixture(
     scratch: *ExternalRxReadScratch,
     receipt: *CollectReceipt,
@@ -2695,6 +2857,129 @@ fn makeFinishedPreparedUseFixture(
         seed,
         prepared_permit,
     ));
+}
+
+test "settled stopped graph terminalization authenticates every tombstone" {
+    const Mutation = enum {
+        none,
+        scratch,
+        receipt,
+        borrow,
+        use_permit,
+        seed,
+        prepared_use,
+        would_block_seed_absent,
+        non_would_block_seed_present,
+        permit_seed_mismatch,
+    };
+    for (std.enums.values(Mutation)) |mutation| {
+        const scratch = try std.testing.allocator.create(ExternalRxReadScratch);
+        defer std.testing.allocator.destroy(scratch);
+        var receipt: CollectReceipt = undefined;
+        var borrow: StoppedBorrow = .{};
+        var guard_probe: BorrowUseGuardProbe = .{};
+        var seed: WouldBlockSeed = .{};
+        var use_permit: BorrowUsePermit = .{};
+        var prepared_use: PreparedAdmitUsePermit = .{};
+        try makeSettledWouldBlockFixture(
+            scratch,
+            &receipt,
+            &borrow,
+            &guard_probe,
+            &seed,
+            &use_permit,
+        );
+        switch (mutation) {
+            .none => {},
+            .scratch => scratch.digest[0] +%= 1,
+            .receipt => receipt.digest[0] +%= 1,
+            .borrow => borrow.digest[0] +%= 1,
+            .use_permit => use_permit.digest[0] +%= 1,
+            .seed => seed.digest[0] +%= 1,
+            .prepared_use => prepared_use.saved_self_addr =
+                @intFromPtr(&prepared_use),
+            .would_block_seed_absent => {
+                seed = .{};
+                use_permit.seed_lifecycle = .unminted;
+                use_permit.seed_digest = [_]u8{0} ** 32;
+                use_permit.digest = borrowUsePermitDigest(&use_permit);
+            },
+            .non_would_block_seed_present => {
+                receipt.stop = .allowance_reached;
+                receipt.digest = receiptDigest(&receipt);
+                borrow.receipt_digest = receipt.digest;
+                borrow.digest = borrowDigest(&borrow);
+                use_permit.receipt_digest = receipt.digest;
+                seed.receipt_digest = receipt.digest;
+                seed.digest = wouldBlockSeedDigest(&seed);
+                use_permit.seed_digest = seed.digest;
+                use_permit.digest = borrowUsePermitDigest(&use_permit);
+            },
+            .permit_seed_mismatch => {
+                use_permit.seed_lifecycle = .aborted;
+                use_permit.digest = borrowUsePermitDigest(&use_permit);
+            },
+        }
+        const scratch_before = std.mem.asBytes(scratch).*;
+        const receipt_before = std.mem.asBytes(&receipt).*;
+        const borrow_before = std.mem.asBytes(&borrow).*;
+        const use_permit_before = std.mem.asBytes(&use_permit).*;
+        const seed_before = std.mem.asBytes(&seed).*;
+        const prepared_use_before = std.mem.asBytes(&prepared_use).*;
+        const callback_calls_before = guard_probe.callback_calls;
+        const expected: StoppedGraphTerminalizeResult =
+            if (mutation == .none) .closed else .unrecoverable;
+        try std.testing.expectEqual(
+            expected,
+            terminalizeStoppedGraphNoCallback(
+                scratch,
+                &receipt,
+                &borrow,
+                &use_permit,
+                &seed,
+                &prepared_use,
+            ),
+        );
+        if (mutation == .none)
+            try std.testing.expectEqual(Lifecycle.terminal, scratch.lifecycle)
+        else {
+            try std.testing.expectEqual(Lifecycle.ready, scratch.lifecycle);
+            try std.testing.expectEqualSlices(
+                u8,
+                &scratch_before,
+                std.mem.asBytes(scratch),
+            );
+            try std.testing.expectEqualSlices(
+                u8,
+                &receipt_before,
+                std.mem.asBytes(&receipt),
+            );
+            try std.testing.expectEqualSlices(
+                u8,
+                &borrow_before,
+                std.mem.asBytes(&borrow),
+            );
+            try std.testing.expectEqualSlices(
+                u8,
+                &use_permit_before,
+                std.mem.asBytes(&use_permit),
+            );
+            try std.testing.expectEqualSlices(
+                u8,
+                &seed_before,
+                std.mem.asBytes(&seed),
+            );
+            try std.testing.expectEqualSlices(
+                u8,
+                &prepared_use_before,
+                std.mem.asBytes(&prepared_use),
+            );
+        }
+        try std.testing.expectEqual(
+            callback_calls_before,
+            guard_probe.callback_calls,
+        );
+    }
 }
 
 test "C4c no-callback stopped graph terminalizer closes active graph and replays" {

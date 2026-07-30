@@ -9176,6 +9176,53 @@ pub const ExternalPumpStorage = struct {
         terminal: BufferedTraversalCommitTerminal,
     };
 
+    const RxPolicyFacts = struct {
+        turn: client_pump.TurnInput,
+        parser: client_pump.ParserReadiness = .empty,
+        inherited_blocker: bool = false,
+        rx_frame_budget_exhausted: bool = false,
+        rx_read_budget_exhausted: bool = false,
+        work_budget_exhausted: bool = false,
+        terminal: ?client_pump.ExternalPumpTerminal = null,
+        deadlines: [5]?i128 = .{null} ** 5,
+    };
+
+    const RxPreparedSummary = struct {
+        policy: RxPolicyFacts,
+        rx_read_bytes: usize = 0,
+        rx_bytes: usize = 0,
+        rx_frames: usize = 0,
+    };
+
+    const RxPreparation = union(enum) {
+        terminal: RxPreparedSummary,
+        without_drain: RxPreparedSummary,
+        drained: RxPreparedSummary,
+    };
+
+    fn terminalRxPreparation(
+        _: *ExternalPumpStorage,
+        turn: client_pump.TurnInput,
+        reason: client_pump.TerminalReason,
+        rx_read_bytes: usize,
+        rx_bytes: usize,
+        rx_frames: usize,
+    ) RxPreparation {
+        const terminal = client_pump.ExternalPumpTerminal{
+            .reason = reason,
+            .fd_disposition = .owner_cleanup,
+        };
+        return .{ .terminal = .{
+            .policy = .{
+                .turn = turn,
+                .terminal = terminal,
+            },
+            .rx_read_bytes = rx_read_bytes,
+            .rx_bytes = rx_bytes,
+            .rx_frames = rx_frames,
+        } };
+    }
+
     fn terminalInjectedRxTurn(
         self: *ExternalPumpStorage,
         reason: client_pump.TerminalReason,
@@ -9415,6 +9462,8 @@ pub const ExternalPumpStorage = struct {
                 terminal.rx_frames,
             );
         scratch.lifecycle = .terminal;
+        if (terminal.terminal) |reason|
+            self.semantic_state = .{ .terminal = reason };
         return terminal;
     }
 
@@ -9820,6 +9869,54 @@ pub const ExternalPumpStorage = struct {
         return true;
     }
 
+    fn consumedRxDrainEvidenceCurrent(
+        self: *ExternalPumpStorage,
+        lease: *ExternalWholeTurnLease,
+        scratch: *ExternalRxTurnScratch,
+    ) bool {
+        const evidence = &scratch.drain_evidence;
+        const client = if (self.owned_client) |*owned| owned else return false;
+        const state = switch (client.io_mode) {
+            .external => |*external| external,
+            .blocking => return false,
+        };
+        const readiness = client_external_mode.parserReadiness(
+            state,
+            &client.parser,
+        ) catch return false;
+        if (evidence.lifecycle != .consumed or
+            !self.rxDrainEvidenceCurrentForCleanup(
+                lease,
+                scratch,
+                evidence,
+            ) or
+            evidence.parser_addr != @intFromPtr(&client.parser) or
+            !std.meta.eql(evidence.parser_seal, state.rx_provenance.parser_seal) or
+            readiness != evidence.final_readiness or readiness != .empty or
+            evidence.rx_frame_budget_exhausted or
+            evidence.rx_read_budget_exhausted or
+            !evidence.final_owner_blockers_clear)
+            return false;
+        const snapshot = buildRxOwnerAuthoritySnapshot(
+            self,
+            lease,
+            scratch,
+        ) orelse return false;
+        const blocker = self.currentDrainBlockerProjection() orelse return false;
+        return snapshot.inventory_generation ==
+            evidence.owner_inventory_generation and
+            std.mem.eql(
+                u8,
+                &snapshot.digest,
+                &evidence.owner_snapshot_digest,
+            ) and blocker.all_clear and
+            std.mem.eql(
+                u8,
+                &blocker.digest,
+                &evidence.inherited_blocker_snapshot_digest,
+            );
+    }
+
     fn finishRxDrainEvidence(
         scratch: *ExternalRxTurnScratch,
     ) bool {
@@ -10103,20 +10200,20 @@ pub const ExternalPumpStorage = struct {
         } };
     }
 
-    fn pumpInjectedRxUnderHeldLease(
+    fn prepareRxTurn(
         self: *ExternalPumpStorage,
         lease: *ExternalWholeTurnLease,
         turn: client_pump.TurnInput,
         original_ops: *const RxTurnOps,
         scratch: *ExternalRxTurnScratch,
-    ) client_pump.TurnResult {
+    ) RxPreparation {
         if (active_callback_region_addr != 0) {
-            return client_pump.decide(.{
-                .turn = turn,
-                .parser = .empty,
-                .socket_rx_drained = false,
-                .inherited_blocker = true,
-            });
+            return .{ .without_drain = .{
+                .policy = .{
+                    .turn = turn,
+                    .inherited_blocker = true,
+                },
+            } };
         }
         var frozen_ops: FrozenRxTurnOps = .{};
         if (!freezeRxTurnOps(
@@ -10126,7 +10223,8 @@ pub const ExternalPumpStorage = struct {
             original_ops,
             &frozen_ops,
         ))
-            return self.terminalInjectedRxTurn(
+            return self.terminalRxPreparation(
+                turn,
                 .invariant_failure,
                 0,
                 0,
@@ -10136,7 +10234,8 @@ pub const ExternalPumpStorage = struct {
         self.snapshotInheritedRxBlockersUnderHeldLease(
             lease,
             &scratch.snapshot,
-        ) catch return self.terminalInjectedRxTurn(
+        ) catch return self.terminalRxPreparation(
+            turn,
             .invariant_failure,
             0,
             0,
@@ -10146,7 +10245,8 @@ pub const ExternalPumpStorage = struct {
         _ = self.validateAndConsumeInheritedSnapshot(
             lease,
             &scratch.snapshot,
-        ) catch return self.terminalInjectedRxTurn(
+        ) catch return self.terminalRxPreparation(
+            turn,
             .invariant_failure,
             0,
             0,
@@ -10158,12 +10258,12 @@ pub const ExternalPumpStorage = struct {
             snapshot.resize_projection_pending or
             snapshot.response_correlation_pending;
         if (existing_consumer_blocker) {
-            return client_pump.decide(.{
-                .turn = turn,
-                .parser = .empty,
-                .socket_rx_drained = false,
-                .inherited_blocker = true,
-            });
+            return .{ .without_drain = .{
+                .policy = .{
+                    .turn = turn,
+                    .inherited_blocker = true,
+                },
+            } };
         }
         if (snapshot.live_screen_pending) {
             var callback_release: CallbackReleaseAuthority = .{};
@@ -10173,7 +10273,8 @@ pub const ExternalPumpStorage = struct {
                 scratch,
                 &callback_release,
             ))
-                return self.terminalInjectedRxTurn(
+                return self.terminalRxPreparation(
+                    turn,
                     .invariant_failure,
                     0,
                     0,
@@ -10192,20 +10293,22 @@ pub const ExternalPumpStorage = struct {
                 &frozen_ops,
                 &callback_release,
             ))
-                return self.terminalInjectedRxTurn(
+                return self.terminalRxPreparation(
+                    turn,
                     .invariant_failure,
                     0,
                     0,
                     0,
                 );
             return switch (consume) {
-                .consumed, .retry => client_pump.decide(.{
-                    .turn = turn,
-                    .parser = .empty,
-                    .socket_rx_drained = false,
-                    .inherited_blocker = true,
-                }),
-                .no_work, .invalid_state => self.terminalInjectedRxTurn(
+                .consumed, .retry => .{ .without_drain = .{
+                    .policy = .{
+                        .turn = turn,
+                        .inherited_blocker = true,
+                    },
+                } },
+                .no_work, .invalid_state => self.terminalRxPreparation(
+                    turn,
                     .invariant_failure,
                     0,
                     0,
@@ -10217,10 +10320,17 @@ pub const ExternalPumpStorage = struct {
         const client = if (self.owned_client) |*owned|
             owned
         else
-            return self.terminalInjectedRxTurn(.invariant_failure, 0, 0, 0);
+            return self.terminalRxPreparation(
+                turn,
+                .invariant_failure,
+                0,
+                0,
+                0,
+            );
         const rx_state = switch (client.io_mode) {
             .external => |*state| state,
-            .blocking => return self.terminalInjectedRxTurn(
+            .blocking => return self.terminalRxPreparation(
+                turn,
                 .invariant_failure,
                 0,
                 0,
@@ -10230,7 +10340,8 @@ pub const ExternalPumpStorage = struct {
         const initial_readiness = client_external_mode.parserReadiness(
             rx_state,
             &client.parser,
-        ) catch return self.terminalInjectedRxTurn(
+        ) catch return self.terminalRxPreparation(
+            turn,
             .invariant_failure,
             0,
             0,
@@ -10244,7 +10355,8 @@ pub const ExternalPumpStorage = struct {
                 scratch,
                 &callback_release,
             ))
-                return self.terminalInjectedRxTurn(
+                return self.terminalRxPreparation(
+                    turn,
                     .invariant_failure,
                     0,
                     0,
@@ -10265,46 +10377,48 @@ pub const ExternalPumpStorage = struct {
                 &frozen_ops,
                 &callback_release,
             ))
-                return self.terminalInjectedRxTurn(
+                return self.terminalRxPreparation(
+                    turn,
                     .invariant_failure,
                     0,
                     0,
                     0,
                 );
             return switch (mechanics) {
-                .terminal => |terminal| self.terminalInjectedRxTurn(
+                .terminal => |terminal| self.terminalRxPreparation(
+                    turn,
                     terminal.reason,
                     0,
                     terminal.rx_bytes,
                     terminal.rx_frames,
                 ),
-                .completed => |completed| blk: {
-                    var result = client_pump.decide(.{
+                .completed => |completed| .{ .without_drain = .{
+                    .policy = .{
                         .turn = turn,
                         .parser = switch (completed.final_readiness) {
                             .empty => .empty,
                             .incomplete => .incomplete,
                             .complete_or_error => .complete_or_error,
                         },
-                        .socket_rx_drained = false,
                         .rx_frame_budget_exhausted = completed.budget_exhausted,
-                    });
-                    result.rx_bytes = completed.rx_bytes;
-                    result.rx_frames = completed.rx_frames;
-                    break :blk result;
-                },
+                        .work_budget_exhausted = completed.rx_frames >= external_rx_intent.max_intents,
+                    },
+                    .rx_bytes = completed.rx_bytes,
+                    .rx_frames = completed.rx_frames,
+                } },
             };
         }
         if (!turn.readable) {
-            return client_pump.decide(.{
-                .turn = turn,
-                .parser = switch (initial_readiness) {
-                    .empty => .empty,
-                    .incomplete => .incomplete,
-                    .complete_or_error => unreachable,
+            return .{ .without_drain = .{
+                .policy = .{
+                    .turn = turn,
+                    .parser = switch (initial_readiness) {
+                        .empty => .empty,
+                        .incomplete => .incomplete,
+                        .complete_or_error => unreachable,
+                    },
                 },
-                .socket_rx_drained = false,
-            });
+            } };
         }
 
         const allowance = switch (client_external_mode.maxReadable(
@@ -10313,7 +10427,8 @@ pub const ExternalPumpStorage = struct {
             self.rx_resident_cap,
             client_external_rx_read.max_rx_read_bytes_per_turn,
         )) {
-            .invalid, .counter_exhausted => return self.terminalInjectedRxTurn(
+            .invalid, .counter_exhausted => return self.terminalRxPreparation(
+                turn,
                 .invariant_failure,
                 0,
                 0,
@@ -10321,29 +10436,31 @@ pub const ExternalPumpStorage = struct {
             ),
             .resident_exhausted => {
                 if (initial_readiness == .incomplete)
-                    return self.terminalInjectedRxTurn(
+                    return self.terminalRxPreparation(
+                        turn,
                         .resource_exhausted,
                         0,
                         0,
                         0,
                     );
-                return client_pump.decide(.{
-                    .turn = turn,
-                    .parser = .empty,
-                    .socket_rx_drained = false,
-                    .rx_read_budget_exhausted = true,
-                });
+                return .{ .without_drain = .{
+                    .policy = .{
+                        .turn = turn,
+                        .rx_read_budget_exhausted = true,
+                    },
+                } };
             },
-            .turn_exhausted => return client_pump.decide(.{
-                .turn = turn,
-                .parser = switch (initial_readiness) {
-                    .empty => .empty,
-                    .incomplete => .incomplete,
-                    .complete_or_error => unreachable,
+            .turn_exhausted => return .{ .without_drain = .{
+                .policy = .{
+                    .turn = turn,
+                    .parser = switch (initial_readiness) {
+                        .empty => .empty,
+                        .incomplete => .incomplete,
+                        .complete_or_error => unreachable,
+                    },
+                    .rx_read_budget_exhausted = true,
                 },
-                .socket_rx_drained = false,
-                .rx_read_budget_exhausted = true,
-            }),
+            } },
             .bytes => |positive| positive,
         };
         var read_authority = ProductRxReadAuthority{
@@ -10362,7 +10479,8 @@ pub const ExternalPumpStorage = struct {
             scratch,
             &read_callback_release,
         ))
-            return self.terminalInjectedRxTurn(
+            return self.terminalRxPreparation(
+                turn,
                 .invariant_failure,
                 0,
                 0,
@@ -10384,20 +10502,23 @@ pub const ExternalPumpStorage = struct {
             &frozen_ops,
             &read_callback_release,
         ))
-            return self.terminalInjectedRxTurn(
+            return self.terminalRxPreparation(
+                turn,
                 .invariant_failure,
                 0,
                 0,
                 0,
             );
         const receipt = switch (collected) {
-            .rejected => return self.terminalInjectedRxTurn(
+            .rejected => return self.terminalRxPreparation(
+                turn,
                 .invariant_failure,
                 0,
                 0,
                 0,
             ),
-            .terminal => |terminal| return self.terminalInjectedRxTurn(
+            .terminal => |terminal| return self.terminalRxPreparation(
+                turn,
                 switch (terminal.reason) {
                     .eof => .eof,
                     .socket_error => .socket_error,
@@ -10415,7 +10536,8 @@ pub const ExternalPumpStorage = struct {
             &scratch.collect_receipt,
             &scratch.stopped_borrow,
         ))
-            return self.terminalInjectedRxTurn(
+            return self.terminalRxPreparation(
+                turn,
                 .invariant_failure,
                 0,
                 0,
@@ -10434,19 +10556,27 @@ pub const ExternalPumpStorage = struct {
             &scratch.would_block_seed,
             &scratch.borrow_use_permit,
         ))
-            return self.terminalInjectedRxTurn(
+            return self.terminalRxPreparation(
+                turn,
                 .invariant_failure,
                 0,
                 0,
                 0,
             );
         if (hitInjectedRxFailpoint(scratch, .after_stopped_begin))
-            return self.terminalInjectedRxTurn(.invariant_failure, 0, 0, 0);
+            return self.terminalRxPreparation(
+                turn,
+                .invariant_failure,
+                0,
+                0,
+                0,
+            );
         const stopped_bytes = client_external_rx_read.stoppedBytes(
             &scratch.read,
             &scratch.collect_receipt,
             &scratch.stopped_borrow,
-        ) orelse return self.terminalInjectedRxTurn(
+        ) orelse return self.terminalRxPreparation(
+            turn,
             .invariant_failure,
             0,
             0,
@@ -10472,7 +10602,8 @@ pub const ExternalPumpStorage = struct {
                 scratch,
                 .after_prepared_begin,
             )) {
-                return self.terminalInjectedRxTurn(
+                return self.terminalRxPreparation(
+                    turn,
                     .invariant_failure,
                     0,
                     0,
@@ -10513,7 +10644,8 @@ pub const ExternalPumpStorage = struct {
                             &frozen_ops,
                             &admit_callback_release,
                         );
-                        return self.terminalInjectedRxTurn(
+                        return self.terminalRxPreparation(
+                            turn,
                             .invariant_failure,
                             0,
                             0,
@@ -10569,7 +10701,8 @@ pub const ExternalPumpStorage = struct {
                                     scratch,
                                     &admit_callback_release,
                                 );
-                                return self.terminalInjectedRxTurn(
+                                return self.terminalRxPreparation(
+                                    turn,
                                     .invariant_failure,
                                     0,
                                     0,
@@ -10734,7 +10867,8 @@ pub const ExternalPumpStorage = struct {
                         scratch,
                         .after_traversal,
                     ))
-                        return self.terminalInjectedRxTurn(
+                        return self.terminalRxPreparation(
+                            turn,
                             .invariant_failure,
                             stopped_bytes.len,
                             0,
@@ -10776,7 +10910,8 @@ pub const ExternalPumpStorage = struct {
                 if (final_parser == .empty) .empty else .incomplete,
             );
         const final_blockers = self.currentDrainBlockerProjection() orelse
-            return self.terminalInjectedRxTurn(
+            return self.terminalRxPreparation(
+                turn,
                 .invariant_failure,
                 read_bytes,
                 completed.rx_bytes,
@@ -10786,7 +10921,8 @@ pub const ExternalPumpStorage = struct {
             self,
             lease,
             scratch,
-        ) orelse return self.terminalInjectedRxTurn(
+        ) orelse return self.terminalRxPreparation(
+            turn,
             .invariant_failure,
             read_bytes,
             completed.rx_bytes,
@@ -10796,7 +10932,8 @@ pub const ExternalPumpStorage = struct {
             rx_state,
             &client.parser,
         ))
-            return self.terminalInjectedRxTurn(
+            return self.terminalRxPreparation(
+                turn,
                 .invariant_failure,
                 read_bytes,
                 completed.rx_bytes,
@@ -10841,7 +10978,8 @@ pub const ExternalPumpStorage = struct {
                 terminal_reason = .invariant_failure;
             } else {
                 if (hitInjectedRxFailpoint(scratch, .after_seed_mint))
-                    return self.terminalInjectedRxTurn(
+                    return self.terminalRxPreparation(
+                        turn,
                         .invariant_failure,
                         if (admitted) stopped_bytes.len else 0,
                         0,
@@ -10868,7 +11006,8 @@ pub const ExternalPumpStorage = struct {
                         scratch,
                         .after_seed_consume,
                     ))
-                        return self.terminalInjectedRxTurn(
+                        return self.terminalRxPreparation(
+                            turn,
                             .invariant_failure,
                             if (admitted) stopped_bytes.len else 0,
                             0,
@@ -10895,7 +11034,8 @@ pub const ExternalPumpStorage = struct {
             }
         }
         if (hitInjectedRxFailpoint(scratch, .before_end))
-            return self.terminalInjectedRxTurn(
+            return self.terminalRxPreparation(
+                turn,
                 .invariant_failure,
                 if (admitted) stopped_bytes.len else 0,
                 0,
@@ -10909,7 +11049,8 @@ pub const ExternalPumpStorage = struct {
         ))
             terminal_reason = .invariant_failure;
         if (hitInjectedRxFailpoint(scratch, .before_settle))
-            return self.terminalInjectedRxTurn(
+            return self.terminalRxPreparation(
+                turn,
                 .invariant_failure,
                 if (admitted) stopped_bytes.len else 0,
                 0,
@@ -10927,7 +11068,8 @@ pub const ExternalPumpStorage = struct {
             if (drain_prepared and
                 self.abortRxDrainEvidence(lease, scratch))
                 _ = finishRxDrainEvidence(scratch);
-            return self.terminalInjectedRxTurn(
+            return self.terminalRxPreparation(
+                turn,
                 reason,
                 read_bytes,
                 completed.rx_bytes,
@@ -10935,21 +11077,24 @@ pub const ExternalPumpStorage = struct {
             );
         }
         if (mechanics_terminal) |terminal|
-            return self.terminalInjectedRxTurn(
+            return self.terminalRxPreparation(
+                turn,
                 terminal.reason,
                 read_bytes,
                 terminal.rx_bytes,
                 terminal.rx_frames,
             );
         if (allowance_stop == .counter_terminal or allowance_stop == .invalid)
-            return self.terminalInjectedRxTurn(
+            return self.terminalRxPreparation(
+                turn,
                 .invariant_failure,
                 read_bytes,
                 completed.rx_bytes,
                 completed.rx_frames,
             );
         if (allowance_stop == .resident_incomplete_terminal)
-            return self.terminalInjectedRxTurn(
+            return self.terminalRxPreparation(
+                turn,
                 .resource_exhausted,
                 read_bytes,
                 completed.rx_bytes,
@@ -10962,35 +11107,130 @@ pub const ExternalPumpStorage = struct {
                 scratch,
                 would_block_disposition,
             );
-            if (socket_rx_drained)
-                recordRxDrainTestEvent(.published);
         }
-        recordRxDrainTestEvent(.decide);
-        var result = client_pump.decide(.{
-            .turn = turn,
-            .parser = final_parser,
-            .socket_rx_drained = socket_rx_drained,
-            .inherited_blocker = !drain_final.blockers.all_clear,
-            .rx_frame_budget_exhausted = completed.budget_exhausted,
-            .rx_read_budget_exhausted = read_budget_exhausted,
-        });
-        result.rx_read_bytes = read_bytes;
-        result.rx_bytes = completed.rx_bytes;
-        result.rx_frames = completed.rx_frames;
         if (drain_prepared and !socket_rx_drained)
-            return self.terminalInjectedRxTurn(
+            return self.terminalRxPreparation(
+                turn,
                 .invariant_failure,
                 read_bytes,
                 completed.rx_bytes,
                 completed.rx_frames,
             );
-        if (socket_rx_drained and !finishRxDrainEvidence(scratch))
-            return self.terminalInjectedRxTurn(
-                .invariant_failure,
-                read_bytes,
-                completed.rx_bytes,
-                completed.rx_frames,
-            );
+        const summary = RxPreparedSummary{
+            .policy = .{
+                .turn = turn,
+                .parser = final_parser,
+                .inherited_blocker = !drain_final.blockers.all_clear,
+                .rx_frame_budget_exhausted = completed.budget_exhausted,
+                .rx_read_budget_exhausted = read_budget_exhausted,
+                .work_budget_exhausted = completed.rx_frames >= external_rx_intent.max_intents,
+            },
+            .rx_read_bytes = read_bytes,
+            .rx_bytes = completed.rx_bytes,
+            .rx_frames = completed.rx_frames,
+        };
+        return if (socket_rx_drained)
+            .{ .drained = summary }
+        else
+            .{ .without_drain = summary };
+    }
+
+    fn publishRxPreparationUnderHeldLease(
+        self: *ExternalPumpStorage,
+        lease: *ExternalWholeTurnLease,
+        scratch: *ExternalRxTurnScratch,
+        preparation: RxPreparation,
+    ) client_pump.TurnResult {
+        if (!rxPreparationCoherent(preparation)) {
+            const summary = switch (preparation) {
+                inline else => |value| value,
+            };
+            return self.invalidRxPreparationResult(summary);
+        }
+        return switch (preparation) {
+            .terminal => |summary| self.policyResultFromRxSummary(summary, false),
+            .without_drain => |summary| self.policyResultFromRxSummary(
+                summary,
+                false,
+            ),
+            .drained => |summary| blk: {
+                if (!self.consumedRxDrainEvidenceCurrent(
+                    lease,
+                    scratch,
+                ))
+                    break :blk self.invalidRxPreparationResult(summary);
+                recordRxDrainTestEvent(.published);
+                recordRxDrainTestEvent(.decide);
+                const result = self.policyResultFromRxSummary(summary, true);
+                if (!finishRxDrainEvidence(scratch))
+                    break :blk self.terminalizePublishedRxResult(
+                        result,
+                        .invariant_failure,
+                    );
+                break :blk result;
+            },
+        };
+    }
+
+    fn rxPreparationCoherent(preparation: RxPreparation) bool {
+        return switch (preparation) {
+            .terminal => |summary| summary.policy.terminal != null,
+            .without_drain, .drained => |summary| summary.policy.terminal == null,
+        };
+    }
+
+    fn invalidRxPreparationResult(
+        self: *ExternalPumpStorage,
+        summary: RxPreparedSummary,
+    ) client_pump.TurnResult {
+        var invalid = summary;
+        invalid.policy.terminal = .{
+            .reason = .invariant_failure,
+            .fd_disposition = .owner_cleanup,
+        };
+        return self.policyResultFromRxSummary(invalid, false);
+    }
+
+    fn terminalizePublishedRxResult(
+        _: *ExternalPumpStorage,
+        published: client_pump.TurnResult,
+        reason: client_pump.TerminalReason,
+    ) client_pump.TurnResult {
+        const terminal = client_pump.ExternalPumpTerminal{
+            .reason = reason,
+            .fd_disposition = .owner_cleanup,
+        };
+        return .{
+            .rx_bytes = published.rx_bytes,
+            .rx_read_bytes = published.rx_read_bytes,
+            .rx_frames = published.rx_frames,
+            .tx_bytes = published.tx_bytes,
+            .tx_frames = published.tx_frames,
+            .terminal = terminal,
+            .next_deadline_ns = published.next_deadline_ns,
+        };
+    }
+
+    fn policyResultFromRxSummary(
+        _: *ExternalPumpStorage,
+        summary: RxPreparedSummary,
+        socket_rx_drained: bool,
+    ) client_pump.TurnResult {
+        const facts = summary.policy;
+        var result = client_pump.decide(.{
+            .turn = facts.turn,
+            .parser = facts.parser,
+            .socket_rx_drained = socket_rx_drained,
+            .inherited_blocker = facts.inherited_blocker,
+            .rx_frame_budget_exhausted = facts.rx_frame_budget_exhausted or
+                facts.work_budget_exhausted,
+            .rx_read_budget_exhausted = facts.rx_read_budget_exhausted,
+            .terminal = facts.terminal,
+            .deadlines = facts.deadlines,
+        });
+        result.rx_read_bytes = summary.rx_read_bytes;
+        result.rx_bytes = summary.rx_bytes;
+        result.rx_frames = summary.rx_frames;
         return result;
     }
 
@@ -11208,11 +11448,16 @@ pub const ExternalPumpStorage = struct {
         scratch.would_block_seed = .{};
         scratch.quarantine_receipt = .{};
         scratch.authority_ranges_generation = self.operation_generation;
-        var result = self.pumpInjectedRxUnderHeldLease(
+        const preparation = self.prepareRxTurn(
             &lease,
             turn,
             ops,
             scratch,
+        );
+        var result = self.publishRxPreparationUnderHeldLease(
+            &lease,
+            scratch,
+            preparation,
         );
         scratch.snapshot = .{};
         scratch.live_consume = .{};
@@ -27632,5 +27877,281 @@ test "product payload guard rejects exact and partial guard authority aliases" {
     try std.testing.expectEqual(
         @as(u64, cases.len),
         cross_owner_quarantine_events.load(.acquire),
+    );
+}
+
+test "D1 prepared summary preserves policy deadlines terminal and counters" {
+    var storage: ExternalPumpStorage = .{};
+    const deadline_result = storage.policyResultFromRxSummary(
+        .{
+            .policy = .{
+                .turn = .{
+                    .readable = true,
+                    .writable = true,
+                    .now_ns = 50,
+                },
+                .parser = .complete_or_error,
+                .work_budget_exhausted = true,
+                .deadlines = .{ 90, 40, null, 70, null },
+            },
+            .rx_read_bytes = 11,
+            .rx_bytes = 7,
+            .rx_frames = 3,
+        },
+        false,
+    );
+    try std.testing.expectEqual(@as(?i128, 40), deadline_result.next_deadline_ns);
+    try std.testing.expectEqual(
+        client_pump.TerminalReason.deadline_exceeded,
+        deadline_result.terminal.?.reason,
+    );
+    try std.testing.expectEqual(@as(usize, 11), deadline_result.rx_read_bytes);
+    try std.testing.expectEqual(@as(usize, 7), deadline_result.rx_bytes);
+    try std.testing.expectEqual(@as(usize, 3), deadline_result.rx_frames);
+
+    const budget_result = storage.policyResultFromRxSummary(
+        .{
+            .policy = .{
+                .turn = .{
+                    .readable = true,
+                    .writable = false,
+                    .now_ns = 1,
+                },
+                .work_budget_exhausted = true,
+            },
+        },
+        false,
+    );
+    try std.testing.expect(budget_result.terminal == null);
+    try std.testing.expect(budget_result.immediate_rx);
+    try std.testing.expect(!budget_result.read_interest);
+
+    const frame_budget_result = storage.policyResultFromRxSummary(
+        .{
+            .policy = .{
+                .turn = .{
+                    .readable = true,
+                    .writable = false,
+                    .now_ns = 1,
+                },
+                .rx_frame_budget_exhausted = true,
+            },
+        },
+        false,
+    );
+    try std.testing.expect(frame_budget_result.terminal == null);
+    try std.testing.expect(frame_budget_result.immediate_rx);
+    try std.testing.expect(!frame_budget_result.read_interest);
+
+    const explicit_terminal = client_pump.ExternalPumpTerminal{
+        .reason = .socket_error,
+        .fd_disposition = .owner_cleanup,
+    };
+    const terminal_result = storage.policyResultFromRxSummary(
+        .{
+            .policy = .{
+                .turn = .{
+                    .readable = true,
+                    .writable = true,
+                    .now_ns = 1,
+                },
+                .terminal = explicit_terminal,
+                .deadlines = .{ 5, null, null, null, null },
+            },
+            .rx_read_bytes = 13,
+            .rx_bytes = 9,
+            .rx_frames = 4,
+        },
+        true,
+    );
+    try std.testing.expectEqual(
+        client_pump.TerminalReason.socket_error,
+        terminal_result.terminal.?.reason,
+    );
+    try std.testing.expectEqual(@as(?i128, 5), terminal_result.next_deadline_ns);
+    try std.testing.expect(!terminal_result.authority_clear);
+    try std.testing.expectEqual(@as(usize, 13), terminal_result.rx_read_bytes);
+    try std.testing.expectEqual(@as(usize, 9), terminal_result.rx_bytes);
+    try std.testing.expectEqual(@as(usize, 4), terminal_result.rx_frames);
+}
+
+test "D1 preparation tag and terminal payload must agree" {
+    const turn = client_pump.TurnInput{
+        .readable = false,
+        .writable = false,
+        .now_ns = 0,
+    };
+    const nonterminal = ExternalPumpStorage.RxPreparedSummary{
+        .policy = .{ .turn = turn },
+    };
+    var terminal = nonterminal;
+    terminal.policy.terminal = .{
+        .reason = .socket_error,
+        .fd_disposition = .owner_cleanup,
+    };
+    try std.testing.expect(ExternalPumpStorage.rxPreparationCoherent(
+        .{ .terminal = terminal },
+    ));
+    try std.testing.expect(ExternalPumpStorage.rxPreparationCoherent(
+        .{ .without_drain = nonterminal },
+    ));
+    try std.testing.expect(ExternalPumpStorage.rxPreparationCoherent(
+        .{ .drained = nonterminal },
+    ));
+    try std.testing.expect(!ExternalPumpStorage.rxPreparationCoherent(
+        .{ .terminal = nonterminal },
+    ));
+    try std.testing.expect(!ExternalPumpStorage.rxPreparationCoherent(
+        .{ .without_drain = terminal },
+    ));
+    try std.testing.expect(!ExternalPumpStorage.rxPreparationCoherent(
+        .{ .drained = terminal },
+    ));
+
+    var storage: ExternalPumpStorage = .{};
+    var lease: ExternalWholeTurnLease = .{};
+    var scratch: ExternalRxTurnScratch = .{};
+    const rejected = storage.publishRxPreparationUnderHeldLease(
+        &lease,
+        &scratch,
+        .{ .without_drain = terminal },
+    );
+    try std.testing.expectEqual(
+        client_pump.TerminalReason.invariant_failure,
+        rejected.terminal.?.reason,
+    );
+    try std.testing.expect(!rejected.authority_clear);
+}
+
+test "D1 drained deadline terminalizes only after evidence cleanup" {
+    const ApplyProbe = struct {
+        apply_calls: *usize,
+
+        fn apply(
+            raw: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.apply_calls.* += 1;
+            return .applied;
+        }
+    };
+    const Probe = struct {
+        read_calls: usize = 0,
+
+        fn read(
+            raw: *anyopaque,
+            _: posix.fd_t,
+            _: []u8,
+        ) client_external_rx_read.RxReadOutcome {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.read_calls += 1;
+            return .would_block;
+        }
+    };
+
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    defer _ = teardownForTest(&storage);
+
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    var probe = Probe{};
+    var apply_calls: usize = 0;
+    var apply_probe = ApplyProbe{ .apply_calls = &apply_calls };
+    const ops = RxTurnOps{
+        .buffered = .{
+            .context = &apply_probe,
+            .context_len = @sizeOf(ApplyProbe),
+            .apply_live_screen = ApplyProbe.apply,
+        },
+        .transport = .{
+            .context = &probe,
+            .context_len = @sizeOf(Probe),
+            .read = Probe.read,
+        },
+    };
+    var lease: ExternalWholeTurnLease = .{};
+    try storage.acquireWholeTurnLease(
+        &lease,
+        @intFromPtr(scratch),
+        @sizeOf(ExternalRxTurnScratch),
+    );
+    scratch.lifecycle = .busy;
+    scratch.snapshot = .{};
+    scratch.live_consume = .{};
+    scratch.stopped_borrow = .{};
+    scratch.borrow_use_permit = .{};
+    scratch.would_block_seed = .{};
+    scratch.quarantine_receipt = .{};
+    scratch.authority_ranges_generation = storage.operation_generation;
+
+    var preparation = storage.prepareRxTurn(
+        &lease,
+        .{ .readable = true, .writable = false, .now_ns = 50 },
+        &ops,
+        scratch,
+    );
+    preparation = switch (preparation) {
+        .drained => |value| blk: {
+            var summary = value;
+            summary.policy.deadlines = .{ 90, 40, null, 70, null };
+            break :blk .{ .drained = summary };
+        },
+        .terminal => return error.UnexpectedTerminalPreparation,
+        .without_drain => return error.UnexpectedUndrainedPreparation,
+    };
+    var result = storage.publishRxPreparationUnderHeldLease(
+        &lease,
+        scratch,
+        preparation,
+    );
+    try std.testing.expectEqual(
+        client_pump.TerminalReason.deadline_exceeded,
+        result.terminal.?.reason,
+    );
+    try std.testing.expectEqual(
+        RxDrainEvidenceLifecycle.finished,
+        scratch.drain_evidence.lifecycle,
+    );
+    try std.testing.expect(storage.semantic_state == .active);
+
+    scratch.snapshot = .{};
+    scratch.live_consume = .{};
+    result = storage.finalizeInjectedRxTerminalUnderHeldLease(
+        &lease,
+        scratch,
+        result,
+    );
+    try std.testing.expectEqual(
+        client_pump.TerminalReason.deadline_exceeded,
+        result.terminal.?.reason,
+    );
+    try std.testing.expectEqual(
+        client_pump.TerminalReason.deadline_exceeded,
+        storage.semantic_state.terminal.reason,
+    );
+    try std.testing.expectEqual(
+        RxDrainEvidenceLifecycle.finished,
+        scratch.drain_evidence.lifecycle,
+    );
+    try std.testing.expectEqual(@as(usize, 0), active_callback_region_addr);
+    try std.testing.expectEqual(@as(usize, 0), active_callback_release_addr);
+    try std.testing.expectEqual(@as(usize, 0), active_callback_storage_addr);
+    try std.testing.expectEqual(@as(usize, 0), active_callback_lease_addr);
+    try std.testing.expectEqual(@as(usize, 0), active_callback_scratch_addr);
+    try std.testing.expectEqual(@as(usize, 0), active_callback_permit_addr);
+    try std.testing.expectEqual(
+        WholeTurnReleaseResult.released,
+        storage.releaseWholeTurnLease(&lease),
     );
 }

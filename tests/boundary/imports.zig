@@ -124,6 +124,77 @@ test "d2d whole-turn authority stays a pure owner-free leaf" {
     try std.testing.expectEqual(@as(usize, 0), lifecycle_calls);
 }
 
+test "d2d RX preparation leaf cannot publish scheduling policy" {
+    const allocator = std.testing.allocator;
+    const pump = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/client_external_pump.zig",
+    );
+    defer allocator.free(pump);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(pump, "fn prepareRxTurn("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        countOccurrences(pump, "fn pumpInjectedRxUnderHeldLease("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(pump,
+            \\const RxPolicyFacts = struct {
+            \\        turn: client_pump.TurnInput,
+            \\        parser: client_pump.ParserReadiness = .empty,
+            \\        inherited_blocker: bool = false,
+            \\        rx_frame_budget_exhausted: bool = false,
+            \\        rx_read_budget_exhausted: bool = false,
+            \\        work_budget_exhausted: bool = false,
+            \\        terminal: ?client_pump.ExternalPumpTerminal = null,
+            \\        deadlines: [5]?i128 = .{null} ** 5,
+            \\    };
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(pump,
+            \\const RxPreparedSummary = struct {
+            \\        policy: RxPolicyFacts,
+            \\        rx_read_bytes: usize = 0,
+            \\        rx_bytes: usize = 0,
+            \\        rx_frames: usize = 0,
+            \\    };
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(pump,
+            \\const RxPreparation = union(enum) {
+            \\        terminal: RxPreparedSummary,
+            \\        without_drain: RxPreparedSummary,
+            \\        drained: RxPreparedSummary,
+            \\    };
+        ),
+    );
+    const prepare_start = std.mem.indexOf(
+        u8,
+        pump,
+        "fn prepareRxTurn(",
+    ) orelse return error.TestUnexpectedResult;
+    const prepare_end = std.mem.indexOfPos(
+        u8,
+        pump,
+        prepare_start,
+        "\n    fn publishRxPreparationUnderHeldLease(",
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        countOccurrences(
+            pump[prepare_start..prepare_end],
+            "client_pump.decide(",
+        ),
+    );
+}
+
 test "session host neutral cleanup leaf has no owner reverse dependencies" {
     const allocator = std.testing.allocator;
     const source = try readZigFileZ(
@@ -2417,9 +2488,9 @@ test "d2c S3-D drain evidence is one-shot and has one scheduling publication" {
         countOccurrences(product, "asBytes(&state.rx_provenance.parser_seal"),
     );
 
-    // After the one-shot consume returns, the local fact must flow directly to the unique decide
-    // projection. This narrow suffix may not reclassify terminal/budget/blockers, invoke callbacks,
-    // rebuild authority, or mutate storage/scratch.
+    // D1 returns consumed evidence to the callback-free outer adapter. The outer adapter must
+    // validate that exact evidence before publishing the drained scheduling fact, decide once,
+    // and only then finish the evidence.
     const consume_start = std.mem.lastIndexOf(
         u8,
         product,
@@ -2431,24 +2502,57 @@ test "d2c S3-D drain evidence is one-shot and has one scheduling publication" {
         consume_start,
         ");",
     ) orelse return error.TestUnexpectedResult;
-    const publication = std.mem.indexOfPos(
+    const fresh_validation = std.mem.indexOfPos(
         u8,
         product,
         consume_end,
-        ".socket_rx_drained = socket_rx_drained",
+        "self.consumedRxDrainEvidenceCurrent(",
     ) orelse return error.TestUnexpectedResult;
-    const publication_suffix = product[consume_end + 2 .. publication];
+    const drained_branch = std.mem.lastIndexOf(
+        u8,
+        product[0..fresh_validation],
+        ".drained => |summary|",
+    ) orelse return error.TestUnexpectedResult;
+    const publication = std.mem.indexOfPos(
+        u8,
+        product,
+        fresh_validation,
+        "recordRxDrainTestEvent(.published)",
+    ) orelse return error.TestUnexpectedResult;
+    const decide = std.mem.indexOfPos(
+        u8,
+        product,
+        publication,
+        "recordRxDrainTestEvent(.decide)",
+    ) orelse return error.TestUnexpectedResult;
+    const policy = std.mem.indexOfPos(
+        u8,
+        product,
+        decide,
+        "self.policyResultFromRxSummary(summary, true)",
+    ) orelse return error.TestUnexpectedResult;
+    const finish = std.mem.indexOfPos(
+        u8,
+        product,
+        policy,
+        "finishRxDrainEvidence(scratch)",
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(
+        consume_end < fresh_validation and
+            fresh_validation < publication and
+            publication < decide and
+            decide < policy and
+            policy < finish,
+    );
+    const publication_suffix = product[drained_branch..fresh_validation];
     inline for (.{
-        "terminalInjectedRxTurn(",
         "classifyAcceptedAllowanceStop(",
         "liveOwnerBlockerProjection(",
         "currentDrainBlockerProjection(",
         "buildRxOwnerAuthoritySnapshot(",
         "acquirePumpCallbackRegion(",
         "finishPumpCallbackRegion(",
-        "terminal_reason =",
-        "self.",
-        "scratch.",
+        "client_pump.decide(",
     }) |forbidden|
         try std.testing.expectEqual(
             @as(usize, 0),

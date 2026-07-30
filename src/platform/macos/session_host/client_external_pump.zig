@@ -1971,6 +1971,35 @@ const ExternalRxTurnScratchLifecycle = enum {
     terminal,
 };
 
+const RxOwnerAuthoritySnapshot = struct {
+    saved_self_addr: usize = 0,
+    storage_addr: usize = 0,
+    storage_len: usize = 0,
+    lease_addr: usize = 0,
+    lease_len: usize = 0,
+    scratch_addr: usize = 0,
+    scratch_len: usize = 0,
+    operation_generation: u64 = 0,
+    client_addr: usize = 0,
+    state_addr: usize = 0,
+    fd: posix.fd_t = -1,
+    parser_addr: usize = 0,
+    parser_seal: client_external_mode.ParserAuthoritySeal = .{},
+    identity: external_rx_types.RxIdentity = .{
+        .attach_instance_id = 0,
+        .destination_slot_addr = 0,
+    },
+    allocator_ptr_addr: usize = 0,
+    allocator_vtable_addr: usize = 0,
+    inventory_addr: usize = 0,
+    inventory_count: usize = 0,
+    inventory_generation: u64 = 0,
+    inventory_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    reservation_handle_addr: usize = 0,
+    reservation_generation: u64 = 0,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
 pub const ExternalRxTurnScratch = struct {
     saved_self_addr: usize = 0,
     lifecycle: ExternalRxTurnScratchLifecycle = .empty,
@@ -1980,6 +2009,8 @@ pub const ExternalRxTurnScratch = struct {
     read: client_external_rx_read.ExternalRxReadScratch = .{},
     client_ranges: client_mod.ExternalSourceOwnerRangeScratch = undefined,
     authority_ranges: external_owner_range.Scratch = .{},
+    authority_snapshot: RxOwnerAuthoritySnapshot = .{},
+    authority_snapshot_build_count: u64 = 0,
     aggregate_ranges: external_owner_range.Scratch = .{},
     authority_ranges_generation: u64 = 0,
 
@@ -1997,6 +2028,8 @@ pub const ExternalRxTurnScratch = struct {
         if (!client_external_rx_read.ExternalRxReadScratch.initInPlace(&out.read))
             return false;
         out.authority_ranges.reset();
+        out.authority_snapshot = .{};
+        out.authority_snapshot_build_count = 0;
         out.aggregate_ranges.reset();
         out.authority_ranges_generation = 0;
         return true;
@@ -2017,6 +2050,161 @@ comptime {
         @compileError("external RX turn scratch exceeds 3.25 MiB");
 }
 
+fn rxOwnerAuthoritySnapshotDigest(
+    snapshot: *const RxOwnerAuthoritySnapshot,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARUROA1");
+    writer.writeUsize(snapshot.saved_self_addr);
+    writer.writeUsize(snapshot.storage_addr);
+    writer.writeUsize(snapshot.storage_len);
+    writer.writeUsize(snapshot.lease_addr);
+    writer.writeUsize(snapshot.lease_len);
+    writer.writeUsize(snapshot.scratch_addr);
+    writer.writeUsize(snapshot.scratch_len);
+    writer.writeU64(snapshot.operation_generation);
+    writer.writeUsize(snapshot.client_addr);
+    writer.writeUsize(snapshot.state_addr);
+    writer.writeU64(@as(u32, @bitCast(snapshot.fd)));
+    writer.writeUsize(snapshot.parser_addr);
+    writer.writeBytes(&snapshot.parser_seal.digest);
+    writer.writeU64(snapshot.identity.attach_instance_id);
+    writer.writeUsize(snapshot.identity.destination_slot_addr);
+    writer.writeUsize(snapshot.allocator_ptr_addr);
+    writer.writeUsize(snapshot.allocator_vtable_addr);
+    writer.writeUsize(snapshot.inventory_addr);
+    writer.writeUsize(snapshot.inventory_count);
+    writer.writeU64(snapshot.inventory_generation);
+    writer.writeBytes(&snapshot.inventory_digest);
+    writer.writeUsize(snapshot.reservation_handle_addr);
+    writer.writeU64(snapshot.reservation_generation);
+    return writer.finish();
+}
+
+/// Rebuilds the complete owner inventory into the existing turn scratch.
+///
+/// The returned snapshot and inventory slice are ephemeral: the next authority callback rebuilds
+/// both in place, so consumers must project and use them before crossing another callback.
+fn buildRxOwnerAuthoritySnapshot(
+    storage: *ExternalPumpStorage,
+    lease: *ExternalWholeTurnLease,
+    scratch: *ExternalRxTurnScratch,
+) ?*const RxOwnerAuthoritySnapshot {
+    if (!storage.validateWholeTurnLease(lease) or
+        scratch.saved_self_addr != @intFromPtr(scratch) or
+        scratch.lifecycle != .busy or
+        scratch.authority_ranges_generation == 0 or
+        scratch.authority_snapshot_build_count == std.math.maxInt(u64))
+        return null;
+    const client = if (storage.owned_client) |*owned| owned else return null;
+    const rx_state = switch (client.io_mode) {
+        .external => |*state| state,
+        .blocking => return null,
+    };
+    if (!client_external_mode.parserSealValid(rx_state, &client.parser))
+        return null;
+    const identity = rx_state.rx_provenance.identity orelse return null;
+
+    const ranges = &scratch.authority_ranges;
+    ranges.reset();
+    client.appendExternalOwnerRangesForTeardown(
+        &scratch.client_ranges,
+        ranges,
+    ) catch return null;
+    storage.inbox_ledger.appendActiveOwnerRanges(ranges) catch return null;
+    storage.owner_metadata.appendActiveOwnerRanges(storage, ranges) catch return null;
+    switch (storage.pending_response) {
+        .none => {},
+        .pending => |pending| ranges.append(
+            pending.seal.payload_addr,
+            pending.seal.payload_len,
+        ) catch return null,
+        .terminal => return null,
+    }
+    const forbidden = [_]external_owner_range.Range{
+        .{ .start = @intFromPtr(storage), .len = @sizeOf(ExternalPumpStorage) },
+        .{ .start = @intFromPtr(lease), .len = @sizeOf(ExternalWholeTurnLease) },
+        .{ .start = @intFromPtr(scratch), .len = @sizeOf(ExternalRxTurnScratch) },
+    };
+    ranges.validate(&forbidden) catch return null;
+    const inventory_digest = external_rx_intent.sealAuthorityRanges(
+        ranges.ranges[0..ranges.len],
+        scratch.authority_ranges_generation,
+    ) orelse return null;
+    const reservation = storage.intent_scratch_reservation;
+    var next = RxOwnerAuthoritySnapshot{
+        .saved_self_addr = @intFromPtr(&scratch.authority_snapshot),
+        .storage_addr = @intFromPtr(storage),
+        .storage_len = @sizeOf(ExternalPumpStorage),
+        .lease_addr = @intFromPtr(lease),
+        .lease_len = @sizeOf(ExternalWholeTurnLease),
+        .scratch_addr = @intFromPtr(scratch),
+        .scratch_len = @sizeOf(ExternalRxTurnScratch),
+        .operation_generation = storage.operation_generation,
+        .client_addr = @intFromPtr(client),
+        .state_addr = @intFromPtr(rx_state),
+        .fd = client.fd,
+        .parser_addr = @intFromPtr(&client.parser),
+        .parser_seal = rx_state.rx_provenance.parser_seal,
+        .identity = identity,
+        .allocator_ptr_addr = @intFromPtr(client.parser.allocator.ptr),
+        .allocator_vtable_addr = @intFromPtr(client.parser.allocator.vtable),
+        .inventory_addr = @intFromPtr(&ranges.ranges),
+        .inventory_count = ranges.len,
+        .inventory_generation = scratch.authority_ranges_generation,
+        .inventory_digest = inventory_digest,
+        .reservation_handle_addr = switch (reservation.lifecycle) {
+            .active, .destroying => reservation.handle_addr,
+            .empty, .poisoned_tombstone => 0,
+        },
+        .reservation_generation = switch (reservation.lifecycle) {
+            .active, .destroying => reservation.generation,
+            .empty, .poisoned_tombstone => 0,
+        },
+    };
+    next.digest = rxOwnerAuthoritySnapshotDigest(&next);
+    scratch.authority_snapshot = next;
+    scratch.authority_snapshot_build_count += 1;
+    return &scratch.authority_snapshot;
+}
+
+fn intentAuthorityFromSnapshot(
+    snapshot: *const RxOwnerAuthoritySnapshot,
+    scratch: *ExternalRxTurnScratch,
+) ?external_rx_intent.AuthorityView {
+    if (snapshot.saved_self_addr != @intFromPtr(snapshot) or
+        snapshot.scratch_addr != @intFromPtr(scratch) or
+        snapshot.inventory_addr != @intFromPtr(&scratch.authority_ranges.ranges) or
+        snapshot.inventory_count != scratch.authority_ranges.len or
+        !std.mem.eql(
+            u8,
+            &snapshot.digest,
+            &rxOwnerAuthoritySnapshotDigest(snapshot),
+        ))
+        return null;
+    const client: *client_mod.Client = @ptrFromInt(snapshot.client_addr);
+    if (@intFromPtr(client.parser.allocator.ptr) != snapshot.allocator_ptr_addr or
+        @intFromPtr(client.parser.allocator.vtable) != snapshot.allocator_vtable_addr)
+        return null;
+    return .{
+        .storage_addr = snapshot.storage_addr,
+        .storage_len = snapshot.storage_len,
+        .operation_generation = snapshot.operation_generation,
+        .parser_generation = snapshot.parser_seal.generation,
+        .buffer_start_absolute = snapshot.parser_seal.buffer_start_absolute,
+        .identity = snapshot.identity,
+        .allocator = client.parser.allocator,
+        .forbidden_ranges = scratch.authority_ranges.ranges[0..snapshot.inventory_count],
+        .forbidden_ranges_generation = snapshot.inventory_generation,
+        .forbidden_ranges_digest = snapshot.inventory_digest,
+        .operation_scratch_addr = snapshot.scratch_addr,
+        .operation_scratch_len = snapshot.scratch_len,
+        .operation_lease_addr = snapshot.lease_addr,
+        .operation_lease_len = snapshot.lease_len,
+        .reservation_handle_addr = snapshot.reservation_handle_addr,
+        .reservation_generation = snapshot.reservation_generation,
+    };
+}
+
 const ProductIntentAuthority = struct {
     storage: *ExternalPumpStorage,
     lease: *ExternalWholeTurnLease,
@@ -2024,94 +2212,178 @@ const ProductIntentAuthority = struct {
 
     fn current(raw: *anyopaque) ?external_rx_intent.AuthorityView {
         const self: *ProductIntentAuthority = @ptrCast(@alignCast(raw));
-        const storage = self.storage;
-        const scratch = self.scratch;
-        if (!storage.validateWholeTurnLease(self.lease) or
-            scratch.saved_self_addr != @intFromPtr(scratch) or
-            scratch.lifecycle != .busy or
-            scratch.authority_ranges_generation == 0)
-            return null;
-        const client = if (storage.owned_client) |*owned|
-            owned
-        else
-            return null;
-        const rx_state = switch (client.io_mode) {
-            .external => |*state| state,
-            .blocking => return null,
-        };
-        if (!client_external_mode.parserSealValid(rx_state, &client.parser))
-            return null;
-
-        const ranges = &scratch.authority_ranges;
-        ranges.reset();
-        client.appendExternalOwnerRangesForTeardown(
-            &scratch.client_ranges,
-            ranges,
-        ) catch return null;
-        storage.inbox_ledger.appendActiveOwnerRanges(ranges) catch return null;
-        storage.owner_metadata.appendActiveOwnerRanges(
-            storage,
-            ranges,
-        ) catch return null;
-        switch (storage.pending_response) {
-            .none => {},
-            .pending => |pending| ranges.append(
-                pending.seal.payload_addr,
-                pending.seal.payload_len,
-            ) catch return null,
-            .terminal => return null,
-        }
-        const forbidden = [_]external_owner_range.Range{
-            .{
-                .start = @intFromPtr(storage),
-                .len = @sizeOf(ExternalPumpStorage),
-            },
-            .{
-                .start = @intFromPtr(self.lease),
-                .len = @sizeOf(ExternalWholeTurnLease),
-            },
-            .{
-                .start = @intFromPtr(scratch),
-                .len = @sizeOf(ExternalRxTurnScratch),
-            },
-        };
-        ranges.validate(&forbidden) catch return null;
-        const identity = rx_state.rx_provenance.identity orelse return null;
-        const digest = external_rx_intent.sealAuthorityRanges(
-            ranges.ranges[0..ranges.len],
-            scratch.authority_ranges_generation,
+        const snapshot = buildRxOwnerAuthoritySnapshot(
+            self.storage,
+            self.lease,
+            self.scratch,
         ) orelse return null;
-        const reservation = storage.intent_scratch_reservation;
-        return .{
-            .storage_addr = @intFromPtr(storage),
-            .storage_len = @sizeOf(ExternalPumpStorage),
-            .operation_generation = storage.operation_generation,
-            .parser_generation = rx_state.rx_provenance.parser_seal.generation,
-            .buffer_start_absolute = rx_state.rx_provenance.buffer_start_absolute,
-            .identity = identity,
-            .allocator = client.parser.allocator,
-            .forbidden_ranges = ranges.ranges[0..ranges.len],
-            .forbidden_ranges_generation = scratch.authority_ranges_generation,
-            .forbidden_ranges_digest = digest,
-            .operation_scratch_addr = self.lease.scratch_addr,
-            .operation_scratch_len = self.lease.scratch_len,
-            .operation_lease_addr = @intFromPtr(self.lease),
-            .operation_lease_len = @sizeOf(ExternalWholeTurnLease),
-            .reservation_handle_addr = switch (reservation.lifecycle) {
-                .active, .destroying => reservation.handle_addr,
-                .empty, .poisoned_tombstone => 0,
-            },
-            .reservation_generation = switch (reservation.lifecycle) {
-                .active, .destroying => reservation.generation,
-                .empty, .poisoned_tombstone => 0,
-            },
-        };
+        return intentAuthorityFromSnapshot(snapshot, self.scratch);
     }
 
     fn ops(self: *ProductIntentAuthority) external_rx_intent.AuthorityOps {
         return .{
             .context = self,
             .current = current,
+        };
+    }
+};
+
+fn protectedRangeLessThan(
+    _: void,
+    a: client_external_rx_read.ProtectedRange,
+    b: client_external_rx_read.ProtectedRange,
+) bool {
+    return a.addr < b.addr or (a.addr == b.addr and a.len < b.len);
+}
+
+const ProductRxReadAuthority = struct {
+    storage: *ExternalPumpStorage,
+    lease: *ExternalWholeTurnLease,
+    scratch: *ExternalRxTurnScratch,
+    read_ops: *const client_external_rx_read.RxReadOps,
+
+    fn current(raw: *anyopaque) ?client_external_rx_read.RxReadAuthorityView {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        const snapshot = buildRxOwnerAuthoritySnapshot(
+            self.storage,
+            self.lease,
+            self.scratch,
+        ) orelse return null;
+        if (self.read_ops.context_len == 0 or
+            @intFromPtr(self.read_ops.context) == 0 or
+            @intFromPtr(self.read_ops.read) == 0 or
+            !client_external_mode.parserAuthoritySealStructurallyValid(
+                &snapshot.parser_seal,
+            ))
+            return null;
+
+        var protected = [_]client_external_rx_read.ProtectedRange{.{}} **
+            client_external_rx_read.max_rx_read_protected_ranges;
+        var count: usize = 0;
+        protected[count] = .{
+            .addr = @intFromPtr(self.read_ops.context),
+            .len = self.read_ops.context_len,
+        };
+        count += 1;
+        protected[count] = .{
+            .addr = @intFromPtr(self),
+            .len = @sizeOf(@This()),
+        };
+        count += 1;
+        if (snapshot.parser_seal.capacity != 0) {
+            protected[count] = .{
+                .addr = snapshot.parser_seal.backing_addr,
+                .len = snapshot.parser_seal.capacity,
+            };
+            count += 1;
+        }
+        std.mem.sort(
+            client_external_rx_read.ProtectedRange,
+            protected[0..count],
+            {},
+            protectedRangeLessThan,
+        );
+        var previous_end: usize = 0;
+        for (protected[0..count], 0..) |range, index| {
+            if (range.addr == 0 or range.len == 0) return null;
+            const end = std.math.add(usize, range.addr, range.len) catch return null;
+            if (index != 0 and range.addr < previous_end) return null;
+            previous_end = end;
+        }
+        var view = client_external_rx_read.RxReadAuthorityView{
+            .storage_addr = snapshot.storage_addr,
+            .lease_addr = snapshot.lease_addr,
+            .scratch_addr = @intFromPtr(&self.scratch.read),
+            .scratch_generation = self.scratch.read.generation,
+            .client_addr = snapshot.client_addr,
+            .fd = snapshot.fd,
+            .parser_addr = snapshot.parser_addr,
+            .parser_seal = snapshot.parser_seal,
+            .owner_snapshot_digest = snapshot.digest,
+            .protected_range_count = @intCast(count),
+            .protected_ranges = protected,
+            .view_digest = [_]u8{0} ** 32,
+        };
+        client_external_rx_read.sealAuthorityView(&view);
+        return view;
+    }
+
+    fn ops(self: *@This()) client_external_rx_read.RxReadAuthorityOps {
+        return .{
+            .context = self,
+            .context_len = @sizeOf(@This()),
+            .current = current,
+        };
+    }
+};
+
+fn snapshotMatchesReplacementSeal(
+    snapshot: *const RxOwnerAuthoritySnapshot,
+    seal: client_external_mode.ReplacementAuthoritySeal,
+) bool {
+    return seal.generation == snapshot.operation_generation and
+        std.mem.eql(u8, &seal.digest, &snapshot.digest);
+}
+
+const ProductReplacementAllocationGuard = struct {
+    storage: *ExternalPumpStorage,
+    lease: *ExternalWholeTurnLease,
+    scratch: *ExternalRxTurnScratch,
+
+    fn check(
+        raw: *anyopaque,
+        phase: client_external_mode.ReplacementGuardPhase,
+        expected: ?client_external_mode.ReplacementAuthoritySeal,
+        candidate: ?client_external_mode.ReplacementCandidate,
+    ) client_external_mode.ReplacementGuardResult {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        const snapshot = buildRxOwnerAuthoritySnapshot(
+            self.storage,
+            self.lease,
+            self.scratch,
+        ) orelse return .quarantined;
+        const seal = client_external_mode.ReplacementAuthoritySeal{
+            .generation = snapshot.operation_generation,
+            .digest = snapshot.digest,
+        };
+        if (expected) |prior|
+            if (!snapshotMatchesReplacementSeal(snapshot, prior))
+                return .quarantined;
+        return switch (phase) {
+            .capture_before_allocate,
+            .capture_after_allocate,
+            .capture_after_validate,
+            .capture_before_cleanup,
+            .capture_after_cleanup_validate,
+            => .{ .seal = seal },
+            .validate_allocated,
+            .validate_after_cleanup,
+            => blk: {
+                const checked = candidate orelse break :blk .quarantined;
+                if (rangesOverlap(
+                    checked.addr,
+                    checked.len,
+                    @intFromPtr(self),
+                    @sizeOf(@This()),
+                )) break :blk .quarantined;
+                const authority = intentAuthorityFromSnapshot(
+                    snapshot,
+                    self.scratch,
+                ) orelse break :blk .quarantined;
+                if (!external_rx_intent.allocationDisjointFromAuthority(
+                    authority,
+                    checked.addr,
+                    checked.len,
+                )) break :blk .quarantined;
+                break :blk .{ .accepted = seal };
+            },
+        };
+    }
+
+    fn ops(self: *@This()) client_external_mode.ReplacementAllocationGuard {
+        return .{
+            .context = self,
+            .check = check,
         };
     }
 };
@@ -21977,6 +22249,156 @@ test "external pump storage overlap arithmetic covers partial and adjacent range
     try std.testing.expect(!rangesOverlap(100, 20, 80, 20));
     try std.testing.expect(!rangesOverlap(100, 20, 120, 20));
     try std.testing.expect(rangesOverlap(std.math.maxInt(usize) - 1, 4, 0, 1));
+}
+
+test "C4b shared owner snapshot rebuilds freshly and projects each authority" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    defer _ = teardownForTest(&storage);
+
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    var lease: ExternalWholeTurnLease = .{};
+    try storage.acquireWholeTurnLease(
+        &lease,
+        @intFromPtr(scratch),
+        @sizeOf(ExternalRxTurnScratch),
+    );
+    scratch.lifecycle = .busy;
+    scratch.authority_ranges_generation = storage.operation_generation;
+    defer {
+        scratch.lifecycle = .ready;
+        _ = storage.releaseWholeTurnLease(&lease);
+    }
+
+    const first = buildRxOwnerAuthoritySnapshot(
+        &storage,
+        &lease,
+        scratch,
+    ) orelse return error.TestUnexpectedResult;
+    const first_digest = first.digest;
+    const first_count = first.inventory_count;
+    const second = buildRxOwnerAuthoritySnapshot(
+        &storage,
+        &lease,
+        scratch,
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 2), scratch.authority_snapshot_build_count);
+    try std.testing.expectEqual(first_count, second.inventory_count);
+    try std.testing.expectEqualSlices(u8, &first_digest, &second.digest);
+
+    var intent = ProductIntentAuthority{
+        .storage = &storage,
+        .lease = &lease,
+        .scratch = scratch,
+    };
+    const intent_view = ProductIntentAuthority.current(&intent) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 3), scratch.authority_snapshot_build_count);
+    try std.testing.expectEqual(second.inventory_count, intent_view.forbidden_ranges.len);
+
+    const ReadProbe = struct {
+        value: u8 = 0,
+
+        fn read(
+            _: *anyopaque,
+            _: posix.fd_t,
+            _: []u8,
+        ) client_external_rx_read.RxReadOutcome {
+            return .would_block;
+        }
+    };
+    var read_probe = ReadProbe{};
+    const read_ops = client_external_rx_read.RxReadOps{
+        .context = &read_probe,
+        .context_len = @sizeOf(ReadProbe),
+        .read = ReadProbe.read,
+    };
+    var read_authority = ProductRxReadAuthority{
+        .storage = &storage,
+        .lease = &lease,
+        .scratch = scratch,
+        .read_ops = &read_ops,
+    };
+    const read_view = ProductRxReadAuthority.current(&read_authority) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 4), scratch.authority_snapshot_build_count);
+    try std.testing.expect(read_view.protected_range_count <=
+        client_external_rx_read.max_rx_read_protected_ranges);
+    try std.testing.expectEqual(
+        @intFromPtr(&scratch.read),
+        read_view.scratch_addr,
+    );
+    const aliased_read_ops = client_external_rx_read.RxReadOps{
+        .context = &read_authority,
+        .context_len = @sizeOf(ProductRxReadAuthority),
+        .read = ReadProbe.read,
+    };
+    read_authority.read_ops = &aliased_read_ops;
+    try std.testing.expect(ProductRxReadAuthority.current(&read_authority) == null);
+
+    var replacement = ProductReplacementAllocationGuard{
+        .storage = &storage,
+        .lease = &lease,
+        .scratch = scratch,
+    };
+    const captured = ProductReplacementAllocationGuard.check(
+        &replacement,
+        .capture_before_allocate,
+        null,
+        null,
+    );
+    const seal = switch (captured) {
+        .seal => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    var candidate: u8 = 0;
+    try std.testing.expect(
+        ProductReplacementAllocationGuard.check(
+            &replacement,
+            .capture_after_allocate,
+            seal,
+            .{ .addr = @intFromPtr(&candidate), .len = 1 },
+        ) == .seal,
+    );
+    try std.testing.expect(
+        ProductReplacementAllocationGuard.check(
+            &replacement,
+            .validate_allocated,
+            seal,
+            .{ .addr = @intFromPtr(&candidate), .len = 1 },
+        ) == .accepted,
+    );
+    try std.testing.expect(
+        ProductReplacementAllocationGuard.check(
+            &replacement,
+            .validate_after_cleanup,
+            seal,
+            .{
+                .addr = @intFromPtr(scratch),
+                .len = @sizeOf(ExternalRxTurnScratch),
+            },
+        ) == .quarantined,
+    );
+    var stale_seal = seal;
+    stale_seal.digest[0] +%= 1;
+    try std.testing.expect(
+        ProductReplacementAllocationGuard.check(
+            &replacement,
+            .capture_after_validate,
+            stale_seal,
+            null,
+        ) == .quarantined,
+    );
 }
 
 test "product payload guard rejects exact and partial guard authority aliases" {

@@ -111,6 +111,11 @@
 > parser/budget/lease/owner snapshot과 fresh inherited/live blocker zero를 봉인하고 재검증한 뒤에만
 > `socket_rx_drained=true`를 publish하는 A~G adapter matrix를 닫아야 C4 완료다. 그 뒤 C5 POSIX 제품
 > facade+실제 socketpair를 마지막 구현 gate로 닫는다.
+> C3 `snapshotDrainSeedAuthority`는 prepared/consumed phase의 exact address graph, private digest/range와
+> attempt continuity를 callback 0/mutation 0으로 인증한 value-only projection만 반환한다. C4 pump는 raw
+> receipt/borrow/permit/seed field를 재해석하지 않고 두 projection continuity만 비교한다. full final
+> summary와 allowance stop은 evidence prepare 전에 확정하며, consume 성공 뒤 decide까지 terminal/budget/
+> allowance/blocker branch, callback과 storage/scratch mutation은 0이다.
 > C3 collector는 최초 `maxReadable` allowance 안에서 최대 1 MiB를 누적한다. allowance/would-block/
 > attempt-budget stop은 validated staged prefix를 보존하고 EOF/error/EINTR-9/authority·descriptor·prefix
 > terminal은 전부 폐기해 C4 admit 0이다. C4는 `staged_len>0`일 때만 guarded

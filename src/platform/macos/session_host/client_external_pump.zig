@@ -1976,17 +1976,37 @@ const ExternalRxTurnScratchLifecycle = enum {
     terminal,
 };
 
-const CallbackRegionLifecycle = enum { empty, ready, active };
+const CallbackRegionLifecycle = enum { empty, active, consumed, quarantined };
 
 const CallbackRegionToken = struct {
     saved_self_addr: usize = 0,
     scratch_addr: usize = 0,
     permit_addr: usize = 0,
+    storage_addr: usize = 0,
+    lease_addr: usize = 0,
+    operation_generation: u64 = 0,
     thread_id: std.Thread.Id = undefined,
     epoch: u64 = 0,
     lifecycle: CallbackRegionLifecycle = .empty,
     digest: external_owner_seal.Digest = [_]u8{0} ** 32,
 };
+
+const CallbackReleaseLifecycle = enum { empty, active, consumed };
+
+const CallbackReleaseAuthority = struct {
+    saved_self_addr: usize = 0,
+    token_addr: usize = 0,
+    thread_id: std.Thread.Id = undefined,
+    epoch: u64 = 0,
+    storage_addr: usize = 0,
+    lease_addr: usize = 0,
+    scratch_addr: usize = 0,
+    permit_addr: usize = 0,
+    lifecycle: CallbackReleaseLifecycle = .empty,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+const CallbackReleaseResult = enum { released, quarantined, invalid_authority };
 
 const RxDrainEvidenceLifecycle = enum { empty, prepared, consumed, aborted };
 
@@ -2005,6 +2025,11 @@ const RxDrainEvidence = struct {
 };
 
 threadlocal var active_callback_region_addr: usize = 0;
+threadlocal var active_callback_release_addr: usize = 0;
+threadlocal var active_callback_storage_addr: usize = 0;
+threadlocal var active_callback_lease_addr: usize = 0;
+threadlocal var active_callback_scratch_addr: usize = 0;
+threadlocal var active_callback_permit_addr: usize = 0;
 threadlocal var callback_region_epoch: u64 = 0;
 
 const RxOwnerAuthoritySnapshot = struct {
@@ -2082,14 +2107,7 @@ pub const ExternalRxTurnScratch = struct {
         out.would_block_seed = .{};
         out.prepared_admit_use_permit = .{};
         out.drain_evidence = .{};
-        out.callback_region = .{
-            .saved_self_addr = @intFromPtr(&out.callback_region),
-            .scratch_addr = @intFromPtr(out),
-            .permit_addr = @intFromPtr(&out.borrow_use_permit),
-            .thread_id = std.Thread.getCurrentId(),
-            .lifecycle = .ready,
-        };
-        out.callback_region.digest = callbackRegionDigest(&out.callback_region);
+        out.callback_region = .{};
         out.quarantine_receipt = .{};
         return true;
     }
@@ -2116,6 +2134,9 @@ fn callbackRegionDigest(
     writer.writeUsize(token.saved_self_addr);
     writer.writeUsize(token.scratch_addr);
     writer.writeUsize(token.permit_addr);
+    writer.writeUsize(token.storage_addr);
+    writer.writeUsize(token.lease_addr);
+    writer.writeU64(token.operation_generation);
     writer.writeUsize(@intCast(token.thread_id));
     writer.writeU64(token.epoch);
     writer.writeU8(@intFromEnum(token.lifecycle));
@@ -2127,49 +2148,262 @@ fn callbackRegionTokenValid(
 ) bool {
     return token.saved_self_addr == @intFromPtr(token) and
         token.scratch_addr != 0 and token.permit_addr != 0 and
+        token.storage_addr != 0 and token.lease_addr != 0 and
+        token.operation_generation != 0 and
         token.thread_id == std.Thread.getCurrentId() and
         std.mem.eql(u8, &token.digest, &callbackRegionDigest(token));
 }
 
-fn acquireCallbackRegion(token: *CallbackRegionToken) bool {
-    if (!callbackRegionTokenValid(token) or token.lifecycle != .ready or
+fn callbackRegionTokenPristine(token: *const CallbackRegionToken) bool {
+    return token.saved_self_addr == 0 and token.scratch_addr == 0 and
+        token.permit_addr == 0 and token.storage_addr == 0 and
+        token.lease_addr == 0 and token.operation_generation == 0 and
+        token.epoch == 0 and token.lifecycle == .empty and
+        std.mem.allEqual(u8, &token.digest, 0);
+}
+
+fn callbackReleaseDigest(
+    authority: *const CallbackReleaseAuthority,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARUCRA1");
+    writer.writeUsize(authority.saved_self_addr);
+    writer.writeUsize(authority.token_addr);
+    writer.writeUsize(@intCast(authority.thread_id));
+    writer.writeU64(authority.epoch);
+    writer.writeUsize(authority.storage_addr);
+    writer.writeUsize(authority.lease_addr);
+    writer.writeUsize(authority.scratch_addr);
+    writer.writeUsize(authority.permit_addr);
+    writer.writeU8(@intFromEnum(authority.lifecycle));
+    return writer.finish();
+}
+
+fn callbackReleaseValid(
+    authority: *const CallbackReleaseAuthority,
+) bool {
+    return authority.saved_self_addr == @intFromPtr(authority) and
+        authority.token_addr != 0 and
+        authority.thread_id == std.Thread.getCurrentId() and
+        authority.epoch != 0 and authority.storage_addr != 0 and
+        authority.lease_addr != 0 and authority.scratch_addr != 0 and
+        authority.permit_addr != 0 and
+        std.mem.eql(
+            u8,
+            &authority.digest,
+            &callbackReleaseDigest(authority),
+        );
+}
+
+fn callbackReleasePristine(
+    authority: *const CallbackReleaseAuthority,
+) bool {
+    return authority.saved_self_addr == 0 and authority.token_addr == 0 and
+        authority.epoch == 0 and authority.storage_addr == 0 and
+        authority.lease_addr == 0 and authority.scratch_addr == 0 and
+        authority.permit_addr == 0 and authority.lifecycle == .empty and
+        std.mem.allEqual(u8, &authority.digest, 0);
+}
+
+fn acquireCallbackRegion(
+    storage: *ExternalPumpStorage,
+    lease: *ExternalWholeTurnLease,
+    scratch: *ExternalRxTurnScratch,
+    token: *CallbackRegionToken,
+    authority: *CallbackReleaseAuthority,
+) bool {
+    if (!callbackRegionTokenPristine(token) or
+        !callbackReleasePristine(authority) or
+        scratch.saved_self_addr != @intFromPtr(scratch) or
+        scratch.lifecycle != .busy or
+        !storage.validateWholeTurnLease(lease) or
         active_callback_region_addr != 0 or
+        active_callback_release_addr != 0 or
         callback_region_epoch == std.math.maxInt(u64))
         return false;
     callback_region_epoch += 1;
-    token.epoch = callback_region_epoch;
-    token.lifecycle = .active;
+    token.* = .{
+        .saved_self_addr = @intFromPtr(token),
+        .scratch_addr = @intFromPtr(scratch),
+        .permit_addr = @intFromPtr(&scratch.borrow_use_permit),
+        .storage_addr = @intFromPtr(storage),
+        .lease_addr = @intFromPtr(lease),
+        .operation_generation = storage.operation_generation,
+        .thread_id = std.Thread.getCurrentId(),
+        .epoch = callback_region_epoch,
+        .lifecycle = .active,
+    };
     token.digest = callbackRegionDigest(token);
+    authority.* = .{
+        .saved_self_addr = @intFromPtr(authority),
+        .token_addr = @intFromPtr(token),
+        .thread_id = std.Thread.getCurrentId(),
+        .epoch = callback_region_epoch,
+        .storage_addr = @intFromPtr(storage),
+        .lease_addr = @intFromPtr(lease),
+        .scratch_addr = @intFromPtr(scratch),
+        .permit_addr = @intFromPtr(&scratch.borrow_use_permit),
+        .lifecycle = .active,
+    };
+    authority.digest = callbackReleaseDigest(authority);
     active_callback_region_addr = @intFromPtr(token);
+    active_callback_release_addr = @intFromPtr(authority);
+    active_callback_storage_addr = @intFromPtr(storage);
+    active_callback_lease_addr = @intFromPtr(lease);
+    active_callback_scratch_addr = @intFromPtr(scratch);
+    active_callback_permit_addr = @intFromPtr(&scratch.borrow_use_permit);
     return true;
 }
 
-fn releaseCallbackRegion(token: *CallbackRegionToken) bool {
-    if (!callbackRegionTokenValid(token) or token.lifecycle != .active or
-        active_callback_region_addr != @intFromPtr(token) or
-        token.epoch != callback_region_epoch)
-        return false;
+fn releaseCallbackRegion(
+    authority: *CallbackReleaseAuthority,
+) CallbackReleaseResult {
+    if (!callbackReleaseValid(authority) or
+        authority.lifecycle != .active or
+        active_callback_release_addr != @intFromPtr(authority) or
+        active_callback_region_addr != authority.token_addr or
+        active_callback_storage_addr != authority.storage_addr or
+        active_callback_lease_addr != authority.lease_addr or
+        active_callback_scratch_addr != authority.scratch_addr or
+        active_callback_permit_addr != authority.permit_addr or
+        callback_region_epoch != authority.epoch)
+        return .invalid_authority;
     active_callback_region_addr = 0;
-    token.lifecycle = .ready;
+    active_callback_release_addr = 0;
+    active_callback_storage_addr = 0;
+    active_callback_lease_addr = 0;
+    active_callback_scratch_addr = 0;
+    active_callback_permit_addr = 0;
+    authority.lifecycle = .consumed;
+    authority.digest = callbackReleaseDigest(authority);
+    const token: *CallbackRegionToken = @ptrFromInt(authority.token_addr);
+    const scratch: *ExternalRxTurnScratch =
+        @ptrFromInt(authority.scratch_addr);
+    if (!callbackRegionTokenValid(token) or token.lifecycle != .active or
+        token.epoch != authority.epoch or
+        token.storage_addr != authority.storage_addr or
+        token.lease_addr != authority.lease_addr or
+        token.scratch_addr != authority.scratch_addr or
+        token.permit_addr != authority.permit_addr)
+    {
+        token.* = .{
+            .saved_self_addr = @intFromPtr(token),
+            .scratch_addr = authority.scratch_addr,
+            .permit_addr = authority.permit_addr,
+            .storage_addr = authority.storage_addr,
+            .lease_addr = authority.lease_addr,
+            .operation_generation = (@as(*ExternalPumpStorage, @ptrFromInt(
+                authority.storage_addr,
+            ))).operation_generation,
+            .thread_id = authority.thread_id,
+            .epoch = authority.epoch,
+            .lifecycle = .quarantined,
+        };
+        token.digest = callbackRegionDigest(token);
+        scratch.lifecycle = .terminal;
+        return .quarantined;
+    }
+    token.lifecycle = .consumed;
     token.digest = callbackRegionDigest(token);
+    return .released;
+}
+
+fn resetConsumedCallbackRegion(
+    scratch: *ExternalRxTurnScratch,
+    token: *CallbackRegionToken,
+) bool {
+    if (scratch.saved_self_addr != @intFromPtr(scratch) or
+        scratch.lifecycle != .busy or
+        token.saved_self_addr != @intFromPtr(token) or
+        token.scratch_addr != @intFromPtr(scratch) or
+        token.permit_addr != @intFromPtr(&scratch.borrow_use_permit) or
+        token.lifecycle != .consumed or
+        !std.mem.eql(u8, &token.digest, &callbackRegionDigest(token)) or
+        active_callback_region_addr != 0 or
+        active_callback_release_addr != 0)
+        return false;
+    token.* = .{};
     return true;
+}
+
+fn beginPumpCallbackRegion(
+    storage: *ExternalPumpStorage,
+    lease: *ExternalWholeTurnLease,
+    scratch: *ExternalRxTurnScratch,
+    authority: *CallbackReleaseAuthority,
+) bool {
+    if (scratch.callback_region.lifecycle == .consumed and
+        !resetConsumedCallbackRegion(scratch, &scratch.callback_region))
+        return false;
+    return acquireCallbackRegion(
+        storage,
+        lease,
+        scratch,
+        &scratch.callback_region,
+        authority,
+    );
+}
+
+fn finishPumpCallbackRegion(
+    scratch: *ExternalRxTurnScratch,
+    authority: *CallbackReleaseAuthority,
+) bool {
+    _ = scratch;
+    return releaseCallbackRegion(authority) == .released;
 }
 
 fn callbackRegionCurrent(
     raw: *anyopaque,
     scratch_addr: usize,
 ) ?bool {
+    const outer_scratch_addr = std.math.sub(
+        usize,
+        scratch_addr,
+        @offsetOf(ExternalRxTurnScratch, "read"),
+    ) catch return null;
+    const trusted_token_addr = std.math.add(
+        usize,
+        outer_scratch_addr,
+        @offsetOf(ExternalRxTurnScratch, "callback_region"),
+    ) catch return null;
+    if (@intFromPtr(raw) != trusted_token_addr) return null;
     const token: *CallbackRegionToken = @ptrCast(@alignCast(raw));
+    if (!callbackRegionTokenValid(token) or
+        (token.lifecycle != .active and token.lifecycle != .consumed))
+        return null;
+    if (token.storage_addr != active_external_operation_addr or
+        token.lease_addr != active_external_lease_addr or
+        token.operation_generation != active_external_lease_generation)
+        return null;
+    const storage: *ExternalPumpStorage = @ptrFromInt(token.storage_addr);
+    const lease: *ExternalWholeTurnLease = @ptrFromInt(token.lease_addr);
+    const scratch: *ExternalRxTurnScratch = @ptrFromInt(token.scratch_addr);
     const expected_read_addr = std.math.add(
         usize,
         token.scratch_addr,
         @offsetOf(ExternalRxTurnScratch, "read"),
     ) catch return null;
-    if (!callbackRegionTokenValid(token) or
+    const active = token.lifecycle == .active;
+    if ((active and (active_callback_release_addr == 0 or
+        active_callback_storage_addr != token.storage_addr or
+        active_callback_lease_addr != token.lease_addr or
+        active_callback_scratch_addr != token.scratch_addr or
+        active_callback_permit_addr != token.permit_addr or
+        active_callback_region_addr != @intFromPtr(token))) or
+        (!active and (active_callback_release_addr != 0 or
+            active_callback_region_addr != 0 or
+            active_callback_storage_addr != 0 or
+            active_callback_lease_addr != 0 or
+            active_callback_scratch_addr != 0 or
+            active_callback_permit_addr != 0)) or
+        token.epoch != callback_region_epoch or
+        scratch.saved_self_addr != @intFromPtr(scratch) or
+        scratch.lifecycle != .busy or
+        token.permit_addr != @intFromPtr(&scratch.borrow_use_permit) or
+        token.operation_generation != storage.operation_generation or
+        !storage.validateWholeTurnLease(lease) or
         expected_read_addr != scratch_addr)
         return null;
-    return token.lifecycle == .active and
-        active_callback_region_addr == @intFromPtr(token);
+    return active;
 }
 
 fn rxOwnerAuthoritySnapshotDigest(
@@ -9002,7 +9236,13 @@ pub const ExternalPumpStorage = struct {
             });
         }
         if (snapshot.live_screen_pending) {
-            if (!acquireCallbackRegion(&scratch.callback_region))
+            var callback_release: CallbackReleaseAuthority = .{};
+            if (!beginPumpCallbackRegion(
+                self,
+                lease,
+                scratch,
+                &callback_release,
+            ))
                 return self.terminalInjectedRxTurn(
                     .invariant_failure,
                     0,
@@ -9014,7 +9254,7 @@ pub const ExternalPumpStorage = struct {
                 &ops.buffered,
                 &scratch.live_consume,
             );
-            if (!releaseCallbackRegion(&scratch.callback_region))
+            if (!finishPumpCallbackRegion(scratch, &callback_release))
                 return self.terminalInjectedRxTurn(
                     .invariant_failure,
                     0,
@@ -9060,7 +9300,13 @@ pub const ExternalPumpStorage = struct {
             0,
         );
         if (initial_readiness == .complete_or_error) {
-            if (!acquireCallbackRegion(&scratch.callback_region))
+            var callback_release: CallbackReleaseAuthority = .{};
+            if (!beginPumpCallbackRegion(
+                self,
+                lease,
+                scratch,
+                &callback_release,
+            ))
                 return self.terminalInjectedRxTurn(
                     .invariant_failure,
                     0,
@@ -9074,7 +9320,7 @@ pub const ExternalPumpStorage = struct {
                 snapshot.live_partial_pending,
                 scratch,
             );
-            if (!releaseCallbackRegion(&scratch.callback_region))
+            if (!finishPumpCallbackRegion(scratch, &callback_release))
                 return self.terminalInjectedRxTurn(
                     .invariant_failure,
                     0,
@@ -9163,7 +9409,13 @@ pub const ExternalPumpStorage = struct {
             .read_ops = &ops.transport,
         };
         const authority_ops = read_authority.ops();
-        if (!acquireCallbackRegion(&scratch.callback_region))
+        var read_callback_release: CallbackReleaseAuthority = .{};
+        if (!beginPumpCallbackRegion(
+            self,
+            lease,
+            scratch,
+            &read_callback_release,
+        ))
             return self.terminalInjectedRxTurn(
                 .invariant_failure,
                 0,
@@ -9178,7 +9430,7 @@ pub const ExternalPumpStorage = struct {
                 .authority_ops = &authority_ops,
             },
         );
-        if (!releaseCallbackRegion(&scratch.callback_region))
+        if (!finishPumpCallbackRegion(scratch, &read_callback_release))
             return self.terminalInjectedRxTurn(
                 .invariant_failure,
                 0,
@@ -9269,7 +9521,13 @@ pub const ExternalPumpStorage = struct {
                     .admitted_len = stopped_bytes.len,
                 };
                 const replacement_guard = replacement_guard_owner.ops();
-                if (!acquireCallbackRegion(&scratch.callback_region))
+                var admit_callback_release: CallbackReleaseAuthority = .{};
+                if (!beginPumpCallbackRegion(
+                    self,
+                    lease,
+                    scratch,
+                    &admit_callback_release,
+                ))
                     terminal_reason = .invariant_failure
                 else {
                     const prepare = client_external_mode.prepareAdmitGuarded(
@@ -9283,13 +9541,19 @@ pub const ExternalPumpStorage = struct {
                     );
                     switch (prepare) {
                         .ordinary_failure => {
-                            if (!releaseCallbackRegion(&scratch.callback_region))
+                            if (!finishPumpCallbackRegion(
+                                scratch,
+                                &admit_callback_release,
+                            ))
                                 terminal_reason = .invariant_failure
                             else
                                 terminal_reason = .resource_exhausted;
                         },
                         .allocation_quarantined => |quarantine| {
-                            if (!releaseCallbackRegion(&scratch.callback_region) or
+                            if (!finishPumpCallbackRegion(
+                                scratch,
+                                &admit_callback_release,
+                            ) or
                                 !completeGuardedAdmitQuarantine(
                                     &scratch.read.prepared_admit,
                                     .allocation_quarantined,
@@ -9308,7 +9572,10 @@ pub const ExternalPumpStorage = struct {
                                     stopped_bytes,
                                     &scratch.read.prepared_admit,
                                 );
-                            if (!releaseCallbackRegion(&scratch.callback_region)) {
+                            if (!finishPumpCallbackRegion(
+                                scratch,
+                                &admit_callback_release,
+                            )) {
                                 terminal_reason = .invariant_failure;
                             } else switch (commit) {
                                 .committed => {
@@ -9326,8 +9593,12 @@ pub const ExternalPumpStorage = struct {
                                         terminal_reason = .invariant_failure;
                                 },
                                 .ordinary_failure => {
-                                    if (!acquireCallbackRegion(
-                                        &scratch.callback_region,
+                                    var abort_callback_release: CallbackReleaseAuthority = .{};
+                                    if (!beginPumpCallbackRegion(
+                                        self,
+                                        lease,
+                                        scratch,
+                                        &abort_callback_release,
                                     )) {
                                         terminal_reason = .invariant_failure;
                                     } else {
@@ -9337,8 +9608,9 @@ pub const ExternalPumpStorage = struct {
                                             &client.parser,
                                             &scratch.read.prepared_admit,
                                         );
-                                        if (!releaseCallbackRegion(
-                                            &scratch.callback_region,
+                                        if (!finishPumpCallbackRegion(
+                                            scratch,
+                                            &abort_callback_release,
                                         )) {
                                             terminal_reason = .invariant_failure;
                                         } else switch (aborted) {
@@ -9410,7 +9682,13 @@ pub const ExternalPumpStorage = struct {
                     terminal_reason = .invariant_failure;
             }
             if (admitted and terminal_reason == null) {
-                if (!acquireCallbackRegion(&scratch.callback_region)) {
+                var traversal_callback_release: CallbackReleaseAuthority = .{};
+                if (!beginPumpCallbackRegion(
+                    self,
+                    lease,
+                    scratch,
+                    &traversal_callback_release,
+                )) {
                     terminal_reason = .invariant_failure;
                 } else {
                     mechanics = self.traverseAndCommitBufferedUnderHeldLease(
@@ -9420,7 +9698,10 @@ pub const ExternalPumpStorage = struct {
                         snapshot.live_partial_pending,
                         scratch,
                     );
-                    if (!releaseCallbackRegion(&scratch.callback_region))
+                    if (!finishPumpCallbackRegion(
+                        scratch,
+                        &traversal_callback_release,
+                    ))
                         terminal_reason = .invariant_failure;
                 }
             }
@@ -9722,9 +10003,17 @@ pub const ExternalPumpStorage = struct {
         ops: *const RxTurnOps,
         scratch: *ExternalRxTurnScratch,
     ) client_pump.TurnResult {
+        if (active_callback_region_addr != 0 or
+            active_callback_release_addr != 0)
+            return client_pump.decide(.{
+                .turn = turn,
+                .parser = .empty,
+                .socket_rx_drained = false,
+                .inherited_blocker = true,
+            });
         if (scratch.saved_self_addr != @intFromPtr(scratch) or
             scratch.lifecycle != .ready or
-            scratch.callback_region.lifecycle != .ready or
+            !callbackRegionTokenPristine(&scratch.callback_region) or
             active_callback_region_addr != 0)
             return self.terminalRxTurn(.invariant_failure, 0, 0);
         var lease: ExternalWholeTurnLease = .{};
@@ -9749,12 +10038,6 @@ pub const ExternalPumpStorage = struct {
         scratch.would_block_seed = .{};
         scratch.drain_evidence = .{};
         scratch.quarantine_receipt = .{};
-        scratch.callback_region.permit_addr =
-            @intFromPtr(&scratch.borrow_use_permit);
-        scratch.callback_region.thread_id = std.Thread.getCurrentId();
-        scratch.callback_region.epoch = callback_region_epoch;
-        scratch.callback_region.digest =
-            callbackRegionDigest(&scratch.callback_region);
         scratch.authority_ranges_generation = self.operation_generation;
         var result = self.pumpInjectedRxUnderHeldLease(
             &lease,
@@ -9764,7 +10047,23 @@ pub const ExternalPumpStorage = struct {
         );
         scratch.snapshot = .{};
         scratch.live_consume = .{};
-        scratch.lifecycle = .ready;
+        if (scratch.lifecycle != .terminal and
+            scratch.callback_region.lifecycle == .consumed and
+            !resetConsumedCallbackRegion(
+                scratch,
+                &scratch.callback_region,
+            ))
+            scratch.lifecycle = .terminal;
+        if (scratch.lifecycle != .terminal and
+            callbackRegionTokenPristine(&scratch.callback_region))
+            scratch.lifecycle = .ready
+        else
+            result = self.terminalInjectedRxTurn(
+                .invariant_failure,
+                result.rx_read_bytes,
+                result.rx_bytes,
+                result.rx_frames,
+            );
         if (self.releaseWholeTurnLease(&lease) != .released) {
             result = self.terminalInjectedRxTurn(
                 .invariant_failure,
@@ -23668,6 +23967,22 @@ test "C4b shared owner snapshot rebuilds freshly and projects each authority" {
     defer std.testing.allocator.destroy(scratch);
     scratch.* = .{};
     try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    const invalid_raw_cases = [_]usize{
+        1,
+        @intFromPtr(&scratch.callback_region) +
+            @sizeOf(CallbackRegionToken),
+        std.math.maxInt(usize) &
+            ~(@as(usize, @alignOf(CallbackRegionToken)) - 1),
+    };
+    for (invalid_raw_cases) |raw_addr|
+        try std.testing.expect(callbackRegionCurrent(
+            @ptrFromInt(raw_addr),
+            @intFromPtr(&scratch.read),
+        ) == null);
+    try std.testing.expect(callbackRegionCurrent(
+        @ptrFromInt(1),
+        @offsetOf(ExternalRxTurnScratch, "read") - 1,
+    ) == null);
     var lease: ExternalWholeTurnLease = .{};
     try storage.acquireWholeTurnLease(
         &lease,
@@ -23800,6 +24115,271 @@ test "C4b shared owner snapshot rebuilds freshly and projects each authority" {
             null,
         ) == .quarantined,
     );
+}
+
+test "C4d callback hidden release clears TLS and quarantines every public token drift" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    defer _ = teardownForTest(&storage);
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    var lease: ExternalWholeTurnLease = .{};
+    try storage.acquireWholeTurnLease(
+        &lease,
+        @intFromPtr(scratch),
+        @sizeOf(ExternalRxTurnScratch),
+    );
+    defer _ = storage.releaseWholeTurnLease(&lease);
+    scratch.lifecycle = .busy;
+
+    const Mutation = enum {
+        saved_self,
+        scratch,
+        permit,
+        storage,
+        lease,
+        generation,
+        thread,
+        epoch,
+        lifecycle,
+        digest,
+    };
+    inline for (std.meta.tags(Mutation)) |mutation| {
+        scratch.callback_region = .{};
+        scratch.lifecycle = .busy;
+        var authority: CallbackReleaseAuthority = .{};
+        try std.testing.expect(beginPumpCallbackRegion(
+            &storage,
+            &lease,
+            scratch,
+            &authority,
+        ));
+        switch (mutation) {
+            .saved_self => scratch.callback_region.saved_self_addr +%= 1,
+            .scratch => scratch.callback_region.scratch_addr +%= 1,
+            .permit => scratch.callback_region.permit_addr +%= 1,
+            .storage => scratch.callback_region.storage_addr +%= 1,
+            .lease => scratch.callback_region.lease_addr +%= 1,
+            .generation => scratch.callback_region.operation_generation +%= 1,
+            .thread => scratch.callback_region.thread_id +%= 1,
+            .epoch => scratch.callback_region.epoch +%= 1,
+            .lifecycle => scratch.callback_region.lifecycle = .consumed,
+            .digest => scratch.callback_region.digest[0] +%= 1,
+        }
+        try std.testing.expectEqual(
+            CallbackReleaseResult.quarantined,
+            releaseCallbackRegion(&authority),
+        );
+        try std.testing.expectEqual(@as(usize, 0), active_callback_region_addr);
+        try std.testing.expectEqual(@as(usize, 0), active_callback_release_addr);
+        try std.testing.expectEqual(
+            ExternalRxTurnScratchLifecycle.terminal,
+            scratch.lifecycle,
+        );
+        try std.testing.expectEqual(
+            CallbackRegionLifecycle.quarantined,
+            scratch.callback_region.lifecycle,
+        );
+    }
+
+    scratch.callback_region = .{};
+    scratch.lifecycle = .busy;
+    var authority: CallbackReleaseAuthority = .{};
+    try std.testing.expect(beginPumpCallbackRegion(
+        &storage,
+        &lease,
+        scratch,
+        &authority,
+    ));
+    var copied_authority = authority;
+    try std.testing.expectEqual(
+        CallbackReleaseResult.invalid_authority,
+        releaseCallbackRegion(&copied_authority),
+    );
+    try std.testing.expect(active_callback_region_addr != 0);
+    const CrossThread = struct {
+        fn run(
+            target: *CallbackReleaseAuthority,
+            result: *CallbackReleaseResult,
+        ) void {
+            result.* = releaseCallbackRegion(target);
+        }
+    };
+    var cross_result: CallbackReleaseResult = .released;
+    const thread = try std.Thread.spawn(
+        .{},
+        CrossThread.run,
+        .{ &authority, &cross_result },
+    );
+    thread.join();
+    try std.testing.expectEqual(
+        CallbackReleaseResult.invalid_authority,
+        cross_result,
+    );
+    try std.testing.expect(active_callback_region_addr != 0);
+    const copied_token = scratch.callback_region;
+    try std.testing.expect(!callbackRegionTokenValid(&copied_token));
+    try std.testing.expectEqual(
+        CallbackReleaseResult.released,
+        releaseCallbackRegion(&authority),
+    );
+    try std.testing.expect(!finishPumpCallbackRegion(
+        scratch,
+        &authority,
+    ));
+    try std.testing.expect(resetConsumedCallbackRegion(
+        scratch,
+        &scratch.callback_region,
+    ));
+
+    const saved_epoch = callback_region_epoch;
+    callback_region_epoch = std.math.maxInt(u64);
+    defer callback_region_epoch = saved_epoch;
+    var exhausted: CallbackReleaseAuthority = .{};
+    try std.testing.expect(!beginPumpCallbackRegion(
+        &storage,
+        &lease,
+        scratch,
+        &exhausted,
+    ));
+    try std.testing.expect(callbackRegionTokenPristine(
+        &scratch.callback_region,
+    ));
+    try std.testing.expect(callbackReleasePristine(&exhausted));
+}
+
+test "C4d drifted A callback releases TLS and leaves B reusable after nested blocker" {
+    var fixture_a = try TestClient.init();
+    defer fixture_a.deinitPeer();
+    var fixture_b = try TestClient.init();
+    defer fixture_b.deinitPeer();
+    var storage_a: ExternalPumpStorage = .{};
+    var storage_b: ExternalPumpStorage = .{};
+    inline for (.{ .{ &storage_a, &fixture_a.client }, .{ &storage_b, &fixture_b.client } }) |pair| {
+        try std.testing.expect(
+            initTestStorage(pair[0], pair[1], valid_evidence) == .initialized,
+        );
+        try std.testing.expect(
+            prepareAdoptionForTest(pair[0]) == .prepared_adopted,
+        );
+        try std.testing.expect(pair[0].commitAdoption() == .adopted);
+    }
+    defer _ = teardownForTest(&storage_a);
+    defer _ = teardownForTest(&storage_b);
+    const scratch_a = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch_a);
+    const scratch_b = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch_b);
+    scratch_a.* = .{};
+    scratch_b.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch_a));
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch_b));
+
+    const BProbe = struct {
+        fn apply(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
+        fn read(
+            _: *anyopaque,
+            _: posix.fd_t,
+            _: []u8,
+        ) client_external_rx_read.RxReadOutcome {
+            return .would_block;
+        }
+    };
+    var b_probe: u8 = 0;
+    const b_ops = RxTurnOps{
+        .buffered = .{
+            .context = &b_probe,
+            .apply_live_screen = BProbe.apply,
+        },
+        .transport = .{
+            .context = &b_probe,
+            .context_len = @sizeOf(u8),
+            .read = BProbe.read,
+        },
+    };
+    const AProbe = struct {
+        scratch_a: *ExternalRxTurnScratch,
+        storage_b: *ExternalPumpStorage,
+        scratch_b: *ExternalRxTurnScratch,
+        b_ops: *const RxTurnOps,
+        nested: ?client_pump.TurnResult = null,
+
+        fn apply(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
+        fn read(
+            raw: *anyopaque,
+            _: posix.fd_t,
+            _: []u8,
+        ) client_external_rx_read.RxReadOutcome {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.nested = self.storage_b.pumpInjectedRxTurnForTest(
+                .{ .readable = true, .writable = false, .now_ns = 1 },
+                self.b_ops,
+                self.scratch_b,
+            );
+            self.scratch_a.callback_region.digest[0] +%= 1;
+            return .would_block;
+        }
+    };
+    var a_probe = AProbe{
+        .scratch_a = scratch_a,
+        .storage_b = &storage_b,
+        .scratch_b = scratch_b,
+        .b_ops = &b_ops,
+    };
+    const a_ops = RxTurnOps{
+        .buffered = .{
+            .context = &a_probe,
+            .apply_live_screen = AProbe.apply,
+        },
+        .transport = .{
+            .context = &a_probe,
+            .context_len = @sizeOf(AProbe),
+            .read = AProbe.read,
+        },
+    };
+    const a_result = storage_a.pumpInjectedRxTurnForTest(
+        .{ .readable = true, .writable = false, .now_ns = 1 },
+        &a_ops,
+        scratch_a,
+    );
+    try std.testing.expect(a_result.terminal != null);
+    try std.testing.expect(a_probe.nested.?.inherited_work_ready);
+    try std.testing.expect(a_probe.nested.?.terminal == null);
+    try std.testing.expectEqual(@as(usize, 0), active_callback_region_addr);
+    try std.testing.expectEqual(@as(usize, 0), active_callback_release_addr);
+    try std.testing.expectEqual(
+        ExternalRxTurnScratchLifecycle.terminal,
+        scratch_a.lifecycle,
+    );
+    try std.testing.expectEqual(
+        ExternalRxTurnScratchLifecycle.ready,
+        scratch_b.lifecycle,
+    );
+    const b_result = storage_b.pumpInjectedRxTurnForTest(
+        .{ .readable = true, .writable = false, .now_ns = 2 },
+        &b_ops,
+        scratch_b,
+    );
+    try std.testing.expect(b_result.terminal == null);
 }
 
 test "C4d product replacement guard rejects phase copy candidate parser inventory and lease drift" {

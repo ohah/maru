@@ -163,6 +163,10 @@ pub const CollectResult = union(enum) {
 
 const BorrowLifecycle = enum { empty, borrowed, settled, aborted };
 
+const BorrowUseLifecycle = enum { empty, active, released, aborted };
+const WouldBlockSeedLifecycle = enum { empty, prepared, consumed, aborted };
+const PermitSeedLifecycle = enum { unminted, prepared, consumed, aborted };
+
 pub const StoppedBorrow = struct {
     saved_self_addr: usize = 0,
     scratch_addr: usize = 0,
@@ -171,6 +175,43 @@ pub const StoppedBorrow = struct {
     bytes_addr: usize = 0,
     bytes_len: usize = 0,
     lifecycle: BorrowLifecycle = .empty,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+pub const BorrowUseGuardOps = struct {
+    context: *anyopaque,
+    context_len: usize,
+    current: *const fn (context: *anyopaque, scratch_addr: usize) ?bool,
+};
+
+pub const WouldBlockSeed = struct {
+    saved_self_addr: usize = 0,
+    scratch_addr: usize = 0,
+    scratch_generation: u64 = 0,
+    receipt_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    borrow_addr: usize = 0,
+    attempt_generation: u64 = 0,
+    lifecycle: WouldBlockSeedLifecycle = .empty,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+pub const BorrowUsePermit = struct {
+    saved_self_addr: usize = 0,
+    scratch_addr: usize = 0,
+    scratch_generation: u64 = 0,
+    receipt_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    borrow_addr: usize = 0,
+    authorized_seed_addr: usize = 0,
+    authorized_seed_len: usize = 0,
+    guard_context: *anyopaque = undefined,
+    guard_context_len: usize = 0,
+    guard_current: *const fn (
+        context: *anyopaque,
+        scratch_addr: usize,
+    ) ?bool = undefined,
+    seed_lifecycle: PermitSeedLifecycle = .unminted,
+    seed_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    lifecycle: BorrowUseLifecycle = .empty,
     digest: external_owner_seal.Digest = [_]u8{0} ** 32,
 };
 
@@ -240,6 +281,8 @@ pub const ExternalRxReadScratch = struct {
     spent_receipt_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
     active_borrow_addr: usize = 0,
     active_borrow_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    active_use_permit_addr: usize = 0,
+    active_use_permit_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
     validation_bytes_checked: usize = 0,
     backing: [max_rx_read_bytes_per_turn]u8 = undefined,
     digest: external_owner_seal.Digest = [_]u8{0} ** 32,
@@ -262,6 +305,8 @@ pub const ExternalRxReadScratch = struct {
         out.spent_receipt_digest = [_]u8{0} ** 32;
         out.active_borrow_addr = 0;
         out.active_borrow_digest = [_]u8{0} ** 32;
+        out.active_use_permit_addr = 0;
+        out.active_use_permit_digest = [_]u8{0} ** 32;
         out.validation_bytes_checked = 0;
         out.digest = scratchDigest(out);
         return true;
@@ -291,6 +336,8 @@ pub const ExternalRxReadScratch = struct {
             !std.mem.allEqual(u8, &self.spent_receipt_digest, 0) or
             self.active_borrow_addr != 0 or
             !std.mem.allEqual(u8, &self.active_borrow_digest, 0) or
+            self.active_use_permit_addr != 0 or
+            !std.mem.allEqual(u8, &self.active_use_permit_digest, 0) or
             self.validation_bytes_checked != 0 or
             !std.mem.eql(u8, &self.digest, &scratchDigest(self)))
             return false;
@@ -338,6 +385,8 @@ fn scratchDigest(
     writer.writeBytes(&scratch.spent_receipt_digest);
     writer.writeUsize(scratch.active_borrow_addr);
     writer.writeBytes(&scratch.active_borrow_digest);
+    writer.writeUsize(scratch.active_use_permit_addr);
+    writer.writeBytes(&scratch.active_use_permit_digest);
     writer.writeUsize(scratch.validation_bytes_checked);
     return writer.finish();
 }
@@ -365,6 +414,40 @@ fn borrowDigest(borrow: *const StoppedBorrow) external_owner_seal.Digest {
     writer.writeUsize(borrow.bytes_addr);
     writer.writeUsize(borrow.bytes_len);
     writer.writeU8(@intFromEnum(borrow.lifecycle));
+    return writer.finish();
+}
+
+fn wouldBlockSeedDigest(
+    seed: *const WouldBlockSeed,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARURWS1");
+    writer.writeUsize(seed.saved_self_addr);
+    writer.writeUsize(seed.scratch_addr);
+    writer.writeU64(seed.scratch_generation);
+    writer.writeBytes(&seed.receipt_digest);
+    writer.writeUsize(seed.borrow_addr);
+    writer.writeU64(seed.attempt_generation);
+    writer.writeU8(@intFromEnum(seed.lifecycle));
+    return writer.finish();
+}
+
+fn borrowUsePermitDigest(
+    permit: *const BorrowUsePermit,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARURUP1");
+    writer.writeUsize(permit.saved_self_addr);
+    writer.writeUsize(permit.scratch_addr);
+    writer.writeU64(permit.scratch_generation);
+    writer.writeBytes(&permit.receipt_digest);
+    writer.writeUsize(permit.borrow_addr);
+    writer.writeUsize(permit.authorized_seed_addr);
+    writer.writeUsize(permit.authorized_seed_len);
+    writer.writeUsize(@intFromPtr(permit.guard_context));
+    writer.writeUsize(permit.guard_context_len);
+    writer.writeUsize(@intFromPtr(permit.guard_current));
+    writer.writeU8(@intFromEnum(permit.seed_lifecycle));
+    writer.writeBytes(&permit.seed_digest);
+    writer.writeU8(@intFromEnum(permit.lifecycle));
     return writer.finish();
 }
 
@@ -1135,13 +1218,271 @@ pub fn stoppedBytes(
     return scratch.backing[0..scratch.staged_len];
 }
 
+fn permitMatchesScratch(
+    scratch: *const ExternalRxReadScratch,
+    permit: *const BorrowUsePermit,
+) bool {
+    return permit.saved_self_addr == @intFromPtr(permit) and
+        permit.scratch_addr == @intFromPtr(scratch) and
+        permit.scratch_generation == scratch.generation and
+        permit.authorized_seed_len == @sizeOf(WouldBlockSeed) and
+        rangeEnd(permit.authorized_seed_addr, permit.authorized_seed_len) !=
+            null and
+        permit.guard_context_len != 0 and
+        rangeEnd(
+            @intFromPtr(permit.guard_context),
+            permit.guard_context_len,
+        ) != null and
+        permit.lifecycle == .active and
+        std.mem.eql(u8, &permit.digest, &borrowUsePermitDigest(permit)) and
+        scratch.active_use_permit_addr == @intFromPtr(permit) and
+        std.mem.eql(
+            u8,
+            &scratch.active_use_permit_digest,
+            &permit.digest,
+        ) and
+        std.mem.eql(u8, &scratch.digest, &scratchDigest(scratch));
+}
+
+fn permitMatchesBorrow(
+    scratch: *const ExternalRxReadScratch,
+    receipt: *const CollectReceipt,
+    borrow: *const StoppedBorrow,
+    permit: *const BorrowUsePermit,
+) bool {
+    return stoppedBytes(scratch, receipt, borrow) != null and
+        permitMatchesScratch(scratch, permit) and
+        std.mem.eql(u8, &permit.receipt_digest, &receipt.digest) and
+        permit.borrow_addr == @intFromPtr(borrow);
+}
+
+fn guardInactive(
+    scratch: *ExternalRxReadScratch,
+    permit: *BorrowUsePermit,
+) bool {
+    if (!permitMatchesScratch(scratch, permit)) return false;
+    const before_scratch = scratch.digest;
+    const before_permit = permit.digest;
+    const state = permit.guard_current(
+        permit.guard_context,
+        @intFromPtr(scratch),
+    ) orelse return false;
+    return !state and
+        std.mem.eql(u8, &before_scratch, &scratch.digest) and
+        std.mem.eql(u8, &before_permit, &permit.digest) and
+        permitMatchesScratch(scratch, permit);
+}
+
+pub fn beginStoppedUse(
+    scratch: *ExternalRxReadScratch,
+    receipt: *const CollectReceipt,
+    borrow: *const StoppedBorrow,
+    guard: *const BorrowUseGuardOps,
+    authorized_seed_out: *WouldBlockSeed,
+    out: *BorrowUsePermit,
+) bool {
+    const ranges = [_]ProtectedRange{
+        .{ .addr = @intFromPtr(scratch), .len = @sizeOf(ExternalRxReadScratch) },
+        .{ .addr = @intFromPtr(receipt), .len = @sizeOf(CollectReceipt) },
+        .{ .addr = @intFromPtr(borrow), .len = @sizeOf(StoppedBorrow) },
+        .{ .addr = @intFromPtr(guard), .len = @sizeOf(BorrowUseGuardOps) },
+        .{ .addr = @intFromPtr(guard.context), .len = guard.context_len },
+        .{ .addr = @intFromPtr(authorized_seed_out), .len = @sizeOf(WouldBlockSeed) },
+        .{ .addr = @intFromPtr(out), .len = @sizeOf(BorrowUsePermit) },
+    };
+    for (ranges, 0..) |left, index| {
+        if (rangeEnd(left.addr, left.len) == null) return false;
+        for (ranges[index + 1 ..]) |right|
+            if (rangesOverlap(left.addr, left.len, right.addr, right.len))
+                return false;
+    }
+    if (scratch.active_use_permit_addr != 0 or
+        !std.mem.allEqual(u8, &scratch.active_use_permit_digest, 0) or
+        stoppedBytes(scratch, receipt, borrow) == null or
+        authorized_seed_out.saved_self_addr != 0 or
+        authorized_seed_out.lifecycle != .empty or
+        out.saved_self_addr != 0 or out.lifecycle != .empty)
+        return false;
+
+    const frozen_context = guard.context;
+    const frozen_context_len = guard.context_len;
+    const frozen_current = guard.current;
+    const before_scratch = scratch.digest;
+    const before_borrow = borrow.digest;
+    const before_receipt = receipt.digest;
+    const current = frozen_current(
+        frozen_context,
+        @intFromPtr(scratch),
+    ) orelse return false;
+    if (current or guard.context != frozen_context or
+        guard.context_len != frozen_context_len or
+        guard.current != frozen_current or
+        !std.mem.eql(u8, &before_scratch, &scratch.digest) or
+        !std.mem.eql(u8, &before_borrow, &borrow.digest) or
+        !std.mem.eql(u8, &before_receipt, &receipt.digest) or
+        stoppedBytes(scratch, receipt, borrow) == null or
+        authorized_seed_out.saved_self_addr != 0 or
+        authorized_seed_out.lifecycle != .empty or
+        out.saved_self_addr != 0 or out.lifecycle != .empty)
+        return false;
+
+    out.* = .{
+        .saved_self_addr = @intFromPtr(out),
+        .scratch_addr = @intFromPtr(scratch),
+        .scratch_generation = scratch.generation,
+        .receipt_digest = receipt.digest,
+        .borrow_addr = @intFromPtr(borrow),
+        .authorized_seed_addr = @intFromPtr(authorized_seed_out),
+        .authorized_seed_len = @sizeOf(WouldBlockSeed),
+        .guard_context = frozen_context,
+        .guard_context_len = frozen_context_len,
+        .guard_current = frozen_current,
+        .seed_lifecycle = .unminted,
+        .lifecycle = .active,
+    };
+    out.digest = borrowUsePermitDigest(out);
+    scratch.active_use_permit_addr = @intFromPtr(out);
+    scratch.active_use_permit_digest = out.digest;
+    scratch.digest = scratchDigest(scratch);
+    return true;
+}
+
+fn seedMatchesPermit(
+    scratch: *const ExternalRxReadScratch,
+    permit: *const BorrowUsePermit,
+    seed: *const WouldBlockSeed,
+    lifecycle: WouldBlockSeedLifecycle,
+) bool {
+    const permit_lifecycle: PermitSeedLifecycle = switch (lifecycle) {
+        .empty => .unminted,
+        .prepared => .prepared,
+        .consumed => .consumed,
+        .aborted => .aborted,
+    };
+    return permitMatchesScratch(scratch, permit) and
+        @intFromPtr(seed) == permit.authorized_seed_addr and
+        seed.saved_self_addr == @intFromPtr(seed) and
+        seed.scratch_addr == @intFromPtr(scratch) and
+        seed.scratch_generation == scratch.generation and
+        std.mem.eql(u8, &seed.receipt_digest, &permit.receipt_digest) and
+        seed.borrow_addr == permit.borrow_addr and
+        seed.lifecycle == lifecycle and
+        permit.seed_lifecycle == permit_lifecycle and
+        std.mem.eql(u8, &seed.digest, &wouldBlockSeedDigest(seed)) and
+        std.mem.eql(u8, &permit.seed_digest, &seed.digest);
+}
+
+pub fn mintBorrowedWouldBlockSeed(
+    scratch: *ExternalRxReadScratch,
+    receipt: *const CollectReceipt,
+    borrow: *const StoppedBorrow,
+    permit: *BorrowUsePermit,
+    out: *WouldBlockSeed,
+) bool {
+    if (@intFromPtr(out) != permit.authorized_seed_addr or
+        rangesOverlap(
+            @intFromPtr(out),
+            @sizeOf(WouldBlockSeed),
+            @intFromPtr(permit),
+            @sizeOf(BorrowUsePermit),
+        ) or
+        !permitMatchesBorrow(scratch, receipt, borrow, permit) or
+        permit.seed_lifecycle != .unminted or
+        out.saved_self_addr != 0 or out.lifecycle != .empty or
+        receipt.stop != .would_block or
+        scratch.would_block.lifecycle != .observed or
+        !std.mem.eql(
+            u8,
+            &scratch.would_block.digest,
+            &wouldBlockDigest(&scratch.would_block),
+        ) or !guardInactive(scratch, permit))
+        return false;
+    out.* = .{
+        .saved_self_addr = @intFromPtr(out),
+        .scratch_addr = @intFromPtr(scratch),
+        .scratch_generation = scratch.generation,
+        .receipt_digest = receipt.digest,
+        .borrow_addr = @intFromPtr(borrow),
+        .attempt_generation = scratch.would_block.attempt_generation,
+        .lifecycle = .prepared,
+    };
+    out.digest = wouldBlockSeedDigest(out);
+    permit.seed_lifecycle = .prepared;
+    permit.seed_digest = out.digest;
+    permit.digest = borrowUsePermitDigest(permit);
+    scratch.active_use_permit_digest = permit.digest;
+    scratch.digest = scratchDigest(scratch);
+    return true;
+}
+
+fn accountWouldBlockSeed(
+    scratch: *ExternalRxReadScratch,
+    permit: *BorrowUsePermit,
+    seed: *WouldBlockSeed,
+    lifecycle: WouldBlockSeedLifecycle,
+) ?u64 {
+    if (!seedMatchesPermit(scratch, permit, seed, .prepared) or
+        !guardInactive(scratch, permit))
+        return null;
+    const generation = seed.attempt_generation;
+    seed.lifecycle = lifecycle;
+    seed.digest = wouldBlockSeedDigest(seed);
+    permit.seed_lifecycle = switch (lifecycle) {
+        .empty => .unminted,
+        .prepared => .prepared,
+        .consumed => .consumed,
+        .aborted => .aborted,
+    };
+    permit.seed_digest = seed.digest;
+    permit.digest = borrowUsePermitDigest(permit);
+    scratch.active_use_permit_digest = permit.digest;
+    scratch.digest = scratchDigest(scratch);
+    return generation;
+}
+
+pub fn consumeWouldBlockSeed(
+    scratch: *ExternalRxReadScratch,
+    permit: *BorrowUsePermit,
+    seed: *WouldBlockSeed,
+) ?u64 {
+    return accountWouldBlockSeed(scratch, permit, seed, .consumed);
+}
+
+pub fn abortWouldBlockSeed(
+    scratch: *ExternalRxReadScratch,
+    permit: *BorrowUsePermit,
+    seed: *WouldBlockSeed,
+) bool {
+    return accountWouldBlockSeed(scratch, permit, seed, .aborted) != null;
+}
+
+pub fn endStoppedUse(
+    scratch: *ExternalRxReadScratch,
+    receipt: *const CollectReceipt,
+    borrow: *const StoppedBorrow,
+    permit: *BorrowUsePermit,
+) bool {
+    if (!permitMatchesBorrow(scratch, receipt, borrow, permit) or
+        permit.seed_lifecycle == .prepared or
+        !guardInactive(scratch, permit))
+        return false;
+    permit.lifecycle = .released;
+    permit.digest = borrowUsePermitDigest(permit);
+    scratch.active_use_permit_addr = 0;
+    scratch.active_use_permit_digest = [_]u8{0} ** 32;
+    scratch.digest = scratchDigest(scratch);
+    return true;
+}
+
 pub fn settleStopped(
     scratch: *ExternalRxReadScratch,
     receipt: *const CollectReceipt,
     borrow: *StoppedBorrow,
     disposition: StoppedDisposition,
 ) bool {
-    if (stoppedBytes(scratch, receipt, borrow) == null or
+    if (scratch.active_use_permit_addr != 0 or
+        !std.mem.allEqual(u8, &scratch.active_use_permit_digest, 0) or
+        stoppedBytes(scratch, receipt, borrow) == null or
         !client_external_mode.preparedRxAppendPristine(
             &scratch.prepared_admit,
         ))
@@ -1169,6 +1510,9 @@ pub fn teardown(
     if (scratch.saved_self_addr != @intFromPtr(scratch))
         return .stale_or_moved;
     if (scratch.lifecycle == .collecting) return .busy;
+    if (scratch.active_use_permit_addr != 0 or
+        !std.mem.allEqual(u8, &scratch.active_use_permit_digest, 0))
+        return .busy;
     if (!client_external_mode.preparedRxAppendPristine(
         &scratch.prepared_admit,
     ))
@@ -1183,6 +1527,8 @@ pub fn teardown(
             std.mem.allEqual(u8, &scratch.spent_receipt_digest, 0) and
             scratch.active_borrow_addr == 0 and
             std.mem.allEqual(u8, &scratch.active_borrow_digest, 0) and
+            scratch.active_use_permit_addr == 0 and
+            std.mem.allEqual(u8, &scratch.active_use_permit_digest, 0) and
             scratch.validation_bytes_checked == 0 and
             stagedPrefixIntact(scratch) and
             std.mem.eql(u8, &scratch.digest, &scratchDigest(scratch));
@@ -1210,6 +1556,8 @@ pub fn teardown(
             std.mem.allEqual(u8, &scratch.spent_receipt_digest, 0) and
             scratch.active_borrow_addr == 0 and
             std.mem.allEqual(u8, &scratch.active_borrow_digest, 0) and
+            scratch.active_use_permit_addr == 0 and
+            std.mem.allEqual(u8, &scratch.active_use_permit_digest, 0) and
             scratch.validation_bytes_checked == 0 and
             stagedPrefixIntact(scratch),
         else => false,
@@ -1410,4 +1758,234 @@ test "C1 accepted allowance stop table fixes every limit tie precedence" {
             .counter_limited = false,
         }, 0, .empty),
     );
+}
+
+const BorrowUseGuardProbe = struct {
+    state: ?bool = false,
+
+    fn current(context: *anyopaque, _: usize) ?bool {
+        const self: *BorrowUseGuardProbe = @ptrCast(@alignCast(context));
+        return self.state;
+    }
+};
+
+fn makeStoppedWouldBlockFixture(
+    scratch: *ExternalRxReadScratch,
+    receipt: *CollectReceipt,
+    borrow: *StoppedBorrow,
+) !void {
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxReadScratch.initInPlace(scratch));
+    scratch.lifecycle = .spent;
+    scratch.attempt_count = 1;
+    scratch.would_block = .{
+        .attempt_generation = 1,
+        .lifecycle = .observed,
+    };
+    scratch.would_block.digest = wouldBlockDigest(&scratch.would_block);
+    receipt.* = .{
+        .scratch_addr = @intFromPtr(scratch),
+        .scratch_generation = scratch.generation,
+        .allowance = .{
+            .bytes = 1,
+            .resident_limited = true,
+            .turn_limited = false,
+            .counter_limited = false,
+        },
+        .accepted_bytes = 0,
+        .attempts = 1,
+        .stop = .would_block,
+        .digest = undefined,
+    };
+    receipt.digest = receiptDigest(receipt);
+    scratch.spent_receipt_digest = receipt.digest;
+    scratch.digest = scratchDigest(scratch);
+    borrow.* = .{};
+    try std.testing.expect(borrowStopped(scratch, receipt, borrow));
+}
+
+test "C4c active stopped use accounts would-block seed before settlement" {
+    const scratch = try std.testing.allocator.create(ExternalRxReadScratch);
+    defer std.testing.allocator.destroy(scratch);
+    var receipt: CollectReceipt = undefined;
+    var borrow: StoppedBorrow = .{};
+    try makeStoppedWouldBlockFixture(scratch, &receipt, &borrow);
+
+    var guard_probe: BorrowUseGuardProbe = .{};
+    var guard = BorrowUseGuardOps{
+        .context = &guard_probe,
+        .context_len = @sizeOf(BorrowUseGuardProbe),
+        .current = BorrowUseGuardProbe.current,
+    };
+    var seed: WouldBlockSeed = .{};
+    var permit: BorrowUsePermit = .{};
+    try std.testing.expect(beginStoppedUse(
+        scratch,
+        &receipt,
+        &borrow,
+        &guard,
+        &seed,
+        &permit,
+    ));
+    try std.testing.expect(!settleStopped(
+        scratch,
+        &receipt,
+        &borrow,
+        .{
+            .staged = .consumed,
+            .would_block = .consumed,
+        },
+    ));
+    try std.testing.expectEqual(
+        ReadScratchTeardownResult.busy,
+        teardown(scratch),
+    );
+    try std.testing.expect(mintBorrowedWouldBlockSeed(
+        scratch,
+        &receipt,
+        &borrow,
+        &permit,
+        &seed,
+    ));
+    try std.testing.expect(!endStoppedUse(
+        scratch,
+        &receipt,
+        &borrow,
+        &permit,
+    ));
+
+    var copied_seed = seed;
+    try std.testing.expect(
+        consumeWouldBlockSeed(scratch, &permit, &copied_seed) == null,
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 1),
+        consumeWouldBlockSeed(scratch, &permit, &seed),
+    );
+    var copied_permit = permit;
+    try std.testing.expect(!endStoppedUse(
+        scratch,
+        &receipt,
+        &borrow,
+        &copied_permit,
+    ));
+    guard_probe.state = true;
+    try std.testing.expect(!endStoppedUse(
+        scratch,
+        &receipt,
+        &borrow,
+        &permit,
+    ));
+    try std.testing.expectEqual(
+        ReadScratchTeardownResult.busy,
+        teardown(scratch),
+    );
+    guard_probe.state = null;
+    try std.testing.expect(!endStoppedUse(
+        scratch,
+        &receipt,
+        &borrow,
+        &permit,
+    ));
+    guard_probe.state = false;
+    try std.testing.expect(endStoppedUse(
+        scratch,
+        &receipt,
+        &borrow,
+        &permit,
+    ));
+    try std.testing.expect(!endStoppedUse(
+        scratch,
+        &receipt,
+        &borrow,
+        &permit,
+    ));
+    try std.testing.expect(settleStopped(
+        scratch,
+        &receipt,
+        &borrow,
+        .{
+            .staged = .consumed,
+            .would_block = .consumed,
+        },
+    ));
+    try std.testing.expectEqual(ReadScratchTeardownResult.closed, teardown(scratch));
+}
+
+test "C4c stopped use rejects seed output alias and supports abort" {
+    const scratch = try std.testing.allocator.create(ExternalRxReadScratch);
+    defer std.testing.allocator.destroy(scratch);
+    var receipt: CollectReceipt = undefined;
+    var borrow: StoppedBorrow = .{};
+    try makeStoppedWouldBlockFixture(scratch, &receipt, &borrow);
+    var guard_probe: BorrowUseGuardProbe = .{};
+    const guard = BorrowUseGuardOps{
+        .context = &guard_probe,
+        .context_len = @sizeOf(BorrowUseGuardProbe),
+        .current = BorrowUseGuardProbe.current,
+    };
+    var permit: BorrowUsePermit = .{};
+    const alias_seed: *WouldBlockSeed = @ptrCast(@alignCast(&permit));
+    try std.testing.expect(!beginStoppedUse(
+        scratch,
+        &receipt,
+        &borrow,
+        &guard,
+        alias_seed,
+        &permit,
+    ));
+    try std.testing.expectEqual(@as(usize, 0), permit.saved_self_addr);
+
+    var seed: WouldBlockSeed = .{};
+    try std.testing.expect(beginStoppedUse(
+        scratch,
+        &receipt,
+        &borrow,
+        &guard,
+        &seed,
+        &permit,
+    ));
+    const partial_seed: *WouldBlockSeed =
+        @ptrFromInt(@intFromPtr(&seed) + @alignOf(WouldBlockSeed));
+    const one_past_seed: *WouldBlockSeed =
+        @ptrFromInt(@intFromPtr(&seed) + @sizeOf(WouldBlockSeed));
+    const overflow_addr =
+        std.math.maxInt(usize) & ~(@as(usize, @alignOf(WouldBlockSeed)) - 1);
+    const overflow_seed: *WouldBlockSeed = @ptrFromInt(overflow_addr);
+    try std.testing.expect(!mintBorrowedWouldBlockSeed(
+        scratch,
+        &receipt,
+        &borrow,
+        &permit,
+        partial_seed,
+    ));
+    try std.testing.expect(!mintBorrowedWouldBlockSeed(
+        scratch,
+        &receipt,
+        &borrow,
+        &permit,
+        one_past_seed,
+    ));
+    try std.testing.expect(!mintBorrowedWouldBlockSeed(
+        scratch,
+        &receipt,
+        &borrow,
+        &permit,
+        overflow_seed,
+    ));
+    try std.testing.expect(mintBorrowedWouldBlockSeed(
+        scratch,
+        &receipt,
+        &borrow,
+        &permit,
+        &seed,
+    ));
+    try std.testing.expect(abortWouldBlockSeed(scratch, &permit, &seed));
+    try std.testing.expect(!abortWouldBlockSeed(scratch, &permit, &seed));
+    try std.testing.expect(endStoppedUse(
+        scratch,
+        &receipt,
+        &borrow,
+        &permit,
+    ));
 }

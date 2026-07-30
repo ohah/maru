@@ -86,6 +86,11 @@ src/
                         `client_external_mode.maxReadable` allowance re-export·동률 stop classifier,
                         1 MiB read/256 KiB metadata 예산과 final-address `ExternalRxReadScratch`를 소유;
                         collector·POSIX syscall·pump/storage/ledger/traversal import는 후속 gate 전까지 0),
+                        client_external_mode.zig(blocking→external 전환, sealed parser provenance,
+                        guarded replacement admit과 frozen cleanup·typed bounded quarantine를 소유;
+                        product owner inventory와 socket read import는 0),
+                        client_external_pump.zig(external storage/lease/ledger/turn aggregate와
+                        cross-owner quarantine 총예산을 소유; d2c 세부 구현 상태는 verification-matrix가 단일 출처),
                         client_external_rx_turn_test_support.zig(해당 traversal의 hostile wire/owner fixture 전용,
                         제품 import 0 — **구현됨, P3-d2c 진입 전 구조 분해**),
                         handoff_inventory.zig(session host 동일 PID exec upgrade U0 — terminal core/scrollback page,

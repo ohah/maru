@@ -7001,10 +7001,11 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               | null/OOM allocation callback authority drift | `allocation_quarantined` | canonical terminal | callback 없이 tombstone, busy false | free 0, upper-bound charge 0 exact once |
               | no-replacement spare-capacity commit | `committed` | append+reseal | committed, busy false | callback/free/quarantine 0 |
               | raw addr overflow·local/product alias·alloc/check callback drift | `allocation_quarantined` | canonical terminal, counter 증가 0 | callback 없이 tombstone, busy false | candidate free 0, upper-bound charge exact once |
+              | prepared replacement evidence 전체 삭제·길이 축소 등 token authentication 실패 | `allocation_quarantined` | canonical terminal | callback 없이 tombstone, busy false | 신뢰 가능한 cleanup descriptor가 없으므로 free 0, single resident hard-cap을 exact once charge; replay charge 0 |
               | prepared 성공 뒤 commit 전 token/input/source drift, cleanup guard valid | `allocation_quarantined` | leaf mutation 0이나 원본 복원은 주장하지 않고 canonical terminal | callback 전 aborted tombstone와 terminal-busy, busy false로 종결 | replacement exact-one free, upper-bound charge 0 |
-              | prepared 성공 뒤 commit 전 cleanup guard invalid/drift | `allocation_quarantined` | canonical terminal | callback 없이 tombstone, busy false | replacement free 0, upper-bound charge exact once |
+              | prepared 성공 뒤 commit 전 cleanup guard invalid/drift | `allocation_quarantined` | canonical terminal | callback 전에 tombstone·terminal-busy, busy false로 종결 | replacement free 0. callback이 source를 보존하면 replacement 상한만, source를 변조한 뒤 거부하면 replacement+frozen source capacity의 saturating bounded aggregate를 exact once charge |
               | safe abort | `aborted` | source exact 보존 | callback 전 aborted tombstone와 terminal-busy, 반환 시 bound authority 복원·busy false | replacement exact-one free |
-              | abort free callback drift/reentry | `allocation_quarantined` | canonical terminal | callback 전 tombstone, busy false로 종결 | replacement free exact once, 추가 free 0 |
+              | abort free callback drift/reentry | `allocation_quarantined` | canonical terminal | callback 전 tombstone, busy false로 종결 | replacement free exact once, replacement charge 0, 버려진 frozen source capacity를 exact once charge |
               | replacement publish+reseal 뒤 old-backing cleanup 정상 | `committed` | 새 bytes/counter authoritative | callback 전 committed tombstone, 반환 시 busy false | old backing exact-one free |
               | commit old-backing callback 뒤 descriptor/content/provenance drift | `post_commit_quarantined` | rollback 금지, canonical terminal | callback 전 committed tombstone, busy false로 종결 | old backing exact-one free, 새 backing은 free 0·upper-bound charge exact once |
 
@@ -7014,6 +7015,9 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               되돌리지 않고 canonical terminal quarantine이다. publication 뒤 old-backing callback drift는 새
               backing을 다시 free하거나 old descriptor를 복원하지 않고 `post_commit_quarantined`로 끝낸다. 이미
               publication된 bytes/counter를 성공으로 보고하지 않으며 이후 RX 진입은 0이다.
+              replacement 여부는 mutable pointer 필드의 현재 모양으로 먼저 추측하지 않는다. lifecycle·final
+              address·source seal·전체 token digest 인증을 통과한 뒤에만 spare/replacement를 분기한다. 인증에
+              실패하면 손상된 길이로 상한을 줄이지 않고 single resident hard-cap을 보수적으로 한 번 보고한다.
 
               guarded abort/free는 disjoint와 cleanup digest가 증명된 allocator/ptr/len을 frozen local로 옮긴
               뒤 replacement primary와 cleanup mirror를 callback **전에** consumed/aborted tombstone으로
@@ -7025,8 +7029,11 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
 
               `max_rx_resident_bytes`는 `protocol.max_binary_chunk + protocol.header_size`이며
               `InitOptions.resident_cap`은 `1...max_rx_resident_bytes`만 허용한다. cap 초과/0은 source mutation과
-              allocation 전에 거부한다. replacement allocation의 no-free 최대치는
-              `max_guarded_admit_quarantine_bytes = max_rx_resident_bytes`다. 기존
+              allocation 전에 거부한다. replacement allocation 단독 no-free 최대치는
+              `max_rx_resident_bytes`이고, cleanup callback이 replacement를 거부하면서 기존 source
+              backing까지 신뢰 가능한 소유권에서 이탈시킬 수 있으므로 guarded cleanup aggregate 최대치는
+              `max_guarded_admit_quarantine_bytes = 2 * max_rx_resident_bytes`다. frozen descriptor로 source
+              drift가 확인된 경우에만 saturating addition하고 같은 backing을 중복 가산하지 않는다. 기존
               `max_cross_owner_quarantine_bytes`는 checked addition으로 이 값을 정확히 한 번 더하며 overflow는
               compile error다. quarantine event/accounting은 charged upper bound가 이 named bound 이하인지
               검증하고 같은 replacement를 다른 quarantine 항목에 중복 가산하지 않는다.
@@ -7146,10 +7153,12 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 provenance snapshot, trusted positive-consume/parser generation `+1` refresh,
                 no-progress 재봉인 거부, 재봉인 drift terminal 복원과
                 teardown callback 뒤 resident-cap canonical zero도 이 gate가 소유한다.
-              - **C2 guarded admit:** `client_external_mode`에 opaque `ReplacementAllocationGuard`, typed
-                commit/quarantine outcome과 tombstone-before-callback cleanup을 추가한다. synthetic guard로
-                allocation fail-index, alias, callback drift/reentry와 no-free quarantine을 검증하며 product
-                owner inventory와 제품 read callsite는 아직 0이다.
+              - **C2 guarded admit:** `client_external_mode`는 opaque
+                `ReplacementAllocationGuard`, typed commit/quarantine outcome과
+                tombstone-before-callback cleanup을 제공한다. synthetic guard는 allocation fail-index,
+                alias, callback drift/reentry, replacement evidence 전체 삭제·길이 축소, cleanup 거부와 source
+                drift가 겹친 abort·precommit의 bounded aggregate 및 replay charge 0을 검증한다. product owner
+                inventory와 제품 read callsite는 이 경계 밖이며 C4/C5가 소유한다.
               - **C3 injected collector:** C1의 동일 transport-only module/scratch/backing에 cumulative collector
                 동작과 `RxReadAuthorityOps` seam을 추가해 ops/fd/destination/staged-prefix seal, EINTR 0/8/9,
                 bytes/would-block/EOF/error, attempt 1/64/65, 64 MiB staged-prefix validation work bound와 1 MiB

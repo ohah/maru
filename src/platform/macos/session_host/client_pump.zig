@@ -60,6 +60,25 @@ pub const RecoveryOrigin = external_recovery_types.Origin;
 pub const RecoveryKey = external_recovery_types.Key;
 pub const RecoveryMarkResult = external_recovery_types.MarkResult;
 
+pub const RecoverySnapshotBindingDisposition = enum {
+    bound,
+    terminal,
+};
+
+pub const RecoverySnapshotBindingPlan = struct {
+    disposition: RecoverySnapshotBindingDisposition,
+    next: AuthorityState,
+};
+
+pub const RecoverySnapshotCandidate = struct {
+    origin: RecoveryOrigin,
+    recovery_epoch: u64,
+    is_snapshot: bool,
+    start_absolute: u64,
+    end_absolute: u64,
+    committed_token_generation: u64,
+};
+
 pub const PollHint = struct {
     immediate: bool,
     next_deadline_ns: ?i128,
@@ -72,6 +91,13 @@ pub const RecoveryContext = struct {
 
 pub const AwaitingSnapshot = struct {
     context: RecoveryContext,
+    recovery_barrier_absolute: u64,
+};
+
+pub const SnapshotInFlight = struct {
+    /// Bound means a ledger token exists; the consumer may not have borrowed its lease yet.
+    context: RecoveryContext,
+    recovery_barrier_absolute: u64,
     expected_token_generation: u64,
 };
 
@@ -79,14 +105,16 @@ pub const HostRecoveryPhase = union(enum) {
     ack_unadmitted: RecoveryContext,
     ack_queued: RecoveryContext,
     awaiting_snapshot: AwaitingSnapshot,
-    applied_pending: AwaitingSnapshot,
+    snapshot_in_flight: SnapshotInFlight,
+    applied_pending: SnapshotInFlight,
 };
 
 pub const ClientRecoveryPhase = union(enum) {
     control_wait: RecoveryContext,
     control_in_flight: RecoveryContext,
     awaiting_snapshot: AwaitingSnapshot,
-    applied_pending: AwaitingSnapshot,
+    snapshot_in_flight: SnapshotInFlight,
+    applied_pending: SnapshotInFlight,
 };
 
 pub const ControlKind = enum {
@@ -106,6 +134,55 @@ pub const ExternalPumpState = union(enum) {
     active: AuthorityState,
     terminal: ExternalPumpTerminal,
 };
+
+/// Binds the first accepted recovery snapshot to the actual ledger token generation.
+///
+/// The control request cannot know this generation. The storage layer may apply this plan only in
+/// the no-callback suffix of the ledger commit that created the token.
+pub fn planRecoverySnapshotBinding(
+    state: AuthorityState,
+    candidate: RecoverySnapshotCandidate,
+) RecoverySnapshotBindingPlan {
+    if (!candidate.is_snapshot or candidate.recovery_epoch == 0 or
+        candidate.committed_token_generation == 0 or
+        candidate.end_absolute <= candidate.start_absolute)
+        return .{ .disposition = .terminal, .next = state };
+    return switch (state) {
+        .host_recovery => |phase| switch (phase) {
+            .awaiting_snapshot => |waiting| if (candidate.origin == .host and
+                candidate.recovery_epoch == waiting.context.epoch and
+                candidate.start_absolute >= waiting.recovery_barrier_absolute)
+                .{
+                    .disposition = .bound,
+                    .next = .{ .host_recovery = .{ .snapshot_in_flight = .{
+                        .context = waiting.context,
+                        .recovery_barrier_absolute = waiting.recovery_barrier_absolute,
+                        .expected_token_generation = candidate.committed_token_generation,
+                    } } },
+                }
+            else
+                .{ .disposition = .terminal, .next = state },
+            else => .{ .disposition = .terminal, .next = state },
+        },
+        .client_recovery => |phase| switch (phase) {
+            .awaiting_snapshot => |waiting| if (candidate.origin == .client and
+                candidate.recovery_epoch == waiting.context.epoch and
+                candidate.start_absolute >= waiting.recovery_barrier_absolute)
+                .{
+                    .disposition = .bound,
+                    .next = .{ .client_recovery = .{ .snapshot_in_flight = .{
+                        .context = waiting.context,
+                        .recovery_barrier_absolute = waiting.recovery_barrier_absolute,
+                        .expected_token_generation = candidate.committed_token_generation,
+                    } } },
+                }
+            else
+                .{ .disposition = .terminal, .next = state },
+            else => .{ .disposition = .terminal, .next = state },
+        },
+        .valid => .{ .disposition = .terminal, .next = state },
+    };
+}
 
 pub const RecoveryTrigger = enum {
     local_overflow,
@@ -640,12 +717,14 @@ fn recoveryContext(state: AuthorityState) ?RecoveryContext {
             .ack_unadmitted => |context| context,
             .ack_queued => |context| context,
             .awaiting_snapshot => |waiting| waiting.context,
+            .snapshot_in_flight => |in_flight| in_flight.context,
             .applied_pending => |waiting| waiting.context,
         },
         .client_recovery => |phase| switch (phase) {
             .control_wait => |context| context,
             .control_in_flight => |context| context,
             .awaiting_snapshot => |waiting| waiting.context,
+            .snapshot_in_flight => |in_flight| in_flight.context,
             .applied_pending => |waiting| waiting.context,
         },
     };
@@ -718,7 +797,7 @@ pub fn planRecoveryTransition(
                 .control_wait => input.control == .none or
                     input.control == .offset_zero_unsent,
                 .control_in_flight => input.control == .offset_zero_unsent,
-                .awaiting_snapshot, .applied_pending => false,
+                .awaiting_snapshot, .snapshot_in_flight, .applied_pending => false,
             };
             if (!promotable) return terminalRecoveryPlan();
             var plan = enterRecovery(
@@ -848,14 +927,87 @@ test "client pump request IDs use max exactly once and never wrap to zero" {
 test "client pump preserves recovery origin in every snapshot phase" {
     const waiting = AwaitingSnapshot{
         .context = .{ .epoch = 7, .deadline_ns = 30 },
+        .recovery_barrier_absolute = 4,
+    };
+    const in_flight = SnapshotInFlight{
+        .context = waiting.context,
+        .recovery_barrier_absolute = waiting.recovery_barrier_absolute,
         .expected_token_generation = 9,
     };
     const host = AuthorityState{ .host_recovery = .{ .awaiting_snapshot = waiting } };
-    const client = AuthorityState{ .client_recovery = .{ .applied_pending = waiting } };
+    const client = AuthorityState{ .client_recovery = .{ .applied_pending = in_flight } };
     try std.testing.expect(host == .host_recovery);
     try std.testing.expect(client == .client_recovery);
     try std.testing.expectEqual(@as(u64, 7), host.host_recovery.awaiting_snapshot.context.epoch);
     try std.testing.expectEqual(@as(u64, 7), client.client_recovery.applied_pending.context.epoch);
+}
+
+test "recovery integration contract binds only the committed ledger token generation" {
+    const waiting = AwaitingSnapshot{
+        .context = .{ .epoch = 7, .deadline_ns = 30 },
+        .recovery_barrier_absolute = 41,
+    };
+    inline for (.{ RecoveryOrigin.host, RecoveryOrigin.client }) |origin| {
+        const state: AuthorityState = switch (origin) {
+            .host => .{ .host_recovery = .{ .awaiting_snapshot = waiting } },
+            .client => .{ .client_recovery = .{ .awaiting_snapshot = waiting } },
+        };
+        const candidate = RecoverySnapshotCandidate{
+            .origin = origin,
+            .recovery_epoch = waiting.context.epoch,
+            .is_snapshot = true,
+            .start_absolute = waiting.recovery_barrier_absolute,
+            .end_absolute = waiting.recovery_barrier_absolute + 1,
+            .committed_token_generation = 9,
+        };
+        const plan = planRecoverySnapshotBinding(state, candidate);
+        try std.testing.expectEqual(
+            RecoverySnapshotBindingDisposition.bound,
+            plan.disposition,
+        );
+        const bound = switch (plan.next) {
+            .host_recovery => |phase| phase.snapshot_in_flight,
+            .client_recovery => |phase| phase.snapshot_in_flight,
+            .valid => return error.TestUnexpectedResult,
+        };
+        try std.testing.expectEqual(@as(u64, 7), bound.context.epoch);
+        try std.testing.expectEqual(@as(u64, 41), bound.recovery_barrier_absolute);
+        try std.testing.expectEqual(@as(u64, 9), bound.expected_token_generation);
+
+        const hostile = [_]RecoverySnapshotCandidate{
+            .{ .origin = origin, .recovery_epoch = 7, .is_snapshot = true, .start_absolute = 41, .end_absolute = 42, .committed_token_generation = 0 },
+            .{ .origin = origin, .recovery_epoch = 7, .is_snapshot = false, .start_absolute = 41, .end_absolute = 42, .committed_token_generation = 9 },
+            .{ .origin = origin, .recovery_epoch = 7, .is_snapshot = true, .start_absolute = 40, .end_absolute = 42, .committed_token_generation = 9 },
+            .{ .origin = origin, .recovery_epoch = 7, .is_snapshot = true, .start_absolute = 41, .end_absolute = 41, .committed_token_generation = 9 },
+            .{ .origin = origin, .recovery_epoch = 8, .is_snapshot = true, .start_absolute = 41, .end_absolute = 42, .committed_token_generation = 9 },
+            .{ .origin = if (origin == .host) .client else .host, .recovery_epoch = 7, .is_snapshot = true, .start_absolute = 41, .end_absolute = 42, .committed_token_generation = 9 },
+        };
+        for (hostile) |invalid_candidate| {
+            const rejected = planRecoverySnapshotBinding(state, invalid_candidate);
+            try std.testing.expectEqual(
+                RecoverySnapshotBindingDisposition.terminal,
+                rejected.disposition,
+            );
+            try std.testing.expect(std.meta.eql(state, rejected.next));
+        }
+    }
+
+    const wrong_phase: AuthorityState = .{ .client_recovery = .{
+        .control_wait = waiting.context,
+    } };
+    const rejected = planRecoverySnapshotBinding(wrong_phase, .{
+        .origin = .client,
+        .recovery_epoch = 7,
+        .is_snapshot = true,
+        .start_absolute = 41,
+        .end_absolute = 42,
+        .committed_token_generation = 9,
+    });
+    try std.testing.expectEqual(
+        RecoverySnapshotBindingDisposition.terminal,
+        rejected.disposition,
+    );
+    try std.testing.expect(std.meta.eql(wrong_phase, rejected.next));
 }
 
 test "recovery reducer enters from valid and rejects unsafe unrelated controls" {
@@ -907,17 +1059,24 @@ test "recovery reducer keeps duplicate origin epoch and deadline immutable" {
     const context = RecoveryContext{ .epoch = 8, .deadline_ns = 300 };
     const waiting = AwaitingSnapshot{
         .context = context,
+        .recovery_barrier_absolute = 4,
+    };
+    const in_flight = SnapshotInFlight{
+        .context = context,
+        .recovery_barrier_absolute = 4,
         .expected_token_generation = 17,
     };
     const states = [_]AuthorityState{
         .{ .host_recovery = .{ .ack_unadmitted = context } },
         .{ .host_recovery = .{ .ack_queued = context } },
         .{ .host_recovery = .{ .awaiting_snapshot = waiting } },
-        .{ .host_recovery = .{ .applied_pending = waiting } },
+        .{ .host_recovery = .{ .snapshot_in_flight = in_flight } },
+        .{ .host_recovery = .{ .applied_pending = in_flight } },
         .{ .client_recovery = .{ .control_wait = context } },
         .{ .client_recovery = .{ .control_in_flight = context } },
         .{ .client_recovery = .{ .awaiting_snapshot = waiting } },
-        .{ .client_recovery = .{ .applied_pending = waiting } },
+        .{ .client_recovery = .{ .snapshot_in_flight = in_flight } },
+        .{ .client_recovery = .{ .applied_pending = in_flight } },
     };
     for (states) |state| {
         const trigger: RecoveryTrigger = if (state == .host_recovery)
@@ -941,6 +1100,11 @@ test "host invalidated promotes only cancellable client recovery control" {
     const context = RecoveryContext{ .epoch = 11, .deadline_ns = 500 };
     const waiting = AwaitingSnapshot{
         .context = context,
+        .recovery_barrier_absolute = 4,
+    };
+    const in_flight = SnapshotInFlight{
+        .context = context,
+        .recovery_barrier_absolute = 4,
         .expected_token_generation = 23,
     };
     const promotable = [_]struct {
@@ -1004,7 +1168,11 @@ test "host invalidated promotes only cancellable client recovery control" {
             .progress = .none,
         },
         .{
-            .state = .{ .client_recovery = .{ .applied_pending = waiting } },
+            .state = .{ .client_recovery = .{ .snapshot_in_flight = in_flight } },
+            .progress = .none,
+        },
+        .{
+            .state = .{ .client_recovery = .{ .applied_pending = in_flight } },
             .progress = .none,
         },
     };
@@ -1025,13 +1193,14 @@ test "host invalidated promotes only cancellable client recovery control" {
 }
 
 test "fresh recovery commit is deadline-first and phase exact" {
-    const waiting = AwaitingSnapshot{
+    const in_flight = SnapshotInFlight{
         .context = .{ .epoch = 5, .deadline_ns = 100 },
+        .recovery_barrier_absolute = 4,
         .expected_token_generation = 19,
     };
     for ([_]AuthorityState{
-        .{ .host_recovery = .{ .applied_pending = waiting } },
-        .{ .client_recovery = .{ .applied_pending = waiting } },
+        .{ .host_recovery = .{ .applied_pending = in_flight } },
+        .{ .client_recovery = .{ .applied_pending = in_flight } },
     }) |state| {
         const before = planRecoveryTransition(.{
             .state = state,
@@ -1055,7 +1224,7 @@ test "fresh recovery commit is deadline-first and phase exact" {
     }
 
     const stale_phase = planRecoveryTransition(.{
-        .state = .{ .host_recovery = .{ .awaiting_snapshot = waiting } },
+        .state = .{ .host_recovery = .{ .snapshot_in_flight = in_flight } },
         .trigger = .fresh_commit,
         .now_ns = 99,
     });

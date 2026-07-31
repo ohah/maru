@@ -183,7 +183,6 @@ const test_resync_expectation: ControlExpectation = .{ .resync = .{
     .owner_incarnation = 1,
     .origin = .client,
     .recovery_epoch = 1,
-    .expected_token_generation = 1,
 } };
 
 test "control correlation admits only one outstanding request without wrapping deadline" {

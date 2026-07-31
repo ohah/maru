@@ -1,7 +1,7 @@
 //! Dependency-neutral strict wire contract for runtime resize/resync controls.
 //!
 //! Request encoding and response decoding live together so blocking and external clients cannot
-//! silently acquire different JSON vocabularies. Recovery keys are local correlation authority;
+//! silently acquire different JSON vocabularies. Recovery control authority is local-only;
 //! they are deliberately never serialized.
 
 const std = @import("std");
@@ -17,7 +17,7 @@ pub const ResizeRequest = struct {
 
 pub const ResyncRequest = struct {
     stream_id: u64,
-    recovery_key: recovery.Key,
+    recovery_authority: recovery.ControlAuthority,
 };
 
 pub const WireRequest = union(enum) {
@@ -41,14 +41,14 @@ pub const ControlRequest = union(enum) {
         return switch (self) {
             .resize => |value| value.stream_id != 0 and value.cols >= 2 and
                 value.rows >= 1 and value.client_sequence != 0,
-            .resync => |value| value.stream_id != 0 and value.recovery_key.isCanonical(),
+            .resync => |value| value.stream_id != 0 and value.recovery_authority.isCanonical(),
         };
     }
 };
 
 pub const ControlExpectation = union(enum) {
     resize: struct { client_sequence: u64 },
-    resync: recovery.Key,
+    resync: recovery.ControlAuthority,
 
     pub fn isCanonical(self: ControlExpectation) bool {
         return switch (self) {
@@ -68,12 +68,12 @@ pub fn expectationDigest(expectation: ControlExpectation) [32]u8 {
             std.mem.writeInt(u64, &word, value.client_sequence, .little);
             hasher.update(&word);
         },
-        .resync => |key| {
-            inline for (.{ key.owner_incarnation, key.recovery_epoch, key.expected_token_generation }) |value| {
+        .resync => |authority| {
+            inline for (.{ authority.owner_incarnation, authority.recovery_epoch }) |value| {
                 std.mem.writeInt(u64, &word, value, .little);
                 hasher.update(&word);
             }
-            hasher.update(&.{@intFromEnum(key.origin)});
+            hasher.update(&.{@intFromEnum(authority.origin)});
         },
     }
     var digest: [32]u8 = undefined;
@@ -122,7 +122,7 @@ pub fn encodeRequest(buffer: []u8, request: ControlRequest) EncodeError!EncodedR
     };
     const expectation: ControlExpectation = switch (request) {
         .resize => |value| .{ .resize = .{ .client_sequence = value.client_sequence } },
-        .resync => |value| .{ .resync = value.recovery_key },
+        .resync => |value| .{ .resync = value.recovery_authority },
     };
     const prefix = switch (wire) {
         .resize => "{\"method\":\"runtime.resize\",\"params\":",
@@ -259,7 +259,7 @@ pub fn decodeResyncResponse(
 ) ResponseError!void {
     switch (expectation) {
         .resize => return error.Malformed,
-        .resync => |key| if (!key.isCanonical()) return error.Malformed,
+        .resync => |authority| if (!authority.isCanonical()) return error.Malformed,
     }
     return decodeResyncEnvelope(allocator, payload);
 }
@@ -272,11 +272,10 @@ fn unsigned(comptime T: type, value: std.json.Value) ?T {
     };
 }
 
-const canonical_key = recovery.Key{
+const canonical_authority = recovery.ControlAuthority{
     .owner_incarnation = 3,
     .origin = .client,
     .recovery_epoch = 5,
-    .expected_token_generation = 7,
 };
 
 test "f3c0 control wire encodes typed requests and keeps recovery authority local" {
@@ -298,13 +297,13 @@ test "f3c0 control wire encodes typed requests and keeps recovery authority loca
 
     const resync = try encodeRequest(&buffer, .{ .resync = .{
         .stream_id = 7,
-        .recovery_key = canonical_key,
+        .recovery_authority = canonical_authority,
     } });
     try std.testing.expectEqualStrings(
         "{\"method\":\"runtime.resync\",\"params\":{\"stream_id\":7}}",
         resync.payload,
     );
-    try std.testing.expect(std.meta.eql(canonical_key, resync.expectation.resync));
+    try std.testing.expect(std.meta.eql(canonical_authority, resync.expectation.resync));
     try std.testing.expect(std.mem.indexOf(u8, resync.payload, "recovery") == null);
 
     var params_buffer: [128]u8 = undefined;
@@ -352,7 +351,7 @@ test "f3c0 control wire request encoding is exact-bound and rejects noncanonical
     } };
     const resync: ControlRequest = .{ .resync = .{
         .stream_id = 7,
-        .recovery_key = canonical_key,
+        .recovery_authority = canonical_authority,
     } };
     try expectExactRequestBoundary(resize);
     try expectExactRequestBoundary(resync);
@@ -368,11 +367,10 @@ test "f3c0 control wire request encoding is exact-bound and rejects noncanonical
     } }));
     try std.testing.expectError(error.InvalidRequest, encodeRequest(&large, .{ .resync = .{
         .stream_id = 7,
-        .recovery_key = .{
+        .recovery_authority = .{
             .owner_incarnation = 0,
             .origin = .client,
             .recovery_epoch = 1,
-            .expected_token_generation = 1,
         },
     } }));
 }
@@ -420,17 +418,17 @@ test "f3c0 control wire strictly decodes resize and resync responses" {
     try decodeResyncResponse(
         std.testing.allocator,
         "{\"result\":{\"resync\":true}}",
-        .{ .resync = canonical_key },
+        .{ .resync = canonical_authority },
     );
     try std.testing.expectError(error.Malformed, decodeResyncResponse(
         std.testing.allocator,
         "{\"result\":{\"resync\":false}}",
-        .{ .resync = canonical_key },
+        .{ .resync = canonical_authority },
     ));
     try std.testing.expectError(error.Malformed, decodeResyncResponse(
         std.testing.allocator,
         "{\"result\":{\"resync\":true,\"foreign\":false}}",
-        .{ .resync = canonical_key },
+        .{ .resync = canonical_authority },
     ));
     try std.testing.expectError(error.Malformed, decodeResyncResponse(
         std.testing.allocator,

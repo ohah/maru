@@ -8,7 +8,6 @@ pub fn main() !void {
         .owner_incarnation = 1,
         .origin = .client,
         .recovery_epoch = 2,
-        .expected_token_generation = 3,
     } };
     try codec.decodeResyncResponse(
         std.heap.page_allocator,

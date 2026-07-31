@@ -2567,8 +2567,11 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             terminal{reason,fd_disposition}`이고, `AuthorityState = valid |
             host_recovery(HostRecoveryPhase) |
             client_recovery(ClientRecoveryPhase)`다. host/client phase는 각각 자기
-            `awaiting_snapshot{epoch,expected_token_generation}`과
-            `applied_pending{epoch,expected_token_generation}`을 가지므로 origin을 잃지 않는다. `AuthorityState`는
+            `awaiting_snapshot{context,recovery_barrier_absolute}`와
+            `snapshot_in_flight{context,recovery_barrier_absolute,expected_token_generation}` 및
+            `applied_pending{context,recovery_barrier_absolute,expected_token_generation}`을 가지므로 origin을 잃지
+            않는다. `snapshot_in_flight`는 actual token authority에 bound됐다는 뜻이며 attachment가 이미 lease를
+            borrow했다는 뜻은 아니다. `AuthorityState`는
             recovery/input gate만 소유하며 generic control correlation을 미러하지 않는다.
             parser/TX queue와 raw/TX clocks의 단일 소유자는 기존 `storage.client.io_mode.external`이고,
             `ExternalPumpState`는 semantic authority/lifecycle만 소유한다. 기존 2a placeholder
@@ -8503,15 +8506,52 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             `ExternalPumpStorage`의 현재 storage-owned live consume/release 경로와 병존시키지 않는다.
             두 경로를 잇는 non-movable product adapter와 단일 release authority는 2b3이 소유한다.
 
+            **2b2e-integration doc-first 정정:** `expected_token_generation`은 control request/ACK 시점에는
+            아직 존재하지 않는다. 이 값의 SSOT는 recovery snapshot을 ledger에 commit해 얻은 실제
+            `Token.generation`뿐이다. 따라서 caller가 미래 generation을 예측해 resync control에 넣거나
+            `ledger.next_generation`을 미리 읽는 API는 금지한다. control correlation은
+            `RecoveryControlAuthority{owner_incarnation,origin=.client,recovery_epoch}`만 봉인한다.
+            ACK 또는 host ACK full-send 직후 상태는
+            `awaiting_snapshot{context,recovery_barrier_absolute}`이고, barrier 이후 새로 시작해 완성된 snapshot을
+            ledger에 commit한 no-callback suffix만
+            `snapshot_in_flight{context,recovery_barrier_absolute,expected_token_generation=actual_token.generation}`으로
+            전이한다. ledger `borrowLease`는 slot의 `RecoveryIntent`와 실제 token generation으로 기존 full
+            `RecoveryKey`를 합성한다. preflight/mark는 `snapshot_in_flight`에서만 이 full key를 exact match하며
+            mark 성공은 같은 bound value를 `applied_pending`으로 옮긴다. candidate가 없거나 pre-barrier/straddling이면
+            token binding도 state mutation도 0이다. correction slice의 pure plan은 candidate의 origin/epoch,
+            `is_snapshot`, half-open absolute `start/end`, nonzero committed generation을 검사하며
+            `start >= recovery_barrier_absolute`와 `end > start`를 요구한다. 이 DTO 자체는 commit capability가 아니다.
+            f3c1이 실제 ledger commit token·candidate provenance·storage/lease/incarnation을 opaque prepared receipt에
+            봉인하고, 2b2e-integration이 그 receipt를 소비할 때 barrier와 bound token generation을 recovery authority
+            seal/digest에 포함한다. 그 전 product callsite는 0이고 checked absolute offset overflow는 terminal이다.
+
+            **구현 완료(recovery contract correction):** control request/correlation은 future ledger generation 없는
+            `RecoveryControlAuthority`만 봉인한다. recovery state는 barrier-only `awaiting_snapshot`, committed-generation
+            bound `snapshot_in_flight`, post-mark `applied_pending`으로 분리했고, pure candidate planner가 exact origin/epoch,
+            snapshot tag, half-open range, barrier와 nonzero committed generation을 검사한다. preflight/mark는 full
+            `RecoveryKey`를 `snapshot_in_flight`에서만 허용한다. Debug/ReleaseFast
+            `test-session-host-recovery-contract`, F3c0 회귀, 전체 `test-session-host`, `check-boundaries`, `mise run check`가
+            green이어야 이 완료 표식을 유지한다. actual ledger receipt/storage seal/product callsite는 완료 범위가 아니며
+            다음 f3c1이 소유한다.
+
+            구현 순환도 다음 순서로 제거한다. **f3c1 preparation**이 clean whole-drain permit과 strict typed
+            verdict를 만들되 recovery state를 바꾸지 않고, 그 뒤 **2b2e-integration**이 기존
+            `planRecoveryTransition` 결과와 f3c1 capability를 받아 callback-free commit suffix만 구현한다.
+            마지막으로 **f3c2/d/e orchestration**이 같은 held lease에서 f3c1→integration을 exact-one 호출한다.
+            permit constructor를 integration/test adapter가 만들거나 f3c1 이전에 consumer를 product-reachable하게
+            만드는 우회는 금지한다. integration은 새 recovery planner/JSON parser/request map/public consumer를
+            만들지 않고 `ExternalPumpStorage` 내부 mutation suffix만 소유하며 stable adapter와 attachment teardown은
+            계속 2b3 범위다.
+
             recovery transition은 다음 충돌표를 따른다.
 
             | 현재 | 입력 | 결과 |
             | --- | --- | --- |
             | `valid` | local overflow | `client_control_wait`, backlog drop, 30초 시작 |
             | `valid` | host invalidated | `host_ack_unadmitted`, backlog drop, 30초 시작 |
-            | host recovery `ack_unadmitted|ack_queued|awaiting_snapshot|applied_pending` | duplicate invalidated 또는 local overflow | no-op, origin/epoch/deadline 불변 |
+            | host recovery `ack_unadmitted|ack_queued|awaiting_snapshot|snapshot_in_flight|applied_pending` | duplicate invalidated 또는 local overflow | no-op, origin/epoch/deadline 불변 |
             | client recovery `control_wait` 또는 offset-0 unsent control | host invalidated | local control cancel 후 host `ack_unadmitted`, 기존 deadline 유지 |
-            | client recovery partial/fully-sent control 또는 `awaiting_snapshot|applied_pending` | host invalidated | protocol terminal |
+            | client recovery partial/fully-sent control 또는 `awaiting_snapshot|snapshot_in_flight|applied_pending` | host invalidated | protocol terminal |
             | client recovery 모든 phase | repeated local overflow | no-op, origin/epoch/deadline 불변 |
             | host/client `applied_pending` | exact deadline 도달 | commit보다 먼저 timeout terminal |
             | recovery 진입 | unrelated control offset 0 | atomic cancel 후 진입 |
@@ -8547,9 +8587,9 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             **shadow apply→lease release→`mark_resync_applied(context,stream_id,recovery_key)`→visible publish**
             순서다. release 실패면 기존
             `failed_release` terminal slot에 retain하고 mark 0이다. mark exact match는 stream, nonzero owner
-            incarnation, origin, epoch, expected token generation과 현재 `awaiting_snapshot` phase를 모두
+            incarnation, origin, epoch, expected token generation과 현재 `snapshot_in_flight` phase를 모두
             대조하며 input gate를 바로 열지 않고
-            `awaiting_snapshot→applied_pending`만 기록한다. `commit_pending`을 받은 facade caller는 같은 owner
+            `snapshot_in_flight→applied_pending`만 기록한다. `commit_pending`을 받은 facade caller는 같은 owner
             thread에서 새 monotonic clock을 읽고 **zero-readiness pump를 즉시 한 번 호출해야 하며**, 그 전까지
             input/TX admission은 계속 0이다. callback에는 clock을 전달하지 않는다. 별도 bool을 두지 않고
             `applied_pending` 상태 자체가 유일한 `immediate_turn_required` latch다.
@@ -8802,7 +8842,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           attachment에 반환하고 delta는 release한다. response 도착이나 snapshot handoff만으로 latch를 clear하지 않는다.
           `RemoteAttachment.pumpScreen`이 recovery snapshot apply와 charged lease release에 모두 성공한 뒤에만
           `transport.mark_resync_applied(context, stream_id, recovery_key)`를 호출한다.
-          이 callback은 state가 정확히 `awaiting_snapshot`이고 stream/recovery epoch/token generation이 모두
+          이 callback은 state가 정확히 `snapshot_in_flight`이고 stream/recovery epoch/token generation이 모두
           일치할 때 `applied_pending`만 기록하고 input gate는 유지한다. 다음 fresh-clock pump가 deadline-first로
           latch/input gate를 clear한다. `control_in_flight`의 early snapshot apply, append/apply/release/drop 실패,
           stale generation과 attachment deinit은 mark/clear 0이며 recovery deadline
@@ -8972,8 +9012,9 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           module의 typed encoder가 `ControlRequest`와 allocation-free tagged `ControlExpectation`을 함께 만든다.
           product `admitControl`은 caller raw JSON을 받지 않고 typed request만 받아 wire payload와 expectation을
           같은 f1 atomic admission/correlation seal에 publish한다. expectation은 `.resize{client_sequence}` 또는
-          `.resync{RecoveryKey}`이며 InFlight→Completed→PreparedTake→whole-drain permit까지 exact generation/digest로
-          운반한다. retired TX backing이나 request JSON을 다시 읽지 않는다. resize response의 echoed sequence는
+          `.resync{RecoveryControlAuthority}`이며 InFlight→Completed→PreparedTake→whole-drain permit까지 exact
+          incarnation/origin/epoch와 correlation generation/digest로 운반한다. retired TX backing이나 request JSON을
+          다시 읽지 않는다. resize response의 echoed sequence는
           expectation과 exact equality이고 applied cols/rows는 요청값 equality가 아니라 codec의 nonzero `u16` bounds,
           applied generation/changed semantic 규칙으로 검증한다. expectation mismatch는 payload cleanup 뒤 protocol
           terminal이며 expectation 자체는 추가 allocation이 없어 admission OOM rollback을 바꾸지 않는다. boundary는 JSON
@@ -8986,8 +9027,9 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           `resync_ack` verdict까지만 만들며 f3에서 독자적으로 recovery state를 바꾸거나 gate를 열지 않는다.
           `client_recovery.control_in_flight → awaiting_snapshot`, host invalidated/ACK 충돌표, pre-ACK stale snapshot
           drop, post-ACK fresh snapshot과 `applied_pending → valid` fresh-clock commit은 2b2e-integration의 단일
-          mutation authority다. 구현 순서는 f3a~b 첫 merge slice, f3c0 substrate, **2b2e-integration**, 그 뒤
-          f3c~e 셋째 f3 slice다. 2b2e-integration은 private callback-free `consumeResyncAckUnderHeldLease`를 제공하고,
+          mutation authority다. 구현 순서는 f3a~b 첫 merge slice, f3c0 substrate, **f3c1 preparation**,
+          **2b2e-integration**, 그 뒤 **f3c2/d/e orchestration**이다. 2b2e-integration은 private callback-free
+          `consumeResyncAckUnderHeldLease`를 제공하고,
           f3 orchestration이 같은 held lease/no-fail suffix에서 permit, typed verdict, exact recovery phase generation과
           completed/correlation owner를 함께 consume한다. permit/verdict는 저장·외부 반환되지 않으며 payload cleanup과
           `control_in_flight → awaiting_snapshot` publication 사이에 다음 call이나 callback이 없다. resize verdict는
@@ -9013,17 +9055,20 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           `pumpRxTurn`, sticky cleanup failure, callback drift, raw-tag corruption과 allocation identity tracker가 arbitrary
           replay/free·double free 0을 검증한다. Debug/ReleaseFast `test-session-host-f3b`, 전체
           `test-session-host`, `check-boundaries`, `mise run check`가 green이어야 이 완료 표식을 유지한다.
-          2b2e-integration, f3c~e와 stable adapter는 아직 완료가 아니다.
+          f3c1, 2b2e-integration, f3c2/d/e와 stable adapter는 아직 완료가 아니다.
           **f3c0 control contract substrate**는 shared codec, `ControlExpectation`, opaque final-address
           `PreparedWholeDrainPermit`/`PreparedControlSemanticVerdict` 타입과 private same-lease resync consumer signature를
-          추가하되 permit 생성·public take capability는 0으로 둔다. 이 compile/test 가능한 substrate 뒤에
-          2b2e-integration이 consumer를 구현한다. codec의 정확한 계약은 다음과 같다.
-          `ControlRequest = .resize{stream_id, cols, rows, client_sequence} | .resync{stream_id, recovery_key}`이고
+          추가하되 permit 생성·public take capability는 0으로 둔다. 이 compile/test 가능한 substrate 뒤에는
+          f3c1 preparation이 실제 producer를 먼저 구현한다. codec의 정확한 계약은 다음과 같다.
+          `ControlRequest = .resize{stream_id, cols, rows, client_sequence} |
+          .resync{stream_id, recovery_authority}`이고
           모든 scalar는 canonical nonzero여야 하며 resize는 `cols >= 2`, `rows >= 1`이어야 한다. caller 제공 고정 buffer에
           whole request JSON을 쓰는 allocation-free encoder는 성공할 때에만 그 buffer slice와
-          `.resize{client_sequence}` 또는 `.resync{recovery_key}` expectation을 함께 돌려준다. buffer 부족·비정규 request는
+          `.resize{client_sequence}` 또는 `.resync{recovery_authority}` expectation을 함께 돌려준다. buffer 부족·비정규 request는
           wire/expectation을 어느 쪽도 publish하지 않는다. recovery key는 local semantic authority이며 JSON에는 넣지 않는다.
-          resync admission은 key의 owner incarnation·client origin·recovery epoch가 현재 `control_wait`와 정확히 맞는지도
+          여기서 local authority는 ledger token을 포함한 full `RecoveryKey`가 아니라
+          `RecoveryControlAuthority{owner_incarnation,origin,recovery_epoch}`다. resync admission은 authority의 owner
+          incarnation·client origin·recovery epoch가 현재 `control_wait`와 정확히 맞는지도
           request-ID 예약과 TX allocation 전에 검증하고, foreign key에는 wire를 0 byte publish한다.
           같은 codec의 `WireRequest` params encoder를 blocking `RemoteRuntime`도 사용해 method/field vocabulary를 공유하며,
           full external request encoder는 그 params encoder 결과를 envelope에 넣는다.
@@ -9040,7 +9085,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           payload seal, request ID/control expectation/target, current authority seal/generation과 permit digest에 결속되는 필드를
           미리 고정하되 public constructor, public 반환, payload consumer는 두지 않는다. same-lease resync consumer는
           `consumed | stale | invalid | terminal` typed result의 private function type으로만 고정하고 실제 callable implementation과 permit
-          발급은 2b2e-integration이 소유한다. 따라서 f3c0의 자동 gate는 (1) codec 정상/경계/duplicate/unknown/error/OOM 및
+          발급은 각각 2b2e-integration과 f3c1이 소유한다. 따라서 f3c0의 자동 gate는 (1) codec 정상/경계/duplicate/unknown/error/OOM 및
           resize/resync request/params buffer cap-1/exact, (2) RemoteRuntime request/decode parity, (3) typed admission allocation fail-index와 raw JSON API 부재,
           (4) expectation copy/tamper가 seal 검증을 통과하지 못함, (5) boundary scan으로 codec 외 product JSON vocabulary와
           permit constructor/take 0, (6) component별 executable sentinel로 zero-test 0을 Debug/ReleaseFast에서 고정한다. f3c0만으로 response payload를 semantic apply하거나
@@ -9050,11 +9095,14 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           resize stale/applied·u64 max sequence/generation·exact resync ACK·error envelope를 strict decode한다. `RemoteRuntime`의
           resize/resync response와 external pump의 F1 admission이 이 codec을 소비하며 raw JSON admission은 제거했다.
           allocation-free `ControlExpectation`은 correlation→completed payload→revoke proof의 모든 digest에 포함되고,
-          recovery key는 wire에 직렬화되지 않는다. opaque final-address permit/verdict와 private same-lease consumer function
+          당시 full recovery key는 wire에 직렬화되지 않았다. 다음 doc-first correction은 이를 미래 ledger token을
+          예측하지 않는 `RecoveryControlAuthority`로 축소한다. opaque final-address permit/verdict와 private same-lease consumer function
           type만 추가했으며 constructor·public take·semantic apply는 0이다. Debug/ReleaseFast
           `test-session-host-f3c0`, 전체 `test-session-host`, `check-boundaries`, `mise run check`가 green이어야 이 완료 표식을
           유지한다.
-          **f3c drain-bound semantic take**는 `completed_awaiting_drain`, private permit과 typed resize verdict,
+          **f3c1 drain-bound preparation**은 `completed_awaiting_drain`에서 clean whole-drain permit과 strict typed
+          resize/resync verdict를 만들되 semantic state를 바꾸거나 payload cleanup callback을 호출하지 않는다.
+          **f3c2 semantic take**는 2b2e-integration consumer와 resize commit을 같은 held lease/no-callback suffix에서 호출하고,
           duplicate-after-success와 max-ID success 뒤 같은 product storage의 다음 wire-zero
           `request_id_exhausted`를 고정한다. **f3d whole-turn orchestration**은 기존 `pumpRxTurn`의 단일 clock,
           RX→authority→f1 TX suffix와 cleanup leaf만 재사용하고 새 pump/write adapter/lease를 만들지 않는다.
@@ -9062,8 +9110,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           response↔revoke, response+FIN/HUP, readable+writable write 0, revoke 위치 1/64/65, parser resident 65,
           incomplete header/payload+FIN, input/control offset 0/partial/retired/response-wait, deadline-1/exact/+1,
           EINTR/EAGAIN, no-end/chunk/1-byte drip과 common TX/parser/ledger/completed/FD final-zero를 검증한다.
-          f3a~b, f3c0, f3c~e는 각각 독립 merge slice로 리뷰·회귀 격리하고 f3c0 뒤·f3c 전에
-          2b2e-integration을 병합한다. 세 f3 slice 모두
+          f3a~b, f3c0, f3c1, 2b2e-integration, f3c2/d/e는 각각 독립 merge slice로 리뷰·회귀 격리한다. 모든 f3 slice가
           Debug/ReleaseFast, `check-boundaries`, 실제 socketpair와 전체 `mise run check`가 green이기 전에는
           f3 또는 TX/control/turn 통합을 완료로 표시하지 않는다. `ExternalPumpOwner`,
           `external_attach.Prepared` consume과 stable adapter/attachment teardown은 P5c3c-2b3 범위다.

@@ -73,6 +73,8 @@ pub const DiffBase = enum {
     unstaged,
     /// 비교 대상이 없다 — 파일 내용을 그대로 보여 준다(추적되지 않은 파일).
     untracked,
+    /// `merge-base(기본 브랜치) ↔ HEAD` — 이 브랜치의 커밋들이 바꾼 것(§3.5 "브랜치에 COMMIT 됨").
+    branch,
 };
 
 /// 폐기된 라이브 프리뷰 모드가 workspace 파일에 남긴 wire 이름이다. **writer는 이 값을 다시 쓰지 않는다** —

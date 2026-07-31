@@ -73,6 +73,12 @@ pub const Result = struct {
     numstat_staged: []u8 = &.{},
     /// `git diff --numstat` 출력.
     numstat_worktree: []u8 = &.{},
+    /// 기본 브랜치와 갈린 지점 이후 이 브랜치가 바꾼 것(`--name-status`/`--numstat`). **없으면 빈 문자열**이고
+    /// 그건 실패가 아니라 "그 섹션이 없는 것"이다(origin/HEAD 없는 저장소 — docs/editor-surface.md §3.5).
+    branch_name_status: []u8 = &.{},
+    branch_numstat: []u8 = &.{},
+    /// 그 갈린 지점의 커밋 해시. 브랜치 섹션 행의 diff 왼쪽이 이 커밋이다.
+    merge_base: []u8 = &.{},
     /// 셋 다 정상 종료했는가. 하나라도 실패하면 부분 결과를 쓰지 않는다(섹션이 서로 다른 시점을 섞지 않게).
     ok: bool = false,
     /// 출력이 상한에 걸려 잘렸는가. 목록 끝에 그 사실을 표시한다.
@@ -84,6 +90,9 @@ pub const Result = struct {
         allocator.free(self.status);
         allocator.free(self.numstat_staged);
         allocator.free(self.numstat_worktree);
+        allocator.free(self.branch_name_status);
+        allocator.free(self.branch_numstat);
+        allocator.free(self.merge_base);
         self.* = .{};
     }
 };
@@ -121,6 +130,8 @@ const Job = struct {
         rel_path: []u8,
         /// rename의 옛 경로(그 외 빈 값). 왼쪽(HEAD)만 이 경로를 쓴다.
         orig_rel_path: []u8,
+        /// `.branch` 기준의 왼쪽 커밋(merge-base 해시). 다른 기준에서는 빈 값이다.
+        merge_base: []u8,
         base: dock_panel.DiffBase,
     };
 };
@@ -208,6 +219,7 @@ pub const Backend = struct {
         repo: []const u8,
         rel_path: []const u8,
         orig_rel_path: []const u8,
+        merge_base: []const u8,
         base: dock_panel.DiffBase,
         request_id: u64,
     ) bool {
@@ -228,8 +240,9 @@ pub const Backend = struct {
         job.git_exe = state.allocator.dupe(u8, git_exe) catch return self.releaseDiffJob(job);
         job.repo = state.allocator.dupe(u8, repo) catch return self.releaseDiffJob(job);
         const owned_path = state.allocator.dupe(u8, rel_path) catch return self.releaseDiffJob(job);
-        job.diff = .{ .rel_path = owned_path, .orig_rel_path = &.{}, .base = base };
+        job.diff = .{ .rel_path = owned_path, .orig_rel_path = &.{}, .merge_base = &.{}, .base = base };
         job.diff.?.orig_rel_path = state.allocator.dupe(u8, orig_rel_path) catch return self.releaseDiffJob(job);
+        job.diff.?.merge_base = state.allocator.dupe(u8, merge_base) catch return self.releaseDiffJob(job);
         const thread = std.Thread.spawn(.{}, diffWorker, .{job}) catch return self.releaseDiffJob(job);
         thread.detach();
         return true;
@@ -241,6 +254,7 @@ pub const Backend = struct {
         if (job.diff) |d| {
             state.allocator.free(d.rel_path);
             if (d.orig_rel_path.len > 0) state.allocator.free(d.orig_rel_path);
+            if (d.merge_base.len > 0) state.allocator.free(d.merge_base);
         }
         if (job.repo.len > 0) state.allocator.free(job.repo);
         if (job.git_exe.len > 0) state.allocator.free(job.git_exe);
@@ -302,6 +316,24 @@ fn diffWorker(job: *Job) void {
     var truncated = false;
 
     // untracked는 비교 대상 자체가 없다 — 왼쪽을 읽지 않는다(읽으면 같은 경로가 추적 중일 때 엉뚱한 내용이 실린다).
+    if (target.base == .branch) {
+        // 브랜치 섹션: 갈린 지점(merge-base) ↔ HEAD. 둘 다 커밋이라 작업트리를 읽지 않는다.
+        if (commitSide(state.allocator, job, target.merge_base)) |out| {
+            result.original = out.bytes;
+            if (out.truncated) truncated = true;
+            had_side = true;
+        } else |_| {}
+        if (blobSide(state.allocator, job, .head)) |out| {
+            result.modified = out.bytes;
+            if (out.truncated) truncated = true;
+            had_side = true;
+        } else |_| {}
+        result.ok = had_side;
+        result.truncated = truncated;
+        finishDiff(state, job, target, result);
+        return;
+    }
+
     if (target.base != .untracked) {
         const side: git_command.BlobSide = if (target.base == .staged) .head else .index;
         if (blobSide(state.allocator, job, side)) |out| {
@@ -326,8 +358,15 @@ fn diffWorker(job: *Job) void {
     result.ok = had_side;
     result.truncated = truncated;
 
+    finishDiff(state, job, target, result);
+}
+
+/// worker의 마지막 절차(소유 해제 + 결과 적재)를 한 곳에 둔다 — 기준마다 갈라진 경로가 같은 정리를 공유한다.
+fn finishDiff(state: *State, job: *Job, target: Job.DiffTarget, result_in: DiffResult) void {
+    var result = result_in;
     state.allocator.free(target.rel_path);
     if (target.orig_rel_path.len > 0) state.allocator.free(target.orig_rel_path);
+    if (target.merge_base.len > 0) state.allocator.free(target.merge_base);
     state.allocator.free(job.git_exe);
     state.allocator.free(job.repo);
     state.allocator.destroy(job);
@@ -345,6 +384,16 @@ fn diffWorker(job: *Job) void {
 }
 
 /// `Output`을 그대로 돌려준다 — `truncated`를 버리면 상한에서 잘린 내용이 온전한 파일처럼 보인다(리뷰 지적).
+/// 그 커밋의 blob(브랜치 섹션 왼쪽). rename이면 옛 경로를 읽는다 — 새 경로는 그 커밋에 없다.
+fn commitSide(allocator: std.mem.Allocator, job: *Job, rev: []const u8) !Output {
+    var spec_buf: [std.fs.max_path_bytes + 72]u8 = undefined;
+    const target = job.diff.?;
+    const path = if (target.orig_rel_path.len > 0) target.orig_rel_path else target.rel_path;
+    const trimmed = std.mem.trim(u8, rev, " \t\r\n"); // merge-base 출력은 개행으로 끝난다
+    const spec = git_command.commitBlobSpec(trimmed, path, &spec_buf) orelse return error.BadRev;
+    return runWithArg(allocator, .show_blob, job.git_exe, job.repo, spec);
+}
+
 fn blobSide(allocator: std.mem.Allocator, job: *Job, side: git_command.BlobSide) !Output {
     var spec_buf: [std.fs.max_path_bytes + 8]u8 = undefined;
     // rename은 왼쪽이 옛 경로다 — 새 경로로 HEAD를 읽으면 그 blob이 없어 비교가 통째로 실패한다.
@@ -374,6 +423,17 @@ fn worker(job: *Job) void {
     var result: Result = .{ .request_id = job.request_id };
     var ok = true;
     var truncated = false;
+    // 브랜치 범위 셋은 **선택**이다: origin/HEAD가 없으면 실패하는데 그건 정상이고 그 섹션만 없다.
+    // 여기서 ok를 내리면 기준을 못 잡는 저장소에서 목록 전체가 실패로 보인다.
+    inline for (.{
+        .{ git_command.Kind.merge_base, "merge_base" },
+        .{ git_command.Kind.branch_name_status, "branch_name_status" },
+        .{ git_command.Kind.branch_numstat, "branch_numstat" },
+    }) |pair| {
+        if (run(state.allocator, pair[0], job.git_exe, job.repo)) |out| {
+            @field(result, pair[1]) = out.bytes;
+        } else |_| {}
+    }
     inline for (.{
         .{ git_command.Kind.status, "status" },
         .{ git_command.Kind.numstat_staged, "numstat_staged" },
@@ -604,7 +664,7 @@ test "diff 본문을 기준별로 읽는다(end-to-end)" {
 
     // 커밋돼 있는 파일이라 `HEAD:` 와 작업트리 양쪽에서 읽힌다. 내용 자체가 아니라 **비지 않았는지**를 본다
     // (내용을 고정하면 이 파일을 고칠 때마다 테스트가 깨진다).
-    try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", .staged, 1));
+    try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", "", .staged, 1));
     const staged = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
     var staged_result = staged;
     defer staged_result.deinit(testing.allocator);
@@ -612,7 +672,7 @@ test "diff 본문을 기준별로 읽는다(end-to-end)" {
     try testing.expect(staged_result.original.len > 0); // HEAD:build.zig
     try testing.expect(staged_result.modified.len > 0); // :build.zig(index)
 
-    try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", .unstaged, 2));
+    try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", "", .unstaged, 2));
     const unstaged = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
     var unstaged_result = unstaged;
     defer unstaged_result.deinit(testing.allocator);
@@ -620,7 +680,7 @@ test "diff 본문을 기준별로 읽는다(end-to-end)" {
     try testing.expect(unstaged_result.modified.len > 0); // 작업트리 파일(git을 안 거친다)
 
     // untracked는 왼쪽이 **없는 것이 정상**이다 — 실패로 접지 않는다.
-    try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", .untracked, 3));
+    try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", "", .untracked, 3));
     const untracked = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
     var untracked_result = untracked;
     defer untracked_result.deinit(testing.allocator);
@@ -629,7 +689,7 @@ test "diff 본문을 기준별로 읽는다(end-to-end)" {
     try testing.expect(untracked_result.modified.len > 0);
 
     // 없는 경로는 실패를 **결과로** 싣는다(in-flight가 풀려야 화면이 "여는 중"에 안 갇힌다).
-    try testing.expect(backend.submitDiff(exe, repo, "no/such/file.txt", "", .staged, 4));
+    try testing.expect(backend.submitDiff(exe, repo, "no/such/file.txt", "", "", .staged, 4));
     const missing = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
     var missing_result = missing;
     defer missing_result.deinit(testing.allocator);
@@ -640,6 +700,48 @@ fn waitForDiff(backend: *Backend) ?DiffResult {
     var spins: usize = 0;
     while (spins < 1000) : (spins += 1) {
         if (backend.takeDiffResult()) |result| return result;
+        var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, null);
+    }
+    return null;
+}
+
+test "브랜치 기준 diff는 merge-base와 HEAD를 읽는다(end-to-end)" {
+    // 다른 기준과 달리 **양쪽 다 커밋**이라 작업트리를 읽지 않는다. 실제 저장소·실제 git으로 그 대응을 고정한다.
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const exe = locate(&exe_buf) orelse return error.SkipZigTest;
+    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_ptr = std.c.getcwd(&repo_buf, repo_buf.len) orelse return error.NoCwd;
+    const repo = std.mem.span(@as([*:0]u8, @ptrCast(cwd_ptr)));
+
+    var backend = try Backend.init(testing.allocator, std.Io.Threaded.global_single_threaded.io());
+    defer backend.deinit();
+
+    // 목록 읽기가 merge-base를 함께 준다 — 브랜치 섹션의 왼쪽이 그 커밋이다.
+    try testing.expect(backend.submit(exe, repo, 1));
+    var listed = waitForList(&backend) orelse return error.ListNeverCompleted;
+    defer listed.deinit(testing.allocator);
+    if (listed.merge_base.len == 0) return error.SkipZigTest; // origin/HEAD 없는 clone이면 이 섹션 자체가 없다
+    const merge_base = std.mem.trim(u8, listed.merge_base, " \t\r\n");
+
+    try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", merge_base, .branch, 2));
+    var result = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.ok);
+    try testing.expect(result.original.len > 0); // merge-base:build.zig
+    try testing.expect(result.modified.len > 0); // HEAD:build.zig
+
+    // hex가 아닌 rev는 애초에 spec이 안 만들어져 실패한다(인자 주입 차단이 실제로 걸리는지).
+    try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", "origin/HEAD", .branch, 3));
+    var bad = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
+    defer bad.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 0), bad.original.len);
+}
+
+fn waitForList(backend: *Backend) ?Result {
+    var spins: usize = 0;
+    while (spins < 1000) : (spins += 1) {
+        if (backend.takeResult()) |result| return result;
         var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
         _ = std.c.nanosleep(&ts, null);
     }

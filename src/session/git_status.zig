@@ -378,3 +378,68 @@ test "손상 입력은 조용히 건너뛴다(부분 표시가 잘못된 표시�
     try testing.expectEqualStrings("good.txt", n.next().?.path);
     try testing.expect(n.next() == null);
 }
+
+/// `git diff --name-status` 한 줄: 상태 문자 + 경로(rename이면 옛 경로와 새 경로 둘).
+///
+/// **왜 별도 파서인가**: porcelain v2(`iterate`)는 작업트리·index 상태를 말하고, 이건 **커밋 범위**가 바꾼 것을
+/// 말한다("브랜치에 COMMIT 됨" 섹션 — docs/editor-surface.md §3.5). 같은 파일이 두 곳에 다른 상태로 나올 수 있어
+/// 하나의 파서로 뭉개면 안 된다.
+pub const NameStatusEntry = struct {
+    /// `M`·`A`·`D`·`R`(rename)·`C`(copy) 등 git이 준 첫 글자.
+    letter: u8,
+    /// 지금 경로(rename이면 새 경로).
+    path: []const u8,
+    /// rename/copy의 옛 경로(그 외 null).
+    orig_path: ?[]const u8 = null,
+};
+
+pub fn iterateNameStatus(text: []const u8) NameStatusIterator {
+    return .{ .rest = text };
+}
+
+pub const NameStatusIterator = struct {
+    rest: []const u8,
+
+    pub fn next(self: *NameStatusIterator) ?NameStatusEntry {
+        while (self.rest.len > 0) {
+            const end = std.mem.indexOfScalar(u8, self.rest, '\n') orelse self.rest.len;
+            const line = self.rest[0..end];
+            self.rest = if (end < self.rest.len) self.rest[end + 1 ..] else "";
+            if (line.len < 3) continue;
+
+            // `R100\told\tnew` / `M\tpath`. 상태 뒤 숫자(유사도)는 무시한다 — 표시에 쓰지 않는다.
+            const first_tab = std.mem.indexOfScalar(u8, line, '\t') orelse continue;
+            const letter = line[0];
+            const rest = line[first_tab + 1 ..];
+            if (letter == 'R' or letter == 'C') {
+                const sep = std.mem.indexOfScalar(u8, rest, '\t') orelse continue;
+                // 옛 경로가 비어 있으면 그 줄은 못 믿는다(잘린 출력).
+                if (sep == 0 or sep + 1 >= rest.len) continue;
+                return .{ .letter = letter, .path = rest[sep + 1 ..], .orig_path = rest[0..sep] };
+            }
+            if (rest.len == 0) continue;
+            return .{ .letter = letter, .path = rest };
+        }
+        return null;
+    }
+};
+
+test "name-status: 상태 문자와 경로, rename의 옛 경로를 낸다" {
+    var it = iterateNameStatus("M\tsrc/main.zig\nA\tnew.txt\nD\tgone.txt\nR100\told.txt\tnew.txt\n");
+    const first = it.next().?;
+    try std.testing.expectEqual(@as(u8, 'M'), first.letter);
+    try std.testing.expectEqualStrings("src/main.zig", first.path);
+    try std.testing.expectEqualStrings("new.txt", it.next().?.path);
+    try std.testing.expectEqual(@as(u8, 'D'), it.next().?.letter);
+    const renamed = it.next().?;
+    try std.testing.expectEqualStrings("new.txt", renamed.path);
+    try std.testing.expectEqualStrings("old.txt", renamed.orig_path.?);
+    try std.testing.expect(it.next() == null);
+}
+
+test "name-status: 잘린 줄은 건너뛴다(엉뚱한 경로를 만들지 않는다)" {
+    // rename인데 새 경로가 없는 줄, 탭이 없는 줄, 너무 짧은 줄.
+    var it = iterateNameStatus("R100\tonly-old\nM\nX\nM\tok.txt\n");
+    try std.testing.expectEqualStrings("ok.txt", it.next().?.path);
+    try std.testing.expect(it.next() == null);
+}

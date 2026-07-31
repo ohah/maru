@@ -23,6 +23,14 @@ pub const Kind = enum {
     numstat_staged,
     /// 아직 스테이지되지 않은 변경의 +N -N (`index ↔ worktree`).
     numstat_worktree,
+    /// 기본 브랜치와 갈린 지점(`merge-base origin/HEAD HEAD`). 이 값이 "브랜치에 COMMIT 됨" 섹션의 왼쪽이다.
+    /// **실패해도 목록은 성립한다** — origin/HEAD가 없는 저장소(로컬 전용·clone 아님)에서는 그 섹션만 숨긴다.
+    merge_base,
+    /// 그 갈린 지점 이후 이 브랜치의 커밋들이 바꾼 파일: `git diff --name-status origin/HEAD...HEAD`.
+    /// **삼점 범위**라 merge-base를 따로 구해 넘길 필요가 없다(git이 같은 계산을 한다).
+    branch_name_status,
+    /// 같은 범위의 +N -N.
+    branch_numstat,
     /// diff 본문 한쪽(원본)을 통째로: `git show <spec>`. spec은 `blobSpec`이 만든 `HEAD:<경로>` 또는 `:<경로>`다.
     /// **worktree 쪽은 이 경로로 읽지 않는다** — 디스크 파일을 그대로 읽으면 되고, git을 한 번 덜 띄운다.
     show_blob,
@@ -49,6 +57,23 @@ pub const BlobSide = enum {
     /// index(스테이지 영역)의 내용. `index ↔ worktree` 비교의 왼쪽이자 `HEAD ↔ index`의 오른쪽이다.
     index,
 };
+
+/// 임의 커밋의 blob 지정자(`<hex>:<path>`). "브랜치에 COMMIT 됨"의 왼쪽(merge-base)을 읽을 때 쓴다.
+///
+/// **rev는 hex 해시만 받는다.** 사용자가 고른 문자열이 아니라 우리가 `merge-base`에서 받은 값이고, 여기서 형태를
+/// 강제하면 그 값이 어떤 경로로 오염돼도 `--upload-pack=…` 같은 인자로 해석될 수 없다(길이·문자 둘 다 본다).
+pub fn commitBlobSpec(rev: []const u8, repo_relative_path: []const u8, buf: []u8) ?[]const u8 {
+    if (rev.len < 7 or rev.len > 64) return null;
+    for (rev) |c| {
+        const hex = (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
+        if (!hex) return null;
+    }
+    if (rev.len + 1 + repo_relative_path.len > buf.len) return null;
+    @memcpy(buf[0..rev.len], rev);
+    buf[rev.len] = ':';
+    @memcpy(buf[rev.len + 1 ..][0..repo_relative_path.len], repo_relative_path);
+    return buf[0 .. rev.len + 1 + repo_relative_path.len];
+}
 
 /// 어떤 kind든 이만큼이면 담긴다(테스트가 상한을 고정한다). config 쌍을 늘리면 여기도 함께 늘려야 한다 —
 /// 넘치면 조용히 잘리는 게 아니라 buf 범위를 벗어난다(quotePath 추가 때 실제로 넘쳤다).
@@ -121,6 +146,30 @@ pub fn build(kind: Kind, git_exe: []const u8, repo: []const u8, arg: ?[]const u8
                 buf[n] = "--cached";
                 n += 1;
             }
+        },
+        .merge_base => {
+            buf[n] = "merge-base";
+            n += 1;
+            buf[n] = "origin/HEAD";
+            n += 1;
+            buf[n] = "HEAD";
+            n += 1;
+        },
+        .branch_name_status, .branch_numstat => {
+            buf[n] = "diff";
+            n += 1;
+            buf[n] = if (kind == .branch_numstat) "--numstat" else "--name-status";
+            n += 1;
+            buf[n] = "--find-renames";
+            n += 1;
+            buf[n] = "--no-ext-diff";
+            n += 1;
+            buf[n] = "--no-textconv";
+            n += 1;
+            // `A...B` = B가 갈린 지점 이후 바꾼 것(공통 조상 기준). `A..B`(두 점)로 쓰면 기본 브랜치에 새로 들어온
+            // 커밋까지 "내가 바꾼 것"으로 잡혀 목록이 부풀어 오른다.
+            buf[n] = "origin/HEAD...HEAD";
+            n += 1;
         },
         .show_blob => {
             buf[n] = "show";
@@ -245,4 +294,33 @@ test "argv 상한이 모든 kind를 담는다(넘치면 범위를 벗어난다)"
         const argv = build(kind, "/usr/bin/git", "/repo", "HEAD:x", &buf);
         try testing.expect(argv.len <= max_argv);
     }
+}
+
+test "브랜치 범위는 삼점(...)으로 물어 기본 브랜치의 새 커밋을 섞지 않는다" {
+    var buf: [max_argv][]const u8 = undefined;
+    const argv = build(.branch_name_status, "/usr/bin/git", "/repo", null, &buf);
+    try testing.expect(has(argv, "origin/HEAD...HEAD"));
+    try testing.expect(!has(argv, "origin/HEAD..HEAD"));
+    try testing.expect(has(argv, "--name-status"));
+    // 같은 범위의 증감도 같은 형태로 묻는다.
+    var buf2: [max_argv][]const u8 = undefined;
+    try testing.expect(has(build(.branch_numstat, "/usr/bin/git", "/repo", null, &buf2), "--numstat"));
+    // merge-base는 그 섹션의 diff 왼쪽을 읽을 때 쓴다.
+    var buf3: [max_argv][]const u8 = undefined;
+    const mb = build(.merge_base, "/usr/bin/git", "/repo", null, &buf3);
+    try testing.expect(has(mb, "merge-base"));
+    try testing.expect(has(mb, "origin/HEAD"));
+}
+
+test "commitBlobSpec은 hex 해시만 받는다(임의 문자열을 인자로 넘기지 않는다)" {
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings(
+        "650a0bbef96a1dd562e0d39f262260ae002c1545:src/main.zig",
+        commitBlobSpec("650a0bbef96a1dd562e0d39f262260ae002c1545", "src/main.zig", &buf).?,
+    );
+    try testing.expect(commitBlobSpec("--upload-pack=x", "a", &buf) == null); // 옵션처럼 생긴 값
+    try testing.expect(commitBlobSpec("origin/HEAD", "a", &buf) == null); // ref 이름도 안 받는다
+    try testing.expect(commitBlobSpec("abc", "a", &buf) == null); // 너무 짧다
+    var tiny: [8]u8 = undefined;
+    try testing.expect(commitBlobSpec("650a0bbef96a1dd5", "very/long.txt", &tiny) == null); // 자르지 않는다
 }

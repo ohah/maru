@@ -2625,7 +2625,7 @@ pub const AppSession = struct {
     scm_selected_row: ?usize = null,
     /// 섹션 접힘 상태(스테이지된 변경·변경 사항·추적되지 않은 파일 순). 창 상태이며 workspace에 저장하지 않는다 —
     /// 목록 자체가 매번 새로 계산되는 값이라 접힘만 남겨 봐야 다음 실행의 목록과 대응이 보장되지 않는다.
-    scm_collapsed: [3]bool = .{ false, false, false },
+    scm_collapsed: [scm_view.section_count]bool = .{ false, false, false, false },
     /// 감시를 걸어야 하는 `<repo>/.git` 경로(아직 host가 안 가져갔으면 non-null). **폴링 대신 감시**를 쓰는
     /// 이유: `git add`는 작업트리를 안 건드리고 index만 바꿔 파일 감시로는 안 잡히는데, `.git`을 보면 잡힌다.
     git_watch_request: ?[]u8 = null,
@@ -14612,6 +14612,8 @@ pub const AppSession = struct {
             result.status,
             result.numstat_staged,
             result.numstat_worktree,
+            result.branch_name_status,
+            result.branch_numstat,
             self.scm_collapsed,
             out,
             scratch,
@@ -14629,6 +14631,8 @@ pub const AppSession = struct {
             result.status,
             result.numstat_staged,
             result.numstat_worktree,
+            result.branch_name_status,
+            result.branch_numstat,
             self.scm_collapsed,
             &buf,
             &scratch,
@@ -14648,6 +14652,7 @@ pub const AppSession = struct {
             .staged => .staged,
             .unstaged => .unstaged,
             .untracked => .untracked,
+            .branch => .branch,
         };
         // rename은 왼쪽이 옛 경로다(`R` 행의 orig_path). 스테이지된 rename만 그 구분이 의미 있다.
         self.openDiffTerm(repo, abs, row.path, row.orig_path, base);
@@ -14749,6 +14754,8 @@ pub const AppSession = struct {
             entry.diff_repo,
             entry.diff_rel_path,
             entry.diff_orig_rel_path,
+            // 브랜치 기준의 왼쪽 커밋. 목록을 읽을 때 함께 받아 둔 값이라 여기서 git을 또 부르지 않는다.
+            if (self.git_result) |r| r.merge_base else "",
             entry.diff_base,
             entry.diff_request_id,
         )) {
@@ -26933,6 +26940,8 @@ pub const AppSession = struct {
                                 r.status,
                                 r.numstat_staged,
                                 r.numstat_worktree,
+                                r.branch_name_status,
+                                r.branch_numstat,
                                 self.scm_collapsed,
                                 &rows_buf,
                                 &scratch,

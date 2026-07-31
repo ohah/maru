@@ -645,24 +645,34 @@ test "membership decoder accepts only exact runtime or exact absence envelope" {
     );
 }
 
+fn terminateAndReapFixtureChild(pid: c.pid_t) bool {
+    const kill_rc = c.kill(pid, posix.SIG.TERM);
+    if (kill_rc != 0 and posix.errno(kill_rc) != .SRCH) return false;
+    while (true) {
+        var status: c_int = undefined;
+        const waited = c.waitpid(pid, &status, 0);
+        if (waited == pid) {
+            const unsigned: c_uint = @bitCast(status);
+            return c.W.IFEXITED(unsigned) or c.W.IFSIGNALED(unsigned);
+        }
+        if (waited < 0 and posix.errno(waited) == .INTR) continue;
+        return false;
+    }
+}
+
 test "product resolver discovers and pins the one host that owns a live runtime" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const daemon = @import("daemon.zig");
     const short_endpoint = @import("short_endpoint.zig");
     const testing = std.testing;
     const host_id = (@as(u128, @intCast(c.getpid())) << 64) | 0xa771;
-    var base_buf: [192]u8 = undefined;
-    const base = std.fmt.bufPrintZ(
-        &base_buf,
-        "/tmp/maru-attach-resolver-{d}",
-        .{c.getpid()},
-    ) catch return error.SkipZigTest;
-    // The path is only unique per pid, and pids are reused. A previous run that ended before its
-    // cleanup — or whose `rmdir` failed because the tree was not empty — leaves a populated
-    // `session-host/hosts` behind, and `registryRootAbsent` then reports the registry as present.
-    // That flips the assertion below from `host_unavailable` to `denied`. Start from bare ground.
-    std.Io.Dir.cwd().deleteTree(testing.io, base) catch {};
-    _ = c.mkdir(base.ptr, 0o700);
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var base_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base_len = try tmp.dir.realPath(testing.io, &base_buf);
+    if (base_len == base_buf.len) return error.SkipZigTest;
+    base_buf[base_len] = 0;
+    const base: [:0]const u8 = base_buf[0..base_len :0];
     const no_host = resolveProduct(testing.allocator, base, 1, try testPhase(.resolve));
     try testing.expectEqual(attach_cli.ExitCode.host_unavailable, no_host.failed);
     var session_buf: [256]u8 = undefined;
@@ -682,15 +692,8 @@ test "product resolver discovers and pins the one host that owns a live runtime"
         ) catch {};
         std.c._exit(0);
     }
-    defer {
-        _ = c.kill(child, posix.SIG.TERM);
-        var status: c_int = undefined;
-        _ = c.waitpid(child, &status, 0);
-        host_manifest.removeEmptyHostDirectories(session_dir, host_id);
-        // `rmdir` only removes empty directories, so any file the hosts left behind (owner.lock,
-        // rollback-current, host.v1.json) used to strand the whole tree for the next pid to trip on.
-        std.Io.Dir.cwd().deleteTree(testing.io, base) catch {};
-    }
+    defer if (!terminateAndReapFixtureChild(child))
+        @panic("failed to reap first resolver fixture host");
 
     var owner_client = blk: {
         var attempt: usize = 0;
@@ -736,15 +739,8 @@ test "product resolver discovers and pins the one host that owns a live runtime"
         ) catch {};
         std.c._exit(0);
     }
-    var second_live = true;
-    defer {
-        if (second_live) {
-            _ = c.kill(second_child, posix.SIG.TERM);
-            var second_status: c_int = undefined;
-            _ = c.waitpid(second_child, &second_status, 0);
-            host_manifest.removeEmptyHostDirectories(session_dir, second_host_id);
-        }
-    }
+    defer if (!terminateAndReapFixtureChild(second_child))
+        @panic("failed to reap second resolver fixture host");
     var blockers = [_]?@import("client.zig").Client{null} ** connection_slot.max_connections;
     defer for (&blockers) |*blocker| {
         if (blocker.*) |*client| client.deinit();
@@ -774,16 +770,18 @@ test "product resolver discovers and pins the one host that owns a live runtime"
         if (blocker.*) |*client| client.deinit();
         blocker.* = null;
     }
-    _ = c.kill(second_child, posix.SIG.TERM);
-    var second_status: c_int = undefined;
-    _ = c.waitpid(second_child, &second_status, 0);
-    second_live = false;
-    host_manifest.removeEmptyHostDirectories(session_dir, second_host_id);
-
-    const resolved = resolveProduct(testing.allocator, base, runtime_id, try testPhase(.resolve));
-    var pinned = switch (resolved) {
-        .selected => |value| value,
-        .failed => return error.TestUnexpectedResult,
+    const recovery_phase = try testPhase(.resolve);
+    var pinned = retry: {
+        var attempt: usize = 0;
+        while (attempt < 150) : (attempt += 1) {
+            const resolved = resolveProduct(testing.allocator, base, runtime_id, recovery_phase);
+            switch (resolved) {
+                .selected => |value| break :retry value,
+                .failed => {},
+            }
+            _ = usleep(20_000);
+        }
+        return error.TestUnexpectedResult;
     };
     defer pinned.deinit();
     try testing.expectEqual(host_id, pinned.host_id);
@@ -830,11 +828,8 @@ test "product resolver discovers and pins the one host that owns a live runtime"
     if (proxy_child == 0) runTestSocketProxy(replacement_fd, old_endpoint);
     var proxy_live = true;
     defer {
-        if (proxy_live) {
-            _ = c.kill(proxy_child, posix.SIG.TERM);
-            var proxy_status: c_int = undefined;
-            _ = c.waitpid(proxy_child, &proxy_status, 0);
-        }
+        if (proxy_live and !terminateAndReapFixtureChild(proxy_child))
+            @panic("failed to reap resolver proxy fixture");
     }
     const replacement_identity = switch (observeSocket(endpoint)) {
         .identity => |identity| identity,
@@ -845,9 +840,7 @@ test "product resolver discovers and pins the one host that owns a live runtime"
         attach_cli.ExitCode.denied,
         revalidateProduct(testing.allocator, base, &pinned, try testPhase(.connect_hello)).?,
     );
-    _ = c.kill(proxy_child, posix.SIG.TERM);
-    var proxy_status: c_int = undefined;
-    _ = c.waitpid(proxy_child, &proxy_status, 0);
+    try testing.expect(terminateAndReapFixtureChild(proxy_child));
     proxy_live = false;
     _ = c.close(replacement_fd);
     replacement_open = false;

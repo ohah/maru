@@ -9,6 +9,7 @@ const builtin = @import("builtin");
 const c = std.c;
 const posix = std.posix;
 const client_mod = @import("client.zig");
+const client_control_correlation = @import("client_control_correlation.zig");
 const client_external_mode = @import("client_external_mode.zig");
 const client_external_tx = @import("client_external_tx.zig");
 const checked_event_counter = @import("checked_event_counter.zig");
@@ -45,6 +46,18 @@ comptime {
 pub const AttachmentRole = client_external_turn_authority.AttachmentRole;
 pub const TxAdmissionSpec = client_external_tx.AdmissionSpec;
 pub const TxAdmissionResult = client_external_tx.AdmissionResult;
+pub const ControlAdmissionSpec = struct {
+    kind: client_pump.ControlKind,
+    target_stream_id: u64,
+    expected_controller_generation: u64,
+    payload: []const u8,
+};
+pub const ControlAdmissionResult = union(enum) {
+    admitted: client_external_tx.Admitted,
+    backpressure,
+    busy,
+    terminal: client_pump.TerminalReason,
+};
 
 fn validateTxOwner(
     context: *const anyopaque,
@@ -68,6 +81,7 @@ fn validateTxOwner(
         self.lifecycle == .live and
         self.semantic_state == .active and
         ownerIncarnationValid(self) and
+        controlCorrelationValid(self) and
         !self.operation_reentry_latched and
         self.operation_generation == binding.operation_generation and
         self.owner_incarnation == binding.owner_incarnation and
@@ -166,6 +180,89 @@ fn discardExternalTxCompletions(
 ) bool {
     for (completions) |completion| std.mem.doNotOptimizeAway(completion);
     return true;
+}
+
+const ControlCompletionContext = struct {
+    storage: *ExternalPumpStorage,
+};
+
+/// The TX module has already retired and freed completed frame bytes when this no-allocation
+/// callback runs. Exact descriptor evidence is therefore consumed here, before the opaque
+/// completion scratch becomes spent, and published as the sole response-wait transition.
+fn correlateExternalTxCompletions(
+    raw: *anyopaque,
+    completions: []const client_external_tx.TxCompletion,
+    semantic_allowed: bool,
+) bool {
+    if (!semantic_allowed) return true;
+    const context: *ControlCompletionContext = @ptrCast(@alignCast(raw));
+    const storage = context.storage;
+    if (!controlCorrelationValid(storage)) return false;
+    var next = storage.control_correlation.state;
+    const expected_request_id = switch (next) {
+        .in_flight => |value| value.request_id,
+        .idle, .completed, .terminal => 0,
+    };
+    var matched = false;
+    for (completions) |completion| {
+        if (completion.request_id == 0) continue;
+        if (completion.request_id != expected_request_id) continue;
+        const in_flight = switch (next) {
+            .in_flight => |value| value,
+            .idle, .completed, .terminal => return false,
+        };
+        // Request IDs are connection-global. A control may be queued behind an older generic
+        // request, so unrelated completions are left to their own semantic consumer.
+        if (matched or completion.kind != .request or completion.stream_id != 0 or
+            completion.wire_len != in_flight.wire_len)
+            return false;
+        next = switch (client_control_correlation.observeProgress(
+            in_flight,
+            .response_wait,
+            completion.request_id,
+            in_flight.target,
+        )) {
+            .updated => |updated| .{ .in_flight = updated },
+            .stale, .invalid_transition => return false,
+        };
+        matched = true;
+    }
+    if (!matched) return true;
+    return publishControlCorrelation(storage, next);
+}
+
+fn reconcileControlTxProgress(
+    storage: *ExternalPumpStorage,
+    state: *const client_external_mode.State,
+) bool {
+    if (!controlCorrelationValid(storage)) return false;
+    const in_flight = switch (storage.control_correlation.state) {
+        .in_flight => |value| value,
+        .idle, .completed => return true,
+        .terminal => return false,
+    };
+    if (in_flight.progress == .response_wait) return true;
+    const observed = client_external_tx.requestFrameProgress(
+        state,
+        in_flight.request_id,
+        in_flight.wire_len,
+    );
+    const next_progress: client_control_correlation.Progress = switch (observed) {
+        .queued => .queued,
+        .partial => .partial,
+        .missing, .invalid => return false,
+    };
+    if (next_progress == in_flight.progress) return true;
+    const next = switch (client_control_correlation.observeProgress(
+        in_flight,
+        next_progress,
+        in_flight.request_id,
+        in_flight.target,
+    )) {
+        .updated => |value| value,
+        .stale, .invalid_transition => return false,
+    };
+    return publishControlCorrelation(storage, .{ .in_flight = next });
 }
 
 /// Immutable evidence captured at attach publication. Live authority is adopted in 2b2c and must
@@ -605,6 +702,91 @@ fn ownerAuthorityValid(storage: *const ExternalPumpStorage) bool {
         seal.generation_tracked == (authority.generation == .tracked) and
         seal.generation == generation and seal.flow == authority.flow and
         std.mem.eql(u8, &seal.digest, &ownerAuthoritySealDigest(seal));
+}
+
+const ControlCorrelationOwner = struct {
+    saved_self_addr: usize = 0,
+    storage_addr: usize = 0,
+    owner_incarnation: u64 = 0,
+    generation: u64 = 0,
+    state: client_control_correlation.State = .idle,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+fn writeControlTarget(
+    writer: *external_owner_seal.Writer,
+    target: client_control_correlation.Target,
+) void {
+    writer.writeU64(target.stream_id);
+    writer.writeU64(target.controller_generation);
+}
+
+fn controlCorrelationDigest(
+    owner: *const ControlCorrelationOwner,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARUCCO1");
+    writer.writeUsize(owner.saved_self_addr);
+    writer.writeUsize(owner.storage_addr);
+    writer.writeU64(owner.owner_incarnation);
+    writer.writeU64(owner.generation);
+    writer.writeU8(@intFromEnum(std.meta.activeTag(owner.state)));
+    switch (owner.state) {
+        .idle, .terminal => {},
+        .in_flight => |control| {
+            writer.writeU8(@intFromEnum(control.kind));
+            writeControlTarget(&writer, control.target);
+            writer.writeU64(control.request_id);
+            writer.writeUsize(control.wire_len);
+            writer.writeU128(@bitCast(control.deadline_ns));
+            writer.writeU8(@intFromEnum(control.progress));
+        },
+        .completed => |control| {
+            writer.writeU8(@intFromEnum(control.kind));
+            writeControlTarget(&writer, control.target);
+            writer.writeU64(control.request_id);
+            writer.writeUsize(control.wire_len);
+        },
+    }
+    return writer.finish();
+}
+
+fn bindInitialControlCorrelation(storage: *ExternalPumpStorage) void {
+    storage.control_correlation = .{
+        .saved_self_addr = @intFromPtr(&storage.control_correlation),
+        .storage_addr = @intFromPtr(storage),
+        .owner_incarnation = storage.owner_incarnation,
+        .generation = 1,
+        .state = .idle,
+    };
+    storage.control_correlation.digest =
+        controlCorrelationDigest(&storage.control_correlation);
+}
+
+fn controlCorrelationValid(storage: *const ExternalPumpStorage) bool {
+    const owner = &storage.control_correlation;
+    return owner.saved_self_addr == @intFromPtr(owner) and
+        owner.storage_addr == @intFromPtr(storage) and
+        owner.owner_incarnation == storage.owner_incarnation and
+        owner.generation != 0 and
+        std.mem.eql(
+            u8,
+            &owner.digest,
+            &controlCorrelationDigest(owner),
+        );
+}
+
+fn publishControlCorrelation(
+    storage: *ExternalPumpStorage,
+    state: client_control_correlation.State,
+) bool {
+    if (!controlCorrelationValid(storage) or
+        storage.control_correlation.generation == std.math.maxInt(u64))
+        return false;
+    storage.control_correlation.generation += 1;
+    storage.control_correlation.state = state;
+    storage.control_correlation.digest =
+        controlCorrelationDigest(&storage.control_correlation);
+    return true;
 }
 
 const OwnerScalarTakeLifecycle = enum {
@@ -1607,10 +1789,15 @@ const ResponsePayloadSeal = struct {
     }
 };
 
-const PendingResponseState = struct {
+const CompletedControlState = struct {
     payload: external_inbox_ledger.OwnedPayload,
     seal: ResponsePayloadSeal,
     request_id: u64 = 0,
+    control_kind: client_pump.ControlKind = .resize,
+    target_stream_id: u64 = 0,
+    expected_controller_generation: u64 = 0,
+    control_wire_len: usize = 0,
+    correlation_generation: u64 = 0,
     source_turn_generation: u64 = 0,
     source_parser_generation: u64 = 0,
     source_owner_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
@@ -1618,10 +1805,62 @@ const PendingResponseState = struct {
     owner_digest: external_owner_seal.Digest,
 };
 
-const PendingResponseOwner = union(enum) {
+const CompletedControlOwner = union(enum) {
     none,
-    pending: PendingResponseState,
+    completed: CompletedControlState,
     terminal,
+};
+
+const ControlResponseTakeLifecycle = enum {
+    empty,
+    prepared,
+    consumed_tombstone,
+};
+
+const PreparedControlResponseTake = struct {
+    saved_self_addr: usize = 0,
+    storage_addr: usize = 0,
+    lease_addr: usize = 0,
+    owner_incarnation: u64 = 0,
+    operation_generation: u64 = 0,
+    completed_generation: u64 = 0,
+    correlation_generation: u64 = 0,
+    request_id: u64 = 0,
+    owner_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    payload_seal: ResponsePayloadSeal = ResponsePayloadSeal.empty(),
+    lifecycle: ControlResponseTakeLifecycle = .empty,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+const FrozenControlResponseLifecycle = enum {
+    empty,
+    owned,
+    cleaned_tombstone,
+};
+
+const FrozenControlResponse = struct {
+    saved_self_addr: usize = 0,
+    storage_addr: usize = 0,
+    owner_incarnation: u64 = 0,
+    correlation_generation: u64 = 0,
+    kind: client_pump.ControlKind = .resize,
+    target_stream_id: u64 = 0,
+    expected_controller_generation: u64 = 0,
+    request_id: u64 = 0,
+    wire_len: usize = 0,
+    payload: external_inbox_ledger.OwnedPayload = .{
+        .allocator = std.heap.page_allocator,
+    },
+    payload_seal: ResponsePayloadSeal = ResponsePayloadSeal.empty(),
+    lifecycle: FrozenControlResponseLifecycle = .empty,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+const FinishControlResponseResult = enum {
+    rejected_terminal,
+    invalid,
+    invalid_commit,
+    invalid_finish,
 };
 
 const IntentScratchReservationLifecycle = enum {
@@ -1815,6 +2054,12 @@ const FrozenResponseDestinationPlan = struct {
     neutral_addr: usize = 0,
     intent_index: u8 = 0,
     request_id: u64 = 0,
+    control_kind: client_pump.ControlKind = .resize,
+    target_stream_id: u64 = 0,
+    expected_controller_generation: u64 = 0,
+    control_wire_len: usize = 0,
+    expected_correlation_generation: u64 = 0,
+    expected_correlation_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
     source_turn_generation: u64 = 0,
     source_parser_generation: u64 = 0,
     source_owner_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
@@ -1907,6 +2152,7 @@ const PreparedRxAggregate = struct {
     handle_addr: usize,
     storage_addr: usize,
     turn_generation: u64,
+    turn_now_ns: i128,
     intent_handle_addr: usize,
     intent_reservation_generation: u64,
     live_batch: external_inbox_ledger.PreparedLiveBatch,
@@ -1968,6 +2214,7 @@ const RxAggregateAbortResult = enum {
 
 const RxAggregateFinalizeResult = enum {
     finalized,
+    terminal_deadline,
     terminal_runtime_ended,
     invalid_state,
     rejected,
@@ -2261,8 +2508,8 @@ pub const testing = if (builtin.is_test) struct {
         live_screen_len: usize,
         live_screen_generation: u64,
         live_partial_present: bool,
-        pending_response_present: bool,
-        pending_response_generation: u64,
+        completed_control_present: bool,
+        completed_control_generation: u64,
         screen_retained_count: usize,
         screen_committed: bool,
         metadata_revision: u64,
@@ -2324,8 +2571,8 @@ pub const testing = if (builtin.is_test) struct {
             .live_screen_len = storage.live_screen.len,
             .live_screen_generation = storage.live_screen.generation,
             .live_partial_present = storage.live_partial != .none,
-            .pending_response_present = storage.pending_response != .none,
-            .pending_response_generation = storage.pending_response_generation,
+            .completed_control_present = storage.completed_control != .none,
+            .completed_control_generation = storage.completed_control_generation,
             .screen_retained_count = storage.screen_pending_summary.retained_count,
             .screen_committed = storage.screen_pending_summary.committed,
             .metadata_revision = storage.metadata_pending_summary.revision,
@@ -2848,9 +3095,9 @@ fn buildRxOwnerAuthoritySnapshot(
     ) catch return null;
     storage.inbox_ledger.appendActiveOwnerRanges(ranges) catch return null;
     storage.owner_metadata.appendActiveOwnerRanges(storage, ranges) catch return null;
-    switch (storage.pending_response) {
+    switch (storage.completed_control) {
         .none => {},
-        .pending => |pending| ranges.append(
+        .completed => |pending| ranges.append(
             pending.seal.payload_addr,
             pending.seal.payload_len,
         ) catch return null,
@@ -3362,9 +3609,9 @@ fn rebuildProductReplacementInventory(
     storage.inbox_ledger.appendActiveOwnerRanges(ranges) catch return false;
     storage.owner_metadata.appendActiveOwnerRanges(storage, ranges) catch
         return false;
-    switch (storage.pending_response) {
+    switch (storage.completed_control) {
         .none => {},
-        .pending => |pending| ranges.append(
+        .completed => |pending| ranges.append(
             pending.seal.payload_addr,
             pending.seal.payload_len,
         ) catch return false,
@@ -3920,19 +4167,60 @@ fn responsePayloadDigest(bytes: []const u8) external_owner_seal.Digest {
     return writer.finish();
 }
 
-fn pendingResponseDigest(
+fn completedControlDigest(
     storage: *const ExternalPumpStorage,
-    pending: *const PendingResponseState,
+    pending: *const CompletedControlState,
 ) external_owner_seal.Digest {
-    var writer = external_owner_seal.Writer.init("MARURPO1");
+    var writer = external_owner_seal.Writer.init("MARUCCP1");
     writer.writeUsize(@intFromPtr(storage));
     writer.writeU64(storage.owner_incarnation);
     pending.seal.writeDigest(&writer);
     writer.writeU64(pending.request_id);
+    writer.writeU8(@intFromEnum(pending.control_kind));
+    writer.writeU64(pending.target_stream_id);
+    writer.writeU64(pending.expected_controller_generation);
+    writer.writeUsize(pending.control_wire_len);
+    writer.writeU64(pending.correlation_generation);
     writer.writeU64(pending.source_turn_generation);
     writer.writeU64(pending.source_parser_generation);
     writer.writeBytes(&pending.source_owner_digest);
     writer.writeU64(pending.generation);
+    return writer.finish();
+}
+
+fn preparedControlResponseTakeDigest(
+    take: *const PreparedControlResponseTake,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARUCTK1");
+    writer.writeUsize(take.saved_self_addr);
+    writer.writeUsize(take.storage_addr);
+    writer.writeUsize(take.lease_addr);
+    writer.writeU64(take.owner_incarnation);
+    writer.writeU64(take.operation_generation);
+    writer.writeU64(take.completed_generation);
+    writer.writeU64(take.correlation_generation);
+    writer.writeU64(take.request_id);
+    writer.writeBytes(&take.owner_digest);
+    take.payload_seal.writeDigest(&writer);
+    writer.writeU8(@intFromEnum(take.lifecycle));
+    return writer.finish();
+}
+
+fn frozenControlResponseDigest(
+    response: *const FrozenControlResponse,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARUFCR1");
+    writer.writeUsize(response.saved_self_addr);
+    writer.writeUsize(response.storage_addr);
+    writer.writeU64(response.owner_incarnation);
+    writer.writeU64(response.correlation_generation);
+    writer.writeU8(@intFromEnum(response.kind));
+    writer.writeU64(response.target_stream_id);
+    writer.writeU64(response.expected_controller_generation);
+    writer.writeU64(response.request_id);
+    writer.writeUsize(response.wire_len);
+    response.payload_seal.writeDigest(&writer);
+    writer.writeU8(@intFromEnum(response.lifecycle));
     return writer.finish();
 }
 
@@ -4186,6 +4474,7 @@ fn preparedRxAggregateDigest(
     writer.writeUsize(aggregate.handle_addr);
     writer.writeUsize(aggregate.storage_addr);
     writer.writeU64(aggregate.turn_generation);
+    writer.writeU128(@bitCast(aggregate.turn_now_ns));
     writer.writeUsize(aggregate.intent_handle_addr);
     writer.writeU64(aggregate.intent_reservation_generation);
     writer.writeBytes(&aggregate.live_batch.digest);
@@ -4283,6 +4572,12 @@ fn responseDestinationPlanDigest(
     writer.writeUsize(plan.neutral_addr);
     writer.writeU8(plan.intent_index);
     writer.writeU64(plan.request_id);
+    writer.writeU8(@intFromEnum(plan.control_kind));
+    writer.writeU64(plan.target_stream_id);
+    writer.writeU64(plan.expected_controller_generation);
+    writer.writeUsize(plan.control_wire_len);
+    writer.writeU64(plan.expected_correlation_generation);
+    writer.writeBytes(&plan.expected_correlation_digest);
     writer.writeU64(plan.source_turn_generation);
     writer.writeU64(plan.source_parser_generation);
     writer.writeBytes(&plan.source_owner_digest);
@@ -5641,30 +5936,36 @@ fn finishFrozenAggregateCleanup(
     return clean;
 }
 
+const ResponsePlanPrepareResult = enum {
+    prepared,
+    deadline_exceeded,
+    rejected,
+};
+
 fn prepareResponseDestinationPlan(
     storage: *const ExternalPumpStorage,
     aggregate: *PreparedRxAggregate,
     intent_handle: *external_rx_intent.ExternalRxIntentHandle,
-) bool {
+) ResponsePlanPrepareResult {
     const plan = &aggregate.response_destination;
     if (plan.saved_self_addr != 0 or plan.lifecycle != .empty or
-        storage.pending_response != .none or
-        storage.pending_response_generation == std.math.maxInt(u64))
-        return false;
+        storage.completed_control != .none or
+        storage.completed_control_generation == std.math.maxInt(u64))
+        return .rejected;
     var response_index: ?usize = null;
     for (aggregate.intent_commit.slot_kinds[0..aggregate.intent_commit.intent_count], 0..) |
         kind,
         index,
     | switch (kind) {
         .response => {
-            if (response_index != null) return false;
+            if (response_index != null) return .rejected;
             response_index = index;
         },
         .event => {},
         .screen => {},
-        .unused => return false,
+        .unused => return .rejected,
     };
-    if (response_index == null) return true;
+    if (response_index == null) return .prepared;
     const index = response_index.?;
     const payload = external_rx_intent.borrowPreparedClassifiedPayload(
         intent_handle,
@@ -5672,7 +5973,7 @@ fn prepareResponseDestinationPlan(
         &aggregate.screen_proofs,
         &aggregate.neutral_payloads,
         &aggregate.intent_commit,
-    ) orelse return false;
+    ) orelse return .rejected;
     const request_id = aggregate.intent_commit.response_request_ids[index];
     if (request_id == 0 or
         aggregate.intent_commit.source_parser_generations[index] == 0 or
@@ -5681,7 +5982,23 @@ fn prepareResponseDestinationPlan(
             &aggregate.intent_commit.source_owner_digests[index],
             0,
         ))
-        return false;
+        return .rejected;
+    if (!controlCorrelationValid(storage) or
+        storage.control_correlation.generation == std.math.maxInt(u64))
+        return .rejected;
+    const in_flight = switch (storage.control_correlation.state) {
+        .in_flight => |value| value,
+        .idle, .completed, .terminal => return .rejected,
+    };
+    switch (client_control_correlation.classifyResponse(
+        in_flight,
+        request_id,
+        aggregate.turn_now_ns,
+    )) {
+        .accept => {},
+        .deadline_exceeded => return .deadline_exceeded,
+        .early, .wrong_request, .unsolicited => return .rejected,
+    }
     plan.* = .{
         .saved_self_addr = @intFromPtr(plan),
         .aggregate_addr = @intFromPtr(aggregate),
@@ -5689,6 +6006,12 @@ fn prepareResponseDestinationPlan(
         .neutral_addr = @intFromPtr(&aggregate.neutral_payloads[index]),
         .intent_index = @intCast(index),
         .request_id = request_id,
+        .control_kind = in_flight.kind,
+        .target_stream_id = in_flight.target.stream_id,
+        .expected_controller_generation = in_flight.target.controller_generation,
+        .control_wire_len = in_flight.wire_len,
+        .expected_correlation_generation = storage.control_correlation.generation,
+        .expected_correlation_digest = storage.control_correlation.digest,
         .source_turn_generation = aggregate.turn_generation,
         .source_parser_generation = aggregate.intent_commit.source_parser_generations[index],
         .source_owner_digest = aggregate.intent_commit.source_owner_digests[index],
@@ -5702,13 +6025,13 @@ fn prepareResponseDestinationPlan(
         .payload_allocator_vtable_addr = @intFromPtr(payload.allocator.vtable),
         .payload_addr = payload.allocation_addr,
         .payload_len = payload.allocation_len,
-        .expected_generation = storage.pending_response_generation,
-        .next_generation = storage.pending_response_generation + 1,
+        .expected_generation = storage.completed_control_generation,
+        .next_generation = storage.completed_control_generation + 1,
         .lifecycle = .prepared,
         .digest = undefined,
     };
     plan.digest = responseDestinationPlanDigest(plan);
-    return true;
+    return .prepared;
 }
 
 fn validateResponseDestinationPlan(
@@ -5733,13 +6056,35 @@ fn validateResponseDestinationPlan(
         return plan.saved_self_addr == 0 and plan.lifecycle == .empty and
             std.mem.allEqual(u8, &plan.digest, 0);
     const index = response_index.?;
-    return storage.pending_response == .none and
+    const in_flight = switch (storage.control_correlation.state) {
+        .in_flight => |value| value,
+        .idle, .completed, .terminal => return false,
+    };
+    return controlCorrelationValid(storage) and
+        storage.completed_control == .none and
         plan.saved_self_addr == @intFromPtr(plan) and
         plan.aggregate_addr == @intFromPtr(aggregate) and
         plan.storage_addr == @intFromPtr(storage) and
         plan.neutral_addr == @intFromPtr(&aggregate.neutral_payloads[index]) and
         plan.intent_index == index and
         plan.request_id == aggregate.intent_commit.response_request_ids[index] and
+        plan.control_kind == in_flight.kind and
+        plan.target_stream_id == in_flight.target.stream_id and
+        plan.expected_controller_generation ==
+            in_flight.target.controller_generation and
+        plan.control_wire_len == in_flight.wire_len and
+        plan.expected_correlation_generation ==
+            storage.control_correlation.generation and
+        std.mem.eql(
+            u8,
+            &plan.expected_correlation_digest,
+            &storage.control_correlation.digest,
+        ) and
+        client_control_correlation.classifyResponse(
+            in_flight,
+            plan.request_id,
+            aggregate.turn_now_ns,
+        ) == .accept and
         plan.source_turn_generation == aggregate.turn_generation and
         plan.source_parser_generation ==
             aggregate.intent_commit.source_parser_generations[index] and
@@ -5758,7 +6103,7 @@ fn validateResponseDestinationPlan(
         @intFromPtr(plan.payload_allocator.vtable) ==
             plan.payload_allocator_vtable_addr and
         ((plan.payload_addr == 0) == (plan.payload_len == 0)) and
-        plan.expected_generation == storage.pending_response_generation and
+        plan.expected_generation == storage.completed_control_generation and
         plan.next_generation == plan.expected_generation + 1 and
         plan.lifecycle == .prepared and
         std.mem.eql(u8, &plan.digest, &responseDestinationPlanDigest(plan));
@@ -5767,7 +6112,7 @@ fn validateResponseDestinationPlan(
 fn commitResponseDestinationPlanUnchecked(
     storage: *ExternalPumpStorage,
     plan: *FrozenResponseDestinationPlan,
-    target: *PendingResponseOwner,
+    target: *CompletedControlOwner,
     neutral: *external_rx_intent.MovedIntentPayload,
 ) void {
     const owned = external_inbox_ledger.OwnedPayload{
@@ -5779,7 +6124,7 @@ fn commitResponseDestinationPlanUnchecked(
         .logical_len = plan.payload_len,
     };
     tombstoneMovedIntentPayloadUnchecked(neutral);
-    var pending = PendingResponseState{
+    var pending = CompletedControlState{
         .payload = owned,
         .seal = .{
             .payload_addr = plan.payload_addr,
@@ -5789,15 +6134,33 @@ fn commitResponseDestinationPlanUnchecked(
             .payload_digest = plan.response_payload_digest,
         },
         .request_id = plan.request_id,
+        .control_kind = plan.control_kind,
+        .target_stream_id = plan.target_stream_id,
+        .expected_controller_generation = plan.expected_controller_generation,
+        .control_wire_len = plan.control_wire_len,
+        .correlation_generation = plan.expected_correlation_generation + 1,
         .source_turn_generation = plan.source_turn_generation,
         .source_parser_generation = plan.source_parser_generation,
         .source_owner_digest = plan.source_owner_digest,
         .generation = plan.next_generation,
         .owner_digest = undefined,
     };
-    pending.owner_digest = pendingResponseDigest(storage, &pending);
-    storage.pending_response_generation = plan.next_generation;
-    target.* = .{ .pending = pending };
+    pending.owner_digest = completedControlDigest(storage, &pending);
+    storage.completed_control_generation = plan.next_generation;
+    target.* = .{ .completed = pending };
+    storage.control_correlation.generation =
+        plan.expected_correlation_generation + 1;
+    storage.control_correlation.state = .{ .completed = .{
+        .kind = plan.control_kind,
+        .target = .{
+            .stream_id = plan.target_stream_id,
+            .controller_generation = plan.expected_controller_generation,
+        },
+        .request_id = plan.request_id,
+        .wire_len = plan.control_wire_len,
+    } };
+    storage.control_correlation.digest =
+        controlCorrelationDigest(&storage.control_correlation);
     plan.lifecycle = .consumed;
     plan.digest = responseDestinationPlanDigest(plan);
 }
@@ -6004,9 +6367,9 @@ fn expectedDestinationWrite(
         },
         .response => {
             write.kind = .response;
-            write.target_addr = @intFromPtr(&storage.pending_response);
+            write.target_addr = @intFromPtr(&storage.completed_control);
             write.expected_lifecycle =
-                @intFromEnum(std.meta.activeTag(storage.pending_response));
+                @intFromEnum(std.meta.activeTag(storage.completed_control));
             write.expected_digest = aggregate.response_destination.digest;
             write.prepared_backing_addr =
                 @intFromPtr(&aggregate.response_destination);
@@ -6935,8 +7298,8 @@ pub const ExternalPumpStorage = struct {
     committed_screen: client_external_adoption.CommittedScreenBacklog = .{},
     live_partial: LivePartialBatch = .none,
     live_screen: LiveScreenBacklog = .{},
-    pending_response: PendingResponseOwner = .none,
-    pending_response_generation: u64 = 0,
+    completed_control: CompletedControlOwner = .none,
+    completed_control_generation: u64 = 0,
     screen_pending_summary: ScreenPendingSummarySeal = .{},
     owner_metadata: external_event_materialization.OwnerMetadataState = .{},
     metadata_pending_summary: MetadataPendingSummarySeal = .{},
@@ -6944,6 +7307,7 @@ pub const ExternalPumpStorage = struct {
     owner_authority: OwnerAuthorityState = .empty,
     owner_authority_seal: OwnerAuthoritySeal = .{},
     owner_request_ids: ?client_pump.RequestIdState = null,
+    control_correlation: ControlCorrelationOwner = .{},
     owner_incarnation: u64 = 0,
     owner_incarnation_seal: OwnerIncarnationSeal = .{},
     owner_event_projection_generation: u64 = 0,
@@ -7084,13 +7448,28 @@ pub const ExternalPumpStorage = struct {
         return true;
     }
 
-    fn pendingResponseValid(self: *const ExternalPumpStorage) bool {
-        return switch (self.pending_response) {
-            .none, .terminal => true,
-            .pending => |*pending| blk: {
+    fn completedControlValid(self: *const ExternalPumpStorage) bool {
+        return switch (self.completed_control) {
+            // A private prepared take temporarily moves the payload into its frozen owner while
+            // the same whole-turn lease keeps the completed correlation as backpressure.
+            .none => true,
+            .terminal => true,
+            .completed => |*pending| blk: {
+                const completed = switch (self.control_correlation.state) {
+                    .completed => |value| value,
+                    .idle, .in_flight, .terminal => break :blk false,
+                };
                 if (pending.generation == 0 or
-                    pending.generation != self.pending_response_generation or
+                    pending.generation != self.completed_control_generation or
                     pending.request_id == 0 or
+                    pending.control_kind != completed.kind or
+                    pending.target_stream_id != completed.target.stream_id or
+                    pending.expected_controller_generation !=
+                        completed.target.controller_generation or
+                    pending.request_id != completed.request_id or
+                    pending.control_wire_len != completed.wire_len or
+                    pending.correlation_generation !=
+                        self.control_correlation.generation or
                     pending.source_turn_generation == 0 or
                     pending.source_parser_generation == 0 or
                     std.mem.allEqual(u8, &pending.source_owner_digest, 0) or
@@ -7099,15 +7478,183 @@ pub const ExternalPumpStorage = struct {
                 break :blk std.mem.eql(
                     u8,
                     &pending.owner_digest,
-                    &pendingResponseDigest(self, pending),
+                    &completedControlDigest(self, pending),
                 );
             },
         };
     }
 
+    fn prepareControlResponseTake(
+        self: *ExternalPumpStorage,
+        out: *PreparedControlResponseTake,
+    ) bool {
+        if (active_external_operation_addr != 0 or
+            !std.meta.eql(out.*, PreparedControlResponseTake{}) or
+            !self.completedControlValid() or
+            self.operation_generation == std.math.maxInt(u64) or
+            self.control_correlation.generation == std.math.maxInt(u64))
+            return false;
+        const completed = switch (self.completed_control) {
+            .completed => |*value| value,
+            .none, .terminal => return false,
+        };
+        const correlation = switch (self.control_correlation.state) {
+            .completed => |value| value,
+            .idle, .in_flight, .terminal => return false,
+        };
+        if (completed.request_id != correlation.request_id or
+            completed.correlation_generation !=
+                self.control_correlation.generation)
+            return false;
+        out.* = .{
+            .saved_self_addr = @intFromPtr(out),
+            .storage_addr = @intFromPtr(self),
+            .lease_addr = 0,
+            .owner_incarnation = self.owner_incarnation,
+            .operation_generation = self.operation_generation + 1,
+            .completed_generation = self.completed_control_generation,
+            .correlation_generation = self.control_correlation.generation,
+            .request_id = completed.request_id,
+            .owner_digest = completed.owner_digest,
+            .payload_seal = completed.seal,
+            .lifecycle = .prepared,
+        };
+        out.digest = preparedControlResponseTakeDigest(out);
+        return true;
+    }
+
+    fn commitControlResponseTakeUncheckedUnderHeldLease(
+        self: *ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        take: *PreparedControlResponseTake,
+        out: *FrozenControlResponse,
+    ) bool {
+        if (!self.validateWholeTurnLease(lease) or
+            take.saved_self_addr != @intFromPtr(take) or
+            take.storage_addr != @intFromPtr(self) or
+            take.lease_addr != 0 or
+            take.owner_incarnation != self.owner_incarnation or
+            take.operation_generation != self.operation_generation or
+            take.completed_generation != self.completed_control_generation or
+            take.correlation_generation != self.control_correlation.generation or
+            take.lifecycle != .prepared or
+            !std.mem.eql(u8, &take.digest, &preparedControlResponseTakeDigest(take)) or
+            out.saved_self_addr != 0 or out.storage_addr != 0 or
+            out.owner_incarnation != 0 or out.correlation_generation != 0 or
+            out.target_stream_id != 0 or
+            out.expected_controller_generation != 0 or
+            out.request_id != 0 or out.wire_len != 0 or
+            out.payload.allocation_ptr != null or out.payload.logical_len != 0 or
+            !std.meta.eql(out.payload_seal, ResponsePayloadSeal.empty()) or
+            out.lifecycle != .empty or
+            !std.mem.allEqual(u8, &out.digest, 0) or
+            !self.completedControlValid())
+            return false;
+        const completed = switch (self.completed_control) {
+            .completed => |*value| value,
+            .none, .terminal => return false,
+        };
+        const correlation = switch (self.control_correlation.state) {
+            .completed => |value| value,
+            .idle, .in_flight, .terminal => return false,
+        };
+        if (take.request_id != completed.request_id or
+            take.request_id != correlation.request_id or
+            !std.mem.eql(u8, &take.owner_digest, &completed.owner_digest) or
+            !std.meta.eql(take.payload_seal, completed.seal))
+            return false;
+        out.* = .{
+            .saved_self_addr = @intFromPtr(out),
+            .storage_addr = @intFromPtr(self),
+            .owner_incarnation = self.owner_incarnation,
+            .correlation_generation = self.control_correlation.generation,
+            .kind = completed.control_kind,
+            .target_stream_id = completed.target_stream_id,
+            .expected_controller_generation = completed.expected_controller_generation,
+            .request_id = completed.request_id,
+            .wire_len = completed.control_wire_len,
+            .payload = completed.payload,
+            .payload_seal = completed.seal,
+            .lifecycle = .owned,
+        };
+        out.digest = frozenControlResponseDigest(out);
+        completed.payload = external_inbox_ledger.OwnedPayload.empty(
+            completed.payload.allocator,
+        );
+        self.completed_control = .none;
+        take.lifecycle = .consumed_tombstone;
+        take.digest = preparedControlResponseTakeDigest(take);
+        return true;
+    }
+
+    fn finishControlResponseUncheckedUnderHeldLease(
+        self: *ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        response: *FrozenControlResponse,
+    ) FinishControlResponseResult {
+        if (!self.validateWholeTurnLease(lease) or
+            response.saved_self_addr != @intFromPtr(response) or
+            response.storage_addr != @intFromPtr(self) or
+            response.owner_incarnation != self.owner_incarnation or
+            response.correlation_generation !=
+                self.control_correlation.generation or
+            response.lifecycle != .owned or
+            !response.payload_seal.validatesPayload(&response.payload) or
+            !std.mem.eql(
+                u8,
+                &response.digest,
+                &frozenControlResponseDigest(response),
+            ) or self.completed_control != .none or
+            self.control_correlation.generation == std.math.maxInt(u64))
+            return .invalid;
+        const completed = switch (self.control_correlation.state) {
+            .completed => |value| value,
+            .idle, .in_flight, .terminal => return .invalid,
+        };
+        if (response.kind != completed.kind or
+            response.target_stream_id != completed.target.stream_id or
+            response.expected_controller_generation !=
+                completed.target.controller_generation or
+            response.request_id != completed.request_id or
+            response.wire_len != completed.wire_len)
+            return .invalid;
+        response.payload.deinit();
+        response.lifecycle = .cleaned_tombstone;
+        response.digest = frozenControlResponseDigest(response);
+        self.control_correlation.generation += 1;
+        self.control_correlation.state = .terminal;
+        self.control_correlation.digest =
+            controlCorrelationDigest(&self.control_correlation);
+        self.semantic_state = .{ .terminal = .{
+            .reason = .protocol_error,
+            .fd_disposition = .owner_cleanup,
+        } };
+        return .rejected_terminal;
+    }
+
+    /// f2 keeps the frozen payload owner inside this call and can only reject-terminal after
+    /// exact cleanup. f3 supplies the separate typed success verdict and drain permit.
+    fn takeControlResponseUnderHeldLease(
+        self: *ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        take: *PreparedControlResponseTake,
+    ) FinishControlResponseResult {
+        var frozen: FrozenControlResponse = .{};
+        if (!self.commitControlResponseTakeUncheckedUnderHeldLease(
+            lease,
+            take,
+            &frozen,
+        )) return .invalid_commit;
+        const finished = self.finishControlResponseUncheckedUnderHeldLease(
+            lease,
+            &frozen,
+        );
+        return if (finished == .invalid) .invalid_finish else finished;
+    }
+
     fn liveOwnersValid(self: *const ExternalPumpStorage) bool {
         return self.livePartialValid() and self.liveScreenValid() and
-            self.pendingResponseValid();
+            self.completedControlValid();
     }
 
     fn intentScratchReservationValid(
@@ -7288,6 +7835,7 @@ pub const ExternalPumpStorage = struct {
             intent_handle,
             allocator,
             null,
+            0,
             ranges,
         );
     }
@@ -7298,6 +7846,7 @@ pub const ExternalPumpStorage = struct {
         intent_handle: *external_rx_intent.ExternalRxIntentHandle,
         allocator: std.mem.Allocator,
         authority_ops: external_rx_intent.AuthorityOps,
+        now_ns: i128,
         ranges: *external_owner_range.Scratch,
     ) RxAggregateCreateResult {
         return self.createRxAggregateImpl(
@@ -7305,6 +7854,7 @@ pub const ExternalPumpStorage = struct {
             intent_handle,
             allocator,
             authority_ops,
+            now_ns,
             ranges,
         );
     }
@@ -7315,6 +7865,7 @@ pub const ExternalPumpStorage = struct {
         intent_handle: *external_rx_intent.ExternalRxIntentHandle,
         allocator: std.mem.Allocator,
         authority_ops: ?external_rx_intent.AuthorityOps,
+        now_ns: i128,
         ranges: *external_owner_range.Scratch,
     ) RxAggregateCreateResult {
         if (external_owner_cleanup.callbackActive() or
@@ -7532,6 +8083,7 @@ pub const ExternalPumpStorage = struct {
             .handle_addr = @intFromPtr(&self.rx_aggregate_handle),
             .storage_addr = @intFromPtr(self),
             .turn_generation = operation_generation,
+            .turn_now_ns = now_ns,
             .intent_handle_addr = @intFromPtr(intent_handle),
             .intent_reservation_generation = intent_reservation.generation,
             .live_batch = .{},
@@ -7910,11 +8462,24 @@ pub const ExternalPumpStorage = struct {
             return .rejected;
         }
         aggregate.digest = preparedRxAggregateDigest(aggregate);
-        if (!prepareEventScalarDestinations(self, aggregate) or
-            !prepareResponseDestinationPlan(self, aggregate, intent_handle))
-        {
+        if (!prepareEventScalarDestinations(self, aggregate)) {
             aggregate.digest = preparedRxAggregateDigest(aggregate);
             return .rejected;
+        }
+        switch (prepareResponseDestinationPlan(
+            self,
+            aggregate,
+            intent_handle,
+        )) {
+            .prepared => {},
+            .deadline_exceeded => {
+                aggregate.digest = preparedRxAggregateDigest(aggregate);
+                return .terminal_deadline;
+            },
+            .rejected => {
+                aggregate.digest = preparedRxAggregateDigest(aggregate);
+                return .rejected;
+            },
         }
         aggregate.digest = preparedRxAggregateDigest(aggregate);
         if (!prepareDestinationWrites(self, aggregate, intent_handle)) {
@@ -8481,9 +9046,9 @@ pub const ExternalPumpStorage = struct {
             self.live_screen.len != 0;
     }
 
-    fn responsePending(self: *const ExternalPumpStorage) bool {
-        return switch (self.pending_response) {
-            .pending => true,
+    fn controlResponsePending(self: *const ExternalPumpStorage) bool {
+        return switch (self.completed_control) {
+            .completed => true,
             else => false,
         };
     }
@@ -8497,7 +9062,7 @@ pub const ExternalPumpStorage = struct {
         return .{
             .partial_pending = self.livePartialPending(),
             .screen_pending = self.liveScreenPending(),
-            .response_pending = self.responsePending(),
+            .response_pending = self.controlResponsePending(),
         };
     }
 
@@ -8872,6 +9437,196 @@ pub const ExternalPumpStorage = struct {
         }
         const release_result = self.releaseWholeTurnLease(&lease);
         if (release_result != .released) {
+            result = .{ .terminal = .invariant_failure };
+        }
+        return result;
+    }
+
+    /// Admits the only outstanding control request. The request-ID preview and semantic plan are
+    /// sealed before f1 runs; after f1 commits, the remaining scalar publication cannot allocate,
+    /// call out, or fail.
+    pub fn admitControl(
+        self: *ExternalPumpStorage,
+        spec: ControlAdmissionSpec,
+        now_ns: i128,
+    ) ControlAdmissionResult {
+        var lease: ExternalWholeTurnLease = .{};
+        var admission_scratch: client_external_tx.PreparedTxAdmission = .{};
+        self.acquireWholeTurnLease(
+            &lease,
+            @intFromPtr(&admission_scratch),
+            @sizeOf(client_external_tx.PreparedTxAdmission),
+        ) catch |err| return switch (err) {
+            error.TransactionBusy => .busy,
+            error.Terminal => .{
+                .terminal = self.snapshotTerminalReason(),
+            },
+            else => .{ .terminal = .invariant_failure },
+        };
+
+        var result: ControlAdmissionResult = .{ .terminal = .invariant_failure };
+        var terminal_reason: ?client_pump.TerminalReason = null;
+        control: {
+            if (!controlCorrelationValid(self)) break :control;
+            if (self.control_correlation.state != .idle) {
+                result = .backpressure;
+                break :control;
+            }
+            if (self.control_correlation.generation == std.math.maxInt(u64)) {
+                terminal_reason = .resource_exhausted;
+                break :control;
+            }
+            const authority = switch (self.owner_authority) {
+                .current => |authority| authority,
+                .empty => break :control,
+            };
+            const generation = switch (authority.generation) {
+                .tracked => |generation| generation,
+                .untracked => break :control,
+            };
+            if (authority.role != .controller or authority.flow != .clear or
+                spec.target_stream_id != self.evidence_snapshot.stream_id or
+                spec.expected_controller_generation != generation)
+            {
+                terminal_reason = .protocol_error;
+                break :control;
+            }
+            const active = switch (self.semantic_state) {
+                .active => |active| active,
+                else => break :control,
+            };
+            var next_semantic = active;
+            switch (spec.kind) {
+                .resize => if (active != .valid) {
+                    result = .backpressure;
+                    break :control;
+                },
+                .resync => switch (active) {
+                    .client_recovery => |phase| switch (phase) {
+                        .control_wait => |context| {
+                            next_semantic = .{ .client_recovery = .{
+                                .control_in_flight = context,
+                            } };
+                        },
+                        else => {
+                            result = .backpressure;
+                            break :control;
+                        },
+                    },
+                    else => {
+                        result = .backpressure;
+                        break :control;
+                    },
+                },
+            }
+            const client = if (self.owned_client) |*owned| owned else break :control;
+            const state = switch (client.io_mode) {
+                .external => |*external| external,
+                .blocking => break :control,
+            };
+            const request_ids = if (self.owner_request_ids) |*ids| ids else break :control;
+            const prepared_request = request_ids.prepare() catch |err| {
+                terminal_reason = switch (err) {
+                    error.Exhausted => .request_id_exhausted,
+                    error.InvalidState => .invariant_failure,
+                };
+                break :control;
+            };
+            const target = client_control_correlation.Target{
+                .stream_id = spec.target_stream_id,
+                .controller_generation = spec.expected_controller_generation,
+            };
+            const expected_wire_len = std.math.add(
+                usize,
+                protocol.header_size,
+                spec.payload.len,
+            ) catch {
+                terminal_reason = .resource_exhausted;
+                break :control;
+            };
+            const prepared_correlation =
+                client_control_correlation.prepareAdmission(
+                    .idle,
+                    spec.kind,
+                    target,
+                    prepared_request.id,
+                    expected_wire_len,
+                    now_ns,
+                );
+            const in_flight = switch (prepared_correlation) {
+                .admitted => |value| value,
+                .deadline_overflow => {
+                    terminal_reason = .deadline_exceeded;
+                    break :control;
+                },
+                .backpressure => {
+                    result = .backpressure;
+                    break :control;
+                },
+                .invalid => break :control,
+            };
+            const admitted = client_external_tx.admitFromExternalPump(
+                validateTxOwner,
+                @ptrCast(self),
+                &admission_scratch,
+                state.tx_allocator,
+                state,
+                request_ids,
+                makeTxOwnerBinding(
+                    self,
+                    client,
+                    state,
+                    &lease,
+                    @intFromPtr(&admission_scratch),
+                    @sizeOf(client_external_tx.PreparedTxAdmission),
+                    @intFromPtr(&admission_scratch),
+                    @sizeOf(client_external_tx.PreparedTxAdmission),
+                    .admission,
+                ),
+                .{
+                    .kind = .request,
+                    .stream_id = 0,
+                    .payload = spec.payload,
+                    .request_policy = .reserve,
+                },
+                now_ns,
+            );
+            switch (admitted) {
+                .admitted => |value| {
+                    if (value.request_id != in_flight.request_id or
+                        value.wire_len != in_flight.wire_len)
+                    {
+                        terminal_reason = .invariant_failure;
+                        break :control;
+                    }
+                    // All fallible/callback-capable work ended above. The generation was checked
+                    // before f1 and the held lease prevents any competing mutation.
+                    self.control_correlation.generation += 1;
+                    self.control_correlation.state = .{
+                        .in_flight = in_flight,
+                    };
+                    self.control_correlation.digest =
+                        controlCorrelationDigest(&self.control_correlation);
+                    self.semantic_state = .{ .active = next_semantic };
+                    result = .{ .admitted = value };
+                },
+                .backpressure => result = .backpressure,
+                .busy => result = .busy,
+                .terminal => |reason| terminal_reason = reason,
+            }
+        }
+        if (terminal_reason) |reason| {
+            self.semantic_state = .{ .terminal = .{
+                .reason = reason,
+                .fd_disposition = .owner_cleanup,
+            } };
+            result = .{ .terminal = reason };
+        }
+        if (self.releaseWholeTurnLease(&lease) != .released) {
+            self.semantic_state = .{ .terminal = .{
+                .reason = .invariant_failure,
+                .fd_disposition = .owner_cleanup,
+            } };
             result = .{ .terminal = .invariant_failure };
         }
         return result;
@@ -10462,6 +11217,7 @@ pub const ExternalPumpStorage = struct {
         client: *client_mod.Client,
         rx_state: *client_external_mode.State,
         live_partial_pending: bool,
+        now_ns: i128,
         scratch: *ExternalRxTurnScratch,
     ) BufferedTraversalCommitResult {
         var authority = ProductIntentAuthority{
@@ -10558,6 +11314,7 @@ pub const ExternalPumpStorage = struct {
             &scratch.traversal.intent,
             client.parser.allocator,
             authority_ops,
+            now_ns,
             &scratch.aggregate_ranges,
         )) {
             .allocated => {},
@@ -10630,6 +11387,18 @@ pub const ExternalPumpStorage = struct {
         );
         switch (finalize_result) {
             .finalized => {},
+            .terminal_deadline => {
+                const abort_result =
+                    self.abortRxAggregate(lease, &scratch.traversal.intent);
+                return .{ .terminal = .{
+                    .reason = if (abort_result == .cleaned)
+                        .deadline_exceeded
+                    else
+                        .invariant_failure,
+                    .rx_bytes = rx_bytes,
+                    .rx_frames = rx_frames,
+                } };
+            },
             .terminal_runtime_ended => {
                 const actual_abort_result =
                     self.abortRxAggregate(lease, &scratch.traversal.intent);
@@ -10866,6 +11635,7 @@ pub const ExternalPumpStorage = struct {
                 client,
                 rx_state,
                 snapshot.live_partial_pending,
+                turn.now_ns,
                 scratch,
             );
             if (!finishAndValidateRxTurnCallback(
@@ -11351,6 +12121,7 @@ pub const ExternalPumpStorage = struct {
                         client,
                         rx_state,
                         snapshot.live_partial_pending,
+                        turn.now_ns,
                         scratch,
                     );
                     if (!finishAndValidateRxTurnCallback(
@@ -11825,6 +12596,7 @@ pub const ExternalPumpStorage = struct {
             client,
             rx_state,
             snapshot.live_partial_pending,
+            turn.now_ns,
             scratch,
         );
         const summary = switch (mechanics) {
@@ -11890,6 +12662,42 @@ pub const ExternalPumpStorage = struct {
             );
         };
         if (tx_clock_terminal) |reason| {
+            scratch.lifecycle = .terminal;
+            self.semantic_state = .{ .terminal = .{
+                .reason = reason,
+                .fd_disposition = .owner_cleanup,
+            } };
+            var terminal = self.finalizeInjectedRxTerminalUnderHeldLease(
+                &lease,
+                scratch,
+                self.terminalInjectedRxTurn(reason, 0, 0, 0),
+            );
+            if (self.releaseWholeTurnLease(&lease) != .released)
+                terminal = self.terminalInjectedRxTurn(
+                    .invariant_failure,
+                    0,
+                    0,
+                    0,
+                );
+            return terminal;
+        }
+        const control_clock_terminal: ?client_pump.TerminalReason = control_clock: {
+            if (!controlCorrelationValid(self))
+                break :control_clock .invariant_failure;
+            const expired = switch (self.control_correlation.state) {
+                .in_flight => |control| client_control_correlation.deadlineExpired(
+                    control,
+                    turn.now_ns,
+                ),
+                .idle, .completed => false,
+                .terminal => break :control_clock .invariant_failure,
+            };
+            if (!expired) break :control_clock null;
+            if (!publishControlCorrelation(self, .terminal))
+                break :control_clock .invariant_failure;
+            break :control_clock .deadline_exceeded;
+        };
+        if (control_clock_terminal) |reason| {
             scratch.lifecycle = .terminal;
             self.semantic_state = .{ .terminal = .{
                 .reason = reason,
@@ -12680,7 +13488,9 @@ pub const ExternalPumpStorage = struct {
                 }
                 var tx_context = PosixTxContext{ .fd = client.fd };
                 var tx_write_scratch: client_external_tx.PreparedTxWrite = .{};
-                var tx_completion_context: u8 = 0;
+                var tx_completion_context = ControlCompletionContext{
+                    .storage = self,
+                };
                 const tx_binding = makeTxOwnerBinding(
                     self,
                     client,
@@ -12699,7 +13509,7 @@ pub const ExternalPumpStorage = struct {
                         &tx_write_scratch,
                         .{
                             .context = &tx_completion_context,
-                            .consume = discardExternalTxCompletions,
+                            .consume = correlateExternalTxCompletions,
                         },
                         external.tx_allocator,
                         external,
@@ -12737,8 +13547,19 @@ pub const ExternalPumpStorage = struct {
                     );
                     self.semantic_state = .{ .terminal = result.terminal.? };
                 } else {
-                    result.write_interest =
-                        external.external_tx.items.len != 0;
+                    if (!reconcileControlTxProgress(self, external)) {
+                        scratch.lifecycle = .terminal;
+                        result = self.terminalInjectedRxTurn(
+                            .invariant_failure,
+                            result.rx_read_bytes,
+                            result.rx_bytes,
+                            result.rx_frames,
+                        );
+                        self.semantic_state = .{ .terminal = result.terminal.? };
+                    } else {
+                        result.write_interest =
+                            external.external_tx.items.len != 0;
+                    }
                 }
             }
         }
@@ -12899,9 +13720,9 @@ pub const ExternalPumpStorage = struct {
         }
         writer.writeU8(@intFromEnum(self.live_screen.lifecycle));
         writer.writeBytes(&self.live_screen.owner_digest);
-        switch (self.pending_response) {
+        switch (self.completed_control) {
             .none => writer.writeU8(0),
-            .pending => |pending| {
+            .completed => |pending| {
                 writer.writeU8(1);
                 writer.writeBytes(&pending.owner_digest);
             },
@@ -12953,7 +13774,7 @@ pub const ExternalPumpStorage = struct {
             else => return .stale_invariant,
         };
         const key = maybe_key orelse return switch (active) {
-            .valid, .control => .ordinary,
+            .valid => .ordinary,
             .host_recovery, .client_recovery => .stale_invariant,
         };
         if (!key.isCanonical() or !is_snapshot or
@@ -12980,7 +13801,7 @@ pub const ExternalPumpStorage = struct {
                     .stale_invariant,
                 else => .stale_invariant,
             },
-            .valid, .control => .stale_invariant,
+            .valid => .stale_invariant,
         };
     }
 
@@ -13029,7 +13850,7 @@ pub const ExternalPumpStorage = struct {
                     },
                     else => return self.latchRecoveryInvariantTerminal(),
                 },
-                .valid, .control => return self.latchRecoveryInvariantTerminal(),
+                .valid => return self.latchRecoveryInvariantTerminal(),
             },
             else => return self.latchRecoveryInvariantTerminal(),
         };
@@ -13084,7 +13905,7 @@ pub const ExternalPumpStorage = struct {
                         .next_deadline_ns = waiting.context.deadline_ns,
                     },
                 },
-                .valid, .control => .{
+                .valid => .{
                     .immediate = false,
                     .next_deadline_ns = null,
                 },
@@ -13094,7 +13915,24 @@ pub const ExternalPumpStorage = struct {
         };
     }
 
-    /// Read-only wake/deadline projection. Recovery and TX expose one immediate bit and the
+    fn controlPollHint(
+        self: *const ExternalPumpStorage,
+    ) ?client_pump.PollHint {
+        if (!controlCorrelationValid(self)) return null;
+        return switch (self.control_correlation.state) {
+            .idle => .{ .immediate = false, .next_deadline_ns = null },
+            .in_flight => |control| .{
+                .immediate = false,
+                .next_deadline_ns = control.deadline_ns,
+            },
+            // The private take/apply suffix owns this wake. f3 will expose that suffix to the
+            // product caller without creating a second readiness authority.
+            .completed => .{ .immediate = true, .next_deadline_ns = null },
+            .terminal => .{ .immediate = true, .next_deadline_ns = null },
+        };
+    }
+
+    /// Read-only wake/deadline projection. Recovery, TX, and control expose one immediate bit and the
     /// earliest absolute deadline, while an incomplete product owner fails closed.
     pub fn pollHint(self: *const ExternalPumpStorage) client_pump.PollHint {
         if (self.saved_self_addr != @intFromPtr(self) or
@@ -13110,15 +13948,24 @@ pub const ExternalPumpStorage = struct {
         const tx = client_external_tx.pollHint(external);
         if (!tx.valid)
             return .{ .immediate = true, .next_deadline_ns = null };
-        return .{
-            .immediate = recovery.immediate or tx.immediate,
-            .next_deadline_ns = if (recovery.next_deadline_ns) |recovery_deadline|
-                if (tx.deadline_ns) |tx_deadline|
-                    @min(recovery_deadline, tx_deadline)
-                else
-                    recovery_deadline
+        const control = self.controlPollHint() orelse
+            return .{ .immediate = true, .next_deadline_ns = null };
+        const recovery_tx_deadline = if (recovery.next_deadline_ns) |recovery_deadline|
+            if (tx.deadline_ns) |tx_deadline|
+                @min(recovery_deadline, tx_deadline)
             else
-                tx.deadline_ns,
+                recovery_deadline
+        else
+            tx.deadline_ns;
+        return .{
+            .immediate = recovery.immediate or tx.immediate or control.immediate,
+            .next_deadline_ns = if (recovery_tx_deadline) |current|
+                if (control.next_deadline_ns) |control_deadline|
+                    @min(current, control_deadline)
+                else
+                    current
+            else
+                control.next_deadline_ns,
         };
     }
 
@@ -13176,7 +14023,7 @@ pub const ExternalPumpStorage = struct {
         const pending = switch (self.semantic_state.active) {
             .host_recovery => |phase| phase == .applied_pending,
             .client_recovery => |phase| phase == .applied_pending,
-            .valid, .control => false,
+            .valid => false,
         };
         if (!pending) return .not_pending;
         return switch (self.commitAppliedRecoveryFreshSemantic(now_ns)) {
@@ -14059,7 +14906,7 @@ pub const ExternalPumpStorage = struct {
         self.committed_screen = .{};
         self.live_partial = .none;
         self.live_screen = .{};
-        self.pending_response = .none;
+        self.completed_control = .none;
         self.owner_metadata = .{};
         if (!external_event_materialization.commitRecoveryBaseline(
             &self.owner_metadata,
@@ -14157,7 +15004,7 @@ pub const ExternalPumpStorage = struct {
         self.committed_screen = .{};
         self.live_partial = .terminal;
         self.live_screen = .{ .lifecycle = .cleaned_tombstone };
-        self.pending_response = .terminal;
+        self.completed_control = .terminal;
         self.intent_scratch_reservation = .{
             .lifecycle = .poisoned_tombstone,
         };
@@ -14387,7 +15234,7 @@ pub const ExternalPumpStorage = struct {
             !self.committed_screen.isEmpty() or
             self.live_partial != .none or
             !std.meta.eql(self.live_screen, LiveScreenBacklog{}) or
-            self.pending_response != .none or
+            self.completed_control != .none or
             !std.meta.eql(self.screen_pending_summary, ScreenPendingSummarySeal{}) or
             !self.owner_metadata.isEmpty() or
             !std.meta.eql(self.metadata_pending_summary, MetadataPendingSummarySeal{}) or
@@ -14661,6 +15508,7 @@ pub const ExternalPumpStorage = struct {
         bindOwnerIncarnation(self, evidence.attach_instance_id);
         self.commitOwnerScalarTakeUnchecked(&plan.scalar_take);
         bindOwnerAuthority(self);
+        bindInitialControlCorrelation(self);
         self.bindPendingSummaries();
         self.owner_event_projection_generation = 0;
         recorder.record(.scalar_destination);
@@ -14886,9 +15734,9 @@ pub const ExternalPumpStorage = struct {
             }
             staged.screen_owner_digest = self.live_screen.owner_digest;
         }
-        switch (self.pending_response) {
+        switch (self.completed_control) {
             .none, .terminal => {},
-            .pending => |pending| {
+            .completed => |pending| {
                 staged.response_owner_digest = pending.owner_digest;
                 staged.response_seal = pending.seal;
             },
@@ -14953,13 +15801,13 @@ pub const ExternalPumpStorage = struct {
             return false;
         }
         if (index != prepared.known_token_count) return false;
-        return switch (self.pending_response) {
+        return switch (self.completed_control) {
             .none, .terminal => std.meta.eql(
                 prepared.response_seal,
                 ResponsePayloadSeal.empty(),
             ) and
                 std.mem.allEqual(u8, &prepared.response_owner_digest, 0),
-            .pending => |pending| std.meta.eql(
+            .completed => |pending| std.meta.eql(
                 prepared.response_seal,
                 pending.seal,
             ) and
@@ -14984,9 +15832,9 @@ pub const ExternalPumpStorage = struct {
             .saved_self_addr = @intFromPtr(frozen),
             .lifecycle = .frozen,
         };
-        switch (self.pending_response) {
+        switch (self.completed_control) {
             .none, .terminal => {},
-            .pending => |*pending| {
+            .completed => |*pending| {
                 frozen.response.payload = pending.payload;
                 pending.payload = external_inbox_ledger.OwnedPayload.empty(
                     pending.payload.allocator,
@@ -14998,7 +15846,7 @@ pub const ExternalPumpStorage = struct {
         frozen.digest = frozenLiveOwnerDigest(frozen);
         self.live_partial = .terminal;
         self.live_screen = .{ .lifecycle = .cleaned_tombstone };
-        self.pending_response = .terminal;
+        self.completed_control = .terminal;
         prepared.lifecycle = .consumed;
     }
 
@@ -15051,7 +15899,7 @@ pub const ExternalPumpStorage = struct {
             !self.client_cleanup_take.requiresTypedCleanup() and
             self.live_partial == .none and
             self.live_screen.lifecycle == .empty and
-            self.pending_response == .none)
+            self.completed_control == .none)
         {
             return switch (self.closeUncommittedOwned(.invariant_failure)) {
                 .cleaned => .cleaned,
@@ -15267,6 +16115,7 @@ pub const ExternalPumpStorage = struct {
         self.owner_authority = .empty;
         self.owner_authority_seal = .{};
         self.owner_request_ids = null;
+        self.control_correlation = .{};
         self.owner_incarnation = 0;
         self.owner_incarnation_seal = .{};
         self.owner_event_projection_generation = 0;
@@ -15379,7 +16228,7 @@ pub const ExternalPumpStorage = struct {
         self.committed_screen = .{ .lifecycle = .cleaned_tombstone };
         self.live_partial = .terminal;
         self.live_screen = .{ .lifecycle = .cleaned_tombstone };
-        self.pending_response = .terminal;
+        self.completed_control = .terminal;
         self.screen_pending_summary = .{ .lifecycle = .tombstone };
         self.owner_metadata = .{ .lifecycle = .cleaned_tombstone };
         self.metadata_pending_summary = .{ .lifecycle = .tombstone };
@@ -15388,6 +16237,7 @@ pub const ExternalPumpStorage = struct {
         self.owner_authority = .empty;
         self.owner_authority_seal = .{};
         self.owner_request_ids = null;
+        self.control_correlation = .{};
         self.owner_incarnation = 0;
         self.owner_incarnation_seal = .{};
         self.owner_event_projection_generation = 0;
@@ -15492,7 +16342,7 @@ pub const ExternalPumpStorage = struct {
         self.owner_event_projection_generation = 0;
         self.live_partial = .terminal;
         self.live_screen = .{ .lifecycle = .cleaned_tombstone };
-        self.pending_response = .terminal;
+        self.completed_control = .terminal;
         // Quarantine deliberately leaks an untrusted scratch graph. Remove the canonical
         // dereference authority before releasing the process-wide operation reservation.
         self.intent_scratch_reservation = .{
@@ -15652,6 +16502,60 @@ fn moveIntentFrameForTest(
     );
 }
 
+fn armResponseCorrelationForTest(
+    storage: *ExternalPumpStorage,
+    request_id: u64,
+    now_ns: i128,
+) bool {
+    if (comptime !builtin.is_test) unreachable;
+    if (!controlCorrelationValid(storage)) return false;
+    const authority = switch (storage.owner_authority) {
+        .current => |value| value,
+        .empty => return false,
+    };
+    const controller_generation = switch (authority.generation) {
+        .tracked => |value| value,
+        .untracked => return false,
+    };
+    const target = client_control_correlation.Target{
+        .stream_id = storage.evidence_snapshot.stream_id,
+        .controller_generation = controller_generation,
+    };
+    const admitted = switch (client_control_correlation.prepareAdmission(
+        storage.control_correlation.state,
+        .resize,
+        target,
+        request_id,
+        protocol.header_size + 1,
+        now_ns,
+    )) {
+        .admitted => |value| value,
+        else => return false,
+    };
+    const waiting = switch (client_control_correlation.observeProgress(
+        admitted,
+        .response_wait,
+        request_id,
+        target,
+    )) {
+        .updated => |value| value,
+        else => return false,
+    };
+    return publishControlCorrelation(storage, .{ .in_flight = waiting });
+}
+
+fn rewindControlCorrelationToQueuedForTest(
+    storage: *ExternalPumpStorage,
+) bool {
+    if (comptime !builtin.is_test) unreachable;
+    var in_flight = switch (storage.control_correlation.state) {
+        .in_flight => |value| value,
+        .idle, .completed, .terminal => return false,
+    };
+    in_flight.progress = .queued;
+    return publishControlCorrelation(storage, .{ .in_flight = in_flight });
+}
+
 fn activateSyntheticLiveOwnersForTest(
     storage: *ExternalPumpStorage,
     partial_token: external_inbox_ledger.Token,
@@ -15674,10 +16578,25 @@ fn activateSyntheticLiveOwnersForTest(
     };
     storage.live_screen.owner_digest =
         liveScreenDigest(storage, &storage.live_screen);
-    var pending = PendingResponseState{
+    const target = client_control_correlation.Target{
+        .stream_id = storage.evidence_snapshot.stream_id,
+        .controller_generation = 1,
+    };
+    std.debug.assert(publishControlCorrelation(storage, .{ .completed = .{
+        .kind = .resize,
+        .target = target,
+        .request_id = 1,
+        .wire_len = protocol.header_size + 1,
+    } }));
+    var pending = CompletedControlState{
         .payload = response_payload,
         .seal = ResponsePayloadSeal.fromPayload(&response_payload),
         .request_id = 1,
+        .control_kind = .resize,
+        .target_stream_id = target.stream_id,
+        .expected_controller_generation = target.controller_generation,
+        .control_wire_len = protocol.header_size + 1,
+        .correlation_generation = storage.control_correlation.generation,
         .source_turn_generation = storage.operation_generation,
         .source_parser_generation = 1,
         .source_owner_digest = external_owner_cleanup.contentDigest(
@@ -15686,9 +16605,9 @@ fn activateSyntheticLiveOwnersForTest(
         .generation = 1,
         .owner_digest = undefined,
     };
-    pending.owner_digest = pendingResponseDigest(storage, &pending);
-    storage.pending_response = .{ .pending = pending };
-    storage.pending_response_generation = pending.generation;
+    pending.owner_digest = completedControlDigest(storage, &pending);
+    storage.completed_control = .{ .completed = pending };
+    storage.completed_control_generation = pending.generation;
 }
 
 fn seedSyntheticLiveOwnersForTest(
@@ -18559,11 +19478,11 @@ test "d2b3d partial continuation is sealed without becoming a consumer blocker" 
         external_inbox_ledger.RetireLiveResult.retired,
         release_retirement.retire(),
     );
-    switch (storage.pending_response) {
-        .pending => |*pending| pending.payload.deinit(),
+    switch (storage.completed_control) {
+        .completed => |*pending| pending.payload.deinit(),
         else => unreachable,
     }
-    storage.pending_response = .none;
+    storage.completed_control = .none;
     storage.live_screen = .{};
     try std.testing.expect(storage.liveOwnersValid());
 
@@ -19007,11 +19926,11 @@ test "d2b3d live screen consume retries without mutation then retires one FIFO h
     defer _ = teardownForTest(&storage);
     try seedSyntheticLiveOwnersForTest(&storage, std.testing.allocator);
     storage.live_partial = .none;
-    switch (storage.pending_response) {
-        .pending => |*pending| pending.payload.deinit(),
+    switch (storage.completed_control) {
+        .completed => |*pending| pending.payload.deinit(),
         else => unreachable,
     }
-    storage.pending_response = .none;
+    storage.completed_control = .none;
     try std.testing.expect(storage.liveOwnersValid());
 
     var scratch = struct {
@@ -19117,6 +20036,305 @@ test "d2b3d live screen consume retries without mutation then retires one FIFO h
         WholeTurnReleaseResult.released,
         storage.releaseWholeTurnLease(&lease),
     );
+}
+
+test "f2 control admission atomically publishes one correlation and one request frame" {
+    const Probe = struct {
+        fn read(
+            raw: *anyopaque,
+            fd: posix.fd_t,
+            buffer: []u8,
+        ) client_external_rx_read.RxReadOutcome {
+            const use_posix: *bool = @ptrCast(@alignCast(raw));
+            if (!use_posix.*) return .would_block;
+            const rc = c.recv(fd, buffer.ptr, buffer.len, posix.MSG.DONTWAIT);
+            if (rc > 0) return .{ .bytes = @intCast(rc) };
+            if (rc == 0) return .eof;
+            return switch (posix.errno(rc)) {
+                .INTR => .interrupted,
+                .AGAIN => .would_block,
+                else => .socket_error,
+            };
+        }
+
+        fn apply(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
+    };
+
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    try std.testing.expect(testing.clearInitialFence(&storage));
+
+    const admitted = storage.admitControl(.{
+        .kind = .resize,
+        .target_stream_id = valid_evidence.stream_id,
+        .expected_controller_generation = valid_evidence.initial_controller_generation,
+        .payload = "{\"method\":\"runtime.resize\",\"params\":{\"stream_id\":7,\"cols\":80,\"rows\":24,\"client_sequence\":1}}",
+    }, 100);
+    const request_id = switch (admitted) {
+        .admitted => |value| value.request_id,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(u64, 1), request_id);
+    const correlation = storage.control_correlation.state.in_flight;
+    try std.testing.expectEqual(request_id, correlation.request_id);
+    try std.testing.expectEqual(
+        client_control_correlation.Progress.queued,
+        correlation.progress,
+    );
+    try std.testing.expect(controlCorrelationValid(&storage));
+    const external = switch (storage.owned_client.?.io_mode) {
+        .external => |*state| state,
+        .blocking => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(usize, 1), external.external_tx.items.len);
+    try std.testing.expect(std.meta.eql(
+        storage.owner_request_ids.?,
+        client_pump.RequestIdState{ .available = 2 },
+    ));
+
+    const queue_generation = external.tx_queue_generation;
+    const request_state = storage.owner_request_ids.?;
+    try std.testing.expect(storage.admitControl(.{
+        .kind = .resync,
+        .target_stream_id = valid_evidence.stream_id,
+        .expected_controller_generation = valid_evidence.initial_controller_generation,
+        .payload = "{\"method\":\"runtime.resync\",\"params\":{\"stream_id\":7}}",
+    }, 101) == .backpressure);
+    try std.testing.expectEqual(queue_generation, external.tx_queue_generation);
+    try std.testing.expect(std.meta.eql(
+        request_state,
+        storage.owner_request_ids.?,
+    ));
+
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    var read_probe = false;
+    var apply_probe: u8 = 0;
+    const ops = RxTurnOps{
+        .buffered = .{
+            .context = &apply_probe,
+            .context_len = @sizeOf(bool),
+            .apply_live_screen = Probe.apply,
+        },
+        .transport = .{
+            .context = &read_probe,
+            .context_len = @sizeOf(u8),
+            .read = Probe.read,
+        },
+    };
+    const turn = storage.pumpRxTurn(
+        .{ .readable = true, .writable = true, .now_ns = 102 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expectEqual(
+        @as(?client_pump.ExternalPumpTerminal, null),
+        turn.terminal,
+    );
+    try std.testing.expectEqual(@as(usize, 1), turn.tx_frames);
+    try std.testing.expectEqual(
+        client_control_correlation.Progress.response_wait,
+        storage.control_correlation.state.in_flight.progress,
+    );
+    try std.testing.expect(controlCorrelationValid(&storage));
+    var request_wire: [protocol.max_control_json + protocol.header_size]u8 = undefined;
+    const request_bytes = c.recv(
+        fixture.peer_fd,
+        &request_wire,
+        request_wire.len,
+        0,
+    );
+    try std.testing.expect(request_bytes > 0);
+    const response_wire = try framing.encodeFrame(
+        std.testing.allocator,
+        .{ .kind = .response, .request_id = request_id },
+        "socket-response",
+    );
+    defer std.testing.allocator.free(response_wire);
+    try std.testing.expectEqual(
+        @as(isize, @intCast(response_wire.len)),
+        c.send(
+            fixture.peer_fd,
+            response_wire.ptr,
+            response_wire.len,
+            0,
+        ),
+    );
+    read_probe = true;
+    const response_turn = storage.pumpRxTurn(
+        .{ .readable = true, .writable = false, .now_ns = 103 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(response_turn.terminal == null);
+    try std.testing.expectEqualStrings(
+        "socket-response",
+        storage.completed_control.completed.payload.bytes(),
+    );
+    try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(&storage));
+}
+
+test "f2 product socket partial write publishes sealed control progress" {
+    const Probe = struct {
+        fn read(
+            _: *anyopaque,
+            _: posix.fd_t,
+            _: []u8,
+        ) client_external_rx_read.RxReadOutcome {
+            return .would_block;
+        }
+
+        fn apply(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
+    };
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    defer _ = teardownForTest(&storage);
+    try std.testing.expect(testing.clearInitialFence(&storage));
+    var requested: c_int = 4096;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.setsockopt(
+            storage.owned_client.?.fd,
+            posix.SOL.SOCKET,
+            posix.SO.SNDBUF,
+            &requested,
+            @sizeOf(c_int),
+        ),
+    );
+    const payload = try std.testing.allocator.alloc(
+        u8,
+        protocol.max_control_json,
+    );
+    defer std.testing.allocator.free(payload);
+    @memset(payload, 'x');
+    const admitted = storage.admitControl(.{
+        .kind = .resize,
+        .target_stream_id = valid_evidence.stream_id,
+        .expected_controller_generation = valid_evidence.initial_controller_generation,
+        .payload = payload,
+    }, 100);
+    const wire_len = switch (admitted) {
+        .admitted => |value| value.wire_len,
+        else => return error.TestUnexpectedResult,
+    };
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    var read_probe: u8 = 0;
+    var apply_probe: u8 = 0;
+    const ops = RxTurnOps{
+        .buffered = .{
+            .context = &apply_probe,
+            .context_len = @sizeOf(u8),
+            .apply_live_screen = Probe.apply,
+        },
+        .transport = .{
+            .context = &read_probe,
+            .context_len = @sizeOf(u8),
+            .read = Probe.read,
+        },
+    };
+    const turn = storage.pumpRxTurn(
+        .{ .readable = true, .writable = true, .now_ns = 101 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(turn.terminal == null);
+    try std.testing.expect(turn.tx_bytes > 0);
+    try std.testing.expect(turn.tx_bytes < wire_len);
+    try std.testing.expectEqual(
+        client_control_correlation.Progress.partial,
+        storage.control_correlation.state.in_flight.progress,
+    );
+    const external = switch (storage.owned_client.?.io_mode) {
+        .external => |*state| state,
+        .blocking => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(
+        client_external_tx.RequestFrameProgress.partial,
+        client_external_tx.requestFrameProgress(
+            external,
+            storage.control_correlation.state.in_flight.request_id,
+            wire_len,
+        ),
+    );
+}
+
+test "f2 completion sink ignores unrelated request completions in either order" {
+    inline for (.{ false, true }) |matching_first| {
+        var fixture = try TestClient.init();
+        defer fixture.deinitPeer();
+        var storage: ExternalPumpStorage = .{};
+        try std.testing.expect(
+            initTestStorage(&storage, &fixture.client, valid_evidence) ==
+                .initialized,
+        );
+        try std.testing.expect(
+            prepareAdoptionForTest(&storage) == .prepared_adopted,
+        );
+        try std.testing.expect(storage.commitAdoption() == .adopted);
+        defer _ = teardownForTest(&storage);
+        try std.testing.expect(
+            armResponseCorrelationForTest(&storage, 80, 0),
+        );
+        try std.testing.expect(
+            rewindControlCorrelationToQueuedForTest(&storage),
+        );
+        const wire_len = storage.control_correlation.state.in_flight.wire_len;
+        const matching = client_external_tx.TxCompletion{
+            .kind = .request,
+            .stream_id = 0,
+            .request_id = 80,
+            .wire_len = wire_len,
+        };
+        const unrelated = client_external_tx.TxCompletion{
+            .kind = .request,
+            .stream_id = 0,
+            .request_id = 79,
+            .wire_len = wire_len + 1,
+        };
+        const completions = if (matching_first)
+            [_]client_external_tx.TxCompletion{ matching, unrelated }
+        else
+            [_]client_external_tx.TxCompletion{ unrelated, matching };
+        var context = ControlCompletionContext{ .storage = &storage };
+        try std.testing.expect(correlateExternalTxCompletions(
+            &context,
+            &completions,
+            true,
+        ));
+        try std.testing.expectEqual(
+            client_control_correlation.Progress.response_wait,
+            storage.control_correlation.state.in_flight.progress,
+        );
+    }
 }
 
 test "f1a product facade admits under whole-turn lease and terminal replay is wire zero" {
@@ -20599,7 +21817,7 @@ test "d2b3d late protocol terminals abort accepted screen and response prefixes"
         );
         try std.testing.expect(storage.live_partial == .none);
         try std.testing.expect(storage.live_screen.lifecycle == .empty);
-        try std.testing.expect(storage.pending_response == .none);
+        try std.testing.expect(storage.completed_control == .none);
         try std.testing.expectEqual(
             @as(usize, 0),
             storage.inbox_ledger.accountingView().charged_items,
@@ -20630,6 +21848,7 @@ test "d2b3d product response publishes a blocker and the next turn traverses zer
     );
     try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
     try std.testing.expect(storage.commitAdoption() == .adopted);
+    try std.testing.expect(armResponseCorrelationForTest(&storage, 77, 0));
 
     const wire = try framing.encodeFrame(
         std.testing.allocator,
@@ -20658,13 +21877,13 @@ test "d2b3d product response publishes a blocker and the next turn traverses zer
     );
     try std.testing.expect(first.terminal == null);
     try std.testing.expectEqual(@as(usize, 1), first.rx_frames);
-    const pending = switch (storage.pending_response) {
-        .pending => |*value| value,
+    const pending = switch (storage.completed_control) {
+        .completed => |*value| value,
         else => return error.TestUnexpectedResult,
     };
     try std.testing.expectEqual(@as(u64, 77), pending.request_id);
     try std.testing.expectEqualStrings("product-response", pending.payload.bytes());
-    try std.testing.expect(storage.pendingResponseValid());
+    try std.testing.expect(storage.completedControlValid());
 
     const second = storage.pumpBufferedRxForTest(
         .{ .readable = true, .writable = false, .now_ns = 2 },
@@ -20675,8 +21894,296 @@ test "d2b3d product response publishes a blocker and the next turn traverses zer
     try std.testing.expect(second.inherited_work_ready);
     try std.testing.expectEqual(@as(usize, 0), second.rx_frames);
     try std.testing.expectEqual(@as(usize, 0), second.rx_bytes);
-    try std.testing.expect(storage.pendingResponseValid());
+    try std.testing.expect(storage.completedControlValid());
     try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(&storage));
+}
+
+test "f2 completed response take is sealed exact once and reject-terminal only" {
+    const Apply = struct {
+        fn run(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
+    };
+
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    try std.testing.expect(armResponseCorrelationForTest(&storage, 78, 0));
+
+    const wire = try framing.encodeFrame(
+        std.testing.allocator,
+        .{ .kind = .response, .request_id = 78 },
+        "take-response",
+    );
+    defer std.testing.allocator.free(wire);
+    try admitBufferedProductWireForTest(&storage, wire);
+
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    var context: u8 = 0;
+    const ops = BufferedRxOps{
+        .context = &context,
+        .apply_live_screen = Apply.run,
+    };
+    const result = storage.pumpBufferedRxForTest(
+        .{ .readable = true, .writable = false, .now_ns = 1 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(result.terminal == null);
+    try std.testing.expect(storage.completedControlValid());
+
+    var take: PreparedControlResponseTake = .{};
+    try std.testing.expect(storage.prepareControlResponseTake(&take));
+    var moved_take = take;
+    var lease: ExternalWholeTurnLease = .{};
+    try storage.acquireWholeTurnLease(
+        &lease,
+        @intFromPtr(scratch),
+        @sizeOf(ExternalRxTurnScratch),
+    );
+    try std.testing.expectEqual(
+        FinishControlResponseResult.invalid_commit,
+        storage.takeControlResponseUnderHeldLease(&lease, &moved_take),
+    );
+    const completed = storage.completed_control.completed;
+    try std.testing.expectEqualStrings("take-response", completed.payload.bytes());
+    try std.testing.expect(storage.control_correlation.state == .completed);
+    try std.testing.expectEqual(
+        FinishControlResponseResult.rejected_terminal,
+        storage.takeControlResponseUnderHeldLease(&lease, &take),
+    );
+    try std.testing.expectEqual(
+        FinishControlResponseResult.invalid_commit,
+        storage.takeControlResponseUnderHeldLease(&lease, &take),
+    );
+    try std.testing.expect(storage.control_correlation.state == .terminal);
+    try std.testing.expectEqual(
+        WholeTurnReleaseResult.released,
+        storage.releaseWholeTurnLease(&lease),
+    );
+    try std.testing.expect(storage.completedControlValid());
+    try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(&storage));
+}
+
+test "f2 control deadline is projected and terminalizes a zero readiness turn at exact boundary" {
+    const Apply = struct {
+        fn run(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
+    };
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    const admitted_at: i128 = 100;
+    try std.testing.expect(
+        armResponseCorrelationForTest(&storage, 79, admitted_at),
+    );
+    const deadline = admitted_at + client_control_correlation.timeout_ns;
+    const hint = storage.pollHint();
+    try std.testing.expect(!hint.immediate);
+    try std.testing.expectEqual(deadline, hint.next_deadline_ns.?);
+
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    var context: u8 = 0;
+    const ops = BufferedRxOps{
+        .context = &context,
+        .apply_live_screen = Apply.run,
+    };
+    const result = storage.pumpBufferedRxForTest(
+        .{ .readable = false, .writable = false, .now_ns = deadline },
+        &ops,
+        scratch,
+    );
+    try std.testing.expectEqual(
+        client_pump.TerminalReason.deadline_exceeded,
+        result.terminal.?.reason,
+    );
+    try std.testing.expect(storage.control_correlation.state == .terminal);
+    try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(&storage));
+}
+
+test "f2 product RX rejects unsolicited early wrong and same-drain duplicate responses" {
+    const Apply = struct {
+        fn run(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
+    };
+    const Case = enum { unsolicited, early, wrong, zero, duplicate };
+    inline for (std.meta.tags(Case)) |case| {
+        var fixture = try TestClient.init();
+        defer fixture.deinitPeer();
+        var storage: ExternalPumpStorage = .{};
+        try std.testing.expect(
+            initTestStorage(&storage, &fixture.client, valid_evidence) ==
+                .initialized,
+        );
+        try std.testing.expect(
+            prepareAdoptionForTest(&storage) == .prepared_adopted,
+        );
+        try std.testing.expect(storage.commitAdoption() == .adopted);
+        if (case != .unsolicited) {
+            try std.testing.expect(
+                armResponseCorrelationForTest(&storage, 80, 0),
+            );
+            if (case == .early)
+                try std.testing.expect(
+                    rewindControlCorrelationToQueuedForTest(&storage),
+                );
+        }
+        const first = try framing.encodeFrame(
+            std.testing.allocator,
+            .{
+                .kind = .response,
+                .request_id = if (case == .wrong)
+                    81
+                else if (case == .zero)
+                    0
+                else
+                    80,
+            },
+            "response",
+        );
+        defer std.testing.allocator.free(first);
+        if (case == .duplicate) {
+            const second = try framing.encodeFrame(
+                std.testing.allocator,
+                .{ .kind = .response, .request_id = 80 },
+                "duplicate",
+            );
+            defer std.testing.allocator.free(second);
+            try admitBufferedProductFramesForTest(&storage, &.{ first, second });
+        } else {
+            try admitBufferedProductWireForTest(&storage, first);
+        }
+        const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+        defer std.testing.allocator.destroy(scratch);
+        scratch.* = .{};
+        try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+        var context: u8 = 0;
+        const ops = BufferedRxOps{
+            .context = &context,
+            .apply_live_screen = Apply.run,
+        };
+        const result = storage.pumpBufferedRxForTest(
+            .{ .readable = true, .writable = false, .now_ns = 1 },
+            &ops,
+            scratch,
+        );
+        try std.testing.expectEqual(
+            client_pump.TerminalReason.protocol_error,
+            result.terminal.?.reason,
+        );
+        try std.testing.expect(storage.completed_control == .none);
+        try std.testing.expectEqual(
+            TeardownResult.cleaned,
+            teardownForTest(&storage),
+        );
+    }
+}
+
+test "f2 response payload accepts exact protocol cap and rejects cap plus one from header" {
+    const Apply = struct {
+        fn run(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
+    };
+    inline for (.{ false, true }) |over_cap| {
+        var fixture = try TestClient.init();
+        defer fixture.deinitPeer();
+        var storage: ExternalPumpStorage = .{};
+        try std.testing.expect(
+            initTestStorage(&storage, &fixture.client, valid_evidence) ==
+                .initialized,
+        );
+        try std.testing.expect(
+            prepareAdoptionForTest(&storage) == .prepared_adopted,
+        );
+        try std.testing.expect(storage.commitAdoption() == .adopted);
+        try std.testing.expect(
+            armResponseCorrelationForTest(&storage, 83, 0),
+        );
+        const payload = if (over_cap)
+            &.{}
+        else
+            try std.testing.allocator.alloc(u8, protocol.max_control_json);
+        defer if (!over_cap) std.testing.allocator.free(payload);
+        if (!over_cap) @memset(payload, 'r');
+        const wire = if (over_cap) blk: {
+            const encoded = (protocol.Header{
+                .kind = .response,
+                .request_id = 83,
+                .payload_len = protocol.max_control_json + 1,
+            }).encode();
+            break :blk try std.testing.allocator.dupe(u8, &encoded);
+        } else try framing.encodeFrame(
+            std.testing.allocator,
+            .{ .kind = .response, .request_id = 83 },
+            payload,
+        );
+        defer std.testing.allocator.free(wire);
+        try admitBufferedProductWireForTest(&storage, wire);
+        const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+        defer std.testing.allocator.destroy(scratch);
+        scratch.* = .{};
+        try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+        var context: u8 = 0;
+        const ops = BufferedRxOps{
+            .context = &context,
+            .apply_live_screen = Apply.run,
+        };
+        const result = storage.pumpBufferedRxForTest(
+            .{ .readable = true, .writable = false, .now_ns = 1 },
+            &ops,
+            scratch,
+        );
+        if (over_cap) {
+            try std.testing.expectEqual(
+                client_pump.TerminalReason.protocol_error,
+                result.terminal.?.reason,
+            );
+            try std.testing.expect(storage.completed_control == .none);
+        } else {
+            try std.testing.expect(result.terminal == null);
+            try std.testing.expectEqual(
+                protocol.max_control_json,
+                storage.completed_control.completed.payload.logical_len,
+            );
+        }
+        try std.testing.expectEqual(
+            TeardownResult.cleaned,
+            teardownForTest(&storage),
+        );
+    }
 }
 
 test "d2b3d product mixed owners abort atomically on a late terminal event" {
@@ -20772,7 +22279,7 @@ test "d2b3d product mixed owners abort atomically on a late terminal event" {
     try std.testing.expect(std.meta.eql(metadata_before, storage.owner_metadata));
     try std.testing.expect(storage.live_partial == .none);
     try std.testing.expect(storage.live_screen.lifecycle == .empty);
-    try std.testing.expect(storage.pending_response == .none);
+    try std.testing.expect(storage.completed_control == .none);
     try std.testing.expect(std.meta.eql(
         accounting_before,
         storage.inbox_ledger.accountingView(),
@@ -21874,7 +23381,7 @@ test "d2b3a live owner teardown rejects cross-owner duplicates and response drif
         liveScreenDigest(&storage, &storage.live_screen);
 
     const response_byte =
-        &storage.pending_response.pending.payload.allocation_ptr.?[0];
+        &storage.completed_control.completed.payload.allocation_ptr.?[0];
     response_byte.* ^= 1;
     try std.testing.expect(!storage.liveOwnersValid());
     var drift_prepared: PreparedLiveOwnerTeardown = .{};
@@ -21930,8 +23437,8 @@ test "d2b3a response seal rejects descriptor and allocator drift before callback
         .parent = std.testing.allocator,
         .storage = &storage,
     };
-    switch (storage.pending_response) {
-        .pending => |*pending| {
+    switch (storage.completed_control) {
+        .completed => |*pending| {
             pending.payload.deinit();
             var bytes = try probe.allocator().dupe(u8, "response");
             pending.payload = external_inbox_ledger.OwnedPayload.takeOwned(
@@ -21939,7 +23446,7 @@ test "d2b3a response seal rejects descriptor and allocator drift before callback
                 &bytes,
             );
             pending.seal = ResponsePayloadSeal.fromPayload(&pending.payload);
-            pending.owner_digest = pendingResponseDigest(&storage, pending);
+            pending.owner_digest = completedControlDigest(&storage, pending);
         },
         else => unreachable,
     }
@@ -21953,8 +23460,8 @@ test "d2b3a response seal rejects descriptor and allocator drift before callback
         payload_allocator_vtable,
     };
     inline for (std.meta.tags(Drift)) |drift| {
-        switch (storage.pending_response) {
-            .pending => |*pending| {
+        switch (storage.completed_control) {
+            .completed => |*pending| {
                 const original_seal = pending.seal;
                 const original_allocator = pending.payload.allocator;
                 switch (drift) {
@@ -22066,8 +23573,8 @@ test "d2b3a response cleanup callback cannot reenter owner teardown" {
         .mode = .teardown_reentry,
         .storage = &storage,
     };
-    switch (storage.pending_response) {
-        .pending => |*pending| {
+    switch (storage.completed_control) {
+        .completed => |*pending| {
             pending.payload.deinit();
             var bytes = try probe.allocator().dupe(u8, "response");
             pending.payload = external_inbox_ledger.OwnedPayload.takeOwned(
@@ -22075,7 +23582,7 @@ test "d2b3a response cleanup callback cannot reenter owner teardown" {
                 &bytes,
             );
             pending.seal = ResponsePayloadSeal.fromPayload(&pending.payload);
-            pending.owner_digest = pendingResponseDigest(&storage, pending);
+            pending.owner_digest = completedControlDigest(&storage, pending);
         },
         else => unreachable,
     }
@@ -22089,7 +23596,7 @@ test "d2b3a response cleanup callback cannot reenter owner teardown" {
         probe.nested_teardown.?,
     );
     try std.testing.expect(storage.liveOwnersValid());
-    try std.testing.expect(!storage.responsePending());
+    try std.testing.expect(!storage.controlResponsePending());
 }
 
 test "d2b1 snapshot cannot cross storage authority" {
@@ -27064,7 +28571,7 @@ test "d2b3c aggregate commit publishes one completed screen token atomically" {
     );
 }
 
-test "d2b3c response-only aggregate publishes one sealed pending owner" {
+test "d2b3c response-only aggregate publishes one sealed completed owner" {
     var fixture = try TestClient.init();
     defer fixture.deinitPeer();
     var storage: ExternalPumpStorage = .{};
@@ -27077,6 +28584,7 @@ test "d2b3c response-only aggregate publishes one sealed pending owner" {
         CommitAdoptionResult.adopted,
         storage.commitAdoption(),
     );
+    try std.testing.expect(armResponseCorrelationForTest(&storage, 77, 0));
     var ranges: external_owner_range.Scratch = .{};
     var lease: ExternalWholeTurnLease = .{};
     try storage.acquireWholeTurnLease(
@@ -27154,33 +28662,33 @@ test "d2b3c response-only aggregate publishes one sealed pending owner" {
         RxAggregateCommitResult.invalid_state,
         storage.commitRxAggregate(&lease, &intent_handle),
     );
-    try std.testing.expect(storage.pending_response == .none);
+    try std.testing.expect(storage.completed_control == .none);
     sealed_aggregate.destination_writes[0].target_addr =
         saved_target_addr;
     sealed_aggregate.destination_writes[0].digest =
         destinationWriteDigest(&sealed_aggregate.destination_writes[0]);
     sealed_aggregate.digest = preparedRxAggregateDigest(sealed_aggregate);
     const saved_response_generation =
-        storage.pending_response_generation;
-    storage.pending_response_generation +%= 1;
+        storage.completed_control_generation;
+    storage.completed_control_generation +%= 1;
     try std.testing.expectEqual(
         RxAggregateCommitResult.invalid_state,
         storage.commitRxAggregate(&lease, &intent_handle),
     );
-    try std.testing.expect(storage.pending_response == .none);
-    storage.pending_response_generation = saved_response_generation;
+    try std.testing.expect(storage.completed_control == .none);
+    storage.completed_control_generation = saved_response_generation;
     try std.testing.expectEqual(
         RxAggregateCommitResult.committed,
         storage.commitRxAggregate(&lease, &intent_handle),
     );
-    const pending = switch (storage.pending_response) {
-        .pending => |*value| value,
+    const pending = switch (storage.completed_control) {
+        .completed => |*value| value,
         else => return error.TestUnexpectedResult,
     };
     try std.testing.expectEqual(@as(u64, 77), pending.request_id);
     try std.testing.expectEqual(@as(u64, 1), pending.generation);
     try std.testing.expect(pending.seal.validatesPayload(&pending.payload));
-    try std.testing.expect(storage.pendingResponseValid());
+    try std.testing.expect(storage.completedControlValid());
     try std.testing.expectEqual(
         WholeTurnReleaseResult.released,
         storage.releaseWholeTurnLease(&lease),
@@ -27201,6 +28709,7 @@ test "d2b3c fixed writers preserve response then screen intent order" {
         CommitAdoptionResult.adopted,
         storage.commitAdoption(),
     );
+    try std.testing.expect(armResponseCorrelationForTest(&storage, 91, 0));
     var ranges: external_owner_range.Scratch = .{};
     var lease: ExternalWholeTurnLease = .{};
     try storage.acquireWholeTurnLease(
@@ -27341,7 +28850,7 @@ test "d2b3c fixed writers preserve response then screen intent order" {
         RxAggregateCommitResult.committed,
         storage.commitRxAggregate(&lease, &intent_handle),
     );
-    try std.testing.expect(storage.pendingResponseValid());
+    try std.testing.expect(storage.completedControlValid());
     try std.testing.expectEqual(@as(u8, 1), storage.live_screen.len);
     try std.testing.expectEqual(
         WholeTurnReleaseResult.released,
@@ -27593,7 +29102,7 @@ fn exerciseD2b3cMetadataEvent(
             storage.owner_metadata,
         ));
         try std.testing.expectEqual(@as(u8, 0), storage.live_screen.len);
-        try std.testing.expect(storage.pending_response == .none);
+        try std.testing.expect(storage.completed_control == .none);
         try std.testing.expectEqual(
             WholeTurnReleaseResult.released,
             storage.releaseWholeTurnLease(&lease),
@@ -28997,7 +30506,7 @@ test "C4d product replacement guard rejects phase copy candidate parser inventor
         .seal => |value| value,
         else => return error.TestUnexpectedResult,
     };
-    storage.pending_response = .terminal;
+    storage.completed_control = .terminal;
     try std.testing.expect(
         ProductReplacementAllocationGuard.check(
             &inventory_guard,
@@ -29006,7 +30515,7 @@ test "C4d product replacement guard rejects phase copy candidate parser inventor
             candidate_range,
         ) == .quarantined,
     );
-    storage.pending_response = .none;
+    storage.completed_control = .none;
 
     var alias_guard = ProductReplacementAllocationGuard{
         .storage = &storage,

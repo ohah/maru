@@ -142,6 +142,33 @@ pub const TxPollHint = struct {
     valid: bool = true,
 };
 
+pub const RequestFrameProgress = enum {
+    queued,
+    partial,
+    missing,
+    invalid,
+};
+
+/// Reads only a sealed live queue descriptor. Completion remains owned by the retirement sink;
+/// this projection distinguishes offset zero from a partially accepted control frame for f3.
+pub fn requestFrameProgress(
+    state: *const client_external_mode.State,
+    request_id: u64,
+    wire_len: usize,
+) RequestFrameProgress {
+    if (request_id == 0 or wire_len == 0 or queueDigest(state) == null)
+        return .invalid;
+    var match: ?RequestFrameProgress = null;
+    for (state.external_tx.items) |frame| {
+        if (frame.request_id != request_id) continue;
+        if (match != null or frame.kind != .request or frame.stream_id != 0 or
+            frame.bytes.len != wire_len or frame.offset >= frame.bytes.len)
+            return .invalid;
+        match = if (frame.offset == 0) .queued else .partial;
+    }
+    return match orelse .missing;
+}
+
 const WriteSnapshot = struct {
     queue_address: usize,
     queue_len: usize,
@@ -2824,6 +2851,64 @@ test "f1b partial write preserves resident then full write retires exactly once"
     try std.testing.expectEqual(@as(usize, 0), state.external_tx_bytes);
     try std.testing.expectEqual(@as(usize, 0), state.external_tx_retiring_bytes);
     try std.testing.expectEqual(@as(?i128, null), state.tx_head_progress_baseline_ns);
+}
+
+test "f2 request progress projects exact offset zero partial and retired states" {
+    var state = try initState();
+    defer state.deinit(std.testing.allocator);
+    var request_ids = client_pump.RequestIdState{ .available = 41 };
+    var storage: [64]u8 = undefined;
+    var client: [64]u8 = undefined;
+    const binding = testBinding(&storage, &client);
+    const admitted = admit(
+        std.testing.allocator,
+        &state,
+        &request_ids,
+        binding,
+        .{
+            .kind = .request,
+            .stream_id = 0,
+            .payload = "control",
+            .request_policy = .reserve,
+        },
+        100,
+    ).admitted;
+    try std.testing.expectEqual(
+        RequestFrameProgress.queued,
+        requestFrameProgress(&state, admitted.request_id, admitted.wire_len),
+    );
+    var first_probe = WriteProbe{ .outcome_count = 2 };
+    first_probe.outcomes[0] = .{ .written = 5 };
+    const first = writeTurnFromExternalPump(
+        testOwnerValid,
+        @ptrCast(&state),
+        std.testing.allocator,
+        &state,
+        binding,
+        first_probe.ops(),
+        101,
+    );
+    try std.testing.expect(first.terminal == null);
+    try std.testing.expectEqual(
+        RequestFrameProgress.partial,
+        requestFrameProgress(&state, admitted.request_id, admitted.wire_len),
+    );
+    var second_probe = WriteProbe{ .outcome_count = 1 };
+    second_probe.outcomes[0] = .{ .written = admitted.wire_len - 5 };
+    const second = writeTurnFromExternalPump(
+        testOwnerValid,
+        @ptrCast(&state),
+        std.testing.allocator,
+        &state,
+        binding,
+        second_probe.ops(),
+        102,
+    );
+    try std.testing.expect(second.terminal == null);
+    try std.testing.expectEqual(
+        RequestFrameProgress.missing,
+        requestFrameProgress(&state, admitted.request_id, admitted.wire_len),
+    );
 }
 
 test "f1b deadline is checked before write and EINTR ninth attempt terminalizes" {

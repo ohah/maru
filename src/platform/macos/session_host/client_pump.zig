@@ -94,18 +94,8 @@ pub const ControlKind = enum {
     resync,
 };
 
-pub const InFlightControlState = struct {
-    kind: ControlKind,
-    target_stream_id: u64,
-    expected_controller_generation: u64,
-    request_id: u64,
-    deadline_ns: i128,
-    tx_fully_sent: bool = false,
-};
-
 pub const AuthorityState = union(enum) {
     valid,
-    control: InFlightControlState,
     host_recovery: HostRecoveryPhase,
     client_recovery: ClientRecoveryPhase,
 };
@@ -186,7 +176,7 @@ fn enterRecovery(
 
 fn recoveryContext(state: AuthorityState) ?RecoveryContext {
     return switch (state) {
-        .valid, .control => null,
+        .valid => null,
         .host_recovery => |phase| switch (phase) {
             .ack_unadmitted => |context| context,
             .ack_queued => |context| context,
@@ -236,7 +226,7 @@ pub fn planRecoveryTransition(
     if (input.trigger == .fresh_commit) return planFreshRecoveryCommit(input);
 
     switch (input.state) {
-        .valid, .control => {
+        .valid => {
             if (input.new_context == null) return terminalRecoveryPlan();
             const cancel = switch (input.control) {
                 .none => false,

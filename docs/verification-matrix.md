@@ -26,9 +26,10 @@
 > (a) pure correlation reducer,
 > (b) TX/request-ID와 semantic correlation의 atomic admission 및 exact completion seal,
 > (c) RX deadline/header/request-ID preflight 뒤 기존 raw response owner를 대체하는 completed owner,
-> (d) authority-clear private prepared take와 exact-once cleanup/product socketpair
-> 네 gate를 모두 통과해야 완료다. f2에서는 제품 semantic apply를 열지 않으며 f3가 same-drain
-> revoke/EOF 우선순위를 닫기 전 public control/whole-turn 완료를 주장하지 않는다.
+> (d) completed source-turn에 결속된 private prepared take와 비탈출 exact-once
+> cleanup/product socketpair 네 gate를 모두 통과해야 완료다. f2에서는 제품 semantic apply를 열지
+> 않으며, f3가 same-drain revoke/EOF 우선순위와 authority-clear drain permit을 닫기 전 public
+> control/whole-turn 완료를 주장하지 않는다.
 
 > 2b2d2는 d2a pure classifier, d2b buffered/inherited bounded turn, d2c injected nonblocking
 > read/admit, d2d RX-first whole-turn authority barrier를 모두 구현했다. 네 단계의

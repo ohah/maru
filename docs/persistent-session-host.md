@@ -2565,15 +2565,17 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             next_deadline_ns: ?i128}`와 다음 합성 상태를 소유한다.
             `ExternalPumpState = constructing | adopting | active(AuthorityState) |
             terminal{reason,fd_disposition}`이고, `AuthorityState = valid |
-            control(InFlightControlState) | host_recovery(HostRecoveryPhase) |
+            host_recovery(HostRecoveryPhase) |
             client_recovery(ClientRecoveryPhase)`다. host/client phase는 각각 자기
             `awaiting_snapshot{epoch,expected_token_generation}`과
-            `applied_pending{epoch,expected_token_generation}`을 가지므로 origin을 잃지 않는다. generic control과
-            recovery control을 동시에 표현하는 별도 bool/optional/enum 미러는 만들지 않는다.
+            `applied_pending{epoch,expected_token_generation}`을 가지므로 origin을 잃지 않는다. `AuthorityState`는
+            recovery/input gate만 소유하며 generic control correlation을 미러하지 않는다.
             parser/TX queue와 raw/TX clocks의 단일 소유자는 기존 `storage.client.io_mode.external`이고,
             `ExternalPumpState`는 semantic authority/lifecycle만 소유한다. 기존 2a placeholder
-            `ExternalModeState.in_flight_control`은 2b2a에서 제거하고, 실제 control correlation은 2b2f2의
-            `ExternalPumpState.control` 한 곳에만 추가한다. 같은 control/transport 상태를 양쪽에 복제하지 않는다.
+            `ExternalModeState.in_flight_control`과 과도기 `AuthorityState.control`은 제거하고, 실제 control
+            correlation은 2b2f2의 final-address `ExternalPumpStorage.control_correlation` 한 곳에만 둔다.
+            recovery phase는 resync가 대기 중이라는 input-gate 의미만 소유하고 request ID/TX progress/payload를
+            복제하지 않는다. 같은 control/transport 상태를 양쪽에 복제하지 않는다.
             `RequestIdState = available(next: u64) | last_available | max_consumed`도 이 slice의 pure DTO로
             정의해 adoption과 f1이 같은 타입을 쓴다.
             `next_deadline_ns`는 active raw/logical/TX/control/recovery deadline의 minimum이고 owner는
@@ -8837,8 +8839,13 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           evidence로 읽는다. `admitControl`은 whole-turn lease 안에서 authority/correlation/deadline arithmetic을
           먼저 봉인한 뒤 f1 prepared admission을 실행한다. backpressure/OOM/request exhaustion/clock overflow는
           request ID·queue·authority mutation 0이다. f1 commit 뒤 semantic suffix는 callback과 실패 분기가 없는
-          scalar store이며, 그 suffix를 수행할 seal이 사전에 깨졌다면 f1도 commit하지 않고 canonical terminal로 간다.
-          따라서 correlation 없는 admitted frame이나 fully-sent 뒤 correlation 없이 retire된 frame은 존재하지 않는다.
+          scalar store다. f1 preflight 전에 확인할 수 있는 seal 불일치는 commit 0이고, f1 내부 commit 뒤에만
+          드러나는 returned descriptor/candidate 불일치는 아래 post-commit fail-close 규칙을 따른다.
+          f1 commit 뒤 sealed scalar suffix의 비교가 실패하면 이미 admit된 frame을 없었던 것으로 되돌렸다고
+          주장하지 않는다. 대신 storage를 canonical terminal로 닫고 f1 queue와 correlation candidate를 같은 owner
+          teardown transaction이 정리한다. 따라서 정상 live 상태에는 correlation 없는 admitted frame이나
+          fully-sent 뒤 correlation 없이 retire된 frame이 존재하지 않으며, post-commit mismatch는 복구가 아니라
+          fail-close 대상이다.
           저장되는 deadline SSOT는 clock을 품은 객체가 아니라 overflow를 검사한 `deadline_ns:i128` scalar이며
           `pollHint`는 recovery/TX/control 중 가장 이른 deadline을 투영한다.
 
@@ -8856,10 +8863,13 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           completed owner의 immutable identity와 payload seal에는 storage address, owner incarnation, correlation
           generation과 target generation을 포함한다.
 
-          f2의 `takeControlResponse`는 whole drain이 authority-clear이고 terminal/revoke evidence가 없다고 봉인된
-          **private prepared take**까지만 개방한다. stale copy/double/cross-storage take를 거부하는 generation seal과
-          frozen cleanup descriptor를 사용하며, f3 전에는 제품 caller가 semantic apply하거나 input gate를 열 수 없다.
-          f3가 strict revoke/EOF 우선순위를 whole-turn으로 닫은 뒤 같은 take를 제품 suffix에 공개한다.
+          f2의 `takeControlResponse`는 completed owner의 immutable source-turn/owner/correlation evidence에 결속된
+          **private prepared take와 비탈출 exact-cleanup transaction**까지만 개방한다. stale
+          copy/double/cross-storage take를 거부하는 generation seal을 사용하고 frozen cleanup descriptor는 같은
+          whole-turn call을 벗어나지 않는다. f2에서는 성공 semantic verdict나 input-gate clear를 제품 caller에
+          공개하지 않는다. f3가 strict revoke/EOF 우선순위를 닫고 `authority_clear && terminal/revoke 없음`인
+          drain permit을 추가로 봉인한 뒤에만 typed semantic verdict를 받는 제품 suffix로 공개한다. 즉 f2의
+          completed-owner seal 자체를 whole-drain permit이라고 부르지 않는다.
           forced-first-resize처럼 response 자체가 mutation barrier인 kind는 `runtime.resize`의 echoed sequence,
           applied size/generation/changed와 target stream/controller generation을 strict decode한 성공 apply 뒤에만
           해당 input gate를 연다. `runtime.resync`는 exact `{"result":{"resync":true}}` 성공 response에서
@@ -8868,12 +8878,13 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           fresh-clock pump의 deadline-first commit만 `valid`로 전이해 input을 다시 연다. error envelope,
           malformed/foreign/stale semantic payload는 close다.
 
-          take, semantic failure, revoke, timeout/EOF, allocation 실패와 owner teardown은 pending/completed payload와
-          correlation을 같은 exact-once frozen cleanup transaction으로 닫는다. `RequestIdState.last_available`은
+          f2의 private take, timeout, allocation 실패와 owner teardown은 completed payload와 correlation을
+          exact-once cleanup transaction으로 닫는다. semantic failure/revoke/EOF와 결합된 whole-drain cleanup은
+          f3의 drain permit·우선순위 gate가 추가된 뒤 같은 cleanup leaf를 호출한다. `RequestIdState.last_available`은
           `maxInt(u64)`을 마지막 한 번 예약하면서 `max_consumed`로 전이하고, 그 response를 take한 뒤에도 다음 admission은
           wire 0 `request_id_exhausted` terminal로 stale ID/0 wrap을 허용하지 않는다. pure reducer,
           allocation fail-index, injected whole-turn, 실제 Darwin socketpair가 request 없음/offset 0/partial/fully-sent의
-          same·wrong·zero ID, duplicate before/after take, 역순 response, deadline-1/exact/+1, response+FIN,
+          same·wrong·zero ID, duplicate before take, 역순 response, deadline-1/exact/+1,
           payload cap/cap+1과 cleanup final-zero를 고정해야 2b2f2 완료다. RX-first 규칙상 turn 시작 시
           `response_wait`였던 control만 그 turn의 response를 받을 수 있다. 같은 readable+writable turn의 TX suffix가
           막 fully-sent로 만든 control에 이미 RX로 도착한 response는 early protocol error다. 구현 gate는
@@ -8899,7 +8910,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           partial TX cleanup과 allocation fail-index를 결정적으로 검증한다. host-origin recovery는 invalidated
           barrier→ACK cap-full retry/ACK OOM terminal→fully-sent, pre-ACK stale snapshot drop와 post-ACK fresh
           snapshot apply-clear를 별도 fixture로 고정한다.
-          동시에 readable+writable, response 뒤 같은 drain revoke, timer-only wake,
+          동시에 readable+writable, duplicate after typed-success take, response+FIN, response 뒤 같은 drain revoke, timer-only wake,
           socketpair/fail-index/stress를 통과해야 하며 f1~f3가 모두 green이기 전에는 TX/control/turn 통합을
           완료로 표시하지 않는다.
 

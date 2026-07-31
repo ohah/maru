@@ -1143,7 +1143,8 @@ pub export fn maru_macos_app_session_file_panel_entry(
     // text·svg는 markdown과 같은 신뢰 config(1)로 태우고, 소스 CM6 언어·svg 프리뷰 선택은 file_panel_language의
     // `?lang=`과 file_panel_shell_kind의 `?kind=svg` 힌트가 맡는다(§2.2·§2.3).
     return switch (info.kind) {
-        .markdown, .text, .svg => 1,
+        // diff(E1)는 신뢰 shell에 CM6 MergeView를 마운트한다 — 내용은 diff.open이 주므로 파일 URL을 로드하지 않는다.
+        .markdown, .text, .svg, .diff => 1,
         // html·image·media·pdf는 격리 loadFileURL(2). Swift가 filePanelPath를 loadFileURL(_:allowingReadAccessTo:)로
         // 로드하고 WebKit이 HTML/PDF/이미지/미디어를 네이티브 렌더한다(§2.2) — image(FP14b)·media(FP15)는 WebKit이
         // 만드는 image/media document이고 커스텀 UX(줌·팬·체커)는 주입 스크립트가 얹는다. 신뢰 shell URL·bridge를 안 쓴다.

@@ -415,7 +415,10 @@ fn writePane(w: *std.Io.Writer, pane: Pane) !void {
     try w.writeAll("\"");
     // 파일 Term은 `surface` 줄이 아니라 이 줄의 반복 필드다(§5.0). `surfaces` 개수 필드는 **PTY surface 수**로
     // 남는다 — 옛 리더가 그 수만큼 `surface` 줄을 읽는 계약이라 건드리면 하위호환이 깨진다.
-    for (pane.file_terms) |ft| try writeFileTerm(w, ft);
+    // **diff Term은 저장하지 않는다**(docs/editor-surface.md §3.5). diff는 디스크 파일이 아니라 그 시점 git 상태의
+    // 비교 결과라, 다음 실행에서 되살리면 저장할 때 보던 화면과 다른 것을 같은 것처럼 보여 준다. 되살릴 값이
+    // 아니라 다시 계산할 값이므로 소스 컨트롤 목록에서 다시 연다.
+    for (pane.file_terms) |ft| if (ft.kind != .diff) try writeFileTerm(w, ft);
     for (pane.browser_terms) |bt| try writeBrowserTerm(w, bt);
     if (pane.active_browser) |ab| try w.print(" active-browser={d}", .{ab});
     try w.writeAll("\n");
@@ -892,6 +895,8 @@ fn parseFileTerm(encoded: []const u8) DockEntryParseError!FileTerm {
 }
 
 fn parseEntryKindName(raw: []const u8) ?dock_panel.EntryKind {
+    // writer가 절대 쓰지 않는 값은 reader도 받지 않는다 — 손으로 쓴 파일이 복원 못 할 상태를 만들지 못하게.
+    if (std.mem.eql(u8, raw, "diff")) return null;
     inline for (@typeInfo(dock_panel.EntryKind).@"enum".fields) |field| {
         if (std.mem.eql(u8, raw, field.name)) return @field(dock_panel.EntryKind, field.name);
     }
@@ -2535,4 +2540,26 @@ test "workspace FP16: 모르는 kind의 file-term은 그 항목만 버리고 창
     const pane = parsed.workspace.windows[0].tabs[0].panes[0];
     try std.testing.expectEqual(@as(usize, 0), pane.file_terms.len); // 미지 kind는 그 항목만 버린다
     try std.testing.expectEqual(@as(usize, 1), pane.surfaces.len); // 창·pane은 살아남는다
+}
+
+test "diff 파일 Term은 저장되지 않고 파일에서 읽히지도 않는다" {
+    // diff는 그 시점 git 상태의 비교 결과다. 되살리면 저장할 때 보던 것과 다른 화면을 같은 것처럼 보여 주므로
+    // 저장 대상이 아니다(docs/editor-surface.md §3.5). 대신 소스 컨트롤 목록에서 다시 연다.
+    const allocator = std.testing.allocator;
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    defer buf.deinit();
+    const panes = [_]Pane{.{
+        .surfaces = &.{},
+        .file_terms = &.{
+            .{ .index = 0, .kind = .markdown, .mode = .read, .path = "/tmp/keep.md" },
+            .{ .index = 1, .kind = .diff, .mode = .read, .path = "/tmp/drop.zig" },
+        },
+    }};
+    try writePane(&buf.writer, panes[0]);
+    const text = buf.written();
+    try std.testing.expect(std.mem.indexOf(u8, text, "keep.md") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "drop.zig") == null);
+    // 손으로 diff를 적어 넣어도 읽지 않는다(복원 못 할 상태를 파일이 만들지 못하게).
+    try std.testing.expect(parseEntryKindName("diff") == null);
+    try std.testing.expect(parseEntryKindName("markdown") != null);
 }

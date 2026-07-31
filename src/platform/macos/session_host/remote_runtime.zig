@@ -15,6 +15,7 @@ const terminal = maru.terminal;
 const Surface = maru.session.Surface;
 const term_backend = maru.app.term_runtime_backend;
 const client_mod = @import("client.zig");
+const control_response_wire = @import("control_response_wire.zig");
 const protocol = @import("protocol.zig");
 const screen_assembler = @import("screen_assembler.zig");
 const runtime_event_wire = @import("runtime_event_wire.zig");
@@ -611,10 +612,18 @@ pub const RemoteRuntime = struct {
             return error.SequenceExhausted;
         self.resize_seq += 1;
         var buf: [96]u8 = undefined;
-        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d},\"cols\":{d},\"rows\":{d},\"client_sequence\":{d}}}", .{ self.attachment.streamId(), cols, rows, self.resize_seq }) catch return error.OutOfMemory;
-        const resp = try self.callOrdered("runtime.resize", params);
+        const encoded = control_response_wire.encodeParams(&buf, .{ .resize = .{
+            .stream_id = self.attachment.streamId(),
+            .cols = cols,
+            .rows = rows,
+            .client_sequence = self.resize_seq,
+        } }) catch |err| return switch (err) {
+            error.InvalidRequest => error.ResizeRejected,
+            error.BufferTooSmall => error.OutOfMemory,
+        };
+        const resp = try self.callOrdered(encoded.method, encoded.params);
         defer self.allocator.free(resp);
-        const reply = parseResizeReply(self.allocator, resp, self.resize_seq) catch |err| {
+        const reply = decodeResizeReply(self.allocator, resp, self.resize_seq) catch |err| {
             if (err == error.ProtocolError) self.client.failClosed();
             return err;
         };
@@ -622,7 +631,7 @@ pub const RemoteRuntime = struct {
             .stale => {},
             .applied => |applied| {
                 _ = try self.applyResizeFullState(
-                    applied.size,
+                    .{ .cols = applied.cols, .rows = applied.rows },
                     applied.resize_generation,
                 );
             },
@@ -838,9 +847,15 @@ pub const RemoteRuntime = struct {
     /// 받아 generation을 리셋해 복구한다(delta는 base_generation이 현재라 stale client를 못 고쳐 snapshot이 유일한 복구). 응답 무시.
     pub fn requestResync(self: *RemoteRuntime) client_mod.ClientError!void {
         var buf: [64]u8 = undefined;
-        const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d}}}", .{self.attachment.streamId()}) catch return error.OutOfMemory;
-        const resp = try self.callOrdered("runtime.resync", params);
-        self.allocator.free(resp);
+        const encoded = control_response_wire.encodeParams(&buf, .{ .resync = .{
+            .stream_id = self.attachment.streamId(),
+        } }) catch |err| return switch (err) {
+            error.InvalidRequest => error.ProtocolError,
+            error.BufferTooSmall => error.OutOfMemory,
+        };
+        const resp = try self.callOrdered(encoded.method, encoded.params);
+        defer self.allocator.free(resp);
+        try decodeResyncReply(self.client, self.allocator, resp);
     }
 
     /// periodic event보다 강한 metadata barrier. SSH upload처럼 stale destination으로 실행하면 안 되는 user action이
@@ -1485,125 +1500,131 @@ pub const RemoteRuntime = struct {
     }
 };
 
-const ResizeReply = union(enum) {
-    stale,
-    applied: struct {
-        size: terminal.Size,
-        resize_generation: u64,
-        changed: bool,
-    },
-};
-
-fn parseResizeReply(
+fn decodeResizeReply(
     allocator: std.mem.Allocator,
     payload: []const u8,
     expected_sequence: u64,
-) RemoteRuntime.ResizeError!ResizeReply {
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, payload, .{}) catch |err| return switch (err) {
+) RemoteRuntime.ResizeError!control_response_wire.ResizeReply {
+    return control_response_wire.decodeResizeResponse(
+        allocator,
+        payload,
+        .{ .resize = .{ .client_sequence = expected_sequence } },
+    ) catch |err| return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
-        else => error.ProtocolError,
+        error.RuntimeNotFound => error.RuntimeNotFound,
+        error.ResourceExhausted => error.ResourceExhausted,
+        error.Rejected => error.ResizeRejected,
+        error.Malformed => error.ProtocolError,
     };
-    defer parsed.deinit();
-    const root = switch (parsed.value) {
-        .object => |object| object,
-        else => return error.ProtocolError,
-    };
-    if (root.get("error")) |error_value| {
-        if (root.count() != 1) return error.ProtocolError;
-        const wire_error = switch (error_value) {
-            .string => |value| value,
-            else => return error.ProtocolError,
+}
+
+fn decodeResyncReply(
+    client: *client_mod.Client,
+    allocator: std.mem.Allocator,
+    payload: []const u8,
+) client_mod.ClientError!void {
+    control_response_wire.decodeResyncEnvelope(allocator, payload) catch |err| {
+        if (err != error.OutOfMemory) client.failClosed();
+        return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.ProtocolError,
         };
-        const code = protocol.ErrorCode.fromWireName(wire_error) orelse return error.ProtocolError;
-        return switch (code) {
-            .runtime_not_found => error.RuntimeNotFound,
-            .resource_exhausted => error.ResourceExhausted,
-            else => error.ResizeRejected,
-        };
-    }
-    if (root.count() != 1) return error.ProtocolError;
-    const result_value = root.get("result") orelse return error.ProtocolError;
-    const result = switch (result_value) {
-        .object => |object| object,
-        else => return error.ProtocolError,
     };
-    if (result.get("stale")) |stale_value| {
-        if (result.count() != 1) return error.ProtocolError;
-        const stale = switch (stale_value) {
-            .bool => |value| value,
-            else => return error.ProtocolError,
-        };
-        if (!stale) return error.ProtocolError;
-        return .stale;
-    }
-    if (result.count() != 5) return error.ProtocolError;
-    const cols_raw = switch (result.get("cols") orelse return error.ProtocolError) {
-        .integer => |value| value,
-        else => return error.ProtocolError,
-    };
-    const rows_raw = switch (result.get("rows") orelse return error.ProtocolError) {
-        .integer => |value| value,
-        else => return error.ProtocolError,
-    };
-    switch (result.get("client_sequence") orelse return error.ProtocolError) {
-        .integer => |value| if (value < 0 or
-            std.math.cast(u64, value) != expected_sequence) return error.ProtocolError,
-        else => return error.ProtocolError,
-    }
-    const generation = switch (result.get("resize_generation") orelse return error.ProtocolError) {
-        .integer => |value| if (value >= 0)
-            std.math.cast(u64, value) orelse return error.ProtocolError
-        else
-            return error.ProtocolError,
-        else => return error.ProtocolError,
-    };
-    const changed = switch (result.get("changed") orelse return error.ProtocolError) {
-        .bool => |value| value,
-        else => return error.ProtocolError,
-    };
-    if (cols_raw < 0 or rows_raw < 0) return error.ProtocolError;
-    const cols = std.math.cast(u16, cols_raw) orelse return error.ProtocolError;
-    const rows = std.math.cast(u16, rows_raw) orelse return error.ProtocolError;
-    if (cols < 2 or rows < 1) return error.ProtocolError;
-    return .{ .applied = .{
-        .size = .{ .cols = cols, .rows = rows },
-        .resize_generation = generation,
-        .changed = changed,
-    } };
 }
 
 fn shouldSendCoreCommand(runtime_core_command_v1: bool, command: core_command_wire.Command) bool {
     return runtime_core_command_v1 or command.isLegacyScroll();
 }
 
-test "remote runtime: resize reply preserves stale size and uses host-clamped applied size" {
+test "f3c0 remote runtime resize reply preserves stale size and uses host-clamped applied size" {
     try std.testing.expectEqual(
-        ResizeReply.stale,
-        try parseResizeReply(std.testing.allocator, "{\"result\":{\"stale\":true}}", 7),
+        control_response_wire.ResizeReply.stale,
+        try decodeResizeReply(std.testing.allocator, "{\"result\":{\"stale\":true}}", 7),
     );
     try std.testing.expectEqual(
-        terminal.Size{ .cols = 2, .rows = 1 },
-        (try parseResizeReply(
+        @as(u16, 2),
+        (try decodeResizeReply(
             std.testing.allocator,
             "{\"result\":{\"cols\":2,\"rows\":1,\"client_sequence\":7,\"resize_generation\":3,\"changed\":true}}",
             7,
-        )).applied.size,
+        )).applied.cols,
     );
     try std.testing.expectError(
         error.ResourceExhausted,
-        parseResizeReply(std.testing.allocator, "{\"error\":\"resource_exhausted\"}", 7),
+        decodeResizeReply(std.testing.allocator, "{\"error\":\"resource_exhausted\"}", 7),
     );
     try std.testing.expectError(
         error.ProtocolError,
-        parseResizeReply(std.testing.allocator, "{\"result\":{\"cols\":1,\"rows\":1,\"client_sequence\":7,\"resize_generation\":3,\"changed\":true}}", 7),
+        decodeResizeReply(std.testing.allocator, "{\"result\":{\"cols\":1,\"rows\":1,\"client_sequence\":7,\"resize_generation\":3,\"changed\":true}}", 7),
     );
     try std.testing.expectError(
         error.ProtocolError,
-        parseResizeReply(
+        decodeResizeReply(
             std.testing.allocator,
             "{\"result\":{\"cols\":2,\"rows\":1,\"client_sequence\":8,\"resize_generation\":3,\"changed\":true}}",
             7,
         ),
+    );
+}
+
+test "f3c0 remote runtime resync maps valid malformed error and OOM without drift" {
+    var valid_client = client_mod.Client{
+        .allocator = std.testing.allocator,
+        .fd = -1,
+        .host_id = 1,
+        .parser = framing.FrameParser.init(std.testing.allocator),
+    };
+    defer valid_client.deinit();
+    try decodeResyncReply(
+        &valid_client,
+        std.testing.allocator,
+        "{\"result\":{\"resync\":true}}",
+    );
+    try std.testing.expect(!valid_client.unusable);
+
+    inline for (.{
+        "{\"result\":{\"resync\":false}}",
+        "{\"error\":\"invalid_request\"}",
+    }) |payload| {
+        var rejected = client_mod.Client{
+            .allocator = std.testing.allocator,
+            .fd = -1,
+            .host_id = 1,
+            .parser = framing.FrameParser.init(std.testing.allocator),
+        };
+        defer rejected.deinit();
+        try std.testing.expectError(
+            error.ProtocolError,
+            decodeResyncReply(&rejected, std.testing.allocator, payload),
+        );
+        try std.testing.expect(rejected.unusable);
+    }
+
+    const Runner = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var client = client_mod.Client{
+                .allocator = std.testing.allocator,
+                .fd = -1,
+                .host_id = 1,
+                .parser = framing.FrameParser.init(std.testing.allocator),
+            };
+            defer client.deinit();
+            decodeResyncReply(
+                &client,
+                allocator,
+                "{\"result\":{\"resync\":true}}",
+            ) catch |err| {
+                if (err != error.OutOfMemory) return err;
+                try std.testing.expect(!client.unusable);
+                return err;
+            };
+            try std.testing.expect(!client.unusable);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        Runner.run,
+        .{},
     );
 }
 
@@ -4119,7 +4140,7 @@ test "remote runtime: link decode OOM은 소유 메모리를 회수하고 connec
     try testing.checkAllAllocationFailures(testing.allocator, Runner.run, .{});
 }
 
-test "remote runtime: requestResync makes the host push a fresh snapshot (desync 복구)" {
+test "f3c0 remote runtime requestResync makes the host push a fresh snapshot (desync 복구)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     const io = testing.io;

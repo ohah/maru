@@ -4,6 +4,7 @@
 const std = @import("std");
 
 pub const max_inventory_runtimes: usize = 4096;
+pub const max_control_json: usize = 256 * 1024;
 
 pub const ErrorCode = enum {
     host_unavailable,

@@ -3330,7 +3330,7 @@ test "f2 control correlation reducer stays dependency neutral" {
     );
     defer allocator.free(source);
     try std.testing.expectEqual(
-        @as(usize, 2),
+        @as(usize, 3),
         std.mem.count(u8, source, "@import(\""),
     );
     try std.testing.expectEqual(
@@ -3341,6 +3341,10 @@ test "f2 control correlation reducer stays dependency neutral" {
         @as(usize, 1),
         std.mem.count(u8, source, "@import(\"client_pump.zig\")"),
     );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        std.mem.count(u8, source, "@import(\"control_response_wire.zig\")"),
+    );
     inline for (.{
         "client_external_pump.zig",
         "client_external_tx.zig",
@@ -3350,6 +3354,94 @@ test "f2 control correlation reducer stays dependency neutral" {
         try std.testing.expect(
             std.mem.indexOf(u8, source, forbidden_import) == null,
         );
+}
+
+test "f3c0 control wire is the typed product codec without drain capability" {
+    const allocator = std.testing.allocator;
+    const codec = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/control_response_wire.zig",
+    );
+    defer allocator.free(codec);
+    const runtime = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/remote_runtime.zig",
+    );
+    defer allocator.free(runtime);
+    const pump = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/client_external_pump.zig",
+    );
+    defer allocator.free(pump);
+    const protocol_source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/protocol.zig",
+    );
+    defer allocator.free(protocol_source);
+
+    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, codec, "@import(\""));
+    try std.testing.expect(std.mem.indexOf(u8, codec, "client_external_pump.zig") == null);
+    try std.testing.expect(std.mem.indexOf(u8, codec, "remote_runtime.zig") == null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        protocol_source,
+        "host_protocol.max_control_json",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        codec,
+        "host_protocol.max_control_json",
+    ) != null);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        std.mem.count(u8, runtime, "control_response_wire.decodeResizeResponse("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        std.mem.count(u8, runtime, "control_response_wire.decodeResyncEnvelope("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        std.mem.count(u8, runtime, "control_response_wire.encodeParams("),
+    );
+    try std.testing.expect(std.mem.indexOf(u8, runtime, "fn parseResizeReply(") == null);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        std.mem.count(u8, pump, "control_response_wire.encodeRequest("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 4),
+        std.mem.count(u8, pump, "PreparedWholeDrainPermit"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 4),
+        std.mem.count(u8, pump, "PreparedControlSemanticVerdict"),
+    );
+    const permit = betweenMarkers(
+        pump,
+        "const PreparedWholeDrainPermit = struct {",
+        "const ControlSemanticValue = union(enum) {",
+    ) orelse return error.TestUnexpectedResult;
+    inline for (.{
+        "saved_self_addr",       "storage_addr",               "lease_addr",             "owner_incarnation",
+        "operation_generation",  "turn_generation",            "parser_generation",      "parser_absolute_start",
+        "parser_absolute_end",   "parser_seal_digest",         "sampled_now_ns",         "authority_generation",
+        "authority_seal_digest", "completed_owner_generation", "correlation_generation", "tx_queue_generation",
+        "lifecycle",             "digest",
+    }) |field| try std.testing.expect(std.mem.indexOf(u8, permit, field) != null);
+    const verdict = betweenMarkers(
+        pump,
+        "const PreparedControlSemanticVerdict = struct {",
+        "const ConsumeResyncAckResult = enum {",
+    ) orelse return error.TestUnexpectedResult;
+    inline for (.{
+        "completed_payload_seal", "request_id",           "control_kind",          "expectation",
+        "target",                 "authority_generation", "authority_seal_digest", "permit_digest",
+        "lifecycle",              "digest",
+    }) |field| try std.testing.expect(std.mem.indexOf(u8, verdict, field) != null);
+    inline for (.{ "consumed", "stale", "invalid", "terminal" }) |outcome|
+        try std.testing.expect(std.mem.indexOf(u8, pump, outcome) != null);
+    try std.testing.expect(std.mem.indexOf(u8, pump, "const ConsumeResyncAckUnderHeldLeaseFn") != null);
 }
 
 fn containsForbiddenExternalBuiltin(source: [:0]const u8) bool {

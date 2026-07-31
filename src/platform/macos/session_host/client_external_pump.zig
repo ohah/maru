@@ -10,6 +10,7 @@ const c = std.c;
 const posix = std.posix;
 const client_mod = @import("client.zig");
 const client_control_correlation = @import("client_control_correlation.zig");
+const control_response_wire = @import("control_response_wire.zig");
 const client_external_mode = @import("client_external_mode.zig");
 const client_external_tx = @import("client_external_tx.zig");
 const checked_event_counter = @import("checked_event_counter.zig");
@@ -47,10 +48,8 @@ pub const AttachmentRole = client_external_turn_authority.AttachmentRole;
 pub const TxAdmissionSpec = client_external_tx.AdmissionSpec;
 pub const TxAdmissionResult = client_external_tx.AdmissionResult;
 pub const ControlAdmissionSpec = struct {
-    kind: client_pump.ControlKind,
-    target_stream_id: u64,
+    request: control_response_wire.ControlRequest,
     expected_controller_generation: u64,
-    payload: []const u8,
 };
 pub const ControlAdmissionResult = union(enum) {
     admitted: client_external_tx.Admitted,
@@ -744,6 +743,9 @@ const FrozenRevokeCorrelation = struct {
     present: bool = false,
     completed: bool = false,
     kind: client_pump.ControlKind = .resize,
+    expectation: control_response_wire.ControlExpectation = .{
+        .resize = .{ .client_sequence = 0 },
+    },
     target: client_control_correlation.Target = .{
         .stream_id = 0,
         .controller_generation = 0,
@@ -764,6 +766,7 @@ fn frozenRevokeCorrelationDigest(
     writer.writeBool(frozen.present);
     writer.writeBool(frozen.completed);
     writer.writeU8(@intFromEnum(frozen.kind));
+    writeControlExpectation(&writer, frozen.expectation);
     writeControlTarget(&writer, frozen.target);
     writer.writeU64(frozen.request_id);
     writer.writeUsize(frozen.wire_len);
@@ -779,6 +782,13 @@ fn writeControlTarget(
     writer.writeU64(target.controller_generation);
 }
 
+fn writeControlExpectation(
+    writer: *external_owner_seal.Writer,
+    expectation: control_response_wire.ControlExpectation,
+) void {
+    writer.writeBytes(&control_response_wire.expectationDigest(expectation));
+}
+
 fn controlCorrelationDigest(
     owner: *const ControlCorrelationOwner,
 ) external_owner_seal.Digest {
@@ -792,6 +802,7 @@ fn controlCorrelationDigest(
         .idle, .terminal => {},
         .in_flight => |control| {
             writer.writeU8(@intFromEnum(control.kind));
+            writeControlExpectation(&writer, control.expectation);
             writeControlTarget(&writer, control.target);
             writer.writeU64(control.request_id);
             writer.writeUsize(control.wire_len);
@@ -800,6 +811,7 @@ fn controlCorrelationDigest(
         },
         .completed => |control| {
             writer.writeU8(@intFromEnum(control.kind));
+            writeControlExpectation(&writer, control.expectation);
             writeControlTarget(&writer, control.target);
             writer.writeU64(control.request_id);
             writer.writeUsize(control.wire_len);
@@ -850,11 +862,13 @@ fn frozenRevokeCorrelationCurrent(
             frozen.wire_len == 0,
         .in_flight => |control| frozen.present and !frozen.completed and
             frozen.kind == control.kind and
+            std.meta.eql(frozen.expectation, control.expectation) and
             std.meta.eql(frozen.target, control.target) and
             frozen.request_id == control.request_id and frozen.wire_len == control.wire_len and
             control.progress == .queued,
         .completed => |control| frozen.present and frozen.completed and
             frozen.kind == control.kind and
+            std.meta.eql(frozen.expectation, control.expectation) and
             std.meta.eql(frozen.target, control.target) and
             frozen.request_id == control.request_id and
             frozen.wire_len == control.wire_len,
@@ -1881,6 +1895,9 @@ const CompletedControlState = struct {
     seal: ResponsePayloadSeal,
     request_id: u64 = 0,
     control_kind: client_pump.ControlKind = .resize,
+    expectation: control_response_wire.ControlExpectation = .{
+        .resize = .{ .client_sequence = 0 },
+    },
     target_stream_id: u64 = 0,
     expected_controller_generation: u64 = 0,
     control_wire_len: usize = 0,
@@ -1903,6 +1920,79 @@ const ControlResponseTakeLifecycle = enum {
     prepared,
     consumed_tombstone,
 };
+
+// F3c0 only fixes the final-address vocabulary consumed by the next two slices. There is
+// intentionally no constructor or callable consumer yet: whole-drain authority cannot be minted
+// until 2b2e-integration owns resync phase mutation and f3c proves the drain barrier.
+const PreparedWholeDrainPermitLifecycle = enum { empty, prepared, consumed_tombstone };
+const PreparedWholeDrainPermit = struct {
+    saved_self_addr: usize = 0,
+    storage_addr: usize = 0,
+    lease_addr: usize = 0,
+    owner_incarnation: u64 = 0,
+    operation_generation: u64 = 0,
+    turn_generation: u64 = 0,
+    parser_generation: u64 = 0,
+    parser_absolute_start: u64 = 0,
+    parser_absolute_end: u64 = 0,
+    parser_seal_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    sampled_now_ns: i128 = 0,
+    authority_generation: AuthorityGeneration = .untracked,
+    authority_seal_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    completed_owner_generation: u64 = 0,
+    correlation_generation: u64 = 0,
+    tx_queue_generation: u64 = 0,
+    lifecycle: PreparedWholeDrainPermitLifecycle = .empty,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+const ControlSemanticValue = union(enum) {
+    resize: control_response_wire.ResizeReply,
+    resync_ack,
+};
+const PreparedControlSemanticVerdictLifecycle = enum { empty, prepared, consumed_tombstone };
+const PreparedControlSemanticVerdict = struct {
+    saved_self_addr: usize = 0,
+    permit_addr: usize = 0,
+    storage_addr: usize = 0,
+    lease_addr: usize = 0,
+    owner_incarnation: u64 = 0,
+    operation_generation: u64 = 0,
+    correlation_generation: u64 = 0,
+    completed_payload_seal: ResponsePayloadSeal = ResponsePayloadSeal.empty(),
+    request_id: u64 = 0,
+    control_kind: client_pump.ControlKind = .resize,
+    target: client_control_correlation.Target = .{
+        .stream_id = 0,
+        .controller_generation = 0,
+    },
+    authority_generation: AuthorityGeneration = .untracked,
+    authority_seal_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    permit_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    expectation: control_response_wire.ControlExpectation = .{
+        .resize = .{ .client_sequence = 0 },
+    },
+    value: ControlSemanticValue = .resync_ack,
+    lifecycle: PreparedControlSemanticVerdictLifecycle = .empty,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+const ConsumeResyncAckResult = enum {
+    consumed,
+    stale,
+    invalid,
+    terminal,
+};
+const ConsumeResyncAckUnderHeldLeaseFn = fn (
+    storage: *ExternalPumpStorage,
+    lease: *const ExternalWholeTurnLease,
+    permit: *PreparedWholeDrainPermit,
+    verdict: *PreparedControlSemanticVerdict,
+) ConsumeResyncAckResult;
+
+comptime {
+    _ = ConsumeResyncAckUnderHeldLeaseFn;
+}
 
 const PreparedControlResponseTake = struct {
     saved_self_addr: usize = 0,
@@ -1931,6 +2021,9 @@ const FrozenControlResponse = struct {
     owner_incarnation: u64 = 0,
     correlation_generation: u64 = 0,
     kind: client_pump.ControlKind = .resize,
+    expectation: control_response_wire.ControlExpectation = .{
+        .resize = .{ .client_sequence = 0 },
+    },
     target_stream_id: u64 = 0,
     expected_controller_generation: u64 = 0,
     request_id: u64 = 0,
@@ -2142,6 +2235,9 @@ const FrozenResponseDestinationPlan = struct {
     intent_index: u8 = 0,
     request_id: u64 = 0,
     control_kind: client_pump.ControlKind = .resize,
+    expectation: control_response_wire.ControlExpectation = .{
+        .resize = .{ .client_sequence = 0 },
+    },
     target_stream_id: u64 = 0,
     expected_controller_generation: u64 = 0,
     control_wire_len: usize = 0,
@@ -4435,6 +4531,7 @@ fn completedControlDigest(
     pending.seal.writeDigest(&writer);
     writer.writeU64(pending.request_id);
     writer.writeU8(@intFromEnum(pending.control_kind));
+    writeControlExpectation(&writer, pending.expectation);
     writer.writeU64(pending.target_stream_id);
     writer.writeU64(pending.expected_controller_generation);
     writer.writeUsize(pending.control_wire_len);
@@ -4473,6 +4570,7 @@ fn frozenControlResponseDigest(
     writer.writeU64(response.owner_incarnation);
     writer.writeU64(response.correlation_generation);
     writer.writeU8(@intFromEnum(response.kind));
+    writeControlExpectation(&writer, response.expectation);
     writer.writeU64(response.target_stream_id);
     writer.writeU64(response.expected_controller_generation);
     writer.writeU64(response.request_id);
@@ -4831,6 +4929,7 @@ fn responseDestinationPlanDigest(
     writer.writeU8(plan.intent_index);
     writer.writeU64(plan.request_id);
     writer.writeU8(@intFromEnum(plan.control_kind));
+    writeControlExpectation(&writer, plan.expectation);
     writer.writeU64(plan.target_stream_id);
     writer.writeU64(plan.expected_controller_generation);
     writer.writeUsize(plan.control_wire_len);
@@ -6331,6 +6430,7 @@ fn prepareResponseDestinationPlan(
         .intent_index = @intCast(index),
         .request_id = request_id,
         .control_kind = in_flight.kind,
+        .expectation = in_flight.expectation,
         .target_stream_id = in_flight.target.stream_id,
         .expected_controller_generation = in_flight.target.controller_generation,
         .control_wire_len = in_flight.wire_len,
@@ -6393,6 +6493,7 @@ fn validateResponseDestinationPlan(
         plan.intent_index == index and
         plan.request_id == aggregate.intent_commit.response_request_ids[index] and
         plan.control_kind == in_flight.kind and
+        std.meta.eql(plan.expectation, in_flight.expectation) and
         plan.target_stream_id == in_flight.target.stream_id and
         plan.expected_controller_generation ==
             in_flight.target.controller_generation and
@@ -6459,6 +6560,7 @@ fn commitResponseDestinationPlanUnchecked(
         },
         .request_id = plan.request_id,
         .control_kind = plan.control_kind,
+        .expectation = plan.expectation,
         .target_stream_id = plan.target_stream_id,
         .expected_controller_generation = plan.expected_controller_generation,
         .control_wire_len = plan.control_wire_len,
@@ -6476,6 +6578,7 @@ fn commitResponseDestinationPlanUnchecked(
         plan.expected_correlation_generation + 1;
     storage.control_correlation.state = .{ .completed = .{
         .kind = plan.control_kind,
+        .expectation = plan.expectation,
         .target = .{
             .stream_id = plan.target_stream_id,
             .controller_generation = plan.expected_controller_generation,
@@ -7787,6 +7890,7 @@ pub const ExternalPumpStorage = struct {
                     pending.generation != self.completed_control_generation or
                     pending.request_id == 0 or
                     pending.control_kind != completed.kind or
+                    !std.meta.eql(pending.expectation, completed.expectation) or
                     pending.target_stream_id != completed.target.stream_id or
                     pending.expected_controller_generation !=
                         completed.target.controller_generation or
@@ -7938,6 +8042,7 @@ pub const ExternalPumpStorage = struct {
             .owner_incarnation = self.owner_incarnation,
             .correlation_generation = self.control_correlation.generation,
             .kind = completed.control_kind,
+            .expectation = completed.expectation,
             .target_stream_id = completed.target_stream_id,
             .expected_controller_generation = completed.expected_controller_generation,
             .request_id = completed.request_id,
@@ -7993,6 +8098,7 @@ pub const ExternalPumpStorage = struct {
             .idle, .in_flight, .terminal => return .invalid,
         };
         if (response.kind != completed.kind or
+            !std.meta.eql(response.expectation, completed.expectation) or
             response.target_stream_id != completed.target.stream_id or
             response.expected_controller_generation !=
                 completed.target.controller_generation or
@@ -9649,6 +9755,7 @@ pub const ExternalPumpStorage = struct {
                     return self.cleanupFailedPreparedRevoke(lease, scratch, intent_handle, external, graph_owner, false, .protocol_terminal);
                 frozen.present = true;
                 frozen.kind = control.kind;
+                frozen.expectation = control.expectation;
                 frozen.target = control.target;
                 frozen.request_id = control.request_id;
                 frozen.wire_len = control.wire_len;
@@ -9665,6 +9772,7 @@ pub const ExternalPumpStorage = struct {
                 frozen.present = true;
                 frozen.completed = true;
                 frozen.kind = control.kind;
+                frozen.expectation = control.expectation;
                 frozen.target = control.target;
                 frozen.request_id = control.request_id;
                 frozen.wire_len = control.wire_len;
@@ -10651,6 +10759,7 @@ pub const ExternalPumpStorage = struct {
 
         var result: ControlAdmissionResult = .{ .terminal = .invariant_failure };
         var terminal_reason: ?client_pump.TerminalReason = null;
+        var control_wire_buffer: [protocol.max_control_json]u8 = undefined;
         control: {
             if (!controlCorrelationValid(self)) break :control;
             if (self.control_correlation.state != .idle) {
@@ -10669,8 +10778,16 @@ pub const ExternalPumpStorage = struct {
                 .tracked => |generation| generation,
                 .untracked => break :control,
             };
+            const control_kind: client_pump.ControlKind = switch (spec.request) {
+                .resize => .resize,
+                .resync => .resync,
+            };
+            const target_stream_id = switch (spec.request) {
+                .resize => |request| request.stream_id,
+                .resync => |request| request.stream_id,
+            };
             if (authority.role != .controller or authority.flow != .clear or
-                spec.target_stream_id != self.evidence_snapshot.stream_id or
+                target_stream_id != self.evidence_snapshot.stream_id or
                 spec.expected_controller_generation != generation)
             {
                 terminal_reason = .protocol_error;
@@ -10681,7 +10798,7 @@ pub const ExternalPumpStorage = struct {
                 else => break :control,
             };
             var next_semantic = active;
-            switch (spec.kind) {
+            switch (control_kind) {
                 .resize => if (active != .valid) {
                     result = .backpressure;
                     break :control;
@@ -10689,6 +10806,14 @@ pub const ExternalPumpStorage = struct {
                 .resync => switch (active) {
                     .client_recovery => |phase| switch (phase) {
                         .control_wait => |context| {
+                            const key = spec.request.resync.recovery_key;
+                            if (key.owner_incarnation != self.owner_incarnation or
+                                key.origin != .client or
+                                key.recovery_epoch != context.epoch)
+                            {
+                                terminal_reason = .protocol_error;
+                                break :control;
+                            }
                             next_semantic = .{ .client_recovery = .{
                                 .control_in_flight = context,
                             } };
@@ -10710,6 +10835,16 @@ pub const ExternalPumpStorage = struct {
                 .blocking => break :control,
             };
             const request_ids = if (self.owner_request_ids) |*ids| ids else break :control;
+            const encoded = control_response_wire.encodeRequest(
+                &control_wire_buffer,
+                spec.request,
+            ) catch |err| {
+                terminal_reason = switch (err) {
+                    error.InvalidRequest => .protocol_error,
+                    error.BufferTooSmall => .resource_exhausted,
+                };
+                break :control;
+            };
             const prepared_request = request_ids.prepare() catch |err| {
                 terminal_reason = switch (err) {
                     error.Exhausted => .request_id_exhausted,
@@ -10718,13 +10853,13 @@ pub const ExternalPumpStorage = struct {
                 break :control;
             };
             const target = client_control_correlation.Target{
-                .stream_id = spec.target_stream_id,
+                .stream_id = target_stream_id,
                 .controller_generation = spec.expected_controller_generation,
             };
             const expected_wire_len = std.math.add(
                 usize,
                 protocol.header_size,
-                spec.payload.len,
+                encoded.payload.len,
             ) catch {
                 terminal_reason = .resource_exhausted;
                 break :control;
@@ -10732,7 +10867,8 @@ pub const ExternalPumpStorage = struct {
             const prepared_correlation =
                 client_control_correlation.prepareAdmission(
                     .idle,
-                    spec.kind,
+                    control_kind,
+                    encoded.expectation,
                     target,
                     prepared_request.id,
                     expected_wire_len,
@@ -10771,7 +10907,7 @@ pub const ExternalPumpStorage = struct {
                 .{
                     .kind = .request,
                     .stream_id = 0,
-                    .payload = spec.payload,
+                    .payload = encoded.payload,
                     .request_policy = .reserve,
                 },
                 now_ns,
@@ -17776,6 +17912,7 @@ fn armResponseCorrelationForTest(
     const admitted = switch (client_control_correlation.prepareAdmission(
         storage.control_correlation.state,
         .resize,
+        .{ .resize = .{ .client_sequence = 1 } },
         target,
         request_id,
         protocol.header_size + 1,
@@ -17836,6 +17973,7 @@ fn activateSyntheticLiveOwnersForTest(
     };
     std.debug.assert(publishControlCorrelation(storage, .{ .completed = .{
         .kind = .resize,
+        .expectation = .{ .resize = .{ .client_sequence = 1 } },
         .target = target,
         .request_id = 1,
         .wire_len = protocol.header_size + 1,
@@ -17845,6 +17983,7 @@ fn activateSyntheticLiveOwnersForTest(
         .seal = ResponsePayloadSeal.fromPayload(&response_payload),
         .request_id = 1,
         .control_kind = .resize,
+        .expectation = .{ .resize = .{ .client_sequence = 1 } },
         .target_stream_id = target.stream_id,
         .expected_controller_generation = target.controller_generation,
         .control_wire_len = protocol.header_size + 1,
@@ -21544,7 +21683,7 @@ fn expectF2FinalZero(storage: *ExternalPumpStorage) !void {
     );
 }
 
-test "f2 control admission atomically publishes one correlation and one request frame" {
+test "f3c0 typed control admission atomically publishes expectation and request frame" {
     const Probe = struct {
         fn read(
             raw: *anyopaque,
@@ -21583,10 +21722,13 @@ test "f2 control admission atomically publishes one correlation and one request 
     try std.testing.expect(testing.clearInitialFence(&storage));
 
     const admitted = storage.admitControl(.{
-        .kind = .resize,
-        .target_stream_id = valid_evidence.stream_id,
+        .request = .{ .resize = .{
+            .stream_id = valid_evidence.stream_id,
+            .cols = 80,
+            .rows = 24,
+            .client_sequence = 1,
+        } },
         .expected_controller_generation = valid_evidence.initial_controller_generation,
-        .payload = "{\"method\":\"runtime.resize\",\"params\":{\"stream_id\":7,\"cols\":80,\"rows\":24,\"client_sequence\":1}}",
     }, 100);
     const request_id = switch (admitted) {
         .admitted => |value| value.request_id,
@@ -21596,9 +21738,18 @@ test "f2 control admission atomically publishes one correlation and one request 
     const correlation = storage.control_correlation.state.in_flight;
     try std.testing.expectEqual(request_id, correlation.request_id);
     try std.testing.expectEqual(
+        @as(u64, 1),
+        correlation.expectation.resize.client_sequence,
+    );
+    try std.testing.expectEqual(
         client_control_correlation.Progress.queued,
         correlation.progress,
     );
+    try std.testing.expect(controlCorrelationValid(&storage));
+    const sealed_correlation = storage.control_correlation;
+    storage.control_correlation.state.in_flight.expectation.resize.client_sequence = 2;
+    try std.testing.expect(!controlCorrelationValid(&storage));
+    storage.control_correlation = sealed_correlation;
     try std.testing.expect(controlCorrelationValid(&storage));
     const external = switch (storage.owned_client.?.io_mode) {
         .external => |*state| state,
@@ -21613,10 +21764,16 @@ test "f2 control admission atomically publishes one correlation and one request 
     const queue_generation = external.tx_queue_generation;
     const request_state = storage.owner_request_ids.?;
     try std.testing.expect(storage.admitControl(.{
-        .kind = .resync,
-        .target_stream_id = valid_evidence.stream_id,
+        .request = .{ .resync = .{
+            .stream_id = valid_evidence.stream_id,
+            .recovery_key = .{
+                .owner_incarnation = storage.owner_incarnation,
+                .origin = .client,
+                .recovery_epoch = 1,
+                .expected_token_generation = 1,
+            },
+        } },
         .expected_controller_generation = valid_evidence.initial_controller_generation,
-        .payload = "{\"method\":\"runtime.resync\",\"params\":{\"stream_id\":7}}",
     }, 101) == .backpressure);
     try std.testing.expectEqual(queue_generation, external.tx_queue_generation);
     try std.testing.expect(std.meta.eql(
@@ -21720,6 +21877,81 @@ fn pumpF3bBufferedRevoke(
     );
 }
 
+test "f3c0 typed resync admission seals the local recovery key without serializing it" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try initActiveF2Storage(&storage, &fixture);
+    defer if (storage.lifecycle != .dead) {
+        _ = teardownForTest(&storage);
+    };
+    storage.semantic_state = .{ .active = .{ .client_recovery = .{
+        .control_wait = .{ .epoch = 9, .deadline_ns = 1000 },
+    } } };
+    const key = client_pump.RecoveryKey{
+        .owner_incarnation = storage.owner_incarnation,
+        .origin = .client,
+        .recovery_epoch = 9,
+        .expected_token_generation = 11,
+    };
+    const admitted = storage.admitControl(.{
+        .request = .{ .resync = .{
+            .stream_id = valid_evidence.stream_id,
+            .recovery_key = key,
+        } },
+        .expected_controller_generation = valid_evidence.initial_controller_generation,
+    }, 100);
+    _ = switch (admitted) {
+        .admitted => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    const correlation = storage.control_correlation.state.in_flight;
+    try std.testing.expectEqual(client_pump.ControlKind.resync, correlation.kind);
+    try std.testing.expect(std.meta.eql(key, correlation.expectation.resync));
+    const external = storage.owned_client.?.io_mode.external;
+    try std.testing.expectEqual(@as(usize, 1), external.external_tx.items.len);
+    const queued = external.external_tx.items[0].bytes;
+    try std.testing.expect(std.mem.indexOf(u8, queued, "runtime.resync") != null);
+    try std.testing.expect(std.mem.indexOf(u8, queued, "recovery") == null);
+    try std.testing.expect(std.mem.indexOf(u8, queued, "token_generation") == null);
+}
+
+test "f3c0 resync admission rejects a foreign recovery epoch before wire publication" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try initActiveF2Storage(&storage, &fixture);
+    defer if (storage.lifecycle != .dead) {
+        _ = teardownForTest(&storage);
+    };
+    storage.semantic_state = .{ .active = .{ .client_recovery = .{
+        .control_wait = .{ .epoch = 9, .deadline_ns = 1000 },
+    } } };
+    const request_ids_before = storage.owner_request_ids.?;
+    const result = storage.admitControl(.{
+        .request = .{ .resync = .{
+            .stream_id = valid_evidence.stream_id,
+            .recovery_key = .{
+                .owner_incarnation = storage.owner_incarnation,
+                .origin = .client,
+                .recovery_epoch = 10,
+                .expected_token_generation = 11,
+            },
+        } },
+        .expected_controller_generation = valid_evidence.initial_controller_generation,
+    }, 100);
+    try std.testing.expectEqual(
+        client_pump.TerminalReason.protocol_error,
+        result.terminal,
+    );
+    try std.testing.expect(std.meta.eql(request_ids_before, storage.owner_request_ids.?));
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        storage.owned_client.?.io_mode.external.external_tx.items.len,
+    );
+    try std.testing.expect(storage.control_correlation.state == .idle);
+}
+
 fn admitF3bProductQueue(
     storage: *ExternalPumpStorage,
     case: F3bProductQueueCase,
@@ -21734,10 +21966,13 @@ fn admitF3bProductQueue(
     }
     if (case == .control or case == .input_and_control) {
         try std.testing.expect(storage.admitControl(.{
-            .kind = .resize,
-            .target_stream_id = valid_evidence.stream_id,
+            .request = .{ .resize = .{
+                .stream_id = valid_evidence.stream_id,
+                .cols = 80,
+                .rows = 24,
+                .client_sequence = 1,
+            } },
             .expected_controller_generation = valid_evidence.initial_controller_generation,
-            .payload = "{\"method\":\"runtime.resize\",\"params\":{\"stream_id\":7,\"cols\":80,\"rows\":24,\"client_sequence\":1}}",
         }, 11) == .admitted);
     }
 }
@@ -22546,10 +22781,13 @@ fn checkF2ControlAdmissionAllocationFailure(
     const queue_generation_before = external.tx_queue_generation;
     const authority_before = storage.owner_authority;
     const result = storage.admitControl(.{
-        .kind = .resize,
-        .target_stream_id = valid_evidence.stream_id,
+        .request = .{ .resize = .{
+            .stream_id = valid_evidence.stream_id,
+            .cols = 80,
+            .rows = 24,
+            .client_sequence = 1,
+        } },
         .expected_controller_generation = valid_evidence.initial_controller_generation,
-        .payload = "{\"method\":\"runtime.resize\"}",
     }, 100);
     switch (result) {
         .admitted => {
@@ -22596,7 +22834,7 @@ fn checkF2ControlAdmissionAllocationFailure(
     }
 }
 
-test "f2 control admission preserves every owner at every allocation fail index" {
+test "f3c0 typed control admission preserves every owner at every allocation fail index" {
     try std.testing.checkAllAllocationFailures(
         std.testing.allocator,
         checkF2ControlAdmissionAllocationFailure,
@@ -22678,7 +22916,7 @@ test "f2 response ownership preserves final zero at every allocation fail index"
     );
 }
 
-test "f2 product socket partial write publishes sealed control progress" {
+test "f3c0 typed product control publishes exact socket completion" {
     const Probe = struct {
         fn read(
             _: *anyopaque,
@@ -22717,17 +22955,14 @@ test "f2 product socket partial write publishes sealed control progress" {
             @sizeOf(c_int),
         ),
     );
-    const payload = try std.testing.allocator.alloc(
-        u8,
-        protocol.max_control_json,
-    );
-    defer std.testing.allocator.free(payload);
-    @memset(payload, 'x');
     const admitted = storage.admitControl(.{
-        .kind = .resize,
-        .target_stream_id = valid_evidence.stream_id,
+        .request = .{ .resize = .{
+            .stream_id = valid_evidence.stream_id,
+            .cols = 80,
+            .rows = 24,
+            .client_sequence = 1,
+        } },
         .expected_controller_generation = valid_evidence.initial_controller_generation,
-        .payload = payload,
     }, 100);
     const wire_len = switch (admitted) {
         .admitted => |value| value.wire_len,
@@ -22757,10 +22992,10 @@ test "f2 product socket partial write publishes sealed control progress" {
         scratch,
     );
     try std.testing.expect(turn.terminal == null);
-    try std.testing.expect(turn.tx_bytes > 0);
-    try std.testing.expect(turn.tx_bytes < wire_len);
+    try std.testing.expectEqual(wire_len, turn.tx_bytes);
+    try std.testing.expectEqual(@as(usize, 1), turn.tx_frames);
     try std.testing.expectEqual(
-        client_control_correlation.Progress.partial,
+        client_control_correlation.Progress.response_wait,
         storage.control_correlation.state.in_flight.progress,
     );
     const external = switch (storage.owned_client.?.io_mode) {
@@ -22768,7 +23003,7 @@ test "f2 product socket partial write publishes sealed control progress" {
         .blocking => return error.TestUnexpectedResult,
     };
     try std.testing.expectEqual(
-        client_external_tx.RequestFrameProgress.partial,
+        client_external_tx.RequestFrameProgress.missing,
         client_external_tx.requestFrameProgress(
             external,
             storage.control_correlation.state.in_flight.request_id,
@@ -22796,17 +23031,14 @@ test "f2 actual socket response wins RX first and rejects same turn TX completio
             @sizeOf(c_int),
         ),
     );
-    const payload = try std.testing.allocator.alloc(
-        u8,
-        protocol.max_control_json,
-    );
-    defer std.testing.allocator.free(payload);
-    @memset(payload, 'x');
     const admitted = storage.admitControl(.{
-        .kind = .resize,
-        .target_stream_id = valid_evidence.stream_id,
+        .request = .{ .resize = .{
+            .stream_id = valid_evidence.stream_id,
+            .cols = 80,
+            .rows = 24,
+            .client_sequence = 1,
+        } },
         .expected_controller_generation = valid_evidence.initial_controller_generation,
-        .payload = payload,
     }, 100);
     const request_id = switch (admitted) {
         .admitted => |value| value.request_id,
@@ -22909,10 +23141,13 @@ test "f2 max request id survives product wire response and private reject cleanu
     storage.owner_request_ids = .last_available;
 
     const admitted = storage.admitControl(.{
-        .kind = .resize,
-        .target_stream_id = valid_evidence.stream_id,
+        .request = .{ .resize = .{
+            .stream_id = valid_evidence.stream_id,
+            .cols = 80,
+            .rows = 24,
+            .client_sequence = 1,
+        } },
         .expected_controller_generation = valid_evidence.initial_controller_generation,
-        .payload = "{\"method\":\"runtime.resize\",\"params\":{}}",
     }, 100);
     const request_id = switch (admitted) {
         .admitted => |value| value.request_id,

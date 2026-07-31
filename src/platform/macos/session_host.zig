@@ -147,6 +147,8 @@ pub const client_pump = @import("session_host/client_pump.zig");
 // correlation reducer다. fd/TX queue/payload allocator는 owning pump adapter가 계속 소유한다.
 pub const client_control_correlation =
     @import("session_host/client_control_correlation.zig");
+pub const control_response_wire =
+    @import("session_host/control_response_wire.zig");
 pub const external_recovery_types =
     @import("session_host/external_recovery_types.zig");
 // external_rx_types는 parser/ledger/recovery가 공유하는 pointer-free observation DTO다.

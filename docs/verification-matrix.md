@@ -142,7 +142,16 @@
 > commit하지 않고 aggregate를 abort한 뒤 typed terminal로 닫으며, product lower-publication snapshot과
 > hostile owner/parser/drain/reentry drift 표가 이 경계를 고정한다. Debug/ReleaseFast
 > `test-session-host`, `check-boundaries`, 전체 `mise run check`가 green이다. d2d는 완료했지만
-> d2e~f3가 남아 있으므로 2b2 전체는 구현 완료로 표시하지 않는다.
+> d2e~f3가 남아 있으므로 2b2 전체는 구현 완료로 표시하지 않는다. 2b2e는
+> `e-core`(neutral incarnation-bound key, pure recovery reducer, generic consumer
+> apply→release→mark, poll hint/fresh-clock wake)와 `e-integration`(f1/f2의 실제 TX
+> offset·fully-sent·response-wait 증거를 사용한 충돌표 및 external owner 제품 배선)으로 나눈다.
+> core만 green이면 2b2e 완료가 아니며 integration까지 green이어야 한다. 두 단계는 storage-owned
+> consume과 attachment-owned charged release가 동시에 존재하지 않는지 boundary scan으로 증명한다.
+> e-core는 null/exact/stale key, same-address reinit·cross-storage ABA, apply/release/mark 실패 순서,
+> mark→latch→pollHint immediate, fresh-clock deadline-1/exact/+1을 Debug/ReleaseFast로 고정한다.
+> e-integration은 origin 충돌표 전수, cleanup fail-index, 같은 zero-readiness turn의
+> delta/invalidated/revoke, socketpair positions 1/64/65와 ledger final-zero를 제품 gate로 고정한다.
 > C3 `snapshotDrainSeedAuthority`는 prepared/consumed phase의 exact address graph, private digest/range와
 > attempt continuity를 callback 0/mutation 0으로 인증한 value-only projection만 반환한다. C4 pump는 raw
 > receipt/borrow/permit/seed field를 재해석하지 않고 두 projection continuity만 비교한다. full final

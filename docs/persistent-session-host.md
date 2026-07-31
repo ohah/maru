@@ -8748,11 +8748,12 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
         공유하고 leave가 남은 budget 중 최대 100 ms를 쓴다. signal/revoke/error cleanup은 active/latest와 detach를
         버리고 하나의 100 ms deadline 안에서 leave를 시도한 뒤 즉시 raw restore/signal forwarding으로 간다.
 
-    **P5c3c-1a~2a, 2b1, 2b2a~c2와 2b2c3-c3a1~c3c-3b, 2b2d1, 2b2d2a,
-    2b2d2b의 d2a~d는 구현 완료다. 2b2e~f3, P5c3c-2b3,
-    P5c3c-3a~3b는 계획 상태다.**
-    2b2c3 전체는 후속 통합 gate가 green이 아니므로 아직 계획 상태다. 각 slice는 P5c3a~b의 Debug/ReleaseFast gate를 재실행하고 다음 slice가 실제
-    consumer로 쓰지 않는 임시 public API는 만들지 않는다.
+    이 절은 P5c3c의 normative 계약만 소유한다. slice별 구현·검증 상태는
+    [검증 매트릭스](verification-matrix.md#영속-세션-p5-세부-상태)를 단일 출처로 둔다.
+    2b2e-core와 2b2e-integration은 하나의 2b2e 계약을 닫는 두 gate이며, core만으로
+    recovery 충돌표나 2b2e 전체를 완료 처리하지 않는다. 각 slice는 P5c3a~b의
+    Debug/ReleaseFast gate를 재실행하고 다음 slice가 실제 consumer로 쓰지 않는 임시 public API는
+    만들지 않는다.
 
     raw 진입 전에도 기존 `SO_RCVTIMEO`/blocking `writeAll`을 deadline으로 간주하지 않는다. resolver 전체, selected
     connect+hello, role-selected attach+initial snapshot, optional status+takeover를 각각 하나의 5초 absolute monotonic

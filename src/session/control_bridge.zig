@@ -16,6 +16,7 @@ const std = @import("std");
 const cp = @import("control_plane.zig");
 const file_policy = @import("file_panel_bridge.zig");
 const mermaid_protocol = @import("mermaid_protocol.zig");
+const diff_payload = @import("diff_payload.zig");
 
 /// 브리지 method 이름(5b 최소: `hello` 1개). `window.maru` shim의 `maru.hello()`가 이 method 요청으로 매핑된다.
 /// 소켓 핸드셰이크의 `hello` notification(cp.hello_method)과 이름은 같지만 문맥이 다르다 — 이건 id 있는 **request**로
@@ -33,8 +34,23 @@ pub const file_open_link_method = "maru.file.openLink";
 pub const file_render_mermaid_method = "maru.file.renderMermaid";
 pub const file_revoke_mermaid_method = "maru.file.revokeMermaid";
 pub const file_renderer_ready_method = "maru.file.rendererReady";
+/// E1: diff 본문 두 쪽을 가져온다(docs/editor-surface.md §6). **인자가 없다** — 무엇을 비교할지는 그 Term의
+/// entry(경로, base)가 이미 정하고 있고, 웹이 경로를 고를 수 있게 하면 그 순간 이 method가 "아무 파일이나 읽는
+/// 창구"가 된다. 자기 것만 읽는 `readSelfImage`와 같은 최소 capability 규율이다.
+pub const diff_open_method = "maru.diff.open";
 /// 모든 bridge 정수는 JavaScript `Number`를 왕복하므로 이 상한 안에서만 identity가 정확하다.
 pub const max_js_safe_integer: u64 = 9_007_199_254_740_991;
+
+/// `diff.open`이 native에서 받아 오는 두 쪽. 둘 다 `gpa` 소유이며 dispatch가 해제한다.
+pub const DiffSides = struct {
+    original: []u8,
+    modified: []u8,
+
+    pub fn deinit(self: DiffSides, gpa: std.mem.Allocator) void {
+        gpa.free(self.original);
+        gpa.free(self.modified);
+    }
+};
 
 pub const DirtyReport = struct {
     dirty: bool,
@@ -56,6 +72,8 @@ pub const FileAccess = struct {
     context: *anyopaque,
     begin_document_fn: *const fn (context: *anyopaque, document_id: u64) anyerror!u64,
     read_fn: *const fn (context: *anyopaque, gpa: std.mem.Allocator, editor_epoch: u64) anyerror![]u8,
+    /// diff 본문 두 쪽(원본·수정본). null이면 이 surface는 diff Term이 아니다 — method 자체를 거절한다.
+    diff_open_fn: ?*const fn (context: *anyopaque, gpa: std.mem.Allocator) anyerror!DiffSides = null,
     read_asset_fn: *const fn (context: *anyopaque, gpa: std.mem.Allocator, normalized_path: []const u8) anyerror![]u8,
     write_fn: *const fn (context: *anyopaque, editor_epoch: u64, content: []const u8) anyerror!void,
     set_dirty_fn: *const fn (context: *anyopaque, report: DirtyReport) anyerror!void,
@@ -71,6 +89,11 @@ pub const FileAccess = struct {
 
     fn read(self: FileAccess, gpa: std.mem.Allocator, editor_epoch: u64) anyerror![]u8 {
         return self.read_fn(self.context, gpa, editor_epoch);
+    }
+
+    pub fn diffOpen(self: FileAccess, gpa: std.mem.Allocator) anyerror!DiffSides {
+        const f = self.diff_open_fn orelse return error.Unsupported;
+        return f(self.context, gpa);
     }
 
     fn readAsset(self: FileAccess, gpa: std.mem.Allocator, normalized_path: []const u8) anyerror![]u8 {
@@ -174,6 +197,21 @@ pub fn dispatchBridgeWithFileAccess(
         defer gpa.free(content);
         if (!std.unicode.utf8ValidateSlice(content)) return errorResponse(gpa, req.id, .internal_error);
         return serializeFileReadResult(gpa, req.id, content);
+    }
+    if (std.mem.eql(u8, req.method, diff_open_method)) {
+        // diff Term이 아니면 method가 존재하지 않는 것과 같다 — md 뷰어 Term이 이 창구를 쓰지 못하게 한다(§3.1).
+        const sides = access.diffOpen(gpa) catch return errorResponse(gpa, req.id, .internal_error);
+        defer sides.deinit(gpa);
+        // 무엇을 싣지 않을지는 L2 정책이 정한다(크기 → binary → 줄 수). 거절은 오류가 아니라 **typed 결과**다 —
+        // 화면이 "왜 못 보여 주는지"를 말할 수 있어야 한다(§6).
+        return switch (diff_payload.decide(sides.original, sides.modified)) {
+            .reject => |reason| serializeDiffRejected(gpa, req.id, @tagName(reason)),
+            .ok => |body| blk: {
+                if (!std.unicode.utf8ValidateSlice(body.original) or !std.unicode.utf8ValidateSlice(body.modified))
+                    break :blk serializeDiffRejected(gpa, req.id, "binary");
+                break :blk serializeDiffResult(gpa, req.id, body.original, body.modified, body.truncated_lines);
+            },
+        };
     }
     if (std.mem.eql(u8, req.method, file_read_asset_method)) {
         const raw_path = readAssetPath(req.params) catch return errorResponse(gpa, req.id, .invalid_params);
@@ -413,6 +451,40 @@ fn serializeFileReadResult(gpa: std.mem.Allocator, id: cp.Id, content: []const u
     cp.beginResult(&s, id) catch return error.OutOfMemory;
     s.objectField("content") catch return error.OutOfMemory;
     s.write(content) catch return error.OutOfMemory;
+    cp.endResult(&s) catch return error.OutOfMemory;
+    return aw.toOwnedSlice();
+}
+
+/// diff 본문 결과. `truncated_lines`는 화면이 "여기까지만 보여 준다"고 말하기 위한 값이다(조용히 자르지 않는다).
+fn serializeDiffResult(
+    gpa: std.mem.Allocator,
+    id: cp.Id,
+    original: []const u8,
+    modified: []const u8,
+    truncated_lines: bool,
+) std.mem.Allocator.Error![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    cp.beginResult(&s, id) catch return error.OutOfMemory;
+    s.objectField("original") catch return error.OutOfMemory;
+    s.write(original) catch return error.OutOfMemory;
+    s.objectField("modified") catch return error.OutOfMemory;
+    s.write(modified) catch return error.OutOfMemory;
+    s.objectField("truncated_lines") catch return error.OutOfMemory;
+    s.write(truncated_lines) catch return error.OutOfMemory;
+    cp.endResult(&s) catch return error.OutOfMemory;
+    return aw.toOwnedSlice();
+}
+
+/// 보여 줄 수 없는 이유를 **결과로** 준다(오류 코드가 아니라) — 화면이 그 이유를 그대로 말한다.
+fn serializeDiffRejected(gpa: std.mem.Allocator, id: cp.Id, reason: []const u8) std.mem.Allocator.Error![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    cp.beginResult(&s, id) catch return error.OutOfMemory;
+    s.objectField("rejected") catch return error.OutOfMemory;
+    s.write(reason) catch return error.OutOfMemory;
     cp.endResult(&s) catch return error.OutOfMemory;
     return aw.toOwnedSlice();
 }
@@ -898,4 +970,81 @@ test "serializeHelloResult: minified 한 줄(개행 없음 — ndjson frame 안�
     const resp = try serializeHelloResult(testing.allocator, .{ .number = 1 }, "0.1.0");
     defer testing.allocator.free(resp);
     try testing.expect(std.mem.indexOfScalar(u8, resp, '\n') == null);
+}
+
+test "dispatchBridge: diff.open은 인자 없이 자기 Term의 두 쪽만 준다" {
+    // 경로 인자를 받지 않는 것이 계약이다 — 받으면 이 method가 "아무 파일이나 읽는 창구"가 된다.
+    const Fake = struct {
+        original: []const u8,
+        modified: []const u8,
+        calls: usize = 0,
+
+        fn open(context: *anyopaque, gpa: std.mem.Allocator) anyerror!DiffSides {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            return .{
+                .original = try gpa.dupe(u8, self.original),
+                .modified = try gpa.dupe(u8, self.modified),
+            };
+        }
+    };
+    var fake: Fake = .{ .original = "a\nb\n", .modified = "a\nB\n" };
+    var base: FakeFileAccess = .{};
+    var access = base.access();
+    access.context = &fake;
+    access.diff_open_fn = Fake.open;
+
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":31,\"method\":\"maru.diff.open\",\"params\":{}}";
+    const resp = try dispatchBridgeWithFileAccess(testing.allocator, req, "0.1.0", access);
+    defer testing.allocator.free(resp);
+    var p = try parseValue(testing.allocator, resp);
+    defer p.deinit();
+    const result = p.value.object.get("result").?.object;
+    try testing.expectEqualStrings("a\nb\n", result.get("original").?.string);
+    try testing.expectEqualStrings("a\nB\n", result.get("modified").?.string);
+    try testing.expect(!result.get("truncated_lines").?.bool);
+    try testing.expectEqual(@as(usize, 1), fake.calls);
+}
+
+test "dispatchBridge: 보여 줄 수 없는 diff는 오류가 아니라 이유를 준다" {
+    const Fake = struct {
+        fn binary(context: *anyopaque, gpa: std.mem.Allocator) anyerror!DiffSides {
+            _ = context;
+            return .{ .original = try gpa.dupe(u8, "ok\n"), .modified = try gpa.dupe(u8, "a\x00b") };
+        }
+        fn unsupported(context: *anyopaque, gpa: std.mem.Allocator) anyerror!DiffSides {
+            _ = context;
+            _ = gpa;
+            return error.Unsupported;
+        }
+    };
+    var base: FakeFileAccess = .{};
+
+    var access = base.access();
+    access.diff_open_fn = Fake.binary;
+    const resp = try dispatchBridgeWithFileAccess(
+        testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":32,\"method\":\"maru.diff.open\",\"params\":{}}",
+        "0.1.0",
+        access,
+    );
+    defer testing.allocator.free(resp);
+    var p = try parseValue(testing.allocator, resp);
+    defer p.deinit();
+    // binary는 실패가 아니라 "이 이유로 못 보여 준다"는 결과다 — 화면이 그대로 말한다.
+    try testing.expectEqualStrings("binary", p.value.object.get("result").?.object.get("rejected").?.string);
+
+    // diff Term이 아닌 surface(콜백 없음)는 method가 없는 것과 같다.
+    const plain = base.access();
+    const denied = try dispatchBridgeWithFileAccess(
+        testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":33,\"method\":\"maru.diff.open\",\"params\":{}}",
+        "0.1.0",
+        plain,
+    );
+    defer testing.allocator.free(denied);
+    var dp = try parseValue(testing.allocator, denied);
+    defer dp.deinit();
+    try testing.expect(dp.value.object.get("error") != null);
+    try testing.expect(dp.value.object.get("result") == null);
 }

@@ -9,8 +9,8 @@
 //! 상태를 넷으로 가른다: 읽는 중 · 보여 줄 수 없음(이유와 함께) · 변경 없음 · 비교. 네이티브가 그 넷을 그대로
 //! 내려주므로(§6 typed 결과) 화면은 판단하지 않고 말하기만 한다.
 
-import { EditorState } from "@codemirror/state";
 import { MergeView } from "@codemirror/merge";
+import { original_side_extensions, side_extensions, syncMergeScroll } from "./diff-layout";
 import { requestFileBridge } from "./viewer";
 
 /// 네이티브가 아직 읽는 중일 때 다시 묻는 간격과 한도. git 읽기는 보통 수십 ms라 첫 재시도에서 끝나지만,
@@ -66,7 +66,10 @@ export function createDiffScreen(host: HTMLElement): DiffScreen {
   host.append(notice, mount);
 
   let view: MergeView | null = null;
+  let stopSync: (() => void) | null = null;
   const clearView = () => {
+    stopSync?.();
+    stopSync = null;
     view?.destroy();
     view = null;
     mount.replaceChildren();
@@ -98,12 +101,14 @@ export function createDiffScreen(host: HTMLElement): DiffScreen {
           notice.textContent = "";
           notice.hidden = true;
           view = new MergeView({
-            a: { doc: payload.original, extensions: [EditorState.readOnly.of(true)] },
-            b: { doc: payload.modified, extensions: [EditorState.readOnly.of(true)] },
+            a: { doc: payload.original, extensions: original_side_extensions },
+            b: { doc: payload.modified, extensions: side_extensions },
             parent: mount,
             orientation: "a-b",
             gutter: true,
           });
+          // 세로 위치를 두 편집기 사이에서 맞춘다 — 각자 스크롤하면 같은 줄이 다른 높이에 놓여 비교가 깨진다.
+          stopSync = syncMergeScroll(view);
           return;
         }
       }

@@ -11,6 +11,7 @@
 
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
+import { original_side_extensions, side_extensions, syncMergeScroll } from "./diff-layout";
 import {
   MergeView,
   getChunks,
@@ -21,9 +22,24 @@ import {
 
 /// 저장소에 커밋된 synthetic fixture. 실제 파일 내용을 쓰지 않는다(§7.4 — DOM artifact·screenshot에 source text 금지).
 /// 변경 종류를 하나씩 담는다: 수정(`beta`→`BETA`), 삭제(`delta`), 추가(`eta`·`theta`).
+/// 변경 종류를 하나씩 담고, **뷰 높이를 넘길 만큼 길다** — 넘치지 않으면 "스크롤이 안 된다"와 "스크롤할 게
+/// 없다"가 구분되지 않아 스크롤 계약을 잴 수 없다.
+const filler = Array.from({ length: 60 }, (_, i) => `line ${i + 1}`);
+/// **가로로도 넘치는 줄.** 없으면 "가로 스크롤이 안 된다"와 "가로로 넘칠 게 없다"가 구분되지 않는다.
+const long_line = `const wide = "${"x".repeat(400)}";`;
 export const fixture = {
-  original: ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"].join("\n"),
-  modified: ["alpha", "BETA", "gamma", "epsilon", "zeta", "eta", "theta"].join("\n"),
+  original: ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", long_line, ...filler].join("\n"),
+  modified: [
+    "alpha",
+    "BETA",
+    "gamma",
+    "epsilon",
+    "zeta",
+    "eta",
+    "theta",
+    long_line,
+    ...filler,
+  ].join("\n"),
 };
 
 export type SideProbe = {
@@ -66,14 +82,18 @@ export function mount(parent: HTMLElement, doc = fixture): Harness {
   unifiedHost.id = "diff-unified";
   parent.append(splitHost, unifiedHost);
 
+  // 제품 diff-view와 **같은 모듈**을 쓴다(레이아웃 계약이 갈리면 게이트 초록이 제품을 대표하지 못한다).
+  const side = side_extensions;
   const split = new MergeView({
-    a: { doc: doc.original, extensions: [EditorState.readOnly.of(true)] },
-    b: { doc: doc.modified, extensions: [EditorState.readOnly.of(true)] },
+    a: { doc: doc.original, extensions: original_side_extensions },
+    b: { doc: doc.modified, extensions: side },
     parent: splitHost,
     // 나란히 보기 — 목업의 diff 본문 형태이고 양쪽 layout을 각각 잴 수 있다.
     orientation: "a-b",
     gutter: true,
   });
+
+  const stop_sync = syncMergeScroll(split);
 
   const unified = new EditorView({
     doc: doc.modified,
@@ -88,6 +108,7 @@ export function mount(parent: HTMLElement, doc = fixture): Harness {
     acceptFirstChunk: () => withFirstChunk(unified, acceptChunk),
     rejectFirstChunk: () => withFirstChunk(unified, rejectChunk),
     destroy: () => {
+      stop_sync();
       split.destroy();
       unified.destroy();
       splitHost.remove();
@@ -115,7 +136,42 @@ function sideProbe(view: EditorView): SideProbe {
     ).length,
     gutter_markers: view.dom.querySelectorAll(".cm-changedLineGutter").length,
     layout: { width: view.dom.clientWidth, height: view.dom.clientHeight },
+    // 스크롤은 편집기가 아니라 바깥 상자가 한다 — 그 값은 probe()가 host를 직접 재서 채운다.
+    scroll: { client_height: 0, scroll_height: 0 },
+    line_number_elements: view.dom.querySelectorAll(".cm-lineNumbers .cm-gutterElement").length,
+    // 높이 사슬 진단: 어느 단계에서 박스가 안 정해지는지 본다(하나라도 내용 높이면 그 위가 끊긴 것이다).
+    chain: chainHeights(view.dom),
   };
+}
+
+/// 편집기 자체 스크롤러의 보이는 높이·전체 높이·가로 넘침. 각 편집기가 스스로 스크롤하는 구조라 여기를 잰다.
+function scrollerMetrics(view: EditorView): {
+  client_height: number;
+  scroll_height: number;
+  client_width: number;
+  scroll_width: number;
+} {
+  const el = view.dom.querySelector<HTMLElement>(".cm-scroller");
+  return {
+    client_height: el?.clientHeight ?? 0,
+    scroll_height: el?.scrollHeight ?? 0,
+    client_width: el?.clientWidth ?? 0,
+    scroll_width: el?.scrollWidth ?? 0,
+  };
+}
+
+/// 편집기에서 위로 올라가며 각 조상의 높이·배치를 기록한다. 계산된 스타일까지 봐야 "규칙이 안 맞은 것"과
+/// "규칙은 맞았는데 값이 그런 것"을 구분할 수 있다.
+function chainHeights(from: HTMLElement): string[] {
+  const out: string[] = [];
+  let node: HTMLElement | null = from;
+  for (let depth = 0; depth < 6 && node !== null; depth += 1) {
+    const cls = (node.className || node.tagName).toString().split(" ")[0] ?? "?";
+    const style = node.ownerDocument.defaultView?.getComputedStyle(node);
+    out.push(`${cls}:${node.clientHeight}:${style?.position ?? "?"}:${style?.height ?? "?"}`);
+    node = node.parentElement;
+  }
+  return out;
 }
 
 export function probe(split: MergeView, unified: EditorView, parent: HTMLElement): DiffProbe {
@@ -130,9 +186,17 @@ export function probe(split: MergeView, unified: EditorView, parent: HTMLElement
       changed_elements: a.changed_elements + b.changed_elements,
       gutter_markers: a.gutter_markers + b.gutter_markers,
       layout: b.layout,
+      scroll: scrollerMetrics(split.b),
+      line_number_elements: b.line_number_elements,
+      chain: b.chain,
       text: { a: split.a.state.doc.toString(), b: split.b.state.doc.toString() },
     },
-    unified: { ...sideProbe(unified), text: unified.state.doc.toString() },
+    unified: {
+      ...sideProbe(unified),
+      // 통합 뷰도 편집기 자체가 스크롤한다(제품 규칙과 같은 구조).
+      scroll: scrollerMetrics(unified),
+      text: unified.state.doc.toString(),
+    },
     style_elements: styles.length,
     // style-mod는 문서 루트에 `<style>`을 넣는다. 다른 문서(격리 렌더 iframe)로 새면 여기서 걸린다.
     styles_all_in_this_document: styles.every((el) => el.ownerDocument === doc),

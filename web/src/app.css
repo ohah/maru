@@ -172,6 +172,81 @@ body {
   display: none;
 }
 
+/* diff 화면(E1 — docs/editor-surface.md §3). shell은 `height:100vh; overflow:hidden`이라 **자식이 높이를 스스로
+   가져야** 내용이 보인다. 규칙이 없으면 CM6가 높이 0으로 마운트돼 "행이 안 나오고 스크롤도 안 되는" 상태가
+   된다(손 확인에서 그랬다). 스크롤은 각 편집기 안에서 일어난다 — 문서가 길어도 패널 밖으로 밀리지 않게. */
+#editor:has(.diff-merge) {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.diff-notice {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 0.75rem 1rem;
+  font-size: 12px;
+  color: color-mix(in srgb, CanvasText 62%, Canvas);
+}
+
+/* 열 머리: 어느 쪽이 원본인지 이름으로 준다(색만으로 알게 하지 않는다). 두 열은 본문과 같은 비율로 나눈다. */
+.diff-columns {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1px;
+  padding: 0;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: color-mix(in srgb, CanvasText 55%, Canvas);
+  background: color-mix(in srgb, CanvasText 12%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, CanvasText 12%, transparent);
+}
+
+.diff-columns > span {
+  padding: 6px 12px;
+  background: Canvas;
+}
+
+.diff-columns[hidden] {
+  display: none;
+}
+
+.diff-notice[hidden] {
+  display: none;
+}
+
+/* **각 편집기가 자기 안에서 스크롤한다.** 바깥 상자가 스크롤하면(merge의 기본 구조) 가로 막대가 문서 맨 아래에
+   생겨, 긴 줄을 보려면 세로로 끝까지 내려가야 한다. merge가 `.cm-mergeView & { height: auto !important }`로 높이를
+   강제하므로 여기서 `!important`로 되돌린다 — 세로 위치는 diff-layout.syncMergeScroll이 두 편집기 사이에서 맞춘다. */
+.diff-merge {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.diff-merge .cm-mergeView,
+.diff-merge .cm-mergeViewEditors,
+.diff-merge .cm-mergeViewEditor {
+  height: 100%;
+  min-height: 0;
+}
+
+.diff-merge .cm-mergeViewEditor > .cm-editor,
+.diff-merge .cm-mergeViewEditor > .cm-editor > .cm-scroller {
+  height: 100% !important;
+}
+
+.diff-merge .cm-mergeViewEditor > .cm-editor > .cm-scroller {
+  overflow: auto !important;
+}
+
+/* 두 열 사이 경계 — 열이 붙어 있으면 어디까지가 한 쪽인지 눈이 헷갈린다. */
+.diff-merge .cm-mergeViewEditor + .cm-mergeViewEditor {
+  border-left: 1px solid color-mix(in srgb, CanvasText 14%, transparent);
+}
+
 /* 첫 렌더 완료(shell이 `data-content-ready`를 세움) 전까지 읽기 모드 iframe을 투명하게 둔다. render.html이
    로드되며 잠깐 보이는 blank Canvas와 markdown 내용의 팝인을 감추고 완성된 문서만 페이드인한다. 한 번 준비되면
    유지되므로 모드 왕복(읽기↔라이브)이나 재렌더에서 다시 깜빡이지 않는다. */

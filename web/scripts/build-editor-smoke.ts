@@ -38,9 +38,19 @@ await writeFile(
 await writeFile(
   join(outdir, "app.css"),
   [
+    // 제품에서는 native가 터미널 테마에서 파생해 주입하는 변수다(syntax_theme.writeCssVarsJs). 게이트도 같은
+    // 변수를 정의해, 스크린샷이 "변수를 쓰는 경로"를 실제로 지나가게 한다(폴백만 보고 통과하지 않게).
+    ":root { --maru-diff-added: #3fb950; --maru-diff-removed: #f85149; }",
     "html, body { margin: 0; height: 100%; background: Canvas; color: CanvasText; }",
     "#diff-harness { display: flex; flex-direction: column; gap: 12px; height: 100%; padding: 8px; box-sizing: border-box; }",
-    "#diff-split, #diff-unified { flex: 1 1 0; min-height: 120px; overflow: auto; }",
+    // 제품 app.css(.diff-merge …)와 **같은 규칙**: 각 편집기가 자기 안에서 스크롤한다 — 그래야 가로 막대가
+    // 문서 맨 아래가 아니라 보이는 영역 아래에 있다. merge의 auto !important를 우리 쪽 !important로 되돌린다.
+    "#diff-split, #diff-unified { flex: 1 1 0; min-height: 0; overflow: hidden; }",
+    "#diff-split .cm-mergeView, #diff-split .cm-mergeViewEditors, #diff-split .cm-mergeViewEditor { height: 100%; min-height: 0; }",
+    "#diff-split .cm-mergeViewEditor > .cm-editor, #diff-split .cm-mergeViewEditor > .cm-editor > .cm-scroller { height: 100% !important; }",
+    "#diff-split .cm-mergeViewEditor > .cm-editor > .cm-scroller { overflow: auto !important; }",
+    "#diff-split .cm-mergeViewEditor + .cm-mergeViewEditor { border-left: 1px solid color-mix(in srgb, CanvasText 14%, transparent); }",
+    "#diff-unified .cm-editor, #diff-unified .cm-editor > .cm-scroller { height: 100% !important; }",
     "",
   ].join("\n"),
 );

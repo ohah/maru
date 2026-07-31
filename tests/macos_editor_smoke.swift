@@ -35,6 +35,9 @@ struct EditorSmoke {
         app.setActivationPolicy(visible ? .regular : .accessory)
 
         let config = WKWebViewConfiguration()
+        // **비영속 스토어.** 기본 스토어는 앱 실행 사이에도 캐시가 남아, asset을 고쳐도 옛 CSS/JS가 로드될 수 있다.
+        // 게이트는 "지금 이 산출물"을 재야 하므로 캐시를 아예 두지 않는다.
+        config.websiteDataStore = .nonPersistent()
         // 제품과 같은 등록 — 핸들러도 CSP도 제품 코드가 소유한다(스모크는 root만 바꾼다).
         config.setURLSchemeHandler(
             MaruAppSchemeHandler(assetRoot: assetRoot),
@@ -144,6 +147,10 @@ struct EditorSmoke {
         if intValue(summary["initial_unified_chunks"]) <= 0 { failures.append("unified view computed no chunks") }
         if intValue(summary["initial_split_changed_elements"]) <= 0 { failures.append("no change decorations") }
         if intValue(summary["initial_unified_gutter_markers"]) <= 0 { failures.append("no gutter markers") }
+        if intValue(summary["initial_split_line_numbers"]) <= 0 { failures.append("no line numbers") }
+        if boolValue(summary["initial_split_scrollable"]) == false { failures.append("split view cannot scroll") }
+        if boolValue(summary["initial_split_scrollable_x"]) == false { failures.append("split view cannot scroll horizontally") }
+        if boolValue(summary["initial_unified_scrollable"]) == false { failures.append("unified view cannot scroll") }
         if !accepted { failures.append("acceptChunk did not apply") }
         if intValue(summary["after_accept_unified_chunks"]) >= intValue(summary["initial_unified_chunks"]) {
             failures.append("acceptChunk did not reduce the chunk count")
@@ -190,6 +197,13 @@ struct EditorSmoke {
         summary["\(prefix)_split_gutter_markers"] = String(intOf(split["gutter_markers"]))
         summary["\(prefix)_unified_gutter_markers"] = String(intOf(unified["gutter_markers"]))
         summary["\(prefix)_split_visible"] = String(hasLayout(split["layout"]))
+        // **스크롤 가능 여부**: 보이는 높이보다 전체가 커야 넘치는 내용을 볼 수 있다. merge가 편집기 높이를
+        // `auto !important`로 강제하므로 스크롤 주체는 바깥 상자이고, 그 상자가 안 갇히면 여기서 같아진다.
+        summary["\(prefix)_split_scrollable"] = String(isScrollable(split["scroll"]))
+        // 가로도 넘쳐야 한다 — 긴 줄이 있는데 가로 스크롤이 없으면 그 줄의 나머지를 볼 방법이 없다.
+        summary["\(prefix)_split_scrollable_x"] = String(isScrollableX(split["scroll"]))
+        summary["\(prefix)_unified_scrollable"] = String(isScrollable(unified["scroll"]))
+        summary["\(prefix)_split_line_numbers"] = String(intOf(split["line_number_elements"]))
         summary["\(prefix)_unified_visible"] = String(hasLayout(unified["layout"]))
         summary["\(prefix)_style_elements"] = String(intOf(probe["style_elements"]))
         summary["\(prefix)_styles_all_in_this_document"] = String((probe["styles_all_in_this_document"] as? Bool) ?? false)
@@ -212,6 +226,18 @@ struct EditorSmoke {
             copy[key] = side
         }
         return copy
+    }
+
+    /// 가로로 넘치는가(fixture에 뷰 폭을 넘는 긴 줄이 있다).
+    static func isScrollableX(_ raw: Any?) -> Bool {
+        guard let scroll = raw as? [String: Any] else { return false }
+        return intOf(scroll["scroll_width"]) > intOf(scroll["client_width"]) && intOf(scroll["client_width"]) > 0
+    }
+
+    /// 스크롤 상자가 실제로 넘치는가(fixture는 뷰 높이를 넘도록 길다).
+    static func isScrollable(_ raw: Any?) -> Bool {
+        guard let scroll = raw as? [String: Any] else { return false }
+        return intOf(scroll["scroll_height"]) > intOf(scroll["client_height"]) && intOf(scroll["client_height"]) > 0
     }
 
     static func hasLayout(_ raw: Any?) -> Bool {

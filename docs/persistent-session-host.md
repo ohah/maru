@@ -8490,7 +8490,18 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             - **[d2d]** `AuthorityGeneration.untracked/tracked`와 operation/parser generation max/exhaustion에서 permit 발급
               0을 검증한다.
 
-          - **2b2e — closed recovery + consumer commit:** recovery transition은 다음 충돌표를 따른다.
+          - **2b2e — closed recovery + consumer commit:** 이 gate는 순환 의존을 피하기 위해
+            **2b2e-core**와 **2b2e-integration**으로 나눈다. core는 dependency-neutral recovery 타입,
+            recovery candidate의 immutable key, generic `RemoteAttachment` consumer의
+            apply→release→mark 계약, recovery 상태 reducer와 fresh-clock wake 계약을 닫는다.
+            integration은 2b2f1의 실제 TX offset/fully-sent 증거와 2b2f2의 response-wait/correlation
+            증거가 생긴 뒤 아래 충돌표 전체를 실제 external owner에 연결한다. core만 green인 상태를
+            2b2e 완료로 표시하지 않으며, integration까지 green이어야 2b2e와 충돌표가 구현 완료다.
+            core의 generic consumer 계약은 transport ownership을 증명하지만
+            `ExternalPumpStorage`의 현재 storage-owned live consume/release 경로와 병존시키지 않는다.
+            두 경로를 잇는 non-movable product adapter와 단일 release authority는 2b3이 소유한다.
+
+            recovery transition은 다음 충돌표를 따른다.
 
             | 현재 | 입력 | 결과 |
             | --- | --- | --- |
@@ -8504,10 +8515,18 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             | recovery 진입 | unrelated control offset 0 | atomic cancel 후 진입 |
             | recovery 진입 | unrelated control partial/fully-sent/response-wait | protocol terminal |
 
-            candidate charged batch는
-            `RecoveryKey{origin,recovery_epoch,expected_token_generation}`을 handoff 전에 slot metadata에 함께
-            고정한다. `StreamBatchView.recovery_key: ?RecoveryKey`로 immutable key를 노출하고 normal snapshot/delta
-            및 GUI `.untracked`는 null이다. `AttachmentTransport`는
+            dependency-neutral `external_recovery_types.zig`가 `RecoveryOrigin`과
+            `RecoveryKey{owner_incarnation,origin,recovery_epoch,expected_token_generation}`의 단일 정의를
+            소유하고 `client_pump`, ledger, attachment가 공유한다. nonzero `owner_incarnation`은 adopted
+            Client의 process-unique `attach_instance_id`에서 온 storage seal 값이므로 같은 주소·stream·epoch·
+            token generation으로 storage를 재초기화해도 이전 key가 새 owner에 맞지 않는다.
+            candidate charged batch의 slot semantic은 sealed `RecoveryIntent{origin,epoch}`만 canonical하게
+            저장하고, lease handoff 시 ledger가 그 intent와 현재 token generation 및 sealed owner incarnation을
+            결합해 full key를 한 번 투영한다. origin/epoch을 facade나 consumer state에서 재구성하지 않으며 full
+            key를 slot에 중복 저장하지도 않는다. `StreamBatchView.recovery_key: ?RecoveryKey`로 immutable value
+            key를 노출하고 normal snapshot/delta 및 GUI `.untracked`는 null이다. recovery state에서 null
+            snapshot/delta, valid state에서 nonnull key, wrong stream/incarnation/origin/epoch/generation은
+            screen apply와 gate clear 0의 protocol terminal이다. `AttachmentTransport`는
             `mark_resync_applied(context,stream_id,key: RecoveryKey)->commit_pending|stale_invariant` callback을
             제공한다. `RemoteAttachment`는 release 전에 `?RecoveryKey`를 값으로 복사한다. null이면 mark callback
             0회 후 `applied`, some이면 release 성공 뒤 exact key로 callback을 정확히 1회 호출한다. 따라서 GUI
@@ -8515,19 +8534,34 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             `idle | applied | recovery_commit_pending | terminal`의 닫힌 enum으로 owner wake 필요를 전달한다.
             facade/ledger import는 하지 않는다. `RemoteAttachment` 성공 경로는
             **apply→lease release→`mark_resync_applied(context,stream_id,recovery_key)`** 순서다. release 실패면 기존
-            `failed_release` terminal slot에 retain하고 mark 0이다. mark exact match는 input gate를 바로 열지 않고
+            `failed_release` terminal slot에 retain하고 mark 0이다. mark exact match는 stream, nonzero owner
+            incarnation, origin, epoch, expected token generation과 현재 `awaiting_snapshot` phase를 모두
+            대조하며 input gate를 바로 열지 않고
             `awaiting_snapshot→applied_pending`만 기록한다. `commit_pending`을 받은 facade caller는 같은 owner
             thread에서 새 monotonic clock을 읽고 **zero-readiness pump를 즉시 한 번 호출해야 하며**, 그 전까지
             input/TX admission은 계속 0이다. callback에는 clock을 전달하지 않는다. 대신 storage가
             `immediate_turn_required=true` latch를 세운다.
-            `pollHint() -> { immediate: bool, next_deadline_ns: ?i128 }`가 opaque storage에서 이를 무할당으로
-            읽고, owner는 poll 진입 전에 검사해 timeout 0을 택한다.
+            `pollHint() -> { immediate: bool, next_deadline_ns: ?i128 }`가 opaque storage에서 latch와 semantic
+            seal을 소비하지 않는 read-only snapshot으로 무할당 조회한다. `next_deadline_ns`는 recovery만의
+            별도 시계가 아니라 raw/partial/TX/control/recovery 전체 deadline minimum의 단일 출처다.
+            owner는 모든 poll 진입 직전에 hint를 다시 읽고 immediate면 timeout 0을 택한다.
             따라서 caller가 즉시 turn을 호출하지 못해도 기존 recovery 만료시각까지 잠들 수 없다. 이 fresh-clock
             turn은 deadline→`applied_pending` commit→RX 순서로 실행한다. 같은 turn에 도착한 delta/invalidated/
-            revoke는 버리지 않고 각각 새 `valid`/host-recovery/terminal 경로로 분류한다. 따라서 오래 걸린 apply가
+            revoke는 버리지 않고 각각 새 `valid`/fresh `now`에서 새 30초 host-recovery/terminal 경로로
+            분류한다. 따라서 오래 걸린 apply가
             turn-start의 stale clock으로 30초 gate를 우회하지 않는다. callback 결과는
             `commit_pending | stale_invariant`의 닫힌 enum이며 stale stream/epoch/token, apply/append/
-            drop/mark 실패와 deadline exact boundary는 clear 0·terminal이다.
+            drop/mark 실패와 deadline exact boundary는 clear 0·terminal이다. release 성공 뒤 stale mark는
+            이미 release한 token을 retain/retry하지 않고 terminal로 닫으며, release 실패만 기존
+            `failed_release` 한 칸에 token을 보존하고 mark 0이다. mark 성공은 `applied_pending`과
+            `immediate_turn_required`를 하나의 callback-free/no-fail commit으로 함께 publish한다.
+            fresh-clock turn 전까지 input/TX gate는 계속 닫혀 있다.
+
+            recovery 진입의 backlog drop, offset-0 control cancel, origin/epoch/deadline publish는 하나의
+            preflight된 cleanup aggregate와 no-callback suffix로 all-or-none commit한다. cleanup 중 하나라도
+            불확실하거나 partial/fully-sent/response-wait control이면 새 recovery state를 부분 publish하지 않고
+            terminal/quarantine로 닫는다. epoch는 같은 recovery의 duplicate/승격에서 보존하고, 새
+            `valid→recovery` 진입에서만 checked increment한다. overflow는 mutation 0 terminal이다.
 
             GUI의 기존 `snapshot.invalidated` classifier, canonical `runtime.resync` request builder와
             `stream_ack` builder는 공용 pure wire leaf로 추출해 GUI/external이 공유한다. `client_pump.zig`는

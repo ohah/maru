@@ -9012,12 +9012,49 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           기존 `max_cross_owner_quarantine_bytes` 상한 안의 deliberate no-free다. actual socketpair의 public
           `pumpRxTurn`, sticky cleanup failure, callback drift, raw-tag corruption과 allocation identity tracker가 arbitrary
           replay/free·double free 0을 검증한다. Debug/ReleaseFast `test-session-host-f3b`, 전체
-          `test-session-host`, `check-boundaries`, `mise run check`가 green이어야 이 완료 표식을 유지한다. f3c0,
+          `test-session-host`, `check-boundaries`, `mise run check`가 green이어야 이 완료 표식을 유지한다.
           2b2e-integration, f3c~e와 stable adapter는 아직 완료가 아니다.
           **f3c0 control contract substrate**는 shared codec, `ControlExpectation`, opaque final-address
           `PreparedWholeDrainPermit`/`PreparedControlSemanticVerdict` 타입과 private same-lease resync consumer signature를
           추가하되 permit 생성·public take capability는 0으로 둔다. 이 compile/test 가능한 substrate 뒤에
-          2b2e-integration이 consumer를 구현한다. **f3c drain-bound semantic take**는 `completed_awaiting_drain`, private permit과 typed resize verdict,
+          2b2e-integration이 consumer를 구현한다. codec의 정확한 계약은 다음과 같다.
+          `ControlRequest = .resize{stream_id, cols, rows, client_sequence} | .resync{stream_id, recovery_key}`이고
+          모든 scalar는 canonical nonzero여야 하며 resize는 `cols >= 2`, `rows >= 1`이어야 한다. caller 제공 고정 buffer에
+          whole request JSON을 쓰는 allocation-free encoder는 성공할 때에만 그 buffer slice와
+          `.resize{client_sequence}` 또는 `.resync{recovery_key}` expectation을 함께 돌려준다. buffer 부족·비정규 request는
+          wire/expectation을 어느 쪽도 publish하지 않는다. recovery key는 local semantic authority이며 JSON에는 넣지 않는다.
+          resync admission은 key의 owner incarnation·client origin·recovery epoch가 현재 `control_wait`와 정확히 맞는지도
+          request-ID 예약과 TX allocation 전에 검증하고, foreign key에는 wire를 0 byte publish한다.
+          같은 codec의 `WireRequest` params encoder를 blocking `RemoteRuntime`도 사용해 method/field vocabulary를 공유하며,
+          full external request encoder는 그 params encoder 결과를 envelope에 넣는다.
+          response decoder는 trailing/duplicate/unknown field를 허용하지 않고 resize의 기존 stale/applied와 protocol error
+          envelope, resync의 exact `{"result":{"resync":true}}`만 typed value로 만든다. `RemoteRuntime`은 같은 resize decoder를
+          사용하되 blocking call의 기존 error surface로 명시적으로 매핑한다. external pump의 F1 admission은 typed request를
+          받아 codec 결과의 payload와 expectation을 TX/correlation owner에 한 no-fail publication으로 봉인하며, caller raw
+          JSON admission API와 test-only 우회는 제거한다.
+
+          `ControlExpectation`은 correlation `InFlight`와 `Completed`, frozen revoke proof 및 response take까지 digest에 포함한다.
+          f3c0의 `PreparedWholeDrainPermit`는 private lifecycle·saved-address·storage/lease, owner incarnation,
+          operation/turn/parser generation, parser absolute range/seal, sampled clock, authority seal/generation, completed owner/
+          correlation generation과 TX queue generation vocabulary를 모두 정의한다. `PreparedControlSemanticVerdict`도 completed
+          payload seal, request ID/control expectation/target, current authority seal/generation과 permit digest에 결속되는 필드를
+          미리 고정하되 public constructor, public 반환, payload consumer는 두지 않는다. same-lease resync consumer는
+          `consumed | stale | invalid | terminal` typed result의 private function type으로만 고정하고 실제 callable implementation과 permit
+          발급은 2b2e-integration이 소유한다. 따라서 f3c0의 자동 gate는 (1) codec 정상/경계/duplicate/unknown/error/OOM 및
+          resize/resync request/params buffer cap-1/exact, (2) RemoteRuntime request/decode parity, (3) typed admission allocation fail-index와 raw JSON API 부재,
+          (4) expectation copy/tamper가 seal 검증을 통과하지 못함, (5) boundary scan으로 codec 외 product JSON vocabulary와
+          permit constructor/take 0, (6) component별 executable sentinel로 zero-test 0을 Debug/ReleaseFast에서 고정한다. f3c0만으로 response payload를 semantic apply하거나
+          correlation을 idle로 되돌리거나 recovery phase를 바꾸지 않는다.
+          **구현 완료(f3c0):** OS-neutral `host_protocol`이 control payload cap과 error-code vocabulary의 SSOT이며,
+          `control_response_wire.zig`은 canonical typed resize/resync request를 caller buffer에 allocation 없이 encode하고
+          resize stale/applied·u64 max sequence/generation·exact resync ACK·error envelope를 strict decode한다. `RemoteRuntime`의
+          resize/resync response와 external pump의 F1 admission이 이 codec을 소비하며 raw JSON admission은 제거했다.
+          allocation-free `ControlExpectation`은 correlation→completed payload→revoke proof의 모든 digest에 포함되고,
+          recovery key는 wire에 직렬화되지 않는다. opaque final-address permit/verdict와 private same-lease consumer function
+          type만 추가했으며 constructor·public take·semantic apply는 0이다. Debug/ReleaseFast
+          `test-session-host-f3c0`, 전체 `test-session-host`, `check-boundaries`, `mise run check`가 green이어야 이 완료 표식을
+          유지한다.
+          **f3c drain-bound semantic take**는 `completed_awaiting_drain`, private permit과 typed resize verdict,
           duplicate-after-success와 max-ID success 뒤 같은 product storage의 다음 wire-zero
           `request_id_exhausted`를 고정한다. **f3d whole-turn orchestration**은 기존 `pumpRxTurn`의 단일 clock,
           RX→authority→f1 TX suffix와 cleanup leaf만 재사용하고 새 pump/write adapter/lease를 만들지 않는다.

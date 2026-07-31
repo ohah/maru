@@ -37,7 +37,7 @@ pub const max_inventory_pages: usize =
 
 /// payload cap(§10). control은 strict UTF-8 JSON, binary는 그대로. 이 상한들은 kind별로 framing이 적용한다.
 /// 한 viewport snapshot(16 MiB)은 여러 `snapshot_chunk`(각 1 MiB)로 나뉘므로 **단일 frame** payload 상한은 binary 1 MiB다.
-pub const max_control_json: usize = 256 * 1024;
+pub const max_control_json: usize = @import("maru").session.host_protocol.max_control_json;
 pub const max_binary_chunk: usize = 1024 * 1024;
 pub const max_viewport_snapshot: usize = 16 * 1024 * 1024;
 pub const max_screen_batch_chunks: usize = max_viewport_snapshot / max_binary_chunk;

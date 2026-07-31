@@ -5,9 +5,11 @@
 
 const std = @import("std");
 const client_pump = @import("client_pump.zig");
+const control_response_wire = @import("control_response_wire.zig");
 
 pub const timeout_ns: i128 = 5 * std.time.ns_per_s;
 pub const ControlKind = client_pump.ControlKind;
+pub const ControlExpectation = control_response_wire.ControlExpectation;
 
 pub const Target = struct {
     stream_id: u64,
@@ -26,6 +28,7 @@ pub const Progress = enum {
 
 pub const InFlight = struct {
     kind: ControlKind,
+    expectation: ControlExpectation,
     target: Target,
     request_id: u64,
     wire_len: usize,
@@ -35,6 +38,7 @@ pub const InFlight = struct {
 
 pub const Completed = struct {
     kind: ControlKind,
+    expectation: ControlExpectation,
     target: Target,
     request_id: u64,
     wire_len: usize,
@@ -59,6 +63,7 @@ pub const AdmissionResult = union(enum) {
 pub fn prepareAdmission(
     state: State,
     kind: ControlKind,
+    expectation: ControlExpectation,
     target: Target,
     request_id: u64,
     wire_len: usize,
@@ -69,12 +74,17 @@ pub fn prepareAdmission(
         .in_flight, .completed => return .backpressure,
         .terminal => return .invalid,
     }
-    if (!target.isCanonical() or request_id == 0 or wire_len == 0)
+    if (!target.isCanonical() or request_id == 0 or wire_len == 0 or
+        !expectation.isCanonical() or switch (expectation) {
+        .resize => kind != .resize,
+        .resync => kind != .resync,
+    })
         return .invalid;
     const deadline_ns = std.math.add(i128, now_ns, timeout_ns) catch
         return .deadline_overflow;
     return .{ .admitted = .{
         .kind = kind,
+        .expectation = expectation,
         .target = target,
         .request_id = request_id,
         .wire_len = wire_len,
@@ -159,11 +169,22 @@ pub fn completeResponse(
         return .terminal;
     return .{ .completed = .{
         .kind = in_flight.kind,
+        .expectation = in_flight.expectation,
         .target = in_flight.target,
         .request_id = in_flight.request_id,
         .wire_len = in_flight.wire_len,
     } };
 }
+
+const test_resize_expectation: ControlExpectation = .{
+    .resize = .{ .client_sequence = 1 },
+};
+const test_resync_expectation: ControlExpectation = .{ .resync = .{
+    .owner_incarnation = 1,
+    .origin = .client,
+    .recovery_epoch = 1,
+    .expected_token_generation = 1,
+} };
 
 test "control correlation admits only one outstanding request without wrapping deadline" {
     const target = Target{
@@ -173,6 +194,7 @@ test "control correlation admits only one outstanding request without wrapping d
     const admitted = prepareAdmission(
         .idle,
         .resize,
+        test_resize_expectation,
         target,
         41,
         80,
@@ -185,6 +207,7 @@ test "control correlation admits only one outstanding request without wrapping d
         prepareAdmission(
             .{ .in_flight = admitted.admitted },
             .resync,
+            test_resync_expectation,
             target,
             42,
             80,
@@ -192,7 +215,7 @@ test "control correlation admits only one outstanding request without wrapping d
         ) == .backpressure,
     );
     try std.testing.expect(
-        prepareAdmission(.idle, .resize, target, 1, 80, std.math.maxInt(i128)) ==
+        prepareAdmission(.idle, .resize, test_resize_expectation, target, 1, 80, std.math.maxInt(i128)) ==
             .deadline_overflow,
     );
 }
@@ -205,6 +228,7 @@ test "control correlation accepts response only after exact completion and befor
     const admitted = prepareAdmission(
         .idle,
         .resize,
+        test_resize_expectation,
         target,
         41,
         80,
@@ -245,6 +269,7 @@ test "control correlation rejects stale completion and duplicate response" {
     const in_flight = prepareAdmission(
         .idle,
         .resync,
+        test_resync_expectation,
         target,
         std.math.maxInt(u64),
         80,
@@ -272,6 +297,7 @@ test "control deadline is live through deadline minus one and expires exactly at
     const in_flight = prepareAdmission(
         .idle,
         .resize,
+        test_resize_expectation,
         target,
         1,
         80,

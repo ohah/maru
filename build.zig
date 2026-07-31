@@ -1895,6 +1895,140 @@ pub fn build(b: *std.Build) void {
         );
         session_host_f3b_step.dependOn(&run_external_pump_f3b_tests.step);
 
+        const control_wire_f3c0_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/control_response_wire.zig",
+                ),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"f3c0"},
+        });
+        const run_control_wire_f3c0_tests = b.addRunArtifact(
+            control_wire_f3c0_tests,
+        );
+        run_control_wire_f3c0_tests.setCwd(b.path("."));
+        const remote_runtime_f3c0_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/remote_runtime.zig",
+                ),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"f3c0"},
+        });
+        const run_remote_runtime_f3c0_tests = b.addRunArtifact(
+            remote_runtime_f3c0_tests,
+        );
+        run_remote_runtime_f3c0_tests.setCwd(b.path("."));
+        const external_pump_f3c0_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/client_external_pump.zig",
+                ),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"f3c0"},
+        });
+        const run_external_pump_f3c0_tests = b.addRunArtifact(
+            external_pump_f3c0_tests,
+        );
+        run_external_pump_f3c0_tests.setCwd(b.path("."));
+        const session_host_f3c0_step = b.step(
+            "test-session-host-f3c0",
+            "Run the non-empty F3c0 typed control contract regression gate",
+        );
+        const session_host_f3c0_sentinel_pump = b.createModule(.{
+            .root_source_file = b.path(
+                "src/platform/macos/session_host/client_external_pump.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        const session_host_f3c0_sentinel = b.addExecutable(.{
+            .name = "maru-session-host-f3c0-sentinel",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_f3c0_sentinel.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "maru", .module = maru_mod },
+                    .{ .name = "client_external_pump", .module = session_host_f3c0_sentinel_pump },
+                },
+            }),
+        });
+        const run_session_host_f3c0_sentinel = b.addRunArtifact(
+            session_host_f3c0_sentinel,
+        );
+        run_session_host_f3c0_sentinel.setCwd(b.path("."));
+        const session_host_f3c0_codec_sentinel_module = b.createModule(.{
+            .root_source_file = b.path(
+                "src/platform/macos/session_host/control_response_wire.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        const session_host_f3c0_codec_sentinel = b.addExecutable(.{
+            .name = "maru-session-host-f3c0-codec-sentinel",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_f3c0_codec_sentinel.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{
+                    .name = "control_response_wire",
+                    .module = session_host_f3c0_codec_sentinel_module,
+                }},
+            }),
+        });
+        const run_session_host_f3c0_codec_sentinel = b.addRunArtifact(
+            session_host_f3c0_codec_sentinel,
+        );
+        run_session_host_f3c0_codec_sentinel.setCwd(b.path("."));
+        const session_host_f3c0_remote_sentinel_module = b.createModule(.{
+            .root_source_file = b.path(
+                "src/platform/macos/session_host/remote_runtime.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        const session_host_f3c0_remote_sentinel = b.addExecutable(.{
+            .name = "maru-session-host-f3c0-remote-sentinel",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_f3c0_remote_sentinel.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{
+                    .name = "remote_runtime",
+                    .module = session_host_f3c0_remote_sentinel_module,
+                }},
+            }),
+        });
+        const run_session_host_f3c0_remote_sentinel = b.addRunArtifact(
+            session_host_f3c0_remote_sentinel,
+        );
+        run_session_host_f3c0_remote_sentinel.setCwd(b.path("."));
+        session_host_f3c0_step.dependOn(&run_control_wire_f3c0_tests.step);
+        session_host_f3c0_step.dependOn(&run_remote_runtime_f3c0_tests.step);
+        session_host_f3c0_step.dependOn(&run_external_pump_f3c0_tests.step);
+        session_host_f3c0_step.dependOn(&run_session_host_f3c0_sentinel.step);
+        session_host_f3c0_step.dependOn(&run_session_host_f3c0_codec_sentinel.step);
+        session_host_f3c0_step.dependOn(&run_session_host_f3c0_remote_sentinel.step);
+
         // Buffered traversal fixtures stay outside the product barrel so test-only authority and
         // hostile allocators cannot become reachable from the shipped session-host module graph.
         const external_rx_turn_tests = b.addTest(.{

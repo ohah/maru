@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { ViewerWindow } from "../src/viewer";
 import { EditorState, Text, Transaction } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { JSDOM } from "jsdom";
@@ -80,7 +81,7 @@ describe("file viewer bridge boundary", () => {
     globalThis.setTimeout = ((..._arguments: Parameters<typeof setTimeout>) => {
       scheduledTimeouts += 1;
       throw new Error("product Mermaid adapter scheduled an independent Web timeout");
-    }) as typeof setTimeout;
+    }) as unknown as typeof setTimeout;
     let pending: HTMLElement | null = null;
     document.addEventListener("maru:file-request", () => {
       const node = document.querySelector<HTMLElement>('[data-maru-file-request="pending"]');
@@ -134,7 +135,7 @@ describe("file viewer bridge boundary", () => {
       scheduledDelay = delay ?? 0;
       scheduledCallback = callback as () => void;
       return 1 as unknown as ReturnType<typeof setTimeout>;
-    }) as typeof setTimeout;
+    }) as unknown as typeof setTimeout;
     globalThis.clearTimeout = ((_handle?: ReturnType<typeof setTimeout>) => {
       clearedTimeouts += 1;
     }) as typeof clearTimeout;
@@ -190,8 +191,10 @@ describe("file viewer bridge boundary", () => {
       dom.window.document.dispatchEvent(new dom.window.Event("maru:file-response"));
     });
 
-    bootShell(dom.window.document, dom.window as unknown as Window);
-    const page = dom.window as unknown as Window & { __maruSyncDirty?: () => Promise<boolean> };
+    bootShell(dom.window.document, dom.window as unknown as ViewerWindow);
+    const page = dom.window as unknown as ViewerWindow & {
+      __maruSyncDirty?: () => Promise<boolean>;
+    };
     const sync = page.__maruSyncDirty?.();
     const duplicateSync = page.__maruSyncDirty?.();
     expect(duplicateSync).toBe(sync);
@@ -254,7 +257,7 @@ describe("file viewer bridge boundary", () => {
       settle({ result: { ok: true } });
     });
 
-    bootShell(document, dom.window as unknown as Window);
+    bootShell(document, dom.window as unknown as ViewerWindow);
     for (let turn = 0; turn < 24; turn += 1) await Promise.resolve();
 
     const status = document.querySelector<HTMLElement>("#viewer-status");
@@ -585,14 +588,14 @@ describe("file viewer bridge boundary", () => {
       node.dataset.maruFileRequest = "done";
       dom.window.document.dispatchEvent(new dom.window.Event("maru:file-response"));
     });
-    bootShell(dom.window.document, dom.window as unknown as Window);
+    bootShell(dom.window.document, dom.window as unknown as ViewerWindow);
     const frame = dom.window.document.querySelector<HTMLIFrameElement>("#renderer");
     expect(frame?.contentWindow).not.toBeNull();
     for (let turn = 0; turn < 6; turn += 1) await Promise.resolve();
 
     dom.window.dispatchEvent(
       new dom.window.MessageEvent("message", {
-        source: dom.window,
+        source: dom.window as unknown as MessageEventSource,
         data: {
           channel: viewerChannel,
           type: "link-activate",
@@ -680,7 +683,7 @@ describe("file viewer bridge boundary", () => {
     const originalToString = textPrototype.toString;
     let editor: EditorView | null = null;
     try {
-      bootShell(dom.window.document, dom.window as unknown as Window);
+      bootShell(dom.window.document, dom.window as unknown as ViewerWindow);
       const frame = dom.window.document.querySelector<HTMLIFrameElement>("#renderer");
       dom.window.dispatchEvent(
         new dom.window.MessageEvent("message", {
@@ -760,7 +763,7 @@ describe("bridge-free renderer", () => {
     const dom = new JSDOM('<!doctype html><main id="app"></main>', {
       url: "maru-app://render/render.html",
     });
-    bootRenderer(dom.window.document, dom.window as unknown as Window);
+    bootRenderer(dom.window.document, dom.window as unknown as ViewerWindow);
     dom.window.dispatchEvent(
       new dom.window.MessageEvent("message", {
         source: dom.window.parent,
@@ -782,7 +785,7 @@ describe("bridge-free renderer", () => {
       url: "maru-app://render/render.html",
     });
     const root = dom.window.document.documentElement;
-    bootRenderer(dom.window.document, dom.window as unknown as Window);
+    bootRenderer(dom.window.document, dom.window as unknown as ViewerWindow);
     const post = (data: unknown) =>
       dom.window.dispatchEvent(
         new dom.window.MessageEvent("message", { source: dom.window.parent, data }),
@@ -829,7 +832,7 @@ describe("bridge-free renderer", () => {
       { url: "maru-app://app/index.html?document=1" },
     );
     // read/write 브리지는 이 테스트와 무관 — 줌 포워딩만 검증하므로 문서 요청은 처리하지 않는다(begin이 pending에 머물러도 무해).
-    bootShell(dom.window.document, dom.window as unknown as Window);
+    bootShell(dom.window.document, dom.window as unknown as ViewerWindow);
     const frame = dom.window.document.querySelector<HTMLIFrameElement>("#renderer");
     const target = frame?.contentWindow;
     expect(target).not.toBeNull();
@@ -861,7 +864,7 @@ describe("bridge-free renderer", () => {
 
   test("allows raster data URLs and sanitizes SVG before creating a data URL", () => {
     const dom = new JSDOM("");
-    const targetWindow = dom.window as unknown as Window;
+    const targetWindow = dom.window as unknown as ViewerWindow;
     expect(assetDataUrl("image/png", "iVBORw0KGgo=", targetWindow)).toBe(
       "data:image/png;base64,iVBORw0KGgo=",
     );
@@ -884,7 +887,7 @@ describe("bridge-free renderer", () => {
     const messages: unknown[] = [];
     dom.window.postMessage = ((message: unknown) =>
       messages.push(message)) as typeof dom.window.postMessage;
-    bootRenderer(dom.window.document, dom.window as unknown as Window);
+    bootRenderer(dom.window.document, dom.window as unknown as ViewerWindow);
     dom.window.dispatchEvent(
       new dom.window.MessageEvent("message", {
         source: dom.window.parent,
@@ -919,7 +922,7 @@ describe("bridge-free renderer", () => {
     const messages: unknown[] = [];
     dom.window.postMessage = ((message: unknown) =>
       messages.push(message)) as typeof dom.window.postMessage;
-    bootRenderer(dom.window.document, dom.window as unknown as Window);
+    bootRenderer(dom.window.document, dom.window as unknown as ViewerWindow);
     dom.window.dispatchEvent(
       new dom.window.MessageEvent("message", {
         source: dom.window.parent,

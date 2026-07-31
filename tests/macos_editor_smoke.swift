@@ -63,6 +63,8 @@ struct EditorSmoke {
         }
         webView.load(URLRequest(url: url))
 
+        // 마운트에 걸린 시간을 남긴다 — 문서가 커질 때 어디서 못 쓰게 되는지 판단할 근거다(추측 금지).
+        let ready_started = Date()
         // 하니스가 마운트를 끝낼 때까지 run loop를 돌린다. 폴링이지만 값이 도착하면 즉시 나가므로 고정 대기가 아니다.
         guard let ready = waitFor(webView: webView, expression: "window.__maruEditorSmoke ? (window.__maruEditorSmoke.ready || window.__maruEditorSmoke.error || false) : false") else {
             fail("harness never became ready within \(Int(timeout))s")
@@ -72,6 +74,7 @@ struct EditorSmoke {
         }
 
         var summary: [String: String] = [:]
+        summary["ready_ms"] = String(Int(Date().timeIntervalSince(ready_started) * 1000))
         summary["engine"] = "codemirror-merge/MergeView+unifiedMergeView"
         summary["webkit_user_agent"] = (evaluate(webView, "navigator.userAgent") as? String) ?? "unknown"
         summary["asset_root"] = assetRoot

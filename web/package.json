@@ -5,7 +5,7 @@
   "scripts": {
     "web:build": "bun run scripts/build.ts && bun run scripts/verify-build.ts",
     "web:test": "bun test",
-    "web:typecheck": "tsc -p tsconfig.src.json && tsc -p tsconfig.bridge.json && tsc -p tsconfig.ui.json",
+    "web:typecheck": "tsc -p tsconfig.src.json && tsc -p tsconfig.tests.json && tsc -p tsconfig.bridge.json && tsc -p tsconfig.ui.json",
     "web:lint": "oxlint src scripts tests",
     "web:fmt": "oxfmt --write src scripts tests package.json tsconfig.json tsconfig.bridge.json tsconfig.ui.json",
     "web:fmt-check": "oxfmt --check src scripts tests package.json tsconfig.json tsconfig.bridge.json tsconfig.ui.json",

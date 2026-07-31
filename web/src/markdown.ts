@@ -114,7 +114,9 @@ function createProcessor(mode: AssetRenderMode) {
       .use(rehypeSanitize, schema)
       // sanitizer 뒤에는 사용자 AST가 아니라 핀된 renderer만 마크업을 만든다.
       // MathML-only는 KaTeX HTML의 inline style을 피해서 Markdown 파생 markup의 inline style 금지를 지킨다.
-      .use(rehypeKatex, { output: "mathml", strict: "error", throwOnError: false })
+      // `throwOnError`는 넘기지 않는다 — 플러그인이 자기가 `true`로 덮어쓰고 실패 시 `false`로 재시도한다
+      // (rehype-katex 소스 확인). 타입에서도 빠져 있는 옵션이라 우리 값은 여태 무시돼 왔다.
+      .use(rehypeKatex, { output: "mathml", strict: "error" })
       .use(rehypePrism, { ignoreMissing: true })
       .use(rehypeHardenTrustedOutput)
       .use(rehypeStringify)

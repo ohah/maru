@@ -1,0 +1,7 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "target": "ES2022", "skipLibCheck": true },
+  // 테스트도 검사한다. jsdom 창은 브라우저 `Window`와 타입이 달라 캐스팅이 필요한데, 그 캐스팅이 **어디서
+  // 필요한지**를 타입 검사가 짚어 주는 편이 낫다(런타임에만 드러나면 늦다).
+  "include": ["tests/**/*.ts", "tests/**/*.tsx"]
+}

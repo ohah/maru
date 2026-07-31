@@ -1,4 +1,4 @@
-import createDOMPurify from "dompurify";
+import createDOMPurify, { type WindowLike } from "dompurify";
 import type { MermaidConfig } from "mermaid";
 
 // 실제 Mermaid 실행은 FP4의 bridge 없는 격리 origin이 생긴 뒤에만 연다. Mermaid는
@@ -76,7 +76,9 @@ function styleContentIsUnsafe(text: string): boolean {
   }
 }
 
-export function sanitizeMermaidSvg(svg: string, targetWindow: Window): string {
+// DOMPurify가 요구하는 타입을 **그대로** 쓴다(그 창의 `Node`·`Element` 등으로 판정하기 때문이다). 직접 적으면
+// 라이브러리가 요구하는 목록과 어긋날 수 있고, jsdom 창도 이 타입을 만족해 테스트가 캐스팅 없이 돈다.
+export function sanitizeMermaidSvg(svg: string, targetWindow: WindowLike): string {
   const purifier = createDOMPurify(targetWindow);
   purifier.addHook("uponSanitizeAttribute", (_node, data) => {
     if (hasUnsafeSvgUrl(data.attrValue)) data.keepAttr = false;

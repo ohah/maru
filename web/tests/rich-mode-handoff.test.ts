@@ -8,6 +8,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import type { ViewerWindow } from "../src/viewer";
 import { JSDOM } from "jsdom";
 import { bootShell, viewerChannel } from "../src/viewer";
 
@@ -82,7 +83,7 @@ async function bootMarkdownShell(initial: string): Promise<Harness> {
     });
   }
 
-  bootShell(dom.window.document, dom.window as unknown as Window);
+  bootShell(dom.window.document, dom.window as unknown as ViewerWindow);
   dom.window.dispatchEvent(
     new dom.window.MessageEvent("message", {
       source: contentWindow,

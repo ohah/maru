@@ -113,6 +113,30 @@ fn validateTxOwner(
                 break :blk false;
             break :blk self.txConsumedAuthorityStable(lease, scratch);
         },
+        .cancel_turn => blk: {
+            if (binding.scratch_len != @sizeOf(ExternalRxTurnScratch) or
+                binding.write_scratch_len !=
+                    @sizeOf(client_external_tx.PreparedTxCancellation))
+                break :blk false;
+            const scratch_end = std.math.add(
+                usize,
+                binding.scratch_addr,
+                binding.scratch_len,
+            ) catch break :blk false;
+            const write_end = std.math.add(
+                usize,
+                binding.write_scratch_addr,
+                binding.write_scratch_len,
+            ) catch break :blk false;
+            if (binding.write_scratch_addr < binding.scratch_addr or
+                write_end > scratch_end)
+                break :blk false;
+            const scratch: *ExternalRxTurnScratch =
+                @ptrFromInt(binding.scratch_addr);
+            break :blk scratch.saved_self_addr == @intFromPtr(scratch) and
+                scratch.lifecycle == .busy and
+                scratch.turn_generation != 0;
+        },
     };
 }
 

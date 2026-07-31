@@ -1395,7 +1395,15 @@ test "remote attachment never marks failed apply or failed release" {
     });
     try first.bindTransport(apply_failure.interface());
     try first.initScreen(2);
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        first.screen.?.assembler.generation,
+    );
     try std.testing.expectError(error.Truncated, first.pumpScreen(std.testing.io));
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        first.screen.?.assembler.generation,
+    );
     try std.testing.expectEqual(@as(usize, 1), apply_failure.release_calls);
     try std.testing.expectEqual(@as(usize, 0), apply_failure.mark_calls);
     first.deinit();
@@ -1420,9 +1428,17 @@ test "remote attachment never marks failed apply or failed release" {
     });
     try second.bindTransport(release_failure.interface());
     try second.initScreen(2);
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        second.screen.?.assembler.generation,
+    );
     try std.testing.expectError(
         error.LedgerInvariant,
         second.pumpScreen(std.testing.io),
+    );
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        second.screen.?.assembler.generation,
     );
     try std.testing.expectEqual(@as(usize, 1), release_failure.release_calls);
     try std.testing.expectEqual(@as(usize, 0), release_failure.mark_calls);
@@ -1475,6 +1491,45 @@ test "remote attachment stale mark terminalizes without retaining released token
     try std.testing.expectEqual(@as(usize, 1), transport.mark_calls);
     try std.testing.expectEqual(@as(usize, 1), transport.fail_closed_calls);
     try std.testing.expectEqual(@as(?AttachmentBatchLease, null), attachment.failed_release);
+    attachment.deinit();
+    try std.testing.expectEqual(@as(usize, 1), transport.release_calls);
+}
+
+test "remote attachment rejects wrong recovery stream before screen apply or mark" {
+    const allocator = std.testing.allocator;
+    const snapshot = try testSnapshot(allocator);
+    defer allocator.free(snapshot);
+    var transport = RecoveryTestTransport{ .view = .{
+        .is_snapshot = true,
+        .stream_id = 8,
+        .provenance = .untracked,
+        .recovery_key = .{
+            .owner_incarnation = 41,
+            .origin = .host,
+            .recovery_epoch = 7,
+            .expected_token_generation = 9,
+        },
+        .bytes = snapshot,
+    } };
+    var attachment = RemoteAttachment.init(allocator, .{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .role = .observer,
+        .controller_generation = 0,
+    });
+    try attachment.bindTransport(transport.interface());
+    try attachment.initScreen(2);
+    try std.testing.expectError(
+        error.LedgerInvariant,
+        attachment.pumpScreen(std.testing.io),
+    );
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        attachment.screen.?.assembler.generation,
+    );
+    try std.testing.expectEqual(@as(usize, 1), transport.release_calls);
+    try std.testing.expectEqual(@as(usize, 0), transport.mark_calls);
+    try std.testing.expectEqual(@as(usize, 1), transport.fail_closed_calls);
     attachment.deinit();
     try std.testing.expectEqual(@as(usize, 1), transport.release_calls);
 }

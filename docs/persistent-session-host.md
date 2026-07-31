@@ -8564,8 +8564,8 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             `commit_pending | stale_invariant`의 닫힌 enum이며 stale stream/epoch/token, apply/append/
             drop/mark 실패와 deadline exact boundary는 clear 0·terminal이다. release 성공 뒤 stale mark는
             이미 release한 token을 retain/retry하지 않고 terminal로 닫으며, release 실패만 기존
-            `failed_release` 한 칸에 token을 보존하고 mark 0이다. mark 성공은 `applied_pending`과
-            `immediate_turn_required`를 하나의 callback-free/no-fail commit으로 함께 publish한다.
+            `failed_release` 한 칸에 token을 보존하고 mark 0이다. mark 성공은 별도 bool 없이
+            `applied_pending` 상태 자체를 callback-free/no-fail immediate-turn latch로 publish한다.
             fresh-clock turn 전까지 input/TX gate는 계속 닫혀 있다.
 
             recovery 진입의 backlog drop, offset-0 control cancel, origin/epoch/deadline publish는 하나의

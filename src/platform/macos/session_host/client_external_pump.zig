@@ -23146,6 +23146,17 @@ test "e-core mark publishes applied-pending and read-only immediate poll hint" {
 test "e-core preflight rejects null recovery and nonnull valid authority" {
     var recovery: ExternalPumpStorage = .{};
     recoveryCoreStorage(&recovery, 41, .host, 3, 9, 100);
+    const recovery_key = client_pump.RecoveryKey{
+        .owner_incarnation = 41,
+        .origin = .host,
+        .recovery_epoch = 3,
+        .expected_token_generation = 9,
+    };
+    try std.testing.expectEqual(
+        external_recovery_types.BatchAuthority.stale_invariant,
+        recovery.preflightBatchAuthority(8, true, recovery_key),
+    );
+    try std.testing.expect(recovery.semantic_state.active == .host_recovery);
     try std.testing.expectEqual(
         external_recovery_types.BatchAuthority.stale_invariant,
         recovery.preflightBatchAuthority(7, true, null),
@@ -23161,12 +23172,7 @@ test "e-core preflight rejects null recovery and nonnull valid authority" {
     );
     try std.testing.expectEqual(
         external_recovery_types.BatchAuthority.stale_invariant,
-        valid.preflightBatchAuthority(7, true, .{
-            .owner_incarnation = 41,
-            .origin = .host,
-            .recovery_epoch = 3,
-            .expected_token_generation = 9,
-        }),
+        valid.preflightBatchAuthority(7, true, recovery_key),
     );
     try std.testing.expect(valid.semantic_state.active == .valid);
 }

@@ -7352,14 +7352,20 @@ test "client deadline call rejects restore-time boundary and restore failure" {
     inline for (.{ false, true }) |fail_restore| {
         var fds: [2]c.fd_t = undefined;
         try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+        var client_fd_unowned = true;
+        errdefer {
+            if (client_fd_unowned) _ = c.close(fds[0]);
+        }
+        defer _ = c.close(fds[1]);
         const response = try framing.encodeFrame(
             allocator,
             .{ .kind = .response, .request_id = 1 },
             "{\"result\":{}}",
         );
         defer allocator.free(response);
-        var peer_ok = false;
-        var peer = try std.Thread.spawn(.{}, deadlineCallPeer, .{ fds[1], response, &peer_ok });
+        // This test owns the restore-time boundary, not peer scheduling. Preload the response so
+        // the injected 100 ns clock cannot be converted into a real 1 ms poll race before restore.
+        try socket_server.writeAll(fds[1], response);
         var fixture = ConnectedSocketFixture{
             .fd = fds[0],
             .fail_restore_flags = fail_restore,
@@ -7371,6 +7377,7 @@ test "client deadline call rejects restore-time boundary and restore failure" {
             .host_id = 1,
             .parser = framing.FrameParser.init(allocator),
         };
+        client_fd_unowned = false;
         defer client.deinit();
         const deadline = client_deadline.AbsoluteDeadline.fromInjected(
             .{ .context = &fixture, .now_ns = ConnectedSocketFixture.clock },
@@ -7387,8 +7394,6 @@ test "client deadline call rejects restore-time boundary and restore failure" {
                 client.callUntilWithOps("runtime.get", "{}", deadline, fixture.ops()),
             );
         }
-        peer.join();
-        try std.testing.expect(peer_ok);
         try std.testing.expect(client.unusable);
         try std.testing.expectEqual(@as(c.fd_t, -1), client.fd);
         try std.testing.expectEqual(@as(usize, 2), fixture.set_flags_calls);

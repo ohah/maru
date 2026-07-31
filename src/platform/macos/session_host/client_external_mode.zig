@@ -25,6 +25,20 @@ threadlocal var tx_cleanup_reentry_events: u64 = 0;
 threadlocal var active_tx_cleanup_id: u64 = 0;
 var next_tx_cleanup_id: std.atomic.Value(u64) = .init(1);
 
+const TxDeinitTestReceipt = struct {
+    observed: bool = false,
+    items: usize = std.math.maxInt(usize),
+    capacity: usize = std.math.maxInt(usize),
+    bytes: usize = std.math.maxInt(usize),
+    retiring_bytes: usize = std.math.maxInt(usize),
+    lifecycle: TxLifecycle = .live,
+    claim_dead: bool = false,
+};
+threadlocal var tx_deinit_test_receipt: if (builtin.is_test)
+    ?*TxDeinitTestReceipt
+else
+    u8 = if (builtin.is_test) null else 0;
+
 pub fn chargeTxQuarantine(state: *State, bytes: usize) void {
     if (bytes == 0) return;
     while (!tx_quarantine_lock.tryLock()) std.atomic.spinLoopHint();
@@ -764,6 +778,18 @@ pub const State = struct {
         self.tx_cleanup_id = 0;
         self.tx_cleanup_owner_addr = 0;
         self.tx_claim.store(@intFromEnum(TxClaim.dead), .release);
+        if (builtin.is_test) if (tx_deinit_test_receipt) |receipt| {
+            receipt.* = .{
+                .observed = true,
+                .items = self.external_tx.items.len,
+                .capacity = self.external_tx.capacity,
+                .bytes = self.external_tx_bytes,
+                .retiring_bytes = self.external_tx_retiring_bytes,
+                .lifecycle = self.tx_lifecycle,
+                .claim_dead = self.tx_claim.load(.acquire) ==
+                    @intFromEnum(TxClaim.dead),
+            };
+        };
         return .cleaned;
     }
 };
@@ -1133,6 +1159,21 @@ pub fn validateExternalRxFrame(frame: *const ExternalRxFrame) bool {
 }
 
 pub const testing = if (builtin.is_test) struct {
+    pub const TxDeinitReceipt = TxDeinitTestReceipt;
+
+    pub fn beginTxDeinitReceipt(receipt: *TxDeinitReceipt) bool {
+        if (tx_deinit_test_receipt != null) return false;
+        receipt.* = .{};
+        tx_deinit_test_receipt = receipt;
+        return true;
+    }
+
+    pub fn endTxDeinitReceipt(receipt: *TxDeinitReceipt) bool {
+        if (tx_deinit_test_receipt != receipt) return false;
+        tx_deinit_test_receipt = null;
+        return true;
+    }
+
     pub fn sealExternalRxFrame(frame: *ExternalRxFrame) void {
         frame.pair_seal = externalRxFrameDigest(frame);
     }

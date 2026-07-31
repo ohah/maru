@@ -9,6 +9,9 @@
 const std = @import("std");
 const git_status = @import("git_status.zig");
 
+/// 섹션 개수 — 접힘 상태 배열의 길이 계약이다(세션이 같은 크기로 들고 있는다).
+pub const section_count = 3;
+
 pub const Section = enum {
     staged,
     unstaged,
@@ -57,6 +60,9 @@ pub fn build(
     status_text: []const u8,
     staged_numstat: []const u8,
     worktree_numstat: []const u8,
+    /// 접힌 섹션(Section 순서). 접혀 있으면 헤더만 내고 파일 행은 만들지 않는다 — **화면에 있는 것과 이 목록이
+    /// 같아야** 클릭 좌표가 그린 자리와 어긋나지 않는다.
+    collapsed: [section_count]bool,
     out: []Row,
     scratch: []u8,
 ) Model {
@@ -67,7 +73,9 @@ pub fn build(
             out[n] = .{ .section = .{ .section = section, .count = count } };
             n += 1;
             var it = git_status.iterate(status_text);
-            while (it.next()) |entry| {
+            // 접힌 섹션은 헤더만 낸다(반복문을 아예 안 돈다 — inline for 안이라 continue를 쓰지 않는다).
+            while (!collapsed[@intFromEnum(section)]) {
+                const entry = it.next() orelse break;
                 if (n >= out.len) break;
                 if (!belongs(entry, section)) continue;
                 const change = switch (section) {
@@ -142,7 +150,7 @@ const fixture_worktree = "1\t0\tkeep.txt\n";
 test "섹션·개수·증감이 실측 출력에서 그대로 나온다" {
     var out: [32]Row = undefined;
     var scratch: [256]u8 = undefined;
-    const model = build(fixture_status, fixture_staged, fixture_worktree, &out, &scratch);
+    const model = build(fixture_status, fixture_staged, fixture_worktree, .{ false, false, false }, &out, &scratch);
     try testing.expect(!model.empty);
     try testing.expectEqualStrings("main", model.head.branch.?);
 
@@ -173,7 +181,7 @@ test "섹션·개수·증감이 실측 출력에서 그대로 나온다" {
 test "개수가 0인 섹션은 헤더도 내지 않는다" {
     var out: [16]Row = undefined;
     var scratch: [64]u8 = undefined;
-    const model = build("# branch.head main\n? only.txt\n", "", "", &out, &scratch);
+    const model = build("# branch.head main\n? only.txt\n", "", "", .{ false, false, false }, &out, &scratch);
     try testing.expectEqual(@as(usize, 2), model.rows.len); // 추적되지 않은 파일 헤더 + 1행뿐
     try testing.expectEqual(Section.untracked, model.rows[0].section.section);
 }
@@ -181,7 +189,7 @@ test "개수가 0인 섹션은 헤더도 내지 않는다" {
 test "변경이 없으면 empty다(빈 안내를 대신 그린다)" {
     var out: [8]Row = undefined;
     var scratch: [64]u8 = undefined;
-    const model = build("# branch.head main\n", "", "", &out, &scratch);
+    const model = build("# branch.head main\n", "", "", .{ false, false, false }, &out, &scratch);
     try testing.expect(model.empty);
     try testing.expectEqual(@as(usize, 0), model.rows.len);
     try testing.expectEqualStrings("main", model.head.branch.?);
@@ -190,7 +198,7 @@ test "변경이 없으면 empty다(빈 안내를 대신 그린다)" {
 test "out이 모자라면 거기서 자른다(화면 밖 행을 만들지 않는다)" {
     var out: [2]Row = undefined;
     var scratch: [256]u8 = undefined;
-    const model = build(fixture_status, fixture_staged, fixture_worktree, &out, &scratch);
+    const model = build(fixture_status, fixture_staged, fixture_worktree, .{ false, false, false }, &out, &scratch);
     try testing.expectEqual(@as(usize, 2), model.rows.len);
     try testing.expectEqual(Section.staged, model.rows[0].section.section);
 }
@@ -198,7 +206,21 @@ test "out이 모자라면 거기서 자른다(화면 밖 행을 만들지 않는
 test "numstat에 없는 파일은 숫자를 비운다(0으로 채우지 않는다)" {
     var out: [8]Row = undefined;
     var scratch: [256]u8 = undefined;
-    const model = build("1 .M N... 1 2 3 a b lonely.txt\n", "", "", &out, &scratch);
+    const model = build("1 .M N... 1 2 3 a b lonely.txt\n", "", "", .{ false, false, false }, &out, &scratch);
     try testing.expect(model.rows[1].file.unknown_delta);
     try testing.expectEqual(@as(u32, 0), model.rows[1].file.added);
+}
+
+test "접힌 섹션은 헤더만 내고 개수는 그대로 보여 준다" {
+    // 접혀도 개수는 남아야 "몇 개가 숨어 있는지"를 알 수 있다. 파일 행이 없어야 클릭 좌표가 어긋나지 않는다.
+    var out: [32]Row = undefined;
+    var scratch: [256]u8 = undefined;
+    const model = build(fixture_status, fixture_staged, fixture_worktree, .{ true, false, false }, &out, &scratch);
+    try testing.expectEqual(Section.staged, model.rows[0].section.section);
+    try testing.expectEqual(@as(usize, 3), model.rows[0].section.count); // 개수는 접혀도 그대로
+    try testing.expectEqual(Section.unstaged, model.rows[1].section.section); // 바로 다음 섹션이 온다
+    // 전부 접으면 헤더 3줄만 남는다.
+    const all = build(fixture_status, fixture_staged, fixture_worktree, .{ true, true, true }, &out, &scratch);
+    try testing.expectEqual(@as(usize, 3), all.rows.len);
+    try testing.expect(!all.empty); // 변경이 없는 것과 접은 것은 다르다
 }

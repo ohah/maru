@@ -11,6 +11,7 @@ const text_field = maru.chrome.components.text_field; // 주소창 편집 밴드
 const file_tree_icon = maru.chrome.file_tree_icon;
 const dock_view_bar = maru.chrome.components.dock_view_bar;
 const scm_view = maru.session.scm_view;
+const git_status = maru.session.git_status;
 const dock_layout = maru.session.dock_layout;
 const dock_panel = maru.session.dock_panel;
 const file_tree = maru.session.file_tree;
@@ -931,11 +932,19 @@ pub fn buildDockNoticeDrawList(
     };
 }
 
+/// 소스 컨트롤 목록. 첫 줄은 **브랜치 헤더**(브랜치 · upstream · ahead/behind)이고 그 아래가 섹션·파일 행이다.
+/// 섹션 행은 접힘 표시(▸/▾)를 앞에 두고, 파일 행은 종류 아이콘을 둔다 — 탐색기와 같은 분류기를 쓴다.
 pub fn buildDockScmDrawList(
     allocator: std.mem.Allocator,
     cols: u16,
     rows: u16,
+    head: git_status.Head,
     model_rows: []const scm_view.Row,
+    collapsed: []const bool,
+    /// 선택된 행(모델 인덱스). 그 행을 강조해 **지금 보고 있는 비교가 어느 것인지** 남긴다.
+    selected: ?usize,
+    /// 첫 화면 행이 모델의 몇 번째인가(스크롤).
+    scroll: usize,
     fg: terminal.Color,
     muted: terminal.Color,
     accent: terminal.Color,
@@ -946,14 +955,49 @@ pub fn buildDockScmDrawList(
     errdefer pool.deinit(allocator);
     const inset: u16 = file_tree_inset_cols;
     var r: u16 = 0;
-    for (model_rows) |row| {
+
+    // ── 브랜치 헤더. 아이콘 + 브랜치 이름 + (upstream 대비) ahead/behind. upstream이 없으면 그 자리를 비운다.
+    if (rows > 0 and cols > inset + 2) {
+        try cells.append(allocator, .{ .row = 0, .col = inset, .codepoint = 0xF0001, .width = 2, .style = .{ .foreground = muted } });
+        var tail_buf: [32]u8 = undefined;
+        var tail: []const u8 = "";
+        if (head.has_ab) {
+            tail = std.fmt.bufPrint(&tail_buf, "↑{d} ↓{d}", .{ head.ahead, head.behind }) catch "";
+        }
+        const tail_cols: u16 = @intCast(std.unicode.utf8CountCodepoints(tail) catch tail.len);
+        const name_end = cols -| tail_cols -| 1;
+        const branch = if (head.detached) "(detached)" else (head.branch orelse "(브랜치 없음)");
+        if (inset + 3 < name_end)
+            _ = try appendEllipsizedTitle(allocator, &cells, &pool, branch, 0, inset + 3, name_end, .{ .foreground = fg, .bold = true }, false, .head);
+        if (tail.len > 0 and tail_cols < cols) {
+            var col = cols - tail_cols;
+            var it = std.unicode.Utf8Iterator{ .bytes = tail, .i = 0 };
+            while (it.nextCodepoint()) |cp| : (col += 1) {
+                try cells.append(allocator, .{ .row = 0, .col = col, .codepoint = cp, .width = 1, .style = .{ .foreground = muted } });
+            }
+        }
+        r = 1;
+    }
+
+    for (model_rows, 0..) |row, model_index| {
         if (r >= rows) break;
+        const is_selected = selected != null and selected.? == scroll + model_index;
         switch (row) {
             .section => |sec| {
                 var buf: [16]u8 = undefined;
                 const count = std.fmt.bufPrint(&buf, "{d}", .{sec.count}) catch "";
-                if (cols > inset)
-                    _ = try appendEllipsizedTitle(allocator, &cells, &pool, sec.section.title(), r, inset, cols -| @as(u16, @intCast(count.len)) -| 1, .{ .foreground = fg, .bold = true }, false, .head);
+                // 접힘 표시를 제목 앞에 둔다 — 눌러서 접을 수 있다는 것이 보여야 한다(눌러보기 전에 알 수 있게).
+                const folded = @intFromEnum(sec.section) < collapsed.len and collapsed[@intFromEnum(sec.section)];
+                try cells.append(allocator, .{
+                    .row = r,
+                    .col = inset,
+                    .codepoint = if (folded) '>' else 'v',
+                    .width = 1,
+                    .style = .{ .foreground = muted },
+                });
+                const title_col = inset + 2;
+                if (cols > title_col)
+                    _ = try appendEllipsizedTitle(allocator, &cells, &pool, sec.section.title(), r, title_col, cols -| @as(u16, @intCast(count.len)) -| 1, .{ .foreground = fg, .bold = true }, false, .head);
                 // 개수는 오른쪽 끝에 고정한다 — 제목이 길어져도 개수가 밀려 사라지지 않는다.
                 if (cols > count.len) appendAscii(&cells, allocator, count, r, cols - @as(u16, @intCast(count.len)), .{ .foreground = muted }) catch {};
             },
@@ -970,9 +1014,18 @@ pub fn buildDockScmDrawList(
                 const delta_col = letter_col -| @as(u16, @intCast(delta.len)) -| 1;
                 const name = std.fs.path.basename(file.path);
                 const dir = file.path[0 .. file.path.len - name.len];
-                var col = inset;
+                // 종류 아이콘은 탐색기와 **같은 분류기**를 쓴다 — 같은 파일이 두 화면에서 다른 아이콘이면 안 된다.
+                if (file_tree_icon.codepoint(file_tree_icon.classify(.file, name, false))) |cp| {
+                    if (inset + 2 < cols)
+                        try cells.append(allocator, .{ .row = r, .col = inset + 1, .codepoint = cp, .width = 2, .style = .{ .foreground = muted } });
+                }
+                var col = inset + 4;
+                const name_style: terminal.Style = if (is_selected)
+                    .{ .foreground = accent, .bold = true } // 선택 행은 이름을 강조 — 어느 비교를 보고 있는지 남는다
+                else
+                    .{ .foreground = fg };
                 if (col < delta_col)
-                    col = try appendEllipsizedTitle(allocator, &cells, &pool, name, r, col, @min(delta_col, cols), .{ .foreground = fg }, false, .head);
+                    col = try appendEllipsizedTitle(allocator, &cells, &pool, name, r, col, @min(delta_col, cols), name_style, false, .head);
                 if (dir.len > 0 and col + 1 < delta_col)
                     _ = try appendEllipsizedTitle(allocator, &cells, &pool, dir, r, col + 1, delta_col, .{ .foreground = muted }, false, .head);
                 if (delta.len > 0 and delta_col < cols)
@@ -2899,4 +2952,37 @@ test "buildFromDrawList interns faces into the shared RendererState registry (Fo
     // Menlo의 FontId가 frame 간 불변 = atlas cache key 안정(루트커즈 봉인). 뒤집힌 등장 순서로 다시 intern해도
     // idempotent라 새 순번을 안 받는다.
     try std.testing.expectEqual(menlo_id, try renderer_state.font_registry.intern(.{ .postscript_name = "Menlo-Regular" }));
+}
+
+test "buildDockScmDrawList: 브랜치 헤더가 첫 줄이고 접힌 섹션은 표시가 바뀐다" {
+    // 헤더가 첫 줄이라는 사실은 **히트테스트와 공유하는 계약**이다(app_session.scmRowAt이 한 줄을 뺀다).
+    // 여기서 깨지면 사용자가 누른 행과 열리는 행이 어긋난다.
+    const allocator = std.testing.allocator;
+    const rows = [_]scm_view.Row{
+        .{ .section = .{ .section = .staged, .count = 2 } },
+        .{ .file = .{ .section = .staged, .path = "src/main.zig", .letter = 'M', .added = 3, .removed = 1 } },
+    };
+    const head: git_status.Head = .{ .branch = "feat/x", .ahead = 2, .behind = 1, .has_ab = true };
+    var dl = try buildDockScmDrawList(allocator, 40, 3, head, &rows, &.{ false, false, false }, null, 0, .{ .rgb = .{ .r = 255, .g = 255, .b = 255 } }, .{ .rgb = .{ .r = 136, .g = 136, .b = 136 } }, .{ .rgb = .{ .r = 221, .g = 161, .b = 94 } });
+    defer dl.deinit(allocator);
+
+    // 0행: git 아이콘 + 브랜치 이름 + ahead/behind.
+    try std.testing.expect(hasCell(dl.cells, 0, 0xF0001));
+    try std.testing.expect(hasCell(dl.cells, 0, 'f')); // feat/x
+    try std.testing.expect(hasCell(dl.cells, 0, '2')); // ↑2
+    // 1행: 섹션 헤더(펼침 표시 v) — 2행: 파일 행(아이콘 + 상태 문자 M).
+    try std.testing.expect(hasCell(dl.cells, 1, 'v'));
+    try std.testing.expect(hasCell(dl.cells, 2, 'M'));
+
+    var folded = try buildDockScmDrawList(allocator, 40, 3, head, rows[0..1], &.{ true, false, false }, null, 0, .{ .rgb = .{ .r = 255, .g = 255, .b = 255 } }, .{ .rgb = .{ .r = 136, .g = 136, .b = 136 } }, .{ .rgb = .{ .r = 221, .g = 161, .b = 94 } });
+    defer folded.deinit(allocator);
+    try std.testing.expect(hasCell(folded.cells, 1, '>')); // 접힘 표시
+    try std.testing.expect(!hasCell(folded.cells, 1, 'v'));
+}
+
+fn hasCell(cells: []const renderer.DrawCell, row: u16, codepoint: u32) bool {
+    for (cells) |c| {
+        if (c.row == row and c.codepoint == codepoint) return true;
+    }
+    return false;
 }

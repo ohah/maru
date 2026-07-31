@@ -2616,6 +2616,21 @@ pub const AppSession = struct {
     git_request_seq: u64 = 0,
     /// 아직 응답을 못 받은 요청 번호(없으면 0). 갱신 트리거가 겹쳐도 큐를 쌓지 않는다.
     git_inflight: u64 = 0,
+    /// **지금 목록이 읽힌 저장소 루트.** 클릭 시 다시 구하면 안 된다 — 첫 diff가 열리는 순간 활성 Term이 웹
+    /// Term이 되어 cwd 폴백이 빈 값을 보고 null이 된다(그래서 두 번째 행부터 안 열렸다). 목록과 그 목록에서 연
+    /// 비교는 **같은 저장소**를 봐야 한다는 계약이기도 하다.
+    git_repo: ?[]u8 = null,
+    /// 목록 스크롤(행 단위)과 선택 행. 둘 다 창 상태다 — 목록은 매번 새로 계산되므로 저장하지 않는다.
+    scm_scroll_rows: usize = 0,
+    scm_selected_row: ?usize = null,
+    /// 섹션 접힘 상태(스테이지된 변경·변경 사항·추적되지 않은 파일 순). 창 상태이며 workspace에 저장하지 않는다 —
+    /// 목록 자체가 매번 새로 계산되는 값이라 접힘만 남겨 봐야 다음 실행의 목록과 대응이 보장되지 않는다.
+    scm_collapsed: [3]bool = .{ false, false, false },
+    /// 감시를 걸어야 하는 `<repo>/.git` 경로(아직 host가 안 가져갔으면 non-null). **폴링 대신 감시**를 쓰는
+    /// 이유: `git add`는 작업트리를 안 건드리고 index만 바꿔 파일 감시로는 안 잡히는데, `.git`을 보면 잡힌다.
+    git_watch_request: ?[]u8 = null,
+    /// 지금 감시 중인 `.git` 경로. 저장소가 바뀌면 새로 요청한다(같은 경로면 다시 요청하지 않는다).
+    git_watch_path: ?[]u8 = null,
     /// 마지막 읽기가 실패했는가. 재시도로 성공하면 풀린다 — 실패를 '읽는 중'으로 위장하지 않는다.
     git_failed: bool = false,
     /// git 실행 파일을 못 찾았는가. 뷰를 다시 고르면 재판정한다(설치 후 껐다 켜지 않아도 되게).
@@ -3234,10 +3249,47 @@ pub const AppSession = struct {
             return;
         };
         self.git_missing = false;
+        self.ensureGitWatch(repo);
+        self.rememberGitRepo(repo);
         self.git_request_seq += 1;
         if (self.git_backend.?.submit(git_exe, repo, self.git_request_seq)) {
             self.git_inflight = self.git_request_seq;
         }
+    }
+
+    /// 목록을 읽은 저장소를 기억한다. 같은 값이면 다시 할당하지 않는다.
+    fn rememberGitRepo(self: *AppSession, repo: []const u8) void {
+        if (self.git_repo) |current| {
+            if (std.mem.eql(u8, current, repo)) return;
+            self.allocator.free(current);
+            self.git_repo = null;
+        }
+        self.git_repo = self.allocator.dupe(u8, repo) catch null;
+    }
+
+    /// 그 저장소의 `.git`을 감시 목록에 올린다. 같은 경로면 아무것도 하지 않는다(중복 요청 금지).
+    fn ensureGitWatch(self: *AppSession, repo: []const u8) void {
+        if (self.git_watch_path) |current| {
+            var buf: [std.fs.max_path_bytes]u8 = undefined;
+            const want = std.fmt.bufPrint(&buf, "{s}/.git", .{repo}) catch return;
+            if (std.mem.eql(u8, current, want)) return;
+            self.allocator.free(current);
+            self.git_watch_path = null;
+        }
+        const path = std.fmt.allocPrint(self.allocator, "{s}/.git", .{repo}) catch return;
+        const request = self.allocator.dupe(u8, path) catch {
+            self.allocator.free(path);
+            return;
+        };
+        if (self.git_watch_request) |old| self.allocator.free(old);
+        self.git_watch_request = request;
+        self.git_watch_path = path;
+    }
+
+    /// 그 경로가 저장소 내부(`.git`) 변경인가 — 목록을 다시 읽어야 하는 신호다.
+    fn isGitInternalPath(path: []const u8) bool {
+        if (std.mem.endsWith(u8, path, "/.git")) return true;
+        return std.mem.indexOf(u8, path, "/.git/") != null;
     }
 
     /// 완료된 git 결과를 받아 세션에 싣는다. frame tick에서 호출해도 syscall이 없다.
@@ -10604,7 +10656,15 @@ pub const AppSession = struct {
     pub fn fileTreeChanged(self: *AppSession, changed_path: []const u8) void {
         if (!self.file_tree_initialized or changed_path.len == 0 or !std.fs.path.isAbsolute(changed_path) or
             !std.unicode.utf8ValidateSlice(changed_path)) return;
+        // `.git` 내부 변경은 **git 상태 신호**다(stage·commit·checkout). 파일 트리 항목과는 무관하므로 목록만
+        // 다시 읽고 끝낸다 — in-flight면 refreshGitStatus가 스스로 건너뛰어 이벤트가 몰려도 명령이 안 쌓인다.
+        if (isGitInternalPath(changed_path)) {
+            self.refreshGitStatus();
+            return;
+        }
         self.file_tree.invalidatePath(changed_path) catch {};
+        // 작업트리 파일이 바뀌어도 git 상태가 바뀐다(수정·삭제) — 목록을 보고 있으면 같이 다시 읽는다.
+        self.refreshGitStatus();
         const coarse = self.file_tree.containsRootPath(changed_path);
         var entry_it15 = self.fileEntries();
         while (entry_it15.next()) |entry| {
@@ -10632,11 +10692,18 @@ pub const AppSession = struct {
     }
 
     pub fn takeFileTreeWatchRoot(self: *AppSession) ?[]u8 {
+        // git 감시 요청도 같은 창구로 나간다 — host는 "감시할 경로"만 알면 되고, 그 경로가 탐색기 root인지
+        // 저장소의 `.git`인지 구분할 이유가 없다(구분은 이벤트를 받는 Zig가 한다).
+        if (self.git_watch_request) |path| {
+            self.git_watch_request = null;
+            return path;
+        }
         if (!self.file_tree_initialized) return null;
         return self.file_tree.takeWatchRequest();
     }
 
     pub fn peekFileTreeWatchRoot(self: *const AppSession) ?[]const u8 {
+        if (self.git_watch_request) |path| return path;
         if (!self.file_tree_initialized) return null;
         return self.file_tree.peekWatchRequest();
     }
@@ -14521,7 +14588,7 @@ pub const AppSession = struct {
     /// 소스 컨트롤 목록에서 그 좌표의 **파일 행**을 찾는다(섹션 헤더는 null). 렌더와 같은 모델을 같은 입력으로
     /// 다시 만들어 판정한다 — 그린 자리와 눌리는 자리가 어긋나지 않게 한다(행 목록을 따로 캐시하지 않는 이유다).
     /// 반환 슬라이스는 `git_result` 소유라 다음 갱신 전까지만 유효하다(호출자가 그 자리에서 쓴다).
-    fn scmFileRowAt(self: *AppSession, x_px: f64, y_px: f64, out: []scm_view.Row, scratch: []u8) ?scm_view.FileRow {
+    fn scmRowAt(self: *AppSession, x_px: f64, y_px: f64, out: []scm_view.Row, scratch: []u8) ?scm_view.Row {
         if (self.dock.view != .source_control or !self.dockVisible() or self.cell_height_px == 0) return null;
         const rect = self.dockGeometry().tree_content;
         if (!layout_math.pointInRect(x_px, y_px, rect)) return null;
@@ -14529,25 +14596,52 @@ pub const AppSession = struct {
             @as(f64, @floatFromInt(self.cell_height_px)));
         const visible_rows = rect.h / self.cell_height_px;
         if (local >= visible_rows) return null; // renderer가 그리지 않는 아래 잘린 행은 hit도 아니다
+        // **첫 줄은 브랜치 헤더다**(렌더와 같은 자리 규칙 — 여기서 빼지 않으면 한 줄씩 어긋나 엉뚱한 행이 열린다).
+        if (local == 0) return null;
+        const index = self.scm_scroll_rows + (local - 1); // 스크롤한 만큼 아래 행이 그 자리에 온다
+        const row = self.scmRowAtIndex(index, out, scratch) orelse return null;
+        self.scm_selected_row = index;
+        self.metal_dirty = true;
+        return row;
+    }
+
+    /// 모델에서 그 인덱스의 행. 렌더와 **같은 입력**으로 만든다(그린 자리와 눌리는 자리를 하나로 유지).
+    fn scmRowAtIndex(self: *AppSession, index: usize, out: []scm_view.Row, scratch: []u8) ?scm_view.Row {
         const result = self.git_result orelse return null;
         const model = scm_view.build(
             result.status,
             result.numstat_staged,
             result.numstat_worktree,
-            out[0..@min(out.len, visible_rows)],
+            self.scm_collapsed,
+            out,
             scratch,
         );
-        if (local >= model.rows.len) return null;
-        return switch (model.rows[local]) {
-            .file => |row| row,
-            .section => null, // 섹션 헤더는 접기 대상이고(후속) 여는 대상이 아니다
-        };
+        if (index >= model.rows.len) return null;
+        return model.rows[index];
+    }
+
+    /// 목록 전체 행 수(스크롤 상한 계산용). 화면 크기와 무관하게 모델이 만들 수 있는 만큼 센다.
+    fn scmTotalRows(self: *AppSession) usize {
+        var buf: [512]scm_view.Row = undefined;
+        var scratch: [std.fs.max_path_bytes]u8 = undefined;
+        const result = self.git_result orelse return 0;
+        const model = scm_view.build(
+            result.status,
+            result.numstat_staged,
+            result.numstat_worktree,
+            self.scm_collapsed,
+            &buf,
+            &scratch,
+        );
+        return model.rows.len;
     }
 
     /// 그 행이 가리키는 비교를 연다. 경로는 저장소 루트 기준이므로 절대경로를 만들어 Term identity로 쓴다.
     fn openDiffForScmRow(self: *AppSession, row: scm_view.FileRow) void {
+        // **목록을 읽은 그 저장소**를 쓴다. 여기서 다시 구하면 첫 diff가 열린 뒤 활성 Term이 웹 Term이라
+        // cwd 폴백이 빈 값을 보고 null이 되어 두 번째 행부터 조용히 무시된다(손 확인에서 그랬다).
         var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const repo = self.gitRepoRoot(&repo_buf) orelse return;
+        const repo = self.git_repo orelse (self.gitRepoRoot(&repo_buf) orelse return);
         var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
         const abs = std.fmt.bufPrint(&abs_buf, "{s}/{s}", .{ repo, row.path }) catch return;
         const base: dock_panel.DiffBase = switch (row.section) {
@@ -19424,6 +19518,22 @@ pub const AppSession = struct {
         // tab_wheel_accum 경로는 원본 delta_x). 방향 판정(위 wheel_accum 부호)은 배수>0이라 부호 불변이라 영향 없다.
         const scaled_delta_y = delta_y * @as(f64, self.appearance.scroll_multiplier);
         const lines = wheelDeltaToLines(&self.wheel_accum, scaled_delta_y, precise, self.cell_height_px, self.scale_milli);
+        // 소스 컨트롤 목록도 스크롤한다 — **자기 상태**(scm_scroll_rows)로. 탐색기 스크롤과 섞으면 안 보이는
+        // 목록이 움직인다(그래서 뷰별로 나눠 둔다).
+        if (self.dockVisible() and self.dock.view == .source_control and
+            layout_math.pointInRect(x_px, y_px, self.dockGeometry().tree_content))
+        {
+            const rect = self.dockGeometry().tree_content;
+            const visible = if (self.cell_height_px == 0) 0 else (rect.h / self.cell_height_px) -| 1; // 헤더 한 줄 제외
+            const max_scroll = self.scmTotalRows() -| @as(usize, visible);
+            const next = @as(i64, @intCast(self.scm_scroll_rows)) - @as(i64, lines);
+            const clamped: usize = @intCast(std.math.clamp(next, 0, @as(i64, @intCast(max_scroll))));
+            if (clamped != self.scm_scroll_rows) {
+                self.scm_scroll_rows = clamped;
+                self.metal_dirty = true;
+            }
+            return;
+        }
         // 트리 스크롤은 탐색기 상태(file_tree_scroll_rows)라 다른 뷰에서 굴리면 안 보이는 목록이 움직인다.
         if (self.dockVisible() and self.dock.view == .explorer and
             layout_math.pointInRect(x_px, y_px, self.dockGeometry().tree_content))
@@ -20257,10 +20367,19 @@ pub const AppSession = struct {
                     // 행 클릭 = 그 비교 열기(§3.5 표). 섹션 헤더·여백은 아래 dock rect 분기가 소비만 한다.
                     var rows_buf: [128]scm_view.Row = undefined;
                     var row_scratch: [std.fs.max_path_bytes]u8 = undefined;
-                    if (self.scmFileRowAt(x_px, y_px, &rows_buf, &row_scratch)) |row| {
-                        self.openDiffForScmRow(row);
-                        return;
-                    }
+                    if (self.scmRowAt(x_px, y_px, &rows_buf, &row_scratch)) |row| switch (row) {
+                        .file => |file| {
+                            self.openDiffForScmRow(file);
+                            return;
+                        },
+                        .section => |sec| {
+                            // 섹션 헤더 클릭 = 접기/펴기. 개수는 접혀도 남아 몇 개가 숨었는지 보인다.
+                            const idx = @intFromEnum(sec.section);
+                            if (idx < self.scm_collapsed.len) self.scm_collapsed[idx] = !self.scm_collapsed[idx];
+                            self.metal_dirty = true;
+                            return;
+                        },
+                    };
                 }
                 if (self.dock.view == .explorer) {
                     if (self.beginFileTreeScrollbarGesture(x_px, y_px)) return;
@@ -26808,11 +26927,14 @@ pub const AppSession = struct {
                             var rows_buf: [128]scm_view.Row = undefined;
                             var scratch: [std.fs.max_path_bytes]u8 = undefined;
                             const result = self.git_result;
+                            // 히트테스트(scmRowAt)와 **같은 입력·같은 상한**으로 만든다 — 그린 자리와 눌리는
+                            // 자리가 어긋나지 않게. 첫 줄은 브랜치 헤더라 파일·섹션 행은 한 줄 아래부터다.
                             const model = if (result) |r| scm_view.build(
                                 r.status,
                                 r.numstat_staged,
                                 r.numstat_worktree,
-                                rows_buf[0..@min(rows_buf.len, visible_rows)],
+                                self.scm_collapsed,
+                                &rows_buf,
                                 &scratch,
                             ) else null;
                             if (model) |m| {
@@ -26825,15 +26947,24 @@ pub const AppSession = struct {
                                             .colors = tabbar_colors,
                                         } });
                                     } else |_| {}
-                                } else if (coretext_frame_builder.buildDockScmDrawList(
-                                    self.allocator,
-                                    tree_content_cols,
-                                    @intCast(@min(m.rows.len, visible_rows)),
-                                    m.rows,
-                                    dock_active_fg,
-                                    dock_fg,
-                                    .{ .rgb = self.appearance.theme.accent },
-                                )) |sdl| {
+                                } else if (blk: {
+                                    // 스크롤한 만큼 앞을 잘라 그린다 — 히트테스트도 같은 오프셋을 쓴다.
+                                    const start = @min(self.scm_scroll_rows, m.rows.len);
+                                    const window_rows = m.rows[start..];
+                                    break :blk coretext_frame_builder.buildDockScmDrawList(
+                                        self.allocator,
+                                        tree_content_cols,
+                                        @intCast(@min(window_rows.len + 1, visible_rows)), // +1 = 브랜치 헤더
+                                        m.head,
+                                        window_rows,
+                                        &self.scm_collapsed,
+                                        self.scm_selected_row,
+                                        start,
+                                        dock_active_fg,
+                                        dock_fg,
+                                        .{ .rgb = self.appearance.theme.accent },
+                                    );
+                                }) |sdl| {
                                     self.collectShaped(&collected, sdl, pane_frame_builder, .{ .pane = .{
                                         .origin_x = dg.tree_content.x,
                                         .origin_y = dg.tree_content.y,
@@ -30626,6 +30757,19 @@ pub const AppSession = struct {
     }
 
     pub fn deinit(self: *AppSession) void {
+        // 소스 컨트롤(E1) 자원: backend는 detached worker를 refcount로 붙들고 있으므로 여기서 놓아야 스레드가
+        // 끝난 뒤 정리된다. 결과·감시 경로도 세션 소유라 함께 푼다(이 셋은 세션 수명과 정확히 같다).
+        if (self.git_backend) |*backend| backend.deinit();
+        self.git_backend = null;
+        if (self.git_result) |*result| result.deinit(self.allocator);
+        self.git_result = null;
+        if (self.git_watch_request) |path| self.allocator.free(path);
+        self.git_watch_request = null;
+        if (self.git_watch_path) |path| self.allocator.free(path);
+        self.git_watch_path = null;
+        if (self.git_repo) |path| self.allocator.free(path);
+        self.git_repo = null;
+
         // MARU_TRACE: trace는 세션 동안 파일로 증분 append됐다. deinit 초입에 남은 버퍼를 flush + sync(durability) +
         // close한다 — 크래시가 아니어도 마지막 이벤트까지 디스크에 남긴다. per-link recorder라 runtime 싱글톤을 끊을 게
         // 없다 — 이 창의 링크가 든 recorder 포인터는 아래 1) closeAndDetach가 링크째 detach하며 사라진다(리뷰 [0]).
@@ -60657,4 +60801,118 @@ test "diff Term과 파일 Term은 같은 경로로 공존한다(유일성 키에
     diff.term.file_entry.?.diff_base = .staged;
     try std.testing.expectEqual(diff.term, session.diffTermFor(path, .staged).?);
     try std.testing.expect(session.diffTermFor(path, .unstaged) == null);
+}
+
+// [손 확인] 목록이 뷰를 껐다 켜야만 갱신되던 것을 감시로 바꿨다. 폴링이 아니라 `.git` 감시인 이유: `git add`는
+// 작업트리를 안 건드리고 index만 바꿔 작업트리 감시로는 안 잡힌다. 그 경로가 감시 목록에 실제로 실리는지,
+// `.git` 이벤트가 목록 갱신 신호로만 쓰이는지를 못박는다.
+test "소스 컨트롤: 저장소의 .git을 감시 목록에 올리고 그 이벤트로 목록을 다시 읽는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    session.ensureGitWatch("/repo/one");
+    try std.testing.expectEqualStrings("/repo/one/.git", session.peekFileTreeWatchRoot().?);
+    const taken = session.takeFileTreeWatchRoot().?;
+    defer allocator.free(taken);
+    try std.testing.expectEqualStrings("/repo/one/.git", taken);
+    // 같은 저장소는 다시 요청하지 않는다(이벤트마다 stream을 재구성하지 않게).
+    session.ensureGitWatch("/repo/one");
+    try std.testing.expect(session.peekFileTreeWatchRoot() == null);
+    // 저장소가 바뀌면 새로 요청한다.
+    session.ensureGitWatch("/repo/two");
+    try std.testing.expectEqualStrings("/repo/two/.git", session.peekFileTreeWatchRoot().?);
+
+    // `.git` 안쪽 경로만 git 신호다 — 이름이 비슷한 작업트리 파일(.gitignore)을 신호로 오인하면 안 된다.
+    try std.testing.expect(AppSession.isGitInternalPath("/repo/one/.git/index"));
+    try std.testing.expect(AppSession.isGitInternalPath("/repo/one/.git"));
+    try std.testing.expect(!AppSession.isGitInternalPath("/repo/one/.gitignore"));
+    try std.testing.expect(!AppSession.isGitInternalPath("/repo/one/src/main.zig"));
+}
+
+// [손 확인] "첫 파일은 열리는데 두 번째가 안 열린다". **좌표 클릭부터** 그대로 태워 재현한다 — 세션 API를 직접
+// 부르는 것으로는 히트테스트·라우팅 결함이 안 잡힌다.
+test "소스 컨트롤: 두 번째 행 클릭도 diff를 연다(좌표 경로)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+
+    // 도크를 열고 소스 컨트롤 뷰로.
+    const launcher = session.filePanelDockControlRect() orelse return error.MissingDockLauncher;
+    session.mouse(1, @floatFromInt(launcher.x + 1), @floatFromInt(launcher.y + 1), 0, 0);
+    session.setDockView(.source_control);
+
+    // 실제 git 없이 목록만 채운다(클릭 경로 검증이 목적).
+    session.git_result = .{
+        .status = try allocator.dupe(u8, "# branch.head main\n1 .M N... 1 2 3 a b one.txt\n1 .M N... 1 2 3 a b two.txt\n"),
+        .numstat_staged = try allocator.dupe(u8, ""),
+        .numstat_worktree = try allocator.dupe(u8, "1\t0\tone.txt\n2\t0\ttwo.txt\n"),
+        .ok = true,
+    };
+
+    const rect = session.dockGeometry().tree_content;
+    const x: f64 = @floatFromInt(rect.x + rect.w / 2);
+    const row_y = struct {
+        fn at(s: *AppSession, r: u32, top: u32) f64 {
+            return @floatFromInt(top + r * s.cell_height_px + 1);
+        }
+    }.at;
+    // 목록이 읽힌 저장소를 기억시켜 둔다(실제로는 refreshGitStatus가 한다). 이게 없으면 클릭이 조용히 무시된다.
+    session.rememberGitRepo("/repo");
+
+    // 0=브랜치 헤더, 1=섹션 헤더, 2=one.txt, 3=two.txt
+    var rows_buf: [16]scm_view.Row = undefined;
+    var scratch: [std.fs.max_path_bytes]u8 = undefined;
+    try std.testing.expect(session.scmRowAt(x, row_y(session, 0, rect.y), &rows_buf, &scratch) == null); // 헤더는 행이 아니다
+    try std.testing.expectEqualStrings(
+        "one.txt",
+        session.scmRowAt(x, row_y(session, 2, rect.y), &rows_buf, &scratch).?.file.path,
+    );
+    try std.testing.expectEqualStrings(
+        "two.txt",
+        session.scmRowAt(x, row_y(session, 3, rect.y), &rows_buf, &scratch).?.file.path,
+    );
+
+    session.mouse(1, x, row_y(session, 2, rect.y), 0, 0);
+    session.mouse(1, x, row_y(session, 3, rect.y), 0, 0);
+
+    var diffs: usize = 0;
+    var it = session.fileEntries();
+    while (it.next()) |entry| {
+        if (entry.kind == .diff) diffs += 1;
+    }
+    // **두 번째 클릭도 열려야 한다** — 첫 diff가 활성이 된 뒤 저장소를 다시 구하면 여기서 1이 된다.
+    try std.testing.expectEqual(@as(usize, 2), diffs);
+
+    // 섹션 헤더 클릭은 접힘을 토글한다(열기가 아니다).
+    session.mouse(1, x, row_y(session, 1, rect.y), 0, 0);
+    try std.testing.expect(session.scm_collapsed[@intFromEnum(scm_view.Section.unstaged)]);
+}
+
+// [손 확인] "첫 파일은 열리는데 두 번째가 안 열린다". 클릭 경로(행 → openDiffForScmRow)를 그대로 태워 재현한다.
+test "소스 컨트롤: 여러 행을 연달아 눌러도 각각 diff Term이 열린다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    // gitRepoRoot가 이 저장소를 찾도록 탐색기 root 대신 임시 저장소를 흉내 낼 수는 없으므로, 클릭 경로의
+    // 앞단(openDiffTerm)을 직접 부른다 — 검증 대상은 "두 번째 열기가 되는가"이지 저장소 탐색이 아니다.
+    session.openDiffTerm("/repo", "/repo/a.txt", "a.txt", null, .unstaged);
+    session.openDiffTerm("/repo", "/repo/b.txt", "b.txt", null, .unstaged);
+
+    var diffs: usize = 0;
+    var it = session.fileEntries();
+    while (it.next()) |entry| {
+        if (entry.kind == .diff) diffs += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), diffs);
+    try std.testing.expect(session.diffTermFor("/repo/a.txt", .unstaged) != null);
+    try std.testing.expect(session.diffTermFor("/repo/b.txt", .unstaged) != null);
 }

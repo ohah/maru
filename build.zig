@@ -307,6 +307,7 @@ pub fn build(b: *std.Build) void {
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/MermaidProtocolBridge.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/MermaidHelperProcess.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/MermaidProductTick.swift"));
+        macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/MaruAppSchemeHandler.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/MaruAppHost.swift"));
         macos_app_host_swift_check_cmd.setCwd(b.path("."));
         macos_app_host_swift_check_step.dependOn(&macos_app_host_swift_check_cmd.step);
@@ -705,6 +706,7 @@ pub fn build(b: *std.Build) void {
         macos_app_compile.addFileArg(b.path("src/platform/macos/MermaidProtocolBridge.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/MermaidHelperProcess.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/MermaidProductTick.swift"));
+        macos_app_compile.addFileArg(b.path("src/platform/macos/MaruAppSchemeHandler.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/MaruAppHost.swift"));
         macos_app_compile.addFileArg(macos_app_host_abi_lib.getEmittedBin());
         macos_app_compile.addArgs(&.{
@@ -904,6 +906,66 @@ pub fn build(b: *std.Build) void {
         macos_mermaid_smoke_assert.step.dependOn(&macos_mermaid_smoke_run.step);
         const macos_mermaid_helper_smoke_step = b.step("macos-mermaid-helper-smoke", "Run the isolated Mermaid helper lifecycle smoke");
         macos_mermaid_helper_smoke_step.dependOn(&macos_mermaid_smoke_assert.step);
+
+        // ── E0.5A: 제품 WKWebView editor 게이트(docs/editor-surface.md §7.4).
+        // 하니스 asset root는 제품 dist와 분리해 스모크 전용으로 만든다 — 검증 경로(스킴 핸들러·CSP·WKWebView)는
+        // 제품 그대로이고 제품 자산 집합은 건드리지 않는다.
+        const macos_editor_smoke_assets = b.addSystemCommand(&.{
+            "bun",                           "run",
+            "--cwd",                         "web",
+            "scripts/build-editor-smoke.ts", "../zig-out/maru-macos-editor-smoke/assets",
+        });
+        macos_editor_smoke_assets.setCwd(b.path("."));
+        macos_editor_smoke_assets.has_side_effects = true;
+
+        const macos_editor_smoke_compile = b.addSystemCommand(&.{
+            "xcrun",
+            "swiftc",
+            "-target",
+            macos_swift_target,
+            "-import-objc-header",
+        });
+        macos_editor_smoke_compile.addFileArg(b.path("src/platform/macos/MaruAppHost-Bridging.h"));
+        macos_editor_smoke_compile.addFileArg(b.path("src/platform/macos/MaruAppSchemeHandler.swift"));
+        macos_editor_smoke_compile.addFileArg(b.path("tests/macos_editor_smoke.swift"));
+        macos_editor_smoke_compile.addFileArg(macos_app_host_abi_lib.getEmittedBin());
+        macos_editor_smoke_compile.addArgs(&.{
+            "-framework", "AppKit",
+            "-framework", "CoreText",
+            "-framework", "CoreGraphics",
+            "-framework", "Metal",
+            "-framework", "QuartzCore",
+            "-framework", "WebKit",
+            "-framework", "JavaScriptCore",
+            "-framework", "Security",
+            "-o",         "zig-out/bin/maru-macos-editor-smoke",
+        });
+        macos_editor_smoke_compile.setCwd(b.path("."));
+        macos_editor_smoke_compile.step.dependOn(&macos_app_mkdir.step);
+        macos_editor_smoke_compile.step.dependOn(&macos_app_host_abi_lib.step);
+
+        const macos_editor_smoke_run = b.addSystemCommand(&.{"./zig-out/bin/maru-macos-editor-smoke"});
+        macos_editor_smoke_run.setCwd(b.path("."));
+        macos_editor_smoke_run.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("zig-out/maru-macos-editor-smoke/assets"));
+        macos_editor_smoke_run.setEnvironmentVariable("MARU_EDITOR_SMOKE_OUT", b.pathFromRoot("zig-out/maru-macos-editor-smoke"));
+        macos_editor_smoke_run.has_side_effects = true;
+        macos_editor_smoke_run.step.dependOn(&macos_editor_smoke_compile.step);
+        macos_editor_smoke_run.step.dependOn(&macos_editor_smoke_assets.step);
+
+        const macos_editor_smoke_step = b.step("test-macos-editor-smoke", "Assert the MergeView product WKWebView gate");
+        macos_editor_smoke_step.dependOn(&macos_editor_smoke_run.step);
+
+        // 눈으로 볼 때만 창을 띄운다(기본은 accessory라 CI에서 창이 뜨지 않는다).
+        const macos_editor_smoke_display = b.addSystemCommand(&.{"./zig-out/bin/maru-macos-editor-smoke"});
+        macos_editor_smoke_display.setCwd(b.path("."));
+        macos_editor_smoke_display.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("zig-out/maru-macos-editor-smoke/assets"));
+        macos_editor_smoke_display.setEnvironmentVariable("MARU_EDITOR_SMOKE_OUT", b.pathFromRoot("zig-out/maru-macos-editor-smoke"));
+        macos_editor_smoke_display.setEnvironmentVariable("MARU_EDITOR_SMOKE_DISPLAY", "1");
+        macos_editor_smoke_display.has_side_effects = true;
+        macos_editor_smoke_display.step.dependOn(&macos_editor_smoke_compile.step);
+        macos_editor_smoke_display.step.dependOn(&macos_editor_smoke_assets.step);
+        const macos_editor_smoke_display_step = b.step("macos-editor-smoke", "Run the MergeView WKWebView gate with a visible window");
+        macos_editor_smoke_display_step.dependOn(&macos_editor_smoke_display.step);
 
         const macos_mermaid_perf_validate = b.addRunArtifact(perf_validate_exe);
         macos_mermaid_perf_validate.addArgs(&.{

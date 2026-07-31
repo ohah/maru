@@ -15,6 +15,8 @@ type SmokeApi = {
   probe: () => DiffProbe | null;
   accept: () => boolean;
   reject: () => boolean;
+  /** CSP가 실제로 걸려 있는지 스스로 확인한다 — 아래 cspSelfTest 참고. */
+  csp_self_test: () => boolean;
 };
 
 const violations: string[] = [];
@@ -47,7 +49,21 @@ const api: SmokeApi = {
   probe: () => (harness === null ? null : harness.probe()),
   accept: () => harness?.acceptFirstChunk() ?? false,
   reject: () => harness?.rejectFirstChunk() ?? false,
+  csp_self_test: cspSelfTest,
 };
+
+/// **"위반 0"이 의미를 가지려면 CSP가 실제로 걸려 있어야 한다.** 헤더가 빠져도 위반은 0으로 보이므로, 반드시
+/// 막혀야 하는 동작(`eval` — app origin은 `script-src 'self'`, `'unsafe-eval'` 없음)을 일부러 시도해 차단을
+/// 확인한다. 게이트는 이 검사를 **모든 실제 측정이 끝난 뒤** 부른다(일부러 만든 위반이 계측을 오염시키지 않게).
+function cspSelfTest(): boolean {
+  try {
+    // eslint-disable-next-line no-eval
+    (0, eval)("1+1");
+    return false; // 통과했다 = CSP가 안 걸렸다 = 이 실행의 "위반 0"은 근거가 없다
+  } catch {
+    return true;
+  }
+}
 
 // 하니스 API는 `window`에 단 하나만 노출한다. 브리지가 아니라 계측 창구이며, 제품 페이지에는 존재하지 않는다.
 (window as unknown as { __maruEditorSmoke: SmokeApi }).__maruEditorSmoke = api;

@@ -12979,7 +12979,8 @@ pub const AppSession = struct {
             .text => file_panel_bridge.textLanguageForPath(entry.path),
             .svg => .xml,
             // markdown은 기존 shell URL, html·image·media·pdf는 격리 loadFileURL이라 언어가 없다.
-            .markdown, .html, .image, .media, .pdf => null,
+            // diff는 MergeView가 양쪽 문서를 각자 세우므로 shell URL의 `?lang=` 힌트를 쓰지 않는다.
+            .markdown, .html, .image, .media, .pdf, .diff => null,
         };
     }
 
@@ -14927,7 +14928,8 @@ pub const AppSession = struct {
             // FP14b: image도 격리 loadFileURL(WebKit image document + 주입 뷰어 스크립트) — 신뢰 shell로
             // 바이트를 옮기던 readSelfImage 경로를 걷어냈다(§2.2 "왜 FP14의 신뢰 shell을 걷어냈나").
             .html, .image, .media, .pdf => true,
-            .markdown, .text, .svg => false,
+            // diff는 신뢰 shell(=1)이다 — 격리 loadFileURL로는 두 문서를 나란히 못 세우고 브리지도 못 쓴다.
+            .markdown, .text, .svg, .diff => false,
         };
     }
 

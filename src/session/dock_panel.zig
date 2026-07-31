@@ -40,6 +40,10 @@ pub const EntryKind = enum {
     image,
     media,
     pdf,
+    /// E1: git diff 본문(docs/editor-surface.md §3·§9). 신뢰 shell에 CM6 MergeView를 마운트하지만 파일을 편집하지
+    /// 않는다 — 내용은 `diff.open`이 주고 저장·dirty·epoch 흐름이 없다. **디스크 파일이 아니라 비교 결과**라
+    /// entry가 경로와 함께 비교 기준(`DiffBase`)을 들고 다닌다.
+    diff,
 
     /// 신뢰 shell에서 CM6를 마운트하고 `maru.file.read/write` 브리지로 편집하는 kind인지. read/write·dirty·저장·
     /// document epoch·외부변경·초기 hydration identity 보호 게이트가 이 술어를 공유한다(§2.2·§3). markdown 라이브
@@ -48,12 +52,27 @@ pub const EntryKind = enum {
     pub fn usesEditorBridge(self: EntryKind) bool {
         return switch (self) {
             .markdown, .text, .svg => true,
+            // diff는 CM6를 쓰지만 **읽기 전용 비교 결과**라 file.read/write·dirty·저장·epoch 흐름이 없다.
+            // 내용은 diff.open이 주고, 그 method는 별도 grant 축이다(§3.1).
+            .diff => false,
             // image(FP14)는 신뢰 shell이지만 CM6 편집기가 없다(readSelfImage로 자기 바이너리만 읽어 panzoom read
             // 프리뷰). html·media·pdf는 격리 loadFileURL(media는 WebKit media document — FP15). 넷 다 CM6 편집기·
             // editor_epoch 문서 흐름을 쓰지 않는다(§2.2).
             .html, .image, .media, .pdf => false,
         };
     }
+};
+
+/// diff 본문의 **비교 기준**. 도크 소스 컨트롤 목록의 섹션이 그대로 기준이 된다(docs/editor-surface.md §10.10 —
+/// 전역 기본 base도 선택기도 두지 않는다). 같은 경로가 스테이지·미스테이지 양쪽에 있을 수 있으므로 diff Term의
+/// 유일성 키는 `(경로, kind, base)`다 — 한 파일의 두 diff를 나란히 보는 것은 정상 리뷰 흐름이다(§3.5).
+pub const DiffBase = enum {
+    /// `HEAD ↔ index`(스테이지된 변경).
+    staged,
+    /// `index ↔ worktree`(변경 사항).
+    unstaged,
+    /// 비교 대상이 없다 — 파일 내용을 그대로 보여 준다(추적되지 않은 파일).
+    untracked,
 };
 
 /// 폐기된 라이브 프리뷰 모드가 workspace 파일에 남긴 wire 이름이다. **writer는 이 값을 다시 쓰지 않는다** —
@@ -75,6 +94,8 @@ pub const Mode = enum(u32) {
     pub fn defaultFor(kind: EntryKind) Mode {
         return switch (kind) {
             .markdown => .read,
+            // diff는 읽기 전용이라 mode가 하나뿐이다(선택기도 없다 — dock_layout.modesForKind).
+            .diff => .read,
             // html·media·pdf=격리 loadFileURL, image=신뢰 뷰어+readSelfImage(FP14) — 넷 다 read 뷰 전용(편집·모드 없음).
             .html, .image, .media, .pdf => .read,
             .text => .source_edit,
@@ -88,6 +109,7 @@ pub const Mode = enum(u32) {
             .html, .image, .media, .pdf => self == .read, // read 뷰 전용(편집·모드 없음).
             .text => self == .source_edit,
             .svg => self == .read or self == .source_edit, // 리치는 markdown 전용이다.
+            .diff => self == .read, // 읽기 전용 비교 결과.
         };
     }
 

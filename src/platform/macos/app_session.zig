@@ -931,6 +931,12 @@ fn blendRgb(base: u32, tint_rgb: u32, alpha: u8) u32 {
 /// 사이드바 워크스페이스 라벨·pane 탭바가 공유하는 단일 해석(app.pickLabel). 반환은 borrowed(custom_name=세션 소유,
 /// auto_title=메인 스레드 소유 캐시, surface.title=정적) — 모두 reader 스레드가 안 건드려 렌더 중 안정. 호출자가 즉시 복사.
 fn termLabel(term: *const Term) []const u8 {
+    // 파일 Term은 **파일 이름**이 라벨이다. 패널 종류 라벨("Markdown")을 쓰면 파일을 세 개 열어도 탭이 전부
+    // "Markdown"이라 어느 탭이 무엇인지 알 수 없다(diff를 열면서 드러났다 — 사용자 지적). 사용자 rename이 있으면
+    // 그게 우선인 것은 다른 경로와 같다.
+    if (term.file_entry) |entry| {
+        return app.pickLabel(term.surface.custom_name, std.fs.path.basename(entry.path));
+    }
     // 4e-1 web Term: 자동 제목(OSC)이 없으니 kind 파생 라벨("Browser"/"Markdown")을 auto로 쓴다 — 사용자 rename
     // (custom_name)이 있으면 그게 우선(pickLabel 단일 해석). terminal 경로는 `if` 아래로 **byte-identical**.
     if (term.kind == .web) return app.pickLabel(term.surface.custom_name, term.webPanelLabel());
@@ -26768,7 +26774,8 @@ pub const AppSession = struct {
                             titles.append(self.allocator, label) catch self.allocator.free(label);
                         } else {
                             // running Term 탭은 라벨 앞에 1칸 정적 플래그 "● " prefix(owned) — 에이전트가 도는 바로 그 탭을 가리킨다.
-                            const label = flagPrefixedLabel(self.allocator, termLabel(term), term.agent_state == .running) catch continue;
+                            // diff 탭은 기준을 함께 보여 준다 — 같은 파일의 편집기 탭·다른 기준 diff와 구분된다.
+                            const label = self.diffAwareLabel(self.allocator, term) catch continue;
                             titles.append(self.allocator, label) catch self.allocator.free(label);
                         }
                     }
@@ -28966,6 +28973,18 @@ pub const AppSession = struct {
     /// 이름 앞에 running이면 "● "(1칸 정적 플래그 + 공백)를 붙인 owned 라벨을 만든다(아니면 base 복제). 탭바 pane 라벨·Term
     /// 탭이 공유 — ● 셀은 recolorAgentFlagCells가 브랜드색으로 칠한다. base는 borrowed 가능(여기서 복제해 소유권 반환).
     /// 파형(5칸)이 아니라 1칸이라 등폭 탭에서 이름을 거의 안 갉아먹는다(tmux 창-플래그 관례, code-review max #1).
+    /// 탭 라벨(owned). diff Term이면 `이름 · 기준`으로, 그 외에는 기존 규칙(running 플래그 prefix) 그대로.
+    fn diffAwareLabel(self: *AppSession, allocator: std.mem.Allocator, term: *Term) ![]u8 {
+        _ = self;
+        const base = termLabel(term);
+        if (term.file_entry) |entry| {
+            if (entry.kind == .diff) {
+                return std.fmt.allocPrint(allocator, "{s} · {s}", .{ base, entry.diff_base.label() });
+            }
+        }
+        return flagPrefixedLabel(allocator, base, term.agent_state == .running);
+    }
+
     fn flagPrefixedLabel(allocator: std.mem.Allocator, base: []const u8, running: bool) ![]u8 {
         if (!running) return allocator.dupe(u8, base);
         var flag: [4]u8 = undefined;

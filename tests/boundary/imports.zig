@@ -2711,6 +2711,16 @@ test "d2b3d live owner substrate stays private with one buffered product travers
             std.mem.indexOf(u8, source, "pub const CompletedControlOwner") == null,
         );
         inline for (.{
+            "pub const ControlCorrelationOwner",
+            "pub const PreparedControlResponseTake",
+            "pub const FrozenControlResponse",
+            "pub fn takeControlResponse",
+            "pub fn publishControlCorrelation",
+        }) |forbidden_control_api|
+            try std.testing.expect(
+                std.mem.indexOf(u8, source, forbidden_control_api) == null,
+            );
+        inline for (.{
             "pub fn publishLivePartial",
             "pub fn publishLiveScreen",
             "pub fn publishCompletedControl",
@@ -2871,6 +2881,30 @@ test "d2b3d live owner substrate stays private with one buffered product travers
         const first_test = std.mem.indexOf(u8, source, "\ntest \"") orelse
             return error.TestUnexpectedResult;
         const product_source = source[0..first_test];
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            std.mem.count(
+                u8,
+                product_source,
+                "control_correlation: ControlCorrelationOwner",
+            ),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            std.mem.count(
+                u8,
+                product_source,
+                "completed_control: CompletedControlOwner",
+            ),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            std.mem.count(
+                u8,
+                product_source,
+                "client_external_tx.requestFrameProgress(",
+            ),
+        );
         try std.testing.expectEqual(
             @as(usize, 2),
             std.mem.count(u8, product_source, "commitRxAggregate("),
@@ -3099,6 +3133,36 @@ test "d2b3d live owner substrate stays private with one buffered product travers
         @as(usize, 0),
         std.mem.count(u8, product_owner_boundary, "nextOutcomeWithRange("),
     );
+}
+
+test "f2 control correlation reducer stays dependency neutral" {
+    const allocator = std.testing.allocator;
+    const source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/client_control_correlation.zig",
+    );
+    defer allocator.free(source);
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        std.mem.count(u8, source, "@import(\""),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        std.mem.count(u8, source, "@import(\"std\")"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        std.mem.count(u8, source, "@import(\"client_pump.zig\")"),
+    );
+    inline for (.{
+        "client_external_pump.zig",
+        "client_external_tx.zig",
+        "client_external_mode.zig",
+        "protocol.zig",
+    }) |forbidden_import|
+        try std.testing.expect(
+            std.mem.indexOf(u8, source, forbidden_import) == null,
+        );
 }
 
 fn containsForbiddenExternalBuiltin(source: [:0]const u8) bool {

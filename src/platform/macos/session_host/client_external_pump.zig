@@ -20038,6 +20038,102 @@ test "d2b3d live screen consume retries without mutation then retires one FIFO h
     );
 }
 
+const F2ProductProbe = struct {
+    use_posix: bool = false,
+    apply_context: u8 = 0,
+
+    fn read(
+        raw: *anyopaque,
+        fd: posix.fd_t,
+        buffer: []u8,
+    ) client_external_rx_read.RxReadOutcome {
+        const use_posix: *bool = @ptrCast(@alignCast(raw));
+        if (!use_posix.*) return .would_block;
+        const rc = c.recv(fd, buffer.ptr, buffer.len, posix.MSG.DONTWAIT);
+        if (rc > 0) return .{ .bytes = @intCast(rc) };
+        if (rc == 0) return .eof;
+        return switch (posix.errno(rc)) {
+            .INTR => .interrupted,
+            .AGAIN => .would_block,
+            else => .socket_error,
+        };
+    }
+
+    fn apply(
+        _: *anyopaque,
+        _: external_inbox_ledger.PayloadView,
+    ) LiveScreenApplyResult {
+        return .applied;
+    }
+
+    fn rxOps(self: *@This()) RxTurnOps {
+        return .{
+            .buffered = .{
+                .context = &self.apply_context,
+                .context_len = @sizeOf(u8),
+                .apply_live_screen = apply,
+            },
+            .transport = .{
+                .context = &self.use_posix,
+                .context_len = @sizeOf(bool),
+                .read = read,
+            },
+        };
+    }
+
+    fn bufferedOps(self: *@This()) BufferedRxOps {
+        return .{
+            .context = &self.apply_context,
+            .apply_live_screen = apply,
+        };
+    }
+};
+
+fn initActiveF2Storage(
+    storage: *ExternalPumpStorage,
+    fixture: *TestClient,
+) !void {
+    try std.testing.expect(
+        initTestStorage(storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    try std.testing.expect(testing.clearInitialFence(storage));
+}
+
+/// Every f2 terminal fixture ends in the same canonical owner graph. Explicit field assertions
+/// keep `.cleaned` from becoming a weak proxy that could hide a retained TX/payload authority.
+fn expectF2FinalZero(storage: *ExternalPumpStorage) !void {
+    var tx_receipt: client_external_mode.testing.TxDeinitReceipt = .{};
+    try std.testing.expect(
+        client_external_mode.testing.beginTxDeinitReceipt(&tx_receipt),
+    );
+    defer std.debug.assert(
+        client_external_mode.testing.endTxDeinitReceipt(&tx_receipt),
+    );
+    try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(storage));
+    try std.testing.expect(tx_receipt.observed);
+    try std.testing.expectEqual(@as(usize, 0), tx_receipt.items);
+    try std.testing.expectEqual(@as(usize, 0), tx_receipt.capacity);
+    try std.testing.expectEqual(@as(usize, 0), tx_receipt.bytes);
+    try std.testing.expectEqual(@as(usize, 0), tx_receipt.retiring_bytes);
+    try std.testing.expect(tx_receipt.lifecycle == .dead);
+    try std.testing.expect(tx_receipt.claim_dead);
+    try std.testing.expect(storage.owned_client == null);
+    try std.testing.expect(storage.owner_request_ids == null);
+    try std.testing.expect(storage.control_correlation.state == .idle);
+    const accounting = storage.inbox_ledger.accountingView();
+    try std.testing.expect(accounting.valid);
+    try std.testing.expectEqual(@as(usize, 0), accounting.charged_bytes);
+    try std.testing.expectEqual(@as(usize, 0), accounting.charged_items);
+    try std.testing.expect(storage.completed_control == .terminal);
+    try std.testing.expect(storage.live_partial == .terminal);
+    try std.testing.expect(
+        storage.live_screen.lifecycle == .cleaned_tombstone,
+    );
+}
+
 test "f2 control admission atomically publishes one correlation and one request frame" {
     const Probe = struct {
         fn read(
@@ -20188,6 +20284,158 @@ test "f2 control admission atomically publishes one correlation and one request 
     try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(&storage));
 }
 
+fn checkF2ControlAdmissionAllocationFailure(
+    allocator: std.mem.Allocator,
+) !void {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try initActiveF2Storage(&storage, &fixture);
+    defer if (storage.lifecycle != .dead) {
+        _ = teardownForTest(&storage);
+    };
+    const external = switch (storage.owned_client.?.io_mode) {
+        .external => |*state| state,
+        .blocking => return error.TestUnexpectedResult,
+    };
+    external.tx_allocator = allocator;
+    external.tx_allocator_context_len = 1;
+    const request_before = storage.owner_request_ids.?;
+    const queue_generation_before = external.tx_queue_generation;
+    const authority_before = storage.owner_authority;
+    const result = storage.admitControl(.{
+        .kind = .resize,
+        .target_stream_id = valid_evidence.stream_id,
+        .expected_controller_generation = valid_evidence.initial_controller_generation,
+        .payload = "{\"method\":\"runtime.resize\"}",
+    }, 100);
+    switch (result) {
+        .admitted => {
+            try std.testing.expect(
+                storage.control_correlation.state == .in_flight,
+            );
+            try expectF2FinalZero(&storage);
+        },
+        .terminal => |reason| {
+            try std.testing.expectEqual(
+                client_pump.TerminalReason.resource_exhausted,
+                reason,
+            );
+            try std.testing.expect(std.meta.eql(
+                request_before,
+                storage.owner_request_ids.?,
+            ));
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                external.external_tx.items.len,
+            );
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                external.external_tx_bytes,
+            );
+            try std.testing.expectEqual(
+                queue_generation_before,
+                external.tx_queue_generation,
+            );
+            try std.testing.expect(storage.control_correlation.state == .idle);
+            try std.testing.expect(storage.semantic_state == .terminal);
+            try std.testing.expectEqual(
+                client_pump.TerminalReason.resource_exhausted,
+                storage.semantic_state.terminal.reason,
+            );
+            try std.testing.expect(std.meta.eql(
+                authority_before,
+                storage.owner_authority,
+            ));
+            try expectF2FinalZero(&storage);
+            return error.OutOfMemory;
+        },
+        .backpressure, .busy => return error.TestUnexpectedResult,
+    }
+}
+
+test "f2 control admission preserves every owner at every allocation fail index" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        checkF2ControlAdmissionAllocationFailure,
+        .{},
+    );
+}
+
+fn checkF2ResponseOwnershipAllocationFailure(
+    allocator: std.mem.Allocator,
+) !void {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try initActiveF2Storage(&storage, &fixture);
+    defer if (storage.lifecycle != .dead) {
+        _ = teardownForTest(&storage);
+    };
+    try std.testing.expect(armResponseCorrelationForTest(&storage, 84, 0));
+    const response = try framing.encodeFrame(
+        std.testing.allocator,
+        .{ .kind = .response, .request_id = 84 },
+        "allocation-response",
+    );
+    defer std.testing.allocator.free(response);
+    const client = &storage.owned_client.?;
+    const external = switch (client.io_mode) {
+        .external => |*state| state,
+        .blocking => return error.TestUnexpectedResult,
+    };
+    // Setup stays on the stable allocator. Replace the empty product parser before response
+    // admission so every allocation and matching free from wire ingress through completed-owner
+    // publication belongs to the exact failing allocator under test.
+    client.parser.deinit();
+    client.parser = framing.FrameParser.init(allocator);
+    try std.testing.expect(
+        client_external_mode.testing.forgeResealedResidentCap(
+            external,
+            &client.parser,
+            external.rx_provenance.resident_cap,
+        ),
+    );
+    admitBufferedProductWireForTest(&storage, response) catch |err| {
+        try std.testing.expectEqual(error.OutOfMemory, err);
+        try expectF2FinalZero(&storage);
+        return error.OutOfMemory;
+    };
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    var probe = F2ProductProbe{};
+    const ops = probe.bufferedOps();
+    const result = storage.pumpBufferedRxForTest(
+        .{ .readable = true, .writable = false, .now_ns = 1 },
+        &ops,
+        scratch,
+    );
+    if (result.terminal) |terminal| {
+        try std.testing.expectEqual(
+            client_pump.TerminalReason.resource_exhausted,
+            terminal.reason,
+        );
+        try std.testing.expect(storage.completed_control == .none);
+        try expectF2FinalZero(&storage);
+        return error.OutOfMemory;
+    }
+    try std.testing.expectEqualStrings(
+        "allocation-response",
+        storage.completed_control.completed.payload.bytes(),
+    );
+    try expectF2FinalZero(&storage);
+}
+
+test "f2 response ownership preserves final zero at every allocation fail index" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        checkF2ResponseOwnershipAllocationFailure,
+        .{},
+    );
+}
+
 test "f2 product socket partial write publishes sealed control progress" {
     const Probe = struct {
         fn read(
@@ -20287,6 +20535,77 @@ test "f2 product socket partial write publishes sealed control progress" {
     );
 }
 
+test "f2 actual socket response wins RX first and rejects same turn TX completion" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try initActiveF2Storage(&storage, &fixture);
+    defer if (storage.lifecycle != .dead) {
+        _ = teardownForTest(&storage);
+    };
+    var requested: c_int = 4096;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.setsockopt(
+            storage.owned_client.?.fd,
+            posix.SOL.SOCKET,
+            posix.SO.SNDBUF,
+            &requested,
+            @sizeOf(c_int),
+        ),
+    );
+    const payload = try std.testing.allocator.alloc(
+        u8,
+        protocol.max_control_json,
+    );
+    defer std.testing.allocator.free(payload);
+    @memset(payload, 'x');
+    const admitted = storage.admitControl(.{
+        .kind = .resize,
+        .target_stream_id = valid_evidence.stream_id,
+        .expected_controller_generation = valid_evidence.initial_controller_generation,
+        .payload = payload,
+    }, 100);
+    const request_id = switch (admitted) {
+        .admitted => |value| value.request_id,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(
+        client_control_correlation.Progress.queued,
+        storage.control_correlation.state.in_flight.progress,
+    );
+    const response = try framing.encodeFrame(
+        std.testing.allocator,
+        .{ .kind = .response, .request_id = request_id },
+        "too-early",
+    );
+    defer std.testing.allocator.free(response);
+    try std.testing.expectEqual(
+        @as(isize, @intCast(response.len)),
+        c.send(fixture.peer_fd, response.ptr, response.len, 0),
+    );
+
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    var probe = F2ProductProbe{ .use_posix = true };
+    const ops = probe.rxOps();
+    const result = storage.pumpRxTurn(
+        .{ .readable = true, .writable = true, .now_ns = 101 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expectEqual(
+        client_pump.TerminalReason.protocol_error,
+        result.terminal.?.reason,
+    );
+    try std.testing.expectEqual(@as(usize, 0), result.tx_bytes);
+    try std.testing.expectEqual(@as(usize, 0), result.tx_frames);
+    try std.testing.expect(storage.completed_control == .none);
+    try expectF2FinalZero(&storage);
+}
+
 test "f2 completion sink ignores unrelated request completions in either order" {
     inline for (.{ false, true }) |matching_first| {
         var fixture = try TestClient.init();
@@ -20335,6 +20654,111 @@ test "f2 completion sink ignores unrelated request completions in either order" 
             storage.control_correlation.state.in_flight.progress,
         );
     }
+}
+
+test "f2 max request id survives product wire response and private reject cleanup" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try initActiveF2Storage(&storage, &fixture);
+    defer if (storage.lifecycle != .dead) {
+        _ = teardownForTest(&storage);
+    };
+    storage.owner_request_ids = .last_available;
+
+    const admitted = storage.admitControl(.{
+        .kind = .resize,
+        .target_stream_id = valid_evidence.stream_id,
+        .expected_controller_generation = valid_evidence.initial_controller_generation,
+        .payload = "{\"method\":\"runtime.resize\",\"params\":{}}",
+    }, 100);
+    const request_id = switch (admitted) {
+        .admitted => |value| value.request_id,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(std.math.maxInt(u64), request_id);
+    try std.testing.expect(storage.owner_request_ids.? == .max_consumed);
+    try std.testing.expectEqual(
+        request_id,
+        storage.control_correlation.state.in_flight.request_id,
+    );
+    try std.testing.expect(controlCorrelationValid(&storage));
+    try std.testing.expect(storage.completedControlValid());
+    try std.testing.expect(ownerAuthorityValid(&storage));
+
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    var probe = F2ProductProbe{};
+    const ops = probe.rxOps();
+    const tx = storage.pumpRxTurn(
+        .{ .readable = true, .writable = true, .now_ns = 101 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(tx.terminal == null);
+    try std.testing.expectEqual(@as(usize, 1), tx.tx_frames);
+    var request_wire: [protocol.max_control_json + protocol.header_size]u8 = undefined;
+    const request_len = c.recv(
+        fixture.peer_fd,
+        &request_wire,
+        request_wire.len,
+        0,
+    );
+    try std.testing.expect(request_len > 0);
+    const request_header: *const [protocol.header_size]u8 =
+        @ptrCast(request_wire[0..protocol.header_size]);
+    try std.testing.expectEqual(
+        request_id,
+        (try protocol.Header.decode(request_header)).request_id,
+    );
+
+    const response = try framing.encodeFrame(
+        std.testing.allocator,
+        .{ .kind = .response, .request_id = request_id },
+        "max-response",
+    );
+    defer std.testing.allocator.free(response);
+    try std.testing.expectEqual(
+        @as(isize, @intCast(response.len)),
+        c.send(fixture.peer_fd, response.ptr, response.len, 0),
+    );
+    probe.use_posix = true;
+    const rx = storage.pumpRxTurn(
+        .{ .readable = true, .writable = false, .now_ns = 102 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(rx.terminal == null);
+    try std.testing.expectEqual(
+        request_id,
+        storage.completed_control.completed.request_id,
+    );
+    try std.testing.expectEqualStrings(
+        "max-response",
+        storage.completed_control.completed.payload.bytes(),
+    );
+    try std.testing.expect(storage.owner_request_ids.? == .max_consumed);
+
+    var take: PreparedControlResponseTake = .{};
+    try std.testing.expect(storage.prepareControlResponseTake(&take));
+    var lease: ExternalWholeTurnLease = .{};
+    try storage.acquireWholeTurnLease(
+        &lease,
+        @intFromPtr(scratch),
+        @sizeOf(ExternalRxTurnScratch),
+    );
+    try std.testing.expectEqual(
+        FinishControlResponseResult.rejected_terminal,
+        storage.takeControlResponseUnderHeldLease(&lease, &take),
+    );
+    try std.testing.expectEqual(
+        WholeTurnReleaseResult.released,
+        storage.releaseWholeTurnLease(&lease),
+    );
+    try std.testing.expect(storage.owner_request_ids.? == .max_consumed);
+    try expectF2FinalZero(&storage);
 }
 
 test "f1a product facade admits under whole-turn lease and terminal replay is wire zero" {
@@ -21977,53 +22401,67 @@ test "f2 completed response take is sealed exact once and reject-terminal only" 
     try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(&storage));
 }
 
-test "f2 control deadline is projected and terminalizes a zero readiness turn at exact boundary" {
-    const Apply = struct {
-        fn run(
-            _: *anyopaque,
-            _: external_inbox_ledger.PayloadView,
-        ) LiveScreenApplyResult {
-            return .applied;
-        }
-    };
-    var fixture = try TestClient.init();
-    defer fixture.deinitPeer();
-    var storage: ExternalPumpStorage = .{};
-    try std.testing.expect(
-        initTestStorage(&storage, &fixture.client, valid_evidence) ==
-            .initialized,
-    );
-    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
-    try std.testing.expect(storage.commitAdoption() == .adopted);
-    const admitted_at: i128 = 100;
-    try std.testing.expect(
-        armResponseCorrelationForTest(&storage, 79, admitted_at),
-    );
-    const deadline = admitted_at + client_control_correlation.timeout_ns;
-    const hint = storage.pollHint();
-    try std.testing.expect(!hint.immediate);
-    try std.testing.expectEqual(deadline, hint.next_deadline_ns.?);
+test "f2 product deadline minus one exact and plus one are deadline first" {
+    inline for (.{ -1, 0, 1 }) |delta| {
+        var fixture = try TestClient.init();
+        defer fixture.deinitPeer();
+        var storage: ExternalPumpStorage = .{};
+        try std.testing.expect(
+            initTestStorage(&storage, &fixture.client, valid_evidence) ==
+                .initialized,
+        );
+        try std.testing.expect(
+            prepareAdoptionForTest(&storage) == .prepared_adopted,
+        );
+        try std.testing.expect(storage.commitAdoption() == .adopted);
+        const admitted_at: i128 = 100;
+        try std.testing.expect(
+            armResponseCorrelationForTest(&storage, 79, admitted_at),
+        );
+        const deadline = admitted_at + client_control_correlation.timeout_ns;
+        const hint = storage.pollHint();
+        try std.testing.expect(!hint.immediate);
+        try std.testing.expectEqual(deadline, hint.next_deadline_ns.?);
 
-    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
-    defer std.testing.allocator.destroy(scratch);
-    scratch.* = .{};
-    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
-    var context: u8 = 0;
-    const ops = BufferedRxOps{
-        .context = &context,
-        .apply_live_screen = Apply.run,
-    };
-    const result = storage.pumpBufferedRxForTest(
-        .{ .readable = false, .writable = false, .now_ns = deadline },
-        &ops,
-        scratch,
-    );
-    try std.testing.expectEqual(
-        client_pump.TerminalReason.deadline_exceeded,
-        result.terminal.?.reason,
-    );
-    try std.testing.expect(storage.control_correlation.state == .terminal);
-    try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(&storage));
+        const response = try framing.encodeFrame(
+            std.testing.allocator,
+            .{ .kind = .response, .request_id = 79 },
+            "deadline-response",
+        );
+        defer std.testing.allocator.free(response);
+        try admitBufferedProductWireForTest(&storage, response);
+        const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+        defer std.testing.allocator.destroy(scratch);
+        scratch.* = .{};
+        try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+        var probe = F2ProductProbe{};
+        const ops = probe.bufferedOps();
+        const result = storage.pumpBufferedRxForTest(
+            .{
+                .readable = true,
+                .writable = false,
+                .now_ns = deadline + delta,
+            },
+            &ops,
+            scratch,
+        );
+        if (delta < 0) {
+            try std.testing.expect(result.terminal == null);
+            try std.testing.expectEqualStrings(
+                "deadline-response",
+                storage.completed_control.completed.payload.bytes(),
+            );
+            try std.testing.expect(storage.control_correlation.state == .completed);
+        } else {
+            try std.testing.expectEqual(
+                client_pump.TerminalReason.deadline_exceeded,
+                result.terminal.?.reason,
+            );
+            try std.testing.expect(storage.completed_control == .none);
+            try std.testing.expect(storage.control_correlation.state == .terminal);
+        }
+        try expectF2FinalZero(&storage);
+    }
 }
 
 test "f2 product RX rejects unsolicited early wrong and same-drain duplicate responses" {
@@ -22035,7 +22473,15 @@ test "f2 product RX rejects unsolicited early wrong and same-drain duplicate res
             return .applied;
         }
     };
-    const Case = enum { unsolicited, early, wrong, zero, duplicate };
+    const Case = enum {
+        unsolicited,
+        early,
+        wrong,
+        zero,
+        duplicate,
+        wrong_then_expected,
+        expected_then_wrong,
+    };
     inline for (std.meta.tags(Case)) |case| {
         var fixture = try TestClient.init();
         defer fixture.deinitPeer();
@@ -22057,25 +22503,30 @@ test "f2 product RX rejects unsolicited early wrong and same-drain duplicate res
                     rewindControlCorrelationToQueuedForTest(&storage),
                 );
         }
+        const first_request_id: u64 = switch (case) {
+            .wrong, .wrong_then_expected => 81,
+            .zero => 0,
+            else => 80,
+        };
         const first = try framing.encodeFrame(
             std.testing.allocator,
             .{
                 .kind = .response,
-                .request_id = if (case == .wrong)
-                    81
-                else if (case == .zero)
-                    0
-                else
-                    80,
+                .request_id = first_request_id,
             },
             "response",
         );
         defer std.testing.allocator.free(first);
-        if (case == .duplicate) {
+        if (case == .duplicate or case == .wrong_then_expected or
+            case == .expected_then_wrong)
+        {
             const second = try framing.encodeFrame(
                 std.testing.allocator,
-                .{ .kind = .response, .request_id = 80 },
-                "duplicate",
+                .{
+                    .kind = .response,
+                    .request_id = if (case == .expected_then_wrong) 81 else 80,
+                },
+                "second-response",
             );
             defer std.testing.allocator.free(second);
             try admitBufferedProductFramesForTest(&storage, &.{ first, second });
@@ -22105,6 +22556,66 @@ test "f2 product RX rejects unsolicited early wrong and same-drain duplicate res
             TeardownResult.cleaned,
             teardownForTest(&storage),
         );
+    }
+}
+
+test "f2 actual socket rejects expected and foreign responses in either same-drain order" {
+    inline for (.{ false, true }) |expected_first| {
+        var fixture = try TestClient.init();
+        defer fixture.deinitPeer();
+        var storage: ExternalPumpStorage = .{};
+        try initActiveF2Storage(&storage, &fixture);
+        defer if (storage.lifecycle != .dead) {
+            _ = teardownForTest(&storage);
+        };
+        try std.testing.expect(armResponseCorrelationForTest(&storage, 80, 0));
+
+        const expected = try framing.encodeFrame(
+            std.testing.allocator,
+            .{ .kind = .response, .request_id = 80 },
+            "expected-response",
+        );
+        defer std.testing.allocator.free(expected);
+        const foreign = try framing.encodeFrame(
+            std.testing.allocator,
+            .{ .kind = .response, .request_id = 81 },
+            "foreign-response",
+        );
+        defer std.testing.allocator.free(foreign);
+        const wire = try std.testing.allocator.alloc(
+            u8,
+            expected.len + foreign.len,
+        );
+        defer std.testing.allocator.free(wire);
+        const first = if (expected_first) expected else foreign;
+        const second = if (expected_first) foreign else expected;
+        @memcpy(wire[0..first.len], first);
+        @memcpy(wire[first.len..], second);
+        try std.testing.expectEqual(
+            @as(isize, @intCast(wire.len)),
+            c.send(fixture.peer_fd, wire.ptr, wire.len, 0),
+        );
+
+        const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+        defer std.testing.allocator.destroy(scratch);
+        scratch.* = .{};
+        try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+        var probe = F2ProductProbe{ .use_posix = true };
+        const ops = probe.rxOps();
+        const result = storage.pumpRxTurn(
+            .{ .readable = true, .writable = false, .now_ns = 1 },
+            &ops,
+            scratch,
+        );
+        try std.testing.expectEqual(
+            client_pump.TerminalReason.protocol_error,
+            result.terminal.?.reason,
+        );
+        // Both complete frames crossed the real socket and were classified in one RX drain;
+        // all-or-none publication still rejects the aggregate before publishing a completion.
+        try std.testing.expectEqual(@as(usize, 2), result.rx_frames);
+        try std.testing.expect(storage.completed_control == .none);
+        try expectF2FinalZero(&storage);
     }
 }
 

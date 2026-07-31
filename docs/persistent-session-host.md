@@ -8526,14 +8526,24 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             key를 slot에 중복 저장하지도 않는다. `StreamBatchView.recovery_key: ?RecoveryKey`로 immutable value
             key를 노출하고 normal snapshot/delta 및 GUI `.untracked`는 null이다. recovery state에서 null
             snapshot/delta, valid state에서 nonnull key, wrong stream/incarnation/origin/epoch/generation은
-            screen apply와 gate clear 0의 protocol terminal이다. `AttachmentTransport`는
+            screen apply와 gate clear 0의 protocol terminal이다. `AttachmentTransport`는 먼저
+            `preflight_batch_authority(context,stream_id,is_snapshot,key:?RecoveryKey)
+            -> ordinary|recovery_exact|stale_invariant`를 제공한다. 이 callback은 무할당·read-only이고 상태나
+            key를 소비하지 않는다. callback이 없는 GUI/untracked transport는 null key만 `ordinary`이며
+            nonnull key는 stale이다. consumer 순서는
+            **borrow→preflight→shadow apply→lease release→mark→visible screen publish**다. stale이면 visible
+            screen apply 0, lease는 exact release/retain, mark 0, terminal이다. `recovery_exact` snapshot은
+            private shadow `RemoteScreen`에만 조립하고, release 뒤 동일 key/state를 재검증하는 mark가 성공한
+            뒤 stable screen mutex 아래 no-fail swap한다. 따라서 preflight 뒤 apply/release callback이 recovery
+            authority를 바꿔 mark가 stale이 되어도 visible screen은 불변이다. `AttachmentTransport`는 이어서
             `mark_resync_applied(context,stream_id,key: RecoveryKey)->commit_pending|stale_invariant` callback을
             제공한다. `RemoteAttachment`는 release 전에 `?RecoveryKey`를 값으로 복사한다. null이면 mark callback
             0회 후 `applied`, some이면 release 성공 뒤 exact key로 callback을 정확히 1회 호출한다. 따라서 GUI
             `.untracked`/normal batch는 mark를 호출하지 않는다. `pumpScreen` 반환도
             `idle | applied | recovery_commit_pending | terminal`의 닫힌 enum으로 owner wake 필요를 전달한다.
-            facade/ledger import는 하지 않는다. `RemoteAttachment` 성공 경로는
-            **apply→lease release→`mark_resync_applied(context,stream_id,recovery_key)`** 순서다. release 실패면 기존
+            facade/ledger import는 하지 않는다. `RemoteAttachment` recovery 성공 경로는
+            **shadow apply→lease release→`mark_resync_applied(context,stream_id,recovery_key)`→visible publish**
+            순서다. release 실패면 기존
             `failed_release` terminal slot에 retain하고 mark 0이다. mark exact match는 stream, nonzero owner
             incarnation, origin, epoch, expected token generation과 현재 `awaiting_snapshot` phase를 모두
             대조하며 input gate를 바로 열지 않고

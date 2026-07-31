@@ -24773,56 +24773,141 @@ pub const AppSession = struct {
         return buf[0..n];
     }
 
-    /// 사용자 파일을 **원자적으로** 갈아 끼운다 — 같은 디렉터리 임시 파일에 다 쓴 뒤 `rename`.
+    /// 작은 사용자 파일을 읽되 **없음과 못 읽음을 가른다**. 이 구분이 이 경로의 안전장치 전체를 떠받친다 — 둘을
+    /// 하나로 접으면 "읽지 못했다"가 "원래 없었다"는 확정으로 둔갑해 사용자 명령을 지운다(적대 검증이 이 접힘으로
+    /// 원본 소실 경로 36개를 만들어 보였다).
+    ///
+    /// 0바이트는 **못 읽음**으로 본다 — 비원자 쓰기가 남기던 잔해이자 claude가 파일을 쓰는 중간 상태이지,
+    /// "내용이 없는 정상 파일"인 경우는 이 경로에 없다.
+    const FileRead = union(enum) { absent, unreadable, present: []u8 };
+
+    fn readFileState(io: std.Io, a: std.mem.Allocator, path: []const u8) FileRead {
+        const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| return switch (err) {
+            error.FileNotFound => .absent,
+            else => .unreadable,
+        };
+        defer file.close(io);
+        const size = (file.stat(io) catch return .unreadable).size;
+        if (size == 0 or size > 1 << 20) return .unreadable;
+        const buf = a.alloc(u8, @intCast(size)) catch return .unreadable;
+        const n = file.readPositionalAll(io, buf, 0) catch return .unreadable;
+        return .{ .present = buf[0..n] };
+    }
+
+    /// 사용자 파일을 **원자적으로** 갈아 끼운다 — 같은 디렉터리 임시 파일에 다 쓰고 fsync한 뒤 `rename`.
     ///
     /// 제자리 truncate로 쓰면 그 사이에 claude가 **반쯤 쓰인 상태줄 스크립트를 실행**하거나, 우리가 죽은 자리에 잘린
     /// `settings.json`이 남는다. 둘 다 사용자 파일이라 되돌려줄 사람이 없다. rename은 같은 파일시스템 안에서 원자적이다.
+    ///
+    /// 그 대가로 두 가지를 **명시적으로 되돌려 준다**(적대 검증이 실측으로 잡은 회귀):
+    /// - `rename`은 심링크를 따라가지 않고 **대체**한다. dotfile 관리자가 `~/.claude/settings.json`을 심링크로 두는
+    ///   구성이 흔하므로, 심링크면 실체 경로를 해석해 그쪽을 갈아 끼운다.
+    /// - 새 파일은 umask 기본 권한을 갖는다. 기존 파일이 있으면 그 권한을 그대로 승계한다 — `settings.json`을
+    ///   `0600`으로 두던 사용자가 조용히 `0644`로 넓어지지 않게.
     fn writeExecutableFile(io: std.Io, path: []const u8, body: []const u8, executable: bool) !void {
-        const dir = std.fs.path.dirname(path) orelse return error.BadPath;
+        // 심링크 해석: 실체가 있으면 그 경로가 쓰기 대상이다. 없으면(새로 만드는 경우) 주어진 경로 그대로.
+        var real_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const target = if (std.Io.Dir.realPathFileAbsolute(io, path, &real_buf)) |len|
+            real_buf[0..len]
+        else |_|
+            path;
+
+        // 기존 권한 승계(없으면 스크립트 0o755 / 설정 파일은 생성 기본값).
+        const existing: ?std.Io.File.Permissions = blk: {
+            const file = std.Io.Dir.cwd().openFile(io, target, .{}) catch break :blk null;
+            defer file.close(io);
+            break :blk (file.stat(io) catch break :blk null).permissions;
+        };
+
+        const dir = std.fs.path.dirname(target) orelse return error.BadPath;
         std.Io.Dir.cwd().createDirPath(io, dir) catch {};
         var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const tmp_path = std.fmt.bufPrint(&tmp_buf, "{s}.maru-tmp", .{path}) catch return error.BadPath;
+        const tmp_path = std.fmt.bufPrint(&tmp_buf, "{s}.maru-tmp", .{target}) catch return error.BadPath;
+        std.Io.Dir.cwd().deleteFile(io, tmp_path) catch {}; // 옛 크래시가 남긴 잔해가 있으면 걷어낸다
         {
             const file = try std.Io.Dir.cwd().createFile(io, tmp_path, .{ .truncate = true });
             defer file.close(io);
             errdefer std.Io.Dir.cwd().deleteFile(io, tmp_path) catch {};
             try file.writePositionalAll(io, body, 0);
-            // 상태줄 스크립트는 claude가 **직접 실행**하므로 실행 권한이 필요하다(settings.json은 아니다).
-            // rename **전에** 걸어야 갈아 끼운 순간부터 실행 가능하다.
-            if (executable) file.setPermissions(io, @enumFromInt(0o755)) catch {};
+            // 권한은 rename **전에** 건다 — 갈아 끼운 순간부터 claude가 실행할 수 있어야 한다.
+            if (existing) |perm|
+                file.setPermissions(io, perm) catch {}
+            else if (executable)
+                file.setPermissions(io, @enumFromInt(0o755)) catch {};
+            // rename만 영속되고 데이터가 비는 것(전원 차단)을 막는다.
+            file.sync(io) catch {};
         }
         // 실패하면 임시 파일을 남기지 않는다 — 사용자 디렉터리에 우리 잔해가 쌓이면 CI의 "늘어난 파일" 게이트도 깨진다.
         errdefer std.Io.Dir.cwd().deleteFile(io, tmp_path) catch {};
-        try std.Io.Dir.renameAbsolute(tmp_path, path, io);
+        try std.Io.Dir.renameAbsolute(tmp_path, target, io);
     }
 
     /// 상태줄 훅의 read-modify-write 전체를 **인스턴스 사이에서 직렬화**하는 락. 대상은 설치 마커 파일이다
     /// (docs/sidebar-agent-list.md §7.2.2).
     ///
-    /// 논블로킹이라 데드락이 없다 — 잡지 못하면 다른 인스턴스가 지금 같은 일을 하고 있다는 뜻이라 **물러난다**.
-    /// 마커를 rename으로 갈아 끼우지 않고 제자리에 쓰는 이유가 이것이다(inode가 바뀌면 이 락이 무의미해진다).
+    /// 논블로킹이라 데드락이 없다. 다만 **"경합"과 "잠글 수 없음"을 가른다** — 권한이나 파일시스템(네트워크 홈 등)
+    /// 때문에 애초에 잠글 수 없는 사람에게 조용한 영구 무동작을 안기지 않기 위해서다. 경합이면 물러나고,
+    /// 잠글 수 없으면 락 없이 진행한다(락을 넣기 전과 같은 위험 — 더 나빠지지는 않는다).
+    ///
+    /// `CLOEXEC`은 필수다. 이 fd가 exec된 자식(PTY 셸·curl·ssh)에게 새면 그 자식이 사는 내내 락이 잠겨
+    /// **모든 인스턴스에서 설치도 제거도 조용히 무동작**이 된다(같은 규율: `app_instance_lease.zig`).
     const StatuslineLock = struct {
-        fd: c_int,
+        fd: c_int, // -1 = 잠글 수 없어 락 없이 진행 중
 
-        fn acquire(marker_path: [:0]const u8) ?StatuslineLock {
-            const fd = std.c.open(marker_path.ptr, .{ .ACCMODE = .RDWR, .CREAT = true }, @as(std.c.mode_t, 0o644));
-            if (fd < 0) return null;
-            if (std.c.flock(fd, std.posix.LOCK.EX | std.posix.LOCK.NB) != 0) {
+        const Outcome = union(enum) { locked: StatuslineLock, unlockable: StatuslineLock, contended };
+
+        fn acquire(marker_path: [:0]const u8, create: bool) Outcome {
+            const flags: std.c.O = if (create)
+                .{ .ACCMODE = .RDWR, .CREAT = true, .CLOEXEC = true, .NOFOLLOW = true }
+            else
+                .{ .ACCMODE = .RDWR, .CLOEXEC = true, .NOFOLLOW = true };
+            const fd = std.c.open(marker_path.ptr, flags, @as(std.c.mode_t, 0o644));
+            if (fd < 0) return .{ .unlockable = .{ .fd = -1 } };
+            // CLOEXEC이 실제로 걸렸는지 확인한다 — 안 걸렸으면 잠그지 않는 편이 낫다(영구 잠금보다 경합이 낫다).
+            const fd_flags = std.c.fcntl(fd, std.c.F.GETFD, @as(c_int, 0));
+            if (fd_flags < 0 or fd_flags & std.c.FD_CLOEXEC == 0) {
                 _ = std.c.close(fd);
-                return null;
+                return .{ .unlockable = .{ .fd = -1 } };
             }
-            return .{ .fd = fd };
+            const rc = std.c.flock(fd, std.posix.LOCK.EX | std.posix.LOCK.NB);
+            if (rc != 0) {
+                const err = std.posix.errno(rc);
+                _ = std.c.close(fd);
+                // EWOULDBLOCK = 다른 인스턴스가 지금 같은 일을 하고 있다 → 우리가 할 일은 없다.
+                return if (err == .AGAIN) .contended else .{ .unlockable = .{ .fd = -1 } };
+            }
+            return .{ .locked = .{ .fd = fd } };
         }
 
-        /// 마커 본문을 제자리로 쓴다(락 유지). 반쯤 쓰인 마커는 파싱에 실패하고, 그건 "모른다"라 호출부가 `.skip`으로
-        /// 접는다 — 안전한 방향의 실패다.
-        fn writeBody(self: StatuslineLock, body: []const u8) void {
-            if (std.c.ftruncate(self.fd, 0) != 0) return;
-            _ = std.c.pwrite(self.fd, body.ptr, body.len, 0);
+        /// 우리가 잠근 그 파일이 **아직 같은 파일인가**. 다른 인스턴스가 마커를 지우고 새로 만들면 이름은 같아도
+        /// inode가 달라 두 인스턴스가 동시에 임계구역에 들어간다(적대 검증이 실측한 lockfile unlink 함정).
+        fn stillOwns(self: StatuslineLock, io: std.Io, marker_path: []const u8) bool {
+            if (self.fd < 0) return true; // 락 없이 진행 중 — 확인할 것이 없다
+            const held: std.Io.File = .{ .handle = self.fd, .flags = .{ .nonblocking = false } }; // 여기서 닫지 않는다
+            const by_fd = held.stat(io) catch return false;
+            const file = std.Io.Dir.cwd().openFile(io, marker_path, .{}) catch return false;
+            defer file.close(io);
+            const by_path = file.stat(io) catch return false;
+            return by_fd.inode == by_path.inode;
+        }
+
+        /// 마커 본문을 제자리로 쓴다(락 유지). rename으로 갈아 끼우면 잠근 inode가 바뀌어 직렬화가 풀리므로
+        /// 제자리에 쓴다. 대신 **부분 쓰기는 반드시 지운다** — 잘린 마커가 짧고 틀린 명령으로 파싱되면 그 쓰레기가
+        /// 복원 때 사용자 `settings.json`에 들어간다(길이 필드가 1차 방어, 이 정리가 2차).
+        fn writeBody(self: StatuslineLock, body: []const u8) bool {
+            if (self.fd < 0) return false;
+            if (std.c.ftruncate(self.fd, 0) != 0) return false;
+            const written = std.c.pwrite(self.fd, body.ptr, body.len, 0);
+            if (written != @as(isize, @intCast(body.len))) {
+                _ = std.c.ftruncate(self.fd, 0);
+                return false;
+            }
+            _ = std.c.fsync(self.fd);
+            return true;
         }
 
         fn release(self: StatuslineLock) void {
-            _ = std.c.close(self.fd); // close가 flock도 푼다
+            if (self.fd >= 0) _ = std.c.close(self.fd); // close가 flock도 푼다
         }
     };
 
@@ -24837,60 +24922,100 @@ pub const AppSession = struct {
         return maru.session.agent_statusline.configDir(buf, env.get("CLAUDE_CONFIG_DIR"), env.get("HOME"));
     }
 
-    /// `settings.json`에서 `statusLine.command`를 읽는다(없거나 파싱 실패면 null).
-    fn readStatusLineCommand(a: std.mem.Allocator, io: std.Io, path: []const u8) ?[]const u8 {
-        const raw = readFileAlloc(io, a, path) orelse return null;
-        var parsed = std.json.parseFromSlice(std.json.Value, a, raw, .{}) catch return null;
+    /// `settings.json`의 `statusLine` 상태를 읽는다. **"없다"와 "못 읽었다"를 가른다**(`SettingsState`).
+    fn readStatusLineState(a: std.mem.Allocator, io: std.Io, path: []const u8) maru.session.agent_statusline.SettingsState {
+        const raw = switch (readFileState(io, a, path)) {
+            // 파일이 없으면 statusLine도 없다 — 이건 확정이다.
+            .absent => return .absent,
+            .unreadable => return .unreadable,
+            .present => |buf| buf,
+        };
+        var parsed = std.json.parseFromSlice(std.json.Value, a, raw, .{}) catch return .unreadable;
         defer parsed.deinit();
         const root = switch (parsed.value) {
             .object => |o| o,
-            else => return null,
+            else => return .unreadable,
         };
-        const sl = switch (root.get("statusLine") orelse return null) {
+        const sl = switch (root.get("statusLine") orelse return .absent) {
             .object => |o| o,
-            else => return null,
+            else => return .unreadable,
         };
-        return switch (sl.get("command") orelse return null) {
-            .string => |cmd| a.dupe(u8, cmd) catch null,
-            else => null,
+        return switch (sl.get("command") orelse return .absent) {
+            .string => |cmd| .{ .command = a.dupe(u8, cmd) catch return .unreadable },
+            else => .unreadable,
         };
     }
 
-    /// `settings.json`의 `statusLine`만 바꿔 쓴다(`command`가 null이면 그 키를 제거).
+    /// `settings.json`의 `statusLine`만 바꿔 쓴다(`command`가 null이면 그 키를 제거). 성공했을 때만 true.
     ///
     /// **다른 키를 보존한다** — 이 파일은 사용자 것이고 우리가 아는 건 statusLine뿐이다. 통째로 다시 쓰면 우리가 모르는
     /// 설정이 사라진다. 그래서 파싱한 트리에서 그 키만 갈아 끼우고 나머지는 그대로 직렬화한다.
-    fn writeStatusLineCommand(a: std.mem.Allocator, io: std.Io, path: []const u8, command: ?[]const u8) void {
-        const raw = readFileAlloc(io, a, path);
+    ///
+    /// 규율 둘이 더 있다(적대 검증이 실측으로 잡은 것):
+    /// - **읽지 못한 파일은 새로 쓰지 않는다.** 옛 코드는 읽기 실패를 "빈 객체"로 접어, 0바이트 창(claude가 쓰는
+    ///   중간)에 걸리면 사용자 설정 **전체**를 `statusLine` 하나만 남기고 날렸다. 없는 파일만 새로 만든다.
+    /// - **판단 근거가 아직 유효한지 쓰기 직전에 다시 본다**(compare-and-swap). 우리가 읽고 쓰는 사이는 스크립트
+    ///   파일 쓰기만큼 벌어져 있고, 그 사이 claude나 사용자가 바꾼 값을 덮으면 그게 바로 이 사고의 축소판이다.
+    fn writeStatusLineCommand(
+        a: std.mem.Allocator,
+        io: std.Io,
+        path: []const u8,
+        command: ?[]const u8,
+        expect: maru.session.agent_statusline.SettingsState,
+    ) bool {
         var root: std.json.ObjectMap = .empty;
         var parsed_opt: ?std.json.Parsed(std.json.Value) = null;
         defer if (parsed_opt) |*p| p.deinit();
-        if (raw) |text| {
-            if (std.json.parseFromSlice(std.json.Value, a, text, .{})) |parsed| {
+        switch (readFileState(io, a, path)) {
+            .absent => {}, // 없는 파일은 새로 만든다
+            // 파싱/읽기 실패 = 사용자 파일이 우리가 모르는 상태다. **덮어쓰지 않는다**.
+            .unreadable => return false,
+            .present => |text| {
+                const parsed = std.json.parseFromSlice(std.json.Value, a, text, .{}) catch return false;
                 parsed_opt = parsed;
                 switch (parsed.value) {
                     .object => |o| root = o,
-                    else => {},
+                    else => return false,
                 }
-            } else |_| {
-                // 파싱 실패 = 사용자 파일이 우리가 모르는 상태다. **덮어쓰지 않는다** — 고치는 것보다 두는 편이 안전하다.
-                return;
-            }
+            },
         }
+
+        // compare-and-swap: 우리가 판단 근거로 삼은 값이 아직 그대로인가.
+        const current: maru.session.agent_statusline.SettingsState = blk: {
+            const sl = switch (root.get("statusLine") orelse break :blk .absent) {
+                .object => |o| o,
+                else => break :blk .unreadable,
+            };
+            break :blk switch (sl.get("command") orelse break :blk .absent) {
+                .string => |cmd| .{ .command = cmd },
+                else => .unreadable,
+            };
+        };
+        const unchanged = switch (expect) {
+            .unreadable => false, // 애초에 근거가 없었다면 쓰지 않는다
+            .absent => current == .absent,
+            .command => |want| switch (current) {
+                .command => |have| std.mem.eql(u8, want, have),
+                else => false,
+            },
+        };
+        if (!unchanged) return false;
+
         if (command) |cmd| {
             var sl: std.json.ObjectMap = .empty;
-            sl.put(a, "type", .{ .string = "command" }) catch return;
-            sl.put(a, "command", .{ .string = cmd }) catch return;
-            root.put(a, "statusLine", .{ .object = sl }) catch return;
+            sl.put(a, "type", .{ .string = "command" }) catch return false;
+            sl.put(a, "command", .{ .string = cmd }) catch return false;
+            root.put(a, "statusLine", .{ .object = sl }) catch return false;
         } else {
             _ = root.orderedRemove("statusLine");
         }
         var out: std.ArrayListUnmanaged(u8) = .empty;
         defer out.deinit(a);
         var aw: std.Io.Writer.Allocating = .fromArrayList(a, &out);
-        std.json.Stringify.value(std.json.Value{ .object = root }, .{ .whitespace = .indent_2 }, &aw.writer) catch return;
+        std.json.Stringify.value(std.json.Value{ .object = root }, .{ .whitespace = .indent_2 }, &aw.writer) catch return false;
         out = aw.toArrayList();
-        writeExecutableFile(io, path, out.items, false) catch return;
+        writeExecutableFile(io, path, out.items, false) catch return false;
+        return true;
     }
 
     /// 자식 프로세스 env에서 세션 신원을 읽는다(§7.2.1 — 기본 경로, 사용자 파일 무침습).
@@ -24951,37 +25076,72 @@ pub const AppSession = struct {
         const settings_path = std.fmt.allocPrint(a, "{s}/settings.json", .{claude_dir}) catch return;
         const marker_path = std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ claude_dir, sl.marker_name }, 0) catch return;
 
+        const want = self.loaded_config.config.sidebar.agent_transcript_hook;
+
         // 여기서부터 끝까지가 하나의 read-modify-write다 — 락 안에서만 읽고 쓴다. 읽기와 쓰기 사이에 다른 인스턴스가
         // 끼어드는 것이 원본 소실의 원인이었다.
-        const lock = StatuslineLock.acquire(marker_path) orelse return;
+        //
+        // 훅을 끈 사람에게는 **마커를 만들지 않는다**(`create = want`). 만들었다 지우는 것도 남의 홈을 건드리는
+        // 일이고, 조기 반환 경로에서 빈 마커가 잔류한다. 마커가 없으면 잠글 것도 없으니 락 없이 진행한다.
+        const marker_existed = readFileState(self.io, a, marker_path) != .absent;
+        const lock = switch (StatuslineLock.acquire(marker_path, want)) {
+            // 다른 인스턴스가 지금 같은 일을 하고 있다 → 우리가 할 일은 없다.
+            .contended => return,
+            // 애초에 잠글 수 없는 환경(권한·파일시스템)이다. 락을 넣기 전과 같은 위험을 지고 진행한다 —
+            // 조용한 영구 무동작보다 낫다.
+            .unlockable => |l| l,
+            .locked => |l| l,
+        };
         defer lock.release();
+        var marker_written = false;
+        // 잠그느라 **새로 만든** 빈 마커는 아무것도 기록하지 않았으면 남기지 않는다(원래 있던 마커는 건드리지 않는다).
+        defer if (!marker_existed and !marker_written) {
+            std.Io.Dir.cwd().deleteFile(self.io, marker_path) catch {};
+        };
 
-        const want = self.loaded_config.config.sidebar.agent_transcript_hook;
-        const existing_script = readFileAlloc(self.io, a, script_path);
-        const current_cmd = readStatusLineCommand(a, self.io, settings_path);
-        const marker = if (readFileAlloc(self.io, a, marker_path)) |text| sl.parseMarker(text) else null;
+        const script_read = readFileState(self.io, a, script_path);
+        const script_state: sl.ScriptState = switch (script_read) {
+            .absent => .absent,
+            .unreadable => .unreadable,
+            .present => .present,
+        };
+        const existing_script: ?[]const u8 = switch (script_read) {
+            .present => |body| body,
+            else => null,
+        };
+        const settings = readStatusLineState(a, self.io, settings_path);
+        const marker: ?sl.Marker = switch (readFileState(self.io, a, marker_path)) {
+            .present => |text| sl.parseMarker(text),
+            else => null,
+        };
         const script_wrapped = if (existing_script) |body| sl.extractWrappedCommand(a, body) else null;
 
         if (!want) {
             // **복원**: 마커 → 스크립트 wrap 순으로 원본을 찾는다. 사용자가 그 사이 statusLine을 직접 바꿨다면
-            // (우리 것이 아니면) 아무것도 건드리지 않는다.
-            switch (sl.restoreActionFor(current_cmd, marker, script_wrapped)) {
-                .leave => {},
-                .set => |cmd| writeStatusLineCommand(a, self.io, settings_path, cmd),
-                .clear => writeStatusLineCommand(a, self.io, settings_path, null),
-            }
+            // (우리 것이 아니면) settings는 그대로 두고 우리 파일만 거둔다.
+            const restored = switch (sl.restoreActionFor(settings, marker, script_wrapped)) {
+                // 현재 상태를 못 읽었다 — 지우고 나면 되돌릴 근거가 사라지므로 **아무것도 하지 않는다**.
+                .unknown => return,
+                .leave => true,
+                .set => |cmd| writeStatusLineCommand(a, self.io, settings_path, cmd, settings),
+                .clear => writeStatusLineCommand(a, self.io, settings_path, null, settings),
+            };
+            // **복원에 실패했으면 근거를 지우지 않는다.** 지워버리면 사용자가 나중에 파일을 고쳐도 되살릴 것이 없다.
+            if (!restored) return;
             std.Io.Dir.cwd().deleteFile(self.io, script_path) catch {};
             // 마커는 락 대상이라 지금 잡고 있는 fd가 가리킨다. 지우고 나서 close해도 락은 정상적으로 풀린다.
             std.Io.Dir.cwd().deleteFile(self.io, marker_path) catch {};
             return;
         }
 
-        // 어떤 계획인가 — 없으면 설치, 우리 것이면 갱신, 남의 것이면 감싼다. 그 계획을 **써도 되는지**는 actionFor가
-        // 판정한다(근거를 잃은 갱신은 덮어쓰지 않는다).
-        const plan = sl.planFor(current_cmd);
-        const wrapped: ?[]const u8 = switch (sl.actionFor(plan, current_cmd, marker, existing_script != null, script_wrapped)) {
+        // 읽은 뒤에도 우리가 잠근 그 마커가 맞는지 확인한다 — 다른 인스턴스가 지우고 새로 만들었으면 우리 락은
+        // 더 이상 아무것도 막지 못한다.
+        if (!lock.stillOwns(self.io, marker_path)) return;
+
+        // 계획(없으면 설치·우리 것이면 갱신·남의 것이면 감싼다)과 **써도 되는가**를 함께 판정한다.
+        const write = switch (sl.actionFor(settings, marker, script_state, script_wrapped)) {
             .skip => return,
-            .write => |cmd| cmd,
+            .write => |w| w,
         };
 
         const cache_base = sessionCacheBase(a) orelse return;
@@ -24989,21 +25149,34 @@ pub const AppSession = struct {
 
         var body: std.ArrayListUnmanaged(u8) = .empty;
         defer body.deinit(a);
-        sl.scriptBody(&body, a, session_dir, wrapped) catch return;
+        sl.scriptBody(&body, a, session_dir, write.wrapped) catch return;
 
-        // 마커를 **스크립트보다 먼저** 영속한다 — 이 순서라야 중간에 죽어도 원본을 되찾을 근거가 남는다.
-        var marker_body: std.ArrayListUnmanaged(u8) = .empty;
-        defer marker_body.deinit(a);
-        sl.markerBody(&marker_body, a, wrapped) catch return;
-        lock.writeBody(marker_body.items);
+        // 마커를 **스크립트보다 먼저** 쓴다 — 이 순서라야 중간에 죽어도 원본을 되찾을 근거가 남는다. 확정이 아닌
+        // 값(모르는 상태에서 나온 것)은 기록하지 않는다: `wrapped 0`은 나중에 `statusLine` 키를 지우는 근거가 된다.
+        if (write.record_marker) {
+            var marker_body: std.ArrayListUnmanaged(u8) = .empty;
+            defer marker_body.deinit(a);
+            sl.markerBody(&marker_body, a, write.wrapped) catch return;
+            // 내용이 같으면 다시 쓰지 않는다 — reconcile은 세팅 GUI 조작마다 돌고, 매번 truncate하면 그때마다
+            // 잘린 마커가 보이는 창이 생긴다.
+            const same = switch (readFileState(self.io, a, marker_path)) {
+                .present => |old| std.mem.eql(u8, old, marker_body.items),
+                else => false,
+            };
+            marker_written = same or lock.writeBody(marker_body.items);
+            if (!marker_written) return; // 근거를 남기지 못했으면 스크립트도 바꾸지 않는다
+        } else {
+            marker_written = marker != null; // 기존 마커는 그대로 둔다
+        }
 
         // 내용이 같으면 쓰지 않는다 — 매 실행마다 사용자 파일의 mtime을 흔들 이유가 없다.
         if (existing_script) |old| if (std.mem.eql(u8, old, body.items)) {
-            if (plan != .refresh) writeStatusLineCommand(a, self.io, settings_path, script_path);
+            if (settings != .command or !sl.commandIsOurs(settings.command))
+                _ = writeStatusLineCommand(a, self.io, settings_path, script_path, settings);
             return;
         };
         writeExecutableFile(self.io, script_path, body.items, true) catch return;
-        writeStatusLineCommand(a, self.io, settings_path, script_path);
+        _ = writeStatusLineCommand(a, self.io, settings_path, script_path, settings);
     }
 
     /// 에이전트가 자식에게 내려주는 **세션 신원**을 캐시에 채운다(claude `CLAUDE_CODE_SESSION_ID`, codex
@@ -30910,6 +31083,179 @@ test "agent statusline hook edits only the statusLine key and preserves the wrap
     try std.testing.expectEqual(@as(usize, 3), restored_obj.count());
     try std.testing.expectEqualStrings("opus", restored_obj.get("model").?.string);
     try std.testing.expectEqualStrings(user_command, restored_obj.get("statusLine").?.object.get("command").?.string);
+}
+
+// 상태줄 훅이 **파일에 대해** 지키기로 한 규율 — 직렬화·원자 교체·쓰기 순서·"모르면 손대지 않음" — 을 제품
+// 경로에서 검증한다. 적대 검증이 이 넷을 전부 무력화해도 기존 게이트가 green이라는 것을 실측으로 보였다
+// (마커 **내용** 로직만 덮여 있었다). 각 블록은 그 뮤테이션 하나에 대응한다.
+test "agent statusline hook serializes, preserves file identity, and refuses to guess" {
+    if (builtin.os.tag != .macos or std.c.getenv("MARU_TEST_PROVIDER_NO_MUTATION") == null) return error.SkipZigTest;
+    const sl = maru.session.agent_statusline;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var env_guard = try ProviderEnvGuard.capture(a);
+    defer env_guard.restore();
+    test_config_text = hook_on_config;
+    defer test_config_text = "";
+    try tmp.dir.createDirPath(io, "home");
+    try tmp.dir.createDirPath(io, "claude");
+    try tmp.dir.createDirPath(io, "codex");
+    try tmp.dir.createDirPath(io, "xdg/maru/agent-sessions");
+    try tmp.dir.createDirPath(io, "cache");
+
+    // `settings.json`을 **심링크**로 둔다 — dotfile 관리자(stow·chezmoi)의 흔한 구성이다. 원자 교체가 rename이라
+    // 그대로 두면 링크가 실체 파일로 갈아 끼워져 관리 대상에서 조용히 이탈한다(적대 검증 실측).
+    const user_command = "sh ~/.claude/mine.sh --theme it's-dark";
+    const settings_before = "{\"model\":\"opus\",\"statusLine\":{\"type\":\"command\",\"command\":\"" ++ user_command ++ "\"}}";
+    try tmp.dir.writeFile(io, .{ .sub_path = "dotfiles-settings.json", .data = settings_before });
+    {
+        // 0600은 env·자격 증명을 담는 사용자가 실제로 쓰는 권한이다. 넓어지면 보안 회귀다.
+        const f = try tmp.dir.openFile(io, "dotfiles-settings.json", .{});
+        defer f.close(io);
+        try f.setPermissions(io, @enumFromInt(0o600));
+    }
+    try tmp.dir.symLink(io, "../dotfiles-settings.json", "claude/settings.json", .{});
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const home = try std.fmt.allocPrintSentinel(a, "{s}/home", .{root}, 0);
+    defer a.free(home);
+    const claude = try std.fmt.allocPrintSentinel(a, "{s}/claude", .{root}, 0);
+    defer a.free(claude);
+    const codex = try std.fmt.allocPrintSentinel(a, "{s}/codex", .{root}, 0);
+    defer a.free(codex);
+    const xdg = try std.fmt.allocPrintSentinel(a, "{s}/xdg", .{root}, 0);
+    defer a.free(xdg);
+    const cache = try std.fmt.allocPrintSentinel(a, "{s}/cache", .{root}, 0);
+    defer a.free(cache);
+    const config = try std.fmt.allocPrintSentinel(a, "{s}/missing-config", .{root}, 0);
+    defer a.free(config);
+    try std.testing.expectEqual(@as(c_int, 0), setenv("HOME", home.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("CLAUDE_CONFIG_DIR", claude.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("CODEX_HOME", codex.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("XDG_CONFIG_HOME", xdg.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("XDG_CACHE_HOME", cache.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("MARU_CONFIG", config.ptr, 1));
+
+    const marker_path = try std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ claude, sl.marker_name }, 0);
+    defer a.free(marker_path);
+
+    const runOnce = struct {
+        fn call(run_io: std.Io, run_a: std.mem.Allocator) !void {
+            var s: AppSession = undefined;
+            try s.init(run_io, run_a, .{
+                .abi_version = abi_version,
+                .cols = 40,
+                .rows = 10,
+                .queue_capacity = 16,
+                .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+            });
+            s.deinit();
+        }
+    }.call;
+
+    // ── 1. 잠긴 동안에는 아무것도 쓰지 않는다(직렬화) ──────────────────────────────────────────
+    // 다른 인스턴스가 임계구역에 있는 상태를 fd 하나로 정확히 재현한다. 락을 통째로 지워도 기존 게이트는
+    // green이었다 — 이 블록이 그 공백을 메운다.
+    {
+        const fd = std.c.open(marker_path.ptr, .{ .ACCMODE = .RDWR, .CREAT = true, .CLOEXEC = true }, @as(std.c.mode_t, 0o644));
+        try std.testing.expect(fd >= 0);
+        defer _ = std.c.close(fd);
+        try std.testing.expectEqual(@as(c_int, 0), std.c.flock(fd, std.posix.LOCK.EX | std.posix.LOCK.NB));
+
+        try runOnce(io, a);
+
+        // 스크립트도 settings도 손대지 않았다.
+        try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "claude/" ++ sl.script_name, .{}));
+        const settings_now = try tmp.dir.readFileAlloc(io, "claude/settings.json", a, .limited(16 * 1024));
+        defer a.free(settings_now);
+        try std.testing.expectEqualStrings(settings_before, settings_now);
+    }
+    // 잠금 해제 후 남은 빈 마커는 다음 실행이 정상적으로 채운다.
+
+    // ── 2. 정상 설치: 심링크와 권한을 그대로 둔다(원자 교체의 대가를 되돌린다) ─────────────────
+    try runOnce(io, a);
+    {
+        const link_stat = try tmp.dir.statFile(io, "claude/settings.json", .{ .follow_symlinks = false });
+        try std.testing.expectEqual(std.Io.File.Kind.sym_link, link_stat.kind);
+        const target_stat = try tmp.dir.statFile(io, "dotfiles-settings.json", .{});
+        try std.testing.expectEqual(@as(u32, 0o600), @as(u32, @intFromEnum(target_stat.permissions)) & 0o777);
+
+        // 심링크 **너머**의 실체 파일이 갱신됐다(링크가 끊기지 않았다는 증거).
+        const target_text = try tmp.dir.readFileAlloc(io, "dotfiles-settings.json", a, .limited(16 * 1024));
+        defer a.free(target_text);
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, target_text, .{});
+        defer parsed.deinit();
+        try std.testing.expect(sl.commandIsOurs(parsed.value.object.get("statusLine").?.object.get("command").?.string));
+
+        // 임시 파일 잔해가 없다.
+        try expectProviderFixtureEntries(io, claude, &.{
+            .{ .name = sl.marker_name, .kind = .file },
+            .{ .name = "settings.json", .kind = .sym_link },
+            .{ .name = sl.script_name, .kind = .file },
+        });
+
+        const marker_text = try tmp.dir.readFileAlloc(io, "claude/" ++ sl.marker_name, a, .limited(16 * 1024));
+        defer a.free(marker_text);
+        try std.testing.expectEqualStrings(user_command, (sl.parseMarker(marker_text) orelse return error.MarkerMissing).wrapped.?);
+    }
+
+    // ── 3. `settings.json`을 못 읽으면 아무것도 하지 않는다("모른다"를 "없었다"로 접지 않는다) ──
+    // 0바이트는 claude가 파일을 쓰는 중간 상태이자 옛 비원자 쓰기의 잔해다. 여기서 `.install`로 접으면
+    // 마커에 "감쌀 것 없었음"을 확정으로 찍어 사용자 명령을 영구히 지운다.
+    {
+        const script_before = try tmp.dir.readFileAlloc(io, "claude/" ++ sl.script_name, a, .limited(16 * 1024));
+        defer a.free(script_before);
+        try tmp.dir.writeFile(io, .{ .sub_path = "dotfiles-settings.json", .data = "" });
+
+        try runOnce(io, a);
+
+        const marker_text = try tmp.dir.readFileAlloc(io, "claude/" ++ sl.marker_name, a, .limited(16 * 1024));
+        defer a.free(marker_text);
+        const kept = (sl.parseMarker(marker_text) orelse return error.MarkerLost).wrapped orelse return error.MarkerDowngraded;
+        try std.testing.expectEqualStrings(user_command, kept);
+        const script_after = try tmp.dir.readFileAlloc(io, "claude/" ++ sl.script_name, a, .limited(16 * 1024));
+        defer a.free(script_after);
+        try std.testing.expectEqualStrings(script_before, script_after);
+    }
+
+    // ── 4. 끄기인데 현재 상태를 못 읽으면 **근거를 지우지 않는다** ─────────────────────────────
+    // 지우고 나면 사용자가 파일을 고쳐도 되살릴 것이 없다. 옛 코드는 복원 성공 여부와 무관하게 지웠다.
+    {
+        test_config_text = hook_off_config;
+        defer test_config_text = hook_on_config;
+
+        try runOnce(io, a);
+
+        try tmp.dir.access(io, "claude/" ++ sl.marker_name, .{});
+        try tmp.dir.access(io, "claude/" ++ sl.script_name, .{});
+    }
+
+    // ── 5. 마커가 스크립트보다 **먼저** 쓰인다 ────────────────────────────────────────────────
+    // 스크립트 자리를 디렉터리로 막아 그 쓰기만 실패시킨다. 순서가 뒤집혀 있으면 마커에 아무것도 남지 않는다.
+    {
+        try tmp.dir.writeFile(io, .{ .sub_path = "dotfiles-settings.json", .data = settings_before });
+        try tmp.dir.deleteFile(io, "claude/" ++ sl.marker_name);
+        try tmp.dir.deleteFile(io, "claude/" ++ sl.script_name);
+        try tmp.dir.createDirPath(io, "claude/" ++ sl.script_name);
+        defer tmp.dir.deleteTree(io, "claude/" ++ sl.script_name) catch {};
+
+        try runOnce(io, a);
+
+        const marker_text = try tmp.dir.readFileAlloc(io, "claude/" ++ sl.marker_name, a, .limited(16 * 1024));
+        defer a.free(marker_text);
+        const recorded = (sl.parseMarker(marker_text) orelse return error.MarkerMissing).wrapped orelse
+            return error.MarkerWrittenAfterScript;
+        try std.testing.expectEqualStrings(user_command, recorded);
+        // 스크립트를 쓰지 못했으므로 `statusLine`은 아직 사용자 것이어야 한다 — 없는 실행 파일을 가리키면 안 된다.
+        const settings_now = try tmp.dir.readFileAlloc(io, "dotfiles-settings.json", a, .limited(16 * 1024));
+        defer a.free(settings_now);
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, settings_now, .{});
+        defer parsed.deinit();
+        try std.testing.expectEqualStrings(user_command, parsed.value.object.get("statusLine").?.object.get("command").?.string);
+    }
 }
 
 test "macOS app session config rejects unsafe fixed-width ABI input" {

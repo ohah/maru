@@ -31,7 +31,11 @@ pub const marker_name = ".maru-statusline-installed";
 
 /// 마커 1행 — 포맷 식별자. 이 줄로 시작하지 않으면 우리 마커가 아니고, 그때는 "감쌀 것이 없었다"가 아니라
 /// **"모른다"**로 접힌다(그 구분이 `actionFor`의 안전장치를 만든다).
-pub const marker_header = "maru-statusline v1";
+///
+/// v2에서 본문 **길이**를 함께 적는다. v1은 "본문은 파일 끝까지"라 잘린 마커가 **짧고 틀린 명령으로 유효하게
+/// 파싱됐다** — 적대 검증이 절단 길이를 전수로 돌려 25개의 위험한 파싱을 실측했다. "잘리면 파싱이 실패해 안전
+/// 방향으로 접힌다"는 설계 주장이 거짓이었고, 그 값이 옵션을 끌 때 사용자 `settings.json`에 복원됐다.
+pub const marker_header = "maru-statusline v2";
 
 /// 설치 마커의 내용. `wrapped == null`은 **설치 시점에 감쌀 것이 없었다는 확정**이다 — 마커 자체가 없거나 깨진
 /// 경우(= 모른다)와 다르다.
@@ -39,7 +43,8 @@ pub const Marker = struct {
     wrapped: ?[]const u8,
 };
 
-/// 마커 본문을 만든다. 명령은 파일 끝까지 **바이트 그대로** 두므로 이스케이프가 없다(개행이 든 명령도 그대로 산다).
+/// 마커 본문을 만든다. 명령은 **바이트 그대로** 두므로 이스케이프가 없고(개행이 든 명령도 그대로 산다), 대신
+/// 길이를 함께 적어 잘림을 검출한다.
 pub fn markerBody(
     out: *std.ArrayListUnmanaged(u8),
     allocator: std.mem.Allocator,
@@ -47,25 +52,30 @@ pub fn markerBody(
 ) !void {
     try out.appendSlice(allocator, marker_header);
     if (wrapped) |cmd| {
-        try out.appendSlice(allocator, "\nwrapped 1\n");
+        try out.print(allocator, "\nwrapped 1 {d}\n", .{cmd.len});
         try out.appendSlice(allocator, cmd);
     } else {
         try out.appendSlice(allocator, "\nwrapped 0\n");
     }
 }
 
-/// 마커를 읽는다. null = 우리 마커가 아니거나 잘렸다 → **모른다**. 반쯤 쓰인 마커가 여기서 null이 되는 것은 의도된
-/// 안전 방향이다(호출부가 `.skip`으로 접는다).
+/// 마커를 읽는다. null = 우리 마커가 아니거나 잘렸다 → **모른다**.
+///
+/// 본문 길이가 적힌 값과 **정확히** 같아야 한다. 길이 없이 "끝까지"로 읽던 v1은 어느 지점에서 잘려도 유효한
+/// 명령으로 파싱돼(적대 검증 실측) 잘린 쓰레기가 사용자 `settings.json`에 복원될 수 있었다.
 pub fn parseMarker(text: []const u8) ?Marker {
     var it = std.mem.splitScalar(u8, text, '\n');
     const header = std.mem.trim(u8, it.next() orelse return null, " \t\r");
     if (!std.mem.eql(u8, header, marker_header)) return null;
     const flag = std.mem.trim(u8, it.next() orelse return null, " \t\r");
     if (std.mem.eql(u8, flag, "wrapped 0")) return .{ .wrapped = null };
-    if (!std.mem.eql(u8, flag, "wrapped 1")) return null;
+    const prefix = "wrapped 1 ";
+    if (!std.mem.startsWith(u8, flag, prefix)) return null;
+    const len = std.fmt.parseInt(usize, flag[prefix.len..], 10) catch return null;
     const rest = it.rest();
-    // `wrapped 1`인데 본문이 없다 = 잘린 마커다. 빈 명령을 감싸는 것보다 "모른다"가 안전하다.
-    return if (rest.len == 0) null else .{ .wrapped = rest };
+    // 길이가 어긋나면 잘렸거나 오염된 것이다. 빈 명령·짧은 명령을 감싸는 것보다 "모른다"가 안전하다.
+    if (len == 0 or rest.len != len) return null;
+    return .{ .wrapped = rest };
 }
 
 /// 스크립트가 세션 신원을 적는 디렉터리(캐시 루트 기준). Term의 `MARU_PANE_ID`가 파일명이 되어, Maru가 그 Term의
@@ -206,62 +216,103 @@ pub const InstallPlan = enum {
     wrap_existing,
 };
 
-/// 설치 계획을 정한다. `current_command`는 `settings.json`의 `statusLine.command`(없으면 null).
+/// `settings.json`에서 읽어낸 `statusLine` 상태.
+///
+/// **"없다"와 "못 읽었다"는 절대 같지 않다.** 후자를 전자로 접으면 "이 사람은 상태줄이 원래 없었다"를 **확정**으로
+/// 기록하게 되고, 그 확정이 나중에 사용자 명령을 지운다. 이 훅이 낸 사고가 정확히 그 접힘이었다 —
+/// 근거를 잃은 자리에서 모르는 것을 아는 것처럼 다룬 것.
+pub const SettingsState = union(enum) {
+    /// 파일을 읽지 못했거나(권한·크기·중간 쓰기) JSON이 아니다 → **아무것도 하지 않는다**.
+    unreadable,
+    /// 파일은 정상이고 `statusLine`이 없다(확정).
+    absent,
+    /// `statusLine.command`가 있다.
+    command: []const u8,
+};
+
+/// 설치된 스크립트 파일의 상태. `settings`와 같은 이유로 **없음과 못 읽음을 가른다** — 0바이트 스크립트는
+/// 비원자 쓰기가 남기던 잔해이고, 그것을 "없음"으로 접으면 재생성 예외를 타서 감싼 명령이 사라진다.
+pub const ScriptState = enum { absent, unreadable, present };
+
+/// 설치 계획을 정한다. 판정 불가(`unreadable`)면 null — 호출부는 아무것도 쓰지 않는다.
 ///
 /// **남의 상태줄을 지우지 않는다 — 감싼다.** claude의 `statusLine`은 필드가 **하나뿐**이라 나란히 둘 자리가 없다.
 /// 그렇다고 건너뛰면 그 사용자는 이 기능을 아예 못 쓴다. 그래서 원래 명령을 **우리 스크립트가 대신 실행**하고
 /// stdout을 통과시킨다 — 그 사람이 보던 화면은 그대로이고, 우리는 payload에서 신원만 가져간다.
-///
-/// 되돌릴 수 있어야 하므로 원래 명령을 마커에 저장한다(`restore_command`). 옵션을 끄면 그 값을 `statusLine`에
-/// 되돌리고 우리 스크립트를 지운다 — 설치 전 상태로 정확히 복원된다.
-pub fn planFor(current_command: ?[]const u8) InstallPlan {
-    const cmd = current_command orelse return .install;
-    const trimmed = std.mem.trim(u8, cmd, " \t\r\n");
-    if (trimmed.len == 0) return .install;
-    return if (commandIsOurs(trimmed)) .refresh else .wrap_existing;
+pub fn planFor(settings: SettingsState) ?InstallPlan {
+    return switch (settings) {
+        .unreadable => null,
+        .absent => .install,
+        .command => |cmd| blk: {
+            const trimmed = std.mem.trim(u8, cmd, " \t\r\n");
+            if (trimmed.len == 0) break :blk .install;
+            break :blk if (commandIsOurs(trimmed)) .refresh else .wrap_existing;
+        },
+    };
 }
 
 /// 계획을 실제 쓰기로 옮길 때 **무엇을 감쌀 것인가**, 혹은 아예 쓰지 않을 것인가.
 pub const Action = union(enum) {
     /// 아무것도 쓰지 않는다. 감쌌던 원본이 있었는지 없었는지 **모르는** 상태라, 쓰는 순간 손실이 확정된다.
     skip,
-    /// 이 명령(없으면 null)을 감싸 스크립트를 쓰고 `statusLine`을 우리 것으로 가리킨다.
-    write: ?[]const u8,
+    write: Write,
+
+    pub const Write = struct {
+        /// 스크립트가 감쌀 명령(없으면 null).
+        wrapped: ?[]const u8,
+        /// 이 결과를 마커에 **확정으로 기록해도 되는가**. "모른다"에서 나온 값은 기록하지 않는다 — 마커의
+        /// `wrapped 0`은 "감쌀 것이 없었다"는 확정이고, 그 확정은 나중에 `statusLine` 키를 지우는 근거가 된다.
+        record_marker: bool,
+    };
 };
 
 /// 설치·갱신에서 실제 쓰기를 정한다. `planFor`가 "어떤 상황인가"라면 이쪽은 **"써도 되는가"**를 본다.
 ///
 /// 핵심은 `refresh`다. 스크립트에 wrap이 없다는 사실만으로 "감쌀 게 없었다"고 단정하면, 경합으로 wrap이 한 번
-/// 탈락한 순간 그 판단이 사용자 상태줄을 영구히 지운다(실제 사고). 그래서 마커를 먼저 보고, 마커조차 없으면
+/// 탈락한 순간 그 판단이 사용자 상태줄을 영구히 지운다(실제 사고). 그래서 **마커를 먼저 보고**, 마커조차 없으면
 /// **물러난다** — 사용자가 `statusLine`을 자기 것으로 되돌리면 그때 `wrap_existing`으로 정상 복귀한다.
 pub fn actionFor(
-    plan: InstallPlan,
-    /// `settings.json`의 현재 `statusLine.command`(`wrap_existing`에서 감쌀 대상).
-    current_command: ?[]const u8,
+    /// `settings.json`의 `statusLine` 상태.
+    settings: SettingsState,
     /// 마커(파싱 성공 시). null = 마커 부재/손상 = **모른다**.
     marker: ?Marker,
-    /// 스크립트 파일이 디스크에 있는가.
-    script_present: bool,
-    /// 스크립트 표식 블록에서 되찾은 명령(마커 폴백).
+    /// 스크립트 파일 상태.
+    script: ScriptState,
+    /// 스크립트 표식 블록에서 되찾은 명령(마커가 없을 때의 폴백. `script == .present`일 때만 의미가 있다).
     script_wrapped: ?[]const u8,
 ) Action {
+    const plan = planFor(settings) orelse return .skip;
     return switch (plan) {
-        .install => .{ .write = null },
-        .wrap_existing => .{ .write = current_command },
-        .refresh => blk: {
-            if (script_wrapped) |cmd| break :blk .{ .write = cmd };
-            if (marker) |m| break :blk .{ .write = m.wrapped };
-            // 스크립트가 아예 없다 = `statusLine`이 없는 파일을 가리키는 상태다. 그대로 두는 편이 더 나쁘므로
-            // 재생성한다(감쌀 것이 있었다면 마커가 남았을 것이고, 마커도 없으니 되살릴 것도 없다).
-            if (!script_present) break :blk .{ .write = null };
-            break :blk .skip;
+        // settings를 **읽어서** statusLine이 없음을 확인했다 → 감쌀 것이 없음이 확정이다.
+        .install => .{ .write = .{ .wrapped = null, .record_marker = true } },
+        .wrap_existing => .{ .write = .{ .wrapped = settings.command, .record_marker = true } },
+        .refresh => switch (script) {
+            // 스크립트를 못 읽었다 = 그 안에 감싼 명령이 있었는지 알 수 없다.
+            .unreadable => .skip,
+            // 마커가 단일 출처다. 이미 마커에 있는 값을 다시 쓸 이유는 없다(매 실행 마커를 흔들지 않는다).
+            .present => if (marker) |m|
+                .{ .write = .{ .wrapped = m.wrapped, .record_marker = false } }
+            else if (script_wrapped) |cmd|
+                // 마커 이전 설치 — 스크립트에 남은 근거를 마커로 **승격**한다(1회 마이그레이션).
+                .{ .write = .{ .wrapped = cmd, .record_marker = true } }
+            else
+                .skip,
+            // 스크립트가 없다 = `statusLine`이 없는 파일을 가리키는 상태다. 그대로 두는 편이 더 나쁘므로
+            // 재생성하되, 감쌀 것이 있었는지는 **모르므로 마커에 확정을 남기지 않는다**.
+            .absent => if (marker) |m|
+                .{ .write = .{ .wrapped = m.wrapped, .record_marker = false } }
+            else
+                .{ .write = .{ .wrapped = null, .record_marker = false } },
         },
     };
 }
 
 /// 옵션을 껐을 때 `settings.json`을 어떻게 할 것인가.
 pub const RestoreAction = union(enum) {
-    /// 우리 것이 아니다 — 건드리지 않는다.
+    /// 현재 상태를 읽지 못했다 — `settings.json`도, **우리 파일도** 건드리지 않는다. 지우고 나면 되돌릴
+    /// 근거가 사라지므로, 못 읽은 김에 지우는 것이 가장 나쁜 선택이다.
+    unknown,
+    /// 우리 것이 아니다 — `settings.json`은 그대로 두고 우리 파일만 거둔다.
     leave,
     /// 감쌌던 원래 명령으로 되돌린다.
     set: []const u8,
@@ -272,11 +323,15 @@ pub const RestoreAction = union(enum) {
 /// 복원 대상을 정한다 — **마커 → 스크립트 wrap** 순. 둘 다 없으면(마커 이전 설치) 키를 지운다: 우리 스크립트를
 /// 지우면서 그것을 가리키는 포인터를 남길 수는 없다.
 pub fn restoreActionFor(
-    current_command: ?[]const u8,
+    settings: SettingsState,
     marker: ?Marker,
     script_wrapped: ?[]const u8,
 ) RestoreAction {
-    const cmd = current_command orelse return .leave;
+    const cmd = switch (settings) {
+        .unreadable => return .unknown,
+        .absent => return .leave,
+        .command => |c| c,
+    };
     if (!commandIsOurs(cmd)) return .leave;
     if (marker) |m| return if (m.wrapped) |w| .{ .set = w } else .clear;
     if (script_wrapped) |w| return .{ .set = w };
@@ -374,7 +429,7 @@ test "마커: 감쌀 것이 없었다와 모른다를 구분한다" {
     try markerBody(&with, testing.allocator, original);
     try testing.expectEqualStrings(original, parseMarker(with.items).?.wrapped.?);
 
-    // 개행이 든 명령도 바이트 그대로 산다(본문은 파일 끝까지다).
+    // 개행이 든 명령도 바이트 그대로 산다.
     var multi: std.ArrayListUnmanaged(u8) = .empty;
     defer multi.deinit(testing.allocator);
     const two_lines = "printf a\nprintf b";
@@ -390,49 +445,111 @@ test "마커: 감쌀 것이 없었다와 모른다를 구분한다" {
     try testing.expectEqual(@as(?Marker, null), parseMarker(""));
     try testing.expectEqual(@as(?Marker, null), parseMarker("남의 파일이다"));
     try testing.expectEqual(@as(?Marker, null), parseMarker(marker_header)); // 잘림(플래그 없음)
-    try testing.expectEqual(@as(?Marker, null), parseMarker(marker_header ++ "\nwrapped 1\n")); // 잘림(본문 없음)
+    // v1 포맷(길이 없음)은 우리 것이 아니다 → 모른다. 길이가 어긋난 것도 마찬가지.
+    try testing.expectEqual(@as(?Marker, null), parseMarker(marker_header ++ "\nwrapped 1\nls"));
+    try testing.expectEqual(@as(?Marker, null), parseMarker(marker_header ++ "\nwrapped 1 9\nls"));
+}
+
+test "마커: 어느 지점에서 잘려도 명령으로 파싱되지 않는다" {
+    // 적대 검증이 실측으로 깬 주장 — v1은 "본문은 파일 끝까지"라 절단 지점마다 **짧고 틀린 명령**이 유효하게
+    // 파싱됐고, 그 쓰레기가 옵션을 끌 때 사용자 `settings.json`에 복원됐다. 길이 필드가 그것을 막는다.
+    const original = "sh /Users/me/statusline-command.sh --theme dark";
+    var full: std.ArrayListUnmanaged(u8) = .empty;
+    defer full.deinit(testing.allocator);
+    try markerBody(&full, testing.allocator, original);
+
+    var cut: usize = 0;
+    while (cut < full.items.len) : (cut += 1) {
+        if (parseMarker(full.items[0..cut])) |m| {
+            std.debug.print("잘린 마커(len={d})가 파싱됐다: {?s}\n", .{ cut, m.wrapped });
+            return error.TruncatedMarkerParsed;
+        }
+    }
+    // 온전한 길이에서만 파싱된다.
+    try testing.expectEqualStrings(original, parseMarker(full.items).?.wrapped.?);
 }
 
 test "actionFor: 근거를 잃은 refresh는 덮어쓰지 않는다" {
     const user = "sh ~/.claude/statusline-command.sh";
+    const ours: SettingsState = .{ .command = "/Users/a/.claude/maru-statusline.sh" };
 
     // 이번 사고의 회귀 지점 — 스크립트에 wrap이 없고 마커도 없다(마커 이전 설치이거나 경합으로 탈락). "감쌀 게
     // 없었다"고 단정하면 그 순간 사용자 상태줄이 영구히 사라진다.
-    try testing.expectEqual(Action.skip, actionFor(.refresh, null, null, true, null));
+    try testing.expectEqual(Action.skip, actionFor(ours, null, .present, null));
 
-    // 마커가 있으면 스크립트가 wrap을 잃었어도 되살아난다.
-    switch (actionFor(.refresh, null, .{ .wrapped = user }, true, null)) {
-        .write => |cmd| try testing.expectEqualStrings(user, cmd.?),
+    // **읽지 못한 것은 없는 것이 아니다.** settings를 못 읽었으면(중간 쓰기·권한·손상 JSON) 아무것도 쓰지 않는다 —
+    // 여기서 `.install`로 접으면 마커에 "감쌀 것 없었음"을 확정으로 찍어 원본을 지운다(적대 검증 F1/H1).
+    try testing.expectEqual(Action.skip, actionFor(.unreadable, null, .present, user));
+    try testing.expectEqual(Action.skip, actionFor(.unreadable, .{ .wrapped = user }, .absent, null));
+    // 스크립트를 못 읽은 것도 "없음"이 아니다 — 0바이트 잔해가 재생성 예외를 타면 안 된다.
+    try testing.expectEqual(Action.skip, actionFor(ours, null, .unreadable, null));
+
+    // 마커가 있으면 스크립트가 wrap을 잃었어도 되살아난다(그리고 이미 마커에 있으니 다시 기록하지 않는다).
+    switch (actionFor(ours, .{ .wrapped = user }, .present, null)) {
+        .write => |w| {
+            try testing.expectEqualStrings(user, w.wrapped.?);
+            try testing.expect(!w.record_marker);
+        },
         .skip => return error.MarkerIgnored,
     }
-    // 마커가 "감쌀 것 없었음"을 확정하면 그대로 감싸지 않고 쓴다.
-    try testing.expectEqual(Action{ .write = null }, actionFor(.refresh, null, .{ .wrapped = null }, true, null));
+    // **마커가 스크립트를 이긴다.** 둘이 다른 값을 들고 있으면 단일 출처가 이겨야 한다 — 문서(§7.2.2)가
+    // "갱신·복원 모두 마커를 우선 신뢰한다"고 못 박은 계약인데 코드가 반대였다(적대 검증 M1/F6).
+    switch (actionFor(ours, .{ .wrapped = user }, .present, "옛 세대 스크립트에 남은 값")) {
+        .write => |w| try testing.expectEqualStrings(user, w.wrapped.?),
+        .skip => return error.MarkerNotPreferred,
+    }
+    // 마커가 "감쌀 것 없었음"을 확정하면 그대로 감싸지 않고 쓴다 — 스크립트에 남은 옛 wrap을 되살리지 않는다
+    // (그게 문서가 금지한 "시간 여행"이다).
+    switch (actionFor(ours, .{ .wrapped = null }, .present, "옛 세대 값")) {
+        .write => |w| try testing.expectEqual(@as(?[]const u8, null), w.wrapped),
+        .skip => return error.ConfirmedNoneIgnored,
+    }
 
-    // 스크립트가 아예 없으면 statusLine이 없는 파일을 가리키는 상태다 — 재생성이 유일한 복구다.
-    try testing.expectEqual(Action{ .write = null }, actionFor(.refresh, null, null, false, null));
+    // 스크립트가 없으면 statusLine이 없는 파일을 가리키는 상태다 — 재생성하되 **확정을 남기지 않는다**.
+    switch (actionFor(ours, null, .absent, null)) {
+        .write => |w| {
+            try testing.expectEqual(@as(?[]const u8, null), w.wrapped);
+            try testing.expect(!w.record_marker);
+        },
+        .skip => return error.DanglingPointerLeft,
+    }
 
-    // 스크립트 wrap은 마커가 없을 때의 폴백으로 그대로 산다.
-    switch (actionFor(.refresh, null, null, true, user)) {
-        .write => |cmd| try testing.expectEqualStrings(user, cmd.?),
+    // 스크립트 wrap은 마커가 없을 때의 폴백이고, 이때는 마커로 **승격**한다(1회 마이그레이션).
+    switch (actionFor(ours, null, .present, user)) {
+        .write => |w| {
+            try testing.expectEqualStrings(user, w.wrapped.?);
+            try testing.expect(w.record_marker);
+        },
         .skip => return error.ScriptWrapIgnored,
     }
 
-    // 설치·감싸기는 마커와 무관하게 계획대로 간다.
-    try testing.expectEqual(Action{ .write = null }, actionFor(.install, null, null, false, null));
-    switch (actionFor(.wrap_existing, user, null, false, null)) {
-        .write => |cmd| try testing.expectEqualStrings(user, cmd.?),
+    // 설치·감싸기는 settings를 읽어서 확인한 것이라 마커에 확정으로 기록한다.
+    switch (actionFor(.absent, null, .absent, null)) {
+        .write => |w| {
+            try testing.expectEqual(@as(?[]const u8, null), w.wrapped);
+            try testing.expect(w.record_marker);
+        },
+        .skip => return error.InstallSkipped,
+    }
+    switch (actionFor(.{ .command = user }, null, .absent, null)) {
+        .write => |w| {
+            try testing.expectEqualStrings(user, w.wrapped.?);
+            try testing.expect(w.record_marker);
+        },
         .skip => return error.WrapExistingSkipped,
     }
 }
 
-test "restoreActionFor: 마커가 스크립트보다 앞선다" {
-    const ours = "/Users/a/.claude/maru-statusline.sh";
+test "restoreActionFor: 마커가 스크립트보다 앞서고, 모르면 아무것도 안 한다" {
+    const ours: SettingsState = .{ .command = "/Users/a/.claude/maru-statusline.sh" };
     const user = "sh ~/.claude/statusline-command.sh";
     const stale = "bunx ccusage statusline";
 
-    // 사용자가 그 사이 자기 것으로 바꿔놨으면 건드리지 않는다.
-    try testing.expectEqual(RestoreAction.leave, restoreActionFor(user, .{ .wrapped = user }, null));
-    try testing.expectEqual(RestoreAction.leave, restoreActionFor(null, null, null));
+    // 사용자가 그 사이 자기 것으로 바꿔놨으면 settings는 건드리지 않는다(우리 파일만 거둔다).
+    try testing.expectEqual(RestoreAction.leave, restoreActionFor(.{ .command = user }, .{ .wrapped = user }, null));
+    try testing.expectEqual(RestoreAction.leave, restoreActionFor(.absent, null, null));
+    // **못 읽었으면 아무것도 하지 않는다** — 지우고 나면 되돌릴 근거가 사라진다(적대 검증 F2/M4).
+    try testing.expectEqual(RestoreAction.unknown, restoreActionFor(.unreadable, .{ .wrapped = user }, user));
 
     // 마커가 단일 출처 — 스크립트에 다른 값이 남아 있어도 마커를 따른다.
     switch (restoreActionFor(ours, .{ .wrapped = user }, stale)) {
@@ -451,18 +568,19 @@ test "restoreActionFor: 마커가 스크립트보다 앞선다" {
 }
 
 test "planFor: 사용자 커스텀 상태줄은 지우지 않고 감싼다" {
-    // 없으면 설치.
-    try testing.expectEqual(InstallPlan.install, planFor(null));
-    try testing.expectEqual(InstallPlan.install, planFor(""));
-    try testing.expectEqual(InstallPlan.install, planFor("   \n"));
+    // 읽지 못했으면 판정 자체를 하지 않는다.
+    try testing.expectEqual(@as(?InstallPlan, null), planFor(.unreadable));
+    // 읽어서 없음을 확인했으면 설치.
+    try testing.expectEqual(InstallPlan.install, planFor(.absent));
+    try testing.expectEqual(InstallPlan.install, planFor(.{ .command = "" }));
+    try testing.expectEqual(InstallPlan.install, planFor(.{ .command = "   \n" }));
     // 우리 것이면 최신 유지.
-    try testing.expectEqual(InstallPlan.refresh, planFor("/Users/a/.claude/maru-statusline.sh"));
-    // **사용자 것이면 건너뛴다** — statusLine은 필드가 하나뿐이라 넣는 순간 그 사람 화면이 사라진다.
+    try testing.expectEqual(InstallPlan.refresh, planFor(.{ .command = "/Users/a/.claude/maru-statusline.sh" }));
     // **사용자 것이면 감싼다** — statusLine은 필드가 하나뿐이라 나란히 둘 자리가 없지만, 건너뛰면 그 사용자는
-    // 기능을 아예 못 쓴다. 원래 명령은 스크립트 안에 표식 블록으로 남아 복원 가능하다.
-    try testing.expectEqual(InstallPlan.wrap_existing, planFor("bunx ccusage statusline"));
-    try testing.expectEqual(InstallPlan.wrap_existing, planFor("~/bin/my-statusline"));
-    try testing.expectEqual(InstallPlan.wrap_existing, planFor("/opt/other-tool/statusline.sh"));
+    // 기능을 아예 못 쓴다. 원래 명령은 마커에 남아 복원 가능하다.
+    try testing.expectEqual(InstallPlan.wrap_existing, planFor(.{ .command = "bunx ccusage statusline" }));
+    try testing.expectEqual(InstallPlan.wrap_existing, planFor(.{ .command = "~/bin/my-statusline" }));
+    try testing.expectEqual(InstallPlan.wrap_existing, planFor(.{ .command = "/opt/other-tool/statusline.sh" }));
 }
 
 test "plausibleIdentity: 파일이 잘리거나 오염돼도 그대로 쓰지 않는다" {

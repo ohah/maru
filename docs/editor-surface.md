@@ -602,6 +602,32 @@ E0.5A PR은 계획 명령 `mise run test-macos-editor-smoke`와 display opt-in `
 
 IME는 synthetic JS/AppKit event만으로 통과 처리하지 않는다. 자동 하니스는 DOM/model 상태를 고정하고, 종료 gate에는 실제 macOS 한글 입력기로 preedit→완성→caret→backspace를 수행한 수동 summary를 함께 요구한다.
 
+**E0.5A 실측 결과(2026-07-31, 이 저장소·Apple Silicon).** `mise run test-macos-editor-smoke`가 제품 스킴 핸들러
+(`MaruAppSchemeHandler`)·제품 CSP·실제 `WKWebView`로 하니스를 로드해 남긴 값이다.
+
+| 항목 | 결과 |
+| --- | --- |
+| MergeView·unifiedMergeView 표시 | non-zero layout으로 렌더(스크린샷에 좌우 비교·gutter·Accept/Reject 확인) |
+| chunk·마커 | split 3 · unified 3, gutter 마커 존재 |
+| accept/reject | accept 후 chunk 3→2, reject가 해당 구간을 원본으로 되돌림 |
+| CSP 위반 · console 오류 | **0 · 0** |
+| CSP 실제 적용 확인 | `eval` 차단 관측(`script-src|eval`) — 위반 0이 헤더 부재 때문이 아님을 증명 |
+| MergeView 스타일 유출 | 없음(모든 `<style>`이 하니스 문서 소유, iframe 0) |
+| web content 프로세스 RSS | 1개 **45.7 MB** · 2개 **91.1 MB** · 4개 **182.4 MB**(정확히 선형) |
+| 유휴 CPU(화면 밖) | 1·2·4개 모두 **0%** |
+| 닫은 뒤 회수 | **0.6~0.7초**에 프로세스·메모리 전부 회수(잔존 0) |
+
+**측정에서 배운 것 둘.**
+
+- **선형 증가는 configuration을 뷰마다 새로 만든 결과다.** 하니스는 diff 파일 Term이 각자 패널인 제품 형태를 따라
+  뷰마다 별도 `WKWebViewConfiguration`을 쓰고, 그래서 프로세스도 뷰당 하나다(4개=4프로세스). diff를 여러 개 여는
+  사용이 흔하면 E1에서 **process pool 공유 여부**를 별도로 정해야 한다 — 공유하면 메모리는 줄지만 격리가 약해진다.
+- **"위반 0"은 그 자체로 근거가 아니다.** CSP 헤더가 빠져도 위반 수는 0이므로, 게이트는 모든 계측을 마친 뒤 반드시
+  차단돼야 하는 동작을 일부러 시도해 CSP가 살아 있는지와 수집기가 동작하는지를 함께 확인하고, 아니면 초록을 주지 않는다.
+
+**아직 닫히지 않은 것: 실제 한글 입력기 수동 확인.** 위 표는 자동 하니스 결과이고, 이 문서가 요구하는 대로 synthetic
+이벤트만으로 IME를 통과 처리하지 않는다. preedit→완성→caret→backspace 수동 summary가 남아 있다.
+
 이 gate는 이제 **CM6 MergeView 기준으로 좁혀진다.** Monaco 하니스의 RED는 엔진 교체로 무효가 됐고, **CM6 편집 경로는 file-panel
 소스 모드로 제품 WebKit에서 이미 검증됐다**(§2 — 텍스트·caret·편집·한글 IME가 출하 중). 따라서 이 gate가 **처음** 검증하는 것은
 `@codemirror/merge`의 MergeView/unifiedMergeView 렌더·chunk 마커·accept/reject 상호작용과 그 CSP 영향(§7.2)이다. MergeView가
@@ -667,6 +693,9 @@ editor event는 처음부터 하나의 domain schema를 공유하되 문서 원�
 - 1/2/4 diff 파일 Term에서 web-process RSS, hidden/background CPU와 close 뒤 회수 측정
 - **종료:** §7.4(MergeView WebKit) green + CSP 위반 수 + dependency/bundle/RSS·resource scaling 보고. MergeView가 막히면
   대안 diff 렌더를 같은 gate로 비교.
+- **상태(2026-07-31): 자동 항목은 닫혔다.** 하니스·게이트·artifact가 저장소에 있고(`mise run test-macos-editor-smoke`),
+  MergeView는 제품 WebKit에서 막히지 않으며 CSP 위반 0·RSS/회수 측정까지 §7.4 표에 있다. 대안 diff 렌더는 필요 없다.
+  **남은 것은 실제 입력기로 하는 수동 IME summary 하나**다.
 
 ### E0.5B — 순수 계약
 
@@ -750,12 +779,17 @@ editor event는 처음부터 하나의 domain schema를 공유하되 문서 원�
   기하·히트테스트 — 로, E0.5B/E1 slice에서 코드와 함께 고정한다. 정합 형태(§10.0 (a′))는 최종 승인 대기.
 - **도크 소스 컨트롤 뷰(§3.5)는 목업의 정보 계층만 옮긴 것이고 기하는 미정이다.** 행 높이·아이콘 세트·색 토큰·스크롤·키보드
   이동은 탐색기 트리와 공유해야 하는데, 그 공유 표면이 [file-explorer.md](file-explorer.md)에 아직 뷰 하나 기준으로만 적혀 있다.
-- 제품 WKWebView에서 **MergeView는 미검증**이다(편집 경로는 출하 검증 완료 — §2). E0.5A가 MergeView와 그 CSP 영향을 처음 본다.
-- 임시 PoC 하니스와 결과 artifact가 저장소에 없으므로 재현성은 E0.5A가 닫아야 한다.
+- 제품 WKWebView에서 **MergeView는 검증됐다**(2026-07-31 — §7.4 표). 렌더·chunk·accept/reject·CSP 위반 0·RSS/회수까지
+  자동 게이트가 남긴다. 남은 것은 실제 입력기로 하는 수동 IME 확인이다.
+- 하니스와 결과 artifact가 저장소에 있다(`tests/macos_editor_smoke.swift`·`web/src/diff-harness.ts`,
+  산출물 `zig-out/maru-macos-editor-smoke/`). 재현은 `mise run test-macos-editor-smoke`.
 - **`@codemirror/merge` 번들 가능성은 확인됐다(PoC 2026-07-31).** `@codemirror/merge@6.12.2`를 실제 앱 엔트리에 넣어
   zntc `0.1.4`로 번들했고, 산출물이 파싱되며 크기는 **+31 KiB**(2,752,306 → 2,784,419 bytes)다. CM6 코어가 이미 들어 있어
-  증분이 작다. 3 MiB 예산 여유는 약 353 KiB 남는다. **아직 확인 안 된 것은 MergeView의 런타임 동작과 CSP 영향**이다.
-- **MergeView 스타일이 app origin에만 머무는지 미확인**이다(§7.2 불변식 1). 격리 렌더 문서로 새면 hash 핀이 깨진다.
+  증분이 작다. 3 MiB 예산 여유는 약 353 KiB 남는다. **런타임 동작과 CSP 영향도 이제 확인됐다**(§7.4 표) — 다만 그
+  확인은 스모크 전용 asset root(하니스 번들 281 KiB)에서 한 것이고, **제품 번들에 diff를 넣는 순간의 크기·예산은 E1에서
+  다시 잰다**(제품 번들은 이 PR에서 바뀌지 않았다).
+- **MergeView 스타일은 app origin에 머문다(확인됨, 2026-07-31).** 하니스 문서의 모든 `<style>`이 그 문서 소유였고
+  격리 렌더 문서는 만들어지지 않았다(§7.4 표). 제품 배선에서 diff를 다른 문서에 얹으면 이 확인은 다시 해야 한다.
 - safe-save는 요구사항만 검증됐고 구현되지 않았다.
 - 제품 file capability 발급, editor bridge, DocumentRegistry, watcher, diff service는 모두 미구현이다.
 - bundle size 외 실제 WKWebView web-process RSS, first interactive, large-file latency 예산은 미측정이다.

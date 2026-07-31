@@ -113,6 +113,11 @@ struct EditorSmoke {
         let selfTestRaisedViolation = jsonArrayCount(violationsAfterSelfTest) > jsonArrayCount(violations)
         summary["csp_violation_recorder_live"] = String(selfTestRaisedViolation)
 
+        // ── 자원 스케일링(§9 E0.5A 종료 조건): diff 1/2/4개의 web content 프로세스 RSS·유휴 CPU·닫은 뒤 회수.
+        //    WKWebView는 메모리 API가 없으므로 **우리가 만들기 전후의 WebContent 프로세스 집합 차이**로 귀속한다
+        //    (같은 순간 다른 앱이 WebContent를 띄우면 섞일 수 있다 — 그 한계는 summary에 남긴다).
+        measureResources(&summary, config: config, url: url)
+
         // ── snapshot: Metal PPM은 WKWebView 픽셀을 담지 못하므로 WebKit takeSnapshot을 쓴다(§7.4).
         let outURL = URL(fileURLWithPath: outRoot, isDirectory: true)
         try? FileManager.default.createDirectory(at: outURL, withIntermediateDirectories: true)
@@ -153,6 +158,18 @@ struct EditorSmoke {
         // CSP가 안 걸렸거나 수집기가 죽었으면 위 "위반 0"은 근거가 없다 — 초록을 주지 않는다.
         if !cspEnforced { failures.append("CSP is not enforced (eval succeeded) — a zero violation count proves nothing") }
         if !selfTestRaisedViolation { failures.append("violation recorder did not observe the deliberate violation") }
+        // 자원 측정이 실제로 일어났는가 — 0이면 귀속에 실패한 것이고, 그 상태로 "예산 안"이라 말할 수 없다.
+        for count in [1, 2, 4] where intValue(summary["rss_\(count)_view_kb"]) <= 0 {
+            failures.append("no web content RSS attributed for \(count) view(s)")
+        }
+        // 닫은 뒤 회수: 우리가 띄운 프로세스가 남아 있으면 안 된다(누수 = 탭을 닫아도 메모리가 안 돌아온다).
+        if intValue(summary["webcontent_processes_after_close"]) != 0 {
+            failures.append("web content processes survived close: \(summary["webcontent_processes_after_close"] ?? "?")")
+        }
+        // 유휴 CPU: 화면에 없는 diff가 코어를 돌리면 안 된다. 임계는 넉넉히 잡되(측정 창의 50%) 0은 아니게 둔다.
+        if intValue(summary["idle_cpu_percent_4_view"]) > 50 {
+            failures.append("hidden diff views burned CPU: \(summary["idle_cpu_percent_4_view"] ?? "?")%")
+        }
 
         if failures.isEmpty {
             FileHandle.standardOutput.write(Data("editor smoke ok: \(outRoot)\n".utf8))
@@ -215,6 +232,142 @@ struct EditorSmoke {
         guard let data = json.data(using: .utf8),
               let array = try? JSONSerialization.jsonObject(with: data) as? [Any] else { return 0 }
         return array.count
+    }
+
+    // MARK: - 자원 측정
+
+    /// diff 1/2/4개를 차례로 띄워 web content 프로세스의 RSS·유휴 CPU를 재고, 전부 닫은 뒤 회수를 확인한다.
+    static func measureResources(_ summary: inout [String: String], config: WKWebViewConfiguration, url: URL) {
+        // **우리 PID를 직접 추적한다.** "지금 도는 WebContent 전부 − 처음 있던 것"으로 세면 측정 도중 다른 앱이 띄운
+        // WebContent가 섞여(이 기기에서 실제로 관측됨) 회수 판정이 영원히 거짓이 된다. 각 회차에서 새로 생긴 PID를
+        // 그 회차의 소유로 못박고, 회수도 **그 PID들이 사라졌는가**로만 본다.
+        summary["resource_attribution"] = "per-iteration new webcontent pids"
+        var known = Set(webContentProcesses().keys)
+        var ourPids: [Int32] = []
+
+        for count in [1, 2, 4] {
+            var rssKB = 0
+            var processCount = 0
+            var idleCpuPercent = 0
+            var iterationPids: Set<Int32> = []
+
+            // autoreleasepool 안에서 만들고 버린다 — 밖이면 함수 스코프가 끝날 때까지 풀에 남는다.
+            autoreleasepool {
+                var views: [WKWebView] = []
+                var windows: [NSWindow] = []
+                for _ in 0..<count {
+                    // 뷰마다 별도 configuration — 같은 config를 공유하면 WebKit이 프로세스를 합쳐 "N개일 때"가
+                    // 측정되지 않는다. 제품에서도 diff 파일 Term은 각자 패널이라 이쪽이 실제에 가깝다.
+                    let viewConfig = WKWebViewConfiguration()
+                    viewConfig.setURLSchemeHandler(
+                        MaruAppSchemeHandler(assetRoot: summary["asset_root"] ?? ""),
+                        forURLScheme: MaruAppSchemeHandler.scheme
+                    )
+                    let frame = NSRect(x: 0, y: 0, width: 900, height: 600)
+                    let view = WKWebView(frame: frame, configuration: viewConfig)
+                    // 창에 붙이지 않으면 WebKit이 레이아웃을 미룰 수 있다 — 화면 밖 창에 얹어 실제 렌더까지 가게 한다.
+                    let window = NSWindow(contentRect: frame, styleMask: [.borderless], backing: .buffered, defer: false)
+                    // close()가 과다 해제로 크래시하지 않게(격리 프로브에서 SIGSEGV 실측).
+                    window.isReleasedWhenClosed = false
+                    window.contentView = view
+                    view.load(URLRequest(url: url))
+                    views.append(view)
+                    windows.append(window)
+                }
+                for view in views {
+                    _ = waitFor(webView: view, expression: "window.__maruEditorSmoke ? (window.__maruEditorSmoke.ready || false) : false")
+                }
+
+                let loaded = webContentProcesses().filter { !known.contains($0.key) }
+                iterationPids = Set(loaded.keys)
+                rssKB = loaded.values.reduce(0) { $0 + $1.rssKB }
+                processCount = loaded.count
+
+                // 유휴 CPU: 입력 없이 화면 밖 상태로 두고 CPU 시간 증가분을 본다.
+                let windowSeconds = 1.5
+                idle(seconds: windowSeconds)
+                let after = webContentProcesses().filter { iterationPids.contains($0.key) }
+                let cpuDelta = after.reduce(0.0) { total, entry in
+                    total + max(0, entry.value.cpuSeconds - (loaded[entry.key]?.cpuSeconds ?? entry.value.cpuSeconds))
+                }
+                idleCpuPercent = Int((cpuDelta / windowSeconds) * 100)
+
+                for view in views { view.stopLoading() }
+                for window in windows {
+                    window.contentView = nil
+                    window.orderOut(nil)
+                    window.close()
+                }
+                views.removeAll()
+                windows.removeAll()
+            }
+
+            summary["rss_\(count)_view_kb"] = String(rssKB)
+            summary["webcontent_processes_\(count)_view"] = String(processCount)
+            summary["idle_cpu_percent_\(count)_view"] = String(idleCpuPercent)
+
+            // 회수는 즉시가 아니다(XPC 종료). **걸린 시간을 값으로 남긴다** — 회수 여부만 boolean으로 두면
+            // '오래 걸린다'와 '샌다'가 구분되지 않는다.
+            let reclaimed = waitForReclaim(pids: iterationPids, limit: 20)
+            summary["reclaim_seconds_\(count)_view"] = reclaimed.map { String(format: "%.1f", $0) } ?? "timeout"
+            ourPids.append(contentsOf: iterationPids)
+            known.formUnion(iterationPids)
+        }
+
+        let alive = webContentProcesses().filter { ourPids.contains($0.key) }
+        summary["webcontent_processes_after_close"] = String(alive.count)
+        summary["rss_after_close_kb"] = String(alive.values.reduce(0) { $0 + $1.rssKB })
+    }
+
+    /// 주어진 PID들이 모두 사라질 때까지 기다린다. 사라지면 걸린 초, 한도를 넘기면 nil.
+    static func waitForReclaim(pids: Set<Int32>, limit: TimeInterval) -> TimeInterval? {
+        if pids.isEmpty { return 0 }
+        let start = Date()
+        while Date().timeIntervalSince(start) < limit {
+            let alive = Set(webContentProcesses().keys).intersection(pids)
+            if alive.isEmpty { return Date().timeIntervalSince(start) }
+            idle(seconds: 0.5)
+        }
+        return nil
+    }
+
+    /// 지금 도는 WebContent 프로세스의 pid → (RSS KB, 누적 CPU 초). `ps`를 쓴다 — WKWebView는 자식 프로세스를
+    /// 노출하지 않고 WebContent는 launchd 아래에 뜨므로, 프로세스 목록이 유일한 관측 창구다.
+    static func webContentProcesses() -> [Int32: (rssKB: Int, cpuSeconds: Double)] {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/ps")
+        process.arguments = ["-ax", "-o", "pid=,rss=,time=,comm="]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        guard (try? process.run()) != nil else { return [:] }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+
+        var result: [Int32: (rssKB: Int, cpuSeconds: Double)] = [:]
+        for line in String(decoding: data, as: UTF8.self).split(separator: "\n") {
+            guard line.contains("WebKit.WebContent") else { continue }
+            let fields = line.split(separator: " ", omittingEmptySubsequences: true)
+            guard fields.count >= 3, let pid = Int32(fields[0]), let rss = Int(fields[1]) else { continue }
+            result[pid] = (rssKB: rss, cpuSeconds: cpuSeconds(fields[2]))
+        }
+        return result
+    }
+
+    /// `ps` time 필드(`M:SS.ss` 또는 `H:MM:SS`)를 초로 바꾼다.
+    static func cpuSeconds(_ field: Substring) -> Double {
+        let parts = field.split(separator: ":").map { Double($0) ?? 0 }
+        switch parts.count {
+        case 2: return parts[0] * 60 + parts[1]
+        case 3: return parts[0] * 3600 + parts[1] * 60 + parts[2]
+        default: return 0
+        }
+    }
+
+    static func idle(seconds: TimeInterval) {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
     }
 
     // MARK: - WKWebView 구동

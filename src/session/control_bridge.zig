@@ -72,8 +72,9 @@ pub const FileAccess = struct {
     context: *anyopaque,
     begin_document_fn: *const fn (context: *anyopaque, document_id: u64) anyerror!u64,
     read_fn: *const fn (context: *anyopaque, gpa: std.mem.Allocator, editor_epoch: u64) anyerror![]u8,
-    /// diff 본문 두 쪽(원본·수정본). null이면 이 surface는 diff Term이 아니다 — method 자체를 거절한다.
-    diff_open_fn: ?*const fn (context: *anyopaque, gpa: std.mem.Allocator) anyerror!DiffSides = null,
+    /// diff 본문 두 쪽(원본·수정본). 콜백이 null이면 이 surface는 diff Term이 아니다 — method 자체를 거절한다.
+    /// 콜백이 **`null`을 돌려주면 아직 읽는 중**이다: git 읽기는 별도 스레드에서 도므로 여기서 기다리면 UI가 멎는다.
+    diff_open_fn: ?*const fn (context: *anyopaque, gpa: std.mem.Allocator) anyerror!?DiffSides = null,
     read_asset_fn: *const fn (context: *anyopaque, gpa: std.mem.Allocator, normalized_path: []const u8) anyerror![]u8,
     write_fn: *const fn (context: *anyopaque, editor_epoch: u64, content: []const u8) anyerror!void,
     set_dirty_fn: *const fn (context: *anyopaque, report: DirtyReport) anyerror!void,
@@ -91,7 +92,7 @@ pub const FileAccess = struct {
         return self.read_fn(self.context, gpa, editor_epoch);
     }
 
-    pub fn diffOpen(self: FileAccess, gpa: std.mem.Allocator) anyerror!DiffSides {
+    pub fn diffOpen(self: FileAccess, gpa: std.mem.Allocator) anyerror!?DiffSides {
         const f = self.diff_open_fn orelse return error.Unsupported;
         return f(self.context, gpa);
     }
@@ -200,7 +201,9 @@ pub fn dispatchBridgeWithFileAccess(
     }
     if (std.mem.eql(u8, req.method, diff_open_method)) {
         // diff Term이 아니면 method가 존재하지 않는 것과 같다 — md 뷰어 Term이 이 창구를 쓰지 못하게 한다(§3.1).
-        const sides = access.diffOpen(gpa) catch return errorResponse(gpa, req.id, .internal_error);
+        const maybe_sides = access.diffOpen(gpa) catch return errorResponse(gpa, req.id, .internal_error);
+        // 아직 읽는 중이면 그렇게 말한다 — 빈 문서를 정상 결과로 주면 화면이 "변경 없음"을 보여 준다.
+        const sides = maybe_sides orelse return serializeDiffPending(gpa, req.id);
         defer sides.deinit(gpa);
         // 무엇을 싣지 않을지는 L2 정책이 정한다(크기 → binary → 줄 수). 거절은 오류가 아니라 **typed 결과**다 —
         // 화면이 "왜 못 보여 주는지"를 말할 수 있어야 한다(§6).
@@ -473,6 +476,18 @@ fn serializeDiffResult(
     s.write(modified) catch return error.OutOfMemory;
     s.objectField("truncated_lines") catch return error.OutOfMemory;
     s.write(truncated_lines) catch return error.OutOfMemory;
+    cp.endResult(&s) catch return error.OutOfMemory;
+    return aw.toOwnedSlice();
+}
+
+/// 아직 읽는 중. 웹은 잠시 뒤 다시 부른다(브리지가 git을 기다리며 메인 스레드를 잡지 않는다).
+fn serializeDiffPending(gpa: std.mem.Allocator, id: cp.Id) std.mem.Allocator.Error![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    cp.beginResult(&s, id) catch return error.OutOfMemory;
+    s.objectField("pending") catch return error.OutOfMemory;
+    s.write(true) catch return error.OutOfMemory;
     cp.endResult(&s) catch return error.OutOfMemory;
     return aw.toOwnedSlice();
 }
@@ -979,7 +994,7 @@ test "dispatchBridge: diff.open은 인자 없이 자기 Term의 두 쪽만 준�
         modified: []const u8,
         calls: usize = 0,
 
-        fn open(context: *anyopaque, gpa: std.mem.Allocator) anyerror!DiffSides {
+        fn open(context: *anyopaque, gpa: std.mem.Allocator) anyerror!?DiffSides {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.calls += 1;
             return .{
@@ -1008,11 +1023,11 @@ test "dispatchBridge: diff.open은 인자 없이 자기 Term의 두 쪽만 준�
 
 test "dispatchBridge: 보여 줄 수 없는 diff는 오류가 아니라 이유를 준다" {
     const Fake = struct {
-        fn binary(context: *anyopaque, gpa: std.mem.Allocator) anyerror!DiffSides {
+        fn binary(context: *anyopaque, gpa: std.mem.Allocator) anyerror!?DiffSides {
             _ = context;
             return .{ .original = try gpa.dupe(u8, "ok\n"), .modified = try gpa.dupe(u8, "a\x00b") };
         }
-        fn unsupported(context: *anyopaque, gpa: std.mem.Allocator) anyerror!DiffSides {
+        fn unsupported(context: *anyopaque, gpa: std.mem.Allocator) anyerror!?DiffSides {
             _ = context;
             _ = gpa;
             return error.Unsupported;
@@ -1047,4 +1062,30 @@ test "dispatchBridge: 보여 줄 수 없는 diff는 오류가 아니라 이유�
     defer dp.deinit();
     try testing.expect(dp.value.object.get("error") != null);
     try testing.expect(dp.value.object.get("result") == null);
+}
+
+test "dispatchBridge: 아직 읽는 중이면 pending을 준다(빈 문서가 아니라)" {
+    // 빈 두 쪽을 정상 결과로 주면 화면이 "변경 없음"을 보여 준다 — 읽는 중과 변경 없음은 다른 상태다.
+    const Fake = struct {
+        fn pending(context: *anyopaque, gpa: std.mem.Allocator) anyerror!?DiffSides {
+            _ = context;
+            _ = gpa;
+            return null;
+        }
+    };
+    var base: FakeFileAccess = .{};
+    var access = base.access();
+    access.diff_open_fn = Fake.pending;
+    const resp = try dispatchBridgeWithFileAccess(
+        testing.allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":34,\"method\":\"maru.diff.open\",\"params\":{}}",
+        "0.1.0",
+        access,
+    );
+    defer testing.allocator.free(resp);
+    var p = try parseValue(testing.allocator, resp);
+    defer p.deinit();
+    const result = p.value.object.get("result").?.object;
+    try testing.expect(result.get("pending").?.bool);
+    try testing.expect(result.get("original") == null);
 }

@@ -668,6 +668,10 @@ final class MaruBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
           rendererReady: function (editorEpoch) {
             return window.maru.request("maru.file.rendererReady", { editor_epoch: editorEpoch });
           }
+        },
+        diff: {
+          // E1: 인자가 없다 — 무엇을 비교할지는 그 Term의 entry가 정한다(docs/editor-surface.md §6).
+          open: function () { return window.maru.request("maru.diff.open"); }
         }
       };
       function flushFileRequests() {
@@ -682,6 +686,9 @@ final class MaruBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
           }
           else if (request.method === "read" && Number.isSafeInteger(request.editor_epoch) && request.editor_epoch > 0) {
             promise = window.maru.file.read(request.editor_epoch);
+          }
+          else if (request.method === "diffOpen") {
+            promise = window.maru.diff.open();
           }
           else if (request.method === "readAsset" && typeof request.path === "string" && request.path.length <= 4096) {
             promise = window.maru.file.readAsset(request.path);

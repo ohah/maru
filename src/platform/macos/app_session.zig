@@ -3246,6 +3246,30 @@ pub const AppSession = struct {
         // 결과도 없고 in-flight도 없을 때만 한 번 건다 — 조건이 결과 도착으로 스스로 닫히므로 폴링이 아니다.
         if (self.dock.view == .source_control and self.git_result == null and self.git_inflight == 0 and !self.git_failed and !self.git_missing) self.refreshGitStatus();
         var backend = &(self.git_backend orelse return);
+        // diff 본문 결과를 그 entry로 흘린다. request_id로 짝을 맞춰 **늦게 온 옛 결과가 새 내용을 덮지 않게** 한다.
+        while (backend.takeDiffResult()) |taken| {
+            var diff_result = taken;
+            outer: for (self.tabs.items) |tab| {
+                for (tab.panes.items) |pane| {
+                    for (pane.terms.items) |term| {
+                        const entry = term.file_entry orelse continue;
+                        if (entry.kind != .diff or entry.diff_request_id != diff_result.request_id) continue;
+                        if (diff_result.ok) {
+                            self.freeDiffContent(entry); // rel_path는 남긴다 — 새로 고칠 때 다시 읽을 대상이다
+                            entry.diff_original = diff_result.original;
+                            entry.diff_modified = diff_result.modified;
+                            entry.diff_ready = true;
+                            diff_result.original = &.{};
+                            diff_result.modified = &.{};
+                        } else entry.diff_failed = true;
+                        break :outer;
+                    }
+                }
+            }
+            // 짝이 없으면(그 사이 Term이 닫혔다) 결과를 그냥 버린다 — 아래 deinit이 어느 경우든 해제한다.
+            diff_result.deinit(self.allocator);
+            self.metal_dirty = true;
+        }
         while (backend.takeResult()) |taken| {
             var result = taken;
             if (result.request_id != self.git_inflight) {
@@ -6008,6 +6032,7 @@ pub const AppSession = struct {
         // 소유권 경계가 여기 하나뿐이라(생성은 파일 열기, 해제는 여기) 중간 상태가 없다.
         if (term.file_entry) |entry| {
             self.allocator.free(entry.path);
+            self.freeDiffEntryState(entry);
             self.allocator.destroy(entry);
             term.file_entry = null;
         }
@@ -14475,6 +14500,141 @@ pub const AppSession = struct {
         previous_active_term: ?*Term,
     };
 
+    /// 소스 컨트롤 목록에서 그 좌표의 **파일 행**을 찾는다(섹션 헤더는 null). 렌더와 같은 모델을 같은 입력으로
+    /// 다시 만들어 판정한다 — 그린 자리와 눌리는 자리가 어긋나지 않게 한다(행 목록을 따로 캐시하지 않는 이유다).
+    /// 반환 슬라이스는 `git_result` 소유라 다음 갱신 전까지만 유효하다(호출자가 그 자리에서 쓴다).
+    fn scmFileRowAt(self: *AppSession, x_px: f64, y_px: f64, out: []scm_view.Row, scratch: []u8) ?scm_view.FileRow {
+        if (self.dock.view != .source_control or !self.dockVisible() or self.cell_height_px == 0) return null;
+        const rect = self.dockGeometry().tree_content;
+        if (!layout_math.pointInRect(x_px, y_px, rect)) return null;
+        const local: usize = @intFromFloat((y_px - @as(f64, @floatFromInt(rect.y))) /
+            @as(f64, @floatFromInt(self.cell_height_px)));
+        const visible_rows = rect.h / self.cell_height_px;
+        if (local >= visible_rows) return null; // renderer가 그리지 않는 아래 잘린 행은 hit도 아니다
+        const result = self.git_result orelse return null;
+        const model = scm_view.build(
+            result.status,
+            result.numstat_staged,
+            result.numstat_worktree,
+            out[0..@min(out.len, visible_rows)],
+            scratch,
+        );
+        if (local >= model.rows.len) return null;
+        return switch (model.rows[local]) {
+            .file => |row| row,
+            .section => null, // 섹션 헤더는 접기 대상이고(후속) 여는 대상이 아니다
+        };
+    }
+
+    /// 그 행이 가리키는 비교를 연다. 경로는 저장소 루트 기준이므로 절대경로를 만들어 Term identity로 쓴다.
+    fn openDiffForScmRow(self: *AppSession, row: scm_view.FileRow) void {
+        var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const repo = self.gitRepoRoot(&repo_buf) orelse return;
+        var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const abs = std.fmt.bufPrint(&abs_buf, "{s}/{s}", .{ repo, row.path }) catch return;
+        const base: dock_panel.DiffBase = switch (row.section) {
+            .staged => .staged,
+            .unstaged => .unstaged,
+            .untracked => .untracked,
+        };
+        self.openDiffTerm(abs, row.path, base);
+    }
+
+    /// diff entry가 들고 있는 소유 문자열을 **전부** 푼다(Term 파괴 시). path와 같은 자리에서 부른다.
+    fn freeDiffEntryState(self: *AppSession, entry: *dock_panel.Entry) void {
+        if (entry.diff_rel_path.len > 0) self.allocator.free(entry.diff_rel_path);
+        entry.diff_rel_path = &.{};
+        self.freeDiffContent(entry);
+    }
+
+    /// 본문 두 쪽만 푼다. **`diff_rel_path`는 남긴다** — 새로 고칠 때 다시 읽을 대상이 그 값이다.
+    fn freeDiffContent(self: *AppSession, entry: *dock_panel.Entry) void {
+        if (entry.diff_original.len > 0) self.allocator.free(entry.diff_original);
+        if (entry.diff_modified.len > 0) self.allocator.free(entry.diff_modified);
+        entry.diff_original = &.{};
+        entry.diff_modified = &.{};
+    }
+
+    /// 소스 컨트롤 행을 눌렀을 때 그 비교를 여는 지점. **유일성 키는 `(경로, kind, base)`**라 같은 파일의
+    /// 스테이지·미스테이지 diff가 서로를 덮지 않는다(docs/editor-surface.md §3.5).
+    fn openDiffTerm(self: *AppSession, abs_path: []const u8, rel_path: []const u8, base: dock_panel.DiffBase) void {
+        if (self.diffTermFor(abs_path, base)) |existing| {
+            _ = self.activateExistingFileTerm(existing);
+            return;
+        }
+        const opened = self.openFileTermInActivePane(abs_path, .diff) catch return;
+        const entry = opened.term.file_entry orelse return;
+        entry.diff_base = base;
+        entry.diff_rel_path = self.allocator.dupe(u8, rel_path) catch &.{};
+        self.requestDiffContent(entry);
+    }
+
+    fn diffTermFor(self: *AppSession, abs_path: []const u8, base: dock_panel.DiffBase) ?*Term {
+        for (self.tabs.items) |tab| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items) |term| {
+                    const entry = term.file_entry orelse continue;
+                    if (entry.kind != .diff or entry.diff_base != base) continue;
+                    if (std.mem.eql(u8, entry.path, abs_path)) return term;
+                }
+            }
+        }
+        return null;
+    }
+
+    /// 그 entry의 두 쪽을 백엔드에 요청한다. 실패해도 조용히 두지 않고 `diff_failed`로 남긴다.
+    fn requestDiffContent(self: *AppSession, entry: *dock_panel.Entry) void {
+        entry.diff_ready = false;
+        entry.diff_failed = false;
+        if (entry.diff_rel_path.len == 0) {
+            entry.diff_failed = true;
+            return;
+        }
+        var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const repo = self.gitRepoRoot(&repo_buf) orelse {
+            entry.diff_failed = true;
+            return;
+        };
+        var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const git_exe = git_backend_mod.locate(&exe_buf) orelse {
+            entry.diff_failed = true;
+            return;
+        };
+        if (self.git_backend == null) {
+            self.git_backend = git_backend_mod.Backend.init(self.allocator, self.io) catch {
+                entry.diff_failed = true;
+                return;
+            };
+        }
+        self.git_request_seq += 1;
+        entry.diff_request_id = self.git_request_seq;
+        if (!self.git_backend.?.submitDiff(git_exe, repo, entry.diff_rel_path, entry.diff_base, entry.diff_request_id)) {
+            // 이미 다른 본문을 읽는 중이다. 다음 tick에서 다시 건다(그때 슬롯이 빈다).
+            entry.diff_request_id = 0;
+        }
+    }
+
+    /// 브리지 `diff.open`이 부른다. 아직 안 읽혔으면 **null**(pending) — 빈 문서를 정상 결과로 주지 않는다.
+    pub fn diffSidesForSurface(
+        self: *AppSession,
+        gpa: std.mem.Allocator,
+        surface_id: u64,
+    ) anyerror!?maru.session.control_bridge.DiffSides {
+        if (!self.dock_initialized) return error.SurfaceNotFound;
+        const entry = self.fileEntryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
+        if (entry.kind != .diff) return error.WrongKind;
+        if (entry.diff_failed) return error.ReadFailed;
+        if (!entry.diff_ready) {
+            // 아직 요청조차 못 건 상태(백엔드가 바빴다)면 여기서 다시 건다 — 그러지 않으면 영영 pending이다.
+            if (entry.diff_request_id == 0) self.requestDiffContent(entry);
+            return null;
+        }
+        return .{
+            .original = try gpa.dupe(u8, entry.diff_original),
+            .modified = try gpa.dupe(u8, entry.diff_modified),
+        };
+    }
+
     /// 이미 열린 파일이면 그 Term으로 이동·활성화하고, 아니면 활성 pane에 새 파일 Term을 만든다.
     /// 경로 유일성은 pane별이 아니라 **창 전체** 불변식이다(§1).
     fn openFileTermInActivePane(
@@ -20038,6 +20198,15 @@ pub const AppSession = struct {
                 // 아래 트리 조작은 **탐색기 전용**이다. 다른 뷰에서 좌표만 같다고 타면 소스 컨트롤 행을 누른 것이
                 // 폴더 선택 다이얼로그가 되고(실측), 트리 포커스도 뺏는다 — setDockView가 뷰를 바꿀 때 그 포커스를
                 // 놓는 것과 모순된다. 도크 안이라는 사실만으로 클릭을 소비하는 건 아래 dock rect 분기가 한다.
+                if (self.dock.view == .source_control) {
+                    // 행 클릭 = 그 비교 열기(§3.5 표). 섹션 헤더·여백은 아래 dock rect 분기가 소비만 한다.
+                    var rows_buf: [128]scm_view.Row = undefined;
+                    var row_scratch: [std.fs.max_path_bytes]u8 = undefined;
+                    if (self.scmFileRowAt(x_px, y_px, &rows_buf, &row_scratch)) |row| {
+                        self.openDiffForScmRow(row);
+                        return;
+                    }
+                }
                 if (self.dock.view == .explorer) {
                     if (self.beginFileTreeScrollbarGesture(x_px, y_px)) return;
                     if (self.fileTreeRowAt(x_px, y_px)) |row_index| {
@@ -30585,6 +30754,7 @@ pub const AppSession = struct {
                     // custom_name·surface는 번들 deinit이 소유한다(M3a). destroyTerm의 Term-owned 필드 목록과 동기 유지할 것.
                     if (term.file_entry) |entry| { // FP16: Term 소유 파일 entry — destroyTerm과 같은 목록(위 주석의 동기 규율)
                         self.allocator.free(entry.path);
+                        self.freeDiffEntryState(entry);
                         self.allocator.destroy(entry);
                         term.file_entry = null;
                     }

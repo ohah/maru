@@ -61,15 +61,27 @@ pub const Entry = struct {
     path: []const u8,
     /// rename/copy의 원래 경로(그 외 null).
     orig_path: ?[]const u8 = null,
+    /// 하위 모듈(gitlink, mode 160000)인가. porcelain v2의 `<sub>` 필드가 `S`로 시작하면 참이다.
+    /// **텍스트 비교 대상이 아니다** — 커밋 포인터라 blob이 없고, 작업트리 쪽은 디렉터리다(실측).
+    submodule: bool = false,
 
-    /// "스테이지된 변경" 섹션에 드는가.
+    /// 병합 충돌 중인가(`u` 레코드). 해결 전에는 index에 stage 0이 없어 `:<경로>` 읽기가 실패한다(실측).
+    pub fn isConflicted(self: Entry) bool {
+        return self.staged == .unmerged or self.worktree == .unmerged;
+    }
+
+    /// "스테이지된 변경" 섹션에 드는가. **충돌은 여기 들지 않는다** — 스테이지된 것이 아니라 해결되지 않은
+    /// 상태이고, 양쪽 섹션에 같은 파일을 두 번 띄우면 "일부만 스테이지한 파일"(MM)과 구분되지 않는다.
     pub fn isStaged(self: Entry) bool {
+        if (self.isConflicted()) return false;
         return self.staged != .unchanged and self.staged != .untracked;
     }
 
     /// "변경 사항"(index↔worktree) 섹션에 드는가. **한 파일이 두 섹션에 동시에 들 수 있다**(`MM`) — git이 그렇게
     /// 보고하고, 사용자도 "일부만 스테이지한 파일"을 양쪽에서 봐야 하므로 여기서 하나로 접지 않는다.
+    /// 충돌은 이 섹션에만 든다(해결해야 하는 작업트리 상태다).
     pub fn isUnstaged(self: Entry) bool {
+        if (self.isConflicted()) return true;
         return self.worktree != .unchanged and self.worktree != .untracked;
     }
 
@@ -143,9 +155,12 @@ pub const Iterator = struct {
                     const xy = line[2..4];
                     const staged = Change.fromCode(xy[0]);
                     const worktree = Change.fromCode(xy[1]);
+                    // `<sub>` 필드(XY 다음): `N...`=일반, `S`로 시작하면 하위 모듈이다. 텍스트 비교 대상이 아니므로
+                    // 여기서 표시해 둔다(모르면 blob을 읽으려다 실패하고 "표시할 수 없음"만 남는다 — 실측).
+                    const submodule = line.len > 5 and line[5] == 'S';
                     if (!renamed) {
                         const path = lastField(line) orelse continue;
-                        return .{ .staged = staged, .worktree = worktree, .path = path };
+                        return .{ .staged = staged, .worktree = worktree, .path = path, .submodule = submodule };
                     }
                     // `2` 레코드의 마지막 필드는 `<새 경로>\t<원래 경로>`다(경로에 공백이 있어도 탭이 가른다).
                     const field = lastField(line) orelse continue;
@@ -155,6 +170,7 @@ pub const Iterator = struct {
                         .worktree = worktree,
                         .path = field[0..tab],
                         .orig_path = field[tab + 1 ..],
+                        .submodule = submodule,
                     };
                 },
                 else => continue,
@@ -442,4 +458,33 @@ test "name-status: 잘린 줄은 건너뛴다(엉뚱한 경로를 만들지 않�
     var it = iterateNameStatus("R100\tonly-old\nM\nX\nM\tok.txt\n");
     try std.testing.expectEqualStrings("ok.txt", it.next().?.path);
     try std.testing.expect(it.next() == null);
+}
+
+test "충돌은 변경 사항 섹션에만 들고, 하위 모듈은 표시된다(실측 출력)" {
+    // 실제 `git merge` 충돌과 `git submodule add`에서 뜬 출력을 그대로 쓴다.
+    const conflict_line = "u UU N... 100644 100644 100644 100644 c0d0fb4 f563088 19ec3b0 f.txt\n";
+    var it = iterate(conflict_line);
+    const conflicted = it.next().?;
+    try std.testing.expect(conflicted.isConflicted());
+    // 충돌은 "스테이지된 변경"이 아니다 — 스테이지된 게 아니라 해결되지 않은 상태다.
+    try std.testing.expect(!conflicted.isStaged());
+    try std.testing.expect(conflicted.isUnstaged());
+    try std.testing.expect(!conflicted.isUntracked());
+
+    const submodule_line = "1 AM S.M. 000000 160000 160000 0000000 0b4a6aa vendor\n";
+    var sub_it = iterate(submodule_line);
+    const sub = sub_it.next().?;
+    try std.testing.expect(sub.submodule);
+    try std.testing.expectEqualStrings("vendor", sub.path);
+
+    // 일반 파일은 하위 모듈로 오인되지 않는다.
+    var plain_it = iterate("1 .M N... 100644 100644 100644 aaa bbb src/main.zig\n");
+    try std.testing.expect(!plain_it.next().?.submodule);
+}
+
+test "unborn 저장소도 브랜치 이름을 읽는다(oid가 (initial))" {
+    // 첫 커밋 전 저장소의 실제 출력. 여기서 막히면 새 저장소에서 헤더가 비어 보인다.
+    const head = parseHead("# branch.oid (initial)\n# branch.head main\n? a.txt\n");
+    try std.testing.expectEqualStrings("main", head.branch.?);
+    try std.testing.expect(!head.has_ab); // upstream이 없으니 ahead/behind도 없다
 }

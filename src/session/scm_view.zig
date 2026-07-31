@@ -44,6 +44,10 @@ pub const FileRow = struct {
     binary: bool = false,
     /// 증감을 못 붙였다(numstat에 없거나 rename 경로 복원 실패). 숫자 자리를 비운다.
     unknown_delta: bool = false,
+    /// 병합 충돌 중(해결 전). diff는 `HEAD ↔ 작업트리`로 열어 충돌 표시를 그대로 보여 준다.
+    conflicted: bool = false,
+    /// 하위 모듈(gitlink). **텍스트 비교가 없다** — 열면 빈 화면이 되므로 호출자가 그 사실을 말한다.
+    submodule: bool = false,
 };
 
 pub const Row = union(enum) {
@@ -96,9 +100,13 @@ pub fn build(
                     .path = entry.path,
                     .orig_path = entry.orig_path,
                     .letter = change.letter(),
+                    .conflicted = entry.isConflicted(),
+                    .submodule = entry.submodule,
                 };
                 // 추적되지 않은 파일은 비교 대상이 없어 증감이 존재하지 않는다 — 숫자 자리를 비운다.
-                if (section == .untracked) {
+                // **충돌도 마찬가지다**: numstat이 같은 경로에 여러 줄(스테이지별)을 내는데 그 첫 줄이 `0 0`이라
+                // 그대로 쓰면 "안 바뀐 파일"로 보인다(실측). 하위 모듈은 커밋 포인터라 줄 수가 의미가 없다.
+                if (section == .untracked or entry.isConflicted() or entry.submodule) {
                     row.unknown_delta = true;
                 } else {
                     const numstat = if (section == .staged) staged_numstat else worktree_numstat;
@@ -299,4 +307,40 @@ test "브랜치 섹션도 접힌다(개수는 남는다)" {
     );
     try testing.expectEqual(@as(usize, 1), model.rows.len);
     try testing.expectEqual(@as(usize, 2), model.rows[0].section.count);
+}
+
+test "충돌·하위 모듈은 숫자를 비운다(거짓 0으로 안 바뀐 것처럼 보이지 않게)" {
+    var out: [16]Row = undefined;
+    var scratch: [256]u8 = undefined;
+    // 실측: 충돌 파일은 numstat이 같은 경로에 두 줄을 내고 첫 줄이 `0 0`이다.
+    const status = "# branch.head main\n" ++
+        "u UU N... 100644 100644 100644 100644 aaa bbb ccc f.txt\n" ++
+        "1 AM S.M. 000000 160000 160000 000 0b4 vendor\n";
+    const numstat = "0\t0\tf.txt\n4\t0\tf.txt\n1\t0\tvendor\n";
+    const model = build(status, numstat, numstat, "", "", .{ false, false, false, false }, &out, &scratch);
+
+    // 충돌은 **변경 사항 섹션에만** 든다(스테이지된 변경에 같은 파일이 또 뜨면 MM과 구분이 안 된다).
+    var conflicted_sections: [2]bool = .{ false, false };
+    for (model.rows) |row| switch (row) {
+        .file => |f| if (f.conflicted) {
+            if (f.section == .staged) conflicted_sections[0] = true;
+            if (f.section == .unstaged) conflicted_sections[1] = true;
+            try testing.expect(f.unknown_delta); // `+0 -0`을 쓰지 않는다
+            try testing.expectEqual(@as(u8, 'U'), f.letter);
+        },
+        .section => {},
+    };
+    try testing.expect(!conflicted_sections[0]);
+    try testing.expect(conflicted_sections[1]);
+
+    // 하위 모듈은 스테이지 쪽 A로 잡히고 숫자를 안 붙인다.
+    var found_submodule = false;
+    for (model.rows) |row| switch (row) {
+        .file => |f| if (f.submodule) {
+            found_submodule = true;
+            try testing.expect(f.unknown_delta);
+        },
+        .section => {},
+    };
+    try testing.expect(found_submodule);
 }

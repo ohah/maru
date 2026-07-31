@@ -3216,7 +3216,8 @@ pub const AppSession = struct {
     fn refreshGitStatus(self: *AppSession) void {
         if (self.dock.view != .source_control) return;
         if (self.git_inflight != 0) return;
-        const repo = self.gitRepoRoot() orelse return;
+        var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const repo = self.gitRepoRoot(&repo_buf) orelse return;
         if (self.git_backend == null) {
             self.git_backend = git_backend_mod.Backend.init(self.allocator, self.io) catch return;
         }
@@ -3229,6 +3230,9 @@ pub const AppSession = struct {
 
     /// 완료된 git 결과를 받아 세션에 싣는다. frame tick에서 호출해도 syscall이 없다.
     fn drainGitStatus(self: *AppSession) void {
+        // 복원으로 소스 컨트롤 뷰가 켜진 채 시작하면 `setDockView`를 거치지 않아 첫 읽기가 안 걸린다(실측).
+        // 결과도 없고 in-flight도 없을 때만 한 번 건다 — 조건이 결과 도착으로 스스로 닫히므로 폴링이 아니다.
+        if (self.dock.view == .source_control and self.git_result == null and self.git_inflight == 0) self.refreshGitStatus();
         var backend = &(self.git_backend orelse return);
         while (backend.takeResult()) |taken| {
             var result = taken;
@@ -3240,20 +3244,50 @@ pub const AppSession = struct {
             if (self.git_result) |*old| old.deinit(self.allocator);
             self.git_result = result;
             self.metal_dirty = true;
+            // 진단은 **수치만** 남긴다 — 경로·브랜치명·상태 원문은 사용자 저장소 내용이라 로그에 넣지 않는다
+            // (docs/editor-surface.md §8.3의 민감정보 경계와 같은 규율).
+            if (diag_gate.maruDebugEnabled()) std.log.scoped(.scm).info(
+                "git status bytes={d}/{d}/{d} truncated={} req={d}",
+                .{ result.status.len, result.numstat_staged.len, result.numstat_worktree.len, result.truncated, result.request_id },
+            );
         }
     }
 
-    /// 탐색기 root 중 첫 git 저장소. 도크가 보여 주는 것과 같은 root를 기준으로 삼는다 — 사용자가 보는 트리와
-    /// 다른 저장소의 변경을 보여 주면 안 된다.
-    fn gitRepoRoot(self: *const AppSession) ?[]const u8 {
+    /// 소스 컨트롤 뷰가 볼 저장소. **탐색기 root → 활성 터미널 cwd** 순으로 찾는다.
+    ///
+    /// 탐색기를 먼저 보는 이유는 사용자가 트리로 고른 것이 명시적 의사이기 때문이고, 없을 때 활성 터미널 cwd로
+    /// 내려가는 이유는 탐색기가 애초에 그 cwd를 따라가기 때문이다(file-explorer.md §1 ET-CWD). 폴더를 열지 않은
+    /// 창에서도 "지금 일하는 저장소"가 보이는 게 맞다 — 그러지 않으면 터미널이 저장소 안인데도 "git 저장소가
+    /// 아닙니다"가 뜬다(손 확인에서 실제로 그랬다).
+    ///
+    /// 결과 슬라이스는 `buf`에 담아 돌려준다(walk-up 중간 경로라 어디도 소유하지 않는다).
+    fn gitRepoRoot(self: *AppSession, buf: []u8) ?[]const u8 {
         for (self.file_tree.roots.items) |root| {
-            var buf: [std.fs.max_path_bytes]u8 = undefined;
-            // `.git`이 디렉터리든 파일(worktree)이든 존재만 보면 된다 — 어느 쪽이든 git이 해석한다.
-            const dot_git = std.fmt.bufPrintZ(&buf, "{s}/.git", .{root.path}) catch continue;
-            if (std.c.access(dot_git.ptr, @intCast(std.posix.F_OK)) != 0) continue;
-            return root.path;
+            if (repoRootFor(root.path, buf)) |found| return found;
         }
-        return null;
+        const term = self.activeTab().activeTerm();
+        self.refreshTermObservation(term, false, false);
+        const cwd = if (term.rt.observation.availability != .unavailable) term.rt.observation.cwd.items else "";
+        return repoRootFor(cwd, buf);
+    }
+
+    /// `dir`부터 부모로 올라가며 `.git`이 있는 첫 디렉터리. `.git`이 디렉터리든 파일(worktree)이든 존재만 본다 —
+    /// 어느 쪽이든 git이 해석한다. 깊이는 절대경로 세그먼트 수로 자연히 bounded다.
+    fn repoRootFor(dir: []const u8, buf: []u8) ?[]const u8 {
+        if (dir.len == 0 or !std.fs.path.isAbsolute(dir)) return null;
+        var candidate = dir;
+        while (true) {
+            var probe: [std.fs.max_path_bytes]u8 = undefined;
+            const dot_git = std.fmt.bufPrintZ(&probe, "{s}/.git", .{candidate}) catch return null;
+            if (std.c.access(dot_git.ptr, @intCast(std.posix.F_OK)) == 0) {
+                if (candidate.len > buf.len) return null;
+                @memcpy(buf[0..candidate.len], candidate);
+                return buf[0..candidate.len];
+            }
+            const parent = std.fs.path.dirname(candidate) orelse return null;
+            if (parent.len == candidate.len) return null;
+            candidate = parent;
+        }
     }
 
     fn dockGeometry(self: *const AppSession) dock_layout.Geometry {
@@ -25660,6 +25694,7 @@ pub const AppSession = struct {
         self.ageFilePanelSelfWriteLatches();
         self.updateFileTree() catch {}; // FP7: background scan 결과만 적용 + 다음 요청 제출(FS I/O는 worker 전용)
         self.updateFileTreeMutations(); // mutation completion memory queue only; at most one result per frame // path-pinned rename recreation is bounded to one visible WebView per frame
+        self.drainGitStatus(); // 완료된 git 읽기를 싣는다(syscall 없음 — 큐에서 꺼내기만)
         self.pollAgentKinds(); // 포그라운드 프로세스(claude/codex) polling — throttled, 각 Term agent_kind 갱신
         self.revalidateHoverLink(); // 커서가 멈춘 채 레이아웃이 바뀌었으면 stale 링크 밑줄을 내린다(hover는 마우스 이벤트로만 갱신됨)
         if (ft_on) ft_pre = std.Io.Clock.awake.now(self.io).nanoseconds; // pre(housekeeping) 끝 = titles 시작
@@ -26499,6 +26534,55 @@ pub const AppSession = struct {
                                     },
                                 });
                             } else |_| {}
+                        }
+                        if (self.dock.view == .source_control and tree_content_cols > 0 and visible_rows > 0) {
+                            var rows_buf: [128]scm_view.Row = undefined;
+                            var scratch: [std.fs.max_path_bytes]u8 = undefined;
+                            const result = self.git_result;
+                            const model = if (result) |r| scm_view.build(
+                                r.status,
+                                r.numstat_staged,
+                                r.numstat_worktree,
+                                rows_buf[0..@min(rows_buf.len, visible_rows)],
+                                &scratch,
+                            ) else null;
+                            if (model) |m| {
+                                if (m.empty) {
+                                    // 빈 상태는 오류가 아니다(§3.5) — 경고색을 쓰지 않는다.
+                                    if (coretext_frame_builder.buildDockNoticeDrawList(self.allocator, tree_content_cols, "변경 사항 없음", dock_fg)) |pdl| {
+                                        self.collectShaped(&collected, pdl, pane_frame_builder, .{ .pane = .{
+                                            .origin_x = dg.tree_content.x,
+                                            .origin_y = dg.tree_content.y,
+                                            .colors = tabbar_colors,
+                                        } });
+                                    } else |_| {}
+                                } else if (coretext_frame_builder.buildDockScmDrawList(
+                                    self.allocator,
+                                    tree_content_cols,
+                                    @intCast(@min(m.rows.len, visible_rows)),
+                                    m.rows,
+                                    dock_active_fg,
+                                    dock_fg,
+                                    .{ .rgb = self.appearance.theme.accent },
+                                )) |sdl| {
+                                    self.collectShaped(&collected, sdl, pane_frame_builder, .{ .pane = .{
+                                        .origin_x = dg.tree_content.x,
+                                        .origin_y = dg.tree_content.y,
+                                        .colors = tabbar_colors,
+                                    } });
+                                } else |_| {}
+                            } else {
+                                // 아직 못 읽었거나 git 저장소가 아니다 — 둘을 구분해 적는다(정상 상태이므로 경고 아님).
+                                var repo_probe: [std.fs.max_path_bytes]u8 = undefined;
+                                const notice: []const u8 = if (self.gitRepoRoot(&repo_probe) == null) "git 저장소가 아닙니다" else "읽는 중…";
+                                if (coretext_frame_builder.buildDockNoticeDrawList(self.allocator, tree_content_cols, notice, dock_fg)) |pdl| {
+                                    self.collectShaped(&collected, pdl, pane_frame_builder, .{ .pane = .{
+                                        .origin_x = dg.tree_content.x,
+                                        .origin_y = dg.tree_content.y,
+                                        .colors = tabbar_colors,
+                                    } });
+                                } else |_| {}
+                            }
                         }
                         if (self.dock.view == .agent_sessions and tree_content_cols > 0 and visible_rows > 0) {
                             // 창의 모든 탭을 가로질러 에이전트 Term을 한 목록으로 낸다 — 사이드바는 워크스페이스

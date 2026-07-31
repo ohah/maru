@@ -904,6 +904,33 @@ test "도크 뷰 바: 슬롯 3개가 모두 그려진다" {
 
 /// 도크 소스 컨트롤 뷰의 목록. 섹션 헤더는 `제목  N`, 파일 행은 `이름  흐린 경로  +N -N  X`다.
 /// **폭이 좁아지면 경로가 먼저 줄어든다** — 파일명·증감·상태가 스캔의 축이라 끝까지 남긴다(§3.5).
+/// 도크 뷰의 한 줄짜리 안내(빈 상태·읽는 중). 트리의 빈 안내와 같은 들여쓰기·흐린 색을 쓴다 — 같은 컬럼 안에서
+/// 안내가 두 가지 모양이면 어느 것이 상태이고 어느 것이 내용인지 헷갈린다.
+pub fn buildDockNoticeDrawList(
+    allocator: std.mem.Allocator,
+    cols: u16,
+    text: []const u8,
+    fg: terminal.Color,
+) !renderer.DrawList {
+    var cells: std.ArrayList(renderer.DrawCell) = .empty;
+    errdefer cells.deinit(allocator);
+    var pool: std.ArrayList(u32) = .empty;
+    errdefer pool.deinit(allocator);
+    const inset: u16 = file_tree_inset_cols + 2;
+    if (cols > inset)
+        _ = try appendEllipsizedTitle(allocator, &cells, &pool, text, 0, inset, cols, .{ .foreground = fg }, false, .head);
+    const owned_pool = try pool.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_pool);
+    return .{
+        .size = .{ .cols = @max(cols, 1), .rows = 1 },
+        .cursor = .{ .row = 0, .col = 0, .visible = false },
+        .dirty = .{ .start_row = 0, .end_row = 0 },
+        .cells = try cells.toOwnedSlice(allocator),
+        .grapheme_pool = owned_pool,
+        .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
+    };
+}
+
 pub fn buildDockScmDrawList(
     allocator: std.mem.Allocator,
     cols: u16,

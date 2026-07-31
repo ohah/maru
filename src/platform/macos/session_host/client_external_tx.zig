@@ -49,6 +49,7 @@ pub const OwnerBinding = struct {
 pub const OwnerPurpose = enum {
     admission,
     write_turn,
+    cancel_turn,
 };
 
 pub const OwnerValidator = *const fn (
@@ -169,6 +170,108 @@ pub fn requestFrameProgress(
     return match orelse .missing;
 }
 
+pub const CancellationControl = struct {
+    request_id: u64,
+    wire_len: usize,
+};
+
+pub const CancellationSpec = struct {
+    stream_id: u64,
+    control: ?CancellationControl = null,
+};
+
+pub const CancellationPrepareResult = enum {
+    prepared,
+    uncancellable,
+    invalid,
+};
+
+const CancellationLifecycle = enum { empty, prepared, armed, committed, tombstone };
+
+const CancellationSnapshot = struct {
+    saved_self_addr: usize = 0,
+    state_addr: usize = 0,
+    permit_addr: usize = 0,
+    cleanup_addr: usize = 0,
+    binding: OwnerBinding = undefined,
+    spec: CancellationSpec = .{ .stream_id = 0 },
+    queue_generation: u64 = 0,
+    queue_address: usize = 0,
+    queue_capacity: usize = 0,
+    queue_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    queue_len: usize = 0,
+    queued_bytes: usize = 0,
+    cancelled_bytes: usize = 0,
+    cancelled_count: usize = 0,
+    projected_queue_generation: u64 = 0,
+    projected_queued_bytes: usize = 0,
+    projected_head_progress_ns: ?i128 = null,
+    projected_immediate_pending: bool = false,
+    projected_queue_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    cancel_mask: [client_external_mode.max_tx_frames]bool =
+        [_]bool{false} ** client_external_mode.max_tx_frames,
+    frames: [client_external_mode.max_tx_frames]FrameScalarSnapshot = undefined,
+    lifecycle: CancellationLifecycle = .empty,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+pub const PreparedTxCancellation = struct {
+    bytes: [@sizeOf(CancellationSnapshot)]u8 align(@alignOf(CancellationSnapshot)) =
+        [_]u8{0} ** @sizeOf(CancellationSnapshot),
+
+    fn storage(self: *PreparedTxCancellation) *CancellationSnapshot {
+        return @ptrCast(@alignCast(&self.bytes));
+    }
+};
+
+const CancellationPermitStorage = struct {
+    saved_self_addr: usize = 0,
+    prepared_addr: usize = 0,
+    cleanup_addr: usize = 0,
+    state_addr: usize = 0,
+    queue_generation: u64 = 0,
+    owner_incarnation: u64 = 0,
+    operation_generation: u64 = 0,
+    lifecycle: enum { empty, armed, consumed, aborted } = .empty,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+pub const TxCancellationCommitPermit = struct {
+    bytes: [@sizeOf(CancellationPermitStorage)]u8 align(@alignOf(CancellationPermitStorage)) =
+        [_]u8{0} ** @sizeOf(CancellationPermitStorage),
+
+    fn storage(self: *TxCancellationCommitPermit) *CancellationPermitStorage {
+        return @ptrCast(@alignCast(&self.bytes));
+    }
+};
+
+const CancellationCleanupStorage = struct {
+    saved_self_addr: usize = 0,
+    state_addr: usize = 0,
+    allocator: std.mem.Allocator = std.heap.page_allocator,
+    allocator_ptr_addr: usize = 0,
+    allocator_vtable_addr: usize = 0,
+    binding: OwnerBinding = undefined,
+    binding_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    count: usize = 0,
+    total_bytes: usize = 0,
+    post_queue_generation: u64 = 0,
+    post_queued_bytes: usize = 0,
+    post_queue_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    frames: [client_external_mode.max_tx_frames]client_external_mode.ExternalTxFrame = undefined,
+    lifecycle: enum { empty, owned, cleaned, quarantined } = .empty,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+pub const FrozenTxCancellationCleanup = struct {
+    bytes: [@sizeOf(CancellationCleanupStorage)]u8 align(@alignOf(CancellationCleanupStorage)) =
+        [_]u8{0} ** @sizeOf(CancellationCleanupStorage),
+
+    fn storage(self: *FrozenTxCancellationCleanup) *CancellationCleanupStorage {
+        return @ptrCast(@alignCast(&self.bytes));
+    }
+};
+
 const WriteSnapshot = struct {
     queue_address: usize,
     queue_len: usize,
@@ -198,6 +301,20 @@ const FrameScalarSnapshot = struct {
 const Range = struct {
     address: usize,
     len: usize,
+};
+
+const CancellationRanges = struct {
+    storage: Range,
+    client: Range,
+    lease: Range,
+    scratch: Range,
+    write_scratch: Range,
+    allocator_context: Range,
+    allocator_vtable: Range,
+    queue_backing: Range,
+    prepared: Range,
+    permit: Range,
+    cleanup: Range,
 };
 
 const AdmissionSnapshot = struct {
@@ -383,6 +500,255 @@ fn rangesOverlap(a: Range, b: Range) bool {
     return a.address < b_end and b.address < a_end;
 }
 
+fn checkedCancellationRanges(
+    state: *const client_external_mode.State,
+    binding: OwnerBinding,
+    prepared_addr: usize,
+    permit_addr: usize,
+    cleanup_addr: usize,
+) ?CancellationRanges {
+    const queue_bytes = std.math.mul(
+        usize,
+        state.external_tx.capacity,
+        @sizeOf(client_external_mode.ExternalTxFrame),
+    ) catch return null;
+    return .{
+        .storage = addressRange(binding.storage_addr, binding.storage_len) orelse return null,
+        .client = addressRange(binding.client_addr, binding.client_len) orelse return null,
+        .lease = addressRange(binding.lease_addr, binding.lease_len) orelse return null,
+        .scratch = addressRange(binding.scratch_addr, binding.scratch_len) orelse return null,
+        .write_scratch = addressRange(binding.write_scratch_addr, binding.write_scratch_len) orelse return null,
+        .allocator_context = addressRange(binding.allocator_ptr_addr, binding.allocator_context_len) orelse return null,
+        .allocator_vtable = addressRange(binding.allocator_vtable_addr, @sizeOf(std.mem.Allocator.VTable)) orelse return null,
+        .queue_backing = addressRange(@intFromPtr(state.external_tx.items.ptr), queue_bytes) orelse return null,
+        .prepared = addressRange(prepared_addr, @sizeOf(PreparedTxCancellation)) orelse return null,
+        .permit = addressRange(permit_addr, @sizeOf(TxCancellationCommitPermit)) orelse return null,
+        .cleanup = addressRange(cleanup_addr, @sizeOf(FrozenTxCancellationCleanup)) orelse return null,
+    };
+}
+
+fn cancellationSnapshotDigest(snapshot: *const CancellationSnapshot) ?external_owner_seal.Digest {
+    if (snapshot.queue_len > client_external_mode.max_tx_frames or
+        snapshot.cancelled_count > snapshot.queue_len or
+        snapshot.queued_bytes > max_resident_bytes or
+        snapshot.cancelled_bytes > snapshot.queued_bytes or
+        snapshot.projected_queued_bytes > snapshot.queued_bytes)
+        return null;
+    var writer = external_owner_seal.Writer.init("MARUTXK1");
+    writer.writeUsize(snapshot.saved_self_addr);
+    writer.writeUsize(snapshot.state_addr);
+    writer.writeUsize(snapshot.permit_addr);
+    writer.writeUsize(snapshot.cleanup_addr);
+    writer.writeU64(snapshot.binding.owner_incarnation);
+    writer.writeU64(snapshot.binding.operation_generation);
+    writer.writeU64(snapshot.spec.stream_id);
+    if (snapshot.spec.control) |control| {
+        writer.writeU8(1);
+        writer.writeU64(control.request_id);
+        writer.writeUsize(control.wire_len);
+    } else writer.writeU8(0);
+    writer.writeU64(snapshot.queue_generation);
+    writer.writeUsize(snapshot.queue_address);
+    writer.writeUsize(snapshot.queue_capacity);
+    writer.writeBytes(&snapshot.queue_digest);
+    writer.writeUsize(snapshot.queue_len);
+    writer.writeUsize(snapshot.queued_bytes);
+    writer.writeUsize(snapshot.cancelled_bytes);
+    writer.writeUsize(snapshot.cancelled_count);
+    writer.writeU64(snapshot.projected_queue_generation);
+    writer.writeUsize(snapshot.projected_queued_bytes);
+    writer.writeU128(@bitCast(snapshot.projected_head_progress_ns orelse std.math.minInt(i128)));
+    writer.writeU8(@intFromBool(snapshot.projected_immediate_pending));
+    writer.writeBytes(&snapshot.projected_queue_digest);
+    writer.writeU8(@intFromEnum(snapshot.lifecycle));
+    for (0..snapshot.queue_len) |index| {
+        writer.writeU8(@intFromBool(snapshot.cancel_mask[index]));
+        const frame = snapshot.frames[index];
+        writer.writeUsize(frame.bytes_addr);
+        writer.writeUsize(frame.bytes_len);
+        writer.writeUsize(frame.offset);
+        writer.writeU16(@intFromEnum(frame.kind));
+        writer.writeU64(frame.stream_id);
+        writer.writeU64(frame.request_id);
+        writer.writeU128(@bitCast(frame.activated_at_ns));
+        writer.writeBytes(&frame.wire_digest);
+        writer.writeBytes(&frame.descriptor_digest);
+    }
+    return writer.finish();
+}
+
+fn cancellationPermitDigest(permit: *const CancellationPermitStorage) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARUTXKP");
+    writer.writeUsize(permit.saved_self_addr);
+    writer.writeUsize(permit.prepared_addr);
+    writer.writeUsize(permit.cleanup_addr);
+    writer.writeUsize(permit.state_addr);
+    writer.writeU64(permit.queue_generation);
+    writer.writeU64(permit.owner_incarnation);
+    writer.writeU64(permit.operation_generation);
+    writer.writeU8(@intFromEnum(permit.lifecycle));
+    return writer.finish();
+}
+
+fn cancellationCleanupDigest(cleanup: *const CancellationCleanupStorage) ?external_owner_seal.Digest {
+    if (cleanup.count > client_external_mode.max_tx_frames or
+        cleanup.total_bytes > max_resident_bytes or
+        cleanup.post_queued_bytes > max_resident_bytes)
+        return null;
+    var writer = external_owner_seal.Writer.init("MARUTXKC");
+    writer.writeUsize(cleanup.saved_self_addr);
+    writer.writeUsize(cleanup.state_addr);
+    writer.writeUsize(cleanup.allocator_ptr_addr);
+    writer.writeUsize(cleanup.allocator_vtable_addr);
+    writer.writeBytes(&cleanup.binding_digest);
+    writer.writeUsize(cleanup.count);
+    writer.writeUsize(cleanup.total_bytes);
+    writer.writeU64(cleanup.post_queue_generation);
+    writer.writeUsize(cleanup.post_queued_bytes);
+    writer.writeBytes(&cleanup.post_queue_digest);
+    writer.writeU8(@intFromEnum(cleanup.lifecycle));
+    for (cleanup.frames[0..cleanup.count]) |frame|
+        writer.writeBytes(&frame.descriptor_digest);
+    return writer.finish();
+}
+
+fn ownerBindingDigest(binding: OwnerBinding) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARUTXOB");
+    writer.writeU8(@intFromEnum(binding.purpose));
+    writer.writeUsize(binding.storage_addr);
+    writer.writeUsize(binding.storage_len);
+    writer.writeUsize(binding.client_addr);
+    writer.writeUsize(binding.client_len);
+    writer.writeUsize(binding.lease_addr);
+    writer.writeUsize(binding.lease_len);
+    writer.writeUsize(binding.scratch_addr);
+    writer.writeUsize(binding.scratch_len);
+    writer.writeUsize(binding.write_scratch_addr);
+    writer.writeUsize(binding.write_scratch_len);
+    writer.writeUsize(binding.allocator_ptr_addr);
+    writer.writeUsize(binding.allocator_context_len);
+    writer.writeUsize(binding.allocator_vtable_addr);
+    writer.writeU64(binding.owner_incarnation);
+    writer.writeU64(binding.operation_generation);
+    return writer.finish();
+}
+
+fn cancellationSpecCanonical(spec: CancellationSpec) bool {
+    if (spec.stream_id == 0) return false;
+    if (spec.control) |control|
+        return control.request_id != 0 and control.wire_len >= protocol.header_size and
+            control.wire_len <= max_resident_bytes;
+    return true;
+}
+
+fn projectedCancellationQueueDigest(
+    snapshot: *const CancellationSnapshot,
+) ?external_owner_seal.Digest {
+    if (snapshot.queue_len > client_external_mode.max_tx_frames or
+        snapshot.cancelled_count > snapshot.queue_len or
+        snapshot.projected_queued_bytes > max_resident_bytes)
+        return null;
+    var total: usize = 0;
+    var actual = external_owner_seal.Writer.init("MARUTXQ1");
+    actual.writeUsize(snapshot.queue_address);
+    actual.writeUsize(snapshot.queue_len - snapshot.cancelled_count);
+    actual.writeUsize(snapshot.queue_capacity);
+    actual.writeU64(snapshot.projected_queue_generation);
+    for (snapshot.frames[0..snapshot.queue_len], 0..) |frame, index| {
+        if (snapshot.cancel_mask[index]) continue;
+        total = std.math.add(usize, total, frame.bytes_len) catch return null;
+        actual.writeBytes(&frame.descriptor_digest);
+    }
+    if (total != snapshot.projected_queued_bytes or total > max_resident_bytes) return null;
+    actual.writeUsize(total);
+    return actual.finish();
+}
+
+fn frameMatchesScalar(frame: client_external_mode.ExternalTxFrame, scalar: FrameScalarSnapshot) bool {
+    return scalar.bytes_addr == @intFromPtr(frame.bytes.ptr) and
+        scalar.bytes_len == frame.bytes.len and scalar.offset == frame.offset and
+        scalar.kind == frame.kind and scalar.stream_id == frame.stream_id and
+        scalar.request_id == frame.request_id and
+        scalar.activated_at_ns == frame.activated_at_ns and
+        std.mem.eql(u8, &scalar.wire_digest, &frame.wire_digest) and
+        std.mem.eql(u8, &scalar.descriptor_digest, &frame.descriptor_digest);
+}
+
+fn cancellationFrameWireHeaderMatches(
+    frame: client_external_mode.ExternalTxFrame,
+) bool {
+    if (frame.bytes.len < protocol.header_size or frame.bytes.len > max_resident_bytes)
+        return false;
+    const header_bytes: *const [protocol.header_size]u8 = @ptrCast(frame.bytes.ptr);
+    const header = protocol.Header.decode(header_bytes) catch return false;
+    const expected_wire_len = std.math.add(
+        usize,
+        protocol.header_size,
+        @as(usize, header.payload_len),
+    ) catch return false;
+    return header.major == protocol.version_major and
+        header.kind == frame.kind and
+        header.flags == 0 and
+        header.request_id == frame.request_id and
+        header.stream_id == frame.stream_id and
+        expected_wire_len == frame.bytes.len and
+        header.payload_len <= protocol.maxPayloadForKind(header.kind);
+}
+
+fn cancellationQueueAliasesProtected(
+    state: *const client_external_mode.State,
+    binding: OwnerBinding,
+    prepared: *const PreparedTxCancellation,
+    permit: *const TxCancellationCommitPermit,
+    cleanup: *const FrozenTxCancellationCleanup,
+) bool {
+    const ranges = checkedCancellationRanges(
+        state,
+        binding,
+        @intFromPtr(prepared),
+        @intFromPtr(permit),
+        @intFromPtr(cleanup),
+    ) orelse return true;
+    if (rangesOverlap(ranges.prepared, ranges.permit) or
+        rangesOverlap(ranges.prepared, ranges.cleanup) or
+        rangesOverlap(ranges.permit, ranges.cleanup)) return true;
+    const scratch_ranges = [_]Range{ ranges.prepared, ranges.permit, ranges.cleanup };
+    const owner_protected = [_]Range{
+        ranges.storage,
+        ranges.client,
+        ranges.lease,
+        ranges.allocator_context,
+        ranges.allocator_vtable,
+        ranges.queue_backing,
+    };
+    for (scratch_ranges) |scratch_range|
+        for (owner_protected) |item|
+            if (rangesOverlap(scratch_range, item)) return true;
+    const protected = [_]Range{
+        ranges.storage,
+        ranges.client,
+        ranges.lease,
+        ranges.scratch,
+        ranges.write_scratch,
+        ranges.allocator_context,
+        ranges.allocator_vtable,
+        ranges.prepared,
+        ranges.permit,
+        ranges.cleanup,
+        ranges.queue_backing,
+    };
+    for (state.external_tx.items, 0..) |frame, index| {
+        const range = sliceRange(frame.bytes) orelse return true;
+        for (protected) |item|
+            if (rangesOverlap(range, item)) return true;
+        for (state.external_tx.items[0..index]) |prior| {
+            const prior_range = sliceRange(prior.bytes) orelse return true;
+            if (rangesOverlap(range, prior_range)) return true;
+        }
+    }
+    return false;
+}
+
 fn candidateAliasesProtected(
     candidate: []u8,
     snapshot: AdmissionSnapshot,
@@ -554,9 +920,8 @@ fn bindingCanonical(binding: OwnerBinding) bool {
             binding.write_scratch_addr,
             binding.write_scratch_len,
         ) != null and
-        binding.allocator_ptr_addr != 0 and
-        binding.allocator_context_len != 0 and
-        binding.allocator_vtable_addr != 0 and
+        addressRange(binding.allocator_ptr_addr, binding.allocator_context_len) != null and
+        addressRange(binding.allocator_vtable_addr, @sizeOf(std.mem.Allocator.VTable)) != null and
         addressRange(binding.storage_addr, binding.storage_len) != null and
         addressRange(binding.client_addr, binding.client_len) != null;
 }
@@ -827,6 +1192,504 @@ pub fn admitFromExternalPump(
         .request_id = request_id,
         .wire_len = wire_len,
     } };
+}
+
+fn cancellationSnapshotCurrent(
+    snapshot: *const CancellationSnapshot,
+    prepared: *const PreparedTxCancellation,
+    state: *const client_external_mode.State,
+    binding: OwnerBinding,
+    lifecycle: CancellationLifecycle,
+) bool {
+    if (snapshot.saved_self_addr != @intFromPtr(prepared) or
+        snapshot.state_addr != @intFromPtr(state) or
+        snapshot.lifecycle != lifecycle or
+        !std.meta.eql(snapshot.binding, binding) or
+        snapshot.queue_len != state.external_tx.items.len or
+        snapshot.queue_address != @intFromPtr(state.external_tx.items.ptr) or
+        snapshot.queue_capacity != state.external_tx.capacity or
+        snapshot.queued_bytes != state.external_tx_bytes or
+        snapshot.queue_generation != state.tx_queue_generation or
+        !std.mem.eql(u8, &snapshot.digest, &(cancellationSnapshotDigest(snapshot) orelse return false)) or
+        !std.mem.eql(u8, &snapshot.queue_digest, &(queueDigest(state) orelse return false)))
+        return false;
+    for (state.external_tx.items, 0..) |frame, index|
+        if (!frameMatchesScalar(frame, snapshot.frames[index])) return false;
+    return true;
+}
+
+pub fn prepareCancellationFromExternalPump(
+    comptime validate_owner: OwnerValidator,
+    owner_context: *const anyopaque,
+    prepared: *PreparedTxCancellation,
+    permit: *TxCancellationCommitPermit,
+    cleanup: *FrozenTxCancellationCleanup,
+    state: *client_external_mode.State,
+    binding: OwnerBinding,
+    spec: CancellationSpec,
+    now_ns: i128,
+) CancellationPrepareResult {
+    const snapshot = prepared.storage();
+    if (!std.mem.allEqual(u8, &prepared.bytes, 0) or
+        !std.mem.allEqual(u8, &permit.bytes, 0) or
+        !std.mem.allEqual(u8, &cleanup.bytes, 0) or
+        binding.purpose != .cancel_turn or
+        binding.write_scratch_addr != @intFromPtr(prepared) or
+        binding.write_scratch_len != @sizeOf(PreparedTxCancellation) or
+        !bindingCanonical(binding) or !validate_owner(owner_context, binding) or
+        !cancellationSpecCanonical(spec))
+        return .invalid;
+    if (state.tx_allocator_context_len != binding.allocator_context_len or
+        @intFromPtr(state.tx_allocator.ptr) != binding.allocator_ptr_addr or
+        @intFromPtr(state.tx_allocator.vtable) != binding.allocator_vtable_addr or
+        cancellationQueueAliasesProtected(state, binding, prepared, permit, cleanup))
+        return .invalid;
+    const digest = queueDigest(state) orelse return .invalid;
+    if (state.tx_last_observed_now_ns) |last|
+        if (now_ns < last) return .invalid;
+    var candidate = CancellationSnapshot{
+        .saved_self_addr = @intFromPtr(prepared),
+        .state_addr = @intFromPtr(state),
+        .permit_addr = @intFromPtr(permit),
+        .cleanup_addr = @intFromPtr(cleanup),
+        .binding = binding,
+        .spec = spec,
+        .queue_generation = state.tx_queue_generation,
+        .queue_address = @intFromPtr(state.external_tx.items.ptr),
+        .queue_capacity = state.external_tx.capacity,
+        .queue_digest = digest,
+        .queue_len = state.external_tx.items.len,
+        .queued_bytes = state.external_tx_bytes,
+        .lifecycle = .prepared,
+    };
+    var control_matches: usize = 0;
+    for (state.external_tx.items, 0..) |frame, index| {
+        if (!cancellationFrameWireHeaderMatches(frame)) return .invalid;
+        candidate.frames[index] = .{
+            .bytes_addr = @intFromPtr(frame.bytes.ptr),
+            .bytes_len = frame.bytes.len,
+            .offset = frame.offset,
+            .kind = frame.kind,
+            .stream_id = frame.stream_id,
+            .request_id = frame.request_id,
+            .activated_at_ns = frame.activated_at_ns,
+            .wire_digest = frame.wire_digest,
+            .descriptor_digest = frame.descriptor_digest,
+        };
+        const input_match = frame.kind == .input_bytes and frame.stream_id == spec.stream_id and
+            frame.request_id == 0;
+        const same_control_id = if (spec.control) |control|
+            frame.request_id == control.request_id
+        else
+            false;
+        const control_match = if (spec.control) |control|
+            frame.kind == .request and frame.stream_id == 0 and
+                frame.request_id == control.request_id and frame.bytes.len == control.wire_len
+        else
+            false;
+        const request_descriptor = frame.kind == .request or frame.request_id != 0;
+        if ((same_control_id and !control_match) or
+            (request_descriptor and !control_match)) return .uncancellable;
+        if (control_match) control_matches += 1;
+        if (input_match or control_match) {
+            if (frame.offset != 0) return .uncancellable;
+            candidate.cancel_mask[index] = true;
+            candidate.cancelled_count += 1;
+            candidate.cancelled_bytes = std.math.add(
+                usize,
+                candidate.cancelled_bytes,
+                frame.bytes.len,
+            ) catch return .invalid;
+        }
+    }
+    if (spec.control != null and control_matches != 1) return .uncancellable;
+    if (candidate.cancelled_count != 0 and
+        candidate.queue_generation >= std.math.maxInt(u64) - 1) return .invalid;
+    candidate.projected_queue_generation = if (candidate.cancelled_count == 0)
+        candidate.queue_generation
+    else
+        std.math.add(u64, candidate.queue_generation, 1) catch return .invalid;
+    candidate.projected_queued_bytes = candidate.queued_bytes - candidate.cancelled_bytes;
+    var first_survivor: ?FrameScalarSnapshot = null;
+    for (candidate.frames[0..candidate.queue_len], 0..) |frame, index|
+        if (!candidate.cancel_mask[index]) {
+            first_survivor = frame;
+            break;
+        };
+    candidate.projected_head_progress_ns = if (first_survivor == null)
+        null
+    else if (!candidate.cancel_mask[0])
+        state.tx_head_progress_baseline_ns
+    else
+        now_ns;
+    candidate.projected_immediate_pending = first_survivor != null and
+        state.tx_immediate_pending;
+    candidate.projected_queue_digest = projectedCancellationQueueDigest(&candidate) orelse
+        return .invalid;
+    candidate.digest = cancellationSnapshotDigest(&candidate) orelse return .invalid;
+    snapshot.* = candidate;
+    return .prepared;
+}
+
+pub fn validatePreparedCancellation(
+    comptime validate_owner: OwnerValidator,
+    owner_context: *const anyopaque,
+    prepared: *PreparedTxCancellation,
+    permit: *TxCancellationCommitPermit,
+    state: *client_external_mode.State,
+    binding: OwnerBinding,
+) bool {
+    const snapshot = prepared.storage();
+    const permit_storage = permit.storage();
+    if (!std.meta.eql(permit_storage.*, CancellationPermitStorage{}) or
+        !validate_owner(owner_context, binding) or
+        !cancellationSnapshotCurrent(snapshot, prepared, state, binding, .prepared))
+        return false;
+    snapshot.lifecycle = .armed;
+    snapshot.digest = cancellationSnapshotDigest(snapshot) orelse return false;
+    permit_storage.* = .{
+        .saved_self_addr = @intFromPtr(permit),
+        .prepared_addr = @intFromPtr(prepared),
+        .cleanup_addr = snapshot.cleanup_addr,
+        .state_addr = @intFromPtr(state),
+        .queue_generation = state.tx_queue_generation,
+        .owner_incarnation = binding.owner_incarnation,
+        .operation_generation = binding.operation_generation,
+        .lifecycle = .armed,
+    };
+    permit_storage.digest = cancellationPermitDigest(permit_storage);
+    return true;
+}
+
+pub fn abortPreparedCancellation(
+    comptime validate_owner: OwnerValidator,
+    owner_context: *const anyopaque,
+    prepared: *PreparedTxCancellation,
+    permit: *TxCancellationCommitPermit,
+    state: *client_external_mode.State,
+    binding: OwnerBinding,
+) bool {
+    const snapshot = prepared.storage();
+    const permit_storage = permit.storage();
+    const armed = snapshot.lifecycle == .armed;
+    if (!validate_owner(owner_context, binding) or
+        !cancellationSnapshotCurrent(
+            snapshot,
+            prepared,
+            state,
+            binding,
+            if (armed) .armed else .prepared,
+        )) return false;
+    if (armed) {
+        if (permit_storage.saved_self_addr != @intFromPtr(permit) or
+            permit_storage.prepared_addr != @intFromPtr(prepared) or
+            permit_storage.cleanup_addr != snapshot.cleanup_addr or
+            permit_storage.state_addr != @intFromPtr(state) or
+            permit_storage.lifecycle != .armed or
+            !std.mem.eql(u8, &permit_storage.digest, &cancellationPermitDigest(permit_storage)))
+            return false;
+        permit_storage.lifecycle = .aborted;
+        permit_storage.digest = cancellationPermitDigest(permit_storage);
+    } else if (!std.mem.allEqual(u8, &permit.bytes, 0)) return false;
+    snapshot.lifecycle = .tombstone;
+    snapshot.cancelled_count = 0;
+    snapshot.cancelled_bytes = 0;
+    snapshot.digest = cancellationSnapshotDigest(snapshot) orelse return false;
+    return true;
+}
+
+fn cancellationCommitReady(
+    comptime validate_owner: OwnerValidator,
+    owner_context: *const anyopaque,
+    prepared: *PreparedTxCancellation,
+    permit: *TxCancellationCommitPermit,
+    cleanup: *FrozenTxCancellationCleanup,
+    state: *client_external_mode.State,
+    binding: OwnerBinding,
+) bool {
+    const snapshot = prepared.storage();
+    const permit_storage = permit.storage();
+    return std.mem.allEqual(u8, &cleanup.bytes, 0) and
+        validate_owner(owner_context, binding) and
+        cancellationSnapshotCurrent(snapshot, prepared, state, binding, .armed) and
+        snapshot.permit_addr == @intFromPtr(permit) and
+        snapshot.cleanup_addr == @intFromPtr(cleanup) and
+        permit_storage.saved_self_addr == @intFromPtr(permit) and
+        permit_storage.prepared_addr == @intFromPtr(prepared) and
+        permit_storage.cleanup_addr == @intFromPtr(cleanup) and
+        permit_storage.state_addr == @intFromPtr(state) and
+        permit_storage.queue_generation == state.tx_queue_generation and
+        permit_storage.owner_incarnation == binding.owner_incarnation and
+        permit_storage.operation_generation == binding.operation_generation and
+        permit_storage.lifecycle == .armed and
+        std.mem.eql(u8, &permit_storage.digest, &cancellationPermitDigest(permit_storage));
+}
+
+fn commitValidatedCancellation(
+    prepared: *PreparedTxCancellation,
+    permit: *TxCancellationCommitPermit,
+    cleanup: *FrozenTxCancellationCleanup,
+    state: *client_external_mode.State,
+) void {
+    const snapshot = prepared.storage();
+    const permit_storage = permit.storage();
+    const cleanup_storage = cleanup.storage();
+
+    cleanup_storage.* = .{
+        .saved_self_addr = @intFromPtr(cleanup),
+        .state_addr = @intFromPtr(state),
+        .allocator = state.tx_allocator,
+        .allocator_ptr_addr = @intFromPtr(state.tx_allocator.ptr),
+        .allocator_vtable_addr = @intFromPtr(state.tx_allocator.vtable),
+        .binding = snapshot.binding,
+        .binding_digest = ownerBindingDigest(snapshot.binding),
+        .count = snapshot.cancelled_count,
+        .total_bytes = snapshot.cancelled_bytes,
+        .lifecycle = .owned,
+    };
+    var survivor_count: usize = 0;
+    var cancelled_count: usize = 0;
+    const old_len = state.external_tx.items.len;
+    for (state.external_tx.items, 0..) |frame, index| {
+        if (snapshot.cancel_mask[index]) {
+            cleanup_storage.frames[cancelled_count] = frame;
+            cancelled_count += 1;
+        } else {
+            state.external_tx.items[survivor_count] = frame;
+            survivor_count += 1;
+        }
+    }
+    // The ArrayList length is not an ownership boundary: stale descriptors in the inactive tail
+    // remain readable through the fixed backing allocation. Erase every removed slot before
+    // publishing the shorter length so no cancelled allocation identity survives there.
+    @memset(std.mem.sliceAsBytes(state.external_tx.items.ptr[survivor_count..old_len]), 0);
+    state.external_tx.items.len = survivor_count;
+    state.external_tx_bytes = snapshot.projected_queued_bytes;
+    state.tx_queue_generation = snapshot.projected_queue_generation;
+    state.tx_head_progress_baseline_ns = snapshot.projected_head_progress_ns;
+    state.tx_immediate_pending = snapshot.projected_immediate_pending;
+    cleanup_storage.post_queue_generation = snapshot.projected_queue_generation;
+    cleanup_storage.post_queued_bytes = snapshot.projected_queued_bytes;
+    cleanup_storage.post_queue_digest = snapshot.projected_queue_digest;
+    state.external_tx_retiring_bytes = snapshot.cancelled_bytes;
+    cleanup_storage.digest = cancellationCleanupDigest(cleanup_storage) orelse
+        @panic("validated cancellation cleanup seal became invalid");
+    snapshot.lifecycle = .committed;
+    snapshot.digest = cancellationSnapshotDigest(snapshot) orelse
+        @panic("validated cancellation snapshot seal became invalid");
+    permit_storage.lifecycle = .consumed;
+    permit_storage.digest = cancellationPermitDigest(permit_storage);
+}
+
+pub fn consumePreparedCancellationUnderHeldLease(
+    comptime validate_owner: OwnerValidator,
+    owner_context: *const anyopaque,
+    prepared: *PreparedTxCancellation,
+    permit: *TxCancellationCommitPermit,
+    cleanup: *FrozenTxCancellationCleanup,
+    state: *client_external_mode.State,
+    binding: OwnerBinding,
+) bool {
+    if (!cancellationCommitReady(
+        validate_owner,
+        owner_context,
+        prepared,
+        permit,
+        cleanup,
+        state,
+        binding,
+    )) return false;
+    commitValidatedCancellation(prepared, permit, cleanup, state);
+    return true;
+}
+
+pub const CancellationCleanupResult = enum { cleaned, invalid, quarantined };
+
+fn tombstoneCorruptCancellationCleanup(
+    frozen: *CancellationCleanupStorage,
+    state: *client_external_mode.State,
+) CancellationCleanupResult {
+    const retiring = state.external_tx_retiring_bytes;
+    if (retiring > max_resident_bytes) @panic("unbounded cancellation retirement charge");
+    if (retiring != 0) client_external_mode.chargeTxQuarantine(state, retiring);
+    state.tx_lifecycle = .terminal_tombstone;
+    state.external_tx_retiring_bytes = 0;
+    frozen.lifecycle = .quarantined;
+    frozen.count = 0;
+    frozen.total_bytes = 0;
+    frozen.digest = cancellationCleanupDigest(frozen) orelse
+        @panic("bounded cancellation quarantine seal became invalid");
+    return .quarantined;
+}
+
+fn cancellationCleanupDescriptorsValid(
+    frozen: *const CancellationCleanupStorage,
+    state: *const client_external_mode.State,
+    binding: OwnerBinding,
+    prepared: *const PreparedTxCancellation,
+    permit: *const TxCancellationCommitPermit,
+    cleanup: *const FrozenTxCancellationCleanup,
+) bool {
+    var total: usize = 0;
+    const ranges = checkedCancellationRanges(
+        state,
+        binding,
+        @intFromPtr(prepared),
+        @intFromPtr(permit),
+        @intFromPtr(cleanup),
+    ) orelse return false;
+    for (frozen.frames[0..frozen.count], 0..) |frame, index| {
+        if (frame.bytes.len < protocol.header_size or frame.bytes.len > max_resident_bytes or
+            frame.offset != 0 or
+            !std.mem.eql(u8, &frame.descriptor_digest, &frameDescriptorDigest(frame)))
+            return false;
+        const frame_range = sliceRange(frame.bytes) orelse return false;
+        const protected = [_]Range{
+            ranges.storage,
+            ranges.client,
+            ranges.lease,
+            ranges.scratch,
+            ranges.write_scratch,
+            ranges.allocator_context,
+            ranges.allocator_vtable,
+            ranges.queue_backing,
+            ranges.prepared,
+            ranges.permit,
+            ranges.cleanup,
+        };
+        for (protected) |item|
+            if (rangesOverlap(frame_range, item)) return false;
+        for (frozen.frames[0..index]) |prior| {
+            const prior_range = sliceRange(prior.bytes) orelse return false;
+            if (rangesOverlap(frame_range, prior_range)) return false;
+        }
+        total = std.math.add(usize, total, frame.bytes.len) catch return false;
+    }
+    return total == frozen.total_bytes and total <= max_resident_bytes;
+}
+
+const CancellationCleanupAuthority = enum { foreign, original_corrupt, valid };
+
+fn cancellationCleanupAuthority(
+    prepared: *PreparedTxCancellation,
+    permit: *TxCancellationCommitPermit,
+    cleanup: *const FrozenTxCancellationCleanup,
+    state: *const client_external_mode.State,
+    binding: OwnerBinding,
+) CancellationCleanupAuthority {
+    const snapshot = prepared.storage();
+    const permit_storage = permit.storage();
+    if (snapshot.saved_self_addr != @intFromPtr(prepared) or
+        snapshot.state_addr != @intFromPtr(state) or
+        snapshot.permit_addr != @intFromPtr(permit) or
+        snapshot.cleanup_addr != @intFromPtr(cleanup) or
+        permit_storage.saved_self_addr != @intFromPtr(permit))
+        return .foreign;
+    if (permit_storage.prepared_addr != @intFromPtr(prepared) or
+        permit_storage.cleanup_addr != @intFromPtr(cleanup) or
+        permit_storage.state_addr != @intFromPtr(state) or
+        permit_storage.owner_incarnation != binding.owner_incarnation or
+        permit_storage.operation_generation != binding.operation_generation or
+        permit_storage.lifecycle != .consumed or
+        !std.mem.eql(u8, &permit_storage.digest, &cancellationPermitDigest(permit_storage)))
+        return .foreign;
+    if (snapshot.lifecycle != .committed or
+        !std.meta.eql(snapshot.binding, binding) or
+        !std.mem.eql(u8, &snapshot.digest, &(cancellationSnapshotDigest(snapshot) orelse
+            return .original_corrupt)))
+        return .original_corrupt;
+    return .valid;
+}
+
+fn cancellationCleanupDigestValid(frozen: *const CancellationCleanupStorage) bool {
+    return frozen.count <= client_external_mode.max_tx_frames and
+        std.mem.eql(u8, &frozen.digest, &(cancellationCleanupDigest(frozen) orelse return false));
+}
+
+pub fn finishCancellationCleanup(
+    comptime validate_owner: OwnerValidator,
+    owner_context: *const anyopaque,
+    prepared: *PreparedTxCancellation,
+    permit: *TxCancellationCommitPermit,
+    cleanup: *FrozenTxCancellationCleanup,
+    state: *client_external_mode.State,
+    binding: OwnerBinding,
+) CancellationCleanupResult {
+    const frozen = cleanup.storage();
+    switch (cancellationCleanupAuthority(prepared, permit, cleanup, state, binding)) {
+        .foreign => return .invalid,
+        .original_corrupt => return tombstoneCorruptCancellationCleanup(frozen, state),
+        .valid => {},
+    }
+    const header_digest_valid = cancellationCleanupDigestValid(frozen);
+    if ((frozen.lifecycle == .cleaned or frozen.lifecycle == .quarantined) and
+        frozen.saved_self_addr == @intFromPtr(cleanup) and
+        frozen.state_addr == @intFromPtr(state) and
+        std.meta.eql(frozen.binding, binding) and
+        std.mem.eql(u8, &frozen.binding_digest, &ownerBindingDigest(binding)) and
+        header_digest_valid)
+        return .invalid;
+    if (frozen.saved_self_addr != @intFromPtr(cleanup) or
+        frozen.state_addr != @intFromPtr(state) or frozen.lifecycle != .owned or
+        !std.meta.eql(frozen.binding, binding) or
+        !std.mem.eql(u8, &frozen.binding_digest, &ownerBindingDigest(binding)) or
+        !header_digest_valid or
+        frozen.count > client_external_mode.max_tx_frames or
+        frozen.total_bytes != state.external_tx_retiring_bytes or
+        frozen.allocator_ptr_addr != @intFromPtr(frozen.allocator.ptr) or
+        frozen.allocator_vtable_addr != @intFromPtr(frozen.allocator.vtable) or
+        !cancellationCleanupDescriptorsValid(frozen, state, binding, prepared, permit, cleanup) or
+        !validate_owner(owner_context, binding))
+        return tombstoneCorruptCancellationCleanup(frozen, state);
+    state.tx_lifecycle = .completion_callback;
+    var remaining = frozen.total_bytes;
+    for (frozen.frames[0..frozen.count], 0..) |frame, index| {
+        frozen.allocator.rawFree(frame.bytes, .@"1", @returnAddress());
+        remaining -= frame.bytes.len;
+        const stable = state.tx_lifecycle == .completion_callback and
+            state.tx_queue_generation == frozen.post_queue_generation and
+            state.external_tx_bytes == frozen.post_queued_bytes and
+            state.external_tx_retiring_bytes == frozen.total_bytes and
+            validate_owner(owner_context, binding);
+        if (!stable) {
+            client_external_mode.chargeTxQuarantine(state, remaining);
+            state.tx_lifecycle = .terminal_tombstone;
+            state.external_tx_retiring_bytes = 0;
+            frozen.lifecycle = .quarantined;
+            frozen.count = 0;
+            frozen.total_bytes = 0;
+            frozen.digest = cancellationCleanupDigest(frozen) orelse
+                @panic("bounded cancellation callback quarantine seal became invalid");
+            _ = index;
+            return .quarantined;
+        }
+    }
+    state.tx_lifecycle = .live;
+    state.external_tx_retiring_bytes = 0;
+    const actual_post_digest = queueDigest(state) orelse {
+        quarantineLiveQueue(state, frozen.post_queued_bytes);
+        frozen.lifecycle = .quarantined;
+        frozen.count = 0;
+        frozen.total_bytes = 0;
+        frozen.digest = cancellationCleanupDigest(frozen) orelse
+            @panic("bounded cancellation live-queue quarantine seal became invalid");
+        return .quarantined;
+    };
+    if (!std.mem.eql(u8, &frozen.post_queue_digest, &actual_post_digest)) {
+        quarantineLiveQueue(state, frozen.post_queued_bytes);
+        frozen.lifecycle = .quarantined;
+        frozen.count = 0;
+        frozen.total_bytes = 0;
+        frozen.digest = cancellationCleanupDigest(frozen) orelse
+            @panic("bounded cancellation digest quarantine seal became invalid");
+        return .quarantined;
+    }
+    frozen.lifecycle = .cleaned;
+    frozen.count = 0;
+    frozen.total_bytes = 0;
+    frozen.digest = cancellationCleanupDigest(frozen) orelse
+        @panic("bounded cancellation cleaned seal became invalid");
+    return .cleaned;
 }
 
 fn captureWriteSnapshot(
@@ -2172,6 +3035,7 @@ const DriftMode = enum {
     request_state,
     payload_bytes,
     cleanup_free_drift,
+    cancellation_cleanup_drift,
 };
 
 const DriftAllocator = struct {
@@ -2223,6 +3087,7 @@ const DriftAllocator = struct {
                 test_owner_digest[0] ^= 0xff;
                 return self.parent.rawAlloc(len, alignment, ret_addr);
             },
+            .cancellation_cleanup_drift => return self.parent.rawAlloc(len, alignment, ret_addr),
         }
         if (len > self.backing.len) return null;
         return &self.backing;
@@ -2260,11 +3125,14 @@ const DriftAllocator = struct {
             self.mode == .owner_digest or
             self.mode == .request_state or
             self.mode == .payload_bytes or
-            self.mode == .cleanup_free_drift)
+            self.mode == .cleanup_free_drift or
+            self.mode == .cancellation_cleanup_drift)
         {
             self.parent.rawFree(memory, alignment, ret_addr);
         }
         if (self.mode == .cleanup_free_drift)
+            self.state.tx_queue_generation += 1;
+        if (self.mode == .cancellation_cleanup_drift)
             self.state.tx_queue_generation += 1;
     }
 };
@@ -4157,4 +5025,672 @@ test "f1b terminal after one completion consumes discard-only evidence" {
     try std.testing.expect(!recorder.semantic_allowed);
     try std.testing.expectEqual(@as(usize, 1), recorder.count);
     try std.testing.expectEqual(CompletionLifecycle.spent, prepared.storage().lifecycle);
+}
+
+fn cancellationBinding(original: OwnerBinding, prepared: *PreparedTxCancellation) OwnerBinding {
+    var binding = original;
+    binding.purpose = .cancel_turn;
+    binding.write_scratch_addr = @intFromPtr(prepared);
+    binding.write_scratch_len = @sizeOf(PreparedTxCancellation);
+    return binding;
+}
+
+test "f3b validated cancel moves exact input and request while preserving survivor FIFO" {
+    var state = try initState();
+    defer state.deinit(std.testing.allocator);
+    var request_ids = client_pump.RequestIdState{ .available = 41 };
+    var owner_storage: [64]u8 = undefined;
+    var owner_client: [64]u8 = undefined;
+    const base = testBinding(&owner_storage, &owner_client);
+    try std.testing.expect(admit(std.testing.allocator, &state, &request_ids, base, .{
+        .kind = .input_bytes,
+        .stream_id = 7,
+        .payload = "input",
+        .request_policy = .zero,
+    }, 1) == .admitted);
+    try std.testing.expect(admit(std.testing.allocator, &state, &request_ids, base, .{
+        .kind = .stream_ack,
+        .stream_id = 7,
+        .payload = "ack",
+        .request_policy = .zero,
+    }, 2) == .admitted);
+    const request = switch (admit(std.testing.allocator, &state, &request_ids, base, .{
+        .kind = .request,
+        .stream_id = 0,
+        .payload = "{}",
+        .request_policy = .reserve,
+    }, 3)) {
+        .admitted => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    const survivor_before = state.external_tx.items[1];
+    var prepared: PreparedTxCancellation = .{};
+    var permit: TxCancellationCommitPermit = .{};
+    var cleanup: FrozenTxCancellationCleanup = .{};
+    const binding = cancellationBinding(base, &prepared);
+    try std.testing.expectEqual(CancellationPrepareResult.prepared, prepareCancellationFromExternalPump(testOwnerValid, @ptrCast(&state), &prepared, &permit, &cleanup, &state, binding, .{
+        .stream_id = 7,
+        .control = .{ .request_id = request.request_id, .wire_len = request.wire_len },
+    }, 10));
+    var copied_prepared = prepared;
+    try std.testing.expect(!validatePreparedCancellation(testOwnerValid, @ptrCast(&state), &copied_prepared, &permit, &state, binding));
+    try std.testing.expectEqual(@as(usize, 3), state.external_tx.items.len);
+    try std.testing.expect(validatePreparedCancellation(testOwnerValid, @ptrCast(&state), &prepared, &permit, &state, binding));
+    var copied_permit = permit;
+    try std.testing.expect(!consumePreparedCancellationUnderHeldLease(testOwnerValid, @ptrCast(&state), &prepared, &copied_permit, &cleanup, &state, binding));
+    try std.testing.expectEqual(@as(usize, 3), state.external_tx.items.len);
+    try std.testing.expect(consumePreparedCancellationUnderHeldLease(testOwnerValid, @ptrCast(&state), &prepared, &permit, &cleanup, &state, binding));
+    try std.testing.expectEqual(@as(usize, 1), state.external_tx.items.len);
+    try std.testing.expectEqual(@intFromPtr(survivor_before.bytes.ptr), @intFromPtr(state.external_tx.items[0].bytes.ptr));
+    for (state.external_tx.items.ptr[1..3]) |tail_frame|
+        try std.testing.expect(std.mem.allEqual(
+            u8,
+            std.mem.asBytes(&tail_frame),
+            0,
+        ));
+    try std.testing.expectEqual(CancellationCleanupResult.cleaned, finishCancellationCleanup(testOwnerValid, @ptrCast(&state), &prepared, &permit, &cleanup, &state, binding));
+    try std.testing.expectEqual(@as(usize, 0), state.external_tx_retiring_bytes);
+    try std.testing.expect(queueDigest(&state) != null);
+}
+
+test "f3b cancel rejects partial request without queue mutation" {
+    var state = try initState();
+    defer state.deinit(std.testing.allocator);
+    var request_ids = client_pump.RequestIdState{ .available = 50 };
+    var owner_storage: [64]u8 = undefined;
+    var owner_client: [64]u8 = undefined;
+    const base = testBinding(&owner_storage, &owner_client);
+    const request = switch (admit(std.testing.allocator, &state, &request_ids, base, .{
+        .kind = .request,
+        .stream_id = 0,
+        .payload = "{}",
+        .request_policy = .reserve,
+    }, 1)) {
+        .admitted => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    state.external_tx.items[0].offset = 1;
+    state.external_tx.items[0].descriptor_digest = frameDescriptorDigest(state.external_tx.items[0]);
+    const generation = state.tx_queue_generation;
+    var prepared: PreparedTxCancellation = .{};
+    var permit: TxCancellationCommitPermit = .{};
+    var cleanup: FrozenTxCancellationCleanup = .{};
+    const binding = cancellationBinding(base, &prepared);
+    try std.testing.expectEqual(CancellationPrepareResult.uncancellable, prepareCancellationFromExternalPump(testOwnerValid, @ptrCast(&state), &prepared, &permit, &cleanup, &state, binding, .{
+        .stream_id = 7,
+        .control = .{ .request_id = request.request_id, .wire_len = request.wire_len },
+    }, 10));
+    try std.testing.expectEqual(generation, state.tx_queue_generation);
+    try std.testing.expectEqual(@as(usize, 1), state.external_tx.items.len);
+}
+
+test "f3b cancellation rejects duplicate request identity and cross-state permit" {
+    var state = try initState();
+    defer state.deinit(std.testing.allocator);
+    var request_ids = client_pump.RequestIdState{ .available = 60 };
+    var owner_storage: [64]u8 = undefined;
+    var owner_client: [64]u8 = undefined;
+    const base = testBinding(&owner_storage, &owner_client);
+    const first = switch (admit(std.testing.allocator, &state, &request_ids, base, .{
+        .kind = .request,
+        .stream_id = 0,
+        .payload = "{}",
+        .request_policy = .reserve,
+    }, 1)) {
+        .admitted => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    _ = admit(std.testing.allocator, &state, &request_ids, base, .{
+        .kind = .request,
+        .stream_id = 0,
+        .payload = "{}",
+        .request_policy = .reserve,
+    }, 2);
+    state.external_tx.items[1].request_id = first.request_id;
+    var duplicate_header = try protocol.Header.decode(@ptrCast(state.external_tx.items[1].bytes.ptr));
+    duplicate_header.request_id = first.request_id;
+    const duplicate_header_bytes = duplicate_header.encode();
+    @memcpy(state.external_tx.items[1].bytes[0..protocol.header_size], &duplicate_header_bytes);
+    state.external_tx.items[1].wire_digest = bytesDigest("MARUTXW1", state.external_tx.items[1].bytes);
+    state.external_tx.items[1].descriptor_digest = frameDescriptorDigest(state.external_tx.items[1]);
+    var prepared: PreparedTxCancellation = .{};
+    var permit: TxCancellationCommitPermit = .{};
+    var cleanup: FrozenTxCancellationCleanup = .{};
+    const binding = cancellationBinding(base, &prepared);
+    try std.testing.expectEqual(CancellationPrepareResult.uncancellable, prepareCancellationFromExternalPump(testOwnerValid, @ptrCast(&state), &prepared, &permit, &cleanup, &state, binding, .{
+        .stream_id = 7,
+        .control = .{ .request_id = first.request_id, .wire_len = first.wire_len },
+    }, 10));
+
+    // A fresh authority-only revoke has a real prepared/permit lifecycle even with no TX target.
+    var empty_state = try initState();
+    defer empty_state.deinit(std.testing.allocator);
+    var empty_prepared: PreparedTxCancellation = .{};
+    var empty_permit: TxCancellationCommitPermit = .{};
+    var empty_cleanup: FrozenTxCancellationCleanup = .{};
+    const empty_binding = cancellationBinding(base, &empty_prepared);
+    try std.testing.expectEqual(CancellationPrepareResult.prepared, prepareCancellationFromExternalPump(testOwnerValid, @ptrCast(&empty_state), &empty_prepared, &empty_permit, &empty_cleanup, &empty_state, empty_binding, .{ .stream_id = 7 }, 10));
+    try std.testing.expect(validatePreparedCancellation(testOwnerValid, @ptrCast(&empty_state), &empty_prepared, &empty_permit, &empty_state, empty_binding));
+    try std.testing.expect(!consumePreparedCancellationUnderHeldLease(testOwnerValid, @ptrCast(&empty_state), &empty_prepared, &empty_permit, &empty_cleanup, &state, empty_binding));
+    const generation = empty_state.tx_queue_generation;
+    try std.testing.expect(consumePreparedCancellationUnderHeldLease(testOwnerValid, @ptrCast(&empty_state), &empty_prepared, &empty_permit, &empty_cleanup, &empty_state, empty_binding));
+    try std.testing.expectEqual(generation, empty_state.tx_queue_generation);
+    try std.testing.expectEqual(CancellationCleanupResult.cleaned, finishCancellationCleanup(testOwnerValid, @ptrCast(&empty_state), &empty_prepared, &empty_permit, &empty_cleanup, &empty_state, empty_binding));
+}
+
+test "f3b cancellation cleanup quarantines remaining backing after allocator drift" {
+    client_external_mode.resetTxQuarantineForTest();
+    var state = try initState();
+    defer {
+        test_owner_digest = [_]u8{0x22} ** 32;
+        state.external_tx_quarantined_bytes = 0;
+        state.external_tx_retiring_bytes = 0;
+        state.tx_lifecycle = .live;
+        state.deinit(std.testing.allocator);
+    }
+    var drift = DriftAllocator{
+        .parent = std.heap.page_allocator,
+        .state = &state,
+        .mode = .cancellation_cleanup_drift,
+    };
+    const allocator = drift.allocator();
+    state.tx_allocator = allocator;
+    state.tx_allocator_context_len = @sizeOf(DriftAllocator);
+    var request_ids = client_pump.RequestIdState{ .available = 1 };
+    var owner_storage: [64]u8 = undefined;
+    var owner_client: [64]u8 = undefined;
+    var base = testBinding(&owner_storage, &owner_client);
+    base.allocator_ptr_addr = @intFromPtr(allocator.ptr);
+    base.allocator_context_len = @sizeOf(DriftAllocator);
+    base.allocator_vtable_addr = @intFromPtr(allocator.vtable);
+    for ([_][]const u8{ "one", "two" }) |payload|
+        try std.testing.expect(admit(allocator, &state, &request_ids, base, .{
+            .kind = .input_bytes,
+            .stream_id = 7,
+            .payload = payload,
+            .request_policy = .zero,
+        }, 1) == .admitted);
+    var prepared: PreparedTxCancellation = .{};
+    var permit: TxCancellationCommitPermit = .{};
+    var cleanup: FrozenTxCancellationCleanup = .{};
+    const binding = cancellationBinding(base, &prepared);
+    try std.testing.expectEqual(CancellationPrepareResult.prepared, prepareCancellationFromExternalPump(testOwnerValid, @ptrCast(&state), &prepared, &permit, &cleanup, &state, binding, .{ .stream_id = 7 }, 10));
+    try std.testing.expect(validatePreparedCancellation(testOwnerValid, @ptrCast(&state), &prepared, &permit, &state, binding));
+    try std.testing.expect(consumePreparedCancellationUnderHeldLease(testOwnerValid, @ptrCast(&state), &prepared, &permit, &cleanup, &state, binding));
+    try std.testing.expectEqual(CancellationCleanupResult.quarantined, finishCancellationCleanup(testOwnerValid, @ptrCast(&state), &prepared, &permit, &cleanup, &state, binding));
+    try std.testing.expectEqual(client_external_mode.TxLifecycle.terminal_tombstone, state.tx_lifecycle);
+    try std.testing.expect(state.external_tx_quarantined_bytes != 0);
+}
+
+test "f3b cancellation snapshots full queue and preserves all survivor order" {
+    var state = try initState();
+    defer state.deinit(std.testing.allocator);
+    var request_ids = client_pump.RequestIdState{ .available = 1 };
+    var owner_storage: [64]u8 = undefined;
+    var owner_client: [64]u8 = undefined;
+    const base = testBinding(&owner_storage, &owner_client);
+    for (0..client_external_mode.max_tx_frames) |index|
+        try std.testing.expect(admit(std.testing.allocator, &state, &request_ids, base, .{
+            .kind = .input_bytes,
+            .stream_id = if (index % 2 == 0) 7 else 8,
+            .payload = "",
+            .request_policy = .zero,
+        }, @intCast(index + 1)) == .admitted);
+    var survivor_addresses: [client_external_mode.max_tx_frames / 2]usize = undefined;
+    for (0..survivor_addresses.len) |index|
+        survivor_addresses[index] = @intFromPtr(state.external_tx.items[index * 2 + 1].bytes.ptr);
+    var prepared: PreparedTxCancellation = .{};
+    var permit: TxCancellationCommitPermit = .{};
+    var cleanup: FrozenTxCancellationCleanup = .{};
+    const binding = cancellationBinding(base, &prepared);
+    try std.testing.expectEqual(CancellationPrepareResult.prepared, prepareCancellationFromExternalPump(testOwnerValid, @ptrCast(&state), &prepared, &permit, &cleanup, &state, binding, .{ .stream_id = 7 }, 100));
+    try std.testing.expect(validatePreparedCancellation(testOwnerValid, @ptrCast(&state), &prepared, &permit, &state, binding));
+    try std.testing.expect(consumePreparedCancellationUnderHeldLease(testOwnerValid, @ptrCast(&state), &prepared, &permit, &cleanup, &state, binding));
+    try std.testing.expectEqual(survivor_addresses.len, state.external_tx.items.len);
+    for (state.external_tx.items, survivor_addresses) |frame, address|
+        try std.testing.expectEqual(address, @intFromPtr(frame.bytes.ptr));
+    try std.testing.expectEqual(CancellationCleanupResult.cleaned, finishCancellationCleanup(testOwnerValid, @ptrCast(&state), &prepared, &permit, &cleanup, &state, binding));
+}
+
+test "f3b cancellation rejects payload alias with protected owner range" {
+    var state = try initState();
+    defer state.deinit(std.testing.allocator);
+    var request_ids = client_pump.RequestIdState{ .available = 1 };
+    var owner_storage: [64]u8 = undefined;
+    var owner_client: [64]u8 = undefined;
+    const base = testBinding(&owner_storage, &owner_client);
+    try std.testing.expect(admit(std.testing.allocator, &state, &request_ids, base, .{
+        .kind = .input_bytes,
+        .stream_id = 7,
+        .payload = "x",
+        .request_policy = .zero,
+    }, 1) == .admitted);
+    const saved = state.external_tx.items[0];
+    @memcpy(owner_storage[0..saved.bytes.len], saved.bytes);
+    state.external_tx.items[0].bytes = owner_storage[0..saved.bytes.len];
+    state.external_tx.items[0].wire_digest = bytesDigest("MARUTXW1", state.external_tx.items[0].bytes);
+    state.external_tx.items[0].descriptor_digest = frameDescriptorDigest(state.external_tx.items[0]);
+    defer state.external_tx.items[0] = saved;
+    var prepared: PreparedTxCancellation = .{};
+    var permit: TxCancellationCommitPermit = .{};
+    var cleanup: FrozenTxCancellationCleanup = .{};
+    const binding = cancellationBinding(base, &prepared);
+    try std.testing.expectEqual(CancellationPrepareResult.invalid, prepareCancellationFromExternalPump(testOwnerValid, @ptrCast(&state), &prepared, &permit, &cleanup, &state, binding, .{ .stream_id = 7 }, 10));
+    try std.testing.expect(std.mem.allEqual(u8, &prepared.bytes, 0));
+}
+
+test "f3b cancellation rejects max generation and backwards clock without mutation" {
+    var state = try initState();
+    defer state.deinit(std.testing.allocator);
+    var request_ids = client_pump.RequestIdState{ .available = 1 };
+    var owner_storage: [64]u8 = undefined;
+    var owner_client: [64]u8 = undefined;
+    const base = testBinding(&owner_storage, &owner_client);
+    try std.testing.expect(admit(std.testing.allocator, &state, &request_ids, base, .{
+        .kind = .input_bytes,
+        .stream_id = 7,
+        .payload = "x",
+        .request_policy = .zero,
+    }, 100) == .admitted);
+    state.tx_queue_generation = std.math.maxInt(u64) - 1;
+    const saved_len = state.external_tx.items.len;
+    const saved_bytes = state.external_tx_bytes;
+    const saved_generation = state.tx_queue_generation;
+    const saved_frame = state.external_tx.items[0];
+    var prepared: PreparedTxCancellation = .{};
+    var permit: TxCancellationCommitPermit = .{};
+    var cleanup: FrozenTxCancellationCleanup = .{};
+    const binding = cancellationBinding(base, &prepared);
+    try std.testing.expectEqual(.invalid, prepareCancellationFromExternalPump(
+        testOwnerValid,
+        @ptrCast(&state),
+        &prepared,
+        &permit,
+        &cleanup,
+        &state,
+        binding,
+        .{ .stream_id = 7 },
+        100,
+    ));
+    try std.testing.expectEqual(saved_generation, state.tx_queue_generation);
+    try std.testing.expectEqual(saved_len, state.external_tx.items.len);
+    try std.testing.expectEqual(saved_bytes, state.external_tx_bytes);
+    try std.testing.expect(frameMatchesScalar(saved_frame, .{
+        .bytes_addr = @intFromPtr(state.external_tx.items[0].bytes.ptr),
+        .bytes_len = state.external_tx.items[0].bytes.len,
+        .offset = state.external_tx.items[0].offset,
+        .kind = state.external_tx.items[0].kind,
+        .stream_id = state.external_tx.items[0].stream_id,
+        .request_id = state.external_tx.items[0].request_id,
+        .activated_at_ns = state.external_tx.items[0].activated_at_ns,
+        .wire_digest = state.external_tx.items[0].wire_digest,
+        .descriptor_digest = state.external_tx.items[0].descriptor_digest,
+    }));
+    try std.testing.expect(std.mem.allEqual(u8, &prepared.bytes, 0));
+
+    state.tx_queue_generation = saved_generation - 1;
+    try std.testing.expectEqual(.invalid, prepareCancellationFromExternalPump(
+        testOwnerValid,
+        @ptrCast(&state),
+        &prepared,
+        &permit,
+        &cleanup,
+        &state,
+        binding,
+        .{ .stream_id = 7 },
+        99,
+    ));
+    try std.testing.expectEqual(saved_generation - 1, state.tx_queue_generation);
+    try std.testing.expect(std.mem.allEqual(u8, &prepared.bytes, 0));
+}
+
+test "f3b cancellation preserves or replaces head clock from survivor identity" {
+    var owner_storage: [64]u8 = undefined;
+    var owner_client: [64]u8 = undefined;
+    const base = testBinding(&owner_storage, &owner_client);
+
+    var surviving_head = try initState();
+    defer surviving_head.deinit(std.testing.allocator);
+    var surviving_ids = client_pump.RequestIdState{ .available = 1 };
+    for ([_]u64{ 8, 7 }, 0..) |stream_id, index|
+        try std.testing.expect(admit(std.testing.allocator, &surviving_head, &surviving_ids, base, .{
+            .kind = .input_bytes,
+            .stream_id = stream_id,
+            .payload = "x",
+            .request_policy = .zero,
+        }, @intCast(index + 1)) == .admitted);
+    surviving_head.tx_head_progress_baseline_ns = 55;
+    var prepared_a: PreparedTxCancellation = .{};
+    var permit_a: TxCancellationCommitPermit = .{};
+    var cleanup_a: FrozenTxCancellationCleanup = .{};
+    const binding_a = cancellationBinding(base, &prepared_a);
+    try std.testing.expectEqual(.prepared, prepareCancellationFromExternalPump(testOwnerValid, @ptrCast(&surviving_head), &prepared_a, &permit_a, &cleanup_a, &surviving_head, binding_a, .{ .stream_id = 7 }, 99));
+    try std.testing.expectEqual(@as(?i128, 55), prepared_a.storage().projected_head_progress_ns);
+    try std.testing.expect(abortPreparedCancellation(testOwnerValid, @ptrCast(&surviving_head), &prepared_a, &permit_a, &surviving_head, binding_a));
+
+    var replaced_head = try initState();
+    defer replaced_head.deinit(std.testing.allocator);
+    var replaced_ids = client_pump.RequestIdState{ .available = 1 };
+    for ([_]u64{ 7, 8 }, 0..) |stream_id, index|
+        try std.testing.expect(admit(std.testing.allocator, &replaced_head, &replaced_ids, base, .{
+            .kind = .input_bytes,
+            .stream_id = stream_id,
+            .payload = "x",
+            .request_policy = .zero,
+        }, @intCast(index + 1)) == .admitted);
+    replaced_head.tx_head_progress_baseline_ns = 55;
+    var prepared_b: PreparedTxCancellation = .{};
+    var permit_b: TxCancellationCommitPermit = .{};
+    var cleanup_b: FrozenTxCancellationCleanup = .{};
+    const binding_b = cancellationBinding(base, &prepared_b);
+    try std.testing.expectEqual(.prepared, prepareCancellationFromExternalPump(testOwnerValid, @ptrCast(&replaced_head), &prepared_b, &permit_b, &cleanup_b, &replaced_head, binding_b, .{ .stream_id = 7 }, 99));
+    try std.testing.expectEqual(@as(?i128, 99), prepared_b.storage().projected_head_progress_ns);
+    try std.testing.expect(abortPreparedCancellation(testOwnerValid, @ptrCast(&replaced_head), &prepared_b, &permit_b, &replaced_head, binding_b));
+}
+
+test "f3b cancellation abort replay and copied cleanup are fail closed" {
+    var state = try initState();
+    defer state.deinit(std.testing.allocator);
+    var request_ids = client_pump.RequestIdState{ .available = 1 };
+    var owner_storage: [64]u8 = undefined;
+    var owner_client: [64]u8 = undefined;
+    const base = testBinding(&owner_storage, &owner_client);
+    try std.testing.expect(admit(std.testing.allocator, &state, &request_ids, base, .{
+        .kind = .input_bytes,
+        .stream_id = 7,
+        .payload = "x",
+        .request_policy = .zero,
+    }, 1) == .admitted);
+    var prepared: PreparedTxCancellation = .{};
+    var permit: TxCancellationCommitPermit = .{};
+    var cleanup: FrozenTxCancellationCleanup = .{};
+    const binding = cancellationBinding(base, &prepared);
+    try std.testing.expectEqual(.prepared, prepareCancellationFromExternalPump(testOwnerValid, @ptrCast(&state), &prepared, &permit, &cleanup, &state, binding, .{ .stream_id = 7 }, 2));
+    test_owner_digest[0] ^= 0xff;
+    try std.testing.expect(!abortPreparedCancellation(testOwnerValid, @ptrCast(&state), &prepared, &permit, &state, binding));
+    try std.testing.expectEqual(CancellationLifecycle.prepared, prepared.storage().lifecycle);
+    try std.testing.expect(std.mem.allEqual(u8, &permit.bytes, 0));
+    test_owner_digest[0] ^= 0xff;
+    try std.testing.expect(abortPreparedCancellation(testOwnerValid, @ptrCast(&state), &prepared, &permit, &state, binding));
+    try std.testing.expect(!abortPreparedCancellation(testOwnerValid, @ptrCast(&state), &prepared, &permit, &state, binding));
+    try std.testing.expectEqual(@as(usize, 1), state.external_tx.items.len);
+
+    prepared = .{};
+    permit = .{};
+    try std.testing.expectEqual(.prepared, prepareCancellationFromExternalPump(testOwnerValid, @ptrCast(&state), &prepared, &permit, &cleanup, &state, binding, .{ .stream_id = 7 }, 2));
+    try std.testing.expect(validatePreparedCancellation(testOwnerValid, @ptrCast(&state), &prepared, &permit, &state, binding));
+    try std.testing.expect(abortPreparedCancellation(testOwnerValid, @ptrCast(&state), &prepared, &permit, &state, binding));
+    try std.testing.expect(!abortPreparedCancellation(testOwnerValid, @ptrCast(&state), &prepared, &permit, &state, binding));
+    try std.testing.expectEqual(@as(usize, 1), state.external_tx.items.len);
+}
+
+test "f3b copied cleanup wrong operation and double finish never mutate live owner" {
+    var state = try initState();
+    defer state.deinit(std.testing.allocator);
+    var request_ids = client_pump.RequestIdState{ .available = 1 };
+    var owner_storage: [64]u8 = undefined;
+    var owner_client: [64]u8 = undefined;
+    const base = testBinding(&owner_storage, &owner_client);
+    try std.testing.expect(admit(std.testing.allocator, &state, &request_ids, base, .{
+        .kind = .input_bytes,
+        .stream_id = 7,
+        .payload = "x",
+        .request_policy = .zero,
+    }, 1) == .admitted);
+    var prepared: PreparedTxCancellation = .{};
+    var permit: TxCancellationCommitPermit = .{};
+    var cleanup: FrozenTxCancellationCleanup = .{};
+    const binding = cancellationBinding(base, &prepared);
+    try std.testing.expectEqual(.prepared, prepareCancellationFromExternalPump(testOwnerValid, @ptrCast(&state), &prepared, &permit, &cleanup, &state, binding, .{ .stream_id = 7 }, 2));
+    try std.testing.expectEqual(@as(?i128, null), prepared.storage().projected_head_progress_ns);
+    try std.testing.expect(validatePreparedCancellation(testOwnerValid, @ptrCast(&state), &prepared, &permit, &state, binding));
+    test_owner_digest[0] ^= 0xff;
+    try std.testing.expect(!consumePreparedCancellationUnderHeldLease(testOwnerValid, @ptrCast(&state), &prepared, &permit, &cleanup, &state, binding));
+    try std.testing.expectEqual(@as(usize, 1), state.external_tx.items.len);
+    test_owner_digest[0] ^= 0xff;
+    try std.testing.expect(consumePreparedCancellationUnderHeldLease(testOwnerValid, @ptrCast(&state), &prepared, &permit, &cleanup, &state, binding));
+    try std.testing.expect(!consumePreparedCancellationUnderHeldLease(testOwnerValid, @ptrCast(&state), &prepared, &permit, &cleanup, &state, binding));
+
+    var copied_cleanup = cleanup;
+    const retiring = state.external_tx_retiring_bytes;
+    const lifecycle = state.tx_lifecycle;
+    try std.testing.expectEqual(.invalid, finishCancellationCleanup(testOwnerValid, @ptrCast(&state), &prepared, &permit, &copied_cleanup, &state, binding));
+    try std.testing.expectEqual(retiring, state.external_tx_retiring_bytes);
+    try std.testing.expectEqual(lifecycle, state.tx_lifecycle);
+
+    var wrong_binding = binding;
+    wrong_binding.operation_generation += 1;
+    try std.testing.expectEqual(.invalid, finishCancellationCleanup(testOwnerValid, @ptrCast(&state), &prepared, &permit, &cleanup, &state, wrong_binding));
+    try std.testing.expectEqual(retiring, state.external_tx_retiring_bytes);
+    try std.testing.expectEqual(lifecycle, state.tx_lifecycle);
+
+    try std.testing.expectEqual(.cleaned, finishCancellationCleanup(testOwnerValid, @ptrCast(&state), &prepared, &permit, &cleanup, &state, binding));
+    try std.testing.expectEqual(.invalid, finishCancellationCleanup(testOwnerValid, @ptrCast(&state), &prepared, &permit, &cleanup, &state, binding));
+    try std.testing.expectEqual(@as(usize, 0), state.external_tx_retiring_bytes);
+    try std.testing.expectEqual(client_external_mode.TxLifecycle.live, state.tx_lifecycle);
+}
+
+test "f3b original cleanup descriptor corruption quarantines without allocator callback" {
+    client_external_mode.resetTxQuarantineForTest();
+    var state = try initState();
+    defer {
+        state.external_tx_quarantined_bytes = 0;
+        state.external_tx_retiring_bytes = 0;
+        state.deinit(std.testing.allocator);
+    }
+    var request_ids = client_pump.RequestIdState{ .available = 1 };
+    var owner_storage: [64]u8 = undefined;
+    var owner_client: [64]u8 = undefined;
+    const base = testBinding(&owner_storage, &owner_client);
+    try std.testing.expect(admit(std.testing.allocator, &state, &request_ids, base, .{
+        .kind = .input_bytes,
+        .stream_id = 7,
+        .payload = "x",
+        .request_policy = .zero,
+    }, 1) == .admitted);
+    var prepared: PreparedTxCancellation = .{};
+    var permit: TxCancellationCommitPermit = .{};
+    var cleanup: FrozenTxCancellationCleanup = .{};
+    const binding = cancellationBinding(base, &prepared);
+    try std.testing.expectEqual(.prepared, prepareCancellationFromExternalPump(testOwnerValid, @ptrCast(&state), &prepared, &permit, &cleanup, &state, binding, .{ .stream_id = 7 }, 2));
+    try std.testing.expect(validatePreparedCancellation(testOwnerValid, @ptrCast(&state), &prepared, &permit, &state, binding));
+    try std.testing.expect(consumePreparedCancellationUnderHeldLease(testOwnerValid, @ptrCast(&state), &prepared, &permit, &cleanup, &state, binding));
+    const owned_frame = cleanup.storage().frames[0];
+    cleanup.storage().frames[0].descriptor_digest[0] ^= 0xff;
+    const quarantined = state.external_tx_retiring_bytes;
+    try std.testing.expectEqual(.quarantined, finishCancellationCleanup(testOwnerValid, @ptrCast(&state), &prepared, &permit, &cleanup, &state, binding));
+    try std.testing.expectEqual(quarantined, state.external_tx_quarantined_bytes);
+    try std.testing.expectEqual(@as(usize, 0), state.external_tx_retiring_bytes);
+    try std.testing.expectEqual(client_external_mode.TxLifecycle.terminal_tombstone, state.tx_lifecycle);
+    // The corrupt descriptor path deliberately never called its allocator. Test ownership can
+    // reclaim the saved, known-good allocation after observing the terminal state.
+    std.testing.allocator.rawFree(owned_frame.bytes, .@"1", @returnAddress());
+}
+
+test "f3b original cleanup saved self corruption quarantines through external authority" {
+    client_external_mode.resetTxQuarantineForTest();
+    var state = try initState();
+    defer {
+        state.external_tx_quarantined_bytes = 0;
+        state.external_tx_retiring_bytes = 0;
+        state.deinit(std.testing.allocator);
+    }
+    var request_ids = client_pump.RequestIdState{ .available = 1 };
+    var owner_storage: [64]u8 = undefined;
+    var owner_client: [64]u8 = undefined;
+    const base = testBinding(&owner_storage, &owner_client);
+    try std.testing.expect(admit(std.testing.allocator, &state, &request_ids, base, .{
+        .kind = .input_bytes,
+        .stream_id = 7,
+        .payload = "x",
+        .request_policy = .zero,
+    }, 1) == .admitted);
+    var prepared: PreparedTxCancellation = .{};
+    var permit: TxCancellationCommitPermit = .{};
+    var cleanup: FrozenTxCancellationCleanup = .{};
+    const binding = cancellationBinding(base, &prepared);
+    try std.testing.expectEqual(.prepared, prepareCancellationFromExternalPump(testOwnerValid, @ptrCast(&state), &prepared, &permit, &cleanup, &state, binding, .{ .stream_id = 7 }, 2));
+    try std.testing.expect(validatePreparedCancellation(testOwnerValid, @ptrCast(&state), &prepared, &permit, &state, binding));
+    try std.testing.expect(consumePreparedCancellationUnderHeldLease(testOwnerValid, @ptrCast(&state), &prepared, &permit, &cleanup, &state, binding));
+    const owned_frame = cleanup.storage().frames[0];
+    cleanup.storage().saved_self_addr +%= 1;
+    const quarantined = state.external_tx_retiring_bytes;
+    try std.testing.expectEqual(.quarantined, finishCancellationCleanup(testOwnerValid, @ptrCast(&state), &prepared, &permit, &cleanup, &state, binding));
+    try std.testing.expectEqual(quarantined, state.external_tx_quarantined_bytes);
+    try std.testing.expectEqual(@as(usize, 0), state.external_tx_retiring_bytes);
+    try std.testing.expectEqual(client_external_mode.TxLifecycle.terminal_tombstone, state.tx_lifecycle);
+    std.testing.allocator.rawFree(owned_frame.bytes, .@"1", @returnAddress());
+}
+
+test "f3b cleanup queue backing overflow quarantines without trap or free" {
+    client_external_mode.resetTxQuarantineForTest();
+    var state = try initState();
+    defer {
+        state.external_tx_quarantined_bytes = 0;
+        state.external_tx_retiring_bytes = 0;
+        state.deinit(std.testing.allocator);
+    }
+    var request_ids = client_pump.RequestIdState{ .available = 1 };
+    var owner_storage: [64]u8 = undefined;
+    var owner_client: [64]u8 = undefined;
+    const base = testBinding(&owner_storage, &owner_client);
+    try std.testing.expect(admit(std.testing.allocator, &state, &request_ids, base, .{
+        .kind = .input_bytes,
+        .stream_id = 7,
+        .payload = "x",
+        .request_policy = .zero,
+    }, 1) == .admitted);
+    var prepared: PreparedTxCancellation = .{};
+    var permit: TxCancellationCommitPermit = .{};
+    var cleanup: FrozenTxCancellationCleanup = .{};
+    const binding = cancellationBinding(base, &prepared);
+    try std.testing.expectEqual(.prepared, prepareCancellationFromExternalPump(testOwnerValid, @ptrCast(&state), &prepared, &permit, &cleanup, &state, binding, .{ .stream_id = 7 }, 2));
+    try std.testing.expect(validatePreparedCancellation(testOwnerValid, @ptrCast(&state), &prepared, &permit, &state, binding));
+    try std.testing.expect(consumePreparedCancellationUnderHeldLease(testOwnerValid, @ptrCast(&state), &prepared, &permit, &cleanup, &state, binding));
+    const owned_frame = cleanup.storage().frames[0];
+    const saved_capacity = state.external_tx.capacity;
+    state.external_tx.capacity = std.math.maxInt(usize);
+    try std.testing.expectEqual(.quarantined, finishCancellationCleanup(testOwnerValid, @ptrCast(&state), &prepared, &permit, &cleanup, &state, binding));
+    state.external_tx.capacity = saved_capacity;
+    try std.testing.expectEqual(@as(usize, 0), state.external_tx_retiring_bytes);
+    try std.testing.expectEqual(client_external_mode.TxLifecycle.terminal_tombstone, state.tx_lifecycle);
+    std.testing.allocator.rawFree(owned_frame.bytes, .@"1", @returnAddress());
+}
+
+test "f3b corrupt committed snapshot length quarantines without digest bounds trap" {
+    client_external_mode.resetTxQuarantineForTest();
+    var state = try initState();
+    defer {
+        state.external_tx_quarantined_bytes = 0;
+        state.external_tx_retiring_bytes = 0;
+        state.deinit(std.testing.allocator);
+    }
+    var request_ids = client_pump.RequestIdState{ .available = 1 };
+    var owner_storage: [64]u8 = undefined;
+    var owner_client: [64]u8 = undefined;
+    const base = testBinding(&owner_storage, &owner_client);
+    try std.testing.expect(admit(std.testing.allocator, &state, &request_ids, base, .{
+        .kind = .input_bytes,
+        .stream_id = 7,
+        .payload = "x",
+        .request_policy = .zero,
+    }, 1) == .admitted);
+    var prepared: PreparedTxCancellation = .{};
+    var permit: TxCancellationCommitPermit = .{};
+    var cleanup: FrozenTxCancellationCleanup = .{};
+    const binding = cancellationBinding(base, &prepared);
+    try std.testing.expectEqual(.prepared, prepareCancellationFromExternalPump(testOwnerValid, @ptrCast(&state), &prepared, &permit, &cleanup, &state, binding, .{ .stream_id = 7 }, 2));
+    try std.testing.expect(validatePreparedCancellation(testOwnerValid, @ptrCast(&state), &prepared, &permit, &state, binding));
+    try std.testing.expect(consumePreparedCancellationUnderHeldLease(testOwnerValid, @ptrCast(&state), &prepared, &permit, &cleanup, &state, binding));
+    const owned_frame = cleanup.storage().frames[0];
+    prepared.storage().queue_len = client_external_mode.max_tx_frames + 1;
+    try std.testing.expectEqual(.quarantined, finishCancellationCleanup(testOwnerValid, @ptrCast(&state), &prepared, &permit, &cleanup, &state, binding));
+    try std.testing.expectEqual(@as(usize, 0), state.external_tx_retiring_bytes);
+    try std.testing.expectEqual(client_external_mode.TxLifecycle.terminal_tombstone, state.tx_lifecycle);
+    std.testing.allocator.rawFree(owned_frame.bytes, .@"1", @returnAddress());
+}
+
+test "f3b cancellation rejects resealed wire header semantic drift" {
+    const HeaderDrift = enum { kind, stream_id, request_id, payload_len, flags, major };
+    var state = try initState();
+    defer state.deinit(std.testing.allocator);
+    var request_ids = client_pump.RequestIdState{ .available = 1 };
+    var owner_storage: [64]u8 = undefined;
+    var owner_client: [64]u8 = undefined;
+    const base = testBinding(&owner_storage, &owner_client);
+    try std.testing.expect(admit(std.testing.allocator, &state, &request_ids, base, .{
+        .kind = .input_bytes,
+        .stream_id = 7,
+        .payload = "x",
+        .request_policy = .zero,
+    }, 1) == .admitted);
+    const original_header = try protocol.Header.decode(@ptrCast(state.external_tx.items[0].bytes.ptr));
+    const original_header_bytes = original_header.encode();
+    const generation = state.tx_queue_generation;
+    const queued_bytes = state.external_tx_bytes;
+    for ([_]HeaderDrift{ .kind, .stream_id, .request_id, .payload_len, .flags, .major }) |drift| {
+        var header = original_header;
+        switch (drift) {
+            .kind => header.kind = .stream_ack,
+            .stream_id => header.stream_id += 1,
+            .request_id => header.request_id = 1,
+            .payload_len => header.payload_len += 1,
+            .flags => header.flags = protocol.Flags.end_stream,
+            .major => header.major += 1,
+        }
+        const encoded = header.encode();
+        @memcpy(state.external_tx.items[0].bytes[0..protocol.header_size], &encoded);
+        state.external_tx.items[0].wire_digest = bytesDigest("MARUTXW1", state.external_tx.items[0].bytes);
+        state.external_tx.items[0].descriptor_digest = frameDescriptorDigest(state.external_tx.items[0]);
+        var prepared: PreparedTxCancellation = .{};
+        var permit: TxCancellationCommitPermit = .{};
+        var cleanup: FrozenTxCancellationCleanup = .{};
+        const binding = cancellationBinding(base, &prepared);
+        try std.testing.expectEqual(.invalid, prepareCancellationFromExternalPump(testOwnerValid, @ptrCast(&state), &prepared, &permit, &cleanup, &state, binding, .{ .stream_id = 7 }, 2));
+        try std.testing.expectEqual(generation, state.tx_queue_generation);
+        try std.testing.expectEqual(queued_bytes, state.external_tx_bytes);
+        try std.testing.expect(std.mem.allEqual(u8, &prepared.bytes, 0));
+        try std.testing.expect(std.mem.allEqual(u8, &permit.bytes, 0));
+        try std.testing.expect(std.mem.allEqual(u8, &cleanup.bytes, 0));
+        @memcpy(state.external_tx.items[0].bytes[0..protocol.header_size], &original_header_bytes);
+        state.external_tx.items[0].wire_digest = bytesDigest("MARUTXW1", state.external_tx.items[0].bytes);
+        state.external_tx.items[0].descriptor_digest = frameDescriptorDigest(state.external_tx.items[0]);
+    }
+}
+
+test "f3b cancellation scratch ranges are pairwise disjoint and protected" {
+    var state = try initState();
+    defer state.deinit(std.testing.allocator);
+    var owner_storage: [64]u8 = undefined;
+    var owner_client: [64]u8 = undefined;
+    const base = testBinding(&owner_storage, &owner_client);
+    var prepared: PreparedTxCancellation = .{};
+    var shared: [@sizeOf(FrozenTxCancellationCleanup)]u8 align(@alignOf(FrozenTxCancellationCleanup)) =
+        [_]u8{0} ** @sizeOf(FrozenTxCancellationCleanup);
+    const permit: *TxCancellationCommitPermit = @ptrCast(@alignCast(&shared));
+    const cleanup: *FrozenTxCancellationCleanup = @ptrCast(@alignCast(&shared));
+    const binding = cancellationBinding(base, &prepared);
+    try std.testing.expectEqual(.invalid, prepareCancellationFromExternalPump(testOwnerValid, @ptrCast(&state), &prepared, permit, cleanup, &state, binding, .{ .stream_id = 7 }, 1));
+    try std.testing.expect(std.mem.allEqual(u8, &prepared.bytes, 0));
+    try std.testing.expect(std.mem.allEqual(u8, &shared, 0));
+
+    var separate_permit: TxCancellationCommitPermit = .{};
+    var separate_cleanup: FrozenTxCancellationCleanup = .{};
+    var protected_binding = binding;
+    protected_binding.storage_addr = @intFromPtr(&separate_permit);
+    protected_binding.storage_len = @sizeOf(TxCancellationCommitPermit);
+    try std.testing.expectEqual(.invalid, prepareCancellationFromExternalPump(testOwnerValid, @ptrCast(&state), &prepared, &separate_permit, &separate_cleanup, &state, protected_binding, .{ .stream_id = 7 }, 1));
+    try std.testing.expect(std.mem.allEqual(u8, &prepared.bytes, 0));
+    try std.testing.expect(std.mem.allEqual(u8, &separate_permit.bytes, 0));
+    try std.testing.expect(std.mem.allEqual(u8, &separate_cleanup.bytes, 0));
+
+    const saved_context_len = state.tx_allocator_context_len;
+    state.tx_allocator_context_len = std.math.maxInt(usize);
+    var overflow_binding = binding;
+    overflow_binding.allocator_context_len = std.math.maxInt(usize);
+    try std.testing.expectEqual(.invalid, prepareCancellationFromExternalPump(testOwnerValid, @ptrCast(&state), &prepared, &separate_permit, &separate_cleanup, &state, overflow_binding, .{ .stream_id = 7 }, 1));
+    state.tx_allocator_context_len = saved_context_len;
+    try std.testing.expect(std.mem.allEqual(u8, &prepared.bytes, 0));
+    try std.testing.expect(std.mem.allEqual(u8, &separate_permit.bytes, 0));
+    try std.testing.expect(std.mem.allEqual(u8, &separate_cleanup.bytes, 0));
 }

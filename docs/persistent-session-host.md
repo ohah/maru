@@ -8823,23 +8823,64 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           deadline을 기다리되 authority-clear는 아니다. 따라서 benign/optional 64개 뒤 65번째 revoke와 같은 read의 response 뒤
           revoke가 lower mutation gate를 열지 못한다.
 
-          - **2b2f2 — control correlation + response ownership:** control admission은 `ControlKind`, target
-          stream/controller generation, request ID, admission부터 시작한
-          5초 `AbsoluteDeadline`, `tx_fully_sent=false`를 한 `InFlightControl`에 둔다. queue 대기+write+response가
-          같은 5초를 쓰며 TX 10/30초보다 먼저 만료한 deadline이 terminal이다. response는 flags/stream ID 0,
-          exact request ID, fully-sent 뒤에만 수락한다. early/unsolicited/wrong/duplicate response는 protocol close다.
-          valid payload는 `CompletedControl{kind,payload}`로 이동하고 caller가 같은 authority-clear turn에서
-          `takeControlResponse`로 받아 strict semantic decode/apply한다. forced-first-resize처럼 response 자체가
-          mutation barrier인 kind만 성공 apply 뒤 해당 input gate를 연다. `runtime.resync` response는
-          `needs_resync: control_in_flight → awaiting_snapshot`으로만 전이하고 gate clear 0이며, 위
-          `mark_resync_applied`는 `applied_pending`까지만 전이한다. 그 다음 fresh-clock pump의
-          deadline-first commit만 `valid`로 전이해 input을 다시 연다. decode 실패는 close다.
-          completed payload는 parser가 이미 적용한 `protocol.max_control_json` 한 개 cap을 그대로 소유하며 두 번째
-          response를 받지 않는다. take, semantic failure, revoke, timeout/EOF와 owner cleanup은 같은 exact-once free
-          helper를 사용한다.
-          response 수신 exact boundary도 deadline-first다. `RequestIdState.last_available`은 `maxInt(u64)`을
-          마지막 한 번 예약하면서 `max_consumed`로 전이하고, 그 다음 admission은 wire 0
-          `request_id_exhausted` terminal로 stale ID/0 wrap을 허용하지 않는다.
+          - **2b2f2 — control correlation + response ownership:** 이 slice의 correlation SSOT는
+          `ExternalPumpStorage`가 final address에서 소유하는 sealed `ControlCorrelation` 하나다. v1은
+          **동시 outstanding control을 정확히 하나로 제한**한다. 이미 `in_flight` 또는 `completed`가 있으면 두 번째
+          control admission은 backpressure이며 request ID 예약·wire allocation·TX queue mutation이 모두 0이다.
+          일반 input/resize의 request-ID 0 TX와 control response 사이에는 별도 correlation을 만들지 않는다.
+
+          control admission은 `ControlKind`, target stream/controller generation, request ID,
+          admission부터 시작한 5초 `AbsoluteDeadline`, 대응 TX frame identity와
+          `queued(offset=0) | partial | response_wait` progress를 하나의 transaction으로 publish한다. queue
+          대기+write+response가 같은 5초를 쓰며 TX 10/30초보다 먼저 만료한 deadline이 terminal이다. TX completion
+          sink만 exact frame identity를 `response_wait`로 바꿀 수 있고, partial offset은 queue descriptor에서 sealed
+          evidence로 읽는다. `admitControl`은 whole-turn lease 안에서 authority/correlation/deadline arithmetic을
+          먼저 봉인한 뒤 f1 prepared admission을 실행한다. backpressure/OOM/request exhaustion/clock overflow는
+          request ID·queue·authority mutation 0이다. f1 commit 뒤 semantic suffix는 callback과 실패 분기가 없는
+          scalar store이며, 그 suffix를 수행할 seal이 사전에 깨졌다면 f1도 commit하지 않고 canonical terminal로 간다.
+          따라서 correlation 없는 admitted frame이나 fully-sent 뒤 correlation 없이 retire된 frame은 존재하지 않는다.
+          저장되는 deadline SSOT는 clock을 품은 객체가 아니라 overflow를 검사한 `deadline_ns:i128` scalar이며
+          `pollHint`는 recovery/TX/control 중 가장 이른 deadline을 투영한다.
+
+          response는 common parser/classifier가 `.response`, known wire major, flags/stream ID 0,
+          `protocol.max_control_json` 이하를 먼저 증명한 뒤, fresh `TurnInput.now_ns < deadline`, exact request ID,
+          `response_wait`를 모두 만족할 때만 수락한다. early/unsolicited/wrong/duplicate/late response는 기존 valid
+          completed payload를 덮지 않고 protocol close다. 같은 drain의 EOF·strict revoke·terminal frame은 response
+          semantic publish보다 우선한다. 따라서 response+EOF/revoke는 payload를 exact-once 정리하고 callback 0이며,
+          response 뒤 같은 drain에 일반 snapshot/event만 있는 경우에도 전체 drain이 authority-clear여야 take할 수 있다.
+
+          기존 raw inbox인 `PendingResponseOwner`와 별도 completed owner를 병존시키지 않는다. f2는 destination
+          preflight에 correlation을 넣고 그 owner를 `CompletedControlOwner{kind, target, request_id, payload}`로
+          **대체**한다. neutral RX payload→completed owner 이동과 in-flight→completed semantic 전이는 같은 no-fail
+          commit suffix다. mismatch는 neutral payload의 기존 tombstone/cleanup 경로만 실행하고 storage를 terminalize한다.
+          completed owner의 immutable identity와 payload seal에는 storage address, owner incarnation, correlation
+          generation과 target generation을 포함한다.
+
+          f2의 `takeControlResponse`는 whole drain이 authority-clear이고 terminal/revoke evidence가 없다고 봉인된
+          **private prepared take**까지만 개방한다. stale copy/double/cross-storage take를 거부하는 generation seal과
+          frozen cleanup descriptor를 사용하며, f3 전에는 제품 caller가 semantic apply하거나 input gate를 열 수 없다.
+          f3가 strict revoke/EOF 우선순위를 whole-turn으로 닫은 뒤 같은 take를 제품 suffix에 공개한다.
+          forced-first-resize처럼 response 자체가 mutation barrier인 kind는 `runtime.resize`의 echoed sequence,
+          applied size/generation/changed와 target stream/controller generation을 strict decode한 성공 apply 뒤에만
+          해당 input gate를 연다. `runtime.resync`는 exact `{"result":{"resync":true}}` 성공 response에서
+          `client_recovery.control_in_flight → awaiting_snapshot`으로만 전이하고 gate clear 0이며, host recovery
+          ACK 경로는 건드리지 않는다. 위 `mark_resync_applied`는 `applied_pending`까지만 전이한다. 그 다음
+          fresh-clock pump의 deadline-first commit만 `valid`로 전이해 input을 다시 연다. error envelope,
+          malformed/foreign/stale semantic payload는 close다.
+
+          take, semantic failure, revoke, timeout/EOF, allocation 실패와 owner teardown은 pending/completed payload와
+          correlation을 같은 exact-once frozen cleanup transaction으로 닫는다. `RequestIdState.last_available`은
+          `maxInt(u64)`을 마지막 한 번 예약하면서 `max_consumed`로 전이하고, 그 response를 take한 뒤에도 다음 admission은
+          wire 0 `request_id_exhausted` terminal로 stale ID/0 wrap을 허용하지 않는다. pure reducer,
+          allocation fail-index, injected whole-turn, 실제 Darwin socketpair가 request 없음/offset 0/partial/fully-sent의
+          same·wrong·zero ID, duplicate before/after take, 역순 response, deadline-1/exact/+1, response+FIN,
+          payload cap/cap+1과 cleanup final-zero를 고정해야 2b2f2 완료다. RX-first 규칙상 turn 시작 시
+          `response_wait`였던 control만 그 turn의 response를 받을 수 있다. 같은 readable+writable turn의 TX suffix가
+          막 fully-sent로 만든 control에 이미 RX로 도착한 response는 early protocol error다. 구현 gate는
+          (a) pure correlation reducer, (b) atomic admission+completion seal, (c) RX preflight+completed owner,
+          (d) private prepared take+exact cleanup·product socketpair 네 단계이며 모두 Debug/ReleaseFast,
+          `check-boundaries`, 전체 `mise run check`가 green이어야 한다. f2 완료만으로 2b2e-integration, f3,
+          public control apply 또는 2b2 전체 완료를 표시하지 않는다.
 
           - **2b2f3 — revoke + whole-turn integration:** strict `controller.revoked`는
           runtime/stream/generation을 현재 attachment evidence와 대조한 뒤 offset 0인

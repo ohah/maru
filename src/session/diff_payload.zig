@@ -26,11 +26,15 @@ pub const Rejection = enum {
     too_large,
     /// NUL 바이트가 있다 → 텍스트 비교가 의미 없다.
     binary,
+    /// 한쪽이 `max_lines`를 넘었다. **자르지 않고 거절한다** — 양쪽을 각자 자르면 두 문서의 끝이 서로 다른
+    /// 원본 줄이 되어 **없는 변경이 만들어진다**(맨 위에 한 줄만 삽입돼도 마지막 줄이 삭제된 것처럼 보인다).
+    /// 페이지 넘김이 생기기 전까지는 잘린 비교를 보여 주지 않는 편이 정직하다.
+    too_many_lines,
 };
 
 pub const Decision = union(enum) {
-    /// 그대로 실어도 되는 본문. 줄 수 상한을 넘었으면 `truncated_lines`가 잘린 사실을 싣는다.
-    ok: struct { original: []const u8, modified: []const u8, truncated_lines: bool },
+    /// 그대로 실어도 되는 본문(자르지 않은 전체다).
+    ok: struct { original: []const u8, modified: []const u8 },
     reject: Rejection,
 };
 
@@ -41,13 +45,21 @@ pub const Decision = union(enum) {
 pub fn decide(original: []const u8, modified: []const u8) Decision {
     if (original.len > max_side_bytes or modified.len > max_side_bytes) return .{ .reject = .too_large };
     if (looksBinary(original) or looksBinary(modified)) return .{ .reject = .binary };
-    const cut_original = firstLines(original);
-    const cut_modified = firstLines(modified);
-    return .{ .ok = .{
-        .original = cut_original.text,
-        .modified = cut_modified.text,
-        .truncated_lines = cut_original.truncated or cut_modified.truncated,
-    } };
+    if (lineCount(original) > max_lines or lineCount(modified) > max_lines) return .{ .reject = .too_many_lines };
+    return .{ .ok = .{ .original = original, .modified = modified } };
+}
+
+/// 개행 수 + 마지막 줄(개행으로 안 끝나면). 상한 판정에만 쓰므로 넘는 순간 멈춘다.
+fn lineCount(bytes: []const u8) usize {
+    var lines: usize = 0;
+    var i: usize = 0;
+    while (i < bytes.len) : (i += 1) {
+        if (bytes[i] != '\n') continue;
+        lines += 1;
+        if (lines > max_lines) return lines;
+    }
+    if (bytes.len > 0 and bytes[bytes.len - 1] != '\n') lines += 1;
+    return lines;
 }
 
 /// 앞부분에 NUL이 있으면 binary로 본다(git과 같은 판정).
@@ -56,27 +68,12 @@ pub fn looksBinary(bytes: []const u8) bool {
     return std.mem.indexOfScalar(u8, probe, 0) != null;
 }
 
-const Cut = struct { text: []const u8, truncated: bool };
-
-/// 앞에서 `max_lines`줄까지 잘라 돌려준다. 자른 경우 그 사실을 함께 준다 — 조용히 일부만 보여 주지 않는다.
-fn firstLines(bytes: []const u8) Cut {
-    var lines: usize = 0;
-    var i: usize = 0;
-    while (i < bytes.len) : (i += 1) {
-        if (bytes[i] != '\n') continue;
-        lines += 1;
-        if (lines == max_lines) return .{ .text = bytes[0 .. i + 1], .truncated = i + 1 < bytes.len };
-    }
-    return .{ .text = bytes, .truncated = false };
-}
-
 const testing = std.testing;
 
 test "상한 안의 텍스트는 그대로 싣는다" {
     const decision = decide("a\nb\n", "a\nB\n");
     try testing.expectEqualStrings("a\nb\n", decision.ok.original);
     try testing.expectEqualStrings("a\nB\n", decision.ok.modified);
-    try testing.expect(!decision.ok.truncated_lines);
 }
 
 test "한쪽만 커도 거른다(합이 아니라 한쪽 기준)" {
@@ -87,7 +84,6 @@ test "한쪽만 커도 거른다(합이 아니라 한쪽 기준)" {
 
 test "NUL이 있으면 binary다 — 크기 판정보다 뒤에 온다" {
     try testing.expectEqual(Rejection.binary, decide("ok\n", "a\x00b").reject);
-    // 큰 binary는 binary가 아니라 too_large로 걸린다(크기를 먼저 본다 — 훑는 비용을 아낀다).
     const big_binary = "\x00" ** (max_side_bytes + 1);
     try testing.expectEqual(Rejection.too_large, decide("ok\n", big_binary).reject);
 }
@@ -99,21 +95,24 @@ test "탐침 범위 밖의 NUL은 binary로 보지 않는다(git과 같은 판�
     try testing.expect(!looksBinary(&buf));
 }
 
-test "줄 수 상한을 넘으면 잘라 싣고 잘렸다고 말한다" {
+test "줄 수 상한을 넘으면 자르지 않고 거절한다(없는 변경을 만들지 않으려고)" {
+    // 양쪽을 각자 자르면 두 문서의 끝이 서로 다른 원본 줄이 되어, 맨 위 한 줄 삽입만으로도
+    // 마지막 줄이 삭제된 것처럼 보인다. 그런 비교를 보여 주느니 못 보여 준다고 말한다.
     var buf: std.Io.Writer.Allocating = .init(testing.allocator);
     defer buf.deinit();
-    for (0..max_lines + 10) |i| {
-        try buf.writer.print("line {d}\n", .{i});
-    }
-    const decision = decide(buf.written(), "one\n");
-    try testing.expect(decision.ok.truncated_lines);
-    try testing.expectEqual(max_lines, std.mem.count(u8, decision.ok.original, "\n"));
-    // 짧은 쪽은 손대지 않는다.
-    try testing.expectEqualStrings("one\n", decision.ok.modified);
+    for (0..max_lines + 1) |i| try buf.writer.print("line {d}\n", .{i});
+    try testing.expectEqual(Rejection.too_many_lines, decide(buf.written(), "one\n").reject);
+    try testing.expectEqual(Rejection.too_many_lines, decide("one\n", buf.written()).reject);
 }
 
-test "마지막 줄에 개행이 없어도 자르지 않은 것은 그대로다" {
+test "상한과 정확히 같은 줄 수는 통과한다(경계)" {
+    var buf: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer buf.deinit();
+    for (0..max_lines) |i| try buf.writer.print("line {d}\n", .{i});
+    try testing.expectEqualStrings(buf.written(), decide(buf.written(), "one\n").ok.original);
+}
+
+test "마지막 줄에 개행이 없어도 한 줄로 센다" {
     const decision = decide("a\nb", "a\nb");
     try testing.expectEqualStrings("a\nb", decision.ok.original);
-    try testing.expect(!decision.ok.truncated_lines);
 }

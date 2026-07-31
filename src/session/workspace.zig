@@ -415,9 +415,9 @@ fn writePane(w: *std.Io.Writer, pane: Pane) !void {
     try w.writeAll("\"");
     // 파일 Term은 `surface` 줄이 아니라 이 줄의 반복 필드다(§5.0). `surfaces` 개수 필드는 **PTY surface 수**로
     // 남는다 — 옛 리더가 그 수만큼 `surface` 줄을 읽는 계약이라 건드리면 하위호환이 깨진다.
-    // **diff Term은 저장하지 않는다**(docs/editor-surface.md §3.5). diff는 디스크 파일이 아니라 그 시점 git 상태의
-    // 비교 결과라, 다음 실행에서 되살리면 저장할 때 보던 화면과 다른 것을 같은 것처럼 보여 준다. 되살릴 값이
-    // 아니라 다시 계산할 값이므로 소스 컨트롤 목록에서 다시 연다.
+    // diff Term은 저장하지 않는다(docs/editor-surface.md §3.5 — 그 시점 git 상태의 비교 결과라 되살리면 다른 것을
+    // 같은 것처럼 보여 준다). **제외는 capture 단계에서 한다** — 여기서만 빼면 이미 부여된 index가 줄어든 총계와
+    // 어긋나 복원 시 그 창 전체가 fail-close된다. 여기 검사는 잘못된 입력을 그대로 흘리지 않기 위한 두 번째 방어다.
     for (pane.file_terms) |ft| if (ft.kind != .diff) try writeFileTerm(w, ft);
     for (pane.browser_terms) |bt| try writeBrowserTerm(w, bt);
     if (pane.active_browser) |ab| try w.print(" active-browser={d}", .{ab});

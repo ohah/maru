@@ -3245,6 +3245,15 @@ pub const AppSession = struct {
         // 복원으로 소스 컨트롤 뷰가 켜진 채 시작하면 `setDockView`를 거치지 않아 첫 읽기가 안 걸린다(실측).
         // 결과도 없고 in-flight도 없을 때만 한 번 건다 — 조건이 결과 도착으로 스스로 닫히므로 폴링이 아니다.
         if (self.dock.view == .source_control and self.git_result == null and self.git_inflight == 0 and !self.git_failed and !self.git_missing) self.refreshGitStatus();
+        // 아직 못 건 diff 요청을 여기서 다시 건다. 백엔드 슬롯이 차 있으면 submit이 false를 주므로(그 경우
+        // request_id가 0으로 남는다) 다음 tick에 자연히 재시도된다 — 브리지가 아니라 tick이 이 책임을 진다.
+        if (self.git_backend != null) {
+            var it = self.fileEntries();
+            while (it.next()) |entry| {
+                if (entry.kind != .diff or entry.diff_ready or entry.diff_failed) continue;
+                if (entry.diff_request_id == 0) self.requestDiffContent(entry);
+            }
+        }
         var backend = &(self.git_backend orelse return);
         // diff 본문 결과를 그 entry로 흘린다. request_id로 짝을 맞춰 **늦게 온 옛 결과가 새 내용을 덮지 않게** 한다.
         while (backend.takeDiffResult()) |taken| {
@@ -3259,6 +3268,7 @@ pub const AppSession = struct {
                             entry.diff_original = diff_result.original;
                             entry.diff_modified = diff_result.modified;
                             entry.diff_ready = true;
+                            entry.diff_truncated = diff_result.truncated;
                             diff_result.original = &.{};
                             diff_result.modified = &.{};
                         } else entry.diff_failed = true;
@@ -10600,6 +10610,14 @@ pub const AppSession = struct {
         while (entry_it15.next()) |entry| {
             if (!std.mem.eql(u8, entry.path, changed_path) and
                 !(coarse and file_tree.Tree.pathWithinRoot(entry.path, changed_path))) continue;
+            if (entry.kind == .diff) {
+                // diff는 편집 문서가 아니라 **비교 결과**다. 파일 리로드 이벤트를 보내 봐야 그 화면엔 받을 핸들러가
+                // 없어 조용히 사라지고(native는 갱신했다고 믿는다), 사용자는 파일과 다른 비교를 계속 읽게 된다.
+                // 대신 비교를 다시 읽는다 — 바뀐 파일이 그 비교의 한쪽이기 때문이다.
+                self.requestDiffContent(entry);
+                if (!coarse) break;
+                continue;
+            }
             if (entry.self_write_grace_ticks != 0) {
                 if (!self.verifySelfWriteEvent(entry)) {
                     entry.self_write_grace_ticks = 0;
@@ -14537,14 +14555,24 @@ pub const AppSession = struct {
             .unstaged => .unstaged,
             .untracked => .untracked,
         };
-        self.openDiffTerm(abs, row.path, base);
+        // rename은 왼쪽이 옛 경로다(`R` 행의 orig_path). 스테이지된 rename만 그 구분이 의미 있다.
+        self.openDiffTerm(repo, abs, row.path, row.orig_path, base);
     }
 
     /// diff entry가 들고 있는 소유 문자열을 **전부** 푼다(Term 파괴 시). path와 같은 자리에서 부른다.
     fn freeDiffEntryState(self: *AppSession, entry: *dock_panel.Entry) void {
-        if (entry.diff_rel_path.len > 0) self.allocator.free(entry.diff_rel_path);
-        entry.diff_rel_path = &.{};
+        self.freeDiffPaths(entry);
         self.freeDiffContent(entry);
+    }
+
+    /// 경로 세 개(대상·rename 원본·저장소 루트)를 푼다. 다시 열 때도 먼저 이걸 부른다 — 대입만 하면 샌다.
+    fn freeDiffPaths(self: *AppSession, entry: *dock_panel.Entry) void {
+        if (entry.diff_rel_path.len > 0) self.allocator.free(entry.diff_rel_path);
+        if (entry.diff_orig_rel_path.len > 0) self.allocator.free(entry.diff_orig_rel_path);
+        if (entry.diff_repo.len > 0) self.allocator.free(entry.diff_repo);
+        entry.diff_rel_path = &.{};
+        entry.diff_orig_rel_path = &.{};
+        entry.diff_repo = &.{};
     }
 
     /// 본문 두 쪽만 푼다. **`diff_rel_path`는 남긴다** — 새로 고칠 때 다시 읽을 대상이 그 값이다.
@@ -14557,7 +14585,14 @@ pub const AppSession = struct {
 
     /// 소스 컨트롤 행을 눌렀을 때 그 비교를 여는 지점. **유일성 키는 `(경로, kind, base)`**라 같은 파일의
     /// 스테이지·미스테이지 diff가 서로를 덮지 않는다(docs/editor-surface.md §3.5).
-    fn openDiffTerm(self: *AppSession, abs_path: []const u8, rel_path: []const u8, base: dock_panel.DiffBase) void {
+    fn openDiffTerm(
+        self: *AppSession,
+        repo: []const u8,
+        abs_path: []const u8,
+        rel_path: []const u8,
+        orig_rel_path: ?[]const u8,
+        base: dock_panel.DiffBase,
+    ) void {
         if (self.diffTermFor(abs_path, base)) |existing| {
             _ = self.activateExistingFileTerm(existing);
             return;
@@ -14565,7 +14600,14 @@ pub const AppSession = struct {
         const opened = self.openFileTermInActivePane(abs_path, .diff) catch return;
         const entry = opened.term.file_entry orelse return;
         entry.diff_base = base;
+        // 옛 값이 있으면 먼저 푼다 — 대입만 하면 그 할당이 회수 불가가 된다(리뷰에서 잡힌 누수).
+        self.freeDiffPaths(entry);
         entry.diff_rel_path = self.allocator.dupe(u8, rel_path) catch &.{};
+        // rename은 왼쪽이 **옛 경로**다. 새 경로로 `HEAD:`를 읽으면 그 blob이 없어 비교가 통째로 실패한다.
+        entry.diff_orig_rel_path = if (orig_rel_path) |o| (self.allocator.dupe(u8, o) catch &.{}) else &.{};
+        // **저장소 루트는 호출자에게서 받는다.** 여기서 다시 구하면 방금 활성화된 diff 웹 Term의 cwd(빈 값)를 보고
+        // null이 되어 영영 실패로 굳는다(리뷰에서 잡힌 결함) — 목록을 만든 그 루트를 그대로 쓴다.
+        entry.diff_repo = self.allocator.dupe(u8, repo) catch &.{};
         self.requestDiffContent(entry);
     }
 
@@ -14586,15 +14628,15 @@ pub const AppSession = struct {
     fn requestDiffContent(self: *AppSession, entry: *dock_panel.Entry) void {
         entry.diff_ready = false;
         entry.diff_failed = false;
+        entry.diff_truncated = false;
         if (entry.diff_rel_path.len == 0) {
             entry.diff_failed = true;
             return;
         }
-        var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const repo = self.gitRepoRoot(&repo_buf) orelse {
+        if (entry.diff_repo.len == 0) {
             entry.diff_failed = true;
             return;
-        };
+        }
         var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
         const git_exe = git_backend_mod.locate(&exe_buf) orelse {
             entry.diff_failed = true;
@@ -14608,7 +14650,14 @@ pub const AppSession = struct {
         }
         self.git_request_seq += 1;
         entry.diff_request_id = self.git_request_seq;
-        if (!self.git_backend.?.submitDiff(git_exe, repo, entry.diff_rel_path, entry.diff_base, entry.diff_request_id)) {
+        if (!self.git_backend.?.submitDiff(
+            git_exe,
+            entry.diff_repo,
+            entry.diff_rel_path,
+            entry.diff_orig_rel_path,
+            entry.diff_base,
+            entry.diff_request_id,
+        )) {
             // 이미 다른 본문을 읽는 중이다. 다음 tick에서 다시 건다(그때 슬롯이 빈다).
             entry.diff_request_id = 0;
         }
@@ -14624,11 +14673,11 @@ pub const AppSession = struct {
         const entry = self.fileEntryForSurfaceId(surface_id) orelse return error.SurfaceNotFound;
         if (entry.kind != .diff) return error.WrongKind;
         if (entry.diff_failed) return error.ReadFailed;
-        if (!entry.diff_ready) {
-            // 아직 요청조차 못 건 상태(백엔드가 바빴다)면 여기서 다시 건다 — 그러지 않으면 영영 pending이다.
-            if (entry.diff_request_id == 0) self.requestDiffContent(entry);
-            return null;
-        }
+        // 잘린 내용을 온전한 파일처럼 보여 주지 않는다 — 상한 초과와 같은 취급으로 화면이 이유를 말한다.
+        if (entry.diff_ready and entry.diff_truncated) return error.TooLarge;
+        // **여기서 다시 요청하지 않는다.** 브리지 호출은 크기 질의·채우기로 두 번 실행될 수 있어(Swift callBridge),
+        // 부수효과를 두면 같은 요청이 두 번 걸리고 두 응답이 서로 달라진다. 재요청은 tick(drainGitStatus)이 소유한다.
+        if (!entry.diff_ready) return null;
         return .{
             .original = try gpa.dupe(u8, entry.diff_original),
             .modified = try gpa.dupe(u8, entry.diff_modified),
@@ -14642,7 +14691,10 @@ pub const AppSession = struct {
         path: []const u8,
         kind: dock_panel.EntryKind,
     ) !FileOpenResult {
-        if (self.fileTermForPath(path)) |existing| return self.activateExistingFileTerm(existing);
+        // diff는 위 유일성 키가 다르므로 경로만으로 기존 Term을 재사용하지 않는다(그 확인은 openDiffTerm이 한다).
+        if (kind != .diff) {
+            if (self.fileTermForPath(path)) |existing| return self.activateExistingFileTerm(existing);
+        }
 
         // 창당 상한. 옛 `DockPanel.open`이 모델 불변식으로 걸던 것을 열기 시점 검사로 옮겼다(§10 열린 질문 2번).
         var count: usize = 0;
@@ -14712,11 +14764,14 @@ pub const AppSession = struct {
         return false;
     }
 
+    /// 창 전체에서 **그 경로의 비-diff 파일 Term**. diff는 같은 경로로 따로 존재할 수 있어(§3.5 유일성 키가
+    /// `(경로, kind, base)`) 여기서 제외한다 — 안 그러면 탐색기에서 파일을 열 때 열려 있던 diff Term이 활성화된다.
     fn fileTermForPath(self: *AppSession, path: []const u8) ?*Term {
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
                 for (pane.terms.items) |term| {
                     const entry = term.file_entry orelse continue;
+                    if (entry.kind == .diff) continue;
                     if (std.mem.eql(u8, entry.path, path)) return term;
                 }
             }
@@ -23985,6 +24040,11 @@ pub const AppSession = struct {
             var persisted_index: usize = 0;
             for (pane.terms.items, 0..) |term, term_i| {
                 if (term.file_entry) |entry| {
+                    // **diff는 persisted 시퀀스에 들지 않는다**(docs/editor-surface.md §3.5 — 저장하지 않는다).
+                    // 여기서 빼지 않고 writer에서만 빼면, 이미 부여한 index가 줄어든 총계와 안 맞아 복원 시
+                    // `index >= total`로 **그 창 전체가 fail-close**된다(리뷰에서 잡힌 결함). 자리를 아예 만들지
+                    // 않으므로 브라우저 `insert_after`도 같은 기준을 본다.
+                    if (entry.kind == .diff) continue;
                     try file_terms.append(arena, .{
                         .index = persisted_index,
                         .kind = entry.kind,
@@ -24075,7 +24135,12 @@ pub const AppSession = struct {
             // 넓어진다. 활성이 브라우저면 다음 persisted Term을 가리키며, 이는 현행 web 활성 시 성질과 같다.
             var restored_active: usize = 0;
             for (pane.terms.items[0..pane.active_term]) |t| {
-                if (t.file_entry != null or t.kind != .web) restored_active += 1;
+                // diff Term은 persisted 시퀀스에 없으므로 앞자리로도 세지 않는다(위 capture 규칙과 같은 기준).
+                if (t.file_entry) |e| {
+                    if (e.kind != .diff) restored_active += 1;
+                    continue;
+                }
+                if (t.kind != .web) restored_active += 1;
             }
             // **범위로 clamp한다.** "활성이 브라우저면 다음 persisted Term을 가리킨다"는 **다음이 있을 때만** 참이다 —
             // 활성 브라우저가 pane의 **마지막** Term이면 위 카운트가 persisted_total과 같아져 `active-term`이 한 칸
@@ -60541,4 +60606,55 @@ test "도크 뷰: 탐색기 아닌 뷰의 클릭은 폴더 선택·트리 포커
     session.setDockView(.explorer);
     session.mouse(1, x, y, 0, 0);
     try std.testing.expect(session.takeFilePanelPickRequest());
+}
+
+// [code-review max] diff Term은 persisted 시퀀스에 **자리를 만들지 않는다**. writer에서만 빼면 이미 부여된 index가
+// 줄어든 총계와 어긋나 복원 시 `index >= total`로 그 창 전체가 fail-close된다(터미널·파일 탭이 통째로 사라진다).
+test "captureWorkspaceTab: diff Term은 index를 차지하지 않는다(복원 fail-close 방지)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    // [term0, diff, markdown] — diff가 가운데라 뒤 파일 Term의 index가 밀린다(그게 결함의 조건이었다).
+    _ = try session.openFileTermInActivePane("/tmp/diff-capture.zig", .diff);
+    _ = try session.openFileTermInActivePane("/tmp/diff-capture.md", .markdown);
+    const pane = session.activePane();
+    try std.testing.expectEqual(@as(usize, 3), pane.terms.items.len);
+
+    const wtab = try session.captureWorkspaceTab(arena.allocator(), session.activeTab());
+    const wpane = wtab.panes[0];
+    // diff는 빠지고 markdown만 남는다.
+    try std.testing.expectEqual(@as(usize, 1), wpane.file_terms.len);
+    try std.testing.expectEqualStrings("/tmp/diff-capture.md", wpane.file_terms[0].path);
+    // **핵심**: 남은 index와 active_term이 줄어든 총계 안에 든다(reader의 validatePaneFileTerms 조건).
+    const total = wpane.surfaces.len + wpane.file_terms.len;
+    try std.testing.expect(wpane.file_terms[0].index < total);
+    try std.testing.expect(wpane.active_term < total);
+}
+
+// [code-review max] 유일성 키는 `(경로, kind, base)`다(docs/editor-surface.md §3.5). 경로만으로 조회하면 소스 컨트롤
+// 행 클릭이 이미 열린 markdown Term을 재사용해 **diff가 영영 안 열리고**, 반대로 탐색기에서 그 파일을 열면 diff Term이
+// 활성화된다. 둘 다 사용자가 누른 것과 다른 것을 보여 준다.
+test "diff Term과 파일 Term은 같은 경로로 공존한다(유일성 키에 kind가 든다)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    const path = "/tmp/same-path.md";
+    const md = try session.openFileTermInActivePane(path, .markdown);
+    const diff = try session.openFileTermInActivePane(path, .diff);
+    try std.testing.expect(md.term != diff.term); // 서로를 빼앗지 않는다
+
+    // 탐색기 경로 조회는 diff를 건너뛴다 — 그러지 않으면 파일을 열 때 diff Term이 활성화된다.
+    try std.testing.expectEqual(md.term, session.fileTermForPath(path).?);
+    // 반대로 diff 조회는 base까지 본다: 같은 경로의 다른 base는 다른 Term이다.
+    diff.term.file_entry.?.diff_base = .staged;
+    try std.testing.expectEqual(diff.term, session.diffTermFor(path, .staged).?);
+    try std.testing.expect(session.diffTermFor(path, .unstaged) == null);
 }

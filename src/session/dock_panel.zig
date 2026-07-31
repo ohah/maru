@@ -184,6 +184,11 @@ pub const Entry = struct {
     /// diff entry 전용. 저장소 루트 기준 상대경로 — `git show <rev>:<path>`가 그 형태를 요구한다. entry의 `path`는
     /// 절대경로라 그대로 못 쓴다. 소유는 entry에 있고 `path`와 같은 시점에 해제된다.
     diff_rel_path: []u8 = &.{},
+    /// rename의 **옛 경로**(그 외 빈 값). 왼쪽(HEAD)은 이 경로로 읽어야 한다 — 새 경로는 HEAD에 없다.
+    diff_orig_rel_path: []u8 = &.{},
+    /// 이 비교가 속한 저장소 루트. **열 때 정해 들고 다닌다** — 나중에 다시 구하면 그 사이 활성 Term이 바뀌어
+    /// 다른 저장소(혹은 없음)로 해석된다.
+    diff_repo: []u8 = &.{},
     /// 백엔드가 읽어 온 두 쪽. `diff_ready` 전에는 비어 있고, 브리지는 그 상태를 pending으로 답한다 —
     /// 빈 문서를 정상 결과로 주면 화면이 "변경 없음"을 보여 준다.
     diff_original: []u8 = &.{},
@@ -191,6 +196,8 @@ pub const Entry = struct {
     diff_ready: bool = false,
     /// 읽기가 실패했다(경로가 사라졌거나 conflict 등). 다시 열기 전까지 이 상태를 유지한다.
     diff_failed: bool = false,
+    /// 한쪽이라도 상한에서 잘렸다 — 온전한 파일처럼 보여 주지 않고 그 사실을 화면에 말한다.
+    diff_truncated: bool = false,
     /// 이 entry가 건 읽기 요청. 늦게 도착한 옛 결과가 새 내용을 덮지 않게 한다.
     diff_request_id: u64 = 0,
     /// 마지막 성공 Markdown read/save의 디스크 content token. 저장 직전 같은 inode의 in-place 외부 변경도 감지한다.

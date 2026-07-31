@@ -201,7 +201,11 @@ pub fn dispatchBridgeWithFileAccess(
     }
     if (std.mem.eql(u8, req.method, diff_open_method)) {
         // diff Term이 아니면 method가 존재하지 않는 것과 같다 — md 뷰어 Term이 이 창구를 쓰지 못하게 한다(§3.1).
-        const maybe_sides = access.diffOpen(gpa) catch return errorResponse(gpa, req.id, .internal_error);
+        const maybe_sides = access.diffOpen(gpa) catch |err| switch (err) {
+            // "너무 커서 못 보여 준다"는 실패가 아니라 **말할 수 있는 상태**다(§6 typed 결과).
+            error.TooLarge => return serializeDiffRejected(gpa, req.id, "too_large"),
+            else => return errorResponse(gpa, req.id, .internal_error),
+        };
         // 아직 읽는 중이면 그렇게 말한다 — 빈 문서를 정상 결과로 주면 화면이 "변경 없음"을 보여 준다.
         const sides = maybe_sides orelse return serializeDiffPending(gpa, req.id);
         defer sides.deinit(gpa);
@@ -212,7 +216,7 @@ pub fn dispatchBridgeWithFileAccess(
             .ok => |body| blk: {
                 if (!std.unicode.utf8ValidateSlice(body.original) or !std.unicode.utf8ValidateSlice(body.modified))
                     break :blk serializeDiffRejected(gpa, req.id, "binary");
-                break :blk serializeDiffResult(gpa, req.id, body.original, body.modified, body.truncated_lines);
+                break :blk serializeDiffResult(gpa, req.id, body.original, body.modified);
             },
         };
     }
@@ -458,13 +462,12 @@ fn serializeFileReadResult(gpa: std.mem.Allocator, id: cp.Id, content: []const u
     return aw.toOwnedSlice();
 }
 
-/// diff 본문 결과. `truncated_lines`는 화면이 "여기까지만 보여 준다"고 말하기 위한 값이다(조용히 자르지 않는다).
+/// diff 본문 결과. 자른 본문은 여기 오지 않는다 — 줄 수를 넘으면 `too_many_lines`로 거절한다(diff_payload).
 fn serializeDiffResult(
     gpa: std.mem.Allocator,
     id: cp.Id,
     original: []const u8,
     modified: []const u8,
-    truncated_lines: bool,
 ) std.mem.Allocator.Error![]u8 {
     var aw: std.Io.Writer.Allocating = .init(gpa);
     defer aw.deinit();
@@ -474,8 +477,6 @@ fn serializeDiffResult(
     s.write(original) catch return error.OutOfMemory;
     s.objectField("modified") catch return error.OutOfMemory;
     s.write(modified) catch return error.OutOfMemory;
-    s.objectField("truncated_lines") catch return error.OutOfMemory;
-    s.write(truncated_lines) catch return error.OutOfMemory;
     cp.endResult(&s) catch return error.OutOfMemory;
     return aw.toOwnedSlice();
 }
@@ -1017,7 +1018,6 @@ test "dispatchBridge: diff.open은 인자 없이 자기 Term의 두 쪽만 준�
     const result = p.value.object.get("result").?.object;
     try testing.expectEqualStrings("a\nb\n", result.get("original").?.string);
     try testing.expectEqualStrings("a\nB\n", result.get("modified").?.string);
-    try testing.expect(!result.get("truncated_lines").?.bool);
     try testing.expectEqual(@as(usize, 1), fake.calls);
 }
 

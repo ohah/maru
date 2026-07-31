@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
+import { JSDOM } from "jsdom";
 import { withEditorDom } from "./editor-dom";
 import {
+  bootDiff,
   createDiffScreen,
   loadDiff,
   parseDiffResult,
@@ -32,12 +34,7 @@ test("같은 내용이면 MergeView 대신 '변경 없음'을 말한다", () => 
   withEditorDom((dom) => {
     const host = dom.window.document.querySelector("main")!;
     const screen = createDiffScreen(host);
-    screen.render({
-      kind: "ready",
-      original: "same\n",
-      modified: "same\n",
-      truncated_lines: false,
-    });
+    screen.render({ kind: "ready", original: "same\n", modified: "same\n" });
     // 빈 MergeView를 그리면 사용자는 화면이 깨진 것으로 읽는다.
     expect(host.querySelector(".diff-merge")!.children.length).toBe(0);
     expect(host.querySelector(".diff-notice")!.textContent).toContain("변경이 없습니다");
@@ -45,17 +42,20 @@ test("같은 내용이면 MergeView 대신 '변경 없음'을 말한다", () => 
   });
 });
 
-test("잘린 비교는 그 사실을 함께 보여 준다", () => {
-  withEditorDom((dom) => {
-    const host = dom.window.document.querySelector("main")!;
-    const screen = createDiffScreen(host);
-    screen.render({ kind: "ready", original: "a\n", modified: "b\n", truncated_lines: true });
-    const notice = host.querySelector(".diff-notice")!;
-    expect(notice.hasAttribute("hidden")).toBe(false);
-    expect(notice.textContent).toContain("앞부분만");
-    expect(host.querySelector(".diff-merge")!.children.length).toBeGreaterThan(0);
-    screen.destroy();
-  });
+test("shell의 iframe·상태 문구를 치운다(안 그러면 제품에서 화면 밖으로 밀린다)", () => {
+  // 제품 index.html은 편집기 shell과 같은 문서라 100% 높이 iframe이 먼저 있다. body가 overflow:hidden이라
+  // 그대로 두면 MergeView가 뷰포트 아래에 놓여 **아무것도 안 보인다**(리뷰에서 잡힌 결함).
+  const dom = new JSDOM(
+    `<!doctype html><body><p id="viewer-status">파일을 읽는 중</p>` +
+      `<iframe id="renderer" src="maru-app://render/render.html"></iframe><main id="editor" hidden></main></body>`,
+  );
+  bootDiff(dom.window.document);
+  const frame = dom.window.document.querySelector("#renderer")!;
+  expect(frame.hasAttribute("hidden")).toBe(true);
+  expect(frame.hasAttribute("src")).toBe(false);
+  expect(dom.window.document.querySelector("#viewer-status")!.hasAttribute("hidden")).toBe(true);
+  expect(dom.window.document.querySelector("#editor")!.hasAttribute("hidden")).toBe(false);
+  dom.window.close();
 });
 
 test("pending이면 다시 묻고, 결과가 오면 멈춘다", async () => {

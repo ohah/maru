@@ -119,6 +119,8 @@ const Job = struct {
 
     const DiffTarget = struct {
         rel_path: []u8,
+        /// rename의 옛 경로(그 외 빈 값). 왼쪽(HEAD)만 이 경로를 쓴다.
+        orig_rel_path: []u8,
         base: dock_panel.DiffBase,
     };
 };
@@ -128,6 +130,8 @@ pub const DiffResult = struct {
     original: []u8 = &.{},
     modified: []u8 = &.{},
     ok: bool = false,
+    /// 한쪽이라도 상한에서 잘렸다. **잘린 내용을 온전한 파일처럼 보여 주지 않기 위해** 호출자가 이 사실을 쓴다.
+    truncated: bool = false,
     request_id: u64 = 0,
 
     pub fn deinit(self: *DiffResult, allocator: std.mem.Allocator) void {
@@ -201,12 +205,15 @@ pub const Backend = struct {
         git_exe: []const u8,
         repo: []const u8,
         rel_path: []const u8,
+        orig_rel_path: []const u8,
         base: dock_panel.DiffBase,
         request_id: u64,
     ) bool {
         const state = self.state orelse return false;
         state.mutex.lockUncancelable(state.io);
-        if (state.shutting_down or state.diff_inflight >= max_inflight) {
+        // 아직 안 빼 간 결과가 있으면 받지 않는다. 받으면 그 worker의 결과를 **버리게 되고**, 요청을 건 entry는
+        // ready도 failed도 아닌 채 남아 영영 pending이 된다(리뷰에서 잡힌 고착). 호출자는 다음 폴에서 다시 건다.
+        if (state.shutting_down or state.diff_inflight >= max_inflight or state.diff_result != null) {
             state.mutex.unlock(state.io);
             return false;
         }
@@ -219,7 +226,8 @@ pub const Backend = struct {
         job.git_exe = state.allocator.dupe(u8, git_exe) catch return self.releaseDiffJob(job);
         job.repo = state.allocator.dupe(u8, repo) catch return self.releaseDiffJob(job);
         const owned_path = state.allocator.dupe(u8, rel_path) catch return self.releaseDiffJob(job);
-        job.diff = .{ .rel_path = owned_path, .base = base };
+        job.diff = .{ .rel_path = owned_path, .orig_rel_path = &.{}, .base = base };
+        job.diff.?.orig_rel_path = state.allocator.dupe(u8, orig_rel_path) catch return self.releaseDiffJob(job);
         const thread = std.Thread.spawn(.{}, diffWorker, .{job}) catch return self.releaseDiffJob(job);
         thread.detach();
         return true;
@@ -228,7 +236,10 @@ pub const Backend = struct {
     /// 부분 구성된 diff job을 되돌린다(할당 실패 경로 단일화 — 어느 단계에서 실패해도 같은 정리).
     fn releaseDiffJob(self: *Backend, job: *Job) bool {
         const state = job.state;
-        if (job.diff) |d| state.allocator.free(d.rel_path);
+        if (job.diff) |d| {
+            state.allocator.free(d.rel_path);
+            if (d.orig_rel_path.len > 0) state.allocator.free(d.orig_rel_path);
+        }
         if (job.repo.len > 0) state.allocator.free(job.repo);
         if (job.git_exe.len > 0) state.allocator.free(job.git_exe);
         state.allocator.destroy(job);
@@ -282,31 +293,39 @@ fn diffWorker(job: *Job) void {
     const state = job.state;
     const target = job.diff.?;
     var result: DiffResult = .{ .request_id = job.request_id };
-    var ok = true;
+    // **없는 쪽은 빈 문서다.** 추가된 파일은 왼쪽이 없고 삭제된 파일은 오른쪽이 없다 — 둘 다 정상적인 비교이며
+    // 목록에서 가장 흔한 상태다. 이걸 실패로 접으면 삭제·추가를 아예 못 본다(리뷰에서 잡힌 결함).
+    // 진짜 실패는 **양쪽 다 못 읽은 경우**뿐이다 — 보여 줄 것이 없다.
+    var had_side = false;
+    var truncated = false;
 
-    // untracked는 **비교 대상 자체가 없다** — 왼쪽을 읽지 않는다. 읽으려 들면 그 파일이 우연히 index에 있을 때
-    // (같은 경로가 추적 중인 경우) 엉뚱한 내용이 왼쪽에 실린다(테스트가 실제로 잡았다).
+    // untracked는 비교 대상 자체가 없다 — 왼쪽을 읽지 않는다(읽으면 같은 경로가 추적 중일 때 엉뚱한 내용이 실린다).
     if (target.base != .untracked) {
-        if (blobSide(state.allocator, job, if (target.base == .staged) .head else .index)) |bytes| {
-            result.original = bytes;
-        } else |_| {
-            ok = false;
-        }
-    }
-    if (ok) {
-        if (target.base == .staged) {
-            if (blobSide(state.allocator, job, .index)) |bytes| result.modified = bytes else |_| {
-                ok = false;
-            }
-        } else if (worktreeSide(state.allocator, job.repo, target.rel_path)) |bytes| {
-            result.modified = bytes;
-        } else |_| {
-            ok = false;
-        }
-    }
-    result.ok = ok;
+        const side: git_command.BlobSide = if (target.base == .staged) .head else .index;
+        if (blobSide(state.allocator, job, side)) |out| {
+            result.original = out.bytes;
+            if (out.truncated) truncated = true;
+            had_side = true;
+        } else |_| {}
+    } else had_side = true; // 왼쪽이 없는 것이 이 기준의 정상이다
+
+    if (target.base == .staged) {
+        if (blobSide(state.allocator, job, .index)) |out| {
+            result.modified = out.bytes;
+            if (out.truncated) truncated = true;
+            had_side = true;
+        } else |_| {}
+    } else if (worktreeSide(state.allocator, job.repo, target.rel_path)) |out| {
+        result.modified = out.bytes;
+        if (out.truncated) truncated = true;
+        had_side = true;
+    } else |_| {}
+
+    result.ok = had_side;
+    result.truncated = truncated;
 
     state.allocator.free(target.rel_path);
+    if (target.orig_rel_path.len > 0) state.allocator.free(target.orig_rel_path);
     state.allocator.free(job.git_exe);
     state.allocator.free(job.repo);
     state.allocator.destroy(job);
@@ -323,21 +342,29 @@ fn diffWorker(job: *Job) void {
     state.release();
 }
 
-fn blobSide(allocator: std.mem.Allocator, job: *Job, side: git_command.BlobSide) ![]u8 {
+/// `Output`을 그대로 돌려준다 — `truncated`를 버리면 상한에서 잘린 내용이 온전한 파일처럼 보인다(리뷰 지적).
+fn blobSide(allocator: std.mem.Allocator, job: *Job, side: git_command.BlobSide) !Output {
     var spec_buf: [std.fs.max_path_bytes + 8]u8 = undefined;
-    const spec = git_command.blobSpec(side, job.diff.?.rel_path, &spec_buf) orelse return error.PathTooLong;
-    const out = try runWithArg(allocator, .show_blob, job.git_exe, job.repo, spec);
-    return out.bytes;
+    // rename은 왼쪽이 옛 경로다 — 새 경로로 HEAD를 읽으면 그 blob이 없어 비교가 통째로 실패한다.
+    const target = job.diff.?;
+    const path = if (side == .head and target.orig_rel_path.len > 0) target.orig_rel_path else target.rel_path;
+    const spec = git_command.blobSpec(side, path, &spec_buf) orelse return error.PathTooLong;
+    return runWithArg(allocator, .show_blob, job.git_exe, job.repo, spec);
 }
 
 /// 작업트리 파일은 git을 거치지 않고 그대로 읽는다 — 같은 바이트이고 프로세스를 하나 덜 띄운다.
-fn worktreeSide(allocator: std.mem.Allocator, repo: []const u8, rel_path: []const u8) ![]u8 {
+///
+/// **symlink는 따라가지 않는다**(`O_NOFOLLOW`). 저장소에 `key.txt -> ~/.ssh/id_rsa` 같은 링크가 있으면 그 행을
+/// 눌렀을 때 저장소 밖 파일 내용이 비교 화면에 그대로 실린다 — 파일 패널의 다른 읽기 경로가 이미 no-follow를
+/// 강제하는 것과 같은 이유다. 링크 자체를 보여 주는 것은 후속(git은 링크 대상 경로 문자열을 blob으로 준다).
+fn worktreeSide(allocator: std.mem.Allocator, repo: []const u8, rel_path: []const u8) !Output {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = std.fmt.bufPrintZ(&path_buf, "{s}/{s}", .{ repo, rel_path }) catch return error.PathTooLong;
-    const fd = std.c.open(path.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true });
+    const fd = std.c.open(path.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true });
     if (fd < 0) return error.OpenFailed;
     defer _ = std.c.close(fd);
-    return readAllFd(allocator, fd);
+    const bytes = try readAllFd(allocator, fd);
+    return .{ .bytes = bytes, .truncated = bytes.len >= max_output_bytes };
 }
 
 fn worker(job: *Job) void {
@@ -575,7 +602,7 @@ test "diff 본문을 기준별로 읽는다(end-to-end)" {
 
     // 커밋돼 있는 파일이라 `HEAD:` 와 작업트리 양쪽에서 읽힌다. 내용 자체가 아니라 **비지 않았는지**를 본다
     // (내용을 고정하면 이 파일을 고칠 때마다 테스트가 깨진다).
-    try testing.expect(backend.submitDiff(exe, repo, "build.zig", .staged, 1));
+    try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", .staged, 1));
     const staged = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
     var staged_result = staged;
     defer staged_result.deinit(testing.allocator);
@@ -583,7 +610,7 @@ test "diff 본문을 기준별로 읽는다(end-to-end)" {
     try testing.expect(staged_result.original.len > 0); // HEAD:build.zig
     try testing.expect(staged_result.modified.len > 0); // :build.zig(index)
 
-    try testing.expect(backend.submitDiff(exe, repo, "build.zig", .unstaged, 2));
+    try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", .unstaged, 2));
     const unstaged = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
     var unstaged_result = unstaged;
     defer unstaged_result.deinit(testing.allocator);
@@ -591,7 +618,7 @@ test "diff 본문을 기준별로 읽는다(end-to-end)" {
     try testing.expect(unstaged_result.modified.len > 0); // 작업트리 파일(git을 안 거친다)
 
     // untracked는 왼쪽이 **없는 것이 정상**이다 — 실패로 접지 않는다.
-    try testing.expect(backend.submitDiff(exe, repo, "build.zig", .untracked, 3));
+    try testing.expect(backend.submitDiff(exe, repo, "build.zig", "", .untracked, 3));
     const untracked = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
     var untracked_result = untracked;
     defer untracked_result.deinit(testing.allocator);
@@ -600,7 +627,7 @@ test "diff 본문을 기준별로 읽는다(end-to-end)" {
     try testing.expect(untracked_result.modified.len > 0);
 
     // 없는 경로는 실패를 **결과로** 싣는다(in-flight가 풀려야 화면이 "여는 중"에 안 갇힌다).
-    try testing.expect(backend.submitDiff(exe, repo, "no/such/file.txt", .staged, 4));
+    try testing.expect(backend.submitDiff(exe, repo, "no/such/file.txt", "", .staged, 4));
     const missing = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
     var missing_result = missing;
     defer missing_result.deinit(testing.allocator);

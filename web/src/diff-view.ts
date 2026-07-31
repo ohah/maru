@@ -19,7 +19,7 @@ export const retry_interval_ms = 120;
 export const retry_limit = 50;
 
 export type DiffPayload =
-  | { kind: "ready"; original: string; modified: string; truncated_lines: boolean }
+  | { kind: "ready"; original: string; modified: string }
   | { kind: "pending" }
   | { kind: "rejected"; reason: string };
 
@@ -31,12 +31,7 @@ export function parseDiffResult(value: unknown): DiffPayload {
   if (record.pending === true) return { kind: "pending" };
   if (typeof record.rejected === "string") return { kind: "rejected", reason: record.rejected };
   if (typeof record.original === "string" && typeof record.modified === "string") {
-    return {
-      kind: "ready",
-      original: record.original,
-      modified: record.modified,
-      truncated_lines: record.truncated_lines === true,
-    };
+    return { kind: "ready", original: record.original, modified: record.modified };
   }
   return { kind: "rejected", reason: "invalid" };
 }
@@ -48,6 +43,8 @@ export function rejectionText(reason: string): string {
       return "파일이 너무 커서 비교를 표시하지 않습니다";
     case "binary":
       return "바이너리 파일이라 텍스트 비교가 없습니다";
+    case "too_many_lines":
+      return "파일이 너무 길어 비교를 표시하지 않습니다";
     default:
       return "비교를 표시할 수 없습니다";
   }
@@ -97,9 +94,9 @@ export function createDiffScreen(host: HTMLElement): DiffScreen {
             return;
           }
           clearView();
-          // 잘렸으면 숨기지 않고 함께 보여 준다(조용히 일부만 보여 주지 않는다 — §6).
-          notice.textContent = payload.truncated_lines ? "앞부분만 표시합니다" : "";
-          notice.hidden = !payload.truncated_lines;
+          // 잘린 본문은 여기 오지 않는다 — 상한을 넘으면 네이티브가 거절로 답한다(없는 변경을 만들지 않으려고).
+          notice.textContent = "";
+          notice.hidden = true;
           view = new MergeView({
             a: { doc: payload.original, extensions: [EditorState.readOnly.of(true)] },
             b: { doc: payload.modified, extensions: [EditorState.readOnly.of(true)] },
@@ -147,7 +144,19 @@ export async function loadDiff(
 }
 
 /// `?kind=diff` shell의 진입점.
+///
+/// **shell의 다른 요소를 반드시 치운다.** index.html은 편집기 shell과 같은 문서라 100% 높이 `#renderer` iframe과
+/// "파일을 읽는 중" 상태 문구가 먼저 들어 있다. body가 `overflow:hidden`이라 그것들을 그대로 두면 MergeView가
+/// 화면 아래로 밀려 **제품에서 diff가 아예 안 보인다**(리뷰에서 잡힌 결함 — jsdom 테스트는 iframe·CSS가 없어 못 잡는다).
 export function bootDiff(document: Document): void {
+  const frame = document.querySelector<HTMLIFrameElement>("#renderer");
+  if (frame !== null) {
+    frame.hidden = true;
+    frame.removeAttribute("src"); // 렌더 문서를 띄울 이유가 없다(격리 origin 로드도 아끼고)
+  }
+  const status = document.querySelector<HTMLElement>("#viewer-status");
+  if (status !== null) status.hidden = true;
+
   const host = document.querySelector<HTMLElement>("#editor") ?? document.body;
   host.hidden = false;
   const screen = createDiffScreen(host);

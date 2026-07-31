@@ -13,10 +13,10 @@ const std = @import("std");
 /// 원본만 큰 경우(대용량 파일 삭제)와 수정본만 큰 경우를 같은 규칙으로 거른다.
 pub const max_side_bytes: usize = 1 << 20;
 
-/// 한 페이지에 실을 최대 줄 수(§10.6). CM6는 더 큰 문서도 열지만, 한 번에 넘기는 양을 묶어 두면 브리지 payload와
-/// 첫 렌더 비용이 파일 크기와 무관하게 상한을 갖는다. 페이지 넘김은 후속 슬라이스다.
-pub const max_lines: usize = 500;
-
+/// **줄 수로는 거르지 않는다.** 문서의 "diff 페이지 500행"은 페이지네이션 단위이지 표시 상한이 아닌데, 그걸 상한으로
+/// 쓰면 500줄 넘는 파일(대부분)이 안 열린다. 실측(2026-08-01, 제품 WKWebView): 2만 줄 문서에서 10%가 다른 최악의
+/// 경우도 마운트 **229 ms**, 1천·5천 줄은 ~100 ms다 — CM6가 화면 밖을 그리지 않기 때문이다. 양을 묶는 일은
+/// **바이트 상한**(`max_side_bytes`)이 이미 한다(1 MiB면 보통 코드로 2만 줄 남짓이라 위 측정 범위 안이다).
 /// binary 판정에 볼 앞부분 길이. git도 같은 방식(앞부분에 NUL이 있으면 binary)이라 판정이 목록의 `-` 표시와 어긋나지
 /// 않는다. 전체를 훑지 않는 이유는 큰 파일에서 판정 비용이 파일 크기에 비례하지 않게 하기 위해서다.
 pub const binary_probe_bytes: usize = 8000;
@@ -26,10 +26,6 @@ pub const Rejection = enum {
     too_large,
     /// NUL 바이트가 있다 → 텍스트 비교가 의미 없다.
     binary,
-    /// 한쪽이 `max_lines`를 넘었다. **자르지 않고 거절한다** — 양쪽을 각자 자르면 두 문서의 끝이 서로 다른
-    /// 원본 줄이 되어 **없는 변경이 만들어진다**(맨 위에 한 줄만 삽입돼도 마지막 줄이 삭제된 것처럼 보인다).
-    /// 페이지 넘김이 생기기 전까지는 잘린 비교를 보여 주지 않는 편이 정직하다.
-    too_many_lines,
 };
 
 pub const Decision = union(enum) {
@@ -45,21 +41,7 @@ pub const Decision = union(enum) {
 pub fn decide(original: []const u8, modified: []const u8) Decision {
     if (original.len > max_side_bytes or modified.len > max_side_bytes) return .{ .reject = .too_large };
     if (looksBinary(original) or looksBinary(modified)) return .{ .reject = .binary };
-    if (lineCount(original) > max_lines or lineCount(modified) > max_lines) return .{ .reject = .too_many_lines };
     return .{ .ok = .{ .original = original, .modified = modified } };
-}
-
-/// 개행 수 + 마지막 줄(개행으로 안 끝나면). 상한 판정에만 쓰므로 넘는 순간 멈춘다.
-fn lineCount(bytes: []const u8) usize {
-    var lines: usize = 0;
-    var i: usize = 0;
-    while (i < bytes.len) : (i += 1) {
-        if (bytes[i] != '\n') continue;
-        lines += 1;
-        if (lines > max_lines) return lines;
-    }
-    if (bytes.len > 0 and bytes[bytes.len - 1] != '\n') lines += 1;
-    return lines;
 }
 
 /// 앞부분에 NUL이 있으면 binary로 본다(git과 같은 판정).
@@ -95,21 +77,13 @@ test "탐침 범위 밖의 NUL은 binary로 보지 않는다(git과 같은 판�
     try testing.expect(!looksBinary(&buf));
 }
 
-test "줄 수 상한을 넘으면 자르지 않고 거절한다(없는 변경을 만들지 않으려고)" {
-    // 양쪽을 각자 자르면 두 문서의 끝이 서로 다른 원본 줄이 되어, 맨 위 한 줄 삽입만으로도
-    // 마지막 줄이 삭제된 것처럼 보인다. 그런 비교를 보여 주느니 못 보여 준다고 말한다.
+test "긴 문서는 그대로 싣는다(줄 수로 거르지 않는다)" {
+    // 500줄 상한은 페이지네이션 단위를 표시 상한으로 잘못 쓴 것이었다 — 실측상 2만 줄도 마운트 229ms다.
     var buf: std.Io.Writer.Allocating = .init(testing.allocator);
     defer buf.deinit();
-    for (0..max_lines + 1) |i| try buf.writer.print("line {d}\n", .{i});
-    try testing.expectEqual(Rejection.too_many_lines, decide(buf.written(), "one\n").reject);
-    try testing.expectEqual(Rejection.too_many_lines, decide("one\n", buf.written()).reject);
-}
-
-test "상한과 정확히 같은 줄 수는 통과한다(경계)" {
-    var buf: std.Io.Writer.Allocating = .init(testing.allocator);
-    defer buf.deinit();
-    for (0..max_lines) |i| try buf.writer.print("line {d}\n", .{i});
-    try testing.expectEqualStrings(buf.written(), decide(buf.written(), "one\n").ok.original);
+    for (0..5000) |i| try buf.writer.print("line {d}\n", .{i});
+    const decision = decide(buf.written(), "one\n");
+    try testing.expectEqualStrings(buf.written(), decision.ok.original); // 자르지도, 거절하지도 않는다
 }
 
 test "마지막 줄에 개행이 없어도 한 줄로 센다" {

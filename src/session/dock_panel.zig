@@ -78,6 +78,18 @@ pub const DiffBase = enum {
     /// 병합 충돌 중인 파일: `HEAD ↔ 작업트리`. index에 stage 0이 없어 `:<경로>`를 못 읽으므로(실측) 왼쪽을
     /// HEAD로 잡는다 — 그러면 작업트리의 충돌 표시를 그대로 볼 수 있다.
     conflict,
+
+    /// 탭 라벨에 붙일 기준 이름. 파일 이름만으로는 **같은 파일의 다른 비교**(MM은 두 개, 편집기 탭까지 세 개)를
+    /// 구분할 수 없다 — 무엇을 보고 있는지 탭에서 바로 알 수 있어야 한다.
+    pub fn label(self: DiffBase) []const u8 {
+        return switch (self) {
+            .staged => "스테이지됨",
+            .unstaged => "작업트리",
+            .untracked => "새 파일",
+            .branch => "브랜치",
+            .conflict => "충돌",
+        };
+    }
 };
 
 /// 폐기된 라이브 프리뷰 모드가 workspace 파일에 남긴 wire 이름이다. **writer는 이 값을 다시 쓰지 않는다** —

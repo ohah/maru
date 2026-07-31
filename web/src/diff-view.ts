@@ -43,8 +43,6 @@ export function rejectionText(reason: string): string {
       return "파일이 너무 커서 비교를 표시하지 않습니다";
     case "binary":
       return "바이너리 파일이라 텍스트 비교가 없습니다";
-    case "too_many_lines":
-      return "파일이 너무 길어 비교를 표시하지 않습니다";
     default:
       return "비교를 표시할 수 없습니다";
   }

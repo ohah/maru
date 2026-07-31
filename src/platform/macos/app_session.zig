@@ -24773,16 +24773,58 @@ pub const AppSession = struct {
         return buf[0..n];
     }
 
-    /// 실행 권한(0o755)으로 파일을 쓴다 — 상태줄 스크립트는 claude가 직접 실행한다.
+    /// 사용자 파일을 **원자적으로** 갈아 끼운다 — 같은 디렉터리 임시 파일에 다 쓴 뒤 `rename`.
+    ///
+    /// 제자리 truncate로 쓰면 그 사이에 claude가 **반쯤 쓰인 상태줄 스크립트를 실행**하거나, 우리가 죽은 자리에 잘린
+    /// `settings.json`이 남는다. 둘 다 사용자 파일이라 되돌려줄 사람이 없다. rename은 같은 파일시스템 안에서 원자적이다.
     fn writeExecutableFile(io: std.Io, path: []const u8, body: []const u8, executable: bool) !void {
         const dir = std.fs.path.dirname(path) orelse return error.BadPath;
         std.Io.Dir.cwd().createDirPath(io, dir) catch {};
-        const file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
-        defer file.close(io);
-        try file.writePositionalAll(io, body, 0);
-        // 상태줄 스크립트는 claude가 **직접 실행**하므로 실행 권한이 필요하다(settings.json은 아니다).
-        if (executable) file.setPermissions(io, @enumFromInt(0o755)) catch {};
+        var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const tmp_path = std.fmt.bufPrint(&tmp_buf, "{s}.maru-tmp", .{path}) catch return error.BadPath;
+        {
+            const file = try std.Io.Dir.cwd().createFile(io, tmp_path, .{ .truncate = true });
+            defer file.close(io);
+            errdefer std.Io.Dir.cwd().deleteFile(io, tmp_path) catch {};
+            try file.writePositionalAll(io, body, 0);
+            // 상태줄 스크립트는 claude가 **직접 실행**하므로 실행 권한이 필요하다(settings.json은 아니다).
+            // rename **전에** 걸어야 갈아 끼운 순간부터 실행 가능하다.
+            if (executable) file.setPermissions(io, @enumFromInt(0o755)) catch {};
+        }
+        // 실패하면 임시 파일을 남기지 않는다 — 사용자 디렉터리에 우리 잔해가 쌓이면 CI의 "늘어난 파일" 게이트도 깨진다.
+        errdefer std.Io.Dir.cwd().deleteFile(io, tmp_path) catch {};
+        try std.Io.Dir.renameAbsolute(tmp_path, path, io);
     }
+
+    /// 상태줄 훅의 read-modify-write 전체를 **인스턴스 사이에서 직렬화**하는 락. 대상은 설치 마커 파일이다
+    /// (docs/sidebar-agent-list.md §7.2.2).
+    ///
+    /// 논블로킹이라 데드락이 없다 — 잡지 못하면 다른 인스턴스가 지금 같은 일을 하고 있다는 뜻이라 **물러난다**.
+    /// 마커를 rename으로 갈아 끼우지 않고 제자리에 쓰는 이유가 이것이다(inode가 바뀌면 이 락이 무의미해진다).
+    const StatuslineLock = struct {
+        fd: c_int,
+
+        fn acquire(marker_path: [:0]const u8) ?StatuslineLock {
+            const fd = std.c.open(marker_path.ptr, .{ .ACCMODE = .RDWR, .CREAT = true }, @as(std.c.mode_t, 0o644));
+            if (fd < 0) return null;
+            if (std.c.flock(fd, std.posix.LOCK.EX | std.posix.LOCK.NB) != 0) {
+                _ = std.c.close(fd);
+                return null;
+            }
+            return .{ .fd = fd };
+        }
+
+        /// 마커 본문을 제자리로 쓴다(락 유지). 반쯤 쓰인 마커는 파싱에 실패하고, 그건 "모른다"라 호출부가 `.skip`으로
+        /// 접는다 — 안전한 방향의 실패다.
+        fn writeBody(self: StatuslineLock, body: []const u8) void {
+            if (std.c.ftruncate(self.fd, 0) != 0) return;
+            _ = std.c.pwrite(self.fd, body.ptr, body.len, 0);
+        }
+
+        fn release(self: StatuslineLock) void {
+            _ = std.c.close(self.fd); // close가 flock도 푼다
+        }
+    };
 
     /// claude 설정 디렉터리(존재 여부는 호출부가 판정). 규칙 자체는 OS 중립이라 session 레이어가 갖고, 여기서는
     /// env 조회만 해서 넘긴다. 결과는 `buf` 소유.
@@ -24884,8 +24926,10 @@ pub const AppSession = struct {
     ///
     /// **사용자 소유 파일을 건드리는 유일한 자리**라 규율을 여기서 지킨다:
     /// - 이미 사용자가 쓰던 상태줄이 있으면 **지우지 않고 감싼다**(우리 스크립트가 그 명령을 그대로 실행).
-    /// - 우리가 넣은 것은 파일명(`maru-statusline.sh`)과 스크립트 안 표식 블록으로 드러난다.
-    /// - 끄면 감쌌던 원래 명령을 `statusLine`에 복원하고 우리 스크립트를 지운다 — 설치 전 상태로 돌아간다.
+    /// - 감쌌던 원래 명령의 **단일 출처는 설치 마커**다. 스크립트 안의 표식은 사람이 읽으라고 있는 것이고, 우리가
+    ///   매 실행마다 덮어쓰는 파일을 유일한 근거로 삼았다가 실제로 사용자 상태줄을 영구히 잃었다(§7.2.2).
+    /// - 마커 파일 `flock`으로 **인스턴스 사이를 직렬화**한다. 잡지 못하면 물러난다.
+    /// - 끄면 감쌌던 원래 명령을 `statusLine`에 복원하고 우리 것(스크립트·마커)을 지운다 — 설치 전 상태로 돌아간다.
     ///
     /// best-effort다. 실패는 조용히 지나간다 — 이 훅이 없어도 대화는 자식 신원 경로(§7.2.1)로 대부분 잡힌다.
     fn reconcileAgentStatusline(self: *AppSession) void {
@@ -24905,29 +24949,39 @@ pub const AppSession = struct {
         dir_handle.close(self.io);
         const script_path = std.fmt.allocPrint(a, "{s}/{s}", .{ claude_dir, sl.script_name }) catch return;
         const settings_path = std.fmt.allocPrint(a, "{s}/settings.json", .{claude_dir}) catch return;
+        const marker_path = std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ claude_dir, sl.marker_name }, 0) catch return;
+
+        // 여기서부터 끝까지가 하나의 read-modify-write다 — 락 안에서만 읽고 쓴다. 읽기와 쓰기 사이에 다른 인스턴스가
+        // 끼어드는 것이 원본 소실의 원인이었다.
+        const lock = StatuslineLock.acquire(marker_path) orelse return;
+        defer lock.release();
 
         const want = self.loaded_config.config.sidebar.agent_transcript_hook;
         const existing_script = readFileAlloc(self.io, a, script_path);
         const current_cmd = readStatusLineCommand(a, self.io, settings_path);
+        const marker = if (readFileAlloc(self.io, a, marker_path)) |text| sl.parseMarker(text) else null;
+        const script_wrapped = if (existing_script) |body| sl.extractWrappedCommand(a, body) else null;
 
         if (!want) {
-            // **복원**: 우리가 감쌌던 원래 명령을 되돌리고 우리 것을 지운다. 사용자가 그 사이 statusLine을 직접
-            // 바꿨다면(우리 것이 아니면) 아무것도 건드리지 않는다.
-            if (current_cmd) |cmd| if (sl.commandIsOurs(cmd)) {
-                const restore = if (existing_script) |body| sl.extractWrappedCommand(body) else null;
-                writeStatusLineCommand(a, self.io, settings_path, restore);
-            };
+            // **복원**: 마커 → 스크립트 wrap 순으로 원본을 찾는다. 사용자가 그 사이 statusLine을 직접 바꿨다면
+            // (우리 것이 아니면) 아무것도 건드리지 않는다.
+            switch (sl.restoreActionFor(current_cmd, marker, script_wrapped)) {
+                .leave => {},
+                .set => |cmd| writeStatusLineCommand(a, self.io, settings_path, cmd),
+                .clear => writeStatusLineCommand(a, self.io, settings_path, null),
+            }
             std.Io.Dir.cwd().deleteFile(self.io, script_path) catch {};
+            // 마커는 락 대상이라 지금 잡고 있는 fd가 가리킨다. 지우고 나서 close해도 락은 정상적으로 풀린다.
+            std.Io.Dir.cwd().deleteFile(self.io, marker_path) catch {};
             return;
         }
 
-        // 어떤 계획인가 — 없으면 설치, 우리 것이면 갱신, 남의 것이면 감싼다.
+        // 어떤 계획인가 — 없으면 설치, 우리 것이면 갱신, 남의 것이면 감싼다. 그 계획을 **써도 되는지**는 actionFor가
+        // 판정한다(근거를 잃은 갱신은 덮어쓰지 않는다).
         const plan = sl.planFor(current_cmd);
-        const wrapped: ?[]const u8 = switch (plan) {
-            .install => null,
-            // 갱신이면 이미 스크립트 안에 감싸둔 원래 명령을 유지한다(두 번 감싸지 않게).
-            .refresh => if (existing_script) |body| sl.extractWrappedCommand(body) else null,
-            .wrap_existing => current_cmd,
+        const wrapped: ?[]const u8 = switch (sl.actionFor(plan, current_cmd, marker, existing_script != null, script_wrapped)) {
+            .skip => return,
+            .write => |cmd| cmd,
         };
 
         const cache_base = sessionCacheBase(a) orelse return;
@@ -24936,6 +24990,12 @@ pub const AppSession = struct {
         var body: std.ArrayListUnmanaged(u8) = .empty;
         defer body.deinit(a);
         sl.scriptBody(&body, a, session_dir, wrapped) catch return;
+
+        // 마커를 **스크립트보다 먼저** 영속한다 — 이 순서라야 중간에 죽어도 원본을 되찾을 근거가 남는다.
+        var marker_body: std.ArrayListUnmanaged(u8) = .empty;
+        defer marker_body.deinit(a);
+        sl.markerBody(&marker_body, a, wrapped) catch return;
+        lock.writeBody(marker_body.items);
 
         // 내용이 같으면 쓰지 않는다 — 매 실행마다 사용자 파일의 mtime을 흔들 이유가 없다.
         if (existing_script) |old| if (std.mem.eql(u8, old, body.items)) {
@@ -30753,8 +30813,9 @@ test "agent statusline hook edits only the statusLine key and preserves the wrap
     });
     session.deinit();
 
-    // 늘어난 파일은 이름으로 우리 것임이 드러나는 스크립트 하나뿐이다. codex와 옛 mapping은 이 경로와 무관하다.
+    // 늘어난 파일은 이름으로 우리 것임이 드러나는 스크립트와 마커 둘뿐이다. codex와 옛 mapping은 이 경로와 무관하다.
     try expectProviderFixtureEntries(io, claude, &.{
+        .{ .name = sl.marker_name, .kind = .file },
         .{ .name = "settings.json", .kind = .file },
         .{ .name = sl.script_name, .kind = .file },
     });
@@ -30782,14 +30843,51 @@ test "agent statusline hook edits only the statusLine key and preserves the wrap
         try std.testing.expect(sl.commandIsOurs(obj.get("statusLine").?.object.get("command").?.string));
     }
 
-    // 사용자 상태줄은 지워진 게 아니라 우리 스크립트 안에 감싸여 있다 — 그게 복원의 근거이기도 하다.
+    // 사용자 상태줄은 지워진 게 아니라 우리 스크립트 안에 감싸여 있다 — 사람이 열어봐도 보이는 표식이다.
     const script_after = try tmp.dir.readFileAlloc(io, "claude/" ++ sl.script_name, a, .limited(16 * 1024));
     defer a.free(script_after);
-    const wrapped = sl.extractWrappedCommand(script_after) orelse {
+    const wrapped = sl.extractWrappedCommand(a, script_after) orelse {
         std.debug.print("설치한 스크립트에 사용자 상태줄이 감싸여 있지 않다:\n{s}\n", .{script_after});
         return error.WrappedUserCommandMissing;
     };
+    defer a.free(wrapped);
     try std.testing.expectEqualStrings(user_command, wrapped);
+
+    // **복원의 근거는 마커다.** 스크립트는 우리가 매 실행마다 덮어쓰는 파일이라 근거가 될 수 없다(§7.2.2).
+    {
+        const marker_after = try tmp.dir.readFileAlloc(io, "claude/" ++ sl.marker_name, a, .limited(16 * 1024));
+        defer a.free(marker_after);
+        const parsed_marker = sl.parseMarker(marker_after) orelse return error.MarkerMissing;
+        try std.testing.expectEqualStrings(user_command, parsed_marker.wrapped orelse return error.MarkerLostCommand);
+    }
+
+    // **경합 회귀**: 다른 인스턴스가 wrap 없는 본문으로 스크립트를 덮은 상태를 그대로 만든다. 예전에는 이 상태에서
+    // 다시 켜면 `refresh` + wrap 없음으로 판정해 원본을 영구히 잃었다. 이제는 마커에서 되살아나야 한다.
+    {
+        var clobbered: std.ArrayListUnmanaged(u8) = .empty;
+        defer clobbered.deinit(a);
+        try sl.scriptBody(&clobbered, a, "/tmp/does-not-matter", null);
+        try tmp.dir.writeFile(io, .{ .sub_path = "claude/" ++ sl.script_name, .data = clobbered.items });
+
+        var again: AppSession = undefined;
+        try again.init(io, a, .{
+            .abi_version = abi_version,
+            .cols = 40,
+            .rows = 10,
+            .queue_capacity = 16,
+            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        });
+        again.deinit();
+
+        const healed_script = try tmp.dir.readFileAlloc(io, "claude/" ++ sl.script_name, a, .limited(16 * 1024));
+        defer a.free(healed_script);
+        const healed = sl.extractWrappedCommand(a, healed_script) orelse {
+            std.debug.print("마커가 있는데도 감싼 명령이 되살아나지 않았다:\n{s}\n", .{healed_script});
+            return error.WrappedUserCommandLost;
+        };
+        defer a.free(healed);
+        try std.testing.expectEqualStrings(user_command, healed);
+    }
 
     // 옵션을 끄면 설치 전 상태로 돌아간다 — 원래 명령이 `statusLine`에 복원되고 우리 스크립트는 사라진다.
     test_config_text = hook_off_config;

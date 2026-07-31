@@ -155,7 +155,6 @@ pub const RecoveryTransitionPlan = struct {
     next: AuthorityState,
     drop_backlog: bool = false,
     cancel_control: bool = false,
-    immediate_turn_required: bool = false,
 };
 
 fn terminalRecoveryPlan() RecoveryTransitionPlan {

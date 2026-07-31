@@ -80,6 +80,12 @@ pub const AttachmentTransport = struct {
         context: *anyopaque,
         token: external_inbox_ledger.Token,
     ) external_inbox_ledger.InvariantError!void = null,
+    preflight_batch_authority: ?*const fn (
+        context: *anyopaque,
+        stream_id: u64,
+        is_snapshot: bool,
+        key: ?external_recovery_types.Key,
+    ) external_recovery_types.BatchAuthority = null,
     mark_resync_applied: ?*const fn (
         context: *anyopaque,
         stream_id: u64,
@@ -202,12 +208,28 @@ pub const RemoteAttachment = struct {
             if (!released) return error.LedgerInvariant;
             return error.LedgerInvariant;
         }
-        if (recovery_key != null and !batch.is_snapshot) {
+        const batch_authority = if (transport.preflight_batch_authority) |preflight|
+            preflight(
+                transport.context,
+                self.state.stream_id,
+                batch.is_snapshot,
+                recovery_key,
+            )
+        else if (recovery_key == null)
+            external_recovery_types.BatchAuthority.ordinary
+        else
+            .stale_invariant;
+        const authority_valid = switch (batch_authority) {
+            .ordinary => recovery_key == null,
+            .recovery_exact => recovery_key != null and batch.is_snapshot,
+            .stale_invariant => false,
+        };
+        if (!authority_valid) {
             const released = self.releaseOrRetain(lease, transport);
             self.compactConsumedBatches();
             transport.fail_closed(transport.context);
             if (!released) return error.LedgerInvariant;
-            return error.ProtocolError;
+            return .terminal;
         }
         const screen = &(self.screen orelse {
             const released = self.releaseOrRetain(lease, transport);
@@ -239,7 +261,8 @@ pub const RemoteAttachment = struct {
             return error.LedgerInvariant;
         }
         self.compactConsumedBatches();
-        const key = recovery_key orelse return .applied;
+        if (batch_authority == .ordinary) return .applied;
+        const key = recovery_key orelse unreachable;
         const mark = transport.mark_resync_applied orelse {
             transport.fail_closed(transport.context);
             return .terminal;
@@ -1005,8 +1028,10 @@ const RecoveryTestTransport = struct {
     view: external_inbox_ledger.BatchView,
     batch_available: bool = true,
     release_fails: bool = false,
+    preflight_result: external_recovery_types.BatchAuthority = .recovery_exact,
     mark_result: MarkResyncAppliedResult = .commit_pending,
     fail_closed_calls: usize = 0,
+    preflight_calls: usize = 0,
     release_calls: usize = 0,
     mark_calls: usize = 0,
     release_before_mark: bool = false,
@@ -1051,6 +1076,17 @@ const RecoveryTestTransport = struct {
         return self.mark_result;
     }
 
+    fn preflight(
+        context: *anyopaque,
+        _: u64,
+        _: bool,
+        _: ?external_recovery_types.Key,
+    ) external_recovery_types.BatchAuthority {
+        const self: *RecoveryTestTransport = @ptrCast(@alignCast(context));
+        self.preflight_calls += 1;
+        return self.preflight_result;
+    }
+
     fn drop(_: *anyopaque, _: u64) void {}
 
     fn failClosed(context: *anyopaque) void {
@@ -1064,6 +1100,7 @@ const RecoveryTestTransport = struct {
             .read_batch = read,
             .borrow_charged = borrow,
             .release_charged = release,
+            .preflight_batch_authority = preflight,
             .mark_resync_applied = mark,
             .drop_stream = drop,
             .fail_closed = failClosed,
@@ -1386,6 +1423,53 @@ test "remote attachment stale mark terminalizes without retaining released token
     try std.testing.expectEqual(@as(usize, 1), transport.mark_calls);
     try std.testing.expectEqual(@as(usize, 1), transport.fail_closed_calls);
     try std.testing.expectEqual(@as(?AttachmentBatchLease, null), attachment.failed_release);
+    attachment.deinit();
+    try std.testing.expectEqual(@as(usize, 1), transport.release_calls);
+}
+
+test "remote attachment rejects stale recovery authority before screen apply" {
+    const allocator = std.testing.allocator;
+    const snapshot = try testSnapshot(allocator);
+    defer allocator.free(snapshot);
+    var transport = RecoveryTestTransport{
+        .view = .{
+            .is_snapshot = true,
+            .stream_id = 7,
+            .provenance = .untracked,
+            .recovery_key = .{
+                .owner_incarnation = 41,
+                .origin = .host,
+                .recovery_epoch = 7,
+                .expected_token_generation = 9,
+            },
+            .bytes = snapshot,
+        },
+        .preflight_result = .stale_invariant,
+    };
+    var attachment = RemoteAttachment.init(allocator, .{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .role = .observer,
+        .controller_generation = 0,
+    });
+    try attachment.bindTransport(transport.interface());
+    try attachment.initScreen(2);
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        attachment.screen.?.assembler.generation,
+    );
+    try std.testing.expectEqual(
+        PumpScreenResult.terminal,
+        try attachment.pumpScreen(std.testing.io),
+    );
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        attachment.screen.?.assembler.generation,
+    );
+    try std.testing.expectEqual(@as(usize, 1), transport.preflight_calls);
+    try std.testing.expectEqual(@as(usize, 1), transport.release_calls);
+    try std.testing.expectEqual(@as(usize, 0), transport.mark_calls);
+    try std.testing.expectEqual(@as(usize, 1), transport.fail_closed_calls);
     attachment.deinit();
     try std.testing.expectEqual(@as(usize, 1), transport.release_calls);
 }

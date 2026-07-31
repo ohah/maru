@@ -6,6 +6,7 @@
 const client_external_pump = @import("client_external_pump.zig");
 const client_external_rx_read = @import("client_external_rx_read.zig");
 const client_pump = @import("client_pump.zig");
+const external_recovery_types = @import("external_recovery_types.zig");
 const std = @import("std");
 const builtin = @import("builtin");
 const c = std.c;
@@ -736,14 +737,19 @@ test "d2c product owner maps readiness to POSIX RX before any writable work" {
             .expected_token_generation = 9,
         },
     } } };
+    const recovery_key = client_pump.RecoveryKey{
+        .owner_incarnation = storage.owner_incarnation,
+        .origin = .host,
+        .recovery_epoch = 5,
+        .expected_token_generation = 9,
+    };
+    try std.testing.expectEqual(
+        external_recovery_types.BatchAuthority.recovery_exact,
+        storage.preflightBatchAuthority(7, true, recovery_key),
+    );
     try std.testing.expectEqual(
         client_pump.RecoveryMarkResult.commit_pending,
-        storage.markResyncApplied(7, .{
-            .owner_incarnation = storage.owner_incarnation,
-            .origin = .host,
-            .recovery_epoch = 5,
-            .expected_token_generation = 9,
-        }),
+        storage.markResyncApplied(7, recovery_key),
     );
     try std.testing.expect(storage.pollHint().immediate);
     const scratch = try createRxScratchForTest();

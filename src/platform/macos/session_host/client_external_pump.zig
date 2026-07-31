@@ -24,6 +24,7 @@ const external_inbox_limits = @import("external_inbox_limits.zig");
 const external_owner_cleanup = @import("external_owner_cleanup.zig");
 const external_owner_seal = @import("external_owner_seal.zig");
 const external_owner_range = @import("external_owner_range.zig");
+const external_recovery_types = @import("external_recovery_types.zig");
 const external_source_decision = @import("external_source_decision.zig");
 const external_rx_types = @import("external_rx_types.zig");
 const external_rx_intent = @import("external_rx_intent.zig");
@@ -12304,6 +12305,57 @@ pub const ExternalPumpStorage = struct {
         return .stale_invariant;
     }
 
+    /// Allocation-free authority check that runs before a recovery snapshot can mutate the GUI
+    /// screen. It does not consume or publish state; the exact same key is checked again by
+    /// `markResyncApplied` after apply and lease release.
+    pub fn preflightBatchAuthority(
+        self: *const ExternalPumpStorage,
+        stream_id: u64,
+        is_snapshot: bool,
+        maybe_key: ?client_pump.RecoveryKey,
+    ) external_recovery_types.BatchAuthority {
+        if (self.saved_self_addr != @intFromPtr(self) or
+            self.lifecycle != .live or
+            active_external_operation_addr != 0 or
+            !ownerIncarnationValid(self) or
+            stream_id != self.evidence_snapshot.stream_id)
+            return .stale_invariant;
+        const active = switch (self.semantic_state) {
+            .active => |value| value,
+            else => return .stale_invariant,
+        };
+        const key = maybe_key orelse return switch (active) {
+            .valid, .control => .ordinary,
+            .host_recovery, .client_recovery => .stale_invariant,
+        };
+        if (!key.isCanonical() or !is_snapshot or
+            key.owner_incarnation != self.owner_incarnation)
+            return .stale_invariant;
+        return switch (active) {
+            .host_recovery => |phase| switch (phase) {
+                .awaiting_snapshot => |waiting| if (key.origin == .host and
+                    key.recovery_epoch == waiting.context.epoch and
+                    key.expected_token_generation ==
+                        waiting.expected_token_generation)
+                    .recovery_exact
+                else
+                    .stale_invariant,
+                else => .stale_invariant,
+            },
+            .client_recovery => |phase| switch (phase) {
+                .awaiting_snapshot => |waiting| if (key.origin == .client and
+                    key.recovery_epoch == waiting.context.epoch and
+                    key.expected_token_generation ==
+                        waiting.expected_token_generation)
+                    .recovery_exact
+                else
+                    .stale_invariant,
+                else => .stale_invariant,
+            },
+            .valid, .control => .stale_invariant,
+        };
+    }
+
     /// Completes only the post-release authority transition. The consumer has already applied the
     /// screen and retired its ledger token, so stale evidence cannot be retried or repaired here.
     /// No allocator callback, clock read, or recursive pump is permitted in this suffix.
@@ -23074,6 +23126,10 @@ test "e-core mark publishes applied-pending and read-only immediate poll hint" {
     try std.testing.expect(!before.immediate);
     try std.testing.expectEqual(@as(?i128, 100), before.next_deadline_ns);
     try std.testing.expectEqual(
+        external_recovery_types.BatchAuthority.recovery_exact,
+        storage.preflightBatchAuthority(7, true, key),
+    );
+    try std.testing.expectEqual(
         client_pump.RecoveryMarkResult.commit_pending,
         storage.markResyncApplied(7, key),
     );
@@ -23085,6 +23141,34 @@ test "e-core mark publishes applied-pending and read-only immediate poll hint" {
     try std.testing.expect(first.immediate);
     try std.testing.expect(std.meta.eql(first, second));
     try std.testing.expectEqual(@as(?i128, 100), first.next_deadline_ns);
+}
+
+test "e-core preflight rejects null recovery and nonnull valid authority" {
+    var recovery: ExternalPumpStorage = .{};
+    recoveryCoreStorage(&recovery, 41, .host, 3, 9, 100);
+    try std.testing.expectEqual(
+        external_recovery_types.BatchAuthority.stale_invariant,
+        recovery.preflightBatchAuthority(7, true, null),
+    );
+    try std.testing.expect(recovery.semantic_state.active == .host_recovery);
+
+    var valid: ExternalPumpStorage = .{};
+    recoveryCoreStorage(&valid, 41, .host, 3, 9, 100);
+    valid.semantic_state = .{ .active = .valid };
+    try std.testing.expectEqual(
+        external_recovery_types.BatchAuthority.ordinary,
+        valid.preflightBatchAuthority(7, false, null),
+    );
+    try std.testing.expectEqual(
+        external_recovery_types.BatchAuthority.stale_invariant,
+        valid.preflightBatchAuthority(7, true, .{
+            .owner_incarnation = 41,
+            .origin = .host,
+            .recovery_epoch = 3,
+            .expected_token_generation = 9,
+        }),
+    );
+    try std.testing.expect(valid.semantic_state.active == .valid);
 }
 
 test "e-core stale copied key cannot cross reincarnation origin epoch or generation" {
@@ -23124,6 +23208,11 @@ test "e-core stale copied key cannot cross reincarnation origin epoch or generat
         var storage: ExternalPumpStorage = .{};
         recoveryCoreStorage(&storage, 41, .client, 3, 9, 100);
         try std.testing.expectEqual(
+            external_recovery_types.BatchAuthority.stale_invariant,
+            storage.preflightBatchAuthority(7, true, key),
+        );
+        try std.testing.expect(storage.semantic_state.active == .client_recovery);
+        try std.testing.expectEqual(
             client_pump.RecoveryMarkResult.stale_invariant,
             storage.markResyncApplied(7, key),
         );
@@ -23143,6 +23232,32 @@ test "e-core stale copied key cannot cross reincarnation origin epoch or generat
         same_address.markResyncApplied(7, canonical),
     );
     try std.testing.expect(same_address.semantic_state == .terminal);
+}
+
+test "e-core cross-storage copied key isolates the original live owner" {
+    var first: ExternalPumpStorage = .{};
+    var second: ExternalPumpStorage = .{};
+    recoveryCoreStorage(&first, 41, .host, 3, 9, 100);
+    recoveryCoreStorage(&second, 42, .host, 3, 9, 100);
+    const first_key = client_pump.RecoveryKey{
+        .owner_incarnation = 41,
+        .origin = .host,
+        .recovery_epoch = 3,
+        .expected_token_generation = 9,
+    };
+    const first_before = first.semantic_state;
+    try std.testing.expectEqual(
+        external_recovery_types.BatchAuthority.stale_invariant,
+        second.preflightBatchAuthority(7, true, first_key),
+    );
+    try std.testing.expect(std.meta.eql(first_before, first.semantic_state));
+    try std.testing.expect(second.semantic_state.active == .host_recovery);
+    try std.testing.expectEqual(
+        client_pump.RecoveryMarkResult.stale_invariant,
+        second.markResyncApplied(7, first_key),
+    );
+    try std.testing.expect(std.meta.eql(first_before, first.semantic_state));
+    try std.testing.expect(second.semantic_state == .terminal);
 }
 
 test "e-core fresh clock commits before deadline and exact boundary terminalizes first" {

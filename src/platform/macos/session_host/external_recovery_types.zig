@@ -58,6 +58,12 @@ pub const MarkResult = enum {
     stale_invariant,
 };
 
+pub const BatchAuthority = enum {
+    ordinary,
+    recovery_exact,
+    stale_invariant,
+};
+
 test "recovery intent projects only canonical incarnation-bound keys" {
     try std.testing.expectEqual(
         @as(?Key, null),

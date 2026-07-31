@@ -359,6 +359,17 @@ FP16의 "파일 1개 = 창당 Term 1개" 불변식과의 관계를 명시한다 
 `변경 사항 없음`. ⑶ unborn(첫 커밋 전) → 섹션은 `추적되지 않은 파일`만 나온다. 셋 다 오류가 아니라 정상 상태이므로 경고색을
 쓰지 않는다.
 
+**말할 수 없는 상태를 "읽는 중"으로 위장하지 않는다.** 읽기가 끝나지 않는 것과 읽을 수 없는 것은 사용자에게 전혀 다른 일이다.
+
+| 상태 | 안내 | 판정 |
+| --- | --- | --- |
+| git CLI 없음 | `git이 설치되어 있지 않습니다` | 실행 파일 후보를 다 봐도 없음(§6) — **실행을 시도하지 않는다** |
+| 읽기 실패 | `git 읽기에 실패했습니다` | 명령이 0이 아닌 코드로 끝남. 직전 성공 목록은 버린다(다른 시점과 섞지 않는다) |
+| 읽는 중 | `읽는 중…` | 요청이 실제로 떠 있는 동안만 |
+
+실패는 화면에 남는다 — 뷰를 다시 선택하면 재시도한다. 자동 재시도는 넣지 않는다(같은 이유로 계속 실패할 명령을 매 프레임
+돌릴 이유가 없다). git stderr는 어떤 상태에서도 화면·로그에 싣지 않는다(§6).
+
 **갱신 시점.** 목록은 폴링하지 않는다. ⑴ 도크 뷰가 소스 컨트롤로 바뀔 때, ⑵ 파일 Term 저장 성공 뒤, ⑶ 창이 다시 포커스를
 받을 때, ⑷ 사용자가 헤더 새로고침을 누를 때 다시 읽는다.
 
@@ -473,6 +484,14 @@ Git 의미와 실행 안전도 E1 전에 고정한다.
 - rename/copy, type change, mode-only change, symlink blob, deleted file, unmerged conflict(stage 1/2/3), submodule gitlink, empty/unborn repository를 typed status로 표현한다.
 - `.git` directory뿐 아니라 worktree의 `.git` file과 bare/unborn 상태를 처리한다. 현재 sidebar branch 탐색의 best-effort 구현을 diff root 탐색에 재사용하지 않는다.
 - `GitAdapter`는 shell이나 사용자 alias를 거치지 않고 승인된 git executable을 argv로 직접 실행한다. executable path/version을 기록하고 PATH hijack, pager/editor prompt, credential/network 접근이 없는 read-only 명령만 `git_read`로 허용한다.
+- **실행 파일 결정**: 고정 경로 하나를 박지 않는다 — `/usr/bin/git`만 쓰면 homebrew·수동 설치 git을 쓰는 기기에서 사용자가
+  셸에서 쓰는 것과 **다른 git**을 돌리게 된다. PATH 항목 → 통상 설치 위치 순으로 후보를 훑어 **실행 가능한 정규 파일 하나를
+  절대경로로 확정**하고, 그 절대경로를 argv[0]로 실행한다. PATH 탐색은 후보를 고를 때만 쓰고 **exec에는 절대 쓰지 않는다**
+  (`execvp`·셸 경유 없음 = PATH hijack 차단은 유지). 상대경로·빈 PATH 항목은 후보에서 배제한다(앱 cwd의 `git`을 실행하지
+  않는다). 후보가 하나도 없으면 **실행을 시도하지 않고** git 미설치로 표시한다(§3.5).
+- **macOS shim 예외**: `/usr/bin/git`은 진짜 git이 아니라 개발자 도구 shim이라, 도구가 없는 기기에서 실행하면 git이 도는 대신
+  설치 모달이 뜬다. 파일 목록을 보려던 조작이 시스템 설치 창을 띄우는 건 사용자가 시킨 적 없는 일이므로, 도구가 실제로 있다는
+  증거(명령행 도구·Xcode 툴체인의 git이 실행 가능)가 없으면 이 경로는 후보에서 뺀다.
 - read-only diff 호출은 repository config가 외부 프로세스를 실행하지 못하도록 external diff/textconv/pager와 interactive prompt를 명시적으로 끈다. config·attributes·filter가 실행되는 각 명령을 adversarial repo fixture로 확인한다.
 - git stderr에는 path/user/repo 정보가 있으므로 raw로 page/trace에 전달하지 않는다.
 - 이후 stage/unstage는 clean/smudge filter, index lock, partial hunk stale context를 별도 보안·CAS 문제로 다룬다.

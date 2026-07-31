@@ -8585,15 +8585,144 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             `ExternalPumpState.terminal{fd_disposition=.owner_cleanup}`으로 latch해 모든 후속 facade 호출/admission을
             wire 0으로 거부한다.
 
+          f1은 구현·리뷰 크기만 줄이는 세 internal gate다. `f1a`는 sealed admission과 request-ID atomicity,
+          `f1b`는 bounded write/clock/retire/cleanup, `f1c`는 같은 whole-turn lease의 RX-authority suffix와
+          제품 POSIX adapter/socketpair를 소유한다. 세 gate가 모두 green이기 전에는 2b2f1 완료나 실제
+          TX capability를 주장하지 않는다. f1이 반환하는 fully-sent evidence는 transport 사실일 뿐이다.
+          f2가 이를 control correlation에 귀속하고, e-integration이 ACK/resync recovery barrier에 귀속하며,
+          f3가 revoke/HUP/close 전체 우선순위와 offset-0 control cancel을 소유한다.
+
+          - **f1a — sealed admission + request-ID commit:** TX queue/counter/allocator의 sole owner는 기존
+            `storage.owned_client.io_mode.external`에 남고, request-ID의 sole owner는 adoption이 옮긴
+            `storage.owner_request_ids`다. 별도 queue/counter mirror를 만들지 않는다.
+            `admitTx(spec, now_ns)`는 다른 facade와 같은 external operation lease/generation을 획득해
+            pump/teardown과 동시 진입하지 않는다. callback 중 pump/teardown/admission 재진입과 pump 중 admission은
+            typed busy이며 allocation/syscall/두 번째 callback 0이다. `now_ns`는 owner가 facade 진입 직전에 읽은
+            monotonic 시각이고 prepared seal에 포함한다. external TX state의 `last_observed_now_ns`보다 작으면
+            allocation 0 terminal이며, 유효한 facade 진입은 별도 clock seal을 callback 전에 단조 publish한다.
+            `TxAdmissionSpec{kind,stream_id,flags,payload,request_policy = zero | reserve}`는 caller-owned
+            immutable borrow다. generic f1은 payload 의미나 control/recovery state를 해석하지 않고 canonical
+            header/stream/request policy, kind별 payload cap, checked `header_size+payload.len`, 64-item cap과
+            resident byte cap을 allocation 전에 검증한다. resize/resync/ACK builder와 coalesce는 각각 f2와
+            e-integration의 owner intent가 이 spec을 만들기 전에 수행한다.
+            `PreparedTxAdmission`은 final storage/Client/external-state 주소, owner incarnation/operation generation,
+            operation lease, allocator identity, queue pointer/len/cap/generation과 descriptor-scalar+per-frame-seal
+            aggregate, queued+retiring resident bytes, request owner address와 expected/next state, input
+            header/payload descriptor·range·digest 및 `now_ns`를 봉인한다. queue generation은 stage에서 1로
+            시작하고 successful admission 또는 positive write/retire aggregate마다 checked `+1`,
+            EAGAIN/OOM/backpressure/rejected admission에는 0이다. max는 live mutation을 더 허용하지 않는
+            exhausted generation이다. terminal teardown은 숫자를 증가시키지 않고 lifecycle을 먼저
+            nonnumeric terminal tombstone으로 no-fail publish해 기존 generation을 보존한 채 cleanup한다.
+            따라서 max에서도 callback/syscall/admission 0, 1~64 frame cleanup exact once이며 wrap 0이다.
+            cap-full은 `backpressure`, request exhaustion·forged
+            state·checked overflow는 typed terminal이고 둘 다 allocation/queue/request mutation 0이다.
+            `zero` policy는 request state를 읽기만 하고 prepare/commit하지 않으며 canonical request ID 0만
+            encoding한다. `reserve`만 request state를 prepare하며 nonzero ID를 encoding한다.
+
+            exact wire allocation 전 owner/input scalar와 protected range를 freeze한다. allocator가 반환한
+            pointer/len/alignment가 storage/Client/external state, queue backing, request owner, input payload와
+            exact/partial alias면 write/copy/free 0 bounded quarantine다. alias 검증 뒤에만 canonical header
+            encoding과 payload copy를 수행한다. candidate owner는 pointer/len/allocator와 encoded wire digest를
+            callback-hidden `PreparedTxAdmission`에 보존한다. allocation callback 반환 뒤에는 frozen scalar
+            descriptor·allocator·range·alias를 **pointer 역참조 없이 먼저** 비교하고 exact match 뒤에만
+            payload/wire digest와 aggregate를 검증한다. stale/copy/cross-storage/abort면 candidate를 frozen
+            cleanup owner로 옮기고 prepared를 tombstone한 뒤 exact-once free한다. cleanup callback drift/reentry는
+            live prepared를 다시 읽거나 free하지 않고 bounded quarantine로 계상한다. replay/double/cross-storage
+            cleanup은 0이다. protected-range alias, invalid pointer 또는 cleanup authority drift로 free할 수 없는
+            candidate는 requested exact wire length를 storage의 `external_tx_quarantined_bytes` sticky terminal
+            counter에 정확히 한 번 charge한다. 이 counter는 queued+retiring resident와 분리된 corruption
+            accounting이고 candidate backing을 live queue로 재사용하지 않는다. 한 storage에는 prepared
+            candidate가 하나뿐이며 첫 quarantine이 terminalize해 이후 facade/allocation이 0이므로 상한은
+            `1 MiB+32`다. process-wide checked quarantine event/byte high-water도 같은 exact length를 한 번
+            기록하고 overflow는 fail-stop한다. normal teardown은 queued/retiring final-zero를 요구하고
+            quarantine fixture는 sticky exact charge/replay 0을 요구한다. 마지막 callback 뒤에는 queue append, resident counter와
+            request next state를 한 callback-free/no-fail suffix에서 함께 publish한다. OOM/encode/stale/copy/
+            cross-storage/double permit은 queue/counter/request mutation 0이며, `last_available`은 이 suffix에서만
+            `max_consumed`가 된다.
+
           TX resident는 connection당 `protocol.max_binary_chunk + protocol.header_size` bytes(`1 MiB+32`)와
-          64 frame 두 cap을 동시에 적용한다. `external_tx_bytes`는 unsent suffix가 아니라 free 전까지 살아 있는
-          `Σ frame.bytes.len`이고 partial write로 줄지 않는다. checked header+payload 길이와 byte/item cap을 allocation
+          64 frame 두 cap을 동시에 적용한다. resident SSOT는 queued `external_tx_bytes`와 callback-hidden
+          `external_tx_retiring_bytes`의 checked 합이며, free 전까지 살아 있는 `Σ allocation.len`이다.
+          partial write로 줄지 않고 retire/teardown free callback 중에는 queue에서 빠진 full 길이가 retiring
+          counter에 남는다. admission과 관측은 combined resident를 사용한다. checked header+payload 길이와
+          byte/item cap을 allocation
           전에 preflight하고, encode 성공 뒤에만 queue와 counter를 infallible commit한다. cap-full은
           `backpressure`, allocation 실패는 wire/queue/request-ID mutation 0이다. frame admission 시
-          `activated_at_ns=last_progress_at_ns=now`로 시작하며 accepted byte만 progress를 갱신하고 absolute 30초는
-          연장하지 않는다. TX queue에 admission된 immutable frame은 offset 0이어도 replacement하지 않는다.
+          immutable `activated_at_ns=now`로 시작한다. queue가 empty→nonempty면 queue-level
+          `head_progress_baseline_ns=now`를 시작하고, 이후 positive accepted byte와 head 승격만 이 baseline을
+          갱신한다. absolute 30초는 연장하지 않는다. TX queue에 admission된 immutable frame은 offset 0이어도
+          replacement하지 않는다.
           resize/resync coalesce는 request ID를 예약하기 전 owner intent에서만 수행하고 input은 절대 coalesce/drop하지
-          않는다. write error/HUP/deadline과 partial frame revoke는 connection fail-close다.
+          않는다. write syscall error와 TX deadline은 f1이 terminal latch하되 poll HUP/revoke/partial-frame
+          revoke의 우선순위와 close syscall은 f3가 소유한다.
+
+          - **f1b — bounded write, clock, retire와 cleanup:** queue descriptor는 admitted 뒤 bytes backing/len,
+            kind/stream/request ID와 `activated_at_ns`가 immutable이고 offset과 head
+            `head_progress_baseline_ns`만 sealed transition으로 바뀐다. FIFO는 최대 64개이므로 head retire 때
+            allocation-free bounded shift를 허용한다. partial write는 accepted byte만 offset/turn counter에 더하고
+            resident bytes를 줄이지 않는다. fully sent이면 descriptor와 full allocation 길이를 callback-hidden
+            frozen local로 먼저 move하고 queue counter를 retiring counter로 옮겨 combined resident를 유지한 채
+            queue/head clock을 no-fail tombstone한 뒤 exact once free한다. callback 반환 뒤 retiring counter만
+            줄인다.
+            다음 frame이 head가 되면 fresh `now_ns`로 그 frame의 progress baseline만 시작하고
+            `activated_at_ns`는 바꾸지 않는다. free callback은 live descriptor를 다시 읽지 않으며 same/cross-storage
+            reentry나 나머지 descriptor/queue/counter 변조를 seal로 탐지해 terminal/quarantine로 닫는다.
+            teardown도 1~64개 descriptor 전체를 먼저 freeze하고 live queue/counter를 retiring owner로 옮겨
+            tombstone한 뒤 free callback을 실행해 replay·wrong-free·double-free를 허용하지 않는다.
+            scalar pointer/len/allocator/range/alias가 frozen mirror와 exact match하기 전에는 어떤 candidate/live/
+            retiring pointer도 dereference하거나 free하지 않는다. request state/lifecycle terminal tombstone은
+            queue cleanup leaf가 아니라 storage aggregate가 소유한다.
+
+          frame별 absolute deadline은 admission의 `activated_at_ns + 30s`이고 queue wait도 포함한다.
+          10초 progress deadline은 현재 head가 된 시각 또는 마지막 positive accepted byte부터 계산한다.
+          EAGAIN/EINTR/zero/error와 뒤 frame의 대기는 progress를 갱신하지 않는다. queue empty이면 두 TX clock을
+          모두 제거한다. `pollHint()`는 recovery와 모든 resident absolute deadline 및 head progress deadline의
+          checked minimum을 반환하며 별도 TX hint를 만들지 않는다. checked clock overflow, backwards clock,
+          `now >= deadline`은 readiness보다 먼저 terminal이고 allocation/write는 0이다.
+          한 turn은 accepted wire bytes 최대 `1 MiB`, fully-sent frame 최대 64이며 exact boundary 뒤에는
+          queue가 남을 때 external TX state의 durable `tx_immediate_pending`과
+          `TurnResult.immediate_tx=true`를 no-fail publish하고 cap+1 syscall은 하지 않는다.
+          `pollHint.immediate`는 recovery `applied_pending || tx_immediate_pending`의 합성 read-only projection이다.
+          다음 pump 진입이 TX latch를 정확히 한 번 소비한다. 그 turn이 non-writable/EAGAIN이면 latch를 다시
+          세우지 않아 POLLOUT을 기다리고 spin하지 않으며, positive progress가 다시 exact budget에 닿을 때만
+          재설정한다. queue empty/terminal/teardown은 false다. resident absolute minimum은 최대 64개 frame
+          `activated_at_ns`의 bounded O(64) scalar scan이고 frame seal/queue generation이 invalid면
+          `immediate=true`로 다음 zero-readiness pump가 terminalize한다.
+
+          `PreparedTxWrite`는 held whole-turn lease, final storage/Client/external-state 주소, owner incarnation/
+          operation generation, current D2 authority permit, queue generation과 head descriptor/backing/wire digest,
+          offset/remaining/clocks, transport callback extent를 봉인한다. syscall 전에 operation-busy를 publish하고
+          callback 뒤에는 attacker-mutable descriptor를 읽기 전에 frozen permit과 owner graph를 재검증한다.
+          nonblocking write 결과는 positive `1...remaining`, `would_block`, bounded `interrupted`,
+          `zero`, `socket_error`의 닫힌 enum이다. positive만 progress이며 over-report·zero·오류·EINTR
+          9번째는 terminal, EAGAIN은 mutation 0이다. callback reentry/descriptor drift/ABA는 두 번째 syscall
+          0으로 terminal/quarantine한다. fully-sent 결과는
+          `TxCompletion{kind,stream_id,request_id,wire_len}`의 최대 64개 sealed same-turn scratch FIFO에
+          기록한다. public return이나 scratch reset 전에 held lease 아래 package-private
+          `consumeTxCompletionsUnderHeldLease`가 exact-once consume→spent한다. f1의 sink는 discard-only이며
+          test-only recorder가 FIFO를 관측한다. f2는 control correlation을, e-integration은 ACK/resync barrier를
+          이 **단일 sink 함수 안에서만** 추가하고 scratch를 직접 읽거나 두 번째 callback을 만들지 않는다.
+          sink 전후 count/content/owner incarnation/operation generation seal, cap 64, stale/replay/cross-storage,
+          teardown의 empty/spent를 검증한다. 따라서 f1은 semantic state를 바꾸지 않고 completion을 다음 turn까지
+          보존하는 두 번째 owner도 만들지 않는다. fully-sent 뒤 retire/free callback의 drift/reentry가 terminal을
+          만들면 terminal이 우선한다. completion batch는 discard-only consume→spent하고 f2/e semantic sink는
+          호출 0이며 scratch와 transport evidence를 재사용하지 않는다.
+
+          - **f1c — same-turn authority + product adapter:** 별도 public `pumpTx`나 caller-supplied
+            `authority_clear` boolean은 만들지 않는다. 기존 whole-turn lease 안에서
+            RX prepare/publish와 D2 authority permit의 final validate가 끝난 뒤,
+            `authority_clear && !immediate_rx && terminal == null && writable`인 같은 turn suffix만
+            f1b write permit을 소비한다. permit은 write suffix가 끝난 뒤 기존 reset과 함께 spent 처리한다.
+            TX admission/write permit이 held lease digest와 operation generation을 bind하므로 RX-only lease
+            구조에 queue/request seal을 중복 저장하지 않는다.
+            pump 진입도 `TurnInput.now_ns`를 같은 `last_observed_now_ns`와 deadline 판정보다 먼저 compare하고,
+            유효하면 held lease 아래 clock seal을 단조 publish한다. admission과 pump 어느 쪽이 먼저 와도
+            backwards time은 lower mutation/callback 0 terminal이다.
+            RX incomplete/backlog/budget/terminal이면 write callback 0이다. 제품 owner의 sole POSIX adapter는
+            established `SO_NOSIGPIPE` fd에 per-call nonblocking write를 사용하고 caller는 semantic buffered
+            callback만 공급한다. Darwin socketpair가 short write/EAGAIN/FIFO/final-zero와 readable+writable
+            RX-first를 증명한다. f3는 이 public whole-turn entry에 revoke/EOF/HUP/close와 semantic control
+            cancellation을 추가하며 f1 write path를 복제하지 않는다.
 
           **2b2 공통 normative mechanics(새 slice 아님):** 아래 bind/adoption은 2b2a~c, RX provenance와
           budget은 2b2d1~d2, recovery는 2b2e가 각각 구현·소유한다. f1은 위 TX queue/request-ID 문단만 구현하며
@@ -8687,8 +8816,10 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           받아 `CompletedControl`로 옮겼지만 semantic apply 전 revoke가 같은 RX drain에서 발견되면 completed payload를
           release하고 revoke를 우선하며 close 없이 terminal revoked로 끝낸다. 안전하게 취소한 경우에도
           `authority_clear=false`와 terminal revoked를 반환한다. EOF/socket/malformed/cap 회복 불가/
-          OOM-after-socket-consume/deadline도 같은 canonical poison/close를 사용한다. `PumpOps{read,write,close}`와
-          owner가 turn 시작에 한 번 읽어 `TurnInput.now_ns`로 전달하는 injected clock, pure turn policy로
+          OOM-after-socket-consume/deadline도 같은 canonical poison/close를 사용한다. f3는 f1의 동일
+          whole-turn `read/write` ops에 `close`와 revoke/control cancellation을 추가하되 write adapter나
+          authority suffix를 복제하지 않는다. owner가 turn 시작에 한 번 읽어 `TurnInput.now_ns`로 전달하는
+          injected clock과 pure turn policy로
           EINTR/EAGAIN, exact/cap+1/overflow, 1/64/65 위치 revoke, parser resident 65 frame,
           early/wrong/duplicate response, request-ID max, inherited backlog/partial, no-end/chunk/byte drip,
           partial TX cleanup과 allocation fail-index를 결정적으로 검증한다. host-origin recovery는 invalidated

@@ -152,6 +152,30 @@
 > mark→latch→pollHint immediate, fresh-clock deadline-1/exact/+1을 Debug/ReleaseFast로 고정한다.
 > e-integration은 origin 충돌표 전수, cleanup fail-index, 같은 zero-readiness turn의
 > delta/invalidated/revoke, socketpair positions 1/64/65와 ledger final-zero를 제품 gate로 고정한다.
+> 2b2f1은 f1a sealed admission/request-ID atomicity, f1b bounded write/clock/retire/cleanup,
+> f1c held whole-turn authority/product socketpair의 세 internal gate다. f1a는 exact byte·item cap과 +1,
+> checked overflow, request ID 1/max-1/max/exhausted, allocation fail-index와 allocator callback의
+> queue/request/payload drift에서 mutation 0을 검증한다. zero/reserve policy의 request mutation 0/1,
+> max-ID encode/OOM/stale rollback 뒤 exact reuse, allocation 성공 뒤 abort cleanup의 freeze→tombstone→free,
+> invalid pointer/len·exact/partial alias·same-address ABA의 dereference/free 0과 bounded quarantine,
+> terminal 뒤 모든 admission의 allocation/request/wire 0도 포함한다. f1b는 1/64 FIFO, immutable offset-0 frame,
+> partial resident 회계, short/full/EAGAIN/EINTR 8/9/zero/over-report/error, admission 30초와 head-progress
+> 10초 deadline-1/exact/+1, queued-behind-head가 head 승격 전에 이미 absolute 만료한 경우의 write 0,
+> backwards clock, queue generation max-1→max 뒤 live mutation 0과 max terminal teardown 1/64 exact cleanup,
+> stale max permit replay·wrap 0, queued+retiring combined resident high-water,
+> full retire·teardown의 freeze→tombstone→free exact once 및 same/cross-storage
+> reentry를 검증한다. queue aggregate는 per-frame seal만 읽고 wire payload를 admission마다 다시 hash하지 않으며,
+> 1 MiB frame의 1-byte short-write fixture가 digest/copy byte 예산을 초과하지 않는지 센다.
+> allocator alias/invalid descriptor/cleanup drift quarantine는 storage sticky exact bytes와 process-wide
+> event/byte high-water를 한 번만 charge하고 이후 facade 0, replay charge 0을 검증한다.
+> f1c는 RX incomplete/backlog/budget/terminal에서 write 0, empty EAGAIN authority에서만
+> write, callback drift 뒤 second write 0, turn wire-byte/frame exact cap과 Darwin socketpair
+> short-write/EAGAIN/FIFO/final-zero를 검증한다. exact budget 뒤
+> `immediate_tx=1→next turn EAGAIN→immediate_tx=0` no-spin, completion sink의 1/64 FIFO
+> consume→spent·stale/replay/cross-storage와 scratch final-zero, final-byte retire callback terminal에서
+> semantic sink 0·discard→spent를 포함한다. 세 gate가 모두
+> Debug/ReleaseFast·boundary·전체 check에서
+> green이기 전에는 2b2f1 완료나 제품 TX capability로 표시하지 않는다.
 > C3 `snapshotDrainSeedAuthority`는 prepared/consumed phase의 exact address graph, private digest/range와
 > attempt continuity를 callback 0/mutation 0으로 인증한 value-only projection만 반환한다. C4 pump는 raw
 > receipt/borrow/permit/seed field를 재해석하지 않고 두 projection continuity만 비교한다. full final

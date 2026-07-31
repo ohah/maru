@@ -4,6 +4,7 @@
 //! authority. Tokens contain no pointer, so stale copies can only be rejected by this ledger.
 
 const std = @import("std");
+const external_recovery_types = @import("external_recovery_types.zig");
 const builtin = @import("builtin");
 const frozen_cleanup_guard = @import("frozen_cleanup_guard.zig");
 const owner_cleanup = @import("external_owner_cleanup.zig");
@@ -72,11 +73,7 @@ pub const PayloadPhase = enum(u2) {
     lease,
 };
 
-pub const RecoveryIntent = union(enum) {
-    none,
-    host: u64,
-    client: u64,
-};
+pub const RecoveryIntent = external_recovery_types.Intent;
 
 pub const CompactExternalRange = struct {
     start_absolute: u64,
@@ -298,6 +295,7 @@ pub const BatchView = struct {
     is_snapshot: bool,
     stream_id: u64,
     provenance: ObservedRxBatchProvenance,
+    recovery_key: ?external_recovery_types.Key,
     bytes: []const u8,
 };
 
@@ -4662,10 +4660,25 @@ pub const ExternalInboxLedger = struct {
     ) InvariantError!BatchView {
         const view = try self.borrow(token, .lease);
         const semantic = view.semantic.lease;
+        const recovery_key = switch (semantic.recovery_intent) {
+            .none => null,
+            .host, .client => blk: {
+                const identity = switch (semantic.provenance) {
+                    .untracked => return self.failInvariant(),
+                    .external => |range| range.identity,
+                };
+                const key = semantic.recovery_intent.key(
+                    identity.attach_instance_id,
+                    token.generation,
+                ) orelse return self.failInvariant();
+                break :blk key;
+            },
+        };
         return .{
             .is_snapshot = semantic.is_snapshot,
             .stream_id = semantic.stream_id,
             .provenance = semantic.provenance,
+            .recovery_key = recovery_key,
             .bytes = view.bytes,
         };
     }
@@ -6735,6 +6748,68 @@ test "end-stream frame becomes completed then lease with exact recovery intent" 
     const view = try ledger.borrow(lease, .lease);
     try std.testing.expect(std.meta.eql(intent, view.semantic.lease.recovery_intent));
     try ledger.releaseLease(lease);
+}
+
+test "charged recovery lease projects sealed intent incarnation and token generation" {
+    const allocator = std.testing.allocator;
+    var ledger: ExternalInboxLedger = .{};
+    const identity = external_rx_types.RxIdentity{
+        .attach_instance_id = 41,
+        .destination_slot_addr = 0x9000,
+    };
+    projection_test.bindExternalIdentityForTest(&ledger, identity);
+
+    var recovery_payload = try owned(allocator, "snapshot");
+    const recovery_token = try ledger.reserveLease(.{
+        .stream_id = 7,
+        .is_snapshot = true,
+        .recovery_intent = .{ .host = 9 },
+        .provenance = .{ .external = .{
+            .start_absolute = 100,
+            .span = 8,
+        } },
+    }, &recovery_payload);
+    const recovery = try ledger.borrowLease(recovery_token);
+    try std.testing.expect(std.meta.eql(
+        external_recovery_types.Key{
+            .owner_incarnation = identity.attach_instance_id,
+            .origin = .host,
+            .recovery_epoch = 9,
+            .expected_token_generation = recovery_token.generation,
+        },
+        recovery.recovery_key.?,
+    ));
+
+    var ordinary_payload = try owned(allocator, "delta");
+    const ordinary_token = try ledger.reserveLease(.{
+        .stream_id = 7,
+        .is_snapshot = false,
+        .provenance = .{ .external = .{
+            .start_absolute = 108,
+            .span = 5,
+        } },
+    }, &ordinary_payload);
+    const ordinary = try ledger.borrowLease(ordinary_token);
+    try std.testing.expectEqual(
+        @as(?external_recovery_types.Key, null),
+        ordinary.recovery_key,
+    );
+
+    const drained = try ledger.drainAll();
+    try std.testing.expectEqual(@as(usize, 2), drained.drained_active_count);
+}
+
+test "recovery lease without sealed external incarnation fails closed" {
+    const allocator = std.testing.allocator;
+    var ledger: ExternalInboxLedger = .{};
+    var payload = try owned(allocator, "snapshot");
+    const token = try ledger.reserveLease(.{
+        .stream_id = 7,
+        .is_snapshot = true,
+        .recovery_intent = .{ .client = 2 },
+    }, &payload);
+    try std.testing.expectError(error.InvariantFailure, ledger.borrowLease(token));
+    try ledger.releaseLease(token);
 }
 
 test "sticky invariant blocks sibling borrow but not exact cleanup" {

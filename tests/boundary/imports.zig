@@ -1489,7 +1489,7 @@ test "session host external RX DTO and classifier preserve neutral ownership bou
     ));
 }
 
-test "session host client pump policy imports only std" {
+test "session host client pump policy imports only dependency-neutral leaves" {
     const allocator = std.testing.allocator;
     const source = try readZigFileZ(
         allocator,
@@ -1523,6 +1523,11 @@ test "session host client pump policy imports only std" {
                             std.mem.eql(
                                 u8,
                                 literal,
+                                "\"external_recovery_types.zig\"",
+                            ) or
+                            std.mem.eql(
+                                u8,
+                                literal,
                                 "\"request_id_state.zig\"",
                             ),
                     );
@@ -1538,8 +1543,8 @@ test "session host client pump policy imports only std" {
             },
         }
     }
-    try std.testing.expectEqual(@as(usize, 2), import_builtins);
-    try std.testing.expectEqual(@as(usize, 2), imports);
+    try std.testing.expectEqual(@as(usize, 3), import_builtins);
+    try std.testing.expectEqual(@as(usize, 3), imports);
     try std.testing.expect(!containsForbiddenExternalBuiltin(source));
     try std.testing.expect(!containsForbiddenPumpToken(source));
     try std.testing.expect(!containsForbiddenStdChild(source));

@@ -12071,6 +12071,35 @@ pub const ExternalPumpStorage = struct {
         scratch.would_block_seed = .{};
         scratch.quarantine_receipt = .{};
         scratch.authority_ranges_generation = self.operation_generation;
+        switch (self.commitAppliedRecoveryFreshUnderHeldLease(
+            &lease,
+            turn.now_ns,
+        )) {
+            .not_pending, .committed => {},
+            .terminal => {
+                scratch.lifecycle = .terminal;
+                const reason = switch (self.semantic_state) {
+                    .terminal => |terminal| terminal.reason,
+                    else => client_pump.TerminalReason.invariant_failure,
+                };
+                var terminal = self.finalizeInjectedRxTerminalUnderHeldLease(
+                    &lease,
+                    scratch,
+                    self.terminalInjectedRxTurn(reason, 0, 0, 0),
+                );
+                if (self.releaseWholeTurnLease(&lease) != .released) {
+                    terminal = self.terminalInjectedRxTurn(
+                        .invariant_failure,
+                        0,
+                        0,
+                        0,
+                    );
+                    if (self.lifecycle == .live)
+                        self.semantic_state = .{ .terminal = terminal.terminal.? };
+                }
+                return terminal;
+            },
+        }
         const preparation = self.prepareRxTurn(
             &lease,
             turn,
@@ -12261,6 +12290,191 @@ pub const ExternalPumpStorage = struct {
         writer.writeBytes(&self.rx_resident_cap_digest);
         writer.writeU64(self.operation_generation);
         return writer.finish();
+    }
+
+    fn latchRecoveryInvariantTerminal(
+        self: *ExternalPumpStorage,
+    ) client_pump.RecoveryMarkResult {
+        if (self.lifecycle == .live) {
+            self.semantic_state = .{ .terminal = .{
+                .reason = .invariant_failure,
+                .fd_disposition = .owner_cleanup,
+            } };
+        }
+        return .stale_invariant;
+    }
+
+    /// Completes only the post-release authority transition. The consumer has already applied the
+    /// screen and retired its ledger token, so stale evidence cannot be retried or repaired here.
+    /// No allocator callback, clock read, or recursive pump is permitted in this suffix.
+    pub fn markResyncApplied(
+        self: *ExternalPumpStorage,
+        stream_id: u64,
+        key: client_pump.RecoveryKey,
+    ) client_pump.RecoveryMarkResult {
+        if (self.saved_self_addr != @intFromPtr(self) or
+            self.lifecycle != .live or
+            active_external_operation_addr != 0 or
+            !ownerIncarnationValid(self) or
+            !key.isCanonical() or
+            stream_id != self.evidence_snapshot.stream_id or
+            key.owner_incarnation != self.owner_incarnation)
+            return self.latchRecoveryInvariantTerminal();
+
+        const next: client_pump.AuthorityState = switch (self.semantic_state) {
+            .active => |active| switch (active) {
+                .host_recovery => |phase| switch (phase) {
+                    .awaiting_snapshot => |waiting| blk: {
+                        if (key.origin != .host or
+                            key.recovery_epoch != waiting.context.epoch or
+                            key.expected_token_generation !=
+                                waiting.expected_token_generation)
+                            return self.latchRecoveryInvariantTerminal();
+                        break :blk .{ .host_recovery = .{
+                            .applied_pending = waiting,
+                        } };
+                    },
+                    else => return self.latchRecoveryInvariantTerminal(),
+                },
+                .client_recovery => |phase| switch (phase) {
+                    .awaiting_snapshot => |waiting| blk: {
+                        if (key.origin != .client or
+                            key.recovery_epoch != waiting.context.epoch or
+                            key.expected_token_generation !=
+                                waiting.expected_token_generation)
+                            return self.latchRecoveryInvariantTerminal();
+                        break :blk .{ .client_recovery = .{
+                            .applied_pending = waiting,
+                        } };
+                    },
+                    else => return self.latchRecoveryInvariantTerminal(),
+                },
+                .valid, .control => return self.latchRecoveryInvariantTerminal(),
+            },
+            else => return self.latchRecoveryInvariantTerminal(),
+        };
+        // `applied_pending` is the durable immediate-turn latch. Publishing a second bool would
+        // create two wake authorities; pollHint derives both values from this single state.
+        self.semantic_state = .{ .active = next };
+        return .commit_pending;
+    }
+
+    /// Read-only wake/deadline projection. f1/f2 integration adds their deadlines to the same
+    /// minimum; e-core currently has only the recovery absolute deadline in active product state.
+    pub fn pollHint(self: *const ExternalPumpStorage) client_pump.PollHint {
+        if (self.saved_self_addr != @intFromPtr(self) or
+            self.lifecycle != .live or
+            !ownerIncarnationValid(self))
+            return .{ .immediate = true, .next_deadline_ns = null };
+        return switch (self.semantic_state) {
+            .active => |active| switch (active) {
+                .host_recovery => |phase| switch (phase) {
+                    .ack_unadmitted => |context| .{
+                        .immediate = false,
+                        .next_deadline_ns = context.deadline_ns,
+                    },
+                    .ack_queued => |context| .{
+                        .immediate = false,
+                        .next_deadline_ns = context.deadline_ns,
+                    },
+                    .awaiting_snapshot => |waiting| .{
+                        .immediate = false,
+                        .next_deadline_ns = waiting.context.deadline_ns,
+                    },
+                    .applied_pending => |waiting| .{
+                        .immediate = true,
+                        .next_deadline_ns = waiting.context.deadline_ns,
+                    },
+                },
+                .client_recovery => |phase| switch (phase) {
+                    .control_wait => |context| .{
+                        .immediate = false,
+                        .next_deadline_ns = context.deadline_ns,
+                    },
+                    .control_in_flight => |context| .{
+                        .immediate = false,
+                        .next_deadline_ns = context.deadline_ns,
+                    },
+                    .awaiting_snapshot => |waiting| .{
+                        .immediate = false,
+                        .next_deadline_ns = waiting.context.deadline_ns,
+                    },
+                    .applied_pending => |waiting| .{
+                        .immediate = true,
+                        .next_deadline_ns = waiting.context.deadline_ns,
+                    },
+                },
+                .valid, .control => .{
+                    .immediate = false,
+                    .next_deadline_ns = null,
+                },
+            },
+            .terminal => .{ .immediate = false, .next_deadline_ns = null },
+            else => .{ .immediate = true, .next_deadline_ns = null },
+        };
+    }
+
+    /// Runs the semantic prefix of the mandatory fresh-clock zero-readiness turn. RX remains a
+    /// separate suffix so the owner can commit first and then classify bytes already ready on the
+    /// same turn without reopening input/TX in between.
+    fn commitAppliedRecoveryFreshSemantic(
+        self: *ExternalPumpStorage,
+        now_ns: i128,
+    ) enum { committed, terminal } {
+        if (self.saved_self_addr != @intFromPtr(self) or
+            self.lifecycle != .live or
+            !ownerIncarnationValid(self))
+        {
+            _ = self.latchRecoveryInvariantTerminal();
+            return .terminal;
+        }
+        const active = switch (self.semantic_state) {
+            .active => |value| value,
+            else => {
+                _ = self.latchRecoveryInvariantTerminal();
+                return .terminal;
+            },
+        };
+        const plan = client_pump.planRecoveryTransition(.{
+            .state = active,
+            .trigger = .fresh_commit,
+            .now_ns = now_ns,
+        });
+        if (plan.disposition != .committed) {
+            const reason: client_pump.TerminalReason =
+                if (client_pump.recoveryDeadline(active)) |deadline|
+                    if (now_ns >= deadline) .deadline_exceeded else .invariant_failure
+                else
+                    .invariant_failure;
+            self.semantic_state = .{ .terminal = .{
+                .reason = reason,
+                .fd_disposition = .owner_cleanup,
+            } };
+            return .terminal;
+        }
+        self.semantic_state = .{ .active = plan.next };
+        return .committed;
+    }
+
+    fn commitAppliedRecoveryFreshUnderHeldLease(
+        self: *ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        now_ns: i128,
+    ) enum { not_pending, committed, terminal } {
+        if (!self.validateWholeTurnLease(lease)) {
+            _ = self.latchRecoveryInvariantTerminal();
+            return .terminal;
+        }
+        const pending = switch (self.semantic_state.active) {
+            .host_recovery => |phase| phase == .applied_pending,
+            .client_recovery => |phase| phase == .applied_pending,
+            .valid, .control => false,
+        };
+        if (!pending) return .not_pending;
+        return switch (self.commitAppliedRecoveryFreshSemantic(now_ns)) {
+            .committed => .committed,
+            .terminal => .terminal,
+        };
     }
 
     /// Pointer-free metadata query. Invalid committed authority stays distinguishable from ordinary
@@ -22813,6 +23027,160 @@ test "external local screen item cap commits client recovery" {
     );
     try std.testing.expect(storage.inbox_ledger.accountingView().pristine_zero);
     try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(&storage));
+}
+
+fn recoveryCoreStorage(
+    storage: *ExternalPumpStorage,
+    incarnation: u64,
+    origin: client_pump.RecoveryOrigin,
+    epoch: u64,
+    token_generation: u64,
+    deadline_ns: i128,
+) void {
+    storage.* = .{
+        .lifecycle = .live,
+        .saved_self_addr = @intFromPtr(storage),
+        .semantic_state = .{ .active = switch (origin) {
+            .host => .{ .host_recovery = .{ .awaiting_snapshot = .{
+                .context = .{ .epoch = epoch, .deadline_ns = deadline_ns },
+                .expected_token_generation = token_generation,
+            } } },
+            .client => .{ .client_recovery = .{ .awaiting_snapshot = .{
+                .context = .{ .epoch = epoch, .deadline_ns = deadline_ns },
+                .expected_token_generation = token_generation,
+            } } },
+        } },
+        .evidence_snapshot = .{
+            .runtime_id = 1,
+            .stream_id = 7,
+            .initial_role = .observer,
+            .initial_controller_generation = 0,
+        },
+    };
+    bindOwnerIncarnation(storage, incarnation);
+}
+
+test "e-core mark publishes applied-pending and read-only immediate poll hint" {
+    var storage: ExternalPumpStorage = .{};
+    recoveryCoreStorage(&storage, 41, .host, 3, 9, 100);
+    const key = client_pump.RecoveryKey{
+        .owner_incarnation = 41,
+        .origin = .host,
+        .recovery_epoch = 3,
+        .expected_token_generation = 9,
+    };
+
+    const before = storage.pollHint();
+    try std.testing.expect(!before.immediate);
+    try std.testing.expectEqual(@as(?i128, 100), before.next_deadline_ns);
+    try std.testing.expectEqual(
+        client_pump.RecoveryMarkResult.commit_pending,
+        storage.markResyncApplied(7, key),
+    );
+    try std.testing.expect(
+        storage.semantic_state.active.host_recovery == .applied_pending,
+    );
+    const first = storage.pollHint();
+    const second = storage.pollHint();
+    try std.testing.expect(first.immediate);
+    try std.testing.expect(std.meta.eql(first, second));
+    try std.testing.expectEqual(@as(?i128, 100), first.next_deadline_ns);
+}
+
+test "e-core stale copied key cannot cross reincarnation origin epoch or generation" {
+    const canonical = client_pump.RecoveryKey{
+        .owner_incarnation = 41,
+        .origin = .client,
+        .recovery_epoch = 3,
+        .expected_token_generation = 9,
+    };
+    const mutations = [_]client_pump.RecoveryKey{
+        .{
+            .owner_incarnation = 42,
+            .origin = .client,
+            .recovery_epoch = 3,
+            .expected_token_generation = 9,
+        },
+        .{
+            .owner_incarnation = 41,
+            .origin = .host,
+            .recovery_epoch = 3,
+            .expected_token_generation = 9,
+        },
+        .{
+            .owner_incarnation = 41,
+            .origin = .client,
+            .recovery_epoch = 4,
+            .expected_token_generation = 9,
+        },
+        .{
+            .owner_incarnation = 41,
+            .origin = .client,
+            .recovery_epoch = 3,
+            .expected_token_generation = 10,
+        },
+    };
+    for (mutations) |key| {
+        var storage: ExternalPumpStorage = .{};
+        recoveryCoreStorage(&storage, 41, .client, 3, 9, 100);
+        try std.testing.expectEqual(
+            client_pump.RecoveryMarkResult.stale_invariant,
+            storage.markResyncApplied(7, key),
+        );
+        try std.testing.expect(storage.semantic_state == .terminal);
+        try std.testing.expectEqual(
+            client_pump.TerminalReason.invariant_failure,
+            storage.semantic_state.terminal.reason,
+        );
+    }
+
+    var same_address: ExternalPumpStorage = .{};
+    recoveryCoreStorage(&same_address, 41, .client, 3, 9, 100);
+    // Model teardown/re-init at the exact final address with the same stream/epoch/generation.
+    recoveryCoreStorage(&same_address, 42, .client, 3, 9, 100);
+    try std.testing.expectEqual(
+        client_pump.RecoveryMarkResult.stale_invariant,
+        same_address.markResyncApplied(7, canonical),
+    );
+    try std.testing.expect(same_address.semantic_state == .terminal);
+}
+
+test "e-core fresh clock commits before deadline and exact boundary terminalizes first" {
+    var before: ExternalPumpStorage = .{};
+    recoveryCoreStorage(&before, 41, .host, 3, 9, 100);
+    const key = client_pump.RecoveryKey{
+        .owner_incarnation = 41,
+        .origin = .host,
+        .recovery_epoch = 3,
+        .expected_token_generation = 9,
+    };
+    try std.testing.expectEqual(
+        client_pump.RecoveryMarkResult.commit_pending,
+        before.markResyncApplied(7, key),
+    );
+    try std.testing.expectEqual(
+        .committed,
+        before.commitAppliedRecoveryFreshSemantic(99),
+    );
+    try std.testing.expect(before.semantic_state.active == .valid);
+    try std.testing.expect(!before.pollHint().immediate);
+
+    for ([_]i128{ 100, 101 }) |now_ns| {
+        var expired: ExternalPumpStorage = .{};
+        recoveryCoreStorage(&expired, 41, .host, 3, 9, 100);
+        try std.testing.expectEqual(
+            client_pump.RecoveryMarkResult.commit_pending,
+            expired.markResyncApplied(7, key),
+        );
+        try std.testing.expectEqual(
+            .terminal,
+            expired.commitAppliedRecoveryFreshSemantic(now_ns),
+        );
+        try std.testing.expectEqual(
+            client_pump.TerminalReason.deadline_exceeded,
+            expired.semantic_state.terminal.reason,
+        );
+    }
 }
 
 test "external adoption rejects moved cleanup scratch with bounded quarantine" {

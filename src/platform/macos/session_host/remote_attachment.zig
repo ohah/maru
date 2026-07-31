@@ -5,6 +5,7 @@ const std = @import("std");
 const protocol = @import("protocol.zig");
 const runtime_metadata_wire = @import("runtime_metadata_wire.zig");
 const client_mod = @import("client.zig");
+const external_recovery_types = @import("external_recovery_types.zig");
 const external_inbox_ledger = @import("external_inbox_ledger.zig");
 const remote_screen = @import("remote_screen.zig");
 const screen_assembler = @import("screen_assembler.zig");
@@ -22,6 +23,7 @@ pub const AttachmentBatchLease = union(enum) {
                 .is_snapshot = batch.is_snapshot,
                 .stream_id = batch.stream_id,
                 .provenance = .untracked,
+                .recovery_key = null,
                 .bytes = batch.bytes,
             },
             .charged => |token| {
@@ -55,6 +57,15 @@ pub const AttachmentBatchLease = union(enum) {
 
 pub const LeaseError = error{LedgerInvariant};
 
+pub const MarkResyncAppliedResult = external_recovery_types.MarkResult;
+
+pub const PumpScreenResult = enum {
+    idle,
+    applied,
+    recovery_commit_pending,
+    terminal,
+};
+
 pub const AttachmentTransport = struct {
     context: *anyopaque,
     read_batch: *const fn (
@@ -69,6 +80,11 @@ pub const AttachmentTransport = struct {
         context: *anyopaque,
         token: external_inbox_ledger.Token,
     ) external_inbox_ledger.InvariantError!void = null,
+    mark_resync_applied: ?*const fn (
+        context: *anyopaque,
+        stream_id: u64,
+        key: external_recovery_types.Key,
+    ) MarkResyncAppliedResult = null,
     drop_stream: *const fn (context: *anyopaque, stream_id: u64) void,
     fail_closed: *const fn (context: *anyopaque) void,
 };
@@ -151,7 +167,7 @@ pub const RemoteAttachment = struct {
     pub fn pumpScreen(
         self: *RemoteAttachment,
         io: std.Io,
-    ) (client_mod.ClientError || screen_assembler.ApplyError || LeaseError)!bool {
+    ) (client_mod.ClientError || screen_assembler.ApplyError || LeaseError)!PumpScreenResult {
         const transport = self.transport orelse return error.ConnectionClosed;
         // A failed release is already a terminal ownership invariant. Never consume another
         // transport batch and risk needing a second allocation-free recovery slot.
@@ -167,7 +183,7 @@ pub const RemoteAttachment = struct {
                 return error.OutOfMemory;
             };
         }
-        if (self.pending_batch_head == self.pending_batches.items.len) return false;
+        if (self.pending_batch_head == self.pending_batches.items.len) return .idle;
         const lease = self.pending_batches.items[self.pending_batch_head];
         self.pending_batch_head += 1;
         const batch = lease.borrow(transport) catch {
@@ -176,12 +192,22 @@ pub const RemoteAttachment = struct {
             transport.fail_closed(transport.context);
             return error.LedgerInvariant;
         };
+        // The view and payload cease to exist at release. Copy the pointer-free key before any
+        // apply or cleanup callback so the post-release mark cannot dereference retired storage.
+        const recovery_key = batch.recovery_key;
         if (batch.stream_id != self.state.stream_id) {
             const released = self.releaseOrRetain(lease, transport);
             self.compactConsumedBatches();
             transport.fail_closed(transport.context);
             if (!released) return error.LedgerInvariant;
             return error.LedgerInvariant;
+        }
+        if (recovery_key != null and !batch.is_snapshot) {
+            const released = self.releaseOrRetain(lease, transport);
+            self.compactConsumedBatches();
+            transport.fail_closed(transport.context);
+            if (!released) return error.LedgerInvariant;
+            return error.ProtocolError;
         }
         const screen = &(self.screen orelse {
             const released = self.releaseOrRetain(lease, transport);
@@ -213,7 +239,20 @@ pub const RemoteAttachment = struct {
             return error.LedgerInvariant;
         }
         self.compactConsumedBatches();
-        return true;
+        const key = recovery_key orelse return .applied;
+        const mark = transport.mark_resync_applied orelse {
+            transport.fail_closed(transport.context);
+            return .terminal;
+        };
+        return switch (mark(transport.context, self.state.stream_id, key)) {
+            .commit_pending => .recovery_commit_pending,
+            .stale_invariant => blk: {
+                // The screen was applied and the lease was released. Retrying or retaining the
+                // old token would create a second owner, so stale authority can only fail closed.
+                transport.fail_closed(transport.context);
+                break :blk .terminal;
+            },
+        };
     }
 
     /// A callback invariant can fail after the transport already handed ownership to us. Keep the
@@ -962,6 +1001,76 @@ const ChargedTestTransport = struct {
     }
 };
 
+const RecoveryTestTransport = struct {
+    view: external_inbox_ledger.BatchView,
+    batch_available: bool = true,
+    release_fails: bool = false,
+    mark_result: MarkResyncAppliedResult = .commit_pending,
+    fail_closed_calls: usize = 0,
+    release_calls: usize = 0,
+    mark_calls: usize = 0,
+    release_before_mark: bool = false,
+    marked_key: ?external_recovery_types.Key = null,
+
+    fn read(
+        context: *anyopaque,
+        _: u64,
+    ) client_mod.ClientError!?AttachmentBatchLease {
+        const self: *RecoveryTestTransport = @ptrCast(@alignCast(context));
+        if (!self.batch_available) return null;
+        self.batch_available = false;
+        return .{ .charged = .{ .slot = 1, .generation = 9 } };
+    }
+
+    fn borrow(
+        context: *anyopaque,
+        _: external_inbox_ledger.Token,
+    ) external_inbox_ledger.InvariantError!external_inbox_ledger.BatchView {
+        const self: *RecoveryTestTransport = @ptrCast(@alignCast(context));
+        return self.view;
+    }
+
+    fn release(
+        context: *anyopaque,
+        _: external_inbox_ledger.Token,
+    ) external_inbox_ledger.InvariantError!void {
+        const self: *RecoveryTestTransport = @ptrCast(@alignCast(context));
+        self.release_calls += 1;
+        if (self.release_fails) return error.InvariantFailure;
+    }
+
+    fn mark(
+        context: *anyopaque,
+        _: u64,
+        key: external_recovery_types.Key,
+    ) MarkResyncAppliedResult {
+        const self: *RecoveryTestTransport = @ptrCast(@alignCast(context));
+        self.mark_calls += 1;
+        self.release_before_mark = self.release_calls == 1;
+        self.marked_key = key;
+        return self.mark_result;
+    }
+
+    fn drop(_: *anyopaque, _: u64) void {}
+
+    fn failClosed(context: *anyopaque) void {
+        const self: *RecoveryTestTransport = @ptrCast(@alignCast(context));
+        self.fail_closed_calls += 1;
+    }
+
+    fn interface(self: *RecoveryTestTransport) AttachmentTransport {
+        return .{
+            .context = self,
+            .read_batch = read,
+            .borrow_charged = borrow,
+            .release_charged = release,
+            .mark_resync_applied = mark,
+            .drop_stream = drop,
+            .fail_closed = failClosed,
+        };
+    }
+};
+
 fn reserveChargedBatch(
     ledger: *external_inbox_ledger.ExternalInboxLedger,
     allocator: std.mem.Allocator,
@@ -1133,12 +1242,152 @@ test "remote attachment applies and releases a charged snapshot with an empty qu
     });
     try attachment.bindTransport(transport.interface());
     try attachment.initScreen(2);
-    try std.testing.expect(try attachment.pumpScreen(std.testing.io));
+    try std.testing.expectEqual(
+        PumpScreenResult.applied,
+        try attachment.pumpScreen(std.testing.io),
+    );
     try std.testing.expectEqual(@as(usize, 1), transport.release_calls);
     try std.testing.expectEqual(@as(usize, 0), transport.fail_closed_calls);
     try std.testing.expectEqual(@as(usize, 0), attachment.pending_batches.items.len);
     attachment.deinit();
     try ledger.finish();
+}
+
+test "remote attachment copies recovery key then releases before exact mark" {
+    const allocator = std.testing.allocator;
+    const snapshot = try testSnapshot(allocator);
+    defer allocator.free(snapshot);
+    const key = external_recovery_types.Key{
+        .owner_incarnation = 41,
+        .origin = .host,
+        .recovery_epoch = 7,
+        .expected_token_generation = 9,
+    };
+    var transport = RecoveryTestTransport{ .view = .{
+        .is_snapshot = true,
+        .stream_id = 7,
+        .provenance = .untracked,
+        .recovery_key = key,
+        .bytes = snapshot,
+    } };
+    var attachment = RemoteAttachment.init(allocator, .{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .role = .observer,
+        .controller_generation = 0,
+    });
+    try attachment.bindTransport(transport.interface());
+    try attachment.initScreen(2);
+    defer attachment.deinit();
+
+    try std.testing.expectEqual(
+        PumpScreenResult.recovery_commit_pending,
+        try attachment.pumpScreen(std.testing.io),
+    );
+    try std.testing.expectEqual(@as(usize, 1), transport.release_calls);
+    try std.testing.expectEqual(@as(usize, 1), transport.mark_calls);
+    try std.testing.expect(transport.release_before_mark);
+    try std.testing.expect(std.meta.eql(key, transport.marked_key.?));
+    try std.testing.expectEqual(@as(usize, 0), transport.fail_closed_calls);
+}
+
+test "remote attachment never marks failed apply or failed release" {
+    const allocator = std.testing.allocator;
+    const key = external_recovery_types.Key{
+        .owner_incarnation = 41,
+        .origin = .client,
+        .recovery_epoch = 7,
+        .expected_token_generation = 9,
+    };
+    var apply_failure = RecoveryTestTransport{ .view = .{
+        .is_snapshot = true,
+        .stream_id = 7,
+        .provenance = .untracked,
+        .recovery_key = key,
+        .bytes = "not-a-screen",
+    } };
+    var first = RemoteAttachment.init(allocator, .{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .role = .observer,
+        .controller_generation = 0,
+    });
+    try first.bindTransport(apply_failure.interface());
+    try first.initScreen(2);
+    try std.testing.expectError(error.Truncated, first.pumpScreen(std.testing.io));
+    try std.testing.expectEqual(@as(usize, 1), apply_failure.release_calls);
+    try std.testing.expectEqual(@as(usize, 0), apply_failure.mark_calls);
+    first.deinit();
+
+    const snapshot = try testSnapshot(allocator);
+    defer allocator.free(snapshot);
+    var release_failure = RecoveryTestTransport{
+        .view = .{
+            .is_snapshot = true,
+            .stream_id = 7,
+            .provenance = .untracked,
+            .recovery_key = key,
+            .bytes = snapshot,
+        },
+        .release_fails = true,
+    };
+    var second = RemoteAttachment.init(allocator, .{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .role = .observer,
+        .controller_generation = 0,
+    });
+    try second.bindTransport(release_failure.interface());
+    try second.initScreen(2);
+    try std.testing.expectError(
+        error.LedgerInvariant,
+        second.pumpScreen(std.testing.io),
+    );
+    try std.testing.expectEqual(@as(usize, 1), release_failure.release_calls);
+    try std.testing.expectEqual(@as(usize, 0), release_failure.mark_calls);
+    release_failure.release_fails = false;
+    second.deinit();
+    try std.testing.expectEqual(@as(usize, 2), release_failure.release_calls);
+    try std.testing.expectEqual(@as(usize, 0), release_failure.mark_calls);
+}
+
+test "remote attachment stale mark terminalizes without retaining released token" {
+    const allocator = std.testing.allocator;
+    const snapshot = try testSnapshot(allocator);
+    defer allocator.free(snapshot);
+    var transport = RecoveryTestTransport{
+        .view = .{
+            .is_snapshot = true,
+            .stream_id = 7,
+            .provenance = .untracked,
+            .recovery_key = .{
+                .owner_incarnation = 41,
+                .origin = .host,
+                .recovery_epoch = 7,
+                .expected_token_generation = 9,
+            },
+            .bytes = snapshot,
+        },
+        .mark_result = .stale_invariant,
+    };
+    var attachment = RemoteAttachment.init(allocator, .{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .role = .observer,
+        .controller_generation = 0,
+    });
+    try attachment.bindTransport(transport.interface());
+    try attachment.initScreen(2);
+    try std.testing.expectEqual(
+        PumpScreenResult.terminal,
+        try attachment.pumpScreen(std.testing.io),
+    );
+    try std.testing.expectEqual(@as(usize, 1), transport.release_calls);
+    try std.testing.expectEqual(@as(usize, 1), transport.mark_calls);
+    try std.testing.expectEqual(@as(usize, 1), transport.fail_closed_calls);
+    try std.testing.expectEqual(@as(?AttachmentBatchLease, null), attachment.failed_release);
+    attachment.deinit();
+    try std.testing.expectEqual(@as(usize, 1), transport.release_calls);
 }
 
 test "remote attachment reports ledger invariant when failure cleanup cannot release" {

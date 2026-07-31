@@ -36,6 +36,22 @@
 > max-ID 성공 take 뒤 같은 product storage의 다음 wire-zero exhaustion은 f3 typed-success integration
 > gate가 검증한다. test-only correlation reset은 이 경계를 대신하지 않는다.
 
+> 2b2f3는 recovery mutation을 소유하지 않는다. f3의 완료 범위는 reducer-sealed pre-event
+> authority 기준 revoke priority, exact offset-zero TX/control cancel, partial/retired/response-wait
+> protocol close, `completed_awaiting_drain`과 private whole-drain permit, typed resize success,
+> transport terminal/owner cleanup이다. resync는 sealed `resync_ack` verdict까지만 만들고
+> `control_in_flight → awaiting_snapshot`, host invalidated/ACK 충돌표, pre/post-ACK snapshot과
+> fresh-clock recovery commit은 2b2e-integration이 단독 소유한다. f3a pure planner와 f3b sealed
+> cancellation을 첫 merge slice로 닫고, shared codec·`ControlExpectation`·opaque permit/verdict와 private
+> consumer signature만 여는 f3c0 substrate를 둘째 slice로 병합한다. 그 뒤 2b2e-integration의 private
+> same-lease resync consumer를 구현하고, f3c drain-bound semantic take·f3d 기존 whole-turn orchestration·f3e hostile socket/fail-index evidence를
+> 셋째 f3 slice로 닫는다. resize/resync payload schema는 dependency-neutral `control_response_wire.zig`
+> codec 하나를 기존 `RemoteRuntime`과 external pump가 공유한다. response/revoke/EOF 양순서,
+> revoke 1/64/65와 parser resident 65, readable+writable write 0, input/control offset 0/partial/
+> retired/response-wait, max-ID success 뒤 same-storage exhaustion, deadline-1/exact/+1과 common
+> TX/parser/ledger/completed/FD final-zero가 모두 Debug/ReleaseFast·boundary·전체 check에서 green이기
+> 전에는 f3나 2b2 완료로 표시하지 않는다. 실제 stable poll/close adapter와 final owner binding은 2b3다.
+
 > 2b2d2는 d2a pure classifier, d2b buffered/inherited bounded turn, d2c injected nonblocking
 > read/admit, d2d RX-first whole-turn authority barrier를 모두 구현했다. 네 단계의
 > Debug/ReleaseFast component, 실제 socketpair syscall-order 및 payload/ledger final-zero가

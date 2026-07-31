@@ -8906,27 +8906,114 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           `check-boundaries`, 전체 `mise run check`가 green이어야 한다. f2 완료만으로 2b2e-integration, f3,
           public control apply 또는 2b2 전체 완료를 표시하지 않는다.
 
-          - **2b2f3 — revoke + whole-turn integration:** strict `controller.revoked`는
-          runtime/stream/generation을 현재 attachment evidence와 대조한 뒤 offset 0인
-          own-stream input/resize를 cancel한다. control은 `tx_fully_sent=false`이고 대응 TX frame offset이 0일 때만
-          queue와 `InFlightControl`을 한 transaction으로 함께 cancel한다. control/input/resize 하나라도 partial이거나
-          control이 fully-sent/response-waiting이면 framing·correlation을 되돌릴 수 없어 close한다. response를 완전히
-          받아 `CompletedControl`로 옮겼지만 semantic apply 전 revoke가 같은 RX drain에서 발견되면 completed payload를
-          release하고 revoke를 우선하며 close 없이 terminal revoked로 끝낸다. 안전하게 취소한 경우에도
-          `authority_clear=false`와 terminal revoked를 반환한다. EOF/socket/malformed/cap 회복 불가/
-          OOM-after-socket-consume/deadline도 같은 canonical poison/close를 사용한다. f3는 f1의 동일
-          whole-turn `read/write` ops에 `close`와 revoke/control cancellation을 추가하되 write adapter나
-          authority suffix를 복제하지 않는다. owner가 turn 시작에 한 번 읽어 `TurnInput.now_ns`로 전달하는
-          injected clock과 pure turn policy로
-          EINTR/EAGAIN, exact/cap+1/overflow, 1/64/65 위치 revoke, parser resident 65 frame,
-          early/wrong/duplicate response, request-ID max, inherited backlog/partial, no-end/chunk/byte drip,
-          partial TX cleanup과 allocation fail-index를 결정적으로 검증한다. host-origin recovery는 invalidated
-          barrier→ACK cap-full retry/ACK OOM terminal→fully-sent, pre-ACK stale snapshot drop와 post-ACK fresh
-          snapshot apply-clear를 별도 fixture로 고정한다.
-          동시에 readable+writable, duplicate after typed-success take, response+FIN, response 뒤 같은 drain revoke, timer-only wake,
-          max-ID typed-success take 뒤 같은 product storage의 다음 admission wire 0 `request_id_exhausted`,
-          socketpair/fail-index/stress를 통과해야 하며 f1~f3가 모두 green이기 전에는 TX/control/turn 통합을
-          완료로 표시하지 않는다.
+          - **2b2f3 — revoke + whole-turn integration:** f3의 단일 입력은 raw JSON 재파싱 결과가 아니라
+          기존 `runtime_event_reducer`가 현재 aggregate의 **pre-event** attachment identity·authority를 기준으로
+          봉인한 exact `revoked` outcome이다. runtime ID와 stream ID는 현재 attachment와 같고, event의
+          controller generation은 pre-event tracked generation의 checked successor `current+1`이며 reducer가
+          산출한 next authority는 같은 successor generation의 observer여야 한다. foreign/stale/equivocating revoke는 ignore가 아니라 protocol
+          terminal이다. pump나 TX leaf가 revoke JSON/generation을 다시 해석하지 않는다.
+
+          revoke가 이긴 turn은 outbound owner graph를 held whole-turn lease 아래 한 번 snapshot한다. 취소 대상은
+          (a) exact own-stream `input_bytes` frame과 (b) `InFlightControl`의 request ID·wire length·kind·target과
+          정확히 일치하는 request frame이다. 모든 대상 frame이 offset 0이고 control progress가 `.queued`일
+          때만 queue descriptors/backing payload, TX item·byte accounting·queue generation과 correlation generation을
+          하나의 prepared aggregate로 freeze한다. prepare는 source queue를 바꾸거나 backing ownership을 복제하지
+          않는 non-owning descriptor/range/seal만 만든다. final validation 뒤 callback-free suffix가 source descriptor
+          tombstone·queue removal과 backing의 final-address frozen cleanup owner 이관, item·byte accounting,
+          queue/correlation generations, correlation terminalization과 reducer의 revoked authority를 all-or-none
+          publish한다. validation 전에는 owner가 source 하나뿐이고 suffix 뒤에는 cleanup owner 하나뿐이라 rollback
+          authority가 필요하지 않다. 그 뒤 callback-hidden cleanup이 frozen backing을 free하며 allocator reentry·drift가 있어도
+          이미 publish한 revoked/terminal authority와 TX 제거를 되살리지 않는다. 대응 frame 누락, foreign/duplicate descriptor,
+          request ID·wire length·generation drift, partial offset, retired/fully-sent/`response_wait` control 중 하나라도
+          있으면 rollback 가능성을 주장하지 않고 protocol-close plan을 고른다. pump가
+          `external_tx.items`를 직접 splice/free하지 않으며 TX owner가 만든 sealed cancel plan만 소비한다.
+
+          f3는 response를 `CompletedControlOwner`로 옮긴 사실과 **whole drain이 끝났다는 증거**를 분리한다.
+          completed response는 우선 `completed_awaiting_drain` blocker이며 semantic apply, input/TX suffix와 public
+          take를 0으로 만든다. 다만 이 blocker는 parser/socket에 남은 revoke·EOF·malformed terminal을 찾기 위한
+          bounded immediate RX continuation을 막지 않는다. clean drain은 parser complete backlog 0, partial frame 0,
+          read/frame budget 미소진, 마지막 transport observation `would_block`, same-drain terminal/revoke/EOF 0의
+          conjunction이다. caller의 `authority_clear` bool이나 `TurnResult`를 권위로 받지 않고 private final-address
+          `PreparedWholeDrainPermit`이 storage/lease address, owner incarnation, operation·turn·parser generations,
+          parser absolute range/seal, sampled clock, authority seal/generation, completed owner/correlation generations와
+          TX queue generation을 봉인한다. permit은 같은 held lease call 안에서 한 번만 소비되고 저장·복사·외부
+          반환되지 않는다. frame/read budget 64 경계에서 response 뒤 65번째 revoke가 남으면 permit 0과 immediate
+          RX를 반환하며 다음 turn이 revoke/EOF를 먼저 확정한다.
+
+          response↔revoke 또는 response↔EOF/FIN이 같은 logical drain에 있으면 wire 순서와 무관하게
+          revoke/transport terminal이 이긴다. completed payload는 frozen cleanup owner로 옮겨 exact-once release하고
+          semantic callback, correlation idle, input gate clear와 TX write는 모두 0이다. 여기서 “protocol close 없이
+          terminal revoked”는 socket을 열린 채 보존한다는 뜻이 아니다. terminal reason을 `.protocol_error`가 아닌
+          `.revoked`로 보존하면서 `fd_disposition=.owner_cleanup`의 canonical teardown이 이후 syscall/admission 0과
+          FD close exact once를 수행한다는 뜻이다. 동시 원인의 total precedence는 turn 시작에 이미 만료한
+          **deadline/backwards clock → invariant/corruption → socket-consume 뒤 OOM/resource terminal →
+          malformed·cap·foreign protocol terminal → exact valid revoke → EOF/peer HUP/socket error** 순이다.
+          첫 clock 판정이 terminal이면 RX syscall은 0이다. 그 외 peer HUP는 turn 시작의 readiness hint라서 TX write를
+          0으로 만들되 bounded RX drain은 수행하고, 더 높은 원인이 없을 때 drain 끝에서 transport terminal로 확정한다.
+          이 table은 f3a planner의 단일 출처다. OOM 뒤 남은 resident/socket bytes를 더 검사한다고 주장하지 않으며
+          OOM이 관측된 순간 traversal은 즉시 끝나므로 뒤의 아직 관측하지 않은 malformed/revoke는 candidate set에
+          들어가지 않는다. 같은 completed preflight 안에서 이미 관측·봉인된 원인만 table로 비교한다.
+          f3의 transport observation DTO는 readable/writable과 별도로 peer HUP를 나타내지만 FD를 직접 닫는 callback은
+          추가하지 않는다. f3 fixture의 FD final-zero는 `TestClient`/storage scaffold의 canonical teardown 증거이고,
+          실제 stable poll adapter와 product close exact once authority는 P5c3c-2b3이 소유한다.
+
+          response 뒤 budget 경계를 넘는 benign snapshot/event/optional frame은 버리거나 별도 deferred FIFO에
+          복제하지 않는다. 기존 parser/reducer와 screen·metadata live owner가 bounded continuation에서 exact-once
+          commit하며, 각 기존 projection blocker를 기존 consumer가 먼저 비운 뒤 다음 RX continuation을 수행한다.
+          이 동안 completed response의 semantic apply, input/control admission과 TX write만 0이다. invalidated/resync
+          충돌처럼 recovery state에 영향을 주는 benign owner는 아래 2b2e-integration private consumer가 같은 held
+          lease에서 adjudicate하기 전 permit을 만들지 않는다. response@64→benign@65→EAGAIN, 여러 turn의
+          benign 64*n→revoke/EOF와 live-owner cap/OOM cleanup을 hostile gate에 포함한다.
+
+          clean `PreparedWholeDrainPermit`만 f2의 private response take를 typed-success 경로로 연다. strict decoder는
+          새 dependency-neutral `control_response_wire.zig`의 단일 codec이다. 이 module은 기존
+          `remote_runtime.parseResizeReply`의 schema/typed result를 옮겨 `RemoteRuntime`과 external pump 두 product
+          consumer가 공유하고, exact `{"result":{"resync":true}}` parser도 함께 소유한다. request 쪽도 같은
+          module의 typed encoder가 `ControlRequest`와 allocation-free tagged `ControlExpectation`을 함께 만든다.
+          product `admitControl`은 caller raw JSON을 받지 않고 typed request만 받아 wire payload와 expectation을
+          같은 f1 atomic admission/correlation seal에 publish한다. expectation은 `.resize{client_sequence}` 또는
+          `.resync{RecoveryKey}`이며 InFlight→Completed→PreparedTake→whole-drain permit까지 exact generation/digest로
+          운반한다. retired TX backing이나 request JSON을 다시 읽지 않는다. resize response의 echoed sequence는
+          expectation과 exact equality이고 applied cols/rows는 요청값 equality가 아니라 codec의 nonzero `u16` bounds,
+          applied generation/changed semantic 규칙으로 검증한다. expectation mismatch는 payload cleanup 뒤 protocol
+          terminal이며 expectation 자체는 추가 allocation이 없어 admission OOM rollback을 바꾸지 않는다. boundary는 JSON
+          field vocabulary·error envelope parser의 product consumer가 정확히 이 codec 하나임을 고정하고 pump 내부
+          JSON parser 복제를 금지한다. codec은 raw payload에서 pointer-free `PreparedControlSemanticVerdict`를 만들고 completed payload seal, request/control
+          target, current authority generation과 permit digest에 결속한다. `runtime.resize` success는 echoed sequence,
+          applied cols/rows/generation/changed와 target stream/controller generation이 모두 맞을 때만 correlation을
+          idle로 전이하고 resize/input gate 결과를 publish한다. error envelope, malformed/foreign/stale semantic
+          payload는 exact payload cleanup 뒤 protocol terminal이다. `runtime.resync` success는 exact typed
+          `resync_ack` verdict까지만 만들며 f3에서 독자적으로 recovery state를 바꾸거나 gate를 열지 않는다.
+          `client_recovery.control_in_flight → awaiting_snapshot`, host invalidated/ACK 충돌표, pre-ACK stale snapshot
+          drop, post-ACK fresh snapshot과 `applied_pending → valid` fresh-clock commit은 2b2e-integration의 단일
+          mutation authority다. 구현 순서는 f3a~b 첫 merge slice, f3c0 substrate, **2b2e-integration**, 그 뒤
+          f3c~e 셋째 f3 slice다. 2b2e-integration은 private callback-free `consumeResyncAckUnderHeldLease`를 제공하고,
+          f3 orchestration이 같은 held lease/no-fail suffix에서 permit, typed verdict, exact recovery phase generation과
+          completed/correlation owner를 함께 consume한다. permit/verdict는 저장·외부 반환되지 않으며 payload cleanup과
+          `control_in_flight → awaiting_snapshot` publication 사이에 다음 call이나 callback이 없다. resize verdict는
+          f3가 같은 방식으로 직접 consume한다. 이 단계는 raw payload 재decode, 별도 request map,
+          `authority_clear` 재계산이나 두 번째 cancel state machine을 만들지 않는다.
+
+          f3는 다음 여섯 내부 gate를 순서대로 닫는다. **f3a pure priority planner**는 terminal/revoke/EOF,
+          completed presence와 exact TX progress를 받아 `cancel_queued | cleanup_completed | poison_close |
+          success_candidate`를 allocation-free로 결정한다. **f3b sealed cancellation transaction**은 f1 queue owner와
+          f2 correlation owner를 한 prepared graph로 freeze하고 offset-zero cancel/partial-close/final-zero를 고정한다.
+          **f3c0 control contract substrate**는 shared codec, `ControlExpectation`, opaque final-address
+          `PreparedWholeDrainPermit`/`PreparedControlSemanticVerdict` 타입과 private same-lease resync consumer signature를
+          추가하되 permit 생성·public take capability는 0으로 둔다. 이 compile/test 가능한 substrate 뒤에
+          2b2e-integration이 consumer를 구현한다. **f3c drain-bound semantic take**는 `completed_awaiting_drain`, private permit과 typed resize verdict,
+          duplicate-after-success와 max-ID success 뒤 같은 product storage의 다음 wire-zero
+          `request_id_exhausted`를 고정한다. **f3d whole-turn orchestration**은 기존 `pumpRxTurn`의 단일 clock,
+          RX→authority→f1 TX suffix와 cleanup leaf만 재사용하고 새 pump/write adapter/lease를 만들지 않는다.
+          **f3e hostile evidence**는 pure 전수표→injected turn→실제 Darwin socketpair→fail-index/stress 순으로
+          response↔revoke, response+FIN/HUP, readable+writable write 0, revoke 위치 1/64/65, parser resident 65,
+          incomplete header/payload+FIN, input/control offset 0/partial/retired/response-wait, deadline-1/exact/+1,
+          EINTR/EAGAIN, no-end/chunk/1-byte drip과 common TX/parser/ledger/completed/FD final-zero를 검증한다.
+          f3a~b, f3c0, f3c~e는 각각 독립 merge slice로 리뷰·회귀 격리하고 f3c0 뒤·f3c 전에
+          2b2e-integration을 병합한다. 세 f3 slice 모두
+          Debug/ReleaseFast, `check-boundaries`, 실제 socketpair와 전체 `mise run check`가 green이기 전에는
+          f3 또는 TX/control/turn 통합을 완료로 표시하지 않는다. `ExternalPumpOwner`,
+          `external_attach.Prepared` consume과 stable adapter/attachment teardown은 P5c3c-2b3 범위다.
 
         - **P5c3c-2b3 — stable product binding**:
           2b2b의 검증된 `ExternalPumpStorage` scaffold를 최종 member로 두고

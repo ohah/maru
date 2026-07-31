@@ -8540,20 +8540,72 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
 
             merge 순서는 다음과 같다. **f3c1 preparation**이 clean whole-drain permit과 strict typed
             verdict를 만들되 recovery state를 바꾸지 않고, 그 뒤 **2b2e-integration**이 기존
-            `planRecoveryTransition` 결과와 f3c1 capability를 받아 callback-free commit suffix만 구현한다.
+            `planRecoveryTransition`에 allocation-free `resync_ack` trigger를 추가하고 그 결과와 f3c1 capability를 받아
+            callback-free commit suffix만 구현한다. `resync_ack` 입력은 exact client
+            `control_in_flight`, sealed response-wait progress, nonzero `recovery_barrier_absolute`, deadline 미만의 current
+            state에서만 `awaiting_snapshot`을 만들며 다른 state/progress/barrier 조합은 terminal이다. pump가 별도 switch나
+            두 번째 ACK reducer를 만드는 것은 금지한다.
             마지막으로 **f3c2/d/e orchestration**이 같은 held lease에서 f3c1→integration을 exact-one 호출한다.
             permit constructor를 integration/test adapter가 만들거나 f3c1 이전에 consumer를 product-reachable하게
             만드는 우회는 금지한다. integration은 새 recovery planner/JSON parser/request map/public consumer를
             만들지 않고 `ExternalPumpStorage` 내부 mutation suffix만 소유하며 stable adapter와 attachment teardown은
             계속 2b3 범위다.
 
-            런타임의 no-callback atomic 순서는 merge 순서와 다르다. RX traversal/ledger가 side-intent를 준비하고
-            f3c1이 이를 검증해 semantic pair에 결속한 뒤,
-            2b2e-integration이 ACK 이후 적용할 candidate/token binding과 모든 drop/terminal disposition을 미리 preflight한
-            뒤, f3c2 suffix가 ACK consume→`awaiting_snapshot` publish→2b2e no-fail binding/retirement→completed payload cleanup→
-            correlation/input publication을 exact-one 실행한다. ACK publication 이후에는 allocation, callback 또는 fallible
-            branch가 없다. preflight 실패/OOM은 ACK나 recovery state를 바꾸기 전 terminal preparation으로 돌아가며,
-            no-fail suffix seal drift는 invariant terminal과 canonical teardown으로 닫는다.
+            런타임에는 서로 다른 두 callback-free transaction이 있다. **ACK transaction**은 f3c1 permit/verdict와
+            `PreparedResyncAckTransition`을 preflight한 뒤 `control_in_flight→awaiting_snapshot`, correlation/input과 ACK capability
+            tombstone을 게시한다. **snapshot transaction**은 두 단계다. commit 전
+            `PreparedRecoverySnapshotCommit`의 source는 닫힌 union `commit_pending{prepared_live_commit}` 또는
+            `already_committed{immutable_commit_output}`이다. 두 source 모두 bounded candidate/disposition aggregate와 pristine final
+            receipt destination을 봉인하며 token generation을 caller가 만든 recovery authority로 갖지 않는다. `commit_pending`에서만
+            callback-free ledger commit leaf가 actual `Token{slot,generation}`과 committed slot semantic digest를 반환한다.
+            `already_committed`는 post-response side-intent가 이미 가진 immutable actual commit output을 재사용하되 prepared-live
+            permit을 재사용하거나 두 번째 commit하지 않는다. actual output을 얻은 직후에만 그 destination에
+            `CommittedRecoverySnapshotBinding`을 initialize/seal한다. 같은 suffix의 private
+            `commitRecoverySnapshotBindingUnderHeldLease`가 live commit output과 receipt를 exact 비교하고
+            `snapshot_in_flight`+binding receipt tombstone을 게시한다. commit 뒤 allocation/callback/raw lookup/fallible operation은 0이다.
+            Exact seal 비교는 no-fail invariant check이며 mismatch는 rollback 가능한 ordinary error가 아니라 invariant
+            terminal+canonical teardown의 닫힌 branch다. 두 source는 이 private binding leaf 하나로 수렴한다.
+            두 transaction은 서로의 capability나 cleanup tail을 재사용하지 않는다. 보통은 서로 다른 turn이다. ACK 뒤 같은
+            logical drain에서 snapshot이 이미 transport ownership 목적으로 commit된 post-response side-intent만 예외 fast path이며,
+            이때도 미리 봉인한 두 prepared transaction을 ACK transaction 다음 snapshot transaction 순서로 연속 consume할 뿐
+            하나의 receipt/state machine으로 합치지 않는다. candidate가 없으면 ACK transaction은 `awaiting_snapshot`에서 끝나고
+            나중 snapshot aggregate가 독립 snapshot transaction을 수행한다.
+
+            각 transaction의 publication suffix가 끝날 때까지 allocation, callback, clock read, syscall, raw parser/ledger 재조회
+            또는 fallible branch는 없다. completed response payload는 ACK transaction의 canonical state가 전부 게시된 뒤 기존
+            final-address take가 소유하는 별도 publish-before-free callback tail에서 exact-once 정리한다. Snapshot transaction은
+            completed payload나 allocator를 소유하지 않는다. preflight 실패/OOM은 해당 transaction의 semantic state를 바꾸기 전
+            terminal preparation으로 돌아가며, no-fail suffix seal drift는 invariant terminal과 canonical teardown으로 닫는다.
+
+            `PreparedResyncAckTransition`은 self/final address, storage/scratch address와 owner incarnation, held-lease address/generation,
+            operation/turn/parser generation과 seal, sampled `now_ns`와 recovery deadline, authority state/generation/seal,
+            permit·verdict·completed·correlation·TX digest, barrier와 destination pristine digest를 봉인한다.
+            `PreparedRecoverySnapshotCommit`은 source union, final `CommittedRecoverySnapshotBinding` destination의 address/pristine
+            digest와 최대 64개 candidate/disposition aggregate의 final address/count/root digest를 봉인한다. 각 aggregate entry는
+            actual 또는 pending token source, origin/epoch/snapshot/range, `bind|drop|terminal` disposition, exact cleanup destination/
+            lifecycle digest를 포함한다. suffix는 이 aggregate를 재조회·재계획하지 않고 wire/range 순 최초 exact 하나만 bind하며
+            나머지 token/drop authority를 all-or-none tombstone한다.
+            `CommittedRecoverySnapshotBinding`은 별도 self/final address와 lifecycle, storage/scratch/lease/operation/turn/parser 및
+            authority seal, current `awaiting_snapshot` digest, ledger instance/authority digest, full actual token identity(slot+generation),
+            committed slot semantic digest와 sealed `RecoveryIntent`, candidate origin/epoch/snapshot tag/absolute start·end,
+            side-intent final address/digest, destination pristine digest를 봉인한다. same-drain fast path의 already-committed source는
+            ledger가 앞서 발급한 immutable commit output과 ACK transition plan digest를, later-turn commit-output source는 current
+            awaiting digest를 source discriminator와 함께 봉인한다. caller가 token generation,
+            ledger next generation, candidate DTO 또는 lease value만으로 이 receipt를 재구성할 수 없다. validator는 위 필드를
+            one-field exact 비교하며 copy/move/cross-storage/cross-lease/slot reuse/replay는 precommit에서 거부한다.
+
+            ACK payload callback tail의 closed 결과는 `cleaned | cleaned_with_invariant | invalid_precommit`이다. callback 전
+            post-publication snapshot은 recovery state, correlation/input gate, completed owner와 permit/verdict/ACK receipt/take
+            tombstone, parser/authority/TX/operation/turn seal을 포함한다. callback 뒤 drift는 이미 게시한 semantic authority를
+            이전 state로 되돌리거나 새 current 값으로 reseal하지 않는다. underlying parser backing/TX queue owner와
+            descriptor/content seal이 모두 post-publication snapshot 그대로 coherent할 때만 scratch/parser/TX의 비소유 scalar를
+            복원하고 `cleaned_with_invariant`와 process quarantine을 latch한다. backing/descriptor/content가 함께 drift했으면
+            generation/seal scalar만 복원해 authority를 다시 유효화하지 않는다. allocator-owned pointer, ledger token/slot 또는
+            storage lifecycle처럼 복원 시 arbitrary
+            free/release 위험이 있는 drift는 추가 free/release 0으로 canonical teardown에 넘기고 retained charge를 기존
+            `max_cross_owner_quarantine_bytes` 이하로 한 사건에 정확히 한 번 charge하고 process
+            `cross_owner_quarantine_events`도 사건당 exact 1회만 증가시킨다. replay/invalid precommit은 callback/free/state mutation,
+            quarantine event/byte 재회계가 모두 0이다.
 
             recovery transition은 다음 충돌표를 따른다.
 
@@ -9082,8 +9134,9 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           **2b2e-integration**, 그 뒤 **f3c2/d/e orchestration**이다. 2b2e-integration은 private callback-free
           `consumeResyncAckUnderHeldLease`를 제공하고,
           f3 orchestration이 같은 held lease/no-fail suffix에서 permit, typed verdict, exact recovery phase generation과
-          completed/correlation owner를 함께 consume한다. permit/verdict는 저장·외부 반환되지 않으며 payload cleanup과
-          `control_in_flight → awaiting_snapshot` publication 사이에 다음 call이나 callback이 없다. resize verdict는
+          completed/correlation owner를 함께 consume한다. permit/verdict는 저장·외부 반환되지 않으며
+          `control_in_flight → awaiting_snapshot`부터 correlation/input/tombstone publication 완료까지 다음 call이나 callback이
+          없다. completed payload cleanup callback tail은 그 canonical publication 뒤에만 실행한다. resize verdict는
           f3가 같은 방식으로 직접 consume한다. 이 단계는 raw payload 재decode, 별도 request map,
           `authority_clear` 재계산이나 두 번째 cancel state machine을 만들지 않는다.
 

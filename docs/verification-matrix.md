@@ -81,6 +81,34 @@
 > capability를 발급하지 않고 graph 0의 `not_ready`로 outer invariant teardown에 넘긴다.
 > 따라서 binding component gate만 green이어도 f3c1/F3/2b2 전체 완료로 표시하지 않는다.
 
+> 2b2e-integration은 기존 `planRecoveryTransition` 하나를 `resync_ack` trigger로 확장해 exact client
+> `control_in_flight`+response-wait+nonzero barrier+deadline 미만만 `awaiting_snapshot`으로 계획한다. pump 내부의 별도 ACK
+> switch/reducer는 허용하지 않는다. Snapshot binding은 commit 전 actual-token 없는 `PreparedRecoverySnapshotCommit`과 commit
+> 직후 no-fail suffix가 final address에 쓰는 `CommittedRecoverySnapshotBinding`의 두 lifecycle이다. Precommit source는
+> `commit_pending{prepared_live_commit}` 또는 `already_committed{immutable_commit_output}`의 closed union이며 전자만 ledger commit을
+> 수행하고 후자는 same-drain side-intent의 기존 output을 쓰므로 permit 재사용/두 번째 commit이 0이다. 두 source가 actual
+> commit output을 얻은 뒤 수렴하며, `CommittedRecoverySnapshotBinding`만 ledger commit이
+> 발급한 actual token slot+generation과 sealed recovery intent/provenance/storage-incarnation/held-lease를 capability로 사용하며
+> predicted next generation이나 pure plan DTO를 authority로 쓰지 않는다. ACK transaction과 snapshot transaction은 별도
+> final-address receipt/lifecycle이며, 전자는
+> `control_in_flight→awaiting_snapshot`, 후자는 actual ledger commit→`snapshot_in_flight`만 소유한다. 같은 drain에 이미 commit된
+> post-response side-intent가 있을 때만 두 prepared transaction을 순서대로 consume하고, candidate가 없으면 후속 turn의 snapshot
+> transaction이 독립 실행된다. 각 no-fail suffix는 semantic publication과 capability tombstone을 먼저 게시할 때까지
+> allocator/callback/clock/syscall/fallible lookup 0이어야 한다. Completed payload free는 ACK canonical publication 뒤의 별도
+> publish-before-free callback tail이며 snapshot consumer는 payload/allocator를 소유하지 않는다.
+>
+> ACK receipt one-field matrix는 self/storage/scratch/lease address, owner incarnation, lease/operation/turn/parser generation과
+> parser seal, sampled clock/deadline, authority state/generation/seal, permit/verdict/completed/correlation/TX digest, barrier와 pristine
+> destination을 포함한다. Precommit snapshot matrix는 source union, 최대 64개 disposition aggregate의 final address/count/root
+> digest와 entry별 token source/provenance/range/disposition/cleanup destination, pristine committed-receipt destination을 포함한다.
+> Committed snapshot receipt matrix는 별도 self/lifecycle, 같은 storage/lease/turn authority, current awaiting digest,
+> ledger identity/authority digest, full token slot+generation, committed slot semantic digest/RecoveryIntent, origin/epoch/snapshot/range,
+> side-intent address/digest, source discriminator와 destination pristine digest를 포함한다. Debug/ReleaseFast component gate는
+> actual-generation/slot reuse, barrier 전·걸침·후, copy/move/cross-storage/cross-lease/replay, 위 필드별 tamper, multi-candidate
+> first-exact/drop transaction과 fail-index를 검증한다. ACK callback tail은 post-publication recovery/correlation/input 및 모든
+> tombstone/owner seal snapshot을 기준으로 `cleaned|cleaned_with_invariant|invalid_precommit`을 반환하고, 안전한 scalar drift만
+> 복원하며 allocator pointer/ledger/storage lifecycle drift는 추가 free/release 0+bounded quarantine으로 닫는다.
+
 > f3c0의 독립 merge gate는 `control_response_wire.zig` 하나가 allocation-free typed resize/resync request와
 > strict response/error envelope를 소유하고, `RemoteRuntime`과 external pump가 각각 같은 decoder/encoder를 소비하는지
 > 검증한다. external `admitControl`에는 raw JSON 입력이 없어야 하며 request encoder의 buffer cap-1/exact,

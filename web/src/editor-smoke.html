@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Maru editor smoke</title>
+    <link rel="stylesheet" href="app.css" />
+  </head>
+  <body>
+    <!-- 스모크는 이 한 노드 아래만 본다. 인라인 스크립트는 없다 — app origin CSP가 script-src 'self'라
+         차단되고, 그 차단 자체가 위반 카운트에 잡혀 게이트를 오염시킨다(계측 대상은 MergeView뿐이다). -->
+    <main id="diff-harness" aria-label="diff 하니스"></main>
+  </body>
+</html>

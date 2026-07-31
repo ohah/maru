@@ -526,6 +526,12 @@ const ExternalAdoptionSnapshot = struct {
     external_saved_flags: c_int,
     external_tx: ExternalArrayDescriptor,
     external_tx_bytes: usize,
+    external_tx_retiring_bytes: usize,
+    external_tx_quarantined_bytes: usize,
+    tx_queue_generation: u64,
+    tx_head_progress_baseline_ns: ?i128,
+    tx_last_observed_now_ns: ?i128,
+    tx_immediate_pending: bool,
 };
 
 /// Read-only, owned snapshot of the exact Client state that an external-pump adoption may consume.
@@ -1590,12 +1596,17 @@ fn externalRangeForList(
 
 fn externalOwnerRangeCount(self: *const Client) ExternalAdoptionInspectError!usize {
     var count: usize = 6;
+    const tx_count = switch (self.io_mode) {
+        .blocking => 0,
+        .external => |state| state.external_tx.items.len,
+    };
     inline for (.{
         @as(usize, @intFromBool(self.build_id != null)),
         @as(usize, @intFromBool(self.partial_batch != null)),
         self.pending_batches.items.len,
         self.pending_stream.items.len,
         self.pending_events.items.len,
+        tx_count,
     }) |part| count = std.math.add(usize, count, part) catch
         return error.ArithmeticOverflow;
     return count;
@@ -1605,7 +1616,8 @@ const max_external_owner_range_count =
     6 + 1 + 1 +
     protocol.max_client_screen_items +
     protocol.max_client_screen_items +
-    max_pending_event_count;
+    max_pending_event_count +
+    client_external_mode.max_tx_frames;
 const max_external_owner_range_scratch_bytes =
     max_external_owner_range_count * @sizeOf(ExternalRange);
 const max_external_outer_owner_range_count = 7;
@@ -1676,6 +1688,10 @@ fn externalNestedOwnerRangeCount(
         self.pending_batches.items.len,
         self.pending_stream.items.len,
         self.pending_events.items.len,
+        switch (self.io_mode) {
+            .blocking => 0,
+            .external => |state| state.external_tx.items.len,
+        },
     }) |part| count = std.math.add(usize, count, part) catch
         return error.ArithmeticOverflow;
     return count;
@@ -1704,6 +1720,16 @@ fn externalNestedOwnerRangeAt(
     if (index < self.pending_events.items.len) {
         const frame = self.pending_events.items[index];
         return externalRangeForSlice(frame.payload, frame.payload.len);
+    }
+    index -= self.pending_events.items.len;
+    switch (self.io_mode) {
+        .blocking => {},
+        .external => |state| {
+            if (index < state.external_tx.items.len) {
+                const frame = state.external_tx.items[index];
+                return externalRangeForSlice(frame.bytes, frame.bytes.len);
+            }
+        },
     }
     return error.InvalidClientState;
 }
@@ -2072,6 +2098,16 @@ const ExternalSourceSealEncoder = struct {
             0x1a00,
         );
         try writer.writeUsize(external.external_tx_bytes);
+        try writer.writeUsize(external.external_tx_retiring_bytes);
+        try writer.writeUsize(external.external_tx_quarantined_bytes);
+        writer.writeU64(external.tx_queue_generation);
+        writer.writePresence(external.tx_head_progress_baseline_ns != null);
+        if (external.tx_head_progress_baseline_ns) |value|
+            writer.writeU128(@bitCast(value));
+        writer.writePresence(external.tx_last_observed_now_ns != null);
+        if (external.tx_last_observed_now_ns) |value|
+            writer.writeU128(@bitCast(value));
+        writer.writeBool(external.tx_immediate_pending);
 
         try writer.writeUsize(validated.screen_source_count);
         try writer.writeUsize(validated.screen_payload_bytes);
@@ -3363,6 +3399,14 @@ fn validateExternalAdoptionSourceEligibility(
         .blocking => return error.InvalidClientState,
         .external => |state| if (state.external_tx.items.len != 0 or
             state.external_tx_bytes != 0 or
+            state.external_tx_retiring_bytes != 0 or
+            state.external_tx_quarantined_bytes != 0 or
+            state.tx_queue_generation != 1 or
+            state.tx_head_progress_baseline_ns != null or
+            state.tx_last_observed_now_ns != null or
+            state.tx_immediate_pending or
+            state.tx_cleanup_id != 0 or
+            state.tx_cleanup_owner_addr != 0 or
             state.external_tx.items.len > state.external_tx.capacity or
             state.external_tx.capacity != client_external_mode.max_tx_frames)
             return error.InvalidClientState,
@@ -3584,6 +3628,12 @@ fn externalAdoptionSnapshot(self: *const Client) ExternalAdoptionSnapshot {
         .external_saved_flags = external.saved_flags,
         .external_tx = externalArrayDescriptor(external.external_tx),
         .external_tx_bytes = external.external_tx_bytes,
+        .external_tx_retiring_bytes = external.external_tx_retiring_bytes,
+        .external_tx_quarantined_bytes = external.external_tx_quarantined_bytes,
+        .tx_queue_generation = external.tx_queue_generation,
+        .tx_head_progress_baseline_ns = external.tx_head_progress_baseline_ns,
+        .tx_last_observed_now_ns = external.tx_last_observed_now_ns,
+        .tx_immediate_pending = external.tx_immediate_pending,
     };
 }
 
@@ -4126,10 +4176,14 @@ pub const Client = struct {
     }
 
     pub fn deinit(self: *Client) void {
+        _ = self.tryDeinit();
+    }
+
+    pub fn tryDeinit(self: *Client) bool {
         if (self.ownership == .moved) {
-            return;
+            return true;
         }
-        self.clearExternalModeStorage();
+        if (!self.prepareExternalModeDeinit()) return false;
         if (self.fd >= 0) _ = c.close(self.fd);
         if (self.build_id) |build_id| self.allocator.free(build_id);
         if (self.lifecycle.len != 0) self.allocator.free(self.lifecycle);
@@ -4143,6 +4197,7 @@ pub const Client = struct {
         if (self.partial_batch) |*partial| partial.bytes.deinit(self.allocator);
         self.parser.deinit();
         self.* = undefined;
+        return true;
     }
 
     /// Deep snapshot of the descriptors and descriptor elements consumed by `deinit`. This is
@@ -5340,12 +5395,73 @@ pub const Client = struct {
         }
     }
 
-    fn clearExternalModeStorage(self: *Client) void {
+    pub fn prepareExternalModeDeinit(self: *Client) bool {
         switch (self.io_mode) {
             .blocking => {},
-            .external => |*state| state.deinit(self.allocator),
+            .external => |*state| {
+                state.requestTxClose();
+                switch (state.tryDeinit(self.allocator)) {
+                    .cleaned, .already_dead => {},
+                    .busy => return false,
+                }
+            },
         }
         self.io_mode = .blocking;
+        return true;
+    }
+
+    pub const ExternalModeDeinitReservationResult = enum {
+        reserved,
+        already_dead,
+        busy,
+    };
+
+    pub fn reserveExternalModeDeinit(
+        self: *Client,
+    ) ExternalModeDeinitReservationResult {
+        return switch (self.io_mode) {
+            .blocking => .already_dead,
+            .external => |*state| blk: {
+                state.requestTxClose();
+                break :blk switch (state.reserveDeinit()) {
+                    .reserved => .reserved,
+                    .already_dead => .already_dead,
+                    .busy => .busy,
+                };
+            },
+        };
+    }
+
+    pub fn finishReservedExternalModeDeinit(self: *Client) bool {
+        switch (self.io_mode) {
+            .blocking => return true,
+            .external => |*state| switch (state.finishReservedDeinit(self.allocator)) {
+                .cleaned, .already_dead => {},
+                .busy => return false,
+            },
+        }
+        self.io_mode = .blocking;
+        return true;
+    }
+
+    pub fn cancelReservedExternalModeDeinit(self: *Client) bool {
+        return switch (self.io_mode) {
+            .blocking => true,
+            .external => |*state| state.cancelReservedDeinit(),
+        };
+    }
+
+    pub fn transferReservedExternalModeDeinit(
+        self: *Client,
+        destination: *Client,
+    ) bool {
+        return switch (self.io_mode) {
+            .blocking => destination.io_mode == .blocking,
+            .external => |*source_state| switch (destination.io_mode) {
+                .blocking => false,
+                .external => |*destination_state| source_state.transferReservedDeinit(destination_state),
+            },
+        };
     }
 
     const RpcIo = union(enum) {
@@ -6746,8 +6862,8 @@ pub const Client = struct {
     fn poisonAndTakeFd(self: *Client) ?c.fd_t {
         // pending frame은 connection 소유 메모리다. 이미 unusable이어도 deinit 전 명시 invalidate가 재진입할 수 있으므로
         // 항상 회수 helper를 거친다. fd를 먼저 Client에서 떼어낸 뒤 정확히 한 close strategy만 실행한다.
+        if (!self.prepareExternalModeDeinit()) return null;
         self.clearPendingOutbound();
-        self.clearExternalModeStorage();
         if (self.unusable) return null;
         self.unusable = true;
         if (self.fd < 0) return null;
@@ -9470,6 +9586,36 @@ test "external mode prechecks perform no allocation or fd inspection" {
     try std.testing.expect(!failing.has_induced_failure);
 }
 
+test "external Client failClosed during TX operation preserves owner and latches deferred close" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    defer _ = c.close(fds[1]);
+    var client = makeConnectedTestClient(std.testing.allocator, fds[0]);
+    var cleaned = false;
+    defer if (!cleaned) client.deinit();
+    var fixture = ConnectedSocketFixture{ .fd = fds[0] };
+    try client.enterExternalModeWithOps(fixture.ops());
+    const state = switch (client.io_mode) {
+        .external => |*external| external,
+        .blocking => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(state.acquireTxOperation());
+    client.failClosed();
+    try std.testing.expectEqual(fds[0], client.fd);
+    try std.testing.expect(!client.unusable);
+    try std.testing.expect(client.io_mode == .external);
+    try std.testing.expect(state.txCloseRequested());
+    try std.testing.expect(state.releaseTxOperation());
+    try std.testing.expect(client.tryDeinit());
+    cleaned = true;
+    try std.testing.expect(c.fcntl(fds[0], c.F.GETFD, @as(c_int, 0)) < 0);
+}
+
 fn checkClientExternalModeAllocation(allocator: std.mem.Allocator) !void {
     var fds: [2]c.fd_t = undefined;
     try std.testing.expectEqual(
@@ -10914,7 +11060,7 @@ test "external adoption owner alias validation stays n log n at every queue cap"
     const source_stats = try validateExternalSourceOwnerRanges(&client, &source_scratch);
     try std.testing.expectEqual(range_count, source_stats.total_ranges);
     try std.testing.expectEqual(
-        max_external_owner_range_count,
+        max_external_owner_range_count - client_external_mode.max_tx_frames,
         source_stats.total_ranges,
     );
     try std.testing.expect(
@@ -10922,7 +11068,7 @@ test "external adoption owner alias validation stays n log n at every queue cap"
             (source_stats.outer_ranges + source_stats.total_ranges) * 64,
     );
     try std.testing.expectEqual(
-        @as(usize, 147_584),
+        @as(usize, 148_608),
         max_external_owner_range_scratch_bytes,
     );
 }
@@ -11003,8 +11149,8 @@ test "client source seal binds explicit schema descriptors and ordered payload b
         .canonical_test,
     );
     const frozen_canonical_digest =
-        "\x25\xb8\x0b\x8e\x68\xe0\x28\x49\xac\x66\xf5\x37\x59\xac\xfe\x2c" ++
-        "\x46\xb9\x0d\xe6\xd0\x96\x6f\x6f\x01\xff\x81\xa6\x1c\x7c\x27\x21";
+        "\xc0\xf3\x5a\x01\xd0\x25\x7a\x31\x43\x04\x58\xa8\xcb\x25\xe0\xaa" ++
+        "\x80\xce\xaa\x04\x7f\xed\xbb\xf4\xbe\x67\x86\xbf\x13\x75\xf8\x5d";
     try std.testing.expectEqualSlices(
         u8,
         frozen_canonical_digest,
@@ -11785,22 +11931,32 @@ test "external mode failClosed reclaims queued frames exactly once" {
         .blocking => return error.TestUnexpectedResult,
         .external => |*state| {
             state.external_tx.appendAssumeCapacity(.{
-                .bytes = try allocator.dupe(u8, "zero"),
+                .bytes = try state.tx_allocator.dupe(u8, "zero"),
                 .kind = .input_bytes,
                 .stream_id = 7,
                 .request_id = 0,
                 .activated_at_ns = 1,
-                .last_progress_at_ns = 1,
+                .wire_digest = [_]u8{1} ** 32,
+                .descriptor_digest = [_]u8{2} ** 32,
             });
+            state.external_tx.items[0].descriptor_digest =
+                client_external_mode.txFrameDescriptorDigest(
+                    state.external_tx.items[0],
+                );
             state.external_tx.appendAssumeCapacity(.{
-                .bytes = try allocator.dupe(u8, "partial"),
+                .bytes = try state.tx_allocator.dupe(u8, "partial"),
                 .offset = 1,
                 .kind = .request,
                 .stream_id = 7,
                 .request_id = 8,
                 .activated_at_ns = 2,
-                .last_progress_at_ns = 3,
+                .wire_digest = [_]u8{3} ** 32,
+                .descriptor_digest = [_]u8{4} ** 32,
             });
+            state.external_tx.items[1].descriptor_digest =
+                client_external_mode.txFrameDescriptorDigest(
+                    state.external_tx.items[1],
+                );
             state.external_tx_bytes = 11;
         },
     }

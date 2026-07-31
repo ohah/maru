@@ -46,6 +46,7 @@ pub const TurnResult = struct {
     read_interest: bool = false,
     write_interest: bool = false,
     immediate_rx: bool = false,
+    immediate_tx: bool = false,
     authority_clear: bool = false,
     control_ready: bool = false,
     inherited_work_ready: bool = false,

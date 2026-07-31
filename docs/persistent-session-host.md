@@ -8592,6 +8592,34 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           f2가 이를 control correlation에 귀속하고, e-integration이 ACK/resync recovery barrier에 귀속하며,
           f3가 revoke/HUP/close 전체 우선순위와 offset-0 control cancel을 소유한다.
 
+          **f1 concurrency·cleanup 계약:** f1a admission/request-ID transaction, f1b bounded
+          writer·completion sink·callback-safe retire/teardown, f1c consumed D2 authority와 제품 POSIX
+          write 배선은 아래 단일 소유권 규율을 공유한다.
+          stable `ExternalPumpStorage`의 operation/cleanup atomic typestate를 Client/union 첫 조회 전에
+          획득하고, 그 안에서 per-State claim을 whole-turn 마지막 release까지 유지해 concurrent
+          write/admission/completion/retire와 teardown을 상호 배제한다. 경쟁한 storage teardown은
+          `.transaction_busy`, callback의 State `tryDeinit`은 `.busy`를
+          반환하며, void `State.deinit`과 `Client.deinit`은
+          owner union을 덮거나 spin/panic하지 않고 bounded no-op으로 보존하고
+          close intent를 operation 획득 시도보다 먼저 동일 atomic claim의 `operation_close` 또는
+          `idle_close`로 latch해 새 operation을 막는다. held operation의 CAS release는 이 intent와
+          경쟁해도 반드시 close 상태를 보존하고 storage semantic을 terminal로 승격해 canonical
+          teardown으로 수렴한다. outer cleanup은 callback 전에 per-State cleanup claim을 예약하고 모든
+          callback 뒤 exact-once consume하므로 readiness 확인과 실제 cleanup 사이 operation 재획득 창이 없다.
+          committed teardown이 Client를 callback-hidden local owner로 옮길 때 cleanup reservation authority도
+          nonzero process-unique reservation ID와 expected source address를 대조해 source→scratch→local
+          final address로 callback 없이 함께 이전한다. 독립 State가 가진 cleanup claim은 ID/source seal이
+          달라 transfer 0이다. reserve는 atomic `reserving`을 먼저 publish하고 ID/address 기록 뒤
+          `cleanup`을 release-publish하므로 transfer와 metadata 초기화가 data race하지 않는다. 조기 반환은
+          typed cancel로 `idle_close`에 복귀한다.
+          busy를 받은 호출자는 해당
+          `Client`를 move/drop하지 않고 stable owner에 그대로 보존해 operation release 뒤 typed cleanup을
+          재시도해야 한다. 제품 경로의 canonical owner는 `ExternalPumpStorage`이며, void `deinit`은
+          소유권 이전·해제 성공을 뜻하지 않는다. 같은 State의
+          double-free는 거부하면서 서로 다른 State의 병렬 cleanup은 허용한다. 세부 acceptance
+          inventory와 구현·검증 상태의 단일 출처는 아래 verification matrix다. f1 transport TX 사실은
+          f2 response correlation이나 f3 revoke/whole-turn 통합의 권위를 대신하지 않는다.
+
           - **f1a — sealed admission + request-ID commit:** TX queue/counter/allocator의 sole owner는 기존
             `storage.owned_client.io_mode.external`에 남고, request-ID의 sole owner는 adoption이 옮긴
             `storage.owner_request_ids`다. 별도 queue/counter mirror를 만들지 않는다.
@@ -8628,13 +8656,18 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             payload/wire digest와 aggregate를 검증한다. stale/copy/cross-storage/abort면 candidate를 frozen
             cleanup owner로 옮기고 prepared를 tombstone한 뒤 exact-once free한다. cleanup callback drift/reentry는
             live prepared를 다시 읽거나 free하지 않고 bounded quarantine로 계상한다. replay/double/cross-storage
-            cleanup은 0이다. protected-range alias, invalid pointer 또는 cleanup authority drift로 free할 수 없는
+            cleanup은 0이다. protected-range alias, checked address-range overflow 또는 cleanup authority drift로 free할 수 없는
             candidate는 requested exact wire length를 storage의 `external_tx_quarantined_bytes` sticky terminal
             counter에 정확히 한 번 charge한다. 이 counter는 queued+retiring resident와 분리된 corruption
             accounting이고 candidate backing을 live queue로 재사용하지 않는다. 한 storage에는 prepared
             candidate가 하나뿐이며 첫 quarantine이 terminalize해 이후 facade/allocation이 0이므로 상한은
             `1 MiB+32`다. process-wide checked quarantine event/byte high-water도 같은 exact length를 한 번
             기록하고 overflow는 fail-stop한다. normal teardown은 queued/retiring final-zero를 요구하고
+            Zig `Allocator.rawAlloc`의 non-null 결과가 실제 writable allocation이라는 언어-level 계약은 신뢰 경계다.
+            null은 OOM으로, null이 아닌 주소의 arithmetic overflow·protected exact/partial alias는 위 preflight로
+            거부한다. allocator가 unmapped non-null 주소를 반환하는 UB를 런타임 메모리 probe로 판별한다는 주장은
+            하지 않는다. stale/copy/same-address ABA는 주소 자체가 아니라 prepared lifecycle과 owner
+            incarnation/operation/queue generation seal로 callback 전에 거부한다.
             quarantine fixture는 sticky exact charge/replay 0을 요구한다. 마지막 callback 뒤에는 queue append, resident counter와
             request next state를 한 callback-free/no-fail suffix에서 함께 publish한다. OOM/encode/stale/copy/
             cross-storage/double permit은 queue/counter/request mutation 0이며, `last_available`은 이 suffix에서만

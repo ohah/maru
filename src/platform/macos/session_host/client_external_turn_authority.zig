@@ -146,6 +146,11 @@ pub const AbortResult = enum {
     invalid_authority,
 };
 
+pub const ConsumeResult = enum {
+    consumed,
+    invalid_authority,
+};
+
 pub const CleanupAbortResult = enum {
     aborted,
     invalid_authority,
@@ -233,6 +238,24 @@ pub fn abort(
     return .aborted;
 }
 
+pub fn consume(
+    permit: *PreparedAuthorityPermit,
+    current: CurrentView,
+) ConsumeResult {
+    if (!permitMatchesCurrent(permit, current, .prepared))
+        return .invalid_authority;
+    permit.lifecycle = .consumed;
+    permit.digest = sealPermit(permit);
+    return .consumed;
+}
+
+pub fn validateConsumed(
+    permit: *const PreparedAuthorityPermit,
+    current: CurrentView,
+) bool {
+    return permitMatchesCurrent(permit, current, .consumed);
+}
+
 pub fn abortForCleanup(
     permit: *PreparedAuthorityPermit,
     cleanup: *FrozenCleanupSeed,
@@ -266,8 +289,25 @@ pub fn resetSpent(
     current: CurrentView,
 ) bool {
     if (!validCleanup(cleanup, permit) or
-        !permitMatchesCurrent(permit, current, .aborted) or
+        !(permitMatchesCurrent(permit, current, .aborted) or
+            permitMatchesCurrent(permit, current, .consumed)) or
         !std.meta.eql(cleanup.seed, current))
+        return false;
+    permit.* = .{};
+    cleanup.* = .{};
+    return true;
+}
+
+/// Resets a consumed TX suffix after the write leaf has validated the live RX authority around
+/// every external call. TX queue retirement legitimately changes the broader owner inventory, so the
+/// consumed permit is closed against its frozen cleanup seed rather than a reconstructed pre-TX
+/// view.
+pub fn resetConsumedAfterTx(
+    permit: *PreparedAuthorityPermit,
+    cleanup: *FrozenCleanupSeed,
+) bool {
+    if (!validCleanup(cleanup, permit) or
+        !permitMatchesCurrent(permit, cleanup.seed, .consumed))
         return false;
     permit.* = .{};
     cleanup.* = .{};

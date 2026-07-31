@@ -29,7 +29,12 @@
 > (d) completed source-turn에 결속된 private prepared take와 비탈출 exact-once
 > cleanup/product socketpair 네 gate를 모두 통과해야 완료다. f2에서는 제품 semantic apply를 열지
 > 않으며, f3가 same-drain revoke/EOF 우선순위와 authority-clear drain permit을 닫기 전 public
-> control/whole-turn 완료를 주장하지 않는다.
+> control/whole-turn 완료를 주장하지 않는다. f2 completion evidence는 (1) `admitControl` 실제
+> allocation 실패 전수와 공통 final-zero, (2) product max-ID enqueue→TX→response→private reject
+> cleanup 및 f1 exhaustion leaf, (3) 실제 socket RX-first readable+writable와 두 방향 역순 response,
+> (4) product deadline-1/exact/+1을 모두 포함한다. f2에는 정상 success/idle 복귀 권위가 없으므로
+> max-ID 성공 take 뒤 같은 product storage의 다음 wire-zero exhaustion은 f3 typed-success integration
+> gate가 검증한다. test-only correlation reset은 이 경계를 대신하지 않는다.
 
 > 2b2d2는 d2a pure classifier, d2b buffered/inherited bounded turn, d2c injected nonblocking
 > read/admit, d2d RX-first whole-turn authority barrier를 모두 구현했다. 네 단계의

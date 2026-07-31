@@ -9161,8 +9161,10 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           lease/parser/authority/completed/correlation/TX와 두 final output address를 모두 재검증한 뒤에만 pristine
           `PreparedWholeDrainPermit`과 pointer-free `PreparedControlSemanticVerdict`를 한 callback-free publication으로
           봉인한다. producer 결과는 닫힌 `not_ready | prepared_pair | terminal_prepared`다. resize `.stale`, malformed/error
-          envelope은 sealed protocol terminal, decode OOM은 sealed resource terminal, drift/reentry/copy는 sealed invariant
-          terminal이며 각각 completed owner와 **non-owning cleanup binding**을 포함한다. 이 binding은 새 payload owner나
+          envelope은 sealed protocol terminal, decode OOM은 sealed resource terminal이다. decode callback 뒤
+          drift/reentry/coherent reseal은 바뀐 current owner를 다시 읽어 cleanup capability로 만들지 않고 `not_ready`로
+          outer invariant teardown에 넘긴다. protocol/resource terminal은 각각 original completed owner와
+          **non-owning cleanup binding**을 포함한다. 이 binding은 새 payload owner나
           cleanup state machine이 아니라 기존 `PreparedControlResponseTake`와 canonical f2/f3 cleanup leaf의 final destination
           identity/digest만 봉인한다. preparation 자체는 source ownership·semantic state·
           TX·ledger를 바꾸거나 payload cleanup callback을 호출하지 않고, 후속 exact-one cleanup leaf만 terminal preparation을
@@ -9171,7 +9173,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           terminal을 구별하고 payload를 재decode하지 않는다. 두 성공 결과는 final address, same lease와 서로의
           pair address/digest에 결속되어 copy/move/splice/replay를 거부한다. f3c1은 semantic state, correlation idle,
           input gate, recovery phase를 바꾸거나 payload를 정리하지 않는다.
-          **f3c1-base merge slice**는 이 계약의 단일-turn final-`would_block`, post-response side-intent 0,
+          **f3c1-base 경계**는 이 계약의 단일-turn final-`would_block`, post-response side-intent 0,
           multi-turn episode 불필요 경로만 닫는다. producer는 private이고 product callsite 0이며, permit은 exact
           completed-aware `RxDrainEvidence` final address/digest와 exception digest를 직접 봉인한다. malformed/stale/OOM의
           `terminal_prepared`는 이 base에서 non-owning·unconsumable evidence일 뿐 cleanup capability가 아니다. 기존
@@ -9179,14 +9181,55 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           `DrainEpisodeOwner` advance가 각각 후속 f3c1-terminal-binding, 2b2e-integration, f3d에서 green이 되기 전에는
           **f3c1 전체 완료로 표시하지 않는다**. side-intent 또는 continuation episode가 있으면 base producer는
           `not_ready`이며 source owner와 state를 바꾸지 않는다.
-          **구현 완료(f3c1-base):** classified response의 absolute range가 intent commit→destination plan→completed owner까지
+          **f3c1-base가 봉인하는 범위:** classified response의 absolute range가 intent commit→destination plan→completed owner까지
           seal되고, 기존 D2 general projection을 약화하지 않는 completed-only drain evidence가 final `would_block`과 남은
           read/frame/work budget을 증명한다. private producer는 실제 held lease에서 shared codec을 사용해 resize/resync pair
           또는 non-owning terminal evidence를 final-address scratch에 준비하며 completed/correlation/semantic/payload owner를
           바꾸지 않는다. permit은 drain evidence address/digest/exception을 직접 봉인한다. Debug/ReleaseFast
           `test-session-host-f3c1`은 actual resize/resync, stale/malformed/error/OOM, absolute provenance, one-field tamper,
-          copy/move와 independent-pair splice를 executable sentinel과 함께 검증한다. product callsite, terminal cleanup
-          consumer, side-intent/episode는 위 제한대로 아직 0/미구현이다.
+          copy/move와 independent-pair splice를 executable sentinel과 함께 검증한다. 이 base gate만으로는 product callsite,
+          terminal cleanup consumer, side-intent/episode를 증명하지 않으며 각각 아래 후속 계약의 소유다.
+          **f3c1-terminal-binding 계약**은 `ExternalRxTurnScratch`의 final address에 terminal 전용
+          `PreparedControlResponseTake`, pristine `FrozenControlResponse` destination과 별도
+          `PreparedControlSemanticTerminalBinding{empty|prepared|consumed_tombstone}`을 둔다. base의
+          `PreparedControlSemanticTerminal{empty|prepared|consumed_tombstone}`은 unbound evidence로 그대로 두며 나중에
+          mutate/reseal하지 않는다. binding은 새 payload owner나 별도 cleanup state machine을 만들지 않고, 자기 final
+          address와 terminal reason, scratch/turn, storage/incarnation/held-lease/operation, canonical completed owner 전체
+          digest, correlation generation/digest, parser seal과 source absolute range, completed-aware drain evidence
+          address/digest/exception, authority generation/seal, TX queue generation, prepared take address/digest와 frozen
+          destination address/pristine projection digest 및 기존 terminal evidence address/digest를
+          **binding→terminal/take/destination 단방향**으로 봉인한다. take는 기존
+          `prepareControlResponseTakeUnderHeldLease`를 그대로 사용하며 terminal digest를 역참조하지 않아 digest 순환을
+          만들지 않는다. terminal, take, frozen destination은 같은 scratch 안의 서로 겹치지 않는 final range여야 한다.
+          preparation은 decode 전 잡은 exact completed/correlation/parser/drain/authority/TX snapshot이 callback 뒤에도
+          동일할 때만 take와 binding을 callback-free로 publish한다. callback이 owner를 coherent reseal했거나 reentry,
+          destination 선점, lease/turn drift가 있으면 현재 owner를 다시 읽어 cleanup capability를 만들지 않고 호출 전
+          destination bytes를 그대로 유지한다. 이 단계까지 completed/correlation/semantic/recovery/TX/ledger와 payload
+          owner/free count의 mutation은 0이다.
+          private exact consumer는 모든 live seal과 세 final address를 마지막으로 검증한 뒤, 기존
+          `publishControlResponseTakeUnchecked`로 completed payload owner를 frozen destination으로 옮기고 take와 terminal
+          evidence/binding을 각각 consumed tombstone으로 만들며, 같은 callback-free suffix에서 correlation을 absorbing `.terminal`,
+          semantic state를 terminal의 원래 reason과 `fd_disposition=.owner_cleanup`으로 publish한다. 그 canonical publication
+          이후에만 frozen payload를 empty로 먼저 옮긴 뒤 allocator-bearing `deinit`을 exact once 호출한다. callback이
+          storage lifecycle/incarnation/operation, correlation/semantic/completed/authority, terminal scratch proof,
+          parser seal 또는 TX generation으로 정의한 canonical cleanup projection을 바꾸면 callback 전 snapshot을 복원하고
+          quarantine하되 payload authority를 되살리거나 두 번 free하지 않는다. `cleaned_with_invariant`는 global quarantine
+          latch가 반드시 켜지고 frozen payload는 이미 exact once free되어 retained bytes가 0인 결과다. correlation generation은 정상적으로 `+1`
+          하며, 이미 `maxInt(u64)`이면 wrap하지 않고 같은 max generation에서 state/digest만 absorbing terminal로 바꾸는
+          one-way 예외를 쓴다. max terminal은 새 request/capability를 발급할 수 없으므로 ABA 재개가 없다. consumer 결과는
+          닫힌 `consumed_cleaned | invalid_precommit | cleaned_with_invariant`이고, precommit 실패는 owner move/free/state
+          mutation 0이다. 이 slice는 private prepare/validator/consumer와 component gate까지 소유하지만 제품 callsite는 0이다.
+          후속 f3d는 producer의 `terminal_prepared`를 binding prepare→consumer까지 callback-free로 즉시 잇고 closed
+          orchestration 결과 하나로 반환하는 단일 private leaf를 소유한다. 호출자는 세 단계를 따로 선택할 수 없으며 이 leaf가
+          consumer를 exact once 선택하고 binding 실패를 outer invariant teardown으로 닫는다. 새 cleanup leaf는 만들지 않는다.
+          2b2e-integration은 resync success candidate, f3c2는 typed success semantic take,
+          2b3은 실제 FD close adapter만 소유한다.
+          focused gate는 protocol/resource reason 보존과 decode 중 drift/coherent-reseal graph 0, generation max, non-pristine destination, completed/
+          correlation/parser/drain/authority/TX drift와 allocator reentry, terminal/take/destination one-field tamper,
+          copy/move/cross-storage/cross-lease/independent splice, replay/double consume, publish-before-free, exact-once free와
+          quarantine final-zero를 Debug/ReleaseFast로 검증한다. boundary gate는 private terminal prepare/consumer 선언 외
+          제품 호출 0과 새 decoder/payload owner/cleanup state machine 0을 고정한다. 전체 `test-session-host`,
+          `check-boundaries`, `mise run check`가 함께 green이기 전에는 이 binding이나 f3c1 전체를 완료로 표시하지 않는다.
           **f3c2 semantic take**는 2b2e-integration consumer와 resize commit을 같은 held lease/no-callback suffix에서 호출하고,
           duplicate-after-success와 max-ID success 뒤 같은 product storage의 다음 wire-zero
           `request_id_exhausted`를 고정한다. **f3d whole-turn orchestration**은 기존 `pumpRxTurn`의 단일 clock,

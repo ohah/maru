@@ -13,6 +13,7 @@ const builtin = @import("builtin");
 const maru = @import("maru");
 const git_command = maru.session.git_command;
 const git_locate = maru.session.git_locate;
+const dock_panel = maru.session.dock_panel;
 
 /// git 실행 파일 경로를 찾는다. **없으면 null** — 호출자는 그 사실을 화면에 말하고 실행을 시도하지 않는다.
 /// 후보 순서는 `git_locate`(순수)가 정하고, 여기서는 존재·실행권만 본다.
@@ -95,10 +96,13 @@ const State = struct {
     shutting_down: bool = false,
     inflight: usize = 0,
     result: ?Result = null,
+    diff_inflight: usize = 0,
+    diff_result: ?DiffResult = null,
 
     fn release(self: *State) void {
         if (self.refs.fetchSub(1, .acq_rel) != 1) return;
         if (self.result) |*r| r.deinit(self.allocator);
+        if (self.diff_result) |*r| r.deinit(self.allocator);
         const allocator = self.allocator;
         allocator.destroy(self);
     }
@@ -110,6 +114,27 @@ const Job = struct {
     git_exe: []u8,
     repo: []u8,
     request_id: u64,
+    /// diff 작업이면 읽을 대상(저장소 루트 기준 상대경로 + 비교 기준). 목록 갱신 작업이면 null이다.
+    diff: ?DiffTarget = null,
+
+    const DiffTarget = struct {
+        rel_path: []u8,
+        base: dock_panel.DiffBase,
+    };
+};
+
+/// diff 본문 두 쪽. 목록 결과(`Result`)와 슬롯을 나눠 갖는다 — 목록 갱신과 본문 열기가 서로를 취소하지 않게.
+pub const DiffResult = struct {
+    original: []u8 = &.{},
+    modified: []u8 = &.{},
+    ok: bool = false,
+    request_id: u64 = 0,
+
+    pub fn deinit(self: *DiffResult, allocator: std.mem.Allocator) void {
+        allocator.free(self.original);
+        allocator.free(self.modified);
+        self.* = .{};
+    }
 };
 
 pub const Backend = struct {
@@ -169,6 +194,66 @@ pub const Backend = struct {
         return true;
     }
 
+    /// diff 본문 두 쪽을 읽는다. 목록 갱신과 **다른 슬롯**을 쓰므로 목록을 새로 고치는 중에도 본문을 열 수 있다.
+    /// `rel_path`는 저장소 루트 기준 상대경로여야 한다(git `<rev>:<path>` 규약 — git_command.blobSpec).
+    pub fn submitDiff(
+        self: *Backend,
+        git_exe: []const u8,
+        repo: []const u8,
+        rel_path: []const u8,
+        base: dock_panel.DiffBase,
+        request_id: u64,
+    ) bool {
+        const state = self.state orelse return false;
+        state.mutex.lockUncancelable(state.io);
+        if (state.shutting_down or state.diff_inflight >= max_inflight) {
+            state.mutex.unlock(state.io);
+            return false;
+        }
+        state.diff_inflight += 1;
+        _ = state.refs.fetchAdd(1, .monotonic);
+        state.mutex.unlock(state.io);
+
+        const job = state.allocator.create(Job) catch return self.abandonDiff();
+        job.* = .{ .state = state, .git_exe = &.{}, .repo = &.{}, .request_id = request_id, .diff = null };
+        job.git_exe = state.allocator.dupe(u8, git_exe) catch return self.releaseDiffJob(job);
+        job.repo = state.allocator.dupe(u8, repo) catch return self.releaseDiffJob(job);
+        const owned_path = state.allocator.dupe(u8, rel_path) catch return self.releaseDiffJob(job);
+        job.diff = .{ .rel_path = owned_path, .base = base };
+        const thread = std.Thread.spawn(.{}, diffWorker, .{job}) catch return self.releaseDiffJob(job);
+        thread.detach();
+        return true;
+    }
+
+    /// 부분 구성된 diff job을 되돌린다(할당 실패 경로 단일화 — 어느 단계에서 실패해도 같은 정리).
+    fn releaseDiffJob(self: *Backend, job: *Job) bool {
+        const state = job.state;
+        if (job.diff) |d| state.allocator.free(d.rel_path);
+        if (job.repo.len > 0) state.allocator.free(job.repo);
+        if (job.git_exe.len > 0) state.allocator.free(job.git_exe);
+        state.allocator.destroy(job);
+        return self.abandonDiff();
+    }
+
+    fn abandonDiff(self: *Backend) bool {
+        const state = self.state orelse return false;
+        state.mutex.lockUncancelable(state.io);
+        state.diff_inflight -= 1;
+        state.mutex.unlock(state.io);
+        state.release();
+        return false;
+    }
+
+    /// 완료된 diff 본문의 소유권을 넘긴다. frame tick에서 불러도 syscall이 없다.
+    pub fn takeDiffResult(self: *Backend) ?DiffResult {
+        const state = self.state orelse return null;
+        state.mutex.lockUncancelable(state.io);
+        defer state.mutex.unlock(state.io);
+        const result = state.diff_result orelse return null;
+        state.diff_result = null;
+        return result;
+    }
+
     fn abandon(self: *Backend) bool {
         const state = self.state orelse return false;
         state.mutex.lockUncancelable(state.io);
@@ -188,6 +273,72 @@ pub const Backend = struct {
         return result;
     }
 };
+
+/// 비교 기준에 따라 두 쪽을 모은다(docs/editor-surface.md §3.5 표).
+///   staged   : `HEAD:<path>` ↔ `:<path>`   (커밋된 것 ↔ 스테이지된 것)
+///   unstaged : `:<path>`     ↔ 작업트리 파일 (스테이지된 것 ↔ 지금 파일)
+///   untracked: 없음          ↔ 작업트리 파일 (비교 대상이 없다 — 왼쪽은 빈 문서)
+fn diffWorker(job: *Job) void {
+    const state = job.state;
+    const target = job.diff.?;
+    var result: DiffResult = .{ .request_id = job.request_id };
+    var ok = true;
+
+    // untracked는 **비교 대상 자체가 없다** — 왼쪽을 읽지 않는다. 읽으려 들면 그 파일이 우연히 index에 있을 때
+    // (같은 경로가 추적 중인 경우) 엉뚱한 내용이 왼쪽에 실린다(테스트가 실제로 잡았다).
+    if (target.base != .untracked) {
+        if (blobSide(state.allocator, job, if (target.base == .staged) .head else .index)) |bytes| {
+            result.original = bytes;
+        } else |_| {
+            ok = false;
+        }
+    }
+    if (ok) {
+        if (target.base == .staged) {
+            if (blobSide(state.allocator, job, .index)) |bytes| result.modified = bytes else |_| {
+                ok = false;
+            }
+        } else if (worktreeSide(state.allocator, job.repo, target.rel_path)) |bytes| {
+            result.modified = bytes;
+        } else |_| {
+            ok = false;
+        }
+    }
+    result.ok = ok;
+
+    state.allocator.free(target.rel_path);
+    state.allocator.free(job.git_exe);
+    state.allocator.free(job.repo);
+    state.allocator.destroy(job);
+
+    state.mutex.lockUncancelable(state.io);
+    // 실패도 결과로 싣는다 — 안 실으면 호출자의 in-flight가 안 풀려 화면이 "여는 중"에 고착된다(목록에서 겪은 결함).
+    if (!state.shutting_down and state.diff_result == null) {
+        state.diff_result = result;
+    } else {
+        result.deinit(state.allocator);
+    }
+    state.diff_inflight -= 1;
+    state.mutex.unlock(state.io);
+    state.release();
+}
+
+fn blobSide(allocator: std.mem.Allocator, job: *Job, side: git_command.BlobSide) ![]u8 {
+    var spec_buf: [std.fs.max_path_bytes + 8]u8 = undefined;
+    const spec = git_command.blobSpec(side, job.diff.?.rel_path, &spec_buf) orelse return error.PathTooLong;
+    const out = try runWithArg(allocator, .show_blob, job.git_exe, job.repo, spec);
+    return out.bytes;
+}
+
+/// 작업트리 파일은 git을 거치지 않고 그대로 읽는다 — 같은 바이트이고 프로세스를 하나 덜 띄운다.
+fn worktreeSide(allocator: std.mem.Allocator, repo: []const u8, rel_path: []const u8) ![]u8 {
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = std.fmt.bufPrintZ(&path_buf, "{s}/{s}", .{ repo, rel_path }) catch return error.PathTooLong;
+    const fd = std.c.open(path.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true });
+    if (fd < 0) return error.OpenFailed;
+    defer _ = std.c.close(fd);
+    return readAllFd(allocator, fd);
+}
 
 fn worker(job: *Job) void {
     const state = job.state;
@@ -229,8 +380,18 @@ fn worker(job: *Job) void {
 const Output = struct { bytes: []u8, truncated: bool };
 
 fn run(allocator: std.mem.Allocator, kind: git_command.Kind, git_exe: []const u8, repo: []const u8) !Output {
+    return runWithArg(allocator, kind, git_exe, repo, null);
+}
+
+fn runWithArg(
+    allocator: std.mem.Allocator,
+    kind: git_command.Kind,
+    git_exe: []const u8,
+    repo: []const u8,
+    arg: ?[]const u8,
+) !Output {
     var argv_buf: [git_command.max_argv][]const u8 = undefined;
-    const argv_slices = git_command.build(kind, git_exe, repo, null, &argv_buf);
+    const argv_slices = git_command.build(kind, git_exe, repo, arg, &argv_buf);
 
     // **posix fork+exec+pipe로 띄운다**(update_check.zig·ssh_upload.zig와 같은 결). `std.process.run`은 0.16에서
     // io 기반인데 앱 Io가 `init_single_threaded`(할당기 없음·동시성 미지원)라 그 자리에서 OutOfMemory로 실패한다 —
@@ -398,4 +559,60 @@ test "실제 저장소를 읽어 세 출력을 채운다(end-to-end)" {
         _ = std.c.nanosleep(&ts, null);
     }
     return error.GitReadNeverCompleted;
+}
+
+test "diff 본문을 기준별로 읽는다(end-to-end)" {
+    // 목록과 달리 본문은 "무엇과 무엇을 비교하는가"가 기준마다 다르다. 실제 저장소·실제 git으로 세 기준을 전부
+    // 태워 그 대응을 고정한다(fake로는 `HEAD:` 와 `:` 의 차이가 검증되지 않는다).
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const exe = locate(&exe_buf) orelse return error.SkipZigTest;
+    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_ptr = std.c.getcwd(&repo_buf, repo_buf.len) orelse return error.NoCwd;
+    const repo = std.mem.span(@as([*:0]u8, @ptrCast(cwd_ptr)));
+
+    var backend = try Backend.init(testing.allocator, std.Io.Threaded.global_single_threaded.io());
+    defer backend.deinit();
+
+    // 커밋돼 있는 파일이라 `HEAD:` 와 작업트리 양쪽에서 읽힌다. 내용 자체가 아니라 **비지 않았는지**를 본다
+    // (내용을 고정하면 이 파일을 고칠 때마다 테스트가 깨진다).
+    try testing.expect(backend.submitDiff(exe, repo, "build.zig", .staged, 1));
+    const staged = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
+    var staged_result = staged;
+    defer staged_result.deinit(testing.allocator);
+    try testing.expect(staged_result.ok);
+    try testing.expect(staged_result.original.len > 0); // HEAD:build.zig
+    try testing.expect(staged_result.modified.len > 0); // :build.zig(index)
+
+    try testing.expect(backend.submitDiff(exe, repo, "build.zig", .unstaged, 2));
+    const unstaged = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
+    var unstaged_result = unstaged;
+    defer unstaged_result.deinit(testing.allocator);
+    try testing.expect(unstaged_result.ok);
+    try testing.expect(unstaged_result.modified.len > 0); // 작업트리 파일(git을 안 거친다)
+
+    // untracked는 왼쪽이 **없는 것이 정상**이다 — 실패로 접지 않는다.
+    try testing.expect(backend.submitDiff(exe, repo, "build.zig", .untracked, 3));
+    const untracked = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
+    var untracked_result = untracked;
+    defer untracked_result.deinit(testing.allocator);
+    try testing.expect(untracked_result.ok);
+    try testing.expectEqual(@as(usize, 0), untracked_result.original.len);
+    try testing.expect(untracked_result.modified.len > 0);
+
+    // 없는 경로는 실패를 **결과로** 싣는다(in-flight가 풀려야 화면이 "여는 중"에 안 갇힌다).
+    try testing.expect(backend.submitDiff(exe, repo, "no/such/file.txt", .staged, 4));
+    const missing = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
+    var missing_result = missing;
+    defer missing_result.deinit(testing.allocator);
+    try testing.expect(!missing_result.ok);
+}
+
+fn waitForDiff(backend: *Backend) ?DiffResult {
+    var spins: usize = 0;
+    while (spins < 1000) : (spins += 1) {
+        if (backend.takeDiffResult()) |result| return result;
+        var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, null);
+    }
+    return null;
 }

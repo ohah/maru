@@ -298,6 +298,12 @@ export function requestFileBridge(
 ): Promise<BridgeResult>;
 export function requestFileBridge(
   document: Document,
+  method: "diffOpen",
+  value?: undefined,
+  timeoutMs?: number,
+): Promise<BridgeResult>;
+export function requestFileBridge(
+  document: Document,
   method: "write",
   value: WriteRequest,
   timeoutMs?: number,
@@ -353,6 +359,9 @@ export function requestFileBridge(
         request = { method, path: value };
         break;
       case "readSelfImage":
+        request = { method };
+        break;
+      case "diffOpen":
         request = { method };
         break;
       case "write":

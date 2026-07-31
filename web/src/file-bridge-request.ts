@@ -41,7 +41,9 @@ export type FileBridgeRequest =
   | ({ method: "openLink" } & OpenLinkRequest)
   | ({ method: "renderMermaid" } & RenderMermaidRequest)
   | ({ method: "revokeMermaid" } & RevokeMermaidRequest)
-  | { method: "rendererReady"; editor_epoch: number };
+  | { method: "rendererReady"; editor_epoch: number }
+  // E1 diff 본문. **인자가 없다** — 무엇을 비교할지는 그 Term의 entry가 정한다(docs/editor-surface.md §6).
+  | { method: "diffOpen" };
 
 export type FileMethod = FileBridgeRequest["method"];
 
@@ -54,6 +56,8 @@ export function encodeFileBridgeRequest(request: FileBridgeRequest): Record<stri
     case "readAsset":
       return { method: request.method, path: request.path };
     case "readSelfImage":
+      return { method: request.method };
+    case "diffOpen":
       return { method: request.method };
     case "write":
       return {

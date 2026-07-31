@@ -178,6 +178,21 @@ pub const Entry = struct {
     /// dirty/pending document를 잃은 WebContent reload는 disk hydration으로 clean을 추정할 수 없다. 명시적 복구 UX가
     /// 생길 때까지 save/clean ACK/eviction/mutation을 fail-close하는 catastrophic recovery latch다.
     editor_recovery_required: bool = false,
+    /// diff entry 전용. 어느 기준으로 비교하는지 — 유일성 키의 일부이고(§3.5) 읽을 blob도 이 값이 정한다.
+    /// diff가 아닌 kind에서는 의미가 없다(`.unstaged` 기본값을 읽지 않는다).
+    diff_base: DiffBase = .unstaged,
+    /// diff entry 전용. 저장소 루트 기준 상대경로 — `git show <rev>:<path>`가 그 형태를 요구한다. entry의 `path`는
+    /// 절대경로라 그대로 못 쓴다. 소유는 entry에 있고 `path`와 같은 시점에 해제된다.
+    diff_rel_path: []u8 = &.{},
+    /// 백엔드가 읽어 온 두 쪽. `diff_ready` 전에는 비어 있고, 브리지는 그 상태를 pending으로 답한다 —
+    /// 빈 문서를 정상 결과로 주면 화면이 "변경 없음"을 보여 준다.
+    diff_original: []u8 = &.{},
+    diff_modified: []u8 = &.{},
+    diff_ready: bool = false,
+    /// 읽기가 실패했다(경로가 사라졌거나 conflict 등). 다시 열기 전까지 이 상태를 유지한다.
+    diff_failed: bool = false,
+    /// 이 entry가 건 읽기 요청. 늦게 도착한 옛 결과가 새 내용을 덮지 않게 한다.
+    diff_request_id: u64 = 0,
     /// 마지막 성공 Markdown read/save의 디스크 content token. 저장 직전 같은 inode의 in-place 외부 변경도 감지한다.
     disk_content_hash: u64 = 0,
     disk_content_hash_valid: bool = false,

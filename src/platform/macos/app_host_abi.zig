@@ -1167,6 +1167,8 @@ pub export fn maru_macos_app_session_file_panel_shell_kind(
     const info = app_session.filePanelEntryInfo(surface_id) orelse return 0;
     const token = switch (info.kind) {
         .svg => "svg",
+        // E1: diff는 같은 신뢰 shell을 쓰지만 편집 배관을 타지 않는다 — 웹이 이 힌트로 비교 화면을 띄운다.
+        .diff => "diff",
         else => return 0, // FP14b: image는 격리 문서라 신뢰 shell 힌트가 없다.
     };
     if (out_ptr) |p| p.* = token.ptr;
@@ -2300,6 +2302,12 @@ const FileBridgeContext = struct {
         return self.session.readFilePanel(gpa, self.surface_id, editor_epoch);
     }
 
+    /// E1 `diff.open`. null이면 아직 읽는 중이다(브리지가 pending으로 답한다).
+    fn diffOpen(raw: *anyopaque, gpa: std.mem.Allocator) anyerror!?maru.session.control_bridge.DiffSides {
+        const self: *FileBridgeContext = @ptrCast(@alignCast(raw));
+        return self.session.diffSidesForSurface(gpa, self.surface_id);
+    }
+
     fn readAsset(raw: *anyopaque, gpa: std.mem.Allocator, path: []const u8) anyerror![]u8 {
         const self: *FileBridgeContext = @ptrCast(@alignCast(raw));
         return self.session.readFilePanelAsset(gpa, self.surface_id, path);
@@ -2379,6 +2387,7 @@ pub export fn maru_macos_app_session_bridge_dispatch(
         .context = &context,
         .begin_document_fn = FileBridgeContext.beginDocument,
         .read_fn = FileBridgeContext.read,
+        .diff_open_fn = FileBridgeContext.diffOpen,
         .read_asset_fn = FileBridgeContext.readAsset,
         .write_fn = FileBridgeContext.write,
         .set_dirty_fn = FileBridgeContext.setDirty,

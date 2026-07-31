@@ -2693,7 +2693,7 @@ test "d2b3d live owner substrate stays private with one buffered product travers
         const mentions_owner =
             std.mem.indexOf(u8, source, "LivePartialBatch") != null or
             std.mem.indexOf(u8, source, "LiveScreenBacklog") != null or
-            std.mem.indexOf(u8, source, "PendingResponseOwner") != null;
+            std.mem.indexOf(u8, source, "CompletedControlOwner") != null;
         if (!mentions_owner) continue;
         try std.testing.expect(std.mem.eql(
             u8,
@@ -2708,13 +2708,13 @@ test "d2b3d live owner substrate stays private with one buffered product travers
             std.mem.indexOf(u8, source, "pub const LiveScreenBacklog") == null,
         );
         try std.testing.expect(
-            std.mem.indexOf(u8, source, "pub const PendingResponseOwner") == null,
+            std.mem.indexOf(u8, source, "pub const CompletedControlOwner") == null,
         );
         inline for (.{
             "pub fn publishLivePartial",
             "pub fn publishLiveScreen",
-            "pub fn publishPendingResponse",
-            "pub fn takePendingResponse",
+            "pub fn publishCompletedControl",
+            "pub fn takeCompletedControl",
         }) |forbidden_writer|
             try std.testing.expect(
                 std.mem.indexOf(u8, source, forbidden_writer) == null,
@@ -2820,18 +2820,18 @@ test "d2b3d live owner substrate stays private with one buffered product travers
         );
         try std.testing.expectEqual(
             @as(usize, 1),
-            std.mem.count(u8, source, "storage.pending_response = .{ .pending"),
+            std.mem.count(u8, source, "storage.completed_control = .{ .completed"),
         );
         try std.testing.expectEqual(
             @as(usize, 1),
-            std.mem.count(u8, source, "target.* = .{ .pending"),
+            std.mem.count(u8, source, "target.* = .{ .completed"),
         );
         try std.testing.expectEqual(
             @as(usize, 1),
             std.mem.count(
                 u8,
                 activation_source,
-                "storage.pending_response = .{ .pending",
+                "storage.completed_control = .{ .completed",
             ),
         );
         try std.testing.expectEqual(
@@ -2924,7 +2924,7 @@ test "d2b3d live owner substrate stays private with one buffered product travers
         );
         try std.testing.expectEqual(
             @as(usize, 0),
-            std.mem.count(u8, source, "self.pending_response = .{ .pending"),
+            std.mem.count(u8, source, "self.completed_control = .{ .completed"),
         );
         // Count every canonical raw LHS, not only active literals. `zig fmt --check` makes these
         // spellings stable; a helper-return assignment such as `self.live_partial = next` or an
@@ -2938,8 +2938,8 @@ test "d2b3d live owner substrate stays private with one buffered product travers
             std.mem.count(u8, source, "self.live_screen ="),
         );
         try std.testing.expectEqual(
-            @as(usize, 6),
-            std.mem.count(u8, source, "self.pending_response ="),
+            @as(usize, 7),
+            std.mem.count(u8, source, "self.completed_control ="),
         );
         try std.testing.expectEqual(
             @as(usize, 1),
@@ -2947,7 +2947,7 @@ test "d2b3d live owner substrate stays private with one buffered product travers
         );
         try std.testing.expectEqual(
             @as(usize, 1),
-            std.mem.count(u8, source, "self.pending_response == .none"),
+            std.mem.count(u8, source, "self.completed_control == .none"),
         );
         try std.testing.expectEqual(
             @as(usize, 1),
@@ -2959,7 +2959,7 @@ test "d2b3d live owner substrate stays private with one buffered product travers
         );
         try std.testing.expectEqual(
             @as(usize, 2),
-            std.mem.count(u8, product_source, "storage.pending_response ="),
+            std.mem.count(u8, product_source, "storage.completed_control ="),
         );
         try std.testing.expectEqual(
             @as(usize, 4),
@@ -2983,11 +2983,11 @@ test "d2b3d live owner substrate stays private with one buffered product travers
         );
         try std.testing.expectEqual(
             @as(usize, 4),
-            std.mem.count(u8, source, "self.pending_response = .terminal"),
+            std.mem.count(u8, source, "self.completed_control = .terminal"),
         );
         try std.testing.expectEqual(
-            @as(usize, 1),
-            std.mem.count(u8, source, "self.pending_response = .none"),
+            @as(usize, 2),
+            std.mem.count(u8, source, "self.completed_control = .none"),
         );
         // Whole-owner pointer aliases could otherwise hide `owner.* = active`; keep every
         // address-taking spelling bounded as well. Nested payload borrows are not whole owners.
@@ -3001,7 +3001,7 @@ test "d2b3d live owner substrate stays private with one buffered product travers
         );
         try std.testing.expectEqual(
             @as(usize, 0),
-            std.mem.count(u8, source, "&self.pending_response"),
+            std.mem.count(u8, source, "&self.completed_control"),
         );
         try std.testing.expectEqual(
             @as(usize, 1),
@@ -3015,7 +3015,7 @@ test "d2b3d live owner substrate stays private with one buffered product travers
             // The product writer is the only pre-test whole-owner address borrow. Hostile
             // fixtures may inspect a local storage owner without opening another product writer.
             @as(usize, 1),
-            std.mem.count(u8, product_source, "&storage.pending_response"),
+            std.mem.count(u8, product_source, "&storage.completed_control"),
         );
         try std.testing.expectEqual(
             @as(usize, 0),
@@ -3027,7 +3027,7 @@ test "d2b3d live owner substrate stays private with one buffered product travers
         );
         try std.testing.expectEqual(
             @as(usize, 0),
-            std.mem.count(u8, source, "@field(self, \"pending_response\")"),
+            std.mem.count(u8, source, "@field(self, \"completed_control\")"),
         );
     }
     try std.testing.expectEqual(@as(usize, 1), owner_module_count);

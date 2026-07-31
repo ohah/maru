@@ -51,6 +51,17 @@ export type SideProbe = {
   gutter_markers: number;
   /** non-zero layout으로 실제 표시되는가(§7.4 첫 항목). jsdom은 0이라 제품 WKWebView에서만 참이 된다. */
   layout: { width: number; height: number };
+  /** 스크롤 상자의 보이는 크기와 전체 크기. `scroll_* > client_*`면 실제로 스크롤이 가능한 상태다. */
+  scroll: {
+    client_height: number;
+    scroll_height: number;
+    client_width?: number;
+    scroll_width?: number;
+  };
+  /** 줄 번호 gutter 요소 수(0이면 줄 번호가 없다). */
+  line_number_elements: number;
+  /** 높이 사슬 진단(편집기 → 조상): `클래스:높이:배치:계산된높이`. 레이아웃이 깨지면 어디서 끊겼는지 여기서 본다. */
+  chain: string[];
 };
 
 export type DiffProbe = {

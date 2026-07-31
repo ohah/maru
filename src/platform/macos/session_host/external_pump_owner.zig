@@ -742,8 +742,9 @@ test "d2c product owner maps readiness to POSIX RX before any writable work" {
         client_external_pump.testing.clearInitialFence(&storage),
     );
     storage.semantic_state = .{ .active = .{ .host_recovery = .{
-        .awaiting_snapshot = .{
+        .snapshot_in_flight = .{
             .context = .{ .epoch = 5, .deadline_ns = 30 },
+            .recovery_barrier_absolute = 1,
             .expected_token_generation = 9,
         },
     } } };

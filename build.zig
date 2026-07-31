@@ -2029,6 +2029,106 @@ pub fn build(b: *std.Build) void {
         session_host_f3c0_step.dependOn(&run_session_host_f3c0_codec_sentinel.step);
         session_host_f3c0_step.dependOn(&run_session_host_f3c0_remote_sentinel.step);
 
+        const recovery_contract_types_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/external_recovery_types.zig",
+                ),
+                .target = target,
+                .optimize = optimize,
+            }),
+            .filters = &.{"recovery integration contract"},
+        });
+        const run_recovery_contract_types_tests = b.addRunArtifact(
+            recovery_contract_types_tests,
+        );
+        const recovery_contract_pump_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/client_pump.zig",
+                ),
+                .target = target,
+                .optimize = optimize,
+            }),
+            .filters = &.{"recovery integration contract"},
+        });
+        const run_recovery_contract_pump_tests = b.addRunArtifact(
+            recovery_contract_pump_tests,
+        );
+        const recovery_contract_external_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/client_external_pump.zig",
+                ),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"recovery integration contract"},
+        });
+        const run_recovery_contract_external_tests = b.addRunArtifact(
+            recovery_contract_external_tests,
+        );
+        const recovery_contract_external_sentinel = b.addExecutable(.{
+            .name = "maru-session-host-recovery-external-sentinel",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "tests/session_host_recovery_external_sentinel.zig",
+                ),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{
+                    .name = "client_external_pump",
+                    .module = recovery_contract_external_tests.root_module,
+                }},
+            }),
+        });
+        const run_recovery_contract_external_sentinel = b.addRunArtifact(
+            recovery_contract_external_sentinel,
+        );
+        const recovery_contract_pump_module = b.createModule(.{
+            .root_source_file = b.path(
+                "src/platform/macos/session_host/client_pump.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+        });
+        const recovery_contract_sentinel = b.addExecutable(.{
+            .name = "maru-session-host-recovery-contract-sentinel",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "tests/session_host_recovery_contract_sentinel.zig",
+                ),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "client_pump", .module = recovery_contract_pump_module }},
+            }),
+        });
+        const run_recovery_contract_sentinel = b.addRunArtifact(
+            recovery_contract_sentinel,
+        );
+        const session_host_recovery_contract_step = b.step(
+            "test-session-host-recovery-contract",
+            "Run the non-empty recovery authority and ledger-token binding gate",
+        );
+        session_host_recovery_contract_step.dependOn(
+            &run_recovery_contract_types_tests.step,
+        );
+        session_host_recovery_contract_step.dependOn(
+            &run_recovery_contract_pump_tests.step,
+        );
+        session_host_recovery_contract_step.dependOn(
+            &run_recovery_contract_external_tests.step,
+        );
+        session_host_recovery_contract_step.dependOn(
+            &run_recovery_contract_external_sentinel.step,
+        );
+        session_host_recovery_contract_step.dependOn(
+            &run_recovery_contract_sentinel.step,
+        );
+
         // Buffered traversal fixtures stay outside the product barrel so test-only authority and
         // hostile allocators cannot become reachable from the shipped session-host module graph.
         const external_rx_turn_tests = b.addTest(.{

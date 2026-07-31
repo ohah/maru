@@ -53,6 +53,21 @@ pub const Key = struct {
     }
 };
 
+/// Correlation authority available before a recovery snapshot owns a ledger token.
+///
+/// `expected_token_generation` deliberately does not belong here: only `borrowLease` can derive
+/// that value from an actually committed token. Control admission must never predict the ledger's
+/// future generation.
+pub const ControlAuthority = struct {
+    owner_incarnation: u64,
+    origin: Origin,
+    recovery_epoch: u64,
+
+    pub fn isCanonical(self: ControlAuthority) bool {
+        return self.owner_incarnation != 0 and self.recovery_epoch != 0;
+    }
+};
+
 pub const MarkResult = enum {
     commit_pending,
     stale_invariant,
@@ -88,6 +103,18 @@ test "recovery intent projects only canonical incarnation-bound keys" {
     try std.testing.expectEqual(@as(u64, 7), host.owner_incarnation);
     try std.testing.expectEqual(@as(u64, 3), host.recovery_epoch);
     try std.testing.expectEqual(@as(u64, 9), host.expected_token_generation);
+}
+
+test "recovery integration contract excludes the future ledger token generation" {
+    const authority = ControlAuthority{
+        .owner_incarnation = 7,
+        .origin = .client,
+        .recovery_epoch = 3,
+    };
+    try std.testing.expect(authority.isCanonical());
+    try std.testing.expectEqual(@as(u64, 7), authority.owner_incarnation);
+    try std.testing.expectEqual(Origin.client, authority.origin);
+    try std.testing.expectEqual(@as(u64, 3), authority.recovery_epoch);
 }
 
 test "copied key cannot cross owner incarnation or semantic authority" {

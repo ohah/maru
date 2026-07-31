@@ -10806,10 +10806,11 @@ pub const ExternalPumpStorage = struct {
                 .resync => switch (active) {
                     .client_recovery => |phase| switch (phase) {
                         .control_wait => |context| {
-                            const key = spec.request.resync.recovery_key;
-                            if (key.owner_incarnation != self.owner_incarnation or
-                                key.origin != .client or
-                                key.recovery_epoch != context.epoch)
+                            const recovery_authority =
+                                spec.request.resync.recovery_authority;
+                            if (recovery_authority.owner_incarnation != self.owner_incarnation or
+                                recovery_authority.origin != .client or
+                                recovery_authority.recovery_epoch != context.epoch)
                             {
                                 terminal_reason = .protocol_error;
                                 break :control;
@@ -15170,7 +15171,7 @@ pub const ExternalPumpStorage = struct {
             return .stale_invariant;
         return switch (active) {
             .host_recovery => |phase| switch (phase) {
-                .awaiting_snapshot => |waiting| if (key.origin == .host and
+                .snapshot_in_flight => |waiting| if (key.origin == .host and
                     key.recovery_epoch == waiting.context.epoch and
                     key.expected_token_generation ==
                         waiting.expected_token_generation)
@@ -15180,7 +15181,7 @@ pub const ExternalPumpStorage = struct {
                 else => .stale_invariant,
             },
             .client_recovery => |phase| switch (phase) {
-                .awaiting_snapshot => |waiting| if (key.origin == .client and
+                .snapshot_in_flight => |waiting| if (key.origin == .client and
                     key.recovery_epoch == waiting.context.epoch and
                     key.expected_token_generation ==
                         waiting.expected_token_generation)
@@ -15213,7 +15214,7 @@ pub const ExternalPumpStorage = struct {
         const next: client_pump.AuthorityState = switch (self.semantic_state) {
             .active => |active| switch (active) {
                 .host_recovery => |phase| switch (phase) {
-                    .awaiting_snapshot => |waiting| blk: {
+                    .snapshot_in_flight => |waiting| blk: {
                         if (key.origin != .host or
                             key.recovery_epoch != waiting.context.epoch or
                             key.expected_token_generation !=
@@ -15226,7 +15227,7 @@ pub const ExternalPumpStorage = struct {
                     else => return self.latchRecoveryInvariantTerminal(),
                 },
                 .client_recovery => |phase| switch (phase) {
-                    .awaiting_snapshot => |waiting| blk: {
+                    .snapshot_in_flight => |waiting| blk: {
                         if (key.origin != .client or
                             key.recovery_epoch != waiting.context.epoch or
                             key.expected_token_generation !=
@@ -15270,6 +15271,10 @@ pub const ExternalPumpStorage = struct {
                         .immediate = false,
                         .next_deadline_ns = waiting.context.deadline_ns,
                     },
+                    .snapshot_in_flight => |in_flight| .{
+                        .immediate = false,
+                        .next_deadline_ns = in_flight.context.deadline_ns,
+                    },
                     .applied_pending => |waiting| .{
                         .immediate = true,
                         .next_deadline_ns = waiting.context.deadline_ns,
@@ -15287,6 +15292,10 @@ pub const ExternalPumpStorage = struct {
                     .awaiting_snapshot => |waiting| .{
                         .immediate = false,
                         .next_deadline_ns = waiting.context.deadline_ns,
+                    },
+                    .snapshot_in_flight => |in_flight| .{
+                        .immediate = false,
+                        .next_deadline_ns = in_flight.context.deadline_ns,
                     },
                     .applied_pending => |waiting| .{
                         .immediate = true,
@@ -21766,11 +21775,10 @@ test "f3c0 typed control admission atomically publishes expectation and request 
     try std.testing.expect(storage.admitControl(.{
         .request = .{ .resync = .{
             .stream_id = valid_evidence.stream_id,
-            .recovery_key = .{
+            .recovery_authority = .{
                 .owner_incarnation = storage.owner_incarnation,
                 .origin = .client,
                 .recovery_epoch = 1,
-                .expected_token_generation = 1,
             },
         } },
         .expected_controller_generation = valid_evidence.initial_controller_generation,
@@ -21877,7 +21885,7 @@ fn pumpF3bBufferedRevoke(
     );
 }
 
-test "f3c0 typed resync admission seals the local recovery key without serializing it" {
+test "f3c0 recovery integration contract control admission never predicts a ledger token generation" {
     var fixture = try TestClient.init();
     defer fixture.deinitPeer();
     var storage: ExternalPumpStorage = .{};
@@ -21888,16 +21896,15 @@ test "f3c0 typed resync admission seals the local recovery key without serializi
     storage.semantic_state = .{ .active = .{ .client_recovery = .{
         .control_wait = .{ .epoch = 9, .deadline_ns = 1000 },
     } } };
-    const key = client_pump.RecoveryKey{
+    const recovery_authority = external_recovery_types.ControlAuthority{
         .owner_incarnation = storage.owner_incarnation,
         .origin = .client,
         .recovery_epoch = 9,
-        .expected_token_generation = 11,
     };
     const admitted = storage.admitControl(.{
         .request = .{ .resync = .{
             .stream_id = valid_evidence.stream_id,
-            .recovery_key = key,
+            .recovery_authority = recovery_authority,
         } },
         .expected_controller_generation = valid_evidence.initial_controller_generation,
     }, 100);
@@ -21907,7 +21914,10 @@ test "f3c0 typed resync admission seals the local recovery key without serializi
     };
     const correlation = storage.control_correlation.state.in_flight;
     try std.testing.expectEqual(client_pump.ControlKind.resync, correlation.kind);
-    try std.testing.expect(std.meta.eql(key, correlation.expectation.resync));
+    try std.testing.expect(std.meta.eql(
+        recovery_authority,
+        correlation.expectation.resync,
+    ));
     const external = storage.owned_client.?.io_mode.external;
     try std.testing.expectEqual(@as(usize, 1), external.external_tx.items.len);
     const queued = external.external_tx.items[0].bytes;
@@ -21931,11 +21941,10 @@ test "f3c0 resync admission rejects a foreign recovery epoch before wire publica
     const result = storage.admitControl(.{
         .request = .{ .resync = .{
             .stream_id = valid_evidence.stream_id,
-            .recovery_key = .{
+            .recovery_authority = .{
                 .owner_incarnation = storage.owner_incarnation,
                 .origin = .client,
                 .recovery_epoch = 10,
-                .expected_token_generation = 11,
             },
         } },
         .expected_controller_generation = valid_evidence.initial_controller_generation,
@@ -29303,12 +29312,14 @@ fn recoveryCoreStorage(
         .lifecycle = .live,
         .saved_self_addr = @intFromPtr(storage),
         .semantic_state = .{ .active = switch (origin) {
-            .host => .{ .host_recovery = .{ .awaiting_snapshot = .{
+            .host => .{ .host_recovery = .{ .snapshot_in_flight = .{
                 .context = .{ .epoch = epoch, .deadline_ns = deadline_ns },
+                .recovery_barrier_absolute = 1,
                 .expected_token_generation = token_generation,
             } } },
-            .client => .{ .client_recovery = .{ .awaiting_snapshot = .{
+            .client => .{ .client_recovery = .{ .snapshot_in_flight = .{
                 .context = .{ .epoch = epoch, .deadline_ns = deadline_ns },
+                .recovery_barrier_absolute = 1,
                 .expected_token_generation = token_generation,
             } } },
         } },

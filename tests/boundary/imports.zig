@@ -3444,6 +3444,66 @@ test "f3c0 control wire is the typed product codec without drain capability" {
     try std.testing.expect(std.mem.indexOf(u8, pump, "const ConsumeResyncAckUnderHeldLeaseFn") != null);
 }
 
+test "recovery integration contract keeps future ledger generation out of control authority" {
+    const allocator = std.testing.allocator;
+    const recovery_types = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/external_recovery_types.zig",
+    );
+    defer allocator.free(recovery_types);
+    const codec = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/control_response_wire.zig",
+    );
+    defer allocator.free(codec);
+    const policy = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/client_pump.zig",
+    );
+    defer allocator.free(policy);
+    const pump = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/client_external_pump.zig",
+    );
+    defer allocator.free(pump);
+
+    const authority = betweenMarkers(
+        recovery_types,
+        "pub const ControlAuthority = struct {",
+        "pub const MarkResult = enum {",
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.indexOf(u8, authority, "expected_token_generation") == null);
+    const request = betweenMarkers(
+        codec,
+        "pub const ResyncRequest = struct {",
+        "pub const WireRequest = union(enum) {",
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.indexOf(u8, request, "recovery_authority") != null);
+    try std.testing.expect(std.mem.indexOf(u8, request, "expected_token_generation") == null);
+    try std.testing.expect(std.mem.indexOf(u8, pump, "spec.request.resync.recovery_key") == null);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        std.mem.count(u8, pump, "test \"f3c0 recovery integration contract"),
+    );
+
+    const awaiting = betweenMarkers(
+        policy,
+        "pub const AwaitingSnapshot = struct {",
+        "pub const SnapshotInFlight = struct {",
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.indexOf(u8, awaiting, "recovery_barrier_absolute") != null);
+    try std.testing.expect(std.mem.indexOf(u8, awaiting, "expected_token_generation") == null);
+    const in_flight = betweenMarkers(
+        policy,
+        "pub const SnapshotInFlight = struct {",
+        "pub const HostRecoveryPhase = union(enum) {",
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.indexOf(u8, in_flight, "recovery_barrier_absolute") != null);
+    try std.testing.expect(std.mem.indexOf(u8, in_flight, "expected_token_generation") != null);
+    try std.testing.expect(std.mem.indexOf(u8, policy, "pub fn planRecoverySnapshotBinding(") != null);
+    try std.testing.expect(std.mem.count(u8, pump, ".snapshot_in_flight =>") >= 4);
+}
+
 fn containsForbiddenExternalBuiltin(source: [:0]const u8) bool {
     var tokenizer = std.zig.Tokenizer.init(source);
     while (true) {

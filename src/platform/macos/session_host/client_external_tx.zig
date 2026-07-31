@@ -178,6 +178,8 @@ pub const CancellationControl = struct {
 pub const CancellationSpec = struct {
     stream_id: u64,
     control: ?CancellationControl = null,
+    protected_payload_addr: usize = 0,
+    protected_payload_len: usize = 0,
 };
 
 pub const CancellationPrepareResult = enum {
@@ -547,6 +549,8 @@ fn cancellationSnapshotDigest(snapshot: *const CancellationSnapshot) ?external_o
         writer.writeU64(control.request_id);
         writer.writeUsize(control.wire_len);
     } else writer.writeU8(0);
+    writer.writeUsize(snapshot.spec.protected_payload_addr);
+    writer.writeUsize(snapshot.spec.protected_payload_len);
     writer.writeU64(snapshot.queue_generation);
     writer.writeUsize(snapshot.queue_address);
     writer.writeUsize(snapshot.queue_capacity);
@@ -635,6 +639,14 @@ fn ownerBindingDigest(binding: OwnerBinding) external_owner_seal.Digest {
 
 fn cancellationSpecCanonical(spec: CancellationSpec) bool {
     if (spec.stream_id == 0) return false;
+    if ((spec.protected_payload_addr == 0) !=
+        (spec.protected_payload_len == 0) or
+        spec.protected_payload_len > max_resident_bytes or
+        (spec.protected_payload_len != 0 and addressRange(
+            spec.protected_payload_addr,
+            spec.protected_payload_len,
+        ) == null))
+        return false;
     if (spec.control) |control|
         return control.request_id != 0 and control.wire_len >= protocol.header_size and
             control.wire_len <= max_resident_bytes;
@@ -1265,6 +1277,13 @@ pub fn prepareCancellationFromExternalPump(
     var control_matches: usize = 0;
     for (state.external_tx.items, 0..) |frame, index| {
         if (!cancellationFrameWireHeaderMatches(frame)) return .invalid;
+        if (spec.protected_payload_len != 0 and rangesOverlap(
+            sliceRange(frame.bytes) orelse return .invalid,
+            addressRange(
+                spec.protected_payload_addr,
+                spec.protected_payload_len,
+            ) orelse return .invalid,
+        )) return .invalid;
         candidate.frames[index] = .{
             .bytes_addr = @intFromPtr(frame.bytes.ptr),
             .bytes_len = frame.bytes.len,
@@ -1398,7 +1417,8 @@ pub fn abortPreparedCancellation(
     return true;
 }
 
-fn cancellationCommitReady(
+/// Revalidates an already-armed cancellation graph without mutating any owner.
+pub fn validateArmedCancellation(
     comptime validate_owner: OwnerValidator,
     owner_context: *const anyopaque,
     prepared: *PreparedTxCancellation,
@@ -1490,7 +1510,7 @@ pub fn consumePreparedCancellationUnderHeldLease(
     state: *client_external_mode.State,
     binding: OwnerBinding,
 ) bool {
-    if (!cancellationCommitReady(
+    if (!validateArmedCancellation(
         validate_owner,
         owner_context,
         prepared,
@@ -1504,6 +1524,162 @@ pub fn consumePreparedCancellationUnderHeldLease(
 }
 
 pub const CancellationCleanupResult = enum { cleaned, invalid, quarantined };
+
+const PostCancellationReceiptLifecycle = enum(u8) { empty, armed, consumed };
+
+const PostCancellationReceiptStorage = struct {
+    saved_self_addr: usize = 0,
+    state_addr: usize = 0,
+    prepared_addr: usize = 0,
+    permit_addr: usize = 0,
+    cleanup_addr: usize = 0,
+    queue_generation: u64 = 0,
+    queued_bytes: usize = 0,
+    queue_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    lifecycle: PostCancellationReceiptLifecycle = .empty,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+pub const PostCancellationReceipt = struct {
+    bytes: [@sizeOf(PostCancellationReceiptStorage)]u8 align(@alignOf(PostCancellationReceiptStorage)) =
+        [_]u8{0} ** @sizeOf(PostCancellationReceiptStorage),
+
+    fn storage(self: *PostCancellationReceipt) *PostCancellationReceiptStorage {
+        return @ptrCast(@alignCast(&self.bytes));
+    }
+
+    fn storageConst(self: *const PostCancellationReceipt) *const PostCancellationReceiptStorage {
+        return @ptrCast(@alignCast(&self.bytes));
+    }
+};
+
+fn postCancellationReceiptDigest(
+    receipt: *const PostCancellationReceiptStorage,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARUTXR1");
+    writer.writeUsize(receipt.saved_self_addr);
+    writer.writeUsize(receipt.state_addr);
+    writer.writeUsize(receipt.prepared_addr);
+    writer.writeUsize(receipt.permit_addr);
+    writer.writeUsize(receipt.cleanup_addr);
+    writer.writeU64(receipt.queue_generation);
+    writer.writeUsize(receipt.queued_bytes);
+    writer.writeBytes(&receipt.queue_digest);
+    writer.writeU64(@intFromEnum(receipt.lifecycle));
+    return writer.finish();
+}
+
+fn postCancellationReceiptAuthentic(
+    receipt: *const PostCancellationReceipt,
+    prepared: *const PreparedTxCancellation,
+    permit: *const TxCancellationCommitPermit,
+    cleanup: *const FrozenTxCancellationCleanup,
+    state: *const client_external_mode.State,
+) bool {
+    const storage = receipt.storageConst();
+    return storage.saved_self_addr == @intFromPtr(receipt) and
+        storage.state_addr == @intFromPtr(state) and
+        storage.prepared_addr == @intFromPtr(prepared) and
+        storage.permit_addr == @intFromPtr(permit) and
+        storage.cleanup_addr == @intFromPtr(cleanup) and
+        storage.lifecycle == .armed and
+        std.mem.eql(u8, &storage.digest, &postCancellationReceiptDigest(storage));
+}
+
+pub fn capturePostCancellationReceipt(
+    receipt: *PostCancellationReceipt,
+    prepared: *PreparedTxCancellation,
+    permit: *TxCancellationCommitPermit,
+    cleanup: *FrozenTxCancellationCleanup,
+    state: *const client_external_mode.State,
+) bool {
+    const storage = receipt.storage();
+    if (state.tx_lifecycle != .live or state.external_tx_retiring_bytes != 0 or
+        !std.mem.allEqual(u8, &prepared.bytes, 0) or
+        !std.mem.allEqual(u8, &permit.bytes, 0) or
+        !std.mem.allEqual(u8, &cleanup.bytes, 0))
+        return false;
+    // Complete the read-only owner proof before publishing a single receipt byte. In particular,
+    // a forged receipt pointer must not be able to overwrite live state, queue descriptors, a
+    // survivor allocation, or any of the final-address cancellation scratch owners.
+    const sealed_queue_digest = queueDigest(state) orelse return false;
+    const receipt_range = addressRange(
+        @intFromPtr(receipt),
+        @sizeOf(PostCancellationReceipt),
+    ) orelse return false;
+    const queue_backing_bytes = std.math.mul(
+        usize,
+        state.external_tx.capacity,
+        @sizeOf(client_external_mode.ExternalTxFrame),
+    ) catch return false;
+    const forbidden = [_]Range{
+        addressRange(@intFromPtr(state), @sizeOf(client_external_mode.State)) orelse return false,
+        addressRange(@intFromPtr(prepared), @sizeOf(PreparedTxCancellation)) orelse return false,
+        addressRange(@intFromPtr(permit), @sizeOf(TxCancellationCommitPermit)) orelse return false,
+        addressRange(@intFromPtr(cleanup), @sizeOf(FrozenTxCancellationCleanup)) orelse return false,
+        addressRange(@intFromPtr(state.external_tx.items.ptr), queue_backing_bytes) orelse return false,
+    };
+    for (forbidden) |owner_range|
+        if (rangesOverlap(receipt_range, owner_range)) return false;
+    for (state.external_tx.items) |frame|
+        if (rangesOverlap(
+            receipt_range,
+            sliceRange(frame.bytes) orelse return false,
+        )) return false;
+    if (!std.meta.eql(storage.*, PostCancellationReceiptStorage{})) return false;
+    storage.* = .{
+        .saved_self_addr = @intFromPtr(receipt),
+        .state_addr = @intFromPtr(state),
+        .prepared_addr = @intFromPtr(prepared),
+        .permit_addr = @intFromPtr(permit),
+        .cleanup_addr = @intFromPtr(cleanup),
+        .queue_generation = state.tx_queue_generation,
+        .queued_bytes = state.external_tx_bytes,
+        .queue_digest = sealed_queue_digest,
+        .lifecycle = .armed,
+    };
+    storage.digest = postCancellationReceiptDigest(storage);
+    return true;
+}
+
+pub const PostCancellationDisposition = enum { valid, quarantined, invalid };
+
+pub fn consumePostCancellationReceipt(
+    receipt: *PostCancellationReceipt,
+    prepared: *PreparedTxCancellation,
+    permit: *TxCancellationCommitPermit,
+    cleanup: *FrozenTxCancellationCleanup,
+    state: *client_external_mode.State,
+) PostCancellationDisposition {
+    if (!postCancellationReceiptAuthentic(
+        receipt,
+        prepared,
+        permit,
+        cleanup,
+        state,
+    )) return .invalid;
+    const storage = receipt.storage();
+    const current_queue_digest = queueDigest(state);
+    const queue_current = state.tx_lifecycle == .live and
+        state.external_tx_retiring_bytes == 0 and
+        state.tx_queue_generation == storage.queue_generation and
+        state.external_tx_bytes == storage.queued_bytes and
+        current_queue_digest != null and
+        std.mem.eql(u8, &storage.queue_digest, &current_queue_digest.?);
+    const scratch_pristine = std.mem.allEqual(u8, &prepared.bytes, 0) and
+        std.mem.allEqual(u8, &permit.bytes, 0) and
+        std.mem.allEqual(u8, &cleanup.bytes, 0);
+    storage.lifecycle = .consumed;
+    storage.digest = postCancellationReceiptDigest(storage);
+    if (queue_current and scratch_pristine) return .valid;
+    // The receipt was captured only from a validated bounded queue. Never trust a callback-mutated
+    // live counter when charging or deciding how much descriptor state to retain.
+    quarantineLiveQueue(state, storage.queued_bytes);
+    prepared.* = .{};
+    permit.* = .{};
+    cleanup.* = .{};
+    return .quarantined;
+}
 
 fn tombstoneCorruptCancellationCleanup(
     frozen: *CancellationCleanupStorage,
@@ -1641,26 +1817,54 @@ pub fn finishCancellationCleanup(
         !cancellationCleanupDescriptorsValid(frozen, state, binding, prepared, permit, cleanup) or
         !validate_owner(owner_context, binding))
         return tombstoneCorruptCancellationCleanup(frozen, state);
+    // Allocator free is an arbitrary callback boundary. Keep only a small sealed receipt on the
+    // worker stack; the 64-frame cleanup array remains in its final-address scratch. Revalidate
+    // that receipt before reading each next descriptor and after every callback.
+    const frozen_count = frozen.count;
+    const frozen_total = frozen.total_bytes;
+    const frozen_post_generation = frozen.post_queue_generation;
+    const frozen_post_bytes = frozen.post_queued_bytes;
+    const frozen_digest = frozen.digest;
+    const frozen_allocator = frozen.allocator;
     state.tx_lifecycle = .completion_callback;
-    var remaining = frozen.total_bytes;
-    for (frozen.frames[0..frozen.count], 0..) |frame, index| {
-        frozen.allocator.rawFree(frame.bytes, .@"1", @returnAddress());
+    var remaining = frozen_total;
+    for (0..frozen_count) |index| {
+        if (!std.mem.eql(u8, &frozen.digest, &frozen_digest)) {
+            client_external_mode.chargeTxQuarantine(state, remaining);
+            state.tx_lifecycle = .terminal_tombstone;
+            state.external_tx_retiring_bytes = 0;
+            prepared.* = .{};
+            permit.* = .{};
+            cleanup.* = .{};
+            return .quarantined;
+        }
+        const frame = frozen.frames[index];
+        frozen_allocator.rawFree(frame.bytes, .@"1", @returnAddress());
         remaining -= frame.bytes.len;
         const stable = state.tx_lifecycle == .completion_callback and
-            state.tx_queue_generation == frozen.post_queue_generation and
-            state.external_tx_bytes == frozen.post_queued_bytes and
-            state.external_tx_retiring_bytes == frozen.total_bytes and
+            state.tx_queue_generation == frozen_post_generation and
+            state.external_tx_bytes == frozen_post_bytes and
+            state.external_tx_retiring_bytes == frozen_total and
+            cancellationCleanupAuthority(
+                prepared,
+                permit,
+                cleanup,
+                state,
+                binding,
+            ) == .valid and
+            cancellationCleanupDigestValid(frozen) and
+            std.mem.eql(u8, &frozen.digest, &frozen_digest) and
             validate_owner(owner_context, binding);
         if (!stable) {
             client_external_mode.chargeTxQuarantine(state, remaining);
             state.tx_lifecycle = .terminal_tombstone;
             state.external_tx_retiring_bytes = 0;
-            frozen.lifecycle = .quarantined;
-            frozen.count = 0;
-            frozen.total_bytes = 0;
-            frozen.digest = cancellationCleanupDigest(frozen) orelse
-                @panic("bounded cancellation callback quarantine seal became invalid");
-            _ = index;
+            // The committed queue is never resurrected. Clearing the opaque graph here is the TX
+            // authority's validated terminal reset and prevents foreign/invalid residue from
+            // escaping into the RX cleanup callback or the next turn.
+            prepared.* = .{};
+            permit.* = .{};
+            cleanup.* = .{};
             return .quarantined;
         }
     }
@@ -1690,6 +1894,55 @@ pub fn finishCancellationCleanup(
     frozen.digest = cancellationCleanupDigest(frozen) orelse
         @panic("bounded cancellation cleaned seal became invalid");
     return .cleaned;
+}
+
+pub fn resetCancellationGraphForNextTurn(
+    comptime validate_owner: OwnerValidator,
+    owner_context: *const anyopaque,
+    prepared: *PreparedTxCancellation,
+    permit: *TxCancellationCommitPermit,
+    cleanup: *FrozenTxCancellationCleanup,
+    state: *client_external_mode.State,
+    binding: OwnerBinding,
+) bool {
+    if (!validate_owner(owner_context, binding)) return false;
+    const snapshot = prepared.storage();
+    const permit_storage = permit.storage();
+    const cleanup_storage = cleanup.storage();
+    const snapshot_valid = snapshot.saved_self_addr == @intFromPtr(prepared) and
+        snapshot.state_addr == @intFromPtr(state) and
+        snapshot.permit_addr == @intFromPtr(permit) and
+        snapshot.cleanup_addr == @intFromPtr(cleanup) and
+        std.meta.eql(snapshot.binding, binding) and
+        std.mem.eql(u8, &snapshot.digest, &(cancellationSnapshotDigest(snapshot) orelse return false));
+    if (!snapshot_valid) return false;
+    const resettable = switch (snapshot.lifecycle) {
+        .committed => permit_storage.saved_self_addr == @intFromPtr(permit) and
+            permit_storage.prepared_addr == @intFromPtr(prepared) and
+            permit_storage.cleanup_addr == @intFromPtr(cleanup) and
+            permit_storage.state_addr == @intFromPtr(state) and
+            permit_storage.lifecycle == .consumed and
+            std.mem.eql(u8, &permit_storage.digest, &cancellationPermitDigest(permit_storage)) and
+            cleanup_storage.saved_self_addr == @intFromPtr(cleanup) and
+            cleanup_storage.state_addr == @intFromPtr(state) and
+            cleanup_storage.lifecycle == .cleaned and cleanup_storage.count == 0 and
+            cleanup_storage.total_bytes == 0 and state.external_tx_retiring_bytes == 0 and
+            std.mem.eql(u8, &cleanup_storage.digest, &(cancellationCleanupDigest(cleanup_storage) orelse return false)),
+        .tombstone => (std.mem.allEqual(u8, &permit.bytes, 0) or
+            (permit_storage.saved_self_addr == @intFromPtr(permit) and
+                permit_storage.prepared_addr == @intFromPtr(prepared) and
+                permit_storage.cleanup_addr == @intFromPtr(cleanup) and
+                permit_storage.state_addr == @intFromPtr(state) and
+                permit_storage.lifecycle == .aborted and
+                std.mem.eql(u8, &permit_storage.digest, &cancellationPermitDigest(permit_storage)))) and
+            std.mem.allEqual(u8, &cleanup.bytes, 0),
+        .empty, .prepared, .armed => false,
+    };
+    if (!resettable) return false;
+    prepared.* = .{};
+    permit.* = .{};
+    cleanup.* = .{};
+    return true;
 }
 
 fn captureWriteSnapshot(
@@ -5035,6 +5288,174 @@ fn cancellationBinding(original: OwnerBinding, prepared: *PreparedTxCancellation
     return binding;
 }
 
+test "f3b post cancellation receipt rejects fabricated copied and replayed capability" {
+    var state = try initState();
+    defer state.deinit(std.testing.allocator);
+    var prepared: PreparedTxCancellation = .{};
+    var permit: TxCancellationCommitPermit = .{};
+    var cleanup: FrozenTxCancellationCleanup = .{};
+
+    var fabricated: PostCancellationReceipt = .{};
+    try std.testing.expectEqual(
+        PostCancellationDisposition.invalid,
+        consumePostCancellationReceipt(
+            &fabricated,
+            &prepared,
+            &permit,
+            &cleanup,
+            &state,
+        ),
+    );
+
+    var receipt: PostCancellationReceipt = .{};
+    try std.testing.expect(capturePostCancellationReceipt(
+        &receipt,
+        &prepared,
+        &permit,
+        &cleanup,
+        &state,
+    ));
+    var copied = receipt;
+    try std.testing.expectEqual(
+        PostCancellationDisposition.invalid,
+        consumePostCancellationReceipt(
+            &copied,
+            &prepared,
+            &permit,
+            &cleanup,
+            &state,
+        ),
+    );
+    try std.testing.expectEqual(client_external_mode.TxLifecycle.live, state.tx_lifecycle);
+    try std.testing.expectEqual(
+        PostCancellationDisposition.valid,
+        consumePostCancellationReceipt(
+            &receipt,
+            &prepared,
+            &permit,
+            &cleanup,
+            &state,
+        ),
+    );
+    try std.testing.expectEqual(
+        PostCancellationDisposition.invalid,
+        consumePostCancellationReceipt(
+            &receipt,
+            &prepared,
+            &permit,
+            &cleanup,
+            &state,
+        ),
+    );
+}
+
+test "f3b authentic post cancellation receipt quarantines state or scratch drift once" {
+    var state = try initState();
+    defer state.deinit(std.testing.allocator);
+    var prepared: PreparedTxCancellation = .{};
+    var permit: TxCancellationCommitPermit = .{};
+    var cleanup: FrozenTxCancellationCleanup = .{};
+    var receipt: PostCancellationReceipt = .{};
+    try std.testing.expect(capturePostCancellationReceipt(
+        &receipt,
+        &prepared,
+        &permit,
+        &cleanup,
+        &state,
+    ));
+    prepared.bytes[0] = 1;
+    try std.testing.expectEqual(
+        PostCancellationDisposition.quarantined,
+        consumePostCancellationReceipt(
+            &receipt,
+            &prepared,
+            &permit,
+            &cleanup,
+            &state,
+        ),
+    );
+    try std.testing.expectEqual(
+        client_external_mode.TxLifecycle.terminal_tombstone,
+        state.tx_lifecycle,
+    );
+    try std.testing.expectEqual(@as(usize, 0), state.external_tx_quarantined_bytes);
+    try std.testing.expect(std.mem.allEqual(u8, &prepared.bytes, 0));
+    try std.testing.expectEqual(
+        PostCancellationDisposition.invalid,
+        consumePostCancellationReceipt(
+            &receipt,
+            &prepared,
+            &permit,
+            &cleanup,
+            &state,
+        ),
+    );
+}
+
+test "f3b post cancellation receipt alias preflight is mutation free" {
+    var state = try initState();
+    defer state.deinit(std.testing.allocator);
+    var request_ids = client_pump.RequestIdState{ .available = 1 };
+    var owner_storage: [64]u8 = undefined;
+    var owner_client: [64]u8 = undefined;
+    const binding = testBinding(&owner_storage, &owner_client);
+    const payload = [_]u8{'x'} ** 256;
+    try std.testing.expect(admit(std.testing.allocator, &state, &request_ids, binding, .{
+        .kind = .input_bytes,
+        .stream_id = 7,
+        .payload = &payload,
+        .request_policy = .zero,
+    }, 1) == .admitted);
+    var prepared: PreparedTxCancellation = .{};
+    var permit: TxCancellationCommitPermit = .{};
+    var cleanup: FrozenTxCancellationCleanup = .{};
+    const before_queue_digest = queueDigest(&state).?;
+    const before_frame = try std.testing.allocator.dupe(u8, state.external_tx.items[0].bytes);
+    defer std.testing.allocator.free(before_frame);
+
+    const state_alias: *PostCancellationReceipt = @ptrCast(@alignCast(&state));
+    try std.testing.expect(!capturePostCancellationReceipt(
+        state_alias,
+        &prepared,
+        &permit,
+        &cleanup,
+        &state,
+    ));
+    const scratch_alias: *PostCancellationReceipt = @ptrCast(@alignCast(&prepared));
+    try std.testing.expect(!capturePostCancellationReceipt(
+        scratch_alias,
+        &prepared,
+        &permit,
+        &cleanup,
+        &state,
+    ));
+    const queue_backing_alias: *PostCancellationReceipt = @ptrCast(@alignCast(
+        state.external_tx.items.ptr,
+    ));
+    try std.testing.expect(!capturePostCancellationReceipt(
+        queue_backing_alias,
+        &prepared,
+        &permit,
+        &cleanup,
+        &state,
+    ));
+    const survivor_alias: *PostCancellationReceipt = @ptrCast(@alignCast(
+        state.external_tx.items[0].bytes.ptr,
+    ));
+    try std.testing.expect(!capturePostCancellationReceipt(
+        survivor_alias,
+        &prepared,
+        &permit,
+        &cleanup,
+        &state,
+    ));
+    try std.testing.expect(std.mem.eql(u8, before_frame, state.external_tx.items[0].bytes));
+    try std.testing.expect(std.mem.eql(u8, &before_queue_digest, &queueDigest(&state).?));
+    try std.testing.expect(std.mem.allEqual(u8, &prepared.bytes, 0));
+    try std.testing.expect(std.mem.allEqual(u8, &permit.bytes, 0));
+    try std.testing.expect(std.mem.allEqual(u8, &cleanup.bytes, 0));
+}
+
 test "f3b validated cancel moves exact input and request while preserving survivor FIFO" {
     var state = try initState();
     defer state.deinit(std.testing.allocator);
@@ -5091,6 +5512,52 @@ test "f3b validated cancel moves exact input and request while preserving surviv
     try std.testing.expectEqual(CancellationCleanupResult.cleaned, finishCancellationCleanup(testOwnerValid, @ptrCast(&state), &prepared, &permit, &cleanup, &state, binding));
     try std.testing.expectEqual(@as(usize, 0), state.external_tx_retiring_bytes);
     try std.testing.expect(queueDigest(&state) != null);
+    try std.testing.expect(resetCancellationGraphForNextTurn(
+        testOwnerValid,
+        @ptrCast(&state),
+        &prepared,
+        &permit,
+        &cleanup,
+        &state,
+        binding,
+    ));
+    try std.testing.expect(std.mem.allEqual(u8, &prepared.bytes, 0));
+    try std.testing.expect(std.mem.allEqual(u8, &permit.bytes, 0));
+    try std.testing.expect(std.mem.allEqual(u8, &cleanup.bytes, 0));
+    try std.testing.expect(admit(std.testing.allocator, &state, &request_ids, base, .{
+        .kind = .input_bytes,
+        .stream_id = 7,
+        .payload = "replay",
+        .request_policy = .zero,
+    }, 11) == .admitted);
+    try std.testing.expectEqual(.prepared, prepareCancellationFromExternalPump(
+        testOwnerValid,
+        @ptrCast(&state),
+        &prepared,
+        &permit,
+        &cleanup,
+        &state,
+        binding,
+        .{ .stream_id = 7 },
+        12,
+    ));
+    try std.testing.expect(abortPreparedCancellation(
+        testOwnerValid,
+        @ptrCast(&state),
+        &prepared,
+        &permit,
+        &state,
+        binding,
+    ));
+    try std.testing.expect(resetCancellationGraphForNextTurn(
+        testOwnerValid,
+        @ptrCast(&state),
+        &prepared,
+        &permit,
+        &cleanup,
+        &state,
+        binding,
+    ));
 }
 
 test "f3b cancel rejects partial request without queue mutation" {
@@ -5277,6 +5744,49 @@ test "f3b cancellation rejects payload alias with protected owner range" {
     const binding = cancellationBinding(base, &prepared);
     try std.testing.expectEqual(CancellationPrepareResult.invalid, prepareCancellationFromExternalPump(testOwnerValid, @ptrCast(&state), &prepared, &permit, &cleanup, &state, binding, .{ .stream_id = 7 }, 10));
     try std.testing.expect(std.mem.allEqual(u8, &prepared.bytes, 0));
+}
+
+test "f3b cancellation rejects resealed tx frame aliasing completed payload range" {
+    var state = try initState();
+    defer state.deinit(std.testing.allocator);
+    var request_ids = client_pump.RequestIdState{ .available = 1 };
+    var owner_storage: [64]u8 = undefined;
+    var owner_client: [64]u8 = undefined;
+    const base = testBinding(&owner_storage, &owner_client);
+    try std.testing.expect(admit(std.testing.allocator, &state, &request_ids, base, .{
+        .kind = .input_bytes,
+        .stream_id = 7,
+        .payload = "completed-alias",
+        .request_policy = .zero,
+    }, 1) == .admitted);
+    const frame = state.external_tx.items[0];
+    const generation = state.tx_queue_generation;
+    const queued_bytes = state.external_tx_bytes;
+    var prepared: PreparedTxCancellation = .{};
+    var permit: TxCancellationCommitPermit = .{};
+    var cleanup: FrozenTxCancellationCleanup = .{};
+    const binding = cancellationBinding(base, &prepared);
+    try std.testing.expectEqual(.invalid, prepareCancellationFromExternalPump(
+        testOwnerValid,
+        @ptrCast(&state),
+        &prepared,
+        &permit,
+        &cleanup,
+        &state,
+        binding,
+        .{
+            .stream_id = 7,
+            .protected_payload_addr = @intFromPtr(frame.bytes.ptr),
+            .protected_payload_len = frame.bytes.len,
+        },
+        10,
+    ));
+    try std.testing.expectEqual(generation, state.tx_queue_generation);
+    try std.testing.expectEqual(queued_bytes, state.external_tx_bytes);
+    try std.testing.expectEqual(@as(usize, 1), state.external_tx.items.len);
+    try std.testing.expect(std.mem.allEqual(u8, &prepared.bytes, 0));
+    try std.testing.expect(std.mem.allEqual(u8, &permit.bytes, 0));
+    try std.testing.expect(std.mem.allEqual(u8, &cleanup.bytes, 0));
 }
 
 test "f3b cancellation rejects max generation and backwards clock without mutation" {

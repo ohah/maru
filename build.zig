@@ -1870,6 +1870,31 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_external_pump_storage_tests.step);
         session_host_step.dependOn(&run_external_pump_storage_tests.step);
 
+        // `zig build ... -- --test-filter` passes arguments to a run artifact and does not
+        // configure Zig's compile-time test selection. Keep the F3b regression gate explicit so
+        // a command that selected zero tests cannot be mistaken for evidence.
+        const external_pump_f3b_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/client_external_pump.zig",
+                ),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"f3b"},
+        });
+        const run_external_pump_f3b_tests = b.addRunArtifact(
+            external_pump_f3b_tests,
+        );
+        run_external_pump_f3b_tests.setCwd(b.path("."));
+        const session_host_f3b_step = b.step(
+            "test-session-host-f3b",
+            "Run the non-empty F3b revoke and whole-turn regression gate",
+        );
+        session_host_f3b_step.dependOn(&run_external_pump_f3b_tests.step);
+
         // Buffered traversal fixtures stay outside the product barrel so test-only authority and
         // hostile allocators cannot become reachable from the shipped session-host module graph.
         const external_rx_turn_tests = b.addTest(.{

@@ -767,8 +767,17 @@ test "socket: 살아있는 소켓은 unlink 금지 — 같은 키 재bind는 Add
             const fd = connectClient(self.base, "k1") catch return;
             defer _ = c.close(fd);
             var rb: [128]u8 = undefined;
-            const n = c.read(fd, &rb, rb.len);
-            self.ok = n > 0;
+            // acceptOne deliberately emits hello and its delimiter as two writes. Do not close
+            // after the first readable fragment: that races the server's newline write and turns
+            // a healthy listener into a spurious EPIPE/WriteFailed.
+            while (true) {
+                const n = c.read(fd, &rb, rb.len);
+                if (n <= 0) return;
+                if (std.mem.indexOfScalar(u8, rb[0..@intCast(n)], '\n') != null) {
+                    self.ok = true;
+                    return;
+                }
+            }
         }
     };
     var ct = ClientT{ .base = base };

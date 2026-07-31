@@ -7,6 +7,7 @@ const client_external_pump = @import("client_external_pump.zig");
 const client_external_rx_read = @import("client_external_rx_read.zig");
 const client_pump = @import("client_pump.zig");
 const external_recovery_types = @import("external_recovery_types.zig");
+const runtime_event_types = @import("runtime_event_types.zig");
 const std = @import("std");
 const builtin = @import("builtin");
 const c = std.c;
@@ -524,7 +525,16 @@ fn exerciseD3SocketpairRevokePosition(
         const lower_after =
             client_external_pump.testing.lowerPublicationSnapshot(&storage) orelse
             return error.TestUnexpectedResult;
-        try std.testing.expectEqual(lower_before, lower_after);
+        if (expected_terminal == .revoked) {
+            const authority = client_external_pump.testing.ownerAuthorityView(&storage) orelse
+                return error.TestUnexpectedResult;
+            try std.testing.expectEqual(runtime_event_types.Role.observer, authority.role);
+            if (prefix_kind == .screen)
+                try std.testing.expectEqual(
+                    @as(u8, @intCast(@min(position - 1, external_rx_intent.max_intents))),
+                    lower_after.live_screen_len,
+                );
+        } else try std.testing.expectEqual(lower_before, lower_after);
     }
     try std.testing.expect(
         client_external_pump.testing.endAuthorityReceipt(
@@ -610,7 +620,7 @@ test "d2c POSIX RX adapter maps nonblocking bytes would-block EOF and hard error
     );
 }
 
-test "D3 product socketpair revoke at frame 1 64 and 65 never reaches lower authority" {
+test "D3 product socketpair revoke commits observer authority at frame 1 64 and 65" {
     inline for (.{ @as(usize, 1), 64, 65 }) |position|
         try exerciseD3SocketpairRevokePosition(position, .screen, .revoked);
     try exerciseD3SocketpairRevokePosition(

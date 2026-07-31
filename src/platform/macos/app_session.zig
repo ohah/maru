@@ -2616,6 +2616,10 @@ pub const AppSession = struct {
     git_request_seq: u64 = 0,
     /// 아직 응답을 못 받은 요청 번호(없으면 0). 갱신 트리거가 겹쳐도 큐를 쌓지 않는다.
     git_inflight: u64 = 0,
+    /// 마지막 읽기가 실패했는가. 재시도로 성공하면 풀린다 — 실패를 '읽는 중'으로 위장하지 않는다.
+    git_failed: bool = false,
+    /// git 실행 파일을 못 찾았는가. 뷰를 다시 고르면 재판정한다(설치 후 껐다 켜지 않아도 되게).
+    git_missing: bool = false,
     file_tree_rows_dirty: bool = true,
     file_tree_reload_actions: [dock_panel.max_entries]FileTreeReloadAction = undefined,
     file_tree_reload_actions_len: usize = 0,
@@ -3221,9 +3225,17 @@ pub const AppSession = struct {
         if (self.git_backend == null) {
             self.git_backend = git_backend_mod.Backend.init(self.allocator, self.io) catch return;
         }
+        // 실행 파일을 먼저 확정한다. 못 찾으면 **실행을 시도하지 않고** 미설치로 표시한다(docs/editor-surface.md §6).
+        // 후보 열거에만 PATH를 쓰고 exec는 확정된 절대경로로 한다(셸·execvp 경유 없음 = PATH hijack 차단 유지).
+        var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const git_exe = git_backend_mod.locate(&exe_buf) orelse {
+            self.git_missing = true;
+            self.metal_dirty = true;
+            return;
+        };
+        self.git_missing = false;
         self.git_request_seq += 1;
-        // git 실행 파일은 PATH 탐색 없이 고정 경로를 쓴다(PATH hijack 차단 — docs/editor-surface.md §6).
-        if (self.git_backend.?.submit("/usr/bin/git", repo, self.git_request_seq)) {
+        if (self.git_backend.?.submit(git_exe, repo, self.git_request_seq)) {
             self.git_inflight = self.git_request_seq;
         }
     }
@@ -3232,7 +3244,7 @@ pub const AppSession = struct {
     fn drainGitStatus(self: *AppSession) void {
         // 복원으로 소스 컨트롤 뷰가 켜진 채 시작하면 `setDockView`를 거치지 않아 첫 읽기가 안 걸린다(실측).
         // 결과도 없고 in-flight도 없을 때만 한 번 건다 — 조건이 결과 도착으로 스스로 닫히므로 폴링이 아니다.
-        if (self.dock.view == .source_control and self.git_result == null and self.git_inflight == 0) self.refreshGitStatus();
+        if (self.dock.view == .source_control and self.git_result == null and self.git_inflight == 0 and !self.git_failed and !self.git_missing) self.refreshGitStatus();
         var backend = &(self.git_backend orelse return);
         while (backend.takeResult()) |taken| {
             var result = taken;
@@ -3241,6 +3253,14 @@ pub const AppSession = struct {
                 continue;
             }
             self.git_inflight = 0;
+            if (!result.ok) {
+                // 실패한 읽기는 결과로 삼지 않는다(섹션이 옛 시점과 섞이지 않게). in-flight만 풀고 상태를 남긴다.
+                result.deinit(self.allocator);
+                self.git_failed = true;
+                self.metal_dirty = true;
+                continue;
+            }
+            self.git_failed = false;
             if (self.git_result) |*old| old.deinit(self.allocator);
             self.git_result = result;
             self.metal_dirty = true;
@@ -26574,7 +26594,15 @@ pub const AppSession = struct {
                             } else {
                                 // 아직 못 읽었거나 git 저장소가 아니다 — 둘을 구분해 적는다(정상 상태이므로 경고 아님).
                                 var repo_probe: [std.fs.max_path_bytes]u8 = undefined;
-                                const notice: []const u8 = if (self.gitRepoRoot(&repo_probe) == null) "git 저장소가 아닙니다" else "읽는 중…";
+                                // 안내 우선순위: 실행할 수 없음 → 볼 것이 없음 → 실패 → 진행 중.
+                                const notice: []const u8 = if (self.git_missing)
+                                    "git이 설치되어 있지 않습니다"
+                                else if (self.gitRepoRoot(&repo_probe) == null)
+                                    "git 저장소가 아닙니다"
+                                else if (self.git_failed)
+                                    "git 읽기에 실패했습니다"
+                                else
+                                    "읽는 중…";
                                 if (coretext_frame_builder.buildDockNoticeDrawList(self.allocator, tree_content_cols, notice, dock_fg)) |pdl| {
                                     self.collectShaped(&collected, pdl, pane_frame_builder, .{ .pane = .{
                                         .origin_x = dg.tree_content.x,

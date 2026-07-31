@@ -2029,6 +2029,32 @@ pub fn resetForNextTurn(
     return .ready;
 }
 
+/// Read-only closure check used by the outer turn epilogue before it marks caller-owned scratch
+/// reusable. An empty handle has never allocated; a live handle must point to an authenticated
+/// spent scratch whose intents are all terminal scalar states.
+pub fn closedForOuterTurn(
+    handle: *const ExternalRxIntentHandle,
+) bool {
+    if (handle.lifecycle == .empty)
+        return handle.saved_self_addr == 0 and handle.scratch_addr == 0 and
+            handle.allocation_addr == 0 and handle.allocation_len == 0 and
+            handle.allocator_ptr_addr == 0 and
+            handle.allocator_vtable_addr == 0 and
+            handle.cleanup_allocator == null and handle.storage_addr == 0 and
+            handle.reservation_generation == 0 and
+            std.mem.allEqual(u8, &handle.digest, 0);
+    const mutable: *ExternalRxIntentHandle = @constCast(handle);
+    const scratch = validateHandleAndScratch(
+        mutable,
+        .ready,
+        .spent,
+    ) orelse return false;
+    for (scratch.intents) |intent|
+        if (intent != .empty and intent != .aborted and intent != .committed)
+            return false;
+    return true;
+}
+
 pub fn prepareDestroy(
     handle: *ExternalRxIntentHandle,
     storage_addr: usize,

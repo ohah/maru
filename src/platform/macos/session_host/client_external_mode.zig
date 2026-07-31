@@ -1063,6 +1063,17 @@ pub const GuardedQuarantineAccountingReceipt = struct {
     digest: owner_seal.Digest = [_]u8{0} ** 32,
 };
 
+pub fn guardedQuarantineReceiptPristine(
+    receipt: *const GuardedQuarantineAccountingReceipt,
+) bool {
+    return receipt.saved_self_addr == 0 and receipt.prepared_addr == 0 and
+        receipt.outcome_tag == .allocation_quarantined and
+        receipt.phase == .allocation and
+        receipt.quarantined_bytes_upper_bound == 0 and
+        receipt.latch_generation == 0 and receipt.lifecycle == .empty and
+        std.mem.allEqual(u8, &receipt.digest, 0);
+}
+
 fn guardedQuarantineReceiptDigest(
     receipt: *const GuardedQuarantineAccountingReceipt,
 ) owner_seal.Digest {
@@ -1198,6 +1209,10 @@ fn parseScratchPristine(scratch: *const RxParseScratch) bool {
         scratch.payload == null and scratch.cleanup_payload == null and
         scratch.payload_addr == 0 and scratch.payload_len == 0 and
         scratch.lifecycle == .empty;
+}
+
+pub fn rxParseScratchPristine(scratch: *const RxParseScratch) bool {
+    return parseScratchPristine(scratch);
 }
 
 fn rangesOverlap(a_start: usize, a_len: usize, b_start: usize, b_len: usize) bool {

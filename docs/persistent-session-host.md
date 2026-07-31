@@ -8060,14 +8060,13 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                  generation max와 prepare/abort 사이 owner/parser/drain drift는 lower mutation 0의 terminal로
                  닫는다. Debug/ReleaseFast, boundary와 전체 check가 모두 green이어야 d2d를 구현으로 표시한다.
 
-              **D0 구현 완료:** `client_external_turn_authority.zig`가 canonical nested `Seed`,
+              canonical lifecycle evidence는 `client_external_turn_authority.zig`의 nested `Seed`,
               address-bound permit/cleanup lifecycle, reflection 기반 seal transcript와 explicit enum ordinal을
               소유한다. permit/cleanup destination의 checked range disjoint, generation·role·budget eligibility,
               stale/copy/tamper/double transition mutation 0을 14개 focused test로 검증한다. boundary는 제품
               source 전체에서 pump만 sole importer임을 고정하고 D0 lifecycle 제품 callsite와 future
               `consume` 정의/callsite가 0임을 검증한다. Debug/ReleaseFast `test-session-host`,
-              `check-boundaries`, 전체 `mise run check`가 green이다. D1~D3 전에는 d2d 전체를 구현 완료로
-              표시하지 않는다.
+              `check-boundaries`, 전체 `mise run check`가 이 계약의 회귀를 검증한다.
 
               ```zig
               // Pump가 current owners에서 투영하는 pointer-free immutable DTO. Leaf는 이 값의
@@ -8182,6 +8181,11 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                   permit: *PreparedAuthorityPermit,
                   cleanup: *FrozenCleanupSeed,
               ) CleanupAbortResult;
+              // cleanup descriptor가 untrusted여도 self-sealed prepared scalar를 terminal
+              // tombstone으로 만들 수 있다. owned resource/callback은 다루지 않는다.
+              pub fn poisonPreparedForTerminal(
+                  permit: *PreparedAuthorityPermit,
+              ) bool;
               pub fn resetSpent(
                   permit: *PreparedAuthorityPermit,
                   cleanup: *FrozenCleanupSeed,
@@ -8314,9 +8318,11 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
               seed를 검증해 terminal 상태에서도 aborted tombstone으로 닫는다. permit 또는 cleanup seed 자체
               descriptor/digest까지 untrusted라 cleanup이 안전하지 않으면
               permit에 쓰지 않고 scratch를 terminal-only poison, storage를 `.invariant_failure`로 만들며 canonical
-              lease finalizer만 실행한다. 이 경우 함수 밖에 **유효한** prepared authority는 없고 scratch는 reset/
-              reuse할 수 없다. intact 기존 terminal reason은 보존하지만 permit/lease authority drift가 있으면
-              `.invariant_failure`가 우선한다.
+              lease finalizer만 실행한다. cleanup descriptor만 untrusted이고 permit 자체의 final-address/self seal이
+              intact하면 `poisonPreparedForTerminal`이 callback 없이 permit만 `.aborted` tombstone으로 만든다.
+              permit 자체도 untrusted면 이미 valid prepared가 아니므로 mutation 0으로 둔다. 어느 경우든 함수 밖에
+              **유효한** prepared authority는 없고 scratch는 reset/reuse할 수 없다. intact 기존 terminal reason은
+              보존하지만 permit/lease authority drift가 있으면 `.invariant_failure`가 우선한다.
 
               acquire 실패는 pristine lease out의 `.empty`를 보존하고 global lease를 잡지 않는다. 단 같은 storage의
               nested public entry는 기존 d2b1 SSOT대로 `operation_reentry_latched=true`를 기록할 수 있으며, 이

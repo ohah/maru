@@ -247,6 +247,19 @@ pub fn abortForCleanup(
     return .aborted;
 }
 
+/// Irreversibly closes a scalar prepared capability when its sibling cleanup descriptor cannot
+/// be trusted. A malformed permit is already unusable and remains untouched; an intact permit
+/// owns no resource or executable hook, so changing only its sealed lifecycle is bounded.
+pub fn poisonPreparedForTerminal(
+    permit: *PreparedAuthorityPermit,
+) bool {
+    if (!permitMatchesCurrent(permit, permit.seed, .prepared))
+        return true;
+    permit.lifecycle = .aborted;
+    permit.digest = sealPermit(permit);
+    return !permitMatchesCurrent(permit, permit.seed, .prepared);
+}
+
 pub fn resetSpent(
     permit: *PreparedAuthorityPermit,
     cleanup: *FrozenCleanupSeed,
@@ -980,6 +993,25 @@ test "cleanup envelope copies and tamper cannot change either record" {
     );
     try std.testing.expectEqual(AbortResult.aborted, abort(&permit, seed));
     try std.testing.expect(resetSpent(&permit, &cleanup, seed));
+}
+
+test "terminal poison invalidates intact permit when cleanup descriptor is untrusted" {
+    var permit = PreparedAuthorityPermit{};
+    var cleanup = FrozenCleanupSeed{};
+    const seed = testSeed(&permit, &cleanup);
+    try std.testing.expectEqual(
+        PrepareResult.prepared,
+        prepare(&permit, &cleanup, seed),
+    );
+    cleanup.digest[0] ^= 1;
+    try std.testing.expectEqual(
+        CleanupAbortResult.invalid_authority,
+        abortForCleanup(&permit, &cleanup),
+    );
+    try std.testing.expect(validate(&permit, seed));
+    try std.testing.expect(poisonPreparedForTerminal(&permit));
+    try std.testing.expect(!validate(&permit, seed));
+    try std.testing.expectEqual(PermitLifecycle.aborted, permit.lifecycle);
 }
 
 test "occupied cleanup or both destinations preserve both records" {

@@ -1,5 +1,41 @@
 const std = @import("std");
 
+test "external pump acquires storage claim before reading owned Client" {
+    const allocator = std.testing.allocator;
+    const source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/client_external_pump.zig",
+    );
+    defer allocator.free(source);
+    const function_start = std.mem.indexOf(
+        u8,
+        source,
+        "pub fn acquireWholeTurnLease(",
+    ) orelse return error.TestUnexpectedResult;
+    const function_end = std.mem.indexOfPos(
+        u8,
+        source,
+        function_start,
+        "\n    pub fn ",
+    ) orelse return error.TestUnexpectedResult;
+    const body = source[function_start..function_end];
+    const claim = std.mem.indexOf(
+        u8,
+        body,
+        "self.access_claim.cmpxchgStrong(",
+    ) orelse return error.TestUnexpectedResult;
+    const client_read = std.mem.indexOf(
+        u8,
+        body,
+        "const client = if (self.owned_client)",
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(claim < client_read);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(body, "self.owned_client"),
+    );
+}
+
 test "d2d whole-turn authority stays a pure owner-free leaf" {
     const allocator = std.testing.allocator;
     const leaf = try readZigFileZ(
@@ -25,21 +61,19 @@ test "d2d whole-turn authority stays a pure owner-free leaf" {
     const lifecycle_apis = [_][]const u8{
         "pub fn prepare(",
         "pub fn validate(",
+        "pub fn consume(",
+        "pub fn validateConsumed(",
         "pub fn abort(",
         "pub fn abortForCleanup(",
         "pub fn poisonPreparedForTerminal(",
         "pub fn resetSpent(",
+        "pub fn resetConsumedAfterTx(",
     };
     for (lifecycle_apis) |signature|
         try std.testing.expectEqual(
             @as(usize, 1),
             countOccurrences(leaf, signature),
         );
-    try std.testing.expectEqual(
-        @as(usize, 0),
-        countOccurrences(leaf, "pub fn consume("),
-    );
-
     const pump = try readZigFileZ(
         allocator,
         "src/platform/macos/session_host/client_external_pump.zig",
@@ -82,6 +116,8 @@ test "d2d whole-turn authority stays a pure owner-free leaf" {
     var poison_calls: usize = 0;
     var reset_spent_calls: usize = 0;
     var consume_calls: usize = 0;
+    var validate_consumed_calls: usize = 0;
+    var reset_consumed_calls: usize = 0;
     var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
     defer dir.close(std.testing.io);
     var walker = try dir.walk(allocator);
@@ -143,17 +179,27 @@ test "d2d whole-turn authority stays a pure owner-free leaf" {
             source,
             "client_external_turn_authority.consume(",
         );
+        validate_consumed_calls += countOccurrences(
+            source,
+            "client_external_turn_authority.validateConsumed(",
+        );
+        reset_consumed_calls += countOccurrences(
+            source,
+            "client_external_turn_authority.resetConsumedAfterTx(",
+        );
     }
     try std.testing.expectEqual(@as(usize, 1), importers);
-    // D2 owns one auditable lifecycle edge per operation. The future mutation consumer remains
-    // absent until f3, so the temporary adapter can only prepare and close authority.
+    // D2 owns one auditable lifecycle edge per operation. f1 consumes the prepared authority for
+    // the same-turn TX suffix, validates it across callbacks, and resets it exactly once.
     try std.testing.expectEqual(@as(usize, 1), prepare_calls);
     try std.testing.expectEqual(@as(usize, 1), validate_calls);
     try std.testing.expectEqual(@as(usize, 1), abort_calls);
     try std.testing.expectEqual(@as(usize, 1), cleanup_abort_calls);
     try std.testing.expectEqual(@as(usize, 1), poison_calls);
     try std.testing.expectEqual(@as(usize, 1), reset_spent_calls);
-    try std.testing.expectEqual(@as(usize, 0), consume_calls);
+    try std.testing.expectEqual(@as(usize, 1), consume_calls);
+    try std.testing.expectEqual(@as(usize, 1), validate_consumed_calls);
+    try std.testing.expectEqual(@as(usize, 1), reset_consumed_calls);
 }
 
 test "d2d adapter pins authority records and a monotonic turn generation in canonical scratch" {
@@ -3104,6 +3150,10 @@ test "session host external pump facade callsites stay in the final owner bounda
             u8,
             entry.path,
             "platform/macos/session_host/client_external_rx_read_test_support.zig",
+        ) or std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/client_external_tx.zig",
         );
         if (allowed) continue;
         const path = try std.fmt.allocPrint(

@@ -16,6 +16,144 @@ const external_rx_types = @import("external_rx_types.zig");
 
 pub const max_tx_frames: usize = 64;
 
+var tx_quarantine_events: std.atomic.Value(u64) = .init(0);
+var tx_quarantine_bytes: std.atomic.Value(usize) = .init(0);
+var tx_quarantine_lock: std.atomic.Mutex = .unlocked;
+threadlocal var active_tx_cleanup: ?*State = null;
+threadlocal var active_tx_operation: ?*State = null;
+threadlocal var tx_cleanup_reentry_events: u64 = 0;
+threadlocal var active_tx_cleanup_id: u64 = 0;
+var next_tx_cleanup_id: std.atomic.Value(u64) = .init(1);
+
+pub fn chargeTxQuarantine(state: *State, bytes: usize) void {
+    if (bytes == 0) return;
+    while (!tx_quarantine_lock.tryLock()) std.atomic.spinLoopHint();
+    defer tx_quarantine_lock.unlock();
+    const next_events = std.math.add(
+        u64,
+        tx_quarantine_events.load(.acquire),
+        1,
+    ) catch @panic("external TX quarantine event counter exhausted");
+    const next_bytes = std.math.add(
+        usize,
+        tx_quarantine_bytes.load(.acquire),
+        bytes,
+    ) catch @panic("external TX quarantine byte counter exhausted");
+    tx_quarantine_events.store(next_events, .release);
+    tx_quarantine_bytes.store(next_bytes, .release);
+    state.external_tx_quarantined_bytes = std.math.add(
+        usize,
+        state.external_tx_quarantined_bytes,
+        bytes,
+    ) catch @panic("external TX storage quarantine counter exhausted");
+}
+
+pub fn resetTxQuarantineForTest() void {
+    if (!builtin.is_test) @panic("test-only TX quarantine reset");
+    tx_quarantine_events.store(0, .release);
+    tx_quarantine_bytes.store(0, .release);
+}
+
+pub fn txQuarantineEventsForTest() u64 {
+    if (!builtin.is_test) @panic("test-only TX quarantine observation");
+    return tx_quarantine_events.load(.acquire);
+}
+
+pub fn txQuarantineBytesForTest() usize {
+    if (!builtin.is_test) @panic("test-only TX quarantine observation");
+    return tx_quarantine_bytes.load(.acquire);
+}
+
+var trusted_tx_allocator_context: u8 = 0;
+
+fn trustedTxAlloc(
+    _: *anyopaque,
+    len: usize,
+    alignment: std.mem.Alignment,
+    ret_addr: usize,
+) ?[*]u8 {
+    return std.heap.c_allocator.rawAlloc(len, alignment, ret_addr);
+}
+
+fn trustedTxResize(
+    _: *anyopaque,
+    memory: []u8,
+    alignment: std.mem.Alignment,
+    new_len: usize,
+    ret_addr: usize,
+) bool {
+    return std.heap.c_allocator.rawResize(
+        memory,
+        alignment,
+        new_len,
+        ret_addr,
+    );
+}
+
+fn trustedTxRemap(
+    _: *anyopaque,
+    memory: []u8,
+    alignment: std.mem.Alignment,
+    new_len: usize,
+    ret_addr: usize,
+) ?[*]u8 {
+    return std.heap.c_allocator.rawRemap(
+        memory,
+        alignment,
+        new_len,
+        ret_addr,
+    );
+}
+
+fn trustedTxFree(
+    _: *anyopaque,
+    memory: []u8,
+    alignment: std.mem.Alignment,
+    ret_addr: usize,
+) void {
+    std.heap.c_allocator.rawFree(memory, alignment, ret_addr);
+}
+
+pub const trusted_tx_allocator: std.mem.Allocator = .{
+    .ptr = &trusted_tx_allocator_context,
+    .vtable = &.{
+        .alloc = trustedTxAlloc,
+        .resize = trustedTxResize,
+        .remap = trustedTxRemap,
+        .free = trustedTxFree,
+    },
+};
+
+pub const TxLifecycle = enum {
+    live,
+    completion_callback,
+    terminal_tombstone,
+    tearing_down,
+    dead,
+};
+
+pub const DeinitResult = enum {
+    cleaned,
+    busy,
+    already_dead,
+};
+
+pub const DeinitReservationResult = enum {
+    reserved,
+    busy,
+    already_dead,
+};
+
+const TxClaim = enum(u8) {
+    idle,
+    operation,
+    operation_close,
+    idle_close,
+    reserving,
+    cleanup,
+    dead,
+};
+
 pub const ExternalTxFrame = struct {
     bytes: []u8,
     offset: usize = 0,
@@ -23,8 +161,22 @@ pub const ExternalTxFrame = struct {
     stream_id: u64,
     request_id: u64,
     activated_at_ns: i128,
-    last_progress_at_ns: i128,
+    wire_digest: owner_seal.Digest,
+    descriptor_digest: owner_seal.Digest,
 };
+
+pub fn txFrameDescriptorDigest(frame: ExternalTxFrame) owner_seal.Digest {
+    var writer = owner_seal.Writer.init("MARUTXF1");
+    writer.writeUsize(@intFromPtr(frame.bytes.ptr));
+    writer.writeUsize(frame.bytes.len);
+    writer.writeUsize(frame.offset);
+    writer.writeU16(@intFromEnum(frame.kind));
+    writer.writeU64(frame.stream_id);
+    writer.writeU64(frame.request_id);
+    writer.writeU128(@bitCast(frame.activated_at_ns));
+    writer.writeBytes(&frame.wire_digest);
+    return writer.finish();
+}
 
 pub const RxProvenanceLifecycle = enum { unbound, bound, terminal };
 
@@ -116,20 +268,503 @@ pub const ExternalRxOutcome = union(enum) {
 pub const State = struct {
     saved_flags: c_int,
     external_tx: std.ArrayListUnmanaged(ExternalTxFrame) = .empty,
+    tx_queue_backing_addr: usize = 0,
+    tx_queue_backing_capacity: usize = 0,
+    tx_allocator: std.mem.Allocator = trusted_tx_allocator,
+    tx_allocator_context_len: usize = 1,
     external_tx_bytes: usize = 0,
+    external_tx_retiring_bytes: usize = 0,
+    external_tx_quarantined_bytes: usize = 0,
+    tx_lifecycle: TxLifecycle = .live,
+    tx_queue_generation: u64 = 1,
+    tx_head_progress_baseline_ns: ?i128 = null,
+    tx_last_observed_now_ns: ?i128 = null,
+    tx_immediate_pending: bool = false,
+    tx_claim: std.atomic.Value(u8) = .init(@intFromEnum(TxClaim.idle)),
+    tx_cleanup_id: u64 = 0,
+    tx_cleanup_owner_addr: usize = 0,
     rx_provenance: RxProvenance = .{},
     rx_operation_busy: bool = false,
     fn stage(allocator: std.mem.Allocator) error{OutOfMemory}!State {
         var result = State{ .saved_flags = 0 };
         result.external_tx.ensureTotalCapacityPrecise(allocator, max_tx_frames) catch
             return error.OutOfMemory;
+        result.tx_queue_backing_addr = @intFromPtr(result.external_tx.items.ptr);
+        result.tx_queue_backing_capacity = result.external_tx.capacity;
         return result;
     }
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
-        for (self.external_tx.items) |frame| allocator.free(frame.bytes);
-        self.external_tx.deinit(allocator);
-        self.* = undefined;
+        self.requestTxClose();
+        switch (self.tryDeinit(allocator)) {
+            .cleaned, .already_dead => {},
+            .busy => {},
+        }
+    }
+
+    /// Acquires the per-State operation/cleanup exclusion for one complete external-pump turn.
+    /// The claim must remain held until the caller's last access to the owning Client.
+    pub fn acquireTxOperation(self: *State) bool {
+        if (active_tx_operation != null or active_tx_cleanup != null)
+            return false;
+        if (self.tx_claim.cmpxchgStrong(
+            @intFromEnum(TxClaim.idle),
+            @intFromEnum(TxClaim.operation),
+            .acq_rel,
+            .acquire,
+        ) != null)
+            return false;
+        if (self.tx_cleanup_id != 0 or self.tx_cleanup_owner_addr != 0) {
+            self.tx_claim.store(@intFromEnum(TxClaim.idle_close), .release);
+            return false;
+        }
+        active_tx_operation = self;
+        return true;
+    }
+
+    pub fn requestTxClose(self: *State) void {
+        while (true) {
+            const observed = self.tx_claim.load(.acquire);
+            const desired = if (observed == @intFromEnum(TxClaim.idle))
+                @intFromEnum(TxClaim.idle_close)
+            else if (observed == @intFromEnum(TxClaim.operation))
+                @intFromEnum(TxClaim.operation_close)
+            else
+                return;
+            if (self.tx_claim.cmpxchgWeak(
+                observed,
+                desired,
+                .acq_rel,
+                .acquire,
+            ) == null) return;
+        }
+    }
+
+    pub fn txCloseRequested(self: *const State) bool {
+        const claim = self.tx_claim.load(.acquire);
+        return claim == @intFromEnum(TxClaim.operation_close) or
+            claim == @intFromEnum(TxClaim.idle_close) or
+            claim == @intFromEnum(TxClaim.reserving) or
+            claim == @intFromEnum(TxClaim.cleanup);
+    }
+
+    pub fn txOperationHeldByCurrentThread(self: *const State) bool {
+        if (active_tx_operation != self) return false;
+        const claim = self.tx_claim.load(.acquire);
+        return claim == @intFromEnum(TxClaim.operation) or
+            claim == @intFromEnum(TxClaim.operation_close);
+    }
+
+    /// Releases a successfully acquired operation. The release store is the final access to
+    /// `self`, allowing a waiting cross-thread Client teardown to proceed immediately afterwards.
+    pub fn releaseTxOperation(self: *State) bool {
+        return self.releaseTxOperationAndObserveClose() != null;
+    }
+
+    pub fn releaseTxOperationAndObserveClose(self: *State) ?bool {
+        return self.releaseTxOperationAndObserveCloseWithHook(null, undefined);
+    }
+
+    fn releaseTxOperationAndObserveCloseWithHook(
+        self: *State,
+        hook: ?*const fn (*anyopaque) void,
+        hook_context: *anyopaque,
+    ) ?bool {
+        if (active_tx_operation != self) return null;
+        var close_requested = false;
+        var hook_called = false;
+        while (true) {
+            const observed = self.tx_claim.load(.acquire);
+            const desired = if (observed == @intFromEnum(TxClaim.operation))
+                @intFromEnum(TxClaim.idle)
+            else if (observed == @intFromEnum(TxClaim.operation_close)) blk: {
+                close_requested = true;
+                break :blk @intFromEnum(TxClaim.idle_close);
+            } else return null;
+            if (!hook_called) {
+                hook_called = true;
+                if (hook) |callback| callback(hook_context);
+            }
+            if (self.tx_claim.cmpxchgWeak(
+                observed,
+                desired,
+                .acq_rel,
+                .acquire,
+            ) == null) break;
+        }
+        active_tx_operation = null;
+        return close_requested;
+    }
+
+    pub fn tryDeinit(
+        self: *State,
+        allocator: std.mem.Allocator,
+    ) DeinitResult {
+        return switch (self.reserveDeinit()) {
+            .reserved => self.finishReservedDeinit(allocator),
+            .busy => .busy,
+            .already_dead => .already_dead,
+        };
+    }
+
+    /// Reserves cleanup across callback-bearing outer-owner teardown. Public cleanup remains busy
+    /// until the reserving owner consumes the claim with `finishReservedDeinit`.
+    pub fn reserveDeinit(self: *State) DeinitReservationResult {
+        return self.reserveDeinitWithHook(null, undefined);
+    }
+
+    fn reserveDeinitWithHook(
+        self: *State,
+        hook: ?*const fn (*anyopaque) void,
+        hook_context: *anyopaque,
+    ) DeinitReservationResult {
+        while (true) {
+            const observed = self.tx_claim.load(.acquire);
+            if (observed == @intFromEnum(TxClaim.dead))
+                return .already_dead;
+            if (observed != @intFromEnum(TxClaim.idle) and
+                observed != @intFromEnum(TxClaim.idle_close))
+            {
+                if (active_tx_cleanup != null)
+                    tx_cleanup_reentry_events = std.math.add(
+                        u64,
+                        tx_cleanup_reentry_events,
+                        1,
+                    ) catch @panic(
+                        "external TX cleanup reentry counter exhausted",
+                    );
+                return .busy;
+            }
+            if (self.tx_claim.cmpxchgWeak(
+                observed,
+                @intFromEnum(TxClaim.reserving),
+                .acq_rel,
+                .acquire,
+            ) == null) break;
+        }
+        if (hook) |callback| callback(hook_context);
+        if (self.tx_cleanup_id != 0 or self.tx_cleanup_owner_addr != 0) {
+            self.tx_claim.store(@intFromEnum(TxClaim.idle_close), .release);
+            return .busy;
+        }
+        if (self.tx_lifecycle == .completion_callback or
+            self.tx_lifecycle == .tearing_down)
+        {
+            self.tx_claim.store(@intFromEnum(TxClaim.idle_close), .release);
+            return .busy;
+        }
+        if (self.tx_lifecycle == .dead) {
+            self.tx_claim.store(@intFromEnum(TxClaim.dead), .release);
+            return .already_dead;
+        }
+        if (active_tx_cleanup != null) {
+            tx_cleanup_reentry_events = std.math.add(
+                u64,
+                tx_cleanup_reentry_events,
+                1,
+            ) catch @panic("external TX cleanup reentry counter exhausted");
+            self.tx_claim.store(@intFromEnum(TxClaim.idle_close), .release);
+            return .busy;
+        }
+        active_tx_cleanup = self;
+        const reservation_id = next_tx_cleanup_id.fetchAdd(1, .acq_rel);
+        if (reservation_id == 0 or reservation_id == std.math.maxInt(u64))
+            @panic("external TX cleanup reservation ID exhausted");
+        self.tx_cleanup_id = reservation_id;
+        self.tx_cleanup_owner_addr = @intFromPtr(self);
+        active_tx_cleanup_id = reservation_id;
+        self.tx_claim.store(@intFromEnum(TxClaim.cleanup), .release);
+        return .reserved;
+    }
+
+    pub fn transferReservedDeinit(self: *State, destination: *State) bool {
+        if (self == destination or
+            active_tx_cleanup != self or
+            active_tx_cleanup_id == 0 or
+            self.tx_cleanup_id != active_tx_cleanup_id or
+            self.tx_cleanup_owner_addr != @intFromPtr(self) or
+            self.tx_claim.load(.acquire) !=
+                @intFromEnum(TxClaim.cleanup) or
+            destination.tx_claim.load(.acquire) !=
+                @intFromEnum(TxClaim.cleanup) or
+            destination.tx_cleanup_id != self.tx_cleanup_id or
+            destination.tx_cleanup_owner_addr != @intFromPtr(self) or
+            destination.tx_cleanup_id == 0)
+            return false;
+        destination.tx_cleanup_owner_addr = @intFromPtr(destination);
+        active_tx_cleanup = destination;
+        return true;
+    }
+
+    pub fn cancelReservedDeinit(self: *State) bool {
+        if (active_tx_cleanup != self or
+            active_tx_cleanup_id == 0 or
+            self.tx_cleanup_id != active_tx_cleanup_id or
+            self.tx_cleanup_owner_addr != @intFromPtr(self) or
+            self.tx_claim.load(.acquire) !=
+                @intFromEnum(TxClaim.cleanup))
+            return false;
+        active_tx_cleanup = null;
+        active_tx_cleanup_id = 0;
+        self.tx_cleanup_id = 0;
+        self.tx_cleanup_owner_addr = 0;
+        self.tx_claim.store(@intFromEnum(TxClaim.idle_close), .release);
+        return true;
+    }
+
+    pub fn finishReservedDeinit(
+        self: *State,
+        allocator: std.mem.Allocator,
+    ) DeinitResult {
+        if (active_tx_cleanup == null and
+            self.tx_claim.load(.acquire) == @intFromEnum(TxClaim.dead))
+            return .already_dead;
+        if (active_tx_cleanup != self or
+            active_tx_cleanup_id == 0 or
+            self.tx_cleanup_id != active_tx_cleanup_id or
+            self.tx_cleanup_owner_addr != @intFromPtr(self) or
+            self.tx_claim.load(.acquire) !=
+                @intFromEnum(TxClaim.cleanup))
+            return .busy;
+        const cleanup_id = active_tx_cleanup_id;
+        const cleanup_owner_addr = @intFromPtr(self);
+        defer {
+            active_tx_cleanup = null;
+            active_tx_cleanup_id = 0;
+        }
+        var frozen: [max_tx_frames]ExternalTxFrame = undefined;
+        const entry_lifecycle = self.tx_lifecycle;
+        const backing_valid =
+            self.tx_queue_backing_addr != 0 and
+            self.tx_queue_backing_capacity == max_tx_frames and
+            self.external_tx.capacity == self.tx_queue_backing_capacity and
+            @intFromPtr(self.external_tx.items.ptr) ==
+                self.tx_queue_backing_addr;
+        const list_valid = self.tx_lifecycle == .live and backing_valid and
+            self.external_tx.items.len <= max_tx_frames and
+            self.external_tx.items.len <= self.external_tx.capacity and
+            self.external_tx_retiring_bytes == 0;
+        var count = if (list_valid)
+            self.external_tx.items.len
+        else
+            0;
+        if (count != 0)
+            @memcpy(frozen[0..count], self.external_tx.items[0..count]);
+        const frozen_backing = if (backing_valid)
+            self.external_tx.allocatedSlice()
+        else
+            @as([]ExternalTxFrame, &.{});
+        // Validate the complete frozen cleanup graph before the first allocator callback. This
+        // prevents a recomputed public descriptor digest from turning duplicate or protected
+        // ranges into a wrong-free/double-free sequence during terminal teardown.
+        var frozen_total: usize = 0;
+        var frozen_valid = count != 0 or
+            (list_valid and self.external_tx_bytes == 0);
+        for (frozen[0..count], 0..) |frame, index| {
+            const address = @intFromPtr(frame.bytes.ptr);
+            const end = std.math.add(usize, address, frame.bytes.len) catch {
+                frozen_valid = false;
+                break;
+            };
+            if (address == 0 or frame.bytes.len < protocol.header_size or
+                frame.bytes.len > protocol.max_binary_chunk + protocol.header_size or
+                frame.offset > frame.bytes.len or
+                !std.mem.eql(
+                    u8,
+                    &frame.descriptor_digest,
+                    &txFrameDescriptorDigest(frame),
+                ))
+            {
+                frozen_valid = false;
+                break;
+            }
+            const protected = [_]struct { address: usize, len: usize }{
+                .{ .address = @intFromPtr(self), .len = @sizeOf(State) },
+                .{
+                    .address = self.tx_queue_backing_addr,
+                    .len = self.tx_queue_backing_capacity *
+                        @sizeOf(ExternalTxFrame),
+                },
+                .{
+                    .address = @intFromPtr(self.tx_allocator.ptr),
+                    .len = self.tx_allocator_context_len,
+                },
+                .{
+                    .address = @intFromPtr(self.tx_allocator.vtable),
+                    .len = @sizeOf(std.mem.Allocator.VTable),
+                },
+            };
+            for (protected) |range| {
+                const range_end = std.math.add(
+                    usize,
+                    range.address,
+                    range.len,
+                ) catch {
+                    frozen_valid = false;
+                    break;
+                };
+                if (address < range_end and range.address < end) {
+                    frozen_valid = false;
+                    break;
+                }
+            }
+            if (!frozen_valid) break;
+            for (frozen[0..index]) |prior| {
+                const prior_address = @intFromPtr(prior.bytes.ptr);
+                const prior_end = std.math.add(
+                    usize,
+                    prior_address,
+                    prior.bytes.len,
+                ) catch {
+                    frozen_valid = false;
+                    break;
+                };
+                if (address < prior_end and prior_address < end) {
+                    frozen_valid = false;
+                    break;
+                }
+            }
+            if (!frozen_valid) break;
+            frozen_total = std.math.add(
+                usize,
+                frozen_total,
+                frame.bytes.len,
+            ) catch {
+                frozen_valid = false;
+                break;
+            };
+        }
+        const graph_invalid =
+            !frozen_valid or frozen_total != self.external_tx_bytes;
+        if (graph_invalid) {
+            if (entry_lifecycle == .live and
+                self.external_tx_bytes != 0 and
+                self.external_tx_quarantined_bytes == 0)
+                chargeTxQuarantine(self, self.external_tx_bytes);
+            count = 0;
+        }
+        const frame_allocator = self.tx_allocator;
+        const frozen_allocator_ptr = @intFromPtr(self.tx_allocator.ptr);
+        const frozen_allocator_vtable = @intFromPtr(self.tx_allocator.vtable);
+        const frozen_allocator_context_len = self.tx_allocator_context_len;
+        const frozen_backing_addr = self.tx_queue_backing_addr;
+        const frozen_backing_capacity = self.tx_queue_backing_capacity;
+        const frozen_queue_generation = self.tx_queue_generation;
+        const frozen_quarantined_bytes = self.external_tx_quarantined_bytes;
+        const cleanup_total = frozen_total;
+        var cleanup_drift_charged = graph_invalid;
+        var cleanup_drifted = false;
+        self.tx_lifecycle = .tearing_down;
+        self.external_tx = .empty;
+        self.external_tx_bytes = 0;
+        self.external_tx_retiring_bytes = if (count == 0) 0 else frozen_total;
+        self.tx_head_progress_baseline_ns = null;
+        self.tx_immediate_pending = false;
+        for (frozen[0..count], 0..) |frame, index| {
+            const reentry_before = tx_cleanup_reentry_events;
+            if (frame.bytes.len != 0 and
+                frame.offset <= frame.bytes.len and
+                std.mem.eql(
+                    u8,
+                    &frame.descriptor_digest,
+                    &txFrameDescriptorDigest(frame),
+                ))
+                frame_allocator.rawFree(
+                    frame.bytes,
+                    .@"1",
+                    @returnAddress(),
+                );
+            var remaining_descriptors_valid = true;
+            for (
+                frozen[index + 1 .. count],
+                frozen_backing[index + 1 .. count],
+            ) |expected, current| {
+                if (@intFromPtr(expected.bytes.ptr) !=
+                    @intFromPtr(current.bytes.ptr) or
+                    expected.bytes.len != current.bytes.len or
+                    expected.offset != current.offset or
+                    expected.kind != current.kind or
+                    expected.stream_id != current.stream_id or
+                    expected.request_id != current.request_id or
+                    expected.activated_at_ns != current.activated_at_ns or
+                    !std.mem.eql(
+                        u8,
+                        &expected.wire_digest,
+                        &current.wire_digest,
+                    ) or
+                    !std.mem.eql(
+                        u8,
+                        &expected.descriptor_digest,
+                        &current.descriptor_digest,
+                    ))
+                {
+                    remaining_descriptors_valid = false;
+                    break;
+                }
+            }
+            if (!remaining_descriptors_valid or
+                tx_cleanup_reentry_events != reentry_before or
+                self.tx_lifecycle != .tearing_down or
+                self.external_tx.items.len != 0 or
+                self.external_tx.capacity != 0 or
+                self.external_tx_bytes != 0 or
+                self.external_tx_retiring_bytes < frame.bytes.len or
+                self.external_tx_quarantined_bytes !=
+                    frozen_quarantined_bytes or
+                self.tx_queue_backing_addr != frozen_backing_addr or
+                self.tx_queue_backing_capacity != frozen_backing_capacity or
+                self.tx_queue_generation != frozen_queue_generation or
+                self.tx_cleanup_id != cleanup_id or
+                self.tx_cleanup_owner_addr != cleanup_owner_addr or
+                @intFromPtr(self.tx_allocator.ptr) != frozen_allocator_ptr or
+                @intFromPtr(self.tx_allocator.vtable) !=
+                    frozen_allocator_vtable or
+                self.tx_allocator_context_len !=
+                    frozen_allocator_context_len)
+            {
+                if (!cleanup_drift_charged and cleanup_total != 0) {
+                    chargeTxQuarantine(self, cleanup_total);
+                    cleanup_drift_charged = true;
+                }
+                cleanup_drifted = true;
+                break;
+            }
+            self.external_tx_retiring_bytes -= frame.bytes.len;
+        }
+        if (!cleanup_drifted and frozen_backing.len != 0)
+            allocator.rawFree(
+                std.mem.sliceAsBytes(frozen_backing),
+                .of(ExternalTxFrame),
+                @returnAddress(),
+            );
+        if ((self.tx_lifecycle != .tearing_down or
+            self.external_tx.items.len != 0 or
+            self.external_tx.capacity != 0 or
+            self.external_tx_bytes != 0 or
+            self.external_tx_retiring_bytes != 0 or
+            self.tx_queue_backing_addr != frozen_backing_addr or
+            self.tx_queue_backing_capacity != frozen_backing_capacity or
+            self.tx_queue_generation != frozen_queue_generation or
+            self.tx_cleanup_id != cleanup_id or
+            self.tx_cleanup_owner_addr != cleanup_owner_addr or
+            @intFromPtr(self.tx_allocator.ptr) != frozen_allocator_ptr or
+            @intFromPtr(self.tx_allocator.vtable) !=
+                frozen_allocator_vtable or
+            self.tx_allocator_context_len != frozen_allocator_context_len) and
+            !cleanup_drift_charged and cleanup_total != 0)
+            chargeTxQuarantine(self, cleanup_total);
+        self.tx_lifecycle = .dead;
+        self.external_tx = .empty;
+        self.tx_queue_backing_addr = 0;
+        self.tx_queue_backing_capacity = 0;
+        self.external_tx_bytes = 0;
+        self.external_tx_retiring_bytes = 0;
+        self.tx_head_progress_baseline_ns = null;
+        self.tx_immediate_pending = false;
+        self.tx_cleanup_id = 0;
+        self.tx_cleanup_owner_addr = 0;
+        self.tx_claim.store(@intFromEnum(TxClaim.dead), .release);
+        return .cleaned;
     }
 };
 
@@ -5505,5 +6140,1122 @@ test "RX parser readiness treats exact 32-byte terminal outcomes as ready" {
         );
         try std.testing.expect(std.meta.eql(before, state));
         try std.testing.expectEqual(@as(usize, 0), parser.head);
+    }
+}
+
+test "TX teardown callback drift stops remaining frees and charges one sealed transaction" {
+    const DriftFree = struct {
+        state: *State,
+        calls: usize = 0,
+
+        fn allocator(self: *@This()) std.mem.Allocator {
+            return .{ .ptr = self, .vtable = &.{
+                .alloc = alloc,
+                .resize = resize,
+                .remap = remap,
+                .free = free,
+            } };
+        }
+
+        fn alloc(
+            _: *anyopaque,
+            _: usize,
+            _: std.mem.Alignment,
+            _: usize,
+        ) ?[*]u8 {
+            return null;
+        }
+
+        fn resize(
+            _: *anyopaque,
+            _: []u8,
+            _: std.mem.Alignment,
+            _: usize,
+            _: usize,
+        ) bool {
+            return false;
+        }
+
+        fn remap(
+            _: *anyopaque,
+            _: []u8,
+            _: std.mem.Alignment,
+            _: usize,
+            _: usize,
+        ) ?[*]u8 {
+            return null;
+        }
+
+        fn free(
+            raw: *anyopaque,
+            _: []u8,
+            _: std.mem.Alignment,
+            _: usize,
+        ) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            self.state.tx_queue_generation += 1;
+            std.debug.assert(
+                self.state.tryDeinit(std.testing.allocator) == .busy,
+            );
+        }
+    };
+
+    resetTxQuarantineForTest();
+    var state = State{ .saved_flags = 0 };
+    try state.external_tx.ensureTotalCapacityPrecise(
+        std.testing.allocator,
+        max_tx_frames,
+    );
+    state.tx_queue_backing_addr = @intFromPtr(state.external_tx.items.ptr);
+    state.tx_queue_backing_capacity = state.external_tx.capacity;
+    var drift = DriftFree{ .state = &state };
+    const allocator = drift.allocator();
+    state.tx_allocator = allocator;
+    state.tx_allocator_context_len = @sizeOf(DriftFree);
+    var buffers: [2][protocol.header_size]u8 = undefined;
+    for (&buffers, 0..) |*buffer, index| {
+        @memset(buffer, @intCast(index + 1));
+        var frame = ExternalTxFrame{
+            .bytes = buffer,
+            .kind = .input_bytes,
+            .stream_id = @intCast(index + 1),
+            .request_id = 0,
+            .activated_at_ns = 10,
+            .wire_digest = [_]u8{0} ** 32,
+            .descriptor_digest = undefined,
+        };
+        frame.descriptor_digest = txFrameDescriptorDigest(frame);
+        state.external_tx.appendAssumeCapacity(frame);
+        state.external_tx_bytes += frame.bytes.len;
+    }
+
+    const quarantined_backing = state.external_tx.allocatedSlice();
+    state.deinit(std.testing.allocator);
+    defer std.testing.allocator.rawFree(
+        std.mem.sliceAsBytes(quarantined_backing),
+        .of(ExternalTxFrame),
+        @returnAddress(),
+    );
+    try std.testing.expectEqual(@as(usize, 1), drift.calls);
+    try std.testing.expectEqual(TxLifecycle.dead, state.tx_lifecycle);
+    try std.testing.expectEqual(@as(u64, 1), txQuarantineEventsForTest());
+    try std.testing.expectEqual(
+        2 * protocol.header_size,
+        txQuarantineBytesForTest(),
+    );
+    state.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), drift.calls);
+    try std.testing.expectEqual(@as(u64, 1), txQuarantineEventsForTest());
+}
+
+test "TX teardown matrix stops at first or last scalar descriptor allocator and reentry drift" {
+    const DriftMode = enum {
+        state_scalar,
+        next_descriptor,
+        allocator_identity,
+        same_and_cross_reentry,
+    };
+    const MatrixFree = struct {
+        state: *State,
+        cross: *State,
+        queue_backing: [*]ExternalTxFrame,
+        frame_count: usize,
+        drift_index: usize,
+        mode: DriftMode,
+        calls: usize = 0,
+        same_result: ?DeinitResult = null,
+        cross_result: ?DeinitResult = null,
+
+        fn allocator(self: *@This()) std.mem.Allocator {
+            return .{ .ptr = self, .vtable = &.{
+                .alloc = alloc,
+                .resize = resize,
+                .remap = remap,
+                .free = free,
+            } };
+        }
+
+        fn alloc(
+            _: *anyopaque,
+            _: usize,
+            _: std.mem.Alignment,
+            _: usize,
+        ) ?[*]u8 {
+            return null;
+        }
+
+        fn resize(
+            _: *anyopaque,
+            _: []u8,
+            _: std.mem.Alignment,
+            _: usize,
+            _: usize,
+        ) bool {
+            return false;
+        }
+
+        fn remap(
+            _: *anyopaque,
+            _: []u8,
+            _: std.mem.Alignment,
+            _: usize,
+            _: usize,
+        ) ?[*]u8 {
+            return null;
+        }
+
+        fn free(
+            raw: *anyopaque,
+            _: []u8,
+            _: std.mem.Alignment,
+            _: usize,
+        ) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            const index = self.calls;
+            self.calls += 1;
+            if (index != self.drift_index) return;
+            switch (self.mode) {
+                .state_scalar => self.state.tx_queue_generation += 1,
+                .next_descriptor => {
+                    if (index + 1 < self.frame_count) {
+                        self.queue_backing[index + 1].bytes.ptr =
+                            @ptrFromInt(@alignOf(u8));
+                    } else {
+                        self.state.tx_queue_generation += 1;
+                    }
+                },
+                .allocator_identity => self.state.tx_allocator_context_len += 1,
+                .same_and_cross_reentry => {
+                    self.same_result =
+                        self.state.tryDeinit(std.testing.allocator);
+                    self.cross_result =
+                        self.cross.tryDeinit(std.testing.allocator);
+                },
+            }
+        }
+    };
+
+    inline for (.{ @as(usize, 1), @as(usize, 64) }) |frame_count| {
+        inline for (.{ @as(usize, 0), frame_count - 1 }) |drift_index| {
+            inline for (std.meta.tags(DriftMode)) |mode| {
+                resetTxQuarantineForTest();
+                var state = State{ .saved_flags = 0 };
+                try state.external_tx.ensureTotalCapacityPrecise(
+                    std.testing.allocator,
+                    max_tx_frames,
+                );
+                state.tx_queue_backing_addr =
+                    @intFromPtr(state.external_tx.items.ptr);
+                state.tx_queue_backing_capacity =
+                    state.external_tx.capacity;
+                const quarantined_backing =
+                    state.external_tx.allocatedSlice();
+                var cross = State{ .saved_flags = 0 };
+                var probe = MatrixFree{
+                    .state = &state,
+                    .cross = &cross,
+                    .queue_backing = state.external_tx.items.ptr,
+                    .frame_count = frame_count,
+                    .drift_index = drift_index,
+                    .mode = mode,
+                };
+                const allocator = probe.allocator();
+                state.tx_allocator = allocator;
+                state.tx_allocator_context_len = @sizeOf(MatrixFree);
+                var buffers: [max_tx_frames][protocol.header_size]u8 = undefined;
+                for (buffers[0..frame_count], 0..) |*buffer, index| {
+                    @memset(buffer, @intCast(index + 1));
+                    var frame = ExternalTxFrame{
+                        .bytes = buffer,
+                        .kind = .input_bytes,
+                        .stream_id = @intCast(index + 1),
+                        .request_id = 0,
+                        .activated_at_ns = 10,
+                        .wire_digest = [_]u8{0} ** 32,
+                        .descriptor_digest = undefined,
+                    };
+                    frame.descriptor_digest =
+                        txFrameDescriptorDigest(frame);
+                    state.external_tx.appendAssumeCapacity(frame);
+                    state.external_tx_bytes += frame.bytes.len;
+                }
+
+                try std.testing.expectEqual(
+                    DeinitResult.cleaned,
+                    state.tryDeinit(std.testing.allocator),
+                );
+                try std.testing.expectEqual(
+                    drift_index + 1,
+                    probe.calls,
+                );
+                try std.testing.expectEqual(
+                    TxLifecycle.dead,
+                    state.tx_lifecycle,
+                );
+                try std.testing.expectEqual(
+                    @as(u64, 1),
+                    txQuarantineEventsForTest(),
+                );
+                try std.testing.expectEqual(
+                    frame_count * protocol.header_size,
+                    txQuarantineBytesForTest(),
+                );
+                if (mode == .same_and_cross_reentry) {
+                    try std.testing.expectEqual(
+                        DeinitResult.busy,
+                        probe.same_result.?,
+                    );
+                    try std.testing.expectEqual(
+                        DeinitResult.busy,
+                        probe.cross_result.?,
+                    );
+                }
+                try std.testing.expectEqual(
+                    DeinitResult.already_dead,
+                    state.tryDeinit(std.testing.allocator),
+                );
+                try std.testing.expectEqual(
+                    drift_index + 1,
+                    probe.calls,
+                );
+                try std.testing.expectEqual(
+                    DeinitResult.cleaned,
+                    cross.tryDeinit(std.testing.allocator),
+                );
+                std.testing.allocator.rawFree(
+                    std.mem.sliceAsBytes(quarantined_backing),
+                    .of(ExternalTxFrame),
+                    @returnAddress(),
+                );
+            }
+        }
+    }
+}
+
+test "TX teardown permits unrelated states to clean concurrently without quarantine" {
+    const BarrierFree = struct {
+        entered: *std.atomic.Value(bool),
+        release: *std.atomic.Value(bool),
+        block: bool,
+        calls: usize = 0,
+
+        fn allocator(self: *@This()) std.mem.Allocator {
+            return .{ .ptr = self, .vtable = &.{
+                .alloc = alloc,
+                .resize = resize,
+                .remap = remap,
+                .free = free,
+            } };
+        }
+
+        fn alloc(
+            _: *anyopaque,
+            _: usize,
+            _: std.mem.Alignment,
+            _: usize,
+        ) ?[*]u8 {
+            return null;
+        }
+
+        fn resize(
+            _: *anyopaque,
+            _: []u8,
+            _: std.mem.Alignment,
+            _: usize,
+            _: usize,
+        ) bool {
+            return false;
+        }
+
+        fn remap(
+            _: *anyopaque,
+            _: []u8,
+            _: std.mem.Alignment,
+            _: usize,
+            _: usize,
+        ) ?[*]u8 {
+            return null;
+        }
+
+        fn free(
+            raw: *anyopaque,
+            _: []u8,
+            _: std.mem.Alignment,
+            _: usize,
+        ) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            if (!self.block) return;
+            self.entered.store(true, .release);
+            while (!self.release.load(.acquire))
+                std.atomic.spinLoopHint();
+        }
+    };
+    const Runner = struct {
+        const Context = struct {
+            state: *State,
+            result: ?DeinitResult = null,
+        };
+
+        fn run(context: *Context) void {
+            context.result =
+                context.state.tryDeinit(std.testing.allocator);
+        }
+    };
+
+    resetTxQuarantineForTest();
+    var entered: std.atomic.Value(bool) = .init(false);
+    var release: std.atomic.Value(bool) = .init(false);
+    var states = [2]State{
+        .{ .saved_flags = 0 },
+        .{ .saved_flags = 0 },
+    };
+    var probes = [2]BarrierFree{
+        .{
+            .entered = &entered,
+            .release = &release,
+            .block = true,
+        },
+        .{
+            .entered = &entered,
+            .release = &release,
+            .block = false,
+        },
+    };
+    var buffers: [2][protocol.header_size]u8 = undefined;
+    for (&states, &probes, &buffers, 0..) |*state, *probe, *buffer, index| {
+        try state.external_tx.ensureTotalCapacityPrecise(
+            std.testing.allocator,
+            max_tx_frames,
+        );
+        state.tx_queue_backing_addr =
+            @intFromPtr(state.external_tx.items.ptr);
+        state.tx_queue_backing_capacity = state.external_tx.capacity;
+        state.tx_allocator = probe.allocator();
+        state.tx_allocator_context_len = @sizeOf(BarrierFree);
+        @memset(buffer, @intCast(index + 1));
+        var frame = ExternalTxFrame{
+            .bytes = buffer,
+            .kind = .input_bytes,
+            .stream_id = @intCast(index + 1),
+            .request_id = 0,
+            .activated_at_ns = 10,
+            .wire_digest = [_]u8{0} ** 32,
+            .descriptor_digest = undefined,
+        };
+        frame.descriptor_digest = txFrameDescriptorDigest(frame);
+        state.external_tx.appendAssumeCapacity(frame);
+        state.external_tx_bytes = frame.bytes.len;
+    }
+    var context = Runner.Context{ .state = &states[0] };
+    const thread = try std.Thread.spawn(.{}, Runner.run, .{&context});
+    errdefer {
+        release.store(true, .release);
+        thread.join();
+    }
+    while (!entered.load(.acquire)) std.atomic.spinLoopHint();
+    try std.testing.expectEqual(
+        DeinitResult.cleaned,
+        states[1].tryDeinit(std.testing.allocator),
+    );
+    release.store(true, .release);
+    thread.join();
+    try std.testing.expectEqual(DeinitResult.cleaned, context.result.?);
+    try std.testing.expectEqual(@as(usize, 1), probes[0].calls);
+    try std.testing.expectEqual(@as(usize, 1), probes[1].calls);
+    try std.testing.expectEqual(@as(u64, 0), txQuarantineEventsForTest());
+}
+
+test "TX teardown serializes the same state across threads without double free" {
+    const BarrierFree = struct {
+        entered: *std.atomic.Value(bool),
+        release: *std.atomic.Value(bool),
+        calls: std.atomic.Value(usize) = .init(0),
+
+        fn allocator(self: *@This()) std.mem.Allocator {
+            return .{ .ptr = self, .vtable = &.{
+                .alloc = alloc,
+                .resize = resize,
+                .remap = remap,
+                .free = free,
+            } };
+        }
+
+        fn alloc(
+            _: *anyopaque,
+            _: usize,
+            _: std.mem.Alignment,
+            _: usize,
+        ) ?[*]u8 {
+            return null;
+        }
+
+        fn resize(
+            _: *anyopaque,
+            _: []u8,
+            _: std.mem.Alignment,
+            _: usize,
+            _: usize,
+        ) bool {
+            return false;
+        }
+
+        fn remap(
+            _: *anyopaque,
+            _: []u8,
+            _: std.mem.Alignment,
+            _: usize,
+            _: usize,
+        ) ?[*]u8 {
+            return null;
+        }
+
+        fn free(
+            raw: *anyopaque,
+            _: []u8,
+            _: std.mem.Alignment,
+            _: usize,
+        ) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            _ = self.calls.fetchAdd(1, .acq_rel);
+            self.entered.store(true, .release);
+            while (!self.release.load(.acquire))
+                std.atomic.spinLoopHint();
+        }
+    };
+    const Runner = struct {
+        const Context = struct {
+            state: *State,
+            result: ?DeinitResult = null,
+        };
+
+        fn run(context: *Context) void {
+            context.result =
+                context.state.tryDeinit(std.testing.allocator);
+        }
+    };
+
+    resetTxQuarantineForTest();
+    var entered: std.atomic.Value(bool) = .init(false);
+    var release: std.atomic.Value(bool) = .init(false);
+    var state = State{ .saved_flags = 0 };
+    try state.external_tx.ensureTotalCapacityPrecise(
+        std.testing.allocator,
+        max_tx_frames,
+    );
+    state.tx_queue_backing_addr =
+        @intFromPtr(state.external_tx.items.ptr);
+    state.tx_queue_backing_capacity = state.external_tx.capacity;
+    var probe = BarrierFree{
+        .entered = &entered,
+        .release = &release,
+    };
+    state.tx_allocator = probe.allocator();
+    state.tx_allocator_context_len = @sizeOf(BarrierFree);
+    var buffer: [protocol.header_size]u8 = undefined;
+    @memset(&buffer, 0x5a);
+    var frame = ExternalTxFrame{
+        .bytes = &buffer,
+        .kind = .input_bytes,
+        .stream_id = 1,
+        .request_id = 0,
+        .activated_at_ns = 10,
+        .wire_digest = [_]u8{0} ** 32,
+        .descriptor_digest = undefined,
+    };
+    frame.descriptor_digest = txFrameDescriptorDigest(frame);
+    state.external_tx.appendAssumeCapacity(frame);
+    state.external_tx_bytes = frame.bytes.len;
+
+    var context = Runner.Context{ .state = &state };
+    const thread = try std.Thread.spawn(.{}, Runner.run, .{&context});
+    errdefer {
+        release.store(true, .release);
+        thread.join();
+    }
+    while (!entered.load(.acquire)) std.atomic.spinLoopHint();
+    try std.testing.expectEqual(
+        DeinitResult.busy,
+        state.tryDeinit(std.testing.allocator),
+    );
+    try std.testing.expectEqual(@as(usize, 1), probe.calls.load(.acquire));
+    release.store(true, .release);
+    thread.join();
+    try std.testing.expectEqual(DeinitResult.cleaned, context.result.?);
+    try std.testing.expectEqual(@as(usize, 1), probe.calls.load(.acquire));
+    try std.testing.expectEqual(
+        DeinitResult.already_dead,
+        state.tryDeinit(std.testing.allocator),
+    );
+    try std.testing.expectEqual(@as(u64, 0), txQuarantineEventsForTest());
+}
+
+test "TX operation claim makes void teardown a bounded no-op and typed teardown busy" {
+    const Runner = struct {
+        const Context = struct {
+            state: *State,
+            started: *std.atomic.Value(bool),
+            finished: *std.atomic.Value(bool),
+        };
+
+        fn run(context: *Context) void {
+            context.started.store(true, .release);
+            context.state.deinit(std.testing.allocator);
+            context.finished.store(true, .release);
+        }
+    };
+
+    var state = State{ .saved_flags = 0 };
+    try std.testing.expect(state.acquireTxOperation());
+    try std.testing.expect(state.txOperationHeldByCurrentThread());
+    try std.testing.expectEqual(
+        DeinitResult.busy,
+        state.tryDeinit(std.testing.allocator),
+    );
+    var started: std.atomic.Value(bool) = .init(false);
+    var finished: std.atomic.Value(bool) = .init(false);
+    var context = Runner.Context{
+        .state = &state,
+        .started = &started,
+        .finished = &finished,
+    };
+    const thread = try std.Thread.spawn(.{}, Runner.run, .{&context});
+    errdefer {
+        _ = state.releaseTxOperation();
+        thread.join();
+    }
+    while (!started.load(.acquire)) std.atomic.spinLoopHint();
+    while (!finished.load(.acquire)) std.atomic.spinLoopHint();
+    try std.testing.expect(state.txOperationHeldByCurrentThread());
+    try std.testing.expect(state.releaseTxOperation());
+    thread.join();
+    try std.testing.expect(finished.load(.acquire));
+    try std.testing.expectEqual(
+        DeinitResult.cleaned,
+        state.tryDeinit(std.testing.allocator),
+    );
+    try std.testing.expectEqual(
+        DeinitResult.already_dead,
+        state.tryDeinit(std.testing.allocator),
+    );
+}
+
+test "TX close request between release load and CAS is observed atomically" {
+    const Hook = struct {
+        fn run(raw: *anyopaque) void {
+            const state: *State = @ptrCast(@alignCast(raw));
+            state.requestTxClose();
+        }
+    };
+
+    var state = State{ .saved_flags = 0 };
+    try std.testing.expect(state.acquireTxOperation());
+    try std.testing.expectEqual(
+        true,
+        state.releaseTxOperationAndObserveCloseWithHook(
+            Hook.run,
+            @ptrCast(&state),
+        ).?,
+    );
+    try std.testing.expect(state.txCloseRequested());
+    try std.testing.expect(!state.acquireTxOperation());
+    try std.testing.expectEqual(
+        DeinitResult.cleaned,
+        state.tryDeinit(std.testing.allocator),
+    );
+}
+
+test "TX cleanup transfer rejects an independently reserved destination" {
+    const Runner = struct {
+        const Context = struct {
+            state: *State,
+            ready: *std.atomic.Value(bool),
+            release: *std.atomic.Value(bool),
+            reserve_result: ?DeinitReservationResult = null,
+            finish_result: ?DeinitResult = null,
+        };
+
+        fn run(context: *Context) void {
+            context.reserve_result = context.state.reserveDeinit();
+            context.ready.store(true, .release);
+            while (!context.release.load(.acquire))
+                std.atomic.spinLoopHint();
+            context.finish_result =
+                context.state.finishReservedDeinit(std.testing.allocator);
+        }
+    };
+
+    var source = State{ .saved_flags = 0 };
+    var destination = State{ .saved_flags = 0 };
+    var ready: std.atomic.Value(bool) = .init(false);
+    var release: std.atomic.Value(bool) = .init(false);
+    var context = Runner.Context{
+        .state = &destination,
+        .ready = &ready,
+        .release = &release,
+    };
+    const thread = try std.Thread.spawn(.{}, Runner.run, .{&context});
+    errdefer {
+        release.store(true, .release);
+        thread.join();
+    }
+    while (!ready.load(.acquire)) std.atomic.spinLoopHint();
+    try std.testing.expectEqual(
+        DeinitReservationResult.reserved,
+        context.reserve_result.?,
+    );
+    try std.testing.expectEqual(
+        DeinitReservationResult.reserved,
+        source.reserveDeinit(),
+    );
+    try std.testing.expect(!source.transferReservedDeinit(&destination));
+    try std.testing.expectEqual(
+        DeinitResult.cleaned,
+        source.finishReservedDeinit(std.testing.allocator),
+    );
+    release.store(true, .release);
+    thread.join();
+    try std.testing.expectEqual(DeinitResult.cleaned, context.finish_result.?);
+}
+
+test "TX cleanup transfer rejects destination during reservation publication" {
+    const Runner = struct {
+        const Context = struct {
+            state: *State,
+            entered: *std.atomic.Value(bool),
+            release: *std.atomic.Value(bool),
+            reserve_result: ?DeinitReservationResult = null,
+            finish_result: ?DeinitResult = null,
+        };
+
+        fn hook(raw: *anyopaque) void {
+            const context: *Context = @ptrCast(@alignCast(raw));
+            context.entered.store(true, .release);
+            while (!context.release.load(.acquire))
+                std.atomic.spinLoopHint();
+        }
+
+        fn run(context: *Context) void {
+            context.reserve_result = context.state.reserveDeinitWithHook(
+                hook,
+                @ptrCast(context),
+            );
+            context.finish_result =
+                context.state.finishReservedDeinit(std.testing.allocator);
+        }
+    };
+
+    var source = State{ .saved_flags = 0 };
+    var destination = State{ .saved_flags = 0 };
+    var entered: std.atomic.Value(bool) = .init(false);
+    var release: std.atomic.Value(bool) = .init(false);
+    var context = Runner.Context{
+        .state = &destination,
+        .entered = &entered,
+        .release = &release,
+    };
+    const thread = try std.Thread.spawn(.{}, Runner.run, .{&context});
+    errdefer {
+        release.store(true, .release);
+        thread.join();
+    }
+    while (!entered.load(.acquire)) std.atomic.spinLoopHint();
+    try std.testing.expectEqual(
+        DeinitReservationResult.reserved,
+        source.reserveDeinit(),
+    );
+    try std.testing.expect(!source.transferReservedDeinit(&destination));
+    try std.testing.expectEqual(
+        DeinitResult.cleaned,
+        source.finishReservedDeinit(std.testing.allocator),
+    );
+    release.store(true, .release);
+    thread.join();
+    try std.testing.expectEqual(
+        DeinitReservationResult.reserved,
+        context.reserve_result.?,
+    );
+    try std.testing.expectEqual(DeinitResult.cleaned, context.finish_result.?);
+}
+
+test "TX cleanup reservation cancel restores close-only state" {
+    var state = State{ .saved_flags = 0 };
+    state.requestTxClose();
+    try std.testing.expectEqual(
+        DeinitReservationResult.reserved,
+        state.reserveDeinit(),
+    );
+    try std.testing.expect(state.cancelReservedDeinit());
+    try std.testing.expect(state.txCloseRequested());
+    try std.testing.expect(!state.acquireTxOperation());
+    try std.testing.expectEqual(
+        DeinitResult.cleaned,
+        state.tryDeinit(std.testing.allocator),
+    );
+}
+
+test "TX teardown detects queue-backing free callback drift after exact cleanup" {
+    const FrameFree = struct {
+        calls: usize = 0,
+
+        fn allocator(self: *@This()) std.mem.Allocator {
+            return .{ .ptr = self, .vtable = &.{
+                .alloc = alloc,
+                .resize = resize,
+                .remap = remap,
+                .free = free,
+            } };
+        }
+
+        fn alloc(
+            _: *anyopaque,
+            _: usize,
+            _: std.mem.Alignment,
+            _: usize,
+        ) ?[*]u8 {
+            return null;
+        }
+
+        fn resize(
+            _: *anyopaque,
+            _: []u8,
+            _: std.mem.Alignment,
+            _: usize,
+            _: usize,
+        ) bool {
+            return false;
+        }
+
+        fn remap(
+            _: *anyopaque,
+            _: []u8,
+            _: std.mem.Alignment,
+            _: usize,
+            _: usize,
+        ) ?[*]u8 {
+            return null;
+        }
+
+        fn free(
+            raw: *anyopaque,
+            _: []u8,
+            _: std.mem.Alignment,
+            _: usize,
+        ) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+        }
+    };
+    const BackingDrift = struct {
+        parent: std.mem.Allocator,
+        state: *State,
+        free_calls: usize = 0,
+
+        fn allocator(self: *@This()) std.mem.Allocator {
+            return .{ .ptr = self, .vtable = &.{
+                .alloc = alloc,
+                .resize = resize,
+                .remap = remap,
+                .free = free,
+            } };
+        }
+
+        fn alloc(
+            raw: *anyopaque,
+            len: usize,
+            alignment: std.mem.Alignment,
+            ret_addr: usize,
+        ) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return self.parent.rawAlloc(len, alignment, ret_addr);
+        }
+
+        fn resize(
+            _: *anyopaque,
+            _: []u8,
+            _: std.mem.Alignment,
+            _: usize,
+            _: usize,
+        ) bool {
+            return false;
+        }
+
+        fn remap(
+            _: *anyopaque,
+            _: []u8,
+            _: std.mem.Alignment,
+            _: usize,
+            _: usize,
+        ) ?[*]u8 {
+            return null;
+        }
+
+        fn free(
+            raw: *anyopaque,
+            memory: []u8,
+            alignment: std.mem.Alignment,
+            ret_addr: usize,
+        ) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.free_calls += 1;
+            self.parent.rawFree(memory, alignment, ret_addr);
+            self.state.tx_queue_generation += 1;
+        }
+    };
+
+    resetTxQuarantineForTest();
+    var state = State{ .saved_flags = 0 };
+    var backing = BackingDrift{
+        .parent = std.testing.allocator,
+        .state = &state,
+    };
+    const backing_allocator = backing.allocator();
+    try state.external_tx.ensureTotalCapacityPrecise(
+        backing_allocator,
+        max_tx_frames,
+    );
+    state.tx_queue_backing_addr = @intFromPtr(state.external_tx.items.ptr);
+    state.tx_queue_backing_capacity = state.external_tx.capacity;
+    var frame_free = FrameFree{};
+    state.tx_allocator = frame_free.allocator();
+    state.tx_allocator_context_len = @sizeOf(FrameFree);
+    var buffer: [protocol.header_size]u8 = undefined;
+    @memset(&buffer, 0x5a);
+    var frame = ExternalTxFrame{
+        .bytes = &buffer,
+        .kind = .input_bytes,
+        .stream_id = 1,
+        .request_id = 0,
+        .activated_at_ns = 10,
+        .wire_digest = [_]u8{0} ** 32,
+        .descriptor_digest = undefined,
+    };
+    frame.descriptor_digest = txFrameDescriptorDigest(frame);
+    state.external_tx.appendAssumeCapacity(frame);
+    state.external_tx_bytes = frame.bytes.len;
+
+    try std.testing.expectEqual(
+        DeinitResult.cleaned,
+        state.tryDeinit(backing_allocator),
+    );
+    try std.testing.expectEqual(@as(usize, 1), frame_free.calls);
+    try std.testing.expectEqual(@as(usize, 1), backing.free_calls);
+    try std.testing.expectEqual(@as(u64, 1), txQuarantineEventsForTest());
+    try std.testing.expectEqual(
+        protocol.header_size,
+        txQuarantineBytesForTest(),
+    );
+    try std.testing.expectEqual(
+        DeinitResult.already_dead,
+        state.tryDeinit(backing_allocator),
+    );
+    try std.testing.expectEqual(@as(usize, 1), backing.free_calls);
+}
+
+test "TX teardown rejects exact and partial-overlap frozen graphs without a frame free" {
+    const FrameFree = struct {
+        calls: usize = 0,
+
+        fn allocator(self: *@This()) std.mem.Allocator {
+            return .{ .ptr = self, .vtable = &.{
+                .alloc = alloc,
+                .resize = resize,
+                .remap = remap,
+                .free = free,
+            } };
+        }
+
+        fn alloc(
+            _: *anyopaque,
+            _: usize,
+            _: std.mem.Alignment,
+            _: usize,
+        ) ?[*]u8 {
+            return null;
+        }
+
+        fn resize(
+            _: *anyopaque,
+            _: []u8,
+            _: std.mem.Alignment,
+            _: usize,
+            _: usize,
+        ) bool {
+            return false;
+        }
+
+        fn remap(
+            _: *anyopaque,
+            _: []u8,
+            _: std.mem.Alignment,
+            _: usize,
+            _: usize,
+        ) ?[*]u8 {
+            return null;
+        }
+
+        fn free(
+            raw: *anyopaque,
+            _: []u8,
+            _: std.mem.Alignment,
+            _: usize,
+        ) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+        }
+    };
+
+    inline for (.{ false, true }) |partial_overlap| {
+        resetTxQuarantineForTest();
+        var state = State{ .saved_flags = 0 };
+        try state.external_tx.ensureTotalCapacityPrecise(
+            std.testing.allocator,
+            max_tx_frames,
+        );
+        state.tx_queue_backing_addr = @intFromPtr(state.external_tx.items.ptr);
+        state.tx_queue_backing_capacity = state.external_tx.capacity;
+        var frame_free = FrameFree{};
+        state.tx_allocator = frame_free.allocator();
+        state.tx_allocator_context_len = @sizeOf(FrameFree);
+        var buffer: [protocol.header_size + 16]u8 = undefined;
+        @memset(&buffer, 0x5a);
+        const slices = if (partial_overlap)
+            [2][]u8{
+                buffer[0..protocol.header_size],
+                buffer[16 .. 16 + protocol.header_size],
+            }
+        else
+            [2][]u8{
+                buffer[0..protocol.header_size],
+                buffer[0..protocol.header_size],
+            };
+        for (slices, 0..) |bytes, index| {
+            var frame = ExternalTxFrame{
+                .bytes = bytes,
+                .kind = .input_bytes,
+                .stream_id = @intCast(index + 1),
+                .request_id = 0,
+                .activated_at_ns = 10,
+                .wire_digest = [_]u8{0} ** 32,
+                .descriptor_digest = undefined,
+            };
+            frame.descriptor_digest = txFrameDescriptorDigest(frame);
+            state.external_tx.appendAssumeCapacity(frame);
+            state.external_tx_bytes += frame.bytes.len;
+        }
+
+        try std.testing.expectEqual(
+            DeinitResult.cleaned,
+            state.tryDeinit(std.testing.allocator),
+        );
+        try std.testing.expectEqual(@as(usize, 0), frame_free.calls);
+        try std.testing.expectEqual(@as(u64, 1), txQuarantineEventsForTest());
+        try std.testing.expectEqual(
+            2 * protocol.header_size,
+            txQuarantineBytesForTest(),
+        );
+        try std.testing.expectEqual(
+            DeinitResult.already_dead,
+            state.tryDeinit(std.testing.allocator),
+        );
+        try std.testing.expectEqual(@as(usize, 0), frame_free.calls);
+    }
+}
+
+test "TX teardown at exhausted generation frees one and sixty-four frames exactly once" {
+    const FrameFree = struct {
+        calls: usize = 0,
+
+        fn allocator(self: *@This()) std.mem.Allocator {
+            return .{ .ptr = self, .vtable = &.{
+                .alloc = alloc,
+                .resize = resize,
+                .remap = remap,
+                .free = free,
+            } };
+        }
+
+        fn alloc(
+            _: *anyopaque,
+            _: usize,
+            _: std.mem.Alignment,
+            _: usize,
+        ) ?[*]u8 {
+            return null;
+        }
+
+        fn resize(
+            _: *anyopaque,
+            _: []u8,
+            _: std.mem.Alignment,
+            _: usize,
+            _: usize,
+        ) bool {
+            return false;
+        }
+
+        fn remap(
+            _: *anyopaque,
+            _: []u8,
+            _: std.mem.Alignment,
+            _: usize,
+            _: usize,
+        ) ?[*]u8 {
+            return null;
+        }
+
+        fn free(
+            raw: *anyopaque,
+            _: []u8,
+            _: std.mem.Alignment,
+            _: usize,
+        ) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+        }
+    };
+
+    inline for (.{ @as(usize, 1), @as(usize, 64) }) |frame_count| {
+        resetTxQuarantineForTest();
+        var state = State{ .saved_flags = 0 };
+        try state.external_tx.ensureTotalCapacityPrecise(
+            std.testing.allocator,
+            max_tx_frames,
+        );
+        state.tx_queue_backing_addr = @intFromPtr(state.external_tx.items.ptr);
+        state.tx_queue_backing_capacity = state.external_tx.capacity;
+        state.tx_queue_generation = std.math.maxInt(u64);
+        var frame_free = FrameFree{};
+        state.tx_allocator = frame_free.allocator();
+        state.tx_allocator_context_len = @sizeOf(FrameFree);
+        var buffers: [max_tx_frames][protocol.header_size]u8 = undefined;
+        for (buffers[0..frame_count], 0..) |*buffer, index| {
+            @memset(buffer, @intCast(index + 1));
+            var frame = ExternalTxFrame{
+                .bytes = buffer,
+                .kind = .input_bytes,
+                .stream_id = @intCast(index + 1),
+                .request_id = 0,
+                .activated_at_ns = 10,
+                .wire_digest = [_]u8{0} ** 32,
+                .descriptor_digest = undefined,
+            };
+            frame.descriptor_digest = txFrameDescriptorDigest(frame);
+            state.external_tx.appendAssumeCapacity(frame);
+            state.external_tx_bytes += frame.bytes.len;
+        }
+
+        try std.testing.expectEqual(
+            DeinitResult.cleaned,
+            state.tryDeinit(std.testing.allocator),
+        );
+        try std.testing.expectEqual(frame_count, frame_free.calls);
+        try std.testing.expectEqual(@as(u64, 0), txQuarantineEventsForTest());
+        try std.testing.expectEqual(
+            DeinitResult.already_dead,
+            state.tryDeinit(std.testing.allocator),
+        );
+        try std.testing.expectEqual(frame_count, frame_free.calls);
     }
 }

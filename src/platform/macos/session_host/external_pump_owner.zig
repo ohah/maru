@@ -848,7 +848,7 @@ test "d2c product owner maps readiness to POSIX RX before any writable work" {
             .aborted,
             .reset,
         },
-        drained_authority.events,
+        drained_authority.events[0..4].*,
     );
     try std.testing.expectEqual(drained_generation + 1, scratch.turn_generation);
     try std.testing.expect(

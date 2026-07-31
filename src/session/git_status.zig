@@ -195,8 +195,38 @@ pub const LineDelta = struct {
     added: u32 = 0,
     removed: u32 = 0,
     binary: bool = false,
+    /// numstat이 rename을 `A => B` 또는 `pre/{A => B}/post` **한 필드**로 적었는가. 그러면 `path`는 status의 경로와
+    /// 글자 그대로 다르므로 그대로 대조하면 안 된다 — `newPath(buf)`로 새 경로를 복원해 맞춘다.
+    rename: bool = false,
     path: []const u8,
+
+    /// rename 표기를 푼 **새 경로**를 `buf`에 쓰고 그 슬라이스를 돌려준다(그 외에는 `path` 그대로).
+    /// 버퍼가 모자라면 null — 호출자는 그 행의 증감을 비워 두고 표시만 건너뛴다(틀린 숫자를 붙이지 않는다).
+    ///
+    /// 형식(실측): `gone.txt => renamed.txt`, `{old => src}/deep.txt`. 뒤쪽 형태는 공통 prefix/suffix를 묶어 주는
+    /// git의 축약이라 **문자열 치환이 아니라 구간 조립**이 필요하다.
+    pub fn newPath(self: LineDelta, buf: []u8) ?[]const u8 {
+        if (!self.rename) return self.path;
+        const arrow = std.mem.indexOf(u8, self.path, " => ") orelse return self.path;
+        if (std.mem.lastIndexOfScalar(u8, self.path[0..arrow], '{')) |open| {
+            const close = std.mem.indexOfScalarPos(u8, self.path, arrow, '}') orelse return null;
+            const prefix = self.path[0..open];
+            const new_mid = self.path[arrow + 4 .. close];
+            const suffix = self.path[close + 1 ..];
+            const total = prefix.len + new_mid.len + suffix.len;
+            if (total > buf.len) return null;
+            @memcpy(buf[0..prefix.len], prefix);
+            @memcpy(buf[prefix.len..][0..new_mid.len], new_mid);
+            @memcpy(buf[prefix.len + new_mid.len ..][0..suffix.len], suffix);
+            return buf[0..total];
+        }
+        return self.path[arrow + 4 ..];
+    }
 };
+
+fn isRenamePath(path: []const u8) bool {
+    return std.mem.indexOf(u8, path, " => ") != null;
+}
 
 pub const NumstatIterator = struct {
     lines: std.mem.SplitIterator(u8, .scalar),
@@ -212,11 +242,12 @@ pub const NumstatIterator = struct {
             const path = line[t2 + 1 ..];
             if (path.len == 0) continue;
             if (std.mem.eql(u8, added, "-") and std.mem.eql(u8, removed, "-"))
-                return .{ .binary = true, .path = path };
+                return .{ .binary = true, .path = path, .rename = isRenamePath(path) };
             return .{
                 .added = std.fmt.parseInt(u32, added, 10) catch continue,
                 .removed = std.fmt.parseInt(u32, removed, 10) catch continue,
                 .path = path,
+                .rename = isRenamePath(path),
             };
         }
         return null;
@@ -292,6 +323,31 @@ test "branch 헤더: upstream이 없으면 ahead/behind도 없다" {
 
     const detached = parseHead("# branch.head (detached)\n");
     try testing.expect(detached.detached and detached.branch == null);
+}
+
+test "numstat rename: status 경로와 맞추려면 새 경로를 복원해야 한다" {
+    // 실측: `--find-renames`가 켜지면 numstat 경로가 status의 경로와 **글자 그대로 다르다**. 그대로 대조하면
+    // rename된 파일의 +N -N이 영영 안 붙는다.
+    var buf: [256]u8 = undefined;
+    var it = iterateNumstat("0\t0\tgone.txt => renamed.txt\n0\t0\t{old => src}/deep.txt\n3\t1\tplain.txt\n");
+
+    const simple = it.next().?;
+    try testing.expect(simple.rename);
+    try testing.expectEqualStrings("renamed.txt", simple.newPath(&buf).?);
+
+    // 축약형은 공통 prefix/suffix를 묶으므로 구간 조립이 필요하다(문자열 치환으로는 안 된다).
+    const compact = it.next().?;
+    try testing.expect(compact.rename);
+    try testing.expectEqualStrings("src/deep.txt", compact.newPath(&buf).?);
+
+    const plain = it.next().?;
+    try testing.expect(!plain.rename);
+    try testing.expectEqualStrings("plain.txt", plain.newPath(&buf).?);
+
+    // 버퍼가 모자라면 null — 틀린 경로에 숫자를 붙이느니 그 행의 증감을 비운다.
+    var tiny: [4]u8 = undefined;
+    var one = iterateNumstat("0\t0\t{old => src}/deep.txt\n");
+    try testing.expect(one.next().?.newPath(&tiny) == null);
 }
 
 test "numstat: 숫자와 binary를 구분한다" {

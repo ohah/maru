@@ -5,6 +5,7 @@
 //! share one deadline/priority policy without creating a second transport implementation.
 
 const std = @import("std");
+const external_recovery_types = @import("external_recovery_types.zig");
 
 pub const max_interrupt_retries_per_direction: u8 = 8;
 
@@ -54,15 +55,13 @@ pub const TurnResult = struct {
 
 pub const RequestIdState = @import("request_id_state.zig").State;
 
-pub const RecoveryOrigin = enum {
-    host,
-    client,
-};
+pub const RecoveryOrigin = external_recovery_types.Origin;
+pub const RecoveryKey = external_recovery_types.Key;
+pub const RecoveryMarkResult = external_recovery_types.MarkResult;
 
-pub const RecoveryKey = struct {
-    origin: RecoveryOrigin,
-    recovery_epoch: u64,
-    expected_token_generation: u64,
+pub const PollHint = struct {
+    immediate: bool,
+    next_deadline_ns: ?i128,
 };
 
 pub const RecoveryContext = struct {
@@ -116,6 +115,173 @@ pub const ExternalPumpState = union(enum) {
     active: AuthorityState,
     terminal: ExternalPumpTerminal,
 };
+
+pub const RecoveryTrigger = enum {
+    local_overflow,
+    host_invalidated,
+    fresh_commit,
+};
+
+/// Evidence owned by f1/f2 and consumed by the recovery reducer. Keeping this semantic enum here
+/// lets e-core close the collision table without inventing TX offsets or response ownership.
+pub const ControlProgress = enum {
+    none,
+    offset_zero_unsent,
+    partial,
+    fully_sent,
+    response_wait,
+};
+
+pub const RecoveryDisposition = enum {
+    no_op,
+    entered,
+    promoted_to_host,
+    committed,
+    terminal,
+};
+
+pub const RecoveryTransitionInput = struct {
+    state: AuthorityState,
+    trigger: RecoveryTrigger,
+    control: ControlProgress = .none,
+    now_ns: i128,
+    /// Supplied only for a new valid→recovery transition. The caller checked epoch increment and
+    /// absolute-deadline arithmetic before asking this allocation-free reducer to publish a plan.
+    new_context: ?RecoveryContext = null,
+};
+
+pub const RecoveryTransitionPlan = struct {
+    disposition: RecoveryDisposition,
+    next: AuthorityState,
+    drop_backlog: bool = false,
+    cancel_control: bool = false,
+    immediate_turn_required: bool = false,
+};
+
+fn terminalRecoveryPlan() RecoveryTransitionPlan {
+    return .{
+        .disposition = .terminal,
+        // The caller maps this closed disposition to ExternalPumpState.terminal. `next` remains a
+        // non-authoritative placeholder so no terminal branch can accidentally clear a gate.
+        .next = .valid,
+    };
+}
+
+fn enterRecovery(
+    origin: RecoveryOrigin,
+    context: RecoveryContext,
+    cancel_control: bool,
+) RecoveryTransitionPlan {
+    if (context.epoch == 0) return terminalRecoveryPlan();
+    return .{
+        .disposition = .entered,
+        .next = switch (origin) {
+            .host => .{ .host_recovery = .{ .ack_unadmitted = context } },
+            .client => .{ .client_recovery = .{ .control_wait = context } },
+        },
+        .drop_backlog = true,
+        .cancel_control = cancel_control,
+    };
+}
+
+fn recoveryContext(state: AuthorityState) ?RecoveryContext {
+    return switch (state) {
+        .valid, .control => null,
+        .host_recovery => |phase| switch (phase) {
+            .ack_unadmitted => |context| context,
+            .ack_queued => |context| context,
+            .awaiting_snapshot => |waiting| waiting.context,
+            .applied_pending => |waiting| waiting.context,
+        },
+        .client_recovery => |phase| switch (phase) {
+            .control_wait => |context| context,
+            .control_in_flight => |context| context,
+            .awaiting_snapshot => |waiting| waiting.context,
+            .applied_pending => |waiting| waiting.context,
+        },
+    };
+}
+
+pub fn recoveryDeadline(state: AuthorityState) ?i128 {
+    const context = recoveryContext(state) orelse return null;
+    return context.deadline_ns;
+}
+
+fn planFreshRecoveryCommit(input: RecoveryTransitionInput) RecoveryTransitionPlan {
+    const waiting = switch (input.state) {
+        .host_recovery => |phase| switch (phase) {
+            .applied_pending => |value| value,
+            else => return terminalRecoveryPlan(),
+        },
+        .client_recovery => |phase| switch (phase) {
+            .applied_pending => |value| value,
+            else => return terminalRecoveryPlan(),
+        },
+        else => return terminalRecoveryPlan(),
+    };
+    if (input.control != .none or input.now_ns >= waiting.context.deadline_ns)
+        return terminalRecoveryPlan();
+    return .{
+        .disposition = .committed,
+        .next = .valid,
+    };
+}
+
+/// Closed allocation-free interpretation of the normative 2b2e collision table. It never mutates
+/// queues or controls; the storage layer must seal the returned actions with its cleanup aggregate
+/// and commit them in one no-callback suffix.
+pub fn planRecoveryTransition(
+    input: RecoveryTransitionInput,
+) RecoveryTransitionPlan {
+    if (input.trigger == .fresh_commit) return planFreshRecoveryCommit(input);
+
+    switch (input.state) {
+        .valid, .control => {
+            if (input.new_context == null) return terminalRecoveryPlan();
+            const cancel = switch (input.control) {
+                .none => false,
+                .offset_zero_unsent => true,
+                .partial, .fully_sent, .response_wait => return terminalRecoveryPlan(),
+            };
+            return enterRecovery(
+                if (input.trigger == .host_invalidated) .host else .client,
+                input.new_context.?,
+                cancel,
+            );
+        },
+        .host_recovery => {
+            // Both triggers are duplicates once host recovery owns the epoch.
+            return .{
+                .disposition = .no_op,
+                .next = input.state,
+            };
+        },
+        .client_recovery => |phase| {
+            if (input.trigger == .local_overflow) {
+                return .{
+                    .disposition = .no_op,
+                    .next = input.state,
+                };
+            }
+            const context = recoveryContext(input.state) orelse
+                return terminalRecoveryPlan();
+            const promotable = switch (phase) {
+                .control_wait => input.control == .none or
+                    input.control == .offset_zero_unsent,
+                .control_in_flight => input.control == .offset_zero_unsent,
+                .awaiting_snapshot, .applied_pending => false,
+            };
+            if (!promotable) return terminalRecoveryPlan();
+            var plan = enterRecovery(
+                .host,
+                context,
+                input.control == .offset_zero_unsent,
+            );
+            plan.disposition = .promoted_to_host;
+            return plan;
+        },
+    }
+}
 
 pub const ParserReadiness = enum {
     empty,
@@ -241,6 +407,213 @@ test "client pump preserves recovery origin in every snapshot phase" {
     try std.testing.expect(client == .client_recovery);
     try std.testing.expectEqual(@as(u64, 7), host.host_recovery.awaiting_snapshot.context.epoch);
     try std.testing.expectEqual(@as(u64, 7), client.client_recovery.applied_pending.context.epoch);
+}
+
+test "recovery reducer enters from valid and rejects unsafe unrelated controls" {
+    const context = RecoveryContext{ .epoch = 4, .deadline_ns = 100 };
+    const client = planRecoveryTransition(.{
+        .state = .valid,
+        .trigger = .local_overflow,
+        .now_ns = 20,
+        .new_context = context,
+    });
+    try std.testing.expectEqual(RecoveryDisposition.entered, client.disposition);
+    try std.testing.expect(client.next == .client_recovery);
+    try std.testing.expect(std.meta.eql(
+        context,
+        client.next.client_recovery.control_wait,
+    ));
+    try std.testing.expect(client.drop_backlog);
+    try std.testing.expect(!client.cancel_control);
+
+    const host = planRecoveryTransition(.{
+        .state = .valid,
+        .trigger = .host_invalidated,
+        .control = .offset_zero_unsent,
+        .now_ns = 20,
+        .new_context = context,
+    });
+    try std.testing.expectEqual(RecoveryDisposition.entered, host.disposition);
+    try std.testing.expect(host.next == .host_recovery);
+    try std.testing.expect(host.cancel_control);
+
+    for ([_]ControlProgress{ .partial, .fully_sent, .response_wait }) |progress| {
+        const terminal = planRecoveryTransition(.{
+            .state = .valid,
+            .trigger = .host_invalidated,
+            .control = progress,
+            .now_ns = 20,
+            .new_context = context,
+        });
+        try std.testing.expectEqual(
+            RecoveryDisposition.terminal,
+            terminal.disposition,
+        );
+        try std.testing.expect(!terminal.drop_backlog);
+        try std.testing.expect(!terminal.cancel_control);
+    }
+}
+
+test "recovery reducer keeps duplicate origin epoch and deadline immutable" {
+    const context = RecoveryContext{ .epoch = 8, .deadline_ns = 300 };
+    const waiting = AwaitingSnapshot{
+        .context = context,
+        .expected_token_generation = 17,
+    };
+    const states = [_]AuthorityState{
+        .{ .host_recovery = .{ .ack_unadmitted = context } },
+        .{ .host_recovery = .{ .ack_queued = context } },
+        .{ .host_recovery = .{ .awaiting_snapshot = waiting } },
+        .{ .host_recovery = .{ .applied_pending = waiting } },
+        .{ .client_recovery = .{ .control_wait = context } },
+        .{ .client_recovery = .{ .control_in_flight = context } },
+        .{ .client_recovery = .{ .awaiting_snapshot = waiting } },
+        .{ .client_recovery = .{ .applied_pending = waiting } },
+    };
+    for (states) |state| {
+        const trigger: RecoveryTrigger = if (state == .host_recovery)
+            .host_invalidated
+        else
+            .local_overflow;
+        const plan = planRecoveryTransition(.{
+            .state = state,
+            .trigger = trigger,
+            .now_ns = 250,
+            .new_context = .{ .epoch = 99, .deadline_ns = 999 },
+        });
+        try std.testing.expectEqual(RecoveryDisposition.no_op, plan.disposition);
+        try std.testing.expect(std.meta.eql(state, plan.next));
+        try std.testing.expect(!plan.drop_backlog);
+        try std.testing.expect(!plan.cancel_control);
+    }
+}
+
+test "host invalidated promotes only cancellable client recovery control" {
+    const context = RecoveryContext{ .epoch = 11, .deadline_ns = 500 };
+    const waiting = AwaitingSnapshot{
+        .context = context,
+        .expected_token_generation = 23,
+    };
+    const promotable = [_]struct {
+        state: AuthorityState,
+        progress: ControlProgress,
+        cancel: bool,
+    }{
+        .{
+            .state = .{ .client_recovery = .{ .control_wait = context } },
+            .progress = .none,
+            .cancel = false,
+        },
+        .{
+            .state = .{ .client_recovery = .{ .control_wait = context } },
+            .progress = .offset_zero_unsent,
+            .cancel = true,
+        },
+        .{
+            .state = .{ .client_recovery = .{ .control_in_flight = context } },
+            .progress = .offset_zero_unsent,
+            .cancel = true,
+        },
+    };
+    for (promotable) |case| {
+        const plan = planRecoveryTransition(.{
+            .state = case.state,
+            .trigger = .host_invalidated,
+            .control = case.progress,
+            .now_ns = 100,
+        });
+        try std.testing.expectEqual(
+            RecoveryDisposition.promoted_to_host,
+            plan.disposition,
+        );
+        try std.testing.expect(plan.next == .host_recovery);
+        try std.testing.expect(std.meta.eql(
+            context,
+            plan.next.host_recovery.ack_unadmitted,
+        ));
+        try std.testing.expectEqual(case.cancel, plan.cancel_control);
+    }
+
+    const forbidden = [_]struct {
+        state: AuthorityState,
+        progress: ControlProgress,
+    }{
+        .{
+            .state = .{ .client_recovery = .{ .control_in_flight = context } },
+            .progress = .partial,
+        },
+        .{
+            .state = .{ .client_recovery = .{ .control_in_flight = context } },
+            .progress = .fully_sent,
+        },
+        .{
+            .state = .{ .client_recovery = .{ .control_in_flight = context } },
+            .progress = .response_wait,
+        },
+        .{
+            .state = .{ .client_recovery = .{ .awaiting_snapshot = waiting } },
+            .progress = .none,
+        },
+        .{
+            .state = .{ .client_recovery = .{ .applied_pending = waiting } },
+            .progress = .none,
+        },
+    };
+    for (forbidden) |case| {
+        const plan = planRecoveryTransition(.{
+            .state = case.state,
+            .trigger = .host_invalidated,
+            .control = case.progress,
+            .now_ns = 100,
+        });
+        try std.testing.expectEqual(
+            RecoveryDisposition.terminal,
+            plan.disposition,
+        );
+        try std.testing.expect(!plan.drop_backlog);
+        try std.testing.expect(!plan.cancel_control);
+    }
+}
+
+test "fresh recovery commit is deadline-first and phase exact" {
+    const waiting = AwaitingSnapshot{
+        .context = .{ .epoch = 5, .deadline_ns = 100 },
+        .expected_token_generation = 19,
+    };
+    for ([_]AuthorityState{
+        .{ .host_recovery = .{ .applied_pending = waiting } },
+        .{ .client_recovery = .{ .applied_pending = waiting } },
+    }) |state| {
+        const before = planRecoveryTransition(.{
+            .state = state,
+            .trigger = .fresh_commit,
+            .now_ns = 99,
+        });
+        try std.testing.expectEqual(RecoveryDisposition.committed, before.disposition);
+        try std.testing.expect(before.next == .valid);
+
+        for ([_]i128{ 100, 101 }) |now_ns| {
+            const expired = planRecoveryTransition(.{
+                .state = state,
+                .trigger = .fresh_commit,
+                .now_ns = now_ns,
+            });
+            try std.testing.expectEqual(
+                RecoveryDisposition.terminal,
+                expired.disposition,
+            );
+        }
+    }
+
+    const stale_phase = planRecoveryTransition(.{
+        .state = .{ .host_recovery = .{ .awaiting_snapshot = waiting } },
+        .trigger = .fresh_commit,
+        .now_ns = 99,
+    });
+    try std.testing.expectEqual(
+        RecoveryDisposition.terminal,
+        stale_phase.disposition,
+    );
 }
 
 test "client pump deadline is checked before readable or writable readiness" {

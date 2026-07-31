@@ -650,12 +650,19 @@ pub const RemoteRuntime = struct {
             return if (events.metadata) .metadata else .idle;
         _ = try self.client.pumpPendingOutput();
         try self.pumpResyncIntent();
-        if (!(try self.attachment.pumpScreen(self.io))) {
-            // readStreamBatch가 socket에서 event만 읽어 pending queue에 넣고 screen batch 없이 돌아올 수 있다.
-            const after_read = try self.drainObservationEvents();
-            if (after_read.ended) return .ended;
-            events.metadata = after_read.metadata or events.metadata;
-            return if (events.metadata) .metadata else .idle;
+        switch (try self.attachment.pumpScreen(self.io)) {
+            .idle => {
+                // readStreamBatch가 socket에서 event만 읽어 pending queue에 넣고 screen batch 없이 돌아올 수 있다.
+                const after_read = try self.drainObservationEvents();
+                if (after_read.ended) return .ended;
+                events.metadata = after_read.metadata or events.metadata;
+                return if (events.metadata) .metadata else .idle;
+            },
+            .applied => {},
+            // The blocking GUI transport never produces charged recovery batches. These outcomes
+            // belong to the external owner adapter and cannot be interpreted as ordinary screen
+            // activity on this connection.
+            .recovery_commit_pending, .terminal => return error.ProtocolError,
         }
         const after_screen = try self.drainObservationEvents();
         if (after_screen.ended) return .ended;

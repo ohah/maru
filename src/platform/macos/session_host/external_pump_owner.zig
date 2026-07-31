@@ -730,6 +730,22 @@ test "d2c product owner maps readiness to POSIX RX before any writable work" {
     try std.testing.expect(
         client_external_pump.testing.clearInitialFence(&storage),
     );
+    storage.semantic_state = .{ .active = .{ .host_recovery = .{
+        .awaiting_snapshot = .{
+            .context = .{ .epoch = 5, .deadline_ns = 30 },
+            .expected_token_generation = 9,
+        },
+    } } };
+    try std.testing.expectEqual(
+        client_pump.RecoveryMarkResult.commit_pending,
+        storage.markResyncApplied(7, .{
+            .owner_incarnation = storage.owner_incarnation,
+            .origin = .host,
+            .recovery_epoch = 5,
+            .expected_token_generation = 9,
+        }),
+    );
+    try std.testing.expect(storage.pollHint().immediate);
     const scratch = try createRxScratchForTest();
     scratch_to_destroy = scratch;
     var probe = Apply{};
@@ -748,6 +764,8 @@ test "d2c product owner maps readiness to POSIX RX before any writable work" {
         @as(?client_pump.ExternalPumpTerminal, null),
         first.terminal,
     );
+    try std.testing.expect(storage.semantic_state.active == .valid);
+    try std.testing.expect(!storage.pollHint().immediate);
     try std.testing.expectEqual(@as(usize, 1), first.rx_frames);
     try std.testing.expectEqual(@as(usize, 0), probe.calls);
     const second = pumpRx(

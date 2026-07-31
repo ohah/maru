@@ -143,6 +143,8 @@ else
     struct {};
 // client_pump(P5c3c-2b2a)는 fd/parser/JSON/allocator를 모르는 순수 turn/state DTO다.
 pub const client_pump = @import("session_host/client_pump.zig");
+pub const external_recovery_types =
+    @import("session_host/external_recovery_types.zig");
 // external_rx_types는 parser/ledger/recovery가 공유하는 pointer-free observation DTO다.
 // owning demux/ledger mechanics는 barrel로 노출하지 않는다.
 pub const external_rx_types = @import("session_host/external_rx_types.zig");

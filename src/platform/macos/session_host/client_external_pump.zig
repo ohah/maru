@@ -528,6 +528,7 @@ fn metadataTagMatches(
 }
 
 pub const AuthorityGeneration = client_external_turn_authority.AuthorityGeneration;
+pub const f3c1_contract_version: u16 = 1;
 
 pub const PreparedAttachmentAuthority = struct {
     role: AttachmentRole,
@@ -1904,6 +1905,8 @@ const CompletedControlState = struct {
     correlation_generation: u64 = 0,
     source_turn_generation: u64 = 0,
     source_parser_generation: u64 = 0,
+    source_start_absolute: u64 = 0,
+    source_end_absolute: u64 = 0,
     source_owner_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
     generation: u64,
     owner_digest: external_owner_seal.Digest,
@@ -1921,12 +1924,13 @@ const ControlResponseTakeLifecycle = enum {
     consumed_tombstone,
 };
 
-// F3c0 only fixes the final-address vocabulary consumed by the next two slices. There is
-// intentionally no constructor or callable consumer yet: whole-drain authority cannot be minted
-// until 2b2e-integration owns resync phase mutation and f3c proves the drain barrier.
+// F3c0 introduced the final-address vocabulary. F3c1-base now has a private producer, while the
+// product consumer remains intentionally absent until terminal binding and recovery integration
+// can consume the authority without reopening the held-lease suffix.
 const PreparedWholeDrainPermitLifecycle = enum { empty, prepared, consumed_tombstone };
 const PreparedWholeDrainPermit = struct {
     saved_self_addr: usize = 0,
+    verdict_addr: usize = 0,
     storage_addr: usize = 0,
     lease_addr: usize = 0,
     owner_incarnation: u64 = 0,
@@ -1936,12 +1940,16 @@ const PreparedWholeDrainPermit = struct {
     parser_absolute_start: u64 = 0,
     parser_absolute_end: u64 = 0,
     parser_seal_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    drain_evidence_addr: usize = 0,
+    drain_evidence_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    completed_exception_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
     sampled_now_ns: i128 = 0,
     authority_generation: AuthorityGeneration = .untracked,
     authority_seal_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
     completed_owner_generation: u64 = 0,
     correlation_generation: u64 = 0,
     tx_queue_generation: u64 = 0,
+    pair_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
     lifecycle: PreparedWholeDrainPermitLifecycle = .empty,
     digest: external_owner_seal.Digest = [_]u8{0} ** 32,
 };
@@ -1969,12 +1977,35 @@ const PreparedControlSemanticVerdict = struct {
     authority_generation: AuthorityGeneration = .untracked,
     authority_seal_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
     permit_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    pair_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
     expectation: control_response_wire.ControlExpectation = .{
         .resize = .{ .client_sequence = 0 },
     },
     value: ControlSemanticValue = .resync_ack,
     lifecycle: PreparedControlSemanticVerdictLifecycle = .empty,
     digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+const ControlSemanticTerminalLifecycle = enum { empty, prepared, consumed_tombstone };
+const PreparedControlSemanticTerminal = struct {
+    saved_self_addr: usize = 0,
+    storage_addr: usize = 0,
+    lease_addr: usize = 0,
+    owner_incarnation: u64 = 0,
+    operation_generation: u64 = 0,
+    completed_owner_generation: u64 = 0,
+    correlation_generation: u64 = 0,
+    request_id: u64 = 0,
+    completed_payload_seal: ResponsePayloadSeal = ResponsePayloadSeal.empty(),
+    reason: client_pump.TerminalReason = .invariant_failure,
+    lifecycle: ControlSemanticTerminalLifecycle = .empty,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+const ControlSemanticPreparationResult = enum {
+    not_ready,
+    prepared_pair,
+    terminal_prepared,
 };
 
 const ConsumeResyncAckResult = enum {
@@ -2245,6 +2276,8 @@ const FrozenResponseDestinationPlan = struct {
     expected_correlation_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
     source_turn_generation: u64 = 0,
     source_parser_generation: u64 = 0,
+    source_start_absolute: u64 = 0,
+    source_end_absolute: u64 = 0,
     source_owner_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
     payload_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
     response_payload_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
@@ -2690,6 +2723,8 @@ const RxDrainEvidenceLifecycle = enum {
     finished,
 };
 
+const RxDrainEvidenceMode = enum { general, completed_control };
+
 const RxDrainEvidence = struct {
     domain: [8]u8 = [_]u8{0} ** 8,
     version: u16 = 0,
@@ -2719,6 +2754,9 @@ const RxDrainEvidence = struct {
     final_readiness: client_external_mode.RxParserReadiness = .empty,
     rx_frame_budget_exhausted: bool = false,
     rx_read_budget_exhausted: bool = false,
+    work_budget_exhausted: bool = false,
+    mode: RxDrainEvidenceMode = .general,
+    completed_exception_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
     owner_inventory_generation: u64 = 0,
     owner_snapshot_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
     initial_inherited_snapshot_digest: external_owner_seal.Digest =
@@ -3010,6 +3048,9 @@ pub const ExternalRxTurnScratch = struct {
     would_block_seed: client_external_rx_read.WouldBlockSeed = .{},
     prepared_admit_use_permit: client_external_rx_read.PreparedAdmitUsePermit = .{},
     drain_evidence: RxDrainEvidence = .{},
+    whole_drain_permit: PreparedWholeDrainPermit = .{},
+    control_semantic_verdict: PreparedControlSemanticVerdict = .{},
+    control_semantic_terminal: PreparedControlSemanticTerminal = .{},
     authority_permit: client_external_turn_authority.PreparedAuthorityPermit = .{},
     authority_cleanup_seed: client_external_turn_authority.FrozenCleanupSeed = .{},
     tx_cancellation: client_external_tx.PreparedTxCancellation = .{},
@@ -3024,6 +3065,14 @@ pub const ExternalRxTurnScratch = struct {
     pub fn initInPlace(out: *ExternalRxTurnScratch) bool {
         if (out.saved_self_addr != 0 or out.lifecycle != .empty or
             !rxDrainEvidencePristine(&out.drain_evidence) or
+            !std.meta.eql(out.whole_drain_permit, PreparedWholeDrainPermit{}) or
+            !std.meta.eql(
+                out.control_semantic_verdict,
+                PreparedControlSemanticVerdict{},
+            ) or !std.meta.eql(
+            out.control_semantic_terminal,
+            PreparedControlSemanticTerminal{},
+        ) or
             !std.meta.eql(
                 out.authority_permit,
                 client_external_turn_authority.PreparedAuthorityPermit{},
@@ -3061,6 +3110,9 @@ pub const ExternalRxTurnScratch = struct {
         out.borrow_use_permit = .{};
         out.would_block_seed = .{};
         out.prepared_admit_use_permit = .{};
+        out.whole_drain_permit = .{};
+        out.control_semantic_verdict = .{};
+        out.control_semantic_terminal = .{};
         out.authority_permit = .{};
         out.authority_cleanup_seed = .{};
         out.tx_cancellation = .{};
@@ -3423,7 +3475,7 @@ fn rxOwnerAuthoritySnapshotDigest(
 /// both in place, so consumers must project and use them before crossing another callback.
 fn buildRxOwnerAuthoritySnapshot(
     storage: *ExternalPumpStorage,
-    lease: *ExternalWholeTurnLease,
+    lease: *const ExternalWholeTurnLease,
     scratch: *ExternalRxTurnScratch,
 ) ?*const RxOwnerAuthoritySnapshot {
     if (!storage.validateWholeTurnLease(lease) or
@@ -4538,8 +4590,151 @@ fn completedControlDigest(
     writer.writeU64(pending.correlation_generation);
     writer.writeU64(pending.source_turn_generation);
     writer.writeU64(pending.source_parser_generation);
+    writer.writeU64(pending.source_start_absolute);
+    writer.writeU64(pending.source_end_absolute);
     writer.writeBytes(&pending.source_owner_digest);
     writer.writeU64(pending.generation);
+    return writer.finish();
+}
+
+fn writeAuthorityGeneration(
+    writer: *external_owner_seal.Writer,
+    generation: AuthorityGeneration,
+) void {
+    writer.writeU8(@intFromEnum(std.meta.activeTag(generation)));
+    switch (generation) {
+        .untracked => {},
+        .tracked => |value| writer.writeU64(value),
+    }
+}
+
+fn writeControlSemanticValue(
+    writer: *external_owner_seal.Writer,
+    value: ControlSemanticValue,
+) void {
+    writer.writeU8(@intFromEnum(std.meta.activeTag(value)));
+    switch (value) {
+        .resync_ack => {},
+        .resize => |reply| {
+            writer.writeU8(@intFromEnum(std.meta.activeTag(reply)));
+            switch (reply) {
+                .stale => {},
+                .applied => |applied| {
+                    writer.writeU16(applied.cols);
+                    writer.writeU16(applied.rows);
+                    writer.writeU64(applied.resize_generation);
+                    writer.writeBool(applied.changed);
+                },
+            }
+        },
+    }
+}
+
+fn preparedWholeDrainPermitDigest(
+    permit: *const PreparedWholeDrainPermit,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARUFWP1");
+    writer.writeUsize(permit.saved_self_addr);
+    writer.writeUsize(permit.verdict_addr);
+    writer.writeUsize(permit.storage_addr);
+    writer.writeUsize(permit.lease_addr);
+    writer.writeU64(permit.owner_incarnation);
+    writer.writeU64(permit.operation_generation);
+    writer.writeU64(permit.turn_generation);
+    writer.writeU64(permit.parser_generation);
+    writer.writeU64(permit.parser_absolute_start);
+    writer.writeU64(permit.parser_absolute_end);
+    writer.writeBytes(&permit.parser_seal_digest);
+    writer.writeUsize(permit.drain_evidence_addr);
+    writer.writeBytes(&permit.drain_evidence_digest);
+    writer.writeBytes(&permit.completed_exception_digest);
+    writer.writeU128(@bitCast(permit.sampled_now_ns));
+    writeAuthorityGeneration(&writer, permit.authority_generation);
+    writer.writeBytes(&permit.authority_seal_digest);
+    writer.writeU64(permit.completed_owner_generation);
+    writer.writeU64(permit.correlation_generation);
+    writer.writeU64(permit.tx_queue_generation);
+    writer.writeBytes(&permit.pair_digest);
+    writer.writeU8(@intFromEnum(permit.lifecycle));
+    return writer.finish();
+}
+
+fn preparedControlSemanticVerdictDigest(
+    verdict: *const PreparedControlSemanticVerdict,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARUFVR1");
+    writer.writeUsize(verdict.saved_self_addr);
+    writer.writeUsize(verdict.permit_addr);
+    writer.writeUsize(verdict.storage_addr);
+    writer.writeUsize(verdict.lease_addr);
+    writer.writeU64(verdict.owner_incarnation);
+    writer.writeU64(verdict.operation_generation);
+    writer.writeU64(verdict.correlation_generation);
+    verdict.completed_payload_seal.writeDigest(&writer);
+    writer.writeU64(verdict.request_id);
+    writer.writeU8(@intFromEnum(verdict.control_kind));
+    writeControlTarget(&writer, verdict.target);
+    writeAuthorityGeneration(&writer, verdict.authority_generation);
+    writer.writeBytes(&verdict.authority_seal_digest);
+    writer.writeBytes(&verdict.permit_digest);
+    writer.writeBytes(&verdict.pair_digest);
+    writeControlExpectation(&writer, verdict.expectation);
+    writeControlSemanticValue(&writer, verdict.value);
+    writer.writeU8(@intFromEnum(verdict.lifecycle));
+    return writer.finish();
+}
+
+fn preparedControlSemanticTerminalDigest(
+    terminal: *const PreparedControlSemanticTerminal,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARUFTR1");
+    writer.writeUsize(terminal.saved_self_addr);
+    writer.writeUsize(terminal.storage_addr);
+    writer.writeUsize(terminal.lease_addr);
+    writer.writeU64(terminal.owner_incarnation);
+    writer.writeU64(terminal.operation_generation);
+    writer.writeU64(terminal.completed_owner_generation);
+    writer.writeU64(terminal.correlation_generation);
+    writer.writeU64(terminal.request_id);
+    terminal.completed_payload_seal.writeDigest(&writer);
+    writer.writeU8(@intFromEnum(terminal.reason));
+    writer.writeU8(@intFromEnum(terminal.lifecycle));
+    return writer.finish();
+}
+
+fn controlSemanticPairDigest(
+    permit: *const PreparedWholeDrainPermit,
+    verdict: *const PreparedControlSemanticVerdict,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARUFPR1");
+    writer.writeUsize(permit.saved_self_addr);
+    writer.writeUsize(permit.verdict_addr);
+    writer.writeUsize(verdict.saved_self_addr);
+    writer.writeUsize(verdict.permit_addr);
+    writer.writeUsize(permit.storage_addr);
+    writer.writeUsize(permit.lease_addr);
+    writer.writeU64(permit.owner_incarnation);
+    writer.writeU64(permit.operation_generation);
+    writer.writeU64(permit.turn_generation);
+    writer.writeU64(permit.parser_generation);
+    writer.writeU64(permit.parser_absolute_start);
+    writer.writeU64(permit.parser_absolute_end);
+    writer.writeBytes(&permit.parser_seal_digest);
+    writer.writeUsize(permit.drain_evidence_addr);
+    writer.writeBytes(&permit.drain_evidence_digest);
+    writer.writeBytes(&permit.completed_exception_digest);
+    writer.writeU128(@bitCast(permit.sampled_now_ns));
+    writeAuthorityGeneration(&writer, permit.authority_generation);
+    writer.writeBytes(&permit.authority_seal_digest);
+    writer.writeU64(permit.completed_owner_generation);
+    writer.writeU64(permit.correlation_generation);
+    writer.writeU64(permit.tx_queue_generation);
+    verdict.completed_payload_seal.writeDigest(&writer);
+    writer.writeU64(verdict.request_id);
+    writer.writeU8(@intFromEnum(verdict.control_kind));
+    writeControlTarget(&writer, verdict.target);
+    writeControlExpectation(&writer, verdict.expectation);
+    writeControlSemanticValue(&writer, verdict.value);
     return writer.finish();
 }
 
@@ -4937,6 +5132,8 @@ fn responseDestinationPlanDigest(
     writer.writeBytes(&plan.expected_correlation_digest);
     writer.writeU64(plan.source_turn_generation);
     writer.writeU64(plan.source_parser_generation);
+    writer.writeU64(plan.source_start_absolute);
+    writer.writeU64(plan.source_end_absolute);
     writer.writeBytes(&plan.source_owner_digest);
     writer.writeBytes(&plan.payload_digest);
     writer.writeBytes(&plan.response_payload_digest);
@@ -6438,6 +6635,8 @@ fn prepareResponseDestinationPlan(
         .expected_correlation_digest = storage.control_correlation.digest,
         .source_turn_generation = aggregate.turn_generation,
         .source_parser_generation = aggregate.intent_commit.source_parser_generations[index],
+        .source_start_absolute = aggregate.intent_commit.source_start_absolutes[index],
+        .source_end_absolute = aggregate.intent_commit.source_end_absolutes[index],
         .source_owner_digest = aggregate.intent_commit.source_owner_digests[index],
         .payload_digest = aggregate.intent_commit.payload_digests[index],
         .response_payload_digest = responsePayloadDigest(if (payload.allocation_len == 0)
@@ -6513,6 +6712,11 @@ fn validateResponseDestinationPlan(
         plan.source_turn_generation == aggregate.turn_generation and
         plan.source_parser_generation ==
             aggregate.intent_commit.source_parser_generations[index] and
+        plan.source_start_absolute ==
+            aggregate.intent_commit.source_start_absolutes[index] and
+        plan.source_end_absolute ==
+            aggregate.intent_commit.source_end_absolutes[index] and
+        plan.source_end_absolute > plan.source_start_absolute and
         std.mem.eql(
             u8,
             &plan.source_owner_digest,
@@ -6567,6 +6771,8 @@ fn commitResponseDestinationPlanUnchecked(
         .correlation_generation = plan.expected_correlation_generation + 1,
         .source_turn_generation = plan.source_turn_generation,
         .source_parser_generation = plan.source_parser_generation,
+        .source_start_absolute = plan.source_start_absolute,
+        .source_end_absolute = plan.source_end_absolute,
         .source_owner_digest = plan.source_owner_digest,
         .generation = plan.next_generation,
         .owner_digest = undefined,
@@ -7900,6 +8106,7 @@ pub const ExternalPumpStorage = struct {
                         self.control_correlation.generation or
                     pending.source_turn_generation == 0 or
                     pending.source_parser_generation == 0 or
+                    pending.source_end_absolute <= pending.source_start_absolute or
                     std.mem.allEqual(u8, &pending.source_owner_digest, 0) or
                     !pending.seal.validatesPayload(&pending.payload))
                     break :blk false;
@@ -7910,6 +8117,486 @@ pub const ExternalPumpStorage = struct {
                 );
             },
         };
+    }
+
+    fn semanticAuthorityMatchesCompleted(
+        self: *const ExternalPumpStorage,
+        completed: *const CompletedControlState,
+    ) bool {
+        if (!ownerAuthorityValid(self) or
+            self.owner_authority.current.role != .controller or
+            self.owner_authority.current.flow != .clear)
+            return false;
+        const generation = switch (self.owner_authority.current.generation) {
+            .tracked => |value| value,
+            .untracked => return false,
+        };
+        if (generation != completed.expected_controller_generation or
+            completed.target_stream_id != self.evidence_snapshot.stream_id or
+            !completed.expectation.isCanonical())
+            return false;
+        return switch (completed.expectation) {
+            .resize => self.semantic_state == .active and
+                self.semantic_state.active == .valid,
+            .resync => |expected| blk: {
+                if (expected.owner_incarnation != self.owner_incarnation or
+                    expected.origin != .client)
+                    break :blk false;
+                const active = switch (self.semantic_state) {
+                    .active => |value| value,
+                    else => break :blk false,
+                };
+                break :blk switch (active) {
+                    .client_recovery => |phase| switch (phase) {
+                        .control_in_flight => |context| expected.recovery_epoch == context.epoch,
+                        else => false,
+                    },
+                    else => false,
+                };
+            },
+        };
+    }
+
+    fn completedSemanticPreparationCurrent(
+        self: *ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        scratch: *ExternalRxTurnScratch,
+        summary: RxPreparedSummary,
+        expected_completed_digest: external_owner_seal.Digest,
+        expected_correlation_digest: external_owner_seal.Digest,
+        expected_parser_seal: client_external_mode.ParserAuthoritySeal,
+        expected_tx_generation: u64,
+    ) bool {
+        if (!self.validateWholeTurnLease(lease) or
+            scratch.saved_self_addr != @intFromPtr(scratch) or
+            scratch.lifecycle != .busy or
+            summary.policy.terminal != null or
+            summary.policy.rx_frame_budget_exhausted or
+            summary.policy.rx_read_budget_exhausted or
+            summary.policy.work_budget_exhausted or
+            summary.policy.parser != .empty or
+            self.operation_reentry_latched or
+            active_callback_region_addr != 0 or
+            active_callback_release_addr != 0 or
+            !controlSemanticDestinationsPristine(scratch) or
+            !self.completedControlValid())
+            return false;
+        const evidence = &scratch.drain_evidence;
+        if (evidence.lifecycle != .finished or
+            evidence.mode != .completed_control or
+            evidence.work_budget_exhausted or
+            !rxDrainEvidenceSealed(evidence) or
+            !self.finishedRxDrainEvidenceCurrentUnderHeldLease(
+                lease,
+                scratch,
+                .completed_control,
+            ))
+            return false;
+        const projection = self.currentDrainBlockerProjectionForMode(
+            .completed_control,
+        ) orelse return false;
+        if (!projection.all_clear or
+            !std.mem.eql(
+                u8,
+                &projection.completed_exception_digest,
+                &evidence.completed_exception_digest,
+            ))
+            return false;
+        const completed = switch (self.completed_control) {
+            .completed => |*value| value,
+            .none, .terminal => return false,
+        };
+        const client = if (self.owned_client) |*owned| owned else return false;
+        const external = switch (client.io_mode) {
+            .external => |*state| state,
+            .blocking => return false,
+        };
+        const readiness = client_external_mode.parserReadiness(
+            external,
+            &client.parser,
+        ) catch return false;
+        return readiness == .empty and
+            client_external_mode.parserSealValid(external, &client.parser) and
+            std.meta.eql(external.rx_provenance.parser_seal, expected_parser_seal) and
+            expected_parser_seal.rx_absolute_next >= completed.source_end_absolute and
+            completed.source_end_absolute > completed.source_start_absolute and
+            std.mem.eql(u8, &completed.owner_digest, &expected_completed_digest) and
+            std.mem.eql(
+                u8,
+                &self.control_correlation.digest,
+                &expected_correlation_digest,
+            ) and external.tx_queue_generation == expected_tx_generation and
+            client_external_tx.requestFrameProgress(
+                external,
+                completed.request_id,
+                completed.control_wire_len,
+            ) == .missing and self.semanticAuthorityMatchesCompleted(completed);
+    }
+
+    fn publishControlSemanticTerminalPreparation(
+        self: *ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        scratch: *ExternalRxTurnScratch,
+        reason: client_pump.TerminalReason,
+    ) ControlSemanticPreparationResult {
+        const out = &scratch.control_semantic_terminal;
+        if (!std.meta.eql(out.*, PreparedControlSemanticTerminal{}) or
+            !self.completedControlValid())
+            return .not_ready;
+        const completed = switch (self.completed_control) {
+            .completed => |*value| value,
+            .none, .terminal => return .not_ready,
+        };
+        out.* = .{
+            .saved_self_addr = @intFromPtr(out),
+            .storage_addr = @intFromPtr(self),
+            .lease_addr = @intFromPtr(lease),
+            .owner_incarnation = self.owner_incarnation,
+            .operation_generation = self.operation_generation,
+            .completed_owner_generation = completed.generation,
+            .correlation_generation = self.control_correlation.generation,
+            .request_id = completed.request_id,
+            .completed_payload_seal = completed.seal,
+            .reason = reason,
+            .lifecycle = .prepared,
+        };
+        out.digest = preparedControlSemanticTerminalDigest(out);
+        return .terminal_prepared;
+    }
+
+    fn prepareCompletedControlSemanticUnderHeldLease(
+        self: *ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        scratch: *ExternalRxTurnScratch,
+        summary: RxPreparedSummary,
+    ) ControlSemanticPreparationResult {
+        if (!controlSemanticDestinationsPristine(scratch) or
+            !self.completedControlValid())
+            return .not_ready;
+        const completed_before = switch (self.completed_control) {
+            .completed => |*value| value,
+            .none, .terminal => return .not_ready,
+        };
+        const client = if (self.owned_client) |*owned| owned else return .not_ready;
+        const external = switch (client.io_mode) {
+            .external => |*state| state,
+            .blocking => return .not_ready,
+        };
+        const completed_digest = completed_before.owner_digest;
+        const correlation_digest = self.control_correlation.digest;
+        const parser_seal = external.rx_provenance.parser_seal;
+        const tx_generation = external.tx_queue_generation;
+        if (!self.completedSemanticPreparationCurrent(
+            lease,
+            scratch,
+            summary,
+            completed_digest,
+            correlation_digest,
+            parser_seal,
+            tx_generation,
+        )) return .not_ready;
+
+        const decoded: ControlSemanticValue = decode: {
+            const payload = completed_before.payload.bytes();
+            switch (completed_before.control_kind) {
+                .resize => {
+                    const reply = control_response_wire.decodeResizeResponse(
+                        completed_before.payload.allocator,
+                        payload,
+                        completed_before.expectation,
+                    ) catch |err| {
+                        const current = self.completedSemanticPreparationCurrent(
+                            lease,
+                            scratch,
+                            summary,
+                            completed_digest,
+                            correlation_digest,
+                            parser_seal,
+                            tx_generation,
+                        );
+                        return self.publishControlSemanticTerminalPreparation(
+                            lease,
+                            scratch,
+                            if (!current)
+                                .invariant_failure
+                            else switch (err) {
+                                error.OutOfMemory => .resource_exhausted,
+                                else => .protocol_error,
+                            },
+                        );
+                    };
+                    switch (reply) {
+                        .stale => {
+                            const current = self.completedSemanticPreparationCurrent(
+                                lease,
+                                scratch,
+                                summary,
+                                completed_digest,
+                                correlation_digest,
+                                parser_seal,
+                                tx_generation,
+                            );
+                            return self.publishControlSemanticTerminalPreparation(
+                                lease,
+                                scratch,
+                                if (current) .protocol_error else .invariant_failure,
+                            );
+                        },
+                        .applied => break :decode .{ .resize = reply },
+                    }
+                },
+                .resync => {
+                    control_response_wire.decodeResyncResponse(
+                        completed_before.payload.allocator,
+                        payload,
+                        completed_before.expectation,
+                    ) catch |err| {
+                        const current = self.completedSemanticPreparationCurrent(
+                            lease,
+                            scratch,
+                            summary,
+                            completed_digest,
+                            correlation_digest,
+                            parser_seal,
+                            tx_generation,
+                        );
+                        return self.publishControlSemanticTerminalPreparation(
+                            lease,
+                            scratch,
+                            if (!current)
+                                .invariant_failure
+                            else switch (err) {
+                                error.OutOfMemory => .resource_exhausted,
+                                else => .protocol_error,
+                            },
+                        );
+                    };
+                    break :decode .resync_ack;
+                },
+            }
+        };
+
+        if (!self.completedSemanticPreparationCurrent(
+            lease,
+            scratch,
+            summary,
+            completed_digest,
+            correlation_digest,
+            parser_seal,
+            tx_generation,
+        )) return self.publishControlSemanticTerminalPreparation(
+            lease,
+            scratch,
+            .invariant_failure,
+        );
+        const completed = switch (self.completed_control) {
+            .completed => |*value| value,
+            .none, .terminal => return .not_ready,
+        };
+        const authority = self.owner_authority.current;
+        const permit = &scratch.whole_drain_permit;
+        const verdict = &scratch.control_semantic_verdict;
+        permit.* = .{
+            .saved_self_addr = @intFromPtr(permit),
+            .verdict_addr = @intFromPtr(verdict),
+            .storage_addr = @intFromPtr(self),
+            .lease_addr = @intFromPtr(lease),
+            .owner_incarnation = self.owner_incarnation,
+            .operation_generation = self.operation_generation,
+            .turn_generation = scratch.turn_generation,
+            .parser_generation = parser_seal.generation,
+            .parser_absolute_start = completed.source_start_absolute,
+            .parser_absolute_end = parser_seal.rx_absolute_next,
+            .parser_seal_digest = parser_seal.digest,
+            .drain_evidence_addr = @intFromPtr(&scratch.drain_evidence),
+            .drain_evidence_digest = scratch.drain_evidence.digest,
+            .completed_exception_digest = scratch.drain_evidence.completed_exception_digest,
+            .sampled_now_ns = summary.policy.turn.now_ns,
+            .authority_generation = authority.generation,
+            .authority_seal_digest = self.owner_authority_seal.digest,
+            .completed_owner_generation = completed.generation,
+            .correlation_generation = self.control_correlation.generation,
+            .tx_queue_generation = tx_generation,
+            .lifecycle = .prepared,
+        };
+        verdict.* = .{
+            .saved_self_addr = @intFromPtr(verdict),
+            .permit_addr = @intFromPtr(permit),
+            .storage_addr = @intFromPtr(self),
+            .lease_addr = @intFromPtr(lease),
+            .owner_incarnation = self.owner_incarnation,
+            .operation_generation = self.operation_generation,
+            .correlation_generation = self.control_correlation.generation,
+            .completed_payload_seal = completed.seal,
+            .request_id = completed.request_id,
+            .control_kind = completed.control_kind,
+            .target = .{
+                .stream_id = completed.target_stream_id,
+                .controller_generation = completed.expected_controller_generation,
+            },
+            .authority_generation = authority.generation,
+            .authority_seal_digest = self.owner_authority_seal.digest,
+            .expectation = completed.expectation,
+            .value = decoded,
+            .lifecycle = .prepared,
+        };
+        const pair_digest = controlSemanticPairDigest(permit, verdict);
+        permit.pair_digest = pair_digest;
+        verdict.pair_digest = pair_digest;
+        permit.digest = preparedWholeDrainPermitDigest(permit);
+        verdict.permit_digest = permit.digest;
+        verdict.digest = preparedControlSemanticVerdictDigest(verdict);
+        return .prepared_pair;
+    }
+
+    fn preparedControlSemanticPairCurrent(
+        self: *ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        scratch: *ExternalRxTurnScratch,
+    ) bool {
+        const permit = &scratch.whole_drain_permit;
+        const verdict = &scratch.control_semantic_verdict;
+        if (!self.validateWholeTurnLease(lease) or
+            scratch.saved_self_addr != @intFromPtr(scratch) or
+            scratch.lifecycle != .busy or
+            permit.saved_self_addr != @intFromPtr(permit) or
+            permit.verdict_addr != @intFromPtr(verdict) or
+            verdict.saved_self_addr != @intFromPtr(verdict) or
+            verdict.permit_addr != @intFromPtr(permit) or
+            permit.storage_addr != @intFromPtr(self) or
+            verdict.storage_addr != @intFromPtr(self) or
+            permit.lease_addr != @intFromPtr(lease) or
+            verdict.lease_addr != @intFromPtr(lease) or
+            permit.owner_incarnation != self.owner_incarnation or
+            verdict.owner_incarnation != self.owner_incarnation or
+            permit.operation_generation != self.operation_generation or
+            verdict.operation_generation != self.operation_generation or
+            permit.turn_generation != scratch.turn_generation or
+            permit.drain_evidence_addr != @intFromPtr(&scratch.drain_evidence) or
+            scratch.drain_evidence.lifecycle != .finished or
+            scratch.drain_evidence.mode != .completed_control or
+            !rxDrainEvidenceSealed(&scratch.drain_evidence) or
+            !std.mem.eql(
+                u8,
+                &permit.drain_evidence_digest,
+                &scratch.drain_evidence.digest,
+            ) or !std.mem.eql(
+            u8,
+            &permit.completed_exception_digest,
+            &scratch.drain_evidence.completed_exception_digest,
+        ) or
+            permit.lifecycle != .prepared or
+            verdict.lifecycle != .prepared or
+            !std.mem.eql(u8, &permit.pair_digest, &verdict.pair_digest) or
+            !std.mem.eql(
+                u8,
+                &permit.pair_digest,
+                &controlSemanticPairDigest(permit, verdict),
+            ) or !std.mem.eql(
+            u8,
+            &permit.digest,
+            &preparedWholeDrainPermitDigest(permit),
+        ) or !std.mem.eql(u8, &verdict.permit_digest, &permit.digest) or
+            !std.mem.eql(
+                u8,
+                &verdict.digest,
+                &preparedControlSemanticVerdictDigest(verdict),
+            ) or !self.completedControlValid())
+            return false;
+        if (!self.finishedRxDrainEvidenceCurrentUnderHeldLease(
+            lease,
+            scratch,
+            .completed_control,
+        )) return false;
+        const completed = switch (self.completed_control) {
+            .completed => |*value| value,
+            .none, .terminal => return false,
+        };
+        const client = if (self.owned_client) |*owned| owned else return false;
+        const external = switch (client.io_mode) {
+            .external => |*state| state,
+            .blocking => return false,
+        };
+        const authority = switch (self.owner_authority) {
+            .current => |value| value,
+            .empty => return false,
+        };
+        const projection = self.currentDrainBlockerProjectionForMode(
+            .completed_control,
+        ) orelse return false;
+        return permit.parser_generation == external.rx_provenance.parser_seal.generation and
+            permit.parser_absolute_start == completed.source_start_absolute and
+            permit.parser_absolute_end == external.rx_provenance.parser_seal.rx_absolute_next and
+            permit.parser_absolute_end >= completed.source_end_absolute and
+            std.mem.eql(
+                u8,
+                &permit.parser_seal_digest,
+                &external.rx_provenance.parser_seal.digest,
+            ) and std.meta.eql(permit.authority_generation, authority.generation) and
+            std.meta.eql(verdict.authority_generation, authority.generation) and
+            std.mem.eql(
+                u8,
+                &permit.authority_seal_digest,
+                &self.owner_authority_seal.digest,
+            ) and std.mem.eql(
+            u8,
+            &verdict.authority_seal_digest,
+            &self.owner_authority_seal.digest,
+        ) and permit.completed_owner_generation == completed.generation and
+            permit.correlation_generation == self.control_correlation.generation and
+            verdict.correlation_generation == self.control_correlation.generation and
+            permit.tx_queue_generation == external.tx_queue_generation and
+            projection.all_clear and std.mem.eql(
+            u8,
+            &projection.completed_exception_digest,
+            &permit.completed_exception_digest,
+        ) and
+            std.meta.eql(verdict.completed_payload_seal, completed.seal) and
+            verdict.request_id == completed.request_id and
+            verdict.control_kind == completed.control_kind and
+            verdict.target.stream_id == completed.target_stream_id and
+            verdict.target.controller_generation == completed.expected_controller_generation and
+            std.meta.eql(verdict.expectation, completed.expectation) and
+            client_external_tx.requestFrameProgress(
+                external,
+                completed.request_id,
+                completed.control_wire_len,
+            ) == .missing and self.semanticAuthorityMatchesCompleted(completed);
+    }
+
+    fn preparedControlSemanticTerminalCurrent(
+        self: *ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        scratch: *const ExternalRxTurnScratch,
+    ) bool {
+        const terminal = &scratch.control_semantic_terminal;
+        if (!self.validateWholeTurnLease(lease) or
+            terminal.saved_self_addr != @intFromPtr(terminal) or
+            terminal.storage_addr != @intFromPtr(self) or
+            terminal.lease_addr != @intFromPtr(lease) or
+            terminal.owner_incarnation != self.owner_incarnation or
+            terminal.operation_generation != self.operation_generation or
+            terminal.lifecycle != .prepared or
+            !std.mem.eql(
+                u8,
+                &terminal.digest,
+                &preparedControlSemanticTerminalDigest(terminal),
+            ) or !std.meta.eql(
+            scratch.whole_drain_permit,
+            PreparedWholeDrainPermit{},
+        ) or !std.meta.eql(
+            scratch.control_semantic_verdict,
+            PreparedControlSemanticVerdict{},
+        ) or !self.completedControlValid())
+            return false;
+        const completed = switch (self.completed_control) {
+            .completed => |*value| value,
+            .none, .terminal => return false,
+        };
+        return terminal.completed_owner_generation == completed.generation and
+            terminal.correlation_generation == self.control_correlation.generation and
+            terminal.request_id == completed.request_id and
+            std.meta.eql(terminal.completed_payload_seal, completed.seal);
     }
 
     fn prepareControlResponseTake(
@@ -12048,7 +12735,7 @@ pub const ExternalPumpStorage = struct {
     fn drainEvidenceDigest(
         evidence: *const RxDrainEvidence,
     ) external_owner_seal.Digest {
-        var writer = external_owner_seal.Writer.init("MARURDE2");
+        var writer = external_owner_seal.Writer.init("MARURDE3");
         writer.writeBytes(&evidence.domain);
         writer.writeU16(evidence.version);
         writer.writeUsize(evidence.saved_self_addr);
@@ -12077,6 +12764,9 @@ pub const ExternalPumpStorage = struct {
         writer.writeU8(@intFromEnum(evidence.final_readiness));
         writer.writeBool(evidence.rx_frame_budget_exhausted);
         writer.writeBool(evidence.rx_read_budget_exhausted);
+        writer.writeBool(evidence.work_budget_exhausted);
+        writer.writeU8(@intFromEnum(evidence.mode));
+        writer.writeBytes(&evidence.completed_exception_digest);
         writer.writeU64(evidence.owner_inventory_generation);
         writer.writeBytes(&evidence.owner_snapshot_digest);
         writer.writeBytes(&evidence.initial_inherited_snapshot_digest);
@@ -12087,8 +12777,12 @@ pub const ExternalPumpStorage = struct {
     }
 
     fn rxDrainEvidenceSealed(evidence: *const RxDrainEvidence) bool {
-        return std.mem.eql(u8, &evidence.domain, "MARURDE2") and
-            evidence.version == 1 and
+        const mode_canonical = switch (evidence.mode) {
+            .general => std.mem.allEqual(u8, &evidence.completed_exception_digest, 0),
+            .completed_control => !std.mem.allEqual(u8, &evidence.completed_exception_digest, 0),
+        };
+        return std.mem.eql(u8, &evidence.domain, "MARURDE3") and
+            evidence.version == 2 and mode_canonical and
             evidence.saved_self_addr == @intFromPtr(evidence) and
             !std.mem.allEqual(u8, &evidence.digest, 0) and
             std.mem.eql(
@@ -12101,6 +12795,8 @@ pub const ExternalPumpStorage = struct {
     const DrainBlockerProjection = struct {
         digest: external_owner_seal.Digest,
         all_clear: bool,
+        mode: RxDrainEvidenceMode = .general,
+        completed_exception_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
     };
 
     const RxDrainFinalState = struct {
@@ -12110,6 +12806,7 @@ pub const ExternalPumpStorage = struct {
         allowance_stop: client_external_rx_read.AcceptedAllowanceStop,
         frame_budget_exhausted: bool,
         read_budget_exhausted: bool,
+        work_budget_exhausted: bool,
         terminal: bool,
         blockers: DrainBlockerProjection,
         owner_inventory_generation: u64,
@@ -12122,6 +12819,7 @@ pub const ExternalPumpStorage = struct {
                 self.allowance_stop == .continue_collecting and
                 !self.frame_budget_exhausted and
                 !self.read_budget_exhausted and
+                !self.work_budget_exhausted and
                 self.blockers.all_clear;
         }
     };
@@ -12129,16 +12827,49 @@ pub const ExternalPumpStorage = struct {
     fn currentDrainBlockerProjection(
         self: *const ExternalPumpStorage,
     ) ?DrainBlockerProjection {
+        return self.currentDrainBlockerProjectionForMode(.general);
+    }
+
+    fn currentCompletedExceptionDigest(
+        self: *const ExternalPumpStorage,
+    ) ?external_owner_seal.Digest {
+        if (!self.completedControlValid()) return null;
+        const completed = switch (self.completed_control) {
+            .completed => |*value| value,
+            .none, .terminal => return null,
+        };
+        var exception = external_owner_seal.Writer.init("MARUCDE1");
+        exception.writeBytes(&completed.owner_digest);
+        exception.writeBytes(&self.control_correlation.digest);
+        return exception.finish();
+    }
+
+    /// F3 keeps the general D2 projection strict and grants one sealed exception only when the
+    /// canonical completed owner and its correlation still agree exactly.
+    fn currentDrainBlockerProjectionForMode(
+        self: *const ExternalPumpStorage,
+        mode: RxDrainEvidenceMode,
+    ) ?DrainBlockerProjection {
         const live = self.liveOwnerBlockerProjection() orelse return null;
         const resize_pending = switch (self.owner_resize) {
             .none => false,
             .current => |current| current.pending,
         };
+        var completed_exception_digest: external_owner_seal.Digest = [_]u8{0} ** 32;
+        const response_clear = switch (mode) {
+            .general => !live.response_pending,
+            .completed_control => blk: {
+                if (!live.response_pending) break :blk false;
+                completed_exception_digest = self.currentCompletedExceptionDigest() orelse
+                    break :blk false;
+                break :blk true;
+            },
+        };
         const all_clear =
             self.screen_pending_summary.retained_count == 0 and
             !self.metadata_pending_summary.pending and
             !live.partial_pending and !live.screen_pending and
-            !live.response_pending and !resize_pending;
+            response_clear and !resize_pending;
         var writer = external_owner_seal.Writer.init("MARUDBP1");
         writer.writeU64(self.operation_generation);
         writer.writeUsize(self.screen_pending_summary.retained_count);
@@ -12150,12 +12881,19 @@ pub const ExternalPumpStorage = struct {
         writer.writeBool(live.response_pending);
         writer.writeBool(resize_pending);
         writer.writeBytes(&self.inheritedOwnerDigest());
-        return .{ .digest = writer.finish(), .all_clear = all_clear };
+        writer.writeU8(@intFromEnum(mode));
+        writer.writeBytes(&completed_exception_digest);
+        return .{
+            .digest = writer.finish(),
+            .all_clear = all_clear,
+            .mode = mode,
+            .completed_exception_digest = completed_exception_digest,
+        };
     }
 
     fn rxDrainEvidenceCurrentForCleanup(
         self: *ExternalPumpStorage,
-        lease: *ExternalWholeTurnLease,
+        lease: *const ExternalWholeTurnLease,
         scratch: *ExternalRxTurnScratch,
         evidence: *const RxDrainEvidence,
     ) bool {
@@ -12223,7 +12961,7 @@ pub const ExternalPumpStorage = struct {
             lease,
             scratch,
         ) orelse return false;
-        const blocker = self.currentDrainBlockerProjection() orelse return false;
+        const blocker = self.currentDrainBlockerProjectionForMode(final.blockers.mode) orelse return false;
         if (!blocker.all_clear or
             !std.mem.eql(u8, &blocker.digest, &final.blockers.digest) or
             !std.meta.eql(
@@ -12241,8 +12979,8 @@ pub const ExternalPumpStorage = struct {
         if (evidence.saved_self_addr != 0 or evidence.lifecycle != .empty)
             return false;
         evidence.* = .{
-            .domain = "MARURDE2".*,
-            .version = 1,
+            .domain = "MARURDE3".*,
+            .version = 2,
             .saved_self_addr = @intFromPtr(evidence),
             .storage_addr = @intFromPtr(self),
             .owner_incarnation = self.owner_incarnation,
@@ -12265,6 +13003,9 @@ pub const ExternalPumpStorage = struct {
             .final_readiness = readiness,
             .rx_frame_budget_exhausted = final.frame_budget_exhausted,
             .rx_read_budget_exhausted = final.read_budget_exhausted,
+            .work_budget_exhausted = final.work_budget_exhausted,
+            .mode = blocker.mode,
+            .completed_exception_digest = blocker.completed_exception_digest,
             .owner_inventory_generation = snapshot.inventory_generation,
             .owner_snapshot_digest = snapshot.digest,
             .initial_inherited_snapshot_digest = initial_inherited_snapshot_digest,
@@ -12384,14 +13125,15 @@ pub const ExternalPumpStorage = struct {
             !std.meta.eql(evidence.parser_seal, state.rx_provenance.parser_seal) or
             readiness != evidence.final_readiness or readiness != .empty or
             evidence.rx_frame_budget_exhausted or
-            evidence.rx_read_budget_exhausted)
+            evidence.rx_read_budget_exhausted or
+            evidence.work_budget_exhausted)
             return false;
         const snapshot = buildRxOwnerAuthoritySnapshot(
             self,
             lease,
             scratch,
         ) orelse return false;
-        const blocker = self.currentDrainBlockerProjection() orelse return false;
+        const blocker = self.currentDrainBlockerProjectionForMode(evidence.mode) orelse return false;
         if (snapshot.inventory_generation !=
             evidence.owner_inventory_generation or
             !std.mem.eql(
@@ -12399,6 +13141,12 @@ pub const ExternalPumpStorage = struct {
                 &snapshot.digest,
                 &evidence.owner_snapshot_digest,
             ) or !blocker.all_clear or !evidence.final_owner_blockers_clear or
+            blocker.mode != evidence.mode or
+            !std.mem.eql(
+                u8,
+                &blocker.completed_exception_digest,
+                &evidence.completed_exception_digest,
+            ) or
             !std.mem.eql(
                 u8,
                 &blocker.digest,
@@ -12437,6 +13185,7 @@ pub const ExternalPumpStorage = struct {
             readiness != evidence.final_readiness or readiness != .empty or
             evidence.rx_frame_budget_exhausted or
             evidence.rx_read_budget_exhausted or
+            evidence.work_budget_exhausted or
             !evidence.final_owner_blockers_clear)
             return false;
         const snapshot = buildRxOwnerAuthoritySnapshot(
@@ -12444,19 +13193,72 @@ pub const ExternalPumpStorage = struct {
             lease,
             scratch,
         ) orelse return false;
-        const blocker = self.currentDrainBlockerProjection() orelse return false;
+        const blocker = self.currentDrainBlockerProjectionForMode(evidence.mode) orelse return false;
         return snapshot.inventory_generation ==
             evidence.owner_inventory_generation and
             std.mem.eql(
                 u8,
                 &snapshot.digest,
                 &evidence.owner_snapshot_digest,
-            ) and blocker.all_clear and
+            ) and blocker.all_clear and blocker.mode == evidence.mode and
+            std.mem.eql(
+                u8,
+                &blocker.completed_exception_digest,
+                &evidence.completed_exception_digest,
+            ) and
             std.mem.eql(
                 u8,
                 &blocker.digest,
                 &evidence.inherited_blocker_snapshot_digest,
             );
+    }
+
+    fn finishedRxDrainEvidenceCurrentUnderHeldLease(
+        self: *ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        scratch: *ExternalRxTurnScratch,
+        required_mode: RxDrainEvidenceMode,
+    ) bool {
+        const evidence = &scratch.drain_evidence;
+        const client = if (self.owned_client) |*owned| owned else return false;
+        const state = switch (client.io_mode) {
+            .external => |*external| external,
+            .blocking => return false,
+        };
+        const readiness = client_external_mode.parserReadiness(
+            state,
+            &client.parser,
+        ) catch return false;
+        if (evidence.lifecycle != .finished or evidence.mode != required_mode or
+            !self.rxDrainEvidenceCurrentForCleanup(lease, scratch, evidence) or
+            evidence.parser_addr != @intFromPtr(&client.parser) or
+            !std.meta.eql(evidence.parser_seal, state.rx_provenance.parser_seal) or
+            readiness != .empty or evidence.final_readiness != .empty or
+            evidence.rx_frame_budget_exhausted or
+            evidence.rx_read_budget_exhausted or
+            evidence.work_budget_exhausted or
+            !evidence.final_owner_blockers_clear)
+            return false;
+        const snapshot = buildRxOwnerAuthoritySnapshot(
+            self,
+            lease,
+            scratch,
+        ) orelse return false;
+        const blocker = self.currentDrainBlockerProjectionForMode(
+            required_mode,
+        ) orelse return false;
+        return snapshot.inventory_generation == evidence.owner_inventory_generation and
+            std.mem.eql(u8, &snapshot.digest, &evidence.owner_snapshot_digest) and
+            blocker.all_clear and blocker.mode == required_mode and
+            std.mem.eql(
+                u8,
+                &blocker.completed_exception_digest,
+                &evidence.completed_exception_digest,
+            ) and std.mem.eql(
+            u8,
+            &blocker.digest,
+            &evidence.inherited_blocker_snapshot_digest,
+        );
     }
 
     fn finishRxDrainEvidence(
@@ -12512,11 +13314,20 @@ pub const ExternalPumpStorage = struct {
     ) bool {
         const evidence = &scratch.drain_evidence;
         const snapshot = &scratch.authority_snapshot;
+        const mode_current = switch (evidence.mode) {
+            .general => !self.controlResponsePending() and
+                std.mem.allEqual(u8, &evidence.completed_exception_digest, 0),
+            .completed_control => if (self.currentCompletedExceptionDigest()) |digest|
+                std.mem.eql(u8, &digest, &evidence.completed_exception_digest)
+            else
+                false,
+        };
         return scratch.saved_self_addr == @intFromPtr(scratch) and
             scratch.lifecycle == .ready and
             active_callback_region_addr == 0 and
             active_callback_release_addr == 0 and
             evidence.lifecycle == .finished and
+            mode_current and
             rxDrainEvidenceSealed(evidence) and
             evidence.storage_addr == @intFromPtr(self) and
             ownerIncarnationValid(self) and
@@ -13548,7 +14359,12 @@ pub const ExternalPumpStorage = struct {
                 scratch.collect_receipt.accepted_bytes,
                 if (final_parser == .empty) .empty else .incomplete,
             );
-        const final_blockers = self.currentDrainBlockerProjection() orelse
+        const drain_mode: RxDrainEvidenceMode = if (self.controlResponsePending() and
+            self.completedControlValid())
+            .completed_control
+        else
+            .general;
+        const final_blockers = self.currentDrainBlockerProjectionForMode(drain_mode) orelse
             return self.terminalRxPreparation(
                 turn,
                 .invariant_failure,
@@ -13592,6 +14408,7 @@ pub const ExternalPumpStorage = struct {
             .allowance_stop = allowance_stop,
             .frame_budget_exhausted = completed.budget_exhausted,
             .read_budget_exhausted = read_budget_exhausted,
+            .work_budget_exhausted = completed.rx_frames >= external_rx_intent.max_intents,
             .terminal = terminal_reason != null or
                 mechanics_terminal != null or allowance_terminal,
             .blockers = final_blockers,
@@ -14147,6 +14964,21 @@ pub const ExternalPumpStorage = struct {
         );
     }
 
+    fn controlSemanticDestinationsPristine(
+        scratch: *const ExternalRxTurnScratch,
+    ) bool {
+        return std.meta.eql(
+            scratch.whole_drain_permit,
+            PreparedWholeDrainPermit{},
+        ) and std.meta.eql(
+            scratch.control_semantic_verdict,
+            PreparedControlSemanticVerdict{},
+        ) and std.meta.eql(
+            scratch.control_semantic_terminal,
+            PreparedControlSemanticTerminal{},
+        );
+    }
+
     /// Rebuilds the permit projection from live owners while the whole-turn lease excludes every
     /// sibling mutation. The caller deliberately invokes this again at each lifecycle edge:
     /// reusing the original seed would turn an immutable record into a stale capability.
@@ -14166,7 +14998,7 @@ pub const ExternalPumpStorage = struct {
             !self.validateWholeTurnLease(lease))
             return null;
         const evidence = &scratch.drain_evidence;
-        if (evidence.lifecycle != .finished or
+        if (evidence.lifecycle != .finished or evidence.mode != .general or
             !self.rxDrainEvidenceCurrentForCleanup(lease, scratch, evidence) or
             !evidence.final_owner_blockers_clear or
             std.mem.allEqual(u8, &evidence.initial_inherited_snapshot_digest, 0))
@@ -14325,7 +15157,8 @@ pub const ExternalPumpStorage = struct {
             .blocking => return false,
         };
         const evidence = &scratch.drain_evidence;
-        if (@intFromPtr(client) != seed.client_addr or
+        if (evidence.mode != .general or
+            @intFromPtr(client) != seed.client_addr or
             @intFromPtr(&client.parser) != seed.parser_addr or
             !client_external_mode.parserSealValid(state, &client.parser) or
             state.rx_provenance.parser_seal.generation !=
@@ -14535,6 +15368,7 @@ pub const ExternalPumpStorage = struct {
     ) bool {
         if (scratch.lifecycle != .busy or
             !authorityDestinationsPristine(scratch) or
+            !controlSemanticDestinationsPristine(scratch) or
             !callbackRegionTokenPristine(&scratch.callback_region) or
             active_callback_region_addr != 0 or
             active_callback_release_addr != 0 or
@@ -14596,6 +15430,7 @@ pub const ExternalPumpStorage = struct {
             expected_generation == 0 or
             expected_generation == std.math.maxInt(u64) or
             !authorityDestinationsPristine(scratch) or
+            !controlSemanticDestinationsPristine(scratch) or
             !callbackRegionTokenPristine(&scratch.callback_region) or
             !scratch.read.isReady() or
             !client_external_mode.guardedQuarantineReceiptPristine(
@@ -14646,6 +15481,7 @@ pub const ExternalPumpStorage = struct {
             scratch.turn_generation == 0 or
             scratch.turn_generation == std.math.maxInt(u64) or
             !authorityDestinationsPristine(scratch) or
+            !controlSemanticDestinationsPristine(scratch) or
             !callbackRegionTokenPristine(&scratch.callback_region) or
             !scratch.read.isReady() or
             !client_external_rx_turn.Scratch.closedForOuterTurn(
@@ -14811,7 +15647,12 @@ pub const ExternalPumpStorage = struct {
         var tx_authority_prepared = false;
         if (result.terminal == null and scratch.lifecycle != .terminal) {
             switch (preparation) {
-                .drained => |summary| switch (self.prepareAuthorityUnderHeldLease(
+                .drained => |summary| if (scratch.drain_evidence.mode == .completed_control) {
+                    // The completed-aware drain belongs exclusively to F3 semantic preparation.
+                    // Until that consumer runs, it remains backpressure and must never mint D2 TX
+                    // authority from a projection that intentionally forgave the response owner.
+                    result.authority_clear = false;
+                } else switch (self.prepareAuthorityUnderHeldLease(
                     &lease,
                     scratch,
                     summary,
@@ -17999,6 +18840,8 @@ fn activateSyntheticLiveOwnersForTest(
         .correlation_generation = storage.control_correlation.generation,
         .source_turn_generation = storage.operation_generation,
         .source_parser_generation = 1,
+        .source_start_absolute = 1,
+        .source_end_absolute = 2,
         .source_owner_digest = external_owner_cleanup.contentDigest(
             response_payload.bytes(),
         ),
@@ -21692,7 +22535,7 @@ fn expectF2FinalZero(storage: *ExternalPumpStorage) !void {
     );
 }
 
-test "f3c0 typed control admission atomically publishes expectation and request frame" {
+test "f3c0 f3c1 typed control response publishes completed-aware drain evidence" {
     const Probe = struct {
         fn read(
             raw: *anyopaque,
@@ -21852,11 +22695,462 @@ test "f3c0 typed control admission atomically publishes expectation and request 
         scratch,
     );
     try std.testing.expect(response_turn.terminal == null);
+    try std.testing.expect(!response_turn.authority_clear);
+    try std.testing.expectEqual(RxDrainEvidenceLifecycle.finished, scratch.drain_evidence.lifecycle);
+    try std.testing.expectEqual(RxDrainEvidenceMode.completed_control, scratch.drain_evidence.mode);
+    try std.testing.expect(!scratch.drain_evidence.work_budget_exhausted);
+    try std.testing.expect(!std.mem.allEqual(
+        u8,
+        &scratch.drain_evidence.completed_exception_digest,
+        0,
+    ));
+    const general_projection = storage.currentDrainBlockerProjection();
+    try std.testing.expect(general_projection != null);
+    try std.testing.expect(!general_projection.?.all_clear);
+    const completed_projection_optional = storage.currentDrainBlockerProjectionForMode(.completed_control);
+    try std.testing.expect(completed_projection_optional != null);
+    const completed_projection = completed_projection_optional.?;
+    try std.testing.expect(completed_projection.all_clear);
+    try std.testing.expect(std.mem.eql(
+        u8,
+        &completed_projection.completed_exception_digest,
+        &scratch.drain_evidence.completed_exception_digest,
+    ));
+    const inherited_turn = storage.pumpRxTurn(
+        .{ .readable = true, .writable = true, .now_ns = 104 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(inherited_turn.terminal == null);
+    try std.testing.expect(!inherited_turn.authority_clear);
+    try std.testing.expectEqual(RxDrainEvidenceLifecycle.finished, scratch.drain_evidence.lifecycle);
+    try std.testing.expectEqual(RxDrainEvidenceMode.completed_control, scratch.drain_evidence.mode);
+    try std.testing.expectEqual(@as(usize, 0), inherited_turn.tx_frames);
+    const sealed_evidence = scratch.drain_evidence;
+    scratch.drain_evidence.completed_exception_digest[0] ^= 1;
+    scratch.drain_evidence.digest = ExternalPumpStorage.drainEvidenceDigest(&scratch.drain_evidence);
+    try std.testing.expect(ExternalPumpStorage.rxDrainEvidenceSealed(&scratch.drain_evidence));
+    try std.testing.expect(!storage.finishedRxDrainEvidenceResettable(scratch));
+    scratch.drain_evidence = sealed_evidence;
+    try std.testing.expect(storage.finishedRxDrainEvidenceResettable(scratch));
     try std.testing.expectEqualStrings(
         "socket-response",
         storage.completed_control.completed.payload.bytes(),
     );
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        storage.completed_control.completed.source_start_absolute,
+    );
+    try std.testing.expectEqual(
+        @as(u64, @intCast(response_wire.len)),
+        storage.completed_control.completed.source_end_absolute,
+    );
+    const sealed_completed = storage.completed_control;
+    storage.completed_control.completed.source_end_absolute -= 1;
+    try std.testing.expect(!storage.completedControlValid());
+    const drifted_projection = storage.currentDrainBlockerProjectionForMode(.completed_control);
+    try std.testing.expect(drifted_projection == null or !drifted_projection.?.all_clear);
+    storage.completed_control = sealed_completed;
+    try std.testing.expect(storage.completedControlValid());
     try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(&storage));
+}
+
+const F3c1FailAllocator = struct {
+    parent: std.mem.Allocator,
+    fail: bool = false,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        if (self.fail) return null;
+        return self.parent.vtable.alloc(self.parent.ptr, len, alignment, ret_addr);
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        if (self.fail) return false;
+        return self.parent.vtable.resize(self.parent.ptr, memory, alignment, new_len, ret_addr);
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        if (self.fail) return null;
+        return self.parent.vtable.remap(self.parent.ptr, memory, alignment, new_len, ret_addr);
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        self.parent.vtable.free(self.parent.ptr, memory, alignment, ret_addr);
+    }
+};
+
+const F3c1PolicyBlock = enum {
+    none,
+    frame_budget,
+    read_budget,
+    work_budget,
+    parser_incomplete,
+};
+
+fn prepareF3c1ActualResponse(
+    storage: *ExternalPumpStorage,
+    fixture: *TestClient,
+    scratch: *ExternalRxTurnScratch,
+    lease: *ExternalWholeTurnLease,
+    request: control_response_wire.ControlRequest,
+    payload: []const u8,
+    policy_block: F3c1PolicyBlock,
+    fail_before_decode: ?*bool,
+) !ControlSemanticPreparationResult {
+    try initActiveF2Storage(storage, fixture);
+    var canonical_request = request;
+    if (request == .resync) {
+        canonical_request.resync.recovery_authority.owner_incarnation = storage.owner_incarnation;
+        storage.semantic_state = .{ .active = .{ .client_recovery = .{
+            .control_wait = .{ .epoch = request.resync.recovery_authority.recovery_epoch, .deadline_ns = 1_000 },
+        } } };
+    }
+    const admitted = storage.admitControl(.{
+        .request = canonical_request,
+        .expected_controller_generation = valid_evidence.initial_controller_generation,
+    }, 100);
+    const request_id = switch (admitted) {
+        .admitted => |value| value.request_id,
+        else => return error.TestUnexpectedResult,
+    };
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    var probe = F2ProductProbe{ .use_posix = true };
+    const ops = probe.rxOps();
+    const sent = storage.pumpRxTurn(
+        .{ .readable = true, .writable = true, .now_ns = 101 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(sent.terminal == null);
+    var request_wire: [protocol.max_control_json + protocol.header_size]u8 = undefined;
+    try std.testing.expect(c.recv(fixture.peer_fd, &request_wire, request_wire.len, 0) > 0);
+    const response_wire = try framing.encodeFrame(
+        std.testing.allocator,
+        .{ .kind = .response, .request_id = request_id },
+        payload,
+    );
+    defer std.testing.allocator.free(response_wire);
+    try std.testing.expectEqual(
+        @as(isize, @intCast(response_wire.len)),
+        c.send(fixture.peer_fd, response_wire.ptr, response_wire.len, 0),
+    );
+    if (!client_external_rx_read.stoppedGraphPristine(
+        &scratch.stopped_borrow,
+        &scratch.borrow_use_permit,
+        &scratch.would_block_seed,
+        &scratch.prepared_admit_use_permit,
+    )) try std.testing.expect(client_external_rx_read.resetSettledStoppedGraphForNextTurn(
+        &scratch.read,
+        &scratch.collect_receipt,
+        &scratch.stopped_borrow,
+        &scratch.borrow_use_permit,
+        &scratch.would_block_seed,
+        &scratch.prepared_admit_use_permit,
+    ));
+    if (scratch.drain_evidence.lifecycle == .finished)
+        try std.testing.expect(storage.resetFinishedRxDrainEvidence(scratch));
+    try storage.acquireWholeTurnLease(lease, @intFromPtr(scratch), @sizeOf(ExternalRxTurnScratch));
+    scratch.lifecycle = .busy;
+    scratch.snapshot = .{};
+    scratch.live_consume = .{};
+    scratch.stopped_borrow = .{};
+    scratch.borrow_use_permit = .{};
+    scratch.would_block_seed = .{};
+    scratch.quarantine_receipt = .{};
+    scratch.authority_ranges_generation = storage.operation_generation;
+    const preparation = storage.prepareRxTurn(
+        lease,
+        .{ .readable = true, .writable = false, .now_ns = 102 },
+        &ops,
+        scratch,
+    );
+    const published = storage.publishRxPreparationUnderHeldLease(lease, scratch, preparation);
+    try std.testing.expect(published.terminal == null);
+    var summary = switch (preparation) {
+        .drained => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    switch (policy_block) {
+        .none => {},
+        .frame_budget => summary.policy.rx_frame_budget_exhausted = true,
+        .read_budget => summary.policy.rx_read_budget_exhausted = true,
+        .work_budget => summary.policy.work_budget_exhausted = true,
+        .parser_incomplete => summary.policy.parser = .incomplete,
+    }
+    const completed_before = storage.completed_control;
+    const correlation_before = storage.control_correlation;
+    const semantic_before = storage.semantic_state;
+    const permit_before = scratch.whole_drain_permit;
+    const verdict_before = scratch.control_semantic_verdict;
+    const terminal_before = scratch.control_semantic_terminal;
+    if (fail_before_decode) |flag| flag.* = true;
+    const result = storage.prepareCompletedControlSemanticUnderHeldLease(lease, scratch, summary);
+    try std.testing.expect(std.meta.eql(completed_before, storage.completed_control));
+    try std.testing.expect(std.meta.eql(correlation_before, storage.control_correlation));
+    try std.testing.expect(std.meta.eql(semantic_before, storage.semantic_state));
+    if (result == .not_ready) {
+        try std.testing.expect(std.meta.eql(permit_before, scratch.whole_drain_permit));
+        try std.testing.expect(std.meta.eql(verdict_before, scratch.control_semantic_verdict));
+        try std.testing.expect(std.meta.eql(terminal_before, scratch.control_semantic_terminal));
+    }
+    return result;
+}
+
+test "f3c1 actual resize and resync responses prepare typed pairs" {
+    const cases = [_]struct {
+        request_kind: client_pump.ControlKind,
+        payload: []const u8,
+    }{
+        .{ .request_kind = .resize, .payload = "{\"result\":{\"cols\":80,\"rows\":24,\"client_sequence\":1,\"resize_generation\":2,\"changed\":true}}" },
+        .{ .request_kind = .resync, .payload = "{\"result\":{\"resync\":true}}" },
+    };
+    for (cases) |case| {
+        var fixture = try TestClient.init();
+        defer fixture.deinitPeer();
+        var storage: ExternalPumpStorage = .{};
+        const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+        defer std.testing.allocator.destroy(scratch);
+        defer if (storage.lifecycle != .dead) {
+            _ = teardownForTest(&storage);
+        };
+        var lease: ExternalWholeTurnLease = .{};
+        const request: control_response_wire.ControlRequest = switch (case.request_kind) {
+            .resize => .{ .resize = .{
+                .stream_id = valid_evidence.stream_id,
+                .cols = 80,
+                .rows = 24,
+                .client_sequence = 1,
+            } },
+            .resync => .{ .resync = .{
+                .stream_id = valid_evidence.stream_id,
+                .recovery_authority = .{
+                    .owner_incarnation = fixture.client.attach_instance_id,
+                    .origin = .client,
+                    .recovery_epoch = 9,
+                },
+            } },
+        };
+        const result = try prepareF3c1ActualResponse(
+            &storage,
+            &fixture,
+            scratch,
+            &lease,
+            request,
+            case.payload,
+            .none,
+            null,
+        );
+        try std.testing.expectEqual(ControlSemanticPreparationResult.prepared_pair, result);
+        try std.testing.expect(storage.preparedControlSemanticPairCurrent(&lease, scratch));
+        const completed = switch (storage.completed_control) {
+            .completed => |value| value,
+            .none, .terminal => return error.TestUnexpectedResult,
+        };
+        const permit = &scratch.whole_drain_permit;
+        try std.testing.expectEqual(completed.source_start_absolute, permit.parser_absolute_start);
+        try std.testing.expect(permit.parser_absolute_end >= completed.source_end_absolute);
+        try std.testing.expectEqual(@intFromPtr(&scratch.drain_evidence), permit.drain_evidence_addr);
+        try std.testing.expect(std.mem.eql(u8, &scratch.drain_evidence.digest, &permit.drain_evidence_digest));
+        try std.testing.expect(std.mem.eql(
+            u8,
+            &scratch.drain_evidence.completed_exception_digest,
+            &permit.completed_exception_digest,
+        ));
+        switch (case.request_kind) {
+            .resize => try std.testing.expect(scratch.control_semantic_verdict.value == .resize),
+            .resync => try std.testing.expect(scratch.control_semantic_verdict.value == .resync_ack),
+        }
+        try std.testing.expectEqual(WholeTurnReleaseResult.released, storage.releaseWholeTurnLease(&lease));
+    }
+}
+
+test "f3c1 stale malformed error and OOM prepare terminal without source mutation" {
+    const cases = [_]struct { payload: []const u8, reason: client_pump.TerminalReason }{
+        .{ .payload = "{\"result\":{\"stale\":true}}", .reason = .protocol_error },
+        .{ .payload = "{\"result\":", .reason = .protocol_error },
+        .{ .payload = "{\"error\":\"resource_exhausted\"}", .reason = .protocol_error },
+    };
+    for (cases) |case| {
+        var fixture = try TestClient.init();
+        defer fixture.deinitPeer();
+        var storage: ExternalPumpStorage = .{};
+        const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+        defer std.testing.allocator.destroy(scratch);
+        defer if (storage.lifecycle != .dead) {
+            _ = teardownForTest(&storage);
+        };
+        var lease: ExternalWholeTurnLease = .{};
+        const result = try prepareF3c1ActualResponse(&storage, &fixture, scratch, &lease, .{ .resize = .{
+            .stream_id = valid_evidence.stream_id,
+            .cols = 80,
+            .rows = 24,
+            .client_sequence = 1,
+        } }, case.payload, .none, null);
+        try std.testing.expectEqual(ControlSemanticPreparationResult.terminal_prepared, result);
+        try std.testing.expectEqual(case.reason, scratch.control_semantic_terminal.reason);
+        try std.testing.expect(storage.preparedControlSemanticTerminalCurrent(&lease, scratch));
+        try std.testing.expectEqual(WholeTurnReleaseResult.released, storage.releaseWholeTurnLease(&lease));
+    }
+
+    var failing = F3c1FailAllocator{ .parent = std.testing.allocator };
+    var fixture = try TestClient.initWithAllocator(failing.allocator());
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    defer if (storage.lifecycle != .dead) {
+        _ = teardownForTest(&storage);
+    };
+    var lease: ExternalWholeTurnLease = .{};
+    const result = try prepareF3c1ActualResponse(&storage, &fixture, scratch, &lease, .{ .resize = .{
+        .stream_id = valid_evidence.stream_id,
+        .cols = 80,
+        .rows = 24,
+        .client_sequence = 1,
+    } }, "{\"result\":{\"cols\":80,\"rows\":24,\"client_sequence\":1,\"resize_generation\":2,\"changed\":true}}", .none, &failing.fail);
+    try std.testing.expectEqual(ControlSemanticPreparationResult.terminal_prepared, result);
+    try std.testing.expectEqual(client_pump.TerminalReason.resource_exhausted, scratch.control_semantic_terminal.reason);
+    try std.testing.expect(storage.preparedControlSemanticTerminalCurrent(&lease, scratch));
+    failing.fail = false;
+    try std.testing.expectEqual(WholeTurnReleaseResult.released, storage.releaseWholeTurnLease(&lease));
+}
+
+test "f3c1 permit verdict tamper copy and pair splice fail closed" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    defer if (storage.lifecycle != .dead) {
+        _ = teardownForTest(&storage);
+    };
+    var lease: ExternalWholeTurnLease = .{};
+    try std.testing.expectEqual(ControlSemanticPreparationResult.prepared_pair, try prepareF3c1ActualResponse(
+        &storage,
+        &fixture,
+        scratch,
+        &lease,
+        .{ .resize = .{ .stream_id = 7, .cols = 80, .rows = 24, .client_sequence = 1 } },
+        "{\"result\":{\"cols\":80,\"rows\":24,\"client_sequence\":1,\"resize_generation\":2,\"changed\":true}}",
+        .none,
+        null,
+    ));
+    try std.testing.expect(storage.preparedControlSemanticPairCurrent(&lease, scratch));
+    const saved_permit = scratch.whole_drain_permit;
+    const saved_verdict = scratch.control_semantic_verdict;
+    scratch.whole_drain_permit.parser_absolute_end -= 1;
+    try std.testing.expect(!storage.preparedControlSemanticPairCurrent(&lease, scratch));
+    scratch.whole_drain_permit = saved_permit;
+    scratch.whole_drain_permit.drain_evidence_addr +%= 1;
+    scratch.whole_drain_permit.digest = preparedWholeDrainPermitDigest(&scratch.whole_drain_permit);
+    try std.testing.expect(!storage.preparedControlSemanticPairCurrent(&lease, scratch));
+    scratch.whole_drain_permit = saved_permit;
+    scratch.whole_drain_permit.drain_evidence_digest[0] ^= 1;
+    scratch.whole_drain_permit.digest = preparedWholeDrainPermitDigest(&scratch.whole_drain_permit);
+    try std.testing.expect(!storage.preparedControlSemanticPairCurrent(&lease, scratch));
+    scratch.whole_drain_permit = saved_permit;
+    scratch.whole_drain_permit.completed_exception_digest[0] ^= 1;
+    scratch.whole_drain_permit.digest = preparedWholeDrainPermitDigest(&scratch.whole_drain_permit);
+    try std.testing.expect(!storage.preparedControlSemanticPairCurrent(&lease, scratch));
+    scratch.whole_drain_permit = saved_permit;
+    scratch.control_semantic_verdict.request_id += 1;
+    try std.testing.expect(!storage.preparedControlSemanticPairCurrent(&lease, scratch));
+    scratch.control_semantic_verdict = saved_verdict;
+    var moved_scratch = scratch.*;
+    try std.testing.expect(!storage.preparedControlSemanticPairCurrent(&lease, &moved_scratch));
+    scratch.whole_drain_permit = saved_permit;
+    scratch.control_semantic_verdict = saved_verdict;
+    scratch.control_semantic_verdict.pair_digest[0] ^= 1;
+    scratch.control_semantic_verdict.digest = preparedControlSemanticVerdictDigest(&scratch.control_semantic_verdict);
+    try std.testing.expect(!storage.preparedControlSemanticPairCurrent(&lease, scratch));
+    scratch.whole_drain_permit = saved_permit;
+    scratch.control_semantic_verdict = saved_verdict;
+    const first_pair_digest = saved_permit.pair_digest;
+    try std.testing.expectEqual(WholeTurnReleaseResult.released, storage.releaseWholeTurnLease(&lease));
+
+    var second_fixture = try TestClient.init();
+    defer second_fixture.deinitPeer();
+    var second_storage: ExternalPumpStorage = .{};
+    const second_scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(second_scratch);
+    defer if (second_storage.lifecycle != .dead) {
+        _ = teardownForTest(&second_storage);
+    };
+    var second_lease: ExternalWholeTurnLease = .{};
+    try std.testing.expectEqual(ControlSemanticPreparationResult.prepared_pair, try prepareF3c1ActualResponse(
+        &second_storage,
+        &second_fixture,
+        second_scratch,
+        &second_lease,
+        .{ .resize = .{ .stream_id = 7, .cols = 81, .rows = 25, .client_sequence = 2 } },
+        "{\"result\":{\"cols\":81,\"rows\":25,\"client_sequence\":2,\"resize_generation\":3,\"changed\":true}}",
+        .none,
+        null,
+    ));
+    try std.testing.expect(second_storage.preparedControlSemanticPairCurrent(&second_lease, second_scratch));
+    try std.testing.expect(!std.mem.eql(u8, &first_pair_digest, &second_scratch.whole_drain_permit.pair_digest));
+    second_scratch.control_semantic_verdict.pair_digest = first_pair_digest;
+    second_scratch.control_semantic_verdict.digest = preparedControlSemanticVerdictDigest(
+        &second_scratch.control_semantic_verdict,
+    );
+    try std.testing.expect(!second_storage.preparedControlSemanticPairCurrent(&second_lease, second_scratch));
+    try std.testing.expectEqual(
+        WholeTurnReleaseResult.released,
+        second_storage.releaseWholeTurnLease(&second_lease),
+    );
+}
+
+test "f3c1 exhausted policy or incomplete parser cannot mint preparation" {
+    const blockers = [_]F3c1PolicyBlock{
+        .frame_budget,
+        .read_budget,
+        .work_budget,
+        .parser_incomplete,
+    };
+    for (blockers) |blocker| {
+        var fixture = try TestClient.init();
+        defer fixture.deinitPeer();
+        var storage: ExternalPumpStorage = .{};
+        const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+        defer std.testing.allocator.destroy(scratch);
+        defer if (storage.lifecycle != .dead) {
+            _ = teardownForTest(&storage);
+        };
+        var lease: ExternalWholeTurnLease = .{};
+        try std.testing.expectEqual(
+            ControlSemanticPreparationResult.not_ready,
+            try prepareF3c1ActualResponse(
+                &storage,
+                &fixture,
+                scratch,
+                &lease,
+                .{ .resize = .{
+                    .stream_id = valid_evidence.stream_id,
+                    .cols = 80,
+                    .rows = 24,
+                    .client_sequence = 1,
+                } },
+                "{\"result\":{\"cols\":80,\"rows\":24,\"client_sequence\":1,\"resize_generation\":2,\"changed\":true}}",
+                blocker,
+                null,
+            ),
+        );
+        try std.testing.expectEqual(WholeTurnReleaseResult.released, storage.releaseWholeTurnLease(&lease));
+    }
 }
 
 const F3bProductQueueCase = enum { zero, input, control, input_and_control };

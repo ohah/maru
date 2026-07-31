@@ -8521,9 +8521,13 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             token binding도 state mutation도 0이다. correction slice의 pure plan은 candidate의 origin/epoch,
             `is_snapshot`, half-open absolute `start/end`, nonzero committed generation을 검사하며
             `start >= recovery_barrier_absolute`와 `end > start`를 요구한다. 이 DTO 자체는 commit capability가 아니다.
-            f3c1이 실제 ledger commit token·candidate provenance·storage/lease/incarnation을 opaque prepared receipt에
-            봉인하고, 2b2e-integration이 그 receipt를 소비할 때 barrier와 bound token generation을 recovery authority
-            seal/digest에 포함한다. 그 전 product callsite는 0이고 checked absolute offset overflow는 terminal이다.
+            snapshot frame을 transport ownership 목적으로 실제 ledger에 commit한 뒤의 **2b2e-integration preparation**이
+            이미 발급된 actual token, candidate provenance와 storage/lease/incarnation을 opaque prepared receipt에 봉인한다.
+            이 transport commit은 ACK semantic 전에도 가능하지만 token을 recovery authority로 해석·bind하지 않는다. 같은 integration의
+            callback-free suffix가 그 receipt를 소비할 때 barrier와 bound token generation을 recovery authority
+            seal/digest에 포함한다. pre-ACK response를 다루는 f3c1은 미래 ledger token·candidate receipt를 만들거나
+            예측하지 않고 whole-drain permit과 typed ACK verdict까지만 생산한다. 그 전 product callsite는 0이고
+            checked absolute offset overflow는 terminal이다.
 
             **구현 완료(recovery contract correction):** control request/correlation은 future ledger generation 없는
             `RecoveryControlAuthority`만 봉인한다. recovery state는 barrier-only `awaiting_snapshot`, committed-generation
@@ -8532,9 +8536,9 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             `RecoveryKey`를 `snapshot_in_flight`에서만 허용한다. Debug/ReleaseFast
             `test-session-host-recovery-contract`, F3c0 회귀, 전체 `test-session-host`, `check-boundaries`, `mise run check`가
             green이어야 이 완료 표식을 유지한다. actual ledger receipt/storage seal/product callsite는 완료 범위가 아니며
-            다음 f3c1이 소유한다.
+            snapshot commit 뒤의 2b2e-integration preparation이 소유한다.
 
-            구현 순환도 다음 순서로 제거한다. **f3c1 preparation**이 clean whole-drain permit과 strict typed
+            merge 순서는 다음과 같다. **f3c1 preparation**이 clean whole-drain permit과 strict typed
             verdict를 만들되 recovery state를 바꾸지 않고, 그 뒤 **2b2e-integration**이 기존
             `planRecoveryTransition` 결과와 f3c1 capability를 받아 callback-free commit suffix만 구현한다.
             마지막으로 **f3c2/d/e orchestration**이 같은 held lease에서 f3c1→integration을 exact-one 호출한다.
@@ -8542,6 +8546,14 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             만드는 우회는 금지한다. integration은 새 recovery planner/JSON parser/request map/public consumer를
             만들지 않고 `ExternalPumpStorage` 내부 mutation suffix만 소유하며 stable adapter와 attachment teardown은
             계속 2b3 범위다.
+
+            런타임의 no-callback atomic 순서는 merge 순서와 다르다. RX traversal/ledger가 side-intent를 준비하고
+            f3c1이 이를 검증해 semantic pair에 결속한 뒤,
+            2b2e-integration이 ACK 이후 적용할 candidate/token binding과 모든 drop/terminal disposition을 미리 preflight한
+            뒤, f3c2 suffix가 ACK consume→`awaiting_snapshot` publish→2b2e no-fail binding/retirement→completed payload cleanup→
+            correlation/input publication을 exact-one 실행한다. ACK publication 이후에는 allocation, callback 또는 fallible
+            branch가 없다. preflight 실패/OOM은 ACK나 recovery state를 바꾸기 전 terminal preparation으로 돌아가며,
+            no-fail suffix seal drift는 invariant terminal과 canonical teardown으로 닫는다.
 
             recovery transition은 다음 충돌표를 따른다.
 
@@ -8980,6 +8992,44 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           반환되지 않는다. frame/read budget 64 경계에서 response 뒤 65번째 revoke가 남으면 permit 0과 immediate
           RX를 반환하며 다음 turn이 revoke/EOF를 먼저 확정한다.
 
+          기존 D2/TX `RxDrainEvidence`와 `currentDrainBlockerProjection().all_clear`는 response owner까지 0인
+          일반 drain만 증명하므로 약화하거나 재해석하지 않는다. f3c1은 별도 private
+          **completed-aware drain projection**을 사용한다. 이 projection은 canonical `CompletedControlOwner`가 정확히
+          하나이고 같은 request/correlation의 `completed` state와 일치하는 경우에만 그 exact owner 하나를 예외로
+          허용한다. exception digest는 completed generation, request ID, control kind, expectation, target/controller
+          generation, wire length, source turn/parser generation, source owner digest, payload final address/length/allocator/
+          content seal과 correlation generation을 전부 봉인한다. partial response, live screen/metadata/resize,
+          recovery-affecting benign owner 또는 두 번째/foreign response는 계속 blocker다. 이 projection은 기존
+          `all_clear`의 caller가 아니며 D2/TX authority나 일반 drain의 의미를 바꾸지 않는다.
+
+          response provenance는 parser가 frame을 완성한 시점의 immutable half-open absolute
+          `[response_frame_start, response_frame_end)`이다. `PreparedIntentCommit`이 classified owner의 range를 carry하고
+          `CompletedControlState`가 이 범위와 source parser generation/owner digest를 payload owner와 함께 보존한다.
+          `response_frame_end > response_frame_start`, checked arithmetic와 source seal equality가 필수다. permit의
+          `parser_absolute_start/end`는 response start부터 final clean-drain parser cursor까지의 logical drain 범위이며
+          `start == response_frame_start`, `response_frame_end <= end`, `end == live rx_absolute_next`를 요구한다. 따라서
+          response 뒤 같은 drain에서 정상 소비된 benign frame은 허용한다. ordinary screen/metadata는 기존 consumer가
+          비우지만, resync ACK 뒤 도착한 snapshot처럼 ACK semantic 전이가 선행돼야 하는 frame은 버리거나 GUI에 먼저
+          publish하지 않는다. traversal은 기존 ledger의 transport ownership commit을 먼저 끝내고, 그 결과인 actual token과
+          candidate provenance를 recovery authority가 아닌 immutable **post-response side-intent**로 봉인한다. 이는 미래 token
+          예측이나 recovery binding이 아니다. completed-aware projection은 bounded side-intent 배열(한 turn 최대 64, storage
+          aggregate cap 안)과 ledger owner를 exact digest로 묶어 예외 처리한다. f3c2 callback-free suffix가 ACK verdict를 먼저
+          consume해 `awaiting_snapshot`을 publish한 뒤 2b2e-integration preparation/commit이 같은 lease에서 side-intent의 actual
+          token을 barrier와 결속한다. 여러 candidate는 wire/range 순으로 adjudicate하며 최초 exact post-barrier snapshot 하나만
+          bind하고 pre-barrier/straddling/foreign/delta와 그 뒤 candidate는 sealed drop/terminal disposition으로 exact-once
+          retire한다. abort/terminal은 기존 ledger/live-retirement owner가 전부 정리하며 side-intent가 payload나 두 번째
+          allocation owner를 만들지 않는다. clean permit 시점에는 live parser가 empty이고 range/seal/generation이나
+          side-intent seal이 decode callback 전후 조금이라도 달라지면 permit과 verdict는 0이다.
+
+          response가 frame/read budget 끝에 걸려 다음 turn으로 이어지는 경우에는 별도 final-address `DrainEpisodeOwner`가
+          `drain_episode_generation`, response start와 last contiguous absolute end, continuation count/turn generation과
+          stop reason을 sealed state로 보존한다. `CompletedControlState`는 episode identity와 시작 digest만 봉인해
+          completed↔correlation owner를 continuation마다 다시 쓰지 않는다. 다음 immediate-RX turn은 이전 end와 새 parser start의 exact equality,
+          동일 completed owner/correlation과 budget-exhausted→continuation 전이만 허용한다. 최종 `would_block`까지의 모든
+          half-open range가 빈틈 없이 이어져야 permit을 만든다. f3d private `PreparedDrainEpisodeAdvance`가 same lease에서
+          old episode/completed/correlation/parser seal과 next range를 freeze하고 callback-free all-or-none으로 episode만
+          갱신한다. 실패에는 old episode를 유지한 채 terminal disposition을 준비하며 ABA/overflow 또는 unrelated turn은 terminal이다.
+
           response↔revoke 또는 response↔EOF/FIN이 같은 logical drain에 있으면 wire 순서와 무관하게
           revoke/transport terminal이 이긴다. completed payload는 frozen cleanup owner로 옮겨 exact-once release하고
           semantic callback, correlation idle, input gate clear와 TX write는 모두 0이다. 여기서 “protocol close 없이
@@ -8997,12 +9047,13 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           추가하지 않는다. f3 fixture의 FD final-zero는 `TestClient`/storage scaffold의 canonical teardown 증거이고,
           실제 stable poll adapter와 product close exact once authority는 P5c3c-2b3이 소유한다.
 
-          response 뒤 budget 경계를 넘는 benign snapshot/event/optional frame은 버리거나 별도 deferred FIFO에
+          response 뒤 budget 경계를 넘는 benign snapshot/event/optional frame은 버리거나 payload를 별도 deferred FIFO에
           복제하지 않는다. 기존 parser/reducer와 screen·metadata live owner가 bounded continuation에서 exact-once
           commit하며, 각 기존 projection blocker를 기존 consumer가 먼저 비운 뒤 다음 RX continuation을 수행한다.
           이 동안 completed response의 semantic apply, input/control admission과 TX write만 0이다. invalidated/resync
-          충돌처럼 recovery state에 영향을 주는 benign owner는 아래 2b2e-integration private consumer가 같은 held
-          lease에서 adjudicate하기 전 permit을 만들지 않는다. response@64→benign@65→EAGAIN, 여러 turn의
+          충돌처럼 recovery state에 영향을 주는 benign owner는 payload 복제가 아니라 위 ledger-backed post-response
+          side-intent로 freeze하고, 아래 2b2e-integration private consumer가 같은 held lease에서 ACK 뒤 adjudicate한다.
+          exact side-intent 외 live owner가 남으면 permit을 만들지 않는다. response@64→benign@65→EAGAIN, 여러 turn의
           benign 64*n→revoke/EOF와 live-owner cap/OOM cleanup을 hostile gate에 포함한다.
 
           clean `PreparedWholeDrainPermit`만 f2의 private response take를 typed-success 경로로 연다. strict decoder는
@@ -9101,7 +9152,41 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           `test-session-host-f3c0`, 전체 `test-session-host`, `check-boundaries`, `mise run check`가 green이어야 이 완료 표식을
           유지한다.
           **f3c1 drain-bound preparation**은 `completed_awaiting_drain`에서 clean whole-drain permit과 strict typed
-          resize/resync verdict를 만들되 semantic state를 바꾸거나 payload cleanup callback을 호출하지 않는다.
+          resize/resync verdict를 만든다. 같은 held lease 아래 parser complete backlog/partial/resident tail 0,
+          마지막 transport stop exact `would_block`, read/frame/work budget 미소진, same-drain terminal/revoke/EOF/HUP/
+          malformed/OOM 0과 위 completed-aware projection을 conjunction으로 다시 검증한다. matching request의 TX backing/
+          descriptor는 queue의 queued/partial/fully-sent 어느 상태에도 남아 있지 않고 queue generation도 같아야 한다.
+          correlation은 별도 영역이며 exact `completed` state와 prior `response_wait` provenance를 유지한다.
+          response payload를 canonical completed owner에 둔 채 shared strict codec으로 decode하고, allocator callback 뒤
+          lease/parser/authority/completed/correlation/TX와 두 final output address를 모두 재검증한 뒤에만 pristine
+          `PreparedWholeDrainPermit`과 pointer-free `PreparedControlSemanticVerdict`를 한 callback-free publication으로
+          봉인한다. producer 결과는 닫힌 `not_ready | prepared_pair | terminal_prepared`다. resize `.stale`, malformed/error
+          envelope은 sealed protocol terminal, decode OOM은 sealed resource terminal, drift/reentry/copy는 sealed invariant
+          terminal이며 각각 completed owner와 **non-owning cleanup binding**을 포함한다. 이 binding은 새 payload owner나
+          cleanup state machine이 아니라 기존 `PreparedControlResponseTake`와 canonical f2/f3 cleanup leaf의 final destination
+          identity/digest만 봉인한다. preparation 자체는 source ownership·semantic state·
+          TX·ledger를 바꾸거나 payload cleanup callback을 호출하지 않고, 후속 exact-one cleanup leaf만 terminal preparation을
+          소비해 correlation terminal publication, payload owner 이동, exact-once free와 owner-cleanup FD disposition을 기존
+          순서 그대로 수행한다. replay/tamper는 payload 이동/free 0의 invariant terminal이다. 따라서 f3d는 `not_ready`와
+          terminal을 구별하고 payload를 재decode하지 않는다. 두 성공 결과는 final address, same lease와 서로의
+          pair address/digest에 결속되어 copy/move/splice/replay를 거부한다. f3c1은 semantic state, correlation idle,
+          input gate, recovery phase를 바꾸거나 payload를 정리하지 않는다.
+          **f3c1-base merge slice**는 이 계약의 단일-turn final-`would_block`, post-response side-intent 0,
+          multi-turn episode 불필요 경로만 닫는다. producer는 private이고 product callsite 0이며, permit은 exact
+          completed-aware `RxDrainEvidence` final address/digest와 exception digest를 직접 봉인한다. malformed/stale/OOM의
+          `terminal_prepared`는 이 base에서 non-owning·unconsumable evidence일 뿐 cleanup capability가 아니다. 기존
+          `PreparedControlResponseTake` destination/digest 결속과 exact consumer, bounded side-intent array 결속,
+          `DrainEpisodeOwner` advance가 각각 후속 f3c1-terminal-binding, 2b2e-integration, f3d에서 green이 되기 전에는
+          **f3c1 전체 완료로 표시하지 않는다**. side-intent 또는 continuation episode가 있으면 base producer는
+          `not_ready`이며 source owner와 state를 바꾸지 않는다.
+          **구현 완료(f3c1-base):** classified response의 absolute range가 intent commit→destination plan→completed owner까지
+          seal되고, 기존 D2 general projection을 약화하지 않는 completed-only drain evidence가 final `would_block`과 남은
+          read/frame/work budget을 증명한다. private producer는 실제 held lease에서 shared codec을 사용해 resize/resync pair
+          또는 non-owning terminal evidence를 final-address scratch에 준비하며 completed/correlation/semantic/payload owner를
+          바꾸지 않는다. permit은 drain evidence address/digest/exception을 직접 봉인한다. Debug/ReleaseFast
+          `test-session-host-f3c1`은 actual resize/resync, stale/malformed/error/OOM, absolute provenance, one-field tamper,
+          copy/move와 independent-pair splice를 executable sentinel과 함께 검증한다. product callsite, terminal cleanup
+          consumer, side-intent/episode는 위 제한대로 아직 0/미구현이다.
           **f3c2 semantic take**는 2b2e-integration consumer와 resize commit을 같은 held lease/no-callback suffix에서 호출하고,
           duplicate-after-success와 max-ID success 뒤 같은 product storage의 다음 wire-zero
           `request_id_exhausted`를 고정한다. **f3d whole-turn orchestration**은 기존 `pumpRxTurn`의 단일 clock,
@@ -9110,7 +9195,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           response↔revoke, response+FIN/HUP, readable+writable write 0, revoke 위치 1/64/65, parser resident 65,
           incomplete header/payload+FIN, input/control offset 0/partial/retired/response-wait, deadline-1/exact/+1,
           EINTR/EAGAIN, no-end/chunk/1-byte drip과 common TX/parser/ledger/completed/FD final-zero를 검증한다.
-          f3a~b, f3c0, f3c1, 2b2e-integration, f3c2/d/e는 각각 독립 merge slice로 리뷰·회귀 격리한다. 모든 f3 slice가
+          f3a~b, f3c0, f3c1-base, f3c1-terminal-binding, 2b2e-integration, f3c2/d/e는 각각 독립 merge slice로 리뷰·회귀 격리한다. 모든 f3 slice가
           Debug/ReleaseFast, `check-boundaries`, 실제 socketpair와 전체 `mise run check`가 green이기 전에는
           f3 또는 TX/control/turn 통합을 완료로 표시하지 않는다. `ExternalPumpOwner`,
           `external_attach.Prepared` consume과 stable adapter/attachment teardown은 P5c3c-2b3 범위다.

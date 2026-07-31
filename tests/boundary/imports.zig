@@ -229,6 +229,11 @@ test "d2d adapter pins authority records and a monotonic turn generation in cano
         countOccurrences(pump,
             \\    authority_permit: client_external_turn_authority.PreparedAuthorityPermit = .{},
             \\    authority_cleanup_seed: client_external_turn_authority.FrozenCleanupSeed = .{},
+            \\    tx_cancellation: client_external_tx.PreparedTxCancellation = .{},
+            \\    tx_cancellation_permit: client_external_tx.TxCancellationCommitPermit = .{},
+            \\    tx_cancellation_cleanup: client_external_tx.FrozenTxCancellationCleanup = .{},
+            \\    revoked_commit_graph: PreparedRevokedCommitGraph = .{},
+            \\    post_cancellation_receipt: client_external_tx.PostCancellationReceipt = .{},
             \\    turn_generation: u64 = 0,
         ),
     );
@@ -1394,6 +1399,13 @@ fn countOccurrences(haystack: []const u8, needle: []const u8) usize {
         offset = found + needle.len;
     }
     return count;
+}
+
+fn betweenMarkers(source: []const u8, begin: []const u8, end: []const u8) ?[]const u8 {
+    const begin_at = std.mem.indexOf(u8, source, begin) orelse return null;
+    const body_at = begin_at + begin.len;
+    const end_relative = std.mem.indexOf(u8, source[body_at..], end) orelse return null;
+    return source[body_at .. body_at + end_relative];
 }
 
 test "session host RX unchecked append has one validating aggregate caller" {
@@ -2878,6 +2890,38 @@ test "d2b3d live owner substrate stays private with one buffered product travers
         ) orelse return error.TestUnexpectedResult;
         const aggregate_commit_source =
             aggregate_commit_tail[0..aggregate_commit_end];
+        const validate_start = std.mem.indexOf(
+            u8,
+            source,
+            "    fn validateAndPrepareRxAggregateCommit(",
+        ) orelse return error.TestUnexpectedResult;
+        const validate_tail = source[validate_start..];
+        const validate_end = std.mem.indexOf(
+            u8,
+            validate_tail,
+            "\n    const PublishedRxAggregateCommit",
+        ) orelse return error.TestUnexpectedResult;
+        const validate_source = validate_tail[0..validate_end];
+        const publish_start = std.mem.indexOf(
+            u8,
+            source,
+            "    fn publishRxAggregateUnchecked(",
+        ) orelse return error.TestUnexpectedResult;
+        const publish_tail = source[publish_start..];
+        const publish_end = std.mem.indexOf(
+            u8,
+            publish_tail,
+            "\n    fn finishPublishedRxAggregateCommit(",
+        ) orelse return error.TestUnexpectedResult;
+        const publish_source = publish_tail[0..publish_end];
+        const finish_start = publish_start + publish_end;
+        const finish_tail = source[finish_start..];
+        const finish_end = std.mem.indexOf(
+            u8,
+            finish_tail,
+            "\n    fn commitRxAggregateUnchecked(",
+        ) orelse return error.TestUnexpectedResult;
+        const finish_source = finish_tail[0..finish_end];
         const first_test = std.mem.indexOf(u8, source, "\ntest \"") orelse
             return error.TestUnexpectedResult;
         const product_source = source[0..first_test];
@@ -2898,7 +2942,7 @@ test "d2b3d live owner substrate stays private with one buffered product travers
             ),
         );
         try std.testing.expectEqual(
-            @as(usize, 1),
+            @as(usize, 2),
             std.mem.count(
                 u8,
                 product_source,
@@ -2926,8 +2970,24 @@ test "d2b3d live owner substrate stays private with one buffered product travers
             @as(usize, 1),
             std.mem.count(
                 u8,
-                aggregate_commit_source,
+                publish_source,
                 "commitDestinationWriteUnchecked(self, aggregate, write)",
+            ),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            std.mem.count(
+                u8,
+                validate_source,
+                "commitDestinationWriteUnchecked(",
+            ),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            std.mem.count(
+                u8,
+                finish_source,
+                "commitDestinationWriteUnchecked(",
             ),
         );
         // The suffix consumes the presealed writer kind; it must not reinterpret the ledger
@@ -2972,8 +3032,40 @@ test "d2b3d live owner substrate stays private with one buffered product travers
             std.mem.count(u8, source, "self.live_screen ="),
         );
         try std.testing.expectEqual(
-            @as(usize, 7),
+            @as(usize, 9),
             std.mem.count(u8, source, "self.completed_control ="),
+        );
+        const revoke_canonical_writer = betweenMarkers(
+            product_source,
+            "MARU_REVOKE_CANONICAL_WRITER_BEGIN",
+            "MARU_REVOKE_CANONICAL_WRITER_END",
+        ) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            std.mem.count(
+                u8,
+                revoke_canonical_writer,
+                "self.completed_control = .none",
+            ),
+        );
+        const response_publish_start = std.mem.indexOf(
+            u8,
+            product_source,
+            "    fn publishControlResponseTakeUnchecked(",
+        ) orelse return error.TestUnexpectedResult;
+        const response_publish_tail = product_source[response_publish_start..];
+        const response_publish_end = std.mem.indexOf(
+            u8,
+            response_publish_tail,
+            "\n    fn commitControlResponseTakeUncheckedUnderHeldLease(",
+        ) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            std.mem.count(
+                u8,
+                response_publish_tail[0..response_publish_end],
+                "self.completed_control = .none",
+            ),
         );
         try std.testing.expectEqual(
             @as(usize, 1),
@@ -3020,7 +3112,10 @@ test "d2b3d live owner substrate stays private with one buffered product travers
             std.mem.count(u8, source, "self.completed_control = .terminal"),
         );
         try std.testing.expectEqual(
-            @as(usize, 2),
+            // One legacy reset site plus the response-take publication and the two callback
+            // restores pinned above. Their individual function slices prevent this total from
+            // laundering a new arbitrary writer.
+            @as(usize, 3),
             std.mem.count(u8, source, "self.completed_control = .none"),
         );
         // Whole-owner pointer aliases could otherwise hide `owner.* = active`; keep every
@@ -3125,6 +3220,98 @@ test "d2b3d live owner substrate stays private with one buffered product travers
         @as(usize, 1),
         std.mem.count(u8, mechanics_source, "pub fn pumpRxTurn("),
     );
+    // F3 revoke arbitration has one product decision point. Cancellation preparation may only
+    // consume this plan; a second switch in the external pump would silently fork precedence.
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        std.mem.count(
+            u8,
+            mechanics_source,
+            "client_pump.planRevokeIntegration(",
+        ),
+    );
+    const revoke_publish = betweenMarkers(
+        mechanics_source,
+        "MARU_REVOKE_CONSUME_PUBLISH_BEGIN",
+        "MARU_REVOKE_CONSUME_PUBLISH_END",
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        std.mem.count(
+            u8,
+            revoke_publish,
+            "consumePreparedCancellationUnderHeldLease(",
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        std.mem.count(
+            u8,
+            mechanics_source,
+            "consumePreparedCancellationUnderHeldLease(",
+        ),
+    );
+    inline for (.{ "finishCancellationCleanup(", "finishPublishedRxAggregateCommit(", ".allocator", ".free(" }) |forbidden|
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            std.mem.count(u8, revoke_publish, forbidden),
+        );
+    const revoke_validate = betweenMarkers(
+        mechanics_source,
+        "MARU_REVOKE_PURE_VALIDATE_BEGIN",
+        "MARU_REVOKE_PURE_VALIDATE_END",
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        std.mem.count(
+            u8,
+            revoke_validate,
+            "consumePreparedCancellationUnderHeldLease(",
+        ),
+    );
+    inline for (.{ "abortPreparedCancellation(", "resetCancellationGraphForNextTurn(" }) |mutation|
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            std.mem.count(u8, revoke_validate, mutation),
+        );
+    const revoke_callbacks = betweenMarkers(
+        mechanics_source,
+        "MARU_REVOKE_CALLBACK_TAIL_BEGIN",
+        "MARU_REVOKE_CALLBACK_TAIL_END",
+    ) orelse return error.TestUnexpectedResult;
+    const canonical_writer = betweenMarkers(
+        mechanics_source,
+        "MARU_REVOKE_CANONICAL_WRITER_BEGIN",
+        "MARU_REVOKE_CANONICAL_WRITER_END",
+    ) orelse return error.TestUnexpectedResult;
+    inline for (.{
+        "consumePreparedCancellationUnderHeldLease(",
+        "publishControlResponseTakeUnchecked(",
+        "publishRxAggregateUnchecked(",
+        "self.control_correlation =",
+        "control_correlation.generation =",
+        "self.owner_authority =",
+        "self.owner_authority_seal =",
+        "self.completed_control =",
+        "self.completed_control_generation =",
+        "self.semantic_state =",
+    }) |forbidden|
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            std.mem.count(u8, revoke_callbacks, forbidden),
+        );
+    inline for (.{
+        "self.control_correlation = canonical.correlation",
+        "self.owner_authority = canonical.authority",
+        "self.owner_authority_seal = canonical.authority_seal",
+        "self.completed_control = .none",
+        "self.completed_control_generation = canonical.completed_generation",
+        "self.semantic_state = canonical.semantic",
+    }) |writer|
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            std.mem.count(u8, canonical_writer, writer),
+        );
     try std.testing.expectEqual(
         @as(usize, 0),
         std.mem.count(u8, mechanics_source, "pumpInjectedRxTurnForTest"),

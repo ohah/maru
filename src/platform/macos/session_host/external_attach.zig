@@ -1025,6 +1025,11 @@ test "external attach product transaction resolves connects and assembles one li
         "/tmp/maru-external-attach-{d}",
         .{c.getpid()},
     );
+    // The fixture namespace is PID-derived, so a crashed prior run followed by PID reuse can
+    // leave owner.lock/manifest/socket residue. Starting a daemon on that tree then exits before
+    // the connect loop and makes this test order-dependent. Match the resolver fixture's
+    // bare-ground contract and make cleanup recursive as well.
+    std.Io.Dir.cwd().deleteTree(std.testing.io, base) catch {};
     _ = c.mkdir(base.ptr, 0o700);
     var session_buf: [256]u8 = undefined;
     const session_dir = try discovery.sessionHostDirPath(&session_buf, base);
@@ -1049,8 +1054,7 @@ test "external attach product transaction resolves connects and assembles one li
         var status: c_int = undefined;
         _ = c.waitpid(child, &status, 0);
         host_manifest.removeEmptyHostDirectories(session_dir, host_id);
-        _ = c.rmdir(session_dir.ptr);
-        _ = c.rmdir(base.ptr);
+        std.Io.Dir.cwd().deleteTree(std.testing.io, base) catch {};
     }
 
     var owner = blk: {

@@ -737,6 +737,40 @@ const ControlCorrelationOwner = struct {
     digest: external_owner_seal.Digest = [_]u8{0} ** 32,
 };
 
+const FrozenRevokeCorrelation = struct {
+    saved_self_addr: usize = 0,
+    storage_addr: usize = 0,
+    generation: u64 = 0,
+    present: bool = false,
+    completed: bool = false,
+    kind: client_pump.ControlKind = .resize,
+    target: client_control_correlation.Target = .{
+        .stream_id = 0,
+        .controller_generation = 0,
+    },
+    request_id: u64 = 0,
+    wire_len: usize = 0,
+    owner_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+fn frozenRevokeCorrelationDigest(
+    frozen: *const FrozenRevokeCorrelation,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARURCC1");
+    writer.writeUsize(frozen.saved_self_addr);
+    writer.writeUsize(frozen.storage_addr);
+    writer.writeU64(frozen.generation);
+    writer.writeBool(frozen.present);
+    writer.writeBool(frozen.completed);
+    writer.writeU8(@intFromEnum(frozen.kind));
+    writeControlTarget(&writer, frozen.target);
+    writer.writeU64(frozen.request_id);
+    writer.writeUsize(frozen.wire_len);
+    writer.writeBytes(&frozen.owner_digest);
+    return writer.finish();
+}
+
 fn writeControlTarget(
     writer: *external_owner_seal.Writer,
     target: client_control_correlation.Target,
@@ -797,6 +831,35 @@ fn controlCorrelationValid(storage: *const ExternalPumpStorage) bool {
             &owner.digest,
             &controlCorrelationDigest(owner),
         );
+}
+
+fn frozenRevokeCorrelationCurrent(
+    storage: *const ExternalPumpStorage,
+    frozen: *const FrozenRevokeCorrelation,
+) bool {
+    if (!controlCorrelationValid(storage) or
+        frozen.saved_self_addr != @intFromPtr(frozen) or
+        frozen.storage_addr != @intFromPtr(storage) or
+        frozen.generation != storage.control_correlation.generation or
+        !std.mem.eql(u8, &frozen.owner_digest, &storage.control_correlation.digest) or
+        !std.mem.eql(u8, &frozen.digest, &frozenRevokeCorrelationDigest(frozen)))
+        return false;
+    return switch (storage.control_correlation.state) {
+        .idle => !frozen.present and !frozen.completed and frozen.target.stream_id == 0 and
+            frozen.target.controller_generation == 0 and frozen.request_id == 0 and
+            frozen.wire_len == 0,
+        .in_flight => |control| frozen.present and !frozen.completed and
+            frozen.kind == control.kind and
+            std.meta.eql(frozen.target, control.target) and
+            frozen.request_id == control.request_id and frozen.wire_len == control.wire_len and
+            control.progress == .queued,
+        .completed => |control| frozen.present and frozen.completed and
+            frozen.kind == control.kind and
+            std.meta.eql(frozen.target, control.target) and
+            frozen.request_id == control.request_id and
+            frozen.wire_len == control.wire_len,
+        .terminal => false,
+    };
 }
 
 fn publishControlCorrelation(
@@ -2279,6 +2342,111 @@ const FrozenAggregateCleanup = struct {
     digest: external_owner_seal.Digest = [_]u8{0} ** 32,
 };
 
+const RevokedCommitAction = enum(u8) { cancel_queued, cleanup_completed };
+const PreparedRevokedCommitGraphLifecycle = enum(u8) { empty, prepared, consumed };
+const RevokedCleanupProgress = enum(u8) {
+    empty,
+    tx_abort_pending,
+    tx_reset_pending,
+    rx_abort_pending,
+};
+
+const PreparedRevokedCommitGraphStorage = struct {
+    saved_self_addr: usize = 0,
+    storage_addr: usize = 0,
+    lease_addr: usize = 0,
+    intent_handle_addr: usize = 0,
+    external_addr: usize = 0,
+    aggregate_addr: usize = 0,
+    action: RevokedCommitAction = .cancel_queued,
+    binding: client_external_tx.OwnerBinding = undefined,
+    event_cleanup: FrozenAggregateCleanup = .{},
+    response_take: PreparedControlResponseTake = .{},
+    frozen_response: FrozenControlResponse = .{},
+    correlation: FrozenRevokeCorrelation = .{},
+    cleanup_progress: u8 = @intFromEnum(RevokedCleanupProgress.empty),
+    cleanup_failure: u8 = 0,
+    cleanup_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    lifecycle: PreparedRevokedCommitGraphLifecycle = .empty,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+const PreparedRevokedCommitGraph = struct {
+    bytes: [@sizeOf(PreparedRevokedCommitGraphStorage)]u8 align(@alignOf(PreparedRevokedCommitGraphStorage)) =
+        [_]u8{0} ** @sizeOf(PreparedRevokedCommitGraphStorage),
+
+    fn storage(self: *PreparedRevokedCommitGraph) *PreparedRevokedCommitGraphStorage {
+        return @ptrCast(@alignCast(&self.bytes));
+    }
+
+    fn storageConst(self: *const PreparedRevokedCommitGraph) *const PreparedRevokedCommitGraphStorage {
+        return @ptrCast(@alignCast(&self.bytes));
+    }
+};
+
+fn preparedRevokedCommitGraphDigest(
+    graph: *const PreparedRevokedCommitGraphStorage,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARURPG1");
+    writer.writeUsize(graph.saved_self_addr);
+    writer.writeUsize(graph.storage_addr);
+    writer.writeUsize(graph.lease_addr);
+    writer.writeUsize(graph.intent_handle_addr);
+    writer.writeUsize(graph.external_addr);
+    writer.writeUsize(graph.aggregate_addr);
+    writer.writeU8(@intFromEnum(graph.action));
+    const binding = graph.binding;
+    writer.writeU8(@intFromEnum(binding.purpose));
+    writer.writeUsize(binding.storage_addr);
+    writer.writeUsize(binding.storage_len);
+    writer.writeUsize(binding.client_addr);
+    writer.writeUsize(binding.client_len);
+    writer.writeUsize(binding.lease_addr);
+    writer.writeUsize(binding.lease_len);
+    writer.writeUsize(binding.scratch_addr);
+    writer.writeUsize(binding.scratch_len);
+    writer.writeUsize(binding.write_scratch_addr);
+    writer.writeUsize(binding.write_scratch_len);
+    writer.writeUsize(binding.allocator_ptr_addr);
+    writer.writeUsize(binding.allocator_context_len);
+    writer.writeUsize(binding.allocator_vtable_addr);
+    writer.writeU64(binding.owner_incarnation);
+    writer.writeU64(binding.operation_generation);
+    writer.writeBytes(&graph.event_cleanup.digest);
+    writer.writeBytes(&graph.response_take.digest);
+    writer.writeBytes(&graph.frozen_response.digest);
+    writer.writeBytes(&graph.correlation.digest);
+    writer.writeU8(graph.cleanup_progress);
+    writer.writeU8(graph.cleanup_failure);
+    writer.writeBytes(&graph.cleanup_digest);
+    writer.writeU8(@intFromEnum(graph.lifecycle));
+    return writer.finish();
+}
+
+fn revokedCleanupProgressDigest(
+    graph: *const PreparedRevokedCommitGraphStorage,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARURCF1");
+    writer.writeUsize(graph.saved_self_addr);
+    writer.writeUsize(graph.storage_addr);
+    writer.writeUsize(graph.lease_addr);
+    writer.writeUsize(graph.intent_handle_addr);
+    writer.writeUsize(graph.external_addr);
+    writer.writeUsize(graph.aggregate_addr);
+    writer.writeU8(graph.cleanup_progress);
+    writer.writeU8(graph.cleanup_failure);
+    return writer.finish();
+}
+
+fn revokedCleanupProgress(
+    graph: *const PreparedRevokedCommitGraphStorage,
+) ?RevokedCleanupProgress {
+    return std.enums.fromInt(
+        RevokedCleanupProgress,
+        graph.cleanup_progress,
+    );
+}
+
 const rx_aggregate_abort_frame_bytes =
     @sizeOf(external_inbox_ledger.FrozenLiveBatchAbort) +
     @sizeOf(external_rx_intent.FrozenIntentAbort) +
@@ -2496,6 +2664,50 @@ threadlocal var injected_rx_failpoint: InjectedRxFailpoint = .none;
 threadlocal var injected_rx_failpoint_scratch_addr: usize = 0;
 threadlocal var injected_rx_failpoint_hits: u8 = 0;
 
+const RevokePrepareFailpoint = enum {
+    none,
+    after_aggregate,
+    after_tx_prepare,
+};
+threadlocal var revoke_prepare_failpoint: RevokePrepareFailpoint = .none;
+threadlocal var revoke_prepare_failpoint_scratch_addr: usize = 0;
+
+fn hitRevokePrepareFailpoint(
+    scratch: *const ExternalRxTurnScratch,
+    point: RevokePrepareFailpoint,
+) bool {
+    if (!builtin.is_test or revoke_prepare_failpoint != point or
+        revoke_prepare_failpoint_scratch_addr != @intFromPtr(scratch)) return false;
+    revoke_prepare_failpoint = .none;
+    return true;
+}
+
+const RevokeCleanupFailpoint = enum {
+    none,
+    before_tx_abort,
+    before_tx_reset,
+    before_rx_abort,
+    after_rx_abort_graph_drift,
+};
+threadlocal var revoke_cleanup_failpoint: RevokeCleanupFailpoint = .none;
+threadlocal var revoke_cleanup_failpoint_scratch_addr: usize = 0;
+threadlocal var revoke_cleanup_failpoint_hits: u8 = 0;
+
+fn hitRevokeCleanupFailpoint(
+    scratch: *const ExternalRxTurnScratch,
+    point: RevokeCleanupFailpoint,
+) bool {
+    if (!builtin.is_test or revoke_cleanup_failpoint != point or
+        revoke_cleanup_failpoint_scratch_addr != @intFromPtr(scratch)) return false;
+    if (revoke_cleanup_failpoint_hits > 1) {
+        revoke_cleanup_failpoint_hits -= 1;
+    } else {
+        revoke_cleanup_failpoint = .none;
+        revoke_cleanup_failpoint_hits = 0;
+    }
+    return true;
+}
+
 const RxDrainTestEvent = enum { consumed, published, decide };
 const RxDrainTestRecorder = struct {
     events: [3]RxDrainTestEvent = undefined,
@@ -2564,6 +2776,13 @@ pub const testing = if (builtin.is_test) struct {
 
     pub fn authorityPreparedTag(scratch: *const ExternalRxTurnScratch) bool {
         return scratch.authority_permit.lifecycle == .prepared;
+    }
+
+    pub fn ownerAuthorityView(
+        storage: *const ExternalPumpStorage,
+    ) ?runtime_event_types.EventAuthorityView {
+        if (!ownerAuthorityValid(storage)) return null;
+        return ownerEventAuthority(storage);
     }
 
     pub fn clearInitialFence(storage: *ExternalPumpStorage) bool {
@@ -2697,6 +2916,11 @@ pub const ExternalRxTurnScratch = struct {
     drain_evidence: RxDrainEvidence = .{},
     authority_permit: client_external_turn_authority.PreparedAuthorityPermit = .{},
     authority_cleanup_seed: client_external_turn_authority.FrozenCleanupSeed = .{},
+    tx_cancellation: client_external_tx.PreparedTxCancellation = .{},
+    tx_cancellation_permit: client_external_tx.TxCancellationCommitPermit = .{},
+    tx_cancellation_cleanup: client_external_tx.FrozenTxCancellationCleanup = .{},
+    revoked_commit_graph: PreparedRevokedCommitGraph = .{},
+    post_cancellation_receipt: client_external_tx.PostCancellationReceipt = .{},
     turn_generation: u64 = 0,
     callback_region: CallbackRegionToken = .{},
     quarantine_receipt: client_external_mode.GuardedQuarantineAccountingReceipt = .{},
@@ -2711,7 +2935,12 @@ pub const ExternalRxTurnScratch = struct {
             !std.meta.eql(
                 out.authority_cleanup_seed,
                 client_external_turn_authority.FrozenCleanupSeed{},
-            ) or out.turn_generation != 0 or
+            ) or !std.mem.allEqual(u8, &out.tx_cancellation.bytes, 0) or
+            !std.mem.allEqual(u8, &out.tx_cancellation_permit.bytes, 0) or
+            !std.mem.allEqual(u8, &out.tx_cancellation_cleanup.bytes, 0) or
+            !std.mem.allEqual(u8, &out.revoked_commit_graph.bytes, 0) or
+            !std.mem.allEqual(u8, &out.post_cancellation_receipt.bytes, 0) or
+            out.turn_generation != 0 or
             !client_external_mode.guardedQuarantineReceiptPristine(
                 &out.quarantine_receipt,
             ))
@@ -2738,6 +2967,11 @@ pub const ExternalRxTurnScratch = struct {
         out.prepared_admit_use_permit = .{};
         out.authority_permit = .{};
         out.authority_cleanup_seed = .{};
+        out.tx_cancellation = .{};
+        out.tx_cancellation_permit = .{};
+        out.tx_cancellation_cleanup = .{};
+        out.revoked_commit_graph = .{};
+        out.post_cancellation_receipt = .{};
         out.turn_generation = 1;
         out.callback_region = .{};
         out.quarantine_receipt = .{};
@@ -5773,13 +6007,73 @@ fn frozenAggregateCleanupDigest(
     return writer.finish();
 }
 
+const RevokedCleanupOwnerProof = struct {
+    saved_self_addr: usize,
+    scratch_addr: usize,
+    scratch_len: usize,
+    graph_addr: usize,
+    graph_len: usize,
+    cleanup_addr: usize,
+    lease_addr: usize,
+    storage_addr: usize,
+    owner_incarnation: u64,
+    digest: external_owner_seal.Digest,
+};
+
+fn revokedCleanupOwnerProofDigest(
+    proof: *const RevokedCleanupOwnerProof,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARURCP1");
+    writer.writeUsize(proof.saved_self_addr);
+    writer.writeUsize(proof.scratch_addr);
+    writer.writeUsize(proof.scratch_len);
+    writer.writeUsize(proof.graph_addr);
+    writer.writeUsize(proof.graph_len);
+    writer.writeUsize(proof.cleanup_addr);
+    writer.writeUsize(proof.lease_addr);
+    writer.writeUsize(proof.storage_addr);
+    writer.writeU64(proof.owner_incarnation);
+    return writer.finish();
+}
+
+fn revokedCleanupOwnerProofValid(
+    proof: *const RevokedCleanupOwnerProof,
+    out: *const FrozenAggregateCleanup,
+    storage: *const ExternalPumpStorage,
+) bool {
+    const scratch_end = std.math.add(usize, proof.scratch_addr, proof.scratch_len) catch return false;
+    const graph_end = std.math.add(usize, proof.graph_addr, proof.graph_len) catch return false;
+    const expected_graph_addr = std.math.add(
+        usize,
+        proof.scratch_addr,
+        @offsetOf(ExternalRxTurnScratch, "revoked_commit_graph"),
+    ) catch return false;
+    const expected_cleanup_addr = std.math.add(
+        usize,
+        proof.graph_addr,
+        @offsetOf(PreparedRevokedCommitGraphStorage, "event_cleanup"),
+    ) catch return false;
+    return proof.saved_self_addr == @intFromPtr(proof) and
+        proof.scratch_len == @sizeOf(ExternalRxTurnScratch) and
+        proof.graph_len == @sizeOf(PreparedRevokedCommitGraph) and
+        proof.graph_addr == expected_graph_addr and
+        proof.graph_addr >= proof.scratch_addr and graph_end <= scratch_end and
+        proof.cleanup_addr == @intFromPtr(out) and
+        proof.cleanup_addr == expected_cleanup_addr and
+        proof.lease_addr != 0 and proof.storage_addr == @intFromPtr(storage) and
+        proof.owner_incarnation == storage.owner_incarnation and
+        std.mem.eql(u8, &proof.digest, &revokedCleanupOwnerProofDigest(proof));
+}
+
 fn prepareEventAggregateCleanup(
     storage: *const ExternalPumpStorage,
     aggregate: *PreparedRxAggregate,
     out: *FrozenAggregateCleanup,
     intent_handle: *external_rx_intent.ExternalRxIntentHandle,
+    allowed_out_owner: ?*const RevokedCleanupOwnerProof,
 ) bool {
-    if (!std.meta.eql(out.*, FrozenAggregateCleanup{})) return false;
+    if (!std.meta.eql(out.*, FrozenAggregateCleanup{}))
+        return false;
     var count: usize = 0;
     var total_bytes: usize = 0;
     var metadata_content_digest: external_owner_cleanup.Digest =
@@ -5855,12 +6149,17 @@ fn prepareEventAggregateCleanup(
                     .start = @intFromPtr(aggregate),
                     .len = @sizeOf(PreparedRxAggregate),
                 },
-                .{
-                    .start = @intFromPtr(out),
-                    .len = @sizeOf(FrozenAggregateCleanup),
-                },
             };
             existing_ranges.validate(&forbidden) catch return false;
+            const out_range = external_owner_range.Range{
+                .start = @intFromPtr(out),
+                .len = @sizeOf(FrozenAggregateCleanup),
+            };
+            if (allowed_out_owner) |proof| {
+                if (!revokedCleanupOwnerProofValid(proof, out, storage)) return false;
+            } else {
+                existing_ranges.validate(&.{out_range}) catch return false;
+            }
             total_bytes = std.math.add(
                 usize,
                 total_bytes,
@@ -5972,9 +6271,7 @@ fn prepareResponseDestinationPlan(
     intent_handle: *external_rx_intent.ExternalRxIntentHandle,
 ) ResponsePlanPrepareResult {
     const plan = &aggregate.response_destination;
-    if (plan.saved_self_addr != 0 or plan.lifecycle != .empty or
-        storage.completed_control != .none or
-        storage.completed_control_generation == std.math.maxInt(u64))
+    if (plan.saved_self_addr != 0 or plan.lifecycle != .empty)
         return .rejected;
     var response_index: ?usize = null;
     for (aggregate.intent_commit.slot_kinds[0..aggregate.intent_commit.intent_count], 0..) |
@@ -5990,6 +6287,9 @@ fn prepareResponseDestinationPlan(
         .unused => return .rejected,
     };
     if (response_index == null) return .prepared;
+    if (storage.completed_control != .none or
+        storage.completed_control_generation == std.math.maxInt(u64))
+        return .rejected;
     const index = response_index.?;
     const payload = external_rx_intent.borrowPreparedClassifiedPayload(
         intent_handle,
@@ -7547,16 +7847,54 @@ pub const ExternalPumpStorage = struct {
         return true;
     }
 
-    fn commitControlResponseTakeUncheckedUnderHeldLease(
+    fn prepareControlResponseTakeUnderHeldLease(
         self: *ExternalPumpStorage,
         lease: *const ExternalWholeTurnLease,
-        take: *PreparedControlResponseTake,
-        out: *FrozenControlResponse,
+        out: *PreparedControlResponseTake,
+    ) bool {
+        if (!self.validateWholeTurnLease(lease) or
+            !std.meta.eql(out.*, PreparedControlResponseTake{}) or
+            !self.completedControlValid() or
+            self.control_correlation.generation == std.math.maxInt(u64))
+            return false;
+        const completed = switch (self.completed_control) {
+            .completed => |*value| value,
+            .none, .terminal => return false,
+        };
+        const correlation = switch (self.control_correlation.state) {
+            .completed => |value| value,
+            .idle, .in_flight, .terminal => return false,
+        };
+        if (completed.request_id != correlation.request_id or
+            completed.correlation_generation != self.control_correlation.generation)
+            return false;
+        out.* = .{
+            .saved_self_addr = @intFromPtr(out),
+            .storage_addr = @intFromPtr(self),
+            .lease_addr = @intFromPtr(lease),
+            .owner_incarnation = self.owner_incarnation,
+            .operation_generation = self.operation_generation,
+            .completed_generation = self.completed_control_generation,
+            .correlation_generation = self.control_correlation.generation,
+            .request_id = completed.request_id,
+            .owner_digest = completed.owner_digest,
+            .payload_seal = completed.seal,
+            .lifecycle = .prepared,
+        };
+        out.digest = preparedControlResponseTakeDigest(out);
+        return true;
+    }
+
+    fn validateControlResponseTakeUnderHeldLease(
+        self: *ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        take: *const PreparedControlResponseTake,
+        out: *const FrozenControlResponse,
     ) bool {
         if (!self.validateWholeTurnLease(lease) or
             take.saved_self_addr != @intFromPtr(take) or
             take.storage_addr != @intFromPtr(self) or
-            take.lease_addr != 0 or
+            (take.lease_addr != 0 and take.lease_addr != @intFromPtr(lease)) or
             take.owner_incarnation != self.owner_incarnation or
             take.operation_generation != self.operation_generation or
             take.completed_generation != self.completed_control_generation or
@@ -7582,11 +7920,18 @@ pub const ExternalPumpStorage = struct {
             .completed => |value| value,
             .idle, .in_flight, .terminal => return false,
         };
-        if (take.request_id != completed.request_id or
-            take.request_id != correlation.request_id or
-            !std.mem.eql(u8, &take.owner_digest, &completed.owner_digest) or
-            !std.meta.eql(take.payload_seal, completed.seal))
-            return false;
+        return take.request_id == completed.request_id and
+            take.request_id == correlation.request_id and
+            std.mem.eql(u8, &take.owner_digest, &completed.owner_digest) and
+            std.meta.eql(take.payload_seal, completed.seal);
+    }
+
+    fn publishControlResponseTakeUnchecked(
+        self: *ExternalPumpStorage,
+        take: *PreparedControlResponseTake,
+        out: *FrozenControlResponse,
+    ) void {
+        const completed = self.completed_control.completed;
         out.* = .{
             .saved_self_addr = @intFromPtr(out),
             .storage_addr = @intFromPtr(self),
@@ -7602,12 +7947,24 @@ pub const ExternalPumpStorage = struct {
             .lifecycle = .owned,
         };
         out.digest = frozenControlResponseDigest(out);
-        completed.payload = external_inbox_ledger.OwnedPayload.empty(
-            completed.payload.allocator,
-        );
         self.completed_control = .none;
         take.lifecycle = .consumed_tombstone;
         take.digest = preparedControlResponseTakeDigest(take);
+    }
+
+    fn commitControlResponseTakeUncheckedUnderHeldLease(
+        self: *ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        take: *PreparedControlResponseTake,
+        out: *FrozenControlResponse,
+    ) bool {
+        if (!self.validateControlResponseTakeUnderHeldLease(
+            lease,
+            take,
+            out,
+        ))
+            return false;
+        self.publishControlResponseTakeUnchecked(take, out);
         return true;
     }
 
@@ -7654,6 +8011,18 @@ pub const ExternalPumpStorage = struct {
             .fd_disposition = .owner_cleanup,
         } };
         return .rejected_terminal;
+    }
+
+    fn finishRevokedControlResponseCleanupUnchecked(
+        response: *FrozenControlResponse,
+    ) void {
+        var payload = response.payload;
+        response.payload = external_inbox_ledger.OwnedPayload.empty(
+            payload.allocator,
+        );
+        response.lifecycle = .cleaned_tombstone;
+        response.digest = frozenControlResponseDigest(response);
+        payload.deinit();
     }
 
     /// f2 keeps the frozen payload owner inside this call and can only reject-terminal after
@@ -8521,8 +8890,31 @@ pub const ExternalPumpStorage = struct {
         lease: *const ExternalWholeTurnLease,
         intent_handle: *external_rx_intent.ExternalRxIntentHandle,
     ) RxAggregateCommitResult {
+        var event_cleanup: FrozenAggregateCleanup = .{};
+        const aggregate = self.validateAndPrepareRxAggregateCommit(
+            lease,
+            intent_handle,
+            &event_cleanup,
+            null,
+        ) orelse return .invalid_state;
+        return self.commitRxAggregateUnchecked(
+            aggregate,
+            intent_handle,
+            &event_cleanup,
+        );
+    }
+
+    fn validateAndPrepareRxAggregateCommit(
+        self: *ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        intent_handle: *external_rx_intent.ExternalRxIntentHandle,
+        event_cleanup: *FrozenAggregateCleanup,
+        allowed_cleanup_owner: ?*const RevokedCleanupOwnerProof,
+    ) ?*PreparedRxAggregate {
         const aggregate = self.validateReadyRxAggregate(lease) orelse
-            return .invalid_state;
+            {
+                return null;
+            };
         if (aggregate.lifecycle != .finalized or
             aggregate.intent_handle_addr != @intFromPtr(intent_handle) or
             !validateRxAggregateScreenGraph(
@@ -8530,7 +8922,9 @@ pub const ExternalPumpStorage = struct {
                 aggregate,
                 intent_handle,
             ))
-            return .invalid_state;
+        {
+            return null;
+        }
         const proof_count: usize = aggregate.intent_commit.proof_count;
         const valid_intent = external_rx_intent.validatePreparedIntentCommit(
             intent_handle,
@@ -8549,12 +8943,29 @@ pub const ExternalPumpStorage = struct {
             validateResponseDestinationPlan(self, aggregate);
         const valid_destination_writes =
             validateDestinationWrites(self, aggregate, intent_handle);
-        if (!valid_intent or !valid_reduction or !valid_retirements or
-            !valid_metadata or !valid_scalars or !valid_response or
-            !valid_destination_writes)
-            return .invalid_state;
-        if (proof_count != 0 and
-            (!self.inbox_ledger.validatePreparedLiveCommit(
+        if (!valid_intent) {
+            return null;
+        }
+        if (!valid_reduction) {
+            return null;
+        }
+        if (!valid_retirements) {
+            return null;
+        }
+        if (!valid_metadata) {
+            return null;
+        }
+        if (!valid_scalars) {
+            return null;
+        }
+        if (!valid_response) {
+            return null;
+        }
+        if (!valid_destination_writes) {
+            return null;
+        }
+        if (proof_count != 0) {
+            if (!self.inbox_ledger.validatePreparedLiveCommit(
                 &aggregate.live_batch,
                 &aggregate.retirement,
                 &aggregate.dispositions,
@@ -8562,17 +8973,37 @@ pub const ExternalPumpStorage = struct {
                 @intFromPtr(aggregate),
                 @intFromPtr(self),
                 aggregate.turn_generation,
-            ) or !validateScreenDestinationPlan(self, aggregate)))
-            return .invalid_state;
-        var event_cleanup: FrozenAggregateCleanup = .{};
+            )) {
+                return null;
+            }
+            if (!validateScreenDestinationPlan(self, aggregate)) {
+                return null;
+            }
+        }
         if (!prepareEventAggregateCleanup(
             self,
             aggregate,
-            &event_cleanup,
+            event_cleanup,
             intent_handle,
-        ))
-            return .invalid_state;
+            allowed_cleanup_owner,
+        )) return null;
+        return aggregate;
+    }
 
+    const PublishedRxAggregateCommit = struct {
+        callback_entry_digest: external_owner_seal.Digest,
+        expected_after_callbacks: PreparedRxAggregate,
+        proof_count: usize,
+    };
+
+    fn publishRxAggregateUnchecked(
+        self: *ExternalPumpStorage,
+        aggregate: *PreparedRxAggregate,
+        intent_handle: *external_rx_intent.ExternalRxIntentHandle,
+        event_cleanup: *FrozenAggregateCleanup,
+        published: *PublishedRxAggregateCommit,
+    ) void {
+        const proof_count: usize = aggregate.intent_commit.proof_count;
         aggregate.lifecycle = .committing;
         aggregate.digest = preparedRxAggregateDigest(aggregate);
         if (proof_count != 0)
@@ -8592,34 +9023,45 @@ pub const ExternalPumpStorage = struct {
         for (aggregate.destination_writes[0..aggregate.destination_write_count]) |
             *write,
         | commitDestinationWriteUnchecked(self, aggregate, write);
-        appendEventAggregateCleanupUnchecked(aggregate, &event_cleanup);
+        appendEventAggregateCleanupUnchecked(aggregate, event_cleanup);
         aggregate.lifecycle = .committed;
         aggregate.digest = preparedRxAggregateDigest(aggregate);
-        const callback_entry_digest = aggregate.digest;
         var expected_after_callbacks = aggregate.*;
         if (proof_count != 0)
             expected_after_callbacks.retirement = .{ .lifecycle = .retired };
         expected_after_callbacks.digest =
             preparedRxAggregateDigest(&expected_after_callbacks);
+        published.* = .{
+            .callback_entry_digest = aggregate.digest,
+            .expected_after_callbacks = expected_after_callbacks,
+            .proof_count = proof_count,
+        };
         self.retainRxAggregateAllocation(aggregate);
-        const retire_result = if (proof_count == 0)
+    }
+
+    fn finishPublishedRxAggregateCommit(
+        aggregate: *PreparedRxAggregate,
+        event_cleanup: *FrozenAggregateCleanup,
+        published: *const PublishedRxAggregateCommit,
+    ) RxAggregateCommitResult {
+        const retire_result = if (published.proof_count == 0)
             external_inbox_ledger.RetireLiveResult.retired
         else
             aggregate.retirement.retire();
-        const event_finish = finishFrozenAggregateCleanup(&event_cleanup);
+        const event_finish = finishFrozenAggregateCleanup(event_cleanup);
         const callback_state_valid =
-            std.mem.eql(u8, &aggregate.digest, &callback_entry_digest) and
+            std.mem.eql(u8, &aggregate.digest, &published.callback_entry_digest) and
             std.meta.eql(
                 aggregate.retirement,
-                expected_after_callbacks.retirement,
+                published.expected_after_callbacks.retirement,
             );
-        aggregate.digest = expected_after_callbacks.digest;
+        aggregate.digest = published.expected_after_callbacks.digest;
         const aggregate_state_valid =
-            std.meta.eql(aggregate.*, expected_after_callbacks);
+            std.meta.eql(aggregate.*, published.expected_after_callbacks);
         if (!callback_state_valid or !aggregate_state_valid) {
             // Restore only the callback-hidden, precomputed canonical state. Never seal callback
             // mutations as new authority; retained teardown can now retire the committed graph.
-            aggregate.* = expected_after_callbacks;
+            aggregate.* = published.expected_after_callbacks;
         }
         if (retire_result == .quarantined or !event_finish or
             !callback_state_valid or !aggregate_state_valid)
@@ -8628,6 +9070,725 @@ pub const ExternalPumpStorage = struct {
             return .quarantined;
         }
         return .committed;
+    }
+
+    fn commitRxAggregateUnchecked(
+        self: *ExternalPumpStorage,
+        aggregate: *PreparedRxAggregate,
+        intent_handle: *external_rx_intent.ExternalRxIntentHandle,
+        event_cleanup: *FrozenAggregateCleanup,
+    ) RxAggregateCommitResult {
+        var published: PublishedRxAggregateCommit = undefined;
+        self.publishRxAggregateUnchecked(
+            aggregate,
+            intent_handle,
+            event_cleanup,
+            &published,
+        );
+        return finishPublishedRxAggregateCommit(
+            aggregate,
+            event_cleanup,
+            &published,
+        );
+    }
+
+    const RevokeCommitResult = enum {
+        committed,
+        protocol_terminal,
+        invariant_terminal,
+        protocol_terminal_cleaned,
+        invariant_terminal_cleaned,
+        quarantined,
+    };
+
+    fn skipControlResponseTakePublication(
+        _: *ExternalPumpStorage,
+        _: *PreparedControlResponseTake,
+        _: *FrozenControlResponse,
+    ) void {}
+
+    // MARU_REVOKE_CONSUME_PUBLISH_BEGIN
+    fn consumeAndPublishRevokedRxAggregate(
+        self: *ExternalPumpStorage,
+        scratch: *ExternalRxTurnScratch,
+        intent_handle: *external_rx_intent.ExternalRxIntentHandle,
+        external: *client_external_mode.State,
+        binding: client_external_tx.OwnerBinding,
+        aggregate: *PreparedRxAggregate,
+        event_cleanup: *FrozenAggregateCleanup,
+        response_take: *PreparedControlResponseTake,
+        frozen_response: *FrozenControlResponse,
+        frozen: *const FrozenRevokeCorrelation,
+        cleanup_completed: bool,
+        published: *PublishedRxAggregateCommit,
+    ) bool {
+        const publish_response: *const fn (
+            *ExternalPumpStorage,
+            *PreparedControlResponseTake,
+            *FrozenControlResponse,
+        ) void = if (cleanup_completed)
+            publishControlResponseTakeUnchecked
+        else
+            skipControlResponseTakePublication;
+        // This is the single final checked boundary. Every operation after it is an infallible
+        // scalar/owner publication; allocator callbacks are confined to the cleanup tail.
+        if (!client_external_tx.consumePreparedCancellationUnderHeldLease(
+            validateTxOwner,
+            @ptrCast(self),
+            &scratch.tx_cancellation,
+            &scratch.tx_cancellation_permit,
+            &scratch.tx_cancellation_cleanup,
+            external,
+            binding,
+        )) return false;
+        publish_response(self, response_take, frozen_response);
+        self.control_correlation.generation = frozen.generation + 1;
+        self.control_correlation.state = .terminal;
+        self.control_correlation.digest = controlCorrelationDigest(&self.control_correlation);
+        self.publishRxAggregateUnchecked(
+            aggregate,
+            intent_handle,
+            event_cleanup,
+            published,
+        );
+        return true;
+    }
+    // MARU_REVOKE_CONSUME_PUBLISH_END
+
+    // MARU_REVOKE_PURE_VALIDATE_BEGIN
+    fn validatePreparedRevokedRxAggregateGraph(
+        self: *ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        scratch: *ExternalRxTurnScratch,
+        intent_handle: *external_rx_intent.ExternalRxIntentHandle,
+        external: *client_external_mode.State,
+        graph_owner: *const PreparedRevokedCommitGraph,
+    ) bool {
+        const graph = graph_owner.storageConst();
+        if (graph.saved_self_addr != @intFromPtr(graph_owner) or
+            graph.storage_addr != @intFromPtr(self) or
+            graph.lease_addr != @intFromPtr(lease) or
+            graph.intent_handle_addr != @intFromPtr(intent_handle) or
+            graph.external_addr != @intFromPtr(external) or
+            graph.aggregate_addr == 0 or graph.lifecycle != .prepared or
+            !std.mem.eql(u8, &graph.digest, &preparedRevokedCommitGraphDigest(graph)))
+            return false;
+        const aggregate: *PreparedRxAggregate = @ptrFromInt(graph.aggregate_addr);
+        const cleanup_completed = graph.action == .cleanup_completed;
+        return client_external_tx.validateArmedCancellation(
+            validateTxOwner,
+            @ptrCast(self),
+            &scratch.tx_cancellation,
+            &scratch.tx_cancellation_permit,
+            &scratch.tx_cancellation_cleanup,
+            external,
+            graph.binding,
+        ) and frozenRevokeCorrelationCurrent(self, &graph.correlation) and
+            validateEventReduction(self, aggregate, intent_handle) and
+            validateEventScalarDestinations(self, aggregate) and
+            (!cleanup_completed or self.validateControlResponseTakeUnderHeldLease(
+                lease,
+                &graph.response_take,
+                &graph.frozen_response,
+            ));
+    }
+    // MARU_REVOKE_PURE_VALIDATE_END
+
+    fn cleanupFailedPreparedRevoke(
+        self: *ExternalPumpStorage,
+        lease: *ExternalWholeTurnLease,
+        scratch: *ExternalRxTurnScratch,
+        intent_handle: *external_rx_intent.ExternalRxIntentHandle,
+        external: *client_external_mode.State,
+        graph_owner: *PreparedRevokedCommitGraph,
+        tx_prepared: bool,
+        failure: RevokeCommitResult,
+    ) RevokeCommitResult {
+        const graph = graph_owner.storage();
+        var progress = revokedCleanupProgress(graph) orelse {
+            return .quarantined;
+        };
+        if (progress == .empty) {
+            progress = if (tx_prepared) .tx_abort_pending else .rx_abort_pending;
+            graph.cleanup_progress = @intFromEnum(progress);
+            graph.cleanup_failure = switch (failure) {
+                .protocol_terminal, .protocol_terminal_cleaned => 1,
+                else => 2,
+            };
+            graph.cleanup_digest = revokedCleanupProgressDigest(graph);
+        } else if (graph.saved_self_addr != @intFromPtr(graph_owner) or
+            graph.storage_addr != @intFromPtr(self) or
+            graph.lease_addr != @intFromPtr(lease) or
+            graph.intent_handle_addr != @intFromPtr(intent_handle) or
+            graph.external_addr != @intFromPtr(external) or
+            graph.aggregate_addr == 0 or
+            (graph.cleanup_failure != 1 and graph.cleanup_failure != 2) or
+            !std.mem.eql(u8, &graph.cleanup_digest, &revokedCleanupProgressDigest(graph)))
+        {
+            return .quarantined;
+        }
+        if (progress == .tx_abort_pending) {
+            if (hitRevokeCleanupFailpoint(scratch, .before_tx_abort)) return .quarantined;
+            if (!client_external_tx.abortPreparedCancellation(
+                validateTxOwner,
+                @ptrCast(self),
+                &scratch.tx_cancellation,
+                &scratch.tx_cancellation_permit,
+                external,
+                graph.binding,
+            )) {
+                return .quarantined;
+            }
+            progress = .tx_reset_pending;
+            graph.cleanup_progress = @intFromEnum(progress);
+            graph.cleanup_digest = revokedCleanupProgressDigest(graph);
+        }
+        if (progress == .tx_reset_pending) {
+            if (hitRevokeCleanupFailpoint(scratch, .before_tx_reset)) return .quarantined;
+            if (!client_external_tx.resetCancellationGraphForNextTurn(
+                validateTxOwner,
+                @ptrCast(self),
+                &scratch.tx_cancellation,
+                &scratch.tx_cancellation_permit,
+                &scratch.tx_cancellation_cleanup,
+                external,
+                graph.binding,
+            )) {
+                return .quarantined;
+            }
+            progress = .rx_abort_pending;
+            graph.cleanup_progress = @intFromEnum(progress);
+            graph.cleanup_digest = revokedCleanupProgressDigest(graph);
+        }
+        if (progress != .rx_abort_pending) {
+            return .quarantined;
+        }
+        if (hitRevokeCleanupFailpoint(scratch, .before_rx_abort)) return .quarantined;
+        const cleanup_failure = graph.cleanup_failure;
+        const cleanup_progress = graph.cleanup_progress;
+        const cleanup_digest = graph.cleanup_digest;
+        const rx_abort = self.abortRxAggregate(lease, intent_handle);
+        if (rx_abort != .cleaned) {
+            return .quarantined;
+        }
+        if (hitRevokeCleanupFailpoint(scratch, .after_rx_abort_graph_drift))
+            graph.cleanup_failure = if (cleanup_failure == 1) 2 else 1;
+        if (graph.cleanup_failure != cleanup_failure or
+            graph.cleanup_progress != cleanup_progress or
+            !std.mem.eql(u8, &graph.cleanup_digest, &cleanup_digest) or
+            !std.mem.eql(
+                u8,
+                &graph.cleanup_digest,
+                &revokedCleanupProgressDigest(graph),
+            ))
+        {
+            // Both TX and RX owners are already closed. The callback-mutated graph is no longer a
+            // cleanup capability, so erase it and report the drift through the quarantine latch.
+            graph_owner.* = .{};
+            latchCrossOwnerQuarantine();
+            return .quarantined;
+        }
+        graph_owner.* = .{};
+        return switch (cleanup_failure) {
+            1 => .protocol_terminal_cleaned,
+            else => .invariant_terminal_cleaned,
+        };
+    }
+
+    fn resumeFailedPreparedRevokeCleanup(
+        self: *ExternalPumpStorage,
+        lease: *ExternalWholeTurnLease,
+        scratch: *ExternalRxTurnScratch,
+    ) bool {
+        const graph_owner = &scratch.revoked_commit_graph;
+        if (std.mem.allEqual(u8, &graph_owner.bytes, 0)) return true;
+        const graph = graph_owner.storage();
+        const progress = revokedCleanupProgress(graph) orelse {
+            return false;
+        };
+        if (progress == .empty or
+            graph.saved_self_addr != @intFromPtr(graph_owner) or
+            graph.storage_addr != @intFromPtr(self) or
+            graph.lease_addr != @intFromPtr(lease) or
+            graph.aggregate_addr == 0 or
+            (graph.cleanup_failure != 1 and graph.cleanup_failure != 2) or
+            !std.mem.eql(
+                u8,
+                &graph.cleanup_digest,
+                &revokedCleanupProgressDigest(graph),
+            ))
+        {
+            return false;
+        }
+        const client = if (self.owned_client) |*owned| owned else {
+            return false;
+        };
+        const external = switch (client.io_mode) {
+            .external => |*state| state,
+            .blocking => {
+                return false;
+            },
+        };
+        const intent_handle = &scratch.traversal.intent;
+        const expected_binding = makeTxOwnerBinding(
+            self,
+            client,
+            external,
+            lease,
+            @intFromPtr(scratch),
+            @sizeOf(ExternalRxTurnScratch),
+            @intFromPtr(&scratch.tx_cancellation),
+            @sizeOf(client_external_tx.PreparedTxCancellation),
+            .cancel_turn,
+        );
+        if (graph.external_addr != @intFromPtr(external) or
+            graph.intent_handle_addr != @intFromPtr(intent_handle) or
+            !std.meta.eql(graph.binding, expected_binding))
+        {
+            return false;
+        }
+        const failure: RevokeCommitResult = if (graph.cleanup_failure == 1)
+            .protocol_terminal
+        else
+            .invariant_terminal;
+        const replay_result = self.cleanupFailedPreparedRevoke(
+            lease,
+            scratch,
+            intent_handle,
+            external,
+            graph_owner,
+            progress == .tx_abort_pending,
+            failure,
+        );
+        return switch (replay_result) {
+            .protocol_terminal_cleaned, .invariant_terminal_cleaned => true,
+            else => false,
+        };
+    }
+
+    /// Converts an untrusted or repeatedly failing inline cleanup capability into the process-wide
+    /// bounded quarantine contract. The retained RX/TX owners remain under canonical storage
+    /// teardown authority; clearing only these caller-owned proofs prevents a later dereference or
+    /// replay under a different whole-turn lease. This leaf is callback-free by construction.
+    fn quarantineFailedPreparedRevokeCleanup(
+        _: *ExternalPumpStorage,
+        scratch: *ExternalRxTurnScratch,
+    ) void {
+        latchCrossOwnerQuarantine();
+        scratch.tx_cancellation = .{};
+        scratch.tx_cancellation_permit = .{};
+        scratch.tx_cancellation_cleanup = .{};
+        scratch.revoked_commit_graph = .{};
+        scratch.post_cancellation_receipt = .{};
+    }
+
+    const RevokedPublicationSnapshot = struct {
+        correlation: ControlCorrelationOwner,
+        authority: OwnerAuthorityState,
+        authority_seal: OwnerAuthoritySeal,
+        completed_generation: u64,
+        semantic: client_pump.ExternalPumpState,
+    };
+
+    fn captureRevokedPublicationSnapshot(
+        self: *const ExternalPumpStorage,
+    ) RevokedPublicationSnapshot {
+        return .{
+            .correlation = self.control_correlation,
+            .authority = self.owner_authority,
+            .authority_seal = self.owner_authority_seal,
+            .completed_generation = self.completed_control_generation,
+            .semantic = self.semantic_state,
+        };
+    }
+
+    // MARU_REVOKE_CANONICAL_WRITER_BEGIN
+    fn detectAndRestoreRevokedPublicationDrift(
+        self: *ExternalPumpStorage,
+        canonical: RevokedPublicationSnapshot,
+    ) bool {
+        const drifted = !std.meta.eql(self.control_correlation, canonical.correlation) or
+            !std.meta.eql(self.owner_authority, canonical.authority) or
+            !std.meta.eql(self.owner_authority_seal, canonical.authority_seal) or
+            self.completed_control != .none or
+            self.completed_control_generation != canonical.completed_generation or
+            !std.meta.eql(self.semantic_state, canonical.semantic);
+        if (!drifted) return false;
+        self.control_correlation = canonical.correlation;
+        self.owner_authority = canonical.authority;
+        self.owner_authority_seal = canonical.authority_seal;
+        self.completed_control = .none;
+        self.completed_control_generation = canonical.completed_generation;
+        self.semantic_state = canonical.semantic;
+        return true;
+    }
+    // MARU_REVOKE_CANONICAL_WRITER_END
+
+    // MARU_REVOKE_CALLBACK_TAIL_BEGIN
+    fn finishRevokedRxAggregateCallbacks(
+        self: *ExternalPumpStorage,
+        scratch: *ExternalRxTurnScratch,
+        graph_owner: *PreparedRevokedCommitGraph,
+        external: *client_external_mode.State,
+        binding: client_external_tx.OwnerBinding,
+        aggregate: *PreparedRxAggregate,
+        event_cleanup: *FrozenAggregateCleanup,
+        frozen_response: *FrozenControlResponse,
+        cleanup_completed: bool,
+        published: *const PublishedRxAggregateCommit,
+    ) RevokeCommitResult {
+        defer graph_owner.* = .{};
+        const canonical = self.captureRevokedPublicationSnapshot();
+        const tx_cleanup = client_external_tx.finishCancellationCleanup(
+            validateTxOwner,
+            @ptrCast(self),
+            &scratch.tx_cancellation,
+            &scratch.tx_cancellation_permit,
+            &scratch.tx_cancellation_cleanup,
+            external,
+            binding,
+        );
+        const tx_reset = tx_cleanup == .cleaned and
+            client_external_tx.resetCancellationGraphForNextTurn(
+                validateTxOwner,
+                @ptrCast(self),
+                &scratch.tx_cancellation,
+                &scratch.tx_cancellation_permit,
+                &scratch.tx_cancellation_cleanup,
+                external,
+                binding,
+            );
+        const tx_receipt_captured = tx_reset and
+            client_external_tx.capturePostCancellationReceipt(
+                &scratch.post_cancellation_receipt,
+                &scratch.tx_cancellation,
+                &scratch.tx_cancellation_permit,
+                &scratch.tx_cancellation_cleanup,
+                external,
+            );
+        if (cleanup_completed)
+            finishRevokedControlResponseCleanupUnchecked(frozen_response);
+        var publication_drift = self.detectAndRestoreRevokedPublicationDrift(canonical);
+        const rx_result = finishPublishedRxAggregateCommit(aggregate, event_cleanup, published);
+        const tx_post_callback = if (tx_receipt_captured)
+            client_external_tx.consumePostCancellationReceipt(
+                &scratch.post_cancellation_receipt,
+                &scratch.tx_cancellation,
+                &scratch.tx_cancellation_permit,
+                &scratch.tx_cancellation_cleanup,
+                external,
+            )
+        else
+            .invalid;
+        if (self.detectAndRestoreRevokedPublicationDrift(canonical))
+            publication_drift = true;
+        scratch.post_cancellation_receipt = .{};
+        if (tx_post_callback != .valid) publication_drift = true;
+        if (rx_result == .quarantined or tx_cleanup == .quarantined or publication_drift) {
+            latchCrossOwnerQuarantine();
+            return .quarantined;
+        }
+        if (rx_result != .committed or tx_cleanup != .cleaned or !tx_reset)
+            return .invariant_terminal;
+        return .committed;
+    }
+    // MARU_REVOKE_CALLBACK_TAIL_END
+
+    fn prepareRevokedCommitGraph(
+        self: *ExternalPumpStorage,
+        lease: *ExternalWholeTurnLease,
+        scratch: *ExternalRxTurnScratch,
+        intent_handle: *external_rx_intent.ExternalRxIntentHandle,
+        now_ns: i128,
+    ) ?RevokeCommitResult {
+        const graph_owner = &scratch.revoked_commit_graph;
+        if (!std.mem.allEqual(u8, &graph_owner.bytes, 0)) return .invariant_terminal;
+        var graph_prepared = false;
+        var aggregate_prepared = false;
+        defer {
+            if (!graph_prepared and !aggregate_prepared) graph_owner.* = .{};
+        }
+        const graph = graph_owner.storage();
+        graph.* = .{};
+        graph.saved_self_addr = @intFromPtr(graph_owner);
+        graph.storage_addr = @intFromPtr(self);
+        graph.lease_addr = @intFromPtr(lease);
+        graph.intent_handle_addr = @intFromPtr(intent_handle);
+        const client = if (self.owned_client) |*owned| owned else return .invariant_terminal;
+        const external = switch (client.io_mode) {
+            .external => |*state| state,
+            .blocking => return .invariant_terminal,
+        };
+        const cancellation_graph_pristine =
+            std.mem.allEqual(u8, &scratch.tx_cancellation.bytes, 0) and
+            std.mem.allEqual(u8, &scratch.tx_cancellation_permit.bytes, 0) and
+            std.mem.allEqual(u8, &scratch.tx_cancellation_cleanup.bytes, 0);
+        const correlation_valid = controlCorrelationValid(self);
+        const correlation_generation_valid =
+            self.control_correlation.generation != std.math.maxInt(u64);
+
+        const correlation_completed = self.completed_control != .none or switch (self.control_correlation.state) {
+            .completed => true,
+            else => false,
+        };
+        const control_progress: client_pump.F3ControlProgress = if (!correlation_valid)
+            .invalid
+        else switch (self.control_correlation.state) {
+            .idle => .none,
+            .in_flight => |control| switch (control.progress) {
+                .partial => .partial,
+                .response_wait => .response_wait,
+                .queued => switch (client_external_tx.requestFrameProgress(
+                    external,
+                    control.request_id,
+                    control.wire_len,
+                )) {
+                    .queued => .queued,
+                    .partial => .partial,
+                    .missing => .missing,
+                    .invalid => .invalid,
+                },
+            },
+            .completed => if (self.completed_control != .none) .none else .fully_sent,
+            .terminal => .invalid,
+        };
+        const revoke_plan = client_pump.planRevokeIntegration(.{
+            .causes = .{
+                .invariant_or_corruption = !cancellation_graph_pristine or
+                    !correlation_valid or !correlation_generation_valid,
+                .exact_revoke = true,
+            },
+            .completed_present = correlation_completed,
+            .control = control_progress,
+        });
+        const cleanup_completed = revoke_plan.action == .cleanup_completed;
+        if ((!cleanup_completed and revoke_plan.action != .cancel_queued) or
+            !revoke_plan.suppress_tx or
+            revoke_plan.bounded_rx_required or
+            revoke_plan.terminal == null or
+            revoke_plan.terminal.?.reason != .revoked)
+            return if (revoke_plan.terminal != null and
+                revoke_plan.terminal.?.reason == .invariant_failure)
+                .invariant_terminal
+            else
+                .protocol_terminal;
+
+        var cleanup_owner_proof = RevokedCleanupOwnerProof{
+            .saved_self_addr = undefined,
+            .scratch_addr = @intFromPtr(scratch),
+            .scratch_len = @sizeOf(ExternalRxTurnScratch),
+            .graph_addr = @intFromPtr(graph_owner),
+            .graph_len = @sizeOf(PreparedRevokedCommitGraph),
+            .cleanup_addr = @intFromPtr(&graph.event_cleanup),
+            .lease_addr = @intFromPtr(lease),
+            .storage_addr = @intFromPtr(self),
+            .owner_incarnation = self.owner_incarnation,
+            .digest = undefined,
+        };
+        cleanup_owner_proof.saved_self_addr = @intFromPtr(&cleanup_owner_proof);
+        cleanup_owner_proof.digest = revokedCleanupOwnerProofDigest(&cleanup_owner_proof);
+        const aggregate = self.validateAndPrepareRxAggregateCommit(
+            lease,
+            intent_handle,
+            &graph.event_cleanup,
+            &cleanup_owner_proof,
+        ) orelse return .invariant_terminal;
+        aggregate_prepared = true;
+        graph.aggregate_addr = @intFromPtr(aggregate);
+        if (hitRevokePrepareFailpoint(scratch, .after_aggregate))
+            return self.cleanupFailedPreparedRevoke(lease, scratch, intent_handle, external, graph_owner, false, .invariant_terminal);
+        const reduced = switch (aggregate.event_reduction.outcome) {
+            .revoked => |state| state,
+            else => return self.cleanupFailedPreparedRevoke(
+                lease,
+                scratch,
+                intent_handle,
+                external,
+                graph_owner,
+                false,
+                .invariant_terminal,
+            ),
+        };
+        if (aggregate.event_reduction.authority.role != .controller or
+            aggregate.authority_destination.lifecycle != .prepared)
+            return self.cleanupFailedPreparedRevoke(lease, scratch, intent_handle, external, graph_owner, false, .invariant_terminal);
+        const controller_generation = switch (aggregate.event_reduction.authority.generation) {
+            .tracked => |generation| generation,
+            .untracked => return self.cleanupFailedPreparedRevoke(lease, scratch, intent_handle, external, graph_owner, false, .protocol_terminal),
+        };
+        if (reduced.authority.role != .observer)
+            return self.cleanupFailedPreparedRevoke(lease, scratch, intent_handle, external, graph_owner, false, .protocol_terminal);
+
+        if (cleanup_completed) {
+            if (!self.prepareControlResponseTakeUnderHeldLease(
+                lease,
+                &graph.response_take,
+            )) {
+                return self.cleanupFailedPreparedRevoke(lease, scratch, intent_handle, external, graph_owner, false, .invariant_terminal);
+            }
+            if (!self.validateControlResponseTakeUnderHeldLease(
+                lease,
+                &graph.response_take,
+                &graph.frozen_response,
+            )) {
+                return self.cleanupFailedPreparedRevoke(lease, scratch, intent_handle, external, graph_owner, false, .invariant_terminal);
+            }
+        }
+
+        const frozen = &graph.correlation;
+        frozen.saved_self_addr = @intFromPtr(frozen);
+        frozen.storage_addr = @intFromPtr(self);
+        frozen.generation = self.control_correlation.generation;
+        frozen.owner_digest = self.control_correlation.digest;
+        const cancellation_spec: client_external_tx.CancellationSpec = switch (self.control_correlation.state) {
+            .idle => .{ .stream_id = self.evidence_snapshot.stream_id },
+            .in_flight => |control| blk: {
+                if (control.target.stream_id != self.evidence_snapshot.stream_id or
+                    control.target.controller_generation != controller_generation or
+                    control_progress != .queued)
+                    return self.cleanupFailedPreparedRevoke(lease, scratch, intent_handle, external, graph_owner, false, .protocol_terminal);
+                frozen.present = true;
+                frozen.kind = control.kind;
+                frozen.target = control.target;
+                frozen.request_id = control.request_id;
+                frozen.wire_len = control.wire_len;
+                break :blk .{
+                    .stream_id = self.evidence_snapshot.stream_id,
+                    .control = .{
+                        .request_id = control.request_id,
+                        .wire_len = control.wire_len,
+                    },
+                };
+            },
+            .completed => |control| if (cleanup_completed) blk: {
+                const completed_payload = self.completed_control.completed.payload;
+                frozen.present = true;
+                frozen.completed = true;
+                frozen.kind = control.kind;
+                frozen.target = control.target;
+                frozen.request_id = control.request_id;
+                frozen.wire_len = control.wire_len;
+                break :blk .{
+                    .stream_id = self.evidence_snapshot.stream_id,
+                    .protected_payload_addr = if (completed_payload.logical_len == 0)
+                        0
+                    else
+                        @intFromPtr(completed_payload.allocation_ptr.?),
+                    .protected_payload_len = completed_payload.logical_len,
+                };
+            } else return self.cleanupFailedPreparedRevoke(lease, scratch, intent_handle, external, graph_owner, false, .protocol_terminal),
+            .terminal => return self.cleanupFailedPreparedRevoke(lease, scratch, intent_handle, external, graph_owner, false, .protocol_terminal),
+        };
+        frozen.digest = frozenRevokeCorrelationDigest(frozen);
+        const binding = makeTxOwnerBinding(
+            self,
+            client,
+            external,
+            lease,
+            @intFromPtr(scratch),
+            @sizeOf(ExternalRxTurnScratch),
+            @intFromPtr(&scratch.tx_cancellation),
+            @sizeOf(client_external_tx.PreparedTxCancellation),
+            .cancel_turn,
+        );
+        graph.external_addr = @intFromPtr(external);
+        graph.action = if (cleanup_completed) .cleanup_completed else .cancel_queued;
+        graph.binding = binding;
+        if (client_external_tx.prepareCancellationFromExternalPump(
+            validateTxOwner,
+            @ptrCast(self),
+            &scratch.tx_cancellation,
+            &scratch.tx_cancellation_permit,
+            &scratch.tx_cancellation_cleanup,
+            external,
+            binding,
+            cancellation_spec,
+            now_ns,
+        ) != .prepared)
+            return self.cleanupFailedPreparedRevoke(lease, scratch, intent_handle, external, graph_owner, false, .protocol_terminal);
+        if (!client_external_tx.validatePreparedCancellation(
+            validateTxOwner,
+            @ptrCast(self),
+            &scratch.tx_cancellation,
+            &scratch.tx_cancellation_permit,
+            external,
+            binding,
+        ))
+            return self.cleanupFailedPreparedRevoke(lease, scratch, intent_handle, external, graph_owner, true, .invariant_terminal);
+        if (hitRevokePrepareFailpoint(scratch, .after_tx_prepare))
+            return self.cleanupFailedPreparedRevoke(lease, scratch, intent_handle, external, graph_owner, true, .invariant_terminal);
+        graph.lifecycle = .prepared;
+        graph.digest = preparedRevokedCommitGraphDigest(graph);
+        if (!self.validatePreparedRevokedRxAggregateGraph(
+            lease,
+            scratch,
+            intent_handle,
+            external,
+            graph_owner,
+        )) {
+            return self.cleanupFailedPreparedRevoke(lease, scratch, intent_handle, external, graph_owner, true, .invariant_terminal);
+        }
+        graph_prepared = true;
+
+        return null;
+    }
+
+    fn commitRevokedRxAggregateWithTx(
+        self: *ExternalPumpStorage,
+        lease: *ExternalWholeTurnLease,
+        scratch: *ExternalRxTurnScratch,
+        intent_handle: *external_rx_intent.ExternalRxIntentHandle,
+        now_ns: i128,
+    ) RevokeCommitResult {
+        if (self.prepareRevokedCommitGraph(
+            lease,
+            scratch,
+            intent_handle,
+            now_ns,
+        )) |failure| return failure;
+        const graph_owner = &scratch.revoked_commit_graph;
+        const graph = graph_owner.storage();
+        const external: *client_external_mode.State = @ptrFromInt(graph.external_addr);
+        const aggregate: *PreparedRxAggregate = @ptrFromInt(graph.aggregate_addr);
+        const cleanup_completed = graph.action == .cleanup_completed;
+        var published: PublishedRxAggregateCommit = undefined;
+        if (!self.consumeAndPublishRevokedRxAggregate(
+            scratch,
+            intent_handle,
+            external,
+            graph.binding,
+            aggregate,
+            &graph.event_cleanup,
+            &graph.response_take,
+            &graph.frozen_response,
+            &graph.correlation,
+            cleanup_completed,
+            &published,
+        )) {
+            return self.cleanupFailedPreparedRevoke(
+                lease,
+                scratch,
+                intent_handle,
+                external,
+                graph_owner,
+                true,
+                .invariant_terminal,
+            );
+        }
+        graph.lifecycle = .consumed;
+        graph.digest = preparedRevokedCommitGraphDigest(graph);
+        const result = self.finishRevokedRxAggregateCallbacks(
+            scratch,
+            graph_owner,
+            external,
+            graph.binding,
+            aggregate,
+            &graph.event_cleanup,
+            &graph.frozen_response,
+            cleanup_completed,
+            &published,
+        );
+        return result;
     }
 
     fn abortRxAggregate(
@@ -10367,6 +11528,14 @@ pub const ExternalPumpStorage = struct {
             .fd_disposition = .owner_cleanup,
         };
         self.semantic_state = .{ .terminal = terminal };
+        return terminalRxResult(terminal, rx_bytes, rx_frames);
+    }
+
+    fn terminalRxResult(
+        terminal: client_pump.ExternalPumpTerminal,
+        rx_bytes: usize,
+        rx_frames: usize,
+    ) client_pump.TurnResult {
         var result = client_pump.decide(.{
             .turn = .{
                 .readable = false,
@@ -10671,13 +11840,22 @@ pub const ExternalPumpStorage = struct {
             .ready, .closed => true,
             .empty, .busy => false,
         };
+        // A revoke rollback may have completed only a prefix before the terminal path was chosen.
+        // Replay the sealed cleanup graph while the original whole-turn lease is still held; the
+        // progress typestate makes already-aborted TX ownership a no-op instead of a double abort.
+        const revoked_cleanup_closed = self.resumeFailedPreparedRevokeCleanup(
+            lease,
+            scratch,
+        );
+        if (!revoked_cleanup_closed)
+            self.quarantineFailedPreparedRevokeCleanup(scratch);
         const aggregate_retained =
             self.intentScratchReservationValid() and
             self.rxAggregateReservationValid() and
             self.rx_aggregate_reservation.lifecycle != .active and
             self.rx_aggregate_reservation.lifecycle != .destroying;
-        prepared_closed =
-            prepared_closed and traversal_closed and aggregate_retained;
+        prepared_closed = prepared_closed and traversal_closed and
+            revoked_cleanup_closed and aggregate_retained;
         if (!prepared_closed)
             terminal = self.terminalInjectedRxTurn(
                 .invariant_failure,
@@ -11460,13 +12638,38 @@ pub const ExternalPumpStorage = struct {
             } };
         };
         if (aggregate.event_reduction.outcome == .revoked) {
-            const abort_result =
-                self.abortRxAggregate(lease, &scratch.traversal.intent);
+            const revoke_result = self.commitRevokedRxAggregateWithTx(
+                lease,
+                scratch,
+                &scratch.traversal.intent,
+                now_ns,
+            );
+            const reason: client_pump.TerminalReason = switch (revoke_result) {
+                .committed => .revoked,
+                .protocol_terminal => blk: {
+                    const aborted = self.abortRxAggregate(
+                        lease,
+                        &scratch.traversal.intent,
+                    );
+                    break :blk if (aborted == .cleaned)
+                        .protocol_error
+                    else
+                        .invariant_failure;
+                },
+                .invariant_terminal => blk: {
+                    const aborted = self.abortRxAggregate(
+                        lease,
+                        &scratch.traversal.intent,
+                    );
+                    if (aborted != .cleaned) break :blk .invariant_failure;
+                    break :blk .invariant_failure;
+                },
+                .protocol_terminal_cleaned => .protocol_error,
+                .invariant_terminal_cleaned => .invariant_failure,
+                .quarantined => .invariant_failure,
+            };
             return .{ .terminal = .{
-                .reason = if (abort_result == .cleaned)
-                    .revoked
-                else
-                    .invariant_failure,
+                .reason = reason,
                 .rx_bytes = rx_bytes,
                 .rx_frames = rx_frames,
             } };
@@ -11544,11 +12747,16 @@ pub const ExternalPumpStorage = struct {
             0,
             0,
         );
+        const completed_terminal_probe = snapshot.response_correlation_pending and
+            self.completed_control == .completed and
+            self.control_correlation.state == .completed and
+            self.completedControlValid();
         const existing_consumer_blocker =
             snapshot.committed_screen_pending or
             snapshot.metadata_projection_pending or
             snapshot.resize_projection_pending or
-            snapshot.response_correlation_pending;
+            (snapshot.response_correlation_pending and
+                !completed_terminal_probe);
         if (existing_consumer_blocker) {
             return .{ .without_drain = .{
                 .policy = .{
@@ -12624,7 +13832,18 @@ pub const ExternalPumpStorage = struct {
             scratch,
         );
         const summary = switch (mechanics) {
-            .terminal => |terminal| return self.terminalRxTurn(
+            .terminal => |terminal| return if (!std.mem.allEqual(
+                u8,
+                &scratch.revoked_commit_graph.bytes,
+                0,
+            )) terminalRxResult(
+                .{
+                    .reason = terminal.reason,
+                    .fd_disposition = .owner_cleanup,
+                },
+                terminal.rx_bytes,
+                terminal.rx_frames,
+            ) else self.terminalRxTurn(
                 terminal.reason,
                 terminal.rx_bytes,
                 terminal.rx_frames,
@@ -12751,6 +13970,15 @@ pub const ExternalPumpStorage = struct {
             ops,
             scratch,
         );
+        if (result.terminal != null and
+            !std.mem.allEqual(u8, &scratch.revoked_commit_graph.bytes, 0))
+        {
+            result = self.finalizeInjectedRxTerminalUnderHeldLease(
+                &lease,
+                scratch,
+                result,
+            );
+        }
         scratch.snapshot = .{};
         scratch.live_consume = .{};
         scratch.lifecycle = .ready;
@@ -17470,6 +18698,11 @@ const AllocatorCallbackProbe = struct {
         aggregate_commit_drift,
         tx_admission_reentry,
         tx_admission_queue_drift,
+        revoke_cleanup_correlation_reentry,
+        revoke_cleanup_authority_drift,
+        revoke_rx_cleanup_tx_scratch_drift,
+        revoke_rx_cleanup_retiring_drift,
+        revoke_response_cleanup_owner_drift,
     };
 
     parent: std.mem.Allocator,
@@ -17500,6 +18733,7 @@ const AllocatorCallbackProbe = struct {
     nested_tx_tag: ?std.meta.Tag(TxAdmissionResult) = null,
     nested_tx_operation_acquired: ?bool = null,
     stale_tx_state: ?*client_external_mode.State = null,
+    rx_scratch: ?*ExternalRxTurnScratch = null,
 
     fn allocator(self: *AllocatorCallbackProbe) std.mem.Allocator {
         return .{ .ptr = self, .vtable = &.{
@@ -17728,6 +18962,57 @@ const AllocatorCallbackProbe = struct {
                 self.storage.?.rx_aggregate_handle.aggregate_addr,
             );
             aggregate.destination_write_count +%= 1;
+        } else if (!self.fired and
+            (self.mode == .revoke_cleanup_correlation_reentry or
+                self.mode == .revoke_cleanup_authority_drift) and
+            self.storage.?.lifecycle == .live and
+            self.storage.?.rx_aggregate_handle.lifecycle == .retained)
+        {
+            self.fired = true;
+            if (self.mode == .revoke_cleanup_correlation_reentry) {
+                self.nested_tx_tag = std.meta.activeTag(self.storage.?.admitTx(.{
+                    .kind = .input_bytes,
+                    .stream_id = valid_evidence.stream_id,
+                    .payload = "callback-reentry",
+                    .request_policy = .zero,
+                }, 12));
+                self.storage.?.control_correlation.generation +%= 1;
+            } else {
+                self.storage.?.owner_authority_seal.digest[0] ^= 1;
+            }
+        } else if (!self.fired and
+            (self.mode == .revoke_rx_cleanup_tx_scratch_drift or
+                self.mode == .revoke_rx_cleanup_retiring_drift) and
+            self.storage.?.lifecycle == .live and
+            self.storage.?.rx_aggregate_handle.lifecycle == .retained and
+            std.mem.allEqual(u8, &self.rx_scratch.?.tx_cancellation.bytes, 0) and
+            std.mem.allEqual(u8, &self.rx_scratch.?.tx_cancellation_permit.bytes, 0) and
+            std.mem.allEqual(u8, &self.rx_scratch.?.tx_cancellation_cleanup.bytes, 0))
+        {
+            self.fired = true;
+            if (self.mode == .revoke_rx_cleanup_tx_scratch_drift) {
+                self.rx_scratch.?.tx_cancellation.bytes[0] = 1;
+                self.rx_scratch.?.tx_cancellation_permit.bytes[0] = 1;
+            } else {
+                const state = switch (self.storage.?.owned_client.?.io_mode) {
+                    .external => |*external| external,
+                    .blocking => unreachable,
+                };
+                state.external_tx_retiring_bytes = std.math.maxInt(usize);
+            }
+        } else if (!self.fired and
+            self.mode == .revoke_response_cleanup_owner_drift and
+            self.storage.?.lifecycle == .live and
+            self.storage.?.rx_aggregate_handle.lifecycle == .retained and
+            self.storage.?.completed_control == .none)
+        {
+            self.fired = true;
+            self.storage.?.completed_control = .terminal;
+            self.storage.?.completed_control_generation +%= 1;
+            self.storage.?.semantic_state = .{ .terminal = .{
+                .reason = .eof,
+                .fd_disposition = .owner_cleanup,
+            } };
         } else if (!self.fired and self.mode == .commit_cleanup_reentry and
             self.storage.?.lifecycle == .tearing_down)
         {
@@ -20126,6 +21411,107 @@ fn initActiveF2Storage(
     try std.testing.expect(testing.clearInitialFence(storage));
 }
 
+const QuarantineAllocationTracker = struct {
+    // Test-only tracker for an ArenaAllocator parent: arena frees never recycle an address before
+    // arena deinit. Do not reuse this helper with an allocator that can recycle freed addresses;
+    // stale-pointer detection there requires an allocation generation in addition to the address.
+    const max_records = 64;
+    const Record = struct { addr: usize = 0, len: usize = 0, live: bool = false };
+
+    parent: std.mem.Allocator,
+    records: [max_records]Record = [_]Record{.{}} ** max_records,
+    record_count: usize = 0,
+    free_count: usize = 0,
+    invalid_free: bool = false,
+    duplicate_free: bool = false,
+
+    fn allocator(self: *QuarantineAllocationTracker) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn find(self: *QuarantineAllocationTracker, addr: usize) ?*Record {
+        var prior: ?*Record = null;
+        for (self.records[0..self.record_count]) |*record| {
+            if (record.addr != addr) continue;
+            if (record.live) return record;
+            prior = record;
+        }
+        return prior;
+    }
+
+    fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *QuarantineAllocationTracker = @ptrCast(@alignCast(context));
+        if (self.record_count == max_records) return null;
+        const memory = self.parent.vtable.alloc(self.parent.ptr, len, alignment, ret_addr) orelse return null;
+        self.records[self.record_count] = .{ .addr = @intFromPtr(memory), .len = len, .live = true };
+        self.record_count += 1;
+        return memory;
+    }
+
+    fn resize(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *QuarantineAllocationTracker = @ptrCast(@alignCast(context));
+        const record = self.find(@intFromPtr(memory.ptr)) orelse {
+            self.invalid_free = true;
+            return false;
+        };
+        if (!record.live) {
+            self.duplicate_free = true;
+            return false;
+        }
+        if (!self.parent.vtable.resize(self.parent.ptr, memory, alignment, new_len, ret_addr)) return false;
+        record.len = new_len;
+        return true;
+    }
+
+    fn remap(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *QuarantineAllocationTracker = @ptrCast(@alignCast(context));
+        const record = self.find(@intFromPtr(memory.ptr)) orelse {
+            self.invalid_free = true;
+            return null;
+        };
+        if (!record.live) {
+            self.duplicate_free = true;
+            return null;
+        }
+        const remapped = self.parent.vtable.remap(self.parent.ptr, memory, alignment, new_len, ret_addr) orelse return null;
+        record.addr = @intFromPtr(remapped);
+        record.len = new_len;
+        return remapped;
+    }
+
+    fn free(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *QuarantineAllocationTracker = @ptrCast(@alignCast(context));
+        const record = self.find(@intFromPtr(memory.ptr)) orelse {
+            self.invalid_free = true;
+            return;
+        };
+        if (!record.live) {
+            self.duplicate_free = true;
+            return;
+        }
+        if (record.len != memory.len) {
+            self.invalid_free = true;
+            return;
+        }
+        record.live = false;
+        self.free_count += 1;
+        self.parent.vtable.free(self.parent.ptr, memory, alignment, ret_addr);
+    }
+
+    fn liveBytes(self: *const QuarantineAllocationTracker) usize {
+        var total: usize = 0;
+        for (self.records[0..self.record_count]) |record| {
+            if (record.live) total +|= record.len;
+        }
+        return total;
+    }
+};
+
 /// Every f2 terminal fixture ends in the same canonical owner graph. Explicit field assertions
 /// keep `.cleaned` from becoming a weak proxy that could hide a retained TX/payload authority.
 fn expectF2FinalZero(storage: *ExternalPumpStorage) !void {
@@ -20306,6 +21692,838 @@ test "f2 control admission atomically publishes one correlation and one request 
         storage.completed_control.completed.payload.bytes(),
     );
     try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(&storage));
+}
+
+const F3bProductQueueCase = enum { zero, input, control, input_and_control };
+
+const f3b_revoke_payload =
+    "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":7,\"controller_generation\":4,\"reason\":\"takeover\"}}";
+
+fn pumpF3bBufferedRevoke(
+    storage: *ExternalPumpStorage,
+    scratch: *ExternalRxTurnScratch,
+    now_ns: i128,
+) !client_pump.TurnResult {
+    const wire = try framing.encodeFrame(
+        std.testing.allocator,
+        .{ .kind = .event, .stream_id = valid_evidence.stream_id },
+        f3b_revoke_payload,
+    );
+    defer std.testing.allocator.free(wire);
+    try admitBufferedProductWireForTest(storage, wire);
+    var probe = F2ProductProbe{};
+    const ops = probe.bufferedOps();
+    return storage.pumpBufferedRxForTest(
+        .{ .readable = true, .writable = true, .now_ns = now_ns },
+        &ops,
+        scratch,
+    );
+}
+
+fn admitF3bProductQueue(
+    storage: *ExternalPumpStorage,
+    case: F3bProductQueueCase,
+) !void {
+    if (case == .input or case == .input_and_control) {
+        try std.testing.expect(storage.admitTx(.{
+            .kind = .input_bytes,
+            .stream_id = valid_evidence.stream_id,
+            .payload = "input-before-revoke",
+            .request_policy = .zero,
+        }, 10) == .admitted);
+    }
+    if (case == .control or case == .input_and_control) {
+        try std.testing.expect(storage.admitControl(.{
+            .kind = .resize,
+            .target_stream_id = valid_evidence.stream_id,
+            .expected_controller_generation = valid_evidence.initial_controller_generation,
+            .payload = "{\"method\":\"runtime.resize\",\"params\":{\"stream_id\":7,\"cols\":80,\"rows\":24,\"client_sequence\":1}}",
+        }, 11) == .admitted);
+    }
+}
+
+test "f3b product revoke atomically cancels zero input control and combined queues" {
+    inline for (std.meta.tags(F3bProductQueueCase)) |case| {
+        var fixture = try TestClient.init();
+        defer fixture.deinitPeer();
+        var storage: ExternalPumpStorage = .{};
+        try initActiveF2Storage(&storage, &fixture);
+        defer if (storage.lifecycle != .dead) {
+            _ = teardownForTest(&storage);
+        };
+        const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+        defer std.testing.allocator.destroy(scratch);
+        scratch.* = .{};
+        try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+        try admitF3bProductQueue(&storage, case);
+
+        const result = try pumpF3bBufferedRevoke(&storage, scratch, 12);
+        try std.testing.expectEqual(
+            client_pump.TerminalReason.revoked,
+            result.terminal.?.reason,
+        );
+        const external = switch (storage.owned_client.?.io_mode) {
+            .external => |*state| state,
+            .blocking => return error.TestUnexpectedResult,
+        };
+        try std.testing.expectEqual(@as(usize, 0), external.external_tx.items.len);
+        try std.testing.expectEqual(@as(usize, 0), external.external_tx_bytes);
+        try std.testing.expectEqual(@as(usize, 0), external.external_tx_retiring_bytes);
+        try std.testing.expect(storage.control_correlation.state == .terminal);
+        try std.testing.expectEqual(
+            AttachmentRole.observer,
+            storage.owner_authority.current.role,
+        );
+        try std.testing.expect(std.mem.allEqual(
+            u8,
+            &scratch.tx_cancellation.bytes,
+            0,
+        ));
+        try std.testing.expect(std.mem.allEqual(
+            u8,
+            &scratch.tx_cancellation_permit.bytes,
+            0,
+        ));
+        try std.testing.expect(std.mem.allEqual(
+            u8,
+            &scratch.tx_cancellation_cleanup.bytes,
+            0,
+        ));
+        try std.testing.expect(std.mem.allEqual(
+            u8,
+            &scratch.revoked_commit_graph.bytes,
+            0,
+        ));
+        try std.testing.expect(std.mem.allEqual(
+            u8,
+            &scratch.post_cancellation_receipt.bytes,
+            0,
+        ));
+        try expectF2FinalZero(&storage);
+    }
+}
+
+test "f3b public pumpRxTurn suppresses writable input control and combined queues on revoke" {
+    inline for (std.meta.tags(F3bProductQueueCase)) |case| {
+        var fixture = try TestClient.init();
+        defer fixture.deinitPeer();
+        var storage: ExternalPumpStorage = .{};
+        try initActiveF2Storage(&storage, &fixture);
+        defer if (storage.lifecycle != .dead) {
+            _ = teardownForTest(&storage);
+        };
+        const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+        defer std.testing.allocator.destroy(scratch);
+        scratch.* = .{};
+        try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+        try admitF3bProductQueue(&storage, case);
+        const wire = try framing.encodeFrame(
+            std.testing.allocator,
+            .{ .kind = .event, .stream_id = valid_evidence.stream_id },
+            f3b_revoke_payload,
+        );
+        defer std.testing.allocator.free(wire);
+        try std.testing.expectEqual(
+            @as(isize, @intCast(wire.len)),
+            c.send(fixture.peer_fd, wire.ptr, wire.len, 0),
+        );
+        var probe = F2ProductProbe{ .use_posix = true };
+        const ops = probe.rxOps();
+        const result = storage.pumpRxTurn(
+            .{ .readable = true, .writable = true, .now_ns = 12 },
+            &ops,
+            scratch,
+        );
+        try std.testing.expectEqual(
+            client_pump.TerminalReason.revoked,
+            result.terminal.?.reason,
+        );
+        try std.testing.expectEqual(@as(usize, 0), result.tx_frames);
+        const external = switch (storage.owned_client.?.io_mode) {
+            .external => |*state| state,
+            .blocking => return error.TestUnexpectedResult,
+        };
+        try std.testing.expectEqual(@as(usize, 0), external.external_tx.items.len);
+        try std.testing.expectEqual(@as(usize, 0), external.external_tx_bytes);
+        try expectF2FinalZero(&storage);
+    }
+}
+
+test "f3b public prior completed owner then revoke cleans payload without semantic apply or tx" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try initActiveF2Storage(&storage, &fixture);
+    defer if (storage.lifecycle != .dead) {
+        _ = teardownForTest(&storage);
+    };
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    try admitF3bProductQueue(&storage, .control);
+    const request_id = storage.control_correlation.state.in_flight.request_id;
+    var probe = F2ProductProbe{};
+    var ops = probe.rxOps();
+    const write_turn = storage.pumpRxTurn(
+        .{ .readable = true, .writable = true, .now_ns = 12 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(write_turn.terminal == null);
+    try std.testing.expectEqual(@as(usize, 1), write_turn.tx_frames);
+    var request_wire: [protocol.max_control_json + protocol.header_size]u8 = undefined;
+    try std.testing.expect(c.recv(
+        fixture.peer_fd,
+        &request_wire,
+        request_wire.len,
+        0,
+    ) > 0);
+    const response_wire = try framing.encodeFrame(
+        std.testing.allocator,
+        .{ .kind = .response, .request_id = request_id },
+        "must-not-apply",
+    );
+    defer std.testing.allocator.free(response_wire);
+    const revoke_wire = try framing.encodeFrame(
+        std.testing.allocator,
+        .{ .kind = .event, .stream_id = valid_evidence.stream_id },
+        f3b_revoke_payload,
+    );
+    defer std.testing.allocator.free(revoke_wire);
+    try std.testing.expect(c.send(
+        fixture.peer_fd,
+        response_wire.ptr,
+        response_wire.len,
+        0,
+    ) > 0);
+    probe.use_posix = true;
+    ops = probe.rxOps();
+    const response_turn = storage.pumpRxTurn(
+        .{ .readable = true, .writable = true, .now_ns = 13 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(response_turn.terminal == null);
+    try std.testing.expect(storage.completed_control == .completed);
+    try std.testing.expect(c.send(
+        fixture.peer_fd,
+        revoke_wire.ptr,
+        revoke_wire.len,
+        0,
+    ) > 0);
+    const terminal = storage.pumpRxTurn(
+        .{ .readable = true, .writable = true, .now_ns = 14 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expectEqual(
+        client_pump.TerminalReason.revoked,
+        terminal.terminal.?.reason,
+    );
+    try std.testing.expectEqual(@as(usize, 0), terminal.tx_frames);
+    try std.testing.expect(storage.completed_control == .none);
+    try std.testing.expect(storage.control_correlation.state == .terminal);
+    try std.testing.expectEqual(
+        AttachmentRole.observer,
+        storage.owner_authority.current.role,
+    );
+    try expectF2FinalZero(&storage);
+}
+
+test "f3b prepared revoke failures abort rx and tx graphs without erasing evidence" {
+    inline for (.{
+        RevokePrepareFailpoint.after_aggregate,
+        RevokePrepareFailpoint.after_tx_prepare,
+    }) |point| {
+        var fixture = try TestClient.init();
+        defer fixture.deinitPeer();
+        var storage: ExternalPumpStorage = .{};
+        try initActiveF2Storage(&storage, &fixture);
+        defer if (storage.lifecycle != .dead) {
+            _ = teardownForTest(&storage);
+        };
+        const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+        defer std.testing.allocator.destroy(scratch);
+        scratch.* = .{};
+        try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+        try admitF3bProductQueue(&storage, .input_and_control);
+        const external = switch (storage.owned_client.?.io_mode) {
+            .external => |*state| state,
+            .blocking => return error.TestUnexpectedResult,
+        };
+        const queue_len = external.external_tx.items.len;
+        const queue_bytes = external.external_tx_bytes;
+        revoke_prepare_failpoint = point;
+        revoke_prepare_failpoint_scratch_addr = @intFromPtr(scratch);
+        defer {
+            revoke_prepare_failpoint = .none;
+            revoke_prepare_failpoint_scratch_addr = 0;
+        }
+        const result = try pumpF3bBufferedRevoke(&storage, scratch, 12);
+        try std.testing.expectEqual(
+            client_pump.TerminalReason.invariant_failure,
+            result.terminal.?.reason,
+        );
+        try std.testing.expectEqual(queue_len, external.external_tx.items.len);
+        try std.testing.expectEqual(queue_bytes, external.external_tx_bytes);
+        try std.testing.expect(std.mem.allEqual(u8, &scratch.revoked_commit_graph.bytes, 0));
+        try std.testing.expect(std.mem.allEqual(u8, &scratch.tx_cancellation.bytes, 0));
+        try std.testing.expect(std.mem.allEqual(u8, &scratch.tx_cancellation_permit.bytes, 0));
+        try std.testing.expect(std.mem.allEqual(u8, &scratch.tx_cancellation_cleanup.bytes, 0));
+        try expectF2FinalZero(&storage);
+    }
+}
+
+test "f3b sealed revoke cleanup replay skips completed substeps and teardown converges" {
+    inline for (.{
+        RevokeCleanupFailpoint.before_tx_abort,
+        RevokeCleanupFailpoint.before_tx_reset,
+        RevokeCleanupFailpoint.before_rx_abort,
+        RevokeCleanupFailpoint.after_rx_abort_graph_drift,
+    }) |cleanup_point| {
+        resetCrossOwnerQuarantineForTest();
+        defer resetCrossOwnerQuarantineForTest();
+        var fixture = try TestClient.init();
+        defer fixture.deinitPeer();
+        var storage: ExternalPumpStorage = .{};
+        try initActiveF2Storage(&storage, &fixture);
+        const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+        defer std.testing.allocator.destroy(scratch);
+        scratch.* = .{};
+        try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+        try admitF3bProductQueue(&storage, .input_and_control);
+        const external = switch (storage.owned_client.?.io_mode) {
+            .external => |*state| state,
+            .blocking => return error.TestUnexpectedResult,
+        };
+        const queue_len = external.external_tx.items.len;
+        const queue_bytes = external.external_tx_bytes;
+        revoke_prepare_failpoint = .after_tx_prepare;
+        revoke_prepare_failpoint_scratch_addr = @intFromPtr(scratch);
+        revoke_cleanup_failpoint = cleanup_point;
+        revoke_cleanup_failpoint_scratch_addr = @intFromPtr(scratch);
+        defer {
+            revoke_prepare_failpoint = .none;
+            revoke_prepare_failpoint_scratch_addr = 0;
+            revoke_cleanup_failpoint = .none;
+            revoke_cleanup_failpoint_scratch_addr = 0;
+        }
+        const result = try pumpF3bBufferedRevoke(&storage, scratch, 12);
+        try std.testing.expectEqual(
+            client_pump.TerminalReason.invariant_failure,
+            result.terminal.?.reason,
+        );
+        try std.testing.expectEqual(
+            cleanup_point == .after_rx_abort_graph_drift,
+            crossOwnerQuarantineStatus().latched,
+        );
+        try std.testing.expectEqual(queue_len, external.external_tx.items.len);
+        try std.testing.expectEqual(queue_bytes, external.external_tx_bytes);
+        try std.testing.expect(std.mem.allEqual(u8, &scratch.revoked_commit_graph.bytes, 0));
+        try std.testing.expect(std.mem.allEqual(u8, &scratch.tx_cancellation.bytes, 0));
+        try std.testing.expect(std.mem.allEqual(u8, &scratch.tx_cancellation_permit.bytes, 0));
+        try std.testing.expect(std.mem.allEqual(u8, &scratch.tx_cancellation_cleanup.bytes, 0));
+        try expectF2FinalZero(&storage);
+        try std.testing.expect(teardownForTest(&storage) != .transaction_busy);
+    }
+}
+
+test "f3b focused gate sentinel drives public cleanup replay before terminal publication" {
+    inline for (.{
+        RevokeCleanupFailpoint.before_tx_reset,
+        RevokeCleanupFailpoint.before_rx_abort,
+    }) |cleanup_point| {
+        resetCrossOwnerQuarantineForTest();
+        defer resetCrossOwnerQuarantineForTest();
+        var fixture = try TestClient.init();
+        defer fixture.deinitPeer();
+        var storage: ExternalPumpStorage = .{};
+        try initActiveF2Storage(&storage, &fixture);
+        const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+        defer std.testing.allocator.destroy(scratch);
+        scratch.* = .{};
+        try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+        try admitF3bProductQueue(&storage, .input_and_control);
+        const external = switch (storage.owned_client.?.io_mode) {
+            .external => |*state| state,
+            .blocking => return error.TestUnexpectedResult,
+        };
+        const queue_len = external.external_tx.items.len;
+        const queue_bytes = external.external_tx_bytes;
+        const wire = try framing.encodeFrame(
+            std.testing.allocator,
+            .{ .kind = .event, .stream_id = valid_evidence.stream_id },
+            f3b_revoke_payload,
+        );
+        defer std.testing.allocator.free(wire);
+        try std.testing.expectEqual(
+            @as(isize, @intCast(wire.len)),
+            c.send(fixture.peer_fd, wire.ptr, wire.len, 0),
+        );
+        revoke_prepare_failpoint = .after_tx_prepare;
+        revoke_prepare_failpoint_scratch_addr = @intFromPtr(scratch);
+        revoke_cleanup_failpoint = cleanup_point;
+        revoke_cleanup_failpoint_scratch_addr = @intFromPtr(scratch);
+        defer {
+            revoke_prepare_failpoint = .none;
+            revoke_prepare_failpoint_scratch_addr = 0;
+            revoke_cleanup_failpoint = .none;
+            revoke_cleanup_failpoint_scratch_addr = 0;
+        }
+        var probe = F2ProductProbe{ .use_posix = true };
+        const ops = probe.rxOps();
+        const result = storage.pumpRxTurn(
+            .{ .readable = true, .writable = true, .now_ns = 12 },
+            &ops,
+            scratch,
+        );
+        try std.testing.expectEqual(
+            client_pump.TerminalReason.invariant_failure,
+            result.terminal.?.reason,
+        );
+        try std.testing.expect(storage.semantic_state == .terminal);
+        try std.testing.expect(!crossOwnerQuarantineStatus().latched);
+        try std.testing.expectEqual(queue_len, external.external_tx.items.len);
+        try std.testing.expectEqual(queue_bytes, external.external_tx_bytes);
+        try std.testing.expect(std.mem.allEqual(u8, &scratch.revoked_commit_graph.bytes, 0));
+        try std.testing.expect(std.mem.allEqual(u8, &scratch.tx_cancellation.bytes, 0));
+        try std.testing.expect(std.mem.allEqual(u8, &scratch.tx_cancellation_permit.bytes, 0));
+        try std.testing.expect(std.mem.allEqual(u8, &scratch.tx_cancellation_cleanup.bytes, 0));
+        try expectF2FinalZero(&storage);
+        try std.testing.expect(teardownForTest(&storage) != .transaction_busy);
+    }
+}
+
+test "f3b repeated cleanup failure hands inline capability to bounded quarantine" {
+    inline for (.{
+        RevokeCleanupFailpoint.before_tx_reset,
+        RevokeCleanupFailpoint.before_rx_abort,
+    }) |cleanup_point| {
+        resetCrossOwnerQuarantineForTest();
+        defer resetCrossOwnerQuarantineForTest();
+        // This fixture intentionally proves the bounded-abandonment branch. The tracker records
+        // exact logical frees while the backing arena reclaims the expected retained allocations.
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var allocation_tracker = QuarantineAllocationTracker{
+            .parent = arena.allocator(),
+        };
+        var fixture = try TestClient.initWithAllocator(allocation_tracker.allocator());
+        defer fixture.deinitPeer();
+        var storage: ExternalPumpStorage = .{};
+        try initActiveF2Storage(&storage, &fixture);
+        const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+        defer std.testing.allocator.destroy(scratch);
+        scratch.* = .{};
+        try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+        try admitF3bProductQueue(&storage, .input_and_control);
+        const external = switch (storage.owned_client.?.io_mode) {
+            .external => |*state| state,
+            .blocking => return error.TestUnexpectedResult,
+        };
+        const queue_len = external.external_tx.items.len;
+        const queue_bytes = external.external_tx_bytes;
+        const wire = try framing.encodeFrame(
+            std.testing.allocator,
+            .{ .kind = .event, .stream_id = valid_evidence.stream_id },
+            f3b_revoke_payload,
+        );
+        defer std.testing.allocator.free(wire);
+        try std.testing.expectEqual(
+            @as(isize, @intCast(wire.len)),
+            c.send(fixture.peer_fd, wire.ptr, wire.len, 0),
+        );
+        revoke_prepare_failpoint = .after_tx_prepare;
+        revoke_prepare_failpoint_scratch_addr = @intFromPtr(scratch);
+        revoke_cleanup_failpoint = cleanup_point;
+        revoke_cleanup_failpoint_scratch_addr = @intFromPtr(scratch);
+        // Stay failed across every same-turn replay site so the finalizer must take the explicit
+        // bounded-quarantine handoff instead of succeeding on a later one-shot retry.
+        revoke_cleanup_failpoint_hits = std.math.maxInt(u8);
+        defer {
+            revoke_prepare_failpoint = .none;
+            revoke_prepare_failpoint_scratch_addr = 0;
+            revoke_cleanup_failpoint = .none;
+            revoke_cleanup_failpoint_scratch_addr = 0;
+            revoke_cleanup_failpoint_hits = 0;
+        }
+        var probe = F2ProductProbe{ .use_posix = true };
+        const ops = probe.rxOps();
+        const result = storage.pumpRxTurn(
+            .{ .readable = true, .writable = true, .now_ns = 12 },
+            &ops,
+            scratch,
+        );
+        try std.testing.expectEqual(
+            client_pump.TerminalReason.invariant_failure,
+            result.terminal.?.reason,
+        );
+        try std.testing.expect(crossOwnerQuarantineStatus().latched);
+        try std.testing.expectEqual(
+            max_cross_owner_quarantine_bytes,
+            crossOwnerQuarantineStatus().leaked_bytes_upper_bound,
+        );
+        try std.testing.expectEqual(@as(u64, 1), crossOwnerQuarantineStatus().event_count);
+        try std.testing.expectEqual(queue_len, external.external_tx.items.len);
+        try std.testing.expectEqual(queue_bytes, external.external_tx_bytes);
+        try std.testing.expect(std.mem.allEqual(u8, &scratch.revoked_commit_graph.bytes, 0));
+        try std.testing.expect(std.mem.allEqual(u8, &scratch.tx_cancellation.bytes, 0));
+        try std.testing.expect(std.mem.allEqual(u8, &scratch.tx_cancellation_permit.bytes, 0));
+        try std.testing.expect(std.mem.allEqual(u8, &scratch.tx_cancellation_cleanup.bytes, 0));
+        const retained_aggregate_addr = storage.rx_aggregate_handle.aggregate_addr;
+        const retained_aggregate_len = storage.rx_aggregate_handle.allocation_len;
+        try std.testing.expectEqual(TeardownResult.quarantined, teardownForTest(&storage));
+        try std.testing.expectEqual(StorageLifecycle.dead, storage.lifecycle);
+        try std.testing.expectEqual(
+            IntentScratchReservationLifecycle.poisoned_tombstone,
+            storage.intent_scratch_reservation.lifecycle,
+        );
+        try std.testing.expectEqual(
+            RxAggregateHandleLifecycle.active,
+            storage.rx_aggregate_handle.lifecycle,
+        );
+        const retained_aggregate_record = allocation_tracker.find(
+            retained_aggregate_addr,
+        ) orelse return error.TestUnexpectedResult;
+        try std.testing.expect(retained_aggregate_record.live);
+        try std.testing.expectEqual(
+            retained_aggregate_len,
+            retained_aggregate_record.len,
+        );
+        try std.testing.expect(!allocation_tracker.invalid_free);
+        try std.testing.expect(!allocation_tracker.duplicate_free);
+        try std.testing.expect(allocation_tracker.free_count > 0);
+        try std.testing.expect(
+            allocation_tracker.free_count <= allocation_tracker.record_count,
+        );
+        try std.testing.expect(allocation_tracker.liveBytes() > 0);
+        try std.testing.expect(
+            allocation_tracker.liveBytes() <= max_cross_owner_quarantine_bytes,
+        );
+    }
+}
+
+test "f3b corrupt persisted cleanup tags fail closed before pointer recovery" {
+    inline for (.{ false, true }) |corrupt_failure| {
+        resetCrossOwnerQuarantineForTest();
+        defer resetCrossOwnerQuarantineForTest();
+        var fixture = try TestClient.init();
+        defer fixture.deinitPeer();
+        var storage: ExternalPumpStorage = .{};
+        try initActiveF2Storage(&storage, &fixture);
+        defer if (storage.lifecycle != .dead) {
+            _ = teardownForTest(&storage);
+        };
+        const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+        defer std.testing.allocator.destroy(scratch);
+        scratch.* = .{};
+        try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+        var lease: ExternalWholeTurnLease = .{};
+        try storage.acquireWholeTurnLease(
+            &lease,
+            @intFromPtr(scratch),
+            @sizeOf(ExternalRxTurnScratch),
+        );
+        scratch.lifecycle = .busy;
+        const graph = scratch.revoked_commit_graph.storage();
+        graph.saved_self_addr = @intFromPtr(&scratch.revoked_commit_graph);
+        graph.storage_addr = @intFromPtr(&storage);
+        graph.lease_addr = @intFromPtr(&lease);
+        graph.aggregate_addr = 1;
+        graph.cleanup_progress = if (corrupt_failure)
+            @intFromEnum(RevokedCleanupProgress.tx_abort_pending)
+        else
+            std.math.maxInt(u8);
+        graph.cleanup_failure = if (corrupt_failure) std.math.maxInt(u8) else 2;
+        graph.cleanup_digest = revokedCleanupProgressDigest(graph);
+        try std.testing.expect(!storage.resumeFailedPreparedRevokeCleanup(
+            &lease,
+            scratch,
+        ));
+        try std.testing.expect(!crossOwnerQuarantineStatus().latched);
+        storage.quarantineFailedPreparedRevokeCleanup(scratch);
+        try std.testing.expectEqual(@as(u64, 1), crossOwnerQuarantineStatus().event_count);
+        try std.testing.expect(std.mem.allEqual(
+            u8,
+            &scratch.revoked_commit_graph.bytes,
+            0,
+        ));
+        scratch.lifecycle = .ready;
+        try std.testing.expectEqual(
+            WholeTurnReleaseResult.released,
+            storage.releaseWholeTurnLease(&lease),
+        );
+    }
+}
+
+test "f3b response payload cleanup callback owner drift restores revoke state and quarantines" {
+    resetCrossOwnerQuarantineForTest();
+    defer resetCrossOwnerQuarantineForTest();
+    var allocator_probe = AllocatorCallbackProbe{ .parent = std.testing.allocator };
+    var fixture = try TestClient.initWithAllocator(allocator_probe.allocator());
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try initActiveF2Storage(&storage, &fixture);
+    defer if (storage.lifecycle != .dead) {
+        _ = teardownForTest(&storage);
+    };
+    allocator_probe.storage = &storage;
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    allocator_probe.rx_scratch = scratch;
+    try admitF3bProductQueue(&storage, .control);
+    const request_id = storage.control_correlation.state.in_flight.request_id;
+    var transport_probe = F2ProductProbe{};
+    var ops = transport_probe.rxOps();
+    _ = storage.pumpRxTurn(
+        .{ .readable = true, .writable = true, .now_ns = 12 },
+        &ops,
+        scratch,
+    );
+    var request_wire: [protocol.max_control_json + protocol.header_size]u8 = undefined;
+    try std.testing.expect(c.recv(
+        fixture.peer_fd,
+        &request_wire,
+        request_wire.len,
+        0,
+    ) > 0);
+    const response_wire = try framing.encodeFrame(
+        std.testing.allocator,
+        .{ .kind = .response, .request_id = request_id },
+        "callback-drift",
+    );
+    defer std.testing.allocator.free(response_wire);
+    try std.testing.expect(c.send(
+        fixture.peer_fd,
+        response_wire.ptr,
+        response_wire.len,
+        0,
+    ) > 0);
+    transport_probe.use_posix = true;
+    ops = transport_probe.rxOps();
+    const response_turn = storage.pumpRxTurn(
+        .{ .readable = true, .writable = false, .now_ns = 13 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(response_turn.terminal == null);
+    try std.testing.expect(storage.completed_control == .completed);
+    const revoke_wire = try framing.encodeFrame(
+        std.testing.allocator,
+        .{ .kind = .event, .stream_id = valid_evidence.stream_id },
+        f3b_revoke_payload,
+    );
+    defer std.testing.allocator.free(revoke_wire);
+    try std.testing.expect(c.send(
+        fixture.peer_fd,
+        revoke_wire.ptr,
+        revoke_wire.len,
+        0,
+    ) > 0);
+    allocator_probe.mode = .revoke_response_cleanup_owner_drift;
+    allocator_probe.fired = false;
+    const terminal = storage.pumpRxTurn(
+        .{ .readable = true, .writable = true, .now_ns = 14 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(allocator_probe.fired);
+    try std.testing.expectEqual(
+        client_pump.TerminalReason.invariant_failure,
+        terminal.terminal.?.reason,
+    );
+    try std.testing.expect(storage.completed_control == .none);
+    try std.testing.expect(storage.control_correlation.state == .terminal);
+    try std.testing.expectEqual(
+        AttachmentRole.observer,
+        storage.owner_authority.current.role,
+    );
+    try std.testing.expect(crossOwnerQuarantineStatus().latched);
+    try expectF2FinalZero(&storage);
+}
+
+const F3bProductFailureCase = enum {
+    partial,
+    response_wait,
+    missing,
+    correlation_drift,
+    authority_drift,
+};
+
+test "f3b product revoke failures preserve tx correlation and authority all or none" {
+    inline for (std.meta.tags(F3bProductFailureCase)) |case| {
+        var fixture = try TestClient.init();
+        defer fixture.deinitPeer();
+        var storage: ExternalPumpStorage = .{};
+        try initActiveF2Storage(&storage, &fixture);
+        defer if (storage.lifecycle != .dead) {
+            _ = teardownForTest(&storage);
+        };
+        const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+        defer std.testing.allocator.destroy(scratch);
+        scratch.* = .{};
+        try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+        try admitF3bProductQueue(&storage, .input_and_control);
+        const external = switch (storage.owned_client.?.io_mode) {
+            .external => |*state| state,
+            .blocking => return error.TestUnexpectedResult,
+        };
+        switch (case) {
+            .partial => {
+                external.external_tx.items[1].offset = 1;
+                external.external_tx.items[1].descriptor_digest =
+                    client_external_mode.txFrameDescriptorDigest(
+                        external.external_tx.items[1],
+                    );
+            },
+            .response_wait => {
+                var correlation = storage.control_correlation.state.in_flight;
+                correlation.progress = .response_wait;
+                try std.testing.expect(publishControlCorrelation(
+                    &storage,
+                    .{ .in_flight = correlation },
+                ));
+            },
+            .missing => {
+                var correlation = storage.control_correlation.state.in_flight;
+                correlation.request_id +%= 1;
+                try std.testing.expect(publishControlCorrelation(
+                    &storage,
+                    .{ .in_flight = correlation },
+                ));
+            },
+            .correlation_drift => storage.control_correlation.digest[0] ^= 1,
+            .authority_drift => {
+                var correlation = storage.control_correlation.state.in_flight;
+                correlation.target.controller_generation +%= 1;
+                try std.testing.expect(publishControlCorrelation(
+                    &storage,
+                    .{ .in_flight = correlation },
+                ));
+            },
+        }
+        const queue_generation = external.tx_queue_generation;
+        const queue_len = external.external_tx.items.len;
+        const queue_bytes = external.external_tx_bytes;
+        const correlation_before = storage.control_correlation;
+        const authority_before = storage.owner_authority;
+        const authority_seal_before = storage.owner_authority_seal;
+
+        const wire = try framing.encodeFrame(
+            std.testing.allocator,
+            .{ .kind = .event, .stream_id = valid_evidence.stream_id },
+            f3b_revoke_payload,
+        );
+        defer std.testing.allocator.free(wire);
+        try std.testing.expectEqual(
+            @as(isize, @intCast(wire.len)),
+            c.send(fixture.peer_fd, wire.ptr, wire.len, 0),
+        );
+        var probe = F2ProductProbe{ .use_posix = true };
+        const ops = probe.rxOps();
+        const result = storage.pumpRxTurn(
+            .{ .readable = true, .writable = true, .now_ns = 12 },
+            &ops,
+            scratch,
+        );
+        try std.testing.expect(result.terminal != null);
+        try std.testing.expect(result.terminal.?.reason == .protocol_error or
+            result.terminal.?.reason == .invariant_failure);
+        try std.testing.expectEqual(queue_generation, external.tx_queue_generation);
+        try std.testing.expectEqual(queue_len, external.external_tx.items.len);
+        try std.testing.expectEqual(queue_bytes, external.external_tx_bytes);
+        try std.testing.expect(std.meta.eql(
+            correlation_before,
+            storage.control_correlation,
+        ));
+        try std.testing.expect(std.meta.eql(authority_before, storage.owner_authority));
+        try std.testing.expect(std.meta.eql(
+            authority_seal_before,
+            storage.owner_authority_seal,
+        ));
+        try std.testing.expect(std.mem.allEqual(
+            u8,
+            &scratch.revoked_commit_graph.bytes,
+            0,
+        ));
+        try std.testing.expect(std.mem.allEqual(
+            u8,
+            &scratch.post_cancellation_receipt.bytes,
+            0,
+        ));
+        try expectF2FinalZero(&storage);
+    }
+}
+
+test "f3b revoke cleanup callback reentry and owner drift restore canonical terminal then quarantine" {
+    inline for (.{
+        AllocatorCallbackProbe.Mode.revoke_cleanup_correlation_reentry,
+        AllocatorCallbackProbe.Mode.revoke_cleanup_authority_drift,
+        AllocatorCallbackProbe.Mode.revoke_rx_cleanup_tx_scratch_drift,
+        AllocatorCallbackProbe.Mode.revoke_rx_cleanup_retiring_drift,
+    }) |mode| {
+        resetCrossOwnerQuarantineForTest();
+        defer resetCrossOwnerQuarantineForTest();
+        var probe = AllocatorCallbackProbe{ .parent = std.testing.allocator };
+        var fixture = try TestClient.initWithAllocator(probe.allocator());
+        defer fixture.deinitPeer();
+        var storage: ExternalPumpStorage = .{};
+        try initActiveF2Storage(&storage, &fixture);
+        defer if (storage.lifecycle != .dead) {
+            _ = teardownForTest(&storage);
+        };
+        probe.storage = &storage;
+        const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+        defer std.testing.allocator.destroy(scratch);
+        scratch.* = .{};
+        try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+        probe.rx_scratch = scratch;
+        try admitF3bProductQueue(&storage, .input_and_control);
+        const wire = try framing.encodeFrame(
+            std.testing.allocator,
+            .{ .kind = .event, .stream_id = valid_evidence.stream_id },
+            f3b_revoke_payload,
+        );
+        defer std.testing.allocator.free(wire);
+        try admitBufferedProductWireForTest(&storage, wire);
+        probe.mode = mode;
+        probe.fired = false;
+        var product_probe = F2ProductProbe{};
+        const ops = product_probe.bufferedOps();
+        const result = storage.pumpBufferedRxForTest(
+            .{ .readable = true, .writable = true, .now_ns = 12 },
+            &ops,
+            scratch,
+        );
+        try std.testing.expect(probe.fired);
+        if (mode == .revoke_cleanup_correlation_reentry) {
+            try std.testing.expectEqual(
+                std.meta.Tag(TxAdmissionResult).busy,
+                probe.nested_tx_tag.?,
+            );
+        }
+        try std.testing.expectEqual(
+            client_pump.TerminalReason.invariant_failure,
+            result.terminal.?.reason,
+        );
+        try std.testing.expect(storage.control_correlation.state == .terminal);
+        try std.testing.expect(controlCorrelationValid(&storage));
+        try std.testing.expectEqual(
+            AttachmentRole.observer,
+            storage.owner_authority.current.role,
+        );
+        try std.testing.expect(ownerAuthorityValid(&storage));
+        try std.testing.expect(crossOwnerQuarantineStatus().latched);
+        const external = switch (storage.owned_client.?.io_mode) {
+            .external => |*state| state,
+            .blocking => return error.TestUnexpectedResult,
+        };
+        try std.testing.expectEqual(@as(usize, 0), external.external_tx.items.len);
+        try expectF2FinalZero(&storage);
+    }
 }
 
 fn checkF2ControlAdmissionAllocationFailure(

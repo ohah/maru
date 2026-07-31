@@ -2611,7 +2611,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             보존한다. boundary test는 pure module의 std-only import와 future `ExternalPumpFacade` identifier의
             mechanics/final-owner allowlist를 tokenizer로 강제한다. Debug/ReleaseFast `test-session-host`,
             `check-boundaries`, 전체 `mise run check`를 통과했다. 이 문단의 artifact 범위는 2b2a에만 해당하며,
-            현재 전체 상태는 2b2a~c2와 2b2c3-c3a1~a2 완료, c3b~f3 계획이다.
+            전체 slice의 최신 완료 상태는 [검증 매트릭스](verification-matrix.md)의 P5c3 행을 단일 출처로 둔다.
 
           - **2b2b — stable in-place storage scaffold:** token이 존재하기 전에
             caller가 `var out: ExternalPumpStorage = .{}`로 만든 **deinit-safe empty slot**의 최종 주소에서
@@ -8998,6 +8998,22 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           completed presence와 exact TX progress를 받아 `cancel_queued | cleanup_completed | poison_close |
           success_candidate`를 allocation-free로 결정한다. **f3b sealed cancellation transaction**은 f1 queue owner와
           f2 correlation owner를 한 prepared graph로 freeze하고 offset-zero cancel/partial-close/final-zero를 고정한다.
+          **구현 완료(f3a~b):** pure total planner는 deadline/invariant/resource/protocol/revoke/EOF 우선순위와
+          `cancel_queued | cleanup_completed | poison_close | success_candidate`를 exhaustive table로 고정했다.
+          제품 revoke 경로는 f1 TX cancellation과 f2 correlation/authority를 final-address prepared graph 하나에
+          봉인하고, offset-zero input/control만 all-or-none 취소하며 partial·retired·`response_wait`는 terminal로
+          닫는다. prepare 뒤 실패는 `tx_abort_pending → tx_reset_pending → rx_abort_pending` cleanup progress를 raw
+          tag+digest로 보존하고 원래 whole-turn lease의 terminal suffix가 완료한 substep을 반복하지 않고 replay한다.
+          raw progress/failure/address는 canonical typed pointer를 만들기 전에 domain·self/storage/lease·digest와 exact
+          binding을 검증한다. 같은 substep이 turn 끝까지 실패하거나 persisted tag가 손상되면 callback-bearing cleanup을
+          반복하지 않고 caller-owned inline proof만 tombstone하고, 실제 TX queue와 RX aggregate/intent owner는 storage의
+          canonical teardown authority에 남긴다. teardown은 이 untrusted retained graph를 임의 free하지 않고 정확히
+          `.quarantined`/storage `.dead`로 닫으며, process quarantine event는 사건당 정확히 1회이고 retained allocation은
+          기존 `max_cross_owner_quarantine_bytes` 상한 안의 deliberate no-free다. actual socketpair의 public
+          `pumpRxTurn`, sticky cleanup failure, callback drift, raw-tag corruption과 allocation identity tracker가 arbitrary
+          replay/free·double free 0을 검증한다. Debug/ReleaseFast `test-session-host-f3b`, 전체
+          `test-session-host`, `check-boundaries`, `mise run check`가 green이어야 이 완료 표식을 유지한다. f3c0,
+          2b2e-integration, f3c~e와 stable adapter는 아직 완료가 아니다.
           **f3c0 control contract substrate**는 shared codec, `ControlExpectation`, opaque final-address
           `PreparedWholeDrainPermit`/`PreparedControlSemanticVerdict` 타입과 private same-lease resync consumer signature를
           추가하되 permit 생성·public take capability는 0으로 둔다. 이 compile/test 가능한 substrate 뒤에

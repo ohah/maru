@@ -528,7 +528,7 @@ fn metadataTagMatches(
 }
 
 pub const AuthorityGeneration = client_external_turn_authority.AuthorityGeneration;
-pub const f3c1_contract_version: u16 = 1;
+pub const f3c1_contract_version: u16 = 2;
 
 pub const PreparedAttachmentAuthority = struct {
     role: AttachmentRole,
@@ -2008,6 +2008,17 @@ const ControlSemanticPreparationResult = enum {
     terminal_prepared,
 };
 
+const ConsumeControlSemanticTerminalResult = enum {
+    consumed_cleaned,
+    cleaned_with_invariant,
+    invalid_precommit,
+};
+const ConsumeControlSemanticTerminalUnderHeldLeaseFn = fn (
+    storage: *ExternalPumpStorage,
+    lease: *const ExternalWholeTurnLease,
+    scratch: *ExternalRxTurnScratch,
+) ConsumeControlSemanticTerminalResult;
+
 const ConsumeResyncAckResult = enum {
     consumed,
     stale,
@@ -2064,6 +2075,40 @@ const FrozenControlResponse = struct {
     },
     payload_seal: ResponsePayloadSeal = ResponsePayloadSeal.empty(),
     lifecycle: FrozenControlResponseLifecycle = .empty,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+const ControlSemanticTerminalBindingLifecycle = enum {
+    empty,
+    prepared,
+    consumed_tombstone,
+};
+
+const PreparedControlSemanticTerminalBinding = struct {
+    saved_self_addr: usize = 0,
+    storage_addr: usize = 0,
+    lease_addr: usize = 0,
+    owner_incarnation: u64 = 0,
+    operation_generation: u64 = 0,
+    scratch_addr: usize = 0,
+    scratch_len: usize = 0,
+    turn_generation: u64 = 0,
+    terminal_addr: usize = 0,
+    terminal_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    completed_owner_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    correlation_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    parser_seal: client_external_mode.ParserAuthoritySeal = .{},
+    drain_evidence_addr: usize = 0,
+    drain_evidence_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    completed_exception_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    authority_generation: AuthorityGeneration = .untracked,
+    authority_seal_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    tx_queue_generation: u64 = 0,
+    response_take_addr: usize = 0,
+    response_take_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    frozen_response_addr: usize = 0,
+    frozen_response_pristine_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    lifecycle: ControlSemanticTerminalBindingLifecycle = .empty,
     digest: external_owner_seal.Digest = [_]u8{0} ** 32,
 };
 
@@ -3051,6 +3096,9 @@ pub const ExternalRxTurnScratch = struct {
     whole_drain_permit: PreparedWholeDrainPermit = .{},
     control_semantic_verdict: PreparedControlSemanticVerdict = .{},
     control_semantic_terminal: PreparedControlSemanticTerminal = .{},
+    control_semantic_terminal_binding: PreparedControlSemanticTerminalBinding = .{},
+    control_terminal_response_take: PreparedControlResponseTake = .{},
+    control_terminal_frozen_response: FrozenControlResponse = .{},
     authority_permit: client_external_turn_authority.PreparedAuthorityPermit = .{},
     authority_cleanup_seed: client_external_turn_authority.FrozenCleanupSeed = .{},
     tx_cancellation: client_external_tx.PreparedTxCancellation = .{},
@@ -3072,7 +3120,13 @@ pub const ExternalRxTurnScratch = struct {
             ) or !std.meta.eql(
             out.control_semantic_terminal,
             PreparedControlSemanticTerminal{},
-        ) or
+        ) or !std.meta.eql(
+            out.control_semantic_terminal_binding,
+            PreparedControlSemanticTerminalBinding{},
+        ) or !std.meta.eql(
+            out.control_terminal_response_take,
+            PreparedControlResponseTake{},
+        ) or !frozenControlResponsePristine(&out.control_terminal_frozen_response) or
             !std.meta.eql(
                 out.authority_permit,
                 client_external_turn_authority.PreparedAuthorityPermit{},
@@ -3113,6 +3167,9 @@ pub const ExternalRxTurnScratch = struct {
         out.whole_drain_permit = .{};
         out.control_semantic_verdict = .{};
         out.control_semantic_terminal = .{};
+        out.control_semantic_terminal_binding = .{};
+        out.control_terminal_response_take = .{};
+        out.control_terminal_frozen_response = .{};
         out.authority_permit = .{};
         out.authority_cleanup_seed = .{};
         out.tx_cancellation = .{};
@@ -4756,6 +4813,40 @@ fn preparedControlResponseTakeDigest(
     return writer.finish();
 }
 
+fn preparedControlSemanticTerminalBindingDigest(
+    binding: *const PreparedControlSemanticTerminalBinding,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARUFTB1");
+    writer.writeUsize(binding.saved_self_addr);
+    writer.writeUsize(binding.storage_addr);
+    writer.writeUsize(binding.lease_addr);
+    writer.writeU64(binding.owner_incarnation);
+    writer.writeU64(binding.operation_generation);
+    writer.writeUsize(binding.scratch_addr);
+    writer.writeUsize(binding.scratch_len);
+    writer.writeU64(binding.turn_generation);
+    writer.writeUsize(binding.terminal_addr);
+    writer.writeBytes(&binding.terminal_digest);
+    writer.writeBytes(&binding.completed_owner_digest);
+    writer.writeBytes(&binding.correlation_digest);
+    writer.writeU64(binding.parser_seal.generation);
+    writer.writeU64(binding.parser_seal.buffer_start_absolute);
+    writer.writeU64(binding.parser_seal.rx_absolute_next);
+    writer.writeBytes(&binding.parser_seal.digest);
+    writer.writeUsize(binding.drain_evidence_addr);
+    writer.writeBytes(&binding.drain_evidence_digest);
+    writer.writeBytes(&binding.completed_exception_digest);
+    writeAuthorityGeneration(&writer, binding.authority_generation);
+    writer.writeBytes(&binding.authority_seal_digest);
+    writer.writeU64(binding.tx_queue_generation);
+    writer.writeUsize(binding.response_take_addr);
+    writer.writeBytes(&binding.response_take_digest);
+    writer.writeUsize(binding.frozen_response_addr);
+    writer.writeBytes(&binding.frozen_response_pristine_digest);
+    writer.writeU8(@intFromEnum(binding.lifecycle));
+    return writer.finish();
+}
+
 fn frozenControlResponseDigest(
     response: *const FrozenControlResponse,
 ) external_owner_seal.Digest {
@@ -4773,6 +4864,73 @@ fn frozenControlResponseDigest(
     response.payload_seal.writeDigest(&writer);
     writer.writeU8(@intFromEnum(response.lifecycle));
     return writer.finish();
+}
+
+fn frozenControlResponsePristine(response: *const FrozenControlResponse) bool {
+    return response.saved_self_addr == 0 and response.storage_addr == 0 and
+        response.owner_incarnation == 0 and response.correlation_generation == 0 and
+        response.target_stream_id == 0 and response.expected_controller_generation == 0 and
+        response.request_id == 0 and response.wire_len == 0 and
+        response.payload.allocation_ptr == null and response.payload.logical_len == 0 and
+        std.meta.eql(response.payload_seal, ResponsePayloadSeal.empty()) and
+        response.lifecycle == .empty and std.mem.allEqual(u8, &response.digest, 0);
+}
+
+fn frozenControlResponsePristineProjectionDigest(
+    response: *const FrozenControlResponse,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARUFDP1");
+    writer.writeUsize(@intFromPtr(response));
+    writer.writeUsize(response.saved_self_addr);
+    writer.writeUsize(response.storage_addr);
+    writer.writeU64(response.owner_incarnation);
+    writer.writeU64(response.correlation_generation);
+    writer.writeU8(@intFromEnum(response.kind));
+    writeControlExpectation(&writer, response.expectation);
+    writer.writeU64(response.target_stream_id);
+    writer.writeU64(response.expected_controller_generation);
+    writer.writeU64(response.request_id);
+    writer.writeUsize(response.wire_len);
+    writer.writeUsize(if (response.payload.allocation_ptr) |ptr| @intFromPtr(ptr) else 0);
+    writer.writeUsize(response.payload.logical_len);
+    writer.writeUsize(@intFromPtr(response.payload.allocator.ptr));
+    writer.writeUsize(@intFromPtr(response.payload.allocator.vtable));
+    response.payload_seal.writeDigest(&writer);
+    writer.writeU8(@intFromEnum(response.lifecycle));
+    writer.writeBytes(&response.digest);
+    return writer.finish();
+}
+
+fn terminalBindingDestinationRangesCurrent(scratch: *const ExternalRxTurnScratch) bool {
+    const scratch_addr = @intFromPtr(scratch);
+    const destinations = [_]struct { addr: usize, len: usize }{
+        .{ .addr = @intFromPtr(&scratch.control_semantic_terminal), .len = @sizeOf(PreparedControlSemanticTerminal) },
+        .{ .addr = @intFromPtr(&scratch.control_semantic_terminal_binding), .len = @sizeOf(PreparedControlSemanticTerminalBinding) },
+        .{ .addr = @intFromPtr(&scratch.control_terminal_response_take), .len = @sizeOf(PreparedControlResponseTake) },
+        .{ .addr = @intFromPtr(&scratch.control_terminal_frozen_response), .len = @sizeOf(FrozenControlResponse) },
+    };
+    for (destinations, 0..) |destination, index| {
+        if (!rangeContains(
+            scratch_addr,
+            @sizeOf(ExternalRxTurnScratch),
+            destination.addr,
+            destination.len,
+        )) return false;
+        for (destinations[index + 1 ..]) |other| {
+            if (rangesOverlap(destination.addr, destination.len, other.addr, other.len))
+                return false;
+        }
+    }
+    return true;
+}
+
+fn controlRequestFrameMissing(
+    external: *const client_external_mode.State,
+    request_id: u64,
+    wire_len: usize,
+) bool {
+    const observe = client_external_tx.requestFrameProgress;
+    return observe(external, request_id, wire_len) == .missing;
 }
 
 fn intentScratchReservationDigest(
@@ -8314,12 +8472,11 @@ pub const ExternalPumpStorage = struct {
                             parser_seal,
                             tx_generation,
                         );
+                        if (!current) return .not_ready;
                         return self.publishControlSemanticTerminalPreparation(
                             lease,
                             scratch,
-                            if (!current)
-                                .invariant_failure
-                            else switch (err) {
+                            switch (err) {
                                 error.OutOfMemory => .resource_exhausted,
                                 else => .protocol_error,
                             },
@@ -8336,10 +8493,11 @@ pub const ExternalPumpStorage = struct {
                                 parser_seal,
                                 tx_generation,
                             );
+                            if (!current) return .not_ready;
                             return self.publishControlSemanticTerminalPreparation(
                                 lease,
                                 scratch,
-                                if (current) .protocol_error else .invariant_failure,
+                                .protocol_error,
                             );
                         },
                         .applied => break :decode .{ .resize = reply },
@@ -8360,12 +8518,11 @@ pub const ExternalPumpStorage = struct {
                             parser_seal,
                             tx_generation,
                         );
+                        if (!current) return .not_ready;
                         return self.publishControlSemanticTerminalPreparation(
                             lease,
                             scratch,
-                            if (!current)
-                                .invariant_failure
-                            else switch (err) {
+                            switch (err) {
                                 error.OutOfMemory => .resource_exhausted,
                                 else => .protocol_error,
                             },
@@ -8384,11 +8541,7 @@ pub const ExternalPumpStorage = struct {
             correlation_digest,
             parser_seal,
             tx_generation,
-        )) return self.publishControlSemanticTerminalPreparation(
-            lease,
-            scratch,
-            .invariant_failure,
-        );
+        )) return .not_ready;
         const completed = switch (self.completed_control) {
             .completed => |*value| value,
             .none, .terminal => return .not_ready,
@@ -8599,6 +8752,199 @@ pub const ExternalPumpStorage = struct {
             std.meta.eql(terminal.completed_payload_seal, completed.seal);
     }
 
+    fn prepareControlSemanticTerminalBindingUnderHeldLease(
+        self: *ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        scratch: *ExternalRxTurnScratch,
+    ) bool {
+        const terminal = &scratch.control_semantic_terminal;
+        const binding = &scratch.control_semantic_terminal_binding;
+        const take = &scratch.control_terminal_response_take;
+        const frozen = &scratch.control_terminal_frozen_response;
+        if (!self.preparedControlSemanticTerminalCurrent(lease, scratch) or
+            !std.meta.eql(binding.*, PreparedControlSemanticTerminalBinding{}) or
+            !std.meta.eql(take.*, PreparedControlResponseTake{}) or
+            !frozenControlResponsePristine(frozen))
+            return false;
+        const completed = switch (self.completed_control) {
+            .completed => |*value| value,
+            .none, .terminal => return false,
+        };
+        const client = if (self.owned_client) |*owned| owned else return false;
+        const external = switch (client.io_mode) {
+            .external => |*state| state,
+            .blocking => return false,
+        };
+        const authority = switch (self.owner_authority) {
+            .current => |value| value,
+            .empty => return false,
+        };
+        if (!self.finishedRxDrainEvidenceCurrentUnderHeldLease(
+            lease,
+            scratch,
+            .completed_control,
+        ) or !self.semanticAuthorityMatchesCompleted(completed) or
+            !client_external_mode.parserSealValid(external, &client.parser) or
+            controlRequestFrameMissing(
+                external,
+                completed.request_id,
+                completed.control_wire_len,
+            ) == false)
+            return false;
+        if (!self.prepareControlResponseTakeUnderHeldLease(lease, take))
+            return false;
+        binding.* = .{
+            .saved_self_addr = @intFromPtr(binding),
+            .storage_addr = @intFromPtr(self),
+            .lease_addr = @intFromPtr(lease),
+            .owner_incarnation = self.owner_incarnation,
+            .operation_generation = self.operation_generation,
+            .scratch_addr = @intFromPtr(scratch),
+            .scratch_len = @sizeOf(ExternalRxTurnScratch),
+            .turn_generation = scratch.turn_generation,
+            .terminal_addr = @intFromPtr(terminal),
+            .terminal_digest = terminal.digest,
+            .completed_owner_digest = completed.owner_digest,
+            .correlation_digest = self.control_correlation.digest,
+            .parser_seal = external.rx_provenance.parser_seal,
+            .drain_evidence_addr = @intFromPtr(&scratch.drain_evidence),
+            .drain_evidence_digest = scratch.drain_evidence.digest,
+            .completed_exception_digest = scratch.drain_evidence.completed_exception_digest,
+            .authority_generation = authority.generation,
+            .authority_seal_digest = self.owner_authority_seal.digest,
+            .tx_queue_generation = external.tx_queue_generation,
+            .response_take_addr = @intFromPtr(take),
+            .response_take_digest = take.digest,
+            .frozen_response_addr = @intFromPtr(frozen),
+            .frozen_response_pristine_digest = frozenControlResponsePristineProjectionDigest(frozen),
+            .lifecycle = .prepared,
+        };
+        binding.digest = preparedControlSemanticTerminalBindingDigest(binding);
+        return true;
+    }
+
+    fn preparedControlSemanticTerminalBindingCurrent(
+        self: *ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        scratch: *ExternalRxTurnScratch,
+    ) bool {
+        const terminal = &scratch.control_semantic_terminal;
+        const binding = &scratch.control_semantic_terminal_binding;
+        const take = &scratch.control_terminal_response_take;
+        const frozen = &scratch.control_terminal_frozen_response;
+        const completed = switch (self.completed_control) {
+            .completed => |*value| value,
+            .none, .terminal => return false,
+        };
+        const client = if (self.owned_client) |*owned| owned else return false;
+        const external = switch (client.io_mode) {
+            .external => |*state| state,
+            .blocking => return false,
+        };
+        const authority = switch (self.owner_authority) {
+            .current => |value| value,
+            .empty => return false,
+        };
+        return self.preparedControlSemanticTerminalCurrent(lease, scratch) and
+            binding.saved_self_addr == @intFromPtr(binding) and
+            binding.storage_addr == @intFromPtr(self) and
+            binding.lease_addr == @intFromPtr(lease) and
+            binding.owner_incarnation == self.owner_incarnation and
+            binding.operation_generation == self.operation_generation and
+            binding.scratch_addr == @intFromPtr(scratch) and
+            binding.scratch_len == @sizeOf(ExternalRxTurnScratch) and
+            terminalBindingDestinationRangesCurrent(scratch) and
+            binding.turn_generation == scratch.turn_generation and
+            binding.terminal_addr == @intFromPtr(terminal) and
+            std.mem.eql(u8, &binding.terminal_digest, &terminal.digest) and
+            std.mem.eql(u8, &binding.completed_owner_digest, &completed.owner_digest) and
+            std.mem.eql(u8, &binding.correlation_digest, &self.control_correlation.digest) and
+            std.meta.eql(binding.parser_seal, external.rx_provenance.parser_seal) and
+            client_external_mode.parserSealValid(external, &client.parser) and
+            binding.drain_evidence_addr == @intFromPtr(&scratch.drain_evidence) and
+            std.mem.eql(u8, &binding.drain_evidence_digest, &scratch.drain_evidence.digest) and
+            std.mem.eql(
+                u8,
+                &binding.completed_exception_digest,
+                &scratch.drain_evidence.completed_exception_digest,
+            ) and self.finishedRxDrainEvidenceCurrentUnderHeldLease(
+            lease,
+            scratch,
+            .completed_control,
+        ) and std.meta.eql(binding.authority_generation, authority.generation) and
+            std.mem.eql(u8, &binding.authority_seal_digest, &self.owner_authority_seal.digest) and
+            binding.tx_queue_generation == external.tx_queue_generation and
+            self.semanticAuthorityMatchesCompleted(completed) and
+            controlRequestFrameMissing(
+                external,
+                completed.request_id,
+                completed.control_wire_len,
+            ) and
+            binding.response_take_addr == @intFromPtr(take) and
+            std.mem.eql(u8, &binding.response_take_digest, &take.digest) and
+            binding.frozen_response_addr == @intFromPtr(frozen) and
+            std.mem.eql(
+                u8,
+                &binding.frozen_response_pristine_digest,
+                &frozenControlResponsePristineProjectionDigest(frozen),
+            ) and
+            binding.lifecycle == .prepared and
+            std.mem.eql(
+                u8,
+                &binding.digest,
+                &preparedControlSemanticTerminalBindingDigest(binding),
+            ) and self.validateControlResponseTakeUnderHeldLease(
+            lease,
+            take,
+            frozen,
+        );
+    }
+
+    fn consumeControlSemanticTerminalUnderHeldLease(
+        self: *ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        scratch: *ExternalRxTurnScratch,
+    ) ConsumeControlSemanticTerminalResult {
+        if (!self.preparedControlSemanticTerminalBindingCurrent(
+            lease,
+            scratch,
+        ))
+            return .invalid_precommit;
+        const terminal = &scratch.control_semantic_terminal;
+        const binding = &scratch.control_semantic_terminal_binding;
+        const take = &scratch.control_terminal_response_take;
+        const frozen = &scratch.control_terminal_frozen_response;
+        const reason = terminal.reason;
+
+        self.publishControlResponseTakeUnchecked(take, frozen);
+        if (self.control_correlation.generation != std.math.maxInt(u64))
+            self.control_correlation.generation += 1;
+        self.control_correlation.state = .terminal;
+        self.control_correlation.digest = controlCorrelationDigest(&self.control_correlation);
+        self.semantic_state = .{ .terminal = .{
+            .reason = reason,
+            .fd_disposition = .owner_cleanup,
+        } };
+        terminal.lifecycle = .consumed_tombstone;
+        terminal.digest = preparedControlSemanticTerminalDigest(terminal);
+        binding.lifecycle = .consumed_tombstone;
+        binding.digest = preparedControlSemanticTerminalBindingDigest(binding);
+
+        const canonical = self.captureControlSemanticTerminalCleanupSnapshot(
+            scratch,
+            frozen,
+        );
+        finishControlResponsePayloadCleanupUnchecked(frozen);
+        if (self.detectAndRestoreControlSemanticTerminalCleanupDrift(
+            scratch,
+            canonical,
+        )) {
+            latchCrossOwnerQuarantine();
+            return .cleaned_with_invariant;
+        }
+        return .consumed_cleaned;
+    }
+
     fn prepareControlResponseTake(
         self: *ExternalPumpStorage,
         out: *PreparedControlResponseTake,
@@ -8645,8 +8991,7 @@ pub const ExternalPumpStorage = struct {
     ) bool {
         if (!self.validateWholeTurnLease(lease) or
             !std.meta.eql(out.*, PreparedControlResponseTake{}) or
-            !self.completedControlValid() or
-            self.control_correlation.generation == std.math.maxInt(u64))
+            !self.completedControlValid())
             return false;
         const completed = switch (self.completed_control) {
             .completed => |*value| value,
@@ -8792,9 +9137,7 @@ pub const ExternalPumpStorage = struct {
             response.request_id != completed.request_id or
             response.wire_len != completed.wire_len)
             return .invalid;
-        response.payload.deinit();
-        response.lifecycle = .cleaned_tombstone;
-        response.digest = frozenControlResponseDigest(response);
+        finishControlResponsePayloadCleanupUnchecked(response);
         self.control_correlation.generation += 1;
         self.control_correlation.state = .terminal;
         self.control_correlation.digest =
@@ -8806,7 +9149,7 @@ pub const ExternalPumpStorage = struct {
         return .rejected_terminal;
     }
 
-    fn finishRevokedControlResponseCleanupUnchecked(
+    fn finishControlResponsePayloadCleanupUnchecked(
         response: *FrozenControlResponse,
     ) void {
         var payload = response.payload;
@@ -10175,7 +10518,13 @@ pub const ExternalPumpStorage = struct {
         scratch.post_cancellation_receipt = .{};
     }
 
-    const RevokedPublicationSnapshot = struct {
+    const ControlCleanupPublicationSnapshot = struct {
+        lifecycle: StorageLifecycle,
+        saved_self_addr: usize,
+        owner_incarnation: u64,
+        owner_incarnation_seal: OwnerIncarnationSeal,
+        operation_generation: u64,
+        operation_reentry_latched: bool,
         correlation: ControlCorrelationOwner,
         authority: OwnerAuthorityState,
         authority_seal: OwnerAuthoritySeal,
@@ -10183,10 +10532,16 @@ pub const ExternalPumpStorage = struct {
         semantic: client_pump.ExternalPumpState,
     };
 
-    fn captureRevokedPublicationSnapshot(
+    fn captureControlCleanupPublicationSnapshot(
         self: *const ExternalPumpStorage,
-    ) RevokedPublicationSnapshot {
+    ) ControlCleanupPublicationSnapshot {
         return .{
+            .lifecycle = self.lifecycle,
+            .saved_self_addr = self.saved_self_addr,
+            .owner_incarnation = self.owner_incarnation,
+            .owner_incarnation_seal = self.owner_incarnation_seal,
+            .operation_generation = self.operation_generation,
+            .operation_reentry_latched = self.operation_reentry_latched,
             .correlation = self.control_correlation,
             .authority = self.owner_authority,
             .authority_seal = self.owner_authority_seal,
@@ -10195,18 +10550,30 @@ pub const ExternalPumpStorage = struct {
         };
     }
 
-    // MARU_REVOKE_CANONICAL_WRITER_BEGIN
-    fn detectAndRestoreRevokedPublicationDrift(
+    // MARU_CLEANUP_CANONICAL_WRITER_BEGIN
+    fn detectAndRestoreControlCleanupPublicationDrift(
         self: *ExternalPumpStorage,
-        canonical: RevokedPublicationSnapshot,
+        canonical: ControlCleanupPublicationSnapshot,
     ) bool {
-        const drifted = !std.meta.eql(self.control_correlation, canonical.correlation) or
+        const drifted = self.lifecycle != canonical.lifecycle or
+            self.saved_self_addr != canonical.saved_self_addr or
+            self.owner_incarnation != canonical.owner_incarnation or
+            !std.meta.eql(self.owner_incarnation_seal, canonical.owner_incarnation_seal) or
+            self.operation_generation != canonical.operation_generation or
+            self.operation_reentry_latched != canonical.operation_reentry_latched or
+            !std.meta.eql(self.control_correlation, canonical.correlation) or
             !std.meta.eql(self.owner_authority, canonical.authority) or
             !std.meta.eql(self.owner_authority_seal, canonical.authority_seal) or
             self.completed_control != .none or
             self.completed_control_generation != canonical.completed_generation or
             !std.meta.eql(self.semantic_state, canonical.semantic);
         if (!drifted) return false;
+        self.lifecycle = canonical.lifecycle;
+        self.saved_self_addr = canonical.saved_self_addr;
+        self.owner_incarnation = canonical.owner_incarnation;
+        self.owner_incarnation_seal = canonical.owner_incarnation_seal;
+        self.operation_generation = canonical.operation_generation;
+        self.operation_reentry_latched = canonical.operation_reentry_latched;
         self.control_correlation = canonical.correlation;
         self.owner_authority = canonical.authority;
         self.owner_authority_seal = canonical.authority_seal;
@@ -10215,7 +10582,152 @@ pub const ExternalPumpStorage = struct {
         self.semantic_state = canonical.semantic;
         return true;
     }
-    // MARU_REVOKE_CANONICAL_WRITER_END
+
+    const ControlSemanticTerminalCleanupSnapshot = struct {
+        storage: ControlCleanupPublicationSnapshot,
+        scratch_saved_self_addr: usize,
+        scratch_lifecycle: ExternalRxTurnScratchLifecycle,
+        turn_generation: u64,
+        canonical_drain: RxDrainEvidence,
+        terminal: PreparedControlSemanticTerminal,
+        binding: PreparedControlSemanticTerminalBinding,
+        take: PreparedControlResponseTake,
+        frozen: FrozenControlResponse,
+        parser_seal: client_external_mode.ParserAuthoritySeal,
+        tx_queue_generation: u64,
+    };
+
+    fn captureControlSemanticTerminalCleanupSnapshot(
+        self: *const ExternalPumpStorage,
+        scratch: *const ExternalRxTurnScratch,
+        frozen: *const FrozenControlResponse,
+    ) ControlSemanticTerminalCleanupSnapshot {
+        const client = &self.owned_client.?;
+        const external = switch (client.io_mode) {
+            .external => |*state| state,
+            .blocking => unreachable,
+        };
+        var expected_frozen = frozen.*;
+        expected_frozen.payload = external_inbox_ledger.OwnedPayload.empty(
+            frozen.payload.allocator,
+        );
+        expected_frozen.lifecycle = .cleaned_tombstone;
+        expected_frozen.digest = frozenControlResponseDigest(&expected_frozen);
+        return .{
+            .storage = self.captureControlCleanupPublicationSnapshot(),
+            .scratch_saved_self_addr = scratch.saved_self_addr,
+            .scratch_lifecycle = scratch.lifecycle,
+            .turn_generation = scratch.turn_generation,
+            .canonical_drain = scratch.drain_evidence,
+            .terminal = scratch.control_semantic_terminal,
+            .binding = scratch.control_semantic_terminal_binding,
+            .take = scratch.control_terminal_response_take,
+            .frozen = expected_frozen,
+            .parser_seal = external.rx_provenance.parser_seal,
+            .tx_queue_generation = external.tx_queue_generation,
+        };
+    }
+
+    fn frozenControlResponseMatchesExpectedCleaned(
+        actual: *const FrozenControlResponse,
+        expected: *const FrozenControlResponse,
+    ) bool {
+        return actual.saved_self_addr == expected.saved_self_addr and
+            actual.storage_addr == expected.storage_addr and
+            actual.owner_incarnation == expected.owner_incarnation and
+            actual.correlation_generation == expected.correlation_generation and
+            actual.kind == expected.kind and
+            std.meta.eql(actual.expectation, expected.expectation) and
+            actual.target_stream_id == expected.target_stream_id and
+            actual.expected_controller_generation == expected.expected_controller_generation and
+            actual.request_id == expected.request_id and
+            actual.wire_len == expected.wire_len and
+            actual.payload.allocation_ptr == null and actual.payload.logical_len == 0 and
+            actual.payload.allocator.ptr == expected.payload.allocator.ptr and
+            actual.payload.allocator.vtable == expected.payload.allocator.vtable and
+            std.meta.eql(actual.payload_seal, expected.payload_seal) and
+            actual.lifecycle == .cleaned_tombstone and
+            std.mem.eql(u8, &actual.digest, &expected.digest);
+    }
+
+    fn detectAndRestoreControlSemanticTerminalCleanupDrift(
+        self: *ExternalPumpStorage,
+        scratch: *ExternalRxTurnScratch,
+        canonical: ControlSemanticTerminalCleanupSnapshot,
+    ) bool {
+        var drifted = self.detectAndRestoreControlCleanupPublicationDrift(
+            canonical.storage,
+        );
+        const client = if (self.owned_client) |*owned| owned else {
+            drifted = true;
+            scratch.saved_self_addr = canonical.scratch_saved_self_addr;
+            scratch.lifecycle = canonical.scratch_lifecycle;
+            scratch.turn_generation = canonical.turn_generation;
+            restoreTerminalCleanupDrainEvidenceUnchecked(
+                &scratch.drain_evidence,
+                canonical.canonical_drain,
+            );
+            scratch.control_semantic_terminal = canonical.terminal;
+            scratch.control_semantic_terminal_binding = canonical.binding;
+            scratch.control_terminal_response_take = canonical.take;
+            scratch.control_terminal_frozen_response = canonical.frozen;
+            return drifted;
+        };
+        const external_current = switch (client.io_mode) {
+            .external => |*state| blk: {
+                const current = std.meta.eql(
+                    state.rx_provenance.parser_seal,
+                    canonical.parser_seal,
+                ) and client_external_mode.parserSealValid(state, &client.parser) and
+                    state.tx_queue_generation == canonical.tx_queue_generation;
+                if (!current) {
+                    state.rx_provenance.parser_seal = canonical.parser_seal;
+                    state.tx_queue_generation = canonical.tx_queue_generation;
+                }
+                break :blk current;
+            },
+            .blocking => false,
+        };
+        if (!external_current or
+            scratch.saved_self_addr != canonical.scratch_saved_self_addr or
+            scratch.lifecycle != canonical.scratch_lifecycle or
+            scratch.turn_generation != canonical.turn_generation or
+            !std.meta.eql(scratch.drain_evidence, canonical.canonical_drain) or
+            !std.meta.eql(scratch.control_semantic_terminal, canonical.terminal) or
+            !std.meta.eql(scratch.control_semantic_terminal_binding, canonical.binding) or
+            !std.meta.eql(scratch.control_terminal_response_take, canonical.take) or
+            !frozenControlResponseMatchesExpectedCleaned(
+                &scratch.control_terminal_frozen_response,
+                &canonical.frozen,
+            ))
+            drifted = true;
+        if (drifted) {
+            scratch.saved_self_addr = canonical.scratch_saved_self_addr;
+            scratch.lifecycle = canonical.scratch_lifecycle;
+            scratch.turn_generation = canonical.turn_generation;
+            restoreTerminalCleanupDrainEvidenceUnchecked(
+                &scratch.drain_evidence,
+                canonical.canonical_drain,
+            );
+            scratch.control_semantic_terminal = canonical.terminal;
+            scratch.control_semantic_terminal_binding = canonical.binding;
+            scratch.control_terminal_response_take = canonical.take;
+            scratch.control_terminal_frozen_response = canonical.frozen;
+        }
+        return drifted;
+    }
+
+    /// Cleanup callbacks run after the terminal publication point, so an allocator can corrupt the
+    /// already-consumed proof even though normal lifecycle reset is no longer legal. This private
+    /// recovery writer restores only the previously authenticated byte-for-byte snapshot and is
+    /// followed by process-wide quarantine; it cannot manufacture a new drain capability.
+    fn restoreTerminalCleanupDrainEvidenceUnchecked(
+        destination: *RxDrainEvidence,
+        canonical: RxDrainEvidence,
+    ) void {
+        destination.* = canonical;
+    }
+    // MARU_CLEANUP_CANONICAL_WRITER_END
 
     // MARU_REVOKE_CALLBACK_TAIL_BEGIN
     fn finishRevokedRxAggregateCallbacks(
@@ -10231,7 +10743,7 @@ pub const ExternalPumpStorage = struct {
         published: *const PublishedRxAggregateCommit,
     ) RevokeCommitResult {
         defer graph_owner.* = .{};
-        const canonical = self.captureRevokedPublicationSnapshot();
+        const canonical = self.captureControlCleanupPublicationSnapshot();
         const tx_cleanup = client_external_tx.finishCancellationCleanup(
             validateTxOwner,
             @ptrCast(self),
@@ -10260,8 +10772,8 @@ pub const ExternalPumpStorage = struct {
                 external,
             );
         if (cleanup_completed)
-            finishRevokedControlResponseCleanupUnchecked(frozen_response);
-        var publication_drift = self.detectAndRestoreRevokedPublicationDrift(canonical);
+            finishControlResponsePayloadCleanupUnchecked(frozen_response);
+        var publication_drift = self.detectAndRestoreControlCleanupPublicationDrift(canonical);
         const rx_result = finishPublishedRxAggregateCommit(aggregate, event_cleanup, published);
         const tx_post_callback = if (tx_receipt_captured)
             client_external_tx.consumePostCancellationReceipt(
@@ -10273,7 +10785,7 @@ pub const ExternalPumpStorage = struct {
             )
         else
             .invalid;
-        if (self.detectAndRestoreRevokedPublicationDrift(canonical))
+        if (self.detectAndRestoreControlCleanupPublicationDrift(canonical))
             publication_drift = true;
         scratch.post_cancellation_receipt = .{};
         if (tx_post_callback != .valid) publication_drift = true;
@@ -14976,7 +15488,13 @@ pub const ExternalPumpStorage = struct {
         ) and std.meta.eql(
             scratch.control_semantic_terminal,
             PreparedControlSemanticTerminal{},
-        );
+        ) and std.meta.eql(
+            scratch.control_semantic_terminal_binding,
+            PreparedControlSemanticTerminalBinding{},
+        ) and std.meta.eql(
+            scratch.control_terminal_response_take,
+            PreparedControlResponseTake{},
+        ) and frozenControlResponsePristine(&scratch.control_terminal_frozen_response);
     }
 
     /// Rebuilds the permit projection from live owners while the whole-turn lease excludes every
@@ -19694,12 +20212,19 @@ const AllocatorCallbackProbe = struct {
         revoke_rx_cleanup_tx_scratch_drift,
         revoke_rx_cleanup_retiring_drift,
         revoke_response_cleanup_owner_drift,
+        terminal_response_cleanup_owner_drift,
+        terminal_response_cleanup_scratch_drift,
+        terminal_response_cleanup_external_drift,
+        terminal_response_cleanup_consumer_reentry,
+        terminal_decode_completed_reseal,
     };
 
     parent: std.mem.Allocator,
     mode: Mode = .idle,
     fired: bool = false,
     callback_count: usize = 0,
+    free_count: usize = 0,
+    terminal_publication_observed_at_free: bool = false,
     storage: ?*ExternalPumpStorage = null,
     cleanup_scratch: ?*ExternalPumpCleanupScratch = null,
     source: ?*client_mod.Client = null,
@@ -19725,6 +20250,9 @@ const AllocatorCallbackProbe = struct {
     nested_tx_operation_acquired: ?bool = null,
     stale_tx_state: ?*client_external_mode.State = null,
     rx_scratch: ?*ExternalRxTurnScratch = null,
+    terminal_lease: ?*const ExternalWholeTurnLease = null,
+    terminal_consume_fn: ?*const ConsumeControlSemanticTerminalUnderHeldLeaseFn = null,
+    nested_terminal_consume: ?ConsumeControlSemanticTerminalResult = null,
 
     fn allocator(self: *AllocatorCallbackProbe) std.mem.Allocator {
         return .{ .ptr = self, .vtable = &.{
@@ -19849,6 +20377,13 @@ const AllocatorCallbackProbe = struct {
                 .blocking => return null,
             };
             state.tx_queue_generation += 1;
+        } else if (self.mode == .terminal_decode_completed_reseal and
+            !self.fired and self.storage.?.completed_control == .completed)
+        {
+            self.fired = true;
+            const completed = &self.storage.?.completed_control.completed;
+            completed.source_start_absolute += 1;
+            completed.owner_digest = completedControlDigest(self.storage.?, completed);
         }
         return self.parent.vtable.alloc(
             self.parent.ptr,
@@ -19902,6 +20437,7 @@ const AllocatorCallbackProbe = struct {
     ) void {
         const self: *AllocatorCallbackProbe = @ptrCast(@alignCast(context));
         self.callback_count += 1;
+        self.free_count += 1;
         if (self.mode == .prepare_cleanup_teardown and
             self.fired and self.nested_teardown == null and
             self.storage.?.lifecycle == .adoption_preparing)
@@ -20004,6 +20540,64 @@ const AllocatorCallbackProbe = struct {
                 .reason = .eof,
                 .fd_disposition = .owner_cleanup,
             } };
+        } else if (!self.fired and
+            (self.mode == .terminal_response_cleanup_owner_drift or
+                self.mode == .terminal_response_cleanup_scratch_drift or
+                self.mode == .terminal_response_cleanup_external_drift or
+                self.mode == .terminal_response_cleanup_consumer_reentry) and
+            self.storage.?.lifecycle == .live and
+            self.storage.?.completed_control == .none)
+        {
+            self.fired = true;
+            const semantic_terminal = switch (self.storage.?.semantic_state) {
+                .terminal => true,
+                else => false,
+            };
+            self.terminal_publication_observed_at_free =
+                self.storage.?.completed_control == .none and
+                self.storage.?.control_correlation.state == .terminal and
+                semantic_terminal and
+                self.rx_scratch.?.control_semantic_terminal.lifecycle == .consumed_tombstone and
+                self.rx_scratch.?.control_semantic_terminal_binding.lifecycle == .consumed_tombstone and
+                self.rx_scratch.?.control_terminal_response_take.lifecycle == .consumed_tombstone and
+                self.rx_scratch.?.control_terminal_frozen_response.lifecycle == .cleaned_tombstone and
+                self.rx_scratch.?.control_terminal_frozen_response.payload.allocation_ptr == null and
+                self.rx_scratch.?.control_terminal_frozen_response.payload.logical_len == 0;
+            switch (self.mode) {
+                .terminal_response_cleanup_owner_drift => {
+                    self.storage.?.completed_control = .terminal;
+                    self.storage.?.completed_control_generation +%= 1;
+                    self.storage.?.control_correlation = .{};
+                    self.storage.?.semantic_state = .{ .terminal = .{
+                        .reason = .eof,
+                        .fd_disposition = .owner_cleanup,
+                    } };
+                },
+                .terminal_response_cleanup_scratch_drift => {
+                    self.rx_scratch.?.control_semantic_terminal.lifecycle = .prepared;
+                    self.rx_scratch.?.control_semantic_terminal_binding.lifecycle = .prepared;
+                    self.rx_scratch.?.control_terminal_response_take.lifecycle = .prepared;
+                    self.rx_scratch.?.control_terminal_frozen_response.lifecycle = .owned;
+                    self.rx_scratch.?.control_terminal_frozen_response.payload.logical_len = 1;
+                    self.rx_scratch.?.drain_evidence.digest[0] ^= 1;
+                },
+                .terminal_response_cleanup_external_drift => {
+                    const state = switch (self.storage.?.owned_client.?.io_mode) {
+                        .external => |*external| external,
+                        .blocking => unreachable,
+                    };
+                    state.rx_provenance.parser_seal.digest[0] ^= 1;
+                    state.tx_queue_generation +%= 1;
+                },
+                .terminal_response_cleanup_consumer_reentry => {
+                    self.nested_terminal_consume = self.terminal_consume_fn.?(
+                        self.storage.?,
+                        self.terminal_lease.?,
+                        self.rx_scratch.?,
+                    );
+                },
+                else => unreachable,
+            }
         } else if (!self.fired and self.mode == .commit_cleanup_reentry and
             self.storage.?.lifecycle == .tearing_down)
         {
@@ -22758,6 +23352,7 @@ test "f3c0 f3c1 typed control response publishes completed-aware drain evidence"
 const F3c1FailAllocator = struct {
     parent: std.mem.Allocator,
     fail: bool = false,
+    free_count: usize = 0,
 
     fn allocator(self: *@This()) std.mem.Allocator {
         return .{ .ptr = self, .vtable = &.{
@@ -22788,6 +23383,7 @@ const F3c1FailAllocator = struct {
 
     fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
         const self: *@This() = @ptrCast(@alignCast(ctx));
+        self.free_count += 1;
         self.parent.vtable.free(self.parent.ptr, memory, alignment, ret_addr);
     }
 };
@@ -22798,6 +23394,8 @@ const F3c1PolicyBlock = enum {
     read_budget,
     work_budget,
     parser_incomplete,
+    correlation_max,
+    decode_completed_reseal,
 };
 
 fn prepareF3c1ActualResponse(
@@ -22838,6 +23436,10 @@ fn prepareF3c1ActualResponse(
     try std.testing.expect(sent.terminal == null);
     var request_wire: [protocol.max_control_json + protocol.header_size]u8 = undefined;
     try std.testing.expect(c.recv(fixture.peer_fd, &request_wire, request_wire.len, 0) > 0);
+    if (policy_block == .correlation_max) {
+        storage.control_correlation.generation = std.math.maxInt(u64) - 1;
+        storage.control_correlation.digest = controlCorrelationDigest(&storage.control_correlation);
+    }
     const response_wire = try framing.encodeFrame(
         std.testing.allocator,
         .{ .kind = .response, .request_id = request_id },
@@ -22890,6 +23492,7 @@ fn prepareF3c1ActualResponse(
         .read_budget => summary.policy.rx_read_budget_exhausted = true,
         .work_budget => summary.policy.work_budget_exhausted = true,
         .parser_incomplete => summary.policy.parser = .incomplete,
+        .correlation_max, .decode_completed_reseal => {},
     }
     const completed_before = storage.completed_control;
     const correlation_before = storage.control_correlation;
@@ -22899,9 +23502,11 @@ fn prepareF3c1ActualResponse(
     const terminal_before = scratch.control_semantic_terminal;
     if (fail_before_decode) |flag| flag.* = true;
     const result = storage.prepareCompletedControlSemanticUnderHeldLease(lease, scratch, summary);
-    try std.testing.expect(std.meta.eql(completed_before, storage.completed_control));
-    try std.testing.expect(std.meta.eql(correlation_before, storage.control_correlation));
-    try std.testing.expect(std.meta.eql(semantic_before, storage.semantic_state));
+    if (policy_block != .decode_completed_reseal) {
+        try std.testing.expect(std.meta.eql(completed_before, storage.completed_control));
+        try std.testing.expect(std.meta.eql(correlation_before, storage.control_correlation));
+        try std.testing.expect(std.meta.eql(semantic_before, storage.semantic_state));
+    }
     if (result == .not_ready) {
         try std.testing.expect(std.meta.eql(permit_before, scratch.whole_drain_permit));
         try std.testing.expect(std.meta.eql(verdict_before, scratch.control_semantic_verdict));
@@ -23149,6 +23754,493 @@ test "f3c1 exhausted policy or incomplete parser cannot mint preparation" {
                 null,
             ),
         );
+        try std.testing.expectEqual(WholeTurnReleaseResult.released, storage.releaseWholeTurnLease(&lease));
+    }
+}
+
+test "f3c1 coherent completed reseal during decode cannot mint terminal authority" {
+    var probe = AllocatorCallbackProbe{ .parent = std.testing.allocator };
+    var fixture = try TestClient.initWithAllocator(probe.allocator());
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    probe.storage = &storage;
+    probe.mode = .terminal_decode_completed_reseal;
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    defer if (storage.lifecycle != .dead) {
+        _ = teardownForTest(&storage);
+    };
+    var lease: ExternalWholeTurnLease = .{};
+    try std.testing.expectEqual(
+        ControlSemanticPreparationResult.not_ready,
+        try prepareF3c1ActualResponse(
+            &storage,
+            &fixture,
+            scratch,
+            &lease,
+            .{ .resize = .{
+                .stream_id = valid_evidence.stream_id,
+                .cols = 80,
+                .rows = 24,
+                .client_sequence = 1,
+            } },
+            "{\"result\":{\"cols\":80,\"rows\":24,\"client_sequence\":1,\"resize_generation\":2,\"changed\":true}}",
+            .decode_completed_reseal,
+            null,
+        ),
+    );
+    try std.testing.expect(probe.fired);
+    try std.testing.expect(storage.completed_control == .completed);
+    try std.testing.expect(storage.completedControlValid());
+    try std.testing.expect(storage.completed_control.completed.source_start_absolute != 0);
+    try std.testing.expect(std.meta.eql(
+        scratch.control_semantic_terminal,
+        PreparedControlSemanticTerminal{},
+    ));
+    try std.testing.expect(std.meta.eql(
+        scratch.control_semantic_terminal_binding,
+        PreparedControlSemanticTerminalBinding{},
+    ));
+    try std.testing.expect(std.meta.eql(
+        scratch.control_terminal_response_take,
+        PreparedControlResponseTake{},
+    ));
+    try std.testing.expect(frozenControlResponsePristine(
+        &scratch.control_terminal_frozen_response,
+    ));
+    try std.testing.expectEqual(WholeTurnReleaseResult.released, storage.releaseWholeTurnLease(&lease));
+}
+
+test "f3c1 terminal binding actual stale malformed and OOM clean exactly once" {
+    const cases = [_]struct {
+        payload: []const u8,
+        expected_reason: client_pump.TerminalReason,
+        oom: bool = false,
+    }{
+        .{ .payload = "{\"result\":{\"stale\":true}}", .expected_reason = .protocol_error },
+        .{ .payload = "{\"result\":", .expected_reason = .protocol_error },
+        .{
+            .payload = "{\"result\":{\"cols\":80,\"rows\":24,\"client_sequence\":1,\"resize_generation\":2,\"changed\":true}}",
+            .expected_reason = .resource_exhausted,
+            .oom = true,
+        },
+    };
+    for (cases) |case| {
+        var failing = F3c1FailAllocator{ .parent = std.testing.allocator };
+        var fixture = try TestClient.initWithAllocator(failing.allocator());
+        defer fixture.deinitPeer();
+        var storage: ExternalPumpStorage = .{};
+        const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+        defer std.testing.allocator.destroy(scratch);
+        defer if (storage.lifecycle != .dead) {
+            _ = teardownForTest(&storage);
+        };
+        var lease: ExternalWholeTurnLease = .{};
+        const result = try prepareF3c1ActualResponse(
+            &storage,
+            &fixture,
+            scratch,
+            &lease,
+            .{ .resize = .{
+                .stream_id = valid_evidence.stream_id,
+                .cols = 80,
+                .rows = 24,
+                .client_sequence = 1,
+            } },
+            case.payload,
+            .none,
+            if (case.oom) &failing.fail else null,
+        );
+        failing.fail = false;
+        try std.testing.expectEqual(ControlSemanticPreparationResult.terminal_prepared, result);
+        try std.testing.expectEqual(case.expected_reason, scratch.control_semantic_terminal.reason);
+        try std.testing.expect(storage.prepareControlSemanticTerminalBindingUnderHeldLease(&lease, scratch));
+        try std.testing.expect(storage.preparedControlSemanticTerminalBindingCurrent(&lease, scratch));
+        const free_before = failing.free_count;
+        try std.testing.expectEqual(
+            ConsumeControlSemanticTerminalResult.consumed_cleaned,
+            storage.consumeControlSemanticTerminalUnderHeldLease(&lease, scratch),
+        );
+        try std.testing.expectEqual(free_before + 1, failing.free_count);
+        try std.testing.expect(storage.completed_control == .none);
+        try std.testing.expect(storage.control_correlation.state == .terminal);
+        try std.testing.expectEqual(case.expected_reason, storage.semantic_state.terminal.reason);
+        try std.testing.expectEqual(
+            ControlSemanticTerminalLifecycle.consumed_tombstone,
+            scratch.control_semantic_terminal.lifecycle,
+        );
+        try std.testing.expectEqual(
+            ControlSemanticTerminalBindingLifecycle.consumed_tombstone,
+            scratch.control_semantic_terminal_binding.lifecycle,
+        );
+        try std.testing.expectEqual(
+            ControlResponseTakeLifecycle.consumed_tombstone,
+            scratch.control_terminal_response_take.lifecycle,
+        );
+        try std.testing.expectEqual(
+            FrozenControlResponseLifecycle.cleaned_tombstone,
+            scratch.control_terminal_frozen_response.lifecycle,
+        );
+        try std.testing.expect(scratch.control_terminal_frozen_response.payload.allocation_ptr == null);
+        try std.testing.expectEqual(@as(usize, 0), scratch.control_terminal_frozen_response.payload.logical_len);
+        try std.testing.expectEqual(
+            ConsumeControlSemanticTerminalResult.invalid_precommit,
+            storage.consumeControlSemanticTerminalUnderHeldLease(&lease, scratch),
+        );
+        try std.testing.expectEqual(free_before + 1, failing.free_count);
+        try std.testing.expectEqual(WholeTurnReleaseResult.released, storage.releaseWholeTurnLease(&lease));
+    }
+}
+
+test "f3c1 terminal binding tamper copy splice and replay fail closed" {
+    var failing = F3c1FailAllocator{ .parent = std.testing.allocator };
+    var fixture = try TestClient.initWithAllocator(failing.allocator());
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    defer if (storage.lifecycle != .dead) {
+        _ = teardownForTest(&storage);
+    };
+    var lease: ExternalWholeTurnLease = .{};
+    try std.testing.expectEqual(
+        ControlSemanticPreparationResult.terminal_prepared,
+        try prepareF3c1ActualResponse(
+            &storage,
+            &fixture,
+            scratch,
+            &lease,
+            .{ .resize = .{ .stream_id = 7, .cols = 80, .rows = 24, .client_sequence = 1 } },
+            "{\"result\":",
+            .none,
+            null,
+        ),
+    );
+    try std.testing.expect(storage.prepareControlSemanticTerminalBindingUnderHeldLease(&lease, scratch));
+    const saved = scratch.control_semantic_terminal_binding;
+    var copied_lease = lease;
+    try std.testing.expect(!storage.preparedControlSemanticTerminalBindingCurrent(
+        &copied_lease,
+        scratch,
+    ));
+    const completed_before_foreign_lease = storage.completed_control;
+    const correlation_before_foreign_lease = storage.control_correlation;
+    const semantic_before_foreign_lease = storage.semantic_state;
+    const free_before_foreign_lease = failing.free_count;
+    try std.testing.expectEqual(
+        ConsumeControlSemanticTerminalResult.invalid_precommit,
+        storage.consumeControlSemanticTerminalUnderHeldLease(&copied_lease, scratch),
+    );
+    try std.testing.expect(std.meta.eql(completed_before_foreign_lease, storage.completed_control));
+    try std.testing.expect(std.meta.eql(correlation_before_foreign_lease, storage.control_correlation));
+    try std.testing.expect(std.meta.eql(semantic_before_foreign_lease, storage.semantic_state));
+    try std.testing.expectEqual(free_before_foreign_lease, failing.free_count);
+    scratch.control_semantic_terminal_binding.response_take_addr +%= 1;
+    scratch.control_semantic_terminal_binding.digest =
+        preparedControlSemanticTerminalBindingDigest(&scratch.control_semantic_terminal_binding);
+    try std.testing.expect(!storage.preparedControlSemanticTerminalBindingCurrent(&lease, scratch));
+    scratch.control_semantic_terminal_binding = saved;
+    scratch.control_semantic_terminal_binding.terminal_digest[0] ^= 1;
+    scratch.control_semantic_terminal_binding.digest =
+        preparedControlSemanticTerminalBindingDigest(&scratch.control_semantic_terminal_binding);
+    try std.testing.expect(!storage.preparedControlSemanticTerminalBindingCurrent(&lease, scratch));
+    scratch.control_semantic_terminal_binding = saved;
+    scratch.control_semantic_terminal_binding.frozen_response_pristine_digest[0] ^= 1;
+    scratch.control_semantic_terminal_binding.digest =
+        preparedControlSemanticTerminalBindingDigest(&scratch.control_semantic_terminal_binding);
+    try std.testing.expect(!storage.preparedControlSemanticTerminalBindingCurrent(&lease, scratch));
+    scratch.control_semantic_terminal_binding = saved;
+    scratch.control_semantic_terminal_binding.scratch_len +%= 1;
+    scratch.control_semantic_terminal_binding.digest =
+        preparedControlSemanticTerminalBindingDigest(&scratch.control_semantic_terminal_binding);
+    try std.testing.expect(!storage.preparedControlSemanticTerminalBindingCurrent(&lease, scratch));
+    scratch.control_semantic_terminal_binding = saved;
+    const saved_frozen = scratch.control_terminal_frozen_response;
+    scratch.control_terminal_frozen_response.request_id = 1;
+    try std.testing.expect(!storage.preparedControlSemanticTerminalBindingCurrent(&lease, scratch));
+    scratch.control_terminal_frozen_response = saved_frozen;
+    const saved_take = scratch.control_terminal_response_take;
+    scratch.control_terminal_response_take.owner_digest[0] ^= 1;
+    scratch.control_terminal_response_take.digest = preparedControlResponseTakeDigest(
+        &scratch.control_terminal_response_take,
+    );
+    scratch.control_semantic_terminal_binding.response_take_digest =
+        scratch.control_terminal_response_take.digest;
+    scratch.control_semantic_terminal_binding.digest =
+        preparedControlSemanticTerminalBindingDigest(&scratch.control_semantic_terminal_binding);
+    try std.testing.expect(!storage.preparedControlSemanticTerminalBindingCurrent(&lease, scratch));
+    scratch.control_terminal_response_take = saved_take;
+    scratch.control_semantic_terminal_binding = saved;
+    const saved_completed = storage.completed_control;
+    storage.completed_control.completed.owner_digest[0] ^= 1;
+    try std.testing.expect(!storage.preparedControlSemanticTerminalBindingCurrent(&lease, scratch));
+    storage.completed_control = saved_completed;
+    const saved_correlation = storage.control_correlation;
+    storage.control_correlation.digest[0] ^= 1;
+    try std.testing.expect(!storage.preparedControlSemanticTerminalBindingCurrent(&lease, scratch));
+    storage.control_correlation = saved_correlation;
+    const saved_drain = scratch.drain_evidence;
+    scratch.drain_evidence.digest[0] ^= 1;
+    try std.testing.expect(!storage.preparedControlSemanticTerminalBindingCurrent(&lease, scratch));
+    scratch.drain_evidence = saved_drain;
+    const saved_authority_seal = storage.owner_authority_seal;
+    storage.owner_authority_seal.digest[0] ^= 1;
+    try std.testing.expect(!storage.preparedControlSemanticTerminalBindingCurrent(&lease, scratch));
+    storage.owner_authority_seal = saved_authority_seal;
+    const external = &storage.owned_client.?.io_mode.external;
+    const saved_parser_seal = external.rx_provenance.parser_seal;
+    external.rx_provenance.parser_seal.digest[0] ^= 1;
+    try std.testing.expect(!storage.preparedControlSemanticTerminalBindingCurrent(&lease, scratch));
+    external.rx_provenance.parser_seal = saved_parser_seal;
+    external.tx_queue_generation +%= 1;
+    try std.testing.expect(!storage.preparedControlSemanticTerminalBindingCurrent(&lease, scratch));
+    external.tx_queue_generation -%= 1;
+    try std.testing.expect(storage.preparedControlSemanticTerminalBindingCurrent(&lease, scratch));
+    var moved = scratch.*;
+    try std.testing.expect(!storage.preparedControlSemanticTerminalBindingCurrent(&lease, &moved));
+    scratch.control_semantic_terminal_binding = saved;
+    const foreign_take_digest = saved.response_take_digest;
+    try std.testing.expectEqual(WholeTurnReleaseResult.released, storage.releaseWholeTurnLease(&lease));
+
+    var other_fixture = try TestClient.init();
+    defer other_fixture.deinitPeer();
+    var other_storage: ExternalPumpStorage = .{};
+    const other_scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(other_scratch);
+    defer if (other_storage.lifecycle != .dead) {
+        _ = teardownForTest(&other_storage);
+    };
+    var other_lease: ExternalWholeTurnLease = .{};
+    try std.testing.expectEqual(
+        ControlSemanticPreparationResult.terminal_prepared,
+        try prepareF3c1ActualResponse(
+            &other_storage,
+            &other_fixture,
+            other_scratch,
+            &other_lease,
+            .{ .resize = .{ .stream_id = 7, .cols = 81, .rows = 25, .client_sequence = 2 } },
+            "{\"result\":",
+            .none,
+            null,
+        ),
+    );
+    try std.testing.expect(other_storage.prepareControlSemanticTerminalBindingUnderHeldLease(&other_lease, other_scratch));
+    const other_saved = other_scratch.control_semantic_terminal_binding;
+    other_scratch.control_semantic_terminal_binding.response_take_digest = foreign_take_digest;
+    other_scratch.control_semantic_terminal_binding.digest =
+        preparedControlSemanticTerminalBindingDigest(&other_scratch.control_semantic_terminal_binding);
+    try std.testing.expect(!other_storage.preparedControlSemanticTerminalBindingCurrent(
+        &other_lease,
+        other_scratch,
+    ));
+    other_scratch.control_semantic_terminal_binding = other_saved;
+    try std.testing.expectEqual(
+        ConsumeControlSemanticTerminalResult.consumed_cleaned,
+        other_storage.consumeControlSemanticTerminalUnderHeldLease(&other_lease, other_scratch),
+    );
+    try std.testing.expectEqual(
+        ConsumeControlSemanticTerminalResult.invalid_precommit,
+        other_storage.consumeControlSemanticTerminalUnderHeldLease(&other_lease, other_scratch),
+    );
+    try std.testing.expectEqual(WholeTurnReleaseResult.released, other_storage.releaseWholeTurnLease(&other_lease));
+}
+
+test "f3c1 terminal binding rejects non-pristine destinations without mutation" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    defer if (storage.lifecycle != .dead) {
+        _ = teardownForTest(&storage);
+    };
+    var lease: ExternalWholeTurnLease = .{};
+    try std.testing.expectEqual(
+        ControlSemanticPreparationResult.terminal_prepared,
+        try prepareF3c1ActualResponse(
+            &storage,
+            &fixture,
+            scratch,
+            &lease,
+            .{ .resize = .{ .stream_id = 7, .cols = 80, .rows = 24, .client_sequence = 1 } },
+            "{\"result\":",
+            .none,
+            null,
+        ),
+    );
+    scratch.control_terminal_frozen_response.request_id = 99;
+    const completed_before = storage.completed_control;
+    const correlation_before = storage.control_correlation;
+    const terminal_before = scratch.control_semantic_terminal;
+    const binding_before = scratch.control_semantic_terminal_binding;
+    const take_before = scratch.control_terminal_response_take;
+    const frozen_before = scratch.control_terminal_frozen_response;
+    try std.testing.expect(!storage.prepareControlSemanticTerminalBindingUnderHeldLease(
+        &lease,
+        scratch,
+    ));
+    try std.testing.expect(std.meta.eql(completed_before, storage.completed_control));
+    try std.testing.expect(std.meta.eql(correlation_before, storage.control_correlation));
+    try std.testing.expect(std.meta.eql(terminal_before, scratch.control_semantic_terminal));
+    try std.testing.expect(std.meta.eql(binding_before, scratch.control_semantic_terminal_binding));
+    try std.testing.expect(std.meta.eql(take_before, scratch.control_terminal_response_take));
+    try std.testing.expect(std.meta.eql(frozen_before, scratch.control_terminal_frozen_response));
+    scratch.control_terminal_frozen_response = .{};
+    scratch.control_terminal_response_take.lifecycle = .prepared;
+    const take_occupied = scratch.control_terminal_response_take;
+    try std.testing.expect(!storage.prepareControlSemanticTerminalBindingUnderHeldLease(
+        &lease,
+        scratch,
+    ));
+    try std.testing.expect(std.meta.eql(completed_before, storage.completed_control));
+    try std.testing.expect(std.meta.eql(correlation_before, storage.control_correlation));
+    try std.testing.expect(std.meta.eql(terminal_before, scratch.control_semantic_terminal));
+    try std.testing.expect(std.meta.eql(binding_before, scratch.control_semantic_terminal_binding));
+    try std.testing.expect(std.meta.eql(take_occupied, scratch.control_terminal_response_take));
+    try std.testing.expect(frozenControlResponsePristine(&scratch.control_terminal_frozen_response));
+    scratch.control_terminal_response_take = .{};
+    scratch.control_semantic_terminal_binding.lifecycle = .prepared;
+    const binding_occupied = scratch.control_semantic_terminal_binding;
+    try std.testing.expect(!storage.prepareControlSemanticTerminalBindingUnderHeldLease(
+        &lease,
+        scratch,
+    ));
+    try std.testing.expect(std.meta.eql(completed_before, storage.completed_control));
+    try std.testing.expect(std.meta.eql(correlation_before, storage.control_correlation));
+    try std.testing.expect(std.meta.eql(terminal_before, scratch.control_semantic_terminal));
+    try std.testing.expect(std.meta.eql(binding_occupied, scratch.control_semantic_terminal_binding));
+    try std.testing.expect(std.meta.eql(take_before, scratch.control_terminal_response_take));
+    try std.testing.expect(frozenControlResponsePristine(&scratch.control_terminal_frozen_response));
+    scratch.control_semantic_terminal_binding = .{};
+    try std.testing.expect(storage.prepareControlSemanticTerminalBindingUnderHeldLease(&lease, scratch));
+    try std.testing.expectEqual(
+        ConsumeControlSemanticTerminalResult.consumed_cleaned,
+        storage.consumeControlSemanticTerminalUnderHeldLease(&lease, scratch),
+    );
+    try std.testing.expectEqual(WholeTurnReleaseResult.released, storage.releaseWholeTurnLease(&lease));
+}
+
+test "f3c1 terminal binding max generation is absorbing and cleans payload" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    defer if (storage.lifecycle != .dead) {
+        _ = teardownForTest(&storage);
+    };
+    var lease: ExternalWholeTurnLease = .{};
+    try std.testing.expectEqual(
+        ControlSemanticPreparationResult.terminal_prepared,
+        try prepareF3c1ActualResponse(
+            &storage,
+            &fixture,
+            scratch,
+            &lease,
+            .{ .resize = .{ .stream_id = 7, .cols = 80, .rows = 24, .client_sequence = 1 } },
+            "{\"result\":",
+            .correlation_max,
+            null,
+        ),
+    );
+    try std.testing.expectEqual(std.math.maxInt(u64), storage.control_correlation.generation);
+    try std.testing.expect(storage.prepareControlSemanticTerminalBindingUnderHeldLease(&lease, scratch));
+    try std.testing.expectEqual(
+        ConsumeControlSemanticTerminalResult.consumed_cleaned,
+        storage.consumeControlSemanticTerminalUnderHeldLease(&lease, scratch),
+    );
+    try std.testing.expectEqual(std.math.maxInt(u64), storage.control_correlation.generation);
+    try std.testing.expect(storage.control_correlation.state == .terminal);
+    try std.testing.expect(storage.completed_control == .none);
+    try std.testing.expectEqual(WholeTurnReleaseResult.released, storage.releaseWholeTurnLease(&lease));
+}
+
+test "f3c1 terminal binding callback drift quarantines and consumer reentry is rejected" {
+    const cases = [_]struct {
+        mode: AllocatorCallbackProbe.Mode,
+        expected: ConsumeControlSemanticTerminalResult,
+        quarantined: bool,
+    }{
+        .{ .mode = .terminal_response_cleanup_owner_drift, .expected = .cleaned_with_invariant, .quarantined = true },
+        .{ .mode = .terminal_response_cleanup_scratch_drift, .expected = .cleaned_with_invariant, .quarantined = true },
+        .{ .mode = .terminal_response_cleanup_external_drift, .expected = .cleaned_with_invariant, .quarantined = true },
+        .{ .mode = .terminal_response_cleanup_consumer_reentry, .expected = .consumed_cleaned, .quarantined = false },
+    };
+    for (cases) |case| {
+        resetCrossOwnerQuarantineForTest();
+        defer resetCrossOwnerQuarantineForTest();
+        var probe = AllocatorCallbackProbe{ .parent = std.testing.allocator };
+        var fixture = try TestClient.initWithAllocator(probe.allocator());
+        defer fixture.deinitPeer();
+        var storage: ExternalPumpStorage = .{};
+        const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+        defer std.testing.allocator.destroy(scratch);
+        defer if (storage.lifecycle != .dead) {
+            _ = teardownForTest(&storage);
+        };
+        var lease: ExternalWholeTurnLease = .{};
+        try std.testing.expectEqual(
+            ControlSemanticPreparationResult.terminal_prepared,
+            try prepareF3c1ActualResponse(
+                &storage,
+                &fixture,
+                scratch,
+                &lease,
+                .{ .resize = .{ .stream_id = 7, .cols = 80, .rows = 24, .client_sequence = 1 } },
+                "{\"result\":",
+                .none,
+                null,
+            ),
+        );
+        try std.testing.expect(storage.prepareControlSemanticTerminalBindingUnderHeldLease(&lease, scratch));
+        probe.storage = &storage;
+        probe.rx_scratch = scratch;
+        probe.terminal_lease = &lease;
+        probe.terminal_consume_fn = &ExternalPumpStorage.consumeControlSemanticTerminalUnderHeldLease;
+        probe.mode = case.mode;
+        const free_before = probe.free_count;
+        try std.testing.expectEqual(
+            case.expected,
+            storage.consumeControlSemanticTerminalUnderHeldLease(&lease, scratch),
+        );
+        try std.testing.expect(probe.fired);
+        try std.testing.expect(probe.terminal_publication_observed_at_free);
+        try std.testing.expectEqual(free_before + 1, probe.free_count);
+        try std.testing.expectEqual(case.quarantined, crossOwnerQuarantineStatus().latched);
+        if (case.mode == .terminal_response_cleanup_consumer_reentry) {
+            try std.testing.expectEqual(
+                ConsumeControlSemanticTerminalResult.invalid_precommit,
+                probe.nested_terminal_consume.?,
+            );
+        }
+        try std.testing.expect(storage.completed_control == .none);
+        try std.testing.expect(storage.control_correlation.state == .terminal);
+        try std.testing.expectEqual(client_pump.TerminalReason.protocol_error, storage.semantic_state.terminal.reason);
+        try std.testing.expectEqual(
+            ControlSemanticTerminalLifecycle.consumed_tombstone,
+            scratch.control_semantic_terminal.lifecycle,
+        );
+        try std.testing.expectEqual(
+            ControlSemanticTerminalBindingLifecycle.consumed_tombstone,
+            scratch.control_semantic_terminal_binding.lifecycle,
+        );
+        try std.testing.expectEqual(
+            ControlResponseTakeLifecycle.consumed_tombstone,
+            scratch.control_terminal_response_take.lifecycle,
+        );
+        try std.testing.expectEqual(
+            FrozenControlResponseLifecycle.cleaned_tombstone,
+            scratch.control_terminal_frozen_response.lifecycle,
+        );
+        try std.testing.expect(scratch.control_terminal_frozen_response.payload.allocation_ptr == null);
+        try std.testing.expectEqual(@as(usize, 0), scratch.control_terminal_frozen_response.payload.logical_len);
+        const external = &storage.owned_client.?.io_mode.external;
+        try std.testing.expect(client_external_mode.parserSealValid(external, &storage.owned_client.?.parser));
+        try std.testing.expectEqual(
+            ConsumeControlSemanticTerminalResult.invalid_precommit,
+            storage.consumeControlSemanticTerminalUnderHeldLease(&lease, scratch),
+        );
+        try std.testing.expectEqual(free_before + 1, probe.free_count);
         try std.testing.expectEqual(WholeTurnReleaseResult.released, storage.releaseWholeTurnLease(&lease));
     }
 }

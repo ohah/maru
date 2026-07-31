@@ -3037,8 +3037,8 @@ test "d2b3d live owner substrate stays private with one buffered product travers
         );
         const revoke_canonical_writer = betweenMarkers(
             product_source,
-            "MARU_REVOKE_CANONICAL_WRITER_BEGIN",
-            "MARU_REVOKE_CANONICAL_WRITER_END",
+            "MARU_CLEANUP_CANONICAL_WRITER_BEGIN",
+            "MARU_CLEANUP_CANONICAL_WRITER_END",
         ) orelse return error.TestUnexpectedResult;
         try std.testing.expectEqual(
             @as(usize, 1),
@@ -3281,8 +3281,8 @@ test "d2b3d live owner substrate stays private with one buffered product travers
     ) orelse return error.TestUnexpectedResult;
     const canonical_writer = betweenMarkers(
         mechanics_source,
-        "MARU_REVOKE_CANONICAL_WRITER_BEGIN",
-        "MARU_REVOKE_CANONICAL_WRITER_END",
+        "MARU_CLEANUP_CANONICAL_WRITER_BEGIN",
+        "MARU_CLEANUP_CANONICAL_WRITER_END",
     ) orelse return error.TestUnexpectedResult;
     inline for (.{
         "consumePreparedCancellationUnderHeldLease(",
@@ -3522,6 +3522,56 @@ test "f3c1 semantic producer remains private with zero product callsites" {
         @as(usize, 1),
         countOccurrences(product, "prepareCompletedControlSemanticUnderHeldLease("),
     );
+}
+
+test "f3c1 terminal binding and consumer remain private with zero product callsites" {
+    const allocator = std.testing.allocator;
+    const pump = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/client_external_pump.zig",
+    );
+    defer allocator.free(pump);
+    const product = betweenMarkers(
+        pump,
+        "const ControlSemanticPreparationResult = enum {",
+        "const F3c1FailAllocator = struct {",
+    ) orelse return error.TestUnexpectedResult;
+    // Each private entry occurs once as its declaration; product pump orchestration is F3d.
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(product, "prepareControlSemanticTerminalBindingUnderHeldLease("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(product, "consumeControlSemanticTerminalUnderHeldLease("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(product, "const PreparedControlSemanticTerminalBinding = struct"),
+    );
+    // One shared payload cleanup leaf is called by terminal binding, legacy F2, and F3 revoke.
+    try std.testing.expectEqual(
+        @as(usize, 4),
+        countOccurrences(product, "finishControlResponsePayloadCleanupUnchecked("),
+    );
+    const binding_prepare = betweenMarkers(
+        product,
+        "fn prepareControlSemanticTerminalBindingUnderHeldLease(",
+        "fn preparedControlSemanticTerminalBindingCurrent(",
+    ) orelse return error.TestUnexpectedResult;
+    const terminal_consumer = betweenMarkers(
+        product,
+        "fn consumeControlSemanticTerminalUnderHeldLease(",
+        "fn prepareControlResponseTake(",
+    ) orelse return error.TestUnexpectedResult;
+    // Binding seals existing owners only. It must not grow a second decoder, payload owner,
+    // cleanup implementation, or state machine beside the F3c0/F2 single sources.
+    for ([_][]const u8{ binding_prepare, terminal_consumer }) |slice| {
+        try std.testing.expect(std.mem.indexOf(u8, slice, "decodeResizeResponse") == null);
+        try std.testing.expect(std.mem.indexOf(u8, slice, "decodeResyncResponse") == null);
+        try std.testing.expect(std.mem.indexOf(u8, slice, "OwnedPayload") == null);
+        try std.testing.expect(std.mem.indexOf(u8, slice, ".deinit(") == null);
+    }
 }
 
 fn containsForbiddenExternalBuiltin(source: [:0]const u8) bool {

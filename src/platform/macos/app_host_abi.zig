@@ -1211,6 +1211,7 @@ pub export fn maru_macos_app_session_syntax_style_js(
     const font_size_pt: u16 = @intFromFloat(@round(std.math.clamp(app.font.size, 1, 512)));
     const js = maru.session.syntax_theme.writeCssVarsJs(
         colors,
+        maru.session.syntax_theme.diffFromTheme(app.theme),
         app.theme.selection,
         app.font.family,
         font_size_pt,

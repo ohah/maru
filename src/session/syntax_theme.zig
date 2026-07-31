@@ -68,6 +68,22 @@ pub fn fromTheme(theme: appearance.ResolvedTheme) SyntaxColors {
     };
 }
 
+/// diff 본문의 추가·삭제 색(docs/editor-surface.md §3). syntax와 같은 규율으로 **터미널 팔레트에서 파생**한다 —
+/// 사용자가 테마를 바꾸면 diff도 같이 바뀌어야 한 창 안에서 색 언어가 갈리지 않는다. 초록=추가·빨강=삭제는
+/// git/GitHub과 같은 관례이고, 팔레트의 그 자리(bright green/red)를 그대로 쓴다.
+pub const DiffColors = struct { added: color.Rgb, removed: color.Rgb };
+
+pub fn diffFromTheme(theme: appearance.ResolvedTheme) DiffColors {
+    const bg_lum = color.relativeLuminance(theme.background);
+    // 배경 위에 **알파로 얹을** 색이라 본문 토큰(4.0)만큼 밝힐 필요가 없다. 다만 너무 어두우면 옅은 배경으로
+    // 깔았을 때 아무것도 안 보이므로 최소 대비는 건다.
+    const target: f32 = 3.0;
+    return .{
+        .added = readable(ansi(theme, 10), bg_lum, target), // bright green
+        .removed = readable(ansi(theme, 9), bg_lum, target), // bright red
+    };
+}
+
 /// 폰트 패밀리가 CSS/JS 문자열에 안전하게 넣을 수 있는 문자만 쓰는지(주입 방어). 번들·시스템 폰트명은
 /// 영문자·숫자·공백·하이픈뿐이라 이걸로 충분하고, 그 외 문자가 있으면 var를 안 내보내 app.css 폴백을 쓴다.
 fn isSafeFontFamily(family: []const u8) bool {
@@ -84,7 +100,7 @@ fn isSafeFontFamily(family: []const u8) bool {
 /// 테마·폰트로 설정하는 JS 스니펫을 out에 쓴다(§2.3). 신뢰 shell이 로드된 뒤와 **테마/폰트 변경 시**마다 native가
 /// evaluateJavaScript로 실행하므로 실시간 반영된다. 색은 #RRGGBB(검증 채널), 폰트명은 safe-charset만 통과시켜
 /// 주입 위험이 없다. 버퍼가 모자라면 null. CSS 변수 이름은 `source-language.ts`/`app.css`와 정확히 일치해야 한다.
-pub fn writeCssVarsJs(colors: SyntaxColors, selection: color.Rgb, font_family: []const u8, font_size_pt: u16, out: []u8) ?[]const u8 {
+pub fn writeCssVarsJs(colors: SyntaxColors, diff: DiffColors, selection: color.Rgb, font_family: []const u8, font_size_pt: u16, out: []u8) ?[]const u8 {
     const entries = [_]struct { name: []const u8, rgb: color.Rgb }{
         .{ .name = "keyword", .rgb = colors.keyword },
         .{ .name = "string", .rgb = colors.string },
@@ -98,11 +114,24 @@ pub fn writeCssVarsJs(colors: SyntaxColors, selection: color.Rgb, font_family: [
         .{ .name = "attribute", .rgb = colors.attribute },
         .{ .name = "invalid", .rgb = colors.invalid },
     };
+    // diff 색은 이름 공간을 나눈다(`--maru-diff-*`) — syntax와 쓰임이 다르고, 웹에서 폴백도 따로 둔다.
+    const diff_entries = [_]struct { name: []const u8, rgb: color.Rgb }{
+        .{ .name = "added", .rgb = diff.added },
+        .{ .name = "removed", .rgb = diff.removed },
+    };
     const prefix = "(function(s){";
     const suffix = "})(document.documentElement.style)";
     if (prefix.len > out.len) return null;
     @memcpy(out[0..prefix.len], prefix);
     var w: usize = prefix.len;
+    for (diff_entries) |e| {
+        const chunk = std.fmt.bufPrint(
+            out[w..],
+            "s.setProperty('--maru-diff-{s}','#{x:0>2}{x:0>2}{x:0>2}');",
+            .{ e.name, e.rgb.r, e.rgb.g, e.rgb.b },
+        ) catch return null;
+        w += chunk.len;
+    }
     for (entries) |e| {
         const chunk = std.fmt.bufPrint(
             out[w..],
@@ -213,8 +242,8 @@ test "syntax colors follow the terminal theme instead of a fixed palette" {
     // 주입 JS도 테마마다 달라야 한다 — 같은 bytes면 WKWebView가 재도색할 이유가 없어 색이 그대로 남는다.
     var dark_buf: [1024]u8 = undefined;
     var light_buf: [1024]u8 = undefined;
-    const dark_js = writeCssVarsJs(dc, dark.selection, "JetBrains Mono", 14, &dark_buf).?;
-    const light_js = writeCssVarsJs(lc, light.selection, "JetBrains Mono", 14, &light_buf).?;
+    const dark_js = writeCssVarsJs(dc, diffFromTheme(dark), dark.selection, "JetBrains Mono", 14, &dark_buf).?;
+    const light_js = writeCssVarsJs(lc, diffFromTheme(light), light.selection, "JetBrains Mono", 14, &light_buf).?;
     try testing.expect(!std.mem.eql(u8, dark_js, light_js));
     try testing.expect(std.mem.indexOf(u8, dark_js, "--maru-editor-selection','#334455'") != null);
     try testing.expect(std.mem.indexOf(u8, light_js, "--maru-editor-selection','#ccddee'") != null);
@@ -233,7 +262,7 @@ test "writeCssVarsJs emits all vars as hex and fails closed on small buffer" {
     theme.selection = .{ .r = 0x33, .g = 0x44, .b = 0x55 };
     const c = fromTheme(theme);
     var buf: [1024]u8 = undefined;
-    const js = writeCssVarsJs(c, theme.selection, "JetBrains Mono", 14, &buf).?;
+    const js = writeCssVarsJs(c, diffFromTheme(theme), theme.selection, "JetBrains Mono", 14, &buf).?;
     try testing.expect(std.mem.startsWith(u8, js, "(function(s){"));
     try testing.expect(std.mem.endsWith(u8, js, "})(document.documentElement.style)"));
     try testing.expect(std.mem.indexOf(u8, js, "--maru-syntax-keyword") != null);
@@ -246,12 +275,35 @@ test "writeCssVarsJs emits all vars as hex and fails closed on small buffer" {
     var count: usize = 0;
     var it = std.mem.splitSequence(u8, js, "setProperty");
     while (it.next()) |_| count += 1;
-    try testing.expectEqual(@as(usize, 15), count); // 14 setProperty + 1 앞부분
+    try testing.expectEqual(@as(usize, 17), count); // 16 setProperty(syntax 11 + diff 2 + selection·폰트 3) + 앞부분
     var small: [16]u8 = undefined;
-    try testing.expect(writeCssVarsJs(c, theme.selection, "JetBrains Mono", 14, &small) == null);
+    try testing.expect(writeCssVarsJs(c, diffFromTheme(theme), theme.selection, "JetBrains Mono", 14, &small) == null);
     // unsafe 폰트명은 font-family var를 생략(app.css 폴백) — 나머지는 정상 주입.
     var buf2: [1024]u8 = undefined;
-    const js2 = writeCssVarsJs(c, theme.selection, "Evil'; drop", 14, &buf2).?;
+    const js2 = writeCssVarsJs(c, diffFromTheme(theme), theme.selection, "Evil'; drop", 14, &buf2).?;
     try testing.expect(std.mem.indexOf(u8, js2, "--maru-editor-font-family") == null);
     try testing.expect(std.mem.indexOf(u8, js2, "--maru-editor-font-size','14px'") != null);
+}
+
+test "diff 색은 터미널 팔레트에서 파생되고 테마를 따라 바뀐다" {
+    // diff가 고정색이면 사용자가 테마를 바꿔도 그 부분만 남의 색으로 남는다 — 한 창 안에서 색 언어가 갈린다.
+    var theme: appearance.ResolvedTheme = undefined;
+    theme.foreground = .{ .r = 0xe8, .g = 0xe8, .b = 0xe8 };
+    theme.background = .{ .r = 0x10, .g = 0x10, .b = 0x10 };
+    theme.palette = .{null} ** 16;
+    theme.selection = .{ .r = 0x33, .g = 0x44, .b = 0x55 };
+
+    const base = diffFromTheme(theme);
+    var overridden = theme;
+    overridden.palette[10] = .{ .r = 0x00, .g = 0xff, .b = 0x88 }; // bright green = 추가
+    overridden.palette[9] = .{ .r = 0xff, .g = 0x00, .b = 0x44 }; // bright red = 삭제
+    const custom = diffFromTheme(overridden);
+    try testing.expect(!std.meta.eql(base.added, custom.added));
+    try testing.expect(!std.meta.eql(base.removed, custom.removed));
+
+    // 주입 JS에도 실려야 웹이 쓴다(변수 이름은 diff-theme.ts와 정확히 일치해야 한다).
+    var buf: [1024]u8 = undefined;
+    const js = writeCssVarsJs(fromTheme(theme), base, theme.selection, "JetBrains Mono", 14, &buf).?;
+    try testing.expect(std.mem.indexOf(u8, js, "--maru-diff-added") != null);
+    try testing.expect(std.mem.indexOf(u8, js, "--maru-diff-removed") != null);
 }

@@ -22,8 +22,22 @@ const uniqueSorted = (values: Iterable<string>) => [...new Set(values)].sort();
 /** native가 `setProperty('--maru-syntax-X', …)`로 세우는 토큰 이름. */
 function nativeInjectedTokens(): string[] {
   const zig = readRepoFile("src", "session", "syntax_theme.zig");
+  // `entries`(syntax)와 `diff_entries`(diff)가 같은 모양이라, **앞쪽 배열만** 본다 — 안 그러면 diff 색이
+  // syntax 토큰으로 섞여 이 계약이 엉뚱한 것을 강제한다.
+  const syntax_only = zig.slice(0, zig.indexOf("const diff_entries"));
   return uniqueSorted(
-    [...zig.matchAll(/\.\{ \.name = "([a-z_]+)", \.rgb =/g)].map((match) => match[1] as string),
+    [...syntax_only.matchAll(/\.\{ \.name = "([a-z_]+)", \.rgb =/g)].map(
+      (match) => match[1] as string,
+    ),
+  );
+}
+
+/** native가 `--maru-diff-*`로 주입하는 이름. */
+function nativeInjectedDiffTokens(): string[] {
+  const zig = readRepoFile("src", "session", "syntax_theme.zig");
+  const block = zig.slice(zig.indexOf("const diff_entries"));
+  return uniqueSorted(
+    [...block.matchAll(/\.\{ \.name = "([a-z_]+)", \.rgb =/g)].map((match) => match[1] as string),
   );
 }
 
@@ -35,6 +49,19 @@ function webConsumedTokens(source: string): string[] {
 }
 
 describe("terminal theme syntax colors", () => {
+  // diff 색도 같은 규율이다: native가 터미널 테마에서 파생해 주입하고 웹이 var()로 읽는다. 이름이 어긋나면
+  // 폴백 색으로 조용히 넘어가(화면은 그럴듯하다) 테마를 바꿔도 diff만 안 따라온다.
+  test("diff 색 변수 이름이 native와 웹에서 일치한다", () => {
+    const injected = nativeInjectedDiffTokens();
+    const consumed = uniqueSorted(
+      [...readRepoFile("web", "src", "diff-theme.ts").matchAll(/var\(--maru-diff-([a-z]+)/g)].map(
+        (match) => match[1] as string,
+      ),
+    );
+    expect(injected).toEqual(["added", "removed"]);
+    expect(consumed).toEqual(injected);
+  });
+
   test("native injects exactly the token names both web consumers read", () => {
     const injected = nativeInjectedTokens();
     const editorTokens = webConsumedTokens(readRepoFile("web", "src", "source-language.ts"));

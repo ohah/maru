@@ -589,6 +589,7 @@ pub fn build(b: *std.Build) void {
         .filters = &.{
             "provider files remain unchanged across AppSession.init when the statusline hook is off",
             "agent statusline hook edits only the statusLine key and preserves the wrapped user command",
+            "agent statusline hook serializes, preserves file identity, and refuses to guess",
             "legacy provider workspace fields are ignored across multi-window parse apply and write-new",
             "workspace restore ABI preserves multi-window count active and apply",
         },

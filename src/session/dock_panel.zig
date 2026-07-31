@@ -11,6 +11,7 @@ pub const Side = enum { right, bottom };
 pub const View = enum {
     explorer,
     source_control,
+    agent_sessions,
 
     /// workspace 텍스트 → 뷰. 모르는 이름은 null이고 호출자가 기본값으로 clamp한다.
     pub fn parse(name: []const u8) ?View {

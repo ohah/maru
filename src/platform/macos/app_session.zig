@@ -2604,6 +2604,8 @@ pub const AppSession = struct {
     file_tree_selection: file_tree_navigation.Selection = .{},
     // fileTreeRowAt과 같은 visible-row index. hoverCursor가 갱신하고 GPU row 배경이 소비한다.
     file_tree_hovered_row: ?usize = null,
+    /// 호버 중인 뷰 스위처 슬롯(§3.5). 렌더가 배경 강조에 쓰고 hoverCursor가 갱신한다 — 트리 행 호버와 같은 규율.
+    dock_view_hovered_slot: ?usize = null,
     file_tree_rows_dirty: bool = true,
     file_tree_reload_actions: [dock_panel.max_entries]FileTreeReloadAction = undefined,
     file_tree_reload_actions_len: usize = 0,
@@ -3175,14 +3177,7 @@ pub const AppSession = struct {
         return switch (self.dock.view) {
             .explorer => 0,
             .source_control => 1,
-        };
-    }
-
-    /// 현재 뷰의 헤더 제목. 헤더는 뷰마다 다르지만 rect·렌더 경로는 하나다(§3.5).
-    fn dockViewTitle(self: *const AppSession) []const u8 {
-        return switch (self.dock.view) {
-            .explorer => "탐색기",
-            .source_control => "소스 컨트롤",
+            .agent_sessions => 2,
         };
     }
 
@@ -3190,6 +3185,7 @@ pub const AppSession = struct {
         return switch (index) {
             0 => .explorer,
             1 => .source_control,
+            2 => .agent_sessions,
             else => null,
         };
     }
@@ -3213,6 +3209,9 @@ pub const AppSession = struct {
             .cell_height_px = self.cell_height_px,
             .scale_milli = self.scale_milli,
             .divider_px = self.dividerThicknessPx(),
+            // 뷰 스위처 바는 pane 탭 바와 **같은 높이**여야 아래 경계선이 한 줄로 맞는다(사용자 요청 2026-07-31).
+            // 그래서 chrome 행에서 파생하지 않고 그 단일 출처를 그대로 넘긴다.
+            .view_bar_px = self.paneBarHeightPx(),
             .side = if (self.dock_initialized) self.dock.side else .right,
             .size_pt = if (self.dock_initialized) self.dock.size else 0,
             .visible = self.dockVisible(),
@@ -19910,15 +19909,8 @@ pub const AppSession = struct {
                 // 뷰 스위처가 트리보다 먼저다 — 바는 트리 위에 있고 rect가 겹치지 않지만, 순서를 명시해
                 // 나중에 바가 커져도 트리 클릭에 먹히지 않게 한다(docs/file-explorer.md §3.5).
                 if (dg.view_bar.h > 0 and layout_math.pointInRect(x_px, y_px, dg.view_bar)) {
-                    if (x_px >= 0 and y_px >= 0) {
-                        if (dock_view_bar.slotAtPoint(
-                            .{ .x = dg.view_bar.x, .y = dg.view_bar.y, .w = dg.view_bar.w, .h = dg.view_bar.h },
-                            self.cell_width_px,
-                            @intFromFloat(x_px),
-                            @intFromFloat(y_px),
-                        )) |slot| {
-                            if (dockViewForSlot(slot)) |view| self.setDockView(view);
-                        }
+                    if (self.dockViewSlotAt(x_px, y_px)) |slot| {
+                        if (dockViewForSlot(slot)) |view| self.setDockView(view);
                     }
                     return; // 바 안의 여백 클릭도 트리로 흘려보내지 않는다.
                 }
@@ -22125,6 +22117,7 @@ pub const AppSession = struct {
         // 파일 헤더 mode 선택기도 같은 자리에서 매 이동 갱신한다(밴드 밖으로 나가면 null이라 stale 강조가 안 남는다).
         self.setHoveredFileHeaderMode(self.fileHeaderModeHoverAt(x_px, y_px));
         self.setHoveredFileTreeRow(if (self.dockVisible()) self.fileTreeRowAt(x_px, y_px) else null);
+        self.setHoveredDockViewSlot(self.dockViewSlotAt(x_px, y_px));
         // 접힘 펼치기 토글(◧, 신호등 옆) 호버 — 접힘 시 사이드바 폭 0이라 아래 inSidebar(헤더 아이콘) 경로가 안 타고,
         // resize-edge가 x≈0을 잘못 잡을 수 있어 **먼저** 본다. 토글 위면 호버 배경을 켜고 pointingHand(클릭 가능).
         // 토글 밖이면 끄고 아래 일반 경로로 흐른다. mouse down hit-test(collapsedToggleRect)와 같은 rect로 일치.
@@ -22204,6 +22197,15 @@ pub const AppSession = struct {
         }
         if (self.dockVisible()) {
             const dg = self.dockGeometry();
+            if (dg.view_bar.h > 0 and layout_math.pointInRect(x_px, y_px, dg.view_bar)) {
+                self.setHoveredTab(null);
+                self.clearHoverUrlAnchor();
+                self.setHoveredFileTreeRow(null);
+                const slot = self.dockViewSlotAt(x_px, y_px);
+                self.setHoveredDockViewSlot(slot);
+                return if (slot != null) .link else .default; // 슬롯 위만 클릭 가능(여백은 화살표)
+            }
+            self.setHoveredDockViewSlot(null);
             if (layout_math.pointInRect(x_px, y_px, dg.tree)) {
                 self.setHoveredTab(null);
                 self.clearHoverUrlAnchor();
@@ -25836,12 +25838,24 @@ pub const AppSession = struct {
                 // 뷰 스위처 한 행(docs/file-explorer.md §3.5). 활성 슬롯만 배경으로 표시해 "지금 보는 뷰"를 남긴다.
                 if (dg.view_bar.w > 0 and dg.view_bar.h > 0) {
                     self.appendBarBgQuad(dg.view_bar, self.chromeQuadBg(self.sidebarBg()));
-                    if (dock_view_bar.slotRect(.{
+                    const bar_rect = dock_view_bar.Rect{
                         .x = dg.view_bar.x,
                         .y = dg.view_bar.y,
                         .w = dg.view_bar.w,
                         .h = dg.view_bar.h,
-                    }, self.cell_width_px, self.dockViewSlotIndex())) |slot| {
+                    };
+                    // 호버를 **먼저** 깔고 활성을 그 위에 얹는다 — 활성 슬롯을 호버해도 활성 표시가 유지된다.
+                    if (self.dock_view_hovered_slot) |hovered| {
+                        if (hovered != self.dockViewSlotIndex()) {
+                            if (dock_view_bar.slotRect(bar_rect, self.cell_width_px, hovered)) |slot| {
+                                self.appendBarBgQuad(
+                                    .{ .x = slot.x, .y = slot.y, .w = slot.w, .h = slot.h },
+                                    self.chromeQuadBg(self.sidebarHoverBg()),
+                                );
+                            }
+                        }
+                    }
+                    if (dock_view_bar.slotRect(bar_rect, self.cell_width_px, self.dockViewSlotIndex())) |slot| {
                         self.appendBarBgQuad(
                             .{ .x = slot.x, .y = slot.y, .w = slot.w, .h = slot.h },
                             self.chromeQuadBg(self.sidebarActiveBg()),
@@ -25854,12 +25868,6 @@ pub const AppSession = struct {
                         .h = 1,
                     }, self.dividerColor());
                 }
-                if (dg.tree_header.w > 0 and dg.tree_header.h > 0) self.appendBarBgQuad(.{
-                    .x = dg.tree_header.x,
-                    .y = dg.tree_header.y + dg.tree_header.h -| 1,
-                    .w = dg.tree_header.w,
-                    .h = 1,
-                }, self.dividerColor());
                 if (self.dock.view == .explorer and dg.tree_content.w > 0 and self.cell_height_px > 0) {
                     const start = self.fileTreeEffectiveScroll();
                     const visible: usize = @intCast(dg.tree_content.h / self.cell_height_px);
@@ -26184,22 +26192,66 @@ pub const AppSession = struct {
                         const dock_fg: terminal.Color = .{ .rgb = self.mutedForeground() };
                         const dock_active_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
                         if (tree_cols > 0 and dg.view_bar.h > 0) {
-                            if (coretext_frame_builder.buildDockViewBarDrawList(self.allocator, tree_cols, self.dockViewSlotIndex(), dock_active_fg, dock_fg)) |bdl| {
-                                self.collectShaped(&collected, bdl, pane_frame_builder, .{ .pane = .{
-                                    .origin_x = dg.view_bar.x,
-                                    .origin_y = dg.view_bar.y,
-                                    .colors = tabbar_colors,
-                                } });
+                            if (coretext_frame_builder.buildDockViewBarDrawList(
+                                self.allocator,
+                                tree_cols,
+                                1,
+                                self.dockViewSlotIndex(),
+                                dock_active_fg,
+                                dock_fg,
+                            )) |bdl| {
+                                self.collectShaped(&collected, bdl, pane_frame_builder, .{
+                                    .pane = .{
+                                        .origin_x = dg.view_bar.x,
+                                        // 바 높이는 `cell_height + 2*pad`라 셀 한 줄을 패딩만큼 내려야 세로 중앙이다.
+                                        .origin_y = dg.view_bar.y + (dg.view_bar.h -| self.cell_height_px) / 2,
+                                        .colors = tabbar_colors,
+                                    },
+                                });
                             } else |_| {}
                         }
-                        if (tree_cols > 0 and dg.tree_header.h > 0) {
-                            if (coretext_frame_builder.buildFileTreeHeaderDrawList(self.allocator, tree_cols, dock_active_fg, self.dockViewTitle())) |hdl| {
-                                self.collectShaped(&collected, hdl, pane_frame_builder, .{ .pane = .{
-                                    .origin_x = dg.tree_header.x,
-                                    .origin_y = dg.tree_header.y,
-                                    .colors = tabbar_colors,
-                                } });
-                            } else |_| {}
+                        if (self.dock.view == .agent_sessions and tree_content_cols > 0 and visible_rows > 0) {
+                            // 창의 모든 탭을 가로질러 에이전트 Term을 한 목록으로 낸다 — 사이드바는 워크스페이스
+                            // 카드별로 나누지만, 이 뷰의 값은 "지금 도는 세션 전부를 한 자리에서 본다"는 것이다.
+                            var labels: std.ArrayList([]const u8) = .empty;
+                            defer {
+                                for (labels.items) |label| self.allocator.free(label);
+                                labels.deinit(self.allocator);
+                            }
+                            var active_row: ?usize = null;
+                            const active_term_ptr = self.activeTab().activeTerm();
+                            for (self.tabs.items) |tab| {
+                                var agents: std.ArrayList(WorkspaceAgent) = .empty;
+                                defer agents.deinit(self.allocator);
+                                collectWorkspaceAgents(tab, &agents, self.allocator);
+                                for (agents.items) |ag| {
+                                    if (labels.items.len >= visible_rows) break;
+                                    const term = tab.panes.items[ag.pane].terms.items[ag.term];
+                                    const label = self.agentRowLabelOwned(term) catch continue;
+                                    if (term == active_term_ptr) active_row = labels.items.len;
+                                    labels.append(self.allocator, label) catch {
+                                        self.allocator.free(label);
+                                        break;
+                                    };
+                                }
+                            }
+                            if (labels.items.len > 0) {
+                                if (coretext_frame_builder.buildDockSessionListDrawList(
+                                    self.allocator,
+                                    tree_content_cols,
+                                    @intCast(@min(labels.items.len, visible_rows)),
+                                    labels.items,
+                                    active_row,
+                                    dock_fg,
+                                    dock_active_fg,
+                                )) |sdl| {
+                                    self.collectShaped(&collected, sdl, pane_frame_builder, .{ .pane = .{
+                                        .origin_x = dg.tree_content.x,
+                                        .origin_y = dg.tree_content.y,
+                                        .colors = tabbar_colors,
+                                    } });
+                                } else |_| {}
+                            }
                         }
                         if (self.dock.view == .explorer and tree_content_cols > 0 and visible_rows > 0) {
                             const reserved_cols: u16 = if (self.fileTreeScrollbarGeometry() != null)
@@ -26785,6 +26837,26 @@ pub const AppSession = struct {
         if (tabRefEql(self.hovered_tab, tab)) return;
         self.hovered_tab = tab;
         self.metal_dirty = true;
+    }
+
+    fn setHoveredDockViewSlot(self: *AppSession, slot: ?usize) void {
+        if (usizeOptEql(self.dock_view_hovered_slot, slot)) return;
+        self.dock_view_hovered_slot = slot;
+        self.metal_dirty = true;
+    }
+
+    /// 좌표가 뷰 바의 어느 슬롯 위인지(렌더·hover·클릭 공용 — 기하가 두 벌이 되지 않게).
+    fn dockViewSlotAt(self: *const AppSession, x_px: f64, y_px: f64) ?usize {
+        if (!self.dockVisible()) return null;
+        const bar = self.dockGeometry().view_bar;
+        if (bar.h == 0 or x_px < 0 or y_px < 0) return null;
+        if (!layout_math.pointInRect(x_px, y_px, bar)) return null;
+        return dock_view_bar.slotAtPoint(
+            .{ .x = bar.x, .y = bar.y, .w = bar.w, .h = bar.h },
+            self.cell_width_px,
+            @intFromFloat(x_px),
+            @intFromFloat(y_px),
+        );
     }
 
     fn setHoveredFileTreeRow(self: *AppSession, row: ?usize) void {
@@ -37886,6 +37958,16 @@ test "flagPrefixedLabel: running=●+이름, 아니면 이름만" {
 // agentDisplayVisible(pollAgentKinds/State의 metal_dirty 게이트)은 **화면에 running 표시가 보이는 탭**만 true —
 // 접힘/최소크롬 + 비활성 탭이면 진짜 안 보여 false(백그라운드 Term churn으로 헛 재렌더 방지). 여기선 단일 탭이라
 // (탭0=활성) 탭바(paneBarHeightPx>0)만으로도 true이고, 접힘+비활성으로 만들면 false가 되는 걸 고정한다.
+test "도크 뷰 스위처: 호버는 슬롯 위에서만 포인터가 바뀐다" {
+    // 슬롯 위=클릭 가능(pointingHand), 바 안 여백=화살표. 렌더 강조와 커서가 같은 판정을 쓰는지 함께 본다.
+    const bar = chrome.components.dock_view_bar.Rect{ .x = 100, .y = 40, .w = 200, .h = 24 };
+    const cw: u32 = 10;
+    try std.testing.expectEqual(@as(usize, 0), chrome.components.dock_view_bar.slotAtPoint(bar, cw, 110, 50).?);
+    try std.testing.expectEqual(@as(usize, 2), chrome.components.dock_view_bar.slotAtPoint(bar, cw, 190, 50).?);
+    // 슬롯 3개 × 4셀 × 10px = 120px → 그 뒤는 여백이라 null(커서도 default가 된다).
+    try std.testing.expect(chrome.components.dock_view_bar.slotAtPoint(bar, cw, 230, 50) == null);
+}
+
 test "도크 뷰 스위처: 슬롯 index 대응과 포커스 되돌림" {
     // chrome 컴포넌트는 도메인 enum을 모르므로(레이어 경계) 뷰↔슬롯 대응은 session이 소유한다. 두 곳에
     // 흩어지면 그린 자리와 눌리는 자리가 어긋나므로 왕복을 여기서 못박는다.

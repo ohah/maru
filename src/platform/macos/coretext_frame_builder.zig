@@ -816,61 +816,89 @@ pub const file_tree_inset_cols: u16 = 1;
 pub fn buildDockViewBarDrawList(
     allocator: std.mem.Allocator,
     cols: u16,
+    rows: u16,
     active_index: usize,
     active_fg: terminal.Color,
     muted_fg: terminal.Color,
 ) !renderer.DrawList {
     var cells: std.ArrayList(renderer.DrawCell) = .empty;
     errdefer cells.deinit(allocator);
-    const kinds = [_]file_tree_icon.IconKind{ .folder, .git };
+    const kinds = [_]file_tree_icon.IconKind{ .folder, .git, .code };
     const slot_cols: u16 = @intCast(dock_view_bar.slot_cols);
     for (kinds, 0..) |kind, index| {
-        // 아이콘은 슬롯 가운데(좌측 여백 1셀 뒤). 슬롯이 화면 밖이면 그리지 않는다.
-        const col: u16 = @as(u16, @intCast(index)) *| slot_cols +| 1;
-        if (col >= cols) break;
+        // 아이콘은 슬롯 안 좌측 여백 뒤에 **2칸으로** 놓는다. 합성 아이콘은 슬롯 크기에 맞춰 스케일되므로
+        // (icon_glyph.fillCoverage: side = min(w, h)) 2칸이면 1칸일 때보다 또렷하고 크다 — 사이드바 에이전트
+        // 아이콘이 같은 이유로 이미 `width = 2`다. 슬롯이 화면 밖이면 그리지 않는다.
+        const col: u16 = @as(u16, @intCast(index)) *| slot_cols +| @as(u16, @intCast(dock_view_bar.icon_col_offset));
+        if (col +| @as(u16, @intCast(dock_view_bar.icon_cols)) > cols) break;
         const cp = file_tree_icon.codepointFromRaw(@intFromEnum(kind)) orelse continue;
         try cells.append(allocator, .{
-            .row = 0,
+            // 밴드 가운데 행. 글리프는 행을 넘지 못하므로 세로 중앙은 홀수 행 밴드에서만 정확하다.
+            .row = @max(rows, 1) / 2,
             .col = col,
             .codepoint = cp,
-            .width = 1,
+            .width = @intCast(dock_view_bar.icon_cols),
             .style = .{ .foreground = if (index == active_index) active_fg else muted_fg, .bold = index == active_index },
         });
     }
     return .{
-        .size = .{ .cols = @max(cols, 1), .rows = 1 },
+        .size = .{ .cols = @max(cols, 1), .rows = @max(rows, 1) },
         .cursor = .{ .row = 0, .col = 0, .visible = false },
-        .dirty = .{ .start_row = 0, .end_row = 0 },
+        .dirty = .{ .start_row = 0, .end_row = @max(rows, 1) -| 1 },
         .cells = try cells.toOwnedSlice(allocator),
         .grapheme_pool = try allocator.alloc(u32, 0),
         .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
     };
 }
 
-pub fn buildFileTreeHeaderDrawList(
+/// 도크 AI 세션 목록 뷰의 행들. 한 행에 `<상태 마커> <라벨>` 한 줄이고, 라벨은 사이드바 에이전트 행과 **같은
+/// 문자열**(마지막 사용자 프롬프트 우선)을 받는다 — 같은 것을 두 곳에서 다르게 부르지 않는다.
+pub fn buildDockSessionListDrawList(
     allocator: std.mem.Allocator,
     cols: u16,
+    rows: u16,
+    labels: []const []const u8,
+    active_index: ?usize,
     fg: terminal.Color,
-    label: []const u8,
+    active_fg: terminal.Color,
 ) !renderer.DrawList {
     var cells: std.ArrayList(renderer.DrawCell) = .empty;
     errdefer cells.deinit(allocator);
-    var pool: std.ArrayList(u32) = .empty; // cluster 본체(NFD 자모·결합 문자) — DrawList.grapheme_pool로 넘어간다
+    var pool: std.ArrayList(u32) = .empty;
     errdefer pool.deinit(allocator);
-    if (cols > file_tree_inset_cols)
-        _ = try appendEllipsizedTitle(allocator, &cells, &pool, label, 0, file_tree_inset_cols, cols, .{ .foreground = fg, .bold = true }, false, .head);
-    // pool을 **먼저** 떼어 낸다: 리터럴 안에서 마지막에 평가하면 cells 소유권이 이미 넘어간 뒤라
-    // `errdefer cells.deinit`이 no-op이 되고, pool 할당 실패 시 cells 슬라이스가 샌다(code-review max).
+    const inset: u16 = file_tree_inset_cols;
+    var r: u16 = 0;
+    while (r < rows and r < labels.len) : (r += 1) {
+        const is_active = active_index != null and active_index.? == r;
+        const style: terminal.Style = .{ .foreground = if (is_active) active_fg else fg, .bold = is_active };
+        if (cols > inset)
+            _ = try appendEllipsizedTitle(allocator, &cells, &pool, labels[r], r, inset, cols, style, false, .head);
+    }
     const owned_pool = try pool.toOwnedSlice(allocator);
     errdefer allocator.free(owned_pool);
     return .{
-        .size = .{ .cols = @max(cols, 1), .rows = 1 },
+        .size = .{ .cols = @max(cols, 1), .rows = @max(rows, 1) },
         .cursor = .{ .row = 0, .col = 0, .visible = false },
-        .dirty = .{ .start_row = 0, .end_row = 0 },
+        .dirty = .{ .start_row = 0, .end_row = @max(rows, 1) -| 1 },
         .cells = try cells.toOwnedSlice(allocator),
         .grapheme_pool = owned_pool,
         .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
     };
+}
+
+test "도크 뷰 바: 슬롯 3개가 모두 그려진다" {
+    var dl = try buildDockViewBarDrawList(std.testing.allocator, 24, 1, 0, .{ .rgb = .{ .r = 1, .g = 2, .b = 3 } }, .{ .rgb = .{ .r = 4, .g = 5, .b = 6 } });
+    defer dl.deinit(std.testing.allocator);
+    var count: usize = 0;
+    for (dl.cells) |c| {
+        count += 1;
+        try std.testing.expectEqual(@as(u2, 2), c.width); // 2칸 아이콘
+    }
+    try std.testing.expectEqual(dock_view_bar.slot_count, count);
+    // 미등록 PUA면 폰트 폴백으로 떨어져 **빈칸으로 보인다** — 세 아이콘 모두 합성 등록돼 있어야 한다.
+    for (dl.cells) |c| try std.testing.expect(maru.renderer.icon_glyph.isRegisteredIcon(c.codepoint));
+    // 한 줄짜리 바 — 세로 중앙은 렌더 origin이 패딩만큼 내려 맞춘다(app_session).
+    for (dl.cells) |c| try std.testing.expectEqual(@as(u16, 0), c.row);
 }
 
 pub const FileTreeEdit = struct { identity: file_tree.RowIdentity, text: []const u8 };

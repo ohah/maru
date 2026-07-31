@@ -50,8 +50,9 @@ pub const BlobSide = enum {
     index,
 };
 
-/// 어떤 kind든 이만큼이면 담긴다(테스트가 상한을 고정한다).
-pub const max_argv = 20;
+/// 어떤 kind든 이만큼이면 담긴다(테스트가 상한을 고정한다). config 쌍을 늘리면 여기도 함께 늘려야 한다 —
+/// 넘치면 조용히 잘리는 게 아니라 buf 범위를 벗어난다(quotePath 추가 때 실제로 넘쳤다).
+pub const max_argv = 24;
 
 /// repository config가 외부 프로세스를 실행하지 못하게 덮어쓰는 `-c` 쌍. **빈 값 = 비활성**이 git의 규약이다.
 const config_overrides = [_][]const u8{
@@ -60,6 +61,9 @@ const config_overrides = [_][]const u8{
     "-c", "diff.external=", //            external diff 프로그램 금지
     "-c", "credential.helper=", //        자격증명 helper 프로세스 금지
     "-c", "protocol.ext.allow=never", //  ext:: 원격 = 임의 명령 실행 벡터
+    // 경로를 **있는 그대로** 받는다. 기본값(true)이면 비ASCII 경로를 `"\355\225\234..."`처럼 C-quote해서 내주는데,
+    // 그 문자열을 다시 git에 넘기거나 open(2)에 쓰면 "그런 파일 없음"이 된다 — 한글·일본어 파일명이 전부 안 열렸다.
+    "-c", "core.quotePath=false",
 };
 
 /// 하위 프로세스에 **덮어써서** 넘길 환경변수. 상속만 하면 사용자 환경의 GIT_* 가 계약을 깬다.
@@ -136,6 +140,14 @@ const testing = std.testing;
 fn has(argv: []const []const u8, needle: []const u8) bool {
     for (argv) |a| if (std.mem.eql(u8, a, needle)) return true;
     return false;
+}
+
+test "경로를 C-quote하지 않게 강제한다(비ASCII 파일명)" {
+    // 기본값이면 `한글.txt`가 `"\355\225\234\352\270\200.txt"`로 나와 blobSpec·open(2) 양쪽에서 실패한다.
+    var buf: [max_argv][]const u8 = undefined;
+    inline for (.{ Kind.status, Kind.numstat_staged, Kind.show_blob }) |kind| {
+        try testing.expect(has(build(kind, "/usr/bin/git", "/repo", "HEAD:x", &buf), "core.quotePath=false"));
+    }
 }
 
 test "status 한 번으로 섹션·브랜치·ahead/behind를 모두 요청한다" {
@@ -224,4 +236,13 @@ test "show_blob은 옵션으로 해석될 수 없는 spec만 넘기고 textconv�
 test "spec 버퍼가 모자라면 자르지 않고 실패한다(다른 파일을 읽지 않게)" {
     var tiny: [8]u8 = undefined;
     try testing.expect(blobSpec(.head, "very/long/path.txt", &tiny) == null);
+}
+
+test "argv 상한이 모든 kind를 담는다(넘치면 범위를 벗어난다)" {
+    // config 쌍이 늘 때마다 조용히 깨지지 않게, 가장 긴 조합을 실제로 만들어 본다.
+    var buf: [max_argv][]const u8 = undefined;
+    inline for (.{ Kind.status, Kind.numstat_staged, Kind.numstat_worktree, Kind.show_blob }) |kind| {
+        const argv = build(kind, "/usr/bin/git", "/repo", "HEAD:x", &buf);
+        try testing.expect(argv.len <= max_argv);
+    }
 }

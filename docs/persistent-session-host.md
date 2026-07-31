@@ -8539,11 +8539,12 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             대조하며 input gate를 바로 열지 않고
             `awaiting_snapshot→applied_pending`만 기록한다. `commit_pending`을 받은 facade caller는 같은 owner
             thread에서 새 monotonic clock을 읽고 **zero-readiness pump를 즉시 한 번 호출해야 하며**, 그 전까지
-            input/TX admission은 계속 0이다. callback에는 clock을 전달하지 않는다. 대신 storage가
-            `immediate_turn_required=true` latch를 세운다.
+            input/TX admission은 계속 0이다. callback에는 clock을 전달하지 않는다. 별도 bool을 두지 않고
+            `applied_pending` 상태 자체가 유일한 `immediate_turn_required` latch다.
             `pollHint() -> { immediate: bool, next_deadline_ns: ?i128 }`가 opaque storage에서 latch와 semantic
-            seal을 소비하지 않는 read-only snapshot으로 무할당 조회한다. `next_deadline_ns`는 recovery만의
-            별도 시계가 아니라 raw/partial/TX/control/recovery 전체 deadline minimum의 단일 출처다.
+            seal을 소비하지 않는 read-only snapshot으로 무할당 조회한다. core에서는 recovery absolute
+            deadline을 투영하고, e-integration에서 raw/partial/TX/control deadline이 생기거나 연결될 때
+            `next_deadline_ns`를 이 API의 전체 minimum으로 확장한다. 별도 deadline/poll-hint API는 만들지 않는다.
             owner는 모든 poll 진입 직전에 hint를 다시 읽고 immediate면 timeout 0을 택한다.
             따라서 caller가 즉시 turn을 호출하지 못해도 기존 recovery 만료시각까지 잠들 수 없다. 이 fresh-clock
             turn은 deadline→`applied_pending` commit→RX 순서로 실행한다. 같은 turn에 도착한 delta/invalidated/

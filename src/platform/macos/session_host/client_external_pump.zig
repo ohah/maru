@@ -2050,6 +2050,8 @@ const RxDrainEvidence = struct {
     rx_read_budget_exhausted: bool = false,
     owner_inventory_generation: u64 = 0,
     owner_snapshot_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    initial_inherited_snapshot_digest: external_owner_seal.Digest =
+        [_]u8{0} ** 32,
     inherited_blocker_snapshot_digest: external_owner_seal.Digest =
         [_]u8{0} ** 32,
     final_owner_blockers_clear: bool = false,
@@ -2093,12 +2095,47 @@ const RxDrainTestRecorder = struct {
 };
 threadlocal var rx_drain_test_recorder: ?*RxDrainTestRecorder = null;
 
+const AuthorityAdapterTestEvent = enum { prepared, validated, aborted, reset };
+const AuthorityAdapterTestRecorder = struct {
+    events: [4]AuthorityAdapterTestEvent = undefined,
+    len: u8 = 0,
+};
+threadlocal var authority_adapter_test_recorder: ?*AuthorityAdapterTestRecorder =
+    null;
+const AuthorityAdapterFailpoint = enum {
+    none,
+    after_prepare,
+    after_prepare_cleanup_corrupt,
+    before_release_lease_digest_corrupt,
+};
+threadlocal var authority_adapter_failpoint: AuthorityAdapterFailpoint = .none;
+threadlocal var authority_adapter_failpoint_scratch_addr: usize = 0;
+
 fn recordRxDrainTestEvent(event: RxDrainTestEvent) void {
     if (!builtin.is_test) return;
     const recorder = rx_drain_test_recorder orelse return;
     if (recorder.len == recorder.events.len) return;
     recorder.events[recorder.len] = event;
     recorder.len += 1;
+}
+
+fn recordAuthorityAdapterTestEvent(event: AuthorityAdapterTestEvent) void {
+    if (!builtin.is_test) return;
+    const recorder = authority_adapter_test_recorder orelse return;
+    if (recorder.len == recorder.events.len) return;
+    recorder.events[recorder.len] = event;
+    recorder.len += 1;
+}
+
+fn hitAuthorityAdapterFailpoint(
+    scratch: *ExternalRxTurnScratch,
+    point: AuthorityAdapterFailpoint,
+) bool {
+    if (!builtin.is_test or authority_adapter_failpoint != point or
+        authority_adapter_failpoint_scratch_addr != @intFromPtr(scratch))
+        return false;
+    authority_adapter_failpoint = .none;
+    return true;
 }
 
 fn hitInjectedRxFailpoint(
@@ -2161,12 +2198,26 @@ pub const ExternalRxTurnScratch = struct {
     would_block_seed: client_external_rx_read.WouldBlockSeed = .{},
     prepared_admit_use_permit: client_external_rx_read.PreparedAdmitUsePermit = .{},
     drain_evidence: RxDrainEvidence = .{},
+    authority_permit: client_external_turn_authority.PreparedAuthorityPermit = .{},
+    authority_cleanup_seed: client_external_turn_authority.FrozenCleanupSeed = .{},
+    turn_generation: u64 = 0,
     callback_region: CallbackRegionToken = .{},
     quarantine_receipt: client_external_mode.GuardedQuarantineAccountingReceipt = .{},
 
     pub fn initInPlace(out: *ExternalRxTurnScratch) bool {
         if (out.saved_self_addr != 0 or out.lifecycle != .empty or
-            !rxDrainEvidencePristine(&out.drain_evidence))
+            !rxDrainEvidencePristine(&out.drain_evidence) or
+            !std.meta.eql(
+                out.authority_permit,
+                client_external_turn_authority.PreparedAuthorityPermit{},
+            ) or
+            !std.meta.eql(
+                out.authority_cleanup_seed,
+                client_external_turn_authority.FrozenCleanupSeed{},
+            ) or out.turn_generation != 0 or
+            !client_external_mode.guardedQuarantineReceiptPristine(
+                &out.quarantine_receipt,
+            ))
             return false;
         out.saved_self_addr = @intFromPtr(out);
         out.lifecycle = .ready;
@@ -2188,6 +2239,9 @@ pub const ExternalRxTurnScratch = struct {
         out.borrow_use_permit = .{};
         out.would_block_seed = .{};
         out.prepared_admit_use_permit = .{};
+        out.authority_permit = .{};
+        out.authority_cleanup_seed = .{};
+        out.turn_generation = 1;
         out.callback_region = .{};
         out.quarantine_receipt = .{};
         return true;
@@ -9540,6 +9594,7 @@ pub const ExternalPumpStorage = struct {
         writer.writeBool(evidence.rx_read_budget_exhausted);
         writer.writeU64(evidence.owner_inventory_generation);
         writer.writeBytes(&evidence.owner_snapshot_digest);
+        writer.writeBytes(&evidence.initial_inherited_snapshot_digest);
         writer.writeBytes(&evidence.inherited_blocker_snapshot_digest);
         writer.writeBool(evidence.final_owner_blockers_clear);
         writer.writeU8(@intFromEnum(evidence.lifecycle));
@@ -9652,6 +9707,7 @@ pub const ExternalPumpStorage = struct {
         lease: *ExternalWholeTurnLease,
         scratch: *ExternalRxTurnScratch,
         final: RxDrainFinalState,
+        initial_inherited_snapshot_digest: external_owner_seal.Digest,
     ) bool {
         const client = if (self.owned_client) |*owned| owned else return false;
         const state = switch (client.io_mode) {
@@ -9726,6 +9782,7 @@ pub const ExternalPumpStorage = struct {
             .rx_read_budget_exhausted = final.read_budget_exhausted,
             .owner_inventory_generation = snapshot.inventory_generation,
             .owner_snapshot_digest = snapshot.digest,
+            .initial_inherited_snapshot_digest = initial_inherited_snapshot_digest,
             .inherited_blocker_snapshot_digest = blocker.digest,
             .final_owner_blockers_clear = blocker.all_clear,
             .lifecycle = .prepared,
@@ -9957,45 +10014,53 @@ pub const ExternalPumpStorage = struct {
         self: *ExternalPumpStorage,
         scratch: *ExternalRxTurnScratch,
     ) bool {
+        if (!self.finishedRxDrainEvidenceResettable(scratch))
+            return false;
+        const evidence = &scratch.drain_evidence;
+        evidence.* = .{};
+        return true;
+    }
+
+    fn finishedRxDrainEvidenceResettable(
+        self: *ExternalPumpStorage,
+        scratch: *const ExternalRxTurnScratch,
+    ) bool {
         const evidence = &scratch.drain_evidence;
         const snapshot = &scratch.authority_snapshot;
-        if (scratch.saved_self_addr != @intFromPtr(scratch) or
-            scratch.lifecycle != .ready or
-            active_callback_region_addr != 0 or
-            active_callback_release_addr != 0 or
-            evidence.lifecycle != .finished or
-            !rxDrainEvidenceSealed(evidence) or
-            evidence.storage_addr != @intFromPtr(self) or
-            !ownerIncarnationValid(self) or
-            evidence.owner_incarnation != self.owner_incarnation or
-            !std.mem.eql(
+        return scratch.saved_self_addr == @intFromPtr(scratch) and
+            scratch.lifecycle == .ready and
+            active_callback_region_addr == 0 and
+            active_callback_release_addr == 0 and
+            evidence.lifecycle == .finished and
+            rxDrainEvidenceSealed(evidence) and
+            evidence.storage_addr == @intFromPtr(self) and
+            ownerIncarnationValid(self) and
+            evidence.owner_incarnation == self.owner_incarnation and
+            std.mem.eql(
                 u8,
                 &evidence.owner_incarnation_digest,
                 &self.owner_incarnation_seal.digest,
-            ) or
-            evidence.operation_generation != self.operation_generation or
-            evidence.read_scratch_addr != @intFromPtr(&scratch.read) or
-            scratch.read.generation !=
-                evidence.expected_post_settle_generation or
-            snapshot.saved_self_addr != @intFromPtr(snapshot) or
-            snapshot.storage_addr != @intFromPtr(self) or
-            snapshot.scratch_addr != @intFromPtr(scratch) or
-            snapshot.operation_generation != self.operation_generation or
-            snapshot.inventory_generation !=
-                evidence.owner_inventory_generation or
-            !std.mem.eql(
+            ) and
+            evidence.operation_generation == self.operation_generation and
+            evidence.read_scratch_addr == @intFromPtr(&scratch.read) and
+            scratch.read.generation ==
+                evidence.expected_post_settle_generation and
+            snapshot.saved_self_addr == @intFromPtr(snapshot) and
+            snapshot.storage_addr == @intFromPtr(self) and
+            snapshot.scratch_addr == @intFromPtr(scratch) and
+            snapshot.operation_generation == self.operation_generation and
+            snapshot.inventory_generation ==
+                evidence.owner_inventory_generation and
+            std.mem.eql(
                 u8,
                 &snapshot.digest,
                 &rxOwnerAuthoritySnapshotDigest(snapshot),
-            ) or
-            !std.mem.eql(
+            ) and
+            std.mem.eql(
                 u8,
                 &snapshot.digest,
                 &evidence.owner_snapshot_digest,
-            ))
-            return false;
-        evidence.* = .{};
-        return true;
+            );
     }
 
     /// Runs only the closed buffered parser and aggregate mechanics. The caller retains inherited
@@ -10990,6 +11055,7 @@ pub const ExternalPumpStorage = struct {
                         lease,
                         scratch,
                         drain_final,
+                        snapshot.digest,
                     );
                     if (!drain_prepared) {
                         terminal_reason = .invariant_failure;
@@ -11398,6 +11464,331 @@ pub const ExternalPumpStorage = struct {
         return result;
     }
 
+    const AuthorityAdapterResult = enum {
+        pristine,
+        aborted_and_reset,
+        terminal_closed,
+        terminal_poisoned,
+    };
+
+    fn authorityDestinationsPristine(scratch: *const ExternalRxTurnScratch) bool {
+        return std.meta.eql(
+            scratch.authority_permit,
+            client_external_turn_authority.PreparedAuthorityPermit{},
+        ) and std.meta.eql(
+            scratch.authority_cleanup_seed,
+            client_external_turn_authority.FrozenCleanupSeed{},
+        );
+    }
+
+    /// Rebuilds the permit projection from live owners while the whole-turn lease excludes every
+    /// sibling mutation. The caller deliberately invokes this again at each lifecycle edge:
+    /// reusing the original seed would turn an immutable record into a stale capability.
+    fn currentAuthorityViewUnderHeldLease(
+        self: *ExternalPumpStorage,
+        lease: *ExternalWholeTurnLease,
+        scratch: *ExternalRxTurnScratch,
+        summary: RxPreparedSummary,
+    ) ?client_external_turn_authority.CurrentView {
+        if (scratch.saved_self_addr != @intFromPtr(scratch) or
+            scratch.lifecycle != .busy or scratch.turn_generation == 0 or
+            scratch.turn_generation == std.math.maxInt(u64) or
+            active_callback_region_addr != 0 or
+            active_callback_release_addr != 0 or
+            self.operation_reentry_latched or
+            !ownerIncarnationValid(self) or !ownerAuthorityValid(self) or
+            !self.validateWholeTurnLease(lease))
+            return null;
+        const evidence = &scratch.drain_evidence;
+        if (evidence.lifecycle != .finished or
+            !self.rxDrainEvidenceCurrentForCleanup(lease, scratch, evidence) or
+            !evidence.final_owner_blockers_clear or
+            std.mem.allEqual(u8, &evidence.initial_inherited_snapshot_digest, 0))
+            return null;
+        const client = if (self.owned_client) |*owned| owned else return null;
+        const state = switch (client.io_mode) {
+            .external => |*external| external,
+            .blocking => return null,
+        };
+        if (@intFromPtr(client) != lease.rx_client_addr or
+            @intFromPtr(&client.parser) != lease.rx_parser_addr or
+            !client_external_mode.parserSealValid(state, &client.parser) or
+            !std.meta.eql(state.rx_provenance, lease.rx_provenance))
+            return null;
+        const readiness = client_external_mode.parserReadiness(
+            state,
+            &client.parser,
+        ) catch return null;
+        if (readiness != evidence.final_readiness)
+            return null;
+        const owner_snapshot = buildRxOwnerAuthoritySnapshot(
+            self,
+            lease,
+            scratch,
+        ) orelse return null;
+        const blockers = self.currentDrainBlockerProjection() orelse return null;
+        if (owner_snapshot.inventory_generation !=
+            evidence.owner_inventory_generation or
+            !std.mem.eql(
+                u8,
+                &owner_snapshot.digest,
+                &evidence.owner_snapshot_digest,
+            ) or !blockers.all_clear or
+            !std.mem.eql(
+                u8,
+                &blockers.digest,
+                &evidence.inherited_blocker_snapshot_digest,
+            ))
+            return null;
+        const authority = switch (self.owner_authority) {
+            .current => |current| current,
+            .empty => return null,
+        };
+        const semantic_active = switch (self.semantic_state) {
+            .active => true,
+            else => false,
+        };
+        return .{
+            .permit_addr = @intFromPtr(&scratch.authority_permit),
+            .cleanup_seed_addr = @intFromPtr(&scratch.authority_cleanup_seed),
+            .storage_addr = @intFromPtr(self),
+            .owner_incarnation = self.owner_incarnation,
+            .owner_incarnation_digest = self.owner_incarnation_seal.digest,
+            .scratch_addr = @intFromPtr(scratch),
+            .scratch_turn_generation = scratch.turn_generation,
+            .lease_addr = @intFromPtr(lease),
+            .operation_generation = lease.operation_generation,
+            .lease_digest = lease.digest,
+            .client_addr = @intFromPtr(client),
+            .parser_addr = @intFromPtr(&client.parser),
+            .parser_generation = state.rx_provenance.parser_seal.generation,
+            .parser_seal_digest = state.rx_provenance.parser_seal.digest,
+            .rx_provenance_digest = lease.rx_authority_digest,
+            .rx_absolute_next = state.rx_provenance.rx_absolute_next,
+            .drain_evidence_addr = @intFromPtr(evidence),
+            .drain_read_attempt_generation = evidence.read_attempt_generation,
+            .drain_evidence_digest = evidence.digest,
+            .inherited_blocker_snapshot_digest = evidence.initial_inherited_snapshot_digest,
+            .final_owner_snapshot_digest = evidence.owner_snapshot_digest,
+            .final_parser_readiness = switch (readiness) {
+                .empty => .empty,
+                .incomplete => .incomplete,
+                .complete_or_error => .complete_or_error,
+            },
+            .drain_evidence_lifecycle = .finished,
+            .final_blockers_clear = blockers.all_clear,
+            .read_budget_remaining = !summary.policy.rx_read_budget_exhausted,
+            .frame_budget_remaining = !summary.policy.rx_frame_budget_exhausted,
+            .work_budget_remaining = !summary.policy.work_budget_exhausted,
+            .terminal_or_revoke = summary.policy.terminal != null,
+            .semantic_active = semantic_active,
+            .reentry_clear = !self.operation_reentry_latched,
+            .attachment_role = authority.role,
+            .authority_flow = authority.flow,
+            .owner_authority_seal_digest = self.owner_authority_seal.digest,
+            .authority_generation = authority.generation,
+        };
+    }
+
+    fn abortPreparedAuthorityForCleanup(
+        scratch: *ExternalRxTurnScratch,
+    ) bool {
+        if (client_external_turn_authority.abortForCleanup(
+            &scratch.authority_permit,
+            &scratch.authority_cleanup_seed,
+        ) == .aborted) return true;
+        return client_external_turn_authority.poisonPreparedForTerminal(
+            &scratch.authority_permit,
+        );
+    }
+
+    /// D2 proves the whole-turn barrier without granting lower mutation authority: a successful
+    /// prepare is freshly validated, aborted, validated as spent by resetSpent, and erased before
+    /// the public adapter can return.
+    fn prepareAndAbortAuthorityUnderHeldLease(
+        self: *ExternalPumpStorage,
+        lease: *ExternalWholeTurnLease,
+        scratch: *ExternalRxTurnScratch,
+        summary: RxPreparedSummary,
+    ) AuthorityAdapterResult {
+        const seed = self.currentAuthorityViewUnderHeldLease(
+            lease,
+            scratch,
+            summary,
+        ) orelse return .terminal_poisoned;
+        switch (client_external_turn_authority.prepare(
+            &scratch.authority_permit,
+            &scratch.authority_cleanup_seed,
+            seed,
+        )) {
+            .ineligible => return if (authorityDestinationsPristine(scratch))
+                .pristine
+            else
+                .terminal_poisoned,
+            .invalid_seed, .destination_not_empty => return .terminal_poisoned,
+            .prepared => recordAuthorityAdapterTestEvent(.prepared),
+        }
+        if (hitAuthorityAdapterFailpoint(scratch, .after_prepare)) {
+            scratch.turn_generation += 1;
+        } else if (hitAuthorityAdapterFailpoint(
+            scratch,
+            .after_prepare_cleanup_corrupt,
+        )) {
+            scratch.turn_generation += 1;
+            scratch.authority_cleanup_seed.digest[0] ^= 1;
+        }
+        const validate_view = self.currentAuthorityViewUnderHeldLease(
+            lease,
+            scratch,
+            summary,
+        ) orelse {
+            return if (abortPreparedAuthorityForCleanup(scratch))
+                .terminal_closed
+            else
+                .terminal_poisoned;
+        };
+        if (!client_external_turn_authority.validate(
+            &scratch.authority_permit,
+            validate_view,
+        )) {
+            return if (abortPreparedAuthorityForCleanup(scratch))
+                .terminal_closed
+            else
+                .terminal_poisoned;
+        }
+        recordAuthorityAdapterTestEvent(.validated);
+        const abort_view = self.currentAuthorityViewUnderHeldLease(
+            lease,
+            scratch,
+            summary,
+        ) orelse {
+            return if (abortPreparedAuthorityForCleanup(scratch))
+                .terminal_closed
+            else
+                .terminal_poisoned;
+        };
+        if (client_external_turn_authority.abort(
+            &scratch.authority_permit,
+            abort_view,
+        ) != .aborted) {
+            return if (abortPreparedAuthorityForCleanup(scratch))
+                .terminal_closed
+            else
+                .terminal_poisoned;
+        }
+        recordAuthorityAdapterTestEvent(.aborted);
+        const reset_view = self.currentAuthorityViewUnderHeldLease(
+            lease,
+            scratch,
+            summary,
+        ) orelse return .terminal_poisoned;
+        if (!client_external_turn_authority.resetSpent(
+            &scratch.authority_permit,
+            &scratch.authority_cleanup_seed,
+            reset_view,
+        ) or !authorityDestinationsPristine(scratch))
+            return .terminal_poisoned;
+        recordAuthorityAdapterTestEvent(.reset);
+        return .aborted_and_reset;
+    }
+
+    fn prepareRxTurnForNextTurn(
+        self: *ExternalPumpStorage,
+        lease: *ExternalWholeTurnLease,
+        scratch: *ExternalRxTurnScratch,
+    ) bool {
+        if (scratch.lifecycle != .busy or
+            !authorityDestinationsPristine(scratch) or
+            !callbackRegionTokenPristine(&scratch.callback_region) or
+            active_callback_region_addr != 0 or
+            active_callback_release_addr != 0 or
+            active_callback_storage_addr != 0 or
+            active_callback_lease_addr != 0 or
+            active_callback_scratch_addr != 0 or
+            active_callback_permit_addr != 0 or
+            scratch.turn_generation == 0 or
+            scratch.turn_generation == std.math.maxInt(u64) or
+            !self.validateWholeTurnLease(lease) or
+            !std.meta.eql(scratch.snapshot, InheritedRxBlockerSnapshot{}) or
+            !std.meta.eql(scratch.live_consume, LiveScreenConsumePermit{}) or
+            !client_external_mode.guardedQuarantineReceiptPristine(
+                &scratch.quarantine_receipt,
+            ) or
+            !client_external_rx_turn.Scratch.closedForOuterTurn(
+                &scratch.traversal,
+            ))
+            return false;
+
+        const graph_pristine = client_external_rx_read.stoppedGraphPristine(
+            &scratch.stopped_borrow,
+            &scratch.borrow_use_permit,
+            &scratch.would_block_seed,
+            &scratch.prepared_admit_use_permit,
+        );
+        if (!graph_pristine and
+            !client_external_rx_read.settledStoppedGraphValid(
+                &scratch.read,
+                &scratch.collect_receipt,
+                &scratch.stopped_borrow,
+                &scratch.borrow_use_permit,
+                &scratch.would_block_seed,
+                &scratch.prepared_admit_use_permit,
+            ))
+            return false;
+        if (!scratch.read.isReady())
+            return false;
+        switch (scratch.drain_evidence.lifecycle) {
+            .empty => if (!rxDrainEvidencePristine(&scratch.drain_evidence))
+                return false,
+            .finished => if (!self.rxDrainEvidenceCurrentForCleanup(
+                lease,
+                scratch,
+                &scratch.drain_evidence,
+            ))
+                return false,
+            else => return false,
+        }
+        return true;
+    }
+
+    fn commitRxTurnForNextTurn(
+        scratch: *ExternalRxTurnScratch,
+        expected_generation: u64,
+    ) bool {
+        if (scratch.lifecycle != .busy or
+            scratch.turn_generation != expected_generation or
+            expected_generation == 0 or
+            expected_generation == std.math.maxInt(u64) or
+            !authorityDestinationsPristine(scratch) or
+            !callbackRegionTokenPristine(&scratch.callback_region) or
+            !scratch.read.isReady() or
+            !client_external_mode.guardedQuarantineReceiptPristine(
+                &scratch.quarantine_receipt,
+            ) or
+            (!client_external_rx_read.stoppedGraphPristine(
+                &scratch.stopped_borrow,
+                &scratch.borrow_use_permit,
+                &scratch.would_block_seed,
+                &scratch.prepared_admit_use_permit,
+            ) and !client_external_rx_read.settledStoppedGraphValid(
+                &scratch.read,
+                &scratch.collect_receipt,
+                &scratch.stopped_borrow,
+                &scratch.borrow_use_permit,
+                &scratch.would_block_seed,
+                &scratch.prepared_admit_use_permit,
+            )) or active_callback_region_addr != 0 or
+            active_callback_release_addr != 0 or
+            active_callback_storage_addr != 0 or
+            active_callback_lease_addr != 0 or
+            active_callback_scratch_addr != 0 or
+            active_callback_permit_addr != 0)
+            return false;
+        scratch.turn_generation = expected_generation + 1;
+        scratch.lifecycle = .ready;
+        return true;
+    }
+
     /// Runs one complete RX transaction. The product owner supplies the sole POSIX transport;
     /// module-local hostile fixtures use the same entry with injected read outcomes.
     pub fn pumpRxTurn(
@@ -11416,16 +11807,75 @@ pub const ExternalPumpStorage = struct {
             });
         if (scratch.saved_self_addr != @intFromPtr(scratch) or
             scratch.lifecycle != .ready or
+            scratch.turn_generation == 0 or
+            scratch.turn_generation == std.math.maxInt(u64) or
+            !authorityDestinationsPristine(scratch) or
             !callbackRegionTokenPristine(&scratch.callback_region) or
-            active_callback_region_addr != 0)
+            !scratch.read.isReady() or
+            !client_external_rx_turn.Scratch.closedForOuterTurn(
+                &scratch.traversal,
+            ) or !std.meta.eql(
+            scratch.snapshot,
+            InheritedRxBlockerSnapshot{},
+        ) or !std.meta.eql(
+            scratch.live_consume,
+            LiveScreenConsumePermit{},
+        ) or !client_external_mode.guardedQuarantineReceiptPristine(
+            &scratch.quarantine_receipt,
+        ) or active_callback_region_addr != 0 or
+            active_callback_release_addr != 0 or
+            active_callback_storage_addr != 0 or
+            active_callback_lease_addr != 0 or
+            active_callback_scratch_addr != 0 or
+            active_callback_permit_addr != 0)
             return self.terminalRxTurn(.invariant_failure, 0, 0);
-        switch (scratch.drain_evidence.lifecycle) {
-            .empty => if (!rxDrainEvidencePristine(&scratch.drain_evidence))
+        const stopped_graph_pristine =
+            client_external_rx_read.stoppedGraphPristine(
+                &scratch.stopped_borrow,
+                &scratch.borrow_use_permit,
+                &scratch.would_block_seed,
+                &scratch.prepared_admit_use_permit,
+            );
+        if (!stopped_graph_pristine and
+            !client_external_rx_read.settledStoppedGraphValid(
+                &scratch.read,
+                &scratch.collect_receipt,
+                &scratch.stopped_borrow,
+                &scratch.borrow_use_permit,
+                &scratch.would_block_seed,
+                &scratch.prepared_admit_use_permit,
+            ))
+            return self.terminalRxTurn(.invariant_failure, 0, 0);
+        const finished_drain = switch (scratch.drain_evidence.lifecycle) {
+            .empty => if (rxDrainEvidencePristine(&scratch.drain_evidence))
+                false
+            else
                 return self.terminalRxTurn(.invariant_failure, 0, 0),
-            .finished => if (!self.resetFinishedRxDrainEvidence(scratch))
+            .finished => if (self.finishedRxDrainEvidenceResettable(scratch))
+                true
+            else
                 return self.terminalRxTurn(.invariant_failure, 0, 0),
             else => return self.terminalRxTurn(.invariant_failure, 0, 0),
-        }
+        };
+        if (!stopped_graph_pristine and
+            !client_external_rx_read.resetSettledStoppedGraphForNextTurn(
+                &scratch.read,
+                &scratch.collect_receipt,
+                &scratch.stopped_borrow,
+                &scratch.borrow_use_permit,
+                &scratch.would_block_seed,
+                &scratch.prepared_admit_use_permit,
+            ))
+            return self.terminalRxTurn(.invariant_failure, 0, 0);
+        if (!client_external_rx_read.stoppedGraphPristine(
+            &scratch.stopped_borrow,
+            &scratch.borrow_use_permit,
+            &scratch.would_block_seed,
+            &scratch.prepared_admit_use_permit,
+        ))
+            return self.terminalRxTurn(.invariant_failure, 0, 0);
+        if (finished_drain and !self.resetFinishedRxDrainEvidence(scratch))
+            return self.terminalRxTurn(.invariant_failure, 0, 0);
         var lease: ExternalWholeTurnLease = .{};
         self.acquireWholeTurnLease(
             &lease,
@@ -11459,6 +11909,27 @@ pub const ExternalPumpStorage = struct {
             scratch,
             preparation,
         );
+        if (result.terminal == null and scratch.lifecycle != .terminal) {
+            switch (preparation) {
+                .drained => |summary| switch (self.prepareAndAbortAuthorityUnderHeldLease(
+                    &lease,
+                    scratch,
+                    summary,
+                )) {
+                    .pristine, .aborted_and_reset => {},
+                    .terminal_closed, .terminal_poisoned => {
+                        scratch.lifecycle = .terminal;
+                        result = self.terminalInjectedRxTurn(
+                            .invariant_failure,
+                            result.rx_read_bytes,
+                            result.rx_bytes,
+                            result.rx_frames,
+                        );
+                    },
+                },
+                .terminal, .without_drain => {},
+            }
+        }
         scratch.snapshot = .{};
         scratch.live_consume = .{};
         if (result.terminal != null or scratch.lifecycle == .terminal) {
@@ -11473,23 +11944,74 @@ pub const ExternalPumpStorage = struct {
                 &scratch.callback_region,
             ))
             scratch.lifecycle = .terminal;
-        if (scratch.lifecycle != .terminal and
-            callbackRegionTokenPristine(&scratch.callback_region))
-            scratch.lifecycle = .ready
-        else if (result.terminal == null)
+
+        var reusable_generation: ?u64 = null;
+        if (scratch.lifecycle != .terminal and result.terminal == null) {
+            const generation = scratch.turn_generation;
+            if (self.prepareRxTurnForNextTurn(
+                &lease,
+                scratch,
+            )) {
+                reusable_generation = generation;
+            } else {
+                scratch.lifecycle = .terminal;
+                result = self.terminalInjectedRxTurn(
+                    .invariant_failure,
+                    result.rx_read_bytes,
+                    result.rx_bytes,
+                    result.rx_frames,
+                );
+            }
+        }
+        if (scratch.lifecycle == .terminal and
+            result.terminal != null and reusable_generation == null and
+            self.semantic_state == .active)
+        {
+            result = self.finalizeInjectedRxTerminalUnderHeldLease(
+                &lease,
+                scratch,
+                result,
+            );
+        }
+
+        if (hitAuthorityAdapterFailpoint(
+            scratch,
+            .before_release_lease_digest_corrupt,
+        )) lease.digest[0] ^= 1;
+        const release_result = self.releaseWholeTurnLease(&lease);
+        if (release_result != .released) {
+            scratch.lifecycle = .terminal;
             result = self.terminalInjectedRxTurn(
                 .invariant_failure,
                 result.rx_read_bytes,
                 result.rx_bytes,
                 result.rx_frames,
             );
-        if (self.releaseWholeTurnLease(&lease) != .released) {
+            if (self.lifecycle == .live)
+                self.semantic_state = .{ .terminal = result.terminal.? };
+            reusable_generation = null;
+        } else if (reusable_generation) |generation| {
+            if (!commitRxTurnForNextTurn(scratch, generation)) {
+                scratch.lifecycle = .terminal;
+                result = self.terminalInjectedRxTurn(
+                    .invariant_failure,
+                    result.rx_read_bytes,
+                    result.rx_bytes,
+                    result.rx_frames,
+                );
+                if (self.lifecycle == .live)
+                    self.semantic_state = .{ .terminal = result.terminal.? };
+            }
+        } else if (result.terminal == null) {
+            scratch.lifecycle = .terminal;
             result = self.terminalInjectedRxTurn(
                 .invariant_failure,
                 result.rx_read_bytes,
                 result.rx_bytes,
                 result.rx_frames,
             );
+            if (self.lifecycle == .live)
+                self.semantic_state = .{ .terminal = result.terminal.? };
         }
         return result;
     }
@@ -26350,6 +26872,12 @@ test "C4d injected zero-prefix would-block settles and publishes drain once" {
     );
     try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
     try std.testing.expect(storage.commitAdoption() == .adopted);
+    var fence_clear: projection_test.PreparedInitialFenceClear = .{};
+    try std.testing.expect(projection_test.prepare(&storage, &fence_clear));
+    try std.testing.expectEqual(
+        projection_test.InitialFenceClearResult.cleared,
+        projection_test.commit(&storage, &fence_clear),
+    );
     defer _ = teardownForTest(&storage);
 
     const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
@@ -26371,8 +26899,11 @@ test "C4d injected zero-prefix would-block settles and publishes drain once" {
         },
     };
     var drain_recorder = RxDrainTestRecorder{};
+    var authority_recorder = AuthorityAdapterTestRecorder{};
     rx_drain_test_recorder = &drain_recorder;
+    authority_adapter_test_recorder = &authority_recorder;
     defer rx_drain_test_recorder = null;
+    defer authority_adapter_test_recorder = null;
     const result = storage.pumpRxTurn(
         .{ .readable = true, .writable = false, .now_ns = 1 },
         &ops,
@@ -26391,6 +26922,21 @@ test "C4d injected zero-prefix would-block settles and publishes drain once" {
         drain_recorder.events,
     );
     rx_drain_test_recorder = null;
+    authority_adapter_test_recorder = null;
+    try std.testing.expectEqual(@as(u8, 4), authority_recorder.len);
+    try std.testing.expectEqual(
+        [_]AuthorityAdapterTestEvent{
+            .prepared,
+            .validated,
+            .aborted,
+            .reset,
+        },
+        authority_recorder.events,
+    );
+    try std.testing.expect(
+        ExternalPumpStorage.authorityDestinationsPristine(scratch),
+    );
+    try std.testing.expectEqual(@as(u64, 2), scratch.turn_generation);
     try std.testing.expect(scratch.read.isReady());
     try std.testing.expectEqual(
         RxDrainEvidenceLifecycle.finished,
@@ -26584,6 +27130,369 @@ test "C4d injected zero-prefix would-block settles and publishes drain once" {
         evidence_before_reconstruction,
         scratch.drain_evidence,
     ));
+}
+
+test "D2 max turn generation rejects before lease and preserves scratch authority" {
+    const ApplyProbe = struct {
+        fn apply(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
+    };
+    const ReadProbe = struct {
+        calls: usize = 0,
+
+        fn read(
+            raw: *anyopaque,
+            _: posix.fd_t,
+            _: []u8,
+        ) client_external_rx_read.RxReadOutcome {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            return .would_block;
+        }
+    };
+
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    defer _ = teardownForTest(&storage);
+
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    scratch.turn_generation = std.math.maxInt(u64);
+    const lifecycle_before = scratch.lifecycle;
+    const generation_before = scratch.turn_generation;
+    const drain_before = scratch.drain_evidence;
+    const callback_before = scratch.callback_region;
+    const permit_before = scratch.authority_permit;
+    const cleanup_before = scratch.authority_cleanup_seed;
+    const operation_generation_before = storage.operation_generation;
+    var apply_context: u8 = 0;
+    var read_probe = ReadProbe{};
+    const ops = RxTurnOps{
+        .buffered = .{
+            .context = &apply_context,
+            .context_len = @sizeOf(u8),
+            .apply_live_screen = ApplyProbe.apply,
+        },
+        .transport = .{
+            .context = &read_probe,
+            .context_len = @sizeOf(ReadProbe),
+            .read = ReadProbe.read,
+        },
+    };
+    const result = storage.pumpRxTurn(
+        .{ .readable = true, .writable = true, .now_ns = 1 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expectEqual(
+        client_pump.TerminalReason.invariant_failure,
+        result.terminal.?.reason,
+    );
+    try std.testing.expectEqual(@as(usize, 0), read_probe.calls);
+    try std.testing.expectEqual(
+        operation_generation_before,
+        storage.operation_generation,
+    );
+    try std.testing.expectEqual(lifecycle_before, scratch.lifecycle);
+    try std.testing.expectEqual(generation_before, scratch.turn_generation);
+    try std.testing.expect(std.meta.eql(drain_before, scratch.drain_evidence));
+    try std.testing.expect(std.meta.eql(callback_before, scratch.callback_region));
+    try std.testing.expect(std.meta.eql(permit_before, scratch.authority_permit));
+    try std.testing.expect(std.meta.eql(
+        cleanup_before,
+        scratch.authority_cleanup_seed,
+    ));
+    try std.testing.expect(
+        ExternalPumpStorage.authorityDestinationsPristine(scratch),
+    );
+}
+
+test "D2 cleanup corruption after prepare poisons permit and terminalizes scratch" {
+    const ApplyProbe = struct {
+        fn apply(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
+    };
+    const ReadProbe = struct {
+        calls: usize = 0,
+
+        fn read(
+            raw: *anyopaque,
+            _: posix.fd_t,
+            _: []u8,
+        ) client_external_rx_read.RxReadOutcome {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            return .would_block;
+        }
+    };
+
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    var fence_clear: projection_test.PreparedInitialFenceClear = .{};
+    try std.testing.expect(projection_test.prepare(&storage, &fence_clear));
+    try std.testing.expectEqual(
+        projection_test.InitialFenceClearResult.cleared,
+        projection_test.commit(&storage, &fence_clear),
+    );
+    defer _ = teardownForTest(&storage);
+
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    var apply_context: u8 = 0;
+    var read_probe = ReadProbe{};
+    const ops = RxTurnOps{
+        .buffered = .{
+            .context = &apply_context,
+            .context_len = @sizeOf(u8),
+            .apply_live_screen = ApplyProbe.apply,
+        },
+        .transport = .{
+            .context = &read_probe,
+            .context_len = @sizeOf(ReadProbe),
+            .read = ReadProbe.read,
+        },
+    };
+    var recorder = AuthorityAdapterTestRecorder{};
+    authority_adapter_test_recorder = &recorder;
+    authority_adapter_failpoint = .after_prepare_cleanup_corrupt;
+    authority_adapter_failpoint_scratch_addr = @intFromPtr(scratch);
+    defer {
+        authority_adapter_test_recorder = null;
+        authority_adapter_failpoint = .none;
+        authority_adapter_failpoint_scratch_addr = 0;
+    }
+    const result = storage.pumpRxTurn(
+        .{ .readable = true, .writable = true, .now_ns = 1 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expectEqual(@as(usize, 1), read_probe.calls);
+    try std.testing.expectEqual(
+        client_pump.TerminalReason.invariant_failure,
+        result.terminal.?.reason,
+    );
+    try std.testing.expectEqual(ExternalRxTurnScratchLifecycle.terminal, scratch.lifecycle);
+    try std.testing.expectEqual(@as(u8, 1), recorder.len);
+    try std.testing.expectEqual(
+        AuthorityAdapterTestEvent.prepared,
+        recorder.events[0],
+    );
+    try std.testing.expectEqual(
+        client_external_turn_authority.PermitLifecycle.aborted,
+        scratch.authority_permit.lifecycle,
+    );
+    try std.testing.expectEqual(
+        client_external_turn_authority.CleanupLifecycle.prepared,
+        scratch.authority_cleanup_seed.lifecycle,
+    );
+}
+
+test "D2 lease release failure never commits ready generation" {
+    const ApplyProbe = struct {
+        fn apply(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
+    };
+    const ReadProbe = struct {
+        calls: usize = 0,
+        fn read(
+            raw: *anyopaque,
+            _: posix.fd_t,
+            _: []u8,
+        ) client_external_rx_read.RxReadOutcome {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            return .would_block;
+        }
+    };
+
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    defer _ = teardownForTest(&storage);
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    const generation_before = scratch.turn_generation;
+    var apply_context: u8 = 0;
+    var read_probe = ReadProbe{};
+    const ops = RxTurnOps{
+        .buffered = .{
+            .context = &apply_context,
+            .context_len = @sizeOf(u8),
+            .apply_live_screen = ApplyProbe.apply,
+        },
+        .transport = .{
+            .context = &read_probe,
+            .context_len = @sizeOf(ReadProbe),
+            .read = ReadProbe.read,
+        },
+    };
+    authority_adapter_failpoint = .before_release_lease_digest_corrupt;
+    authority_adapter_failpoint_scratch_addr = @intFromPtr(scratch);
+    defer {
+        authority_adapter_failpoint = .none;
+        authority_adapter_failpoint_scratch_addr = 0;
+    }
+    const result = storage.pumpRxTurn(
+        .{ .readable = true, .writable = true, .now_ns = 1 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expectEqual(@as(usize, 1), read_probe.calls);
+    try std.testing.expectEqual(
+        client_pump.TerminalReason.invariant_failure,
+        result.terminal.?.reason,
+    );
+    try std.testing.expectEqual(
+        ExternalRxTurnScratchLifecycle.terminal,
+        scratch.lifecycle,
+    );
+    try std.testing.expectEqual(generation_before, scratch.turn_generation);
+    try std.testing.expect(
+        ExternalPumpStorage.authorityDestinationsPristine(scratch),
+    );
+    try std.testing.expect(storage.semantic_state == .terminal);
+}
+
+test "D2 cross-turn child drift is rejected before lease and transport" {
+    const ApplyProbe = struct {
+        fn apply(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
+    };
+    const ReadProbe = struct {
+        calls: usize = 0,
+        fn read(
+            raw: *anyopaque,
+            _: posix.fd_t,
+            _: []u8,
+        ) client_external_rx_read.RxReadOutcome {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            return .would_block;
+        }
+    };
+    const Drift = enum { borrow, use_permit, seed, prepared_use, quarantine };
+
+    inline for (std.enums.values(Drift)) |drift| {
+        var fixture = try TestClient.init();
+        defer fixture.deinitPeer();
+        var storage: ExternalPumpStorage = .{};
+        try std.testing.expect(
+            initTestStorage(&storage, &fixture.client, valid_evidence) ==
+                .initialized,
+        );
+        try std.testing.expect(
+            prepareAdoptionForTest(&storage) == .prepared_adopted,
+        );
+        try std.testing.expect(storage.commitAdoption() == .adopted);
+        defer _ = teardownForTest(&storage);
+        const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+        defer std.testing.allocator.destroy(scratch);
+        scratch.* = .{};
+        try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+        var apply_context: u8 = 0;
+        var read_probe = ReadProbe{};
+        const ops = RxTurnOps{
+            .buffered = .{
+                .context = &apply_context,
+                .context_len = @sizeOf(u8),
+                .apply_live_screen = ApplyProbe.apply,
+            },
+            .transport = .{
+                .context = &read_probe,
+                .context_len = @sizeOf(ReadProbe),
+                .read = ReadProbe.read,
+            },
+        };
+        const first = storage.pumpRxTurn(
+            .{ .readable = true, .writable = false, .now_ns = 1 },
+            &ops,
+            scratch,
+        );
+        try std.testing.expect(first.terminal == null);
+        try std.testing.expectEqual(@as(usize, 1), read_probe.calls);
+        const generation_before = scratch.turn_generation;
+        const operation_before = storage.operation_generation;
+        switch (drift) {
+            .borrow => scratch.stopped_borrow.digest[0] ^= 1,
+            .use_permit => scratch.borrow_use_permit.digest[0] ^= 1,
+            .seed => scratch.would_block_seed.digest[0] ^= 1,
+            .prepared_use => scratch.prepared_admit_use_permit.saved_self_addr =
+                @intFromPtr(&scratch.prepared_admit_use_permit),
+            .quarantine => scratch.quarantine_receipt.saved_self_addr =
+                @intFromPtr(&scratch.quarantine_receipt),
+        }
+        const mutated_marker: usize = switch (drift) {
+            .borrow => scratch.stopped_borrow.digest[0],
+            .use_permit => scratch.borrow_use_permit.digest[0],
+            .seed => scratch.would_block_seed.digest[0],
+            .prepared_use => scratch.prepared_admit_use_permit.saved_self_addr,
+            .quarantine => scratch.quarantine_receipt.saved_self_addr,
+        };
+        const second = storage.pumpRxTurn(
+            .{ .readable = true, .writable = false, .now_ns = 2 },
+            &ops,
+            scratch,
+        );
+        try std.testing.expectEqual(
+            client_pump.TerminalReason.invariant_failure,
+            second.terminal.?.reason,
+        );
+        try std.testing.expectEqual(@as(usize, 1), read_probe.calls);
+        try std.testing.expectEqual(generation_before, scratch.turn_generation);
+        try std.testing.expectEqual(operation_before, storage.operation_generation);
+        try std.testing.expectEqual(mutated_marker, switch (drift) {
+            .borrow => scratch.stopped_borrow.digest[0],
+            .use_permit => scratch.borrow_use_permit.digest[0],
+            .seed => scratch.would_block_seed.digest[0],
+            .prepared_use => scratch.prepared_admit_use_permit.saved_self_addr,
+            .quarantine => scratch.quarantine_receipt.saved_self_addr,
+        });
+        try std.testing.expect(
+            ExternalPumpStorage.authorityDestinationsPristine(scratch),
+        );
+    }
 }
 
 test "S3-D incomplete positive prefix cannot mint or consume drain evidence" {

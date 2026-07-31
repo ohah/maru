@@ -2004,6 +2004,105 @@ fn settledStoppedGraphClosed(
     };
 }
 
+/// Authenticates the complete settled graph before erasing its scalar tombstones for reuse.
+/// `CollectReceipt` has no empty value, so it is deliberately made undefined only after every
+/// address, generation, digest, and lifecycle edge has been validated.
+pub fn resetSettledStoppedGraphForNextTurn(
+    scratch: *ExternalRxReadScratch,
+    receipt: *CollectReceipt,
+    borrow: *StoppedBorrow,
+    use_permit: *BorrowUsePermit,
+    seed: *WouldBlockSeed,
+    prepared_use: *PreparedAdmitUsePermit,
+) bool {
+    if (!stoppedGraphRangesDisjoint(
+        scratch,
+        receipt,
+        borrow,
+        use_permit,
+        seed,
+        prepared_use,
+    ) or !settledStoppedGraphClosed(
+        scratch,
+        receipt,
+        borrow,
+        use_permit,
+        seed,
+        prepared_use,
+    ))
+        return false;
+    borrow.* = .{};
+    use_permit.* = .{};
+    seed.* = .{};
+    prepared_use.* = .{};
+    receipt.* = undefined;
+    return true;
+}
+
+pub fn settledStoppedGraphValid(
+    scratch: *const ExternalRxReadScratch,
+    receipt: *const CollectReceipt,
+    borrow: *const StoppedBorrow,
+    use_permit: *const BorrowUsePermit,
+    seed: *const WouldBlockSeed,
+    prepared_use: *const PreparedAdmitUsePermit,
+) bool {
+    return stoppedGraphRangesDisjoint(
+        scratch,
+        receipt,
+        borrow,
+        use_permit,
+        seed,
+        prepared_use,
+    ) and settledStoppedGraphClosed(
+        scratch,
+        receipt,
+        borrow,
+        use_permit,
+        seed,
+        prepared_use,
+    );
+}
+
+pub fn stoppedGraphPristine(
+    borrow: *const StoppedBorrow,
+    use_permit: *const BorrowUsePermit,
+    seed: *const WouldBlockSeed,
+    prepared_use: *const PreparedAdmitUsePermit,
+) bool {
+    return borrow.saved_self_addr == 0 and borrow.scratch_addr == 0 and
+        borrow.scratch_generation == 0 and borrow.receipt_addr == 0 and
+        std.mem.allEqual(u8, &borrow.receipt_digest, 0) and
+        borrow.bytes_addr == 0 and borrow.bytes_len == 0 and
+        borrow.lifecycle == .empty and std.mem.allEqual(u8, &borrow.digest, 0) and
+        use_permit.saved_self_addr == 0 and use_permit.scratch_addr == 0 and
+        use_permit.scratch_generation == 0 and
+        std.mem.allEqual(u8, &use_permit.receipt_digest, 0) and
+        use_permit.borrow_addr == 0 and use_permit.authorized_seed_addr == 0 and
+        use_permit.authorized_seed_len == 0 and
+        use_permit.guard_context_len == 0 and
+        use_permit.seed_lifecycle == .unminted and
+        std.mem.allEqual(u8, &use_permit.seed_digest, 0) and
+        use_permit.lifecycle == .empty and
+        std.mem.allEqual(u8, &use_permit.digest, 0) and
+        seed.saved_self_addr == 0 and seed.scratch_addr == 0 and
+        seed.scratch_generation == 0 and
+        std.mem.allEqual(u8, &seed.receipt_digest, 0) and
+        seed.borrow_addr == 0 and seed.attempt_generation == 0 and
+        seed.lifecycle == .empty and std.mem.allEqual(u8, &seed.digest, 0) and
+        prepared_use.saved_self_addr == 0 and
+        prepared_use.scratch_addr == 0 and
+        prepared_use.scratch_generation == 0 and
+        prepared_use.receipt_addr == 0 and prepared_use.borrow_addr == 0 and
+        prepared_use.use_permit_addr == 0 and prepared_use.seed_addr == 0 and
+        std.mem.allEqual(u8, &prepared_use.frozen_outer_digest, 0) and
+        prepared_use.frozen_borrow.saved_self_addr == 0 and
+        prepared_use.frozen_use_permit.saved_self_addr == 0 and
+        prepared_use.frozen_seed.saved_self_addr == 0 and
+        prepared_use.lifecycle == .empty and
+        std.mem.allEqual(u8, &prepared_use.digest, 0);
+}
+
 fn seedMatchesPermit(
     scratch: *const ExternalRxReadScratch,
     permit: *const BorrowUsePermit,

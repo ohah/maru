@@ -27,6 +27,7 @@ test "d2d whole-turn authority stays a pure owner-free leaf" {
         "pub fn validate(",
         "pub fn abort(",
         "pub fn abortForCleanup(",
+        "pub fn poisonPreparedForTerminal(",
         "pub fn resetSpent(",
     };
     for (lifecycle_apis) |signature|
@@ -74,7 +75,13 @@ test "d2d whole-turn authority stays a pure owner-free leaf" {
     );
 
     var importers: usize = 0;
-    var lifecycle_calls: usize = 0;
+    var prepare_calls: usize = 0;
+    var validate_calls: usize = 0;
+    var abort_calls: usize = 0;
+    var cleanup_abort_calls: usize = 0;
+    var poison_calls: usize = 0;
+    var reset_spent_calls: usize = 0;
+    var consume_calls: usize = 0;
     var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
     defer dir.close(std.testing.io);
     var walker = try dir.walk(allocator);
@@ -108,20 +115,77 @@ test "d2d whole-turn authority stays a pure owner-free leaf" {
                 "client_external_turn_authority.zig",
             ));
         }
-        for ([_][]const u8{
+        prepare_calls += countOccurrences(
+            source,
             "client_external_turn_authority.prepare(",
+        );
+        validate_calls += countOccurrences(
+            source,
             "client_external_turn_authority.validate(",
+        );
+        abort_calls += countOccurrences(
+            source,
             "client_external_turn_authority.abort(",
+        );
+        cleanup_abort_calls += countOccurrences(
+            source,
             "client_external_turn_authority.abortForCleanup(",
+        );
+        poison_calls += countOccurrences(
+            source,
+            "client_external_turn_authority.poisonPreparedForTerminal(",
+        );
+        reset_spent_calls += countOccurrences(
+            source,
             "client_external_turn_authority.resetSpent(",
+        );
+        consume_calls += countOccurrences(
+            source,
             "client_external_turn_authority.consume(",
-        }) |call|
-            lifecycle_calls += countOccurrences(source, call);
+        );
     }
     try std.testing.expectEqual(@as(usize, 1), importers);
-    // D0 owns only the type/lifecycle leaf. D2 adds the sole prepare/abort/reset adapter caller;
-    // the future consume caller remains zero until f3.
-    try std.testing.expectEqual(@as(usize, 0), lifecycle_calls);
+    // D2 owns one auditable lifecycle edge per operation. The future mutation consumer remains
+    // absent until f3, so the temporary adapter can only prepare and close authority.
+    try std.testing.expectEqual(@as(usize, 1), prepare_calls);
+    try std.testing.expectEqual(@as(usize, 1), validate_calls);
+    try std.testing.expectEqual(@as(usize, 1), abort_calls);
+    try std.testing.expectEqual(@as(usize, 1), cleanup_abort_calls);
+    try std.testing.expectEqual(@as(usize, 1), poison_calls);
+    try std.testing.expectEqual(@as(usize, 1), reset_spent_calls);
+    try std.testing.expectEqual(@as(usize, 0), consume_calls);
+}
+
+test "d2d adapter pins authority records and a monotonic turn generation in canonical scratch" {
+    const allocator = std.testing.allocator;
+    const pump = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/client_external_pump.zig",
+    );
+    defer allocator.free(pump);
+
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(
+            pump,
+            "authority_permit: client_external_turn_authority.PreparedAuthorityPermit",
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(
+            pump,
+            "authority_cleanup_seed: client_external_turn_authority.FrozenCleanupSeed",
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(pump,
+            \\    authority_permit: client_external_turn_authority.PreparedAuthorityPermit = .{},
+            \\    authority_cleanup_seed: client_external_turn_authority.FrozenCleanupSeed = .{},
+            \\    turn_generation: u64 = 0,
+        ),
+    );
 }
 
 test "d2d RX preparation leaf cannot publish scheduling policy" {

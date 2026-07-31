@@ -50,6 +50,15 @@ pub const Scratch = struct {
         out.digest = scratchDigest(out);
         return true;
     }
+
+    pub fn closedForOuterTurn(out: *const Scratch) bool {
+        const lifecycle_closed =
+            scratchControlValid(out, .ready) or
+            scratchControlValid(out, .closed);
+        return lifecycle_closed and
+            client_external_mode.rxParseScratchPristine(&out.parse) and
+            external_rx_intent.closedForOuterTurn(&out.intent);
+    }
 };
 
 pub const Input = struct {

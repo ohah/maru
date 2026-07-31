@@ -481,7 +481,11 @@ L4 macOS host가 open document를 디렉터리별로 묶어 `DispatchSource` 또
 
 상한은 raw blob뿐 아니라 UTF-8 decode와 JSON escape 뒤 전송 bytes, 파일 수, hunk 수, line length를 각각 센다. 압축/escape 전 크기만 검사해 메모리 증폭을 허용하지 않는다.
 
-Git read도 workspace 내용을 노출하므로 `git_read` grant 없이는 허용하지 않는다.
+**git 읽기 승인은 workspace root 승인에 포함된다(§10.4 결정).** 탐색기로 연 폴더는 사용자가 이미 고른 root이므로 그 안의
+git 읽기를 위해 **사용자에게 다시 묻지 않는다**. 읽기 범위는 그 root 아래로 제한되고, root 밖 저장소를 읽으려면 그 root를
+먼저 열어야 한다. **`EditorGrant.git_read` 플래그 자체는 그대로다**(§3.1·§3.2) — 그것은 사용자 확인 절차가 아니라 *웹
+브리지가 넘는 경계*이고, diff Term과 md 뷰어 Term을 가르는 수단이다. 바뀌는 것은 그 플래그를 **root 승인에서 파생시킨다**는
+점뿐이다. **쓰기(stage/unstage/discard)는 끝까지 별도 capability**다(§10.14).
 
 Git 의미와 실행 안전도 E1 전에 고정한다.
 
@@ -523,7 +527,8 @@ git 기준(HEAD/index/worktree) 외에 **"에이전트가 방금 바꾼 것"**�
 - **실현성 판정**: showstopper가 될 뻔한 두 관문(에이전트 턴 인식·스냅샷 안전성)이 실측으로 닫혔으므로 **불확실한 연구가 아니라 평범한 구현**이다.
 - 이 base는 **read 전용**이라 `git_read`와 무관한 별도 위험이 없다(스냅샷 캡처는 write-tree/파일 read뿐, 작업트리 변형 없음). 다만 tree OID 캡처가 index를 건드리지 않도록 **임시 index**(`GIT_INDEX_FILE`)로 격리한다.
 
-**결정(§10에 추가)**: 턴 경계 스냅샷을 ①write-tree vs ②touched-files로 할지, ring buffer 보관 정책(개수·세션 수명·저장 위치), 그리고 turn-base를 v1에 넣을지(리뷰 UX의 핵심이라 기본 base 후보) 아니면 E2 후속으로 둘지.
+**결정(2026-07-31, §10.11)**: turn-base는 **E2 후속**이다 — v1은 git 기준만 다룬다. 스냅샷 방식(①write-tree vs
+②touched-files)과 ring buffer 보관 정책은 그 단계에서 정한다.
 
 ## 7. 빌드·에디터 엔진·CSP gate
 
@@ -712,8 +717,9 @@ editor event는 처음부터 하나의 domain schema를 공유하되 문서 원�
   메시지 입력은 아직 없다.
 - **diff 파일 Term** — 파일 entry `diff` kind + 브리지 `diff.list`/`diff.open` method. CSP는 손대지 않는다(§7.2).
 - semantic oracle + 제품 WKWebView regression
-- git comparison/status matrix와 external diff/textconv 실행 차단
-- 에이전트 턴 base(§6.1)는 §10.11에서 v1 채택 시 이 단계에 포함, 아니면 E2 후속.
+- git comparison/status matrix와 external diff/textconv 실행 차단. **base 선택기는 만들지 않는다** — 행이 속한 섹션이
+  기준이다(§10.10). 상한은 파일 1 MiB · diff 페이지 500행에서 출발하고 실측으로 조정한다(§10.6).
+- 에이전트 턴 base(§6.1)는 **E2 후속으로 결정됐다**(§10.11) — E1 범위 밖이다.
 - **종료:** grant root 밖 접근·큰 파일·binary·rename·worktree `.git` file·untracked/conflict/submodule·close/revoke를 포함한 read-only review loop green.
 
 ### E2 — 편집·저장·외부 변경
@@ -741,34 +747,65 @@ editor event는 처음부터 하나의 domain schema를 공유하되 문서 원�
 - 증분 대형 문서 전송과 virtualized diff
 - 다중 root·동시 여러 repository, remote/SSH workspace. 단일 linked worktree의 `.git` file 처리는 E1 범위다.
 
-## 10. 구현 전 사용자 결정
+## 10. 사용자 결정
 
-다음은 문서만으로 승인된 것으로 간주하지 않는다.
+문서만으로 승인된 것으로 간주하지 않는 항목들이다. 결정된 것은 날짜와 함께 **계약**으로 남기고, 남은 것만 질문으로 둔다.
+번호는 최초 목록의 것을 유지한다 — 다른 문서·PR이 번호로 참조하기 때문이다.
 
-0. **[file-panel.md](file-panel.md)와의 정합 — FP16으로 형태가 바뀌었다(2026-07-31).** 원래 질문은 "(a) 도크 콘텐츠 kind vs
-   (b) 별도 `.editor` surface"였으나, FP16이 도크에서 콘텐츠 rect를 없애고 파일을 워크스페이스 `Term`으로 옮기면서 **둘 다
-   그대로는 성립하지 않는다.** 현재 설계는 **(a′) 목록은 우측 도크의 새 뷰(GPU chrome) · 본문은 diff kind 파일 Term**이며
-   §3~§3.5가 그 기준으로 재작성됐다. 별도 `PanelKind`는 여전히 만들지 않는다. **남은 결정은 (a′) 확정 여부 하나다.**
+### 10.A 결정됨
+
+0. **정합 형태 = (a′) 확정(2026-07-31).** **목록은 우측 도크의 새 뷰(GPU chrome) · 본문은 diff kind 파일 Term**이고 별도
+   `PanelKind`는 만들지 않는다. 원래 질문이던 "(a) 도크 콘텐츠 kind vs (b) 별도 `.editor` surface"는 FP16이 도크에서 콘텐츠
+   rect를 없애며 둘 다 성립하지 않게 됐고, §3~§3.5가 (a′) 기준으로 재작성돼 도크 뷰가 이미 그 형태로 출하됐다.
+
 0b. **에디터 엔진 = CM6 (확정, 2026-07-17 · §1.1).** git diff는 `@codemirror/merge` MergeView/unifiedMergeView, hunk staging은 acceptChunk/rejectChunk. Monaco는 채택하지 않는다(WebKit RED가 diff 표시에도 걸리고, 마크다운이 CM6라 엔진 이원화). 이 확정이 §7.1·§7.4·§9의 Monaco 조건부 항목을 CM6 기준으로 바꿨다. **남은 엔진 관련 결정은 없다.**
-1. `PanelKind.editor`와 ABI/wire 확장 — **(a′)에서는 필요 없다.** 0을 뒤집을 때만 되살아난다.
-2. `@codemirror/merge` 의존 추가 (zntc pin은 `0.1.4`로 이미 해소 — §7.1)
+
+1. **`PanelKind.editor`·ABI/wire 확장은 만들지 않는다(2026-07-31).** (a′)의 직접 귀결이다 — 0을 뒤집을 때만 되살아난다.
+
+2. **`@codemirror/merge`를 쓴다(2026-07-31).** 번들 가능성과 제품 WebKit 런타임이 모두 실증됐다(§7.4). 제품 번들 편입은
+   E1에서 하고, 그때 번들 크기를 다시 잰다.
+
 3. ~~editor origin 한정 `style-src 'unsafe-inline'` 허용 여부~~ → **소멸(FP12b, 2026-07-22 사용자 결정으로 이미 닫힘).**
    app origin은 `'unsafe-inline'`, render origin은 hash 핀이며 그 완화 이유가 CM6 style-mod다(§2·§7.2). editor는 그 위에
    얹기만 한다.
-4. 최초 workspace/file/git grant UX와 native `root_id`/root descriptor 발급·회수
+
+4. **git 읽기 승인은 workspace root 승인에 포함한다(2026-07-31).** 탐색기로 연 폴더 안의 git 읽기를 위해 사용자에게
+   다시 묻지 않고, `EditorGrant.git_read`는 그 root 승인에서 **파생**시킨다(플래그 자체는 §3.1 그대로 — 웹 브리지 경계는
+   유지된다). **쓰기(stage/unstage/discard)는 끝까지 별도 capability**다(§6·§10.14). native `root_id`/descriptor 발급·회수
+   방식은 E1 구현에서 정한다.
+
+6. **상한은 보수적으로 시작해 실측으로 조정한다(2026-07-31).** 파일 1 MiB · diff 페이지 500행에서 출발하고, 넘으면
+   typed `too_large`와 external-open fallback을 준다(§6). 이 값들은 E1에서 실제 저장소로 재본 뒤 근거와 함께 갱신한다.
+
+10. **섹션이 곧 기준이다 — 전역 기본 base도, base 선택기도 두지 않는다(2026-07-31).** 행이 속한 섹션이 비교 기준을
+    정한다(스테이지된 변경=`HEAD↔index`, 변경 사항=`index↔worktree`, 추적되지 않은 파일=비교 대상 없음 — §3.5 표). 목록이
+    이미 그렇게 서 있어 규칙이 하나로 유지되고, 사용자가 base를 고를 일이 없다. conflict는 `U`로 표시하고(파서 구현됨),
+    submodule은 v1에서 별도 표기 없이 경로로만 낸다.
+
+11. **에이전트 턴 diff(§6.1)는 E2 후속이다(2026-07-31).** v1은 git 기준(HEAD/index/worktree)만 다룬다. 턴 base는 전체
+    transcript 파싱(현행 파서는 tail만 읽는다)·턴 경계 스냅샷 배관·ring buffer 보관 정책이 **전부 신규**라 E1을 두 배로
+    키운다. diff가 제품에서 도는 것을 먼저 확인하고 얹는다. 스냅샷 방식(write-tree vs touched-files)과 보관 정책은 그때 정한다.
+
+13. **도크 뷰 스위처 = 3슬롯·영속·마지막 뷰 유지(2026-07-31, 출하됨).** 아이콘 줄은 탐색기 · 소스 컨트롤 · AI 세션
+    목록 세 칸이다. 선택한 뷰는 workspace에 `dock-view`로 영속하고 모르는 값은 탐색기로 clamp한다. 포커스 왕복은 뷰를
+    바꾸지 않는다(마지막 뷰 유지). 이 결정은 [file-explorer.md](file-explorer.md) §3.5와 공유한다.
+
+### 10.B 남음
+
+5·7·8·9는 **쓰기**가 생겨야 판단 근거가 생기고(E2 이후), 12·14는 v1 범위 밖으로 미뤄 둔 것이다.
+
 5. 새 파일의 기본 mode 및 기존 ownership/ACL/xattr/hard-link 보존·거부·실패 정책
-6. 최초 지원 파일 크기·diff page·bridge/socket payload 상한
+
 7. v1 지원 encoding/BOM/mixed-newline 정책과 binary/invalid UTF-8 UX
+
 8. 동일 파일을 여러 surface에서 여는 UX와 app-global document session 공유 방식
+
 9. dirty recovery의 journal 대 native shadow, 기본 활성/opt-out UX, 최대 용량, 보존 기간, purge UX
-10. git diff 기준(HEAD/index/worktree) 기본값과 untracked/conflict/submodule 표시 범위
-11. **에이전트 턴 diff base(§6.1)**: 턴 경계 스냅샷을 write-tree vs touched-files로 할지, ring buffer 보관 정책(개수·수명·저장 위치), turn-base를 v1 기본 base로 넣을지 대 E2 후속. (리뷰 UI가 "마지막 턴"을 기본 base로 상정 — 목업 참조)
+
 12. **PR 헤더(§3.5).** 목업 첫 줄의 `PR #8443`은 로컬 git 밖 정보다(GitHub API/`gh`·인증·사설 호스트·rate limit). v1은 브랜치·
     upstream·ahead/behind만 채우고 자리를 비워 둔다 — PR 연동을 할지, 한다면 `gh` CLI 위임인지 자체 HTTP인지, 실패 시 헤더를
     어떻게 접을지를 별도로 정한다.
-13. **도크 뷰 스위처의 범위(§3.5).** 아이콘 줄에 무엇을 둘지(탐색기·소스 컨트롤만인지, 목업의 나머지 두 칸도 채울지),
-    선택 상태를 workspace에 영속할지, `⌘⇧E` 왕복이 "마지막 뷰"로 갈지 "탐색기 고정"으로 갈지. 이 결정은
-    [file-explorer.md](file-explorer.md)와 공유한다.
+
 14. **스테이징 UI를 켜는 시점(§3.5).** `＋ 모두 스테이지`·커밋 메시지·`COMMITS` 섹션은 write 동작이라 v1에서 감춘다. 어느
     단계에서 켤지와, 그때 `git_write` grant를 `git_read`와 분리할지 한 grant로 묶을지.
 
@@ -776,7 +813,7 @@ editor event는 처음부터 하나의 domain schema를 공유하되 문서 원�
 
 - **§3~§8은 FP16 구조(도크 목록 + 파일 Term 본문)로 재작성됐다**(2026-07-31, 구조·정합 층). 남은 것은 **구현 층 세부** —
   MergeView/unifiedMergeView·acceptChunk 배선, CM6↔디스크 인코딩 매핑, 브리지 method 표의 실제 스키마, 도크 뷰 chrome의
-  기하·히트테스트 — 로, E0.5B/E1 slice에서 코드와 함께 고정한다. 정합 형태(§10.0 (a′))는 최종 승인 대기.
+  기하·히트테스트 — 로, E0.5B/E1 slice에서 코드와 함께 고정한다. 정합 형태는 (a′)로 확정됐다(§10.0, 2026-07-31).
 - **도크 소스 컨트롤 뷰(§3.5)는 목업의 정보 계층만 옮긴 것이고 기하는 미정이다.** 행 높이·아이콘 세트·색 토큰·스크롤·키보드
   이동은 탐색기 트리와 공유해야 하는데, 그 공유 표면이 [file-explorer.md](file-explorer.md)에 아직 뷰 하나 기준으로만 적혀 있다.
 - 제품 WKWebView에서 **MergeView는 검증됐다**(2026-07-31 — §7.4 표). 렌더·chunk·accept/reject·CSP 위반 0·RSS/회수까지

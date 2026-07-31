@@ -10,6 +10,7 @@ const text_layout = maru.chrome.text_layout; // chrome 텍스트 셀 배치(분�
 const text_field = maru.chrome.components.text_field; // 주소창 편집 밴드 단일 레이아웃 소스(fieldLayout — docs/text-field-editor.md §3)
 const file_tree_icon = maru.chrome.file_tree_icon;
 const dock_view_bar = maru.chrome.components.dock_view_bar;
+const scm_view = maru.session.scm_view;
 const dock_layout = maru.session.dock_layout;
 const dock_panel = maru.session.dock_panel;
 const file_tree = maru.session.file_tree;
@@ -899,6 +900,77 @@ test "도크 뷰 바: 슬롯 3개가 모두 그려진다" {
     for (dl.cells) |c| try std.testing.expect(maru.renderer.icon_glyph.isRegisteredIcon(c.codepoint));
     // 한 줄짜리 바 — 세로 중앙은 렌더 origin이 패딩만큼 내려 맞춘다(app_session).
     for (dl.cells) |c| try std.testing.expectEqual(@as(u16, 0), c.row);
+}
+
+/// 도크 소스 컨트롤 뷰의 목록. 섹션 헤더는 `제목  N`, 파일 행은 `이름  흐린 경로  +N -N  X`다.
+/// **폭이 좁아지면 경로가 먼저 줄어든다** — 파일명·증감·상태가 스캔의 축이라 끝까지 남긴다(§3.5).
+pub fn buildDockScmDrawList(
+    allocator: std.mem.Allocator,
+    cols: u16,
+    rows: u16,
+    model_rows: []const scm_view.Row,
+    fg: terminal.Color,
+    muted: terminal.Color,
+    accent: terminal.Color,
+) !renderer.DrawList {
+    var cells: std.ArrayList(renderer.DrawCell) = .empty;
+    errdefer cells.deinit(allocator);
+    var pool: std.ArrayList(u32) = .empty;
+    errdefer pool.deinit(allocator);
+    const inset: u16 = file_tree_inset_cols;
+    var r: u16 = 0;
+    for (model_rows) |row| {
+        if (r >= rows) break;
+        switch (row) {
+            .section => |sec| {
+                var buf: [16]u8 = undefined;
+                const count = std.fmt.bufPrint(&buf, "{d}", .{sec.count}) catch "";
+                if (cols > inset)
+                    _ = try appendEllipsizedTitle(allocator, &cells, &pool, sec.section.title(), r, inset, cols -| @as(u16, @intCast(count.len)) -| 1, .{ .foreground = fg, .bold = true }, false, .head);
+                // 개수는 오른쪽 끝에 고정한다 — 제목이 길어져도 개수가 밀려 사라지지 않는다.
+                if (cols > count.len) appendAscii(&cells, allocator, count, r, cols - @as(u16, @intCast(count.len)), .{ .foreground = muted }) catch {};
+            },
+            .file => |file| {
+                // 오른쪽부터 자리를 잡는다: 상태 문자 1칸 + 증감. 남는 폭이 이름·경로 몫이다.
+                var delta_buf: [24]u8 = undefined;
+                const delta: []const u8 = if (file.unknown_delta)
+                    ""
+                else if (file.binary)
+                    "bin"
+                else
+                    std.fmt.bufPrint(&delta_buf, "+{d} -{d}", .{ file.added, file.removed }) catch "";
+                const letter_col = cols -| 1;
+                const delta_col = letter_col -| @as(u16, @intCast(delta.len)) -| 1;
+                const name = std.fs.path.basename(file.path);
+                const dir = file.path[0 .. file.path.len - name.len];
+                var col = inset;
+                if (col < delta_col)
+                    col = try appendEllipsizedTitle(allocator, &cells, &pool, name, r, col, @min(delta_col, cols), .{ .foreground = fg }, false, .head);
+                if (dir.len > 0 and col + 1 < delta_col)
+                    _ = try appendEllipsizedTitle(allocator, &cells, &pool, dir, r, col + 1, delta_col, .{ .foreground = muted }, false, .head);
+                if (delta.len > 0 and delta_col < cols)
+                    appendAscii(&cells, allocator, delta, r, delta_col, .{ .foreground = muted }) catch {};
+                try cells.append(allocator, .{ .row = r, .col = letter_col, .codepoint = file.letter, .width = 1, .style = .{ .foreground = accent, .bold = true } });
+            },
+        }
+        r += 1;
+    }
+    const owned_pool = try pool.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_pool);
+    return .{
+        .size = .{ .cols = @max(cols, 1), .rows = @max(rows, 1) },
+        .cursor = .{ .row = 0, .col = 0, .visible = false },
+        .dirty = .{ .start_row = 0, .end_row = @max(rows, 1) -| 1 },
+        .cells = try cells.toOwnedSlice(allocator),
+        .grapheme_pool = owned_pool,
+        .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
+    };
+}
+
+fn appendAscii(cells: *std.ArrayList(renderer.DrawCell), allocator: std.mem.Allocator, text: []const u8, row: u16, col: u16, style: terminal.Style) !void {
+    for (text, 0..) |ch, i| {
+        try cells.append(allocator, .{ .row = row, .col = col +| @as(u16, @intCast(i)), .codepoint = ch, .width = 1, .style = style });
+    }
 }
 
 pub const FileTreeEdit = struct { identity: file_tree.RowIdentity, text: []const u8 };

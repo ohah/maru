@@ -52,6 +52,7 @@ pub const dock_panel = @import("session/dock_panel.zig"); // FP1: 창 레벨 파
 pub const dock_layout = @import("session/dock_layout.zig"); // FP3: right/bottom 도크·terminal·chrome rect와 resize 순수 기하
 pub const git_status = @import("session/git_status.zig"); // git porcelain v2·numstat 순수 파서(도크 소스 컨트롤 뷰)
 pub const git_command = @import("session/git_command.zig"); // 읽기 전용 git argv·env 조립(외부 프로세스 실행 경로 차단)
+pub const scm_view = @import("session/scm_view.zig"); // 도크 소스 컨트롤 뷰 행 모델(섹션·개수·증감)
 pub const file_panel_bridge = @import("session/file_panel_bridge.zig"); // FP4: readAsset 상대 경로·읽기 상한·MIME 순수 정책
 pub const syntax_theme = @import("session/syntax_theme.zig"); // FP12b: 터미널 색상 테마 → text 소스 편집기 syntax 색 파생(순수)
 pub const agent_selection = @import("session/agent_selection.zig"); // 파일 패널 선택 → 에이전트 CLI 페이로드(순수)

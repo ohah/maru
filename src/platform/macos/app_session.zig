@@ -11875,6 +11875,8 @@ pub const AppSession = struct {
     }
 
     fn computeFileTreeScrollbarGeometry(self: *const AppSession) ?file_tree_scrollbar.Geometry {
+        // 탐색기 행 수로 계산한 스크롤바다 — 다른 뷰에 그리면 목록과 무관한 막대가 뜨고 드래그도 먹는다.
+        if (self.dock.view != .explorer) return null;
         if (!self.dockVisible() or self.cell_height_px == 0) return null;
         const rect = self.dockGeometry().tree_content;
         const visible: usize = @intCast(rect.h / self.cell_height_px);
@@ -19205,7 +19207,10 @@ pub const AppSession = struct {
         // tab_wheel_accum 경로는 원본 delta_x). 방향 판정(위 wheel_accum 부호)은 배수>0이라 부호 불변이라 영향 없다.
         const scaled_delta_y = delta_y * @as(f64, self.appearance.scroll_multiplier);
         const lines = wheelDeltaToLines(&self.wheel_accum, scaled_delta_y, precise, self.cell_height_px, self.scale_milli);
-        if (self.dockVisible() and layout_math.pointInRect(x_px, y_px, self.dockGeometry().tree_content)) {
+        // 트리 스크롤은 탐색기 상태(file_tree_scroll_rows)라 다른 뷰에서 굴리면 안 보이는 목록이 움직인다.
+        if (self.dockVisible() and self.dock.view == .explorer and
+            layout_math.pointInRect(x_px, y_px, self.dockGeometry().tree_content))
+        {
             const visible = if (self.cell_height_px == 0) 0 else self.dockGeometry().tree_content.h / self.cell_height_px;
             const max_scroll = self.file_tree_rows.items.len -| @as(usize, visible);
             const next = @as(i64, @intCast(self.fileTreeEffectiveScroll())) - @as(i64, lines);
@@ -19739,7 +19744,10 @@ pub const AppSession = struct {
                     return;
                 }
             }
-            if (self.dockVisible() and layout_math.pointInRect(x_px, y_px, self.dockGeometry().tree)) {
+            // 배경 메뉴 항목은 전부 탐색기 조작이라 다른 뷰에서는 띄우지 않는다(빈 곳 우클릭은 아래로 흘러 chrome consume).
+            if (self.dockVisible() and self.dock.view == .explorer and
+                layout_math.pointInRect(x_px, y_px, self.dockGeometry().tree))
+            {
                 self.file_tree_background_menu = true;
                 const items = self.buildFileTreeBackgroundMenuItems();
                 self.chrome_host.context_menu.show(@intFromFloat(x_px), @intFromFloat(y_px), items.len);
@@ -20025,23 +20033,28 @@ pub const AppSession = struct {
                     }
                     return; // 바 안의 여백 클릭도 트리로 흘려보내지 않는다.
                 }
-                if (self.beginFileTreeScrollbarGesture(x_px, y_px)) return;
-                if (self.fileTreeRowAt(x_px, y_px)) |row_index| {
-                    if (self.file_tree_rows.items[row_index] == .empty and layout_math.pointInRect(x_px, y_px, dg.tree_content)) {
+                // 아래 트리 조작은 **탐색기 전용**이다. 다른 뷰에서 좌표만 같다고 타면 소스 컨트롤 행을 누른 것이
+                // 폴더 선택 다이얼로그가 되고(실측), 트리 포커스도 뺏는다 — setDockView가 뷰를 바꿀 때 그 포커스를
+                // 놓는 것과 모순된다. 도크 안이라는 사실만으로 클릭을 소비하는 건 아래 dock rect 분기가 한다.
+                if (self.dock.view == .explorer) {
+                    if (self.beginFileTreeScrollbarGesture(x_px, y_px)) return;
+                    if (self.fileTreeRowAt(x_px, y_px)) |row_index| {
+                        if (self.file_tree_rows.items[row_index] == .empty and layout_math.pointInRect(x_px, y_px, dg.tree_content)) {
+                            self.focusFileTree();
+                            self.requestFilePanelPick();
+                            return;
+                        }
                         self.focusFileTree();
-                        self.requestFilePanelPick();
+                        _ = self.setFileTreeSelection(row_index);
+                        self.activateFileTreeRow(row_index);
                         return;
                     }
-                    self.focusFileTree();
-                    _ = self.setFileTreeSelection(row_index);
-                    self.activateFileTreeRow(row_index);
-                    return;
-                }
-                if (layout_math.pointInRect(x_px, y_px, dg.tree)) {
-                    self.focusFileTree(); // header/빈 여백 클릭도 tree 입력 축을 얻는다.
-                    if (!self.file_tree.hasContent() and layout_math.pointInRect(x_px, y_px, dg.tree_content))
-                        self.requestFilePanelPick();
-                    return;
+                    if (layout_math.pointInRect(x_px, y_px, dg.tree)) {
+                        self.focusFileTree(); // header/빈 여백 클릭도 tree 입력 축을 얻는다.
+                        if (!self.file_tree.hasContent() and layout_math.pointInRect(x_px, y_px, dg.tree_content))
+                            self.requestFilePanelPick();
+                        return;
+                    }
                 }
                 // tree header/빈 row, editor 본문의 WebView seam처럼 도크 안에서 Metal까지 내려온 클릭은 도크가 소비한다.
                 // 반대로 도크 밖(workspace)은 여기서 return하지 않고 아래 pane 주소창·탭·터미널 hit-test로 흘러야 한다.
@@ -59864,4 +59877,52 @@ test "host-backed find: span은 client 화면과 view_offset이 맞을 때만 �
     try std.testing.expect(!remoteFindSpansApplicable(0, 120));
     // 구 host 데몬은 이 값을 안 보낸다 — 대조 근거가 없으므로 종전대로 즉시 적용한다.
     try std.testing.expect(remoteFindSpansApplicable(null, 120));
+}
+
+// 손 확인에서 나온 결함: 소스 컨트롤 뷰에서 행을 클릭하면 **폴더 선택 다이얼로그**가 떴다. 탐색기 전용 클릭 처리가
+// `dockVisible()`로만 막혀 있어 좌표가 같은 rect 안이라는 이유로 그대로 탔기 때문이다(뷰가 달라 트리 행은 화면에
+// 없는데도). 트리 포커스도 같이 뺏겼는데, 이는 setDockView가 뷰 전환 시 그 포커스를 놓는 것과 모순이다.
+test "도크 뷰: 탐색기 아닌 뷰의 클릭은 폴더 선택·트리 포커스로 새지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+
+    const launcher = session.filePanelDockControlRect() orelse return error.MissingDockLauncher;
+    session.mouse(1, @floatFromInt(launcher.x + 1), @floatFromInt(launcher.y + 1), 0, 0);
+    try std.testing.expect(session.dockVisible());
+    _ = session.takeFilePanelPickRequest();
+
+    const tree_content = session.dockGeometry().tree_content;
+    const x: f64 = @floatFromInt(tree_content.x + tree_content.w / 2); // 좌측 divider grab band 밖
+    const y: f64 = @floatFromInt(tree_content.y + 1);
+
+    session.setDockView(.source_control);
+    session.mouse(1, x, y, 0, 0);
+    try std.testing.expect(!session.takeFilePanelPickRequest()); // 폴더 다이얼로그 금지
+    try std.testing.expect(!session.fileTreeFocused()); // 트리 포커스도 안 뺏는다
+    session.mouse(1, x, y, 0, 2); // 우클릭 배경 메뉴(새 폴더 등)도 탐색기 조작이라 안 뜬다
+    try std.testing.expect(!session.chrome_host.context_menu.open);
+    try std.testing.expect(!session.file_tree_background_menu);
+
+    // 휠은 탐색기 스크롤 상태를 건드리지 않는다(안 보이는 목록이 움직이면 돌아왔을 때 위치가 어긋난다).
+    session.file_tree_scroll_rows = 0;
+    session.scrollWheel(-600, 0, false, x, y);
+    try std.testing.expectEqual(@as(usize, 0), session.file_tree_scroll_rows);
+    // 탐색기 행 수로 만든 스크롤바도 다른 뷰에는 없다(그리기·드래그 양쪽).
+    try std.testing.expect(session.computeFileTreeScrollbarGeometry() == null);
+
+    // 같은 좌표라도 탐색기로 돌아오면 원래 동작이 그대로다(게이트가 기능을 죽인 게 아니라 뷰로 가른 것).
+    session.setDockView(.explorer);
+    session.mouse(1, x, y, 0, 0);
+    try std.testing.expect(session.takeFilePanelPickRequest());
 }

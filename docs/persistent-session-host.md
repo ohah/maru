@@ -8880,12 +8880,25 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
 
           f2의 private take, timeout, allocation 실패와 owner teardown은 completed payload와 correlation을
           exact-once cleanup transaction으로 닫는다. semantic failure/revoke/EOF와 결합된 whole-drain cleanup은
-          f3의 drain permit·우선순위 gate가 추가된 뒤 같은 cleanup leaf를 호출한다. `RequestIdState.last_available`은
-          `maxInt(u64)`을 마지막 한 번 예약하면서 `max_consumed`로 전이하고, 그 response를 take한 뒤에도 다음 admission은
-          wire 0 `request_id_exhausted` terminal로 stale ID/0 wrap을 허용하지 않는다. pure reducer,
-          allocation fail-index, injected whole-turn, 실제 Darwin socketpair가 request 없음/offset 0/partial/fully-sent의
-          same·wrong·zero ID, duplicate before take, 역순 response, deadline-1/exact/+1,
-          payload cap/cap+1과 cleanup final-zero를 고정해야 2b2f2 완료다. RX-first 규칙상 turn 시작 시
+          f3의 drain permit·우선순위 gate가 추가된 뒤 같은 cleanup leaf를 호출한다. f2의 request-ID 끝값 증거는
+          product `RequestIdState.last_available`에서 `maxInt(u64)` control을 정확히 한 번 enqueue해
+          `max_consumed`로 전이하고, 같은 ID의 TX completion→response→completed owner→private reject cleanup을
+          연결한다. 그 다음 reserve가 wire/queue mutation 0 `request_id_exhausted`임은 f1 leaf의 exhaustion
+          fixture와 조합해 증명한다. f2에는 정상 success/idle 복귀 권위가 없으므로 test-only reset으로 다음
+          product admission을 만들지 않는다. authority-clear drain permit과 typed-success take 뒤 **같은 product
+          storage**의 다음 admission이 wire 0 `request_id_exhausted`인지 확인하는 integration gate는 f3가 소유한다.
+
+          2b2f2의 completion evidence는 다음 네 묶음을 모두 같은 final-zero oracle로 검증한다.
+          (1) `admitControl`의 모든 실제 allocation 실패에서 request-ID·TX queue·correlation·recovery authority의
+          부분 publish가 없고 canonical terminal cleanup으로 수렴한다. (2) 위 max-ID product lifecycle과 f1
+          exhaustion leaf를 연결한다. (3) 실제 Darwin socket에서 response가 TX full completion보다 먼저 도착한
+          readable+writable turn과 wrong→expected/expected→wrong 두-frame 역순을 protocol terminal로 닫고
+          completed owner를 publish하지 않는다. (4) product pump의 deadline-1 response만 completed owner로
+          publish하고 exact/+1은 payload publication 0인 deadline terminal로 닫는다. 공통 final-zero oracle은
+          TX items/bytes, completed payload owner, inbox ledger charge, live owners와 teardown 결과를 명시적으로
+          확인한다. pure reducer, allocation fail-index, injected whole-turn, 실제 Darwin socketpair가 request
+          없음/offset 0/partial/fully-sent의 same·wrong·zero ID, duplicate before take, 역순 response,
+          deadline-1/exact/+1, payload cap/cap+1과 cleanup final-zero를 고정해야 2b2f2 완료다. RX-first 규칙상 turn 시작 시
           `response_wait`였던 control만 그 turn의 response를 받을 수 있다. 같은 readable+writable turn의 TX suffix가
           막 fully-sent로 만든 control에 이미 RX로 도착한 response는 early protocol error다. 구현 gate는
           (a) pure correlation reducer, (b) atomic admission+completion seal, (c) RX preflight+completed owner,
@@ -8911,6 +8924,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           barrier→ACK cap-full retry/ACK OOM terminal→fully-sent, pre-ACK stale snapshot drop와 post-ACK fresh
           snapshot apply-clear를 별도 fixture로 고정한다.
           동시에 readable+writable, duplicate after typed-success take, response+FIN, response 뒤 같은 drain revoke, timer-only wake,
+          max-ID typed-success take 뒤 같은 product storage의 다음 admission wire 0 `request_id_exhausted`,
           socketpair/fail-index/stress를 통과해야 하며 f1~f3가 모두 green이기 전에는 TX/control/turn 통합을
           완료로 표시하지 않는다.
 

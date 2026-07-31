@@ -8421,10 +8421,17 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
                 결합한다. d2d 완료 증거는 기존 `client_pump` pure deadline regression만 유지하고 product
                 deadline wiring을 주장하지 않는다.
             - **[d2d]** both-readable+writable 실제 socketpair에서 revoke가 frame 1/64/65에 있을 때 terminal 판정 전 peer
-              TX 0이다. 65번째 revoke는 첫 turn immediate/authority false, zero-time 다음 turn terminal이다.
+              TX 0이다. 65번째 revoke는 첫 turn에 `inherited_work_ready=true`, `immediate_rx=false`,
+              `authority_clear=false`로 64개 live-screen owner를 parser/socket보다 먼저 소비하고, 같은 monotonic
+              시각의 zero-time continuation들이 마지막 owner까지 닫은 다음 parser에 보존된 revoke를 terminal로
+              만든다. pre-existing/new inherited owner가 있으면 `client_pump`의 inherited-first 계약이
+              frame-budget `immediate_rx`보다 우선한다.
             - **[d2d]** optional unknown 64개 뒤 revoke, foreign screen/event/response, 같은 turn의
               response candidate→snapshot→revoke/ended 순열에서 lower semantic/control/input/TX publish 0과 exact
-              cleanup을 검증한다. response expected-kind/request correlation은 f2 fixture가 소유한다.
+              cleanup을 검증한다. reducer가 `revoked` 또는 `ended`를 확정하면 aggregate의 screen/response/metadata
+              destination을 commit하지 않고 전부 abort한 뒤 각각 `revoked`/`runtime_ended` terminal을 반환한다.
+              `snapshot.invalidated`의 closed recovery commit은 d2e가 소유하므로 d2d adapter에서는 lower publish
+              없이 protocol terminal로 닫는다. response expected-kind/request correlation은 f2 fixture가 소유한다.
             - **[d2d]** inherited blocker+parser backlog+kernel readable+writable에서 consumer/projector wake 이외
               parser/read/write/admission 0을 검증한다. common work budget 64/cap+1과 blocker 해소 뒤 zero-time
               continuation도 고정한다.
@@ -8697,7 +8704,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
         버리고 하나의 100 ms deadline 안에서 leave를 시도한 뒤 즉시 raw restore/signal forwarding으로 간다.
 
     **P5c3c-1a~2a, 2b1, 2b2a~c2와 2b2c3-c3a1~c3c-3b, 2b2d1, 2b2d2a,
-    2b2d2b의 d2a~b는 구현 완료다. 2b2d2b의 d2c~d와 2b2e~f3, P5c3c-2b3,
+    2b2d2b의 d2a~d는 구현 완료다. 2b2e~f3, P5c3c-2b3,
     P5c3c-3a~3b는 계획 상태다.**
     2b2c3 전체는 후속 통합 gate가 green이 아니므로 아직 계획 상태다. 각 slice는 P5c3a~b의 Debug/ReleaseFast gate를 재실행하고 다음 slice가 실제
     consumer로 쓰지 않는 임시 public API는 만들지 않는다.

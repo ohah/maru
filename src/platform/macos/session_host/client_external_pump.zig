@@ -1833,6 +1833,7 @@ const RxAggregateAbortResult = enum {
 
 const RxAggregateFinalizeResult = enum {
     finalized,
+    terminal_runtime_ended,
     invalid_state,
     rejected,
 };
@@ -2080,6 +2081,7 @@ const InjectedRxFailpoint = enum {
     after_traversal,
     after_seed_mint,
     after_seed_consume,
+    after_terminal_abort_result_failure,
     before_end,
     before_settle,
 };
@@ -2106,10 +2108,99 @@ const AuthorityAdapterFailpoint = enum {
     none,
     after_prepare,
     after_prepare_cleanup_corrupt,
+    after_prepare_owner_drift,
+    after_prepare_parser_drift,
+    after_prepare_drain_drift,
+    after_prepare_reentry,
     before_release_lease_digest_corrupt,
 };
 threadlocal var authority_adapter_failpoint: AuthorityAdapterFailpoint = .none;
 threadlocal var authority_adapter_failpoint_scratch_addr: usize = 0;
+
+pub const testing = if (builtin.is_test) struct {
+    pub const AuthorityEvent = AuthorityAdapterTestEvent;
+    pub const AuthorityReceipt = AuthorityAdapterTestRecorder;
+    pub const LowerPublicationSnapshot = struct {
+        charged_bytes: usize,
+        charged_items: usize,
+        live_screen_len: usize,
+        live_screen_generation: u64,
+        live_partial_present: bool,
+        pending_response_present: bool,
+        pending_response_generation: u64,
+        screen_retained_count: usize,
+        screen_committed: bool,
+        metadata_revision: u64,
+        metadata_pending: bool,
+        resize_present: bool,
+        request_state: client_pump.RequestIdState,
+        owner_event_projection_generation: u64,
+    };
+
+    pub fn beginAuthorityReceipt(receipt: *AuthorityReceipt) bool {
+        if (authority_adapter_test_recorder != null) return false;
+        receipt.* = .{};
+        authority_adapter_test_recorder = receipt;
+        return true;
+    }
+
+    pub fn endAuthorityReceipt(receipt: *AuthorityReceipt) bool {
+        if (authority_adapter_test_recorder != receipt) return false;
+        authority_adapter_test_recorder = null;
+        return true;
+    }
+
+    pub fn authorityDestinationsPristine(
+        scratch: *const ExternalRxTurnScratch,
+    ) bool {
+        return ExternalPumpStorage.authorityDestinationsPristine(scratch);
+    }
+
+    pub fn authorityPreparedTag(scratch: *const ExternalRxTurnScratch) bool {
+        return scratch.authority_permit.lifecycle == .prepared;
+    }
+
+    pub fn clearInitialFence(storage: *ExternalPumpStorage) bool {
+        var permit: projection_test.PreparedInitialFenceClear = .{};
+        return projection_test.prepare(storage, &permit) and
+            projection_test.commit(storage, &permit) == .cleared;
+    }
+
+    pub fn bufferedParserBytes(storage: *const ExternalPumpStorage) ?usize {
+        const client = if (storage.owned_client) |*owned| owned else return null;
+        return client.parser.bufferedBytes();
+    }
+
+    /// Excludes the event-authority destination because a revoke must update that owner before
+    /// terminalizing. Everything that a lower semantic/control/input/TX suffix could publish is
+    /// sealed here so product socketpair tests detect even transiently retained work.
+    pub fn lowerPublicationSnapshot(
+        storage: *const ExternalPumpStorage,
+    ) ?LowerPublicationSnapshot {
+        const accounting = storage.inbox_ledger.accountingView();
+        if (!accounting.valid or
+            !storage.screenPendingSummaryValid() or
+            !storage.metadataPendingSummaryValid() or
+            !ownerResizeValid(storage))
+            return null;
+        return .{
+            .charged_bytes = accounting.charged_bytes,
+            .charged_items = accounting.charged_items,
+            .live_screen_len = storage.live_screen.len,
+            .live_screen_generation = storage.live_screen.generation,
+            .live_partial_present = storage.live_partial != .none,
+            .pending_response_present = storage.pending_response != .none,
+            .pending_response_generation = storage.pending_response_generation,
+            .screen_retained_count = storage.screen_pending_summary.retained_count,
+            .screen_committed = storage.screen_pending_summary.committed,
+            .metadata_revision = storage.metadata_pending_summary.revision,
+            .metadata_pending = storage.metadata_pending_summary.pending,
+            .resize_present = storage.owner_resize != .none,
+            .request_state = storage.owner_request_ids orelse return null,
+            .owner_event_projection_generation = storage.owner_event_projection_generation,
+        };
+    }
+} else struct {};
 
 fn recordRxDrainTestEvent(event: RxDrainTestEvent) void {
     if (!builtin.is_test) return;
@@ -4528,30 +4619,36 @@ fn ownerEventAuthority(
     };
 }
 
+const PrepareEventReductionResult = enum {
+    prepared,
+    terminal_runtime_ended,
+    rejected,
+};
+
 fn prepareEventReduction(
     storage: *const ExternalPumpStorage,
     aggregate: *PreparedRxAggregate,
     intent_handle: *external_rx_intent.ExternalRxIntentHandle,
-) bool {
+) PrepareEventReductionResult {
     const reduction = &aggregate.event_reduction;
     const pristine_reduction = PreparedEventReduction{};
     if (!std.mem.eql(
         u8,
         &eventReductionDigest(reduction),
         &eventReductionDigest(&pristine_reduction),
-    )) return false;
+    )) return .rejected;
     var has_event = false;
     for (aggregate.intent_commit.slot_kinds[0..aggregate.intent_commit.intent_count]) |kind|
         has_event = has_event or kind == .event;
-    if (!has_event) return true;
-    const client = if (storage.owned_client) |*owned| owned else return false;
-    const profile = client.externalTransferProfile() orelse return false;
-    const authority = ownerEventAuthority(storage) orelse return false;
+    if (!has_event) return .prepared;
+    const client = if (storage.owned_client) |*owned| owned else return .rejected;
+    const profile = client.externalTransferProfile() orelse return .rejected;
+    const authority = ownerEventAuthority(storage) orelse return .rejected;
     const identity = runtime_event_types.EventIdentity{
         .runtime_id = storage.evidence_snapshot.runtime_id,
         .stream_id = storage.evidence_snapshot.stream_id,
     };
-    if (identity.runtime_id == 0 or identity.stream_id == 0) return false;
+    if (identity.runtime_id == 0 or identity.stream_id == 0) return .rejected;
 
     var event_to_intent =
         [_]u8{std.math.maxInt(u8)} ** external_rx_intent.max_intents;
@@ -4586,7 +4683,7 @@ fn prepareEventReduction(
         const borrowed = external_rx_intent.borrowClassifiedEvent(
             intent_handle,
             @intCast(intent_index),
-        ) orelse return false;
+        ) orelse return .rejected;
         event_to_intent[event_count] = @intCast(intent_index);
         const verdict = runtime_event_wire.preflightEvent(
             borrowed.payload,
@@ -4616,22 +4713,23 @@ fn prepareEventReduction(
         );
         event_count += 1;
     }
-    if (event_count == 0) return true;
+    if (event_count == 0) return .prepared;
     const outcome = accumulator.finalize();
     switch (outcome) {
-        .terminal, .ended, .invalidated => return false,
+        .ended => return .terminal_runtime_ended,
+        .terminal, .invalidated => return .rejected,
         .revoked, .adopted => {},
     }
     // Decoder and allocator callbacks have completed. Rebind every live authority source before
     // publishing a prepared reduction permit.
-    const current_client = if (storage.owned_client) |*owned| owned else return false;
-    const current_profile = current_client.externalTransferProfile() orelse return false;
-    const current_authority = ownerEventAuthority(storage) orelse return false;
+    const current_client = if (storage.owned_client) |*owned| owned else return .rejected;
+    const current_profile = current_client.externalTransferProfile() orelse return .rejected;
+    const current_authority = ownerEventAuthority(storage) orelse return .rejected;
     if (!std.meta.eql(profile, current_profile) or
         !std.meta.eql(authority, current_authority) or
         storage.evidence_snapshot.runtime_id != identity.runtime_id or
         storage.evidence_snapshot.stream_id != identity.stream_id)
-        return false;
+        return .rejected;
     const final_state = switch (outcome) {
         .revoked => |state| state,
         .adopted => |state| state,
@@ -4641,14 +4739,14 @@ fn prepareEventReduction(
         if (ordinal < event_count)
             event_to_intent[ordinal]
         else
-            return false
+            return .rejected
     else
         std.math.maxInt(u8);
     const resize_intent_index: u8 = if (final_state.resize) |candidate|
         if (candidate.ordinal < event_count)
             event_to_intent[candidate.ordinal]
         else
-            return false
+            return .rejected
     else
         std.math.maxInt(u8);
     const metadata_intent_index: u8 = if (final_state.metadata) |candidate|
@@ -4657,7 +4755,7 @@ fn prepareEventReduction(
             .event => |ordinal| if (ordinal < event_count)
                 event_to_intent[ordinal]
             else
-                return false,
+                return .rejected,
         }
     else
         std.math.maxInt(u8);
@@ -4681,7 +4779,7 @@ fn prepareEventReduction(
         .digest = undefined,
     };
     reduction.digest = eventReductionDigest(reduction);
-    return true;
+    return .prepared;
 }
 
 fn validateEventReduction(
@@ -7654,9 +7752,16 @@ pub const ExternalPumpStorage = struct {
             &aggregate.intent_commit,
         ))
             return .invalid_state;
-        if (!prepareEventReduction(self, aggregate, intent_handle)) {
-            aggregate.digest = preparedRxAggregateDigest(aggregate);
-            return .rejected;
+        switch (prepareEventReduction(self, aggregate, intent_handle)) {
+            .prepared => {},
+            .terminal_runtime_ended => {
+                aggregate.digest = preparedRxAggregateDigest(aggregate);
+                return .terminal_runtime_ended;
+            },
+            .rejected => {
+                aggregate.digest = preparedRxAggregateDigest(aggregate);
+                return .rejected;
+            },
         }
         aggregate.digest = preparedRxAggregateDigest(aggregate);
         if (!prepareEventRetirements(aggregate, intent_handle)) {
@@ -10233,13 +10338,56 @@ pub const ExternalPumpStorage = struct {
                 } };
             }
         }
-        if (self.finalizeRxAggregate(
+        const finalize_result = self.finalizeRxAggregate(
             lease,
             &scratch.traversal.intent,
-        ) != .finalized) {
+        );
+        switch (finalize_result) {
+            .finalized => {},
+            .terminal_runtime_ended => {
+                const actual_abort_result =
+                    self.abortRxAggregate(lease, &scratch.traversal.intent);
+                const abort_result = if (hitInjectedRxFailpoint(
+                    scratch,
+                    .after_terminal_abort_result_failure,
+                ))
+                    RxAggregateAbortResult.invalid_state
+                else
+                    actual_abort_result;
+                return .{ .terminal = .{
+                    .reason = if (abort_result == .cleaned)
+                        .runtime_ended
+                    else
+                        .invariant_failure,
+                    .rx_bytes = rx_bytes,
+                    .rx_frames = rx_frames,
+                } };
+            },
+            .invalid_state, .rejected => {
+                _ = self.abortRxAggregate(lease, &scratch.traversal.intent);
+                return .{ .terminal = .{
+                    .reason = .protocol_error,
+                    .rx_bytes = rx_bytes,
+                    .rx_frames = rx_frames,
+                } };
+            },
+        }
+        const aggregate = self.validateReadyRxAggregate(lease) orelse {
             _ = self.abortRxAggregate(lease, &scratch.traversal.intent);
             return .{ .terminal = .{
-                .reason = .protocol_error,
+                .reason = .invariant_failure,
+                .rx_bytes = rx_bytes,
+                .rx_frames = rx_frames,
+            } };
+        };
+        if (aggregate.event_reduction.outcome == .revoked) {
+            const abort_result =
+                self.abortRxAggregate(lease, &scratch.traversal.intent);
+            return .{ .terminal = .{
+                .reason = if (abort_result == .cleaned)
+                    .revoked
+                else
+                    .invariant_failure,
                 .rx_bytes = rx_bytes,
                 .rx_frames = rx_frames,
             } };
@@ -11636,6 +11784,31 @@ pub const ExternalPumpStorage = struct {
         )) {
             scratch.turn_generation += 1;
             scratch.authority_cleanup_seed.digest[0] ^= 1;
+        } else if (hitAuthorityAdapterFailpoint(
+            scratch,
+            .after_prepare_owner_drift,
+        )) {
+            self.owner_authority_seal.digest[0] ^= 1;
+        } else if (hitAuthorityAdapterFailpoint(
+            scratch,
+            .after_prepare_parser_drift,
+        )) {
+            const client = if (self.owned_client) |*owned| owned else return .terminal_poisoned;
+            const state = switch (client.io_mode) {
+                .external => |*external| external,
+                .blocking => return .terminal_poisoned,
+            };
+            state.rx_provenance.parser_seal.digest[0] ^= 1;
+        } else if (hitAuthorityAdapterFailpoint(
+            scratch,
+            .after_prepare_drain_drift,
+        )) {
+            scratch.drain_evidence.digest[0] ^= 1;
+        } else if (hitAuthorityAdapterFailpoint(
+            scratch,
+            .after_prepare_reentry,
+        )) {
+            self.operation_reentry_latched = true;
         }
         const validate_view = self.currentAuthorityViewUnderHeldLease(
             lease,
@@ -18644,7 +18817,7 @@ test "d2b3d product mixed owners abort atomically on a late terminal event" {
         scratch,
     );
     try std.testing.expectEqual(
-        client_pump.TerminalReason.protocol_error,
+        client_pump.TerminalReason.runtime_ended,
         result.terminal.?.reason,
     );
     try std.testing.expectEqual(@as(usize, 4), result.rx_frames);
@@ -18657,6 +18830,76 @@ test "d2b3d product mixed owners abort atomically on a late terminal event" {
         storage.inbox_ledger.accountingView(),
     ));
     try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(&storage));
+}
+
+test "D3 runtime ended reports invariant failure when aggregate abort cannot clean" {
+    const Apply = struct {
+        fn run(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
+    };
+
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) ==
+            .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expect(storage.commitAdoption() == .adopted);
+    var fence_clear: projection_test.PreparedInitialFenceClear = .{};
+    try std.testing.expect(projection_test.prepare(&storage, &fence_clear));
+    try std.testing.expectEqual(
+        projection_test.InitialFenceClearResult.cleared,
+        projection_test.commit(&storage, &fence_clear),
+    );
+    defer _ = teardownForTest(&storage);
+
+    const terminal_wire = try framing.encodeFrame(
+        std.testing.allocator,
+        .{
+            .kind = .event,
+            .stream_id = valid_evidence.stream_id,
+        },
+        "{\"event\":\"runtime.ended\"}",
+    );
+    defer std.testing.allocator.free(terminal_wire);
+    try admitBufferedProductWireForTest(&storage, terminal_wire);
+
+    var context: u8 = 0;
+    const ops = BufferedRxOps{
+        .context = &context,
+        .apply_live_screen = Apply.run,
+    };
+    injected_rx_failpoint = .after_terminal_abort_result_failure;
+    injected_rx_failpoint_scratch_addr = @intFromPtr(scratch);
+    injected_rx_failpoint_hits = 0;
+    defer {
+        injected_rx_failpoint = .none;
+        injected_rx_failpoint_scratch_addr = 0;
+        injected_rx_failpoint_hits = 0;
+    }
+    const result = storage.pumpBufferedRxForTest(
+        .{ .readable = true, .writable = false, .now_ns = 1 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expectEqual(@as(u8, 1), injected_rx_failpoint_hits);
+    try std.testing.expectEqual(
+        client_pump.TerminalReason.invariant_failure,
+        result.terminal.?.reason,
+    );
+    try std.testing.expect(!result.authority_clear);
+    try std.testing.expectEqual(@as(usize, 0), result.tx_bytes);
+    try std.testing.expectEqual(@as(usize, 0), result.tx_frames);
 }
 
 test "d2b3d product traversal commits 64 alternating event and screen intents" {
@@ -25131,7 +25374,10 @@ fn exerciseD2b3cMetadataEvent(
     }
     const finalize = storage.finalizeRxAggregate(&lease, &intent_handle);
     if (mixed_late_terminal) {
-        try std.testing.expectEqual(RxAggregateFinalizeResult.rejected, finalize);
+        try std.testing.expectEqual(
+            RxAggregateFinalizeResult.terminal_runtime_ended,
+            finalize,
+        );
         try std.testing.expectEqual(
             RxAggregateAbortResult.cleaned,
             storage.abortRxAggregate(&lease, &intent_handle),
@@ -25531,7 +25777,13 @@ fn exerciseD2b3cTerminalEventCase(case: D2b3cTerminalEventCase) !void {
             authority.generation.tracked,
         );
     } else {
-        try std.testing.expectEqual(RxAggregateFinalizeResult.rejected, finalize);
+        try std.testing.expectEqual(
+            if (case == .ended)
+                RxAggregateFinalizeResult.terminal_runtime_ended
+            else
+                RxAggregateFinalizeResult.rejected,
+            finalize,
+        );
         try std.testing.expectEqual(
             RxAggregateAbortResult.cleaned,
             storage.abortRxAggregate(&lease, &intent_handle),
@@ -27313,6 +27565,128 @@ test "D2 cleanup corruption after prepare poisons permit and terminalizes scratc
     );
 }
 
+test "D3 owner parser drain and reentry drift after prepare close lower authority" {
+    const ApplyProbe = struct {
+        calls: usize = 0,
+
+        fn apply(
+            raw: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            return .applied;
+        }
+    };
+    const ReadProbe = struct {
+        calls: usize = 0,
+
+        fn read(
+            raw: *anyopaque,
+            _: posix.fd_t,
+            _: []u8,
+        ) client_external_rx_read.RxReadOutcome {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            return .would_block;
+        }
+    };
+    const points = [_]AuthorityAdapterFailpoint{
+        .after_prepare_owner_drift,
+        .after_prepare_parser_drift,
+        .after_prepare_drain_drift,
+        .after_prepare_reentry,
+    };
+
+    for (points) |point| {
+        var fixture = try TestClient.init();
+        defer fixture.deinitPeer();
+        var storage: ExternalPumpStorage = .{};
+        try std.testing.expect(
+            initTestStorage(&storage, &fixture.client, valid_evidence) ==
+                .initialized,
+        );
+        try std.testing.expect(
+            prepareAdoptionForTest(&storage) == .prepared_adopted,
+        );
+        try std.testing.expect(storage.commitAdoption() == .adopted);
+        var fence_clear: projection_test.PreparedInitialFenceClear = .{};
+        try std.testing.expect(projection_test.prepare(&storage, &fence_clear));
+        try std.testing.expectEqual(
+            projection_test.InitialFenceClearResult.cleared,
+            projection_test.commit(&storage, &fence_clear),
+        );
+
+        const scratch =
+            try std.testing.allocator.create(ExternalRxTurnScratch);
+        defer std.testing.allocator.destroy(scratch);
+        defer _ = teardownForTest(&storage);
+        scratch.* = .{};
+        try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+        const generation_before = scratch.turn_generation;
+        var apply_probe = ApplyProbe{};
+        var read_probe = ReadProbe{};
+        const ops = RxTurnOps{
+            .buffered = .{
+                .context = &apply_probe,
+                .context_len = @sizeOf(ApplyProbe),
+                .apply_live_screen = ApplyProbe.apply,
+            },
+            .transport = .{
+                .context = &read_probe,
+                .context_len = @sizeOf(ReadProbe),
+                .read = ReadProbe.read,
+            },
+        };
+        var recorder = AuthorityAdapterTestRecorder{};
+        authority_adapter_test_recorder = &recorder;
+        authority_adapter_failpoint = point;
+        authority_adapter_failpoint_scratch_addr = @intFromPtr(scratch);
+        defer {
+            authority_adapter_test_recorder = null;
+            authority_adapter_failpoint = .none;
+            authority_adapter_failpoint_scratch_addr = 0;
+        }
+        const result = storage.pumpRxTurn(
+            .{ .readable = true, .writable = true, .now_ns = 1 },
+            &ops,
+            scratch,
+        );
+        authority_adapter_test_recorder = null;
+        try std.testing.expectEqual(@as(usize, 1), read_probe.calls);
+        try std.testing.expectEqual(@as(usize, 0), apply_probe.calls);
+        try std.testing.expectEqual(
+            client_pump.TerminalReason.invariant_failure,
+            result.terminal.?.reason,
+        );
+        try std.testing.expect(!result.authority_clear);
+        try std.testing.expect(!result.write_interest);
+        try std.testing.expect(!result.control_ready);
+        try std.testing.expectEqual(@as(usize, 0), result.tx_bytes);
+        try std.testing.expectEqual(@as(usize, 0), result.tx_frames);
+        try std.testing.expectEqual(@as(u8, 1), recorder.len);
+        try std.testing.expectEqual(
+            AuthorityAdapterTestEvent.prepared,
+            recorder.events[0],
+        );
+        try std.testing.expect(!testing.authorityPreparedTag(scratch));
+        try std.testing.expectEqual(
+            ExternalRxTurnScratchLifecycle.terminal,
+            scratch.lifecycle,
+        );
+        try std.testing.expectEqual(
+            generation_before,
+            scratch.turn_generation,
+        );
+        try std.testing.expectEqual(@as(usize, 0), active_external_lease_addr);
+        try std.testing.expectEqual(
+            @as(u64, 0),
+            active_external_lease_generation,
+        );
+        try std.testing.expect(storage.semantic_state == .terminal);
+    }
+}
+
 test "D2 lease release failure never commits ready generation" {
     const ApplyProbe = struct {
         fn apply(
@@ -27563,6 +27937,10 @@ test "S3-D incomplete positive prefix cannot mint or consume drain evidence" {
             .read = ReadProbe.read,
         },
     };
+    var authority_recorder = AuthorityAdapterTestRecorder{};
+    authority_adapter_test_recorder = &authority_recorder;
+    defer authority_adapter_test_recorder = null;
+    const generation_before = scratch.turn_generation;
     const result = storage.pumpRxTurn(
         .{ .readable = true, .writable = false, .now_ns = 1 },
         &ops,
@@ -27573,6 +27951,11 @@ test "S3-D incomplete positive prefix cannot mint or consume drain evidence" {
     try std.testing.expectEqual(@as(usize, 2), read_probe.calls);
     try std.testing.expectEqual(RxDrainEvidenceLifecycle.empty, scratch.drain_evidence.lifecycle);
     try std.testing.expect(rxDrainEvidencePristine(&scratch.drain_evidence));
+    try std.testing.expectEqual(@as(u8, 0), authority_recorder.len);
+    try std.testing.expect(
+        ExternalPumpStorage.authorityDestinationsPristine(scratch),
+    );
+    try std.testing.expectEqual(generation_before + 1, scratch.turn_generation);
 }
 
 test "S3-D read attempt budget cannot publish drain evidence" {
@@ -27643,6 +28026,10 @@ test "S3-D read attempt budget cannot publish drain evidence" {
             .read = ReadProbe.read,
         },
     };
+    var authority_recorder = AuthorityAdapterTestRecorder{};
+    authority_adapter_test_recorder = &authority_recorder;
+    defer authority_adapter_test_recorder = null;
+    const generation_before = scratch.turn_generation;
     const result = storage.pumpRxTurn(
         .{ .readable = true, .writable = false, .now_ns = 1 },
         &ops,
@@ -27663,6 +28050,11 @@ test "S3-D read attempt budget cannot publish drain evidence" {
         scratch.drain_evidence.lifecycle,
     );
     try std.testing.expect(rxDrainEvidencePristine(&scratch.drain_evidence));
+    try std.testing.expectEqual(@as(u8, 0), authority_recorder.len);
+    try std.testing.expect(
+        ExternalPumpStorage.authorityDestinationsPristine(scratch),
+    );
+    try std.testing.expectEqual(generation_before + 1, scratch.turn_generation);
 }
 
 test "S3-D frame budget cannot publish drain evidence" {
@@ -27735,6 +28127,10 @@ test "S3-D frame budget cannot publish drain evidence" {
             .read = ReadProbe.read,
         },
     };
+    var authority_recorder = AuthorityAdapterTestRecorder{};
+    authority_adapter_test_recorder = &authority_recorder;
+    defer authority_adapter_test_recorder = null;
+    const generation_before = scratch.turn_generation;
     const result = storage.pumpRxTurn(
         .{ .readable = true, .writable = false, .now_ns = 1 },
         &ops,
@@ -27752,6 +28148,11 @@ test "S3-D frame budget cannot publish drain evidence" {
         scratch.drain_evidence.lifecycle,
     );
     try std.testing.expect(rxDrainEvidencePristine(&scratch.drain_evidence));
+    try std.testing.expectEqual(@as(u8, 0), authority_recorder.len);
+    try std.testing.expect(
+        ExternalPumpStorage.authorityDestinationsPristine(scratch),
+    );
+    try std.testing.expectEqual(generation_before + 1, scratch.turn_generation);
 }
 
 test "S3-D consume and abort reject authority drift move stale and replay" {

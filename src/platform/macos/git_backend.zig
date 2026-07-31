@@ -165,7 +165,9 @@ pub const Backend = struct {
     pub fn submit(self: *Backend, git_exe: []const u8, repo: []const u8, request_id: u64) bool {
         const state = self.state orelse return false;
         state.mutex.lockUncancelable(state.io);
-        if (state.shutting_down or state.inflight >= max_inflight) {
+        // 아직 안 빼 간 결과가 있으면 받지 않는다. 받으면 그 worker의 결과를 버리게 되고, 호출자의 in-flight가
+        // 영영 안 풀려 **목록이 그 자리에서 얼어붙는다**(손 확인에서 실제로 그랬다 — diff 슬롯과 같은 결함).
+        if (state.shutting_down or state.inflight >= max_inflight or state.result != null) {
             state.mutex.unlock(state.io);
             return false;
         }

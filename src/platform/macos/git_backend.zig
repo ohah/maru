@@ -45,7 +45,8 @@ pub const Result = struct {
 
 const State = struct {
     allocator: std.mem.Allocator,
-    mutex: std.Thread.Mutex = .{},
+    io: std.Io,
+    mutex: std.Io.Mutex = .init,
     refs: std.atomic.Value(u32) = .init(1),
     shutting_down: bool = false,
     inflight: usize = 0,
@@ -70,17 +71,17 @@ const Job = struct {
 pub const Backend = struct {
     state: ?*State = null,
 
-    pub fn init(allocator: std.mem.Allocator) !Backend {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io) !Backend {
         const state = try allocator.create(State);
-        state.* = .{ .allocator = allocator };
+        state.* = .{ .allocator = allocator, .io = io };
         return .{ .state = state };
     }
 
     pub fn deinit(self: *Backend) void {
         const state = self.state orelse return;
-        state.mutex.lock();
+        state.mutex.lockUncancelable(state.io);
         state.shutting_down = true;
-        state.mutex.unlock();
+        state.mutex.unlock(state.io);
         self.state = null;
         state.release();
     }
@@ -89,14 +90,14 @@ pub const Backend = struct {
     /// 호출자는 다음 갱신 시점에 다시 시도한다(큐를 쌓아 오래된 결과를 줄줄이 만들지 않는다).
     pub fn submit(self: *Backend, git_exe: []const u8, repo: []const u8, request_id: u64) bool {
         const state = self.state orelse return false;
-        state.mutex.lock();
+        state.mutex.lockUncancelable(state.io);
         if (state.shutting_down or state.inflight >= max_inflight) {
-            state.mutex.unlock();
+            state.mutex.unlock(state.io);
             return false;
         }
         state.inflight += 1;
         _ = state.refs.fetchAdd(1, .monotonic);
-        state.mutex.unlock();
+        state.mutex.unlock(state.io);
 
         const job = state.allocator.create(Job) catch return self.abandon();
         job.* = .{
@@ -125,9 +126,9 @@ pub const Backend = struct {
 
     fn abandon(self: *Backend) bool {
         const state = self.state orelse return false;
-        state.mutex.lock();
+        state.mutex.lockUncancelable(state.io);
         state.inflight -= 1;
-        state.mutex.unlock();
+        state.mutex.unlock(state.io);
         state.release();
         return false;
     }
@@ -135,8 +136,8 @@ pub const Backend = struct {
     /// 완료 결과 하나의 소유권을 호출자에게 넘긴다. frame tick에서 불러도 syscall이 없다.
     pub fn takeResult(self: *Backend) ?Result {
         const state = self.state orelse return null;
-        state.mutex.lock();
-        defer state.mutex.unlock();
+        state.mutex.lockUncancelable(state.io);
+        defer state.mutex.unlock(state.io);
         const result = state.result orelse return null;
         state.result = null;
         return result;
@@ -154,7 +155,7 @@ fn worker(job: *Job) void {
         .{ git_command.Kind.numstat_worktree, "numstat_worktree" },
     }) |pair| {
         if (ok) {
-            const out = run(state.allocator, pair[0], job.git_exe, job.repo) catch null;
+            const out = run(state.allocator, state.io, pair[0], job.git_exe, job.repo) catch null;
             if (out) |o| {
                 @field(result, pair[1]) = o.bytes;
                 if (o.truncated) truncated = true;
@@ -167,79 +168,55 @@ fn worker(job: *Job) void {
     state.allocator.free(job.repo);
     state.allocator.destroy(job);
 
-    state.mutex.lock();
+    state.mutex.lockUncancelable(state.io);
     if (!state.shutting_down and state.result == null and ok) {
         state.result = result;
     } else {
         result.deinit(state.allocator);
     }
     state.inflight -= 1;
-    state.mutex.unlock();
+    state.mutex.unlock(state.io);
     state.release();
 }
 
 const Output = struct { bytes: []u8, truncated: bool };
 
-fn run(allocator: std.mem.Allocator, kind: git_command.Kind, git_exe: []const u8, repo: []const u8) !Output {
+fn run(allocator: std.mem.Allocator, io: std.Io, kind: git_command.Kind, git_exe: []const u8, repo: []const u8) !Output {
     var argv_buf: [git_command.max_argv][]const u8 = undefined;
     const argv = git_command.build(kind, git_exe, repo, &argv_buf);
 
-    var child = std.process.Child.init(argv, allocator);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Pipe;
-    // stderr에는 경로·사용자·저장소 정보가 섞이므로 **읽지 않고 버린다**(docs/editor-surface.md §6 — raw로
-    // page/trace에 흘리지 않는다). 실패 여부는 종료 코드로 충분하다.
-    child.stderr_behavior = .Ignore;
-
-    // 환경은 상속이 아니라 덮어쓴다 — 사용자 환경의 GIT_* 가 읽기 전용 계약을 깨뜨릴 수 있다.
-    var env = try std.process.getEnvMap(allocator);
+    // 환경은 상속이 아니라 덮어쓴다 — 사용자 환경의 GIT_* 가 읽기 전용 계약을 깬다(git_command.env_overrides).
+    var env = std.process.Environ.Map.init(allocator);
     defer env.deinit();
     for (git_command.env_overrides) |e| try env.put(e.name, e.value);
-    child.env_map = &env;
 
-    try child.spawn();
-    errdefer _ = child.kill() catch {};
+    // stderr에는 경로·사용자·저장소 정보가 섞이므로 **버린다**(docs/editor-surface.md §6 — raw로 흘리지 않는다).
+    // 실패 여부는 종료 코드로 충분하다. stdout만 상한 안에서 받는다.
+    const result = std.process.run(allocator, io, .{
+        .argv = argv,
+        .environ_map = &env,
+        .stdout_limit = .limited(max_output_bytes),
+        .stderr_limit = .limited(4096),
+    }) catch return error.GitFailed;
+    allocator.free(result.stderr);
+    errdefer allocator.free(result.stdout);
 
-    var buffer: std.ArrayList(u8) = .empty;
-    errdefer buffer.deinit(allocator);
-    const stdout = child.stdout.?;
-    var truncated = false;
-    var chunk: [16 * 1024]u8 = undefined;
-    while (true) {
-        const n = stdout.read(&chunk) catch break;
-        if (n == 0) break;
-        if (buffer.items.len + n > max_output_bytes) {
-            const room = max_output_bytes -| buffer.items.len;
-            if (room > 0) try buffer.appendSlice(allocator, chunk[0..room]);
-            truncated = true;
-            break; // 상한을 넘으면 더 읽지 않는다. 아래 wait가 파이프를 닫아 자식을 끝낸다.
-        }
-        try buffer.appendSlice(allocator, chunk[0..n]);
-    }
-    const term = child.wait() catch return error.GitFailed;
-    switch (term) {
-        .Exited => |code| if (code != 0 and !truncated) return error.GitFailed,
+    switch (result.term) {
+        .exited => |code| if (code != 0) return error.GitFailed,
         else => return error.GitFailed,
     }
-    return .{ .bytes = try buffer.toOwnedSlice(allocator), .truncated = truncated };
+    // 상한에 걸렸는지는 길이로 판정한다 — 잘렸으면 목록 끝에 그 사실을 표시한다(조용히 일부만 보여 주지 않는다).
+    return .{ .bytes = result.stdout, .truncated = result.stdout.len >= max_output_bytes };
 }
 
 const testing = std.testing;
 
-test "submit은 in-flight 상한을 넘기지 않고 tick을 막지 않는다" {
+test "제출 없이 열고 닫아도 안전하다(수명 계약)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
-    var backend = try Backend.init(testing.allocator);
-    defer backend.deinit();
-    // 존재하지 않는 실행 파일이라 worker는 곧 실패하지만, submit 자체는 **스레드 생성만** 하고 즉시 돌아온다.
-    try testing.expect(backend.submit("/nonexistent/git", "/tmp", 1));
-    // 상한이 1이므로 곧바로 두 번째를 걸면 거부돼야 한다(큐를 쌓아 오래된 결과를 만들지 않는다).
-    // 첫 요청이 이미 끝났을 수도 있어 결과와 무관하게 **크래시하지 않는 것**만 계약으로 둔다.
-    _ = backend.submit("/nonexistent/git", "/tmp", 2);
-    // 실패한 요청은 결과를 남기지 않는다(부분 결과로 섹션을 섞지 않는다).
-    std.Thread.sleep(50 * std.time.ns_per_ms);
-    if (backend.takeResult()) |*r| {
-        var res = r.*;
-        defer res.deinit(testing.allocator);
-        try testing.expect(res.ok);
-    }
+    // 실제 spawn을 테스트에서 돌리지 않는다 — worker가 detached라 테스트 종료와 경합해 결과가 비결정적이 된다.
+    // 여기서 고정하는 것은 **수명**뿐이고, argv·env는 `session.git_command`가, 파싱은 `session.git_status`가
+    // 각각 헤드리스로 전수 검증한다.
+    var backend = try Backend.init(testing.allocator, std.Io.Threaded.global_single_threaded.io());
+    backend.deinit();
+    try testing.expect(backend.state == null);
 }

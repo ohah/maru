@@ -16,6 +16,8 @@ const file_tree_mutation = maru.session.file_tree_mutation;
 const file_tree_icon = chrome.file_tree_icon;
 const file_tree_scrollbar = chrome.components.file_tree_scrollbar;
 const dock_view_bar = chrome.components.dock_view_bar;
+const git_backend_mod = @import("git_backend.zig");
+const scm_view = maru.session.scm_view;
 const file_panel_bridge = maru.session.file_panel_bridge;
 const control_surface = maru.session.control_surface; // Track C A1: 컨트롤 플레인 Surface 엔티티 DTO(collector가 채운다)
 const web_panel_layout = maru.session.web_panel_layout; // Phase 4c: 웹 패널 본문 rect·px→pt y-flip·surface diff 순수 계산(4a) 소비(docs/web-panel.md §10 4c·§14)
@@ -2606,6 +2608,14 @@ pub const AppSession = struct {
     file_tree_hovered_row: ?usize = null,
     /// 호버 중인 뷰 스위처 슬롯(§3.5). 렌더가 배경 강조에 쓰고 hoverCursor가 갱신한다 — 트리 행 호버와 같은 규율.
     dock_view_hovered_slot: ?usize = null,
+    /// 소스 컨트롤 뷰의 git 읽기 backend와 마지막 결과(docs/editor-surface.md §3.5). 결과 텍스트는 세션이 소유하고
+    /// 행 모델은 프레임마다 그 위에서 다시 만든다 — 목록이 화면 폭·높이에 따라 잘리므로 미리 굳혀 둘 이유가 없다.
+    git_backend: ?git_backend_mod.Backend = null,
+    git_result: ?git_backend_mod.Result = null,
+    /// 다음 요청 번호. 늦게 온 응답이 최신 화면을 덮어쓰지 않게 결과와 대조한다.
+    git_request_seq: u64 = 0,
+    /// 아직 응답을 못 받은 요청 번호(없으면 0). 갱신 트리거가 겹쳐도 큐를 쌓지 않는다.
+    git_inflight: u64 = 0,
     file_tree_rows_dirty: bool = true,
     file_tree_reload_actions: [dock_panel.max_entries]FileTreeReloadAction = undefined,
     file_tree_reload_actions_len: usize = 0,
@@ -3196,7 +3206,54 @@ pub const AppSession = struct {
         if (self.dock.view == view) return;
         self.dock.view = view;
         if (view != .explorer and self.fileTreeFocused()) self.restoreFileTreeFocus();
+        // 뷰로 들어올 때 한 번 읽는다(§3.5의 갱신 시점 ①). 폴링하지 않는다.
+        if (view == .source_control) self.refreshGitStatus();
         self.metal_dirty = true;
+    }
+
+    /// git 읽기를 건다. 소스 컨트롤 뷰를 보고 있지 않으면 아무것도 하지 않는다 — 안 보는 화면 때문에 프로세스를
+    /// 띄우지 않는다. 이미 in-flight면 건너뛴다(큐를 쌓아 오래된 결과를 줄줄이 만들지 않는다 — §3.5).
+    fn refreshGitStatus(self: *AppSession) void {
+        if (self.dock.view != .source_control) return;
+        if (self.git_inflight != 0) return;
+        const repo = self.gitRepoRoot() orelse return;
+        if (self.git_backend == null) {
+            self.git_backend = git_backend_mod.Backend.init(self.allocator, self.io) catch return;
+        }
+        self.git_request_seq += 1;
+        // git 실행 파일은 PATH 탐색 없이 고정 경로를 쓴다(PATH hijack 차단 — docs/editor-surface.md §6).
+        if (self.git_backend.?.submit("/usr/bin/git", repo, self.git_request_seq)) {
+            self.git_inflight = self.git_request_seq;
+        }
+    }
+
+    /// 완료된 git 결과를 받아 세션에 싣는다. frame tick에서 호출해도 syscall이 없다.
+    fn drainGitStatus(self: *AppSession) void {
+        var backend = &(self.git_backend orelse return);
+        while (backend.takeResult()) |taken| {
+            var result = taken;
+            if (result.request_id != self.git_inflight) {
+                result.deinit(self.allocator); // 늦게 온 응답이 최신 화면을 덮지 않는다
+                continue;
+            }
+            self.git_inflight = 0;
+            if (self.git_result) |*old| old.deinit(self.allocator);
+            self.git_result = result;
+            self.metal_dirty = true;
+        }
+    }
+
+    /// 탐색기 root 중 첫 git 저장소. 도크가 보여 주는 것과 같은 root를 기준으로 삼는다 — 사용자가 보는 트리와
+    /// 다른 저장소의 변경을 보여 주면 안 된다.
+    fn gitRepoRoot(self: *const AppSession) ?[]const u8 {
+        for (self.file_tree.roots.items) |root| {
+            var buf: [std.fs.max_path_bytes]u8 = undefined;
+            // `.git`이 디렉터리든 파일(worktree)이든 존재만 보면 된다 — 어느 쪽이든 git이 해석한다.
+            const dot_git = std.fmt.bufPrintZ(&buf, "{s}/.git", .{root.path}) catch continue;
+            if (std.c.access(dot_git.ptr, @intCast(std.posix.F_OK)) != 0) continue;
+            return root.path;
+        }
+        return null;
     }
 
     fn dockGeometry(self: *const AppSession) dock_layout.Geometry {

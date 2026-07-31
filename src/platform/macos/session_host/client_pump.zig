@@ -123,6 +123,465 @@ pub const ControlProgress = enum {
     response_wait,
 };
 
+/// Mutually composable causes already observed and sealed by the current RX turn. This is a
+/// semantic DTO: transport adapters must not infer protocol or revoke state from raw bytes here.
+pub const WholeTurnCauses = struct {
+    deadline_expired: bool = false,
+    backwards_clock: bool = false,
+    invariant_or_corruption: bool = false,
+    resource_exhausted: bool = false,
+    protocol_violation: bool = false,
+    exact_revoke: bool = false,
+    /// A turn-start readiness hint. It suppresses TX immediately but becomes EOF only after the
+    /// bounded RX drain reports completion.
+    peer_hup_hint: bool = false,
+    peer_hup_drain_complete: bool = false,
+    transport: TransportTerminal = .none,
+};
+
+pub const TransportTerminal = enum {
+    none,
+    eof,
+    socket_error,
+};
+
+pub const RevokeIntegrationAction = enum {
+    cancel_queued,
+    cleanup_completed,
+    poison_close,
+    success_candidate,
+    continue_bounded_rx,
+};
+
+pub const RevokeIntegrationInput = struct {
+    causes: WholeTurnCauses,
+    completed_present: bool,
+    control: F3ControlProgress,
+};
+
+pub const F3ControlProgress = enum {
+    none,
+    queued,
+    partial,
+    fully_sent,
+    response_wait,
+    missing,
+    invalid,
+};
+
+pub const RevokeIntegrationPlan = struct {
+    action: RevokeIntegrationAction,
+    terminal: ?ExternalPumpTerminal,
+    suppress_tx: bool = false,
+    bounded_rx_required: bool = false,
+};
+
+fn terminalForWholeTurn(causes: WholeTurnCauses) ?ExternalPumpTerminal {
+    const reason: ?TerminalReason = if (causes.deadline_expired)
+        .deadline_exceeded
+    else if (causes.backwards_clock)
+        .invariant_failure
+    else if (causes.invariant_or_corruption)
+        .invariant_failure
+    else if (causes.resource_exhausted)
+        .resource_exhausted
+    else if (causes.protocol_violation)
+        .protocol_error
+    else if (causes.exact_revoke)
+        .revoked
+    else switch (causes.transport) {
+        .none => if (causes.peer_hup_hint and causes.peer_hup_drain_complete) .eof else null,
+        .eof => .eof,
+        .socket_error => .socket_error,
+    };
+    return if (reason) |value| .{
+        .reason = value,
+        .fd_disposition = .owner_cleanup,
+    } else null;
+}
+
+/// Allocation-free f3a policy. The caller supplies only causes already observed before traversal
+/// stopped; in particular, bytes after an OOM are not candidates. This function chooses ownership
+/// work but never mutates the TX queue, correlation owner, completed payload, or authority.
+pub fn planRevokeIntegration(input: RevokeIntegrationInput) RevokeIntegrationPlan {
+    var causes = input.causes;
+    // A completed owner exists only after the correlated request descriptor retired. Mixing that
+    // owner with any live/missing/invalid TX progress is sealed corruption, not a terminal reason
+    // that may be laundered into a normal revoke/EOF cleanup.
+    if ((input.completed_present and input.control != .none) or
+        (causes.peer_hup_drain_complete and !causes.peer_hup_hint))
+        causes.invariant_or_corruption = true;
+    const terminal = terminalForWholeTurn(causes);
+    const draining_hup = causes.peer_hup_hint and
+        !causes.peer_hup_drain_complete and terminal == null;
+    if (terminal == null) return .{
+        .action = if (draining_hup)
+            .continue_bounded_rx
+        else if (input.completed_present)
+            .success_candidate
+        else
+            .poison_close,
+        .terminal = if (input.completed_present or draining_hup) null else .{
+            .reason = .invariant_failure,
+            .fd_disposition = .owner_cleanup,
+        },
+        .suppress_tx = draining_hup or !input.completed_present,
+        .bounded_rx_required = draining_hup,
+    };
+
+    if (input.completed_present) return .{
+        .action = .cleanup_completed,
+        .terminal = terminal,
+        .suppress_tx = true,
+    };
+
+    if (terminal.?.reason == .revoked) return switch (input.control) {
+        .none, .queued => .{
+            .action = .cancel_queued,
+            .terminal = terminal,
+            .suppress_tx = true,
+        },
+        .partial, .fully_sent, .response_wait, .missing, .invalid => .{
+            .action = .poison_close,
+            .terminal = .{
+                .reason = .protocol_error,
+                .fd_disposition = .owner_cleanup,
+            },
+            .suppress_tx = true,
+        },
+    };
+
+    return .{
+        .action = .poison_close,
+        .terminal = terminal,
+        .suppress_tx = true,
+    };
+}
+
+test "f3a whole-turn precedence is total and deadline first" {
+    const all = planRevokeIntegration(.{
+        .causes = .{
+            .deadline_expired = true,
+            .backwards_clock = true,
+            .invariant_or_corruption = true,
+            .resource_exhausted = true,
+            .protocol_violation = true,
+            .exact_revoke = true,
+            .transport = .socket_error,
+        },
+        .completed_present = true,
+        .control = .response_wait,
+    });
+    try std.testing.expectEqual(RevokeIntegrationAction.cleanup_completed, all.action);
+    try std.testing.expectEqual(TerminalReason.deadline_exceeded, all.terminal.?.reason);
+
+    const ordered = [_]struct {
+        causes: WholeTurnCauses,
+        reason: TerminalReason,
+    }{
+        .{ .causes = .{ .backwards_clock = true }, .reason = .invariant_failure },
+        .{ .causes = .{ .invariant_or_corruption = true }, .reason = .invariant_failure },
+        .{ .causes = .{ .resource_exhausted = true }, .reason = .resource_exhausted },
+        .{ .causes = .{ .protocol_violation = true }, .reason = .protocol_error },
+        .{ .causes = .{ .exact_revoke = true }, .reason = .revoked },
+        .{ .causes = .{ .transport = .eof }, .reason = .eof },
+        .{ .causes = .{ .transport = .socket_error }, .reason = .socket_error },
+    };
+    for (ordered) |case| {
+        const plan = planRevokeIntegration(.{
+            .causes = case.causes,
+            .completed_present = true,
+            .control = .none,
+        });
+        try std.testing.expectEqual(case.reason, plan.terminal.?.reason);
+        try std.testing.expectEqual(FdDisposition.owner_cleanup, plan.terminal.?.fd_disposition);
+    }
+}
+
+test "f3a revoke cancels only exact unsent control and otherwise fails closed" {
+    const progresses = [_]F3ControlProgress{
+        .none,
+        .queued,
+        .partial,
+        .fully_sent,
+        .response_wait,
+        .missing,
+        .invalid,
+    };
+    for (progresses) |progress| {
+        const plan = planRevokeIntegration(.{
+            .causes = .{ .exact_revoke = true },
+            .completed_present = false,
+            .control = progress,
+        });
+        switch (progress) {
+            .none, .queued => {
+                try std.testing.expectEqual(RevokeIntegrationAction.cancel_queued, plan.action);
+                try std.testing.expectEqual(TerminalReason.revoked, plan.terminal.?.reason);
+            },
+            .partial, .fully_sent, .response_wait, .missing, .invalid => {
+                try std.testing.expectEqual(RevokeIntegrationAction.poison_close, plan.action);
+                try std.testing.expectEqual(TerminalReason.protocol_error, plan.terminal.?.reason);
+            },
+        }
+    }
+}
+
+test "f3a HUP suppresses TX while bounded RX decides stronger cause" {
+    const draining = planRevokeIntegration(.{
+        .causes = .{ .peer_hup_hint = true },
+        .completed_present = false,
+        .control = .none,
+    });
+    try std.testing.expectEqual(RevokeIntegrationAction.continue_bounded_rx, draining.action);
+    try std.testing.expectEqual(@as(?ExternalPumpTerminal, null), draining.terminal);
+    try std.testing.expect(draining.suppress_tx);
+    try std.testing.expect(draining.bounded_rx_required);
+
+    const drained = planRevokeIntegration(.{
+        .causes = .{ .peer_hup_hint = true, .peer_hup_drain_complete = true },
+        .completed_present = false,
+        .control = .none,
+    });
+    try std.testing.expectEqual(RevokeIntegrationAction.poison_close, drained.action);
+    try std.testing.expectEqual(TerminalReason.eof, drained.terminal.?.reason);
+    try std.testing.expect(drained.suppress_tx);
+
+    const stronger = planRevokeIntegration(.{
+        .causes = .{ .peer_hup_hint = true, .protocol_violation = true },
+        .completed_present = true,
+        .control = .none,
+    });
+    try std.testing.expectEqual(RevokeIntegrationAction.cleanup_completed, stronger.action);
+    try std.testing.expectEqual(TerminalReason.protocol_error, stronger.terminal.?.reason);
+}
+
+test "f3a pairwise candidate matrix preserves precedence for every control state" {
+    const Candidate = enum {
+        deadline,
+        invariant,
+        resource,
+        protocol,
+        revoke,
+        eof,
+        socket,
+    };
+    const candidates = [_]Candidate{
+        .deadline,
+        .invariant,
+        .resource,
+        .protocol,
+        .revoke,
+        .eof,
+        .socket,
+    };
+    const reasons = [_]TerminalReason{
+        .deadline_exceeded,
+        .invariant_failure,
+        .resource_exhausted,
+        .protocol_error,
+        .revoked,
+        .eof,
+        .socket_error,
+    };
+    const controls = [_]F3ControlProgress{
+        .none,
+        .queued,
+        .partial,
+        .fully_sent,
+        .response_wait,
+        .missing,
+        .invalid,
+    };
+    for (candidates, 0..) |left, left_index| {
+        for (candidates, 0..) |right, right_index| {
+            var causes: WholeTurnCauses = .{};
+            for ([_]Candidate{ left, right }) |candidate| switch (candidate) {
+                .deadline => causes.deadline_expired = true,
+                .invariant => causes.invariant_or_corruption = true,
+                .resource => causes.resource_exhausted = true,
+                .protocol => causes.protocol_violation = true,
+                .revoke => causes.exact_revoke = true,
+                .eof => causes.transport = .eof,
+                .socket => if (causes.transport == .none) {
+                    causes.transport = .socket_error;
+                },
+            };
+            const expected_reason = reasons[@min(left_index, right_index)];
+            for ([_]bool{ false, true }) |completed| {
+                for (controls) |control| {
+                    const plan = planRevokeIntegration(.{
+                        .causes = causes,
+                        .completed_present = completed,
+                        .control = control,
+                    });
+                    if (completed) {
+                        try std.testing.expectEqual(
+                            RevokeIntegrationAction.cleanup_completed,
+                            plan.action,
+                        );
+                        const completed_reason: TerminalReason = if (control != .none and
+                            left_index != 0 and right_index != 0)
+                            .invariant_failure
+                        else
+                            expected_reason;
+                        try std.testing.expectEqual(completed_reason, plan.terminal.?.reason);
+                        try std.testing.expect(plan.suppress_tx);
+                    } else if (expected_reason == .revoked and
+                        (control == .none or control == .queued))
+                    {
+                        try std.testing.expectEqual(
+                            RevokeIntegrationAction.cancel_queued,
+                            plan.action,
+                        );
+                        try std.testing.expectEqual(TerminalReason.revoked, plan.terminal.?.reason);
+                        try std.testing.expect(plan.suppress_tx);
+                    } else {
+                        try std.testing.expectEqual(
+                            RevokeIntegrationAction.poison_close,
+                            plan.action,
+                        );
+                        const poison_reason: TerminalReason = if (expected_reason == .revoked)
+                            .protocol_error
+                        else
+                            expected_reason;
+                        try std.testing.expectEqual(poison_reason, plan.terminal.?.reason);
+                        try std.testing.expect(plan.suppress_tx);
+                    }
+                }
+            }
+        }
+    }
+}
+
+test "f3a completed payload cleanup dominates terminal and clean drain is candidate only" {
+    const revoked = planRevokeIntegration(.{
+        .causes = .{ .exact_revoke = true },
+        .completed_present = true,
+        .control = .none,
+    });
+    try std.testing.expectEqual(RevokeIntegrationAction.cleanup_completed, revoked.action);
+    try std.testing.expectEqual(TerminalReason.revoked, revoked.terminal.?.reason);
+
+    const clean = planRevokeIntegration(.{
+        .causes = .{},
+        .completed_present = true,
+        .control = .none,
+    });
+    try std.testing.expectEqual(RevokeIntegrationAction.success_candidate, clean.action);
+    try std.testing.expectEqual(@as(?ExternalPumpTerminal, null), clean.terminal);
+
+    const impossible = planRevokeIntegration(.{
+        .causes = .{},
+        .completed_present = false,
+        .control = .none,
+    });
+    try std.testing.expectEqual(RevokeIntegrationAction.poison_close, impossible.action);
+    try std.testing.expectEqual(TerminalReason.invariant_failure, impossible.terminal.?.reason);
+}
+
+test "f3a completed correlation and HUP DTO canonicality fail closed" {
+    const invalid_progresses = [_]F3ControlProgress{
+        .queued,
+        .partial,
+        .fully_sent,
+        .response_wait,
+        .missing,
+        .invalid,
+    };
+    for (invalid_progresses) |control| {
+        const clean = planRevokeIntegration(.{
+            .causes = .{},
+            .completed_present = true,
+            .control = control,
+        });
+        try std.testing.expectEqual(RevokeIntegrationAction.cleanup_completed, clean.action);
+        try std.testing.expectEqual(TerminalReason.invariant_failure, clean.terminal.?.reason);
+        try std.testing.expect(clean.suppress_tx);
+
+        const revoked = planRevokeIntegration(.{
+            .causes = .{ .exact_revoke = true },
+            .completed_present = true,
+            .control = control,
+        });
+        try std.testing.expectEqual(TerminalReason.invariant_failure, revoked.terminal.?.reason);
+        try std.testing.expect(revoked.suppress_tx);
+    }
+
+    const impossible_hup = planRevokeIntegration(.{
+        .causes = .{ .peer_hup_drain_complete = true },
+        .completed_present = true,
+        .control = .none,
+    });
+    try std.testing.expectEqual(RevokeIntegrationAction.cleanup_completed, impossible_hup.action);
+    try std.testing.expectEqual(TerminalReason.invariant_failure, impossible_hup.terminal.?.reason);
+    try std.testing.expect(impossible_hup.suppress_tx);
+
+    const completed_hup = planRevokeIntegration(.{
+        .causes = .{ .peer_hup_hint = true },
+        .completed_present = true,
+        .control = .none,
+    });
+    try std.testing.expectEqual(
+        RevokeIntegrationAction.continue_bounded_rx,
+        completed_hup.action,
+    );
+    try std.testing.expect(completed_hup.suppress_tx);
+    try std.testing.expect(completed_hup.bounded_rx_required);
+}
+
+test "f3a HUP cross product never weakens a sealed stronger cause" {
+    const cases = [_]struct {
+        causes: WholeTurnCauses,
+        reason: TerminalReason,
+    }{
+        .{ .causes = .{ .deadline_expired = true }, .reason = .deadline_exceeded },
+        .{ .causes = .{ .backwards_clock = true }, .reason = .invariant_failure },
+        .{ .causes = .{ .invariant_or_corruption = true }, .reason = .invariant_failure },
+        .{ .causes = .{ .resource_exhausted = true }, .reason = .resource_exhausted },
+        .{ .causes = .{ .protocol_violation = true }, .reason = .protocol_error },
+        .{ .causes = .{ .exact_revoke = true }, .reason = .revoked },
+        .{ .causes = .{ .transport = .eof }, .reason = .eof },
+        .{ .causes = .{ .transport = .socket_error }, .reason = .socket_error },
+    };
+    const controls = [_]F3ControlProgress{
+        .none,
+        .queued,
+        .partial,
+        .fully_sent,
+        .response_wait,
+        .missing,
+        .invalid,
+    };
+    for (cases) |case| {
+        for ([_]bool{ false, true }) |drained| {
+            for ([_]bool{ false, true }) |completed| {
+                for (controls) |control| {
+                    var causes = case.causes;
+                    causes.peer_hup_hint = true;
+                    causes.peer_hup_drain_complete = drained;
+                    const plan = planRevokeIntegration(.{
+                        .causes = causes,
+                        .completed_present = completed,
+                        .control = control,
+                    });
+                    const canonical_reason: TerminalReason = if (completed and
+                        control != .none and !causes.deadline_expired)
+                        .invariant_failure
+                    else if (!completed and case.reason == .revoked and
+                        control != .none and control != .queued)
+                        .protocol_error
+                    else
+                        case.reason;
+                    try std.testing.expectEqual(canonical_reason, plan.terminal.?.reason);
+                    try std.testing.expect(plan.suppress_tx);
+                    try std.testing.expect(!plan.bounded_rx_required);
+                }
+            }
+        }
+    }
+}
+
 pub const RecoveryDisposition = enum {
     no_op,
     entered,

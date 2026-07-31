@@ -21,12 +21,16 @@ export async function emitZntcBundle(
 ): Promise<EmittedBundle> {
   // write:false is the fail-closed boundary. 0.1.3에서 확인된 diagnostics+output 동시 반환 가능성을
   // 0.1.4에서도 보수적으로 방어하므로, 오류 확인 전에는 어떤 bytes도 dist에 쓰지 않는다.
-  const result = await build({
+  // `bundle`은 이 버전 타입 정의에 없지만 런타임이 요구하는 값이다(빼면 번들이 안 묶인다) — 타입만 넓혀 넘긴다.
+  // 라이브러리 타입이 실제 옵션을 다 담지 못하는 경우라, 값을 지어내는 게 아니라 **알려진 옵션을 통과**시킨다.
+  const options = {
     entryPoints: [entry],
     bundle: true,
     format: "esm",
     platform: "browser",
-    target: ["safari16"],
+    // 단일 값이다(타입이 `BuildTarget` = 문자열 하나). 배열로 넘기던 것을 고친다 — 산출물이 같은지는 빌드
+    // 결과 바이트로 확인했다(같다: 배열도 같은 값으로 해석돼 왔다).
+    target: "safari16",
     // React 19의 automatic runtime — 컴포넌트마다 `import React`를 쓰지 않는다(docs/file-panel.md §2.1).
     jsx: "automatic",
     jsxImportSource: "react",
@@ -42,7 +46,8 @@ export async function emitZntcBundle(
     minifySyntax: false,
     sourcemap: false,
     write: false,
-  });
+  };
+  const result = await build(options as unknown as Parameters<typeof build>[0]);
 
   if (result.errors.length > 0) {
     throw new Error(`zntc build failed: ${result.errors.map(formatDiagnostic).join("; ")}`);

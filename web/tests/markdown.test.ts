@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { WindowLike } from "dompurify";
 import { JSDOM } from "jsdom";
 import { renderMarkdown } from "../src/markdown";
 import { normalizeAssetReference } from "../src/asset-path";
@@ -139,7 +140,7 @@ test("Mermaid SVG sanitizer removes executable and network-capable sinks", () =>
       <rect id="external" fill="url(https://evil.test/paint.svg#x)" stroke="url(//evil.test/stroke.svg#x)" filter="url(relative.svg#x)" clip-path="url(data:image/svg+xml,x)" mask="u/**/rl(https://evil.test/mask.svg#x)" marker-start="u\\72l(https://evil.test/marker.svg#x)" marker-mid="u\\110000rl(https://evil.test/invalid-high.svg#x)" marker-end="u\\ffffffrl(https://evil.test/invalid-max.svg#x)" />
       <text>plain label</text>
     </svg>`,
-    testWindow as unknown as Window,
+    testWindow as unknown as WindowLike,
   );
 
   expect(svg).toContain("plain label");

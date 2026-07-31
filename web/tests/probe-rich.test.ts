@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { ViewerWindow } from "../src/viewer";
 import { JSDOM } from "jsdom";
 import { bootShell, viewerChannel } from "../src/viewer";
 
@@ -59,7 +60,7 @@ describe("probe", () => {
       });
       const cw = dom.window.document.querySelector<HTMLIFrameElement>("#renderer")?.contentWindow;
       if (cw) Object.defineProperty(cw, "postMessage", { configurable: true, value: () => {} });
-      bootShell(dom.window.document, dom.window as unknown as Window);
+      bootShell(dom.window.document, dom.window as unknown as ViewerWindow);
       dom.window.dispatchEvent(
         new dom.window.MessageEvent("message", {
           source: cw,

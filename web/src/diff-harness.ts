@@ -9,7 +9,6 @@
 //! **하니스는 UI가 아니라 계측이다.** 화면은 커밋된 fixture 하나이고 스모크가 읽을 값(`probe()`)이 산출물이다. 그래서
 //! 마운트·조작·관측을 순수 함수로 노출해 jsdom에서 같은 코드를 테스트한다(§7.3 oracle 2·3).
 
-import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { original_side_extensions, side_extensions, syncMergeScroll } from "./diff-layout";
 import {

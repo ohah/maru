@@ -1,3 +1,4 @@
+import { type WindowLike } from "dompurify";
 import { normalizeAssetReference } from "./asset-path";
 import { renderMarkdown } from "./markdown";
 import { sanitizeMermaidSvg } from "./rich-render";
@@ -28,14 +29,14 @@ export const maxAssetRequests = 64;
 export const maxAssetBase64Bytes = 48 * 1024 * 1024;
 
 export function assetRequestCountAllowed(count: number): boolean {
-  return Number.isInteger(count) && count >= 0 && count <= maxAssetRequests;
+  return isInt(count) && count >= 0 && count <= maxAssetRequests;
 }
 
 export function assetBase64BudgetAllowed(currentBytes: number, nextBytes: number): boolean {
   return (
-    Number.isInteger(currentBytes) &&
+    isInt(currentBytes) &&
     currentBytes >= 0 &&
-    Number.isInteger(nextBytes) &&
+    isInt(nextBytes) &&
     nextBytes >= 0 &&
     currentBytes <= maxAssetBase64Bytes - nextBytes
   );
@@ -96,8 +97,28 @@ type RendererReady = {
 
 let bridgeRequestId = 0;
 
+/// 이 모듈이 창에서 실제로 쓰는 것만 요구한다. `Window & typeof globalThis`로 두면 브라우저 전역 전체를 요구해
+/// jsdom 창(DOMWindow)이 안 맞아 테스트가 캐스팅투성이가 된다 — 필요한 생성자만 적으면 둘 다 만족한다.
+/// (그 창의 생성자로 `instanceof`를 하는 이유는 다른 창/iframe 인스턴스를 정확히 가리기 위해서다.)
+export type ViewerWindow = Window &
+  Pick<typeof globalThis, "MouseEvent" | "Element"> &
+  // SVG asset을 sanitize할 때 그 창을 DOMPurify에 넘긴다 — 그쪽이 요구하는 목록을 여기 포함시켜 호출 지점마다
+  // 캐스팅하지 않는다.
+  WindowLike;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/// `Number.isInteger`도 같은 이유로 가드가 아니다 — 정수 검사 뒤의 비교를 위해 좁혀 준다.
+function isInt(value: unknown): value is number {
+  return Number.isInteger(value);
+}
+
+/// `Number.isSafeInteger`는 타입 가드가 아니라 boolean만 준다 — 그래서 검사한 뒤에도 값이 `unknown`으로 남아
+/// 비교·산술이 전부 타입 오류였다(이 파일이 타입 검사 밖이라 여태 안 드러났다). 같은 판정을 가드로 감싸 좁힌다.
+function isSafeInt(value: unknown): value is number {
+  return Number.isSafeInteger(value);
 }
 
 function isLocalDocumentHref(href: string): boolean {
@@ -159,15 +180,13 @@ export function closeUnlockOwnsLock(
   unlockRequestId: number,
 ): boolean {
   return (
-    currentRequestId !== null &&
-    Number.isSafeInteger(unlockRequestId) &&
-    unlockRequestId >= currentRequestId
+    currentRequestId !== null && isSafeInt(unlockRequestId) && unlockRequestId >= currentRequestId
   );
 }
 
 export function closeLockCanAcquire(currentRequestId: number | null, requestId: number): boolean {
   return (
-    Number.isSafeInteger(requestId) &&
+    isSafeInt(requestId) &&
     requestId > 0 &&
     (currentRequestId === null || requestId >= currentRequestId)
   );
@@ -203,10 +222,10 @@ export function isRendererReport(value: unknown): value is RendererReport {
     value.type === "rendered" &&
     typeof value.text === "string" &&
     value.text.length <= 512 &&
-    Number.isInteger(value.imageCount) &&
+    isInt(value.imageCount) &&
     value.imageCount >= 0 &&
     value.imageCount <= maxAssetRequests &&
-    Number.isInteger(value.loadedImageCount) &&
+    isInt(value.loadedImageCount) &&
     value.loadedImageCount >= 0 &&
     value.loadedImageCount <= value.imageCount &&
     typeof value.bridgeType === "string" &&
@@ -218,7 +237,7 @@ export function isRendererReport(value: unknown): value is RendererReport {
 }
 
 function rendererCapabilityTypes(
-  targetWindow: Window,
+  targetWindow: ViewerWindow,
 ): Pick<RendererReady, "bridgeType" | "handlerType" | "parentAccessible"> {
   let parentAccessible = false;
   try {
@@ -341,16 +360,12 @@ export function requestFileBridge(
     let request: FileBridgeRequest;
     switch (method) {
       case "read":
-        if (
-          !isRecord(value) ||
-          !Number.isSafeInteger(value.editor_epoch) ||
-          value.editor_epoch <= 0
-        )
+        if (!isRecord(value) || !isSafeInt(value.editor_epoch) || value.editor_epoch <= 0)
           throw new TypeError("invalid read payload");
         request = { method, editor_epoch: value.editor_epoch as number };
         break;
       case "beginDocument":
-        if (!isRecord(value) || !Number.isSafeInteger(value.document_id) || value.document_id <= 0)
+        if (!isRecord(value) || !isSafeInt(value.document_id) || value.document_id <= 0)
           throw new TypeError("invalid beginDocument payload");
         request = { method, document_id: value.document_id as number };
         break;
@@ -367,7 +382,7 @@ export function requestFileBridge(
       case "write":
         if (
           !isRecord(value) ||
-          !Number.isSafeInteger(value.editor_epoch) ||
+          !isSafeInt(value.editor_epoch) ||
           value.editor_epoch <= 0 ||
           typeof value.content !== "string"
         )
@@ -382,11 +397,11 @@ export function requestFileBridge(
         if (
           !isRecord(value) ||
           typeof value.dirty !== "boolean" ||
-          !Number.isSafeInteger(value.editor_epoch) ||
+          !isSafeInt(value.editor_epoch) ||
           value.editor_epoch <= 0 ||
-          !Number.isSafeInteger(value.revision) ||
+          !isSafeInt(value.revision) ||
           value.revision < 0 ||
-          !Number.isSafeInteger(value.request_id) ||
+          !isSafeInt(value.request_id) ||
           value.request_id < 0
         ) {
           throw new TypeError("invalid setDirty payload");
@@ -402,7 +417,7 @@ export function requestFileBridge(
       case "resolveExternalChange":
         if (
           !isRecord(value) ||
-          !Number.isSafeInteger(value.editor_epoch) ||
+          !isSafeInt(value.editor_epoch) ||
           value.editor_epoch <= 0 ||
           typeof value.success !== "boolean"
         )
@@ -416,7 +431,7 @@ export function requestFileBridge(
       case "openLink":
         if (
           !isRecord(value) ||
-          !Number.isSafeInteger(value.editor_epoch) ||
+          !isSafeInt(value.editor_epoch) ||
           value.editor_epoch <= 0 ||
           typeof value.href !== "string" ||
           typeof value.forceSystem !== "boolean"
@@ -433,19 +448,19 @@ export function requestFileBridge(
       case "renderMermaid":
         if (
           !isRecord(value) ||
-          !Number.isSafeInteger(value.editor_epoch) ||
+          !isSafeInt(value.editor_epoch) ||
           value.editor_epoch <= 0 ||
-          !Number.isSafeInteger(value.document_revision) ||
+          !isSafeInt(value.document_revision) ||
           value.document_revision < 0 ||
-          !Number.isSafeInteger(value.projection_generation) ||
+          !isSafeInt(value.projection_generation) ||
           value.projection_generation <= 0 ||
-          !Number.isSafeInteger(value.widget_id) ||
+          !isSafeInt(value.widget_id) ||
           value.widget_id <= 0 ||
-          !Number.isSafeInteger(value.widget_generation) ||
+          !isSafeInt(value.widget_generation) ||
           value.widget_generation <= 0 ||
-          !Number.isSafeInteger(value.renderer_instance) ||
+          !isSafeInt(value.renderer_instance) ||
           value.renderer_instance <= 0 ||
-          !Number.isSafeInteger(value.fence_id) ||
+          !isSafeInt(value.fence_id) ||
           value.fence_id <= 0 ||
           typeof value.source_hash !== "string" ||
           !/^[0-9a-f]{64}$/.test(value.source_hash) ||
@@ -471,17 +486,17 @@ export function requestFileBridge(
       case "revokeMermaid":
         if (
           !isRecord(value) ||
-          !Number.isSafeInteger(value.editor_epoch) ||
+          !isSafeInt(value.editor_epoch) ||
           value.editor_epoch <= 0 ||
-          !Number.isSafeInteger(value.document_revision) ||
+          !isSafeInt(value.document_revision) ||
           value.document_revision < 0 ||
-          !Number.isSafeInteger(value.projection_generation) ||
+          !isSafeInt(value.projection_generation) ||
           value.projection_generation <= 0 ||
-          !Number.isSafeInteger(value.widget_id) ||
+          !isSafeInt(value.widget_id) ||
           value.widget_id <= 0 ||
-          !Number.isSafeInteger(value.widget_generation) ||
+          !isSafeInt(value.widget_generation) ||
           value.widget_generation <= 0 ||
-          !Number.isSafeInteger(value.renderer_instance) ||
+          !isSafeInt(value.renderer_instance) ||
           value.renderer_instance <= 0
         ) {
           throw new TypeError("invalid revokeMermaid payload");
@@ -497,11 +512,7 @@ export function requestFileBridge(
         };
         break;
       case "rendererReady":
-        if (
-          !isRecord(value) ||
-          !Number.isSafeInteger(value.editor_epoch) ||
-          value.editor_epoch <= 0
-        )
+        if (!isRecord(value) || !isSafeInt(value.editor_epoch) || value.editor_epoch <= 0)
           throw new TypeError("invalid rendererReady payload");
         request = { method, editor_epoch: value.editor_epoch as number };
         break;
@@ -573,7 +584,7 @@ function sliceMermaidFence(element: HTMLElement, markdown: string): string | nul
 function decodeSourceOffset(encoded: string | undefined): number | null {
   if (encoded === undefined) return null;
   const offset = Number(encoded.split(":")[2]);
-  return Number.isInteger(offset) && offset >= 0 ? offset : null;
+  return isInt(offset) && offset >= 0 ? offset : null;
 }
 
 /// Product Mermaid adapter. The native exact terminal and the action-relative Swift fallback are the
@@ -636,7 +647,7 @@ export function revokeMermaidFromBridge(
   );
 }
 
-function bytesToBase64(bytes: Uint8Array, targetWindow: Window): string {
+function bytesToBase64(bytes: Uint8Array, targetWindow: ViewerWindow): string {
   let binary = "";
   const chunkSize = 0x8000;
   for (let offset = 0; offset < bytes.length; offset += chunkSize) {
@@ -648,7 +659,7 @@ function bytesToBase64(bytes: Uint8Array, targetWindow: Window): string {
 export function assetDataUrl(
   mime: string,
   dataBase64: string,
-  targetWindow: Window,
+  targetWindow: ViewerWindow,
 ): string | null {
   const raster = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "image/avif"]);
   try {
@@ -668,7 +679,7 @@ export function assetDataUrl(
 
 // FP13: svg 파일 프리뷰. 원문 SVG를 sanitize(script/event/외부 URL 제거)한 뒤 `data:` URL로 만든다. `<img>`로
 // 표시하므로 sanitize를 뚫어도 이미지 컨텍스트라 스크립트가 실행되지 않는다(격리 render origin, capability 0).
-export function svgToDataUrl(source: string, targetWindow: Window): string | null {
+export function svgToDataUrl(source: string, targetWindow: ViewerWindow): string | null {
   const trimmed = source.trimStart();
   if (!(trimmed.startsWith("<svg") || /^<\?xml[^>]*>\s*<svg\b/i.test(trimmed))) return null;
   try {
@@ -714,7 +725,10 @@ export function documentIsDirtyAgainstSnapshot(current: Text, saved: Text | null
   return saved === null || !current.eq(saved);
 }
 
-export function bootShell(document: Document, targetWindow: Window): void {
+// `Window & typeof globalThis`인 이유: 이 함수는 `targetWindow.MouseEvent`처럼 **그 창의 전역 생성자**로
+// instanceof 판정을 한다(다른 창/iframe 인스턴스를 정확히 가르려면 그 창의 생성자여야 한다). 그냥 `Window`면
+// 그 속성들이 타입에 없다 — 이 파일이 타입 검사 밖이라 여태 안 드러났다.
+export function bootShell(document: Document, targetWindow: ViewerWindow): void {
   const frame = document.querySelector<HTMLIFrameElement>("#renderer");
   const editorHost = document.querySelector<HTMLElement>("#editor");
   const status = document.querySelector<HTMLElement>("#viewer-status");
@@ -876,6 +890,9 @@ export function bootShell(document: Document, targetWindow: Window): void {
 
   const save = async (): Promise<boolean> => {
     if (editorEpoch === null) return false;
+    // epoch도 **지금** 고정한다(아래 mode와 같은 이유). queue 콜백은 나중에 도는데 그 사이 document가 교체되면
+    // `editorEpoch`가 다른 값이 되어, 방금 검사한 것과 다른 문서에 쓰게 된다. 타입 검사가 이 구멍을 짚어 줬다.
+    const saving_epoch = editorEpoch;
     if (editor === null && richEditor === null) return false;
     // 리치가 표현하지 못하는 문법이 있는 문서는 저장을 거부한다. 잠금이 타이핑만 막으면 ⌘S 한 번에
     // frontmatter·원시 HTML·각주가 직렬화 결과로 덮여 원문이 파괴된다(§2.5의 안전 근거가 여기 있다).
@@ -891,7 +908,7 @@ export function bootShell(document: Document, targetWindow: Window): void {
     const documentSnapshot = editor?.state.doc ?? null;
     const content = currentMarkdown();
     const operation = mutationQueue.then(async () => {
-      await requestFileBridge(document, "write", { editor_epoch: editorEpoch, content });
+      await requestFileBridge(document, "write", { editor_epoch: saving_epoch, content });
       savedContent = content;
       if (documentSnapshot !== null && savingMode !== "rich") savedDocument = documentSnapshot;
       // Native write는 dirty를 임의로 내리지 않는다. 저장 중 문서가 다시 바뀌었는지 같은 직렬 queue에서 판정해
@@ -959,7 +976,7 @@ export function bootShell(document: Document, targetWindow: Window): void {
     true,
   );
   closeApi.__maruSaveForClose = async (requestId: number) => {
-    if (!Number.isSafeInteger(requestId) || closeLockRequestId !== requestId) {
+    if (!isSafeInt(requestId) || closeLockRequestId !== requestId) {
       return { success: false, revision: revisions.documentRevision, dirty: true };
     }
     const success = await save();
@@ -1219,15 +1236,11 @@ export function bootShell(document: Document, targetWindow: Window): void {
     let readOk = false;
     try {
       const documentId = Number(new URL(targetWindow.location.href).searchParams.get("document"));
-      if (!Number.isSafeInteger(documentId) || documentId <= 0)
-        throw new Error("invalid editor document id");
+      if (!isSafeInt(documentId) || documentId <= 0) throw new Error("invalid editor document id");
       const documentResult = await requestFileBridge(document, "beginDocument", {
         document_id: documentId,
       });
-      if (
-        !Number.isSafeInteger(documentResult.editor_epoch) ||
-        (documentResult.editor_epoch as number) <= 0
-      )
+      if (!isSafeInt(documentResult.editor_epoch) || (documentResult.editor_epoch as number) <= 0)
         throw new Error("invalid editor document epoch");
       editorEpoch = documentResult.editor_epoch as number;
       if (status !== null) status.dataset.editorEpoch = String(editorEpoch);
@@ -1392,7 +1405,8 @@ export function bootShell(document: Document, targetWindow: Window): void {
   );
 }
 
-export function bootRenderer(document: Document, targetWindow: Window): void {
+// bootShell과 같은 이유로 `Window & typeof globalThis`다.
+export function bootRenderer(document: Document, targetWindow: ViewerWindow): void {
   const root = document.querySelector<HTMLElement>("#app");
   if (root === null) return;
   let generation = 0;
@@ -1420,7 +1434,9 @@ export function bootRenderer(document: Document, targetWindow: Window): void {
     const target = event.target;
     if (!(target instanceof targetWindow.Element)) return;
     const link = target.closest<HTMLAnchorElement>("a[href]");
-    const href = link?.getAttribute("href");
+    // `?.`는 link가 null이면 undefined를 준다 — 아래 `href === null` 검사와 짝이 안 맞아 타입이 안 좁혀졌다.
+    // 동작은 같고(둘 다 "없음") 검사 하나로 합쳐진다.
+    const href = link?.getAttribute("href") ?? null;
     if (
       link === null ||
       href === null ||

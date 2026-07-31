@@ -75,6 +75,9 @@ pub const DiffBase = enum {
     untracked,
     /// `merge-base(기본 브랜치) ↔ HEAD` — 이 브랜치의 커밋들이 바꾼 것(§3.5 "브랜치에 COMMIT 됨").
     branch,
+    /// 병합 충돌 중인 파일: `HEAD ↔ 작업트리`. index에 stage 0이 없어 `:<경로>`를 못 읽으므로(실측) 왼쪽을
+    /// HEAD로 잡는다 — 그러면 작업트리의 충돌 표시를 그대로 볼 수 있다.
+    conflict,
 };
 
 /// 폐기된 라이브 프리뷰 모드가 workspace 파일에 남긴 wire 이름이다. **writer는 이 값을 다시 쓰지 않는다** —

@@ -14648,7 +14648,13 @@ pub const AppSession = struct {
         const repo = self.git_repo orelse (self.gitRepoRoot(&repo_buf) orelse return);
         var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
         const abs = std.fmt.bufPrint(&abs_buf, "{s}/{s}", .{ repo, row.path }) catch return;
-        const base: dock_panel.DiffBase = switch (row.section) {
+        // 하위 모듈은 텍스트 비교가 없다(커밋 포인터라 blob이 없고 작업트리 쪽은 디렉터리다 — 실측).
+        // 빈 화면을 여느니 이유를 말한다.
+        if (row.submodule) {
+            self.showNotice("하위 모듈은 비교를 표시하지 않습니다");
+            return;
+        }
+        const base: dock_panel.DiffBase = if (row.conflicted) .conflict else switch (row.section) {
             .staged => .staged,
             .unstaged => .unstaged,
             .untracked => .untracked,

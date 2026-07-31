@@ -335,7 +335,8 @@ fn diffWorker(job: *Job) void {
     }
 
     if (target.base != .untracked) {
-        const side: git_command.BlobSide = if (target.base == .staged) .head else .index;
+        // 충돌은 왼쪽이 HEAD다 — index엔 stage 0이 없어 `:<경로>`가 실패한다(실측).
+        const side: git_command.BlobSide = if (target.base == .staged or target.base == .conflict) .head else .index;
         if (blobSide(state.allocator, job, side)) |out| {
             result.original = out.bytes;
             if (out.truncated) truncated = true;
@@ -746,4 +747,102 @@ fn waitForList(backend: *Backend) ?Result {
         _ = std.c.nanosleep(&ts, null);
     }
     return null;
+}
+
+test "충돌 파일도 diff가 열린다(HEAD ↔ 작업트리)" {
+    // 충돌 중에는 index에 stage 0이 없어 `:<경로>`가 실패한다 — 그대로 두면 왼쪽이 비어 파일 전체가 추가로 보인다.
+    // 실제 충돌 저장소를 만들어 그 경로를 태운다(fake로는 stage 0 부재가 재현되지 않는다).
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const exe = locate(&exe_buf) orelse return error.SkipZigTest;
+
+    // 저장소를 만들 자리: 현재 작업 디렉터리 밑의 임시 경로(테스트가 끝나면 지운다). `std.testing.tmpDir`는
+    // 0.16에서 realpath를 안 줘서 경로를 직접 만든다.
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_ptr = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return error.NoCwd;
+    const cwd = std.mem.span(@as([*:0]u8, @ptrCast(cwd_ptr)));
+    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo = std.fmt.bufPrint(&repo_buf, "{s}/.zig-cache/tmp-conflict-diff", .{cwd}) catch return error.SkipZigTest;
+    var rm_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const rm_path = std.fmt.bufPrintZ(&rm_buf, "{s}", .{repo}) catch return error.SkipZigTest;
+    _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
+    defer _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
+
+    if (!makeConflictRepo(exe, repo)) return error.SkipZigTest;
+
+    var backend = try Backend.init(testing.allocator, std.Io.Threaded.global_single_threaded.io());
+    defer backend.deinit();
+    try testing.expect(backend.submitDiff(exe, repo, "f.txt", "", "", .conflict, 1));
+    var result = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(result.ok);
+    try testing.expect(result.original.len > 0); // HEAD:f.txt — 비어 있으면 전부 추가로 보인다
+    // 작업트리에는 충돌 표시가 들어 있다 — 그걸 그대로 보여 주는 것이 이 기준의 목적이다.
+    try testing.expect(std.mem.indexOf(u8, result.modified, "<<<<<<<") != null);
+}
+
+/// 임시 디렉터리에 충돌 상태 저장소를 만든다(성공하면 true). git이 없거나 실패하면 false — 그 환경에서는 스킵한다.
+fn makeConflictRepo(exe: []const u8, repo: []const u8) bool {
+    const steps = [_][]const []const u8{
+        &.{ exe, "init", "-q", "-b", "main", repo },
+        &.{ exe, "-C", repo, "config", "user.email", "t@t" },
+        &.{ exe, "-C", repo, "config", "user.name", "t" },
+    };
+    for (steps) |argv| {
+        if (!runQuiet(argv)) return false;
+    }
+    writeFileAt(repo, "f.txt", "line1\nline2\n") catch return false;
+    if (!runQuiet(&.{ exe, "-C", repo, "add", "f.txt" })) return false;
+    if (!runQuiet(&.{ exe, "-C", repo, "commit", "-qm", "base" })) return false;
+    if (!runQuiet(&.{ exe, "-C", repo, "checkout", "-q", "-b", "other" })) return false;
+    writeFileAt(repo, "f.txt", "line1\nOTHER\n") catch return false;
+    if (!runQuiet(&.{ exe, "-C", repo, "commit", "-qam", "other" })) return false;
+    if (!runQuiet(&.{ exe, "-C", repo, "checkout", "-q", "main" })) return false;
+    writeFileAt(repo, "f.txt", "line1\nMAIN\n") catch return false;
+    if (!runQuiet(&.{ exe, "-C", repo, "commit", "-qam", "main" })) return false;
+    // 이 merge는 **실패해야** 충돌 상태가 된다 — 성공하면 이 테스트의 전제가 깨진 것이다.
+    return !runQuiet(&.{ exe, "-C", repo, "merge", "other" });
+}
+
+fn writeFileAt(dir: []const u8, name: []const u8, content: []const u8) !void {
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&path_buf, "{s}/{s}", .{ dir, name });
+    const fd = std.c.open(path.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o644));
+    if (fd < 0) return error.OpenFailed;
+    defer _ = std.c.close(fd);
+    var written: usize = 0;
+    while (written < content.len) {
+        const n = std.c.write(fd, content[written..].ptr, content.len - written);
+        if (n <= 0) return error.WriteFailed;
+        written += @intCast(n);
+    }
+}
+
+/// argv를 돌려 성공(exit 0)이면 true. 출력은 버린다(테스트 픽스처 준비용).
+fn runQuiet(argv: []const []const u8) bool {
+    var store: [8][:0]u8 = undefined;
+    var c_argv: [9:null]?[*:0]const u8 = undefined;
+    var built: usize = 0;
+    defer for (store[0..built]) |a| testing.allocator.free(a);
+    for (argv) |a| {
+        if (built >= store.len) return false;
+        store[built] = testing.allocator.dupeZ(u8, a) catch return false;
+        c_argv[built] = store[built].ptr;
+        built += 1;
+    }
+    c_argv[built] = null;
+
+    const pid = std.c.fork();
+    if (pid < 0) return false;
+    if (pid == 0) {
+        const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY });
+        if (devnull >= 0) {
+            _ = std.c.dup2(devnull, 1);
+            _ = std.c.dup2(devnull, 2);
+            _ = std.c.close(devnull);
+        }
+        _ = std.c.execve(c_argv[0].?, @ptrCast(&c_argv), @ptrCast(std.c.environ));
+        std.c._exit(127);
+    }
+    return reapPid(pid) == 0;
 }

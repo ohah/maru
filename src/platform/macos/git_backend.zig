@@ -230,7 +230,7 @@ const Output = struct { bytes: []u8, truncated: bool };
 
 fn run(allocator: std.mem.Allocator, kind: git_command.Kind, git_exe: []const u8, repo: []const u8) !Output {
     var argv_buf: [git_command.max_argv][]const u8 = undefined;
-    const argv_slices = git_command.build(kind, git_exe, repo, &argv_buf);
+    const argv_slices = git_command.build(kind, git_exe, repo, null, &argv_buf);
 
     // **posix fork+exec+pipe로 띄운다**(update_check.zig·ssh_upload.zig와 같은 결). `std.process.run`은 0.16에서
     // io 기반인데 앱 Io가 `init_single_threaded`(할당기 없음·동시성 미지원)라 그 자리에서 OutOfMemory로 실패한다 —

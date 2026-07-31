@@ -23,6 +23,31 @@ pub const Kind = enum {
     numstat_staged,
     /// 아직 스테이지되지 않은 변경의 +N -N (`index ↔ worktree`).
     numstat_worktree,
+    /// diff 본문 한쪽(원본)을 통째로: `git show <spec>`. spec은 `blobSpec`이 만든 `HEAD:<경로>` 또는 `:<경로>`다.
+    /// **worktree 쪽은 이 경로로 읽지 않는다** — 디스크 파일을 그대로 읽으면 되고, git을 한 번 덜 띄운다.
+    show_blob,
+};
+
+/// `git show`에 넘길 blob 지정자를 `buf`에 만든다. 할당하지 않는다.
+///
+/// **인자 주입이 불가능한 형태**다: 결과는 항상 `HEAD:` 또는 `:`로 시작하므로 경로가 `-`로 시작해도 옵션으로
+/// 해석되지 않는다. 경로는 **저장소 루트 기준 상대경로**여야 한다(git의 `<rev>:<path>` 규약).
+pub fn blobSpec(side: BlobSide, repo_relative_path: []const u8, buf: []u8) ?[]const u8 {
+    const prefix = switch (side) {
+        .head => "HEAD:",
+        .index => ":",
+    };
+    if (prefix.len + repo_relative_path.len > buf.len) return null; // 자른 경로로 다른 파일을 읽지 않는다
+    @memcpy(buf[0..prefix.len], prefix);
+    @memcpy(buf[prefix.len..][0..repo_relative_path.len], repo_relative_path);
+    return buf[0 .. prefix.len + repo_relative_path.len];
+}
+
+pub const BlobSide = enum {
+    /// 마지막 커밋의 내용(`HEAD ↔ index` 비교의 왼쪽).
+    head,
+    /// index(스테이지 영역)의 내용. `index ↔ worktree` 비교의 왼쪽이자 `HEAD ↔ index`의 오른쪽이다.
+    index,
 };
 
 /// 어떤 kind든 이만큼이면 담긴다(테스트가 상한을 고정한다).
@@ -50,7 +75,7 @@ pub const env_overrides = [_]struct { name: []const u8, value: []const u8 }{
 /// `git_exe`와 `repo`를 받아 argv를 `buf`에 채우고 그 슬라이스를 돌려준다. 할당하지 않는다.
 /// `git_exe`는 호출자가 **절대 경로로 해석해 둔** 실행 파일이다 — PATH 탐색을 이 모듈이 하지 않는 이유는
 /// PATH hijack을 막는 책임이 "무엇을 실행할지 고르는" 쪽(L4)에 있어서다(§6).
-pub fn build(kind: Kind, git_exe: []const u8, repo: []const u8, buf: *[max_argv][]const u8) []const []const u8 {
+pub fn build(kind: Kind, git_exe: []const u8, repo: []const u8, arg: ?[]const u8, buf: *[max_argv][]const u8) []const []const u8 {
     var n: usize = 0;
     buf[n] = git_exe;
     n += 1;
@@ -59,8 +84,8 @@ pub fn build(kind: Kind, git_exe: []const u8, repo: []const u8, buf: *[max_argv]
     n += 1;
     buf[n] = repo;
     n += 1;
-    for (config_overrides) |arg| {
-        buf[n] = arg;
+    for (config_overrides) |override| {
+        buf[n] = override;
         n += 1;
     }
     switch (kind) {
@@ -93,6 +118,15 @@ pub fn build(kind: Kind, git_exe: []const u8, repo: []const u8, buf: *[max_argv]
                 n += 1;
             }
         },
+        .show_blob => {
+            buf[n] = "show";
+            n += 1;
+            // textconv는 config로도 끄지만 플래그가 명령 단위 권위라 함께 건다(numstat과 같은 규율).
+            buf[n] = "--no-textconv";
+            n += 1;
+            buf[n] = arg orelse "";
+            n += 1;
+        },
     }
     return buf[0..n];
 }
@@ -106,7 +140,7 @@ fn has(argv: []const []const u8, needle: []const u8) bool {
 
 test "status 한 번으로 섹션·브랜치·ahead/behind를 모두 요청한다" {
     var buf: [max_argv][]const u8 = undefined;
-    const argv = build(.status, "/usr/bin/git", "/repo", &buf);
+    const argv = build(.status, "/usr/bin/git", "/repo", null, &buf);
     try testing.expectEqualStrings("/usr/bin/git", argv[0]);
     try testing.expectEqualStrings("-C", argv[1]);
     try testing.expectEqualStrings("/repo", argv[2]);
@@ -118,11 +152,11 @@ test "status 한 번으로 섹션·브랜치·ahead/behind를 모두 요청한�
 
 test "numstat은 staged/worktree를 --cached로만 가른다" {
     var buf: [max_argv][]const u8 = undefined;
-    const staged = build(.numstat_staged, "/usr/bin/git", "/repo", &buf);
+    const staged = build(.numstat_staged, "/usr/bin/git", "/repo", null, &buf);
     try testing.expect(has(staged, "--numstat") and has(staged, "--cached"));
 
     var buf2: [max_argv][]const u8 = undefined;
-    const worktree = build(.numstat_worktree, "/usr/bin/git", "/repo", &buf2);
+    const worktree = build(.numstat_worktree, "/usr/bin/git", "/repo", null, &buf2);
     try testing.expect(has(worktree, "--numstat") and !has(worktree, "--cached"));
     try testing.expect(has(worktree, "--find-renames"));
 }
@@ -131,7 +165,7 @@ test "모든 명령이 외부 프로세스 실행 경로를 닫는다" {
     // 악성 저장소가 config에 심어 둔 프로그램을 우리가 대신 실행해 주면 안 된다(§6). kind마다 전수 확인한다.
     inline for (.{ Kind.status, Kind.numstat_staged, Kind.numstat_worktree }) |kind| {
         var buf: [max_argv][]const u8 = undefined;
-        const argv = build(kind, "/usr/bin/git", "/repo", &buf);
+        const argv = build(kind, "/usr/bin/git", "/repo", null, &buf);
         try testing.expect(has(argv, "core.pager=cat"));
         try testing.expect(has(argv, "core.hooksPath=/dev/null"));
         try testing.expect(has(argv, "diff.external="));
@@ -145,7 +179,7 @@ test "모든 명령이 외부 프로세스 실행 경로를 닫는다" {
 
     var buf: [max_argv][]const u8 = undefined;
     inline for (.{ Kind.numstat_staged, Kind.numstat_worktree }) |kind| {
-        const argv = build(kind, "/usr/bin/git", "/repo", &buf);
+        const argv = build(kind, "/usr/bin/git", "/repo", null, &buf);
         try testing.expect(has(argv, "--no-ext-diff") and has(argv, "--no-textconv"));
     }
 }
@@ -167,4 +201,27 @@ test "환경 덮어쓰기가 lock·프롬프트·필터 프로세스를 막는�
         if (std.mem.eql(u8, e.name, "GIT_LFS_SKIP_SMUDGE")) seen_smudge = true;
     }
     try testing.expect(seen_locks and seen_prompt and seen_smudge);
+}
+
+test "show_blob은 옵션으로 해석될 수 없는 spec만 넘기고 textconv를 끈다" {
+    // 경로가 `-`로 시작해도 spec은 `HEAD:`/`:`로 시작하므로 git이 옵션으로 읽지 않는다 — 인자 주입 차단.
+    var spec_buf: [256]u8 = undefined;
+    const head = blobSpec(.head, "-rf/evil.txt", &spec_buf).?;
+    try testing.expectEqualStrings("HEAD:-rf/evil.txt", head);
+    var buf: [max_argv][]const u8 = undefined;
+    const argv = build(.show_blob, "/usr/bin/git", "/repo", head, &buf);
+    try testing.expectEqualStrings("show", argv[argv.len - 3]);
+    try testing.expectEqualStrings("--no-textconv", argv[argv.len - 2]);
+    try testing.expectEqualStrings("HEAD:-rf/evil.txt", argv[argv.len - 1]);
+    // 읽기 전용 계약은 kind와 무관하게 붙는다.
+    try testing.expect(has(argv, "core.pager=cat"));
+    try testing.expect(has(argv, "diff.external="));
+
+    var index_buf: [256]u8 = undefined;
+    try testing.expectEqualStrings(":src/main.zig", blobSpec(.index, "src/main.zig", &index_buf).?);
+}
+
+test "spec 버퍼가 모자라면 자르지 않고 실패한다(다른 파일을 읽지 않게)" {
+    var tiny: [8]u8 = undefined;
+    try testing.expect(blobSpec(.head, "very/long/path.txt", &tiny) == null);
 }

@@ -98,6 +98,14 @@ run = "zig build macos-mermaid-helper-build"
 description = "Run the isolated Mermaid helper lifecycle smoke"
 run = "zig build macos-mermaid-helper-smoke"
 
+[tasks.macos-editor-smoke]
+description = "Run the MergeView WKWebView gate with a visible window"
+run = "zig build macos-editor-smoke"
+
+[tasks.test-macos-editor-smoke]
+description = "Assert the MergeView product WKWebView gate (E0.5A)"
+run = "zig build test-macos-editor-smoke"
+
 [tasks.macos-mermaid-perf]
 description = "Run the native Mermaid performance artifact gate"
 run = "zig build -Doptimize=ReleaseSafe macos-mermaid-perf"

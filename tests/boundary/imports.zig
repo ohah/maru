@@ -2942,7 +2942,7 @@ test "d2b3d live owner substrate stays private with one buffered product travers
             ),
         );
         try std.testing.expectEqual(
-            @as(usize, 2),
+            @as(usize, 4),
             std.mem.count(
                 u8,
                 product_source,
@@ -3410,12 +3410,12 @@ test "f3c0 control wire is the typed product codec without drain capability" {
         std.mem.count(u8, pump, "control_response_wire.encodeRequest("),
     );
     try std.testing.expectEqual(
-        @as(usize, 4),
-        std.mem.count(u8, pump, "PreparedWholeDrainPermit"),
+        @as(usize, 1),
+        std.mem.count(u8, pump, "const PreparedWholeDrainPermit = struct"),
     );
     try std.testing.expectEqual(
-        @as(usize, 4),
-        std.mem.count(u8, pump, "PreparedControlSemanticVerdict"),
+        @as(usize, 1),
+        std.mem.count(u8, pump, "const PreparedControlSemanticVerdict = struct"),
     );
     const permit = betweenMarkers(
         pump,
@@ -3502,6 +3502,26 @@ test "recovery integration contract keeps future ledger generation out of contro
     try std.testing.expect(std.mem.indexOf(u8, in_flight, "expected_token_generation") != null);
     try std.testing.expect(std.mem.indexOf(u8, policy, "pub fn planRecoverySnapshotBinding(") != null);
     try std.testing.expect(std.mem.count(u8, pump, ".snapshot_in_flight =>") >= 4);
+}
+
+test "f3c1 semantic producer remains private with zero product callsites" {
+    const allocator = std.testing.allocator;
+    const pump = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/client_external_pump.zig",
+    );
+    defer allocator.free(pump);
+    const product = betweenMarkers(
+        pump,
+        "const ControlSemanticPreparationResult = enum {",
+        "const F3c1FailAllocator = struct {",
+    ) orelse return error.TestUnexpectedResult;
+    // The only product-region occurrence is the private method declaration. The base slice
+    // intentionally has no pump/adapter consumer until terminal binding is sealed.
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(product, "prepareCompletedControlSemanticUnderHeldLease("),
+    );
 }
 
 fn containsForbiddenExternalBuiltin(source: [:0]const u8) bool {

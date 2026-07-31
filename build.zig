@@ -1895,6 +1895,55 @@ pub fn build(b: *std.Build) void {
         );
         session_host_f3b_step.dependOn(&run_external_pump_f3b_tests.step);
 
+        const external_pump_f3c1_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/client_external_pump.zig",
+                ),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"f3c1"},
+        });
+        const run_external_pump_f3c1_tests = b.addRunArtifact(
+            external_pump_f3c1_tests,
+        );
+        run_external_pump_f3c1_tests.setCwd(b.path("."));
+        const session_host_f3c1_step = b.step(
+            "test-session-host-f3c1",
+            "Run the non-empty F3c1 completed-drain preparation gate",
+        );
+        session_host_f3c1_step.dependOn(&run_external_pump_f3c1_tests.step);
+        const session_host_f3c1_sentinel_pump = b.createModule(.{
+            .root_source_file = b.path(
+                "src/platform/macos/session_host/client_external_pump.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        const session_host_f3c1_sentinel = b.addExecutable(.{
+            .name = "maru-session-host-f3c1-sentinel",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_f3c1_sentinel.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{
+                    .name = "client_external_pump",
+                    .module = session_host_f3c1_sentinel_pump,
+                }},
+            }),
+        });
+        const run_session_host_f3c1_sentinel = b.addRunArtifact(
+            session_host_f3c1_sentinel,
+        );
+        run_session_host_f3c1_sentinel.setCwd(b.path("."));
+        session_host_f3c1_step.dependOn(&run_session_host_f3c1_sentinel.step);
+
         const control_wire_f3c0_tests = b.addTest(.{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(

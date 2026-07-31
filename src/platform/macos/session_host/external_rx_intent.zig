@@ -206,6 +206,8 @@ pub const PreparedIntentCommit = struct {
         [_]IntentCommitSlotKind{.unused} ** max_intents,
     response_request_ids: [max_intents]u64 = [_]u64{0} ** max_intents,
     source_parser_generations: [max_intents]u64 = [_]u64{0} ** max_intents,
+    source_start_absolutes: [max_intents]u64 = [_]u64{0} ** max_intents,
+    source_end_absolutes: [max_intents]u64 = [_]u64{0} ** max_intents,
     source_owner_digests: [max_intents]external_owner_seal.Digest =
         [_]external_owner_seal.Digest{[_]u8{0} ** 32} ** max_intents,
     payload_digests: [max_intents]external_owner_seal.Digest =
@@ -254,6 +256,8 @@ const StagedScreenIntent = struct {
     storage_addr: usize,
     turn_generation: u64,
     parser_generation: u64,
+    source_start_absolute: u64,
+    source_end_absolute: u64,
     aggregate_addr: usize,
     neutral_addr: usize,
     classification: external_rx_demux.ScreenCandidate,
@@ -826,6 +830,8 @@ pub fn moveScreenToNeutral(
         .storage_addr = scratch.storage_addr,
         .turn_generation = scratch.turn_generation,
         .parser_generation = current_owner.parser_generation,
+        .source_start_absolute = current_owner.range.start_absolute,
+        .source_end_absolute = current_owner.range.end_absolute,
         .aggregate_addr = aggregate_addr,
         .neutral_addr = @intFromPtr(out),
         .classification = candidate,
@@ -1175,6 +1181,8 @@ pub fn prepareIntentCommit(
     var slot_kinds = [_]IntentCommitSlotKind{.unused} ** max_intents;
     var response_request_ids = [_]u64{0} ** max_intents;
     var source_parser_generations = [_]u64{0} ** max_intents;
+    var source_start_absolutes = [_]u64{0} ** max_intents;
+    var source_end_absolutes = [_]u64{0} ** max_intents;
     var source_owner_digests =
         [_]external_owner_seal.Digest{[_]u8{0} ** 32} ** max_intents;
     var payload_digests =
@@ -1205,6 +1213,8 @@ pub fn prepareIntentCommit(
                     return error.InvalidPlan;
                 slot_kinds[index] = .screen;
                 source_parser_generations[index] = staged.parser_generation;
+                source_start_absolutes[index] = staged.source_start_absolute;
+                source_end_absolutes[index] = staged.source_end_absolute;
                 source_owner_digests[index] = staged.digest;
                 payload_digests[index] = staged.payload_digest;
                 proof_count += 1;
@@ -1215,6 +1225,8 @@ pub fn prepareIntentCommit(
                     return error.InvalidPlan;
                 payload_digests[index] = owner.payload_digest;
                 source_parser_generations[index] = owner.parser_generation;
+                source_start_absolutes[index] = owner.range.start_absolute;
+                source_end_absolutes[index] = owner.range.end_absolute;
                 source_owner_digests[index] = owner.digest;
                 switch (owner.classification) {
                     .event_candidate => slot_kinds[index] = .event,
@@ -1243,6 +1255,8 @@ pub fn prepareIntentCommit(
         .slot_kinds = slot_kinds,
         .response_request_ids = response_request_ids,
         .source_parser_generations = source_parser_generations,
+        .source_start_absolutes = source_start_absolutes,
+        .source_end_absolutes = source_end_absolutes,
         .source_owner_digests = source_owner_digests,
         .payload_digests = payload_digests,
         .lifecycle = .prepared,
@@ -1323,6 +1337,8 @@ pub fn validatePreparedIntentCommit(
             if (permit.slot_kinds[index] != .unused or
                 permit.response_request_ids[index] != 0 or
                 permit.source_parser_generations[index] != 0 or
+                permit.source_start_absolutes[index] != 0 or
+                permit.source_end_absolutes[index] != 0 or
                 !std.mem.allEqual(
                     u8,
                     &permit.source_owner_digests[index],
@@ -1340,6 +1356,10 @@ pub fn validatePreparedIntentCommit(
                     permit.response_request_ids[index] != 0 or
                     permit.source_parser_generations[index] !=
                         staged.parser_generation or
+                    permit.source_start_absolutes[index] !=
+                        staged.source_start_absolute or
+                    permit.source_end_absolutes[index] !=
+                        staged.source_end_absolute or
                     !std.mem.eql(
                         u8,
                         &permit.source_owner_digests[index],
@@ -1368,6 +1388,10 @@ pub fn validatePreparedIntentCommit(
                     !screenMutationProofPristine(&proofs[index]) or
                     permit.source_parser_generations[index] !=
                         owner.parser_generation or
+                    permit.source_start_absolutes[index] !=
+                        owner.range.start_absolute or
+                    permit.source_end_absolutes[index] !=
+                        owner.range.end_absolute or
                     !std.mem.eql(
                         u8,
                         &permit.source_owner_digests[index],
@@ -2757,6 +2781,8 @@ fn stagedScreenIntentDigest(
     writer.writeUsize(staged.storage_addr);
     writer.writeU64(staged.turn_generation);
     writer.writeU64(staged.parser_generation);
+    writer.writeU64(staged.source_start_absolute);
+    writer.writeU64(staged.source_end_absolute);
     writer.writeUsize(staged.aggregate_addr);
     writer.writeUsize(staged.neutral_addr);
     writeClassification(
@@ -2779,6 +2805,8 @@ fn stagedScreenIntentValid(
         staged.storage_addr == scratch.storage_addr and
         staged.turn_generation == scratch.turn_generation and
         staged.parser_generation > scratch.parser_generation_at_start and
+        staged.source_end_absolute > staged.source_start_absolute and
+        staged.source_end_absolute <= scratch.last_moved_end_absolute and
         staged.aggregate_addr == aggregate_addr and
         aggregate_addr != 0 and
         staged.neutral_addr != 0 and
@@ -2968,6 +2996,10 @@ fn preparedIntentCommitDigest(
         writer.writeU64(request_id);
     for (permit.source_parser_generations) |generation|
         writer.writeU64(generation);
+    for (permit.source_start_absolutes) |start_absolute|
+        writer.writeU64(start_absolute);
+    for (permit.source_end_absolutes) |end_absolute|
+        writer.writeU64(end_absolute);
     for (permit.source_owner_digests) |digest| writer.writeBytes(&digest);
     for (permit.payload_digests) |digest| writer.writeBytes(&digest);
     writer.writeUsize(permit.destination_plan_addr);
@@ -3726,6 +3758,30 @@ test "d2b3c mixed event and response intents move into sealed neutral slots once
         @as(u64, 91),
         aggregate.permit.response_request_ids[1],
     );
+    try std.testing.expectEqual(@as(u64, 0), aggregate.permit.source_start_absolutes[0]);
+    try std.testing.expectEqual(
+        aggregate.permit.source_end_absolutes[0],
+        aggregate.permit.source_start_absolutes[1],
+    );
+    try std.testing.expect(
+        aggregate.permit.source_end_absolutes[1] >
+            aggregate.permit.source_start_absolutes[1],
+    );
+    const saved_response_end = aggregate.permit.source_end_absolutes[1];
+    aggregate.permit.source_end_absolutes[1] -= 1;
+    try std.testing.expect(!validatePreparedIntentCommit(
+        &handle,
+        &aggregate.proofs,
+        &aggregate.neutral,
+        &aggregate.permit,
+    ));
+    aggregate.permit.source_end_absolutes[1] = saved_response_end;
+    try std.testing.expect(validatePreparedIntentCommit(
+        &handle,
+        &aggregate.proofs,
+        &aggregate.neutral,
+        &aggregate.permit,
+    ));
     try prepareNeutralRetirement(
         &handle,
         0,

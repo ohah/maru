@@ -238,6 +238,56 @@ pub const RemoteAttachment = struct {
             if (!released) return error.LedgerInvariant;
             return error.ProtocolError;
         });
+        if (batch_authority == .recovery_exact) {
+            const key = recovery_key orelse unreachable;
+            // Recovery snapshots are assembled off-screen. A callback may invalidate transport
+            // authority after preflight; the visible screen is published only after release and
+            // the exact post-release mark both succeed.
+            var prepared_screen = remote_screen.RemoteScreen.initForCodec(
+                self.allocator,
+                screen.assembler.expected_codec_version,
+            ) catch |err| {
+                const released = self.releaseOrRetain(lease, transport);
+                self.compactConsumedBatches();
+                transport.fail_closed(transport.context);
+                if (!released) return error.LedgerInvariant;
+                return err;
+            };
+            var prepared_screen_live = true;
+            defer if (prepared_screen_live) prepared_screen.deinit();
+            prepared_screen.applySnapshot(batch.bytes, io) catch |err| {
+                const released = self.releaseOrRetain(lease, transport);
+                self.compactConsumedBatches();
+                transport.fail_closed(transport.context);
+                if (!released) return error.LedgerInvariant;
+                return err;
+            };
+            if (!self.releaseOrRetain(lease, transport)) {
+                self.compactConsumedBatches();
+                transport.fail_closed(transport.context);
+                return error.LedgerInvariant;
+            }
+            self.compactConsumedBatches();
+            const mark = transport.mark_resync_applied orelse {
+                transport.fail_closed(transport.context);
+                return .terminal;
+            };
+            switch (mark(transport.context, self.state.stream_id, key)) {
+                .commit_pending => {
+                    screen.publishPreparedSnapshot(&prepared_screen, io);
+                    // `prepared_screen` now owns the replaced screen image.
+                    prepared_screen.deinit();
+                    prepared_screen_live = false;
+                    return .recovery_commit_pending;
+                },
+                .stale_invariant => {
+                    // The charged token is already released, but the shadow screen was never
+                    // published. Retrying either object would create a second authority.
+                    transport.fail_closed(transport.context);
+                    return .terminal;
+                },
+            }
+        }
         if (batch.is_snapshot) {
             screen.applySnapshot(batch.bytes, io) catch |err| {
                 const released = self.releaseOrRetain(lease, transport);
@@ -261,21 +311,7 @@ pub const RemoteAttachment = struct {
             return error.LedgerInvariant;
         }
         self.compactConsumedBatches();
-        if (batch_authority == .ordinary) return .applied;
-        const key = recovery_key orelse unreachable;
-        const mark = transport.mark_resync_applied orelse {
-            transport.fail_closed(transport.context);
-            return .terminal;
-        };
-        return switch (mark(transport.context, self.state.stream_id, key)) {
-            .commit_pending => .recovery_commit_pending,
-            .stale_invariant => blk: {
-                // The screen was applied and the lease was released. Retrying or retaining the
-                // old token would create a second owner, so stale authority can only fail closed.
-                transport.fail_closed(transport.context);
-                break :blk .terminal;
-            },
-        };
+        return .applied;
     }
 
     /// A callback invariant can fail after the transport already handed ownership to us. Keep the
@@ -1316,10 +1352,18 @@ test "remote attachment copies recovery key then releases before exact mark" {
     try attachment.bindTransport(transport.interface());
     try attachment.initScreen(2);
     defer attachment.deinit();
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        attachment.screen.?.assembler.generation,
+    );
 
     try std.testing.expectEqual(
         PumpScreenResult.recovery_commit_pending,
         try attachment.pumpScreen(std.testing.io),
+    );
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        attachment.screen.?.assembler.generation,
     );
     try std.testing.expectEqual(@as(usize, 1), transport.release_calls);
     try std.testing.expectEqual(@as(usize, 1), transport.mark_calls);
@@ -1416,8 +1460,16 @@ test "remote attachment stale mark terminalizes without retaining released token
     try attachment.bindTransport(transport.interface());
     try attachment.initScreen(2);
     try std.testing.expectEqual(
+        @as(u64, 0),
+        attachment.screen.?.assembler.generation,
+    );
+    try std.testing.expectEqual(
         PumpScreenResult.terminal,
         try attachment.pumpScreen(std.testing.io),
+    );
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        attachment.screen.?.assembler.generation,
     );
     try std.testing.expectEqual(@as(usize, 1), transport.release_calls);
     try std.testing.expectEqual(@as(usize, 1), transport.mark_calls);

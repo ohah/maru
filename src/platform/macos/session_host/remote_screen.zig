@@ -340,6 +340,32 @@ pub const RemoteScreen = struct {
         try self.rebuildGrid();
     }
 
+    /// Publishes a fully assembled recovery snapshot without exposing its fallible construction.
+    /// `prepared` is private to the consumer until its transport authority has survived release
+    /// and post-release mark; swapping only the owned model/grid keeps this screen's stable mutex
+    /// and `ScreenSource.ctx` address intact.
+    pub fn publishPreparedSnapshot(
+        self: *RemoteScreen,
+        prepared: *RemoteScreen,
+        io: std.Io,
+    ) void {
+        std.debug.assert(self.allocator.ptr == prepared.allocator.ptr);
+        std.debug.assert(self.allocator.vtable == prepared.allocator.vtable);
+        std.debug.assert(
+            self.assembler.expected_codec_version ==
+                prepared.assembler.expected_codec_version,
+        );
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        std.mem.swap(screen_assembler.ScreenAssembler, &self.assembler, &prepared.assembler);
+        std.mem.swap(CellGrid, &self.grid, &prepared.grid);
+        std.mem.swap(
+            bool,
+            &self.viewport_scrolled_known,
+            &prepared.viewport_scrolled_known,
+        );
+    }
+
     /// agent observer용 최근 화면 UTF-8. host raw PTY를 다시 보내지 않고 이미 조립된 row run을 같은 mutex 아래 읽는다.
     /// local `TerminalCore.dumpRecentTextUtf8`와 같이 마지막 256 blank row를 역스캔해 마지막 text anchor에서 max_rows를
     /// 선택하고, 행 전체 공백과 UTF-8 grapheme 경계를 보존한다.

@@ -22,6 +22,8 @@ const screen_stream = @import("screen_stream.zig");
 const owner_lease = @import("owner_lease.zig");
 const attach_phase_deadline = @import("attach_phase_deadline.zig");
 const client_deadline = @import("client_deadline.zig");
+const upgrade_wire = @import("upgrade_wire.zig");
+const staged_image = @import("staged_image.zig");
 
 // flock(2)은 std.c 미노출(macOS 전용). start lock 직렬화용. LOCK_EX=2·LOCK_NB=4(sys/file.h).
 extern "c" fn flock(fd: c_int, operation: c_int) c_int;
@@ -145,6 +147,11 @@ pub fn connectOrLaunchDetailed(
     // host-specific 모델에서도 중복 spawn을 막는다.
     if (findCurrentManifestHost(allocator, exe_path, base_cache_dir, dir)) |outcome| return outcome;
 
+    // 같은 build의 host가 없다면, **다른 build의 살아 있는 host**를 새 이미지로 exec 교체해 그 runtime을 그대로
+    // 이어받는다. 여기(start lock 획득 뒤)에서 하는 이유: lock이 동시 시작자를 직렬화하므로 두 GUI가 같은 host에
+    // 동시에 upgrade를 걸지 않는다. 실패하면 아래 spawn 경로가 그대로 새 host를 띄운다(회귀 없음).
+    if (tryUpgradeExistingHost(allocator, exe_path, base_cache_dir, dir, opts)) |outcome| return outcome;
+
     short_endpoint.prepareCurrentUserNamespace() catch return .{ .failed = .endpoint_denied };
     var host_id: u128 = 0;
     while (host_id == 0) arc4random_buf(std.mem.asBytes(&host_id).ptr, @sizeOf(u128));
@@ -186,6 +193,116 @@ fn findCurrentManifestHost(
         switch (connectExistingHost(allocator, base_cache_dir, host_id)) {
             .connected => |client| return .{ .connected = client },
             .failed => |reason| if (reason == .out_of_memory) return .{ .failed = reason },
+        }
+    }
+    return null;
+}
+
+/// exec 업그레이드 후보 판정에 필요한 manifest 사실만 담는다. 실 `Manifest`는 allocator가 소유한 슬라이스를
+/// 들고 있어 순수 판정 테스트에 쓰기 어렵다 — 판정에 쓰이는 값만 떼어내 syscall 없이 회귀를 고정한다.
+pub const UpgradeCandidate = struct {
+    protocol_major: u16,
+    screen_codec_version: u16,
+    lifecycle: host_manifest.Lifecycle,
+    build_id: []const u8,
+};
+
+/// 이 host를 새 이미지로 exec 교체해도 되는가. **순수 판정**이라 단위 테스트로 고정한다.
+///
+/// 네 조건을 모두 만족해야 한다.
+///   - wire가 같다(`protocol_major`·`screen_codec_version`): 다르면 exec 교체 대상이 아니라 side-by-side 대상이며
+///     N-1 adapter가 그 host의 runtime을 따로 이어받는다. 여기서 교체하면 살아 있는 구 major 세션을 잃는다.
+///   - `lifecycle == .ready`: draining 중인 host는 이미 정리 경로에 있어 새 이미지를 얹으면 안 된다.
+///   - build_id가 **다르다**: 같으면 교체할 것이 없다(그 host는 `findCurrentManifestHost`가 이미 재사용했다).
+///   - owner lease가 `.held`: 살아 있다는 **긍정적 증거**가 있을 때만 손댄다. `.free`(죽음)는 교체가 아니라 정리
+///     대상이고, `.unknown`(우리가 못 봄)에 exec을 걸면 우리 쪽 사정으로 남의 host를 흔드는 것이 된다.
+pub fn isUpgradeCandidate(
+    candidate: UpgradeCandidate,
+    target_build_id: []const u8,
+    lease: owner_lease.Observation,
+) bool {
+    if (candidate.protocol_major != protocol.version_major) return false;
+    if (candidate.screen_codec_version != screen_stream.codec_version) return false;
+    if (candidate.lifecycle != .ready) return false;
+    if (std.mem.eql(u8, candidate.build_id, target_build_id)) return false;
+    return lease == .held;
+}
+
+/// build_id만 다른 **살아 있는 host**를 찾아 same-PID exec 업그레이드를 시도한다(docs/session-host-upgrade.md).
+/// 성공하면 그 host가 새 이미지로 전환된 뒤의 Client를 반환한다 — host_id·PTY master·자식 프로세스·scrollback이
+/// 모두 보존돼 사용자의 셸이 앱 업데이트를 넘어 살아남는다.
+///
+/// 이 경로가 없으면 새 빌드는 매번 새 host를 띄우고 이전 host의 runtime은 GUI에서 도달할 수 없는 고아가 된다
+/// (실측: build_id별로 host가 4개까지 쌓이고 그 아래 셸이 접근 불가 상태로 남았다).
+///
+/// 실패는 전부 조용히 `null`이다 — 업그레이드는 **최적화**이고, 안 되면 호출자가 기존대로 새 host를 spawn하면
+/// 된다. 여기서 오류를 올리면 "업그레이드 불가"가 곧 "터미널을 못 엶"이 되어 회귀가 된다.
+fn tryUpgradeExistingHost(
+    allocator: std.mem.Allocator,
+    exe_path: [:0]const u8,
+    base_cache_dir: []const u8,
+    session_dir: [:0]const u8,
+    opts: Options,
+) ?Outcome {
+    const target_identity = staged_image.inspect(exe_path) catch return null;
+    const target_build_id = host_manifest.buildIdForExecutable(allocator, exe_path) catch return null;
+    defer allocator.free(target_build_id);
+
+    var hosts_buf: [640]u8 = undefined;
+    const hosts_root = host_manifest.hostsRootPathIn(&hosts_buf, session_dir) catch return null;
+    const directory = c.opendir(hosts_root.ptr) orelse return null;
+    defer _ = c.closedir(directory);
+    while (c.readdir(directory)) |entry| {
+        const name = std.mem.sliceTo(entry.name[0..], 0);
+        if (name.len != 32) continue;
+        const host_id = std.fmt.parseInt(u128, name, 16) catch continue;
+        if (host_id == 0) continue;
+        var manifest = host_manifest.load(allocator, session_dir, host_id) catch continue;
+        defer manifest.deinit();
+        if (!isUpgradeCandidate(.{
+            .protocol_major = manifest.protocol_major,
+            .screen_codec_version = manifest.screen_codec_version,
+            .lifecycle = manifest.lifecycle,
+            .build_id = manifest.build_id,
+        }, target_build_id, ownerLeaseState(session_dir, host_id))) continue;
+
+        var client = switch (connectExistingHost(allocator, base_cache_dir, host_id)) {
+            .connected => |connected| connected,
+            .failed => continue,
+        };
+        // capability를 광고하지 않는 구 host는 exec 교체를 모른다. **죽이지 않고** 그대로 둔다 — 그 아래 runtime이
+        // 살아 있고, capability 없는 host를 종료해 migration처럼 보이게 하지 않는다(session-host-upgrade.md).
+        if (!client.host_exec_upgrade_v1) {
+            client.deinit();
+            continue;
+        }
+        var attempt_id: u128 = 0;
+        while (attempt_id == 0) arc4random_buf(std.mem.asBytes(&attempt_id).ptr, @sizeOf(u128));
+        const outcome = client.prepareUpgrade(.{
+            .attempt_id = attempt_id,
+            .target_path = exe_path,
+            .target_build_id = target_build_id,
+            .target_sha256 = target_identity.sha256,
+            .handoff_reader_min = 1,
+            .handoff_reader_max = 1,
+        }) catch {
+            client.deinit();
+            continue;
+        };
+        switch (outcome) {
+            // host가 응답을 전량 보낸 뒤 이 connection을 닫고 exec한다 — 같은 host_id로 다시 붙는다.
+            .accepted_reconnect_required => {
+                client.deinit();
+                switch (connectNewHostWithBackoff(allocator, base_cache_dir, host_id, opts)) {
+                    .connected => |restored| return .{ .connected = restored },
+                    .failed => continue,
+                }
+            },
+            // 이미 끝난 attempt를 재조회했거나 host가 거절했다 — 조용히 새 host spawn으로 폴백한다.
+            .completed, .rejected => {
+                client.deinit();
+                continue;
+            },
         }
     }
     return null;
@@ -1425,4 +1542,46 @@ test "host_connect: launches the product maru session host and completes host.in
     if (discovery.lockPathIn(&lock_buf, dir)) |lock| _ = c.unlink(lock.ptr) else |_| {}
     _ = c.rmdir(dir.ptr);
     _ = c.rmdir(base.ptr);
+}
+
+// 이 테스트가 증명하는 것(그리고 터미널에서 왜 중요한가): 앱을 업데이트하면 새 binary는 build_id가 달라 기존 host를
+// 재사용하지 못한다. 그때 살아 있는 host를 새 이미지로 exec 교체하면 PTY master·자식 프로세스·scrollback이 그대로
+// 보존돼 사용자의 셸이 업데이트를 넘어 살아남는다. 반대로 **교체 대상을 잘못 고르면 살아 있는 세션을 통째로 흔든다** —
+// wire가 갈리는 host는 exec이 아니라 side-by-side 대상이고(구 major 세션을 N-1 adapter가 따로 이어받는다), 이미 정리
+// 중인 host에 새 이미지를 얹으면 drain 계약이 깨지며, 생존의 긍정적 증거가 없는 host를 건드리면 우리 쪽 관측 실패로
+// 남의 host를 exec하는 것이 된다. 순수 판정이라 syscall 없이 이 네 경계를 고정한다.
+test "exec 업그레이드 후보: build_id가 다르고 wire가 같은 살아 있는 ready host만 고른다" {
+    const target = "sha256:new";
+    const base: UpgradeCandidate = .{
+        .protocol_major = protocol.version_major,
+        .screen_codec_version = screen_stream.codec_version,
+        .lifecycle = .ready,
+        .build_id = "sha256:old",
+    };
+    try testing.expect(isUpgradeCandidate(base, target, .held));
+
+    // 같은 build면 교체할 것이 없다 — findCurrentManifestHost가 이미 그 host를 재사용했다.
+    var same = base;
+    same.build_id = target;
+    try testing.expect(!isUpgradeCandidate(same, target, .held));
+
+    // wire가 갈리면 exec 대상이 아니다(side-by-side).
+    var other_major = base;
+    other_major.protocol_major = protocol.version_major +% 1;
+    try testing.expect(!isUpgradeCandidate(other_major, target, .held));
+    var other_codec = base;
+    other_codec.screen_codec_version = screen_stream.codec_version +% 1;
+    try testing.expect(!isUpgradeCandidate(other_codec, target, .held));
+
+    // 정리 중이거나 아직 복원 중인 host에 새 이미지를 얹지 않는다.
+    var draining = base;
+    draining.lifecycle = .draining;
+    try testing.expect(!isUpgradeCandidate(draining, target, .held));
+    var restoring = base;
+    restoring.lifecycle = .restoring;
+    try testing.expect(!isUpgradeCandidate(restoring, target, .held));
+
+    // 생존의 긍정적 증거가 있을 때만 손댄다 — free는 정리 대상이고, unknown은 우리 쪽 관측 실패다.
+    try testing.expect(!isUpgradeCandidate(base, target, .free));
+    try testing.expect(!isUpgradeCandidate(base, target, .unknown));
 }

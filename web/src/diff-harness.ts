@@ -73,6 +73,21 @@ export type DiffProbe = {
   iframe_count: number;
 };
 
+/// 브리지 응답을 **웹이 받아 파싱하는** 비용. 네이티브 직렬화(Zig 쪽에서 잰다)와 합쳐야 "큰 파일을 열면 얼마나
+/// 기다리는가"가 나온다 — 한쪽만 재면 상한을 잘못 잡는다.
+export function measureParse(bytes_per_side: number): { response_bytes: number; parse_ms: number } {
+  const unit = '    const value = try compute("quoted\ttab", 42); // 주석\n';
+  let side = "";
+  while (side.length + unit.length <= bytes_per_side) side += unit;
+  const response = JSON.stringify({ result: { original: side, modified: side } });
+  const started = performance.now();
+  const parsed = JSON.parse(response) as { result: { original: string } };
+  const elapsed = performance.now() - started;
+  // 최적화로 파싱이 통째로 날아가지 않게 결과를 실제로 쓴다.
+  if (parsed.result.original.length !== side.length) throw new Error("parse mismatch");
+  return { response_bytes: response.length, parse_ms: Math.round(elapsed) };
+}
+
 export type Harness = {
   split: MergeView;
   unified: EditorView;

@@ -109,6 +109,13 @@ struct EditorSmoke {
         summary["csp_violation_count"] = String(jsonArrayCount(violations))
         summary["console_error_count"] = String(jsonArrayCount(consoleErrors))
 
+        // ── 큰 응답 파싱 비용(상한 근거 — docs/editor-surface.md §10.6). 네이티브 직렬화 비용은 Zig 테스트가
+        //    재고, 여기서는 **웹이 받아 파싱하는** 쪽을 잰다. 둘을 합쳐야 "큰 파일을 열면 얼마나 기다리는가"다.
+        if let parse = evaluateJSON(webView, "JSON.stringify(window.__maruEditorSmoke.measure_parse(8*1024*1024))") {
+            summary["parse_8mib_response_bytes"] = String(intOf(parse["response_bytes"]))
+            summary["parse_8mib_ms"] = String(intOf(parse["parse_ms"]))
+        }
+
         // ── CSP 자가검증. 헤더가 빠져도 위반은 0으로 보이므로, "위반 0"을 근거로 쓰려면 CSP가 실제로 막는다는
         //    증거가 있어야 한다. 반드시 차단돼야 하는 eval을 일부러 시도한다 — **위 계측이 모두 끝난 뒤**에.
         let cspEnforced = evaluate(webView, "window.__maruEditorSmoke.csp_self_test()") as? Bool ?? false

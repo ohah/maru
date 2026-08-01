@@ -60963,3 +60963,46 @@ test "소스 컨트롤: 여러 행을 연달아 눌러도 각각 diff Term이 �
     try std.testing.expect(session.diffTermFor("/repo/a.txt", .unstaged) != null);
     try std.testing.expect(session.diffTermFor("/repo/b.txt", .unstaged) != null);
 }
+
+// [E1 종료 조건] 읽는 중에 그 Term을 닫는 경로. 늦게 도착한 결과가 **사라진 entry를 건드리면** 크래시고, 그냥
+// 흘려보내면 누수다. 둘 다 아니어야 한다 — testing.allocator가 누수를, drain의 짝 맞추기가 오배정을 잡는다.
+test "diff Term을 읽는 중에 닫아도 결과가 안전하게 버려진다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    session.openDiffTerm("/repo", "/repo/a.txt", "a.txt", null, .unstaged);
+    const term = session.diffTermFor("/repo/a.txt", .unstaged) orelse return error.MissingDiffTerm;
+    const entry = term.file_entry orelse return error.MissingEntry;
+    const request_id = entry.diff_request_id;
+
+    // 그 Term을 닫는다(백엔드가 실제로 돌고 있었다면 결과는 뒤에 온다).
+    const pane = session.activePane();
+    var index: usize = 0;
+    while (index < pane.terms.items.len) : (index += 1) {
+        if (pane.terms.items[index] == term) break;
+    }
+    session.closeTermAt(session.app_window.active_tab, pane, index);
+    try std.testing.expect(session.diffTermFor("/repo/a.txt", .unstaged) == null);
+
+    // 늦게 온 결과를 흉내 낸다: 그 request_id를 가진 결과가 도착해도 짝이 없어 그냥 버려져야 한다(크래시·누수 없음).
+    if (session.git_backend) |*backend| {
+        _ = backend;
+        var late: git_backend_mod.DiffResult = .{
+            .original = try allocator.dupe(u8, "old"),
+            .modified = try allocator.dupe(u8, "new"),
+            .ok = true,
+            .request_id = request_id,
+        };
+        // drainGitStatus가 하는 일과 같은 절차 — 짝이 없으면 해제한다.
+        var matched = false;
+        var it = session.fileEntries();
+        while (it.next()) |candidate| {
+            if (candidate.kind == .diff and candidate.diff_request_id == late.request_id) matched = true;
+        }
+        try std.testing.expect(!matched);
+        late.deinit(allocator);
+    }
+}

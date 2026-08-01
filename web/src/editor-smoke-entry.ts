@@ -5,7 +5,7 @@
 //! **관측을 먼저 건다.** CSP 위반·console 오류 수집기를 마운트보다 먼저 설치해야 MergeView가 유발한 위반을
 //! 놓치지 않는다(그것이 이 게이트가 처음 보는 값이다 — §7.2 남은 확인).
 
-import { mount, type DiffProbe, type Harness } from "./diff-harness";
+import { measureParse, mount, type DiffProbe, type Harness } from "./diff-harness";
 
 type SmokeApi = {
   ready: boolean;
@@ -17,6 +17,8 @@ type SmokeApi = {
   reject: () => boolean;
   /** CSP가 실제로 걸려 있는지 스스로 확인한다 — 아래 cspSelfTest 참고. */
   csp_self_test: () => boolean;
+  /// 큰 응답을 웹이 파싱하는 비용(상한 근거).
+  measure_parse: (bytes_per_side: number) => { response_bytes: number; parse_ms: number };
 };
 
 const violations: string[] = [];
@@ -50,6 +52,7 @@ const api: SmokeApi = {
   accept: () => harness?.acceptFirstChunk() ?? false,
   reject: () => harness?.rejectFirstChunk() ?? false,
   csp_self_test: cspSelfTest,
+  measure_parse: measureParse,
 };
 
 /// **"위반 0"이 의미를 가지려면 CSP가 실제로 걸려 있어야 한다.** 헤더가 빠져도 위반은 0으로 보이므로, 반드시

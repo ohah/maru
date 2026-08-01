@@ -6887,6 +6887,16 @@ pub const Client = struct {
     pub fn failClosed(self: *Client) void {
         self.invalidateConnection();
     }
+
+    /// 이 Client의 **소켓**으로는 더 대화할 수 없다(wire 무결성 상실·부분 쓰기·EOF). fd가 죽는 것은 물리적
+    /// 사실이지만 host process·PTY·셸은 대개 살아 있고 소켓 경로와 manifest도 그대로다 — 상위는 같은 host에
+    /// 새 연결을 맺어 runtime을 되찾을 수 있다.
+    ///
+    /// **재연결 주체는 Client가 아니다.** Client는 소켓 경로를 필드로 갖지 않으므로 스스로 다시 붙을 수단이
+    /// 없다. 경로를 아는 상위(app_session)가 이 질의를 보고 교체를 주도한다.
+    pub fn isDegraded(self: *const Client) bool {
+        return self.ownership == .moved or self.unusable;
+    }
 };
 
 const client_source_schema_field_allowlist = [_][]const u8{

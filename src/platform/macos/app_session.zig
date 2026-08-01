@@ -1184,6 +1184,10 @@ const TermRuntime = struct {
     // 안 되므로 destroyTerm이 detach-only로 회수한다. applyWorkspaceWindow가 commit point를 넘으면 false로 바꿔 이후
     // 사용자 명시 close는 정상 terminate 의미를 가진다.
     restored_existing: bool = false,
+    /// `be.attach(handle, login)`에 넘겼던 값. 재부착은 라우팅을 뗐다 다시 붙이는데, 그때 **같은 조건**으로
+    /// 등록해야 한다 — interactive 셸만 reader 코어-처리를 켜기 때문이다(§io-render-threading PR3). Term이 이
+    /// 값을 들고 있지 않으면 재부착 후 OSC 응답 타이밍이 조용히 바뀐다.
+    reader_login: bool = false,
     // 이 Term의 PTY가 종료(exit/read_error) 관측 후 finishAfterTermination까지 끝났는가. tick drain이 Term별로
     // 한 번만 finish하도록, 세션 종료(모든 Term terminated) 판정에 쓴다.
     terminated: bool = false,
@@ -1927,6 +1931,14 @@ const HostConnectFailureStage = enum {
     runtime_death,
 };
 var host_connect_failure_stage: ?HostConnectFailureStage = null;
+/// 무효화된 host 연결의 재연결 예산(§7). **실제 시각 기준**이다 — tick으로 세면 창 수와 프레임 레이트에 따라
+/// 실제 경과가 달라져 계약("host pause budget보다 길 것")이 조용히 깨진다.
+const host_reconnect_budget_ms: u64 = 10_000; // host pause budget 5초의 2배
+const host_reconnect_retry_interval_ms: u64 = 500;
+var host_reconnect_started_ms: ?u64 = null;
+var host_reconnect_last_attempt_ms: u64 = 0;
+/// 포기 알림은 예산을 다 쓴 시점에 한 번만 낸다. 재연결에 성공하면 다음 사고를 위해 되돌린다.
+var host_reconnect_gave_up_notified: bool = false;
 /// `runtime_death`처럼 `FailureReason`이 아니라 **Zig error**로 갈리는 단계의 원인. `@errorName`은 comptime 정적
 /// 문자열이라 수명 걱정 없이 그대로 보관한다.
 ///
@@ -5989,6 +6001,162 @@ pub const AppSession = struct {
         self.showNotice("다른 창이 이 세션을 제어 중이라 관찰 모드로 연결했습니다. 화면은 갱신되지만 입력은 전달되지 않습니다.");
     }
 
+    pub const ReconnectDecision = enum { attempt, wait, budget_exhausted };
+
+    /// 지금 재연결을 시도할지 판정한다. **벽시계 기준**이라 창 수와 프레임 레이트에 영향받지 않는다 —
+    /// `AppSession`은 창별인데 이 상태는 앱 전역이라, tick으로 세면 창이 둘일 때 실제 경과가 절반이 되고 높은
+    /// 주사율에서도 절반이 되어 host pause budget 아래로 내려간다. 순수 함수로 둔 이유는 그 정책이 frame loop
+    /// 없이 검증돼야 하기 때문이다.
+    fn hostReconnectDecision(now_ms: u64, started_ms: ?u64, last_attempt_ms: u64) ReconnectDecision {
+        const started = started_ms orelse return .attempt; // 첫 시도는 즉시 — 대개 여기서 붙는다.
+        if (now_ms -| started >= host_reconnect_budget_ms) return .budget_exhausted;
+        if (now_ms -| last_attempt_ms < host_reconnect_retry_interval_ms) return .wait;
+        return .attempt;
+    }
+
+    /// 무효화된 host 연결을 예산 안에서 되살린다. frame-loop tick마다 불린다.
+    ///
+    /// 로컬 unix socket이라 host가 살아 있으면 첫 시도에 붙는다 — 반복 실패는 host 부재의 증거이지 더 기다릴
+    /// 이유가 아니다. 예산은 host의 pause budget보다 길어야 한다(§7). 짧으면 exec 업그레이드로 잠시 멈춘 host를
+    /// 죽은 것으로 오판해 살아 있는 세션을 포기한다.
+    fn pumpHostReconnect(self: *AppSession) void {
+        if (!is_macos) return;
+        const pool = if (app_remote_host_pool) |*p| p else return;
+        const host_id = pool.degradedHostId() orelse {
+            // 되살아났다(또는 애초에 degraded가 없다). 다음 사고를 위해 예산을 되돌린다.
+            host_reconnect_started_ms = null;
+            host_reconnect_gave_up_notified = false;
+            return;
+        };
+        const now_ms = self.awakeMs();
+        switch (hostReconnectDecision(now_ms, host_reconnect_started_ms, host_reconnect_last_attempt_ms)) {
+            .wait => return,
+            .budget_exhausted => {
+                // 시도마다가 아니라 **포기한 시점에 한 번만** 알린다. 대개는 몇 백 ms 안에 조용히 복구되므로
+                // 시도마다 토스트를 띄우면 재연결이 끝나기도 전에 사용자를 끊는다.
+                if (!host_reconnect_gave_up_notified and !self.anyModalOverlayOpen()) {
+                    host_reconnect_gave_up_notified = true;
+                    self.showNotice("영속 세션 host에 다시 연결하지 못했습니다. 세션은 host에 남아 있지만 이 앱에서는 화면이 갱신되지 않습니다.");
+                }
+                return;
+            },
+            .attempt => {},
+        }
+        if (host_reconnect_started_ms == null) host_reconnect_started_ms = now_ms;
+        host_reconnect_last_attempt_ms = now_ms;
+
+        const previous = self.replaceDegradedHostAdapter(host_id) orelse return; // 사유는 그 안에서 판정했다.
+        // **재부착을 끝낸 뒤에** 옛 연결을 반납한다 — 먼저 반납하면 아직 그 `Client`를 참조하는 runtime이
+        // dangling된다.
+        const outcome = self.reattachTermsOnHost(host_id);
+        if (app_remote_host_pool) |*p| p.destroyReplaced(previous);
+        if (outcome.lost != 0 and !self.anyModalOverlayOpen()) {
+            self.showNotice("일부 터미널을 다시 연결하지 못했습니다. 해당 세션은 host에 남아 있습니다.");
+        }
+    }
+
+    /// 무효화된 host에 **connect-only**로 새 연결을 맺어 pool의 adapter를 원자적으로 교체하고, 옛 adapter를
+    /// 돌려준다. 실패하면 null이고 pool은 전혀 바뀌지 않는다.
+    ///
+    /// 돌려받은 옛 adapter는 그 host의 runtime들이 **아직 참조 중**이므로 여기서 해제하지 않는다. 재부착을
+    /// 끝낸 뒤 caller가 `destroyReplaced`로 반납해야 한다 — 먼저 해제하면 재부착 대상이 dangling된다.
+    ///
+    /// `ensureRestoreHostAdapter`와 연결 수립 부분이 닮았지만 합치지 않는다: 그쪽은 **없는** adapter를 만들어
+    /// 넣는 restore 경로이고 옛 adapter를 돌려줄 자리가 없다. 여기서 교체까지 하면 restore 호출자가 해제
+    /// 책임을 모른 채 누수를 만든다.
+    fn replaceDegradedHostAdapter(self: *AppSession, host_id: u128) ?*RemoteSessionAdapter {
+        if (!is_macos) return null;
+        const pool = if (app_remote_host_pool) |*p| p else return null;
+        if (pool.get(host_id) == null) return null;
+        const alloc = std.heap.smp_allocator;
+        var arena = std.heap.ArenaAllocator.init(alloc);
+        defer arena.deinit();
+        const base = sessionCacheBase(arena.allocator()) orelse return null;
+        // **connect-only**다. connect-or-launch를 쓰면 죽은 host 자리에 새 host를 띄우고, host_id가 달라 곧바로
+        // 실패 처리되어 아무도 쓰지 않는 고아 데몬만 남는다.
+        const connected = switch (session_host.host_connect.connectExistingHost(alloc, base, host_id)) {
+            .connected => |client| client,
+            .failed => |reason| {
+                if (reason == .host_gone) self.restore_gone_host_id = host_id; // 되찾을 수 없다 — 반복 시도 금지.
+                return null;
+            },
+        };
+        const adapter = alloc.create(RemoteSessionAdapter) catch {
+            var failed = connected;
+            failed.deinit();
+            return null;
+        };
+        adapter.* = RemoteSessionAdapter.init(connected) catch {
+            var failed = connected;
+            failed.deinit();
+            alloc.destroy(adapter);
+            return null;
+        };
+        return pool.replaceOwned(host_id, adapter) catch {
+            adapter.deinit();
+            alloc.destroy(adapter);
+            return null;
+        };
+    }
+
+    /// createTerm이 새 surface에 넣는 config 파생 값들. 재부착은 surface를 새로 받으므로 같은 chokepoint를 다시
+    /// 통과해야 폭·팔레트·커서 규칙이 어긋나지 않는다. (title·command는 복사하지 않는다 — host-backed Term은
+    /// host 관측이 그 값의 출처이므로 재부착 후 metadata로 다시 온다.)
+    fn applyTermSurfaceConfig(self: *AppSession, term: *Term) void {
+        term.surface.core.ambiguous_wide = self.loaded_config.config.ambiguous_width == .wide;
+        term.surface.core.emoji_wide = self.loaded_config.config.emoji_width == .wide;
+        term.surface.core.setConfigPalette(self.appearance.theme.palette);
+        term.surface.core.setDefaultCursorShape(self.configCursorShape());
+    }
+
+    const ReattachOutcome = struct {
+        reattached: usize = 0,
+        /// 되찾지 못한 Term. host의 runtime은 살아 있고 기존 화면도 그대로 남는다 — 다음 시도가 다시 붙는다.
+        lost: usize = 0,
+    };
+
+    /// 연결이 무효화된 host의 Term들을 새 연결로 다시 붙인다. **app_session이 주도한다.**
+    ///
+    /// in-process Term의 `surface`는 registry 슬롯이지만 **host-backed Term의 `surface`는 `RemoteRuntime` 안에
+    /// 있다**(remote backend는 registry를 쓰지 않는다). 그래서 runtime을 갈면 주소가 바뀌는데, 그 포인터를 들고
+    /// 있는 것은 `Term`이다. backend가 자기 판단으로 runtime을 갈면 `Term.surface`가 dangling된다 — 소유자인
+    /// 이 계층이 갱신까지 함께 해야 성립한다.
+    ///
+    /// **순서가 안전성을 결정한다**: 새 handle로 먼저 attach하고, 성공했을 때만 옛 것을 회수한다. 실패해도 기존
+    /// Term이 그대로 살아 있어 다음 시도가 다시 붙을 수 있다(화면은 멈춰 있지만 dangling은 없다).
+    fn reattachTermsOnHost(self: *AppSession, host_id: u128) ReattachOutcome {
+        var outcome: ReattachOutcome = .{};
+        if (!is_macos) return outcome;
+        const rb = if (app_remote_backend) |*remote| remote else return outcome;
+        for (self.tabs.items) |tab| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items) |term| {
+                    if (term.kind != .terminal or !term.rt.live_initialized) continue;
+                    const old_handle = term.rt.handle;
+                    if (rb.runtimeHostId(old_handle) != host_id) continue;
+                    const runtime_id = rb.runtimeIdFor(old_handle) orelse continue;
+                    // host가 보고한 마지막 크기가 아니라 **GUI가 실제로 배치한 크기**를 쓴다. 소켓이 죽은 동안
+                    // 창을 resize했으면 전자는 stale이다.
+                    const size = term.surface.core.size;
+                    const new_handle = self.surface_ids.next();
+                    const surface = rb.attachTermOnHost(host_id, new_handle, runtime_id, size) catch {
+                        outcome.lost += 1;
+                        continue; // 옛 Term은 손대지 않았다 — 다음 예산이 다시 시도한다.
+                    };
+                    rb.detachTerm(old_handle); // host runtime은 살린 채 client 쪽만 회수(§7 attach 계약).
+                    term.rt.handle = new_handle;
+                    term.surface = surface;
+                    self.applyTermSurfaceConfig(term);
+                    // 라우팅을 **같은 조건으로** 다시 등록한다. login이 다르면 OSC 응답 타이밍이 조용히 바뀐다.
+                    _ = rb.backend().attach(new_handle, term.rt.reader_login) catch {};
+                    if (rb.attachedAsObserver(new_handle)) self.observer_attach_notice_pending = true;
+                    outcome.reattached += 1;
+                }
+            }
+        }
+        return outcome;
+    }
+
     fn showPendingHostConnectNotice(self: *AppSession) void {
         if (!self.host_connect_notice_pending) return;
         self.host_connect_notice_pending = false;
@@ -6258,6 +6426,7 @@ pub const AppSession = struct {
 
         // interactive 셸(login 래핑)만 리더 코어-처리를 켠다 — 렌더 tick에 안 묶여 OSC 응답이 즉시 나간다
         // (docs/io-render-threading.md PR3). controlled_smoke(login=false, 테스트)는 큐-드레인 유지.
+        term.rt.reader_login = request.login; // 재부착이 라우팅을 같은 조건으로 다시 등록하려면 이 값이 필요하다.
         _ = try be.attach(id, request.login); // interactive(login)만 process_in_reader — 계약이 attachSurface로 위임
         // attach 뒤의 backend가 실제 core 소유자다. 신규 spawn은 initial_config를 reader 시작 전에 이미 적용했지만,
         // 이 재적용은 기존 runtime 재접속과 향후 attach 경로가 현재 GUI config로 수렴하게 한다. attach 전
@@ -26499,6 +26668,7 @@ pub const AppSession = struct {
         }
         self.showPendingHostConnectNotice(); // §6 L291: keep-alive host 연결 실패 시 첫 tick에 notice(플래그로 self-gate).
         self.showPendingObserverAttachNotice(); // §9: controller를 못 얻고 observer로 붙었으면 입력이 안 되는 이유를 알린다.
+        self.pumpHostReconnect(); // §7: 무효화된 host 연결을 예산 안에서 되살린다(화면·입력·클립보드가 함께 복구).
         self.showPendingEndedPlaceholderNotice(); // §7: 종료 placeholder로 복원한 자리가 있으면 첫 tick에 한 번 알린다.
         self.applyDragAutoscroll(); // 드래그가 grid 밖에 머무는 동안 frame-loop tick마다 한 줄씩 스크롤+확장
         self.flushPendingPaste(); // 큰 붙여넣기의 잔여를 자식이 읽는 속도에 맞춰 흘려보낸다
@@ -43850,6 +44020,41 @@ test "right-click menu(F2-5): 터미널 컨텍스트 메뉴 복사/붙여넣기 
 
     // 기본 config는 paste(사용자 결정) — 트래킹 .none이면 우클릭이 paste 동작을 의도.
     try std.testing.expectEqual(config_mod.theme.RightClick.paste, session.loaded_config.config.input.right_click);
+}
+
+test "host 재연결 판정: 첫 시도는 즉시, 간격 안에는 쉬고, 예산을 넘기면 포기한다" {
+    const decide = AppSession.hostReconnectDecision;
+    // 첫 시도는 즉시 — 로컬 unix socket이라 host가 살아 있으면 대개 여기서 붙는다.
+    try std.testing.expectEqual(AppSession.ReconnectDecision.attempt, decide(1_000, null, 0));
+    // 간격 안이면 쉰다. 연결 수립은 동기 작업이라 매 프레임 부르면 UI를 잡아먹는다.
+    try std.testing.expectEqual(
+        AppSession.ReconnectDecision.wait,
+        decide(1_000 + host_reconnect_retry_interval_ms - 1, 1_000, 1_000),
+    );
+    try std.testing.expectEqual(
+        AppSession.ReconnectDecision.attempt,
+        decide(1_000 + host_reconnect_retry_interval_ms, 1_000, 1_000),
+    );
+    // 예산을 넘기면 포기한다 — 반복 실패는 host 부재의 증거이지 더 기다릴 이유가 아니다.
+    try std.testing.expectEqual(
+        AppSession.ReconnectDecision.budget_exhausted,
+        decide(1_000 + host_reconnect_budget_ms, 1_000, 0),
+    );
+}
+
+test "host 재연결 예산은 벽시계로 host pause budget보다 길다" {
+    // §7 계약: 예산이 host pause budget(5초)보다 짧으면 exec 업그레이드로 잠시 멈춘 host를 죽은 것으로 오판해
+    // 살아 있는 세션을 포기한다. **벽시계로 재는 것이 계약의 일부다** — tick으로 세면 창 수와 주사율에 따라
+    // 실제 경과가 달라진다. 상수만 곱해 검증하면 그 사실이 드러나지 않으므로, 판정 함수가 실제로 언제까지
+    // attempt를 내주는지로 확인한다.
+    const decide = AppSession.hostReconnectDecision;
+    const start: u64 = 10_000;
+    try std.testing.expectEqual(AppSession.ReconnectDecision.attempt, decide(start + 5_000, start, start));
+    try std.testing.expectEqual(
+        AppSession.ReconnectDecision.budget_exhausted,
+        decide(start + host_reconnect_budget_ms, start, start),
+    );
+    try std.testing.expect(host_reconnect_budget_ms > 5_000);
 }
 
 test "observer 강등: 입력이 안 되는 이유를 notice로 알리고 모달 중엔 보존한다" {

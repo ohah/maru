@@ -757,6 +757,67 @@ link가 없어 `SurfaceRuntime.resize`가 실패하므로 sentinel core를 직�
 | protocol 호환 불가 | runtime을 죽이지 않고 attach 거부, 버전 진단 표시 |
 | client queue overflow | 그 client delta를 invalidated 처리하고 fresh snapshot 재요청; PTY reader는 계속 진행 |
 
+### 사용 중 연결이 끊겼을 때의 재연결
+
+위 실패 행렬은 **창 복원 시점**의 attach 실패를 분류한다. 이 절은 **이미 붙어서 쓰는 중**에 연결이 무효화된
+경우를 다룬다. 둘은 같은 사건이 아니다.
+
+**전제: fd의 죽음은 host의 죽음이 아니다.** wire 무결성을 잃거나(프레임 경계 상실·부분 쓰기) EOF를 만나면 그
+소켓으로는 더 대화할 수 없고, 그 fd를 계속 쓰면 이후 바이트를 오해석해 더 위험하다. 그러나 host process·PTY·셸은
+그대로 살아 있고 소켓 경로와 manifest도 그대로다. 즉 **재연결의 대상이 남아 있다.**
+
+**`Client`는 스스로 재연결하지 않는다.** `Client`는 소켓 경로를 필드로 갖지 않으므로 다시 붙을 수단이 없다.
+경로와 `exe_path`·cache base를 아는 상위(GUI)가 교체를 주도하고, `Client`는 `isDegraded()`로 자신이 더는 쓸 수
+없음을 알릴 뿐이다. 이 분담이 계층을 지킨다.
+
+**폭발 반경은 host 단위다.** 하나의 `Client`를 그 host에 붙은 **모든 pane이 공유**하므로, 무효화되면 그 host의
+pane 전부가 함께 멈춘다. 클립보드 복사(`runtime.clipboard_write`), 화면 갱신(delta·resync), 새 pane 생성(spawn)이
+전부 같은 뿌리로 실패하며, 겉으로는 서로 무관한 세 증상으로 보인다. 따라서 복구도 host 단위로 한 번에 한다.
+
+**절차.** GUI가 degraded host를 관측하면 다음을 순서대로 수행한다.
+
+1. 같은 host에 **새 연결**을 맺는다. host는 살아 있으므로 **connect-only**다 — connect-or-launch를 쓰면 죽은
+   host 자리에 새 host를 띄우고, host_id가 달라 곧바로 실패 처리되어 아무도 쓰지 않는 고아 데몬만 남는다.
+2. `HostPool`의 adapter를 새 것으로 **원자적으로** 교체한다 — `adapter_generation`이 증가한다. 제거 후 재등록으로
+   쪼개면 그 사이의 실패가 host 슬롯을 통째로 잃게 하고, 그 host의 runtime들이 이미 해제된 연결을 가리킨 채 남는다.
+3. 그 host의 Term들을 재부착한다(아래).
+4. 재부착이 모두 끝난 **뒤에** 옛 adapter를 해제한다. 순서를 어기면 아직 옛 연결을 참조하는 runtime이 dangling된다.
+
+**재부착은 GUI가 주도한다.** in-process Term의 surface는 앱 전역 registry 슬롯이 소유하지만 **host-backed Term의
+surface는 runtime 객체 안에 있다**(원격 backend는 registry를 쓰지 않는다). 그래서 runtime을 갈면 surface 주소가
+바뀌는데, 그 포인터를 들고 있는 것은 `Term`이고 `Term`을 소유하는 것은 GUI다. backend가 자기 판단으로 runtime을
+갈면 `Term.surface`가 dangling된다 — 갱신까지 함께 하는 계층만 이 일을 할 수 있다.
+
+**순서가 안전성을 결정한다. 실패가 무해해야 한다.**
+
+1. **새 handle로 먼저 attach한다.** 옛 runtime은 그대로 둔다. 저장된 `runtime_id`로 붙으므로 host의 PTY와 셸이
+   그대로 이어지고, 새 attach가 full snapshot을 받으므로 **화면 복구에 별도 resync 요청이 필요하지 않다.**
+2. 성공했을 때만 옛 runtime을 회수한다(client-side detach — host의 runtime은 죽이지 않는다). 이때 host에 detach를
+   보내는 것이 중요하다. 보내지 않으면 controller lease가 host에 남아 이후 attach가 `controller_busy`로 강등된다.
+3. `Term`의 handle과 surface 포인터를 새 것으로 갱신하고, config 파생 값과 입력 라우팅을 **같은 조건으로** 다시
+   적용한다. 라우팅 등록 조건(interactive 셸 여부)이 달라지면 OSC 응답 타이밍이 조용히 바뀐다.
+
+이 순서에서는 **재부착이 실패해도 기존 Term이 그대로 살아 있다.** 화면은 멈춰 있지만 dangling도 유실도 없고 다음
+예산이 다시 시도할 수 있다. 되찾지 못한 pane이 있다는 사실은 사용자에게 알린다.
+
+크기는 **GUI가 실제로 배치한 값**을 쓴다. host가 마지막으로 확인한 크기는 소켓이 죽은 동안 창을 조정했다면 낡았다.
+
+**예산은 벽시계로 잰다.** 프레임 tick으로 세면 안 된다 — 재연결 상태는 앱 전역인데 tick은 창마다 도므로 창이
+둘이면 실제 경과가 절반이 되고, 높은 주사율에서도 절반이 된다. 로컬 unix socket이므로 host가 살아 있으면 첫
+시도에 붙는다. 짧은 간격으로 재시도하되 총 예산은 **host의 pause budget보다 길어야 한다** — 그렇지 않으면 exec
+업그레이드로 잠시 멈춘 host를 죽은 것으로 오판한다. 무한 재시도는 하지 않는다.
+
+**controller 강등을 성공으로 세지 않는다.** host는 두 번째 controller를 거절하지 않고 조용히 observer로 강등한다
+(§9). 재부착이 그 상태로 끝나면 화면은 갱신되지만 입력이 전부 거부되므로 사용자에게 그 사실을 알린다. 연결이
+끊기면 host가 lease를 회수하므로 재연결 때는 대개 controller를 다시 잡는다.
+
+**재연결 구간의 입력은 버린다.** 큐에 담았다가 뒤늦게 보내면 사용자가 의도하지 않은 시점에 셸 명령이 실행된다.
+재연결에 수 초가 걸렸다면 그 사이 입력은 이미 다른 맥락을 향한 것이다. terminal multiplexer들이 detach 구간의
+입력을 받지 않는 것과 같은 이유다.
+
+**관측.** 재연결 시작·성공·포기는 host 로그와 GUI notice 양쪽에 남긴다. 실패는 §접속 실패 행렬과 같은 stage/사유
+어휘를 쓴다 — 사용자가 보는 문구와 로그가 같은 분류를 가리켜야 한다.
+
 ## 8. 다른 터미널에서 attach
 
 v1 CLI 범위는 **개별 terminal runtime attach**다.

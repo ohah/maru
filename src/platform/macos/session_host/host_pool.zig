@@ -48,6 +48,53 @@ pub fn HostPool(comptime Adapter: type) type {
             self.adapter_generation = generation;
         }
 
+        /// 같은 `host_id`의 owned adapter를 새 것으로 **원자적으로** 교체하고 옛 adapter를 돌려준다. 연결이
+        /// 무효화된 host를 다시 붙일 때 쓴다(§7 사용 중 연결이 끊겼을 때의 재연결).
+        ///
+        /// `remove` + `addOwned`로 쪼개면 안 되는 이유: 그 사이 `addOwned`가 실패하면 옛 adapter는 이미
+        /// 해제됐는데 새 것은 등록되지 않아 host 슬롯이 통째로 사라지고, 그 host의 runtime들은 해제된
+        /// `Client`를 가리킨 채 남는다(use-after-free). 여기서는 기존 entry를 제자리에서 고쳐 쓰므로 할당이
+        /// 없고 따라서 실패 지점도 없다. `runtime_refs`와 `spawn_host_id`도 그대로 유지된다 — 교체는 참조
+        /// 관계를 바꾸지 않는다.
+        ///
+        /// 돌려받은 옛 adapter는 **재부착을 모두 끝낸 뒤** `destroyReplaced`로 해제한다. 먼저 해제하면 아직
+        /// 옛 연결을 참조하는 runtime이 dangling된다.
+        pub fn replaceOwned(self: *Self, host_id: u128, adapter: *Adapter) !*Adapter {
+            if (self.adapter_generation_exhausted) return error.AdapterGenerationExhausted;
+            if (host_id == 0) return error.UnknownHost;
+            if (comptime @hasDecl(Adapter, "hostId")) {
+                if (adapter.hostId() != host_id) return error.HostIdentityMismatch;
+            }
+            const entry = self.entries.getPtr(host_id) orelse return error.UnknownHost;
+            // borrowed adapter는 수명을 caller가 쥐고 있으므로 pool이 교체·해제를 대신할 수 없다.
+            if (!entry.owned) return error.BorrowedHost;
+            const generation = try self.nextAdapterGeneration();
+            const previous = entry.adapter;
+            entry.adapter = adapter;
+            entry.adapter_generation = generation;
+            self.adapter_generation = generation;
+            return previous;
+        }
+
+        /// `replaceOwned`가 돌려준 옛 adapter를 해제한다. pool이 소유했던 메모리이므로 **pool의 allocator로**
+        /// 반납해야 한다 — caller의 allocator와 같다는 보장이 없다.
+        pub fn destroyReplaced(self: *Self, adapter: *Adapter) void {
+            adapter.deinit();
+            self.allocator.destroy(adapter);
+        }
+
+        /// 연결이 무효화된 host를 찾는다(없으면 null). **runtime이 하나도 없는 host도 포함해야 한다** — pane을
+        /// 모두 닫았지만 pool에 남아 있는 host의 연결이 죽으면, 그 host로 새 pane을 spawn할 때 비로소
+        /// `ConnectionClosed`로 실패한다. runtime 목록에서 host 건강을 유도하면 그 경우를 영영 놓친다.
+        pub fn degradedHostId(self: *Self) ?u128 {
+            if (!@hasDecl(Adapter, "logicalClient")) return null;
+            var it = self.entries.iterator();
+            while (it.next()) |entry| {
+                if (entry.value_ptr.adapter.logicalClient().isDegraded()) return entry.key_ptr.*;
+            }
+            return null;
+        }
+
         /// Adapter lifetime을 caller가 pool보다 길게 보장할 때만 사용한다.
         pub fn addBorrowed(self: *Self, host_id: u128, adapter: *Adapter) !void {
             try validateInsert(self, host_id, adapter);
@@ -131,6 +178,74 @@ pub fn HostPool(comptime Adapter: type) type {
             return true;
         }
     };
+}
+
+test "host pool: adapter 원자적 교체가 lease와 spawn host를 보존한다" {
+    // 무효화된 연결을 갈아끼울 때 `remove` + `addOwned`로 쪼개면, 그 사이 addOwned 실패가 host 슬롯을 통째로
+    // 잃게 하고 그 host의 runtime들은 이미 해제된 Client를 가리킨 채 남는다(use-after-free). 교체는 참조 관계를
+    // 바꾸지 않으므로 lease와 spawn host가 그대로 살아 있어야 한다.
+    const FakeAdapter = struct {
+        id: u8,
+        deinit_count: *usize,
+
+        fn deinit(self: *@This()) void {
+            self.deinit_count.* += 1;
+        }
+    };
+    const Pool = HostPool(FakeAdapter);
+    const allocator = std.testing.allocator;
+    var pool = Pool.init(allocator);
+    defer pool.deinit();
+
+    var deinits: usize = 0;
+    const first = try allocator.create(FakeAdapter);
+    first.* = .{ .id = 1, .deinit_count = &deinits };
+    try pool.addOwned(7, first);
+    try pool.setSpawnHost(7);
+    _ = try pool.retain(7); // runtime 하나가 이 host를 참조하는 중이다.
+    const generation_before = pool.adapterGeneration(7).?;
+
+    const second = try allocator.create(FakeAdapter);
+    second.* = .{ .id = 2, .deinit_count = &deinits };
+    const previous = try pool.replaceOwned(7, second);
+
+    try std.testing.expectEqual(@as(u8, 1), previous.id);
+    try std.testing.expectEqual(@as(u8, 2), pool.get(7).?.id);
+    // lease가 살아 있어야 재부착 후 균형이 맞는다. spawn host가 비면 새 pane spawn이 막힌다.
+    try std.testing.expectEqual(@as(?u128, 7), pool.spawnHostId());
+    try std.testing.expect(pool.adapterGeneration(7).? > generation_before);
+    // 옛 adapter는 **재부착이 끝난 뒤** caller가 해제한다 — 교체 시점에 해제하면 재부착 대상이 dangling된다.
+    try std.testing.expectEqual(@as(usize, 0), deinits);
+    pool.destroyReplaced(previous);
+    try std.testing.expectEqual(@as(usize, 1), deinits);
+
+    pool.release(7);
+}
+
+test "host pool: 없는 host나 borrowed adapter는 교체하지 않는다" {
+    const FakeAdapter = struct {
+        id: u8,
+        deinit_count: *usize,
+
+        fn deinit(self: *@This()) void {
+            self.deinit_count.* += 1;
+        }
+    };
+    const Pool = HostPool(FakeAdapter);
+    const allocator = std.testing.allocator;
+    var pool = Pool.init(allocator);
+    defer pool.deinit();
+
+    var deinits: usize = 0;
+    var replacement: FakeAdapter = .{ .id = 9, .deinit_count = &deinits };
+    try std.testing.expectError(error.UnknownHost, pool.replaceOwned(7, &replacement));
+
+    // borrowed는 수명을 caller가 쥐고 있어 pool이 교체·해제를 대신할 수 없다.
+    var borrowed: FakeAdapter = .{ .id = 1, .deinit_count = &deinits };
+    try pool.addBorrowed(7, &borrowed);
+    try std.testing.expectError(error.BorrowedHost, pool.replaceOwned(7, &replacement));
+    try std.testing.expectEqual(@as(u8, 1), pool.get(7).?.id); // 실패는 pool을 바꾸지 않는다.
+    try std.testing.expectEqual(@as(usize, 0), deinits);
 }
 
 test "host pool pins two hosts and selects spawn host explicitly" {

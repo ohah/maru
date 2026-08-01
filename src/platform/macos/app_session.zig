@@ -61101,3 +61101,136 @@ test "diff Term을 읽는 중에 닫아도 결과가 안전하게 버려진다" 
         late.deinit(allocator);
     }
 }
+
+// [E1 §6.1] 턴 스냅샷 전 구간을 **실제 git**으로 돌린다: 스냅샷 요청 → 링 적재 → 목록이 그 기준으로 턴 범위를
+// 읽어 오기까지. 에이전트 감지 자체는 별도(agent_observer·turn_snapshot 단위 테스트)이고, 여기서는 그 뒤 배관을 본다.
+test "턴 스냅샷이 링에 실리고 목록이 그 기준으로 바뀐 파일을 읽어 온다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const git_exe = git_backend_mod.locate(&exe_buf) orelse return error.SkipZigTest;
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_ptr = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return error.SkipZigTest;
+    const cwd = std.mem.span(@as([*:0]u8, @ptrCast(cwd_ptr)));
+    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo = std.fmt.bufPrint(&repo_buf, "{s}/.zig-cache/tmp-session-turn", .{cwd}) catch return error.SkipZigTest;
+    if (!git_backend_mod.testRunQuiet(&.{ "/bin/rm", "-rf", repo })) return error.SkipZigTest;
+    defer _ = git_backend_mod.testRunQuiet(&.{ "/bin/rm", "-rf", repo });
+    if (!git_backend_mod.testRunQuiet(&.{ git_exe, "init", "-q", "-b", "main", repo })) return error.SkipZigTest;
+    if (!git_backend_mod.testRunQuiet(&.{ git_exe, "-C", repo, "config", "user.email", "t@t" })) return error.SkipZigTest;
+    if (!git_backend_mod.testRunQuiet(&.{ git_exe, "-C", repo, "config", "user.name", "t" })) return error.SkipZigTest;
+    git_backend_mod.testWriteFile(repo, "kept.txt", "v1\n") catch return error.SkipZigTest;
+    if (!git_backend_mod.testRunQuiet(&.{ git_exe, "-C", repo, "add", "kept.txt" })) return error.SkipZigTest;
+    if (!git_backend_mod.testRunQuiet(&.{ git_exe, "-C", repo, "commit", "-qm", "base" })) return error.SkipZigTest;
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    // 저장소를 목록의 root로 세운다 — 제품에서 파일을 열면 root가 추론되는 그 경로다(gitRepoRoot가 root부터 본다).
+    var opened_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const opened = try std.fmt.bufPrint(&opened_buf, "{s}/kept.txt", .{repo});
+    try session.file_tree.recordOpened(opened, repo);
+    session.rememberGitRepo(repo);
+
+    // 턴이 끝났다 — 그 순간의 작업트리를 굳힌다(에이전트 상태 전이가 부르는 바로 그 함수).
+    session.captureTurnSnapshot(1);
+    var spins: usize = 0;
+    while (spins < 500 and session.turn_ring.len == 0) : (spins += 1) {
+        session.drainGitStatus();
+        var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, null);
+    }
+    try std.testing.expect(session.turn_ring.len == 1);
+    try std.testing.expect(session.turn_ring.latest().?.oid().len >= 40); // tree OID
+
+    // 그 뒤 파일을 고치면 목록의 턴 범위에 **그 파일만** 나온다(스냅샷 시점에 이미 있던 것은 안 나온다).
+    git_backend_mod.testWriteFile(repo, "kept.txt", "v2\n") catch return error.SkipZigTest;
+    git_backend_mod.testWriteFile(repo, "after.txt", "new\n") catch return error.SkipZigTest;
+    session.dock.view = .source_control;
+    session.refreshGitStatus();
+    spins = 0;
+    while (spins < 500) : (spins += 1) {
+        session.drainGitStatus();
+        if (session.git_result) |result| {
+            if (result.turn_name_status.len > 0) break;
+        }
+        var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, null);
+    }
+    const result = session.git_result orelse return error.NoListResult;
+    try std.testing.expect(std.mem.indexOf(u8, result.turn_name_status, "kept.txt") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.turn_name_status, "after.txt") != null);
+}
+
+// [E1 §6.1] **트리거까지** 제품 경로로 몬다: 실제 claude 화면(실행 중 footer → 프롬프트 상자)을 term 코어에 흘려
+// `pollAgentState`가 running → idle을 판정하고, 그 순간 스냅샷이 찍히는지 본다. 위 테스트가 "찍힌 뒤"를 보고
+// 이 테스트가 "언제 찍는가"를 봐서, 에이전트 없이 §6.1 전 구간이 닫힌다.
+test "에이전트 화면이 running → idle이 되는 순간 작업트리가 굳는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const git_exe = git_backend_mod.locate(&exe_buf) orelse return error.SkipZigTest;
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_ptr = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return error.SkipZigTest;
+    const cwd = std.mem.span(@as([*:0]u8, @ptrCast(cwd_ptr)));
+    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo = std.fmt.bufPrint(&repo_buf, "{s}/.zig-cache/tmp-session-turn-trigger", .{cwd}) catch return error.SkipZigTest;
+    if (!git_backend_mod.testRunQuiet(&.{ "/bin/rm", "-rf", repo })) return error.SkipZigTest;
+    defer _ = git_backend_mod.testRunQuiet(&.{ "/bin/rm", "-rf", repo });
+    if (!git_backend_mod.testRunQuiet(&.{ git_exe, "init", "-q", "-b", "main", repo })) return error.SkipZigTest;
+    git_backend_mod.testWriteFile(repo, "a.txt", "v1\n") catch return error.SkipZigTest;
+
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    var opened_buf: [std.fs.max_path_bytes]u8 = undefined;
+    try session.file_tree.recordOpened(try std.fmt.bufPrint(&opened_buf, "{s}/a.txt", .{repo}), repo);
+    session.rememberGitRepo(repo);
+
+    const term = session.activeTab().activeTerm();
+    term.agent_kind = .claude;
+    const surface = session.term_backend.surfaceFor(term.rt.handle) orelse return error.SkipZigTest;
+    // 관측은 화면과 별개 경로(폴링)라 테스트에서 현재 상태로 둔다 — 여기서 보려는 것은 화면 판정이다.
+    term.rt.observation.availability = .current;
+
+    // ① 실행 중: 실행 footer가 보인다(실측 규칙 `working_footer`).
+    try surface.core.write("\x1b[2J\x1b[H● 파일을 고치는 중\r\n  Working... esc to interrupt\r\n");
+    term.rt.observation.observer_generation +%= 1;
+    session.pollAgentState(term, false);
+    try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
+    try std.testing.expectEqual(@as(usize, 0), session.turn_ring.len); // 아직 턴이 안 끝났다
+
+    // ② 턴 종료: footer가 사라지고 입력 프롬프트만 남는다(실측 규칙 `live_prompt` — 수평선 + `❯ `).
+    //    화면 지우기로는 부족하다. 판정은 **스크롤백을 포함한 최근 48행**을 보므로, 실제 에이전트가 그러듯
+    //    출력이 흘러 지난 footer가 꼬리 밖으로 밀려나야 한다(안 밀면 지운 화면인데도 옛 footer가 계속 잡힌다).
+    try surface.core.write("\r\n" ** 60);
+    try surface.core.write("───────────────────────────────────────\r\n❯ \r\n");
+    term.rt.observation.observer_generation +%= 1;
+    session.pollAgentState(term, false);
+    try std.testing.expectEqual(maru.session.agent_observer.State.idle, term.agent_state);
+
+    var spins: usize = 0;
+    while (spins < 500 and session.turn_ring.len == 0) : (spins += 1) {
+        session.drainGitStatus();
+        var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, null);
+    }
+    try std.testing.expectEqual(@as(usize, 1), session.turn_ring.len);
+    try std.testing.expectEqual(term.surfaceId(), session.turn_ring.latest().?.surface_id);
+}

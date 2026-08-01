@@ -57,6 +57,9 @@ pub const DiffSides = struct {
 
 /// 본문 우클릭 지점과 대상. **전부 신뢰하지 않는 입력이다** — 값을 정하는 것은 적대적일 수 있는 문서다.
 /// 좌표는 shell 뷰포트 CSS px이고(렌더 iframe 좌표는 shell이 오프셋을 더해 보낸다), 창 좌표 변환은 platform이 한다.
+///
+/// **`href`는 콜백이 도는 동안만 유효하다** — 파싱한 JSON 문서 안을 가리키고 그 문서는 dispatch가 끝나면 해제된다.
+/// 더 오래 들고 있어야 하면 콜백 안에서 복사한다(platform이 그렇게 한다).
 pub const MenuRequest = struct {
     editor_epoch: u64,
     x: f64,
@@ -1224,11 +1227,21 @@ test "dispatchBridge: menu.open은 대상과 좌표만 받고, 모드는 받지 
     const Fake = struct {
         last: ?MenuRequest = null,
         calls: usize = 0,
+        // href는 **콜백이 도는 동안만** 유효하다(파싱한 JSON 문서 안이다). 밖에서 읽으려면 여기 복사해 둔다 —
+        // 그대로 들고 나가면 해제된 메모리를 읽는다(실제로 CI에서 segfault로 잡혔다).
+        href_buf: [64]u8 = undefined,
+        href_len: usize = 0,
 
         fn open(context: *anyopaque, request: MenuRequest) anyerror!void {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.calls += 1;
             self.last = request;
+            self.href_len = @min(request.href.len, self.href_buf.len);
+            @memcpy(self.href_buf[0..self.href_len], request.href[0..self.href_len]);
+        }
+
+        fn href(self: *const @This()) []const u8 {
+            return self.href_buf[0..self.href_len];
         }
     };
     var fake: Fake = .{};
@@ -1250,15 +1263,19 @@ test "dispatchBridge: menu.open은 대상과 좌표만 받고, 모드는 받지 
     try testing.expectEqual(@as(f64, 120.5), got.x);
     try testing.expectEqual(@as(f64, 48), got.y); // 정수로 와도 좌표다
     try testing.expectEqual(content_menu.Target.link, got.target);
-    try testing.expectEqualStrings("./a.md", got.href);
+    try testing.expectEqualStrings("./a.md", fake.href());
 }
 
 test "dispatchBridge: 유한하지 않은 좌표와 모르는 대상" {
     const Fake = struct {
-        last: ?MenuRequest = null,
+        // 좌표·대상만 본다(값 타입이라 콜백 뒤에도 안전하다 — 슬라이스인 href는 여기서 안 들고 나간다).
+        target: ?content_menu.Target = null,
+        calls: usize = 0,
+
         fn open(context: *anyopaque, request: MenuRequest) anyerror!void {
             const self: *@This() = @ptrCast(@alignCast(context));
-            self.last = request;
+            self.calls += 1;
+            self.target = request.target;
         }
     };
     var fake: Fake = .{};
@@ -1281,7 +1298,7 @@ test "dispatchBridge: 유한하지 않은 좌표와 모르는 대상" {
         var p = try parseValue(testing.allocator, resp);
         defer p.deinit();
         try testing.expect(p.value.object.get("error") != null);
-        try testing.expect(fake.last == null); // 콜백까지 가지 않았다
+        try testing.expectEqual(@as(usize, 0), fake.calls); // 콜백까지 가지 않았다
     }
 
     // 반대로 **모르는 대상은 거절하지 않는다** — 가장 권한 적은 empty로 접는다(메뉴 자체를 못 열게 하지 않는다).
@@ -1289,7 +1306,7 @@ test "dispatchBridge: 유한하지 않은 좌표와 모르는 대상" {
         "{\"editor_epoch\":1,\"x\":0,\"y\":0,\"target\":\"<script>\",\"has_selection\":false,\"href\":\"\"}}";
     const resp = try dispatchBridgeWithFileAccess(testing.allocator, req, "0.1.0", access);
     defer testing.allocator.free(resp);
-    try testing.expectEqual(content_menu.Target.empty, fake.last.?.target);
+    try testing.expectEqual(content_menu.Target.empty, fake.target.?);
 }
 
 test "dispatchBridge: 파일 본문이 아닌 surface는 menu.open을 거절한다" {

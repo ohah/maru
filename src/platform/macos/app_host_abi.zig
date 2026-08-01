@@ -2361,12 +2361,6 @@ const FileBridgeContext = struct {
         return self.session.openFileContentMenu(self.surface_id, request);
     }
 
-    fn menuClipboardWrite(raw: *anyopaque, editor_epoch: u64, text: []const u8) anyerror!void {
-        const self: *FileBridgeContext = @ptrCast(@alignCast(raw));
-        _ = editor_epoch; // 어느 문서의 선택이든 사용자가 방금 고른 것이다 — epoch는 stale 판정에 쓰지 않는다
-        return self.session.queueMenuClipboardWrite(self.surface_id, text);
-    }
-
     fn renderMermaid(
         raw: *anyopaque,
         request: maru.session.control_bridge.MermaidRenderRequest,
@@ -2427,7 +2421,6 @@ pub export fn maru_macos_app_session_bridge_dispatch(
         .revoke_mermaid_fn = FileBridgeContext.revokeMermaid,
         .renderer_ready_fn = FileBridgeContext.rendererReady,
         .open_menu_fn = FileBridgeContext.openMenu,
-        .menu_clipboard_write_fn = FileBridgeContext.menuClipboardWrite,
     };
     const reply = maru.session.control_bridge.dispatchBridgeWithFileAccess(
         allocator,

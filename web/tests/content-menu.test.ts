@@ -11,8 +11,9 @@ import { JSDOM } from "jsdom";
 import {
   hasVisibleSelection,
   hitFromEvent,
-  parseMenuAction,
+  installSelectionCapture,
   parseRendererContextMenu,
+  restoreSelection,
 } from "../src/content-menu";
 
 const dom = (body: string) => new JSDOM(`<!doctype html><body>${body}</body>`);
@@ -107,15 +108,58 @@ describe("렌더 iframe이 넘긴 값", () => {
   });
 });
 
-describe("native가 되돌려 준 동작", () => {
-  test("닫힌 집합만 받고 붙여넣기 텍스트를 함께 전한다", () => {
-    expect(parseMenuAction({ action: "copy" })).toEqual({ action: "copy", text: "" });
-    expect(parseMenuAction({ action: "paste", text: "붙" })).toEqual({
-      action: "paste",
-      text: "붙",
-    });
-    for (const bad of [{ action: "eval" }, { action: 1 }, {}, null, "copy"]) {
-      expect(parseMenuAction(bad)).toBeNull();
-    }
+describe("우클릭 직전 선택 붙잡기", () => {
+  // 왜 필요한가: 브라우저는 우클릭 기본 동작으로 선택을 접는다. 우리 메뉴는 native가 그려서 사용자가 항목을
+  // 고르는 시점에는 이미 선택이 없다 — 그러면 복사가 빈 문자열을 쓴다(실제로 그렇게 동작했다).
+  const selected = (doc: Document, from: number, to: number) => {
+    const node = doc.querySelector("#p")?.firstChild as Node;
+    const range = doc.createRange();
+    range.setStart(node, from);
+    range.setEnd(node, to);
+    doc.getSelection()?.removeAllRanges();
+    doc.getSelection()?.addRange(range);
+  };
+
+  test("mousedown(capture)에서 붙잡고, 접힌 뒤에도 그 값이 남는다", () => {
+    const jsdom = dom(`<p id="p">가나다라</p>`);
+    const doc = jsdom.window.document;
+    const snapshotOf = installSelectionCapture(doc);
+    expect(snapshotOf().text).toBe("");
+
+    selected(doc, 1, 3);
+    const down = new jsdom.window.MouseEvent("mousedown", { button: 2, bubbles: true });
+    doc.querySelector("#p")?.dispatchEvent(down);
+    // 브라우저가 선택을 접는 상황을 그대로 만든다.
+    doc.getSelection()?.removeAllRanges();
+
+    expect(snapshotOf().text).toBe("나다");
+    // 접힌 선택은 붙잡아 둔 범위로 되살아난다 — 메뉴가 떠 있는 동안 겨냥한 곳이 보여야 한다.
+    restoreSelection(doc, snapshotOf());
+    expect(doc.getSelection()?.toString()).toBe("나다");
+  });
+
+  test("왼쪽 버튼과 빈 선택은 붙잡지 않는다", () => {
+    const jsdom = dom(`<p id="p">가나다라</p>`);
+    const doc = jsdom.window.document;
+    const snapshotOf = installSelectionCapture(doc);
+    selected(doc, 0, 2);
+    doc
+      .querySelector("#p")
+      ?.dispatchEvent(new jsdom.window.MouseEvent("mousedown", { button: 0, bubbles: true }));
+    expect(snapshotOf().text).toBe(""); // 좌클릭은 메뉴를 열지 않는다
+
+    doc.getSelection()?.removeAllRanges();
+    doc
+      .querySelector("#p")
+      ?.dispatchEvent(new jsdom.window.MouseEvent("mousedown", { button: 2, bubbles: true }));
+    expect(snapshotOf().text).toBe(""); // 선택 없이 우클릭하면 지난 값이 남지 않는다
+  });
+
+  test("살아 있는 선택은 옛 값으로 덮지 않는다", () => {
+    const jsdom = dom(`<p id="p">가나다라</p>`);
+    const doc = jsdom.window.document;
+    selected(doc, 0, 1);
+    restoreSelection(doc, { text: "나다", range: null });
+    expect(doc.getSelection()?.toString()).toBe("가");
   });
 });

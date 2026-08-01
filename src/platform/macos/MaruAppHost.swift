@@ -599,7 +599,7 @@ final class MaruBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
         guard let session = controller?.bridgeSession(for: surfaceId) else { return nil }
         // write/dirty/openLink는 side effect라 size-query가 dispatch를 두 번 실행하면 안 된다. 응답은 작은 고정 JSON이므로
         // 단일 1 KiB fill 호출로 끝낸다. read/readAsset만 아래 query/fill 재계산 경로를 쓴다.
-        if method == "maru.file.beginDocument" || method == "maru.file.write" || method == "maru.file.setDirty" || method == "maru.file.resolveExternalChange" || method == "maru.file.openLink" || method == "maru.file.renderMermaid" || method == "maru.file.revokeMermaid" || method == "maru.file.rendererReady" || method == "maru.menu.open" || method == "maru.menu.clipboardWrite" {
+        if method == "maru.file.beginDocument" || method == "maru.file.write" || method == "maru.file.setDirty" || method == "maru.file.resolveExternalChange" || method == "maru.file.openLink" || method == "maru.file.renderMermaid" || method == "maru.file.revokeMermaid" || method == "maru.file.rendererReady" || method == "maru.menu.open" {
             var out = [UInt8](repeating: 0, count: 1024)
             let written = reqBytes.withUnsafeBufferPointer { rp in
                 out.withUnsafeMutableBufferPointer { op in
@@ -675,10 +675,7 @@ final class MaruBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
         },
         menu: {
           // §2.6: 메뉴는 native가 그린다 — web은 "어디서 무엇을 눌렀는지"만 올린다(모드는 안 보낸다).
-          open: function (request) { return window.maru.request("maru.menu.open", request); },
-          // 복사·잘라내기가 고른 텍스트. WebKit이 web content의 클립보드 명령을 사용자 제스처에 묶으므로
-          // web이 직접 쓰지 못하고, 선택 범위는 native가 모른다 — 그래서 텍스트만 되돌려 native가 쓴다.
-          clipboardWrite: function (request) { return window.maru.request("maru.menu.clipboardWrite", request); }
+          open: function (request) { return window.maru.request("maru.menu.open", request); }
         }
       };
       function flushFileRequests() {
@@ -696,10 +693,6 @@ final class MaruBridgeHandler: NSObject, WKScriptMessageHandlerWithReply {
           }
           else if (request.method === "diffOpen") {
             promise = window.maru.diff.open();
-          }
-          else if (request.method === "menuClipboardWrite" && Number.isSafeInteger(request.editor_epoch) && request.editor_epoch > 0 &&
-                   typeof request.text === "string" && request.text.length > 0 && request.text.length <= 8388608) {
-            promise = window.maru.menu.clipboardWrite({ editor_epoch: request.editor_epoch, text: request.text });
           }
           else if (request.method === "menuOpen" && Number.isSafeInteger(request.editor_epoch) && request.editor_epoch > 0 &&
                    typeof request.x === "number" && isFinite(request.x) &&
@@ -2710,33 +2703,48 @@ final class MaruWebPanelView: NSView {
         )
     }
 
-    // §2.6: 본문 우클릭 메뉴에서 고른 항목 중 **선택에 붙은 것**만 여기로 온다. 선택 범위는 문서 안에 있어
-    // native가 모르므로 web이 실행한다(줌·모드와 같은 방향·같은 방식). 동작 이름은 Zig가 고정한 닫힌 집합이라
-    // 문자열 주입 여지가 없다.
+    // §2.6: 본문 우클릭 메뉴에서 고른 항목 중 **선택에 붙은 것**만 여기로 온다.
+    //
+    // **키보드 단축키와 같은 일을 해야 한다** — 그래서 web에 흉내를 시키지 않고 표준 편집 명령을 responder
+    // chain으로 그대로 보낸다. web에서 텍스트로 주고받으면 붙여넣기가 서식(HTML)을 잃고, 잘라내기도 편집기
+    // 자신의 되돌리기 기록과 다른 경로로 들어간다(제보: 리치에서 원본이 안 붙고 ⌘Z로 안 살아났다).
     func applyFileMenuAction(_ rawAction: UInt32) {
         guard filePanelKind == 1 else { return }
-        let action: String
+        // 편집 명령은 first responder를 대상으로 한다. 메뉴 클릭은 오버레이 통과 경로라 터미널 뷰가 받았으므로
+        // 여기서 그 문서로 되돌린다(Zig도 같은 tick에 focus를 요청하지만, 이 명령은 지금 실행된다).
+        if let window = webView.window, window.firstResponder !== webView {
+            window.makeFirstResponder(webView)
+        }
+        let selector: Selector
         switch rawAction {
-        case 1: action = "copy"
-        case 2: action = "cut"
-        case 3: action = "paste"
-        case 4: action = "selectAll"
+        case 1: selector = #selector(NSText.copy(_:))
+        case 2: selector = #selector(NSText.cut(_:))
+        case 3: selector = #selector(NSText.paste(_:))
+        case 4: selector = #selector(NSText.selectAll(_:))
         default: return
         }
-        guard webView.url?.scheme == MaruAppSchemeHandler.scheme, webView.url?.host == "app" else { return }
-        // 붙여넣기만 **텍스트를 실어 보낸다** — WebKit이 web content의 `execCommand('paste')`를 막으므로 web은
-        // 클립보드를 못 읽는다. 사용자가 방금 고른 항목이라 여기서 읽는 것이 정책상 그 순간의 명시적 동작이다.
-        var detail: [String: Any] = ["action": action]
-        if rawAction == 3 {
-            detail["text"] = NSPasteboard.general.string(forType: .string) ?? ""
-        }
-        // 문자열을 직접 이어 붙이지 않는다 — 클립보드 내용이 그대로 JS 소스가 되면 따옴표 하나로 깨진다.
-        guard let json = try? JSONSerialization.data(withJSONObject: detail),
-              let literal = String(data: json, encoding: .utf8) else { return }
+        // **그 웹뷰를 직접 대상으로 보낸다.** `to: nil`은 responder chain을 타는데, 메뉴 클릭은 오버레이 통과
+        // 경로라 그 순간 first responder가 터미널 뷰다 — 명령이 웹뷰까지 안 가서 메뉴만 무반응이었다
+        // (같은 selector를 쓰는 키보드 단축키는 웹뷰가 first responder라 잘 됐다).
+        //
+        // 포커스 전이는 같은 이벤트 루프 안에서 끝나지 않을 수 있으므로 한 턴 뒤에 보낸다 — 그래야 WebKit이
+        // 명령을 받을 때 그 프레임이 이미 focus를 쥐고 있다(선택은 우클릭 때 되살려 둔 그대로다).
+        // **문서 안의 편집 포커스를 먼저 되돌린다.** 명령이 responder chain에 닿아도(로그: chain=true) 그 시점에
+        // 문서의 편집 대상이 focus를 안 쥐고 있으면 WebKit은 아무것도 하지 않는다 — 메뉴만 무반응이던 원인이다.
+        // 우클릭 때 붙잡아 둔 선택을 되살리고 그 편집기에 focus를 준 **뒤에** 명령을 보낸다(완료 콜백 순서).
+        // **명령을 보내기 직전에 문서 안의 편집 대상과 선택을 되살린다.** 문서가 그 상태가 아니면 WebKit은
+        // 명령을 받고도(responder chain은 처리했다고 답한다) 아무 일도 하지 않는다 — 메뉴만 무반응이던 원인이다.
         webView.evaluateJavaScript(
-            "window.dispatchEvent(new CustomEvent('maru:file-menu-action',{detail:\(literal)}))",
-            completionHandler: nil
-        )
+            "window.dispatchEvent(new CustomEvent('maru:file-menu-focus'))",
+            in: nil,
+            in: .page
+        ) { [weak self] _ in
+            guard let self else { return }
+            if let window = self.webView.window, window.firstResponder !== self.webView {
+                window.makeFirstResponder(self.webView)
+            }
+            _ = NSApp.sendAction(selector, to: nil, from: self)
+        }
     }
 
     static func isKnownFilePanelMode(_ rawMode: Int32) -> Bool {
@@ -7117,8 +7125,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
         var menuActionSid: UInt64 = 0
         let menuAction = maru_macos_app_session_take_file_menu_action(session, &menuActionSid)
-        if menuAction != 0, let wp = surface.webPanels[menuActionSid] {
-            wp.applyFileMenuAction(menuAction)
+        if menuAction != 0 {
+            surface.webPanels[menuActionSid]?.applyFileMenuAction(menuAction)
         }
 
         let dockFocusSid = maru_macos_app_session_take_pending_dock_focus_action(session)
@@ -7530,6 +7538,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // Clear(⌘K) — 화면+스크롤백 비우기. 카탈로그 항목이라 catalogMenuItem이 ⌘K chord를 그대로 표시·dispatch한다.
         edit.addItem(catalogMenuItem("clear_screen", catalog))
         edit.addItem(.separator())
+        // **Cut이 없으면 ⌘X가 아무 데서도 안 먹는다.** WKWebView의 편집 단축키는 앱 Edit 메뉴 항목을 거쳐 responder
+        // chain으로 오는데, 항목이 없으면 그 키는 어디에도 닿지 않는다(제보: 리치·소스 편집기에서 ⌘X 무반응).
+        edit.addItem(nativeMenuItem("Cut", #selector(menuCut(_:)), key: "x", target: self))
         edit.addItem(nativeMenuItem("Copy", #selector(menuCopy(_:)), key: "c", target: self))
         edit.addItem(nativeMenuItem("Paste", #selector(menuPaste(_:)), key: "v", target: self))
         edit.addItem(.separator())
@@ -7789,6 +7800,17 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         if result.source_window_closed != 1 {
             withSurface(src) { _ = renderTick() } // src에 워크스페이스 남음 — 사이드바·활성 재계산은 Zig가 함, src 창 repaint만.
         }
+    }
+
+    @objc private func menuCut(_ sender: Any?) {
+        _ = sender
+        // 웹 패널이 first responder면 WebKit이 자기 편집 영역에서 잘라낸다(표준 cut: — 편집기 자신의 되돌리기
+        // 기록에 남는다). 터미널에는 잘라내기가 없다(읽기 전용 화면) — 복사만 하고 지우지 않는다.
+        if firstResponderWebPanel() != nil {
+            NSApp.sendAction(#selector(NSText.cut(_:)), to: nil, from: self)
+            return
+        }
+        copySelectionToPasteboard()
     }
 
     @objc private func menuCopy(_ sender: Any?) {

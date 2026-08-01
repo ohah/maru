@@ -9384,7 +9384,21 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           authority/semantic/correlation SSOT에서 input/control/TX eligibility와 `TurnResult`를 derive한다. f3c2는 private
           prepare/consume과 component gate만 소유하고 `pumpRxTurn` product callsite는 0이다. post-response
           side-intent 배열의 제품 생산, multi-turn `DrainEpisodeOwner` advance, success/terminal branch 선택과 actual same-clock
-          invocation은 f3d가 소유한다. **f3d whole-turn orchestration**은 기존 `pumpRxTurn`의 단일 clock,
+          invocation은 f3d가 소유한다.
+
+          **구현 완료(f3c2):** `PreparedControlSemanticTake`의 resize/resync exact branch, projected post-ACK
+          recovery transaction과 actual-token binding, completed response aggregate+intent+payload의 callback 전
+          freeze/tombstone, duplicate protocol-terminal, max request-ID와 bounded quarantine을 구현했다. ordinary finalized
+          aggregate를 projected source로 바꾸는 private producer는 live permit을 ledger `abort → reset → reprepare`로만
+          전환하며 fixture가 live receipt를 직접 지우지 않는다. typed execution DTO와
+          `commitPreparedDestroyUnchecked`는 첫 semantic write 뒤 raw pointer lookup·validator·assert를 제거한다. executable
+          sentinel은 exact test 이름, resize/resync 네 entrypoint의 제품 callsite 0과 projected/retained/combined/intent unchecked
+          영역을 검사하고 global boundary inventory가 새 unchecked authority의 탈출을 막는다. Debug/ReleaseFast
+          `test-session-host-f3c2`, 전체 `test-session-host`, `check-boundaries`, `mise run check`가 green이어야 이 완료 표식을
+          유지한다. private projected-source producer의 실제 same-clock 선택과 post-abort no-fail orchestration은 f3d가
+          소유하므로 f3c2 완료만으로 제품 pump success 경로 또는 f3 전체 완료를 주장하지 않는다.
+
+          **f3d whole-turn orchestration**은 기존 `pumpRxTurn`의 단일 clock,
           RX→authority→f1 TX suffix와 cleanup leaf만 재사용하고 새 pump/write adapter/lease를 만들지 않는다.
           **f3e hostile evidence**는 pure 전수표→injected turn→실제 Darwin socketpair→fail-index/stress 순으로
           response↔revoke, response+FIN/HUP, readable+writable write 0, revoke 위치 1/64/65, parser resident 65,

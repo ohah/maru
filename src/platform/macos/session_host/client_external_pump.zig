@@ -530,6 +530,7 @@ fn metadataTagMatches(
 pub const AuthorityGeneration = client_external_turn_authority.AuthorityGeneration;
 pub const f3c1_contract_version: u16 = 2;
 pub const integration_2b2e_contract_version: u16 = 2;
+pub const f3c2_contract_version: u16 = 1;
 
 pub const PreparedAttachmentAuthority = struct {
     role: AttachmentRole,
@@ -2076,6 +2077,171 @@ comptime {
     _ = ConsumeResyncAckUnderHeldLeaseFn;
 }
 
+const ControlSemanticTakeLifecycle = enum {
+    empty,
+    prepared,
+    consumed_tombstone,
+};
+
+const ResizeSemanticCommitLifecycle = enum {
+    empty,
+    prepared,
+    consumed_tombstone,
+};
+
+const ResizeSemanticDisposition = enum {
+    publish_new,
+    preserve_current,
+    protocol_terminal,
+    invariant_terminal,
+};
+
+const ResizeSemanticPlan = struct {
+    disposition: ResizeSemanticDisposition,
+};
+
+fn planResizeSemanticCommit(
+    current: OwnerResizeState,
+    runtime_id: u128,
+    stream_id: u64,
+    expected_stream_id: u64,
+    applied: @FieldType(control_response_wire.ResizeReply, "applied"),
+) ResizeSemanticPlan {
+    if (runtime_id == 0)
+        return .{ .disposition = .invariant_terminal };
+    if (stream_id == 0 or stream_id != expected_stream_id)
+        return .{ .disposition = .protocol_terminal };
+    return switch (current) {
+        .none => .{ .disposition = .publish_new },
+        .current => |value| if (value.event.runtime_id != runtime_id)
+            .{ .disposition = .invariant_terminal }
+        else if (applied.resize_generation > value.event.resize_generation)
+            .{ .disposition = .publish_new }
+        else if (applied.resize_generation < value.event.resize_generation or
+            (applied.cols == value.event.cols and applied.rows == value.event.rows))
+            .{ .disposition = .preserve_current }
+        else
+            .{ .disposition = .protocol_terminal },
+    };
+}
+
+const PreparedResizeSemanticCommit = struct {
+    saved_self_addr: usize = 0,
+    storage_addr: usize = 0,
+    scratch_addr: usize = 0,
+    lease_addr: usize = 0,
+    owner_incarnation: u64 = 0,
+    operation_generation: u64 = 0,
+    turn_generation: u64 = 0,
+    permit_addr: usize = 0,
+    permit_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    verdict_addr: usize = 0,
+    verdict_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    completed_owner_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    correlation_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    authority_seal_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    tx_queue_generation: u64 = 0,
+    evidence_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    runtime_id: u128 = 0,
+    stream_id: u64 = 0,
+    expected_owner_resize_present: bool = false,
+    expected_owner_resize_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    applied_cols: u16 = 0,
+    applied_rows: u16 = 0,
+    applied_generation: u64 = 0,
+    applied_changed: bool = false,
+    disposition: ResizeSemanticDisposition = .protocol_terminal,
+    response_take_addr: usize = 0,
+    response_take_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    frozen_response_addr: usize = 0,
+    frozen_response_pristine_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    lifecycle: ResizeSemanticCommitLifecycle = .empty,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+const ProjectedRecoverySnapshotCommitLifecycle = enum {
+    empty,
+    prepared,
+    consumed_tombstone,
+};
+
+const ProjectedRecoverySnapshotCommit = struct {
+    saved_self_addr: usize = 0,
+    storage_addr: usize = 0,
+    scratch_addr: usize = 0,
+    lease_addr: usize = 0,
+    aggregate_addr: usize = 0,
+    projected_state_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    dispositions_count: u8 = 0,
+    dispositions_root_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    output_addr: usize = 0,
+    output_pristine_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    binding_addr: usize = 0,
+    binding_pristine_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    ledger_candidate: external_inbox_ledger.ProjectedLiveCommitCandidate = .{
+        .dispositions = [_]external_inbox_ledger.LiveCommitDisposition{.unused} **
+            external_inbox_ledger.max_live_mutations,
+        .permit = .{},
+    },
+    recovery_dispositions: RecoverySnapshotDispositionAggregate = .{},
+    recovery_commit: PreparedRecoverySnapshotCommit = .{},
+    lifecycle: ProjectedRecoverySnapshotCommitLifecycle = .empty,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+const ResyncSemanticCommitLifecycle = enum {
+    empty,
+    prepared,
+    consumed_tombstone,
+};
+
+const PreparedResyncSemanticCommit = struct {
+    saved_self_addr: usize = 0,
+    storage_addr: usize = 0,
+    scratch_addr: usize = 0,
+    lease_addr: usize = 0,
+    ack_transition_addr: usize = 0,
+    ack_transition_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    projected_state_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    projected_commit_addr: usize = 0,
+    projected_commit_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    aggregate_present: bool = false,
+    aggregate_addr: usize = 0,
+    aggregate_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    lifecycle: ResyncSemanticCommitLifecycle = .empty,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+const ControlSemanticTakeBranch = union(enum) {
+    resize: struct {
+        receipt_addr: usize = 0,
+        receipt_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    },
+    resync: struct {
+        receipt_addr: usize = 0,
+        receipt_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    },
+};
+
+const PreparedControlSemanticTake = struct {
+    saved_self_addr: usize = 0,
+    branch: ControlSemanticTakeBranch = .{ .resize = .{} },
+    lifecycle: ControlSemanticTakeLifecycle = .empty,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+const ConsumeResizeSemanticResult = enum {
+    consumed_resize_cleaned,
+    cleaned_with_invariant,
+    invalid_precommit,
+};
+
+const ConsumeResyncSemanticResult = enum {
+    consumed_resync_cleaned,
+    cleaned_with_invariant,
+    invalid_precommit,
+};
+
 const PreparedControlResponseTake = struct {
     saved_self_addr: usize = 0,
     storage_addr: usize = 0,
@@ -2181,6 +2347,10 @@ const RxAggregateLifecycle = enum {
     finalized,
     committing,
     committed,
+    /// The aggregate supplied only same-drain recovery transport ownership. Its ledger and
+    /// intent commits were consumed by the projected ACK transaction, so it must never re-enter
+    /// the ordinary aggregate commit/abort paths.
+    side_intent_consumed,
     aborting,
     aborted,
     destroying,
@@ -3310,6 +3480,12 @@ pub const ExternalRxTurnScratch = struct {
     drain_evidence: RxDrainEvidence = .{},
     whole_drain_permit: PreparedWholeDrainPermit = .{},
     control_semantic_verdict: PreparedControlSemanticVerdict = .{},
+    control_semantic_take: PreparedControlSemanticTake = .{},
+    resize_semantic_commit: PreparedResizeSemanticCommit = .{},
+    resize_semantic_response_take: PreparedControlResponseTake = .{},
+    resize_semantic_frozen_response: FrozenControlResponse = .{},
+    resync_semantic_commit: PreparedResyncSemanticCommit = .{},
+    projected_recovery_snapshot_commit: ProjectedRecoverySnapshotCommit = .{},
     resync_ack_transition: PreparedResyncAckTransition = .{},
     resync_ack_response_take: PreparedControlResponseTake = .{},
     resync_ack_frozen_response: FrozenControlResponse = .{},
@@ -3336,6 +3512,23 @@ pub const ExternalRxTurnScratch = struct {
                 out.control_semantic_verdict,
                 PreparedControlSemanticVerdict{},
             ) or !std.meta.eql(
+            out.control_semantic_take,
+            PreparedControlSemanticTake{},
+        ) or !std.meta.eql(
+            out.resize_semantic_commit,
+            PreparedResizeSemanticCommit{},
+        ) or !std.meta.eql(
+            out.resize_semantic_response_take,
+            PreparedControlResponseTake{},
+        ) or !frozenControlResponsePristine(
+            &out.resize_semantic_frozen_response,
+        ) or !std.meta.eql(
+            out.resync_semantic_commit,
+            PreparedResyncSemanticCommit{},
+        ) or !std.meta.eql(
+            out.projected_recovery_snapshot_commit,
+            ProjectedRecoverySnapshotCommit{},
+        ) or !std.meta.eql(
             out.resync_ack_transition,
             PreparedResyncAckTransition{},
         ) or !std.meta.eql(
@@ -3392,6 +3585,12 @@ pub const ExternalRxTurnScratch = struct {
         out.prepared_admit_use_permit = .{};
         out.whole_drain_permit = .{};
         out.control_semantic_verdict = .{};
+        out.control_semantic_take = .{};
+        out.resize_semantic_commit = .{};
+        out.resize_semantic_response_take = .{};
+        out.resize_semantic_frozen_response = .{};
+        out.resync_semantic_commit = .{};
+        out.projected_recovery_snapshot_commit = .{};
         out.resync_ack_transition = .{};
         out.resync_ack_response_take = .{};
         out.resync_ack_frozen_response = .{};
@@ -4970,6 +5169,115 @@ fn preparedControlSemanticVerdictDigest(
     return writer.finish();
 }
 
+fn attachmentEvidenceDigest(evidence: AttachmentEvidence) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARUAEV1");
+    writer.writeU128(evidence.runtime_id);
+    writer.writeU64(evidence.stream_id);
+    writer.writeU8(@intFromEnum(evidence.initial_role));
+    writer.writeU64(evidence.initial_controller_generation);
+    return writer.finish();
+}
+
+fn preparedResizeSemanticCommitDigest(
+    receipt: *const PreparedResizeSemanticCommit,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARURSC1");
+    writer.writeUsize(receipt.saved_self_addr);
+    writer.writeUsize(receipt.storage_addr);
+    writer.writeUsize(receipt.scratch_addr);
+    writer.writeUsize(receipt.lease_addr);
+    writer.writeU64(receipt.owner_incarnation);
+    writer.writeU64(receipt.operation_generation);
+    writer.writeU64(receipt.turn_generation);
+    writer.writeUsize(receipt.permit_addr);
+    writer.writeBytes(&receipt.permit_digest);
+    writer.writeUsize(receipt.verdict_addr);
+    writer.writeBytes(&receipt.verdict_digest);
+    writer.writeBytes(&receipt.completed_owner_digest);
+    writer.writeBytes(&receipt.correlation_digest);
+    writer.writeBytes(&receipt.authority_seal_digest);
+    writer.writeU64(receipt.tx_queue_generation);
+    writer.writeBytes(&receipt.evidence_digest);
+    writer.writeU128(receipt.runtime_id);
+    writer.writeU64(receipt.stream_id);
+    writer.writeBool(receipt.expected_owner_resize_present);
+    writer.writeBytes(&receipt.expected_owner_resize_digest);
+    writer.writeU16(receipt.applied_cols);
+    writer.writeU16(receipt.applied_rows);
+    writer.writeU64(receipt.applied_generation);
+    writer.writeBool(receipt.applied_changed);
+    writer.writeU8(@intFromEnum(receipt.disposition));
+    writer.writeUsize(receipt.response_take_addr);
+    writer.writeBytes(&receipt.response_take_digest);
+    writer.writeUsize(receipt.frozen_response_addr);
+    writer.writeBytes(&receipt.frozen_response_pristine_digest);
+    writer.writeU8(@intFromEnum(receipt.lifecycle));
+    return writer.finish();
+}
+
+fn projectedRecoverySnapshotCommitDigest(
+    projected: *const ProjectedRecoverySnapshotCommit,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARUPRC1");
+    writer.writeUsize(projected.saved_self_addr);
+    writer.writeUsize(projected.storage_addr);
+    writer.writeUsize(projected.scratch_addr);
+    writer.writeUsize(projected.lease_addr);
+    writer.writeUsize(projected.aggregate_addr);
+    writer.writeBytes(&projected.projected_state_digest);
+    writer.writeU8(projected.dispositions_count);
+    writer.writeBytes(&projected.dispositions_root_digest);
+    writer.writeUsize(projected.output_addr);
+    writer.writeBytes(&projected.output_pristine_digest);
+    writer.writeUsize(projected.binding_addr);
+    writer.writeBytes(&projected.binding_pristine_digest);
+    writer.writeBytes(&projected.ledger_candidate.permit.digest);
+    writer.writeBytes(&projected.recovery_dispositions.root_digest);
+    writer.writeBytes(&projected.recovery_commit.digest);
+    writer.writeU8(@intFromEnum(projected.lifecycle));
+    return writer.finish();
+}
+
+fn preparedResyncSemanticCommitDigest(
+    receipt: *const PreparedResyncSemanticCommit,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARURYC1");
+    writer.writeUsize(receipt.saved_self_addr);
+    writer.writeUsize(receipt.storage_addr);
+    writer.writeUsize(receipt.scratch_addr);
+    writer.writeUsize(receipt.lease_addr);
+    writer.writeUsize(receipt.ack_transition_addr);
+    writer.writeBytes(&receipt.ack_transition_digest);
+    writer.writeBytes(&receipt.projected_state_digest);
+    writer.writeUsize(receipt.projected_commit_addr);
+    writer.writeBytes(&receipt.projected_commit_digest);
+    writer.writeBool(receipt.aggregate_present);
+    writer.writeUsize(receipt.aggregate_addr);
+    writer.writeBytes(&receipt.aggregate_digest);
+    writer.writeU8(@intFromEnum(receipt.lifecycle));
+    return writer.finish();
+}
+
+fn preparedControlSemanticTakeDigest(
+    take: *const PreparedControlSemanticTake,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARUCST1");
+    writer.writeUsize(take.saved_self_addr);
+    writer.writeU8(@intFromEnum(std.meta.activeTag(take.branch)));
+    switch (take.branch) {
+        .resize => |branch| {
+            writer.writeUsize(branch.receipt_addr);
+            writer.writeBytes(&branch.receipt_digest);
+        },
+        .resync => |branch| {
+            writer.writeUsize(branch.receipt_addr);
+            writer.writeBytes(&branch.receipt_digest);
+        },
+    }
+    writer.writeU8(@intFromEnum(take.lifecycle));
+    return writer.finish();
+}
+
 fn writeRecoveryContext(
     writer: *external_owner_seal.Writer,
     context: client_pump.RecoveryContext,
@@ -5244,6 +5552,219 @@ fn terminalBindingDestinationRangesCurrent(scratch: *const ExternalRxTurnScratch
     return true;
 }
 
+fn declaredInlineChildRangeCurrent(
+    parent_addr: usize,
+    parent_len: usize,
+    child_addr: usize,
+    child_len: usize,
+    declared_offset: usize,
+) bool {
+    const expected = std.math.add(usize, parent_addr, declared_offset) catch return false;
+    return child_addr == expected and
+        rangeContains(parent_addr, parent_len, child_addr, child_len);
+}
+
+fn resizeSemanticDestinationRangesCurrent(
+    storage: *const ExternalPumpStorage,
+    lease: *const ExternalWholeTurnLease,
+    scratch: *const ExternalRxTurnScratch,
+) bool {
+    const scratch_addr = @intFromPtr(scratch);
+    const snapshot = &scratch.authority_snapshot;
+    if (snapshot.saved_self_addr != @intFromPtr(snapshot) or
+        snapshot.storage_addr != @intFromPtr(storage) or
+        snapshot.storage_len != @sizeOf(ExternalPumpStorage) or
+        snapshot.lease_addr != @intFromPtr(lease) or
+        snapshot.lease_len != @sizeOf(ExternalWholeTurnLease) or
+        snapshot.scratch_addr != scratch_addr or
+        snapshot.scratch_len != @sizeOf(ExternalRxTurnScratch) or
+        snapshot.operation_generation != storage.operation_generation or
+        snapshot.inventory_count > scratch.authority_ranges.ranges.len or
+        !std.mem.eql(
+            u8,
+            &snapshot.digest,
+            &rxOwnerAuthoritySnapshotDigest(snapshot),
+        )) return false;
+    const inventory_digest = external_rx_intent.sealAuthorityRanges(
+        scratch.authority_ranges.ranges[0..snapshot.inventory_count],
+        snapshot.inventory_generation,
+    ) orelse return false;
+    if (!std.mem.eql(u8, &inventory_digest, &snapshot.inventory_digest))
+        return false;
+    if (rangesOverlap(
+        scratch_addr,
+        @sizeOf(ExternalRxTurnScratch),
+        @intFromPtr(storage),
+        @sizeOf(ExternalPumpStorage),
+    ) or rangesOverlap(
+        scratch_addr,
+        @sizeOf(ExternalRxTurnScratch),
+        @intFromPtr(lease),
+        @sizeOf(ExternalWholeTurnLease),
+    )) return false;
+    const objects = [_]struct { addr: usize, len: usize }{
+        .{ .addr = @intFromPtr(&scratch.whole_drain_permit), .len = @sizeOf(PreparedWholeDrainPermit) },
+        .{ .addr = @intFromPtr(&scratch.control_semantic_verdict), .len = @sizeOf(PreparedControlSemanticVerdict) },
+        .{ .addr = @intFromPtr(&scratch.control_semantic_take), .len = @sizeOf(PreparedControlSemanticTake) },
+        .{ .addr = @intFromPtr(&scratch.resize_semantic_commit), .len = @sizeOf(PreparedResizeSemanticCommit) },
+        .{ .addr = @intFromPtr(&scratch.resize_semantic_response_take), .len = @sizeOf(PreparedControlResponseTake) },
+        .{ .addr = @intFromPtr(&scratch.resize_semantic_frozen_response), .len = @sizeOf(FrozenControlResponse) },
+    };
+    for (objects, 0..) |object, index| {
+        if (!rangeContains(
+            scratch_addr,
+            @sizeOf(ExternalRxTurnScratch),
+            object.addr,
+            object.len,
+        )) return false;
+        for (objects[index + 1 ..]) |other|
+            if (rangesOverlap(object.addr, object.len, other.addr, other.len))
+                return false;
+        for (scratch.authority_ranges.ranges[0..snapshot.inventory_count]) |source|
+            if (rangesOverlap(object.addr, object.len, source.start, source.len))
+                return false;
+    }
+    return true;
+}
+
+fn resyncSemanticDestinationRangesCurrent(
+    storage: *const ExternalPumpStorage,
+    lease: *const ExternalWholeTurnLease,
+    scratch: *const ExternalRxTurnScratch,
+    aggregate: ?*const PreparedRxAggregate,
+) bool {
+    const scratch_addr = @intFromPtr(scratch);
+    const storage_addr = @intFromPtr(storage);
+    const lease_addr = @intFromPtr(lease);
+    const snapshot = &scratch.authority_snapshot;
+    if (snapshot.saved_self_addr != @intFromPtr(snapshot) or
+        snapshot.storage_addr != storage_addr or
+        snapshot.storage_len != @sizeOf(ExternalPumpStorage) or
+        snapshot.lease_addr != lease_addr or
+        snapshot.lease_len != @sizeOf(ExternalWholeTurnLease) or
+        snapshot.scratch_addr != scratch_addr or
+        snapshot.scratch_len != @sizeOf(ExternalRxTurnScratch) or
+        snapshot.operation_generation != storage.operation_generation or
+        snapshot.inventory_count > scratch.authority_ranges.ranges.len or
+        !std.mem.eql(
+            u8,
+            &snapshot.digest,
+            &rxOwnerAuthoritySnapshotDigest(snapshot),
+        )) return false;
+    const inventory_digest = external_rx_intent.sealAuthorityRanges(
+        scratch.authority_ranges.ranges[0..snapshot.inventory_count],
+        snapshot.inventory_generation,
+    ) orelse return false;
+    if (!std.mem.eql(u8, &inventory_digest, &snapshot.inventory_digest))
+        return false;
+    if (rangesOverlap(
+        scratch_addr,
+        @sizeOf(ExternalRxTurnScratch),
+        storage_addr,
+        @sizeOf(ExternalPumpStorage),
+    ) or rangesOverlap(
+        scratch_addr,
+        @sizeOf(ExternalRxTurnScratch),
+        lease_addr,
+        @sizeOf(ExternalWholeTurnLease),
+    ) or rangesOverlap(
+        storage_addr,
+        @sizeOf(ExternalPumpStorage),
+        lease_addr,
+        @sizeOf(ExternalWholeTurnLease),
+    )) return false;
+    const objects = [_]struct { addr: usize, len: usize }{
+        .{ .addr = @intFromPtr(&scratch.whole_drain_permit), .len = @sizeOf(PreparedWholeDrainPermit) },
+        .{ .addr = @intFromPtr(&scratch.control_semantic_verdict), .len = @sizeOf(PreparedControlSemanticVerdict) },
+        .{ .addr = @intFromPtr(&scratch.control_semantic_take), .len = @sizeOf(PreparedControlSemanticTake) },
+        .{ .addr = @intFromPtr(&scratch.resync_ack_transition), .len = @sizeOf(PreparedResyncAckTransition) },
+        .{ .addr = @intFromPtr(&scratch.resync_ack_response_take), .len = @sizeOf(PreparedControlResponseTake) },
+        .{ .addr = @intFromPtr(&scratch.resync_ack_frozen_response), .len = @sizeOf(FrozenControlResponse) },
+        .{ .addr = @intFromPtr(&scratch.resync_semantic_commit), .len = @sizeOf(PreparedResyncSemanticCommit) },
+        .{ .addr = @intFromPtr(&scratch.projected_recovery_snapshot_commit), .len = @sizeOf(ProjectedRecoverySnapshotCommit) },
+    };
+    for (objects, 0..) |object, index| {
+        if (!rangeContains(
+            scratch_addr,
+            @sizeOf(ExternalRxTurnScratch),
+            object.addr,
+            object.len,
+        )) return false;
+        for (objects[index + 1 ..]) |other|
+            if (rangesOverlap(object.addr, object.len, other.addr, other.len))
+                return false;
+        for (scratch.authority_ranges.ranges[0..snapshot.inventory_count]) |source|
+            if (rangesOverlap(object.addr, object.len, source.start, source.len))
+                return false;
+    }
+    const projected = &scratch.projected_recovery_snapshot_commit;
+    const projected_addr = @intFromPtr(projected);
+    if (!declaredInlineChildRangeCurrent(
+        projected_addr,
+        @sizeOf(ProjectedRecoverySnapshotCommit),
+        @intFromPtr(&projected.ledger_candidate),
+        @sizeOf(external_inbox_ledger.ProjectedLiveCommitCandidate),
+        @offsetOf(ProjectedRecoverySnapshotCommit, "ledger_candidate"),
+    ) or !declaredInlineChildRangeCurrent(
+        @intFromPtr(&projected.ledger_candidate),
+        @sizeOf(external_inbox_ledger.ProjectedLiveCommitCandidate),
+        @intFromPtr(&projected.ledger_candidate.dispositions),
+        @sizeOf([external_inbox_ledger.max_live_mutations]external_inbox_ledger.LiveCommitDisposition),
+        @offsetOf(external_inbox_ledger.ProjectedLiveCommitCandidate, "dispositions"),
+    ) or !declaredInlineChildRangeCurrent(
+        @intFromPtr(&projected.ledger_candidate),
+        @sizeOf(external_inbox_ledger.ProjectedLiveCommitCandidate),
+        @intFromPtr(&projected.ledger_candidate.permit),
+        @sizeOf(external_inbox_ledger.PreparedLiveCommit),
+        @offsetOf(external_inbox_ledger.ProjectedLiveCommitCandidate, "permit"),
+    ) or !declaredInlineChildRangeCurrent(
+        projected_addr,
+        @sizeOf(ProjectedRecoverySnapshotCommit),
+        @intFromPtr(&projected.recovery_dispositions),
+        @sizeOf(RecoverySnapshotDispositionAggregate),
+        @offsetOf(ProjectedRecoverySnapshotCommit, "recovery_dispositions"),
+    ) or !declaredInlineChildRangeCurrent(
+        projected_addr,
+        @sizeOf(ProjectedRecoverySnapshotCommit),
+        @intFromPtr(&projected.recovery_commit),
+        @sizeOf(PreparedRecoverySnapshotCommit),
+        @offsetOf(ProjectedRecoverySnapshotCommit, "recovery_commit"),
+    )) return false;
+    if (aggregate) |source| {
+        const aggregate_addr = @intFromPtr(source);
+        if (rangesOverlap(
+            aggregate_addr,
+            @sizeOf(PreparedRxAggregate),
+            scratch_addr,
+            @sizeOf(ExternalRxTurnScratch),
+        ) or rangesOverlap(
+            aggregate_addr,
+            @sizeOf(PreparedRxAggregate),
+            storage_addr,
+            @sizeOf(ExternalPumpStorage),
+        ) or rangesOverlap(
+            aggregate_addr,
+            @sizeOf(PreparedRxAggregate),
+            lease_addr,
+            @sizeOf(ExternalWholeTurnLease),
+        )) return false;
+        if (!declaredInlineChildRangeCurrent(
+            aggregate_addr,
+            @sizeOf(PreparedRxAggregate),
+            @intFromPtr(&source.recovery_commit_output),
+            @sizeOf(ImmutableRecoveryCommitOutput),
+            @offsetOf(PreparedRxAggregate, "recovery_commit_output"),
+        ) or !declaredInlineChildRangeCurrent(
+            aggregate_addr,
+            @sizeOf(PreparedRxAggregate),
+            @intFromPtr(&source.recovery_snapshot_binding),
+            @sizeOf(CommittedRecoverySnapshotBinding),
+            @offsetOf(PreparedRxAggregate, "recovery_snapshot_binding"),
+        )) return false;
+    }
+    return true;
+}
+
 fn controlRequestFrameMissing(
     external: *const client_external_mode.State,
     request_id: u64,
@@ -5310,10 +5831,44 @@ fn retainedRxAggregateValid(
         return false;
     const aggregate: *const PreparedRxAggregate =
         @ptrFromInt(handle.aggregate_addr);
+    const side_intent_terminal = blk: {
+        if (aggregate.lifecycle != .side_intent_consumed) break :blk true;
+        const binding_consumed =
+            aggregate.recovery_commit_output.lifecycle == .consumed_tombstone and
+            aggregate.recovery_snapshot_binding.lifecycle == .consumed_tombstone and
+            std.mem.eql(
+                u8,
+                &aggregate.recovery_commit_output.digest,
+                &immutableRecoveryCommitOutputDigest(&aggregate.recovery_commit_output),
+            ) and std.mem.eql(
+                u8,
+                &aggregate.recovery_snapshot_binding.digest,
+                &committedRecoverySnapshotBindingDigest(&aggregate.recovery_snapshot_binding),
+            );
+        const no_binding_pristine = std.meta.eql(
+            aggregate.recovery_commit_output,
+            ImmutableRecoveryCommitOutput{},
+        ) and std.meta.eql(
+            aggregate.recovery_snapshot_binding,
+            CommittedRecoverySnapshotBinding{},
+        );
+        break :blk aggregate.retirement.lifecycle == .retired and
+            (binding_consumed or no_binding_pristine) and
+            std.meta.eql(
+                aggregate.recovery_snapshot_commit,
+                PreparedRecoverySnapshotCommit{},
+            ) and std.meta.eql(
+            aggregate.recovery_dispositions,
+            RecoverySnapshotDispositionAggregate{},
+        );
+    };
     return aggregate.saved_self_addr == @intFromPtr(aggregate) and
         aggregate.handle_addr == @intFromPtr(handle) and
         aggregate.storage_addr == @intFromPtr(storage) and
-        (aggregate.lifecycle == .committed or aggregate.lifecycle == .aborted) and
+        (aggregate.lifecycle == .committed or
+            aggregate.lifecycle == .aborted or
+            aggregate.lifecycle == .side_intent_consumed) and
+        side_intent_terminal and
         std.mem.eql(
             u8,
             &aggregate.digest,
@@ -7347,8 +7902,7 @@ fn prepareResponseDestinationPlan(
             0,
         ))
         return .rejected;
-    if (!controlCorrelationValid(storage) or
-        storage.control_correlation.generation == std.math.maxInt(u64))
+    if (!controlCorrelationValid(storage))
         return .rejected;
     const in_flight = switch (storage.control_correlation.state) {
         .in_flight => |value| value,
@@ -8443,6 +8997,11 @@ fn appendPreparedLiveOwnerRanges(
     );
 }
 
+const RetainedRxAggregateDestroyExecution = struct {
+    aggregate: *PreparedRxAggregate,
+    allocator: std.mem.Allocator,
+};
+
 /// Persistent caller-owned cleanup authority shared by prepare and its immediate suffix.
 ///
 /// The aggregate is initialized only at its final address. A successful recovery or terminal
@@ -8472,6 +9031,7 @@ pub const ExternalPumpCleanupScratch = struct {
     live_frozen: FrozenLiveOwnerCleanup = .{},
     intent_destroy_prepared: external_rx_intent.PreparedDestroy = .{},
     aggregate_cleanup: external_owner_cleanup.FrozenOwnerCleanupDescriptor = .{},
+    aggregate_execution: ?RetainedRxAggregateDestroyExecution = null,
     moved_client: ?client_mod.Client = null,
     moved_evidence: ?PreparedAdoptionEvidence = null,
 
@@ -8496,6 +9056,7 @@ pub const ExternalPumpCleanupScratch = struct {
         out.live_frozen = .{};
         out.intent_destroy_prepared = .{};
         out.aggregate_cleanup = .{};
+        out.aggregate_execution = null;
         out.moved_client = null;
         out.moved_evidence = null;
         return true;
@@ -8519,6 +9080,7 @@ pub const ExternalPumpCleanupScratch = struct {
             self.live_prepared.saved_self_addr == 0 and
             self.live_frozen.saved_self_addr == 0 and
             self.aggregate_cleanup.saved_self_addr == 0 and
+            self.aggregate_execution == null and
             self.moved_client == null and self.moved_evidence == null;
     }
 
@@ -8541,6 +9103,7 @@ pub const ExternalPumpCleanupScratch = struct {
         self.live_frozen = .{};
         self.intent_destroy_prepared = .{};
         self.aggregate_cleanup = .{};
+        self.aggregate_execution = null;
         self.moved_client = null;
         self.moved_evidence = null;
         self.lifecycle = .ready;
@@ -8692,6 +9255,7 @@ pub const ExternalPumpStorage = struct {
     operation_generation: u64 = 0,
     operation_reentry_latched: bool = false,
     callback_quarantine_pending: bool = false,
+    callback_quarantine_accounted: bool = false,
     owner_teardown_generation: u64 = 0,
     intent_scratch_generation: u64 = 0,
     intent_scratch_reservation: IntentScratchReservation = .{},
@@ -9130,6 +9694,32 @@ pub const ExternalPumpStorage = struct {
             parser_seal,
             tx_generation,
         )) return .not_ready;
+        if (decoded == .resize) {
+            const applied = switch (decoded.resize) {
+                .applied => |value| value,
+                .stale => unreachable,
+            };
+            const resize_plan = planResizeSemanticCommit(
+                self.owner_resize,
+                self.evidence_snapshot.runtime_id,
+                completed_before.target_stream_id,
+                self.evidence_snapshot.stream_id,
+                applied,
+            );
+            switch (resize_plan.disposition) {
+                .protocol_terminal => return self.publishControlSemanticTerminalPreparation(
+                    lease,
+                    scratch,
+                    .protocol_error,
+                ),
+                .invariant_terminal => return self.publishControlSemanticTerminalPreparation(
+                    lease,
+                    scratch,
+                    .invariant_failure,
+                ),
+                .publish_new, .preserve_current => {},
+            }
+        }
         const completed = switch (self.completed_control) {
             .completed => |*value| value,
             .none, .terminal => return .not_ready,
@@ -9305,6 +9895,244 @@ pub const ExternalPumpStorage = struct {
             ) == .missing and self.semanticAuthorityMatchesCompleted(completed);
     }
 
+    fn prepareResizeSemanticCommitUnderHeldLease(
+        self: *ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        scratch: *ExternalRxTurnScratch,
+    ) bool {
+        const permit = &scratch.whole_drain_permit;
+        const verdict = &scratch.control_semantic_verdict;
+        const receipt = &scratch.resize_semantic_commit;
+        const take = &scratch.resize_semantic_response_take;
+        const frozen = &scratch.resize_semantic_frozen_response;
+        const wrapper = &scratch.control_semantic_take;
+        if (!self.preparedControlSemanticPairCurrent(lease, scratch) or
+            !resizeSemanticDestinationRangesCurrent(self, lease, scratch) or
+            !ownerResizeValid(self) or
+            verdict.control_kind != .resize or verdict.value != .resize or
+            !std.meta.eql(receipt.*, PreparedResizeSemanticCommit{}) or
+            !std.meta.eql(wrapper.*, PreparedControlSemanticTake{}) or
+            !std.meta.eql(take.*, PreparedControlResponseTake{}) or
+            !frozenControlResponsePristine(frozen))
+            return false;
+        const applied = switch (verdict.value.resize) {
+            .applied => |value| value,
+            .stale => return false,
+        };
+        const plan = planResizeSemanticCommit(
+            self.owner_resize,
+            self.evidence_snapshot.runtime_id,
+            verdict.target.stream_id,
+            self.evidence_snapshot.stream_id,
+            applied,
+        );
+        if (plan.disposition == .protocol_terminal or
+            plan.disposition == .invariant_terminal) return false;
+        const completed = switch (self.completed_control) {
+            .completed => |*value| value,
+            .none, .terminal => return false,
+        };
+        const client = if (self.owned_client) |*owned| owned else return false;
+        const external = switch (client.io_mode) {
+            .external => |*state| state,
+            .blocking => return false,
+        };
+        if (!self.prepareControlResponseTakeUnderHeldLease(lease, take))
+            return false;
+        receipt.* = .{
+            .saved_self_addr = @intFromPtr(receipt),
+            .storage_addr = @intFromPtr(self),
+            .scratch_addr = @intFromPtr(scratch),
+            .lease_addr = @intFromPtr(lease),
+            .owner_incarnation = self.owner_incarnation,
+            .operation_generation = self.operation_generation,
+            .turn_generation = scratch.turn_generation,
+            .permit_addr = @intFromPtr(permit),
+            .permit_digest = permit.digest,
+            .verdict_addr = @intFromPtr(verdict),
+            .verdict_digest = verdict.digest,
+            .completed_owner_digest = completed.owner_digest,
+            .correlation_digest = self.control_correlation.digest,
+            .authority_seal_digest = self.owner_authority_seal.digest,
+            .tx_queue_generation = external.tx_queue_generation,
+            .evidence_digest = attachmentEvidenceDigest(self.evidence_snapshot),
+            .runtime_id = self.evidence_snapshot.runtime_id,
+            .stream_id = self.evidence_snapshot.stream_id,
+            .expected_owner_resize_present = self.owner_resize == .current,
+            .expected_owner_resize_digest = switch (self.owner_resize) {
+                .none => [_]u8{0} ** 32,
+                .current => |value| value.seal.digest,
+            },
+            .applied_cols = applied.cols,
+            .applied_rows = applied.rows,
+            .applied_generation = applied.resize_generation,
+            .applied_changed = applied.changed,
+            .disposition = plan.disposition,
+            .response_take_addr = @intFromPtr(take),
+            .response_take_digest = take.digest,
+            .frozen_response_addr = @intFromPtr(frozen),
+            .frozen_response_pristine_digest = frozenControlResponsePristineProjectionDigest(frozen),
+            .lifecycle = .prepared,
+        };
+        receipt.digest = preparedResizeSemanticCommitDigest(receipt);
+        wrapper.* = .{
+            .saved_self_addr = @intFromPtr(wrapper),
+            .branch = .{ .resize = .{
+                .receipt_addr = @intFromPtr(receipt),
+                .receipt_digest = receipt.digest,
+            } },
+            .lifecycle = .prepared,
+        };
+        wrapper.digest = preparedControlSemanticTakeDigest(wrapper);
+        return true;
+    }
+
+    fn preparedResizeSemanticCommitCurrent(
+        self: *ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        scratch: *ExternalRxTurnScratch,
+    ) bool {
+        const receipt = &scratch.resize_semantic_commit;
+        const wrapper = &scratch.control_semantic_take;
+        const verdict = &scratch.control_semantic_verdict;
+        const take = &scratch.resize_semantic_response_take;
+        const frozen = &scratch.resize_semantic_frozen_response;
+        if (!self.preparedControlSemanticPairCurrent(lease, scratch) or
+            !resizeSemanticDestinationRangesCurrent(self, lease, scratch) or
+            receipt.saved_self_addr != @intFromPtr(receipt) or
+            receipt.storage_addr != @intFromPtr(self) or
+            receipt.scratch_addr != @intFromPtr(scratch) or
+            receipt.lease_addr != @intFromPtr(lease) or
+            receipt.owner_incarnation != self.owner_incarnation or
+            receipt.operation_generation != self.operation_generation or
+            receipt.turn_generation != scratch.turn_generation or
+            receipt.permit_addr != @intFromPtr(&scratch.whole_drain_permit) or
+            receipt.verdict_addr != @intFromPtr(verdict) or
+            !std.mem.eql(u8, &receipt.permit_digest, &scratch.whole_drain_permit.digest) or
+            !std.mem.eql(u8, &receipt.verdict_digest, &verdict.digest) or
+            receipt.lifecycle != .prepared or
+            !std.mem.eql(u8, &receipt.digest, &preparedResizeSemanticCommitDigest(receipt)) or
+            wrapper.saved_self_addr != @intFromPtr(wrapper) or
+            wrapper.lifecycle != .prepared or wrapper.branch != .resize or
+            wrapper.branch.resize.receipt_addr != @intFromPtr(receipt) or
+            !std.mem.eql(u8, &wrapper.branch.resize.receipt_digest, &receipt.digest) or
+            !std.mem.eql(u8, &wrapper.digest, &preparedControlSemanticTakeDigest(wrapper)) or
+            verdict.control_kind != .resize or verdict.value != .resize or
+            receipt.runtime_id != self.evidence_snapshot.runtime_id or
+            receipt.stream_id != self.evidence_snapshot.stream_id or
+            !std.mem.eql(u8, &receipt.evidence_digest, &attachmentEvidenceDigest(self.evidence_snapshot)) or
+            receipt.response_take_addr != @intFromPtr(take) or
+            !std.mem.eql(u8, &receipt.response_take_digest, &take.digest) or
+            receipt.frozen_response_addr != @intFromPtr(frozen) or
+            !std.mem.eql(u8, &receipt.frozen_response_pristine_digest, &frozenControlResponsePristineProjectionDigest(frozen)) or
+            !self.validateControlResponseTakeUnderHeldLease(lease, take, frozen))
+            return false;
+        const applied = switch (verdict.value.resize) {
+            .applied => |value| value,
+            .stale => return false,
+        };
+        const plan = planResizeSemanticCommit(
+            self.owner_resize,
+            self.evidence_snapshot.runtime_id,
+            verdict.target.stream_id,
+            self.evidence_snapshot.stream_id,
+            applied,
+        );
+        const expected_digest = switch (self.owner_resize) {
+            .none => [_]u8{0} ** 32,
+            .current => |value| value.seal.digest,
+        };
+        return plan.disposition == receipt.disposition and
+            receipt.expected_owner_resize_present == (self.owner_resize == .current) and
+            std.mem.eql(u8, &receipt.expected_owner_resize_digest, &expected_digest) and
+            receipt.applied_cols == applied.cols and receipt.applied_rows == applied.rows and
+            receipt.applied_generation == applied.resize_generation and
+            receipt.applied_changed == applied.changed;
+    }
+
+    fn consumeResizeSemanticCommitUnderHeldLease(
+        self: *ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        scratch: *ExternalRxTurnScratch,
+    ) ConsumeResizeSemanticResult {
+        if (!self.preparedResizeSemanticCommitCurrent(lease, scratch))
+            return .invalid_precommit;
+        var response_aggregate_cleanup: external_owner_cleanup.FrozenOwnerCleanupDescriptor = .{};
+        var response_aggregate_execution: ?RetainedRxAggregateDestroyExecution = null;
+        var response_intent_destroy: external_rx_intent.PreparedDestroy = .{};
+        var response_intent: ?*external_rx_intent.ExternalRxIntentHandle = null;
+        var response_intent_scratch: ?*anyopaque = null;
+        if (!self.prepareCompletedResponseOwnerCleanup(
+            &response_aggregate_cleanup,
+            &response_aggregate_execution,
+            &response_intent_destroy,
+            &response_intent,
+            &response_intent_scratch,
+        )) return .invalid_precommit;
+        const response_aggregate_execution_value = response_aggregate_execution orelse
+            return .invalid_precommit;
+        const response_intent_value = response_intent orelse return .invalid_precommit;
+        const response_intent_scratch_value = response_intent_scratch orelse
+            return .invalid_precommit;
+        var frozen_response_intent: external_rx_intent.FrozenDestroy = undefined;
+        var frozen_response_payload = external_inbox_ledger.OwnedPayload.empty(
+            scratch.resize_semantic_frozen_response.payload.allocator,
+        );
+        const receipt = &scratch.resize_semantic_commit;
+        self.publishControlResponseTakeUnchecked(
+            &scratch.resize_semantic_response_take,
+            &scratch.resize_semantic_frozen_response,
+        );
+        if (receipt.disposition == .publish_new) bindOwnerResize(self, .{
+            .runtime_id = receipt.runtime_id,
+            .cols = receipt.applied_cols,
+            .rows = receipt.applied_rows,
+            .resize_generation = receipt.applied_generation,
+        });
+        if (self.control_correlation.generation != std.math.maxInt(u64))
+            self.control_correlation.generation += 1;
+        self.control_correlation.state = .idle;
+        self.control_correlation.digest = controlCorrelationDigest(&self.control_correlation);
+        scratch.whole_drain_permit.lifecycle = .consumed_tombstone;
+        scratch.whole_drain_permit.digest = preparedWholeDrainPermitDigest(&scratch.whole_drain_permit);
+        scratch.control_semantic_verdict.lifecycle = .consumed_tombstone;
+        scratch.control_semantic_verdict.permit_digest = scratch.whole_drain_permit.digest;
+        scratch.control_semantic_verdict.digest = preparedControlSemanticVerdictDigest(&scratch.control_semantic_verdict);
+        receipt.lifecycle = .consumed_tombstone;
+        receipt.digest = preparedResizeSemanticCommitDigest(receipt);
+        scratch.control_semantic_take.branch.resize.receipt_digest = receipt.digest;
+        scratch.control_semantic_take.lifecycle = .consumed_tombstone;
+        scratch.control_semantic_take.digest = preparedControlSemanticTakeDigest(&scratch.control_semantic_take);
+        self.commitCompletedResponseOwnerCleanupUnchecked(
+            &response_aggregate_cleanup,
+            response_aggregate_execution_value,
+            response_intent_value,
+            response_intent_scratch_value,
+            &response_intent_destroy,
+            &frozen_response_intent,
+        );
+        freezeControlResponsePayloadCleanupUnchecked(
+            &scratch.resize_semantic_frozen_response,
+            &frozen_response_payload,
+        );
+        const canonical = self.captureResizeSemanticCleanupSnapshot(
+            scratch,
+            &scratch.resize_semantic_frozen_response,
+        );
+        _ = external_owner_cleanup.finishCallbackHidden(
+            &response_aggregate_cleanup,
+        );
+        external_rx_intent.finishFrozenDestroy(frozen_response_intent);
+        frozen_response_payload.deinit();
+        if (self.detectAndRestoreResizeSemanticCleanupDrift(scratch, canonical)) {
+            self.callback_quarantine_pending = true;
+            self.callback_quarantine_accounted = true;
+            latchCrossOwnerQuarantine();
+            return .cleaned_with_invariant;
+        }
+        return .consumed_resize_cleaned;
+    }
+
     fn prepareResyncAckTransitionUnderHeldLease(
         self: *ExternalPumpStorage,
         lease: *const ExternalWholeTurnLease,
@@ -9320,8 +10148,7 @@ pub const ExternalPumpStorage = struct {
             !std.meta.eql(take.*, PreparedControlResponseTake{}) or
             !frozenControlResponsePristine(frozen) or
             verdict.control_kind != .resync or verdict.value != .resync_ack or
-            permit.parser_absolute_end == 0 or
-            self.control_correlation.generation == std.math.maxInt(u64))
+            permit.parser_absolute_end == 0)
             return false;
         const active = switch (self.semantic_state) {
             .active => |value| value,
@@ -9482,11 +10309,25 @@ pub const ExternalPumpStorage = struct {
             verdict,
             transition,
         )) return .invalid;
+        self.publishResyncAckUnchecked(scratch, permit, verdict, transition);
+        return .consumed;
+    }
+
+    fn publishResyncAckUnchecked(
+        self: *ExternalPumpStorage,
+        scratch: *ExternalRxTurnScratch,
+        permit: *PreparedWholeDrainPermit,
+        verdict: *PreparedControlSemanticVerdict,
+        transition: *PreparedResyncAckTransition,
+    ) void {
         const take = &scratch.resync_ack_response_take;
         const frozen = &scratch.resync_ack_frozen_response;
         self.publishControlResponseTakeUnchecked(take, frozen);
         self.semantic_state = .{ .active = transition.next_state };
-        self.control_correlation.generation += 1;
+        // A response already accepted at max generation must still retire exactly once.  The
+        // following admission is what reports exhaustion; wrapping here would reopen an ABA slot.
+        if (self.control_correlation.generation != std.math.maxInt(u64))
+            self.control_correlation.generation += 1;
         self.control_correlation.state = .idle;
         self.control_correlation.digest = controlCorrelationDigest(&self.control_correlation);
         permit.lifecycle = .consumed_tombstone;
@@ -9496,7 +10337,226 @@ pub const ExternalPumpStorage = struct {
         verdict.digest = preparedControlSemanticVerdictDigest(verdict);
         transition.lifecycle = .consumed_tombstone;
         transition.digest = preparedResyncAckTransitionDigest(transition);
-        return .consumed;
+    }
+
+    fn prepareResyncSemanticCommitUnderHeldLease(
+        self: *ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        scratch: *ExternalRxTurnScratch,
+        aggregate: ?*const PreparedRxAggregate,
+    ) bool {
+        const receipt = &scratch.resync_semantic_commit;
+        const wrapper = &scratch.control_semantic_take;
+        if (!resyncSemanticDestinationRangesCurrent(self, lease, scratch, aggregate) or
+            !std.meta.eql(receipt.*, PreparedResyncSemanticCommit{}) or
+            !std.meta.eql(wrapper.*, PreparedControlSemanticTake{}) or
+            !std.meta.eql(
+                scratch.projected_recovery_snapshot_commit,
+                ProjectedRecoverySnapshotCommit{},
+            )) return false;
+        if (!self.prepareResyncAckTransitionUnderHeldLease(lease, scratch))
+            return false;
+        const transition = &scratch.resync_ack_transition;
+        var candidate: ProjectedRecoverySnapshotCommit = .{};
+        if (!self.prepareRecoverySnapshotCommitForProjectedAckUnderHeldLease(
+            lease,
+            scratch,
+            transition,
+            aggregate,
+            &candidate,
+        )) return false;
+        receipt.* = .{
+            .saved_self_addr = @intFromPtr(receipt),
+            .storage_addr = @intFromPtr(self),
+            .scratch_addr = @intFromPtr(scratch),
+            .lease_addr = @intFromPtr(lease),
+            .ack_transition_addr = @intFromPtr(transition),
+            .ack_transition_digest = transition.digest,
+            .projected_state_digest = candidate.projected_state_digest,
+            .projected_commit_addr = @intFromPtr(
+                &scratch.projected_recovery_snapshot_commit,
+            ),
+            .projected_commit_digest = candidate.digest,
+            .aggregate_present = aggregate != null,
+            .aggregate_addr = if (aggregate) |value| @intFromPtr(value) else 0,
+            .aggregate_digest = if (aggregate) |value| value.digest else [_]u8{0} ** 32,
+            .lifecycle = .prepared,
+        };
+        receipt.digest = preparedResyncSemanticCommitDigest(receipt);
+        wrapper.* = .{
+            .saved_self_addr = @intFromPtr(wrapper),
+            .branch = .{ .resync = .{
+                .receipt_addr = @intFromPtr(receipt),
+                .receipt_digest = receipt.digest,
+            } },
+            .lifecycle = .prepared,
+        };
+        wrapper.digest = preparedControlSemanticTakeDigest(wrapper);
+        return true;
+    }
+
+    fn preparedResyncSemanticCommitCurrent(
+        self: *ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        scratch: *ExternalRxTurnScratch,
+        aggregate: ?*const PreparedRxAggregate,
+        candidate: *ProjectedRecoverySnapshotCommit,
+    ) bool {
+        const receipt = &scratch.resync_semantic_commit;
+        const wrapper = &scratch.control_semantic_take;
+        const transition = &scratch.resync_ack_transition;
+        if (!resyncSemanticDestinationRangesCurrent(self, lease, scratch, aggregate) or
+            receipt.saved_self_addr != @intFromPtr(receipt) or
+            receipt.storage_addr != @intFromPtr(self) or
+            receipt.scratch_addr != @intFromPtr(scratch) or
+            receipt.lease_addr != @intFromPtr(lease) or
+            receipt.ack_transition_addr != @intFromPtr(transition) or
+            !std.mem.eql(u8, &receipt.ack_transition_digest, &transition.digest) or
+            receipt.projected_commit_addr != @intFromPtr(
+                &scratch.projected_recovery_snapshot_commit,
+            ) or receipt.aggregate_present != (aggregate != null) or
+            receipt.aggregate_addr != (if (aggregate) |value| @intFromPtr(value) else 0) or
+            receipt.lifecycle != .prepared or
+            !std.mem.eql(u8, &receipt.digest, &preparedResyncSemanticCommitDigest(receipt)) or
+            wrapper.saved_self_addr != @intFromPtr(wrapper) or
+            wrapper.lifecycle != .prepared or wrapper.branch != .resync or
+            wrapper.branch.resync.receipt_addr != @intFromPtr(receipt) or
+            !std.mem.eql(u8, &wrapper.branch.resync.receipt_digest, &receipt.digest) or
+            !std.mem.eql(u8, &wrapper.digest, &preparedControlSemanticTakeDigest(wrapper)))
+            return false;
+        if (aggregate) |value| {
+            if (!std.mem.eql(u8, &receipt.aggregate_digest, &value.digest)) return false;
+        } else if (!std.mem.allEqual(u8, &receipt.aggregate_digest, 0)) return false;
+        candidate.* = .{};
+        if (!self.prepareRecoverySnapshotCommitForProjectedAckUnderHeldLease(
+            lease,
+            scratch,
+            transition,
+            aggregate,
+            candidate,
+        ) or !std.mem.eql(
+            u8,
+            &receipt.projected_state_digest,
+            &candidate.projected_state_digest,
+        ) or !std.mem.eql(
+            u8,
+            &receipt.projected_commit_digest,
+            &candidate.digest,
+        )) return false;
+        return self.validatePreparedRecoverySnapshotForProjectedAckUnderHeldLease(
+            lease,
+            scratch,
+            transition,
+            aggregate,
+            candidate,
+        );
+    }
+
+    fn consumeResyncSemanticCommitUnderHeldLease(
+        self: *ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        scratch: *ExternalRxTurnScratch,
+        aggregate: ?*PreparedRxAggregate,
+    ) ConsumeResyncSemanticResult {
+        var candidate: ProjectedRecoverySnapshotCommit = .{};
+        if (!self.preparedResyncSemanticCommitCurrent(
+            lease,
+            scratch,
+            aggregate,
+            &candidate,
+        )) return .invalid_precommit;
+        // Resolve the already-validated source pointer before the first publication write. The
+        // unchecked suffix receives this exact pointer and performs no raw-address lookup.
+        const source_intent: ?*external_rx_intent.ExternalRxIntentHandle = if (aggregate) |value|
+            @ptrFromInt(value.intent_handle_addr)
+        else
+            null;
+        var response_aggregate_cleanup: external_owner_cleanup.FrozenOwnerCleanupDescriptor = .{};
+        var response_aggregate_execution: ?RetainedRxAggregateDestroyExecution = null;
+        var response_intent_destroy: external_rx_intent.PreparedDestroy = .{};
+        var response_intent: ?*external_rx_intent.ExternalRxIntentHandle = null;
+        var response_intent_scratch: ?*anyopaque = null;
+        if (!self.prepareCompletedResponseOwnerCleanup(
+            &response_aggregate_cleanup,
+            &response_aggregate_execution,
+            &response_intent_destroy,
+            &response_intent,
+            &response_intent_scratch,
+        )) return .invalid_precommit;
+        const response_aggregate_execution_value = response_aggregate_execution orelse
+            return .invalid_precommit;
+        const response_intent_value = response_intent orelse return .invalid_precommit;
+        const response_intent_scratch_value = response_intent_scratch orelse
+            return .invalid_precommit;
+        var frozen_response_intent: external_rx_intent.FrozenDestroy = undefined;
+        var frozen_response_payload = external_inbox_ledger.OwnedPayload.empty(
+            scratch.resync_ack_frozen_response.payload.allocator,
+        );
+        // MARU_F3C2_POST_FIRST_WRITE_BEGIN
+        scratch.projected_recovery_snapshot_commit = candidate;
+        self.publishResyncAckUnchecked(
+            scratch,
+            &scratch.whole_drain_permit,
+            &scratch.control_semantic_verdict,
+            &scratch.resync_ack_transition,
+        );
+        if (aggregate) |value| {
+            self.consumeProjectedRecoverySnapshotUnchecked(
+                &scratch.projected_recovery_snapshot_commit,
+                value,
+                source_intent.?,
+            );
+        }
+        scratch.projected_recovery_snapshot_commit.lifecycle = .consumed_tombstone;
+        scratch.projected_recovery_snapshot_commit.digest =
+            projectedRecoverySnapshotCommitDigest(
+                &scratch.projected_recovery_snapshot_commit,
+            );
+        scratch.resync_semantic_commit.projected_commit_digest =
+            scratch.projected_recovery_snapshot_commit.digest;
+        scratch.resync_semantic_commit.ack_transition_digest =
+            scratch.resync_ack_transition.digest;
+        scratch.resync_semantic_commit.lifecycle = .consumed_tombstone;
+        scratch.resync_semantic_commit.digest = preparedResyncSemanticCommitDigest(
+            &scratch.resync_semantic_commit,
+        );
+        scratch.control_semantic_take.branch.resync.receipt_digest =
+            scratch.resync_semantic_commit.digest;
+        scratch.control_semantic_take.lifecycle = .consumed_tombstone;
+        scratch.control_semantic_take.digest = preparedControlSemanticTakeDigest(
+            &scratch.control_semantic_take,
+        );
+        self.commitCompletedResponseOwnerCleanupUnchecked(
+            &response_aggregate_cleanup,
+            response_aggregate_execution_value,
+            response_intent_value,
+            response_intent_scratch_value,
+            &response_intent_destroy,
+            &frozen_response_intent,
+        );
+        freezeControlResponsePayloadCleanupUnchecked(
+            &scratch.resync_ack_frozen_response,
+            &frozen_response_payload,
+        );
+        // MARU_F3C2_POST_FIRST_WRITE_END
+        const canonical = self.captureResyncSemanticCleanupSnapshot(
+            scratch,
+            aggregate,
+            &scratch.resync_ack_frozen_response,
+        );
+        if (aggregate) |value| _ = value.retirement.retire();
+        _ = external_owner_cleanup.finishCallbackHidden(
+            &response_aggregate_cleanup,
+        );
+        external_rx_intent.finishFrozenDestroy(frozen_response_intent);
+        frozen_response_payload.deinit();
+        if (self.detectResyncSemanticCleanupDrift(scratch, aggregate, canonical)) {
+            self.callback_quarantine_pending = true;
+            self.callback_quarantine_accounted = true;
+            latchCrossOwnerQuarantine();
+            return .cleaned_with_invariant;
+        }
+        return .consumed_resync_cleaned;
     }
 
     fn preparedControlSemanticTerminalCurrent(
@@ -9734,8 +10794,7 @@ pub const ExternalPumpStorage = struct {
         if (active_external_operation_addr != 0 or
             !std.meta.eql(out.*, PreparedControlResponseTake{}) or
             !self.completedControlValid() or
-            self.operation_generation == std.math.maxInt(u64) or
-            self.control_correlation.generation == std.math.maxInt(u64))
+            self.operation_generation == std.math.maxInt(u64))
             return false;
         const completed = switch (self.completed_control) {
             .completed => |*value| value,
@@ -9934,13 +10993,23 @@ pub const ExternalPumpStorage = struct {
     fn finishControlResponsePayloadCleanupUnchecked(
         response: *FrozenControlResponse,
     ) void {
-        var payload = response.payload;
+        var payload = external_inbox_ledger.OwnedPayload.empty(
+            response.payload.allocator,
+        );
+        freezeControlResponsePayloadCleanupUnchecked(response, &payload);
+        payload.deinit();
+    }
+
+    fn freezeControlResponsePayloadCleanupUnchecked(
+        response: *FrozenControlResponse,
+        payload: *external_inbox_ledger.OwnedPayload,
+    ) void {
+        payload.* = response.payload;
         response.payload = external_inbox_ledger.OwnedPayload.empty(
             payload.allocator,
         );
         response.lifecycle = .cleaned_tombstone;
         response.digest = frozenControlResponseDigest(response);
-        payload.deinit();
     }
 
     /// f2 keeps the frozen payload owner inside this call and can only reject-terminal after
@@ -10943,7 +12012,9 @@ pub const ExternalPumpStorage = struct {
                     break;
                 }
             }
-            const completed = switch (semantic orelse return false) {
+            const completed = switch (semantic orelse {
+                return false;
+            }) {
                 .completed => |value| value,
                 else => continue,
             };
@@ -10951,13 +12022,17 @@ pub const ExternalPumpStorage = struct {
                 return false;
             const range = switch (completed.provenance) {
                 .external => |value| value,
-                .untracked => return false,
+                .untracked => {
+                    return false;
+                },
             };
             const end_absolute = std.math.add(
                 u64,
                 range.start_absolute,
                 range.span,
-            ) catch return false;
+            ) catch {
+                return false;
+            };
             const origin: client_pump.RecoveryOrigin = switch (completed.recovery_intent) {
                 .host => .host,
                 .client, .none => .client,
@@ -11102,6 +12177,363 @@ pub const ExternalPumpStorage = struct {
                 &aggregate.recovery_snapshot_commit,
             );
         return true;
+    }
+
+    /// Canonical F3d producer precondition for same-turn projected ACK binding. Ordinary aggregate
+    /// finalization prepares recovery against the current pre-ACK authority. Before F3c2 may
+    /// project against the post-ACK authority, retire that unconsumed plan through the ledger's
+    /// abort/reset transaction and rebuild its live-commit permit; never erase a live permit in a
+    /// fixture or caller.
+    fn reprepareRxAggregateForProjectedRecoveryUnderHeldLease(
+        self: *ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        aggregate: *PreparedRxAggregate,
+    ) bool {
+        if (!self.validateWholeTurnLease(lease) or
+            aggregate.saved_self_addr != @intFromPtr(aggregate) or
+            aggregate.storage_addr != @intFromPtr(self) or
+            aggregate.lifecycle != .finalized or
+            !std.mem.eql(u8, &aggregate.digest, &preparedRxAggregateDigest(aggregate)) or
+            !self.preparedRecoverySnapshotCommitCurrent(lease, aggregate))
+            return false;
+        if (self.inbox_ledger.abortPreparedLiveCommit(
+            &aggregate.live_batch,
+            &aggregate.retirement,
+            &aggregate.dispositions,
+            &aggregate.live_commit,
+        ) != .aborted) return false;
+        if (!external_inbox_ledger.ExternalInboxLedger.resetPreparedLiveCommit(
+            &aggregate.live_commit,
+        )) return false;
+        aggregate.recovery_dispositions = .{};
+        aggregate.recovery_snapshot_commit = .{};
+        self.inbox_ledger.prepareLiveCommit(
+            &aggregate.live_batch,
+            &aggregate.retirement,
+            &aggregate.dispositions,
+            @intFromPtr(aggregate),
+            @intFromPtr(self),
+            aggregate.turn_generation,
+            &aggregate.live_commit,
+        ) catch return false;
+        aggregate.digest = preparedRxAggregateDigest(aggregate);
+        return true;
+    }
+
+    /// Computes the recovery graph against the ACK's projected authority without publishing it.
+    /// Every self/destination address in the returned value names its eventual final storage;
+    /// `candidate` itself is stack-local evidence and never becomes authority.
+    fn prepareRecoverySnapshotCommitForProjectedAckUnderHeldLease(
+        self: *ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        scratch: *ExternalRxTurnScratch,
+        transition: *const PreparedResyncAckTransition,
+        aggregate: ?*const PreparedRxAggregate,
+        candidate: *ProjectedRecoverySnapshotCommit,
+    ) bool {
+        candidate.* = .{};
+        if (!resyncSemanticDestinationRangesCurrent(
+            self,
+            lease,
+            scratch,
+            aggregate,
+        ) or !self.preparedResyncAckTransitionCurrent(
+            lease,
+            scratch,
+            &scratch.whole_drain_permit,
+            &scratch.control_semantic_verdict,
+            transition,
+        ) or !std.meta.eql(
+            scratch.projected_recovery_snapshot_commit,
+            ProjectedRecoverySnapshotCommit{},
+        )) return false;
+
+        candidate.saved_self_addr = @intFromPtr(
+            &scratch.projected_recovery_snapshot_commit,
+        );
+        candidate.storage_addr = @intFromPtr(self);
+        candidate.scratch_addr = @intFromPtr(scratch);
+        candidate.lease_addr = @intFromPtr(lease);
+        candidate.projected_state_digest = recoveryAuthorityStateDigest(
+            transition.next_state,
+        );
+        candidate.lifecycle = .prepared;
+
+        const source = aggregate orelse {
+            candidate.digest = projectedRecoverySnapshotCommitDigest(candidate);
+            return true;
+        };
+        if (source.saved_self_addr != @intFromPtr(source) or
+            source.storage_addr != @intFromPtr(self) or
+            // PreparedRxAggregate.turn_generation is the storage operation generation; the
+            // scratch turn counter is a separate per-poll epoch and need not have the same value.
+            source.turn_generation != self.operation_generation or
+            source.lifecycle != .finalized or
+            !std.mem.eql(u8, &source.digest, &preparedRxAggregateDigest(source)) or
+            !std.meta.eql(source.recovery_dispositions, RecoverySnapshotDispositionAggregate{}) or
+            !std.meta.eql(source.recovery_snapshot_commit, PreparedRecoverySnapshotCommit{}) or
+            !std.meta.eql(source.recovery_commit_output, ImmutableRecoveryCommitOutput{}) or
+            !std.meta.eql(source.recovery_snapshot_binding, CommittedRecoverySnapshotBinding{}))
+            return false;
+        if (source.intent_handle_addr == 0) return false;
+        const source_intent: *external_rx_intent.ExternalRxIntentHandle =
+            @ptrFromInt(source.intent_handle_addr);
+        if (!external_rx_intent.validatePreparedIntentCommit(
+            source_intent,
+            &source.screen_proofs,
+            &source.neutral_payloads,
+            &source.intent_commit,
+        )) return false;
+
+        var recovery: RecoverySnapshotDispositionAggregate = .{
+            .saved_self_addr = @intFromPtr(
+                &scratch.projected_recovery_snapshot_commit.recovery_dispositions,
+            ),
+            .owner_aggregate_addr = @intFromPtr(source),
+        };
+        var cleanup_selection = [_]bool{false} ** external_inbox_ledger.max_live_mutations;
+        var count: u8 = 0;
+        var ledger_output_index: u8 = 0;
+        var bound_selected = false;
+        var binding_entry_index: u8 = 0;
+        var selected_ledger_output_index: u8 = 0;
+        var binding_next_state: client_pump.AuthorityState = .valid;
+        for (source.dispositions, 0..) |disposition, mutation_index| {
+            const root = switch (disposition) {
+                .final_live, .cleanup_final => |value| value,
+                .unused, .superseded_tombstone => continue,
+            };
+            const current_output_index = ledger_output_index;
+            ledger_output_index += 1;
+            if (root.phase != .completed) continue;
+            var semantic: ?external_inbox_ledger.PayloadSemantic = null;
+            for (source.live_commit.simulation.nodes) |node| {
+                if (node.live and std.meta.eql(node.token, root.token)) {
+                    semantic = node.semantic;
+                    break;
+                }
+            }
+            const completed = switch (semantic orelse return false) {
+                .completed => |value| value,
+                else => continue,
+            };
+            if (count == external_inbox_ledger.max_live_mutations) return false;
+            const range = switch (completed.provenance) {
+                .external => |value| value,
+                .untracked => return false,
+            };
+            const end_absolute = std.math.add(
+                u64,
+                range.start_absolute,
+                range.span,
+            ) catch return false;
+            const origin: client_pump.RecoveryOrigin = switch (completed.recovery_intent) {
+                .host => .host,
+                .client, .none => .client,
+            };
+            const epoch: u64 = switch (completed.recovery_intent) {
+                .host, .client => |value| value,
+                .none => 0,
+            };
+            var transfer_addr: usize = 0;
+            var transfer_intent_index: u8 = 0;
+            for (&source.screen_transfers) |*transfer| {
+                if (transfer.lifecycle == .mutation_bound and
+                    transfer.mutation_index == mutation_index)
+                {
+                    transfer_addr = @intFromPtr(transfer);
+                    transfer_intent_index = transfer.intent_index;
+                    break;
+                }
+            }
+            if (transfer_addr == 0) {
+                return false;
+            }
+            if (transfer_intent_index >= source.destination_write_count) {
+                return false;
+            }
+            const destination = &source.destination_writes[transfer_intent_index];
+            if (destination.saved_self_addr != @intFromPtr(destination) or
+                destination.aggregate_addr != @intFromPtr(source) or
+                destination.intent_index != transfer_intent_index or
+                destination.mutation_index != mutation_index or
+                !std.mem.eql(
+                    u8,
+                    &destination.digest,
+                    &destinationWriteDigest(destination),
+                ))
+            {
+                return false;
+            }
+            const plan = client_pump.planRecoverySnapshotBinding(
+                transition.next_state,
+                .{
+                    .origin = origin,
+                    .recovery_epoch = epoch,
+                    .is_snapshot = completed.is_snapshot,
+                    .start_absolute = range.start_absolute,
+                    .end_absolute = end_absolute,
+                    .committed_token_generation = root.token.generation,
+                },
+            );
+            const will_bind = !bound_selected and plan.disposition == .bound;
+            const expected_kind: DestinationWriteKind = if (will_bind)
+                .screen_completed
+            else
+                .screen_cleanup;
+            const expected_lifecycle: u8 = if (will_bind)
+                @intFromEnum(self.live_screen.lifecycle)
+            else
+                @intFromEnum(source.screen_transfers[transfer_intent_index].lifecycle);
+            if (destination.kind != expected_kind or
+                destination.expected_lifecycle != expected_lifecycle)
+            {
+                return false;
+            }
+            const entry = &recovery.entries[count];
+            entry.* = .{
+                .transfer_addr = transfer_addr,
+                .mutation_index = @intCast(mutation_index),
+                .commit_output_index = current_output_index,
+                .token_source = .pending_commit,
+                .token = root.token,
+                .committed_semantic_digest = external_inbox_ledger.payloadSemanticAuthorityDigest(
+                    semantic.?,
+                ),
+                .origin = origin,
+                .recovery_epoch = epoch,
+                .is_snapshot = completed.is_snapshot,
+                .start_absolute = range.start_absolute,
+                .end_absolute = end_absolute,
+                .disposition = if (will_bind) .bind else .drop,
+                .cleanup_destination_addr = @intFromPtr(
+                    destination,
+                ),
+                .cleanup_lifecycle = expected_lifecycle,
+                .cleanup_destination_digest = destination.digest,
+            };
+            entry.digest = recoverySnapshotDispositionEntryDigest(entry);
+            if (will_bind) {
+                bound_selected = true;
+                binding_next_state = plan.next;
+                binding_entry_index = count;
+                selected_ledger_output_index = current_output_index;
+            } else {
+                cleanup_selection[mutation_index] = true;
+            }
+            count += 1;
+        }
+        if (count == 0) return false;
+        recovery.count = count;
+        recovery.root_digest = recoverySnapshotDispositionRootDigest(&recovery);
+
+        const ledger_candidate = self.inbox_ledger.planPreparedFinalRootsForCleanup(
+            &source.live_batch,
+            &source.retirement,
+            &source.dispositions,
+            &source.live_commit,
+            &cleanup_selection,
+            @intFromPtr(
+                &scratch.projected_recovery_snapshot_commit.ledger_candidate.dispositions,
+            ),
+            @intFromPtr(
+                &scratch.projected_recovery_snapshot_commit.ledger_candidate.permit,
+            ),
+            @intFromPtr(source),
+            @intFromPtr(self),
+            source.turn_generation,
+        ) catch return false;
+
+        var recovery_commit: PreparedRecoverySnapshotCommit = .{
+            .saved_self_addr = @intFromPtr(
+                &scratch.projected_recovery_snapshot_commit.recovery_commit,
+            ),
+            .aggregate_addr = @intFromPtr(source),
+            .storage_addr = @intFromPtr(self),
+            .ledger_addr = @intFromPtr(&self.inbox_ledger),
+            .lease_addr = @intFromPtr(lease),
+            .scratch_addr = @intFromPtr(scratch),
+            .lease_digest = lease.digest,
+            .owner_incarnation = self.owner_incarnation,
+            .operation_generation = self.operation_generation,
+            .turn_generation = source.turn_generation,
+            .parser_seal = lease.rx_provenance.parser_seal,
+            .authority_generation = self.owner_authority.current.generation,
+            .authority_seal_digest = self.owner_authority_seal.digest,
+            .authority_state = transition.next_state,
+            .binding_next_state = binding_next_state,
+            .prepared_live_commit_digest = ledger_candidate.permit.digest,
+            .source = .{ .commit_pending = .{
+                .live_commit_addr = @intFromPtr(
+                    &scratch.projected_recovery_snapshot_commit.ledger_candidate.permit,
+                ),
+                .live_commit_digest = ledger_candidate.permit.digest,
+            } },
+            .source_discriminator = .same_drain_side_intent,
+            .ack_transition_addr = @intFromPtr(transition),
+            .ack_transition_digest = transition.digest,
+            .dispositions_addr = @intFromPtr(
+                &scratch.projected_recovery_snapshot_commit.recovery_dispositions,
+            ),
+            .dispositions_root_digest = recovery.root_digest,
+            .committed_output_addr = @intFromPtr(&source.recovery_commit_output),
+            .committed_output_pristine_digest = immutableRecoveryCommitOutputDigest(
+                &source.recovery_commit_output,
+            ),
+            .binding_destination_addr = @intFromPtr(&source.recovery_snapshot_binding),
+            .binding_destination_pristine_digest = committedRecoverySnapshotBindingDigest(
+                &source.recovery_snapshot_binding,
+            ),
+            .has_binding = bound_selected,
+            .binding_entry_index = binding_entry_index,
+            .ledger_output_index = selected_ledger_output_index,
+            .lifecycle = .prepared,
+        };
+        recovery_commit.digest = preparedRecoverySnapshotCommitDigest(&recovery_commit);
+        candidate.aggregate_addr = @intFromPtr(source);
+        candidate.dispositions_count = count;
+        candidate.dispositions_root_digest = recovery.root_digest;
+        candidate.output_addr = @intFromPtr(&source.recovery_commit_output);
+        candidate.output_pristine_digest = immutableRecoveryCommitOutputDigest(
+            &source.recovery_commit_output,
+        );
+        candidate.binding_addr = @intFromPtr(&source.recovery_snapshot_binding);
+        candidate.binding_pristine_digest = committedRecoverySnapshotBindingDigest(
+            &source.recovery_snapshot_binding,
+        );
+        candidate.ledger_candidate = ledger_candidate;
+        candidate.recovery_dispositions = recovery;
+        candidate.recovery_commit = recovery_commit;
+        candidate.digest = projectedRecoverySnapshotCommitDigest(candidate);
+        return true;
+    }
+
+    /// Last read-only boundary before the projected candidate may be copied to final storage.
+    fn validatePreparedRecoverySnapshotForProjectedAckUnderHeldLease(
+        self: *ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        scratch: *ExternalRxTurnScratch,
+        transition: *const PreparedResyncAckTransition,
+        aggregate: ?*const PreparedRxAggregate,
+        candidate: *const ProjectedRecoverySnapshotCommit,
+    ) bool {
+        if (candidate.lifecycle != .prepared or
+            candidate.saved_self_addr != @intFromPtr(
+                &scratch.projected_recovery_snapshot_commit,
+            ) or !std.mem.eql(
+            u8,
+            &candidate.digest,
+            &projectedRecoverySnapshotCommitDigest(candidate),
+        )) return false;
+        var expected: ProjectedRecoverySnapshotCommit = .{};
+        if (!self.prepareRecoverySnapshotCommitForProjectedAckUnderHeldLease(
+            lease,
+            scratch,
+            transition,
+            aggregate,
+            &expected,
+        )) return false;
+        return std.meta.eql(candidate.*, expected);
     }
 
     fn preparedRecoverySnapshotCommitCurrent(
@@ -11355,6 +12787,158 @@ pub const ExternalPumpStorage = struct {
         );
         publishCommittedRecoverySourceUnchecked(aggregate);
         aggregate.digest = preparedRxAggregateDigest(aggregate);
+    }
+
+    // MARU_F3C2_PROJECTED_UNCHECKED_BEGIN
+    /// Consumes the projected final-address authority directly.  The source aggregate supplies
+    /// payload-bearing batch/retirement storage and immutable destinations only; no projected
+    /// receipt is copied into it after the first publication write.
+    fn consumeProjectedRecoverySnapshotUnchecked(
+        self: *ExternalPumpStorage,
+        projected: *ProjectedRecoverySnapshotCommit,
+        source: *PreparedRxAggregate,
+        source_intent: *external_rx_intent.ExternalRxIntentHandle,
+    ) void {
+        const permit = &projected.ledger_candidate.permit;
+        const dispositions = &projected.ledger_candidate.dispositions;
+        const prepared = &projected.recovery_commit;
+        const recovery_dispositions = &projected.recovery_dispositions;
+        const output = &source.recovery_commit_output;
+        const ledger_output = &output.ledger_output;
+
+        self.inbox_ledger.consumePreparedLiveCommitWithOutputUnchecked(
+            &source.live_batch,
+            &source.retirement,
+            dispositions,
+            permit,
+            ledger_output,
+        );
+        external_rx_intent.consumePreparedIntentCommitUnchecked(
+            source_intent,
+            &source.screen_proofs,
+            &source.neutral_payloads,
+            &source.intent_commit,
+        );
+        external_inbox_ledger.claimCommittedLiveOutputUnchecked(
+            ledger_output,
+            @intFromPtr(prepared),
+        );
+        for (recovery_dispositions.entries[0..recovery_dispositions.count]) |*entry| {
+            entry.token_source = .committed_output;
+            entry.digest = recoverySnapshotDispositionEntryDigest(entry);
+        }
+        recovery_dispositions.root_digest = recoverySnapshotDispositionRootDigest(
+            recovery_dispositions,
+        );
+        prepared.source = .{ .already_committed = .{
+            .output_addr = @intFromPtr(ledger_output),
+            .output_digest = ledger_output.digest,
+        } };
+        prepared.dispositions_root_digest = recovery_dispositions.root_digest;
+        prepared.digest = preparedRecoverySnapshotCommitDigest(prepared);
+
+        if (!prepared.has_binding) {
+            external_inbox_ledger.consumeClaimedCommittedLiveOutputUnchecked(
+                ledger_output,
+            );
+            consumeProjectedRecoveryDispositionAuthorityUnchecked(
+                recovery_dispositions,
+                prepared,
+            );
+            prepared.lifecycle = .consumed_tombstone;
+            prepared.digest = preparedRecoverySnapshotCommitDigest(prepared);
+        } else {
+            const entry = &recovery_dispositions.entries[prepared.binding_entry_index];
+            const actual = ledger_output.entries[prepared.ledger_output_index];
+            output.saved_self_addr = @intFromPtr(output);
+            output.aggregate_addr = @intFromPtr(source);
+            output.ledger_addr = @intFromPtr(&self.inbox_ledger);
+            output.storage_addr = @intFromPtr(self);
+            output.live_commit_addr = @intFromPtr(permit);
+            output.live_commit_digest = permit.digest;
+            output.token = actual.token;
+            output.semantic_digest = actual.semantic_digest;
+            output.recovery_intent = switch (entry.origin) {
+                .host => .{ .host = entry.recovery_epoch },
+                .client => .{ .client = entry.recovery_epoch },
+            };
+            output.origin = entry.origin;
+            output.recovery_epoch = entry.recovery_epoch;
+            output.is_snapshot = entry.is_snapshot;
+            output.start_absolute = entry.start_absolute;
+            output.end_absolute = entry.end_absolute;
+            output.lifecycle = .committed;
+            output.digest = immutableRecoveryCommitOutputDigest(output);
+
+            const binding = &source.recovery_snapshot_binding;
+            binding.* = .{
+                .saved_self_addr = @intFromPtr(binding),
+                .aggregate_addr = @intFromPtr(source),
+                .scratch_addr = prepared.scratch_addr,
+                .storage_addr = @intFromPtr(self),
+                .ledger_addr = @intFromPtr(&self.inbox_ledger),
+                .lease_addr = prepared.lease_addr,
+                .lease_digest = prepared.lease_digest,
+                .owner_incarnation = prepared.owner_incarnation,
+                .operation_generation = prepared.operation_generation,
+                .turn_generation = prepared.turn_generation,
+                .parser_generation = prepared.parser_seal.generation,
+                .parser_seal = prepared.parser_seal,
+                .authority_generation = prepared.authority_generation,
+                .authority_seal_digest = prepared.authority_seal_digest,
+                .awaiting_state = prepared.authority_state,
+                .awaiting_state_digest = recoveryAuthorityStateDigest(prepared.authority_state),
+                .ledger_authority_digest = self.inbox_ledger.projectionAuthorityDigest(),
+                .token = output.token,
+                .semantic_digest = output.semantic_digest,
+                .recovery_intent = output.recovery_intent,
+                .origin = output.origin,
+                .recovery_epoch = output.recovery_epoch,
+                .is_snapshot = output.is_snapshot,
+                .start_absolute = output.start_absolute,
+                .end_absolute = output.end_absolute,
+                .source_output_addr = @intFromPtr(output),
+                .source_output_digest = output.digest,
+                .side_intent_addr = @intFromPtr(ledger_output),
+                .side_intent_digest = ledger_output.digest,
+                .destination_pristine_digest = prepared.binding_destination_pristine_digest,
+                .source_discriminator = .same_drain_side_intent,
+                .source_provenance_digest = prepared.ack_transition_digest,
+                .ack_transition_addr = prepared.ack_transition_addr,
+                .ack_transition_digest = prepared.ack_transition_digest,
+                .lifecycle = .committed,
+            };
+            binding.digest = committedRecoverySnapshotBindingDigest(binding);
+            self.semantic_state = .{ .active = prepared.binding_next_state };
+            external_inbox_ledger.consumeClaimedCommittedLiveOutputUnchecked(ledger_output);
+            output.lifecycle = .consumed_tombstone;
+            output.digest = immutableRecoveryCommitOutputDigest(output);
+            binding.source_output_digest = output.digest;
+            binding.side_intent_digest = ledger_output.digest;
+            binding.lifecycle = .consumed_tombstone;
+            binding.digest = committedRecoverySnapshotBindingDigest(binding);
+            consumeProjectedRecoveryDispositionAuthorityUnchecked(
+                recovery_dispositions,
+                prepared,
+            );
+            prepared.lifecycle = .consumed_tombstone;
+            prepared.digest = preparedRecoverySnapshotCommitDigest(prepared);
+        }
+        source.lifecycle = .side_intent_consumed;
+        source.digest = preparedRxAggregateDigest(source);
+    }
+    // MARU_F3C2_PROJECTED_UNCHECKED_END
+
+    fn consumeProjectedRecoveryDispositionAuthorityUnchecked(
+        dispositions: *RecoverySnapshotDispositionAggregate,
+        prepared: *PreparedRecoverySnapshotCommit,
+    ) void {
+        for (dispositions.entries[0..dispositions.count]) |*entry| {
+            entry.token_source = .consumed_tombstone;
+            entry.digest = recoverySnapshotDispositionEntryDigest(entry);
+        }
+        dispositions.root_digest = recoverySnapshotDispositionRootDigest(dispositions);
+        prepared.dispositions_root_digest = dispositions.root_digest;
     }
 
     /// Converges both transport source forms on one exact claimed output. The caller has either
@@ -12019,6 +13603,7 @@ pub const ExternalPumpStorage = struct {
     fn quarantinePublishedStorageAfterCallbackDrift(
         self: *ExternalPumpStorage,
     ) void {
+        const quarantine_already_accounted = self.callback_quarantine_accounted;
         self.lifecycle = .dead;
         self.semantic_state = .{ .terminal = .{
             .reason = .invariant_failure,
@@ -12050,7 +13635,8 @@ pub const ExternalPumpStorage = struct {
             .lifecycle = .poisoned_tombstone,
         };
         self.callback_quarantine_pending = false;
-        latchCrossOwnerQuarantine();
+        self.callback_quarantine_accounted = false;
+        if (!quarantine_already_accounted) latchCrossOwnerQuarantine();
         releaseActiveStorage(@intFromPtr(self));
     }
 
@@ -12377,6 +13963,9 @@ pub const ExternalPumpStorage = struct {
         authority_seal: OwnerAuthoritySeal,
         completed_generation: u64,
         semantic: client_pump.ExternalPumpState,
+        intent_reservation: IntentScratchReservation,
+        aggregate_handle: PreparedRxAggregateHandle,
+        aggregate_reservation: RxAggregateScratchReservation,
     };
 
     fn captureControlCleanupPublicationSnapshot(
@@ -12394,6 +13983,9 @@ pub const ExternalPumpStorage = struct {
             .authority_seal = self.owner_authority_seal,
             .completed_generation = self.completed_control_generation,
             .semantic = self.semantic_state,
+            .intent_reservation = self.intent_scratch_reservation,
+            .aggregate_handle = self.rx_aggregate_handle,
+            .aggregate_reservation = self.rx_aggregate_reservation,
         };
     }
 
@@ -12413,7 +14005,17 @@ pub const ExternalPumpStorage = struct {
             !std.meta.eql(self.owner_authority_seal, canonical.authority_seal) or
             self.completed_control != .none or
             self.completed_control_generation != canonical.completed_generation or
-            !std.meta.eql(self.semantic_state, canonical.semantic);
+            !std.meta.eql(self.semantic_state, canonical.semantic) or
+            !std.meta.eql(
+                self.intent_scratch_reservation,
+                canonical.intent_reservation,
+            ) or !std.meta.eql(
+            self.rx_aggregate_handle,
+            canonical.aggregate_handle,
+        ) or !std.meta.eql(
+            self.rx_aggregate_reservation,
+            canonical.aggregate_reservation,
+        );
         if (!drifted) return false;
         self.lifecycle = canonical.lifecycle;
         self.saved_self_addr = canonical.saved_self_addr;
@@ -12427,6 +14029,9 @@ pub const ExternalPumpStorage = struct {
         self.completed_control = .none;
         self.completed_control_generation = canonical.completed_generation;
         self.semantic_state = canonical.semantic;
+        self.intent_scratch_reservation = canonical.intent_reservation;
+        self.rx_aggregate_handle = canonical.aggregate_handle;
+        self.rx_aggregate_reservation = canonical.aggregate_reservation;
         return true;
     }
 
@@ -12443,6 +14048,321 @@ pub const ExternalPumpStorage = struct {
         parser_seal: client_external_mode.ParserAuthoritySeal,
         tx_queue_generation: u64,
     };
+
+    const ResizeSemanticCleanupSnapshot = struct {
+        storage: ControlCleanupPublicationSnapshot,
+        owner_resize: OwnerResizeState,
+        scratch_saved_self_addr: usize,
+        scratch_lifecycle: ExternalRxTurnScratchLifecycle,
+        turn_generation: u64,
+        canonical_drain: RxDrainEvidence,
+        permit: PreparedWholeDrainPermit,
+        verdict: PreparedControlSemanticVerdict,
+        wrapper: PreparedControlSemanticTake,
+        receipt: PreparedResizeSemanticCommit,
+        take: PreparedControlResponseTake,
+        frozen: FrozenControlResponse,
+        parser_seal: client_external_mode.ParserAuthoritySeal,
+        tx_queue_generation: u64,
+    };
+
+    const ResyncSemanticCleanupSnapshot = struct {
+        storage: ControlCleanupPublicationSnapshot,
+        scratch_saved_self_addr: usize,
+        scratch_lifecycle: ExternalRxTurnScratchLifecycle,
+        turn_generation: u64,
+        canonical_drain: RxDrainEvidence,
+        permit: PreparedWholeDrainPermit,
+        verdict: PreparedControlSemanticVerdict,
+        transition: PreparedResyncAckTransition,
+        projected: ProjectedRecoverySnapshotCommit,
+        receipt: PreparedResyncSemanticCommit,
+        wrapper: PreparedControlSemanticTake,
+        take: PreparedControlResponseTake,
+        frozen: FrozenControlResponse,
+        parser_seal: client_external_mode.ParserAuthoritySeal,
+        tx_queue_generation: u64,
+        ledger_projection_digest: external_owner_seal.Digest,
+        aggregate_present: bool,
+        aggregate_addr: usize,
+        aggregate_digest: external_owner_seal.Digest,
+        aggregate_recovery_commit_digest: external_owner_seal.Digest,
+        aggregate_recovery_output_digest: external_owner_seal.Digest,
+        aggregate_recovery_binding_digest: external_owner_seal.Digest,
+        aggregate_recovery_dispositions_digest: external_owner_seal.Digest,
+    };
+
+    comptime {
+        if (@sizeOf(ProjectedRecoverySnapshotCommit) > 256 * 1024)
+            @compileError("F3c2 projected commit exceeded its 256 KiB stack-object budget");
+        // prepare -> validate -> ledger planning may keep three projected-sized values live.
+        if (@sizeOf(ProjectedRecoverySnapshotCommit) * 3 > 1024 * 1024)
+            @compileError("F3c2 projected validation exceeded its 1 MiB nested stack budget");
+        if (@sizeOf(ResyncSemanticCleanupSnapshot) > 512 * 1024)
+            @compileError("F3c2 cleanup snapshot exceeded its 512 KiB stack-object budget");
+    }
+
+    fn captureResizeSemanticCleanupSnapshot(
+        self: *const ExternalPumpStorage,
+        scratch: *const ExternalRxTurnScratch,
+        frozen: *const FrozenControlResponse,
+    ) ResizeSemanticCleanupSnapshot {
+        const client = &self.owned_client.?;
+        const external = switch (client.io_mode) {
+            .external => |*state| state,
+            .blocking => unreachable,
+        };
+        var expected_frozen = frozen.*;
+        expected_frozen.payload = external_inbox_ledger.OwnedPayload.empty(
+            frozen.payload.allocator,
+        );
+        expected_frozen.lifecycle = .cleaned_tombstone;
+        expected_frozen.digest = frozenControlResponseDigest(&expected_frozen);
+        return .{
+            .storage = self.captureControlCleanupPublicationSnapshot(),
+            .owner_resize = self.owner_resize,
+            .scratch_saved_self_addr = scratch.saved_self_addr,
+            .scratch_lifecycle = scratch.lifecycle,
+            .turn_generation = scratch.turn_generation,
+            .canonical_drain = scratch.drain_evidence,
+            .permit = scratch.whole_drain_permit,
+            .verdict = scratch.control_semantic_verdict,
+            .wrapper = scratch.control_semantic_take,
+            .receipt = scratch.resize_semantic_commit,
+            .take = scratch.resize_semantic_response_take,
+            .frozen = expected_frozen,
+            .parser_seal = external.rx_provenance.parser_seal,
+            .tx_queue_generation = external.tx_queue_generation,
+        };
+    }
+
+    fn detectAndRestoreResizeSemanticCleanupDrift(
+        self: *ExternalPumpStorage,
+        scratch: *ExternalRxTurnScratch,
+        canonical: ResizeSemanticCleanupSnapshot,
+    ) bool {
+        var drifted = self.detectAndRestoreControlCleanupPublicationDrift(
+            canonical.storage,
+        );
+        if (!std.meta.eql(self.owner_resize, canonical.owner_resize)) {
+            self.owner_resize = canonical.owner_resize;
+            drifted = true;
+        }
+        const client = if (self.owned_client) |*owned| owned else {
+            drifted = true;
+            scratch.saved_self_addr = canonical.scratch_saved_self_addr;
+            scratch.lifecycle = canonical.scratch_lifecycle;
+            scratch.turn_generation = canonical.turn_generation;
+            restoreTerminalCleanupDrainEvidenceUnchecked(
+                &scratch.drain_evidence,
+                canonical.canonical_drain,
+            );
+            scratch.whole_drain_permit = canonical.permit;
+            scratch.control_semantic_verdict = canonical.verdict;
+            scratch.control_semantic_take = canonical.wrapper;
+            scratch.resize_semantic_commit = canonical.receipt;
+            scratch.resize_semantic_response_take = canonical.take;
+            scratch.resize_semantic_frozen_response = canonical.frozen;
+            return drifted;
+        };
+        const external_current = switch (client.io_mode) {
+            .external => |*state| blk: {
+                const current = std.meta.eql(
+                    state.rx_provenance.parser_seal,
+                    canonical.parser_seal,
+                ) and client_external_mode.parserSealValid(state, &client.parser) and
+                    state.tx_queue_generation == canonical.tx_queue_generation;
+                if (!current) {
+                    state.rx_provenance.parser_seal = canonical.parser_seal;
+                    state.tx_queue_generation = canonical.tx_queue_generation;
+                }
+                break :blk current;
+            },
+            .blocking => false,
+        };
+        if (!external_current or
+            scratch.saved_self_addr != canonical.scratch_saved_self_addr or
+            scratch.lifecycle != canonical.scratch_lifecycle or
+            scratch.turn_generation != canonical.turn_generation or
+            !std.meta.eql(scratch.drain_evidence, canonical.canonical_drain) or
+            !std.meta.eql(scratch.whole_drain_permit, canonical.permit) or
+            !std.meta.eql(scratch.control_semantic_verdict, canonical.verdict) or
+            !std.meta.eql(scratch.control_semantic_take, canonical.wrapper) or
+            !std.meta.eql(scratch.resize_semantic_commit, canonical.receipt) or
+            !std.meta.eql(scratch.resize_semantic_response_take, canonical.take) or
+            !frozenControlResponseMatchesExpectedCleaned(
+                &scratch.resize_semantic_frozen_response,
+                &canonical.frozen,
+            )) drifted = true;
+        if (drifted) {
+            scratch.saved_self_addr = canonical.scratch_saved_self_addr;
+            scratch.lifecycle = canonical.scratch_lifecycle;
+            scratch.turn_generation = canonical.turn_generation;
+            restoreTerminalCleanupDrainEvidenceUnchecked(
+                &scratch.drain_evidence,
+                canonical.canonical_drain,
+            );
+            scratch.whole_drain_permit = canonical.permit;
+            scratch.control_semantic_verdict = canonical.verdict;
+            scratch.control_semantic_take = canonical.wrapper;
+            scratch.resize_semantic_commit = canonical.receipt;
+            scratch.resize_semantic_response_take = canonical.take;
+            scratch.resize_semantic_frozen_response = canonical.frozen;
+        }
+        return drifted;
+    }
+
+    fn captureResyncSemanticCleanupSnapshot(
+        self: *const ExternalPumpStorage,
+        scratch: *const ExternalRxTurnScratch,
+        aggregate: ?*PreparedRxAggregate,
+        frozen: *const FrozenControlResponse,
+    ) ResyncSemanticCleanupSnapshot {
+        const client = &self.owned_client.?;
+        const external = switch (client.io_mode) {
+            .external => |*state| state,
+            .blocking => unreachable,
+        };
+        var expected_frozen = frozen.*;
+        expected_frozen.payload = external_inbox_ledger.OwnedPayload.empty(
+            frozen.payload.allocator,
+        );
+        expected_frozen.lifecycle = .cleaned_tombstone;
+        expected_frozen.digest = frozenControlResponseDigest(&expected_frozen);
+        var aggregate_digest = [_]u8{0} ** 32;
+        var aggregate_recovery_commit_digest = [_]u8{0} ** 32;
+        var aggregate_recovery_output_digest = [_]u8{0} ** 32;
+        var aggregate_recovery_binding_digest = [_]u8{0} ** 32;
+        var aggregate_recovery_dispositions_digest = [_]u8{0} ** 32;
+        if (aggregate) |value| {
+            // Predict the sole callback-owned mutation without copying the pointer-bearing
+            // aggregate. The original retirement is restored before any allocator callback.
+            const retirement = value.retirement;
+            value.retirement = .{ .lifecycle = .retired };
+            aggregate_digest = preparedRxAggregateDigest(value);
+            value.retirement = retirement;
+            // The aggregate seal contains the child seals, not every child field. Preserve
+            // independently recomputed child digests so a callback cannot mutate a pointer and
+            // leave its stale child seal looking canonical to the aggregate-level recomputation.
+            aggregate_recovery_commit_digest = preparedRecoverySnapshotCommitDigest(
+                &value.recovery_snapshot_commit,
+            );
+            aggregate_recovery_output_digest = immutableRecoveryCommitOutputDigest(
+                &value.recovery_commit_output,
+            );
+            aggregate_recovery_binding_digest = committedRecoverySnapshotBindingDigest(
+                &value.recovery_snapshot_binding,
+            );
+            aggregate_recovery_dispositions_digest = recoverySnapshotDispositionRootDigest(
+                &value.recovery_dispositions,
+            );
+        }
+        return .{
+            .storage = self.captureControlCleanupPublicationSnapshot(),
+            .scratch_saved_self_addr = scratch.saved_self_addr,
+            .scratch_lifecycle = scratch.lifecycle,
+            .turn_generation = scratch.turn_generation,
+            .canonical_drain = scratch.drain_evidence,
+            .permit = scratch.whole_drain_permit,
+            .verdict = scratch.control_semantic_verdict,
+            .transition = scratch.resync_ack_transition,
+            .projected = scratch.projected_recovery_snapshot_commit,
+            .receipt = scratch.resync_semantic_commit,
+            .wrapper = scratch.control_semantic_take,
+            .take = scratch.resync_ack_response_take,
+            .frozen = expected_frozen,
+            .parser_seal = external.rx_provenance.parser_seal,
+            .tx_queue_generation = external.tx_queue_generation,
+            .ledger_projection_digest = self.inbox_ledger.projectionAuthorityDigest(),
+            .aggregate_present = aggregate != null,
+            .aggregate_addr = if (aggregate) |value| @intFromPtr(value) else 0,
+            .aggregate_digest = aggregate_digest,
+            .aggregate_recovery_commit_digest = aggregate_recovery_commit_digest,
+            .aggregate_recovery_output_digest = aggregate_recovery_output_digest,
+            .aggregate_recovery_binding_digest = aggregate_recovery_binding_digest,
+            .aggregate_recovery_dispositions_digest = aggregate_recovery_dispositions_digest,
+        };
+    }
+
+    /// The allocator callback is untrusted.  Scalar storage authority can use the existing
+    /// canonical restorer, but a changed ledger or aggregate is never copied back: those values
+    /// contain ownership-bearing pointers and are handed to bounded quarantine instead.
+    fn detectResyncSemanticCleanupDrift(
+        self: *ExternalPumpStorage,
+        scratch: *ExternalRxTurnScratch,
+        aggregate: ?*PreparedRxAggregate,
+        canonical: ResyncSemanticCleanupSnapshot,
+    ) bool {
+        var drifted = self.detectAndRestoreControlCleanupPublicationDrift(
+            canonical.storage,
+        );
+        const client = if (self.owned_client) |*owned| owned else return true;
+        const external_current = switch (client.io_mode) {
+            .external => |*state| std.meta.eql(
+                state.rx_provenance.parser_seal,
+                canonical.parser_seal,
+            ) and client_external_mode.parserSealValid(state, &client.parser) and
+                state.tx_queue_generation == canonical.tx_queue_generation,
+            .blocking => false,
+        };
+        const aggregate_current = canonical.aggregate_present == (aggregate != null) and
+            canonical.aggregate_addr == (if (aggregate) |value| @intFromPtr(value) else 0) and
+            (if (aggregate) |value|
+                value.lifecycle == .side_intent_consumed and
+                    value.retirement.lifecycle == .retired and
+                    std.mem.eql(
+                        u8,
+                        &canonical.aggregate_digest,
+                        &preparedRxAggregateDigest(value),
+                    ) and std.mem.eql(
+                    u8,
+                    &canonical.aggregate_recovery_commit_digest,
+                    &preparedRecoverySnapshotCommitDigest(&value.recovery_snapshot_commit),
+                ) and std.mem.eql(
+                    u8,
+                    &canonical.aggregate_recovery_output_digest,
+                    &immutableRecoveryCommitOutputDigest(&value.recovery_commit_output),
+                ) and std.mem.eql(
+                    u8,
+                    &canonical.aggregate_recovery_binding_digest,
+                    &committedRecoverySnapshotBindingDigest(&value.recovery_snapshot_binding),
+                ) and std.mem.eql(
+                    u8,
+                    &canonical.aggregate_recovery_dispositions_digest,
+                    &recoverySnapshotDispositionRootDigest(&value.recovery_dispositions),
+                )
+            else
+                std.mem.allEqual(u8, &canonical.aggregate_digest, 0) and
+                    std.mem.allEqual(u8, &canonical.aggregate_recovery_commit_digest, 0) and
+                    std.mem.allEqual(u8, &canonical.aggregate_recovery_output_digest, 0) and
+                    std.mem.allEqual(u8, &canonical.aggregate_recovery_binding_digest, 0) and
+                    std.mem.allEqual(u8, &canonical.aggregate_recovery_dispositions_digest, 0));
+        if (!external_current or !aggregate_current or
+            !std.mem.eql(
+                u8,
+                &self.inbox_ledger.projectionAuthorityDigest(),
+                &canonical.ledger_projection_digest,
+            ) or scratch.saved_self_addr != canonical.scratch_saved_self_addr or
+            scratch.lifecycle != canonical.scratch_lifecycle or
+            scratch.turn_generation != canonical.turn_generation or
+            !std.meta.eql(scratch.drain_evidence, canonical.canonical_drain) or
+            !std.meta.eql(scratch.whole_drain_permit, canonical.permit) or
+            !std.meta.eql(scratch.control_semantic_verdict, canonical.verdict) or
+            !std.meta.eql(scratch.resync_ack_transition, canonical.transition) or
+            !std.meta.eql(scratch.projected_recovery_snapshot_commit, canonical.projected) or
+            !std.meta.eql(scratch.resync_semantic_commit, canonical.receipt) or
+            !std.meta.eql(scratch.control_semantic_take, canonical.wrapper) or
+            !std.meta.eql(scratch.resync_ack_response_take, canonical.take) or
+            !frozenControlResponseMatchesExpectedCleaned(
+                &scratch.resync_ack_frozen_response,
+                &canonical.frozen,
+            )) drifted = true;
+        if (!drifted) if (aggregate) |value| {
+            // Only seal the precomputed canonical state. Never authenticate callback mutations.
+            value.digest = canonical.aggregate_digest;
+        };
+        return drifted;
+    }
 
     fn captureControlSemanticTerminalCleanupSnapshot(
         self: *const ExternalPumpStorage,
@@ -13326,6 +15246,104 @@ pub const ExternalPumpStorage = struct {
         else
             .quarantined;
     }
+
+    /// Prepares the single retained-aggregate destruction authority shared by full owner teardown
+    /// and narrow transaction cleanup.  The allocator callback must see a tombstoned handle, never
+    /// a live pointer-bearing owner.
+    fn prepareRetainedRxAggregateDestroy(
+        self: *ExternalPumpStorage,
+        cleanup: *external_owner_cleanup.FrozenOwnerCleanupDescriptor,
+        execution: *?RetainedRxAggregateDestroyExecution,
+    ) bool {
+        if (!retainedRxAggregateValid(self) or cleanup.saved_self_addr != 0 or
+            execution.* != null)
+            return false;
+        const aggregate: *PreparedRxAggregate =
+            @ptrFromInt(self.rx_aggregate_handle.aggregate_addr);
+        external_owner_cleanup.validateFreezeOwnedSliceAligned(
+            cleanup,
+            std.mem.asBytes(aggregate),
+            .of(PreparedRxAggregate),
+        ) catch return false;
+        execution.* = .{
+            .aggregate = aggregate,
+            .allocator = self.rx_aggregate_handle.allocator,
+        };
+        return true;
+    }
+
+    // MARU_F3C2_RETAINED_CLEANUP_UNCHECKED_BEGIN
+    fn commitRetainedRxAggregateDestroyUnchecked(
+        self: *ExternalPumpStorage,
+        cleanup: *external_owner_cleanup.FrozenOwnerCleanupDescriptor,
+        execution: RetainedRxAggregateDestroyExecution,
+    ) void {
+        const aggregate = execution.aggregate;
+        aggregate.lifecycle = .destroying;
+        aggregate.digest = preparedRxAggregateDigest(aggregate);
+        external_owner_cleanup.freezeOwnedSliceAlignedUnchecked(
+            cleanup,
+            execution.allocator,
+            std.mem.asBytes(aggregate),
+            .of(PreparedRxAggregate),
+        );
+        self.rx_aggregate_handle = .{};
+        self.rx_aggregate_reservation = .{};
+    }
+    // MARU_F3C2_RETAINED_CLEANUP_UNCHECKED_END
+
+    fn prepareCompletedResponseOwnerCleanup(
+        self: *ExternalPumpStorage,
+        aggregate_cleanup: *external_owner_cleanup.FrozenOwnerCleanupDescriptor,
+        aggregate_execution: *?RetainedRxAggregateDestroyExecution,
+        intent_destroy: *external_rx_intent.PreparedDestroy,
+        intent_out: *?*external_rx_intent.ExternalRxIntentHandle,
+        intent_scratch_out: *?*anyopaque,
+    ) bool {
+        if (!self.prepareRetainedRxAggregateDestroy(
+            aggregate_cleanup,
+            aggregate_execution,
+        ) or
+            !self.intentScratchReservationValid() or
+            self.intent_scratch_reservation.lifecycle != .active or
+            intent_scratch_out.* != null)
+            return false;
+        const intent: *external_rx_intent.ExternalRxIntentHandle =
+            @ptrFromInt(self.intent_scratch_reservation.handle_addr);
+        if (!external_rx_intent.prepareDestroy(
+            intent,
+            @intFromPtr(self),
+            self.intent_scratch_reservation.generation,
+            intent_destroy,
+        )) return false;
+        intent_out.* = intent;
+        intent_scratch_out.* = @ptrFromInt(intent_destroy.scratch_addr);
+        return true;
+    }
+
+    // MARU_F3C2_COMBINED_CLEANUP_UNCHECKED_BEGIN
+    fn commitCompletedResponseOwnerCleanupUnchecked(
+        self: *ExternalPumpStorage,
+        aggregate_cleanup: *external_owner_cleanup.FrozenOwnerCleanupDescriptor,
+        aggregate_execution: RetainedRxAggregateDestroyExecution,
+        intent: *external_rx_intent.ExternalRxIntentHandle,
+        intent_scratch: *anyopaque,
+        intent_destroy: *external_rx_intent.PreparedDestroy,
+        frozen_intent: *external_rx_intent.FrozenDestroy,
+    ) void {
+        self.commitRetainedRxAggregateDestroyUnchecked(
+            aggregate_cleanup,
+            aggregate_execution,
+        );
+        external_rx_intent.commitPreparedDestroyUnchecked(
+            intent,
+            intent_scratch,
+            intent_destroy,
+            frozen_intent,
+        );
+        self.intent_scratch_reservation = .{};
+    }
+    // MARU_F3C2_COMBINED_CLEANUP_UNCHECKED_END
 
     fn poisonRxAggregateReservation(self: *ExternalPumpStorage) void {
         self.rx_aggregate_handle = .{ .lifecycle = .poisoned };
@@ -17348,6 +19366,17 @@ pub const ExternalPumpStorage = struct {
             scratch.control_semantic_verdict,
             PreparedControlSemanticVerdict{},
         ) and std.meta.eql(
+            scratch.control_semantic_take,
+            PreparedControlSemanticTake{},
+        ) and std.meta.eql(
+            scratch.resize_semantic_commit,
+            PreparedResizeSemanticCommit{},
+        ) and std.meta.eql(
+            scratch.resize_semantic_response_take,
+            PreparedControlResponseTake{},
+        ) and frozenControlResponsePristine(
+            &scratch.resize_semantic_frozen_response,
+        ) and std.meta.eql(
             scratch.resync_ack_transition,
             PreparedResyncAckTransition{},
         ) and std.meta.eql(
@@ -17355,6 +19384,12 @@ pub const ExternalPumpStorage = struct {
             PreparedControlResponseTake{},
         ) and frozenControlResponsePristine(
             &scratch.resync_ack_frozen_response,
+        ) and std.meta.eql(
+            scratch.resync_semantic_commit,
+            PreparedResyncSemanticCommit{},
+        ) and std.meta.eql(
+            scratch.projected_recovery_snapshot_commit,
+            ProjectedRecoverySnapshotCommit{},
         ) and std.meta.eql(
             scratch.control_semantic_terminal,
             PreparedControlSemanticTerminal{},
@@ -20508,15 +22543,12 @@ pub const ExternalPumpStorage = struct {
         {
             return self.quarantineOwnerTeardown(cleanup_scratch, true);
         }
-        if (has_retained_aggregate) {
-            const aggregate: *const PreparedRxAggregate =
-                @ptrFromInt(self.rx_aggregate_handle.aggregate_addr);
-            external_owner_cleanup.validateFreezeOwnedSliceAligned(
+        if (has_retained_aggregate and
+            !self.prepareRetainedRxAggregateDestroy(
                 &cleanup_scratch.aggregate_cleanup,
-                std.mem.asBytes(aggregate),
-                .of(PreparedRxAggregate),
-            ) catch return self.quarantineOwnerTeardown(cleanup_scratch, true);
-        }
+                &cleanup_scratch.aggregate_execution,
+            ))
+            return self.quarantineOwnerTeardown(cleanup_scratch, true);
         if (self.owner_teardown_generation == std.math.maxInt(u64))
             return self.quarantineOwnerTeardown(cleanup_scratch, true);
         const next_generation = self.owner_teardown_generation + 1;
@@ -20712,20 +22744,11 @@ pub const ExternalPumpStorage = struct {
                 &cleanup_scratch.screen_prepared,
                 &cleanup_scratch.screen_frozen,
             );
-        if (has_retained_aggregate) {
-            const aggregate: *PreparedRxAggregate =
-                @ptrFromInt(self.rx_aggregate_handle.aggregate_addr);
-            aggregate.lifecycle = .destroying;
-            aggregate.digest = preparedRxAggregateDigest(aggregate);
-            external_owner_cleanup.freezeOwnedSliceAlignedUnchecked(
+        if (has_retained_aggregate)
+            self.commitRetainedRxAggregateDestroyUnchecked(
                 &cleanup_scratch.aggregate_cleanup,
-                self.rx_aggregate_handle.allocator,
-                std.mem.asBytes(aggregate),
-                .of(PreparedRxAggregate),
+                cleanup_scratch.aggregate_execution.?,
             );
-            self.rx_aggregate_handle = .{};
-            self.rx_aggregate_reservation = .{};
-        }
         cleanup_scratch.moved_client = self.owned_client;
         if (client_cleanup_reservation_active) {
             const source = reserved_client orelse
@@ -21075,6 +23098,7 @@ const IntentScratchAuthorityProbe = struct {
     allocator: std.mem.Allocator,
     parser_generation: u64 = 1,
     buffer_start_absolute: u64 = 0,
+    attach_instance_id: u64 = 1,
     forbidden_ranges: []const external_owner_range.Range = &.{},
     forbidden_ranges_generation: u64 = 1,
     forbidden_ranges_digest: external_owner_seal.Digest = blk: {
@@ -21092,7 +23116,7 @@ const IntentScratchAuthorityProbe = struct {
             .parser_generation = self.parser_generation,
             .buffer_start_absolute = self.buffer_start_absolute,
             .identity = .{
-                .attach_instance_id = 1,
+                .attach_instance_id = self.attach_instance_id,
                 .destination_slot_addr = @intFromPtr(self.storage),
             },
             .allocator = self.allocator,
@@ -22085,6 +24109,13 @@ const AllocatorCallbackProbe = struct {
         aggregate_storage_authority_drift,
         aggregate_storage_ledger_drift,
         aggregate_storage_ledger_descriptor_drift,
+        resync_cleanup_admit_reentry,
+        resync_aggregate_pointer_drift,
+        resync_aggregate_pointer_reseal_drift,
+        resync_binding_pointer_reseal_drift,
+        resync_disposition_pointer_reseal_drift,
+        resync_ledger_authority_drift,
+        resync_retirement_response_descriptor_drift,
         tx_admission_reentry,
         tx_admission_queue_drift,
         revoke_cleanup_correlation_reentry,
@@ -22127,12 +24158,14 @@ const AllocatorCallbackProbe = struct {
     intent_authority: ?*IntentScratchAuthorityProbe = null,
     nested_intent_create: ?external_rx_intent.CreateResult = null,
     nested_tx_tag: ?std.meta.Tag(TxAdmissionResult) = null,
+    nested_control_tag: ?std.meta.Tag(ControlAdmissionResult) = null,
     nested_tx_operation_acquired: ?bool = null,
     stale_tx_state: ?*client_external_mode.State = null,
     rx_scratch: ?*ExternalRxTurnScratch = null,
     terminal_lease: ?*const ExternalWholeTurnLease = null,
     terminal_consume_fn: ?*const ConsumeControlSemanticTerminalUnderHeldLeaseFn = null,
     nested_terminal_consume: ?ConsumeControlSemanticTerminalResult = null,
+    aggregate: ?*PreparedRxAggregate = null,
 
     fn allocator(self: *AllocatorCallbackProbe) std.mem.Allocator {
         return .{ .ptr = self, .vtable = &.{
@@ -22369,6 +24402,84 @@ const AllocatorCallbackProbe = struct {
                 self.storage.?.rx_aggregate_handle.aggregate_addr,
             );
             aggregate.destination_write_count +%= 1;
+        } else if (!self.fired and self.mode == .resync_cleanup_admit_reentry and
+            self.storage != null and self.rx_scratch != null and
+            self.rx_scratch.?.control_semantic_take.lifecycle == .consumed_tombstone)
+        {
+            self.fired = true;
+            self.nested_control_tag = std.meta.activeTag(self.storage.?.admitControl(.{
+                .request = .{ .resize = .{
+                    .stream_id = valid_evidence.stream_id,
+                    .cols = 80,
+                    .rows = 24,
+                    .client_sequence = 99,
+                } },
+                .expected_controller_generation = valid_evidence.initial_controller_generation,
+            }, 103));
+        } else if (!self.fired and
+            self.mode == .resync_retirement_response_descriptor_drift and
+            self.aggregate != null and self.rx_scratch != null and
+            self.aggregate.?.retirement.lifecycle == .retired and
+            self.rx_scratch.?.resync_ack_frozen_response.lifecycle == .cleaned_tombstone)
+        {
+            self.fired = true;
+            // The response owner was already moved into a callback-local value. Corrupting its
+            // public tombstone must be detected without becoming a second free target.
+            self.rx_scratch.?.resync_ack_frozen_response.payload.allocation_ptr =
+                @ptrFromInt(1);
+            self.rx_scratch.?.resync_ack_frozen_response.payload.logical_len = 1;
+            self.rx_scratch.?.resync_ack_frozen_response.payload.allocator.ptr =
+                @ptrFromInt(1);
+            self.rx_scratch.?.resync_ack_frozen_response.digest =
+                frozenControlResponseDigest(
+                    &self.rx_scratch.?.resync_ack_frozen_response,
+                );
+        } else if (!self.fired and
+            (self.mode == .resync_aggregate_pointer_drift or
+                self.mode == .resync_aggregate_pointer_reseal_drift or
+                self.mode == .resync_binding_pointer_reseal_drift or
+                self.mode == .resync_disposition_pointer_reseal_drift or
+                self.mode == .resync_ledger_authority_drift) and
+            self.aggregate != null and self.rx_scratch != null and
+            self.rx_scratch.?.control_semantic_take.lifecycle == .consumed_tombstone)
+        {
+            self.fired = true;
+            switch (self.mode) {
+                .resync_aggregate_pointer_drift, .resync_aggregate_pointer_reseal_drift => {
+                    // The stale variant leaves the child seal untouched; the coherent variant
+                    // refreshes both child and aggregate seals. Both must differ from canonical.
+                    self.aggregate.?.recovery_commit_output.live_commit_addr = 1;
+                    if (self.mode == .resync_aggregate_pointer_reseal_drift) {
+                        self.aggregate.?.recovery_commit_output.digest = immutableRecoveryCommitOutputDigest(
+                            &self.aggregate.?.recovery_commit_output,
+                        );
+                        self.aggregate.?.digest = preparedRxAggregateDigest(self.aggregate.?);
+                    }
+                },
+                .resync_binding_pointer_reseal_drift => {
+                    self.aggregate.?.recovery_snapshot_binding.source_output_addr = 1;
+                    self.aggregate.?.recovery_snapshot_binding.digest = committedRecoverySnapshotBindingDigest(
+                        &self.aggregate.?.recovery_snapshot_binding,
+                    );
+                    self.aggregate.?.digest = preparedRxAggregateDigest(self.aggregate.?);
+                },
+                .resync_disposition_pointer_reseal_drift => {
+                    const dispositions = &self.aggregate.?.recovery_dispositions;
+                    dispositions.entries[0].cleanup_destination_addr = 1;
+                    dispositions.entries[0].digest = recoverySnapshotDispositionEntryDigest(
+                        &dispositions.entries[0],
+                    );
+                    dispositions.root_digest = recoverySnapshotDispositionRootDigest(dispositions);
+                    self.aggregate.?.recovery_snapshot_commit.dispositions_root_digest =
+                        dispositions.root_digest;
+                    self.aggregate.?.recovery_snapshot_commit.digest = preparedRecoverySnapshotCommitDigest(
+                        &self.aggregate.?.recovery_snapshot_commit,
+                    );
+                    self.aggregate.?.digest = preparedRxAggregateDigest(self.aggregate.?);
+                },
+                .resync_ledger_authority_drift => self.storage.?.inbox_ledger.mutation_epoch +%= 1,
+                else => unreachable,
+            }
         } else if (!self.fired and
             (self.mode == .aggregate_storage_semantic_drift or
                 self.mode == .aggregate_storage_authority_drift or
@@ -25411,6 +27522,7 @@ const F3c1PolicyBlock = enum {
     work_budget,
     parser_incomplete,
     correlation_max,
+    request_id_max,
     decode_completed_reseal,
 };
 
@@ -25424,7 +27536,41 @@ fn prepareF3c1ActualResponse(
     policy_block: F3c1PolicyBlock,
     fail_before_decode: ?*bool,
 ) !ControlSemanticPreparationResult {
+    return prepareF3c1ActualResponseWithInitialResize(
+        storage,
+        fixture,
+        scratch,
+        lease,
+        request,
+        payload,
+        policy_block,
+        fail_before_decode,
+        null,
+    );
+}
+
+fn prepareF3c1ActualResponseWithInitialResize(
+    storage: *ExternalPumpStorage,
+    fixture: *TestClient,
+    scratch: *ExternalRxTurnScratch,
+    lease: *ExternalWholeTurnLease,
+    request: control_response_wire.ControlRequest,
+    payload: []const u8,
+    policy_block: F3c1PolicyBlock,
+    fail_before_decode: ?*bool,
+    initial_resize: ?resize_wire.Event,
+) !ControlSemanticPreparationResult {
     try initActiveF2Storage(storage, fixture);
+    if (initial_resize) |event| {
+        // This is an already-published baseline, not another outbound resize
+        // event competing with the control request exercised by this fixture.
+        bindOwnerResize(storage, event);
+        storage.owner_resize.current.pending = false;
+        storage.owner_resize.current.seal.pending = false;
+        storage.owner_resize.current.seal.digest = ownerResizeDigest(
+            storage.owner_resize.current.seal,
+        );
+    }
     var canonical_request = request;
     if (request == .resync) {
         canonical_request.resync.recovery_authority.owner_incarnation = storage.owner_incarnation;
@@ -25432,6 +27578,8 @@ fn prepareF3c1ActualResponse(
             .control_wait = .{ .epoch = request.resync.recovery_authority.recovery_epoch, .deadline_ns = 1_000 },
         } } };
     }
+    if (policy_block == .request_id_max)
+        storage.owner_request_ids = .last_available;
     const admitted = storage.admitControl(.{
         .request = canonical_request,
         .expected_controller_generation = valid_evidence.initial_controller_generation,
@@ -25450,6 +27598,10 @@ fn prepareF3c1ActualResponse(
         scratch,
     );
     try std.testing.expect(sent.terminal == null);
+    // Never enter the blocking peer read unless the product pump proved that it
+    // published this request. This keeps a failed fixture precondition from
+    // turning a focused gate into an unbounded hang.
+    try std.testing.expect(sent.tx_bytes > 0);
     var request_wire: [protocol.max_control_json + protocol.header_size]u8 = undefined;
     try std.testing.expect(c.recv(fixture.peer_fd, &request_wire, request_wire.len, 0) > 0);
     if (policy_block == .correlation_max) {
@@ -25497,7 +27649,10 @@ fn prepareF3c1ActualResponse(
         scratch,
     );
     const published = storage.publishRxPreparationUnderHeldLease(lease, scratch, preparation);
-    try std.testing.expect(published.terminal == null);
+    try std.testing.expectEqual(
+        @as(?client_pump.ExternalPumpTerminal, null),
+        published.terminal,
+    );
     var summary = switch (preparation) {
         .drained => |value| value,
         else => return error.TestUnexpectedResult,
@@ -25508,7 +27663,7 @@ fn prepareF3c1ActualResponse(
         .read_budget => summary.policy.rx_read_budget_exhausted = true,
         .work_budget => summary.policy.work_budget_exhausted = true,
         .parser_incomplete => summary.policy.parser = .incomplete,
-        .correlation_max, .decode_completed_reseal => {},
+        .correlation_max, .request_id_max, .decode_completed_reseal => {},
     }
     const completed_before = storage.completed_control;
     const correlation_before = storage.control_correlation;
@@ -25529,6 +27684,445 @@ fn prepareF3c1ActualResponse(
         try std.testing.expect(std.meta.eql(terminal_before, scratch.control_semantic_terminal));
     }
     return result;
+}
+
+test "f3c2 resize plan publishes first baseline and newer full state" {
+    comptime {
+        _ = ExternalPumpStorage.prepareResizeSemanticCommitUnderHeldLease;
+        _ = ExternalPumpStorage.preparedResizeSemanticCommitCurrent;
+        _ = ExternalPumpStorage.consumeResizeSemanticCommitUnderHeldLease;
+    }
+    const first = planResizeSemanticCommit(
+        .none,
+        0xaa,
+        7,
+        7,
+        .{ .cols = 80, .rows = 24, .resize_generation = 1, .changed = false },
+    );
+    try std.testing.expectEqual(ResizeSemanticDisposition.publish_new, first.disposition);
+    const current: OwnerResizeState = .{ .current = .{
+        .event = .{ .runtime_id = 0xaa, .cols = 80, .rows = 24, .resize_generation = 1 },
+        .pending = false,
+        .seal = undefined,
+    } };
+    const newer = planResizeSemanticCommit(
+        current,
+        0xaa,
+        7,
+        7,
+        .{ .cols = 100, .rows = 30, .resize_generation = 2, .changed = true },
+    );
+    try std.testing.expectEqual(ResizeSemanticDisposition.publish_new, newer.disposition);
+}
+
+test "f3c2 destination range matrix accepts adjacent and rejects overlap escape and overflow" {
+    try std.testing.expect(!rangesOverlap(100, 20, 120, 10));
+    try std.testing.expect(rangesOverlap(100, 20, 119, 10));
+    try std.testing.expect(rangesOverlap(119, 10, 100, 20));
+    try std.testing.expect(rangesOverlap(100, 40, 110, 10));
+    try std.testing.expect(rangesOverlap(110, 10, 100, 40));
+    try std.testing.expect(rangesOverlap(std.math.maxInt(usize) - 1, 4, 1, 1));
+
+    try std.testing.expect(rangeContains(100, 40, 110, 10));
+    try std.testing.expect(rangeContains(100, 40, 100, 40));
+    try std.testing.expect(!rangeContains(100, 40, 99, 10));
+    try std.testing.expect(!rangeContains(100, 40, 130, 11));
+    try std.testing.expect(!rangeContains(std.math.maxInt(usize) - 1, 4, 1, 1));
+
+    try std.testing.expect(declaredInlineChildRangeCurrent(100, 40, 110, 10, 10));
+    try std.testing.expect(!declaredInlineChildRangeCurrent(100, 40, 111, 10, 10));
+    try std.testing.expect(!declaredInlineChildRangeCurrent(100, 40, 135, 10, 35));
+    try std.testing.expect(!declaredInlineChildRangeCurrent(
+        std.math.maxInt(usize) - 1,
+        4,
+        1,
+        1,
+        4,
+    ));
+}
+
+test "f3c2 resize plan preserves older and equal identical full state" {
+    const current: OwnerResizeState = .{ .current = .{
+        .event = .{ .runtime_id = 0xaa, .cols = 80, .rows = 24, .resize_generation = 5 },
+        .pending = true,
+        .seal = undefined,
+    } };
+    const Applied = @FieldType(control_response_wire.ResizeReply, "applied");
+    const cases = [_]Applied{
+        .{ .cols = 70, .rows = 20, .resize_generation = 4, .changed = true },
+        .{ .cols = 80, .rows = 24, .resize_generation = 5, .changed = false },
+    };
+    for (cases) |applied| try std.testing.expectEqual(
+        ResizeSemanticDisposition.preserve_current,
+        planResizeSemanticCommit(current, 0xaa, 7, 7, applied).disposition,
+    );
+}
+
+test "f3c2 resize plan classifies equivocation and target mismatch as protocol terminal" {
+    const current: OwnerResizeState = .{ .current = .{
+        .event = .{ .runtime_id = 0xaa, .cols = 80, .rows = 24, .resize_generation = 5 },
+        .pending = false,
+        .seal = undefined,
+    } };
+    const equivocation = planResizeSemanticCommit(
+        current,
+        0xaa,
+        7,
+        7,
+        .{ .cols = 81, .rows = 24, .resize_generation = 5, .changed = true },
+    );
+    try std.testing.expectEqual(ResizeSemanticDisposition.protocol_terminal, equivocation.disposition);
+    const wrong_target = planResizeSemanticCommit(
+        current,
+        0xaa,
+        8,
+        7,
+        .{ .cols = 80, .rows = 24, .resize_generation = 6, .changed = true },
+    );
+    try std.testing.expectEqual(ResizeSemanticDisposition.protocol_terminal, wrong_target.disposition);
+}
+
+test "f3c2 resize semantic take publishes full state and cleans response" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    defer if (storage.lifecycle != .dead) {
+        _ = teardownForTest(&storage);
+    };
+    var lease: ExternalWholeTurnLease = .{};
+    try std.testing.expectEqual(
+        ControlSemanticPreparationResult.prepared_pair,
+        try prepareF3c1ActualResponse(
+            &storage,
+            &fixture,
+            scratch,
+            &lease,
+            .{ .resize = .{
+                .stream_id = valid_evidence.stream_id,
+                .cols = 80,
+                .rows = 24,
+                .client_sequence = 1,
+            } },
+            "{\"result\":{\"cols\":80,\"rows\":24,\"client_sequence\":1,\"resize_generation\":2,\"changed\":false}}",
+            .none,
+            null,
+        ),
+    );
+    try std.testing.expect(storage.prepareResizeSemanticCommitUnderHeldLease(
+        &lease,
+        scratch,
+    ));
+    try std.testing.expectEqual(
+        ConsumeResizeSemanticResult.consumed_resize_cleaned,
+        storage.consumeResizeSemanticCommitUnderHeldLease(&lease, scratch),
+    );
+    try std.testing.expect(storage.completed_control == .none);
+    try std.testing.expect(storage.control_correlation.state == .idle);
+    try std.testing.expect(storage.owner_resize == .current);
+    try std.testing.expectEqual(@as(u64, 2), storage.owner_resize.current.event.resize_generation);
+    try std.testing.expectEqual(@as(u16, 80), storage.owner_resize.current.event.cols);
+    try std.testing.expectEqual(@as(u16, 24), storage.owner_resize.current.event.rows);
+    try std.testing.expect(
+        scratch.resize_semantic_frozen_response.lifecycle == .cleaned_tombstone,
+    );
+    try std.testing.expectEqual(
+        WholeTurnReleaseResult.released,
+        storage.releaseWholeTurnLease(&lease),
+    );
+}
+
+test "f3c2 resize rejects coherently resealed response receipt splice" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    defer if (storage.lifecycle != .dead) {
+        _ = teardownForTest(&storage);
+    };
+    var lease: ExternalWholeTurnLease = .{};
+    try std.testing.expectEqual(
+        ControlSemanticPreparationResult.prepared_pair,
+        try prepareF3c1ActualResponse(
+            &storage,
+            &fixture,
+            scratch,
+            &lease,
+            .{ .resize = .{
+                .stream_id = valid_evidence.stream_id,
+                .cols = 80,
+                .rows = 24,
+                .client_sequence = 1,
+            } },
+            "{\"result\":{\"cols\":80,\"rows\":24,\"client_sequence\":1,\"resize_generation\":2,\"changed\":false}}",
+            .none,
+            null,
+        ),
+    );
+    try std.testing.expect(storage.prepareResizeSemanticCommitUnderHeldLease(
+        &lease,
+        scratch,
+    ));
+    const saved_receipt = scratch.resize_semantic_commit;
+    const saved_wrapper = scratch.control_semantic_take;
+    scratch.resize_semantic_commit.response_take_addr =
+        @intFromPtr(&scratch.resync_ack_response_take);
+    scratch.resize_semantic_commit.digest =
+        preparedResizeSemanticCommitDigest(&scratch.resize_semantic_commit);
+    scratch.control_semantic_take.branch.resize.receipt_digest =
+        scratch.resize_semantic_commit.digest;
+    scratch.control_semantic_take.digest =
+        preparedControlSemanticTakeDigest(&scratch.control_semantic_take);
+    try std.testing.expectEqual(
+        ConsumeResizeSemanticResult.invalid_precommit,
+        storage.consumeResizeSemanticCommitUnderHeldLease(&lease, scratch),
+    );
+    scratch.resize_semantic_commit = saved_receipt;
+    scratch.control_semantic_take = saved_wrapper;
+    try std.testing.expectEqual(
+        ConsumeResizeSemanticResult.consumed_resize_cleaned,
+        storage.consumeResizeSemanticCommitUnderHeldLease(&lease, scratch),
+    );
+    try std.testing.expectEqual(
+        WholeTurnReleaseResult.released,
+        storage.releaseWholeTurnLease(&lease),
+    );
+}
+
+test "f3c2 older and equal resize success consume owners exactly once while preserving current" {
+    const cases = [_]struct {
+        payload: []const u8,
+    }{
+        .{ .payload = "{\"result\":{\"cols\":70,\"rows\":20,\"client_sequence\":1,\"resize_generation\":4,\"changed\":true}}" },
+        .{ .payload = "{\"result\":{\"cols\":80,\"rows\":24,\"client_sequence\":1,\"resize_generation\":5,\"changed\":false}}" },
+    };
+    for (cases) |case| {
+        var fixture = try TestClient.init();
+        defer fixture.deinitPeer();
+        var storage: ExternalPumpStorage = .{};
+        const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+        defer std.testing.allocator.destroy(scratch);
+        defer if (storage.lifecycle != .dead) {
+            _ = teardownForTest(&storage);
+        };
+        var lease: ExternalWholeTurnLease = .{};
+        try std.testing.expectEqual(
+            ControlSemanticPreparationResult.prepared_pair,
+            try prepareF3c1ActualResponseWithInitialResize(
+                &storage,
+                &fixture,
+                scratch,
+                &lease,
+                .{ .resize = .{
+                    .stream_id = valid_evidence.stream_id,
+                    .cols = 80,
+                    .rows = 24,
+                    .client_sequence = 1,
+                } },
+                case.payload,
+                .none,
+                null,
+                .{
+                    .runtime_id = valid_evidence.runtime_id,
+                    .cols = 80,
+                    .rows = 24,
+                    .resize_generation = 5,
+                },
+            ),
+        );
+        const owner_before = storage.owner_resize;
+        const correlation_generation_before = storage.control_correlation.generation;
+        try std.testing.expect(storage.prepareResizeSemanticCommitUnderHeldLease(
+            &lease,
+            scratch,
+        ));
+        try std.testing.expectEqual(
+            ConsumeResizeSemanticResult.consumed_resize_cleaned,
+            storage.consumeResizeSemanticCommitUnderHeldLease(&lease, scratch),
+        );
+        try std.testing.expect(std.meta.eql(owner_before, storage.owner_resize));
+        try std.testing.expectEqual(
+            correlation_generation_before + 1,
+            storage.control_correlation.generation,
+        );
+        try std.testing.expect(storage.control_correlation.state == .idle);
+        try std.testing.expect(storage.completed_control == .none);
+        try std.testing.expectEqual(
+            FrozenControlResponseLifecycle.cleaned_tombstone,
+            scratch.resize_semantic_frozen_response.lifecycle,
+        );
+        try std.testing.expect(scratch.resize_semantic_frozen_response.payload.allocation_ptr == null);
+        try std.testing.expectEqual(
+            ConsumeResizeSemanticResult.invalid_precommit,
+            storage.consumeResizeSemanticCommitUnderHeldLease(&lease, scratch),
+        );
+        try std.testing.expectEqual(
+            WholeTurnReleaseResult.released,
+            storage.releaseWholeTurnLease(&lease),
+        );
+    }
+}
+
+test "f3c2 maximum correlation response succeeds before later admission exhausts" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    defer if (storage.lifecycle != .dead) {
+        _ = teardownForTest(&storage);
+    };
+    var lease: ExternalWholeTurnLease = .{};
+    try std.testing.expectEqual(
+        ControlSemanticPreparationResult.prepared_pair,
+        try prepareF3c1ActualResponse(
+            &storage,
+            &fixture,
+            scratch,
+            &lease,
+            .{ .resize = .{
+                .stream_id = valid_evidence.stream_id,
+                .cols = 81,
+                .rows = 25,
+                .client_sequence = 1,
+            } },
+            "{\"result\":{\"cols\":81,\"rows\":25,\"client_sequence\":1,\"resize_generation\":2,\"changed\":true}}",
+            .correlation_max,
+            null,
+        ),
+    );
+    try std.testing.expectEqual(
+        std.math.maxInt(u64),
+        storage.control_correlation.generation,
+    );
+    try std.testing.expect(storage.prepareResizeSemanticCommitUnderHeldLease(
+        &lease,
+        scratch,
+    ));
+    try std.testing.expectEqual(
+        ConsumeResizeSemanticResult.consumed_resize_cleaned,
+        storage.consumeResizeSemanticCommitUnderHeldLease(&lease, scratch),
+    );
+    try std.testing.expectEqual(
+        std.math.maxInt(u64),
+        storage.control_correlation.generation,
+    );
+    try std.testing.expect(storage.control_correlation.state == .idle);
+    try std.testing.expectEqual(
+        WholeTurnReleaseResult.released,
+        storage.releaseWholeTurnLease(&lease),
+    );
+    const external = switch (storage.owned_client.?.io_mode) {
+        .external => |*state| state,
+        .blocking => return error.TestUnexpectedResult,
+    };
+    const tx_len_before = external.external_tx.items.len;
+    const tx_bytes_before = external.external_tx_bytes;
+    const tx_generation_before = external.tx_queue_generation;
+    const request_ids_before = storage.owner_request_ids.?;
+    const correlation_before = storage.control_correlation;
+    const exhausted = storage.admitControl(.{
+        .request = .{ .resize = .{
+            .stream_id = valid_evidence.stream_id,
+            .cols = 82,
+            .rows = 26,
+            .client_sequence = 2,
+        } },
+        .expected_controller_generation = valid_evidence.initial_controller_generation,
+    }, 103);
+    try std.testing.expect(exhausted == .terminal);
+    try std.testing.expectEqual(
+        client_pump.TerminalReason.resource_exhausted,
+        exhausted.terminal,
+    );
+    try std.testing.expectEqual(tx_len_before, external.external_tx.items.len);
+    try std.testing.expectEqual(tx_bytes_before, external.external_tx_bytes);
+    try std.testing.expectEqual(tx_generation_before, external.tx_queue_generation);
+    try std.testing.expect(std.meta.eql(request_ids_before, storage.owner_request_ids.?));
+    try std.testing.expect(std.meta.eql(correlation_before, storage.control_correlation));
+}
+
+test "f3c2 maximum request ID succeeds on wire then next admission emits no wire" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    defer if (storage.lifecycle != .dead) {
+        _ = teardownForTest(&storage);
+    };
+    var lease: ExternalWholeTurnLease = .{};
+    try std.testing.expectEqual(
+        ControlSemanticPreparationResult.prepared_pair,
+        try prepareF3c1ActualResponse(
+            &storage,
+            &fixture,
+            scratch,
+            &lease,
+            .{ .resize = .{
+                .stream_id = valid_evidence.stream_id,
+                .cols = 81,
+                .rows = 25,
+                .client_sequence = 1,
+            } },
+            "{\"result\":{\"cols\":81,\"rows\":25,\"client_sequence\":1,\"resize_generation\":2,\"changed\":true}}",
+            .request_id_max,
+            null,
+        ),
+    );
+    try std.testing.expect(storage.owner_request_ids.? == .max_consumed);
+    try std.testing.expect(storage.prepareResizeSemanticCommitUnderHeldLease(
+        &lease,
+        scratch,
+    ));
+    try std.testing.expectEqual(
+        ConsumeResizeSemanticResult.consumed_resize_cleaned,
+        storage.consumeResizeSemanticCommitUnderHeldLease(&lease, scratch),
+    );
+    try std.testing.expectEqual(
+        std.math.maxInt(u64),
+        scratch.resize_semantic_frozen_response.request_id,
+    );
+    try std.testing.expectEqual(
+        WholeTurnReleaseResult.released,
+        storage.releaseWholeTurnLease(&lease),
+    );
+    const external = switch (storage.owned_client.?.io_mode) {
+        .external => |*state| state,
+        .blocking => return error.TestUnexpectedResult,
+    };
+    const tx_len_before = external.external_tx.items.len;
+    const tx_bytes_before = external.external_tx_bytes;
+    const tx_generation_before = external.tx_queue_generation;
+    const request_ids_before = storage.owner_request_ids.?;
+    const correlation_before = storage.control_correlation;
+    const exhausted = storage.admitControl(.{
+        .request = .{ .resize = .{
+            .stream_id = valid_evidence.stream_id,
+            .cols = 82,
+            .rows = 26,
+            .client_sequence = 2,
+        } },
+        .expected_controller_generation = valid_evidence.initial_controller_generation,
+    }, 103);
+    try std.testing.expect(exhausted == .terminal);
+    try std.testing.expectEqual(
+        client_pump.TerminalReason.request_id_exhausted,
+        exhausted.terminal,
+    );
+    try std.testing.expectEqual(tx_len_before, external.external_tx.items.len);
+    try std.testing.expectEqual(tx_bytes_before, external.external_tx_bytes);
+    try std.testing.expectEqual(tx_generation_before, external.tx_queue_generation);
+    try std.testing.expect(std.meta.eql(request_ids_before, storage.owner_request_ids.?));
+    try std.testing.expect(std.meta.eql(correlation_before, storage.control_correlation));
+    var peer_byte: [1]u8 = undefined;
+    try std.testing.expectEqual(
+        @as(isize, -1),
+        c.recv(fixture.peer_fd, &peer_byte, peer_byte.len, posix.MSG.DONTWAIT),
+    );
+    try std.testing.expect(posix.errno(-1) == .AGAIN);
 }
 
 test "f3c1 actual resize and resync responses prepare typed pairs" {
@@ -41834,4 +44428,1554 @@ test "D1 drained deadline terminalizes only after evidence cleanup" {
         WholeTurnReleaseResult.released,
         storage.releaseWholeTurnLease(&lease),
     );
+}
+
+test "f3c2 projected resync candidate zero preserves source and final bytes" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    defer if (storage.lifecycle != .dead) {
+        _ = teardownForTest(&storage);
+    };
+    var lease: ExternalWholeTurnLease = .{};
+    try std.testing.expectEqual(ControlSemanticPreparationResult.prepared_pair, try prepareF3c1ActualResponse(
+        &storage,
+        &fixture,
+        scratch,
+        &lease,
+        .{ .resync = .{ .stream_id = valid_evidence.stream_id, .recovery_authority = .{
+            .owner_incarnation = fixture.client.attach_instance_id,
+            .origin = .client,
+            .recovery_epoch = 31,
+        } } },
+        "{\"result\":{\"resync\":true}}",
+        .none,
+        null,
+    ));
+    try std.testing.expect(storage.prepareResyncAckTransitionUnderHeldLease(&lease, scratch));
+    const source_before = try std.testing.allocator.dupe(u8, std.mem.asBytes(&storage));
+    defer std.testing.allocator.free(source_before);
+    const final_before = scratch.projected_recovery_snapshot_commit;
+    var candidate: ProjectedRecoverySnapshotCommit = .{};
+    try std.testing.expect(storage.prepareRecoverySnapshotCommitForProjectedAckUnderHeldLease(
+        &lease,
+        scratch,
+        &scratch.resync_ack_transition,
+        null,
+        &candidate,
+    ));
+    try std.testing.expectEqual(@as(u8, 0), candidate.dispositions_count);
+    try std.testing.expect(storage.validatePreparedRecoverySnapshotForProjectedAckUnderHeldLease(
+        &lease,
+        scratch,
+        &scratch.resync_ack_transition,
+        null,
+        &candidate,
+    ));
+    try std.testing.expectEqualSlices(u8, source_before, std.mem.asBytes(&storage));
+    try std.testing.expect(std.meta.eql(final_before, scratch.projected_recovery_snapshot_commit));
+    try std.testing.expectEqual(WholeTurnReleaseResult.released, storage.releaseWholeTurnLease(&lease));
+}
+
+test "f3c2 resync wrapper rejects coherent copy splice cross-owner and optional tag flip" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    defer if (storage.lifecycle != .dead) {
+        _ = teardownForTest(&storage);
+    };
+    var lease: ExternalWholeTurnLease = .{};
+    try std.testing.expectEqual(ControlSemanticPreparationResult.prepared_pair, try prepareF3c1ActualResponse(
+        &storage,
+        &fixture,
+        scratch,
+        &lease,
+        .{ .resync = .{ .stream_id = valid_evidence.stream_id, .recovery_authority = .{
+            .owner_incarnation = fixture.client.attach_instance_id,
+            .origin = .client,
+            .recovery_epoch = 29,
+        } } },
+        "{\"result\":{\"resync\":true}}",
+        .none,
+        null,
+    ));
+    try std.testing.expect(storage.prepareResyncSemanticCommitUnderHeldLease(
+        &lease,
+        scratch,
+        null,
+    ));
+    const receipt_baseline = scratch.resync_semantic_commit;
+    const wrapper_baseline = scratch.control_semantic_take;
+    const transition_baseline = scratch.resync_ack_transition;
+    const completed_baseline = storage.completed_control;
+    const correlation_baseline = storage.control_correlation;
+
+    // A coherently resealed copy still cannot replace the final-address wrapper.
+    var copied_wrapper = wrapper_baseline;
+    copied_wrapper.saved_self_addr = @intFromPtr(&copied_wrapper);
+    copied_wrapper.digest = preparedControlSemanticTakeDigest(&copied_wrapper);
+    scratch.control_semantic_take = copied_wrapper;
+    try std.testing.expectEqual(
+        ConsumeResyncSemanticResult.invalid_precommit,
+        storage.consumeResyncSemanticCommitUnderHeldLease(&lease, scratch, null),
+    );
+    scratch.control_semantic_take = wrapper_baseline;
+
+    // A self-consistent foreign receipt cannot be spliced under the canonical wrapper.
+    var foreign_receipt = receipt_baseline;
+    foreign_receipt.saved_self_addr = @intFromPtr(&foreign_receipt);
+    foreign_receipt.digest = preparedResyncSemanticCommitDigest(&foreign_receipt);
+    scratch.control_semantic_take.branch.resync.receipt_addr = @intFromPtr(&foreign_receipt);
+    scratch.control_semantic_take.branch.resync.receipt_digest = foreign_receipt.digest;
+    scratch.control_semantic_take.digest = preparedControlSemanticTakeDigest(
+        &scratch.control_semantic_take,
+    );
+    try std.testing.expectEqual(
+        ConsumeResyncSemanticResult.invalid_precommit,
+        storage.consumeResyncSemanticCommitUnderHeldLease(&lease, scratch, null),
+    );
+    scratch.control_semantic_take = wrapper_baseline;
+
+    // Cross-owner and none-to-some flips remain invalid even when every edited seal is refreshed.
+    scratch.resync_semantic_commit.storage_addr +%= 1;
+    scratch.resync_semantic_commit.digest = preparedResyncSemanticCommitDigest(
+        &scratch.resync_semantic_commit,
+    );
+    scratch.control_semantic_take.branch.resync.receipt_digest =
+        scratch.resync_semantic_commit.digest;
+    scratch.control_semantic_take.digest = preparedControlSemanticTakeDigest(
+        &scratch.control_semantic_take,
+    );
+    try std.testing.expectEqual(
+        ConsumeResyncSemanticResult.invalid_precommit,
+        storage.consumeResyncSemanticCommitUnderHeldLease(&lease, scratch, null),
+    );
+    scratch.resync_semantic_commit = receipt_baseline;
+    scratch.control_semantic_take = wrapper_baseline;
+
+    scratch.resync_semantic_commit.aggregate_present = true;
+    scratch.resync_semantic_commit.aggregate_addr = 1;
+    scratch.resync_semantic_commit.digest = preparedResyncSemanticCommitDigest(
+        &scratch.resync_semantic_commit,
+    );
+    scratch.control_semantic_take.branch.resync.receipt_digest =
+        scratch.resync_semantic_commit.digest;
+    scratch.control_semantic_take.digest = preparedControlSemanticTakeDigest(
+        &scratch.control_semantic_take,
+    );
+    try std.testing.expectEqual(
+        ConsumeResyncSemanticResult.invalid_precommit,
+        storage.consumeResyncSemanticCommitUnderHeldLease(&lease, scratch, null),
+    );
+    scratch.resync_semantic_commit = receipt_baseline;
+    scratch.control_semantic_take = wrapper_baseline;
+
+    // An independently resealed ACK transition cannot be substituted either.
+    scratch.resync_ack_transition.storage_addr +%= 1;
+    scratch.resync_ack_transition.digest = preparedResyncAckTransitionDigest(
+        &scratch.resync_ack_transition,
+    );
+    scratch.resync_semantic_commit.ack_transition_digest = scratch.resync_ack_transition.digest;
+    scratch.resync_semantic_commit.digest = preparedResyncSemanticCommitDigest(
+        &scratch.resync_semantic_commit,
+    );
+    scratch.control_semantic_take.branch.resync.receipt_digest =
+        scratch.resync_semantic_commit.digest;
+    scratch.control_semantic_take.digest = preparedControlSemanticTakeDigest(
+        &scratch.control_semantic_take,
+    );
+    try std.testing.expectEqual(
+        ConsumeResyncSemanticResult.invalid_precommit,
+        storage.consumeResyncSemanticCommitUnderHeldLease(&lease, scratch, null),
+    );
+    scratch.resync_ack_transition = transition_baseline;
+    scratch.resync_semantic_commit = receipt_baseline;
+    scratch.control_semantic_take = wrapper_baseline;
+
+    try std.testing.expect(std.meta.eql(completed_baseline, storage.completed_control));
+    try std.testing.expect(std.meta.eql(correlation_baseline, storage.control_correlation));
+    try std.testing.expect(std.meta.eql(
+        scratch.projected_recovery_snapshot_commit,
+        ProjectedRecoverySnapshotCommit{},
+    ));
+    try std.testing.expectEqual(
+        ConsumeResyncSemanticResult.consumed_resync_cleaned,
+        storage.consumeResyncSemanticCommitUnderHeldLease(&lease, scratch, null),
+    );
+    try std.testing.expectEqual(
+        WholeTurnReleaseResult.released,
+        storage.releaseWholeTurnLease(&lease),
+    );
+}
+
+const F3c2DetachedRecoveryAggregateFixture = struct {
+    aggregate: *PreparedRxAggregate,
+    intent: external_rx_intent.ExternalRxIntentHandle,
+    storage: *ExternalPumpStorage,
+    lease: *const ExternalWholeTurnLease,
+    intent_reservation_generation: u64,
+    detached_intent_reservation: IntentScratchReservation,
+    detached_aggregate_handle: PreparedRxAggregateHandle,
+    detached_aggregate_reservation: RxAggregateScratchReservation,
+    saved_intent_reservation: IntentScratchReservation,
+    saved_aggregate_handle: PreparedRxAggregateHandle,
+    saved_aggregate_reservation: RxAggregateScratchReservation,
+    allocator: std.mem.Allocator,
+
+    fn initInPlace(
+        result: *@This(),
+        storage: *ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        scratch: *ExternalRxTurnScratch,
+        barrier: u64,
+        epoch: u64,
+        candidate_count: u8,
+        allocator: std.mem.Allocator,
+    ) !void {
+        try std.testing.expect(candidate_count > 0);
+        try std.testing.expect(candidate_count <= external_rx_intent.max_intents);
+        const saved_intent_reservation = storage.intent_scratch_reservation;
+        const saved_intent_generation = storage.intent_scratch_generation;
+        const saved_aggregate_handle = storage.rx_aggregate_handle;
+        const saved_aggregate_reservation = storage.rx_aggregate_reservation;
+        const saved_aggregate_generation = storage.rx_aggregate_generation;
+        const saved_semantic_state = storage.semantic_state;
+        var intent_created = false;
+        var aggregate_created = false;
+        storage.intent_scratch_reservation = .{};
+        storage.rx_aggregate_handle = .{};
+        storage.rx_aggregate_reservation = .{};
+        result.* = @This(){
+            .aggregate = undefined,
+            .intent = .{},
+            .storage = storage,
+            .lease = lease,
+            .intent_reservation_generation = 0,
+            .detached_intent_reservation = .{},
+            .detached_aggregate_handle = .{},
+            .detached_aggregate_reservation = .{},
+            .saved_intent_reservation = saved_intent_reservation,
+            .saved_aggregate_handle = saved_aggregate_handle,
+            .saved_aggregate_reservation = saved_aggregate_reservation,
+            .allocator = allocator,
+        };
+
+        errdefer {
+            if (aggregate_created) {
+                if (storage.validateReadyRxAggregate(lease)) |aggregate| {
+                    switch (aggregate.lifecycle) {
+                        .ready, .preparing, .finalized => if (storage.abortRxAggregate(
+                            lease,
+                            &result.intent,
+                        ) != .cleaned) @panic("F3c2 fixture aggregate abort failed"),
+                        else => {},
+                    }
+                }
+                if (retainedRxAggregateValid(storage)) {
+                    if (!cleanupInstalledF3c2FixtureOwners(
+                        storage,
+                        saved_intent_reservation,
+                        saved_intent_generation,
+                        saved_aggregate_handle,
+                        saved_aggregate_reservation,
+                        saved_aggregate_generation,
+                    )) @panic("F3c2 fixture retained rollback failed");
+                    intent_created = false;
+                } else {
+                    // Do not hide a detached owner graph by restoring the saved authority over it.
+                    // A future validator change must first provide a typed quarantine receipt.
+                    @panic("F3c2 fixture aggregate rollback lost canonical authority");
+                }
+            }
+            if (intent_created) {
+                var prepared: external_rx_intent.PreparedDestroy = .{};
+                if (external_rx_intent.prepareDestroy(
+                    &result.intent,
+                    @intFromPtr(storage),
+                    result.intent_reservation_generation,
+                    &prepared,
+                )) {
+                    const frozen = external_rx_intent.commitPreparedDestroy(
+                        &result.intent,
+                        &prepared,
+                    );
+                    external_rx_intent.finishFrozenDestroy(frozen);
+                }
+            }
+            storage.intent_scratch_reservation = saved_intent_reservation;
+            storage.intent_scratch_generation = saved_intent_generation;
+            storage.rx_aggregate_handle = saved_aggregate_handle;
+            storage.rx_aggregate_reservation = saved_aggregate_reservation;
+            storage.rx_aggregate_generation = saved_aggregate_generation;
+            storage.semantic_state = saved_semantic_state;
+        }
+
+        var probe = IntentScratchAuthorityProbe{
+            .storage = storage,
+            .allocator = allocator,
+            .parser_generation = lease.rx_provenance.parser_seal.generation,
+            .buffer_start_absolute = barrier,
+            .attach_instance_id = storage.owner_incarnation,
+        };
+        switch (storage.createIntentScratch(&result.intent, allocator, probe.ops())) {
+            .allocated => {},
+            .out_of_memory => return error.OutOfMemory,
+            else => return error.TestUnexpectedResult,
+        }
+        intent_created = true;
+        result.intent_reservation_generation =
+            storage.intent_scratch_reservation.generation;
+        var cursor = barrier;
+        for (0..candidate_count) |_| {
+            const payload = try allocator.dupe(
+                u8,
+                "f3c2-detached-recovery-snapshot",
+            );
+            const next = cursor + protocol.header_size + payload.len;
+            var frame = client_external_mode.ExternalRxFrame{
+                .frame = .{ .header = .{
+                    .kind = .snapshot_chunk,
+                    .stream_id = valid_evidence.stream_id,
+                    .flags = protocol.Flags.end_stream,
+                    .payload_len = @intCast(payload.len),
+                }, .payload = payload },
+                .range = .{
+                    .identity = .{
+                        .attach_instance_id = storage.owner_incarnation,
+                        .destination_slot_addr = @intFromPtr(storage),
+                    },
+                    .start_absolute = cursor,
+                    .end_absolute = next,
+                },
+                .pair_seal = undefined,
+            };
+            client_external_mode.testing.sealExternalRxFrame(&frame);
+            var source: client_external_mode.ExternalRxOutcome = .{ .frame = frame };
+            probe.parser_generation += 1;
+            probe.buffer_start_absolute = next;
+            try std.testing.expectEqual(
+                external_rx_intent.MoveResult.classified,
+                moveIntentFrameForTest(
+                    &result.intent,
+                    &source,
+                    probe.ops(),
+                    valid_evidence.stream_id,
+                ),
+            );
+            cursor = next;
+        }
+        storage.semantic_state = .{ .active = .{ .client_recovery = .{
+            .awaiting_snapshot = .{
+                .context = .{ .epoch = epoch, .deadline_ns = 1_000 },
+                .recovery_barrier_absolute = barrier,
+            },
+        } } };
+        switch (storage.createRxAggregate(
+            lease,
+            &result.intent,
+            allocator,
+            &scratch.aggregate_ranges,
+        )) {
+            .allocated => {},
+            .out_of_memory => return error.OutOfMemory,
+            else => return error.TestUnexpectedResult,
+        }
+        aggregate_created = true;
+        for (0..candidate_count) |index| {
+            const intent_index: u8 = @intCast(index);
+            try std.testing.expectEqual(
+                RxAggregateTransferResult.staged,
+                storage.moveScreenIntoRxAggregate(
+                    lease,
+                    &result.intent,
+                    intent_index,
+                    probe.ops(),
+                ),
+            );
+            try std.testing.expectEqual(
+                RxAggregateTransferResult.staged,
+                storage.transferScreenToLedger(lease, &result.intent, intent_index),
+            );
+            try std.testing.expectEqual(
+                RxAggregateTransferResult.staged,
+                storage.admitScreenToLiveBatch(lease, intent_index),
+            );
+        }
+        // Admission and destination planning bind the projected recovery epoch.
+        try std.testing.expectEqual(
+            RxAggregateFinalizeResult.finalized,
+            storage.finalizeRxAggregate(lease, &result.intent),
+        );
+        result.aggregate = storage.validateReadyRxAggregate(lease).?;
+        try std.testing.expect(
+            storage.reprepareRxAggregateForProjectedRecoveryUnderHeldLease(
+                lease,
+                result.aggregate,
+            ),
+        );
+        storage.semantic_state = saved_semantic_state;
+
+        result.detached_intent_reservation = storage.intent_scratch_reservation;
+        result.detached_aggregate_handle = storage.rx_aggregate_handle;
+        result.detached_aggregate_reservation = storage.rx_aggregate_reservation;
+
+        storage.intent_scratch_reservation = saved_intent_reservation;
+        storage.intent_scratch_generation = saved_intent_generation;
+        storage.rx_aggregate_handle = saved_aggregate_handle;
+        storage.rx_aggregate_reservation = saved_aggregate_reservation;
+        storage.rx_aggregate_generation = saved_aggregate_generation;
+    }
+
+    fn deinit(self: *@This()) void {
+        const storage = self.storage;
+        // A successfully returned detached fixture is owned by the F3c2
+        // semantic consumer. Construction failures use initInPlace's errdefer;
+        // successful callers must consume the projected transaction before
+        // destroying the now-spent intent and aggregate allocation.
+        if (self.aggregate.lifecycle != .side_intent_consumed)
+            @panic("F3c2 detached fixture was not semantically consumed");
+        // Pointer-bearing callback drift is intentionally handed to bounded process quarantine;
+        // freeing that graph here would contradict the product no-additional-dereference rule.
+        if (storage.callback_quarantine_pending or
+            crossOwnerQuarantineStatus().latched)
+        {
+            self.* = undefined;
+            return;
+        }
+        if (!rxAggregateHandlePristine(&storage.rx_aggregate_handle) or
+            !std.meta.eql(storage.rx_aggregate_reservation, RxAggregateScratchReservation{}))
+            @panic("F3c2 detached fixture found foreign aggregate authority");
+        storage.rx_aggregate_handle = self.detached_aggregate_handle;
+        storage.rx_aggregate_handle.lifecycle = .retained;
+        storage.rx_aggregate_handle.digest = rxAggregateHandleDigest(
+            &storage.rx_aggregate_handle,
+        );
+        storage.rx_aggregate_reservation = .{};
+        storage.intent_scratch_reservation = self.detached_intent_reservation;
+        const restore_intent_generation = storage.intent_scratch_generation;
+        storage.intent_scratch_generation = self.intent_reservation_generation;
+        const restore_aggregate_generation = storage.rx_aggregate_generation;
+        if (!cleanupInstalledF3c2FixtureOwners(
+            storage,
+            .{},
+            restore_intent_generation,
+            .{},
+            .{},
+            restore_aggregate_generation,
+        )) @panic("F3c2 detached fixture canonical cleanup failed");
+        self.* = undefined;
+    }
+};
+
+fn cleanupInstalledF3c2FixtureOwners(
+    storage: *ExternalPumpStorage,
+    restore_intent_reservation: IntentScratchReservation,
+    restore_intent_generation: u64,
+    restore_handle: PreparedRxAggregateHandle,
+    restore_reservation: RxAggregateScratchReservation,
+    restore_aggregate_generation: u64,
+) bool {
+    var aggregate_cleanup: external_owner_cleanup.FrozenOwnerCleanupDescriptor = .{};
+    var aggregate_execution: ?RetainedRxAggregateDestroyExecution = null;
+    var intent_prepared: external_rx_intent.PreparedDestroy = .{};
+    var intent: ?*external_rx_intent.ExternalRxIntentHandle = null;
+    var intent_scratch: ?*anyopaque = null;
+    if (!storage.prepareCompletedResponseOwnerCleanup(
+        &aggregate_cleanup,
+        &aggregate_execution,
+        &intent_prepared,
+        &intent,
+        &intent_scratch,
+    )) return false;
+    const aggregate_execution_value = aggregate_execution orelse return false;
+    const intent_value = intent orelse return false;
+    const intent_scratch_value = intent_scratch orelse return false;
+
+    var intent_frozen: external_rx_intent.FrozenDestroy = undefined;
+    storage.commitCompletedResponseOwnerCleanupUnchecked(
+        &aggregate_cleanup,
+        aggregate_execution_value,
+        intent_value,
+        intent_scratch_value,
+        &intent_prepared,
+        &intent_frozen,
+    );
+    // Publish every original storage authority before either allocator callback. From this point
+    // only the two frozen locals own the detached graph.
+    storage.intent_scratch_reservation = restore_intent_reservation;
+    storage.intent_scratch_generation = restore_intent_generation;
+    storage.rx_aggregate_handle = restore_handle;
+    storage.rx_aggregate_reservation = restore_reservation;
+    storage.rx_aggregate_generation = restore_aggregate_generation;
+    const lifecycle_before = storage.lifecycle;
+    const operation_generation_before = storage.operation_generation;
+    const operation_reentry_before = storage.operation_reentry_latched;
+    const callback_quarantine_before = storage.callback_quarantine_pending;
+    const semantic_before = storage.semantic_state;
+    const correlation_before = storage.control_correlation;
+    const completed_before = storage.completed_control;
+    const completed_generation_before = storage.completed_control_generation;
+    const authority_before = storage.owner_authority;
+    const authority_seal_before = storage.owner_authority_seal;
+    const request_ids_before = storage.owner_request_ids;
+    const quarantine_before = crossOwnerQuarantineStatus();
+    const ledger_before = storage.inbox_ledger.projectionAuthorityDigest();
+    const aggregate_result = external_owner_cleanup.finishCallbackHidden(
+        &aggregate_cleanup,
+    );
+    external_rx_intent.finishFrozenDestroy(intent_frozen);
+    const ledger_after = storage.inbox_ledger.projectionAuthorityDigest();
+    const quarantine_after = crossOwnerQuarantineStatus();
+    const drifted = storage.lifecycle != lifecycle_before or
+        storage.operation_generation != operation_generation_before or
+        storage.operation_reentry_latched != operation_reentry_before or
+        storage.callback_quarantine_pending != callback_quarantine_before or
+        !std.meta.eql(storage.semantic_state, semantic_before) or
+        !std.meta.eql(storage.control_correlation, correlation_before) or
+        !std.meta.eql(storage.completed_control, completed_before) or
+        storage.completed_control_generation != completed_generation_before or
+        !std.meta.eql(storage.owner_authority, authority_before) or
+        !std.meta.eql(storage.owner_authority_seal, authority_seal_before) or
+        !std.meta.eql(storage.owner_request_ids, request_ids_before) or
+        !std.meta.eql(storage.intent_scratch_reservation, restore_intent_reservation) or
+        storage.intent_scratch_generation != restore_intent_generation or
+        !std.meta.eql(storage.rx_aggregate_handle, restore_handle) or
+        !std.meta.eql(storage.rx_aggregate_reservation, restore_reservation) or
+        storage.rx_aggregate_generation != restore_aggregate_generation or
+        !std.mem.eql(
+            u8,
+            &ledger_before,
+            &ledger_after,
+        ) or !std.meta.eql(quarantine_before, quarantine_after);
+    if (drifted) {
+        storage.callback_quarantine_pending = true;
+        if (std.meta.eql(quarantine_before, quarantine_after))
+            latchCrossOwnerQuarantine();
+    }
+    return aggregate_result == .cleaned and !drifted;
+}
+
+fn checkF3c2DetachedFixtureAllocationFailure(allocator: std.mem.Allocator) !void {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    defer if (storage.lifecycle != .dead) {
+        _ = teardownForTest(&storage);
+    };
+    var lease: ExternalWholeTurnLease = .{};
+    try std.testing.expectEqual(ControlSemanticPreparationResult.prepared_pair, try prepareF3c1ActualResponse(
+        &storage,
+        &fixture,
+        scratch,
+        &lease,
+        .{ .resync = .{ .stream_id = valid_evidence.stream_id, .recovery_authority = .{
+            .owner_incarnation = fixture.client.attach_instance_id,
+            .origin = .client,
+            .recovery_epoch = 43,
+        } } },
+        "{\"result\":{\"resync\":true}}",
+        .none,
+        null,
+    ));
+    defer _ = storage.releaseWholeTurnLease(&lease);
+    var aggregate_fixture: F3c2DetachedRecoveryAggregateFixture = undefined;
+    try aggregate_fixture.initInPlace(
+        &storage,
+        &lease,
+        scratch,
+        storage.completed_control.completed.source_end_absolute,
+        43,
+        1,
+        allocator,
+    );
+    try std.testing.expect(storage.prepareResyncSemanticCommitUnderHeldLease(
+        &lease,
+        scratch,
+        aggregate_fixture.aggregate,
+    ));
+    try std.testing.expectEqual(
+        ConsumeResyncSemanticResult.consumed_resync_cleaned,
+        storage.consumeResyncSemanticCommitUnderHeldLease(
+            &lease,
+            scratch,
+            aggregate_fixture.aggregate,
+        ),
+    );
+    aggregate_fixture.deinit();
+}
+
+test "f3c2 detached recovery fixture restores every owner at allocation fail index" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        checkF3c2DetachedFixtureAllocationFailure,
+        .{},
+    );
+}
+
+test "f3c2 resync candidate one rejects actual-token ABA then atomically consumes ACK and snapshot" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    defer if (storage.lifecycle != .dead) {
+        _ = teardownForTest(&storage);
+    };
+    var lease: ExternalWholeTurnLease = .{};
+    try std.testing.expectEqual(ControlSemanticPreparationResult.prepared_pair, try prepareF3c1ActualResponse(
+        &storage,
+        &fixture,
+        scratch,
+        &lease,
+        .{ .resync = .{ .stream_id = valid_evidence.stream_id, .recovery_authority = .{
+            .owner_incarnation = fixture.client.attach_instance_id,
+            .origin = .client,
+            .recovery_epoch = 47,
+        } } },
+        "{\"result\":{\"resync\":true}}",
+        .none,
+        null,
+    ));
+    const barrier = storage.completed_control.completed.source_end_absolute;
+    const aggregate_fixture = try std.testing.allocator.create(
+        F3c2DetachedRecoveryAggregateFixture,
+    );
+    defer std.testing.allocator.destroy(aggregate_fixture);
+    try aggregate_fixture.initInPlace(
+        &storage,
+        &lease,
+        scratch,
+        barrier,
+        47,
+        1,
+        std.testing.allocator,
+    );
+    defer aggregate_fixture.deinit();
+    try std.testing.expect(storage.prepareResyncSemanticCommitUnderHeldLease(
+        &lease,
+        scratch,
+        aggregate_fixture.aggregate,
+    ));
+    const next_generation = storage.inbox_ledger.next_generation;
+    storage.inbox_ledger.next_generation +%= 1;
+    try std.testing.expectEqual(
+        ConsumeResyncSemanticResult.invalid_precommit,
+        storage.consumeResyncSemanticCommitUnderHeldLease(
+            &lease,
+            scratch,
+            aggregate_fixture.aggregate,
+        ),
+    );
+    try std.testing.expect(std.meta.eql(
+        scratch.projected_recovery_snapshot_commit,
+        ProjectedRecoverySnapshotCommit{},
+    ));
+    storage.inbox_ledger.next_generation = next_generation;
+    try std.testing.expectEqual(
+        ConsumeResyncSemanticResult.consumed_resync_cleaned,
+        storage.consumeResyncSemanticCommitUnderHeldLease(
+            &lease,
+            scratch,
+            aggregate_fixture.aggregate,
+        ),
+    );
+    try std.testing.expectEqual(@as(u8, 1), scratch.projected_recovery_snapshot_commit.dispositions_count);
+    try std.testing.expectEqual(
+        ProjectedRecoverySnapshotCommitLifecycle.consumed_tombstone,
+        scratch.projected_recovery_snapshot_commit.lifecycle,
+    );
+    try std.testing.expectEqual(
+        RxAggregateLifecycle.side_intent_consumed,
+        aggregate_fixture.aggregate.lifecycle,
+    );
+    try std.testing.expect(std.mem.eql(
+        u8,
+        &aggregate_fixture.aggregate.digest,
+        &preparedRxAggregateDigest(aggregate_fixture.aggregate),
+    ));
+    try std.testing.expectEqual(
+        external_inbox_ledger.RetireLiveResult.already_retired,
+        aggregate_fixture.aggregate.retirement.retire(),
+    );
+    const saved_handle = storage.rx_aggregate_handle;
+    storage.rx_aggregate_handle = aggregate_fixture.detached_aggregate_handle;
+    storage.rx_aggregate_handle.lifecycle = .retained;
+    storage.rx_aggregate_handle.digest = rxAggregateHandleDigest(&storage.rx_aggregate_handle);
+    try std.testing.expectEqual(
+        @intFromPtr(&storage.rx_aggregate_handle),
+        storage.rx_aggregate_handle.saved_self_addr,
+    );
+    try std.testing.expectEqual(
+        @intFromPtr(aggregate_fixture.aggregate),
+        storage.rx_aggregate_handle.aggregate_addr,
+    );
+    try std.testing.expectEqual(
+        @intFromPtr(&storage.rx_aggregate_handle),
+        aggregate_fixture.aggregate.handle_addr,
+    );
+    try std.testing.expect(std.mem.eql(
+        u8,
+        &aggregate_fixture.aggregate.recovery_commit_output.digest,
+        &immutableRecoveryCommitOutputDigest(&aggregate_fixture.aggregate.recovery_commit_output),
+    ));
+    try std.testing.expect(std.mem.eql(
+        u8,
+        &aggregate_fixture.aggregate.recovery_snapshot_binding.digest,
+        &committedRecoverySnapshotBindingDigest(&aggregate_fixture.aggregate.recovery_snapshot_binding),
+    ));
+    try std.testing.expect(std.meta.eql(
+        aggregate_fixture.aggregate.recovery_snapshot_commit,
+        PreparedRecoverySnapshotCommit{},
+    ));
+    try std.testing.expect(std.meta.eql(
+        aggregate_fixture.aggregate.recovery_dispositions,
+        RecoverySnapshotDispositionAggregate{},
+    ));
+    try std.testing.expect(retainedRxAggregateValid(&storage));
+    const live_commit_addr = aggregate_fixture.aggregate.recovery_commit_output.live_commit_addr;
+    aggregate_fixture.aggregate.recovery_commit_output.live_commit_addr = 1;
+    try std.testing.expect(!retainedRxAggregateValid(&storage));
+    aggregate_fixture.aggregate.recovery_commit_output.live_commit_addr = live_commit_addr;
+    storage.rx_aggregate_handle = saved_handle;
+    try std.testing.expect(storage.control_correlation.state == .idle);
+    try std.testing.expectEqual(WholeTurnReleaseResult.released, storage.releaseWholeTurnLease(&lease));
+}
+
+test "f3c2 response cleanup reentry is busy and payload frees exactly once" {
+    resetCrossOwnerQuarantineForTest();
+    defer resetCrossOwnerQuarantineForTest();
+    // Nested admission deliberately latches bounded process quarantine. Keep those retained
+    // owner bytes out of the leak-checking allocator; exact callback/free counts below still
+    // prove that the response payload itself is released once.
+    var allocator_probe = AllocatorCallbackProbe{ .parent = std.heap.c_allocator };
+    var fixture = try TestClient.initWithAllocator(allocator_probe.allocator());
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    allocator_probe.storage = &storage;
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    defer if (storage.lifecycle != .dead) {
+        _ = teardownForTest(&storage);
+    };
+    var lease: ExternalWholeTurnLease = .{};
+    try std.testing.expectEqual(ControlSemanticPreparationResult.prepared_pair, try prepareF3c1ActualResponse(
+        &storage,
+        &fixture,
+        scratch,
+        &lease,
+        .{ .resync = .{ .stream_id = valid_evidence.stream_id, .recovery_authority = .{
+            .owner_incarnation = fixture.client.attach_instance_id,
+            .origin = .client,
+            .recovery_epoch = 53,
+        } } },
+        "{\"result\":{\"resync\":true}}",
+        .none,
+        null,
+    ));
+    try std.testing.expect(storage.prepareResyncSemanticCommitUnderHeldLease(
+        &lease,
+        scratch,
+        null,
+    ));
+    allocator_probe.rx_scratch = scratch;
+    allocator_probe.mode = .resync_cleanup_admit_reentry;
+    const free_before = allocator_probe.free_count;
+    try std.testing.expectEqual(
+        ConsumeResyncSemanticResult.cleaned_with_invariant,
+        storage.consumeResyncSemanticCommitUnderHeldLease(&lease, scratch, null),
+    );
+    try std.testing.expect(allocator_probe.fired);
+    try std.testing.expectEqual(std.meta.Tag(ControlAdmissionResult).busy, allocator_probe.nested_control_tag.?);
+    // The irreversible tail now releases all three completed-response owners: the retained
+    // aggregate allocation, its intent allocation, and the response payload. Reentry must not
+    // add a fourth free, and replay below must leave this exact count unchanged.
+    try std.testing.expectEqual(free_before + 3, allocator_probe.free_count);
+    try std.testing.expect(crossOwnerQuarantineStatus().latched);
+    try std.testing.expectEqual(
+        ConsumeResyncSemanticResult.invalid_precommit,
+        storage.consumeResyncSemanticCommitUnderHeldLease(&lease, scratch, null),
+    );
+    try std.testing.expectEqual(free_before + 3, allocator_probe.free_count);
+    try std.testing.expectEqual(
+        WholeTurnReleaseResult.aborted_terminal,
+        storage.releaseWholeTurnLease(&lease),
+    );
+}
+
+fn checkF3c2ResyncCallbackDrift(
+    mode: AllocatorCallbackProbe.Mode,
+    expect_coherent_reseal: bool,
+) !void {
+    resetCrossOwnerQuarantineForTest();
+    defer resetCrossOwnerQuarantineForTest();
+    // This path deliberately hands pointer-bearing ownership to bounded quarantine. Use the
+    // process allocator, as the other quarantine tests do, so the test allocator does not report
+    // those intentionally unreachable bytes as an ordinary cleanup leak.
+    var allocator_probe = AllocatorCallbackProbe{ .parent = std.heap.c_allocator };
+    // The completed response payload is allocated by the client's parser allocator. Route that
+    // exact owner through the probe so the mutation fires from the post-publication payload free,
+    // after the canonical cleanup snapshot has already been captured.
+    var fixture = try TestClient.initWithAllocator(allocator_probe.allocator());
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    allocator_probe.storage = &storage;
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    defer if (storage.lifecycle != .dead) {
+        _ = teardownForTest(&storage);
+    };
+    var lease: ExternalWholeTurnLease = .{};
+    try std.testing.expectEqual(ControlSemanticPreparationResult.prepared_pair, try prepareF3c1ActualResponse(
+        &storage,
+        &fixture,
+        scratch,
+        &lease,
+        .{ .resync = .{ .stream_id = valid_evidence.stream_id, .recovery_authority = .{
+            .owner_incarnation = fixture.client.attach_instance_id,
+            .origin = .client,
+            .recovery_epoch = 61,
+        } } },
+        "{\"result\":{\"resync\":true}}",
+        .none,
+        null,
+    ));
+    const aggregate_fixture = try std.testing.allocator.create(
+        F3c2DetachedRecoveryAggregateFixture,
+    );
+    defer std.testing.allocator.destroy(aggregate_fixture);
+    try aggregate_fixture.initInPlace(
+        &storage,
+        &lease,
+        scratch,
+        storage.completed_control.completed.source_end_absolute,
+        61,
+        external_inbox_ledger.max_live_mutations,
+        std.heap.c_allocator,
+    );
+    defer aggregate_fixture.deinit();
+    allocator_probe.aggregate = aggregate_fixture.aggregate;
+    allocator_probe.rx_scratch = scratch;
+
+    try std.testing.expect(storage.prepareResyncSemanticCommitUnderHeldLease(
+        &lease,
+        scratch,
+        aggregate_fixture.aggregate,
+    ));
+    // Arm only after every precommit allocation and seal is complete. The next probe-backed free
+    // is the frozen response payload cleanup in the irreversible callback tail.
+    allocator_probe.mode = mode;
+    const free_before = allocator_probe.free_count;
+    const consume_result = storage.consumeResyncSemanticCommitUnderHeldLease(
+        &lease,
+        scratch,
+        aggregate_fixture.aggregate,
+    );
+    try std.testing.expect(allocator_probe.fired);
+    try std.testing.expectEqual(
+        ConsumeResyncSemanticResult.cleaned_with_invariant,
+        consume_result,
+    );
+    try std.testing.expect(storage.callback_quarantine_pending);
+    const quarantine = crossOwnerQuarantineStatus();
+    try std.testing.expect(quarantine.latched);
+    try std.testing.expectEqual(@as(u64, 1), quarantine.event_count);
+    try std.testing.expectEqual(
+        max_cross_owner_quarantine_bytes,
+        quarantine.leaked_bytes_upper_bound,
+    );
+    // The callback may quarantine the detached recovery graph, but the three completed-response
+    // owners were already frozen and tombstoned before that callback and remain safe to release.
+    try std.testing.expectEqual(free_before + 3, allocator_probe.free_count);
+    try std.testing.expectEqual(
+        expect_coherent_reseal,
+        std.mem.eql(
+            u8,
+            &aggregate_fixture.aggregate.digest,
+            &preparedRxAggregateDigest(aggregate_fixture.aggregate),
+        ),
+    );
+    try std.testing.expectEqual(
+        WholeTurnReleaseResult.aborted_terminal,
+        storage.releaseWholeTurnLease(&lease),
+    );
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        crossOwnerQuarantineStatus().event_count,
+    );
+    try std.testing.expectEqual(free_before + 3, allocator_probe.free_count);
+}
+
+test "f3c2 resync cleanup quarantines aggregate pointer drift without blessing stale digest" {
+    try checkF3c2ResyncCallbackDrift(
+        .resync_aggregate_pointer_drift,
+        false,
+    );
+}
+
+test "f3c2 resync cleanup rejects coherently resealed aggregate pointer drift" {
+    try checkF3c2ResyncCallbackDrift(
+        .resync_aggregate_pointer_reseal_drift,
+        true,
+    );
+}
+
+test "f3c2 resync cleanup rejects coherently resealed binding source drift" {
+    try checkF3c2ResyncCallbackDrift(
+        .resync_binding_pointer_reseal_drift,
+        true,
+    );
+}
+
+test "f3c2 resync cleanup rejects coherently resealed disposition destination drift" {
+    try checkF3c2ResyncCallbackDrift(
+        .resync_disposition_pointer_reseal_drift,
+        true,
+    );
+}
+
+test "f3c2 resync cleanup quarantines ledger authority drift" {
+    try checkF3c2ResyncCallbackDrift(
+        .resync_ledger_authority_drift,
+        // Once any pointer-bearing authority drifts, cleanup must not bless even an otherwise
+        // unchanged aggregate by refreshing its post-retirement seal after the callback.
+        false,
+    );
+}
+
+test "f3c2 retirement callback cannot redirect response payload or allocator to 0x1" {
+    resetCrossOwnerQuarantineForTest();
+    defer resetCrossOwnerQuarantineForTest();
+    var allocator_probe = AllocatorCallbackProbe{ .parent = std.heap.c_allocator };
+    var fixture = try TestClient.initWithAllocator(allocator_probe.allocator());
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    allocator_probe.storage = &storage;
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    defer if (storage.lifecycle != .dead) {
+        _ = teardownForTest(&storage);
+    };
+    var lease: ExternalWholeTurnLease = .{};
+    try std.testing.expectEqual(ControlSemanticPreparationResult.prepared_pair, try prepareF3c1ActualResponse(
+        &storage,
+        &fixture,
+        scratch,
+        &lease,
+        .{ .resync = .{ .stream_id = valid_evidence.stream_id, .recovery_authority = .{
+            .owner_incarnation = fixture.client.attach_instance_id,
+            .origin = .client,
+            .recovery_epoch = 63,
+        } } },
+        "{\"result\":{\"resync\":true}}",
+        .none,
+        null,
+    ));
+    const aggregate_fixture = try std.testing.allocator.create(
+        F3c2DetachedRecoveryAggregateFixture,
+    );
+    defer std.testing.allocator.destroy(aggregate_fixture);
+    try aggregate_fixture.initInPlace(
+        &storage,
+        &lease,
+        scratch,
+        storage.completed_control.completed.source_end_absolute,
+        63,
+        2,
+        allocator_probe.allocator(),
+    );
+    defer aggregate_fixture.deinit();
+    allocator_probe.aggregate = aggregate_fixture.aggregate;
+    allocator_probe.rx_scratch = scratch;
+    try std.testing.expect(storage.prepareResyncSemanticCommitUnderHeldLease(
+        &lease,
+        scratch,
+        aggregate_fixture.aggregate,
+    ));
+    allocator_probe.mode = .resync_retirement_response_descriptor_drift;
+    try std.testing.expectEqual(
+        ConsumeResyncSemanticResult.cleaned_with_invariant,
+        storage.consumeResyncSemanticCommitUnderHeldLease(
+            &lease,
+            scratch,
+            aggregate_fixture.aggregate,
+        ),
+    );
+    try std.testing.expect(allocator_probe.fired);
+    try std.testing.expectEqual(
+        @as(?[*]u8, @ptrFromInt(1)),
+        scratch.resync_ack_frozen_response.payload.allocation_ptr,
+    );
+    try std.testing.expectEqual(
+        @as(*anyopaque, @ptrFromInt(1)),
+        scratch.resync_ack_frozen_response.payload.allocator.ptr,
+    );
+    try std.testing.expect(crossOwnerQuarantineStatus().latched);
+    try std.testing.expectEqual(
+        WholeTurnReleaseResult.aborted_terminal,
+        storage.releaseWholeTurnLease(&lease),
+    );
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        crossOwnerQuarantineStatus().event_count,
+    );
+}
+
+test "f3c2 resync semantic candidate capacity consumes one bind and all cleanup dispositions" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    defer if (storage.lifecycle != .dead) {
+        _ = teardownForTest(&storage);
+    };
+    var lease: ExternalWholeTurnLease = .{};
+    try std.testing.expectEqual(ControlSemanticPreparationResult.prepared_pair, try prepareF3c1ActualResponse(
+        &storage,
+        &fixture,
+        scratch,
+        &lease,
+        .{ .resync = .{ .stream_id = valid_evidence.stream_id, .recovery_authority = .{
+            .owner_incarnation = fixture.client.attach_instance_id,
+            .origin = .client,
+            .recovery_epoch = 59,
+        } } },
+        "{\"result\":{\"resync\":true}}",
+        .none,
+        null,
+    ));
+    const aggregate_fixture = try std.testing.allocator.create(
+        F3c2DetachedRecoveryAggregateFixture,
+    );
+    defer std.testing.allocator.destroy(aggregate_fixture);
+    try aggregate_fixture.initInPlace(
+        &storage,
+        &lease,
+        scratch,
+        storage.completed_control.completed.source_end_absolute,
+        59,
+        external_inbox_ledger.max_live_mutations,
+        std.testing.allocator,
+    );
+    defer aggregate_fixture.deinit();
+
+    try std.testing.expect(storage.prepareResyncSemanticCommitUnderHeldLease(
+        &lease,
+        scratch,
+        aggregate_fixture.aggregate,
+    ));
+    try std.testing.expectEqual(
+        ConsumeResyncSemanticResult.consumed_resync_cleaned,
+        storage.consumeResyncSemanticCommitUnderHeldLease(
+            &lease,
+            scratch,
+            aggregate_fixture.aggregate,
+        ),
+    );
+    const projected = &scratch.projected_recovery_snapshot_commit;
+    try std.testing.expectEqual(
+        @as(u8, external_inbox_ledger.max_live_mutations),
+        projected.dispositions_count,
+    );
+    var bind_count: u8 = 0;
+    var drop_count: u8 = 0;
+    for (projected.recovery_dispositions.entries[0..projected.dispositions_count]) |entry| {
+        switch (entry.disposition) {
+            .bind => bind_count += 1,
+            .drop => drop_count += 1,
+            .unused, .terminal => return error.TestUnexpectedResult,
+        }
+    }
+    try std.testing.expectEqual(@as(u8, 1), bind_count);
+    try std.testing.expectEqual(
+        @as(u8, external_inbox_ledger.max_live_mutations - 1),
+        drop_count,
+    );
+    try std.testing.expectEqual(
+        ProjectedRecoverySnapshotCommitLifecycle.consumed_tombstone,
+        projected.lifecycle,
+    );
+    try std.testing.expectEqual(
+        RxAggregateLifecycle.side_intent_consumed,
+        aggregate_fixture.aggregate.lifecycle,
+    );
+    try std.testing.expect(std.mem.eql(
+        u8,
+        &aggregate_fixture.aggregate.digest,
+        &preparedRxAggregateDigest(aggregate_fixture.aggregate),
+    ));
+    try std.testing.expect(storage.control_correlation.state == .idle);
+    try std.testing.expectEqual(
+        WholeTurnReleaseResult.released,
+        storage.releaseWholeTurnLease(&lease),
+    );
+}
+
+test "f3c2 post-ACK aggregate cannot replay a sealed resync transition" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    defer if (storage.lifecycle != .dead) {
+        _ = teardownForTest(&storage);
+    };
+    var lease: ExternalWholeTurnLease = .{};
+    try std.testing.expectEqual(ControlSemanticPreparationResult.prepared_pair, try prepareF3c1ActualResponse(
+        &storage,
+        &fixture,
+        scratch,
+        &lease,
+        .{ .resync = .{ .stream_id = valid_evidence.stream_id, .recovery_authority = .{
+            .owner_incarnation = fixture.client.attach_instance_id,
+            .origin = .client,
+            .recovery_epoch = 37,
+        } } },
+        "{\"result\":{\"resync\":true}}",
+        .none,
+        null,
+    ));
+    try std.testing.expect(storage.prepareResyncAckTransitionUnderHeldLease(&lease, scratch));
+    const barrier = scratch.resync_ack_transition.recovery_barrier_absolute;
+    const old_intent = &scratch.traversal.intent;
+    var destroy_prepared: external_rx_intent.PreparedDestroy = .{};
+    try std.testing.expect(external_rx_intent.prepareDestroy(
+        old_intent,
+        @intFromPtr(&storage),
+        storage.intent_scratch_reservation.generation,
+        &destroy_prepared,
+    ));
+    const destroyed = external_rx_intent.commitPreparedDestroy(
+        old_intent,
+        &destroy_prepared,
+    );
+    storage.intent_scratch_reservation.lifecycle = .destroying;
+    storage.intent_scratch_reservation.digest = intentScratchReservationDigest(
+        storage.intent_scratch_reservation,
+    );
+    external_rx_intent.finishFrozenDestroy(destroyed);
+    storage.intent_scratch_reservation = .{};
+    const payload = try std.testing.allocator.dupe(u8, "projected-snapshot");
+    var paired = client_external_mode.ExternalRxFrame{
+        .frame = .{ .header = .{
+            .kind = .snapshot_chunk,
+            .stream_id = valid_evidence.stream_id,
+            .flags = protocol.Flags.end_stream,
+            .payload_len = @intCast(payload.len),
+        }, .payload = payload },
+        .range = .{
+            .identity = .{
+                .attach_instance_id = storage.owner_incarnation,
+                .destination_slot_addr = @intFromPtr(&storage),
+            },
+            .start_absolute = barrier,
+            .end_absolute = barrier + protocol.header_size + payload.len,
+        },
+        .pair_seal = undefined,
+    };
+    client_external_mode.testing.sealExternalRxFrame(&paired);
+    var source: client_external_mode.ExternalRxOutcome = .{ .frame = paired };
+    var probe = IntentScratchAuthorityProbe{
+        .storage = &storage,
+        .allocator = std.testing.allocator,
+        .parser_generation = lease.rx_provenance.parser_seal.generation,
+        .buffer_start_absolute = barrier,
+        .attach_instance_id = storage.owner_incarnation,
+    };
+    var candidate_intent: external_rx_intent.ExternalRxIntentHandle = .{};
+    const intent = &candidate_intent;
+    try std.testing.expectEqual(external_rx_intent.CreateResult.allocated, storage.createIntentScratch(
+        intent,
+        std.testing.allocator,
+        probe.ops(),
+    ));
+    probe.parser_generation += 1;
+    probe.buffer_start_absolute = paired.range.end_absolute;
+    try std.testing.expectEqual(external_rx_intent.MoveResult.classified, moveIntentFrameForTest(
+        intent,
+        &source,
+        probe.ops(),
+        valid_evidence.stream_id,
+    ));
+    try std.testing.expectEqual(RxAggregateCreateResult.allocated, storage.createRxAggregate(
+        &lease,
+        intent,
+        std.testing.allocator,
+        &scratch.aggregate_ranges,
+    ));
+    try std.testing.expectEqual(RxAggregateTransferResult.staged, storage.moveScreenIntoRxAggregate(
+        &lease,
+        intent,
+        0,
+        probe.ops(),
+    ));
+    try std.testing.expectEqual(RxAggregateTransferResult.staged, storage.transferScreenToLedger(
+        &lease,
+        intent,
+        0,
+    ));
+    try std.testing.expectEqual(RxAggregateTransferResult.staged, storage.admitScreenToLiveBatch(
+        &lease,
+        0,
+    ));
+    try std.testing.expectEqual(RxAggregateFinalizeResult.finalized, storage.finalizeRxAggregate(
+        &lease,
+        intent,
+    ));
+    const aggregate = storage.validateReadyRxAggregate(&lease).?;
+    try std.testing.expect(!storage.preparedResyncAckTransitionCurrent(
+        &lease,
+        scratch,
+        &scratch.whole_drain_permit,
+        &scratch.control_semantic_verdict,
+        &scratch.resync_ack_transition,
+    ));
+    var candidate: ProjectedRecoverySnapshotCommit = .{};
+    try std.testing.expect(!storage.prepareRecoverySnapshotCommitForProjectedAckUnderHeldLease(
+        &lease,
+        scratch,
+        &scratch.resync_ack_transition,
+        aggregate,
+        &candidate,
+    ));
+    try std.testing.expectEqual(
+        RxAggregateAbortResult.cleaned,
+        storage.abortRxAggregate(&lease, intent),
+    );
+    // Constructing and then aborting a post-ACK aggregate invalidates the old
+    // drain-bound ACK proof.  Consuming it here would turn a deliberate replay
+    // rejection into a second semantic publication and leak the first graph.
+    try std.testing.expectEqual(WholeTurnReleaseResult.released, storage.releaseWholeTurnLease(&lease));
+}
+
+// Kept as the next f3d RED fixture: product eligibility and same-clock branch selection are
+// intentionally outside f3c2.  f3d will turn this into an executable test when its projected
+// blocker receipt exists; weakening the f3c1 completed-only blocker here would violate its gate.
+fn f3dSameDrainResponseAndSnapshotFixture() !void {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    defer if (storage.lifecycle != .dead) {
+        _ = teardownForTest(&storage);
+    };
+    try initActiveF2Storage(&storage, &fixture);
+    storage.semantic_state = .{ .active = .{ .client_recovery = .{
+        .control_wait = .{ .epoch = 53, .deadline_ns = 1_000 },
+    } } };
+    const admitted = storage.admitControl(.{
+        .request = .{ .resync = .{
+            .stream_id = valid_evidence.stream_id,
+            .recovery_authority = .{
+                .owner_incarnation = storage.owner_incarnation,
+                .origin = .client,
+                .recovery_epoch = 53,
+            },
+        } },
+        .expected_controller_generation = valid_evidence.initial_controller_generation,
+    }, 100);
+    const request_id = switch (admitted) {
+        .admitted => |value| value.request_id,
+        else => return error.TestUnexpectedResult,
+    };
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    var probe = F2ProductProbe{ .use_posix = true };
+    const ops = probe.rxOps();
+    const sent = storage.pumpRxTurn(
+        .{ .readable = true, .writable = true, .now_ns = 101 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expect(sent.terminal == null);
+    var request_wire: [protocol.max_control_json + protocol.header_size]u8 = undefined;
+    try std.testing.expect(c.recv(fixture.peer_fd, &request_wire, request_wire.len, 0) > 0);
+    const response_wire = try framing.encodeFrame(
+        std.testing.allocator,
+        .{ .kind = .response, .request_id = request_id },
+        "{\"result\":{\"resync\":true}}",
+    );
+    defer std.testing.allocator.free(response_wire);
+    const snapshot_wire = try framing.encodeFrame(
+        std.testing.allocator,
+        .{
+            .kind = .snapshot_chunk,
+            .stream_id = valid_evidence.stream_id,
+            .flags = protocol.Flags.end_stream,
+        },
+        "same-drain-snapshot",
+    );
+    defer std.testing.allocator.free(snapshot_wire);
+    try std.testing.expectEqual(
+        @as(isize, @intCast(response_wire.len)),
+        c.send(fixture.peer_fd, response_wire.ptr, response_wire.len, 0),
+    );
+    try std.testing.expectEqual(
+        @as(isize, @intCast(snapshot_wire.len)),
+        c.send(fixture.peer_fd, snapshot_wire.ptr, snapshot_wire.len, 0),
+    );
+
+    // The first turn sent the control request and left a settled collector graph.
+    // A real owner resets that per-turn scratch before the next poll iteration;
+    // this direct held-lease fixture must cross the same boundary explicitly.
+    if (!client_external_rx_read.stoppedGraphPristine(
+        &scratch.stopped_borrow,
+        &scratch.borrow_use_permit,
+        &scratch.would_block_seed,
+        &scratch.prepared_admit_use_permit,
+    )) try std.testing.expect(client_external_rx_read.resetSettledStoppedGraphForNextTurn(
+        &scratch.read,
+        &scratch.collect_receipt,
+        &scratch.stopped_borrow,
+        &scratch.borrow_use_permit,
+        &scratch.would_block_seed,
+        &scratch.prepared_admit_use_permit,
+    ));
+    if (scratch.drain_evidence.lifecycle == .finished)
+        try std.testing.expect(storage.resetFinishedRxDrainEvidence(scratch));
+
+    var lease: ExternalWholeTurnLease = .{};
+    try storage.acquireWholeTurnLease(
+        &lease,
+        @intFromPtr(scratch),
+        @sizeOf(ExternalRxTurnScratch),
+    );
+    scratch.lifecycle = .busy;
+    scratch.authority_ranges_generation = storage.operation_generation;
+    const preparation = storage.prepareRxTurn(
+        &lease,
+        .{ .readable = true, .writable = false, .now_ns = 102 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expectEqual(
+        @as(std.meta.Tag(@TypeOf(preparation)), .drained),
+        std.meta.activeTag(preparation),
+    );
+    const published = storage.publishRxPreparationUnderHeldLease(
+        &lease,
+        scratch,
+        preparation,
+    );
+    try std.testing.expectEqual(
+        @as(?client_pump.ExternalPumpTerminal, null),
+        published.terminal,
+    );
+    const summary = switch (preparation) {
+        .drained => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(
+        ControlSemanticPreparationResult.prepared_pair,
+        storage.prepareCompletedControlSemanticUnderHeldLease(
+            &lease,
+            scratch,
+            summary,
+        ),
+    );
+    const aggregate = storage.validateReadyRxAggregate(&lease) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(storage.prepareResyncSemanticCommitUnderHeldLease(
+        &lease,
+        scratch,
+        aggregate,
+    ));
+    try std.testing.expectEqual(
+        ConsumeResyncSemanticResult.consumed_resync_cleaned,
+        storage.consumeResyncSemanticCommitUnderHeldLease(
+            &lease,
+            scratch,
+            aggregate,
+        ),
+    );
+    try std.testing.expectEqual(
+        ProjectedRecoverySnapshotCommitLifecycle.consumed_tombstone,
+        scratch.projected_recovery_snapshot_commit.lifecycle,
+    );
+    try std.testing.expect(storage.control_correlation.state == .idle);
+    try std.testing.expectEqual(
+        WholeTurnReleaseResult.released,
+        storage.releaseWholeTurnLease(&lease),
+    );
+}
+
+test "f3c2 projected resync digest binds final lifecycle" {
+    var candidate: ProjectedRecoverySnapshotCommit = .{
+        .saved_self_addr = 1,
+        .storage_addr = 2,
+        .scratch_addr = 3,
+        .lease_addr = 4,
+        .lifecycle = .prepared,
+    };
+    const prepared_digest = projectedRecoverySnapshotCommitDigest(&candidate);
+    candidate.lifecycle = .consumed_tombstone;
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &prepared_digest,
+        &projectedRecoverySnapshotCommitDigest(&candidate),
+    ));
+}
+
+test "f3c2 resync success sends duplicate wire to unsolicited protocol terminal" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    defer if (storage.lifecycle != .dead) {
+        _ = teardownForTest(&storage);
+    };
+    var lease: ExternalWholeTurnLease = .{};
+    try std.testing.expectEqual(ControlSemanticPreparationResult.prepared_pair, try prepareF3c1ActualResponse(
+        &storage,
+        &fixture,
+        scratch,
+        &lease,
+        .{ .resync = .{ .stream_id = valid_evidence.stream_id, .recovery_authority = .{
+            .owner_incarnation = fixture.client.attach_instance_id,
+            .origin = .client,
+            .recovery_epoch = 43,
+        } } },
+        "{\"result\":{\"resync\":true}}",
+        .none,
+        null,
+    ));
+    try std.testing.expect(storage.prepareResyncSemanticCommitUnderHeldLease(
+        &lease,
+        scratch,
+        null,
+    ));
+    try std.testing.expectEqual(
+        ConsumeResyncSemanticResult.consumed_resync_cleaned,
+        storage.consumeResyncSemanticCommitUnderHeldLease(&lease, scratch, null),
+    );
+    try std.testing.expect(storage.semantic_state == .active);
+    try std.testing.expect(storage.control_correlation.state == .idle);
+    try std.testing.expectEqual(
+        ProjectedRecoverySnapshotCommitLifecycle.consumed_tombstone,
+        scratch.projected_recovery_snapshot_commit.lifecycle,
+    );
+    try std.testing.expectEqual(
+        ResyncSemanticCommitLifecycle.consumed_tombstone,
+        scratch.resync_semantic_commit.lifecycle,
+    );
+    try std.testing.expectEqual(
+        ControlSemanticTakeLifecycle.consumed_tombstone,
+        scratch.control_semantic_take.lifecycle,
+    );
+    try std.testing.expectEqual(
+        FrozenControlResponseLifecycle.cleaned_tombstone,
+        scratch.resync_ack_frozen_response.lifecycle,
+    );
+    try std.testing.expect(scratch.resync_ack_frozen_response.payload.allocation_ptr == null);
+    const consumed_request_id = scratch.resync_ack_frozen_response.request_id;
+    try std.testing.expectEqual(WholeTurnReleaseResult.released, storage.releaseWholeTurnLease(&lease));
+
+    const duplicate = try framing.encodeFrame(
+        std.testing.allocator,
+        .{ .kind = .response, .request_id = consumed_request_id },
+        "{\"result\":{\"resync\":true}}",
+    );
+    defer std.testing.allocator.free(duplicate);
+    try std.testing.expectEqual(
+        @as(isize, @intCast(duplicate.len)),
+        c.send(fixture.peer_fd, duplicate.ptr, duplicate.len, 0),
+    );
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    var probe = F2ProductProbe{ .use_posix = true };
+    var ops = probe.rxOps();
+    const duplicate_turn = storage.pumpRxTurn(
+        .{ .readable = true, .writable = false, .now_ns = 104 },
+        &ops,
+        scratch,
+    );
+    try std.testing.expectEqual(
+        client_pump.TerminalReason.protocol_error,
+        duplicate_turn.terminal.?.reason,
+    );
+    try expectF2FinalZero(&storage);
+}
+
+test "f3c2 maximum resync correlation retires without wrap and blocks next admission" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    defer if (storage.lifecycle != .dead) {
+        _ = teardownForTest(&storage);
+    };
+    var lease: ExternalWholeTurnLease = .{};
+    try std.testing.expectEqual(ControlSemanticPreparationResult.prepared_pair, try prepareF3c1ActualResponse(
+        &storage,
+        &fixture,
+        scratch,
+        &lease,
+        .{ .resync = .{ .stream_id = valid_evidence.stream_id, .recovery_authority = .{
+            .owner_incarnation = fixture.client.attach_instance_id,
+            .origin = .client,
+            .recovery_epoch = 47,
+        } } },
+        "{\"result\":{\"resync\":true}}",
+        .correlation_max,
+        null,
+    ));
+    try std.testing.expectEqual(
+        std.math.maxInt(u64),
+        storage.control_correlation.generation,
+    );
+    try std.testing.expect(storage.prepareResyncSemanticCommitUnderHeldLease(
+        &lease,
+        scratch,
+        null,
+    ));
+    try std.testing.expectEqual(
+        ConsumeResyncSemanticResult.consumed_resync_cleaned,
+        storage.consumeResyncSemanticCommitUnderHeldLease(&lease, scratch, null),
+    );
+    try std.testing.expectEqual(
+        std.math.maxInt(u64),
+        storage.control_correlation.generation,
+    );
+    try std.testing.expect(storage.control_correlation.state == .idle);
+    try std.testing.expectEqual(
+        WholeTurnReleaseResult.released,
+        storage.releaseWholeTurnLease(&lease),
+    );
+    const external = switch (storage.owned_client.?.io_mode) {
+        .external => |*state| state,
+        .blocking => return error.TestUnexpectedResult,
+    };
+    const tx_len_before = external.external_tx.items.len;
+    const tx_bytes_before = external.external_tx_bytes;
+    const tx_generation_before = external.tx_queue_generation;
+    const request_ids_before = storage.owner_request_ids.?;
+    const correlation_before = storage.control_correlation;
+    const exhausted = storage.admitControl(.{
+        .request = .{ .resize = .{
+            .stream_id = valid_evidence.stream_id,
+            .cols = 80,
+            .rows = 24,
+            .client_sequence = 1,
+        } },
+        .expected_controller_generation = valid_evidence.initial_controller_generation,
+    }, 103);
+    try std.testing.expect(exhausted == .terminal);
+    try std.testing.expectEqual(
+        client_pump.TerminalReason.resource_exhausted,
+        exhausted.terminal,
+    );
+    try std.testing.expectEqual(tx_len_before, external.external_tx.items.len);
+    try std.testing.expectEqual(tx_bytes_before, external.external_tx_bytes);
+    try std.testing.expectEqual(tx_generation_before, external.tx_queue_generation);
+    try std.testing.expect(std.meta.eql(request_ids_before, storage.owner_request_ids.?));
+    try std.testing.expect(std.meta.eql(correlation_before, storage.control_correlation));
 }

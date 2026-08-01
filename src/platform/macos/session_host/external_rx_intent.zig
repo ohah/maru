@@ -2228,6 +2228,22 @@ pub fn commitPreparedDestroy(
     std.debug.assert(validatePreparedDestroy(handle, prepared));
     const scratch: *ExternalRxIntentScratch =
         @ptrFromInt(prepared.scratch_addr);
+    var frozen: FrozenDestroy = undefined;
+    commitPreparedDestroyUnchecked(handle, scratch, prepared, &frozen);
+    return frozen;
+}
+
+/// No-fail publication leaf for callers that completed `validatePreparedDestroy` before their
+/// first semantic write. `scratch_opaque` is captured from the sealed prepared address during
+/// that preflight; this function deliberately performs no raw-address lookup or validation.
+// MARU_F3C2_INTENT_DESTROY_UNCHECKED_BEGIN
+pub fn commitPreparedDestroyUnchecked(
+    handle: *ExternalRxIntentHandle,
+    scratch_opaque: *anyopaque,
+    prepared: *PreparedDestroy,
+    frozen_out: *FrozenDestroy,
+) void {
+    const scratch: *ExternalRxIntentScratch = @ptrCast(@alignCast(scratch_opaque));
     const cleanup_count = prepared.cleanup_count;
     for (0..cleanup_count) |index| scratch.intents[index] = .aborted;
     scratch.intent_count = 0;
@@ -2235,7 +2251,7 @@ pub fn commitPreparedDestroy(
     scratch.digest = scratchDigest(scratch);
     handle.lifecycle = .destroying;
     handle.digest = handleDigest(handle);
-    const frozen = FrozenDestroy{
+    frozen_out.* = .{
         .scratch = scratch,
         .handle = handle,
         .allocator = prepared.allocator,
@@ -2245,8 +2261,8 @@ pub fn commitPreparedDestroy(
         .reservation_generation = prepared.reservation_generation,
     };
     prepared.lifecycle = .consumed;
-    return frozen;
 }
+// MARU_F3C2_INTENT_DESTROY_UNCHECKED_END
 
 pub fn finishFrozenDestroy(frozen: FrozenDestroy) void {
     for (frozen.cleanup[0..frozen.cleanup_count]) |item|

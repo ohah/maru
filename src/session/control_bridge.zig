@@ -41,10 +41,6 @@ pub const file_renderer_ready_method = "maru.file.rendererReady";
 pub const diff_open_method = "maru.diff.open";
 /// 본문 우클릭 → **메뉴는 Zig chrome이 연다**(docs/file-panel.md §2.6). web은 "무엇을 눌렀는지"만 답한다.
 pub const menu_open_method = "maru.menu.open";
-/// 메뉴에서 고른 복사·잘라내기를 실제로 수행한다. **web이 선택 텍스트를 되돌려 준다** — 선택 범위는 문서 안에
-/// 있어 native가 모르고, WebKit이 web content의 클립보드 명령을 사용자 제스처에 묶어 web 혼자서도 못 한다.
-/// 우클릭 시점에 미리 실어 보내지 않는 이유: 안 쓸 수도 있는 문서 전체를 매번 옮기게 된다.
-pub const menu_clipboard_write_method = "maru.menu.clipboardWrite";
 /// 모든 bridge 정수는 JavaScript `Number`를 왕복하므로 이 상한 안에서만 identity가 정확하다.
 pub const max_js_safe_integer: u64 = 9_007_199_254_740_991;
 
@@ -104,8 +100,6 @@ pub const FileAccess = struct {
     renderer_ready_fn: *const fn (context: *anyopaque, editor_epoch: u64) anyerror!void,
     /// 본문 우클릭 메뉴를 연다. 콜백이 null이면 이 surface는 파일 본문이 아니다 — method 자체를 거절한다.
     open_menu_fn: ?*const fn (context: *anyopaque, request: MenuRequest) anyerror!void = null,
-    /// 메뉴가 고른 텍스트를 OS 클립보드 쓰기 큐에 넣는다. `open_menu_fn`과 짝이라 같이 없거나 같이 있다.
-    menu_clipboard_write_fn: ?*const fn (context: *anyopaque, editor_epoch: u64, text: []const u8) anyerror!void = null,
 
     fn beginDocument(self: FileAccess, document_id: u64) anyerror!u64 {
         return self.begin_document_fn(self.context, document_id);
@@ -155,11 +149,6 @@ pub const FileAccess = struct {
     fn openMenu(self: FileAccess, request: MenuRequest) anyerror!void {
         const f = self.open_menu_fn orelse return error.Unsupported;
         return f(self.context, request);
-    }
-
-    fn menuClipboardWrite(self: FileAccess, editor_epoch: u64, text: []const u8) anyerror!void {
-        const f = self.menu_clipboard_write_fn orelse return error.Unsupported;
-        return f(self.context, editor_epoch, text);
     }
 };
 
@@ -293,12 +282,6 @@ pub fn dispatchBridgeWithFileAccess(
         access.openMenu(request) catch return errorResponse(gpa, req.id, .internal_error);
         return serializeFileMutationResult(gpa, req.id, "opened", true);
     }
-    if (std.mem.eql(u8, req.method, menu_clipboard_write_method)) {
-        const params = menuClipboardParams(req.params) catch return errorResponse(gpa, req.id, .invalid_params);
-        access.menuClipboardWrite(params.editor_epoch, params.text) catch
-            return errorResponse(gpa, req.id, .internal_error);
-        return serializeFileMutationResult(gpa, req.id, "written_bytes", params.text.len);
-    }
     if (std.mem.eql(u8, req.method, file_render_mermaid_method)) {
         const params = mermaidRenderParams(req.params) catch return errorResponse(gpa, req.id, .invalid_params);
         const job_id = access.renderMermaid(params) catch return errorResponse(gpa, req.id, .internal_error);
@@ -417,26 +400,6 @@ fn menuParams(params: ?std.json.Value) error{InvalidParams}!MenuRequest {
         .href = href,
     };
 }
-
-/// 복사·잘라내기가 되돌려 준 텍스트. 상한은 문서 읽기 상한과 같은 축이다 — 선택은 문서보다 클 수 없다.
-fn menuClipboardParams(params: ?std.json.Value) error{InvalidParams}!struct { editor_epoch: u64, text: []const u8 } {
-    const obj = switch (params orelse return error.InvalidParams) {
-        .object => |obj| obj,
-        else => return error.InvalidParams,
-    };
-    if (obj.count() != 2) return error.InvalidParams;
-    const text = switch (obj.get("text") orelse return error.InvalidParams) {
-        .string => |value| value,
-        else => return error.InvalidParams,
-    };
-    if (text.len == 0 or text.len > max_menu_clipboard_bytes) return error.InvalidParams;
-    return .{
-        .editor_epoch = try positiveInteger(obj.get("editor_epoch") orelse return error.InvalidParams),
-        .text = text,
-    };
-}
-
-pub const max_menu_clipboard_bytes: usize = 8 << 20;
 
 fn finiteNumber(value: std.json.Value) error{InvalidParams}!f64 {
     const number: f64 = switch (value) {

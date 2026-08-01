@@ -67,8 +67,13 @@ export type RichEditorHandle = {
   selectAll: () => boolean;
   /** IME 조합 중인가. close lock이 조합 중 탭을 닫지 않도록 fail-closed 판정에 쓴다. */
   isComposing: () => boolean;
-  /** 현재 선택을 텍스트로 갈아끼운다(§2.6 메뉴의 잘라내기·붙여넣기). 선택이 없으면 캐럿에 삽입한다. */
-  replaceSelection: (text: string) => void;
+  /**
+   * 문서모델 좌표의 현재 선택(§2.6). **DOM Range를 저장해 두면 안 된다** — 편집기가 DOM을 다시 만들면 그
+   * Range의 노드가 문서에서 빠져 되살리기가 조용히 실패한다(실측: 1379자를 붙잡았는데 복원 뒤 선택 0자).
+   */
+  selectionRange: () => { from: number; to: number };
+  /** 저장해 둔 문서모델 좌표로 선택을 되돌리고 편집기에 focus를 준다. */
+  setSelectionRange: (from: number, to: number) => void;
 };
 
 type ToolbarButton = {
@@ -296,10 +301,9 @@ export function createRichEditor(
       return editor.commands.selectAll();
     },
     isComposing: () => editor.view.composing,
-    // 빈 문자열이면 선택을 지우는 것이 곧 잘라내기다(tiptap의 insertContent는 빈 값에 무동작이라 명시적으로 나눈다).
-    replaceSelection: (text: string) => {
-      if (text.length === 0) editor.chain().focus().deleteSelection().run();
-      else editor.chain().focus().insertContent(text).run();
+    selectionRange: () => ({ from: editor.state.selection.from, to: editor.state.selection.to }),
+    setSelectionRange: (from: number, to: number) => {
+      editor.chain().focus().setTextSelection({ from, to }).run();
     },
   };
 }

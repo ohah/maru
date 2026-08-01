@@ -18258,15 +18258,6 @@ pub const AppSession = struct {
         return null;
     }
 
-    /// 메뉴가 고른 텍스트를 OS 클립보드 쓰기 큐에 넣는다(OSC 52 write와 같은 drain — 새 ABI 불요).
-    /// **그 surface가 파일 본문일 때만** 받는다 — 아니면 임의 web이 클립보드를 덮어쓰는 창구가 된다.
-    pub fn queueMenuClipboardWrite(self: *AppSession, surface_id: u64, text: []const u8) !void {
-        if (self.fileEntryForSurfaceId(surface_id) == null) return error.Unsupported;
-        const captured = try self.allocator.dupe(u8, text);
-        if (self.chrome_clipboard_write.len > 0) self.allocator.free(self.chrome_clipboard_write);
-        self.chrome_clipboard_write = captured;
-    }
-
     /// web이 실행할 메뉴 동작을 drain한다(있으면 그 동작, 비우고). Swift가 매 tick 호출한다.
     pub fn takeFileMenuAction(self: *AppSession) ?FileMenuAction {
         const action = self.pending_file_menu_action;
@@ -18330,6 +18321,9 @@ pub const AppSession = struct {
             switch (item.owner()) {
                 .web => {
                     self.pending_file_menu_action = .{ .surface_id = surface_id, .item = item };
+                    // **그 문서로 포커스를 돌려준다.** 메뉴 클릭은 오버레이 통과 경로라 터미널 뷰가 받는데, 그대로
+                    // 두면 이어지는 ⌘Z·타이핑이 편집기까지 못 간다 — 잘라내기는 됐는데 되돌리기가 안 되던 원인이다.
+                    if (self.fileEntryForSurfaceId(surface_id)) |entry| self.requestDockEntryFocus(entry);
                     self.closeContextMenu();
                 },
                 .native => switch (item) {
@@ -18357,6 +18351,7 @@ pub const AppSession = struct {
                     .open_source => {
                         self.closeContextMenu();
                         _ = self.setFilePanelModeBySurface(surface_id, .source_edit);
+                        if (self.fileEntryForSurfaceId(surface_id)) |entry| self.requestDockEntryFocus(entry);
                     },
                     // 이미지 저장은 저장 패널 ABI가 필요해 이 슬라이스에 없다(§2.6) — 항목도 만들지 않는다.
                     .save_image, .copy, .cut, .paste, .select_all => self.closeContextMenu(),
@@ -19962,8 +19957,21 @@ pub const AppSession = struct {
     /// (그 키/IME가 Zig 경로). 옛 override(anyOverlayOpen or addr_edit만)는 rename·사이드바 검색을 빠뜨려 web pane 활성 중
     /// 그 편집이 웹뷰로 새고(리뷰 [0]), notice까지 세어 토스트가 편집 키를 뺏었다(리뷰 [3]) — 여기서 정정.
     pub fn terminalOwnsInput(self: *const AppSession) bool {
+        // **파일 본문 우클릭 메뉴는 예외다**(docs/file-panel.md §2.6). 그 메뉴가 뜨는 동안 firstResponder를 터미널로
+        // 옮기면 WKWebView가 포커스를 잃고, WebKit은 포커스 없는 문서의 선택을 **아예 안 그린다** — 사용자가 방금
+        // 겨냥한 블록이 우클릭하는 순간 사라진다(실제로 그랬다). 선택을 우리가 흉내 내 그리는 길은 리스트 마커처럼
+        // 텍스트 노드가 아닌 것을 덮어 버려 접었다(§2.6). 그래서 그리게 두는 대신 **포커스를 안 뺏는다.**
+        if (self.fileContentMenuHoldsWebFocus()) return false;
         return self.anyModalOverlayOpen() or self.addr_edit != null or self.rename != null or
             self.sidebar_search_active or self.fileTreeFocused() or self.pendingDockEntryOwnsInput();
+    }
+
+    /// 파일 본문 메뉴가 떠 있고, 그것 말고 입력을 가져갈 오버레이가 없나. 다른 모달(확인·팔레트·세팅)이 함께
+    /// 열려 있으면 그쪽이 이긴다 — 그 화면들은 키가 Zig로 가야 동작한다.
+    fn fileContentMenuHoldsWebFocus(self: *const AppSession) bool {
+        if (self.file_content_menu == null) return false;
+        const h = &self.chrome_host;
+        return !(h.confirm.open or h.notifications.open or h.find.open or h.palette.open or h.settings.open);
     }
 
     /// config `cursor.shape`(config enum)를 코어/렌더가 쓰는 terminal enum으로 옮긴다. 두 enum은 **멤버 순서가 다르다**
@@ -61560,6 +61568,8 @@ test "파일 본문 우클릭: 대상별 항목이 서고 실행 주인이 nativ
     try std.testing.expectEqual(surface_id, action.surface_id);
     try std.testing.expectEqual(maru.session.content_menu.Item.copy, action.item);
     try std.testing.expect(session.takeFileMenuAction() == null); // 1회성
+    // 포커스를 그 문서로 돌려준다 — 안 그러면 이어지는 ⌘Z·타이핑이 편집기까지 못 간다.
+    try std.testing.expectEqual(surface_id, session.takePendingDockFocusAction().?);
 
     // 읽기 모드 + 여백의 "소스 모드로 열기"는 헤더 선택기와 **같은 경로**로 모드를 옮긴다.
     try session.openFileContentMenu(surface_id, .{
@@ -61598,5 +61608,39 @@ test "파일 본문 우클릭: 대상별 항목이 서고 실행 주인이 nativ
         .has_selection = false,
         .href = "",
     }));
-    try std.testing.expectError(error.Unsupported, session.queueMenuClipboardWrite(surface_id + 999, "x"));
+}
+
+// [§2.6] 본문 메뉴가 떠 있는 동안 **웹뷰가 포커스를 지킨다**. 안 그러면 WebKit이 선택을 안 그려 사용자가 방금
+// 겨냥한 블록이 우클릭하는 순간 사라진다. 다른 모달이 함께 열리면 그쪽이 이겨야 한다(키가 Zig로 가야 동작한다).
+test "파일 본문 메뉴는 웹뷰 포커스를 뺏지 않는다(다른 모달은 그대로 뺏는다)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // 평소 컨텍스트 메뉴(터미널 본문)는 그대로 터미널이 입력을 가져간다.
+    session.chrome_host.context_menu.show(10, 10, 2);
+    session.terminal_context_menu = true;
+    try std.testing.expect(session.terminalOwnsInput());
+    session.closeContextMenu();
+
+    // 파일 본문 메뉴는 예외다.
+    session.file_content_menu = .{ .surface_id = 7, .editor_epoch = 1, .len = 2 };
+    session.chrome_host.context_menu.show(10, 10, 2);
+    try std.testing.expect(!session.terminalOwnsInput());
+
+    // 다른 모달이 함께 열리면 그쪽이 이긴다.
+    session.chrome_host.palette.open = true;
+    try std.testing.expect(session.terminalOwnsInput());
+    session.chrome_host.palette.open = false;
+    session.closeContextMenu();
+    try std.testing.expect(!session.terminalOwnsInput()); // 메뉴가 닫혔고 다른 것도 없다
 }

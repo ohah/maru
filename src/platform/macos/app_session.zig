@@ -2632,6 +2632,9 @@ pub const AppSession = struct {
     /// 섹션 접힘 상태(스테이지된 변경·변경 사항·추적되지 않은 파일 순). 창 상태이며 workspace에 저장하지 않는다 —
     /// 목록 자체가 매번 새로 계산되는 값이라 접힘만 남겨 봐야 다음 실행의 목록과 대응이 보장되지 않는다.
     scm_collapsed: [scm_view.section_count]bool = .{ false, false, false, false },
+    /// 그 섹션을 전부 펼쳤는가("모두 보기"를 눌렀는가). 기본은 섹션당 상한까지만 보여 준다 — 변경이 수백 개면
+    /// 한 섹션이 첫 화면을 다 먹어 나머지 섹션이 있는지조차 모르게 된다.
+    scm_expanded: [scm_view.section_count]bool = .{ false, false, false, false },
     /// 감시를 걸어야 하는 `<repo>/.git` 경로(아직 host가 안 가져갔으면 non-null). **폴링 대신 감시**를 쓰는
     /// 이유: `git add`는 작업트리를 안 건드리고 index만 바꿔 파일 감시로는 안 잡히는데, `.git`을 보면 잡힌다.
     git_watch_request: ?[]u8 = null,
@@ -14621,6 +14624,7 @@ pub const AppSession = struct {
             result.branch_name_status,
             result.branch_numstat,
             self.scm_collapsed,
+            self.scm_expanded,
             out,
             scratch,
         );
@@ -14640,6 +14644,7 @@ pub const AppSession = struct {
             result.branch_name_status,
             result.branch_numstat,
             self.scm_collapsed,
+            self.scm_expanded,
             &buf,
             &scratch,
         );
@@ -20395,6 +20400,13 @@ pub const AppSession = struct {
                             // 섹션 헤더 클릭 = 접기/펴기. 개수는 접혀도 남아 몇 개가 숨었는지 보인다.
                             const idx = @intFromEnum(sec.section);
                             if (idx < self.scm_collapsed.len) self.scm_collapsed[idx] = !self.scm_collapsed[idx];
+                            self.metal_dirty = true;
+                            return;
+                        },
+                        .more => |more| {
+                            // "모두 보기" = 그 섹션만 전부 편다(다른 섹션 상한은 그대로 — 한 섹션이 화면을 먹지 않게).
+                            const idx = @intFromEnum(more.section);
+                            if (idx < self.scm_expanded.len) self.scm_expanded[idx] = true;
                             self.metal_dirty = true;
                             return;
                         },
@@ -26956,6 +26968,7 @@ pub const AppSession = struct {
                                 r.branch_name_status,
                                 r.branch_numstat,
                                 self.scm_collapsed,
+                                self.scm_expanded,
                                 &rows_buf,
                                 &scratch,
                             ) else null;

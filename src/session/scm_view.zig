@@ -9,8 +9,13 @@
 const std = @import("std");
 const git_status = @import("git_status.zig");
 
-/// 섹션 개수 — 접힘 상태 배열의 길이 계약이다(세션이 같은 크기로 들고 있는다).
+/// 섹션 개수 — 접힘·펼침 상태 배열의 길이 계약이다(세션이 같은 크기로 들고 있는다).
 pub const section_count = 4;
+
+/// 한 섹션이 기본으로 보여 주는 파일 행 수. 변경이 수백 개인 저장소에서 한 섹션이 화면을 다 먹으면 나머지
+/// 섹션이 스크롤 저 아래로 밀려 **있는지조차 모르게** 된다(스크롤이 있어도 마찬가지다 — 첫 화면이 전부다).
+/// 이 값을 넘으면 "모두 보기"를 내고, 사용자가 그 섹션만 편다.
+pub const default_section_rows: usize = 10;
 
 pub const Section = enum {
     staged,
@@ -53,6 +58,9 @@ pub const FileRow = struct {
 pub const Row = union(enum) {
     section: struct { section: Section, count: usize },
     file: FileRow,
+    /// "모두 보기" 행 — 그 섹션에 **아직 안 보여 준 파일이 몇 개인지** 말한다. 누르면 그 섹션만 전부 편다.
+    /// 이 행이 없으면 목록이 조용히 잘려, 사용자는 자기가 바꾼 파일이 없어졌다고 읽는다.
+    more: struct { section: Section, hidden: usize },
 };
 
 pub const Model = struct {
@@ -75,6 +83,8 @@ pub fn build(
     /// 접힌 섹션(Section 순서). 접혀 있으면 헤더만 내고 파일 행은 만들지 않는다 — **화면에 있는 것과 이 목록이
     /// 같아야** 클릭 좌표가 그린 자리와 어긋나지 않는다.
     collapsed: [section_count]bool,
+    /// 그 섹션을 **전부** 보여 줄지(사용자가 "모두 보기"를 누른 상태). 안 눌렀으면 `default_section_rows`까지만.
+    expanded: [section_count]bool,
     out: []Row,
     scratch: []u8,
 ) Model {
@@ -85,8 +95,11 @@ pub fn build(
             out[n] = .{ .section = .{ .section = section, .count = count } };
             n += 1;
             var it = git_status.iterate(status_text);
+            var shown: usize = 0;
+            const limit = if (expanded[@intFromEnum(section)]) count else @min(count, default_section_rows);
             // 접힌 섹션은 헤더만 낸다(반복문을 아예 안 돈다 — inline for 안이라 continue를 쓰지 않는다).
             while (!collapsed[@intFromEnum(section)]) {
+                if (shown >= limit) break;
                 const entry = it.next() orelse break;
                 if (n >= out.len) break;
                 if (!belongs(entry, section)) continue;
@@ -118,6 +131,12 @@ pub fn build(
                 }
                 out[n] = .{ .file = row };
                 n += 1;
+                shown += 1;
+            }
+            // 남은 게 있으면 그 사실을 행으로 말한다(조용히 자르지 않는다).
+            if (!collapsed[@intFromEnum(section)] and shown < count and n < out.len) {
+                out[n] = .{ .more = .{ .section = section, .hidden = count - shown } };
+                n += 1;
             }
         }
     }
@@ -127,7 +146,10 @@ pub fn build(
         out[n] = .{ .section = .{ .section = .branch, .count = branch_count } };
         n += 1;
         var it = git_status.iterateNameStatus(branch_name_status);
+        var shown: usize = 0;
+        const limit = if (expanded[@intFromEnum(Section.branch)]) branch_count else @min(branch_count, default_section_rows);
         while (!collapsed[@intFromEnum(Section.branch)]) {
+            if (shown >= limit) break;
             const entry = it.next() orelse break;
             if (n >= out.len) break;
             var row: FileRow = .{
@@ -142,6 +164,11 @@ pub fn build(
                 row.binary = d.binary;
             } else row.unknown_delta = true;
             out[n] = .{ .file = row };
+            n += 1;
+            shown += 1;
+        }
+        if (!collapsed[@intFromEnum(Section.branch)] and shown < branch_count and n < out.len) {
+            out[n] = .{ .more = .{ .section = .branch, .hidden = branch_count - shown } };
             n += 1;
         }
     }
@@ -200,7 +227,7 @@ const fixture_worktree = "1\t0\tkeep.txt\n";
 test "섹션·개수·증감이 실측 출력에서 그대로 나온다" {
     var out: [32]Row = undefined;
     var scratch: [256]u8 = undefined;
-    const model = build(fixture_status, fixture_staged, fixture_worktree, "", "", .{ false, false, false, false }, &out, &scratch);
+    const model = build(fixture_status, fixture_staged, fixture_worktree, "", "", .{ false, false, false, false }, .{ true, true, true, true }, &out, &scratch);
     try testing.expect(!model.empty);
     try testing.expectEqualStrings("main", model.head.branch.?);
 
@@ -231,7 +258,7 @@ test "섹션·개수·증감이 실측 출력에서 그대로 나온다" {
 test "개수가 0인 섹션은 헤더도 내지 않는다" {
     var out: [16]Row = undefined;
     var scratch: [64]u8 = undefined;
-    const model = build("# branch.head main\n? only.txt\n", "", "", "", "", .{ false, false, false, false }, &out, &scratch);
+    const model = build("# branch.head main\n? only.txt\n", "", "", "", "", .{ false, false, false, false }, .{ true, true, true, true }, &out, &scratch);
     try testing.expectEqual(@as(usize, 2), model.rows.len); // 추적되지 않은 파일 헤더 + 1행뿐
     try testing.expectEqual(Section.untracked, model.rows[0].section.section);
 }
@@ -239,7 +266,7 @@ test "개수가 0인 섹션은 헤더도 내지 않는다" {
 test "변경이 없으면 empty다(빈 안내를 대신 그린다)" {
     var out: [8]Row = undefined;
     var scratch: [64]u8 = undefined;
-    const model = build("# branch.head main\n", "", "", "", "", .{ false, false, false, false }, &out, &scratch);
+    const model = build("# branch.head main\n", "", "", "", "", .{ false, false, false, false }, .{ true, true, true, true }, &out, &scratch);
     try testing.expect(model.empty);
     try testing.expectEqual(@as(usize, 0), model.rows.len);
     try testing.expectEqualStrings("main", model.head.branch.?);
@@ -248,7 +275,7 @@ test "변경이 없으면 empty다(빈 안내를 대신 그린다)" {
 test "out이 모자라면 거기서 자른다(화면 밖 행을 만들지 않는다)" {
     var out: [2]Row = undefined;
     var scratch: [256]u8 = undefined;
-    const model = build(fixture_status, fixture_staged, fixture_worktree, "", "", .{ false, false, false, false }, &out, &scratch);
+    const model = build(fixture_status, fixture_staged, fixture_worktree, "", "", .{ false, false, false, false }, .{ true, true, true, true }, &out, &scratch);
     try testing.expectEqual(@as(usize, 2), model.rows.len);
     try testing.expectEqual(Section.staged, model.rows[0].section.section);
 }
@@ -256,7 +283,7 @@ test "out이 모자라면 거기서 자른다(화면 밖 행을 만들지 않는
 test "numstat에 없는 파일은 숫자를 비운다(0으로 채우지 않는다)" {
     var out: [8]Row = undefined;
     var scratch: [256]u8 = undefined;
-    const model = build("1 .M N... 1 2 3 a b lonely.txt\n", "", "", "", "", .{ false, false, false, false }, &out, &scratch);
+    const model = build("1 .M N... 1 2 3 a b lonely.txt\n", "", "", "", "", .{ false, false, false, false }, .{ true, true, true, true }, &out, &scratch);
     try testing.expect(model.rows[1].file.unknown_delta);
     try testing.expectEqual(@as(u32, 0), model.rows[1].file.added);
 }
@@ -265,12 +292,12 @@ test "접힌 섹션은 헤더만 내고 개수는 그대로 보여 준다" {
     // 접혀도 개수는 남아야 "몇 개가 숨어 있는지"를 알 수 있다. 파일 행이 없어야 클릭 좌표가 어긋나지 않는다.
     var out: [32]Row = undefined;
     var scratch: [256]u8 = undefined;
-    const model = build(fixture_status, fixture_staged, fixture_worktree, "", "", .{ true, false, false, false }, &out, &scratch);
+    const model = build(fixture_status, fixture_staged, fixture_worktree, "", "", .{ true, false, false, false }, .{ true, true, true, true }, &out, &scratch);
     try testing.expectEqual(Section.staged, model.rows[0].section.section);
     try testing.expectEqual(@as(usize, 3), model.rows[0].section.count); // 개수는 접혀도 그대로
     try testing.expectEqual(Section.unstaged, model.rows[1].section.section); // 바로 다음 섹션이 온다
     // 전부 접으면 헤더 3줄만 남는다.
-    const all = build(fixture_status, fixture_staged, fixture_worktree, "", "", .{ true, true, true, true }, &out, &scratch);
+    const all = build(fixture_status, fixture_staged, fixture_worktree, "", "", .{ true, true, true, true }, .{ true, true, true, true }, &out, &scratch);
     try testing.expectEqual(@as(usize, 3), all.rows.len);
     try testing.expect(!all.empty); // 변경이 없는 것과 접은 것은 다르다
 }
@@ -280,7 +307,7 @@ test "브랜치 섹션은 커밋 범위에서 오고, 기준이 없으면 아예
     var scratch: [256]u8 = undefined;
     const name_status = "M\tsrc/main.zig\nA\tdocs/new.md\n";
     const numstat = "4\t2\tsrc/main.zig\n10\t0\tdocs/new.md\n";
-    const model = build("# branch.head main\n", "", "", name_status, numstat, .{ false, false, false, false }, &out, &scratch);
+    const model = build("# branch.head main\n", "", "", name_status, numstat, .{ false, false, false, false }, .{ true, true, true, true }, &out, &scratch);
     try testing.expectEqual(Section.branch, model.rows[0].section.section);
     try testing.expectEqual(@as(usize, 2), model.rows[0].section.count);
     try testing.expectEqualStrings("src/main.zig", model.rows[1].file.path);
@@ -288,7 +315,7 @@ test "브랜치 섹션은 커밋 범위에서 오고, 기준이 없으면 아예
     try testing.expectEqual(@as(u32, 0), model.rows[2].file.removed);
 
     // **기준을 못 잡으면 그 섹션만 없다**(오류가 아니다 — origin/HEAD 없는 로컬 저장소).
-    const without = build("# branch.head main\n", "", "", "", "", .{ false, false, false, false }, &out, &scratch);
+    const without = build("# branch.head main\n", "", "", "", "", .{ false, false, false, false }, .{ true, true, true, true }, &out, &scratch);
     try testing.expect(without.empty);
 }
 
@@ -302,6 +329,7 @@ test "브랜치 섹션도 접힌다(개수는 남는다)" {
         "M\ta.txt\nM\tb.txt\n",
         "",
         .{ false, false, false, true },
+        .{ true, true, true, true },
         &out,
         &scratch,
     );
@@ -317,7 +345,7 @@ test "충돌·하위 모듈은 숫자를 비운다(거짓 0으로 안 바뀐 것
         "u UU N... 100644 100644 100644 100644 aaa bbb ccc f.txt\n" ++
         "1 AM S.M. 000000 160000 160000 000 0b4 vendor\n";
     const numstat = "0\t0\tf.txt\n4\t0\tf.txt\n1\t0\tvendor\n";
-    const model = build(status, numstat, numstat, "", "", .{ false, false, false, false }, &out, &scratch);
+    const model = build(status, numstat, numstat, "", "", .{ false, false, false, false }, .{ true, true, true, true }, &out, &scratch);
 
     // 충돌은 **변경 사항 섹션에만** 든다(스테이지된 변경에 같은 파일이 또 뜨면 MM과 구분이 안 된다).
     var conflicted_sections: [2]bool = .{ false, false };
@@ -328,7 +356,7 @@ test "충돌·하위 모듈은 숫자를 비운다(거짓 0으로 안 바뀐 것
             try testing.expect(f.unknown_delta); // `+0 -0`을 쓰지 않는다
             try testing.expectEqual(@as(u8, 'U'), f.letter);
         },
-        .section => {},
+        .section, .more => {},
     };
     try testing.expect(!conflicted_sections[0]);
     try testing.expect(conflicted_sections[1]);
@@ -340,7 +368,43 @@ test "충돌·하위 모듈은 숫자를 비운다(거짓 0으로 안 바뀐 것
             found_submodule = true;
             try testing.expect(f.unknown_delta);
         },
-        .section => {},
+        .section, .more => {},
     };
     try testing.expect(found_submodule);
+}
+
+test "섹션은 기본 상한까지만 보여 주고 남은 개수를 말한다" {
+    // 변경이 수백 개면 한 섹션이 첫 화면을 다 먹어 나머지 섹션이 있는지도 모르게 된다. 그래서 상한을 두되
+    // **잘렸다는 사실을 행으로 말한다** — 조용히 자르면 사용자는 자기 파일이 없어졌다고 읽는다.
+    var status: std.ArrayList(u8) = .empty;
+    defer status.deinit(testing.allocator);
+    try status.appendSlice(testing.allocator, "# branch.head main\n");
+    for (0..25) |i| {
+        var line: [64]u8 = undefined;
+        try status.appendSlice(testing.allocator, try std.fmt.bufPrint(&line, "1 .M N... 1 2 3 a b f{d}.txt\n", .{i}));
+    }
+
+    var out: [64]Row = undefined;
+    var scratch: [256]u8 = undefined;
+    const capped = build(status.items, "", "", "", "", .{false} ** section_count, .{false} ** section_count, &out, &scratch);
+    // 헤더 + 상한만큼의 파일 + "모두 보기" 한 줄.
+    try testing.expectEqual(default_section_rows + 2, capped.rows.len);
+    try testing.expectEqual(@as(usize, 25), capped.rows[0].section.count); // 개수는 전체를 말한다
+    const more = capped.rows[capped.rows.len - 1].more;
+    try testing.expectEqual(Section.unstaged, more.section);
+    try testing.expectEqual(@as(usize, 25 - default_section_rows), more.hidden);
+
+    // "모두 보기"를 누른 뒤에는 전부 나오고 그 행은 사라진다.
+    var expanded = [_]bool{false} ** section_count;
+    expanded[@intFromEnum(Section.unstaged)] = true;
+    const full = build(status.items, "", "", "", "", .{false} ** section_count, expanded, &out, &scratch);
+    try testing.expectEqual(@as(usize, 26), full.rows.len); // 헤더 + 25
+    for (full.rows[1..]) |row| try testing.expect(row == .file);
+}
+
+test "상한 안이면 '모두 보기'를 내지 않는다(누를 게 없는 행을 만들지 않는다)" {
+    var out: [32]Row = undefined;
+    var scratch: [256]u8 = undefined;
+    const model = build(fixture_status, fixture_staged, fixture_worktree, "", "", .{false} ** section_count, .{false} ** section_count, &out, &scratch);
+    for (model.rows) |row| try testing.expect(row != .more);
 }

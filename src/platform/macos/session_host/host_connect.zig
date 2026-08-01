@@ -208,19 +208,73 @@ fn findCurrentManifestHost(
 const upgrade_reconnect_delay_ms: u32 = 20;
 const upgrade_reconnect_attempts: usize = 500; // × 20ms = 10s (pause budget 5s + 부팅·복원 여유)
 
-/// exec 뒤 같은 host_id로 다시 붙는다. 실패하면 `null` — 호출자가 기존대로 새 host를 spawn한다.
-fn reconnectAfterUpgrade(
+/// 업그레이드가 **왜 적용되지 않았는지**를 한 줄로 남긴다.
+///
+/// host는 실패 사유를 wire로 이미 보내 준다(`AttemptReason` 12종 — `exec_failed`·`target_invalid`·`handoff_failed`
+/// 등). 그런데 지금까지 그 값을 받고도 버려서, "accepted를 받았는데 이미지가 안 바뀌었다"는 상황에서 원인을 알
+/// 길이 전혀 없었다. GUI의 stdout/stderr는 `/dev/null`이라(Dock·Finder 실행) 이 로그는 터미널에서 앱을 직접
+/// 띄울 때만 보이지만, 실제로 이 경로의 회귀를 그렇게 잡았다 — 사유를 버리지 않는 것 자체가 진단의 출발점이다.
+fn logUpgradeNotApplied(host_id: u128, status: []const u8, reason: []const u8) void {
+    if (builtin.is_test) return;
+    std.log.err(
+        "session host upgrade did not take effect: host={x:0>32} status={s} reason={s}",
+        .{ host_id, status, reason },
+    );
+}
+
+/// 재연결한 host를 업그레이드 결과로 **채택해도 되는가**. hello ack의 build_id가 target과 정확히 같아야 한다.
+///
+/// `null`(광고 안 함)은 거부다 — fail-closed. build_id를 모르는 host는 우리가 보낸 이미지로 돌고 있다는 증거가
+/// 없고, 증거 없이 채택하면 아래 `reconnectUpgradedHost` 주석의 실패 모드로 그대로 들어간다.
+pub fn upgradedHostMatches(restored_build_id: ?[]const u8, target_build_id: []const u8) bool {
+    const restored = restored_build_id orelse return false;
+    return std.mem.eql(u8, restored, target_build_id);
+}
+
+/// exec 뒤 같은 host_id로 다시 붙되, **정말 새 이미지로 바뀌었는지 확인한다.** 실패하면 `null` — 호출자가
+/// 기존대로 새 host를 spawn한다.
+///
+/// 재연결 성공만으로는 부족하다. host가 accepted를 보내고도 exec에 실패해 rollback하면 **같은 host_id로 다시
+/// 붙지만 이미지는 옛것 그대로**다. 그 연결을 그대로 채택하면 GUI는 host-backed라고 믿고 `runtime.spawn`을
+/// 걸었다가, 옛 host가 모르는 capability(`runtime_core_command_v1` 등) 때문에 `UnsupportedSpawnContract`로
+/// 실패해 in-process로 떨어진다. build_id 게이팅이 원래 막아 주던 상황을 우리가 우회해서 만들어 내는 셈이라,
+/// 업그레이드를 안 하느니만 못한 회귀가 된다(실측: 앱 업데이트 뒤 모든 터미널이 in-process로 폴백했다).
+///
+/// 그래서 hello ack의 build_id가 target과 **정확히 같을 때만** 채택하고, 아니면 연결을 버린다.
+fn reconnectUpgradedHost(
     allocator: std.mem.Allocator,
     base_cache_dir: []const u8,
     host_id: u128,
+    target_build_id: []const u8,
+    attempt_id: u128,
 ) ?Outcome {
-    return switch (connectNewHostWithBackoff(allocator, base_cache_dir, host_id, .{
+    var restored = switch (connectNewHostWithBackoff(allocator, base_cache_dir, host_id, .{
         .connect_attempts = upgrade_reconnect_attempts,
         .connect_delay_ms = upgrade_reconnect_delay_ms,
     })) {
-        .connected => |restored| .{ .connected = restored },
-        .failed => null,
+        .connected => |client| client,
+        // 재연결조차 못 했으면 물어볼 상대가 없다. host가 exec 도중 죽었을 수도, 아직 restoring일 수도 있다.
+        .failed => |reason| {
+            logUpgradeNotApplied(host_id, "unreachable", @tagName(reason));
+            return null;
+        },
     };
+    if (!upgradedHostMatches(restored.build_id, target_build_id)) {
+        // **왜 안 바뀌었는지 host에게 직접 묻는다.** 이 조회가 없으면 "재연결은 됐는데 옛 이미지"라는 사실만 알고
+        // 그 이유(exec_failed·rolled_back·target_invalid…)는 영영 알 수 없다 — 정확히 그 상태로 이 회귀를 한참
+        // 추적했다. 조회 자체가 실패해도 그 사실을 남겨 "묻지 못했음"과 "물었는데 기록이 없음"을 구분한다.
+        if (restored.upgradeStatus(attempt_id)) |maybe_report| {
+            if (maybe_report) |report|
+                logUpgradeNotApplied(host_id, @tagName(report.status), @tagName(report.reason))
+            else
+                logUpgradeNotApplied(host_id, "no_attempt_record", "none");
+        } else |_| {
+            logUpgradeNotApplied(host_id, "status_query_failed", "none");
+        }
+        restored.deinit();
+        return null;
+    }
+    return .{ .connected = restored };
 }
 
 /// exec 업그레이드 후보 판정에 필요한 manifest 사실만 담는다. 실 `Manifest`는 allocator가 소유한 슬라이스를
@@ -324,18 +378,35 @@ fn tryUpgradeExistingHost(
             // exec한다. 그때 다른 host로 스캔을 이어 가면 이미 교체 중인 host를 두고 또 다른 host를 흔든다 —
             // 재연결로 결과를 확인하고, 아니면 여기서 끝낸다.
             client.deinit();
-            return reconnectAfterUpgrade(allocator, base_cache_dir, host_id);
+            return reconnectUpgradedHost(allocator, base_cache_dir, host_id, target_build_id, attempt_id);
         };
         client.deinit();
         // **prepare를 한 번 보낸 뒤에는 결과와 무관하게 스캔을 끝낸다.** 한 번의 GUI 실행이 여러 host에 연쇄로
         // upgrade를 걸면 각 host가 클라이언트를 떨어뜨리며 재시작하는데, 그 피해는 새 host 하나를 더 띄우는
         // 것보다 훨씬 크다. 거절(`rejected`)도 마찬가지다 — host는 다른 attachment가 남아 있으면 거절하며,
         // 그건 "지금은 안 된다"이지 "이 host는 못 쓴다"가 아니다.
-        return switch (outcome) {
+        switch (outcome) {
             // host가 응답을 전량 보낸 뒤 이 connection을 닫고 exec한다 — 같은 host_id로 다시 붙는다.
-            .accepted_reconnect_required => reconnectAfterUpgrade(allocator, base_cache_dir, host_id),
-            .completed, .rejected => null,
-        };
+            .accepted_reconnect_required => return reconnectUpgradedHost(
+                allocator,
+                base_cache_dir,
+                host_id,
+                target_build_id,
+                attempt_id,
+            ),
+            // host가 이미 끝난 attempt를 보고했다 — `AttemptReason`이 왜 못 바꿨는지 말해 준다. 이 값을 버리면
+            // 사용자는 "업데이트했는데 세션이 안 이어진다"만 겪고 우리는 이유를 못 본다.
+            .completed => |report| {
+                logUpgradeNotApplied(host_id, @tagName(report.status), @tagName(report.reason));
+                return null;
+            },
+            // 거절에는 이유가 실려 오지 않는다(문서 §240: 다른 attachment가 남아 있으면 거절). 적어도 "거절당했다"는
+            // 사실은 남겨, 조용한 폴백과 구분되게 한다.
+            .rejected => {
+                logUpgradeNotApplied(host_id, "rejected", "none");
+                return null;
+            },
+        }
     }
     return null;
 }
@@ -1616,4 +1687,24 @@ test "exec 업그레이드 후보: build_id가 다르고 wire가 같은 살아 �
     // 생존의 긍정적 증거가 있을 때만 손댄다 — free는 정리 대상이고, unknown은 우리 쪽 관측 실패다.
     try testing.expect(!isUpgradeCandidate(base, target, .free));
     try testing.expect(!isUpgradeCandidate(base, target, .unknown));
+}
+
+// 이 테스트가 증명하는 것(그리고 터미널에서 왜 중요한가): exec 업그레이드는 host가 accepted를 보내고도 실제 exec에
+// 실패해 옛 이미지로 rollback할 수 있다. 그때 같은 host_id로 재연결은 **성공한다** — 프로세스가 살아 있으니까.
+// 재연결 성공만으로 채택하면 GUI는 host-backed라고 믿고 runtime.spawn을 걸었다가, 옛 host가 모르는 capability
+// (`runtime_core_command_v1`) 때문에 UnsupportedSpawnContract로 실패해 **모든 터미널이 in-process로 떨어진다**
+// (실측: 앱 업데이트 뒤 정확히 이 일이 벌어졌고, stage=runtime_death 로그로 드러났다). build_id 게이팅이 원래
+// 막아 주던 상황을 업그레이드 경로가 우회해 만들어 내는 셈이라, 업그레이드를 안 하느니 못한 회귀가 된다.
+// 그래서 build_id가 target과 정확히 같을 때만 채택하고, 모르면(null) 거부하는 fail-closed 규율을 고정한다.
+test "업그레이드 재연결 채택: build_id가 target과 같을 때만, 모르면 거부한다" {
+    const target = "sha256:new";
+    try testing.expect(upgradedHostMatches("sha256:new", target));
+
+    // rollback 등으로 옛 이미지가 그대로면 거부한다 — 이 한 줄이 없으면 전 터미널이 in-process로 떨어진다.
+    try testing.expect(!upgradedHostMatches("sha256:old", target));
+    // build_id를 광고하지 않는 host는 증거가 없으므로 거부(fail-closed).
+    try testing.expect(!upgradedHostMatches(null, target));
+    // 접두사만 겹치는 경우도 정확 일치가 아니면 거부한다.
+    try testing.expect(!upgradedHostMatches("sha256:ne", target));
+    try testing.expect(!upgradedHostMatches("sha256:neww", target));
 }

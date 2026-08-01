@@ -1920,19 +1920,18 @@ const HostConnectFailureStage = enum {
     adapter,
     /// 앱이 뜬 뒤 살아 있던 host 연결이 끊겨 in-process로 폴백했다(`createTerm`의 remote_dead).
     runtime_death,
-    /// 무효화된 연결을 같은 host에 다시 붙이려다 실패했다(§7 사용 중 연결이 끊겼을 때의 재연결). `connect`와
-    /// 구분하는 이유: 최초 연결 실패는 "host를 못 찾았다"지만 이쪽은 **살아 있던 세션을 되찾지 못했다**로,
-    /// 사용자가 잃는 것이 다르다.
-    reconnect,
 };
 var host_connect_failure_stage: ?HostConnectFailureStage = null;
-/// 무효화된 host 연결의 재연결 예산(§7). tick 기반이라 프레임 레이트에 묶이지만, 요구되는 성질은 "host의 pause
-/// budget(5초)보다 길 것" 하나이므로 60fps 기준 30 tick × 12회 ≈ 6초로 그 아래로 내려가지 않게 잡는다. 더 길게
-/// 잡을 이유는 없다 — 로컬 unix socket이라 host가 살아 있으면 첫 시도에 붙고, 반복 실패는 host 부재의 증거다.
-const host_reconnect_max_attempts: usize = 12;
-const host_reconnect_cooldown_ticks: usize = 30;
-var host_reconnect_attempts: usize = 0;
-var host_reconnect_cooldown: usize = 0;
+/// 무효화된 host 연결의 재연결 예산(§7). **실제 시각 기준**이다 — tick으로 세면 창 수와 프레임 레이트에 따라
+/// 실제 경과가 달라진다. `AppSession`은 창별이고 이 상태는 앱 전역이라, tick을 세면 창 2개일 때 예산이 절반으로
+/// 줄고 120Hz에서도 절반이 된다. 계약이 요구하는 성질("host의 pause budget보다 길 것")은 벽시계로만 지킬 수 있다.
+const host_reconnect_budget_ms: u64 = 10_000; // host pause budget 5초의 2배
+const host_reconnect_retry_interval_ms: u64 = 500;
+/// 첫 시도 시각(null이면 아직 재연결을 시작하지 않았다). 예산 경과는 여기서 잰다.
+var host_reconnect_started_ms: ?u64 = null;
+var host_reconnect_last_attempt_ms: u64 = 0;
+/// 포기 알림은 예산을 다 쓴 시점에 한 번만 낸다. 재연결에 성공하면 다음 사고를 위해 되돌린다.
+var host_reconnect_gave_up_notified: bool = false;
 /// `runtime_death`처럼 `FailureReason`이 아니라 **Zig error**로 갈리는 단계의 원인. `@errorName`은 comptime 정적
 /// 문자열이라 수명 걱정 없이 그대로 보관한다.
 ///
@@ -5803,35 +5802,51 @@ pub const AppSession = struct {
         }
     }
 
-    /// 이번 tick에 재연결을 시도할지 판정한다. 순수 함수로 둔 이유는 예산 정책을 frame loop 없이 검증하기
-    /// 위해서다 — 이 부등식이 조용히 깨지면 살아 있는 세션을 포기하거나 프레임을 갉아먹는다.
-    fn shouldAttemptHostReconnect(attempts: usize, cooldown: usize) bool {
-        return attempts < host_reconnect_max_attempts and cooldown == 0;
+    pub const ReconnectDecision = enum { attempt, wait, budget_exhausted };
+
+    /// 지금 재연결을 시도할지 판정한다. **벽시계 기준**이라 창 수와 프레임 레이트에 영향받지 않는다 — 순수
+    /// 함수로 둔 이유는 이 정책이 frame loop 없이 검증돼야 하기 때문이다. tick으로 세던 이전 판정은 창이
+    /// 둘이면 예산이 절반이 됐고, 테스트는 상수만 곱해 그 사실을 잡지 못했다.
+    fn hostReconnectDecision(now_ms: u64, started_ms: ?u64, last_attempt_ms: u64) ReconnectDecision {
+        const started = started_ms orelse return .attempt; // 첫 시도는 즉시 — 대개 여기서 붙는다.
+        if (now_ms -| started >= host_reconnect_budget_ms) return .budget_exhausted;
+        if (now_ms -| last_attempt_ms < host_reconnect_retry_interval_ms) return .wait;
+        return .attempt;
     }
 
     /// 무효화된 host 연결을 예산 안에서 되살린다. frame-loop tick마다 불린다.
     ///
-    /// **폭주 방지가 핵심이다.** `connectOrLaunchDetailed`는 소켓 연결과 hello를 도는 동기 작업이라 매 tick
-    /// 부르면 프레임을 잡아먹는다. 그래서 실패마다 쿨다운을 두고, 총 시도 예산을 넘으면 더 시도하지 않는다.
-    /// 로컬 unix socket이므로 host가 살아 있으면 첫 시도에 붙는다 — 여러 번 실패한다는 것은 host가 없다는
-    /// 뜻이고, 무한 재시도는 프레임만 갉아먹는다.
+    /// **폭주 방지가 핵심이다.** 연결 수립은 소켓과 hello를 도는 동기 작업이라 매 tick 부르면 프레임을
+    /// 잡아먹는다. 그래서 시도 사이에 간격을 두고, 총 예산을 넘으면 더 시도하지 않는다. 로컬 unix socket이라
+    /// host가 살아 있으면 첫 시도에 붙는다 — 반복 실패는 host 부재의 증거이지 더 기다릴 이유가 아니다.
     ///
-    /// 예산은 host의 pause budget보다 길어야 한다(§7). 그렇지 않으면 exec 업그레이드로 잠시 멈춘 host를
-    /// 죽은 것으로 오판해 살아 있는 세션을 포기한다.
+    /// 예산은 host의 pause budget보다 길어야 한다(§7). 짧으면 exec 업그레이드로 잠시 멈춘 host를 죽은 것으로
+    /// 오판해 살아 있는 세션을 포기한다.
     fn pumpHostReconnect(self: *AppSession) void {
+        if (!is_macos) return;
         const backend = if (app_remote_backend) |*rb| rb else return;
         const host_id = backend.degradedHostId() orelse {
-            // 정상으로 돌아왔다(재연결 성공 또는 애초에 degraded 없음). 다음 사고를 위해 예산을 되돌린다.
-            host_reconnect_attempts = 0;
-            host_reconnect_cooldown = 0;
+            // 되살아났다(또는 애초에 degraded가 없다). 다음 사고를 위해 예산을 되돌린다.
+            host_reconnect_started_ms = null;
+            host_reconnect_gave_up_notified = false;
             return;
         };
-        if (!shouldAttemptHostReconnect(host_reconnect_attempts, host_reconnect_cooldown)) {
-            if (host_reconnect_cooldown > 0) host_reconnect_cooldown -= 1;
-            return; // 쿨다운 중이거나 예산 소진(사유는 이미 남겼다).
+        const now_ms = self.awakeMs();
+        switch (hostReconnectDecision(now_ms, host_reconnect_started_ms, host_reconnect_last_attempt_ms)) {
+            .wait => return,
+            .budget_exhausted => {
+                // 시도마다가 아니라 **포기한 시점에 한 번만** 알린다. 재연결이 끝나기도 전에 토스트를 반복하면
+                // 사용자를 끊을 뿐이고, 대개는 몇 백 ms 안에 조용히 복구된다.
+                if (!host_reconnect_gave_up_notified) {
+                    host_reconnect_gave_up_notified = true;
+                    self.showNotice("영속 세션 host에 다시 연결하지 못했습니다. 세션은 host에 남아 있지만 이 창에서는 화면이 갱신되지 않습니다.");
+                }
+                return;
+            },
+            .attempt => {},
         }
-        host_reconnect_attempts += 1;
-        host_reconnect_cooldown = host_reconnect_cooldown_ticks;
+        if (host_reconnect_started_ms == null) host_reconnect_started_ms = now_ms;
+        host_reconnect_last_attempt_ms = now_ms;
         self.reconnectDegradedHost(host_id);
     }
 
@@ -5843,45 +5858,57 @@ pub const AppSession = struct {
     /// `exe_path`를 아는 쪽이 여기다. lease refcount를 아는 backend가 교체 절차를 소유하고, 이 함수는 새 연결을
     /// 만들어 넘기는 데까지만 책임진다.
     fn reconnectDegradedHost(self: *AppSession, host_id: u128) void {
+        if (!is_macos) return;
         const backend = if (app_remote_backend) |*rb| rb else return;
         const alloc = std.heap.smp_allocator;
         var arena = std.heap.ArenaAllocator.init(alloc);
         defer arena.deinit();
         const a = arena.allocator();
-        const exe_path = self.siblingMaruPath(a) orelse
-            return self.markHostConnectFailed(.reconnect);
-        const base = sessionCacheBase(a) orelse
-            return self.markHostConnectFailed(.reconnect);
-        const client = switch (session_host.host_connect.connectOrLaunchDetailed(alloc, exe_path, base, .{})) {
+        const base = sessionCacheBase(a) orelse return logReconnectFailure("cache_base", null);
+        // **connect-only** 경로다. `connectOrLaunchDetailed`를 쓰면 죽은 host 자리에 새 host를 띄우고, 그
+        // host_id가 달라 우리는 곧바로 실패 처리한다 — 아무도 쓰지 않는 고아 데몬만 남는다. 여기서는 정확히
+        // 그 host_id를 겨냥하고 절대 spawn하지 않는다.
+        const client = switch (session_host.host_connect.connectExistingHost(alloc, base, host_id)) {
             .connected => |connected| connected,
-            .failed => |reason| return self.markHostConnectFailedReason(.reconnect, reason),
+            .failed => |reason| return logReconnectFailure(@tagName(reason), null),
         };
-        // 그 사이 current host가 바뀌었다면 이 연결로 옛 host의 runtime을 되찾을 수 없다 — 남의 host에 없는
-        // runtime_id를 요구하게 된다. 옛 host가 더는 current가 아니라는 것은 그 host가 사라졌다는 증거다.
-        if (client.host_id != host_id) {
-            var mismatched = client;
-            mismatched.deinit();
-            return self.markHostConnectFailedReason(.reconnect, .host_gone);
-        }
         const owned_adapter = alloc.create(RemoteSessionAdapter) catch {
             var failed_client = client;
             failed_client.deinit();
-            return self.markHostConnectFailedReason(.reconnect, .out_of_memory);
+            return logReconnectFailure("out_of_memory", null);
         };
         owned_adapter.* = RemoteSessionAdapter.init(client) catch {
             var failed_client = client;
             failed_client.deinit();
             alloc.destroy(owned_adapter);
-            return self.markHostConnectFailedReason(.reconnect, .incompatible_version);
+            return logReconnectFailure("incompatible_version", null);
         };
         // 성공하면 adapter 소유권은 pool이 가져간다. 실패하면 우리가 계속 소유하므로 여기서 회수한다.
         const summary = backend.replaceHostConnection(host_id, owned_adapter) catch |err| {
             owned_adapter.deinit();
             alloc.destroy(owned_adapter);
-            return self.markHostConnectFailedError(.reconnect, err);
+            return logReconnectFailure("replace_failed", @errorName(err));
         };
-        // 일부만 실패해도 남긴다 — 조용히 넘기면 "일부 pane만 죽은" 상태를 사용자가 원인 없이 마주한다.
-        if (summary.failed != 0) self.markHostConnectFailed(.reconnect);
+        if (summary.aborted) return logReconnectFailure("connection_poisoned", null);
+        if (summary.abandoned != 0) {
+            // 되찾지 못한 pane이 있다. host의 runtime은 살아 있지만 이 GUI는 더 보지 못하므로 조용히 넘기면
+            // 사용자가 빈 자리를 원인 없이 마주한다.
+            self.showNotice("일부 터미널을 다시 연결하지 못했습니다. 해당 세션은 host에 남아 있지만 이 창에서는 더 보이지 않습니다.");
+        }
+    }
+
+    /// 재연결 실패를 로그로만 남긴다. **`host_connect_failed` latch를 건드리지 않는 것이 핵심이다** — 그 latch는
+    /// "이 실행에서 host가 죽었다"는 뜻이라 이후 열리는 **모든** 터미널을 in-process로 만든다. 일시적 재연결
+    /// 실패로 그걸 세우면, 장애가 자가 치유된 뒤에 연 터미널까지 영영 비영속이 되어 종료·업데이트 때 그 셸들의
+    /// 작업이 소리 없이 사라진다. 사용자에게 보이는 알림은 예산을 다 쓴 시점에 `pumpHostReconnect`가 한 번만 낸다
+    /// — 시도마다 토스트를 띄우면 재연결이 끝나기도 전에 사용자를 끊는다.
+    fn logReconnectFailure(reason: []const u8, error_name: ?[]const u8) void {
+        if (builtin.is_test) return;
+        if (error_name) |name| {
+            std.log.err("session host reconnect failed: stage=reconnect reason={s} error={s}", .{ reason, name });
+        } else {
+            std.log.err("session host reconnect failed: stage=reconnect reason={s}", .{reason});
+        }
     }
 
     /// host attach 실패를 "영구 없음"과 "일시 실패"로 가른다. 영구로 올리는 것은 **그 handle이 다시는 붙을 수 없다는
@@ -42067,38 +42094,43 @@ test "host connect 실패 detail: runtime_death는 어떤 error였는지까지 �
     );
 }
 
-test "host connect 실패 detail: 재연결 실패는 최초 연결 실패와 구분된다" {
-    // 최초 연결 실패는 "host를 못 찾았다"지만 재연결 실패는 **살아 있던 세션을 되찾지 못했다**로 사용자가 잃는
-    // 것이 다르다. 한 단계로 뭉치면 로그만 보고는 둘을 가를 수 없다.
-    var buf: [96]u8 = undefined;
-    try std.testing.expectEqualStrings(
-        "stage=reconnect error=HostInUse",
-        hostConnectFailureDetail(&buf, .reconnect, @as(?HostConnectFailureReason, null), @errorName(error.HostInUse)),
+test "host 재연결 판정: 첫 시도는 즉시, 간격 안에는 쉬고, 예산을 넘기면 포기한다" {
+    const decide = AppSession.hostReconnectDecision;
+    // 첫 시도는 즉시 — 로컬 unix socket이라 host가 살아 있으면 대개 여기서 붙는다.
+    try std.testing.expectEqual(AppSession.ReconnectDecision.attempt, decide(1_000, null, 0));
+    // 간격 안이면 쉰다. 연결 수립은 동기 작업이라 매 프레임 부르면 UI를 잡아먹는다.
+    try std.testing.expectEqual(
+        AppSession.ReconnectDecision.wait,
+        decide(1_000 + host_reconnect_retry_interval_ms - 1, 1_000, 1_000),
     );
-    const gone: HostConnectFailureReason = if (is_macos) .host_gone else .unavailable;
-    var expected_buf: [96]u8 = undefined;
-    const expected = try std.fmt.bufPrint(&expected_buf, "stage=reconnect reason={s}", .{@tagName(gone)});
-    try std.testing.expectEqualStrings(
-        expected,
-        hostConnectFailureDetail(&buf, .reconnect, gone, null),
+    try std.testing.expectEqual(
+        AppSession.ReconnectDecision.attempt,
+        decide(1_000 + host_reconnect_retry_interval_ms, 1_000, 1_000),
+    );
+    // 예산을 넘기면 포기한다 — 반복 실패는 host 부재의 증거이지 더 기다릴 이유가 아니다.
+    try std.testing.expectEqual(
+        AppSession.ReconnectDecision.budget_exhausted,
+        decide(1_000 + host_reconnect_budget_ms, 1_000, 0),
     );
 }
 
-test "host 재연결 예산: 쿨다운 중엔 쉬고 예산을 넘기면 멈춘다" {
-    try std.testing.expect(AppSession.shouldAttemptHostReconnect(0, 0));
-    // 쿨다운이 남았으면 시도하지 않는다 — connectOrLaunchDetailed는 동기 작업이라 매 tick 부르면 프레임을 먹는다.
-    try std.testing.expect(!AppSession.shouldAttemptHostReconnect(0, 1));
-    try std.testing.expect(AppSession.shouldAttemptHostReconnect(host_reconnect_max_attempts - 1, 0));
-    // 예산을 소진하면 무한 재시도로 넘어가지 않는다. 로컬 socket이라 반복 실패는 host 부재의 증거다.
-    try std.testing.expect(!AppSession.shouldAttemptHostReconnect(host_reconnect_max_attempts, 0));
-}
-
-test "host 재연결 예산은 host pause budget보다 길다" {
+test "host 재연결 예산은 벽시계로 host pause budget보다 길다" {
     // §7 계약: 예산이 host pause budget(5초)보다 짧으면 exec 업그레이드로 잠시 멈춘 host를 죽은 것으로 오판해
-    // 살아 있는 세션을 포기한다. 상수를 줄이는 변경이 이 부등식을 조용히 깨지 못하게 고정한다.
-    const budget_ticks = host_reconnect_max_attempts * host_reconnect_cooldown_ticks;
-    const budget_ms = budget_ticks * 1000 / 60; // 60fps 기준
-    try std.testing.expect(budget_ms > 5000);
+    // 살아 있는 세션을 포기한다.
+    //
+    // **벽시계로 재는 것이 계약의 일부다.** 예전엔 tick 수로 셌는데, AppSession은 창별인 반면 이 상태는 앱
+    // 전역이라 창이 둘이면 실제 경과가 절반이 됐고 120Hz에서도 절반이 됐다. 상수만 곱해 검증하면 그 사실이
+    // 드러나지 않으므로, 여기서는 판정 함수가 실제로 언제까지 attempt를 내주는지로 확인한다.
+    const decide = AppSession.hostReconnectDecision;
+    const start: u64 = 10_000;
+    // 5초 시점에는 아직 시도할 수 있어야 한다(간격은 지난 상태로 둔다).
+    try std.testing.expectEqual(AppSession.ReconnectDecision.attempt, decide(start + 5_000, start, start));
+    // 예산 경계에서 비로소 포기한다.
+    try std.testing.expectEqual(
+        AppSession.ReconnectDecision.budget_exhausted,
+        decide(start + host_reconnect_budget_ms, start, start),
+    );
+    try std.testing.expect(host_reconnect_budget_ms > 5_000);
 }
 
 // 진단 문자열 때문에 앱이 죽으면 본말전도다. 버퍼가 모자라면 panic·부분 출력 대신 식별 가능한 고정 값으로 접힌다.

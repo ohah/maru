@@ -348,6 +348,34 @@ pub const RemoteRuntime = struct {
         self.* = undefined;
     }
 
+    /// 살아 있는 runtime을 **새 연결로 제자리에서 다시 붙인다**(§7 사용 중 연결이 끊겼을 때의 재연결).
+    ///
+    /// 새 `RemoteRuntime`으로 교체하지 않는 이유: GUI가 `attachTerm`이 돌려준 `&rr.surface`를 Term에 보관하므로
+    /// 객체를 갈아치우면 그 포인터가 통째로 어긋난다. 주소를 유지한 채 내용만 다시 조립해야 한다.
+    ///
+    /// `attachExisting`은 **갓 생성된 runtime을 위한 초기화자**다 — `direct_input`·`pending_controls`·
+    /// `observation`을 해제 없이 덮어쓰고 `attachment`·`surface`도 새로 만든다. 그래서 살아 있는 runtime에
+    /// 그냥 부르면 화면 하나가 통째로 샌다. `detachClientSide`가 소유 상태를 전부 반납하고 `self.* = undefined`로
+    /// 되돌리므로, **그 뒤에야** 초기화자를 부르는 것이 옳다. 이 함수가 그 순서를 강제한다.
+    ///
+    /// `detachClientSide`는 host에 detach도 보낸다 — 그러지 않으면 controller lease가 host에 남아 바로 뒤의
+    /// 재attach가 `controller_busy`로 거절된다. 연결이 이미 죽었으면 그 RPC는 실패하지만 host가 EOF로 정리한다.
+    ///
+    /// **실패하면 `self`는 `undefined`다.** caller는 내용을 다시 만지지 말고 회수(free)만 해야 한다.
+    pub fn reattachInPlace(
+        self: *RemoteRuntime,
+        client: *client_mod.Client,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        surface_id: u64,
+        size: terminal.Size,
+    ) anyerror!void {
+        // detachClientSide가 self를 undefined로 만들기 전에 읽어 둔다.
+        const runtime_id_hex = self.runtime_id_hex;
+        self.detachClientSide();
+        try self.attachExisting(client, allocator, io, surface_id, runtime_id_hex, size);
+    }
+
     /// 렌더/입력 라우팅에 쓸 Surface(GUI가 in-process처럼 다룬다).
     pub fn surfacePtr(self: *RemoteRuntime) *Surface {
         return &self.surface;

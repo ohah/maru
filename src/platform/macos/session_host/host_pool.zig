@@ -113,6 +113,20 @@ pub fn HostPool(comptime Adapter: type) type {
                 error.AdapterGenerationExhausted;
         }
 
+        /// 연결이 무효화된 host를 찾는다(없으면 null). **runtime이 하나도 없는 host도 포함해야 한다** — pane을
+        /// 모두 닫았지만 pool에 남아 있는 host의 연결이 죽으면, 그 host로 새 pane을 spawn할 때 비로소
+        /// `ConnectionClosed`로 실패한다. runtime 목록에서 host 건강을 유도하면 그 경우를 영영 놓친다.
+        ///
+        /// `logicalClient`를 노출하지 않는 adapter(테스트 fake 등)에는 판정할 근거가 없으므로 null이다.
+        pub fn degradedHostId(self: *Self) ?u128 {
+            if (!@hasDecl(Adapter, "logicalClient")) return null;
+            var it = self.entries.iterator();
+            while (it.next()) |entry| {
+                if (entry.value_ptr.adapter.logicalClient().isDegraded()) return entry.key_ptr.*;
+            }
+            return null;
+        }
+
         pub fn get(self: *Self, host_id: u128) ?*Adapter {
             const entry = self.entries.get(host_id) orelse return null;
             return entry.adapter;

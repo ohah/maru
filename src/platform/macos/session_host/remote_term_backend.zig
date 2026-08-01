@@ -123,13 +123,20 @@ pub const RemoteTermBackend = struct {
         self.* = undefined;
     }
 
-    const DestroyMode = enum { terminate, detach };
+    const DestroyMode = enum {
+        terminate,
+        detach,
+        /// `reattachInPlace`가 실패해 runtime이 이미 `undefined`인 경우. 소유 상태는 `detachClientSide`가
+        /// 반납을 끝냈으므로 **다시 반납하면 double-free**다. 라우팅만 떼고 메모리를 회수한다.
+        abandoned,
+    };
 
     fn destroyRuntimeEntry(self: *RemoteTermBackend, handle: RuntimeHandle, entry: RuntimeEntry, mode: DestroyMode) void {
         self.surface_runtime.detachSurface(handle);
         switch (mode) {
             .terminate => entry.runtime.deinit(),
             .detach => entry.runtime.detachClientSide(),
+            .abandoned => {},
         }
         self.allocator.destroy(entry.runtime);
         if (self.host_pool) |pool| pool.release(entry.host_id);
@@ -199,16 +206,19 @@ pub const RemoteTermBackend = struct {
     /// pane이 공유**하므로 하나가 degraded면 그 host의 pane 전부가 함께 멈춘다 — 클립보드 복사·화면 갱신·새
     /// pane 생성이 전부 같은 뿌리로 실패한다. 재연결 주체가 이걸 폴링해 교체를 시작한다.
     pub fn degradedHostId(self: *RemoteTermBackend) ?u128 {
-        var it = self.runtimes.valueIterator();
-        while (it.next()) |entry| {
-            if (entry.runtime.client.isDegraded()) return entry.host_id;
-        }
-        return null;
+        // pool을 쓰면 **pool 전체**를 본다. runtime 목록에서 유도하면 pane을 다 닫았지만 pool에 남은 host의
+        // 죽은 연결을 놓치고, 그 host로 새 pane을 spawn할 때 비로소 실패한다.
+        if (self.host_pool) |pool| return pool.degradedHostId();
+        const client = self.client orelse return null;
+        return if (client.isDegraded()) client.host_id else null;
     }
 
     pub const ReattachSummary = struct {
         reattached: usize = 0,
-        failed: usize = 0,
+        /// 재부착에 실패해 등록을 걷어낸 pane 수. host의 runtime은 살아 있지만 이 GUI는 더 보지 못한다.
+        abandoned: usize = 0,
+        /// 공유 연결이 재부착 도중 무효화돼 남은 pane을 시도조차 못 했다. 다음 예산이 새 연결로 다시 시도한다.
+        aborted: bool = false,
     };
 
     /// degraded host의 adapter를 **새로 맺은 연결**로 교체하고 그 host의 runtime을 전부 재부착한다.
@@ -249,15 +259,35 @@ pub const RemoteTermBackend = struct {
         new_client: *client_mod.Client,
     ) ReattachSummary {
         var summary: ReattachSummary = .{};
+        // 실패한 runtime은 **그 자리에서** 등록을 걷어내야 한다(undefined 상태로 남겨 두면 다음 프레임이
+        // 해제된 Client를 pump한다). 순회 중 맵을 수정하면 iterator가 무효해지므로 대상을 먼저 모은다.
+        var handles: std.ArrayListUnmanaged(RuntimeHandle) = .empty;
+        defer handles.deinit(self.allocator);
         var it = self.runtimes.iterator();
         while (it.next()) |entry| {
             if (entry.value_ptr.host_id != host_id) continue;
-            const rr = entry.value_ptr.runtime;
-            // `attachExisting`이 observation을 비우므로 현재 크기를 **먼저** 읽는다.
+            handles.append(self.allocator, entry.key_ptr.*) catch {
+                summary.aborted = true; // 다음 예산이 다시 시도한다. 지금 건드리지 않는 편이 안전하다.
+                return summary;
+            };
+        }
+
+        for (handles.items) |handle| {
+            const entry = self.runtimes.get(handle) orelse continue;
+            // `attachAndAssemble`은 실패 경로 여러 곳에서 **공유** client에 failClosed를 건다. 한 pane이
+            // 그렇게 새 연결을 죽였다면 남은 pane도 전부 실패하므로 더 진행하지 않는다 — 이 라운드를 접고
+            // 다음 예산이 새 연결로 다시 시도하게 둔다.
+            if (new_client.isDegraded()) {
+                summary.aborted = true;
+                return summary;
+            }
+            const rr = entry.runtime;
             const size = rr.observation.size;
-            const hex = rr.runtimeIdHex();
-            rr.attachExisting(new_client, self.allocator, self.io, entry.key_ptr.*, hex, size) catch {
-                summary.failed += 1;
+            rr.reattachInPlace(new_client, self.allocator, self.io, handle, size) catch {
+                // rr은 이제 undefined다. 내용을 만지지 말고 라우팅을 떼고 메모리만 회수한다.
+                if (self.runtimes.fetchRemove(handle)) |kv|
+                    self.destroyRuntimeEntry(handle, kv.value, .abandoned);
+                summary.abandoned += 1;
                 continue;
             };
             summary.reattached += 1;

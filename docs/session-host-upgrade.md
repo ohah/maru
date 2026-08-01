@@ -16,6 +16,11 @@
 > host를 찾아 자동으로 exec 교체를 시도한다(`host_connect.tryUpgradeExistingHost`). 이 시도는 **best-effort**다:
 > 후보가 없거나 capability 미광고·prepare 거부·재연결 실패면 조용히 기존 spawn 경로로 떨어져 새 host를 띄운다.
 > 업그레이드 실패가 곧 "터미널을 못 여는 실패"가 되어서는 안 되기 때문이다.
+> **재연결 성공만으로 채택하지 않는다** — host가 accepted를 보내고도 exec에 실패해 rollback하면 같은 `host_id`로
+> 재연결은 성공하지만 이미지는 옛것 그대로다. 그 연결을 채택하면 GUI가 host-backed로 믿고 `runtime.spawn`을 걸었다가
+> 옛 host가 모르는 capability(`runtime_core_command_v1`)로 실패해 모든 터미널이 in-process로 떨어진다 —
+> `build_id` 게이팅이 막아 주던 상황을 업그레이드 경로가 우회해 만드는 셈이다. 그래서 재연결 뒤 hello ack의
+> `build_id`가 target과 정확히 같을 때만 채택하고, 다르거나 광고하지 않으면(fail-closed) 연결을 버려 spawn으로 간다.
 > 현재 살아 있는 host가 `host_exec_upgrade_v1`을 광고하지 않으면 새 앱은 그 host를 실행 중 교체할 수 없다.
 > 이 경우 지원하는 N-1 MRSH adapter로 attach해 기존 runtime을 그대로 쓰거나, attachment가 모두 끝난 뒤 구 host를
 > 계속 drain한다. **attachment가 0이어도 runtime이 하나라도 살아 있으면 구 host를 종료하지 않으며, runtime count가

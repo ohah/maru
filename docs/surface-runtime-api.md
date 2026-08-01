@@ -198,6 +198,10 @@ pub const SurfaceRuntime = struct {
 - `Surface.TerminalCore.resize`와 `PtySession.resize`를 둘 다 요청한다.
 - size를 `terminal.clampGridSize`(최소 cols>=2, rows>=1)로 한 번 clamp해 core grid와 PTY winsize에 같은 값을 보낸다. TerminalCore가 wide glyph continuation 때문에 cols>=2를 요구하므로, 한쪽만 clamp하면 grid와 셸 winsize가 어긋난다.
 - 두 작업을 같은 user action에서 발생한 하나의 runtime event로 trace에 남긴다.
+- link가 없거나(`UnknownSurface`) 자식이 이미 끝났으면(`ProcessExited`) **코어에 닿기 전에** 거부한다(dead adapter
+  라우팅 거부). 이건 runtime 쪽 사실일 뿐이고, 그 surface의 **표시 grid를 낡은 채 두어도 된다는 뜻은 아니다** —
+  거부된 Term의 표시 grid는 app 레이어(`resizeTermForLayout`)가 코어에 직접 적용한다. 근거와 계약은
+  [탭·split·레이아웃 전략](tabs-splits-layout.md)의 "표시 grid는 레이아웃이 소유한다"를 단일 출처로 둔다.
 
 `applyPtyEvent`:
 

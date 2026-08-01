@@ -1944,6 +1944,77 @@ pub fn build(b: *std.Build) void {
         run_session_host_f3c1_sentinel.setCwd(b.path("."));
         session_host_f3c1_step.dependOn(&run_session_host_f3c1_sentinel.step);
 
+        const integration_2b2e_policy_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/client_pump.zig",
+                ),
+                .target = target,
+                .optimize = optimize,
+            }),
+            .filters = &.{"2b2e integration"},
+        });
+        const run_integration_2b2e_policy_tests = b.addRunArtifact(
+            integration_2b2e_policy_tests,
+        );
+        const integration_2b2e_pump_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/client_external_pump.zig",
+                ),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"2b2e integration"},
+        });
+        const run_integration_2b2e_pump_tests = b.addRunArtifact(
+            integration_2b2e_pump_tests,
+        );
+        run_integration_2b2e_pump_tests.setCwd(b.path("."));
+        const integration_2b2e_pump_module = b.createModule(.{
+            .root_source_file = b.path(
+                "src/platform/macos/session_host/client_external_pump.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        });
+        const integration_2b2e_sentinel = b.addExecutable(.{
+            .name = "maru-session-host-2b2e-integration-sentinel",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "tests/session_host_2b2e_integration_sentinel.zig",
+                ),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{
+                    .name = "client_external_pump",
+                    .module = integration_2b2e_pump_module,
+                }},
+            }),
+        });
+        const run_integration_2b2e_sentinel = b.addRunArtifact(
+            integration_2b2e_sentinel,
+        );
+        run_integration_2b2e_sentinel.setCwd(b.path("."));
+        const session_host_2b2e_integration_step = b.step(
+            "test-session-host-2b2e-integration",
+            "Run the non-empty 2b2e ACK and actual-token integration gate",
+        );
+        session_host_2b2e_integration_step.dependOn(
+            &run_integration_2b2e_policy_tests.step,
+        );
+        session_host_2b2e_integration_step.dependOn(
+            &run_integration_2b2e_pump_tests.step,
+        );
+        session_host_2b2e_integration_step.dependOn(
+            &run_integration_2b2e_sentinel.step,
+        );
+
         const control_wire_f3c0_tests = b.addTest(.{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(

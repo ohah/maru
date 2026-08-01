@@ -187,6 +187,7 @@ pub fn planRecoverySnapshotBinding(
 pub const RecoveryTrigger = enum {
     local_overflow,
     host_invalidated,
+    resync_ack,
     fresh_commit,
 };
 
@@ -663,6 +664,7 @@ pub const RecoveryDisposition = enum {
     no_op,
     entered,
     promoted_to_host,
+    acknowledged,
     committed,
     terminal,
 };
@@ -675,6 +677,9 @@ pub const RecoveryTransitionInput = struct {
     /// Supplied only for a new valid→recovery transition. The caller checked epoch increment and
     /// absolute-deadline arithmetic before asking this allocation-free reducer to publish a plan.
     new_context: ?RecoveryContext = null,
+    /// Supplied only by the sealed resync ACK consumer. It is the absolute end of the completed
+    /// response frame and therefore the first legal recovery-snapshot start.
+    recovery_barrier_absolute: ?u64 = null,
 };
 
 pub const RecoveryTransitionPlan = struct {
@@ -755,12 +760,36 @@ fn planFreshRecoveryCommit(input: RecoveryTransitionInput) RecoveryTransitionPla
     };
 }
 
+fn planResyncAcknowledgement(input: RecoveryTransitionInput) RecoveryTransitionPlan {
+    if (input.new_context != null or input.control != .response_wait) return terminalRecoveryPlan();
+    const barrier = input.recovery_barrier_absolute orelse return terminalRecoveryPlan();
+    if (barrier == 0) return terminalRecoveryPlan();
+    const context = switch (input.state) {
+        .client_recovery => |phase| switch (phase) {
+            .control_in_flight => |value| value,
+            else => return terminalRecoveryPlan(),
+        },
+        else => return terminalRecoveryPlan(),
+    };
+    if (context.epoch == 0 or input.now_ns >= context.deadline_ns)
+        return terminalRecoveryPlan();
+    return .{
+        .disposition = .acknowledged,
+        .next = .{ .client_recovery = .{ .awaiting_snapshot = .{
+            .context = context,
+            .recovery_barrier_absolute = barrier,
+        } } },
+    };
+}
+
 /// Closed allocation-free interpretation of the normative 2b2e collision table. It never mutates
 /// queues or controls; the storage layer must seal the returned actions with its cleanup aggregate
 /// and commit them in one no-callback suffix.
 pub fn planRecoveryTransition(
     input: RecoveryTransitionInput,
 ) RecoveryTransitionPlan {
+    if (input.trigger == .resync_ack) return planResyncAcknowledgement(input);
+    if (input.recovery_barrier_absolute != null) return terminalRecoveryPlan();
     if (input.trigger == .fresh_commit) return planFreshRecoveryCommit(input);
 
     switch (input.state) {
@@ -942,7 +971,7 @@ test "client pump preserves recovery origin in every snapshot phase" {
     try std.testing.expectEqual(@as(u64, 7), client.client_recovery.applied_pending.context.epoch);
 }
 
-test "recovery integration contract binds only the committed ledger token generation" {
+test "2b2e integration binds only exact post-barrier snapshot and committed ledger token" {
     const waiting = AwaitingSnapshot{
         .context = .{ .epoch = 7, .deadline_ns = 30 },
         .recovery_barrier_absolute = 41,
@@ -1052,6 +1081,76 @@ test "recovery reducer enters from valid and rejects unsafe unrelated controls" 
         );
         try std.testing.expect(!terminal.drop_backlog);
         try std.testing.expect(!terminal.cancel_control);
+    }
+}
+
+test "2b2e integration recovery reducer acknowledges only exact response wait before deadline" {
+    const context = RecoveryContext{ .epoch = 13, .deadline_ns = 100 };
+    const state: AuthorityState = .{ .client_recovery = .{ .control_in_flight = context } };
+    const acknowledged = planRecoveryTransition(.{
+        .state = state,
+        .trigger = .resync_ack,
+        .control = .response_wait,
+        .now_ns = 99,
+        .recovery_barrier_absolute = 41,
+    });
+    try std.testing.expectEqual(RecoveryDisposition.acknowledged, acknowledged.disposition);
+    try std.testing.expect(acknowledged.next == .client_recovery);
+    try std.testing.expect(std.meta.eql(
+        AwaitingSnapshot{
+            .context = context,
+            .recovery_barrier_absolute = 41,
+        },
+        acknowledged.next.client_recovery.awaiting_snapshot,
+    ));
+    try std.testing.expect(!acknowledged.drop_backlog);
+    try std.testing.expect(!acknowledged.cancel_control);
+
+    const invalid = [_]RecoveryTransitionInput{
+        .{
+            .state = state,
+            .trigger = .resync_ack,
+            .control = .fully_sent,
+            .now_ns = 99,
+            .recovery_barrier_absolute = 41,
+        },
+        .{
+            .state = state,
+            .trigger = .resync_ack,
+            .control = .response_wait,
+            .now_ns = 99,
+            .recovery_barrier_absolute = 0,
+        },
+        .{
+            .state = state,
+            .trigger = .resync_ack,
+            .control = .response_wait,
+            .now_ns = 100,
+            .recovery_barrier_absolute = 41,
+        },
+        .{
+            .state = .{ .client_recovery = .{ .awaiting_snapshot = .{
+                .context = context,
+                .recovery_barrier_absolute = 40,
+            } } },
+            .trigger = .resync_ack,
+            .control = .response_wait,
+            .now_ns = 99,
+            .recovery_barrier_absolute = 41,
+        },
+        .{
+            .state = .{ .host_recovery = .{ .ack_queued = context } },
+            .trigger = .resync_ack,
+            .control = .response_wait,
+            .now_ns = 99,
+            .recovery_barrier_absolute = 41,
+        },
+    };
+    for (invalid) |input| {
+        const rejected = planRecoveryTransition(input);
+        try std.testing.expectEqual(RecoveryDisposition.terminal, rejected.disposition);
+        try std.testing.expect(!rejected.drop_backlog);
+        try std.testing.expect(!rejected.cancel_control);
     }
 }
 

@@ -8529,7 +8529,7 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
             예측하지 않고 whole-drain permit과 typed ACK verdict까지만 생산한다. 그 전 product callsite는 0이고
             checked absolute offset overflow는 terminal이다.
 
-            **구현 완료(recovery contract correction):** control request/correlation은 future ledger generation 없는
+            Recovery contract correction에서 control request/correlation은 future ledger generation 없는
             `RecoveryControlAuthority`만 봉인한다. recovery state는 barrier-only `awaiting_snapshot`, committed-generation
             bound `snapshot_in_flight`, post-mark `applied_pending`으로 분리했고, pure candidate planner가 exact origin/epoch,
             snapshot tag, half-open range, barrier와 nonzero committed generation을 검사한다. preflight/mark는 full

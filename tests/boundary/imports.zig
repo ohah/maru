@@ -951,6 +951,22 @@ test "session host unchecked teardown authority cannot escape anywhere in src" {
             .pump_references = 2,
         },
         .{
+            .name = "consumePreparedLiveCommitWithOutputUnchecked",
+            .owner_suffixes = &.{"platform/macos/session_host/external_inbox_ledger.zig"},
+            .pump_references = 1,
+        },
+        .{
+            .name = "claimCommittedLiveOutputUnchecked",
+            .owner_suffixes = &.{"platform/macos/session_host/external_inbox_ledger.zig"},
+            // One product leaf plus hostile claim-owner/ABA tests in the same private module.
+            .pump_references = 5,
+        },
+        .{
+            .name = "consumeClaimedCommittedLiveOutputUnchecked",
+            .owner_suffixes = &.{"platform/macos/session_host/external_inbox_ledger.zig"},
+            .pump_references = 2,
+        },
+        .{
             .name = "commitLiveBatchAbortUnchecked",
             .owner_suffixes = &.{"platform/macos/session_host/external_inbox_ledger.zig"},
             .pump_references = 1,
@@ -1081,7 +1097,7 @@ test "session host unchecked teardown authority cannot escape anywhere in src" {
             }
         }
     }
-    try std.testing.expectEqual(@as(usize, 27), unchecked_declarations);
+    try std.testing.expectEqual(@as(usize, 30), unchecked_declarations);
     for (symbols) |symbol| {
         var pump_references: usize = 0;
         var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
@@ -1245,7 +1261,7 @@ test "session host deferred seed retirement has one ledger owner and one adoptio
     try std.testing.expectEqual(@as(usize, 1), adoption_calls);
 }
 
-test "session host live batch unchecked mutation stays behind two ledger entrypoints" {
+test "session host live batch unchecked mutation stays behind three ledger entrypoints" {
     const allocator = std.testing.allocator;
     const root = "src/platform/macos/session_host";
     const definition_needle = "fn commitPreparedLiveBatchUnchecked(";
@@ -1341,7 +1357,7 @@ test "session host live batch unchecked mutation stays behind two ledger entrypo
     // The legacy checked API and the sealed-permit unchecked consume each converge
     // on the same mutation leaf. No caller outside this owner module may bypass
     // either entrypoint.
-    try std.testing.expectEqual(@as(usize, 2), calls);
+    try std.testing.expectEqual(@as(usize, 3), calls);
 }
 
 test "session host live commit permit keeps checked consume ledger-private" {
@@ -3024,15 +3040,15 @@ test "d2b3d live owner substrate stays private with one buffered product travers
         // spellings stable; a helper-return assignment such as `self.live_partial = next` or an
         // extra private writer changes the total even when it avoids the active literal.
         try std.testing.expectEqual(
-            @as(usize, 6),
+            @as(usize, 7),
             std.mem.count(u8, source, "self.live_partial ="),
         );
         try std.testing.expectEqual(
-            @as(usize, 5),
+            @as(usize, 6),
             std.mem.count(u8, source, "self.live_screen ="),
         );
         try std.testing.expectEqual(
-            @as(usize, 9),
+            @as(usize, 10),
             std.mem.count(u8, source, "self.completed_control ="),
         );
         const revoke_canonical_writer = betweenMarkers(
@@ -3088,7 +3104,7 @@ test "d2b3d live owner substrate stays private with one buffered product travers
             std.mem.count(u8, product_source, "storage.completed_control ="),
         );
         try std.testing.expectEqual(
-            @as(usize, 4),
+            @as(usize, 5),
             std.mem.count(u8, source, "self.live_partial = .terminal"),
         );
         try std.testing.expectEqual(
@@ -3096,7 +3112,7 @@ test "d2b3d live owner substrate stays private with one buffered product travers
             std.mem.count(u8, source, "self.live_partial = .none"),
         );
         try std.testing.expectEqual(
-            @as(usize, 4),
+            @as(usize, 5),
             std.mem.count(
                 u8,
                 source,
@@ -3108,7 +3124,7 @@ test "d2b3d live owner substrate stays private with one buffered product travers
             std.mem.count(u8, source, "self.live_screen = .{}"),
         );
         try std.testing.expectEqual(
-            @as(usize, 4),
+            @as(usize, 5),
             std.mem.count(u8, source, "self.completed_control = .terminal"),
         );
         try std.testing.expectEqual(

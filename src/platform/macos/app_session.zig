@@ -10,6 +10,7 @@ const terminal = maru.terminal;
 const layout_math = maru.session.layout_math; // b1: 순수 레이아웃 기하(grid·hit-test·drop-zone·pt→px)를 session L2로 분리
 const dock_layout = maru.session.dock_layout;
 const dock_panel = maru.session.dock_panel;
+const content_menu = maru.session.content_menu;
 const file_tree = maru.session.file_tree;
 const file_tree_navigation = maru.session.file_tree_navigation;
 const file_tree_mutation = maru.session.file_tree_mutation;
@@ -2553,6 +2554,11 @@ pub const AppSession = struct {
     // 복사/붙여넣기 메뉴다(rename 대상·view_options와 배타). buildContextMenuItems/acceptContextMenu/closeContextMenu가
     // 이 플래그로 분기한다. 항목 선택 시 pending_clipboard_action을 세워 Swift가 OS 클립보드 동작을 한다(F2-5).
     terminal_context_menu: bool = false,
+    // 파일 Term 본문 우클릭 메뉴(docs/file-panel.md §2.6). 다른 메뉴들과 chrome_host.context_menu를 공유하되
+    // 이게 non-null이면 그 분기다. web이 올린 대상·좌표로 항목을 정하고, 실행 주인은 항목마다 갈린다.
+    file_content_menu: ?FileContentMenu = null,
+    // 메뉴에서 고른 항목 중 **web이 실행할 것**의 1회성 신호. 선택은 문서 안에 있어 native가 범위를 모른다.
+    pending_file_menu_action: ?FileMenuAction = null,
     // OS 클립보드 동작 1회성 신호(input.right-click paste·menu). Zig가 우클릭/메뉴에서 세우고 Swift가 매 tick
     // take_clipboard_action으로 drain해 copySelectionToPasteboard(copy)/pastePasteboardText(paste)를 호출한다 —
     // 클립보드는 OS 소유라 Swift가 실행, "언제" 동작할지는 Zig가 정한다(take_bell과 같은 1회성 패턴, F2-5).
@@ -2834,9 +2840,10 @@ pub const AppSession = struct {
     copy_buffer: []u8 = &.{},
     // pendingClipboard()가 돌려준 OSC 52 클립보드 데이터의 소유 버퍼(다음 pendingClipboard/destroy까지 유효).
     clipboard_out_buffer: []u8 = &.{},
-    // 슬라이스 4: 주소창 ⌘X(cut)가 넣은 클립보드 쓰기 대기 바이트(소유). pendingClipboard가 OSC52 write와 같은 drain으로
+    // chrome이 넣은 클립보드 쓰기 대기 바이트(소유). 주소창 ⌘X와 파일 본문 메뉴의 주소·경로 복사가 함께 쓴다.
+    // pendingClipboard가 OSC52 write와 같은 drain으로
     // 우선 반환 → Swift가 NSPasteboard에 씀. 선택 바이트를 **먼저 캡처**해 deleteSelection과 순서 무관(cut 표준). drain 시 비움.
-    addr_clipboard_write: []u8 = &.{},
+    chrome_clipboard_write: []u8 = &.{},
     // pendingNotification()이 돌려준 OSC 9/777 알림 title/body의 소유 버퍼(다음 pendingNotification/destroy까지 유효).
     notification_title_out: []u8 = &.{},
     notification_body_out: []u8 = &.{},
@@ -7204,6 +7211,7 @@ pub const AppSession = struct {
         self.file_tree_background_menu = false;
         self.view_options_menu = false;
         self.terminal_context_menu = false;
+        self.clearFileContentMenu();
         // 세팅 모달도 닫는다 — confirm/notice가 settings와 동시에 열리면 buildChromeOverlayFrame이 둘을 한 오버레이
         // 그리드(union bbox)에 painter-order로 raster해 텍스트가 겹쳐 보였다(z-order 겹침). settings를 단일-오버레이
         // 불변식에 포함해 한 번에 하나만 뜨게 한다. toggleSettings는 이 경로를 거치지 않아 열기엔 영향 없음.
@@ -18188,6 +18196,84 @@ pub const AppSession = struct {
         return self.context_menu_items_buf[0..3];
     }
 
+    /// 파일 Term 본문 우클릭 메뉴 상태(docs/file-panel.md §2.6). `href`는 소유 버퍼다 — 렌더러가 준 문자열이라
+    /// 메뉴가 열려 있는 동안 web이 문서를 바꿔도 우리가 든 값이 그대로여야 한다.
+    const FileContentMenu = struct {
+        surface_id: u64,
+        editor_epoch: u64,
+        items: [content_menu.max_items]content_menu.Item = undefined,
+        len: usize = 0,
+        href: []u8 = &.{},
+    };
+
+    /// web이 실행할 메뉴 동작(선택에 붙은 것). Swift가 tick마다 drain해 그 surface의 web에 이벤트로 전달한다.
+    const FileMenuAction = struct { surface_id: u64, item: content_menu.Item };
+
+    /// 본문 우클릭 → 메뉴를 연다. 좌표는 shell 뷰포트 CSS px이라 그 web surface rect + backing scale로 창 좌표를 만든다.
+    /// **모드는 web에서 받지 않는다** — 그 Term의 entry가 이미 안다(두 출처가 갈리지 않게).
+    pub fn openFileContentMenu(
+        self: *AppSession,
+        surface_id: u64,
+        request: maru.session.control_bridge.MenuRequest,
+    ) !void {
+        const entry = self.fileEntryForSurfaceId(surface_id) orelse return error.Unsupported;
+        var buf: [content_menu.max_items]content_menu.Item = undefined;
+        const items = content_menu.build(request.target, entry.mode, request.has_selection, &buf);
+        if (items.len == 0) return; // 낼 항목이 없으면 빈 메뉴를 띄우지 않는다
+
+        const rect = self.webSurfaceRect(surface_id) orelse return error.Unsupported;
+        const scale: f64 = @as(f64, @floatFromInt(@max(@as(u32, 1), self.scale_milli))) / 1000.0;
+        // 좌표는 rect 안으로 clamp한다 — 렌더러가 준 값이라 뷰 밖을 가리킬 수 있고, 그러면 메뉴가 자기 문서와
+        // 무관한 자리에 뜬다. clamp는 "고쳐서 통과"가 아니라 **이 surface 안에서만 뜬다**는 계약이다.
+        const x = std.math.clamp(
+            @as(f64, @floatFromInt(rect.x)) + request.x * scale,
+            @as(f64, @floatFromInt(rect.x)),
+            @as(f64, @floatFromInt(rect.x + rect.w)),
+        );
+        const y = std.math.clamp(
+            @as(f64, @floatFromInt(rect.y)) + request.y * scale,
+            @as(f64, @floatFromInt(rect.y)),
+            @as(f64, @floatFromInt(rect.y + rect.h)),
+        );
+
+        self.closeContextMenu(); // 열려 있던 다른 메뉴가 있으면 먼저 정리(대상·플래그 배타)
+        var state: FileContentMenu = .{ .surface_id = surface_id, .editor_epoch = request.editor_epoch };
+        if (request.href.len > 0) state.href = self.allocator.dupe(u8, request.href) catch &.{};
+        for (items, 0..) |item, i| {
+            self.context_menu_items_buf[i] = item.label();
+            state.items[i] = item;
+        }
+        state.len = items.len;
+        self.context_menu_items_len = items.len;
+        self.file_content_menu = state;
+        self.chrome_host.context_menu.show(@intFromFloat(x), @intFromFloat(y), items.len);
+        self.metal_dirty = true;
+    }
+
+    /// 지난 tick 레이아웃에서 그 web surface의 본문 rect(backing px). 아직 한 번도 배치되지 않았으면 null이다.
+    fn webSurfaceRect(self: *AppSession, surface_id: u64) ?web_panel_layout.Rect {
+        for (self.web_panel_prev.items) |layout| {
+            if (layout.surface_id == surface_id) return layout.content_rect;
+        }
+        return null;
+    }
+
+    /// 메뉴가 고른 텍스트를 OS 클립보드 쓰기 큐에 넣는다(OSC 52 write와 같은 drain — 새 ABI 불요).
+    /// **그 surface가 파일 본문일 때만** 받는다 — 아니면 임의 web이 클립보드를 덮어쓰는 창구가 된다.
+    pub fn queueMenuClipboardWrite(self: *AppSession, surface_id: u64, text: []const u8) !void {
+        if (self.fileEntryForSurfaceId(surface_id) == null) return error.Unsupported;
+        const captured = try self.allocator.dupe(u8, text);
+        if (self.chrome_clipboard_write.len > 0) self.allocator.free(self.chrome_clipboard_write);
+        self.chrome_clipboard_write = captured;
+    }
+
+    /// web이 실행할 메뉴 동작을 drain한다(있으면 그 동작, 비우고). Swift가 매 tick 호출한다.
+    pub fn takeFileMenuAction(self: *AppSession) ?FileMenuAction {
+        const action = self.pending_file_menu_action;
+        self.pending_file_menu_action = null;
+        return action;
+    }
+
     /// 터미널 본문 (x,y backing px)에 복사/붙여넣기 컨텍스트 메뉴를 띄운다(input.right-click=menu). 항목 선택은
     /// acceptContextMenu가 terminal_context_menu 분기로 pending_clipboard_action을 세운다(Swift가 OS 클립보드 실행).
     fn showTerminalContextMenu(self: *AppSession, x_px: f64, y_px: f64) void {
@@ -18212,7 +18298,16 @@ pub const AppSession = struct {
         self.file_tree_background_menu = false;
         self.view_options_menu = false;
         self.terminal_context_menu = false;
+        self.clearFileContentMenu();
         self.metal_dirty = true;
+    }
+
+    /// 파일 본문 메뉴 상태를 비운다(§2.6). 메뉴를 닫는 **모든** 경로가 이걸 지나야 href가 새지 않는다 —
+    /// 바깥 클릭·Esc(`closeContextMenu`)와 오버레이 일괄 정리(`dismissMessageOverlays`) 둘 다 소유자다.
+    fn clearFileContentMenu(self: *AppSession) void {
+        const menu = self.file_content_menu orelse return;
+        if (menu.href.len > 0) self.allocator.free(menu.href);
+        self.file_content_menu = null;
     }
 
     /// 컨텍스트 메뉴의 선택 항목을 실행한다. 0=Rename(모든 대상), workspace는 1=위치 고정 토글·bg_first..=배경 tint 프리셋·accent_first..=좌측 막대색 프리셋.
@@ -18220,6 +18315,55 @@ pub const AppSession = struct {
     fn acceptContextMenu(self: *AppSession) void {
         // 터미널 본문 우클릭 메뉴(input.right-click=menu): 0=복사·1=붙여넣기 → pending_clipboard_action을 세워 Swift가
         // OS 클립보드 동작을 한다. 메뉴를 닫고 return(rename·view_options와 배타). copy는 선택이 없으면 Swift가 no-op.
+        // 파일 본문 우클릭 메뉴(§2.6): 항목마다 실행 주인이 다르다. native가 이미 소유한 동작(링크 열기·복사·모드
+        // 전환)은 여기서 실행하고, 선택에 붙은 것(복사·잘라내기·붙여넣기·전체 선택)은 web으로 되돌려 보낸다.
+        if (self.file_content_menu) |menu| {
+            const selected = self.chrome_host.context_menu.selected;
+            if (selected >= menu.len) {
+                self.closeContextMenu();
+                return;
+            }
+            const item = menu.items[selected];
+            const surface_id = menu.surface_id;
+            const editor_epoch = menu.editor_epoch;
+            // href는 메뉴 teardown에서 해제되므로 **닫기 전에** 복사해 쓴다.
+            switch (item.owner()) {
+                .web => {
+                    self.pending_file_menu_action = .{ .surface_id = surface_id, .item = item };
+                    self.closeContextMenu();
+                },
+                .native => switch (item) {
+                    .open_link => {
+                        const href = self.allocator.dupe(u8, menu.href) catch {
+                            self.closeContextMenu();
+                            return;
+                        };
+                        defer self.allocator.free(href);
+                        self.closeContextMenu();
+                        self.openFilePanelDocumentLink(surface_id, editor_epoch, href, false) catch {
+                            self.showNotice("링크를 열지 못했습니다.");
+                        };
+                    },
+                    .copy_link, .copy_path => {
+                        // OSC 52 write와 같은 drain으로 Swift가 NSPasteboard에 쓴다(새 ABI 불요).
+                        const captured = self.allocator.dupe(u8, menu.href) catch {
+                            self.closeContextMenu();
+                            return;
+                        };
+                        if (self.chrome_clipboard_write.len > 0) self.allocator.free(self.chrome_clipboard_write);
+                        self.chrome_clipboard_write = captured;
+                        self.closeContextMenu();
+                    },
+                    .open_source => {
+                        self.closeContextMenu();
+                        _ = self.setFilePanelModeBySurface(surface_id, .source_edit);
+                    },
+                    // 이미지 저장은 저장 패널 ABI가 필요해 이 슬라이스에 없다(§2.6) — 항목도 만들지 않는다.
+                    .save_image, .copy, .cut, .paste, .select_all => self.closeContextMenu(),
+                },
+            }
+            return;
+        }
         if (self.terminal_context_menu) {
             const action: ClipboardAction = switch (self.chrome_host.context_menu.selected) {
                 0 => .copy,
@@ -21936,8 +22080,8 @@ pub const AppSession = struct {
         const slice = self.addr_field.text.items[sel.lo()..sel.hi()];
         if (slice.len == 0) return;
         const captured = self.allocator.dupe(u8, slice) catch return; // OOM이면 cut 안 함(선택 보존)
-        if (self.addr_clipboard_write.len > 0) self.allocator.free(self.addr_clipboard_write);
-        self.addr_clipboard_write = captured; // Swift가 다음 tick pendingClipboard drain에서 NSPasteboard에 씀
+        if (self.chrome_clipboard_write.len > 0) self.allocator.free(self.chrome_clipboard_write);
+        self.chrome_clipboard_write = captured; // Swift가 다음 tick pendingClipboard drain에서 NSPasteboard에 씀
         _ = self.addr_field.deleteSelection();
     }
 
@@ -23129,10 +23273,10 @@ pub const AppSession = struct {
         if (!self.surface_initialized) return &.{};
         // 슬라이스 4: 주소창 ⌘X가 넣은 클립보드 쓰기가 있으면 우선 반환(OSC52 write와 같은 drain 경로 — Swift가 NSPasteboard에
         // 씀). 소유권을 clipboard_out_buffer로 이전해 반환 수명(다음 pendingClipboard까지) 계약을 그대로 만족한다.
-        if (self.addr_clipboard_write.len > 0) {
+        if (self.chrome_clipboard_write.len > 0) {
             if (self.clipboard_out_buffer.len > 0) self.allocator.free(self.clipboard_out_buffer);
-            self.clipboard_out_buffer = self.addr_clipboard_write;
-            self.addr_clipboard_write = &.{};
+            self.clipboard_out_buffer = self.chrome_clipboard_write;
+            self.chrome_clipboard_write = &.{};
             return self.clipboard_out_buffer;
         }
         // host-backed: core는 빈 placeholder라 OSC 52가 안 들어온다. host가 관측 seq로 알려 준 요청만 RPC로
@@ -31008,7 +31152,7 @@ pub const AppSession = struct {
 
         if (self.copy_buffer.len > 0) self.allocator.free(self.copy_buffer);
         if (self.clipboard_out_buffer.len > 0) self.allocator.free(self.clipboard_out_buffer);
-        if (self.addr_clipboard_write.len > 0) self.allocator.free(self.addr_clipboard_write); // 슬라이스 4: 미-drain 주소창 cut 버퍼
+        if (self.chrome_clipboard_write.len > 0) self.allocator.free(self.chrome_clipboard_write); // 슬라이스 4: 미-drain 주소창 cut 버퍼
         self.clipboard_read_target_buf.deinit(self.allocator);
         if (self.notification_title_out.len > 0) self.allocator.free(self.notification_title_out);
         if (self.notification_body_out.len > 0) self.allocator.free(self.notification_body_out);
@@ -39914,11 +40058,11 @@ test "슬라이스 4: 주소창 클립보드 — copyText는 필드 선택(⌘C)
     session.metal_dirty = false;
     session.addr_edit = 1; // 편집 활성 → copy/paste가 필드 분기
     session.addr_field = .{};
-    session.addr_clipboard_write = &.{};
+    session.chrome_clipboard_write = &.{};
     defer session.addr_field.deinit(std.testing.allocator);
     defer if (session.copy_buffer.len > 0) std.testing.allocator.free(session.copy_buffer);
     defer if (session.clipboard_out_buffer.len > 0) std.testing.allocator.free(session.clipboard_out_buffer);
-    defer if (session.addr_clipboard_write.len > 0) std.testing.allocator.free(session.addr_clipboard_write);
+    defer if (session.chrome_clipboard_write.len > 0) std.testing.allocator.free(session.chrome_clipboard_write);
 
     try session.addr_field.setText(std.testing.allocator, "abcdef"); // caret=끝(6)
     // ⌘C: 선택 [1,4)="bcd"를 복사(필드 선택).
@@ -39948,7 +40092,7 @@ test "슬라이스 4: 주소창 클립보드 — copyText는 필드 선택(⌘C)
     try session.addr_field.setText(std.testing.allocator, "hello"); // 아래 ⌘X 테스트 상태 복원
 
     // ⌘X: 전체 선택 잘라내기 → text에서 제거 + 클립보드-쓰기 큐에 **먼저 캡처**(삭제와 순서 무관). pendingClipboard가
-    // 그 바이트를 반환(Swift가 NSPasteboard에 씀 — OSC52 write와 같은 drain). addr_clipboard_write set이라 터미널 경로 안 탐.
+    // 그 바이트를 반환(Swift가 NSPasteboard에 씀 — OSC52 write와 같은 drain). chrome_clipboard_write set이라 터미널 경로 안 탐.
     session.addr_field.selectAll();
     session.handleAddrEditKey(.{ .key = .{ .key = .char, .codepoint = 'x', .mods = .{ .command = true } } });
     try std.testing.expectEqualStrings("", session.addr_field.text.items); // 잘려서 비었음
@@ -39959,7 +40103,7 @@ test "슬라이스 4: 주소창 클립보드 — copyText는 필드 선택(⌘C)
     try session.addr_field.setText(std.testing.allocator, "abc");
     session.handleAddrEditKey(.{ .key = .{ .key = .char, .codepoint = 'x', .mods = .{ .command = true } } });
     try std.testing.expectEqualStrings("abc", session.addr_field.text.items); // 선택 없어 그대로
-    try std.testing.expectEqual(@as(usize, 0), session.addr_clipboard_write.len);
+    try std.testing.expectEqual(@as(usize, 0), session.chrome_clipboard_write.len);
 }
 
 test "navButtonAt: 밴드 좌측 존을 back/forward/reload로 가르고 URL 존은 null (7e-3 hit-test)" {
@@ -45156,6 +45300,7 @@ test "오버레이 배타 + IME 단일 출처: showNotice가 find/palette를 닫
     session.pending_confirm = .none; // showNotice→cancelPendingClose가 읽음([[devsession-undefined-test-field-trap]])
     session.metal_dirty = false;
     session.ime_terminal_target_id = null; // IME 라우팅이 pin 유무를 먼저 읽음([[devsession-undefined-test-field-trap]])
+    session.file_content_menu = null; // showNotice→closeContextMenu가 읽음([[devsession-undefined-test-field-trap]])
     defer {
         session.chrome_host.deinit(std.testing.allocator);
         session.find_matches.deinit(std.testing.allocator);
@@ -61327,4 +61472,131 @@ test "에이전트 화면이 running → idle이 되는 순간 작업트리가 �
     }
     try std.testing.expectEqual(@as(usize, 1), session.turn_ring.len);
     try std.testing.expectEqual(term.surfaceId(), session.turn_ring.latest().?.surface_id);
+}
+
+// [§2.6] 본문 우클릭 메뉴가 **native 경로로** 열리고, 항목마다 실행 주인이 갈리는지 본다. 화면 그리기는 이미 있는
+// 메뉴 경로(터미널 본문·파일 트리와 공유)가 하므로 여기서는 항목·좌표·동작만 검증한다.
+test "파일 본문 우클릭: 대상별 항목이 서고 실행 주인이 native/web으로 갈린다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 12,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(session.io, .{ .sub_path = "doc.md", .data = "# 제목\n" });
+    var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_root = tmp_buf[0..try tmp.dir.realPath(session.io, &tmp_buf)];
+    const doc = try std.fs.path.join(allocator, &.{ tmp_root, "doc.md" });
+    defer allocator.free(doc);
+    try std.testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, session.openFilePanelPath(doc));
+    const entry = session.fileEntryForPath(doc).?;
+    const surface_id = entry.surface_id;
+
+    // 아직 배치된 적 없는 surface는 좌표를 만들 수 없다 — 열지 않는다(추측한 자리에 띄우지 않는다).
+    try std.testing.expectError(error.Unsupported, session.openFileContentMenu(surface_id, .{
+        .editor_epoch = 1,
+        .x = 10,
+        .y = 10,
+        .target = .text,
+        .has_selection = true,
+        .href = "",
+    }));
+
+    // 지난 tick 레이아웃을 세워 준다(제품에서는 collectWebSurfaces가 채운다).
+    try session.web_panel_prev.append(allocator, .{
+        .surface_id = surface_id,
+        .panel_kind = .markdown,
+        .content_rect = .{ .x = 100, .y = 50, .w = 400, .h = 300 },
+        .visible = true,
+    });
+
+    // 읽기 모드 + 링크: 링크 열기·주소 복사. 좌표는 rect 원점 + CSS px × backing scale이다.
+    try session.openFileContentMenu(surface_id, .{
+        .editor_epoch = 1,
+        .x = 20,
+        .y = 30,
+        .target = .link,
+        .has_selection = false,
+        .href = "./other.md",
+    });
+    try std.testing.expect(session.file_content_menu != null);
+    try std.testing.expectEqual(@as(usize, 2), session.context_menu_items_len);
+    try std.testing.expectEqualStrings("링크 열기", session.context_menu_items_buf[0]);
+    try std.testing.expectEqualStrings("주소 복사", session.context_menu_items_buf[1]);
+    const scale = @max(@as(u32, 1), session.scale_milli);
+    try std.testing.expectEqual(@as(i32, @intCast(100 + 20 * scale / 1000)), session.chrome_host.context_menu.anchor_x);
+    try std.testing.expectEqual(@as(i32, @intCast(50 + 30 * scale / 1000)), session.chrome_host.context_menu.anchor_y);
+
+    // 주소 복사는 native가 실행한다 — OSC 52 write와 같은 drain 큐에 들어간다(web으로 안 넘어간다).
+    session.chrome_host.context_menu.selected = 1;
+    session.acceptContextMenu();
+    try std.testing.expectEqualStrings("./other.md", session.chrome_clipboard_write);
+    try std.testing.expect(session.file_content_menu == null); // 실행 후 메뉴가 닫힌다
+    try std.testing.expect(session.takeFileMenuAction() == null);
+
+    // 읽기 모드 + 본문(선택 있음): 복사·전체 선택. 둘 다 선택에 붙어 web이 실행한다.
+    try session.openFileContentMenu(surface_id, .{
+        .editor_epoch = 1,
+        .x = 0,
+        .y = 0,
+        .target = .text,
+        .has_selection = true,
+        .href = "",
+    });
+    try std.testing.expectEqual(@as(usize, 2), session.context_menu_items_len);
+    try std.testing.expectEqualStrings("복사", session.context_menu_items_buf[0]);
+    session.chrome_host.context_menu.selected = 0;
+    session.acceptContextMenu();
+    const action = session.takeFileMenuAction().?;
+    try std.testing.expectEqual(surface_id, action.surface_id);
+    try std.testing.expectEqual(maru.session.content_menu.Item.copy, action.item);
+    try std.testing.expect(session.takeFileMenuAction() == null); // 1회성
+
+    // 읽기 모드 + 여백의 "소스 모드로 열기"는 헤더 선택기와 **같은 경로**로 모드를 옮긴다.
+    try session.openFileContentMenu(surface_id, .{
+        .editor_epoch = 1,
+        .x = 0,
+        .y = 0,
+        .target = .empty,
+        .has_selection = false,
+        .href = "",
+    });
+    try std.testing.expectEqualStrings("소스 모드로 열기", session.context_menu_items_buf[1]);
+    session.chrome_host.context_menu.selected = 1;
+    session.acceptContextMenu();
+    try std.testing.expectEqual(dock_panel.Mode.source_edit, session.filePanelMode(surface_id).?);
+
+    // 소스 모드가 되면 같은 여백에서 붙여넣기가 생기고 "소스 모드로 열기"는 사라진다(갈 곳이 자기 자신이다).
+    try session.openFileContentMenu(surface_id, .{
+        .editor_epoch = 1,
+        .x = 0,
+        .y = 0,
+        .target = .empty,
+        .has_selection = false,
+        .href = "",
+    });
+    try std.testing.expectEqual(@as(usize, 2), session.context_menu_items_len);
+    try std.testing.expectEqualStrings("붙여넣기", session.context_menu_items_buf[0]);
+    try std.testing.expectEqualStrings("전체 선택", session.context_menu_items_buf[1]);
+    session.closeContextMenu();
+
+    // 파일 본문이 아닌 surface는 메뉴도 클립보드 쓰기도 못 연다.
+    try std.testing.expectError(error.Unsupported, session.openFileContentMenu(surface_id + 999, .{
+        .editor_epoch = 1,
+        .x = 0,
+        .y = 0,
+        .target = .text,
+        .has_selection = false,
+        .href = "",
+    }));
+    try std.testing.expectError(error.Unsupported, session.queueMenuClipboardWrite(surface_id + 999, "x"));
 }

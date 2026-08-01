@@ -6,6 +6,12 @@ import { createMarkdownEditor, createSourceEditor } from "./editor";
 import { createRichEditor, type RichEditorHandle } from "./rich-editor";
 import { sourceLanguageExtensions } from "./source-language";
 import {
+  installRendererContextMenu,
+  installShellContextMenu,
+  type MenuAction,
+  type MenuOpenParams,
+} from "./content-menu";
+import {
   type BeginDocumentRequest,
   encodeFileBridgeRequest,
   type DirtyReport,
@@ -347,6 +353,18 @@ export function requestFileBridge(
 ): Promise<BridgeResult>;
 export function requestFileBridge(
   document: Document,
+  method: "menuOpen",
+  value: MenuOpenParams,
+  timeoutMs?: number,
+): Promise<BridgeResult>;
+export function requestFileBridge(
+  document: Document,
+  method: "menuClipboardWrite",
+  value: { editor_epoch: number; text: string },
+  timeoutMs?: number,
+): Promise<BridgeResult>;
+export function requestFileBridge(
+  document: Document,
   method: FileMethod,
   value?: unknown,
   timeoutMs: number | null = 15_000,
@@ -515,6 +533,49 @@ export function requestFileBridge(
         if (!isRecord(value) || !isSafeInt(value.editor_epoch) || value.editor_epoch <= 0)
           throw new TypeError("invalid rendererReady payload");
         request = { method, editor_epoch: value.editor_epoch as number };
+        break;
+      case "menuOpen": {
+        // 좌표·대상은 문서(적대적일 수 있다)가 정하는 값이라 여기서 한 번, native가 다시 한 번 검사한다.
+        if (
+          !isRecord(value) ||
+          !isSafeInt(value.editor_epoch) ||
+          (value.editor_epoch as number) <= 0 ||
+          typeof value.x !== "number" ||
+          !Number.isFinite(value.x) ||
+          typeof value.y !== "number" ||
+          !Number.isFinite(value.y) ||
+          typeof value.has_selection !== "boolean" ||
+          typeof value.href !== "string" ||
+          value.href.length > 4096
+        ) {
+          throw new TypeError("invalid menuOpen payload");
+        }
+        const target = value.target;
+        if (target !== "text" && target !== "link" && target !== "image" && target !== "empty")
+          throw new TypeError("invalid menuOpen payload");
+        request = {
+          method,
+          editor_epoch: value.editor_epoch as number,
+          x: value.x,
+          y: value.y,
+          target,
+          has_selection: value.has_selection,
+          href: value.href,
+        };
+        break;
+      }
+      case "menuClipboardWrite":
+        if (
+          !isRecord(value) ||
+          !isSafeInt(value.editor_epoch) ||
+          (value.editor_epoch as number) <= 0 ||
+          typeof value.text !== "string" ||
+          value.text.length === 0 ||
+          value.text.length > 8_388_608
+        ) {
+          throw new TypeError("invalid menuClipboardWrite payload");
+        }
+        request = { method, editor_epoch: value.editor_epoch as number, text: value.text };
         break;
     }
     node.textContent = JSON.stringify(encodeFileBridgeRequest(request));
@@ -1129,6 +1190,69 @@ export function bootShell(document: Document, targetWindow: ViewerWindow): void 
     if (detail.mode === "read" || detail.mode === "rich" || detail.mode === "source-edit")
       applyMode(detail.mode);
   });
+  // §2.6: 본문 우클릭 → native 메뉴. web은 대상·좌표만 올리고, 선택에 붙은 동작만 되돌려 받아 실행한다.
+  // **읽기 모드의 선택은 렌더 iframe 안에 있다** — 그 경우 동작을 iframe으로 다시 넘긴다(shell엔 선택이 없다).
+  const replaceSelectionWith = (text: string) => {
+    if (mode === "rich") {
+      richEditor?.replaceSelection(text);
+      return;
+    }
+    if (editor === null) return;
+    editor.dispatch(editor.state.replaceSelection(text));
+    editor.focus();
+  };
+  const applyMenuAction = (action: MenuAction, text: string) => {
+    if (mode === "read") {
+      frame.contentWindow?.postMessage({ channel: viewerChannel, type: "menuAction", action }, "*");
+      return;
+    }
+    switch (action) {
+      case "selectAll":
+        if (mode === "rich") richEditor?.selectAll();
+        else if (editor !== null) {
+          editor.dispatch({ selection: { anchor: 0, head: editor.state.doc.length } });
+          editor.focus();
+        }
+        return;
+      case "copy":
+      case "cut": {
+        const selected = document.getSelection()?.toString() ?? "";
+        if (selected.length === 0 || editorEpoch === null) return;
+        void requestFileBridge(document, "menuClipboardWrite", {
+          editor_epoch: editorEpoch,
+          text: selected,
+        });
+        if (action === "cut") replaceSelectionWith("");
+        return;
+      }
+      case "paste":
+        if (text.length > 0) replaceSelectionWith(text);
+        return;
+    }
+  };
+  // 읽기 모드 복사: 선택 텍스트는 렌더 iframe만 안다. 그 텍스트를 받아 브리지로 올린다(클립보드 쓰기는 native).
+  targetWindow.addEventListener("message", (event) => {
+    if (!isRecord(event.data) || event.data.channel !== viewerChannel) return;
+    if (event.data.type !== "menuClipboard" || typeof event.data.text !== "string") return;
+    const text = event.data.text;
+    if (text.length === 0 || text.length > 8_388_608 || editorEpoch === null) return;
+    void requestFileBridge(document, "menuClipboardWrite", { editor_epoch: editorEpoch, text });
+  });
+  installShellContextMenu({
+    doc: document,
+    targetWindow,
+    channel: viewerChannel,
+    getEditorEpoch: () => editorEpoch,
+    frameRect: () => {
+      const rect = frame.getBoundingClientRect();
+      return { left: rect.left, top: rect.top };
+    },
+    applyAction: applyMenuAction,
+    openMenu: (request) => {
+      void requestFileBridge(document, "menuOpen", request);
+    },
+  });
+
   // §2.3: ⌘+/− 폰트 줌을 읽기 프리뷰에도 반영한다(사용자 결정 2026-07-23). native가 `maru:file-zoom`으로 현재
   // 배율(현재 폰트/base)을 주면 render iframe에 `setZoom`으로 전달해 iframe이 `documentElement.zoom`으로 페이지
   // 줌한다(cross-origin이라 shell이 iframe DOM을 직접 못 건드림). iframe이 아직 준비 전이면 최신 배율을 캐시해
@@ -1415,6 +1539,9 @@ export function bootRenderer(document: Document, targetWindow: ViewerWindow): vo
   // 읽기 프리뷰 mermaid 요청의 대기 resolver(asset과 분리 — 결과 타입이 다름).
   const mermaidPending = new Map<string, (value: MermaidReadResult) => void>();
 
+  // §2.6: 우클릭 좌표·대상을 shell에 넘긴다(브리지는 안 부른다 — 이 origin은 capability 0이다).
+  installRendererContextMenu(document, targetWindow, viewerChannel);
+
   // §2.3: ⌘+/− 페이지 줌. shell이 `setZoom`으로 현재 배율(현재 폰트/base)을 준다. 마크다운 읽기 프리뷰에만
   // `documentElement.zoom`으로 적용한다 — svg 프리뷰는 자체 fit이 크기를 소유하므로 제외하고,
   // 그 모드에서는 zoom을 비워 이중 스케일을 막는다(previewIsMarkdown 게이트). 배율 1은 빈 문자열로 두어 기본 렌더.
@@ -1487,6 +1614,29 @@ export function bootRenderer(document: Document, targetWindow: ViewerWindow): vo
       const zoom = event.data.zoom;
       if (Number.isFinite(zoom)) previewZoom = Math.min(10, Math.max(0.1, zoom));
       applyPreviewZoom();
+      return;
+    }
+    // §2.6: 읽기 모드의 선택은 이 문서 안에 있다 — shell이 넘긴 메뉴 동작을 여기서 실행한다.
+    // 읽기는 편집이 없으므로 복사·전체 선택만 뜻이 있다(잘라내기·붙여넣기는 항목 자체가 안 나온다).
+    if (event.data.type === "menuAction") {
+      const action = event.data.action;
+      if (action === "selectAll") {
+        const selection = targetWindow.getSelection();
+        selection?.removeAllRanges();
+        const range = document.createRange();
+        range.selectNodeContents(root);
+        selection?.addRange(range);
+        return;
+      }
+      if (action === "copy") {
+        const text = targetWindow.getSelection()?.toString() ?? "";
+        if (text.length === 0) return;
+        // 이 origin에는 브리지가 없다(capability 0). 클립보드에 쓰는 것은 shell이 하므로 텍스트만 넘긴다.
+        targetWindow.parent.postMessage(
+          { channel: viewerChannel, type: "menuClipboard", text },
+          "*",
+        );
+      }
       return;
     }
     if (event.data.type === "ping") {

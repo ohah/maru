@@ -22,7 +22,6 @@ const screen_stream = @import("screen_stream.zig");
 const owner_lease = @import("owner_lease.zig");
 const attach_phase_deadline = @import("attach_phase_deadline.zig");
 const client_deadline = @import("client_deadline.zig");
-const upgrade_wire = @import("upgrade_wire.zig");
 const staged_image = @import("staged_image.zig");
 
 // flock(2)은 std.c 미노출(macOS 전용). start lock 직렬화용. LOCK_EX=2·LOCK_NB=4(sys/file.h).
@@ -150,7 +149,7 @@ pub fn connectOrLaunchDetailed(
     // 같은 build의 host가 없다면, **다른 build의 살아 있는 host**를 새 이미지로 exec 교체해 그 runtime을 그대로
     // 이어받는다. 여기(start lock 획득 뒤)에서 하는 이유: lock이 동시 시작자를 직렬화하므로 두 GUI가 같은 host에
     // 동시에 upgrade를 걸지 않는다. 실패하면 아래 spawn 경로가 그대로 새 host를 띄운다(회귀 없음).
-    if (tryUpgradeExistingHost(allocator, exe_path, base_cache_dir, dir, opts)) |outcome| return outcome;
+    if (tryUpgradeExistingHost(allocator, exe_path, base_cache_dir, dir)) |outcome| return outcome;
 
     short_endpoint.prepareCurrentUserNamespace() catch return .{ .failed = .endpoint_denied };
     var host_id: u128 = 0;
@@ -198,6 +197,32 @@ fn findCurrentManifestHost(
     return null;
 }
 
+/// exec 뒤 재연결 예산. host의 pause budget(`upgrade_limits.pause_budget_ms` = 5s)**만으로는 부족하다** — 그 뒤에
+/// 새 이미지 부팅·handoff 복원·manifest 재게시가 이어지고, 그동안 manifest lifecycle이 `.restoring`이라 어떤 스캔도
+/// (`findCurrentManifestHost`도 `isUpgradeCandidate`도 `.ready`만 센다) 이 host를 기다려 주지 않는다.
+///
+/// 여기서 일찍 포기하면 **같은 build_id host가 둘** 남는다: exec된 쪽이 사용자 PTY를 전부 들고 있고, 새로 spawn된
+/// 쪽은 비어 있는데, 이후 스캔은 `readdir` 순서로 아무거나 고른다. 그러면 사용자의 셸이 영구히 도달 불가가 되어
+/// 이 경로가 막으려던 고아화를 그대로 재생산하며, 스스로 회복되지도 않는다. 넉넉히 잡는 대신 치르는 비용은
+/// **업그레이드가 실패했을 때의 대기**뿐이라, 잃는 쪽이 훨씬 싼 비대칭이다.
+const upgrade_reconnect_delay_ms: u32 = 20;
+const upgrade_reconnect_attempts: usize = 500; // × 20ms = 10s (pause budget 5s + 부팅·복원 여유)
+
+/// exec 뒤 같은 host_id로 다시 붙는다. 실패하면 `null` — 호출자가 기존대로 새 host를 spawn한다.
+fn reconnectAfterUpgrade(
+    allocator: std.mem.Allocator,
+    base_cache_dir: []const u8,
+    host_id: u128,
+) ?Outcome {
+    return switch (connectNewHostWithBackoff(allocator, base_cache_dir, host_id, .{
+        .connect_attempts = upgrade_reconnect_attempts,
+        .connect_delay_ms = upgrade_reconnect_delay_ms,
+    })) {
+        .connected => |restored| .{ .connected = restored },
+        .failed => null,
+    };
+}
+
 /// exec 업그레이드 후보 판정에 필요한 manifest 사실만 담는다. 실 `Manifest`는 allocator가 소유한 슬라이스를
 /// 들고 있어 순수 판정 테스트에 쓰기 어렵다 — 판정에 쓰이는 값만 떼어내 syscall 없이 회귀를 고정한다.
 pub const UpgradeCandidate = struct {
@@ -242,10 +267,13 @@ fn tryUpgradeExistingHost(
     exe_path: [:0]const u8,
     base_cache_dir: []const u8,
     session_dir: [:0]const u8,
-    opts: Options,
 ) ?Outcome {
     const target_identity = staged_image.inspect(exe_path) catch return null;
-    const target_build_id = host_manifest.buildIdForExecutable(allocator, exe_path) catch return null;
+    // build id를 **같은 inspect 결과에서** 유도한다(`buildIdForExecutable`은 경로를 한 번 더 읽는다). 두 번 읽으면
+    // 그 사이 번들이 교체될 때(앱 업데이트가 실행 중에 끝나는 경우) build_id와 sha256이 서로 다른 바이트를 가리켜
+    // host의 staging 해시 검증이 실패한다 — 게다가 같은 파일을 두 번 SHA-256하는 낭비다.
+    const target_hex = std.fmt.bytesToHex(target_identity.sha256, .lower);
+    const target_build_id = std.fmt.allocPrint(allocator, "sha256:{s}", .{&target_hex}) catch return null;
     defer allocator.free(target_build_id);
 
     var hosts_buf: [640]u8 = undefined;
@@ -268,7 +296,12 @@ fn tryUpgradeExistingHost(
 
         var client = switch (connectExistingHost(allocator, base_cache_dir, host_id)) {
             .connected => |connected| connected,
-            .failed => continue,
+            // OOM은 host에 대한 증거가 아니라 우리 쪽 사정이다. 삼키고 계속 스캔하면 메모리 압박 상황에서 host
+            // 프로세스만 하나 더 늘린다 — 형제 스캔(`findCurrentManifestHost`)과 같은 규율로 즉시 올린다.
+            .failed => |reason| if (reason == .out_of_memory)
+                return .{ .failed = reason }
+            else
+                continue,
         };
         // capability를 광고하지 않는 구 host는 exec 교체를 모른다. **죽이지 않고** 그대로 둔다 — 그 아래 runtime이
         // 살아 있고, capability 없는 host를 종료해 migration처럼 보이게 하지 않는다(session-host-upgrade.md).
@@ -286,24 +319,23 @@ fn tryUpgradeExistingHost(
             .handoff_reader_min = 1,
             .handoff_reader_max = 1,
         }) catch {
+            // 응답을 못 받았다고 host가 아무것도 안 한 것은 아니다. server는 target 이미지를 복사·fsync·해시한
+            // **뒤에** accepted를 쓰므로, 느린 디스크에서는 우리 recv 타임아웃이 먼저 만료되고 host는 그대로
+            // exec한다. 그때 다른 host로 스캔을 이어 가면 이미 교체 중인 host를 두고 또 다른 host를 흔든다 —
+            // 재연결로 결과를 확인하고, 아니면 여기서 끝낸다.
             client.deinit();
-            continue;
+            return reconnectAfterUpgrade(allocator, base_cache_dir, host_id);
         };
-        switch (outcome) {
+        client.deinit();
+        // **prepare를 한 번 보낸 뒤에는 결과와 무관하게 스캔을 끝낸다.** 한 번의 GUI 실행이 여러 host에 연쇄로
+        // upgrade를 걸면 각 host가 클라이언트를 떨어뜨리며 재시작하는데, 그 피해는 새 host 하나를 더 띄우는
+        // 것보다 훨씬 크다. 거절(`rejected`)도 마찬가지다 — host는 다른 attachment가 남아 있으면 거절하며,
+        // 그건 "지금은 안 된다"이지 "이 host는 못 쓴다"가 아니다.
+        return switch (outcome) {
             // host가 응답을 전량 보낸 뒤 이 connection을 닫고 exec한다 — 같은 host_id로 다시 붙는다.
-            .accepted_reconnect_required => {
-                client.deinit();
-                switch (connectNewHostWithBackoff(allocator, base_cache_dir, host_id, opts)) {
-                    .connected => |restored| return .{ .connected = restored },
-                    .failed => continue,
-                }
-            },
-            // 이미 끝난 attempt를 재조회했거나 host가 거절했다 — 조용히 새 host spawn으로 폴백한다.
-            .completed, .rejected => {
-                client.deinit();
-                continue;
-            },
-        }
+            .accepted_reconnect_required => reconnectAfterUpgrade(allocator, base_cache_dir, host_id),
+            .completed, .rejected => null,
+        };
     }
     return null;
 }

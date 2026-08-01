@@ -112,6 +112,20 @@ split·dock divider 자체는 padding 때문에 안쪽으로 밀리지 않는다
 accessor일 뿐 bar/padding 산술을 복제하지 않는다. focus border의 상태·z-order·테마와 비-key/OOM fail-close 계약은
 [file-panel.md §3.4](file-panel.md#34-terminal파일-도크-입력-포커스-표시왕복)를 단일 출처로 둔다.
 
+**표시 grid는 레이아웃이 소유한다**: 위 `.grid`에서 나온 크기는 그 Term의 표시 grid에 **항상** 적용된다
+(`AppSession.resizeTermForLayout`이 단일 출처). 이건 편의가 아니라 렌더가 서는 근거다 — 렌더러는 셀을
+`pane origin + col×cell_w`로만 놓고 **터미널 셀 패스에 pane 클리핑(scissor)이 없다**. 즉 화면이 자기 pane 안에
+머무는 이유는 오직 "grid가 pane rect에서 나왔다"이고, 이 불변식이 깨진 Term은 divider를 넘어 옆 pane 본문 위에
+글자를 그린다. 따라서 **runtime이 resize를 받지 못하는 것은 표시 grid를 낡은 채 둘 근거가 되지 않는다**:
+`SurfaceRuntime.resize`는 dead adapter로의 라우팅을 계약대로 거부하지만
+([surface-runtime-api.md](surface-runtime-api.md)) — link 없음(`UnknownSurface`)·자식 종료(`ProcessExited`),
+그리고 §7 종료 placeholder(묘비) — 그런 Term의 표시 grid는 레이아웃 레이어가 코어에 직접 적용한다(PTY winsize·trace
+없이 reflow만). runtime에 못 전달한 사실은 삼키지 않고 `resize_delivery_failures` 카운터와 MARU_DEBUG `resize`
+로그로 남긴다(자식 프로세스만 옛 winsize를 믿는 상태의 원인). 레이아웃 적용 자체는 개별 Term의 전달 실패로
+중단되지 않는다 — 중단하면 `recomputeActivePaneRect`·`metal_dirty`를 스킵한 half-state로 창 크기 조정이 깨진다.
+셀 이하(음수 자간 마지막 칸)의 divider bleed는 별개의 알려진 한계이고 per-pane scissor 도입 시 해소된다
+([font-strategy.md](font-strategy.md) 화면 quad 절).
+
 ## SplitTree(panel) 모델
 
 split의 핵심은 재귀 트리다(Ghostty의 SplitTree 동작 참고 — MIT, 개념만, Zig로 독립 구현):

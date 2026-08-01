@@ -4273,6 +4273,68 @@ test "remote runtime: snapshot.invalidated latches one nonblocking resync ack" {
     try testing.expectEqual(@as(usize, 0), client.pending_events.items.len);
 }
 
+// 화면 정지 재현: host가 screen pressure로 내 화면을 회수하면 `snapshot.invalidated`만 보내고, 복구는 GUI가
+// 능동적으로 보내는 resync에 달려 있다. 그런데 `pumpDelta`는 `pumpQueuedInput`이 false면 `pumpResyncIntent`에
+// 닿기 전에 조기 반환하고, `hasBufferedControllerRevoke`는 **남의 stream** revoke 하나만 버퍼에 있어도 false를
+// 만든다. 주인 runtime이 그 이벤트를 소비하기 전까지 같은 Client를 공유하는 모든 pane의 화면 복구가 함께 멈춘다.
+test "remote runtime: 남의 stream revoke가 내 화면 resync 의도까지 막는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+
+    var client = client_mod.Client{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+
+    // 남의 pane(stream 10)이 controller를 빼앗겼다. 그 runtime이 아직 pump되지 않아 버퍼에 남아 있다.
+    var foreign_revoke = client_mod.BufferedEvent{
+        .header = .{ .kind = .event, .stream_id = 10 },
+        .payload = try allocator.dupe(
+            u8,
+            "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":10,\"controller_generation\":4,\"reason\":\"takeover\"}}",
+        ),
+    };
+    foreign_revoke.header.payload_len = @intCast(foreign_revoke.payload.len);
+    // 내 pane(stream 9)은 화면을 회수당했다.
+    var invalidated = client_mod.BufferedEvent{
+        .header = .{ .kind = .event, .stream_id = 9 },
+        .payload = try allocator.dupe(u8, "{\"event\":\"snapshot.invalidated\"}"),
+    };
+    invalidated.header.payload_len = @intCast(invalidated.payload.len);
+    try client.pending_events.append(allocator, foreign_revoke);
+    try client.pending_events.append(allocator, invalidated);
+    client.pending_event_bytes = foreign_revoke.payload.len + invalidated.payload.len;
+
+    var rr: RemoteRuntime = undefined;
+    rr.client = &client;
+    rr.allocator = allocator;
+    rr.io = testing.io;
+    rr.attachment = .init(testing.allocator, .{ .runtime_id = 1, .stream_id = 9, .role = .controller, .controller_generation = 1 });
+    rr.direct_input = .empty;
+    rr.direct_input_offset = 0;
+    rr.pending_controls = .empty;
+    rr.resync_needed = false;
+    defer rr.direct_input.deinit(allocator);
+    defer rr.pending_controls.deinit(allocator);
+
+    // 내 무효화는 소비되어 resync 의도가 걸린다.
+    _ = try rr.drainObservationEvents();
+    try testing.expect(rr.resync_needed);
+    // 남의 revoke는 여전히 버퍼에 남아 있다 — 소비할 주인은 stream 10의 runtime이다.
+    try testing.expect(client.hasBufferedControllerRevoke());
+
+    // 소켓은 멀쩡하고 보낼 입력도 없는데, 남의 latch 하나가 내 진행을 막는다.
+    try testing.expect(!(try rr.pumpQueuedInput()));
+    // 그래서 `pumpDelta`는 여기서 조기 반환하고 resync는 전송 시도조차 되지 않는다.
+    try testing.expect(rr.resync_needed);
+}
+
 test "remote runtime: typed ended event terminates only its stream pump" {
     const allocator = testing.allocator;
     var client = client_mod.Client{

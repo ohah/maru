@@ -29,8 +29,8 @@ describe("rich editing mode", () => {
     // DOM으로 직접 만들어 붙였는데, 그러면 문서 주변 UI가 React 트리와 손으로 만든 노드 둘로 갈린다.
     await withEditorDom(async (dom) => {
       const doc = (globalThis as unknown as { document: Document }).document;
-      // frontmatter는 리치가 표현하지 못하는 문법이라 편집이 잠긴다(§2.5).
-      const rich = mountRich(dom, "---\ntitle: 문서\n---\n\n본문");
+      // 각주는 리치가 표현하지 못하는 문법이라 편집이 잠긴다(§2.5 — frontmatter는 이제 지원한다).
+      const rich = mountRich(dom, "텍스트[^1]\n\n[^1]: 각주");
       try {
         const notice = doc.querySelector(".maru-rich-notice");
         expect(notice).not.toBeNull();
@@ -169,10 +169,61 @@ describe("rich editing mode", () => {
     });
   });
 
+  test("frontmatter는 블록으로 보이고, 왕복해도 원문 그대로다", async () => {
+    // 왜 중요한가: frontmatter 값은 글이 아니라 빌드·배포가 읽는 데이터다. 예전에는 왕복에서 `## title: 문서`로
+    // 뭉개져 편집을 통째로 잠갔는데, 노드를 주면 그 이유가 사라진다 — 대신 **왕복 무손실**이 계약이 된다.
+    await withEditorDom(async (dom) => {
+      const doc = (globalThis as unknown as { document: Document }).document;
+      const source = "---\ntitle: 문서\ntags: [a, b]\n---\n\n# 제목\n\n본문\n";
+      const rich = mountRich(dom, source);
+      try {
+        const block = doc.querySelector(".maru-rich-frontmatter");
+        expect(block).not.toBeNull();
+        expect(block?.textContent).toBe("title: 문서\ntags: [a, b]");
+        // 본문과 **다른 블록**이어야 한다 — 문단으로 들어가면 서식이 붙고 값이 정규화된다.
+        expect(block?.closest(".ProseMirror")).not.toBeNull();
+        // 잠기지 않는다.
+        expect(doc.querySelector(".maru-rich-notice")).toBeNull();
+        expect(doc.querySelector(".ProseMirror")?.getAttribute("contenteditable")).toBe("true");
+
+        // 왕복: 구분선과 안쪽 값이 글자 그대로 살아 있어야 한다.
+        const round = rich.getMarkdown();
+        expect(round.startsWith("---\ntitle: 문서\ntags: [a, b]\n---\n")).toBe(true);
+        expect(round).toContain("# 제목");
+
+        // 모드 인계(setMarkdown)로 들어와도 같다.
+        rich.setMarkdown("---\nid: 7\n---\n\n다른 본문\n");
+        expect(doc.querySelector(".maru-rich-frontmatter")?.textContent).toBe("id: 7");
+        expect(rich.getMarkdown().startsWith("---\nid: 7\n---\n")).toBe(true);
+
+        // frontmatter가 없는 문서로 갈아끼우면 블록도 사라진다.
+        rich.setMarkdown("# 그냥 제목\n");
+        expect(doc.querySelector(".maru-rich-frontmatter")).toBeNull();
+      } finally {
+        rich.destroy();
+      }
+    });
+  });
+
+  test("본문 중간의 `---`는 구분선으로 남는다(frontmatter로 삼키지 않는다)", async () => {
+    // 위치가 정의의 전부다. 중간 구분선을 메타데이터로 읽으면 그 아래 본문이 통째로 블록에 빨려 들어간다.
+    await withEditorDom(async (dom) => {
+      const doc = (globalThis as unknown as { document: Document }).document;
+      const rich = mountRich(dom, "# 제목\n\n---\n\n본문\n");
+      try {
+        expect(doc.querySelector(".maru-rich-frontmatter")).toBeNull();
+        expect(rich.getMarkdown()).toContain("본문");
+      } finally {
+        rich.destroy();
+      }
+    });
+  });
+
   test("표현할 수 없는 문법이 있는 문서는 편집을 잠근다", async () => {
-    // 저장 경로가 열려 있으면 왕복에서 원문이 파괴된다 — frontmatter는 제목으로 변질되고 태그·각주는 사라진다.
-    expect(unsupportedRichSyntax("---\ntitle: 문서\n---\n\n본문")).toContain("YAML frontmatter");
+    // 저장 경로가 열려 있으면 왕복에서 원문이 파괴된다 — 태그는 사라지고 각주 정의는 인라인 링크로 뭉개진다.
     expect(unsupportedRichSyntax("텍스트[^1]\n\n[^1]: 각주")).toContain("각주");
+    // **frontmatter는 더 이상 잠그지 않는다** — 노드를 만들어 보이고 고칠 수 있게 했다(§2.5).
+    expect(unsupportedRichSyntax("---\ntitle: 문서\n---\n\n본문")).toEqual([]);
     expect(unsupportedRichSyntax('<div class="x">raw</div>')).toContain("원시 HTML");
     // 주석·doctype도 왕복에서 사라진다 — 태그만 보면 `<!-- toc -->`가 있는 문서가 조용히 손상된다.
     expect(unsupportedRichSyntax("# 제목\n\n<!-- prettier-ignore -->\n\n본문")).toContain(
@@ -186,11 +237,10 @@ describe("rich editing mode", () => {
     expect(unsupportedRichSyntax("```html\n<div>example</div>\n```")).toEqual([]);
     // 인라인 코드로 태그를 설명하는 문장도 마찬가지다.
     expect(unsupportedRichSyntax("설정은 `<div>` 태그로 합니다.")).toEqual([]);
-    // frontmatter는 문서 첫 줄의 `---`만이다. 절 구분선으로 `---`를 두 번 쓴 평범한 문서를 잠그면 안 된다.
     expect(unsupportedRichSyntax("제목\n---\n\n본문\n\n---\n\n다음 절")).toEqual([]);
 
     await withEditorDom(async (dom) => {
-      const rich = mountRich(dom, "---\ntitle: 문서\n---\n\n본문");
+      const rich = mountRich(dom, "텍스트[^1]\n\n[^1]: 각주");
       try {
         const doc = (globalThis as unknown as { document: Document }).document;
         expect(doc.querySelector(".maru-rich-notice")).not.toBeNull();
@@ -202,15 +252,15 @@ describe("rich editing mode", () => {
   });
 
   test("내용이 바뀌면 잠금도 다시 판정한다", async () => {
-    // 생성 시 한 번만 보면, 소스에서 frontmatter를 붙였다 리치로 돌아온 문서에 잠금이 걸리지 않아
-    // 그대로 저장돼 원문이 파괴된다. 반대로 frontmatter를 지운 문서가 영영 읽기 전용으로 남는 것도 막는다.
+    // 생성 시 한 번만 보면, 소스에서 각주를 붙였다 리치로 돌아온 문서에 잠금이 걸리지 않아 그대로 저장돼
+    // 원문이 파괴된다. 반대로 각주를 지운 문서가 영영 읽기 전용으로 남는 것도 막는다.
     await withEditorDom(async (dom) => {
       const doc = (globalThis as unknown as { document: Document }).document;
       const rich = mountRich(dom, "# 깨끗한 문서");
       try {
         expect(doc.querySelector(".maru-rich-notice")).toBeNull();
 
-        rich.setMarkdown("---\ntitle: 문서\n---\n\n본문");
+        rich.setMarkdown("텍스트[^1]\n\n[^1]: 각주");
         expect(doc.querySelector(".maru-rich-notice")).not.toBeNull();
         expect(doc.querySelector(".ProseMirror")?.getAttribute("contenteditable")).toBe("false");
 
@@ -226,7 +276,7 @@ describe("rich editing mode", () => {
   test("close lock이 풀려도 표현 불가 잠금은 유지된다", async () => {
     await withEditorDom(async (dom) => {
       const doc = (globalThis as unknown as { document: Document }).document;
-      const rich = mountRich(dom, "---\ntitle: 문서\n---\n\n본문");
+      const rich = mountRich(dom, "텍스트[^1]\n\n[^1]: 각주");
       try {
         rich.setEditable(false); // close lock 획득
         expect(doc.querySelector(".ProseMirror")?.getAttribute("contenteditable")).toBe("false");

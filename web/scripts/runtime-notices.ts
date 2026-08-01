@@ -17,6 +17,9 @@ type PendingDependency = {
 
 const licenseFilePattern = /^(license|licence|copying|notice)(\..*)?$/i;
 const exactFallbackLicenses = new Map([
+  // 패키지가 라이선스 **파일**을 안 담고 Readme의 "License" 절과 `licenses` 필드로만 MIT를 선언한다
+  // (2026-08-01 확인 — `Copyright 2010 - 2014 Sami Samhuri`, http://sjs.mit-license.org).
+  ["format@0.2.2", "licenses/format-0.2.2-MIT.txt"],
   ["rehype-katex@7.0.1", "licenses/remark-math-MIT.txt"],
   ["remark-math@6.0.0", "licenses/remark-math-MIT.txt"],
 ]);

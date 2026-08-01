@@ -3,6 +3,7 @@ import rehypeKatex from "rehype-katex";
 import rehypePrism from "rehype-prism-plus";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import rehypeStringify from "rehype-stringify";
+import remarkFrontmatter from "remark-frontmatter";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import remarkParse from "remark-parse";
@@ -105,6 +106,10 @@ function createProcessor(mode: AssetRenderMode) {
   return (
     unified()
       .use(remarkParse)
+      // frontmatter는 **문서 내용이 아니라 메타데이터**다. 이게 없으면 파서가 `---`를 구분선으로, 그 아래 줄을
+      // setext 제목으로 읽어 `<hr>` + `<h2>title: 문서</h2>`로 그려진다(실측 — frontmatter가 있는 문서마다 보였다).
+      // 이 플러그인은 그 블록을 yaml 노드로 만들고, remark-rehype가 기본적으로 그 노드를 HTML로 내보내지 않는다.
+      .use(remarkFrontmatter, ["yaml", "toml"])
       .use(remarkGfm)
       .use(remarkMath)
       // allowDangerousHtml을 켜지 않는다. Markdown raw HTML node는 이 경계에서 폐기된다.

@@ -529,6 +529,7 @@ fn metadataTagMatches(
 
 pub const AuthorityGeneration = client_external_turn_authority.AuthorityGeneration;
 pub const f3c1_contract_version: u16 = 2;
+pub const integration_2b2e_contract_version: u16 = 2;
 
 pub const PreparedAttachmentAuthority = struct {
     role: AttachmentRole,
@@ -2025,11 +2026,50 @@ const ConsumeResyncAckResult = enum {
     invalid,
     terminal,
 };
+const ResyncAckTransitionLifecycle = enum {
+    empty,
+    prepared,
+    consumed_tombstone,
+};
+const PreparedResyncAckTransition = struct {
+    saved_self_addr: usize = 0,
+    storage_addr: usize = 0,
+    scratch_addr: usize = 0,
+    lease_addr: usize = 0,
+    owner_incarnation: u64 = 0,
+    operation_generation: u64 = 0,
+    turn_generation: u64 = 0,
+    parser_generation: u64 = 0,
+    parser_seal: client_external_mode.ParserAuthoritySeal = .{},
+    parser_seal_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    sampled_now_ns: i128 = 0,
+    recovery_deadline_ns: i128 = 0,
+    authority_state: client_pump.AuthorityState = .valid,
+    authority_generation: AuthorityGeneration = .untracked,
+    authority_seal_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    permit_addr: usize = 0,
+    permit_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    verdict_addr: usize = 0,
+    verdict_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    completed_owner_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    correlation_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    tx_queue_generation: u64 = 0,
+    recovery_barrier_absolute: u64 = 0,
+    next_state: client_pump.AuthorityState = .valid,
+    response_take_addr: usize = 0,
+    response_take_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    frozen_response_addr: usize = 0,
+    frozen_response_pristine_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    lifecycle: ResyncAckTransitionLifecycle = .empty,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
 const ConsumeResyncAckUnderHeldLeaseFn = fn (
     storage: *ExternalPumpStorage,
     lease: *const ExternalWholeTurnLease,
+    scratch: *ExternalRxTurnScratch,
     permit: *PreparedWholeDrainPermit,
     verdict: *PreparedControlSemanticVerdict,
+    transition: *PreparedResyncAckTransition,
 ) ConsumeResyncAckResult;
 
 comptime {
@@ -2408,6 +2448,177 @@ const FrozenScreenDestinationPlan = struct {
     digest: external_owner_seal.Digest = [_]u8{0} ** 32,
 };
 
+const RecoverySnapshotDisposition = enum(u8) {
+    unused,
+    bind,
+    drop,
+    terminal,
+};
+
+const RecoverySnapshotTokenSource = enum(u8) {
+    pending_commit,
+    committed_output,
+    consumed_tombstone,
+};
+
+const RecoverySnapshotDispositionEntry = struct {
+    transfer_addr: usize = 0,
+    mutation_index: u8 = 0,
+    commit_output_index: u8 = 0,
+    token_source: RecoverySnapshotTokenSource = .pending_commit,
+    token: external_inbox_ledger.Token = .{ .slot = 0, .generation = 0 },
+    committed_semantic_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    origin: client_pump.RecoveryOrigin = .client,
+    recovery_epoch: u64 = 0,
+    is_snapshot: bool = false,
+    start_absolute: u64 = 0,
+    end_absolute: u64 = 0,
+    disposition: RecoverySnapshotDisposition = .unused,
+    cleanup_destination_addr: usize = 0,
+    cleanup_lifecycle: u8 = 0,
+    cleanup_destination_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+const RecoverySnapshotDispositionAggregate = struct {
+    saved_self_addr: usize = 0,
+    owner_aggregate_addr: usize = 0,
+    count: u8 = 0,
+    entries: [external_inbox_ledger.max_live_mutations]RecoverySnapshotDispositionEntry =
+        [_]RecoverySnapshotDispositionEntry{.{}} ** external_inbox_ledger.max_live_mutations,
+    root_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+const RecoveryCommitOutputLifecycle = enum(u8) {
+    empty,
+    committed,
+    consumed_tombstone,
+};
+
+const ImmutableRecoveryCommitOutput = struct {
+    saved_self_addr: usize = 0,
+    aggregate_addr: usize = 0,
+    ledger_addr: usize = 0,
+    storage_addr: usize = 0,
+    live_commit_addr: usize = 0,
+    live_commit_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    ledger_output: external_inbox_ledger.CommittedLiveOutput = .{},
+    token: external_inbox_ledger.Token = .{ .slot = 0, .generation = 0 },
+    semantic_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    recovery_intent: external_inbox_ledger.RecoveryIntent = .none,
+    origin: client_pump.RecoveryOrigin = .client,
+    recovery_epoch: u64 = 0,
+    is_snapshot: bool = false,
+    start_absolute: u64 = 0,
+    end_absolute: u64 = 0,
+    lifecycle: RecoveryCommitOutputLifecycle = .empty,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+const RecoverySnapshotCommitSource = union(enum) {
+    commit_pending: struct {
+        live_commit_addr: usize = 0,
+        live_commit_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    },
+    already_committed: struct {
+        /// Final-address ledger output owned by the side-intent/commit transaction. Keeping only
+        /// an authenticated reference avoids copying a self-addressed receipt and re-digesting it
+        /// into a new token authority.
+        output_addr: usize = 0,
+        output_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    },
+};
+
+const RecoverySnapshotCommitLifecycle = enum(u8) {
+    empty,
+    prepared,
+    consumed_tombstone,
+};
+
+const RecoverySnapshotBindingSource = enum(u8) {
+    later_turn_commit,
+    same_drain_side_intent,
+};
+
+const PreparedRecoverySnapshotCommit = struct {
+    saved_self_addr: usize = 0,
+    aggregate_addr: usize = 0,
+    storage_addr: usize = 0,
+    ledger_addr: usize = 0,
+    lease_addr: usize = 0,
+    scratch_addr: usize = 0,
+    lease_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    owner_incarnation: u64 = 0,
+    operation_generation: u64 = 0,
+    turn_generation: u64 = 0,
+    parser_seal: client_external_mode.ParserAuthoritySeal = .{},
+    authority_generation: AuthorityGeneration = .untracked,
+    authority_seal_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    authority_state: client_pump.AuthorityState = .valid,
+    binding_next_state: client_pump.AuthorityState = .valid,
+    prepared_live_commit_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    source: RecoverySnapshotCommitSource = .{ .commit_pending = .{} },
+    source_discriminator: RecoverySnapshotBindingSource = .later_turn_commit,
+    ack_transition_addr: usize = 0,
+    ack_transition_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    dispositions_addr: usize = 0,
+    dispositions_root_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    committed_output_addr: usize = 0,
+    committed_output_pristine_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    binding_destination_addr: usize = 0,
+    binding_destination_pristine_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    has_binding: bool = false,
+    binding_entry_index: u8 = 0,
+    ledger_output_index: u8 = 0,
+    lifecycle: RecoverySnapshotCommitLifecycle = .empty,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
+const RecoverySnapshotBindingLifecycle = enum(u8) {
+    empty,
+    committed,
+    consumed_tombstone,
+};
+
+const CommittedRecoverySnapshotBinding = struct {
+    saved_self_addr: usize = 0,
+    aggregate_addr: usize = 0,
+    scratch_addr: usize = 0,
+    storage_addr: usize = 0,
+    ledger_addr: usize = 0,
+    lease_addr: usize = 0,
+    lease_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    owner_incarnation: u64 = 0,
+    operation_generation: u64 = 0,
+    turn_generation: u64 = 0,
+    parser_generation: u64 = 0,
+    parser_seal: client_external_mode.ParserAuthoritySeal = .{},
+    authority_generation: AuthorityGeneration = .untracked,
+    authority_seal_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    awaiting_state: client_pump.AuthorityState = .valid,
+    awaiting_state_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    ledger_authority_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    token: external_inbox_ledger.Token = .{ .slot = 0, .generation = 0 },
+    semantic_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    recovery_intent: external_inbox_ledger.RecoveryIntent = .none,
+    origin: client_pump.RecoveryOrigin = .client,
+    recovery_epoch: u64 = 0,
+    is_snapshot: bool = false,
+    start_absolute: u64 = 0,
+    end_absolute: u64 = 0,
+    source_output_addr: usize = 0,
+    source_output_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    side_intent_addr: usize = 0,
+    side_intent_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    destination_pristine_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    source_discriminator: RecoverySnapshotBindingSource = .later_turn_commit,
+    source_provenance_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    ack_transition_addr: usize = 0,
+    ack_transition_digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+    lifecycle: RecoverySnapshotBindingLifecycle = .empty,
+    digest: external_owner_seal.Digest = [_]u8{0} ** 32,
+};
+
 const PreparedRxAggregate = struct {
     saved_self_addr: usize,
     handle_addr: usize,
@@ -2436,6 +2647,10 @@ const PreparedRxAggregate = struct {
     resize_destination: FrozenResizeDestinationPlan,
     screen_destination: FrozenScreenDestinationPlan,
     response_destination: FrozenResponseDestinationPlan,
+    recovery_dispositions: RecoverySnapshotDispositionAggregate,
+    recovery_snapshot_commit: PreparedRecoverySnapshotCommit,
+    recovery_commit_output: ImmutableRecoveryCommitOutput,
+    recovery_snapshot_binding: CommittedRecoverySnapshotBinding,
     destination_writes: [external_rx_intent.max_intents]FrozenDestinationWrite,
     destination_write_count: u8,
     lifecycle: RxAggregateLifecycle,
@@ -3095,6 +3310,9 @@ pub const ExternalRxTurnScratch = struct {
     drain_evidence: RxDrainEvidence = .{},
     whole_drain_permit: PreparedWholeDrainPermit = .{},
     control_semantic_verdict: PreparedControlSemanticVerdict = .{},
+    resync_ack_transition: PreparedResyncAckTransition = .{},
+    resync_ack_response_take: PreparedControlResponseTake = .{},
+    resync_ack_frozen_response: FrozenControlResponse = .{},
     control_semantic_terminal: PreparedControlSemanticTerminal = .{},
     control_semantic_terminal_binding: PreparedControlSemanticTerminalBinding = .{},
     control_terminal_response_take: PreparedControlResponseTake = .{},
@@ -3118,6 +3336,14 @@ pub const ExternalRxTurnScratch = struct {
                 out.control_semantic_verdict,
                 PreparedControlSemanticVerdict{},
             ) or !std.meta.eql(
+            out.resync_ack_transition,
+            PreparedResyncAckTransition{},
+        ) or !std.meta.eql(
+            out.resync_ack_response_take,
+            PreparedControlResponseTake{},
+        ) or !frozenControlResponsePristine(
+            &out.resync_ack_frozen_response,
+        ) or !std.meta.eql(
             out.control_semantic_terminal,
             PreparedControlSemanticTerminal{},
         ) or !std.meta.eql(
@@ -3166,6 +3392,9 @@ pub const ExternalRxTurnScratch = struct {
         out.prepared_admit_use_permit = .{};
         out.whole_drain_permit = .{};
         out.control_semantic_verdict = .{};
+        out.resync_ack_transition = .{};
+        out.resync_ack_response_take = .{};
+        out.resync_ack_frozen_response = .{};
         out.control_semantic_terminal = .{};
         out.control_semantic_terminal_binding = .{};
         out.control_terminal_response_take = .{};
@@ -4741,6 +4970,97 @@ fn preparedControlSemanticVerdictDigest(
     return writer.finish();
 }
 
+fn writeRecoveryContext(
+    writer: *external_owner_seal.Writer,
+    context: client_pump.RecoveryContext,
+) void {
+    writer.writeU64(context.epoch);
+    writer.writeU128(@bitCast(context.deadline_ns));
+}
+
+fn writeRecoveryAuthorityState(
+    writer: *external_owner_seal.Writer,
+    state: client_pump.AuthorityState,
+) void {
+    writer.writeU8(@intFromEnum(std.meta.activeTag(state)));
+    switch (state) {
+        .valid => {},
+        .host_recovery => |phase| {
+            writer.writeU8(@intFromEnum(std.meta.activeTag(phase)));
+            switch (phase) {
+                .ack_unadmitted, .ack_queued => |context| writeRecoveryContext(writer, context),
+                .awaiting_snapshot => |waiting| {
+                    writeRecoveryContext(writer, waiting.context);
+                    writer.writeU64(waiting.recovery_barrier_absolute);
+                },
+                .snapshot_in_flight, .applied_pending => |in_flight| {
+                    writeRecoveryContext(writer, in_flight.context);
+                    writer.writeU64(in_flight.recovery_barrier_absolute);
+                    writer.writeU64(in_flight.expected_token_generation);
+                },
+            }
+        },
+        .client_recovery => |phase| {
+            writer.writeU8(@intFromEnum(std.meta.activeTag(phase)));
+            switch (phase) {
+                .control_wait, .control_in_flight => |context| writeRecoveryContext(writer, context),
+                .awaiting_snapshot => |waiting| {
+                    writeRecoveryContext(writer, waiting.context);
+                    writer.writeU64(waiting.recovery_barrier_absolute);
+                },
+                .snapshot_in_flight, .applied_pending => |in_flight| {
+                    writeRecoveryContext(writer, in_flight.context);
+                    writer.writeU64(in_flight.recovery_barrier_absolute);
+                    writer.writeU64(in_flight.expected_token_generation);
+                },
+            }
+        },
+    }
+}
+
+fn preparedResyncAckTransitionDigest(
+    transition: *const PreparedResyncAckTransition,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARURAT1");
+    writer.writeUsize(transition.saved_self_addr);
+    writer.writeUsize(transition.storage_addr);
+    writer.writeUsize(transition.scratch_addr);
+    writer.writeUsize(transition.lease_addr);
+    writer.writeU64(transition.owner_incarnation);
+    writer.writeU64(transition.operation_generation);
+    writer.writeU64(transition.turn_generation);
+    writer.writeU64(transition.parser_generation);
+    writer.writeBytes(&transition.parser_seal_digest);
+    writer.writeU128(@bitCast(transition.sampled_now_ns));
+    writer.writeU128(@bitCast(transition.recovery_deadline_ns));
+    writeRecoveryAuthorityState(&writer, transition.authority_state);
+    writeAuthorityGeneration(&writer, transition.authority_generation);
+    writer.writeBytes(&transition.authority_seal_digest);
+    writer.writeUsize(transition.permit_addr);
+    writer.writeBytes(&transition.permit_digest);
+    writer.writeUsize(transition.verdict_addr);
+    writer.writeBytes(&transition.verdict_digest);
+    writer.writeBytes(&transition.completed_owner_digest);
+    writer.writeBytes(&transition.correlation_digest);
+    writer.writeU64(transition.tx_queue_generation);
+    writer.writeU64(transition.recovery_barrier_absolute);
+    writeRecoveryAuthorityState(&writer, transition.next_state);
+    writer.writeUsize(transition.response_take_addr);
+    writer.writeBytes(&transition.response_take_digest);
+    writer.writeUsize(transition.frozen_response_addr);
+    writer.writeBytes(&transition.frozen_response_pristine_digest);
+    writer.writeU8(@intFromEnum(transition.lifecycle));
+    return writer.finish();
+}
+
+fn recoveryAuthorityStateDigest(
+    state: client_pump.AuthorityState,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARURAS1");
+    writeRecoveryAuthorityState(&writer, state);
+    return writer.finish();
+}
+
 fn preparedControlSemanticTerminalDigest(
     terminal: *const PreparedControlSemanticTerminal,
 ) external_owner_seal.Digest {
@@ -5175,6 +5495,166 @@ fn resizeDestinationDigest(
     return writer.finish();
 }
 
+fn writeRecoveryIntentForPump(
+    writer: *external_owner_seal.Writer,
+    intent: external_inbox_ledger.RecoveryIntent,
+) void {
+    writer.writeU8(@intFromEnum(std.meta.activeTag(intent)));
+    switch (intent) {
+        .none => {},
+        .host, .client => |epoch| writer.writeU64(epoch),
+    }
+}
+
+fn recoverySnapshotDispositionEntryDigest(
+    entry: *const RecoverySnapshotDispositionEntry,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARURDE1");
+    writer.writeUsize(entry.transfer_addr);
+    writer.writeU8(entry.mutation_index);
+    writer.writeU8(entry.commit_output_index);
+    writer.writeU8(@intFromEnum(entry.token_source));
+    writer.writeU16(entry.token.slot);
+    writer.writeU64(entry.token.generation);
+    writer.writeBytes(&entry.committed_semantic_digest);
+    writer.writeU8(@intFromEnum(entry.origin));
+    writer.writeU64(entry.recovery_epoch);
+    writer.writeBool(entry.is_snapshot);
+    writer.writeU64(entry.start_absolute);
+    writer.writeU64(entry.end_absolute);
+    writer.writeU8(@intFromEnum(entry.disposition));
+    writer.writeUsize(entry.cleanup_destination_addr);
+    writer.writeU8(entry.cleanup_lifecycle);
+    writer.writeBytes(&entry.cleanup_destination_digest);
+    return writer.finish();
+}
+
+fn recoverySnapshotDispositionRootDigest(
+    aggregate: *const RecoverySnapshotDispositionAggregate,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARURDA1");
+    writer.writeUsize(aggregate.saved_self_addr);
+    writer.writeUsize(aggregate.owner_aggregate_addr);
+    writer.writeU8(aggregate.count);
+    for (aggregate.entries[0..aggregate.count]) |entry|
+        writer.writeBytes(&entry.digest);
+    return writer.finish();
+}
+
+fn immutableRecoveryCommitOutputDigest(
+    output: *const ImmutableRecoveryCommitOutput,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARURCO1");
+    writer.writeUsize(output.saved_self_addr);
+    writer.writeUsize(output.aggregate_addr);
+    writer.writeUsize(output.ledger_addr);
+    writer.writeUsize(output.storage_addr);
+    writer.writeUsize(output.live_commit_addr);
+    writer.writeBytes(&output.live_commit_digest);
+    writer.writeBytes(&output.ledger_output.digest);
+    writer.writeU16(output.token.slot);
+    writer.writeU64(output.token.generation);
+    writer.writeBytes(&output.semantic_digest);
+    writeRecoveryIntentForPump(&writer, output.recovery_intent);
+    writer.writeU8(@intFromEnum(output.origin));
+    writer.writeU64(output.recovery_epoch);
+    writer.writeBool(output.is_snapshot);
+    writer.writeU64(output.start_absolute);
+    writer.writeU64(output.end_absolute);
+    writer.writeU8(@intFromEnum(output.lifecycle));
+    return writer.finish();
+}
+
+fn preparedRecoverySnapshotCommitDigest(
+    prepared: *const PreparedRecoverySnapshotCommit,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARURPC1");
+    writer.writeUsize(prepared.saved_self_addr);
+    writer.writeUsize(prepared.aggregate_addr);
+    writer.writeUsize(prepared.storage_addr);
+    writer.writeUsize(prepared.ledger_addr);
+    writer.writeUsize(prepared.lease_addr);
+    writer.writeUsize(prepared.scratch_addr);
+    writer.writeBytes(&prepared.lease_digest);
+    writer.writeU64(prepared.owner_incarnation);
+    writer.writeU64(prepared.operation_generation);
+    writer.writeU64(prepared.turn_generation);
+    writer.writeBytes(&prepared.parser_seal.digest);
+    writeAuthorityGeneration(&writer, prepared.authority_generation);
+    writer.writeBytes(&prepared.authority_seal_digest);
+    writeRecoveryAuthorityState(&writer, prepared.authority_state);
+    writeRecoveryAuthorityState(&writer, prepared.binding_next_state);
+    writer.writeBytes(&prepared.prepared_live_commit_digest);
+    writer.writeU8(@intFromEnum(std.meta.activeTag(prepared.source)));
+    switch (prepared.source) {
+        .commit_pending => |source| {
+            writer.writeUsize(source.live_commit_addr);
+            writer.writeBytes(&source.live_commit_digest);
+        },
+        .already_committed => |source| {
+            writer.writeUsize(source.output_addr);
+            writer.writeBytes(&source.output_digest);
+        },
+    }
+    writer.writeU8(@intFromEnum(prepared.source_discriminator));
+    writer.writeUsize(prepared.ack_transition_addr);
+    writer.writeBytes(&prepared.ack_transition_digest);
+    writer.writeUsize(prepared.dispositions_addr);
+    writer.writeBytes(&prepared.dispositions_root_digest);
+    writer.writeUsize(prepared.committed_output_addr);
+    writer.writeBytes(&prepared.committed_output_pristine_digest);
+    writer.writeUsize(prepared.binding_destination_addr);
+    writer.writeBytes(&prepared.binding_destination_pristine_digest);
+    writer.writeBool(prepared.has_binding);
+    writer.writeU8(prepared.binding_entry_index);
+    writer.writeU8(prepared.ledger_output_index);
+    writer.writeU8(@intFromEnum(prepared.lifecycle));
+    return writer.finish();
+}
+
+fn committedRecoverySnapshotBindingDigest(
+    binding: *const CommittedRecoverySnapshotBinding,
+) external_owner_seal.Digest {
+    var writer = external_owner_seal.Writer.init("MARURCB1");
+    writer.writeUsize(binding.saved_self_addr);
+    writer.writeUsize(binding.aggregate_addr);
+    writer.writeUsize(binding.scratch_addr);
+    writer.writeUsize(binding.storage_addr);
+    writer.writeUsize(binding.ledger_addr);
+    writer.writeUsize(binding.lease_addr);
+    writer.writeBytes(&binding.lease_digest);
+    writer.writeU64(binding.owner_incarnation);
+    writer.writeU64(binding.operation_generation);
+    writer.writeU64(binding.turn_generation);
+    writer.writeU64(binding.parser_generation);
+    writer.writeBytes(&binding.parser_seal.digest);
+    writeAuthorityGeneration(&writer, binding.authority_generation);
+    writer.writeBytes(&binding.authority_seal_digest);
+    writeRecoveryAuthorityState(&writer, binding.awaiting_state);
+    writer.writeBytes(&binding.awaiting_state_digest);
+    writer.writeBytes(&binding.ledger_authority_digest);
+    writer.writeU16(binding.token.slot);
+    writer.writeU64(binding.token.generation);
+    writer.writeBytes(&binding.semantic_digest);
+    writeRecoveryIntentForPump(&writer, binding.recovery_intent);
+    writer.writeU8(@intFromEnum(binding.origin));
+    writer.writeU64(binding.recovery_epoch);
+    writer.writeBool(binding.is_snapshot);
+    writer.writeU64(binding.start_absolute);
+    writer.writeU64(binding.end_absolute);
+    writer.writeUsize(binding.source_output_addr);
+    writer.writeBytes(&binding.source_output_digest);
+    writer.writeUsize(binding.side_intent_addr);
+    writer.writeBytes(&binding.side_intent_digest);
+    writer.writeBytes(&binding.destination_pristine_digest);
+    writer.writeU8(@intFromEnum(binding.source_discriminator));
+    writer.writeBytes(&binding.source_provenance_digest);
+    writer.writeUsize(binding.ack_transition_addr);
+    writer.writeBytes(&binding.ack_transition_digest);
+    writer.writeU8(@intFromEnum(binding.lifecycle));
+    return writer.finish();
+}
+
 fn preparedRxAggregateDigest(
     aggregate: *const PreparedRxAggregate,
 ) external_owner_seal.Digest {
@@ -5195,6 +5675,15 @@ fn preparedRxAggregateDigest(
         .unused => writer.writeU8(0),
         .final_live => |root| {
             writer.writeU8(1);
+            writer.writeU16(root.token.slot);
+            writer.writeU64(root.token.generation);
+            writer.writeU8(switch (root.phase) {
+                .partial => 0,
+                .completed => 1,
+            });
+        },
+        .cleanup_final => |root| {
+            writer.writeU8(3);
             writer.writeU16(root.token.slot);
             writer.writeU64(root.token.generation);
             writer.writeU8(switch (root.phase) {
@@ -5230,6 +5719,10 @@ fn preparedRxAggregateDigest(
     writer.writeBytes(&aggregate.resize_destination.digest);
     writer.writeBytes(&aggregate.screen_destination.digest);
     writer.writeBytes(&aggregate.response_destination.digest);
+    writer.writeBytes(&aggregate.recovery_dispositions.root_digest);
+    writer.writeBytes(&aggregate.recovery_snapshot_commit.digest);
+    writer.writeBytes(&aggregate.recovery_commit_output.digest);
+    writer.writeBytes(&aggregate.recovery_snapshot_binding.digest);
     writer.writeU8(aggregate.destination_write_count);
     for (aggregate.destination_writes) |write|
         writer.writeBytes(&write.digest);
@@ -5382,6 +5875,59 @@ fn screenTransferSemantic(
             .chunk_count = 1,
             .provenance = provenance,
         } };
+}
+
+fn bindRecoveryIntentForCurrentState(
+    storage: *const ExternalPumpStorage,
+    semantic: external_inbox_ledger.PayloadSemantic,
+) external_inbox_ledger.PayloadSemantic {
+    var next = semantic;
+    const active = switch (storage.semantic_state) {
+        .active => |value| value,
+        else => return next,
+    };
+    const intent_and_barrier: struct {
+        intent: external_inbox_ledger.RecoveryIntent,
+        barrier: u64,
+    } = switch (active) {
+        .host_recovery => |phase| switch (phase) {
+            .awaiting_snapshot => |waiting| .{
+                .intent = .{ .host = waiting.context.epoch },
+                .barrier = waiting.recovery_barrier_absolute,
+            },
+            else => return next,
+        },
+        .client_recovery => |phase| switch (phase) {
+            .awaiting_snapshot => |waiting| .{
+                .intent = .{ .client = waiting.context.epoch },
+                .barrier = waiting.recovery_barrier_absolute,
+            },
+            else => return next,
+        },
+        .valid => return next,
+    };
+    switch (next) {
+        .partial => |*value| switch (value.provenance) {
+            .external => |range| if (value.is_snapshot and
+                value.stream_id == storage.evidence_snapshot.stream_id and
+                range.start_absolute >= intent_and_barrier.barrier)
+            {
+                value.recovery_intent = intent_and_barrier.intent;
+            },
+            .untracked => {},
+        },
+        .completed => |*value| switch (value.provenance) {
+            .external => |range| if (value.is_snapshot and
+                value.stream_id == storage.evidence_snapshot.stream_id and
+                range.start_absolute >= intent_and_barrier.barrier)
+            {
+                value.recovery_intent = intent_and_barrier.intent;
+            },
+            .untracked => {},
+        },
+        .frame, .lease => {},
+    }
+    return next;
 }
 
 fn continuedScreenTransferSemantic(
@@ -5541,14 +6087,20 @@ fn validateRxAggregateScreenGraph(
                         switch (aggregate.live_batch.mutations[
                             transfer.mutation_index
                         ]) {
-                            .merge => continuedScreenTransferSemantic(
+                            .merge => bindRecoveryIntentForCurrentState(
                                 storage,
-                                aggregate,
-                                transfer,
-                                transfer.mutation_index,
-                            ) orelse return false,
-                            else => screenTransferSemantic(transfer) orelse
-                                return false,
+                                continuedScreenTransferSemantic(
+                                    storage,
+                                    aggregate,
+                                    transfer,
+                                    transfer.mutation_index,
+                                ) orelse return false,
+                            ),
+                            else => bindRecoveryIntentForCurrentState(
+                                storage,
+                                screenTransferSemantic(transfer) orelse
+                                    return false,
+                            ),
                         },
                         transfer.payload_digest,
                     ))
@@ -5569,6 +6121,40 @@ fn validateRxAggregateScreenGraph(
             },
             .committed, .aborted, .poisoned, .empty => return false,
         }
+    }
+    return true;
+}
+
+fn validateCommittedRecoveryScreenGraph(
+    aggregate: *const PreparedRxAggregate,
+    intent_handle: *external_rx_intent.ExternalRxIntentHandle,
+) bool {
+    if (aggregate.live_batch.lifecycle != .committed or
+        aggregate.live_commit.lifecycle != .consumed)
+        return false;
+    for (&aggregate.screen_transfers, 0..) |*transfer, index| {
+        if (transfer.lifecycle == .empty) {
+            if (!screenTransferPristine(transfer)) return false;
+            continue;
+        }
+        if (transfer.lifecycle != .mutation_bound or
+            transfer.saved_self_addr != @intFromPtr(transfer) or
+            transfer.aggregate_addr != @intFromPtr(aggregate) or
+            transfer.intent_index != index or
+            transfer.batch_addr != @intFromPtr(&aggregate.live_batch) or
+            transfer.mutation_index >= aggregate.live_commit.mutation_count or
+            !std.mem.eql(u8, &transfer.digest, &screenTransferDigest(transfer)) or
+            !external_rx_intent.validateMovedIntentPayloadTombstone(
+                &transfer.neutral,
+                @intFromPtr(aggregate),
+            ) or transfer.ledger_payload.allocation_ptr != null or
+            transfer.ledger_payload.logical_len != 0 or
+            !external_rx_intent.validateScreenMutationScalar(
+                intent_handle,
+                @intCast(index),
+                @intFromPtr(aggregate),
+                &aggregate.screen_proofs[index],
+            )) return false;
     }
     return true;
 }
@@ -5602,7 +6188,7 @@ fn prepareScreenDestinationPlan(
                     .completed => completed_count += 1,
                 }
             },
-            .superseded_tombstone => {},
+            .cleanup_final, .superseded_tombstone => {},
             .unused => return false,
         }
     }
@@ -7001,7 +7587,7 @@ fn expectedDestinationWrite(
             const transfer = &aggregate.screen_transfers[intent_index];
             write.mutation_index = transfer.mutation_index;
             switch (aggregate.dispositions[transfer.mutation_index]) {
-                .superseded_tombstone => {
+                .cleanup_final, .superseded_tombstone => {
                     write.kind = .screen_cleanup;
                     write.target_addr = @intFromPtr(transfer);
                     write.expected_lifecycle =
@@ -7029,7 +7615,7 @@ fn expectedDestinationWrite(
                             {
                                 completed_ordinal += 1;
                             },
-                            .superseded_tombstone => {},
+                            .cleanup_final, .superseded_tombstone => {},
                             .unused => return null,
                         };
                         const tail = (storage.live_screen.head +
@@ -7247,6 +7833,7 @@ fn validateScreenDestinationPlan(
     aggregate: *const PreparedRxAggregate,
 ) bool {
     const plan = &aggregate.screen_destination;
+    const expected_live_commit_digest = if (aggregate.recovery_snapshot_commit.lifecycle == .prepared) aggregate.recovery_snapshot_commit.prepared_live_commit_digest else aggregate.live_commit.digest;
     const expected_partial_valid = switch (storage.live_partial) {
         .none => plan.expected_partial_empty and
             plan.expected_partial_token.generation == 0 and
@@ -7276,7 +7863,7 @@ fn validateScreenDestinationPlan(
         !std.mem.eql(
             u8,
             &plan.live_commit_digest,
-            &aggregate.live_commit.digest,
+            &expected_live_commit_digest,
         ) or !std.mem.eql(
         u8,
         &plan.digest,
@@ -8104,6 +8691,7 @@ pub const ExternalPumpStorage = struct {
     owner_event_projection_generation: u64 = 0,
     operation_generation: u64 = 0,
     operation_reentry_latched: bool = false,
+    callback_quarantine_pending: bool = false,
     owner_teardown_generation: u64 = 0,
     intent_scratch_generation: u64 = 0,
     intent_scratch_reservation: IntentScratchReservation = .{},
@@ -8715,6 +9303,200 @@ pub const ExternalPumpStorage = struct {
                 completed.request_id,
                 completed.control_wire_len,
             ) == .missing and self.semanticAuthorityMatchesCompleted(completed);
+    }
+
+    fn prepareResyncAckTransitionUnderHeldLease(
+        self: *ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        scratch: *ExternalRxTurnScratch,
+    ) bool {
+        const permit = &scratch.whole_drain_permit;
+        const verdict = &scratch.control_semantic_verdict;
+        const transition = &scratch.resync_ack_transition;
+        const take = &scratch.resync_ack_response_take;
+        const frozen = &scratch.resync_ack_frozen_response;
+        if (!self.preparedControlSemanticPairCurrent(lease, scratch) or
+            !std.meta.eql(transition.*, PreparedResyncAckTransition{}) or
+            !std.meta.eql(take.*, PreparedControlResponseTake{}) or
+            !frozenControlResponsePristine(frozen) or
+            verdict.control_kind != .resync or verdict.value != .resync_ack or
+            permit.parser_absolute_end == 0 or
+            self.control_correlation.generation == std.math.maxInt(u64))
+            return false;
+        const active = switch (self.semantic_state) {
+            .active => |value| value,
+            else => return false,
+        };
+        const deadline = client_pump.recoveryDeadline(active) orelse return false;
+        const plan = client_pump.planRecoveryTransition(.{
+            .state = active,
+            .trigger = .resync_ack,
+            .control = .response_wait,
+            .now_ns = permit.sampled_now_ns,
+            .recovery_barrier_absolute = permit.parser_absolute_end,
+        });
+        if (plan.disposition != .acknowledged) return false;
+        const completed = switch (self.completed_control) {
+            .completed => |*value| value,
+            .none, .terminal => return false,
+        };
+        const client = if (self.owned_client) |*owned| owned else return false;
+        const external = switch (client.io_mode) {
+            .external => |*state| state,
+            .blocking => return false,
+        };
+        const authority = switch (self.owner_authority) {
+            .current => |value| value,
+            .empty => return false,
+        };
+        if (!self.prepareControlResponseTakeUnderHeldLease(lease, take))
+            return false;
+        transition.* = .{
+            .saved_self_addr = @intFromPtr(transition),
+            .storage_addr = @intFromPtr(self),
+            .scratch_addr = @intFromPtr(scratch),
+            .lease_addr = @intFromPtr(lease),
+            .owner_incarnation = self.owner_incarnation,
+            .operation_generation = self.operation_generation,
+            .turn_generation = scratch.turn_generation,
+            .parser_generation = external.rx_provenance.parser_seal.generation,
+            .parser_seal = external.rx_provenance.parser_seal,
+            .parser_seal_digest = external.rx_provenance.parser_seal.digest,
+            .sampled_now_ns = permit.sampled_now_ns,
+            .recovery_deadline_ns = deadline,
+            .authority_state = active,
+            .authority_generation = authority.generation,
+            .authority_seal_digest = self.owner_authority_seal.digest,
+            .permit_addr = @intFromPtr(permit),
+            .permit_digest = permit.digest,
+            .verdict_addr = @intFromPtr(verdict),
+            .verdict_digest = verdict.digest,
+            .completed_owner_digest = completed.owner_digest,
+            .correlation_digest = self.control_correlation.digest,
+            .tx_queue_generation = external.tx_queue_generation,
+            .recovery_barrier_absolute = permit.parser_absolute_end,
+            .next_state = plan.next,
+            .response_take_addr = @intFromPtr(take),
+            .response_take_digest = take.digest,
+            .frozen_response_addr = @intFromPtr(frozen),
+            .frozen_response_pristine_digest = frozenControlResponsePristineProjectionDigest(frozen),
+            .lifecycle = .prepared,
+        };
+        transition.digest = preparedResyncAckTransitionDigest(transition);
+        return true;
+    }
+
+    fn preparedResyncAckTransitionCurrent(
+        self: *ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        scratch: *ExternalRxTurnScratch,
+        permit: *const PreparedWholeDrainPermit,
+        verdict: *const PreparedControlSemanticVerdict,
+        transition: *const PreparedResyncAckTransition,
+    ) bool {
+        if (!self.validateWholeTurnLease(lease) or
+            transition.saved_self_addr != @intFromPtr(transition) or
+            transition.storage_addr != @intFromPtr(self) or
+            transition.lease_addr != @intFromPtr(lease) or
+            transition.owner_incarnation != self.owner_incarnation or
+            transition.operation_generation != self.operation_generation or
+            transition.permit_addr != @intFromPtr(permit) or
+            transition.verdict_addr != @intFromPtr(verdict) or
+            transition.lifecycle != .prepared or
+            !std.mem.eql(u8, &transition.digest, &preparedResyncAckTransitionDigest(transition)))
+            return false;
+        const take = &scratch.resync_ack_response_take;
+        const frozen = &scratch.resync_ack_frozen_response;
+        if (transition.scratch_addr != @intFromPtr(scratch) or
+            scratch.saved_self_addr != @intFromPtr(scratch) or
+            scratch.lifecycle != .busy or
+            scratch.turn_generation != transition.turn_generation or
+            @intFromPtr(&scratch.whole_drain_permit) != @intFromPtr(permit) or
+            @intFromPtr(&scratch.control_semantic_verdict) != @intFromPtr(verdict) or
+            @intFromPtr(&scratch.resync_ack_transition) != @intFromPtr(transition) or
+            !self.preparedControlSemanticPairCurrent(lease, scratch) or
+            !std.mem.eql(u8, &transition.permit_digest, &permit.digest) or
+            !std.mem.eql(u8, &transition.verdict_digest, &verdict.digest) or
+            verdict.control_kind != .resync or verdict.value != .resync_ack)
+            return false;
+        const completed = switch (self.completed_control) {
+            .completed => |*value| value,
+            .none, .terminal => return false,
+        };
+        const client = if (self.owned_client) |*owned| owned else return false;
+        const external = switch (client.io_mode) {
+            .external => |*state| state,
+            .blocking => return false,
+        };
+        const authority = switch (self.owner_authority) {
+            .current => |value| value,
+            .empty => return false,
+        };
+        const active = switch (self.semantic_state) {
+            .active => |value| value,
+            else => return false,
+        };
+        const plan = client_pump.planRecoveryTransition(.{
+            .state = active,
+            .trigger = .resync_ack,
+            .control = .response_wait,
+            .now_ns = transition.sampled_now_ns,
+            .recovery_barrier_absolute = transition.recovery_barrier_absolute,
+        });
+        return transition.parser_generation == external.rx_provenance.parser_seal.generation and
+            std.meta.eql(transition.parser_seal, external.rx_provenance.parser_seal) and
+            std.mem.eql(u8, &transition.parser_seal_digest, &external.rx_provenance.parser_seal.digest) and
+            transition.sampled_now_ns == permit.sampled_now_ns and
+            transition.recovery_deadline_ns == (client_pump.recoveryDeadline(active) orelse
+                return false) and
+            std.meta.eql(transition.authority_state, active) and
+            std.meta.eql(transition.authority_generation, authority.generation) and
+            std.mem.eql(u8, &transition.authority_seal_digest, &self.owner_authority_seal.digest) and
+            std.mem.eql(u8, &transition.completed_owner_digest, &completed.owner_digest) and
+            std.mem.eql(u8, &transition.correlation_digest, &self.control_correlation.digest) and
+            transition.tx_queue_generation == external.tx_queue_generation and
+            transition.recovery_barrier_absolute == permit.parser_absolute_end and
+            plan.disposition == .acknowledged and std.meta.eql(transition.next_state, plan.next) and
+            transition.response_take_addr == @intFromPtr(take) and
+            std.mem.eql(u8, &transition.response_take_digest, &take.digest) and
+            transition.frozen_response_addr == @intFromPtr(frozen) and
+            std.mem.eql(
+                u8,
+                &transition.frozen_response_pristine_digest,
+                &frozenControlResponsePristineProjectionDigest(frozen),
+            ) and self.validateControlResponseTakeUnderHeldLease(lease, take, frozen);
+    }
+
+    fn consumeResyncAckUnderHeldLease(
+        self: *ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        scratch: *ExternalRxTurnScratch,
+        permit: *PreparedWholeDrainPermit,
+        verdict: *PreparedControlSemanticVerdict,
+        transition: *PreparedResyncAckTransition,
+    ) ConsumeResyncAckResult {
+        if (!self.preparedResyncAckTransitionCurrent(
+            lease,
+            scratch,
+            permit,
+            verdict,
+            transition,
+        )) return .invalid;
+        const take = &scratch.resync_ack_response_take;
+        const frozen = &scratch.resync_ack_frozen_response;
+        self.publishControlResponseTakeUnchecked(take, frozen);
+        self.semantic_state = .{ .active = transition.next_state };
+        self.control_correlation.generation += 1;
+        self.control_correlation.state = .idle;
+        self.control_correlation.digest = controlCorrelationDigest(&self.control_correlation);
+        permit.lifecycle = .consumed_tombstone;
+        permit.digest = preparedWholeDrainPermitDigest(permit);
+        verdict.lifecycle = .consumed_tombstone;
+        verdict.permit_digest = permit.digest;
+        verdict.digest = preparedControlSemanticVerdictDigest(verdict);
+        transition.lifecycle = .consumed_tombstone;
+        transition.digest = preparedResyncAckTransitionDigest(transition);
+        return .consumed;
     }
 
     fn preparedControlSemanticTerminalCurrent(
@@ -9640,6 +10422,10 @@ pub const ExternalPumpStorage = struct {
             .resize_destination = .{},
             .screen_destination = .{},
             .response_destination = .{},
+            .recovery_dispositions = .{},
+            .recovery_snapshot_commit = .{},
+            .recovery_commit_output = .{},
+            .recovery_snapshot_binding = .{},
             .destination_writes = [_]FrozenDestinationWrite{.{}} **
                 external_rx_intent.max_intents,
             .destination_write_count = 0,
@@ -9815,8 +10601,10 @@ pub const ExternalPumpStorage = struct {
             aggregate.digest = preparedRxAggregateDigest(aggregate);
         }
         const mutation_index = aggregate.live_batch.mutation_count;
-        const semantic = screenTransferSemantic(transfer) orelse
-            return .rejected;
+        const semantic = bindRecoveryIntentForCurrentState(
+            self,
+            screenTransferSemantic(transfer) orelse return .rejected,
+        );
         var merge_destination: ?external_inbox_ledger.LiveTokenRef = null;
         if (mutation_index == 0) {
             merge_destination = switch (self.live_partial) {
@@ -9838,12 +10626,15 @@ pub const ExternalPumpStorage = struct {
             }
         }
         if (merge_destination) |destination| {
-            const merged_semantic = continuedScreenTransferSemantic(
+            const merged_semantic = bindRecoveryIntentForCurrentState(
                 self,
-                aggregate,
-                transfer,
-                mutation_index,
-            ) orelse return .rejected;
+                continuedScreenTransferSemantic(
+                    self,
+                    aggregate,
+                    transfer,
+                    mutation_index,
+                ) orelse return .rejected,
+            );
             var source = external_inbox_ledger.PreparedLiveMergeSource{
                 .owned = transfer.ledger_payload,
             };
@@ -9960,7 +10751,12 @@ pub const ExternalPumpStorage = struct {
                 @intFromPtr(aggregate),
                 @intFromPtr(self),
                 aggregate.turn_generation,
-            ) or !prepareScreenDestinationPlan(self, aggregate))
+            )) return .invalid_state;
+            if (!self.prepareRecoverySnapshotCommitUnderHeldLease(
+                lease,
+                aggregate,
+            )) return .invalid_state;
+            if (!prepareScreenDestinationPlan(self, aggregate))
                 return .invalid_state;
         }
         if (!external_rx_intent.validatePreparedIntentCommit(
@@ -10015,10 +10811,59 @@ pub const ExternalPumpStorage = struct {
             aggregate.digest = preparedRxAggregateDigest(aggregate);
             return .rejected;
         }
+        if (proof_count != 0 and
+            !bindRecoveryCleanupDestinationDigests(aggregate))
+        {
+            aggregate.digest = preparedRxAggregateDigest(aggregate);
+            return .invalid_state;
+        }
+        if (proof_count != 0 and
+            !self.preparedRecoverySnapshotCommitCurrent(lease, aggregate))
+        {
+            aggregate.digest = preparedRxAggregateDigest(aggregate);
+            return .invalid_state;
+        }
         aggregate.digest = preparedRxAggregateDigest(aggregate);
         aggregate.lifecycle = .finalized;
         aggregate.digest = preparedRxAggregateDigest(aggregate);
         return .finalized;
+    }
+
+    /// Destination writes are prepared after the recovery candidate table because their shape
+    /// also depends on metadata/response reductions. Bind the final write seal into every
+    /// candidate before the aggregate becomes commit-ready; this prevents a valid write from a
+    /// sibling ordinal being spliced under an otherwise coherent disposition root.
+    fn bindRecoveryCleanupDestinationDigests(
+        aggregate: *PreparedRxAggregate,
+    ) bool {
+        const prepared = &aggregate.recovery_snapshot_commit;
+        if (prepared.lifecycle == .empty)
+            return aggregate.recovery_dispositions.count == 0;
+        for (aggregate.recovery_dispositions.entries[0..aggregate.recovery_dispositions.count]) |
+            *entry,
+        | {
+            var found = false;
+            for (aggregate.destination_writes[0..aggregate.destination_write_count]) |*write| {
+                if (@intFromPtr(write) == entry.cleanup_destination_addr) {
+                    if (found or write.mutation_index != entry.mutation_index or
+                        !std.mem.eql(u8, &write.digest, &destinationWriteDigest(write)))
+                        return false;
+                    entry.cleanup_destination_digest = write.digest;
+                    entry.digest = recoverySnapshotDispositionEntryDigest(entry);
+                    found = true;
+                }
+            }
+            if (!found) return false;
+        }
+        aggregate.recovery_dispositions.root_digest =
+            recoverySnapshotDispositionRootDigest(
+                &aggregate.recovery_dispositions,
+            );
+        prepared.dispositions_root_digest =
+            aggregate.recovery_dispositions.root_digest;
+        prepared.digest = preparedRecoverySnapshotCommitDigest(prepared);
+        aggregate.digest = preparedRxAggregateDigest(aggregate);
+        return true;
     }
 
     fn commitRxAggregate(
@@ -10040,6 +10885,679 @@ pub const ExternalPumpStorage = struct {
         );
     }
 
+    fn prepareRecoverySnapshotCommitUnderHeldLease(
+        self: *ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        aggregate: *PreparedRxAggregate,
+    ) bool {
+        if (!std.meta.eql(
+            aggregate.recovery_dispositions,
+            RecoverySnapshotDispositionAggregate{},
+        ) or !std.meta.eql(
+            aggregate.recovery_snapshot_commit,
+            PreparedRecoverySnapshotCommit{},
+        ) or !std.meta.eql(
+            aggregate.recovery_commit_output,
+            ImmutableRecoveryCommitOutput{},
+        ) or !std.meta.eql(
+            aggregate.recovery_snapshot_binding,
+            CommittedRecoverySnapshotBinding{},
+        )) return false;
+        const active = switch (self.semantic_state) {
+            .active => |value| value,
+            else => return true,
+        };
+        switch (active) {
+            .host_recovery => |phase| switch (phase) {
+                .awaiting_snapshot => {},
+                else => return true,
+            },
+            .client_recovery => |phase| switch (phase) {
+                .awaiting_snapshot => {},
+                else => return true,
+            },
+            .valid => return true,
+        }
+        const authority = switch (self.owner_authority) {
+            .current => |value| value,
+            .empty => return false,
+        };
+        var count: u8 = 0;
+        var bound_selected = false;
+        var binding_entry_index: u8 = 0;
+        var ledger_output_index: u8 = 0;
+        var selected_ledger_output_index: u8 = 0;
+        var binding_next_state: client_pump.AuthorityState = .valid;
+        for (aggregate.dispositions, 0..) |disposition, mutation_index| {
+            const root = switch (disposition) {
+                .final_live, .cleanup_final => |value| value,
+                .unused, .superseded_tombstone => continue,
+            };
+            const current_output_index = ledger_output_index;
+            ledger_output_index += 1;
+            if (root.phase != .completed) continue;
+            var semantic: ?external_inbox_ledger.PayloadSemantic = null;
+            for (aggregate.live_commit.simulation.nodes) |node| {
+                if (node.live and std.meta.eql(node.token, root.token)) {
+                    semantic = node.semantic;
+                    break;
+                }
+            }
+            const completed = switch (semantic orelse return false) {
+                .completed => |value| value,
+                else => continue,
+            };
+            if (count == external_inbox_ledger.max_live_mutations)
+                return false;
+            const range = switch (completed.provenance) {
+                .external => |value| value,
+                .untracked => return false,
+            };
+            const end_absolute = std.math.add(
+                u64,
+                range.start_absolute,
+                range.span,
+            ) catch return false;
+            const origin: client_pump.RecoveryOrigin = switch (completed.recovery_intent) {
+                .host => .host,
+                .client, .none => .client,
+            };
+            const epoch: u64 = switch (completed.recovery_intent) {
+                .host, .client => |value| value,
+                .none => 0,
+            };
+            const entry = &aggregate.recovery_dispositions.entries[count];
+            var transfer_addr: usize = 0;
+            var transfer_intent_index: u8 = 0;
+            for (&aggregate.screen_transfers) |*transfer| {
+                if (transfer.lifecycle == .mutation_bound and
+                    transfer.mutation_index == mutation_index)
+                {
+                    transfer_addr = @intFromPtr(transfer);
+                    transfer_intent_index = transfer.intent_index;
+                    break;
+                }
+            }
+            if (transfer_addr == 0) return false;
+            const cleanup_destination_addr = @intFromPtr(
+                &aggregate.destination_writes[transfer_intent_index],
+            );
+            const candidate_plan = client_pump.planRecoverySnapshotBinding(
+                active,
+                .{
+                    .origin = origin,
+                    .recovery_epoch = epoch,
+                    .is_snapshot = completed.is_snapshot,
+                    .start_absolute = range.start_absolute,
+                    .end_absolute = end_absolute,
+                    .committed_token_generation = root.token.generation,
+                },
+            );
+            const will_bind = !bound_selected and
+                candidate_plan.disposition == .bound;
+            const cleanup_lifecycle: u8 = if (will_bind)
+                @intFromEnum(self.live_screen.lifecycle)
+            else
+                @intFromEnum(
+                    aggregate.screen_transfers[transfer_intent_index].lifecycle,
+                );
+            entry.* = .{
+                .transfer_addr = transfer_addr,
+                .mutation_index = @intCast(mutation_index),
+                .commit_output_index = current_output_index,
+                .token_source = .pending_commit,
+                .token = root.token,
+                .committed_semantic_digest = external_inbox_ledger.payloadSemanticAuthorityDigest(
+                    semantic.?,
+                ),
+                .origin = origin,
+                .recovery_epoch = epoch,
+                .is_snapshot = completed.is_snapshot,
+                .start_absolute = range.start_absolute,
+                .end_absolute = end_absolute,
+                .disposition = if (will_bind)
+                    .bind
+                else
+                    .drop,
+                .cleanup_destination_addr = cleanup_destination_addr,
+                .cleanup_lifecycle = cleanup_lifecycle,
+                .cleanup_destination_digest = [_]u8{0} ** 32,
+            };
+            entry.digest = recoverySnapshotDispositionEntryDigest(entry);
+            if (entry.disposition == .bind) {
+                bound_selected = true;
+                binding_next_state = candidate_plan.next;
+                binding_entry_index = count;
+                selected_ledger_output_index = current_output_index;
+            }
+            count += 1;
+        }
+        if (count == 0) return true;
+        var cleanup_selection = [_]bool{false} ** external_inbox_ledger.max_live_mutations;
+        for (aggregate.recovery_dispositions.entries[0..count]) |entry| {
+            if (entry.disposition == .drop) {
+                cleanup_selection[entry.mutation_index] = true;
+            }
+        }
+        self.inbox_ledger.markPreparedFinalRootsForCleanup(
+            &aggregate.live_batch,
+            &aggregate.retirement,
+            &aggregate.dispositions,
+            &aggregate.live_commit,
+            &cleanup_selection,
+            @intFromPtr(aggregate),
+            @intFromPtr(self),
+            aggregate.turn_generation,
+        ) catch return false;
+        aggregate.digest = preparedRxAggregateDigest(aggregate);
+        aggregate.recovery_dispositions.saved_self_addr =
+            @intFromPtr(&aggregate.recovery_dispositions);
+        aggregate.recovery_dispositions.owner_aggregate_addr =
+            @intFromPtr(aggregate);
+        aggregate.recovery_dispositions.count = count;
+        aggregate.recovery_dispositions.root_digest =
+            recoverySnapshotDispositionRootDigest(
+                &aggregate.recovery_dispositions,
+            );
+        aggregate.recovery_snapshot_commit = .{
+            .saved_self_addr = @intFromPtr(&aggregate.recovery_snapshot_commit),
+            .aggregate_addr = @intFromPtr(aggregate),
+            .storage_addr = @intFromPtr(self),
+            .ledger_addr = @intFromPtr(&self.inbox_ledger),
+            .lease_addr = @intFromPtr(lease),
+            .scratch_addr = lease.scratch_addr,
+            .lease_digest = lease.digest,
+            .owner_incarnation = self.owner_incarnation,
+            .operation_generation = self.operation_generation,
+            .turn_generation = aggregate.turn_generation,
+            .parser_seal = lease.rx_provenance.parser_seal,
+            .authority_generation = authority.generation,
+            .authority_seal_digest = self.owner_authority_seal.digest,
+            .authority_state = active,
+            .binding_next_state = binding_next_state,
+            .prepared_live_commit_digest = aggregate.live_commit.digest,
+            .source = .{ .commit_pending = .{
+                .live_commit_addr = @intFromPtr(&aggregate.live_commit),
+                .live_commit_digest = aggregate.live_commit.digest,
+            } },
+            .dispositions_addr = @intFromPtr(&aggregate.recovery_dispositions),
+            .dispositions_root_digest = aggregate.recovery_dispositions.root_digest,
+            .committed_output_addr = @intFromPtr(&aggregate.recovery_commit_output),
+            .committed_output_pristine_digest = immutableRecoveryCommitOutputDigest(
+                &aggregate.recovery_commit_output,
+            ),
+            .binding_destination_addr = @intFromPtr(
+                &aggregate.recovery_snapshot_binding,
+            ),
+            .binding_destination_pristine_digest = committedRecoverySnapshotBindingDigest(
+                &aggregate.recovery_snapshot_binding,
+            ),
+            .has_binding = bound_selected,
+            .binding_entry_index = binding_entry_index,
+            .ledger_output_index = selected_ledger_output_index,
+            .lifecycle = .prepared,
+        };
+        aggregate.recovery_snapshot_commit.digest =
+            preparedRecoverySnapshotCommitDigest(
+                &aggregate.recovery_snapshot_commit,
+            );
+        return true;
+    }
+
+    fn preparedRecoverySnapshotCommitCurrent(
+        self: *ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        aggregate: *const PreparedRxAggregate,
+    ) bool {
+        const prepared = &aggregate.recovery_snapshot_commit;
+        if (prepared.lifecycle == .empty)
+            return std.meta.eql(
+                aggregate.recovery_dispositions,
+                RecoverySnapshotDispositionAggregate{},
+            ) and std.meta.eql(
+                aggregate.recovery_commit_output,
+                ImmutableRecoveryCommitOutput{},
+            ) and std.meta.eql(
+                aggregate.recovery_snapshot_binding,
+                CommittedRecoverySnapshotBinding{},
+            );
+        if (!self.validateWholeTurnLease(lease) or
+            prepared.saved_self_addr != @intFromPtr(prepared) or
+            prepared.aggregate_addr != @intFromPtr(aggregate) or
+            prepared.storage_addr != @intFromPtr(self) or
+            prepared.ledger_addr != @intFromPtr(&self.inbox_ledger) or
+            prepared.lease_addr != @intFromPtr(lease) or
+            prepared.scratch_addr != lease.scratch_addr or
+            !std.mem.eql(u8, &prepared.lease_digest, &lease.digest) or
+            prepared.owner_incarnation != self.owner_incarnation or
+            prepared.operation_generation != self.operation_generation or
+            prepared.turn_generation != aggregate.turn_generation or
+            !std.meta.eql(prepared.parser_seal, lease.rx_provenance.parser_seal) or
+            !ownerAuthorityValid(self) or
+            !std.meta.eql(
+                prepared.authority_generation,
+                self.owner_authority.current.generation,
+            ) or !std.mem.eql(
+            u8,
+            &prepared.authority_seal_digest,
+            &self.owner_authority_seal.digest,
+        ) or
+            prepared.dispositions_addr != @intFromPtr(&aggregate.recovery_dispositions) or
+            prepared.committed_output_addr != @intFromPtr(&aggregate.recovery_commit_output) or
+            prepared.binding_destination_addr != @intFromPtr(
+                &aggregate.recovery_snapshot_binding,
+            ) or
+            prepared.lifecycle != .prepared or
+            !std.mem.eql(u8, &prepared.digest, &preparedRecoverySnapshotCommitDigest(prepared)) or
+            !std.meta.eql(aggregate.recovery_snapshot_binding, CommittedRecoverySnapshotBinding{}) or
+            !std.mem.eql(
+                u8,
+                &prepared.binding_destination_pristine_digest,
+                &committedRecoverySnapshotBindingDigest(
+                    &aggregate.recovery_snapshot_binding,
+                ),
+            ))
+            return false;
+        const source_current = switch (prepared.source) {
+            .commit_pending => |source| source.live_commit_addr ==
+                @intFromPtr(&aggregate.live_commit) and
+                std.mem.eql(u8, &source.live_commit_digest, &aggregate.live_commit.digest) and
+                std.meta.eql(
+                    aggregate.recovery_commit_output,
+                    ImmutableRecoveryCommitOutput{},
+                ) and std.mem.eql(
+                u8,
+                &prepared.committed_output_pristine_digest,
+                &immutableRecoveryCommitOutputDigest(
+                    &aggregate.recovery_commit_output,
+                ),
+            ),
+            .already_committed => |source| blk: {
+                var expected = ImmutableRecoveryCommitOutput{};
+                expected.ledger_output = aggregate.recovery_commit_output.ledger_output;
+                break :blk std.meta.eql(aggregate.recovery_commit_output, expected) and
+                    source.output_addr == @intFromPtr(
+                        &aggregate.recovery_commit_output.ledger_output,
+                    ) and aggregate.recovery_commit_output.ledger_output.permit_addr ==
+                    @intFromPtr(&aggregate.live_commit) and std.mem.eql(
+                    u8,
+                    &aggregate.recovery_commit_output.ledger_output.permit_digest,
+                    &aggregate.live_commit.digest,
+                ) and std.mem.eql(
+                    u8,
+                    &source.output_digest,
+                    &aggregate.recovery_commit_output.ledger_output.digest,
+                ) and external_inbox_ledger.claimedCommittedLiveOutputValid(
+                    &self.inbox_ledger,
+                    &aggregate.recovery_commit_output.ledger_output,
+                    @intFromPtr(prepared),
+                );
+            },
+        };
+        const source_provenance_current = switch (prepared.source_discriminator) {
+            .later_turn_commit => prepared.ack_transition_addr == 0 and
+                std.mem.allEqual(u8, &prepared.ack_transition_digest, 0),
+            .same_drain_side_intent => blk: {
+                const expected_addr = std.math.add(
+                    usize,
+                    lease.scratch_addr,
+                    @offsetOf(ExternalRxTurnScratch, "resync_ack_transition"),
+                ) catch break :blk false;
+                if (prepared.ack_transition_addr == 0 or
+                    prepared.ack_transition_addr != expected_addr)
+                    break :blk false;
+                const transition: *const PreparedResyncAckTransition =
+                    @ptrFromInt(prepared.ack_transition_addr);
+                break :blk std.mem.eql(
+                    u8,
+                    &prepared.ack_transition_digest,
+                    &transition.digest,
+                ) and self.consumedResyncAckReceiptCurrent(
+                    lease,
+                    transition,
+                );
+            },
+        };
+        return source_current and source_provenance_current and
+            aggregate.recovery_dispositions.saved_self_addr ==
+                @intFromPtr(&aggregate.recovery_dispositions) and
+            aggregate.recovery_dispositions.owner_aggregate_addr == @intFromPtr(aggregate) and
+            aggregate.recovery_dispositions.count != 0 and
+            (!prepared.has_binding or
+                (prepared.binding_entry_index < aggregate.recovery_dispositions.count and
+                    prepared.ledger_output_index == aggregate.recovery_dispositions.entries[
+                        prepared.binding_entry_index
+                    ].commit_output_index and
+                    aggregate.recovery_dispositions.entries[
+                        prepared.binding_entry_index
+                    ].disposition == .bind)) and
+            recoverySnapshotDispositionsCurrent(aggregate) and
+            std.mem.eql(
+                u8,
+                &aggregate.recovery_dispositions.root_digest,
+                &recoverySnapshotDispositionRootDigest(
+                    &aggregate.recovery_dispositions,
+                ),
+            ) and std.mem.eql(
+            u8,
+            &prepared.dispositions_root_digest,
+            &aggregate.recovery_dispositions.root_digest,
+        ) and switch (self.semantic_state) {
+            .active => |value| std.meta.eql(value, prepared.authority_state),
+            else => false,
+        };
+    }
+
+    /// Commits transport ownership without publishing recovery authority. f3c2 may place this
+    /// side-intent between the ACK transaction and the snapshot binding transaction; the claimed
+    /// final-address output is then the only accepted `already_committed` source and cannot be
+    /// replayed by a second receipt.
+    fn commitRecoveryTransportSideIntentUnderHeldLease(
+        self: *ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        aggregate: *PreparedRxAggregate,
+        ack_transition: *const PreparedResyncAckTransition,
+    ) bool {
+        if (!self.preparedRecoverySnapshotCommitCurrent(lease, aggregate) or
+            std.meta.activeTag(aggregate.recovery_snapshot_commit.source) !=
+                .commit_pending)
+            return false;
+        if (!self.consumedResyncAckReceiptCurrent(lease, ack_transition))
+            return false;
+        aggregate.recovery_snapshot_commit.source_discriminator =
+            .same_drain_side_intent;
+        aggregate.recovery_snapshot_commit.ack_transition_addr =
+            @intFromPtr(ack_transition);
+        aggregate.recovery_snapshot_commit.ack_transition_digest =
+            ack_transition.digest;
+        aggregate.recovery_snapshot_commit.digest =
+            preparedRecoverySnapshotCommitDigest(
+                &aggregate.recovery_snapshot_commit,
+            );
+        aggregate.digest = preparedRxAggregateDigest(aggregate);
+        if (!self.preparedRecoverySnapshotCommitCurrent(lease, aggregate))
+            return false;
+        self.commitRecoveryTransportSourceUnchecked(aggregate);
+        return true;
+    }
+
+    fn consumedResyncAckReceiptCurrent(
+        self: *const ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        transition: *const PreparedResyncAckTransition,
+    ) bool {
+        if (lease.scratch_len != @sizeOf(ExternalRxTurnScratch)) return false;
+        const expected_addr = std.math.add(
+            usize,
+            lease.scratch_addr,
+            @offsetOf(ExternalRxTurnScratch, "resync_ack_transition"),
+        ) catch return false;
+        const scratch: *const ExternalRxTurnScratch =
+            @ptrFromInt(lease.scratch_addr);
+        const active = switch (self.semantic_state) {
+            .active => |value| value,
+            else => return false,
+        };
+        const authority = switch (self.owner_authority) {
+            .current => |value| value,
+            .empty => return false,
+        };
+        const plan = client_pump.planRecoveryTransition(.{
+            .state = transition.authority_state,
+            .trigger = .resync_ack,
+            .control = .response_wait,
+            .now_ns = transition.sampled_now_ns,
+            .recovery_barrier_absolute = transition.recovery_barrier_absolute,
+        });
+        return expected_addr == @intFromPtr(transition) and
+            transition.saved_self_addr == @intFromPtr(transition) and
+            transition.storage_addr == @intFromPtr(self) and
+            transition.scratch_addr == lease.scratch_addr and
+            transition.lease_addr == @intFromPtr(lease) and
+            transition.owner_incarnation == self.owner_incarnation and
+            transition.operation_generation == self.operation_generation and
+            scratch.saved_self_addr == @intFromPtr(scratch) and
+            transition.turn_generation == scratch.turn_generation and
+            transition.parser_generation <= lease.rx_provenance.parser_seal.generation and
+            transition.recovery_barrier_absolute != 0 and
+            transition.recovery_deadline_ns ==
+                (client_pump.recoveryDeadline(transition.authority_state) orelse
+                    return false) and
+            plan.disposition == .acknowledged and
+            std.meta.eql(plan.next, transition.next_state) and
+            std.meta.eql(transition.authority_generation, authority.generation) and
+            std.mem.eql(
+                u8,
+                &transition.authority_seal_digest,
+                &self.owner_authority_seal.digest,
+            ) and std.meta.eql(transition.next_state, active) and
+            transition.lifecycle == .consumed_tombstone and
+            std.mem.eql(
+                u8,
+                &transition.digest,
+                &preparedResyncAckTransitionDigest(transition),
+            );
+    }
+
+    /// The sole irreversible ledger-commit leaf for a recovery source. Every caller completes all
+    /// validation before entering it; after the first write there is deliberately no boolean or
+    /// error return that could misdescribe a consumed permit as an ordinary precommit rejection.
+    fn commitRecoveryTransportSourceUnchecked(
+        self: *ExternalPumpStorage,
+        aggregate: *PreparedRxAggregate,
+    ) void {
+        self.inbox_ledger.consumePreparedLiveCommitWithOutputUnchecked(
+            &aggregate.live_batch,
+            &aggregate.retirement,
+            &aggregate.dispositions,
+            &aggregate.live_commit,
+            &aggregate.recovery_commit_output.ledger_output,
+        );
+        publishCommittedRecoverySourceUnchecked(aggregate);
+        aggregate.digest = preparedRxAggregateDigest(aggregate);
+    }
+
+    /// Converges both transport source forms on one exact claimed output. The caller has either
+    /// just committed the sealed ledger permit or is the side-intent helper above; no allocation,
+    /// callback, clock, syscall, or fallible lookup may enter this suffix.
+    fn publishCommittedRecoverySourceUnchecked(
+        aggregate: *PreparedRxAggregate,
+    ) void {
+        external_inbox_ledger.claimCommittedLiveOutputUnchecked(
+            &aggregate.recovery_commit_output.ledger_output,
+            @intFromPtr(&aggregate.recovery_snapshot_commit),
+        );
+        for (aggregate.recovery_dispositions.entries[0..aggregate.recovery_dispositions.count]) |
+            *entry,
+        | {
+            entry.token_source = .committed_output;
+            entry.digest = recoverySnapshotDispositionEntryDigest(entry);
+        }
+        aggregate.recovery_dispositions.root_digest =
+            recoverySnapshotDispositionRootDigest(
+                &aggregate.recovery_dispositions,
+            );
+        aggregate.recovery_snapshot_commit.source = .{ .already_committed = .{
+            .output_addr = @intFromPtr(
+                &aggregate.recovery_commit_output.ledger_output,
+            ),
+            .output_digest = aggregate.recovery_commit_output.ledger_output.digest,
+        } };
+        aggregate.recovery_snapshot_commit.dispositions_root_digest =
+            aggregate.recovery_dispositions.root_digest;
+        aggregate.recovery_snapshot_commit.digest =
+            preparedRecoverySnapshotCommitDigest(
+                &aggregate.recovery_snapshot_commit,
+            );
+    }
+
+    fn recoverySnapshotDispositionsCurrent(
+        aggregate: *const PreparedRxAggregate,
+    ) bool {
+        const dispositions = &aggregate.recovery_dispositions;
+        if (dispositions.saved_self_addr != @intFromPtr(dispositions) or
+            dispositions.owner_aggregate_addr != @intFromPtr(aggregate) or
+            dispositions.count == 0 or
+            dispositions.count > external_inbox_ledger.max_live_mutations)
+            return false;
+        var seen = std.StaticBitSet(external_inbox_ledger.max_live_mutations).initEmpty();
+        var bind_count: u8 = 0;
+        const expected_token_source: RecoverySnapshotTokenSource = switch (aggregate.recovery_snapshot_commit.source) {
+            .commit_pending => .pending_commit,
+            .already_committed => .committed_output,
+        };
+        for (dispositions.entries[0..dispositions.count]) |entry| {
+            if (!std.mem.eql(
+                u8,
+                &entry.digest,
+                &recoverySnapshotDispositionEntryDigest(&entry),
+            ) or entry.token_source != expected_token_source or
+                entry.mutation_index >= aggregate.live_commit.mutation_count or
+                seen.isSet(entry.mutation_index) or
+                entry.token.generation == 0 or
+                entry.end_absolute <= entry.start_absolute)
+                return false;
+            seen.set(entry.mutation_index);
+            const root = switch (aggregate.dispositions[entry.mutation_index]) {
+                .final_live, .cleanup_final => |value| value,
+                .unused, .superseded_tombstone => return false,
+            };
+            if (root.phase != .completed or !std.meta.eql(root.token, entry.token))
+                return false;
+            var expected_output_index: u8 = 0;
+            for (aggregate.dispositions[0..entry.mutation_index]) |prior|
+                if (prior == .final_live or prior == .cleanup_final) {
+                    expected_output_index += 1;
+                };
+            if (entry.commit_output_index != expected_output_index)
+                return false;
+            const committed_semantic: ?external_inbox_ledger.PayloadSemantic = switch (aggregate.recovery_snapshot_commit.source) {
+                .commit_pending => blk: {
+                    for (aggregate.live_commit.simulation.nodes) |node| {
+                        if (node.live and std.meta.eql(node.token, root.token))
+                            break :blk node.semantic;
+                    }
+                    break :blk null;
+                },
+                .already_committed => blk: {
+                    const output = &aggregate.recovery_commit_output.ledger_output;
+                    if (entry.commit_output_index >= output.count)
+                        break :blk null;
+                    const actual = output.entries[entry.commit_output_index];
+                    if (!std.meta.eql(actual.token, entry.token) or
+                        actual.phase != .completed or
+                        actual.cleanup_only != (entry.disposition == .drop) or
+                        !std.mem.eql(
+                            u8,
+                            &actual.semantic_digest,
+                            &entry.committed_semantic_digest,
+                        )) break :blk null;
+                    break :blk actual.semantic;
+                },
+            };
+            const completed = switch (committed_semantic orelse return false) {
+                .completed => |value| value,
+                else => return false,
+            };
+            const range = switch (completed.provenance) {
+                .external => |value| value,
+                .untracked => return false,
+            };
+            const semantic_end = std.math.add(
+                u64,
+                range.start_absolute,
+                range.span,
+            ) catch return false;
+            const semantic_origin: client_pump.RecoveryOrigin = switch (completed.recovery_intent) {
+                .host => .host,
+                .client => .client,
+                .none => .client,
+            };
+            const semantic_epoch: u64 = switch (completed.recovery_intent) {
+                .host, .client => |value| value,
+                .none => 0,
+            };
+            if (entry.is_snapshot != completed.is_snapshot or
+                entry.origin != semantic_origin or
+                entry.recovery_epoch != semantic_epoch or
+                entry.start_absolute != range.start_absolute or
+                entry.end_absolute != semantic_end)
+                return false;
+            if (!std.mem.eql(
+                u8,
+                &entry.committed_semantic_digest,
+                &external_inbox_ledger.payloadSemanticAuthorityDigest(
+                    committed_semantic.?,
+                ),
+            )) return false;
+            var transfer_current = false;
+            for (&aggregate.screen_transfers) |*transfer| {
+                if (@intFromPtr(transfer) == entry.transfer_addr and
+                    transfer.lifecycle == .mutation_bound and
+                    transfer.mutation_index == entry.mutation_index)
+                {
+                    transfer_current = true;
+                    break;
+                }
+            }
+            if (!transfer_current) return false;
+            var destination_current = false;
+            const expected_write_kind: DestinationWriteKind = switch (entry.disposition) {
+                .bind => .screen_completed,
+                .drop => .screen_cleanup,
+                .unused, .terminal => return false,
+            };
+            for (aggregate.destination_writes[0..aggregate.destination_write_count]) |*write| {
+                if (@intFromPtr(write) == entry.cleanup_destination_addr and
+                    write.mutation_index == entry.mutation_index and
+                    write.kind == expected_write_kind and
+                    write.expected_lifecycle == entry.cleanup_lifecycle and
+                    std.mem.eql(
+                        u8,
+                        &write.digest,
+                        &entry.cleanup_destination_digest,
+                    ))
+                {
+                    destination_current = true;
+                    break;
+                }
+            }
+            if (!destination_current) return false;
+            if (entry.disposition == .bind) {
+                bind_count += 1;
+                const plan = client_pump.planRecoverySnapshotBinding(
+                    aggregate.recovery_snapshot_commit.authority_state,
+                    .{
+                        .origin = entry.origin,
+                        .recovery_epoch = entry.recovery_epoch,
+                        .is_snapshot = entry.is_snapshot,
+                        .start_absolute = entry.start_absolute,
+                        .end_absolute = entry.end_absolute,
+                        .committed_token_generation = entry.token.generation,
+                    },
+                );
+                if (bind_count != 1 or plan.disposition != .bound or
+                    !std.meta.eql(
+                        plan.next,
+                        aggregate.recovery_snapshot_commit.binding_next_state,
+                    ))
+                {
+                    return false;
+                }
+            } else if (entry.disposition != .drop) return false;
+        }
+        for (dispositions.entries[dispositions.count..]) |entry|
+            if (!std.meta.eql(entry, RecoverySnapshotDispositionEntry{}))
+                return false;
+        return bind_count == @intFromBool(
+            aggregate.recovery_snapshot_commit.has_binding,
+        ) and (bind_count != 0 or
+            std.meta.eql(
+                aggregate.recovery_snapshot_commit.binding_next_state,
+                client_pump.AuthorityState.valid,
+            ));
+    }
+
     fn validateAndPrepareRxAggregateCommit(
         self: *ExternalPumpStorage,
         lease: *const ExternalWholeTurnLease,
@@ -10051,13 +11569,22 @@ pub const ExternalPumpStorage = struct {
             {
                 return null;
             };
+        const already_committed = std.meta.activeTag(
+            aggregate.recovery_snapshot_commit.source,
+        ) == .already_committed;
         if (aggregate.lifecycle != .finalized or
             aggregate.intent_handle_addr != @intFromPtr(intent_handle) or
-            !validateRxAggregateScreenGraph(
-                self,
-                aggregate,
-                intent_handle,
-            ))
+            !(if (already_committed)
+                validateCommittedRecoveryScreenGraph(
+                    aggregate,
+                    intent_handle,
+                )
+            else
+                validateRxAggregateScreenGraph(
+                    self,
+                    aggregate,
+                    intent_handle,
+                )))
         {
             return null;
         }
@@ -10101,20 +11628,23 @@ pub const ExternalPumpStorage = struct {
             return null;
         }
         if (proof_count != 0) {
-            if (!self.inbox_ledger.validatePreparedLiveCommit(
-                &aggregate.live_batch,
-                &aggregate.retirement,
-                &aggregate.dispositions,
-                &aggregate.live_commit,
-                @intFromPtr(aggregate),
-                @intFromPtr(self),
-                aggregate.turn_generation,
-            )) {
-                return null;
+            switch (aggregate.recovery_snapshot_commit.source) {
+                .commit_pending => if (!self.inbox_ledger.validatePreparedLiveCommit(
+                    &aggregate.live_batch,
+                    &aggregate.retirement,
+                    &aggregate.dispositions,
+                    &aggregate.live_commit,
+                    @intFromPtr(aggregate),
+                    @intFromPtr(self),
+                    aggregate.turn_generation,
+                )) return null,
+                .already_committed => {},
             }
             if (!validateScreenDestinationPlan(self, aggregate)) {
                 return null;
             }
+            if (!self.preparedRecoverySnapshotCommitCurrent(lease, aggregate))
+                return null;
         }
         if (!prepareEventAggregateCleanup(
             self,
@@ -10129,6 +11659,18 @@ pub const ExternalPumpStorage = struct {
     const PublishedRxAggregateCommit = struct {
         callback_entry_digest: external_owner_seal.Digest,
         expected_after_callbacks: PreparedRxAggregate,
+        /// Cleanup callbacks execute after the semantic publication point, but they are still
+        /// untrusted allocator code. Freeze every storage-level authority that this transaction
+        /// must leave unchanged so a callback cannot coherently reseal a different owner/ledger
+        /// graph while leaving the aggregate receipt byte-for-byte valid.
+        storage_lifecycle: StorageLifecycle,
+        semantic_state: client_pump.ExternalPumpState,
+        owner_authority: OwnerAuthorityState,
+        owner_authority_seal: OwnerAuthoritySeal,
+        owner_incarnation: u64,
+        owner_incarnation_seal: OwnerIncarnationSeal,
+        operation_generation: u64,
+        ledger_projection_digest: external_owner_seal.Digest,
         proof_count: usize,
     };
 
@@ -10142,13 +11684,26 @@ pub const ExternalPumpStorage = struct {
         const proof_count: usize = aggregate.intent_commit.proof_count;
         aggregate.lifecycle = .committing;
         aggregate.digest = preparedRxAggregateDigest(aggregate);
-        if (proof_count != 0)
-            self.inbox_ledger.consumePreparedLiveCommitUnchecked(
-                &aggregate.live_batch,
-                &aggregate.retirement,
-                &aggregate.dispositions,
-                &aggregate.live_commit,
-            );
+        if (proof_count != 0) {
+            if (aggregate.recovery_snapshot_commit.lifecycle == .prepared) {
+                switch (aggregate.recovery_snapshot_commit.source) {
+                    .commit_pending => {
+                        self.commitRecoveryTransportSourceUnchecked(aggregate);
+                    },
+                    .already_committed => {},
+                }
+            } else {
+                self.inbox_ledger.consumePreparedLiveCommitUnchecked(
+                    &aggregate.live_batch,
+                    &aggregate.retirement,
+                    &aggregate.dispositions,
+                    &aggregate.live_commit,
+                );
+            }
+        }
+        if (proof_count != 0 and
+            aggregate.recovery_snapshot_commit.lifecycle == .prepared)
+            self.publishRecoverySnapshotCommitUnchecked(aggregate);
         external_rx_intent.consumePreparedIntentCommitUnchecked(
             intent_handle,
             &aggregate.screen_proofs,
@@ -10170,15 +11725,235 @@ pub const ExternalPumpStorage = struct {
         published.* = .{
             .callback_entry_digest = aggregate.digest,
             .expected_after_callbacks = expected_after_callbacks,
+            .storage_lifecycle = self.lifecycle,
+            .semantic_state = self.semantic_state,
+            .owner_authority = self.owner_authority,
+            .owner_authority_seal = self.owner_authority_seal,
+            .owner_incarnation = self.owner_incarnation,
+            .owner_incarnation_seal = self.owner_incarnation_seal,
+            .operation_generation = self.operation_generation,
+            .ledger_projection_digest = self.inbox_ledger.projectionAuthorityDigest(),
             .proof_count = proof_count,
         };
         self.retainRxAggregateAllocation(aggregate);
     }
 
+    fn publishRecoverySnapshotCommitUnchecked(
+        self: *ExternalPumpStorage,
+        aggregate: *PreparedRxAggregate,
+    ) void {
+        const prepared = &aggregate.recovery_snapshot_commit;
+        const output = &aggregate.recovery_commit_output;
+        const ledger_output = &output.ledger_output;
+        if (!prepared.has_binding) {
+            external_inbox_ledger.consumeClaimedCommittedLiveOutputUnchecked(
+                ledger_output,
+            );
+            consumeRecoveryDispositionAuthorityUnchecked(aggregate);
+            prepared.lifecycle = .consumed_tombstone;
+            prepared.digest = preparedRecoverySnapshotCommitDigest(prepared);
+            return;
+        }
+        const entry = &aggregate.recovery_dispositions.entries[
+            prepared.binding_entry_index
+        ];
+        const actual = ledger_output.entries[prepared.ledger_output_index];
+        output.saved_self_addr = @intFromPtr(output);
+        output.aggregate_addr = @intFromPtr(aggregate);
+        output.ledger_addr = @intFromPtr(&self.inbox_ledger);
+        output.storage_addr = @intFromPtr(self);
+        output.live_commit_addr = @intFromPtr(&aggregate.live_commit);
+        output.live_commit_digest = aggregate.live_commit.digest;
+        output.token = actual.token;
+        output.semantic_digest = actual.semantic_digest;
+        output.recovery_intent = switch (entry.origin) {
+            .host => .{ .host = entry.recovery_epoch },
+            .client => .{ .client = entry.recovery_epoch },
+        };
+        output.origin = entry.origin;
+        output.recovery_epoch = entry.recovery_epoch;
+        output.is_snapshot = entry.is_snapshot;
+        output.start_absolute = entry.start_absolute;
+        output.end_absolute = entry.end_absolute;
+        output.lifecycle = .committed;
+        output.digest = immutableRecoveryCommitOutputDigest(output);
+        const binding = &aggregate.recovery_snapshot_binding;
+        binding.* = .{
+            .saved_self_addr = @intFromPtr(binding),
+            .aggregate_addr = @intFromPtr(aggregate),
+            .scratch_addr = prepared.scratch_addr,
+            .storage_addr = @intFromPtr(self),
+            .ledger_addr = @intFromPtr(&self.inbox_ledger),
+            .lease_addr = prepared.lease_addr,
+            .lease_digest = prepared.lease_digest,
+            .owner_incarnation = prepared.owner_incarnation,
+            .operation_generation = prepared.operation_generation,
+            .turn_generation = prepared.turn_generation,
+            .parser_generation = prepared.parser_seal.generation,
+            .parser_seal = prepared.parser_seal,
+            .authority_generation = prepared.authority_generation,
+            .authority_seal_digest = prepared.authority_seal_digest,
+            .awaiting_state = prepared.authority_state,
+            .awaiting_state_digest = recoveryAuthorityStateDigest(
+                prepared.authority_state,
+            ),
+            .ledger_authority_digest = self.inbox_ledger.projectionAuthorityDigest(),
+            .token = output.token,
+            .semantic_digest = output.semantic_digest,
+            .recovery_intent = output.recovery_intent,
+            .origin = output.origin,
+            .recovery_epoch = output.recovery_epoch,
+            .is_snapshot = output.is_snapshot,
+            .start_absolute = output.start_absolute,
+            .end_absolute = output.end_absolute,
+            .source_output_addr = @intFromPtr(output),
+            .source_output_digest = output.digest,
+            .side_intent_addr = if (prepared.source_discriminator ==
+                .same_drain_side_intent)
+                @intFromPtr(&output.ledger_output)
+            else
+                0,
+            .side_intent_digest = if (prepared.source_discriminator ==
+                .same_drain_side_intent)
+                output.ledger_output.digest
+            else
+                [_]u8{0} ** 32,
+            .destination_pristine_digest = prepared.binding_destination_pristine_digest,
+            .source_discriminator = prepared.source_discriminator,
+            .source_provenance_digest = switch (prepared.source_discriminator) {
+                .later_turn_commit => recoveryAuthorityStateDigest(
+                    prepared.authority_state,
+                ),
+                .same_drain_side_intent => prepared.ack_transition_digest,
+            },
+            .ack_transition_addr = prepared.ack_transition_addr,
+            .ack_transition_digest = prepared.ack_transition_digest,
+            .lifecycle = .committed,
+        };
+        binding.digest = committedRecoverySnapshotBindingDigest(binding);
+        self.semantic_state = .{ .active = prepared.binding_next_state };
+        external_inbox_ledger.consumeClaimedCommittedLiveOutputUnchecked(
+            ledger_output,
+        );
+        output.lifecycle = .consumed_tombstone;
+        output.digest = immutableRecoveryCommitOutputDigest(output);
+        binding.source_output_digest = output.digest;
+        if (binding.source_discriminator == .same_drain_side_intent)
+            binding.side_intent_digest = ledger_output.digest;
+        binding.lifecycle = .consumed_tombstone;
+        binding.digest = committedRecoverySnapshotBindingDigest(binding);
+        consumeRecoveryDispositionAuthorityUnchecked(aggregate);
+        prepared.lifecycle = .consumed_tombstone;
+        prepared.digest = preparedRecoverySnapshotCommitDigest(prepared);
+    }
+
+    fn consumeRecoveryDispositionAuthorityUnchecked(
+        aggregate: *PreparedRxAggregate,
+    ) void {
+        for (aggregate.recovery_dispositions.entries[0..aggregate.recovery_dispositions.count]) |
+            *entry,
+        | {
+            entry.token_source = .consumed_tombstone;
+            entry.digest = recoverySnapshotDispositionEntryDigest(entry);
+        }
+        aggregate.recovery_dispositions.root_digest =
+            recoverySnapshotDispositionRootDigest(
+                &aggregate.recovery_dispositions,
+            );
+        aggregate.recovery_snapshot_commit.dispositions_root_digest =
+            aggregate.recovery_dispositions.root_digest;
+    }
+
+    fn committedRecoverySnapshotBindingCurrent(
+        self: *const ExternalPumpStorage,
+        lease: *const ExternalWholeTurnLease,
+        aggregate: *const PreparedRxAggregate,
+    ) bool {
+        const prepared = &aggregate.recovery_snapshot_commit;
+        const output = &aggregate.recovery_commit_output;
+        const binding = &aggregate.recovery_snapshot_binding;
+        if (binding.saved_self_addr != @intFromPtr(binding) or
+            binding.aggregate_addr != @intFromPtr(aggregate) or
+            binding.scratch_addr != lease.scratch_addr or
+            binding.storage_addr != @intFromPtr(self) or
+            binding.ledger_addr != @intFromPtr(&self.inbox_ledger) or
+            binding.lease_addr != @intFromPtr(lease) or
+            !std.mem.eql(u8, &binding.lease_digest, &lease.digest) or
+            binding.owner_incarnation != self.owner_incarnation or
+            binding.operation_generation != self.operation_generation or
+            binding.turn_generation != aggregate.turn_generation or
+            binding.parser_generation != binding.parser_seal.generation or
+            !std.meta.eql(binding.parser_seal, prepared.parser_seal) or
+            !std.meta.eql(binding.authority_generation, prepared.authority_generation) or
+            !std.mem.eql(
+                u8,
+                &binding.authority_seal_digest,
+                &prepared.authority_seal_digest,
+            ) or !std.meta.eql(binding.awaiting_state, prepared.authority_state) or
+            !std.mem.eql(
+                u8,
+                &binding.awaiting_state_digest,
+                &recoveryAuthorityStateDigest(binding.awaiting_state),
+            ) or !std.mem.eql(
+            u8,
+            &binding.ledger_authority_digest,
+            &self.inbox_ledger.projectionAuthorityDigest(),
+        ) or binding.source_output_addr != @intFromPtr(output) or
+            !std.mem.eql(u8, &binding.source_output_digest, &output.digest) or
+            !std.mem.eql(
+                u8,
+                &binding.destination_pristine_digest,
+                &prepared.binding_destination_pristine_digest,
+            ) or binding.source_discriminator != prepared.source_discriminator or
+            binding.ack_transition_addr != prepared.ack_transition_addr or
+            !std.mem.eql(
+                u8,
+                &binding.ack_transition_digest,
+                &prepared.ack_transition_digest,
+            ) or binding.lifecycle != .consumed_tombstone or
+            !std.mem.eql(
+                u8,
+                &binding.digest,
+                &committedRecoverySnapshotBindingDigest(binding),
+            )) return false;
+        if (!std.meta.eql(binding.token, output.token) or
+            !std.mem.eql(u8, &binding.semantic_digest, &output.semantic_digest) or
+            !std.meta.eql(binding.recovery_intent, output.recovery_intent) or
+            binding.origin != output.origin or
+            binding.recovery_epoch != output.recovery_epoch or
+            binding.is_snapshot != output.is_snapshot or
+            binding.start_absolute != output.start_absolute or
+            binding.end_absolute != output.end_absolute)
+            return false;
+        return switch (binding.source_discriminator) {
+            .later_turn_commit => binding.side_intent_addr == 0 and
+                std.mem.allEqual(u8, &binding.side_intent_digest, 0) and
+                binding.ack_transition_addr == 0 and
+                std.mem.allEqual(u8, &binding.ack_transition_digest, 0) and
+                std.mem.eql(
+                    u8,
+                    &binding.source_provenance_digest,
+                    &binding.awaiting_state_digest,
+                ),
+            .same_drain_side_intent => binding.side_intent_addr ==
+                @intFromPtr(&output.ledger_output) and std.mem.eql(
+                u8,
+                &binding.side_intent_digest,
+                &output.ledger_output.digest,
+            ) and binding.ack_transition_addr != 0 and std.mem.eql(
+                u8,
+                &binding.source_provenance_digest,
+                &binding.ack_transition_digest,
+            ),
+        };
+    }
+
     fn finishPublishedRxAggregateCommit(
+        self: *ExternalPumpStorage,
         aggregate: *PreparedRxAggregate,
         event_cleanup: *FrozenAggregateCleanup,
         published: *const PublishedRxAggregateCommit,
+        defer_scalar_drift_to_outer_owner: bool,
     ) RxAggregateCommitResult {
         const retire_result = if (published.proof_count == 0)
             external_inbox_ledger.RetireLiveResult.retired
@@ -10194,10 +11969,43 @@ pub const ExternalPumpStorage = struct {
         aggregate.digest = published.expected_after_callbacks.digest;
         const aggregate_state_valid =
             std.meta.eql(aggregate.*, published.expected_after_callbacks);
+        const ledger_state_valid = std.mem.eql(
+            u8,
+            &self.inbox_ledger.projectionAuthorityDigest(),
+            &published.ledger_projection_digest,
+        );
+        const storage_scalar_state_valid =
+            self.lifecycle == published.storage_lifecycle and
+            std.meta.eql(self.semantic_state, published.semantic_state) and
+            std.meta.eql(self.owner_authority, published.owner_authority) and
+            std.meta.eql(self.owner_authority_seal, published.owner_authority_seal) and
+            self.owner_incarnation == published.owner_incarnation and
+            std.meta.eql(self.owner_incarnation_seal, published.owner_incarnation_seal) and
+            self.operation_generation == published.operation_generation;
+        const storage_state_valid =
+            storage_scalar_state_valid and ledger_state_valid;
         if (!callback_state_valid or !aggregate_state_valid) {
             // Restore only the callback-hidden, precomputed canonical state. Never seal callback
             // mutations as new authority; retained teardown can now retire the committed graph.
             aggregate.* = published.expected_after_callbacks;
+        }
+        if (!storage_state_valid) {
+            if (defer_scalar_drift_to_outer_owner and ledger_state_valid) {
+                return .quarantined;
+            }
+            // Preserve only lease-release-critical scalars until the outer whole-turn owner drops
+            // its TX/RX claims. Pointer-bearing owners (especially the ledger) remain untouched and
+            // must not be dereferenced; releaseWholeTurnLease immediately converts this marker into
+            // a dead bounded-quarantine tombstone after clearing the thread-local claims.
+            self.lifecycle = published.storage_lifecycle;
+            self.semantic_state = published.semantic_state;
+            self.owner_authority = published.owner_authority;
+            self.owner_authority_seal = published.owner_authority_seal;
+            self.owner_incarnation = published.owner_incarnation;
+            self.owner_incarnation_seal = published.owner_incarnation_seal;
+            self.operation_generation = published.operation_generation;
+            self.callback_quarantine_pending = true;
+            return .quarantined;
         }
         if (retire_result == .quarantined or !event_finish or
             !callback_state_valid or !aggregate_state_valid)
@@ -10206,6 +12014,44 @@ pub const ExternalPumpStorage = struct {
             return .quarantined;
         }
         return .committed;
+    }
+
+    fn quarantinePublishedStorageAfterCallbackDrift(
+        self: *ExternalPumpStorage,
+    ) void {
+        self.lifecycle = .dead;
+        self.semantic_state = .{ .terminal = .{
+            .reason = .invariant_failure,
+            .fd_disposition = .owner_cleanup,
+        } };
+        self.owned_client = null;
+        self.owned_evidence = null;
+        self.client_transfer = .{};
+        self.inbox_ledger = .{};
+        self.prepared_adoption = .{ .lifecycle = .committed_tombstone };
+        self.client_cleanup_take = .{};
+        self.committed_screen = .{};
+        self.live_partial = .terminal;
+        self.live_screen = .{ .lifecycle = .cleaned_tombstone };
+        self.completed_control = .terminal;
+        self.owner_metadata = .{};
+        self.owner_resize = .none;
+        self.owner_authority = .empty;
+        self.owner_authority_seal = .{};
+        self.owner_request_ids = null;
+        self.control_correlation = .{};
+        self.owner_incarnation = 0;
+        self.owner_incarnation_seal = .{};
+        self.intent_scratch_reservation = .{
+            .lifecycle = .poisoned_tombstone,
+        };
+        self.rx_aggregate_handle = .{ .lifecycle = .poisoned };
+        self.rx_aggregate_reservation = .{
+            .lifecycle = .poisoned_tombstone,
+        };
+        self.callback_quarantine_pending = false;
+        latchCrossOwnerQuarantine();
+        releaseActiveStorage(@intFromPtr(self));
     }
 
     fn commitRxAggregateUnchecked(
@@ -10221,10 +12067,11 @@ pub const ExternalPumpStorage = struct {
             event_cleanup,
             &published,
         );
-        return finishPublishedRxAggregateCommit(
+        return self.finishPublishedRxAggregateCommit(
             aggregate,
             event_cleanup,
             &published,
+            false,
         );
     }
 
@@ -10774,7 +12621,12 @@ pub const ExternalPumpStorage = struct {
         if (cleanup_completed)
             finishControlResponsePayloadCleanupUnchecked(frozen_response);
         var publication_drift = self.detectAndRestoreControlCleanupPublicationDrift(canonical);
-        const rx_result = finishPublishedRxAggregateCommit(aggregate, event_cleanup, published);
+        const rx_result = self.finishPublishedRxAggregateCommit(
+            aggregate,
+            event_cleanup,
+            published,
+            true,
+        );
         const tx_post_callback = if (tx_receipt_captured)
             client_external_tx.consumePostCancellationReceipt(
                 &scratch.post_cancellation_receipt,
@@ -12569,6 +14421,8 @@ pub const ExternalPumpStorage = struct {
             self.lifecycle == .live and
             (self.semantic_state == .active or self.semantic_state == .terminal))
         {
+            const close_for_callback_quarantine =
+                self.callback_quarantine_pending;
             lease.* = .{ .lifecycle = .released };
             active_external_lease_addr = 0;
             active_external_lease_generation = 0;
@@ -12576,6 +14430,14 @@ pub const ExternalPumpStorage = struct {
             active_external_operation_addr = 0;
             const close_requested = releaseActiveWholeTurnTxClaim() orelse
                 @panic("external whole-turn TX claim release failed");
+            if (close_for_callback_quarantine) {
+                self.quarantinePublishedStorageAfterCallbackDrift();
+                self.access_claim.store(
+                    @intFromEnum(StorageClaim.dead),
+                    .release,
+                );
+                return .aborted_terminal;
+            }
             if (close_requested)
                 self.semantic_state = .{ .terminal = .{
                     .reason = .invariant_failure,
@@ -15485,6 +17347,14 @@ pub const ExternalPumpStorage = struct {
         ) and std.meta.eql(
             scratch.control_semantic_verdict,
             PreparedControlSemanticVerdict{},
+        ) and std.meta.eql(
+            scratch.resync_ack_transition,
+            PreparedResyncAckTransition{},
+        ) and std.meta.eql(
+            scratch.resync_ack_response_take,
+            PreparedControlResponseTake{},
+        ) and frozenControlResponsePristine(
+            &scratch.resync_ack_frozen_response,
         ) and std.meta.eql(
             scratch.control_semantic_terminal,
             PreparedControlSemanticTerminal{},
@@ -18429,6 +20299,12 @@ pub const ExternalPumpStorage = struct {
             .constructing, .normalizing, .adoption_preparing, .tearing_down => return .transaction_busy,
             .adopting, .live => {},
         }
+        if (self.callback_quarantine_pending) {
+            storage_claim_owned = false;
+            self.quarantinePublishedStorageAfterCallbackDrift();
+            self.access_claim.store(@intFromEnum(StorageClaim.dead), .release);
+            return .quarantined;
+        }
         var cap_invariant = false;
         if (!rxResidentCapOwnerValid(self)) {
             cap_invariant = true;
@@ -20205,6 +22081,10 @@ const AllocatorCallbackProbe = struct {
         teardown_cap_drift,
         intent_scratch_reentry,
         aggregate_commit_drift,
+        aggregate_storage_semantic_drift,
+        aggregate_storage_authority_drift,
+        aggregate_storage_ledger_drift,
+        aggregate_storage_ledger_descriptor_drift,
         tx_admission_reentry,
         tx_admission_queue_drift,
         revoke_cleanup_correlation_reentry,
@@ -20489,6 +22369,32 @@ const AllocatorCallbackProbe = struct {
                 self.storage.?.rx_aggregate_handle.aggregate_addr,
             );
             aggregate.destination_write_count +%= 1;
+        } else if (!self.fired and
+            (self.mode == .aggregate_storage_semantic_drift or
+                self.mode == .aggregate_storage_authority_drift or
+                self.mode == .aggregate_storage_ledger_drift or
+                self.mode == .aggregate_storage_ledger_descriptor_drift) and
+            self.storage.?.lifecycle == .live and
+            self.storage.?.rx_aggregate_handle.lifecycle == .retained)
+        {
+            self.fired = true;
+            switch (self.mode) {
+                .aggregate_storage_semantic_drift => self.storage.?.semantic_state = .{ .terminal = .{
+                    .reason = .eof,
+                    .fd_disposition = .owner_cleanup,
+                } },
+                .aggregate_storage_authority_drift => self.storage.?.owner_authority_seal.digest[0] ^= 1,
+                .aggregate_storage_ledger_drift => self.storage.?.inbox_ledger.mutation_epoch +%= 1,
+                .aggregate_storage_ledger_descriptor_drift => {
+                    for (&self.storage.?.inbox_ledger.slots) |*slot| {
+                        if (slot.active) {
+                            slot.payload.allocation_ptr = @ptrFromInt(1);
+                            break;
+                        }
+                    }
+                },
+                else => unreachable,
+            }
         } else if (!self.fired and
             (self.mode == .revoke_cleanup_correlation_reentry or
                 self.mode == .revoke_cleanup_authority_drift) and
@@ -22622,6 +24528,116 @@ test "d2b3d deferred retirement callback drift is quarantined without blessing a
     );
 }
 
+test "2b2e integration cleanup callback closes semantic owner ledger and descriptor drift" {
+    const Drift = enum {
+        semantic,
+        owner_authority,
+        ledger,
+        ledger_descriptor,
+    };
+    const Apply = struct {
+        fn run(
+            _: *anyopaque,
+            _: external_inbox_ledger.PayloadView,
+        ) LiveScreenApplyResult {
+            return .applied;
+        }
+    };
+
+    inline for (std.meta.tags(Drift)) |drift| {
+        resetCrossOwnerQuarantineForTest();
+        defer resetCrossOwnerQuarantineForTest();
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var allocation_tracker = QuarantineAllocationTracker{
+            .parent = arena.allocator(),
+        };
+        var allocator_probe = AllocatorCallbackProbe{
+            .parent = allocation_tracker.allocator(),
+        };
+        var fixture = try TestClient.initWithAllocator(allocator_probe.allocator());
+        defer fixture.deinitPeer();
+        var storage: ExternalPumpStorage = .{};
+        allocator_probe.storage = &storage;
+        try std.testing.expect(
+            initTestStorage(&storage, &fixture.client, valid_evidence) ==
+                .initialized,
+        );
+        try std.testing.expect(
+            prepareAdoptionForTest(&storage) == .prepared_adopted,
+        );
+        try std.testing.expect(storage.commitAdoption() == .adopted);
+        const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+        defer std.testing.allocator.destroy(scratch);
+        scratch.* = .{};
+        try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+        var context: u8 = 0;
+        const ops = BufferedRxOps{
+            .context = &context,
+            .apply_live_screen = Apply.run,
+        };
+        const first_wire = try framing.encodeFrame(
+            std.testing.allocator,
+            .{
+                .kind = .delta_chunk,
+                .stream_id = valid_evidence.stream_id,
+            },
+            "a",
+        );
+        defer std.testing.allocator.free(first_wire);
+        try admitBufferedProductWireForTest(&storage, first_wire);
+        try std.testing.expect(storage.pumpBufferedRxForTest(
+            .{ .readable = true, .writable = false, .now_ns = 1 },
+            &ops,
+            scratch,
+        ).terminal == null);
+        const second_wire = try framing.encodeFrame(
+            std.testing.allocator,
+            .{
+                .kind = .delta_chunk,
+                .stream_id = valid_evidence.stream_id,
+                .flags = protocol.Flags.end_stream,
+            },
+            "b",
+        );
+        defer std.testing.allocator.free(second_wire);
+        try admitBufferedProductWireForTest(&storage, second_wire);
+
+        allocator_probe.mode = switch (drift) {
+            .semantic => .aggregate_storage_semantic_drift,
+            .owner_authority => .aggregate_storage_authority_drift,
+            .ledger => .aggregate_storage_ledger_drift,
+            .ledger_descriptor => .aggregate_storage_ledger_descriptor_drift,
+        };
+        const result = storage.pumpBufferedRxForTest(
+            .{ .readable = true, .writable = false, .now_ns = 2 },
+            &ops,
+            scratch,
+        );
+        try std.testing.expect(allocator_probe.fired);
+        try std.testing.expectEqual(
+            client_pump.TerminalReason.invariant_failure,
+            result.terminal.?.reason,
+        );
+        try std.testing.expect(crossOwnerQuarantineStatus().latched);
+        try std.testing.expectEqual(StorageLifecycle.dead, storage.lifecycle);
+        try std.testing.expect(storage.semantic_state == .terminal);
+        try std.testing.expectEqual(
+            RxAggregateHandleLifecycle.poisoned,
+            storage.rx_aggregate_handle.lifecycle,
+        );
+        try std.testing.expectEqual(
+            TeardownResult.already_dead,
+            teardownForTest(&storage),
+        );
+        try std.testing.expect(!allocation_tracker.invalid_free);
+        try std.testing.expect(!allocation_tracker.duplicate_free);
+        try std.testing.expect(
+            allocation_tracker.liveBytes() <= max_cross_owner_quarantine_bytes,
+        );
+    }
+}
+
 test "d2b3d incompatible product partial is terminal without retiring the prior owner" {
     const Apply = struct {
         fn run(
@@ -23581,6 +25597,1260 @@ test "f3c1 actual resize and resync responses prepare typed pairs" {
         }
         try std.testing.expectEqual(WholeTurnReleaseResult.released, storage.releaseWholeTurnLease(&lease));
     }
+}
+
+test "2b2e integration resync ACK transaction publishes before payload cleanup" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    defer if (storage.lifecycle != .dead) {
+        _ = teardownForTest(&storage);
+    };
+    var lease: ExternalWholeTurnLease = .{};
+    try std.testing.expectEqual(
+        ControlSemanticPreparationResult.prepared_pair,
+        try prepareF3c1ActualResponse(
+            &storage,
+            &fixture,
+            scratch,
+            &lease,
+            .{ .resync = .{
+                .stream_id = valid_evidence.stream_id,
+                .recovery_authority = .{
+                    .owner_incarnation = fixture.client.attach_instance_id,
+                    .origin = .client,
+                    .recovery_epoch = 9,
+                },
+            } },
+            "{\"result\":{\"resync\":true}}",
+            .none,
+            null,
+        ),
+    );
+    const completed_payload = storage.completed_control.completed.payload.bytes();
+    try std.testing.expectEqualStrings(
+        "{\"result\":{\"resync\":true}}",
+        completed_payload,
+    );
+    try std.testing.expect(storage.prepareResyncAckTransitionUnderHeldLease(
+        &lease,
+        scratch,
+    ));
+    try std.testing.expect(storage.preparedResyncAckTransitionCurrent(
+        &lease,
+        scratch,
+        &scratch.whole_drain_permit,
+        &scratch.control_semantic_verdict,
+        &scratch.resync_ack_transition,
+    ));
+    const barrier = scratch.resync_ack_transition.recovery_barrier_absolute;
+    try std.testing.expect(barrier != 0);
+    try std.testing.expectEqual(
+        ConsumeResyncAckResult.consumed,
+        storage.consumeResyncAckUnderHeldLease(
+            &lease,
+            scratch,
+            &scratch.whole_drain_permit,
+            &scratch.control_semantic_verdict,
+            &scratch.resync_ack_transition,
+        ),
+    );
+    const waiting = storage.semantic_state.active.client_recovery.awaiting_snapshot;
+    try std.testing.expectEqual(@as(u64, 9), waiting.context.epoch);
+    try std.testing.expectEqual(barrier, waiting.recovery_barrier_absolute);
+    try std.testing.expect(storage.control_correlation.state == .idle);
+    try std.testing.expect(storage.completed_control == .none);
+    try std.testing.expectEqual(
+        FrozenControlResponseLifecycle.owned,
+        scratch.resync_ack_frozen_response.lifecycle,
+    );
+    try std.testing.expectEqualStrings(
+        "{\"result\":{\"resync\":true}}",
+        scratch.resync_ack_frozen_response.payload.bytes(),
+    );
+    try std.testing.expectEqual(
+        ConsumeResyncAckResult.invalid,
+        storage.consumeResyncAckUnderHeldLease(
+            &lease,
+            scratch,
+            &scratch.whole_drain_permit,
+            &scratch.control_semantic_verdict,
+            &scratch.resync_ack_transition,
+        ),
+    );
+    ExternalPumpStorage.finishControlResponsePayloadCleanupUnchecked(
+        &scratch.resync_ack_frozen_response,
+    );
+    try std.testing.expectEqual(
+        WholeTurnReleaseResult.released,
+        storage.releaseWholeTurnLease(&lease),
+    );
+}
+
+test "2b2e integration ACK receipt tamper move and replay are mutation zero" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    defer if (storage.lifecycle != .dead) {
+        _ = teardownForTest(&storage);
+    };
+    var lease: ExternalWholeTurnLease = .{};
+    try std.testing.expectEqual(
+        ControlSemanticPreparationResult.prepared_pair,
+        try prepareF3c1ActualResponse(
+            &storage,
+            &fixture,
+            scratch,
+            &lease,
+            .{ .resync = .{
+                .stream_id = valid_evidence.stream_id,
+                .recovery_authority = .{
+                    .owner_incarnation = fixture.client.attach_instance_id,
+                    .origin = .client,
+                    .recovery_epoch = 23,
+                },
+            } },
+            "{\"result\":{\"resync\":true}}",
+            .none,
+            null,
+        ),
+    );
+    try std.testing.expect(storage.prepareResyncAckTransitionUnderHeldLease(
+        &lease,
+        scratch,
+    ));
+    const semantic_before = storage.semantic_state;
+    const correlation_before = storage.control_correlation;
+    const completed_before = storage.completed_control;
+    const saved = scratch.resync_ack_transition;
+
+    scratch.resync_ack_transition.recovery_barrier_absolute += 1;
+    scratch.resync_ack_transition.digest = preparedResyncAckTransitionDigest(
+        &scratch.resync_ack_transition,
+    );
+    try std.testing.expectEqual(
+        ConsumeResyncAckResult.invalid,
+        storage.consumeResyncAckUnderHeldLease(
+            &lease,
+            scratch,
+            &scratch.whole_drain_permit,
+            &scratch.control_semantic_verdict,
+            &scratch.resync_ack_transition,
+        ),
+    );
+    try std.testing.expect(std.meta.eql(semantic_before, storage.semantic_state));
+    try std.testing.expect(std.meta.eql(correlation_before, storage.control_correlation));
+    try std.testing.expect(std.meta.eql(completed_before, storage.completed_control));
+
+    scratch.resync_ack_transition = saved;
+    var moved = saved;
+    try std.testing.expectEqual(
+        ConsumeResyncAckResult.invalid,
+        storage.consumeResyncAckUnderHeldLease(
+            &lease,
+            scratch,
+            &scratch.whole_drain_permit,
+            &scratch.control_semantic_verdict,
+            &moved,
+        ),
+    );
+    try std.testing.expect(std.meta.eql(semantic_before, storage.semantic_state));
+    try std.testing.expectEqual(
+        ConsumeResyncAckResult.consumed,
+        storage.consumeResyncAckUnderHeldLease(
+            &lease,
+            scratch,
+            &scratch.whole_drain_permit,
+            &scratch.control_semantic_verdict,
+            &scratch.resync_ack_transition,
+        ),
+    );
+    try std.testing.expectEqual(
+        ConsumeResyncAckResult.invalid,
+        storage.consumeResyncAckUnderHeldLease(
+            &lease,
+            scratch,
+            &scratch.whole_drain_permit,
+            &scratch.control_semantic_verdict,
+            &scratch.resync_ack_transition,
+        ),
+    );
+    ExternalPumpStorage.finishControlResponsePayloadCleanupUnchecked(
+        &scratch.resync_ack_frozen_response,
+    );
+    try std.testing.expectEqual(
+        WholeTurnReleaseResult.released,
+        storage.releaseWholeTurnLease(&lease),
+    );
+}
+
+test "2b2e integration snapshot binding uses only post-commit immutable output" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    const scratch = try std.testing.allocator.create(ExternalRxTurnScratch);
+    defer std.testing.allocator.destroy(scratch);
+    scratch.* = .{};
+    try std.testing.expect(ExternalRxTurnScratch.initInPlace(scratch));
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) == .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expectEqual(CommitAdoptionResult.adopted, storage.commitAdoption());
+    const prior_ack_state: client_pump.AuthorityState = .{
+        .client_recovery = .{ .control_in_flight = .{
+            .epoch = 19,
+            .deadline_ns = 1_000,
+        } },
+    };
+    const barrier: u64 = 41;
+    const ack_plan = client_pump.planRecoveryTransition(.{
+        .state = prior_ack_state,
+        .trigger = .resync_ack,
+        .control = .response_wait,
+        .now_ns = 0,
+        .recovery_barrier_absolute = barrier,
+    });
+    try std.testing.expect(ack_plan.disposition == .acknowledged);
+    storage.semantic_state = .{ .active = ack_plan.next };
+    var lease: ExternalWholeTurnLease = .{};
+    try storage.acquireWholeTurnLease(
+        &lease,
+        @intFromPtr(scratch),
+        @sizeOf(ExternalRxTurnScratch),
+    );
+    const authority = storage.owner_authority.current;
+    scratch.resync_ack_transition = .{
+        .saved_self_addr = @intFromPtr(&scratch.resync_ack_transition),
+        .storage_addr = @intFromPtr(&storage),
+        .scratch_addr = @intFromPtr(scratch),
+        .lease_addr = @intFromPtr(&lease),
+        .owner_incarnation = storage.owner_incarnation,
+        .operation_generation = storage.operation_generation,
+        .turn_generation = scratch.turn_generation,
+        .parser_generation = lease.rx_provenance.parser_seal.generation,
+        .parser_seal = lease.rx_provenance.parser_seal,
+        .parser_seal_digest = lease.rx_provenance.parser_seal.digest,
+        .sampled_now_ns = 0,
+        .recovery_deadline_ns = 1_000,
+        .authority_state = prior_ack_state,
+        .authority_generation = authority.generation,
+        .authority_seal_digest = storage.owner_authority_seal.digest,
+        .recovery_barrier_absolute = barrier,
+        .next_state = ack_plan.next,
+        .lifecycle = .consumed_tombstone,
+    };
+    scratch.resync_ack_transition.digest = preparedResyncAckTransitionDigest(
+        &scratch.resync_ack_transition,
+    );
+    var probe = IntentScratchAuthorityProbe{
+        .storage = &storage,
+        .allocator = std.testing.allocator,
+    };
+    const intent_handle = &scratch.traversal.intent;
+    try std.testing.expectEqual(
+        external_rx_intent.CreateResult.allocated,
+        storage.createIntentScratch(
+            intent_handle,
+            std.testing.allocator,
+            probe.ops(),
+        ),
+    );
+    const payload = try std.testing.allocator.dupe(u8, "recovery-snapshot");
+    var paired = client_external_mode.ExternalRxFrame{
+        .frame = .{
+            .header = .{
+                .kind = .snapshot_chunk,
+                .stream_id = valid_evidence.stream_id,
+                .flags = protocol.Flags.end_stream,
+                .payload_len = @intCast(payload.len),
+            },
+            .payload = payload,
+        },
+        .range = .{
+            .identity = .{
+                .attach_instance_id = storage.owner_incarnation,
+                .destination_slot_addr = @intFromPtr(&storage),
+            },
+            .start_absolute = barrier,
+            .end_absolute = barrier + protocol.header_size + payload.len,
+        },
+        .pair_seal = undefined,
+    };
+    client_external_mode.testing.sealExternalRxFrame(&paired);
+    var source: client_external_mode.ExternalRxOutcome = .{ .frame = paired };
+    probe.parser_generation = 2;
+    probe.buffer_start_absolute = paired.range.end_absolute;
+    try std.testing.expectEqual(
+        external_rx_intent.MoveResult.classified,
+        moveIntentFrameForTest(
+            intent_handle,
+            &source,
+            probe.ops(),
+            valid_evidence.stream_id,
+        ),
+    );
+    try std.testing.expectEqual(
+        RxAggregateCreateResult.allocated,
+        storage.createRxAggregate(
+            &lease,
+            intent_handle,
+            std.testing.allocator,
+            &scratch.aggregate_ranges,
+        ),
+    );
+    try std.testing.expectEqual(
+        RxAggregateTransferResult.staged,
+        storage.moveScreenIntoRxAggregate(
+            &lease,
+            intent_handle,
+            0,
+            probe.ops(),
+        ),
+    );
+    try std.testing.expectEqual(
+        RxAggregateTransferResult.staged,
+        storage.transferScreenToLedger(&lease, intent_handle, 0),
+    );
+    try std.testing.expectEqual(
+        RxAggregateTransferResult.staged,
+        storage.admitScreenToLiveBatch(&lease, 0),
+    );
+    try std.testing.expectEqual(
+        RxAggregateFinalizeResult.finalized,
+        storage.finalizeRxAggregate(&lease, intent_handle),
+    );
+    const aggregate_before = storage.validateReadyRxAggregate(&lease).?;
+    try std.testing.expectEqual(
+        RecoveryCommitOutputLifecycle.empty,
+        aggregate_before.recovery_commit_output.lifecycle,
+    );
+    const side_intent_committed = storage.commitRecoveryTransportSideIntentUnderHeldLease(
+        &lease,
+        aggregate_before,
+        &scratch.resync_ack_transition,
+    );
+    const epoch_after_side_intent = storage.inbox_ledger.accountingView().mutation_epoch;
+    try std.testing.expectEqual(
+        external_inbox_ledger.CommittedLiveOutputLifecycle.claimed,
+        aggregate_before.recovery_commit_output.ledger_output.lifecycle,
+    );
+    try std.testing.expect(
+        aggregate_before.recovery_snapshot_commit.source == .already_committed,
+    );
+    try std.testing.expect(external_inbox_ledger.claimedCommittedLiveOutputValid(
+        &storage.inbox_ledger,
+        &aggregate_before.recovery_commit_output.ledger_output,
+        @intFromPtr(&aggregate_before.recovery_snapshot_commit),
+    ));
+    const disposition_entry = aggregate_before.recovery_dispositions.entries[0];
+    try std.testing.expectEqual(
+        RecoverySnapshotTokenSource.committed_output,
+        disposition_entry.token_source,
+    );
+    try std.testing.expect(std.mem.eql(
+        u8,
+        &disposition_entry.digest,
+        &recoverySnapshotDispositionEntryDigest(&disposition_entry),
+    ));
+    for (aggregate_before.recovery_dispositions.entries[1..]) |tail_entry|
+        try std.testing.expect(std.meta.eql(
+            tail_entry,
+            RecoverySnapshotDispositionEntry{},
+        ));
+    const disposition_root = aggregate_before.dispositions[
+        disposition_entry.mutation_index
+    ].final_live;
+    try std.testing.expect(std.meta.eql(
+        disposition_root.token,
+        disposition_entry.token,
+    ));
+    const actual_output_entry = aggregate_before.recovery_commit_output
+        .ledger_output.entries[disposition_entry.commit_output_index];
+    try std.testing.expect(std.meta.eql(
+        actual_output_entry.token,
+        disposition_entry.token,
+    ));
+    try std.testing.expect(std.mem.eql(
+        u8,
+        &actual_output_entry.semantic_digest,
+        &disposition_entry.committed_semantic_digest,
+    ));
+    const actual_completed = actual_output_entry.semantic.completed;
+    const actual_range = actual_completed.provenance.external;
+    try std.testing.expect(actual_completed.is_snapshot);
+    try std.testing.expect(std.meta.eql(
+        external_inbox_ledger.RecoveryIntent{ .client = 19 },
+        actual_completed.recovery_intent,
+    ));
+    try std.testing.expectEqual(client_pump.RecoveryOrigin.client, disposition_entry.origin);
+    try std.testing.expectEqual(@as(u64, 19), disposition_entry.recovery_epoch);
+    try std.testing.expect(disposition_entry.is_snapshot);
+    try std.testing.expectEqual(
+        disposition_entry.start_absolute,
+        actual_range.start_absolute,
+    );
+    try std.testing.expectEqual(
+        disposition_entry.end_absolute,
+        actual_range.start_absolute + actual_range.span,
+    );
+    try std.testing.expectEqual(
+        client_pump.RecoverySnapshotBindingDisposition.bound,
+        client_pump.planRecoverySnapshotBinding(
+            aggregate_before.recovery_snapshot_commit.authority_state,
+            .{
+                .origin = disposition_entry.origin,
+                .recovery_epoch = disposition_entry.recovery_epoch,
+                .is_snapshot = disposition_entry.is_snapshot,
+                .start_absolute = disposition_entry.start_absolute,
+                .end_absolute = disposition_entry.end_absolute,
+                .committed_token_generation = disposition_entry.token.generation,
+            },
+        ).disposition,
+    );
+    const binding_plan = client_pump.planRecoverySnapshotBinding(
+        aggregate_before.recovery_snapshot_commit.authority_state,
+        .{
+            .origin = disposition_entry.origin,
+            .recovery_epoch = disposition_entry.recovery_epoch,
+            .is_snapshot = disposition_entry.is_snapshot,
+            .start_absolute = disposition_entry.start_absolute,
+            .end_absolute = disposition_entry.end_absolute,
+            .committed_token_generation = disposition_entry.token.generation,
+        },
+    );
+    try std.testing.expect(std.meta.eql(
+        binding_plan.next,
+        aggregate_before.recovery_snapshot_commit.binding_next_state,
+    ));
+    var transfer_found = false;
+    for (&aggregate_before.screen_transfers) |*transfer| {
+        if (@intFromPtr(transfer) == disposition_entry.transfer_addr and
+            transfer.lifecycle == .mutation_bound and
+            transfer.mutation_index == disposition_entry.mutation_index)
+            transfer_found = true;
+    }
+    try std.testing.expect(transfer_found);
+    var destination_found = false;
+    for (aggregate_before.destination_writes[0..aggregate_before.destination_write_count]) |*write| {
+        if (@intFromPtr(write) == disposition_entry.cleanup_destination_addr and
+            write.mutation_index == disposition_entry.mutation_index and
+            write.kind == .screen_completed and
+            write.expected_lifecycle == disposition_entry.cleanup_lifecycle)
+            destination_found = true;
+    }
+    try std.testing.expect(destination_found);
+    try std.testing.expectEqual(@as(u8, 1), aggregate_before.recovery_dispositions.count);
+    try std.testing.expect(aggregate_before.recovery_snapshot_commit.has_binding);
+    try std.testing.expectEqual(@as(u8, 0), disposition_entry.commit_output_index);
+    try std.testing.expectEqual(@as(u8, 0), disposition_entry.mutation_index);
+    try std.testing.expect(ExternalPumpStorage.recoverySnapshotDispositionsCurrent(
+        aggregate_before,
+    ));
+    try std.testing.expect(storage.preparedRecoverySnapshotCommitCurrent(
+        &lease,
+        aggregate_before,
+    ));
+    try std.testing.expect(side_intent_committed);
+    const copied_precommit = try std.testing.allocator.create(PreparedRxAggregate);
+    copied_precommit.* = aggregate_before.*;
+    try std.testing.expect(!storage.preparedRecoverySnapshotCommitCurrent(
+        &lease,
+        copied_precommit,
+    ));
+    std.testing.allocator.destroy(copied_precommit);
+    var copied_lease = lease;
+    try std.testing.expect(!storage.preparedRecoverySnapshotCommitCurrent(
+        &copied_lease,
+        aggregate_before,
+    ));
+    var copied_storage: ExternalPumpStorage = .{};
+    try std.testing.expect(!copied_storage.preparedRecoverySnapshotCommitCurrent(
+        &lease,
+        aggregate_before,
+    ));
+    const claimed_output = &aggregate_before.recovery_commit_output.ledger_output;
+    external_inbox_ledger.claimCommittedLiveOutputUnchecked(
+        claimed_output,
+        @intFromPtr(aggregate_before),
+    );
+    aggregate_before.recovery_snapshot_commit.source.already_committed.output_digest =
+        claimed_output.digest;
+    aggregate_before.recovery_snapshot_commit.digest =
+        preparedRecoverySnapshotCommitDigest(
+            &aggregate_before.recovery_snapshot_commit,
+        );
+    aggregate_before.digest = preparedRxAggregateDigest(aggregate_before);
+    try std.testing.expect(!storage.preparedRecoverySnapshotCommitCurrent(
+        &lease,
+        aggregate_before,
+    ));
+    external_inbox_ledger.claimCommittedLiveOutputUnchecked(
+        claimed_output,
+        @intFromPtr(&aggregate_before.recovery_snapshot_commit),
+    );
+    aggregate_before.recovery_snapshot_commit.source.already_committed.output_digest =
+        claimed_output.digest;
+    aggregate_before.recovery_snapshot_commit.digest =
+        preparedRecoverySnapshotCommitDigest(
+            &aggregate_before.recovery_snapshot_commit,
+        );
+    aggregate_before.digest = preparedRxAggregateDigest(aggregate_before);
+    try std.testing.expect(storage.preparedRecoverySnapshotCommitCurrent(
+        &lease,
+        aggregate_before,
+    ));
+    const output_index = aggregate_before.recovery_snapshot_commit.ledger_output_index;
+    const slot_index = claimed_output.entries[output_index].token.slot;
+    const saved_slot_generation = storage.inbox_ledger.slots[slot_index].generation;
+    const saved_output_token = claimed_output.entries[output_index].token;
+    storage.inbox_ledger.slots[slot_index].generation +%= 1;
+    claimed_output.entries[output_index].token.generation +%= 1;
+    external_inbox_ledger.claimCommittedLiveOutputUnchecked(
+        claimed_output,
+        @intFromPtr(&aggregate_before.recovery_snapshot_commit),
+    );
+    aggregate_before.recovery_snapshot_commit.source.already_committed.output_digest =
+        claimed_output.digest;
+    aggregate_before.recovery_snapshot_commit.digest =
+        preparedRecoverySnapshotCommitDigest(
+            &aggregate_before.recovery_snapshot_commit,
+        );
+    aggregate_before.digest = preparedRxAggregateDigest(aggregate_before);
+    try std.testing.expect(!storage.preparedRecoverySnapshotCommitCurrent(
+        &lease,
+        aggregate_before,
+    ));
+    storage.inbox_ledger.slots[slot_index].generation = saved_slot_generation;
+    claimed_output.entries[output_index].token = saved_output_token;
+    external_inbox_ledger.claimCommittedLiveOutputUnchecked(
+        claimed_output,
+        @intFromPtr(&aggregate_before.recovery_snapshot_commit),
+    );
+    aggregate_before.recovery_snapshot_commit.source.already_committed.output_digest =
+        claimed_output.digest;
+    aggregate_before.recovery_snapshot_commit.digest =
+        preparedRecoverySnapshotCommitDigest(
+            &aggregate_before.recovery_snapshot_commit,
+        );
+    aggregate_before.digest = preparedRxAggregateDigest(aggregate_before);
+    try std.testing.expect(storage.preparedRecoverySnapshotCommitCurrent(
+        &lease,
+        aggregate_before,
+    ));
+    const saved_binding_destination_addr = aggregate_before
+        .recovery_snapshot_commit.binding_destination_addr;
+    aggregate_before.recovery_snapshot_commit.binding_destination_addr +%= 1;
+    aggregate_before.recovery_snapshot_commit.digest =
+        preparedRecoverySnapshotCommitDigest(
+            &aggregate_before.recovery_snapshot_commit,
+        );
+    aggregate_before.digest = preparedRxAggregateDigest(aggregate_before);
+    try std.testing.expect(!storage.preparedRecoverySnapshotCommitCurrent(
+        &lease,
+        aggregate_before,
+    ));
+    aggregate_before.recovery_snapshot_commit.binding_destination_addr =
+        saved_binding_destination_addr;
+    aggregate_before.recovery_snapshot_commit.digest =
+        preparedRecoverySnapshotCommitDigest(
+            &aggregate_before.recovery_snapshot_commit,
+        );
+    aggregate_before.recovery_snapshot_binding.lifecycle = .committed;
+    aggregate_before.recovery_snapshot_binding.digest =
+        committedRecoverySnapshotBindingDigest(
+            &aggregate_before.recovery_snapshot_binding,
+        );
+    aggregate_before.digest = preparedRxAggregateDigest(aggregate_before);
+    try std.testing.expect(!storage.preparedRecoverySnapshotCommitCurrent(
+        &lease,
+        aggregate_before,
+    ));
+    aggregate_before.recovery_snapshot_binding = .{};
+    aggregate_before.recovery_snapshot_commit.digest =
+        preparedRecoverySnapshotCommitDigest(
+            &aggregate_before.recovery_snapshot_commit,
+        );
+    aggregate_before.digest = preparedRxAggregateDigest(aggregate_before);
+    try std.testing.expect(storage.preparedRecoverySnapshotCommitCurrent(
+        &lease,
+        aggregate_before,
+    ));
+    const saved_source = aggregate_before.recovery_snapshot_commit.source;
+    aggregate_before.recovery_snapshot_commit.source.already_committed.output_addr +%= 1;
+    aggregate_before.recovery_snapshot_commit.digest =
+        preparedRecoverySnapshotCommitDigest(
+            &aggregate_before.recovery_snapshot_commit,
+        );
+    aggregate_before.digest = preparedRxAggregateDigest(aggregate_before);
+    try std.testing.expect(!storage.preparedRecoverySnapshotCommitCurrent(
+        &lease,
+        aggregate_before,
+    ));
+    aggregate_before.recovery_snapshot_commit.source = saved_source;
+    aggregate_before.recovery_snapshot_commit.digest =
+        preparedRecoverySnapshotCommitDigest(
+            &aggregate_before.recovery_snapshot_commit,
+        );
+    aggregate_before.digest = preparedRxAggregateDigest(aggregate_before);
+    const saved_cleanup_digest = aggregate_before.recovery_dispositions.entries[0]
+        .cleanup_destination_digest;
+    aggregate_before.recovery_dispositions.entries[0]
+        .cleanup_destination_digest[0] ^= 0x40;
+    aggregate_before.recovery_dispositions.entries[0].digest =
+        recoverySnapshotDispositionEntryDigest(
+            &aggregate_before.recovery_dispositions.entries[0],
+        );
+    aggregate_before.recovery_dispositions.root_digest =
+        recoverySnapshotDispositionRootDigest(
+            &aggregate_before.recovery_dispositions,
+        );
+    aggregate_before.recovery_snapshot_commit.dispositions_root_digest =
+        aggregate_before.recovery_dispositions.root_digest;
+    aggregate_before.recovery_snapshot_commit.digest =
+        preparedRecoverySnapshotCommitDigest(
+            &aggregate_before.recovery_snapshot_commit,
+        );
+    aggregate_before.digest = preparedRxAggregateDigest(aggregate_before);
+    try std.testing.expect(!storage.preparedRecoverySnapshotCommitCurrent(
+        &lease,
+        aggregate_before,
+    ));
+    aggregate_before.recovery_dispositions.entries[0]
+        .cleanup_destination_digest = saved_cleanup_digest;
+    aggregate_before.recovery_dispositions.entries[0].digest =
+        recoverySnapshotDispositionEntryDigest(
+            &aggregate_before.recovery_dispositions.entries[0],
+        );
+    aggregate_before.recovery_dispositions.root_digest =
+        recoverySnapshotDispositionRootDigest(
+            &aggregate_before.recovery_dispositions,
+        );
+    aggregate_before.recovery_snapshot_commit.dispositions_root_digest =
+        aggregate_before.recovery_dispositions.root_digest;
+    aggregate_before.recovery_snapshot_commit.digest =
+        preparedRecoverySnapshotCommitDigest(
+            &aggregate_before.recovery_snapshot_commit,
+        );
+    aggregate_before.digest = preparedRxAggregateDigest(aggregate_before);
+    const saved_semantic_digest = aggregate_before.recovery_dispositions.entries[0]
+        .committed_semantic_digest;
+    aggregate_before.recovery_dispositions.entries[0]
+        .committed_semantic_digest[0] ^= 0x80;
+    aggregate_before.recovery_dispositions.entries[0].digest =
+        recoverySnapshotDispositionEntryDigest(
+            &aggregate_before.recovery_dispositions.entries[0],
+        );
+    aggregate_before.recovery_dispositions.root_digest =
+        recoverySnapshotDispositionRootDigest(
+            &aggregate_before.recovery_dispositions,
+        );
+    aggregate_before.recovery_snapshot_commit.dispositions_root_digest =
+        aggregate_before.recovery_dispositions.root_digest;
+    aggregate_before.recovery_snapshot_commit.digest =
+        preparedRecoverySnapshotCommitDigest(
+            &aggregate_before.recovery_snapshot_commit,
+        );
+    aggregate_before.digest = preparedRxAggregateDigest(aggregate_before);
+    try std.testing.expect(!storage.preparedRecoverySnapshotCommitCurrent(
+        &lease,
+        aggregate_before,
+    ));
+    aggregate_before.recovery_dispositions.entries[0]
+        .committed_semantic_digest = saved_semantic_digest;
+    aggregate_before.recovery_dispositions.entries[0].digest =
+        recoverySnapshotDispositionEntryDigest(
+            &aggregate_before.recovery_dispositions.entries[0],
+        );
+    aggregate_before.recovery_dispositions.root_digest =
+        recoverySnapshotDispositionRootDigest(
+            &aggregate_before.recovery_dispositions,
+        );
+    aggregate_before.recovery_snapshot_commit.dispositions_root_digest =
+        aggregate_before.recovery_dispositions.root_digest;
+    aggregate_before.recovery_snapshot_commit.digest =
+        preparedRecoverySnapshotCommitDigest(
+            &aggregate_before.recovery_snapshot_commit,
+        );
+    aggregate_before.digest = preparedRxAggregateDigest(aggregate_before);
+    try std.testing.expect(storage.preparedRecoverySnapshotCommitCurrent(
+        &lease,
+        aggregate_before,
+    ));
+    try std.testing.expect(!storage.commitRecoveryTransportSideIntentUnderHeldLease(
+        &lease,
+        aggregate_before,
+        &scratch.resync_ack_transition,
+    ));
+    try std.testing.expect(storage.validateReadyRxAggregate(&lease) != null);
+    const committed_transfer = &aggregate_before.screen_transfers[0];
+    try std.testing.expectEqual(
+        ScreenTransferLifecycle.mutation_bound,
+        committed_transfer.lifecycle,
+    );
+    try std.testing.expect(external_rx_intent.validateMovedIntentPayloadTombstone(
+        &committed_transfer.neutral,
+        @intFromPtr(aggregate_before),
+    ));
+    try std.testing.expect(external_rx_intent.validateScreenMutationScalar(
+        intent_handle,
+        0,
+        @intFromPtr(aggregate_before),
+        &aggregate_before.screen_proofs[0],
+    ));
+    try std.testing.expect(validateCommittedRecoveryScreenGraph(
+        aggregate_before,
+        intent_handle,
+    ));
+    try std.testing.expect(validateScreenDestinationPlan(
+        &storage,
+        aggregate_before,
+    ));
+    try std.testing.expectEqual(
+        RxAggregateCommitResult.committed,
+        storage.commitRxAggregate(&lease, intent_handle),
+    );
+    try std.testing.expectEqual(
+        epoch_after_side_intent,
+        storage.inbox_ledger.accountingView().mutation_epoch,
+    );
+    try std.testing.expect(retainedRxAggregateValid(&storage));
+    const aggregate: *const PreparedRxAggregate =
+        @ptrFromInt(storage.rx_aggregate_handle.aggregate_addr);
+    try std.testing.expectEqual(
+        RecoverySnapshotCommitLifecycle.consumed_tombstone,
+        aggregate.recovery_snapshot_commit.lifecycle,
+    );
+    const committed_source = aggregate.recovery_snapshot_commit.source.already_committed;
+    try std.testing.expectEqual(
+        @intFromPtr(&aggregate.recovery_commit_output.ledger_output),
+        committed_source.output_addr,
+    );
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &aggregate.recovery_commit_output.ledger_output.digest,
+        &committed_source.output_digest,
+    ));
+    try std.testing.expectEqual(
+        external_inbox_ledger.CommittedLiveOutputLifecycle.consumed_tombstone,
+        aggregate.recovery_commit_output.ledger_output.lifecycle,
+    );
+    const prepared_entry = aggregate.recovery_dispositions.entries[
+        aggregate.recovery_snapshot_commit.binding_entry_index
+    ];
+    const ledger_entry = aggregate.recovery_commit_output.ledger_output.entries[
+        aggregate.recovery_snapshot_commit.ledger_output_index
+    ];
+    try std.testing.expect(std.meta.eql(prepared_entry.token, ledger_entry.token));
+    try std.testing.expectEqual(
+        external_inbox_ledger.PayloadPhase.completed,
+        ledger_entry.phase,
+    );
+    try std.testing.expect(ledger_entry.semantic.completed.is_snapshot);
+    try std.testing.expect(std.meta.eql(
+        external_inbox_ledger.RecoveryIntent{ .client = 19 },
+        ledger_entry.semantic.completed.recovery_intent,
+    ));
+    try std.testing.expectEqual(
+        prepared_entry.start_absolute,
+        ledger_entry.semantic.completed.provenance.external.start_absolute,
+    );
+    try std.testing.expectEqual(
+        prepared_entry.end_absolute,
+        ledger_entry.semantic.completed.provenance.external.start_absolute +
+            ledger_entry.semantic.completed.provenance.external.span,
+    );
+    try std.testing.expectEqual(
+        client_pump.RecoverySnapshotBindingDisposition.bound,
+        client_pump.planRecoverySnapshotBinding(
+            aggregate.recovery_snapshot_commit.authority_state,
+            .{
+                .origin = prepared_entry.origin,
+                .recovery_epoch = prepared_entry.recovery_epoch,
+                .is_snapshot = prepared_entry.is_snapshot,
+                .start_absolute = prepared_entry.start_absolute,
+                .end_absolute = prepared_entry.end_absolute,
+                .committed_token_generation = ledger_entry.token.generation,
+            },
+        ).disposition,
+    );
+    try std.testing.expect(storage.semantic_state == .active);
+    try std.testing.expectEqual(
+        RecoveryCommitOutputLifecycle.consumed_tombstone,
+        aggregate.recovery_commit_output.lifecycle,
+    );
+    try std.testing.expectEqual(
+        RecoverySnapshotBindingLifecycle.consumed_tombstone,
+        aggregate.recovery_snapshot_binding.lifecycle,
+    );
+    try std.testing.expect(storage.committedRecoverySnapshotBindingCurrent(
+        &lease,
+        aggregate,
+    ));
+    try std.testing.expectEqual(
+        RecoverySnapshotBindingSource.same_drain_side_intent,
+        aggregate.recovery_snapshot_binding.source_discriminator,
+    );
+    try std.testing.expectEqual(
+        @intFromPtr(&scratch.resync_ack_transition),
+        aggregate.recovery_snapshot_binding.ack_transition_addr,
+    );
+    try std.testing.expect(std.mem.eql(
+        u8,
+        &scratch.resync_ack_transition.digest,
+        &aggregate.recovery_snapshot_binding.ack_transition_digest,
+    ));
+    const copied_aggregate = try std.testing.allocator.create(PreparedRxAggregate);
+    copied_aggregate.* = aggregate.*;
+    try std.testing.expect(!storage.committedRecoverySnapshotBindingCurrent(
+        &lease,
+        copied_aggregate,
+    ));
+    std.testing.allocator.destroy(copied_aggregate);
+    var foreign_lease = lease;
+    try std.testing.expect(!storage.committedRecoverySnapshotBindingCurrent(
+        &foreign_lease,
+        aggregate,
+    ));
+    var foreign_storage: ExternalPumpStorage = .{};
+    try std.testing.expect(!foreign_storage.committedRecoverySnapshotBindingCurrent(
+        &lease,
+        aggregate,
+    ));
+    const mutable_binding = &aggregate_before.recovery_snapshot_binding;
+    const saved_ledger_authority = mutable_binding.ledger_authority_digest;
+    mutable_binding.ledger_authority_digest[0] ^= 1;
+    mutable_binding.digest = committedRecoverySnapshotBindingDigest(
+        mutable_binding,
+    );
+    try std.testing.expect(!storage.committedRecoverySnapshotBindingCurrent(
+        &lease,
+        aggregate,
+    ));
+    mutable_binding.ledger_authority_digest = saved_ledger_authority;
+    mutable_binding.digest = committedRecoverySnapshotBindingDigest(
+        mutable_binding,
+    );
+    try std.testing.expect(storage.committedRecoverySnapshotBindingCurrent(
+        &lease,
+        aggregate,
+    ));
+    const in_flight = storage.semantic_state.active.client_recovery.snapshot_in_flight;
+    try std.testing.expectEqual(@as(u64, 19), in_flight.context.epoch);
+    try std.testing.expectEqual(@as(u64, 41), in_flight.recovery_barrier_absolute);
+    try std.testing.expectEqual(
+        aggregate.recovery_commit_output.token.generation,
+        in_flight.expected_token_generation,
+    );
+    try std.testing.expect(std.meta.eql(
+        aggregate.recovery_commit_output.token,
+        aggregate.recovery_snapshot_binding.token,
+    ));
+    try std.testing.expectEqual(
+        WholeTurnReleaseResult.released,
+        storage.releaseWholeTurnLease(&lease),
+    );
+    try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(&storage));
+}
+
+test "2b2e integration commits first exact snapshot and retires later exact snapshot" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(initTestStorage(&storage, &fixture.client, valid_evidence) == .initialized);
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expectEqual(CommitAdoptionResult.adopted, storage.commitAdoption());
+    storage.semantic_state = .{ .active = .{ .client_recovery = .{
+        .awaiting_snapshot = .{
+            .context = .{ .epoch = 29, .deadline_ns = 1_000 },
+            .recovery_barrier_absolute = 101,
+        },
+    } } };
+
+    var ranges: external_owner_range.Scratch = .{};
+    var lease: ExternalWholeTurnLease = .{};
+    try storage.acquireWholeTurnLease(&lease, @intFromPtr(&ranges), @sizeOf(external_owner_range.Scratch));
+    var probe = IntentScratchAuthorityProbe{ .storage = &storage, .allocator = std.testing.allocator };
+    var intent_handle: external_rx_intent.ExternalRxIntentHandle = .{};
+    try std.testing.expectEqual(
+        external_rx_intent.CreateResult.allocated,
+        storage.createIntentScratch(&intent_handle, std.testing.allocator, probe.ops()),
+    );
+
+    var next_absolute: u64 = 101;
+    for ([_][]const u8{ "first-exact", "second-must-drop" }, 0..) |text, index| {
+        const payload = try std.testing.allocator.dupe(u8, text);
+        var paired = client_external_mode.ExternalRxFrame{
+            .frame = .{
+                .header = .{
+                    .kind = .snapshot_chunk,
+                    .stream_id = valid_evidence.stream_id,
+                    .flags = protocol.Flags.end_stream,
+                    .payload_len = @intCast(payload.len),
+                },
+                .payload = payload,
+            },
+            .range = .{
+                .identity = .{
+                    .attach_instance_id = storage.owner_incarnation,
+                    .destination_slot_addr = @intFromPtr(&storage),
+                },
+                .start_absolute = next_absolute,
+                .end_absolute = next_absolute + protocol.header_size + payload.len,
+            },
+            .pair_seal = undefined,
+        };
+        next_absolute = paired.range.end_absolute;
+        client_external_mode.testing.sealExternalRxFrame(&paired);
+        var source: client_external_mode.ExternalRxOutcome = .{ .frame = paired };
+        probe.parser_generation = @intCast(index + 2);
+        probe.buffer_start_absolute = paired.range.end_absolute;
+        try std.testing.expectEqual(
+            external_rx_intent.MoveResult.classified,
+            moveIntentFrameForTest(&intent_handle, &source, probe.ops(), valid_evidence.stream_id),
+        );
+    }
+
+    try std.testing.expectEqual(
+        RxAggregateCreateResult.allocated,
+        storage.createRxAggregate(&lease, &intent_handle, std.testing.allocator, &ranges),
+    );
+    for (0..2) |index| {
+        try std.testing.expectEqual(
+            RxAggregateTransferResult.staged,
+            storage.moveScreenIntoRxAggregate(&lease, &intent_handle, @intCast(index), probe.ops()),
+        );
+        try std.testing.expectEqual(
+            RxAggregateTransferResult.staged,
+            storage.transferScreenToLedger(&lease, &intent_handle, @intCast(index)),
+        );
+        try std.testing.expectEqual(
+            RxAggregateTransferResult.staged,
+            storage.admitScreenToLiveBatch(&lease, @intCast(index)),
+        );
+    }
+    try std.testing.expectEqual(
+        RxAggregateFinalizeResult.finalized,
+        storage.finalizeRxAggregate(&lease, &intent_handle),
+    );
+    const prepared = storage.validateReadyRxAggregate(&lease).?;
+    try std.testing.expectEqual(@as(u8, 2), prepared.recovery_dispositions.count);
+    try std.testing.expectEqual(RecoverySnapshotDisposition.bind, prepared.recovery_dispositions.entries[0].disposition);
+    try std.testing.expectEqual(RecoverySnapshotDisposition.drop, prepared.recovery_dispositions.entries[1].disposition);
+    try std.testing.expect(prepared.dispositions[0] == .final_live);
+    try std.testing.expect(prepared.dispositions[1] == .cleanup_final);
+    try std.testing.expectEqual(DestinationWriteKind.screen_completed, prepared.destination_writes[0].kind);
+    try std.testing.expectEqual(DestinationWriteKind.screen_cleanup, prepared.destination_writes[1].kind);
+
+    try std.testing.expectEqual(
+        RxAggregateCommitResult.committed,
+        storage.commitRxAggregate(&lease, &intent_handle),
+    );
+    try std.testing.expectEqual(@as(u8, 1), storage.live_screen.len);
+    const committed: *const PreparedRxAggregate = @ptrFromInt(storage.rx_aggregate_handle.aggregate_addr);
+    try std.testing.expectEqual(@as(u8, 2), committed.recovery_commit_output.ledger_output.count);
+    try std.testing.expect(!committed.recovery_commit_output.ledger_output.entries[0].cleanup_only);
+    try std.testing.expect(committed.recovery_commit_output.ledger_output.entries[1].cleanup_only);
+    try std.testing.expectEqual(
+        RecoverySnapshotBindingSource.later_turn_commit,
+        committed.recovery_snapshot_binding.source_discriminator,
+    );
+    try std.testing.expect(storage.committedRecoverySnapshotBindingCurrent(
+        &lease,
+        committed,
+    ));
+    const accounting = storage.inbox_ledger.accountingView();
+    try std.testing.expectEqual(@as(usize, 1), accounting.charged_items);
+    try std.testing.expectEqual(@as(usize, 0), accounting.retired_items);
+    try std.testing.expectEqual(WholeTurnReleaseResult.released, storage.releaseWholeTurnLease(&lease));
+    try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(&storage));
+}
+
+test "2b2e integration aggregate allocation failure is recovery mutation zero" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(
+        initTestStorage(&storage, &fixture.client, valid_evidence) == .initialized,
+    );
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expectEqual(CommitAdoptionResult.adopted, storage.commitAdoption());
+    storage.semantic_state = .{ .active = .{ .client_recovery = .{
+        .awaiting_snapshot = .{
+            .context = .{ .epoch = 37, .deadline_ns = 1_000 },
+            .recovery_barrier_absolute = 700,
+        },
+    } } };
+    var ranges: external_owner_range.Scratch = .{};
+    var lease: ExternalWholeTurnLease = .{};
+    try storage.acquireWholeTurnLease(
+        &lease,
+        @intFromPtr(&ranges),
+        @sizeOf(external_owner_range.Scratch),
+    );
+    var probe = IntentScratchAuthorityProbe{
+        .storage = &storage,
+        .allocator = std.testing.allocator,
+    };
+    var intent_handle: external_rx_intent.ExternalRxIntentHandle = .{};
+    try std.testing.expectEqual(
+        external_rx_intent.CreateResult.allocated,
+        storage.createIntentScratch(
+            &intent_handle,
+            std.testing.allocator,
+            probe.ops(),
+        ),
+    );
+    const payload = try std.testing.allocator.dupe(u8, "oom-snapshot");
+    var paired = client_external_mode.ExternalRxFrame{
+        .frame = .{
+            .header = .{
+                .kind = .snapshot_chunk,
+                .stream_id = valid_evidence.stream_id,
+                .flags = protocol.Flags.end_stream,
+                .payload_len = @intCast(payload.len),
+            },
+            .payload = payload,
+        },
+        .range = .{
+            .identity = .{
+                .attach_instance_id = storage.owner_incarnation,
+                .destination_slot_addr = @intFromPtr(&storage),
+            },
+            .start_absolute = 700,
+            .end_absolute = 700 + protocol.header_size + payload.len,
+        },
+        .pair_seal = undefined,
+    };
+    client_external_mode.testing.sealExternalRxFrame(&paired);
+    var source: client_external_mode.ExternalRxOutcome = .{ .frame = paired };
+    probe.parser_generation = 2;
+    probe.buffer_start_absolute = paired.range.end_absolute;
+    try std.testing.expectEqual(
+        external_rx_intent.MoveResult.classified,
+        moveIntentFrameForTest(
+            &intent_handle,
+            &source,
+            probe.ops(),
+            valid_evidence.stream_id,
+        ),
+    );
+    const semantic_before = storage.semantic_state;
+    const accounting_before = storage.inbox_ledger.accountingView();
+    var failing = F3c1FailAllocator{
+        .parent = std.testing.allocator,
+        .fail = true,
+    };
+    try std.testing.expectEqual(
+        RxAggregateCreateResult.out_of_memory,
+        storage.createRxAggregate(
+            &lease,
+            &intent_handle,
+            failing.allocator(),
+            &ranges,
+        ),
+    );
+    try std.testing.expect(std.meta.eql(semantic_before, storage.semantic_state));
+    try std.testing.expect(std.meta.eql(
+        accounting_before,
+        storage.inbox_ledger.accountingView(),
+    ));
+    try std.testing.expectEqual(
+        RxAggregateHandleLifecycle.empty,
+        storage.rx_aggregate_handle.lifecycle,
+    );
+    try std.testing.expectEqual(
+        WholeTurnReleaseResult.released,
+        storage.releaseWholeTurnLease(&lease),
+    );
+    try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(&storage));
+}
+
+test "2b2e integration retires an all-drop pre-barrier snapshot without binding" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(initTestStorage(&storage, &fixture.client, valid_evidence) == .initialized);
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expectEqual(CommitAdoptionResult.adopted, storage.commitAdoption());
+    const waiting_state: client_pump.AuthorityState = .{ .client_recovery = .{
+        .awaiting_snapshot = .{
+            .context = .{ .epoch = 31, .deadline_ns = 1_000 },
+            .recovery_barrier_absolute = 500,
+        },
+    } };
+    storage.semantic_state = .{ .active = waiting_state };
+
+    var ranges: external_owner_range.Scratch = .{};
+    var lease: ExternalWholeTurnLease = .{};
+    try storage.acquireWholeTurnLease(&lease, @intFromPtr(&ranges), @sizeOf(external_owner_range.Scratch));
+    var probe = IntentScratchAuthorityProbe{ .storage = &storage, .allocator = std.testing.allocator };
+    var intent_handle: external_rx_intent.ExternalRxIntentHandle = .{};
+    try std.testing.expectEqual(
+        external_rx_intent.CreateResult.allocated,
+        storage.createIntentScratch(&intent_handle, std.testing.allocator, probe.ops()),
+    );
+    const payload = try std.testing.allocator.dupe(u8, "pre-barrier-drop");
+    var paired = client_external_mode.ExternalRxFrame{
+        .frame = .{
+            .header = .{
+                .kind = .snapshot_chunk,
+                .stream_id = valid_evidence.stream_id,
+                .flags = protocol.Flags.end_stream,
+                .payload_len = @intCast(payload.len),
+            },
+            .payload = payload,
+        },
+        .range = .{
+            .identity = .{
+                .attach_instance_id = storage.owner_incarnation,
+                .destination_slot_addr = @intFromPtr(&storage),
+            },
+            .start_absolute = 400,
+            .end_absolute = 400 + protocol.header_size + payload.len,
+        },
+        .pair_seal = undefined,
+    };
+    client_external_mode.testing.sealExternalRxFrame(&paired);
+    var source: client_external_mode.ExternalRxOutcome = .{ .frame = paired };
+    probe.parser_generation = 2;
+    probe.buffer_start_absolute = paired.range.end_absolute;
+    try std.testing.expectEqual(
+        external_rx_intent.MoveResult.classified,
+        moveIntentFrameForTest(&intent_handle, &source, probe.ops(), valid_evidence.stream_id),
+    );
+    try std.testing.expectEqual(
+        RxAggregateCreateResult.allocated,
+        storage.createRxAggregate(&lease, &intent_handle, std.testing.allocator, &ranges),
+    );
+    try std.testing.expectEqual(
+        RxAggregateTransferResult.staged,
+        storage.moveScreenIntoRxAggregate(&lease, &intent_handle, 0, probe.ops()),
+    );
+    try std.testing.expectEqual(
+        RxAggregateTransferResult.staged,
+        storage.transferScreenToLedger(&lease, &intent_handle, 0),
+    );
+    try std.testing.expectEqual(
+        RxAggregateTransferResult.staged,
+        storage.admitScreenToLiveBatch(&lease, 0),
+    );
+    try std.testing.expectEqual(
+        RxAggregateFinalizeResult.finalized,
+        storage.finalizeRxAggregate(&lease, &intent_handle),
+    );
+    const prepared = storage.validateReadyRxAggregate(&lease).?;
+    try std.testing.expect(!prepared.recovery_snapshot_commit.has_binding);
+    try std.testing.expectEqual(RecoverySnapshotDisposition.drop, prepared.recovery_dispositions.entries[0].disposition);
+    try std.testing.expect(prepared.dispositions[0] == .cleanup_final);
+    try std.testing.expectEqual(DestinationWriteKind.screen_cleanup, prepared.destination_writes[0].kind);
+    try std.testing.expectEqual(
+        RxAggregateCommitResult.committed,
+        storage.commitRxAggregate(&lease, &intent_handle),
+    );
+    try std.testing.expect(std.meta.eql(waiting_state, storage.semantic_state.active));
+    try std.testing.expectEqual(@as(u8, 0), storage.live_screen.len);
+    const accounting = storage.inbox_ledger.accountingView();
+    try std.testing.expectEqual(@as(usize, 0), accounting.charged_items);
+    try std.testing.expectEqual(@as(usize, 0), accounting.charged_bytes);
+    try std.testing.expectEqual(WholeTurnReleaseResult.released, storage.releaseWholeTurnLease(&lease));
+    try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(&storage));
+}
+
+test "2b2e integration binds one and retires sixty three candidates at the fixed cap" {
+    var fixture = try TestClient.init();
+    defer fixture.deinitPeer();
+    var storage: ExternalPumpStorage = .{};
+    try std.testing.expect(initTestStorage(&storage, &fixture.client, valid_evidence) == .initialized);
+    try std.testing.expect(prepareAdoptionForTest(&storage) == .prepared_adopted);
+    try std.testing.expectEqual(CommitAdoptionResult.adopted, storage.commitAdoption());
+    storage.semantic_state = .{ .active = .{ .client_recovery = .{
+        .awaiting_snapshot = .{
+            .context = .{ .epoch = 37, .deadline_ns = 10_000 },
+            .recovery_barrier_absolute = 1_000,
+        },
+    } } };
+
+    var ranges: external_owner_range.Scratch = .{};
+    var lease: ExternalWholeTurnLease = .{};
+    try storage.acquireWholeTurnLease(&lease, @intFromPtr(&ranges), @sizeOf(external_owner_range.Scratch));
+    var probe = IntentScratchAuthorityProbe{ .storage = &storage, .allocator = std.testing.allocator };
+    var intent_handle: external_rx_intent.ExternalRxIntentHandle = .{};
+    try std.testing.expectEqual(
+        external_rx_intent.CreateResult.allocated,
+        storage.createIntentScratch(&intent_handle, std.testing.allocator, probe.ops()),
+    );
+    var next_absolute: u64 = 1_000;
+    for (0..external_rx_intent.max_intents) |index| {
+        const payload = try std.testing.allocator.dupe(u8, &[_]u8{@intCast('a' + index % 26)});
+        var paired = client_external_mode.ExternalRxFrame{
+            .frame = .{
+                .header = .{
+                    .kind = .snapshot_chunk,
+                    .stream_id = valid_evidence.stream_id,
+                    .flags = protocol.Flags.end_stream,
+                    .payload_len = 1,
+                },
+                .payload = payload,
+            },
+            .range = .{
+                .identity = .{
+                    .attach_instance_id = storage.owner_incarnation,
+                    .destination_slot_addr = @intFromPtr(&storage),
+                },
+                .start_absolute = next_absolute,
+                .end_absolute = next_absolute + protocol.header_size + 1,
+            },
+            .pair_seal = undefined,
+        };
+        next_absolute = paired.range.end_absolute;
+        client_external_mode.testing.sealExternalRxFrame(&paired);
+        var source: client_external_mode.ExternalRxOutcome = .{ .frame = paired };
+        probe.parser_generation = @intCast(index + 2);
+        probe.buffer_start_absolute = paired.range.end_absolute;
+        try std.testing.expectEqual(
+            external_rx_intent.MoveResult.classified,
+            moveIntentFrameForTest(&intent_handle, &source, probe.ops(), valid_evidence.stream_id),
+        );
+    }
+    try std.testing.expectEqual(
+        RxAggregateCreateResult.allocated,
+        storage.createRxAggregate(&lease, &intent_handle, std.testing.allocator, &ranges),
+    );
+    for (0..external_rx_intent.max_intents) |index| {
+        try std.testing.expectEqual(
+            RxAggregateTransferResult.staged,
+            storage.moveScreenIntoRxAggregate(&lease, &intent_handle, @intCast(index), probe.ops()),
+        );
+        try std.testing.expectEqual(
+            RxAggregateTransferResult.staged,
+            storage.transferScreenToLedger(&lease, &intent_handle, @intCast(index)),
+        );
+        try std.testing.expectEqual(
+            RxAggregateTransferResult.staged,
+            storage.admitScreenToLiveBatch(&lease, @intCast(index)),
+        );
+    }
+    try std.testing.expectEqual(
+        RxAggregateFinalizeResult.finalized,
+        storage.finalizeRxAggregate(&lease, &intent_handle),
+    );
+    const prepared = storage.validateReadyRxAggregate(&lease).?;
+    try std.testing.expectEqual(@as(u8, external_rx_intent.max_intents), prepared.recovery_dispositions.count);
+    try std.testing.expectEqual(@as(u8, 1), prepared.live_commit.final_completed_count);
+    try std.testing.expectEqual(@as(u8, external_rx_intent.max_intents - 1), prepared.live_commit.cleanup_final_count);
+    try std.testing.expectEqual(
+        RxAggregateCommitResult.committed,
+        storage.commitRxAggregate(&lease, &intent_handle),
+    );
+    try std.testing.expectEqual(@as(u8, 1), storage.live_screen.len);
+    try std.testing.expectEqual(@as(usize, 1), storage.inbox_ledger.accountingView().charged_items);
+    try std.testing.expectEqual(WholeTurnReleaseResult.released, storage.releaseWholeTurnLease(&lease));
+    try std.testing.expectEqual(TeardownResult.cleaned, teardownForTest(&storage));
 }
 
 test "f3c1 stale malformed error and OOM prepare terminal without source mutation" {

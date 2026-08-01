@@ -170,8 +170,9 @@ describe("rich mode hand-off", () => {
   });
 
   test("잠긴 문서는 리치에서 저장되지 않는다", async () => {
-    // 잠금이 타이핑만 막고 저장 경로가 열려 있으면 ⌘S 한 번에 frontmatter가 `## title: 문서`로 덮인다.
-    const harness = await bootMarkdownShell("---\ntitle: 문서\n---\n\n본문");
+    // 잠금이 타이핑만 막고 저장 경로가 열려 있으면 ⌘S 한 번에 각주 정의가 인라인 링크로 덮인다.
+    // (frontmatter는 이제 노드로 지원하므로 잠금 픽스처가 아니다 — §2.5.)
+    const harness = await bootMarkdownShell("텍스트[^1]\n\n[^1]: 각주");
     try {
       setMode(harness.dom, "rich");
       for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();

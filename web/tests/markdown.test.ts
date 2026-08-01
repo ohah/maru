@@ -52,6 +52,20 @@ describe("markdown trust boundary", () => {
     expect(html).not.toContain("src=");
   });
 
+  test("frontmatter는 메타데이터라 프리뷰에 그리지 않는다(본문 중간 `---`는 구분선으로 남는다)", () => {
+    // 이게 없으면 파서가 `---`를 구분선으로, 그 아래 줄을 setext 제목으로 읽어 `<hr>` + `<h2>title: 문서</h2>`가
+    // 그려진다 — frontmatter가 있는 문서마다 보이던 것이라 사용자가 매번 마주친다.
+    const html = renderMarkdown("---\ntitle: 문서\ntags: [a, b]\n---\n\n# 제목\n\n본문\n");
+    expect(html).not.toContain("title: 문서");
+    expect(html).not.toContain("<hr");
+    expect(html).toContain("<h1");
+
+    // 위치가 정의의 전부다 — 중간 구분선까지 삼키면 그 줄이 문서에서 사라진다.
+    const middle = renderMarkdown("# 제목\n\n---\n\n본문\n");
+    expect(middle).toContain("<hr");
+    expect(middle).toContain("본문");
+  });
+
   test("emits renderer-owned source positions with character offsets", () => {
     const html = renderMarkdown("# title\n\nparagraph");
 

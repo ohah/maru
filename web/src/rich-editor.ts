@@ -9,7 +9,7 @@
  * 그린다**(§2.1) — 둘은 형제 노드이고 편집기를 React 컴포넌트로 다시 쓰지 않는다.
  */
 
-import { Editor } from "@tiptap/core";
+import { Editor, type JSONContent } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
 import TaskList from "@tiptap/extension-task-list";
@@ -17,14 +17,17 @@ import TaskItem from "@tiptap/extension-task-item";
 import Image from "@tiptap/extension-image";
 import { Table, TableRow, TableCell, TableHeader } from "@tiptap/extension-table";
 import { mountShellUi, type ShellUiHandle } from "./shell-ui";
+import { splitFrontmatter } from "./frontmatter";
+import { Frontmatter, frontmatterNodeName } from "./rich-frontmatter-node";
 import type { ToolbarItem } from "./ui/toolbar";
 
 /**
  * 리치가 문서모델로 표현하지 못해 **저장할 때 잃어버리는** 문법을 찾는다.
  *
- * 실측(왕복 테스트)으로 확인된 것들이다 — frontmatter는 `---` 구분자가 제목으로 변질되고(`## title: 문서`),
- * 원시 HTML은 태그가 사라지며, 각주는 정의가 인라인 링크로 뭉개진다. 이미지·표는 확장을 넣어 해결했지만
- * 이 셋은 문서모델에 대응 노드가 없어 확장으로 채울 수 없다.
+ * 실측(왕복 테스트)으로 확인된 것들이다 — 원시 HTML은 태그가 사라지고, 각주는 정의가 인라인 링크로 뭉개진다.
+ * 이미지·표는 확장으로, frontmatter는 전용 노드로 해결했지만(`rich-frontmatter-node.ts`) 이 둘은 그렇게 못
+ * 한다: frontmatter는 **문서 맨 앞이라는 위치**로 떼어 낼 수 있었던 반면, 각주와 원시 HTML은 본문 **안에
+ * 섞여** 있어 경계로 가를 수 없고 문서모델에 노드를 주는 별도 작업이다.
  *
  * 그래서 이런 문서는 리치에서 **읽기만** 하게 하고 편집을 막는다. 저장 경로가 닫히면 원문은 안전하고,
  * 사용자는 소스 모드에서 손실 없이 고칠 수 있다(docs/file-panel.md §2.5).
@@ -36,11 +39,6 @@ export function unsupportedRichSyntax(markdown: string): string[] {
     .replace(/^ {0,3}(`{3,}|~{3,})[\s\S]*?^ {0,3}\1[ \t]*$/gm, "")
     .replace(/`[^`\n]*`/g, "");
   const found: string[] = [];
-  // frontmatter는 **문서 첫 줄**의 `---`만이다. 앵커가 없으면 `제목\n---`(setext H2)이나 절 구분선으로 쓴
-  // `---` 두 개짜리 평범한 문서가 전부 잠긴다(실측 오탐).
-  if (/^---\r?\n[\s\S]*?^---[ \t]*$/m.test(withoutCode) && /^---\r?\n/.test(withoutCode)) {
-    found.push("YAML frontmatter");
-  }
   if (/^\[\^[^\]]+\]:/m.test(withoutCode)) found.push("각주");
   // 태그뿐 아니라 주석·doctype도 왕복에서 사라진다(`<!-- toc -->`, `<!-- prettier-ignore -->`, `<!DOCTYPE html>`).
   if (
@@ -190,6 +188,25 @@ function toolbarItems(editor: Editor): ToolbarItem[][] {
   );
 }
 
+/**
+ * 본문을 문서 JSON으로 파싱하고 frontmatter 블록을 **맨 앞에** 얹는다.
+ *
+ * 마크다운 문자열로 한 번에 넣지 않는 이유: 문자열 경로는 파서가 `---`를 구분선으로 읽어 우리가 방금 가른 것을
+ * 되돌린다. JSON으로 넣으면 그 블록이 우리가 정한 노드로 그대로 들어간다.
+ */
+function withFrontmatter(editor: Editor, split: ReturnType<typeof splitFrontmatter>): JSONContent {
+  const parsed = editor.markdown?.parse(split.body) ?? { type: "doc", content: [] };
+  if (split.frontmatter === null) return parsed;
+  const block: JSONContent = {
+    type: frontmatterNodeName,
+    // 빈 frontmatter(`---\n---`)에는 텍스트 자식이 없다 — 빈 문자열 노드를 넣으면 ProseMirror가 거부한다.
+    ...(split.frontmatter.length === 0
+      ? {}
+      : { content: [{ type: "text", text: split.frontmatter }] }),
+  };
+  return { ...parsed, content: [block, ...(parsed.content ?? [])] };
+}
+
 export function createRichEditor(
   parent: HTMLElement,
   markdown: string,
@@ -208,12 +225,18 @@ export function createRichEditor(
   let syncToolbar: () => void = () => {};
   /// close lock으로 잠긴 상태인가(표현 불가 잠금과 독립 — 둘 중 하나라도 걸리면 편집 불가).
   let closeLocked = false;
+  // frontmatter는 **위치로 정의된다**(문서 맨 앞) — 마크다운 파서에 맡기면 본문 중간의 구분선까지 삼킨다.
+  // 그래서 경계에서 갈라 별도 노드로 넣는다(`frontmatter.ts`).
+  const initial = splitFrontmatter(markdown);
   const editor = new Editor({
     element: content,
-    content: markdown,
+    content: initial.body,
     contentType: "markdown",
     extensions: [
       StarterKit,
+      // 문서 맨 앞 메타데이터를 보이고 고칠 수 있는 블록으로 둔다(§2.5). 이 노드가 없으면 왕복에서 뭉개져
+      // 예전처럼 편집을 통째로 잠가야 한다.
+      Frontmatter,
       Markdown,
       TaskList,
       // 체크박스를 눌러 바로 토글할 수 있게 한다(GFM `- [ ]`).
@@ -232,6 +255,12 @@ export function createRichEditor(
     },
     onSelectionUpdate: () => syncToolbar(),
   });
+
+  // 생성은 본문만으로 하고(마크다운 문자열 경로) frontmatter 블록은 곧바로 얹는다 — JSON을 만들려면 편집기의
+  // 마크다운 매니저가 필요한데 그건 편집기가 선 뒤에야 있다.
+  if (initial.frontmatter !== null) {
+    editor.commands.setContent(withFrontmatter(editor, initial), { emitUpdate: false });
+  }
 
   const uiHost = doc.createElement("div");
   shell.appendChild(uiHost);
@@ -276,7 +305,8 @@ export function createRichEditor(
     setMarkdown: (next: string) => {
       // emitUpdate=false: 같은 내용을 다시 넣는 것뿐인데 onUpdate가 돌면 revision이 오르고 dirty가 켜져
       // "리치를 잠깐 들여다보기만 해도 탭에 ●가 붙는" 상태가 된다.
-      editor.commands.setContent(next, { contentType: "markdown", emitUpdate: false });
+      const split = splitFrontmatter(next);
+      editor.commands.setContent(withFrontmatter(editor, split), { emitUpdate: false });
       applyLock(next);
       syncToolbar();
     },

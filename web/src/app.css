@@ -305,6 +305,20 @@ body {
   height: 100%;
 }
 
+/* 문서 맨 앞 메타데이터 블록(§2.5). 본문과 **다른 것**임이 한눈에 보여야 한다 — 여기 적힌 값은 글이 아니라
+   빌드·배포가 읽는 데이터다. 안쪽은 평문이라 고정폭으로 둔다. */
+.maru-rich-frontmatter {
+  margin: 0 0 1rem;
+  padding: 0.625rem 0.875rem;
+  border-left: 3px solid color-mix(in srgb, AccentColor 55%, Canvas);
+  background: color-mix(in srgb, CanvasText 5%, Canvas);
+  color: color-mix(in srgb, CanvasText 78%, Canvas);
+  font-family: var(--maru-editor-font-family, ui-monospace, monospace);
+  font-size: 0.8125rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
 /* 리치가 다루지 못하는 문법이 있어 편집을 잠갔을 때의 안내. 저장 경로가 닫혔다는 사실을 사용자가 알아야
    소스 모드로 옮겨 갈 수 있다. */
 .maru-rich-notice {

@@ -2622,6 +2622,13 @@ pub const AppSession = struct {
     git_request_seq: u64 = 0,
     /// 아직 응답을 못 받은 요청 번호(없으면 0). 갱신 트리거가 겹쳐도 큐를 쌓지 않는다.
     git_inflight: u64 = 0,
+    /// 저장소별 턴 스냅샷 링(§6.1). 창 하나가 여러 저장소를 오갈 수 있지만 v1은 **목록이 읽힌 그 저장소** 하나만
+    /// 들고 간다 — 저장소가 바뀌면 링을 비운다(다른 저장소의 tree로 비교하면 전부 삭제로 보인다).
+    turn_ring: maru.session.turn_snapshot.Ring = .{},
+    /// 그 링이 속한 저장소(바뀌면 링을 버린다).
+    turn_ring_repo: ?[]u8 = null,
+    /// 턴 스냅샷용 임시 index 경로. **저장소 밖**이어야 한다(안에 두면 자기가 스냅샷에 잡힌다).
+    turn_index_path: ?[]u8 = null,
     /// **지금 목록이 읽힌 저장소 루트.** 클릭 시 다시 구하면 안 된다 — 첫 diff가 열리는 순간 활성 Term이 웹
     /// Term이 되어 cwd 폴백이 빈 값을 보고 null이 된다(그래서 두 번째 행부터 안 열렸다). 목록과 그 목록에서 연
     /// 비교는 **같은 저장소**를 봐야 한다는 계약이기도 하다.
@@ -2631,10 +2638,10 @@ pub const AppSession = struct {
     scm_selected_row: ?usize = null,
     /// 섹션 접힘 상태(스테이지된 변경·변경 사항·추적되지 않은 파일 순). 창 상태이며 workspace에 저장하지 않는다 —
     /// 목록 자체가 매번 새로 계산되는 값이라 접힘만 남겨 봐야 다음 실행의 목록과 대응이 보장되지 않는다.
-    scm_collapsed: [scm_view.section_count]bool = .{ false, false, false, false },
+    scm_collapsed: [scm_view.section_count]bool = @splat(false),
     /// 그 섹션을 전부 펼쳤는가("모두 보기"를 눌렀는가). 기본은 섹션당 상한까지만 보여 준다 — 변경이 수백 개면
     /// 한 섹션이 첫 화면을 다 먹어 나머지 섹션이 있는지조차 모르게 된다.
-    scm_expanded: [scm_view.section_count]bool = .{ false, false, false, false },
+    scm_expanded: [scm_view.section_count]bool = @splat(false),
     /// 감시를 걸어야 하는 `<repo>/.git` 경로(아직 host가 안 가져갔으면 non-null). **폴링 대신 감시**를 쓰는
     /// 이유: `git add`는 작업트리를 안 건드리고 index만 바꿔 파일 감시로는 안 잡히는데, `.git`을 보면 잡힌다.
     git_watch_request: ?[]u8 = null,
@@ -3261,9 +3268,53 @@ pub const AppSession = struct {
         self.ensureGitWatch(repo);
         self.rememberGitRepo(repo);
         self.git_request_seq += 1;
-        if (self.git_backend.?.submit(git_exe, repo, self.git_request_seq)) {
+        const snapshot = if (self.turn_ring.latest()) |snap| snap.oid() else "";
+        if (self.git_backend.?.submit(git_exe, repo, snapshot, self.turnIndexPath() orelse "", self.git_request_seq)) {
             self.git_inflight = self.git_request_seq;
         }
+    }
+
+    /// 턴 스냅샷용 임시 index 경로(없으면 만든다). **저장소 밖**인 캐시 디렉터리에 둔다 — 저장소 안에 두면
+    /// `add -A`가 그 파일을 잡아 스냅샷이 자기를 포함한다(§6.1).
+    fn turnIndexPath(self: *AppSession) ?[]const u8 {
+        if (self.turn_index_path) |path| return path;
+        const home: []const u8 = if (std.c.getenv("HOME")) |h| std.mem.span(h) else "";
+        if (home.len == 0) return null;
+        // 창마다 다른 파일을 쓴다 — 같은 파일을 두 창이 동시에 쓰면 한쪽 스냅샷이 다른 쪽 작업트리를 담는다.
+        // 세션 포인터를 이름에 쓴다(창 수명 동안 유일하고, 종료 시 그 파일은 다음 실행에서 재사용되거나 남아도
+        // 무해하다 — read-tree가 매번 덮어쓴다).
+        const path = std.fmt.allocPrint(self.allocator, "{s}/.cache/maru/turn-index-{d}", .{ home, @intFromPtr(self) }) catch return null;
+        // 디렉터리는 미리 만들어 둔다(없으면 git이 index를 못 쓴다).
+        var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+        if (std.fmt.bufPrintZ(&dir_buf, "{s}/.cache/maru", .{home})) |dir| {
+            _ = std.c.mkdir(dir.ptr, 0o700);
+        } else |_| {}
+        self.turn_index_path = path;
+        return path;
+    }
+
+    /// 에이전트 턴이 끝났다 — 그 순간의 작업트리를 tree 하나로 굳힌다(§6.1). 실패하면 그냥 안 찍힌 것이고
+    /// 다음 턴에 다시 시도한다(스냅샷 실패가 목록·diff를 막지 않는다).
+    fn captureTurnSnapshot(self: *AppSession, surface_id: u64) void {
+        var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const repo = self.git_repo orelse (self.gitRepoRoot(&repo_buf) orelse return);
+        // 저장소가 바뀌었으면 링을 버린다 — 다른 저장소의 tree로 비교하면 전부 삭제로 보인다.
+        if (self.turn_ring_repo) |current| {
+            if (!std.mem.eql(u8, current, repo)) {
+                self.allocator.free(current);
+                self.turn_ring_repo = null;
+                self.turn_ring = .{};
+            }
+        }
+        if (self.turn_ring_repo == null) self.turn_ring_repo = self.allocator.dupe(u8, repo) catch return;
+
+        const index_file = self.turnIndexPath() orelse return;
+        var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const git_exe = git_backend_mod.locate(&exe_buf) orelse return;
+        if (self.git_backend == null) {
+            self.git_backend = git_backend_mod.Backend.init(self.allocator, self.io) catch return;
+        }
+        _ = self.git_backend.?.submitSnapshot(git_exe, repo, index_file, surface_id);
     }
 
     /// 목록을 읽은 저장소를 기억한다. 같은 값이면 다시 할당하지 않는다.
@@ -3301,6 +3352,17 @@ pub const AppSession = struct {
         return std.mem.indexOf(u8, path, "/.git/") != null;
     }
 
+    /// `AgentState`(관측)를 턴 정책이 쓰는 값으로 옮긴다. 두 열거를 직접 잇지 않는 이유는 정책 모듈이 순수해야
+    /// 하기 때문이다(그쪽은 관측 타입을 모른다).
+    fn turnStateOf(state: maru.session.agent_observer.State) maru.session.turn_snapshot.AgentState {
+        return switch (state) {
+            .unknown => .unknown,
+            .running => .running,
+            .blocked => .blocked,
+            .idle => .idle,
+        };
+    }
+
     /// 완료된 git 결과를 받아 세션에 싣는다. frame tick에서 호출해도 syscall이 없다.
     fn drainGitStatus(self: *AppSession) void {
         // 복원으로 소스 컨트롤 뷰가 켜진 채 시작하면 `setDockView`를 거치지 않아 첫 읽기가 안 걸린다(실측).
@@ -3316,6 +3378,14 @@ pub const AppSession = struct {
             }
         }
         var backend = &(self.git_backend orelse return);
+        // 턴 스냅샷 결과를 링에 넣는다. 같은 tree가 연달아 오면 링이 스스로 무시한다(빈 비교 방지 — §6.1).
+        while (backend.takeSnapshotResult()) |taken| {
+            var snapshot = taken;
+            self.turn_ring.push(snapshot.tree, snapshot.surface_id);
+            snapshot.deinit(self.allocator);
+            // 새 기준이 생겼으니 목록을 다시 읽는다(그 섹션이 이제 나온다).
+            self.refreshGitStatus();
+        }
         // diff 본문 결과를 그 entry로 흘린다. request_id로 짝을 맞춰 **늦게 온 옛 결과가 새 내용을 덮지 않게** 한다.
         while (backend.takeDiffResult()) |taken| {
             var diff_result = taken;
@@ -14623,6 +14693,8 @@ pub const AppSession = struct {
             result.numstat_worktree,
             result.branch_name_status,
             result.branch_numstat,
+            result.turn_name_status,
+            result.turn_numstat,
             self.scm_collapsed,
             self.scm_expanded,
             out,
@@ -14643,6 +14715,8 @@ pub const AppSession = struct {
             result.numstat_worktree,
             result.branch_name_status,
             result.branch_numstat,
+            result.turn_name_status,
+            result.turn_numstat,
             self.scm_collapsed,
             self.scm_expanded,
             &buf,
@@ -14676,6 +14750,7 @@ pub const AppSession = struct {
             .unstaged => .unstaged,
             .untracked => .untracked,
             .branch => .branch,
+            .turn => .turn,
         };
         // rename은 왼쪽이 옛 경로다(`R` 행의 orig_path). 스테이지된 rename만 그 구분이 의미 있다.
         self.openDiffTerm(repo, abs, row.path, row.orig_path, base);
@@ -14777,8 +14852,12 @@ pub const AppSession = struct {
             entry.diff_repo,
             entry.diff_rel_path,
             entry.diff_orig_rel_path,
-            // 브랜치 기준의 왼쪽 커밋. 목록을 읽을 때 함께 받아 둔 값이라 여기서 git을 또 부르지 않는다.
-            if (self.git_result) |r| r.merge_base else "",
+            // 왼쪽 트리/커밋: 브랜치 기준은 merge-base, 턴 기준은 마지막 스냅샷 tree. 둘 다 `<oid>:<경로>`로
+            // 읽으므로 같은 자리를 쓴다(목록을 읽을 때 함께 받아 둔 값이라 여기서 git을 또 부르지 않는다).
+            switch (entry.diff_base) {
+                .turn => if (self.turn_ring.latest()) |snap| snap.oid() else "",
+                else => if (self.git_result) |r| r.merge_base else "",
+            },
             entry.diff_base,
             entry.diff_request_id,
         )) {
@@ -25890,6 +25969,10 @@ pub const AppSession = struct {
         const previous = term.agent_state;
         const current = term.agent_stabilizer.observe(detection, now_ms);
         term.agent_state = current;
+        // 턴이 끝난 순간의 작업트리를 굳힌다(§6.1) — "에이전트가 방금 바꾼 것"의 기준이 이 tree다.
+        if (maru.session.turn_snapshot.isTurnEnd(turnStateOf(previous), turnStateOf(current))) {
+            self.captureTurnSnapshot(term.surfaceId());
+        }
         if (current != previous) {
             if (displayed) self.metal_dirty = true;
             if (diag_gate.maruDebugEnabled()) std.log.scoped(.agent).info(
@@ -26973,6 +27056,8 @@ pub const AppSession = struct {
                                 r.numstat_worktree,
                                 r.branch_name_status,
                                 r.branch_numstat,
+                                r.turn_name_status,
+                                r.turn_numstat,
                                 self.scm_collapsed,
                                 self.scm_expanded,
                                 &rows_buf,
@@ -30822,6 +30907,10 @@ pub const AppSession = struct {
         self.git_watch_path = null;
         if (self.git_repo) |path| self.allocator.free(path);
         self.git_repo = null;
+        if (self.turn_ring_repo) |path| self.allocator.free(path);
+        self.turn_ring_repo = null;
+        if (self.turn_index_path) |path| self.allocator.free(path);
+        self.turn_index_path = null;
 
         // MARU_TRACE: trace는 세션 동안 파일로 증분 append됐다. deinit 초입에 남은 버퍼를 flush + sync(durability) +
         // close한다 — 크래시가 아니어도 마지막 이벤트까지 디스크에 남긴다. per-link recorder라 runtime 싱글톤을 끊을 게

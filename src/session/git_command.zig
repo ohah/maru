@@ -31,6 +31,18 @@ pub const Kind = enum {
     branch_name_status,
     /// 같은 범위의 +N -N.
     branch_numstat,
+    /// 턴 스냅샷 ①: 임시 index를 HEAD로 채운다(`read-tree HEAD`). 진짜 index는 안 건드린다 — `GIT_INDEX_FILE`이
+    /// 가리키는 파일만 쓴다. 그 파일은 **저장소 밖**에 둔다(안에 두면 그 파일 자체가 diff에 잡힌다).
+    snapshot_read_tree,
+    /// 턴 스냅샷 ②: 그 임시 index에 작업트리를 반영한다(`add -A`). 작업트리는 안 바뀐다.
+    snapshot_add,
+    /// 턴 스냅샷 ③: 그 index를 tree 하나로 굳힌다(`write-tree`). 이 tree OID가 "그 턴이 끝난 순간"이다.
+    snapshot_write_tree,
+    /// 그 스냅샷 이후 바뀐 것: 임시 index(작업트리 반영본)와 스냅샷 tree를 비교한다.
+    /// **`--cached`인 이유**: 비교 대상이 작업트리가 아니라 방금 만든 index다(추적되지 않은 파일까지 포함하려면
+    /// index에 넣고 비교해야 한다 — 실측으로 확인).
+    snapshot_name_status,
+    snapshot_numstat,
     /// diff 본문 한쪽(원본)을 통째로: `git show <spec>`. spec은 `blobSpec`이 만든 `HEAD:<경로>` 또는 `:<경로>`다.
     /// **worktree 쪽은 이 경로로 읽지 않는다** — 디스크 파일을 그대로 읽으면 되고, git을 한 번 덜 띄운다.
     show_blob,
@@ -169,6 +181,38 @@ pub fn build(kind: Kind, git_exe: []const u8, repo: []const u8, arg: ?[]const u8
             // `A...B` = B가 갈린 지점 이후 바꾼 것(공통 조상 기준). `A..B`(두 점)로 쓰면 기본 브랜치에 새로 들어온
             // 커밋까지 "내가 바꾼 것"으로 잡혀 목록이 부풀어 오른다.
             buf[n] = "origin/HEAD...HEAD";
+            n += 1;
+        },
+        .snapshot_read_tree => {
+            buf[n] = "read-tree";
+            n += 1;
+            buf[n] = "HEAD";
+            n += 1;
+        },
+        .snapshot_add => {
+            buf[n] = "add";
+            n += 1;
+            buf[n] = "-A";
+            n += 1;
+        },
+        .snapshot_write_tree => {
+            buf[n] = "write-tree";
+            n += 1;
+        },
+        .snapshot_name_status, .snapshot_numstat => {
+            buf[n] = "diff";
+            n += 1;
+            buf[n] = "--cached";
+            n += 1;
+            buf[n] = if (kind == .snapshot_numstat) "--numstat" else "--name-status";
+            n += 1;
+            buf[n] = "--find-renames";
+            n += 1;
+            buf[n] = "--no-ext-diff";
+            n += 1;
+            buf[n] = "--no-textconv";
+            n += 1;
+            buf[n] = arg orelse ""; // 스냅샷 tree OID
             n += 1;
         },
         .show_blob => {
@@ -323,4 +367,21 @@ test "commitBlobSpec은 hex 해시만 받는다(임의 문자열을 인자로 �
     try testing.expect(commitBlobSpec("abc", "a", &buf) == null); // 너무 짧다
     var tiny: [8]u8 = undefined;
     try testing.expect(commitBlobSpec("650a0bbef96a1dd5", "very/long.txt", &tiny) == null); // 자르지 않는다
+}
+
+test "턴 스냅샷은 임시 index로만 돌고 작업트리를 건드리지 않는다" {
+    // `add -A`가 진짜 index에 닿으면 사용자의 스테이지 상태를 우리가 바꾸는 것이다 — 환경변수로 격리하는 것이
+    // 이 기능의 안전 근거이고, argv에는 그 사실이 안 보이므로(환경은 L4가 건다) 여기서는 **명령 모양**만 고정한다.
+    var buf: [max_argv][]const u8 = undefined;
+    try testing.expect(has(build(.snapshot_read_tree, "/usr/bin/git", "/repo", null, &buf), "read-tree"));
+    try testing.expect(has(build(.snapshot_add, "/usr/bin/git", "/repo", null, &buf), "-A"));
+    try testing.expect(has(build(.snapshot_write_tree, "/usr/bin/git", "/repo", null, &buf), "write-tree"));
+
+    // 비교는 **index ↔ 스냅샷 tree**다(`--cached`) — 작업트리와 직접 비교하면 추적되지 않은 파일이 빠진다.
+    const named = build(.snapshot_name_status, "/usr/bin/git", "/repo", "deadbeef", &buf);
+    try testing.expect(has(named, "--cached"));
+    try testing.expect(has(named, "--name-status"));
+    try testing.expect(has(named, "deadbeef"));
+    // 읽기 전용 계약은 여기에도 그대로 붙는다.
+    try testing.expect(has(named, "core.pager=cat"));
 }

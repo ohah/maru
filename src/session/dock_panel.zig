@@ -75,6 +75,8 @@ pub const DiffBase = enum {
     untracked,
     /// `merge-base(기본 브랜치) ↔ HEAD` — 이 브랜치의 커밋들이 바꾼 것(§3.5 "브랜치에 COMMIT 됨").
     branch,
+    /// 에이전트가 마지막 턴에 바꾼 것: `턴 스냅샷 tree ↔ 작업트리`(§6.1). git 기준이 아니라 턴 경계 기준이다.
+    turn,
     /// 병합 충돌 중인 파일: `HEAD ↔ 작업트리`. index에 stage 0이 없어 `:<경로>`를 못 읽으므로(실측) 왼쪽을
     /// HEAD로 잡는다 — 그러면 작업트리의 충돌 표시를 그대로 볼 수 있다.
     conflict,
@@ -88,6 +90,7 @@ pub const DiffBase = enum {
             .untracked => "새 파일",
             .branch => "브랜치",
             .conflict => "충돌",
+            .turn => "마지막 턴",
         };
     }
 };

@@ -83,6 +83,9 @@ pub const Result = struct {
     branch_numstat: []u8 = &.{},
     /// 그 갈린 지점의 커밋 해시. 브랜치 섹션 행의 diff 왼쪽이 이 커밋이다.
     merge_base: []u8 = &.{},
+    /// 마지막 턴 스냅샷 이후 바뀐 것(§6.1). 스냅샷이 없으면 빈 문자열이고 그 섹션은 안 나온다.
+    turn_name_status: []u8 = &.{},
+    turn_numstat: []u8 = &.{},
     /// 셋 다 정상 종료했는가. 하나라도 실패하면 부분 결과를 쓰지 않는다(섹션이 서로 다른 시점을 섞지 않게).
     ok: bool = false,
     /// 출력이 상한에 걸려 잘렸는가. 목록 끝에 그 사실을 표시한다.
@@ -97,6 +100,8 @@ pub const Result = struct {
         allocator.free(self.branch_name_status);
         allocator.free(self.branch_numstat);
         allocator.free(self.merge_base);
+        allocator.free(self.turn_name_status);
+        allocator.free(self.turn_numstat);
         self.* = .{};
     }
 };
@@ -111,11 +116,16 @@ const State = struct {
     result: ?Result = null,
     diff_inflight: usize = 0,
     diff_result: ?DiffResult = null,
+    /// 턴 스냅샷은 **별도 슬롯**이다 — 턴이 끝나는 순간은 사용자가 목록을 보거나 diff를 여는 순간과 겹치는데,
+    /// 슬롯을 공유하면 그때마다 한쪽이 취소돼 "가끔 스냅샷이 안 찍히는" 상태가 된다.
+    snapshot_inflight: usize = 0,
+    snapshot_result: ?SnapshotResult = null,
 
     fn release(self: *State) void {
         if (self.refs.fetchSub(1, .acq_rel) != 1) return;
         if (self.result) |*r| r.deinit(self.allocator);
         if (self.diff_result) |*r| r.deinit(self.allocator);
+        if (self.snapshot_result) |*r| r.deinit(self.allocator);
         const allocator = self.allocator;
         allocator.destroy(self);
     }
@@ -127,6 +137,9 @@ const Job = struct {
     git_exe: []u8,
     repo: []u8,
     request_id: u64,
+    /// 목록 작업이 함께 읽을 턴 스냅샷(빈 값이면 그 섹션 없음).
+    snapshot_tree: []u8 = &.{},
+    index_file: []u8 = &.{},
     /// diff 작업이면 읽을 대상(저장소 루트 기준 상대경로 + 비교 기준). 목록 갱신 작업이면 null이다.
     diff: ?DiffTarget = null,
 
@@ -138,6 +151,17 @@ const Job = struct {
         merge_base: []u8,
         base: dock_panel.DiffBase,
     };
+};
+
+/// 턴 스냅샷 결과. `tree`가 비어 있으면 실패다(저장소가 아니거나 git이 거절).
+pub const SnapshotResult = struct {
+    tree: []u8 = &.{},
+    surface_id: u64 = 0,
+
+    pub fn deinit(self: *SnapshotResult, allocator: std.mem.Allocator) void {
+        allocator.free(self.tree);
+        self.* = .{};
+    }
 };
 
 /// diff 본문 두 쪽. 목록 결과(`Result`)와 슬롯을 나눠 갖는다 — 목록 갱신과 본문 열기가 서로를 취소하지 않게.
@@ -177,7 +201,15 @@ pub const Backend = struct {
 
     /// 요청을 건다. frame tick에서 불러도 syscall이 없다(스레드 생성만). 이미 in-flight면 false —
     /// 호출자는 다음 갱신 시점에 다시 시도한다(큐를 쌓아 오래된 결과를 줄줄이 만들지 않는다).
-    pub fn submit(self: *Backend, git_exe: []const u8, repo: []const u8, request_id: u64) bool {
+    pub fn submit(
+        self: *Backend,
+        git_exe: []const u8,
+        repo: []const u8,
+        /// 마지막 턴 스냅샷 tree(없으면 빈 문자열 — 그러면 그 섹션을 아예 안 읽는다).
+        snapshot_tree: []const u8,
+        index_file: []const u8,
+        request_id: u64,
+    ) bool {
         const state = self.state orelse return false;
         state.mutex.lockUncancelable(state.io);
         // 아직 안 빼 간 결과가 있으면 받지 않는다. 받으면 그 worker의 결과를 버리게 되고, 호출자의 in-flight가
@@ -205,6 +237,8 @@ pub const Backend = struct {
             state.allocator.destroy(job);
             return self.abandon();
         };
+        job.snapshot_tree = state.allocator.dupe(u8, snapshot_tree) catch &.{};
+        job.index_file = state.allocator.dupe(u8, index_file) catch &.{};
         const thread = std.Thread.spawn(.{}, worker, .{job}) catch {
             state.allocator.free(job.git_exe);
             state.allocator.free(job.repo);
@@ -275,6 +309,62 @@ pub const Backend = struct {
         return false;
     }
 
+    /// 턴 스냅샷을 찍는다(별도 슬롯). 실패하면 그냥 안 찍힌 것이고, 다음 턴에 다시 시도한다 —
+    /// 스냅샷 실패로 목록·diff가 영향을 받지 않게 결과 슬롯을 나눠 뒀다.
+    pub fn submitSnapshot(
+        self: *Backend,
+        git_exe: []const u8,
+        repo: []const u8,
+        index_file: []const u8,
+        surface_id: u64,
+    ) bool {
+        const state = self.state orelse return false;
+        state.mutex.lockUncancelable(state.io);
+        if (state.shutting_down or state.snapshot_inflight >= max_inflight or state.snapshot_result != null) {
+            state.mutex.unlock(state.io);
+            return false;
+        }
+        state.snapshot_inflight += 1;
+        _ = state.refs.fetchAdd(1, .monotonic);
+        state.mutex.unlock(state.io);
+
+        const job = state.allocator.create(SnapshotJob) catch return self.abandonSnapshot();
+        job.* = .{ .state = state, .git_exe = &.{}, .repo = &.{}, .index_file = &.{}, .surface_id = surface_id };
+        job.git_exe = state.allocator.dupe(u8, git_exe) catch return self.releaseSnapshotJob(job);
+        job.repo = state.allocator.dupe(u8, repo) catch return self.releaseSnapshotJob(job);
+        job.index_file = state.allocator.dupe(u8, index_file) catch return self.releaseSnapshotJob(job);
+        const thread = std.Thread.spawn(.{}, snapshotWorker, .{job}) catch return self.releaseSnapshotJob(job);
+        thread.detach();
+        return true;
+    }
+
+    fn releaseSnapshotJob(self: *Backend, job: *SnapshotJob) bool {
+        const state = job.state;
+        if (job.index_file.len > 0) state.allocator.free(job.index_file);
+        if (job.repo.len > 0) state.allocator.free(job.repo);
+        if (job.git_exe.len > 0) state.allocator.free(job.git_exe);
+        state.allocator.destroy(job);
+        return self.abandonSnapshot();
+    }
+
+    fn abandonSnapshot(self: *Backend) bool {
+        const state = self.state orelse return false;
+        state.mutex.lockUncancelable(state.io);
+        state.snapshot_inflight -= 1;
+        state.mutex.unlock(state.io);
+        state.release();
+        return false;
+    }
+
+    pub fn takeSnapshotResult(self: *Backend) ?SnapshotResult {
+        const state = self.state orelse return null;
+        state.mutex.lockUncancelable(state.io);
+        defer state.mutex.unlock(state.io);
+        const result = state.snapshot_result orelse return null;
+        state.snapshot_result = null;
+        return result;
+    }
+
     /// 완료된 diff 본문의 소유권을 넘긴다. frame tick에서 불러도 syscall이 없다.
     pub fn takeDiffResult(self: *Backend) ?DiffResult {
         const state = self.state orelse return null;
@@ -309,6 +399,37 @@ pub const Backend = struct {
 ///   staged   : `HEAD:<path>` ↔ `:<path>`   (커밋된 것 ↔ 스테이지된 것)
 ///   unstaged : `:<path>`     ↔ 작업트리 파일 (스테이지된 것 ↔ 지금 파일)
 ///   untracked: 없음          ↔ 작업트리 파일 (비교 대상이 없다 — 왼쪽은 빈 문서)
+const SnapshotJob = struct {
+    state: *State,
+    git_exe: []u8,
+    repo: []u8,
+    index_file: []u8,
+    surface_id: u64,
+};
+
+fn snapshotWorker(job: *SnapshotJob) void {
+    const state = job.state;
+    var result: SnapshotResult = .{ .surface_id = job.surface_id };
+    if (takeTurnSnapshot(state.allocator, job.git_exe, job.repo, job.index_file)) |tree| {
+        result.tree = tree;
+    } else |_| {}
+
+    state.allocator.free(job.index_file);
+    state.allocator.free(job.repo);
+    state.allocator.free(job.git_exe);
+    state.allocator.destroy(job);
+
+    state.mutex.lockUncancelable(state.io);
+    if (!state.shutting_down and state.snapshot_result == null) {
+        state.snapshot_result = result;
+    } else {
+        result.deinit(state.allocator);
+    }
+    state.snapshot_inflight -= 1;
+    state.mutex.unlock(state.io);
+    state.release();
+}
+
 fn diffWorker(job: *Job) void {
     const state = job.state;
     const target = job.diff.?;
@@ -320,6 +441,25 @@ fn diffWorker(job: *Job) void {
     var truncated = false;
 
     // untracked는 비교 대상 자체가 없다 — 왼쪽을 읽지 않는다(읽으면 같은 경로가 추적 중일 때 엉뚱한 내용이 실린다).
+    if (target.base == .turn) {
+        // 턴 기준: 스냅샷 tree ↔ 작업트리. 왼쪽은 그 tree의 blob, 오른쪽은 지금 파일이다 — 스냅샷은 커밋이 아니라
+        // tree라 `<tree>:<경로>`로 읽는다(같은 `git show` 문법이다).
+        if (commitSide(state.allocator, job, target.merge_base)) |out| {
+            result.original = out.bytes;
+            if (out.truncated) truncated = true;
+            had_side = true;
+        } else |_| {}
+        if (worktreeSide(state.allocator, job.repo, target.rel_path)) |out| {
+            result.modified = out.bytes;
+            if (out.truncated) truncated = true;
+            had_side = true;
+        } else |_| {}
+        result.ok = had_side;
+        result.truncated = truncated;
+        finishDiff(state, job, target, result);
+        return;
+    }
+
     if (target.base == .branch) {
         // 브랜치 섹션: 갈린 지점(merge-base) ↔ HEAD. 둘 다 커밋이라 작업트리를 읽지 않는다.
         if (commitSide(state.allocator, job, target.merge_base)) |out| {
@@ -389,6 +529,50 @@ fn finishDiff(state: *State, job: *Job, target: Job.DiffTarget, result_in: DiffR
 }
 
 /// `Output`을 그대로 돌려준다 — `truncated`를 버리면 상한에서 잘린 내용이 온전한 파일처럼 보인다(리뷰 지적).
+/// 턴 스냅샷을 찍고 tree OID를 돌려준다(호출자 소유). 세 명령이 **같은 임시 index**를 공유한다:
+/// `read-tree HEAD` → `add -A` → `write-tree`. 진짜 index·작업트리는 안 바뀐다(실측으로 확인).
+///
+/// **임시 index는 저장소 밖**이어야 한다 — 안에 두면 그 파일 자체가 `add -A`에 잡혀 스냅샷이 자기를 포함한다.
+pub fn takeTurnSnapshot(
+    allocator: std.mem.Allocator,
+    git_exe: []const u8,
+    repo: []const u8,
+    index_file: []const u8,
+) ![]u8 {
+    inline for (.{ git_command.Kind.snapshot_read_tree, git_command.Kind.snapshot_add }) |kind| {
+        const out = try runWithEnv(allocator, kind, git_exe, repo, null, index_file);
+        allocator.free(out.bytes); // 이 둘은 출력이 없다(실패는 종료 코드로 온다)
+    }
+    const written = try runWithEnv(allocator, .snapshot_write_tree, git_exe, repo, null, index_file);
+    errdefer allocator.free(written.bytes);
+    const trimmed = std.mem.trim(u8, written.bytes, " \t\r\n");
+    if (trimmed.len == 0) {
+        allocator.free(written.bytes);
+        return error.GitFailed;
+    }
+    const oid = try allocator.dupe(u8, trimmed);
+    allocator.free(written.bytes);
+    return oid;
+}
+
+/// 스냅샷 이후 바뀐 것(`--name-status`/`--numstat`). 비교 시점의 작업트리를 같은 임시 index에 다시 반영한 뒤 본다 —
+/// 그래야 추적되지 않은 파일까지 들어온다.
+pub fn diffSinceSnapshot(
+    allocator: std.mem.Allocator,
+    git_exe: []const u8,
+    repo: []const u8,
+    index_file: []const u8,
+    tree_oid: []const u8,
+    kind: git_command.Kind,
+) ![]u8 {
+    const refreshed = try runWithEnv(allocator, .snapshot_read_tree, git_exe, repo, null, index_file);
+    allocator.free(refreshed.bytes);
+    const added = try runWithEnv(allocator, .snapshot_add, git_exe, repo, null, index_file);
+    allocator.free(added.bytes);
+    const out = try runWithEnv(allocator, kind, git_exe, repo, tree_oid, index_file);
+    return out.bytes;
+}
+
 /// 그 커밋의 blob(브랜치 섹션 왼쪽). rename이면 옛 경로를 읽는다 — 새 경로는 그 커밋에 없다.
 fn commitSide(allocator: std.mem.Allocator, job: *Job, rev: []const u8) !Output {
     var spec_buf: [std.fs.max_path_bytes + 72]u8 = undefined;
@@ -486,8 +670,19 @@ fn worker(job: *Job) void {
             } else ok = false;
         }
     }
+    // 턴 범위는 스냅샷이 있을 때만 읽는다. **실패해도 목록을 깨지 않는다**(브랜치 섹션과 같은 규율).
+    if (ok and job.snapshot_tree.len > 0 and job.index_file.len > 0) {
+        if (diffSinceSnapshot(state.allocator, job.git_exe, job.repo, job.index_file, job.snapshot_tree, .snapshot_name_status)) |bytes| {
+            result.turn_name_status = bytes;
+        } else |_| {}
+        if (diffSinceSnapshot(state.allocator, job.git_exe, job.repo, job.index_file, job.snapshot_tree, .snapshot_numstat)) |bytes| {
+            result.turn_numstat = bytes;
+        } else |_| {}
+    }
     result.ok = ok;
     result.truncated = truncated;
+    if (job.snapshot_tree.len > 0) state.allocator.free(job.snapshot_tree);
+    if (job.index_file.len > 0) state.allocator.free(job.index_file);
     state.allocator.free(job.git_exe);
     state.allocator.free(job.repo);
     state.allocator.destroy(job);
@@ -517,6 +712,19 @@ fn runWithArg(
     git_exe: []const u8,
     repo: []const u8,
     arg: ?[]const u8,
+) !Output {
+    return runWithEnv(allocator, kind, git_exe, repo, arg, null);
+}
+
+/// `index_file`이 있으면 `GIT_INDEX_FILE`로 걸어 **그 index에만** 쓰게 한다(턴 스냅샷). 진짜 index를 안 건드리는
+/// 근거가 이 한 줄이므로, 스냅샷 명령은 반드시 이 경로로만 돈다.
+fn runWithEnv(
+    allocator: std.mem.Allocator,
+    kind: git_command.Kind,
+    git_exe: []const u8,
+    repo: []const u8,
+    arg: ?[]const u8,
+    index_file: ?[]const u8,
 ) !Output {
     var argv_buf: [git_command.max_argv][]const u8 = undefined;
     const argv_slices = git_command.build(kind, git_exe, repo, arg, &argv_buf);
@@ -553,12 +761,20 @@ fn runWithArg(
         for (git_command.env_overrides) |o| {
             if (std.mem.eql(u8, pair[0..eq], o.name)) continue :outer; // override가 이긴다
         }
+        // 사용자 환경의 `GIT_INDEX_FILE`은 **항상 버린다**. 남겨 두면 우리 명령이 그 index에 쓰게 되어, 스냅샷이
+        // 아닌 명령까지 남의 index를 건드린다(스냅샷은 아래에서 우리 값을 명시적으로 건다).
+        if (std.mem.eql(u8, pair[0..eq], "GIT_INDEX_FILE")) continue :outer;
         const copy = allocator.dupeZ(u8, pair) catch return error.GitFailed;
         env_store.append(allocator, copy) catch return error.GitFailed;
         env_ptrs.append(allocator, copy.ptr) catch return error.GitFailed;
     }
     for (git_command.env_overrides) |o| {
         const joined = std.fmt.allocPrintSentinel(allocator, "{s}={s}", .{ o.name, o.value }, 0) catch return error.GitFailed;
+        env_store.append(allocator, joined) catch return error.GitFailed;
+        env_ptrs.append(allocator, joined.ptr) catch return error.GitFailed;
+    }
+    if (index_file) |path| {
+        const joined = std.fmt.allocPrintSentinel(allocator, "GIT_INDEX_FILE={s}", .{path}, 0) catch return error.GitFailed;
         env_store.append(allocator, joined) catch return error.GitFailed;
         env_ptrs.append(allocator, joined.ptr) catch return error.GitFailed;
     }
@@ -670,7 +886,7 @@ test "실제 저장소를 읽어 세 출력을 채운다(end-to-end)" {
 
     var backend = try Backend.init(testing.allocator, std.Io.Threaded.global_single_threaded.io());
     defer backend.deinit();
-    try testing.expect(backend.submit(exe, repo, 7));
+    try testing.expect(backend.submit(exe, repo, "", "", 7));
 
     // git status는 큰 저장소에서 수백 ms 걸린다. 10초까지 기다린 뒤에도 없으면 배관이 끊긴 것으로 본다.
     var spins: usize = 0;
@@ -757,7 +973,7 @@ test "브랜치 기준 diff는 merge-base와 HEAD를 읽는다(end-to-end)" {
     defer backend.deinit();
 
     // 목록 읽기가 merge-base를 함께 준다 — 브랜치 섹션의 왼쪽이 그 커밋이다.
-    try testing.expect(backend.submit(exe, repo, 1));
+    try testing.expect(backend.submit(exe, repo, "", "", 1));
     var listed = waitForList(&backend) orelse return error.ListNeverCompleted;
     defer listed.deinit(testing.allocator);
     if (listed.merge_base.len == 0) return error.SkipZigTest; // origin/HEAD 없는 clone이면 이 섹션 자체가 없다
@@ -924,4 +1140,66 @@ test "저장소 밖을 가리키는 symlink는 읽지 않는다" {
     // 문자열 단계에서 걸리는 것들.
     try testing.expectError(error.UnsafePath, worktreeSide(testing.allocator, repo, "../outside.txt"));
     try testing.expectError(error.UnsafePath, worktreeSide(testing.allocator, repo, "/etc/hosts"));
+}
+
+test "턴 스냅샷은 진짜 index와 작업트리를 건드리지 않는다(end-to-end)" {
+    // 이 기능의 안전 근거가 "임시 index만 쓴다"이므로, 실제 저장소에서 **진짜 index가 그대로인지**를 확인한다.
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const exe = locate(&exe_buf) orelse return error.SkipZigTest;
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_ptr = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return error.NoCwd;
+    const cwd = std.mem.span(@as([*:0]u8, @ptrCast(cwd_ptr)));
+    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo = std.fmt.bufPrint(&repo_buf, "{s}/.zig-cache/tmp-turn-snapshot", .{cwd}) catch return error.SkipZigTest;
+    var rm_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const rm_path = std.fmt.bufPrintZ(&rm_buf, "{s}", .{repo}) catch return error.SkipZigTest;
+    _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
+    defer _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
+
+    if (!runQuiet(&.{ exe, "init", "-q", "-b", "main", repo })) return error.SkipZigTest;
+    if (!runQuiet(&.{ exe, "-C", repo, "config", "user.email", "t@t" })) return error.SkipZigTest;
+    if (!runQuiet(&.{ exe, "-C", repo, "config", "user.name", "t" })) return error.SkipZigTest;
+    writeFileAt(repo, "a.txt", "v1\n") catch return error.SkipZigTest;
+    if (!runQuiet(&.{ exe, "-C", repo, "add", "a.txt" })) return error.SkipZigTest;
+    if (!runQuiet(&.{ exe, "-C", repo, "commit", "-qm", "base" })) return error.SkipZigTest;
+
+    // 턴이 끝난 시점: 추적되는 파일 수정 + 새 파일(추적되지 않음).
+    writeFileAt(repo, "a.txt", "v2\n") catch return error.SkipZigTest;
+    writeFileAt(repo, "b.txt", "new\n") catch return error.SkipZigTest;
+
+    // 임시 index는 **저장소 밖**에 둔다(안에 두면 자기가 스냅샷에 잡힌다).
+    var index_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const index_file = std.fmt.bufPrint(&index_buf, "{s}/.zig-cache/tmp-turn-index", .{cwd}) catch return error.SkipZigTest;
+    var idx_rm_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const idx_rm = std.fmt.bufPrintZ(&idx_rm_buf, "{s}", .{index_file}) catch return error.SkipZigTest;
+    _ = runQuiet(&.{ "/bin/rm", "-f", idx_rm });
+    defer _ = runQuiet(&.{ "/bin/rm", "-f", idx_rm });
+
+    const snapshot = try takeTurnSnapshot(testing.allocator, exe, repo, index_file);
+    defer testing.allocator.free(snapshot);
+    try testing.expect(snapshot.len >= 40); // tree OID
+
+    // **진짜 index는 그대로다**: a.txt는 여전히 스테이지 안 됨(`.M`), b.txt는 여전히 추적 안 됨(`?`).
+    var status_buf: [git_command.max_argv][]const u8 = undefined;
+    const status_argv = git_command.build(.status, exe, repo, null, &status_buf);
+    _ = status_argv;
+    const status = try runWithArg(testing.allocator, .status, exe, repo, null);
+    defer testing.allocator.free(status.bytes);
+    try testing.expect(std.mem.indexOf(u8, status.bytes, "1 .M") != null);
+    try testing.expect(std.mem.indexOf(u8, status.bytes, "? b.txt") != null);
+
+    // 스냅샷 직후에는 바뀐 게 없다.
+    const none = try diffSinceSnapshot(testing.allocator, exe, repo, index_file, snapshot, .snapshot_name_status);
+    defer testing.allocator.free(none);
+    try testing.expectEqualStrings("", std.mem.trim(u8, none, " \t\r\n"));
+
+    // 그 뒤 파일을 고치면 **그 파일만** 나온다(추적되지 않은 새 파일도 포함).
+    writeFileAt(repo, "a.txt", "v3\n") catch return error.SkipZigTest;
+    writeFileAt(repo, "c.txt", "later\n") catch return error.SkipZigTest;
+    const changed = try diffSinceSnapshot(testing.allocator, exe, repo, index_file, snapshot, .snapshot_name_status);
+    defer testing.allocator.free(changed);
+    try testing.expect(std.mem.indexOf(u8, changed, "a.txt") != null);
+    try testing.expect(std.mem.indexOf(u8, changed, "c.txt") != null);
+    try testing.expect(std.mem.indexOf(u8, changed, "b.txt") == null); // 스냅샷에 이미 있던 파일은 안 나온다
 }

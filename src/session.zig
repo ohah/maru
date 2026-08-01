@@ -53,6 +53,7 @@ pub const dock_layout = @import("session/dock_layout.zig"); // FP3: right/bottom
 pub const git_status = @import("session/git_status.zig"); // git porcelain v2·numstat 순수 파서(도크 소스 컨트롤 뷰)
 pub const git_command = @import("session/git_command.zig"); // 읽기 전용 git argv·env 조립(외부 프로세스 실행 경로 차단)
 pub const git_locate = @import("session/git_locate.zig");
+pub const turn_snapshot = @import("session/turn_snapshot.zig"); // 에이전트 턴 경계 스냅샷 정책(§6.1, 순수)
 pub const repo_path = @import("session/repo_path.zig"); // 저장소 루트 안쪽 상대경로 판정(심층 방어 — 순수)
 pub const diff_payload = @import("session/diff_payload.zig"); // E1: diff 본문 페이로드 상한·binary 정책(순수) // git 실행 파일 후보 열거(설치 여부 판정 — shim 회피)
 pub const scm_view = @import("session/scm_view.zig"); // 도크 소스 컨트롤 뷰 행 모델(섹션·개수·증감)

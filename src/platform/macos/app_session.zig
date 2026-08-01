@@ -14653,6 +14653,12 @@ pub const AppSession = struct {
 
     /// 그 행이 가리키는 비교를 연다. 경로는 저장소 루트 기준이므로 절대경로를 만들어 Term identity로 쓴다.
     fn openDiffForScmRow(self: *AppSession, row: scm_view.FileRow) void {
+        // git 출력이 이상하거나 우리 파싱이 어긋나면 루트 밖 경로가 여기까지 올 수 있다. **여는 단계에서** 막는다 —
+        // 백엔드도 같은 판정을 하지만, 열지 말아야 할 것으로 Term을 만들면 사용자에게 빈 화면이 남는다(§6 심층 방어).
+        if (!maru.session.repo_path.isSafeRelative(row.path)) {
+            self.showNotice("저장소 밖을 가리키는 경로는 열지 않습니다");
+            return;
+        }
         // **목록을 읽은 그 저장소**를 쓴다. 여기서 다시 구하면 첫 diff가 열린 뒤 활성 Term이 웹 Term이라
         // cwd 폴백이 빈 값을 보고 null이 되어 두 번째 행부터 조용히 무시된다(손 확인에서 그랬다).
         var repo_buf: [std.fs.max_path_bytes]u8 = undefined;

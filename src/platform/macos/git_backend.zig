@@ -14,6 +14,7 @@ const maru = @import("maru");
 const git_command = maru.session.git_command;
 const git_locate = maru.session.git_locate;
 const dock_panel = maru.session.dock_panel;
+const repo_path = maru.session.repo_path;
 
 /// git 실행 파일 경로를 찾는다. **없으면 null** — 호출자는 그 사실을 화면에 말하고 실행을 시도하지 않는다.
 /// 후보 순서는 `git_locate`(순수)가 정하고, 여기서는 존재·실행권만 본다.
@@ -403,23 +404,57 @@ fn blobSide(allocator: std.mem.Allocator, job: *Job, side: git_command.BlobSide)
     // rename은 왼쪽이 옛 경로다 — 새 경로로 HEAD를 읽으면 그 blob이 없어 비교가 통째로 실패한다.
     const target = job.diff.?;
     const path = if (side == .head and target.orig_rel_path.len > 0) target.orig_rel_path else target.rel_path;
+    if (!repo_path.isSafeRelative(path)) return error.UnsafePath;
     const spec = git_command.blobSpec(side, path, &spec_buf) orelse return error.PathTooLong;
     return runWithArg(allocator, .show_blob, job.git_exe, job.repo, spec);
 }
 
 /// 작업트리 파일은 git을 거치지 않고 그대로 읽는다 — 같은 바이트이고 프로세스를 하나 덜 띄운다.
 ///
-/// **symlink는 따라가지 않는다**(`O_NOFOLLOW`). 저장소에 `key.txt -> ~/.ssh/id_rsa` 같은 링크가 있으면 그 행을
-/// 눌렀을 때 저장소 밖 파일 내용이 비교 화면에 그대로 실린다 — 파일 패널의 다른 읽기 경로가 이미 no-follow를
-/// 강제하는 것과 같은 이유다. 링크 자체를 보여 주는 것은 후속(git은 링크 대상 경로 문자열을 blob으로 준다).
+/// **경로 요소마다 symlink를 거부한다.** 마지막 요소만 `O_NOFOLLOW`로 막으면 중간 디렉터리가 링크일 때(`a/b.txt`의
+/// `a`가 `/etc`를 가리킴) 저장소 밖이 열린다. diff는 남의 코드를 보려고 만든 기능이라 **적대적 저장소를 여는 것이
+/// 정상 사용**이고(§6), 읽은 내용은 신뢰 origin 웹뷰로 들어간다. 파일 패널의 다른 읽기 경로도 component마다
+/// no-follow를 강제한다 — diff만 예외로 둘 이유가 없다.
 fn worktreeSide(allocator: std.mem.Allocator, repo: []const u8, rel_path: []const u8) !Output {
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = std.fmt.bufPrintZ(&path_buf, "{s}/{s}", .{ repo, rel_path }) catch return error.PathTooLong;
-    const fd = std.c.open(path.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true });
-    if (fd < 0) return error.OpenFailed;
+    if (!repo_path.isSafeRelative(rel_path)) return error.UnsafePath;
+    const fd = try openNoFollow(repo, rel_path);
     defer _ = std.c.close(fd);
     const bytes = try readAllFd(allocator, fd);
     return .{ .bytes = bytes, .truncated = bytes.len >= max_output_bytes };
+}
+
+/// 저장소 루트에서 시작해 경로 요소를 하나씩 `openat`으로 내려가며 연다. **각 단계가 `O_NOFOLLOW`**라 어느
+/// 요소든 symlink면 그 자리에서 실패한다(ELOOP). 마지막 요소만 파일로 연다.
+fn openNoFollow(repo: []const u8, rel_path: []const u8) !c_int {
+    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo_z = std.fmt.bufPrintZ(&repo_buf, "{s}", .{repo}) catch return error.PathTooLong;
+    // 루트 자체는 사용자가 연 폴더라 따라가도 된다(그 경로를 고른 것이 사용자다) — 그 **아래**부터 막는다.
+    var dir_fd = std.c.open(repo_z.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECTORY = true });
+    if (dir_fd < 0) return error.OpenFailed;
+
+    var it = std.mem.splitScalar(u8, rel_path, '/');
+    var pending: ?[]const u8 = it.next();
+    while (pending) |segment| {
+        const next = it.next();
+        var seg_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const seg_z = std.fmt.bufPrintZ(&seg_buf, "{s}", .{segment}) catch {
+            _ = std.c.close(dir_fd);
+            return error.PathTooLong;
+        };
+        const is_last = next == null;
+        const flags: std.c.O = if (is_last)
+            .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true }
+        else
+            .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true, .DIRECTORY = true };
+        const opened = std.c.openat(dir_fd, seg_z.ptr, flags, @as(std.c.mode_t, 0));
+        _ = std.c.close(dir_fd);
+        if (opened < 0) return error.OpenFailed;
+        if (is_last) return opened;
+        dir_fd = opened;
+        pending = next;
+    }
+    _ = std.c.close(dir_fd);
+    return error.OpenFailed; // rel_path가 비어 있었다(isSafeRelative가 이미 막지만 경로를 열어 두지 않는다)
 }
 
 fn worker(job: *Job) void {
@@ -848,4 +883,45 @@ fn runQuiet(argv: []const []const u8) bool {
         std.c._exit(127);
     }
     return reapPid(pid) == 0;
+}
+
+// [E1 종료 조건] 저장소 밖으로 나가는 경로는 읽지 않는다. 문자열 판정(`repo_path`)만으로는 symlink를 못 막으므로
+// **실제 링크가 든 저장소**를 만들어 확인한다 — 이 방어가 도는지는 파일 시스템이 있어야 판정된다.
+test "저장소 밖을 가리키는 symlink는 읽지 않는다" {
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const exe = locate(&exe_buf) orelse return error.SkipZigTest;
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_ptr = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return error.NoCwd;
+    const cwd = std.mem.span(@as([*:0]u8, @ptrCast(cwd_ptr)));
+    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo = std.fmt.bufPrint(&repo_buf, "{s}/.zig-cache/tmp-symlink-escape", .{cwd}) catch return error.SkipZigTest;
+    var rm_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const rm_path = std.fmt.bufPrintZ(&rm_buf, "{s}", .{repo}) catch return error.SkipZigTest;
+    _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
+    defer _ = runQuiet(&.{ "/bin/rm", "-rf", rm_path });
+
+    if (!runQuiet(&.{ exe, "init", "-q", "-b", "main", repo })) return error.SkipZigTest;
+    writeFileAt(repo, "inside.txt", "safe\n") catch return error.SkipZigTest;
+
+    // ⑴ 마지막 요소가 링크: `secret.txt -> /etc/hosts`
+    var link_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const link = std.fmt.bufPrintZ(&link_buf, "{s}/secret.txt", .{repo}) catch return error.SkipZigTest;
+    if (!runQuiet(&.{ "/bin/ln", "-s", "/etc/hosts", link })) return error.SkipZigTest;
+    // ⑵ 중간 요소가 링크: `escape/ -> /etc` (마지막만 막으면 여기로 새어 나간다)
+    var dir_link_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_link = std.fmt.bufPrintZ(&dir_link_buf, "{s}/escape", .{repo}) catch return error.SkipZigTest;
+    if (!runQuiet(&.{ "/bin/ln", "-s", "/etc", dir_link })) return error.SkipZigTest;
+
+    // 정상 파일은 읽힌다(방어가 기능을 죽이지 않았다는 대조군).
+    const inside = try worktreeSide(testing.allocator, repo, "inside.txt");
+    defer testing.allocator.free(inside.bytes);
+    try testing.expect(inside.bytes.len > 0);
+
+    // 링크는 어느 위치에 있든 실패한다.
+    try testing.expectError(error.OpenFailed, worktreeSide(testing.allocator, repo, "secret.txt"));
+    try testing.expectError(error.OpenFailed, worktreeSide(testing.allocator, repo, "escape/hosts"));
+    // 문자열 단계에서 걸리는 것들.
+    try testing.expectError(error.UnsafePath, worktreeSide(testing.allocator, repo, "../outside.txt"));
+    try testing.expectError(error.UnsafePath, worktreeSide(testing.allocator, repo, "/etc/hosts"));
 }

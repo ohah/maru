@@ -10,8 +10,12 @@
 > caller가 frozen N-1/current라고 증명한 signed executable의 non-empty PTY 성공 경로를 실행할 opt-in E2E
 > 하네스는 구현했지만, 저장소에는
 > 서명된 두 release artifact가 없어 아직 통과 증거를 만들지 못했다. 최대치 근처 multi-runtime 제품 restore,
-> 실제 제품 rollback activation, 전 구간 failure injection, 앱 재실행 orchestration과 soak gate도 열려 있으므로
-> U5 완료나 기본 자동 migration은 주장하지 않는다.**
+> 실제 제품 rollback activation, 전 구간 failure injection, 업그레이드 결과 notice와 soak gate도 열려 있으므로
+> U5 완료는 주장하지 않는다.**
+> **앱 재실행 orchestration은 연결됐다** — GUI는 시작할 때 같은 build의 host가 없으면, build_id만 다른 살아 있는
+> host를 찾아 자동으로 exec 교체를 시도한다(`host_connect.tryUpgradeExistingHost`). 이 시도는 **best-effort**다:
+> 후보가 없거나 capability 미광고·prepare 거부·재연결 실패면 조용히 기존 spawn 경로로 떨어져 새 host를 띄운다.
+> 업그레이드 실패가 곧 "터미널을 못 여는 실패"가 되어서는 안 되기 때문이다.
 > 현재 살아 있는 host가 `host_exec_upgrade_v1`을 광고하지 않으면 새 앱은 그 host를 실행 중 교체할 수 없다.
 > 이 경우 지원하는 N-1 MRSH adapter로 attach해 기존 runtime을 그대로 쓰거나, attachment가 모두 끝난 뒤 구 host를
 > 계속 drain한다. **attachment가 0이어도 runtime이 하나라도 살아 있으면 구 host를 종료하지 않으며, runtime count가
@@ -603,12 +607,14 @@ absolute identity만** 기록하고 target의 page layout을 새로 만든다. s
   provenance가 고정된 signed frozen
   N-1/current artifact를 사용한 위 성공 gate의 실제 통과, 실제 제품 rollback activation, 1개·최대치 근처
   multi-runtime의 제품 daemon→product restore→GUI exact reattach, manifest/reader/socket/FD/promotion 전 구간
-  failure injection, 장시간 soak와 앱 재실행 자동 orchestration/notice가 남아 있다. macOS 공개 API에는 fd-based
+  failure injection, 장시간 soak와 **업그레이드 결과 notice**가 남아 있다(자동 orchestration 자체는 GUI의
+  connect 경로에 연결됐다 — 위 상태 블록). macOS 공개 API에는 fd-based
   exec가 없으므로 kernel-loaded-image pin은 목표에서 제거하고, 마지막
   pathname object identity 재검증+same-designated-requirement signer+same-UID owner boundary를 제품 계약으로 쓴다.
-  이 종료 gate가 닫히기 전에는 U5 완료나 기본 자동 migration을 주장하지 않는다.
+  이 종료 gate가 닫히기 전에는 U5 완료를 주장하지 않는다.
 
-U5 제품 종료 gate가 닫히기 전에는 “구 host session migration 완료”나 기본 자동 migration을 제품/PR에 쓰지 않는다.
+U5 제품 종료 gate가 닫히기 전에는 “구 host session migration 완료”를 제품/PR에 쓰지 않는다. 자동 시도가 기본
+경로에 연결된 것과 “migration이 검증됐다”는 것은 다르다 — 전자는 연결됐고, 후자는 위 gate가 닫혀야 성립한다.
 U1~U4와 현재 U5 component seam은 제품 완료가 아니라 기반 증거다.
 
 ## 12. 필수 적대적 검증

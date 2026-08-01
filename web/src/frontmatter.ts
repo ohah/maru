@@ -95,7 +95,7 @@ export function frontmatterEntries(frontmatter: string): FrontmatterEntry[] {
       continue;
     }
     // 최상위 주석은 값이 아니라 문서에 대한 말이라 표에 넣지 않는다. 들여쓴 주석은 값 블록의 일부다.
-    if (/^#/.test(line)) continue;
+    if (line.startsWith("#")) continue;
     // 키를 만나기 전의 줄은 버린다 — 붙일 곳이 없다.
     if (current !== null) current.lines.push(line);
   }

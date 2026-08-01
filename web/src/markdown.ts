@@ -1,6 +1,7 @@
 import type { Element, Root } from "hast";
 import rehypeKatex from "rehype-katex";
 import rehypePrism from "rehype-prism-plus";
+import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import rehypeStringify from "rehype-stringify";
 import remarkFrontmatter from "remark-frontmatter";
@@ -20,11 +21,14 @@ const assetIdProperty = "dataMaruAssetId";
 
 type AssetRenderMode = "path" | "opaque";
 
-// 위치 attribute는 raw HTML을 HAST로 승격하기 전에가 아니라, raw HTML을 버린 뒤
-// renderer가 직접 붙인다. 그래서 문서가 같은 이름을 위조해도 sanitize allowlist에 닿지 않는다.
+// 위치 attribute는 renderer가 직접 붙인다. **문서가 쓴 값은 먼저 지운다** — 이 이름들은 sanitize
+// allowlist에 있으므로(§2.1 renderer-owned attribute), 지우지 않으면 raw HTML이 승격된 뒤 위조한 값이
+// 그대로 통과한다. 예전에는 raw HTML을 파서 경계에서 버려 이 경로가 아예 없었다.
 function rehypeSourcePositions() {
   return (tree: Root) => {
     visit(tree, "element", (node: Element) => {
+      delete node.properties[sourceStartProperty];
+      delete node.properties[sourceEndProperty];
       if (node.position?.start === undefined || node.position.end === undefined) return;
 
       node.properties[sourceStartProperty] = encodePoint(node.position.start);
@@ -39,6 +43,10 @@ function rehypeBlockResourceLoads(mode: AssetRenderMode) {
   return (tree: Root, file: { data: Record<string, unknown> }) => {
     const atomicPaths: string[] = [];
     visit(tree, "element", (node: Element) => {
+      // 위치 attribute와 같은 이유로 문서가 쓴 값을 먼저 지운다. 이쪽은 더 나쁘다 — viewer가 이 값을
+      // `readAsset` 인자로 쓰므로, 위조가 통과하면 문서가 **읽을 파일을 고르게** 된다.
+      delete node.properties[assetPathProperty];
+      delete node.properties[assetIdProperty];
       // Markdown image의 원래 src를 네트워크 sink로 남기지 않고, 검증된 상대 경로만 renderer-owned data attribute로
       // 옮긴다. FP4 viewer가 readAsset 결과를 data URL로 바꿀 때 이 값만 소비한다.
       if (node.tagName === "img" && typeof node.properties.src === "string") {
@@ -137,6 +145,10 @@ function frontmatterTable(value: string): Element | undefined {
 
 const schema = {
   ...defaultSchema,
+  // 태그를 지울 때 **안쪽 내용까지** 버릴 것들. 기본값은 `script` 하나여서, `<style>`을 지우면 CSS 본문이
+  // 문단 텍스트로 남아 화면에 `body{display:none}`이 그대로 보인다(실측). 실행되지 않으니 위험은 아니지만
+  // 문서에 없던 글자가 생기는 건 렌더 오류다.
+  strip: [...(defaultSchema.strip ?? []), "style"],
   attributes: {
     ...defaultSchema.attributes,
     "*": [
@@ -169,13 +181,19 @@ function createProcessor(mode: AssetRenderMode) {
       .use(remarkFrontmatter, ["yaml", "toml"])
       .use(remarkGfm)
       .use(remarkMath)
-      // allowDangerousHtml을 켜지 않는다. Markdown raw HTML node는 이 경계에서 폐기된다.
+      // 문서에 직접 쓴 HTML(`<details>`·`<kbd>`·`<br>`…)을 여기서 버리지 않고 아래 `rehypeRaw`에 넘긴다.
+      // **이 옵션 자체는 아무것도 허용하지 않는다** — raw 문자열을 트리에 남길 뿐이고, 무엇이 살아남는지는
+      // `rehypeSanitize`의 allowlist가 단독으로 정한다(§2.1). 폐기 경계를 파서에서 sanitizer로 **옮긴** 것이다.
       .use(remarkRehype, {
+        allowDangerousHtml: true,
         handlers: {
           // `toml`은 표로 그리지 않는다 — `키 = 값` 문법이라 같은 규칙으로 못 읽고, 잘못 그리느니 안 그린다.
           yaml: (_state: unknown, node: { value?: string }) => frontmatterTable(node.value ?? ""),
         },
       })
+      // raw 문자열을 실제 element 트리로 판독한다. 문자열인 채로 sanitizer에 보내면 검사할 노드가 없어
+      // 그대로 출력에 박히므로, **파싱이 sanitize보다 반드시 먼저**여야 한다.
+      .use(rehypeRaw)
       .use(rehypeSourcePositions)
       .use(rehypeBlockResourceLoads, mode)
       .use(rehypeSanitize, schema)

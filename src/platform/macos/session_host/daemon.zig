@@ -127,6 +127,83 @@ pub fn runSessionHostWithIdentityTestAuthorizer(
     return runSessionHostImpl(allocator, io, session_dir, socket_path, host_id, true, null);
 }
 
+/// exec layout(연속 `exec_fd_set.max_slots`개 슬롯) + 최대 runtime의 PTY master/wake pipe + listener·lease 여유.
+/// 무한대를 요청하지 않는 이유는 아래 `raiseFileDescriptorLimit` 주석 참고.
+const desired_fd_limit = 8192;
+
+/// 자연 종료 유예 — `poll_timeout_ms`(200ms) × 이 횟수만큼 **연속으로** 비어 있어야 종료한다(= 5초).
+/// 마지막 runtime이 사라진 직후 곧바로 죽으면, 그 순간 재접속하려던 GUI가 endpoint를 잃고 새 host를 띄우게 된다.
+const natural_exit_idle_ticks: usize = 25;
+
+/// 지금 host가 스스로 물러나도 되는가. 순수 판정이라 실 daemon 없이 경계를 테스트로 고정한다.
+///
+/// 세 조건을 **모두** 요구한다.
+///   - `served_any_runtime`: runtime을 한 번이라도 서빙했어야 한다. 없으면 방금 뜬 host가 GUI의 첫 spawn을
+///     받기도 전에 자신을 종료해, 그 host를 띄운 GUI가 endpoint를 잃는다.
+///   - `runtime_count == 0`: detach된 keep-alive 세션이 하나라도 있으면 살아남아야 한다 — 그게 이 host의
+///     존재 이유다(문서: "runtime이 하나라도 살아 있으면 구 host를 종료하지 않는다").
+///   - `client_count == 0`: 붙어 있는 GUI가 곧 spawn할 수 있으므로 끊지 않는다.
+fn shouldExitNaturally(
+    served_any_runtime: bool,
+    runtime_count: usize,
+    client_count: usize,
+    empty_idle_ticks: usize,
+) bool {
+    if (!served_any_runtime or runtime_count != 0 or client_count != 0) return false;
+    return empty_idle_ticks >= natural_exit_idle_ticks;
+}
+
+/// 시작 시 열 수 있는 fd 상한(soft)을 올린다. **exec 업그레이드가 여기에 걸려 한 번도 성공하지 못했다.**
+///
+/// `upgrade_product_coordinator.findAvailableLayout(40)`은 fd 40부터 `exec_fd_set.max_slots`
+/// (= `max_runtime_count` 256 + 3 = **259**)개의 **연속 빈 슬롯**을 찾는다. 그런데 launchd가 GUI 앱에 주는
+/// 기본 soft limit은 **256**이고 host는 그것을 그대로 상속하므로, Dock·Finder로 켠 앱이 띄운 host에서는
+/// `40 + 259 > 256`이라 탐색 루프가 **한 번도 돌지 않고** `null`이 된다. 그러면
+/// `upgrade_loop.finishPreclosedWithoutLayout`이 곧바로 `status=resumed reason=handoff_failed`로 끝낸다.
+///
+/// 실측이 이를 뒷받침한다: 모든 host manifest의 `upgrade_epoch`가 0이었고(한 번도 교체된 적 없음), 빌드를
+/// 바꿀 때마다 옛 host가 고아로 쌓였다. 터미널에서 띄운 앱(셸 `ulimit -n`을 상속)만 이 조건을 통과했다.
+///
+/// hard limit은 보통 무한대지만 macOS는 무한대를 받지 않고 `kern.maxfilesperproc`을 넘으면 EINVAL이므로,
+/// 필요한 만큼만 요청한다. **best-effort**다 — 실패해도 host의 본 기능(keep-alive)은 그대로이므로 오류로
+/// 올리지 않는다. 못 올리면 업그레이드만 기존처럼 실패하고 새 host가 뜬다.
+/// host의 진단 출력을 `<session_dir>/host-<id>.log`로 돌린다.
+///
+/// launcher가 detached spawn하면서 std fd를 전부 `/dev/null`로 보내므로(`redirectStdioToDevNull`) **host 안에서
+/// 무슨 일이 있었는지 볼 방법이 전혀 없다.** GUI 쪽은 터미널에서 앱을 직접 띄우면 stderr가 보이지만 host는 그
+/// 방법조차 없다 — 실제로 "host는 살아 있는데 그 연결만 끊겼다"(`error=ConnectionClosed`)를 만났을 때 host가 왜
+/// 닫았는지 확인할 수단이 없어 추적이 막혔다.
+///
+/// stdout/stdin은 그대로 `/dev/null`에 둔다(PTY 출력이 섞이면 안 된다). append 모드라 exec 업그레이드로 같은
+/// host가 이미지를 갈아타도 기록이 이어진다. **best-effort**다: 못 열면 조용히 기존 fd를 유지한다.
+fn redirectStderrToHostLog(session_dir: [:0]const u8, host_id: ?u128) void {
+    const id = host_id orelse return;
+    var path_buf: [1024]u8 = undefined;
+    const path = std.fmt.bufPrintZ(
+        &path_buf,
+        "{s}/host-{x:0>32}.log",
+        .{ std.mem.sliceTo(session_dir, 0), id },
+    ) catch return;
+    const fd = c.open(
+        path.ptr,
+        .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true, .NOFOLLOW = true },
+        @as(c.mode_t, 0o600),
+    );
+    if (fd < 0) return;
+    defer if (fd > 2) {
+        _ = c.close(fd);
+    };
+    _ = c.dup2(fd, 2);
+}
+
+fn raiseFileDescriptorLimit() void {
+    var limit = posix.getrlimit(.NOFILE) catch return;
+    const target = @min(limit.max, desired_fd_limit);
+    if (limit.cur >= target) return;
+    limit.cur = target;
+    posix.setrlimit(.NOFILE, limit) catch {};
+}
+
 fn runSessionHostImpl(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -136,6 +213,11 @@ fn runSessionHostImpl(
     test_allow_any_upgrade_target: bool,
     fixture_probe: ?FixtureProbe,
 ) RunError!void {
+    // exec 업그레이드 layout을 확보할 수 있도록 가장 먼저 올린다. 이후 열리는 socket/PTY/lease fd가 상한에
+    // 걸리지 않게 하려면 어떤 fd를 열기 전이어야 한다.
+    raiseFileDescriptorLimit();
+    // 그다음 진단 출력을 파일로 돌린다 — 이후 단계의 실패도 기록에 남아야 한다.
+    redirectStderrToHostLog(dir_path, exact_host_id);
     // 제품 launcher argv를 실제 `maru` 바이너리까지 관통하는 process smoke가 detached orphan을 남기지 않도록,
     // 테스트가 명시한 경우 첫 client 연결을 처리한 뒤 정상 종료한다. 일반 제품 환경에는 이 변수가 없어 기존의 영속
     // accept loop를 그대로 돈다. 환경은 시작 시 한 번만 읽어 parent가 spawn 직후 unset해도 child의 동작이 안정적이다.
@@ -303,8 +385,13 @@ fn runSessionHostImpl(
 
     var fd_owner = poll_owner.Owner.init(allocator, io, &server) catch return error.OutOfMemory;
     defer fd_owner.deinit();
+    // 자연 종료 판정 상태. `served_any_runtime`이 없으면 **방금 뜬 host**(아직 GUI가 첫 runtime을 만들기 전)가
+    // 곧바로 자기 자신을 종료해 버린다 — spawn한 GUI가 endpoint를 잃는다.
+    var served_any_runtime = false;
+    var empty_idle_ticks: usize = 0;
     while (true) {
         server.tickOwner();
+        if (registry.count() != 0) served_any_runtime = true;
         switch (fd_owner.pollOnce(poll_timeout_ms) catch return error.OutOfMemory) {
             .upgrade_ready => {
                 const marker = fd_owner.takeArmedUpgrade() orelse return error.ManifestFailed;
@@ -325,9 +412,29 @@ fn runSessionHostImpl(
                     }) == .fail_stop)
                     return error.ManifestFailed;
             },
-            .idle => if (test_oneshot) {
-                test_idle_ticks += 1;
-                if (test_idle_ticks >= 25) break;
+            .idle => {
+                if (test_oneshot) {
+                    test_idle_ticks += 1;
+                    if (test_idle_ticks >= 25) break;
+                }
+                // docs/session-host-upgrade.md 계약: "attachment가 0이어도 runtime이 하나라도 살아 있으면 구
+                // host를 종료하지 않으며, runtime count가 0이 된 뒤에만 자연 종료한다." 이 경로가 구현되지
+                // 않아 고아 host가 영구히 남았다 — 실측에서 자식 0개인 host가 계속 살아 있어 수동으로 죽여야
+                // 했고, build_id가 바뀔 때마다 그런 host가 하나씩 쌓였다.
+                //
+                // 세 조건을 **모두** 요구한다. runtime을 한 번이라도 서빙했어야 하고(신생 host 보호), 지금
+                // runtime이 0이어야 하며(detach된 keep-alive 세션이 있으면 살아남는다), 붙어 있는 client도
+                // 없어야 한다(곧 spawn할 GUI를 끊지 않는다).
+                if (served_any_runtime and registry.count() == 0 and fd_owner.activeCount() == 0)
+                    empty_idle_ticks += 1
+                else
+                    empty_idle_ticks = 0;
+                if (shouldExitNaturally(
+                    served_any_runtime,
+                    registry.count(),
+                    fd_owner.activeCount(),
+                    empty_idle_ticks,
+                )) break;
             },
             .progress => {},
             .listener_broken => break,
@@ -484,4 +591,27 @@ fn readKindContains(fd: c.fd_t, parser: *framing.FrameParser, a: std.mem.Allocat
         if (n <= 0) return false;
         parser.push(buf[0..@intCast(n)]) catch return false;
     }
+}
+
+// 이 테스트가 증명하는 것(그리고 터미널에서 왜 중요한가): host는 GUI가 꺼져도 살아남아야 세션이 유지되지만,
+// **영원히 살아남으면 안 된다**. docs/session-host-upgrade.md는 "runtime count가 0이 된 뒤에만 자연 종료한다"고
+// 계약하는데 그 경로가 구현되지 않아, 자식이 0개인 host가 계속 남아 build_id가 바뀔 때마다 하나씩 쌓였다(실측:
+// 4개까지 누적, 전부 수동으로 죽여야 했다). 반대로 성급하게 죽이면 더 나쁘다 — 방금 뜬 host가 첫 spawn을 받기
+// 전에 자신을 종료하면 그 host를 띄운 GUI가 endpoint를 잃고, detach된 keep-alive 세션이 남아 있는데 죽으면
+// 사용자의 셸이 통째로 사라진다. 그래서 "한 번 서빙했고, 지금 runtime 0이고, 붙은 client도 0"이라는 세 조건과
+// 유예 tick을 전부 요구한다. 순수 판정이라 실 daemon·소켓 없이 이 경계를 고정한다.
+test "daemon 자연 종료: 서빙 이력·runtime 0·client 0·유예를 모두 만족할 때만 물러난다" {
+    const enough = natural_exit_idle_ticks;
+    // 정상 종료 조건.
+    try testing.expect(shouldExitNaturally(true, 0, 0, enough));
+
+    // 신생 host 보호 — 아직 아무 runtime도 서빙하지 않았으면 절대 죽지 않는다.
+    try testing.expect(!shouldExitNaturally(false, 0, 0, enough));
+    // 살아 있는 keep-alive 세션이 있으면 남는다. 여기서 죽으면 사용자의 셸이 사라진다.
+    try testing.expect(!shouldExitNaturally(true, 1, 0, enough));
+    // 붙어 있는 GUI가 곧 spawn할 수 있으므로 끊지 않는다.
+    try testing.expect(!shouldExitNaturally(true, 0, 1, enough));
+    // 유예가 차기 전에는 물러나지 않는다 — 마지막 runtime 소멸 직후 재접속하려는 GUI를 위한 창이다.
+    try testing.expect(!shouldExitNaturally(true, 0, 0, enough - 1));
+    try testing.expect(!shouldExitNaturally(true, 0, 0, 0));
 }

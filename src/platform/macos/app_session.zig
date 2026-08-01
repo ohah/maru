@@ -1922,6 +1922,14 @@ const HostConnectFailureStage = enum {
     runtime_death,
 };
 var host_connect_failure_stage: ?HostConnectFailureStage = null;
+/// `runtime_death`처럼 `FailureReason`이 아니라 **Zig error**로 갈리는 단계의 원인. `@errorName`은 comptime 정적
+/// 문자열이라 수명 걱정 없이 그대로 보관한다.
+///
+/// 이걸 남기지 않으면 `stage=runtime_death` 하나가 서로 **완전히 다른 세 실패**를 뭉갠다: host가 연결을 끊었나
+/// (`ConnectionClosed`), 쓰기가 실패했나(`WriteFailed`), 아니면 host가 요청 계약을 모르나
+/// (`UnsupportedSpawnContract`). 원인 규명이 여기서 막히는 것을 실제로 겪었다 — build_id가 완전히 일치하는
+/// host에서도 이 단계가 재현됐는데, 셋 중 무엇인지 몰라 더 좁힐 수 없었다.
+var host_connect_failure_error: ?[]const u8 = null;
 
 /// 실패 단계/사유를 사람이 읽고 **그대로 복사해 보고할 수 있는** 한 줄로 만든다. GUI 프로세스의 stdout/stderr는
 /// `/dev/null`이라(Dock·Finder 실행) `std.log`가 어디에도 남지 않는다 — 그래서 이 문자열이 화면 notice에 실리는
@@ -1930,10 +1938,16 @@ fn hostConnectFailureDetail(
     buf: []u8,
     stage: ?HostConnectFailureStage,
     reason: ?HostConnectFailureReason,
+    error_name: ?[]const u8,
 ) []const u8 {
     const stage_text = if (stage) |s| @tagName(s) else "unknown";
+    // reason(연결 단계의 `FailureReason`)과 error(그 밖의 단계에서 갈리는 Zig error)는 **동시에 오지 않는다** —
+    // 어느 쪽이든 있는 것을 싣고, 둘 다 없으면 단계만 남긴다.
     if (reason) |r| {
         return std.fmt.bufPrint(buf, "stage={s} reason={s}", .{ stage_text, @tagName(r) }) catch "stage=unknown";
+    }
+    if (error_name) |name| {
+        return std.fmt.bufPrint(buf, "stage={s} error={s}", .{ stage_text, name }) catch "stage=unknown";
     }
     return std.fmt.bufPrint(buf, "stage={s}", .{stage_text}) catch "stage=unknown";
 }
@@ -5875,7 +5889,7 @@ pub const AppSession = struct {
     /// keep-alive host 연결 실패를 기록한다(§6 L291) — 프로세스 전역 flag(이후 창은 재시도 없이 폴백)와 이 창의 notice
     /// pending을 함께 세운다. createTerm은 backendForNew가 null이라 in-process로 열되, 첫 tick의 notice가 "유지 안 됨"을 알린다.
     fn markHostConnectFailed(self: *AppSession, stage: HostConnectFailureStage) void {
-        self.recordHostConnectFailure(stage, null);
+        self.recordHostConnectFailure(stage, null, null);
     }
 
     fn markHostConnectFailedReason(
@@ -5883,7 +5897,18 @@ pub const AppSession = struct {
         stage: HostConnectFailureStage,
         reason: HostConnectFailureReason,
     ) void {
-        self.recordHostConnectFailure(stage, reason);
+        self.recordHostConnectFailure(stage, reason, null);
+    }
+
+    /// `FailureReason`이 아니라 **Zig error**로 갈리는 단계(현재 `runtime_death`)를 기록한다. 단계만 남기면
+    /// `ConnectionClosed`·`WriteFailed`·`UnsupportedSpawnContract`가 한 값으로 뭉개져, 원인이 host 사망인지
+    /// 쓰기 실패인지 계약 불일치인지 구분할 수 없다 — 실제로 그 지점에서 진단이 막혔다.
+    fn markHostConnectFailedError(
+        self: *AppSession,
+        stage: HostConnectFailureStage,
+        err: anyerror,
+    ) void {
+        self.recordHostConnectFailure(stage, null, @errorName(err));
     }
 
     /// 실패 단계/사유를 전역 상태에 남기고 **즉시 한 줄 로깅한다**. 로깅을 notice 표시 시점(다음 tick)까지 미루지
@@ -5893,16 +5918,18 @@ pub const AppSession = struct {
         self: *AppSession,
         stage: HostConnectFailureStage,
         reason: ?HostConnectFailureReason,
+        error_name: ?[]const u8,
     ) void {
         host_connect_failed = true;
         host_connect_failure_stage = stage;
         host_connect_failure_reason = reason;
+        host_connect_failure_error = error_name;
         self.host_connect_notice_pending = true;
         if (!builtin.is_test) {
             var buf: [96]u8 = undefined;
             std.log.err(
                 "persistent session host unavailable: {s} — terminals fall back to in-process",
-                .{hostConnectFailureDetail(&buf, stage, reason)},
+                .{hostConnectFailureDetail(&buf, stage, reason, error_name)},
             );
         }
     }
@@ -5920,6 +5947,7 @@ pub const AppSession = struct {
             &detail_buf,
             host_connect_failure_stage,
             host_connect_failure_reason,
+            host_connect_failure_error,
         );
         var buf: [220]u8 = undefined;
         const msg = std.fmt.bufPrint(
@@ -6108,7 +6136,7 @@ pub const AppSession = struct {
                 const remote_dead = is_macos and !reconnected and app_remote_backend != null and !host_connect_failed and
                     (err == error.ConnectionClosed or err == error.WriteFailed or err == error.UnsupportedSpawnContract);
                 if (!remote_dead) return err;
-                self.markHostConnectFailed(.runtime_death);
+                self.markHostConnectFailedError(.runtime_death, err);
                 be = self.termBackend(); // errdefer·이후 단계가 in-process backend를 쓰도록 갱신.
                 break :surface try be.spawn(.{
                     .handle = id,
@@ -41905,22 +41933,56 @@ test "P4 Quit-End-All: alternate가 host-backed runtime을 terminate한다(재�
 // 순수 함수라 실 PTY/CoreText 없이 non-macOS에서도 회귀를 잡는다.
 test "host connect 실패 detail: 단계 단독과 단계+사유를 한 줄로 조립한다" {
     var buf: [96]u8 = undefined;
-    try std.testing.expectEqualStrings("stage=exe_path", hostConnectFailureDetail(&buf, .exe_path, null));
-    try std.testing.expectEqualStrings("stage=cache_base", hostConnectFailureDetail(&buf, .cache_base, null));
-    try std.testing.expectEqualStrings("stage=runtime_death", hostConnectFailureDetail(&buf, .runtime_death, null));
+    try std.testing.expectEqualStrings("stage=exe_path", hostConnectFailureDetail(&buf, .exe_path, null, null));
+    try std.testing.expectEqualStrings("stage=cache_base", hostConnectFailureDetail(&buf, .cache_base, null, null));
     // stage를 잃어도 "reason=null"로 세 가지 실패를 뭉개지 않고 unknown으로 구분해 남긴다.
-    try std.testing.expectEqualStrings("stage=unknown", hostConnectFailureDetail(&buf, null, null));
+    try std.testing.expectEqualStrings("stage=unknown", hostConnectFailureDetail(&buf, null, null, null));
 
     const reason: HostConnectFailureReason = if (is_macos) .launch_failed else .unavailable;
     var expected_buf: [96]u8 = undefined;
     const expected = try std.fmt.bufPrint(&expected_buf, "stage=connect reason={s}", .{@tagName(reason)});
-    try std.testing.expectEqualStrings(expected, hostConnectFailureDetail(&buf, .connect, reason));
+    try std.testing.expectEqualStrings(expected, hostConnectFailureDetail(&buf, .connect, reason, null));
+}
+
+// 이 테스트가 증명하는 것(그리고 터미널에서 왜 중요한가): `runtime_death`는 **서로 완전히 다른 세 실패**를 한
+// 단계로 묶는다 — host가 연결을 끊었거나(ConnectionClosed), 쓰기가 실패했거나(WriteFailed), host가 요청 계약을
+// 모르거나(UnsupportedSpawnContract). 원인이 갈리는데 표시가 같으면 진단이 그 지점에서 멈춘다. 실제로 build_id가
+// **완전히 일치하는** host에서도 이 단계가 재현됐고, 셋 중 무엇인지 몰라 더 좁힐 수 없었다. 그래서 error 이름을
+// 함께 싣는다. reason과 error는 동시에 오지 않으므로(연결 단계냐 그 이후냐) 우선순위도 함께 고정한다.
+test "host connect 실패 detail: runtime_death는 어떤 error였는지까지 남긴다" {
+    var buf: [96]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "stage=runtime_death error=ConnectionClosed",
+        hostConnectFailureDetail(&buf, .runtime_death, null, @errorName(error.ConnectionClosed)),
+    );
+    try std.testing.expectEqualStrings(
+        "stage=runtime_death error=UnsupportedSpawnContract",
+        hostConnectFailureDetail(&buf, .runtime_death, null, @errorName(error.UnsupportedSpawnContract)),
+    );
+    // error 없이 단계만 있으면 기존 형식 그대로다(회귀 방지).
+    try std.testing.expectEqualStrings(
+        "stage=runtime_death",
+        hostConnectFailureDetail(&buf, .runtime_death, null, null),
+    );
+    // reason이 있으면 그쪽이 우선한다 — 연결 단계의 실패는 FailureReason이 더 구체적이다.
+    const reason: HostConnectFailureReason = if (is_macos) .launch_failed else .unavailable;
+    var expected_buf: [96]u8 = undefined;
+    const expected = try std.fmt.bufPrint(&expected_buf, "stage=connect reason={s}", .{@tagName(reason)});
+    try std.testing.expectEqualStrings(
+        expected,
+        hostConnectFailureDetail(&buf, .connect, reason, @errorName(error.WriteFailed)),
+    );
 }
 
 // 진단 문자열 때문에 앱이 죽으면 본말전도다. 버퍼가 모자라면 panic·부분 출력 대신 식별 가능한 고정 값으로 접힌다.
 test "host connect 실패 detail: 버퍼가 모자라면 크래시 대신 식별 가능한 값으로 접힌다" {
     var tiny: [4]u8 = undefined;
-    try std.testing.expectEqualStrings("stage=unknown", hostConnectFailureDetail(&tiny, .connect, null));
+    try std.testing.expectEqualStrings("stage=unknown", hostConnectFailureDetail(&tiny, .connect, null, null));
+    // error 이름이 붙어 더 길어지는 경로도 같은 규율로 접힌다.
+    try std.testing.expectEqualStrings(
+        "stage=unknown",
+        hostConnectFailureDetail(&tiny, .runtime_death, null, @errorName(error.ConnectionClosed)),
+    );
 }
 
 // P4 §6 L291 — keep-alive인데 host 연결이 실패하면 **조용히 in-process로 폴백하지 않고** 사용자에게 notice로 알린다("유지된다"

@@ -1486,14 +1486,36 @@ pub const RemoteRuntime = struct {
         self.allocator.free(resp);
     }
 
+    /// detach가 끝내 실패하면 host에 controller lease가 남는다. 그 결과는 조용하지 않다 — 다음 attach가
+    /// `controller_busy`가 되어 **화면은 그려지는데 키 입력만 안 먹는** 상태가 되고, 사용자에게는 "터미널이
+    /// 멈췄다"로 보인다. 지금까지 이 실패는 어디에도 남지 않아 원인을 추적할 수 없었으므로 한 줄 남긴다.
+    /// GUI stdout/stderr는 `/dev/null`이라(Dock 실행) 터미널에서 앱을 직접 띄울 때만 보인다.
+    fn logDetachIncomplete(stage: []const u8, err: anyerror) void {
+        if (builtin.is_test) return;
+        std.log.err(
+            "remote runtime detach incomplete: stage={s} error={s} — controller lease may linger (next attach can be controller_busy)",
+            .{ stage, @errorName(err) },
+        );
+    }
+
     fn detachBestEffort(self: *RemoteRuntime) void {
         if (self.attachment.streamId() == 0) return;
         var buf: [64]u8 = undefined;
         const params = std.fmt.bufPrint(&buf, "{{\"stream_id\":{d}}}", .{self.attachment.streamId()}) catch return;
-        // controller lease 해제는 transient input-frame OOM보다 우선한다. hard connection error면 어차피 EOF detach된다.
-        self.flushQueuedInputBlocking() catch |err| if (err != error.OutOfMemory) return;
+        // controller lease 해제는 큐에 남은 입력보다 **우선한다**. 그래서 flush가 실패해도 detach를 건너뛰지 않는다.
+        //
+        // 이전에는 OOM이 아닌 실패(예: `AdminBusy`)면 곧바로 return해 detach RPC를 보내지 않았는데, 근거였던
+        // "hard connection error면 어차피 EOF detach된다"가 **shared connection에서는 성립하지 않는다**
+        // (`detachClientSide` 주석: 앱 종료 전까지 EOF가 오지 않는다). 그래서 lease가 host에 그대로 남아 다음
+        // attach가 `controller_busy`가 되고, 사용자는 입력이 안 되는 터미널을 보게 된다. connection이 이미
+        // 죽었다면 아래 detach도 실패할 뿐이라 시도 자체는 무해하다.
+        self.flushQueuedInputBlocking() catch |err| {
+            if (err == error.OutOfMemory) self.client.failClosed();
+            logDetachIncomplete("flush", err);
+        };
         const resp = self.client.call("runtime.detach", params) catch |err| {
             if (err == error.OutOfMemory) self.client.failClosed();
+            logDetachIncomplete("detach", err);
             return;
         };
         self.allocator.free(resp);

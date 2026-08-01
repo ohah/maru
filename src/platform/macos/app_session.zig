@@ -1028,6 +1028,11 @@ const sync_diag = std.log.scoped(.sync);
 const frametime_diag = std.log.scoped(.frametime);
 // 느린 tick 즉시 로그 임계 — 8ms(60Hz 프레임 16.6ms의 절반). 이보다 오래 걸린 tick은 다음 NSTimer 발사를 밀어 rate를 떨군다.
 const frametime_slow_ns: i128 = 8 * std.time.ns_per_ms;
+// 레이아웃 resize 진단 logger. 표시 grid는 항상 맞춰지지만 runtime(PTY winsize·원격 host) 전달이 거부되면 그
+// Term의 자식 프로세스만 옛 winsize를 믿는다 — "이 pane의 TUI만 어긋난다"의 원인을 남긴다. 카운터
+// (`resize_delivery_failures`)와 같은 도메인 데이터를 헤드리스 테스트가 읽는다(관측 가능성 원칙).
+// 게이트는 diag.zig 단일 출처.
+const resize_diag = std.log.scoped(.resize);
 const diag_gate = @import("diag.zig");
 
 fn nsToMs(ns: i128) f64 {
@@ -2389,6 +2394,12 @@ pub const AppSession = struct {
     total_app_key_events: u64 = 0,
     total_ignored_key_events: u64 = 0,
     total_resize_events: u64 = 0,
+    // 레이아웃 크기를 **runtime(PTY winsize·원격 host)에 전달하지 못한** 횟수와 마지막 error 이름. 표시 grid는
+    // `resizeTermForLayout`이 항상 맞추므로 화면은 pane을 넘지 않지만, 자식 프로세스는 옛 winsize를 계속 믿는다
+    // (TUI만 어긋난 상태). 조용히 삼키면 그 원인을 찾을 수 없어 관측 지점을 둔다 — `@errorName`은 comptime 정적
+    // 문자열이라 수명이 안전하다(hostConnectFailureDetail이 쓰는 것과 같은 근거).
+    resize_delivery_failures: u64 = 0,
+    last_resize_delivery_error: ?[]const u8 = null,
     total_close_events: u64 = 0,
     ended_seen: bool = false,
     // 호스트(Swift)가 매 tick 주입하는 "이 세션이 앱의 마지막(유일) 일반 창인가". Zig 리프 세션은 형제 NSWindow를
@@ -4270,56 +4281,84 @@ pub const AppSession = struct {
         try PaneTree.layout(allocator, self.activeTab().tree, term_rect, out);
     }
 
-    /// 활성 탭의 각 panel을 자기 leaf rect grid로 resize한다(window resize·split 후 재배치). 단일 leaf면
-    /// 활성 surface 하나를 full term grid로 — 기존 resizeActiveSurface와 동일 효과. 활성 panel의 resize
-    /// 에러만 전파하고(기존 resize()의 try 동작 보존), 비활성 panel의 죽은 PTY 등은 무시해 한 panel이 다른
-    /// panel 재배치를 막지 않게 한다. leaf rect 계산 실패(OOM)는 전파.
-    /// layout grid를 이 Term에 적용하는 **단일 출처**. PTY 없는 Term 두 종류를 여기서 갈라, 호출부가 `kind == .web`
-    /// 스킵을 각자 복사하지 않게 한다.
+    /// layout grid를 이 Term에 적용하는 **단일 출처**.
+    ///
+    /// **계약**: 이 함수가 돌아온 뒤 그 Term의 **표시 grid(core)는 항상 레이아웃 크기**다. runtime(PTY winsize·
+    /// 원격 host)에 전달하지 못하면 그 실패를 error로 **보고**하되, 표시 grid는 그래도 맞춘다. 이 비대칭이
+    /// 핵심이다 — 렌더러는 셀을 `pane origin + col×cell_w`로만 두고 **pane 클리핑이 없어서**
+    /// (maru_metal_renderer.m의 셀 패스에는 scissor가 없다), 옛 grid가 남은 Term은 divider를 넘어 **옆 pane
+    /// 글자 위에 겹쳐 그려진다**. 즉 "runtime에 못 보냈다"는 표시 grid를 낡은 채 두어도 되는 근거가 아니다.
+    ///
+    /// PTY 없는/못 미치는 Term의 갈래를 여기서 모두 갈라, 호출부가 `kind == .web` 스킵을 각자 복사하지 않게 한다.
     /// - web(4e-2 §6): sentinel이고 WKWebView frame은 surfaceDiff가 따로 sync하므로 대상이 아니다(no-op).
-    /// - §7 종료 placeholder: live link가 없어 `SurfaceRuntime.resize`가 `UnknownSurface`를 낸다(runtime.zig:308).
-    ///   그런데 묘비는 **렌더는 해야 하므로** 그냥 스킵하면 저장 grid에 갇혀 창 크기와 어긋난 화면이 남는다. 그래서
-    ///   sentinel core를 락 아래 직접 resize한다(PTY winsize·trace recorder 없음 — 표시용 reflow만).
-    /// - 그 외: 기존 `runtime.resize`와 동일 의미(에러도 그대로 전파).
+    /// - §7 종료 placeholder: live link가 없어 `SurfaceRuntime.resize`가 `UnknownSurface`를 낸다(runtime.zig).
+    ///   묘비는 **렌더는 해야 하므로** 그냥 스킵하면 저장 grid에 갇혀 창 크기와 어긋난 화면이 남는다.
+    /// - 자식이 끝난 Term(`process_state == .exited`)·link가 사라진 Term(host runtime 사망): runtime이 dead
+    ///   adapter로의 라우팅을 **문서화된 계약대로** 거부한다([surface-runtime-api.md]). 거부는 runtime 쪽 사실일 뿐
+    ///   레이아웃 사실이 아니므로, 표시 grid는 여기서 직접 맞춘다.
     fn resizeTermForLayout(self: *AppSession, term: *Term, size: terminal.Size) app.RuntimeError!void {
         if (term.kind == .web) return;
         if (term.rt.ended_placeholder) {
-            const grid = terminal.clampGridSize(size); // runtime.resize와 같은 clamp(core는 cols>=2를 요구)
-            {
-                term.surface.lockCore(self.io);
-                defer term.surface.unlockCore(self.io);
-                term.surface.core.resize(grid.cols, grid.rows) catch return; // OOM이면 기존 grid 유지(표시만 영향)
-            }
-            // 관측 캐시도 함께 옮긴다. 묘비는 `live_initialized == false`라 `refreshTermObservation`이 즉시 반환하므로
-            // 여기서 갱신하지 않으면 생성 시 심은 저장 grid에 영원히 갇힌다 — `captureWorkspaceTab`은 core.size보다
-            // observation.size를 **우선**하므로, 창을 키운 채 종료하면 예전 grid가 저장되고 다음 실행의 새 셸이 창과
-            // 다른 winsize로 떠 시작 프로그램이 잘못된 기하로 레이아웃한다(code-review).
-            term.rt.observation.size = grid;
+            self.resizeTermCoreToLayout(term, size);
             return;
         }
-        return self.runtime.resize(term.surface.id, size, self.io);
+        self.runtime.resize(term.surface.id, size, self.io) catch |err| {
+            // `UnknownSurface`/`ProcessExited`는 core에 닿기 전에 반환되므로 표시 grid가 옛 크기로 남는다.
+            // `ResizeFailed`(core는 이미 적용, PTY ioctl만 실패)에서도 같은 값을 다시 적용할 뿐이라 무해하다.
+            self.resizeTermCoreToLayout(term, size);
+            return err;
+        };
     }
 
+    /// 표시 grid(core)만 레이아웃 크기로 맞춘다 — PTY winsize·trace recorder 없이 **reflow만**. 묘비(§7)와
+    /// runtime 전달 실패가 같은 코드를 쓰게 해, "표시 grid는 레이아웃이 소유한다"는 규칙의 구현이 한 곳에 있게 한다.
+    fn resizeTermCoreToLayout(self: *AppSession, term: *Term, size: terminal.Size) void {
+        const grid = terminal.clampGridSize(size); // runtime.resize와 같은 clamp(core는 cols>=2를 요구)
+        {
+            term.surface.lockCore(self.io);
+            defer term.surface.unlockCore(self.io);
+            term.surface.core.resize(grid.cols, grid.rows) catch return; // OOM이면 기존 grid 유지(표시만 영향)
+        }
+        // 관측 캐시도 함께 옮긴다. 묘비는 `live_initialized == false`라 `refreshTermObservation`이 즉시 반환하므로
+        // 여기서 갱신하지 않으면 생성 시 심은 저장 grid에 영원히 갇힌다 — `captureWorkspaceTab`은 core.size보다
+        // observation.size를 **우선**하므로, 창을 키운 채 종료하면 예전 grid가 저장되고 다음 실행의 새 셸이 창과
+        // 다른 winsize로 떠 시작 프로그램이 잘못된 기하로 레이아웃한다(code-review). 살아 있는 Term에서도 같은
+        // 이유로 맞춰 둔다(runtime이 살아나면 `refreshTermObservation`이 곧 자기 값으로 덮는다).
+        term.rt.observation.size = grid;
+    }
+
+    /// 레이아웃 크기를 runtime에 전달하지 못한 사실을 관측 지점에 남긴다. 표시 grid는 이미 맞춰졌으므로 화면은
+    /// 정상이지만 자식 프로세스는 옛 winsize를 믿는다 — 원인을 남기지 않으면 "그 pane의 TUI만 어긋난다"를
+    /// 추적할 수 없다. 카운터는 헤드리스 테스트가 읽고, 상세는 MARU_DEBUG 로그로 낸다.
+    fn noteResizeDeliveryFailure(self: *AppSession, term: *Term, err: app.RuntimeError) void {
+        self.resize_delivery_failures += 1;
+        self.last_resize_delivery_error = @errorName(err); // comptime 정적 문자열 — 수명 안전
+        if (diag_gate.maruDebugEnabled()) resize_diag.info(
+            "layout resize not delivered: surface={d} error={s}",
+            .{ term.surface.id, @errorName(err) },
+        );
+    }
+
+    /// 활성 탭의 각 panel을 자기 leaf rect grid로 resize한다(window resize·split 후 재배치). 단일 leaf면
+    /// 활성 surface 하나를 full term grid로 — 기존 resizeActiveSurface와 동일 효과. **레이아웃 적용은 개별 Term의
+    /// runtime 전달 실패로 중단되지 않는다**(표시 grid는 `resizeTermForLayout`이 보장하고, 못 전달한 사실은
+    /// `noteResizeDeliveryFailure`가 남긴다). leaf rect 계산 실패(OOM)만 전파한다.
     fn resizeActiveTabPanes(self: *AppSession) !void {
         var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
         defer leaf_rects.deinit(self.allocator);
         try self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects);
-        const active_pane = self.activePane();
         for (leaf_rects.items) |lr| {
             // 각 panel은 상단 탭 바를 뺀 '터미널 영역'(paneTermRect)에 그려지므로 Term grid도 그 크기로 맞춘다.
             const trect = self.paneTermRect(lr.rect);
             const psize = layout_math.gridFromRectPx(self.cell_width_px, self.cell_height_px, trect.w, trect.h);
             // panel의 모든 Term(가로 탭)을 같은 rect grid로 맞춘다 — 비활성 Term도 전환 즉시 올바른 크기가 되게.
-            // 활성 panel의 활성 Term만 에러를 전파(기존 단일 surface resize의 try 동작 보존), 나머지는 무시.
             for (lr.leaf.terms.items) |term| {
-                // PTY 없는 Term(web sentinel·§7 종료 placeholder)의 처리는 resizeTermForLayout이 소유한다. 활성 pane의
-                // 활성 Term만 에러를 전파하는 계약은 그대로다 — 그 `try`가 PTY 없는 Term의 UnknownSurface를 전파하면
-                // resize() 전체가 실패해 recomputeActivePaneRect·metal_dirty가 스킵된 half-state가 남는다(창 크기 조정 깨짐).
-                if (lr.leaf == active_pane and term == lr.leaf.activeTerm()) {
-                    try self.resizeTermForLayout(term, psize);
-                } else {
-                    self.resizeTermForLayout(term, psize) catch {};
-                }
+                // **레이아웃 적용은 한 Term의 runtime 전달 실패로 중단되지 않는다.** 표시 grid는
+                // `resizeTermForLayout`이 이미 보장하므로 남은 error는 "PTY winsize·원격 host에 못 보냈다"뿐인데,
+                // 그걸 밖으로 전파하면 `resize()`가 `recomputeActivePaneRect`·`last_resize_size`·`metal_dirty`를
+                // 스킵한 half-state로 끝난다(활성 pane의 세션이 죽어 있으면 창 크기 조정이 통째로 깨짐).
+                // 대신 삼키지 않고 관측 지점에 남긴다(관측 가능성 원칙).
+                self.resizeTermForLayout(term, psize) catch |err| self.noteResizeDeliveryFailure(term, err);
             }
         }
     }
@@ -4336,7 +4375,7 @@ pub const AppSession = struct {
             const trect = self.paneTermRect(lr.rect);
             const psize = layout_math.gridFromRectPx(self.cell_width_px, self.cell_height_px, trect.w, trect.h);
             for (lr.leaf.terms.items) |term| {
-                self.resizeTermForLayout(term, psize) catch {}; // PTY 없는 Term 분기는 헬퍼가 소유(web=no-op, 묘비=core 직접)
+                self.resizeTermForLayout(term, psize) catch |err| self.noteResizeDeliveryFailure(term, err); // 표시 grid는 헬퍼가 보장, 전달 실패만 관측
             }
         }
     }
@@ -5655,9 +5694,11 @@ pub const AppSession = struct {
             return error.ActivePaneNotInTree; // errdefer가 split·pane을 원복(트리는 변형 전이라 무변)
         }
 
-        // 5) 기존 panel의 모든 Term을 a 크기로 줄인다(PTY winsize 포함). 죽은 PTY 등의 실패는 무시(split 자체는 성공).
+        // 5) 기존 panel의 모든 Term을 a 크기로 줄인다(PTY winsize 포함). 죽은 PTY라 winsize를 못 보내도 **표시
+        //    grid는 반드시 줄어든다**(resizeTermForLayout 계약) — 안 그러면 그 Term이 divider를 넘어 새 panel 위에
+        //    글자를 그린다. 전달 실패는 split을 막지 않고 관측 지점에만 남긴다.
         for (active.terms.items) |term| {
-            self.resizeTermForLayout(term, a_size) catch {}; // PTY 없는 Term 분기는 헬퍼가 소유(web=no-op, 묘비=core 직접)
+            self.resizeTermForLayout(term, a_size) catch |err| self.noteResizeDeliveryFailure(term, err); // 표시 grid는 헬퍼가 보장, 전달 실패만 관측
         }
 
         // 6) 새 panel로 포커스 이동(멀티플렉서 split 관행). focusPane이 탭 대표 surface(= app_window.active())·
@@ -7528,7 +7569,7 @@ pub const AppSession = struct {
                 const trect = self.paneTermRect(lr.rect);
                 const psize = layout_math.gridFromRectPx(self.cell_width_px, self.cell_height_px, trect.w, trect.h);
                 for (lr.leaf.terms.items) |term| {
-                    self.resizeTermForLayout(term, psize) catch {}; // PTY 없는 Term 분기는 헬퍼가 소유(web=no-op, 묘비=core 직접)
+                    self.resizeTermForLayout(term, psize) catch |err| self.noteResizeDeliveryFailure(term, err); // 표시 grid는 헬퍼가 보장, 전달 실패만 관측
                 }
                 if (lr.leaf == active_pane) {
                     self.active_pane_rect = trect; // 상단 탭 바를 뺀 영역(좌표 origin) — recomputeActivePaneRect 동형
@@ -49479,6 +49520,81 @@ test "newTab(새 워크스페이스): 직전 활성 탭이 split이어도 새 �
     const new_tab_size = session.activeSurface().core.size;
     try std.testing.expectEqual(full, new_tab_size); // 전체 영역 복원(직전 panel 크기 아님)
     try std.testing.expect(new_tab_size.cols != split_panel.cols); // 회귀 가드: split panel 크기를 물려받지 않음
+}
+
+// 이 테스트가 증명하는 것(그리고 터미널에서 왜 중요한가): **표시 grid는 레이아웃이 소유한다**. runtime이
+// resize를 거부해도(자식 종료 `.exited`·link 없음) core grid는 자기 pane 크기를 따라야 한다. 렌더러는 셀을
+// `pane origin + col×cell_w`로만 두고 **pane 클리핑이 없으므로**(maru_metal_renderer.m), 옛 grid가 남으면 그
+// Term이 divider를 넘어 **옆 pane 글자 위에 겹쳐 그려진다** — 사용자가 실제로 겪은 화면 손상이다.
+test "레이아웃 resize: 자식이 종료된(.exited) Term도 split 후 자기 pane grid로 줄어든다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // splitActivePane = 실 PTY/CoreText
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.backing_width_px = session.sidebar_width_px + 800; // split이 의미 있으려면 backing 필요
+    session.backing_height_px = 600;
+    session.window_padding_px = .{}; // split 기하만 검증(다른 split 테스트와 같은 규율)
+
+    try session.resizeActiveTabPanes();
+    const full = session.activeSurface().core.size;
+
+    // "held 창": 자식이 끝난 Term은 `process_state = .exited`라 `SurfaceRuntime.resize`가 core에 닿기 전에
+    // `ProcessExited`로 거부한다(runtime.zig — dead adapter로의 라우팅 거부는 문서화된 계약).
+    const dead = session.activePane().activeTerm();
+    dead.surface.process_state = .exited;
+
+    try session.splitActivePane(.horizontal);
+
+    // 회귀 전에는 거부된 resize가 그대로 삼켜져 dead가 분할 전 폭(full)을 유지했다 → 옆 pane 침범.
+    try std.testing.expect(dead.surface.core.size.cols < full.cols);
+    try std.testing.expectEqual(session.activeSurface().core.size, dead.surface.core.size); // 두 pane은 같은 크기(0.5 분할)
+}
+
+// 이 테스트가 증명하는 것(그리고 터미널에서 왜 중요한가): 레이아웃 적용은 한 Term의 runtime 전달 실패로
+// **중단되지 않는다**. 활성 pane의 Term이 죽어 있을 때 창 크기를 바꾸면, 예전엔 그 에러가 `resize()` 밖으로
+// 전파돼 `recomputeActivePaneRect`·`last_resize_size`·`metal_dirty`가 통째로 스킵된 half-state가 남았다
+// (좌표계가 옛 rect에 고정 = 마우스 hit-test 어긋남, 화면 미갱신). 실패는 삼키지 않고 카운터로 관측한다.
+test "레이아웃 resize: 활성 Term의 runtime 전달 실패가 창 resize 적용을 중단시키지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY/CoreText
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+
+    session.activeSurface().process_state = .exited; // 활성 Term의 runtime 전달이 거부되는 상태
+
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    try std.testing.expect(session.last_resize_size != null); // 레이아웃 적용이 끝까지 갔다
+    try std.testing.expect(session.metal_dirty);
+    try std.testing.expect(session.active_pane_rect.w > 0);
+    try std.testing.expectEqual(@as(u64, 1), session.resize_delivery_failures); // 삼키지 않고 관측
+    try std.testing.expectEqualStrings("ProcessExited", session.last_resize_delivery_error.?);
+    // 표시 grid는 그래도 새 창 크기를 따라간다 — 기준은 `active_pane_rect`(=paneTermRect)에서 나온 pane grid다.
+    // `last_resize_size`는 pane 탭 바를 빼기 전의 터미널 도메인 전체 grid라 pane grid와 같지 않다.
+    const pane_grid = layout_math.gridFromRectPx(
+        session.cell_width_px,
+        session.cell_height_px,
+        session.active_pane_rect.w,
+        session.active_pane_rect.h,
+    );
+    try std.testing.expectEqual(pane_grid, session.activeSurface().core.size);
 }
 
 test "S1 구조-무효화 계약: destroyPane이 해제 Pane 포인터를 표적 무효화(무관 드래그 보존)·divider도 표적" {

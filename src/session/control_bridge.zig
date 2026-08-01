@@ -16,6 +16,7 @@ const std = @import("std");
 const cp = @import("control_plane.zig");
 const file_policy = @import("file_panel_bridge.zig");
 const mermaid_protocol = @import("mermaid_protocol.zig");
+const content_menu = @import("content_menu.zig");
 const diff_payload = @import("diff_payload.zig");
 
 /// 브리지 method 이름(5b 최소: `hello` 1개). `window.maru` shim의 `maru.hello()`가 이 method 요청으로 매핑된다.
@@ -38,6 +39,12 @@ pub const file_renderer_ready_method = "maru.file.rendererReady";
 /// entry(경로, base)가 이미 정하고 있고, 웹이 경로를 고를 수 있게 하면 그 순간 이 method가 "아무 파일이나 읽는
 /// 창구"가 된다. 자기 것만 읽는 `readSelfImage`와 같은 최소 capability 규율이다.
 pub const diff_open_method = "maru.diff.open";
+/// 본문 우클릭 → **메뉴는 Zig chrome이 연다**(docs/file-panel.md §2.6). web은 "무엇을 눌렀는지"만 답한다.
+pub const menu_open_method = "maru.menu.open";
+/// 메뉴에서 고른 복사·잘라내기를 실제로 수행한다. **web이 선택 텍스트를 되돌려 준다** — 선택 범위는 문서 안에
+/// 있어 native가 모르고, WebKit이 web content의 클립보드 명령을 사용자 제스처에 묶어 web 혼자서도 못 한다.
+/// 우클릭 시점에 미리 실어 보내지 않는 이유: 안 쓸 수도 있는 문서 전체를 매번 옮기게 된다.
+pub const menu_clipboard_write_method = "maru.menu.clipboardWrite";
 /// 모든 bridge 정수는 JavaScript `Number`를 왕복하므로 이 상한 안에서만 identity가 정확하다.
 pub const max_js_safe_integer: u64 = 9_007_199_254_740_991;
 
@@ -50,6 +57,18 @@ pub const DiffSides = struct {
         gpa.free(self.original);
         gpa.free(self.modified);
     }
+};
+
+/// 본문 우클릭 지점과 대상. **전부 신뢰하지 않는 입력이다** — 값을 정하는 것은 적대적일 수 있는 문서다.
+/// 좌표는 shell 뷰포트 CSS px이고(렌더 iframe 좌표는 shell이 오프셋을 더해 보낸다), 창 좌표 변환은 platform이 한다.
+pub const MenuRequest = struct {
+    editor_epoch: u64,
+    x: f64,
+    y: f64,
+    target: content_menu.Target,
+    has_selection: bool,
+    /// 링크·이미지일 때의 원본 문자열. 비었을 수 있고, 쓰는 쪽이 정규화·스킴 검사를 한다.
+    href: []const u8,
 };
 
 pub const DirtyReport = struct {
@@ -83,6 +102,10 @@ pub const FileAccess = struct {
     render_mermaid_fn: *const fn (context: *anyopaque, request: MermaidRenderRequest) anyerror!u64,
     revoke_mermaid_fn: *const fn (context: *anyopaque, renderer: mermaid_protocol.RendererCapability) anyerror!void,
     renderer_ready_fn: *const fn (context: *anyopaque, editor_epoch: u64) anyerror!void,
+    /// 본문 우클릭 메뉴를 연다. 콜백이 null이면 이 surface는 파일 본문이 아니다 — method 자체를 거절한다.
+    open_menu_fn: ?*const fn (context: *anyopaque, request: MenuRequest) anyerror!void = null,
+    /// 메뉴가 고른 텍스트를 OS 클립보드 쓰기 큐에 넣는다. `open_menu_fn`과 짝이라 같이 없거나 같이 있다.
+    menu_clipboard_write_fn: ?*const fn (context: *anyopaque, editor_epoch: u64, text: []const u8) anyerror!void = null,
 
     fn beginDocument(self: FileAccess, document_id: u64) anyerror!u64 {
         return self.begin_document_fn(self.context, document_id);
@@ -127,6 +150,16 @@ pub const FileAccess = struct {
 
     fn rendererReady(self: FileAccess, editor_epoch: u64) anyerror!void {
         return self.renderer_ready_fn(self.context, editor_epoch);
+    }
+
+    fn openMenu(self: FileAccess, request: MenuRequest) anyerror!void {
+        const f = self.open_menu_fn orelse return error.Unsupported;
+        return f(self.context, request);
+    }
+
+    fn menuClipboardWrite(self: FileAccess, editor_epoch: u64, text: []const u8) anyerror!void {
+        const f = self.menu_clipboard_write_fn orelse return error.Unsupported;
+        return f(self.context, editor_epoch, text);
     }
 };
 
@@ -255,6 +288,17 @@ pub fn dispatchBridgeWithFileAccess(
         access.openLink(params.editor_epoch, href, params.force_system) catch return errorResponse(gpa, req.id, .internal_error);
         return serializeFileMutationResult(gpa, req.id, "opened", true);
     }
+    if (std.mem.eql(u8, req.method, menu_open_method)) {
+        const request = menuParams(req.params) catch return errorResponse(gpa, req.id, .invalid_params);
+        access.openMenu(request) catch return errorResponse(gpa, req.id, .internal_error);
+        return serializeFileMutationResult(gpa, req.id, "opened", true);
+    }
+    if (std.mem.eql(u8, req.method, menu_clipboard_write_method)) {
+        const params = menuClipboardParams(req.params) catch return errorResponse(gpa, req.id, .invalid_params);
+        access.menuClipboardWrite(params.editor_epoch, params.text) catch
+            return errorResponse(gpa, req.id, .internal_error);
+        return serializeFileMutationResult(gpa, req.id, "written_bytes", params.text.len);
+    }
     if (std.mem.eql(u8, req.method, file_render_mermaid_method)) {
         const params = mermaidRenderParams(req.params) catch return errorResponse(gpa, req.id, .invalid_params);
         const job_id = access.renderMermaid(params) catch return errorResponse(gpa, req.id, .internal_error);
@@ -339,6 +383,69 @@ fn openLinkParams(params: ?std.json.Value) error{InvalidParams}!struct { editor_
         .href = href,
         .force_system = force_system,
     };
+}
+
+/// 본문 우클릭 인자. **좌표는 유한한 수라야 한다** — NaN/Inf가 그대로 창 좌표 변환에 들어가면 메뉴가
+/// 화면 밖에 뜨거나 정수 변환이 정의되지 않는다. 음수는 허용한다(스크롤·오프셋 계산 결과가 0 왼쪽일 수 있다).
+fn menuParams(params: ?std.json.Value) error{InvalidParams}!MenuRequest {
+    const obj = switch (params orelse return error.InvalidParams) {
+        .object => |obj| obj,
+        else => return error.InvalidParams,
+    };
+    if (obj.count() != 6) return error.InvalidParams;
+    const x = try finiteNumber(obj.get("x") orelse return error.InvalidParams);
+    const y = try finiteNumber(obj.get("y") orelse return error.InvalidParams);
+    const target = switch (obj.get("target") orelse return error.InvalidParams) {
+        .string => |value| content_menu.Target.parse(value),
+        else => return error.InvalidParams,
+    };
+    const has_selection = switch (obj.get("has_selection") orelse return error.InvalidParams) {
+        .bool => |value| value,
+        else => return error.InvalidParams,
+    };
+    const href = switch (obj.get("href") orelse return error.InvalidParams) {
+        .string => |value| value,
+        else => return error.InvalidParams,
+    };
+    if (href.len > std.fs.max_path_bytes) return error.InvalidParams;
+    return .{
+        .editor_epoch = try positiveInteger(obj.get("editor_epoch") orelse return error.InvalidParams),
+        .x = x,
+        .y = y,
+        .target = target,
+        .has_selection = has_selection,
+        .href = href,
+    };
+}
+
+/// 복사·잘라내기가 되돌려 준 텍스트. 상한은 문서 읽기 상한과 같은 축이다 — 선택은 문서보다 클 수 없다.
+fn menuClipboardParams(params: ?std.json.Value) error{InvalidParams}!struct { editor_epoch: u64, text: []const u8 } {
+    const obj = switch (params orelse return error.InvalidParams) {
+        .object => |obj| obj,
+        else => return error.InvalidParams,
+    };
+    if (obj.count() != 2) return error.InvalidParams;
+    const text = switch (obj.get("text") orelse return error.InvalidParams) {
+        .string => |value| value,
+        else => return error.InvalidParams,
+    };
+    if (text.len == 0 or text.len > max_menu_clipboard_bytes) return error.InvalidParams;
+    return .{
+        .editor_epoch = try positiveInteger(obj.get("editor_epoch") orelse return error.InvalidParams),
+        .text = text,
+    };
+}
+
+pub const max_menu_clipboard_bytes: usize = 8 << 20;
+
+fn finiteNumber(value: std.json.Value) error{InvalidParams}!f64 {
+    const number: f64 = switch (value) {
+        .float => |v| v,
+        .integer => |v| @floatFromInt(v),
+        else => return error.InvalidParams,
+    };
+    if (!std.math.isFinite(number)) return error.InvalidParams;
+    return number;
 }
 
 fn dirtyReportParam(params: ?std.json.Value) error{InvalidParams}!DirtyReport {
@@ -1147,4 +1254,90 @@ test "diff.open 직렬화 비용과 응답 크기(8 MiB 한쪽 기준)" {
         "[측정] diff.open 직렬화: 입력 {d} MiB → 응답 {d} MiB, {d} ms\n",
         .{ input_total >> 20, resp.len >> 20, elapsed_ms },
     );
+}
+
+test "dispatchBridge: menu.open은 대상과 좌표만 받고, 모드는 받지 않는다" {
+    // 어느 모드인지는 그 Term의 entry가 이미 안다 — web에서도 받으면 두 출처가 갈린다(docs/file-panel.md §2.6).
+    const Fake = struct {
+        last: ?MenuRequest = null,
+        calls: usize = 0,
+
+        fn open(context: *anyopaque, request: MenuRequest) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            self.last = request;
+        }
+    };
+    var fake: Fake = .{};
+    var base: FakeFileAccess = .{};
+    var access = base.access();
+    access.context = &fake;
+    access.open_menu_fn = Fake.open;
+
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":41,\"method\":\"maru.menu.open\",\"params\":" ++
+        "{\"editor_epoch\":7,\"x\":120.5,\"y\":48,\"target\":\"link\",\"has_selection\":false,\"href\":\"./a.md\"}}";
+    const resp = try dispatchBridgeWithFileAccess(testing.allocator, req, "0.1.0", access);
+    defer testing.allocator.free(resp);
+    var p = try parseValue(testing.allocator, resp);
+    defer p.deinit();
+    try testing.expect(p.value.object.get("result").?.object.get("opened").?.bool);
+    try testing.expectEqual(@as(usize, 1), fake.calls);
+    const got = fake.last.?;
+    try testing.expectEqual(@as(u64, 7), got.editor_epoch);
+    try testing.expectEqual(@as(f64, 120.5), got.x);
+    try testing.expectEqual(@as(f64, 48), got.y); // 정수로 와도 좌표다
+    try testing.expectEqual(content_menu.Target.link, got.target);
+    try testing.expectEqualStrings("./a.md", got.href);
+}
+
+test "dispatchBridge: 유한하지 않은 좌표와 모르는 대상" {
+    const Fake = struct {
+        last: ?MenuRequest = null,
+        fn open(context: *anyopaque, request: MenuRequest) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.last = request;
+        }
+    };
+    var fake: Fake = .{};
+    var base: FakeFileAccess = .{};
+    var access = base.access();
+    access.context = &fake;
+    access.open_menu_fn = Fake.open;
+
+    // NaN/Inf는 그대로 창 좌표 변환에 들어가면 메뉴가 화면 밖에 뜨거나 정수 변환이 정의되지 않는다 → 거절.
+    for ([_][]const u8{ "1e999", "-1e999" }) |bad| {
+        const req = try std.fmt.allocPrint(
+            testing.allocator,
+            "{{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"maru.menu.open\",\"params\":" ++
+                "{{\"editor_epoch\":1,\"x\":{s},\"y\":0,\"target\":\"text\",\"has_selection\":true,\"href\":\"\"}}}}",
+            .{bad},
+        );
+        defer testing.allocator.free(req);
+        const resp = try dispatchBridgeWithFileAccess(testing.allocator, req, "0.1.0", access);
+        defer testing.allocator.free(resp);
+        var p = try parseValue(testing.allocator, resp);
+        defer p.deinit();
+        try testing.expect(p.value.object.get("error") != null);
+        try testing.expect(fake.last == null); // 콜백까지 가지 않았다
+    }
+
+    // 반대로 **모르는 대상은 거절하지 않는다** — 가장 권한 적은 empty로 접는다(메뉴 자체를 못 열게 하지 않는다).
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":43,\"method\":\"maru.menu.open\",\"params\":" ++
+        "{\"editor_epoch\":1,\"x\":0,\"y\":0,\"target\":\"<script>\",\"has_selection\":false,\"href\":\"\"}}";
+    const resp = try dispatchBridgeWithFileAccess(testing.allocator, req, "0.1.0", access);
+    defer testing.allocator.free(resp);
+    try testing.expectEqual(content_menu.Target.empty, fake.last.?.target);
+}
+
+test "dispatchBridge: 파일 본문이 아닌 surface는 menu.open을 거절한다" {
+    // diff Term·브라우저 패널에서 이 method가 통하면 그쪽 화면에 파일 메뉴가 뜬다.
+    var base: FakeFileAccess = .{};
+    const access = base.access(); // open_menu_fn = null
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":44,\"method\":\"maru.menu.open\",\"params\":" ++
+        "{\"editor_epoch\":1,\"x\":0,\"y\":0,\"target\":\"text\",\"has_selection\":false,\"href\":\"\"}}";
+    const resp = try dispatchBridgeWithFileAccess(testing.allocator, req, "0.1.0", access);
+    defer testing.allocator.free(resp);
+    var p = try parseValue(testing.allocator, resp);
+    defer p.deinit();
+    try testing.expect(p.value.object.get("error") != null);
 }

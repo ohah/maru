@@ -85,6 +85,15 @@
     짜는 비용도 매번 든다.
   - **경계는 그대로 판별한다**: "이 UI가 문서 콘텐츠 위에 뜨는가"가 기준이다. 그렇다면 web, 창 전체나 chrome
     영역에 뜨면(알림 센터·설정·닫기 확인) 계속 Zig chrome이다.
+  - **부분 정정(2026-08-01, 사용자 결정) — 컨텍스트 메뉴는 Zig chrome이 그린다.** 초판은 컨텍스트 메뉴를 web으로
+    옮기는 **대표 사례**로 들었으나, 그 근거("native 오버레이는 좌표 변환·firstResponder·스크롤 추종을 매번 새로
+    푼다")가 메뉴에는 맞지 않는다: 메뉴는 스크롤을 따라다니지 않고 한 번 뜨고 닫히며, 좌표는 어차피 web이 올려
+    주고, 그 변환은 **터미널 우클릭 메뉴가 이미 하고 있다**. 반대로 web으로 그리면 두 가지를 잃는다 — ⑴ 메뉴가
+    WKWebView rect를 못 벗어나 콘텐츠 영역 가장자리에서 접히거나 잘린다. ⑵ maru의 chrome은 AppKit이 아니라
+    Zig+GPU라, 이미 있는 세 메뉴(터미널 본문·파일 트리·사이드바 ⚙ — 전부 `context_menu_items_buf`+`itemAt`/
+    `draws`/`accept` 공유)와 **네 번째 스타일**이 생긴다. 계약은 §2.6이 소유한다.
+    **React가 계속 맡는 것**: 문서 흐름 **안에** 사는 UI — 리치 툴바, 인라인 위젯, 폼. 이들은 문서와 함께
+    스크롤돼야 하므로 web이 맞다. 즉 기준을 "콘텐츠 위에 뜨는가"에서 **"문서와 함께 스크롤하는가"**로 좁힌다.
   - **CM6·문서모델 편집기는 React와 직교한다.** 둘 다 DOM 마운트 라이브러리라 React 트리 안의 한 노드에 그대로
     붙는다. 편집기를 React 컴포넌트로 다시 쓰지 않는다.
 - **테마 색의 단일 출처는 여전히 native다(§2.1b).** Tailwind를 도입해도 색·폰트 값은 계속 `--maru-syntax-*`·
@@ -279,6 +288,37 @@ flowchart TD
 - **overlay z-order 선행조건·ABI v131**: `modal_cells_start=0`이 “overlay 없음”과 “index 0부터 overlay”를 겸하는 현행 sentinel을 FP9 전에 제거한다. seam 필드와 같은 ABI v131에서 `MaruAppHostMetalFrame`/Zig `MetalFrame`에 끝 필드 `overlay_cells_present: u32`를 추가한다. `MetalFrameBuffer.view`가 producer, Swift `drawMetalFrame`과 `MaruMetalRenderer.drawFrame`이 consumer이며 Objective-C renderer는 `overlay_cells_present != 0`을 overlay 유무의 유일한 gate로 쓰고 `modal_cells_start`는 0을 포함한 시작 index로만 해석한다. C header/Zig size·offset과 Swift→Objective-C 전달을 ABI 테스트로 고정한다. base cell 0인 focus-border-only/drag-zone-only/floating-only frame도 WKWebView 위 최상단 overlay로 분류하며, overlay가 없을 때만 field=0이다. focus border와 drag preview가 이 gate 없이 terminal layer로 내려가면 FP9를 출하하지 않는다.
 - **기본 단축키**: `toggle_file_panel_focus`의 기본은 기존 `focus_file_tree`가 쓰던 `⌘⇧E`다. **왕복 축은 `.workspace` ↔ `.file_tree` 둘뿐이다**(2026-07-28 — `.dock_surface`가 사라지며 파일 focus가 곧 `.workspace`가 됐다. 그래서 파일을 보고 있을 때 토글하면 트리로 간다). `.workspace`에서 실행하면 내용/history가 있는 도크를 필요 시 펼치고 project tree를 focus한다. `.dock_surface`, `.dock_group` 또는 `.file_tree`에서 실행하면 활성 workspace의 현재 terminal/browser pane으로 돌아간다. 완전히 빈 도크에서는 picker를 자동으로 열거나 focus를 잃지 않고 no-op notice만 표시한다. modal/IME composition이 키를 소유한 동안에는 그 owner의 기존 확정·취소 계약이 우선한다.
 - **상태 권위·one-way action**: 왕복 판정은 Zig `FocusOwner` 하나만 소비하고 Swift는 요청받은 firstResponder 전이만 수행한다. workspace 대상은 이미 활성 pane/Term에서 파생하므로 별도 last-terminal pointer를 저장하지 않는다. 도크 진입 기본은 project tree이고, 파일 본문을 마지막으로 클릭했더라도 `⌘⇧E`는 일관되게 tree로 들어간다. `focus_file_tree`는 기본 chord만 잃고 palette·사용자 binding에서 one-way 진입으로 계속 동작한다. 사용자 rebind/unbind가 새 기본보다 우선하며 focus/border 상태는 workspace에 저장하지 않는다.
+
+### 2.6 문서 영역 컨텍스트 메뉴
+
+파일 Term 본문(읽기·소스·리치 셋 다)에서 우클릭했을 때 뜨는 메뉴다. **지금은 아무것도 안 뜬다** — `main.ts`가
+WKWebView 기본 메뉴를 억제하는데(Reload가 편집 중 WebContent를 재시작해 recovery latch를 건다) 대신 띄우는 것이
+없어서다. 이 절이 그 빈자리를 채운다.
+
+- **메뉴는 Zig chrome이 그린다(§2.1a 부분 정정).** 이미 있는 세 메뉴 — 터미널 본문 우클릭, 파일 트리 우클릭,
+  사이드바 ⚙ — 와 **같은 경로**(`context_menu_items_buf` + `itemAt`/`draws`/`accept`, 분기는 플래그)를 쓴다.
+  새 메뉴 UI를 만들지 않는다.
+- **web은 대상만 올린다.** 브리지 `maru.menu.open`의 인자는 `{ editor_epoch, x, y, target, href?, path?,
+  has_selection }`이고, `target`은 `text | link | image | empty`다. 그리기·키보드 이동·바깥 클릭 닫기·테마는
+  Zig가 이미 하고 있으므로 web은 **무엇을 눌렀는지**만 답한다.
+- **좌표는 shell 뷰포트 CSS px**다. 렌더 iframe에서 일어난 우클릭은 iframe이 자기 로컬 좌표로 shell에 postMessage
+  하고, **shell이 iframe 오프셋을 더해** 브리지로 넘긴다. iframe은 자기가 화면 어디에 있는지 모르고(cross-origin),
+  알 필요도 없다 — capability는 계속 0이다. Zig는 그 값을 surface rect + scale로 창 좌표로 바꾼다.
+- **모드는 web이 안 보낸다.** 어느 모드인지는 그 Term의 entry가 이미 알고 있고, 두 곳에서 판단하면 갈린다.
+- **렌더러가 준 값은 신뢰하지 않는 입력이다.** 적대적 문서가 `href`·`path`를 정하기 때문이다. 경로는 기존
+  asset-path 정규화를 그대로 태우고(§2.2), `href`는 열기 직전 스킴을 검사한다(기존 `openLink` 경로 재사용).
+- **항목**(대상 × 모드):
+
+  | 대상 | 읽기 | 소스·리치 |
+  | --- | --- | --- |
+  | 선택된 텍스트 | 복사 | 잘라내기 · 복사 · 붙여넣기 |
+  | 링크 | 링크 열기 · 주소 복사 | 링크 열기 · 주소 복사 |
+  | 이미지 | 이미지 저장 · 경로 복사 | 이미지 저장 · 경로 복사 |
+  | 빈 곳 | 전체 선택 · 소스 모드로 열기 | 붙여넣기 · 전체 선택 |
+
+- **동작의 주인은 둘로 갈린다.** 링크 열기·경로 복사·모드 전환은 **Zig**가 이미 소유한 동작이라 그대로 실행한다.
+  문서 선택에 붙은 것(복사·잘라내기·붙여넣기·전체 선택)은 선택이 web에 있으므로 native가 `maru:file-menu-action`
+  이벤트로 **되돌려 보내** web이 실행한다(줌이 쓰는 `maru:file-zoom`과 같은 방향·같은 방식).
 
 ## 4. 생명주기 (파일 Term = 워크스페이스 안, 전환에도 보존)
 

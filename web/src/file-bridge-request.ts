@@ -42,8 +42,21 @@ export type FileBridgeRequest =
   | ({ method: "renderMermaid" } & RenderMermaidRequest)
   | ({ method: "revokeMermaid" } & RevokeMermaidRequest)
   | { method: "rendererReady"; editor_epoch: number }
+  // §2.6 본문 우클릭. **메뉴는 native가 그린다** — web은 어디서 무엇을 눌렀는지만 답한다(모드는 안 보낸다).
+  | ({ method: "menuOpen" } & MenuOpenRequest)
+  // 복사·잘라내기가 고른 텍스트. web은 클립보드를 못 쓰고(WebKit 제스처 제약) native는 선택 범위를 모른다.
+  | { method: "menuClipboardWrite"; editor_epoch: number; text: string }
   // E1 diff 본문. **인자가 없다** — 무엇을 비교할지는 그 Term의 entry가 정한다(docs/editor-surface.md §6).
   | { method: "diffOpen" };
+
+export type MenuOpenRequest = {
+  editor_epoch: number;
+  x: number;
+  y: number;
+  target: "text" | "link" | "image" | "empty";
+  has_selection: boolean;
+  href: string;
+};
 
 export type FileMethod = FileBridgeRequest["method"];
 
@@ -57,6 +70,18 @@ export function encodeFileBridgeRequest(request: FileBridgeRequest): Record<stri
       return { method: request.method, path: request.path };
     case "readSelfImage":
       return { method: request.method };
+    case "menuClipboardWrite":
+      return { method: request.method, editor_epoch: request.editor_epoch, text: request.text };
+    case "menuOpen":
+      return {
+        method: request.method,
+        editor_epoch: request.editor_epoch,
+        x: request.x,
+        y: request.y,
+        target: request.target,
+        has_selection: request.has_selection,
+        href: request.href,
+      };
     case "diffOpen":
       return { method: request.method };
     case "write":

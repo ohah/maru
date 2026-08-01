@@ -903,6 +903,9 @@ uint64_t maru_macos_app_session_take_file_tree_restore_surface_action(MaruAppHos
 uint32_t maru_macos_app_session_take_workspace_restore_dropped(MaruAppHostSession *session);
 /* GPU 헤더 토글이 바꾼 mode를 1회 drain한다. 반환 -1=없음, 0=read, 1=source-edit, 2=rich. v132. */
 int32_t maru_macos_app_session_take_file_panel_mode_action(MaruAppHostSession *session, uint64_t *surface_id_out);
+
+/// 파일 본문 우클릭 메뉴에서 web이 실행할 항목을 drain한다(0=없음·1=copy·2=cut·3=paste·4=selectAll).
+uint32_t maru_macos_app_session_take_file_menu_action(MaruAppHostSession *session, uint64_t *surface_id_out);
 /* PendingDockFocus의 native firstResponder action을 mode refresh와 독립적으로 drain한다. 0=없음. v131. */
 uint64_t maru_macos_app_session_take_pending_dock_focus_action(MaruAppHostSession *session);
 /* source editor 이탈 전에 이전 surface의 dirty snapshot을 강제 요청한다. 0=없음, 그 외=surface id. v122. */

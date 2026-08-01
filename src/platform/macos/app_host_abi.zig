@@ -1329,6 +1329,24 @@ pub export fn maru_macos_app_session_take_file_panel_mode_action(session: ?*AppS
     return @intCast(@intFromEnum(action.mode));
 }
 
+/// 파일 본문 우클릭 메뉴에서 고른 항목 중 **web이 실행할 것**을 drain한다(docs/file-panel.md §2.6).
+/// 반환은 동작 코드(0=없음·1=복사·2=잘라내기·3=붙여넣기·4=전체 선택)이고 대상 surface는 out으로 준다.
+/// 선택 범위는 문서 안에 있어 native가 모르므로, Swift가 그 web에 이벤트로 되돌려 보낸다.
+pub export fn maru_macos_app_session_take_file_menu_action(session: ?*AppSession, surface_id_out: ?*u64) u32 {
+    const app_session = session orelse return 0;
+    const out = surface_id_out orelse return 0;
+    const action = app_session.takeFileMenuAction() orelse return 0;
+    out.* = action.surface_id;
+    return switch (action.item) {
+        .copy => 1,
+        .cut => 2,
+        .paste => 3,
+        .select_all => 4,
+        // native가 실행하는 항목은 여기 오지 않는다(owner가 갈라 담는다).
+        .open_link, .copy_link, .save_image, .copy_path, .open_source => 0,
+    };
+}
+
 pub export fn maru_macos_app_session_take_file_panel_dirty_sync_action(session: ?*AppSession) u64 {
     const app_session = session orelse return 0;
     return app_session.takeFilePanelDirtySyncAction() orelse 0;
@@ -2338,6 +2356,17 @@ const FileBridgeContext = struct {
         return self.session.openFilePanelDocumentLink(self.surface_id, editor_epoch, href, force_system);
     }
 
+    fn openMenu(raw: *anyopaque, request: maru.session.control_bridge.MenuRequest) anyerror!void {
+        const self: *FileBridgeContext = @ptrCast(@alignCast(raw));
+        return self.session.openFileContentMenu(self.surface_id, request);
+    }
+
+    fn menuClipboardWrite(raw: *anyopaque, editor_epoch: u64, text: []const u8) anyerror!void {
+        const self: *FileBridgeContext = @ptrCast(@alignCast(raw));
+        _ = editor_epoch; // 어느 문서의 선택이든 사용자가 방금 고른 것이다 — epoch는 stale 판정에 쓰지 않는다
+        return self.session.queueMenuClipboardWrite(self.surface_id, text);
+    }
+
     fn renderMermaid(
         raw: *anyopaque,
         request: maru.session.control_bridge.MermaidRenderRequest,
@@ -2397,6 +2426,8 @@ pub export fn maru_macos_app_session_bridge_dispatch(
         .render_mermaid_fn = FileBridgeContext.renderMermaid,
         .revoke_mermaid_fn = FileBridgeContext.revokeMermaid,
         .renderer_ready_fn = FileBridgeContext.rendererReady,
+        .open_menu_fn = FileBridgeContext.openMenu,
+        .menu_clipboard_write_fn = FileBridgeContext.menuClipboardWrite,
     };
     const reply = maru.session.control_bridge.dispatchBridgeWithFileAccess(
         allocator,

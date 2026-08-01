@@ -67,6 +67,8 @@ export type RichEditorHandle = {
   selectAll: () => boolean;
   /** IME 조합 중인가. close lock이 조합 중 탭을 닫지 않도록 fail-closed 판정에 쓴다. */
   isComposing: () => boolean;
+  /** 현재 선택을 텍스트로 갈아끼운다(§2.6 메뉴의 잘라내기·붙여넣기). 선택이 없으면 캐럿에 삽입한다. */
+  replaceSelection: (text: string) => void;
 };
 
 type ToolbarButton = {
@@ -294,5 +296,10 @@ export function createRichEditor(
       return editor.commands.selectAll();
     },
     isComposing: () => editor.view.composing,
+    // 빈 문자열이면 선택을 지우는 것이 곧 잘라내기다(tiptap의 insertContent는 빈 값에 무동작이라 명시적으로 나눈다).
+    replaceSelection: (text: string) => {
+      if (text.length === 0) editor.chain().focus().deleteSelection().run();
+      else editor.chain().focus().insertContent(text).run();
+    },
   };
 }

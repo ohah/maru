@@ -1905,6 +1905,37 @@ const HostConnectFailureReason = if (is_macos)
 else
     enum { unavailable };
 var host_connect_failure_reason: ?HostConnectFailureReason = null;
+/// 실패가 **어느 단계**에서 났는지. `FailureReason`은 connect 시도가 시작된 뒤의 사유만 담으므로 그 이전(형제 실행
+/// 파일 경로·캐시 base 확인)과 연결 성공 이후(adapter/pool/backend 구성, 런타임 중 host 사망)를 같은 어휘로 담지
+/// 못한다. 단계 없이 reason만 남기면 "reason=null"이 세 가지 다른 실패를 하나로 뭉개 진단이 불가능하다.
+const HostConnectFailureStage = enum {
+    /// GUI 바이너리 형제 `maru` 경로를 못 구했다(`siblingMaruPath`).
+    exe_path,
+    /// `${XDG_CACHE_HOME:-$HOME/.cache}/maru` base를 못 구했다(`sessionCacheBase`).
+    cache_base,
+    /// `connectOrLaunchDetailed`가 실패했다 — 이 단계만 `FailureReason`을 동반한다.
+    connect,
+    /// connect는 됐는데 HostAdapter/pool/RemoteTermBackend 구성에서 실패했다.
+    adapter,
+    /// 앱이 뜬 뒤 살아 있던 host 연결이 끊겨 in-process로 폴백했다(`createTerm`의 remote_dead).
+    runtime_death,
+};
+var host_connect_failure_stage: ?HostConnectFailureStage = null;
+
+/// 실패 단계/사유를 사람이 읽고 **그대로 복사해 보고할 수 있는** 한 줄로 만든다. GUI 프로세스의 stdout/stderr는
+/// `/dev/null`이라(Dock·Finder 실행) `std.log`가 어디에도 남지 않는다 — 그래서 이 문자열이 화면 notice에 실리는
+/// 것이 유일한 관측 경로다. 순수 함수라 로그·notice가 같은 문자열을 공유하고 단위 테스트로 고정된다.
+fn hostConnectFailureDetail(
+    buf: []u8,
+    stage: ?HostConnectFailureStage,
+    reason: ?HostConnectFailureReason,
+) []const u8 {
+    const stage_text = if (stage) |s| @tagName(s) else "unknown";
+    if (reason) |r| {
+        return std.fmt.bufPrint(buf, "stage={s} reason={s}", .{ stage_text, @tagName(r) }) catch "stage=unknown";
+    }
+    return std.fmt.bufPrint(buf, "stage={s}", .{stage_text}) catch "stage=unknown";
+}
 
 /// FP10c1 C ABI가 앱 전역 Mermaid 정책 인스턴스를 찾는 유일한 접근점. 새 handle을 만들지 않아 모든 창과
 /// Swift adapter가 `AppRuntime.mermaid_queue` 하나를 공유한다.
@@ -5686,18 +5717,18 @@ pub const AppSession = struct {
             defer arena.deinit();
             const a = arena.allocator();
             const exe_path = self.siblingMaruPath(a) orelse {
-                self.markHostConnectFailed();
+                self.markHostConnectFailed(.exe_path);
                 return;
             };
             const base = sessionCacheBase(a) orelse {
-                self.markHostConnectFailed();
+                self.markHostConnectFailed(.cache_base);
                 return;
             };
             // §6 L291: host 연결/spawn 실패 시 조용히 in-process로 폴백하지 않고 사용자에게 알린다("유지된다" 오인 방지).
             const client = switch (session_host.host_connect.connectOrLaunchDetailed(alloc, exe_path, base, .{})) {
                 .connected => |connected| connected,
                 .failed => |reason| {
-                    self.markHostConnectFailedReason(reason);
+                    self.markHostConnectFailedReason(.connect, reason);
                     return;
                 },
             };
@@ -5705,14 +5736,14 @@ pub const AppSession = struct {
             const owned_adapter = alloc.create(RemoteSessionAdapter) catch {
                 var failed_client = client;
                 failed_client.deinit();
-                self.markHostConnectFailedReason(.out_of_memory);
+                self.markHostConnectFailedReason(.adapter, .out_of_memory);
                 return;
             };
             owned_adapter.* = RemoteSessionAdapter.init(client) catch {
                 var failed_client = client;
                 failed_client.deinit();
                 alloc.destroy(owned_adapter);
-                self.markHostConnectFailedReason(.incompatible_version);
+                self.markHostConnectFailedReason(.adapter, .incompatible_version);
                 return;
             };
             app_remote_host_pool = RemoteHostPool.init(alloc);
@@ -5721,7 +5752,7 @@ pub const AppSession = struct {
                 alloc.destroy(owned_adapter);
                 app_remote_host_pool.?.deinit();
                 app_remote_host_pool = null;
-                self.markHostConnectFailedReason(.out_of_memory);
+                self.markHostConnectFailedReason(.adapter, .out_of_memory);
                 return;
             };
             app_remote_host_pool.?.setSpawnHost(host_id) catch unreachable;
@@ -5734,7 +5765,7 @@ pub const AppSession = struct {
             ) catch {
                 app_remote_host_pool.?.deinit();
                 app_remote_host_pool = null;
-                self.markHostConnectFailedReason(.out_of_memory);
+                self.markHostConnectFailedReason(.adapter, .out_of_memory);
                 return;
             };
         }
@@ -5836,16 +5867,37 @@ pub const AppSession = struct {
 
     /// keep-alive host 연결 실패를 기록한다(§6 L291) — 프로세스 전역 flag(이후 창은 재시도 없이 폴백)와 이 창의 notice
     /// pending을 함께 세운다. createTerm은 backendForNew가 null이라 in-process로 열되, 첫 tick의 notice가 "유지 안 됨"을 알린다.
-    fn markHostConnectFailed(self: *AppSession) void {
-        host_connect_failed = true;
-        host_connect_failure_reason = null;
-        self.host_connect_notice_pending = true;
+    fn markHostConnectFailed(self: *AppSession, stage: HostConnectFailureStage) void {
+        self.recordHostConnectFailure(stage, null);
     }
 
-    fn markHostConnectFailedReason(self: *AppSession, reason: HostConnectFailureReason) void {
+    fn markHostConnectFailedReason(
+        self: *AppSession,
+        stage: HostConnectFailureStage,
+        reason: HostConnectFailureReason,
+    ) void {
+        self.recordHostConnectFailure(stage, reason);
+    }
+
+    /// 실패 단계/사유를 전역 상태에 남기고 **즉시 한 줄 로깅한다**. 로깅을 notice 표시 시점(다음 tick)까지 미루지
+    /// 않는 이유: notice는 창이 하나라도 떠야 보이는데, 실패가 첫 창 init 중이면 그 사이 크래시·강제 종료가 끼면
+    /// 사유가 통째로 사라진다. `is_test` 가드는 단위 테스트 출력 오염을 막는 기존 관례를 따른다.
+    fn recordHostConnectFailure(
+        self: *AppSession,
+        stage: HostConnectFailureStage,
+        reason: ?HostConnectFailureReason,
+    ) void {
         host_connect_failed = true;
+        host_connect_failure_stage = stage;
         host_connect_failure_reason = reason;
         self.host_connect_notice_pending = true;
+        if (!builtin.is_test) {
+            var buf: [96]u8 = undefined;
+            std.log.err(
+                "persistent session host unavailable: {s} — terminals fall back to in-process",
+                .{hostConnectFailureDetail(&buf, stage, reason)},
+            );
+        }
     }
 
     /// keep-alive host 연결이 실패해 in-process로 폴백했으면(§6 L291) notice를 한 번 띄운다 — 첫 tick에서 호출한다(init 중엔
@@ -5853,7 +5905,22 @@ pub const AppSession = struct {
     fn showPendingHostConnectNotice(self: *AppSession) void {
         if (!self.host_connect_notice_pending) return;
         self.host_connect_notice_pending = false;
-        self.showNotice("영속 세션 host에 연결하지 못했습니다. 이번 세션의 터미널은 유지되지 않습니다(종료 시 함께 종료).");
+        // 사유를 문장에 함께 싣는다 — GUI stdout/stderr가 `/dev/null`이라 로그는 터미널에서 직접 실행할 때만 보이고,
+        // Dock으로 켠 사용자에게는 이 notice가 실패 원인을 아는 **유일한** 경로다. 식별자를 한글로 풀지 않고 그대로
+        // 노출해 사용자가 문자열을 그대로 복사해 보고하면 코드의 stage/reason으로 바로 이어지게 한다.
+        var detail_buf: [96]u8 = undefined;
+        const detail = hostConnectFailureDetail(
+            &detail_buf,
+            host_connect_failure_stage,
+            host_connect_failure_reason,
+        );
+        var buf: [220]u8 = undefined;
+        const msg = std.fmt.bufPrint(
+            &buf,
+            "영속 세션 host에 연결하지 못했습니다({s}). 이번 세션의 터미널은 유지되지 않습니다(종료 시 함께 종료).",
+            .{detail},
+        ) catch "영속 세션 host에 연결하지 못했습니다. 이번 세션의 터미널은 유지되지 않습니다(종료 시 함께 종료).";
+        self.showNotice(msg);
     }
 
     /// §7 종료 placeholder가 하나 이상 복원됐음을 첫 tick에 알린다(host connect notice와 같은 self-gate 패턴 — 복원은
@@ -6034,7 +6101,7 @@ pub const AppSession = struct {
                 const remote_dead = is_macos and !reconnected and app_remote_backend != null and !host_connect_failed and
                     (err == error.ConnectionClosed or err == error.WriteFailed or err == error.UnsupportedSpawnContract);
                 if (!remote_dead) return err;
-                self.markHostConnectFailed();
+                self.markHostConnectFailed(.runtime_death);
                 be = self.termBackend(); // errdefer·이후 단계가 in-process backend를 쓰도록 갱신.
                 break :surface try be.spawn(.{
                     .handle = id,
@@ -41675,6 +41742,33 @@ test "P4 Quit-End-All: alternate가 host-backed runtime을 terminate한다(재�
     } else {
         return error.SkipZigTest;
     }
+}
+
+// 이 테스트가 증명하는 것(그리고 터미널에서 왜 중요한가): host 연결이 실패하면 그 세션의 터미널은 앱을 끄는 순간
+// 함께 죽는다 — 사용자가 잃는 것은 작업 중이던 셸 전부다. 그런데 GUI 프로세스의 stdout/stderr는 `/dev/null`이라
+// (Dock·Finder 실행) `std.log`가 어디에도 남지 않고, 통합 로그로도 가지 않는다. 실제로 이 실패를 추적할 때
+// `log show`도 stderr도 전부 비어 있어 "왜 유지가 안 되는가"를 사후에 알 방법이 없었다. 그래서 실패 단계와 사유를
+// 한 줄 문자열로 조립해 **화면 notice에 싣는 것**이 유일한 관측 경로다. 아래는 그 문자열이 단계 단독일 때와
+// 단계+사유일 때 각각 어떤 모양인지, 버퍼가 모자라도 크래시 없이 식별 가능한 값으로 접히는지를 고정한다.
+// 순수 함수라 실 PTY/CoreText 없이 non-macOS에서도 회귀를 잡는다.
+test "host connect 실패 detail: 단계 단독과 단계+사유를 한 줄로 조립한다" {
+    var buf: [96]u8 = undefined;
+    try std.testing.expectEqualStrings("stage=exe_path", hostConnectFailureDetail(&buf, .exe_path, null));
+    try std.testing.expectEqualStrings("stage=cache_base", hostConnectFailureDetail(&buf, .cache_base, null));
+    try std.testing.expectEqualStrings("stage=runtime_death", hostConnectFailureDetail(&buf, .runtime_death, null));
+    // stage를 잃어도 "reason=null"로 세 가지 실패를 뭉개지 않고 unknown으로 구분해 남긴다.
+    try std.testing.expectEqualStrings("stage=unknown", hostConnectFailureDetail(&buf, null, null));
+
+    const reason: HostConnectFailureReason = if (is_macos) .launch_failed else .unavailable;
+    var expected_buf: [96]u8 = undefined;
+    const expected = try std.fmt.bufPrint(&expected_buf, "stage=connect reason={s}", .{@tagName(reason)});
+    try std.testing.expectEqualStrings(expected, hostConnectFailureDetail(&buf, .connect, reason));
+}
+
+// 진단 문자열 때문에 앱이 죽으면 본말전도다. 버퍼가 모자라면 panic·부분 출력 대신 식별 가능한 고정 값으로 접힌다.
+test "host connect 실패 detail: 버퍼가 모자라면 크래시 대신 식별 가능한 값으로 접힌다" {
+    var tiny: [4]u8 = undefined;
+    try std.testing.expectEqualStrings("stage=unknown", hostConnectFailureDetail(&tiny, .connect, null));
 }
 
 // P4 §6 L291 — keep-alive인데 host 연결이 실패하면 **조용히 in-process로 폴백하지 않고** 사용자에게 notice로 알린다("유지된다"

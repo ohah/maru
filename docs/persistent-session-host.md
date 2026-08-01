@@ -355,6 +355,12 @@ surface ... runtime-handle="<32 lowercase host-id>:<32 lowercase runtime-id>" ru
   serial serve**(한 connection을 그 client 수명 내내 처리)라, 아래 "두 GUI **process** 동시 실행"은 아직 미지원이다 — 두 번째
   app process는 handshake 타임아웃 후 notice를 예약하고 in-process로 폴백한다. 그래서 keep-alive opt-in 단계의
   **지원 구성은 단일 app instance**(창/Workspace는 몇 개든 무방)다.
+- host 연결 실패는 조용히 폴백하지 않고 **실패 단계와 사유를 함께** 알린다. 단계는 `exe_path`(형제 `maru` 경로 부재)·
+  `cache_base`(캐시 base 부재)·`connect`(`connectOrLaunchDetailed` 실패, 이때만 `FailureReason` 동반)·`adapter`(연결 후
+  adapter/pool/backend 구성 실패)·`runtime_death`(실행 중 host 연결 사망)로 구분하고, `stage=…[ reason=…]` 한 줄을
+  notice 문장과 `std.log.err`에 같이 싣는다. **notice가 주 경로다** — GUI process의 stdout/stderr는 `/dev/null`이라
+  (Dock·Finder 실행) 로그는 터미널에서 직접 실행할 때만 보이고 통합 로그로도 가지 않는다. 단계를 남기지 않으면 위
+  다섯 실패가 전부 "사유 없음" 하나로 뭉개져 사후 진단이 불가능하다.
 - Window를 닫거나 Workspace/Term을 다른 Window로 옮기는 것은 먼저 하나의 layout transaction으로 source/target을 검증한
   뒤 manifest 위치만 바꾼다. 성공한 이동은 `runtime-handle`, child pid, scrollback을 바꾸지 않는다.
 - app-wide Quit은 모든 Window의 GUI subscription을 끊는 detach다. 비마지막 Window/Workspace/Term의 명시적 close는 기존

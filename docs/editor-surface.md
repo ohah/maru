@@ -774,17 +774,30 @@ editor event는 처음부터 하나의 domain schema를 공유하되 문서 원�
 - dirty recovery의 journal 대 native shadow 선택과 schema/redaction/보존 정책
 - **종료:** 구체적인 상한 숫자와 파일 포맷 지원 범위를 포함해 UI 없이 auth/path/revision/save/watch/recovery 불변식 green.
 
-### E1 — read-only diff (선행: 도크 뷰 스위처)
+### E1 — read-only diff (완료, 2026-08-01)
 
-- `web/` workspace에 `@codemirror/merge` 추가 + reproducible build(zntc pin은 이미 `0.1.4` — §7.1).
-- **도크 소스 컨트롤 뷰**(§3.5) — 뷰 스위처 배관, 섹션·행 chrome, 빈 상태, 갱신 시점. 읽기 전용이므로 스테이지 버튼·커밋
-  메시지 입력은 아직 없다.
-- **diff 파일 Term** — 파일 entry `diff` kind + 브리지 `diff.list`/`diff.open` method. CSP는 손대지 않는다(§7.2).
-- semantic oracle + 제품 WKWebView regression
-- git comparison/status matrix와 external diff/textconv 실행 차단. **base 선택기는 만들지 않는다** — 행이 속한 섹션이
-  기준이다(§10.10). 상한은 파일 1 MiB · diff 페이지 500행에서 출발하고 실측으로 조정한다(§10.6).
-- 에이전트 턴 base(§6.1)는 **E2 후속으로 결정됐다**(§10.11) — E1 범위 밖이다.
-- **종료:** grant root 밖 접근·큰 파일·binary·rename·worktree `.git` file·untracked/conflict/submodule·close/revoke를 포함한 read-only review loop green.
+- `web/` workspace에 `@codemirror/merge` 추가 + reproducible build(zntc pin은 `0.1.4` — §7.1). **완료**(제품 번들 포함).
+- **도크 소스 컨트롤 뷰**(§3.5) — 네 섹션·행 chrome·브랜치 헤더·접기·아이콘·스크롤·선택·표시 상한, `.git` 감시 갱신.
+  읽기 전용이라 스테이지 버튼·커밋 메시지 입력은 없다(§10.14). **완료**.
+- **diff 파일 Term** — 파일 entry `diff` kind + 브리지 `diff.open`. **완료**. `diff.list`는 만들지 않았다 — 목록은 GPU
+  chrome이라 네이티브가 이미 status/numstat을 직접 읽고, 같은 데이터를 브리지로 한 번 더 옮길 이유가 없다(§3).
+- semantic oracle + 제품 WKWebView regression — **완료**. 게이트(`mise run test-macos-editor-smoke`)가 렌더·chunk·
+  accept/reject·줄 번호·세로/가로 스크롤·CSP 위반 0·스타일 유출·RSS/회수·큰 응답 파싱 비용을 단언한다(§7.4).
+- git comparison/status matrix와 external diff/textconv 실행 차단 — **완료**(§3.5 실측 표: 충돌·하위 모듈·unborn·링크
+  워크트리·rename·비ASCII). base 선택기는 만들지 않았다(§10.10). 상한은 실측으로 한쪽 8 MiB(§10.6).
+- 에이전트 턴 base(§6.1)는 §10.11에서 E2 후속으로 정했다가 **E1 마무리 시점에 앞당기기로 했다**(2026-08-01 사용자
+  결정) — 읽기 전용이라 이 단계 안에서 성립한다.
+- **종료 근거(항목별)**:
+
+  | 종료 항목 | 근거 |
+  | --- | --- |
+  | grant root 밖 접근 | 구조(브리지가 경로 인자 없음)·문자열(`repo_path`)·열기(요소별 `O_NOFOLLOW`) 세 겹, 실제 심링크 저장소로 확인(§6) |
+  | 큰 파일 | 한쪽 8 MiB·양쪽 16 MiB. 직렬화 189 ms·파싱 16 ms·마운트 ~500 ms 실측(§10.6) |
+  | binary | 앞 8000바이트 NUL 판정 → typed 거절(§6) |
+  | rename | 왼쪽을 옛 경로로 읽는다. 실제 `git mv` 저장소로 확인 |
+  | worktree `.git` file | 링크 워크트리에서 루트 탐지·읽기 정상(§3.5 표) |
+  | untracked/conflict/submodule | 충돌은 변경 사항에만·`HEAD ↔ 작업트리`로 열림, 하위 모듈은 열지 않고 이유를 말함(§3.5 표) |
+  | close/revoke | 읽는 중 Term을 닫아도 늦은 결과가 짝 없이 버려진다(크래시·누수 없음 — 테스트) |
 
 ### E2 — 편집·저장·외부 변경
 
@@ -866,7 +879,10 @@ editor event는 처음부터 하나의 domain schema를 공유하되 문서 원�
     이미 그렇게 서 있어 규칙이 하나로 유지되고, 사용자가 base를 고를 일이 없다. conflict는 `U`로 표시하고(파서 구현됨),
     submodule은 v1에서 별도 표기 없이 경로로만 낸다.
 
-11. **에이전트 턴 diff(§6.1)는 E2 후속이다(2026-07-31).** v1은 git 기준(HEAD/index/worktree)만 다룬다. 턴 base는 전체
+11. **에이전트 턴 diff(§6.1)를 E1에 넣는다(2026-08-01 재결정).** 7월 31일에는 E2 후속으로 정했으나, E1의 나머지가
+    닫히고 나니 **읽기 전용이라 이 단계 안에서 성립**하고 목업의 핵심 UX라 앞당긴다. 아래 7월 31일 판단은 그때의
+    근거로 남긴다(무엇이 바뀌어 결정이 뒤집혔는지 보이게).
+    ~~**에이전트 턴 diff(§6.1)는 E2 후속이다(2026-07-31).**~~ v1은 git 기준(HEAD/index/worktree)만 다룬다. 턴 base는 전체
     transcript 파싱(현행 파서는 tail만 읽는다)·턴 경계 스냅샷 배관·ring buffer 보관 정책이 **전부 신규**라 E1을 두 배로
     키운다. diff가 제품에서 도는 것을 먼저 확인하고 얹는다. 스냅샷 방식(write-tree vs touched-files)과 보관 정책은 그때 정한다.
 

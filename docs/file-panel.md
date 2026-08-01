@@ -73,7 +73,7 @@
 
 아키텍처 B로 WKWebView 웹앱의 일은 최소다(트리·탭·도크 chrome = 네이티브 Zig+GPU). 그래서:
 
-- **프론트엔드 = React + Tailwind + shadcn/ui (2026-07-29 개정, 사용자 결정).** 웹앱의 일은 새니타이즈 HTML 표시(읽기) + CM6 마운트(소스) + 문서모델 편집기 마운트(리치, §2.5) + 브리지 모드/테마 신호 수신 + dirty 보고다. Markdown 파생 HTML은 신뢰 shell에 삽입하지 않고 bridge-free renderer origin이 소유하며, 그 안의 Mermaid 펜스만 shell이 native helper로 중계한다(§2.4). `viewer.ts`는 shell composition facade와 mutation queue/guard snapshot 전달을 맡고, Markdown→HTML 파생은 `markdown.ts`, Mermaid sanitize·config는 `rich-render.ts`, helper wire는 `mermaid-helper.ts`·`mermaid-fence.ts`, 렌더 capability 타입은 `renderer-capability.ts`, 편집 모드·revision clock은 `file-panel-state.ts`, 리치 편집기와 툴바는 `rich-editor.ts`가 소유한다. **라이브 프리뷰 폐기(§1)로 projection·atomic worker·intent dispatcher 모듈은 전부 삭제했다** — 남은 웹 모듈은 읽기·소스 두 모드만 지탱한다. CM6는 프레임워크가 아니라 **DOM 마운트 에디터 라이브러리**라 이 결정과 직교한다.
+- **프론트엔드 = React + Tailwind + shadcn/ui (2026-07-29 개정, 사용자 결정).** 웹앱의 일은 새니타이즈 HTML 표시(읽기) + CM6 마운트(소스) + 문서모델 편집기 마운트(리치, §2.5) + 브리지 모드/테마 신호 수신 + dirty 보고다. Markdown 파생 HTML은 신뢰 shell에 삽입하지 않고 bridge-free renderer origin이 소유하며, 그 안의 Mermaid 펜스만 shell이 native helper로 중계한다(§2.4) — **단일 예외인 리치 HTML 블록 미리보기는 §2.5의 조건을 전부 만족할 때만이다**. `viewer.ts`는 shell composition facade와 mutation queue/guard snapshot 전달을 맡고, Markdown→HTML 파생은 `markdown.ts`, Mermaid sanitize·config는 `rich-render.ts`, helper wire는 `mermaid-helper.ts`·`mermaid-fence.ts`, 렌더 capability 타입은 `renderer-capability.ts`, 편집 모드·revision clock은 `file-panel-state.ts`, 리치 편집기와 툴바는 `rich-editor.ts`가 소유한다. **라이브 프리뷰 폐기(§1)로 projection·atomic worker·intent dispatcher 모듈은 전부 삭제했다** — 남은 웹 모듈은 읽기·소스 두 모드만 지탱한다. CM6는 프레임워크가 아니라 **DOM 마운트 에디터 라이브러리**라 이 결정과 직교한다.
 - **프레임워크 도입의 범위와 뒤집지 않는 것(§2.1a).** 초판은 "프레임워크 없음"이었고 그 근거는 아키텍처 B —
   "웹앱의 일을 최소화한다"였다. **아키텍처 B 자체는 그대로다**: 탭·헤더 밴드·파일 트리·pane chrome은 계속 Zig+GPU가
   그리고, WKWebView는 문서 콘텐츠만 소유한다. 바뀌는 것은 **그 콘텐츠 영역 안에서 web이 이미 그리던 UI를 무엇으로
@@ -132,7 +132,7 @@
 | 수식 | KaTeX(경량 권장) / MathJax | 격리 origin, 수식→마크업 |
 | 코드 하이라이트 | Shiki / Prism | 렌더·빌드타임, XSS 표면 작음 |
 
-- **세 web 컨텍스트**(§3·web-panel §7, FP4 실구현·FP10 확장): ① **격리 렌더 origin `maru-app://render`** = `sandbox="allow-scripts allow-same-origin"` iframe 안에서 새니타이즈 HTML + KaTeX/Prism 결과를 materialize한다. 읽기의 문서 iframe, FP10의 일반 fragment와 FP11의 atomic widget은 같은 origin·capability 0 계약을 쓴다. shell과 host가 달라 same-origin이 아니며, `window.maru`/WebKit message handler가 없고 부모 DOM 접근도 실패해야 한다. ② **신뢰 shell origin `maru-app://app`** = CM6·worker orchestration·핀 파일 브리지. Markdown 파생 HTML/SVG는 문자열로만 전달하고 이 DOM에 삽입하지 않는다. FP10 당시 공용 타입은 `RendererCapability { document_revision, projection_generation, widget_id, widget_generation, renderer_instance }` 5-field였고, 현재 모든 renderer message는 §3의 `editor_epoch` 포함 6-field alias 하나만 사용한다. load마다 새 `MessageChannel` port와 현재 registry가 모두 맞을 때만 ready/height/rendered 결과를 수용하며 renderer에는 asset/link 요청 권한을 주지 않는다. ③ **전용 Mermaid helper** = 앱의 `MermaidRenderCoordinator`가 App Sandbox로 서명된 `Contents/Helpers/MaruMermaidRenderer.app`의 실행파일을 시작하고 bounded stdin/stdout protocol로만 통신한다. helper는 bridge/message handler 없는 자기 WKWebView에서 strict Mermaid를 실행하며 앱 편집 WebView를 소유하지 않는다. 각 요청은 `MermaidJobCapability { helper_instance, job_id, renderer_capability, fence_id, source_hash }`에 묶이고 timeout/crash/restart/widget revoke 시 terminal 처리된다. 늦거나 중복된 result는 이 capability 전체와 현재 renderer registry가 맞을 때만 한 번 소비한다.
+- **세 web 컨텍스트**(§3·web-panel §7, FP4 실구현·FP10 확장): ① **격리 렌더 origin `maru-app://render`** = `sandbox="allow-scripts allow-same-origin"` iframe 안에서 새니타이즈 HTML + KaTeX/Prism 결과를 materialize한다. 읽기의 문서 iframe, FP10의 일반 fragment와 FP11의 atomic widget은 같은 origin·capability 0 계약을 쓴다. shell과 host가 달라 same-origin이 아니며, `window.maru`/WebKit message handler가 없고 부모 DOM 접근도 실패해야 한다. ② **신뢰 shell origin `maru-app://app`** = CM6·worker orchestration·핀 파일 브리지. Markdown 파생 HTML/SVG는 문자열로만 전달하고 이 DOM에 삽입하지 않는다 — **예외는 리치 편집기의 HTML 블록 미리보기 하나이며 그 조건은 §2.5가 소유한다**(2026-08-02 개정). FP10 당시 공용 타입은 `RendererCapability { document_revision, projection_generation, widget_id, widget_generation, renderer_instance }` 5-field였고, 현재 모든 renderer message는 §3의 `editor_epoch` 포함 6-field alias 하나만 사용한다. load마다 새 `MessageChannel` port와 현재 registry가 모두 맞을 때만 ready/height/rendered 결과를 수용하며 renderer에는 asset/link 요청 권한을 주지 않는다. ③ **전용 Mermaid helper** = 앱의 `MermaidRenderCoordinator`가 App Sandbox로 서명된 `Contents/Helpers/MaruMermaidRenderer.app`의 실행파일을 시작하고 bounded stdin/stdout protocol로만 통신한다. helper는 bridge/message handler 없는 자기 WKWebView에서 strict Mermaid를 실행하며 앱 편집 WebView를 소유하지 않는다. 각 요청은 `MermaidJobCapability { helper_instance, job_id, renderer_capability, fence_id, source_hash }`에 묶이고 timeout/crash/restart/widget revoke 시 terminal 처리된다. 늦거나 중복된 result는 이 capability 전체와 현재 renderer registry가 맞을 때만 한 번 소비한다.
 - **번들(FP2 완료)**: `web/` Bun workspace(`package.json` + `bun.lock`) + `@zntc/core@0.1.4` bundle + oxlint/oxfmt(Oxc), SHA-384 SRI 생성 후 실제 bundle bytes 재검증. vanilla 단일 앱에는 PostCSS/Sass/HMR controller가 불필요해 `@zntc/web`은 넣지 않았다. `bun install --frozen-lockfile`과 별도 path-filtered CI로 재현하고 기존 dependency-free Zig `mise run check`에는 합치지 않는다.
 
 ### 2.2 새 파일 종류 (text/code · svg · image · media · pdf)
@@ -261,6 +261,24 @@ flowchart TD
     `toml`은 `키 = 값` 문법이라 같은 규칙으로 못 읽으므로 그리지 않는다.
   - 남은 잠금 대상은 **각주와 원시 HTML** 둘이다. 이들은 본문 **안에 섞여** 있어 위치로 떼어 낼 수 없고,
     문서모델에 노드를 주는 별도 작업이라 그때까지는 잠근다.
+- **리치의 HTML 블록 미리보기 = 신뢰 shell DOM 삽입의 단일 예외(2026-08-02, 사용자 결정).** 원칙(§2.1 ②)은
+  "Markdown 파생 HTML을 shell DOM에 넣지 않는다"이고 그대로 유지한다. 리치의 HTML 블록만 예외이며, **아래
+  다섯을 전부 만족할 때만**이다. 하나라도 못 지키면 미리보기를 포기하고 소스 칸만 보여 준다.
+  - **① 읽기와 같은 파이프라인을 통과한 것만 넣는다.** 별도 sanitizer를 세우지 않는다 — allowlist가 둘로
+    갈리면 한쪽만 넓어지는 드리프트가 반드시 생기고, 그때 넓은 쪽이 브리지를 가진 shell이 된다.
+  - **② `id`·`name`을 지운다.** 이 둘은 allowlist에 있지만 **shell에서만 위험하다** — shell은 자기 부품을
+    `#renderer`·`#editor`·`#viewer-status` **id 셀렉터로 찾는다**. 문서가 같은 id를 넣으면 문서 순서에 따라
+    `querySelector`가 문서의 노드를 돌려준다. 격리 origin에는 찾을 부품이 없어 이 위험이 없다.
+  - **③ renderer-owned attribute를 지운다.** 읽기와 같은 이유이고 같은 코드가 한다.
+  - **④ 미리보기는 편집 대상이 아니다.** atom 노드로 두고 편집은 소스 칸에서만 한다 — 미리보기 DOM을
+    편집하면 그 결과를 다시 HTML로 되쓸 방법이 없어 왕복이 깨진다.
+  - **⑤ 파일 브리지 mailbox는 계속 data attribute로 식별한다.** `data-maru-file-request*`는 allowlist 밖이라
+    문서가 위조할 수 없고, 그게 이 예외의 전제다. **mailbox 식별을 id/class로 바꾸면 이 계약이 깨진다.**
+  - **왜 받아들일 수 있나**: app origin CSP가 `script-src 'self'`(인라인·`on*` 실행 불가)·`connect-src 'none'`·
+    `form-action 'none'`·`img-src 'self' data:`라, sanitizer를 뚫고 태그가 새어도 **실행할 길도 내보낼 길도
+    없다**. 즉 sanitizer 단독이 아니라 sanitizer + CSP 이중 방어다. 원칙이 세워진 FP4 시점에는 이 이중성이
+    문서에 명시되지 않았을 뿐이다. **대안을 기각한 근거**: 미리보기를 격리 iframe으로 띄우는 안은 블록마다
+    iframe을 만드는 것이고, 그 구조는 로드 실패·플리커·성능 때문에 이미 폐기한 라이브 프리뷰 그 자체다(§1).
 - **손실이 곤란하면 소스로 편집한다.** 소스 모드는 CM6가 텍스트를 그대로 다루므로 왕복 손실이 0이다. 리치에서
   이상한 결과가 보이면 같은 파일을 소스로 열어 원문을 직접 고칠 수 있다. 그래서 리치는 소스를 대체하지 않는다(§1).
 - **모드 전환은 저장 상태를 기준으로 한다.** dirty인 상태로 모드를 오가면 두 편집기의 문서 표현이 서로 달라

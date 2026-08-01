@@ -9305,9 +9305,108 @@ G3는 provisioned runner와 frozen A artifact가 없으면 시작하지 않는�
           quarantine final-zero를 Debug/ReleaseFast로 검증한다. boundary gate는 private terminal prepare/consumer 선언 외
           제품 호출 0과 새 decoder/payload owner/cleanup state machine 0을 고정한다. 전체 `test-session-host`,
           `check-boundaries`, `mise run check`가 함께 green이기 전에는 이 binding이나 f3c1 전체를 완료로 표시하지 않는다.
-          **f3c2 semantic take**는 2b2e-integration consumer와 resize commit을 같은 held lease/no-callback suffix에서 호출하고,
-          duplicate-after-success와 max-ID success 뒤 같은 product storage의 다음 wire-zero
-          `request_id_exhausted`를 고정한다. **f3d whole-turn orchestration**은 기존 `pumpRxTurn`의 단일 clock,
+          **f3c2 semantic take**는 얇은 final-address `PreparedControlSemanticTake` 하나가 branch receipt의
+          final address+digest+lifecycle만 닫힌 `resize | resync` union으로 봉인한다. 공통 authority 필드를 wrapper에
+          복제하지 않는다. permit/verdict/completed/correlation/TX/authority와 response take/frozen destination의 full graph는
+          각 branch receipt가 단독 SSOT이며 wrapper는 verdict의 live tag와 exact branch receipt를 결속해 반대 branch나
+          부분 consumer 선택을 막는다. `.resize`는 별도 final-address
+          `PreparedResizeSemanticCommit`의 expected/current owner-resize projection, decoded applied
+          `cols/rows/resize_generation/changed`, target stream/controller generation과 destination pristine digest를,
+          `.resync`는 별도 final-address `PreparedResyncSemanticCommit` 하나가 기존 `PreparedResyncAckTransition`의
+          address/digest/lifecycle, projected state digest와 optional same-drain `PreparedRxAggregate`의
+          address/digest/lifecycle, recovery disposition final address/count/root digest, actual output/binding pristine digest를
+          단방향 봉인한다. 기존 ACK receipt는 aggregate를 소유하도록 확장하지 않는다. outer wrapper는 이 resync receipt의
+          address/digest/lifecycle만 참조하며 independent ACK/resync-receipt/aggregate splice와 optional none↔some tag flip을
+          거부한다. 반대 branch의 destination은 전부 canonical
+          pristine이어야 한다. tag flip, independent receipt splice, copy/move, cross-storage/lease와 coherent re-seal은
+          live owner/expectation/final-address exact 비교에서 precommit 거부한다. f3c2는 새 response decoder, request map,
+          ledger token predictor 또는 payload owner를 만들지 않는다.
+
+          prepare는 permit, verdict, branch receipt, response take/frozen destination, optional aggregate와 그 내부 disposition/
+          committed output/binding, storage/ledger/Client/parser/TX backing, whole-turn lease와 scratch의 모든 source/destination
+          `{addr,len}`을 checked-add한다. 서로 다른 top-level receipt/object와 external referent끼리는 pairwise exact/partial/
+          containing overlap을 거부하고 adjacent만 허용한다. parent aggregate/scratch와 선언된 inline child의 containing
+          overlap은 compile-time field offset/size와 exact 일치할 때만 허용하며 sibling field끼리는 non-overlap이어야 한다.
+          forged child offset/size, parent 밖 escape, 양방향 1-byte overlap과 wraparound는 invalid이고 foreign backing은 허용하지
+          않는다.
+
+          resize success는 blocking `RemoteRuntime.applyResizeFullState`와 같은 host-authoritative full-state 규칙을 쓴다.
+          response generation이 현재 owner-resize generation보다 크면 applied cols/rows를 새 pending projection으로 게시하고,
+          같은 generation·같은 size는 idempotent success, 더 작은 generation은
+          현재 projection을 보존한 success다. fresh/newer뿐 아니라 first-baseline, equal-identical, older success도 completed
+          owner take, correlation generation advance→idle, permit/verdict/branch receipt tombstone과 payload cleanup을 exact once
+          수행한다. `changed=false`도 첫 baseline이 없으면 response full-state를 게시할 수 있으며,
+          `changed`만으로 generation을 추론하지 않는다. runtime ID는 `evidence_snapshot.runtime_id`만 사용하고 verdict/completed의
+          target `stream_id`가 `evidence_snapshot.stream_id`와 exact 일치해야 한다. 둘을 상호 변환하거나 reply/caller가 새
+          identity를 제공하지 않는다. `PreparedResizeSemanticCommit`은 expected runtime ID와 evidence digest도 봉인한다.
+          correlation `.idle`+generation/digest advance는 owner-resize publication과 같은 suffix에서 일어나며 async `runtime.resized`가 먼저/나중에 와도 max generation과
+          equal-generation equivocation 규칙으로 같은 상태에 수렴한다.
+
+          equal generation·다른 size 또는 completed target stream과 current evidence stream 불일치는 `invalid_precommit`이
+          아니라 `.protocol_error`다. f3c1의 최종 semantic pair publication 직전에 dependency-neutral
+          `planResizeSemanticCommit`이 decoded reply, current owner-resize와 immutable evidence projection을 비교한다. semantic
+          conflict면 permit/verdict pair를 게시하지 않고 기존 `PreparedControlSemanticTerminal`+terminal binding/take/frozen
+          destination을 준비해 기존 exact terminal consumer로 수렴한다. f3c2의 `PreparedResizeSemanticCommit`은
+          `publish_new|preserve_current` success만 받는다. 준비 뒤 evidence/owner descriptor drift나 copied receipt는 tamper인
+          `invalid_precommit`이며 protocol reason을 가장하지 않는다. `changed`는 host response evidence로 봉인하지만 generation
+          관계를 추론하거나 protocol conflict를 만드는 authority는 아니다.
+
+          resync same-drain fast path는 ACK를 먼저 consume한 뒤 side-intent를 검증하지 않는다. f3c2 prepare가
+          `PreparedResyncAckTransition.next_state`의 exact digest를 projected `awaiting_snapshot` authority로 사용해
+          2b2e recovery disposition, live ledger commit permit, actual-output/binding pristine destination을 **ACK publication 전에**
+          전부 준비·검증한다. 공통/branch pristine·range·capacity 검사를 먼저 끝내고 projected recovery preparation을 마지막
+          preparation leaf로 실행한다. 모든 fallible 계산과 source/current validation은 callback/reentry/외부 관측이 없는 stack-local
+          **non-authority candidate value**에서 끝낸다. candidate의 saved-self와 sealed destination은 stack 주소가 아니라 처음부터
+          scratch/aggregate의 예약된 `ProjectedRecoverySnapshotCommit` final address와 실제 aggregate output/binding final address를
+          사용한다. 마지막 checked boundary가 live source, candidate digest, range와 final destinations pristine을 한 번 검증한다.
+          그 뒤 final destination write가 최초 publication이며 callback-free suffix가 candidate를 final address에 복사해 유효한
+          commit authority로 만든 즉시 projected permit/disposition을 직접 consume한다. 첫 write 뒤 validator, abort, copy/move/
+          reseal, bool/error return은 0이다. checked boundary 이전 실패는 final destination과 caller/source graph byte를 전혀
+          바꾸지 않는다. shallow byte snapshot rollback, pointer-bearing owner 복원, prepare 중 allocation/take는 금지한다.
+          `invalid_precommit`은 semantic/ledger mutation뿐 아니라 permit/verdict/take/frozen/
+          aggregate/dispositions/live-commit/output/binding mutation과 payload move/free도 0이다. 이 projected prepare는 semantic
+          state나 ledger를 바꾸지 않으며 ACK transition의
+          current state/next state/barrier/deadline/authority seal과 같은 semantic-take receipt에 결속된다. candidate가 0이면
+          optional aggregate 없이 ACK만 게시해 `awaiting_snapshot`을 유지한다. candidate가 있으면 callback-free no-fail suffix가
+          response owner move → ACK semantic/correlation publication → 미리 검증한 transport ledger commit과 actual output claim →
+          actual-token recovery binding/drop disposition → 모든 permit/verdict/transition/success receipt tombstone을 순서대로
+          수행한다. 최초 publication 뒤에는 allocation, callback, clock/syscall, raw lookup, validator, bool/error return이 0이다.
+          구현은 `prepareRecoverySnapshotCommitForProjectedAckUnderHeldLease`가 projected state+ACK transition digest로
+          2b2e graph를 준비하고 `validatePreparedRecoverySnapshotForProjectedAckUnderHeldLease`가 첫 write 전에 마지막으로
+          검증한다. 기존 ACK consumer는 checked `preparedResyncAckTransitionCurrent`와 반환 없는
+          `publishResyncAckUnchecked`로, side-intent/binding consumer는 checked graph validation과 반환 없는
+          `commitRecoveryTransportSideIntentUnchecked`/`commitRecoverySnapshotBindingUnchecked` leaf로 분리한다. f3c2가 모든
+          checked validator를 통과한 뒤 이 unchecked leaf만 호출하며 첫 write 뒤 bool/error/validator는 0이다. 기존 checked
+          convenience wrapper는 component test 바깥 제품 경로에서 호출하지 않는다. ACK만 또는 token binding만 선택 소비할
+          수 있는 callable 조합을 열지 않는다.
+
+          semantic publication이 끝난 뒤에만 frozen response payload cleanup callback tail을 실행한다. callback 전 canonical
+          snapshot은 storage lifecycle/incarnation/operation, parser/drain, authority/TX, completed/correlation, owner-resize 또는
+          recovery state, ledger projection과 branch receipt tombstone뿐 아니라 optional aggregate의 committed output/binding/
+          disposition/retirement와 response take/frozen owner projection을 포함한다. payload owner와 모든 branch receipt는 callback
+          전에 consumed/cleaned tombstone이다. payload owner는 callback 전에 empty+
+          `cleaned_tombstone`으로 바뀌어 reentry가 두 번째 free나 semantic take를 할 수 없다. callback 뒤 안전한 비소유 scalar
+          drift와 tombstone만 canonical snapshot으로 복원하고 process quarantine을 latch한다. allocator/payload/ledger/aggregate
+          pointer-bearing descriptor, side-intent output/binding source/disposition cleanup destination 또는 storage lifecycle drift는
+          추가 dereference/free/release 0으로 whole-turn lease release 뒤 dead bounded quarantine에 넘긴다. 이미 게시한 resize/
+          recovery 결과를 rollback하거나 callback 결과를 ordinary precommit failure로 반환하지 않는다. 닫힌 결과는
+          `consumed_resize_cleaned | consumed_resync_cleaned | cleaned_with_invariant | invalid_precommit`이며 post-publication
+          fallible result는 없다.
+
+          duplicate-after-success는 old permit/verdict/response owner를 재사용하지 않는다. 같은 read 또는 다음 turn의
+          byte-identical/semantic-equivalent/different duplicate는 unsolicited response의 기존 protocol-terminal 경로로 간다.
+          cleanup callback 안의 nested read/consume은 held lease에 의해 `busy|invalid_precommit`으로 wire/state/free 0이며,
+          duplicate bytes는 callback 종료 뒤 다음 정상 turn에서만 protocol-terminal로 처리한다. 첫 resize/recovery/correlation/
+          token state와 payload free는 exact once다. request ID max의 성공 response는
+          정상 commit하고 f3c2가 다음 ID를 조회·예약하지 않는다. 그 다음 별도 control admission만 allocation/wire/TX/correlation
+          mutation 0으로 `request_id_exhausted` terminal을 게시한다.
+
+          f3c2는 correlation `.idle`+generation/digest와 branch semantic/owner-resize state만 게시한다. 별도 input-gate bool이나
+          `TurnResult.authority_clear`를 만들지 않고 owner-authority flow도 바꾸지 않는다. f3d가 이 canonical state와 기존
+          authority/semantic/correlation SSOT에서 input/control/TX eligibility와 `TurnResult`를 derive한다. f3c2는 private
+          prepare/consume과 component gate만 소유하고 `pumpRxTurn` product callsite는 0이다. post-response
+          side-intent 배열의 제품 생산, multi-turn `DrainEpisodeOwner` advance, success/terminal branch 선택과 actual same-clock
+          invocation은 f3d가 소유한다. **f3d whole-turn orchestration**은 기존 `pumpRxTurn`의 단일 clock,
           RX→authority→f1 TX suffix와 cleanup leaf만 재사용하고 새 pump/write adapter/lease를 만들지 않는다.
           **f3e hostile evidence**는 pure 전수표→injected turn→실제 Darwin socketpair→fail-index/stress 순으로
           response↔revoke, response+FIN/HUP, readable+writable write 0, revoke 위치 1/64/65, parser resident 65,

@@ -109,6 +109,32 @@
 > tombstone/owner seal snapshot을 기준으로 `cleaned|cleaned_with_invariant|invalid_precommit`을 반환하고, 안전한 scalar drift만
 > 복원하며 allocator pointer/ledger/storage lifecycle drift는 추가 free/release 0+bounded quarantine으로 닫는다.
 
+> f3c2는 얇은 final-address `PreparedControlSemanticTake`의 `resize|resync` closed union으로 branch receipt의 exact
+> address/digest/lifecycle만 묶고 공통 authority는 branch receipt에 단일화한다. Resize branch는 host-authoritative full-state generation/equivocation reducer와
+> owner-resize pristine destination을, resync branch의 단일 `PreparedResyncSemanticCommit`은 ACK transition, projected state와
+> optional same-drain recovery aggregate/output/binding을 봉인한다. Outer wrapper는 branch receipt 하나만 참조하며 independent
+> ACK/receipt/aggregate splice와 optional none↔some flip을 거부한다.
+> Resync aggregate는 ACK 뒤 다시 검증하는 구조가 아니라 ACK transition의 projected `awaiting_snapshot`을 사용해 semantic
+> publication 전에 disposition/live-commit/binding destination을 모두 preflight한다. no-fail suffix는 response move, branch semantic,
+> correlation idle, optional ledger actual-token binding과 모든 tombstone을 게시한 뒤에만 payload callback cleanup을 실행한다.
+> f3c2 결과는 `consumed_resize_cleaned|consumed_resync_cleaned|cleaned_with_invariant|invalid_precommit`이고 post-publication
+> ordinary failure는 없다. 모든 source/destination `{addr,len}`은 checked-add한다. 서로 다른 top-level object/external referent는
+> pairwise non-alias, parent↔declared inline child는 exact compile-time offset/size, sibling은 non-overlap이어야 한다. adjacent는
+> 허용하고 forged child/parent escape/양방향 overlap/overflow는 거부한다. Projected prepare는 stack-local non-authority
+> candidate에서 모든 fallible 계산/검증을 끝내고 final destination write를 최초 publication으로 삼는다. 그 즉시 unchecked
+> suffix가 final-address `ProjectedRecoverySnapshotCommit` 자체를 consume하며 이후 validator/abort/copy/move/reseal은 0이다.
+> 모든 precommit failure에서 final destination, caller graph와 allocator-backed owner bytes가 불변이다. Resize equal-generation size equivocation과 target-stream mismatch는
+> f3c1 pair 게시 전 기존 protocol-terminal preparation/consumer로 수렴하고 `invalid_precommit`과 구분한다. Component gate는
+> Debug/ReleaseFast executable sentinel, branch one-field/copy/move/splice/replay,
+> resize changed/generation/equivocation, resync candidate 0/1/64와 actual-token ABA, duplicate-after-success, max-ID 다음 admission
+> wire 0, parent↔declared-child valid와 forged offset/parent escape, exact/양방향 partial/containing/adjacent/overflow range,
+> callback reentry와 payload allocator `0x1`/side-intent output/
+> binding source/disposition destination drift의 추가 dereference/free 0+bounded quarantine, final-zero를 고정한다. Older/equal
+> resize success도 completed/correlation/receipt/payload를 exact once 소비한다. Boundary는 public consumer/새 decoder/request map/
+> 두 번째 cleanup owner와 product `pumpRxTurn` callsite가 0임을 확인한다. f3c2는 correlation idle+generation/digest와 branch
+> state만 게시하며 새 input-gate bool, owner-authority flow, `TurnResult`를 소유하지 않는다. 실제 eligibility derive,
+> side-intent 생산과 product branch 선택은 f3d 증거가 필요하다.
+
 > f3c0의 독립 merge gate는 `control_response_wire.zig` 하나가 allocation-free typed resize/resync request와
 > strict response/error envelope를 소유하고, `RemoteRuntime`과 external pump가 각각 같은 decoder/encoder를 소비하는지
 > 검증한다. external `admitControl`에는 raw JSON 입력이 없어야 하며 request encoder의 buffer cap-1/exact,

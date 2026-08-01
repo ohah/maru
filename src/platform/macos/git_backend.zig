@@ -539,9 +539,26 @@ pub fn takeTurnSnapshot(
     repo: []const u8,
     index_file: []const u8,
 ) ![]u8 {
-    inline for (.{ git_command.Kind.snapshot_read_tree, git_command.Kind.snapshot_add }) |kind| {
-        const out = try runWithEnv(allocator, kind, git_exe, repo, null, index_file);
-        allocator.free(out.bytes); // 이 둘은 출력이 없다(실패는 종료 코드로 온다)
+    // `read-tree HEAD`는 **커밋이 하나도 없는 저장소에서 실패한다** — 그건 오류가 아니라 "기준이 빈 트리"라는
+    // 뜻이다(에이전트가 새 프로젝트를 만드는 흔한 경우). 실패해도 그대로 두면 임시 index가 빈 채로 남고,
+    // 이어지는 `add -A`가 작업트리 전체를 담아 정확히 우리가 원하는 스냅샷이 된다. 여기서 접으면 첫 커밋 전까지
+    // "에이전트가 방금 바꾼 것"이 통째로 안 뜬다.
+    {
+        const out = runWithEnv(allocator, .snapshot_read_tree, git_exe, repo, null, index_file) catch null;
+        if (out) |ok| {
+            allocator.free(ok.bytes);
+        } else {
+            // 실패했으면 임시 index를 **지우고** 시작한다. 이 파일은 턴마다 재사용하므로(그래야 24 ms다),
+            // 남겨 두면 지난 턴의 항목이 남아 스냅샷이 "그때 있던 파일 + 지금 파일"이 된다.
+            var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+            if (std.fmt.bufPrintZ(&path_buf, "{s}", .{index_file})) |path_z| {
+                _ = std.c.unlink(path_z.ptr);
+            } else |_| {}
+        }
+    }
+    {
+        const out = try runWithEnv(allocator, .snapshot_add, git_exe, repo, null, index_file);
+        allocator.free(out.bytes); // 출력이 없다(실패는 종료 코드로 온다)
     }
     const written = try runWithEnv(allocator, .snapshot_write_tree, git_exe, repo, null, index_file);
     errdefer allocator.free(written.bytes);
@@ -1073,6 +1090,9 @@ fn writeFileAt(dir: []const u8, name: []const u8, content: []const u8) !void {
 }
 
 /// argv를 돌려 성공(exit 0)이면 true. 출력은 버린다(테스트 픽스처 준비용).
+pub const testRunQuiet = runQuiet;
+pub const testWriteFile = writeFileAt;
+
 fn runQuiet(argv: []const []const u8) bool {
     var store: [8][:0]u8 = undefined;
     var c_argv: [9:null]?[*:0]const u8 = undefined;

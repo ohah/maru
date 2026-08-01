@@ -953,18 +953,22 @@ test "session host unchecked teardown authority cannot escape anywhere in src" {
         .{
             .name = "consumePreparedLiveCommitWithOutputUnchecked",
             .owner_suffixes = &.{"platform/macos/session_host/external_inbox_ledger.zig"},
-            .pump_references = 1,
+            // The legacy committed-source path and F3c2's projected same-drain path are the two
+            // private, prevalidated consumers. F3d must orchestrate them through the enclosing
+            // semantic take rather than adding a third direct ledger call.
+            .pump_references = 2,
         },
         .{
             .name = "claimCommittedLiveOutputUnchecked",
             .owner_suffixes = &.{"platform/macos/session_host/external_inbox_ledger.zig"},
-            // One product leaf plus hostile claim-owner/ABA tests in the same private module.
-            .pump_references = 5,
+            // The legacy and projected semantic leaves plus hostile claim-owner/ABA tests remain
+            // confined to the same private pump module.
+            .pump_references = 6,
         },
         .{
             .name = "consumeClaimedCommittedLiveOutputUnchecked",
             .owner_suffixes = &.{"platform/macos/session_host/external_inbox_ledger.zig"},
-            .pump_references = 2,
+            .pump_references = 4,
         },
         .{
             .name = "commitLiveBatchAbortUnchecked",
@@ -1013,6 +1017,11 @@ test "session host unchecked teardown authority cannot escape anywhere in src" {
         },
         .{
             .name = "consumePreparedIntentCommitUnchecked",
+            .owner_suffixes = &.{"platform/macos/session_host/external_rx_intent.zig"},
+            .pump_references = 2,
+        },
+        .{
+            .name = "commitPreparedDestroyUnchecked",
             .owner_suffixes = &.{"platform/macos/session_host/external_rx_intent.zig"},
             .pump_references = 1,
         },
@@ -1097,7 +1106,7 @@ test "session host unchecked teardown authority cannot escape anywhere in src" {
             }
         }
     }
-    try std.testing.expectEqual(@as(usize, 30), unchecked_declarations);
+    try std.testing.expectEqual(@as(usize, 31), unchecked_declarations);
     for (symbols) |symbol| {
         var pump_references: usize = 0;
         var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
@@ -3565,7 +3574,10 @@ test "f3c1 terminal binding and consumer remain private with zero product callsi
         @as(usize, 1),
         countOccurrences(product, "const PreparedControlSemanticTerminalBinding = struct"),
     );
-    // One shared payload cleanup leaf is called by terminal binding, legacy F2, and F3 revoke.
+    // The shared payload cleanup leaf has one declaration and three direct product callers:
+    // terminal binding, legacy F2, and F3 revoke. Resize/resync semantic take first moves the
+    // payload into its callback-local frozen owner, so it intentionally has no direct call here.
+    // F3d must reuse these enclosing consumers rather than add another direct cleanup call.
     try std.testing.expectEqual(
         @as(usize, 4),
         countOccurrences(product, "finishControlResponsePayloadCleanupUnchecked("),

@@ -874,6 +874,16 @@ pub const PreparedLiveCommit = struct {
     digest: owner_seal.Digest = [_]u8{0} ** 32,
 };
 
+/// A non-owning value projection for a future final-address live commit.
+///
+/// The embedded token and payload descriptors are evidence only: planning never moves a
+/// payload, reserves a token, or changes the source batch/retirement/permit. The caller may
+/// publish these bytes only at the two final addresses sealed into `permit`.
+pub const ProjectedLiveCommitCandidate = struct {
+    dispositions: [max_live_mutations]LiveCommitDisposition,
+    permit: PreparedLiveCommit,
+};
+
 /// Stack scratch budgets keep the bounded batch protocol reviewable as its sealed state grows.
 pub const max_live_batch_scratch_bytes: usize = 128 * 1024;
 pub const max_live_commit_scratch_bytes: usize = 192 * 1024;
@@ -3718,30 +3728,11 @@ pub const ExternalInboxLedger = struct {
         return counts;
     }
 
-    /// Marks a bounded set of completed roots for direct deferred cleanup. This is not the
-    /// ledger's retired-slot queue: selected payloads receive actual tokens during commit, then
-    /// move straight into `PreparedLiveRetirement` without becoming externally live. The whole
-    /// selection is validated before the first disposition changes, preserving retryability.
-    pub fn markPreparedFinalRootsForCleanup(
-        self: *ExternalInboxLedger,
-        batch: *PreparedLiveBatch,
-        retirement: *PreparedLiveRetirement,
+    fn applyFinalRootCleanupSelection(
         dispositions: *[max_live_mutations]LiveCommitDisposition,
         permit: *PreparedLiveCommit,
         selection: *const [max_live_mutations]bool,
-        aggregate_addr: usize,
-        storage_addr: usize,
-        turn_generation: u64,
     ) CommitLiveError!void {
-        try self.validatePreparedLiveCommitPermit(
-            batch,
-            retirement,
-            dispositions,
-            permit,
-            aggregate_addr,
-            storage_addr,
-            turn_generation,
-        );
         var selected_count: u8 = 0;
         var selected_bytes: usize = 0;
         for (selection, 0..) |selected, mutation_index| {
@@ -3789,6 +3780,99 @@ pub const ExternalInboxLedger = struct {
         permit.reserved_cleanup_bytes = reserved_cleanup_bytes;
         permit.dispositions_digest = liveDispositionsDigest(dispositions);
         permit.digest = preparedLiveCommitDigest(permit);
+    }
+
+    /// Builds sealed bytes for a projected final-address commit without publishing authority.
+    /// Destination ranges are checked as integers before any pointer is formed, so hostile
+    /// addresses cannot wrap or alias the live source graph.
+    pub fn planPreparedFinalRootsForCleanup(
+        self: *ExternalInboxLedger,
+        batch: *const PreparedLiveBatch,
+        retirement: *const PreparedLiveRetirement,
+        dispositions: *const [max_live_mutations]LiveCommitDisposition,
+        permit: *const PreparedLiveCommit,
+        selection: *const [max_live_mutations]bool,
+        final_dispositions_addr: usize,
+        final_permit_addr: usize,
+        aggregate_addr: usize,
+        storage_addr: usize,
+        turn_generation: u64,
+    ) CommitLiveError!ProjectedLiveCommitCandidate {
+        try self.validatePreparedLiveCommitPermit(
+            batch,
+            retirement,
+            dispositions,
+            permit,
+            aggregate_addr,
+            storage_addr,
+            turn_generation,
+        );
+        const final_dispositions = try checkedAddressRange(
+            final_dispositions_addr,
+            @sizeOf([max_live_mutations]LiveCommitDisposition),
+        );
+        const final_permit = try checkedAddressRange(
+            final_permit_addr,
+            @sizeOf(PreparedLiveCommit),
+        );
+        if (rangesOverlap(final_dispositions, final_permit))
+            return error.InvalidAlias;
+        const sources = [_]ByteRange{
+            rangeOfValue(self),
+            rangeOfValue(batch),
+            rangeOfValue(retirement),
+            rangeOfValue(dispositions),
+            rangeOfValue(permit),
+        };
+        for (sources) |source| {
+            if (rangesOverlap(final_dispositions, source) or
+                rangesOverlap(final_permit, source))
+                return error.InvalidAlias;
+        }
+        if (rangeOverlapsActive(final_dispositions, self) or
+            rangeOverlapsActive(final_permit, self))
+            return error.InvalidAlias;
+
+        var candidate: ProjectedLiveCommitCandidate = .{
+            .dispositions = dispositions.*,
+            .permit = permit.*,
+        };
+        candidate.permit.saved_self_addr = final_permit_addr;
+        candidate.permit.dispositions_addr = final_dispositions_addr;
+        candidate.permit.digest = preparedLiveCommitDigest(&candidate.permit);
+        try applyFinalRootCleanupSelection(
+            &candidate.dispositions,
+            &candidate.permit,
+            selection,
+        );
+        return candidate;
+    }
+
+    /// Marks a bounded set of completed roots for direct deferred cleanup. This is not the
+    /// ledger's retired-slot queue: selected payloads receive actual tokens during commit, then
+    /// move straight into `PreparedLiveRetirement` without becoming externally live. The whole
+    /// selection is validated before the first disposition changes, preserving retryability.
+    pub fn markPreparedFinalRootsForCleanup(
+        self: *ExternalInboxLedger,
+        batch: *PreparedLiveBatch,
+        retirement: *PreparedLiveRetirement,
+        dispositions: *[max_live_mutations]LiveCommitDisposition,
+        permit: *PreparedLiveCommit,
+        selection: *const [max_live_mutations]bool,
+        aggregate_addr: usize,
+        storage_addr: usize,
+        turn_generation: u64,
+    ) CommitLiveError!void {
+        try self.validatePreparedLiveCommitPermit(
+            batch,
+            retirement,
+            dispositions,
+            permit,
+            aggregate_addr,
+            storage_addr,
+            turn_generation,
+        );
+        try applyFinalRootCleanupSelection(dispositions, permit, selection);
     }
 
     pub fn prepareLiveCommit(
@@ -5796,6 +5880,12 @@ const ByteRange = struct {
     }
 };
 
+fn checkedAddressRange(start: usize, len: usize) error{ InvalidAlias, InvalidPlan }!ByteRange {
+    if (start == 0 or len == 0) return error.InvalidPlan;
+    const end = std.math.add(usize, start, len) catch return error.InvalidAlias;
+    return .{ .start = start, .end = end };
+}
+
 fn rangeOfValue(value: anytype) ByteRange {
     return rangeOfSlice(u8, std.mem.asBytes(value));
 }
@@ -7771,6 +7861,253 @@ test "2b2e integration retired final is never live and remains immutable commit 
     try std.testing.expectEqual(@as(u8, 1), retirement.cleanup_count);
     try std.testing.expectEqual(permit.cleanup_final_bytes, retirement.cleanup_bytes);
     try std.testing.expectEqual(RetireLiveResult.retired, retirement.retire());
+    try ledger.finish();
+}
+
+test "projected final-root cleanup planner is pure and seals only disjoint final addresses" {
+    const allocator = std.testing.allocator;
+    var ledger: ExternalInboxLedger = .{};
+    var batch: PreparedLiveBatch = .{};
+    try ledger.beginLiveBatch(&batch, allocator, null);
+    var payload = try owned(allocator, "projected-cleanup");
+    _ = try ledger.prepareLiveAdmission(
+        &batch,
+        .{ .completed = .{
+            .stream_id = 73,
+            .is_snapshot = true,
+        } },
+        &payload,
+    );
+    try ledger.finishLiveBatch(&batch);
+    var retirement = PreparedLiveRetirement.init(allocator);
+    var dispositions = [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+    var permit: PreparedLiveCommit = .{};
+    try ledger.prepareLiveCommit(
+        &batch,
+        &retirement,
+        &dispositions,
+        0xA663,
+        0x5704,
+        43,
+        &permit,
+    );
+    var final_dispositions = [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+    var final_permit: PreparedLiveCommit = .{};
+    var selection = [_]bool{false} ** max_live_mutations;
+    selection[0] = true;
+
+    const ledger_before = ledger;
+    const batch_before = batch;
+    const retirement_before = retirement;
+    const dispositions_before = dispositions;
+    const permit_before = permit;
+    const candidate = try ledger.planPreparedFinalRootsForCleanup(
+        &batch,
+        &retirement,
+        &dispositions,
+        &permit,
+        &selection,
+        @intFromPtr(&final_dispositions),
+        @intFromPtr(&final_permit),
+        0xA663,
+        0x5704,
+        43,
+    );
+    try std.testing.expect(std.meta.eql(ledger_before, ledger));
+    try std.testing.expect(std.meta.eql(batch_before, batch));
+    try std.testing.expect(std.meta.eql(retirement_before, retirement));
+    try std.testing.expect(std.meta.eql(dispositions_before, dispositions));
+    try std.testing.expect(std.meta.eql(permit_before, permit));
+    try std.testing.expect(std.meta.eql(
+        final_dispositions,
+        [_]LiveCommitDisposition{.unused} ** max_live_mutations,
+    ));
+    try std.testing.expect(std.meta.eql(final_permit, PreparedLiveCommit{}));
+    try std.testing.expect(candidate.dispositions[0] == .cleanup_final);
+    try std.testing.expectEqual(@as(u8, 1), candidate.permit.cleanup_final_count);
+    try std.testing.expectEqual(@as(u8, 0), candidate.permit.final_completed_count);
+    try std.testing.expectEqual(
+        @intFromPtr(&final_dispositions),
+        candidate.permit.dispositions_addr,
+    );
+    try std.testing.expectEqual(
+        @intFromPtr(&final_permit),
+        candidate.permit.saved_self_addr,
+    );
+
+    selection[1] = true;
+    try std.testing.expectError(
+        error.InvalidPlan,
+        ledger.planPreparedFinalRootsForCleanup(
+            &batch,
+            &retirement,
+            &dispositions,
+            &permit,
+            &selection,
+            @intFromPtr(&final_dispositions),
+            @intFromPtr(&final_permit),
+            0xA663,
+            0x5704,
+            43,
+        ),
+    );
+    selection[1] = false;
+    try std.testing.expectError(
+        error.InvalidAlias,
+        ledger.planPreparedFinalRootsForCleanup(
+            &batch,
+            &retirement,
+            &dispositions,
+            &permit,
+            &selection,
+            @intFromPtr(&dispositions),
+            @intFromPtr(&final_permit),
+            0xA663,
+            0x5704,
+            43,
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidAlias,
+        ledger.planPreparedFinalRootsForCleanup(
+            &batch,
+            &retirement,
+            &dispositions,
+            &permit,
+            &selection,
+            std.math.maxInt(usize) -
+                @sizeOf([max_live_mutations]LiveCommitDisposition) + 2,
+            @intFromPtr(&final_permit),
+            0xA663,
+            0x5704,
+            43,
+        ),
+    );
+    try std.testing.expect(std.meta.eql(ledger_before, ledger));
+    try std.testing.expect(std.meta.eql(batch_before, batch));
+    try std.testing.expect(std.meta.eql(retirement_before, retirement));
+    try std.testing.expect(std.meta.eql(dispositions_before, dispositions));
+    try std.testing.expect(std.meta.eql(permit_before, permit));
+
+    const original_mutation_count = batch.mutation_count;
+    batch.mutation_count = @intCast(max_live_mutations + 1);
+    const invalid_batch = batch;
+    try std.testing.expectError(
+        error.InvalidPlan,
+        ledger.planPreparedFinalRootsForCleanup(
+            &batch,
+            &retirement,
+            &dispositions,
+            &permit,
+            &selection,
+            @intFromPtr(&final_dispositions),
+            @intFromPtr(&final_permit),
+            0xA663,
+            0x5704,
+            43,
+        ),
+    );
+    try std.testing.expect(std.meta.eql(invalid_batch, batch));
+    batch.mutation_count = original_mutation_count;
+
+    try std.testing.expectEqual(
+        AbortLiveCommitResult.aborted,
+        ledger.abortPreparedLiveCommit(
+            &batch,
+            &retirement,
+            &dispositions,
+            &permit,
+        ),
+    );
+    try std.testing.expect(ExternalInboxLedger.resetPreparedLiveCommit(&permit));
+    _ = ledger.abortPreparedLiveBatch(&batch);
+    try ledger.finish();
+}
+
+test "projected final-root cleanup planner accepts exact mutation cap and rejects cap plus one" {
+    const allocator = std.testing.allocator;
+    var ledger: ExternalInboxLedger = .{};
+    var batch: PreparedLiveBatch = .{};
+    try ledger.beginLiveBatch(&batch, allocator, null);
+    for (0..max_live_mutations) |index| {
+        var payload = try owned(allocator, "x");
+        _ = try ledger.prepareLiveAdmission(
+            &batch,
+            .{ .completed = .{
+                .stream_id = @intCast(1_000 + index),
+                .is_snapshot = true,
+            } },
+            &payload,
+        );
+    }
+    try ledger.finishLiveBatch(&batch);
+    var retirement = PreparedLiveRetirement.init(allocator);
+    var dispositions = [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+    var permit: PreparedLiveCommit = .{};
+    try ledger.prepareLiveCommit(
+        &batch,
+        &retirement,
+        &dispositions,
+        0xA664,
+        0x5705,
+        44,
+        &permit,
+    );
+    var final_dispositions = [_]LiveCommitDisposition{.unused} ** max_live_mutations;
+    var final_permit: PreparedLiveCommit = .{};
+    const selection = [_]bool{true} ** max_live_mutations;
+    const candidate = try ledger.planPreparedFinalRootsForCleanup(
+        &batch,
+        &retirement,
+        &dispositions,
+        &permit,
+        &selection,
+        @intFromPtr(&final_dispositions),
+        @intFromPtr(&final_permit),
+        0xA664,
+        0x5705,
+        44,
+    );
+    try std.testing.expectEqual(
+        @as(u8, max_live_mutations),
+        candidate.permit.cleanup_final_count,
+    );
+    try std.testing.expectEqual(@as(u8, 0), candidate.permit.final_completed_count);
+    for (candidate.dispositions) |disposition|
+        try std.testing.expect(disposition == .cleanup_final);
+
+    const source_before = batch;
+    batch.mutation_count = @intCast(max_live_mutations + 1);
+    const invalid_source = batch;
+    try std.testing.expectError(
+        error.InvalidPlan,
+        ledger.planPreparedFinalRootsForCleanup(
+            &batch,
+            &retirement,
+            &dispositions,
+            &permit,
+            &selection,
+            @intFromPtr(&final_dispositions),
+            @intFromPtr(&final_permit),
+            0xA664,
+            0x5705,
+            44,
+        ),
+    );
+    try std.testing.expect(std.meta.eql(invalid_source, batch));
+    batch = source_before;
+
+    try std.testing.expectEqual(
+        AbortLiveCommitResult.aborted,
+        ledger.abortPreparedLiveCommit(
+            &batch,
+            &retirement,
+            &dispositions,
+            &permit,
+        ),
+    );
+    try std.testing.expect(ExternalInboxLedger.resetPreparedLiveCommit(&permit));
+    _ = ledger.abortPreparedLiveBatch(&batch);
     try ledger.finish();
 }
 

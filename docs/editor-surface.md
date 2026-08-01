@@ -556,6 +556,17 @@ Git 의미와 실행 안전도 E1 전에 고정한다.
   증거(명령행 도구·Xcode 툴체인의 git이 실행 가능)가 없으면 이 경로는 후보에서 뺀다.
 - read-only diff 호출은 repository config가 외부 프로세스를 실행하지 못하도록 external diff/textconv/pager와 interactive prompt를 명시적으로 끈다. config·attributes·filter가 실행되는 각 명령을 adversarial repo fixture로 확인한다.
 - git stderr에는 path/user/repo 정보가 있으므로 raw로 page/trace에 전달하지 않는다.
+- **루트 밖 접근은 세 겹으로 막는다(2026-08-01).** ⑴ **구조**: 브리지 `diff.open`은 경로 인자를 받지 않는다 — 무엇을
+  읽을지는 그 Term의 entry가 정하므로 웹이 대상을 고를 수 없다(가장 강한 방어이고, 나머지 둘은 **우리 자신의 버그와
+  이상한 git 출력**에 대한 심층 방어다). ⑵ **문자열**: 저장소 루트 기준 상대경로만 받는다(`session.repo_path` —
+  절대경로·`..`/`.` 세그먼트·빈 세그먼트·NUL 거부). ⑶ **열기**: 작업트리 파일은 루트에서 시작해 경로 요소마다
+  `O_NOFOLLOW`로 내려간다 — 마지막 요소만 막으면 중간 디렉터리가 링크일 때 밖이 열린다(실제 링크가 든 저장소로 확인).
+
+  **왜 이 경계를 두는가**: diff는 남의 코드를 보려고 만든 기능이라 **적대적일 수 있는 저장소를 여는 것이 정상 사용**
+  이고, 읽은 내용은 신뢰 origin 웹뷰로 들어간다(마크다운 sanitizer 우회 같은 결함이 브리지 호출로 이어질 수 있는
+  자리다 — §3.1). 사용자에게 무엇을 더 묻는 장치가 아니다(§10.4에서 git 읽기 승인은 root 승인에 포함됐다) —
+  **우리 코드의 사고 반경**을 사용자가 연 폴더로 묶는 장치다. 참고로 VS Code·Zed는 이런 읽기 경계를 두지 않는다
+  (그쪽 경계는 실행 신뢰다) — 우리가 다른 이유는 본문이 웹뷰에서 그려지기 때문이다.
 - 이후 stage/unstage는 clean/smudge filter, index lock, partial hunk stale context를 별도 보안·CAS 문제로 다룬다.
 
 ### 6.1 에이전트 턴 diff (agent-turn base)

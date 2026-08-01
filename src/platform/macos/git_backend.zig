@@ -62,9 +62,12 @@ fn pathEnv() []const u8 {
 /// (오래된 결과로 화면을 덮어쓰지 않기 위해 어차피 최신 하나만 쓴다).
 pub const max_inflight: usize = 1;
 
-/// 명령 하나의 출력 상한. 변경 파일이 수만 개인 저장소에서도 목록은 화면에 다 못 들어가므로, 여기서 잘라도
-/// 사용자가 보는 것은 같다. 상한을 넘으면 **잘린 사실을 결과에 싣는다** — 조용히 일부만 보여 주지 않는다.
-pub const max_output_bytes: usize = 1 << 20;
+/// 명령 하나의 출력 상한. 상한을 넘으면 **잘린 사실을 결과에 싣는다** — 조용히 일부만 보여 주지 않는다.
+///
+/// **payload 상한(`diff_payload.max_side_bytes`)보다 커야 한다.** 작으면 blob이 여기서 먼저 잘려 "너무 큼"으로
+/// 거절되는데, 그 판단은 payload 정책이 해야 한다(같은 한계를 두 곳에서 다르게 말하면 안 된다). 목록 출력은
+/// 원래 이보다 훨씬 작다.
+pub const max_output_bytes: usize = 16 << 20;
 
 pub const Result = struct {
     /// `git status --porcelain=v2 --branch` 출력.

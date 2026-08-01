@@ -1001,6 +1001,13 @@ pub fn buildDockScmDrawList(
                 // 개수는 오른쪽 끝에 고정한다 — 제목이 길어져도 개수가 밀려 사라지지 않는다.
                 if (cols > count.len) appendAscii(&cells, allocator, count, r, cols - @as(u16, @intCast(count.len)), .{ .foreground = muted }) catch {};
             },
+            .more => |more| {
+                // "모두 보기 (N개 더)" — 숨은 개수를 말한다. 조용히 자르면 사용자는 파일이 사라졌다고 읽는다.
+                var buf: [48]u8 = undefined;
+                const text = std.fmt.bufPrint(&buf, "모두 보기 ({d}개 더)", .{more.hidden}) catch "모두 보기";
+                if (cols > inset + 2)
+                    _ = try appendEllipsizedTitle(allocator, &cells, &pool, text, r, inset + 4, cols, .{ .foreground = accent }, false, .head);
+            },
             .file => |file| {
                 // 오른쪽부터 자리를 잡는다: 상태 문자 1칸 + 증감. 남는 폭이 이름·경로 몫이다.
                 var delta_buf: [24]u8 = undefined;

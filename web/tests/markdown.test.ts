@@ -23,6 +23,60 @@ describe("markdown trust boundary", () => {
     expect(html).not.toContain('1:1:0"');
   });
 
+  test("문서에 직접 쓴 안전한 HTML은 그린다", () => {
+    // 마크다운 문법으로는 접기를 만들 수 없어 README가 이 태그들을 직접 쓴다. 폐기하면 그 문서는
+    // 읽기 모드에서 구조를 잃는다 — 접기 안 내용이 통째로 펼쳐진 평문이 된다.
+    const html = renderMarkdown(
+      "<details>\n<summary>접기</summary>\n\n안쪽 **본문**\n\n</details>\n\n누르세요 <kbd>⌘S</kbd> H<sub>2</sub>O<br>\n",
+    );
+
+    expect(html).toContain("<details");
+    expect(html).toContain("<summary");
+    expect(html).toContain("<kbd");
+    expect(html).toContain("<sub");
+    expect(html).toContain("<br");
+    // 접기 안의 마크다운도 계속 마크다운이다.
+    expect(html).toContain("<strong");
+  });
+
+  test("실행·표현을 가진 태그는 안쪽 내용까지 버린다", () => {
+    // `<style>`은 지워도 기본 동작이 **안쪽 CSS를 문단 텍스트로 남긴다** — 실행되지는 않지만 문서에 없던
+    // `body{display:none}`이 화면에 글자로 뜬다. `script`처럼 통째로 버려야 한다.
+    expect(renderMarkdown("<style>body{display:none}</style>\n")).not.toContain("display:none");
+    expect(renderMarkdown('<div style="position:fixed">x</div>\n')).not.toContain("position:fixed");
+    // 폼은 사용자 입력을 어딘가로 보내는 장치라 문서가 가질 수 없다(GFM 체크박스 `input`은 별개로 남는다).
+    expect(renderMarkdown('<form action="https://evil.test"></form>\n')).not.toContain("<form");
+    expect(renderMarkdown("<!-- prettier-ignore -->\n본문\n")).not.toContain("prettier-ignore");
+    expect(renderMarkdown("<!DOCTYPE html>\n본문\n")).not.toContain("DOCTYPE");
+  });
+
+  test("renderer-owned attribute는 문서가 위조해도 renderer 값이 이긴다", () => {
+    // raw HTML을 승격하기 전에는 이 이름들이 sanitize allowlist에 **닿을 수 없어서** 위조가 불가능했다.
+    // 이제 닿으므로, 붙이는 쪽이 먼저 지운다. asset 경로 쪽이 특히 중요하다 — viewer가 이 값을
+    // `readAsset` 인자로 쓰기 때문에, 통과하면 문서가 읽을 파일을 스스로 고르게 된다.
+    const forged = renderMarkdown(
+      '<span data-maru-source-start="9:9:9" data-maru-source-end="9:9:9">위조</span>\n\n' +
+        '<img data-maru-asset-path="../../../etc/passwd" data-maru-asset-id="7">\n',
+    );
+
+    expect(forged).not.toContain("9:9:9");
+    expect(forged).not.toContain("etc/passwd");
+    expect(forged).not.toContain("data-maru-asset-id");
+    // 진짜 위치는 계속 붙는다.
+    expect(forged).toContain('data-maru-source-start="1:1:0"');
+  });
+
+  test("코드 안의 HTML은 내용일 뿐이라 그리지 않는다", () => {
+    const html = renderMarkdown(
+      "`<div>`는 태그다\n\n```html\n<script>alert(1)</script>\n```\n\n3 < 5\n",
+    );
+
+    expect(html).not.toContain("<div>");
+    expect(html).not.toContain("<script>alert");
+    expect(html).toContain("&#x3C;div>");
+    expect(html).toContain("3 &#x3C; 5");
+  });
+
   test("removes executable URLs and external resource loads while retaining safe links", () => {
     const html = renderMarkdown(`
 [bad](javascript:alert(1))

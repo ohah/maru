@@ -106,7 +106,24 @@
   팝오버 위치 계산의 인라인 style이 통과한다(§1 무백색 계약과 같은 근거). Tailwind 출력은 빌드타임 CSS 파일이라
   새 권한이 필요 없다. 번들은 커지므로 **web bundle 3 MiB를 예산으로 둔다** — 넘으면 그 PR에서 근거를 대거나
   코드 분할을 한다. 로컬 스킴 로드라 네트워크 비용은 없지만 파싱 시간은 첫 paint에 들어간다.
-- **렌더러 = remark/unified 확정(FP2)**. 실측으로 ⑴ raw HTML을 `remarkRehype` 경계에서 폐기, ⑵ `rehype-sanitize` AST allowlist, ⑶ unist 문자 offset→renderer-owned `data-maru-source-start/end`, ⑷ GFM·KaTeX MathML-only·Prism을 한 pipeline에서 보존하고 adversarial fixture를 통과했다. markdown-it의 block line 범위보다 후속 주석 앵커의 문자 offset hedge가 강하고 별도 DOM sanitizer가 불필요해 remark를 택했다.
+- **렌더러 = remark/unified 확정(FP2)**. 실측으로 ⑴ raw HTML을 `rehype-raw`로 판독한 뒤 `rehype-sanitize` allowlist가 단독으로 무엇이 살아남는지 정하고, ⑵ 그 allowlist는 AST 위에서 돈다(문자열 정규식이 아니다), ⑶ unist 문자 offset→renderer-owned `data-maru-source-start/end`, ⑷ GFM·KaTeX MathML-only·Prism을 한 pipeline에서 보존하고 adversarial fixture를 통과했다. markdown-it의 block line 범위보다 후속 주석 앵커의 문자 offset hedge가 강하고 별도 DOM sanitizer가 불필요해 remark를 택했다.
+- **읽기 모드는 문서가 직접 쓴 HTML을 그린다(2026-08-02, 사용자 결정).** 마크다운 명세가 HTML을 허용하고
+  `<details>` 접기·`<kbd>`·`<sub>`처럼 **문법만으로는 만들 수 없는 표현**이 실제 문서에 흔하다. 폐기하면 그
+  문서는 읽기에서 구조를 잃는다(접기 안 내용이 통째로 펼쳐진 평문이 된다).
+  - **폐기 경계를 파서에서 sanitizer로 옮긴 것이지, 격리를 푼 것이 아니다.** `allowDangerousHtml`은 raw
+    문자열을 트리에 남길 뿐이고 무엇이 살아남는지는 allowlist가 단독으로 정한다. `script`·`style`·`iframe`·
+    `form`과 `on*`·인라인 style은 계속 제거되며, 렌더 결과는 여전히 capability 0 격리 origin 안에서만
+    materialize된다(§3 ①). `src`는 어떤 scheme도 허용하지 않는 기존 정책 그대로다.
+  - **태그를 지울 때 안쪽까지 버리는 목록에 `style`을 더한다.** 기본값은 `script` 하나여서 `<style>`을
+    지우면 CSS 본문이 문단 텍스트로 남는다(실측 — 화면에 `body{display:none}`이 글자로 떴다). 실행되지는
+    않지만 문서에 없던 글자가 생기는 건 렌더 오류다.
+  - **renderer-owned attribute는 붙이기 전에 지운다.** `data-maru-source-*`·`data-maru-asset-*`는
+    allowlist에 있으므로, raw HTML이 승격된 뒤에는 문서가 같은 이름을 위조할 수 있다. 예전에는 파서
+    경계에서 raw를 버려 이 경로가 아예 없었다. asset 경로 쪽이 특히 중요하다 — viewer가 그 값을
+    `readAsset` 인자로 쓰므로 위조가 통과하면 **문서가 읽을 파일을 스스로 고르게 된다**.
+  - **리치는 계속 잠근다.** 읽기는 그리기만 하지만 리치는 저장할 때 문서모델을 되쓰므로, 노드가 없는 HTML은
+    사라진다. 두 모드의 판단 근거가 다르다 — 읽기는 "안전하게 그릴 수 있는가", 리치는 "잃지 않고 되쓸 수
+    있는가"다.
 - **리치 렌더 기능**(각 = 라이브러리 + 보안 배치):
 
 | 기능 | 라이브러리(후보) | 보안 배치 |

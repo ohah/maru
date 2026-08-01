@@ -5514,12 +5514,6 @@ pub const Client = struct {
         ops: client_deadline.Ops,
     ) DeadlineClientError![]u8 {
         try self.requireBlockingMode();
-        // The pre-raw attach path never owns GUI's queued fire-and-forget frame. Blocking here
-        // would escape the phase budget and reordering it would violate the Client wire SSOT.
-        if (self.pending_outbound != null) {
-            self.invalidateConnection();
-            return error.WriteFailed;
-        }
         const frame_bytes = try self.buildRequestFrame(method, params_json);
         defer self.allocator.free(frame_bytes);
 
@@ -5531,6 +5525,22 @@ pub const Client = struct {
         if (!ops.set_flags(ops.context, self.fd, saved_flags | nonblocking)) {
             self.invalidateConnectionWithOps(ops);
             return error.WriteFailed;
+        }
+        // 큐에 남은 GUI 입력 frame을 **먼저 밀어낸다**. wire 순서를 지키는 방법은 연결을 끊는 것이 아니라 먼저 온
+        // 것을 먼저 보내는 것이다. 이전에는 pending이 있으면 곧바로 fail-closed했는데, 그 대가가 지나치게 컸다 —
+        // 사용자가 타이핑하는 중(입력 frame이 backpressure로 슬롯에 남은 순간)에 새 Term을 열면 `WriteFailed`로
+        // connection이 끊기고, AppSession이 `stage=runtime_death`로 in-process 폴백해 그 세션의 터미널이 앱 종료와
+        // 함께 전부 사라졌다. 같은 빌드에서 실행마다 되고 안 되던 간헐성의 정체가 이 타이밍 겹침이었다.
+        //
+        // 여기는 이미 O_NONBLOCK을 건 뒤라 `writeAllUntil`이 블로킹하지 않고 would_block이면 deadline 안에서
+        // writable을 기다린다 — phase budget을 넘기지 않는다. 정말로 못 비우면 그때 fail-closed한다: 부분 write 뒤
+        // timeout이면 framing이 이미 깨져 복구가 불가능하므로 connection을 살려 둘 수 없다.
+        if (self.pending_outbound) |pending| {
+            client_deadline.writeAllUntil(ops, self.fd, pending.frame[pending.offset..], deadline) catch {
+                self.invalidateConnectionWithOps(ops);
+                return error.WriteFailed;
+            };
+            self.clearPendingOutbound();
         }
         const payload = self.callPreparedWithIo(
             self.next_request_id,
@@ -7242,6 +7252,81 @@ test "client call poisons malformed event headers instead of buffering them" {
     }
 }
 
+/// 큐에 남아 있던 입력 frame을 **먼저** 받고, 그 뒤에 오는 RPC request에 응답한다. 순서가 뒤바뀌면 `ok`를 세우지
+/// 않으므로 테스트가 실패한다.
+fn flushOrderPeer(fd: c.fd_t, expect_input: []const u8, response: []const u8, ok: *bool) void {
+    defer _ = c.close(fd);
+    const got = std.heap.page_allocator.alloc(u8, expect_input.len) catch return;
+    defer std.heap.page_allocator.free(got);
+    readExactFd(fd, got) catch return;
+    if (!std.mem.eql(u8, got, expect_input)) return;
+    var header_bytes: [protocol.header_size]u8 = undefined;
+    readExactFd(fd, &header_bytes) catch return;
+    const header = protocol.Header.decode(&header_bytes) catch return;
+    if (header.kind != .request or header.request_id != 1) return;
+    const payload = std.heap.page_allocator.alloc(u8, header.payload_len) catch return;
+    defer std.heap.page_allocator.free(payload);
+    readExactFd(fd, payload) catch return;
+    socket_server.writeAll(fd, response) catch return;
+    ok.* = true;
+}
+
+// 이 테스트가 증명하는 것(그리고 터미널에서 왜 중요한가): 사용자가 타이핑하는 중에는 입력 frame이 backpressure로
+// outbound 슬롯에 남을 수 있다. 바로 그 순간 새 Term을 열면(`runtime.spawn`) 예전에는 connection을 끊어 버렸고,
+// AppSession이 `stage=runtime_death`로 in-process 폴백해 **그 세션의 터미널이 앱 종료와 함께 전부 사라졌다**.
+// 같은 빌드에서 어떤 실행은 되고 어떤 실행은 안 되던 간헐성의 정체가 이 타이밍 겹침이었다.
+//
+// wire 순서를 지키는 올바른 방법은 연결을 끊는 것이 아니라 **먼저 온 것을 먼저 보내는 것**이다. 이 테스트는
+// 큐에 입력이 남은 채로 RPC를 걸었을 때 (1) 입력 frame이 host에 **먼저** 도착하고, (2) 그 다음 request가 가며,
+// (3) 응답을 정상 수신하고, (4) connection이 살아남는지를 고정한다. peer가 순서를 직접 검증하므로 재정렬이
+// 생기면 즉시 실패한다.
+test "queued input frame is flushed before the RPC so the wire order holds" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    socket_server.setNoSigPipe(fds[0]);
+
+    const input_frame = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .input_bytes, .stream_id = 7 },
+        "typed-while-opening",
+    );
+    defer allocator.free(input_frame);
+    const response = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .response, .request_id = 1 },
+        "{\"result\":{}}",
+    );
+    defer allocator.free(response);
+
+    var peer_ok = false;
+    var peer = try std.Thread.spawn(.{}, flushOrderPeer, .{ fds[1], input_frame, response, &peer_ok });
+
+    var client: Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+        .pending_outbound = .{
+            .frame = try allocator.dupe(u8, input_frame),
+            .stream_id = 7,
+        },
+    };
+    defer client.deinit();
+
+    const deadline = try client_deadline.AbsoluteDeadline.after(std.testing.io, std.time.ns_per_s);
+    const payload = try client.callUntil("runtime.spawn", "{}", deadline);
+    defer allocator.free(payload);
+    peer.join();
+
+    try std.testing.expect(peer_ok); // 입력이 먼저, request가 나중에 — 순서가 지켜졌다.
+    try std.testing.expectEqualStrings("{\"result\":{}}", payload);
+    try std.testing.expect(client.pending_outbound == null); // 슬롯이 비어 다음 입력을 받을 수 있다.
+    // **이번 수정의 핵심**: 예전에는 여기서 connection이 죽어 세션이 in-process로 떨어졌다.
+    try std.testing.expect(!client.unusable);
+}
+
 fn deadlineCallPeer(fd: c.fd_t, response: []const u8, ok: *bool) void {
     defer _ = c.close(fd);
     var header_bytes: [protocol.header_size]u8 = undefined;
@@ -7842,6 +7927,38 @@ test "client response timeout is transient evidence and invalidates before anoth
     try std.testing.expectEqual(@as(c.fd_t, -1), client.fd);
     // 늦은 response가 다음 request에 오귀속될 수 없도록 같은 socket은 재사용하지 않는다.
     try std.testing.expectError(error.ConnectionClosed, client.call("host.info", null));
+}
+
+// 이 테스트가 증명하는 것(그리고 터미널에서 왜 중요한가): RPC 앞에 큐가 차 있으면 이제 먼저 flush를 **시도**
+// 하지만, 그 frame을 끝내 밀어낼 수 없으면 연결을 살려 두면 안 된다. 부분 write 뒤 실패한 상태에서 RPC를 이어
+// 쓰면 host가 보는 frame 경계가 깨져 입력이 엉뚱한 stream으로 새거나 응답이 어긋난다 — 터미널에서 이는 사용자가
+// 친 키가 다른 창에 들어가는 것과 같다. 그래서 flush 불가는 fail-closed가 정답이다. 여기서는 fd를 -1로 두어
+// write가 성립할 수 없는 상태를 만들고, (1) WriteFailed로 끝나며 (2) connection이 재사용 불가로 마킹되고
+// (3) 소유하던 frame이 누수 없이 회수되는지 고정한다.
+test "unflushable queued input frame still fails the RPC closed" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+        .pending_outbound = .{
+            .frame = try allocator.dupe(u8, "queued-input-frame"),
+            .stream_id = 7,
+        },
+    };
+    defer client.deinit();
+
+    const deadline = try client_deadline.AbsoluteDeadline.after(std.testing.io, std.time.ns_per_s);
+    try std.testing.expectError(
+        error.WriteFailed,
+        client.callUntil("runtime.spawn", "{}", deadline),
+    );
+    // fail-closed: 이 connection으로 더 이상 요청하지 않는다. 재사용하면 host가 본 순서와 client가 믿는
+    // 순서가 갈려 입력이 엉뚱한 stream으로 새거나 응답이 어긋난다.
+    try std.testing.expect(client.unusable);
+    // 소유하던 frame은 invalidate가 회수한다(테스트 allocator가 누수를 잡는다).
+    try std.testing.expect(client.pending_outbound == null);
 }
 
 test "client invalidation releases an owned pending outbound frame" {

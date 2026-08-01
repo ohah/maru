@@ -25,6 +25,16 @@
 > 이 경우 지원하는 N-1 MRSH adapter로 attach해 기존 runtime을 그대로 쓰거나, attachment가 모두 끝난 뒤 구 host를
 > 계속 drain한다. **attachment가 0이어도 runtime이 하나라도 살아 있으면 구 host를 종료하지 않으며, runtime count가
 > 0이 된 뒤에만** 자연 종료하고 새 host를 시작한다. capability 없는 host를 죽여 migration처럼 보이게 하지 않는다.
+> 자연 종료는 세 조건(runtime을 한 번이라도 서빙했음 · 지금 runtime 0 · 붙은 client 0)을 모두 만족한 채 유예가
+> 지나야 성립한다(`daemon.shouldExitNaturally`). 신생 host가 첫 spawn 전에 스스로 물러나면 그 host를 띄운 GUI가
+> endpoint를 잃기 때문이다.
+>
+> **fd 상한 제약**: exec layout은 fd 40부터 `exec_fd_set.max_slots`(= `max_runtime_count` + 3 = 259)개의 **연속 빈
+> 슬롯**을 요구한다(`findAvailableLayout`). launchd가 GUI에 주는 기본 soft limit은 256이고 host가 그대로 상속하므로,
+> Dock·Finder로 켠 앱이 띄운 host에서는 `40 + 259 > 256`이라 탐색이 **항상** 실패하고 `handoff_failed`로 끝난다
+> (`finishPreclosedWithoutLayout`). 그래서 host는 시작 시 soft limit을 올린다(`daemon.raiseFileDescriptorLimit`,
+> best-effort). 이 제약을 모르면 "업그레이드가 한 번도 성공하지 않는" 현상의 원인을 찾을 수 없다 — 실제로 모든
+> host manifest의 `upgrade_epoch`가 0이었고 빌드를 바꿀 때마다 옛 host가 고아로 쌓였다.
 
 ## 1. 결론
 

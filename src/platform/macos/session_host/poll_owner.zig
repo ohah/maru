@@ -5,6 +5,7 @@
 //! blocked writer, or many attached streams cannot monopolize the host owner.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const c = std.c;
 const posix = std.posix;
 const connection_slot = @import("connection_slot.zig");
@@ -34,6 +35,29 @@ pub const TelemetrySnapshot = struct {
     first_stall_ns: u64,
     first_stall_send_buffer_bytes: u64,
     stale_client_observations: usize,
+};
+
+/// host가 client 연결을 닫는 이유. **예상되지 않은 종료만 로그로 남긴다** — 클라이언트가 스스로 닫거나 host가
+/// 내려가는 것은 정상 경로라, 그것까지 찍으면 CLI가 붙었다 끊을 때마다 한 줄씩 쌓여(실측: `maru host status`
+/// 한 번에 한 줄) 정작 봐야 할 backpressure 희생이 노이즈에 묻힌다.
+pub const ClientCloseReason = enum {
+    /// 클라이언트가 스스로 연결을 닫았다(GUI 종료, CLI 명령 완료). 정상.
+    client_closing,
+    /// host 자신이 내려간다. 정상.
+    host_shutdown,
+    /// 메모리 압박으로 이 연결의 화면 큐를 회수하다 닫았다. 사용자에게는 **갑작스러운 세션 단절**로 보인다.
+    screen_pressure,
+    /// 화면을 받아가지 못해 다른 client를 막던 observer를 끊었다.
+    observer_offender,
+    /// 테스트 전용 경로.
+    testing,
+
+    fn isExpected(self: ClientCloseReason) bool {
+        return switch (self) {
+            .client_closing, .host_shutdown, .testing => true,
+            .screen_pressure, .observer_offender => false,
+        };
+    }
 };
 
 pub const Owner = struct {
@@ -253,7 +277,7 @@ pub const Owner = struct {
         progressed = true;
         if (client.isClosing()) {
             const marker = client.takeArmedUpgrade();
-            self.destroyClient(slot_index);
+            self.destroyClient(slot_index, .client_closing);
             if (marker) |armed| {
                 self.destroyAll();
                 if (!self.upgradeTeardownDrained()) {
@@ -329,8 +353,21 @@ pub const Owner = struct {
         self.syncClientCount();
     }
 
-    fn destroyClient(self: *Owner, index: usize) void {
+    /// host가 client 연결을 닫을 때 **왜** 닫았는지 남긴다. GUI 쪽에는 이것이 `error=ConnectionClosed`로만
+    /// 보이는데, 그 값만으로는 정상 종료인지 backpressure로 희생된 것인지 구분할 수 없다 — 실제로 "host는 살아
+    /// 있는데 그 연결만 끊겼다"를 만났을 때 이유를 알 수단이 없어 추적이 막혔다. host stderr는
+    /// `redirectStderrToHostLog`가 `<session_dir>/host-<id>.log`로 돌린다.
+    fn logClientClosed(index: usize, reason: ClientCloseReason) void {
+        if (builtin.is_test or reason.isExpected()) return;
+        std.log.err(
+            "session host closed client connection: slot={d} reason={s}",
+            .{ index, @tagName(reason) },
+        );
+    }
+
+    fn destroyClient(self: *Owner, index: usize, reason: ClientCloseReason) void {
         const client = self.clients[index] orelse return;
+        logClientClosed(index, reason);
         self.clients[index] = null;
         self.producer_remaining[index] = 0;
         client.destroy();
@@ -338,7 +375,7 @@ pub const Owner = struct {
     }
 
     fn destroyAll(self: *Owner) void {
-        for (0..max_clients) |index| self.destroyClient(index);
+        for (0..max_clients) |index| self.destroyClient(index, .host_shutdown);
     }
 
     fn upgradeTeardownDrained(self: *const Owner) bool {
@@ -454,7 +491,7 @@ pub const Owner = struct {
         const index = victim_index orelse return false;
         const victim = self.clients[index].?;
         if (!victim.reclaimScreenPressure(victim_candidate.?)) return false;
-        if (victim.isClosing()) self.destroyClient(index);
+        if (victim.isClosing()) self.destroyClient(index, .screen_pressure);
         self.total_pressure_reclaims += 1;
         return true;
     }
@@ -686,7 +723,7 @@ pub const Owner = struct {
                 self.allocator.free(screen_items);
                 screen_items = &.{};
                 screen_items_owned = false;
-                self.destroyClient(offending_observer.?);
+                self.destroyClient(offending_observer.?, .observer_offender);
             }
         }
 
@@ -3321,7 +3358,7 @@ test "poll owner rejects a prepared transition after requester slot ABA reuse" {
             .frame = try testing.allocator.dupe(u8, "revoked"),
         },
     };
-    owner.destroyClient(stale_requester.index);
+    owner.destroyClient(stale_requester.index, .testing);
     try testing.expect(owner.clients[stale_requester.index] == null);
 
     var replacement = try connectAttachedTestClient(&owner, socket_path, "observer");
@@ -4361,4 +4398,18 @@ test "failed accepted upgrade reopens admission and preserves frozen sibling inp
     try testing.expect(owner.takeArmedUpgrade() == null);
     try sendTestRequest(sibling_fd, .request, 3, "{\"method\":\"host.info\"}");
     try pumpUntilResponse(&owner, sibling_fd, "runtime_count");
+}
+
+// 이 테스트가 증명하는 것(그리고 터미널에서 왜 중요한가): host가 client 연결을 닫는 이유 중 **정상 경로**
+// (클라이언트가 스스로 닫음, host 종료)와 **비정상 경로**(backpressure로 희생시킴)를 갈라야 한다. 정상까지
+// 로그로 남기면 `maru host status` 한 번에 한 줄씩 쌓여, 정작 추적해야 할 화면 압박 희생이 노이즈에 묻힌다 —
+// 실제로 그렇게 만들었다가 로그가 `client_closing`으로만 채워졌다. 반대로 비정상을 안 남기면 사용자에게는
+// `error=ConnectionClosed` 하나만 보이고 host가 왜 끊었는지 영영 알 수 없다. 이 분류가 그 경계다.
+test "client 종료 이유: 정상 경로만 조용하고 backpressure 희생은 남긴다" {
+    try testing.expect(ClientCloseReason.client_closing.isExpected());
+    try testing.expect(ClientCloseReason.host_shutdown.isExpected());
+    try testing.expect(ClientCloseReason.testing.isExpected());
+    // 아래 둘은 사용자 세션이 갑자기 끊기는 경로다 — 반드시 흔적을 남겨야 한다.
+    try testing.expect(!ClientCloseReason.screen_pressure.isExpected());
+    try testing.expect(!ClientCloseReason.observer_offender.isExpected());
 }

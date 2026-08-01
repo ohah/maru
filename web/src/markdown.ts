@@ -11,6 +11,7 @@ import remarkRehype from "remark-rehype";
 import { unified } from "unified";
 import { visit } from "unist-util-visit";
 import { normalizeAssetReference } from "./asset-path";
+import { frontmatterEntries } from "./frontmatter";
 
 const sourceStartProperty = "dataMaruSourceStart";
 const sourceEndProperty = "dataMaruSourceEnd";
@@ -81,6 +82,59 @@ function encodePoint(point: { line: number; column: number; offset?: number }): 
   return `${point.line}:${point.column}:${point.offset ?? -1}`;
 }
 
+const frontmatterTableClass = "maru-frontmatter";
+
+/** sanitize allowlist 항목은 `[속성, 허용값…]` **튜플**이다 — 배열로 두면 스키마 타입에 맞지 않는다. */
+const frontmatterClassRule: [string, string] = ["className", frontmatterTableClass];
+
+/**
+ * frontmatter를 문서 맨 위의 **메타데이터 표**로 그린다(사용자 결정 2026-08-01).
+ *
+ * `remark-frontmatter`는 블록을 `yaml` 노드로 만들 뿐이고, `remark-rehype`에는 그 노드의 핸들러가 없어
+ * 기본적으로 출력에서 **사라진다**. 사라지는 편이 렌더 결과에는 충실하지만, 읽기 모드에서 이 값들을 확인할
+ * 길이 아예 없어진다 — frontmatter는 그 문서의 제목·태그·공개 여부를 담는다.
+ *
+ * 값은 **해석하지 않고 글자 그대로** 옮긴다(`frontmatterEntries`). 표는 읽기 전용 표시이므로 원문과 다른
+ * 것이 보이면 그게 곧 거짓말이다.
+ */
+function frontmatterTable(value: string): Element | undefined {
+  const entries = frontmatterEntries(value);
+  // 최상위 키가 없으면(주석뿐이거나 빈 블록) 빈 표를 만들지 않는다 — 표시할 것이 없다.
+  if (entries.length === 0) return undefined;
+
+  return {
+    type: "element",
+    tagName: "table",
+    properties: { className: [frontmatterTableClass] },
+    children: [
+      {
+        type: "element",
+        tagName: "tbody",
+        properties: {},
+        children: entries.map((entry) => ({
+          type: "element" as const,
+          tagName: "tr",
+          properties: {},
+          children: [
+            {
+              type: "element" as const,
+              tagName: "th",
+              properties: {},
+              children: [{ type: "text" as const, value: entry.key }],
+            },
+            {
+              type: "element" as const,
+              tagName: "td",
+              properties: {},
+              children: [{ type: "text" as const, value: entry.value }],
+            },
+          ],
+        })),
+      },
+    ],
+  };
+}
+
 const schema = {
   ...defaultSchema,
   attributes: {
@@ -92,6 +146,9 @@ const schema = {
       assetPathProperty,
       assetIdProperty,
     ],
+    // 메타데이터 표에만 이 클래스 하나를 허용한다. 값까지 못박아 두면 문서가 같은 이름을 위조해도
+    // (raw HTML은 이미 폐기되지만) 다른 클래스는 통과하지 못한다.
+    table: [...(defaultSchema.attributes?.table ?? []), frontmatterClassRule],
   },
   protocols: {
     ...defaultSchema.protocols,
@@ -108,12 +165,17 @@ function createProcessor(mode: AssetRenderMode) {
       .use(remarkParse)
       // frontmatter는 **문서 내용이 아니라 메타데이터**다. 이게 없으면 파서가 `---`를 구분선으로, 그 아래 줄을
       // setext 제목으로 읽어 `<hr>` + `<h2>title: 문서</h2>`로 그려진다(실측 — frontmatter가 있는 문서마다 보였다).
-      // 이 플러그인은 그 블록을 yaml 노드로 만들고, remark-rehype가 기본적으로 그 노드를 HTML로 내보내지 않는다.
+      // 이 플러그인은 그 블록을 yaml 노드로 만들고, 아래 handler가 그걸 메타데이터 표로 바꾼다.
       .use(remarkFrontmatter, ["yaml", "toml"])
       .use(remarkGfm)
       .use(remarkMath)
       // allowDangerousHtml을 켜지 않는다. Markdown raw HTML node는 이 경계에서 폐기된다.
-      .use(remarkRehype)
+      .use(remarkRehype, {
+        handlers: {
+          // `toml`은 표로 그리지 않는다 — `키 = 값` 문법이라 같은 규칙으로 못 읽고, 잘못 그리느니 안 그린다.
+          yaml: (_state: unknown, node: { value?: string }) => frontmatterTable(node.value ?? ""),
+        },
+      })
       .use(rehypeSourcePositions)
       .use(rehypeBlockResourceLoads, mode)
       .use(rehypeSanitize, schema)

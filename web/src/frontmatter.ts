@@ -55,3 +55,50 @@ export function joinFrontmatter(frontmatter: string | null, body: string): strin
   if (frontmatter.length === 0) return `---\n---\n${body}`;
   return `---\n${frontmatter}\n---\n${body}`;
 }
+
+/** 읽기 프리뷰가 표로 그리는 한 항목. `value`는 **원문 그대로**이며 여러 줄일 수 있다. */
+export type FrontmatterEntry = {
+  key: string;
+  /** `키:` 뒤 나머지 + 뒤따르는 들여쓴 줄들. 값이 없으면 빈 문자열이다. */
+  value: string;
+};
+
+/** 최상위 `키:` 줄. 들여쓰기가 없어야 하고, 키에 `:`나 `#`가 없어야 한다. */
+const topLevelKey = /^([^\s#][^:]*):(?:[ \t]+(.*))?$/;
+
+/**
+ * 표시용으로 항목을 뽑는다(읽기 프리뷰의 메타데이터 표).
+ *
+ * **YAML 파서를 쓰지 않는다.** 이건 값을 해석하는 게 아니라 **보여 주려고 줄을 묶는** 일이다. 파서를 쓰면
+ * 앵커·태그·타입 캐스팅이 개입해 원문과 다른 것이 표에 뜨고(`draft: false` → `false`가 아닌 무엇), 문법이
+ * 조금 어긋난 frontmatter는 통째로 표시에 실패한다. 여기서는 값을 **글자 그대로** 옮기므로 둘 다 없다.
+ * 저장 경로가 YAML을 다시 쓰지 않는 것과 같은 이유다(`rich-frontmatter-node.ts`).
+ *
+ * 최상위 키가 하나도 없으면 빈 배열이다 — 호출자는 그때 표를 만들지 않는다.
+ */
+export function frontmatterEntries(frontmatter: string): FrontmatterEntry[] {
+  const entries: FrontmatterEntry[] = [];
+  let current: { key: string; lines: string[] } | null = null;
+
+  const flush = () => {
+    if (current === null) return;
+    // 값 끝의 빈 줄은 표에서 빈 칸으로 보이므로 턴다. 안쪽 빈 줄은 값의 일부라 남긴다.
+    entries.push({ key: current.key, value: current.lines.join("\n").replace(/\s+$/, "") });
+    current = null;
+  };
+
+  for (const line of frontmatter.split("\n")) {
+    const match = topLevelKey.exec(line);
+    if (match !== null) {
+      flush();
+      current = { key: match[1].trimEnd(), lines: match[2] === undefined ? [] : [match[2]] };
+      continue;
+    }
+    // 최상위 주석은 값이 아니라 문서에 대한 말이라 표에 넣지 않는다. 들여쓴 주석은 값 블록의 일부다.
+    if (/^#/.test(line)) continue;
+    // 키를 만나기 전의 줄은 버린다 — 붙일 곳이 없다.
+    if (current !== null) current.lines.push(line);
+  }
+  flush();
+  return entries;
+}

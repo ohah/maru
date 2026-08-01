@@ -195,6 +195,76 @@ pub const RemoteTermBackend = struct {
         return entry.host_id;
     }
 
+    /// 소켓이 무효화된 host가 있으면 그 host_id를 돌려준다(없으면 null). `Client`는 한 host에 붙은 **모든
+    /// pane이 공유**하므로 하나가 degraded면 그 host의 pane 전부가 함께 멈춘다 — 클립보드 복사·화면 갱신·새
+    /// pane 생성이 전부 같은 뿌리로 실패한다. 재연결 주체가 이걸 폴링해 교체를 시작한다.
+    pub fn degradedHostId(self: *RemoteTermBackend) ?u128 {
+        var it = self.runtimes.valueIterator();
+        while (it.next()) |entry| {
+            if (entry.runtime.client.isDegraded()) return entry.host_id;
+        }
+        return null;
+    }
+
+    pub const ReattachSummary = struct {
+        reattached: usize = 0,
+        failed: usize = 0,
+    };
+
+    /// degraded host의 adapter를 **새로 맺은 연결**로 교체하고 그 host의 runtime을 전부 재부착한다.
+    /// pool의 runtime lease(refcount)를 아는 쪽이 backend이므로 교체 절차 전체를 여기서 소유한다 — 상위는
+    /// 소켓 경로를 알기에 새 adapter를 만들어 넘기기만 한다.
+    ///
+    /// **순서가 안전성을 결정한다**: lease 반납 → 옛 adapter 제거(이때 옛 `Client`가 해제된다) → 새 adapter
+    /// 등록 → 재부착으로 각 runtime의 client 포인터 갱신. 제거와 재부착 사이에는 어떤 runtime도 client를
+    /// 건드리면 안 되며, 이 함수가 단일 스레드에서 순차 실행되는 것이 그 보장이다.
+    ///
+    /// 실패해도 host runtime을 terminate하지 않는다(§7 attach 계약). 성공하면 `new_adapter` 소유권은 pool이
+    /// 가져가고, 실패로 등록하지 못하면 caller가 계속 소유한다.
+    pub fn replaceHostConnection(
+        self: *RemoteTermBackend,
+        host_id: u128,
+        new_adapter: *HostAdapter,
+    ) !ReattachSummary {
+        const pool = self.host_pool orelse return error.HostNotFound;
+        // 원자적 교체다. `remove` + `addOwned`로 쪼개면 그 사이 실패가 host 슬롯을 잃게 하고, 그 host의
+        // runtime들이 해제된 Client를 가리킨 채 남는다. 여기서는 실패하면 pool이 전혀 바뀌지 않는다.
+        const previous = try pool.replaceOwned(host_id, new_adapter);
+        const summary = self.reattachHostRuntimes(host_id, new_adapter.logicalClient());
+        // **재부착을 모두 끝낸 뒤에** 옛 연결을 해제한다. 먼저 해제하면 재부착 대상이 참조하던 Client 주소가
+        // dangling된다. 재부착이 일부 실패했더라도 옛 Client는 이미 무효화된 소켓이라 되돌릴 대상이 아니다.
+        pool.destroyReplaced(previous);
+        return summary;
+    }
+
+    /// `host_id`에 속한 모든 runtime을 **새로 맺은 연결**로 재부착한다. host의 PTY와 셸은 살아 있고
+    /// `runtime_id`도 그대로이므로, 성공하면 화면과 입력이 이어진다 — `attachExisting`이 resize generation을
+    /// 리셋해 host가 full snapshot을 다시 push하기 때문에 화면 복구는 별도 resync 요청 없이 이루어진다.
+    ///
+    /// 실패해도 **host runtime을 terminate하지 않는다**(§7 attach 계약). 우리가 띄운 게 아니라 이미 존재하던
+    /// runtime이므로, 재부착 실패가 세션을 죽이면 안 된다 — 다음 시도가 다시 붙을 수 있어야 한다.
+    pub fn reattachHostRuntimes(
+        self: *RemoteTermBackend,
+        host_id: u128,
+        new_client: *client_mod.Client,
+    ) ReattachSummary {
+        var summary: ReattachSummary = .{};
+        var it = self.runtimes.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.host_id != host_id) continue;
+            const rr = entry.value_ptr.runtime;
+            // `attachExisting`이 observation을 비우므로 현재 크기를 **먼저** 읽는다.
+            const size = rr.observation.size;
+            const hex = rr.runtimeIdHex();
+            rr.attachExisting(new_client, self.allocator, self.io, entry.key_ptr.*, hex, size) catch {
+                summary.failed += 1;
+                continue;
+            };
+            summary.reattached += 1;
+        }
+        return summary;
+    }
+
     /// host-backed Term(handle)의 대기 OSC 9/777 데스크톱 알림을 host에서 pull한다(§6.32 GUI surfacing). 없거나 연결 오류면
     /// null(**best-effort** — 알림은 부가 기능이라 오류를 세션에 전파하지 않는다). 반환 `Notification.title/body`는 이 backend의
     /// allocator 소유(caller가 `deinit`). host core가 파싱한 알림(placeholder client core엔 없음)을 app_session 알림 경로에 잇는다.

@@ -1089,3 +1089,62 @@ test "dispatchBridge: 아직 읽는 중이면 pending을 준다(빈 문서가 �
     try testing.expect(result.get("pending").?.bool);
     try testing.expect(result.get("original") == null);
 }
+
+fn monotonicMs() u64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    return @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / std.time.ns_per_ms;
+}
+
+// [측정] diff 본문은 **양쪽 합 최대 16 MiB**를 브리지로 넘긴다(diff_payload.max_side_bytes × 2). 그 직렬화 비용이
+// 얼마인지 모른 채 상한을 올리면 "열리긴 하는데 앱이 멎는" 상태를 만들 수 있다. 여기서 그 비용을 실제로 재고,
+// **응답 크기가 입력에 비례해 폭증하지 않는지**(JSON escape 증폭)까지 확인한다.
+test "diff.open 직렬화 비용과 응답 크기(8 MiB 한쪽 기준)" {
+    const allocator = std.testing.allocator;
+    const side_bytes = 8 << 20;
+
+    // 실제 소스와 비슷한 모양(escape 대상이 섞인 텍스트)으로 채운다 — 전부 'a'면 escape 비용이 과소평가된다.
+    const unit = "    const value = try compute(\"quoted\\ttab\", 42); // 주석\n";
+    var big: std.ArrayList(u8) = .empty;
+    defer big.deinit(allocator);
+    // 상한 **바로 아래**까지 채운다(넘기면 too_large로 거절돼 직렬화를 재지 못한다 — 처음에 그렇게 실패했다).
+    while (big.items.len + unit.len <= side_bytes) try big.appendSlice(allocator, unit);
+
+    const Fake = struct {
+        var payload: []const u8 = "";
+        fn open(context: *anyopaque, gpa: std.mem.Allocator) anyerror!?DiffSides {
+            _ = context;
+            return .{
+                .original = try gpa.dupe(u8, payload),
+                .modified = try gpa.dupe(u8, payload),
+            };
+        }
+    };
+    Fake.payload = big.items;
+
+    var base: FakeFileAccess = .{};
+    var access = base.access();
+    access.diff_open_fn = Fake.open;
+
+    // Zig 0.16은 `std.time.Timer`·`nanoTimestamp`를 안 준다 — libc `clock_gettime`(단조)으로 직접 잰다.
+    const started = monotonicMs();
+    const resp = try dispatchBridgeWithFileAccess(
+        allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":90,\"method\":\"maru.diff.open\",\"params\":{}}",
+        "0.1.0",
+        access,
+    );
+    defer allocator.free(resp);
+    const elapsed_ms = monotonicMs() - started;
+
+    // **응답이 입력의 2배(양쪽)에 escape 증분만 붙어야 한다.** 3배를 넘으면 escape 정책이 잘못돼 메모리가 증폭된다.
+    const input_total = big.items.len * 2;
+    try std.testing.expect(resp.len > input_total); // 그대로는 아니다(JSON 구조 + escape)
+    try std.testing.expect(resp.len < input_total * 3);
+    // 시간은 기기마다 다르므로 **상한만** 둔다: 사람이 못 견디는 수준(수 초)에 들어가면 전송 방식을 바꿔야 한다.
+    try std.testing.expect(elapsed_ms < 3000);
+    std.debug.print(
+        "[측정] diff.open 직렬화: 입력 {d} MiB → 응답 {d} MiB, {d} ms\n",
+        .{ input_total >> 20, resp.len >> 20, elapsed_ms },
+    );
+}

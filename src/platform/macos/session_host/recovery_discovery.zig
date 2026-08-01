@@ -89,7 +89,18 @@ pub fn discover(allocator: std.mem.Allocator, session_dir: [:0]const u8) Discove
         const name = std.mem.sliceTo(entry.name[0..], 0);
         if (!isCanonicalHostName(name)) continue;
         const host_id = std.fmt.parseInt(u128, name, 16) catch continue;
-        if (!reserveRegistryEntry(&entry_count))
+        // 죽은 host(owner lease가 free — 소유 프로세스가 없음)의 entry는 **살아 있는 host의 예산을 쓰지 않는다**.
+        // `SIGKILL`·crash·로그아웃 뒤 정리는 실행할 코드가 없어 계약상 보장 범위 밖이므로(persistent-session-host.md
+        // "host 자체의 수명") 잔여 entry는 반드시 쌓인다. 그것들이 `max_hosts`를 채우면 **살아 있는 host까지 발견되지
+        // 못해** 영속 세션 기능이 통째로 죽는다(관측: 잔여 70개가 산 host 하나를 밀어내 CLI는 ambiguous, 앱은 조용히
+        // in-process 폴백). 상한은 살아 있을 수 있는 host를 세는 것이지 시체를 세는 것이 아니다.
+        //
+        // `.unknown`은 예산을 쓴다 — fd/권한 실패일 수 있어 죽음의 증거가 아니다(`owner_lease.observe` 계약).
+        // entry 자체는 아래에서 그대로 emit한다: manifest + dead lease는 "host 종료를 검증함"이라는 **확정 신호**라
+        // 소비자가 handle을 ended로 정리하는 근거이고(persistent-session-host.md 상태표), 여기서 삭제해 버리면
+        // 그 확정이 "endpoint 미발견 = 생존 가능성 있음"으로 격하돼 stale handle이 영원히 안 풀린다.
+        const lease = leaseObservation(session_dir, host_id);
+        if (lease != .free and !reserveRegistryEntry(&entry_count))
             return .{ .unavailable = .too_many_hosts };
         var manifest = host_manifest.load(allocator, session_dir, host_id) catch |err| switch (err) {
             error.OutOfMemory => return .{ .unavailable = .out_of_memory },
@@ -109,7 +120,6 @@ pub fn discover(allocator: std.mem.Allocator, session_dir: [:0]const u8) Discove
             } }) catch return .{ .unavailable = .out_of_memory };
             continue;
         }
-        const lease = leaseObservation(session_dir, host_id);
         if (lease != .held) {
             manifest.deinit();
             entries.append(allocator, .{ .unavailable = .{
@@ -438,6 +448,104 @@ test "recovery discovery registry entry cap은 exact 16만 허용하고 17번째
     try std.testing.expectEqual(max_hosts, count);
     try std.testing.expect(!reserveRegistryEntry(&count));
     try std.testing.expectEqual(max_hosts, count);
+}
+
+// 이 테스트가 증명하는 것(그리고 터미널에서 왜 중요한가): **죽은 host의 잔여 entry는 살아 있는 host를 밀어내지
+// 않는다.** crash·`SIGKILL` 뒤 registry 정리는 실행할 코드가 없어 계약상 보장 범위 밖이라 잔여 entry가 반드시
+// 쌓이는데, 그것이 `max_hosts`를 채우면 discovery가 `too_many_hosts`로 통째로 포기해 **살아 있는 host까지 발견되지
+// 못한다**. 그 결과가 "영속 세션이 조용히 안 되고 in-process로 떨어지며 CLI 진단도 전부 막히는" 상태다(실제 관측:
+// 잔여 70개 대 산 host 1개). 상한은 살아 있을 수 있는 host를 세는 것이지 시체를 세는 것이 아니다.
+test "recovery discovery: 죽은 entry가 max_hosts를 넘겨도 살아 있는 host를 찾는다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const testing = std.testing;
+    var dir_buf: [192]u8 = undefined;
+    const dir = std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-recovery-dead-cap-{d}", .{c.getpid()}) catch
+        return error.SkipZigTest;
+    _ = c.mkdir(dir.ptr, 0o700);
+    defer _ = c.rmdir(dir.ptr);
+
+    const build_id = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const short = @import("short_endpoint.zig");
+
+    // 죽은 host를 상한보다 많이 만든다 — manifest는 publish하되 owner.lock을 만들지 않는다(`observe`가 NOENT를
+    // `.free`로 본다 = 소유 프로세스 없음, 즉 crash 잔여물과 같은 관측 결과).
+    const dead_count = max_hosts + 4;
+    var dead: [dead_count]host_manifest.Published = undefined;
+    var dead_made: usize = 0;
+    defer {
+        var i: usize = 0;
+        while (i < dead_made) : (i += 1) {
+            dead[i].deinit();
+            host_manifest.removeEmptyHostDirectories(dir, @as(u128, 0x100) + i);
+        }
+    }
+    while (dead_made < dead_count) : (dead_made += 1) {
+        const host_id: u128 = @as(u128, 0x100) + dead_made;
+        var endpoint_buf: [128]u8 = undefined;
+        const endpoint = try short.currentSocketPathIn(&endpoint_buf, host_id);
+        dead[dead_made] = try host_manifest.publish(testing.allocator, dir, .{
+            .host_id = host_id,
+            .build_id = build_id,
+            .protocol_major = protocol.version_major,
+            .screen_codec_version = @import("screen_stream.zig").codec_version,
+            .upgrade_epoch = 1,
+            .lifecycle = .ready,
+            .endpoint = endpoint,
+        });
+    }
+
+    // 살아 있는 host 하나 — owner lease를 실제로 잡아 `.held`로 관측되게 한다.
+    const live_id: u128 = 0x20;
+    var live_endpoint_buf: [128]u8 = undefined;
+    const live_endpoint = try short.currentSocketPathIn(&live_endpoint_buf, live_id);
+    var live = try host_manifest.publish(testing.allocator, dir, .{
+        .host_id = live_id,
+        .build_id = build_id,
+        .protocol_major = protocol.version_major,
+        .screen_codec_version = @import("screen_stream.zig").codec_version,
+        .upgrade_epoch = 1,
+        .lifecycle = .ready,
+        .endpoint = live_endpoint,
+    });
+    defer live.deinit();
+    var owner_buf: [832]u8 = undefined;
+    const owner_path = try host_manifest.ownerLockPathIn(&owner_buf, dir, live_id);
+    var lease = try owner_lease.OwnerLease.acquire(owner_path);
+    defer {
+        _ = lease.unlinkOwnedWhileLocked(owner_path) catch .absent;
+        lease.deinit();
+        host_manifest.removeEmptyHostDirectories(dir, live_id);
+    }
+
+    var discovery = discover(testing.allocator, dir);
+    defer discovery.deinit(testing.allocator);
+
+    // 회귀 전에는 죽은 entry가 예산을 다 써 17번째에서 `too_many_hosts`로 전체가 무너졌다.
+    switch (discovery) {
+        .unavailable => |reason| {
+            std.debug.print("expected complete, got {s}\n", .{@tagName(reason)});
+            return error.TestUnexpectedResult;
+        },
+        .complete => |items| {
+            var candidates: usize = 0;
+            var found_live = false;
+            var dead_seen: usize = 0;
+            for (items) |item| switch (item) {
+                .candidate => |value| {
+                    candidates += 1;
+                    if (value.manifest.host_id == live_id) found_live = true;
+                },
+                // 죽은 entry는 그대로 emit된다 — "host 종료를 검증함"이라는 확정 신호라 소비자가 handle을
+                // ended로 정리하는 근거다(예산만 안 쓸 뿐 증거를 지우지 않는다).
+                .unavailable => |value| if (value.reason == .lease_free) {
+                    dead_seen += 1;
+                },
+            };
+            try testing.expectEqual(@as(usize, 1), candidates);
+            try testing.expect(found_live);
+            try testing.expectEqual(dead_count, dead_seen);
+        },
+    }
 }
 
 test "recovery collector는 빈 plan을 complete로 만들고 invalid authority를 fail-close한다" {

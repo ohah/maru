@@ -348,6 +348,17 @@ pub const RemoteRuntime = struct {
         self.* = undefined;
     }
 
+    /// controller를 요청했는데 다른 client가 이미 쥐고 있어 **observer로 강등**된 상태인가.
+    ///
+    /// host가 두 번째 controller를 조용히 observer로 강등하는 것은 설계대로다(§9 다중 client와 resize —
+    /// "두 번째 controller는 조용히 observer로 강등(`controller_busy`)"). `decodeAttachResponse`도 그 조합을
+    /// 검증해 attachment 상태까지 실어 나른다. **문제는 그 사실을 아무도 읽지 않는다는 것**이었다 — 그래서
+    /// 사용자는 화면은 멀쩡히 갱신되는데 키 입력만 전부 `Unauthorized`로 버려지는 터미널을 이유도 모른 채
+    /// 마주한다. 강등 자체를 막지 않고(계약대로다) 관측만 가능하게 한다.
+    pub fn attachedAsObserver(self: *const RemoteRuntime) bool {
+        return !self.attachment.allowsMutation();
+    }
+
     /// 렌더/입력 라우팅에 쓸 Surface(GUI가 in-process처럼 다룬다).
     pub fn surfacePtr(self: *RemoteRuntime) *Surface {
         return &self.surface;

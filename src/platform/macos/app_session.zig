@@ -2084,6 +2084,9 @@ pub const AppSession = struct {
     // P4 §6 L291: keep-alive인데 host 연결 실패로 in-process 폴백했을 때 첫 tick에 사용자에게 notice로 알린다("유지 안 됨").
     // ensureRemoteBackend가 실패하면 켜고, showPendingHostConnectNotice가 한 번 표시하고 끈다.
     host_connect_notice_pending: bool = false,
+    /// attach가 controller를 못 얻고 observer로 강등된 Term이 있다(§9). 다음 tick에 한 번 알린다 — 알리지
+    /// 않으면 사용자는 화면만 갱신되고 입력이 전부 무시되는 터미널을 이유도 모른 채 쓰게 된다.
+    observer_attach_notice_pending: bool = false,
     /// §7 종료 placeholder로 복원한 Term 수(첫 tick에 한 번 알리고 0으로 비운다 — host connect notice와 같은 self-gate).
     /// 복원은 AppSession init 중이라 chrome이 없어 그 자리에서 notice를 못 띄운다.
     ended_placeholder_notice_pending: u32 = 0,
@@ -5977,6 +5980,15 @@ pub const AppSession = struct {
 
     /// keep-alive host 연결이 실패해 in-process로 폴백했으면(§6 L291) notice를 한 번 띄운다 — 첫 tick에서 호출한다(init 중엔
     /// chrome이 아직 안 서 있을 수 있어 미룬다). 사용자가 이번 세션 터미널이 유지되지 않음을 명확히 알게 한다.
+    /// controller를 못 얻고 observer로 붙은 Term이 있으면 한 번 알린다. **불청 이벤트라** 모달 오버레이가 열려
+    /// 있으면 건너뛴다(showNotice가 그 모달을 닫아 사용자를 끊지 않게) — `surfaceClipboardWriteRejected`와 같은
+    /// 규율이다. 다음 tick에 다시 시도한다.
+    fn showPendingObserverAttachNotice(self: *AppSession) void {
+        if (!self.observer_attach_notice_pending or self.anyModalOverlayOpen()) return;
+        self.observer_attach_notice_pending = false;
+        self.showNotice("다른 창이 이 세션을 제어 중이라 관찰 모드로 연결했습니다. 화면은 갱신되지만 입력은 전달되지 않습니다.");
+    }
+
     fn showPendingHostConnectNotice(self: *AppSession) void {
         if (!self.host_connect_notice_pending) return;
         self.host_connect_notice_pending = false;
@@ -6160,6 +6172,10 @@ pub const AppSession = struct {
                     break :blk rb.attachTerm(id, rid, size) catch |err| return classifyAttachError(err);
                 };
                 reconnected = true;
+                // host는 두 번째 controller를 거절하지 않고 **조용히 observer로 강등**한다(§9). attach는 성공으로
+                // 돌아오지만 이 Term은 화면만 받고 입력은 전부 거부된다. 알리지 않으면 사용자는 "화면은 나오는데
+                // 키가 안 먹는" 터미널을 이유도 모른 채 마주한다 — 실제로 그 상태로 한참을 쓰게 된다.
+                if (rb.attachedAsObserver(id)) self.observer_attach_notice_pending = true;
                 break :surface attached;
             }
             break :surface be.spawn(.{
@@ -26482,6 +26498,7 @@ pub const AppSession = struct {
             self.startUpdateCheck();
         }
         self.showPendingHostConnectNotice(); // §6 L291: keep-alive host 연결 실패 시 첫 tick에 notice(플래그로 self-gate).
+        self.showPendingObserverAttachNotice(); // §9: controller를 못 얻고 observer로 붙었으면 입력이 안 되는 이유를 알린다.
         self.showPendingEndedPlaceholderNotice(); // §7: 종료 placeholder로 복원한 자리가 있으면 첫 tick에 한 번 알린다.
         self.applyDragAutoscroll(); // 드래그가 grid 밖에 머무는 동안 frame-loop tick마다 한 줄씩 스크롤+확장
         self.flushPendingPaste(); // 큰 붙여넣기의 잔여를 자식이 읽는 속도에 맞춰 흘려보낸다
@@ -43833,6 +43850,43 @@ test "right-click menu(F2-5): 터미널 컨텍스트 메뉴 복사/붙여넣기 
 
     // 기본 config는 paste(사용자 결정) — 트래킹 .none이면 우클릭이 paste 동작을 의도.
     try std.testing.expectEqual(config_mod.theme.RightClick.paste, session.loaded_config.config.input.right_click);
+}
+
+test "observer 강등: 입력이 안 되는 이유를 notice로 알리고 모달 중엔 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // 강등이 없었으면 아무 notice도 안 뜬다.
+    session.showPendingObserverAttachNotice();
+    try std.testing.expect(!session.chrome_host.notice.open);
+
+    // host가 두 번째 controller를 observer로 강등하면(§9) attach는 성공으로 돌아오지만 입력이 전부 거부된다.
+    // 그 사실을 알리지 않으면 사용자는 "화면은 나오는데 키가 안 먹는" 터미널을 이유도 모른 채 쓰게 된다.
+    session.observer_attach_notice_pending = true;
+    session.showPendingObserverAttachNotice();
+    try std.testing.expect(session.chrome_host.notice.open);
+    try std.testing.expect(!session.observer_attach_notice_pending); // 1회성
+    session.chrome_host.notice.dismiss();
+
+    // 불청 이벤트라 모달이 열려 있으면 억제한다 — showNotice가 그 모달을 닫아 사용자를 끊지 않게.
+    session.chrome_host.settings.open = true;
+    session.observer_attach_notice_pending = true;
+    session.showPendingObserverAttachNotice();
+    try std.testing.expect(!session.chrome_host.notice.open);
+    try std.testing.expect(session.observer_attach_notice_pending); // 신호는 보존 — 다음 tick에 다시 시도한다
+    session.chrome_host.settings.open = false;
+    session.showPendingObserverAttachNotice();
+    try std.testing.expect(session.chrome_host.notice.open);
 }
 
 test "OSC 52 상한 초과 거부: surfaceClipboardWriteRejected가 notice로 표면화(모달 열림 시 억제)" {

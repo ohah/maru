@@ -195,6 +195,13 @@ pub const RemoteTermBackend = struct {
         return entry.host_id;
     }
 
+    /// 이 handle이 controller를 못 얻고 observer로 붙었는가(§9 — 두 번째 controller는 조용히 강등된다).
+    /// host-backed가 아니면 false다. GUI가 "화면은 나오는데 입력이 안 된다"를 사용자에게 설명하는 근거다.
+    pub fn attachedAsObserver(self: *RemoteTermBackend, handle: RuntimeHandle) bool {
+        const entry = self.runtimes.get(handle) orelse return false;
+        return entry.runtime.attachedAsObserver();
+    }
+
     /// host-backed Term(handle)의 대기 OSC 9/777 데스크톱 알림을 host에서 pull한다(§6.32 GUI surfacing). 없거나 연결 오류면
     /// null(**best-effort** — 알림은 부가 기능이라 오류를 세션에 전파하지 않는다). 반환 `Notification.title/body`는 이 backend의
     /// allocator 소유(caller가 `deinit`). host core가 파싱한 알림(placeholder client core엔 없음)을 app_session 알림 경로에 잇는다.

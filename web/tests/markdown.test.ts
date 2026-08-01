@@ -52,11 +52,15 @@ describe("markdown trust boundary", () => {
     expect(html).not.toContain("src=");
   });
 
-  test("frontmatter는 메타데이터라 프리뷰에 그리지 않는다(본문 중간 `---`는 구분선으로 남는다)", () => {
-    // 이게 없으면 파서가 `---`를 구분선으로, 그 아래 줄을 setext 제목으로 읽어 `<hr>` + `<h2>title: 문서</h2>`가
+  test("frontmatter는 메타데이터 표로 그린다(본문 중간 `---`는 구분선으로 남는다)", () => {
+    // 이 handler가 없으면 파서가 `---`를 구분선으로, 그 아래 줄을 setext 제목으로 읽어 `<hr>` + `<h2>title: 문서</h2>`가
     // 그려진다 — frontmatter가 있는 문서마다 보이던 것이라 사용자가 매번 마주친다.
     const html = renderMarkdown("---\ntitle: 문서\ntags: [a, b]\n---\n\n# 제목\n\n본문\n");
-    expect(html).not.toContain("title: 문서");
+    expect(html).toContain('class="maru-frontmatter"');
+    // 키와 값이 갈라져야 한다 — `title: 문서` 한 덩어리로 보이면 그건 표가 아니라 제목으로 샌 옛 결함이다.
+    expect(html).toContain("<th>title</th>");
+    expect(html).toContain("<td>문서</td>");
+    expect(html).toContain("<td>[a, b]</td>");
     expect(html).not.toContain("<hr");
     expect(html).toContain("<h1");
 
@@ -64,6 +68,30 @@ describe("markdown trust boundary", () => {
     const middle = renderMarkdown("# 제목\n\n---\n\n본문\n");
     expect(middle).toContain("<hr");
     expect(middle).toContain("본문");
+    expect(middle).not.toContain("maru-frontmatter");
+  });
+
+  test("메타데이터 표는 값을 해석하지 않고 원문 그대로 옮긴다", () => {
+    // 값을 YAML로 해석하면 표에 원문과 **다른 것**이 뜬다. 읽기 모드는 확인하러 오는 화면이라 그건 거짓말이다.
+    const html = renderMarkdown(
+      "---\n# 이 주석은 표에 넣지 않는다\ndraft: false\nquoted: 'value'\nnested:\n  key: 1\n  list:\n    - 하나\nempty:\n---\n\n본문\n",
+    );
+
+    expect(html).toContain("<td>false</td>");
+    // 따옴표가 벗겨지면 값이 달라진 것이다.
+    expect(html).toContain("<td>'value'</td>");
+    // 중첩 블록은 들여쓰기까지 한 칸에 그대로 담는다(표는 표시일 뿐 구조를 재구성하지 않는다).
+    expect(html).toContain("<td>  key: 1\n  list:\n    - 하나</td>");
+    // 빈 값은 빈 칸이다. 키는 남아야 한다 — 문서에 그 키가 있다는 사실 자체가 정보다.
+    expect(html).toContain("<th>empty</th><td></td>");
+    // 최상위 주석은 값이 아니라 문서에 대한 말이라 표 밖이다.
+    expect(html).not.toContain("이 주석은 표에 넣지 않는다");
+  });
+
+  test("표시할 최상위 키가 없으면 표를 만들지 않는다", () => {
+    // 빈 표는 문서 맨 위에 이유 없는 테두리만 남긴다.
+    expect(renderMarkdown("---\n---\n\n본문\n")).not.toContain("maru-frontmatter");
+    expect(renderMarkdown("---\n# 주석뿐\n---\n\n본문\n")).not.toContain("maru-frontmatter");
   });
 
   test("emits renderer-owned source positions with character offsets", () => {

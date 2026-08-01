@@ -583,3 +583,30 @@ td {
   padding: 0.35rem 0.6rem;
   border: 1px solid color-mix(in srgb, CanvasText 24%, Canvas);
 }
+
+/* 읽기 모드의 문서 맨 앞 메타데이터 표(§2.5). 본문 표와 **다른 것**이라 조용히 둔다 — 값은 글이 아니라
+   빌드·배포가 읽는 데이터다. 리치의 frontmatter 블록과 같은 이유로 고정폭이고, 값은 여러 줄일 수 있어
+   개행을 보존한다. */
+.maru-frontmatter {
+  width: 100%;
+  margin: 0 0 1.25rem;
+  font-family: var(--maru-editor-font-family, ui-monospace, monospace);
+  font-size: 0.8125rem;
+  line-height: 1.55;
+  color: color-mix(in srgb, CanvasText 78%, Canvas);
+}
+
+/* 키 칸은 내용만큼만 쓰고 남는 폭은 값이 가져간다. `width: 1%` + `nowrap`이 그 관용구다 —
+   퍼센트를 주지 않으면 표가 두 칸을 반씩 나눠 짧은 키 옆에 빈 공간이 길게 남는다. */
+.maru-frontmatter th {
+  width: 1%;
+  text-align: left;
+  vertical-align: top;
+  white-space: nowrap;
+  background: color-mix(in srgb, CanvasText 5%, Canvas);
+  font-weight: 600;
+}
+
+.maru-frontmatter td {
+  white-space: pre-wrap;
+}

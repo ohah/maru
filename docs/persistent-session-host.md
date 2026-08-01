@@ -504,9 +504,25 @@ dirty file editor는 session host가 보호하지 못한다. `Quit Maru`도 기�
 - 여러 GUI/CLI가 동시에 host 부재를 발견해도 user-only start lock과 lock 획득 뒤 connect 재확인으로 host 하나만 시작한다.
   stale socket은 peer/process 검증 뒤에만 회수한다.
 - GUI client가 0이어도 runtime이 하나라도 살아 있으면 종료하지 않는다.
-- runtime 0개·client 0개가 되면 bounded idle grace 뒤 종료할 수 있다.
+- runtime 0개·client 0개가 되면 bounded idle grace 뒤 종료할 수 있다. 그렇게 스스로 물러나는 host는 socket·manifest·
+  owner.lock을 먼저 내리고 빈 registry directory까지 회수한다(`removeEmptyHostDirectories`).
 - macOS login session 종료·재부팅·전원 종료 뒤에는 살아 있음을 약속하지 않는다.
 - host/runtime 종료 뒤 provider resume/fork나 동일 runtime 복구는 시도하지 않는다.
+
+**죽은 host의 잔여 entry는 상한을 쓰지 않는다.** `SIGKILL`·crash·로그아웃으로 죽은 host는 실행할 cleanup 코드가 없어
+자기 registry entry를 회수하지 못하고(위 "보장 범위" 규정), 그 잔여물은 다음 실행에서도 그대로 남는다. 따라서 잔여
+entry는 **반드시 쌓인다**. discovery의 canonical entry cap(16)이 그 시체까지 세면 상한이 곧 실패로 바뀐다 — 잔여물이
+16개를 채운 순간 `too_many_hosts`로 열거 전체가 포기되어 **살아 있는 host까지 발견되지 않는다**. 그 상태의 사용자
+증상은 "영속 세션이 조용히 안 되고 새 터미널이 in-process로 떨어지며 `maru host/sessions/runtime` 진단이 전부 막힘"
+이다(실측: 잔여 70개가 산 host 1개를 밀어냄). 그래서 cap은 **owner lease가 `.held`이거나 `.unknown`인 entry에만**
+적용한다 — `.free`(소유 프로세스 없음 = 죽음이 확정)는 세지 않는다. `.unknown`은 fd/권한 실패일 수 있어 죽음의
+증거가 아니므로 그대로 센다(`owner_lease.observe` 계약).
+
+죽은 entry를 **열거 결과에서 지우지는 않는다.** manifest가 있으면서 owner lease가 죽은 조합은 위 상태표가 정한
+"host 종료를 검증함" 확정 신호이고, 소비자는 그 신호로 기존 handle을 ended로 정리한다. 여기서 파일을 삭제하면 그
+확정이 다음 실행에서 "endpoint 미발견 = runtime 생존 가능성 있음"으로 격하되어 stale handle이 영원히 풀리지 않는다.
+잔여물의 **디스크 회수**(host당 manifest + `rollback-current`)는 이 확정 신호를 소비한 뒤에 하는 별도 정책이며 아직
+정하지 않았다.
 
 ### GUI가 종료된 동안의 알림
 

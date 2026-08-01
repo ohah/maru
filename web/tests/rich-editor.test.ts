@@ -24,6 +24,29 @@ function mountRich(dom: ReturnType<typeof Object>, markdown: string) {
 }
 
 describe("rich editing mode", () => {
+  test("잠금 안내는 툴바와 **같은 React 트리**에서 그려지고, 풀리면 사라진다", async () => {
+    // 왜 중요한가: 안내는 편집기 위에 한 줄 밴드로 뜨고 사라지며 **레이아웃을 바꾼다**. 예전엔 이 안내만
+    // DOM으로 직접 만들어 붙였는데, 그러면 문서 주변 UI가 React 트리와 손으로 만든 노드 둘로 갈린다.
+    await withEditorDom(async (dom) => {
+      const doc = (globalThis as unknown as { document: Document }).document;
+      // frontmatter는 리치가 표현하지 못하는 문법이라 편집이 잠긴다(§2.5).
+      const rich = mountRich(dom, "---\ntitle: 문서\n---\n\n본문");
+      try {
+        const notice = doc.querySelector(".maru-rich-notice");
+        expect(notice).not.toBeNull();
+        expect(notice?.textContent).toContain("소스 모드");
+        // 툴바와 형제여야 한다 — 한 루트가 둘 다 그린다.
+        expect(notice?.parentElement?.querySelector("[role='toolbar']")).not.toBeNull();
+
+        // 표현 가능한 문서로 갈아끼우면 잠금이 풀리고 안내도 사라진다.
+        rich.setMarkdown("# 그냥 제목");
+        expect(doc.querySelector(".maru-rich-notice")).toBeNull();
+      } finally {
+        rich.destroy();
+      }
+    });
+  });
+
   test("markdown structure survives a document-model round trip", async () => {
     await withEditorDom(async (dom) => {
       const source = [
@@ -81,7 +104,7 @@ describe("rich editing mode", () => {
       try {
         const doc = (globalThis as unknown as { document: Document }).document;
         // 기다리지 않는다. `createRichEditor`가 돌아온 시점에 툴바가 DOM에 있어야 한다는 계약을 여기서 함께
-        // 고정한다(toolbar-mount.tsx가 첫 렌더를 flushSync로 동기화한다). 폴링을 넣으면 그 계약이 깨져도 통과한다.
+        // 고정한다(shell-ui.tsx가 첫 렌더를 flushSync로 동기화한다). 폴링을 넣으면 그 계약이 깨져도 통과한다.
         const buttons = [...doc.querySelectorAll<HTMLButtonElement>("[data-toolbar-button]")];
         expect(buttons.length).toBeGreaterThan(8);
 

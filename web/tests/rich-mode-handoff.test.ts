@@ -128,7 +128,7 @@ async function bootMarkdownShell(initial: string): Promise<Harness> {
 /**
  * 툴바 버튼을 title로 찾아 누른다 — 실제 편집 명령 경로를 그대로 탄다.
  *
- * 마운트를 기다리지 않는다. 툴바 첫 렌더는 동기이므로(toolbar-mount.tsx), 폴링을 넣으면 그 계약이 깨져도
+ * 마운트를 기다리지 않는다. 툴바 첫 렌더는 동기이므로(shell-ui.tsx), 폴링을 넣으면 그 계약이 깨져도
  * 테스트가 통과해 버린다.
  */
 function clickToolbar(dom: JSDOM, title: string): void {

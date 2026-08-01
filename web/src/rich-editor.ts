@@ -5,7 +5,8 @@
  * 결과이고, 파일을 열 때 마크다운을 문서모델로 파싱해 들어왔다가 저장할 때 다시 마크다운으로 직렬화해 나간다.
  * **그 왕복이 원문을 정규화할 수 있다는 것이 이 모드의 명시된 대가다** — 손실이 곤란한 문서는 소스 모드가 받는다.
  *
- * 마운트는 vanilla다(웹앱에 프레임워크를 두지 않는다 — §2.1). 툴바도 DOM으로 직접 만든다.
+ * 편집기 본문은 문서모델 라이브러리가 DOM에 직접 마운트하고, 그 **주변 chrome(툴바·잠금 안내)은 React가
+ * 그린다**(§2.1) — 둘은 형제 노드이고 편집기를 React 컴포넌트로 다시 쓰지 않는다.
  */
 
 import { Editor } from "@tiptap/core";
@@ -15,7 +16,7 @@ import TaskList from "@tiptap/extension-task-list";
 import TaskItem from "@tiptap/extension-task-item";
 import Image from "@tiptap/extension-image";
 import { Table, TableRow, TableCell, TableHeader } from "@tiptap/extension-table";
-import { mountRichToolbar, type ToolbarMount } from "./ui/toolbar-mount";
+import { mountShellUi, type ShellUiHandle } from "./shell-ui";
 import type { ToolbarItem } from "./ui/toolbar";
 
 /**
@@ -232,39 +233,32 @@ export function createRichEditor(
     onSelectionUpdate: () => syncToolbar(),
   });
 
-  const toolbarHost = doc.createElement("div");
-  shell.appendChild(toolbarHost);
+  const uiHost = doc.createElement("div");
+  shell.appendChild(uiHost);
   // 마운트 실패를 삼키지 않는다. 제품(WKWebView)에서 툴바가 통째로 비어 있는데 콘솔에도 아무 흔적이 없어
   // 원인 추적이 사용자 왕복이 됐다. 실패 사실을 DOM에 남겨 native 진단이 읽을 수 있게 한다.
-  let toolbar: ToolbarMount;
+  let ui: ShellUiHandle;
   try {
-    toolbar = mountRichToolbar(toolbarHost, () => toolbarItems(editor));
+    ui = mountShellUi(uiHost, () => toolbarItems(editor));
   } catch (error) {
     doc.body.dataset.richToolbarError = String(error);
     throw error;
   }
-  syncToolbar = toolbar.sync;
+  syncToolbar = ui.sync;
   shell.appendChild(content);
 
   // 리치가 표현하지 못하는 문법이 있으면 편집을 막는다. **내용이 바뀔 때마다 다시 판정한다** — 생성 시
   // 한 번만 보면, 소스에서 frontmatter를 붙였다 리치로 돌아온 문서에는 잠금이 걸리지 않는다(그 반대도 마찬가지).
-  let notice: HTMLElement | null = null;
   let locked = false;
   const applyLock = (source: string) => {
     const unsupported = unsupportedRichSyntax(source);
     locked = unsupported.length > 0;
     editor.setEditable(!locked && !closeLocked);
-    if (locked) {
-      if (notice === null) {
-        notice = doc.createElement("div");
-        notice.className = "maru-rich-notice";
-        shell.insertBefore(notice, content);
-      }
-      notice.textContent = `이 문서에는 리치 편집이 다루지 못하는 문법이 있어 편집을 잠갔습니다(${unsupported.join(", ")}). 소스 모드에서 고치면 원문이 그대로 보존됩니다.`;
-    } else if (notice !== null) {
-      notice.remove();
-      notice = null;
-    }
+    ui.setNotice(
+      locked
+        ? `이 문서에는 리치 편집이 다루지 못하는 문법이 있어 편집을 잠갔습니다(${unsupported.join(", ")}). 소스 모드에서 고치면 원문이 그대로 보존됩니다.`
+        : null,
+    );
     onLockChanged(locked);
   };
   applyLock(markdown);
@@ -288,7 +282,7 @@ export function createRichEditor(
     },
     focus: () => editor.commands.focus(),
     destroy: () => {
-      toolbar.destroy();
+      ui.destroy();
       editor.destroy();
     },
     setEditable: (editable: boolean) => {

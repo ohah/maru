@@ -15,11 +15,14 @@ const webRoot = join(import.meta.dir, "..");
 
 describe("shell UI stack", () => {
   test("the React entry point exists and is wired for automatic JSX", () => {
-    // 실제 마운트 검증은 첫 컴포넌트(컨텍스트 메뉴)가 생길 때 그 UI 테스트가 한다. 여기서 React 루트를 미리
-    // 띄우면 스케줄러가 jsdom 정리 뒤에 돌아 **다른 테스트까지 오염시킨다**(실제로 겪었다 — window is not
-    // defined가 7건 터졌다). 그래서 이 슬라이스는 스택이 서 있는지만 본다.
+    // 실제 마운트·동작 검증은 이 루트를 쓰는 쪽(`rich-editor.test.ts`)이 한다 — 거기서는 jsdom 전역을 세우고
+    // 반드시 복원하기 때문이다. 여기서 루트를 띄우면 스케줄러가 jsdom 정리 뒤에 돌아 **다른 테스트까지
+    // 오염시킨다**(실제로 겪었다 — window is not defined가 7건 터졌다). 이 파일은 스택 배선만 본다.
     const source = readFileSync(join(webRoot, "src", "shell-ui.tsx"), "utf8");
     expect(source).toContain("createRoot");
+    // 루트는 편집기당 **하나**다 — 툴바와 안내가 같은 트리에서 그려진다(둘로 갈리면 뒤 UI마다 루트가 는다).
+    expect(source).toContain("RichToolbar");
+    expect(source).toContain("maru-rich-notice");
     // automatic runtime이라 `import React`가 없어야 한다 — 있으면 jsx 설정이 classic으로 새고 있다는 뜻이다.
     expect(source).not.toMatch(/^import React /m);
 

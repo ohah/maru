@@ -23,8 +23,13 @@ pub const max_total_bytes: usize = 512 * 1024 * 1024;
 
 pub const Record = struct {
     parsed: archive.Parsed,
+    /// Absolute provider-log pathname kept only in the in-process snapshot.
+    /// It is paired with the discovery identity so a later explicit reveal can
+    /// reject a replacement instead of opening an arbitrary new file.
     source_path: []u8,
     mtime_ns: i96,
+    inode: std.Io.File.INode,
+    device: u64,
 
     pub fn deinit(self: *Record, allocator: std.mem.Allocator) void {
         self.parsed.deinit(allocator);
@@ -210,12 +215,12 @@ fn cachedRecord(state: *State, candidate: Candidate) ?Record {
     for (state.cache.items) |entry| {
         if (!sameCacheIdentity(entry, candidate)) continue;
         const parsed = entry.parsed.clone(state.allocator) catch return null;
-        const path = state.allocator.dupe(u8, candidate.source_path) catch {
+        const path = state.allocator.dupe(u8, candidate.open_path) catch {
             var owned = parsed;
             owned.deinit(state.allocator);
             return null;
         };
-        return .{ .parsed = parsed, .source_path = path, .mtime_ns = candidate.mtime_ns };
+        return .{ .parsed = parsed, .source_path = path, .mtime_ns = candidate.mtime_ns, .inode = candidate.inode, .device = candidate.device };
     }
     return null;
 }
@@ -476,8 +481,8 @@ fn appendCandidateFile(state: *State, candidate: Candidate, result: *Result, rem
     var parsed = archive.parse(allocator, candidate.provider, bytes[0..n]) catch return orelse return;
     errdefer parsed.deinit(allocator);
     cacheParsed(state, candidate, &parsed);
-    const path = allocator.dupe(u8, candidate.source_path) catch return;
-    result.records.append(allocator, .{ .parsed = parsed, .source_path = path, .mtime_ns = candidate.mtime_ns }) catch {
+    const path = allocator.dupe(u8, candidate.open_path) catch return;
+    result.records.append(allocator, .{ .parsed = parsed, .source_path = path, .mtime_ns = candidate.mtime_ns, .inode = candidate.inode, .device = candidate.device }) catch {
         allocator.free(path);
         return;
     };

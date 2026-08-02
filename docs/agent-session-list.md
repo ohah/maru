@@ -70,7 +70,7 @@ Codex의 과거 파일에는 `thread_source`가 없을 수 있다. 이 경우 us
 ## 5. 보안·개인정보·관측
 
 - provider log는 민감한 개인 데이터다. 원문·prompt·token·절대 home path를 trace, crash artifact, fixture, analytics, config에 쓰지 않는다. fixture는 synthetic·redacted JSONL만 허용하며 [project-rules.md](project-rules.md)의 redaction 기준을 공유한다.
-- scanner는 no-follow로 열고 fstat identity를 discovery snapshot과 다시 대조한다. parse 중 교체되거나 permission이 바뀐 파일은 stale로 버린다. source reveal은 사용자가 누른 때만 OS file reveal API에 exact canonical source를 넘긴다.
+- scanner는 no-follow로 열고 fstat identity를 discovery snapshot과 다시 대조한다. parse 중 교체되거나 permission이 바뀐 파일은 stale로 버린다. published record는 앱 실행 중에만 absolute source path와 `(device,inode)`를 함께 보존하며, `로그 보기`는 사용자가 누른 때에만 그 identity를 다시 검사해 OS file reveal API에 넘긴다. 교체·삭제·비정규 파일이면 reveal을 거부한다.
 - resume command는 shell string concat이 아니라 argv array다. session id/provider/cwd는 UI text나 log에서 명령으로 재해석되지 않는다. parse한 prompt는 실행 인자로 절대 넣지 않는다.
 - metrics는 candidate/verified/partial/rejected 개수와 scan duration/bytes만 남긴다. title·요약·cwd·session id는 observability event의 payload가 될 수 없다.
 

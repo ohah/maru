@@ -91,8 +91,9 @@ const Candidate = struct {
     }
 };
 
-/// Process-lifetime only: a matching source path, mtime and size can reuse the
-/// already-redacted summary, but never writes history metadata to disk.
+/// Process-lifetime only: an identical provider, path, device, inode, mtime,
+/// and size can reuse the already-redacted summary, but never writes history
+/// metadata to disk.
 const CacheEntry = struct {
     provider: archive.Provider,
     source_path: []u8,
@@ -331,13 +332,13 @@ fn scan(state: *State, home: []const u8) void {
 fn scanClaude(allocator: std.mem.Allocator, io: std.Io, home: []const u8, candidates: *std.ArrayList(Candidate), partial: *bool) void {
     const root_path = std.fs.path.join(allocator, &.{ home, ".claude", "projects" }) catch return;
     defer allocator.free(root_path);
-    var root = std.Io.Dir.cwd().openDir(io, root_path, .{ .iterate = true }) catch return;
+    var root = std.Io.Dir.cwd().openDir(io, root_path, .{ .iterate = true, .follow_symlinks = false }) catch return;
     defer root.close(io);
     var projects = root.iterate();
     while (true) {
         const project = (projects.next(io) catch return) orelse break;
         if (project.kind != .directory) continue;
-        var dir = root.openDir(io, project.name, .{ .iterate = true }) catch continue;
+        var dir = openChildDirectoryNoFollow(io, root, project.name) orelse continue;
         defer dir.close(io);
         var files = dir.iterate();
         while (true) {
@@ -356,25 +357,25 @@ fn scanClaude(allocator: std.mem.Allocator, io: std.Io, home: []const u8, candid
 fn scanCodex(allocator: std.mem.Allocator, io: std.Io, home: []const u8, candidates: *std.ArrayList(Candidate), partial: *bool) void {
     const root_path = std.fs.path.join(allocator, &.{ home, ".codex", "sessions" }) catch return;
     defer allocator.free(root_path);
-    var root = std.Io.Dir.cwd().openDir(io, root_path, .{ .iterate = true }) catch return;
+    var root = std.Io.Dir.cwd().openDir(io, root_path, .{ .iterate = true, .follow_symlinks = false }) catch return;
     defer root.close(io);
     var years = root.iterate();
     while (true) {
         const year = (years.next(io) catch return) orelse break;
         if (year.kind != .directory) continue;
-        var year_dir = root.openDir(io, year.name, .{ .iterate = true }) catch continue;
+        var year_dir = openChildDirectoryNoFollow(io, root, year.name) orelse continue;
         defer year_dir.close(io);
         var months = year_dir.iterate();
         while (true) {
             const month = (months.next(io) catch break) orelse break;
             if (month.kind != .directory) continue;
-            var month_dir = year_dir.openDir(io, month.name, .{ .iterate = true }) catch continue;
+            var month_dir = openChildDirectoryNoFollow(io, year_dir, month.name) orelse continue;
             defer month_dir.close(io);
             var days = month_dir.iterate();
             while (true) {
                 const day = (days.next(io) catch break) orelse break;
                 if (day.kind != .directory) continue;
-                var day_dir = month_dir.openDir(io, day.name, .{ .iterate = true }) catch continue;
+                var day_dir = openChildDirectoryNoFollow(io, month_dir, day.name) orelse continue;
                 defer day_dir.close(io);
                 var files = day_dir.iterate();
                 while (true) {
@@ -390,6 +391,13 @@ fn scanCodex(allocator: std.mem.Allocator, io: std.Io, home: []const u8, candida
             }
         }
     }
+}
+
+/// Each history-path component is opened from the preceding directory handle.
+/// `iterate` reports a symlink in the usual case; the no-follow open closes the
+/// enumerate-to-open replacement race as well.
+fn openChildDirectoryNoFollow(io: std.Io, parent: std.Io.Dir, name: []const u8) ?std.Io.Dir {
+    return parent.openDir(io, name, .{ .iterate = true, .follow_symlinks = false }) catch null;
 }
 
 fn appendCandidate(allocator: std.mem.Allocator, io: std.Io, dir: *std.Io.Dir, open_name: []const u8, provider: archive.Provider, open_path: []u8, source_path: []u8, candidates: *std.ArrayList(Candidate), partial: *bool) void {
@@ -509,4 +517,26 @@ test "archive cache identity rejects replaced or changed source files" {
     changed = candidate;
     changed.device = 41;
     try std.testing.expect(!sameCacheIdentity(entry, changed));
+    changed = candidate;
+    changed.size = 21;
+    try std.testing.expect(!sameCacheIdentity(entry, changed));
+    changed = candidate;
+    changed.provider = .claude;
+    try std.testing.expect(!sameCacheIdentity(entry, changed));
+    changed = candidate;
+    changed.source_path = @constCast("other/rollout.jsonl");
+    try std.testing.expect(!sameCacheIdentity(entry, changed));
+}
+
+test "archive scanner refuses a symlinked history directory" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "history", .default_dir);
+    try tmp.dir.createDir(io, "outside", .default_dir);
+    try tmp.dir.symLink(io, "outside", "history/project-link", .{ .is_directory = true });
+    var history = try tmp.dir.openDir(io, "history", .{ .iterate = true, .follow_symlinks = false });
+    defer history.close(io);
+    try std.testing.expect(openChildDirectoryNoFollow(io, history, "project-link") == null);
 }

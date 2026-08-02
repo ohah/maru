@@ -4148,10 +4148,11 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
             try std.testing.expect(lease_type_count > 0);
         } else {
             // CR3a-2a stores the lease only in the final-address GUI attachment, while HostAdapter
-            // forwards its exact address to ClientSlot. Transport and external movable owners may
-            // not name the cleanup capability.
+            // forwards its exact address to ClientSlot. ClientSlot additionally names the type in
+            // the ended-purge destination range preflight; it still does not store or mint another
+            // lease. Transport and external movable owners may not name the cleanup capability.
             const expected_lease_count: usize = if (is_client_slot)
-                7
+                8
             else if (is_host_adapter)
                 4
             else if (is_generation_attachment)

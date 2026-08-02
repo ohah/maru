@@ -26,9 +26,13 @@ N개 표시 · 최근 500개
 [⌕ 세션 검색]
 ────────────────────────────────────────────────────────────────
 ⌄ project-or-workspace                                      12
-  제목                                                        ⌄  …
+  제목                                                     Codex
   마지막 사용자 요청의 안전한 짧은 요약
-  Codex | 메시지 140개 | 22시간 전 | gpt-…
+  메시지 140개 · 22시간 전 · gpt-…
+  ────────────────────────────────────────────────────────────
+  제목                                                   Claude
+  마지막 사용자 요청의 안전한 짧은 요약
+  메시지 94개 · 3분 전 · claude-…
 ```
 
 - header의 `Local Mac`은 현재 사용자 홈 아래 provider log만 읽는다는 provenance label이며 host 선택기가 아니다. v1 정렬은 mtime 내림차순 하나로 고정한다. 탭 재진입은 현재 앱 실행 중의 snapshot을 즉시 보이고, 마지막 완료 scan 뒤 **15초** 안이면 새 refresh를 시작하지 않는다. 목록 첫 행의 `AI 세션 · ⟳ 새로 고침`은 명시적인 refresh control이며 클릭은 이 TTL을 우회한다. worker가 실행 중이면 같은 control은 `분석 중`으로 바뀌고 추가 job을 만들지 않는다.
@@ -37,13 +41,15 @@ N개 표시 · 최근 500개
 - 이 필터는 접근 제어가 아닌 표시 범위다. 경로는 provider log의 `cwd`를 canonicalize할 수 있을 때만 containment 비교하며, 실패·삭제·비로컬 값은 workspace/project에 억지로 넣지 않는다.
 - 검색은 이미 publish된 snapshot만 대상으로 한다. `/`로 시작한 입력은 header에 표시되고 Esc는 query를 지우고 닫으며, UTF-8 byte substring(ASCII만 case-insensitive)으로 제목·요약·cwd leaf·branch·model을 찾고 입력은 256 byte로 자른다. 검색 키 입력은 재스캔·파일 stat·정렬을 일으키지 않는다. 한국어처럼 case가 없는 문자열은 정확 byte match로 검색된다.
 - 최근 window는 provider를 합쳐 mtime 내림차순 최대 500 **검증 완료** 세션이다. 후보 탐색 상한 또는 parser byte budget 때문에 더 오래된 항목을 보장하지 않으므로 header와 empty state는 항상 `최근`이라고 말하고 `전체 이력`이라고 주장하지 않는다.
-- 기본 그룹은 canonical `cwd`의 프로젝트/폴더 이름이다. cwd가 없거나 project 밖이면 `알 수 없는 위치` 한 그룹으로 낸다. 그룹 접힘은 현재 view 수명 안에서만 유지하며 JSONL이나 workspace에 저장하지 않는다.
-- 행 제목은 provider 고유 제목이 있으면 그것, 없으면 첫 신뢰 가능한 사용자 요청의 single-line prefix(최대 120 display bytes), 끝내 없으면 `제목 없는 세션`이다. 요약은 마지막 사용자 요청 우선, 없으면 마지막 assistant text의 single-line prefix(최대 240 display bytes)다. raw escape/control byte·경로 외 홈 사용자명은 렌더 전에 제거/일반화하며 Markdown/ANSI를 해석하지 않는다.
+- fixed chrome은 header·scope segmented control·검색뿐이다. scope control은 **그룹 헤더가 아니며**, 목록 본문을 밀거나 선택된 세션의 detail/action으로 대체하지 않는다. 목록의 workspace/project 그룹만 본문에서 독립적으로 접고 펼친다.
+- 기본 그룹은 canonical `cwd`의 프로젝트/폴더 이름이다. cwd가 없거나 project 밖이면 `알 수 없는 위치` 한 그룹으로 낸다. 각 그룹 header는 chevron·이름·표시 개수를 갖고 click/Left/Right로 접고 편다. 접힌 그룹은 header만 남기며 다른 그룹과 고정 chrome의 위치는 바꾸지 않는다. 그룹 접힘은 현재 view 수명 안에서만 유지하며 JSONL이나 workspace에 저장하지 않는다.
+- 세션 행은 **세 줄 카드**다: 제목과 provider badge, 마지막 사용자 요청의 안전한 짧은 요약, 메시지 수·상대 시각·model metadata. 카드 내부의 provider/title/summary를 한 줄 label로 합치거나 raw JSONL line을 그대로 표시하지 않는다. 행 제목은 provider 고유 제목이 있으면 그것, 없으면 첫 신뢰 가능한 사용자 요청의 single-line prefix(최대 120 display bytes), 끝내 없으면 `제목 없는 세션`이다. 요약은 마지막 사용자 요청 우선, 없으면 마지막 assistant text의 single-line prefix(최대 240 display bytes)다. raw escape/control byte·경로 외 홈 사용자명은 렌더 전에 제거/일반화하며 Markdown/ANSI를 해석하지 않는다.
 - `메시지 n개`는 전체 파일을 budget 안에서 끝까지 분석한 경우만 정확한 수다. cap에 걸리면 `메시지 ≥n개`, 아직 분석하지 않았으면 메시지 수를 생략한다. 숫자를 추정치처럼 표시하지 않는다.
-- 한 번 클릭/Enter는 행을 선택하고 detail을 펼칠 뿐 provider를 실행하지 않는다. 이 동작은 행을 대량 훑을 때 실수로 provider를 시작하지 않게 한다. detail은 provider, session id의 짧은 복사본, source 위치, cwd/branch/model, 시각, 메시지 수, 분석 상태와 최근 세 turn을 보인다. 행 hover의 ▶와 detail의 primary `새 탭에서 이어하기`, `…`의 같은 명령은 모두 같은 resume action이다. 선택 행의 `⌘L`은 detail의 `로그 보기`와 같은 explicit source-reveal action이며, raw JSONL을 terminal에 paste하거나 WebView에 trusted content로 넣지 않는다.
+- 한 번 클릭/Enter는 provider를 실행하지 않고 **전용 archive session tab**을 연다. 도크 목록은 탭이 열려도 카드 위치·scroll을 유지하며 detail/action을 fixed chrome에 끼워 넣지 않는다. tab은 provider, session id의 짧은 복사본, cwd/branch/model, 시각, 메시지 수, 분석 상태, 안전하게 정규화한 최근 세 turn과 그 시점에 기록된 permission/action 요약만 보인다. raw JSONL·tool payload·환경 변수·명령 출력의 전체 원문은 tab에 넣지 않는다.
+- tab의 `새 탭에서 이어하기`와 `로그 보기`는 명시 action이다. `로그 보기`는 source-reveal만 수행하고, raw JSONL을 terminal에 paste하거나 WebView에 trusted content로 넣지 않는다. 동일 identity의 tab이 이미 열려 있으면 새 tab을 만들지 않고 기존 tab을 활성화한다. snapshot 교체 뒤 source identity가 달라지면 tab은 stale 상태로 남기고 resume/reveal을 비활성화한다.
 - `새 탭에서 이어하기`는 사용자가 그 명시 버튼을 누르는 즉시 새 local Term 탭을 만들고 활성화한다(추가 확인 dialog 없음). shell 없이 정확한 argv로 실행한다: Claude는 `claude --resume <session-id>`, Codex는 `codex resume <session-id>`. 실행 cwd는 archive record의 canonical local cwd가 아직 directory일 때만 쓰며, 아니면 새 Term의 기본 cwd와 함께 "원래 cwd를 찾지 못함"을 보여 준다. 기존 Term에 키를 주입하지 않는다.
 - open live Term과 provider+session id가 정확히 일치하면 detail에 **부가 동작**으로 `열린 세션으로 이동`을 제공한다. 이것은 archive 후보 선정·정렬·표시를 바꾸지 않으며, 일치하지 않는 과거 세션도 완전히 같은 행으로 보인다. mapping은 live session identity가 다시 검증된 경우만 만들며 path/mtime 유사성으로 추정하지 않는다.
-- 새 focus owner `agent_session_list`가 선택 identity `{ provider, session_id, source_file_identity }`를 소유한다. Up/Down, PageUp/PageDown, Home/End는 보이는 행을 움직이고, Right/Left는 그룹/detail을 펼치고 접으며, Enter는 detail, Escape는 search focus를 먼저 해제한다. 도크를 떠나거나 snapshot 교체 뒤 identity가 사라지면 선택을 해제한다. `⌘⇧E`는 기존대로 탐색기로 돌아간다.
+- 새 focus owner `agent_session_list`가 선택 identity `{ provider, session_id, source_file_identity }`를 소유한다. Up/Down, PageUp/PageDown, Home/End는 보이는 카드를 움직이고, Right/Left는 그룹을 펼치고 접으며, Enter는 archive session tab을 연다. Escape는 search focus를 먼저 해제한다. 도크를 떠나거나 snapshot 교체 뒤 identity가 사라지면 선택을 해제한다. `⌘⇧E`는 기존대로 탐색기로 돌아간다.
 
 ## 3. provider 입력과 신뢰 등급
 
@@ -78,8 +84,8 @@ Codex의 과거 파일에는 `thread_source`가 없을 수 있다. 이 경우 us
 
 1. **AS1 — 순수 모델·parser:** provider-neutral record, Claude/Codex streaming parser, trust grade, dedup/title/summary/redaction/filter/sort pure tests. 실제 사용자 log는 fixture로 넣지 않는다.
 2. **AS2 — bounded scanner:** no-follow discovery, candidate/file/total caps, cancellation/generation, in-memory identity parse cache, 최신순 bounded worker pool과 first/continuation batch snapshot, metrics. main tick filesystem I/O=0·JSON parse=0·worker wait=0을 counter와 source boundary test로 고정한다.
-3. **AS3 — 도크 chrome:** header/scope/search/group/row/detail/action menu, `agent_session_list` focus owner, virtualized visible-row rendering과 selection identity. search keypress I/O=0, row 한 번 클릭 실행=0을 integration test로 고정한다.
-4. **AS4 — explicit actions·제품 gate:** live exact mapping, copy/reveal, hover/detail `새 탭에서 이어하기`와 argv-only immediate new-Term activation, macOS manual fixture E2E. 실제 provider 계정/개인 이력에 대한 재개는 사용자가 직접 승인한 수동 gate일 뿐 CI 증거가 아니다.
+3. **AS3 — 도크 chrome:** header/scope/search, 접이식 workspace group, 세 줄 virtualized card, `agent_session_list` focus owner와 selection identity. search keypress I/O=0, row 한 번 클릭 provider 실행=0·main thread JSONL I/O=0을 integration test로 고정한다.
+4. **AS4 — archive session tab·explicit actions·제품 gate:** bounded recent/permission summary의 native tab, stale identity disable, exact live mapping, copy/reveal, tab의 `새 탭에서 이어하기`와 argv-only immediate new-Term activation, macOS fixture manual E2E. 실제 provider 계정/개인 이력에 대한 재개는 사용자가 직접 승인한 수동 gate일 뿐 CI 증거가 아니다.
 
 ## 7. 설계 검토 기록 — 적대적 5회
 

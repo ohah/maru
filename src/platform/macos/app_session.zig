@@ -50,8 +50,10 @@ const coretext_frame_builder = @import("coretext_frame_builder.zig");
 const file_tree_backend = @import("file_tree_backend.zig");
 const file_tree_mutation_backend = @import("file_tree_mutation_backend.zig");
 const agent_session_archive_backend = @import("agent_session_archive_backend.zig");
+const agent_session_archive_detail_backend = @import("agent_session_archive_detail_backend.zig");
 const agent_session_archive_scope_backend = @import("agent_session_archive_scope_backend.zig");
 const agent_session_archive_view = maru.session.agent_session_archive_view;
+const agent_session_archive_detail = maru.session.agent_session_archive_detail;
 const metal_frame = renderer.metal_frame; // §8: metal_frame이 renderer로 이주 — maru.renderer barrel 경유(중립 frame DTO)
 const shell_integration = @import("shell_integration.zig");
 const global_hotkey = @import("global_hotkey.zig");
@@ -1242,6 +1244,22 @@ const NormalizedConfig = struct {
 /// `TermRuntime` = Term의 런타임 부착(PTY 세션 **참조**·이벤트 펌프·생애 플래그) — platform이 소유하는 OS/런타임
 /// 결합부. session 모델(`session_model.Model(TermRuntime).Term`)에 generic `Rt`로 주입된다(§3.1). 모델 struct
 /// (Term/Pane/Tab)는 session core(src/session/session_model.zig)가 소유하고, 이 런타임 결합 타입만 platform에 남는다(S2-4b).
+/// Per-Term, owned state for a read-only archive tab.  Keeping the selected
+/// record with its stable file identity lets resume/reveal reject a snapshot
+/// replacement even after the archive list itself is refreshed or closed.
+const ArchiveSessionTab = struct {
+    record: agent_session_archive_backend.Record,
+    request_id: u64,
+    state: enum { loading, ready, stale, unavailable } = .loading,
+    detail: ?agent_session_archive_detail.Detail = null,
+
+    fn deinit(self: *ArchiveSessionTab, allocator: std.mem.Allocator) void {
+        if (self.detail) |*parsed| parsed.deinit(allocator);
+        self.record.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
 const TermRuntime = struct {
     // persistent-session P2 seam(docs/persistent-session-host.md §13 P2): 런타임 소유는 앱 전역
     // `app_runtime.live_registry`(LiveSurfaceRegistry(LiveSurface))에 있고, GUI(Term)는 그 runtime을 가리키는 opaque
@@ -1301,6 +1319,10 @@ const TermRuntime = struct {
     /// capture가 반복 relaunch에도 같은 handle을 기록한다.
     ended_runtime_host_id: []const u8 = "",
     ended_runtime_id: []const u8 = "",
+    /// Archive tabs use the same PTY-free sentinel surface as a tombstone, but
+    /// are a distinct state: they must stay readable, never respawn a shell,
+    /// and accept only their explicit resume/reveal shortcuts.
+    archive_session_tab: ?*ArchiveSessionTab = null,
 };
 
 // 이 테스트가 증명하는 것(그리고 터미널에서 왜 중요한가): persistent-session P2 seam의 완료 조건은 "GUI layout이
@@ -2744,6 +2766,7 @@ pub const AppSession = struct {
     file_tree: file_tree.Tree = undefined,
     file_tree_backend: file_tree_backend.Backend = undefined,
     agent_session_archive_backend: agent_session_archive_backend.Backend = undefined,
+    agent_session_archive_detail_backend: agent_session_archive_detail_backend.Backend = undefined,
     agent_session_archive_scope_backend: agent_session_archive_scope_backend.Backend = undefined,
     agent_session_archive_initialized: bool = false,
     agent_session_archive_records: std.ArrayList(agent_session_archive_backend.Record) = .empty,
@@ -2769,6 +2792,9 @@ pub const AppSession = struct {
     /// for the older terminal.
     agent_session_archive_project_scope_pending_cwd: ?[]u8 = null,
     agent_session_archive_loading: bool = false,
+    /// Monotonic tab-detail request identity. A result may arrive after its tab
+    /// closes, so surface id alone is insufficient to authorize publication.
+    agent_session_archive_detail_request_id: u64 = 0,
     agent_session_archive_completed_ns: i128 = 0,
     agent_session_archive_partial: bool = false,
     agent_session_archive_scroll_rows: usize = 0,
@@ -3195,6 +3221,8 @@ pub const AppSession = struct {
             self.file_tree_mutation_backend = try file_tree_mutation_backend.Backend.init(allocator, io);
             self.agent_session_archive_backend = try agent_session_archive_backend.Backend.init(allocator, io);
             errdefer self.agent_session_archive_backend.deinit();
+            self.agent_session_archive_detail_backend = try agent_session_archive_detail_backend.Backend.init(allocator, io);
+            errdefer self.agent_session_archive_detail_backend.deinit();
             self.agent_session_archive_scope_backend = try agent_session_archive_scope_backend.Backend.init(allocator, io);
             errdefer self.agent_session_archive_scope_backend.deinit();
         }
@@ -3480,6 +3508,7 @@ pub const AppSession = struct {
         }
         if (!result.first_batch) self.agent_session_archive_partial = self.agent_session_archive_partial or result.partial;
         self.rebuildAgentSessionArchiveFilter();
+        self.reconcileArchiveSessionTabsAgainstSnapshot();
         const visible = self.agentSessionArchiveVisibleContentRows();
         self.agent_session_archive_scroll_rows = @min(self.agent_session_archive_scroll_rows, self.agent_session_archive_projection.visual_rows -| visible);
         if (result.complete) {
@@ -4638,7 +4667,7 @@ pub const AppSession = struct {
     ///   레이아웃 사실이 아니므로, 표시 grid는 여기서 직접 맞춘다.
     fn resizeTermForLayout(self: *AppSession, term: *Term, size: terminal.Size) app.RuntimeError!void {
         if (term.kind == .web) return;
-        if (term.rt.ended_placeholder) {
+        if (term.rt.ended_placeholder or term.rt.archive_session_tab != null) {
             self.resizeTermCoreToLayout(term, size);
             return;
         }
@@ -5803,7 +5832,7 @@ pub const AppSession = struct {
     fn findTerminatedTerm(self: *AppSession) ?TermLoc {
         return self.findTermWhere({}, struct {
             fn pred(_: void, term: *Term) bool {
-                return term.rt.terminated and !term.rt.ended_placeholder;
+                return term.rt.terminated and !term.rt.ended_placeholder and term.rt.archive_session_tab == null;
             }
         }.pred);
     }
@@ -5922,6 +5951,213 @@ pub const AppSession = struct {
         const owned = try self.allocator.dupe(u8, record.source_path);
         if (self.file_tree_external_open) |old| self.allocator.free(old);
         self.file_tree_external_open = owned;
+    }
+
+    fn cloneAgentSessionArchiveRecord(
+        allocator: std.mem.Allocator,
+        source: *const agent_session_archive_backend.Record,
+    ) !agent_session_archive_backend.Record {
+        const parsed = try source.parsed.clone(allocator);
+        errdefer {
+            var owned = parsed;
+            owned.deinit(allocator);
+        }
+        const path = try allocator.dupe(u8, source.source_path);
+        return .{
+            .parsed = parsed,
+            .source_path = path,
+            .mtime_ns = source.mtime_ns,
+            .inode = source.inode,
+            .device = source.device,
+        };
+    }
+
+    fn nextAgentSessionArchiveDetailRequestId(self: *AppSession) u64 {
+        self.agent_session_archive_detail_request_id +%= 1;
+        if (self.agent_session_archive_detail_request_id == 0) self.agent_session_archive_detail_request_id = 1;
+        return self.agent_session_archive_detail_request_id;
+    }
+
+    /// Finds and focuses an existing read-only tab for the exact archive file.
+    /// Session id alone is not enough: providers can retain/rewrite a file, and
+    /// a replacement must never inherit a tab's explicit actions.
+    fn focusExistingArchiveSessionTab(self: *AppSession, record: *const agent_session_archive_backend.Record) bool {
+        for (self.tabs.items, 0..) |tab, tab_index| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items, 0..) |term, term_index| {
+                    const archive_tab = term.rt.archive_session_tab orelse continue;
+                    const existing = archive_tab.record;
+                    if (existing.parsed.provider != record.parsed.provider or
+                        existing.inode != record.inode or existing.device != record.device or
+                        !std.mem.eql(u8, existing.parsed.session_id, record.parsed.session_id)) continue;
+                    _ = self.switchTab(tab_index);
+                    _ = self.focusPaneByPtr(pane);
+                    self.focusTerm(term_index);
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    fn createArchiveSessionTabTerm(
+        self: *AppSession,
+        record: *const agent_session_archive_backend.Record,
+        size: terminal.Size,
+        request_id: u64,
+    ) !*Term {
+        const term = try self.allocator.create(Term);
+        errdefer self.allocator.destroy(term);
+        term.* = .{}; // native terminal rendering, but no PTY/runtime attachment
+
+        const archive_tab = try self.allocator.create(ArchiveSessionTab);
+        errdefer self.allocator.destroy(archive_tab);
+        archive_tab.* = .{ .record = try cloneAgentSessionArchiveRecord(self.allocator, record), .request_id = request_id };
+        errdefer archive_tab.deinit(self.allocator);
+        term.rt.archive_session_tab = archive_tab;
+
+        const id = self.surface_ids.next();
+        const slot = try self.live_registry.create(id, 0);
+        slot.* = .{ .web = .{ .internal_allocator = self.allocator } };
+        term.surface = &slot.web.surface;
+        errdefer self.live_registry.removeUninitialized(id) catch {};
+        term.surface.* = try maru.session.Surface.init(self.allocator, id, terminal.clampGridSize(size));
+        errdefer self.live_registry.remove(id) catch {};
+
+        // This tab intentionally renders through the existing terminal grid so
+        // no new WebView/SurfaceKind/Swift ABI trust surface is introduced.
+        term.surface.core.setConfigPalette(self.appearance.theme.palette);
+        term.surface.core.ambiguous_wide = self.loaded_config.config.ambiguous_width == .wide;
+        term.surface.core.emoji_wide = self.loaded_config.config.emoji_width == .wide;
+        term.surface.core.setDefaultCursorShape(self.configCursorShape());
+        term.surface.process_state = .exited;
+        try term.auto_title.appendSlice(self.allocator, record.parsed.title);
+        try term.rt.observation.replace(self.allocator, .{
+            .availability = .stale,
+            .size = terminal.clampGridSize(size),
+            .cwd = record.parsed.cwd,
+            .window_title = record.parsed.title,
+        });
+        return term;
+    }
+
+    /// Row activation opens a local, read-only tab immediately.  It does not
+    /// launch a provider; the worker request is best effort and its result is
+    /// fenced by both surface id and request id before it becomes visible.
+    fn openAgentSessionArchiveTab(self: *AppSession, record: *const agent_session_archive_backend.Record) !void {
+        if (self.focusExistingArchiveSessionTab(record)) return;
+        const pane = self.activePane();
+        const size = layout_math.gridFromRectPx(self.cell_width_px, self.cell_height_px, self.active_pane_rect.w, self.active_pane_rect.h);
+        const term = try self.createArchiveSessionTabTerm(record, size, self.nextAgentSessionArchiveDetailRequestId());
+        errdefer self.destroyTerm(term);
+        try pane.terms.append(self.allocator, term);
+        self.focusTerm(pane.terms.items.len - 1);
+        self.writeArchiveSessionTabGuidance(term);
+
+        const archive_tab = term.rt.archive_session_tab.?;
+        var source: agent_session_archive_detail_backend.Source = .{
+            .provider = archive_tab.record.parsed.provider,
+            .source_path = try self.allocator.dupe(u8, archive_tab.record.source_path),
+            .inode = archive_tab.record.inode,
+            .device = archive_tab.record.device,
+        };
+        if (!self.agent_session_archive_detail_backend.submit(source, archive_tab.request_id, term.surface.id)) {
+            source.deinit(self.allocator);
+            archive_tab.state = .unavailable;
+            self.writeArchiveSessionTabGuidance(term);
+        }
+    }
+
+    fn archiveSessionTermForResult(self: *AppSession, surface_id: u64) ?*Term {
+        for (self.tabs.items) |tab| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items) |term| {
+                    if (term.surface.id == surface_id and term.rt.archive_session_tab != null) return term;
+                }
+            }
+        }
+        return null;
+    }
+
+    /// Frame work is queue-only: the detached backend performed every open,
+    /// stat, read, parse and redact operation before this point.
+    fn updateAgentSessionArchiveDetail(self: *AppSession) void {
+        var result = self.agent_session_archive_detail_backend.takeResult() orelse return;
+        defer result.deinit(self.allocator);
+        const term = self.archiveSessionTermForResult(result.surface_id) orelse return;
+        const archive_tab = term.rt.archive_session_tab orelse return;
+        if (archive_tab.request_id != result.request_id or archive_tab.state != .loading) return;
+        archive_tab.state = switch (result.state) {
+            .ready => .ready,
+            .stale => .stale,
+            .unavailable => .unavailable,
+        };
+        if (result.detail) |parsed| {
+            archive_tab.detail = parsed;
+            result.detail = null;
+        }
+        self.writeArchiveSessionTabGuidance(term);
+        self.metal_dirty = true;
+    }
+
+    /// A refreshed archive may nominate the same provider session id from a
+    /// different file identity.  The old tab is not allowed to reveal or resume
+    /// through that replacement, even if its own worker happened to finish
+    /// first.  Absence is intentionally not a mismatch: a bounded/partial
+    /// snapshot cannot prove the old file disappeared.
+    fn reconcileArchiveSessionTabsAgainstSnapshot(self: *AppSession) void {
+        for (self.tabs.items) |tab| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items) |term| {
+                    const archive_tab = term.rt.archive_session_tab orelse continue;
+                    var replacement_seen = false;
+                    for (self.agent_session_archive_records.items) |record| {
+                        if (record.parsed.provider != archive_tab.record.parsed.provider or
+                            !std.mem.eql(u8, record.parsed.session_id, archive_tab.record.parsed.session_id)) continue;
+                        replacement_seen = record.inode != archive_tab.record.inode or record.device != archive_tab.record.device;
+                        break;
+                    }
+                    if (!replacement_seen or archive_tab.state == .stale) continue;
+                    if (archive_tab.detail) |*parsed| parsed.deinit(self.allocator);
+                    archive_tab.detail = null;
+                    archive_tab.state = .stale;
+                    self.writeArchiveSessionTabGuidance(term);
+                    self.metal_dirty = true;
+                }
+            }
+        }
+    }
+
+    /// A native tab has no clickable rich controls yet, so the guaranteed
+    /// affordance is the explicit shortcut text plus the key routing below.
+    /// It clears then rewrites the bounded snapshot to avoid appending an old
+    /// loading state below a newly completed result.
+    fn writeArchiveSessionTabGuidance(self: *AppSession, term: *Term) void {
+        const archive_tab = term.rt.archive_session_tab orelse return;
+        var buf: [2_048]u8 = undefined;
+        var w = std.Io.Writer.fixed(&buf);
+        w.writeAll("\x1b[2J\x1b[H\r\n\x1b[1m  AI 세션 기록\x1b[0m\r\n") catch return;
+        switch (archive_tab.state) {
+            .loading => w.writeAll("\r\n  세션 분석 중…\r\n") catch {},
+            .stale => w.writeAll("\r\n  원본 세션이 변경되어 안전하게 열 수 없습니다.\r\n") catch {},
+            .unavailable => w.writeAll("\r\n  세션 원본을 읽을 수 없습니다.\r\n") catch {},
+            .ready => {
+                const parsed = archive_tab.detail orelse return;
+                w.writeAll("\r\n  최근 대화\r\n") catch {};
+                if (parsed.turns.items.len == 0) w.writeAll("    표시할 최근 대화가 없습니다.\r\n") catch {};
+                for (parsed.turns.items) |turn| {
+                    const role = switch (turn.role) {
+                        .user => "사용자",
+                        .assistant => "에이전트",
+                    };
+                    w.print("\r\n  {s}\r\n    {s}\r\n", .{ role, turn.text }) catch {};
+                }
+                if (parsed.action_records > 0)
+                    w.print("\r\n  도구/권한 관련 기록 {d}건\r\n", .{parsed.action_records}) catch {};
+                w.writeAll("\r\n  ⌘↵ 새 탭에서 이어하기    ⌘L 로그 보기\r\n") catch {};
+            },
+        }
+        self.writeSurfaceGuidance(term.surface, w.buffered());
     }
 
     /// §7 묘비를 **같은 pane 슬롯에서 제자리 교체**해 새 셸로 되살린다(⏎). `newTermInActivePane`을 쓰면 안 되는
@@ -6748,7 +6984,7 @@ pub const AppSession = struct {
             self.allocator.free(u);
             term.pending_url = null;
         }
-        if (term.kind == .web or term.rt.ended_placeholder) {
+        if (term.kind == .web or term.rt.ended_placeholder or term.rt.archive_session_tab != null) {
             // 4e-1 web Term: PTY·reader·라우팅 없음(sentinel surface). detach/closeAndDetach 없이 registry.remove만
             // 부른다 — union web arm deinit(custom_name 해제 + sentinel surface.deinit + 슬롯 해제)이 소유를 정리한다.
             // surface_id는 remove 실행 전에 읽는다(remove가 슬롯을 해제하므로 이후 term.surface deref 금지).
@@ -6784,6 +7020,10 @@ pub const AppSession = struct {
         if (term.git_branch_cwd) |c| self.allocator.free(c);
         term.auto_title.deinit(self.allocator);
         term.rt.observation.deinit(self.allocator);
+        if (term.rt.archive_session_tab) |archive_tab| {
+            archive_tab.deinit(self.allocator);
+            self.allocator.destroy(archive_tab);
+        }
         if (term.rt.ended_command.len > 0) self.allocator.free(term.rt.ended_command); // §7 묘비 owned command(deinit과 동기 유지)
         if (term.rt.ended_runtime_host_id.len > 0) self.allocator.free(term.rt.ended_runtime_host_id);
         if (term.rt.ended_runtime_id.len > 0) self.allocator.free(term.rt.ended_runtime_id);
@@ -10384,6 +10624,7 @@ pub const AppSession = struct {
                     // 오latch돼 "셸이 시작 직후 비정상 종료됐습니다"라는 거짓 안내가 뜬다. 창이 닫히면 Swift `windows`에서
                     // 빠져 그 탭·split·frame이 다음 checkpoint에서 영구히 사라진다 — 복원해 놓고 잃는 최악의 경로다.
                     if (term.rt.ended_placeholder) return false;
+                    if (term.rt.archive_session_tab != null) return false;
                     if (term.rt.live_initialized and !term.rt.terminated) return false;
                 }
             }
@@ -20174,6 +20415,32 @@ pub const AppSession = struct {
             self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
             return self.last_summary;
         }
+        // A focused archive tab is a read-only terminal surface.  It consumes
+        // every ordinary key so user text can never be mistaken for PTY input;
+        // only its visible, explicit actions are routed while the identity is
+        // still ready.  Stale/unavailable tabs deliberately keep consuming.
+        if (self.surface_initialized and self.tabs.items.len > 0) {
+            const active_archive = self.activePane().activeTerm().rt.archive_session_tab;
+            if (active_archive) |archive_tab| {
+                if (archive_tab.state == .ready and event.modifiers.command and event.key == .enter) {
+                    self.resumeAgentSessionInNewTerm(&archive_tab.record) catch {
+                        self.showNotice("세션을 다시 시작하지 못했습니다. Claude 또는 Codex CLI 설치와 작업 경로를 확인하세요.");
+                    };
+                } else if (archive_tab.state == .ready and event.modifiers.command and switch (event.key) {
+                    .char => |codepoint| codepoint == 'l' or codepoint == 'L',
+                    else => false,
+                }) {
+                    self.revealAgentSessionArchiveLog(&archive_tab.record) catch {
+                        self.showNotice("로그 원본이 변경되었거나 더 이상 열 수 없습니다.");
+                    };
+                }
+                self.metal_dirty = true;
+                self.total_app_key_events += 1;
+                self.writeSummaryFromState();
+                self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
+                return self.last_summary;
+            }
+        }
         if (self.dockVisible() and self.dock.view == .agent_sessions) {
             if (self.handleAgentSessionArchiveSearchKey(event)) {
                 self.total_app_key_events += 1;
@@ -20192,6 +20459,22 @@ pub const AppSession = struct {
                 self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
                 return self.last_summary;
             }
+        }
+        // One plain activation opens the read-only archive tab.  The provider
+        // remains inert until the later explicit action inside that tab.
+        if (self.dockVisible() and self.dock.view == .agent_sessions and event.key == .enter and
+            !event.modifiers.command and !event.modifiers.control and !event.modifiers.option and !event.modifiers.shift)
+        {
+            if (self.agent_session_archive_selected) |selected| if (selected < self.agent_session_archive_records.items.len) {
+                self.openAgentSessionArchiveTab(&self.agent_session_archive_records.items[selected]) catch {
+                    self.showNotice("세션 기록 탭을 열지 못했습니다.");
+                };
+                self.metal_dirty = true;
+                self.total_app_key_events += 1;
+                self.writeSummaryFromState();
+                self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
+                return self.last_summary;
+            };
         }
         // 선택된 archive의 명시적 재개 단축키. 행 클릭은 selection만 바꾸며 실행하지 않는다; 이 경로는
         // `Resume in New Tab` 액션과 같은 provider-native argv를 사용한다. 새 상세 패널이 붙기 전에도
@@ -21466,11 +21749,13 @@ pub const AppSession = struct {
                             self.toggleAgentSessionArchiveGroup(group_index);
                             return;
                         },
-                        // The tab opener is the next AS4 slice. Until then a card
-                        // click is deliberately selection-only and never resumes
-                        // the provider or exposes the raw archive.
                         .record => |record_index| {
                             self.agent_session_archive_selected = record_index;
+                            if (record_index < self.agent_session_archive_records.items.len) {
+                                self.openAgentSessionArchiveTab(&self.agent_session_archive_records.items[record_index]) catch {
+                                    self.showNotice("세션 기록 탭을 열지 못했습니다.");
+                                };
+                            }
                             self.metal_dirty = true;
                             return;
                         },
@@ -25253,6 +25538,10 @@ pub const AppSession = struct {
             var active_browser: ?usize = null;
             var persisted_index: usize = 0;
             for (pane.terms.items, 0..) |term, term_i| {
+                // Archive tabs are ephemeral views of private local history.
+                // Persisting one as a terminal would recreate a fake shell on
+                // the next launch and retain archive identity metadata.
+                if (term.rt.archive_session_tab != null) continue;
                 if (term.file_entry) |entry| {
                     // **diff는 persisted 시퀀스에 들지 않는다**(docs/editor-surface.md §3.5 — 저장하지 않는다).
                     // 여기서 빼지 않고 writer에서만 빼면, 이미 부여한 index가 줄어든 총계와 안 맞아 복원 시
@@ -25349,6 +25638,7 @@ pub const AppSession = struct {
             // 넓어진다. 활성이 브라우저면 다음 persisted Term을 가리키며, 이는 현행 web 활성 시 성질과 같다.
             var restored_active: usize = 0;
             for (pane.terms.items[0..pane.active_term]) |t| {
+                if (t.rt.archive_session_tab != null) continue;
                 // diff Term은 persisted 시퀀스에 없으므로 앞자리로도 세지 않는다(위 capture 규칙과 같은 기준).
                 if (t.file_entry) |e| {
                     if (e.kind != .diff) restored_active += 1;
@@ -27181,6 +27471,7 @@ pub const AppSession = struct {
         self.drainUpdateCheck(); // 인앱 새 버전 안내: 백그라운드 체크 결과를 알림으로(백그라운드 스레드 → 메인)
         self.ageFilePanelSelfWriteLatches();
         self.updateAgentSessionArchive(); // 로컬 Codex/Claude history worker 결과만 main thread 상태로 교체
+        self.updateAgentSessionArchiveDetail(); // 선택 탭 detail worker 결과만 drain; open/read/parse는 worker 전용
         self.refreshAgentSessionArchiveProjectScopeForFocus(); // active-surface id 비교만; root I/O는 worker
         self.updateAgentSessionArchiveProjectScope(); // scope root worker result만 적용; tick의 filesystem I/O는 0
         self.updateFileTree() catch {}; // FP7: background scan 결과만 적용 + 다음 요청 제출(FS I/O는 worker 전용)
@@ -32068,6 +32359,7 @@ pub const AppSession = struct {
         if (self.file_tree_initialized) {
             if (self.agent_session_archive_initialized) {
                 self.agent_session_archive_scope_backend.deinit();
+                self.agent_session_archive_detail_backend.deinit();
                 self.agent_session_archive_backend.deinit();
                 for (self.agent_session_archive_records.items) |*record| record.deinit(self.allocator);
                 self.agent_session_archive_records.deinit(self.allocator);
@@ -32220,6 +32512,10 @@ pub const AppSession = struct {
                     if (term.git_branch_cwd) |c| self.allocator.free(c);
                     term.auto_title.deinit(self.allocator);
                     term.rt.observation.deinit(self.allocator);
+                    if (term.rt.archive_session_tab) |archive_tab| {
+                        archive_tab.deinit(self.allocator);
+                        self.allocator.destroy(archive_tab);
+                    }
                     if (term.rt.ended_command.len > 0) self.allocator.free(term.rt.ended_command); // 묘비 owned command
                     if (term.rt.ended_runtime_host_id.len > 0) self.allocator.free(term.rt.ended_runtime_host_id);
                     if (term.rt.ended_runtime_id.len > 0) self.allocator.free(term.rt.ended_runtime_id);
@@ -32236,7 +32532,7 @@ pub const AppSession = struct {
                             self.backendFor(term).remove(term.rt.handle);
                         }
                         term.rt.live_initialized = false;
-                    } else if (term.rt.live_initialized or term.kind == .web or term.rt.ended_placeholder) {
+                    } else if (term.rt.live_initialized or term.kind == .web or term.rt.ended_placeholder or term.rt.archive_session_tab != null) {
                         // 4e-1: web Term은 live_initialized=false지만 registry 슬롯(web arm sentinel)을 소유하므로 remove 대상이다.
                         // remove가 union arm 태그로 분기(terminal=reader join·web=경량)해 해당 슬롯 소유를 teardown한다.
                         // §7 종료 placeholder도 같다 — `live_initialized=false` + `remote == null` + `kind == .terminal`이라

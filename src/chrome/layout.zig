@@ -194,7 +194,7 @@ pub fn layoutFlex(container: FlexContainer, items: []const Item, scratch: []Flex
     const gaps_total = try finiteProduct(container.style.gap, @as(f32, @floatFromInt(items.len - 1)));
 
     for (items, scratch) |item, *entry| {
-        try validateStyle(item.style, container.direction);
+        try validateItemStyle(item.style, container.direction);
         const measured = try measure(item, content_rect);
         const main_length = mainLength(item.style, container.direction);
         const cross_length = crossLength(item.style, container.direction);
@@ -233,7 +233,10 @@ pub fn layoutFlex(container: FlexContainer, items: []const Item, scratch: []Flex
     return result;
 }
 
-fn validateStyle(style: UiStyle, direction: Direction) LayoutError!void {
+/// `UiNode` root처럼 다른 flex parent의 `Item`이 아닌 style도 같은 closed vocabulary로
+/// 검증할 때 쓴다. caller가 성공한 layout만 publish하게 해 invalid root가 임의 rect로
+/// 보이는 fallback을 막는다.
+pub fn validateItemStyle(style: UiStyle, direction: Direction) LayoutError!void {
     try validateLength(style.width);
     try validateLength(style.height);
     try validateEdges(style.margin);

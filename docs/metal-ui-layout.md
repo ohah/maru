@@ -32,6 +32,9 @@ flowchart TD
   `ChromeDraw`로 만들고 기존 Metal GPU path가 lower한다.
 - terminal grid·VT renderer·CoreText glyph atlas의 책임은 유지한다. 이 문서는
   terminal을 CSS box로 바꾸지 않는다.
+- 새 chrome layout은 기존 TUI의 cell row/column, ANSI escape, terminal text draw를
+  입력이나 fallback으로 읽지 않는다. 이들은 전환 기간에 남는 legacy product path이며,
+  새 tree의 backing-pixel rect·clip·hit-test와 섞이지 않는다.
 
 v1 비목표는 DOM, CSS parser, JavaScript/JSX runtime, stylesheet cascade,
 browser compatibility, Rust FFI runtime, full CSS Grid algorithm, transform,
@@ -74,7 +77,7 @@ dispatch한다. component는 `AppSession`, `NativeMetalCell`, Metal API, filesys
 import하지 않는다. children/slot은 명시 prop으로 넘기며, component가 전역 UI
 상태를 찾아보지 않는다.
 
-실제 작성 문법은 JSX/XML parser가 아니라 compile-time Zig value builder다. ML2의
+실제 작성 문법은 JSX/XML parser가 아니라 compile-time Zig value builder다. ML2a의
 `UiNode`는 `identity`, `UiStyle`, tagged `props`, `[]const UiNode` children을 가지며,
 부모가 children slice의 수명과 순서를 명시한다. 예를 들어 session card 안의 text는
 다음처럼 tree의 실제 child로 작성한다.
@@ -89,9 +92,45 @@ const tree = ui.column(.{ .id = .session_dock, .style = .{ .gap = 8 } }, &.{
 
 `column`·`card`·`text`는 `UiNode` value를 반환하는 작은 Zig 함수일 뿐이고, React
 runtime, virtual DOM diff, arbitrary callback closure를 만들지 않는다. host가 immutable
-snapshot마다 frame arena에 이 tree를 만들고, ML2가 재귀 layout해 `UiRectTree`를 낸다.
+snapshot마다 frame arena에 이 tree를 만들고, ML2a가 재귀 layout해 `UiRectTree`를 낸다.
 ML1의 `layoutFlex(..., []Item, ...)`는 이때 한 parent의 sibling children을 계산하는
 순수 solver이며, 아직 component tree API나 제품 UI를 구현했다는 뜻이 아니다.
+
+### ML2a tree 경계
+
+ML2a의 `UiNode`는 `kind`, tree 전체에서 유일한 stable identity, `UiStyle`, immutable
+tagged props, children slice를 가진 value다. identity는 snapshot 사이에 같은 semantic
+component를 가리킬 때에만 재사용하며, 형제 순서나 frame allocator 주소로 만들지 않는다.
+한 tree 안의 duplicate identity는 diagnostic과 함께 build를 fail-close한다. 임의로
+suffix를 붙여 구별하면 stale pointer action이 다른 component에 전달될 수 있으므로
+금지한다.
+
+build caller는 root를 포함하는 양수 `max_entries`와 root depth=1 기준의 양수
+`max_depth`를 명시해 frame arena 사용량과 재귀 깊이를 bounded하게 만든다. 어느 limit도
+자동 확장·부분 publish하지 않으며, 초과는 typed diagnostic이다. `items`/flex scratch는
+한 parent flex 계산 뒤 재사용하지만, child rect scratch는 활성 조상 sibling이 덮어쓰지
+않도록 frame arena 안에서 stack range로 예약한다. 이전 completed snapshot이 있으면 그것을
+유지하고, 첫 build라면 empty non-interactive tree만 publish한다. virtualization은 이 상한을
+우회하려고 두 번째 hidden rect tree를 만드는 방식이 아니라, visible node만 포함한 같은
+tree를 다음 frame에 rebuild한다.
+
+`UiRectTree`는 frame arena가 소유하는 flat preorder entry와 parent index, node identity,
+border-box rect, effective clip을 보관한다. 재귀 layout은 각 parent의 child sibling을
+ML1 `layoutFlex`로 계산한 뒤 같은 entry를 자식에 전달한다. root border-box는 host가
+한 번만 준 backing-pixel available size이고, 자식이 terminal cell 수나 독자적인 window
+size를 다시 읽을 수 없다. 따라서 root는 padding/gap 같은 container 내부 style만 쓰며
+width/height/min/max/margin/flex/align-self 같은 outer placement style은 fail-close한다.
+draw, hit-test, focus, virtualization은 별도의 rect cache를 만들지 않고 이 tree만 읽는다.
+tree와 rect tree는 다음 immutable snapshot publish 전까지만 유효하다. build/layout이
+duplicate identity나 invalid style로 실패하면 host는 새 tree를 publish하지 않고 직전
+completed snapshot을 유지한다. 이를 위해 candidate frame buffer는 published snapshot과
+분리하며, in-place rebuild는 금지한다. publish 시에는 old tree를 retire하기 전에
+capture/focus의 stale identity를 cancel하고, 그 뒤 old frame arena를 회수한다.
+
+`column`, `card`, `text` builder는 이 tagged node value를 만들 뿐 TUI cell 수를
+계산하거나 ANSI 문자열을 반환하지 않는다. `card`의 action은 callback이 아니라 stable
+action identity와 enabled policy이고, host가 나중에 dispatch한다. text measurement는
+ML1 callback seam을 통하며 실제 CoreText measure와 paint는 ML3에서 연결한다.
 
 ## 3. typed style과 responsive sizing
 
@@ -289,21 +328,25 @@ file work를 섞지 않으며, 공용 frame phase가 살아 있는 animation만 
 1. **ML1 — typed rect/flex core:** `UiLength`, edge/min-max resolve, measure callback,
    row/column flex, overflow clip의 pure test. px/percent/auto/fill, zero/negative,
    NaN/∞ fail-close, tiny container, min/max freeze 재분배, text measurement을 단언한다.
-2. **ML2 — component layout seam:** `UiTree`/`UiRectTree`, stable identity, same
-   rect for draw/hit/focus/virtualization, dirty rebuild counter를 headless로 고정한다.
-   `UiPointerEvent` mapping, hover enter/leave의 두-rect dirty, outside move/up pointer
-   capture, tree mutation/snapshot swap의 cancelled capture와 stale up action=0도 같은
-   component/host test로 고정한다.
-3. **ML3 — Chrome Lab과 Metal paint seam:** test-only `ChromeLabScenario` surface를
+2. **ML2a — nested component layout seam (구현 완료):** `src/chrome/ui_tree.zig`가
+   `UiNode` builder와 `UiRectTree`, tree-wide unique stable identity, parent/clip
+   ancestry, same rect 소비 seam, successful-only rebuild counter를 headless로 고정한다.
+   이 tree는 legacy TUI cell/ANSI path를 읽지 않는다. 아직 draw/hit/focus consumer는
+   연결하지 않았다.
+3. **ML2b — pointer interaction seam:** `UiPointerEvent` mapping, hover enter/leave의
+   두-rect dirty, outside move/up pointer capture, tree mutation/snapshot swap의
+   cancelled capture와 stale up action=0을 ML2a rect tree를 소비하는 host test로
+   고정한다.
+4. **ML3 — Chrome Lab과 Metal paint seam:** test-only `ChromeLabScenario` surface를
    먼저 만들고 rounded/border/shadow/opacity/clip을 `ChromeDraw`와 production Metal
    lowering에 연결한다. Lab screenshot/readback fixture가 rect·clip 정합과 scripted
    action identity를 고정한다. clip scissor는 Metal framebuffer의 좌상단 원점을
    명시적으로 사용하며, clip 미연결 인프라나 하단-원점 변환을 남기지 않는다. nested
    clip·부분 pixel scroll의 경계 screenshot이 y축 반전과 header bleed를 막는 gate다.
-4. **ML4 — Session Dock:** `SessionDock`과 `ArchiveDetailPanel`이 ML1~3만 소비해
+5. **ML4 — Session Dock:** `SessionDock`과 `ArchiveDetailPanel`이 ML1~3만 소비해
    direct text draw/ANSI guidance를 대체한다. worker, archive identity, resume/reveal
    계약은 바꾸지 않는다.
-5. **ML5+ — 필요가 증명된 기능:** grid, static transform, transition/animation을
+6. **ML5+ — 필요가 증명된 기능:** grid, static transform, transition/animation을
    각각 별도 PR과 fixture로 연다.
 
 각 slice의 적대적 검증은 (a) draw/hit/clip rect drift, (b) parent resize와

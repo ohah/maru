@@ -530,10 +530,37 @@ cursor/hover paint와 scripted macOS 입력은 ML3 Chrome Lab capture에서 별�
 ## 6. Chrome Lab — Storybook 같은 Metal visual/E2E fixture
 
 `Chrome Lab`은 Storybook의 component scenario 개념을 Metal 제품 경로에 옮긴
-**test-only surface tab**이다. shell·PTY를 실행하는 일반 Terminal이 아니며, 앱의
-정상 사용자 화면과 release navigation에는 노출하지 않는다. 개발/CI fixture가
+**test-only surface input**이다. shell·PTY를 실행하는 일반 Terminal이 아니며, 앱의
+정상 사용자 화면과 release navigation에는 노출하지 않는다. 후속 개발/CI fixture가
 `ChromeLabScenario`를 열면, 같은 `ChromeHost`·`ChromeDraw`·CoreText·Metal lowering
-경로가 synthetic component tree를 실제 drawable에 그린다.
+경로로 synthetic component tree를 실제 drawable에 그린다. 이 PR은 그 caller가 공유할 lowering
+leaf를 먼저 분리한 것이며, Lab 자체·readback capture는 아직 구현하지 않는다.
+
+### 6.1 surface admission과 공개 모델 경계
+
+ML3b의 첫 구현에서 Lab은 `session.control_surface.SurfaceKind`나 persisted workspace의
+새 variant가 아니다. 그 둘은 CLI/control-plane과 workspace restore의 공개 계약이므로, `.chrome_lab`
+추가는 개발 fixture 하나를 위해 일반 사용자 탭·저장 포맷·원격 관측에 누출된다. 대신 macOS fixture가
+프로세스 안에서만 만드는 **`ChromeLabSurface`** 를 사용한다.
+
+- 입구는 test executable 또는 명시적인 fixture-only boot argument 하나다. 일반 앱 launch, release
+  navigation, workspace restore, control-plane inventory는 Lab을 만들거나 열거하지 않는다.
+- `ChromeLabSurface`는 PTY, shell, provider log, 파일 경로, persisted `Term`를 갖지 않는다. scenario의
+  compile-time synthetic props와 deterministic clock만 소유한다.
+- surface라는 말은 Metal drawable에 투영되는 독립 frame input이라는 뜻이다. 제품 workspace의 Tab/Pane가
+  아니며, `SurfaceId`를 발급하거나 `SurfaceKind`에 새 case를 더하지 않는다.
+- 후속 Lab과 일반 Chrome은 동일한 `src/platform/macos/chrome/metal_lowering.zig` platform leaf를 호출해야 한다.
+  이 파일은 `ChromeDraw`·`Tokens`를 `renderer.metal_frame`의 cell/quad/shadow frame input으로만
+  변환하며 표준 `maru` facade에서 필요한 중립 계약만 읽는다. `AppSession`, session model, PTY, provider를
+  import하거나 참조하지 않는다. 기존 `AppSession`은 frame
+  소유·arena·합성만 맡고 이 leaf를 호출한다. Lab 전용 lowerer, mock renderer, 별도의 token→RGB 규칙은
+  금지한다. backend extraction이 먼저이고, Lab은 그 caller 둘 중 하나일 뿐이다.
+- scripted input은 `ui/interaction.dispatch`에 전달하고, dispatcher는 `recorded_action`만 쓴다.
+  provider resume, reveal, process spawn, filesystem callback은 compile-time과 runtime 양쪽에서 진입점이 없다.
+
+따라서 ML3b1의 산출물은 `test-only surface input`이라는 fixture 경계를 공개 session 타입으로 오해하지 않게
+한다. 이후 실제 개발자용 Lab 탭을 추가할 필요가 생기면, 그때만 별도 설계에서 workspace persistence,
+control-plane visibility, 권한 모델과 lifecycle을 결정한다.
 
 ```mermaid
 flowchart TD

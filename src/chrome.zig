@@ -1,7 +1,7 @@
 //! Chrome 디자인 시스템 facade(L3). **플랫폼 중립** — 컴포넌트는 semantic `ChromeDraw`만 뱉고, session을
 //! `props`로만 읽으며, NativeMetalCell·Metal·CoreText·atlas를 모른다. ChromeDraw → 플랫폼 셀 lowering은
-//! platform 어댑터가 소유한다(현재 app_session.zig의 rasterizeOverlayCells — 별도 chrome_tui_backend 분리는
-//! docs/chrome-strategy.md §5.3의 계획). 테마 = 토큰셋(tui|rich, 컴포넌트 불변).
+//! platform 어댑터가 소유한다(현재 `platform/macos/chrome/metal_lowering.zig` — AppSession은 호출·frame 합성만).
+//! 테마 = 토큰셋이며, 사용자 진입점은 Chrome만 제공한다. legacy `tui` 표기는 셀 lowering 호환 경로의 내부 이름이다.
 //!
 //! 의존: chrome → (session core를 props로) → renderer 중립 계약. chrome은 pty/platform/terminal/renderer를
 //! import하지 않는다(tests/boundary/imports.zig가 강제). 단일 출처: docs/layering-and-portability.md,

@@ -48543,10 +48543,15 @@ test "file tree mutations create rename protect dirty and use a visible staged T
     attempts = 0;
     while (attempts < 500) : (attempts += 1) {
         session.updateFileTreeMutations();
-        if (std.Io.Dir.cwd().statFile(io, renamed, .{})) |_| break else |_| {}
+        // worker가 파일을 먼저 복원하고 app-side restore completion은 다음 turn에 게시할 수 있다.
+        // namespace reservation까지 해제된 뒤에만 다음 삭제를 시작해야 실제 제품 순서를 검증한다.
+        if (std.Io.Dir.cwd().statFile(io, renamed, .{})) |_| {
+            if (!session.fileTreeFileMutationBusy()) break;
+        } else |_| {}
         std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
     }
     _ = try std.Io.Dir.cwd().statFile(io, renamed, .{});
+    try std.testing.expect(!session.fileTreeFileMutationBusy());
     try std.testing.expect(session.fileEntryForPath(renamed) != null);
 
     // A successful native Trash ack commits the model only after the OS operation and closes clean tabs.

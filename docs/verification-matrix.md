@@ -666,7 +666,10 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   last release 뒤 Client/node exact-one destroy를 검증한다. fork child PID-domain mismatch에서 low-level mint/consume/tryDeinit의
   typed reject와 callback/free/owner mutation 0, strict 제품 wrapper의 fail-stop을 구분해 검증한다. HostPool membership
   lease와 ConnectionLease는 별개이며 external-pump owner graph는 변경하지 않는다. 증거 수준은 production-type unit이다.
-- CR3a-2(진행, **2a·2b·2c1 구현**, 2c2~e 계획): generation 1 compatibility wiring으로 GUI raw `RemoteRuntime.client=*Client`와
+- CR3a-2(진행, **2a·2b·2c1·2c2a 구현**, 2c2b~e 계획): 2c2a는 snapshot 전용 permit을 kind-tagged common
+  `StreamOperationPermit`/단일 active tuple/process registry로 migration하고 `GenerationBatchRegistry.streamIdle`이
+  reserved/ingress/live/releasing 전 상태를 purge blocker로 분류한다. ended peek/queue transaction/제품 배선은 2c2b 이후다.
+  generation 1 compatibility wiring으로 GUI raw `RemoteRuntime.client=*Client`와
   `AttachmentTransport.context=*Client` production callsite 0, GUI-only final-address `GenerationAttachment.initInPlace`,
   external movable `RemoteAttachment`의 outer field 목록·기존 `untracked|charged` reachable 의미와 external `Prepared|Attached`의
   outer owner schema 불변(`AttachmentBatchLease` 내부 generation variant/layout 변화는 허용), live transport와 cleanup lease 분리,

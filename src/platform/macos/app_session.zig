@@ -12443,6 +12443,9 @@ pub const AppSession = struct {
             else => return true,
         }
         self.rebuildAgentSessionArchiveFilter();
+        // A query may hide the selected record; clear the expanded detail
+        // rather than leaving actions for an item outside the visible result.
+        self.agent_session_archive_selected = null;
         self.metal_dirty = true;
         return true;
     }

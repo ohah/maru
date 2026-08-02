@@ -862,6 +862,24 @@ export function bootShell(document: Document, targetWindow: ViewerWindow): void 
     return editor !== null && documentIsDirtyAgainstSnapshot(editor.state.doc, savedDocument);
   };
 
+  /**
+   * 리치가 보여 줄 이미지 바이트를 shell 브리지로 읽어 data URL로 만든다.
+   *
+   * 읽기 경로가 쓰는 것과 **같은 브리지·같은 변환**이다(`readAsset` → `assetDataUrl`) — `assetDataUrl`이
+   * mime과 매직 바이트가 맞는지 다시 보고, SVG는 sanitize를 거친다. 리치만의 완화 경로를 만들지 않는다.
+   *
+   * 실패는 조용하다. 이미지가 안 보일 뿐 문서와 저장 결과는 영향받지 않는다.
+   */
+  const resolveRichAsset = async (path: string): Promise<string | null> => {
+    try {
+      const result = await requestFileBridge(document, "readAsset", path);
+      if (typeof result.mime !== "string" || typeof result.data_base64 !== "string") return null;
+      return assetDataUrl(result.mime, result.data_base64, targetWindow);
+    } catch {
+      return null;
+    }
+  };
+
   const setCloseLocked = (requestId: number | null) => {
     closeLockRequestId = requestId;
     if (editor !== null) editor.contentDOM.contentEditable = requestId === null ? "true" : "false";
@@ -1075,6 +1093,7 @@ export function bootShell(document: Document, targetWindow: ViewerWindow): void 
         reportDirty(currentDocumentIsDirty());
       },
       () => void save(),
+      resolveRichAsset,
     );
     if (closeLockRequestId !== null) richEditor.setEditable(false);
     return richEditor;

@@ -392,6 +392,101 @@ describe("rich editing mode", () => {
     });
   });
 
+  test("이미지는 화면에만 바이트를 채우고 문서에 적힌 경로는 그대로다", async () => {
+    // `src`를 data URL로 갈아끼우면 그 URL이 **직렬화돼 파일에 저장된다** — 이미지 한 장 때문에 문서가 수십
+    // KB의 base64로 부풀고 원문 경로가 사라진다. 그래서 속성은 원문 경로로 두고 DOM만 채운다.
+    await withEditorDom(async (dom) => {
+      const doc = (globalThis as unknown as { document: Document }).document;
+      const asked: string[] = [];
+      const host = doc.querySelector("main") as HTMLElement;
+      const rich = createRichEditor(
+        host,
+        "![alt](images/local.png)\n",
+        () => {},
+        () => {},
+        async (path: string) => {
+          asked.push(path);
+          return "data:image/png;base64,AAAA";
+        },
+      );
+      try {
+        // 브리지에는 **검증된 상대 경로**가 간다.
+        expect(asked).toEqual(["images/local.png"]);
+        for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+        expect(doc.querySelector<HTMLImageElement>(".maru-rich-image")?.getAttribute("src")).toBe(
+          "data:image/png;base64,AAAA",
+        );
+        // 저장되는 원문은 경로 그대로다.
+        expect(rich.getMarkdown().trim()).toBe("![alt](images/local.png)");
+      } finally {
+        rich.destroy();
+      }
+    });
+  });
+
+  test("원격 이미지는 바이트를 요청하지 않는다(정책)", async () => {
+    // 문서가 네트워크를 먼저 읽지 못하게 한다. 읽기 파이프라인과 **같은 검증**을 쓰므로 절대경로·상위 이동도
+    // 함께 걸러진다.
+    await withEditorDom(async (dom) => {
+      const doc = (globalThis as unknown as { document: Document }).document;
+      const asked: string[] = [];
+      const host = doc.querySelector("main") as HTMLElement;
+      const rich = createRichEditor(
+        host,
+        "![a](https://example.com/x.png)\n\n![b](/tmp/secret.png)\n\n![c](../outside.png)\n",
+        () => {},
+        () => {},
+        async (path: string) => {
+          asked.push(path);
+          return "data:image/png;base64,AAAA";
+        },
+      );
+      try {
+        expect(asked).toEqual([]);
+        expect(rich.getMarkdown()).toContain("https://example.com/x.png");
+      } finally {
+        rich.destroy();
+      }
+    });
+  });
+
+  test("짝이 맞지 않는 조각은 미리보기를 감춘다", async () => {
+    // `<details>` 안에 빈 줄과 마크다운이 있으면(가장 흔한 형태다) 토크나이저가 조각을 셋으로 나눈다 —
+    // 여는 태그 / 일반 문단 / 닫는 태그. 보존은 조각 단위라 왕복은 정확하지만, 여는 태그만 렌더하면
+    // **안쪽 본문이 빠진 접기**가 보여 실제 문서보다 적게 보인다(실제 브라우저에서 확인했다).
+    // 반쪽 구조를 보여 주느니 원문만 보이는 편이 정직하다.
+    await withEditorDom(async (dom) => {
+      const doc = (globalThis as unknown as { document: Document }).document;
+      const split = "<details>\n<summary>접기</summary>\n\n안쪽 **본문**\n\n</details>\n";
+      const rich = mountRich(dom, split);
+      try {
+        const previews = [...doc.querySelectorAll<HTMLElement>(".maru-rich-raw-preview")];
+        expect(previews.length).toBeGreaterThan(0);
+        expect(previews.every((preview) => preview.hidden)).toBe(true);
+        // 보존은 그대로다 — 미리보기 판정이 문서를 바꾸지 않는다.
+        expect(rich.getMarkdown().trim()).toBe(split.trim());
+      } finally {
+        rich.destroy();
+      }
+    });
+  });
+
+  test("한 조각으로 온전한 블록은 미리보기를 보여 준다", async () => {
+    await withEditorDom(async (dom) => {
+      const doc = (globalThis as unknown as { document: Document }).document;
+      const whole = "<details><summary>한 조각</summary>안쪽</details>";
+      const rich = mountRich(dom, `${whole}\n`);
+      try {
+        const preview = doc.querySelector<HTMLElement>(".maru-rich-raw-preview");
+        expect(preview?.hidden).toBe(false);
+        expect(preview?.querySelector("details summary")).not.toBeNull();
+        expect(rich.getMarkdown().trim()).toBe(whole);
+      } finally {
+        rich.destroy();
+      }
+    });
+  });
+
   test("임의로 조합한 문서도 조각 단위로 보존된다(속성 테스트)", async () => {
     // 왜 속성 테스트인가: 문법을 하나씩 세는 방식은 **우리가 떠올린 것만** 검사한다. 보존 규칙의 값어치는
     // 목록에 없는 문법에서 나오므로, 조각을 무작위로 이어 붙여 "원문 조각이 출력에 그대로 남는가"를 본다.

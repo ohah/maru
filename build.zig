@@ -283,7 +283,7 @@ pub fn build(b: *std.Build) void {
         macos_chrome_lab_smoke.root_module.linkFramework("QuartzCore", .{});
 
         const macos_chrome_lab_smoke_step = b.step("macos-chrome-lab-smoke", "Capture deterministic Chrome Lab scenarios through the product Metal renderer");
-        inline for ([_][]const u8{ "empty", "loading", "retained-list" }) |scenario| {
+        inline for ([_][]const u8{ "empty", "loading", "retained-list", "partial-scroll" }) |scenario| {
             const run_chrome_lab = b.addRunArtifact(macos_chrome_lab_smoke);
             run_chrome_lab.setCwd(b.path("."));
             run_chrome_lab.setEnvironmentVariable("MARU_CHROME_LAB_SCENARIO", scenario);

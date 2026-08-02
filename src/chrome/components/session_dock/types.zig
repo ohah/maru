@@ -58,6 +58,9 @@ pub const Props = struct {
     loading: bool = false,
     refreshing: bool = false,
     spinner_phase: u3 = 0,
+    /// The first virtualized item origin relative to the content clip. It is normally zero or
+    /// negative, but can be positive when an offset lands in an inter-item gap.
+    content_first_item_origin_y_px: i32 = 0,
     items: []const Item = &.{},
 };
 

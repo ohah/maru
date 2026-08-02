@@ -85,6 +85,11 @@ const Writer = struct {
         if (cw == 0 or ch == 0) return;
         const x = rect.rect.x + @as(f32, @floatFromInt(cw));
         const y = rect.rect.y + @as(f32, @floatFromInt(ch * (line + 1)));
+        if (rect.effective_clip) |clip| {
+            // CoreText lowering receives semantic baselines, not a second content scissor. Do not
+            // emit a baseline outside the tree's already-published clip while an item is partial.
+            if (y < clip.y or y >= clip.y + clip.height) return;
+        }
         const available_px = rect.rect.width - @as(f32, @floatFromInt(cw * 2));
         if (available_px <= 0) return;
         const max_cols: u16 = @intFromFloat(@floor(available_px / @as(f32, @floatFromInt(cw))));

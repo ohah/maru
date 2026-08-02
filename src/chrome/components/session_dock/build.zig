@@ -131,7 +131,32 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
         .flex_scratch = buffers.flex_scratch,
         .child_rects = buffers.child_rects,
     });
-    return .{ .tree = built, .actions = table.slice() };
+    // Virtualization starts at the first partially-visible item. Shift only those direct content
+    // children after the generic tree has established the one shared content clip; this avoids a
+    // parallel host-only y calculation for paint or hit testing.
+    if (props.content_first_item_origin_y_px != 0) {
+        const content_index = built.find(NodeIds.content) orelse return error.InsufficientNodeBuffer;
+        const origin: f32 = @floatFromInt(props.content_first_item_origin_y_px);
+        const content_clip = buffers.entries[content_index].effective_clip orelse buffers.entries[content_index].rect;
+        for (buffers.entries[0..built.entries.len]) |*entry| {
+            if (entry.parent_index != null and entry.parent_index.? == content_index) {
+                entry.rect.y += origin;
+                // `tree.build` calculated this child's clip before the virtualization translation.
+                // Re-intersect against the immutable content clip here so card paint and hit test
+                // observe the exact same visible partial rectangle.
+                entry.effective_clip = intersect(entry.rect, content_clip);
+            }
+        }
+    }
+    return .{ .tree = .{ .entries = buffers.entries[0..built.entries.len] }, .actions = table.slice() };
+}
+
+fn intersect(a: layout.UiRect, b: layout.UiRect) layout.UiRect {
+    const left = @max(a.x, b.x);
+    const top = @max(a.y, b.y);
+    const right = @min(a.x + a.width, b.x + b.width);
+    const bottom = @min(a.y + a.height, b.y + b.height);
+    return .{ .x = left, .y = top, .width = @max(right - left, 0), .height = @max(bottom - top, 0) };
 }
 
 fn scopeNode(id: u64, action: tree.UiAction, enabled: bool, selected: bool) tree.UiNode {
@@ -186,4 +211,40 @@ test "SessionDock build shares action rects with the completed tree" {
     var table = ids.Table.init(@constCast(frame.actions));
     table.count = frame.actions.len;
     try @import("std").testing.expectEqual(@as(?ids.Intent, .{ .select_card = 12 }), table.resolve(7, 9));
+}
+
+test "SessionDock partial item keeps one content clip for paint and hit testing" {
+    const props = types.Props{
+        .viewport_px = .{ .width = 320, .height = 240 },
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .snapshot_generation = 9,
+        .displayed_count = 2,
+        .content_first_item_origin_y_px = -20,
+        .items = &.{
+            .{ .card = .{ .identity = 12, .provider = .codex, .title = "title", .summary = "summary", .metadata = "meta" } },
+            .{ .card = .{ .identity = 13, .provider = .claude, .title = "next", .summary = "summary", .metadata = "meta" } },
+        },
+    };
+    var nodes: [9]tree.UiNode = undefined;
+    var entries: [10]tree.RectEntry = undefined;
+    var layout_items: [10]layout.Item = undefined;
+    var flex_scratch: [10]layout.FlexScratch = undefined;
+    var child_rects: [10]layout.UiRect = undefined;
+    var actions: [8]ids.Entry = undefined;
+    const frame = try build(props, .{
+        .nodes = &nodes,
+        .entries = &entries,
+        .layout_items = &layout_items,
+        .flex_scratch = &flex_scratch,
+        .child_rects = &child_rects,
+        .actions = &actions,
+    });
+    const content = frame.tree.entries[frame.tree.find(NodeIds.content).?];
+    const first = frame.tree.entries[frame.tree.find(NodeIds.item(0)).?];
+    try @import("std").testing.expect(first.rect.y < content.rect.y);
+    try @import("std").testing.expect(first.effective_clip != null);
+    const clip = first.effective_clip.?;
+    try @import("std").testing.expectEqual(content.rect.y, clip.y);
+    try @import("std").testing.expect(clip.height <= content.rect.height);
 }

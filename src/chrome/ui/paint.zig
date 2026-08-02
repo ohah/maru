@@ -50,7 +50,8 @@ pub fn paint(
             .none => if (entry.kind != .container) return error.InvalidSnapshot,
             .card => |visual| {
                 if (entry.kind != .card) return error.InvalidSnapshot;
-                const rect = try snapRect(entry.rect);
+                const clipped = if (entry.effective_clip) |clip| intersect(entry.rect, clip) else entry.rect;
+                const rect = try snapRect(clipped);
                 if (rect.w == 0 or rect.h == 0) continue;
                 if (count == buffers.ops.len) return error.InsufficientBuffer;
                 const style = paint_style.resolveCard(entry.id, visual, entry.action, state, tk);
@@ -71,6 +72,14 @@ pub fn paint(
         }
     }
     return .{ .layer = layer, .ops = buffers.ops[0..count] };
+}
+
+fn intersect(a: layout.UiRect, b: layout.UiRect) layout.UiRect {
+    const left = @max(a.x, b.x);
+    const top = @max(a.y, b.y);
+    const right = @min(a.x + a.width, b.x + b.width);
+    const bottom = @min(a.y + a.height, b.y + b.height);
+    return .{ .x = left, .y = top, .width = @max(right - left, 0), .height = @max(bottom - top, 0) };
 }
 
 /// Layout may produce fractional rects for percent/fill. Painting snaps once at the last neutral
@@ -168,6 +177,24 @@ test "paint emits preordered snapped card quads and ignores text until shaping e
     try std.testing.expectEqual(tokens.ColorRole.row_hover_bg, out.ops[0].quad.fill_role);
     try std.testing.expect(out.ops[1] == .quad);
     try std.testing.expectEqual(tokens.ColorRole.tab_active_bg, out.ops[1].quad.fill_role);
+}
+
+test "paint intersects a card with its completed tree clip" {
+    const tk = testTokens();
+    const entries = [_]ui_tree.RectEntry{.{
+        .id = 1,
+        .parent_index = null,
+        .kind = .card,
+        .rect = .{ .x = 0, .y = -8, .width = 20, .height = 20 },
+        .effective_clip = .{ .x = 0, .y = 0, .width = 20, .height = 12 },
+        .action = .{ .id = 1 },
+        .visual = .{ .card = .{ .variant = .surface, .paint = .{} } },
+    }};
+    var ops: [1]draw.Op = undefined;
+    const out = try paint(.{ .entries = &entries }, .{}, &tk, .sidebar, .{ .ops = &ops });
+    try std.testing.expectEqual(@as(usize, 1), out.ops.len);
+    try std.testing.expectEqual(@as(i32, 0), out.ops[0].quad.rect.y);
+    try std.testing.expectEqual(@as(u32, 12), out.ops[0].quad.rect.h);
 }
 
 test "paint fails closed for bad snapshots and fixed-capacity overflow" {

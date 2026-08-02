@@ -637,7 +637,7 @@ success/rollback 대칭 republish와 경쟁 launcher 0을 포함한다.
 
 ### 영속 host CR 실행 중 transport reconnect gate
 
-**상태: 부분 구현(CR0a·CR3a-1 완료).** `RemoteRuntime`/Surface/pump/routing 주소를 고정한 stable shell과 generation bundle,
+**상태: 부분 구현(CR0a·CR3a-1·2a·2b1·2b2·2c1 완료).** `RemoteRuntime`/Surface/pump/routing 주소를 고정한 stable shell과 generation bundle,
 stable `ScreenSource` borrow, 앱 전역 host job, existing-host-only controller recovery를
 [persistent-session-host.md](persistent-session-host.md#실행-중-connection-invalidation과-재연결)가 소유한다. raw in-place
 field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다.
@@ -666,7 +666,7 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   last release 뒤 Client/node exact-one destroy를 검증한다. fork child PID-domain mismatch에서 low-level mint/consume/tryDeinit의
   typed reject와 callback/free/owner mutation 0, strict 제품 wrapper의 fail-stop을 구분해 검증한다. HostPool membership
   lease와 ConnectionLease는 별개이며 external-pump owner graph는 변경하지 않는다. 증거 수준은 production-type unit이다.
-- CR3a-2(진행, **2a 구현**, 2b~e 계획): generation 1 compatibility wiring으로 GUI raw `RemoteRuntime.client=*Client`와
+- CR3a-2(진행, **2a·2b·2c1 구현**, 2c2~e 계획): generation 1 compatibility wiring으로 GUI raw `RemoteRuntime.client=*Client`와
   `AttachmentTransport.context=*Client` production callsite 0, GUI-only final-address `GenerationAttachment.initInPlace`,
   external movable `RemoteAttachment`의 outer field 목록·기존 `untracked|charged` reachable 의미와 external `Prepared|Attached`의
   outer owner schema 불변(`AttachmentBatchLease` 내부 generation variant/layout 변화는 허용), live transport와 cleanup lease 분리,
@@ -711,11 +711,22 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   node/ledger terminal owner exact 1을 검증한다. 첫 indeterminate/두 번째 retryable 뒤 남은 token 전부의 aggregate terminal
   handoff, registry drain/quarantine→Client.deinit→node destroy 순서를 검증한다. batch release completed/retryable은 stream open,
   stream drop completed는 terminal, indeterminate/second retryable만 terminal_handoff인 entry/stream 직교 표를 전수한다.
-  `GenerationTransport`는 SSOT의 exact 15-declaration primitive set, closed `RuntimeRequest` variants와 exact-field
+  2c는 2c1(구현) initial snapshot final-address owner, 2c2 sealed ended receipt+all-or-none early purge, 2c3 closed
+  capability/input/control/event/RPC primitive, 2c4 `RuntimeConnection` union+exact 15-method source oracle 순으로 병합한다. 중간
+  gate는 자기 raw allowlist만 줄이며 2c4 전에는 `RemoteRuntime.client` 0이나 2c 전체 완료를 주장하지 않는다.
+  `GenerationTransport`는 SSOT의 exact 15-declaration primitive set(`readAttachmentBatch` 제외,
+  `purgeEndedStream` 포함), closed `RuntimeRequest` variants와 exact-field
   `GenerationCapabilities`만 노출하고 arbitrary method-string `call`, generic callback, Client-containing aggregate,
-  `*Client|*anyopaque` escape는 0이다. recursive signature audit와 self-address/PID/owner-thread/same-stream cleanup gate는
-  copy/fork/reentry를 wire/mutation 0으로 거부한다. initial snapshot은 stack-owned 별도 payload로 exact once free하고 registry
-  accounting에 들어가지 않는다. no-wire local OOM, complete snapshot apply OOM, malformed payload, partial/timeout/EOF, detach
+  `*Client|*anyopaque` escape는 0이다. generation의 post-initial batch owner는 2b2 `GenerationBatchAdapter` 하나뿐이며,
+  ended purge는 exact one-shot receipt로 demux queue만 정리하고 canonical attachment drop/lease를 건드리지 않는다. 기존 raw
+  Client entrypoint는 명시적 legacy union arm에만 격리되고 generation 실패의 legacy fallback은 0이다. recursive signature audit와
+  self-address/PID/owner-thread/same-stream cleanup gate는
+  copy/fork/reentry를 wire/mutation 0으로 거부한다. initial snapshot은 allocator·binding·stream identity를 봉인한 final-address
+  owner와 heap-pinned node canonical permit을 함께 써 exact once free하고 registry accounting에 들어가지 않는다. owner+transport
+  stale restore replay, slot 종료 뒤 stale owner의 backing 비역참조 거부, binding splice, allocator free callback의
+  same-attachment teardown busy, callback 뒤 permit consume와 batch-internal
+  error 비노출을 고정한다. no-wire local OOM, complete snapshot apply OOM, malformed
+  payload, partial/timeout/EOF, detach
   prepare OOM, success, invalid_request/unauthorized/conflict reject와 detach reply-loss 상태표를 actual
   socket/fail-index로 전수한다.
   모든 success/errdefer/map-put/terminate/detach 경로는 `pool retain -> prepared binding -> runtime publish`와

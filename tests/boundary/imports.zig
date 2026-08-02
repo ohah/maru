@@ -50,7 +50,7 @@ test "CR3a-2a attachment cleanup registry stays node-local and callback-free" {
         try std.testing.expectEqual(@as(usize, 0), countOccurrences(source, needle));
 }
 
-test "CR3a-2a generation transport exposes only the five-method live core" {
+test "CR3a-2c1 generation transport exposes the five-method core plus initial snapshot" {
     const allocator = std.testing.allocator;
     const source = try readZigFileZ(
         allocator,
@@ -65,6 +65,7 @@ test "CR3a-2a generation transport exposes only the five-method live core" {
         "    pub fn prepareRequest(",
         "    pub fn executePreparedRequest(",
         "    pub fn abortPreparedRequest(",
+        "    pub fn readInitialSnapshot(",
         "    pub fn poison(",
     };
     try std.testing.expectEqual(@as(usize, methods.len), countOccurrences(product_source, "    pub fn "));
@@ -1391,8 +1392,10 @@ test "generation batch Client ownership mutations have one node-bound production
     try std.testing.expectEqual(@as(usize, 1), read_references);
     try std.testing.expectEqual(@as(usize, 1), prepare_references);
     try std.testing.expectEqual(@as(usize, 1), bind_references);
-    try std.testing.expectEqual(@as(usize, 1), begin_allocator_references);
-    try std.testing.expectEqual(@as(usize, 1), restore_allocator_references);
+    // Batch와 one-shot initial snapshot은 같은 node-local allocator swap boundary를 쓰며,
+    // 그 밖의 파일에는 raw allocator authority가 없다.
+    try std.testing.expectEqual(@as(usize, 2), begin_allocator_references);
+    try std.testing.expectEqual(@as(usize, 2), restore_allocator_references);
     try std.testing.expectEqual(@as(usize, 4), enter_callback_references);
     try std.testing.expectEqual(@as(usize, 4), leave_callback_references);
     try std.testing.expectEqual(@as(usize, 2), reject_callback_references);
@@ -4012,6 +4015,69 @@ test "CR3a-2b2 generation GUI batch path is node-bound while legacy fallback sta
     // Initial snapshot과 ended-event queue 정리는 2c의 명시적 raw Client allowlist다.
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(runtime, "self.client.readSnapshot("));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(runtime, "self.client.dropBufferedStream("));
+}
+
+test "CR3a-2c1 initial snapshot ownership stays final-address and generation-bound" {
+    const allocator = std.testing.allocator;
+    const runtime = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/remote_runtime.zig",
+    );
+    defer allocator.free(runtime);
+    const transport = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/generation_transport.zig",
+    );
+    defer allocator.free(transport);
+    const owner = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/initial_snapshot_owner.zig",
+    );
+    defer allocator.free(owner);
+    const slot = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/client_slot.zig",
+    );
+    defer allocator.free(slot);
+    const owner_type = betweenMarkers(
+        owner,
+        "pub const InitialSnapshotOwner = struct {",
+        "\nfn currentPid()",
+    ) orelse return error.TestUnexpectedResult;
+    const transport_product = if (std.mem.indexOf(u8, transport, "\ntest \"")) |index| transport[0..index] else return error.TestUnexpectedResult;
+
+    // Generation initial snapshot은 raw Client 호출이나 bare slice 반환이 아니라 exact
+    // final-address owner를 통해서만 제품 attach stack에 도달한다.
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(runtime, "self.client.readSnapshot("));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(transport_product, "pub fn readInitialSnapshot("));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(transport_product, ".readInitialSnapshotGuarded("));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(slot, ".readSnapshot("));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(runtime, ".readInitialSnapshot("));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(owner_type, "self_addr: usize = 0"));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(owner_type, "actual_allocator:"));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(owner_type, "transport_incarnation: u64 = 0"));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(owner_type, "stream_id: u64 = 0"));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(owner_type, "binding_incarnation: u64 = 0"));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(owner_type, "binding_storage_addr: usize = 0"));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(owner_type, "binding_destination_addr: usize = 0"));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(owner_type, "binding_reservation_id: u64 = 0"));
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(
+            owner_type,
+            "canonical_permit: client_slot_mod.InitialSnapshotPermit = undefined",
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(transport_product, "InitialSnapshotOwner.initInPlace("));
+    try std.testing.expectEqual(@as(usize, 0), countOccurrences(runtime, "InitialSnapshotOwner.initInPlace("));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(transport_product, ".prepareInitialSnapshotPermit("));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(transport_product, ".abortInitialSnapshotPermit("));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(owner, ".consumeInitialSnapshotPermit("));
+    try std.testing.expectEqual(@as(usize, 0), countOccurrences(owner, "*client_mod.Client"));
+
+    // Batch registry와 ended purge는 각각 2b2와 2c2의 별도 권위다.
+    try std.testing.expectEqual(@as(usize, 0), countOccurrences(transport, "readAttachmentBatch("));
+    try std.testing.expectEqual(@as(usize, 0), countOccurrences(transport, "dropBufferedStream("));
 }
 
 test "CR3a-1 ownership capabilities stay in their exact production boundaries" {

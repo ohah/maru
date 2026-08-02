@@ -9,6 +9,7 @@ const client_mod = @import("client.zig");
 const client_slot_mod = @import("client_slot.zig");
 const contract = @import("generation_attachment_contract.zig");
 const executed_response_mod = @import("executed_response.zig");
+const initial_snapshot_owner_mod = @import("initial_snapshot_owner.zig");
 const client_poison = @import("client_poison.zig");
 const framing = @import("framing.zig");
 const socket_server = @import("socket_server.zig");
@@ -49,6 +50,8 @@ pub const GenerationTransport = struct {
     owner_thread_id: std.Thread.Id = 0,
     lifecycle: Lifecycle = .pristine,
     binding_reservation: client_slot_mod.AttachmentBindingReservation = undefined,
+    bound_stream_id: u64 = 0,
+    snapshot_authority: initial_snapshot_owner_mod.Authority = .{},
     prepared_storage: client_mod.PreparedBlockingRpcStorage = .{},
 
     pub fn capabilities(self: *GenerationTransport) contract.GenerationCapabilities {
@@ -222,6 +225,107 @@ pub const GenerationTransport = struct {
         try client.abortPreparedBlockingRpcStorage(&self.prepared_storage);
     }
 
+    pub fn readInitialSnapshot(
+        self: *GenerationTransport,
+        out: *initial_snapshot_owner_mod.InitialSnapshotOwner,
+    ) (client_mod.ClientError || error{ InvalidSnapshotOwner, MovedOrCopied })!void {
+        const client = self.borrowClient() orelse return error.MovedOrCopied;
+        if (self.bound_stream_id == 0 or !out.canInitialize() or
+            rangesOverlapTyped(out, self) or rangesOverlapTyped(out, &self.prepared_storage))
+            return error.InvalidSnapshotOwner;
+        const slot: *client_slot_mod.ClientSlot = @ptrFromInt(self.slot_addr);
+        if (rangesOverlapTyped(out, slot) or rangesOverlapTyped(out, slot.current) or
+            rangesOverlapTyped(out, client))
+            return error.InvalidSnapshotOwner;
+        const binding_identity = self.binding_reservation.identity;
+        const canonical_permit = slot.prepareInitialSnapshotPermit(
+            @intFromPtr(out),
+            self.transport_incarnation,
+            binding_identity,
+        ) catch |err| switch (err) {
+            error.AdminBusy => return error.AdminBusy,
+            error.IdentityExhausted => {
+                client.poison(.local_invariant_violation);
+                return error.InvalidSnapshotOwner;
+            },
+            error.InvalidSnapshotPermit => return error.InvalidSnapshotOwner,
+        };
+        var canonical_permit_live = true;
+        defer if (canonical_permit_live)
+            slot.abortInitialSnapshotPermit(canonical_permit) catch
+                @panic("initial snapshot canonical permit rollback drifted");
+        const receipt = self.snapshot_authority.prepare(
+            @intFromPtr(out),
+            self.transport_incarnation,
+        ) catch return error.InvalidSnapshotOwner;
+        var receipt_live = true;
+        defer if (receipt_live)
+            self.snapshot_authority.abort(receipt) catch
+                @panic("initial snapshot authority rollback drifted");
+        const read = slot.readInitialSnapshotGuarded(
+            self.bound_stream_id,
+            self.owner_addr,
+            self.owner_size,
+            @intFromPtr(out),
+            @sizeOf(initial_snapshot_owner_mod.InitialSnapshotOwner),
+        ) catch |err| switch (err) {
+            error.AliasedAllocation,
+            error.InvalidDestination,
+            error.CapacityExhausted,
+            error.DestinationOccupied,
+            error.IdentityExhausted,
+            error.InvalidDescriptor,
+            error.InvalidIdentity,
+            error.InvalidReservation,
+            error.InvalidState,
+            error.InvalidStream,
+            => {
+                client.poison(.local_invariant_violation);
+                return error.InvalidSnapshotOwner;
+            },
+            error.MovedOrCopied => return error.MovedOrCopied,
+            else => |typed| return typed,
+        };
+        if (payloadOverlaps(read.bytes, .{
+            out,
+            self,
+            &self.prepared_storage,
+            slot,
+            slot.current,
+            client,
+        }) or rangeOverlaps(
+            @intFromPtr(read.bytes.ptr),
+            read.bytes.len,
+            self.owner_addr,
+            self.owner_size,
+        )) {
+            client.poison(.local_invariant_violation);
+            return error.InvalidSnapshotOwner;
+        }
+        initial_snapshot_owner_mod.InitialSnapshotOwner.initInPlace(out, read.allocator, read.bytes, .{
+            .transport_incarnation = self.transport_incarnation,
+            .slot_incarnation = self.slot_incarnation,
+            .node_incarnation = self.node_incarnation,
+            .host_id = self.host_id,
+            .connection_generation = self.connection_generation,
+            .pid = self.pid,
+            .process_nonce = self.process_nonce,
+            .owner_thread_id = self.owner_thread_id,
+            .stream_id = self.bound_stream_id,
+            .binding_incarnation = binding_identity.binding_incarnation,
+            .binding_storage_addr = binding_identity.binding_storage_addr,
+            .binding_destination_addr = binding_identity.destination_addr,
+            .binding_reservation_id = binding_identity.binding_reservation_id,
+            .runtime_id = binding_identity.runtime_id,
+            .role = binding_identity.role,
+        }, &self.snapshot_authority, receipt, canonical_permit) catch {
+            read.allocator.free(read.bytes);
+            return error.InvalidSnapshotOwner;
+        };
+        receipt_live = false;
+        canonical_permit_live = false;
+    }
+
     pub fn poison(
         self: *GenerationTransport,
         reason: client_poison.ConnectionReason,
@@ -305,25 +409,61 @@ pub fn mintInPlace(
         .lifecycle = .live,
         .binding_reservation = binding_reservation,
     };
+    initial_snapshot_owner_mod.Authority.initInPlace(
+        &out.snapshot_authority,
+        incarnation,
+    ) catch unreachable;
+}
+
+/// Binding commit 직후 final attachment owner만 호출하는 allocation-free stream seal이다.
+pub fn bindCommittedStreamOwned(
+    transport: *GenerationTransport,
+    owner_addr: usize,
+    stream_id: u64,
+) Error!void {
+    if (stream_id == 0 or transport.self_addr != @intFromPtr(transport) or
+        transport.lifecycle != .live or transport.owner_addr != owner_addr or
+        transport.bound_stream_id != 0 or transport.borrowClient() == null)
+        return error.InvalidTransport;
+    transport.bound_stream_id = stream_id;
 }
 
 /// Owner-only no-I/O authority fence. It is module-level so the public transport facade remains
 /// exactly five methods; source boundaries pin its sole production caller to GenerationAttachment.
 pub fn terminalizeOwned(transport: *GenerationTransport, owner_addr: usize) Error!void {
-    if (transport.self_addr != @intFromPtr(transport) or transport.lifecycle != .live or
-        transport.owner_addr == 0 or transport.owner_addr != owner_addr or transport.owner_seal_addr == 0 or
-        !client_mod.Client.preparedBlockingRpcStorageSettled(&transport.prepared_storage))
+    if (preflightTerminalizeOwned(transport, owner_addr) != .ready)
         return error.InvalidTransport;
     const slot: *client_slot_mod.ClientSlot = @ptrFromInt(transport.slot_addr);
     const owner_seal = slot.transportOwnerSeal(transport.binding_reservation) catch
         return error.InvalidTransport;
-    if (@intFromPtr(owner_seal) != transport.owner_seal_addr) return error.InvalidTransport;
+    transport.snapshot_authority.terminalize(transport.transport_incarnation) catch unreachable;
     owner_seal.terminalize(transport.transport_incarnation) catch return error.InvalidTransport;
     transport.lifecycle = .terminal;
     transport.slot_addr = 0;
     transport.owner_addr = 0;
     transport.owner_size = 0;
     transport.owner_seal_addr = 0;
+    transport.bound_stream_id = 0;
+}
+
+pub const TerminalizeReadiness = enum { ready, busy, invalid };
+
+pub fn preflightTerminalizeOwned(
+    transport: *GenerationTransport,
+    owner_addr: usize,
+) TerminalizeReadiness {
+    if (transport.self_addr != @intFromPtr(transport) or transport.lifecycle != .live or
+        transport.owner_addr == 0 or transport.owner_addr != owner_addr or transport.owner_seal_addr == 0 or
+        !client_mod.Client.preparedBlockingRpcStorageSettled(&transport.prepared_storage))
+        return .invalid;
+    if (!transport.snapshot_authority.canTerminalize(transport.transport_incarnation))
+        return .busy;
+    const slot: *client_slot_mod.ClientSlot = @ptrFromInt(transport.slot_addr);
+    if (!slot.initialSnapshotPermitIdle()) return .busy;
+    const owner_seal = slot.transportOwnerSeal(transport.binding_reservation) catch
+        return .invalid;
+    if (@intFromPtr(owner_seal) != transport.owner_seal_addr) return .invalid;
+    return .ready;
 }
 
 fn rangesOverlapTyped(a: anytype, b: anytype) bool {
@@ -455,6 +595,91 @@ test "CR3a-2a generation transport prepares and aborts a closed attach request" 
     try transport.abortPreparedRequest(receipt);
     try terminalizeOwned(&transport, 0x101);
     try slot.abortAttachmentBinding(&binding, reservation);
+}
+
+test "CR3a-2c1 final snapshot owner rejects copy thread replay and restored transport authority" {
+    const allocator = std.testing.allocator;
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0xAB,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    var slot: client_slot_mod.ClientSlot = undefined;
+    try client_slot_mod.ClientSlot.initInPlace(&slot, allocator, &client, 0xAB);
+    var transport: GenerationTransport = .{};
+    var binding: contract.PreparedAttachmentBinding = .{};
+    var lease: @import("connection_lease.zig").ConnectionLease = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0xA2);
+    try mintInPlace(&transport, &slot, 0x102, @sizeOf(GenerationTransport), reservation);
+
+    var owner: initial_snapshot_owner_mod.InitialSnapshotOwner = .{};
+    const canonical = try slot.prepareInitialSnapshotPermit(
+        @intFromPtr(&owner),
+        transport.transport_incarnation,
+        reservation.identity,
+    );
+    const local = try transport.snapshot_authority.prepare(
+        @intFromPtr(&owner),
+        transport.transport_incarnation,
+    );
+    const bytes = try allocator.dupe(u8, "snapshot");
+    try initial_snapshot_owner_mod.InitialSnapshotOwner.initInPlace(
+        &owner,
+        allocator,
+        bytes,
+        .{
+            .transport_incarnation = transport.transport_incarnation,
+            .slot_incarnation = reservation.identity.slot_incarnation,
+            .node_incarnation = reservation.identity.node_incarnation,
+            .host_id = reservation.identity.host_id,
+            .connection_generation = reservation.identity.connection_generation,
+            .pid = reservation.identity.pid,
+            .process_nonce = reservation.identity.process_nonce,
+            .owner_thread_id = std.Thread.getCurrentId(),
+            .stream_id = 7,
+            .binding_incarnation = reservation.identity.binding_incarnation,
+            .binding_storage_addr = reservation.identity.binding_storage_addr,
+            .binding_destination_addr = reservation.identity.destination_addr,
+            .binding_reservation_id = reservation.identity.binding_reservation_id,
+            .runtime_id = reservation.identity.runtime_id,
+            .role = reservation.identity.role,
+        },
+        &transport.snapshot_authority,
+        local,
+        canonical,
+    );
+    var copied_owner = owner;
+    const copied_transport = transport;
+    try std.testing.expectError(error.MovedOrCopied, copied_owner.borrow());
+    const ThreadProbe = struct {
+        fn run(target: *initial_snapshot_owner_mod.InitialSnapshotOwner, rejected: *[2]bool) void {
+            _ = target.borrow() catch {
+                rejected[0] = true;
+            };
+            target.deinit() catch {
+                rejected[1] = true;
+            };
+        }
+    };
+    var rejected = [_]bool{ false, false };
+    var thread = try std.Thread.spawn(.{}, ThreadProbe.run, .{ &owner, &rejected });
+    thread.join();
+    try std.testing.expect(rejected[0] and rejected[1]);
+    try owner.deinit();
+    try std.testing.expectError(error.MovedOrCopied, owner.deinit());
+    const consumed_transport = transport;
+    owner = copied_owner;
+    transport = copied_transport;
+    try std.testing.expectError(error.MovedOrCopied, owner.deinit());
+    transport = consumed_transport;
+    try terminalizeOwned(&transport, 0x102);
+    try slot.abortAttachmentBinding(&binding, reservation);
+    slot.deinit();
+    @memset(std.mem.asBytes(&slot), 0xA5);
+    owner = copied_owner;
+    try std.testing.expectError(error.MovedOrCopied, owner.borrow());
+    try std.testing.expectError(error.MovedOrCopied, owner.deinit());
 }
 
 test "CR3a-2a copied generation transport cannot prepare or mutate Client" {

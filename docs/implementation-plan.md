@@ -818,7 +818,7 @@ TDD 방식:
      P6 전체 workspace TUI/외부 tmux import adapter와 Plugin은 각각 실제 수요·착수 전 별도 논의.
 - **검토했으나 미채택한 대안**(UI 완성도 먼저, 구조 리스크 뒤로): chrome 고급화를 New Window보다 앞에 두는 안. atlas 소유권 캡슐화 + restore 스키마 window-aware면 재작업은 낮으나, 큰 구조 변경을 미루는 대신 나중에 공유 검토할 atlas가 2개가 되는 트레이드오프 — 사용자가 "토대 먼저"를 택해 미채택.
 
-## Session host 실행 중 transport reconnect (CR, CR0a·CR3a-1·2a·2b1 완료)
+## Session host 실행 중 transport reconnect (CR, CR0a·CR3a-1·2a·2b1·2b2·2c1 완료)
 
 shared `Client`가 실행 중 unusable이 되어도 기존 Term/Surface/runtime handle을 유지한 채 exact host에 다시 붙이는 단계다.
 규범 계약은 [영속 터미널 세션 호스트](persistent-session-host.md#실행-중-connection-invalidation과-재연결), 검증 상태와
@@ -898,9 +898,23 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    pump→release→deinit, buffered/direct, idle/error/OOM, multi-token FIFO/compaction과 exact-once cleanup을 실행하고
    Debug/ReleaseFast/boundary/전체 check를 재실행한다. initial snapshot의 raw `Client.readSnapshot` 제거와 전체 actual-socket
    failure parity는 각각 2c/2e 범위다. 두 gate 모두 reconnect/current publish, incident/artifact, workspace 및
-   host/runtime lifecycle mutation은 0이다. CR3a-2c는 나머지 stream/event
-   primitive를 최소 core에 추가해 `RemoteRuntime.client` direct escape를 HostAdapter가 발급하는 작은 closed transport facade로
-   완전히 교체한다. CR3a-2d는
+   host/runtime lifecycle mutation은 0이다. CR3a-2c는 나머지 stream/event primitive를 최소 core에 추가해
+   `RemoteRuntime.client` direct escape를 HostAdapter가 발급하는 작은 closed transport facade로 완전히 교체한다. exact
+   15-method 집합은 2b2가 별도 소유하는 `readAttachmentBatch`를 중복하지 않고 `purgeEndedStream`을 포함한다. purge는 임의
+   stream ID가 아니라 exact binding/runtime/controller generation에 결속된 one-shot ended receipt만 소비하며 조기 demux
+   purge와 최종 canonical drop 권한을 분리한다. initial snapshot은 bare slice가 아니라 allocator provenance와
+   transport/binding/stream identity를 봉인한 final-address owner로 반환해 apply 성공·OOM·malformed 모두 exact once free한다.
+   `RemoteRuntime`은 `legacy|generation` connection union을 유일한 mode SSOT로 쓰며 기존 raw Client entrypoint는 legacy arm에만
+   격리하고 generation 실패를 legacy로 fallback하지 않는다. 2c는 review 가능한 네 TDD merge gate로 닫는다.
+   **2c1(구현)**은 `InitialSnapshotOwner`와 generation `readInitialSnapshot`을 제품 attach stack에 배선하고 raw snapshot read를 legacy
+   arm에만 남긴다. owner/transport stale 복원은 heap-pinned `ClientNode`의 checked-monotonic canonical stream-operation permit으로
+   차단하고, allocator free callback 동안 permit을 유지해 attachment/slot teardown 재진입을 `busy`로 고정한다. 이 permit의 exact
+   binding seal과 닫힌 외부 error normalization을 2c2~2c4가 공통 admission 기반으로 재사용한다. **2c2**는 sealed ended receipt와
+   all-or-none early demux purge를 배선한다. **2c3**은 capability/input/control/
+   event/RPC primitive를 exact facade로 옮기고 generation의 `logicalClient()` 사용을 0으로 만든다. **2c4**는
+   `RuntimeConnection` union을 mode SSOT로 전환해 `RemoteRuntime.client`와 `generation_adapter` 병렬 필드를 제거하고 exact
+   15-method/signature/source oracle을 닫는다. 각 gate는 reconnect/current publish와 제품 동작 변화 0을 유지하며 마지막 2c4
+   전에는 2c 전체 완료를 주장하지 않는다. CR3a-2d는
    실제 owner의 typed failure/reentry/aggregate handoff를 닫고, CR3a-2e는 actual socket
    parity와 production boundary를 닫는다. HostAdapter는 RPC 전에 neutral binding의 node pin과 빈 cleanup entry를 예약하고 attach
    성공 뒤 stream ID를 무할당으로 결속하므로 post-attach lease mint 실패

@@ -26,6 +26,7 @@ const core_command_wire = @import("core_command_wire.zig");
 const remote_attachment = @import("remote_attachment.zig");
 const generation_attachment_mod = @import("generation_attachment.zig");
 const generation_contract = @import("generation_attachment_contract.zig");
+const initial_snapshot_owner_mod = @import("initial_snapshot_owner.zig");
 const host_adapter_mod = @import("host_adapter.zig");
 
 const RuntimeAttachment = union(enum) {
@@ -539,14 +540,38 @@ pub const RemoteRuntime = struct {
         }
 
         // 3. 첫 snapshot을 읽어 원격 화면을 조립한다.
-        const snap = try self.client.readSnapshot(self.attachment.streamId());
-        defer self.allocator.free(snap);
+        var generation_snapshot: initial_snapshot_owner_mod.InitialSnapshotOwner = .{};
+        var legacy_snapshot: ?[]u8 = null;
+        const snap: []const u8 = switch (self.attachment) {
+            .legacy => blk: {
+                const bytes = try self.client.readSnapshot(self.attachment.streamId());
+                legacy_snapshot = bytes;
+                break :blk bytes;
+            },
+            .generation => |*value| blk: {
+                try value.readInitialSnapshot(&generation_snapshot);
+                break :blk try generation_snapshot.borrow();
+            },
+        };
+        defer if (legacy_snapshot) |bytes|
+            self.allocator.free(bytes)
+        else
+            generation_snapshot.deinit() catch
+                @panic("generation initial snapshot cleanup lost final owner");
         try self.attachment.initScreen(self.client.screen_codec_version);
         // mode bit 자체는 v2에도 우연히 존재할 수 있으므로 hello_ack에서 명시 협상한 host일 때만 "0 = live bottom"을
         // 신뢰한다. 구 host는 capability=false로 두고, RemoteScreen이 snapshot별 visible cursor 증거만으로
         // legacy live preedit/candidate를 허용한다. hidden/ambiguous snapshot은 계속 fail-closed다.
         self.attachment.screenPtr().?.viewport_scrolled_known = self.client.screen_viewport_scrolled_v1;
-        try self.attachment.screenPtr().?.applySnapshot(snap, self.io);
+        self.attachment.screenPtr().?.applySnapshot(snap, self.io) catch |err| {
+            switch (self.attachment) {
+                .legacy => {},
+                .generation => |*value| value.poisonInitialSnapshotApply(
+                    err == error.OutOfMemory,
+                ) catch @panic("generation snapshot apply failure lost its sealed transport"),
+            }
+            return err;
+        };
 
         // 4. 원격-backed Surface를 세운다(로컬 core는 placeholder — 렌더는 remote 소스로 간다).
         self.surface = try Surface.init(self.allocator, surface_id, size);
@@ -2573,6 +2598,265 @@ test "CR3a-2a committed GUI attach rolls back generation ownership when snapshot
         rr.attachAndAssemble(1, .{ .cols = 80, .rows = 24 }),
     );
     peer.join();
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try adapter.slot.current.cleanup_registry.count(),
+    );
+    try std.testing.expectEqual(@as(usize, 0), adapter.slot.current.pin_owner.cleanup_pin_count);
+}
+
+const SnapshotFreeReentryProbe = struct {
+    parent: std.mem.Allocator,
+    runtime: *RemoteRuntime,
+    adapter: *host_adapter_mod.HostAdapter,
+    armed: bool = false,
+    fired: bool = false,
+    outcome: ?generation_attachment_mod.DeinitOutcome = null,
+    slot_outcome: ?@import("client_slot.zig").DeinitOutcome = null,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        return self.parent.vtable.alloc(self.parent.ptr, len, alignment, ra);
+    }
+
+    fn resize(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ra: usize,
+    ) bool {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        return self.parent.vtable.resize(self.parent.ptr, memory, alignment, new_len, ra);
+    }
+
+    fn remap(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ra: usize,
+    ) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        return self.parent.vtable.remap(self.parent.ptr, memory, alignment, new_len, ra);
+    }
+
+    fn free(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        ra: usize,
+    ) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (self.armed and !self.fired) {
+            self.fired = true;
+            self.outcome = switch (self.runtime.attachment) {
+                .generation => |*value| value.tryDeinit(self.adapter),
+                .legacy => .corrupt,
+            };
+            self.slot_outcome = self.adapter.slot.tryDeinit();
+        }
+        self.parent.vtable.free(self.parent.ptr, memory, alignment, ra);
+    }
+};
+
+test "CR3a-2c1 generation GUI attach applies an initial snapshot through its final owner" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const response_body =
+        "{\"result\":{\"stream_id\":7,\"controller_generation\":1," ++
+        "\"granted\":{\"observe\":true,\"input\":true,\"resize\":true}," ++
+        "\"controller_busy\":false,\"metadata_revision\":0,\"metadata\":null}}";
+    const response = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .response, .request_id = 1 },
+        response_body,
+    );
+    defer allocator.free(response);
+    var records: std.ArrayListUnmanaged(u8) = .empty;
+    defer records.deinit(allocator);
+    const meta = try screen_stream.encodeScreenMeta(
+        allocator,
+        .{ .kind = .screen_meta, .generation = 1 },
+        .{ .cols = 1, .rows = 1, .cursor = .{} },
+    );
+    defer allocator.free(meta);
+    try screen_stream.appendRecord(&records, allocator, meta);
+    var runs = [_]screen_stream.Run{.{ .grapheme = "x", .width = 1, .count = 1 }};
+    const row = try screen_stream.encodeRow(
+        allocator,
+        .{ .kind = .row, .generation = 1 },
+        .{ .row_index = 0, .runs = &runs },
+    );
+    defer allocator.free(row);
+    try screen_stream.appendRecord(&records, allocator, row);
+    const snapshot = try framing.encodeFrame(
+        allocator,
+        .{
+            .kind = .snapshot_chunk,
+            .stream_id = 7,
+            .flags = protocol.Flags.end_stream,
+        },
+        records.items,
+    );
+    defer allocator.free(snapshot);
+    const Peer = struct {
+        fn run(fd: c.fd_t, response_wire: []const u8, snapshot_wire: []const u8) void {
+            defer _ = c.close(fd);
+            const peer_allocator = std.heap.page_allocator;
+            const request = readPeerFrame(fd, peer_allocator) catch return;
+            defer peer_allocator.free(request.payload);
+            if (request.header.kind != .request or
+                std.mem.indexOf(u8, request.payload, "\"method\":\"runtime.attach\"") == null)
+                return;
+            socket_server.writeAll(fd, response_wire) catch return;
+            socket_server.writeAll(fd, snapshot_wire) catch return;
+        }
+    };
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    var peer = try std.Thread.spawn(.{}, Peer.run, .{ fds[1], response, snapshot });
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+        .attachment_capabilities = .{ .peer_attach_generation = true },
+        .metadata_support = .supported,
+        .compatibility_profile = @import("compatibility.zig").profileForMajor(
+            protocol.version_major,
+        ).?,
+    };
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    try host_adapter_mod.HostAdapter.initInPlace(&adapter, allocator, &client);
+    defer adapter.deinit();
+    var rr: RemoteRuntime = undefined;
+    rr.client = adapter.logicalClient();
+    rr.generation_adapter = &adapter;
+    rr.allocator = allocator;
+    rr.io = std.testing.io;
+    rr.runtime_id_hex = "000000000000000000000000000000aa".*;
+    rr.resize_seq = 0;
+    rr.resize_generation = 0;
+    rr.resize_baseline_present = false;
+    rr.direct_input = .empty;
+    rr.direct_input_offset = 0;
+    rr.pending_controls = .empty;
+    rr.pump_ended = false;
+    rr.resync_needed = false;
+    rr.observation = .{};
+    defer rr.observation.deinit(allocator);
+
+    var free_probe = SnapshotFreeReentryProbe{
+        .parent = allocator,
+        .runtime = &rr,
+        .adapter = &adapter,
+        .armed = true,
+    };
+    adapter.slot.current.guarded_allocator.parent = free_probe.allocator();
+
+    try rr.attachAndAssemble(1, .{ .cols = 1, .rows = 1 });
+    peer.join();
+    try std.testing.expect(free_probe.fired);
+    try std.testing.expectEqual(generation_attachment_mod.DeinitOutcome.busy, free_probe.outcome.?);
+    try std.testing.expectEqual(
+        @import("client_slot.zig").DeinitOutcome.busy,
+        free_probe.slot_outcome.?,
+    );
+    try std.testing.expect(adapter.slot.initialSnapshotPermitIdle());
+    try std.testing.expect(rr.usesGenerationAttachment());
+    try std.testing.expectEqual(@as(u21, 'x'), rr.attachment.screenPtr().?.grid.cells[0].codepoint);
+    rr.surface.deinit();
+    rr.attachment.deinitWithAdapter(&adapter);
+}
+
+test "CR3a-2c1 malformed generation snapshot poisons before exact attachment rollback" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const response = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .response, .request_id = 1 },
+        "{\"result\":{\"stream_id\":7,\"controller_generation\":1," ++
+            "\"granted\":{\"observe\":true,\"input\":true,\"resize\":true}," ++
+            "\"controller_busy\":false,\"metadata_revision\":0,\"metadata\":null}}",
+    );
+    defer allocator.free(response);
+    const malformed = try framing.encodeFrame(
+        allocator,
+        .{
+            .kind = .snapshot_chunk,
+            .stream_id = 7,
+            .flags = protocol.Flags.end_stream,
+        },
+        "not-a-screen-record",
+    );
+    defer allocator.free(malformed);
+    const Peer = struct {
+        fn run(fd: c.fd_t, response_wire: []const u8, snapshot_wire: []const u8) void {
+            defer _ = c.close(fd);
+            const peer_allocator = std.heap.page_allocator;
+            const request = readPeerFrame(fd, peer_allocator) catch return;
+            defer peer_allocator.free(request.payload);
+            if (request.header.kind != .request) return;
+            socket_server.writeAll(fd, response_wire) catch return;
+            socket_server.writeAll(fd, snapshot_wire) catch return;
+        }
+    };
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    var peer = try std.Thread.spawn(.{}, Peer.run, .{ fds[1], response, malformed });
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+        .attachment_capabilities = .{ .peer_attach_generation = true },
+        .metadata_support = .supported,
+        .compatibility_profile = @import("compatibility.zig").profileForMajor(
+            protocol.version_major,
+        ).?,
+    };
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    try host_adapter_mod.HostAdapter.initInPlace(&adapter, allocator, &client);
+    defer adapter.deinit();
+    var rr: RemoteRuntime = undefined;
+    rr.client = adapter.logicalClient();
+    rr.generation_adapter = &adapter;
+    rr.allocator = allocator;
+    rr.io = std.testing.io;
+    rr.runtime_id_hex = "000000000000000000000000000000aa".*;
+    rr.resize_seq = 0;
+    rr.resize_generation = 0;
+    rr.resize_baseline_present = false;
+    rr.direct_input = .empty;
+    rr.direct_input_offset = 0;
+    rr.pending_controls = .empty;
+    rr.pump_ended = false;
+    rr.resync_needed = false;
+    rr.observation = .{};
+    defer rr.observation.deinit(allocator);
+
+    try std.testing.expectError(
+        error.Truncated,
+        rr.attachAndAssemble(1, .{ .cols = 1, .rows = 1 }),
+    );
+    peer.join();
+    try std.testing.expect(adapter.logicalClient().unusable);
     try std.testing.expectEqual(
         @as(usize, 0),
         try adapter.slot.current.cleanup_registry.count(),

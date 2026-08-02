@@ -11,6 +11,7 @@ const contract = @import("generation_attachment_contract.zig");
 const executed_response_mod = @import("executed_response.zig");
 const generation_transport_mod = @import("generation_transport.zig");
 const generation_batch_adapter_mod = @import("generation_batch_adapter.zig");
+const initial_snapshot_owner_mod = @import("initial_snapshot_owner.zig");
 const host_adapter_mod = @import("host_adapter.zig");
 const remote_attachment = @import("remote_attachment.zig");
 const screen_assembler = @import("screen_assembler.zig");
@@ -218,11 +219,38 @@ pub const GenerationAttachment = struct {
             state.stream_id,
             &self.lease,
         );
+        generation_transport_mod.bindCommittedStreamOwned(
+            &self.transport,
+            @intFromPtr(self),
+            state.stream_id,
+        ) catch @panic("generation transport stream seal failed after binding commit");
         self.batch_adapter.activateCommitted() catch
             @panic("generation batch adapter activation failed after binding commit");
         self.payload = remote_attachment.RemoteAttachment.init(allocator, state);
         self.payload.?.bindTransport(self.batch_adapter.interface()) catch unreachable;
         self.lifecycle = .attached;
+    }
+
+    pub fn readInitialSnapshot(
+        self: *GenerationAttachment,
+        out: *initial_snapshot_owner_mod.InitialSnapshotOwner,
+    ) anyerror!void {
+        if (!self.valid() or self.lifecycle != .attached) return error.InvalidState;
+        return self.transport.readInitialSnapshot(out);
+    }
+
+    /// Initial snapshot bytes are already generation-owned, so semantic apply failures must
+    /// terminalize the same sealed connection instead of escaping through RemoteRuntime's legacy
+    /// raw Client field.
+    pub fn poisonInitialSnapshotApply(
+        self: *GenerationAttachment,
+        out_of_memory: bool,
+    ) anyerror!void {
+        if (!self.valid() or self.lifecycle != .attached) return error.InvalidState;
+        return self.transport.poison(if (out_of_memory)
+            .local_resource_exhausted
+        else
+            .peer_contract_violation);
     }
 
     pub fn tryDeinit(
@@ -239,6 +267,14 @@ pub const GenerationAttachment = struct {
             .cleaning => return .busy,
             .attached => {
                 if (self.response.lifecycle != .terminal) return .busy;
+                switch (generation_transport_mod.preflightTerminalizeOwned(
+                    &self.transport,
+                    @intFromPtr(self),
+                )) {
+                    .ready => {},
+                    .busy => return .busy,
+                    .invalid => return .corrupt,
+                }
                 const payload = &(self.payload orelse return .corrupt);
                 self.batch_adapter.preflightDraining() catch return .corrupt;
                 adapter.beginAttachmentDrop(

@@ -877,7 +877,7 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    `{slot/node address, slot/node incarnation, host ID, generation=1, process domain}`을 seal하고, `RemoteRuntime`이 실제 사용하는
    transport primitive만 노출한다. exact public declaration은
    `capabilities|prepareRequest|executePreparedRequest|abortPreparedRequest|sendInput|sendInputNonBlocking|sendControl|sendControlNonBlocking|
-   pumpPendingOutput|takeEvent|releaseEvent|fenceRevoke|readInitialSnapshot|readAttachmentBatch|poison`이다. `prepareRequest`는
+   pumpPendingOutput|takeEvent|releaseEvent|fenceRevoke|readInitialSnapshot|purgeEndedStream|poison`이다. `prepareRequest`는
    `RuntimeRequest` tagged union만 받고 union variant는 `spawn_full|attach_controller|resize|observation|selected_text|link_at|
    clipboard_write|find|select_op|core_command|report_mouse|notification|terminate|detach`로 닫힌다. 각 variant payload는 기존
    `RemoteRuntime` encoder가 만든 bytes이고 method string은 facade 밖에서 받지 않는다. response decode/ordered input policy는
@@ -886,10 +886,17 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    async_scroll_to_bottom,notification_stream_auth,runtime_clipboard,runtime_core_command,runtime_link_at,
    runtime_selected_text}`뿐이다.
 
+   `readAttachmentBatch`는 이 집합에 넣지 않는다. post-initial batch의 유일한 owner는 2b2의 별도 inline
+   `GenerationBatchAdapter`이며 transport가 같은 queue authority를 중복하지 않는다. `purgeEndedStream`은 임의 stream ID를
+   받는 drop이 아니라 `takeEvent`가 exact binding·runtime·controller generation에 결속해 발급한 one-shot ended receipt만
+   소비한다. 이는 demux queue의 조기 purge만 소유하며 2a canonical attachment drop·lease release를 terminalize하지 않는다.
    arbitrary method string을 받는 `call`, `*Client`, `*anyopaque`, generic callback/function과 Client-containing aggregate를
    반환·인자로 노출하지 않는다. compile-time public-declaration exact set, recursive parameter/return pointer audit와 source scan이
-   drift를 막고 `HostAdapter.logicalClient()` production callsite, legacy `RemoteTermBackend.client` field/constructor,
-   `RemoteRuntime.client`, GUI raw context/cast를 모두 0으로 고정한다.
+   drift를 막고 `HostAdapter.logicalClient()` generation production callsite, `RemoteRuntime.client`, GUI generation raw
+   context/cast를 모두 0으로 고정한다. 기존 `spawn(*Client)`/`attachExisting(*Client)` 호환은
+   `RuntimeConnection = legacy|generation`의 명시적 legacy arm에만 격리한다. generation arm은 타입 수준에서 Client에 도달할
+   수 없고 실패를 legacy로 fallback하지 않는다. legacy raw transport와 external movable graph는 2c 범위 밖이며 source
+   oracle이 별도 exact allowlist로 고정한다.
 
    live transport는 final-address `GenerationAttachment` 안에 in-place mint하고 self-address/PID/owner-thread를 seal한다. bitwise
    copy/move, fork child, owner-thread 밖 호출은 Client/node/wire/registry mutation 0의 typed terminal이며 strict 제품 wrapper만
@@ -989,11 +996,23 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    move+tombstone할 뿐 callback/free를 호출하지 않는다. reconnect R2에서 기존 monolithic `RemoteAttachment.deinit()` 직접
    호출은 금지한다. retired fail-closed callback은 typed cleanup reason만 반환하고 새 reconnect를 예약하지 않는다. CR0b 이후
    coordinator/observability adapter가 그 reason을 child incident에 연결한다.
-   initial snapshot은 attachment batch registry로 옮기지 않는다. `readInitialSnapshot`이 반환한 allocator-owned bytes는 attach
-   stack의 단일 owner이며 screen apply 성공/실패 모두 같은 defer에서 exact once free한다. 이 payload는 장기 attachment queue나
+   initial snapshot은 attachment batch registry로 옮기지 않는다. `readInitialSnapshot`은 bare slice를 반환하지 않고 caller가
+   제공한 final-address `InitialSnapshotOwner`에 actual allocator, exact binding/stream/transport identity와 owned bytes를
+   in-place publish한다. owner는 self-address·PID/process nonce·owner thread·slot/node incarnation을 검증하고 screen apply
+   성공/실패 모두 같은 `deinit`에서 exact once free한다. mint는 transport-local receipt만으로 성립하지 않고 heap-pinned
+   `ClientNode`의 checked-monotonic canonical permit과 exact binding identity를 함께 소비한다. permit은 process-lifetime bounded
+   registry의 non-reused ID로 먼저 인증한 뒤에만 slot/node를 빌리므로, owner가 소비된 뒤 slot backing까지 종료된 stale copy도
+   dangling pointer를 역참조하지 않고 거부한다. 따라서 owner와 transport inline 상태를 같은 주소에 stale 복원해도 node permit
+   replay가 거부된다. `deinit`은 owner를 먼저 tombstone하되 두 permit을
+   allocator `free` callback 반환까지 live로 유지해 same-attachment/slot teardown 재진입을 `busy`로 막고, callback 뒤
+   node permit→transport receipt 순으로 consume한다. allocator drift나 payload가 owner/attachment/transport/binding/lease/
+   slot/node/Client/parser/live queue backing과 exact·partial alias면 forged slice를 free하지 않고 connection을 fail-close한다.
+   이 payload는 장기 attachment queue나
    terminal handoff에 들어가지 않는다. snapshot read/decode/apply 실패는 bound stream cleanup과 lease release 전에
    connection/attachment 상태표에 따라 detach 또는 canonical connection close를 수행하며, allocation fail-index가
    `snapshot bytes free -> attachment cleanup/handoff -> lease release -> RemoteRuntime destroy -> HostPool release` 순서를 고정한다.
+   snapshot facade는 batch registry의 내부 error set을 노출하지 않고 transport/resource/protocol/invalid-owner의 닫힌 결과로
+   normalize한다. node permit은 2c2~2c4 stream operation이 재사용할 canonical admission 기반이며 snapshot별 guard bool을 늘리지 않는다.
 
    | initial snapshot 실패 | connection 처리 | stream/registry/lease 처리 |
    | --- | --- | --- |

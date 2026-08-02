@@ -36,6 +36,12 @@ const GenerationGuardedAllocator = struct {
     slot_end: usize,
     source_start: usize,
     source_end: usize,
+    snapshot_owner_start: usize = 0,
+    snapshot_owner_end: usize = 0,
+    snapshot_out_start: usize = 0,
+    snapshot_out_end: usize = 0,
+    snapshot_guard_active: bool = false,
+    snapshot_alias_rejected: bool = false,
 
     fn allocator(self: *GenerationGuardedAllocator) std.mem.Allocator {
         return .{ .ptr = self, .vtable = &.{
@@ -51,7 +57,11 @@ const GenerationGuardedAllocator = struct {
         const end = std.math.add(usize, start, len) catch return true;
         return rawRangesOverlap(start, end, self.node_start, self.node_end) or
             rawRangesOverlap(start, end, self.slot_start, self.slot_end) or
-            rawRangesOverlap(start, end, self.source_start, self.source_end);
+            rawRangesOverlap(start, end, self.source_start, self.source_end) or
+            (self.snapshot_guard_active and
+                (rawRangesOverlap(start, end, self.snapshot_owner_start, self.snapshot_owner_end) or
+                    rawRangesOverlap(start, end, self.snapshot_out_start, self.snapshot_out_end) or
+                    client_mod.generationAllocationAliasesOwnedBacking(self.client.?, ptr, len)));
     }
 
     fn alloc(
@@ -69,8 +79,12 @@ const GenerationGuardedAllocator = struct {
             alignment,
             return_address,
         ) orelse return null;
-        if (self.rejects(result, len))
-            @panic("generation allocator returned canonical owner alias");
+        if (self.rejects(result, len)) {
+            if (!self.snapshot_guard_active)
+                @panic("generation allocator returned canonical owner alias");
+            self.snapshot_alias_rejected = true;
+            return null;
+        }
         return result;
     }
 
@@ -82,8 +96,12 @@ const GenerationGuardedAllocator = struct {
         return_address: usize,
     ) bool {
         const self: *GenerationGuardedAllocator = @ptrCast(@alignCast(context));
-        if (self.rejects(memory.ptr, new_len))
-            @panic("generation allocator resized into canonical owner");
+        if (self.rejects(memory.ptr, new_len)) {
+            if (!self.snapshot_guard_active)
+                @panic("generation allocator resized into canonical owner");
+            self.snapshot_alias_rejected = true;
+            return false;
+        }
         if (!self.client.?.enterGenerationAllocatorCallback()) return false;
         defer self.client.?.leaveGenerationAllocatorCallbackUnchecked();
         return self.parent.vtable.resize(
@@ -112,8 +130,12 @@ const GenerationGuardedAllocator = struct {
             new_len,
             return_address,
         ) orelse return null;
-        if (self.rejects(result, new_len))
-            @panic("generation allocator remapped into canonical owner");
+        if (self.rejects(result, new_len)) {
+            if (!self.snapshot_guard_active)
+                @panic("generation allocator remapped into canonical owner");
+            self.snapshot_alias_rejected = true;
+            return null;
+        }
         return result;
     }
 
@@ -144,6 +166,23 @@ pub const ClientNode = struct {
     accounting_ledger: batch_registry_mod.AccountingLedger,
     guarded_allocator: GenerationGuardedAllocator,
     incarnation: lease_mod.Identity,
+    next_snapshot_generation: u64,
+    active_snapshot_generation: u64,
+    active_snapshot_owner_addr: usize,
+    active_snapshot_transport_incarnation: u64,
+    active_snapshot_binding: contract.BindingIdentity,
+};
+
+pub const InitialSnapshotPermit = struct {
+    slot: *ClientSlot,
+    registry_index: u16,
+    registry_id: u64,
+    slot_incarnation: u64,
+    node_incarnation: u64,
+    generation: u64,
+    owner_addr: usize,
+    transport_incarnation: u64,
+    binding: contract.BindingIdentity,
 };
 
 pub const InitError = error{
@@ -179,6 +218,55 @@ var process_issuer: ?lease_mod.IdentityIssuer = null;
 threadlocal var init_active: bool = false;
 threadlocal var batch_release_callback_active: bool = false;
 var alias_quarantine_events: std.atomic.Value(u64) = .init(0);
+
+const max_initial_snapshot_permits = 4096;
+const InitialSnapshotRegistryEntry = struct {
+    live: bool = false,
+    id: u64 = 0,
+    permit: InitialSnapshotPermit = undefined,
+};
+var initial_snapshot_registry_mutex: std.atomic.Mutex = .unlocked;
+var initial_snapshot_registry: [max_initial_snapshot_permits]InitialSnapshotRegistryEntry =
+    [_]InitialSnapshotRegistryEntry{.{}} ** max_initial_snapshot_permits;
+var next_initial_snapshot_registry_id: u64 = 1;
+
+fn registerInitialSnapshotPermit(fields: InitialSnapshotPermit) error{ AdminBusy, IdentityExhausted }!InitialSnapshotPermit {
+    while (!initial_snapshot_registry_mutex.tryLock()) std.atomic.spinLoopHint();
+    defer initial_snapshot_registry_mutex.unlock();
+    var index: usize = 0;
+    while (index < initial_snapshot_registry.len and initial_snapshot_registry[index].live) : (index += 1) {}
+    if (index == initial_snapshot_registry.len) return error.AdminBusy;
+    const id = next_initial_snapshot_registry_id;
+    next_initial_snapshot_registry_id = std.math.add(u64, id, 1) catch
+        return error.IdentityExhausted;
+    var permit = fields;
+    permit.registry_index = @intCast(index);
+    permit.registry_id = id;
+    initial_snapshot_registry[index] = .{ .live = true, .id = id, .permit = permit };
+    return permit;
+}
+
+fn initialSnapshotPermitRegistryLive(permit: InitialSnapshotPermit) bool {
+    const index: usize = permit.registry_index;
+    if (index >= initial_snapshot_registry.len or permit.registry_id == 0) return false;
+    while (!initial_snapshot_registry_mutex.tryLock()) std.atomic.spinLoopHint();
+    defer initial_snapshot_registry_mutex.unlock();
+    const entry = initial_snapshot_registry[index];
+    return entry.live and entry.id == permit.registry_id and std.meta.eql(entry.permit, permit);
+}
+
+fn unregisterInitialSnapshotPermit(permit: InitialSnapshotPermit) error{InvalidSnapshotPermit}!void {
+    const index: usize = permit.registry_index;
+    if (index >= initial_snapshot_registry.len or permit.registry_id == 0)
+        return error.InvalidSnapshotPermit;
+    while (!initial_snapshot_registry_mutex.tryLock()) std.atomic.spinLoopHint();
+    defer initial_snapshot_registry_mutex.unlock();
+    const entry = initial_snapshot_registry[index];
+    if (!entry.live or entry.id != permit.registry_id or !std.meta.eql(entry.permit, permit))
+        return error.InvalidSnapshotPermit;
+    initial_snapshot_registry[index].live = false;
+    initial_snapshot_registry[index].permit = undefined;
+}
 
 fn recordAliasQuarantine() bool {
     var observed = alias_quarantine_events.load(.acquire);
@@ -339,6 +427,11 @@ pub const ClientSlot = struct {
         ) catch unreachable;
         node.accounting_ledger = .{};
         batch_registry_mod.AccountingLedger.initInPlace(&node.accounting_ledger) catch unreachable;
+        node.next_snapshot_generation = 1;
+        node.active_snapshot_generation = 0;
+        node.active_snapshot_owner_addr = 0;
+        node.active_snapshot_transport_incarnation = 0;
+        node.active_snapshot_binding = undefined;
         node.guarded_allocator = .{
             .parent = source.allocator,
             .node_start = node_start,
@@ -685,6 +778,143 @@ pub const ClientSlot = struct {
         self.current.client.poison(reason);
     }
 
+    pub const InitialSnapshotRead = struct {
+        bytes: []u8,
+        allocator: std.mem.Allocator,
+    };
+
+    pub fn prepareInitialSnapshotPermit(
+        self: *ClientSlot,
+        owner_addr: usize,
+        transport_incarnation: u64,
+        binding: contract.BindingIdentity,
+    ) error{ InvalidSnapshotPermit, AdminBusy, IdentityExhausted }!InitialSnapshotPermit {
+        if (!self.valid() or owner_addr == 0 or transport_incarnation == 0 or
+            self.current.active_snapshot_generation != 0 or
+            binding.slot_incarnation != self.incarnation.tagged or
+            binding.node_incarnation != self.current.incarnation.tagged or
+            binding.host_id != self.current.client.host_id or
+            binding.connection_generation != 1 or binding.pid != self.pid or
+            binding.process_nonce != self.process_nonce)
+            return error.InvalidSnapshotPermit;
+        const generation = self.current.next_snapshot_generation;
+        const next_generation = std.math.add(u64, generation, 1) catch
+            return error.IdentityExhausted;
+        const permit = try registerInitialSnapshotPermit(.{
+            .slot = self,
+            .registry_index = 0,
+            .registry_id = 0,
+            .slot_incarnation = self.incarnation.tagged,
+            .node_incarnation = self.current.incarnation.tagged,
+            .generation = generation,
+            .owner_addr = owner_addr,
+            .transport_incarnation = transport_incarnation,
+            .binding = binding,
+        });
+        self.current.next_snapshot_generation = next_generation;
+        self.current.active_snapshot_generation = generation;
+        self.current.active_snapshot_owner_addr = owner_addr;
+        self.current.active_snapshot_transport_incarnation = transport_incarnation;
+        self.current.active_snapshot_binding = binding;
+        return permit;
+    }
+
+    pub fn initialSnapshotPermitLive(
+        self: *const ClientSlot,
+        permit: InitialSnapshotPermit,
+    ) bool {
+        if (!initialSnapshotPermitRegistryLive(permit)) return false;
+        return self.valid() and permit.slot == self and
+            permit.slot_incarnation == self.incarnation.tagged and
+            permit.node_incarnation == self.current.incarnation.tagged and
+            permit.generation != 0 and
+            permit.generation == self.current.active_snapshot_generation and
+            permit.owner_addr == self.current.active_snapshot_owner_addr and
+            permit.transport_incarnation == self.current.active_snapshot_transport_incarnation and
+            std.meta.eql(permit.binding, self.current.active_snapshot_binding);
+    }
+
+    pub fn abortInitialSnapshotPermit(
+        self: *ClientSlot,
+        permit: InitialSnapshotPermit,
+    ) error{InvalidSnapshotPermit}!void {
+        if (!self.initialSnapshotPermitLive(permit)) return error.InvalidSnapshotPermit;
+        try unregisterInitialSnapshotPermit(permit);
+        self.clearInitialSnapshotPermit();
+    }
+
+    pub fn consumeInitialSnapshotPermit(
+        self: *ClientSlot,
+        permit: InitialSnapshotPermit,
+    ) error{InvalidSnapshotPermit}!void {
+        if (!self.initialSnapshotPermitLive(permit)) return error.InvalidSnapshotPermit;
+        try unregisterInitialSnapshotPermit(permit);
+        self.clearInitialSnapshotPermit();
+    }
+
+    pub fn initialSnapshotPermitIdle(self: *const ClientSlot) bool {
+        return self.valid() and self.current.active_snapshot_generation == 0 and
+            self.current.active_snapshot_owner_addr == 0 and
+            self.current.active_snapshot_transport_incarnation == 0;
+    }
+
+    fn clearInitialSnapshotPermit(self: *ClientSlot) void {
+        self.current.active_snapshot_generation = 0;
+        self.current.active_snapshot_owner_addr = 0;
+        self.current.active_snapshot_transport_incarnation = 0;
+        self.current.active_snapshot_binding = undefined;
+    }
+
+    pub fn readInitialSnapshotGuarded(
+        self: *ClientSlot,
+        stream_id: u64,
+        owner_addr: usize,
+        owner_size: usize,
+        out_addr: usize,
+        out_size: usize,
+    ) (client_mod.ClientError || batch_registry_mod.Error || error{
+        AliasedAllocation,
+        InvalidDestination,
+    })!InitialSnapshotRead {
+        if (!self.valid()) return error.MovedOrCopied;
+        if (stream_id == 0 or owner_addr == 0 or owner_size == 0 or out_addr == 0 or out_size == 0)
+            return error.InvalidDestination;
+        const owner_end = std.math.add(usize, owner_addr, owner_size) catch
+            return error.InvalidDestination;
+        const out_end = std.math.add(usize, out_addr, out_size) catch
+            return error.InvalidDestination;
+        const guard = &self.current.guarded_allocator;
+        if (guard.snapshot_guard_active) return error.AdminBusy;
+        guard.snapshot_owner_start = owner_addr;
+        guard.snapshot_owner_end = owner_end;
+        guard.snapshot_out_start = out_addr;
+        guard.snapshot_out_end = out_end;
+        guard.snapshot_alias_rejected = false;
+        guard.snapshot_guard_active = true;
+        defer {
+            guard.snapshot_guard_active = false;
+            guard.snapshot_owner_start = 0;
+            guard.snapshot_owner_end = 0;
+            guard.snapshot_out_start = 0;
+            guard.snapshot_out_end = 0;
+        }
+        const allocator = guard.allocator();
+        const previous_allocator = try self.current.client.beginGenerationBatchAllocator(allocator);
+        defer self.current.client.restoreGenerationBatchAllocatorUnchecked(previous_allocator);
+        const bytes = self.current.client.readSnapshot(stream_id) catch |err| {
+            if (guard.snapshot_alias_rejected) {
+                self.current.client.poison(.local_invariant_violation);
+                return error.AliasedAllocation;
+            }
+            return err;
+        };
+        if (guard.snapshot_alias_rejected) {
+            self.current.client.poison(.local_invariant_violation);
+            return error.AliasedAllocation;
+        }
+        return .{ .bytes = bytes, .allocator = allocator };
+    }
+
     /// Registry entry를 먼저 ingress로 고정한 뒤 Client queue/parser owner를 옮긴다.
     pub fn readAttachmentBatch(
         self: *ClientSlot,
@@ -768,6 +998,7 @@ pub const ClientSlot = struct {
         if (!self.valid()) return if (self.lifecycle == .deinit_reserved) .busy else .corrupt;
         if (batch_release_callback_active) return .busy;
         self.current.client.rejectGenerationAllocatorCallbackReentry() catch return .busy;
+        if (self.current.active_snapshot_generation != 0) return .busy;
         if (self.current.pin_owner.cleanup_pin_count != 0 or
             self.current.pin_owner.active_cleanup != 0)
             return .busy;
@@ -1255,6 +1486,111 @@ const GenerationAllocatorReentryProbe = struct {
         self.parent.vtable.free(self.parent.ptr, memory, alignment, return_address);
     }
 };
+
+const SnapshotOwnerAliasAllocator = struct {
+    target: []align(16) u8,
+    alloc_calls: usize = 0,
+    free_calls: usize = 0,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(
+        context: *anyopaque,
+        len: usize,
+        alignment: std.mem.Alignment,
+        return_address: usize,
+    ) ?[*]u8 {
+        _ = return_address;
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.alloc_calls += 1;
+        if (len > self.target.len or !alignment.check(@intFromPtr(self.target.ptr))) return null;
+        return self.target.ptr;
+    }
+
+    fn resize(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        return_address: usize,
+    ) bool {
+        _ = context;
+        _ = memory;
+        _ = alignment;
+        _ = new_len;
+        _ = return_address;
+        return false;
+    }
+
+    fn remap(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        return_address: usize,
+    ) ?[*]u8 {
+        _ = context;
+        _ = memory;
+        _ = alignment;
+        _ = new_len;
+        _ = return_address;
+        return null;
+    }
+
+    fn free(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        return_address: usize,
+    ) void {
+        _ = memory;
+        _ = alignment;
+        _ = return_address;
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.free_calls += 1;
+    }
+};
+
+test "CR3a-2c1 snapshot allocation rejects owner alias before the first payload write" {
+    const allocator = std.testing.allocator;
+    var source = fixtureClient(allocator, 0xB20B);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0xB20B);
+    defer slot.deinit();
+
+    const wire = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .snapshot_chunk, .stream_id = 7, .flags = protocol.Flags.end_stream },
+        "snapshot-payload",
+    );
+    defer allocator.free(wire);
+    try slot.current.client.parser.push(wire);
+
+    var owner_storage: [256]u8 align(16) = [_]u8{0xA5} ** 256;
+    var hostile = SnapshotOwnerAliasAllocator{ .target = owner_storage[0..] };
+    slot.current.guarded_allocator.parent = hostile.allocator();
+    try std.testing.expectError(
+        error.AliasedAllocation,
+        slot.readInitialSnapshotGuarded(
+            7,
+            @intFromPtr(&owner_storage),
+            owner_storage.len,
+            @intFromPtr(&owner_storage),
+            owner_storage.len,
+        ),
+    );
+    try std.testing.expect(hostile.alloc_calls > 0);
+    try std.testing.expectEqual(@as(usize, 0), hostile.free_calls);
+    for (owner_storage) |byte| try std.testing.expectEqual(@as(u8, 0xA5), byte);
+    try std.testing.expect(slot.current.client.unusable);
+}
 
 test "CR3a-2b1 parser allocator callback은 same과 foreign ClientSlot mutation을 wire 전에 거부한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
@@ -1901,4 +2237,32 @@ test "client slot alias quarantine counter rejects overflow without wrapping" {
         std.math.maxInt(u64),
         alias_quarantine_events.load(.acquire),
     );
+}
+
+test "CR3a-2c1 node canonical snapshot permit rejects stale authority replay and binding splice" {
+    const allocator = std.testing.allocator;
+    var source = fixtureClient(allocator, 0xF4);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0xF4);
+    defer slot.deinit();
+    var binding: contract.PreparedAttachmentBinding = .{};
+    var lease: lease_mod.ConnectionLease = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0x44);
+    defer slot.abortAttachmentBinding(&binding, reservation) catch
+        @panic("snapshot permit test binding cleanup drifted");
+
+    const first = try slot.prepareInitialSnapshotPermit(0x1000, 9, reservation.identity);
+    try std.testing.expect(slot.initialSnapshotPermitLive(first));
+    try slot.consumeInitialSnapshotPermit(first);
+    try std.testing.expect(!slot.initialSnapshotPermitLive(first));
+    try std.testing.expectError(error.InvalidSnapshotPermit, slot.consumeInitialSnapshotPermit(first));
+
+    const second = try slot.prepareInitialSnapshotPermit(0x1000, 9, reservation.identity);
+    try std.testing.expect(second.generation != first.generation);
+    var spliced = second;
+    spliced.binding.runtime_id += 1;
+    try std.testing.expect(!slot.initialSnapshotPermitLive(spliced));
+    try std.testing.expectError(error.InvalidSnapshotPermit, slot.abortInitialSnapshotPermit(spliced));
+    try slot.abortInitialSnapshotPermit(second);
+    try std.testing.expect(slot.initialSnapshotPermitIdle());
 }

@@ -713,10 +713,22 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    `withCurrent`는 신규 RPC admission 전용이다. CR3a는 이를 두 단계로 닫는다. CR3a-1은 cleanup lease의 product callback이
    0인 inactive lease와 generation 1 전용 slot skeleton이며 아래의 exact 3-argument `HostAdapter.initInPlace`만 허용한다.
    inline `ClientSlot`이 연결 세대마다 별도 heap-pinned `ClientNode`를 단독 소유하므로 current/retired publication은 Client value move가
-   아니라 pointer flip만 한다. `HostAdapter.initInPlace(out,node_allocator,source)`는 모든 allocation/validation을 먼저 끝내며
+   아니라 pointer flip만 한다. 유일한 signature는
+   `HostAdapter.initInPlace(out: *HostAdapter,node_allocator: Allocator,source: *Client)`다. `out`은 caller가 값을 읽지 않은
+   allocation backing이어야 하며 pristine 증거는 canary byte 비교가 아니라 `initInPlace`가 성공 전 write 0임을 allocator
+   callback observer와 source projection digest로 확인한다. `HostAdapter.initInPlace`는 protocol/profile/source ownership과
+   세 주소의 비중첩을 먼저 검증하고, 그 뒤 **slot identity → node identity를 순서대로 reserve한 다음 node를 allocate**한다.
+   unsupported protocol/invalid source/alias input은 identity 0·allocation 0이고, 첫 reserve 성공 뒤 두 번째 exhaustion이나
+   allocation 실패는 이미 얻은 identity만 burn한다. ID를 source/out에 publish하지는 않는다. 모든 fallible 단계가 끝난 뒤
+   node를 초기화하고 마지막 no-fail suffix에서 source를 moved tombstone으로 바꾼 뒤 out을 한 번 publish한다.
    실패는 `{source=preserved,out=pristine}`, 성공은 `{source=moved tombstone,node owns exact Client}`다. slot은 node allocator를
-   저장하고 deinit에서 Client exact once 뒤 같은 allocator로 node를 destroy한다. out/source/node backing alias와 allocator callback
-   reentry는 거부한다. slot과 node는 초기화 뒤 이동할 수 없고, HostPool은 adapter membership만 소유하며 AppSession에 병렬
+   저장하고 deinit에서 Client exact once 뒤 같은 allocator로 node를 destroy한다. 정상 allocator가 돌려준 독립 backing의
+   fail-index는 같은 allocator로 exact once 회수한다. allocator가 out/source와 겹치는 backing을 반환한 adversarial alias는
+   caller-owned 메모리를 free하지 않고 process quarantine counter에 exact once 기록한 뒤 fail-stop하며 source/out mutation은 0이다.
+   allocator callback reentry는 slot/node identity를 burn하되 nested publication 0으로 거부한다. slot은
+   `live|deinit_reserved|dead` lifecycle을 갖고 deinit은 Client callback/free 전에 `deinit_reserved`를 publish한다. allocator free
+   callback의 nested deinit은 Client/node/free mutation 0으로 fail-stop하며 outer suffix만 node exact once destroy 후 `dead`를
+   publish한다. slot과 node는 초기화 뒤 이동할 수 없고, HostPool은 adapter membership만 소유하며 AppSession에 병렬
    Client owner를 두지 않는다.
 
    주소 재사용 ABA는 address 자체를 identity로 간주하지 않는다. process-global atomic `ClientIdentityIssuer` 하나가 slot/node
@@ -724,7 +736,9 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    먼저 일어나고 allocator callback nested init과 실패에서도 ID를 burn해 재사용하지 않는다. slot과 node는 서로 다른 발급값을
    가지며 kind tag가 cross-kind splice를 거부한다. max exhaustion은 sticky이고 다음 생성은 allocation/source/out mutation 0으로
    거부한다. issuer domain은 process nonce와 PID를 seal한다. exec/relaunch에서는 lease를 serialize·전달하지 않고 새 domain을
-   만든다. fork child는 inherited slot/lease API 사용이 비지원이며 PID mismatch가 exec 전 모든 mint/consume/deinit을 fail-stop한다.
+   만든다. fork child는 inherited slot/lease API 사용이 비지원이다. PID mismatch에서 low-level
+   `ConnectionLease.initInPlace`/`release`와 `ClientSlot.tryDeinit`은 typed reject와 mutation 0을 반환하고, 제품의 strict
+   `HostAdapter.deinit` 및 후속 CR3a-2 attachment wrapper는 그 결과를 fail-stop한다.
    attachment당 `ConnectionLease`는 final address에서 초기화해
    `{self_addr,slot_addr,slot_incarnation,node_addr,node_incarnation,host_id,connection_generation=1,stream_id}`을 immutable seal하고
    exact node lifetime만 pin한다. 이 seed는 checked-nonzero identity일 뿐이며 increment/current-retired publish/overflow는 CR3b가
@@ -733,6 +747,14 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    `cleanup_pin_count`를 소유한다. acquire overflow는 mutation 0, permit terminal/active cleanup 0 뒤의 exact lease만 pin을 한 번
    감소시킨다. `ClientSlot.deinit`/`HostAdapter.deinit`은 pin 0에서만 Client exact once와 node destroy를 수행하며 live pin이면
    모든 build mode에서 fail-stop한다.
+
+   CR3a-1의 neutral 모듈은 임의 callback/vtable 대신 module-private synthetic `CleanupOwner`와 닫힌
+   `reserve(token_digest,stream,kind) -> prepared|busy|terminal|capacity_exhausted`,
+   `complete(reservation,completed|retryable_preserved|indeterminate_or_partial)`, `abort(reservation)` 계약만 component test에 쓴다.
+   token digest는 process-local 64-bit nonzero scalar이며 원문 token/pointer의 대체 owner가 아니다. CR3a-1 제품 mint/consume은
+   여전히 0이다. CR3a-2의 owner-specific adapter만 기존 bounded external inbox/attachment owner entry를 이 계약에 투영하며,
+   adapter가 실제 destructive cleanup을 실행한 뒤 그 닫힌 verdict를 neutral permit에 전달한다. neutral core는 adapter 함수
+   포인터나 raw owner/token 주소를 저장·호출하지 않는다.
 
    여러 pending batch와 마지막 drop을 한 lease의 one-shot 연산으로 뭉치지 않는다. 각 drop/release/cancel 직전에
    caller의 final stack/storage 주소에 별도 `CleanupPermit`을 init하고
@@ -743,10 +765,14 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    중 같은 lease에서 nested prepare하면 mutation 0의 retryable `busy`, owner entry가 already consumed/terminal이면 `terminal`이다.
    owner 내부의 `already_reserved|consumed`는 각각 이 외부 결과로만 투영한다. prepare는 parent lease의 private
    `ActiveCleanupReceipt`에도 permit final address와 canonical owner reservation
-   identity를 seal한다. permit preflight가 stale/move/splice/corruption으로 callback 전에 실패하면 손상된 permit 필드가 아니라 이
+   identity를 seal한다. canonical owner는 별도 nonzero checked-monotonic reservation ID를 reserve 시 burn하고 entry/receipt/permit
+   세 곳에 봉인한다. 같은 주소가 재사용돼도 이전 permit은 새 reservation과 일치하지 않으며 max exhaustion은 sticky라 wrap 없이
+   `capacity_exhausted`가 된다. permit preflight가 stale/move/splice/corruption으로 callback 전에 실패하면 손상된 permit 필드가 아니라 이
    private mirror를 사용해 owner reservation을 `reserved -> available`, parent active cleanup을 0으로 exact once 되돌리고 permit을
-   terminal로 만든다. mirror 자체가 검증되지 않으면 canonical reservation/resource owner를 mutate하지 않고 별도 process
-   quarantine latch/accounting에 그 owner identity를 exact once 기록한 뒤 process fail-stop한다.
+   terminal로 만든다. mirror 자체가 검증되지 않으면 canonical reservation/resource owner를 mutate하지 않고 synthetic owner의
+   final address와 관측된 reservation ID를 sticky quarantine latch/accounting에 exact once 기록한다. CR3a-1 component API는 이후
+   모든 연산을 typed corrupt/terminal로 거부하며, CR3a-2의 owner-specific strict 제품 adapter가 최초 corrupt 결과에서 process
+   fail-stop한다. 제품 mint/consume이 0인 CR3a-1만으로 존재하지 않는 제품 wrapper의 death를 주장하지 않는다.
 
    `consume`은 callback 전 node/token/owner와 private receipt를 전량 검증한 뒤 owner-specific cleanup callback을 정확히 한 번
    호출한다. 이 callback이 destructive resource 처리와 canonical owner entry 전이를 함께 소유하므로 caller는 callback 뒤 raw
@@ -776,6 +802,15 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    제공하지 않는다. stale/moved/copied/spliced/double-consume lease/permit은 새 current를 조회하거나 mutate하지 않고 typed terminal로
    닫힌다. HostPool runtime membership retain/release와 이 connection cleanup lease는 서로 다른 수명·세대다. external-pump의
    final-address `ExternalPumpStorage.owned_client` owner graph는 slot으로 흡수하지 않고 기존 계약을 유지한다.
+
+   CR3a seal의 위협 모델은 이 문서의 external adoption/RX owner와 같다. memory-safe Maru API가 발급한 live/final-address
+   allocation 사이의 copy·move·same-address reincarnation·foreign-object splice와 seal field drift를 탐지하고, 검증된 parent
+   receipt/owner 주소 외의 pointer를 cleanup/free authority로 쓰지 않는다. copied handle은 self-address mismatch에서 backing을
+   읽기 전에 닫히고, valid foreign allocation splice는 incarnation/domain 비교 뒤 mutation 0으로 닫힌다. 반면 공격자가 process
+   메모리를 임의 수정해 seal과 pointer를 함께 일관되게 위조하거나 unmapped 주소를 주입할 수 있는 arbitrary process-memory
+   corruption의 mapped/readable 여부까지 탐지·복구한다고 주장하지 않는다. 이를 위해 별도 process-global pointer registry를
+   만들지 않는다. allocator callback이 받은 legitimate descriptor를 drift시키는 경우와 malicious allocator alias는 계속
+   명시적 component gate 범위다.
 
    CR3a-2에서 현 `AttachmentTransport.context=*Client` raw callback을 generation 1의 generation-bound live transport와 exact
    cleanup thunk로 교체한다. `RemoteAttachment`는 final destination에서 `initInPlace`한 뒤 그 내부 pristine lease storage에
@@ -823,6 +858,20 @@ CR3a-1 source oracle은 tokenizer identifier scan+compile-time field allowlist+p
 field definition은 exact 1이고 adoption/teardown owner-schema digest는 불변이며 AppSession의 새 Client/slot owner field는 0이다.
 `connection_lease.zig`는 neutral definition과 component test, `client_slot.zig`는 owner adapter, `host_adapter.zig`는 slot construction만
 import할 수 있고 umbrella public export·lease mint/consume product callsite는 0이다.
+
+현재 production baseline은 file+symbol별로 고정한다. `AppSession`의 `RemoteSessionAdapter` construction은 2곳,
+`RemoteTermBackend`의 `logicalClient()` 호출은 2곳과 legacy borrowed `client` field 1곳, `RemoteRuntime.client` field 1곳과
+initialization 2곳, `AttachmentTransport.context`의 Client binding 1곳과 raw cast callback 3곳,
+`ExternalPumpStorage.owned_client` field definition 1곳, `HostPool.Entry.adapter` field 1곳과 owned adapter deinit 2곳이다.
+CR3a-1은 HostAdapter raw `client` field 1곳을 0으로 만들고 AppSession construction 2곳만 `initInPlace`로 바꾸며 나머지
+production baseline은 그대로다. source oracle은 whole-file tokenizer count와 top-level `test` block count를 별도 기록해
+production count를 차감하며, 새 test가 production escape 증가를 가리지 못하게 compile-time field allowlist도 함께 요구한다.
+
+`HostAdapter.InitError`는 `UnsupportedProtocol|InvalidSource|InvalidDestination|AliasedAllocation|ReentrantInit|
+ProcessDomainMismatch|IdentityExhausted|OutOfMemory`의 닫힌 집합이다. 두 AppSession callsite는 `UnsupportedProtocol`만 기존
+`incompatible_version`, `IdentityExhausted|OutOfMemory`는 `resource_exhausted`, 나머지 invariant/domain 오류는 로그에 exact
+error name을 남기고 fail-stop한다. restore 경로도 transient `unavailable`로 뭉개기 전에 exact error를 기록한다. 정상 제품
+입력에서 새 invariant 오류가 발생하지 않는 parity test를 두 callsite 모두에 둔다.
 
 CR3a-1 종료 oracle은 실제 production `HostAdapter` construction/deinit을 generation-1 slot으로 parity migration하고,
 `Client`를 import해 slot/node final-address, same-address destroy→re-init incarnation, allocator fail-index, immutable lease와 one-shot

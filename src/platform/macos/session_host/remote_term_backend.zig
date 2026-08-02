@@ -689,10 +689,11 @@ const daemon = @import("daemon.zig");
 
 extern "c" fn usleep(usec: c_uint) c_int;
 
-fn addOwnedClient(pool: *AdapterPool, allocator: std.mem.Allocator, client_value: client_mod.Client) !u128 {
+fn addOwnedClient(pool: *AdapterPool, allocator: std.mem.Allocator, source: *client_mod.Client) !u128 {
+    errdefer source.deinit();
     const adapter = try allocator.create(HostAdapter);
     errdefer allocator.destroy(adapter);
-    adapter.* = try HostAdapter.init(client_value);
+    try HostAdapter.initInPlace(adapter, allocator, source);
     errdefer adapter.deinit();
     const host_id = adapter.hostId();
     try pool.addOwned(host_id, adapter);
@@ -724,7 +725,7 @@ test "remote term backend: drives a real host runtime through the TermRuntimeBac
         _ = c.rmdir(dir_path.ptr);
     }
 
-    const client_value: client_mod.Client = blk: {
+    var client_value: client_mod.Client = blk: {
         var attempts: usize = 0;
         while (attempts < 150) : (attempts += 1) {
             if (client_mod.Client.connect(allocator, socket_path, .gui)) |cl| break :blk cl else |_| _ = usleep(20 * 1000);
@@ -734,7 +735,7 @@ test "remote term backend: drives a real host runtime through the TermRuntimeBac
     };
     var pool = AdapterPool.init(allocator);
     defer pool.deinit();
-    const host_id = try addOwnedClient(&pool, allocator, client_value);
+    const host_id = try addOwnedClient(&pool, allocator, &client_value);
     try pool.setSpawnHost(host_id);
 
     // 앱 라우팅 표(GUI 입력 hot path가 쓰는 그 표). backend가 원격 Term을 여기 등록한다.
@@ -857,20 +858,19 @@ test "remote term backend: two daemon pool routes exact hosts and retiring A pre
         _ = c.rmdir(dir_b.ptr);
     }
 
-    const connect_a: client_mod.Client = blk: {
+    var connect_a: client_mod.Client = blk: {
         var attempts: usize = 0;
         while (attempts < 150) : (attempts += 1) {
             if (client_mod.Client.connect(allocator, socket_a, .gui)) |client| break :blk client else |_| _ = usleep(20 * 1000);
         }
         return error.TestUnexpectedResult;
     };
-    const connect_b: client_mod.Client = blk: {
+    var connect_b: client_mod.Client = blk: {
         var attempts: usize = 0;
         while (attempts < 150) : (attempts += 1) {
             if (client_mod.Client.connect(allocator, socket_b, .gui)) |client| break :blk client else |_| _ = usleep(20 * 1000);
         }
-        var failed_a = connect_a;
-        failed_a.deinit();
+        connect_a.deinit();
         return error.TestUnexpectedResult;
     };
     const host_a = connect_a.host_id;
@@ -879,8 +879,8 @@ test "remote term backend: two daemon pool routes exact hosts and retiring A pre
 
     var pool = AdapterPool.init(allocator);
     defer pool.deinit();
-    try testing.expectEqual(host_a, try addOwnedClient(&pool, allocator, connect_a));
-    try testing.expectEqual(host_b, try addOwnedClient(&pool, allocator, connect_b));
+    try testing.expectEqual(host_a, try addOwnedClient(&pool, allocator, &connect_a));
+    try testing.expectEqual(host_b, try addOwnedClient(&pool, allocator, &connect_b));
     try pool.setSpawnHost(host_a);
 
     var surface_runtime = maru.app.SurfaceRuntime.init(allocator);

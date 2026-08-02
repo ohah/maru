@@ -818,7 +818,7 @@ TDD 방식:
      P6 전체 workspace TUI/외부 tmux import adapter와 Plugin은 각각 실제 수요·착수 전 별도 논의.
 - **검토했으나 미채택한 대안**(UI 완성도 먼저, 구조 리스크 뒤로): chrome 고급화를 New Window보다 앞에 두는 안. atlas 소유권 캡슐화 + restore 스키마 window-aware면 재작업은 낮으나, 큰 구조 변경을 미루는 대신 나중에 공유 검토할 atlas가 2개가 되는 트레이드오프 — 사용자가 "토대 먼저"를 택해 미채택.
 
-## Session host 실행 중 transport reconnect (CR, CR0a 완료)
+## Session host 실행 중 transport reconnect (CR, CR0a·CR3a-1 완료)
 
 shared `Client`가 실행 중 unusable이 되어도 기존 Term/Surface/runtime handle을 유지한 채 exact host에 다시 붙이는 단계다.
 규범 계약은 [영속 터미널 세션 호스트](persistent-session-host.md#실행-중-connection-invalidation과-재연결), 검증 상태와
@@ -844,7 +844,7 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    cursor, CR2d4는 cross-Window old transfer 제거/parity를 각각 golden trace로 닫는다. CR2e에서 순수
    `ReconnectReducer`의 exhaustive/illegal-transition model test와 fake `PreparedReconnect` prepare/publish/retire,
    allocator fail-index를 검증한다.
-5. **CR3 — shared Client 세대:** CR3a는 두 merge slice로 닫는다. **CR3a-1**은 현
+5. **CR3 — shared Client 세대:** CR3a는 두 merge slice로 닫는다. **CR3a-1(완료)**은 현
    Client/external-pump/final-address cleanup ownership inventory를 먼저 고정하고 cleanup lease의 제품 callback이 0인
    transport-neutral `ConnectionLease`와 generation 1 전용 `HostAdapter.ClientSlot` skeleton을 넣는다. `HostAdapter`는
    `initInPlace(out,node_allocator,source)`로만 생성하고 inline slot이 세대별 heap-pinned `ClientNode`를 단독 소유한다.

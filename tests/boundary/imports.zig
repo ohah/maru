@@ -3642,10 +3642,11 @@ test "session host has zero raw untyped Client invalidation callsites" {
         }
     }
     const source = client_source orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 5), countFieldAssignments(source, "unusable"));
+    try std.testing.expectEqual(@as(usize, 6), countFieldAssignments(source, "unusable"));
     const allowed = [_][]const u8{
         betweenMarkers(source, "fn externalAdoptionSnapshot(", "fn externalAdoptionSnapshotForProof(") orelse return error.TestUnexpectedResult,
         betweenMarkers(source, "pub fn commitExternalPumpTransfer(", "/// Runs only after Client and metadata evidence") orelse return error.TestUnexpectedResult,
+        betweenMarkers(source, "pub fn moveToGenerationNode(", "/// Deep snapshot of the descriptors") orelse return error.TestUnexpectedResult,
         betweenMarkers(source, "fn poisonAndTakeFd(", "fn latchFirstPoisonReason(") orelse return error.TestUnexpectedResult,
         betweenMarkers(source, "fn markPoisonedForDeferredCleanup(", "pub fn terminalReasonInvariant(") orelse return error.TestUnexpectedResult,
         betweenMarkers(source, "test \"client source seal binds explicit schema descriptors", "test \"external source fold keeps seed tags") orelse return error.TestUnexpectedResult,
@@ -3673,6 +3674,157 @@ test "session host has zero raw untyped Client invalidation callsites" {
             @as(usize, 1),
             countFieldAssignments(sentinel_slice, "first_poison_reason"),
         );
+    }
+}
+
+test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
+    const allocator = std.testing.allocator;
+    var dir = try std.Io.Dir.cwd().openDir(
+        std.testing.io,
+        "src",
+        .{ .iterate = true },
+    );
+    defer dir.close(std.testing.io);
+    var walker = try dir.walk(allocator);
+    defer walker.deinit();
+
+    while (try walker.next(std.testing.io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".zig")) continue;
+        const path = try std.fmt.allocPrint(
+            allocator,
+            "src/{s}",
+            .{entry.path},
+        );
+        defer allocator.free(path);
+        const source = try readZigFileZ(allocator, path);
+        defer allocator.free(source);
+
+        const is_client_slot = std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/client_slot.zig",
+        );
+        const is_lease_module = std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/connection_lease.zig",
+        );
+        // Count the filename rather than one relative spelling so imports from anywhere under
+        // `src/` cannot bypass the product-wide mint/consume-zero gate with a longer path.
+        const imports_lease = countOccurrences(source, "connection_lease.zig");
+        try std.testing.expectEqual(
+            @as(usize, if (is_client_slot) 1 else 0),
+            imports_lease,
+        );
+        const lease_type_count = countIdentifierOutsideTopLevelTests(source, "ConnectionLease");
+        if (is_lease_module) {
+            // The defining module necessarily names the type in its methods.  Its exact internal
+            // count is not an architecture boundary; only production references outside the
+            // defining module are forbidden until CR3a-2 wires the compatibility adapter.
+            try std.testing.expect(lease_type_count > 0);
+        } else {
+            try std.testing.expectEqual(@as(usize, 0), lease_type_count);
+        }
+        const move_count = countIdentifierOutsideTopLevelTests(source, "moveToGenerationNode");
+        const expected_move_count: usize = if (std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/client.zig",
+        ) or is_client_slot) 1 else 0;
+        try std.testing.expectEqual(expected_move_count, move_count);
+        if (!is_client_slot)
+            try std.testing.expectEqual(@as(usize, 0), countOccurrences(source, ".slot.current"));
+    }
+
+    const app = try readZigFileZ(allocator, "src/platform/macos/app_session.zig");
+    defer allocator.free(app);
+    const backend = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/remote_term_backend.zig",
+    );
+    defer allocator.free(backend);
+    const runtime = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/remote_runtime.zig",
+    );
+    defer allocator.free(runtime);
+    const pump = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/client_external_pump.zig",
+    );
+    defer allocator.free(pump);
+    const pool = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/host_pool.zig",
+    );
+    defer allocator.free(pool);
+
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        countOccurrences(app, "RemoteSessionAdapter.initInPlace("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        countIdentifierOutsideTopLevelTests(backend, "logicalClient"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(runtime, "    client: *client_mod.Client, // borrowed"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        countOccurrences(runtime, "        self.client = client;"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(runtime, "        .context = client,"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 3),
+        countOccurrences(
+            runtime,
+            "const client: *client_mod.Client = @ptrCast(@alignCast(context));",
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(pump, "    owned_client: ?client_mod.Client = null,"),
+    );
+    try std.testing.expectEqual(@as(usize, 2), countOccurrences(pool, "adapter.deinit();"));
+}
+
+fn countIdentifierOutsideTopLevelTests(source: [:0]const u8, wanted: []const u8) usize {
+    var tokenizer = std.zig.Tokenizer.init(source);
+    var brace_depth: usize = 0;
+    var waiting_for_test_body = false;
+    var test_body_depth: ?usize = null;
+    var count: usize = 0;
+    while (true) {
+        const token = tokenizer.next();
+        switch (token.tag) {
+            .eof => return count,
+            .keyword_test => if (brace_depth == 0 and test_body_depth == null) {
+                waiting_for_test_body = true;
+            },
+            .l_brace => {
+                brace_depth += 1;
+                if (waiting_for_test_body) {
+                    test_body_depth = brace_depth;
+                    waiting_for_test_body = false;
+                }
+            },
+            .r_brace => {
+                if (test_body_depth != null and test_body_depth.? == brace_depth)
+                    test_body_depth = null;
+                if (brace_depth > 0) brace_depth -= 1;
+            },
+            .identifier => if (test_body_depth == null and
+                std.mem.eql(u8, source[token.loc.start..token.loc.end], wanted))
+            {
+                count += 1;
+            },
+            else => {},
+        }
     }
 }
 

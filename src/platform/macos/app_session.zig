@@ -436,6 +436,25 @@ fn archiveOpenedDevice(file: std.Io.File) u64 {
     return @intCast(stat.dev);
 }
 
+fn asciiContainsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (needle.len > haystack.len) return false;
+    var start: usize = 0;
+    while (start + needle.len <= haystack.len) : (start += 1) {
+        var index: usize = 0;
+        while (index < needle.len and std.ascii.toLower(haystack[start + index]) == std.ascii.toLower(needle[index])) : (index += 1) {}
+        if (index == needle.len) return true;
+    }
+    return false;
+}
+
+fn agentSessionArchiveMatches(record: agent_session_archive_backend.Record, query: []const u8) bool {
+    return query.len == 0 or asciiContainsIgnoreCase(record.parsed.title, query) or
+        asciiContainsIgnoreCase(record.parsed.summary, query) or
+        asciiContainsIgnoreCase(record.parsed.cwd, query) or
+        asciiContainsIgnoreCase(record.parsed.model, query);
+}
+
 // 세로 탭 사이드바의 기본 논리 폭(pt). backing 픽셀 폭은 scale을 곱해 구한다(refreshCellMetrics에서).
 // 터미널 surface는 이 폭만큼 오른쪽으로 그려지고, 왼쪽 strip이 사이드바다("surface→rect" 첫 적용). 사용자가
 // 우측 경계를 드래그해 바꾸면 `AppSession.sidebar_width_pt`(현재 폭, pt)가 [min,max]로 갱신된다 — pt로 들어
@@ -2668,6 +2687,9 @@ pub const AppSession = struct {
     agent_session_archive_backend: agent_session_archive_backend.Backend = undefined,
     agent_session_archive_initialized: bool = false,
     agent_session_archive_records: std.ArrayList(agent_session_archive_backend.Record) = .empty,
+    agent_session_archive_filtered_indices: std.ArrayList(usize) = .empty,
+    agent_session_archive_search: std.ArrayList(u8) = .empty,
+    agent_session_archive_search_active: bool = false,
     agent_session_archive_loading: bool = false,
     agent_session_archive_completed_ns: i128 = 0,
     agent_session_archive_partial: bool = false,
@@ -3372,8 +3394,9 @@ pub const AppSession = struct {
             result.records.clearRetainingCapacity();
         }
         if (!result.first_batch) self.agent_session_archive_partial = self.agent_session_archive_partial or result.partial;
+        self.rebuildAgentSessionArchiveFilter();
         const visible = self.agentSessionArchiveVisibleRecordRows();
-        self.agent_session_archive_scroll_rows = @min(self.agent_session_archive_scroll_rows, self.agent_session_archive_records.items.len -| @as(usize, visible));
+        self.agent_session_archive_scroll_rows = @min(self.agent_session_archive_scroll_rows, self.agent_session_archive_filtered_indices.items.len -| @as(usize, visible));
         if (result.complete) {
             self.agent_session_archive_loading = false;
             self.agent_session_archive_completed_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
@@ -12374,7 +12397,7 @@ pub const AppSession = struct {
         // Header and expanded detail/action rows are not selectable sessions.
         if (local_row < 1 + detail_rows or local_row >= visible_rows) return null;
         const row = self.agent_session_archive_scroll_rows + local_row - 1 - detail_rows;
-        return if (row < self.agent_session_archive_records.items.len) row else null;
+        return if (row < self.agent_session_archive_filtered_indices.items.len) self.agent_session_archive_filtered_indices.items[row] else null;
     }
 
     fn agentSessionArchiveDetailRows(self: *const AppSession) usize {
@@ -12389,6 +12412,39 @@ pub const AppSession = struct {
         if (self.cell_height_px == 0) return 0;
         const rows = self.dockGeometry().tree_content.h / self.cell_height_px;
         return rows -| 1 -| self.agentSessionArchiveDetailRows();
+    }
+
+    fn rebuildAgentSessionArchiveFilter(self: *AppSession) void {
+        self.agent_session_archive_filtered_indices.clearRetainingCapacity();
+        for (self.agent_session_archive_records.items, 0..) |record, index| {
+            if (agentSessionArchiveMatches(record, self.agent_session_archive_search.items))
+                self.agent_session_archive_filtered_indices.append(self.allocator, index) catch break;
+        }
+    }
+
+    fn handleAgentSessionArchiveSearchKey(self: *AppSession, event: terminal.KeyEvent) bool {
+        if (!self.agent_session_archive_search_active) return false;
+        switch (event.key) {
+            .escape => {
+                self.agent_session_archive_search_active = false;
+                self.agent_session_archive_search.clearRetainingCapacity();
+            },
+            .backspace => {
+                if (self.agent_session_archive_search.items.len > 0)
+                    _ = self.agent_session_archive_search.pop();
+            },
+            .char => |codepoint| {
+                if (event.modifiers.command or event.modifiers.control or event.modifiers.option) return true;
+                var utf8: [4]u8 = undefined;
+                const len = std.unicode.utf8Encode(codepoint, &utf8) catch return true;
+                if (self.agent_session_archive_search.items.len + len <= 256)
+                    self.agent_session_archive_search.appendSlice(self.allocator, utf8[0..len]) catch {};
+            },
+            else => return true,
+        }
+        self.rebuildAgentSessionArchiveFilter();
+        self.metal_dirty = true;
+        return true;
     }
 
     const AgentSessionArchiveDetailAction = enum { resume_session, reveal_log };
@@ -19814,6 +19870,25 @@ pub const AppSession = struct {
             self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
             return self.last_summary;
         }
+        if (self.dockVisible() and self.dock.view == .agent_sessions) {
+            if (self.handleAgentSessionArchiveSearchKey(event)) {
+                self.total_app_key_events += 1;
+                self.writeSummaryFromState();
+                self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
+                return self.last_summary;
+            }
+            if (!event.modifiers.command and !event.modifiers.control and !event.modifiers.option and switch (event.key) {
+                .char => |codepoint| codepoint == '/',
+                else => false,
+            }) {
+                self.agent_session_archive_search_active = true;
+                self.metal_dirty = true;
+                self.total_app_key_events += 1;
+                self.writeSummaryFromState();
+                self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
+                return self.last_summary;
+            }
+        }
         // 선택된 archive의 명시적 재개 단축키. 행 클릭은 selection만 바꾸며 실행하지 않는다; 이 경로는
         // `Resume in New Tab` 액션과 같은 provider-native argv를 사용한다. 새 상세 패널이 붙기 전에도
         // keyboard-only 사용자가 transcript를 shell로 흘리지 않고 안전하게 재개할 수 있는 연결점이다.
@@ -20197,7 +20272,7 @@ pub const AppSession = struct {
             layout_math.pointInRect(x_px, y_px, self.dockGeometry().tree_content))
         {
             const visible = self.agentSessionArchiveVisibleRecordRows();
-            const max_scroll = self.agent_session_archive_records.items.len -| @as(usize, visible);
+            const max_scroll = self.agent_session_archive_filtered_indices.items.len -| @as(usize, visible);
             const next = @as(i64, @intCast(self.agent_session_archive_scroll_rows)) - @as(i64, lines);
             const clamped: usize = @intCast(std.math.clamp(next, 0, @as(i64, @intCast(max_scroll))));
             if (clamped != self.agent_session_archive_scroll_rows) {
@@ -27725,7 +27800,12 @@ pub const AppSession = struct {
                             const detail_rows = self.agentSessionArchiveDetailRows();
                             const archive_rows = visible_rows -| 1 -| detail_rows;
                             const archive_origin_y = dg.tree_content.y + self.cell_height_px * @as(u32, @intCast(1 + detail_rows));
-                            const header = if (self.agent_session_archive_loading)
+                            const header_owned: ?[]u8 = if (self.agent_session_archive_search_active)
+                                std.fmt.allocPrint(self.allocator, "AI 세션 · 검색: {s}", .{self.agent_session_archive_search.items}) catch null
+                            else
+                                null;
+                            defer if (header_owned) |value| self.allocator.free(value);
+                            const header = header_owned orelse if (self.agent_session_archive_loading)
                                 "AI 세션 · 분석 중"
                             else
                                 "AI 세션 · ⟳ 새로 고침";
@@ -27755,9 +27835,10 @@ pub const AppSession = struct {
                             };
                             var labels: std.ArrayList([]const u8) = .empty;
                             defer labels.deinit(self.allocator);
-                            const start = @min(self.agent_session_archive_scroll_rows, self.agent_session_archive_records.items.len);
-                            for (self.agent_session_archive_records.items[start..]) |record| {
+                            const start = @min(self.agent_session_archive_scroll_rows, self.agent_session_archive_filtered_indices.items.len);
+                            for (self.agent_session_archive_filtered_indices.items[start..]) |record_index| {
                                 if (labels.items.len >= archive_rows) break;
+                                const record = &self.agent_session_archive_records.items[record_index];
                                 labels.append(self.allocator, record.parsed.title) catch break;
                             }
                             var loading_label: ?[]u8 = null;
@@ -27776,7 +27857,13 @@ pub const AppSession = struct {
                                     tree_content_cols,
                                     @intCast(@min(labels.items.len, archive_rows)),
                                     labels.items,
-                                    if (self.agent_session_archive_selected) |selected| if (selected >= start and selected < start + labels.items.len) selected - start else null else null,
+                                    if (self.agent_session_archive_selected) |selected| blk: {
+                                        for (self.agent_session_archive_filtered_indices.items[start..], 0..) |record_index, visible_index| {
+                                            if (visible_index >= labels.items.len) break;
+                                            if (record_index == selected) break :blk visible_index;
+                                        }
+                                        break :blk null;
+                                    } else null,
                                     dock_fg,
                                     dock_active_fg,
                                 )) |sdl| {
@@ -31621,6 +31708,8 @@ pub const AppSession = struct {
                 self.agent_session_archive_backend.deinit();
                 for (self.agent_session_archive_records.items) |*record| record.deinit(self.allocator);
                 self.agent_session_archive_records.deinit(self.allocator);
+                self.agent_session_archive_filtered_indices.deinit(self.allocator);
+                self.agent_session_archive_search.deinit(self.allocator);
                 self.agent_session_archive_initialized = false;
             }
             if (self.pending_rename_remap) |*plan| plan.deinit(self.allocator);

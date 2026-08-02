@@ -141,6 +141,17 @@ pub const RemoteAttachment = struct {
     }
 
     pub fn deinit(self: *RemoteAttachment) void {
+        self.deinitWithDropPolicy(true);
+    }
+
+    /// GUI generation-bound owner settles the canonical node-local stream drop itself, but still
+    /// needs this payload to release pending batch leases and screen storage. External movable
+    /// attachments keep using `deinit`, which retains the legacy transport-owned drop.
+    pub fn deinitPayloadOnly(self: *RemoteAttachment) void {
+        self.deinitWithDropPolicy(false);
+    }
+
+    fn deinitWithDropPolicy(self: *RemoteAttachment, drop_stream: bool) void {
         if (self.transport) |transport| {
             if (self.failed_release) |lease| {
                 if (lease.release(transport) == .invariant_failure) {
@@ -152,7 +163,7 @@ pub const RemoteAttachment = struct {
                     transport.fail_closed(transport.context, .attachment_cleanup_failed);
                 }
             }
-            transport.drop_stream(transport.context, self.state.stream_id);
+            if (drop_stream) transport.drop_stream(transport.context, self.state.stream_id);
         } else {
             if (self.failed_release) |lease| switch (lease) {
                 .untracked => |batch| batch.deinit(),
@@ -390,6 +401,30 @@ pub const RemoteAttachment = struct {
         self.state.controller_generation = successor_generation;
     }
 };
+
+fn exactOwnerSchema(comptime Actual: type, comptime Expected: type) bool {
+    const actual = std.meta.fields(Actual);
+    const expected = std.meta.fields(Expected);
+    if (actual.len != expected.len) return false;
+    inline for (actual, expected) |a, e| {
+        if (!std.mem.eql(u8, a.name, e.name) or a.type != e.type) return false;
+    }
+    return true;
+}
+
+comptime {
+    const Expected = struct {
+        allocator: std.mem.Allocator,
+        state: State,
+        transport: ?AttachmentTransport,
+        screen: ?remote_screen.RemoteScreen,
+        pending_batches: std.ArrayListUnmanaged(AttachmentBatchLease),
+        pending_batch_head: usize,
+        failed_release: ?AttachmentBatchLease,
+    };
+    if (!exactOwnerSchema(RemoteAttachment, Expected))
+        @compileError("CR3a movable RemoteAttachment schema changed; update SSOT before implementation");
+}
 
 pub const AttachResult = struct {
     state: State,
@@ -1030,6 +1065,29 @@ const TestTransport = struct {
         };
     }
 };
+
+test "CR3a-2a GUI payload-only teardown leaves stream drop to generation owner" {
+    var transport = TestTransport{ .batch = null };
+    var attachment = RemoteAttachment.init(std.testing.allocator, .{
+        .runtime_id = 1,
+        .stream_id = 7,
+        .role = .controller,
+        .controller_generation = 1,
+    });
+    try attachment.bindTransport(transport.interface());
+    attachment.deinitPayloadOnly();
+    try std.testing.expectEqual(@as(usize, 0), transport.drop_calls);
+
+    var external = RemoteAttachment.init(std.testing.allocator, .{
+        .runtime_id = 2,
+        .stream_id = 8,
+        .role = .controller,
+        .controller_generation = 1,
+    });
+    try external.bindTransport(transport.interface());
+    external.deinit();
+    try std.testing.expectEqual(@as(usize, 1), transport.drop_calls);
+}
 
 const ChargedTestTransport = struct {
     ledger: *external_inbox_ledger.ExternalInboxLedger,

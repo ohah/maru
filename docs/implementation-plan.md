@@ -856,9 +856,17 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    `completed|retryable_preserved|indeterminate_or_partial`의 닫힌 전이다.
    두 타입 모두 raw `*Client`, 임의 callback, request/read/write admission을 노출하지 않는다. **CR3a-2**는 generation 1 compatibility
    wiring을 다섯 vertical merge gate로 닫고 각 gate 끝의 실제 제품 경로에는 canonical cleanup owner를 하나만 둔다.
-   CR3a-2a는 GUI `RemoteRuntime` 안에 final-address `GenerationAttachment`, neutral binding leaf와
+   **CR3a-2a(구현):** GUI `RemoteRuntime` 안에 final-address `GenerationAttachment`, neutral binding leaf와
    `GenerationTransport` 최소 core(`capabilities|prepareRequest|executePreparedRequest|abortPreparedRequest|poison`)를 넣어 실제 attach/deinit의
    stream-drop reservation·lease release를 배선하고, 외부 CLI의 movable `RemoteAttachment` graph는 바꾸지 않는다.
+   node-local cleanup registry의 canonical transport/response seal, opaque prepared RPC storage, response/binding/transport/request
+   backing의 wire 전 non-alias preflight, wire 전 captured allocator와 Frame schema를 바꾸지 않는 parser out-parameter가 frame마다
+   반환하는 실제 payload allocator를 제품
+   타입으로 고정했다. response payload는 GUI parent 전체와 node canonical owner range에 겹치지 않아야 하며, forged alias나
+   allocator drift는 connection을 poison하고 해당 bounded payload를 free하지 않는다. copy/ABA/reentry,
+   poison-before-free, snapshot EOF rollback과 실제 daemon의 기본 attach/detach/reattach를 자동 검증한다. 이는 최소 core와 GUI
+   attachment shell만의 완료이며 raw batch context 제거, 나머지 primitive, typed teardown, 전체 actual-socket parity는 각각
+   2b~2e에 남는다.
    CR3a-2b는 `Client` 내부 accounting을 보존한 batch queue→node registry owner transaction을 실제 pump/release에 배선하고 GUI
    `AttachmentTransport.context=*Client`를 node-bound batch/drop adapter로 즉시 교체한다. CR3a-2c는 나머지 stream/event
    primitive를 최소 core에 추가해 `RemoteRuntime.client` direct escape를 HostAdapter가 발급하는 작은 closed transport facade로

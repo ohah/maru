@@ -23077,6 +23077,63 @@ pub const ExternalPumpStorage = struct {
     }
 };
 
+fn exactCr3aOwnerSchema(comptime Actual: type, comptime Expected: type) bool {
+    const actual = std.meta.fields(Actual);
+    const expected = std.meta.fields(Expected);
+    if (actual.len != expected.len) return false;
+    inline for (actual, expected) |a, e| {
+        if (!std.mem.eql(u8, a.name, e.name) or a.type != e.type) return false;
+    }
+    return true;
+}
+
+comptime {
+    @setEvalBranchQuota(100_000);
+    const Expected = struct {
+        access_claim: std.atomic.Value(u8),
+        lifecycle: StorageLifecycle,
+        saved_self_addr: usize,
+        rx_resident_cap: usize,
+        rx_resident_cap_digest: external_owner_seal.Digest,
+        semantic_state: client_pump.ExternalPumpState,
+        evidence_snapshot: AttachmentEvidence,
+        owned_client: ?client_mod.Client,
+        owned_evidence: ?PreparedAdoptionEvidence,
+        client_transfer: client_mod.PreparedExternalPumpTransfer,
+        inbox_ledger: external_inbox_ledger.ExternalInboxLedger,
+        prepared_adoption: PreparedExternalAdoption,
+        client_cleanup_take: client_mod.ExternalAdoptionTake,
+        committed_screen: client_external_adoption.CommittedScreenBacklog,
+        live_partial: LivePartialBatch,
+        live_screen: LiveScreenBacklog,
+        completed_control: CompletedControlOwner,
+        completed_control_generation: u64,
+        screen_pending_summary: ScreenPendingSummarySeal,
+        owner_metadata: external_event_materialization.OwnerMetadataState,
+        metadata_pending_summary: MetadataPendingSummarySeal,
+        owner_resize: OwnerResizeState,
+        owner_authority: OwnerAuthorityState,
+        owner_authority_seal: OwnerAuthoritySeal,
+        owner_request_ids: ?client_pump.RequestIdState,
+        control_correlation: ControlCorrelationOwner,
+        owner_incarnation: u64,
+        owner_incarnation_seal: OwnerIncarnationSeal,
+        owner_event_projection_generation: u64,
+        operation_generation: u64,
+        operation_reentry_latched: bool,
+        callback_quarantine_pending: bool,
+        callback_quarantine_accounted: bool,
+        owner_teardown_generation: u64,
+        intent_scratch_generation: u64,
+        intent_scratch_reservation: IntentScratchReservation,
+        rx_aggregate_generation: u64,
+        rx_aggregate_handle: PreparedRxAggregateHandle,
+        rx_aggregate_reservation: RxAggregateScratchReservation,
+    };
+    if (!exactCr3aOwnerSchema(ExternalPumpStorage, Expected))
+        @compileError("CR3a ExternalPumpStorage schema changed; update SSOT before implementation");
+}
+
 fn cleanupScratchOverlapsStorage(
     storage: *const ExternalPumpStorage,
     cleanup_scratch: *const ExternalPumpCleanupScratch,

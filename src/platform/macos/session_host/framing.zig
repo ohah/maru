@@ -203,6 +203,14 @@ pub const FrameParser = struct {
         return .{ .allocator = allocator, .expected_major = expected_major };
     }
 
+    pub fn usesAllocator(self: *const FrameParser, allocator: std.mem.Allocator) bool {
+        return std.meta.eql(self.allocator, allocator);
+    }
+
+    pub fn restoreAllocatorAfterDrift(self: *FrameParser, allocator: std.mem.Allocator) void {
+        self.allocator = allocator;
+    }
+
     pub fn deinit(self: *FrameParser) void {
         self.buf.deinit(self.allocator);
         self.* = undefined;
@@ -234,8 +242,15 @@ pub const FrameParser = struct {
     /// 완성된 다음 frame을 꺼낸다(버퍼에서 제거). 부족하면 null(더 push하라). optional unknown frame은 조용히
     /// skip하고 그 다음 처리 대상 frame을 찾는다. cap 초과·bad magic·unknown required는 error(connection 닫기).
     pub fn next(self: *FrameParser) ParseError!?Frame {
+        return self.nextWithAllocator(null);
+    }
+
+    pub fn nextWithAllocator(
+        self: *FrameParser,
+        payload_allocator_out: ?*std.mem.Allocator,
+    ) ParseError!?Frame {
         while (true) {
-            const outcome = try self.nextOutcome();
+            const outcome = try self.nextOutcomeWithAllocator(payload_allocator_out);
             switch (outcome) {
                 .incomplete => return null,
                 .skipped => continue,
@@ -254,6 +269,13 @@ pub const FrameParser = struct {
     };
 
     pub fn nextOutcome(self: *FrameParser) ParseError!Outcome {
+        return self.nextOutcomeWithAllocator(null);
+    }
+
+    fn nextOutcomeWithAllocator(
+        self: *FrameParser,
+        payload_allocator_out: ?*std.mem.Allocator,
+    ) ParseError!Outcome {
         const pending = self.buf.items[self.head..];
         if (pending.len < protocol.header_size) return .incomplete;
         const header_bytes: *const [protocol.header_size]u8 = @ptrCast(pending.ptr);
@@ -271,11 +293,13 @@ pub const FrameParser = struct {
             self.consume(total);
             return .skipped;
         }
-        const payload = self.allocator.dupe(
+        const payload_allocator = self.allocator;
+        const payload = payload_allocator.dupe(
             u8,
             pending[protocol.header_size..total],
         ) catch return error.OutOfMemory;
         self.consume(total);
+        if (payload_allocator_out) |out| out.* = payload_allocator;
         return .{ .frame = .{ .header = header, .payload = payload } };
     }
 

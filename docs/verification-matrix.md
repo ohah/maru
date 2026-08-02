@@ -665,7 +665,7 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   last release 뒤 Client/node exact-one destroy를 검증한다. fork child PID-domain mismatch에서 low-level mint/consume/tryDeinit의
   typed reject와 callback/free/owner mutation 0, strict 제품 wrapper의 fail-stop을 구분해 검증한다. HostPool membership
   lease와 ConnectionLease는 별개이며 external-pump owner graph는 변경하지 않는다. 증거 수준은 production-type unit이다.
-- CR3a-2(계획, 2a~e): generation 1 compatibility wiring으로 GUI raw `RemoteRuntime.client=*Client`와
+- CR3a-2(진행, **2a 구현**, 2b~e 계획): generation 1 compatibility wiring으로 GUI raw `RemoteRuntime.client=*Client`와
   `AttachmentTransport.context=*Client` production callsite 0, GUI-only final-address `GenerationAttachment.initInPlace`,
   external movable `RemoteAttachment`/`Prepared|Attached` owner-schema 불변, live transport와 cleanup lease 분리,
   batch table 0/1/4096/4097과 별도 stream-drop table 0/1/4096/4097의
@@ -731,6 +731,14 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   attach/pump/deinit/uncertain/malformed/snapshot-failure/failed-release fixture와 전체 source
   boundary를 각각 증명한다. 각 gate는 production-type unit과 boundary를 재실행하며 전체가 green이기 전 CR3a-2 완료를 주장하지
   않는다.
+  2a의 현재 자동 증거는 canonical node-local transport/response seal, opaque prepared request storage, final response의
+  binding/transport/request backing non-alias preflight, wire 전 allocator capture와 Frame schema 불변 out-parameter 기반의 frame별
+  실제 payload allocator 일치,
+  OOB queue callback의 captured-allocator 사용·같은 thread의 foreign Client까지 wire 전 동기 재진입 거부·drift 복원,
+  GUI parent/node owner payload alias의 no-free fail-stop,
+  live-seal registry erasure 거부,
+  copy/ABA/reentry·poison-before-free·snapshot EOF rollback을 production type으로 실행한다. 실제 daemon의 기본
+  attach/detach/reattach도 포함하지만 2e가 요구하는 전체 socket failure/parity matrix를 대신하지 않는다.
 - CR3b: pool-membership과 독립된 connection generation 전이·publish·overflow, stale callback/동시 attempt,
   R1 admission close/cancel → R2 store-only detach+placeholder publish+callback cleanup → R3 final seal/canRetire/tick-end destroy의
   three-phase retirement, retired Client cap 2. CR3c: 실제 RemoteGeneration slot integration.

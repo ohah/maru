@@ -1836,7 +1836,10 @@ pub fn build(b: *std.Build) void {
     }
     run_session_host_tests.addArg("MARU_SESSION_HOST_TEST_ONESHOT=maru-test-only-v1");
     run_session_host_tests.addArtifactArg(session_host_tests);
-    run_session_host_tests.enableTestRunnerMode();
+    // 이 wrapper는 simple test runner가 일반 종료 코드로 모든 test function을 실행한다.
+    // IPC server mode를 켜면 `--listen=-`을 덧붙여 Zig 0.16의 runner handshake를 다시 요구하므로,
+    // 제품 artifact 환경변수가 필요한 이 전용 경로도 일반 test run과 같은 exit-code 계약으로 둔다.
+    run_session_host_tests.expectExitCode(0);
     run_session_host_tests.setCwd(b.path("."));
     test_step.dependOn(&run_session_host_tests.step);
 

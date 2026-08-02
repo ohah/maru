@@ -562,6 +562,35 @@ ML3b의 첫 구현에서 Lab은 `session.control_surface.SurfaceKind`나 persist
 한다. 이후 실제 개발자용 Lab 탭을 추가할 필요가 생기면, 그때만 별도 설계에서 workspace persistence,
 control-plane visibility, 권한 모델과 lifecycle을 결정한다.
 
+### 6.2 ML3b1 구현 단위와 완료 조건
+
+첫 구현 PR은 session dock이나 제품 workspace를 건드리지 않는다. `ChromeLabScenario`의 고정 synthetic
+draw와 `ui.interaction.dispatch`의 recorded action을 만들고, 이를 기존 제품 `metal_lowering.lower`에
+연결하는 test executable만 추가한다. 시각 capture는 그 **다음** macOS readback PR이 소유한다. 이렇게
+나누면 platform-independent scenario/action 계약과 Cocoa·Metal drawable 실패를 한 PR의 실패 원인으로
+섞지 않는다.
+
+- scenario ID, backing px viewport, appearance token, deterministic clock, synthetic tree/draw와 expected
+  action만 input으로 받는다. `AppSession`, `Term`, `SurfaceId`, config 파일, 환경변수 기반 사용자 경로는
+  input으로 받지 않는다.
+- 결과는 `OverlayRaster`와 recorded action의 값 DTO다. caller는 allocator를 소유하고 Lab은 frame arena,
+  OS window, PTY 또는 worker를 만들지 않는다.
+- scenario가 늘어나도 provider resume/reveal/spawn/filesystem callback을 나타내는 action case를 추가하지
+  않는다. 해당 행동은 ML4 session dock의 host adapter에서만 별도 권한 계약으로 다룬다.
+- headless test는 empty/loading/retained-list의 tree/draw/action 결과, long title clip, selected/hovered
+  precedence, width 320/480/800/1280을 고정한다. actual PPM/PNG, CoreText shaping, GPU blend는 이
+  단계의 완료 증거가 아니며 다음 readback PR의 범위다.
+
+```mermaid
+flowchart TD
+    A[ChromeLabScenario fixture] --> B[UiTree UiLayout UiPaint]
+    B --> C[ui interaction dispatch]
+    C --> D[recorded action only]
+    B --> E[ChromeDraw]
+    E --> F[production metal_lowering]
+    F --> G[OverlayRaster DTO]
+```
+
 ```mermaid
 flowchart TD
     A[ChromeLabScenario synthetic props] --> B[UiTree and UiLayout]

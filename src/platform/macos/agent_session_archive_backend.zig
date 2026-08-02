@@ -4,11 +4,15 @@
 //! 만든 summary 외 raw JSONL은 main actor로 넘기지 않는다.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const maru = @import("maru");
 const archive = maru.session.agent_session_archive;
 
 pub const max_candidates_per_provider: usize = 4096;
 pub const max_records: usize = 500;
+/// The archive itself displays at most 500 verified records, so retaining more
+/// parse summaries would increase lookup cost without improving a refresh.
+pub const max_cache_entries: usize = max_records;
 /// A single verified newest record proves the list is useful; publish it
 /// immediately instead of making first paint wait for a full display page.
 pub const first_batch_records: usize = 1;
@@ -51,6 +55,7 @@ const State = struct {
     mutex: std.Io.Mutex = .init,
     refs: std.atomic.Value(usize) = .init(1),
     results: std.ArrayList(Result) = .empty,
+    cache: std.ArrayList(CacheEntry) = .empty,
     inflight: bool = false,
     shutting_down: bool = false,
 
@@ -59,6 +64,8 @@ const State = struct {
         std.debug.assert(!self.inflight);
         std.debug.assert(self.results.items.len == 0);
         self.results.deinit(self.allocator);
+        for (self.cache.items) |*entry| entry.deinit(self.allocator);
+        self.cache.deinit(self.allocator);
         self.allocator.destroy(self);
     }
 };
@@ -74,10 +81,30 @@ const Candidate = struct {
     source_path: []u8,
     mtime_ns: i96,
     size: usize,
+    inode: std.Io.File.INode,
+    device: u64,
 
     fn deinit(self: *Candidate, allocator: std.mem.Allocator) void {
         allocator.free(self.open_path);
         allocator.free(self.source_path);
+        self.* = undefined;
+    }
+};
+
+/// Process-lifetime only: a matching source path, mtime and size can reuse the
+/// already-redacted summary, but never writes history metadata to disk.
+const CacheEntry = struct {
+    provider: archive.Provider,
+    source_path: []u8,
+    mtime_ns: i96,
+    size: usize,
+    inode: std.Io.File.INode,
+    device: u64,
+    parsed: archive.Parsed,
+
+    fn deinit(self: *CacheEntry, allocator: std.mem.Allocator) void {
+        allocator.free(self.source_path);
+        self.parsed.deinit(allocator);
         self.* = undefined;
     }
 };
@@ -133,6 +160,9 @@ pub const Backend = struct {
         for (state.results.items) |*result| result.deinit(state.allocator);
         state.results.deinit(state.allocator);
         state.results = .empty;
+        for (state.cache.items) |*entry| entry.deinit(state.allocator);
+        state.cache.deinit(state.allocator);
+        state.cache = .empty;
         state.mutex.unlock(state.io);
         state.release();
     }
@@ -172,6 +202,70 @@ fn publish(state: *State, result: *Result) bool {
     return true;
 }
 
+fn cachedRecord(state: *State, candidate: Candidate) ?Record {
+    state.mutex.lockUncancelable(state.io);
+    defer state.mutex.unlock(state.io);
+    if (state.shutting_down) return null;
+    for (state.cache.items) |entry| {
+        if (!sameCacheIdentity(entry, candidate)) continue;
+        const parsed = entry.parsed.clone(state.allocator) catch return null;
+        const path = state.allocator.dupe(u8, candidate.source_path) catch {
+            var owned = parsed;
+            owned.deinit(state.allocator);
+            return null;
+        };
+        return .{ .parsed = parsed, .source_path = path, .mtime_ns = candidate.mtime_ns };
+    }
+    return null;
+}
+
+fn sameCacheIdentity(entry: CacheEntry, candidate: Candidate) bool {
+    return entry.provider == candidate.provider and
+        entry.device == candidate.device and
+        entry.inode == candidate.inode and
+        entry.mtime_ns == candidate.mtime_ns and
+        entry.size == candidate.size and
+        std.mem.eql(u8, entry.source_path, candidate.source_path);
+}
+
+fn cacheParsed(state: *State, candidate: Candidate, parsed: *const archive.Parsed) void {
+    const parsed_copy = parsed.clone(state.allocator) catch return;
+    const path = state.allocator.dupe(u8, candidate.source_path) catch {
+        var owned = parsed_copy;
+        owned.deinit(state.allocator);
+        return;
+    };
+    state.mutex.lockUncancelable(state.io);
+    defer state.mutex.unlock(state.io);
+    if (state.shutting_down) {
+        state.allocator.free(path);
+        var owned = parsed_copy;
+        owned.deinit(state.allocator);
+        return;
+    }
+    var index: usize = 0;
+    while (index < state.cache.items.len) {
+        const entry = state.cache.items[index];
+        if (entry.provider == candidate.provider and std.mem.eql(u8, entry.source_path, candidate.source_path)) {
+            var stale = state.cache.orderedRemove(index);
+            stale.deinit(state.allocator);
+        } else index += 1;
+    }
+    if (state.cache.items.len == max_cache_entries) {
+        // A cache miss must never turn a bounded scan into an unbounded
+        // process-lifetime metadata store. Existing warm entries remain valid.
+        state.allocator.free(path);
+        var owned = parsed_copy;
+        owned.deinit(state.allocator);
+        return;
+    }
+    state.cache.append(state.allocator, .{ .provider = candidate.provider, .source_path = path, .mtime_ns = candidate.mtime_ns, .size = candidate.size, .inode = candidate.inode, .device = candidate.device, .parsed = parsed_copy }) catch {
+        state.allocator.free(path);
+        var owned = parsed_copy;
+        owned.deinit(state.allocator);
+    };
+}
+
 fn scan(state: *State, home: []const u8) void {
     const allocator = state.allocator;
     const io = state.io;
@@ -205,7 +299,12 @@ fn scan(state: *State, home: []const u8) void {
             result.partial = true;
             break;
         }
-        appendCandidateFile(allocator, io, candidate, &result, &remaining_bytes);
+        if (cachedRecord(state, candidate)) |record| {
+            result.records.append(allocator, record) catch {
+                var owned = record;
+                owned.deinit(allocator);
+            };
+        } else appendCandidateFile(state, candidate, &result, &remaining_bytes);
         const batch_limit = if (first_batch) first_batch_records else records_per_batch;
         if (result.records.items.len == batch_limit) {
             result.first_batch = first_batch;
@@ -300,6 +399,8 @@ fn appendCandidate(allocator: std.mem.Allocator, io: std.Io, dir: *std.Io.Dir, o
         .source_path = source_path,
         .mtime_ns = 0,
         .size = 0,
+        .inode = 0,
+        .device = 0,
     };
     var transferred = false;
     defer if (!transferred) candidate.deinit(allocator);
@@ -311,6 +412,8 @@ fn appendCandidate(allocator: std.mem.Allocator, io: std.Io, dir: *std.Io.Dir, o
     }
     candidate.mtime_ns = stat.mtime.nanoseconds;
     candidate.size = @intCast(stat.size);
+    candidate.inode = stat.inode;
+    candidate.device = fileDevice(allocator, dir.*, open_name) orelse return;
     if (candidates.items.len < max_candidates_per_provider) {
         candidates.append(allocator, candidate) catch return;
         transferred = true;
@@ -331,10 +434,22 @@ fn appendCandidate(allocator: std.mem.Allocator, io: std.Io, dir: *std.Io.Dir, o
     partial.* = true;
 }
 
-fn appendCandidateFile(allocator: std.mem.Allocator, io: std.Io, candidate: Candidate, result: *Result, remaining_bytes: *usize) void {
-    const file = std.Io.Dir.cwd().openFile(io, candidate.open_path, .{}) catch return;
+fn fileDevice(allocator: std.mem.Allocator, dir: std.Io.Dir, name: []const u8) ?u64 {
+    if (comptime builtin.os.tag != .macos) return 0;
+    const name_z = allocator.dupeZ(u8, name) catch return null;
+    defer allocator.free(name_z);
+    var stat: std.posix.Stat = undefined;
+    if (std.c.fstatat(dir.handle, name_z.ptr, &stat, std.posix.AT.SYMLINK_NOFOLLOW) != 0) return null;
+    return @intCast(stat.dev);
+}
+
+fn appendCandidateFile(state: *State, candidate: Candidate, result: *Result, remaining_bytes: *usize) void {
+    const allocator = state.allocator;
+    const io = state.io;
+    const file = std.Io.Dir.cwd().openFile(io, candidate.open_path, .{ .follow_symlinks = false }) catch return;
     defer file.close(io);
     const stat = file.stat(io) catch return;
+    if (stat.inode != candidate.inode or openedDevice(file) != candidate.device) return;
     if (stat.kind != .file or stat.size == 0 or stat.size > max_file_bytes) {
         if (stat.size > max_file_bytes) result.partial = true;
         return;
@@ -352,9 +467,46 @@ fn appendCandidateFile(allocator: std.mem.Allocator, io: std.Io, candidate: Cand
     const n = file.readPositionalAll(io, bytes, 0) catch return;
     var parsed = archive.parse(allocator, candidate.provider, bytes[0..n]) catch return orelse return;
     errdefer parsed.deinit(allocator);
+    cacheParsed(state, candidate, &parsed);
     const path = allocator.dupe(u8, candidate.source_path) catch return;
     result.records.append(allocator, .{ .parsed = parsed, .source_path = path, .mtime_ns = candidate.mtime_ns }) catch {
         allocator.free(path);
         return;
     };
+}
+
+fn openedDevice(file: std.Io.File) u64 {
+    if (comptime builtin.os.tag != .macos) return 0;
+    var stat: std.posix.Stat = undefined;
+    if (std.c.fstat(file.handle, &stat) != 0) return std.math.maxInt(u64);
+    return @intCast(stat.dev);
+}
+
+test "archive cache identity rejects replaced or changed source files" {
+    var entry: CacheEntry = undefined;
+    entry.provider = .codex;
+    entry.source_path = @constCast("2026/08/02/rollout.jsonl");
+    entry.mtime_ns = 10;
+    entry.size = 20;
+    entry.inode = 30;
+    entry.device = 40;
+    const candidate = Candidate{
+        .provider = .codex,
+        .open_path = @constCast("/tmp/rollout.jsonl"),
+        .source_path = @constCast("2026/08/02/rollout.jsonl"),
+        .mtime_ns = 10,
+        .size = 20,
+        .inode = 30,
+        .device = 40,
+    };
+    try std.testing.expect(sameCacheIdentity(entry, candidate));
+    var replaced = candidate;
+    replaced.inode = 31;
+    try std.testing.expect(!sameCacheIdentity(entry, replaced));
+    var changed = candidate;
+    changed.mtime_ns = 11;
+    try std.testing.expect(!sameCacheIdentity(entry, changed));
+    changed = candidate;
+    changed.device = 41;
+    try std.testing.expect(!sameCacheIdentity(entry, changed));
 }

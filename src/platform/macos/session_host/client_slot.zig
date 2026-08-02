@@ -647,6 +647,44 @@ pub const ClientSlot = struct {
 
     pub const BatchError = client_mod.ClientError || batch_registry_mod.Error;
 
+    pub const GenerationBatchAdapterIdentity = struct {
+        slot_incarnation: u64,
+        node_incarnation: u64,
+        pid: u32,
+        process_nonce: u64,
+    };
+
+    /// Final-address GUI batch adapter가 raw node/Client 포인터를 보관하지 않고도 exact slot을
+    /// 매 호출 재검증할 수 있는 pointer-free identity다.
+    pub fn generationBatchAdapterIdentity(
+        self: *ClientSlot,
+    ) error{MovedOrCopied}!GenerationBatchAdapterIdentity {
+        if (!self.valid()) return error.MovedOrCopied;
+        return .{
+            .slot_incarnation = self.incarnation.tagged,
+            .node_incarnation = self.current.incarnation.tagged,
+            .pid = self.pid,
+            .process_nonce = self.process_nonce,
+        };
+    }
+
+    pub fn matchesGenerationBatchAdapterIdentity(
+        self: *ClientSlot,
+        identity: GenerationBatchAdapterIdentity,
+    ) bool {
+        return self.valid() and self.incarnation.tagged == identity.slot_incarnation and
+            self.current.incarnation.tagged == identity.node_incarnation and
+            self.pid == identity.pid and self.process_nonce == identity.process_nonce;
+    }
+
+    pub fn poisonAttachmentConnection(
+        self: *ClientSlot,
+        reason: @import("client_poison.zig").ConnectionReason,
+    ) error{MovedOrCopied}!void {
+        if (!self.valid()) return error.MovedOrCopied;
+        self.current.client.poison(reason);
+    }
+
     /// Registry entry를 먼저 ingress로 고정한 뒤 Client queue/parser owner를 옮긴다.
     pub fn readAttachmentBatch(
         self: *ClientSlot,

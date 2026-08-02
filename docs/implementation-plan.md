@@ -818,7 +818,7 @@ TDD 방식:
      P6 전체 workspace TUI/외부 tmux import adapter와 Plugin은 각각 실제 수요·착수 전 별도 논의.
 - **검토했으나 미채택한 대안**(UI 완성도 먼저, 구조 리스크 뒤로): chrome 고급화를 New Window보다 앞에 두는 안. atlas 소유권 캡슐화 + restore 스키마 window-aware면 재작업은 낮으나, 큰 구조 변경을 미루는 대신 나중에 공유 검토할 atlas가 2개가 되는 트레이드오프 — 사용자가 "토대 먼저"를 택해 미채택.
 
-## Session host 실행 중 transport reconnect (CR, CR0a·CR3a-1 완료)
+## Session host 실행 중 transport reconnect (CR, CR0a·CR3a-1·2a·2b1 완료)
 
 shared `Client`가 실행 중 unusable이 되어도 기존 Term/Surface/runtime handle을 유지한 채 exact host에 다시 붙이는 단계다.
 규범 계약은 [영속 터미널 세션 호스트](persistent-session-host.md#실행-중-connection-invalidation과-재연결), 검증 상태와
@@ -880,13 +880,24 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    guarded allocator alloc/free callback에서는 same/foreign `ClientSlot` read/release/deinit 재진입을 busy로 닫는다.
    모든 batch release callback은 nested release/deinit을 막고, buffered payload callback의 read는 allocation 없는 exact pending
    sibling만 허용하며 miss는 registry reserve·socket/parser 전에 busy로 거부한다. callback 종료 뒤 원래 token·미소비 wire와
-   teardown이 정상 진행됨을 production-type unit으로 고정했다. **CR3a-2b2**는 final-address node-bound adapter를
-   `GenerationAttachment`의 실제 `RemoteAttachment.pumpScreen`/release/drop에 연결하고, generation GUI 경로의 raw
-   `AttachmentTransport.context=*Client` 및 raw Client batch read/release/drop callsite를 source boundary로 0으로 만든다. external
+   teardown이 정상 진행됨을 production-type unit으로 고정했다. **CR3a-2b2(구현)**는 `GenerationAttachment`가 inline 소유하는
+   final-address node-bound batch adapter를 실제 `RemoteAttachment.pumpScreen`/release에 연결한다.
+   `AttachmentBatchLease.generation`은 pointer-free node registry token만 보관하고 external recovery ledger의 `.charged`와 섞지
+   않는다. adapter callback context는 exact inline adapter이며 raw `*Client`/`*HostAdapter`를 노출하지 않는다.
+   `commitAccepted`의 legacy transport 인자를 제거하고 generation payload는 이 adapter를 직접 bind한다. 신규 read admission을
+   닫은 뒤에도 pending generation token 전량을 release할 때까지 release-only draining authority를 유지하고, 전량 settle 뒤 기존
+   2a canonical `beginAttachmentDrop -> deinitPayloadOnly -> finishActiveAttachmentDrop`이 stream drop과 lease release를 exact once
+   수행한다. 별도 transport drop callback은 만들지 않고 기존 canonical drop의 무회귀를 증명한다. 정상 generation release는
+   completed-only strict 경로이며 stale/spliced/replay token은 generic `failed_release` 보존이나 sibling 진행 전에 제품 invariant
+   fail-stop한다. retryable/indeterminate handoff는 CR3a-2d 전에는 열지 않는다. source boundary는 legacy GUI fallback의 raw
+   `attachmentTransport(*Client)`와 initial snapshot/event/input/RPC allowlist를 유지하되 generation commit/pump에서는 raw
+   context/cast를 0으로, raw `readGenerationBatch`/`dropBufferedStream`은 `ClientSlot` sole canonical caller로 고정한다. external
    movable `RemoteAttachment`의 outer field 목록, 기존 `untracked|charged` reachable 의미와 `ExternalPumpStorage`/external
    `Prepared|Attached`의 outer owner schema·동작은 바꾸지 않는다. 내부 `AttachmentBatchLease`에는 generation 전용 variant가 추가되므로
-   그 union의 state space/layout 불변은 주장하지 않는다. 2b2 끝에 실제 GUI attach→pump→release→deinit
-   통합과 Debug/ReleaseFast/boundary를 재실행한다. 두 gate 모두 reconnect/current publish, incident/artifact, workspace 및
+   그 union의 state space/layout 불변은 주장하지 않는다. 2b2 끝에 production type GUI attach→post-initial snapshot/delta
+   pump→release→deinit, buffered/direct, idle/error/OOM, multi-token FIFO/compaction과 exact-once cleanup을 실행하고
+   Debug/ReleaseFast/boundary/전체 check를 재실행한다. initial snapshot의 raw `Client.readSnapshot` 제거와 전체 actual-socket
+   failure parity는 각각 2c/2e 범위다. 두 gate 모두 reconnect/current publish, incident/artifact, workspace 및
    host/runtime lifecycle mutation은 0이다. CR3a-2c는 나머지 stream/event
    primitive를 최소 core에 추가해 `RemoteRuntime.client` direct escape를 HostAdapter가 발급하는 작은 closed transport facade로
    완전히 교체한다. CR3a-2d는

@@ -10,9 +10,11 @@ const connection_lease = @import("connection_lease.zig");
 const contract = @import("generation_attachment_contract.zig");
 const executed_response_mod = @import("executed_response.zig");
 const generation_transport_mod = @import("generation_transport.zig");
+const generation_batch_adapter_mod = @import("generation_batch_adapter.zig");
 const host_adapter_mod = @import("host_adapter.zig");
 const remote_attachment = @import("remote_attachment.zig");
 const screen_assembler = @import("screen_assembler.zig");
+const screen_stream = @import("screen_stream.zig");
 
 pub const Lifecycle = enum(u8) {
     pristine,
@@ -35,6 +37,7 @@ pub const GenerationAttachment = struct {
     self_addr: usize = 0,
     lifecycle: Lifecycle = .pristine,
     transport: generation_transport_mod.GenerationTransport = .{},
+    batch_adapter: generation_batch_adapter_mod.GenerationBatchAdapter = .{},
     binding: contract.PreparedAttachmentBinding = .{},
     reservation: ?client_slot_mod.AttachmentBindingReservation = null,
     lease: connection_lease.ConnectionLease = .{},
@@ -198,10 +201,16 @@ pub const GenerationAttachment = struct {
         accepted: contract.CorrelatedExecutedCall,
         state: remote_attachment.State,
         allocator: std.mem.Allocator,
-        legacy_batch_transport: remote_attachment.AttachmentTransport,
     ) anyerror!void {
         if (!self.valid() or self.lifecycle != .executing or self.payload != null)
             return error.InvalidState;
+        try adapter.mintGenerationBatchAdapter(
+            &self.batch_adapter,
+            @intFromPtr(self),
+            @sizeOf(GenerationAttachment),
+            state.stream_id,
+        );
+        errdefer self.batch_adapter.abortPrepared();
         try adapter.commitAttachmentBinding(
             &self.binding,
             self.reservation.?,
@@ -209,8 +218,10 @@ pub const GenerationAttachment = struct {
             state.stream_id,
             &self.lease,
         );
+        self.batch_adapter.activateCommitted() catch
+            @panic("generation batch adapter activation failed after binding commit");
         self.payload = remote_attachment.RemoteAttachment.init(allocator, state);
-        self.payload.?.bindTransport(legacy_batch_transport) catch unreachable;
+        self.payload.?.bindTransport(self.batch_adapter.interface()) catch unreachable;
         self.lifecycle = .attached;
     }
 
@@ -229,17 +240,19 @@ pub const GenerationAttachment = struct {
             .attached => {
                 if (self.response.lifecycle != .terminal) return .busy;
                 const payload = &(self.payload orelse return .corrupt);
+                self.batch_adapter.preflightDraining() catch return .corrupt;
                 adapter.beginAttachmentDrop(
                     &self.binding,
                     self.reservation orelse return .corrupt,
                     &self.lease,
                 ) catch return .corrupt;
                 self.lifecycle = .cleaning;
-                // The legacy batch callbacks below still need their narrow cleanup transport, but
-                // no callback may regain the live generation RPC authority while payload memory is
-                // being released.
+                // 새 read와 RPC 권위는 먼저 닫되, pending generation token 전량을 정리할 때까지
+                // batch adapter의 release-only draining 권위는 유지한다.
+                self.batch_adapter.commitDraining();
                 self.terminalizeTransport();
                 payload.deinitPayloadOnly();
+                self.batch_adapter.finishDraining();
                 self.payload = null;
                 adapter.finishActiveAttachmentDrop(
                     &self.binding,
@@ -409,19 +422,22 @@ test "CR3a-2a attached teardown fences transport before adapter release" {
     try attachment.transport.abortPreparedRequest(receipt);
     const executed = contract.ExecutedCallReceipt.fromPrepared(receipt).?;
     const accepted = contract.CorrelatedExecutedCall.init(executed, receipt.request_id).?;
-    try adapter.commitAttachmentBinding(
-        &attachment.binding,
-        attachment.reservation.?,
+    const response_bytes = try allocator.dupe(u8, "accepted");
+    try attachment.response.initAcceptedInPlace(
+        allocator,
+        try adapter.responseOwnerSeal(attachment.reservation.?),
+        0xEF,
         accepted,
-        0xEE,
-        &attachment.lease,
+        response_bytes,
     );
-    attachment.payload = remote_attachment.RemoteAttachment.init(reentrant.allocator(), .{
+    try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.finishResponse(&adapter));
+    attachment.lifecycle = .executing;
+    try attachment.commitAccepted(&adapter, accepted, .{
         .runtime_id = 0xDD,
         .stream_id = 0xEE,
         .role = .controller,
         .controller_generation = 1,
-    });
+    }, reentrant.allocator());
     const pending_bytes = try reentrant.allocator().dupe(u8, "pending");
     try attachment.payload.?.pending_batches.append(
         reentrant.allocator(),
@@ -432,14 +448,6 @@ test "CR3a-2a attached teardown fences transport before adapter release" {
             .allocator = reentrant.allocator(),
         } },
     );
-    attachment.lifecycle = .attached;
-    try attachment.response.initWithoutPayloadInPlace(
-        try adapter.responseOwnerSeal(attachment.reservation.?),
-        0xEF,
-        .{ .typed_reject = accepted },
-    );
-    const response_owner = try adapter.responseOwnerSeal(attachment.reservation.?);
-    try std.testing.expectEqual(executed_response_mod.DeinitOutcome.cleaned, attachment.response.deinit(response_owner));
     const stale_transport = attachment.transport;
     const stale_parent = attachment;
     reentrant.target = &attachment;
@@ -503,6 +511,284 @@ test "CR3a-2a whole-parent restore cannot revive accepted response or transport 
         attachment.transport.prepareRequest(.{ .detach = .{ .json = null } }),
     );
     try std.testing.expectEqual(DeinitOutcome.corrupt, attachment.finishResponse(&adapter));
+}
+
+test "CR3a-2b2 generation GUI pump transfers and releases a node-owned snapshot before canonical drop" {
+    const allocator = std.testing.allocator;
+    var client: @import("client.zig").Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0x2B2,
+        .parser = @import("framing.zig").FrameParser.init(allocator),
+    };
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    try host_adapter_mod.HostAdapter.initInPlace(&adapter, allocator, &client);
+    defer adapter.deinit();
+
+    var attachment: GenerationAttachment = .{};
+    try GenerationAttachment.initInPlace(&attachment, &adapter);
+    const receipt = try attachment.prepareControllerAttach(
+        &adapter,
+        0x2B3,
+        "{\"runtime_id\":\"000000000000000000000000000002b3\",\"mode\":\"controller\"}",
+    );
+    try attachment.binding.beginExecute(receipt);
+    attachment.lifecycle = .executing;
+    try attachment.transport.abortPreparedRequest(receipt);
+    const executed = contract.ExecutedCallReceipt.fromPrepared(receipt).?;
+    const accepted = contract.CorrelatedExecutedCall.init(executed, receipt.request_id).?;
+    const response_bytes = try allocator.dupe(u8, "accepted");
+    try attachment.response.initAcceptedInPlace(
+        allocator,
+        try adapter.responseOwnerSeal(attachment.reservation.?),
+        0x2B4,
+        accepted,
+        response_bytes,
+    );
+    try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.finishResponse(&adapter));
+    try attachment.commitAccepted(&adapter, accepted, .{
+        .runtime_id = 0x2B3,
+        .stream_id = 0x2B5,
+        .role = .controller,
+        .controller_generation = 1,
+    }, allocator);
+    try attachment.initScreen(screen_stream.codec_version);
+    try std.testing.expectEqual(
+        remote_attachment.PumpScreenResult.idle,
+        try attachment.pumpScreen(std.testing.io),
+    );
+
+    var snapshot: std.ArrayListUnmanaged(u8) = .empty;
+    defer snapshot.deinit(allocator);
+    const meta = try screen_stream.encodeScreenMeta(
+        allocator,
+        .{ .kind = .screen_meta, .generation = 1 },
+        .{ .cols = 1, .rows = 1, .cursor = .{} },
+    );
+    defer allocator.free(meta);
+    try screen_stream.appendRecord(&snapshot, allocator, meta);
+    var runs = [_]screen_stream.Run{.{ .grapheme = "x", .width = 1, .count = 1 }};
+    const row = try screen_stream.encodeRow(
+        allocator,
+        .{ .kind = .row, .generation = 1 },
+        .{ .row_index = 0, .runs = &runs },
+    );
+    defer allocator.free(row);
+    try screen_stream.appendRecord(&snapshot, allocator, row);
+
+    const first_batch_bytes = try allocator.dupe(u8, snapshot.items);
+    const second_batch_bytes = try allocator.dupe(u8, snapshot.items);
+    const logical_client = adapter.logicalClient();
+    try logical_client.pending_batches.append(allocator, .{
+        .is_snapshot = true,
+        .stream_id = 0x2B5,
+        .bytes = first_batch_bytes,
+        .allocator = allocator,
+    });
+    try logical_client.pending_batches.append(allocator, .{
+        .is_snapshot = true,
+        .stream_id = 0x2B5,
+        .bytes = second_batch_bytes,
+        .allocator = allocator,
+    });
+    logical_client.pending_batch_bytes = first_batch_bytes.len + second_batch_bytes.len;
+
+    for (0..2) |_| {
+        try std.testing.expectEqual(
+            remote_attachment.PumpScreenResult.applied,
+            try attachment.pumpScreen(std.testing.io),
+        );
+    }
+    try std.testing.expectEqual(@as(usize, 0), try adapter.slot.current.batch_registry.count());
+    try std.testing.expectEqual(
+        @import("generation_batch_registry.zig").DeinitOutcome.cleaned,
+        adapter.slot.current.accounting_ledger.preflightDeinit(),
+    );
+
+    // RemoteAttachment queue append OOM도 generation token을 즉시 exact-once release한다.
+    attachment.payload.?.pending_batches.deinit(allocator);
+    attachment.payload.?.pending_batches = .empty;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    attachment.payload.?.allocator = failing.allocator();
+    const oom_bytes = try allocator.dupe(u8, snapshot.items);
+    try logical_client.pending_batches.append(allocator, .{
+        .is_snapshot = true,
+        .stream_id = 0x2B5,
+        .bytes = oom_bytes,
+        .allocator = allocator,
+    });
+    logical_client.pending_batch_bytes = oom_bytes.len;
+    try std.testing.expectError(error.OutOfMemory, attachment.pumpScreen(std.testing.io));
+    attachment.payload.?.allocator = allocator;
+    try std.testing.expectEqual(@as(usize, 0), try adapter.slot.current.batch_registry.count());
+
+    try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.tryDeinit(&adapter));
+    try std.testing.expectEqual(@as(usize, 0), try adapter.slot.current.batch_registry.count());
+    try std.testing.expectEqual(
+        @import("generation_batch_registry.zig").DeinitOutcome.cleaned,
+        adapter.slot.current.accounting_ledger.preflightDeinit(),
+    );
+    try std.testing.expectEqual(contract.BindingLifecycle.terminal, attachment.binding.lifecycle);
+}
+
+test "CR3a-2b2 generation GUI pump releases a malformed node-owned batch" {
+    const allocator = std.testing.allocator;
+    var client: @import("client.zig").Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0x2D2,
+        .parser = @import("framing.zig").FrameParser.init(allocator),
+    };
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    try host_adapter_mod.HostAdapter.initInPlace(&adapter, allocator, &client);
+    defer adapter.deinit();
+
+    var attachment: GenerationAttachment = .{};
+    try GenerationAttachment.initInPlace(&attachment, &adapter);
+    const receipt = try attachment.prepareControllerAttach(
+        &adapter,
+        0x2D3,
+        "{\"runtime_id\":\"000000000000000000000000000002d3\",\"mode\":\"controller\"}",
+    );
+    try attachment.binding.beginExecute(receipt);
+    attachment.lifecycle = .executing;
+    try attachment.transport.abortPreparedRequest(receipt);
+    const executed = contract.ExecutedCallReceipt.fromPrepared(receipt).?;
+    const accepted = contract.CorrelatedExecutedCall.init(executed, receipt.request_id).?;
+    const response_bytes = try allocator.dupe(u8, "accepted");
+    try attachment.response.initAcceptedInPlace(
+        allocator,
+        try adapter.responseOwnerSeal(attachment.reservation.?),
+        0x2D4,
+        accepted,
+        response_bytes,
+    );
+    try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.finishResponse(&adapter));
+    try attachment.commitAccepted(&adapter, accepted, .{
+        .runtime_id = 0x2D3,
+        .stream_id = 0x2D5,
+        .role = .controller,
+        .controller_generation = 1,
+    }, allocator);
+    try attachment.initScreen(screen_stream.codec_version);
+
+    const malformed_bytes = try allocator.dupe(u8, "malformed-screen-record");
+    const logical_client = adapter.logicalClient();
+    try logical_client.pending_batches.append(allocator, .{
+        .is_snapshot = true,
+        .stream_id = 0x2D5,
+        .bytes = malformed_bytes,
+        .allocator = allocator,
+    });
+    logical_client.pending_batch_bytes = malformed_bytes.len;
+    try std.testing.expectError(error.Truncated, attachment.pumpScreen(std.testing.io));
+    try std.testing.expectEqual(@as(usize, 0), try adapter.slot.current.batch_registry.count());
+    try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.tryDeinit(&adapter));
+    try std.testing.expectEqual(@as(usize, 0), try adapter.slot.current.batch_registry.count());
+    try std.testing.expectEqual(
+        @import("generation_batch_registry.zig").DeinitOutcome.cleaned,
+        adapter.slot.current.accounting_ledger.preflightDeinit(),
+    );
+    try std.testing.expectEqual(contract.BindingLifecycle.terminal, attachment.binding.lifecycle);
+}
+
+test "CR3a-2b2 generation GUI pump transfers a direct parser frame through the node adapter" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const protocol = @import("protocol.zig");
+    const framing = @import("framing.zig");
+    const socket_server = @import("socket_server.zig");
+    var fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds),
+    );
+    defer _ = std.c.close(fds[1]);
+    var client: @import("client.zig").Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 0x2C1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    try host_adapter_mod.HostAdapter.initInPlace(&adapter, allocator, &client);
+    defer adapter.deinit();
+    var attachment: GenerationAttachment = .{};
+    try GenerationAttachment.initInPlace(&attachment, &adapter);
+    const receipt = try attachment.prepareControllerAttach(
+        &adapter,
+        0x2C2,
+        "{\"runtime_id\":\"000000000000000000000000000002c2\",\"mode\":\"controller\"}",
+    );
+    try attachment.binding.beginExecute(receipt);
+    attachment.lifecycle = .executing;
+    try attachment.transport.abortPreparedRequest(receipt);
+    const executed = contract.ExecutedCallReceipt.fromPrepared(receipt).?;
+    const accepted = contract.CorrelatedExecutedCall.init(executed, receipt.request_id).?;
+    const response_bytes = try allocator.dupe(u8, "accepted");
+    try attachment.response.initAcceptedInPlace(
+        allocator,
+        try adapter.responseOwnerSeal(attachment.reservation.?),
+        0x2C3,
+        accepted,
+        response_bytes,
+    );
+    try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.finishResponse(&adapter));
+    try attachment.commitAccepted(&adapter, accepted, .{
+        .runtime_id = 0x2C2,
+        .stream_id = 0x2C4,
+        .role = .controller,
+        .controller_generation = 1,
+    }, allocator);
+    try attachment.initScreen(screen_stream.codec_version);
+
+    var snapshot: std.ArrayListUnmanaged(u8) = .empty;
+    defer snapshot.deinit(allocator);
+    const meta = try screen_stream.encodeScreenMeta(
+        allocator,
+        .{ .kind = .screen_meta, .generation = 1 },
+        .{ .cols = 1, .rows = 1, .cursor = .{} },
+    );
+    defer allocator.free(meta);
+    try screen_stream.appendRecord(&snapshot, allocator, meta);
+    const wire = try framing.encodeFrame(
+        allocator,
+        .{
+            .kind = .snapshot_chunk,
+            .stream_id = 0x2C4,
+            .flags = protocol.Flags.end_stream,
+        },
+        snapshot.items,
+    );
+    defer allocator.free(wire);
+    try socket_server.writeAll(fds[1], wire);
+
+    try std.testing.expectEqual(
+        remote_attachment.PumpScreenResult.applied,
+        try attachment.pumpScreen(std.testing.io),
+    );
+    try std.testing.expectEqual(@as(usize, 0), try adapter.slot.current.batch_registry.count());
+
+    // 다음 batch는 payload queue가 이미 소유한 상태에서 teardown해 release-only draining과
+    // canonical drop의 exact 순서를 고정한다.
+    const pending_bytes = try allocator.dupe(u8, "pending-generation-batch");
+    const logical_client = adapter.logicalClient();
+    try logical_client.pending_batches.append(allocator, .{
+        .is_snapshot = false,
+        .stream_id = 0x2C4,
+        .bytes = pending_bytes,
+        .allocator = allocator,
+    });
+    logical_client.pending_batch_bytes = pending_bytes.len;
+    const generation_transport = attachment.payload.?.transport.?;
+    const pending_lease = (try generation_transport.read_batch(
+        generation_transport.context,
+        0x2C4,
+    )).?;
+    try attachment.payload.?.pending_batches.append(allocator, pending_lease);
+    try std.testing.expectEqual(@as(usize, 1), try adapter.slot.current.batch_registry.count());
+    try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.tryDeinit(&adapter));
+    try std.testing.expectEqual(@as(usize, 0), try adapter.slot.current.batch_registry.count());
 }
 
 test "CR3a-2a typed reject settles binding response and transport exactly once" {

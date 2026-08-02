@@ -1055,13 +1055,20 @@ permit의 copy·move·splice·stale 거부, cleanup API의 Client admission symb
 변화 0이다. CR3a-2는 각 PR 끝에 실제 제품 cleanup owner가 하나인 vertical merge gate로 닫는다. **2a** GUI-only
 final-address `GenerationAttachment` + neutral contract leaf + `GenerationTransport` 최소 core를 실제 attach/deinit stream-drop에
 배선하고 external movable graph를 보존한다. **2b** buffered queue/direct parser→node registry payload/accounting transaction을 실제
-pump/release에 배선하고 GUI raw AttachmentTransport context를 node-bound batch/drop adapter로 교체한다. **2c** 나머지 small closed
+pump/release에 배선하고 GUI raw AttachmentTransport context를 `GenerationAttachment` inline final-address node-bound batch
+adapter로 교체한다. 이 adapter는 raw Client/HostAdapter를 노출하지 않고 pointer-free generation token의
+read/borrow/release와 release-only draining만 소유한다. drop은 새 callback으로 중복하지 않고 2a canonical
+`beginAttachmentDrop -> deinitPayloadOnly -> finishActiveAttachmentDrop`을 유지해 pending token 전량 settle 뒤 stream
+drop/lease release를 exact once 수행한다. **2c** 나머지 small closed
 transport primitive를 옮겨 `RemoteRuntime.client`와 모든 GUI raw Client escape를 제거한다. **2d** 실제 registry의 permit·reentry·typed
 failure·aggregate handoff를 배선한다. **2e** 실제 GUI attach/pump/deinit/failed-release socket parity와 source boundary를 닫는다.
 2b 종료 시 generation GUI attachment의 batch read/release/drop은 node-bound adapter만 호출하며, 이 경로의
 `AttachmentTransport.context=*Client`, raw Client cast와 `readStreamBatch|readGenerationBatch|dropBufferedStream` 직접 호출은 0이다.
 legacy GUI fallback과 external movable attachment의 기존 transport는 이 source-boundary 수에 포함하지 않는다. 2c까지 남아 있는
 `RemoteRuntime.client`의 event/input/RPC 및 ended-event 정리 경로는 명시적 allowlist로 남고, 2c에서 closed facade로 제거한다.
+initial snapshot의 raw `Client.readSnapshot`도 2c allowlist이며 2b2는 post-initial screen batch 경로만 교체한다.
+generation release는 completed-only strict 경로로, stale/spliced/replay는 generic failed-release 보존이나 sibling 진행
+전에 fail-stop하고 retryable/indeterminate handoff는 2d 전에는 열지 않는다.
 2a~e 전체가 green이기 전 CR3a-2 완료를 주장하지 않는다. 종료 oracle은 GUI generation 1 attachment의
 attach/pump/deinit/failed-release parity, generation GUI batch 경로의 raw Client callback/context production callsite 0,
 `ExternalPumpStorage.owned_client` 및 external `Prepared|Attached` owner-schema digest 불변이다. 두 단계 모두 incident/artifact

@@ -3938,6 +3938,82 @@ test "session host has zero raw untyped Client invalidation callsites" {
     }
 }
 
+test "CR3a-2b2 generation GUI batch path is node-bound while legacy fallback stays explicit" {
+    const allocator = std.testing.allocator;
+    const runtime = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/remote_runtime.zig",
+    );
+    defer allocator.free(runtime);
+    const attachment = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/generation_attachment.zig",
+    );
+    defer allocator.free(attachment);
+    const remote = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/remote_attachment.zig",
+    );
+    defer allocator.free(remote);
+    const adapter = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/generation_batch_adapter.zig",
+    );
+    defer allocator.free(adapter);
+    const host_adapter = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/host_adapter.zig",
+    );
+    defer allocator.free(host_adapter);
+    const slot = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/client_slot.zig",
+    );
+    defer allocator.free(slot);
+
+    // Legacy GUI fallback은 raw Client transport 한 곳만 유지한다. Generation commit은 이
+    // transport를 인자로 받거나 fallback으로 되찾을 수 없다.
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(runtime, "attachmentTransport(self.client)"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        countOccurrences(attachment, "legacy_batch_transport"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(attachment, "batch_adapter:"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(attachment, ".mintGenerationBatchAdapter("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(host_adapter, "GenerationBatchAdapter.initPreparedInPlace("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(remote, "generation: generation_batch_registry.Token"),
+    );
+
+    // Inline adapter는 닫힌 leaf다. sealed ClientSlot 주소만 내부에 보존하고 raw
+    // Client/HostAdapter capability를 노출하거나 canonical stream drop을 중복하지 않는다.
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(adapter, "slot_addr: usize = 0"));
+    try std.testing.expectEqual(@as(usize, 0), countOccurrences(adapter, "*client_mod.Client"));
+    try std.testing.expectEqual(@as(usize, 0), countOccurrences(adapter, "*host_adapter_mod.HostAdapter"));
+    try std.testing.expectEqual(@as(usize, 0), countOccurrences(adapter, ".dropBufferedStream("));
+    try std.testing.expectEqual(@as(usize, 0), countOccurrences(adapter, ".readGenerationBatch("));
+
+    // Raw Client ownership은 exact node owner 뒤에만 남고 sibling adapter는 이를 우회하지 못한다.
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(slot, ".readGenerationBatch("));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(slot, ".dropBufferedStream("));
+    // Initial snapshot과 ended-event queue 정리는 2c의 명시적 raw Client allowlist다.
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(runtime, "self.client.readSnapshot("));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(runtime, "self.client.dropBufferedStream("));
+}
+
 test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
     const allocator = std.testing.allocator;
     var dir = try std.Io.Dir.cwd().openDir(

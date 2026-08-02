@@ -108,3 +108,51 @@ test "Chrome Lab has no implicit surface and fails closed for an empty synthetic
     const undefined_tokens: chrome.Tokens = undefined;
     try std.testing.expectError(error.NoBox, lowerDraws(std.testing.allocator, &.{}, &undefined_tokens, 8, 16));
 }
+
+test "Chrome Lab builds a deterministic card and records only its action" {
+    const tokens = chrome.Tokens.rich(.{
+        .foreground = .{ .r = 240, .g = 240, .b = 240 },
+        .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
+        .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
+        .sidebar_active = .{ .r = 80, .g = 80, .b = 80 },
+        .search_match = .{ .r = 1, .g = 2, .b = 3 },
+        .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
+        .selection = .{ .r = 7, .g = 8, .b = 9 },
+        .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .accent = .{ .r = 13, .g = 14, .b = 15 },
+    });
+    var entries: [3]chrome.ui.tree.RectEntry = undefined;
+    var items: [3]chrome.ui.layout.Item = undefined;
+    var flex_scratch: [3]chrome.ui.layout.FlexScratch = undefined;
+    var child_rects: [3]chrome.ui.layout.UiRect = undefined;
+    var ops: [1]chrome.draw.Op = undefined;
+    const frame = try buildFrame(.{
+        .id = .retained_list,
+        .viewport_px = .{ .width = 320, .height = 240 },
+        .now_ns = 77,
+    }, &tokens, .{
+        .entries = &entries,
+        .items = &items,
+        .flex_scratch = &flex_scratch,
+        .child_rects = &child_rects,
+        .ops = &ops,
+    });
+
+    try std.testing.expectEqual(@as(usize, 3), frame.tree.entries.len);
+    try std.testing.expectEqual(@as(usize, 1), frame.draws.ops.len);
+    try std.testing.expect(frame.draws.ops[0] == .quad);
+
+    var state = chrome.ui.interaction.InteractionState{};
+    try std.testing.expectEqual(@as(?chrome.ui.tree.UiActionId, null), try dispatchRecordedAction(&state, frame, .{
+        .phase = .down,
+        .x_px = 20,
+        .y_px = 20,
+        .timestamp_ns = 1,
+    }));
+    try std.testing.expectEqual(@as(?chrome.ui.tree.UiActionId, 100), try dispatchRecordedAction(&state, frame, .{
+        .phase = .up,
+        .x_px = 1000,
+        .y_px = 1000,
+        .timestamp_ns = 2,
+    }));
+}

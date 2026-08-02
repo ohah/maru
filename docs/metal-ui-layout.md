@@ -531,10 +531,10 @@ cursor/hover paint와 scripted macOS 입력은 ML3 Chrome Lab capture에서 별�
 
 `Chrome Lab`은 Storybook의 component scenario 개념을 Metal 제품 경로에 옮긴
 **test-only surface input**이다. shell·PTY를 실행하는 일반 Terminal이 아니며, 앱의
-정상 사용자 화면과 release navigation에는 노출하지 않는다. 후속 개발/CI fixture가
-`ChromeLabScenario`를 열면, 같은 `ChromeHost`·`ChromeDraw`·CoreText·Metal lowering
-경로로 synthetic component tree를 실제 drawable에 그린다. 이 PR은 그 caller가 공유할 lowering
-leaf를 먼저 분리한 것이며, Lab 자체·readback capture는 아직 구현하지 않는다.
+정상 사용자 화면과 release navigation에는 노출하지 않는다. 개발/CI fixture는
+`ChromeLabScenario`를 통해 같은 `ChromeDraw`·SessionDock text lowering·CoreText atlas·Metal
+renderer 경로로 synthetic component tree를 실제 drawable에 그린다. Lab/readback은 구현됐지만
+fixture props만 소유하므로 `AppSession` worker나 provider I/O를 대신하는 E2E는 아니다.
 
 ### 6.1 surface admission과 공개 모델 경계
 
@@ -549,12 +549,11 @@ ML3b의 첫 구현에서 Lab은 `session.control_surface.SurfaceKind`나 persist
   compile-time synthetic props와 deterministic clock만 소유한다.
 - surface라는 말은 Metal drawable에 투영되는 독립 frame input이라는 뜻이다. 제품 workspace의 Tab/Pane가
   아니며, `SurfaceId`를 발급하거나 `SurfaceKind`에 새 case를 더하지 않는다.
-- 후속 Lab과 일반 Chrome은 동일한 `src/platform/macos/chrome/metal_lowering.zig` platform leaf를 호출해야 한다.
-  이 파일은 `ChromeDraw`·`Tokens`를 `renderer.metal_frame`의 cell/quad/shadow frame input으로만
-  변환하며 표준 `maru` facade에서 필요한 중립 계약만 읽는다. `AppSession`, session model, PTY, provider를
-  import하거나 참조하지 않는다. 기존 `AppSession`은 frame
-  소유·arena·합성만 맡고 이 leaf를 호출한다. Lab 전용 lowerer, mock renderer, 별도의 token→RGB 규칙은
-  금지한다. backend extraction이 먼저이고, Lab은 그 caller 둘 중 하나일 뿐이다.
+- 일반 Chrome의 quad/shadow lowerer는 `src/platform/macos/chrome/metal_lowering.zig`가 맡고,
+  SessionDock의 semantic text는 `session_dock_lowering.zig`가 **한 방향**으로 CoreText DrawList/atlas로
+  옮긴다. 두 leaf 모두 `AppSession`, session model, PTY, provider를 import하지 않고, platform이 text
+  내용·rect·tone을 다시 계산하지 않는다. Lab은 같은 SessionDock adapter와 제품 renderer를 호출하며, 별도
+  mock renderer나 token→RGB 규칙은 금지한다.
 - scripted input은 `ui/interaction.dispatch`에 전달하고, dispatcher는 `recorded_action`만 쓴다.
   provider resume, reveal, process spawn, filesystem callback은 compile-time과 runtime 양쪽에서 진입점이 없다.
 
@@ -562,13 +561,12 @@ ML3b의 첫 구현에서 Lab은 `session.control_surface.SurfaceKind`나 persist
 한다. 이후 실제 개발자용 Lab 탭을 추가할 필요가 생기면, 그때만 별도 설계에서 workspace persistence,
 control-plane visibility, 권한 모델과 lifecycle을 결정한다.
 
-### 6.2 ML3b1 구현 단위와 완료 조건
+### 6.2 ML3b1 foundation과 현 Lab 범위
 
-첫 구현 PR은 session dock이나 제품 workspace를 건드리지 않는다. `ChromeLabScenario`의 고정 synthetic
-draw와 `ui.interaction.dispatch`의 recorded action을 만들고, 이를 기존 제품 `metal_lowering.lower`에
-연결하는 test executable만 추가한다. 시각 capture는 그 **다음** macOS readback PR이 소유한다. 이렇게
-나누면 platform-independent scenario/action 계약과 Cocoa·Metal drawable 실패를 한 PR의 실패 원인으로
-섞지 않는다.
+ML3b1은 `ChromeLabScenario`의 고정 synthetic draw와 `ui.interaction.dispatch`의 recorded action을 만들고
+기존 제품 lowerer에 연결했다. 현 SessionDock Lab은 그 foundation 위에서 component `build`/`view`와
+`session_dock_lowering.buildTextDrawList`를 추가로 통과시켜, Cocoa·Metal drawable failure와 text atlas
+failure를 같은 artifact에서 구분한다.
 
 - scenario ID, backing px viewport, appearance token, deterministic clock, synthetic tree/draw와 expected
   action만 input으로 받는다. `AppSession`, `Term`, `SurfaceId`, config 파일, 환경변수 기반 사용자 경로는
@@ -640,18 +638,19 @@ hook은 프로세스 단위 환경값을 한 번만 읽으므로, 한 프로세�
 ```mermaid
 flowchart TD
     A[ChromeLabScenario] --> B[lab.buildFrame]
-    B --> C[lab.lowerDraws]
-    C --> D[maru_metal_renderer_draw]
-    D --> E[offscreen BGRA readback]
-    E --> F[scenario PPM]
-    F --> G[scenario PNG]
-    G --> H[scenario JSON summary]
+    B --> C[session_dock_lowering]
+    C --> D[CoreText atlas]
+    D --> E[maru_metal_renderer_draw]
+    E --> F[offscreen BGRA readback]
+    F --> G[scenario PPM]
+    G --> H[scenario PNG]
+    H --> I[scenario JSON summary]
 ```
 
-- executable은 `ChromeLabScenario`와 `OverlayRaster`만 받아 C bridge에 넘긴다. bridge는
-  fixture-only `CAMetalLayer`와 1×1 empty glyph atlas을 만들고,
+- executable은 `ChromeLabScenario`의 semantic draw에서 one-batch `DrawList`와 CoreText atlas raster
+  upload를 만들고 C bridge에 넘긴다. bridge는 fixture-only `CAMetalLayer`와 그 atlas/cell/quad를 받아
   `maru_metal_renderer_create` → `maru_metal_renderer_set_atlas` →
-  `maru_metal_renderer_draw`의 **제품** quad/shadow path를 호출한다. window, `AppSession`, PTY,
+  `maru_metal_renderer_draw`의 **제품** glyph+quad path를 호출한다. window, `AppSession`, PTY,
   worker, filesystem/provider action은 만들지 않는다.
 - `MARU_SCREENSHOT_KEEP_PROCESS=maru-test-only-v1`은 Lab bridge처럼 test executable이 screenshot write 뒤
   summary를 검사해야 할 때만 `exit(0)`을 억제하는 renderer debug hook이다. 일반
@@ -661,10 +660,10 @@ flowchart TD
   `sips`로 같은 RGB readback을 `<scenario>.png`로 변환하고, `<scenario>.json`에 scenario,
   viewport, appearance, product-renderer success, non-background pixel probe, PPM/PNG 경로를
   기록한다. PNG 변환 실패·파일 크기 0·background-only readback은 모두 smoke 실패다.
-- 첫 readback fixture는 typed `paint`가 아직 text glyph를 방출하지 않는 상태를 숨기지 않는다.
-  따라서 JSON은 `text_rasterized=false`를 명시하고 card geometry/rounded corner/shadow의
-  GPU readback만 증명한다. CoreText text raster와 long-title mask oracle은 text paint slice에서
-  별도 scenario와 함께 추가한다.
+- SessionDock readback은 typed text를 실제 atlas로 rasterize한다. 따라서 fixed dark 480×720 JSON은
+  `text_rasterized=true`와 glyph cell 수를 명시하며, 카드 geometry뿐 아니라 header/scope/search/group/card
+  문자열이 같은 제품 Metal readback에 합성됐음을 증명한다. 다만 고정 font raster의 exact golden, light
+  appearance, nested clip/partial scroll과 active host snapshot은 후속 scenario/E2E gate다.
 
 순수 `UiLayout` fixture는 필요하면 test-only WASM build에서도 실행해 browser
 property/differential test를 추가할 수 있다. 이는 DOM/CSS runtime이나 shipping WASM을
@@ -720,8 +719,11 @@ layout-affecting animation은 paint-only animation과 별도 정책/성능 gate�
    clip 미연결 인프라나 하단-원점 변환을 남기지 않는다. nested clip·부분 pixel scroll의
    경계 screenshot이 y축 반전과 header bleed를 막는 gate다.
 6. **ML4 — Session Dock:** `SessionDock`과 `ArchiveDetailPanel`이 ML1~3만 소비해
-   direct text draw/ANSI guidance를 대체한다. worker, archive identity, resume/reveal
-   계약은 바꾸지 않는다.
+   direct text draw/ANSI guidance를 대체한다. 첫 AS3 product slice에서 `SessionDock`
+   component는 typed tree의 geometry와 semantic `ChromeDraw.text`를 함께 내고, macOS backend의
+   기존 CoreText lowering이 text op만 atlas cell로 바꾼다. 이는 platform이 문자열이나 rect를 재계산하지
+   않는 one-way text bridge이며 generic GPU text shaping의 대체가 아니다. worker, archive identity,
+   resume/reveal 계약은 바꾸지 않는다.
 7. **ML5+ — 필요가 증명된 기능:** grid, static transform, transition/animation을
    각각 별도 PR과 fixture로 연다.
 

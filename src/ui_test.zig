@@ -10,6 +10,7 @@ const tree = @import("chrome/ui/tree.zig");
 const interaction = @import("chrome/ui/interaction.zig");
 const paint_style = @import("chrome/ui/paint_style.zig");
 const paint = @import("chrome/ui/paint.zig");
+const session_dock = @import("chrome/components/session_dock.zig");
 
 test {
     // `refAllDecls` is intentionally explicit: imports alone do not make this focused artifact's
@@ -21,4 +22,5 @@ test {
     testing.refAllDecls(interaction);
     testing.refAllDecls(paint_style);
     testing.refAllDecls(paint);
+    testing.refAllDecls(session_dock);
 }

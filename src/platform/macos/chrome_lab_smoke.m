@@ -48,6 +48,18 @@ void maru_macos_chrome_lab_smoke_render(
     uint32_t height_px,
     const char *ppm_path,
     const char *png_path,
+    uint16_t cols,
+    uint16_t rows,
+    uint32_t cell_width_px,
+    uint32_t cell_height_px,
+    const MaruAppHostMetalCell *cells,
+    size_t cell_count,
+    uint32_t atlas_width_px,
+    uint32_t atlas_height_px,
+    const MaruAppHostMetalRasterUpload *raster_uploads,
+    size_t raster_upload_count,
+    const uint8_t *raster_pixels,
+    size_t raster_pixel_count,
     const MaruAppHostGpuQuad *quads,
     size_t quad_count,
     const MaruAppHostGpuShadow *shadows,
@@ -59,7 +71,9 @@ void maru_macos_chrome_lab_smoke_render(
     }
     memset(result, 0, sizeof(*result));
     result->status = -1;
-    if (width_px == 0 || height_px == 0 || ppm_path == NULL || png_path == NULL) {
+    if (width_px == 0 || height_px == 0 || cols == 0 || rows == 0 ||
+        cell_width_px == 0 || cell_height_px == 0 || atlas_width_px == 0 || atlas_height_px == 0 ||
+        ppm_path == NULL || png_path == NULL) {
         return;
     }
 
@@ -87,7 +101,14 @@ void maru_macos_chrome_lab_smoke_render(
         return;
     }
     result->renderer_created = 1;
-    if (!maru_metal_renderer_set_atlas(renderer, 1, 1, NULL, 0, NULL, 0)) {
+    if (!maru_metal_renderer_set_atlas(
+            renderer,
+            atlas_width_px,
+            atlas_height_px,
+            raster_uploads,
+            raster_upload_count,
+            raster_pixels,
+            raster_pixel_count)) {
         maru_metal_renderer_destroy(renderer);
         return;
     }
@@ -97,12 +118,12 @@ void maru_macos_chrome_lab_smoke_render(
         renderer,
         terminal_layer,
         nil,
-        1,
-        1,
-        1,
-        1,
-        NULL,
-        0,
+        cols,
+        rows,
+        cell_width_px,
+        cell_height_px,
+        cells,
+        cell_count,
         0,
         0,
         NULL,

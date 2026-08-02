@@ -8,6 +8,7 @@ const maru = @import("maru");
 const lowering = @import("metal_lowering.zig");
 
 const chrome = maru.chrome;
+const session_dock = chrome.components.session_dock;
 
 pub const ScenarioId = enum { empty, loading, retained_list };
 
@@ -30,6 +31,10 @@ pub const FrameBuffers = struct {
     flex_scratch: []chrome.ui.layout.FlexScratch,
     child_rects: []chrome.ui.layout.UiRect,
     ops: []chrome.draw.Op,
+    dock_nodes: []chrome.ui.tree.UiNode,
+    dock_actions: []session_dock.ids.Entry,
+    text_runs: []chrome.draw.Run,
+    text_bytes: []u8,
 };
 
 pub const Frame = struct {
@@ -37,52 +42,42 @@ pub const Frame = struct {
     draws: chrome.ChromeDraw,
 };
 
-/// Produces a deterministic, effect-free card fixture through the product UI tree and paint path.
-/// Text nodes intentionally remain semantic until the later CoreText/readback slice owns shaping.
+/// Produces a deterministic, effect-free Session Dock through the product UI tree and paint path.
+/// The fixture carries only synthetic/redacted strings; it cannot import an archive provider or an
+/// AppSession merely to make a visual regression test pass.
 pub fn buildFrame(
     scenario: Scenario,
     tokens: *const chrome.Tokens,
     buffers: FrameBuffers,
 ) !Frame {
-    const title: []const u8 = switch (scenario.id) {
-        .empty => "No sessions yet",
-        .loading => "Analyzing sessions",
-        .retained_list => "Notion document root cause",
+    const retained = [_]session_dock.types.Item{
+        .{ .group = .{ .identity = 1, .label = "payhere-pos-pc", .count = 3 } },
+        .{ .card = .{ .identity = 2, .provider = .claude, .title = "Notion document root cause", .summary = "Check the original document and isolate the cause", .metadata = "94 messages · 3m ago · claude-opus-5", .selected = scenario.id == .retained_list } },
+        .{ .card = .{ .identity = 3, .provider = .codex, .title = "Implement session dock layout", .summary = "Wire the snapshot, interaction tree, and host renderer", .metadata = "140 messages · 22h ago · gpt-5.6-sol" } },
+        .{ .card = .{ .identity = 4, .provider = .claude, .title = "Refresh list without flicker", .summary = "Keep the prior snapshot until the replacement is complete", .metadata = "356 messages · 1d ago · claude-opus-5" } },
     };
-    const visual: chrome.ui.tree.CardVisual = switch (scenario.id) {
-        .empty => .{ .variant = .surface, .paint = .{} },
-        .loading => .{ .variant = .raised, .paint = .{} },
-        .retained_list => .{ .variant = .selected, .paint = .{} },
+    const dock_props = session_dock.types.Props{
+        .viewport_px = scenario.viewport_px,
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .snapshot_generation = 1,
+        .displayed_count = if (scenario.id == .retained_list) 3 else 0,
+        .loading = scenario.id == .loading,
+        .refreshing = false,
+        .spinner_phase = @intCast(scenario.now_ns % 8),
+        .search = if (scenario.id == .empty) "" else "",
+        .items = if (scenario.id == .retained_list) &retained else &.{},
     };
-    const root = chrome.ui.tree.container(.{
-        .id = 1,
-        .style = .{ .padding = .{ .top = 16, .right = 16, .bottom = 16, .left = 16 } },
-        .overflow = .clip,
-    }, &.{chrome.ui.tree.card(.{
-        .id = 2,
-        // The Lab fixture is responsive too: an auto-width, clipped card with an unmeasured text
-        // leaf has a zero-width content clip and cannot be hit. The root is a column, so width is
-        // its cross axis: a definite 100% resolves the card paint, clip, and action rect without
-        // using the intentionally-invalid cross-axis fill vocabulary.
-        .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = 72 }, .padding = .{ .top = 12, .right = 12, .bottom = 12, .left = 12 } },
-        .variant = visual.variant,
-        .paint = visual.paint,
-        .action = .{ .id = 100 },
-        .overflow = .clip,
-    }, &.{chrome.ui.tree.text(.{ .id = 3, .value = title, .tone = .primary })})});
-
-    const tree = try chrome.ui.tree.build(root, .{
-        .root_size = scenario.viewport_px,
-        .max_entries = 3,
-        .max_depth = 3,
-    }, .{
+    const session_frame = try session_dock.build.build(dock_props, .{
+        .nodes = buffers.dock_nodes,
         .entries = buffers.entries,
-        .items = buffers.items,
+        .layout_items = buffers.items,
         .flex_scratch = buffers.flex_scratch,
         .child_rects = buffers.child_rects,
+        .actions = buffers.dock_actions,
     });
-    const draws = try chrome.ui.paint.paint(tree, .{}, tokens, .sidebar, .{ .ops = buffers.ops });
-    return .{ .tree = tree, .draws = draws };
+    const draws = try session_dock.view.view(dock_props, session_frame, .{}, tokens, .{ .ops = buffers.ops, .runs = buffers.text_runs, .text_bytes = buffers.text_bytes });
+    return .{ .tree = session_frame.tree, .draws = draws };
 }
 
 pub fn dispatchRecordedAction(
@@ -125,11 +120,15 @@ test "Chrome Lab builds a deterministic card and records only its action" {
         .cursor = .{ .r = 10, .g = 11, .b = 12 },
         .accent = .{ .r = 13, .g = 14, .b = 15 },
     });
-    var entries: [3]chrome.ui.tree.RectEntry = undefined;
-    var items: [3]chrome.ui.layout.Item = undefined;
-    var flex_scratch: [3]chrome.ui.layout.FlexScratch = undefined;
-    var child_rects: [3]chrome.ui.layout.UiRect = undefined;
-    var ops: [1]chrome.draw.Op = undefined;
+    var entries: [16]chrome.ui.tree.RectEntry = undefined;
+    var items: [16]chrome.ui.layout.Item = undefined;
+    var flex_scratch: [16]chrome.ui.layout.FlexScratch = undefined;
+    var child_rects: [16]chrome.ui.layout.UiRect = undefined;
+    var ops: [32]chrome.draw.Op = undefined;
+    var dock_nodes: [16]chrome.ui.tree.UiNode = undefined;
+    var dock_actions: [12]session_dock.ids.Entry = undefined;
+    var text_runs: [32]chrome.draw.Run = undefined;
+    var text_bytes: [2048]u8 = undefined;
     const frame = try buildFrame(.{
         .id = .retained_list,
         .viewport_px = .{ .width = 320, .height = 240 },
@@ -140,17 +139,22 @@ test "Chrome Lab builds a deterministic card and records only its action" {
         .flex_scratch = &flex_scratch,
         .child_rects = &child_rects,
         .ops = &ops,
+        .dock_nodes = &dock_nodes,
+        .dock_actions = &dock_actions,
+        .text_runs = &text_runs,
+        .text_bytes = &text_bytes,
     });
 
-    try std.testing.expectEqual(@as(usize, 3), frame.tree.entries.len);
-    try std.testing.expectEqual(@as(usize, 1), frame.draws.ops.len);
+    try std.testing.expect(frame.tree.entries.len > 7);
+    try std.testing.expect(frame.draws.ops.len > 8);
     try std.testing.expect(frame.draws.ops[0] == .quad);
 
-    const card_rect = frame.tree.entries[1].rect;
+    const card_index = frame.tree.find(session_dock.build.NodeIds.item(1)).?;
+    const card_rect = frame.tree.entries[card_index].rect;
     try std.testing.expect(card_rect.width > 0);
     try std.testing.expect(card_rect.height > 0);
-    try std.testing.expect(frame.tree.entries[1].effective_clip != null);
-    const card_clip = frame.tree.entries[1].effective_clip.?;
+    try std.testing.expect(frame.tree.entries[card_index].effective_clip != null);
+    const card_clip = frame.tree.entries[card_index].effective_clip.?;
     try std.testing.expect(card_clip.width > 0);
     try std.testing.expect(card_clip.height > 0);
     const card_x = card_rect.x + card_rect.width / 2;
@@ -163,7 +167,7 @@ test "Chrome Lab builds a deterministic card and records only its action" {
         .y_px = card_y,
         .timestamp_ns = 1,
     }));
-    try std.testing.expectEqual(@as(?chrome.ui.tree.UiActionId, 100), try dispatchRecordedAction(&state, frame, .{
+    try std.testing.expectEqual(@as(?chrome.ui.tree.UiActionId, 7), try dispatchRecordedAction(&state, frame, .{
         .phase = .up,
         .x_px = 1000,
         .y_px = 1000,

@@ -77,6 +77,11 @@ const allowlist = [_]Allowed{
         .reason = "cluster 방출 어댑터 — text_layout이 잡아 준 바이트 범위에서 base는 셀에, 나머지는 grapheme_pool에(CG1 방출부 그 자체).",
     },
     .{
+        .file = "platform/macos/chrome/session_dock_lowering.zig",
+        .function = "appendCluster",
+        .reason = "SessionDock의 단일 DrawList cluster 방출 어댑터 — text_layout.plan이 확정한 범위만 DrawCell/grapheme_pool으로 옮기며, 별도 UTF-8 순회나 폭 계산을 하지 않는다.",
+    },
+    .{
         .file = "platform/macos/coretext_frame_builder.zig",
         .function = "emitEditBand",
         .reason = "주소창 편집 밴드: caret 열이 text_field.fieldLayout(Σ max(1,cellWidth))과 1:1이라 cluster화하려면 L3 레이아웃까지 같이 바꿔야 한다(후속 슬라이스). IME 조합은 입력 경계 composeHangul이 덮는다.",

@@ -20116,7 +20116,7 @@ pub const AppSession = struct {
             layout_math.pointInRect(x_px, y_px, self.dockGeometry().tree_content))
         {
             const rect = self.dockGeometry().tree_content;
-            const visible = if (self.cell_height_px == 0) 0 else (rect.h / self.cell_height_px) -| 1; // 헤더 한 줄 제외
+            const visible = if (self.cell_height_px == 0) 0 else rect.h / self.cell_height_px;
             const max_scroll = self.scmTotalRows() -| @as(usize, visible);
             const next = @as(i64, @intCast(self.scm_scroll_rows)) - @as(i64, lines);
             const clamped: usize = @intCast(std.math.clamp(next, 0, @as(i64, @intCast(max_scroll))));

@@ -19,6 +19,10 @@ pub const UiAction = struct {
 pub const ContainerOptions = struct {
     id: UiId,
     style: layout.UiStyle = .{},
+    /// `Container`는 제품 component가 아니라 내부 flex solver의 구조 노드다. Column/Row라는
+    /// 별도 공개 component를 만들지 않고 방향을 이 한 값으로 제한해, layout API가
+    /// shadcn식 의미 component(`Card`/`Text`)와 섞이지 않게 한다.
+    direction: layout.Direction = .column,
     justify: layout.Justify = .start,
     align_items: layout.Align = .stretch,
     overflow: layout.Overflow = .visible,
@@ -43,12 +47,8 @@ pub const TextOptions = struct {
 };
 
 pub const NodeProps = union(enum) {
-    column: struct {
-        justify: layout.Justify,
-        align_items: layout.Align,
-        overflow: layout.Overflow,
-    },
-    row: struct {
+    container: struct {
+        direction: layout.Direction,
         justify: layout.Justify,
         align_items: layout.Align,
         overflow: layout.Overflow,
@@ -67,7 +67,7 @@ pub const NodeProps = union(enum) {
     },
 };
 
-pub const NodeKind = enum { column, row, card, text };
+pub const NodeKind = enum { container, card, text };
 
 /// children slice의 수명과 순서는 builder caller가 소유한다. node address나 형제 index는
 /// identity가 아니며, 한 build 안에 같은 `id`가 있으면 `DuplicateIdentity`로 끝난다.
@@ -79,32 +79,21 @@ pub const UiNode = struct {
 
     pub fn kind(self: UiNode) NodeKind {
         return switch (self.props) {
-            .column => .column,
-            .row => .row,
+            .container => .container,
             .card => .card,
             .text => .text,
         };
     }
 };
 
-pub fn column(options: ContainerOptions, children: []const UiNode) UiNode {
+/// Internal layout node. Domain components compose this around semantic children; it is not a
+/// user-facing Chrome design-system component.
+pub fn container(options: ContainerOptions, children: []const UiNode) UiNode {
     return .{
         .id = options.id,
         .style = options.style,
-        .props = .{ .column = .{
-            .justify = options.justify,
-            .align_items = options.align_items,
-            .overflow = options.overflow,
-        } },
-        .children = children,
-    };
-}
-
-pub fn row(options: ContainerOptions, children: []const UiNode) UiNode {
-    return .{
-        .id = options.id,
-        .style = options.style,
-        .props = .{ .row = .{
+        .props = .{ .container = .{
+            .direction = options.direction,
             .justify = options.justify,
             .align_items = options.align_items,
             .overflow = options.overflow,
@@ -250,7 +239,7 @@ const BuildState = struct {
         if (parent_index == null) try validateRootOuterStyle(node.style);
         if (node.children.len > self.options.max_entries - self.entry_count - 1) return error.MaxEntriesExceeded;
 
-        const container = try containerFor(node, rect);
+        const flex_container = try containerFor(node, rect);
         const child_count = node.children.len;
         const child_items = self.buffers.items[0..child_count];
         const child_scratch = self.buffers.flex_scratch[0..child_count];
@@ -258,7 +247,7 @@ const BuildState = struct {
             child_count > self.buffers.child_rects.len - rect_stack_start) return error.MaxEntriesExceeded;
         const child_rects = self.buffers.child_rects[rect_stack_start..][0..child_count];
         for (node.children, child_items) |child, *item| item.* = itemFor(child);
-        const result = try layout.layoutFlex(container, child_items, child_scratch, child_rects);
+        const result = try layout.layoutFlex(flex_container, child_items, child_scratch, child_rects);
 
         const own_clip = if (result.clip_rect) |content_rect|
             try offsetRect(content_rect, rect.x, rect.y)
@@ -310,19 +299,11 @@ fn isAuto(length: layout.UiLength) bool {
 }
 
 fn containerFor(node: UiNode, rect: layout.UiRect) BuildError!layout.FlexContainer {
-    const container: layout.FlexContainer = switch (node.props) {
-        .column => |value| .{
+    const flex_container: layout.FlexContainer = switch (node.props) {
+        .container => |value| .{
             .style = node.style,
             .size = .{ .width = rect.width, .height = rect.height },
-            .direction = .column,
-            .justify = value.justify,
-            .align_items = value.align_items,
-            .overflow = value.overflow,
-        },
-        .row => |value| .{
-            .style = node.style,
-            .size = .{ .width = rect.width, .height = rect.height },
-            .direction = .row,
+            .direction = value.direction,
             .justify = value.justify,
             .align_items = value.align_items,
             .overflow = value.overflow,
@@ -341,8 +322,8 @@ fn containerFor(node: UiNode, rect: layout.UiRect) BuildError!layout.FlexContain
             .direction = .column,
         },
     };
-    try layout.validateItemStyle(node.style, container.direction);
-    return container;
+    try layout.validateItemStyle(node.style, flex_container.direction);
+    return flex_container;
 }
 
 fn itemFor(node: UiNode) layout.Item {
@@ -413,7 +394,7 @@ fn measuredText(_: ?*const anyopaque, _: layout.MeasureConstraint) layout.UiSize
 }
 
 test "nested UiNode produces one preorder rect tree for cards and text" {
-    const root = column(.{ .id = 1, .style = .{ .padding = .{ .top = 4, .left = 3 }, .gap = 2 }, .overflow = .clip }, &.{
+    const root = container(.{ .id = 1, .style = .{ .padding = .{ .top = 4, .left = 3 }, .gap = 2 }, .overflow = .clip }, &.{
         card(.{ .id = 2, .style = .{ .height = .{ .px = 24 }, .padding = .{ .left = 2 } }, .action = .{ .id = 90 } }, &.{
             text(.{ .id = 3, .value = "adsf", .measure = measuredText }),
         }),
@@ -445,7 +426,7 @@ test "nested UiNode produces one preorder rect tree for cards and text" {
 }
 
 test "build fails closed for duplicate identity and leaves no new rect entries" {
-    const root = column(.{ .id = 1 }, &.{
+    const root = container(.{ .id = 1 }, &.{
         text(.{ .id = 2, .value = "first" }),
         text(.{ .id = 2, .value = "duplicate" }),
     });
@@ -463,7 +444,7 @@ test "build fails closed for duplicate identity and leaves no new rect entries" 
 }
 
 test "build rejects depth, capacity, and leaf children without partial tree" {
-    const nested = column(.{ .id = 1 }, &.{
+    const nested = container(.{ .id = 1 }, &.{
         card(.{ .id = 2 }, &.{
             text(.{ .id = 3, .value = "deep" }),
         }),
@@ -488,15 +469,15 @@ test "build rejects depth, capacity, and leaf children without partial tree" {
     };
     try std.testing.expectError(error.LeafHasChildren, build(invalid_leaf, .{ .root_size = .{ .width = 20, .height = 20 }, .max_entries = 3, .max_depth = 2 }, buffers));
 
-    const invalid_root = column(.{ .id = 10, .style = .{ .width = .{ .px = 10 } } }, &.{});
+    const invalid_root = container(.{ .id = 10, .style = .{ .width = .{ .px = 10 } } }, &.{});
     try std.testing.expectError(error.RootOuterStyle, build(invalid_root, .{ .root_size = .{ .width = 20, .height = 20 }, .max_entries = 3, .max_depth = 2 }, buffers));
 
-    const invalid_root_padding = column(.{ .id = 11, .style = .{ .padding = .{ .left = -1 } } }, &.{});
+    const invalid_root_padding = container(.{ .id = 11, .style = .{ .padding = .{ .left = -1 } } }, &.{});
     try std.testing.expectError(error.NegativeValue, build(invalid_root_padding, .{ .root_size = .{ .width = 20, .height = 20 }, .max_entries = 3, .max_depth = 2 }, buffers));
 }
 
-test "nested overflow clips intersect and row children use parent rect origin" {
-    const root = row(.{ .id = 1, .style = .{ .padding = .{ .left = 5 }, .gap = 3 }, .overflow = .clip }, &.{
+test "nested overflow clips intersect and horizontal container children use parent rect origin" {
+    const root = container(.{ .id = 1, .direction = .row, .style = .{ .padding = .{ .left = 5 }, .gap = 3 }, .overflow = .clip }, &.{
         card(.{ .id = 2, .style = .{ .width = .{ .px = 30 } }, .overflow = .clip }, &.{
             text(.{ .id = 3, .value = "clip" }),
         }),
@@ -519,7 +500,7 @@ test "nested overflow clips intersect and row children use parent rect origin" {
 }
 
 test "deep first sibling cannot overwrite later parent sibling rect" {
-    const root = column(.{ .id = 1, .style = .{ .gap = 2 } }, &.{
+    const root = container(.{ .id = 1, .style = .{ .gap = 2 } }, &.{
         card(.{ .id = 2, .style = .{ .height = .{ .px = 30 } } }, &.{
             text(.{ .id = 3, .value = "one", .measure = measuredText }),
             text(.{ .id = 4, .value = "two", .measure = measuredText }),
@@ -544,7 +525,7 @@ test "deep first sibling cannot overwrite later parent sibling rect" {
 
 test "nested rect offset overflow fails closed instead of publishing infinity" {
     const max = std.math.floatMax(f32);
-    const root = row(.{ .id = 1 }, &.{
+    const root = container(.{ .id = 1, .direction = .row }, &.{
         card(.{
             .id = 2,
             .style = .{ .width = .{ .px = 0 }, .margin = .{ .left = max / 2 }, .padding = .{ .left = max } },
@@ -566,7 +547,7 @@ test "nested rect offset overflow fails closed instead of publishing infinity" {
 
 test "rebuild counter advances only after completed tree build" {
     const valid = text(.{ .id = 1, .value = "ready" });
-    const duplicate = column(.{ .id = 2 }, &.{
+    const duplicate = container(.{ .id = 2 }, &.{
         text(.{ .id = 3, .value = "one" }),
         text(.{ .id = 3, .value = "two" }),
     });
@@ -589,7 +570,7 @@ test "rebuild counter advances only after completed tree build" {
 }
 
 test "active sibling scratch beyond tree cap reports max entries, not buffer failure" {
-    const root = column(.{ .id = 1 }, &.{
+    const root = container(.{ .id = 1 }, &.{
         card(.{ .id = 2 }, &.{
             text(.{ .id = 3, .value = "one" }),
             text(.{ .id = 4, .value = "two" }),

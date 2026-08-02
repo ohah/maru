@@ -11,8 +11,14 @@ pub const draw = @import("chrome/draw.zig");
 pub const tokens = @import("chrome/tokens.zig");
 pub const props = @import("chrome/props.zig");
 pub const input = @import("chrome/input.zig");
-pub const layout = @import("chrome/layout.zig");
-pub const ui_tree = @import("chrome/ui_tree.zig");
+pub const ui = struct {
+    pub const layout = @import("chrome/ui/layout.zig");
+    pub const style = @import("chrome/ui/style.zig");
+    pub const tree = @import("chrome/ui/tree.zig");
+    pub const interaction = @import("chrome/ui/interaction.zig");
+    pub const paint_style = @import("chrome/ui/paint_style.zig");
+    pub const paint = @import("chrome/ui/paint.zig");
+};
 pub const state = @import("chrome/state.zig");
 pub const host = @import("chrome/host.zig");
 pub const file_tree_icon = @import("chrome/file_tree_icon.zig");

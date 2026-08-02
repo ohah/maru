@@ -1,0 +1,24 @@
+//! Focused test root for the typed Chrome UI namespace.
+//!
+//! The production `chrome.zig` facade deliberately imports every Chrome component. Keeping this
+//! build entrypoint separate makes `zig build test-chrome-ui` prove only the build → layout →
+//! interaction → paint seam while resolving child-module imports from the real `src/` boundary.
+
+const layout = @import("chrome/ui/layout.zig");
+const style = @import("chrome/ui/style.zig");
+const tree = @import("chrome/ui/tree.zig");
+const interaction = @import("chrome/ui/interaction.zig");
+const paint_style = @import("chrome/ui/paint_style.zig");
+const paint = @import("chrome/ui/paint.zig");
+
+test {
+    // `refAllDecls` is intentionally explicit: imports alone do not make this focused artifact's
+    // scope obvious to a reader, and each namespace owns the tests for its one responsibility.
+    const testing = @import("std").testing;
+    testing.refAllDecls(layout);
+    testing.refAllDecls(style);
+    testing.refAllDecls(tree);
+    testing.refAllDecls(interaction);
+    testing.refAllDecls(paint_style);
+    testing.refAllDecls(paint);
+}

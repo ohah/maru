@@ -598,7 +598,7 @@ sequenceDiagram
 #### 복구보다 먼저 남기는 poison taxonomy와 incident artifact
 
 CR0a의 typed poison table이 먼저 `{scope,disposition,transport_usable,expected}`를 확정한 뒤 CR0b가 artifact를 붙인다.
-자동 reconnect는 최초 원인을 숨기지 못한다. `Client`가 처음 connection-fatal 오류를 확정하는 순간 immutable
+자동 reconnect는 최초 원인을 숨기지 못한다. CR0b에서 `Client`가 처음 connection-fatal 오류를 확정하는 순간 immutable
 `incident_id`를 만들고, reconnect scheduling보다 먼저 bounded 구조화 artifact를 저장한다. 후속 EOF·detach 실패·controller
 conflict는 같은 incident의 child event이며 최초 `poison_reason`을 덮지 않는다.
 
@@ -772,11 +772,14 @@ state를 먼저 publish한 다음 owner turn에서 selection/search/viewport/pre
   event delivery를 연다. Window 이동/close는 이 owner를 옮기지 않는다. 과거 clipboard 요청/notification을 재발화하지
   않으며 counter 감소·overflow나 host epoch 불일치는 resync 또는 unavailable로 닫는다.
 - transport/semantic 오류는 `{scope: stream|connection|host, disposition: retry_status|reconnect|no_retry|gone,
-  transport_usable: bool}` tuple로 분류한다. framing 손실, partial write, response-ID 모호성만 connection reconnect다.
-  `invalid_generation`은 usable stream의 fresh-status 재시도, `controller_busy`는 controller conflict, `auth_denied`는 자동
-  재시도 금지, positive absence만 Gone이다. raw `Client.failClosed`는 typed `poison(reason,scope)` 내부로 숨기고 모든
-  callsite가 exhaustive expected tuple을 갖게 한다. 한 stream의 bounded semantic 오류가 sibling reconnect storm을 만들면
-  안 된다.
+  transport_usable: bool}` tuple로 분류한다. connection-fatal reason의 closed set은 clean EOF, read timeout, transport read
+  failure, planned-upgrade reconnect, capability incompatibility, known partial/ambiguous write, event/local queue exhaustion,
+  local resource exhaustion, malformed/truncated framing, response-ID correlation loss, peer contract violation, local invariant
+  violation, external-transfer quarantine, attachment cleanup failure다. `Client.poison(reason)`은 reason만 받고 scope와
+  disposition은 이 closed table에서 파생하며 caller가 전달하지 않는다. `invalid_generation`은 usable stream의 fresh-status
+  재시도, `controller_busy`는 controller conflict, `auth_denied`는 자동 재시도 금지, positive absence만 Gone이다. raw
+  `Client.failClosed`는 typed poison 내부로 숨기고 모든 callsite가 exhaustive expected tuple을 갖게 한다. 한 stream의 bounded
+  semantic 오류가 sibling reconnect storm을 만들면 안 된다.
 
 세부 구현 순서와 완료 gate는 구현 계획의 CR 단계와 검증 매트릭스가 소유한다.
 

@@ -818,16 +818,21 @@ TDD 방식:
      P6 전체 workspace TUI/외부 tmux import adapter와 Plugin은 각각 실제 수요·착수 전 별도 논의.
 - **검토했으나 미채택한 대안**(UI 완성도 먼저, 구조 리스크 뒤로): chrome 고급화를 New Window보다 앞에 두는 안. atlas 소유권 캡슐화 + restore 스키마 window-aware면 재작업은 낮으나, 큰 구조 변경을 미루는 대신 나중에 공유 검토할 atlas가 2개가 되는 트레이드오프 — 사용자가 "토대 먼저"를 택해 미채택.
 
-## Session host 실행 중 transport reconnect (CR, 미착수)
+## Session host 실행 중 transport reconnect (CR, CR0a 완료)
 
 shared `Client`가 실행 중 unusable이 되어도 기존 Term/Surface/runtime handle을 유지한 채 exact host에 다시 붙이는 단계다.
 규범 계약은 [영속 터미널 세션 호스트](persistent-session-host.md#실행-중-connection-invalidation과-재연결), 검증 상태와
 종료 gate는 [검증 매트릭스](verification-matrix.md#영속-host-cr-실행-중-transport-reconnect-gate)가 소유한다. cold workspace
 restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
 
-1. **CR0a — typed poison taxonomy:** reconnect와 artifact writer 없이 raw `Client.failClosed` 직접 호출을 typed poison
-   boundary로 모으고 `{scope,disposition,transport_usable,expected}` exhaustive table을 먼저 고정한다. unexpected와 raw
-   fail-close 경계를 테스트가 구분한다.
+1. **CR0a — typed poison taxonomy (완료):** reconnect와 artifact writer 없이 raw `Client.failClosed`와 내부 raw
+   `invalidateConnection*` 직접 호출을 typed poison boundary로 모았다. 분류용 `Outcome`과 connection-fatal만 허용하는
+   `ConnectionReason`을 타입으로 분리하고 `{scope,disposition,transport_usable,expected}` exhaustive golden table을 고정했다.
+   최초 reason은 immutable이며 source/adoption/projection seal에 포함된다. clean EOF·read timeout/transport failure·framing
+   truncation/malformed·write progress ambiguous/known partial·queue/OOM·peer contract·attachment cleanup을 구분하고 source
+   boundary test가 named terminalization leaf 밖의 raw untyped callsite를 감시한다. semantic `Outcome` 4종은 이 단계에서는
+   model-only이며 production semantic decode/dispatch 연결과 scope 축소는 CR1 범위다. reconnect와 artifact writer는 CR0b
+   이후 범위다.
 2. **CR0b — poison observability:** CR0a DTO만 소비하는 immutable `ConnectionIncident`, 최초 원인 보존, redaction/rate-limit,
    32 KiB emergency ring handoff→bounded disk writer 순서, Debug fail-stop과 Release artifact-before-recovery gate를 구현한다.
 3. **CR1 — poison 범위 축소와 scheduler:** semantic stream 오류가 shared connection을 불필요하게 poison하지 않도록 callsite를

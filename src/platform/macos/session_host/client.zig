@@ -24,6 +24,7 @@ const owner_range = @import("external_owner_range.zig");
 const owner_seal = @import("external_owner_seal.zig");
 const socket_server = @import("socket_server.zig");
 const client_deadline = @import("client_deadline.zig");
+const client_poison = @import("client_poison.zig");
 const client_external_mode = @import("client_external_mode.zig");
 const client_source_transcript = @import("client_source_transcript.zig");
 const screen_stream = @import("screen_stream.zig");
@@ -511,6 +512,7 @@ const ExternalAdoptionSnapshot = struct {
     compatibility_profile: compatibility.Profile,
     ownership: ClientOwnership,
     unusable: bool,
+    first_poison_reason: ?client_poison.ConnectionReason,
     next_request_id: u64,
     parser_allocator: std.mem.Allocator,
     parser_expected_major: u16,
@@ -1984,6 +1986,7 @@ const ExternalSourceSealEncoder = struct {
         validated: ExternalValidatedAdoption,
         encoding: ExternalSourceSealEncoding,
     ) ExternalSourceSealError!void {
+        if (!client.terminalReasonInvariant()) return error.InvalidClientState;
         var writer = client_source_transcript.Writer.init(.client_source_v1);
         try writer.writeUsize(encoding.address(@intFromPtr(client), 0x1000));
         writer.writeU64(target_stream);
@@ -2033,6 +2036,8 @@ const ExternalSourceSealEncoder = struct {
         writer.writeU64(client.attach_instance_id);
         writer.writeTag(@intFromEnum(client.ownership));
         writer.writeBool(client.unusable);
+        writer.writeBool(client.first_poison_reason != null);
+        if (client.first_poison_reason) |reason| writer.writeTag(@intFromEnum(reason));
         writer.writeU64(client.next_request_id);
 
         try writeSourceAllocator(&writer, client.parser.allocator, encoding, 0x1400);
@@ -3608,6 +3613,7 @@ fn externalAdoptionSnapshot(self: *const Client) ExternalAdoptionSnapshot {
         .compatibility_profile = self.compatibility_profile.?,
         .ownership = self.ownership,
         .unusable = self.unusable,
+        .first_poison_reason = self.first_poison_reason,
         .next_request_id = self.next_request_id,
         .parser_allocator = self.parser.allocator,
         .parser_expected_major = self.parser.expected_major,
@@ -3638,6 +3644,7 @@ fn externalAdoptionSnapshot(self: *const Client) ExternalAdoptionSnapshot {
 }
 
 fn externalAdoptionSnapshotForProof(self: *const Client) ?ExternalAdoptionSnapshot {
+    if (!self.terminalReasonInvariant()) return null;
     switch (self.io_mode) {
         .blocking => return null,
         .external => {},
@@ -3891,6 +3898,8 @@ pub const Client = struct {
     // async full-state를 하나라도 수용하지 못하면 server subscription base는 이미 전진했을 수 있다. 그 뒤 같은 socket을
     // 계속 쓰면 어떤 shared stream이 누락됐는지 복구할 수 없으므로 connection 전체를 poison/close한다.
     unusable: bool = false,
+    /// 최초 connection poison만 보존한다. 후속 EOF/cleanup 실패는 원인을 덮지 않는다.
+    first_poison_reason: ?client_poison.ConnectionReason = null,
     next_request_id: u64 = 1,
     // 응답을 기다리는 `call` 중에 host가 비동기로 push한 stream frame(delta_chunk/snapshot_chunk)을 여기 버퍼한다 — 드롭하면
     // 화면 갱신이 유실되므로(§9 delta는 증분이라 하나만 놓쳐도 desync), 다음 `readStreamBatch`가 소켓보다 먼저 이걸 비운다.
@@ -3970,7 +3979,7 @@ pub const Client = struct {
     pub fn requireAdminRuntimeEnd(self: *Client) ClientError!void {
         try self.requireBlockingMode();
         if (self.admin_runtime_end_v1) return;
-        self.failClosed();
+        self.poison(.capability_incompatible);
         return error.IncompatibleVersion;
     }
 
@@ -4204,6 +4213,7 @@ pub const Client = struct {
     /// process-local authority evidence; payload contents are intentionally excluded.
     pub fn projectionAuthorityDigest(self: *const Client) owner_seal.Digest {
         var writer = owner_seal.Writer.init("maru.client-owner.projection.v1");
+        writer.writeBool(self.terminalReasonInvariant());
         writer.writeUsize(@intFromPtr(self));
         writer.writeUsize(@intFromPtr(self.allocator.ptr));
         writer.writeUsize(@intFromPtr(self.allocator.vtable));
@@ -4218,6 +4228,8 @@ pub const Client = struct {
         writer.writeUsize(self.lifecycle.len);
         writer.writeU8(@intFromEnum(self.ownership));
         writer.writeBool(self.unusable);
+        writer.writeBool(self.first_poison_reason != null);
+        if (self.first_poison_reason) |reason| writer.writeU8(@intFromEnum(reason));
         writer.writeU64(self.next_request_id);
         writer.writeUsize(if (self.parser.buf.capacity == 0)
             0
@@ -4618,7 +4630,8 @@ pub const Client = struct {
         if (normalize_outcome == .quarantined) {
             external_state.rx_provenance = .{ .lifecycle = .terminal };
             external_state.rx_operation_busy = false;
-            destination.*.?.unusable = true;
+            destination.*.?.markPoisonedForDeferredCleanup(.external_transfer_quarantined);
+            std.debug.assert(destination.*.?.terminalReasonInvariant());
             prepared.source_addr = 0;
             prepared.profile = null;
             prepared.lifecycle = .committed;
@@ -5389,7 +5402,7 @@ pub const Client = struct {
             .external => |state| self.io_mode = .{ .external = state },
             .flag_failed => return error.FlagFailed,
             .invalid_blocking_flags, .indeterminate => {
-                self.invalidateConnectionWithOps(ops);
+                self.poisonWithOps(.local_invariant_violation, ops);
                 return error.ConnectionClosed;
             },
         }
@@ -5518,12 +5531,12 @@ pub const Client = struct {
         defer self.allocator.free(frame_bytes);
 
         const saved_flags = ops.get_flags(ops.context, self.fd) orelse {
-            self.invalidateConnectionWithOps(ops);
+            self.poisonWithOps(.local_invariant_violation, ops);
             return error.WriteFailed;
         };
         const nonblocking: c_int = @bitCast(posix.O{ .NONBLOCK = true });
         if (!ops.set_flags(ops.context, self.fd, saved_flags | nonblocking)) {
-            self.invalidateConnectionWithOps(ops);
+            self.poisonWithOps(.local_invariant_violation, ops);
             return error.WriteFailed;
         }
         // 큐에 남은 GUI 입력 frame을 **먼저 밀어낸다**. wire 순서를 지키는 방법은 연결을 끊는 것이 아니라 먼저 온
@@ -5537,7 +5550,7 @@ pub const Client = struct {
         // timeout이면 framing이 이미 깨져 복구가 불가능하므로 connection을 살려 둘 수 없다.
         if (self.pending_outbound) |pending| {
             client_deadline.writeAllUntil(ops, self.fd, pending.frame[pending.offset..], deadline) catch {
-                self.invalidateConnectionWithOps(ops);
+                self.poisonWithOps(.outbound_write_ambiguous, ops);
                 return error.WriteFailed;
             };
             self.clearPendingOutbound();
@@ -5547,17 +5560,17 @@ pub const Client = struct {
             frame_bytes,
             .{ .deadline = .{ .absolute = deadline, .ops = ops } },
         ) catch |err| {
-            self.invalidateConnectionWithOps(ops);
+            self.poisonWithOps(.response_correlation_lost, ops);
             return err;
         };
         if (!ops.set_flags(ops.context, self.fd, saved_flags)) {
             self.allocator.free(payload);
-            self.invalidateConnectionWithOps(ops);
+            self.poisonWithOps(.local_invariant_violation, ops);
             return error.ConnectionClosed;
         }
         if (deadline.remainingNs() <= 0) {
             self.allocator.free(payload);
-            self.invalidateConnectionWithOps(ops);
+            self.poisonWithOps(.response_correlation_lost, ops);
             return error.DeadlineExceeded;
         }
         return payload;
@@ -5588,7 +5601,7 @@ pub const Client = struct {
             .blocking => socket_server.writeAll(self.fd, frame_bytes) catch {
                 // request prefix가 이미 kernel에 들어갔을 수 있다. 이 connection은 frame 경계를 다시 찾을 수 없으므로
                 // 이후 RPC를 허용하지 않고 EOF로 모든 host-side attachment를 정리한다.
-                self.invalidateConnection();
+                self.poison(.outbound_write_ambiguous);
                 return error.WriteFailed;
             },
             .deadline => |bounded| client_deadline.writeAllUntil(
@@ -5608,13 +5621,16 @@ pub const Client = struct {
         while (true) {
             const resp = switch (io) {
                 .blocking => try self.readFrame(),
-                .deadline => |bounded| try self.readFrameUntil(bounded.absolute, bounded.ops),
+                .deadline => |bounded| try self.readFrameUntilEstablished(
+                    bounded.absolute,
+                    bounded.ops,
+                ),
             };
             if (try self.bufferOutOfBandFrame(resp)) continue;
             // kind와 request_id를 함께 확인한다 — out-of-order frame을 이 call의 응답으로 오귀속하지 않는다.
             if (resp.header.kind != .response or resp.header.request_id != request_id) {
                 resp.deinit(self.allocator);
-                self.invalidateConnection();
+                self.poison(.response_correlation_lost);
                 return error.ProtocolError;
             }
             if (rpcDeadlineExpired(io)) {
@@ -5642,14 +5658,14 @@ pub const Client = struct {
                 self.screenInboxBytes() +| frame.payload.len > protocol.max_client_screen_inbox)
             {
                 frame.deinit(self.allocator);
-                self.invalidateConnection();
+                self.poison(.event_queue_overflow);
                 return error.EventQueueFull;
             }
             self.pending_stream.append(self.allocator, frame) catch {
                 frame.deinit(self.allocator);
                 // The frame is already consumed from the socket. Losing it would break the next
                 // stream delta base, so the whole shared connection must fail closed.
-                self.invalidateConnection();
+                self.poison(.local_resource_exhausted);
                 return error.OutOfMemory;
             };
             self.pending_stream_bytes += frame.payload.len;
@@ -5669,7 +5685,10 @@ pub const Client = struct {
         try self.requireBlockingMode();
         while (self.parser.bufferState() == .complete_or_error) {
             const maybe = self.parser.next() catch |err| {
-                self.invalidateConnection();
+                self.poison(if (err == error.OutOfMemory)
+                    .local_resource_exhausted
+                else
+                    .frame_malformed);
                 return switch (err) {
                     error.OutOfMemory => error.OutOfMemory,
                     else => error.ProtocolError,
@@ -5679,7 +5698,7 @@ pub const Client = struct {
             const frame = try self.requireWireMajor(owned);
             if (try self.bufferOutOfBandFrame(frame)) continue;
             frame.deinit(self.allocator);
-            self.invalidateConnection();
+            self.poison(.peer_contract_violation);
             return error.ProtocolError;
         }
     }
@@ -5826,13 +5845,13 @@ pub const Client = struct {
         defer self.allocator.free(response);
         return switch (parsePrepareUpgradeResponse(response, request.attempt_id)) {
             .accepted => {
-                self.invalidateConnection();
+                self.poison(.planned_upgrade_reconnect);
                 return .accepted_reconnect_required;
             },
             .completed => |report| .{ .completed = report },
             .rejected => .rejected,
             .malformed => {
-                self.invalidateConnection();
+                self.poison(.peer_contract_violation);
                 return error.ProtocolError;
             },
         };
@@ -5851,7 +5870,7 @@ pub const Client = struct {
         defer self.allocator.free(response);
         if (parseAttemptStatus(response)) |report| return report;
         if (responseHasTypedError(response)) return null;
-        self.invalidateConnection();
+        self.poison(.peer_contract_violation);
         return error.ProtocolError;
     }
 
@@ -5893,29 +5912,29 @@ pub const Client = struct {
     ) DeadlineClientError![]u8 {
         try self.requireBlockingMode();
         const saved_flags = ops.get_flags(ops.context, self.fd) orelse {
-            self.invalidateConnectionWithOps(ops);
+            self.poisonWithOps(.local_invariant_violation, ops);
             return error.ConnectionClosed;
         };
         const nonblocking: c_int = @bitCast(posix.O{ .NONBLOCK = true });
         if (!ops.set_flags(ops.context, self.fd, saved_flags | nonblocking)) {
-            self.invalidateConnectionWithOps(ops);
+            self.poisonWithOps(.local_invariant_violation, ops);
             return error.ConnectionClosed;
         }
         const bytes = self.readSnapshotWithIo(
             stream_id,
             .{ .deadline = .{ .absolute = deadline, .ops = ops } },
         ) catch |err| {
-            self.invalidateConnectionWithOps(ops);
+            self.poisonWithOps(.response_correlation_lost, ops);
             return err;
         };
         if (!ops.set_flags(ops.context, self.fd, saved_flags)) {
             self.allocator.free(bytes);
-            self.invalidateConnectionWithOps(ops);
+            self.poisonWithOps(.local_invariant_violation, ops);
             return error.ConnectionClosed;
         }
         if (deadline.remainingNs() <= 0) {
             self.allocator.free(bytes);
-            self.invalidateConnectionWithOps(ops);
+            self.poisonWithOps(.response_correlation_lost, ops);
             return error.DeadlineExceeded;
         }
         return bytes;
@@ -5932,7 +5951,7 @@ pub const Client = struct {
             if (try self.readStreamBatchWithIo(stream_id, io)) |batch| {
                 if (!batch.is_snapshot) {
                     batch.deinit();
-                    self.invalidateConnection();
+                    self.poison(.peer_contract_violation);
                     return error.ProtocolError;
                 }
                 if (deadlineExpired(io)) {
@@ -5945,7 +5964,7 @@ pub const Client = struct {
                 .deadline => return error.DeadlineExceeded,
                 .polling => {
                     if (attempts >= 249) {
-                        self.invalidateConnection();
+                        self.poison(.read_timeout);
                         return error.ConnectionClosed;
                     }
                     attempts += 1;
@@ -6000,13 +6019,13 @@ pub const Client = struct {
                 self.screenInboxBytes() +| batch.bytes.len > protocol.max_client_screen_inbox)
             {
                 batch.deinit();
-                self.invalidateConnection();
+                self.poison(.event_queue_overflow);
                 return error.EventQueueFull;
             }
             // 남의 stream 배치 — 그 runtime pump가 소비하도록 버퍼. append 실패 시 이 배치 bytes를 회수(누수 방지).
             self.pending_batches.append(self.allocator, batch) catch {
                 batch.deinit();
-                self.invalidateConnection();
+                self.poison(.local_resource_exhausted);
                 return error.OutOfMemory;
             };
             self.pending_batch_bytes += batch.bytes.len;
@@ -6047,7 +6066,7 @@ pub const Client = struct {
             if (frame.header.kind == .event) {
                 if (started or frame.header.request_id != 0 or frame.header.flags != 0) {
                     frame.deinit(self.allocator);
-                    self.invalidateConnection();
+                    self.poison(.frame_malformed);
                     return error.ProtocolError;
                 }
                 try self.bufferEvent(frame);
@@ -6055,16 +6074,16 @@ pub const Client = struct {
             }
             defer frame.deinit(self.allocator);
             if (frame.header.kind != .snapshot_chunk and frame.header.kind != .delta_chunk) {
-                self.invalidateConnection();
+                self.poison(.peer_contract_violation);
                 return error.ProtocolError;
             }
             if (frame.header.request_id != 0) {
-                self.invalidateConnection();
+                self.poison(.response_correlation_lost);
                 return error.ProtocolError;
             }
             if (!started) {
                 if (frame.header.stream_id == 0) {
-                    self.invalidateConnection();
+                    self.poison(.peer_contract_violation);
                     return error.ProtocolError;
                 }
                 state.stream_id = frame.header.stream_id;
@@ -6073,7 +6092,7 @@ pub const Client = struct {
             } else if (frame.header.stream_id != state.stream_id or
                 (frame.header.kind == .snapshot_chunk) != state.is_snapshot)
             {
-                self.invalidateConnection();
+                self.poison(.peer_contract_violation);
                 return error.ProtocolError;
             }
             if (frame.header.flags & ~protocol.Flags.end_stream != 0 or
@@ -6082,19 +6101,19 @@ pub const Client = struct {
                 self.screenInboxBytes() +| state.bytes.items.len +| frame.payload.len >
                     protocol.max_client_screen_inbox)
             {
-                self.invalidateConnection();
+                self.poison(.frame_malformed);
                 return error.ProtocolError;
             }
             state.chunk_count += 1;
             const next_len = state.bytes.items.len + frame.payload.len;
             state.bytes.ensureTotalCapacityPrecise(allocator, next_len) catch {
-                self.invalidateConnection();
+                self.poison(.local_resource_exhausted);
                 return error.OutOfMemory;
             };
             state.bytes.appendSliceAssumeCapacity(frame.payload);
             if (protocol.Flags.hasEndStream(frame.header.flags)) {
                 const bytes = state.bytes.toOwnedSlice(allocator) catch {
-                    self.invalidateConnection();
+                    self.poison(.local_resource_exhausted);
                     return error.OutOfMemory;
                 };
                 return .{
@@ -6162,7 +6181,7 @@ pub const Client = struct {
                 const owned = self.pending_events.orderedRemove(i);
                 self.pending_event_bytes -= owned.payload.len;
                 owned.deinit(self.allocator);
-                self.invalidateConnection();
+                self.poison(.local_invariant_violation);
                 return error.ProtocolError;
             }
         }
@@ -6189,7 +6208,7 @@ pub const Client = struct {
             frame.header.stream_id == 0 or frame.header.flags != 0)
         {
             frame.deinit(self.allocator);
-            self.invalidateConnection();
+            self.poison(.peer_contract_violation);
             return error.ProtocolError;
         }
         if (self.connection_profile != null and
@@ -6207,7 +6226,7 @@ pub const Client = struct {
             .unknown => null,
             .foreign => {
                 frame.deinit(self.allocator);
-                self.invalidateConnection();
+                self.poison(.peer_contract_violation);
                 return error.ProtocolError;
             },
             .malformed => {
@@ -6218,7 +6237,7 @@ pub const Client = struct {
             },
             .resource_exhausted => {
                 frame.deinit(self.allocator);
-                self.invalidateConnection();
+                self.poison(.peer_contract_violation);
                 return error.ProtocolError;
             },
         };
@@ -6226,7 +6245,7 @@ pub const Client = struct {
             .metadata => |metadata| blk: {
                 if (self.metadata_support == .unsupported) {
                     frame.deinit(self.allocator);
-                    self.invalidateConnection();
+                    self.poison(.peer_contract_violation);
                     return error.ProtocolError;
                 }
                 break :blk metadata.revision;
@@ -6245,7 +6264,7 @@ pub const Client = struct {
                 // to skip it before the later attachment-aware classifier runs.
                 if (revoked.stream_id != frame.header.stream_id) {
                     frame.deinit(self.allocator);
-                    self.invalidateConnection();
+                    self.poison(.peer_contract_violation);
                     return error.ProtocolError;
                 }
             },
@@ -6269,7 +6288,7 @@ pub const Client = struct {
         for (self.pending_events.items) |old| {
             if (!old.sealMatches()) {
                 buffered.deinit(self.allocator);
-                self.invalidateConnection();
+                self.poison(.local_invariant_violation);
                 return error.ProtocolError;
             }
         }
@@ -6315,7 +6334,7 @@ pub const Client = struct {
                             &next_value,
                         )) {
                             buffered.deinit(self.allocator);
-                            self.invalidateConnection();
+                            self.poison(.peer_contract_violation);
                             return error.ProtocolError;
                         }
                         buffered.deinit(self.allocator);
@@ -6326,7 +6345,7 @@ pub const Client = struct {
                         buffered.payload.len;
                     if (next_bytes > protocol.max_client_queue) {
                         buffered.deinit(self.allocator);
-                        self.invalidateConnection();
+                        self.poison(.event_queue_overflow);
                         return error.EventQueueFull;
                     }
                     self.pending_events.items[i] = buffered;
@@ -6346,7 +6365,7 @@ pub const Client = struct {
                 if (old_resize) |old_value| {
                     if (resized.?.runtime_id != old_value.runtime_id) {
                         buffered.deinit(self.allocator);
-                        self.invalidateConnection();
+                        self.poison(.peer_contract_violation);
                         return error.ProtocolError;
                     }
                     if (resized.?.resize_generation < old_value.resize_generation) {
@@ -6358,7 +6377,7 @@ pub const Client = struct {
                             resized.?.rows != old_value.rows)
                         {
                             buffered.deinit(self.allocator);
-                            self.invalidateConnection();
+                            self.poison(.peer_contract_violation);
                             return error.ProtocolError;
                         }
                         buffered.deinit(self.allocator);
@@ -6369,7 +6388,7 @@ pub const Client = struct {
                         self.pending_event_bytes - replaced.payload.len +| buffered.payload.len;
                     if (next_bytes > protocol.max_client_queue) {
                         buffered.deinit(self.allocator);
-                        self.invalidateConnection();
+                        self.poison(.event_queue_overflow);
                         return error.EventQueueFull;
                     }
                     self.pending_events.items[i] = buffered;
@@ -6400,12 +6419,12 @@ pub const Client = struct {
             // full-state를 조용히 버리면 같은 상태를 다시 보내지 않는다. 어느 shared stream이 누락됐든 connection 전체를
             // 닫아 모든 runtime이 fail-closed하고, 다음 attach의 initial metadata에서만 복구한다.
             event.deinit(self.allocator);
-            self.invalidateConnection();
+            self.poison(.event_queue_overflow);
             return error.EventQueueFull;
         }
         self.pending_events.append(self.allocator, event) catch {
             event.deinit(self.allocator);
-            self.invalidateConnection();
+            self.poison(.local_resource_exhausted);
             return error.OutOfMemory;
         };
         self.pending_event_bytes += event.payload.len;
@@ -6440,7 +6459,10 @@ pub const Client = struct {
         var buf: [4096]u8 = undefined;
         while (true) {
             if (self.parser.next() catch |err| {
-                self.invalidateConnection();
+                self.poison(if (err == error.OutOfMemory)
+                    .local_resource_exhausted
+                else
+                    .frame_malformed);
                 return switch (err) {
                     error.OutOfMemory => error.OutOfMemory,
                     else => error.ProtocolError,
@@ -6462,11 +6484,11 @@ pub const Client = struct {
                     if (n < 0) {
                         if (posix.errno(n) == .INTR) continue; // 시그널 인터럽트는 재시도.
                         if (posix.errno(n) == .AGAIN or posix.errno(n) == .TIMEDOUT) return null;
-                        self.invalidateConnection();
+                        self.poison(.transport_read_failure);
                         return error.ConnectionClosed;
                     }
                     if (n == 0) {
-                        self.invalidateConnection();
+                        self.poison(.connection_eof);
                         return error.ConnectionClosed;
                     }
                     break :blk @as(usize, @intCast(n));
@@ -6476,14 +6498,26 @@ pub const Client = struct {
                     self.fd,
                     &buf,
                     bounded.absolute,
-                ) catch |err| return switch (err) {
-                    error.Timeout => error.DeadlineExceeded,
-                    error.Closed, error.ReadFailed => error.ConnectionClosed,
-                    else => error.ConnectionClosed,
+                ) catch |err| {
+                    const reason: client_poison.ConnectionReason = switch (err) {
+                        error.Timeout => .read_timeout,
+                        error.Closed => if (self.parser.bufferedBytes() == 0)
+                            .connection_eof
+                        else
+                            .frame_malformed,
+                        error.ReadFailed => .transport_read_failure,
+                        else => .transport_read_failure,
+                    };
+                    self.poisonWithOps(reason, bounded.ops);
+                    return switch (err) {
+                        error.Timeout => error.DeadlineExceeded,
+                        error.Closed, error.ReadFailed => error.ConnectionClosed,
+                        else => error.ConnectionClosed,
+                    };
                 },
             };
             self.parser.push(buf[0..count]) catch {
-                self.invalidateConnection();
+                self.poison(.local_resource_exhausted);
                 return error.OutOfMemory;
             };
         }
@@ -6517,7 +6551,7 @@ pub const Client = struct {
             socket_server.writeAll(self.fd, frame_bytes) catch {
                 self.allocator.free(frame_bytes);
                 // frame prefix가 이미 kernel에 들어갔을 수 있어 같은 connection에서 재시도하면 framing/입력이 중복된다.
-                self.invalidateConnection();
+                self.poison(.outbound_write_ambiguous);
                 return error.WriteFailed;
             };
             self.allocator.free(frame_bytes);
@@ -6613,7 +6647,7 @@ pub const Client = struct {
         ) catch return error.OutOfMemory;
         defer self.allocator.free(frame);
         socket_server.writeAll(self.fd, frame) catch {
-            self.invalidateConnection();
+            self.poison(.outbound_write_ambiguous);
             return error.WriteFailed;
         };
     }
@@ -6631,7 +6665,7 @@ pub const Client = struct {
         ) catch return error.OutOfMemory;
         defer self.allocator.free(frame);
         socket_server.writeAll(self.fd, frame) catch {
-            self.invalidateConnection();
+            self.poison(.outbound_write_ambiguous);
             return error.WriteFailed;
         };
     }
@@ -6644,11 +6678,11 @@ pub const Client = struct {
             const rc = c.write(self.fd, remaining.ptr, remaining.len);
             if (rc < 0) {
                 if (posix.errno(rc) == .INTR) continue;
-                self.invalidateConnection();
+                self.poison(.outbound_write_ambiguous);
                 return error.WriteFailed;
             }
             if (rc == 0) {
-                self.invalidateConnection();
+                self.poison(.outbound_write_ambiguous);
                 return error.WriteFailed;
             }
             pending.offset += @intCast(rc);
@@ -6738,13 +6772,13 @@ pub const Client = struct {
     fn sendDontWait(self: *Client, bytes: []const u8) ClientError!NonblockingSend {
         const flags = c.fcntl(self.fd, c.F.GETFL, @as(c_int, 0));
         if (flags < 0) {
-            self.invalidateConnection();
+            self.poison(.local_invariant_violation);
             return error.WriteFailed;
         }
         const nonblock_flag: c_int = @bitCast(posix.O{ .NONBLOCK = true });
         const changed = flags & nonblock_flag == 0;
         if (changed and c.fcntl(self.fd, c.F.SETFL, flags | nonblock_flag) < 0) {
-            self.invalidateConnection();
+            self.poison(.local_invariant_violation);
             return error.WriteFailed;
         }
 
@@ -6759,12 +6793,12 @@ pub const Client = struct {
         }
 
         if (changed and c.fcntl(self.fd, c.F.SETFL, flags) < 0) {
-            self.invalidateConnection();
+            self.poison(.local_invariant_violation);
             return error.WriteFailed;
         }
         if (rc > 0) return .{ .written = @intCast(rc) };
         if (rc < 0 and send_errno.? == .AGAIN) return .would_block;
-        self.invalidateConnection();
+        self.poison(.outbound_write_ambiguous);
         return error.WriteFailed;
     }
 
@@ -6779,20 +6813,21 @@ pub const Client = struct {
         var buf: [4096]u8 = undefined;
         while (true) {
             if (self.parser.next() catch {
-                self.invalidateConnection();
+                self.poison(.frame_malformed);
                 return error.ProtocolError;
             }) |frame|
                 return self.requireWireMajor(frame) catch |err| {
-                    self.invalidateConnection();
+                    self.poison(.peer_contract_violation);
                     return err;
                 };
             const n = c.read(self.fd, &buf, buf.len);
             if (n < 0) {
                 const read_errno = posix.errno(n);
                 if (read_errno == .INTR) continue;
-                const partial = self.parser.bufferedBytes() != 0;
-                self.invalidateConnection();
-                if (partial) return error.ProtocolError;
+                self.poison(if (read_errno == .AGAIN or read_errno == .TIMEDOUT)
+                    .read_timeout
+                else
+                    .transport_read_failure);
                 return if (read_errno == .AGAIN or read_errno == .TIMEDOUT)
                     error.EndpointTransient
                 else
@@ -6800,12 +6835,12 @@ pub const Client = struct {
             }
             if (n == 0) {
                 const partial = self.parser.bufferedBytes() != 0;
-                self.invalidateConnection();
+                self.poison(if (partial) .frame_malformed else .connection_eof);
                 return if (partial) error.ProtocolError else error.ConnectionClosed;
             }
             self.parser.push(buf[0..@intCast(n)]) catch {
                 // 이미 socket에서 소비한 바이트를 parser에 보존하지 못했다. 다음 frame 경계를 복구할 수 없다.
-                self.invalidateConnection();
+                self.poison(.local_resource_exhausted);
                 return error.OutOfMemory;
             };
         }
@@ -6819,15 +6854,47 @@ pub const Client = struct {
         deadline: client_deadline.AbsoluteDeadline,
         ops: client_deadline.Ops,
     ) DeadlineClientError!framing.Frame {
+        return self.readFrameUntilMode(deadline, ops, false);
+    }
+
+    /// Established RPCs use the handshake reader's one-deadline mechanics, but unlike handshake
+    /// negotiation they must preserve the first connection-fatal transport/framing cause.
+    fn readFrameUntilEstablished(
+        self: *Client,
+        deadline: client_deadline.AbsoluteDeadline,
+        ops: client_deadline.Ops,
+    ) DeadlineClientError!framing.Frame {
+        return self.readFrameUntilMode(deadline, ops, true);
+    }
+
+    fn readFrameUntilMode(
+        self: *Client,
+        deadline: client_deadline.AbsoluteDeadline,
+        ops: client_deadline.Ops,
+        poison_established: bool,
+    ) DeadlineClientError!framing.Frame {
         var buf: [4096]u8 = undefined;
         while (true) {
-            if (deadline.remainingNs() <= 0) return error.DeadlineExceeded;
-            if (self.parser.next() catch |err| return switch (err) {
-                error.OutOfMemory => error.OutOfMemory,
-                else => error.ProtocolError,
+            if (deadline.remainingNs() <= 0) {
+                if (poison_established) self.poisonWithOps(.read_timeout, ops);
+                return error.DeadlineExceeded;
+            }
+            if (self.parser.next() catch |err| {
+                if (poison_established) self.poisonWithOps(
+                    if (err == error.OutOfMemory)
+                        .local_resource_exhausted
+                    else
+                        .frame_malformed,
+                    ops,
+                );
+                return switch (err) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    else => error.ProtocolError,
+                };
             }) |frame| {
                 if (deadline.remainingNs() <= 0) {
                     frame.deinit(self.allocator);
+                    if (poison_established) self.poisonWithOps(.read_timeout, ops);
                     return error.DeadlineExceeded;
                 }
                 return self.requireWireMajor(frame);
@@ -6837,8 +6904,22 @@ pub const Client = struct {
                 self.fd,
                 &buf,
                 deadline,
-            ) catch |err| return deadlineHelloError(err);
-            self.parser.push(buf[0..n]) catch return error.OutOfMemory;
+            ) catch |err| {
+                if (poison_established) self.poisonWithOps(switch (err) {
+                    error.Timeout => .read_timeout,
+                    error.Closed => if (self.parser.bufferedBytes() == 0)
+                        .connection_eof
+                    else
+                        .frame_malformed,
+                    error.ReadFailed => .transport_read_failure,
+                    else => .transport_read_failure,
+                }, ops);
+                return deadlineHelloError(err);
+            };
+            self.parser.push(buf[0..n]) catch {
+                if (poison_established) self.poisonWithOps(.local_resource_exhausted, ops);
+                return error.OutOfMemory;
+            };
         }
     }
 
@@ -6847,6 +6928,7 @@ pub const Client = struct {
     fn requireWireMajor(self: *Client, frame: framing.Frame) ClientError!framing.Frame {
         if (frame.header.major != self.wire_major) {
             frame.deinit(self.allocator);
+            self.poison(.peer_contract_violation);
             return error.ProtocolError;
         }
         return frame;
@@ -6861,11 +6943,12 @@ pub const Client = struct {
         if (self.io_mode == .external) return error.ExternalMode;
     }
 
-    fn invalidateConnection(self: *Client) void {
-        if (self.poisonAndTakeFd()) |fd| _ = c.close(fd);
-    }
-
-    fn invalidateConnectionWithOps(self: *Client, ops: client_deadline.Ops) void {
+    fn poisonWithOps(
+        self: *Client,
+        reason: client_poison.ConnectionReason,
+        ops: client_deadline.Ops,
+    ) void {
+        self.latchFirstPoisonReason(reason);
         if (self.poisonAndTakeFd()) |fd| ops.close(ops.context, fd);
     }
 
@@ -6882,10 +6965,35 @@ pub const Client = struct {
         return fd;
     }
 
+    fn latchFirstPoisonReason(self: *Client, reason: client_poison.ConnectionReason) void {
+        if (self.first_poison_reason == null) self.first_poison_reason = reason;
+    }
+
+    /// External transfer normalization may already hold the RX owner lease, so it cannot run the
+    /// ordinary close path reentrantly. Latch the exact cause and make the Client terminal; the
+    /// existing final owner teardown releases the fd and external storage after the lease returns.
+    fn markPoisonedForDeferredCleanup(
+        self: *Client,
+        reason: client_poison.ConnectionReason,
+    ) void {
+        self.latchFirstPoisonReason(reason);
+        self.unusable = true;
+    }
+
+    pub fn terminalReasonInvariant(self: *const Client) bool {
+        return !self.unusable or self.ownership == .moved or self.first_poison_reason != null;
+    }
+
     /// lifecycle cleanup frame조차 할당할 수 없는 경우 host가 EOF로 attachment를 정리하도록 shared connection을
     /// 명시적으로 닫는 fail-closed fallback.
-    pub fn failClosed(self: *Client) void {
-        self.invalidateConnection();
+    pub fn poison(self: *Client, reason: client_poison.ConnectionReason) void {
+        self.latchFirstPoisonReason(reason);
+        if (self.poisonAndTakeFd()) |fd| _ = c.close(fd);
+        std.debug.assert(self.terminalReasonInvariant());
+    }
+
+    pub fn firstPoisonReason(self: *const Client) ?client_poison.ConnectionReason {
+        return self.first_poison_reason;
     }
 };
 
@@ -6920,6 +7028,7 @@ const client_source_schema_field_allowlist = [_][]const u8{
     "parser",
     "ownership",
     "unusable",
+    "first_poison_reason",
     "next_request_id",
     "pending_stream",
     "pending_stream_bytes",
@@ -6974,6 +7083,10 @@ test "admin runtime end capability absence closes before sending any request" {
     };
     defer client.deinit();
     try std.testing.expectError(error.IncompatibleVersion, client.requireAdminRuntimeEnd());
+    try std.testing.expectEqual(
+        client_poison.ConnectionReason.capability_incompatible,
+        client.firstPoisonReason().?,
+    );
     var byte: [1]u8 = undefined;
     try std.testing.expectEqual(@as(isize, 0), c.read(fds[1], &byte, byte.len));
 }
@@ -7396,6 +7509,58 @@ test "client deadline call closes a blocking socket when response stalls" {
     );
     try std.testing.expect(client.unusable);
     try std.testing.expectEqual(@as(c.fd_t, -1), client.fd);
+    try std.testing.expectEqual(
+        client_poison.ConnectionReason.read_timeout,
+        client.firstPoisonReason().?,
+    );
+}
+
+test "client deadline RPC and snapshot preserve terminal read cause before correlation poison" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const Operation = enum { rpc, snapshot };
+    inline for ([_]ForcedReadTerminal{ .eof, .failed }) |terminal| {
+        inline for ([_]Operation{ .rpc, .snapshot }) |operation| {
+            var fds: [2]c.fd_t = undefined;
+            try std.testing.expectEqual(
+                @as(c_int, 0),
+                c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+            );
+            defer _ = c.close(fds[1]);
+            var fixture = ConnectedSocketFixture{
+                .fd = fds[0],
+                .forced_read_terminal = terminal,
+            };
+            var client: Client = .{
+                .allocator = allocator,
+                .fd = fds[0],
+                .host_id = 1,
+                .parser = framing.FrameParser.init(allocator),
+            };
+            defer client.deinit();
+            const deadline = try client_deadline.AbsoluteDeadline.after(
+                std.testing.io,
+                std.time.ns_per_s,
+            );
+            switch (operation) {
+                .rpc => try std.testing.expectError(
+                    error.ConnectionClosed,
+                    client.callUntilWithOps("runtime.get", "{}", deadline, fixture.ops()),
+                ),
+                .snapshot => try std.testing.expectError(
+                    error.ConnectionClosed,
+                    client.readSnapshotUntilWithOps(7, deadline, fixture.ops()),
+                ),
+            }
+            try std.testing.expectEqual(
+                if (terminal == .eof)
+                    client_poison.ConnectionReason.connection_eof
+                else
+                    client_poison.ConnectionReason.transport_read_failure,
+                client.firstPoisonReason().?,
+            );
+        }
+    }
 }
 
 test "client deadline snapshot reuses the existing stream assembler and restores flags" {
@@ -7429,6 +7594,64 @@ test "client deadline snapshot reuses the existing stream assembler and restores
     defer allocator.free(snapshot);
     try std.testing.expectEqualStrings("snapshot-records", snapshot);
     try std.testing.expectEqual(initial_flags, c.fcntl(client.fd, c.F.GETFL));
+}
+
+test "client deadline snapshot stall records read timeout as first poison" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    defer _ = c.close(fds[1]);
+    var client = makeConnectedTestClient(std.testing.allocator, fds[0]);
+    defer client.deinit();
+    const deadline = try client_deadline.AbsoluteDeadline.after(
+        std.testing.io,
+        10 * std.time.ns_per_ms,
+    );
+    try std.testing.expectError(
+        error.DeadlineExceeded,
+        client.readSnapshotUntil(7, deadline),
+    );
+    try std.testing.expectEqual(
+        client_poison.ConnectionReason.read_timeout,
+        client.firstPoisonReason().?,
+    );
+}
+
+test "client deadline snapshot partial EOF records malformed framing" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    var peer_open = true;
+    defer {
+        if (peer_open) _ = c.close(fds[1]);
+    }
+    var client = makeConnectedTestClient(std.testing.allocator, fds[0]);
+    defer client.deinit();
+    const partial = [_]u8{ 'M', 'R', 'S', 'H', 2 };
+    try std.testing.expectEqual(
+        @as(isize, partial.len),
+        c.write(fds[1], &partial, partial.len),
+    );
+    _ = c.close(fds[1]);
+    peer_open = false;
+    const deadline = try client_deadline.AbsoluteDeadline.after(
+        std.testing.io,
+        std.time.ns_per_s,
+    );
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        client.readSnapshotUntil(7, deadline),
+    );
+    try std.testing.expectEqual(
+        client_poison.ConnectionReason.frame_malformed,
+        client.firstPoisonReason().?,
+    );
 }
 
 test "client deadline call rejects restore-time boundary and restore failure" {
@@ -7902,6 +8125,10 @@ test "client request write failure invalidates the connection before another cal
     try std.testing.expectError(error.WriteFailed, client.call("host.info", null));
     try std.testing.expect(client.unusable);
     try std.testing.expectEqual(@as(c.fd_t, -1), client.fd);
+    try std.testing.expectEqual(
+        client_poison.ConnectionReason.outbound_write_ambiguous,
+        client.firstPoisonReason().?,
+    );
     try std.testing.expect(client.pending_outbound == null);
     try std.testing.expectError(error.ConnectionClosed, client.call("host.info", null));
 }
@@ -7925,6 +8152,10 @@ test "client response timeout is transient evidence and invalidates before anoth
     try std.testing.expectError(error.EndpointTransient, client.call("host.info", null));
     try std.testing.expect(client.unusable);
     try std.testing.expectEqual(@as(c.fd_t, -1), client.fd);
+    try std.testing.expectEqual(
+        client_poison.ConnectionReason.read_timeout,
+        client.firstPoisonReason().?,
+    );
     // 늦은 response가 다음 request에 오귀속될 수 없도록 같은 socket은 재사용하지 않는다.
     try std.testing.expectError(error.ConnectionClosed, client.call("host.info", null));
 }
@@ -7974,7 +8205,7 @@ test "client invalidation releases an owned pending outbound frame" {
         },
     };
     defer client.deinit();
-    client.invalidateConnection();
+    client.poison(.local_invariant_violation);
     try std.testing.expect(client.pending_outbound == null);
     try std.testing.expect(client.unusable);
 }
@@ -8040,6 +8271,10 @@ test "client classifies EOF after partial frame bytes as protocol evidence" {
     _ = c.close(fds[1]);
     try std.testing.expectError(error.ProtocolError, client.readFrame());
     try std.testing.expect(client.unusable);
+    try std.testing.expectEqual(
+        client_poison.ConnectionReason.frame_malformed,
+        client.firstPoisonReason().?,
+    );
 }
 
 /// test socket의 send buffer를 DONTWAIT로 실제 EAGAIN까지 채운다. filler 길이를 돌려줘 peer가 이후 정확히 걷어내고,
@@ -8210,13 +8445,13 @@ test "client inventory collector owns the exact 16-page maximum snapshot" {
     var peer_ok = false;
     const peer = try std.Thread.spawn(.{}, inventoryMaxPeer, .{ fds[1], &peer_ok });
     var inventory = client.runtimeInventory() catch |err| {
-        client.failClosed();
+        client.poison(.local_invariant_violation);
         peer.join();
         return err;
     };
     switch (inventory) {
         .unavailable => {
-            client.failClosed();
+            client.poison(.local_invariant_violation);
             peer.join();
             return error.TestUnexpectedResult;
         },
@@ -8273,7 +8508,7 @@ test "client malformed recovery inventory leaves canonical RPC usable on the sam
     var peer_ok = false;
     const peer = try std.Thread.spawn(.{}, inventoryIsolationPeer, .{ fds[1], &peer_ok });
     const inventory = client.runtimeInventory() catch |err| {
-        client.failClosed();
+        client.poison(.local_invariant_violation);
         peer.join();
         return err;
     };
@@ -8281,7 +8516,7 @@ test "client malformed recovery inventory leaves canonical RPC usable on the sam
     try std.testing.expectEqual(@as(u8, 1), inventory.unavailable.page_count);
     try std.testing.expect(!client.unusable);
     const get = client.call("runtime.get", "{\"runtime_id\":\"00000000000000000000000000000001\"}") catch |err| {
-        client.failClosed();
+        client.poison(.local_invariant_violation);
         peer.join();
         return err;
     };
@@ -8570,7 +8805,7 @@ test "client cli attach socket demux preserves inherited events in exact raw FIF
     client.metadata_support = .supported;
 
     const response = client.call("runtime.attach", "{}") catch |err| {
-        client.failClosed();
+        client.poison(.local_invariant_violation);
         peer.join();
         return err;
     };
@@ -9298,6 +9533,7 @@ fn payloadHasCapability(payload: []const u8, wanted: []const u8) bool {
 
 const testing = std.testing;
 const daemon = @import("daemon.zig");
+const ForcedReadTerminal = enum { eof, failed };
 
 const ConnectedSocketFixture = struct {
     fd: c.fd_t,
@@ -9316,6 +9552,7 @@ const ConnectedSocketFixture = struct {
     write_calls: usize = 0,
     read_calls: usize = 0,
     advance_per_read_ns: i128 = 0,
+    forced_read_terminal: ?ForcedReadTerminal = null,
 
     fn ops(self: *ConnectedSocketFixture) client_deadline.Ops {
         var result = client_deadline.posix_ops;
@@ -9350,6 +9587,10 @@ const ConnectedSocketFixture = struct {
         const self = cast(ctx);
         self.read_calls += 1;
         self.clock_now_ns += self.advance_per_read_ns;
+        if (self.forced_read_terminal) |terminal| return switch (terminal) {
+            .eof => .eof,
+            .failed => .failed,
+        };
         if (self.inject_read_interrupt_again and self.read_calls == 1) return .interrupted;
         if (self.inject_read_interrupt_again and self.read_calls == 2) return .would_block;
         return client_deadline.posix_ops.read(
@@ -9420,6 +9661,80 @@ fn makeConnectedTestClient(
         .parser = framing.FrameParser.init(allocator),
     };
 }
+
+const TransferNormalizeMutationAllocator = struct {
+    parent: std.mem.Allocator,
+    target: ?*framing.FrameParser = null,
+    armed: bool = false,
+    mutated: bool = false,
+
+    fn allocator(self: *TransferNormalizeMutationAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(
+        context: *anyopaque,
+        len: usize,
+        alignment: std.mem.Alignment,
+        ret_addr: usize,
+    ) ?[*]u8 {
+        const self: *TransferNormalizeMutationAllocator = @ptrCast(@alignCast(context));
+        return self.parent.vtable.alloc(self.parent.ptr, len, alignment, ret_addr);
+    }
+
+    fn resize(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ret_addr: usize,
+    ) bool {
+        const self: *TransferNormalizeMutationAllocator = @ptrCast(@alignCast(context));
+        return self.parent.vtable.resize(
+            self.parent.ptr,
+            memory,
+            alignment,
+            new_len,
+            ret_addr,
+        );
+    }
+
+    fn remap(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ret_addr: usize,
+    ) ?[*]u8 {
+        const self: *TransferNormalizeMutationAllocator = @ptrCast(@alignCast(context));
+        return self.parent.vtable.remap(
+            self.parent.ptr,
+            memory,
+            alignment,
+            new_len,
+            ret_addr,
+        );
+    }
+
+    fn free(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        ret_addr: usize,
+    ) void {
+        const self: *TransferNormalizeMutationAllocator = @ptrCast(@alignCast(context));
+        if (self.armed and !self.mutated) {
+            self.mutated = true;
+            self.target.?.expected_major +%= 1;
+        }
+        self.parent.vtable.free(self.parent.ptr, memory, alignment, ret_addr);
+    }
+};
 
 const ProofForgedAllocator = struct {
     free_calls: usize = 0,
@@ -9655,7 +9970,7 @@ test "external mode prechecks perform no allocation or fd inspection" {
 
     var unusable = makeConnectedTestClient(std.testing.allocator, -1);
     defer unusable.deinit();
-    unusable.unusable = true;
+    unusable.poison(.local_invariant_violation);
     var unusable_fixture = ConnectedSocketFixture{ .fd = -1 };
     try std.testing.expectError(
         error.ConnectionClosed,
@@ -9727,7 +10042,7 @@ test "external Client failClosed during TX operation preserves owner and latches
         .blocking => return error.TestUnexpectedResult,
     };
     try std.testing.expect(state.acquireTxOperation());
-    client.failClosed();
+    client.poison(.local_invariant_violation);
     try std.testing.expectEqual(fds[0], client.fd);
     try std.testing.expect(!client.unusable);
     try std.testing.expect(client.io_mode == .external);
@@ -11271,8 +11586,8 @@ test "client source seal binds explicit schema descriptors and ordered payload b
         .canonical_test,
     );
     const frozen_canonical_digest =
-        "\xc0\xf3\x5a\x01\xd0\x25\x7a\x31\x43\x04\x58\xa8\xcb\x25\xe0\xaa" ++
-        "\x80\xce\xaa\x04\x7f\xed\xbb\xf4\xbe\x67\x86\xbf\x13\x75\xf8\x5d";
+        "\x39\xbd\xc5\xea\x1b\x40\x1e\x5a\x79\x3b\x54\x6b\xa5\x6c\xa3\x9c" ++
+        "\x3b\xeb\x28\xfd\x74\x6f\xf3\x31\x87\xd9\x15\x11\x4d\x1c\xce\x52";
     try std.testing.expectEqualSlices(
         u8,
         frozen_canonical_digest,
@@ -11387,9 +11702,12 @@ test "client source seal binds explicit schema descriptors and ordered payload b
     client.ownership = .standalone;
     try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
     client.ownership = .external_pump;
-    client.unusable = true;
+    client.markPoisonedForDeferredCleanup(.local_invariant_violation);
     try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
     client.unusable = false;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.first_poison_reason = null;
+    try std.testing.expect(externalSourceSealMatches(&client, 7, seal, &scratch));
     client.build_id.?[0] ^= 1;
     try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
     client.build_id.?[0] ^= 1;
@@ -12082,12 +12400,145 @@ test "external mode failClosed reclaims queued frames exactly once" {
             state.external_tx_bytes = 11;
         },
     }
-    client.failClosed();
-    client.failClosed();
+    client.poison(.frame_malformed);
+    client.poison(.connection_eof);
     try std.testing.expect(client.unusable);
+    try std.testing.expectEqual(
+        client_poison.ConnectionReason.frame_malformed,
+        client.firstPoisonReason().?,
+    );
     try std.testing.expectEqual(@as(c.fd_t, -1), client.fd);
     var byte: [1]u8 = undefined;
     try std.testing.expectEqual(@as(isize, 0), c.read(fds[1], &byte, byte.len));
+}
+
+test "client EOF poison records the canonical first reason" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    var client = makeConnectedTestClient(std.testing.allocator, fds[0]);
+    defer client.deinit();
+    _ = c.close(fds[1]);
+
+    try std.testing.expectError(error.ConnectionClosed, client.readFrame());
+    try std.testing.expectEqual(
+        client_poison.ConnectionReason.connection_eof,
+        client.firstPoisonReason().?,
+    );
+}
+
+test "client partial-frame EOF records malformed before cleanup EOF" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    var client = makeConnectedTestClient(std.testing.allocator, fds[0]);
+    defer client.deinit();
+    const prefix = [_]u8{'M'};
+    try std.testing.expectEqual(@as(isize, 1), c.write(fds[1], &prefix, prefix.len));
+    _ = c.close(fds[1]);
+
+    try std.testing.expectError(error.ProtocolError, client.readFrame());
+    try std.testing.expectEqual(
+        client_poison.ConnectionReason.frame_malformed,
+        client.firstPoisonReason().?,
+    );
+}
+
+test "client non-timeout read failure is not mislabeled as EOF" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    defer _ = c.close(fds[1]);
+    var client = makeConnectedTestClient(std.testing.allocator, fds[0]);
+    defer client.deinit();
+    _ = c.close(fds[0]);
+
+    try std.testing.expectError(error.ConnectionClosed, client.readFrame());
+    try std.testing.expectEqual(
+        client_poison.ConnectionReason.transport_read_failure,
+        client.firstPoisonReason().?,
+    );
+}
+
+test "client poison reason participates in projection authority and terminal invariant" {
+    var client: Client = .{
+        .allocator = std.testing.allocator,
+        .fd = -1,
+        .host_id = 1,
+        .parser = framing.FrameParser.init(std.testing.allocator),
+    };
+    defer client.deinit();
+    const before = client.projectionAuthorityDigest();
+    client.markPoisonedForDeferredCleanup(.external_transfer_quarantined);
+    const after = client.projectionAuthorityDigest();
+    try std.testing.expect(!std.mem.eql(u8, &before, &after));
+    try std.testing.expect(client.terminalReasonInvariant());
+    try std.testing.expectEqual(
+        client_poison.ConnectionReason.external_transfer_quarantined,
+        client.firstPoisonReason().?,
+    );
+    client.first_poison_reason = .frame_malformed;
+    const changed_reason = client.projectionAuthorityDigest();
+    try std.testing.expect(!std.mem.eql(u8, &after, &changed_reason));
+}
+
+test "external transfer normalize quarantine latches typed reason on production branch" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // A successful quarantine deliberately drops the now-untrusted replacement backing instead
+    // of invoking its allocator again. Keep the production policy intact while giving the test a
+    // coarser owner that can reclaim the whole isolated region after the assertion.
+    var quarantine_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer quarantine_arena.deinit();
+    var probe = TransferNormalizeMutationAllocator{ .parent = quarantine_arena.allocator() };
+    const allocator = probe.allocator();
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    defer _ = c.close(fds[1]);
+    var source = makeConnectedTestClient(allocator, fds[0]);
+    defer source.deinit();
+    const profile = compatibility.profileForMajor(protocol.version_major).?;
+    source.connection_profile = .cli_attach;
+    source.compatibility_profile = profile;
+    source.screen_codec_version = profile.screen_codec_version;
+    source.attach_instance_id = 7;
+    try source.parser.push("unread");
+    try source.enterExternalMode();
+
+    var prepared: PreparedExternalPumpTransfer = .{};
+    defer prepared.deinit();
+    var destination: ?Client = null;
+    try source.prepareExternalPumpTransfer(
+        &prepared,
+        &destination,
+        source.parser.residentBytes(),
+    );
+    try source.commitExternalPumpTransfer(&prepared, &destination);
+    probe.target = &destination.?.parser;
+    probe.armed = true;
+    try std.testing.expectEqual(
+        ExternalPumpFinishOutcome.quarantined,
+        Client.finishExternalPumpTransfer(&prepared, &destination),
+    );
+    try std.testing.expect(probe.mutated);
+    try std.testing.expect(destination.?.terminalReasonInvariant());
+    try std.testing.expectEqual(
+        client_poison.ConnectionReason.external_transfer_quarantined,
+        destination.?.firstPoisonReason().?,
+    );
+    destination.?.deinit();
+    destination = null;
 }
 
 const full_hello_ack_payload =

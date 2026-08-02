@@ -636,12 +636,18 @@ success/rollback 대칭 republish와 경쟁 launcher 0을 포함한다.
 
 ### 영속 host CR 실행 중 transport reconnect gate
 
-**상태: 구현 전.** `RemoteRuntime`/Surface/pump/routing 주소를 고정한 stable shell과 generation bundle,
+**상태: 부분 구현(CR0a 완료).** `RemoteRuntime`/Surface/pump/routing 주소를 고정한 stable shell과 generation bundle,
 stable `ScreenSource` borrow, 앱 전역 host job, existing-host-only controller recovery를
 [persistent-session-host.md](persistent-session-host.md#실행-중-connection-invalidation과-재연결)가 소유한다. raw in-place
 field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다.
 
-- CR0a: raw `failClosed` 직접 callsite 0, typed poison tuple exhaustive table, expected/unexpected 분류와 최초 reason 불변.
+- CR0a(구현): raw `failClosed`와 내부 `invalidateConnection*` 직접 callsite 0, semantic `Outcome`과 connection-fatal
+  `ConnectionReason`의 타입 분리, typed tuple exhaustive golden table, expected/unexpected 분류와 최초 reason 불변을
+  production connection-fatal `Client`/`RemoteRuntime`/`RemoteAttachment` callsite에 적용했다. semantic `Outcome` 4종은
+  model-only이고 실제 semantic decode/dispatch 연결·scope 축소는 CR1이다. Client source/adoption/projection seal이 reason을
+  포함하며 clean EOF·read timeout/failure·framing truncation/malformed·write progress ambiguity/known partial·attachment
+  cleanup의 타입을 테스트한다. `zig build test-session-host`와 `mise run check-boundaries`가 증거다. incident
+  artifact/reconnect 동작은 주장하지 않는다.
 - CR0b: child-event incident correlation, redaction, 32 KiB ring handoff→reconnect와 bounded disk writer ordering, blocked/late
   writer, ring full aggregation과 Debug fail-stop.
 - CR1: bounded semantic 오류의 sibling connection poison 0, partial read/write와 artifact 실패 scheduler의 exact outcome.

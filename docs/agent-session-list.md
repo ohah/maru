@@ -136,7 +136,7 @@ component/layout/lowering 경로를 쓴다.
   붙이고 backend만 semantic draw를 glyph/cell/GPU primitive로 lower한다.
 
 - header의 `Local Mac`은 현재 사용자 홈 아래 provider log만 읽는다는 provenance label이며 host 선택기가 아니다. v1 정렬은 mtime 내림차순 하나로 고정한다. 탭 재진입은 현재 앱 실행 중의 snapshot을 즉시 보이고, 마지막 완료 scan 뒤 **15초** 안이면 새 refresh를 시작하지 않는다. `SessionDockHeader`의 refresh control은 이 TTL을 우회한다. worker가 실행 중이면 동일 rect의 spinner/disabled state로 바뀌고 추가 job을 만들지 않는다.
-- 도크 view bar의 `AI 세션`을 누르면 archive refresh를 요청한다. **refresh 중에는 직전 완료 snapshot과 scroll(새 결과가 짧으면 상한 clamp), 같은 source identity의 선택을 유지하고, 새 bounded scan 전체가 끝난 뒤에만 새 immutable snapshot으로 한 번에 교체한다.** 결과 큐의 OOM 등 새 snapshot을 publish할 수 없는 완료는 spinner만 끝내고 기존 목록을 유지하며 notice를 보인다. 따라서 새로 고침이 기존 목록을 비우거나 첫 record/중간 batch로 목록을 흔들지 않는다. 첫 진입처럼 이전 snapshot이 없을 때만 skeleton/진행 문구를 보이며, frame tick에서 파일 I/O를 하지 않는다. 창 재포커스와 새 provider session identity 감지는 같은 refresh를 요청하되, forced refresh는 5초 전역 throttle로 합친다. filesystem polling/watcher는 v1에 없다.
+- 도크 view bar의 `AI 세션`을 누르면 archive refresh를 요청한다. **refresh 중에는 직전 완료 snapshot과 current scroll/selection을 그대로 paint하고, 새 bounded scan 전체가 끝난 뒤에만 새 immutable snapshot으로 한 번에 교체한다.** AS3-c부터 교체 commit은 first partially-visible card의 exact identity와 intra-card pixel offset을 restore하고, identity가 없으면 기존 numeric offset만 새 상한에 clamp한다. 결과 큐의 OOM 등 새 snapshot을 publish할 수 없는 완료는 spinner만 끝내고 기존 목록과 scroll/selection을 유지하며 notice를 보인다. 따라서 새로 고침이 기존 목록을 비우거나 첫 record/중간 batch로 목록을 흔들지 않는다. 첫 진입처럼 이전 snapshot이 없을 때만 skeleton/진행 문구를 보이며, frame tick에서 파일 I/O를 하지 않는다. 창 재포커스와 새 provider session identity 감지는 같은 refresh를 요청하되, forced refresh는 5초 전역 throttle로 합친다. filesystem polling/watcher는 v1에 없다.
 - scope는 `현재 작업공간`, `현재 프로젝트`, `전체`다. 기본값은 `전체`이며 마지막 선택만 창 UI 상태로 보존한다. **`현재 작업공간`은 활성 워크스페이스 탭의 활성 local Term이 마지막으로 보고한 CWD를 worker가 canonicalize한 단일 root snapshot 아래에 `cwd`가 있는 기록**이다. 창 전역 탐색기 root와 다른 권위이므로, 다른 워크스페이스 탭의 폴더가 섞이지 않는다. `현재 프로젝트`는 같은 active Term CWD에서 worker가 찾은 canonical git root 아래 `cwd`가 있는 기록이며, local CWD 또는 git root가 없으면 각각 비활성화한다. `전체`는 모든 provider의 검증된 사용자 세션이다. remote/불명 `cwd`는 전체에서만 보인다. 도크 진입, scope click, 활성 workspace/pane/Term 전환 **및 같은 활성 pane의 CWD 보고 변경**에서 root snapshot을 갱신하며, 결과가 오기 전에는 이전 tab 또는 이전 CWD의 범위를 재사용하지 않는다. CWD 비교는 main actor의 메모리 observation만 사용하고 canonicalize·git walk는 worker만 수행한다. 이후 scope/search/scroll/frame은 그 메모리 snapshot만 읽는다.
 - 이 필터는 접근 제어가 아닌 표시 범위다. 경로는 provider log의 `cwd`를 canonicalize할 수 있을 때만 containment 비교하며, 실패·삭제·비로컬 값은 workspace/project에 억지로 넣지 않는다.
 - 검색은 이미 publish된 snapshot만 대상으로 한다. `/`로 시작한 입력은 header에 표시되고 Esc는 query를 지우고 닫으며, UTF-8 byte substring(ASCII만 case-insensitive)으로 제목·요약·cwd leaf·branch·model을 찾고 입력은 256 byte로 자른다. 검색 키 입력은 재스캔·파일 stat·정렬을 일으키지 않는다. 한국어처럼 case가 없는 문자열은 정확 byte match로 검색된다.
@@ -242,9 +242,71 @@ reconcile이 capture를 취소해 늦은 up이 옛 record를 열 수 없다.
 replace 뒤 stale-up 무효를 고정한다. 카드 중간 픽셀을 보존하는 scroll offset/clip과 refresh 중 scroll·selection E2E는
 다음 AS3-c이며, AS3-b가 행 수 기반 scroll을 정밀 스크롤이라고 주장하지 않는다.
 
+### AS3-c — pixel scroll projection과 refresh anchor
+
+AS3-c는 기존 `agent_session_archive_scroll_rows`를 늘리는 보정 PR이 아니다. 도크 목록의 스크롤 권위는
+active `ChromeHost` adapter인 `AppSession`이 소유하는 `SessionDockScrollState`의 **backing-pixel `offset_y_px`**
+하나로 바꾼다. offset은 목록의 첫 item top을
+`SessionDockScrollArea` clip top에서 얼마나 위로 옮겼는지를 뜻하고, 범위는 정확히
+`0..max(0, content_height_px - scroll_area_height_px)`다. header·scope·search는 이 좌표계 밖의 fixed chrome이며
+어떤 scroll offset에도 이동하지 않는다. retained `offset_y_px`는 항상 integer이며, **wheel ingress에만**
+`agent_session_archive_wheel_residue_px`가 fractional backing px를 보관한다. 매 wheel event는 residue에 delta를 더하고
+trunc한 integral px만 offset에 적용한 뒤 residue만 남긴다. paint/hit-test에는 같은 integer backing-pixel offset만
+publish한다. 이 규칙은 2x Retina에서 0.5pt 입력도 1px 단위로 누적되어 보이되, draw와 hit-test의 subpixel/rounding 결과가
+갈라지는 것을 막는다.
+
+`src/chrome/components/session_dock/scroll.zig`의 pure `project`가 `Item` kind와 `Metrics`, viewport, offset을 받아
+다음을 **한 번에** 산출한다: total content height, clamped offset, 첫 partially-visible item index, 그 item의 negative local
+origin, visible item range, 각 item의 rect와 content clip. host는 이 결과가 가리키는 item만 `build.zig`에 전달하며 별도의
+visual-row→entry, cell-row, fixed-header y 산술을 하지 않는다. `view.zig`, `session_dock_lowering`, published
+`UiRectTree`, pointer hit-test, future scrollbar thumb는 이 same projection의 integer rect/clip을 소비한다. 따라서 카드가
+clip top에서 반쯤 보이면 그 보이는 반쪽만 draw/hit 가능하고, header 아래로 bleed하거나 다음 card의 action rect가 앞 card를
+가로채지 않는다. content height는 item 간 gap만 포함하고 마지막 item 뒤 trailing gap은 넣지 않는다. scroll thumb가
+필요한 경우에도 `project`의 total/viewport/clamped offset만 사용해 visual rect를 만들며, thumb drag는 이 slice의
+비목표다. 최대 500개 record와 그에 대응하는 bounded group header의 projection은 O(n) scan 하나이며 frame/hover에는
+I/O, worker, JSON parse, allocation을 추가하지 않는다.
+
+wheel의 owner는 published `SessionDockScrollArea` rect 하나다. `delta_y > 0`(위)는 offset을 줄이고 `< 0`(아래)은
+offset을 늘린다. mouse wheel은 기존 line delta를 card 높이 기반의 bounded pixel step으로 변환하고, precise trackpad는
+AppKit point delta를 scale로 backing px로 바꾼다. `scroll.multiplier`는 둘에 같이 적용한다. `AppSession`은
+terminal·sidebar·notification과 공유하는 `wheel_accum`을 쓰지 않고 dock 전용
+`agent_session_archive_wheel_residue_px`를 둔다. 방향 반전, dock leave, snapshot replace, scope/search/group change,
+surface deactivate 때 residue를 0으로 비워 이전 owner의 미세 잔여가 첫 반대 scroll을 상쇄하지 않게 한다. target이
+scroll-area 밖이면 agent list state는 바꾸지 않고, scroll-area 안이면 clamp로 실제 offset이 변하지 않아도 terminal/PTy에는
+절대 전달하지 않는다. horizontal delta, momentum/animation, rubber-band overscroll, scrollbar drag는 이 slice의 비목표다.
+
+`agent_session_list` focus가 search field를 소유하지 않을 때 PageUp/PageDown, Home/End도 같은
+`SessionDockScrollState.scrollByPx`/`scrollToBoundary`만 호출한다. page step은 `scroll_area_height_px - one_card_h`로
+정해 0/음수 viewport에서는 no-op이고, Home/End는 각각 0/max offset으로 간다. keyboard scroll은 dock 밖이나 search
+focus에서 terminal로 새지 않으며 wheel residue를 0으로 비운다. Up/Down의 selection 이동과 선택 card를 viewport에
+reveal하는 정책은 기존 focus-owner slice의 계약을 소비할 뿐 이 slice에서 새 semantic selection rule을 만들지 않는다.
+
+refresh는 old completed snapshot을 paint하는 동안 current offset과 selection을 절대 바꾸지 않는다. worker 완료 직전에
+`ArchiveScrollAnchor`를 capture한다: 현재 offset에서 **첫 partially-visible card**의 exact archive identity
+`{provider, session_id, device, inode}`와 그 card top에 대한 `intra_card_y_px`다. group header는 anchor가 될 수 없고,
+첫 보이는 card가 없으면 numeric offset만 보존한다. 새 immutable snapshot과 filtered/collapsed projection이 완료된 뒤에만
+selection을 기존 exact identity로 restore하고, 같은 card identity가 새 projection에 있으면
+`new_card_top_px + intra_card_y_px`를 새 offset으로 clamp한다. identity가 사라졌거나 group이 접혀 card가 materialize되지
+않으면 **추측으로 이웃·path·mtime을 매칭하지 않고** 기존 numeric offset만 새 range에 clamp한다. 이전 목록을 비우지 않는
+refresh와 함께 이 restore는 한 main-actor commit에서만 일어나며, new snapshot OOM/retain-previous는 spinner만 끝내고
+offset·residue·selection·published tree를 그대로 둔다.
+
+`toggle_group`, scope/search query, active CWD scope change처럼 사용자가 목록 의미를 바꾸는 action은 anchor restore가
+아니라 offset=0과 residue=0을 명시적으로 선택한다. 반대로 resize는 old viewport에서 같은 `ArchiveScrollAnchor`를 먼저
+capture한 뒤 새 viewport projection에 exact identity가 있으면 restore하고, 없으면 old numeric offset을 새 range로 clamp한다.
+새 tree/action mapping이 바뀌면 AS3-b의 reconcile 규칙대로 pointer capture를 취소한다. scroll 자체는 card action을 만들지
+않고, scroll 중에는 hover를 current published rect로 재평가한다.
+
+구현 전 pure test는 (1) partial first/last card clip과 half-open hit bounds, (2) 1px offset과 max/cap clamp, (3) precise
+delta의 Retina scale·residue·direction reset, (4) fixed header 불변, (5) 500 item bounded visible range, (6) exact
+anchor reorder restore와 identity-missing no-guess fallback, (7) retain-previous/OOM의 state byte-for-byte 보존을 고정한다.
+제품 test는 scroll-area 안/밖 wheel ownership, scroll 중 PTY mouse/terminal scrollback=0, resize/group/snapshot replace의
+capture cancel, same renderer Lab의 `partial-scroll` PNG/JSON(clip과 text rasterized evidence)을 추가한다. active AppKit
+host wheel screenshot은 AS3-c 뒤에도 별도 manual/automation gate로 남긴다.
+
 1. **AS1 — 순수 모델·parser:** provider-neutral record, Claude/Codex streaming parser, trust grade, dedup/title/summary/redaction/filter/sort pure tests. 실제 사용자 log는 fixture로 넣지 않는다.
 2. **AS2 — bounded scanner:** no-follow discovery, candidate/file/total caps, cancellation/generation, in-memory identity parse cache, 최신순 bounded worker pool과 완료 snapshot atomic publish, metrics. refresh는 직전 완료 snapshot을 유지하고 새 scan이 끝날 때만 교체한다. main tick filesystem I/O=0·JSON parse=0·worker wait=0을 counter와 source boundary test로 고정한다.
-3. **AS3 — 도크 Metal component vertical slice:** `SessionDockLayout`과 header/scope/search/group/card/scroll-area primitive를 순수 props/state/layout/view/hit-test/action으로 만든 뒤 host/backend의 semantic draw → Metal GPU lowering에 연결한다. 기존 direct text draw와 pipe scope label은 이 slice에서 제거한다. layout 공유 test가 view rect=hit rect=visible-row origin을, search keypress I/O=0·row 한 번 클릭 provider 실행=0·main thread JSONL I/O=0을 고정한다. loading spinner는 snapshot 유무별로 skeleton 또는 기존 목록 유지인지도 integration test로 고정한다. **AS3-a는 component→CoreText/Metal card background, AS3-b는 published-tree hover/down/up lifecycle을 연결한다. card 중간을 보존하는 precise scroll, refresh 중 selection/scroll E2E와 active host screenshot E2E는 AS3의 남은 gate다.**
+3. **AS3 — 도크 Metal component vertical slice:** `SessionDockLayout`과 header/scope/search/group/card/scroll-area primitive를 순수 props/state/layout/view/hit-test/action으로 만든 뒤 host/backend의 semantic draw → Metal GPU lowering에 연결한다. 기존 direct text draw와 pipe scope label은 이 slice에서 제거한다. layout 공유 test가 view rect=hit rect=visible-row origin을, search keypress I/O=0·row 한 번 클릭 provider 실행=0·main thread JSONL I/O=0을 고정한다. loading spinner는 snapshot 유무별로 skeleton 또는 기존 목록 유지인지도 integration test로 고정한다. **AS3-a는 component→CoreText/Metal card background, AS3-b는 published-tree hover/down/up lifecycle, AS3-c는 pixel scroll projection·refresh identity anchor·partial-scroll Lab artifact를 연결한다. active host screenshot E2E는 AS3의 남은 gate다.**
 4. **AS4 — archive Metal detail panel·explicit actions·제품 gate:** `ArchiveSessionDetailPanel`을 PTY 없는 Metal-rendered surface로 연결하고 bounded recent/permission summary, loading/stale identity disable, exact live mapping, source reveal, `워크트리에서 재개`의 argv-only immediate new-Term activation을 닫는다. resume/log의 click rect와 `⌘↵`/`⌘L` shortcut은 같은 action identity를 소비한다. `열린 세션으로 이동`은 exact live identity가 있을 때만 별도 pointer/Enter action으로 제공한다. macOS fixture E2E는 dock card hover/selection/collapse/scroll, refresh 중 snapshot 보존, detail loading→ready/stale, disabled action, resume/reveal을 확인한다. 실제 provider 계정/개인 이력에 대한 재개는 사용자가 직접 승인한 수동 gate일 뿐 CI 증거가 아니다.
 
 ## 7. 설계 검토 기록 — 적대적 5회

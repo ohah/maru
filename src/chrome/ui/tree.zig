@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const layout = @import("layout.zig");
+const ui_style = @import("style.zig");
 
 pub const UiId = u64;
 pub const UiActionId = u64;
@@ -15,6 +16,14 @@ pub const UiAction = struct {
     id: UiActionId,
     enabled: bool = true,
 };
+
+pub const CardVariant = ui_style.CardVariant;
+pub const TextTone = ui_style.TextTone;
+pub const ShadowKind = ui_style.ShadowKind;
+pub const PaintStyle = ui_style.PaintStyle;
+pub const CardVisual = ui_style.CardVisual;
+pub const TextVisual = ui_style.TextVisual;
+pub const VisualProps = ui_style.VisualProps;
 
 pub const ContainerOptions = struct {
     id: UiId,
@@ -31,6 +40,8 @@ pub const ContainerOptions = struct {
 pub const CardOptions = struct {
     id: UiId,
     style: layout.UiStyle = .{},
+    variant: CardVariant = .surface,
+    paint: PaintStyle = .{},
     action: ?UiAction = null,
     direction: layout.Direction = .column,
     justify: layout.Justify = .start,
@@ -42,6 +53,8 @@ pub const TextOptions = struct {
     id: UiId,
     style: layout.UiStyle = .{},
     value: []const u8,
+    tone: TextTone = .primary,
+    paint: PaintStyle = .{},
     measure_context: ?*const anyopaque = null,
     measure: ?layout.MeasureFn = null,
 };
@@ -54,6 +67,8 @@ pub const NodeProps = union(enum) {
         overflow: layout.Overflow,
     },
     card: struct {
+        variant: CardVariant,
+        paint: PaintStyle,
         action: ?UiAction,
         direction: layout.Direction,
         justify: layout.Justify,
@@ -62,6 +77,8 @@ pub const NodeProps = union(enum) {
     },
     text: struct {
         value: []const u8,
+        tone: TextTone,
+        paint: PaintStyle,
         measure_context: ?*const anyopaque,
         measure: ?layout.MeasureFn,
     },
@@ -107,6 +124,8 @@ pub fn card(options: CardOptions, children: []const UiNode) UiNode {
         .id = options.id,
         .style = options.style,
         .props = .{ .card = .{
+            .variant = options.variant,
+            .paint = options.paint,
             .action = options.action,
             .direction = options.direction,
             .justify = options.justify,
@@ -123,6 +142,8 @@ pub fn text(options: TextOptions) UiNode {
         .style = options.style,
         .props = .{ .text = .{
             .value = options.value,
+            .tone = options.tone,
+            .paint = options.paint,
             .measure_context = options.measure_context,
             .measure = options.measure,
         } },
@@ -138,6 +159,10 @@ pub const RectEntry = struct {
     /// 이 entry와 모든 visible ancestor가 clip하지 않는다는 뜻이다.
     effective_clip: ?layout.UiRect,
     action: ?UiAction,
+    /// This is an exact projection of immutable semantic props, not a second style source.
+    /// `ui_paint` consumes this flattened snapshot alongside the same rect/action used by
+    /// interaction, so later host/Metal stages cannot rediscover a variant from domain state.
+    visual: VisualProps = .none,
 };
 
 /// entries는 preorder라 parent는 항상 child보다 먼저 나온다. direct child 탐색에는
@@ -262,6 +287,7 @@ const BuildState = struct {
             .rect = rect,
             .effective_clip = effective_clip,
             .action = actionFor(node),
+            .visual = visualFor(node),
         };
         self.entry_count += 1;
 
@@ -344,6 +370,14 @@ fn actionFor(node: UiNode) ?UiAction {
     };
 }
 
+fn visualFor(node: UiNode) VisualProps {
+    return switch (node.props) {
+        .container => .none,
+        .card => |value| .{ .card = .{ .variant = value.variant, .paint = value.paint } },
+        .text => |value| .{ .text = .{ .tone = value.tone, .paint = value.paint } },
+    };
+}
+
 fn hasIdentity(entries: []const RectEntry, id: UiId) bool {
     for (entries) |entry| {
         if (entry.id == id) return true;
@@ -386,7 +420,19 @@ fn validateRect(rect: layout.UiRect) BuildError!void {
 }
 
 fn clearEntries(entries: []RectEntry) void {
-    for (entries) |*entry| entry.* = std.mem.zeroes(RectEntry);
+    for (entries) |*entry| entry.* = emptyRectEntry();
+}
+
+fn emptyRectEntry() RectEntry {
+    return .{
+        .id = 0,
+        .parent_index = null,
+        .kind = .container,
+        .rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
+        .effective_clip = null,
+        .action = null,
+        .visual = .none,
+    };
 }
 
 fn measuredText(_: ?*const anyopaque, _: layout.MeasureConstraint) layout.UiSize {
@@ -425,6 +471,33 @@ test "nested UiNode produces one preorder rect tree for cards and text" {
     try std.testing.expectEqual(@as(?usize, 2), tree.find(3));
 }
 
+test "semantic paint props project once into the completed rect snapshot" {
+    const root = container(.{ .id = 1 }, &.{
+        card(.{ .id = 2, .variant = .raised, .paint = .{ .background = .accent_bar, .corner_radii_px = .{ 1, 2, 3, 4 }, .shadow = .none } }, &.{
+            text(.{ .id = 3, .value = "title", .tone = .muted, .paint = .{ .foreground = .accent_bar } }),
+        }),
+    });
+    var entries: [3]RectEntry = undefined;
+    var items: [3]layout.Item = undefined;
+    var scratch: [3]layout.FlexScratch = undefined;
+    var child_rects: [3]layout.UiRect = undefined;
+    const tree = try build(root, .{ .root_size = .{ .width = 80, .height = 40 }, .max_entries = 3, .max_depth = 3 }, .{
+        .entries = &entries,
+        .items = &items,
+        .flex_scratch = &scratch,
+        .child_rects = &child_rects,
+    });
+
+    try std.testing.expect(tree.entries[1].visual == .card);
+    try std.testing.expectEqual(CardVariant.raised, tree.entries[1].visual.card.variant);
+    try std.testing.expectEqual(.accent_bar, tree.entries[1].visual.card.paint.background.?);
+    try std.testing.expectEqual(@as(?ShadowKind, .none), tree.entries[1].visual.card.paint.shadow);
+    try std.testing.expectEqual([4]u16{ 1, 2, 3, 4 }, tree.entries[1].visual.card.paint.corner_radii_px.?);
+    try std.testing.expect(tree.entries[2].visual == .text);
+    try std.testing.expectEqual(TextTone.muted, tree.entries[2].visual.text.tone);
+    try std.testing.expectEqual(.accent_bar, tree.entries[2].visual.text.paint.foreground.?);
+}
+
 test "build fails closed for duplicate identity and leaves no new rect entries" {
     const root = container(.{ .id = 1 }, &.{
         text(.{ .id = 2, .value = "first" }),
@@ -440,7 +513,7 @@ test "build fails closed for duplicate identity and leaves no new rect entries" 
         .flex_scratch = &scratch,
         .child_rects = &child_rects,
     }));
-    for (entries) |entry| try std.testing.expectEqual(std.mem.zeroes(RectEntry), entry);
+    for (entries) |entry| try std.testing.expectEqual(emptyRectEntry(), entry);
 }
 
 test "build rejects depth, capacity, and leaf children without partial tree" {
@@ -464,7 +537,7 @@ test "build rejects depth, capacity, and leaf children without partial tree" {
 
     const invalid_leaf = UiNode{
         .id = 8,
-        .props = .{ .text = .{ .value = "leaf", .measure_context = null, .measure = null } },
+        .props = .{ .text = .{ .value = "leaf", .tone = .primary, .paint = .{}, .measure_context = null, .measure = null } },
         .children = &.{text(.{ .id = 9, .value = "child" })},
     };
     try std.testing.expectError(error.LeafHasChildren, build(invalid_leaf, .{ .root_size = .{ .width = 20, .height = 20 }, .max_entries = 3, .max_depth = 2 }, buffers));
@@ -542,7 +615,7 @@ test "nested rect offset overflow fails closed instead of publishing infinity" {
         .flex_scratch = &scratch,
         .child_rects = &child_rects,
     }));
-    for (entries) |entry| try std.testing.expectEqual(std.mem.zeroes(RectEntry), entry);
+    for (entries) |entry| try std.testing.expectEqual(emptyRectEntry(), entry);
 }
 
 test "rebuild counter advances only after completed tree build" {
@@ -588,7 +661,7 @@ test "active sibling scratch beyond tree cap reports max entries, not buffer fai
         .flex_scratch = &scratch,
         .child_rects = &child_rects,
     }));
-    for (entries) |entry| try std.testing.expectEqual(std.mem.zeroes(RectEntry), entry);
+    for (entries) |entry| try std.testing.expectEqual(emptyRectEntry(), entry);
 }
 
 test "rebuild counter overflow clears candidate entries before fail-close" {
@@ -611,5 +684,5 @@ test "rebuild counter overflow clears candidate entries before fail-close" {
         .flex_scratch = &scratch,
         .child_rects = &child_rects,
     }));
-    try std.testing.expectEqual(std.mem.zeroes(RectEntry), entries[0]);
+    try std.testing.expectEqual(emptyRectEntry(), entries[0]);
 }

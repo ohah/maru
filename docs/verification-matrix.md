@@ -725,8 +725,42 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   owner와 heap-pinned node canonical permit을 함께 써 exact once free하고 registry accounting에 들어가지 않는다. owner+transport
   stale restore replay, slot 종료 뒤 stale owner의 backing 비역참조 거부, binding splice, allocator free callback의
   same-attachment teardown busy, callback 뒤 permit consume와 batch-internal
-  error 비노출을 고정한다. no-wire local OOM, complete snapshot apply OOM, malformed
-  payload, partial/timeout/EOF, detach
+  error 비노출을 고정한다. 2c2의 exact signature는
+  `purgeEndedStream() -> error{Busy,InvalidOwner,Corrupt,Terminal}!enum{not_ended,purged}`다. Busy/InvalidOwner는 모든 mutation 0,
+  committed global latch의 Terminal은 current connection mutation/추가 poison 0, precommit Corrupt는
+  demux queue/counter·attachment·lease/registry mutation 0과 connection terminal poison exact 1이며 commit 후 drift-poison은 target cleanup
+  완료 뒤 `.purged`로 normalize한다. generation 일반 event loop
+  앞의 무인자 `purgeEndedStream`이 exact current binding의 target-stream 첫
+  ended만 private receipt로 만들고, ended 부재·foreign stream·non-ended target event에서는 event take/release와 모든 queue mutation이
+  0임을 고정한다. `pending_batches`, optional `partial_batch`, 이미 분류된 `pending_stream`, `pending_events` 각각의 단독·혼합 target과
+  sibling interleave, 제품 count/byte cap 경계, counter/allocator/event-seal drift를 전수해 prepare 실패 mutation/free 0과 성공 시
+  target-only final-zero를 증명한다. `.not_ended` hot path는 작은 target-event peek만 수행해 대형 scratch frame·screen queue scan/hash가
+  0임을 계측/source oracle로 고정한다. ended slow helper의 descriptor 배열 cap은 제품 queue cap과 같고, compact target bitset과 queue별
+  aggregate payload seal을 사용해 compile-time 전체 `<= 512 KiB`다. target의
+  `GenerationBatchRegistry` entry가 reserved/ingress/live/releasing 어느 상태로든 존재하면 `busy`이며 registry/token/OwnedBatch/accounting,
+  parser raw RX/framing, attachment pending lease/screen, cleanup registry와 connection lease는 byte-for-byte 불변이다.
+
+  commit은 inventory의 target descriptor slot을 in-place frozen cleanup owner로 전환해 별도 full-size 배열 0이며, receipt tombstone과 네
+  queue stable compaction·최종 counter publish가 첫 free callback보다 앞섬을 callback 관측으로 검증한다. receipt copy·wrong
+  thread·same-address replay·binding/slot/node/transport splice, commit 직전 queue
+  drift, first/middle/last free callback의 public API 재진입은 attachment/slot/client mutation `busy`와 sibling 순서·bytes·counter 보존을
+  Debug/ReleaseFast production-type test로 증명한다. 2c1의 snapshot 전용 permit/active fields/registry를 kind-tagged 공통
+  `StreamOperationPermit`/단일 active-operation tuple로 migration하고 snapshot↔purge 상호 busy, teardown 및 sibling을 포함한
+  input/event/RPC/queue mutation busy, immutable scalar 관측만 허용을 고정한다. hostile raw sibling backing drift는 복원을 주장하지 않고 callback 뒤 detect+poison,
+  target descriptor는 callback 전에 전부 freeze되어 exact once free됨을 고정한다. node permit은 마지막 callback과 post-callback 검증까지
+  live이다. callback 중 canonical queue/source reread는 0이고 마지막 callback 뒤 frozen survivor descriptor/range seal과 current
+  queue ownership metadata를 비교하는 post-validation은 정확히 한 번뿐이다. 구조 drift면 payload pointer를 역참조하지 않고 canonical
+  demux queue·partial state·counter를 empty/zero로 tombstone해 sibling owner graph를 no-free quarantine한다. drift의 exact
+  suffix 순서는 `demux tombstone -> quarantine commit -> connection poison -> node permit/transport receipt consume`이다. callback 전
+  process-global `idle->reserved`와 frozen capacity checked sum `<= max_ended_purge_quarantine_bytes(64 MiB)`, 정상 release, drift exact-once
+  `reserved->committed`, replay charge 0, committed 뒤 새 generation Client/reconnect/purge terminal 거부를 검증해 process 누적을 한 건으로
+  고정한다. cap 초과는 callback/free/quarantine 0과 precommit poison이다. 이후 generic teardown의 해당 pointer read/free가 0임을 hostile
+  allocator oracle로 고정한다. 구조가 일치할 때만 aggregate payload seal을 재계산한다.
+  commit 전 typed error는 mutation 0, commit 뒤 정상/poison은 모두 target cleanup과 no-fail node permit→transport receipt suffix를 끝내고
+  public `.purged`로 정규화하며 poison latch를 별도로 검증한다. purge 뒤 attachment state·cleanup registry·connection lease가 live이고 later
+  `GenerationAttachment.tryDeinit`만 registry release·attachment drop·lease cleanup의 canonical 권위이며 raw demux 재정리는 idempotent
+  no-op임을 source/boundary oracle로 분리한다.
+  no-wire local OOM, complete snapshot apply OOM, malformed payload, partial/timeout/EOF, detach
   prepare OOM, success, invalid_request/unauthorized/conflict reject와 detach reply-loss 상태표를 actual
   socket/fail-index로 전수한다.
   모든 success/errdefer/map-put/terminate/detach 경로는 `pool retain -> prepared binding -> runtime publish`와

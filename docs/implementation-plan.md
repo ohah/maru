@@ -910,7 +910,43 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    arm에만 남긴다. owner/transport stale 복원은 heap-pinned `ClientNode`의 checked-monotonic canonical stream-operation permit으로
    차단하고, allocator free callback 동안 permit을 유지해 attachment/slot teardown 재진입을 `busy`로 고정한다. 이 permit의 exact
    binding seal과 닫힌 외부 error normalization을 2c2~2c4가 공통 admission 기반으로 재사용한다. **2c2**는 sealed ended receipt와
-   all-or-none early demux purge를 배선한다. **2c3**은 capability/input/control/
+   all-or-none early demux purge를 배선한다. generation arm은 일반 event loop보다 먼저 무인자
+   `purgeEndedStream() -> PurgeEndedError!PurgeEndedOutcome`을 호출한다. outcome은 `.not_ended|purged`, error는
+   `.busy|invalid_owner|corrupt|terminal`의 닫힌 집합이다. registry/다른 stream operation 충돌은 모든 mutation 0의 `.busy`, moved/copy/thread/binding
+   불일치는 모든 mutation 0의 `.invalid_owner`, precommit descriptor/counter/seal 손상은 demux queue/counter·attachment·lease/registry
+   mutation 0과 connection terminal poison exact 1의 `.corrupt`로 normalize한다. 이미 committed인 process quarantine latch는 현재
+   connection을 추가로 poison하거나 mutate하지 않고 `.terminal`이다.
+   transport는 현재 binding의
+   `{slot/node/transport, host, connection generation, immutable binding incarnation/runtime, non-reused stream}`과 admission seal이 살아
+   있는 target-stream 첫 `runtime.ended` event만 private stack-final-address receipt에 결속해 같은 호출에서 소비한다. ended는 role과
+   무관한 lifecycle event이고 mutable current role/controller generation은 binding SSOT에 없으므로 receipt가 추측하거나 봉인하지
+   않는다. 작은 allocation-free peek가 ended가 없으면 event take/release와 대형 scratch frame 없이 즉시 `.not_ended`를 반환하고,
+   ended가 확인된 때만 별도 noinline transaction helper에 들어가므로 2c3의 일반 event facade를 선취하지 않는다.
+
+   prepare는 Client-owned 미전달 `pending_batches`, optional `partial_batch`, 이미 분류된 `pending_stream`, `pending_events`의 전체
+   descriptor·allocator provenance·event seal·byte counter를 fixed inline scratch에 복사해 검증하며 mutation/free/allocation 0이다.
+   scratch는 per-item digest 대신 compact target bitset과 queue별 aggregate payload seal을 쓰며, descriptor 배열 cap은 제품 queue cap과
+   같고 기존 `ExternalAdoptionCleanupScratch`와 같은 compile-time `<= 512 KiB` 예산을 지킨다. target stream에
+   `GenerationBatchRegistry`의 reserved/ingress/live/releasing entry가 하나라도 있으면 mutation 전에 `busy`로 닫는다. transferred
+   batch/token/accounting, parser raw RX/framing, attachment pending lease/screen, cleanup registry와 connection lease는 inventory와 purge
+   대상이 아니다. commit은 receipt tombstone 뒤 inventory descriptor slot 중 target slot을 in-place frozen cleanup owner로 전환해 별도
+   full-size 배열을 만들지 않고, 네 queue stable compaction과 최종 counter publish를 첫 allocator callback 전에 끝낸다. 이후 fallible
+   work는 0이고 callback 중 canonical queue/source reread도 0이다. 마지막 callback 뒤에는 frozen survivor descriptor/range seal과 current
+   queue ownership metadata를 비교하는 post-validation을 정확히 한 번 수행하고, 구조가 일치할 때만 sibling aggregate payload seal을 다시 읽는다.
+   node permit은 이 post-validation까지 유지한 뒤 node permit→transport receipt 순으로 소비한다. permit이 live인 동안 sibling을
+   포함한 Client input/event/RPC/queue mutation과 attachment/slot teardown은 모두 `busy`이며 read-only scalar 관측만 허용한다. public
+   Maru API callback 재진입은 같은 규칙으로 sibling을 byte-for-byte 보존한다. callback 전에 process-global one-slot quarantine
+   reservation을 무할당으로 잡고 frozen pre-callback capacity의 checked sum이
+   `max_ended_purge_quarantine_bytes = 64 MiB` 이하임을 검증한다. 정상 post-validation은 reservation을 release한다. 구조 drift에서는
+   pointer 역참조 없이 canonical demux queue·partial state·counter를 먼저 empty/zero로 tombstone하고 reservation을 exact once 영구
+   commit한 뒤 connection을 poison해 남은 sibling owner graph를 no-free quarantine한다. exact 순서는
+   `demux tombstone -> quarantine commit -> connection poison -> node permit/transport receipt consume`이다. 이 sticky process latch 뒤 새 generation Client/reconnect/ended-purge admission은 terminal로
+   거부되어 누적 quarantine은 한 건·64 MiB를 넘지 않는다. replay charge는 0이다. 이후 generic teardown은 변조된 pointer를 다시 읽거나
+   free하지 않으며 해당 connection의 buffered sibling data와 allocation은 버린다. commit 전 오류는 `.not_ended`와 구별된 typed error이며
+   위 error별 허용 mutation만 수행한다. commit 뒤 정상과 drift-poison 모두 target cleanup을
+   끝내고 no-fail node permit/transport receipt consume을 실행하며 public 결과는 `.purged`다. tests는 poison latch를 별도로
+   검증한다. early purge는 canonical attachment drop·registry token release·node cleanup
+   registry·connection lease를 소비하지 않으며 later teardown의 raw demux 정리는 idempotent no-op이다. **2c3**은 capability/input/control/
    event/RPC primitive를 exact facade로 옮기고 generation의 `logicalClient()` 사용을 0으로 만든다. **2c4**는
    `RuntimeConnection` union을 mode SSOT로 전환해 `RemoteRuntime.client`와 `generation_adapter` 병렬 필드를 제거하고 exact
    15-method/signature/source oracle을 닫는다. 각 gate는 reconnect/current publish와 제품 동작 변화 0을 유지하며 마지막 2c4

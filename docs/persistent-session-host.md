@@ -888,8 +888,10 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
 
    `readAttachmentBatch`는 이 집합에 넣지 않는다. post-initial batch의 유일한 owner는 2b2의 별도 inline
    `GenerationBatchAdapter`이며 transport가 같은 queue authority를 중복하지 않는다. `purgeEndedStream`은 임의 stream ID를
-   받는 drop이 아니라 `takeEvent`가 exact binding·runtime·controller generation에 결속해 발급한 one-shot ended receipt만
-   소비한다. 이는 demux queue의 조기 purge만 소유하며 2a canonical attachment drop·lease release를 terminalize하지 않는다.
+   받는 drop이 아니다. 이 메서드가 일반 `takeEvent`보다 먼저 node-local ended-only target-head peek/classify를 수행하고,
+   `.not_ended|purged`만 반환한다. ended일 때만 exact binding과 event admission seal에 결속한 private one-shot receipt를 stack final
+   address에 만들어 같은 호출에서 소비한다. 일반 event면 byte를 take/release하지 않아 2c3 event facade를 선취하지 않는다.
+   이는 Client-owned 미전달 demux queue의 조기 purge만 소유하며 2a canonical attachment drop·lease release를 terminalize하지 않는다.
    arbitrary method string을 받는 `call`, `*Client`, `*anyopaque`, generic callback/function과 Client-containing aggregate를
    반환·인자로 노출하지 않는다. compile-time public-declaration exact set, recursive parameter/return pointer audit와 source scan이
    drift를 막고 `HostAdapter.logicalClient()` generation production callsite, `RemoteRuntime.client`, GUI generation raw
@@ -1013,6 +1015,72 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    `snapshot bytes free -> attachment cleanup/handoff -> lease release -> RemoteRuntime destroy -> HostPool release` 순서를 고정한다.
    snapshot facade는 batch registry의 내부 error set을 노출하지 않고 transport/resource/protocol/invalid-owner의 닫힌 결과로
    normalize한다. node permit은 2c2~2c4 stream operation이 재사용할 canonical admission 기반이며 snapshot별 guard bool을 늘리지 않는다.
+
+   ended early purge도 임의 `stream_id`를 받는 raw queue helper가 아니다. `RemoteRuntime` generation arm은 일반 event loop보다 먼저
+   무인자 `GenerationTransport.purgeEndedStream() -> PurgeEndedError!PurgeEndedOutcome`을 호출한다.
+   `PurgeEndedOutcome={not_ended,purged}`, `PurgeEndedError=error{Busy,InvalidOwner,Corrupt,Terminal}`가 exact public 계약이다. registry/다른
+   stream-operation 충돌은 모든 mutation 0의 `Busy`, moved/copy/thread/binding 불일치는 모든 mutation 0의 `InvalidOwner`, precommit
+   descriptor/counter/seal 손상은 demux queue/counter·attachment·lease/registry mutation 0과 connection terminal poison exact 1의
+   `Corrupt`로 normalize한다. 이미 committed인 process quarantine latch는 current connection mutation/추가 poison 0의 `Terminal`이다.
+   transport가 현재 attachment binding과
+   admission-sealed target-stream 첫 `runtime.ended` event를 함께 확인해 private stack-final-address `EndedStreamReceipt`를 만들고,
+   같은 호출의 commit에서만 소비한다. ended가 아니면 event를 take/release하지 않고 `.not_ended`라서 metadata/revoke/resize/
+   invalidated는 기존 raw loop가 그대로 처리한다. 작은 allocation-free peek는 target event만 검사하고 `.not_ended`에서 대형 scratch
+   frame과 전체 screen queue scan/hash를 만들지 않는다. ended가 확인된 때만 별도 noinline transaction helper에 진입한다. ingress는
+   ended를 받을 때 같은 stream의 기존 pending event를 supersede하며,
+   server stream ID는 같은 connection generation에서 재사용하지 않는다. 따라서 receipt의 runtime 권위는
+   `{exact connection generation, non-reused stream, immutable binding incarnation/runtime}` 조합이다. ended는 role과 무관한 lifecycle
+   event이고 mutable current role/controller generation은 binding SSOT에 없으므로 receipt에 포함하지 않는다. `runtime.ended` payload에서
+   없는 runtime/controller generation을 추측하지 않는다.
+
+   queue inventory와 commit의 단일 구현은 `ClientSlot` node-local ended purge transaction이다. transport는 receipt orchestration만
+   하고 raw queue를 직접 순회하지 않는다. transaction은 inline stack `EndedPurgeScratch`에
+   `pending_batches[protocol.max_client_screen_items]`, `pending_stream[protocol.max_client_screen_items]`,
+   `pending_events[max_pending_event_count]`, optional `partial_batch`의 descriptor와 compact target bitset을 복사하고 queue별 aggregate
+   payload seal을 계산한다. per-item digest는 9,216개 상한에서 예산을 초과하므로 쓰지 않는다. compile-time으로 기존
+   `ExternalAdoptionCleanupScratch`와 같은 `@sizeOf(EndedPurgeScratch) <= 512 KiB`를 고정하며 heap allocation은 0이다. prepare는 list backing/len/cap, 모든 descriptor,
+   byte counter, allocator provenance, event admission seal과 target/sibling 합계를 전수 검증하고 mutation/free 0이다. commit은 private
+   receipt만 먼저 tombstone한 뒤 inventory descriptor slot 중 target slot을 in-place frozen cleanup owner로 전환해 별도 full-size 배열을
+   만들지 않고, 첫 callback 전에 네 Client queue를 stable compact·target owner detach·counter publish한다. 이후 fallible operation은
+   0이고 callback 중 canonical queue/source reread도 0이다. 모든 target
+   payload free callback 동안 heap-pinned node stream-operation permit은 live이고 public Client/attachment/slot mutation과 teardown은
+   `busy`다. 마지막 callback 반환 뒤 frozen survivor descriptor/range seal과 current queue ownership metadata를 비교하는 post-validation을 정확히 한 번
+   수행하고, 구조가 일치할 때만 aggregate payload seal을 다시 읽는다.
+   구조 drift에서는 drift된 pointer를 역참조하지 않는다. permit이 live인 동안 sibling을 포함한 Client input/event/RPC/queue mutation과
+   attachment/slot teardown은 모두 `busy`이고 read-only scalar 관측만 허용한다. callback이 public Maru API로 재진입한 경우 sibling은
+   byte-for-byte 보존한다. callback이 raw sibling backing을 직접 변조한 경우 복원은 주장하지 않는다. callback 전에 process-global
+   one-slot quarantine reservation을 allocation 없이 잡고, frozen pre-callback queue backing capacity와
+   payload capacity의 checked sum이 `max_ended_purge_quarantine_bytes = 64 MiB` 이하인지 검증한다. 정상 post-validation은 slot을 release한다.
+   구조 drift는 canonical demux queue·partial state·counter를 먼저 empty/zero로 tombstone하고 reservation을 exact once 영구 commit한 뒤
+   connection을 poison해 sibling owner graph를 no-free quarantine한다. exact 순서는
+   `demux tombstone -> quarantine commit -> connection poison -> node permit/transport receipt consume`이다. committed sticky latch 뒤 새 generation Client/reconnect/ended-purge
+   admission은 terminal로 거부하므로 process lifetime 누적은 한 건·64 MiB를 넘지 않고 replay charge는 0이다. 이후 generic teardown은
+   변조된 pointer를 읽거나 free하지 않으며 buffered sibling data와 allocation은 process lifetime까지 버린다. commit 전 오류는
+   typed error와 mutation 0이다. commit 뒤에는 정상/poison 모두 target exact-once cleanup 후 no-fail node permit/transport receipt
+   consume을 실행하고 public `.purged`로 정규화한다. poison 여부는 connection latch/테스트 oracle이 별도로 관측한다.
+
+   2c2는 2c1의 snapshot 전용 `InitialSnapshotPermit`/`active_snapshot_*`/process registry를
+   `StreamOperationPermit { kind = initial_snapshot|ended_purge }`와 node의 단일 active-operation tuple로 rename·migration한다. 두 kind는 같은
+   node에서 서로 `busy`이고, node/slot teardown 및 sibling을 포함한 input/event/RPC/queue mutation은 permit 종료까지 `busy`다.
+   immutable scalar 관측만 허용하며 generation batch read/admission과 다른 stream operation permit prepare도 거부한다.
+
+   `max_ended_purge_quarantine_bytes`는 screen payload/in-progress capacity, event payload, 네 queue backing capacity의 실제 frozen checked
+   sum을 모두 포함하는 독립 process-global 상한이다. 64 MiB를 넘는 source는 callback 전 `Corrupt`+connection poison으로 닫혀 quarantine을
+   만들지 않는다. reservation state는 `idle|reserved(node incarnation, operation generation)|committed`이고 reserved owner만 release/commit할
+   수 있다. committed는 process lifetime sticky이며 overflow·ABA·copy/replay에서 새 charge나 두 번째 leak을 허용하지 않는다.
+
+   | early purge가 제거하는 Client-owned 미전달 owner | early purge가 절대 건드리지 않는 owner |
+   | --- | --- |
+   | target `pending_batches` payload | `GenerationBatchRegistry`의 reserved/ingress/live/releasing entry |
+   | target `partial_batch` payload/capacity | transferred `GenerationBatchAdapter` token·`OwnedBatch`·accounting ledger entry |
+   | target `pending_stream`의 이미 분류된 frame payload | parser raw RX bytes와 connection-wide framing state |
+   | target `pending_events`의 admitted event payload | `RemoteAttachment` pending lease/screen, cleanup registry, connection lease |
+
+   node transaction은 target stream의 batch registry entry가 하나라도 reserved/ingress/live/releasing이면 첫 queue mutation 전에
+   `.busy`를 반환한다. 성공 뒤 later canonical attachment drop이 같은 Client demux에 수행하는 정리는 검증된 idempotent no-op이고,
+   실제 registry token release·attachment state/drop·lease cleanup은 여전히 최종 teardown만 소유한다. target 하나라도 손상됐거나
+   receipt copy·wrong thread·binding splice·permit replay·commit 직전 queue drift면 아무 queue도 건드리지 않고 connection을 typed
+   fail-close한다. `pending_stream`은 이미 frame으로 분류된 queue만 뜻하며 parser raw bytes를 stream별로 수술하지 않는다.
 
    | initial snapshot 실패 | connection 처리 | stream/registry/lease 처리 |
    | --- | --- | --- |

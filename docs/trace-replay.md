@@ -153,6 +153,34 @@ event 4 output surface=1 bytes="..."
 
 그래서 trace는 로그보다 엄격한 schema가 필요하다.
 
+## ConnectionIncident 진단 artifact
+
+실행 중 session-host transport reconnect의 진단 단일 출처는 trace event가 아니라 중립 leaf
+`src/observability/connection_incident.zig`의 versioned `ConnectionIncident` DTO다. `incident_id`는
+`{app_instance_nonce: u128, sequence: nonzero checked-monotonic u64}`이며 zero/wrap은 새 incident/reconnect를 fail-close한다.
+filename은 두 값을 고정 길이 lowercase hex로만 인코딩한다. session client는 typed poison tuple과
+bounded 숫자/enum만 채우고, 구조화 로그·테스트 artifact·future inspector가 같은 DTO를 직렬화한다. 최초 incident는
+immutable이고 반복 횟수와 first/last timestamp만 별도 bounded `IncidentAggregate`가 갱신한다. raw terminal input/output,
+paste, clipboard, cwd, command, SSH 주소와 임의 오류 문자열은 DTO에 들어가지 않는다.
+
+Release는 preallocated 32 KiB ring handoff를 reconnect scheduling보다 먼저 끝낸다. disk writer는 별도 bounded owner이며
+filesystem syscall 정지를 reconnect/main/quit 경로가 기다리지 않는다. `${XDG_CACHE_HOME:-$HOME/.cache}/maru/incidents`
+디렉터리는 `0700`,
+새 파일은 `0600` regular file로
+exclusive create하고 symlink를 따르지 않으며 현재 uid 소유를 확인한다. 파일당·총량·보존 기간은 각각 64 KiB, 1 MiB,
+7일이고 최대 128개에서 oldest-first로 지운다. disk가 실패하면 process 시작 때 할당한 32 KiB fixed-record emergency ring에
+writer는 이미 handoff된 ring record를 disk로 persist하며 실패하면 같은 record를 ring-resident로 유지한다. 재삽입이나
+aggregate count 증가는 0이다. disk에 저장된 record는 ring eviction 대상이 아니다. ring은 first-N distinct immutable
+slot과 fixed overflow bucket을 분리하고 `{reason,scope,source_site,host_class}` bounded enum fingerprint의 count/first/last만
+saturating aggregate한다. incident ID와 raw host ID는 aggregate key가 아니다. Debug/test의
+unexpected poison은 같은 기록 뒤 fail-stop한다. 이 artifact는 화면 replay 입력이 아니므로 `maru.trace.v1`에 억지로 섞지 않는다.
+
+경로·권한·cap·eviction·disk/ring 실패는 deterministic fake storage로 검증하고, artifact 본문에는 프로젝트 redaction 규칙을
+통과한 fixed schema 외 필드가 생기지 않도록 golden schema test를 둔다. fake storage는 ordering/failure injection만
+증명한다. 실제 macOS tempdir integration은 component별 no-follow/current-UID/directory 검증, `openat`-relative exclusive
+regular-file create, mode 0700/0600, preexisting symlink/non-regular/collision 거부와 bounded eviction을 별도 자동 gate로
+검증한다.
+
 ## 민감정보 규칙
 
 raw output bytes에는 경로, 서버 이름, token, 환경변수 값이 섞일 수 있다. 그래서 trace는 기본적으로 로컬 산출물이다.

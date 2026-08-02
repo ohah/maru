@@ -210,6 +210,30 @@ OSC 알림 제목에는 **발신 위치**(워크스페이스=탭, Term=surface/p
 
 ## 4. 경계 분담 (단일 출처)
 
+### 실행 중 session-host reconnect 안내
+
+reconnect 상태의 원본은 Window별 알림 history가 아니라 app-global notice store의 retained
+`{runtime_id,shell_generation,notice_seq}` record다. `SessionHostCoordinator`는 store를 orchestrate할 뿐 reducer나 storage를
+직접 구현하지 않는다. Window/AppSession은 자기 Term membership을 확인한 뒤 projection cursor를 ack하며 non-owner poll은
+record를 consume하지 않는다. app-global summary cursor와 pane cursor는 별도다. dedup key는
+`{incident_id,runtime_id,notice_kind}`다. 250ms 안의
+무영향 복구는 조용히 끝내고, 그 이상은 pane 상태줄 `reconnecting`을 표시한다. `recovered`는 paused/rejected input이 있을
+때만 incident·runtime당 banner 1회다. raw host 오류와 input/paste 본문은 알림 history나 OS notification에 넣지 않는다.
+
+`paused_paste`, `controller_conflict`, `termination_pending`은 단순 토스트가 아니라 coordinator의 상태에 묶인 in-app action
+surface다. paste action은 유효한 완전본에만 `Discard`/`Review Details and Send Full Paste`를 제공하되 본문은 표시하지 않고
+길이/hash prefix/시각만 보여 준다. controller conflict는 `Retry`/single-use
+`Take Control`을 제공한다. pane 이동은 action authority를 옮기지 않고 새 Window가 같은 ledger를 투영한다. pane close는 action을
+revoke하고 paste를 zeroize한다. 이 reconnect 안내는 host-owned OSC notification journal이나 `UNUserNotificationCenter`로
+전달하지 않는다.
+
+일반 resolved notice store는 app-global 256 records/256 KiB, TTL 10분이며 oldest resolved부터 evict한다. 죽은 Window의
+projection cursor는 Window unregister와 함께 revoke한다. unresolved `PausedPaste`/Take Control/termination action은 일반
+notice와 분리된 bounded action ledger가 소유하고 각 기능의 더 작은 item/byte cap을 따른다. 일반 notice overflow는 새 raw
+record를 버리고 app-global aggregate count 하나만 갱신하며 modal/banner 폭주를 만들지 않는다.
+Take Control은 runtime당 1개/app-global 64개/TTL 60초, termination은 runtime당 1개/app-global 64개/30초 attempt이며
+PausedPaste는 session-host 문서의 1 MiB/item·runtime 1개·app 8 MiB·10분 TTL을 따른다.
+
 - **현재 GUI-local 경로**: Zig `AppSession`이 OSC 알림 drain(`pendingNotification`), 업데이트 안내,
   **제목 위치 접두**(`notificationLocation` — `탭 › 팬`), 전면 배너 여부(`foreground_banner`), surface 역조회·
   활성화 순서(`activateSurfaceById`), 히스토리 모델·정렬·상대시간 포맷과 chrome을 소유한다. Swift는

@@ -431,6 +431,13 @@ absolute identity만** 기록하고 target의 page layout을 새로 만든다. s
 
 ## 10. 멀티윈도우·Quick Terminal·SSH
 
+실행 중 Client transport reconnect와 host exec upgrade는 별도 state machine이며 동시에 commit하지 않는다. reconnect는
+exact `host_id`의 existing endpoint에만 붙고 upgrade/spawn을 시작하지 않는다. host lifecycle가 `ready`가 아니거나
+`upgrade_busy`면 per-host reconnect absolute deadline 안에서 기다리거나 unavailable로 끝낸다.
+`pool_membership_generation`은 GUI HostPool entry add/remove, `connection_generation`은 같은 heap-pin HostAdapter 안의 Client
+교체, `upgrade_epoch`은 같은 PID host image/handoff의 권위다. 셋은 서로 대체하거나 직접 비교하지 않는다. reconnect가
+authority/publish 단계면 upgrade admission도 old/new connection generation이 정리될 때까지 busy로 닫는다.
+
 - 같은 app process의 여러 Window는 app-global host connection을 공유한다. 정상 Quit 뒤 connection이 없어졌을 때만
   upgrade하므로 Window 수는 handoff 조건에 영향을 주지 않는다.
 - 다른 Maru app process가 붙어 있으면 active attachment이므로 upgrade를 미룬다.

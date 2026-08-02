@@ -63,6 +63,19 @@ Maru가 저장하는 것은 다시 시작하기 위한 **설명서**다.
 
 ## 영속 session host와의 관계 (부분 구현)
 
+실행 중 shared host connection이 unusable이 된 뒤의 reconnect는 workspace restore가 아니다. 성공/일시 실패 모두
+`runtime-handle={host_id,runtime_id}`와 `runtime-state=live`를 바꾸거나 checkpoint를 dirty로 만들지 않는다. 이 경로는
+saved cwd/command로 shell/runtime을 spawn하지 않으며 창별 `restore_gone_host_id` negative memo를 재사용하지 않는다.
+durable ended tombstone은 fresh `runtime_not_found`, stale host identity, dead owner lease처럼 runtime 부재의 긍정적 증거가
+기존 Gone 분류를 통과한 경우에만 쓴다. transport poison·timeout·upgrade busy·지원 adapter 부재는 unavailable이다.
+
+reconnect 중 close의 checkpoint 규칙은 다음과 같다. Term close는 positive terminate confirmation 전 pane/binding을
+`termination_pending|termination_unconfirmed`으로 살아 있는 Window model에 유지한다. 사용자가 non-last Window 또는
+Workspace를 닫으면 그 model과 binding은 일반 close처럼 checkpoint에서 제거하고, coordinator는 layout snapshot을 따로
+소유하지 않는다. terminate confirmation이 없으므로 host runtime은 건드리지 않고 다음 실행의 Recovered Sessions에서 찾는다.
+Window model이 남은 채 app Quit/crash가 일어나면 마지막 binding을 복원하므로 Term이 원래 위치에 다시 보일 수 있다.
+positive termination 뒤에는 기존 close transaction이 pane/binding 제거 checkpoint를 정확히 한 번 쓴다.
+
 workspace restore와 persistent-session attach는 서로 대체하지 않는다.
 
 | 상태 | 시작 동작 |

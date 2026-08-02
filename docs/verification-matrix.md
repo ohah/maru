@@ -634,6 +634,49 @@ success/rollback 대칭 republish와 경쟁 launcher 0을 포함한다.
 - **예산 부재 시**: "성능 영향 없음"으로 쓰지 않는다. 아직 예산이 없다고 적고, 어떤 metric을 다음에 추가할지 [성능 예산](performance-budget.md)에 연결한다.
 - **퇴행 시 중단**: 기능 테스트가 통과해도 안정성·성능 gate가 깨지면 다음 micro-slice를 진행하지 않는다.
 
+### 영속 host CR 실행 중 transport reconnect gate
+
+**상태: 구현 전.** `RemoteRuntime`/Surface/pump/routing 주소를 고정한 stable shell과 generation bundle,
+stable `ScreenSource` borrow, 앱 전역 host job, existing-host-only controller recovery를
+[persistent-session-host.md](persistent-session-host.md#실행-중-connection-invalidation과-재연결)가 소유한다. raw in-place
+field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다.
+
+- CR0a: raw `failClosed` 직접 callsite 0, typed poison tuple exhaustive table, expected/unexpected 분류와 최초 reason 불변.
+- CR0b: child-event incident correlation, redaction, 32 KiB ring handoff→reconnect와 bounded disk writer ordering, blocked/late
+  writer, ring full aggregation과 Debug fail-stop.
+- CR1: bounded semantic 오류의 sibling connection poison 0, partial read/write와 artifact 실패 scheduler의 exact outcome.
+- CR2a: `RemoteGeneration` field inventory와 추출 parity. CR2b: stable proxy gate의 exact pinned-target unlock,
+  reentrant lock 거부, writer-pending 뒤 신규 reader 차단, generation ABA/max와 destroy-vs-borrow. CR2c: local/remote
+  `InputOwner` facade parity. CR2d: queue/cursor의 Window 이동·close 및 cross-Window parity. CR2e: fake
+  `PreparedReconnect`, allocator fail-index, old destructor exact 1.
+- CR3a: transport-neutral lease/slot skeleton. CR3b: pool-membership/connection generation 분리, stale callback/동시 attempt,
+  R1 admission close/cancel → R2 store-only detach+placeholder publish+callback cleanup → R3 final seal/canRetire/tick-end destroy의
+  three-phase retirement, retired Client cap 2. CR3c: 실제 RemoteGeneration slot integration.
+- CR4: 실제 socket poison→observer attach→takeover→input/resize. takeover reply-loss는 local authority 미발행,
+  candidate close 완료를 가정하지 않고 direct-controller grant만 기다리며 observer conflict는 자동 탈취하지 않는다.
+- CR5: 2 Window·다중 runtime, k번째 authority commit 장애의 runtime ledger/forward resolution, Window move/close 경쟁,
+  reconnect job 자체의 workspace write·host/runtime spawn·upgrade 시작 0. positive terminate confirmation을 받은 사용자
+  close transaction만 pane/binding 제거 checkpoint를 정확히 1회 쓴다. pending/unconfirmed 상태에서 Window close는 binding을
+  제거하되 runtime terminate 0이고 다음 inventory에서 Recovered Sessions로 노출한다. Take Control tuple의 double-click/move/close/TTL/generation 경쟁은
+  takeover 송신 최대 1이고 stale action은 0이다.
+- 모든 CR 결과는 `model-only | production-type unit | real socket | real AppKit` 증거 수준을 기록한다. CR2/CR3 완료는
+  production type import test가 필수이며 임시 PoC green만으로 닫지 않는다. `ReconnectReducer`는 모든 legal transition과
+  illegal state/event pair fail-close를 model-based sequence로 검증한다. 3-runtime `published_new + frozen_unavailable + ended`
+  혼합 결과에서도 성공 generation publish, unavailable placeholder 전환, old attachment/screen/Client retirement가 유한
+  시간에 끝나야 한다. placeholder는 shell-embedded bounded `UnavailableCore`만 사용하고 old
+  grid/scrollback/selection/search/link/image backing은 0이며 Retry full snapshot이 새 screen을 구성해야 한다. store-only
+  detach commit 중 callback/allocation 0, finish cleanup exact once와 실제 placeholder marker/title/runtime ID를
+  production-type/headless render로 검증한다.
+- termination revoke는 writer offset 0 purge와 모든 partial offset의 connection abort를 검증하며, 이미 전송된 prefix 외
+  payload suffix와 후속 sibling frame은 0이다.
+- mutation `beginMutation`과 freeze/seal의 두 interleaving, Window 이동 중 X partial 뒤 Y/input/control/paste/IME suffix
+  전부 quarantine, takeover 송신 0만 old writable 복귀, unknown/conflict의 old write 0을 검증한다. 입력은 0/partial/full wire
+  admission에서 duplicate 0, 자동 재전송 0, incident·runtime notice 1을, paste는 1 MiB/item·runtime 1개·app 8 MiB·10분 TTL,
+  zeroize, Discard/전체 재전송 single-use 확인과 suffix-only action 0을 검증한다. BEL·OSC 9/777·OSC 52는
+  reconnect 전 historical replay와 실제 AppKit clipboard 호출 0을 검증한다. X ambiguous frame 뒤 Y/control suffix 전부 폐기,
+  mutation freeze 중 old/new wire mutation 0, snapshot+delta contiguous catch-up도 자동 gate다. 실제 AppKit render/IME와
+  장시간 poison/backoff는 CR6 제품 gate다.
+
 ## PR마다 확인할 질문
 
 - 새 기능이 이 표의 어느 검증 경로에 연결되는가?

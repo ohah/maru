@@ -211,10 +211,20 @@ LiveSurface = struct {
 
 ### 8A.2 라우팅 앱-전역화 + AppRuntime coordinator (문제 1의 배치 층)
 
-cross-window 이동 후 목적지 창의 메인 스레드가 옮겨온 surface에 입력/resize/명령을 라우팅하려면 그 창의 라우팅 표가 링크를 알아야 한다. 현재 `SurfaceRuntime`이 per-window라 두 선택지가 있다:
+영속 host의 실행 중 reconnect도 이 주소 안정성 계약을 깨지 않는다. Window tree나
+Term/Surface/`surface_id`/routing link를 교체하지 않고, heap-pin된 `RemoteRuntime` stable shell 내부의 generation bundle과
+stable `HostAdapter`의 Client generation만 prepare/publish/retire한다. `Surface.remote`는 stable proxy를 가리키고 한
+render borrow 동안 exact screen generation을 고정하므로 lock과 unlock 사이 교체가 없다. 따라서 cross-window 이동과
+reconnect가 겹쳐도 배치 transaction은 기존 Surface만 옮긴다. per-host reconnect 정책/job은 앱 전역
+`SessionHostCoordinator`가, canonical runtime membership과 실행 adapter는 `RemoteTermBackend`가 소유한다. Window별
+reconnect budget이나 두 번째 global Surface/binding registry는 만들지 않는다. 상세 수명 계약은
+[영속 터미널 세션 호스트](persistent-session-host.md#실행-중-connection-invalidation과-재연결)가 소유한다.
 
-- **채택: `SurfaceRuntime`을 앱-전역으로 승격**하고 `AppRuntime`(L4 coordinator, `src/app` 또는 `src/platform/macos`)이 **{registry, SurfaceIdAllocator, 앱-전역 SurfaceRuntime}**를 소유한다. 이동은 라우팅을 **전혀 안 건드린다**(링크가 surface_id로 keyed돼 그대로 유효, 목적지 창 메인 스레드가 같은 표를 조회). §3의 "단일 정책 소유자 AppRuntime"을 실체화하는 것이고, 모듈-로컬 `var`(app_live_registry·app_surface_ids)를 AppRuntime 필드로 정식화한다. reader는 interactive 모드에서 core에 **직접** 쓰므로(setProcessing) SurfaceRuntime 승격과 무관하고, per-Term `pump`만 앱-전역 runtime에 바인딩하도록 재배선한다.
-- **대안(미채택): per-window 유지 + 이동 시 링크 마이그레이션**(A의 runtime에서 detach → B의 runtime에 attach + pump 재바인딩). per-move churn이 크고 AppRuntime 설계와 어긋난다.
+M3b 이전에는 `SurfaceRuntime`이 per-window였지만 현재는 앱 전역 `AppRuntime.routing`이 모든 Window의 link를 소유한다.
+cross-window 이동 후 목적지 창의 메인 스레드는 이 같은 표를 조회하므로 surface 이동 때 routing을 바꾸지 않는다.
+
+- `AppRuntime`은 `{registry, SurfaceIdAllocator, 앱 전역 SurfaceRuntime}`을 소유한다. reader는 interactive 모드에서 core에
+  직접 쓰므로 routing 승격과 무관하고, per-Term pump도 같은 앱 전역 runtime에 바인딩된다.
 
 **레이어**: AppRuntime은 핸들 수명을 직접 들되(L4) 이동 가부·drop target·정규화는 L2 순수 함수를 호출한다(§3 배치 규칙 — 정책과 플랫폼 핸들을 한 god object에 안 섞음).
 

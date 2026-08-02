@@ -5534,7 +5534,7 @@ pub const AppSession = struct {
         const size = layout_math.gridFromRectPx(self.cell_width_px, self.cell_height_px, self.active_pane_rect.w, self.active_pane_rect.h);
         var cfg = self.new_tab_config;
         cfg.size = size;
-        var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.shell, self.loaded_config.config.env, self.new_tab_zdotdir, self.new_tab_ssh_bin);
+        var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.shell, self.loaded_config.config.env, self.shellIntegrationZdotdir(), self.new_tab_ssh_bin);
         // 서페이스(새 Term)는 Term 탭이라 tab-inherit-cwd 토글을 따른다(켜지면 포커스 cwd 상속, 아니면 root).
         // append 전에 읽어야 focusedTermCwd의 activeTerm이 아직 현재(=직전 포커스) Term을 가리킨다.
         var root_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -5572,7 +5572,7 @@ pub const AppSession = struct {
         const size = layout_math.gridFromRectPx(self.cell_width_px, self.cell_height_px, self.active_pane_rect.w, self.active_pane_rect.h);
         var cfg = self.new_tab_config;
         cfg.size = size;
-        var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.shell, self.loaded_config.config.env, self.new_tab_zdotdir, self.new_tab_ssh_bin);
+        var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.shell, self.loaded_config.config.env, self.shellIntegrationZdotdir(), self.new_tab_ssh_bin);
         if (usableRestoreCwd(tomb.rt.observation.cwd.items)) |c| req.cwd = c;
         const fresh = try self.createTerm(req, size, cfg.queue_capacity, "Maru", commandName(cfg.command_kind));
 
@@ -5668,7 +5668,7 @@ pub const AppSession = struct {
         // 3) 새 panel을 b 크기로 spawn(새 셸). 실패하면 트리/탭은 그대로다.
         var cfg = self.new_tab_config;
         cfg.size = b_size;
-        var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.shell, self.loaded_config.config.env, self.new_tab_zdotdir, self.new_tab_ssh_bin);
+        var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.shell, self.loaded_config.config.env, self.shellIntegrationZdotdir(), self.new_tab_ssh_bin);
         // 팬(분할)은 split-inherit-cwd면 분할되는(활성) pane의 활성 Term cwd 상속, 아니면 root. 아래 트리 변형
         // 전에 읽어 focusedTermCwd의 active가 아직 포커스 Term을 가리킨다.
         var root_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -6016,6 +6016,26 @@ pub const AppSession = struct {
         if (!self.observer_attach_notice_pending or self.anyModalOverlayOpen()) return;
         self.observer_attach_notice_pending = false;
         self.showNotice("다른 창이 이 세션을 제어 중이라 관찰 모드로 연결했습니다. 화면은 갱신되지만 입력은 전달되지 않습니다.");
+    }
+
+    /// 새 셸에 주입할 통합 `ZDOTDIR`. **spawn 직전에 통합 파일이 아직 있는지 확인하고 없으면 다시 쓴다.**
+    ///
+    /// `setupZsh`는 앱 시작 때 한 번만 돌고 그 경로를 `new_tab_zdotdir`에 보관한다. 그런데 이 파일은 캐시에
+    /// 있어 사용자가 캐시를 비우면 사라지는데, 앱은 계속 실행 중이라 아무도 다시 만들지 않는다. 그러면 이후
+    /// 열리는 **모든** 탭이 존재하지 않는 `ZDOTDIR`을 받고, zsh는 그 빈 디렉터리에서 설정을 찾다가 사용자의
+    /// `.zshrc`를 통째로 건너뛴다 — PATH도 자동완성도 OSC 133도 전부 사라지는데 화면에는 아무 단서가 없다.
+    /// 캐시를 비운 뒤 실제로 그 사고를 겪었다.
+    ///
+    /// 파일 하나 `stat`이라 spawn 경로에 얹어도 비용이 없다. 없을 때만 다시 쓰고, 재생성이 실패해도 보관 중인
+    /// 경로를 그대로 돌려준다 — 통합이 없는 평범한 셸로 뜨는 편이 spawn 자체를 막는 것보다 낫다.
+    fn shellIntegrationZdotdir(self: *AppSession) ?[]const u8 {
+        const dir = self.new_tab_zdotdir orelse return null;
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const zshenv = std.fmt.bufPrint(&buf, "{s}/.zshenv", .{dir}) catch return dir;
+        if (std.Io.Dir.cwd().statFile(self.io, zshenv, .{})) |_| return dir else |_| {}
+        // 사라졌다 — 다시 쓴다. 경로 규칙이 같으므로 보관 중인 `dir`이 그대로 유효하고, 새로 할당된 사본만 버린다.
+        if (shell_integration.setupZsh(self.io, self.allocator)) |fresh| self.allocator.free(fresh);
+        return dir;
     }
 
     fn showPendingHostConnectNotice(self: *AppSession) void {
@@ -10054,7 +10074,7 @@ pub const AppSession = struct {
         // 같은 계약을 따른다 — resizeActiveTabPanes가 단일 leaf에 적용하는 grid와도 정확히 일치한다.
         const full = self.paneTermRect(self.termRect());
         cfg.size = layout_math.gridFromRectPx(self.cell_width_px, self.cell_height_px, full.w, full.h);
-        var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.shell, self.loaded_config.config.env, self.new_tab_zdotdir, self.new_tab_ssh_bin);
+        var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.shell, self.loaded_config.config.env, self.shellIntegrationZdotdir(), self.new_tab_ssh_bin);
         // 새 워크스페이스 탭: tab-inherit-cwd면 포커스 cwd 상속, 아니면 root(Ghostty tab-inherit 모델).
         var root_buf: [std.fs.max_path_bytes]u8 = undefined;
         self.applySpawnCwd(&req, &root_buf, self.loaded_config.config.workspace.tab_inherit_cwd);
@@ -25305,7 +25325,7 @@ pub const AppSession = struct {
         var cfg = self.new_tab_config;
         const size = restoreSurfaceSize(sm);
         cfg.size = size;
-        var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.shell, self.loaded_config.config.env, self.new_tab_zdotdir, self.new_tab_ssh_bin);
+        var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.shell, self.loaded_config.config.env, self.shellIntegrationZdotdir(), self.new_tab_ssh_bin);
         if (usableRestoreCwd(sm.cwd)) |c| req.cwd = c; // 존재하는 디렉터리면 거기서, 아니면 기본 cwd(surface 안 잃음)
         return .{ .req = req, .size = size };
     }

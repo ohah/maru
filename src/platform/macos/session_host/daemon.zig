@@ -131,6 +131,22 @@ pub fn runSessionHostWithIdentityTestAuthorizer(
 /// 무한대를 요청하지 않는 이유는 아래 `raiseFileDescriptorLimit` 주석 참고.
 const desired_fd_limit = 8192;
 
+/// `/tmp` 정리 회피 주기(**벽시계 1시간**).
+///
+/// macOS `com.apple.tmp_cleaner`가 **매일 0시**에 돌며 `atime`·`mtime`·`ctime`이 **모두** 3일을 넘긴 항목을
+/// 지운다(`daily_clean_tmps_days="3"`). 우리 endpoint와 manifest는 bind/publish 시각 이후 아무도 건드리지
+/// 않으므로 — 실측에서 소켓 파일의 시각이 bind 시점 그대로였다 — 3일 이상 조용한 host는 자기 endpoint를
+/// 잃는다. 프로세스는 멀쩡히 살아 있는데 아무도 찾지 못하는 상태가 되고, 사용자에게는 "세션이 그냥 사라진"
+/// 것으로 보인다.
+///
+/// 그래서 살아 있는 동안 주기적으로 시각을 갱신해 그 조건을 깬다. 3일 한계에 1시간은 충분히 짧고 비용은
+/// `utimensat` 몇 번이라 사실상 없다.
+///
+/// **tick 수가 아니라 벽시계로 잰다.** `pollOnce`는 `poll_timeout_ms`를 보장하지 않는다 — armed upgrade나
+/// 도착한 이벤트가 있으면 즉시 반환하므로, 입력이 활발한 host에서는 tick이 훨씬 빨리 돈다. tick으로 세면
+/// 그런 host가 초당 여러 번 touch하게 되어 의미 없는 syscall을 반복한다.
+const runtime_touch_interval_ms: u64 = 60 * 60 * 1000;
+
 /// 자연 종료 유예 — `poll_timeout_ms`(200ms) × 이 횟수만큼 **연속으로** 비어 있어야 종료한다(= 5초).
 /// 마지막 runtime이 사라진 직후 곧바로 죽으면, 그 순간 재접속하려던 GUI가 endpoint를 잃고 새 host를 띄우게 된다.
 const natural_exit_idle_ticks: usize = 25;
@@ -151,6 +167,100 @@ fn shouldExitNaturally(
 ) bool {
     if (!served_any_runtime or runtime_count != 0 or client_count != 0) return false;
     return empty_idle_ticks >= natural_exit_idle_ticks;
+}
+
+/// 지금 `/tmp` 정리 회피 touch를 할 차례인가. **벽시계 기준**이라 tick이 얼마나 빨리 도는지와 무관하다.
+/// 순수 함수라 주기 정책을 daemon 루프 없이 검증한다.
+///
+/// "아직 한 번도 안 찍음"을 `0`이 아니라 `null`로 표현하는 이유: 단조 시계는 부팅 후 경과라 host가 부팅
+/// 직후에 뜨면 `now_ms` 자체가 작다. `0`을 sentinel로 쓰면 그 host의 첫 touch가 1시간 뒤로 밀려, 그동안
+/// 물려받은 옛 시각이 그대로 남는다.
+fn shouldTouchRuntimeArtifacts(now_ms: u64, last_touch_ms: ?u64) bool {
+    const last = last_touch_ms orelse return true;
+    return now_ms -| last >= runtime_touch_interval_ms;
+}
+
+/// 단조 시계의 현재 ms. touch 주기를 벽시계로 재기 위한 것이라 절대 시각일 필요는 없다.
+fn awakeMs(io: std.Io) u64 {
+    const now_ns = std.Io.Clock.awake.now(io).nanoseconds;
+    return if (now_ns <= 0) 0 else @intCast(@divFloor(now_ns, std.time.ns_per_ms));
+}
+
+/// endpoint·manifest·그 부모 디렉터리의 시각을 현재로 갱신해 `tmp_cleaner`의 3일 조건을 깬다.
+///
+/// **best-effort다.** 실패해도 host는 계속 돈다 — 갱신하지 못하면 최악의 경우 3일 뒤 endpoint를 잃지만, 그
+/// 때문에 지금 살아 있는 세션을 끊는 것이 더 나쁘다. 디렉터리까지 찍는 이유는 정리 규칙이 빈 디렉터리도
+/// (`-empty -mtime +3`) 대상으로 삼기 때문이다.
+fn touchRuntimeArtifacts(dir_path: [:0]const u8, socket_path: [:0]const u8, host_id: u128) void {
+    // null times = 현재 시각으로 설정(POSIX). AT_SYMLINK_NOFOLLOW를 주지 않아 경로를 그대로 따른다.
+    _ = c.utimensat(c.AT.FDCWD, socket_path.ptr, null, 0);
+    _ = c.utimensat(c.AT.FDCWD, dir_path.ptr, null, 0);
+    var manifest_buf: [512]u8 = undefined;
+    if (host_manifest.manifestPathIn(&manifest_buf, dir_path, host_id)) |path| {
+        _ = c.utimensat(c.AT.FDCWD, path.ptr, null, 0);
+    } else |_| {}
+    // 소켓과 manifest의 부모(`/tmp/maru-<uid>`, `.../sh`)도 함께 찍는다. 자식이 남아 있으면 `-empty` 조건에
+    // 걸리지 않지만, 자식이 먼저 지워진 뒤 빈 디렉터리로 남는 창을 없앤다.
+    var root_buf: [64]u8 = undefined;
+    if (short_endpoint.userRootPathIn(&root_buf, c.getuid())) |root| {
+        _ = c.utimensat(c.AT.FDCWD, root.ptr, null, 0);
+    } else |_| {}
+    var sock_dir_buf: [64]u8 = undefined;
+    if (short_endpoint.socketDirPathIn(&sock_dir_buf, c.getuid())) |sock_dir| {
+        _ = c.utimensat(c.AT.FDCWD, sock_dir.ptr, null, 0);
+    } else |_| {}
+}
+
+test "tmp 정리 회피: 처음엔 즉시, 그 뒤엔 벽시계 주기로만 touch한다" {
+    // macOS tmp_cleaner는 atime·mtime·ctime이 **모두** 3일을 넘긴 항목을 지운다. 주기가 3일을 넘기면 살아 있는
+    // host가 자기 endpoint를 잃고 프로세스는 남은 채 아무도 찾지 못하는 상태가 된다.
+    try std.testing.expect(shouldTouchRuntimeArtifacts(1_000, null)); // 아직 안 찍음 — 물려받은 옛 시각을 즉시 덮는다
+    const base: u64 = 1_000_000;
+    try std.testing.expect(!shouldTouchRuntimeArtifacts(base, base));
+    try std.testing.expect(!shouldTouchRuntimeArtifacts(base + runtime_touch_interval_ms - 1, base));
+    try std.testing.expect(shouldTouchRuntimeArtifacts(base + runtime_touch_interval_ms, base));
+    // 단조 시계가 뒤로 가는 일은 없어야 하지만, 그렇더라도 saturating 뺄셈이라 폭주하지 않는다.
+    try std.testing.expect(!shouldTouchRuntimeArtifacts(base, base + 5_000));
+}
+
+test "tmp 정리 회피: touch가 실제로 파일 시각을 되돌린다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // 판정 함수만 테스트하면 `utimensat` 호출이 런타임에 무효여도(잘못된 인자·경로) 통과한다. 그러면 host는
+    // 매시간 아무 일도 하지 않고 3일 뒤 endpoint를 잃는다 — 정확히 막으려던 그 상태다.
+    var dir_buf: [128]u8 = undefined;
+    const dir = try std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-touch-test-{d}", .{c.getpid()});
+    _ = c.mkdir(dir.ptr, 0o700);
+    var sock_buf: [192]u8 = undefined;
+    const fake_socket = try std.fmt.bufPrintZ(&sock_buf, "{s}/endpoint.sock", .{dir});
+    defer {
+        _ = c.unlink(fake_socket.ptr);
+        _ = c.rmdir(dir.ptr);
+    }
+    const fd = c.open(fake_socket.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(c.mode_t, 0o600));
+    if (fd < 0) return error.SkipZigTest;
+    _ = c.close(fd);
+
+    // 아주 오래된 시각으로 밀어 3일 조건을 넘긴 상태를 만든다(절대 시각은 무관 — 과거이기만 하면 된다).
+    const ancient: c.timespec = .{ .sec = 1_000_000_000, .nsec = 0 }; // 2001년
+    const past: [2]c.timespec = .{ ancient, ancient };
+    if (c.utimensat(c.AT.FDCWD, fake_socket.ptr, &past, 0) != 0) return error.SkipZigTest;
+
+    const cwd = std.Io.Dir.cwd();
+    const before = cwd.statFile(testing.io, fake_socket, .{}) catch return error.SkipZigTest;
+    touchRuntimeArtifacts(dir, fake_socket, 0xabcd);
+    const after = cwd.statFile(testing.io, fake_socket, .{}) catch return error.SkipZigTest;
+
+    // 갱신되지 않으면 3일 조건을 못 깨고, host는 살아 있는데도 endpoint를 잃는다.
+    try testing.expect(after.mtime.nanoseconds > before.mtime.nanoseconds);
+}
+
+test "tmp 정리 회피 주기는 tmp_cleaner의 3일 한계보다 충분히 짧다" {
+    // 이 부등식이 깨지면 host가 살아 있는데도 endpoint가 사라진다. 상수를 키우는 변경이 조용히 넘어가지 못하게 한다.
+    //
+    // **벽시계로 재는 것이 계약의 일부다.** 예전엔 tick 수로 셌는데 `pollOnce`가 `poll_timeout_ms`를 보장하지
+    // 않아(armed upgrade·도착한 이벤트가 있으면 즉시 반환) 바쁜 host에서는 실제 경과가 훨씬 짧았다.
+    const three_days_ms: u64 = 3 * 24 * 60 * 60 * 1000;
+    try std.testing.expect(runtime_touch_interval_ms * 24 <= three_days_ms); // 한계의 1/24 이하 — 정리 주기(하루)보다 짧다
 }
 
 /// 시작 시 열 수 있는 fd 상한(soft)을 올린다. **exec 업그레이드가 여기에 걸려 한 번도 성공하지 못했다.**
@@ -389,8 +499,16 @@ fn runSessionHostImpl(
     // 곧바로 자기 자신을 종료해 버린다 — spawn한 GUI가 endpoint를 잃는다.
     var served_any_runtime = false;
     var empty_idle_ticks: usize = 0;
+    var last_touch_ms: ?u64 = null;
     while (true) {
         server.tickOwner();
+        // `/tmp`는 매일 정리된다. 살아 있는 동안 endpoint·manifest 시각을 갱신하지 않으면 3일 이상 조용한
+        // host가 자기 endpoint를 잃고, 프로세스는 살아 있는데 아무도 찾지 못하는 상태가 된다.
+        const now_ms = awakeMs(io);
+        if (shouldTouchRuntimeArtifacts(now_ms, last_touch_ms)) {
+            touchRuntimeArtifacts(dir_path, socket_path, host_id);
+            last_touch_ms = now_ms;
+        }
         if (registry.count() != 0) served_any_runtime = true;
         switch (fd_owner.pollOnce(poll_timeout_ms) catch return error.OutOfMemory) {
             .upgrade_ready => {

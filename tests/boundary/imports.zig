@@ -1398,7 +1398,8 @@ test "generation batch Client ownership mutations have one node-bound production
     try std.testing.expectEqual(@as(usize, 2), restore_allocator_references);
     try std.testing.expectEqual(@as(usize, 4), enter_callback_references);
     try std.testing.expectEqual(@as(usize, 4), leave_callback_references);
-    try std.testing.expectEqual(@as(usize, 2), reject_callback_references);
+    // 모든 node-local mutation은 callback TLS를 한 공통 guard에서만 읽는다.
+    try std.testing.expectEqual(@as(usize, 1), reject_callback_references);
     try std.testing.expectEqual(@as(usize, 1), require_buffered_references);
 }
 

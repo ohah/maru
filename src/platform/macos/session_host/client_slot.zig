@@ -166,24 +166,36 @@ pub const ClientNode = struct {
     accounting_ledger: batch_registry_mod.AccountingLedger,
     guarded_allocator: GenerationGuardedAllocator,
     incarnation: lease_mod.Identity,
-    next_snapshot_generation: u64,
-    active_snapshot_generation: u64,
-    active_snapshot_owner_addr: usize,
-    active_snapshot_transport_incarnation: u64,
-    active_snapshot_binding: contract.BindingIdentity,
+    next_operation_generation: u64,
+    active_operation_generation: u64,
+    active_operation_kind: StreamOperationKind,
+    active_operation_owner_thread_incarnation: u64,
+    active_operation_owner_addr: usize,
+    active_operation_transport_incarnation: u64,
+    active_operation_binding: contract.BindingIdentity,
 };
 
-pub const InitialSnapshotPermit = struct {
+pub const StreamOperationKind = enum(u8) {
+    none,
+    initial_snapshot,
+    ended_purge,
+};
+
+pub const StreamOperationPermit = struct {
     slot: *ClientSlot,
     registry_index: u16,
     registry_id: u64,
     slot_incarnation: u64,
     node_incarnation: u64,
     generation: u64,
+    kind: StreamOperationKind,
+    owner_thread_incarnation: u64,
     owner_addr: usize,
     transport_incarnation: u64,
     binding: contract.BindingIdentity,
 };
+
+pub const InitialSnapshotPermit = StreamOperationPermit;
 
 pub const InitError = error{
     InvalidSource,
@@ -209,6 +221,7 @@ pub const AttachmentBindingReservation = struct {
 
 pub const BindingError = cleanup_registry_mod.Error ||
     contract.PreparedAttachmentBinding.TransitionError || error{
+    AdminBusy,
     PinOverflow,
     InvalidLease,
 };
@@ -217,55 +230,81 @@ var issuer_mutex: std.atomic.Mutex = .unlocked;
 var process_issuer: ?lease_mod.IdentityIssuer = null;
 threadlocal var init_active: bool = false;
 threadlocal var batch_release_callback_active: bool = false;
+threadlocal var operation_thread_incarnation: u64 = 0;
+var next_operation_thread_incarnation: std.atomic.Value(u64) = .init(1);
 var alias_quarantine_events: std.atomic.Value(u64) = .init(0);
 
-const max_initial_snapshot_permits = 4096;
-const InitialSnapshotRegistryEntry = struct {
+fn acquireOperationThreadIncarnation() error{IdentityExhausted}!u64 {
+    if (operation_thread_incarnation != 0) return operation_thread_incarnation;
+    var observed = next_operation_thread_incarnation.load(.acquire);
+    while (true) {
+        if (observed == 0 or observed == std.math.maxInt(u64))
+            return error.IdentityExhausted;
+        if (next_operation_thread_incarnation.cmpxchgWeak(
+            observed,
+            observed + 1,
+            .acq_rel,
+            .acquire,
+        )) |actual| {
+            observed = actual;
+            continue;
+        }
+        operation_thread_incarnation = observed;
+        return observed;
+    }
+}
+
+fn operationThreadMatches(incarnation: u64) bool {
+    return incarnation != 0 and operation_thread_incarnation == incarnation;
+}
+
+const max_stream_operation_permits = 4096;
+const StreamOperationRegistryEntry = struct {
     live: bool = false,
     id: u64 = 0,
-    permit: InitialSnapshotPermit = undefined,
+    permit: StreamOperationPermit = undefined,
 };
-var initial_snapshot_registry_mutex: std.atomic.Mutex = .unlocked;
-var initial_snapshot_registry: [max_initial_snapshot_permits]InitialSnapshotRegistryEntry =
-    [_]InitialSnapshotRegistryEntry{.{}} ** max_initial_snapshot_permits;
-var next_initial_snapshot_registry_id: u64 = 1;
+var stream_operation_registry_mutex: std.atomic.Mutex = .unlocked;
+var stream_operation_registry: [max_stream_operation_permits]StreamOperationRegistryEntry =
+    [_]StreamOperationRegistryEntry{.{}} ** max_stream_operation_permits;
+var next_stream_operation_registry_id: u64 = 1;
 
-fn registerInitialSnapshotPermit(fields: InitialSnapshotPermit) error{ AdminBusy, IdentityExhausted }!InitialSnapshotPermit {
-    while (!initial_snapshot_registry_mutex.tryLock()) std.atomic.spinLoopHint();
-    defer initial_snapshot_registry_mutex.unlock();
+fn registerStreamOperationPermit(fields: StreamOperationPermit) error{ AdminBusy, IdentityExhausted }!StreamOperationPermit {
+    while (!stream_operation_registry_mutex.tryLock()) std.atomic.spinLoopHint();
+    defer stream_operation_registry_mutex.unlock();
     var index: usize = 0;
-    while (index < initial_snapshot_registry.len and initial_snapshot_registry[index].live) : (index += 1) {}
-    if (index == initial_snapshot_registry.len) return error.AdminBusy;
-    const id = next_initial_snapshot_registry_id;
-    next_initial_snapshot_registry_id = std.math.add(u64, id, 1) catch
+    while (index < stream_operation_registry.len and stream_operation_registry[index].live) : (index += 1) {}
+    if (index == stream_operation_registry.len) return error.AdminBusy;
+    const id = next_stream_operation_registry_id;
+    next_stream_operation_registry_id = std.math.add(u64, id, 1) catch
         return error.IdentityExhausted;
     var permit = fields;
     permit.registry_index = @intCast(index);
     permit.registry_id = id;
-    initial_snapshot_registry[index] = .{ .live = true, .id = id, .permit = permit };
+    stream_operation_registry[index] = .{ .live = true, .id = id, .permit = permit };
     return permit;
 }
 
-fn initialSnapshotPermitRegistryLive(permit: InitialSnapshotPermit) bool {
+fn streamOperationPermitRegistryLive(permit: StreamOperationPermit) bool {
     const index: usize = permit.registry_index;
-    if (index >= initial_snapshot_registry.len or permit.registry_id == 0) return false;
-    while (!initial_snapshot_registry_mutex.tryLock()) std.atomic.spinLoopHint();
-    defer initial_snapshot_registry_mutex.unlock();
-    const entry = initial_snapshot_registry[index];
+    if (index >= stream_operation_registry.len or permit.registry_id == 0) return false;
+    while (!stream_operation_registry_mutex.tryLock()) std.atomic.spinLoopHint();
+    defer stream_operation_registry_mutex.unlock();
+    const entry = stream_operation_registry[index];
     return entry.live and entry.id == permit.registry_id and std.meta.eql(entry.permit, permit);
 }
 
-fn unregisterInitialSnapshotPermit(permit: InitialSnapshotPermit) error{InvalidSnapshotPermit}!void {
+fn unregisterStreamOperationPermit(permit: StreamOperationPermit) error{InvalidStreamOperationPermit}!void {
     const index: usize = permit.registry_index;
-    if (index >= initial_snapshot_registry.len or permit.registry_id == 0)
-        return error.InvalidSnapshotPermit;
-    while (!initial_snapshot_registry_mutex.tryLock()) std.atomic.spinLoopHint();
-    defer initial_snapshot_registry_mutex.unlock();
-    const entry = initial_snapshot_registry[index];
+    if (index >= stream_operation_registry.len or permit.registry_id == 0)
+        return error.InvalidStreamOperationPermit;
+    while (!stream_operation_registry_mutex.tryLock()) std.atomic.spinLoopHint();
+    defer stream_operation_registry_mutex.unlock();
+    const entry = stream_operation_registry[index];
     if (!entry.live or entry.id != permit.registry_id or !std.meta.eql(entry.permit, permit))
-        return error.InvalidSnapshotPermit;
-    initial_snapshot_registry[index].live = false;
-    initial_snapshot_registry[index].permit = undefined;
+        return error.InvalidStreamOperationPermit;
+    stream_operation_registry[index].live = false;
+    stream_operation_registry[index].permit = undefined;
 }
 
 fn recordAliasQuarantine() bool {
@@ -341,6 +380,7 @@ pub const ClientSlot = struct {
     incarnation: lease_mod.Identity,
     pid: u32,
     process_nonce: u64,
+    operation_owner_thread_incarnation: u64,
     next_binding_incarnation: u64,
     lifecycle: Lifecycle,
 
@@ -371,6 +411,7 @@ pub const ClientSlot = struct {
         if (@intFromPtr(out) == @intFromPtr(source)) return error.InvalidDestination;
         if (host_id == 0 or source.host_id != host_id or !source.canMoveToGenerationNode())
             return error.InvalidSource;
+        const operation_owner_thread_incarnation = try acquireOperationThreadIncarnation();
 
         const slot_identity = issuer.reserve(.slot, pid) catch |err| return switch (err) {
             error.IdentityExhausted => error.IdentityExhausted,
@@ -427,11 +468,13 @@ pub const ClientSlot = struct {
         ) catch unreachable;
         node.accounting_ledger = .{};
         batch_registry_mod.AccountingLedger.initInPlace(&node.accounting_ledger) catch unreachable;
-        node.next_snapshot_generation = 1;
-        node.active_snapshot_generation = 0;
-        node.active_snapshot_owner_addr = 0;
-        node.active_snapshot_transport_incarnation = 0;
-        node.active_snapshot_binding = undefined;
+        node.next_operation_generation = 1;
+        node.active_operation_generation = 0;
+        node.active_operation_kind = .none;
+        node.active_operation_owner_thread_incarnation = 0;
+        node.active_operation_owner_addr = 0;
+        node.active_operation_transport_incarnation = 0;
+        node.active_operation_binding = undefined;
         node.guarded_allocator = .{
             .parent = source.allocator,
             .node_start = node_start,
@@ -462,6 +505,7 @@ pub const ClientSlot = struct {
             .incarnation = slot_identity,
             .pid = pid,
             .process_nonce = issuer.process_nonce,
+            .operation_owner_thread_incarnation = operation_owner_thread_incarnation,
             .next_binding_incarnation = 1,
             .lifecycle = .live,
         };
@@ -474,6 +518,7 @@ pub const ClientSlot = struct {
     pub fn valid(self: *const ClientSlot) bool {
         if (self.self_addr != @intFromPtr(self) or self.lifecycle != .live or
             self.pid != currentPid() or self.process_nonce == 0 or
+            self.operation_owner_thread_incarnation == 0 or
             self.incarnation.kind() != .slot)
             return false;
         _ = self.current.cleanup_registry.count() catch return false;
@@ -503,6 +548,7 @@ pub const ClientSlot = struct {
         role: contract.AttachmentRole,
     ) BindingError!AttachmentBindingReservation {
         if (!self.valid()) return error.MovedOrCopied;
+        if (self.current.active_operation_generation != 0) return error.AdminBusy;
         const protected = .{
             self,
             self.current,
@@ -553,6 +599,7 @@ pub const ClientSlot = struct {
         reservation: AttachmentBindingReservation,
     ) BindingError!void {
         if (!self.valid()) return error.MovedOrCopied;
+        if (self.current.active_operation_generation != 0) return error.AdminBusy;
         if (!binding.validAtFinalAddress()) return error.MovedOrCopied;
         const canonical = binding.identity orelse return error.InvalidIdentity;
         if (!canonical.matches(reservation.identity) or
@@ -573,6 +620,7 @@ pub const ClientSlot = struct {
         executed: contract.ExecutedCallReceipt,
     ) BindingError!void {
         if (!self.valid()) return error.MovedOrCopied;
+        if (self.current.active_operation_generation != 0) return error.AdminBusy;
         if (!binding.validAtFinalAddress()) return error.MovedOrCopied;
         const canonical = binding.identity orelse return error.InvalidIdentity;
         const prepared = binding.prepared_call orelse return error.InvalidState;
@@ -596,6 +644,7 @@ pub const ClientSlot = struct {
         lease_out: *lease_mod.ConnectionLease,
     ) BindingError!void {
         if (!self.valid()) return error.MovedOrCopied;
+        if (self.current.active_operation_generation != 0) return error.AdminBusy;
         if (!binding.validAtFinalAddress()) return error.MovedOrCopied;
         const canonical = binding.identity orelse return error.InvalidIdentity;
         const prepared = binding.prepared_call orelse return error.InvalidState;
@@ -638,6 +687,7 @@ pub const ClientSlot = struct {
         lease: *lease_mod.ConnectionLease,
     ) BindingError!void {
         if (!self.valid()) return error.MovedOrCopied;
+        if (self.current.active_operation_generation != 0) return error.AdminBusy;
         if (!binding.validAtFinalAddress()) return error.MovedOrCopied;
         const canonical = binding.identity orelse return error.InvalidIdentity;
         if (!canonical.matches(reservation.identity) or
@@ -778,6 +828,12 @@ pub const ClientSlot = struct {
         self.current.client.poison(reason);
     }
 
+    /// Client의 allocator callback TLS는 node-local mutation 진입점들이 같은 방식으로 읽는다.
+    fn generationAllocatorCallbackActive(self: *const ClientSlot) bool {
+        self.current.client.rejectGenerationAllocatorCallbackReentry() catch return true;
+        return false;
+    }
+
     pub const InitialSnapshotRead = struct {
         bytes: []u8,
         allocator: std.mem.Allocator,
@@ -789,33 +845,62 @@ pub const ClientSlot = struct {
         transport_incarnation: u64,
         binding: contract.BindingIdentity,
     ) error{ InvalidSnapshotPermit, AdminBusy, IdentityExhausted }!InitialSnapshotPermit {
-        if (!self.valid() or owner_addr == 0 or transport_incarnation == 0 or
-            self.current.active_snapshot_generation != 0 or
+        return self.prepareStreamOperationPermit(
+            .initial_snapshot,
+            owner_addr,
+            transport_incarnation,
+            binding,
+        ) catch |err| switch (err) {
+            error.InvalidStreamOperationPermit => error.InvalidSnapshotPermit,
+            error.AdminBusy => error.AdminBusy,
+            error.IdentityExhausted => error.IdentityExhausted,
+        };
+    }
+
+    pub fn prepareStreamOperationPermit(
+        self: *ClientSlot,
+        kind: StreamOperationKind,
+        owner_addr: usize,
+        transport_incarnation: u64,
+        binding: contract.BindingIdentity,
+    ) error{ InvalidStreamOperationPermit, AdminBusy, IdentityExhausted }!StreamOperationPermit {
+        if (!self.valid() or
+            !operationThreadMatches(self.operation_owner_thread_incarnation) or
+            kind == .none or owner_addr == 0 or transport_incarnation == 0 or
             binding.slot_incarnation != self.incarnation.tagged or
             binding.node_incarnation != self.current.incarnation.tagged or
             binding.host_id != self.current.client.host_id or
             binding.connection_generation != 1 or binding.pid != self.pid or
             binding.process_nonce != self.process_nonce)
-            return error.InvalidSnapshotPermit;
-        const generation = self.current.next_snapshot_generation;
+            return error.InvalidStreamOperationPermit;
+        if (batch_release_callback_active or self.current.active_operation_generation != 0 or
+            self.current.pin_owner.active_cleanup != 0)
+            return error.AdminBusy;
+        if (self.generationAllocatorCallbackActive()) return error.AdminBusy;
+        const generation = self.current.next_operation_generation;
         const next_generation = std.math.add(u64, generation, 1) catch
             return error.IdentityExhausted;
-        const permit = try registerInitialSnapshotPermit(.{
+        const owner_thread_incarnation = self.operation_owner_thread_incarnation;
+        const permit = try registerStreamOperationPermit(.{
             .slot = self,
             .registry_index = 0,
             .registry_id = 0,
             .slot_incarnation = self.incarnation.tagged,
             .node_incarnation = self.current.incarnation.tagged,
             .generation = generation,
+            .kind = kind,
+            .owner_thread_incarnation = owner_thread_incarnation,
             .owner_addr = owner_addr,
             .transport_incarnation = transport_incarnation,
             .binding = binding,
         });
-        self.current.next_snapshot_generation = next_generation;
-        self.current.active_snapshot_generation = generation;
-        self.current.active_snapshot_owner_addr = owner_addr;
-        self.current.active_snapshot_transport_incarnation = transport_incarnation;
-        self.current.active_snapshot_binding = binding;
+        self.current.next_operation_generation = next_generation;
+        self.current.active_operation_generation = generation;
+        self.current.active_operation_kind = kind;
+        self.current.active_operation_owner_thread_incarnation = owner_thread_incarnation;
+        self.current.active_operation_owner_addr = owner_addr;
+        self.current.active_operation_transport_incarnation = transport_incarnation;
+        self.current.active_operation_binding = binding;
         return permit;
     }
 
@@ -823,15 +908,26 @@ pub const ClientSlot = struct {
         self: *const ClientSlot,
         permit: InitialSnapshotPermit,
     ) bool {
-        if (!initialSnapshotPermitRegistryLive(permit)) return false;
+        return permit.kind == .initial_snapshot and self.streamOperationPermitLive(permit);
+    }
+
+    pub fn streamOperationPermitLive(
+        self: *const ClientSlot,
+        permit: StreamOperationPermit,
+    ) bool {
+        if (!operationThreadMatches(permit.owner_thread_incarnation)) return false;
+        if (!streamOperationPermitRegistryLive(permit)) return false;
         return self.valid() and permit.slot == self and
             permit.slot_incarnation == self.incarnation.tagged and
             permit.node_incarnation == self.current.incarnation.tagged and
             permit.generation != 0 and
-            permit.generation == self.current.active_snapshot_generation and
-            permit.owner_addr == self.current.active_snapshot_owner_addr and
-            permit.transport_incarnation == self.current.active_snapshot_transport_incarnation and
-            std.meta.eql(permit.binding, self.current.active_snapshot_binding);
+            permit.generation == self.current.active_operation_generation and
+            permit.kind != .none and permit.kind == self.current.active_operation_kind and
+            permit.owner_thread_incarnation == self.operation_owner_thread_incarnation and
+            permit.owner_thread_incarnation == self.current.active_operation_owner_thread_incarnation and
+            permit.owner_addr == self.current.active_operation_owner_addr and
+            permit.transport_incarnation == self.current.active_operation_transport_incarnation and
+            std.meta.eql(permit.binding, self.current.active_operation_binding);
     }
 
     pub fn abortInitialSnapshotPermit(
@@ -839,8 +935,7 @@ pub const ClientSlot = struct {
         permit: InitialSnapshotPermit,
     ) error{InvalidSnapshotPermit}!void {
         if (!self.initialSnapshotPermitLive(permit)) return error.InvalidSnapshotPermit;
-        try unregisterInitialSnapshotPermit(permit);
-        self.clearInitialSnapshotPermit();
+        self.abortStreamOperationPermit(permit) catch return error.InvalidSnapshotPermit;
     }
 
     pub fn consumeInitialSnapshotPermit(
@@ -848,21 +943,54 @@ pub const ClientSlot = struct {
         permit: InitialSnapshotPermit,
     ) error{InvalidSnapshotPermit}!void {
         if (!self.initialSnapshotPermitLive(permit)) return error.InvalidSnapshotPermit;
-        try unregisterInitialSnapshotPermit(permit);
-        self.clearInitialSnapshotPermit();
+        self.consumeStreamOperationPermit(permit) catch return error.InvalidSnapshotPermit;
     }
 
     pub fn initialSnapshotPermitIdle(self: *const ClientSlot) bool {
-        return self.valid() and self.current.active_snapshot_generation == 0 and
-            self.current.active_snapshot_owner_addr == 0 and
-            self.current.active_snapshot_transport_incarnation == 0;
+        return self.streamOperationPermitIdle();
     }
 
-    fn clearInitialSnapshotPermit(self: *ClientSlot) void {
-        self.current.active_snapshot_generation = 0;
-        self.current.active_snapshot_owner_addr = 0;
-        self.current.active_snapshot_transport_incarnation = 0;
-        self.current.active_snapshot_binding = undefined;
+    pub fn abortStreamOperationPermit(
+        self: *ClientSlot,
+        permit: StreamOperationPermit,
+    ) error{InvalidStreamOperationPermit}!void {
+        if (!self.streamOperationPermitLive(permit)) return error.InvalidStreamOperationPermit;
+        if (batch_release_callback_active or self.current.pin_owner.active_cleanup != 0)
+            return error.InvalidStreamOperationPermit;
+        if (self.generationAllocatorCallbackActive())
+            return error.InvalidStreamOperationPermit;
+        try unregisterStreamOperationPermit(permit);
+        self.clearStreamOperationPermit();
+    }
+
+    pub fn consumeStreamOperationPermit(
+        self: *ClientSlot,
+        permit: StreamOperationPermit,
+    ) error{InvalidStreamOperationPermit}!void {
+        if (!self.streamOperationPermitLive(permit)) return error.InvalidStreamOperationPermit;
+        if (batch_release_callback_active or self.current.pin_owner.active_cleanup != 0)
+            return error.InvalidStreamOperationPermit;
+        if (self.generationAllocatorCallbackActive())
+            return error.InvalidStreamOperationPermit;
+        try unregisterStreamOperationPermit(permit);
+        self.clearStreamOperationPermit();
+    }
+
+    pub fn streamOperationPermitIdle(self: *const ClientSlot) bool {
+        return self.valid() and self.current.active_operation_generation == 0 and
+            self.current.active_operation_kind == .none and
+            self.current.active_operation_owner_thread_incarnation == 0 and
+            self.current.active_operation_owner_addr == 0 and
+            self.current.active_operation_transport_incarnation == 0;
+    }
+
+    fn clearStreamOperationPermit(self: *ClientSlot) void {
+        self.current.active_operation_generation = 0;
+        self.current.active_operation_kind = .none;
+        self.current.active_operation_owner_thread_incarnation = 0;
+        self.current.active_operation_owner_addr = 0;
+        self.current.active_operation_transport_incarnation = 0;
+        self.current.active_operation_binding = undefined;
     }
 
     pub fn readInitialSnapshotGuarded(
@@ -921,6 +1049,7 @@ pub const ClientSlot = struct {
         stream_id: u64,
     ) BatchError!AttachmentBatchRead {
         if (!self.valid()) return error.MovedOrCopied;
+        if (self.current.active_operation_generation != 0) return error.AdminBusy;
         // buffered payload의 free callback에서는 allocation 없는 exact pending sibling만 허용한다.
         // miss를 parser/socket으로 내리면 parent allocator callback 안에서 wire와 allocator를 재진입한다.
         if (batch_release_callback_active)
@@ -974,8 +1103,9 @@ pub const ClientSlot = struct {
         token: batch_registry_mod.Token,
     ) BatchError!void {
         if (!self.valid()) return error.MovedOrCopied;
+        if (self.current.active_operation_generation != 0) return error.AdminBusy;
         if (batch_release_callback_active) return error.AdminBusy;
-        try self.current.client.rejectGenerationAllocatorCallbackReentry();
+        if (self.generationAllocatorCallbackActive()) return error.AdminBusy;
         var cleanup: batch_registry_mod.OwnedBatch = .{};
         const receipt = try self.current.batch_registry.preflightRelease(token, &cleanup);
         const accounting = try self.current.client.prepareGenerationAccountingConsume(receipt);
@@ -997,8 +1127,8 @@ pub const ClientSlot = struct {
         if (self.lifecycle == .dead) return .already_dead;
         if (!self.valid()) return if (self.lifecycle == .deinit_reserved) .busy else .corrupt;
         if (batch_release_callback_active) return .busy;
-        self.current.client.rejectGenerationAllocatorCallbackReentry() catch return .busy;
-        if (self.current.active_snapshot_generation != 0) return .busy;
+        if (self.generationAllocatorCallbackActive()) return .busy;
+        if (self.current.active_operation_generation != 0) return .busy;
         if (self.current.pin_owner.cleanup_pin_count != 0 or
             self.current.pin_owner.active_cleanup != 0)
             return .busy;
@@ -2265,4 +2395,174 @@ test "CR3a-2c1 node canonical snapshot permit rejects stale authority replay and
     try std.testing.expectError(error.InvalidSnapshotPermit, slot.abortInitialSnapshotPermit(spliced));
     try slot.abortInitialSnapshotPermit(second);
     try std.testing.expect(slot.initialSnapshotPermitIdle());
+}
+
+test "CR3a-2c2 node stream operation permit serializes snapshot and ended purge" {
+    const allocator = std.testing.allocator;
+    var source = fixtureClient(allocator, 0xF5);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0xF5);
+    defer slot.deinit();
+    var binding: contract.PreparedAttachmentBinding = .{};
+    var lease: lease_mod.ConnectionLease = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0x45);
+    defer slot.abortAttachmentBinding(&binding, reservation) catch
+        @panic("stream operation permit test binding cleanup drifted");
+
+    var foreign_prepare_rejected: std.atomic.Value(bool) = .init(false);
+    const ForeignPrepare = struct {
+        fn run(
+            target: *ClientSlot,
+            identity: contract.BindingIdentity,
+            rejected: *std.atomic.Value(bool),
+        ) void {
+            if (target.prepareStreamOperationPermit(
+                .ended_purge,
+                0x3000,
+                10,
+                identity,
+            )) |_| {
+                return;
+            } else |err| {
+                if (err == error.InvalidStreamOperationPermit)
+                    rejected.store(true, .release);
+            }
+        }
+    };
+    const foreign_prepare = try std.Thread.spawn(
+        .{},
+        ForeignPrepare.run,
+        .{ &slot, reservation.identity, &foreign_prepare_rejected },
+    );
+    foreign_prepare.join();
+    try std.testing.expect(foreign_prepare_rejected.load(.acquire));
+    try std.testing.expect(slot.streamOperationPermitIdle());
+
+    const snapshot = try slot.prepareStreamOperationPermit(
+        .initial_snapshot,
+        0x2000,
+        10,
+        reservation.identity,
+    );
+    try std.testing.expect(slot.streamOperationPermitLive(snapshot));
+    var wrong_thread_rejected: std.atomic.Value(bool) = .init(false);
+    const WrongThread = struct {
+        fn run(
+            target: *ClientSlot,
+            captured: StreamOperationPermit,
+            rejected: *std.atomic.Value(bool),
+        ) void {
+            target.abortStreamOperationPermit(captured) catch |abort_err| {
+                if (abort_err != error.InvalidStreamOperationPermit) return;
+                target.consumeStreamOperationPermit(captured) catch |consume_err| {
+                    if (consume_err != error.InvalidStreamOperationPermit) return;
+                    if (target.streamOperationPermitLive(captured)) return;
+                    rejected.store(true, .release);
+                };
+            };
+        }
+    };
+    const wrong_thread = try std.Thread.spawn(
+        .{},
+        WrongThread.run,
+        .{ &slot, snapshot, &wrong_thread_rejected },
+    );
+    wrong_thread.join();
+    try std.testing.expect(wrong_thread_rejected.load(.acquire));
+    try std.testing.expect(slot.streamOperationPermitLive(snapshot));
+    try std.testing.expectError(
+        error.AdminBusy,
+        slot.abortAttachmentBinding(&binding, reservation),
+    );
+    try std.testing.expectError(error.AdminBusy, slot.readAttachmentBatch(7));
+    try std.testing.expectError(
+        error.AdminBusy,
+        slot.releaseAttachmentBatch(std.mem.zeroes(batch_registry_mod.Token)),
+    );
+    try std.testing.expectError(
+        error.AdminBusy,
+        slot.prepareStreamOperationPermit(
+            .ended_purge,
+            0x3000,
+            10,
+            reservation.identity,
+        ),
+    );
+    batch_release_callback_active = true;
+    defer batch_release_callback_active = false;
+    try std.testing.expectError(
+        error.InvalidStreamOperationPermit,
+        slot.abortStreamOperationPermit(snapshot),
+    );
+    try std.testing.expectError(
+        error.InvalidStreamOperationPermit,
+        slot.consumeStreamOperationPermit(snapshot),
+    );
+    try std.testing.expect(slot.streamOperationPermitLive(snapshot));
+    try std.testing.expectError(
+        error.AdminBusy,
+        slot.abortAttachmentBinding(&binding, reservation),
+    );
+    try std.testing.expectError(
+        error.AdminBusy,
+        slot.prepareStreamOperationPermit(
+            .ended_purge,
+            0x3000,
+            10,
+            reservation.identity,
+        ),
+    );
+    batch_release_callback_active = false;
+    try slot.consumeStreamOperationPermit(snapshot);
+
+    const purge = try slot.prepareStreamOperationPermit(
+        .ended_purge,
+        0x3000,
+        10,
+        reservation.identity,
+    );
+    try std.testing.expectEqual(StreamOperationKind.ended_purge, purge.kind);
+    try std.testing.expect(slot.streamOperationPermitLive(purge));
+    try std.testing.expectError(error.AdminBusy, slot.readAttachmentBatch(7));
+    try std.testing.expectError(
+        error.AdminBusy,
+        slot.releaseAttachmentBatch(std.mem.zeroes(batch_registry_mod.Token)),
+    );
+    var wrong_kind = purge;
+    wrong_kind.kind = .initial_snapshot;
+    try std.testing.expect(!slot.streamOperationPermitLive(wrong_kind));
+    try std.testing.expectError(
+        error.InvalidStreamOperationPermit,
+        slot.consumeStreamOperationPermit(wrong_kind),
+    );
+    try slot.abortStreamOperationPermit(purge);
+    try std.testing.expect(slot.streamOperationPermitIdle());
+}
+
+test "CR3a-2c2 stale stream operation permit rejects before deinitialized node access" {
+    const allocator = std.testing.allocator;
+    var source = fixtureClient(allocator, 0xF6);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0xF6);
+    var binding: contract.PreparedAttachmentBinding = .{};
+    var lease: lease_mod.ConnectionLease = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0x46);
+    const permit = try slot.prepareStreamOperationPermit(
+        .ended_purge,
+        0x4000,
+        11,
+        reservation.identity,
+    );
+    try slot.consumeStreamOperationPermit(permit);
+    try slot.abortAttachmentBinding(&binding, reservation);
+    slot.deinit();
+
+    try std.testing.expectError(
+        error.InvalidStreamOperationPermit,
+        slot.abortStreamOperationPermit(permit),
+    );
+    try std.testing.expectError(
+        error.InvalidStreamOperationPermit,
+        slot.consumeStreamOperationPermit(permit),
+    );
 }

@@ -946,7 +946,11 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    위 error별 허용 mutation만 수행한다. commit 뒤 정상과 drift-poison 모두 target cleanup을
    끝내고 no-fail node permit/transport receipt consume을 실행하며 public 결과는 `.purged`다. tests는 poison latch를 별도로
    검증한다. early purge는 canonical attachment drop·registry token release·node cleanup
-   registry·connection lease를 소비하지 않으며 later teardown의 raw demux 정리는 idempotent no-op이다. **2c3**은 capability/input/control/
+   registry·connection lease를 소비하지 않으며 later teardown의 raw demux 정리는 idempotent no-op이다. **2c2a(구현)**는 2c1의 snapshot
+   전용 permit/active tuple/process registry를 kind-tagged `StreamOperationPermit` SSOT로 migration하고 snapshot↔ended-purge 상호 busy와
+   copy/splice/replay 거부를 production-type test로 고정했다. `GenerationBatchRegistry.streamIdle(stream_id)`도
+   reserved/ingress/live/releasing 전 상태를 target purge blocker로 분류한다. 아직 ended peek, Client queue transaction, transport/GUI 제품
+   배선은 구현하지 않았으므로 2c2 완료를 주장하지 않는다. **2c3**은 capability/input/control/
    event/RPC primitive를 exact facade로 옮기고 generation의 `logicalClient()` 사용을 0으로 만든다. **2c4**는
    `RuntimeConnection` union을 mode SSOT로 전환해 `RemoteRuntime.client`와 `generation_adapter` 병렬 필드를 제거하고 exact
    15-method/signature/source oracle을 닫는다. 각 gate는 reconnect/current publish와 제품 동작 변화 0을 유지하며 마지막 2c4

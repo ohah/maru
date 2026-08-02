@@ -474,6 +474,18 @@ pub const Registry = struct {
         return self.live_count;
     }
 
+    /// early demux purge는 해당 stream의 transferred owner가 어느 lifecycle에도 없을 때만 허용한다.
+    /// reserved와 releasing도 canonical 권위를 아직 소유하므로 raw Client queue와 경합하거나
+    /// 그 소유권을 다른 의미로 해석하면 안 된다.
+    pub fn streamIdle(self: *const Registry, stream_id: u64) Error!bool {
+        if (!self.valid()) return error.MovedOrCopied;
+        if (stream_id == 0) return error.InvalidStream;
+        for (self.entries) |entry| {
+            if (entry.lifecycle != .empty and entry.stream_id == stream_id) return false;
+        }
+        return true;
+    }
+
     pub fn preflightDeinit(self: *const Registry) DeinitOutcome {
         if (self.lifecycle == .dead and self.self_addr == @intFromPtr(self)) return .already_dead;
         if (!self.valid()) return .corrupt;
@@ -497,6 +509,43 @@ test "CR3a-2b1 batch registry reserve abort는 polling idle에서 slot을 소비
         try registry.abort(reservation);
     }
     try std.testing.expectEqual(@as(usize, 0), try registry.count());
+}
+
+test "CR3a-2c2 stream idle includes reserved ingress live and releasing owners" {
+    const allocator = std.testing.allocator;
+    var registry: Registry = .{};
+    try registry.initInPlace(12);
+    try std.testing.expect(try registry.streamIdle(7));
+
+    const reservation = try registry.reserve(7);
+    try std.testing.expect(!(try registry.streamIdle(7)));
+    try std.testing.expect(try registry.streamIdle(8));
+    try registry.prepareIngress(reservation);
+    try std.testing.expect(!(try registry.streamIdle(7)));
+
+    const bytes = try allocator.dupe(u8, "batch");
+    var owned: OwnedBatch = .{};
+    try owned.initInPlace(
+        false,
+        7,
+        bytes,
+        allocator,
+        .{ .client_addr = 17, .transfer_id = reservation.entry_generation, .byte_count = bytes.len },
+    );
+    const token = try registry.commit(reservation, &owned);
+    try std.testing.expect(!(try registry.streamIdle(7)));
+
+    var cleanup: OwnedBatch = .{};
+    _ = try registry.preflightRelease(token, &cleanup);
+    registry.beginReleaseUnchecked(token, &cleanup);
+    try std.testing.expect(!(try registry.streamIdle(7)));
+    cleanup.allocator.?.free(cleanup.bytes);
+    cleanup.bytes = &.{};
+    cleanup.allocator = null;
+    cleanup.accounting = .{ .client_addr = 0, .transfer_id = 0, .byte_count = 0 };
+    cleanup.completeCleanupUnchecked();
+    registry.finishReleaseUnchecked(token, &cleanup);
+    try std.testing.expect(try registry.streamIdle(7));
 }
 
 test "CR3a-2b1 batch registry는 pointer-free token으로 exact owner를 release한다" {

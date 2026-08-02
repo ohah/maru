@@ -242,6 +242,61 @@ pub fn build(b: *std.Build) void {
         run_macos_metal_smoke_tests.setCwd(b.path("."));
         test_macos_metal_smoke_step.dependOn(&run_macos_metal_smoke_tests.step);
 
+        // Chrome Lab readback은 synthetic UiTree를 제품 lowering과 renderer의 오프스크린
+        // screenshot pass까지 잇는다. 일반 앱 tab/workspace에 Lab을 넣지 않으며 scenario마다
+        // 별도 process를 써 screenshot env cache와 artifact path를 서로 격리한다.
+        const macos_chrome_lab_smoke = b.addExecutable(.{
+            .name = "maru-macos-chrome-lab-smoke",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/chrome_lab_smoke.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "maru", .module = maru_mod },
+                },
+            }),
+        });
+        macos_chrome_lab_smoke.root_module.addIncludePath(b.path("src/platform/macos"));
+        macos_chrome_lab_smoke.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/macos/chrome_lab_smoke.m"),
+            // dispatch_once inside the product screenshot hook is a system primitive. The app-host
+            // ObjC objects disable UBSan for the same reason: instrumenting its opaque state trips
+            // Zig's runtime checker before Metal gets a chance to run.
+            .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
+        });
+        macos_chrome_lab_smoke.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/macos/maru_metal_renderer.m"),
+            .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
+        });
+        macos_chrome_lab_smoke.root_module.linkFramework("Foundation", .{});
+        macos_chrome_lab_smoke.root_module.linkFramework("Metal", .{});
+        macos_chrome_lab_smoke.root_module.linkFramework("QuartzCore", .{});
+
+        const macos_chrome_lab_smoke_step = b.step("macos-chrome-lab-smoke", "Capture deterministic Chrome Lab scenarios through the product Metal renderer");
+        inline for ([_][]const u8{ "empty", "loading", "retained-list" }) |scenario| {
+            const run_chrome_lab = b.addRunArtifact(macos_chrome_lab_smoke);
+            run_chrome_lab.setCwd(b.path("."));
+            run_chrome_lab.setEnvironmentVariable("MARU_CHROME_LAB_SCENARIO", scenario);
+            macos_chrome_lab_smoke_step.dependOn(&run_chrome_lab.step);
+        }
+
+        const macos_chrome_lab_smoke_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/chrome_lab_smoke.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "maru", .module = maru_mod },
+                },
+            }),
+        });
+        const test_macos_chrome_lab_smoke_step = b.step("test-macos-chrome-lab-smoke", "Run Chrome Lab readback artifact contract tests");
+        const run_macos_chrome_lab_smoke_tests = b.addRunArtifact(macos_chrome_lab_smoke_tests);
+        run_macos_chrome_lab_smoke_tests.setCwd(b.path("."));
+        test_macos_chrome_lab_smoke_step.dependOn(&run_macos_chrome_lab_smoke_tests.step);
+
         // App PTY Metal smoke는 headless app-pty-smoke와 visible Metal smoke를 잇는다.
         // controlled PTY command output이 SurfaceRuntime/AppWindow를 거쳐 CoreText
         // DrawList shaper와 Metal atlas shader sampling까지 도달하는지 확인한다.

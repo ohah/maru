@@ -11,6 +11,7 @@ pub const draw = @import("chrome/draw.zig");
 pub const tokens = @import("chrome/tokens.zig");
 pub const props = @import("chrome/props.zig");
 pub const input = @import("chrome/input.zig");
+pub const layout = @import("chrome/layout.zig");
 pub const state = @import("chrome/state.zig");
 pub const host = @import("chrome/host.zig");
 pub const file_tree_icon = @import("chrome/file_tree_icon.zig");

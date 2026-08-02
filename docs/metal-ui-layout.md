@@ -74,6 +74,25 @@ dispatch한다. component는 `AppSession`, `NativeMetalCell`, Metal API, filesys
 import하지 않는다. children/slot은 명시 prop으로 넘기며, component가 전역 UI
 상태를 찾아보지 않는다.
 
+실제 작성 문법은 JSX/XML parser가 아니라 compile-time Zig value builder다. ML2의
+`UiNode`는 `identity`, `UiStyle`, tagged `props`, `[]const UiNode` children을 가지며,
+부모가 children slice의 수명과 순서를 명시한다. 예를 들어 session card 안의 text는
+다음처럼 tree의 실제 child로 작성한다.
+
+```zig
+const tree = ui.column(.{ .id = .session_dock, .style = .{ .gap = 8 } }, &.{
+    ui.card(.{ .id = session_id, .action = .open_archive }, &.{
+        ui.text(.{ .value = "adsf" }),
+    }),
+});
+```
+
+`column`·`card`·`text`는 `UiNode` value를 반환하는 작은 Zig 함수일 뿐이고, React
+runtime, virtual DOM diff, arbitrary callback closure를 만들지 않는다. host가 immutable
+snapshot마다 frame arena에 이 tree를 만들고, ML2가 재귀 layout해 `UiRectTree`를 낸다.
+ML1의 `layoutFlex(..., []Item, ...)`는 이때 한 parent의 sibling children을 계산하는
+순수 solver이며, 아직 component tree API나 제품 UI를 구현했다는 뜻이 아니다.
+
 ## 3. typed style과 responsive sizing
 
 길이는 문자열 CSS가 아니라 닫힌 typed union이다.
@@ -114,6 +133,14 @@ pub const UiStyle = struct {
 - finite하지 않은 px/percent/fill, 음수 px/fill, 범위 밖 percent, `min > max`는
   parse/props 경계에서 fail-close한다. renderer와 hit-test가 보정된 임의 rect를
   각각 만들지 않는다.
+- edge·gap·child 합산처럼 유한 input에서 생길 수 있는 `f32` overflow도 같은
+  invalid layout으로 끝낸다. explicit min이 없을 때 shrink 하한은 0이며, tiny
+  container가 negative/NaN rect를 만들게 두지 않는다.
+- `UiRect`와 resolved `width`/`height`는 border box다. text measure callback은
+  content 크기를 반환하고 solver가 child padding을 한 번만 더한다. px/percent/flex
+  basis는 이미 padding을 포함하는 border-box 크기다. callback의 `known`/`available`
+  constraint는 margin·padding을 뺀 content box다. 이렇게 해야 fixed hit target,
+  rounded paint, child text inset이 서로 다른 폭을 다시 계산하지 않는다.
 - responsive는 전역 breakpoint보다 **available container size**와 위 sizing 값으로
   시작한다. 따라서 dock 폭, detached window, split pane이 달라도 같은 component가
   정확한 rect를 얻는다. 조건부 compact variant가 필요한 경우에도 host가 화면 크기를
@@ -261,7 +288,7 @@ file work를 섞지 않으며, 공용 frame phase가 살아 있는 animation만 
 
 1. **ML1 — typed rect/flex core:** `UiLength`, edge/min-max resolve, measure callback,
    row/column flex, overflow clip의 pure test. px/percent/auto/fill, zero/negative,
-   NaN/∞ fail-close, tiny container, nested min/max, text measurement을 단언한다.
+   NaN/∞ fail-close, tiny container, min/max freeze 재분배, text measurement을 단언한다.
 2. **ML2 — component layout seam:** `UiTree`/`UiRectTree`, stable identity, same
    rect for draw/hit/focus/virtualization, dirty rebuild counter를 headless로 고정한다.
    `UiPointerEvent` mapping, hover enter/leave의 두-rect dirty, outside move/up pointer

@@ -2871,7 +2871,7 @@ pub const AppSession = struct {
     file_tree_open_states: std.ArrayList(file_tree.OpenState) = .empty,
     file_tree_scroll_rows: usize = 0,
     /// ET-CWD: 마지막으로 따라간 활성 터미널 cwd(owned, ""=아직 없음). 관측은 폴링이라 매 tick 같은 값이
-    /// 오므로 **변화 시에만** reveal을 건다(docs/file-panel.md §7.0 정책 2).
+    /// 오므로 **변화 시에만** reveal을 건다(docs/file-explorer.md §1 정책 2).
     file_tree_followed_cwd: ?[]u8 = null,
     /// 이번 tick에 reveal을 새로 건 경로(rows 재투영 뒤 그 행을 뷰포트에 넣을 때만 쓴다). 소유는 위 필드.
     file_tree_follow_scroll_pending: bool = false,
@@ -12001,8 +12001,8 @@ pub const AppSession = struct {
 
     /// background scan 완료를 snapshot에 적용하고 다음 lazy scan을 제출한다. 호출부는 frame tick이지만 blocking
     /// path lookup/read는 worker에만 있고, main actor는 queue/snapshot 작업과 result descriptor close만 수행한다.
-    /// ET-CWD(docs/file-panel.md §7.0): 활성 터미널 cwd가 **바뀌면** 탐색기에서 그 자리를 펼친다(reveal).
-    /// root를 갈지 않으므로 접힘 상태·watcher·영속이 그대로다 — 그 판단의 근거는 §7.0의 기각 표에 있다.
+    /// ET-CWD(docs/file-explorer.md §1): 활성 터미널 cwd가 **바뀌면** 탐색기에서 그 자리를 펼친다(reveal).
+    /// root를 갈지 않으므로 접힘 상태·watcher·영속이 그대로다 — 그 판단의 근거는 file-explorer §1의 기각 표에 있다.
     ///
     /// 정책 넷을 여기서 전부 집행한다: 도크가 보일 때만 / 활성 pane·활성 Term의 cwd만 / cwd가 없으면 직전
     /// 값 유지 / 변화 시에만(관측은 폴링이라 같은 값이 매 tick 온다). root 밖 경로는 `revealDirectory`가 무시한다.
@@ -12010,23 +12010,34 @@ pub const AppSession = struct {
         if (!self.dockVisible()) return;
         if (self.tabs.items.len == 0) return;
         const term = self.activePane().activeTerm();
+        // updateFileTree는 renderer보다 먼저 tick에서 돈다. 여기서 observation을 새로 읽지 않으면 OSC 7의
+        // cwd 변경을 아직 보지 못해 한 번도 reveal하지 않는 frame이 생긴다. readObservation은 runtime cache만
+        // 갱신하며 filesystem scan은 worker 경계에 그대로 남는다.
+        self.refreshTermObservation(term, false, false);
         // 파일·브라우저 탭은 cwd가 없다 → **직전 값 유지**(문서를 보다 터미널로 돌아왔을 때 리셋되면 안 된다).
         if (term.rt.observation.availability == .unavailable) return;
         const cwd = term.rt.observation.cwd.items;
         if (cwd.len == 0) return;
         if (self.file_tree_followed_cwd) |prev| if (std.mem.eql(u8, prev, cwd)) return;
         const owned = self.allocator.dupe(u8, cwd) catch return;
+        const reveal = self.file_tree.revealDirectory(owned) catch {
+            self.allocator.free(owned);
+            return; // OOM이면 이전 CWD를 보존해 다음 tick에 재시도한다.
+        };
         if (self.file_tree_followed_cwd) |prev| self.allocator.free(prev);
         self.file_tree_followed_cwd = owned;
-        self.file_tree.revealDirectory(owned) catch return;
-        // reveal이 실제로 걸렸을 때만(= root 안) 행을 뷰포트에 넣는다. root 밖이면 intent가 안 서므로 무동작.
-        if (self.file_tree.revealTarget() != null) {
-            self.file_tree_rows_dirty = true;
-            self.file_tree_follow_scroll_pending = true;
+        // root 밖이면 Tree의 이전 file-open reveal intent는 그대로 두되, 그것을 새 CWD의 scroll 대상으로
+        // 오인하지 않는다. 반대로 같은 경로의 기존 intent는 새 scan 없이도 CWD 대상이므로 재투영 뒤 보정한다.
+        switch (reveal) {
+            .rejected => self.file_tree_follow_scroll_pending = false,
+            .already_target, .accepted => {
+                self.file_tree_rows_dirty = true;
+                self.file_tree_follow_scroll_pending = true;
+            },
         }
     }
 
-    /// reveal 대상 행을 뷰포트 안으로 **최소한만** 민다(§7.0 정책 4 — 이미 보이면 스크롤을 안 뺏는다).
+    /// reveal 대상 행을 뷰포트 안으로 **최소한만** 민다(file-explorer §1 정책 4 — 이미 보이면 스크롤을 안 뺏는다).
     fn scrollFileTreeToFollowedCwd(self: *AppSession) void {
         if (!self.file_tree_follow_scroll_pending) return;
         const target = self.file_tree_followed_cwd orelse {
@@ -12268,7 +12279,7 @@ pub const AppSession = struct {
                 self.file_tree_rows.items.len -| @as(usize, visible_rows),
             );
             self.file_tree_hovered_row = null;
-            self.scrollFileTreeToFollowedCwd(); // ET-CWD: 재투영된 행 기준으로 뷰포트 보정(§7.0 정책 4)
+            self.scrollFileTreeToFollowedCwd(); // ET-CWD: 재투영된 행 기준으로 뷰포트 보정(file-explorer §1 정책 4)
             self.advanceFileTreeProjectionGeneration();
             self.file_tree_rows_dirty = false;
             self.metal_dirty = true;
@@ -47481,6 +47492,107 @@ test "file tree root picker is a typed one-shot and cancel or invalid path prese
     try std.testing.expectEqual(FileTreeRootOutcome.invalid_path, session.fileTreeRootOutcome());
     try std.testing.expectEqual(generation, session.file_tree.rootGeneration());
     try std.testing.expectEqualStrings("/before", session.file_tree.rootAt(0).?);
+}
+
+fn testWriteActiveTermCwd(session: *AppSession, cwd: []const u8) !void {
+    // 실제 OSC 7→core observation 경로를 쓴다. cache를 직접 바꾸면 updateFileTree가 renderer보다 먼저
+    // observation을 refresh해야 한다는 제품 불변을 증명하지 못한다.
+    var osc: [std.fs.max_path_bytes + 32]u8 = undefined;
+    const bytes = try std.fmt.bufPrint(&osc, "\x1b]7;file://localhost{s}\x07", .{cwd});
+    try session.activePane().activeTerm().surface.core.write(bytes);
+}
+
+test "file tree ET-CWD follows the active pane observation and keeps an old reveal inert for an outside cwd" {
+    // 활성 pane의 OSC 7 관측만 소비하고, root 밖 CWD는 root/watch/persistence를 바꾸지 않으며 이전
+    // file-open/reveal intent를 새 CWD의 scroll 대상으로 오인하지 않는 제품 경로 회귀다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(session.io, "project", .default_dir);
+    try tmp.dir.createDir(session.io, "project/one", .default_dir);
+    try tmp.dir.createDir(session.io, "project/two", .default_dir);
+    try tmp.dir.createDir(session.io, "outside", .default_dir);
+    var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_root = tmp_buf[0..try tmp.dir.realPath(session.io, &tmp_buf)];
+    const project = try std.fs.path.join(allocator, &.{ tmp_root, "project" });
+    defer allocator.free(project);
+    const one = try std.fs.path.join(allocator, &.{ project, "one" });
+    defer allocator.free(one);
+    const two = try std.fs.path.join(allocator, &.{ project, "two" });
+    defer allocator.free(two);
+    const outside = try std.fs.path.join(allocator, &.{ tmp_root, "outside" });
+    defer allocator.free(outside);
+
+    session.activateFilePanelDockControl();
+    try session.file_tree.replaceExplicitRoots(&.{project});
+    const root_generation = session.file_tree.rootGeneration();
+    const root_count = session.file_tree.rootCount();
+    const initial_scan = session.file_tree.takeScanRequest().?;
+    allocator.free(initial_scan);
+    try session.file_tree.applySnapshotWithIdentity(project, try testFileTreeIdentity(project), &.{
+        .{ .name = "one", .kind = .directory, .identity = try testFileTreeIdentity(one) },
+        .{ .name = "two", .kind = .directory, .identity = try testFileTreeIdentity(two) },
+    });
+    session.file_tree_rows_dirty = true;
+    session.file_tree_watch_reset_pending = false;
+
+    // updateFileTree는 renderer보다 먼저 run한다. 따라서 내부에서 observation을 refresh하지 않으면 OSC 7이
+    // 아직 Term cache에 안 들어와 이 첫 reveal을 놓친다.
+    try testWriteActiveTermCwd(session, one);
+    try session.updateFileTree();
+    try std.testing.expectEqualStrings(one, session.file_tree_followed_cwd.?);
+    try std.testing.expectEqualStrings(one, session.file_tree.revealTarget().?);
+    // one은 초기 viewport 안의 행이다. follow가 보이는 대상을 다시 위로 당기면 사용자의 탐색 위치를
+    // 빼앗으므로 pending을 끝내고 scroll=0을 보존해야 한다.
+    try std.testing.expect(!session.file_tree_follow_scroll_pending);
+    try std.testing.expectEqual(@as(usize, 0), session.file_tree_scroll_rows);
+    try std.testing.expectEqual(root_generation, session.file_tree.rootGeneration());
+    try std.testing.expectEqual(root_count, session.file_tree.rootCount());
+    try std.testing.expect(!session.file_tree_watch_reset_pending);
+
+    // 관측은 tick마다 같은 CWD를 되풀이한다. 같은 값에서 rows 재투영이나 scroll을 다시 걸면 사용자가
+    // 탐색 중인 위치를 빼앗으므로, raw scroll과 dirty/pending 상태가 그대로여야 한다.
+    session.file_tree_scroll_rows = 2;
+    try session.updateFileTree();
+    try std.testing.expect(!session.file_tree_rows_dirty);
+    try std.testing.expect(!session.file_tree_follow_scroll_pending);
+    try std.testing.expectEqual(@as(usize, 2), session.file_tree_scroll_rows);
+    try std.testing.expect(!session.file_tree_watch_reset_pending);
+
+    // root 밖 CWD는 Tree의 기존 one reveal을 보존하지만, 그것을 outside의 scroll pending으로 바꾸면 안 된다.
+    try testWriteActiveTermCwd(session, outside);
+    try session.updateFileTree();
+    try std.testing.expectEqualStrings(outside, session.file_tree_followed_cwd.?);
+    try std.testing.expect(!session.file_tree_follow_scroll_pending);
+    try std.testing.expectEqualStrings(one, session.file_tree.revealTarget().?);
+    try std.testing.expectEqual(root_generation, session.file_tree.rootGeneration());
+    try std.testing.expectEqual(root_count, session.file_tree.rootCount());
+    try std.testing.expect(!session.file_tree_watch_reset_pending);
+
+    // 기존 file-open intent와 같은 CWD로 돌아와도 root 밖 거부와 혼동하면 안 된다. offscreen scroll 위치를
+    // 강제로 만들어, `already_target`이 실제 viewport 보정을 다시 요청하는지 증명한다.
+    session.file_tree_scroll_rows = 6;
+    try testWriteActiveTermCwd(session, one);
+    try session.updateFileTree();
+    try std.testing.expectEqualStrings(one, session.file_tree_followed_cwd.?);
+    try std.testing.expect(!session.file_tree_follow_scroll_pending);
+    try std.testing.expectEqual(@as(usize, 1), session.file_tree_scroll_rows);
+
+    // 새 split pane을 active로 바꾸면 이전 pane의 outside cache가 아니라 새 active Term의 CWD만 따라간다.
+    try session.splitActivePane(.horizontal);
+    try testWriteActiveTermCwd(session, two);
+    try session.updateFileTree();
+    try std.testing.expectEqualStrings(two, session.file_tree_followed_cwd.?);
+
+    // 파일/브라우저 Term은 CWD가 없으므로 직전 local CWD와 Tree 상태를 지우지 않는다.
+    session.dispatchAppAction(.new_web_tab);
+    try std.testing.expect(session.activePane().activeTerm().kind == .web);
+    try session.updateFileTree();
+    try std.testing.expectEqualStrings(two, session.file_tree_followed_cwd.?);
 }
 
 fn testWaitForFileTreeRootCompletion(session: *AppSession) !void {

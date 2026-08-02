@@ -2,7 +2,7 @@
 
 창 레벨 도크에 사는 **파일 탐색기**(프로젝트 트리)의 단일 출처 문서다. 트리의 root 모델·스캔·감시·선택·키보드 탐색·파일 변경 명령을 소유한다.
 
-> **[파일 패널](file-panel.md)과의 경계**: 파일 *콘텐츠*(뷰어/편집기)는 워크스페이스 pane 트리의 `Term`으로 살고 그 계약은 file-panel.md가 소유한다. 이 문서는 **도크에 남은 유일한 콘텐츠인 탐색기**만 다룬다(FP16에서 도크는 탐색기 전용이 됐다). 두 문서가 만나는 지점은 셋이다 — ⑴ 트리에서 파일을 열면 [file-panel.md §6](file-panel.md#6-열기-규칙)의 열기 규칙을 탄다, ⑵ 도크 배치·표시 상태와 root 영속은 [file-panel.md §5.1](file-panel.md#51-도크트리-포맷-현행--레거시-읽기-경로)의 workspace.v1 포맷이 소유한다, ⑶ 트리↔터미널 입력 포커스 왕복은 [file-panel.md §3.4](file-panel.md#34-terminal파일-도크-입력-포커스-표시왕복)가 소유한다.
+> **[파일 패널](file-panel.md)과의 경계**: 파일 *콘텐츠*(뷰어/편집기)는 워크스페이스 pane 트리의 `Term`으로 살고 그 계약은 file-panel.md가 소유한다. 이 문서는 도크의 **파일 탐색기 콘텐츠**만 다룬다(FP16에서 파일 콘텐츠를 보관하던 별도 도크 그룹은 없어졌으며, 도크의 다른 view는 각자 문서가 소유한다). 두 문서가 만나는 지점은 셋이다 — ⑴ 트리에서 파일을 열면 [file-panel.md §6](file-panel.md#6-열기-규칙)의 열기 규칙을 탄다, ⑵ 도크 배치·표시 상태와 root 영속은 [file-panel.md §5.1](file-panel.md#51-도크트리-포맷-현행--레거시-읽기-경로)의 workspace.v1 포맷이 소유한다, ⑶ 트리↔터미널 입력 포커스 왕복은 [file-panel.md §3.4](file-panel.md#34-terminal파일-도크-입력-포커스-표시왕복)가 소유한다.
 >
 > 진행·검증 상태는 이 문서가 아니라 [검증 매트릭스](verification-matrix.md)의 "파일 패널 FP7" 행과 "파일 도크 닫기·트리 키보드·파일 변경" 행이 소유한다.
 
@@ -34,9 +34,7 @@ reveal은 이 다섯을 전부 피한다: root·접힘·watcher·영속을 **하
 
 **남는 것(이 슬라이스 밖)**: root 밖 cwd에 대한 "이 폴더를 루트로 추가" 어포던스, 끄기 위한 config 키. 둘 다 실사용 근거가 생기면 한다(measure-first) — 지금은 reveal이 비파괴적이라 끌 이유가 약하다.
 
-**구현 상태(2026-08-02).** 위 ET-CWD는 확정된 **정책 계약**이지만 아직 제품 경로에 배선되지 않았다. 현재 `AppSession`은 활성 Term CWD를 소스 컨트롤과 AI 세션 scope에는 소비하지만 file tree에는 전달하지 않아, 탐색기가 열린 파일/명시 root만 보며 active pane을 따라 reveal하지 않는다. 이는 경로를 얻지 못한 문제가 아니라 문서-구현 드리프트다.
-
-다음 구현 slice는 active workspace → active pane → active local Term의 관측 CWD가 변할 때만, 도크가 보이고 tree root 안에 있을 때 기존 `reveal_path` intent를 제출한다. explicit/inferred root·watcher·workspace persistence는 변경하지 않으며, 파일/브라우저 pane의 CWD 부재에서는 마지막 local CWD와 현재 tree 상태를 유지한다. 자동 gate는 pane/Term 전환, 같은 pane의 `cd`, root 밖 no-op, visible target 무스크롤, lazy reveal 완료/취소, explicit root·watcher 불변을 포함해야 한다.
+자동 gate는 pane/Term 전환, 같은 pane의 `cd`, root 밖 no-op, visible target 무스크롤, lazy reveal 완료/취소, explicit root·watcher 불변을 포함한다.
 
 ## 2. root 모델과 열기 UX
 

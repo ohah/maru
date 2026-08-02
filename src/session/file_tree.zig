@@ -475,25 +475,37 @@ pub const Tree = struct {
         self.continueReveal() catch {};
     }
 
-    /// ET-CWD: 이미 있는 root 안의 **디렉터리**를 reveal 대상으로 건다(docs/file-panel.md §7.0). 파일 열기가 쓰는
+    /// ET-CWD: 이미 있는 root 안의 **디렉터리**를 reveal 대상으로 건다(docs/file-explorer.md §1). 파일 열기가 쓰는
     /// `reveal_path` intent를 그대로 재사용하므로 ancestor 펼치기·lazy scan·intent 종료가 전부 기존 경로다.
     ///
     /// root 밖 경로는 **무동작**이다 — 자동으로 root를 추가하면 `cd ~` 한 번에 홈 전체가 root가 되고
-    /// (`explicit` 모드에서는) 사용자가 고른 root를 덮어 영속까지 오염된다(§7.0의 기각 이유).
+    /// (`explicit` 모드에서는) 사용자가 고른 root를 덮어 영속까지 오염된다(§1의 기각 이유).
     /// 이미 같은 경로를 reveal 중이면 무동작(폴링 관측이 같은 값을 반복해 보내도 재시도가 쌓이지 않게).
-    pub fn revealDirectory(self: *Tree, path: []const u8) !void {
-        if (path.len == 0 or !std.fs.path.isAbsolute(path)) return;
+    pub const DirectoryReveal = enum {
+        /// 경로가 비어 있거나 root 밖이라 Tree 상태를 바꾸지 않았다.
+        rejected,
+        /// 같은 대상의 기존 intent가 남아 있다. 새 scan은 만들지 않지만 caller는 그 대상의 화면 보정을 할 수 있다.
+        already_target,
+        /// 새 대상 intent를 받아 ancestor lazy reveal을 시작했다.
+        accepted,
+    };
+
+    /// 결과는 root 밖 거부와 기존 같은 intent를 구별한다. CWD follow는 후자에서도 그 경로를 viewport로
+    /// 보정해야 하지만 전자는 이전 파일-open intent를 새 CWD의 대상으로 오인하면 안 된다.
+    pub fn revealDirectory(self: *Tree, path: []const u8) !DirectoryReveal {
+        if (path.len == 0 or !std.fs.path.isAbsolute(path)) return .rejected;
         var within = false;
         for (self.roots.items) |root| if (pathWithin(path, root.path)) {
             within = true;
             break;
         };
-        if (!within) return;
-        if (self.reveal_path) |cur| if (std.mem.eql(u8, cur, path)) return;
+        if (!within) return .rejected;
+        if (self.reveal_path) |cur| if (std.mem.eql(u8, cur, path)) return .already_target;
         const owned = try self.allocator.dupe(u8, path);
         if (self.reveal_path) |old| self.allocator.free(old);
         self.reveal_path = owned;
         self.continueReveal() catch {};
+        return .accepted;
     }
 
     fn ensureRoot(self: *Tree, root_path: []const u8) !void {
@@ -1052,8 +1064,8 @@ pub const Tree = struct {
         }
     }
 
-    /// 지금 걸린 reveal intent(없으면 null). ET-CWD 호출자가 "root 안이라 intent가 실제로 섰는가"를 확인해
-    /// 스크롤 보정 여부를 정한다(root 밖이면 revealDirectory가 무동작이라 intent가 안 선다).
+    /// 지금 걸린 비동기 reveal intent(없으면 null). 동기적으로 이미 materialize된 대상은 `revealDirectory`
+    /// 반환값은 true지만 여기서는 null일 수 있다.
     pub fn revealTarget(self: *const Tree) ?[]const u8 {
         return self.reveal_path;
     }
@@ -1358,7 +1370,7 @@ test "file tree explicit roots replace add remove and outside open stays recent-
 }
 
 test "file tree ET-CWD: revealDirectory는 root 안만 걸고 같은 경로를 반복하지 않는다" {
-    // §7.0 정책 3·2: root 밖 cwd는 **무동작**(자동 root 추가 금지 — `cd ~` 한 번에 홈 전체가 root가 되는 것을
+    // file-explorer §1 정책 3·2: root 밖 cwd는 **무동작**(자동 root 추가 금지 — `cd ~` 한 번에 홈 전체가 root가 되는 것을
     // 막는다), 같은 값이 반복 관측돼도 intent를 새로 걸지 않는다(관측은 폴링이라 매 tick 같은 값이 온다).
     const allocator = std.testing.allocator;
     var tree = Tree.init(allocator);
@@ -1366,31 +1378,31 @@ test "file tree ET-CWD: revealDirectory는 root 안만 걸고 같은 경로를 �
     try tree.replaceExplicitRoots(&.{"/project"});
 
     // root 밖 → intent 없음.
-    try tree.revealDirectory("/elsewhere/deep");
+    try std.testing.expectEqual(Tree.DirectoryReveal.rejected, try tree.revealDirectory("/elsewhere/deep"));
     try std.testing.expect(tree.revealTarget() == null);
 
     // 상대경로·빈 문자열도 무동작(절대경로만 받는다).
-    try tree.revealDirectory("relative/path");
-    try tree.revealDirectory("");
+    try std.testing.expectEqual(Tree.DirectoryReveal.rejected, try tree.revealDirectory("relative/path"));
+    try std.testing.expectEqual(Tree.DirectoryReveal.rejected, try tree.revealDirectory(""));
     try std.testing.expect(tree.revealTarget() == null);
 
     // root 안 → intent가 선다. root는 lazy라 아직 안 읽혔으므로 intent가 유지된 채 scan을 기다린다.
-    try tree.revealDirectory("/project/src/session");
+    try std.testing.expectEqual(Tree.DirectoryReveal.accepted, try tree.revealDirectory("/project/src/session"));
     try std.testing.expectEqualStrings("/project/src/session", tree.revealTarget().?);
 
     // 같은 경로 반복 → 그대로(무동작). 다른 경로면 교체.
-    try tree.revealDirectory("/project/src/session");
+    try std.testing.expectEqual(Tree.DirectoryReveal.already_target, try tree.revealDirectory("/project/src/session"));
     try std.testing.expectEqualStrings("/project/src/session", tree.revealTarget().?);
-    try tree.revealDirectory("/project/docs");
+    try std.testing.expectEqual(Tree.DirectoryReveal.accepted, try tree.revealDirectory("/project/docs"));
     try std.testing.expectEqualStrings("/project/docs", tree.revealTarget().?);
 
     // root 자체도 유효한 대상이다(cd로 프로젝트 루트에 돌아온 경우).
-    try tree.revealDirectory("/project");
+    try std.testing.expectEqual(Tree.DirectoryReveal.accepted, try tree.revealDirectory("/project"));
     try std.testing.expectEqualStrings("/project", tree.revealTarget().?);
 }
 
 test "file tree ET-CWD: reveal은 root·접힘·영속 축을 건드리지 않는다" {
-    // §7.0의 핵심 — root 교체(replaceExplicitRoots)가 접힘 스냅샷을 버리고 root_generation을 올리는 것과 달리,
+    // file-explorer §1의 핵심 — root 교체(replaceExplicitRoots)가 접힘 스냅샷을 버리고 root_generation을 올리는 것과 달리,
     // reveal은 그 축을 하나도 안 건드린다. 그래서 `cd`마다 트리가 리셋되지 않는다.
     const allocator = std.testing.allocator;
     var tree = Tree.init(allocator);
@@ -1399,11 +1411,41 @@ test "file tree ET-CWD: reveal은 root·접힘·영속 축을 건드리지 않�
     const gen_before = tree.rootGeneration();
     const roots_before = tree.rootCount();
 
-    try tree.revealDirectory("/project/src");
+    try std.testing.expectEqual(Tree.DirectoryReveal.accepted, try tree.revealDirectory("/project/src"));
 
     try std.testing.expectEqual(gen_before, tree.rootGeneration()); // ★ root_generation 불변
     try std.testing.expectEqual(roots_before, tree.rootCount()); // ★ root 목록 불변
     try std.testing.expectEqualStrings("/project", tree.rootAt(0).?);
+}
+
+test "file tree ET-CWD: lazy reveal completes at a loaded directory and cancels when its next ancestor is absent" {
+    // file-explorer §1의 자동 gate: CWD reveal은 미물질화 ancestor를 하나씩 scan하되, 대상 directory가
+    // materialize되면 끝나야 하고 snapshot에 다음 ancestor가 없으면 stale intent를 남겨 재시도하면 안 된다.
+    const allocator = std.testing.allocator;
+    var tree = Tree.init(allocator);
+    defer tree.deinit();
+    try tree.replaceExplicitRoots(&.{"/project"});
+
+    try std.testing.expectEqual(Tree.DirectoryReveal.accepted, try tree.revealDirectory("/project/src"));
+    const root_scan = tree.takeScanRequest().?;
+    defer allocator.free(root_scan);
+    try std.testing.expectEqualStrings("/project", root_scan);
+    try tree.applySnapshot("/project", &.{
+        .{ .name = "src", .kind = .directory },
+        .{ .name = "other", .kind = .directory },
+    });
+    const src_scan = tree.takeScanRequest().?;
+    defer allocator.free(src_scan);
+    try std.testing.expectEqualStrings("/project/src", src_scan);
+    try tree.applySnapshot("/project/src", &.{});
+    try std.testing.expect(tree.revealTarget() == null); // target directory까지 loaded → 완료
+
+    try std.testing.expectEqual(Tree.DirectoryReveal.accepted, try tree.revealDirectory("/project/other/missing"));
+    const other_scan = tree.takeScanRequest().?;
+    defer allocator.free(other_scan);
+    try std.testing.expectEqualStrings("/project/other", other_scan);
+    try tree.applySnapshot("/project/other", &.{});
+    try std.testing.expect(tree.revealTarget() == null); // missing ancestor → 취소, 무한 재시도 금지
 }
 
 test "file tree explicit root cap plus one is atomic" {

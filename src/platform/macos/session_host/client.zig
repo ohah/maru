@@ -758,6 +758,15 @@ pub const BufferedEvent = struct {
     }
 };
 
+/// ended purge의 빠른 판정 결과다. `event_index`는 느린 트랜잭션이 다시 검증할 힌트일 뿐
+/// 소유권이나 commit 권위를 나타내지 않는다.
+pub const EndedEventPeek = union(enum) {
+    not_ended,
+    candidate: struct {
+        event_index: u32,
+    },
+};
+
 const buffered_event_source_schema_field_allowlist = [_][]const u8{
     "header",
     "payload",
@@ -7277,6 +7286,46 @@ pub const Client = struct {
         return null;
     }
 
+    /// 현재 stream의 첫 event가 admission 시점에 검증된 `runtime.ended`인지 무할당으로 판정한다.
+    /// payload를 다시 파싱하거나 hash하지 않으며 큐와 counter를 변경하지 않는다. 반환 index는
+    /// 후속 트랜잭션이 같은 permit 아래 전체 owner graph를 재검증하기 위한 비권위적 힌트다.
+    pub fn peekEndedEventForStream(
+        self: *const Client,
+        stream_id: u64,
+    ) error{InvalidClientState}!EndedEventPeek {
+        if (stream_id == 0 or
+            self.pending_events.items.len > self.pending_events.capacity or
+            self.pending_events.items.len > max_pending_event_count)
+            return error.InvalidClientState;
+
+        for (self.pending_events.items, 0..) |frame, index| {
+            if (frame.header.stream_id != stream_id) continue;
+            if (frame.header.kind != .event or
+                frame.header.request_id != 0 or
+                frame.header.flags != 0 or
+                frame.header.payload_len != frame.payload.len)
+                return error.InvalidClientState;
+
+            const accepted = switch (frame.preflight orelse
+                return error.InvalidClientState) {
+                .accepted => |value| value,
+                else => return error.InvalidClientState,
+            };
+            const admission = frame.admission_seal orelse
+                return error.InvalidClientState;
+            if (!std.meta.eql(admission.header, frame.header) or
+                !std.mem.eql(u8, &admission.payload_digest, &accepted.raw_digest) or
+                !runtime_event_wire.eventPreflightEql(admission.preflight, accepted))
+                return error.InvalidClientState;
+
+            return if (accepted.event == .ended)
+                .{ .candidate = .{ .event_index = @intCast(index) } }
+            else
+                .not_ended;
+        }
+        return .not_ended;
+    }
+
     /// Releases an event through the allocator that admitted it. Consumers must not assume their
     /// projection allocator is identical to the shared Client transport allocator.
     pub fn releaseEvent(self: *const Client, event: BufferedEvent) void {
@@ -10245,6 +10294,176 @@ test "client admitted revoke header mutation closes global and both stream latch
     try std.testing.expect(client.hasBufferedControllerRevoke());
     try std.testing.expect(client.hasBufferedControllerRevokeForStream(7));
     try std.testing.expect(client.hasBufferedControllerRevokeForStream(8));
+}
+
+test "CR3a-2c2b ended peek is allocation-free and does not consume the candidate" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+
+    const foreign_payload = "{\"event\":\"runtime.ended\"}";
+    try client.bufferEvent(.{
+        .header = .{
+            .kind = .event,
+            .stream_id = 8,
+            .payload_len = foreign_payload.len,
+        },
+        .payload = try allocator.dupe(u8, foreign_payload),
+    });
+    const target_payload = "{\"event\":\"runtime.ended\"}";
+    try client.bufferEvent(.{
+        .header = .{
+            .kind = .event,
+            .stream_id = 9,
+            .payload_len = target_payload.len,
+        },
+        .payload = try allocator.dupe(u8, target_payload),
+    });
+
+    const items_ptr = client.pending_events.items.ptr;
+    const items_len = client.pending_events.items.len;
+    const items_capacity = client.pending_events.capacity;
+    const byte_count = client.pending_event_bytes;
+    const candidate = try client.peekEndedEventForStream(9);
+    try std.testing.expectEqual(@as(u32, 1), candidate.candidate.event_index);
+    try std.testing.expectEqual(items_ptr, client.pending_events.items.ptr);
+    try std.testing.expectEqual(items_len, client.pending_events.items.len);
+    try std.testing.expectEqual(items_capacity, client.pending_events.capacity);
+    try std.testing.expectEqual(byte_count, client.pending_event_bytes);
+}
+
+test "CR3a-2c2b ended peek stops at the first target event" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+
+    const metadata = "{\"event\":\"runtime.metadata\",\"metadata_revision\":1,\"metadata\":{}}";
+    try client.bufferEvent(.{
+        .header = .{ .kind = .event, .stream_id = 9, .payload_len = metadata.len },
+        .payload = try allocator.dupe(u8, metadata),
+    });
+    try std.testing.expectEqual(
+        EndedEventPeek.not_ended,
+        try client.peekEndedEventForStream(9),
+    );
+}
+
+test "CR3a-2c2b ended peek rejects admission identity drift without mutation" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+
+    const payload = "{\"event\":\"runtime.ended\"}";
+    try client.bufferEvent(.{
+        .header = .{ .kind = .event, .stream_id = 9, .payload_len = payload.len },
+        .payload = try allocator.dupe(u8, payload),
+    });
+    const byte_count = client.pending_event_bytes;
+    client.pending_events.items[0].header.flags = 1;
+    try std.testing.expectError(
+        error.InvalidClientState,
+        client.peekEndedEventForStream(9),
+    );
+    try std.testing.expectEqual(@as(usize, 1), client.pending_events.items.len);
+    try std.testing.expectEqual(byte_count, client.pending_event_bytes);
+}
+
+test "CR3a-2c2b ended peek leaves payload integrity to the slow transaction" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+
+    const payload = "{\"event\":\"runtime.ended\"}";
+    try client.bufferEvent(.{
+        .header = .{ .kind = .event, .stream_id = 9, .payload_len = payload.len },
+        .payload = try allocator.dupe(u8, payload),
+    });
+    client.pending_events.items[0].payload[1] ^= 1;
+    const candidate = try client.peekEndedEventForStream(9);
+    try std.testing.expectEqual(@as(u32, 0), candidate.candidate.event_index);
+}
+
+test "CR3a-2c2b ended peek rejects stored admission digest drift" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+
+    const payload = "{\"event\":\"runtime.ended\"}";
+    try client.bufferEvent(.{
+        .header = .{ .kind = .event, .stream_id = 9, .payload_len = payload.len },
+        .payload = try allocator.dupe(u8, payload),
+    });
+    client.pending_events.items[0].admission_seal.?.payload_digest[0] ^= 1;
+    try std.testing.expectError(
+        error.InvalidClientState,
+        client.peekEndedEventForStream(9),
+    );
+}
+
+test "CR3a-2c2b ended peek rejects an impossible event count before item access" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+
+    const original_len = client.pending_events.items.len;
+    client.pending_events.items.len = max_pending_event_count + 1;
+    try std.testing.expectError(
+        error.InvalidClientState,
+        client.peekEndedEventForStream(9),
+    );
+    client.pending_events.items.len = original_len;
+}
+
+test "CR3a-2c2b ended peek rejects list length beyond capacity before item access" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+
+    const original_items = client.pending_events.items;
+    const original_capacity = client.pending_events.capacity;
+    client.pending_events.items.len = 1;
+    client.pending_events.capacity = 0;
+    try std.testing.expectError(
+        error.InvalidClientState,
+        client.peekEndedEventForStream(9),
+    );
+    client.pending_events.items = original_items;
+    client.pending_events.capacity = original_capacity;
 }
 
 const strict_cli_inherited_event_payloads = [_][]const u8{

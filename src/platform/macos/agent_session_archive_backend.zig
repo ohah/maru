@@ -1,0 +1,360 @@
+//! Codex·Claude session archive의 macOS worker backend.
+//!
+//! AppSession frame tick은 submit/takeResult만 호출한다. provider history는 사용자 데이터이므로 worker가
+//! 만든 summary 외 raw JSONL은 main actor로 넘기지 않는다.
+
+const std = @import("std");
+const maru = @import("maru");
+const archive = maru.session.agent_session_archive;
+
+pub const max_candidates_per_provider: usize = 4096;
+pub const max_records: usize = 500;
+/// A single verified newest record proves the list is useful; publish it
+/// immediately instead of making first paint wait for a full display page.
+pub const first_batch_records: usize = 1;
+pub const records_per_batch: usize = 50;
+pub const max_file_bytes: usize = 128 * 1024 * 1024;
+/// 한 refresh가 사용자 history를 전부 다시 해석해 UI를 장시간 막지 않게 하는 누적 read 상한.
+pub const max_total_bytes: usize = 512 * 1024 * 1024;
+
+pub const Record = struct {
+    parsed: archive.Parsed,
+    source_path: []u8,
+    mtime_ns: i96,
+
+    pub fn deinit(self: *Record, allocator: std.mem.Allocator) void {
+        self.parsed.deinit(allocator);
+        allocator.free(self.source_path);
+        self.* = undefined;
+    }
+};
+
+pub const Result = struct {
+    records: std.ArrayList(Record) = .empty,
+    partial: bool = false,
+    /// The first batch replaces the app's prior snapshot; later batches append
+    /// to that new generation. `complete` is the only transition that clears
+    /// the visible loading state.
+    first_batch: bool = false,
+    complete: bool = false,
+
+    pub fn deinit(self: *Result, allocator: std.mem.Allocator) void {
+        for (self.records.items) |*record| record.deinit(allocator);
+        self.records.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+const State = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    mutex: std.Io.Mutex = .init,
+    refs: std.atomic.Value(usize) = .init(1),
+    results: std.ArrayList(Result) = .empty,
+    inflight: bool = false,
+    shutting_down: bool = false,
+
+    fn release(self: *State) void {
+        if (self.refs.fetchSub(1, .acq_rel) != 1) return;
+        std.debug.assert(!self.inflight);
+        std.debug.assert(self.results.items.len == 0);
+        self.results.deinit(self.allocator);
+        self.allocator.destroy(self);
+    }
+};
+
+const Job = struct { state: *State, home: []u8 };
+
+/// A bounded, metadata-only candidate.  We collect these before reading JSONL so
+/// traversal order cannot make an old, large transcript spend the refresh budget
+/// ahead of a newer session.
+const Candidate = struct {
+    provider: archive.Provider,
+    open_path: []u8,
+    source_path: []u8,
+    mtime_ns: i96,
+    size: usize,
+
+    fn deinit(self: *Candidate, allocator: std.mem.Allocator) void {
+        allocator.free(self.open_path);
+        allocator.free(self.source_path);
+        self.* = undefined;
+    }
+};
+
+pub const Backend = struct {
+    state: ?*State,
+
+    pub fn init(allocator: std.mem.Allocator, io: std.Io) !Backend {
+        const state = try allocator.create(State);
+        state.* = .{ .allocator = allocator, .io = io };
+        return .{ .state = state };
+    }
+
+    /// caller owns home on false; worker owns it on true.
+    pub fn submit(self: *Backend, home: []u8) bool {
+        const state = self.state orelse return false;
+        state.mutex.lockUncancelable(state.io);
+        if (state.shutting_down or state.inflight) {
+            state.mutex.unlock(state.io);
+            return false;
+        }
+        state.inflight = true;
+        _ = state.refs.fetchAdd(1, .monotonic);
+        state.mutex.unlock(state.io);
+
+        const job = state.allocator.create(Job) catch {
+            finishWithoutResult(state);
+            return false;
+        };
+        job.* = .{ .state = state, .home = home };
+        const thread = std.Thread.spawn(.{}, worker, .{job}) catch {
+            state.allocator.destroy(job);
+            finishWithoutResult(state);
+            return false;
+        };
+        thread.detach();
+        return true;
+    }
+
+    pub fn takeResult(self: *Backend) ?Result {
+        const state = self.state orelse return null;
+        state.mutex.lockUncancelable(state.io);
+        defer state.mutex.unlock(state.io);
+        if (state.results.items.len == 0) return null;
+        return state.results.orderedRemove(0);
+    }
+
+    pub fn deinit(self: *Backend) void {
+        const state = self.state orelse return;
+        self.state = null;
+        state.mutex.lockUncancelable(state.io);
+        state.shutting_down = true;
+        for (state.results.items) |*result| result.deinit(state.allocator);
+        state.results.deinit(state.allocator);
+        state.results = .empty;
+        state.mutex.unlock(state.io);
+        state.release();
+    }
+};
+
+fn finishWithoutResult(state: *State) void {
+    state.mutex.lockUncancelable(state.io);
+    state.inflight = false;
+    state.mutex.unlock(state.io);
+    state.release();
+}
+
+fn worker(job: *Job) void {
+    const state = job.state;
+    scan(state, job.home);
+    state.allocator.free(job.home);
+    state.allocator.destroy(job);
+
+    state.mutex.lockUncancelable(state.io);
+    state.inflight = false;
+    state.mutex.unlock(state.io);
+    state.release();
+}
+
+fn publish(state: *State, result: *Result) bool {
+    state.mutex.lockUncancelable(state.io);
+    defer state.mutex.unlock(state.io);
+    if (state.shutting_down) {
+        result.deinit(state.allocator);
+        return false;
+    }
+    state.results.append(state.allocator, result.*) catch {
+        result.deinit(state.allocator);
+        return false;
+    };
+    result.* = .{};
+    return true;
+}
+
+fn scan(state: *State, home: []const u8) void {
+    const allocator = state.allocator;
+    const io = state.io;
+    var result: Result = .{};
+    errdefer result.deinit(allocator);
+    var claude_candidates: std.ArrayList(Candidate) = .empty;
+    defer {
+        for (claude_candidates.items) |*candidate| candidate.deinit(allocator);
+        claude_candidates.deinit(allocator);
+    }
+    var codex_candidates: std.ArrayList(Candidate) = .empty;
+    defer {
+        for (codex_candidates.items) |*candidate| candidate.deinit(allocator);
+        codex_candidates.deinit(allocator);
+    }
+
+    scanClaude(allocator, io, home, &claude_candidates, &result.partial);
+    scanCodex(allocator, io, home, &codex_candidates, &result.partial);
+    claude_candidates.appendSlice(allocator, codex_candidates.items) catch return;
+    codex_candidates.clearRetainingCapacity(); // ownership moved into claude_candidates
+    std.mem.sort(Candidate, claude_candidates.items, {}, struct {
+        fn lessThan(_: void, a: Candidate, b: Candidate) bool {
+            return a.mtime_ns > b.mtime_ns;
+        }
+    }.lessThan);
+
+    var remaining_bytes = max_total_bytes;
+    var first_batch = true;
+    for (claude_candidates.items) |candidate| {
+        if (result.records.items.len == max_records) {
+            result.partial = true;
+            break;
+        }
+        appendCandidateFile(allocator, io, candidate, &result, &remaining_bytes);
+        const batch_limit = if (first_batch) first_batch_records else records_per_batch;
+        if (result.records.items.len == batch_limit) {
+            result.first_batch = first_batch;
+            result.complete = false;
+            if (!publish(state, &result)) return;
+            first_batch = false;
+        }
+    }
+    std.mem.sort(Record, result.records.items, {}, struct {
+        fn lessThan(_: void, a: Record, b: Record) bool {
+            return a.mtime_ns > b.mtime_ns;
+        }
+    }.lessThan);
+    if (result.records.items.len > max_records) {
+        for (result.records.items[max_records..]) |*record| record.deinit(allocator);
+        result.records.shrinkRetainingCapacity(max_records);
+        result.partial = true;
+    }
+    result.first_batch = first_batch;
+    result.complete = true;
+    _ = publish(state, &result);
+}
+
+fn scanClaude(allocator: std.mem.Allocator, io: std.Io, home: []const u8, candidates: *std.ArrayList(Candidate), partial: *bool) void {
+    const root_path = std.fs.path.join(allocator, &.{ home, ".claude", "projects" }) catch return;
+    defer allocator.free(root_path);
+    var root = std.Io.Dir.cwd().openDir(io, root_path, .{ .iterate = true }) catch return;
+    defer root.close(io);
+    var projects = root.iterate();
+    while (true) {
+        const project = (projects.next(io) catch return) orelse break;
+        if (project.kind != .directory) continue;
+        var dir = root.openDir(io, project.name, .{ .iterate = true }) catch continue;
+        defer dir.close(io);
+        var files = dir.iterate();
+        while (true) {
+            const entry = (files.next(io) catch break) orelse break;
+            if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".jsonl")) continue;
+            const relative = std.fmt.allocPrint(allocator, "{s}/{s}", .{ project.name, entry.name }) catch continue;
+            const open_path = std.fs.path.join(allocator, &.{ root_path, relative }) catch {
+                allocator.free(relative);
+                continue;
+            };
+            appendCandidate(allocator, io, &dir, entry.name, .claude, open_path, relative, candidates, partial);
+        }
+    }
+}
+
+fn scanCodex(allocator: std.mem.Allocator, io: std.Io, home: []const u8, candidates: *std.ArrayList(Candidate), partial: *bool) void {
+    const root_path = std.fs.path.join(allocator, &.{ home, ".codex", "sessions" }) catch return;
+    defer allocator.free(root_path);
+    var root = std.Io.Dir.cwd().openDir(io, root_path, .{ .iterate = true }) catch return;
+    defer root.close(io);
+    var years = root.iterate();
+    while (true) {
+        const year = (years.next(io) catch return) orelse break;
+        if (year.kind != .directory) continue;
+        var year_dir = root.openDir(io, year.name, .{ .iterate = true }) catch continue;
+        defer year_dir.close(io);
+        var months = year_dir.iterate();
+        while (true) {
+            const month = (months.next(io) catch break) orelse break;
+            if (month.kind != .directory) continue;
+            var month_dir = year_dir.openDir(io, month.name, .{ .iterate = true }) catch continue;
+            defer month_dir.close(io);
+            var days = month_dir.iterate();
+            while (true) {
+                const day = (days.next(io) catch break) orelse break;
+                if (day.kind != .directory) continue;
+                var day_dir = month_dir.openDir(io, day.name, .{ .iterate = true }) catch continue;
+                defer day_dir.close(io);
+                var files = day_dir.iterate();
+                while (true) {
+                    const entry = (files.next(io) catch break) orelse break;
+                    if (entry.kind != .file or !std.mem.startsWith(u8, entry.name, "rollout-") or !std.mem.endsWith(u8, entry.name, ".jsonl")) continue;
+                    const relative = std.fmt.allocPrint(allocator, "{s}/{s}/{s}/{s}", .{ year.name, month.name, day.name, entry.name }) catch continue;
+                    const open_path = std.fs.path.join(allocator, &.{ root_path, relative }) catch {
+                        allocator.free(relative);
+                        continue;
+                    };
+                    appendCandidate(allocator, io, &day_dir, entry.name, .codex, open_path, relative, candidates, partial);
+                }
+            }
+        }
+    }
+}
+
+fn appendCandidate(allocator: std.mem.Allocator, io: std.Io, dir: *std.Io.Dir, open_name: []const u8, provider: archive.Provider, open_path: []u8, source_path: []u8, candidates: *std.ArrayList(Candidate), partial: *bool) void {
+    var candidate: Candidate = .{
+        .provider = provider,
+        .open_path = open_path,
+        .source_path = source_path,
+        .mtime_ns = 0,
+        .size = 0,
+    };
+    var transferred = false;
+    defer if (!transferred) candidate.deinit(allocator);
+    const stat = dir.statFile(io, open_name, .{ .follow_symlinks = false }) catch return;
+    if (stat.kind != .file or stat.size == 0) return;
+    if (stat.size > max_file_bytes) {
+        partial.* = true;
+        return;
+    }
+    candidate.mtime_ns = stat.mtime.nanoseconds;
+    candidate.size = @intCast(stat.size);
+    if (candidates.items.len < max_candidates_per_provider) {
+        candidates.append(allocator, candidate) catch return;
+        transferred = true;
+        return;
+    }
+    // Keep the newest 4096 candidates, regardless of directory iteration order.
+    var oldest_index: usize = 0;
+    for (candidates.items[1..], 1..) |existing, index| {
+        if (existing.mtime_ns < candidates.items[oldest_index].mtime_ns) oldest_index = index;
+    }
+    if (candidate.mtime_ns <= candidates.items[oldest_index].mtime_ns) {
+        partial.* = true;
+        return;
+    }
+    candidates.items[oldest_index].deinit(allocator);
+    candidates.items[oldest_index] = candidate;
+    transferred = true;
+    partial.* = true;
+}
+
+fn appendCandidateFile(allocator: std.mem.Allocator, io: std.Io, candidate: Candidate, result: *Result, remaining_bytes: *usize) void {
+    const file = std.Io.Dir.cwd().openFile(io, candidate.open_path, .{}) catch return;
+    defer file.close(io);
+    const stat = file.stat(io) catch return;
+    if (stat.kind != .file or stat.size == 0 or stat.size > max_file_bytes) {
+        if (stat.size > max_file_bytes) result.partial = true;
+        return;
+    }
+    const size: usize = @intCast(stat.size);
+    if (size > remaining_bytes.*) {
+        result.partial = true;
+        return;
+    }
+    // Budget is charged before allocation/read so malformed input cannot turn a bounded refresh into an
+    // unbounded sequence of expensive parse attempts.
+    remaining_bytes.* -= size;
+    const bytes = allocator.alloc(u8, size) catch return;
+    defer allocator.free(bytes);
+    const n = file.readPositionalAll(io, bytes, 0) catch return;
+    var parsed = archive.parse(allocator, candidate.provider, bytes[0..n]) catch return orelse return;
+    errdefer parsed.deinit(allocator);
+    const path = allocator.dupe(u8, candidate.source_path) catch return;
+    result.records.append(allocator, .{ .parsed = parsed, .source_path = path, .mtime_ns = candidate.mtime_ns }) catch {
+        allocator.free(path);
+        return;
+    };
+}

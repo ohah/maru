@@ -112,6 +112,17 @@ RSS는 Maru 앱 프로세스와 해당 WebContent process를 분리해서 재고
 
 계측은 1,000회 pointer move와 projected frame을 반복해 누적값과 event/frame별 최댓값을 함께 남긴다. cap+1 admission은 split/group allocation 0과 다음 layout frame allocation 0도 단언한다.
 
+## 에이전트 세션 기록 도크 예산
+
+이 절은 [에이전트 세션 기록 도크](agent-session-list.md) AS2/AS3의 hot path 계약을 소유한다. provider JSONL은 민감하고 대형일 수 있으므로, 빠른 첫 목록과 main-thread 격리를 같은 gate로 다룬다.
+
+| 경로 | hard gate | 실패 조건·구현 제약 |
+| --- | --- | --- |
+| 탭 재진입·기존 snapshot | 15초 TTL hit: filesystem I/O = 0, JSON parse = 0, worker wait = 0 | 앱 실행 중 snapshot이 있으면 즉시 그것을 렌더한다. TTL hit는 refresh도 시작하지 않으며, force refresh만 이를 우회한다. cache miss가 pointer/key/frame 경로에서 동기 scan을 시작하면 실패한다. |
+| worker first batch | candidate metadata만으로 newest-first, parse concurrency ≤ 4, batch ≤ 50 | 파일 내용 전체를 먼저 읽어 정렬하거나, 500개 완료를 기다려 첫 결과를 publish하면 실패한다. 최초 batch wall-clock은 macOS fixture에서 별도 artifact로 관측하며, 개인 history를 artifact에 넣지 않는다. |
+| refresh parse | file ≤ 128 MiB, refresh read ≤ 512 MiB, unchanged identity cache hit read = 0 | `(device,inode,mtime,size)`가 같은 파일은 이번 앱 실행에서 재parse하지 않는다. stale identity·cap·cancel은 partial로 표시하며 cache가 오래된 record를 현재 결과로 위장하면 실패한다. |
+| frame tick·검색·행 선택 | filesystem I/O = 0, JSON parse = 0, worker wait = 0 | tick은 immutable batch queue drain과 snapshot 교체만 한다. 검색/선택은 published snapshot만 소비하며 scan·provider 실행을 요청하지 않는다. |
+
 ## 파일 탐색기 scrollbar/icon 예산
 
 이 절은 [파일 탐색기 §3](file-explorer.md#3-렌더--스크롤바아이콘)의 hot path를 소유한다. `app_session.zig`의 제품 glue를 직접 호출하는 macOS 테스트가 16,384 materialized row와 1,000회 pointer/frame을 실행하고 `tests/artifacts/perf/file-explorer.txt`에 실제 증가 지점이 있는 구조 counter만 남긴다. warm capacity 뒤 `FailingAllocator`의 실제 allocation 횟수와 기존 `dock_layout_build_count` delta를 함께 단언한다. 숫자 0으로만 초기화되는 가짜 lock/FS·MIME/worker/CoreText counter는 두지 않는다. 이 부재 계약은 filesystem/MIME API를 import하지 않는 중립 classifier/geometry 모듈 경계와 코드 검토가 맡으며, artifact가 자동 증명한다고 주장하지 않는다.
@@ -119,7 +130,7 @@ RSS는 Maru 앱 프로세스와 해당 WebContent process를 분리해서 재고
 | 경로 | hard gate | 실패 조건·구현 제약 |
 | --- | --- | --- |
 | row projection icon classify | row visit ≤ 16,384, row당 classify ≤ 1, allocator call = 0 | basename/extension ASCII 비교만 허용한다. render/pointer event에서 재분류하거나 filesystem metadata·MIME database를 조회하면 실패한다. filesystem/MIME import 부재는 중립 모듈 boundary review가 맡는다. |
-| scrollbar pointer move/drag | geometry build ≤ 1, allocator call = 0 | 저장된 total/visible/effective-scroll과 drag snapshot만 소비한다. divider/tab gesture owner 전환, generation 변경 뒤 commit, 매 move row scan은 실패한다. lock/I/O/worker 부재는 AppSession entrypoint review 항목이며 artifact counter로 과장하지 않는다. | **FP16(2026-07-28)**: `dock layout rebuild = 0` 항목은 **폐기**했다 — 도크가 탐색기 전용이 되며 rebuild를 세던 `dock_layout_build_count`·`invalidateDockTabSnapshot`과 그 대상인 editor chrome이 삭제됐다(측정 대상이 없는 gate라 항상 0을 재는 무의미한 게이트였다).
+| scrollbar pointer move/drag | geometry build ≤ 1, allocator call = 0 | 저장된 total/visible/effective-scroll과 drag snapshot만 소비한다. divider/tab gesture owner 전환, generation 변경 뒤 commit, 매 move row scan은 실패한다. lock/I/O/worker 부재는 AppSession entrypoint review 항목이며 artifact counter로 과장하지 않는다. | **FP16(2026-07-28)**: 파일 콘텐츠를 담던 도크 editor가 제거되며 `dock layout rebuild = 0` 항목을 **폐기**했다 — rebuild를 세던 `dock_layout_build_count`·`invalidateDockTabSnapshot`과 그 대상인 file editor chrome이 삭제돼 측정 대상이 없다. AI 세션 기록의 scan/render 예산은 [agent-session-list.md](agent-session-list.md)의 AS2/AS3 gate가 추가로 소유한다.
 | projected scrollbar update | classifier call = 0, scrollbar geometry build ≤ 1, allocator call = 0 | row에 저장된 semantic kind와 coverage PUA를 사용한다. thumb는 native quad≤1이고, icon cell은 draw-list 자동 테스트에서 visible row당≤1이다. fade는 L2 row projection/classifier를 재실행하지 않는다. 일반 text/icon shaping 전체의 0회는 주장하지 않는다. |
 
 PR 2 검증은 branch protection에 이미 등록된 Ubuntu `mise run check`/`mise run perf`와 별도 macOS PR job의 전용 `mise run macos-file-explorer-perf`를 함께 실행한다. AppSession 제품-path test는 Ubuntu에서 skip되므로 macOS job만 artifact를 생성·업로드하며 누락은 그 job을 실패시킨다. 이 macOS job(`file explorer macOS product path`)은 branch protection required status다([필수 CI 체크](#필수-ci-체크) 참조). 실제 계측하는 zero/bounded counter 하나라도 어기거나 artifact가 없으면 시간과 무관하게 실패한다.

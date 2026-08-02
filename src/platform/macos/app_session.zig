@@ -27736,7 +27736,7 @@ pub const AppSession = struct {
                                     .colors = tabbar_colors,
                                 } });
                             } else |_| {}
-                            if (self.agent_session_archive_selected) |selected| if (selected < self.agent_session_archive_records.items.len) {
+                            if (detail_rows > 0) if (self.agent_session_archive_selected) |selected| if (selected < self.agent_session_archive_records.items.len) {
                                 const record = &self.agent_session_archive_records.items[selected];
                                 const model = if (record.parsed.model.len > 0) record.parsed.model else "모델 정보 없음";
                                 const detail_labels = [_][]const u8{

@@ -260,7 +260,7 @@ cluster 분절은 코어 print 경로 `writeCodepoint`(`screen.zig`) **단일 �
 | --- | --- |
 | `emitEditBand`(주소창 편집 밴드) | caret 열이 `text_field.fieldLayout`(Σ max(1,cellWidth))과 1:1이라 cluster화하려면 L3 레이아웃까지 함께 바꿔야 한다. IME 조합은 입력 경계 `composeHangul`이 덮는다(§4.7) |
 | `buildSidebarHeaderDrawList`(사이드바 검색 밴드) | 위와 같은 caret 열 모델 — 함께 옮겨야 한다 |
-| `placeText`(chrome 오버레이·모달·세팅·팔레트·알림 텍스트) | DrawCell이 아니라 오버레이 raster 그리드(cp/fg/width 배열)에 직접 쓰는 별도 표현이라 CG1과 방식이 다르다 |
+| `platform/macos/chrome/metal_lowering.zig`의 `placeText`(chrome 오버레이·모달·세팅·팔레트·알림 텍스트) | DrawCell이 아니라 오버레이 raster 그리드(cp/fg/width 배열)에 직접 쓰는 별도 표현이라 CG1과 방식이 다르다 |
 | `drawCells`(IME preedit 오버레이, `terminal/preedit.zig`) | 확정 전 텍스트를 base snapshot 위 scratch에 임시 렌더 — 셀 저장이 아니라 표시 전용이고, 주 타깃 한글 IME가 완성형 marked text를 보내 실사용 증상이 없다(§4.7의 "의도된 한계") |
 
 앞의 둘은 같은 caret 열 모델이라 **한 슬라이스로 묶어** 옮기는 것이 맞다. 분절·폭이 이제 OS-중립(`chrome/text_layout.zig`)이라 그 슬라이스는 platform을 거치지 않고 L3 안에서 끝난다 — CT-OWN 추출이 열어 준 길이다.

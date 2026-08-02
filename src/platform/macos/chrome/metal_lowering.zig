@@ -1,0 +1,211 @@
+//! macOS Chrome Metal lowering — backend-neutral `ChromeDraw`를 제품 Metal frame 입력으로 바꾼다.
+//!
+//! 이 leaf는 세션·PTY·provider·`AppSession`을 모른다. 일반 Chrome과 Chrome Lab이 같은
+//! 변환을 공유하도록, semantic draw를 cell/quad/shadow 입력으로만 투영한다.
+
+const std = @import("std");
+const maru = @import("maru");
+const chrome = maru.chrome;
+const renderer = maru.renderer;
+const terminal = maru.terminal;
+const Rgb = maru.color.Rgb;
+const metal_frame = renderer.metal_frame;
+
+/// 한 Chrome overlay를 제품 frame에 합성하기 직전의 소유 버퍼.
+pub const OverlayRaster = struct {
+    cells: std.ArrayList(renderer.DrawCell),
+    gpu_quads: std.ArrayList(metal_frame.GpuQuad),
+    gpu_shadows: std.ArrayList(metal_frame.GpuShadow),
+    cols: u16,
+    rows: u16,
+    origin_x: u32,
+    origin_y: u32,
+    cursor: ?terminal.Cursor = null,
+    clip_rect: ?chrome.draw.Rect = null,
+};
+
+/// ChromeDraw의 painter order를 보존하며 셀과 rich GPU primitives로 투영한다.
+/// `transparent_default`는 흩어진 단축키 배지가 하위 chrome/terminal을 가리지 않게 한다.
+pub fn lower(
+    allocator: std.mem.Allocator,
+    draws: []const chrome.ChromeDraw,
+    tk: *const chrome.Tokens,
+    cw: u32,
+    ch: u32,
+    transparent_default: bool,
+) !OverlayRaster {
+    if (cw == 0 or ch == 0) return error.NoMetrics;
+
+    var gpu_quads: std.ArrayList(metal_frame.GpuQuad) = .empty;
+    errdefer gpu_quads.deinit(allocator);
+    var gpu_shadows: std.ArrayList(metal_frame.GpuShadow) = .empty;
+    errdefer gpu_shadows.deinit(allocator);
+
+    var min_x: i32 = std.math.maxInt(i32);
+    var min_y: i32 = std.math.maxInt(i32);
+    var max_x: i32 = std.math.minInt(i32);
+    var max_y: i32 = std.math.minInt(i32);
+    var have_box = false;
+    for (draws) |d| for (d.ops) |op| {
+        const rect: ?chrome.draw.Rect = switch (op) {
+            .fill => |f| f.rect,
+            .border => |b| b.rect,
+            .quad => |q| q.rect,
+            else => null,
+        };
+        if (rect) |rr| {
+            have_box = true;
+            min_x = @min(min_x, rr.x);
+            min_y = @min(min_y, rr.y);
+            max_x = @max(max_x, rr.x + @as(i32, @intCast(rr.w)));
+            max_y = @max(max_y, rr.y + @as(i32, @intCast(rr.h)));
+        }
+    };
+    if (!have_box) return error.NoBox;
+    const origin_x: u32 = if (min_x < 0) 0 else @intCast(min_x);
+    const origin_y: u32 = if (min_y < 0) 0 else @intCast(min_y);
+    const cols_u = @as(u32, @intCast(@max(max_x - min_x, 0))) / cw;
+    const rows_u = @as(u32, @intCast(@max(max_y - min_y, 0))) / ch;
+    if (cols_u == 0 or rows_u == 0) return error.TooSmall;
+    const cols: u16 = @intCast(@min(cols_u, @as(u32, std.math.maxInt(u16))));
+    const rows: u16 = @intCast(@min(rows_u, @as(u32, std.math.maxInt(u16))));
+
+    const n = @as(usize, cols) * @as(usize, rows);
+    const bg = try allocator.alloc(terminal.Color, n);
+    defer allocator.free(bg);
+    const fg = try allocator.alloc(terminal.Color, n);
+    defer allocator.free(fg);
+    const cp = try allocator.alloc(u21, n);
+    defer allocator.free(cp);
+    const cwid = try allocator.alloc(u2, n);
+    defer allocator.free(cwid);
+    const surface_bg = terminal.Color{ .rgb = tk.get(.surface_bg) };
+    @memset(bg, surface_bg);
+    @memset(fg, terminal.Color{ .rgb = tk.get(.surface_fg) });
+    @memset(cp, ' ');
+    @memset(cwid, 1);
+
+    // 첫 rounded quad는 overlay의 배경·shadow이고, 그 뒤 rounded quad는 선택 행 위에 떠야 하는 widget이다.
+    // 이 painter-order 규칙을 lowerer 한 곳에 둬 cell과 GPU pass의 z-order가 갈라지지 않게 한다.
+    var cursor: ?terminal.Cursor = null;
+    var clip_rect: ?chrome.draw.Rect = null;
+    var modal_bg_quad = false;
+    for (draws) |d| for (d.ops) |op| switch (op) {
+        .fill => |f| {
+            if (f.role == .cursor) {
+                const col = @divTrunc(f.rect.x - @as(i32, @intCast(origin_x)), @as(i32, @intCast(cw)));
+                const row = @divTrunc(f.rect.y - @as(i32, @intCast(origin_y)), @as(i32, @intCast(ch)));
+                if (col >= 0 and col < cols and row >= 0 and row < rows)
+                    cursor = .{ .row = @intCast(row), .col = @intCast(col), .visible = true };
+            } else paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, f.rect, .{ .rgb = tk.get(f.role) }, null);
+        },
+        .border => |b| if (!modal_bg_quad) paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, b.rect, .{ .rgb = tk.get(b.role) }, b.sides),
+        .text => |t| placeText(cp, fg, cwid, cols, rows, origin_x, origin_y, cw, ch, t, .{ .rgb = tk.get(t.role) }),
+        .swatch => |sw| {
+            const rounded = sw.corner_radii[0] != 0 or sw.corner_radii[1] != 0 or sw.corner_radii[2] != 0 or sw.corner_radii[3] != 0;
+            if (!rounded) {
+                paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, sw.rect, .{ .rgb = sw.rgb }, null);
+            } else appendSwatch(&gpu_quads, allocator, sw);
+        },
+        .rule => {},
+        .clip => |rect| clip_rect = rect,
+        .quad => |q| {
+            const rounded = q.corner_radii[0] != 0 or q.corner_radii[1] != 0 or q.corner_radii[2] != 0 or q.corner_radii[3] != 0;
+            if (!rounded) {
+                paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, q.rect, .{ .rgb = tk.get(q.fill_role) }, null);
+            } else if (modal_bg_quad) {
+                appendWidgetQuad(&gpu_quads, allocator, q, tk);
+            } else {
+                appendModalQuad(&gpu_quads, &gpu_shadows, allocator, q, tk);
+                modal_bg_quad = true;
+            }
+        },
+    };
+
+    var cells: std.ArrayList(renderer.DrawCell) = .empty;
+    errdefer cells.deinit(allocator);
+    try cells.ensureTotalCapacity(allocator, n);
+    var row: u16 = 0;
+    while (row < rows) : (row += 1) {
+        var col: u16 = 0;
+        while (col < cols) {
+            const idx = @as(usize, row) * @as(usize, cols) + col;
+            const width = cwid[idx];
+            if ((modal_bg_quad or transparent_default) and cp[idx] == ' ' and std.meta.eql(bg[idx], surface_bg)) {
+                col += if (width == 2) 2 else 1;
+                continue;
+            }
+            const cell_bg: terminal.Color = if ((modal_bg_quad or transparent_default) and std.meta.eql(bg[idx], surface_bg)) .default else bg[idx];
+            cells.appendAssumeCapacity(.{ .row = row, .col = col, .codepoint = cp[idx], .width = width, .style = .{ .foreground = fg[idx], .background = cell_bg } });
+            col += if (width == 2) 2 else 1;
+        }
+    }
+    return .{ .cells = cells, .gpu_quads = gpu_quads, .gpu_shadows = gpu_shadows, .cols = cols, .rows = rows, .origin_x = origin_x, .origin_y = origin_y, .cursor = cursor, .clip_rect = clip_rect };
+}
+
+fn appendSwatch(quads: *std.ArrayList(metal_frame.GpuQuad), allocator: std.mem.Allocator, sw: chrome.draw.Op.Swatch) void {
+    const fill = packOpaqueRgb(sw.rgb);
+    quads.append(allocator, .{ .x = @floatFromInt(sw.rect.x), .y = @floatFromInt(sw.rect.y), .w = @floatFromInt(sw.rect.w), .h = @floatFromInt(sw.rect.h), .corner_radii = .{ @floatFromInt(sw.corner_radii[0]), @floatFromInt(sw.corner_radii[1]), @floatFromInt(sw.corner_radii[2]), @floatFromInt(sw.corner_radii[3]) }, .border_widths = .{ 0, 0, 0, 0 }, .fill_color0 = fill, .fill_color1 = fill, .border_color = 0, .gradient_kind = 0, .layer = 3 }) catch {};
+}
+
+fn appendWidgetQuad(quads: *std.ArrayList(metal_frame.GpuQuad), allocator: std.mem.Allocator, q: chrome.draw.Op.Quad, tk: *const chrome.Tokens) void {
+    appendQuad(quads, allocator, q.rect, q.corner_radii, q.border_widths, q.fill_role, q.border_role, tk, 3);
+}
+
+fn appendModalQuad(quads: *std.ArrayList(metal_frame.GpuQuad), shadows: *std.ArrayList(metal_frame.GpuShadow), allocator: std.mem.Allocator, q: chrome.draw.Op.Quad, tk: *const chrome.Tokens) void {
+    // content rect와 box shadow가 같은 outset box를 공유해야 padding·border·shadow의 가장자리가 어긋나지 않는다.
+    const p = tk.space.modal_padding_px;
+    const box = q.rect.outset(.{ .left = p, .right = p, .top = p, .bottom = p });
+    appendQuad(quads, allocator, box, q.corner_radii, q.border_widths, q.fill_role, q.border_role, tk, 1);
+    shadows.append(allocator, .{ .x = @floatFromInt(box.x), .y = @as(f32, @floatFromInt(box.y)) + @as(f32, @floatFromInt(tk.space.shadow_offset_y_px)), .w = @floatFromInt(box.w), .h = @floatFromInt(box.h), .corner_radii = .{ @floatFromInt(q.corner_radii[0]), @floatFromInt(q.corner_radii[1]), @floatFromInt(q.corner_radii[2]), @floatFromInt(q.corner_radii[3]) }, .blur_radius = @floatFromInt(tk.space.shadow_blur_px), .color = @as(u32, tk.space.shadow_alpha) << 24 }) catch {};
+}
+
+fn appendQuad(quads: *std.ArrayList(metal_frame.GpuQuad), allocator: std.mem.Allocator, rect: chrome.draw.Rect, radii: [4]u16, widths: [4]u16, fill_role: chrome.tokens.ColorRole, border_role: ?chrome.tokens.ColorRole, tk: *const chrome.Tokens, layer: u32) void {
+    const fill = packOpaqueRgb(tk.get(fill_role));
+    const border = if (border_role) |role| packOpaqueRgb(tk.get(role)) else 0;
+    quads.append(allocator, .{ .x = @floatFromInt(rect.x), .y = @floatFromInt(rect.y), .w = @floatFromInt(rect.w), .h = @floatFromInt(rect.h), .corner_radii = .{ @floatFromInt(radii[0]), @floatFromInt(radii[1]), @floatFromInt(radii[2]), @floatFromInt(radii[3]) }, .border_widths = .{ @floatFromInt(widths[0]), @floatFromInt(widths[1]), @floatFromInt(widths[2]), @floatFromInt(widths[3]) }, .fill_color0 = fill, .fill_color1 = fill, .border_color = border, .gradient_kind = 0, .layer = layer }) catch {};
+}
+
+fn paintRectBg(bg: []terminal.Color, cols: u16, rows: u16, origin_x: u32, origin_y: u32, cw: u32, ch: u32, rect: chrome.draw.Rect, color: terminal.Color, sides: ?chrome.draw.Sides) void {
+    const ox: i32 = @intCast(origin_x);
+    const oy: i32 = @intCast(origin_y);
+    const c0 = std.math.clamp(@divTrunc(rect.x - ox, @as(i32, @intCast(cw))), 0, @as(i32, cols));
+    const r0 = std.math.clamp(@divTrunc(rect.y - oy, @as(i32, @intCast(ch))), 0, @as(i32, rows));
+    const c1 = std.math.clamp(@divTrunc(rect.x + @as(i32, @intCast(rect.w)) - ox, @as(i32, @intCast(cw))), 0, @as(i32, cols));
+    const r1 = std.math.clamp(@divTrunc(rect.y + @as(i32, @intCast(rect.h)) - oy, @as(i32, @intCast(ch))), 0, @as(i32, rows));
+    var row: i32 = r0;
+    while (row < r1) : (row += 1) {
+        var col: i32 = c0;
+        while (col < c1) : (col += 1) {
+            const on_edge = if (sides) |s| (s.top and row == r0) or (s.bottom and row == r1 - 1) or (s.left and col == c0) or (s.right and col == c1 - 1) else true;
+            if (on_edge) bg[@as(usize, @intCast(row)) * @as(usize, cols) + @as(usize, @intCast(col))] = color;
+        }
+    }
+}
+
+fn placeText(cp: []u21, fg: []terminal.Color, cwid: []u2, cols: u16, rows: u16, origin_x: u32, origin_y: u32, cw: u32, ch: u32, t: chrome.draw.Op.Text, color: terminal.Color) void {
+    const row_i = @divTrunc(t.origin.y - @as(i32, @intCast(origin_y)), @as(i32, @intCast(ch)));
+    if (row_i < 0 or row_i >= rows) return;
+    const row: usize = @intCast(row_i);
+    var col_i = @divTrunc(t.origin.x - @as(i32, @intCast(origin_x)), @as(i32, @intCast(cw)));
+    for (t.runs) |run| {
+        const view = std.unicode.Utf8View.init(run.text) catch continue;
+        var it = view.iterator();
+        while (it.nextCodepoint()) |codepoint| {
+            // wide 문자는 한 DrawCell의 width=2로 남기고 continuation cell은 emit하지 않는다. 그렇지 않으면
+            // continuation의 배경 quad가 CoreText glyph의 오른쪽 절반을 덮어 한글/CJK가 잘린다.
+            const width: u2 = if (codepoint == chrome.components.settings.reset_glyph_cp) 2 else @max(1, terminal.width.cellWidth(codepoint));
+            if (col_i >= 0 and col_i < cols) {
+                const idx = row * @as(usize, cols) + @as(usize, @intCast(col_i));
+                cp[idx] = codepoint;
+                fg[idx] = color;
+                cwid[idx] = @intCast(@min(width, 2));
+            }
+            col_i += width;
+        }
+    }
+}
+
+fn packOpaqueRgb(rgb: Rgb) u32 {
+    return 0xFF000000 | (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
+}

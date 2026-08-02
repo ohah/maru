@@ -28,7 +28,7 @@ const std = @import("std");
 
 /// "이 함수가 셀(또는 셀 그리드)을 만든다"는 신호.
 /// - `.codepoint = ` — `renderer.DrawCell`/`NativeMetalCell` 리터럴(대부분의 chrome 방출 경로)
-/// - `: []u21` — chrome 오버레이 raster의 codepoint 그리드를 받는 시그니처(app_session.placeText).
+/// - `: []u21` — chrome 오버레이 raster의 codepoint 그리드를 받는 시그니처(metal_lowering.placeText).
 ///   변수 철자가 아니라 **타입**을 키로 삼아, 지역변수를 rename해도 커버리지가 안 사라지게 한다.
 const emit_signals = [_][]const u8{ ".codepoint = ", ": []u21" };
 
@@ -82,7 +82,7 @@ const allowlist = [_]Allowed{
         .reason = "주소창 편집 밴드: caret 열이 text_field.fieldLayout(Σ max(1,cellWidth))과 1:1이라 cluster화하려면 L3 레이아웃까지 같이 바꿔야 한다(후속 슬라이스). IME 조합은 입력 경계 composeHangul이 덮는다.",
     },
     .{
-        .file = "platform/macos/app_session.zig",
+        .file = "platform/macos/chrome/metal_lowering.zig",
         .function = "placeText",
         .reason = "chrome 오버레이(모달·세팅·팔레트·알림) 텍스트: DrawCell이 아니라 오버레이 raster 그리드(cp/fg/width 배열)에 직접 쓰는 별도 경로라 CG1과 표현이 다르다(후속 슬라이스).",
     },

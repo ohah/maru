@@ -112,7 +112,7 @@ pub const Tokens = struct {
 `appearance.ResolvedTheme`(9 색)는 유지하되, `Tokens.tui()`가 그걸 받아 role+derivation을 채운다. **로더 갭(5 key)은 여기서 config→Tokens로 메운다.**
 
 ### 5.2 ChromeDraw — `chrome/draw.zig` (semantic 어휘, 백엔드 중립)
-컴포넌트의 유일한 출력. **픽셀 좌표**(rich의 sub-cell 정밀도 대비)로 표현하고, tui 백엔드가 셀로 스냅한다.
+컴포넌트의 유일한 출력. **픽셀 좌표**로 표현하고, Metal lowerer가 필요한 셀 경계로 스냅한다.
 
 ```zig
 pub const Px = struct { x: i32, y: i32 };
@@ -130,8 +130,14 @@ pub const Run = struct { text: []const u8, bold: bool = false };
 pub const ChromeDraw = struct { layer: Layer, ops: []const Op };  // 한 컴포넌트의 한 프레임 출력
 ```
 
-### 5.3 Backend — `chrome/backend.zig` (계약) + `platform/macos/chrome_tui_backend.zig` **(계획 — 두 파일 모두 아직 미생성)**
-ChromeDraw를 실제 합성 입력으로 lowering. tui = `NativeMetalCell`(+텍스트는 glyph `PaneFrame`). rich(C4) = GPU 프리미티브. **현황**: 별도 backend 파일 분리는 아직 실행되지 않았고, lowering은 `app_session.zig`의 `rasterizeOverlayCells`(오버레이)와 §6 매핑표의 손코드 헬퍼들(`sentinelBgCell`·`appendVerticalLine` 등 — 여전히 `app_session.zig` 잔존)이 담당한다(상단 현황 헤더와 동일).
+### 5.3 Backend — `platform/macos/chrome/metal_lowering.zig` (구현) + 나머지 backend 추출
+ChromeDraw를 실제 합성 입력으로 lowering한다. 현재 `metal_lowering.zig`의 `lower`는 오버레이
+`ChromeDraw`를 `OverlayRaster`의 cell/quad/shadow/clip 입력으로 변환하고, `AppSession`은 frame
+소유·arena·합성만 맡아 이 leaf를 호출한다. 이 leaf는 표준 `maru` facade에서 `chrome`·`renderer`·`terminal`·`color`만
+읽고 session·PTY·provider·`AppSession`을 import하거나 참조하지 않는다. **후속 Chrome Lab caller는** 별도
+mock lowerer 없이 이 같은 제품 Metal 입력 변환을 호출해야 한다. sidebar·pane chrome의 손코드 helpers
+(`sentinelBgCell`·`appendVerticalLine` 등)는 아직 `app_session.zig`에 남아 있으며, 전용 backend
+분리는 별도 범위다.
 
 ```zig
 pub const ChromeFrame = struct {                 // replace()가 먹을 번들(layer별)
@@ -140,10 +146,10 @@ pub const ChromeFrame = struct {                 // replace()가 먹을 번들(l
     pane_overlay_cells: []NativeMetalCell,
     text_frames: []PositionedFrame,              // sidebar 제목·모달(overlay_frame) glyph
 };
-// tui 백엔드: fill→sentinel-UV bg 셀, border/rule→reserved-kind 2px 띠 셀, text→기존 glyph RenderFrame 경로
+// Metal cell lowerer: fill→sentinel-UV bg 셀, border/rule→reserved-kind 2px 띠 셀, text→기존 glyph RenderFrame 경로
 pub fn lower(allocator, draws: []const ChromeDraw, tokens: Tokens, metrics: CellMetrics) !ChromeFrame;
 ```
-tui 백엔드의 lowering 로직 = 현재 `sentinelBgCell`/`appendVerticalLine`/`appendHorizontalLine`/`buildSidebarDrawList`/`appendPaletteRow`를 **이주**한 것. 즉 새 코드가 아니라 현재 수작업 셀 생성을 백엔드로 격상.
+Metal cell lowerer의 lowering 로직 = 현재 `sentinelBgCell`/`appendVerticalLine`/`appendHorizontalLine`/`buildSidebarDrawList`/`appendPaletteRow`를 **이주**한 것. 즉 새 코드가 아니라 현재 수작업 셀 생성을 backend로 격상한다. 사용자 설정의 `tui` 선택지는 제공하지 않으며, 남은 `tui` 이름은 이 legacy cell 경로의 내부 호환성 표기일 뿐이다.
 
 ### 5.4 Component 계약 — `chrome/components/*.zig`
 Zig엔 trait가 없으니 **계약은 컨벤션**(각 컴포넌트 모듈이 같은 4개를 노출)이고 `ChromeHost`가 명시 호출한다(vtable 없음 — 컴파일타임 고정 집합, 기존 `self.palette`/`self.find` 패턴 그대로). 선례 = `FindState`/`PaletteState`.
@@ -216,8 +222,9 @@ pub const ChromeHost = struct {
 | 현재 (`app_session.zig` 등) | → 새 위치 |
 |---|---|
 | `PaletteState`/`FindState` | `chrome/components/palette.zig`·`find.zig` (이동, 거의 그대로) |
-| `sentinelBgCell`/`appendVerticalLine`/`appendHorizontalLine`/`buildSidebarDrawList`/`appendPaletteRow` | `platform/macos/chrome_tui_backend.zig` (lowering) |
-| `sidebarBandCell`/`rebuildSidebar`/`buildSidebarTitleFrame` | `chrome/components/sidebar.zig` view + tui backend |
+| `rasterizeOverlayCells`의 ChromeDraw→cell/quad/shadow/clip 변환 | `platform/macos/chrome/metal_lowering.zig` `lower` (AppSession은 호출·frame 합성만) |
+| `sentinelBgCell`/`appendVerticalLine`/`appendHorizontalLine`/`buildSidebarDrawList`/`appendPaletteRow` | `platform/macos/chrome/metal_lowering.zig`의 후속 확장 (lowering) |
+| `sidebarBandCell`/`rebuildSidebar`/`buildSidebarTitleFrame` | `chrome/components/sidebar.zig` view + Metal lowerer |
 | `BarMetrics`/per-pane 탭바 렌더(`view()` 인라인) | `chrome/components/tabbar.zig` (view + hitTest) |
 | `appendActiveTabDividers`/`dividerAtPoint`/`dividerHit` | `chrome/components/divider.zig` |
 | `appendMinimalTabIndicator` | `chrome/components/pane_decor.zig` |
@@ -229,7 +236,7 @@ pub const ChromeHost = struct {
 
 전체 시퀀싱(C0·S1·S2·C1~C4·B)과 의존성 순서는 [레이어링과 이식성 전략 §5](layering-and-portability.md#5-시퀀싱-의존성-순서-각-단계-green)가 단일 출처다. chrome 관점 요약:
 
-- **C0 — 스켈레톤 + Notice (저위험 수직 슬라이스).** `chrome/{tokens,draw,backend,props,state,host}.zig` + `components/notice.zig` + `platform/macos/chrome_tui_backend.zig`. Notice는 인터랙티브 영역이 없어(hitTest 불필요) 가장 작은 슬라이스로 **전 파이프라인(토큰→view→ChromeDraw→tui 백엔드→replace)을 증명**. 단 Notice는 비-인터랙티브 정보 토스트(자동 닫힘 타이머 없음)라 **아무 입력으로나 닫힌다** — 키는 `notice.handle`(키 종류 무관), 클릭·휠은 platform `mouse()`/`scrollWheel`이 닫는다(닫는 입력은 소비; hitTest는 여전히 불필요). 안 그러면 토스트가 떠 있는 동안 입력이 영구히 막힌다(키/마우스/휠 전부). 손상 알림(`workspace_window_count < 0`)을 `notice.State.show(...)`로 연결. **`search_match*`·`sidebar_*` 5개 키는 설계상 preset 전용으로 둔다**(개별 config 키 없이 `theme.preset`으로만 설정 — theme.zig:121). 토큰화는 이 5색을 per-key config 파싱으로 "메우는" 게 아니라, preset이 채운 `ResolvedTheme`(→chrome-중립 `ThemeColors`)에서 `Tokens.tui`/`Tokens.rich`가 role을 파생할 뿐이다. check-boundaries에 `src/chrome` 경계 추가. (C0는 neutral 모델이라 동작 보존이 아닌 **신규 기능** — "동작 보존"으로 적지 않는다.)
+- **C0 — 스켈레톤 + Notice (저위험 수직 슬라이스).** `chrome/{tokens,draw,backend,props,state,host}.zig` + `components/notice.zig` + `platform/macos/chrome/metal_lowering.zig`의 최초 lowering 범위. Notice는 인터랙티브 영역이 없어(hitTest 불필요) 가장 작은 슬라이스로 **전 파이프라인(토큰→view→ChromeDraw→Metal lowerer→replace)을 증명**. 단 Notice는 비-인터랙티브 정보 토스트(자동 닫힘 타이머 없음)라 **아무 입력으로나 닫힌다** — 키는 `notice.handle`(키 종류 무관), 클릭·휠은 platform `mouse()`/`scrollWheel`이 닫는다(닫는 입력은 소비; hitTest는 여전히 불필요). 안 그러면 토스트가 떠 있는 동안 입력이 영구히 막힌다(키/마우스/휠 전부). 손상 알림(`workspace_window_count < 0`)을 `notice.State.show(...)`로 연결. **`search_match*`·`sidebar_*` 5개 키는 설계상 preset 전용으로 둔다**(개별 config 키 없이 `theme.preset`으로만 설정 — theme.zig:121). 토큰화는 이 5색을 per-key config 파싱으로 "메우는" 게 아니라, preset이 채운 `ResolvedTheme`(→chrome-중립 `ThemeColors`)에서 내부 legacy cell mapping과 Chrome token mapping이 role을 파생할 뿐이다. check-boundaries에 `src/chrome` 경계 추가. (C0는 neutral 모델이라 동작 보존이 아닌 **신규 기능** — "동작 보존"으로 적지 않는다.)
 - **S1·S2 (chrome 큰 조각 전에 선결, 상위 문서 소유)** — S1: session-tree **구조-무효화 계약** 형식화(§5.5의 stale 포인터 UAF 선제거). S2: session core(L2) 추출. C2/C3가 이 둘에 의존한다.
 - **C1 — Palette·Find 이주.** 이미 순수 → 이동 + `view`가 ChromeDraw 뱉도록 + 렌더를 tui 백엔드로. 동작·테스트 보존.
 - **C2 — Divider·pane_decor.** hitTest 컴포넌트 첫 도입(`dividerHit` 승계). `divider_drag`/`tab_drag_pane`의 **세션-트리 포인터 수명**은 S1 계약으로 다룬다(props 핸들로 줄이거나, 호스트가 구조-무효화 콜백 소유). **스냅샷 가드는 UAF를 못 잡으니** 명시적 null화 계약 필수.

@@ -483,6 +483,22 @@ fn agentSessionArchiveWithinRoot(record: agent_session_archive_backend.Record, r
         file_tree.Tree.pathWithinRoot(record.parsed.cwd, root);
 }
 
+fn sameAgentSessionArchiveIdentity(a: *const agent_session_archive_backend.Record, b: *const agent_session_archive_backend.Record) bool {
+    return a.parsed.provider == b.parsed.provider and a.inode == b.inode and a.device == b.device and
+        std.mem.eql(u8, a.parsed.session_id, b.parsed.session_id);
+}
+
+fn archiveSnapshotSelectionIndex(
+    previous: ?*const agent_session_archive_backend.Record,
+    replacement: []const agent_session_archive_backend.Record,
+) ?usize {
+    const selected = previous orelse return null;
+    for (replacement, 0..) |*candidate, index| {
+        if (sameAgentSessionArchiveIdentity(selected, candidate)) return index;
+    }
+    return null;
+}
+
 test "archive scope admits only canonical cwd beneath the exact root boundary" {
     const parsed = maru.session.agent_session_archive.Parsed{
         .provider = .codex,
@@ -507,6 +523,34 @@ test "archive scope admits only canonical cwd beneath the exact root boundary" {
     var unresolved = record;
     unresolved.parsed.cwd_canonical = false;
     try std.testing.expect(!agentSessionArchiveWithinRoot(unresolved, "/workspace/project"));
+}
+
+test "archive snapshot replacement preserves selection only for the exact source identity" {
+    const base = maru.session.agent_session_archive.Parsed{
+        .provider = .codex,
+        .session_id = @constCast("selected"),
+        .title = @constCast("title"),
+        .summary = @constCast("summary"),
+        .cwd = @constCast("/workspace/project"),
+        .cwd_canonical = true,
+        .model = @constCast("model"),
+        .message_count = 1,
+        .verified_user = true,
+    };
+    const selected = agent_session_archive_backend.Record{
+        .parsed = base,
+        .source_path = @constCast("/archive/selected.jsonl"),
+        .mtime_ns = 0,
+        .inode = 7,
+        .device = 11,
+    };
+    var replacement = [_]agent_session_archive_backend.Record{
+        .{ .parsed = .{ .provider = .claude, .session_id = @constCast("other"), .title = @constCast("title"), .summary = @constCast("summary"), .cwd = @constCast("/workspace/project"), .cwd_canonical = true, .model = @constCast("model"), .message_count = 1, .verified_user = true }, .source_path = @constCast("/archive/other.jsonl"), .mtime_ns = 0, .inode = 8, .device = 11 },
+        selected,
+    };
+    try std.testing.expectEqual(@as(?usize, 1), archiveSnapshotSelectionIndex(&selected, &replacement));
+    replacement[1].inode = 9;
+    try std.testing.expect(archiveSnapshotSelectionIndex(&selected, &replacement) == null);
 }
 
 test "archive relative age uses the worker mtime without filesystem access" {
@@ -2781,9 +2825,16 @@ pub const AppSession = struct {
     /// These are copied only when the archive dock opens or the user changes
     /// scope.  Search and per-frame publication consume this snapshot without
     /// looking at the file tree or filesystem again.
-    agent_session_archive_workspace_roots: std.ArrayList([]u8) = .empty,
+    /// The active workspace tab's canonical active-Term CWD. This is a scope
+    /// snapshot, not the window-global explorer tree authority.
+    agent_session_archive_workspace_root: ?[]u8 = null,
     agent_session_archive_project_root: ?[]u8 = null,
+    /// Last local CWD observed from the active pane.  It is intentionally the
+    /// reported (pre-canonical) value: comparing it on each tick detects `cd`
+    /// in the same pane without putting filesystem work on the main actor.
+    agent_session_archive_scope_observed_cwd: ?[]u8 = null,
     agent_session_archive_scope_request_id: u64 = 0,
+    agent_session_archive_workspace_scope_requested: bool = false,
     agent_session_archive_project_scope_requested: bool = false,
     agent_session_archive_project_scope_loading: bool = false,
     agent_session_archive_project_scope_surface_id: ?u64 = null,
@@ -3463,7 +3514,7 @@ pub const AppSession = struct {
         if (view == .agent_sessions) {
             self.refreshAgentSessionArchiveScopeSnapshots();
             self.agent_session_archive_project_scope_surface_id = self.activeSurface().id;
-            self.requestAgentSessionArchiveProjectRoot(false);
+            self.requestAgentSessionArchiveScopeRoots(null);
             self.refreshAgentSessionArchive(false);
         }
         self.metal_dirty = true;
@@ -3487,26 +3538,29 @@ pub const AppSession = struct {
 
     fn updateAgentSessionArchive(self: *AppSession) void {
         if (!self.agent_session_archive_initialized) return;
-        // One immutable batch at most per frame: archive work stays off the
-        // render path, while the first verified sessions become visible before
-        // the remainder of the bounded scan completes.
+        // The worker publishes one completed immutable snapshot only. Keeping
+        // the old snapshot until this point prevents refresh from blanking or
+        // visibly reordering the archive list while JSONL is still scanning.
         var result = self.agent_session_archive_backend.takeResult() orelse return;
         defer result.deinit(self.allocator);
-        if (result.first_batch) {
-            for (self.agent_session_archive_records.items) |*record| record.deinit(self.allocator);
-            self.agent_session_archive_records.deinit(self.allocator);
-            self.agent_session_archive_records = result.records;
-            result.records = .empty;
-            self.agent_session_archive_partial = result.partial;
-            self.agent_session_archive_selected = null;
-            self.agent_session_archive_scroll_rows = 0;
-        } else {
-            self.agent_session_archive_records.appendSlice(self.allocator, result.records.items) catch return;
-            // Ownership moved into the archive snapshot; keep the defer from
-            // reclaiming records now owned by AppSession.
-            result.records.clearRetainingCapacity();
+        std.debug.assert(result.complete);
+        if (result.retain_previous) {
+            self.agent_session_archive_loading = false;
+            self.showNotice("새 세션 목록을 적용하지 못해 기존 목록을 유지했습니다.");
+            self.metal_dirty = true;
+            return;
         }
-        if (!result.first_batch) self.agent_session_archive_partial = self.agent_session_archive_partial or result.partial;
+        const prior_selected = if (self.agent_session_archive_selected) |index|
+            if (index < self.agent_session_archive_records.items.len) &self.agent_session_archive_records.items[index] else null
+        else
+            null;
+        const preserved_selected = archiveSnapshotSelectionIndex(prior_selected, result.records.items);
+        for (self.agent_session_archive_records.items) |*record| record.deinit(self.allocator);
+        self.agent_session_archive_records.deinit(self.allocator);
+        self.agent_session_archive_records = result.records;
+        result.records = .empty;
+        self.agent_session_archive_partial = result.partial;
+        self.agent_session_archive_selected = preserved_selected;
         self.rebuildAgentSessionArchiveFilter();
         self.reconcileArchiveSessionTabsAgainstSnapshot();
         const visible = self.agentSessionArchiveVisibleContentRows();
@@ -3518,29 +3572,9 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
-    fn replaceAgentSessionArchiveWorkspaceRoots(self: *AppSession) bool {
-        var staged: std.ArrayList([]u8) = .empty;
-        errdefer {
-            for (staged.items) |path| self.allocator.free(path);
-            staged.deinit(self.allocator);
-        }
-        staged.ensureTotalCapacity(self.allocator, self.file_tree.roots.items.len) catch return false;
-        for (self.file_tree.roots.items) |root| {
-            // Tree roots are produced by the validated canonical-root path;
-            // retain only absolute roots so a damaged in-memory model cannot
-            // broaden a display scope.
-            if (!std.fs.path.isAbsolute(root.path)) continue;
-            staged.appendAssumeCapacity(self.allocator.dupe(u8, root.path) catch return false);
-        }
-        for (self.agent_session_archive_workspace_roots.items) |path| self.allocator.free(path);
-        self.agent_session_archive_workspace_roots.deinit(self.allocator);
-        self.agent_session_archive_workspace_roots = staged;
-        return true;
-    }
-
-    fn clearAgentSessionArchiveWorkspaceRoots(self: *AppSession) void {
-        for (self.agent_session_archive_workspace_roots.items) |path| self.allocator.free(path);
-        self.agent_session_archive_workspace_roots.clearRetainingCapacity();
+    fn clearAgentSessionArchiveWorkspaceRoot(self: *AppSession) void {
+        if (self.agent_session_archive_workspace_root) |old| self.allocator.free(old);
+        self.agent_session_archive_workspace_root = null;
     }
 
     fn clearAgentSessionArchiveProjectRoot(self: *AppSession) void {
@@ -3548,7 +3582,17 @@ pub const AppSession = struct {
         self.agent_session_archive_project_root = null;
     }
 
-    fn submitAgentSessionArchiveProjectRoot(self: *AppSession, owned_cwd: []u8) bool {
+    fn replaceAgentSessionArchiveScopeObservedCwd(self: *AppSession, owned_cwd: []u8) void {
+        if (self.agent_session_archive_scope_observed_cwd) |old| self.allocator.free(old);
+        self.agent_session_archive_scope_observed_cwd = owned_cwd;
+    }
+
+    fn clearAgentSessionArchiveScopeObservedCwd(self: *AppSession) void {
+        if (self.agent_session_archive_scope_observed_cwd) |old| self.allocator.free(old);
+        self.agent_session_archive_scope_observed_cwd = null;
+    }
+
+    fn submitAgentSessionArchiveScopeRoots(self: *AppSession, owned_cwd: []u8) bool {
         self.agent_session_archive_scope_request_id +%= 1;
         if (self.agent_session_archive_scope_request_id == 0) self.agent_session_archive_scope_request_id = 1;
         if (!self.agent_session_archive_scope_backend.submit(owned_cwd, self.agent_session_archive_scope_request_id)) return false;
@@ -3557,33 +3601,87 @@ pub const AppSession = struct {
         return true;
     }
 
+    /// A focus change can leave an older root walk in flight while the new
+    /// active Term has no local CWD. There is then no replacement job to fence
+    /// the old result, so advance the generation explicitly and let the drain
+    /// clear loading without ever publishing that previous tab's root.
+    fn invalidateAgentSessionArchiveScopeRequest(self: *AppSession) void {
+        self.agent_session_archive_scope_request_id +%= 1;
+        if (self.agent_session_archive_scope_request_id == 0) self.agent_session_archive_scope_request_id = 1;
+    }
+
     /// Capture only the current in-memory observation on the main actor.  The
     /// backend owns canonicalization and the `.git` ancestor walk, so neither
     /// scope selection nor a later key/frame path can block on filesystem I/O.
-    fn requestAgentSessionArchiveProjectRoot(self: *AppSession, requested: bool) void {
-        if (requested) self.agent_session_archive_project_scope_requested = true;
+    fn requestAgentSessionArchiveScopeRoots(self: *AppSession, requested: ?AgentSessionArchiveScope) void {
+        if (requested) |scope| switch (scope) {
+            .workspace => self.agent_session_archive_workspace_scope_requested = true,
+            .project => self.agent_session_archive_project_scope_requested = true,
+            .all => unreachable,
+        };
         const term = self.activeTab().activeTerm();
         self.refreshTermObservation(term, false, false);
         const cwd = if (term.rt.observation.availability != .unavailable) term.rt.observation.cwd.items else "";
         if (!std.fs.path.isAbsolute(cwd) or cwd.len == 0) {
+            const had_observed_cwd = self.agent_session_archive_scope_observed_cwd != null;
+            self.clearAgentSessionArchiveScopeObservedCwd();
+            if (!had_observed_cwd and requested == null) return;
+            if (self.agent_session_archive_project_scope_loading) {
+                if (self.agent_session_archive_project_scope_pending_cwd) |old| self.allocator.free(old);
+                self.agent_session_archive_project_scope_pending_cwd = null;
+                self.invalidateAgentSessionArchiveScopeRequest();
+            }
+            self.clearAgentSessionArchiveWorkspaceRoot();
             self.clearAgentSessionArchiveProjectRoot();
+            if (self.agent_session_archive_workspace_scope_requested) {
+                self.agent_session_archive_workspace_scope_requested = false;
+                self.showNotice("활성 작업공간의 로컬 경로를 찾을 수 없습니다.");
+            }
             if (self.agent_session_archive_project_scope_requested) {
                 self.agent_session_archive_project_scope_requested = false;
                 self.showNotice("현재 터미널의 로컬 git 프로젝트를 찾을 수 없습니다.");
             }
+            if (self.agent_session_archive_scope != .all) {
+                self.rebuildAgentSessionArchiveFilter();
+                self.agent_session_archive_selected = null;
+                self.agent_session_archive_scroll_rows = 0;
+                self.metal_dirty = true;
+            }
             return;
         }
-        const owned_cwd = self.allocator.dupe(u8, cwd) catch return;
+        const cwd_changed = if (self.agent_session_archive_scope_observed_cwd) |previous|
+            !std.mem.eql(u8, previous, cwd)
+        else
+            true;
+        if (!cwd_changed and requested == null) return;
+        const observed_cwd = self.allocator.dupe(u8, cwd) catch return;
+        const owned_cwd = self.allocator.dupe(u8, cwd) catch {
+            self.allocator.free(observed_cwd);
+            return;
+        };
+        self.replaceAgentSessionArchiveScopeObservedCwd(observed_cwd);
+        // A `cd` in the already active pane changes the containment authority
+        // just as a pane switch does. Do not leave rows from the old CWD's
+        // workspace/project visible while the replacement root is walking.
+        if (cwd_changed and self.agent_session_archive_scope != .all) {
+            self.clearAgentSessionArchiveWorkspaceRoot();
+            self.clearAgentSessionArchiveProjectRoot();
+            self.rebuildAgentSessionArchiveFilter();
+            self.agent_session_archive_selected = null;
+            self.agent_session_archive_scroll_rows = 0;
+            self.metal_dirty = true;
+        }
         if (self.agent_session_archive_project_scope_loading) {
             if (self.agent_session_archive_project_scope_pending_cwd) |old| self.allocator.free(old);
             self.agent_session_archive_project_scope_pending_cwd = owned_cwd;
             return;
         }
-        if (!self.submitAgentSessionArchiveProjectRoot(owned_cwd)) {
+        if (!self.submitAgentSessionArchiveScopeRoots(owned_cwd)) {
             self.allocator.free(owned_cwd);
-            if (self.agent_session_archive_project_scope_requested) {
+            if (self.agent_session_archive_workspace_scope_requested or self.agent_session_archive_project_scope_requested) {
+                self.agent_session_archive_workspace_scope_requested = false;
                 self.agent_session_archive_project_scope_requested = false;
-                self.showNotice("프로젝트 경로 분석을 시작하지 못했습니다.");
+                self.showNotice("작업공간 경로 분석을 시작하지 못했습니다.");
             }
             return;
         }
@@ -3592,29 +3690,41 @@ pub const AppSession = struct {
     fn updateAgentSessionArchiveProjectScope(self: *AppSession) void {
         var result = self.agent_session_archive_scope_backend.takeResult() orelse return;
         defer result.deinit(self.allocator);
-        if (result.request_id != self.agent_session_archive_scope_request_id) return;
-        self.agent_session_archive_project_scope_loading = false;
-        self.clearAgentSessionArchiveProjectRoot();
-        self.agent_session_archive_project_root = result.project_root;
-        result.project_root = null;
-        if (self.agent_session_archive_project_scope_pending_cwd) |pending_cwd| {
-            self.agent_session_archive_project_scope_pending_cwd = null;
-            if (self.submitAgentSessionArchiveProjectRoot(pending_cwd)) return;
-            self.allocator.free(pending_cwd);
-            self.agent_session_archive_project_scope_requested = false;
-            self.showNotice("프로젝트 경로 분석을 다시 시작하지 못했습니다.");
+        if (result.request_id != self.agent_session_archive_scope_request_id) {
+            // An active-Term transition without a usable CWD invalidated this
+            // worker. It has no replacement completion to clear the spinner.
+            self.agent_session_archive_project_scope_loading = false;
             self.metal_dirty = true;
             return;
         }
-        if (self.agent_session_archive_scope == .project) {
-            // Focus may have changed while the dock stayed open.  The worker
-            // just replaced the root snapshot, so reproject the immutable
-            // records now instead of leaving the old project's rows visible.
-            if (self.agent_session_archive_project_root == null) {
-                self.agent_session_archive_scope = .all;
-                if (!self.agent_session_archive_project_scope_requested)
-                    self.showNotice("현재 터미널에 로컬 git 프로젝트가 없어 전체 목록으로 전환했습니다.");
+        self.agent_session_archive_project_scope_loading = false;
+        if (self.agent_session_archive_project_scope_pending_cwd) |pending_cwd| {
+            self.agent_session_archive_project_scope_pending_cwd = null;
+            if (self.submitAgentSessionArchiveScopeRoots(pending_cwd)) return;
+            self.allocator.free(pending_cwd);
+            self.agent_session_archive_workspace_scope_requested = false;
+            self.agent_session_archive_project_scope_requested = false;
+            self.showNotice("작업공간 경로 분석을 다시 시작하지 못했습니다.");
+            self.metal_dirty = true;
+            return;
+        }
+        self.clearAgentSessionArchiveWorkspaceRoot();
+        self.agent_session_archive_workspace_root = result.workspace_root;
+        result.workspace_root = null;
+        self.clearAgentSessionArchiveProjectRoot();
+        self.agent_session_archive_project_root = result.project_root;
+        result.project_root = null;
+        if (self.agent_session_archive_scope != .all) {
+            self.rebuildAgentSessionArchiveFilter();
+            self.agent_session_archive_selected = null;
+            self.agent_session_archive_scroll_rows = 0;
+        }
+        if (self.agent_session_archive_workspace_scope_requested) {
+            self.agent_session_archive_workspace_scope_requested = false;
+            if (self.agent_session_archive_workspace_root == null) {
+                self.showNotice("활성 작업공간의 로컬 경로를 찾을 수 없습니다.");
             } else {
+                self.agent_session_archive_scope = .workspace;
                 self.rebuildAgentSessionArchiveFilter();
                 self.agent_session_archive_selected = null;
                 self.agent_session_archive_scroll_rows = 0;
@@ -3639,37 +3749,40 @@ pub const AppSession = struct {
         const surface_id = self.activeSurface().id;
         if (self.agent_session_archive_project_scope_surface_id == surface_id) return;
         self.agent_session_archive_project_scope_surface_id = surface_id;
-        self.requestAgentSessionArchiveProjectRoot(false);
+        self.refreshAgentSessionArchiveScopeSnapshots();
+        self.requestAgentSessionArchiveScopeRoots(null);
     }
 
     fn refreshAgentSessionArchiveScopeSnapshots(self: *AppSession) void {
-        const workspace_ok = self.replaceAgentSessionArchiveWorkspaceRoots();
-        if (!workspace_ok) self.clearAgentSessionArchiveWorkspaceRoots();
-        if (self.agent_session_archive_scope == .workspace and (!workspace_ok or self.agent_session_archive_workspace_roots.items.len == 0))
-            self.agent_session_archive_scope = .all;
+        // A workspace root belongs to the active workspace tab, never to the
+        // window-global explorer. Drop the old snapshot before a new worker
+        // result arrives so switching tabs cannot briefly show another tab's
+        // archive containment range.
+        self.clearAgentSessionArchiveWorkspaceRoot();
+        self.clearAgentSessionArchiveProjectRoot();
+        self.clearAgentSessionArchiveScopeObservedCwd();
         self.rebuildAgentSessionArchiveFilter();
         self.agent_session_archive_selected = null;
         self.agent_session_archive_scroll_rows = 0;
     }
 
     fn selectAgentSessionArchiveScope(self: *AppSession, scope: AgentSessionArchiveScope) void {
+        if (scope != .workspace) self.agent_session_archive_workspace_scope_requested = false;
         if (scope != .project) self.agent_session_archive_project_scope_requested = false;
         const available = switch (scope) {
-            .workspace => self.replaceAgentSessionArchiveWorkspaceRoots() and self.agent_session_archive_workspace_roots.items.len > 0,
+            .workspace => self.agent_session_archive_workspace_root != null,
             .project => {
-                self.requestAgentSessionArchiveProjectRoot(true);
+                self.requestAgentSessionArchiveScopeRoots(.project);
                 return;
             },
             .all => true,
         };
         if (!available) {
-            if (scope == .workspace) self.clearAgentSessionArchiveWorkspaceRoots();
-            self.showNotice(switch (scope) {
-                .workspace => "탐색기 작업공간이 없습니다. 폴더를 열거나 현재 프로젝트를 선택하세요.",
-                .project => unreachable,
-                .all => unreachable,
-            });
-            return;
+            if (scope == .workspace) {
+                self.requestAgentSessionArchiveScopeRoots(.workspace);
+                return;
+            }
+            unreachable;
         }
         self.agent_session_archive_scope = scope;
         self.rebuildAgentSessionArchiveFilter();
@@ -12901,11 +13014,10 @@ pub const AppSession = struct {
         for (self.agent_session_archive_records.items, 0..) |record, index| {
             const scope_matches = switch (self.agent_session_archive_scope) {
                 .all => true,
-                .workspace => blk: {
-                    for (self.agent_session_archive_workspace_roots.items) |root|
-                        if (agentSessionArchiveWithinRoot(record, root)) break :blk true;
-                    break :blk false;
-                },
+                .workspace => if (self.agent_session_archive_workspace_root) |root|
+                    agentSessionArchiveWithinRoot(record, root)
+                else
+                    false,
                 .project => if (self.agent_session_archive_project_root) |root|
                     agentSessionArchiveWithinRoot(record, root)
                 else
@@ -28413,7 +28525,12 @@ pub const AppSession = struct {
                                     .colors = tabbar_colors,
                                 } });
                             } else |_| {}
-                            const workspace_scope_label = if (self.agent_session_archive_workspace_roots.items.len > 0) "현재 작업공간" else "탐색기 없음";
+                            const workspace_scope_label = if (self.agent_session_archive_project_scope_loading)
+                                "작업공간 분석 중"
+                            else if (self.agent_session_archive_workspace_root != null)
+                                "현재 작업공간"
+                            else
+                                "작업공간 없음";
                             const project_scope_label = if (self.agent_session_archive_project_scope_loading)
                                 "프로젝트 분석 중"
                             else if (self.agent_session_archive_project_root != null)
@@ -32368,10 +32485,12 @@ pub const AppSession = struct {
                 for (self.agent_session_archive_collapsed_groups.items) |key| self.allocator.free(key);
                 self.agent_session_archive_collapsed_groups.deinit(self.allocator);
                 self.agent_session_archive_search.deinit(self.allocator);
-                for (self.agent_session_archive_workspace_roots.items) |path| self.allocator.free(path);
-                self.agent_session_archive_workspace_roots.deinit(self.allocator);
+                if (self.agent_session_archive_workspace_root) |path| self.allocator.free(path);
+                self.agent_session_archive_workspace_root = null;
                 if (self.agent_session_archive_project_root) |path| self.allocator.free(path);
                 self.agent_session_archive_project_root = null;
+                if (self.agent_session_archive_scope_observed_cwd) |path| self.allocator.free(path);
+                self.agent_session_archive_scope_observed_cwd = null;
                 if (self.agent_session_archive_project_scope_pending_cwd) |path| self.allocator.free(path);
                 self.agent_session_archive_project_scope_pending_cwd = null;
                 self.agent_session_archive_initialized = false;

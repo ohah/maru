@@ -7,9 +7,14 @@ const std = @import("std");
 
 pub const Result = struct {
     request_id: u64,
+    /// Canonical active-Term CWD. This is the active workspace tab's archive
+    /// containment root; it deliberately does not inherit the window-global
+    /// file explorer roots.
+    workspace_root: ?[]u8 = null,
     project_root: ?[]u8 = null,
 
     pub fn deinit(self: *Result, allocator: std.mem.Allocator) void {
+        if (self.workspace_root) |path| allocator.free(path);
         if (self.project_root) |path| allocator.free(path);
         self.* = undefined;
     }
@@ -100,7 +105,9 @@ fn finishWithoutResult(state: *State) void {
 
 fn worker(job: *Job) void {
     const state = job.state;
-    var result = Result{ .request_id = job.request_id, .project_root = canonicalGitRoot(state.allocator, state.io, job.cwd) };
+    var result = Result{ .request_id = job.request_id };
+    result.workspace_root = canonicalDirectory(state.allocator, state.io, job.cwd);
+    if (result.workspace_root) |root| result.project_root = gitRootFromCanonical(state.allocator, state.io, root);
     state.allocator.free(job.cwd);
     state.allocator.destroy(job);
 
@@ -119,13 +126,17 @@ fn worker(job: *Job) void {
     state.release();
 }
 
-fn canonicalGitRoot(allocator: std.mem.Allocator, io: std.Io, cwd: []const u8) ?[]u8 {
+fn canonicalDirectory(allocator: std.mem.Allocator, io: std.Io, cwd: []const u8) ?[]u8 {
     if (!std.fs.path.isAbsolute(cwd) or cwd.len == 0) return null;
     var canonical_buf: [std.fs.max_path_bytes]u8 = undefined;
     const canonical_len = std.Io.Dir.realPathFileAbsolute(io, cwd, &canonical_buf) catch return null;
     var dir = std.Io.Dir.cwd().openDir(io, canonical_buf[0..canonical_len], .{}) catch return null;
     dir.close(io);
-    var cursor: []const u8 = canonical_buf[0..canonical_len];
+    return allocator.dupe(u8, canonical_buf[0..canonical_len]) catch null;
+}
+
+fn gitRootFromCanonical(allocator: std.mem.Allocator, io: std.Io, canonical_cwd: []const u8) ?[]u8 {
+    var cursor = canonical_cwd;
     while (true) {
         var marker_buf: [std.fs.max_path_bytes]u8 = undefined;
         const marker = std.fmt.bufPrint(&marker_buf, "{s}/.git", .{cursor}) catch return null;
@@ -151,10 +162,37 @@ test "scope worker resolves a canonical git root and rejects a missing cwd" {
     const root_len = try tmp.dir.realPath(io, &root_buf);
     const nested = try std.fs.path.join(allocator, &.{ root_buf[0..root_len], "repo/src" });
     defer allocator.free(nested);
-    const actual = canonicalGitRoot(allocator, io, nested) orelse return error.TestUnexpectedResult;
+    const workspace_root = canonicalDirectory(allocator, io, nested) orelse return error.TestUnexpectedResult;
+    defer allocator.free(workspace_root);
+    try std.testing.expectEqualStrings(nested, workspace_root);
+    const actual = gitRootFromCanonical(allocator, io, workspace_root) orelse return error.TestUnexpectedResult;
     defer allocator.free(actual);
     const expected = try std.fs.path.join(allocator, &.{ root_buf[0..root_len], "repo" });
     defer allocator.free(expected);
     try std.testing.expectEqualStrings(expected, actual);
-    try std.testing.expect(canonicalGitRoot(allocator, io, "/definitely/missing/maru-cwd") == null);
+    try std.testing.expect(canonicalDirectory(allocator, io, "/definitely/missing/maru-cwd") == null);
+}
+
+test "workspace scope keeps the active canonical cwd narrower than its git project" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "workspace", .default_dir);
+    try tmp.dir.createDir(io, "workspace/nested", .default_dir);
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_buf);
+    const nested = try std.fs.path.join(allocator, &.{ root_buf[0..root_len], "workspace/nested" });
+    defer allocator.free(nested);
+
+    const workspace_root = canonicalDirectory(allocator, io, nested) orelse return error.TestUnexpectedResult;
+    defer allocator.free(workspace_root);
+    try std.testing.expectEqualStrings(nested, workspace_root);
+    const project_root = gitRootFromCanonical(allocator, io, workspace_root) orelse return error.TestUnexpectedResult;
+    defer allocator.free(project_root);
+    try std.testing.expect(!std.mem.eql(u8, workspace_root, project_root));
+    try std.testing.expect(project_root.len < workspace_root.len);
+    try std.testing.expect(std.mem.startsWith(u8, workspace_root, project_root));
+    try std.testing.expect(project_root.len == 1 or workspace_root[project_root.len] == '/');
 }

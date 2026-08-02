@@ -811,12 +811,60 @@ TDD 방식:
      Maru runtime backend이며 [영속 터미널 세션 호스트](persistent-session-host.md)의 제품 완료 범위 P1~P5를 따른다.
      앱 업데이트 사이 실행 중 runtime 보존은 [Session host 실행 중 업그레이드](session-host-upgrade.md)의 U0~U5를
      따른다. 현재 U0 inventory와 U1~U5 component seam, 제품 daemon controller 및 caller-attested signed
-     N-1→current 하네스까지 구현되어 있다. 그러나 immutable release manifest provenance, 실제 제품 rollback
-     activation, 최대치 multi-runtime exact reattach, 전 구간 failure injection, 앱 재실행 orchestration과 soak가
-     남아 있으므로 U5 완료나 기본 자동 migration으로 표시하지 않는다. 정확한 증거 수준은
+     N-1→current 하네스와 앱 재실행 orchestration wiring까지 구현되어 있다. 그러나 immutable release manifest provenance,
+     실제 제품 rollback activation, 최대치 multi-runtime exact reattach, 전 구간 failure injection, frozen release 기반
+     app-relaunch E2E·notice·soak가 남아 있으므로 U5 완료나 기본 자동 migration으로 표시하지 않는다. 정확한 증거 수준은
      [검증 매트릭스](verification-matrix.md#session-host-실행-중-업그레이드-gate)를 단일 출처로 따른다.
      P6 전체 workspace TUI/외부 tmux import adapter와 Plugin은 각각 실제 수요·착수 전 별도 논의.
 - **검토했으나 미채택한 대안**(UI 완성도 먼저, 구조 리스크 뒤로): chrome 고급화를 New Window보다 앞에 두는 안. atlas 소유권 캡슐화 + restore 스키마 window-aware면 재작업은 낮으나, 큰 구조 변경을 미루는 대신 나중에 공유 검토할 atlas가 2개가 되는 트레이드오프 — 사용자가 "토대 먼저"를 택해 미채택.
+
+## Session host 실행 중 transport reconnect (CR, 미착수)
+
+shared `Client`가 실행 중 unusable이 되어도 기존 Term/Surface/runtime handle을 유지한 채 exact host에 다시 붙이는 단계다.
+규범 계약은 [영속 터미널 세션 호스트](persistent-session-host.md#실행-중-connection-invalidation과-재연결), 검증 상태와
+종료 gate는 [검증 매트릭스](verification-matrix.md#영속-host-cr-실행-중-transport-reconnect-gate)가 소유한다. cold workspace
+restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
+
+1. **CR0a — typed poison taxonomy:** reconnect와 artifact writer 없이 raw `Client.failClosed` 직접 호출을 typed poison
+   boundary로 모으고 `{scope,disposition,transport_usable,expected}` exhaustive table을 먼저 고정한다. unexpected와 raw
+   fail-close 경계를 테스트가 구분한다.
+2. **CR0b — poison observability:** CR0a DTO만 소비하는 immutable `ConnectionIncident`, 최초 원인 보존, redaction/rate-limit,
+   32 KiB emergency ring handoff→bounded disk writer 순서, Debug fail-stop과 Release artifact-before-recovery gate를 구현한다.
+3. **CR1 — poison 범위 축소와 scheduler:** semantic stream 오류가 shared connection을 불필요하게 poison하지 않도록 callsite를
+   정리하고 partial read/write, sibling stream, artifact 실패를 결정적으로 교차하는 scheduler fixture를 만든다.
+4. **CR2 — stable shell 기반:** CR2a는 field inventory를 고정하고 `RemoteGeneration`만 추출한다. CR2b는 기존 Surface API를
+   유지하는 stable proxy gate와 shell lifecycle pin을 배선한다. CR2c는 local/remote `InputOwner` facade를 도입하되 입력 의미를
+   바꾸지 않는다. transport-neutral facade/ordered policy는 `src/app`의 `TermRuntimeBackend` 계약 옆 중립 모듈이 소유하고
+   local/remote backend가 구현한다. CR2d1은 remote paste/IME/OSC52 queue, CR2d2는 key/control ordered merge, CR2d3은 event
+   cursor, CR2d4는 cross-Window old transfer 제거/parity를 각각 golden trace로 닫는다. CR2e에서 순수
+   `ReconnectReducer`의 exhaustive/illegal-transition model test와 fake `PreparedReconnect` prepare/publish/retire,
+   allocator fail-index를 검증한다.
+5. **CR3 — shared Client 세대:** CR3a는 현 Client/external-pump/final-address cleanup ownership inventory를 먼저 고정한 뒤
+   transport-neutral `ConnectionLease`와 `HostAdapter.ClientSlot` skeleton을 넣는다.
+   CR3b는 pool membership과 독립된 connection generation, main-thread `withCurrent` stack borrow, admission close,
+   `Client.canRetire()`와 tick-end deferred retirement(동시 retired Client hard cap 2)를 닫는다. CR3c에서 `RemoteGeneration`을
+   실제 slot에 연결한다.
+6. **CR4 — 단일 host 실제 reconnect:** `connectExistingHost`, bounded snapshot+delta catch-up, mutation lease/seal,
+   status/takeover와 lost-reply fail-stop 정책을 실제 socket fixture로 연결한다. observer conflict를 자동 takeover하지 않는다.
+7. **CR5 — 멀티윈도우·다중 runtime:** app-global `SessionHostCoordinator`의 host job, runtime별 authority ledger,
+   부분 commit forward resolution, Window move/close 경쟁을 자동 검증한다.
+8. **CR6 — 제품 gate:** 실제 AppKit render/IME/clipboard, semantic notice/action, 장시간 backoff/soak와 성능 예산을 통과한 뒤에만 자동
+   reconnect를 제품 설정에 연결한다.
+
+CR0a~CR3은 사용자 가시 동작이 없는 구조/TDD 단계다. 어느 단계도 workspace를 쓰거나 host/runtime을 spawn·upgrade하지
+않는다. 새 transfer receipt RPC는 현재 범위에 포함하지 않으며 seamless lost-reply 복구가 별도 목표가 될 때 다시 결정한다.
+각 gate의 증거를 `model-only | production-type unit | real socket | real AppKit`으로 표시하며 CR2/CR3 완료는 `/tmp` PoC가 아니라
+실제 production type을 import한 테스트가 필요하다. 최초 구현 순서는 CR0a → CR3a lease/slot skeleton → CR2a → inactive
+CR2b이며 이
+비제품 구조 slice가 green이기 전 CR4 socket reconnect를 시작하지 않는다.
+
+실행 중 connection invalidation이 현재 session-host 제품 사용과 검증을 막으므로 CR은 나머지 제품 polish보다 먼저 닫는
+blocking track이다.
+단 CR4 admission은 CR0a+CR0b+CR1+CR2a~e+CR3a~c 전체 완료를 요구하며 scaffold 순서를 우회 조건으로 해석하지 않는다.
+partial migration 실패의 마지막 screen/scrollback deep-freeze와 `FrozenProjection`은 범위 밖이다. 실패 runtime은 경량
+unavailable placeholder로 전환하고 Retry 성공 시 host snapshot으로 재구성한다.
+CR6 제품 활성화는 R2b Recovered Sessions projection/adopt 제품 경로가 완료된 뒤에만 가능하다. 그 전에는 unconfirmed Term이
+있는 Window close를 제품에서 허용하지 않아 사용자가 찾을 수 없는 orphan runtime을 만들지 않는다.
 
 ## Provider session continuity 잔여 제거(persistent-session P1, 완료)
 

@@ -184,3 +184,13 @@ process spawn/terminate·pipe setup/read/write·blocking wait는 실제 operatio
 | steady frame budget | 120Hz 기준 8.3ms 안쪽 목표 |
 | one idle tab RSS | 측정 후 기준 확정 |
 | large scrollback memory | page storage 설계 후 기준 확정 |
+
+## Session-host reconnect 관측 예산
+
+실행 중 transport reconnect는 정상 frame hot path에 incident 직렬화나 disk I/O를 추가하지 않는다. 최초 typed poison에서만
+fixed-size `ConnectionIncident`를 만들며 Release의 disk 실패 경로는 process 시작 때 미리 할당한 32 KiB emergency ring을 써
+추가 allocation 없이 scheduling 전에 handoff한다. stable `ScreenSource` proxy는 정상 render borrow마다 gate 하나를 거치므로
+CR2b benchmark는 gate 획득 시간, render critical-section, writer-pending 뒤 신규 reader 수, reconnect publish wait를 각각
+기록한다. 숫자 예산은 구현 전 baseline 대비 회귀율로 먼저 고정하고, 측정 없이 "영향 없음"으로 완료 처리하지 않는다.
+기능 exact gate는 writer-pending publish 뒤 신규 reader admission 0, nested lock 0, configured absolute deadline을 넘긴 publish
+wait 0이다. latency p50/p99 상한은 CR2a baseline artifact에 수치와 하드웨어 조건을 기록한 뒤 CR2b 착수 전에 확정한다.

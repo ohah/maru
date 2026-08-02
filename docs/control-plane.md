@@ -65,6 +65,21 @@ Phase 1 live collector 전에는 full AppRuntime을 기다리지 않고 **앱 �
 - 공통 메타: `id`, `kind`, `title`, `window`/`tab`/`pane` 좌표, `focused`.
 - terminal 전용: `cwd`(OSC 7), `git_branch`, `agent`(kind/state), `at_prompt`(OSC 133 semantic prompt 기반 3상 `true|false|unknown`). unknown의 주 출처는 **OSC 133 미통합 셸**(대다수)이라 known-not-prompt(`false`)와 no-integration(`unknown`)을 구별해야 하므로 bool로 접지 않는다. alt-screen 중에는 `semantic_state`와 무관하게 `false`(alt 진출입이 `semantic_state`를 unknown으로 리셋하긴 하나 그건 부차적 경로다).
 - web 전용: `url`, `panel_kind`(markdown|browser|...), `loading`, `trust`(trusted|untrusted — §8.1).
+- host-backed terminal의 일시 상태는 `live | reconnecting | frozen_unavailable | termination_pending |
+  termination_unconfirmed`이다. 이 값은
+  workspace에 저장하는 durable runtime-state가 아니라 app-global coordinator 상태의 projection이다. reconnect 중
+  reconnecting 중 read/output capture는 마지막 published generation만 볼 수 있다. `frozen_unavailable`은 screen을 보존하지
+  않아 capture를 typed busy로 거부한다. `termination_pending|termination_unconfirmed` 진입은
+  기존 read/capture/subscription grant와 queued frame을 revoke한다. write/resize/lifecycle mutation은 typed
+  `resource-busy`의 `resource="session-reconnect"`로 거부한다. `frozen_unavailable`, `termination_pending`,
+  `termination_unconfirmed`도 writable로
+  세탁하지 않는다.
+- wire field는 terminal surface에만 조건부로 싣는 `session_state`다. host-backed terminal에는 항상 위 enum 중 하나를
+  emit하고 local terminal/web surface에서는 필드를 생략한다. 이 필드는 reconnect capability와 함께 광고하기 전까지 외부
+  안정 계약이 아니며 CR6에서 serializer/parser/lifecycle event payload를 동시에 연다.
+- termination revoke가 writer-owned frame과 경쟁하면 offset 0 frame은 purge한다. prefix가 이미 전송된 offset>0 frame은
+  중간 폐기로 framing을 깨지 않고 해당 connection 전체를 abort한다. 그 connection의 sibling surface subscription도 EOF로
+  끝나며 이미 전송된 prefix 외 해당 surface payload suffix와 후속 sibling frame은 0이다.
 - **wire 인코딩 결정(구현 `control_surface.zig`)**: `at_prompt` 3상은 **nullable boolean**으로 실린다 — `true`→JSON `true`, `false`→JSON `false`, `unknown`→JSON **`null`**(문자열 `"unknown"` 아님). terminal surface엔 **항상** 실린다(생략≠unknown). 반면 `cwd`/`git_branch`/`url`/`agent`는 값이 없으면 **필드 자체를 생략**한다. `agent.kind`/`agent.state`/`panel_kind`/`trust`의 wire enum은 내부 observer enum과 **격리된 자체 enum**이다. `agent.state`는 `running`(진행 중) / `blocked`(사용자 입력 필요) / `idle`(현재 입력 가능) / `unknown`(판정 불가) 4상이다. `interrupted`는 더 이상 emit하지 않는다. `idle`은 완료 증명이 아니므로 클라이언트는 `running → idle`만으로 후속 자동화를 시작하면 안 된다. 외부 ID는 `{surface_id, generation}` 중첩 객체(`generation`은 `u64`).
 
 상태 수집은 기존 자산을 직렬화한다(신규 수집 로직은 collector에 둔다): app_session의 `Model` 트리, `core.currentCwd()`, `termGitBranch`, terminal agent observer, 코어 `semantic_state`(OSC 133) + `alt_active`(alt 중 `false` 오버라이드) — 옛 `PtySession.hasForegroundJob()`은 제거됐다. bool로 접은 형태가 `cursorIsAtPrompt`([macos-app-host-boundary.md] 닫기 확인과 같은 계열)지만 그건 unknown을 `false`로 접으므로, 컨트롤 플레인은 3상을 보존하려 `cursorIsAtPrompt`가 아니라 raw `semantic_state`를 읽는다. **A1 구현**: `app_session.zig`의 순수 매핑 `atPromptWire(semantic, alt_active)`(alt→`not_at_prompt`, prompt/input→`at_prompt`, command→`not_at_prompt`, unknown→`unknown`)과 `agentInfoWire(kind, state)`(`none`→null=필드 생략, 나머지는 내부→wire enum)가 내부 상태를 wire enum으로 격리 매핑한다(헤드리스 단위 테스트로 못박음). git branch는 `termGitBranchForCwd`(코어 무참조 변형 — 락 아래 복사한 cwd로 fs 읽기를 `core_mutex` 밖에서 수행).
@@ -74,6 +89,10 @@ Phase 1 live collector 전에는 full AppRuntime을 기다리지 않고 **앱 �
 ### 4.1 핸드셰이크·버전·네임스페이스
 - 연결 시 server가 `hello` notification으로 `{protocol: "maru.control.v1", server_version, capabilities}`를 보낸다. 외부 도구·CLI↔GUI 버전 skew를 감지하고, 지원 메서드를 capability로 광고한다. **5f-5c 기능 구현과 별개로 Track 5 성능 완료 gate까지 통과한 뒤** capabilities string array에 활성화된 논리 결과 상한 `browser.executeScript.max-result-bytes=16777216`을 추가한다. 5f-5c live 경로는 strict CSP·Promise·args와 16 MiB chunk를 전달하지만 현재 hello에는 이 capability가 아직 없다. 코드의 `execute_script_protocol_max_result_bytes=256 MiB`는 현재 parser나 capability에 연결되지 않은 reserved 상수다. 향후 실험도 넘지 않을 ceiling 후보일 뿐 현재 입력 방어선·지원 약속이 아니며, §4.4 재검토 뒤 실제 parser에 연결할 때 별도 테스트로 고정한다(§9.5.8).
 - 메서드 네임스페이스를 예약한다: 코어 = `sessions`/`session`/`panel`/`browser`, 확장 = `plugin.<id>.*`. 닫힌 하드코딩 테이블이 아니라 코어 표 + 등록 가능한 확장 핸들러로 디스패치해 plugin/MCP/skill을 막지 않는다. 발견 메서드(`methods.list`)는 후속.
+- CR 단계에서 외부 control-plane에 `Retry`, `Take Control`, paused-paste resend/discard RPC를 노출하지 않는다. 이 action은
+  fresh GUI gesture와 single-use authority가 필요한 제품 UI 전용이다. CR6에서 외부 API 요구가 생기면 capability·nonce·TTL을
+  별도 설계한다. 상태 구독을 구현할 때는 기존 surface lifecycle event에 위 일시 상태를 typed 값으로 싣고 raw host error는
+  보내지 않는다.
 
 ### 4.2 다중 인스턴스·발견
 - 소켓 경로 키 = 인스턴스(pid/부팅 nonce). `~/.cache/maru/control/`(0700)에 살아있는 인스턴스 인덱스 + `flock`.
@@ -89,6 +108,10 @@ Phase 1 live collector 전에는 full AppRuntime을 기다리지 않고 **앱 �
 **5f-5 구현 상태 주의**: 5f-5c 기능까지 live다. 실행 전 `ActiveBrowserExecution` 등록과 process-global 256 MiB 예약, 부족 시 `resource-busy`, queued/running timeout·surface/grant revoke·late callback 정리를 적용한다. v119에서 도입된 Swift immutable `Data` registry와 Zig pull/copy/release 계약(현재 app host ABI v120)이 raw strict-JSON ≤512 KiB를 inline으로 읽고, 그 초과~16 MiB와 screenshot ≤12 MiB를 공통 progressive pump로 보낸다. off-main syntax validation 뒤에는 같은 ABI가 running+pending+현재 인가를 재확인해 revoke/expiry/timeout 후 page side effect 시작을 막는다. execution 예약은 `ActiveBrowserTransfer`로 반환 없이 원자 이관하며 terminal 순서는 **Swift Data 제거 확인 → execution 예약 반환**이다. release callback이 제거를 확인하지 못하면 예약을 유지하고 stop의 Swift `releaseAll` backstop까지 임의 재사용하지 않는다. 연결당 4 MiB/process 32 MiB queued+writer-owned 회계, terminal carve-out, high/low watermark, typed purge와 socket abort가 live 채널에 적용된다. parser는 `max_result_bytes ≤16 MiB`를 검사하고 CLI는 512 KiB scratch+atomic 0600 no-replace spool로 전체 결과를 메모리에 모으지 않는다. `script`는 JavaScript **표현식**이고 `args`는 그 표현식에 주입되는 strict-JSON 배열이다. `callAsyncJavaScript`가 CSP-safe하게 표현식을 직접 컴파일하고 Promise를 await한 뒤 document-start bounded serializer가 host 이전에 결과를 직렬화한다. 여러 statement는 `(async()=>{ ...; return value })()` 같은 표현식으로 감싼다. hello effective-max는 별도 Track 5 성능 gate 전까지 광고하지 않는다. 선언된 256 MiB protocol ceiling은 aggregate 예약 예산과 숫자가 같지만 parser 입력 상한이나 지원 약속이 아니다.
 
 ### 4.4 bulk payload 전송의 구현 상태·채택 계약·후속 재검토
+
+§4.3 `resource-busy`의 closed `resource` enum에는 CR 구현과 함께 `session-reconnect`를 추가한다. 이 경우
+`data={resource:"session-reconnect",retryable,state,retry_after_ms?}`이고 `state`는 §3의 terminal 일시 상태 enum이며 raw
+poison reason은 싣지 않는다. 구현 전 현재 serializer/parser가 이 값을 받는다고 주장하지 않는다.
 
 **프로토콜 결정**: 현재와 5f-5 완료 범위의 application wire는 NDJSON JSON-RPC 2.0 하나뿐이다. 별도 binary frame type, data socket, 파일 경로 반환, `SCM_RIGHTS` data attachment는 구현하거나 협상하지 않는다. base64 chunk는 별도 프로토콜이 아니라 같은 JSON-RPC envelope와 auth/outbound 수명 규칙 안에서 method별 schema로 전달한다. correlation과 terminal은 공통 형식으로 억지 통일하지 않는다: capture는 `capture_id+generation`과 complete/invalidated notification, screenshot은 `capture_id` chunks+final response, executeScript 목표 계약은 `request_id+result_id` chunks+final response를 쓴다.
 

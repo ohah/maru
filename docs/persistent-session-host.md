@@ -588,6 +588,261 @@ sequenceDiagram
 8. host에는 있지만 manifest에 bind되지 않은 runtime은 삭제하지 않고 `Recovered Sessions`에 노출한다.
 9. 같은 runtime을 manifest의 두 writable Term 슬롯에 bind하면 잘못된 파일로 거부한다. 한 runtime의 canonical writable placement는 하나다.
 
+### 실행 중 connection invalidation과 재연결
+
+위 절의 cold-launch restore와, 이미 publish된 Term의 shared `Client`가 framing/response 상관관계 손실로 `unusable`이 된
+뒤 되살아나는 경로는 서로 다른 transaction이다. 후자는 Window tab을 순회해 `RemoteRuntime`을 직접 교체하는 방식으로
+구현하지 않는다. 진행 상태와 단계 ID는 [구현 계획](implementation-plan.md)과
+[검증 매트릭스](verification-matrix.md)가 소유한다.
+
+#### 복구보다 먼저 남기는 poison taxonomy와 incident artifact
+
+CR0a의 typed poison table이 먼저 `{scope,disposition,transport_usable,expected}`를 확정한 뒤 CR0b가 artifact를 붙인다.
+자동 reconnect는 최초 원인을 숨기지 못한다. `Client`가 처음 connection-fatal 오류를 확정하는 순간 immutable
+`incident_id`를 만들고, reconnect scheduling보다 먼저 bounded 구조화 artifact를 저장한다. 후속 EOF·detach 실패·controller
+conflict는 같은 incident의 child event이며 최초 `poison_reason`을 덮지 않는다.
+
+- 필드: monotonic timestamp, host ID, pool membership/connection generation, wire major, typed poison tuple, 마지막 성공
+  request ID, pending request/stream 수, parser read phase, outbound frame phase와 offset/length, queue count/bytes,
+  controller/upgrade generation, source site다.
+- terminal output/input/paste/clipboard/notification 본문, cwd·command·SSH 주소는 기록하지 않는다. 길이·bounded enum·sequence만
+  남기며 artifact는 로컬 전용이고 [필수 프로젝트 규칙](project-rules.md#민감정보-redaction-기준-단일-출처)의 redaction을
+  통과한다.
+- Debug/test는 unexpected connection poison을 artifact 생성 뒤 fail-stop하여 복구가 회귀를 숨기지 않게 한다. Release는
+  process 시작 때 미리 할당한 **32 KiB emergency ring**에 fixed-size redacted DTO를 allocation-free로 먼저 handoff한다. 이
+  handoff가 artifact-before-recovery의 선형화점이며 reconnect는 disk syscall 반환을 기다리지 않는다. 별도 bounded writer가
+  disk persistence를 시도하고 absolute deadline 뒤에는 ring-only로 남긴다. late writer completion은 generation-pin DTO만
+  소비하며 quit/reconnect가 해제한 storage를 만지지 않는다. artifact 저장 실패는 terminal bytes를 추가 수집하거나 원래
+  incident reason을 바꾸지 않고 `storage=emergency` child metadata만 남긴다.
+- 같은 원인의 반복 artifact와 사용자 notice는 rate-limit하되 occurrence count와 first/last time은 유지한다. disk record는
+  emergency eviction 대상이 아니고 ring은 first-N immutable slot과 bounded fingerprint overflow bucket을 분리한다. ID,
+  cache 경로, mode, quota와 aggregate fingerprint의 단일 출처는 [Trace와 Replay](trace-replay.md#connectionincident-진단-artifact-계획)다.
+  구조화 로그와 future inspector는 같은 `ConnectionIncident` DTO를 소비한다.
+
+#### 소유 구조: stable shell + generation bundle
+
+raw in-place 재초기화와 whole-runtime 교체는 모두 반려하고, 주소 안정성과 prepared publish를 결합한다.
+
+- 기존 heap-pin `RemoteRuntime`은 Term 수명 동안 주소가 고정된 **stable shell**이다. 그 안의 `Surface`,
+  `TermRuntime.handle`, `RuntimeEventPump.ctx`, 앱 전역 `SurfaceRuntime` link, `surface_ptrs`/`app_window.tabs`는 reconnect
+  전후 동일하다. Window tree를 순회해 이 포인터들을 다시 쓰지 않는다.
+- 실제 connection 세대 상태는 `RemoteGeneration` bundle이 소유한다. bundle에는 connection-generation lease,
+  `RemoteAttachment`/screen, raw observation, direct-input/control delivery state가 함께 들어간다.
+  `PreparedReconnect`는 새 bundle을 기존 shell 밖에서 완성한다. 기존 객체에 초기화 전용 `attachExisting`을 다시 호출하거나
+  attachment 필드를 순차 overwrite하지 않는다.
+- `Surface.remote`는 바뀌는 screen을 직접 가리키지 않고 stable shell의 `ScreenSource` proxy를 한 번만 가리킨다. 기존
+  `lockCore`가 proxy gate를 잡고 exact `{runtime_generation,target}`을 `pinned_target`에 저장한 뒤 target core를 lock하며,
+  `unlockCore`는 current를 다시 조회하지 않고 그 target을 unlock한 뒤 gate를 놓는다. publish/destroy는 이 임계구역이 끝날
+  때까지 기다린다. remote target mutex가 이미 reader를 직렬화하므로 공용 Surface API 수백 곳을 token 방식으로 바꾸지
+  않는다. 중첩 lock은 owner-debug로 즉시 거부하고 writer-pending이면 새 reader admission을 막아 starvation을 제한한다.
+  bounded render critical-section과 reconnect publish wait를 계측한다. reclaim은 render gate·pump callback·job lease가 모두
+  0일 때 owner thread에서만 한다. 장래 Surface 전체를 concurrent snapshot token API로 바꾸는 일은 reconnect 범위가 아니다.
+- stable shell은 시작부터 final-address `UnavailableCore`를 소유한다. 이는 마지막 화면을 복제하는 `FrozenProjection`이
+  아니라 현재 viewport 크기의 bounded empty core와 고정 unavailable marker만 가진 placeholder target이다. old
+  scrollback/link/image backing은 없고 marker 표시용 cell만 preallocate한다. proxy는 항상
+  `live(RemoteScreen) | unavailable(UnavailableCore)` 중 exact non-null target을 pin하므로 기존 `lockCore` API를 유지한다.
+- generation은 nonzero checked-monotonic이며 wrap, stale callback, 두 동시 commit을 fail-close한다. publish 뒤 old pointer로
+  rollback하지 않고 `published -> retiring -> reclaimed`만 허용한다. Term destroy와 reconnect commit도 같은 owner/generation
+  claim으로 exact-once retirement를 결정한다. reconnect job은 backend map lock 아래 `RuntimeEntry`의
+  `{shell_ptr,shell_generation,lifecycle=live}`를 검증해 `reconnect_pin_count`를 얻는다. close는 먼저 `closing`을 publish하고
+  pin/callback 0을 기다린 뒤 shell을 파괴하며, move는 membership을 바꾸지 않으므로 허용한다.
+- host-backed Term의 ordered input owner와 event-consumer cursor도 stable shell에 둔다. AppSession의 원격 paste/IME 확정
+  bytes는 enqueue할 때 `{shell_generation,input_epoch,sequence}`를 받아 shell queue로 소유권을 넘기고, Window 이동은 이
+  queue를 옮기지 않는다. preedit 화면 자체는 기존처럼 Surface의 GUI-local 상태다. AppSession은 shell이 dedup해 낸 typed
+  BEL/notification/clipboard event만 소비한다. in-process Term의 기존 Window-local queue 계약은 바꾸지 않는다.
+
+field ownership은 다음처럼 겹치지 않는다.
+
+| owner | 소유 상태 |
+| --- | --- |
+| stable shell `InputOwner` | transport-independent ordered record, global input sequence/epoch, paused metadata와 `PausedPaste` |
+| `RemoteGeneration` | exact stream wire-admission cursor/frame offset, attachment/screen, raw observation |
+| stable shell event consumer | delivered BEL/notification/OSC 52 cursor와 generation baseline |
+| AppSession/Surface | preedit 표시, selection/search/viewport, notice projection만 소유하고 remote raw queue/cursor는 소유하지 않음 |
+
+앱 전역의 얇은 `SessionHostCoordinator { pool, backend, jobs, upgrade_gate }`가 reconnect와 upgrade 직렬화 정책을 소유하고,
+`RemoteTermBackend`는 runtime map과 실행 adapter만 소유한다. backend map이 canonical membership이므로 AppSession registry나
+Window tree를 새로 전역화하지 않는다. Window tick은 coordinator의 request/pollNotice만 호출하며 retry 횟수·deadline·commit을
+소유하지 않는다. job key는 `{host_id,pool_membership_generation,expected_connection_generation}`이다. HostPool의 기존
+`adapter_generation`은 현재 add/remove membership 세대다. CR3에서 코드·DTO·fixture를 함께
+`pool_membership_generation`으로 rename하고, heap-pin `HostAdapter.ClientSlot`이 별도 checked-monotonic
+`connection_generation`과 current/retired Client를 소유한다. CR3 전 wire/구현 명칭은 `adapter_generation`을 유지한다.
+
+#### transaction과 실패 경계
+
+job state는 `healthy(g) -> preparing{attempt,g,new_client,deadline} -> mutation_sealing -> authority_committing ->
+retry_wait_release{runtime_id,candidate_connection_generation,deadline} | publishing -> healthy(g+1)` 또는
+`unavailable{retry_at,deadline}`의 닫힌 전이다. `retry_wait_release`는 job substate이며 candidate close를 요청한 뒤 같은
+absolute deadline 안에서 direct controller grant만 기다린다. runtime별 ledger는
+`old_valid | staged_observer | takeover_sent_unknown | new_controller_evidenced | authority_conflict | gone_positive`를
+기록하고 local terminal state는 `published_old | published_new | frozen_unavailable | ended` 중 하나다.
+
+1. `connectExistingHost`로 exact host에 새 Client를 만들고 모든 canonical runtime의 observer attachment, full snapshot,
+   metadata, local capacity와 generation bundle을 stage한다. snapshot base 이후 delta를 bounded하게 계속 drain해 publish
+   직전 generation/sequence가 contiguous하고 caught-up임을 증명한다. takeover 전 gap/cap 초과는 전체 prepare abort다.
+2. 기존 controller였던 각 runtime은 §9의 `controller.status`/`controller.takeover` generation CAS로 권위를 얻는다.
+   observer attach 성공을 controller reconnect 성공으로 publish하지 않으며 controller 전에는 input/resize를 받지 않는다.
+3. 모든 mutation은 `beginMutation(expected_generation)`으로 shell mutation mutex 아래 epoch lease를 얻고 queue ownership
+   transfer와 Client admission이 끝날 때까지 lease를 보유한다. freeze는 같은 mutex 아래 epoch를 `sealing`으로 바꾸고 새
+   lease를 거부한 뒤 in-flight lease 0을 기다린다. 이어 old runtime queue와 shared Client의 해당 stream pending 상태를
+   `clean | ambiguous`로 seal한다. 일반 key/control/IME payload는 즉시 zeroize하고 `{kind,count,bytes,sequence_range}`만
+   `PausedInputMetadata`로 남긴다. 완전한 원문을 별도 소유한 paste만 `PausedPaste`로 quarantine한다. seal 완료 뒤에만 첫 takeover를
+   보낸다. 이후 입력/resize/
+   control은 old/new wire로 보내거나 암묵적으로 buffer하지 않고 typed reconnect-busy로 거부한다. render는 old generation
+   borrow를 허용하고 pump는 exact generation token이 맞을 때만 화면 delta를 적용한다.
+4. takeover byte가 하나도 송신되기 전 실패는 ambiguity가 없을 때만 mutation epoch를 `open`으로 되돌리고 staged 세대를
+   버려 old graph를 유지한다. seal에서 ambiguity가 확인됐으면 takeover 전 실패여도 paused-input notice를 남긴 뒤 old
+   controller/transport가 usable하다는 증거가 있을 때만 `published_old`로 돌아간다. takeover 전 모든 allocation,
+   publication capacity와 delta catch-up을 끝내 publish suffix를 allocation-free/infallible로 만든다.
+5. takeover가 하나라도 host에서 commit된 뒤에는 rollback 불가능하다. runtime별 ledger로 forward-resolve하며 이미 옮긴
+   권위를 old generation으로 되돌리거나 old adapter를 통째로 파괴하지 않는다. 모든 runtime이 new-valid 또는 긍정적
+   Gone 또는 `frozen_unavailable`으로 수렴한 뒤 성공 member의 bundle generation과 ClientSlot connection generation을
+   한 owner turn에서 publish한다. frozen member는 old transport/attachment/screen ownership을 모두 끊고 stable shell의
+   경량 unavailable placeholder로 교체한다. placeholder는 custom title, runtime ID와 typed 실패 상태만 보존하며 terminal
+   grid/scrollback/selection/search/link/image를 복사하지 않는다. Retry가 성공하면 host의 새 full snapshot으로 screen을 다시
+   구성한다. runtime별로
+   `new_controller_evidenced`만 `published_new`의 writable epoch를 열 수 있다. takeover가 한 byte라도 송신된
+   `takeover_sent_unknown`, `authority_conflict`, 권위 부재는 old generation을 다시 열지 않고 `frozen_unavailable`의
+   read-only 화면과 notice로 남긴다. `old_valid`의 `published_old` 복귀는 takeover 송신 0과 old controller generation 및
+   old transport usability가 모두 증명된 경우만 허용한다. unavailable 종료는 job/reconnect pin만 풀며 mutation gate를
+   writable로 푼다는 뜻이 아니다.
+6. runtime generation은 attachment/screen/observation/wire queue를 `drop stream/buffer -> attachment/screen ->
+   observation/queue` 순으로 retire한다. GUI Client operation은 coordinator owner turn 하나로 직렬화하고 reconnect가 old
+   Client의 새 RPC/frame admission을 먼저 닫는다. `ClientSlot`은 macOS main-thread confined이며
+   `withCurrent(expected_generation, fn)` stack borrow만 노출하고 raw `logicalClient()` 장기 포인터를 허용하지 않는다.
+   `withCurrent`는 신규 RPC admission 전용이다. 현 `AttachmentTransport.context=*Client` raw callback은 CR3a에서
+   generation-bound cleanup thunk로 교체하고 attachment가 exact `ConnectionLease`를 deinit 마지막까지 소유한다. lease는
+   retired Client의 drop/release/cancel만 허용하는 `withLease` cleanup capability이며 새 request를 만들 수 없다. retirement는
+   R1 admission close+pending call typed cancel, R2 attachment pending lease release/drop+detached tombstone+placeholder publish,
+   R3 parser/event/outbound backing final seal의 세 단계다. R2는 `prepareDetachForRetirement()` → proxy gate 아래 store-only
+   `commitDetachTransportUnchecked(out_cleanup)` → gate 밖 `finishDetachedCleanup(out_cleanup)`으로 나뉜다. commit은 proxy
+   target을 preallocated `UnavailableCore`로 바꾸고 transport/screen owner descriptor를 final-address cleanup handle로
+   move+tombstone할 뿐 callback/free를 호출하지 않는다. reconnect R2에서 기존 monolithic `RemoteAttachment.deinit()` 직접
+   호출은 금지한다. retired fail-closed callback은 incident child만 기록하고 새 reconnect를 예약하지 않는다.
+   shared old Client는 모든 member가 `published_new|frozen_unavailable|ended`이고 `Client.canRetire()`의
+   `{ownership_mode_terminal=true,external_pump_receipt_terminal=true,stack_borrows=0,pending_calls=0,attachment_batches=0,
+   event_frames=0,parser_views=0,outbound_frames=0}`를 검증한 뒤 tick-end deferred destruction에서 마지막으로 회수한다.
+   범용 refcount를 모든 frame에 퍼뜨리지 않고 escape
+   가능한 owned lease만 계수한다. 한 slot의 동시 retired Client hard cap은 2이며 초과가 예상되면 새 reconnect를 시작하지
+   않고 backoff한다. 향후 실제 multi-thread Client reader가 생길 때 generation lease를 확장한다.
+
+현 `controller.takeover`는 response/revoke batch admission 뒤 host registry를 commit하므로 성공 reply 유실 시 새 Client가
+그 전환이 자기 요청이었는지 `controller.status`만으로 증명할 수 없다. 불확실 candidate는 close를 요청하되 EOF cleanup
+완료를 관측했다고 가정하지 않는다. 해당 job은 `retry_wait_release`로 두고 새 connection의 `runtime.attach`가 controller를
+직접 grant할 때까지만 absolute deadline 안에서 재시도한다. observer로 붙었다면 다른 same-UID/manual controller인지 자기
+유실 candidate인지 구분할 수 없으므로 자동 takeover하지 않고 unavailable notice로 끝낸다. 늦은 candidate EOF는 global
+SubscriptionId와 connection identity가 다른 새 stream을 revoke할 수 없다. 무중단 전환이나 동일 요청의 idempotent replay를
+목표로 올릴 때만 `transfer_id` 결과 journal/status를 별도 설계한다. 첫 takeover 뒤 host 전체 all-or-none rollback은
+불가능하므로 job은 각 runtime을 `published_new | frozen_unavailable | ended`로 forward 수렴시키고, 어느 Window도
+`frozen_unavailable`을 writable old Term으로 보지 않는다. 이는 same-UID 악성 client 방어가 아니라 lost-reply와
+수동 controller 의도 보존 기능이다. 현재 socket의 same-UID가 trust boundary이므로 continuity secret을 보안 필수처럼
+추가하지 않는다.
+
+reconnect는 host/runtime/shell spawn, same-PID upgrade 시작, 다른 host ID 채택, workspace write를 하지 않는다. 성공과
+일시 실패 모두 `runtime-handle`, `runtime-state=live`, Surface/custom name을 유지하고 checkpoint를
+dirty로 만들지 않는다. timeout, endpoint 일시 부재, `upgrade_busy`, 지원 adapter 부재는 unavailable이며 durable Gone이나
+`restore_gone_host_id`로 승격하지 않는다. host lifecycle가 `ready`가 아니면 host-level absolute deadline 안에서 기다리거나
+unavailable로 끝내고 upgrade와 reconnect commit을 겹치지 않는다.
+
+`frozen_unavailable` 전환은 희귀 partial-authority 실패를 위해 화면 그래프를 deep-freeze하지 않는다. committed placeholder
+state를 먼저 publish한 다음 owner turn에서 selection/search/viewport/preedit를 idempotent clear한다. 모든 backend operation은
+단일 `ProjectionState` dispatcher를 거쳐 placeholder에서 render/Retry 외에는 typed unavailable/busy/null을 반환한다. 마지막
+화면 보존용 `FrozenProjection`은 현재 범위에서 제외한다. 이는 old Client 퇴역을
+막는 장기 attachment와 screen/scrollback 전체 복제라는 두 복잡성을 피하기 위한 의도적 제품 정책이다.
+
+#### 입력·event와 오류 taxonomy
+
+- transport ambiguity가 생기면 ambiguous frame과 그 뒤의 ordered suffix를 at-most-once로 자동 재전송하지 않는다. 일반
+  key/control/IME payload는 seal 즉시 zeroize하고 metadata만 남긴다. paste는 enqueue 시작부터 immutable
+  `{paused_paste_id,runtime_id,shell_generation,input_epoch,full_length,hash,payload}`로 완전한 원문을 소유한 경우만 보관한다.
+  hard cap은 **paste당 1 MiB, runtime당 1개, app-global 8 MiB, TTL 10분**이다. cap 초과·불완전 원문은 payload를 보관하지
+  않고 `Discard`만 제공한다. 완전본은 `Discard` 또는 **전체 paste를 다시 전송**하는 명시적 확인을 제공하며, 후자는 일부가
+  이미 실행됐을 수 있다는 경고 뒤 single-use action으로 새 input epoch에만 보낸다. suffix-only action은 제공하지 않는다.
+  copy 전에 checked length와 app-global byte reservation을 원자 획득하고 single owned secure buffer로 move한다. review UI는
+  원문을 GUI 문자열로 복사하지 않는다. non-elidable wipe primitive로 send/discard/Term close/TTL 만료/app quit/failure unwind에서
+  payload와 resend staging을 zeroize한 뒤 free한다. 8 MiB는 live payload와 staging duplicate peak를 함께 센다. TTL은 sleep을
+  포함하는 continuous monotonic deadline이며 wake/background에서 eager expiry한다. mutation freeze 이후 새 입력은 buffer하지 않고
+  reconnect-busy로 거부한다.
+- host-backed pending paste/IME commit은 stable shell의 input epoch queue가 소유한다. old transport가 인수한 X가
+  ambiguous면 뒤의 Y/input/control/paste/IME suffix를 같은 owner가 한 번에 quarantine한다. 새 controller generation이 publish되기
+  전 stale Window callback은 generation mismatch로 queue를 consume하거나 free할 수 없다.
+- BEL·OSC 9/777·OSC 52 소비 cursor의 SSOT도 stable shell generation-consumer state의
+  `{host_epoch,runtime_generation,counter,seeded}` tuple이다. prepared bundle은 raw observation만 들고 cursor를 미리 바꾸지
+  않는다. shell owner의 allocation-free publish record가 observation baseline과 cursor tuple을 함께 교체한 뒤 dedup된 typed
+  event delivery를 연다. Window 이동/close는 이 owner를 옮기지 않는다. 과거 clipboard 요청/notification을 재발화하지
+  않으며 counter 감소·overflow나 host epoch 불일치는 resync 또는 unavailable로 닫는다.
+- transport/semantic 오류는 `{scope: stream|connection|host, disposition: retry_status|reconnect|no_retry|gone,
+  transport_usable: bool}` tuple로 분류한다. framing 손실, partial write, response-ID 모호성만 connection reconnect다.
+  `invalid_generation`은 usable stream의 fresh-status 재시도, `controller_busy`는 controller conflict, `auth_denied`는 자동
+  재시도 금지, positive absence만 Gone이다. raw `Client.failClosed`는 typed `poison(reason,scope)` 내부로 숨기고 모든
+  callsite가 exhaustive expected tuple을 갖게 한다. 한 stream의 bounded semantic 오류가 sibling reconnect storm을 만들면
+  안 된다.
+
+세부 구현 순서와 완료 gate는 구현 계획의 CR 단계와 검증 매트릭스가 소유한다.
+
+lock order는 `shell lifecycle/map -> shell mutation epoch -> ScreenSource proxy gate -> target screen/core -> ClientSlot`의
+방향만 허용한다. **proxy gate가 target lock 대기와 render operation 전체를 감싸는 것은 source pin을 위한 유일한 허용
+중첩**이다. shell lifecycle/map/mutation mutex는 target 또는 Client 작업 전에 놓고, ClientSlot reservation은 copyable
+`{host_id,membership_generation,connection_generation}` token만 얻은 뒤 slot lock을 놓고 map pin을 잡으며 commit 때 token을
+재검증한다. reclaim은 어떤 target/core lock도 잡지 않은 owner thread에서 한다. 테스트 scheduler는 target-lock 대기 중
+publish waiter, writer-pending 뒤 신규 reader 차단, error unwind, destroy/prepare, enqueue/freeze를 결정적으로 교차시킨다.
+
+#### 사용자 안내와 명시적 복구 action
+
+복구 UI는 원인 코드보다 현재 상태, 보존된 것, 가능한 action을 먼저 설명한다. 문자열 자체는 localization 자원에 두고
+문서는 semantic notice와 action을 소유한다.
+
+- `reconnecting`: 250ms 이내 성공은 조용히 처리한다. 그보다 길면 pane의 비차단 상태줄에 “세션은 실행 중이며 연결을
+  복구하고 있습니다”를 표시하고 입력 잠금 이유를 함께 보인다. modal로 다른 Window를 막지 않는다.
+- `recovered`: 입력 영향이 없으면 상태줄만 해제한다. paused/rejected input이 있으면 incident·runtime당 banner 1회로
+  “중복 실행을 막기 위해 연결 전후의 입력을 자동 전송하지 않았습니다”와 영향 종류/길이만 표시한다.
+- `paused_paste`: paste 본문을 notice/log에 표시하지 않는다. 완전본/cap/TTL이 유효할 때만 `Discard`와
+  `Review Details and Send Full Paste`를 제공한다. review는 본문을 렌더하지 않고 kind, byte length, hash prefix, 생성
+  시각과 “일부가 이미 실행됐을 수 있음” 경고만 보여 준다. secure viewer/GPU/accessibility 복사본은 만들지 않는다. 후자는
+  일부가 이미 실행됐을 가능성을 재확인한다. action authority는 Take Control과 타입/저장소를 공유하지 않는
+  `{paused_paste_id,payload_hash,runtime_id,shell_generation,input_epoch,controller_generation,ui_surface_id,incident_id,
+  nonce,expires_at}` tuple이다. consume 직전 shell owner 아래 payload/hash/TTL/writable generation을 재검증하고
+  consume-before-enqueue한다. mismatch는 wire 0이며 새 확인이 필요하다. timeout/Window 이동으로 다른 active Term에 fallback
+  전송하지 않는다.
+- `controller_conflict`: 화면은 read-only로 유지하며 `Retry`와 `Take Control`을 분리한다. Retry는 direct controller grant만
+  받아 자동 탈취하지 않는다. Take Control은 사용자 gesture epoch를 fresh status와 함께 검증한 뒤에만 §9 takeover를
+  호출하고, 외부 terminal 입력이 중단될 수 있음을 안내한다. action authority는
+  `{runtime_id,shell_generation,incident_id,conflict_generation,ui_surface_id,pool_membership_generation,
+  connection_generation,subscription_id,stream_id,nonce,expires_at}` exact tuple이며
+  `conflict_generation`은 화면에 표시한 host controller generation이다. GUI-process local CSPRNG nonce를 RPC 전에 single-use
+  consume하고 같은 exact `ConnectionLease`/attachment로 fresh status와 takeover를 연속 수행한다. status가 displayed controller
+  generation과 같고 ClientSlot generation도 그대로일 때만 CAS takeover한다. mismatch/timeout은 wire 0과 새 확인/nonce가
+  필요하다. double-click, pane move/close, generation 변경, TTL 만료는 두 번째 takeover를 만들지 않는다.
+  Take Control action은 runtime당 1개, app-global 64개, TTL 60초이며 모든 recovery action `expires_at`은 sleep을 포함하는
+  continuous monotonic clock을 쓴다. wake/background에서는 nonce를 eager revoke하고 fresh status부터 다시 시작한다.
+- reconnect 중 Term close는 pane을 제거하지 않고 read-only `termination_pending`으로 바꾼다. state publish, capability epoch
+  증가, 새 control admission close, grant revoke와 queued/writer inspection은 같은 owner transaction이다. dispatch/chunk는 같은
+  epoch CAS를 검사한다. `PausedPaste`와 recovery
+  action, external read/capture/subscription grant와 queued surface frame을 즉시 revoke/purge한다. Cancel 뒤에도 기존 grant는
+  되살리지 않는다. close intent는 자동 Take Control하지 않으며 same-UID host terminate를 최대 30초 시도한다. runtime당
+  1개, app-global 64개가 상한이고 deadline 뒤에는 job pin을 놓은 read-only `termination_unconfirmed`로 수렴한다.
+  coordinator가 authority를 resolve한 뒤 terminate의 positive confirmation을 받아야 기존 close
+  transaction으로 배치를 제거하고 checkpoint한다. `Cancel`은 takeover 송신 0과 old writable 증거가 있을 때만 원래
+  상태로 돌아가며, 그 외에는 reconnect read-only로 돌아간다. 앱 Quit/crash 전에 Window model이 남아 있으면 기존 binding으로
+  restore되고, 사용자가 그 Window를 먼저 닫았다면 binding은 제거되지만 host runtime은 종료하지 않아 Recovered Sessions에
+  나타난다. Window close는 local close intent/action/shell을 exact-once `abandoned_to_inventory`로 retire한다. 이후 재발견은
+  host inventory만 소유하며 local shell을 pin하지 않는다. durable close journal이나 hidden layout owner는 만들지 않는다.
+  문구는 “세션 종료를 확인하는 중입니다.
+  확인되기 전에는 앱을 다시 열었을 때 세션이 다시 나타날 수 있습니다”다.
+
+notice dedup key는 `{incident_id,runtime_id,notice_kind}`이고 Window가 아니라 runtime을 기준으로 한다. 여러 Window가 같은
+host incident를 보더라도 app-global summary 1개와 영향받은 pane 상태만 투영하며, raw host error 문자열은 노출하지 않는다.
+
+state 조합은 분산 switch가 아니라 순수 `ReconnectReducer(State, Event) -> Decision|IllegalTransition` 한 곳이 소유한다.
+tagged phase payload가 job/runtime/local/mutation의 legal 조합만 표현하고 coordinator는 decision만 실행한다. model-based
+sequence test는 모든 declared transition과 illegal pair의 fail-close를 검증한다. publish suffix는 pointer, generation,
+cursor store만 포함하며 notice/localization/history projection은 committed record를 tick-end에 best-effort로 만든다.
+allocation 실패가 이미 완료된 authority commit을 rollback하지 않는다.
+
+`Shell.canDestroy()`는 `{render_borrows=0,reconnect_pins=0,pump_callbacks=0,mutation_leases=0,connection_leases=0,
+notice_action_leases=0,paused_pastes=0,close_intents=0}`의 conjunct다. UI projection 수명과 shell 수명은 별개다. Window가 닫혀
+projection이 사라지면 local close intent/shell도 retire하고 runtime ID는 host inventory가 다음 projection을 만든다.
+
 #### R2b inventory reconciliation과 Recovered Sessions 계약
 
 R2b는 restore를 하면서 우연히 발견한 runtime을 사후에 자동 attach하는 경로가 아니다. **Binding reconciliation**은
@@ -625,7 +880,9 @@ valid manifest를 apply하거나 default surface를 명시적으로 finish해, l
 - plan authority는 `{host_id, adapter_generation, upgrade_epoch, lifecycle=ready, membership_generation,
   authority_generation, workspace_generation}`이다. `authority_generation`은 ready/restoring/rollback/commit 등
   host lifecycle transition마다 checked monotonic 증가하고 overflow면 transition을 fail-close한다. HostPool의
-  `adapter_generation`도 add/remove/reconnect마다 증가한다. page 수집·row publish·사용자 action commit마다 전부
+  현재 HostPool의 `adapter_generation`도 entry add/remove마다 증가한다. CR3 rename 뒤 같은 필드의 명칭은
+  `pool_membership_generation`이다. 같은 adapter 안의 reconnect는 이 값이 아니라 별도 `connection_generation`을 바꾸며
+  inventory plan authority에는 영향을 주지 않는다. page 수집·row publish·사용자 action commit마다 전부
   재검증하고 ready→restoring→ready와 membership A→B→A도 stale로 폐기한다. inventory 실패는 **recovery projection만** 비활성화하며 canonical manifest의 기존 per-handle
   attach/typed not-found restore를 막지 않는다.
   `host.info`는 같은 `authority_generation`을 반환하고, explicit adopt 직전 `host.info`와 `runtime.get`을 새 request로

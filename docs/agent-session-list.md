@@ -36,8 +36,8 @@ N개 표시 · 최근 500개
 ```
 
 - header의 `Local Mac`은 현재 사용자 홈 아래 provider log만 읽는다는 provenance label이며 host 선택기가 아니다. v1 정렬은 mtime 내림차순 하나로 고정한다. 탭 재진입은 현재 앱 실행 중의 snapshot을 즉시 보이고, 마지막 완료 scan 뒤 **15초** 안이면 새 refresh를 시작하지 않는다. 목록 첫 행의 `AI 세션 · ⟳ 새로 고침`은 명시적인 refresh control이며 클릭은 이 TTL을 우회한다. worker가 실행 중이면 같은 control은 `분석 중`으로 바뀌고 추가 job을 만들지 않는다.
-- 도크 view bar의 `AI 세션`을 누르면 archive refresh를 요청한다. 스캔 중에도 기존 snapshot을 유지하고, 새 결과는 batch로만 publish한다. 빈 snapshot은 skeleton/진행 문구를 보이며 frame tick에서 파일 I/O를 하지 않는다. 창 재포커스와 새 provider session identity 감지는 같은 refresh를 요청하되, forced refresh는 5초 전역 throttle로 합친다. filesystem polling/watcher는 v1에 없다.
-- scope는 `현재 작업공간`, `현재 프로젝트`, `전체`다. 기본값은 `전체`이며 마지막 선택만 창 UI 상태로 보존한다. `현재 작업공간`은 탐색기의 canonical explicit/inferred root 집합 중 **현재 창의 표시 root** 아래에 `cwd`가 있는 기록이다. root가 없으면 비활성화하고 이유를 표시한다. `현재 프로젝트`는 활성 local Term의 canonical git root 아래 `cwd`가 있는 기록이며, local git root가 없으면 비활성화한다. `전체`는 모든 provider의 검증된 사용자 세션이다. remote/불명 `cwd`는 전체에서만 보인다. v1 구현은 도크 진입 또는 scope click 시 root snapshot을 갱신하며, 이후 scope/search/scroll/frame은 그 메모리 snapshot만 읽는다.
+- 도크 view bar의 `AI 세션`을 누르면 archive refresh를 요청한다. **refresh 중에는 직전 완료 snapshot과 scroll(새 결과가 짧으면 상한 clamp), 같은 source identity의 선택을 유지하고, 새 bounded scan 전체가 끝난 뒤에만 새 immutable snapshot으로 한 번에 교체한다.** 결과 큐의 OOM 등 새 snapshot을 publish할 수 없는 완료는 spinner만 끝내고 기존 목록을 유지하며 notice를 보인다. 따라서 새로 고침이 기존 목록을 비우거나 첫 record/중간 batch로 목록을 흔들지 않는다. 첫 진입처럼 이전 snapshot이 없을 때만 skeleton/진행 문구를 보이며, frame tick에서 파일 I/O를 하지 않는다. 창 재포커스와 새 provider session identity 감지는 같은 refresh를 요청하되, forced refresh는 5초 전역 throttle로 합친다. filesystem polling/watcher는 v1에 없다.
+- scope는 `현재 작업공간`, `현재 프로젝트`, `전체`다. 기본값은 `전체`이며 마지막 선택만 창 UI 상태로 보존한다. **`현재 작업공간`은 활성 워크스페이스 탭의 활성 local Term이 마지막으로 보고한 CWD를 worker가 canonicalize한 단일 root snapshot 아래에 `cwd`가 있는 기록**이다. 창 전역 탐색기 root와 다른 권위이므로, 다른 워크스페이스 탭의 폴더가 섞이지 않는다. `현재 프로젝트`는 같은 active Term CWD에서 worker가 찾은 canonical git root 아래 `cwd`가 있는 기록이며, local CWD 또는 git root가 없으면 각각 비활성화한다. `전체`는 모든 provider의 검증된 사용자 세션이다. remote/불명 `cwd`는 전체에서만 보인다. 도크 진입, scope click, 활성 workspace/pane/Term 전환 **및 같은 활성 pane의 CWD 보고 변경**에서 root snapshot을 갱신하며, 결과가 오기 전에는 이전 tab 또는 이전 CWD의 범위를 재사용하지 않는다. CWD 비교는 main actor의 메모리 observation만 사용하고 canonicalize·git walk는 worker만 수행한다. 이후 scope/search/scroll/frame은 그 메모리 snapshot만 읽는다.
 - 이 필터는 접근 제어가 아닌 표시 범위다. 경로는 provider log의 `cwd`를 canonicalize할 수 있을 때만 containment 비교하며, 실패·삭제·비로컬 값은 workspace/project에 억지로 넣지 않는다.
 - 검색은 이미 publish된 snapshot만 대상으로 한다. `/`로 시작한 입력은 header에 표시되고 Esc는 query를 지우고 닫으며, UTF-8 byte substring(ASCII만 case-insensitive)으로 제목·요약·cwd leaf·branch·model을 찾고 입력은 256 byte로 자른다. 검색 키 입력은 재스캔·파일 stat·정렬을 일으키지 않는다. 한국어처럼 case가 없는 문자열은 정확 byte match로 검색된다.
 - 최근 window는 provider를 합쳐 mtime 내림차순 최대 500 **검증 완료** 세션이다. 후보 탐색 상한 또는 parser byte budget 때문에 더 오래된 항목을 보장하지 않으므로 header와 empty state는 항상 `최근`이라고 말하고 `전체 이력`이라고 주장하지 않는다.
@@ -68,10 +68,10 @@ Codex의 과거 파일에는 `thread_source`가 없을 수 있다. 이 경우 us
 
 1. trusted discovery root에서 no-follow directory traversal로 regular file만 수집한다. symlink, socket, FIFO, device, nested Claude directory, 예상 밖 파일명은 skip하며 debug artifact에는 raw 제목/프롬프트/경로를 남기지 않는다.
 2. provider별 최대 4,096개 후보 metadata를 mtime 순으로 고르고, 합쳐 최근 순으로 분석한다. 이 상한을 넘으면 header에 `일부 최근 후보만 검사함`을 표시한다.
-3. worker는 최근 후보를 제한된 worker pool(동시 parse 최대 4)로 분석한다. 첫 verified batch(최대 50개)가 준비되면 즉시 publish하고, 이후 batch도 최신순으로 합친다. 파일은 streaming JSONL parser로 읽고 파일당 128 MiB, refresh당 512 MiB budget을 둔다. 손상 JSON line은 그 line만 버리고 record를 추측해 만들지 않는다. cap/cancel/OOM이면 완성된 record만 publish하고, 해당 record의 분석 상태를 partial로 표시한다.
-4. first guard는 앱 실행 중의 완료 snapshot TTL 15초다. TTL hit는 filesystem I/O 없이 현재 snapshot만 보이고, force refresh만 이를 우회한다. worker는 다음 guard로 `(device,inode,mtime,size)`가 같은 파일의 verified parse 결과를 재사용한다. cache miss/identity 변경 파일만 다시 분석하며, 새 snapshot은 cache 결과와 최신 batch를 mtime 순으로 합친다. 500개 verified record가 완성되면 더 오래된 후보는 v1 refresh에서 분석하지 않는다. memory-only snapshot과 parse cache이므로 앱 종료 후 title/prompt metadata, source path, session id를 디스크에 남기지 않는다. persistent cache는 개인정보 보존·삭제 정책을 별도로 승인하기 전 비목표다.
+3. worker는 최근 후보를 제한된 worker pool(동시 parse 최대 4)로 분석한다. 파일은 streaming JSONL parser로 읽고 파일당 128 MiB, refresh당 512 MiB budget을 둔다. worker는 새 **완료** immutable snapshot만 publish하며 main actor는 그것을 한 번에 swap한다. 손상 JSON line은 그 line만 버리고 record를 추측해 만들지 않는다. cap/cancel/OOM이면 완성된 record만 포함한 partial snapshot을 publish한다.
+4. first guard는 앱 실행 중의 완료 snapshot TTL 15초다. TTL hit는 filesystem I/O 없이 현재 snapshot만 보이고, force refresh만 이를 우회한다. worker는 다음 guard로 `(device,inode,mtime,size)`가 같은 파일의 verified parse 결과를 재사용한다. cache miss/identity 변경 파일만 다시 분석하며, cache 결과와 새 parse 결과를 mtime 순으로 합친 **완료 snapshot**을 publish한다. 500개 verified record가 완성되면 더 오래된 후보는 v1 refresh에서 분석하지 않는다. memory-only snapshot과 parse cache이므로 앱 종료 후 title/prompt metadata, source path, session id를 디스크에 남기지 않는다. persistent cache는 개인정보 보존·삭제 정책을 별도로 승인하기 전 비목표다.
 
-따라서 첫 진입이 즉시 500개를 완성한다는 보장은 없다. UI는 `228개 표시 · 최근 500개 중 분석 중`처럼 현재 snapshot과 scan 상태를 분리해 말해야 하며, search/scope가 partial snapshot을 완전한 결과인 것처럼 보이게 해서는 안 된다.
+따라서 첫 진입이 즉시 500개를 완성한다는 보장은 없다. UI는 `228개 표시 · 최근 500개 중 분석 중`처럼 현재 snapshot과 scan 상태를 분리해 말해야 하며, search/scope가 partial snapshot을 완전한 결과인 것처럼 보이게 해서는 안 된다. 이미 완료 snapshot이 있으면 같은 문구를 overlay로만 보이고 카드 목록은 유지한다.
 
 ## 5. 보안·개인정보·관측
 
@@ -83,7 +83,7 @@ Codex의 과거 파일에는 `thread_source`가 없을 수 있다. 이 경우 us
 ## 6. 구현 순서와 완료 조건
 
 1. **AS1 — 순수 모델·parser:** provider-neutral record, Claude/Codex streaming parser, trust grade, dedup/title/summary/redaction/filter/sort pure tests. 실제 사용자 log는 fixture로 넣지 않는다.
-2. **AS2 — bounded scanner:** no-follow discovery, candidate/file/total caps, cancellation/generation, in-memory identity parse cache, 최신순 bounded worker pool과 first/continuation batch snapshot, metrics. main tick filesystem I/O=0·JSON parse=0·worker wait=0을 counter와 source boundary test로 고정한다.
+2. **AS2 — bounded scanner:** no-follow discovery, candidate/file/total caps, cancellation/generation, in-memory identity parse cache, 최신순 bounded worker pool과 완료 snapshot atomic publish, metrics. refresh는 직전 완료 snapshot을 유지하고 새 scan이 끝날 때만 교체한다. main tick filesystem I/O=0·JSON parse=0·worker wait=0을 counter와 source boundary test로 고정한다.
 3. **AS3 — 도크 chrome:** header/scope/search, 접이식 workspace group, 세 줄 virtualized card, `agent_session_list` focus owner와 selection identity. search keypress I/O=0, row 한 번 클릭 provider 실행=0·main thread JSONL I/O=0을 integration test로 고정한다.
 4. **AS4 — archive session tab·explicit actions·제품 gate:** bounded recent/permission summary의 native tab, stale identity disable, exact live mapping, copy/reveal, tab의 `새 탭에서 이어하기`와 argv-only immediate new-Term activation, macOS fixture manual E2E. 실제 provider 계정/개인 이력에 대한 재개는 사용자가 직접 승인한 수동 gate일 뿐 CI 증거가 아니다.
 
@@ -101,7 +101,7 @@ Codex의 과거 파일에는 `thread_source`가 없을 수 있다. 이 경우 us
 
 | 회차 | 점검한 빈칸 | 결정 |
 | --- | --- | --- |
-| M1 | workspace/project의 의미 | explorer canonical root와 active local git root로 각각 고정; 없으면 비활성화 (§2) |
+| M1 | workspace/project의 의미 | active workspace의 active local Term canonical CWD와 그 git root로 각각 고정; 없으면 비활성화 (§2) |
 | M2 | 정확하지 않은 count/검색 | partial 상태·`≥n` 표기와 snapshot-only search를 명시 (§2, §4) |
 | M3 | resume cwd·실행 경계 | 삭제 cwd fallback, shell 미사용, 명시 ▶/resume 버튼의 즉시 새 탭 실행을 명시 (§2, §5) |
 | M4 | 중복·변경·손상 log | provider/id+file identity, conflict discard, line-level corruption 정책을 명시 (§3, §4) |

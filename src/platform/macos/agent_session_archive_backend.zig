@@ -13,10 +13,6 @@ pub const max_records: usize = 500;
 /// The archive itself displays at most 500 verified records, so retaining more
 /// parse summaries would increase lookup cost without improving a refresh.
 pub const max_cache_entries: usize = max_records;
-/// A single verified newest record proves the list is useful; publish it
-/// immediately instead of making first paint wait for a full display page.
-pub const first_batch_records: usize = 1;
-pub const records_per_batch: usize = 50;
 pub const max_file_bytes: usize = 128 * 1024 * 1024;
 /// 한 refresh가 사용자 history를 전부 다시 해석해 UI를 장시간 막지 않게 하는 누적 read 상한.
 pub const max_total_bytes: usize = 512 * 1024 * 1024;
@@ -41,11 +37,13 @@ pub const Record = struct {
 pub const Result = struct {
     records: std.ArrayList(Record) = .empty,
     partial: bool = false,
-    /// The first batch replaces the app's prior snapshot; later batches append
-    /// to that new generation. `complete` is the only transition that clears
-    /// the visible loading state.
-    first_batch: bool = false,
+    /// Each worker job publishes exactly one completed immutable snapshot. It
+    /// lets the UI retain its prior list while a refresh scans privately.
     complete: bool = false,
+    /// The worker completed but could not enqueue an immutable replacement
+    /// (for example because the result queue allocation failed). The main
+    /// actor must clear its spinner yet retain the prior completed snapshot.
+    retain_previous: bool = false,
 
     pub fn deinit(self: *Result, allocator: std.mem.Allocator) void {
         for (self.records.items) |*record| record.deinit(allocator);
@@ -62,6 +60,7 @@ const State = struct {
     results: std.ArrayList(Result) = .empty,
     cache: std.ArrayList(CacheEntry) = .empty,
     inflight: bool = false,
+    completion_without_snapshot: bool = false,
     shutting_down: bool = false,
 
     fn release(self: *State) void {
@@ -133,6 +132,7 @@ pub const Backend = struct {
             return false;
         }
         state.inflight = true;
+        state.completion_without_snapshot = false;
         _ = state.refs.fetchAdd(1, .monotonic);
         state.mutex.unlock(state.io);
 
@@ -154,7 +154,11 @@ pub const Backend = struct {
         const state = self.state orelse return null;
         state.mutex.lockUncancelable(state.io);
         defer state.mutex.unlock(state.io);
-        if (state.results.items.len == 0) return null;
+        if (state.results.items.len == 0) {
+            if (!state.completion_without_snapshot) return null;
+            state.completion_without_snapshot = false;
+            return .{ .complete = true, .retain_previous = true };
+        }
         return state.results.orderedRemove(0);
     }
 
@@ -183,12 +187,13 @@ fn finishWithoutResult(state: *State) void {
 
 fn worker(job: *Job) void {
     const state = job.state;
-    scan(state, job.home);
+    const published = scan(state, job.home);
     state.allocator.free(job.home);
     state.allocator.destroy(job);
 
     state.mutex.lockUncancelable(state.io);
     state.inflight = false;
+    if (!published and !state.shutting_down) state.completion_without_snapshot = true;
     state.mutex.unlock(state.io);
     state.release();
 }
@@ -272,7 +277,7 @@ fn cacheParsed(state: *State, candidate: Candidate, parsed: *const archive.Parse
     };
 }
 
-fn scan(state: *State, home: []const u8) void {
+fn scan(state: *State, home: []const u8) bool {
     const allocator = state.allocator;
     const io = state.io;
     var result: Result = .{};
@@ -290,7 +295,7 @@ fn scan(state: *State, home: []const u8) void {
 
     scanClaude(allocator, io, home, &claude_candidates, &result.partial);
     scanCodex(allocator, io, home, &codex_candidates, &result.partial);
-    claude_candidates.appendSlice(allocator, codex_candidates.items) catch return;
+    claude_candidates.appendSlice(allocator, codex_candidates.items) catch return false;
     codex_candidates.clearRetainingCapacity(); // ownership moved into claude_candidates
     std.mem.sort(Candidate, claude_candidates.items, {}, struct {
         fn lessThan(_: void, a: Candidate, b: Candidate) bool {
@@ -299,7 +304,6 @@ fn scan(state: *State, home: []const u8) void {
     }.lessThan);
 
     var remaining_bytes = max_total_bytes;
-    var first_batch = true;
     for (claude_candidates.items) |candidate| {
         if (result.records.items.len == max_records) {
             result.partial = true;
@@ -311,13 +315,6 @@ fn scan(state: *State, home: []const u8) void {
                 owned.deinit(allocator);
             };
         } else appendCandidateFile(state, candidate, &result, &remaining_bytes);
-        const batch_limit = if (first_batch) first_batch_records else records_per_batch;
-        if (result.records.items.len == batch_limit) {
-            result.first_batch = first_batch;
-            result.complete = false;
-            if (!publish(state, &result)) return;
-            first_batch = false;
-        }
     }
     std.mem.sort(Record, result.records.items, {}, struct {
         fn lessThan(_: void, a: Record, b: Record) bool {
@@ -329,9 +326,8 @@ fn scan(state: *State, home: []const u8) void {
         result.records.shrinkRetainingCapacity(max_records);
         result.partial = true;
     }
-    result.first_batch = first_batch;
     result.complete = true;
-    _ = publish(state, &result);
+    return publish(state, &result);
 }
 
 fn scanClaude(allocator: std.mem.Allocator, io: std.Io, home: []const u8, candidates: *std.ArrayList(Candidate), partial: *bool) void {
@@ -549,6 +545,22 @@ test "archive cache identity rejects replaced or changed source files" {
     changed = candidate;
     changed.source_path = @constCast("other/rollout.jsonl");
     try std.testing.expect(!sameCacheIdentity(entry, changed));
+}
+
+test "archive backend reports an enqueue failure without manufacturing an empty snapshot" {
+    var state = State{ .allocator = std.testing.allocator, .io = std.testing.io };
+    defer state.results.deinit(std.testing.allocator);
+    var backend = Backend{ .state = &state };
+    state.completion_without_snapshot = true;
+    const result = backend.takeResult() orelse return error.TestUnexpectedResult;
+    defer {
+        var owned = result;
+        owned.deinit(std.testing.allocator);
+    }
+    try std.testing.expect(result.complete);
+    try std.testing.expect(result.retain_previous);
+    try std.testing.expectEqual(@as(usize, 0), result.records.items.len);
+    try std.testing.expect(backend.takeResult() == null);
 }
 
 test "archive scanner refuses a symlinked history directory" {

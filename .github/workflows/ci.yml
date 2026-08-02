@@ -43,7 +43,11 @@ jobs:
   file-explorer-macos:
     name: file explorer macOS product path
     runs-on: macos-15
-    timeout-minutes: 15
+    # This job intentionally builds the full session-host suite twice (Debug and ReleaseFast)
+    # before the provider/file-explorer gates. A cold macOS runner can spend more than 15 minutes
+    # in those two independent compilations, so the job budget must cover the complete gate rather
+    # than cancelling a healthy ReleaseFast run halfway through.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:

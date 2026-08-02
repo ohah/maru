@@ -328,7 +328,7 @@ file work를 섞지 않으며, 공용 frame phase가 살아 있는 animation만 
 1. **ML1 — typed rect/flex core:** `UiLength`, edge/min-max resolve, measure callback,
    row/column flex, overflow clip의 pure test. px/percent/auto/fill, zero/negative,
    NaN/∞ fail-close, tiny container, min/max freeze 재분배, text measurement을 단언한다.
-2. **ML2a — nested component layout seam (구현 완료):** `src/chrome/ui_tree.zig`가
+2. **ML2a — nested component layout seam:** `src/chrome/ui_tree.zig`가
    `UiNode` builder와 `UiRectTree`, tree-wide unique stable identity, parent/clip
    ancestry, same rect 소비 seam, successful-only rebuild counter를 headless로 고정한다.
    이 tree는 legacy TUI cell/ANSI path를 읽지 않는다. 아직 draw/hit/focus consumer는

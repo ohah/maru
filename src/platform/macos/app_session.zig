@@ -53,12 +53,12 @@ const agent_session_archive_backend = @import("agent_session_archive_backend.zig
 const agent_session_archive_detail_backend = @import("agent_session_archive_detail_backend.zig");
 const agent_session_archive_scope_backend = @import("agent_session_archive_scope_backend.zig");
 const chrome_metal_lowering = @import("chrome/metal_lowering.zig");
-const session_dock_lowering = @import("chrome/session_dock_lowering.zig");
+const chrome_draw_lowering = @import("chrome/chrome_draw_lowering.zig");
 test {
     // Chrome Lab은 제품 AppSession이 소유하지 않는 test-only fixture다. 다만 이 import로 app-host
     // 테스트 빌드에서 facade/module ownership과 lowering API drift를 컴파일 시점에 잡는다.
     _ = @import("chrome/lab.zig");
-    _ = @import("chrome/session_dock_lowering.zig");
+    _ = @import("chrome/chrome_draw_lowering.zig");
 }
 const agent_session_archive_view = maru.session.agent_session_archive_view;
 const agent_session_archive_detail = maru.session.agent_session_archive_detail;
@@ -2972,6 +2972,12 @@ pub const AppSession = struct {
     agent_session_dock_actions: std.ArrayList(chrome.components.session_dock.ids.Entry) = .empty,
     agent_session_dock_interaction: chrome.ui.interaction.InteractionState = .{},
     agent_session_dock_snapshot_generation: u64 = 1,
+    /// Active archive-tab detail uses the same publish-before-input rule as SessionDock, but it
+    /// is intentionally a separate tree: the dock can refresh while an archive tab stays open.
+    archive_detail_entries: std.ArrayList(chrome.ui.tree.RectEntry) = .empty,
+    archive_detail_actions: std.ArrayList(chrome.components.archive_detail.ids.Entry) = .empty,
+    archive_detail_interaction: chrome.ui.interaction.InteractionState = .{},
+    archive_detail_request_id: u64 = 0,
     /// View-lifetime only canonical cwd keys. A missing/deleted/remote cwd uses
     /// the empty unknown-location key and remains distinct from lexical paths.
     agent_session_archive_collapsed_groups: std.ArrayList([]u8) = .empty,
@@ -6333,7 +6339,6 @@ pub const AppSession = struct {
         errdefer self.destroyTerm(term);
         try pane.terms.append(self.allocator, term);
         self.focusTerm(pane.terms.items.len - 1);
-        self.writeArchiveSessionTabGuidance(term);
 
         const archive_tab = term.rt.archive_session_tab.?;
         var source: agent_session_archive_detail_backend.Source = .{
@@ -6345,8 +6350,8 @@ pub const AppSession = struct {
         if (!self.agent_session_archive_detail_backend.submit(source, archive_tab.request_id, term.surface.id)) {
             source.deinit(self.allocator);
             archive_tab.state = .unavailable;
-            self.writeArchiveSessionTabGuidance(term);
         }
+        self.metal_dirty = true;
     }
 
     fn archiveSessionTermForResult(self: *AppSession, surface_id: u64) ?*Term {
@@ -6377,7 +6382,11 @@ pub const AppSession = struct {
             archive_tab.detail = parsed;
             result.detail = null;
         }
-        self.writeArchiveSessionTabGuidance(term);
+        // The old completed tree may have had ready-only actions. If this is the active tab,
+        // invalidate it before the next render, not only when that render publishes the new
+        // state: an input event can arrive between this queue drain and the next present. A
+        // background tab must not clear the independent active tab's completed snapshot.
+        if (self.archiveSessionTermIsActive(term)) self.invalidateArchiveDetailFrame();
         self.metal_dirty = true;
     }
 
@@ -6402,43 +6411,11 @@ pub const AppSession = struct {
                     if (archive_tab.detail) |*parsed| parsed.deinit(self.allocator);
                     archive_tab.detail = null;
                     archive_tab.state = .stale;
-                    self.writeArchiveSessionTabGuidance(term);
+                    if (self.archiveSessionTermIsActive(term)) self.invalidateArchiveDetailFrame();
                     self.metal_dirty = true;
                 }
             }
         }
-    }
-
-    /// A native tab has no clickable rich controls yet, so the guaranteed
-    /// affordance is the explicit shortcut text plus the key routing below.
-    /// It clears then rewrites the bounded snapshot to avoid appending an old
-    /// loading state below a newly completed result.
-    fn writeArchiveSessionTabGuidance(self: *AppSession, term: *Term) void {
-        const archive_tab = term.rt.archive_session_tab orelse return;
-        var buf: [2_048]u8 = undefined;
-        var w = std.Io.Writer.fixed(&buf);
-        w.writeAll("\x1b[2J\x1b[H\r\n\x1b[1m  AI 세션 기록\x1b[0m\r\n") catch return;
-        switch (archive_tab.state) {
-            .loading => w.writeAll("\r\n  세션 분석 중…\r\n") catch {},
-            .stale => w.writeAll("\r\n  원본 세션이 변경되어 안전하게 열 수 없습니다.\r\n") catch {},
-            .unavailable => w.writeAll("\r\n  세션 원본을 읽을 수 없습니다.\r\n") catch {},
-            .ready => {
-                const parsed = archive_tab.detail orelse return;
-                w.writeAll("\r\n  최근 대화\r\n") catch {};
-                if (parsed.turns.items.len == 0) w.writeAll("    표시할 최근 대화가 없습니다.\r\n") catch {};
-                for (parsed.turns.items) |turn| {
-                    const role = switch (turn.role) {
-                        .user => "사용자",
-                        .assistant => "에이전트",
-                    };
-                    w.print("\r\n  {s}\r\n    {s}\r\n", .{ role, turn.text }) catch {};
-                }
-                if (parsed.action_records > 0)
-                    w.print("\r\n  도구/권한 관련 기록 {d}건\r\n", .{parsed.action_records}) catch {};
-                w.writeAll("\r\n  ⌘↵ 새 탭에서 이어하기    ⌘L 로그 보기\r\n") catch {};
-            },
-        }
-        self.writeSurfaceGuidance(term.surface, w.buffered());
     }
 
     /// §7 묘비를 **같은 pane 슬롯에서 제자리 교체**해 새 셸로 되살린다(⏎). `newTermInActivePane`을 쓰면 안 되는
@@ -19963,7 +19940,8 @@ pub const AppSession = struct {
         if (!self.surface_initialized or self.tabs.items.len == 0) return true;
         const tab = self.tabs.items[self.app_window.active_tab];
         const pane = tab.panes.items[tab.active_pane];
-        return pane.terms.items[pane.active_term].kind == .terminal;
+        const term = pane.terms.items[pane.active_term];
+        return term.kind == .terminal and term.rt.archive_session_tab == null;
     }
 
     /// [4e-2, web-panel.md §6] 활성 Term이 terminal이면 그 surface(=`activeSurface()`), web이면 null. 활성 render
@@ -20799,25 +20777,19 @@ pub const AppSession = struct {
                 return self.last_summary;
             }
         }
-        // A focused archive tab is a read-only terminal surface.  It consumes
-        // every ordinary key so user text can never be mistaken for PTY input;
-        // only its visible, explicit actions are routed while the identity is
-        // still ready.  Stale/unavailable tabs deliberately keep consuming.
+        // A focused archive tab is a read-only Chrome surface. It consumes every ordinary key
+        // so user text can never be mistaken for PTY input; shortcuts resolve the same completed
+        // action table as pointer-up, so stale/unavailable/just-replaced controls stay inert.
         if (self.surface_initialized and self.tabs.items.len > 0) {
             const active_archive = self.activePane().activeTerm().rt.archive_session_tab;
-            if (active_archive) |archive_tab| {
-                if (archive_tab.state == .ready and event.modifiers.command and event.key == .enter) {
-                    self.resumeAgentSessionInNewTerm(&archive_tab.record) catch {
-                        self.showNotice("세션을 다시 시작하지 못했습니다. Claude 또는 Codex CLI 설치와 작업 경로를 확인하세요.");
-                    };
-                } else if (archive_tab.state == .ready and event.modifiers.command and switch (event.key) {
+            if (active_archive != null) {
+                const shortcut: ?chrome.components.archive_detail.ids.Intent = if (event.modifiers.command and event.key == .enter)
+                    .resume_session
+                else if (event.modifiers.command and switch (event.key) {
                     .char => |codepoint| codepoint == 'l' or codepoint == 'L',
                     else => false,
-                }) {
-                    self.revealAgentSessionArchiveLog(&archive_tab.record) catch {
-                        self.showNotice("로그 원본이 변경되었거나 더 이상 열 수 없습니다.");
-                    };
-                }
+                }) .reveal_log else null;
+                if (shortcut) |wanted| if (self.archiveDetailShortcutIntent(wanted)) |intent| self.applyArchiveDetailIntent(intent);
                 self.metal_dirty = true;
                 self.total_app_key_events += 1;
                 self.writeSummaryFromState();
@@ -21596,6 +21568,7 @@ pub const AppSession = struct {
         // this entry point when the terminal has DECSET 1003 enabled. Keep the component state
         // correct in that case without making agent-session hover depend on PTY tracking mode.
         _ = self.agentSessionDockPointer(.move, x_px, y_px);
+        _ = self.dispatchArchiveDetailPointer(.move, x_px, y_px);
         const active = self.activeSurface();
         // 비-1003이면 dedup도 비운다 — 다음 1003 진입의 첫 셀이 stale last_motion_cell로 막히지 않게.
         // **host-backed면 관측 모드가 SSOT**다: placeholder core는 항상 `.none`이라 예전 코드는 여기서 항상 빠져
@@ -21782,6 +21755,17 @@ pub const AppSession = struct {
         // 처리가 없는 인터랙티브 오버레이(find/palette)뿐이다 — 클릭이 뒤(터미널·divider/탭 드래그·사이드바)로 새지 않게
         // 막는다(키가 모달에서 소비되는 것과 같은 규율). 포인터를 실제로 쓰는 모달 위젯(슬라이더·토글·색)은 CS-4-1+에서 이 경로에 붙는다.
         if (self.chrome_host.handlePointer(chromePointerFromMouse(kind, x_px, y_px, button, mods)) != null) return;
+        // Archive detail owns the active pane body while visible. Its capture has the same
+        // leave/outside-up semantics as SessionDock, and it never falls through to terminal
+        // selection or mouse reporting because archive tabs have no PTY input authority.
+        if (self.activeArchiveSessionTab() != null and button == 0 and (kind == 2 or kind == 3)) {
+            const captured = self.archive_detail_interaction.capture != null;
+            if (captured or layout_math.pointInRect(x_px, y_px, self.active_pane_rect)) {
+                const phase: chrome.ui.interaction.UiPointerPhase = if (kind == 2) .move else .up;
+                if (self.dispatchArchiveDetailPointer(phase, x_px, y_px)) |intent| self.applyArchiveDetailIntent(intent);
+                return;
+            }
+        }
         // SessionDock has no platform row arithmetic. While its capture is live, drag/up stays
         // with the same published component tree even if the pointer leaves the dock; an up over
         // a terminal must not begin a terminal selection or leak a PTY mouse event. A bare up in
@@ -22165,6 +22149,10 @@ pub const AppSession = struct {
                 // tree header/빈 row, editor 본문의 WebView seam처럼 도크 안에서 Metal까지 내려온 클릭은 도크가 소비한다.
                 // 반대로 도크 밖(workspace)은 여기서 return하지 않고 아래 pane 주소창·탭·터미널 hit-test로 흘러야 한다.
                 if (layout_math.pointInRect(x_px, y_px, self.dockGeometry().dock)) return;
+            }
+            if (self.activeArchiveSessionTab() != null and layout_math.pointInRect(x_px, y_px, self.active_pane_rect)) {
+                _ = self.dispatchArchiveDetailPointer(.down, x_px, y_px);
+                return;
             }
             // tree 밖의 명시적 primary click은 workspace 입력 축을 되찾는다. TerminalView가 이미 firstResponder라
             // AppKit responder 변화가 없을 수 있으므로 mouse policy도 같은 FocusOwner를 직접 갱신해야 한다.
@@ -24348,6 +24336,11 @@ pub const AppSession = struct {
         self.setHoveredFileHeaderMode(self.fileHeaderModeHoverAt(x_px, y_px));
         self.setHoveredFileTreeRow(if (self.dockVisible()) self.fileTreeRowAt(x_px, y_px) else null);
         self.setHoveredDockViewSlot(self.dockViewSlotAt(x_px, y_px));
+        if (self.activeArchiveSessionTab() != null and layout_math.pointInRect(x_px, y_px, self.active_pane_rect)) {
+            _ = self.dispatchArchiveDetailPointer(.move, x_px, y_px);
+            self.clearHoverUrlAnchor();
+            return if (self.archive_detail_interaction.hovered != null) .link else .default;
+        }
         // 접힘 펼치기 토글(◧, 신호등 옆) 호버 — 접힘 시 사이드바 폭 0이라 아래 inSidebar(헤더 아이콘) 경로가 안 타고,
         // resize-edge가 x≈0을 잘못 잡을 수 있어 **먼저** 본다. 토글 위면 호버 배경을 켜고 pointingHand(클릭 가능).
         // 토글 밖이면 끄고 아래 일반 경로로 흐른다. mouse down hit-test(collapsedToggleRect)와 같은 rect로 일치.
@@ -28870,7 +28863,7 @@ pub const AppSession = struct {
                     self.pane_palette_copies.ensureTotalCapacity(self.allocator, leaf_rects.items.len) catch {};
                     for (leaf_rects.items) |lr| {
                         if (lr.leaf == active_pane) continue; // 활성은 맨 뒤에 따로 넣는다
-                        if (lr.leaf.activeTerm().kind == .web) continue; // [4e-2, §6] 비활성 web pane은 터미널 frame 없음(본문 배경만 — 탭바·divider는 chrome이 계속 렌더). web Term 없으면 no-op(byte-identical)
+                        if (lr.leaf.activeTerm().kind == .web or lr.leaf.activeTerm().rt.archive_session_tab != null) continue; // web/archive pane은 terminal frame 없음(본문 background+별도 surface만). terminal만 기존 경로를 탄다.
                         const pane_surface = lr.leaf.activeTerm().surface;
                         const pane_core = &pane_surface.core;
                         // 코어 읽기(snapshot→DrawList 복사 + per-pane 색 상태)는 락 아래, CoreText shaping
@@ -28920,6 +28913,13 @@ pub const AppSession = struct {
                 //     아래 append 직후 GpuQuad로(텍스트와 안 겹치게 배너 아래 행에).
                 if (self.buildStickyDrawListAndPlacement(active_term_rect)) |sp| {
                     self.collectShaped(&collected, sp.dl, pane_frame_builder, .{ .sticky = sp.placement });
+                }
+
+                // Archive tabs are Chrome-only panes: their sentinel terminal core is deliberately
+                // not shaped. Collect the already-redacted detail panel in this same atlas batch
+                // so its background/text and published hit tree describe one completed frame.
+                if (self.activeArchiveSessionTab() != null) {
+                    self.collectArchiveSessionDetail(&collected, pane_frame_builder, cell_colors, active_term_rect);
                 }
 
                 // 활성 panel(위에서 shapeOnly됨)을 collect(.active)로 합류 — 다른 모든 페인과 한 placeMultiPane 세대.
@@ -31041,13 +31041,119 @@ pub const AppSession = struct {
 
         // GPU card backgrounds must precede terminal/pane text; the adapter fixes this to
         // renderer layer 2 instead of the overlay layer used by modal components.
-        session_dock_lowering.appendBackgroundQuads(self.allocator, &.{draws}, &tokens, content.x, content.y, &self.gpu_quads);
+        chrome_draw_lowering.appendBackgroundQuads(self.allocator, &.{draws}, &tokens, content.x, content.y, &self.gpu_quads);
         // One completed Dock tree becomes one DrawList and one CoreText shaping pass. The
         // component keeps every text origin local to `content`; the collected pane translates
         // the whole batch exactly once to backing coordinates.
         const cols: u16 = @intCast(@min(content.w / self.cell_width_px, std.math.maxInt(u16)));
         const rows: u16 = @intCast(@min(content.h / self.cell_height_px, std.math.maxInt(u16)));
-        const dl = session_dock_lowering.buildTextDrawList(
+        const dl = chrome_draw_lowering.buildTextDrawList(
+            self.allocator,
+            draws.ops,
+            &tokens,
+            self.cell_width_px,
+            self.cell_height_px,
+            cols,
+            rows,
+        ) catch return;
+        self.collectShaped(collected, dl, builder, .{ .pane = .{
+            .origin_x = content.x,
+            .origin_y = content.y,
+            .colors = colors,
+        } });
+    }
+
+    /// AS4-b product mount. The detail worker has already returned a bounded, redacted DTO; this
+    /// method only projects that immutable state into the same Metal/CoreText path as the dock.
+    /// No archive file, PTY, provider command, or blocking wait is reachable from this frame path.
+    fn collectArchiveSessionDetail(
+        self: *AppSession,
+        collected: *std.ArrayList(CollectedPane),
+        builder: coretext_frame_builder.CoreTextFrameBuilder,
+        colors: metal_frame.CellColors,
+        content: maru.session.SplitRect,
+    ) void {
+        const archive_tab = self.activeArchiveSessionTab() orelse return;
+        if (self.cell_width_px == 0 or self.cell_height_px == 0 or content.w == 0 or content.h == 0) return;
+
+        var turns: [chrome.components.archive_detail.build.max_turns]chrome.components.archive_detail.types.Turn = undefined;
+        var turn_count: usize = 0;
+        var action_record_count: u32 = 0;
+        if (archive_tab.state == .ready) if (archive_tab.detail) |detail| {
+            action_record_count = detail.action_records;
+            for (detail.turns.items) |turn| {
+                if (turn_count == turns.len) break;
+                turns[turn_count] = .{
+                    .role = switch (turn.role) {
+                        .user => .user,
+                        .assistant => .assistant,
+                    },
+                    .text = turn.text,
+                };
+                turn_count += 1;
+            }
+        };
+        var metadata_buf: [192]u8 = undefined;
+        const model = if (archive_tab.record.parsed.model.len > 0) archive_tab.record.parsed.model else "모델 정보 없음";
+        const metadata = std.fmt.bufPrint(&metadata_buf, "{s} · 메시지 {d}개", .{ model, archive_tab.record.parsed.message_count }) catch model;
+        const state: chrome.components.archive_detail.types.State = switch (archive_tab.state) {
+            .loading => .loading,
+            .ready => .ready,
+            .stale => .stale,
+            .unavailable => .unavailable,
+        };
+        const props = chrome.components.archive_detail.types.Props{
+            .viewport_px = .{ .width = @floatFromInt(content.w), .height = @floatFromInt(content.h) },
+            .cell_width_px = self.cell_width_px,
+            .cell_height_px = self.cell_height_px,
+            .snapshot_generation = archive_tab.request_id,
+            .state = state,
+            .provider = switch (archive_tab.record.parsed.provider) {
+                .claude => .claude,
+                .codex => .codex,
+            },
+            .title = archive_tab.record.parsed.title,
+            .metadata = metadata,
+            .turns = turns[0..turn_count],
+            .action_record_count = action_record_count,
+            .spinner_phase = @intCast(self.agent_spin_frame & 7),
+            .resume_enabled = archive_tab.state == .ready,
+            .reveal_enabled = archive_tab.state == .ready,
+            .focus_live_enabled = archive_tab.state == .ready and self.archiveSessionHasLiveMapping(archive_tab),
+        };
+        var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        const action_count: usize = if (props.focus_live_enabled) 3 else 2;
+        const node_count = turn_count + action_count + 5;
+        const nodes = arena.alloc(chrome.ui.tree.UiNode, node_count) catch return;
+        const entries = arena.alloc(chrome.ui.tree.RectEntry, node_count + 1) catch return;
+        const layout_items = arena.alloc(chrome.ui.layout.Item, node_count + 1) catch return;
+        const flex_scratch = arena.alloc(chrome.ui.layout.FlexScratch, node_count + 1) catch return;
+        const child_rects = arena.alloc(chrome.ui.layout.UiRect, node_count + 1) catch return;
+        const actions = arena.alloc(chrome.components.archive_detail.ids.Entry, action_count) catch return;
+        const frame = chrome.components.archive_detail.build.build(props, .{
+            .nodes = nodes,
+            .entries = entries,
+            .layout_items = layout_items,
+            .flex_scratch = flex_scratch,
+            .child_rects = child_rects,
+            .actions = actions,
+        }) catch return;
+        const ops = arena.alloc(chrome.draw.Op, 24 + turn_count * 3) catch return;
+        const runs = arena.alloc(chrome.draw.Run, 16 + turn_count * 2) catch return;
+        const text_bytes = arena.alloc(u8, 4096) catch return;
+        const tokens = self.buildChromeTokens();
+        const draws = chrome.components.archive_detail.view.view(props, frame, self.archive_detail_interaction, &tokens, .{
+            .ops = ops,
+            .runs = runs,
+            .text_bytes = text_bytes,
+        }) catch return;
+        self.publishArchiveDetailFrame(frame, archive_tab.request_id);
+        chrome_draw_lowering.appendBackgroundQuads(self.allocator, &.{draws}, &tokens, content.x, content.y, &self.gpu_quads);
+        const cols: u16 = @intCast(@min(content.w / self.cell_width_px, std.math.maxInt(u16)));
+        const rows: u16 = @intCast(@min(content.h / self.cell_height_px, std.math.maxInt(u16)));
+        const dl = chrome_draw_lowering.buildTextDrawList(
             self.allocator,
             draws.ops,
             &tokens,
@@ -31253,6 +31359,150 @@ pub const AppSession = struct {
                 self.metal_dirty = true;
             },
         }
+    }
+
+    /// An archive tab is a read-only Chrome surface even though its lightweight surface slot is
+    /// represented by a terminal sentinel for lifecycle reuse. Keep that distinction at one
+    /// boundary so render and input never accidentally write its old ANSI guidance buffer.
+    fn activeArchiveSessionTab(self: *AppSession) ?*ArchiveSessionTab {
+        if (!self.surface_initialized or self.tabs.items.len == 0) return null;
+        return self.activePane().activeTerm().rt.archive_session_tab;
+    }
+
+    fn archiveSessionTermIsActive(self: *const AppSession, term: *const Term) bool {
+        if (!self.surface_initialized or self.tabs.items.len == 0) return false;
+        const tab = self.tabs.items[self.app_window.active_tab];
+        const pane = tab.panes.items[tab.active_pane];
+        return pane.terms.items[pane.active_term] == term;
+    }
+
+    fn archiveSessionHasLiveMapping(self: *const AppSession, archive_tab: *const ArchiveSessionTab) bool {
+        for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
+            if (term.rt.archive_session_tab != null or !term.rt.live_initialized or term.rt.terminated) continue;
+            const provider_matches = switch (archive_tab.record.parsed.provider) {
+                .claude => term.agent_kind == .claude,
+                .codex => term.agent_kind == .codex,
+            };
+            if (provider_matches and std.mem.eql(u8, term.agent_transcript.identity(), archive_tab.record.parsed.session_id)) return true;
+        };
+        return false;
+    }
+
+    /// Identity comparison is deliberately repeated at activation time. A panel may have been
+    /// painted while a provider rotated its child session identity; focus is only authorized for
+    /// the exact provider/session pair visible in the current action table.
+    fn focusLiveArchiveSession(self: *AppSession, archive_tab: *const ArchiveSessionTab) bool {
+        for (self.tabs.items, 0..) |tab, tab_index| for (tab.panes.items) |pane| for (pane.terms.items, 0..) |term, term_index| {
+            if (term.rt.archive_session_tab != null or !term.rt.live_initialized or term.rt.terminated) continue;
+            const provider_matches = switch (archive_tab.record.parsed.provider) {
+                .claude => term.agent_kind == .claude,
+                .codex => term.agent_kind == .codex,
+            };
+            if (!provider_matches or !std.mem.eql(u8, term.agent_transcript.identity(), archive_tab.record.parsed.session_id)) continue;
+            _ = self.switchTab(tab_index);
+            _ = self.focusPaneByPtr(pane);
+            self.focusTerm(term_index);
+            return true;
+        };
+        return false;
+    }
+
+    fn archiveDetailFrameEql(
+        old_entries: []const chrome.ui.tree.RectEntry,
+        old_actions: []const chrome.components.archive_detail.ids.Entry,
+        new_entries: []const chrome.ui.tree.RectEntry,
+        new_actions: []const chrome.components.archive_detail.ids.Entry,
+    ) bool {
+        if (old_entries.len != new_entries.len or old_actions.len != new_actions.len) return false;
+        for (old_entries, new_entries) |old, new| if (!std.meta.eql(old, new)) return false;
+        for (old_actions, new_actions) |old, new| if (!std.meta.eql(old, new)) return false;
+        return true;
+    }
+
+    fn publishArchiveDetailFrame(
+        self: *AppSession,
+        frame: chrome.components.archive_detail.build.Frame,
+        request_id: u64,
+    ) void {
+        if (self.archive_detail_request_id == request_id and archiveDetailFrameEql(
+            self.archive_detail_entries.items,
+            self.archive_detail_actions.items,
+            frame.tree.entries,
+            frame.actions,
+        )) return;
+        self.archive_detail_entries.ensureTotalCapacity(self.allocator, frame.tree.entries.len) catch return;
+        self.archive_detail_actions.ensureTotalCapacity(self.allocator, frame.actions.len) catch return;
+        const old_tree = chrome.ui.tree.UiRectTree{ .entries = self.archive_detail_entries.items };
+        if (self.archive_detail_entries.items.len > 0)
+            _ = chrome.ui.interaction.reconcile(&self.archive_detail_interaction, old_tree, frame.tree) catch return;
+        self.archive_detail_entries.clearRetainingCapacity();
+        self.archive_detail_actions.clearRetainingCapacity();
+        self.archive_detail_entries.appendSliceAssumeCapacity(frame.tree.entries);
+        self.archive_detail_actions.appendSliceAssumeCapacity(frame.actions);
+        self.archive_detail_request_id = request_id;
+    }
+
+    /// A detail state/source change revokes the previously painted capability snapshot before
+    /// paint can catch up. Clearing both table and interaction makes a delayed pointer-up and a
+    /// keyboard shortcut equally inert; the following successful frame republishes a fresh tree.
+    fn invalidateArchiveDetailFrame(self: *AppSession) void {
+        self.archive_detail_entries.clearRetainingCapacity();
+        self.archive_detail_actions.clearRetainingCapacity();
+        self.archive_detail_interaction = .{};
+        self.archive_detail_request_id = 0;
+    }
+
+    fn dispatchArchiveDetailPointer(
+        self: *AppSession,
+        phase: chrome.ui.interaction.UiPointerPhase,
+        x_px: f64,
+        y_px: f64,
+    ) ?chrome.components.archive_detail.ids.Intent {
+        const archive_tab = self.activeArchiveSessionTab() orelse return null;
+        if (self.archive_detail_entries.items.len == 0 or self.archive_detail_request_id != archive_tab.request_id) return null;
+        const content = self.active_pane_rect;
+        const dispatched = chrome.ui.interaction.dispatch(&self.archive_detail_interaction, .{ .entries = self.archive_detail_entries.items }, .{
+            .phase = phase,
+            .x_px = x_px - @as(f64, @floatFromInt(content.x)),
+            .y_px = y_px - @as(f64, @floatFromInt(content.y)),
+            .timestamp_ns = 0,
+        }) catch return null;
+        for (dispatched.dirty.ids) |id| if (id != null) {
+            self.metal_dirty = true;
+            break;
+        };
+        const action_id = dispatched.action orelse return null;
+        var table = chrome.components.archive_detail.ids.Table.init(self.archive_detail_actions.items);
+        table.count = self.archive_detail_actions.items.len;
+        return table.resolve(action_id, archive_tab.request_id);
+    }
+
+    fn archiveDetailShortcutIntent(self: *AppSession, wanted: chrome.components.archive_detail.ids.Intent) ?chrome.components.archive_detail.ids.Intent {
+        const archive_tab = self.activeArchiveSessionTab() orelse return null;
+        if (self.archive_detail_request_id != archive_tab.request_id) return null;
+        var table = chrome.components.archive_detail.ids.Table.init(self.archive_detail_actions.items);
+        table.count = self.archive_detail_actions.items.len;
+        for (self.archive_detail_actions.items) |entry| {
+            if (entry.intent != wanted) continue;
+            return table.resolve(entry.action_id, archive_tab.request_id);
+        }
+        return null;
+    }
+
+    fn applyArchiveDetailIntent(self: *AppSession, intent: chrome.components.archive_detail.ids.Intent) void {
+        const archive_tab = self.activeArchiveSessionTab() orelse return;
+        switch (intent) {
+            .resume_session => self.resumeAgentSessionInNewTerm(&archive_tab.record) catch {
+                self.showNotice("세션을 다시 시작하지 못했습니다. Claude 또는 Codex CLI 설치와 작업 경로를 확인하세요.");
+            },
+            .reveal_log => self.revealAgentSessionArchiveLog(&archive_tab.record) catch {
+                self.showNotice("로그 원본이 변경되었거나 더 이상 열 수 없습니다.");
+            },
+            .focus_live => if (!self.focusLiveArchiveSession(archive_tab)) {
+                self.showNotice("현재 열린 동일 세션을 찾지 못했습니다.");
+            },
+        }
+        self.metal_dirty = true;
     }
 
     /// 이미 shapeOnly된 ShapedPane을 collected에 추가한다 — append-or-deinit 꼬리의 단일 출처다(collectShaped는 DrawList를
@@ -32641,6 +32891,8 @@ pub const AppSession = struct {
                 self.agent_session_archive_projection.deinit(self.allocator);
                 self.agent_session_dock_entries.deinit(self.allocator);
                 self.agent_session_dock_actions.deinit(self.allocator);
+                self.archive_detail_entries.deinit(self.allocator);
+                self.archive_detail_actions.deinit(self.allocator);
                 for (self.agent_session_archive_collapsed_groups.items) |key| self.allocator.free(key);
                 self.agent_session_archive_collapsed_groups.deinit(self.allocator);
                 self.agent_session_archive_search.deinit(self.allocator);
@@ -40327,6 +40579,10 @@ test "P4(음성): 고정 탭을 그룹 뒤로 드래그해도 그룹에 흡수 �
 test "R1: 터미널 tracking + Cmd 마우스 → report_mouse.mods에 32 없음(마스킹 회귀 가드)" {
     var session: AppSession = undefined;
     session.addr_edit = null; // 슬라이스 3: mouse()가 조기 addr 밴드 캡처에서 읽음(undefined면 UB — [[devsession-undefined-test-field-trap]])
+    // Archive detail pointer routing asks whether the structured tab model has an active
+    // archive tab before terminal mouse reporting. This legacy surface-only fixture deliberately
+    // has no structured Tab, so make that absence explicit instead of leaving ArrayList poison.
+    session.tabs = .empty;
     session.pointer_gesture_owner = .none;
     session.allocator = std.testing.allocator;
     session.io = std.Io.Threaded.global_single_threaded.io();
@@ -44231,6 +44487,7 @@ test "scrollPage scrolls one screen (rows-1) per page using the core's authorita
 test "mouse reporting 진입은 진행 중이던 드래그 autoscroll을 멈춘다 (audit MEDIUM)" {
     var session: AppSession = undefined;
     session.addr_edit = null; // 슬라이스 3: mouse()가 조기 addr 밴드 캡처에서 읽음(undefined면 UB — [[devsession-undefined-test-field-trap]])
+    session.tabs = .empty; // legacy surface-only fixture: archive detail pointer routing has no structured Tab
     session.pointer_gesture_owner = .none;
     session.allocator = std.testing.allocator;
     session.io = std.Io.Threaded.global_single_threaded.io(); // updateCursorBlink→readActiveSnapshot이 lockCore(self.io)
@@ -44268,6 +44525,7 @@ test "mouse reporting 진입은 진행 중이던 드래그 autoscroll을 멈춘�
 test "drag autoscroll scrolls one line per tick and extends the selection to the edge row" {
     var session: AppSession = undefined;
     session.addr_edit = null; // 슬라이스 3: mouse()가 조기 addr 밴드 캡처에서 읽음(undefined면 UB — [[devsession-undefined-test-field-trap]])
+    session.tabs = .empty; // legacy surface-only fixture: archive detail pointer routing has no structured Tab
     session.pointer_gesture_owner = .none;
     session.allocator = std.testing.allocator;
     session.io = std.Io.Threaded.global_single_threaded.io(); // updateCursorBlink→readActiveSnapshot이 lockCore(self.io)
@@ -59045,6 +59303,7 @@ test "closeTab tears down a tab and reselects, last tab closes the session" {
 test "drag autoscroll works after a double-click word selection and skips redraw when nothing moves" {
     var session: AppSession = undefined;
     session.addr_edit = null; // 슬라이스 3: mouse()가 조기 addr 밴드 캡처에서 읽음(undefined면 UB — [[devsession-undefined-test-field-trap]])
+    session.tabs = .empty; // legacy surface-only fixture: archive detail pointer routing has no structured Tab
     session.pointer_gesture_owner = .none;
     session.allocator = std.testing.allocator;
     session.io = std.Io.Threaded.global_single_threaded.io(); // updateCursorBlink→readActiveSnapshot이 lockCore(self.io)
@@ -63527,4 +63786,37 @@ test "SessionDock published tree dispatches hover/down/up once and rejects a rec
     }};
     try std.testing.expect(AppSession.agentSessionDockFrameEql(&entries, &actions, &entries, &actions));
     try std.testing.expect(!AppSession.agentSessionDockFrameEql(&entries, &actions, &entries, &changed_actions));
+}
+
+// Archive detail uses the same input primitive but has source-affecting intents. This focused
+// host-adapter test proves a press cannot execute and that an action table made stale by the
+// source/state publish cannot be revived by either the old id or its old request generation.
+test "Archive detail published action requires current enabled table and pointer up" {
+    const entries = [_]chrome.ui.tree.RectEntry{.{
+        .id = 0x4152_0200,
+        .parent_index = null,
+        .kind = .card,
+        .rect = .{ .x = 0, .y = 0, .width = 120, .height = 32 },
+        .effective_clip = .{ .x = 0, .y = 0, .width = 120, .height = 32 },
+        .action = .{ .id = 1, .enabled = true },
+        .visual = .{ .card = .{ .variant = .selected, .paint = .{} } },
+    }};
+    var actions = [_]chrome.components.archive_detail.ids.Entry{.{
+        .action_id = 1,
+        .snapshot_generation = 31,
+        .intent = .resume_session,
+        .enabled = true,
+    }};
+    var state = chrome.ui.interaction.InteractionState{};
+    const down = try chrome.ui.interaction.dispatch(&state, .{ .entries = &entries }, .{ .phase = .down, .x_px = 12, .y_px = 12, .timestamp_ns = 1 });
+    try std.testing.expect(down.action == null);
+    var table = chrome.components.archive_detail.ids.Table.init(&actions);
+    table.count = actions.len;
+    const up = try chrome.ui.interaction.dispatch(&state, .{ .entries = &entries }, .{ .phase = .up, .x_px = 12, .y_px = 12, .timestamp_ns = 2 });
+    try std.testing.expectEqual(@as(?chrome.components.archive_detail.ids.Intent, .resume_session), table.resolve(up.action.?, 31));
+
+    actions[0].enabled = false; // ready → stale/unavailable publish retains the id but removes capability.
+    try std.testing.expect(table.resolve(1, 31) == null);
+    actions[0].enabled = true;
+    try std.testing.expect(table.resolve(1, 32) == null); // another tab/request must not borrow the action.
 }

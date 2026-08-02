@@ -7,7 +7,7 @@ const std = @import("std");
 const maru = @import("maru");
 const lab = @import("chrome/lab.zig");
 const bridge = @import("chrome/lab_smoke_bridge.zig");
-const session_dock_lowering = @import("chrome/session_dock_lowering.zig");
+const chrome_draw_lowering = @import("chrome/chrome_draw_lowering.zig");
 const coretext_bridge = @import("coretext_smoke_bridge.zig");
 const coretext_frame_builder = @import("coretext_frame_builder.zig");
 const coretext_raster = @import("coretext_raster.zig");
@@ -79,10 +79,10 @@ pub fn main(init: std.process.Init) !void {
     // a gray rounded rectangle look like a completed UI capture.
     var gpu_quads: std.ArrayList(renderer.metal_frame.GpuQuad) = .empty;
     defer gpu_quads.deinit(allocator);
-    session_dock_lowering.appendBackgroundQuads(allocator, &.{frame.draws}, &tokens, 0, 0, &gpu_quads);
+    chrome_draw_lowering.appendBackgroundQuads(allocator, &.{frame.draws}, &tokens, 0, 0, &gpu_quads);
     const cols: u16 = @intFromFloat(viewport.width / @as(f32, @floatFromInt(cell_width_px)));
     const rows: u16 = @intFromFloat(viewport.height / @as(f32, @floatFromInt(cell_height_px)));
-    const text_draw_list = try session_dock_lowering.buildTextDrawList(
+    const text_draw_list = try chrome_draw_lowering.buildTextDrawList(
         allocator,
         frame.draws.ops,
         &tokens,

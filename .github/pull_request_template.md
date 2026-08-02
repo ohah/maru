@@ -59,6 +59,20 @@ mise run check
 - trace/replay 경로:
 - 자동 E2E가 불가능한 영역과 이유:
 
+## UI 시각 검증
+
+<!-- 디자인 시스템/chrome의 시각 결과를 바꾸는 PR은 필수입니다.
+     Chrome Lab 또는 같은 제품 Metal 경로의 PNG capture 명령·scenario·viewport·theme를 적고,
+     `gh attach <image> --markdown -R ohah/maru`가 출력한 Markdown image reference를 아래에 붙입니다.
+     before/after가 의미 있으면 둘 다 첨부합니다. 순수 refactor로 visual output이 불변이면 그 근거를 적습니다.
+     자세한 규칙은 docs/pr-checklist.md를 단일 출처로 둡니다. -->
+
+- capture 명령:
+- scenario / viewport / theme:
+- visual output 불변 사유(해당 시):
+
+<!-- gh-attach가 출력한 이미지 Markdown을 이 아래에 붙입니다. -->
+
 ## 한계
 
 - 자동 검증하지 못한 영역:

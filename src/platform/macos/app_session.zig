@@ -49,6 +49,7 @@ const coretext_bridge = @import("coretext_smoke_bridge.zig");
 const coretext_frame_builder = @import("coretext_frame_builder.zig");
 const file_tree_backend = @import("file_tree_backend.zig");
 const file_tree_mutation_backend = @import("file_tree_mutation_backend.zig");
+const agent_session_archive_backend = @import("agent_session_archive_backend.zig");
 const metal_frame = renderer.metal_frame; // §8: metal_frame이 renderer로 이주 — maru.renderer barrel 경유(중립 frame DTO)
 const shell_integration = @import("shell_integration.zig");
 const global_hotkey = @import("global_hotkey.zig");
@@ -426,6 +427,7 @@ const bell_flash_peak_milli: u32 = 350;
 // tick 수가 아니라 경과 ms로 게이트한다. 옛 30Hz 1틱/줄(≈33ms/줄)과 같은 체감 속도를 기준으로 잡았다. msPerTick
 // 누적이 이 값을 넘을 때마다 한 줄 스크롤한다(render.frame-rate_min=30이라 msPerTick≤이 값 → tick당 최대 한 줄).
 const drag_autoscroll_step_ms: u32 = 33;
+const agent_session_archive_snapshot_ttl_ns: i128 = 15 * std.time.ns_per_s;
 
 // 세로 탭 사이드바의 기본 논리 폭(pt). backing 픽셀 폭은 scale을 곱해 구한다(refreshCellMetrics에서).
 // 터미널 surface는 이 폭만큼 오른쪽으로 그려지고, 왼쪽 strip이 사이드바다("surface→rect" 첫 적용). 사용자가
@@ -2656,6 +2658,15 @@ pub const AppSession = struct {
     // 메모리 result queue만 drain하며 readdir/stat을 호출하지 않는다. FSEvents root/event는 Swift ABI adapter가 맡는다.
     file_tree: file_tree.Tree = undefined,
     file_tree_backend: file_tree_backend.Backend = undefined,
+    agent_session_archive_backend: agent_session_archive_backend.Backend = undefined,
+    agent_session_archive_initialized: bool = false,
+    agent_session_archive_records: std.ArrayList(agent_session_archive_backend.Record) = .empty,
+    agent_session_archive_loading: bool = false,
+    agent_session_archive_completed_ns: i128 = 0,
+    agent_session_archive_partial: bool = false,
+    agent_session_archive_scroll_rows: usize = 0,
+    /// archive 행 선택은 레코드 index만 든다. refresh가 목록을 바꾸면 update 경로에서 범위를 재검증한다.
+    agent_session_archive_selected: ?usize = null,
     file_tree_mutation_backend: file_tree_mutation_backend.Backend = undefined,
     file_tree_initialized: bool = false,
     file_tree_rows: std.ArrayList(file_tree.Row) = .empty,
@@ -3075,8 +3086,11 @@ pub const AppSession = struct {
             self.file_tree_backend = try file_tree_backend.Backend.init(allocator, io);
             errdefer self.file_tree_backend.deinit();
             self.file_tree_mutation_backend = try file_tree_mutation_backend.Backend.init(allocator, io);
+            self.agent_session_archive_backend = try agent_session_archive_backend.Backend.init(allocator, io);
+            errdefer self.agent_session_archive_backend.deinit();
         }
         self.file_tree_initialized = true;
+        self.agent_session_archive_initialized = true;
         self.file_tree_reload_actions_len = 0;
 
         // 사용자 config(~/.config/maru/config 또는 $MARU_CONFIG)를 가장 먼저 로드한다 — PTY를 띄울 때
@@ -3309,6 +3323,54 @@ pub const AppSession = struct {
         if (view != .explorer and self.fileTreeFocused()) self.restoreFileTreeFocus();
         // 뷰로 들어올 때 한 번 읽는다(§3.5의 갱신 시점 ①). 폴링하지 않는다.
         if (view == .source_control) self.refreshGitStatus();
+        if (view == .agent_sessions) self.refreshAgentSessionArchive();
+        self.metal_dirty = true;
+    }
+
+    fn refreshAgentSessionArchive(self: *AppSession) void {
+        if (!self.agent_session_archive_initialized or self.agent_session_archive_loading) return;
+        const now = std.Io.Clock.awake.now(self.io).nanoseconds;
+        if (self.agent_session_archive_completed_ns != 0 and now - self.agent_session_archive_completed_ns < agent_session_archive_snapshot_ttl_ns) return;
+        const home_z = std.c.getenv("HOME") orelse return;
+        const home = std.mem.span(home_z);
+        if (home.len == 0) return;
+        const owned = self.allocator.dupe(u8, home) catch return;
+        if (!self.agent_session_archive_backend.submit(owned)) {
+            self.allocator.free(owned);
+            return;
+        }
+        self.agent_session_archive_loading = true;
+        self.metal_dirty = true;
+    }
+
+    fn updateAgentSessionArchive(self: *AppSession) void {
+        if (!self.agent_session_archive_initialized) return;
+        // One immutable batch at most per frame: archive work stays off the
+        // render path, while the first verified sessions become visible before
+        // the remainder of the bounded scan completes.
+        var result = self.agent_session_archive_backend.takeResult() orelse return;
+        defer result.deinit(self.allocator);
+        if (result.first_batch) {
+            for (self.agent_session_archive_records.items) |*record| record.deinit(self.allocator);
+            self.agent_session_archive_records.deinit(self.allocator);
+            self.agent_session_archive_records = result.records;
+            result.records = .empty;
+            self.agent_session_archive_partial = result.partial;
+            self.agent_session_archive_selected = null;
+            self.agent_session_archive_scroll_rows = 0;
+        } else {
+            self.agent_session_archive_records.appendSlice(self.allocator, result.records.items) catch return;
+            // Ownership moved into the archive snapshot; keep the defer from
+            // reclaiming records now owned by AppSession.
+            result.records.clearRetainingCapacity();
+        }
+        if (!result.first_batch) self.agent_session_archive_partial = self.agent_session_archive_partial or result.partial;
+        const visible = if (self.cell_height_px == 0) 0 else self.dockGeometry().tree_content.h / self.cell_height_px;
+        self.agent_session_archive_scroll_rows = @min(self.agent_session_archive_scroll_rows, self.agent_session_archive_records.items.len -| @as(usize, visible));
+        if (result.complete) {
+            self.agent_session_archive_loading = false;
+            self.agent_session_archive_completed_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
+        }
         self.metal_dirty = true;
     }
 
@@ -5549,6 +5611,29 @@ pub const AppSession = struct {
         errdefer self.destroyTerm(term);
         try pane.terms.append(self.allocator, term);
         self.focusTerm(pane.terms.items.len - 1); // 새 Term으로 포커스(surface 재바인딩·rect·dirty)
+    }
+
+    /// Archive에서 고른 provider-native session을 새 terminal 탭으로 재개한다. transcript를 셸에 paste하거나
+    /// `sh -c`로 조립하지 않고, `/usr/bin/env`와 provider argv를 분리해 직접 exec 한다.
+    fn resumeAgentSessionInNewTerm(self: *AppSession, record: *const agent_session_archive_backend.Record) !void {
+        const pane = self.activePane();
+        const size = layout_math.gridFromRectPx(self.cell_width_px, self.cell_height_px, self.active_pane_rect.w, self.active_pane_rect.h);
+        var cfg = self.new_tab_config;
+        cfg.size = size;
+        var req = spawnRequest(cfg, self.loaded_config.config.term, self.loaded_config.config.shell, self.loaded_config.config.env, self.new_tab_zdotdir, self.new_tab_ssh_bin);
+        const provider_command: []const u8 = record.parsed.provider.label();
+        const args = switch (record.parsed.provider) {
+            .claude => [_][]const u8{ "claude", "--resume", record.parsed.session_id },
+            .codex => [_][]const u8{ "codex", "resume", record.parsed.session_id },
+        };
+        req.command = "/usr/bin/env";
+        req.args = &args;
+        req.login = false;
+        if (usableRestoreCwd(record.parsed.cwd)) |cwd| req.cwd = cwd;
+        const term = try self.createTerm(req, size, cfg.queue_capacity, provider_command, args[0]);
+        errdefer self.destroyTerm(term);
+        try pane.terms.append(self.allocator, term);
+        self.focusTerm(pane.terms.items.len - 1);
     }
 
     /// §7 묘비를 **같은 pane 슬롯에서 제자리 교체**해 새 셸로 되살린다(⏎). `newTermInActivePane`을 쓰면 안 되는
@@ -12254,6 +12339,20 @@ pub const AppSession = struct {
         if (local >= visible_rows) return null; // renderer가 그리지 않는 bottom partial row는 hit-test에서도 제외한다.
         const index = self.fileTreeEffectiveScroll() + local;
         return if (index < self.file_tree_rows.items.len) index else null;
+    }
+
+    /// 세션 아카이브의 보이는 한 줄과 record index의 대응. 스크롤을 아직 제공하지 않는 첫 vertical slice에서는
+    /// renderer가 보이는 앞쪽 record만 그리므로 row index가 곧 record index다.
+    fn agentSessionArchiveRowAt(self: *const AppSession, x_px: f64, y_px: f64) ?usize {
+        if (self.dock.view != .agent_sessions or !self.dockVisible() or self.cell_height_px == 0) return null;
+        const content = self.dockGeometry().tree_content;
+        if (!layout_math.pointInRect(x_px, y_px, content)) return null;
+        const local_row: usize = @intFromFloat((y_px - @as(f64, @floatFromInt(content.y))) /
+            @as(f64, @floatFromInt(self.cell_height_px)));
+        const visible_rows = content.h / self.cell_height_px;
+        if (local_row >= visible_rows) return null;
+        const row = self.agent_session_archive_scroll_rows + local_row;
+        return if (row < self.agent_session_archive_records.items.len) row else null;
     }
 
     fn fileTreeNamespaceMutationBusy(self: *const AppSession) bool {
@@ -19658,6 +19757,21 @@ pub const AppSession = struct {
             self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
             return self.last_summary;
         }
+        // 선택된 archive의 명시적 재개 단축키. 행 클릭은 selection만 바꾸며 실행하지 않는다; 이 경로는
+        // `Resume in New Tab` 액션과 같은 provider-native argv를 사용한다. 새 상세 패널이 붙기 전에도
+        // keyboard-only 사용자가 transcript를 shell로 흘리지 않고 안전하게 재개할 수 있는 연결점이다.
+        if (self.dockVisible() and self.dock.view == .agent_sessions and event.key == .enter and event.modifiers.command) {
+            if (self.agent_session_archive_selected) |selected| if (selected < self.agent_session_archive_records.items.len) {
+                self.resumeAgentSessionInNewTerm(&self.agent_session_archive_records.items[selected]) catch {
+                    self.showNotice("세션을 다시 시작하지 못했습니다. Claude 또는 Codex CLI 설치와 작업 경로를 확인하세요.");
+                };
+                self.metal_dirty = true;
+                self.total_app_key_events += 1;
+                self.writeSummaryFromState();
+                self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
+                return self.last_summary;
+            };
+        }
         // project tree focus는 terminal byte stream과 완전히 분리한다. 사용자 app binding이 최우선이고 explicit
         // unbind/terminal macro는 소비만 하며, 둘 다 없을 때만 표준 tree key를 실행한다.
         if (self.fileTreeFocused()) {
@@ -20000,6 +20114,20 @@ pub const AppSession = struct {
             const clamped: usize = @intCast(std.math.clamp(next, 0, @as(i64, @intCast(max_scroll))));
             if (clamped != self.scm_scroll_rows) {
                 self.scm_scroll_rows = clamped;
+                self.metal_dirty = true;
+            }
+            return;
+        }
+        if (self.dockVisible() and self.dock.view == .agent_sessions and
+            layout_math.pointInRect(x_px, y_px, self.dockGeometry().tree_content))
+        {
+            const rect = self.dockGeometry().tree_content;
+            const visible = if (self.cell_height_px == 0) 0 else rect.h / self.cell_height_px;
+            const max_scroll = self.agent_session_archive_records.items.len -| @as(usize, visible);
+            const next = @as(i64, @intCast(self.agent_session_archive_scroll_rows)) - @as(i64, lines);
+            const clamped: usize = @intCast(std.math.clamp(next, 0, @as(i64, @intCast(max_scroll))));
+            if (clamped != self.agent_session_archive_scroll_rows) {
+                self.agent_session_archive_scroll_rows = clamped;
                 self.metal_dirty = true;
             }
             return;
@@ -20871,6 +20999,15 @@ pub const AppSession = struct {
                         },
                     };
                 }
+                if (self.dock.view == .agent_sessions) {
+                    // 행 클릭은 세션을 재개하지 않고 먼저 상세 대상을 고른다.
+                    // 선택 상태는 새 탭 재개 액션이 소비하며, archive transcript 자체는 절대 실행하지 않는다.
+                    if (self.agentSessionArchiveRowAt(x_px, y_px)) |row_index| {
+                        self.agent_session_archive_selected = row_index;
+                        self.metal_dirty = true;
+                        return;
+                    }
+                }
                 if (self.dock.view == .explorer) {
                     if (self.beginFileTreeScrollbarGesture(x_px, y_px)) return;
                     if (self.fileTreeRowAt(x_px, y_px)) |row_index| {
@@ -21355,10 +21492,10 @@ pub const AppSession = struct {
     /// 호출된다. 커서 blink(updateCursorBlink)와 달리 스피너는 활성 surface의 출력과 무관한 애니메이션이라, 출력 게이트
     /// (`output>0`이면 resetCursorBlink, else updateCursorBlink)에 얹으면 안 된다 — 연속 출력(SSH firehose·바쁜 원격 TUI)이
     /// 매 tick 스피너 advance를 굶겨 **다른 탭의 running 에이전트 스피너가 멈추던** 버그의 근본 수정(§10.5 primary). 사이드바에
-    /// **실제로 보이는** 카드(접힘 아님 + 검색 필터 통과) 중 running 에이전트가 있을 때만 위상을 진행하고 사이드바만 부분
-    /// 투영(chrome_dirty) — 접힘·필터아웃·에이전트 없음이면 무동작(idle 재투영 없음). blink(500ms)보다 빠른 별도 위상(≈133ms).
+    /// **실제로 보이는** 카드 중 running 에이전트가 있거나 archive worker가 목록을 읽는 동안에만 위상을 진행하고 사이드바만 부분
+    /// 투영(chrome_dirty)한다. archive spinner도 같은 wall-clock 위상을 재사용해 별도 tick/타이머를 만들지 않는다.
     fn advanceAgentSpinner(self: *AppSession) void {
-        if (!self.anyAgentRunning()) {
+        if (!self.anyAgentRunning() and !self.agent_session_archive_loading) {
             self.agent_spin_last_ns = 0; // running 없음 — 무동작 + baseline 리셋(다음 running이 새 위상으로 시작)
             return;
         }
@@ -26575,6 +26712,7 @@ pub const AppSession = struct {
         self.drainUploadResults(); // 완료된 드롭 업로드의 원격 경로를 paste 큐로(백그라운드 스레드 → 메인)
         self.drainUpdateCheck(); // 인앱 새 버전 안내: 백그라운드 체크 결과를 알림으로(백그라운드 스레드 → 메인)
         self.ageFilePanelSelfWriteLatches();
+        self.updateAgentSessionArchive(); // 로컬 Codex/Claude history worker 결과만 main thread 상태로 교체
         self.updateFileTree() catch {}; // FP7: background scan 결과만 적용 + 다음 요청 제출(FS I/O는 worker 전용)
         self.updateFileTreeMutations(); // mutation completion memory queue only; at most one result per frame // path-pinned rename recreation is bounded to one visible WebView per frame
         self.drainGitStatus(); // 완료된 git 읽기를 싣는다(syscall 없음 — 큐에서 꺼내기만)
@@ -27494,29 +27632,24 @@ pub const AppSession = struct {
                             }
                         }
                         if (self.dock.view == .agent_sessions and tree_content_cols > 0 and visible_rows > 0) {
-                            // 창의 모든 탭을 가로질러 에이전트 Term을 한 목록으로 낸다 — 사이드바는 워크스페이스
-                            // 카드별로 나누지만, 이 뷰의 값은 "지금 도는 세션 전부를 한 자리에서 본다"는 것이다.
+                            // 현재 열려 있는 Term 목록이 아니라 로컬 Codex/Claude archive를 표시한다. worker가
+                            // 소유 경계를 넘겨 준 record만 main thread가 읽으며, 다음 refresh 전까지 안정적이다.
                             var labels: std.ArrayList([]const u8) = .empty;
-                            defer {
-                                for (labels.items) |label| self.allocator.free(label);
-                                labels.deinit(self.allocator);
+                            defer labels.deinit(self.allocator);
+                            const start = @min(self.agent_session_archive_scroll_rows, self.agent_session_archive_records.items.len);
+                            for (self.agent_session_archive_records.items[start..]) |record| {
+                                if (labels.items.len >= visible_rows) break;
+                                labels.append(self.allocator, record.parsed.title) catch break;
                             }
-                            var active_row: ?usize = null;
-                            const active_term_ptr = self.activeTab().activeTerm();
-                            for (self.tabs.items) |tab| {
-                                var agents: std.ArrayList(WorkspaceAgent) = .empty;
-                                defer agents.deinit(self.allocator);
-                                collectWorkspaceAgents(tab, &agents, self.allocator);
-                                for (agents.items) |ag| {
-                                    if (labels.items.len >= visible_rows) break;
-                                    const term = tab.panes.items[ag.pane].terms.items[ag.term];
-                                    const label = self.agentRowLabelOwned(term) catch continue;
-                                    if (term == active_term_ptr) active_row = labels.items.len;
-                                    labels.append(self.allocator, label) catch {
-                                        self.allocator.free(label);
-                                        break;
-                                    };
-                                }
+                            var loading_label: ?[]u8 = null;
+                            defer if (loading_label) |label| self.allocator.free(label);
+                            // Keep already-published sessions stable and reserve only one
+                            // trailing row for progress; a refresh never blanks the list.
+                            if (self.agent_session_archive_loading and labels.items.len < visible_rows) {
+                                const bars = self.spinnerBarsUtf8(self.allocator) catch "";
+                                defer if (bars.len > 0) self.allocator.free(bars);
+                                loading_label = std.fmt.allocPrint(self.allocator, "{s} 세션 분석 중", .{bars}) catch null;
+                                if (loading_label) |label| labels.append(self.allocator, label) catch {};
                             }
                             if (labels.items.len > 0) {
                                 if (coretext_frame_builder.buildDockSessionListDrawList(
@@ -27524,11 +27657,24 @@ pub const AppSession = struct {
                                     tree_content_cols,
                                     @intCast(@min(labels.items.len, visible_rows)),
                                     labels.items,
-                                    active_row,
+                                    if (self.agent_session_archive_selected) |selected| if (selected >= start and selected < start + labels.items.len) selected - start else null else null,
                                     dock_fg,
                                     dock_active_fg,
                                 )) |sdl| {
                                     self.collectShaped(&collected, sdl, pane_frame_builder, .{ .pane = .{
+                                        .origin_x = dg.tree_content.x,
+                                        .origin_y = dg.tree_content.y,
+                                        .colors = tabbar_colors,
+                                    } });
+                                } else |_| {}
+                            } else if (self.agent_session_archive_loading) {
+                                const bars = self.spinnerBarsUtf8(self.allocator) catch "";
+                                defer if (bars.len > 0) self.allocator.free(bars);
+                                const owned_notice: ?[]u8 = std.fmt.allocPrint(self.allocator, "{s} 세션 분석 중", .{bars}) catch null;
+                                defer if (owned_notice) |notice| self.allocator.free(notice);
+                                const notice = owned_notice orelse "세션 분석 중";
+                                if (coretext_frame_builder.buildDockNoticeDrawList(self.allocator, tree_content_cols, notice, dock_fg)) |pdl| {
+                                    self.collectShaped(&collected, pdl, pane_frame_builder, .{ .pane = .{
                                         .origin_x = dg.tree_content.x,
                                         .origin_y = dg.tree_content.y,
                                         .colors = tabbar_colors,
@@ -31352,6 +31498,12 @@ pub const AppSession = struct {
         self.ime_inserted.deinit(self.allocator);
 
         if (self.file_tree_initialized) {
+            if (self.agent_session_archive_initialized) {
+                self.agent_session_archive_backend.deinit();
+                for (self.agent_session_archive_records.items) |*record| record.deinit(self.allocator);
+                self.agent_session_archive_records.deinit(self.allocator);
+                self.agent_session_archive_initialized = false;
+            }
             if (self.pending_rename_remap) |*plan| plan.deinit(self.allocator);
             self.pending_rename_remap = null;
             if (self.pending_delete_root) |pending| self.allocator.free(pending.root);

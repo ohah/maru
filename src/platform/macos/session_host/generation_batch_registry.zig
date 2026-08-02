@@ -1,0 +1,719 @@
+//! Generation GUI attachment가 인출한 화면 batch의 node-local canonical owner.
+//!
+//! 이 leaf는 Client, socket, GUI callback을 알지 않는다. attachment에는 pointer-free token만 내보내고,
+//! 실제 payload descriptor와 accounting receipt는 final-address registry 안에 남긴다.
+
+const std = @import("std");
+
+pub const max_entries: usize = 4096;
+
+pub const Token = struct {
+    registry_incarnation: u64,
+    entry_slot: u16,
+    entry_generation: u64,
+    stream_id: u64,
+};
+
+pub const Reservation = Token;
+
+pub const AccountingReceipt = struct {
+    client_addr: usize,
+    transfer_id: u64,
+    byte_count: usize,
+};
+
+const OwnedLifecycle = enum(u8) { empty, live, cleanup, settled };
+
+pub const OwnedBatch = struct {
+    self_addr: usize = 0,
+    lifecycle: OwnedLifecycle = .empty,
+    is_snapshot: bool = false,
+    stream_id: u64 = 0,
+    bytes: []u8 = &.{},
+    allocator: ?std.mem.Allocator = null,
+    accounting: AccountingReceipt = .{ .client_addr = 0, .transfer_id = 0, .byte_count = 0 },
+
+    pub fn initInPlace(
+        out: *OwnedBatch,
+        is_snapshot: bool,
+        stream_id: u64,
+        bytes: []u8,
+        allocator: std.mem.Allocator,
+        accounting: AccountingReceipt,
+    ) Error!void {
+        if (!out.pristine()) return error.DestinationOccupied;
+        if (stream_id == 0 or bytes.len == 0 or accounting.client_addr == 0 or
+            accounting.transfer_id == 0 or accounting.byte_count != bytes.len)
+            return error.InvalidDescriptor;
+        out.* = .{
+            .self_addr = @intFromPtr(out),
+            .lifecycle = .live,
+            .is_snapshot = is_snapshot,
+            .stream_id = stream_id,
+            .bytes = bytes,
+            .allocator = allocator,
+            .accounting = accounting,
+        };
+    }
+
+    pub fn completeCleanup(self: *OwnedBatch) Error!void {
+        if (self.self_addr != @intFromPtr(self) or self.lifecycle != .cleanup or
+            self.bytes.len != 0 or self.allocator != null or self.accounting.client_addr != 0 or
+            self.accounting.transfer_id != 0 or self.accounting.byte_count != 0)
+            return error.InvalidDescriptor;
+        self.lifecycle = .settled;
+    }
+
+    /// Callback 전 preflight와 descriptor move가 끝난 제품 release의 무검증 suffix다.
+    pub fn completeCleanupUnchecked(self: *OwnedBatch) void {
+        self.lifecycle = .settled;
+    }
+
+    pub fn pristine(self: *const OwnedBatch) bool {
+        return self.self_addr == 0 and self.lifecycle == .empty and self.stream_id == 0 and
+            self.bytes.len == 0 and self.allocator == null and self.accounting.client_addr == 0 and
+            self.accounting.transfer_id == 0 and self.accounting.byte_count == 0;
+    }
+
+    fn validLive(self: *const OwnedBatch) bool {
+        return self.self_addr == @intFromPtr(self) and self.lifecycle == .live and
+            self.stream_id != 0 and self.bytes.len != 0 and self.allocator != null and
+            self.accounting.client_addr != 0 and self.accounting.transfer_id != 0 and
+            self.accounting.byte_count == self.bytes.len;
+    }
+
+    fn settle(self: *OwnedBatch) void {
+        self.* = .{};
+    }
+
+    /// Client가 accounting reservation을 먼저 끝낸 뒤 실행하는 무실패 publication suffix다.
+    pub fn initTransferredUnchecked(
+        out: *OwnedBatch,
+        is_snapshot: bool,
+        stream_id: u64,
+        bytes: []u8,
+        allocator: std.mem.Allocator,
+        accounting: AccountingReceipt,
+    ) void {
+        if (!out.pristine() or stream_id == 0 or bytes.len == 0 or
+            accounting.client_addr == 0 or accounting.transfer_id == 0 or
+            accounting.byte_count != bytes.len)
+            @panic("invalid generation batch publication");
+        out.* = .{
+            .self_addr = @intFromPtr(out),
+            .lifecycle = .live,
+            .is_snapshot = is_snapshot,
+            .stream_id = stream_id,
+            .bytes = bytes,
+            .allocator = allocator,
+            .accounting = accounting,
+        };
+    }
+};
+
+pub const BatchView = struct {
+    is_snapshot: bool,
+    stream_id: u64,
+    bytes: []const u8,
+};
+
+pub const Error = error{
+    CapacityExhausted,
+    DestinationOccupied,
+    IdentityExhausted,
+    InvalidDescriptor,
+    InvalidIdentity,
+    InvalidReservation,
+    InvalidState,
+    InvalidStream,
+    MovedOrCopied,
+};
+
+pub const DeinitOutcome = enum { cleaned, busy, already_dead, corrupt };
+
+const AccountingLifecycle = enum(u8) { pristine, live, dead };
+const AccountingEntryLifecycle = enum(u8) { empty, live, releasing };
+
+pub const PreparedAccountingConsume = struct {
+    ledger_slot: u16,
+    transfer_id: u64,
+    byte_count: usize,
+};
+
+const AccountingEntry = struct {
+    lifecycle: AccountingEntryLifecycle = .empty,
+    transfer_id: u64 = 0,
+    byte_count: usize = 0,
+};
+
+/// `Client`가 단독으로 조작하고 generation node가 final-address storage를 제공하는 exact receipt ledger.
+pub const AccountingLedger = struct {
+    self_addr: usize = 0,
+    client_addr: usize = 0,
+    item_count: usize = 0,
+    byte_count: usize = 0,
+    releasing_item_count: usize = 0,
+    releasing_byte_count: usize = 0,
+    lifecycle: AccountingLifecycle = .pristine,
+    entries: [max_entries]AccountingEntry = [_]AccountingEntry{.{}} ** max_entries,
+
+    pub fn initInPlace(out: *AccountingLedger) Error!void {
+        if (out.self_addr != 0 or out.lifecycle != .pristine) return error.InvalidState;
+        out.* = .{ .self_addr = @intFromPtr(out), .lifecycle = .live };
+    }
+
+    pub fn bindClient(self: *AccountingLedger, client_addr: usize) Error!void {
+        if (!self.valid() or self.client_addr != 0 or client_addr == 0)
+            return error.InvalidState;
+        self.client_addr = client_addr;
+    }
+
+    fn valid(self: *const AccountingLedger) bool {
+        return self.self_addr == @intFromPtr(self) and self.lifecycle == .live and
+            self.item_count <= max_entries and self.releasing_item_count <= self.item_count and
+            self.releasing_byte_count <= self.byte_count;
+    }
+
+    pub fn matchesClient(self: *const AccountingLedger, client_addr: usize) bool {
+        return self.valid() and self.client_addr == client_addr and client_addr != 0;
+    }
+
+    pub fn reserve(
+        self: *AccountingLedger,
+        transfer_id: u64,
+        byte_count: usize,
+    ) Error!void {
+        if (!self.valid() or self.client_addr == 0) return error.InvalidState;
+        if (transfer_id == 0 or byte_count == 0) return error.InvalidDescriptor;
+        if (self.item_count == max_entries) return error.CapacityExhausted;
+        for (self.entries) |entry|
+            if (entry.lifecycle != .empty and entry.transfer_id == transfer_id)
+                return error.InvalidIdentity;
+        const index = for (&self.entries, 0..) |*entry, index| {
+            if (entry.lifecycle == .empty) break index;
+        } else return error.CapacityExhausted;
+        const next_bytes = std.math.add(usize, self.byte_count, byte_count) catch
+            return error.InvalidState;
+        self.entries[index] = .{
+            .lifecycle = .live,
+            .transfer_id = transfer_id,
+            .byte_count = byte_count,
+        };
+        self.item_count += 1;
+        self.byte_count = next_bytes;
+    }
+
+    pub fn prepareConsume(
+        self: *AccountingLedger,
+        receipt: AccountingReceipt,
+    ) Error!PreparedAccountingConsume {
+        if (!self.matchesClient(receipt.client_addr)) return error.InvalidDescriptor;
+        for (&self.entries, 0..) |*entry, index| {
+            if (entry.transfer_id != receipt.transfer_id) continue;
+            if (entry.lifecycle != .live or entry.byte_count != receipt.byte_count)
+                return error.InvalidDescriptor;
+            entry.lifecycle = .releasing;
+            self.releasing_item_count += 1;
+            self.releasing_byte_count += entry.byte_count;
+            return .{
+                .ledger_slot = @intCast(index),
+                .transfer_id = entry.transfer_id,
+                .byte_count = entry.byte_count,
+            };
+        }
+        return error.InvalidDescriptor;
+    }
+
+    /// `prepareConsume`가 exact live entry를 releasing으로 봉인한 뒤의 무검증 suffix다.
+    pub fn consumeUnchecked(
+        self: *AccountingLedger,
+        prepared: PreparedAccountingConsume,
+    ) void {
+        self.item_count -= 1;
+        self.byte_count -= prepared.byte_count;
+        self.releasing_item_count -= 1;
+        self.releasing_byte_count -= prepared.byte_count;
+        self.entries[prepared.ledger_slot] = .{};
+    }
+
+    pub fn preflightDeinit(self: *const AccountingLedger) DeinitOutcome {
+        if (!self.valid()) return if (self.lifecycle == .dead) .already_dead else .corrupt;
+        if (self.item_count != 0 or self.byte_count != 0 or self.releasing_item_count != 0 or
+            self.releasing_byte_count != 0)
+            return .busy;
+        for (self.entries) |entry| if (entry.lifecycle != .empty) return .corrupt;
+        return .cleaned;
+    }
+
+    pub fn tryDeinit(self: *AccountingLedger) DeinitOutcome {
+        const outcome = self.preflightDeinit();
+        if (outcome == .cleaned) self.lifecycle = .dead;
+        return outcome;
+    }
+};
+
+const RegistryLifecycle = enum(u8) { pristine, live, dead };
+const EntryLifecycle = enum(u8) { empty, reserved, ingress, live, releasing };
+
+const Entry = struct {
+    lifecycle: EntryLifecycle = .empty,
+    generation: u64 = 0,
+    stream_id: u64 = 0,
+    is_snapshot: bool = false,
+    bytes: []u8 = &.{},
+    allocator: ?std.mem.Allocator = null,
+    accounting: AccountingReceipt = .{ .client_addr = 0, .transfer_id = 0, .byte_count = 0 },
+    cleanup_addr: usize = 0,
+
+    fn clear(self: *Entry) void {
+        self.* = .{};
+    }
+};
+
+fn slicesOverlap(a: []const u8, b: []const u8) bool {
+    if (a.len == 0 or b.len == 0) return false;
+    const a_start = @intFromPtr(a.ptr);
+    const b_start = @intFromPtr(b.ptr);
+    const a_end = std.math.add(usize, a_start, a.len) catch return true;
+    const b_end = std.math.add(usize, b_start, b.len) catch return true;
+    return a_start < b_end and b_start < a_end;
+}
+
+pub const Registry = struct {
+    self_addr: usize = 0,
+    incarnation: u64 = 0,
+    last_generation: u64 = 0,
+    live_count: usize = 0,
+    lifecycle: RegistryLifecycle = .pristine,
+    entries: [max_entries]Entry = [_]Entry{.{}} ** max_entries,
+
+    pub fn initInPlace(out: *Registry, incarnation: u64) Error!void {
+        if (incarnation == 0) return error.InvalidIdentity;
+        if (out.lifecycle != .pristine or out.self_addr != 0 or out.incarnation != 0 or
+            out.live_count != 0)
+            return error.InvalidState;
+        out.* = .{
+            .self_addr = @intFromPtr(out),
+            .incarnation = incarnation,
+            .lifecycle = .live,
+        };
+    }
+
+    fn valid(self: *const Registry) bool {
+        return self.self_addr == @intFromPtr(self) and self.incarnation != 0 and
+            self.live_count <= max_entries and self.lifecycle == .live;
+    }
+
+    pub fn reserve(self: *Registry, stream_id: u64) Error!Reservation {
+        if (!self.valid()) return error.MovedOrCopied;
+        if (stream_id == 0) return error.InvalidStream;
+        if (self.last_generation == std.math.maxInt(u64)) return error.IdentityExhausted;
+        if (self.live_count == max_entries) return error.CapacityExhausted;
+        const index = for (&self.entries, 0..) |*entry, index| {
+            if (entry.lifecycle == .empty) break index;
+        } else return error.InvalidState;
+        const generation = self.last_generation + 1;
+        self.last_generation = generation;
+        self.entries[index] = .{
+            .lifecycle = .reserved,
+            .generation = generation,
+            .stream_id = stream_id,
+        };
+        self.live_count += 1;
+        return .{
+            .registry_incarnation = self.incarnation,
+            .entry_slot = @intCast(index),
+            .entry_generation = generation,
+            .stream_id = stream_id,
+        };
+    }
+
+    fn exactEntry(self: *Registry, token: Token) Error!*Entry {
+        if (!self.valid()) return error.MovedOrCopied;
+        if (token.registry_incarnation != self.incarnation or token.entry_generation == 0 or
+            token.stream_id == 0 or
+            token.entry_slot >= max_entries)
+            return error.InvalidReservation;
+        const entry = &self.entries[token.entry_slot];
+        if (entry.lifecycle == .empty or entry.generation != token.entry_generation or
+            entry.stream_id != token.stream_id)
+            return error.InvalidReservation;
+        return entry;
+    }
+
+    pub fn abort(self: *Registry, reservation: Reservation) Error!void {
+        const entry = try self.exactEntry(reservation);
+        if ((entry.lifecycle != .reserved and entry.lifecycle != .ingress) or
+            entry.is_snapshot or entry.bytes.len != 0 or entry.allocator != null or
+            entry.accounting.client_addr != 0 or entry.accounting.transfer_id != 0 or
+            entry.accounting.byte_count != 0 or entry.cleanup_addr != 0)
+            return error.InvalidState;
+        if (self.live_count == 0) return error.InvalidState;
+        entry.clear();
+        self.live_count -= 1;
+    }
+
+    /// Client owner를 건드리기 전에 destination entry와 reservation을 확정한다.
+    pub fn prepareIngress(self: *Registry, reservation: Reservation) Error!void {
+        const entry = try self.exactEntry(reservation);
+        if (entry.lifecycle != .reserved or entry.is_snapshot or entry.bytes.len != 0 or
+            entry.allocator != null or entry.accounting.client_addr != 0 or
+            entry.accounting.transfer_id != 0 or entry.accounting.byte_count != 0 or
+            entry.cleanup_addr != 0)
+            return error.InvalidState;
+        entry.lifecycle = .ingress;
+    }
+
+    pub fn commit(self: *Registry, reservation: Reservation, owned: *OwnedBatch) Error!Token {
+        const entry = try self.exactEntry(reservation);
+        if (entry.lifecycle != .ingress) return error.InvalidState;
+        if (!owned.validLive() or owned.stream_id != reservation.stream_id or
+            owned.accounting.transfer_id != reservation.entry_generation)
+            return error.InvalidDescriptor;
+        for (self.entries) |other|
+            if (other.lifecycle == .live and slicesOverlap(other.bytes, owned.bytes))
+                return error.InvalidDescriptor;
+        entry.lifecycle = .live;
+        entry.is_snapshot = owned.is_snapshot;
+        entry.bytes = owned.bytes;
+        entry.allocator = owned.allocator;
+        entry.accounting = owned.accounting;
+        entry.cleanup_addr = 0;
+        owned.settle();
+        return reservation;
+    }
+
+    pub fn commitIngressUnchecked(
+        self: *Registry,
+        reservation: Reservation,
+        owned: *OwnedBatch,
+    ) Token {
+        return self.commit(reservation, owned) catch
+            @panic("prepared generation batch ingress drifted");
+    }
+
+    pub fn borrow(self: *Registry, token: Token) Error!BatchView {
+        const entry = try self.exactEntry(token);
+        if (entry.lifecycle != .live or entry.bytes.len == 0 or entry.allocator == null or
+            entry.accounting.transfer_id != entry.generation or
+            entry.accounting.byte_count != entry.bytes.len or entry.cleanup_addr != 0)
+            return error.InvalidState;
+        return .{
+            .is_snapshot = entry.is_snapshot,
+            .stream_id = entry.stream_id,
+            .bytes = entry.bytes,
+        };
+    }
+
+    pub fn beginRelease(self: *Registry, token: Token, out: *OwnedBatch) Error!void {
+        const entry = try self.exactEntry(token);
+        if (entry.lifecycle != .live) return error.InvalidState;
+        if (!out.pristine()) return error.DestinationOccupied;
+        if (entry.bytes.len == 0 or entry.allocator == null or
+            entry.accounting.client_addr == 0 or entry.accounting.transfer_id == 0 or
+            entry.accounting.byte_count != entry.bytes.len or
+            entry.accounting.transfer_id != entry.generation or entry.cleanup_addr != 0)
+            return error.InvalidDescriptor;
+        out.* = .{
+            .self_addr = @intFromPtr(out),
+            .lifecycle = .cleanup,
+            .is_snapshot = entry.is_snapshot,
+            .stream_id = entry.stream_id,
+            .bytes = entry.bytes,
+            .allocator = entry.allocator,
+            .accounting = entry.accounting,
+        };
+        entry.lifecycle = .releasing;
+        entry.bytes = &.{};
+        entry.allocator = null;
+        entry.accounting = .{ .client_addr = 0, .transfer_id = 0, .byte_count = 0 };
+        entry.cleanup_addr = @intFromPtr(out);
+    }
+
+    pub fn preflightRelease(
+        self: *Registry,
+        token: Token,
+        out: *const OwnedBatch,
+    ) Error!AccountingReceipt {
+        const entry = try self.exactEntry(token);
+        if (entry.lifecycle != .live) return error.InvalidState;
+        if (!out.pristine()) return error.DestinationOccupied;
+        if (entry.bytes.len == 0 or entry.allocator == null or
+            entry.accounting.client_addr == 0 or entry.accounting.transfer_id == 0 or
+            entry.accounting.byte_count != entry.bytes.len or
+            entry.accounting.transfer_id != entry.generation or entry.cleanup_addr != 0)
+            return error.InvalidDescriptor;
+        return entry.accounting;
+    }
+
+    pub fn beginReleaseUnchecked(self: *Registry, token: Token, out: *OwnedBatch) void {
+        self.beginRelease(token, out) catch
+            @panic("preflighted generation batch release drifted");
+    }
+
+    pub fn finishRelease(self: *Registry, token: Token, cleanup: *OwnedBatch) Error!void {
+        const entry = try self.exactEntry(token);
+        if (entry.lifecycle != .releasing or entry.cleanup_addr != @intFromPtr(cleanup) or
+            cleanup.self_addr != @intFromPtr(cleanup) or cleanup.lifecycle != .settled)
+            return error.InvalidState;
+        if (self.live_count == 0) return error.InvalidState;
+        cleanup.settle();
+        entry.clear();
+        self.live_count -= 1;
+    }
+
+    /// `finishRelease`의 모든 pairing 검증을 callback 전에 끝낸 제품 release의 무검증 suffix다.
+    pub fn finishReleaseUnchecked(self: *Registry, token: Token, cleanup: *OwnedBatch) void {
+        cleanup.settle();
+        self.entries[token.entry_slot].clear();
+        self.live_count -= 1;
+    }
+
+    pub fn count(self: *const Registry) Error!usize {
+        if (!self.valid()) return error.MovedOrCopied;
+        return self.live_count;
+    }
+
+    pub fn preflightDeinit(self: *const Registry) DeinitOutcome {
+        if (self.lifecycle == .dead and self.self_addr == @intFromPtr(self)) return .already_dead;
+        if (!self.valid()) return .corrupt;
+        if (self.live_count != 0) return .busy;
+        for (self.entries) |entry| if (entry.lifecycle != .empty) return .corrupt;
+        return .cleaned;
+    }
+
+    pub fn tryDeinit(self: *Registry) DeinitOutcome {
+        const outcome = self.preflightDeinit();
+        if (outcome == .cleaned) self.lifecycle = .dead;
+        return outcome;
+    }
+};
+
+test "CR3a-2b1 batch registry reserve abort는 polling idle에서 slot을 소비하지 않는다" {
+    var registry: Registry = .{};
+    try registry.initInPlace(11);
+    for (1..4097) |_| {
+        const reservation = try registry.reserve(7);
+        try registry.abort(reservation);
+    }
+    try std.testing.expectEqual(@as(usize, 0), try registry.count());
+}
+
+test "CR3a-2b1 batch registry는 pointer-free token으로 exact owner를 release한다" {
+    const allocator = std.testing.allocator;
+    var registry: Registry = .{};
+    try registry.initInPlace(13);
+    const reservation = try registry.reserve(7);
+    try registry.prepareIngress(reservation);
+    const bytes = try allocator.dupe(u8, "snapshot");
+    var owned: OwnedBatch = .{};
+    try owned.initInPlace(
+        true,
+        7,
+        bytes,
+        allocator,
+        .{ .client_addr = 17, .transfer_id = reservation.entry_generation, .byte_count = 8 },
+    );
+    errdefer if (owned.allocator) |owner| owner.free(owned.bytes);
+    const token = try registry.commit(reservation, &owned);
+    try std.testing.expect(owned.allocator == null and owned.bytes.len == 0);
+    const view = try registry.borrow(token);
+    try std.testing.expect(view.is_snapshot);
+    try std.testing.expectEqual(@as(u64, 7), view.stream_id);
+    try std.testing.expectEqualStrings("snapshot", view.bytes);
+
+    registry.entries[token.entry_slot].accounting.transfer_id += 1;
+    var rejected_cleanup: OwnedBatch = .{};
+    try std.testing.expectError(
+        error.InvalidDescriptor,
+        registry.preflightRelease(token, &rejected_cleanup),
+    );
+    registry.entries[token.entry_slot].accounting.transfer_id = token.entry_generation;
+    try std.testing.expectEqualStrings("snapshot", (try registry.borrow(token)).bytes);
+
+    var cleanup: OwnedBatch = .{};
+    try registry.beginRelease(token, &cleanup);
+    const cleanup_allocator = cleanup.allocator.?;
+    cleanup_allocator.free(cleanup.bytes);
+    cleanup.bytes = &.{};
+    cleanup.allocator = null;
+    cleanup.accounting = .{ .client_addr = 0, .transfer_id = 0, .byte_count = 0 };
+    try cleanup.completeCleanup();
+    try registry.finishRelease(token, &cleanup);
+    try std.testing.expectEqual(@as(usize, 0), try registry.count());
+    try std.testing.expectEqual(DeinitOutcome.cleaned, registry.tryDeinit());
+}
+
+test "CR3a-2b1 batch registry는 독립 fixed table의 4096 cap을 고정한다" {
+    var registry: Registry = .{};
+    try registry.initInPlace(23);
+    var reservations: [max_entries]Reservation = undefined;
+    for (&reservations) |*reservation|
+        reservation.* = try registry.reserve(7);
+    try std.testing.expectEqual(max_entries, try registry.count());
+    try std.testing.expectError(error.CapacityExhausted, registry.reserve(8));
+    for (reservations) |reservation| try registry.abort(reservation);
+    try std.testing.expectEqual(@as(usize, 0), try registry.count());
+}
+
+test "CR3a-2b1 consumed slot 재사용은 stale generation과 registry copy를 거부한다" {
+    const allocator = std.testing.allocator;
+    var registry: Registry = .{};
+    try registry.initInPlace(29);
+    const first = try registry.reserve(7);
+    try registry.prepareIngress(first);
+    const bytes = try allocator.dupe(u8, "a");
+    var owned: OwnedBatch = .{};
+    try owned.initInPlace(
+        false,
+        7,
+        bytes,
+        allocator,
+        .{ .client_addr = 31, .transfer_id = first.entry_generation, .byte_count = 1 },
+    );
+    _ = try registry.commit(first, &owned);
+    var cleanup: OwnedBatch = .{};
+    try registry.beginRelease(first, &cleanup);
+    cleanup.allocator.?.free(cleanup.bytes);
+    cleanup.bytes = &.{};
+    cleanup.allocator = null;
+    cleanup.accounting = .{ .client_addr = 0, .transfer_id = 0, .byte_count = 0 };
+    try cleanup.completeCleanup();
+    try registry.finishRelease(first, &cleanup);
+
+    const second = try registry.reserve(7);
+    try std.testing.expectEqual(first.entry_slot, second.entry_slot);
+    try std.testing.expectError(error.InvalidReservation, registry.borrow(first));
+    try registry.abort(second);
+
+    var copied = registry;
+    try std.testing.expectError(error.MovedOrCopied, copied.count());
+}
+
+test "CR3a-2b1 token은 registry incarnation과 결속되어 cross-node splice를 거부한다" {
+    const allocator = std.testing.allocator;
+    var first_registry: Registry = .{};
+    var second_registry: Registry = .{};
+    try first_registry.initInPlace(41);
+    try second_registry.initInPlace(43);
+    const reservation = try first_registry.reserve(7);
+    try first_registry.prepareIngress(reservation);
+    const bytes = try allocator.dupe(u8, "sealed");
+    var owned: OwnedBatch = .{};
+    try owned.initInPlace(
+        false,
+        7,
+        bytes,
+        allocator,
+        .{ .client_addr = 47, .transfer_id = reservation.entry_generation, .byte_count = bytes.len },
+    );
+    const token = try first_registry.commit(reservation, &owned);
+
+    const foreign = try second_registry.reserve(7);
+    try std.testing.expectEqual(token.entry_slot, foreign.entry_slot);
+    try std.testing.expectEqual(token.entry_generation, foreign.entry_generation);
+    try std.testing.expectError(error.InvalidReservation, second_registry.borrow(token));
+    try second_registry.abort(foreign);
+
+    var cleanup: OwnedBatch = .{};
+    try first_registry.beginRelease(token, &cleanup);
+    cleanup.allocator.?.free(cleanup.bytes);
+    cleanup.bytes = &.{};
+    cleanup.allocator = null;
+    cleanup.accounting = .{ .client_addr = 0, .transfer_id = 0, .byte_count = 0 };
+    try cleanup.completeCleanup();
+    try first_registry.finishRelease(token, &cleanup);
+}
+
+test "CR3a-2b1 releasing entry는 exact callback-local cleanup 주소만 settle한다" {
+    const allocator = std.testing.allocator;
+    var registry: Registry = .{};
+    try registry.initInPlace(53);
+    var tokens: [2]Token = undefined;
+    for (&tokens, 0..) |*token, index| {
+        const reservation = try registry.reserve(index + 1);
+        try registry.prepareIngress(reservation);
+        const bytes = try allocator.dupe(u8, if (index == 0) "a" else "b");
+        var owned: OwnedBatch = .{};
+        try owned.initInPlace(
+            false,
+            reservation.stream_id,
+            bytes,
+            allocator,
+            .{ .client_addr = 59, .transfer_id = reservation.entry_generation, .byte_count = 1 },
+        );
+        token.* = try registry.commit(reservation, &owned);
+    }
+    var cleanups: [2]OwnedBatch = .{ .{}, .{} };
+    for (tokens, &cleanups) |token, *cleanup| {
+        try registry.beginRelease(token, cleanup);
+        cleanup.allocator.?.free(cleanup.bytes);
+        cleanup.bytes = &.{};
+        cleanup.allocator = null;
+        cleanup.accounting = .{ .client_addr = 0, .transfer_id = 0, .byte_count = 0 };
+        try cleanup.completeCleanup();
+    }
+    try std.testing.expectError(error.InvalidState, registry.finishRelease(tokens[0], &cleanups[1]));
+    try registry.finishRelease(tokens[0], &cleanups[0]);
+    try registry.finishRelease(tokens[1], &cleanups[1]);
+    try std.testing.expectEqual(@as(usize, 0), try registry.count());
+}
+
+test "CR3a-2b1 registry generation exhaustion은 기존 entry mutation 없이 닫힌다" {
+    var registry: Registry = .{};
+    try registry.initInPlace(61);
+    registry.last_generation = std.math.maxInt(u64);
+    try std.testing.expectError(error.IdentityExhausted, registry.reserve(7));
+    try std.testing.expectEqual(@as(usize, 0), try registry.count());
+}
+
+test "CR3a-2b1 registry commit은 live sibling payload overlap을 publication 전에 거부한다" {
+    const allocator = std.testing.allocator;
+    var registry: Registry = .{};
+    try registry.initInPlace(67);
+    const bytes = try allocator.dupe(u8, "shared");
+    const first_reservation = try registry.reserve(7);
+    try registry.prepareIngress(first_reservation);
+    var first: OwnedBatch = .{};
+    try first.initInPlace(
+        false,
+        7,
+        bytes,
+        allocator,
+        .{ .client_addr = 71, .transfer_id = first_reservation.entry_generation, .byte_count = bytes.len },
+    );
+    const first_token = try registry.commit(first_reservation, &first);
+
+    const second_reservation = try registry.reserve(8);
+    try registry.prepareIngress(second_reservation);
+    var alias: OwnedBatch = .{};
+    try alias.initInPlace(
+        false,
+        8,
+        bytes,
+        allocator,
+        .{ .client_addr = 71, .transfer_id = second_reservation.entry_generation, .byte_count = bytes.len },
+    );
+    try std.testing.expectError(
+        error.InvalidDescriptor,
+        registry.commit(second_reservation, &alias),
+    );
+    // alias descriptor에는 독립 free 권위가 없으므로 tombstone만 하고 canonical first owner만 해제한다.
+    alias = .{};
+    try registry.abort(second_reservation);
+    var cleanup: OwnedBatch = .{};
+    try registry.beginRelease(first_token, &cleanup);
+    cleanup.allocator.?.free(cleanup.bytes);
+    cleanup.bytes = &.{};
+    cleanup.allocator = null;
+    cleanup.accounting = .{ .client_addr = 0, .transfer_id = 0, .byte_count = 0 };
+    try cleanup.completeCleanup();
+    try registry.finishRelease(first_token, &cleanup);
+}
+
+comptime {
+    for (std.meta.fields(Token)) |field| switch (@typeInfo(field.type)) {
+        .pointer => @compileError("generation batch token must stay pointer-free"),
+        else => {},
+    };
+}

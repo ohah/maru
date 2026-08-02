@@ -32,6 +32,7 @@ const screen_stream = @import("screen_stream.zig");
 const observation_wire = @import("observation_wire.zig");
 const resize_wire = @import("resize_wire.zig");
 const upgrade_wire = @import("upgrade_wire.zig");
+const generation_batch_registry = @import("generation_batch_registry.zig");
 const max_pending_event_count: usize = 4 * 256;
 comptime {
     if (max_pending_event_count > std.math.maxInt(u32))
@@ -248,6 +249,335 @@ test "client screen assembler yields between split snapshot chunks and resumes b
     try testing.expect(client.partial_batch == null);
 }
 
+test "CR3a-2b1 buffered batch는 pending charge를 transferred charge로 exact 이동한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var client = makeConnectedTestClient(allocator, -1);
+    defer client.deinit();
+    var accounting_ledger: generation_batch_registry.AccountingLedger = .{};
+    try accounting_ledger.initInPlace();
+    try client.bindGenerationAccountingLedger(&accounting_ledger);
+    const first = try allocator.dupe(u8, "foreign-a");
+    const wanted = try allocator.dupe(u8, "wanted");
+    const last = try allocator.dupe(u8, "foreign-b");
+    try client.pending_batches.append(allocator, .{
+        .is_snapshot = false,
+        .stream_id = 8,
+        .bytes = first,
+        .allocator = allocator,
+    });
+    try client.pending_batches.append(allocator, .{
+        .is_snapshot = true,
+        .stream_id = 7,
+        .bytes = wanted,
+        .allocator = allocator,
+    });
+    try client.pending_batches.append(allocator, .{
+        .is_snapshot = false,
+        .stream_id = 9,
+        .bytes = last,
+        .allocator = allocator,
+    });
+    client.pending_batch_bytes = first.len + wanted.len + last.len;
+
+    var out: generation_batch_registry.OwnedBatch = .{};
+    try testing.expectEqual(
+        Client.GenerationBatchReadResult.committed,
+        try client.readGenerationBatch(&out, 7, 1),
+    );
+    try testing.expectEqual(@as(usize, 2), client.pending_batches.items.len);
+    try testing.expectEqual(@as(u64, 8), client.pending_batches.items[0].stream_id);
+    try testing.expectEqual(@as(u64, 9), client.pending_batches.items[1].stream_id);
+    try testing.expectEqual(first.len + last.len, client.pending_batch_bytes);
+    try testing.expectEqual(@as(usize, 1), accounting_ledger.item_count);
+    try testing.expectEqual(wanted.len, accounting_ledger.byte_count);
+    try testing.expectEqualStrings("wanted", out.bytes);
+
+    const prepared = try client.prepareGenerationAccountingConsume(out.accounting);
+    out.allocator.?.free(out.bytes);
+    client.consumeGenerationAccountingUnchecked(prepared);
+    out = .{};
+    try testing.expectEqual(@as(usize, 0), accounting_ledger.item_count);
+    try testing.expectEqual(@as(usize, 0), accounting_ledger.byte_count);
+}
+
+test "CR3a-2b1 accounting ledger는 duplicate와 consumed receipt replay를 거부한다" {
+    const allocator = testing.allocator;
+    var client = makeConnectedTestClient(allocator, -1);
+    defer client.deinit();
+    var accounting_ledger: generation_batch_registry.AccountingLedger = .{};
+    try accounting_ledger.initInPlace();
+    try client.bindGenerationAccountingLedger(&accounting_ledger);
+    for ([_]u64{ 7, 8 }) |stream_id| {
+        const bytes = try allocator.dupe(u8, "x");
+        try client.pending_batches.append(allocator, .{
+            .is_snapshot = false,
+            .stream_id = stream_id,
+            .bytes = bytes,
+            .allocator = allocator,
+        });
+        client.pending_batch_bytes += bytes.len;
+    }
+    var first: generation_batch_registry.OwnedBatch = .{};
+    var second: generation_batch_registry.OwnedBatch = .{};
+    try testing.expectEqual(
+        Client.GenerationBatchReadResult.committed,
+        try client.readGenerationBatch(&first, 7, 1),
+    );
+    try testing.expectEqual(
+        Client.GenerationBatchReadResult.committed,
+        try client.readGenerationBatch(&second, 8, 2),
+    );
+    const first_prepared = try client.prepareGenerationAccountingConsume(first.accounting);
+    try testing.expectError(
+        error.InvalidDescriptor,
+        client.prepareGenerationAccountingConsume(first.accounting),
+    );
+    first.allocator.?.free(first.bytes);
+    client.consumeGenerationAccountingUnchecked(first_prepared);
+    first = .{};
+    try testing.expectError(
+        error.InvalidDescriptor,
+        client.prepareGenerationAccountingConsume(.{
+            .client_addr = @intFromPtr(&client),
+            .transfer_id = 1,
+            .byte_count = 1,
+        }),
+    );
+    const second_prepared = try client.prepareGenerationAccountingConsume(second.accounting);
+    second.allocator.?.free(second.bytes);
+    client.consumeGenerationAccountingUnchecked(second_prepared);
+    second = .{};
+    try testing.expectEqual(@as(usize, 0), accounting_ledger.item_count);
+}
+
+test "CR3a-2b1 direct parser batch는 queue를 우회해 transferred owner를 publish한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var client = makeConnectedTestClient(allocator, fds[0]);
+    defer client.deinit();
+    var accounting_ledger: generation_batch_registry.AccountingLedger = .{};
+    try accounting_ledger.initInPlace();
+    try client.bindGenerationAccountingLedger(&accounting_ledger);
+    const wire = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .delta_chunk, .stream_id = 7, .flags = protocol.Flags.end_stream },
+        "direct",
+    );
+    defer allocator.free(wire);
+    try socket_server.writeAll(fds[1], wire);
+
+    var out: generation_batch_registry.OwnedBatch = .{};
+    try testing.expectEqual(
+        Client.GenerationBatchReadResult.committed,
+        try client.readGenerationBatch(&out, 7, 1),
+    );
+    try testing.expectEqual(@as(usize, 0), client.pending_batches.items.len);
+    try testing.expectEqual(@as(usize, 1), accounting_ledger.item_count);
+    try testing.expectEqualStrings("direct", out.bytes);
+
+    const prepared = try client.prepareGenerationAccountingConsume(out.accounting);
+    out.allocator.?.free(out.bytes);
+    client.consumeGenerationAccountingUnchecked(prepared);
+    out = .{};
+}
+
+test "CR3a-2b1 pending과 transferred payload는 18 MiB exact cap을 함께 사용한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var client = makeConnectedTestClient(allocator, fds[0]);
+    defer client.deinit();
+    var accounting_ledger: generation_batch_registry.AccountingLedger = .{};
+    try accounting_ledger.initInPlace();
+    try client.bindGenerationAccountingLedger(&accounting_ledger);
+
+    const large = try allocator.alloc(u8, protocol.max_client_screen_inbox - 1);
+    try client.pending_batches.append(allocator, .{
+        .is_snapshot = false,
+        .stream_id = 7,
+        .bytes = large,
+        .allocator = allocator,
+    });
+    client.pending_batch_bytes = large.len;
+    var first: generation_batch_registry.OwnedBatch = .{};
+    try testing.expectEqual(
+        Client.GenerationBatchReadResult.committed,
+        try client.readGenerationBatch(&first, 7, 1),
+    );
+
+    const last = try allocator.dupe(u8, "x");
+    try client.pending_batches.append(allocator, .{
+        .is_snapshot = false,
+        .stream_id = 8,
+        .bytes = last,
+        .allocator = allocator,
+    });
+    client.pending_batch_bytes = last.len;
+    var second: generation_batch_registry.OwnedBatch = .{};
+    try testing.expectEqual(
+        Client.GenerationBatchReadResult.committed,
+        try client.readGenerationBatch(&second, 8, 2),
+    );
+    try testing.expectEqual(
+        protocol.max_client_screen_inbox,
+        accounting_ledger.byte_count,
+    );
+
+    const overflow_wire = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .delta_chunk, .stream_id = 9, .flags = protocol.Flags.end_stream },
+        "y",
+    );
+    defer allocator.free(overflow_wire);
+    try socket_server.writeAll(fds[1], overflow_wire);
+    var rejected: generation_batch_registry.OwnedBatch = .{};
+    try testing.expectError(error.ProtocolError, client.readGenerationBatch(&rejected, 9, 3));
+    try testing.expect(rejected.pristine());
+    try testing.expectEqual(
+        protocol.max_client_screen_inbox,
+        accounting_ledger.byte_count,
+    );
+
+    for ([_]*generation_batch_registry.OwnedBatch{ &first, &second }) |owned| {
+        const prepared = try client.prepareGenerationAccountingConsume(owned.accounting);
+        owned.allocator.?.free(owned.bytes);
+        client.consumeGenerationAccountingUnchecked(prepared);
+        owned.* = .{};
+    }
+    try testing.expectEqual(@as(usize, 0), accounting_ledger.byte_count);
+}
+
+test "CR3a-2b1 direct parser allocator drift는 publication 전에 rollback한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var probe: FreeCountingAllocator = .{
+        .parent = allocator,
+        .mutation_allocator = allocator,
+    };
+    const captured = probe.allocator();
+    var client = makeConnectedTestClient(captured, fds[0]);
+    var accounting_ledger: generation_batch_registry.AccountingLedger = .{};
+    try accounting_ledger.initInPlace();
+    try client.bindGenerationAccountingLedger(&accounting_ledger);
+    defer {
+        client.allocator = captured;
+        client.deinit();
+    }
+    probe.mutate_allocator_on_free_a = &client.allocator;
+    const wire = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .delta_chunk, .stream_id = 7, .flags = protocol.Flags.end_stream },
+        "drift",
+    );
+    defer allocator.free(wire);
+    try socket_server.writeAll(fds[1], wire);
+
+    var out: generation_batch_registry.OwnedBatch = .{};
+    try testing.expectError(error.InvalidState, client.readGenerationBatch(&out, 7, 1));
+    try testing.expect(probe.mutation_fired);
+    try testing.expect(out.pristine());
+    try testing.expectEqual(@as(usize, 0), accounting_ledger.item_count);
+    try testing.expectEqual(@as(usize, 0), accounting_ledger.byte_count);
+}
+
+test "CR3a-2b1 partial direct batch는 idle에서 parser owner를 보존하고 다음 generation에 commit한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var client = makeConnectedTestClient(allocator, fds[0]);
+    defer client.deinit();
+    var accounting_ledger: generation_batch_registry.AccountingLedger = .{};
+    try accounting_ledger.initInPlace();
+    try client.bindGenerationAccountingLedger(&accounting_ledger);
+    const first_wire = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .snapshot_chunk, .stream_id = 7 },
+        "partial-",
+    );
+    defer allocator.free(first_wire);
+    try socket_server.writeAll(fds[1], first_wire);
+    var out: generation_batch_registry.OwnedBatch = .{};
+    try testing.expectEqual(
+        Client.GenerationBatchReadResult.idle,
+        try client.readGenerationBatch(&out, 7, 1),
+    );
+    try testing.expect(out.pristine());
+    try testing.expect(client.partial_batch != null);
+    try testing.expectEqual(@as(usize, 0), accounting_ledger.item_count);
+
+    const last_wire = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .snapshot_chunk, .stream_id = 7, .flags = protocol.Flags.end_stream },
+        "complete",
+    );
+    defer allocator.free(last_wire);
+    try socket_server.writeAll(fds[1], last_wire);
+    try testing.expectEqual(
+        Client.GenerationBatchReadResult.committed,
+        try client.readGenerationBatch(&out, 7, 2),
+    );
+    try testing.expectEqualStrings("partial-complete", out.bytes);
+    try testing.expect(client.partial_batch == null);
+    const prepared = try client.prepareGenerationAccountingConsume(out.accounting);
+    out.allocator.?.free(out.bytes);
+    client.consumeGenerationAccountingUnchecked(prepared);
+    out = .{};
+}
+
+test "CR3a-2b1 direct parser allocator fail-index는 owner와 accounting을 final-zero로 닫는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var saw_failure = false;
+    var saw_success = false;
+    for (0..12) |fail_index| {
+        var fds: [2]c.fd_t = undefined;
+        try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+        defer _ = c.close(fds[1]);
+        var failing = testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        var client = makeConnectedTestClient(failing.allocator(), fds[0]);
+        var accounting_ledger: generation_batch_registry.AccountingLedger = .{};
+        try accounting_ledger.initInPlace();
+        try client.bindGenerationAccountingLedger(&accounting_ledger);
+        const wire = try framing.encodeFrame(
+            allocator,
+            .{ .kind = .delta_chunk, .stream_id = 7, .flags = protocol.Flags.end_stream },
+            "fail-index",
+        );
+        defer allocator.free(wire);
+        try socket_server.writeAll(fds[1], wire);
+        var out: generation_batch_registry.OwnedBatch = .{};
+        const result = client.readGenerationBatch(&out, 7, 1);
+        if (result) |outcome| {
+            try testing.expectEqual(Client.GenerationBatchReadResult.committed, outcome);
+            saw_success = true;
+            const prepared = try client.prepareGenerationAccountingConsume(out.accounting);
+            out.allocator.?.free(out.bytes);
+            client.consumeGenerationAccountingUnchecked(prepared);
+            out = .{};
+        } else |err| {
+            try testing.expect(err == error.OutOfMemory or err == error.InvalidState);
+            saw_failure = true;
+            try testing.expect(out.pristine());
+        }
+        try testing.expectEqual(@as(usize, 0), accounting_ledger.item_count);
+        try testing.expectEqual(@as(usize, 0), accounting_ledger.byte_count);
+        client.deinit();
+    }
+    try testing.expect(saw_failure);
+    try testing.expect(saw_success);
+}
+
 test "client screen assembler poisons malformed async header and event interleave" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
@@ -365,6 +695,23 @@ pub const StreamBatch = struct {
         self.allocator.free(self.bytes);
     }
 };
+
+const GenerationBatchAccounting = struct {
+    ledger: ?*generation_batch_registry.AccountingLedger = null,
+    last_transfer_id: u64 = 0,
+
+    fn valid(self: *const GenerationBatchAccounting, client_addr: usize) bool {
+        const ledger_valid = if (self.ledger) |ledger|
+            ledger.matchesClient(client_addr)
+        else
+            true;
+        return ledger_valid;
+    }
+};
+
+fn rawRangesOverlap(a_start: usize, a_end: usize, b_start: usize, b_end: usize) bool {
+    return a_start < b_end and b_start < a_end;
+}
 
 /// GUI ingress seals the allocation-free event preflight beside the exact owned frame so the
 /// runtime consumer can bind identity/authority and materialize without parsing the payload twice.
@@ -4022,6 +4369,8 @@ pub const Client = struct {
     // allocator로 이 배치들을 만들고/소비/해제하므로(불변식) 버퍼-소비 간 allocator가 일치한다. deinit이 잔여를 회수한다.
     pending_batches: std.ArrayListUnmanaged(StreamBatch) = .empty,
     pending_batch_bytes: usize = 0,
+    // Generation GUI로 넘긴 payload도 실제 free callback이 반환할 때까지 같은 18 MiB/4,096 resident budget에 남는다.
+    generation_batch_accounting: GenerationBatchAccounting = .{},
     partial_batch: ?PartialBatch = null,
     // UI의 non-blocking input/viewport-command 경로가 socket backpressure를 만났을 때 소유하는 **단 하나의 완성 wire
     // frame**. offset은 이미 kernel이 수락한 prefix 뒤를 가리킨다. frame을 이 슬롯에 넣는 순간 payload/command는 caller
@@ -4300,6 +4649,10 @@ pub const Client = struct {
         if (self.ownership == .moved) {
             return true;
         }
+        if (!self.generation_batch_accounting.valid(@intFromPtr(self)) or
+            (self.generation_batch_accounting.ledger != null and
+                self.generation_batch_accounting.ledger.?.item_count != 0))
+            return false;
         if (!self.prepareExternalModeDeinit()) return false;
         if (self.fd >= 0) _ = c.close(self.fd);
         if (self.build_id) |build_id| self.allocator.free(build_id);
@@ -4322,7 +4675,82 @@ pub const Client = struct {
     /// The caller allocates and validates the final destination before invoking this no-fail
     /// suffix, so a failed HostAdapter initialization never partially moves socket ownership.
     pub fn canMoveToGenerationNode(self: *const Client) bool {
-        return self.ownership == .standalone and self.io_mode == .blocking and !self.unusable;
+        return self.ownership == .standalone and self.io_mode == .blocking and !self.unusable and
+            self.generation_batch_accounting.valid(@intFromPtr(self)) and
+            (self.generation_batch_accounting.ledger == null or
+                self.generation_batch_accounting.ledger.?.item_count == 0) and
+            self.generationBatchSourceRangesValid();
+    }
+
+    fn generationBatchSourceRangesValid(self: *const Client) bool {
+        const client_start = @intFromPtr(self);
+        const client_end = std.math.add(usize, client_start, @sizeOf(Client)) catch return false;
+        for (self.pending_batches.items, 0..) |batch, index| {
+            if (batch.bytes.len == 0) return false;
+            const start = @intFromPtr(batch.bytes.ptr);
+            const end = std.math.add(usize, start, batch.bytes.len) catch return false;
+            if (rawRangesOverlap(start, end, client_start, client_end)) return false;
+            for (self.pending_batches.items[index + 1 ..]) |sibling| {
+                const sibling_start = @intFromPtr(sibling.bytes.ptr);
+                const sibling_end = std.math.add(
+                    usize,
+                    sibling_start,
+                    sibling.bytes.len,
+                ) catch return false;
+                if (rawRangesOverlap(start, end, sibling_start, sibling_end)) return false;
+            }
+            if (self.partial_batch) |partial| {
+                const partial_start = @intFromPtr(partial.bytes.items.ptr);
+                const partial_end = std.math.add(
+                    usize,
+                    partial_start,
+                    partial.bytes.capacity,
+                ) catch return false;
+                if (partial.bytes.capacity != 0 and
+                    rawRangesOverlap(start, end, partial_start, partial_end)) return false;
+            }
+        }
+        return true;
+    }
+
+    pub fn bindGenerationAccountingLedger(
+        self: *Client,
+        ledger: *generation_batch_registry.AccountingLedger,
+    ) generation_batch_registry.Error!void {
+        if (self.generation_batch_accounting.ledger != null)
+            return error.InvalidState;
+        try ledger.bindClient(@intFromPtr(self));
+        self.generation_batch_accounting.ledger = ledger;
+    }
+
+    pub fn beginGenerationBatchAllocator(
+        self: *Client,
+        allocator: std.mem.Allocator,
+    ) (ClientError || generation_batch_registry.Error)!std.mem.Allocator {
+        try self.ensureUsable();
+        if (self.generation_batch_accounting.ledger == null or self.io_mode != .blocking or
+            self.ownership != .standalone or !self.parser.usesAllocator(self.allocator))
+            return error.InvalidState;
+        const previous = self.allocator;
+        self.allocator = allocator;
+        self.parser.restoreAllocatorAfterDrift(allocator);
+        return previous;
+    }
+
+    pub fn requireBufferedGenerationBatch(self: *const Client, stream_id: u64) ClientError!void {
+        try self.ensureUsable();
+        for (self.pending_batches.items) |pending| {
+            if (pending.stream_id == stream_id) return;
+        }
+        return error.AdminBusy;
+    }
+
+    pub fn restoreGenerationBatchAllocatorUnchecked(
+        self: *Client,
+        allocator: std.mem.Allocator,
+    ) void {
+        self.allocator = allocator;
+        self.parser.restoreAllocatorAfterDrift(allocator);
     }
 
     pub fn moveToGenerationNode(self: *Client, destination: *Client) void {
@@ -4384,6 +4812,12 @@ pub const Client = struct {
         writeProjectionFrames(&writer, self.pending_stream);
         writeProjectionEvents(&writer, self.pending_events);
         writer.writeUsize(self.pending_batch_bytes);
+        const generation_ledger = self.generation_batch_accounting.ledger;
+        writer.writeUsize(if (generation_ledger) |ledger| ledger.item_count else 0);
+        writer.writeUsize(if (generation_ledger) |ledger| ledger.byte_count else 0);
+        writer.writeU64(self.generation_batch_accounting.last_transfer_id);
+        writer.writeUsize(if (generation_ledger) |ledger| ledger.releasing_item_count else 0);
+        writer.writeUsize(if (generation_ledger) |ledger| ledger.releasing_byte_count else 0);
         writer.writeUsize(self.pending_stream_bytes);
         writer.writeUsize(self.pending_event_bytes);
         if (self.partial_batch) |partial| {
@@ -6360,6 +6794,152 @@ pub const Client = struct {
         };
     }
 
+    const GenerationTransferSource = enum { pending, direct };
+
+    pub const PreparedGenerationAccountingConsume = struct {
+        client_addr: usize,
+        transfer_id: u64,
+        byte_count: usize,
+        ledger_slot: u16,
+    };
+
+    fn reserveGenerationTransfer(
+        self: *Client,
+        byte_count: usize,
+        source: GenerationTransferSource,
+        transfer_id: u64,
+    ) (ClientError || generation_batch_registry.Error)!generation_batch_registry.AccountingReceipt {
+        if (!self.generation_batch_accounting.valid(@intFromPtr(self))) return error.InvalidState;
+        if (byte_count == 0) return error.InvalidDescriptor;
+        const accounting = &self.generation_batch_accounting;
+        const ledger = accounting.ledger orelse return error.InvalidState;
+        const total_items = self.pending_batches.items.len +| ledger.item_count;
+        if ((source == .direct and total_items >= protocol.max_client_screen_items) or
+            (source == .pending and total_items > protocol.max_client_screen_items))
+            return error.EventQueueFull;
+        if (source == .direct and
+            self.screenInboxBytes() +| byte_count > protocol.max_client_screen_inbox)
+            return error.EventQueueFull;
+        if (ledger.item_count == generation_batch_registry.max_entries)
+            return error.CapacityExhausted;
+        if (transfer_id == 0 or transfer_id <= accounting.last_transfer_id)
+            return error.InvalidIdentity;
+        const next_bytes = std.math.add(usize, ledger.byte_count, byte_count) catch
+            return error.InvalidState;
+        if (next_bytes > protocol.max_client_screen_inbox) return error.EventQueueFull;
+
+        try ledger.reserve(transfer_id, byte_count);
+        // 검증 뒤에는 allocation/callback 없이 charge를 먼저 publish한다. direct parser의 마지막 frame
+        // payload free가 allocator callback을 재진입시켜도 resident cap이 낮아 보이는 순간이 없다.
+        accounting.last_transfer_id = transfer_id;
+        return .{
+            .client_addr = @intFromPtr(self),
+            .transfer_id = transfer_id,
+            .byte_count = byte_count,
+        };
+    }
+
+    pub fn prepareGenerationAccountingConsume(
+        self: *Client,
+        receipt: generation_batch_registry.AccountingReceipt,
+    ) generation_batch_registry.Error!PreparedGenerationAccountingConsume {
+        if (!self.generation_batch_accounting.valid(@intFromPtr(self)) or
+            receipt.client_addr != @intFromPtr(self) or
+            receipt.transfer_id == 0 or receipt.byte_count == 0)
+            return error.InvalidDescriptor;
+        if (receipt.transfer_id > self.generation_batch_accounting.last_transfer_id)
+            return error.InvalidDescriptor;
+        const ledger = self.generation_batch_accounting.ledger.?;
+        if (ledger.item_count == 0 or ledger.byte_count < receipt.byte_count or
+            ledger.releasing_item_count == ledger.item_count or
+            ledger.releasing_byte_count +| receipt.byte_count > ledger.byte_count)
+            return error.InvalidState;
+        const exact = try ledger.prepareConsume(receipt);
+        return .{
+            .client_addr = receipt.client_addr,
+            .transfer_id = receipt.transfer_id,
+            .byte_count = receipt.byte_count,
+            .ledger_slot = exact.ledger_slot,
+        };
+    }
+
+    pub fn consumeGenerationAccountingUnchecked(
+        self: *Client,
+        prepared: PreparedGenerationAccountingConsume,
+    ) void {
+        // 모든 identity/counter 검증과 releasing reservation은 allocator callback 전에 끝났다.
+        // 이 suffix는 callback을 다시 부르거나 상태를 재검증하지 않고 예약된 scalar만 tombstone한다.
+        self.generation_batch_accounting.ledger.?.consumeUnchecked(.{
+            .ledger_slot = prepared.ledger_slot,
+            .transfer_id = prepared.transfer_id,
+            .byte_count = prepared.byte_count,
+        });
+    }
+
+    pub const GenerationBatchReadResult = enum { committed, idle, terminal };
+
+    /// Generation GUI 전용 closed take. 성공 시 payload owner와 resident charge를 `out`으로 함께
+    /// 옮기며, caller는 node registry에 이를 무할당 publish한다.
+    pub fn readGenerationBatch(
+        self: *Client,
+        out: *generation_batch_registry.OwnedBatch,
+        want_stream_id: u64,
+        transfer_id: u64,
+    ) (ClientError || generation_batch_registry.Error)!GenerationBatchReadResult {
+        if (checkedAllocatorReentry(self)) return error.AdminBusy;
+        if (self.unusable) return .terminal;
+        try self.requireBlockingMode();
+        if (want_stream_id == 0) return error.InvalidStream;
+        if (transfer_id == 0 or transfer_id <= self.generation_batch_accounting.last_transfer_id)
+            return error.InvalidIdentity;
+        if (!out.pristine()) return error.DestinationOccupied;
+
+        // Buffered owner는 charge publication 뒤 allocation/callback 없는 suffix에서 queue를 tombstone한다.
+        for (self.pending_batches.items, 0..) |batch, index| {
+            if (batch.stream_id != want_stream_id) continue;
+            const receipt = try self.reserveGenerationTransfer(batch.bytes.len, .pending, transfer_id);
+            const owned = self.pending_batches.orderedRemove(index);
+            self.pending_batch_bytes -= owned.bytes.len;
+            generation_batch_registry.OwnedBatch.initTransferredUnchecked(
+                out,
+                owned.is_snapshot,
+                owned.stream_id,
+                owned.bytes,
+                owned.allocator,
+                receipt,
+            );
+            return .committed;
+        }
+
+        while (true) {
+            const maybe_batch = self.readOneBatchWithIo(.polling, .{
+                .stream_id = want_stream_id,
+                .transfer_id = transfer_id,
+                .out = out,
+            }) catch |err| switch (err) {
+                error.ConnectionClosed => return .terminal,
+                error.DeadlineExceeded => unreachable,
+                else => |typed| return typed,
+            };
+            if (!out.pristine()) return .committed;
+            const batch = maybe_batch orelse return .idle;
+            if (self.pending_batches.items.len +|
+                self.generation_batch_accounting.ledger.?.item_count >= protocol.max_client_screen_items or
+                self.screenInboxBytes() +| batch.bytes.len > protocol.max_client_screen_inbox)
+            {
+                batch.deinit();
+                self.poison(.event_queue_overflow);
+                return error.EventQueueFull;
+            }
+            self.pending_batches.append(self.allocator, batch) catch {
+                batch.deinit();
+                self.poison(.local_resource_exhausted);
+                return error.OutOfMemory;
+            };
+            self.pending_batch_bytes += batch.bytes.len;
+        }
+    }
+
     fn readStreamBatchWithIo(
         self: *Client,
         want_stream_id: u64,
@@ -6380,7 +6960,19 @@ pub const Client = struct {
         }
         // 2) 소켓에서 완성 배치를 읽는다. 내 것이면 반환, 남의 것이면 버퍼하고 계속(내 것/idle까지).
         while (true) {
-            const batch = (try self.readOneBatchWithIo(io)) orelse return null; // idle — 내 배치 없음.
+            const batch = (self.readOneBatchWithIo(io, null) catch |err| switch (err) {
+                error.CapacityExhausted,
+                error.DestinationOccupied,
+                error.IdentityExhausted,
+                error.InvalidDescriptor,
+                error.InvalidIdentity,
+                error.InvalidReservation,
+                error.InvalidState,
+                error.InvalidStream,
+                error.MovedOrCopied,
+                => unreachable,
+                else => |typed| return typed,
+            }) orelse return null; // idle — 내 배치 없음.
             if (batch.stream_id == want_stream_id) {
                 if (deadlineExpired(io)) {
                     batch.deinit();
@@ -6388,7 +6980,9 @@ pub const Client = struct {
                 }
                 return batch;
             }
-            if (self.pending_batches.items.len >= protocol.max_client_screen_items or
+            if (self.pending_batches.items.len +|
+                (if (self.generation_batch_accounting.ledger) |ledger| ledger.item_count else 0) >=
+                protocol.max_client_screen_items or
                 self.screenInboxBytes() +| batch.bytes.len > protocol.max_client_screen_inbox)
             {
                 batch.deinit();
@@ -6409,16 +7003,38 @@ pub const Client = struct {
     /// 아직 없으면 `null`(recv timeout을 세션 종료로 오인 안 함, §9). host는 grid/alt 변화 시 delta 대신 fresh snapshot을 push한다
     /// (SnapshotRequired). demux는 상위 `readStreamBatch`가 한다 — 여기선 순수하게 "다음 배치 하나".
     fn readOneBatch(self: *Client) ClientError!?StreamBatch {
-        return self.readOneBatchWithIo(.polling) catch |err| switch (err) {
+        return self.readOneBatchWithIo(.polling, null) catch |err| switch (err) {
             error.DeadlineExceeded => unreachable,
+            error.CapacityExhausted,
+            error.DestinationOccupied,
+            error.IdentityExhausted,
+            error.InvalidDescriptor,
+            error.InvalidIdentity,
+            error.InvalidReservation,
+            error.InvalidState,
+            error.InvalidStream,
+            error.MovedOrCopied,
+            => unreachable,
             else => |client_err| client_err,
         };
     }
 
+    const GenerationReadDestination = struct {
+        stream_id: u64,
+        transfer_id: u64,
+        out: *generation_batch_registry.OwnedBatch,
+    };
+
     fn readOneBatchWithIo(
         self: *Client,
         io: StreamIo,
-    ) DeadlineClientError!?StreamBatch {
+        generation: ?GenerationReadDestination,
+    ) (DeadlineClientError || generation_batch_registry.Error)!?StreamBatch {
+        if (generation) |destination| {
+            if (destination.stream_id == 0) return error.InvalidStream;
+            if (destination.transfer_id == 0) return error.InvalidIdentity;
+            if (!destination.out.pristine()) return error.DestinationOccupied;
+        }
         const allocator = self.allocator;
         var state = self.partial_batch orelse PartialBatch{
             .stream_id = 0,
@@ -6428,7 +7044,12 @@ pub const Client = struct {
         errdefer state.bytes.deinit(allocator);
         var started = state.stream_id != 0;
         while (true) {
-            const frame = (try self.nextStreamFrameWithIo(started, io)) orelse {
+            var actual_payload_allocator = allocator;
+            const frame = (try self.nextStreamFrameWithIo(
+                started,
+                io,
+                &actual_payload_allocator,
+            )) orelse {
                 if (started) {
                     self.partial_batch = state;
                     return null;
@@ -6436,16 +7057,25 @@ pub const Client = struct {
                 state.bytes.deinit(allocator);
                 return null;
             };
+            if (!std.meta.eql(actual_payload_allocator, allocator) or
+                !std.meta.eql(self.allocator, allocator) or
+                !self.parser.usesAllocator(allocator))
+            {
+                frame.deinit(actual_payload_allocator);
+                self.poison(.local_invariant_violation);
+                return error.InvalidState;
+            }
             if (frame.header.kind == .event) {
                 if (started or frame.header.request_id != 0 or frame.header.flags != 0) {
-                    frame.deinit(self.allocator);
+                    frame.deinit(allocator);
                     self.poison(.frame_malformed);
                     return error.ProtocolError;
                 }
                 try self.bufferEvent(frame);
                 continue;
             }
-            defer frame.deinit(self.allocator);
+            var frame_live = true;
+            defer if (frame_live) frame.deinit(allocator);
             if (frame.header.kind != .snapshot_chunk and frame.header.kind != .delta_chunk) {
                 self.poison(.peer_contract_violation);
                 return error.ProtocolError;
@@ -6485,10 +7115,65 @@ pub const Client = struct {
             };
             state.bytes.appendSliceAssumeCapacity(frame.payload);
             if (protocol.Flags.hasEndStream(frame.header.flags)) {
+                if (!std.meta.eql(allocator, self.allocator)) {
+                    self.poison(.local_invariant_violation);
+                    return error.InvalidState;
+                }
+                if (generation) |destination| if (state.stream_id == destination.stream_id) {
+                    const receipt = self.reserveGenerationTransfer(
+                        state.bytes.items.len,
+                        .direct,
+                        destination.transfer_id,
+                    ) catch |err| {
+                        self.poison(switch (err) {
+                            error.EventQueueFull, error.CapacityExhausted => .event_queue_overflow,
+                            error.OutOfMemory => .local_resource_exhausted,
+                            else => .local_invariant_violation,
+                        });
+                        return err;
+                    };
+                    const bytes = state.bytes.toOwnedSlice(allocator) catch {
+                        // Charge를 유지한 채 backing free callback을 먼저 끝내고, 그 뒤 no-fail accounting
+                        // suffix를 실행한다. OOM cleanup 재진입도 resident cap을 우회하지 못한다.
+                        const prepared = self.prepareGenerationAccountingConsume(receipt) catch
+                            @panic("generation accounting receipt drifted during direct rollback");
+                        state.bytes.deinit(allocator);
+                        state.bytes = .empty;
+                        self.consumeGenerationAccountingUnchecked(prepared);
+                        self.poison(.local_resource_exhausted);
+                        return error.OutOfMemory;
+                    };
+                    frame.deinit(allocator);
+                    frame_live = false;
+                    if (!std.meta.eql(allocator, self.allocator)) {
+                        const prepared = self.prepareGenerationAccountingConsume(receipt) catch
+                            @panic("generation accounting receipt drifted after frame cleanup");
+                        allocator.free(bytes);
+                        self.consumeGenerationAccountingUnchecked(prepared);
+                        self.poison(.local_invariant_violation);
+                        return error.InvalidState;
+                    }
+                    generation_batch_registry.OwnedBatch.initTransferredUnchecked(
+                        destination.out,
+                        state.is_snapshot,
+                        state.stream_id,
+                        bytes,
+                        allocator,
+                        receipt,
+                    );
+                    return null;
+                };
                 const bytes = state.bytes.toOwnedSlice(allocator) catch {
                     self.poison(.local_resource_exhausted);
                     return error.OutOfMemory;
                 };
+                frame.deinit(allocator);
+                frame_live = false;
+                if (!std.meta.eql(allocator, self.allocator)) {
+                    allocator.free(bytes);
+                    self.poison(.local_invariant_violation);
+                    return error.InvalidState;
+                }
                 return .{
                     .is_snapshot = state.is_snapshot,
                     .stream_id = state.stream_id,
@@ -6537,7 +7222,8 @@ pub const Client = struct {
 
     fn screenInboxBytes(self: *const Client) usize {
         const partial = if (self.partial_batch) |batch| batch.bytes.items.len else 0;
-        return self.pending_stream_bytes +| self.pending_batch_bytes +| partial;
+        return self.pending_stream_bytes +| self.pending_batch_bytes +|
+            (if (self.generation_batch_accounting.ledger) |ledger| ledger.byte_count else 0) +| partial;
     }
 
     /// stream의 다음 full-state/control event를 소유권째 꺼낸다. caller는 적용 뒤
@@ -6826,7 +7512,7 @@ pub const Client = struct {
     /// 첫 frame과 continuation 모두 `pollReadable`로 논블로킹 확인하고, 데이터가 없으면 partial batch를 caller가 보존하도록
     /// `null`을 돌려준다. UI frame pump에서 socket timeout까지 기다리지 않는다.
     fn nextStreamFrame(self: *Client, _: bool) ClientError!?framing.Frame {
-        return self.nextStreamFrameWithIo(false, .polling) catch |err| switch (err) {
+        return self.nextStreamFrameWithIo(false, .polling, null) catch |err| switch (err) {
             error.DeadlineExceeded => unreachable,
             else => |client_err| client_err,
         };
@@ -6836,21 +7522,23 @@ pub const Client = struct {
         self: *Client,
         _: bool,
         io: StreamIo,
+        payload_allocator_out: ?*std.mem.Allocator,
     ) DeadlineClientError!?framing.Frame {
         try self.ensureUsable();
+        if (payload_allocator_out) |out| out.* = self.allocator;
         if (self.pending_stream.items.len > 0) {
             const owned = self.pending_stream.orderedRemove(0);
             self.pending_stream_bytes -= owned.payload.len;
             const frame = try self.requireWireMajor(owned);
             if (deadlineExpired(io)) {
-                frame.deinit(self.allocator);
+                frame.deinit(if (payload_allocator_out) |out| out.* else self.allocator);
                 return error.DeadlineExceeded;
             }
             return frame;
         }
         var buf: [4096]u8 = undefined;
         while (true) {
-            if (self.parser.next() catch |err| {
+            if (self.parser.nextWithAllocator(payload_allocator_out) catch |err| {
                 self.poison(if (err == error.OutOfMemory)
                     .local_resource_exhausted
                 else
@@ -6862,7 +7550,7 @@ pub const Client = struct {
             }) |owned| {
                 const frame = try self.requireWireMajor(owned);
                 if (deadlineExpired(io)) {
-                    frame.deinit(self.allocator);
+                    frame.deinit(if (payload_allocator_out) |out| out.* else self.allocator);
                     return error.DeadlineExceeded;
                 }
                 return frame;
@@ -7346,6 +8034,20 @@ pub const Client = struct {
         return checked_allocator_owner_addr != 0;
     }
 
+    pub fn enterGenerationAllocatorCallback(self: *Client) bool {
+        if (checked_allocator_owner_addr != 0) return false;
+        checked_allocator_owner_addr = @intFromPtr(self);
+        return true;
+    }
+
+    pub fn rejectGenerationAllocatorCallbackReentry(self: *const Client) ClientError!void {
+        if (checkedAllocatorReentry(self)) return error.AdminBusy;
+    }
+
+    pub fn leaveGenerationAllocatorCallbackUnchecked(_: *Client) void {
+        checked_allocator_owner_addr = 0;
+    }
+
     fn requireBlockingMode(self: *const Client) ClientError!void {
         try self.ensureUsable();
         if (self.io_mode == .external) return error.ExternalMode;
@@ -7448,6 +8150,7 @@ const client_source_schema_field_allowlist = [_][]const u8{
     "pending_event_bytes",
     "pending_batches",
     "pending_batch_bytes",
+    "generation_batch_accounting",
     "partial_batch",
     "pending_outbound",
     "io_mode",

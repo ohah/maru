@@ -869,12 +869,18 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    2b~2e에 남는다.
    CR3a-2b는 `Client` 내부 accounting을 보존한 batch queue→node registry owner transaction을 실제 pump/release에 배선하고 GUI
    `AttachmentTransport.context=*Client`를 node-bound batch/drop adapter로 즉시 교체한다. 이 단계는 다음 두 TDD merge gate를
-   순서대로 닫는다. **CR3a-2b1**은 node-local fixed-cap batch entry와 pointer-free token, `Client`의
+   순서대로 닫는다. **CR3a-2b1(구현)**은 node-local fixed-cap batch entry와 pointer-free token, `Client`의
    `pending -> transferred -> released` 회계를 도입하고, 이미 buffered된 batch와 방금 parser에서 완성된 requested-stream batch를
    같은 reserve-first all-or-none transaction으로 옮긴다. red test는 0/1/4,096/4,097 entry, 18 MiB exact/cap+1,
    0/1/4,096회 idle 뒤 reservation final-zero, allocator fail-index, direct-parser actual allocator drift·payload alias·partial rollback,
    foreign-stream demux, accounting receipt/counter drift의 free 0, release callback 재진입 중 charge 보존을
-   production `ClientNode` 타입으로 먼저 고정한다. **CR3a-2b2**는 final-address node-bound adapter를
+   production `ClientNode` 타입으로 고정했다. registry별 incarnation과 checked-monotonic entry generation이 copy·ABA·cross-node·
+   stream splice를 거부하고, exact transfer ledger가 duplicate/replay receipt를 차단한다. parser가 실제 사용한 allocator를
+   node/slot/source canonical range와 대조하며 batch scope 전후 descriptor 복원과 일반 RPC 재사용을 검증한다. parser의
+   guarded allocator alloc/free callback에서는 same/foreign `ClientSlot` read/release/deinit 재진입을 busy로 닫는다.
+   모든 batch release callback은 nested release/deinit을 막고, buffered payload callback의 read는 allocation 없는 exact pending
+   sibling만 허용하며 miss는 registry reserve·socket/parser 전에 busy로 거부한다. callback 종료 뒤 원래 token·미소비 wire와
+   teardown이 정상 진행됨을 production-type unit으로 고정했다. **CR3a-2b2**는 final-address node-bound adapter를
    `GenerationAttachment`의 실제 `RemoteAttachment.pumpScreen`/release/drop에 연결하고, generation GUI 경로의 raw
    `AttachmentTransport.context=*Client` 및 raw Client batch read/release/drop callsite를 source boundary로 0으로 만든다. external
    movable `RemoteAttachment`의 outer field 목록, 기존 `untracked|charged` reachable 의미와 `ExternalPumpStorage`/external

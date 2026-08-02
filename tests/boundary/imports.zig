@@ -973,6 +973,78 @@ test "session host unchecked teardown authority cannot escape anywhere in src" {
     };
     const symbols = [_]Symbol{
         .{
+            .name = "leaveGenerationAllocatorCallbackUnchecked",
+            .owner_suffixes = &.{
+                "platform/macos/session_host/client.zig",
+                "platform/macos/session_host/client_slot.zig",
+            },
+            .pump_references = 0,
+        },
+        .{
+            .name = "restoreGenerationBatchAllocatorUnchecked",
+            .owner_suffixes = &.{
+                "platform/macos/session_host/client.zig",
+                "platform/macos/session_host/client_slot.zig",
+            },
+            .pump_references = 0,
+        },
+        .{
+            .name = "consumeUnchecked",
+            .owner_suffixes = &.{
+                "platform/macos/session_host/generation_batch_registry.zig",
+                "platform/macos/session_host/client.zig",
+            },
+            .pump_references = 0,
+        },
+        .{
+            .name = "completeCleanupUnchecked",
+            .owner_suffixes = &.{
+                "platform/macos/session_host/generation_batch_registry.zig",
+                "platform/macos/session_host/client_slot.zig",
+            },
+            .pump_references = 0,
+        },
+        .{
+            .name = "finishReleaseUnchecked",
+            .owner_suffixes = &.{
+                "platform/macos/session_host/generation_batch_registry.zig",
+                "platform/macos/session_host/client_slot.zig",
+            },
+            .pump_references = 0,
+        },
+        .{
+            .name = "initTransferredUnchecked",
+            .owner_suffixes = &.{
+                "platform/macos/session_host/generation_batch_registry.zig",
+                "platform/macos/session_host/client.zig",
+            },
+            .pump_references = 0,
+        },
+        .{
+            .name = "commitIngressUnchecked",
+            .owner_suffixes = &.{
+                "platform/macos/session_host/generation_batch_registry.zig",
+                "platform/macos/session_host/client_slot.zig",
+            },
+            .pump_references = 0,
+        },
+        .{
+            .name = "beginReleaseUnchecked",
+            .owner_suffixes = &.{
+                "platform/macos/session_host/generation_batch_registry.zig",
+                "platform/macos/session_host/client_slot.zig",
+            },
+            .pump_references = 0,
+        },
+        .{
+            .name = "consumeGenerationAccountingUnchecked",
+            .owner_suffixes = &.{
+                "platform/macos/session_host/client.zig",
+                "platform/macos/session_host/client_slot.zig",
+            },
+            .pump_references = 0,
+        },
+        .{
             .name = "initFromReservedPinUnchecked",
             .owner_suffixes = &.{
                 "platform/macos/session_host/connection_lease.zig",
@@ -1197,7 +1269,7 @@ test "session host unchecked teardown authority cannot escape anywhere in src" {
             }
         }
     }
-    try std.testing.expectEqual(@as(usize, 33), unchecked_declarations);
+    try std.testing.expectEqual(@as(usize, 42), unchecked_declarations);
     for (symbols) |symbol| {
         var pump_references: usize = 0;
         var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
@@ -1233,6 +1305,98 @@ test "session host unchecked teardown authority cannot escape anywhere in src" {
         }
         try std.testing.expectEqual(symbol.pump_references, pump_references);
     }
+}
+
+test "generation batch Client ownership mutations have one node-bound production caller" {
+    const allocator = std.testing.allocator;
+    const client_source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/client.zig",
+    );
+    defer allocator.free(client_source);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(client_source, "pub fn readGenerationBatch("),
+    );
+
+    var read_references: usize = 0;
+    var prepare_references: usize = 0;
+    var bind_references: usize = 0;
+    var begin_allocator_references: usize = 0;
+    var restore_allocator_references: usize = 0;
+    var enter_callback_references: usize = 0;
+    var leave_callback_references: usize = 0;
+    var reject_callback_references: usize = 0;
+    var require_buffered_references: usize = 0;
+    var dir = try std.Io.Dir.cwd().openDir(
+        std.testing.io,
+        "src/platform/macos/session_host",
+        .{ .iterate = true },
+    );
+    defer dir.close(std.testing.io);
+    var walker = try dir.walk(allocator);
+    defer walker.deinit();
+    while (try walker.next(std.testing.io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig") or
+            std.mem.eql(u8, entry.path, "client.zig"))
+            continue;
+        const path = try std.fmt.allocPrint(
+            allocator,
+            "src/platform/macos/session_host/{s}",
+            .{entry.path},
+        );
+        defer allocator.free(path);
+        const source = try readZigFileZ(allocator, path);
+        defer allocator.free(source);
+        const read_count = countOccurrences(source, ".readGenerationBatch(");
+        const prepare_count = countOccurrences(source, ".prepareGenerationAccountingConsume(");
+        const bind_count = countOccurrences(source, ".bindGenerationAccountingLedger(");
+        const begin_allocator_count = countOccurrences(source, ".beginGenerationBatchAllocator(");
+        const restore_allocator_count = countOccurrences(
+            source,
+            ".restoreGenerationBatchAllocatorUnchecked(",
+        );
+        const enter_callback_count = countOccurrences(source, ".enterGenerationAllocatorCallback(");
+        const leave_callback_count = countOccurrences(
+            source,
+            ".leaveGenerationAllocatorCallbackUnchecked(",
+        );
+        const reject_callback_count = countOccurrences(
+            source,
+            ".rejectGenerationAllocatorCallbackReentry(",
+        );
+        const require_buffered_count = countOccurrences(
+            source,
+            ".requireBufferedGenerationBatch(",
+        );
+        if ((read_count != 0 or prepare_count != 0 or bind_count != 0 or
+            begin_allocator_count != 0 or restore_allocator_count != 0 or
+            enter_callback_count != 0 or leave_callback_count != 0 or
+            reject_callback_count != 0 or require_buffered_count != 0) and
+            !std.mem.eql(u8, entry.path, "client_slot.zig"))
+        {
+            std.debug.print("generation batch Client take escaped into {s}\n", .{path});
+            return error.TestUnexpectedResult;
+        }
+        read_references += read_count;
+        prepare_references += prepare_count;
+        bind_references += bind_count;
+        begin_allocator_references += begin_allocator_count;
+        restore_allocator_references += restore_allocator_count;
+        enter_callback_references += enter_callback_count;
+        leave_callback_references += leave_callback_count;
+        reject_callback_references += reject_callback_count;
+        require_buffered_references += require_buffered_count;
+    }
+    try std.testing.expectEqual(@as(usize, 1), read_references);
+    try std.testing.expectEqual(@as(usize, 1), prepare_references);
+    try std.testing.expectEqual(@as(usize, 1), bind_references);
+    try std.testing.expectEqual(@as(usize, 1), begin_allocator_references);
+    try std.testing.expectEqual(@as(usize, 1), restore_allocator_references);
+    try std.testing.expectEqual(@as(usize, 4), enter_callback_references);
+    try std.testing.expectEqual(@as(usize, 4), leave_callback_references);
+    try std.testing.expectEqual(@as(usize, 2), reject_callback_references);
+    try std.testing.expectEqual(@as(usize, 1), require_buffered_references);
 }
 
 test "session host frozen teardown commits have one aggregate product caller" {

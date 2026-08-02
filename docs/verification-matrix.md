@@ -729,13 +729,24 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   실제 attach/deinit/drop/lease, external owner-schema digest, 2b는 실제 pump의 buffered/direct→registry transaction·두 cap·release와
   generation GUI batch 경로의 raw AttachmentTransport Client context와 raw Client 경유 batch read/release/drop callsite 0을
   증명한다. 2b의 상태는
-  **2b1(node batch registry와 Client transferred accounting, 계획) → 2b2(GUI node-bound adapter와 제품 pump/release/drop, 계획)**로
+  **2b1(node batch registry와 Client transferred accounting, 구현) → 2b2(GUI node-bound adapter와 제품 pump/release/drop, 계획)**로
   나누며, 2b1만 green이어도 GUI raw context가 남아 있으므로 2b 전체를 구현으로 표시하지 않는다. 2c는 남은 exact primitive facade와
   `RemoteRuntime.client`를 포함한 raw escape zero,
   2d는 actual-owner permit/reentry/quarantine/typed teardown, 2e는 actual socket
   attach/pump/deinit/uncertain/malformed/snapshot-failure/failed-release fixture와 전체 source
   boundary를 각각 증명한다. 각 gate는 production-type unit과 boundary를 재실행하며 전체가 green이기 전 CR3a-2 완료를 주장하지
   않는다.
+  2b1의 현재 자동 증거는 node-local 4,096-entry registry와 독립 exact accounting ledger, 18 MiB pending+transferred 합산,
+  pointer-free token의 registry incarnation·entry generation·stream 결속, buffered/direct-parser all-or-none transfer,
+  0/1/4,096/4,097 및 exact cap/cap+1, allocator fail-index·drift·partial rollback, sibling/source/canonical owner alias,
+  duplicate/replayed receipt와 generation exhaustion을 production `ClientNode` 타입으로 검증한다. guarded allocator의
+  alloc/resize/remap/free callback에서는 같은 thread의 same/foreign `ClientSlot` read/release/deinit을 registry generation·entry,
+  ledger charge, queue, wire mutation 전에 busy로 거부한다. 모든 batch release callback은 nested release/deinit을 막고, buffered
+  callback의 read는 exact pending sibling만 허용하며 miss는 reserve·socket/parser 전에 busy로 닫는다. socket-ready miss frame이
+  callback 뒤 정상 소비되는지와 direct/buffered payload release callback 뒤 token·payload 보존 및 정상 cleanup,
+  allocator/parser descriptor 복원 뒤 일반 RPC prepare→abort→settled까지 실행한다. Debug·ReleaseFast·boundary와 전체
+  `mise run check`가 자동 gate다. 이 증거는 GUI `GenerationAttachment`의 실제 pump adapter나 raw context 제거를 포함하지 않으며
+  그 범위는 2b2, 전체 actual-socket parity는 2e가 소유한다.
   2a의 현재 자동 증거는 canonical node-local transport/response seal, opaque prepared request storage, final response의
   binding/transport/request backing non-alias preflight, wire 전 allocator capture와 Frame schema 불변 out-parameter 기반의 frame별
   실제 payload allocator 일치,

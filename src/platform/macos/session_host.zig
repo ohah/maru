@@ -349,6 +349,7 @@ test {
     _ = @import("session_host/generation_attachment_contract.zig");
     _ = @import("session_host/executed_response.zig");
     _ = @import("session_host/attachment_cleanup_registry.zig");
+    _ = @import("session_host/generation_batch_registry.zig");
     _ = @import("session_host/generation_transport.zig");
     _ = @import("session_host/generation_attachment.zig");
     comptime {

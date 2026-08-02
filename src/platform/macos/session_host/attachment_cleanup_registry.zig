@@ -307,7 +307,7 @@ pub const AttachmentCleanupRegistry = struct {
         self.live_count -= 1;
     }
 
-    pub fn tryDeinit(self: *AttachmentCleanupRegistry) DeinitOutcome {
+    pub fn preflightDeinit(self: *const AttachmentCleanupRegistry) DeinitOutcome {
         if (self.lifecycle == .dead) {
             return if (self.self_addr == @intFromPtr(self)) .already_dead else .corrupt;
         }
@@ -320,8 +320,13 @@ pub const AttachmentCleanupRegistry = struct {
                 entry.response_owner.lifecycle != .pristine)
                 return .corrupt;
         }
-        self.lifecycle = .dead;
         return .cleaned;
+    }
+
+    pub fn tryDeinit(self: *AttachmentCleanupRegistry) DeinitOutcome {
+        const outcome = self.preflightDeinit();
+        if (outcome == .cleaned) self.lifecycle = .dead;
+        return outcome;
     }
 };
 

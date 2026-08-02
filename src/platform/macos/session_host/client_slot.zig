@@ -9,9 +9,17 @@ const builtin = @import("builtin");
 const client_mod = @import("client.zig");
 const lease_mod = @import("connection_lease.zig");
 const cleanup_registry_mod = @import("attachment_cleanup_registry.zig");
+const batch_registry_mod = @import("generation_batch_registry.zig");
 const contract = @import("generation_attachment_contract.zig");
+const framing = @import("framing.zig");
+const protocol = @import("protocol.zig");
+const socket_server = @import("socket_server.zig");
 
 const c = std.c;
+
+fn rawRangesOverlap(a_start: usize, a_end: usize, b_start: usize, b_end: usize) bool {
+    return a_start < b_end and b_start < a_end;
+}
 
 pub const Lifecycle = enum {
     live,
@@ -19,10 +27,122 @@ pub const Lifecycle = enum {
     dead,
 };
 
+const GenerationGuardedAllocator = struct {
+    parent: std.mem.Allocator,
+    client: ?*client_mod.Client = null,
+    node_start: usize,
+    node_end: usize,
+    slot_start: usize,
+    slot_end: usize,
+    source_start: usize,
+    source_end: usize,
+
+    fn allocator(self: *GenerationGuardedAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn rejects(self: *const GenerationGuardedAllocator, ptr: [*]u8, len: usize) bool {
+        const start = @intFromPtr(ptr);
+        const end = std.math.add(usize, start, len) catch return true;
+        return rawRangesOverlap(start, end, self.node_start, self.node_end) or
+            rawRangesOverlap(start, end, self.slot_start, self.slot_end) or
+            rawRangesOverlap(start, end, self.source_start, self.source_end);
+    }
+
+    fn alloc(
+        context: *anyopaque,
+        len: usize,
+        alignment: std.mem.Alignment,
+        return_address: usize,
+    ) ?[*]u8 {
+        const self: *GenerationGuardedAllocator = @ptrCast(@alignCast(context));
+        if (!self.client.?.enterGenerationAllocatorCallback()) return null;
+        defer self.client.?.leaveGenerationAllocatorCallbackUnchecked();
+        const result = self.parent.vtable.alloc(
+            self.parent.ptr,
+            len,
+            alignment,
+            return_address,
+        ) orelse return null;
+        if (self.rejects(result, len))
+            @panic("generation allocator returned canonical owner alias");
+        return result;
+    }
+
+    fn resize(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        return_address: usize,
+    ) bool {
+        const self: *GenerationGuardedAllocator = @ptrCast(@alignCast(context));
+        if (self.rejects(memory.ptr, new_len))
+            @panic("generation allocator resized into canonical owner");
+        if (!self.client.?.enterGenerationAllocatorCallback()) return false;
+        defer self.client.?.leaveGenerationAllocatorCallbackUnchecked();
+        return self.parent.vtable.resize(
+            self.parent.ptr,
+            memory,
+            alignment,
+            new_len,
+            return_address,
+        );
+    }
+
+    fn remap(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        return_address: usize,
+    ) ?[*]u8 {
+        const self: *GenerationGuardedAllocator = @ptrCast(@alignCast(context));
+        if (!self.client.?.enterGenerationAllocatorCallback()) return null;
+        defer self.client.?.leaveGenerationAllocatorCallbackUnchecked();
+        const result = self.parent.vtable.remap(
+            self.parent.ptr,
+            memory,
+            alignment,
+            new_len,
+            return_address,
+        ) orelse return null;
+        if (self.rejects(result, new_len))
+            @panic("generation allocator remapped into canonical owner");
+        return result;
+    }
+
+    fn free(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        return_address: usize,
+    ) void {
+        const self: *GenerationGuardedAllocator = @ptrCast(@alignCast(context));
+        if (!self.client.?.enterGenerationAllocatorCallback())
+            @panic("nested generation allocator free");
+        defer self.client.?.leaveGenerationAllocatorCallbackUnchecked();
+        self.parent.vtable.free(
+            self.parent.ptr,
+            memory,
+            alignment,
+            return_address,
+        );
+    }
+};
+
 pub const ClientNode = struct {
     client: client_mod.Client,
     pin_owner: lease_mod.PinOwner,
     cleanup_registry: cleanup_registry_mod.AttachmentCleanupRegistry,
+    batch_registry: batch_registry_mod.Registry,
+    accounting_ledger: batch_registry_mod.AccountingLedger,
+    guarded_allocator: GenerationGuardedAllocator,
     incarnation: lease_mod.Identity,
 };
 
@@ -57,6 +177,7 @@ pub const BindingError = cleanup_registry_mod.Error ||
 var issuer_mutex: std.atomic.Mutex = .unlocked;
 var process_issuer: ?lease_mod.IdentityIssuer = null;
 threadlocal var init_active: bool = false;
+threadlocal var batch_release_callback_active: bool = false;
 var alias_quarantine_events: std.atomic.Value(u64) = .init(0);
 
 fn recordAliasQuarantine() bool {
@@ -86,6 +207,25 @@ fn rangesOverlapTyped(a: anytype, b: anytype) bool {
     const a_end = std.math.add(usize, a_start, @sizeOf(@TypeOf(a.*))) catch return true;
     const b_end = std.math.add(usize, b_start, @sizeOf(@TypeOf(b.*))) catch return true;
     return a_start < b_end and b_start < a_end;
+}
+
+fn sliceOverlapsObject(bytes: []const u8, object: anytype) bool {
+    if (bytes.len == 0) return false;
+    const bytes_start = @intFromPtr(bytes.ptr);
+    const bytes_end = std.math.add(usize, bytes_start, bytes.len) catch return true;
+    const object_start = @intFromPtr(object);
+    const object_end = std.math.add(usize, object_start, @sizeOf(@TypeOf(object.*))) catch
+        return true;
+    return bytes_start < object_end and object_start < bytes_end;
+}
+
+fn generationBatchOwnerAliases(
+    slot: *ClientSlot,
+    owned: *const batch_registry_mod.OwnedBatch,
+) bool {
+    return sliceOverlapsObject(owned.bytes, slot) or
+        sliceOverlapsObject(owned.bytes, slot.current) or
+        sliceOverlapsObject(owned.bytes, owned);
 }
 
 fn productionIssuer() *lease_mod.IdentityIssuer {
@@ -192,7 +332,25 @@ pub const ClientSlot = struct {
             &node.cleanup_registry,
             node_identity.tagged,
         ) catch unreachable;
+        node.batch_registry = .{};
+        batch_registry_mod.Registry.initInPlace(
+            &node.batch_registry,
+            node_identity.tagged,
+        ) catch unreachable;
+        node.accounting_ledger = .{};
+        batch_registry_mod.AccountingLedger.initInPlace(&node.accounting_ledger) catch unreachable;
+        node.guarded_allocator = .{
+            .parent = source.allocator,
+            .node_start = node_start,
+            .node_end = node_end,
+            .slot_start = out_start,
+            .slot_end = out_end,
+            .source_start = source_start,
+            .source_end = source_end,
+        };
         source.moveToGenerationNode(&node.client);
+        node.guarded_allocator.client = &node.client;
+        node.client.bindGenerationAccountingLedger(&node.accounting_ledger) catch unreachable;
         node.incarnation = node_identity;
         lease_mod.PinOwner.initInPlace(
             &node.pin_owner,
@@ -226,6 +384,7 @@ pub const ClientSlot = struct {
             self.incarnation.kind() != .slot)
             return false;
         _ = self.current.cleanup_registry.count() catch return false;
+        _ = self.current.batch_registry.count() catch return false;
         return self.current.incarnation.kind() == .node and
             self.current.pin_owner.self_addr == @intFromPtr(&self.current.pin_owner) and
             self.current.pin_owner.slot_addr == @intFromPtr(self) and
@@ -237,7 +396,10 @@ pub const ClientSlot = struct {
             self.current.pin_owner.pid == self.pid and
             self.current.pin_owner.process_nonce == self.process_nonce and
             self.current.cleanup_registry.self_addr == @intFromPtr(&self.current.cleanup_registry) and
-            self.current.cleanup_registry.incarnation == self.current.incarnation.tagged;
+            self.current.cleanup_registry.incarnation == self.current.incarnation.tagged and
+            self.current.batch_registry.self_addr == @intFromPtr(&self.current.batch_registry) and
+            self.current.batch_registry.incarnation == self.current.incarnation.tagged and
+            self.current.accounting_ledger.matchesClient(@intFromPtr(&self.current.client));
     }
 
     pub fn reserveAttachmentBinding(
@@ -477,13 +639,115 @@ pub const ClientSlot = struct {
         );
     }
 
+    pub const AttachmentBatchRead = union(enum) {
+        committed: batch_registry_mod.Token,
+        idle,
+        terminal,
+    };
+
+    pub const BatchError = client_mod.ClientError || batch_registry_mod.Error;
+
+    /// Registry entry를 먼저 ingress로 고정한 뒤 Client queue/parser owner를 옮긴다.
+    pub fn readAttachmentBatch(
+        self: *ClientSlot,
+        stream_id: u64,
+    ) BatchError!AttachmentBatchRead {
+        if (!self.valid()) return error.MovedOrCopied;
+        // buffered payload의 free callback에서는 allocation 없는 exact pending sibling만 허용한다.
+        // miss를 parser/socket으로 내리면 parent allocator callback 안에서 wire와 allocator를 재진입한다.
+        if (batch_release_callback_active)
+            try self.current.client.requireBufferedGenerationBatch(stream_id);
+        // allocator callback 재진입은 registry generation을 예약하기 전에 막는다. 이 순서가 뒤집히면
+        // 최종 entry를 abort해도 재진입만으로 checked-monotonic generation이 소모된다.
+        const previous_allocator = try self.current.client.beginGenerationBatchAllocator(
+            self.current.guarded_allocator.allocator(),
+        );
+        defer self.current.client.restoreGenerationBatchAllocatorUnchecked(previous_allocator);
+        const reservation = try self.current.batch_registry.reserve(stream_id);
+        var reservation_live = true;
+        defer if (reservation_live)
+            self.current.batch_registry.abort(reservation) catch
+                @panic("generation batch reservation rollback drifted");
+        try self.current.batch_registry.prepareIngress(reservation);
+        var owned: batch_registry_mod.OwnedBatch = .{};
+        switch (try self.current.client.readGenerationBatch(
+            &owned,
+            stream_id,
+            reservation.entry_generation,
+        )) {
+            .idle => return .idle,
+            .terminal => return .terminal,
+            .committed => {
+                // allocator가 payload를 slot/node/stack owner와 alias하면 어느 descriptor도 안전한
+                // free 권위를 증명할 수 없다. strict GUI adapter는 registry publication 전에 fail-stop한다.
+                if (generationBatchOwnerAliases(self, &owned))
+                    @panic("generation batch payload aliases canonical owner");
+                const token = self.current.batch_registry.commitIngressUnchecked(
+                    reservation,
+                    &owned,
+                );
+                reservation_live = false;
+                return .{ .committed = token };
+            },
+        }
+    }
+
+    pub fn borrowAttachmentBatch(
+        self: *ClientSlot,
+        token: batch_registry_mod.Token,
+    ) batch_registry_mod.Error!batch_registry_mod.BatchView {
+        if (!self.valid()) return error.MovedOrCopied;
+        return self.current.batch_registry.borrow(token);
+    }
+
+    /// Accounting consume까지 callback 전에 검증한 뒤 free→consume→entry settle을 무실패로 끝낸다.
+    pub fn releaseAttachmentBatch(
+        self: *ClientSlot,
+        token: batch_registry_mod.Token,
+    ) BatchError!void {
+        if (!self.valid()) return error.MovedOrCopied;
+        if (batch_release_callback_active) return error.AdminBusy;
+        try self.current.client.rejectGenerationAllocatorCallbackReentry();
+        var cleanup: batch_registry_mod.OwnedBatch = .{};
+        const receipt = try self.current.batch_registry.preflightRelease(token, &cleanup);
+        const accounting = try self.current.client.prepareGenerationAccountingConsume(receipt);
+        self.current.batch_registry.beginReleaseUnchecked(token, &cleanup);
+        {
+            batch_release_callback_active = true;
+            defer batch_release_callback_active = false;
+            cleanup.allocator.?.free(cleanup.bytes);
+        }
+        self.current.client.consumeGenerationAccountingUnchecked(accounting);
+        cleanup.bytes = &.{};
+        cleanup.allocator = null;
+        cleanup.accounting = .{ .client_addr = 0, .transfer_id = 0, .byte_count = 0 };
+        cleanup.completeCleanupUnchecked();
+        self.current.batch_registry.finishReleaseUnchecked(token, &cleanup);
+    }
+
     pub fn tryDeinit(self: *ClientSlot) DeinitOutcome {
         if (self.lifecycle == .dead) return .already_dead;
         if (!self.valid()) return if (self.lifecycle == .deinit_reserved) .busy else .corrupt;
+        if (batch_release_callback_active) return .busy;
+        self.current.client.rejectGenerationAllocatorCallbackReentry() catch return .busy;
         if (self.current.pin_owner.cleanup_pin_count != 0 or
             self.current.pin_owner.active_cleanup != 0)
             return .busy;
+        // 두 registry 중 하나를 먼저 dead로 만든 뒤 다른 쪽 busy/corrupt를 발견하면 재시도할 수 없다.
+        // 둘의 전체 entry를 먼저 검증한 뒤에만 mutation suffix에 들어간다.
+        const cleanup_ready = self.current.cleanup_registry.preflightDeinit();
+        const batch_ready = self.current.batch_registry.preflightDeinit();
+        const accounting_ready = self.current.accounting_ledger.preflightDeinit();
+        if (cleanup_ready == .busy or batch_ready == .busy or accounting_ready == .busy)
+            return .busy;
+        if (cleanup_ready != .cleaned or batch_ready != .cleaned or accounting_ready != .cleaned)
+            return .corrupt;
         switch (self.current.cleanup_registry.tryDeinit()) {
+            .cleaned => {},
+            .busy => return .busy,
+            .corrupt, .already_dead => return .corrupt,
+        }
+        switch (self.current.batch_registry.tryDeinit()) {
             .cleaned => {},
             .busy => return .busy,
             .corrupt, .already_dead => return .corrupt,
@@ -491,6 +755,10 @@ pub const ClientSlot = struct {
         self.lifecycle = .deinit_reserved;
         self.current.pin_owner.state = .terminal;
         self.current.client.deinit();
+        switch (self.current.accounting_ledger.tryDeinit()) {
+            .cleaned => {},
+            .busy, .corrupt, .already_dead => @panic("preflighted generation accounting teardown drifted"),
+        }
         self.node_allocator.destroy(self.current);
         self.lifecycle = .dead;
         return .cleaned;
@@ -523,6 +791,595 @@ test "CR3a-2a ClientSlot teardown waits for node-local attachment reservations" 
     });
     try std.testing.expectEqual(DeinitOutcome.busy, slot.tryDeinit());
     try slot.current.cleanup_registry.abort(reserved.reservation, reserved.identity);
+    try std.testing.expectEqual(DeinitOutcome.cleaned, slot.tryDeinit());
+}
+
+test "CR3a-2b1 ClientSlot은 buffered batch owner와 accounting을 exact release한다" {
+    const allocator = std.testing.allocator;
+    var source = fixtureClient(allocator, 0xB201);
+    const bytes = try allocator.dupe(u8, "generation-batch");
+    try source.pending_batches.append(allocator, .{
+        .is_snapshot = true,
+        .stream_id = 7,
+        .bytes = bytes,
+        .allocator = allocator,
+    });
+    source.pending_batch_bytes = bytes.len;
+
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0xB201);
+    const read = try slot.readAttachmentBatch(7);
+    const token = switch (read) {
+        .committed => |token| token,
+        else => return error.TestUnexpectedResult,
+    };
+    const view = try slot.borrowAttachmentBatch(token);
+    try std.testing.expect(view.is_snapshot);
+    try std.testing.expectEqualStrings("generation-batch", view.bytes);
+    try std.testing.expectEqual(@as(usize, 1), slot.current.accounting_ledger.item_count);
+    try std.testing.expectEqual(bytes.len, slot.current.accounting_ledger.byte_count);
+    try std.testing.expectEqual(@as(usize, 1), try slot.current.batch_registry.count());
+    try std.testing.expectEqual(DeinitOutcome.busy, slot.tryDeinit());
+
+    try slot.releaseAttachmentBatch(token);
+    try std.testing.expectEqual(@as(usize, 0), slot.current.accounting_ledger.item_count);
+    try std.testing.expectEqual(@as(usize, 0), slot.current.accounting_ledger.byte_count);
+    try std.testing.expectEqual(@as(usize, 0), try slot.current.batch_registry.count());
+    try std.testing.expectError(error.InvalidReservation, slot.borrowAttachmentBatch(token));
+    try std.testing.expectError(error.InvalidReservation, slot.releaseAttachmentBatch(token));
+    try std.testing.expectEqual(DeinitOutcome.cleaned, slot.tryDeinit());
+}
+
+test "CR3a-2b1 ClientSlot batch token은 stream splice를 free 전에 거부한다" {
+    const allocator = std.testing.allocator;
+    var source = fixtureClient(allocator, 0xB202);
+    const bytes = try allocator.dupe(u8, "owned");
+    try source.pending_batches.append(allocator, .{
+        .is_snapshot = false,
+        .stream_id = 11,
+        .bytes = bytes,
+        .allocator = allocator,
+    });
+    source.pending_batch_bytes = bytes.len;
+
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0xB202);
+    const token = switch (try slot.readAttachmentBatch(11)) {
+        .committed => |token| token,
+        else => return error.TestUnexpectedResult,
+    };
+    var spliced = token;
+    spliced.stream_id = 12;
+    try std.testing.expectError(error.InvalidReservation, slot.releaseAttachmentBatch(spliced));
+    try std.testing.expectEqual(@as(usize, 1), slot.current.accounting_ledger.item_count);
+    try std.testing.expectEqual(bytes.len, slot.current.accounting_ledger.byte_count);
+    try std.testing.expectEqualStrings("owned", (try slot.borrowAttachmentBatch(token)).bytes);
+
+    try slot.releaseAttachmentBatch(token);
+    try std.testing.expectEqual(DeinitOutcome.cleaned, slot.tryDeinit());
+}
+
+test "CR3a-2b1 ClientSlot polling idle은 4096회 뒤에도 registry cap을 소비하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var source = fixtureClient(allocator, 0xB204);
+    source.fd = fds[0];
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0xB204);
+
+    try std.testing.expectEqual(ClientSlot.AttachmentBatchRead.idle, try slot.readAttachmentBatch(17));
+    try std.testing.expectEqual(@as(usize, 0), try slot.current.batch_registry.count());
+    for (1..4096) |_| {
+        try std.testing.expectEqual(ClientSlot.AttachmentBatchRead.idle, try slot.readAttachmentBatch(17));
+    }
+    try std.testing.expectEqual(@as(usize, 0), try slot.current.batch_registry.count());
+
+    const bytes = try allocator.dupe(u8, "after-idle");
+    try slot.current.client.pending_batches.append(allocator, .{
+        .is_snapshot = false,
+        .stream_id = 17,
+        .bytes = bytes,
+        .allocator = allocator,
+    });
+    slot.current.client.pending_batch_bytes = bytes.len;
+    const token = switch (try slot.readAttachmentBatch(17)) {
+        .committed => |token| token,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(usize, 1), try slot.current.batch_registry.count());
+    try slot.releaseAttachmentBatch(token);
+    try std.testing.expectEqual(DeinitOutcome.cleaned, slot.tryDeinit());
+}
+
+test "CR3a-2b1 batch와 stream-drop registry는 동시에 각각 4096 entry를 소유한다" {
+    const allocator = std.testing.allocator;
+    var source = fixtureClient(allocator, 0xB205);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0xB205);
+    var batch_reservations: [batch_registry_mod.max_entries]batch_registry_mod.Reservation = undefined;
+    var drop_reservations: [cleanup_registry_mod.max_entries]cleanup_registry_mod.Reserved = undefined;
+    for (&batch_reservations, &drop_reservations, 0..) |*batch, *drop, index| {
+        batch.* = try slot.current.batch_registry.reserve(index + 1);
+        drop.* = try slot.current.cleanup_registry.reserve(.{
+            .binding_incarnation = index + 1,
+            .binding_storage_addr = index + 1,
+            .destination_addr = index + 1,
+            .slot_incarnation = slot.incarnation.tagged,
+            .node_incarnation = slot.current.incarnation.tagged,
+            .host_id = 0xB205,
+            .connection_generation = 1,
+            .runtime_id = index + 1,
+            .role = .controller,
+            .pid = slot.pid,
+            .process_nonce = slot.process_nonce,
+        });
+    }
+    try std.testing.expectEqual(batch_registry_mod.max_entries, try slot.current.batch_registry.count());
+    try std.testing.expectEqual(cleanup_registry_mod.max_entries, try slot.current.cleanup_registry.count());
+    try std.testing.expectError(error.CapacityExhausted, slot.current.batch_registry.reserve(5000));
+    try std.testing.expectError(error.CapacityExhausted, slot.current.cleanup_registry.reserve(.{
+        .binding_incarnation = 5000,
+        .binding_storage_addr = 5000,
+        .destination_addr = 5000,
+        .slot_incarnation = slot.incarnation.tagged,
+        .node_incarnation = slot.current.incarnation.tagged,
+        .host_id = 0xB205,
+        .connection_generation = 1,
+        .runtime_id = 5000,
+        .role = .controller,
+        .pid = slot.pid,
+        .process_nonce = slot.process_nonce,
+    }));
+    for (batch_reservations, drop_reservations) |batch, drop| {
+        try slot.current.batch_registry.abort(batch);
+        try slot.current.cleanup_registry.abort(drop.reservation, drop.identity);
+    }
+    try std.testing.expectEqual(DeinitOutcome.cleaned, slot.tryDeinit());
+}
+
+test "CR3a-2b1 payload alias preflight는 slot node와 callback-local owner range를 닫는다" {
+    const allocator = std.testing.allocator;
+    var source = fixtureClient(allocator, 0xB206);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0xB206);
+    defer slot.deinit();
+    var owned: batch_registry_mod.OwnedBatch = .{};
+    owned.bytes = std.mem.asBytes(&slot)[0..1];
+    try std.testing.expect(generationBatchOwnerAliases(&slot, &owned));
+    owned.bytes = std.mem.asBytes(slot.current)[0..1];
+    try std.testing.expect(generationBatchOwnerAliases(&slot, &owned));
+    owned.bytes = std.mem.asBytes(&owned)[0..1];
+    try std.testing.expect(generationBatchOwnerAliases(&slot, &owned));
+    const separate = "separate";
+    owned.bytes = @constCast(separate);
+    try std.testing.expect(!generationBatchOwnerAliases(&slot, &owned));
+}
+
+test "CR3a-2b1 ClientNode move는 overlapping pending payload owner를 거부한다" {
+    const allocator = std.testing.allocator;
+    var source = fixtureClient(allocator, 0xB207);
+    const bytes = try allocator.dupe(u8, "aliased");
+    for ([_]u64{ 7, 8 }) |stream_id|
+        try source.pending_batches.append(allocator, .{
+            .is_snapshot = false,
+            .stream_id = stream_id,
+            .bytes = bytes,
+            .allocator = allocator,
+        });
+    source.pending_batch_bytes = bytes.len * 2;
+    var slot: ClientSlot = undefined;
+    try std.testing.expectError(
+        error.InvalidSource,
+        ClientSlot.initInPlace(&slot, allocator, &source, 0xB207),
+    );
+    const alias = source.pending_batches.orderedRemove(1);
+    _ = alias;
+    source.pending_batch_bytes -= bytes.len;
+    source.deinit();
+}
+
+const BatchFreeProbe = struct {
+    parent: std.mem.Allocator,
+    slot: ?*ClientSlot = null,
+    observed_items_before_reentry: usize = 0,
+    sibling_token: ?batch_registry_mod.Token = null,
+    reentry_error: ?anyerror = null,
+
+    fn allocator(self: *BatchFreeProbe) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(
+        context: *anyopaque,
+        len: usize,
+        alignment: std.mem.Alignment,
+        return_address: usize,
+    ) ?[*]u8 {
+        const self: *BatchFreeProbe = @ptrCast(@alignCast(context));
+        return self.parent.vtable.alloc(self.parent.ptr, len, alignment, return_address);
+    }
+
+    fn resize(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        return_address: usize,
+    ) bool {
+        const self: *BatchFreeProbe = @ptrCast(@alignCast(context));
+        return self.parent.vtable.resize(
+            self.parent.ptr,
+            memory,
+            alignment,
+            new_len,
+            return_address,
+        );
+    }
+
+    fn remap(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        return_address: usize,
+    ) ?[*]u8 {
+        const self: *BatchFreeProbe = @ptrCast(@alignCast(context));
+        return self.parent.vtable.remap(
+            self.parent.ptr,
+            memory,
+            alignment,
+            new_len,
+            return_address,
+        );
+    }
+
+    fn free(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        return_address: usize,
+    ) void {
+        const self: *BatchFreeProbe = @ptrCast(@alignCast(context));
+        if (self.slot) |slot| {
+            self.observed_items_before_reentry = slot.current.accounting_ledger.item_count;
+            const result = slot.readAttachmentBatch(12) catch |err| {
+                self.reentry_error = err;
+                self.parent.vtable.free(
+                    self.parent.ptr,
+                    memory,
+                    alignment,
+                    return_address,
+                );
+                return;
+            };
+            switch (result) {
+                .committed => |token| self.sibling_token = token,
+                else => self.reentry_error = error.TestUnexpectedResult,
+            }
+            self.slot = null;
+        }
+        self.parent.vtable.free(self.parent.ptr, memory, alignment, return_address);
+    }
+};
+
+test "CR3a-2b1 release allocator callback 동안 charge를 유지하고 sibling admission을 허용한다" {
+    const allocator = std.testing.allocator;
+    var probe: BatchFreeProbe = .{ .parent = allocator };
+    var source = fixtureClient(allocator, 0xB203);
+    const first = try probe.allocator().dupe(u8, "first");
+    const sibling = try allocator.dupe(u8, "sibling");
+    try source.pending_batches.append(allocator, .{
+        .is_snapshot = false,
+        .stream_id = 11,
+        .bytes = first,
+        .allocator = probe.allocator(),
+    });
+    try source.pending_batches.append(allocator, .{
+        .is_snapshot = false,
+        .stream_id = 12,
+        .bytes = sibling,
+        .allocator = allocator,
+    });
+    source.pending_batch_bytes = first.len + sibling.len;
+
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0xB203);
+    const first_token = switch (try slot.readAttachmentBatch(11)) {
+        .committed => |token| token,
+        else => return error.TestUnexpectedResult,
+    };
+    probe.slot = &slot;
+    try slot.releaseAttachmentBatch(first_token);
+    try std.testing.expectEqual(@as(usize, 1), probe.observed_items_before_reentry);
+    try std.testing.expect(probe.reentry_error == null);
+    const sibling_token = probe.sibling_token orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), slot.current.accounting_ledger.item_count);
+    try std.testing.expectEqualStrings("sibling", (try slot.borrowAttachmentBatch(sibling_token)).bytes);
+    try slot.releaseAttachmentBatch(sibling_token);
+    try std.testing.expectEqual(DeinitOutcome.cleaned, slot.tryDeinit());
+}
+
+const GenerationAllocatorReentryProbe = struct {
+    parent: std.mem.Allocator,
+    same: ?*ClientSlot = null,
+    foreign: ?*ClientSlot = null,
+    same_token: ?batch_registry_mod.Token = null,
+    foreign_token: ?batch_registry_mod.Token = null,
+    deinit_target: ?*ClientSlot = null,
+    release_mode: bool = false,
+    armed: bool = false,
+    fired: bool = false,
+    same_error: ?anyerror = null,
+    foreign_error: ?anyerror = null,
+    same_direct_read_error: ?anyerror = null,
+    foreign_direct_read_error: ?anyerror = null,
+    deinit_outcome: ?DeinitOutcome = null,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn attemptReentry(self: *@This()) void {
+        if (!self.armed or self.fired) return;
+        self.fired = true;
+        if (self.release_mode) {
+            self.same.?.releaseAttachmentBatch(self.same_token.?) catch |err| {
+                self.same_error = err;
+            };
+            self.foreign.?.releaseAttachmentBatch(self.foreign_token.?) catch |err| {
+                self.foreign_error = err;
+            };
+            _ = self.same.?.readAttachmentBatch(91) catch |err| {
+                self.same_direct_read_error = err;
+            };
+            _ = self.foreign.?.readAttachmentBatch(92) catch |err| {
+                self.foreign_direct_read_error = err;
+            };
+            self.deinit_outcome = self.deinit_target.?.tryDeinit();
+            return;
+        }
+        _ = self.same.?.readAttachmentBatch(91) catch |err| {
+            self.same_error = err;
+        };
+        _ = self.foreign.?.readAttachmentBatch(92) catch |err| {
+            self.foreign_error = err;
+        };
+    }
+
+    fn alloc(
+        context: *anyopaque,
+        len: usize,
+        alignment: std.mem.Alignment,
+        return_address: usize,
+    ) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.attemptReentry();
+        return self.parent.vtable.alloc(self.parent.ptr, len, alignment, return_address);
+    }
+
+    fn resize(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        return_address: usize,
+    ) bool {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.attemptReentry();
+        return self.parent.vtable.resize(
+            self.parent.ptr,
+            memory,
+            alignment,
+            new_len,
+            return_address,
+        );
+    }
+
+    fn remap(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        return_address: usize,
+    ) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.attemptReentry();
+        return self.parent.vtable.remap(
+            self.parent.ptr,
+            memory,
+            alignment,
+            new_len,
+            return_address,
+        );
+    }
+
+    fn free(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        return_address: usize,
+    ) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.attemptReentry();
+        self.parent.vtable.free(self.parent.ptr, memory, alignment, return_address);
+    }
+};
+
+test "CR3a-2b1 parser allocator callback은 same과 foreign ClientSlot mutation을 wire 전에 거부한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var probe: GenerationAllocatorReentryProbe = .{ .parent = allocator };
+    const checked_allocator = probe.allocator();
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+
+    var source = fixtureClient(checked_allocator, 0xB208);
+    source.fd = fds[0];
+    const same_sibling_bytes = try allocator.dupe(u8, "same-sibling");
+    try source.pending_batches.append(checked_allocator, .{
+        .is_snapshot = false,
+        .stream_id = 8,
+        .bytes = same_sibling_bytes,
+        .allocator = allocator,
+    });
+    source.pending_batch_bytes = same_sibling_bytes.len;
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, checked_allocator, &source, 0xB208);
+    var foreign_source = fixtureClient(allocator, 0xB209);
+    const foreign_sibling_bytes = try allocator.dupe(u8, "foreign-sibling");
+    try foreign_source.pending_batches.append(allocator, .{
+        .is_snapshot = false,
+        .stream_id = 9,
+        .bytes = foreign_sibling_bytes,
+        .allocator = allocator,
+    });
+    foreign_source.pending_batch_bytes = foreign_sibling_bytes.len;
+    var foreign: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&foreign, allocator, &foreign_source, 0xB209);
+    defer foreign.deinit();
+    var deinit_source = fixtureClient(allocator, 0xB20A);
+    var deinit_target: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&deinit_target, allocator, &deinit_source, 0xB20A);
+    probe.same = &slot;
+    probe.foreign = &foreign;
+    probe.deinit_target = &deinit_target;
+    probe.same_token = switch (try slot.readAttachmentBatch(8)) {
+        .committed => |token| token,
+        else => return error.TestUnexpectedResult,
+    };
+    probe.foreign_token = switch (try foreign.readAttachmentBatch(9)) {
+        .committed => |token| token,
+        else => return error.TestUnexpectedResult,
+    };
+
+    const wire = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .delta_chunk, .stream_id = 7, .flags = protocol.Flags.end_stream },
+        "guarded-direct",
+    );
+    defer allocator.free(wire);
+    try socket_server.writeAll(fds[1], wire);
+    probe.armed = true;
+    const token = switch (try slot.readAttachmentBatch(7)) {
+        .committed => |token| token,
+        else => return error.TestUnexpectedResult,
+    };
+    probe.armed = false;
+
+    try std.testing.expect(probe.fired);
+    try std.testing.expectEqual(error.AdminBusy, probe.same_error.?);
+    try std.testing.expectEqual(error.AdminBusy, probe.foreign_error.?);
+    try std.testing.expectEqual(@as(u64, 2), slot.current.batch_registry.last_generation);
+    try std.testing.expectEqual(@as(u64, 1), foreign.current.batch_registry.last_generation);
+    try std.testing.expectEqual(@as(usize, 2), try slot.current.batch_registry.count());
+    try std.testing.expectEqual(@as(usize, 1), try foreign.current.batch_registry.count());
+    try std.testing.expectEqual(@as(usize, 0), foreign.current.client.pending_batches.items.len);
+    try std.testing.expect(std.meta.eql(checked_allocator, slot.current.client.allocator));
+    try std.testing.expect(slot.current.client.parser.usesAllocator(checked_allocator));
+    try std.testing.expectEqualStrings("guarded-direct", (try slot.borrowAttachmentBatch(token)).bytes);
+    var restored_rpc: client_mod.PreparedBlockingRpcStorage = .{};
+    _ = try slot.current.client.prepareBlockingRpcStorage(&restored_rpc, "host.info", null);
+    try slot.current.client.abortPreparedBlockingRpcStorage(&restored_rpc);
+    try std.testing.expect(client_mod.Client.preparedBlockingRpcStorageSettled(&restored_rpc));
+
+    probe.fired = false;
+    probe.same_error = null;
+    probe.foreign_error = null;
+    probe.release_mode = true;
+    probe.armed = true;
+    try slot.releaseAttachmentBatch(token);
+    probe.armed = false;
+    try std.testing.expect(probe.fired);
+    try std.testing.expectEqual(error.AdminBusy, probe.same_error.?);
+    try std.testing.expectEqual(error.AdminBusy, probe.foreign_error.?);
+    try std.testing.expectEqual(error.AdminBusy, probe.same_direct_read_error.?);
+    try std.testing.expectEqual(error.AdminBusy, probe.foreign_direct_read_error.?);
+    try std.testing.expectEqual(DeinitOutcome.busy, probe.deinit_outcome.?);
+    try std.testing.expectEqual(@as(u64, 2), slot.current.batch_registry.last_generation);
+    try std.testing.expectEqual(@as(u64, 1), foreign.current.batch_registry.last_generation);
+    try std.testing.expectEqual(@as(usize, 1), try slot.current.batch_registry.count());
+    try std.testing.expectEqual(@as(usize, 1), try foreign.current.batch_registry.count());
+    try std.testing.expectEqualStrings(
+        "same-sibling",
+        (try slot.borrowAttachmentBatch(probe.same_token.?)).bytes,
+    );
+    try std.testing.expectEqualStrings(
+        "foreign-sibling",
+        (try foreign.borrowAttachmentBatch(probe.foreign_token.?)).bytes,
+    );
+
+    const buffered_outer_bytes = try probe.allocator().dupe(u8, "buffered-outer");
+    try slot.current.client.pending_batches.append(checked_allocator, .{
+        .is_snapshot = false,
+        .stream_id = 10,
+        .bytes = buffered_outer_bytes,
+        .allocator = probe.allocator(),
+    });
+    slot.current.client.pending_batch_bytes += buffered_outer_bytes.len;
+    const buffered_token = switch (try slot.readAttachmentBatch(10)) {
+        .committed => |buffered| buffered,
+        else => return error.TestUnexpectedResult,
+    };
+    probe.fired = false;
+    probe.same_error = null;
+    probe.foreign_error = null;
+    probe.same_direct_read_error = null;
+    probe.foreign_direct_read_error = null;
+    probe.deinit_outcome = null;
+    const buffered_followup_wire = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .delta_chunk, .stream_id = 91, .flags = protocol.Flags.end_stream },
+        "after-buffered-callback",
+    );
+    defer allocator.free(buffered_followup_wire);
+    try socket_server.writeAll(fds[1], buffered_followup_wire);
+    probe.armed = true;
+    try slot.releaseAttachmentBatch(buffered_token);
+    probe.armed = false;
+    try std.testing.expect(probe.fired);
+    try std.testing.expectEqual(error.AdminBusy, probe.same_error.?);
+    try std.testing.expectEqual(error.AdminBusy, probe.foreign_error.?);
+    try std.testing.expectEqual(error.AdminBusy, probe.same_direct_read_error.?);
+    try std.testing.expectEqual(error.AdminBusy, probe.foreign_direct_read_error.?);
+    try std.testing.expectEqual(DeinitOutcome.busy, probe.deinit_outcome.?);
+    try std.testing.expectEqual(@as(u64, 3), slot.current.batch_registry.last_generation);
+    try std.testing.expectEqual(@as(u64, 1), foreign.current.batch_registry.last_generation);
+    try std.testing.expectEqual(@as(usize, 1), try slot.current.batch_registry.count());
+    try std.testing.expectEqual(@as(usize, 1), try foreign.current.batch_registry.count());
+    try std.testing.expectEqualStrings(
+        "same-sibling",
+        (try slot.borrowAttachmentBatch(probe.same_token.?)).bytes,
+    );
+    try std.testing.expectEqualStrings(
+        "foreign-sibling",
+        (try foreign.borrowAttachmentBatch(probe.foreign_token.?)).bytes,
+    );
+    const followup_token = switch (try slot.readAttachmentBatch(91)) {
+        .committed => |followup| followup,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualStrings(
+        "after-buffered-callback",
+        (try slot.borrowAttachmentBatch(followup_token)).bytes,
+    );
+    try slot.releaseAttachmentBatch(followup_token);
+    try slot.releaseAttachmentBatch(probe.same_token.?);
+    try foreign.releaseAttachmentBatch(probe.foreign_token.?);
+    try std.testing.expectEqual(DeinitOutcome.cleaned, deinit_target.tryDeinit());
     try std.testing.expectEqual(DeinitOutcome.cleaned, slot.tryDeinit());
 }
 

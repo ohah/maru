@@ -855,9 +855,20 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    final-address one-shot `CleanupPermit`으로 실행한다. permit 동안 parent pin release는 busy이며 cleanup result는
    `completed|retryable_preserved|indeterminate_or_partial`의 닫힌 전이다.
    두 타입 모두 raw `*Client`, 임의 callback, request/read/write admission을 노출하지 않는다. **CR3a-2**는 generation 1 compatibility
-   wiring으로 현 `AttachmentTransport.context=*Client`를 generation-bound live transport와 exact `ConnectionLease`로 분리하고,
-   실제 `RemoteAttachment` attach/pump/deinit·failed-release parity를 닫는다. 이때 reconnect, current 교체, retired node 생성은
-   여전히 0이고 cleanup은 typed result만 반환하며 incident/artifact mutation은 CR0b까지 0이다.
+   wiring을 다섯 vertical merge gate로 닫고 각 gate 끝의 실제 제품 경로에는 canonical cleanup owner를 하나만 둔다.
+   CR3a-2a는 GUI `RemoteRuntime` 안에 final-address `GenerationAttachment`, neutral binding leaf와
+   `GenerationTransport` 최소 core(`capabilities|prepareRequest|executePreparedRequest|abortPreparedRequest|poison`)를 넣어 실제 attach/deinit의
+   stream-drop reservation·lease release를 배선하고, 외부 CLI의 movable `RemoteAttachment` graph는 바꾸지 않는다.
+   CR3a-2b는 `Client` 내부 accounting을 보존한 batch queue→node registry owner transaction을 실제 pump/release에 배선하고 GUI
+   `AttachmentTransport.context=*Client`를 node-bound batch/drop adapter로 즉시 교체한다. CR3a-2c는 나머지 stream/event
+   primitive를 최소 core에 추가해 `RemoteRuntime.client` direct escape를 HostAdapter가 발급하는 작은 closed transport facade로
+   완전히 교체한다. CR3a-2d는
+   실제 owner의 typed failure/reentry/aggregate handoff를 닫고, CR3a-2e는 actual socket
+   parity와 production boundary를 닫는다. HostAdapter는 RPC 전에 neutral binding의 node pin과 빈 cleanup entry를 예약하고 attach
+   성공 뒤 stream ID를 무할당으로 결속하므로 post-attach lease mint 실패
+   rollback을 만들지 않는다. external-pump의 `ExternalInboxLedger`와 movable attachment graph는 흡수·공유하지 않는다. 이때
+   reconnect, current 교체, retired node 생성은 여전히 0이고 cleanup은 typed result만 반환하며 incident/artifact mutation은
+   CR0b까지 0이다.
    CR3b는 pool membership과 독립된 connection generation의 checked-monotonic 전이·publish·overflow, main-thread
    `withCurrent` stack borrow, admission close,
    `Client.canRetire()`와 tick-end deferred retirement(동시 retired Client hard cap 2)를 닫는다. CR3c에서 `RemoteGeneration`을

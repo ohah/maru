@@ -182,9 +182,69 @@ Codex의 과거 파일에는 `thread_source`가 없을 수 있다. 이 경우 us
 
 ## 6. 구현 순서와 완료 조건
 
+### AS3-a — SessionDockLayout 첫 제품 surface 단위
+
+AS3의 첫 PR은 목록을 다시 ANSI 문자열로 조립하는 것이 아니라, `src/chrome/components/session_dock.zig`
+facade와 그 하위 `session_dock/{types,ids,build,view}.zig`만이 session-dock Chrome component를
+소유하게 한다. 파일별 책임은 다음처럼 고정한다.
+
+- `types.zig`는 worker 완료 snapshot에서 이미 안전하게 정규화된 immutable `Props`와 header/scope/search/group/card의
+  표시 상태만 받는다. `AppSession`, provider 파일, PTY, CoreText/Metal handle 및 raw JSONL을 import하지 않는다.
+- `ids.zig`는 frame-local `UiActionId`와 semantic intent(`refresh`, `scope`, `focus_search`, `toggle_group`, `select_card`)의
+  table을 만든다. 카드 intent는 화면 행 번호만 신뢰하지 않고 snapshot generation과 stable archive identity를
+  platform으로 돌려준다. 새 snapshot을 publish하기 전 interaction capture를 버리고, platform은 generation/identity가
+  일치할 때만 intent를 적용한다.
+- `build.zig`는 caller-owned bounded buffer로 fixed header, segmented scope, 독립 search field, scroll clip,
+  group, card의 `UiNode`/`UiRectTree`를 한 번 만든다. 같은 tree가 `view`, pointer hit, visible-row window와
+  keyboard scroll origin의 유일한 geometry다.
+- `view.zig`는 tree와 props만 읽어 background/border/hover/selected/skeleton/spinner의 typed paint와 text
+  semantic draw를 낸다. 문자열 폭·한 줄 clip/ellipsis는 `chrome.text_layout`의 기존 단일 출처를 사용하며,
+  text node가 layout 밖에서 두 번째 x/y/width를 계산하지 않는다.
+
+이 slice에서 `ui.paint`가 여전히 일반 `UiNode.text`를 GPU glyph로 직접 rasterize하지 않는 한계는
+`ChromeDraw.text` bridge로 닫는다. 즉 component `view.zig`가 backing-pixel origin과 clipped run을 가진
+semantic text op를 만들고, macOS의 `platform/macos/chrome/session_dock_lowering.zig`가 그 run을 **한 번만**
+기존 CoreText `DrawList`/atlas 경로로 옮긴다. 같은 adapter는 card quad를 renderer layer 2로 낮춰 text보다 먼저
+그린다. 이것은 `app_session.zig`의 `buildDockNoticeDrawList`나 pipe scope 문자열을 재사용하는 legacy direct draw가
+아니다. component가 text 내용·rect·tone을 모두 소유하고 platform은 공통 backend lowering만 한다. generic GPU text
+shaping은 이후 별도 ML slice이며, 이 bridge의 문자열/geometry contract와 artifact를 깨지 않고 교체해야 한다.
+
+`AppSession`은 완료된 archive projection을 한 frame의 `Props`로 투영하고, component가 돌려준 action table과
+`UiRectTree`의 완료 snapshot을 함께 publish한다. pointer는 다음 frame에 tree를 재계산하지 않고 **직전에 실제로
+paint한** action table만 선택하며, 새 snapshot publish는 기존 capture를 취소한다. card action은 archive tab을 열 수
+있지만 provider 실행은 절대 하지 않는다. refresh/scope/group/selection은 기존 memory-only state만 바꾸며,
+검색 keypress/hover/frame은 filesystem I/O, JSONL parse, worker wait를 하지 않는다. 이 slice는
+`ArchiveSessionDetailPanel` 및 resume/reveal action을 포함하지 않는다(AS4).
+
+Lab product capture는 최소한 `empty`, initial `loading`, retained list를 포함한다. Lab은 실제 `SessionDock`
+component를 거쳐 card/scope/header/search와 semantic text op를 만들고, 그 op를
+`session_dock_lowering.buildTextDrawList` → CoreText atlas → 제품 `maru_metal_renderer_draw`로 전달한다. 따라서
+480×720 fixed dark PNG/JSON에는 `text_rasterized=true`, glyph cell 수와 readback 성공을 함께 남긴다. 이 artifact는
+회색 quad만 있는 fixture가 아니라 카드와 텍스트가 함께 합성된 visual renderer evidence다.
+
+다만 Lab 입력은 redacted fixture이고 `AppSession`의 실제 archive worker/snapshot publish를 만들지는 않는다. 그러므로
+active `agent_sessions` host screenshot E2E와 precise scroll gesture, refresh 중 selection·scroll 보존은
+여전히 별도 gate다. component text/ellipsis와 scope width는 pure test로, primary card click은 published tree/action
+table을 소비하는 host path로 고정한다.
+
+### AS3-b — published-tree pointer lifecycle
+
+AS3-a 다음 작은 product slice는 새 hit-test나 archive 행 산술을 추가하지 않고, 직전에 paint한
+`UiRectTree`/action table로 `move → down → up` lifecycle을 끝까지 소비한다. `hoverCursor`는 agent-session
+tree 영역에서 component-local backing px로 한 번 변환해 `.move`를 dispatch하고, 도크 밖·창 밖 sentinel에서는
+동일 dispatch로 stale hover를 지운다. pointer down은 capture/focus만 만들며 provider/archive action을 실행하지
+않는다. primary up은 capture가 있으면 도크 밖에서 일어나도 같은 tree의 action id를 한 번만 resolve하고, generation이
+일치할 때에만 refresh/scope/search/group/card intent를 적용한다. 그러므로 down 뒤 refresh가 새 snapshot을 publish하면
+reconcile이 capture를 취소해 늦은 up이 옛 record를 열 수 없다.
+
+도크 content 안의 drag/up은 terminal selection·PTY mouse reporting으로 새지 않고 component lifecycle에서 소비한다.
+이 slice의 test는 hover enter/leave, down이 side effect를 내지 않음, up 1회 action, outside-up capture, snapshot
+replace 뒤 stale-up 무효를 고정한다. 카드 중간 픽셀을 보존하는 scroll offset/clip과 refresh 중 scroll·selection E2E는
+다음 AS3-c이며, AS3-b가 행 수 기반 scroll을 정밀 스크롤이라고 주장하지 않는다.
+
 1. **AS1 — 순수 모델·parser:** provider-neutral record, Claude/Codex streaming parser, trust grade, dedup/title/summary/redaction/filter/sort pure tests. 실제 사용자 log는 fixture로 넣지 않는다.
 2. **AS2 — bounded scanner:** no-follow discovery, candidate/file/total caps, cancellation/generation, in-memory identity parse cache, 최신순 bounded worker pool과 완료 snapshot atomic publish, metrics. refresh는 직전 완료 snapshot을 유지하고 새 scan이 끝날 때만 교체한다. main tick filesystem I/O=0·JSON parse=0·worker wait=0을 counter와 source boundary test로 고정한다.
-3. **AS3 — 도크 Metal component vertical slice:** `SessionDockLayout`과 header/scope/search/group/card/scroll-area primitive를 순수 props/state/layout/view/hit-test/action으로 만든 뒤 host/backend의 semantic draw → Metal GPU lowering에 연결한다. 기존 direct text draw와 pipe scope label은 이 slice에서 제거한다. layout 공유 test가 view rect=hit rect=visible-row origin을, search keypress I/O=0·row 한 번 클릭 provider 실행=0·main thread JSONL I/O=0을 고정한다. loading spinner는 snapshot 유무별로 skeleton 또는 기존 목록 유지인지도 integration test로 고정한다.
+3. **AS3 — 도크 Metal component vertical slice:** `SessionDockLayout`과 header/scope/search/group/card/scroll-area primitive를 순수 props/state/layout/view/hit-test/action으로 만든 뒤 host/backend의 semantic draw → Metal GPU lowering에 연결한다. 기존 direct text draw와 pipe scope label은 이 slice에서 제거한다. layout 공유 test가 view rect=hit rect=visible-row origin을, search keypress I/O=0·row 한 번 클릭 provider 실행=0·main thread JSONL I/O=0을 고정한다. loading spinner는 snapshot 유무별로 skeleton 또는 기존 목록 유지인지도 integration test로 고정한다. **AS3-a는 component→CoreText/Metal card background, AS3-b는 published-tree hover/down/up lifecycle을 연결한다. card 중간을 보존하는 precise scroll, refresh 중 selection/scroll E2E와 active host screenshot E2E는 AS3의 남은 gate다.**
 4. **AS4 — archive Metal detail panel·explicit actions·제품 gate:** `ArchiveSessionDetailPanel`을 PTY 없는 Metal-rendered surface로 연결하고 bounded recent/permission summary, loading/stale identity disable, exact live mapping, source reveal, `워크트리에서 재개`의 argv-only immediate new-Term activation을 닫는다. resume/log의 click rect와 `⌘↵`/`⌘L` shortcut은 같은 action identity를 소비한다. `열린 세션으로 이동`은 exact live identity가 있을 때만 별도 pointer/Enter action으로 제공한다. macOS fixture E2E는 dock card hover/selection/collapse/scroll, refresh 중 snapshot 보존, detail loading→ready/stale, disabled action, resume/reveal을 확인한다. 실제 provider 계정/개인 이력에 대한 재개는 사용자가 직접 승인한 수동 gate일 뿐 CI 증거가 아니다.
 
 ## 7. 설계 검토 기록 — 적대적 5회

@@ -269,7 +269,16 @@ pub fn build(b: *std.Build) void {
             .file = b.path("src/platform/macos/maru_metal_renderer.m"),
             .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
         });
+        // Lab의 visual artifact도 component가 만든 text DrawList를 제품 CoreText atlas로
+        // 올린 뒤 같은 Metal renderer로 읽는다. quad만 찍는 회색 fixture를 UI 증거로
+        // 오인하지 않도록 CoreText bridge를 이 executable에 명시적으로 연결한다.
+        macos_chrome_lab_smoke.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/macos/coretext_smoke.m"),
+            .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
+        });
         macos_chrome_lab_smoke.root_module.linkFramework("Foundation", .{});
+        macos_chrome_lab_smoke.root_module.linkFramework("CoreText", .{});
+        macos_chrome_lab_smoke.root_module.linkFramework("CoreGraphics", .{});
         macos_chrome_lab_smoke.root_module.linkFramework("Metal", .{});
         macos_chrome_lab_smoke.root_module.linkFramework("QuartzCore", .{});
 

@@ -53,10 +53,12 @@ const agent_session_archive_backend = @import("agent_session_archive_backend.zig
 const agent_session_archive_detail_backend = @import("agent_session_archive_detail_backend.zig");
 const agent_session_archive_scope_backend = @import("agent_session_archive_scope_backend.zig");
 const chrome_metal_lowering = @import("chrome/metal_lowering.zig");
+const session_dock_lowering = @import("chrome/session_dock_lowering.zig");
 test {
     // Chrome Lab은 제품 AppSession이 소유하지 않는 test-only fixture다. 다만 이 import로 app-host
     // 테스트 빌드에서 facade/module ownership과 lowering API drift를 컴파일 시점에 잡는다.
     _ = @import("chrome/lab.zig");
+    _ = @import("chrome/session_dock_lowering.zig");
 }
 const agent_session_archive_view = maru.session.agent_session_archive_view;
 const agent_session_archive_detail = maru.session.agent_session_archive_detail;
@@ -2835,6 +2837,12 @@ pub const AppSession = struct {
     agent_session_archive_records: std.ArrayList(agent_session_archive_backend.Record) = .empty,
     agent_session_archive_filtered_indices: std.ArrayList(usize) = .empty,
     agent_session_archive_projection: agent_session_archive_view.Projection = .{},
+    /// The completed component tree/action table that was actually painted in the latest
+    /// frame. Mouse events consume this snapshot rather than rebuilding archive geometry.
+    agent_session_dock_entries: std.ArrayList(chrome.ui.tree.RectEntry) = .empty,
+    agent_session_dock_actions: std.ArrayList(chrome.components.session_dock.ids.Entry) = .empty,
+    agent_session_dock_interaction: chrome.ui.interaction.InteractionState = .{},
+    agent_session_dock_snapshot_generation: u64 = 1,
     /// View-lifetime only canonical cwd keys. A missing/deleted/remote cwd uses
     /// the empty unknown-location key and remains distinct from lexical paths.
     agent_session_archive_collapsed_groups: std.ArrayList([]u8) = .empty,
@@ -13010,26 +13018,6 @@ pub const AppSession = struct {
         return if (index < self.file_tree_rows.items.len) index else null;
     }
 
-    const AgentSessionArchiveHit = union(enum) { group: usize, record: usize };
-
-    /// Archive 본문은 group header 한 줄 또는 session card 세 줄이다. Fixed
-    /// chrome(header/scope)는 visual-row 좌표계에 절대 섞지 않는다.
-    fn agentSessionArchiveHitAt(self: *const AppSession, x_px: f64, y_px: f64) ?AgentSessionArchiveHit {
-        if (self.dock.view != .agent_sessions or !self.dockVisible() or self.cell_height_px == 0) return null;
-        const content = self.dockGeometry().tree_content;
-        if (!layout_math.pointInRect(x_px, y_px, content)) return null;
-        const local_row: usize = @intFromFloat((y_px - @as(f64, @floatFromInt(content.y))) /
-            @as(f64, @floatFromInt(self.cell_height_px)));
-        const visible_rows = content.h / self.cell_height_px;
-        if (local_row < 2 or local_row >= visible_rows) return null;
-        const visual = self.agent_session_archive_scroll_rows + local_row - 2;
-        const found = self.agent_session_archive_projection.visualRowAt(visual) orelse return null;
-        return switch (self.agent_session_archive_projection.entries.items[found.entry_index]) {
-            .group => |group_index| .{ .group = group_index },
-            .card => |record_index| .{ .record = record_index },
-        };
-    }
-
     fn agentSessionArchiveVisibleContentRows(self: *const AppSession) usize {
         if (self.cell_height_px == 0) return 0;
         const rows = self.dockGeometry().tree_content.h / self.cell_height_px;
@@ -13073,6 +13061,8 @@ pub const AppSession = struct {
         const staged = agent_session_archive_view.build(self.allocator, items.items, collapsed) catch return;
         self.agent_session_archive_projection.deinit(self.allocator);
         self.agent_session_archive_projection = staged;
+        self.agent_session_dock_snapshot_generation +%= 1;
+        if (self.agent_session_dock_snapshot_generation == 0) self.agent_session_dock_snapshot_generation = 1;
     }
 
     fn toggleAgentSessionArchiveGroup(self: *AppSession, group_index: usize) void {
@@ -13127,29 +13117,6 @@ pub const AppSession = struct {
         self.agent_session_archive_selected = null;
         self.metal_dirty = true;
         return true;
-    }
-
-    fn agentSessionArchiveRefreshAt(self: *const AppSession, x_px: f64, y_px: f64) bool {
-        if (self.dock.view != .agent_sessions or !self.dockVisible() or self.cell_height_px == 0) return false;
-        const content = self.dockGeometry().tree_content;
-        if (!layout_math.pointInRect(x_px, y_px, content)) return false;
-        return y_px < @as(f64, @floatFromInt(content.y + self.cell_height_px));
-    }
-
-    fn agentSessionArchiveScopeAt(self: *const AppSession, x_px: f64, y_px: f64) ?AgentSessionArchiveScope {
-        if (self.dock.view != .agent_sessions or !self.dockVisible() or self.cell_height_px == 0) return null;
-        const content = self.dockGeometry().tree_content;
-        if (!layout_math.pointInRect(x_px, y_px, content)) return null;
-        const local_row: usize = @intFromFloat((y_px - @as(f64, @floatFromInt(content.y))) / @as(f64, @floatFromInt(self.cell_height_px)));
-        if (local_row != 1) return null;
-        const width = @max(@as(u32, 1), content.w);
-        const column: u2 = @intCast(@min(@as(u32, 2), @as(u32, @intFromFloat((x_px - @as(f64, @floatFromInt(content.x))) * 3.0 / @as(f64, @floatFromInt(width))))));
-        return switch (column) {
-            0 => .workspace,
-            1 => .project,
-            2 => .all,
-            else => unreachable,
-        };
     }
 
     fn fileTreeNamespaceMutationBusy(self: *const AppSession) bool {
@@ -21344,11 +21311,12 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
-    /// 버튼 없는 마우스 이동(hover)을 mouse reporting으로 PTY에 흘린다. Swift가 mouseMoved마다(60~120Hz)
-    /// 부르지만, any-event(DECSET 1003)가 아니면 즉시 빠진다 — 매 이동마다 chrome 히트테스트(leaf_rects alloc)·
-    /// 셀 변환을 돌리지 않게 tracking gate를 가장 먼저 친다. tracking 읽기·reportMouse(코어 response 생성)는
-    /// 락 아래(리더 core.write·response 경합 방지, docs/io-render-threading.md PR3), writeInput은 락 밖(PR1).
-    /// 같은 셀로의 반복 이동은 스킵해(셀 단위 변화만 리포트) PTY·트래킹 앱 부하를 막는다. button 3 = no-button.
+    /// 버튼 없는 마우스 이동(hover)을 먼저 bounded SessionDock tree에, 이어 필요할 때만 mouse reporting으로 PTY에
+    /// 흘린다. Swift가 mouseMoved마다(60~120Hz) 부르지만 SessionDock dispatch는 allocation/I/O 없이 visible
+    /// entries만 역순 hit-test하고 state가 바뀔 때만 redraw를 세운다. 그 뒤 any-event(DECSET 1003)가 아니면
+    /// terminal chrome hit-test(leaf_rects alloc)·셀 변환을 돌리지 않고 즉시 빠진다. tracking 읽기·reportMouse(코어
+    /// response 생성)는 락 아래(리더 core.write·response 경합 방지, docs/io-render-threading.md PR3), writeInput은
+    /// 락 밖(PR1). 같은 셀로의 반복 이동은 스킵해(셀 단위 변화만 리포트) PTY·트래킹 앱 부하를 막는다. button 3 = no-button.
     /// 베이스: xterm — any-event(1003)는 버튼 없는 motion도 Cb=3(+32 motion 비트)로 인코딩한다.
     pub fn mouseMoved(self: *AppSession, x_px: f64, y_px: f64, mods: i32) void {
         if (!self.surface_initialized) return;
@@ -21358,6 +21326,10 @@ pub const AppSession = struct {
             self.last_motion_cell = null;
             return;
         }
+        // `hoverCursor` normally drives this same transition, but the event stream also reaches
+        // this entry point when the terminal has DECSET 1003 enabled. Keep the component state
+        // correct in that case without making agent-session hover depend on PTY tracking mode.
+        _ = self.agentSessionDockPointer(.move, x_px, y_px);
         const active = self.activeSurface();
         // 비-1003이면 dedup도 비운다 — 다음 1003 진입의 첫 셀이 stale last_motion_cell로 막히지 않게.
         // **host-backed면 관측 모드가 SSOT**다: placeholder core는 항상 `.none`이라 예전 코드는 여기서 항상 빠져
@@ -21544,6 +21516,19 @@ pub const AppSession = struct {
         // 처리가 없는 인터랙티브 오버레이(find/palette)뿐이다 — 클릭이 뒤(터미널·divider/탭 드래그·사이드바)로 새지 않게
         // 막는다(키가 모달에서 소비되는 것과 같은 규율). 포인터를 실제로 쓰는 모달 위젯(슬라이더·토글·색)은 CS-4-1+에서 이 경로에 붙는다.
         if (self.chrome_host.handlePointer(chromePointerFromMouse(kind, x_px, y_px, button, mods)) != null) return;
+        // SessionDock has no platform row arithmetic. While its capture is live, drag/up stays
+        // with the same published component tree even if the pointer leaves the dock; an up over
+        // a terminal must not begin a terminal selection or leak a PTY mouse event. A bare up in
+        // the content is also consumed, matching the down path below.
+        if (self.dockVisible() and self.dock.view == .agent_sessions and button == 0 and (kind == 2 or kind == 3)) {
+            const content = self.dockGeometry().tree_content;
+            const captured = self.agent_session_dock_interaction.capture != null;
+            if (captured or layout_math.pointInRect(x_px, y_px, content)) {
+                const phase: chrome.ui.interaction.UiPointerPhase = if (kind == 2) .move else .up;
+                if (self.agentSessionDockPointer(phase, x_px, y_px)) |intent| self.applyAgentSessionDockIntent(intent);
+                return;
+            }
+        }
         // 새 primary down은 잃은 mouse-up/blur가 남긴 파일 탭 arm을 먼저 취소한다. 새 arm은 아래 도크 tab
         // hit-test가 같은 이벤트에서 다시 세운다.
         // 우클릭(button==2, down) → rename 대상이면 컨텍스트 메뉴("Rename")를 띄운다. 대상이 없을 때:
@@ -21884,30 +21869,12 @@ pub const AppSession = struct {
                     };
                 }
                 if (self.dock.view == .agent_sessions) {
-                    if (self.agentSessionArchiveRefreshAt(x_px, y_px)) {
-                        self.refreshAgentSessionArchive(true);
-                        return;
-                    }
-                    if (self.agentSessionArchiveScopeAt(x_px, y_px)) |scope| {
-                        self.selectAgentSessionArchiveScope(scope);
-                        return;
-                    }
-                    if (self.agentSessionArchiveHitAt(x_px, y_px)) |hit| switch (hit) {
-                        .group => |group_index| {
-                            self.toggleAgentSessionArchiveGroup(group_index);
-                            return;
-                        },
-                        .record => |record_index| {
-                            self.agent_session_archive_selected = record_index;
-                            if (record_index < self.agent_session_archive_records.items.len) {
-                                self.openAgentSessionArchiveTab(&self.agent_session_archive_records.items[record_index]) catch {
-                                    self.showNotice("세션 기록 탭을 열지 못했습니다.");
-                                };
-                            }
-                            self.metal_dirty = true;
-                            return;
-                        },
-                    };
+                    // Primary down only arms the completed component tree. The matching up below
+                    // is the one place that resolves and applies an archive intent, so a drag or
+                    // a snapshot replacement cannot open a session merely because the pointer
+                    // first touched a card.
+                    _ = self.agentSessionDockPointer(.down, x_px, y_px);
+                    return;
                 }
                 if (self.dock.view == .explorer) {
                     if (self.beginFileTreeScrollbarGesture(x_px, y_px)) return;
@@ -24194,6 +24161,9 @@ pub const AppSession = struct {
         }
         if (self.dockVisible()) {
             const dg = self.dockGeometry();
+            // Do this before the view-bar return as well: moving from a card to a scope/view
+            // selector is a leave transition for the SessionDock tree, not a frozen hover.
+            if (self.dock.view == .agent_sessions) _ = self.agentSessionDockPointer(.move, x_px, y_px);
             if (dg.view_bar.h > 0 and layout_math.pointInRect(x_px, y_px, dg.view_bar)) {
                 self.setHoveredTab(null);
                 self.clearHoverUrlAnchor();
@@ -24203,6 +24173,16 @@ pub const AppSession = struct {
                 return if (slot != null) .link else .default; // 슬롯 위만 클릭 가능(여백은 화살표)
             }
             self.setHoveredDockViewSlot(null);
+            // SessionDock hover is owned by the same published tree that mouse down/up uses.
+            // The dispatch above already clears a stale card highlight for tree-outside points;
+            // this branch only selects the cursor response without a second archive row hit-test.
+            if (self.dock.view == .agent_sessions) {
+                if (layout_math.pointInRect(x_px, y_px, dg.tree_content)) {
+                    self.setHoveredTab(null);
+                    self.clearHoverUrlAnchor();
+                    return if (self.agent_session_dock_interaction.hovered != null) .link else .default;
+                }
+            }
             if (layout_math.pointInRect(x_px, y_px, dg.tree)) {
                 self.setHoveredTab(null);
                 self.clearHoverUrlAnchor();
@@ -28541,158 +28521,7 @@ pub const AppSession = struct {
                             }
                         }
                         if (self.dock.view == .agent_sessions and tree_content_cols > 0 and visible_rows > 0) {
-                            // 현재 열려 있는 Term 목록이 아니라 로컬 Codex/Claude archive를 표시한다. worker가
-                            // 소유 경계를 넘겨 준 record만 main thread가 읽으며, 다음 refresh 전까지 안정적이다.
-                            const archive_rows = visible_rows -| 2;
-                            const archive_origin_y = dg.tree_content.y + self.cell_height_px * 2;
-                            const header_owned: ?[]u8 = if (self.agent_session_archive_search_active)
-                                std.fmt.allocPrint(self.allocator, "AI 세션 · 검색: {s}", .{self.agent_session_archive_search.items}) catch null
-                            else
-                                null;
-                            defer if (header_owned) |value| self.allocator.free(value);
-                            const header = header_owned orelse if (self.agent_session_archive_loading)
-                                "AI 세션 · 분석 중"
-                            else
-                                "AI 세션 · ⟳ 새로 고침";
-                            if (coretext_frame_builder.buildDockNoticeDrawList(self.allocator, tree_content_cols, header, dock_active_fg)) |hdl| {
-                                self.collectShaped(&collected, hdl, pane_frame_builder, .{ .pane = .{
-                                    .origin_x = dg.tree_content.x,
-                                    .origin_y = dg.tree_content.y,
-                                    .colors = tabbar_colors,
-                                } });
-                            } else |_| {}
-                            const workspace_scope_label = if (self.agent_session_archive_project_scope_loading)
-                                "작업공간 분석 중"
-                            else if (self.agent_session_archive_workspace_root != null)
-                                "현재 작업공간"
-                            else
-                                "작업공간 없음";
-                            const project_scope_label = if (self.agent_session_archive_project_scope_loading)
-                                "프로젝트 분석 중"
-                            else if (self.agent_session_archive_project_root != null)
-                                "현재 프로젝트"
-                            else
-                                "프로젝트 없음";
-                            const scope_owned: ?[]u8 = switch (self.agent_session_archive_scope) {
-                                .workspace => std.fmt.allocPrint(self.allocator, "[{s}] | {s} | 전체", .{ workspace_scope_label, project_scope_label }) catch null,
-                                .project => std.fmt.allocPrint(self.allocator, "{s} | [{s}] | 전체", .{ workspace_scope_label, project_scope_label }) catch null,
-                                .all => std.fmt.allocPrint(self.allocator, "{s} | {s} | [전체]", .{ workspace_scope_label, project_scope_label }) catch null,
-                            };
-                            defer if (scope_owned) |label| self.allocator.free(label);
-                            const scope_label = scope_owned orelse "현재 작업공간 | 현재 프로젝트 | 전체";
-                            if (coretext_frame_builder.buildDockNoticeDrawList(self.allocator, tree_content_cols, scope_label, dock_fg)) |scl| {
-                                self.collectShaped(&collected, scl, pane_frame_builder, .{ .pane = .{
-                                    .origin_x = dg.tree_content.x,
-                                    .origin_y = dg.tree_content.y + self.cell_height_px,
-                                    .colors = tabbar_colors,
-                                } });
-                            } else |_| {}
-                            var labels: std.ArrayList([]const u8) = .empty;
-                            defer labels.deinit(self.allocator);
-                            var owned_labels: std.ArrayList([]u8) = .empty;
-                            defer {
-                                for (owned_labels.items) |label| self.allocator.free(label);
-                                owned_labels.deinit(self.allocator);
-                            }
-                            var selected_line: ?usize = null;
-                            // The archive worker owns filesystem reads.  A single wall-clock
-                            // snapshot makes every card in this frame agree on its relative
-                            // age without a main-thread stat call per row.
-                            const archive_now_ns: i128 = std.Io.Clock.real.now(self.io).nanoseconds;
-                            var visual = @min(self.agent_session_archive_scroll_rows, self.agent_session_archive_projection.visual_rows);
-                            while (labels.items.len < archive_rows) : (visual += 1) {
-                                const located = self.agent_session_archive_projection.visualRowAt(visual) orelse break;
-                                const entry = self.agent_session_archive_projection.entries.items[located.entry_index];
-                                switch (entry) {
-                                    .group => |group_index| {
-                                        const group = &self.agent_session_archive_projection.groups.items[group_index];
-                                        const marker = if (group.collapsed) "›" else "⌄";
-                                        const label = std.fmt.allocPrint(self.allocator, "{s} {s}  {d}", .{ marker, group.label, group.count }) catch break;
-                                        owned_labels.append(self.allocator, label) catch {
-                                            self.allocator.free(label);
-                                            break;
-                                        };
-                                        labels.append(self.allocator, label) catch break;
-                                    },
-                                    .card => |record_index| {
-                                        if (record_index >= self.agent_session_archive_records.items.len) break;
-                                        const record = &self.agent_session_archive_records.items[record_index];
-                                        const parsed = &record.parsed;
-                                        switch (located.line) {
-                                            0 => {
-                                                const label = std.fmt.allocPrint(self.allocator, "  {s} · {s}", .{ parsed.provider.label(), parsed.title }) catch break;
-                                                owned_labels.append(self.allocator, label) catch {
-                                                    self.allocator.free(label);
-                                                    break;
-                                                };
-                                                if (self.agent_session_archive_selected) |selected| {
-                                                    if (selected == record_index) selected_line = labels.items.len;
-                                                }
-                                                labels.append(self.allocator, label) catch break;
-                                            },
-                                            1 => labels.append(self.allocator, parsed.summary) catch break,
-                                            2 => {
-                                                const model = if (parsed.model.len > 0) parsed.model else "모델 정보 없음";
-                                                var age_buf: [32]u8 = undefined;
-                                                const age = formatAgentSessionArchiveRelativeAge(archive_now_ns, record.mtime_ns, &age_buf);
-                                                const label = std.fmt.allocPrint(self.allocator, "  메시지 {d}개 · {s} · {s}", .{ parsed.message_count, age, model }) catch break;
-                                                owned_labels.append(self.allocator, label) catch {
-                                                    self.allocator.free(label);
-                                                    break;
-                                                };
-                                                labels.append(self.allocator, label) catch break;
-                                            },
-                                            else => unreachable,
-                                        }
-                                    },
-                                }
-                            }
-                            // Keep already-published sessions stable and reserve only one
-                            // trailing row for progress; a refresh never blanks the list.
-                            if (self.agent_session_archive_loading and labels.items.len < archive_rows) {
-                                const bars = self.spinnerBarsUtf8(self.allocator) catch "";
-                                defer if (bars.len > 0) self.allocator.free(bars);
-                                if (std.fmt.allocPrint(self.allocator, "{s} 세션 분석 중", .{bars}) catch null) |label| {
-                                    const retained = blk: {
-                                        owned_labels.append(self.allocator, label) catch {
-                                            self.allocator.free(label);
-                                            break :blk false;
-                                        };
-                                        break :blk true;
-                                    };
-                                    if (retained) labels.append(self.allocator, label) catch {};
-                                }
-                            }
-                            if (labels.items.len > 0) {
-                                if (coretext_frame_builder.buildDockSessionListDrawList(
-                                    self.allocator,
-                                    tree_content_cols,
-                                    @intCast(@min(labels.items.len, archive_rows)),
-                                    labels.items,
-                                    selected_line,
-                                    dock_fg,
-                                    dock_active_fg,
-                                )) |sdl| {
-                                    self.collectShaped(&collected, sdl, pane_frame_builder, .{ .pane = .{
-                                        .origin_x = dg.tree_content.x,
-                                        .origin_y = archive_origin_y,
-                                        .colors = tabbar_colors,
-                                    } });
-                                } else |_| {}
-                            } else if (self.agent_session_archive_loading and archive_rows > 0) {
-                                const bars = self.spinnerBarsUtf8(self.allocator) catch "";
-                                defer if (bars.len > 0) self.allocator.free(bars);
-                                const owned_notice: ?[]u8 = std.fmt.allocPrint(self.allocator, "{s} 세션 분석 중", .{bars}) catch null;
-                                defer if (owned_notice) |notice| self.allocator.free(notice);
-                                const notice = owned_notice orelse "세션 분석 중";
-                                if (coretext_frame_builder.buildDockNoticeDrawList(self.allocator, tree_content_cols, notice, dock_fg)) |pdl| {
-                                    self.collectShaped(&collected, pdl, pane_frame_builder, .{ .pane = .{
-                                        .origin_x = dg.tree_content.x,
-                                        .origin_y = archive_origin_y,
-                                        .colors = tabbar_colors,
-                                    } });
-                                } else |_| {}
-                            }
+                            self.collectAgentSessionDock(&collected, pane_frame_builder, tabbar_colors);
                         }
                         if (self.dock.view == .explorer and tree_content_cols > 0 and visible_rows > 0) {
                             const reserved_cols: u16 = if (self.fileTreeScrollbarGeometry() != null)
@@ -29361,6 +29190,7 @@ pub const AppSession = struct {
         self.setHoveredCollapsedToggle(false);
         self.setScrollbarHovered(false);
         self.clearHoverUrlAnchor();
+        _ = self.agentSessionDockPointer(.move, -1, -1);
     }
 
     /// pane 탭 바 호버 영역 — none(바 밖), tabs(탭/‹›/+/pane 포커스 = 클릭), grip(좌측 grip+라벨 = 드래그 손잡이).
@@ -30853,6 +30683,309 @@ pub const AppSession = struct {
         self.collectShapedPane(collected, pane, builder, dest);
     }
 
+    /// AS3-a 제품 경계: archive의 immutable projection을 SessionDock component props로만
+    /// 투영하고, component가 만든 같은 rect tree를 semantic paint/CoreText/Metal에 함께
+    /// 전달한다. 이 함수는 scanner·provider를 호출하지 않으며 매 frame에는 이미 publish된
+    /// snapshot만 읽는다. 따라서 느린 JSONL 분석이 메인 render tick을 막지 않는다.
+    fn collectAgentSessionDock(
+        self: *AppSession,
+        collected: *std.ArrayList(CollectedPane),
+        builder: coretext_frame_builder.CoreTextFrameBuilder,
+        colors: metal_frame.CellColors,
+    ) void {
+        if (self.cell_width_px == 0 or self.cell_height_px == 0) return;
+        const content = self.dockGeometry().tree_content;
+        if (content.w == 0 or content.h == 0) return;
+
+        var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        const items = self.buildAgentSessionDockItems(arena, content) catch return;
+        const props = chrome.components.session_dock.types.Props{
+            .viewport_px = .{ .width = @floatFromInt(content.w), .height = @floatFromInt(content.h) },
+            .cell_width_px = self.cell_width_px,
+            .cell_height_px = self.cell_height_px,
+            // Archive records are atomically swapped by the worker. Its scan generation is
+            // not exposed here yet, so the projection generation is the stable, main-thread
+            // action guard for this first host slice.
+            .snapshot_generation = self.agent_session_dock_snapshot_generation,
+            .displayed_count = @intCast(@min(self.agent_session_archive_filtered_indices.items.len, std.math.maxInt(u16))),
+            .scope = switch (self.agent_session_archive_scope) {
+                .workspace => .workspace,
+                .project => .project,
+                .all => .all,
+            },
+            .workspace_scope_enabled = self.agent_session_archive_workspace_root != null,
+            .project_scope_enabled = self.agent_session_archive_project_root != null,
+            .search = self.agent_session_archive_search.items,
+            .search_focused = self.agent_session_archive_search_active,
+            .loading = self.agent_session_archive_loading and self.agent_session_archive_records.items.len == 0,
+            .refreshing = self.agent_session_archive_loading and self.agent_session_archive_records.items.len > 0,
+            .spinner_phase = @intCast(self.agent_spin_frame & 7),
+            .items = items,
+        };
+        const node_count = items.len + 7;
+        const nodes = arena.alloc(chrome.ui.tree.UiNode, node_count) catch return;
+        const entries = arena.alloc(chrome.ui.tree.RectEntry, node_count + 1) catch return;
+        const layout_items = arena.alloc(chrome.ui.layout.Item, node_count + 1) catch return;
+        const flex_scratch = arena.alloc(chrome.ui.layout.FlexScratch, node_count + 1) catch return;
+        const child_rects = arena.alloc(chrome.ui.layout.UiRect, node_count + 1) catch return;
+        const actions = arena.alloc(chrome.components.session_dock.ids.Entry, items.len + 5) catch return;
+        const frame = chrome.components.session_dock.build.build(props, .{
+            .nodes = nodes,
+            .entries = entries,
+            .layout_items = layout_items,
+            .flex_scratch = flex_scratch,
+            .child_rects = child_rects,
+            .actions = actions,
+        }) catch return;
+
+        // Card quad + text op capacity: fixed header/scope/search cards plus either one item
+        // quad and up to three text lines per projection item, or nine inert initial-loading
+        // skeleton stripes. Keep the placeholder budget explicit so the first scan cannot
+        // silently drop its loading affordance through a fixed-capacity overflow.
+        const ops = arena.alloc(chrome.draw.Op, 21 + items.len * 4) catch return;
+        const runs = arena.alloc(chrome.draw.Run, 8 + items.len * 3) catch return;
+        const text_bytes = arena.alloc(u8, 1024 + items.len * 1024) catch return;
+        const tokens = self.buildChromeTokens();
+        const draws = chrome.components.session_dock.view.view(props, frame, self.agent_session_dock_interaction, &tokens, .{
+            .ops = ops,
+            .runs = runs,
+            .text_bytes = text_bytes,
+        }) catch return;
+
+        self.publishAgentSessionDockFrame(frame, props.snapshot_generation);
+
+        // GPU card backgrounds must precede terminal/pane text; the adapter fixes this to
+        // renderer layer 2 instead of the overlay layer used by modal components.
+        session_dock_lowering.appendBackgroundQuads(self.allocator, &.{draws}, &tokens, content.x, content.y, &self.gpu_quads);
+        // One completed Dock tree becomes one DrawList and one CoreText shaping pass. The
+        // component keeps every text origin local to `content`; the collected pane translates
+        // the whole batch exactly once to backing coordinates.
+        const cols: u16 = @intCast(@min(content.w / self.cell_width_px, std.math.maxInt(u16)));
+        const rows: u16 = @intCast(@min(content.h / self.cell_height_px, std.math.maxInt(u16)));
+        const dl = session_dock_lowering.buildTextDrawList(
+            self.allocator,
+            draws.ops,
+            &tokens,
+            self.cell_width_px,
+            self.cell_height_px,
+            cols,
+            rows,
+        ) catch return;
+        self.collectShaped(collected, dl, builder, .{ .pane = .{
+            .origin_x = content.x,
+            .origin_y = content.y,
+            .colors = colors,
+        } });
+    }
+
+    /// The component receives only the cards that can appear in the current viewport. This is
+    /// a first virtualization consumer: hidden archive rows do not allocate CoreText frames or
+    /// Metal quads, while scroll remains a projection concern owned by the archive model.
+    fn buildAgentSessionDockItems(
+        self: *const AppSession,
+        allocator: std.mem.Allocator,
+        content: maru.session.SplitRect,
+    ) ![]chrome.components.session_dock.types.Item {
+        var out: std.ArrayList(chrome.components.session_dock.types.Item) = .empty;
+        const m = chrome.components.session_dock.types.Metrics.fromCellHeight(self.cell_height_px);
+        const fixed_h = m.pad * 2 + m.header_h + m.scope_h + m.search_h + m.gap * 3;
+        const available_h = content.h -| fixed_h;
+        if (available_h == 0) return try out.toOwnedSlice(allocator);
+        const first_entry = if (self.agent_session_archive_projection.visualRowAt(self.agent_session_archive_scroll_rows)) |row|
+            row.entry_index
+        else
+            0;
+        var used_h: u32 = 0;
+        var entry_index = first_entry;
+        const now_ns: i128 = std.Io.Clock.real.now(self.io).nanoseconds;
+        while (entry_index < self.agent_session_archive_projection.entries.items.len) : (entry_index += 1) {
+            const entry = self.agent_session_archive_projection.entries.items[entry_index];
+            const item_h = switch (entry) {
+                .group => m.group_h,
+                .card => m.card_h,
+            } + m.gap;
+            if (out.items.len > 0 and used_h +| item_h > available_h) break;
+            switch (entry) {
+                .group => |group_index| {
+                    if (group_index >= self.agent_session_archive_projection.groups.items.len) continue;
+                    const group = self.agent_session_archive_projection.groups.items[group_index];
+                    try out.append(allocator, .{ .group = .{
+                        .identity = @intCast(group_index),
+                        .label = group.label,
+                        .count = @intCast(@min(group.count, std.math.maxInt(u16))),
+                        .collapsed = group.collapsed,
+                    } });
+                },
+                .card => |record_index| {
+                    if (record_index >= self.agent_session_archive_records.items.len) continue;
+                    const record = self.agent_session_archive_records.items[record_index];
+                    const parsed = record.parsed;
+                    var age_buf: [32]u8 = undefined;
+                    const age = formatAgentSessionArchiveRelativeAge(now_ns, record.mtime_ns, &age_buf);
+                    const model = if (parsed.model.len > 0) parsed.model else "모델 정보 없음";
+                    const metadata = try std.fmt.allocPrint(allocator, "메시지 {d}개 · {s} · {s}", .{ parsed.message_count, age, model });
+                    try out.append(allocator, .{ .card = .{
+                        .identity = @intCast(record_index),
+                        .provider = switch (parsed.provider) {
+                            .codex => .codex,
+                            .claude => .claude,
+                        },
+                        .title = parsed.title,
+                        .summary = parsed.summary,
+                        .metadata = metadata,
+                        .selected = self.agent_session_archive_selected != null and self.agent_session_archive_selected.? == record_index,
+                    } });
+                },
+            }
+            used_h +|= item_h;
+        }
+        return try out.toOwnedSlice(allocator);
+    }
+
+    /// Successful paint candidates alone replace the published input snapshot. Reconcile clears
+    /// a captured old action before the old backing entries are overwritten, so a delayed pointer
+    /// up can never open a session from the previous archive/scope/search result.
+    fn publishAgentSessionDockFrame(
+        self: *AppSession,
+        frame: chrome.components.session_dock.build.Frame,
+        generation: u64,
+    ) void {
+        // A normal redraw rebuilds the same value tree from the same immutable archive snapshot.
+        // Treating that as a replacement would cancel a just-pressed card before AppKit sends its
+        // matching mouse-up. Only a geometry/action mapping change is a true replacement; that
+        // path still reconciles below and deliberately cancels capture.
+        if (agentSessionDockFrameEql(
+            self.agent_session_dock_entries.items,
+            self.agent_session_dock_actions.items,
+            frame.tree.entries,
+            frame.actions,
+        )) return;
+        // Reserve both backing stores before touching the old snapshot. An allocation failure
+        // must leave the last fully painted hit tree intact rather than publishing entries with
+        // no matching action table (or clearing a usable dock during refresh).
+        self.agent_session_dock_entries.ensureTotalCapacity(self.allocator, frame.tree.entries.len) catch return;
+        self.agent_session_dock_actions.ensureTotalCapacity(self.allocator, frame.actions.len) catch return;
+        const old_tree = chrome.ui.tree.UiRectTree{ .entries = self.agent_session_dock_entries.items };
+        if (self.agent_session_dock_entries.items.len > 0)
+            _ = chrome.ui.interaction.reconcile(&self.agent_session_dock_interaction, old_tree, frame.tree) catch return;
+        self.agent_session_dock_entries.clearRetainingCapacity();
+        self.agent_session_dock_actions.clearRetainingCapacity();
+        self.agent_session_dock_entries.appendSliceAssumeCapacity(frame.tree.entries);
+        self.agent_session_dock_actions.appendSliceAssumeCapacity(frame.actions);
+        // The component action table itself carries this generation, and the click path resolves
+        // against this exact published value.
+        self.agent_session_dock_snapshot_generation = generation;
+    }
+
+    /// Value equality is the publication gate for this particular frame snapshot. `UiRectTree`
+    /// entries contain no borrowed archive text, and ids/action ids are scalar, so a structural
+    /// comparison detects both a layout change and a different visible archive projection without
+    /// relying on the broader scan generation alone.
+    fn agentSessionDockFrameEql(
+        old_entries: []const chrome.ui.tree.RectEntry,
+        old_actions: []const chrome.components.session_dock.ids.Entry,
+        new_entries: []const chrome.ui.tree.RectEntry,
+        new_actions: []const chrome.components.session_dock.ids.Entry,
+    ) bool {
+        if (old_entries.len != new_entries.len or old_actions.len != new_actions.len) return false;
+        for (old_entries, new_entries) |old, new| {
+            if (!std.meta.eql(old, new)) return false;
+        }
+        for (old_actions, new_actions) |old, new| {
+            if (!std.meta.eql(old, new)) return false;
+        }
+        return true;
+    }
+
+    /// The only adapter from a platform pointer lifecycle to the published SessionDock tree.
+    /// It has no archive side effects: an intent can emerge only from `UiPointerPhase.up`, after
+    /// the generic interaction state has verified the captured action against this exact tree.
+    const AgentSessionDockPointerDispatch = struct {
+        intent: ?chrome.components.session_dock.ids.Intent,
+        visual_changed: bool,
+    };
+
+    fn dispatchAgentSessionDockPointer(
+        state: *chrome.ui.interaction.InteractionState,
+        entries: []const chrome.ui.tree.RectEntry,
+        actions: []const chrome.components.session_dock.ids.Entry,
+        generation: u64,
+        event: chrome.ui.interaction.UiPointerEvent,
+    ) ?AgentSessionDockPointerDispatch {
+        const dispatched = chrome.ui.interaction.dispatch(state, .{ .entries = entries }, event) catch return null;
+        var visual_changed = false;
+        for (dispatched.dirty.ids) |id| {
+            if (id != null) {
+                visual_changed = true;
+                break;
+            }
+        }
+        const action_id = dispatched.action orelse return .{ .intent = null, .visual_changed = visual_changed };
+        var table = chrome.components.session_dock.ids.Table.init(@constCast(actions));
+        table.count = actions.len;
+        return .{ .intent = table.resolve(action_id, generation), .visual_changed = visual_changed };
+    }
+
+    /// Pointer의 backing-px를 component-local px로 한 번만 변환해 같은 completed
+    /// SessionDock tree에 lifecycle event를 보낸다. 예전 archive 행 번호 계산을 병행하지
+    /// 않으므로 카드가 둥근 여백/가변 높이로 바뀌어도 "보이는 곳 = 눌리는 곳"이 유지된다.
+    fn agentSessionDockPointer(
+        self: *AppSession,
+        phase: chrome.ui.interaction.UiPointerPhase,
+        x_px: f64,
+        y_px: f64,
+    ) ?chrome.components.session_dock.ids.Intent {
+        if (self.dock.view != .agent_sessions or !self.dockVisible() or self.cell_width_px == 0 or self.cell_height_px == 0) return null;
+        const content = self.dockGeometry().tree_content;
+        if (self.agent_session_dock_entries.items.len == 0) return null;
+        const dispatched = dispatchAgentSessionDockPointer(
+            &self.agent_session_dock_interaction,
+            self.agent_session_dock_entries.items,
+            self.agent_session_dock_actions.items,
+            self.agent_session_dock_snapshot_generation,
+            .{
+                .phase = phase,
+                .x_px = x_px - @as(f64, @floatFromInt(content.x)),
+                .y_px = y_px - @as(f64, @floatFromInt(content.y)),
+                .timestamp_ns = 0,
+            },
+        ) orelse return null;
+        if (dispatched.visual_changed) self.metal_dirty = true;
+        return dispatched.intent;
+    }
+
+    fn applyAgentSessionDockIntent(self: *AppSession, intent: chrome.components.session_dock.ids.Intent) void {
+        switch (intent) {
+            .refresh => self.refreshAgentSessionArchive(true),
+            .scope => |scope| self.selectAgentSessionArchiveScope(switch (scope) {
+                .workspace => .workspace,
+                .project => .project,
+                .all => .all,
+            }),
+            .focus_search => {
+                self.agent_session_archive_search_active = true;
+                self.resetCursorBlink();
+                self.metal_dirty = true;
+            },
+            .toggle_group => |identity| {
+                if (identity <= std.math.maxInt(usize)) self.toggleAgentSessionArchiveGroup(@intCast(identity));
+            },
+            .select_card => |identity| {
+                if (identity > std.math.maxInt(usize)) return;
+                const record_index: usize = @intCast(identity);
+                self.agent_session_archive_selected = record_index;
+                if (record_index < self.agent_session_archive_records.items.len) {
+                    self.openAgentSessionArchiveTab(&self.agent_session_archive_records.items[record_index]) catch {
+                        self.showNotice("세션 기록 탭을 열지 못했습니다.");
+                    };
+                }
+                self.metal_dirty = true;
+            },
+        }
+    }
+
     /// 이미 shapeOnly된 ShapedPane을 collected에 추가한다 — append-or-deinit 꼬리의 단일 출처다(collectShaped는 DrawList를
     /// shapeOnly한 뒤 이걸 부르고, 활성 panel은 frame_builder가 미리 shape한 ShapedPane을 바로 넘긴다). append 실패면 그
     /// 페인만 deinit. 소유권은 collected로 이전되므로 호출자는 넘긴 ShapedPane을 더는 deinit하지 않는다(호출자가 보관
@@ -32237,6 +32370,8 @@ pub const AppSession = struct {
                 self.agent_session_archive_records.deinit(self.allocator);
                 self.agent_session_archive_filtered_indices.deinit(self.allocator);
                 self.agent_session_archive_projection.deinit(self.allocator);
+                self.agent_session_dock_entries.deinit(self.allocator);
+                self.agent_session_dock_actions.deinit(self.allocator);
                 for (self.agent_session_archive_collapsed_groups.items) |key| self.allocator.free(key);
                 self.agent_session_archive_collapsed_groups.deinit(self.allocator);
                 self.agent_session_archive_search.deinit(self.allocator);
@@ -63052,4 +63187,75 @@ test "파일 본문 메뉴는 웹뷰 포커스를 뺏지 않는다(다른 모달
     session.chrome_host.palette.open = false;
     session.closeContextMenu();
     try std.testing.expect(!session.terminalOwnsInput()); // 메뉴가 닫혔고 다른 것도 없다
+}
+
+test "SessionDock published tree dispatches hover/down/up once and rejects a reconciled stale up" {
+    const entries = [_]chrome.ui.tree.RectEntry{.{
+        .id = 0x5344_1000,
+        .parent_index = null,
+        .kind = .card,
+        .rect = .{ .x = 10, .y = 20, .width = 80, .height = 40 },
+        .effective_clip = .{ .x = 10, .y = 20, .width = 80, .height = 40 },
+        .action = .{ .id = 6 },
+        .visual = .{ .card = .{ .variant = .surface, .paint = .{} } },
+    }};
+    const actions = [_]chrome.components.session_dock.ids.Entry{.{
+        .action_id = 6,
+        .snapshot_generation = 9,
+        .intent = .{ .select_card = 42 },
+    }};
+    var state = chrome.ui.interaction.InteractionState{};
+
+    const hover = AppSession.dispatchAgentSessionDockPointer(&state, &entries, &actions, 9, .{
+        .phase = .move,
+        .x_px = 20,
+        .y_px = 30,
+        .timestamp_ns = 1,
+    }).?;
+    try std.testing.expect(hover.intent == null);
+    try std.testing.expect(hover.visual_changed);
+    try std.testing.expectEqual(@as(?chrome.ui.tree.UiId, entries[0].id), state.hovered);
+
+    const down = AppSession.dispatchAgentSessionDockPointer(&state, &entries, &actions, 9, .{
+        .phase = .down,
+        .x_px = 20,
+        .y_px = 30,
+        .timestamp_ns = 2,
+    }).?;
+    try std.testing.expect(down.intent == null); // press never opens an archive tab
+    try std.testing.expect(state.capture != null);
+
+    // Capture deliberately owns the matching up even outside the card, while the same published
+    // action table still maps it to the original archive identity.
+    const up = AppSession.dispatchAgentSessionDockPointer(&state, &entries, &actions, 9, .{
+        .phase = .up,
+        .x_px = 900,
+        .y_px = 900,
+        .timestamp_ns = 3,
+    }).?;
+    try std.testing.expectEqual(@as(?chrome.components.session_dock.ids.Intent, .{ .select_card = 42 }), up.intent);
+    try std.testing.expect(state.capture == null);
+
+    _ = AppSession.dispatchAgentSessionDockPointer(&state, &entries, &actions, 9, .{
+        .phase = .down,
+        .x_px = 20,
+        .y_px = 30,
+        .timestamp_ns = 4,
+    }).?;
+    _ = try chrome.ui.interaction.reconcile(&state, .{ .entries = &entries }, .{ .entries = &entries });
+    const stale_up = AppSession.dispatchAgentSessionDockPointer(&state, &entries, &actions, 9, .{
+        .phase = .up,
+        .x_px = 20,
+        .y_px = 30,
+        .timestamp_ns = 5,
+    }).?;
+    try std.testing.expect(stale_up.intent == null);
+
+    const changed_actions = [_]chrome.components.session_dock.ids.Entry{.{
+        .action_id = 6,
+        .snapshot_generation = 9,
+        .intent = .{ .select_card = 99 },
+    }};
+    try std.testing.expect(AppSession.agentSessionDockFrameEql(&entries, &actions, &entries, &actions));
+    try std.testing.expect(!AppSession.agentSessionDockFrameEql(&entries, &actions, &entries, &changed_actions));
 }

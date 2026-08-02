@@ -729,7 +729,7 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   실제 attach/deinit/drop/lease, external owner-schema digest, 2b는 실제 pump의 buffered/direct→registry transaction·두 cap·release와
   generation GUI batch 경로의 raw AttachmentTransport Client context와 raw Client 경유 batch read/release/drop callsite 0을
   증명한다. 2b의 상태는
-  **2b1(node batch registry와 Client transferred accounting, 구현) → 2b2(GUI node-bound adapter와 제품 pump/release/drop, 계획)**로
+  **2b1(node batch registry와 Client transferred accounting, 구현) → 2b2(GUI node-bound adapter와 제품 pump/release/canonical drop 무회귀, 구현)**로
   나누며, 2b1만 green이어도 GUI raw context가 남아 있으므로 2b 전체를 구현으로 표시하지 않는다. 2c는 남은 exact primitive facade와
   `RemoteRuntime.client`를 포함한 raw escape zero,
   2d는 actual-owner permit/reentry/quarantine/typed teardown, 2e는 actual socket
@@ -747,6 +747,22 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   allocator/parser descriptor 복원 뒤 일반 RPC prepare→abort→settled까지 실행한다. Debug·ReleaseFast·boundary와 전체
   `mise run check`가 자동 gate다. 이 증거는 GUI `GenerationAttachment`의 실제 pump adapter나 raw context 제거를 포함하지 않으며
   그 범위는 2b2, 전체 actual-socket parity는 2e가 소유한다.
+  2b2 red/green oracle은 `GenerationAttachment`이 inline final-address batch adapter를 소유하고 `commitAccepted`
+  generation branch에 legacy transport 인자·fallback이 0인지, `.generation` token이 external `.charged`와 혼용되지
+  않는지, post-initial buffered/direct batch가 실제 GUI pump에서 borrow/release exact once로 정리되는지를
+  production type으로 실행한다. teardown은 read admission을 먼저 닫고 release-only draining으로 pending token을 전량
+  settle한 뒤 기존 2a canonical drop/lease release를 한 번만 수행한다. generation release invariant 실패는 generic
+  `failed_release`에 보존하거나 sibling으로 계속하지 않고 strict fail-stop하며 retryable/indeterminate는 2d 범위다.
+  source boundary는 legacy-only `attachmentTransport(*Client)` raw cast 3개와 initial snapshot/event/input/RPC allowlist를 그대로
+  두되 generation commit/pump의 raw Client context/cast는 0, `readGenerationBatch|dropBufferedStream`은 `client_slot.zig`만의
+  canonical caller로 고정한다. `RemoteAttachment` 7-field outer schema, external `Prepared|Attached`, `ExternalPumpStorage`
+  owner graph와 legacy `.untracked|.charged` 의미는 불변이고 `AttachmentBatchLease.generation` 추가에 따른 union layout 변화만
+  허용한다. Debug·ReleaseFast·boundary·전체 check를 재실행하며 actual-socket 전체 failure parity/AppKit은 2e/CR6 범위다.
+  현재 2b2 자동 증거는 buffered idle·2-token FIFO/compaction·queue append OOM·malformed apply의 token exact release,
+  실제 socketpair direct-parser snapshot pump, pending generation token의 release-only drain 뒤 canonical drop, adapter copy·foreign slot·
+  wrong-thread의 mutation-before rejection을 production type으로 실행한다. boundary는 generation commit의 legacy transport 0,
+  adapter mint sole caller, legacy fallback 1곳, 2c initial snapshot/ended-event raw allowlist 각 1곳과 ClientSlot raw batch/drop sole
+  caller를 고정한다.
   2a의 현재 자동 증거는 canonical node-local transport/response seal, opaque prepared request storage, final response의
   binding/transport/request backing non-alias preflight, wire 전 allocator capture와 Frame schema 불변 out-parameter 기반의 frame별
   실제 payload allocator 일치,

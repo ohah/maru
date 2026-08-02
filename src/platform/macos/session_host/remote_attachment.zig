@@ -8,22 +8,23 @@ const client_mod = @import("client.zig");
 const client_poison = @import("client_poison.zig");
 const external_recovery_types = @import("external_recovery_types.zig");
 const external_inbox_ledger = @import("external_inbox_ledger.zig");
+const generation_batch_registry = @import("generation_batch_registry.zig");
 const remote_screen = @import("remote_screen.zig");
 const screen_assembler = @import("screen_assembler.zig");
 
 pub const AttachmentBatchLease = union(enum) {
     untracked: client_mod.StreamBatch,
     charged: external_inbox_ledger.Token,
+    generation: generation_batch_registry.Token,
 
     fn borrow(
         self: AttachmentBatchLease,
         transport: AttachmentTransport,
-    ) LeaseError!external_inbox_ledger.BatchView {
+    ) LeaseError!AttachmentBatchView {
         return switch (self) {
             .untracked => |batch| .{
                 .is_snapshot = batch.is_snapshot,
                 .stream_id = batch.stream_id,
-                .provenance = .untracked,
                 .recovery_key = null,
                 .bytes = batch.bytes,
             },
@@ -31,6 +32,12 @@ pub const AttachmentBatchLease = union(enum) {
                 const borrow_charged = transport.borrow_charged orelse
                     return error.LedgerInvariant;
                 return borrow_charged(transport.context, token) catch
+                    return error.LedgerInvariant;
+            },
+            .generation => |token| {
+                const borrow_generation = transport.borrow_generation orelse
+                    return error.LedgerInvariant;
+                return borrow_generation(transport.context, token) catch
                     return error.LedgerInvariant;
             },
         };
@@ -52,11 +59,27 @@ pub const AttachmentBatchLease = union(enum) {
                     return .invariant_failure;
                 return .ok;
             },
+            .generation => |token| {
+                const release_generation = transport.release_generation orelse
+                    return .invariant_failure;
+                release_generation(transport.context, token) catch
+                    return .invariant_failure;
+                return .ok;
+            },
         }
     }
 };
 
 pub const LeaseError = error{LedgerInvariant};
+
+/// Attachment consumer가 공유하는 transport-neutral batch view. External ledger의 저장
+/// provenance는 transport 내부에 남기고 consumer에는 recovery key만 투영한다.
+pub const AttachmentBatchView = struct {
+    is_snapshot: bool,
+    stream_id: u64,
+    recovery_key: ?external_recovery_types.Key,
+    bytes: []const u8,
+};
 
 pub const MarkResyncAppliedResult = external_recovery_types.MarkResult;
 
@@ -76,11 +99,19 @@ pub const AttachmentTransport = struct {
     borrow_charged: ?*const fn (
         context: *anyopaque,
         token: external_inbox_ledger.Token,
-    ) external_inbox_ledger.InvariantError!external_inbox_ledger.BatchView = null,
+    ) external_inbox_ledger.InvariantError!AttachmentBatchView = null,
     release_charged: ?*const fn (
         context: *anyopaque,
         token: external_inbox_ledger.Token,
     ) external_inbox_ledger.InvariantError!void = null,
+    borrow_generation: ?*const fn (
+        context: *anyopaque,
+        token: generation_batch_registry.Token,
+    ) LeaseError!AttachmentBatchView = null,
+    release_generation: ?*const fn (
+        context: *anyopaque,
+        token: generation_batch_registry.Token,
+    ) LeaseError!void = null,
     preflight_batch_authority: ?*const fn (
         context: *anyopaque,
         stream_id: u64,
@@ -168,10 +199,12 @@ pub const RemoteAttachment = struct {
             if (self.failed_release) |lease| switch (lease) {
                 .untracked => |batch| batch.deinit(),
                 .charged => {},
+                .generation => @panic("generation batch lost its node-bound release authority"),
             };
             for (self.pending_batches.items[self.pending_batch_head..]) |lease| switch (lease) {
                 .untracked => |batch| batch.deinit(),
                 .charged => {},
+                .generation => @panic("generation batch lost its node-bound release authority"),
             };
         }
         self.pending_batches.deinit(self.allocator);
@@ -1112,9 +1145,15 @@ const ChargedTestTransport = struct {
     fn borrow(
         context: *anyopaque,
         token: external_inbox_ledger.Token,
-    ) external_inbox_ledger.InvariantError!external_inbox_ledger.BatchView {
+    ) external_inbox_ledger.InvariantError!AttachmentBatchView {
         const self: *ChargedTestTransport = @ptrCast(@alignCast(context));
-        return self.ledger.borrowLease(token);
+        const view = try self.ledger.borrowLease(token);
+        return .{
+            .is_snapshot = view.is_snapshot,
+            .stream_id = view.stream_id,
+            .recovery_key = view.recovery_key,
+            .bytes = view.bytes,
+        };
     }
 
     fn release(
@@ -1153,7 +1192,7 @@ const ChargedTestTransport = struct {
 };
 
 const RecoveryTestTransport = struct {
-    view: external_inbox_ledger.BatchView,
+    view: AttachmentBatchView,
     batch_available: bool = true,
     release_fails: bool = false,
     preflight_result: external_recovery_types.BatchAuthority = .recovery_exact,
@@ -1179,7 +1218,7 @@ const RecoveryTestTransport = struct {
     fn borrow(
         context: *anyopaque,
         _: external_inbox_ledger.Token,
-    ) external_inbox_ledger.InvariantError!external_inbox_ledger.BatchView {
+    ) external_inbox_ledger.InvariantError!AttachmentBatchView {
         const self: *RecoveryTestTransport = @ptrCast(@alignCast(context));
         return self.view;
     }
@@ -1437,7 +1476,6 @@ test "remote attachment copies recovery key then releases before exact mark" {
     var transport = RecoveryTestTransport{ .view = .{
         .is_snapshot = true,
         .stream_id = 7,
-        .provenance = .untracked,
         .recovery_key = key,
         .bytes = snapshot,
     } };
@@ -1481,7 +1519,6 @@ test "remote attachment never marks failed apply or failed release" {
     var apply_failure = RecoveryTestTransport{ .view = .{
         .is_snapshot = true,
         .stream_id = 7,
-        .provenance = .untracked,
         .recovery_key = key,
         .bytes = "not-a-screen",
     } };
@@ -1514,7 +1551,6 @@ test "remote attachment never marks failed apply or failed release" {
         .view = .{
             .is_snapshot = true,
             .stream_id = 7,
-            .provenance = .untracked,
             .recovery_key = key,
             .bytes = "not-a-screen",
         },
@@ -1546,7 +1582,6 @@ test "remote attachment never marks failed apply or failed release" {
         .view = .{
             .is_snapshot = true,
             .stream_id = 7,
-            .provenance = .untracked,
             .recovery_key = key,
             .bytes = snapshot,
         },
@@ -1592,7 +1627,6 @@ test "remote attachment stale mark terminalizes without retaining released token
         .view = .{
             .is_snapshot = true,
             .stream_id = 7,
-            .provenance = .untracked,
             .recovery_key = .{
                 .owner_incarnation = 41,
                 .origin = .host,
@@ -1642,7 +1676,6 @@ test "remote attachment rejects wrong recovery stream before screen apply or mar
     var transport = RecoveryTestTransport{ .view = .{
         .is_snapshot = true,
         .stream_id = 8,
-        .provenance = .untracked,
         .recovery_key = .{
             .owner_incarnation = 41,
             .origin = .host,
@@ -1682,7 +1715,6 @@ test "remote attachment rejects stale recovery authority before screen apply" {
         .view = .{
             .is_snapshot = true,
             .stream_id = 7,
-            .provenance = .untracked,
             .recovery_key = .{
                 .owner_incarnation = 41,
                 .origin = .host,

@@ -11,6 +11,7 @@ const screen_stream = @import("screen_stream.zig");
 const compatibility = @import("compatibility.zig");
 const client_slot_mod = @import("client_slot.zig");
 const generation_transport = @import("generation_transport.zig");
+const generation_batch_adapter = @import("generation_batch_adapter.zig");
 const generation_contract = @import("generation_attachment_contract.zig");
 const connection_lease = @import("connection_lease.zig");
 
@@ -88,6 +89,22 @@ pub const HostAdapter = struct {
         reservation: client_slot_mod.AttachmentBindingReservation,
     ) (generation_transport.Error || client_slot_mod.BindingError)!void {
         return generation_transport.mintInPlace(out, &self.slot, owner_addr, owner_size, reservation);
+    }
+
+    pub fn mintGenerationBatchAdapter(
+        self: *HostAdapter,
+        out: *generation_batch_adapter.GenerationBatchAdapter,
+        owner_addr: usize,
+        owner_size: usize,
+        stream_id: u64,
+    ) generation_batch_adapter.Error!void {
+        return generation_batch_adapter.GenerationBatchAdapter.initPreparedInPlace(
+            out,
+            &self.slot,
+            owner_addr,
+            owner_size,
+            stream_id,
+        );
     }
 
     pub fn responseOwnerSeal(

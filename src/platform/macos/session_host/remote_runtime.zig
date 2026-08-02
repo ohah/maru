@@ -522,7 +522,6 @@ pub const RemoteRuntime = struct {
                 generation_accepted.?,
                 accepted.state,
                 self.allocator,
-                attachmentTransport(self.client),
             );
             generation_binding_open = false;
         } else {

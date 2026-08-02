@@ -77,7 +77,7 @@ const allowlist = [_]Allowed{
         .reason = "cluster 방출 어댑터 — text_layout이 잡아 준 바이트 범위에서 base는 셀에, 나머지는 grapheme_pool에(CG1 방출부 그 자체).",
     },
     .{
-        .file = "platform/macos/chrome/session_dock_lowering.zig",
+        .file = "platform/macos/chrome/chrome_draw_lowering.zig",
         .function = "appendCluster",
         .reason = "SessionDock의 단일 DrawList cluster 방출 어댑터 — text_layout.plan이 확정한 범위만 DrawCell/grapheme_pool으로 옮기며, 별도 UTF-8 순회나 폭 계산을 하지 않는다.",
     },

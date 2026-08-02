@@ -550,9 +550,9 @@ ML3b의 첫 구현에서 Lab은 `session.control_surface.SurfaceKind`나 persist
 - surface라는 말은 Metal drawable에 투영되는 독립 frame input이라는 뜻이다. 제품 workspace의 Tab/Pane가
   아니며, `SurfaceId`를 발급하거나 `SurfaceKind`에 새 case를 더하지 않는다.
 - 일반 Chrome의 quad/shadow lowerer는 `src/platform/macos/chrome/metal_lowering.zig`가 맡고,
-  SessionDock의 semantic text는 `session_dock_lowering.zig`가 **한 방향**으로 CoreText DrawList/atlas로
+  component의 semantic text는 `chrome_draw_lowering.zig`가 **한 방향**으로 CoreText DrawList/atlas로
   옮긴다. 두 leaf 모두 `AppSession`, session model, PTY, provider를 import하지 않고, platform이 text
-  내용·rect·tone을 다시 계산하지 않는다. Lab은 같은 SessionDock adapter와 제품 renderer를 호출하며, 별도
+  내용·rect·tone을 다시 계산하지 않는다. Lab은 같은 Chrome draw adapter와 제품 renderer를 호출하며, 별도
   mock renderer나 token→RGB 규칙은 금지한다.
 - scripted input은 `ui/interaction.dispatch`에 전달하고, dispatcher는 `recorded_action`만 쓴다.
   provider resume, reveal, process spawn, filesystem callback은 compile-time과 runtime 양쪽에서 진입점이 없다.
@@ -565,7 +565,7 @@ control-plane visibility, 권한 모델과 lifecycle을 결정한다.
 
 ML3b1은 `ChromeLabScenario`의 고정 synthetic draw와 `ui.interaction.dispatch`의 recorded action을 만들고
 기존 제품 lowerer에 연결했다. 현 SessionDock Lab은 그 foundation 위에서 component `build`/`view`와
-`session_dock_lowering.buildTextDrawList`를 추가로 통과시켜, Cocoa·Metal drawable failure와 text atlas
+`chrome_draw_lowering.buildTextDrawList`를 추가로 통과시켜, Cocoa·Metal drawable failure와 text atlas
 failure를 같은 artifact에서 구분한다.
 
 - scenario ID, backing px viewport, appearance token, deterministic clock, synthetic tree/draw와 expected
@@ -638,7 +638,7 @@ hook은 프로세스 단위 환경값을 한 번만 읽으므로, 한 프로세�
 ```mermaid
 flowchart TD
     A[ChromeLabScenario] --> B[lab.buildFrame]
-    B --> C[session_dock_lowering]
+    B --> C[chrome_draw_lowering]
     C --> D[CoreText atlas]
     D --> E[maru_metal_renderer_draw]
     E --> F[offscreen BGRA readback]

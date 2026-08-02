@@ -203,7 +203,7 @@ facade와 그 하위 `session_dock/{types,ids,build,view}.zig`만이 session-doc
 
 이 slice에서 `ui.paint`가 여전히 일반 `UiNode.text`를 GPU glyph로 직접 rasterize하지 않는 한계는
 `ChromeDraw.text` bridge로 닫는다. 즉 component `view.zig`가 backing-pixel origin과 clipped run을 가진
-semantic text op를 만들고, macOS의 `platform/macos/chrome/session_dock_lowering.zig`가 그 run을 **한 번만**
+semantic text op를 만들고, macOS의 `platform/macos/chrome/chrome_draw_lowering.zig`가 그 run을 **한 번만**
 기존 CoreText `DrawList`/atlas 경로로 옮긴다. 같은 adapter는 card quad를 renderer layer 2로 낮춰 text보다 먼저
 그린다. 이것은 `app_session.zig`의 `buildDockNoticeDrawList`나 pipe scope 문자열을 재사용하는 legacy direct draw가
 아니다. component가 text 내용·rect·tone을 모두 소유하고 platform은 공통 backend lowering만 한다. generic GPU text
@@ -218,7 +218,7 @@ paint한** action table만 선택하며, 새 snapshot publish는 기존 capture�
 
 Lab product capture는 최소한 `empty`, initial `loading`, retained list를 포함한다. Lab은 실제 `SessionDock`
 component를 거쳐 card/scope/header/search와 semantic text op를 만들고, 그 op를
-`session_dock_lowering.buildTextDrawList` → CoreText atlas → 제품 `maru_metal_renderer_draw`로 전달한다. 따라서
+`chrome_draw_lowering.buildTextDrawList` → CoreText atlas → 제품 `maru_metal_renderer_draw`로 전달한다. 따라서
 480×720 fixed dark PNG/JSON에는 `text_rasterized=true`, glyph cell 수와 readback 성공을 함께 남긴다. 이 artifact는
 회색 quad만 있는 fixture가 아니라 카드와 텍스트가 함께 합성된 visual renderer evidence다.
 
@@ -258,7 +258,7 @@ publish한다. 이 규칙은 2x Retina에서 0.5pt 입력도 1px 단위로 누�
 `src/chrome/components/session_dock/scroll.zig`의 pure `project`가 `Item` kind와 `Metrics`, viewport, offset을 받아
 다음을 **한 번에** 산출한다: total content height, clamped offset, 첫 partially-visible item index, 그 item의 negative local
 origin, visible item range, 각 item의 rect와 content clip. host는 이 결과가 가리키는 item만 `build.zig`에 전달하며 별도의
-visual-row→entry, cell-row, fixed-header y 산술을 하지 않는다. `view.zig`, `session_dock_lowering`, published
+visual-row→entry, cell-row, fixed-header y 산술을 하지 않는다. `view.zig`, `chrome_draw_lowering`, published
 `UiRectTree`, pointer hit-test, future scrollbar thumb는 이 same projection의 integer rect/clip을 소비한다. 따라서 카드가
 clip top에서 반쯤 보이면 그 보이는 반쪽만 draw/hit 가능하고, header 아래로 bleed하거나 다음 card의 action rect가 앞 card를
 가로채지 않는다. content height는 item 간 gap만 포함하고 마지막 item 뒤 trailing gap은 넣지 않는다. scroll thumb가

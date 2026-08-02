@@ -1,9 +1,9 @@
-//! Session Dock 전용 macOS renderer adapter.
+//! Semantic Chrome draw의 macOS renderer adapter.
 //!
-//! `chrome.components.session_dock`는 semantic `ChromeDraw`와 rect tree까지만 소유한다.
-//! 이 파일은 그 결과를 실제 앱의 CoreText `DrawList`와 Metal background quad로 한 방향
-//! 투영한다. 따라서 archive/AppSession 좌표 계산이나 provider 문자열 조립은 여기로
-//! 들어올 수 없으며, hit rect와 paint rect의 권위는 계속 component tree 하나다.
+//! 각 `chrome.components.*`는 semantic `ChromeDraw`와 rect tree까지만 소유한다. 이 파일은
+//! 그 결과를 실제 앱의 CoreText `DrawList`와 Metal background quad로 한 방향 투영한다.
+//! 따라서 archive/AppSession 좌표 계산이나 provider 문자열 조립은 여기로 들어올 수 없으며,
+//! hit rect와 paint rect의 권위는 계속 component tree 하나다.
 
 const std = @import("std");
 const maru = @import("maru");
@@ -12,7 +12,7 @@ const renderer = maru.renderer;
 const terminal = maru.terminal;
 const metal_frame = renderer.metal_frame;
 
-/// A completed dock frame's text ops become **one** CoreText DrawList. `view.zig` already owns
+/// A completed Chrome frame's text ops become **one** CoreText DrawList. `view.zig` already owns
 /// clipping/ellipsis; this adapter only places its clusters at the same component-grid origin.
 /// Batching prevents a card with three labels from causing three independent CoreText shaping
 /// passes on every render tick.
@@ -60,9 +60,9 @@ pub fn buildTextDrawList(
     };
 }
 
-/// Session Dock card는 terminal glyph보다 먼저 그리는 layer 2에 둔다. layer 0은 renderer의
-/// draw order상 terminal text 뒤라 써서는 안 된다. 이 규칙을 adapter에 고정해 카드 배경이
-/// CoreText 글자를 덮는 회귀를 막는다.
+/// Chrome card는 terminal glyph보다 먼저 그리는 layer 2에 둔다. layer 0은 renderer의 draw
+/// order상 terminal text 뒤라 써서는 안 된다. 이 규칙을 adapter에 고정해 카드 배경이 CoreText
+/// 글자를 덮는 회귀를 막는다.
 pub fn appendBackgroundQuads(
     allocator: std.mem.Allocator,
     draws: []const chrome.ChromeDraw,
@@ -142,7 +142,7 @@ fn packRgba(rgb: maru.color.Rgb, alpha: u8) u32 {
     return (@as(u32, alpha) << 24) | (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
 }
 
-test "Session Dock lowering preserves an NFD cluster and paints cards behind text" {
+test "Chrome draw lowering preserves an NFD cluster and paints cards behind text" {
     const tk = chrome.tokens.Tokens.rich(.{
         .foreground = .{ .r = 1, .g = 2, .b = 3 },
         .sidebar_background = .{ .r = 4, .g = 5, .b = 6 },

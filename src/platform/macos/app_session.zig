@@ -50,6 +50,7 @@ const coretext_frame_builder = @import("coretext_frame_builder.zig");
 const file_tree_backend = @import("file_tree_backend.zig");
 const file_tree_mutation_backend = @import("file_tree_mutation_backend.zig");
 const agent_session_archive_backend = @import("agent_session_archive_backend.zig");
+const agent_session_archive_scope_backend = @import("agent_session_archive_scope_backend.zig");
 const metal_frame = renderer.metal_frame; // §8: metal_frame이 renderer로 이주 — maru.renderer barrel 경유(중립 frame DTO)
 const shell_integration = @import("shell_integration.zig");
 const global_hotkey = @import("global_hotkey.zig");
@@ -429,6 +430,11 @@ const bell_flash_peak_milli: u32 = 350;
 const drag_autoscroll_step_ms: u32 = 33;
 const agent_session_archive_snapshot_ttl_ns: i128 = 15 * std.time.ns_per_s;
 
+/// Archive scope owns only display filtering.  It never changes the scanner's
+/// candidate set, so changing scope/search is immediately reversible and does
+/// not put filesystem work on the render or key-input path.
+const AgentSessionArchiveScope = enum { workspace, project, all };
+
 fn archiveOpenedDevice(file: std.Io.File) u64 {
     if (comptime builtin.os.tag != .macos) return 0;
     var stat: std.posix.Stat = undefined;
@@ -453,6 +459,37 @@ fn agentSessionArchiveMatches(record: agent_session_archive_backend.Record, quer
         asciiContainsIgnoreCase(record.parsed.summary, query) or
         asciiContainsIgnoreCase(record.parsed.cwd, query) or
         asciiContainsIgnoreCase(record.parsed.model, query);
+}
+
+fn agentSessionArchiveWithinRoot(record: agent_session_archive_backend.Record, root: []const u8) bool {
+    return record.parsed.cwd_canonical and record.parsed.cwd.len > 0 and std.fs.path.isAbsolute(record.parsed.cwd) and
+        file_tree.Tree.pathWithinRoot(record.parsed.cwd, root);
+}
+
+test "archive scope admits only canonical cwd beneath the exact root boundary" {
+    const parsed = maru.session.agent_session_archive.Parsed{
+        .provider = .codex,
+        .session_id = @constCast("session"),
+        .title = @constCast("title"),
+        .summary = @constCast("summary"),
+        .cwd = @constCast("/workspace/project/src"),
+        .cwd_canonical = true,
+        .model = @constCast("model"),
+        .message_count = 1,
+        .verified_user = true,
+    };
+    const record = agent_session_archive_backend.Record{
+        .parsed = parsed,
+        .source_path = @constCast("/source.jsonl"),
+        .mtime_ns = 0,
+        .inode = 0,
+        .device = 0,
+    };
+    try std.testing.expect(agentSessionArchiveWithinRoot(record, "/workspace/project"));
+    try std.testing.expect(!agentSessionArchiveWithinRoot(record, "/workspace/project-old"));
+    var unresolved = record;
+    unresolved.parsed.cwd_canonical = false;
+    try std.testing.expect(!agentSessionArchiveWithinRoot(unresolved, "/workspace/project"));
 }
 
 // 세로 탭 사이드바의 기본 논리 폭(pt). backing 픽셀 폭은 scale을 곱해 구한다(refreshCellMetrics에서).
@@ -2685,11 +2722,26 @@ pub const AppSession = struct {
     file_tree: file_tree.Tree = undefined,
     file_tree_backend: file_tree_backend.Backend = undefined,
     agent_session_archive_backend: agent_session_archive_backend.Backend = undefined,
+    agent_session_archive_scope_backend: agent_session_archive_scope_backend.Backend = undefined,
     agent_session_archive_initialized: bool = false,
     agent_session_archive_records: std.ArrayList(agent_session_archive_backend.Record) = .empty,
     agent_session_archive_filtered_indices: std.ArrayList(usize) = .empty,
     agent_session_archive_search: std.ArrayList(u8) = .empty,
     agent_session_archive_search_active: bool = false,
+    agent_session_archive_scope: AgentSessionArchiveScope = .all,
+    /// These are copied only when the archive dock opens or the user changes
+    /// scope.  Search and per-frame publication consume this snapshot without
+    /// looking at the file tree or filesystem again.
+    agent_session_archive_workspace_roots: std.ArrayList([]u8) = .empty,
+    agent_session_archive_project_root: ?[]u8 = null,
+    agent_session_archive_scope_request_id: u64 = 0,
+    agent_session_archive_project_scope_requested: bool = false,
+    agent_session_archive_project_scope_loading: bool = false,
+    agent_session_archive_project_scope_surface_id: ?u64 = null,
+    /// A focus change during the one in-flight root walk replaces this owned
+    /// cwd.  The next worker result is never allowed to activate project scope
+    /// for the older terminal.
+    agent_session_archive_project_scope_pending_cwd: ?[]u8 = null,
     agent_session_archive_loading: bool = false,
     agent_session_archive_completed_ns: i128 = 0,
     agent_session_archive_partial: bool = false,
@@ -3117,6 +3169,8 @@ pub const AppSession = struct {
             self.file_tree_mutation_backend = try file_tree_mutation_backend.Backend.init(allocator, io);
             self.agent_session_archive_backend = try agent_session_archive_backend.Backend.init(allocator, io);
             errdefer self.agent_session_archive_backend.deinit();
+            self.agent_session_archive_scope_backend = try agent_session_archive_scope_backend.Backend.init(allocator, io);
+            errdefer self.agent_session_archive_scope_backend.deinit();
         }
         self.file_tree_initialized = true;
         self.agent_session_archive_initialized = true;
@@ -3352,7 +3406,12 @@ pub const AppSession = struct {
         if (view != .explorer and self.fileTreeFocused()) self.restoreFileTreeFocus();
         // 뷰로 들어올 때 한 번 읽는다(§3.5의 갱신 시점 ①). 폴링하지 않는다.
         if (view == .source_control) self.refreshGitStatus();
-        if (view == .agent_sessions) self.refreshAgentSessionArchive(false);
+        if (view == .agent_sessions) {
+            self.refreshAgentSessionArchiveScopeSnapshots();
+            self.agent_session_archive_project_scope_surface_id = self.activeSurface().id;
+            self.requestAgentSessionArchiveProjectRoot(false);
+            self.refreshAgentSessionArchive(false);
+        }
         self.metal_dirty = true;
     }
 
@@ -3401,6 +3460,166 @@ pub const AppSession = struct {
             self.agent_session_archive_loading = false;
             self.agent_session_archive_completed_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
         }
+        self.metal_dirty = true;
+    }
+
+    fn replaceAgentSessionArchiveWorkspaceRoots(self: *AppSession) bool {
+        var staged: std.ArrayList([]u8) = .empty;
+        errdefer {
+            for (staged.items) |path| self.allocator.free(path);
+            staged.deinit(self.allocator);
+        }
+        staged.ensureTotalCapacity(self.allocator, self.file_tree.roots.items.len) catch return false;
+        for (self.file_tree.roots.items) |root| {
+            // Tree roots are produced by the validated canonical-root path;
+            // retain only absolute roots so a damaged in-memory model cannot
+            // broaden a display scope.
+            if (!std.fs.path.isAbsolute(root.path)) continue;
+            staged.appendAssumeCapacity(self.allocator.dupe(u8, root.path) catch return false);
+        }
+        for (self.agent_session_archive_workspace_roots.items) |path| self.allocator.free(path);
+        self.agent_session_archive_workspace_roots.deinit(self.allocator);
+        self.agent_session_archive_workspace_roots = staged;
+        return true;
+    }
+
+    fn clearAgentSessionArchiveWorkspaceRoots(self: *AppSession) void {
+        for (self.agent_session_archive_workspace_roots.items) |path| self.allocator.free(path);
+        self.agent_session_archive_workspace_roots.clearRetainingCapacity();
+    }
+
+    fn clearAgentSessionArchiveProjectRoot(self: *AppSession) void {
+        if (self.agent_session_archive_project_root) |old| self.allocator.free(old);
+        self.agent_session_archive_project_root = null;
+    }
+
+    fn submitAgentSessionArchiveProjectRoot(self: *AppSession, owned_cwd: []u8) bool {
+        self.agent_session_archive_scope_request_id +%= 1;
+        if (self.agent_session_archive_scope_request_id == 0) self.agent_session_archive_scope_request_id = 1;
+        if (!self.agent_session_archive_scope_backend.submit(owned_cwd, self.agent_session_archive_scope_request_id)) return false;
+        self.agent_session_archive_project_scope_loading = true;
+        self.metal_dirty = true;
+        return true;
+    }
+
+    /// Capture only the current in-memory observation on the main actor.  The
+    /// backend owns canonicalization and the `.git` ancestor walk, so neither
+    /// scope selection nor a later key/frame path can block on filesystem I/O.
+    fn requestAgentSessionArchiveProjectRoot(self: *AppSession, requested: bool) void {
+        if (requested) self.agent_session_archive_project_scope_requested = true;
+        const term = self.activeTab().activeTerm();
+        self.refreshTermObservation(term, false, false);
+        const cwd = if (term.rt.observation.availability != .unavailable) term.rt.observation.cwd.items else "";
+        if (!std.fs.path.isAbsolute(cwd) or cwd.len == 0) {
+            self.clearAgentSessionArchiveProjectRoot();
+            if (self.agent_session_archive_project_scope_requested) {
+                self.agent_session_archive_project_scope_requested = false;
+                self.showNotice("현재 터미널의 로컬 git 프로젝트를 찾을 수 없습니다.");
+            }
+            return;
+        }
+        const owned_cwd = self.allocator.dupe(u8, cwd) catch return;
+        if (self.agent_session_archive_project_scope_loading) {
+            if (self.agent_session_archive_project_scope_pending_cwd) |old| self.allocator.free(old);
+            self.agent_session_archive_project_scope_pending_cwd = owned_cwd;
+            return;
+        }
+        if (!self.submitAgentSessionArchiveProjectRoot(owned_cwd)) {
+            self.allocator.free(owned_cwd);
+            if (self.agent_session_archive_project_scope_requested) {
+                self.agent_session_archive_project_scope_requested = false;
+                self.showNotice("프로젝트 경로 분석을 시작하지 못했습니다.");
+            }
+            return;
+        }
+    }
+
+    fn updateAgentSessionArchiveProjectScope(self: *AppSession) void {
+        var result = self.agent_session_archive_scope_backend.takeResult() orelse return;
+        defer result.deinit(self.allocator);
+        if (result.request_id != self.agent_session_archive_scope_request_id) return;
+        self.agent_session_archive_project_scope_loading = false;
+        self.clearAgentSessionArchiveProjectRoot();
+        self.agent_session_archive_project_root = result.project_root;
+        result.project_root = null;
+        if (self.agent_session_archive_project_scope_pending_cwd) |pending_cwd| {
+            self.agent_session_archive_project_scope_pending_cwd = null;
+            if (self.submitAgentSessionArchiveProjectRoot(pending_cwd)) return;
+            self.allocator.free(pending_cwd);
+            self.agent_session_archive_project_scope_requested = false;
+            self.showNotice("프로젝트 경로 분석을 다시 시작하지 못했습니다.");
+            self.metal_dirty = true;
+            return;
+        }
+        if (self.agent_session_archive_scope == .project) {
+            // Focus may have changed while the dock stayed open.  The worker
+            // just replaced the root snapshot, so reproject the immutable
+            // records now instead of leaving the old project's rows visible.
+            if (self.agent_session_archive_project_root == null) {
+                self.agent_session_archive_scope = .all;
+                if (!self.agent_session_archive_project_scope_requested)
+                    self.showNotice("현재 터미널에 로컬 git 프로젝트가 없어 전체 목록으로 전환했습니다.");
+            } else {
+                self.rebuildAgentSessionArchiveFilter();
+                self.agent_session_archive_selected = null;
+                self.agent_session_archive_scroll_rows = 0;
+            }
+        }
+        if (self.agent_session_archive_project_scope_requested) {
+            self.agent_session_archive_project_scope_requested = false;
+            if (self.agent_session_archive_project_root == null) {
+                self.showNotice("현재 터미널의 로컬 git 프로젝트를 찾을 수 없습니다.");
+            } else {
+                self.agent_session_archive_scope = .project;
+                self.rebuildAgentSessionArchiveFilter();
+                self.agent_session_archive_selected = null;
+                self.agent_session_archive_scroll_rows = 0;
+            }
+        }
+        self.metal_dirty = true;
+    }
+
+    fn refreshAgentSessionArchiveProjectScopeForFocus(self: *AppSession) void {
+        if (!self.dockVisible() or self.dock.view != .agent_sessions or !self.surface_initialized) return;
+        const surface_id = self.activeSurface().id;
+        if (self.agent_session_archive_project_scope_surface_id == surface_id) return;
+        self.agent_session_archive_project_scope_surface_id = surface_id;
+        self.requestAgentSessionArchiveProjectRoot(false);
+    }
+
+    fn refreshAgentSessionArchiveScopeSnapshots(self: *AppSession) void {
+        const workspace_ok = self.replaceAgentSessionArchiveWorkspaceRoots();
+        if (!workspace_ok) self.clearAgentSessionArchiveWorkspaceRoots();
+        if (self.agent_session_archive_scope == .workspace and (!workspace_ok or self.agent_session_archive_workspace_roots.items.len == 0))
+            self.agent_session_archive_scope = .all;
+        self.rebuildAgentSessionArchiveFilter();
+        self.agent_session_archive_selected = null;
+        self.agent_session_archive_scroll_rows = 0;
+    }
+
+    fn selectAgentSessionArchiveScope(self: *AppSession, scope: AgentSessionArchiveScope) void {
+        if (scope != .project) self.agent_session_archive_project_scope_requested = false;
+        const available = switch (scope) {
+            .workspace => self.replaceAgentSessionArchiveWorkspaceRoots() and self.agent_session_archive_workspace_roots.items.len > 0,
+            .project => {
+                self.requestAgentSessionArchiveProjectRoot(true);
+                return;
+            },
+            .all => true,
+        };
+        if (!available) {
+            if (scope == .workspace) self.clearAgentSessionArchiveWorkspaceRoots();
+            self.showNotice(switch (scope) {
+                .workspace => "현재 작업공간 경로가 없습니다.",
+                .project => unreachable,
+                .all => unreachable,
+            });
+            return;
+        }
+        self.agent_session_archive_scope = scope;
+        self.rebuildAgentSessionArchiveFilter();
+        self.agent_session_archive_selected = null;
+        self.agent_session_archive_scroll_rows = 0;
         self.metal_dirty = true;
     }
 
@@ -12384,8 +12603,8 @@ pub const AppSession = struct {
         return if (index < self.file_tree_rows.items.len) index else null;
     }
 
-    /// 세션 아카이브의 보이는 한 줄과 record index의 대응. 스크롤을 아직 제공하지 않는 첫 vertical slice에서는
-    /// renderer가 보이는 앞쪽 record만 그리므로 row index가 곧 record index다.
+    /// 세션 아카이브의 보이는 한 줄과 record index의 대응. scope/search는
+    /// immutable snapshot의 index만 재투영하므로 행 hit-test도 같은 index를 써야 한다.
     fn agentSessionArchiveRowAt(self: *const AppSession, x_px: f64, y_px: f64) ?usize {
         if (self.dock.view != .agent_sessions or !self.dockVisible() or self.cell_height_px == 0) return null;
         const content = self.dockGeometry().tree_content;
@@ -12394,30 +12613,43 @@ pub const AppSession = struct {
             @as(f64, @floatFromInt(self.cell_height_px)));
         const visible_rows = content.h / self.cell_height_px;
         const detail_rows = self.agentSessionArchiveDetailRows();
-        // Header and expanded detail/action rows are not selectable sessions.
-        if (local_row < 1 + detail_rows or local_row >= visible_rows) return null;
-        const row = self.agent_session_archive_scroll_rows + local_row - 1 - detail_rows;
+        // Header, scope selector, and expanded detail/action rows are not
+        // selectable sessions.
+        if (local_row < 2 + detail_rows or local_row >= visible_rows) return null;
+        const row = self.agent_session_archive_scroll_rows + local_row - 2 - detail_rows;
         return if (row < self.agent_session_archive_filtered_indices.items.len) self.agent_session_archive_filtered_indices.items[row] else null;
     }
 
     fn agentSessionArchiveDetailRows(self: *const AppSession) usize {
         const selected = self.agent_session_archive_selected orelse return 0;
         if (selected >= self.agent_session_archive_records.items.len or self.cell_height_px == 0) return 0;
-        // header + provider/model + two actions must fit before reserving
+        // header + scope selector + provider/model + two actions must fit before reserving
         // record rows; otherwise preserve the compact list without overflow.
-        return if (self.dockGeometry().tree_content.h / self.cell_height_px >= 4) 3 else 0;
+        return if (self.dockGeometry().tree_content.h / self.cell_height_px >= 5) 3 else 0;
     }
 
     fn agentSessionArchiveVisibleRecordRows(self: *const AppSession) usize {
         if (self.cell_height_px == 0) return 0;
         const rows = self.dockGeometry().tree_content.h / self.cell_height_px;
-        return rows -| 1 -| self.agentSessionArchiveDetailRows();
+        return rows -| 2 -| self.agentSessionArchiveDetailRows();
     }
 
     fn rebuildAgentSessionArchiveFilter(self: *AppSession) void {
         self.agent_session_archive_filtered_indices.clearRetainingCapacity();
         for (self.agent_session_archive_records.items, 0..) |record, index| {
-            if (agentSessionArchiveMatches(record, self.agent_session_archive_search.items))
+            const scope_matches = switch (self.agent_session_archive_scope) {
+                .all => true,
+                .workspace => blk: {
+                    for (self.agent_session_archive_workspace_roots.items) |root|
+                        if (agentSessionArchiveWithinRoot(record, root)) break :blk true;
+                    break :blk false;
+                },
+                .project => if (self.agent_session_archive_project_root) |root|
+                    agentSessionArchiveWithinRoot(record, root)
+                else
+                    false,
+            };
+            if (scope_matches and agentSessionArchiveMatches(record, self.agent_session_archive_search.items))
                 self.agent_session_archive_filtered_indices.append(self.allocator, index) catch break;
         }
     }
@@ -12458,8 +12690,8 @@ pub const AppSession = struct {
         if (!layout_math.pointInRect(x_px, y_px, content)) return null;
         const local_row: usize = @intFromFloat((y_px - @as(f64, @floatFromInt(content.y))) / @as(f64, @floatFromInt(self.cell_height_px)));
         return switch (local_row) {
-            2 => .resume_session,
-            3 => .reveal_log,
+            3 => .resume_session,
+            4 => .reveal_log,
             else => null,
         };
     }
@@ -12469,6 +12701,22 @@ pub const AppSession = struct {
         const content = self.dockGeometry().tree_content;
         if (!layout_math.pointInRect(x_px, y_px, content)) return false;
         return y_px < @as(f64, @floatFromInt(content.y + self.cell_height_px));
+    }
+
+    fn agentSessionArchiveScopeAt(self: *const AppSession, x_px: f64, y_px: f64) ?AgentSessionArchiveScope {
+        if (self.dock.view != .agent_sessions or !self.dockVisible() or self.cell_height_px == 0) return null;
+        const content = self.dockGeometry().tree_content;
+        if (!layout_math.pointInRect(x_px, y_px, content)) return null;
+        const local_row: usize = @intFromFloat((y_px - @as(f64, @floatFromInt(content.y))) / @as(f64, @floatFromInt(self.cell_height_px)));
+        if (local_row != 1) return null;
+        const width = @max(@as(u32, 1), content.w);
+        const column: u2 = @intCast(@min(@as(u32, 2), @as(u32, @intFromFloat((x_px - @as(f64, @floatFromInt(content.x))) * 3.0 / @as(f64, @floatFromInt(width))))));
+        return switch (column) {
+            0 => .workspace,
+            1 => .project,
+            2 => .all,
+            else => unreachable,
+        };
     }
 
     fn fileTreeNamespaceMutationBusy(self: *const AppSession) bool {
@@ -21166,6 +21414,10 @@ pub const AppSession = struct {
                         self.refreshAgentSessionArchive(true);
                         return;
                     }
+                    if (self.agentSessionArchiveScopeAt(x_px, y_px)) |scope| {
+                        self.selectAgentSessionArchiveScope(scope);
+                        return;
+                    }
                     // 행 클릭은 세션을 재개하지 않고 먼저 상세 대상을 고른다.
                     // 선택 상태는 새 탭 재개 액션이 소비하며, archive transcript 자체는 절대 실행하지 않는다.
                     if (self.agentSessionArchiveRowAt(x_px, y_px)) |row_index| {
@@ -26879,6 +27131,8 @@ pub const AppSession = struct {
         self.drainUpdateCheck(); // 인앱 새 버전 안내: 백그라운드 체크 결과를 알림으로(백그라운드 스레드 → 메인)
         self.ageFilePanelSelfWriteLatches();
         self.updateAgentSessionArchive(); // 로컬 Codex/Claude history worker 결과만 main thread 상태로 교체
+        self.refreshAgentSessionArchiveProjectScopeForFocus(); // active-surface id 비교만; root I/O는 worker
+        self.updateAgentSessionArchiveProjectScope(); // scope root worker result만 적용; tick의 filesystem I/O는 0
         self.updateFileTree() catch {}; // FP7: background scan 결과만 적용 + 다음 요청 제출(FS I/O는 worker 전용)
         self.updateFileTreeMutations(); // mutation completion memory queue only; at most one result per frame // path-pinned rename recreation is bounded to one visible WebView per frame
         self.drainGitStatus(); // 완료된 git 읽기를 싣는다(syscall 없음 — 큐에서 꺼내기만)
@@ -27801,8 +28055,8 @@ pub const AppSession = struct {
                             // 현재 열려 있는 Term 목록이 아니라 로컬 Codex/Claude archive를 표시한다. worker가
                             // 소유 경계를 넘겨 준 record만 main thread가 읽으며, 다음 refresh 전까지 안정적이다.
                             const detail_rows = self.agentSessionArchiveDetailRows();
-                            const archive_rows = visible_rows -| 1 -| detail_rows;
-                            const archive_origin_y = dg.tree_content.y + self.cell_height_px * @as(u32, @intCast(1 + detail_rows));
+                            const archive_rows = visible_rows -| 2 -| detail_rows;
+                            const archive_origin_y = dg.tree_content.y + self.cell_height_px * @as(u32, @intCast(2 + detail_rows));
                             const header_owned: ?[]u8 = if (self.agent_session_archive_search_active)
                                 std.fmt.allocPrint(self.allocator, "AI 세션 · 검색: {s}", .{self.agent_session_archive_search.items}) catch null
                             else
@@ -27819,6 +28073,27 @@ pub const AppSession = struct {
                                     .colors = tabbar_colors,
                                 } });
                             } else |_| {}
+                            const workspace_scope_label = if (self.agent_session_archive_workspace_roots.items.len > 0) "현재 작업공간" else "작업공간 없음";
+                            const project_scope_label = if (self.agent_session_archive_project_scope_loading)
+                                "프로젝트 분석 중"
+                            else if (self.agent_session_archive_project_root != null)
+                                "현재 프로젝트"
+                            else
+                                "프로젝트 없음";
+                            const scope_owned: ?[]u8 = switch (self.agent_session_archive_scope) {
+                                .workspace => std.fmt.allocPrint(self.allocator, "[{s}] | {s} | 전체", .{ workspace_scope_label, project_scope_label }) catch null,
+                                .project => std.fmt.allocPrint(self.allocator, "{s} | [{s}] | 전체", .{ workspace_scope_label, project_scope_label }) catch null,
+                                .all => std.fmt.allocPrint(self.allocator, "{s} | {s} | [전체]", .{ workspace_scope_label, project_scope_label }) catch null,
+                            };
+                            defer if (scope_owned) |label| self.allocator.free(label);
+                            const scope_label = scope_owned orelse "현재 작업공간 | 현재 프로젝트 | 전체";
+                            if (coretext_frame_builder.buildDockNoticeDrawList(self.allocator, tree_content_cols, scope_label, dock_fg)) |scl| {
+                                self.collectShaped(&collected, scl, pane_frame_builder, .{ .pane = .{
+                                    .origin_x = dg.tree_content.x,
+                                    .origin_y = dg.tree_content.y + self.cell_height_px,
+                                    .colors = tabbar_colors,
+                                } });
+                            } else |_| {}
                             if (detail_rows > 0) if (self.agent_session_archive_selected) |selected| if (selected < self.agent_session_archive_records.items.len) {
                                 const record = &self.agent_session_archive_records.items[selected];
                                 const model = if (record.parsed.model.len > 0) record.parsed.model else "모델 정보 없음";
@@ -27831,7 +28106,7 @@ pub const AppSession = struct {
                                 if (coretext_frame_builder.buildDockSessionListDrawList(self.allocator, tree_content_cols, @intCast(detail_rows), &detail_labels, null, dock_fg, dock_active_fg)) |ddl| {
                                     self.collectShaped(&collected, ddl, pane_frame_builder, .{ .pane = .{
                                         .origin_x = dg.tree_content.x,
-                                        .origin_y = dg.tree_content.y + self.cell_height_px,
+                                        .origin_y = dg.tree_content.y + self.cell_height_px * 2,
                                         .colors = tabbar_colors,
                                     } });
                                 } else |_| {}
@@ -31708,11 +31983,18 @@ pub const AppSession = struct {
 
         if (self.file_tree_initialized) {
             if (self.agent_session_archive_initialized) {
+                self.agent_session_archive_scope_backend.deinit();
                 self.agent_session_archive_backend.deinit();
                 for (self.agent_session_archive_records.items) |*record| record.deinit(self.allocator);
                 self.agent_session_archive_records.deinit(self.allocator);
                 self.agent_session_archive_filtered_indices.deinit(self.allocator);
                 self.agent_session_archive_search.deinit(self.allocator);
+                for (self.agent_session_archive_workspace_roots.items) |path| self.allocator.free(path);
+                self.agent_session_archive_workspace_roots.deinit(self.allocator);
+                if (self.agent_session_archive_project_root) |path| self.allocator.free(path);
+                self.agent_session_archive_project_root = null;
+                if (self.agent_session_archive_project_scope_pending_cwd) |path| self.allocator.free(path);
+                self.agent_session_archive_project_scope_pending_cwd = null;
                 self.agent_session_archive_initialized = false;
             }
             if (self.pending_rename_remap) |*plan| plan.deinit(self.allocator);

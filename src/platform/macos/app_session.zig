@@ -5785,7 +5785,7 @@ pub const AppSession = struct {
                 self.markHostConnectFailed(.exe_path);
                 return;
             };
-            const base = sessionCacheBase(a) orelse {
+            const base = sessionHostRuntimeBase(a) orelse {
                 self.markHostConnectFailed(.cache_base);
                 return;
             };
@@ -5888,7 +5888,7 @@ pub const AppSession = struct {
         const alloc = std.heap.smp_allocator;
         var arena = std.heap.ArenaAllocator.init(alloc);
         defer arena.deinit();
-        const base = sessionCacheBase(arena.allocator()) orelse return .unavailable;
+        const base = sessionHostRuntimeBase(arena.allocator()) orelse return .unavailable;
         var connected = switch (session_host.host_connect.connectExistingHost(
             alloc,
             base,
@@ -6092,6 +6092,27 @@ pub const AppSession = struct {
         const xdg = if (std.c.getenv("XDG_CACHE_HOME")) |value| std.mem.span(value) else null;
         const home = if (std.c.getenv("HOME")) |value| std.mem.span(value) else null;
         return maru.session.cache_path.maruBaseAlloc(a, xdg, home) catch null;
+    }
+
+    /// 영속 session host의 **런타임 상태**(manifest·start lock·owner lease·host 로그) base.
+    ///
+    /// 이 상태를 `~/.cache`에 두면 안 된다. XDG 규약이 캐시를 "손실을 감수하고 언제든 삭제 가능한 데이터"로
+    /// 정의하고 사용자도 그렇게 다루는데, 여기 있는 manifest는 **지우는 순간 살아 있는 세션을 전부 잃게 만드는**
+    /// 데이터다. host 프로세스는 멀쩡히 남아 있어도 자기를 가리키는 manifest가 없으면 GUI가 발견할 수 없어,
+    /// 모든 터미널이 조용히 in-process로 떨어진다. 실제로 캐시를 비운 뒤 그 사고를 겪었다.
+    ///
+    /// 그래서 짝인 소켓과 같은 `/tmp/maru-<uid>` 아래에 둔다. 열쇠(manifest)와 자물쇠(소켓)가 한 디렉터리에
+    /// 있으면 "한쪽만 사라지는" 실패 모드가 성립하지 않는다. 재부팅 때 함께 사라지는데 그 시점엔 host도 전부
+    /// 죽어 있으므로 수명도 정확히 맞다 — `~/.local/state`에 두면 오히려 죽은 host를 가리키는 stale manifest가
+    /// 재부팅을 넘어 남는다.
+    ///
+    /// 디렉터리 생성과 0700 권한은 `short_endpoint.prepareCurrentUserNamespace()`가 소켓 경로와 같은 계약으로
+    /// 보장한다(host·client 양쪽이 이미 호출한다).
+    fn sessionHostRuntimeBase(a: std.mem.Allocator) ?[]const u8 {
+        if (!is_macos) return null;
+        var buf: [64]u8 = undefined;
+        const path = session_host.short_endpoint.userRootPathIn(&buf, std.c.getuid()) catch return null;
+        return a.dupe(u8, path) catch null;
     }
 
     /// 한 Term(터미널)을 만든다 — backend가 registry `LiveSurface` 번들 슬롯 소유 + live PTY spawn + surface init을
@@ -42036,6 +42057,26 @@ test "host connect 실패 detail: 단계 단독과 단계+사유를 한 줄로 �
 // 모르거나(UnsupportedSpawnContract). 원인이 갈리는데 표시가 같으면 진단이 그 지점에서 멈춘다. 실제로 build_id가
 // **완전히 일치하는** host에서도 이 단계가 재현됐고, 셋 중 무엇인지 몰라 더 좁힐 수 없었다. 그래서 error 이름을
 // 함께 싣는다. reason과 error는 동시에 오지 않으므로(연결 단계냐 그 이후냐) 우선순위도 함께 고정한다.
+test "session host 런타임 base는 캐시 경로 밖이며 socket과 같은 디렉터리다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const runtime_base = AppSession.sessionHostRuntimeBase(a) orelse return error.SkipZigTest;
+
+    // manifest/lock이 캐시 아래 있으면 **사용자가 캐시를 비우는 정상적인 행동만으로 살아 있는 세션을 전부 잃는다**.
+    // host 프로세스는 남아 있어도 자기를 가리키는 manifest가 없으면 discovery가 발견하지 못하기 때문이다.
+    if (AppSession.sessionCacheBase(a)) |cache_base| {
+        try std.testing.expect(!std.mem.startsWith(u8, runtime_base, cache_base));
+    }
+
+    // 열쇠(manifest)와 자물쇠(socket)가 같은 디렉터리에 있어야 "한쪽만 사라지는" 실패 모드가 성립하지 않는다.
+    var socket_buf: [128]u8 = undefined;
+    const socket_dir = try session_host.short_endpoint.socketDirPathIn(&socket_buf, std.c.getuid());
+    try std.testing.expect(std.mem.startsWith(u8, socket_dir, runtime_base));
+}
+
 test "host connect 실패 detail: runtime_death는 어떤 error였는지까지 남긴다" {
     var buf: [96]u8 = undefined;
     try std.testing.expectEqualStrings(

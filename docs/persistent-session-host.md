@@ -1734,14 +1734,19 @@ product update E2E는 아직 없다. 따라서 release 호환 완료로 선언�
 이를 위해 고정 `<base>/session-host/control.sock` 하나를 host별 discovery entry와 짧은 endpoint namespace로 바꾼다.
 `<base>/session-host/hosts/<host_id>/host.v1.json` entry는 `host_id`, protocol major, **절대 socket path**, build identity,
 monotonic `upgrade_epoch`, lifecycle(`ready/restoring/draining`) 상태를 가지며 workspace manifest는 계속
-`host_id:runtime_id`만 참조한다. manifest/lock은 긴 cache 경로에 있어도
-되지만 Unix socket은 macOS `sockaddr_un.sun_path`의 NUL 포함 104-byte 상한을 구조적으로 만족해야 한다. endpoint는
+`host_id:runtime_id`만 참조한다. manifest/lock은 socket과 **같은 런타임 디렉터리**(`/tmp/maru-<uid>`) 아래에 둔다 —
+캐시 경로에 두지 않는다. XDG 규약이 캐시를 "손실을 감수하고 언제든 삭제 가능한 데이터"로 정의하고 사용자도 그렇게
+다루는데, manifest는 **지우는 순간 살아 있는 세션을 전부 잃게 만드는** 데이터다. host 프로세스가 멀쩡히 남아 있어도
+자기를 가리키는 manifest가 없으면 discovery가 발견할 수 없어 모든 터미널이 조용히 in-process로 떨어진다(실제로 캐시를
+비운 뒤 그 사고가 났다). 열쇠(manifest)와 자물쇠(socket)를 한 디렉터리에 두면 "한쪽만 사라지는" 실패 모드가 성립하지
+않고, 재부팅 때 함께 사라지는 수명도 host 생존 범위와 정확히 맞는다. Unix socket은 macOS `sockaddr_un.sun_path`의
+NUL 포함 104-byte 상한을 구조적으로 만족해야 한다. endpoint는
 `/tmp/maru-<uid>/sh/<32-hex-host_id>.sock`으로 고정하고, per-UID directory를 mode `0700`으로 생성하기 전에 `lstat`으로
 symlink가 아니며 현재 UID 소유인지 검증한다. socket도 현재처럼 peer UID와 mode `0600`을 검증한다. 임의
 `XDG_CACHE_HOME`을 socket prefix로 사용하지 않는다. host/runtime은 재부팅 보존 비목표라 `/tmp` 정리는 수명 계약과
 충돌하지 않는다.
 
-각 host는 자기 cache directory의 `owner.lock`을 lifetime 동안 exclusive `flock`하고, 짧은 socket bind가 끝난 뒤
+각 host는 자기 런타임 directory의 `owner.lock`을 lifetime 동안 exclusive `flock`하고, 짧은 socket bind가 끝난 뒤
 manifest를 temp-write→`fsync`→rename으로 publish한다. discovery는 lock이 live이고 manifest의 endpoint가 위 trusted
 prefix/길이 조건을 만족하며 socket/hello `host_id`가 모두 맞는 entry만 사용한다. 같은 major의 동시 spawn은
 `<base>/session-host/launch-v<major>.lock`을 잡고 registry를 다시 확인한 뒤 하나만 실행해 spawn storm을 막는다.

@@ -496,6 +496,92 @@ fn sameAgentSessionArchiveIdentity(a: *const agent_session_archive_backend.Recor
         std.mem.eql(u8, a.parsed.session_id, b.parsed.session_id);
 }
 
+/// A borrowed identity is sufficient only inside the one main-actor transaction that swaps an
+/// immutable archive snapshot.  It is captured before the old records are freed and resolved
+/// against the replacement before that free, so no session id is copied or retained past its
+/// source snapshot.
+const ArchiveScrollIdentity = struct {
+    provider: maru.session.agent_session_archive.Provider,
+    session_id: []const u8,
+    device: u64,
+    inode: std.Io.File.INode,
+
+    fn fromRecord(record: *const agent_session_archive_backend.Record) ArchiveScrollIdentity {
+        return .{
+            .provider = record.parsed.provider,
+            .session_id = record.parsed.session_id,
+            .device = record.device,
+            .inode = record.inode,
+        };
+    }
+
+    fn eqlRecord(self: ArchiveScrollIdentity, record: *const agent_session_archive_backend.Record) bool {
+        return self.provider == record.parsed.provider and self.device == record.device and self.inode == record.inode and
+            std.mem.eql(u8, self.session_id, record.parsed.session_id);
+    }
+};
+
+const ArchiveScrollAnchor = struct {
+    identity: ArchiveScrollIdentity,
+    /// Backing pixels from the anchored card's top to the old viewport top.  This is always
+    /// non-negative because only a card crossing the viewport top may become an anchor.
+    intra_card_y_px: u32,
+};
+
+fn archiveScrollAnchorFor(
+    entries: []const agent_session_archive_view.Entry,
+    records: []const agent_session_archive_backend.Record,
+    projection: chrome.components.session_dock.scroll.Projection,
+    metrics: chrome.components.session_dock.scroll.Metrics,
+) ?ArchiveScrollAnchor {
+    var y: i64 = projection.first_origin_y_px;
+    var index = projection.first_index;
+    while (index < projection.end_exclusive) : (index += 1) {
+        const entry = entries[index];
+        const kind: chrome.components.session_dock.scroll.Kind = switch (entry) {
+            .group => .group,
+            .card => .card,
+        };
+        const h: i64 = metrics.itemHeight(kind);
+        if (entry == .card and y <= 0 and y + h > 0) {
+            const record_index = entry.card;
+            if (record_index >= records.len) return null;
+            return .{
+                .identity = .fromRecord(&records[record_index]),
+                .intra_card_y_px = @intCast(-y),
+            };
+        }
+        y += h;
+        if (index + 1 < entries.len) y += metrics.gap_px;
+    }
+    return null;
+}
+
+fn archiveScrollAnchorOffsetFor(
+    entries: []const agent_session_archive_view.Entry,
+    records: []const agent_session_archive_backend.Record,
+    saved: ArchiveScrollAnchor,
+    metrics: chrome.components.session_dock.scroll.Metrics,
+    max_offset_px: u32,
+) ?u32 {
+    var top: u32 = 0;
+    for (entries, 0..) |entry, index| {
+        const kind: chrome.components.session_dock.scroll.Kind = switch (entry) {
+            .group => .group,
+            .card => .card,
+        };
+        const h = metrics.itemHeight(kind);
+        if (entry == .card) {
+            const record_index = entry.card;
+            if (record_index < records.len and saved.identity.eqlRecord(&records[record_index]))
+                return chrome.components.session_dock.scroll.anchorOffsetPx(top, saved.intra_card_y_px, max_offset_px);
+        }
+        top +|= h;
+        if (index + 1 < entries.len) top +|= metrics.gap_px;
+    }
+    return null;
+}
+
 fn archiveSnapshotSelectionIndex(
     previous: ?*const agent_session_archive_backend.Record,
     replacement: []const agent_session_archive_backend.Record,
@@ -566,6 +652,49 @@ test "archive snapshot replacement preserves selection only for the exact source
     try std.testing.expectEqual(@as(?usize, 1), archiveSnapshotSelectionIndex(&selected, &replacement));
     replacement[1].inode = 9;
     try std.testing.expect(archiveSnapshotSelectionIndex(&selected, &replacement) == null);
+}
+
+test "archive scroll identity rejects same path or mtime when the exact source identity changed" {
+    const record = agent_session_archive_backend.Record{
+        .parsed = .{ .provider = .claude, .session_id = @constCast("session-a"), .title = @constCast("title"), .summary = @constCast("summary"), .cwd = @constCast("/workspace/project"), .cwd_canonical = true, .model = @constCast("model"), .message_count = 1, .verified_user = true },
+        .source_path = @constCast("/archive/current.jsonl"),
+        .mtime_ns = 42,
+        .inode = 7,
+        .device = 11,
+    };
+    const identity = ArchiveScrollIdentity.fromRecord(&record);
+    try std.testing.expect(identity.eqlRecord(&record));
+    var changed = record;
+    changed.mtime_ns = 99;
+    try std.testing.expect(identity.eqlRecord(&changed));
+    changed.inode = 8;
+    try std.testing.expect(!identity.eqlRecord(&changed));
+    changed = record;
+    changed.parsed.session_id = @constCast("session-b");
+    try std.testing.expect(!identity.eqlRecord(&changed));
+}
+
+test "archive scroll anchor restores only the exact materialized card after reorder" {
+    const records = [_]agent_session_archive_backend.Record{
+        .{ .parsed = .{ .provider = .codex, .session_id = @constCast("anchored"), .title = @constCast("title"), .summary = @constCast("summary"), .cwd = @constCast("/workspace/a"), .cwd_canonical = true, .model = @constCast("model"), .message_count = 1, .verified_user = true }, .source_path = @constCast("/archive/a.jsonl"), .mtime_ns = 1, .inode = 7, .device = 11 },
+        .{ .parsed = .{ .provider = .codex, .session_id = @constCast("other"), .title = @constCast("title"), .summary = @constCast("summary"), .cwd = @constCast("/workspace/b"), .cwd_canonical = true, .model = @constCast("model"), .message_count = 1, .verified_user = true }, .source_path = @constCast("/archive/b.jsonl"), .mtime_ns = 1, .inode = 8, .device = 11 },
+    };
+    const metrics = chrome.components.session_dock.scroll.Metrics{ .group_h_px = 20, .card_h_px = 50, .gap_px = 10 };
+    const old_entries = [_]agent_session_archive_view.Entry{ .{ .group = 0 }, .{ .card = 0 }, .{ .card = 1 } };
+    const anchor = archiveScrollAnchorFor(&old_entries, &records, .{
+        .content_height_px = 140,
+        .max_offset_px = 80,
+        .offset_y_px = 45,
+        .first_index = 1,
+        .first_origin_y_px = -15,
+        .end_exclusive = 3,
+    }, metrics).?;
+    try std.testing.expectEqual(@as(u32, 15), anchor.intra_card_y_px);
+
+    const reordered = [_]agent_session_archive_view.Entry{ .{ .group = 0 }, .{ .card = 1 }, .{ .card = 0 } };
+    try std.testing.expectEqual(@as(?u32, 105), archiveScrollAnchorOffsetFor(&reordered, &records, anchor, metrics, 300));
+    const collapsed = [_]agent_session_archive_view.Entry{.{ .group = 0 }};
+    try std.testing.expect(archiveScrollAnchorOffsetFor(&collapsed, &records, anchor, metrics, 300) == null);
 }
 
 test "archive scope refresh detects same-pane cwd changes but ignores repeated observations" {
@@ -3540,6 +3669,9 @@ pub const AppSession = struct {
     fn setDockView(self: *AppSession, view: dock_panel.View) void {
         if (self.dock.view == view) return;
         self.dock.view = view;
+        // The SessionDock's component-local keyboard/pointer focus is meaningful only while its
+        // tree is visible.  Returning later must not resurrect a stale PageUp/PageDown owner.
+        if (view != .agent_sessions) self.agent_session_dock_interaction = .{};
         if (view != .explorer and self.fileTreeFocused()) self.restoreFileTreeFocus();
         // 뷰로 들어올 때 한 번 읽는다(§3.5의 갱신 시점 ①). 폴링하지 않는다.
         if (view == .source_control) self.refreshGitStatus();
@@ -3587,15 +3719,22 @@ pub const AppSession = struct {
         else
             null;
         const preserved_selected = archiveSnapshotSelectionIndex(prior_selected, result.records.items);
-        for (self.agent_session_archive_records.items) |*record| record.deinit(self.allocator);
-        self.agent_session_archive_records.deinit(self.allocator);
+        // Keep the old backing records alive until the replacement projection has had one chance
+        // to resolve the exact card anchor.  The anchor borrows the old session-id bytes, so
+        // freeing this list before restore would either dangle or force a second owned identity
+        // cache solely for this one atomic main-actor commit.
+        const prior_scroll_offset = self.agent_session_archive_scroll.offset_y_px;
+        const prior_scroll_anchor = self.captureAgentSessionDockScrollAnchor();
+        var old_records = self.agent_session_archive_records;
         self.agent_session_archive_records = result.records;
         result.records = .empty;
         self.agent_session_archive_partial = result.partial;
         self.agent_session_archive_selected = preserved_selected;
         self.rebuildAgentSessionArchiveFilter();
         self.reconcileArchiveSessionTabsAgainstSnapshot();
-        self.agent_session_archive_scroll.clamp(self.agentSessionDockScrollProjection().max_offset_px);
+        self.restoreAgentSessionDockScrollAnchor(prior_scroll_anchor, prior_scroll_offset);
+        for (old_records.items) |*record| record.deinit(self.allocator);
+        old_records.deinit(self.allocator);
         self.agent_session_archive_wheel_residue_px = 0;
         if (result.complete) {
             self.agent_session_archive_loading = false;
@@ -13050,6 +13189,71 @@ pub const AppSession = struct {
         );
     }
 
+    fn agentSessionDockMetrics(self: *const AppSession) chrome.components.session_dock.scroll.Metrics {
+        const m = chrome.components.session_dock.types.Metrics.fromCellHeight(self.cell_height_px);
+        return .{ .group_h_px = m.group_h, .card_h_px = m.card_h, .gap_px = m.gap };
+    }
+
+    /// Captures only a card that crosses the old viewport top.  A group header or the inter-item
+    /// gap cannot stand in for a session identity: when either occupies that boundary the caller
+    /// deliberately falls back to the retained numeric offset rather than guessing a neighbour.
+    fn captureAgentSessionDockScrollAnchor(self: *const AppSession) ?ArchiveScrollAnchor {
+        const projection = self.agentSessionDockScrollProjection();
+        return archiveScrollAnchorFor(
+            self.agent_session_archive_projection.entries.items,
+            self.agent_session_archive_records.items,
+            projection,
+            self.agentSessionDockMetrics(),
+        );
+    }
+
+    /// Resolves the old card identity only against a materialized replacement card.  It never
+    /// falls back to a title/path/mtime or a nearby record: an absent or collapsed identity keeps
+    /// the old numeric pixel offset, clamped to the new content bounds.
+    fn restoreAgentSessionDockScrollAnchor(self: *AppSession, anchor: ?ArchiveScrollAnchor, fallback_offset_px: u32) void {
+        const projection = self.agentSessionDockScrollProjection();
+        if (anchor) |saved| {
+            if (archiveScrollAnchorOffsetFor(
+                self.agent_session_archive_projection.entries.items,
+                self.agent_session_archive_records.items,
+                saved,
+                self.agentSessionDockMetrics(),
+                projection.max_offset_px,
+            )) |offset| {
+                _ = self.agent_session_archive_scroll.setOffsetPx(offset, projection.max_offset_px);
+                return;
+            }
+        }
+        _ = self.agent_session_archive_scroll.setOffsetPx(fallback_offset_px, projection.max_offset_px);
+    }
+
+    /// Session Dock owns these navigation keys whenever its search field does not.  Returning
+    /// true at a boundary is intentional: a key aimed at the visible dock must not leak into the
+    /// focused terminal just because no further pixel motion is possible.
+    fn handleAgentSessionDockScrollKey(self: *AppSession, event: terminal.KeyEvent) bool {
+        if (self.agent_session_archive_search_active or self.agent_session_dock_interaction.focused == null or
+            event.modifiers.command or event.modifiers.control or event.modifiers.option or event.modifiers.shift)
+            return false;
+        const projection = self.agentSessionDockScrollProjection();
+        const metrics = self.agentSessionDockMetrics();
+        const changed = switch (event.key) {
+            .page_up => self.agent_session_archive_scroll.scrollByPx(
+                -@as(i64, chrome.components.session_dock.scroll.pageStepPx(self.agentSessionDockContentViewportHeightPx(), metrics.card_h_px)),
+                projection.max_offset_px,
+            ),
+            .page_down => self.agent_session_archive_scroll.scrollByPx(
+                @as(i64, chrome.components.session_dock.scroll.pageStepPx(self.agentSessionDockContentViewportHeightPx(), metrics.card_h_px)),
+                projection.max_offset_px,
+            ),
+            .home => self.agent_session_archive_scroll.setOffsetPx(0, projection.max_offset_px),
+            .end => self.agent_session_archive_scroll.setOffsetPx(projection.max_offset_px, projection.max_offset_px),
+            else => return false,
+        };
+        self.agent_session_archive_wheel_residue_px = 0;
+        if (changed) self.metal_dirty = true;
+        return true;
+    }
+
     fn resetAgentSessionDockScroll(self: *AppSession) void {
         self.agent_session_archive_scroll.reset();
         self.agent_session_archive_wheel_residue_px = 0;
@@ -14456,6 +14660,11 @@ pub const AppSession = struct {
 
     pub fn focusWorkspaceInput(self: *AppSession) void {
         self.cancelPendingDockFocus();
+        // A terminal/body click takes the keyboard owner away from the archive list.  Without
+        // clearing this component-local focus, PageUp/PageDown would keep scrolling an open dock
+        // while the user was visibly typing in the workspace terminal.
+        self.agent_session_dock_interaction.focused = null;
+        self.agent_session_dock_interaction.capture = null;
         self.focus_owner = .workspace;
         self.workspace_focus_pending = false;
         self.file_tree_focus_pending = false;
@@ -20562,6 +20771,34 @@ pub const AppSession = struct {
             self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
             return self.last_summary;
         }
+        // Session Dock keyboard focus takes precedence even if a selected card
+        // already opened the read-only archive tab.  Otherwise Page keys stop
+        // reaching their visible owner as soon as that tab becomes active.
+        if (self.dockVisible() and self.dock.view == .agent_sessions) {
+            if (self.handleAgentSessionArchiveSearchKey(event)) {
+                self.total_app_key_events += 1;
+                self.writeSummaryFromState();
+                self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
+                return self.last_summary;
+            }
+            if (self.handleAgentSessionDockScrollKey(event)) {
+                self.total_app_key_events += 1;
+                self.writeSummaryFromState();
+                self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
+                return self.last_summary;
+            }
+            if (!event.modifiers.command and !event.modifiers.control and !event.modifiers.option and switch (event.key) {
+                .char => |codepoint| codepoint == '/',
+                else => false,
+            }) {
+                self.agent_session_archive_search_active = true;
+                self.metal_dirty = true;
+                self.total_app_key_events += 1;
+                self.writeSummaryFromState();
+                self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
+                return self.last_summary;
+            }
+        }
         // A focused archive tab is a read-only terminal surface.  It consumes
         // every ordinary key so user text can never be mistaken for PTY input;
         // only its visible, explicit actions are routed while the identity is
@@ -20581,25 +20818,6 @@ pub const AppSession = struct {
                         self.showNotice("로그 원본이 변경되었거나 더 이상 열 수 없습니다.");
                     };
                 }
-                self.metal_dirty = true;
-                self.total_app_key_events += 1;
-                self.writeSummaryFromState();
-                self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
-                return self.last_summary;
-            }
-        }
-        if (self.dockVisible() and self.dock.view == .agent_sessions) {
-            if (self.handleAgentSessionArchiveSearchKey(event)) {
-                self.total_app_key_events += 1;
-                self.writeSummaryFromState();
-                self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
-                return self.last_summary;
-            }
-            if (!event.modifiers.command and !event.modifiers.control and !event.modifiers.option and switch (event.key) {
-                .char => |codepoint| codepoint == '/',
-                else => false,
-            }) {
-                self.agent_session_archive_search_active = true;
                 self.metal_dirty = true;
                 self.total_app_key_events += 1;
                 self.writeSummaryFromState();
@@ -26565,6 +26783,15 @@ pub const AppSession = struct {
         // Swift가 콜백마다 backing 픽셀을 보내므로, 같은 size+scale 중복은 카운트에 넣지 않는다.
         // scale_milli를 [250,8000]로 막아 손상된 값에서도 곱이 비정상으로 커지지 않게 한다.
         const next_scale = std.math.clamp(scale_milli, 250, 8000);
+        // Capture before scale/cell metrics change: the anchor's intra-card offset belongs to the
+        // old backing-pixel geometry.  Hidden views retain their numeric state untouched, because
+        // a zero-sized hidden dock is not a viewport against which it may be clamped.
+        const resize_agent_session_dock = self.dockVisible() and self.dock.view == .agent_sessions;
+        const prior_agent_session_scroll_offset = self.agent_session_archive_scroll.offset_y_px;
+        const prior_agent_session_scroll_anchor = if (resize_agent_session_dock)
+            self.captureAgentSessionDockScrollAnchor()
+        else
+            null;
         const scale_changed = next_scale != self.scale_milli;
         // backing scale이 바뀌면(다른 DPI 디스플레이로 이동 등) cell 메트릭을 분수 scale로 먼저
         // 다시 뽑는다. grid 계산이 placeholder가 아니라 실제 cell 크기를 쓰도록 순서가 중요하다.
@@ -26608,6 +26835,12 @@ pub const AppSession = struct {
         self.recomputeActivePaneRect(); // backing/grid가 바뀌었으니 활성 panel rect(좌표 origin)도 갱신
         self.last_resize_size = size;
         self.refreshFileTreeScrollbarGeometry();
+        if (resize_agent_session_dock) {
+            // The published rect tree still describes pre-resize geometry until the next paint.
+            // Drop a pressed action now so a delayed mouse-up cannot resolve through that tree.
+            self.agent_session_dock_interaction.capture = null;
+            self.restoreAgentSessionDockScrollAnchor(prior_agent_session_scroll_anchor, prior_agent_session_scroll_offset);
+        }
         // grid가 reflow됐으므로 다음 tick이 Metal frame을 재투영하게 dirty로 표시한다.
         self.metal_dirty = true;
         self.writeSummaryFromState();

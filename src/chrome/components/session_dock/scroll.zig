@@ -42,6 +42,16 @@ pub const SessionDockScrollState = struct {
         self.offset_y_px = @min(self.offset_y_px, max_offset_px);
     }
 
+    /// Replaces the retained offset only through the same bounded coordinate system used by
+    /// wheel input.  A refresh/resize anchor may be negative before clamping when a card moved
+    /// below a newly inserted group header, so the public input is signed.
+    pub fn setOffsetPx(self: *SessionDockScrollState, requested_offset_px: i64, max_offset_px: u32) bool {
+        const clamped: u32 = @intCast(std.math.clamp(requested_offset_px, @as(i64, 0), @as(i64, max_offset_px)));
+        if (clamped == self.offset_y_px) return false;
+        self.offset_y_px = clamped;
+        return true;
+    }
+
     pub fn reset(self: *SessionDockScrollState) void {
         self.offset_y_px = 0;
     }
@@ -56,6 +66,20 @@ pub const Projection = struct {
     first_origin_y_px: i32,
     end_exclusive: usize,
 };
+
+/// Page keys deliberately leave one full card in view.  A tiny/zero viewport has no meaningful
+/// page step and must not manufacture motion from the fixed chrome metrics.
+pub fn pageStepPx(viewport_h_px: u32, card_h_px: u32) u32 {
+    return viewport_h_px -| card_h_px;
+}
+
+/// The host computes a card's content-space top and carries a non-negative intra-card displacement
+/// across an immutable snapshot replacement.  Keeping the saturating/clamping arithmetic here
+/// makes a reordered anchor unable to overflow the bounded scroll coordinate.
+pub fn anchorOffsetPx(card_top_px: u32, intra_card_y_px: u32, max_offset_px: u32) u32 {
+    const requested = @as(u64, card_top_px) + @as(u64, intra_card_y_px);
+    return @intCast(@min(requested, @as(u64, max_offset_px)));
+}
 
 /// Projects a bounded item sequence without allocation. `itemAt` is comptime so the generic
 /// algorithm remains independent from archive/provider record types.
@@ -139,4 +163,17 @@ test "scroll state clamps each backing pixel boundary" {
     try std.testing.expectEqual(@as(u32, 9), state.offset_y_px);
     _ = state.scrollByPx(std.math.minInt(i64), 9);
     try std.testing.expectEqual(@as(u32, 0), state.offset_y_px);
+    try std.testing.expect(state.setOffsetPx(7, 9));
+    try std.testing.expectEqual(@as(u32, 7), state.offset_y_px);
+    _ = state.setOffsetPx(-1, 9);
+    try std.testing.expectEqual(@as(u32, 0), state.offset_y_px);
+}
+
+test "page and anchor helpers preserve bounded pixel semantics" {
+    try std.testing.expectEqual(@as(u32, 0), pageStepPx(0, 72));
+    try std.testing.expectEqual(@as(u32, 0), pageStepPx(72, 72));
+    try std.testing.expectEqual(@as(u32, 128), pageStepPx(200, 72));
+    try std.testing.expectEqual(@as(u32, 145), anchorOffsetPx(120, 25, 400));
+    try std.testing.expectEqual(@as(u32, 400), anchorOffsetPx(399, 9, 400));
+    try std.testing.expectEqual(@as(u32, 400), anchorOffsetPx(std.math.maxInt(u32), std.math.maxInt(u32), 400));
 }

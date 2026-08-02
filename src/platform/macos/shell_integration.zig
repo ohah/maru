@@ -169,6 +169,55 @@ fn cacheDirZsh(allocator: std.mem.Allocator) ![]u8 {
     return std.fmt.allocPrint(allocator, "{s}/.cache/maru/shell-integration/zsh", .{home});
 }
 
+// 테스트에서 XDG_CACHE_HOME을 임시 디렉터리로 돌리기 위한 libc 바인딩(std.c 미노출 — macOS 전용 테스트).
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+
+test "셸 통합: 파일이 사라져도 setupZsh가 다시 만든다(멱등)" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    // 사용자 캐시를 건드리지 않도록 XDG_CACHE_HOME을 임시 디렉터리로 돌린다.
+    var tmp_buf: [128]u8 = undefined;
+    const tmp = try std.fmt.bufPrintZ(&tmp_buf, "/tmp/maru-shellint-test-{d}", .{std.c.getpid()});
+    const saved = std.c.getenv("XDG_CACHE_HOME");
+    if (setenv("XDG_CACHE_HOME", tmp.ptr, 1) != 0) return error.SkipZigTest;
+    defer {
+        if (saved) |old| {
+            _ = setenv("XDG_CACHE_HOME", old, 1);
+        } else {
+            _ = unsetenv("XDG_CACHE_HOME");
+        }
+    }
+
+    const dir = setupZsh(io, allocator) orelse return error.SkipZigTest;
+    defer allocator.free(dir);
+    var path_buf: [256]u8 = undefined;
+    const zshenv = try std.fmt.bufPrintZ(&path_buf, "{s}/.zshenv", .{dir});
+    var dirz_buf: [256]u8 = undefined;
+    const dirz = try std.fmt.bufPrintZ(&dirz_buf, "{s}", .{dir});
+    defer {
+        _ = std.c.unlink(zshenv.ptr);
+        _ = std.c.rmdir(dirz.ptr);
+    }
+
+    // 처음 호출이 파일을 만든다.
+    _ = std.Io.Dir.cwd().statFile(io, zshenv, .{}) catch return error.SkipZigTest;
+
+    // 사용자가 캐시를 비운 상황 — 파일만 사라진다.
+    try std.testing.expectEqual(@as(c_int, 0), std.c.unlink(zshenv.ptr));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(io, zshenv, .{}));
+
+    // 다시 부르면 복원돼야 한다. 이게 안 되면 새 탭이 **존재하지 않는 ZDOTDIR**을 받아 사용자의 `.zshrc`를
+    // 통째로 건너뛴다 — PATH·자동완성·OSC 133이 전부 사라지는데 화면에는 아무 단서가 없다.
+    const again = setupZsh(io, allocator) orelse return error.SkipZigTest;
+    defer allocator.free(again);
+    const stat = std.Io.Dir.cwd().statFile(io, zshenv, .{}) catch return error.SkipZigTest;
+    try std.testing.expect(stat.size > 0);
+    try std.testing.expectEqualStrings(dir, again); // 경로는 그대로여야 보관 중인 ZDOTDIR이 유효하다
+}
+
 test "detect zsh by basename" {
     try std.testing.expectEqual(Shell.zsh, detect("/bin/zsh"));
     try std.testing.expectEqual(Shell.zsh, detect("/opt/homebrew/bin/zsh"));

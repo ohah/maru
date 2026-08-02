@@ -53,6 +53,8 @@ pub fn main(init: std.process.Init) !void {
     var ops: [32]chrome.draw.Op = undefined;
     var dock_nodes: [16]chrome.ui.tree.UiNode = undefined;
     var dock_actions: [12]chrome.components.session_dock.ids.Entry = undefined;
+    var detail_nodes: [16]chrome.ui.tree.UiNode = undefined;
+    var detail_actions: [3]chrome.components.archive_detail.ids.Entry = undefined;
     var text_runs: [32]chrome.draw.Run = undefined;
     var text_bytes: [2048]u8 = undefined;
     const frame = try lab.buildFrame(.{
@@ -67,6 +69,8 @@ pub fn main(init: std.process.Init) !void {
         .ops = &ops,
         .dock_nodes = &dock_nodes,
         .dock_actions = &dock_actions,
+        .detail_nodes = &detail_nodes,
+        .detail_actions = &detail_actions,
         .text_runs = &text_runs,
         .text_bytes = &text_bytes,
     });
@@ -181,6 +185,10 @@ fn scenarioFromEnvValue(raw: []const u8) ?lab.ScenarioId {
     if (std.mem.eql(u8, raw, "loading")) return .loading;
     if (std.mem.eql(u8, raw, "retained-list")) return .retained_list;
     if (std.mem.eql(u8, raw, "partial-scroll")) return .partial_scroll;
+    if (std.mem.eql(u8, raw, "detail-loading")) return .detail_loading;
+    if (std.mem.eql(u8, raw, "detail-ready")) return .detail_ready;
+    if (std.mem.eql(u8, raw, "detail-stale")) return .detail_stale;
+    if (std.mem.eql(u8, raw, "detail-unavailable")) return .detail_unavailable;
     return null;
 }
 
@@ -190,6 +198,10 @@ fn artifactName(id: lab.ScenarioId) []const u8 {
         .loading => "loading",
         .retained_list => "retained-list",
         .partial_scroll => "partial-scroll",
+        .detail_loading => "detail-loading",
+        .detail_ready => "detail-ready",
+        .detail_stale => "detail-stale",
+        .detail_unavailable => "detail-unavailable",
     };
 }
 
@@ -300,11 +312,16 @@ test "Chrome Lab scenario parser keeps one process bound to one deterministic ar
     try std.testing.expectEqual(lab.ScenarioId.loading, scenarioFromEnvValue("loading").?);
     try std.testing.expectEqual(lab.ScenarioId.retained_list, scenarioFromEnvValue("retained-list").?);
     try std.testing.expectEqual(lab.ScenarioId.partial_scroll, scenarioFromEnvValue("partial-scroll").?);
+    try std.testing.expectEqual(lab.ScenarioId.detail_loading, scenarioFromEnvValue("detail-loading").?);
+    try std.testing.expectEqual(lab.ScenarioId.detail_ready, scenarioFromEnvValue("detail-ready").?);
+    try std.testing.expectEqual(lab.ScenarioId.detail_stale, scenarioFromEnvValue("detail-stale").?);
+    try std.testing.expectEqual(lab.ScenarioId.detail_unavailable, scenarioFromEnvValue("detail-unavailable").?);
     try std.testing.expect(scenarioFromEnvValue("unknown") == null);
     try std.testing.expectEqualStrings("empty", artifactName(.empty));
     try std.testing.expectEqualStrings("loading", artifactName(.loading));
     try std.testing.expectEqualStrings("retained-list", artifactName(.retained_list));
     try std.testing.expectEqualStrings("partial-scroll", artifactName(.partial_scroll));
+    try std.testing.expectEqualStrings("detail-ready", artifactName(.detail_ready));
 }
 
 test "Chrome Lab PPM probe rejects background-only and malformed readbacks" {

@@ -1,0 +1,278 @@
+//! Semantic paint and redacted text projection for ArchiveSessionDetailPanel.
+//!
+//! This is deliberately a view of host-sanitized DTO values. It has no archive-path, worker,
+//! provider, PTY, or AppKit import, so displaying a detail can never itself inspect or execute a
+//! session. The later host slice is solely responsible for resolving the opaque actions.
+
+const std = @import("std");
+const draw = @import("../../draw.zig");
+const tokens = @import("../../tokens.zig");
+const text_layout = @import("../../text_layout.zig");
+const interaction = @import("../../ui/interaction.zig");
+const ui_paint = @import("../../ui/paint.zig");
+const tree = @import("../../ui/tree.zig");
+const build = @import("build.zig");
+const types = @import("types.zig");
+
+pub const Buffers = struct {
+    ops: []draw.Op,
+    runs: []draw.Run,
+    text_bytes: []u8,
+};
+
+pub const ViewError = ui_paint.PaintError || error{ InsufficientRunBuffer, InsufficientTextBuffer, MissingRect };
+
+/// Emits the completed rect tree on the pane-overlay layer. `state` is supplied by the host, but
+/// it only changes semantic hover/focus paint; capability gating has already been fixed into the
+/// tree by `build`.
+pub fn view(props: types.Props, frame: build.Frame, state: interaction.InteractionState, tk: *const tokens.Tokens, buffers: Buffers) ViewError!draw.ChromeDraw {
+    const painted = try ui_paint.paint(frame.tree, state, tk, .pane_overlay, .{ .ops = buffers.ops });
+    var writer = Writer{
+        .props = props,
+        .ops = buffers.ops,
+        .op_count = painted.ops.len,
+        .runs = buffers.runs,
+        .text_bytes = buffers.text_bytes,
+    };
+
+    const header = find(frame.tree, build.NodeIds.header) orelse return error.MissingRect;
+    const provider = switch (props.provider) {
+        .codex => "Codex",
+        .claude => "Claude",
+    };
+    var heading: [384]u8 = undefined;
+    const heading_text = std.fmt.bufPrint(&heading, "{s}  {s}", .{ provider, props.title }) catch props.title;
+    try writer.text(header, 0, heading_text, .surface_fg);
+    try writer.text(header, 1, stateLabel(props), if (props.state == .ready) .muted_fg else .accent_bar);
+
+    const metadata = find(frame.tree, build.NodeIds.metadata) orelse return error.MissingRect;
+    try writer.text(metadata, 0, props.metadata, .muted_fg);
+    if (props.state == .ready and props.action_record_count > 0) {
+        var count: [80]u8 = undefined;
+        const label = std.fmt.bufPrint(&count, "도구/권한 관련 기록 {d}건", .{props.action_record_count}) catch "도구/권한 관련 기록";
+        try writer.text(metadata, 1, label, .muted_fg);
+    }
+
+    const section = find(frame.tree, build.NodeIds.section) orelse return error.MissingRect;
+    try writer.text(section, 0, switch (props.state) {
+        .ready => "최근 대화",
+        .loading => "세션 분석 중",
+        .stale => "세션 분석을 중단했습니다",
+        .unavailable => "세션을 열 수 없습니다",
+    }, .surface_fg);
+
+    if (props.state == .ready) {
+        for (props.turns, 0..) |turn, index| {
+            const card = find(frame.tree, build.NodeIds.turn(index)) orelse return error.MissingRect;
+            try writer.text(card, 0, switch (turn.role) {
+                .user => "사용자",
+                .assistant => "에이전트",
+            }, .muted_fg);
+            try writer.text(card, 1, turn.text, .surface_fg);
+        }
+    }
+
+    if (props.state == .loading) {
+        try writer.skeletons(find(frame.tree, build.NodeIds.content) orelse return error.MissingRect);
+    } else if (props.state != .ready) {
+        const content = find(frame.tree, build.NodeIds.content) orelse return error.MissingRect;
+        try writer.text(content, 0, unavailableMessage(props.state), .muted_fg);
+    }
+
+    try writer.action(find(frame.tree, build.NodeIds.resume_session) orelse return error.MissingRect, "▶ 워크트리에서 재개  ⌘↵");
+    try writer.action(find(frame.tree, build.NodeIds.reveal) orelse return error.MissingRect, "로그 보기  ⌘L");
+    if (props.state == .ready and props.focus_live_enabled) {
+        try writer.action(find(frame.tree, build.NodeIds.focus_live) orelse return error.MissingRect, "열린 세션으로 이동");
+    }
+    return .{ .layer = .pane_overlay, .ops = buffers.ops[0..writer.op_count] };
+}
+
+const Writer = struct {
+    props: types.Props,
+    ops: []draw.Op,
+    op_count: usize,
+    runs: []draw.Run,
+    run_count: usize = 0,
+    text_bytes: []u8,
+    text_count: usize = 0,
+
+    fn text(self: *Writer, rect: tree.RectEntry, line: u32, source: []const u8, role: tokens.ColorRole) ViewError!void {
+        const cw = self.props.cell_width_px;
+        const ch = self.props.cell_height_px;
+        if (cw == 0 or ch == 0) return;
+        const x = rect.rect.x + @as(f32, @floatFromInt(cw));
+        const y = rect.rect.y + @as(f32, @floatFromInt(ch * (line + 1)));
+        if (rect.effective_clip) |clip| if (y < clip.y or y >= clip.y + clip.height) return;
+        const available_px = rect.rect.width - @as(f32, @floatFromInt(cw * 2));
+        if (available_px <= 0) return;
+        const max_cols: u16 = @intFromFloat(@floor(available_px / @as(f32, @floatFromInt(cw))));
+        try self.emit(x, y, source, max_cols, role);
+    }
+
+    fn action(self: *Writer, rect: tree.RectEntry, source: []const u8) ViewError!void {
+        try self.text(rect, 0, source, if (rect.action.?.enabled) .surface_fg else .muted_fg);
+    }
+
+    fn emit(self: *Writer, x: f32, y: f32, source: []const u8, cols: u16, role: tokens.ColorRole) ViewError!void {
+        if (cols == 0) return;
+        if (self.op_count == self.ops.len) return error.InsufficientTextBuffer;
+        if (self.run_count == self.runs.len) return error.InsufficientRunBuffer;
+        const start = self.text_count;
+        var plan = text_layout.plan(source, 0, cols, .head, null);
+        while (plan.next()) |item| switch (item) {
+            .cluster => |cluster| try self.appendBytes(source[cluster.start..cluster.end]),
+            .ellipsis => try self.appendBytes("…"),
+        };
+        self.runs[self.run_count] = .{ .text = self.text_bytes[start..self.text_count] };
+        self.ops[self.op_count] = .{ .text = .{ .origin = .{ .x = @intFromFloat(@floor(x)), .y = @intFromFloat(@floor(y)) }, .runs = self.runs[self.run_count .. self.run_count + 1], .role = role } };
+        self.run_count += 1;
+        self.op_count += 1;
+    }
+
+    fn appendBytes(self: *Writer, bytes: []const u8) ViewError!void {
+        if (bytes.len > self.text_bytes.len -| self.text_count) return error.InsufficientTextBuffer;
+        @memcpy(self.text_bytes[self.text_count..][0..bytes.len], bytes);
+        self.text_count += bytes.len;
+    }
+
+    /// Placeholder lines are visual-only: they do not receive node IDs, action IDs, or pointer
+    /// bounds, so loading cannot fabricate a resume/log action.
+    fn skeletons(self: *Writer, content: tree.RectEntry) ViewError!void {
+        const ch = self.props.cell_height_px;
+        if (ch == 0) return;
+        const m = types.Metrics.fromCellHeight(ch);
+        const left = content.rect.x + @as(f32, @floatFromInt(m.pad));
+        const available = content.rect.width - @as(f32, @floatFromInt(m.pad * 2));
+        if (available <= 0) return;
+        const line_h = @max(ch / 2, 2);
+        const start_y = content.rect.y + @as(f32, @floatFromInt(m.gap));
+        for (0..3) |card_index| {
+            const y = start_y + @as(f32, @floatFromInt(card_index * (m.turn_h + m.gap)));
+            if (y >= content.rect.y + content.rect.height) break;
+            try self.skeletonLine(left, y + @as(f32, @floatFromInt(ch)), available, line_h);
+            try self.skeletonLine(left, y + @as(f32, @floatFromInt(ch * 2 + m.gap)), available * 0.70, line_h);
+        }
+    }
+
+    fn skeletonLine(self: *Writer, x: f32, y: f32, width: f32, height: u32) ViewError!void {
+        if (width <= 0 or height == 0) return;
+        if (self.op_count == self.ops.len) return error.InsufficientTextBuffer;
+        self.ops[self.op_count] = .{ .quad = .{
+            .rect = .{ .x = @intFromFloat(@floor(x)), .y = @intFromFloat(@floor(y)), .w = @intFromFloat(@floor(width)), .h = height },
+            .fill_role = .divider,
+            .alpha = 0x90,
+        } };
+        self.op_count += 1;
+    }
+};
+
+fn find(snapshot: tree.UiRectTree, id: tree.UiId) ?tree.RectEntry {
+    const index = snapshot.find(id) orelse return null;
+    return snapshot.entries[index];
+}
+
+fn stateLabel(props: types.Props) []const u8 {
+    return switch (props.state) {
+        .loading => switch (props.spinner_phase & 3) {
+            0 => "◴ 분석 중",
+            1 => "◷ 분석 중",
+            2 => "◶ 분석 중",
+            else => "◵ 분석 중",
+        },
+        .ready => "최근 대화와 동작 요약",
+        .stale => "원본 변경 감지",
+        .unavailable => "원본을 읽을 수 없음",
+    };
+}
+
+fn unavailableMessage(state: types.State) []const u8 {
+    return switch (state) {
+        .stale => "원본 세션이 변경되어 안전하게 표시하지 않습니다.",
+        .unavailable => "세션 원본을 읽을 수 없습니다.",
+        else => "",
+    };
+}
+
+fn testTokens() tokens.Tokens {
+    return tokens.Tokens.rich(.{
+        .foreground = .{ .r = 240, .g = 240, .b = 240 },
+        .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
+        .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
+        .sidebar_active = .{ .r = 80, .g = 80, .b = 80 },
+        .search_match = .{ .r = 1, .g = 2, .b = 3 },
+        .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
+        .selection = .{ .r = 7, .g = 8, .b = 9 },
+        .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .accent = .{ .r = 13, .g = 14, .b = 15 },
+    });
+}
+
+test "archive detail view renders only redacted turn DTOs and exact action labels" {
+    const props = types.Props{
+        .viewport_px = .{ .width = 960, .height = 560 },
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .snapshot_generation = 9,
+        .state = .ready,
+        .provider = .claude,
+        .title = "문서 확인",
+        .metadata = "메시지 3개 · 방금 전",
+        .turns = &.{ .{ .role = .user, .text = "문서에 남은 작업을 알려주세요" }, .{ .role = .assistant, .text = "요약된 안전한 최근 대화입니다" } },
+        .action_record_count = 2,
+        .resume_enabled = true,
+        .reveal_enabled = true,
+        .focus_live_enabled = true,
+    };
+    var nodes: [10]tree.UiNode = undefined;
+    var entries: [11]tree.RectEntry = undefined;
+    var items: [11]@import("../../ui/layout.zig").Item = undefined;
+    var scratch: [11]@import("../../ui/layout.zig").FlexScratch = undefined;
+    var rects: [11]@import("../../ui/layout.zig").UiRect = undefined;
+    var actions: [3]@import("ids.zig").Entry = undefined;
+    const frame = try build.build(props, .{ .nodes = &nodes, .entries = &entries, .layout_items = &items, .flex_scratch = &scratch, .child_rects = &rects, .actions = &actions });
+    var ops: [24]draw.Op = undefined;
+    var runs: [24]draw.Run = undefined;
+    var bytes: [2048]u8 = undefined;
+    const out = try view(props, frame, .{}, &testTokens(), .{ .ops = &ops, .runs = &runs, .text_bytes = &bytes });
+    try std.testing.expectEqual(draw.Layer.pane_overlay, out.layer);
+    var saw_resume = false;
+    var saw_redacted_turn = false;
+    var saw_action_count = false;
+    for (out.ops) |op| switch (op) {
+        .text => |text| for (text.runs) |run| {
+            if (std.mem.indexOf(u8, run.text, "워크트리에서 재개") != null) saw_resume = true;
+            if (std.mem.indexOf(u8, run.text, "안전한 최근 대화") != null) saw_redacted_turn = true;
+            if (std.mem.indexOf(u8, run.text, "도구/권한 관련 기록 2건") != null) saw_action_count = true;
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_resume);
+    try std.testing.expect(saw_redacted_turn);
+    try std.testing.expect(saw_action_count);
+}
+
+test "archive detail loading skeleton and stale state never enable source actions" {
+    var props = types.Props{
+        .viewport_px = .{ .width = 320, .height = 480 },
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .snapshot_generation = 4,
+        .state = .loading,
+        .provider = .codex,
+        .title = "title",
+        .metadata = "metadata",
+        .resume_enabled = true,
+        .reveal_enabled = true,
+    };
+    var nodes: [7]tree.UiNode = undefined;
+    var entries: [8]tree.RectEntry = undefined;
+    var items: [8]@import("../../ui/layout.zig").Item = undefined;
+    var scratch: [8]@import("../../ui/layout.zig").FlexScratch = undefined;
+    var rects: [8]@import("../../ui/layout.zig").UiRect = undefined;
+    var actions: [2]@import("ids.zig").Entry = undefined;
+    const loading = try build.build(props, .{ .nodes = &nodes, .entries = &entries, .layout_items = &items, .flex_scratch = &scratch, .child_rects = &rects, .actions = &actions });
+    try std.testing.expect(!loading.tree.entries[loading.tree.find(build.NodeIds.resume_session).?].action.?.enabled);
+    props.state = .stale;
+    const stale = try build.build(props, .{ .nodes = &nodes, .entries = &entries, .layout_items = &items, .flex_scratch = &scratch, .child_rects = &rects, .actions = &actions });
+    try std.testing.expect(!stale.tree.entries[stale.tree.find(build.NodeIds.reveal).?].action.?.enabled);
+}

@@ -52,6 +52,7 @@ pub const components = struct {
     pub const file_tree_scrollbar = @import("chrome/components/file_tree_scrollbar.zig"); // 탐색기 render/hit/track/drag 공용 순수 geometry
     pub const dock_view_bar = @import("chrome/components/dock_view_bar.zig"); // 도크 뷰 스위처 한 행 render/hit 공용 순수 geometry
     pub const session_dock = @import("chrome/components/session_dock.zig"); // archive session dock typed layout/action/view facade
+    pub const archive_detail = @import("chrome/components/archive_detail.zig"); // redacted archive detail typed layout/action/view facade
 };
 
 test {

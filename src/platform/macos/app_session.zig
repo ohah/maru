@@ -47583,13 +47583,19 @@ test "file tree ET-CWD follows the active pane observation and keeps an old reve
     try std.testing.expect(!session.file_tree_watch_reset_pending);
 
     // 기존 file-open intent와 같은 CWD로 돌아와도 root 밖 거부와 혼동하면 안 된다. offscreen scroll 위치를
-    // 강제로 만들어, `already_target`이 실제 viewport 보정을 다시 요청하는지 증명한다.
+    // 강제로 만들어, `already_target`이 실제 viewport 보정을 다시 요청하는지 증명한다. fixture의 행은
+    // root+자식 둘뿐이므로 실제 도크 높이를 그대로 쓰면 raw scroll이 먼저 0으로 clamp되어 offscreen
+    // 전제가 성립하지 않는다. 이 구간만 한 행 viewport로 고정해 제품의 clamp→follow 순서를 검증한다.
+    const saved_backing_height_px = session.backing_height_px;
+    session.backing_height_px = session.titlebar_strip_px + session.paneBarHeightPx() + session.cell_height_px;
+    try std.testing.expectEqual(session.cell_height_px, session.dockGeometry().tree_content.h);
     session.file_tree_scroll_rows = 6;
     try testWriteActiveTermCwd(session, one);
     try session.updateFileTree();
     try std.testing.expectEqualStrings(one, session.file_tree_followed_cwd.?);
     try std.testing.expect(!session.file_tree_follow_scroll_pending);
     try std.testing.expectEqual(@as(usize, 1), session.file_tree_scroll_rows);
+    session.backing_height_px = saved_backing_height_px;
 
     // 새 split pane을 active로 바꾸면 이전 pane의 outside cache가 아니라 새 active Term의 CWD만 따라간다.
     try session.splitActivePane(.horizontal);

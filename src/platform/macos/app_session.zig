@@ -12379,7 +12379,10 @@ pub const AppSession = struct {
 
     fn agentSessionArchiveDetailRows(self: *const AppSession) usize {
         const selected = self.agent_session_archive_selected orelse return 0;
-        return if (selected < self.agent_session_archive_records.items.len) 3 else 0;
+        if (selected >= self.agent_session_archive_records.items.len or self.cell_height_px == 0) return 0;
+        // header + provider/model + two actions must fit before reserving
+        // record rows; otherwise preserve the compact list without overflow.
+        return if (self.dockGeometry().tree_content.h / self.cell_height_px >= 4) 3 else 0;
     }
 
     fn agentSessionArchiveVisibleRecordRows(self: *const AppSession) usize {

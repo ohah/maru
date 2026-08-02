@@ -164,6 +164,36 @@ computed rect expected result를 독립 fixture로 유지한다.
 - UI frame path는 I/O, JSON parse, worker wait, blocking lock을 하지 않는다. dirty
   props/style/size가 바뀔 때만 layout과 draw artifact를 다시 만든다.
 
+### 입력 dispatch와 interaction state
+
+모든 화면 상태를 props로 왕복하지 않는다. immutable props는 domain data, stable
+item/action identity, enabled/disabled policy, named visual variant를 가진다. hover,
+pressed, focus, pointer capture, scroll offset은 `ChromeHost`가 소유하는 UI-local
+`InteractionState`다. component가 provider나 app 전역 상태를 직접 읽어 hover를
+추측하지 않으며, Lab만 재현 가능한 interaction state를 explicit fixture input으로
+주입한다.
+
+1. `UiPointerEvent`는 현재 chrome의 제한된 `input.PointerEvent`를 완료로 주장하는
+   이름이 아니라 ML2에서 추가하는 layout-layer DTO다. ML2는 기존 backing-px
+   `down/move/up` 변환을 보존하면서 `scroll`과 monotonic timestamp를 같은 adapter
+   경계에서 보강하고, platform → `ChromeHost` event mapping이 하나뿐임을 test로 고정한다.
+2. `ChromeHost`는 같은 `UiRectTree`를 z-order와 clip chain 역순으로 hit-test해
+   target stable identity를 찾고, move에서 이전/새 target을 비교해 hover enter/leave를
+   만든다. 바뀐 두 rect만 dirty로 표시한다.
+3. down은 target identity를 pointer capture로 보관한다. 이후 move/up은 포인터가
+   target 밖으로 나가거나 다른 element 위를 지나도 capture target에 보낸다. up은
+   down/up의 action identity와 enabled policy가 모두 여전히 맞을 때만 click Action을
+   만든다. drag threshold를 넘으면 click Action 대신 component가 선언한 drag intent만
+   허용한다. layout tree mutation, snapshot swap, surface deactivation, capture target
+   identity 제거는 capture를 `cancelled`로 끝내 hover/pressed를 지우고 이후 up Action을
+   만들지 않는다.
+4. wheel/trackpad는 hit target의 scroll owner만 소비하고, viewport clamp 뒤 같은
+   rect tree를 다시 사용한다. pointer action과 keyboard focus action은 같은 stable
+   identity를 통해 `Action`으로 합류한다.
+5. component는 `Action` intent만 반환한다. host dispatcher만 resume/reveal/new-Term
+   같은 side effect를 실행하며, Lab dispatcher는 recorded action만 남겨 filesystem,
+   provider, process 실행을 절대 하지 않는다.
+
 ## 6. Chrome Lab — Storybook 같은 Metal visual/E2E fixture
 
 `Chrome Lab`은 Storybook의 component scenario 개념을 Metal 제품 경로에 옮긴
@@ -177,7 +207,7 @@ flowchart TD
     A[ChromeLabScenario synthetic props] --> B[UiTree and UiLayout]
     B --> C[ChromeDraw]
     C --> D[production Metal lowering]
-    D --> E[drawable readback PPM]
+    D --> E[drawable readback PPM and PNG]
     B --> F[scripted pointer or keyboard]
     F --> G[hitTest action assertion]
 ```
@@ -234,6 +264,9 @@ file work를 섞지 않으며, 공용 frame phase가 살아 있는 animation만 
    NaN/∞ fail-close, tiny container, nested min/max, text measurement을 단언한다.
 2. **ML2 — component layout seam:** `UiTree`/`UiRectTree`, stable identity, same
    rect for draw/hit/focus/virtualization, dirty rebuild counter를 headless로 고정한다.
+   `UiPointerEvent` mapping, hover enter/leave의 두-rect dirty, outside move/up pointer
+   capture, tree mutation/snapshot swap의 cancelled capture와 stale up action=0도 같은
+   component/host test로 고정한다.
 3. **ML3 — Chrome Lab과 Metal paint seam:** test-only `ChromeLabScenario` surface를
    먼저 만들고 rounded/border/shadow/opacity/clip을 `ChromeDraw`와 production Metal
    lowering에 연결한다. Lab screenshot/readback fixture가 rect·clip 정합과 scripted

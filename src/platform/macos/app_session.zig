@@ -3323,14 +3323,14 @@ pub const AppSession = struct {
         if (view != .explorer and self.fileTreeFocused()) self.restoreFileTreeFocus();
         // 뷰로 들어올 때 한 번 읽는다(§3.5의 갱신 시점 ①). 폴링하지 않는다.
         if (view == .source_control) self.refreshGitStatus();
-        if (view == .agent_sessions) self.refreshAgentSessionArchive();
+        if (view == .agent_sessions) self.refreshAgentSessionArchive(false);
         self.metal_dirty = true;
     }
 
-    fn refreshAgentSessionArchive(self: *AppSession) void {
+    fn refreshAgentSessionArchive(self: *AppSession, force: bool) void {
         if (!self.agent_session_archive_initialized or self.agent_session_archive_loading) return;
         const now = std.Io.Clock.awake.now(self.io).nanoseconds;
-        if (self.agent_session_archive_completed_ns != 0 and now - self.agent_session_archive_completed_ns < agent_session_archive_snapshot_ttl_ns) return;
+        if (!force and self.agent_session_archive_completed_ns != 0 and now - self.agent_session_archive_completed_ns < agent_session_archive_snapshot_ttl_ns) return;
         const home_z = std.c.getenv("HOME") orelse return;
         const home = std.mem.span(home_z);
         if (home.len == 0) return;
@@ -3365,7 +3365,7 @@ pub const AppSession = struct {
             result.records.clearRetainingCapacity();
         }
         if (!result.first_batch) self.agent_session_archive_partial = self.agent_session_archive_partial or result.partial;
-        const visible = if (self.cell_height_px == 0) 0 else self.dockGeometry().tree_content.h / self.cell_height_px;
+        const visible = if (self.cell_height_px == 0) 0 else (self.dockGeometry().tree_content.h / self.cell_height_px) -| 1;
         self.agent_session_archive_scroll_rows = @min(self.agent_session_archive_scroll_rows, self.agent_session_archive_records.items.len -| @as(usize, visible));
         if (result.complete) {
             self.agent_session_archive_loading = false;
@@ -12350,9 +12350,17 @@ pub const AppSession = struct {
         const local_row: usize = @intFromFloat((y_px - @as(f64, @floatFromInt(content.y))) /
             @as(f64, @floatFromInt(self.cell_height_px)));
         const visible_rows = content.h / self.cell_height_px;
-        if (local_row >= visible_rows) return null;
-        const row = self.agent_session_archive_scroll_rows + local_row;
+        // Row zero is the archive header/refresh control, not a selectable session.
+        if (local_row == 0 or local_row >= visible_rows) return null;
+        const row = self.agent_session_archive_scroll_rows + local_row - 1;
         return if (row < self.agent_session_archive_records.items.len) row else null;
+    }
+
+    fn agentSessionArchiveRefreshAt(self: *const AppSession, x_px: f64, y_px: f64) bool {
+        if (self.dock.view != .agent_sessions or !self.dockVisible() or self.cell_height_px == 0) return false;
+        const content = self.dockGeometry().tree_content;
+        if (!layout_math.pointInRect(x_px, y_px, content)) return false;
+        return y_px < @as(f64, @floatFromInt(content.y + self.cell_height_px));
     }
 
     fn fileTreeNamespaceMutationBusy(self: *const AppSession) bool {
@@ -20122,7 +20130,7 @@ pub const AppSession = struct {
             layout_math.pointInRect(x_px, y_px, self.dockGeometry().tree_content))
         {
             const rect = self.dockGeometry().tree_content;
-            const visible = if (self.cell_height_px == 0) 0 else rect.h / self.cell_height_px;
+            const visible = if (self.cell_height_px == 0) 0 else (rect.h / self.cell_height_px) -| 1;
             const max_scroll = self.agent_session_archive_records.items.len -| @as(usize, visible);
             const next = @as(i64, @intCast(self.agent_session_archive_scroll_rows)) - @as(i64, lines);
             const clamped: usize = @intCast(std.math.clamp(next, 0, @as(i64, @intCast(max_scroll))));
@@ -21000,6 +21008,10 @@ pub const AppSession = struct {
                     };
                 }
                 if (self.dock.view == .agent_sessions) {
+                    if (self.agentSessionArchiveRefreshAt(x_px, y_px)) {
+                        self.refreshAgentSessionArchive(true);
+                        return;
+                    }
                     // 행 클릭은 세션을 재개하지 않고 먼저 상세 대상을 고른다.
                     // 선택 상태는 새 탭 재개 액션이 소비하며, archive transcript 자체는 절대 실행하지 않는다.
                     if (self.agentSessionArchiveRowAt(x_px, y_px)) |row_index| {
@@ -27634,18 +27646,31 @@ pub const AppSession = struct {
                         if (self.dock.view == .agent_sessions and tree_content_cols > 0 and visible_rows > 0) {
                             // 현재 열려 있는 Term 목록이 아니라 로컬 Codex/Claude archive를 표시한다. worker가
                             // 소유 경계를 넘겨 준 record만 main thread가 읽으며, 다음 refresh 전까지 안정적이다.
+                            const archive_rows = visible_rows -| 1; // row zero is the persistent refresh/progress header.
+                            const archive_origin_y = dg.tree_content.y + self.cell_height_px;
+                            const header = if (self.agent_session_archive_loading)
+                                "AI 세션 · 분석 중"
+                            else
+                                "AI 세션 · ⟳ 새로 고침";
+                            if (coretext_frame_builder.buildDockNoticeDrawList(self.allocator, tree_content_cols, header, dock_active_fg)) |hdl| {
+                                self.collectShaped(&collected, hdl, pane_frame_builder, .{ .pane = .{
+                                    .origin_x = dg.tree_content.x,
+                                    .origin_y = dg.tree_content.y,
+                                    .colors = tabbar_colors,
+                                } });
+                            } else |_| {}
                             var labels: std.ArrayList([]const u8) = .empty;
                             defer labels.deinit(self.allocator);
                             const start = @min(self.agent_session_archive_scroll_rows, self.agent_session_archive_records.items.len);
                             for (self.agent_session_archive_records.items[start..]) |record| {
-                                if (labels.items.len >= visible_rows) break;
+                                if (labels.items.len >= archive_rows) break;
                                 labels.append(self.allocator, record.parsed.title) catch break;
                             }
                             var loading_label: ?[]u8 = null;
                             defer if (loading_label) |label| self.allocator.free(label);
                             // Keep already-published sessions stable and reserve only one
                             // trailing row for progress; a refresh never blanks the list.
-                            if (self.agent_session_archive_loading and labels.items.len < visible_rows) {
+                            if (self.agent_session_archive_loading and labels.items.len < archive_rows) {
                                 const bars = self.spinnerBarsUtf8(self.allocator) catch "";
                                 defer if (bars.len > 0) self.allocator.free(bars);
                                 loading_label = std.fmt.allocPrint(self.allocator, "{s} 세션 분석 중", .{bars}) catch null;
@@ -27655,7 +27680,7 @@ pub const AppSession = struct {
                                 if (coretext_frame_builder.buildDockSessionListDrawList(
                                     self.allocator,
                                     tree_content_cols,
-                                    @intCast(@min(labels.items.len, visible_rows)),
+                                    @intCast(@min(labels.items.len, archive_rows)),
                                     labels.items,
                                     if (self.agent_session_archive_selected) |selected| if (selected >= start and selected < start + labels.items.len) selected - start else null else null,
                                     dock_fg,
@@ -27663,11 +27688,11 @@ pub const AppSession = struct {
                                 )) |sdl| {
                                     self.collectShaped(&collected, sdl, pane_frame_builder, .{ .pane = .{
                                         .origin_x = dg.tree_content.x,
-                                        .origin_y = dg.tree_content.y,
+                                        .origin_y = archive_origin_y,
                                         .colors = tabbar_colors,
                                     } });
                                 } else |_| {}
-                            } else if (self.agent_session_archive_loading) {
+                            } else if (self.agent_session_archive_loading and archive_rows > 0) {
                                 const bars = self.spinnerBarsUtf8(self.allocator) catch "";
                                 defer if (bars.len > 0) self.allocator.free(bars);
                                 const owned_notice: ?[]u8 = std.fmt.allocPrint(self.allocator, "{s} 세션 분석 중", .{bars}) catch null;
@@ -27676,7 +27701,7 @@ pub const AppSession = struct {
                                 if (coretext_frame_builder.buildDockNoticeDrawList(self.allocator, tree_content_cols, notice, dock_fg)) |pdl| {
                                     self.collectShaped(&collected, pdl, pane_frame_builder, .{ .pane = .{
                                         .origin_x = dg.tree_content.x,
-                                        .origin_y = dg.tree_content.y,
+                                        .origin_y = archive_origin_y,
                                         .colors = tabbar_colors,
                                     } });
                                 } else |_| {}

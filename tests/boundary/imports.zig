@@ -3602,6 +3602,106 @@ test "f3c1 terminal binding and consumer remain private with zero product callsi
     }
 }
 
+test "session host has zero raw untyped Client invalidation callsites" {
+    const allocator = std.testing.allocator;
+    var dir = try std.Io.Dir.cwd().openDir(
+        std.testing.io,
+        "src/platform/macos/session_host",
+        .{ .iterate = true },
+    );
+    defer dir.close(std.testing.io);
+    var walker = try dir.walk(allocator);
+    defer walker.deinit();
+    var client_source: ?[:0]u8 = null;
+    defer if (client_source) |source| allocator.free(source);
+
+    while (try walker.next(std.testing.io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".zig")) continue;
+        const path = try std.fmt.allocPrint(
+            allocator,
+            "src/platform/macos/session_host/{s}",
+            .{entry.path},
+        );
+        defer allocator.free(path);
+        const source = try readZigFileZ(allocator, path);
+        defer if (!std.mem.eql(u8, entry.path, "client.zig")) allocator.free(source);
+        try std.testing.expect(std.mem.indexOf(u8, source, ".failClosed(") == null);
+        try std.testing.expect(std.mem.indexOf(u8, source, ".invalidateConnection(") == null);
+        try std.testing.expect(std.mem.indexOf(u8, source, ".invalidateConnectionWithOps(") == null);
+        if (std.mem.eql(u8, entry.path, "client.zig")) {
+            client_source = source;
+        } else {
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                countFieldAssignments(source, "unusable"),
+            );
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                countFieldAssignments(source, "first_poison_reason"),
+            );
+        }
+    }
+    const source = client_source orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 5), countFieldAssignments(source, "unusable"));
+    const allowed = [_][]const u8{
+        betweenMarkers(source, "fn externalAdoptionSnapshot(", "fn externalAdoptionSnapshotForProof(") orelse return error.TestUnexpectedResult,
+        betweenMarkers(source, "pub fn commitExternalPumpTransfer(", "/// Runs only after Client and metadata evidence") orelse return error.TestUnexpectedResult,
+        betweenMarkers(source, "fn poisonAndTakeFd(", "fn latchFirstPoisonReason(") orelse return error.TestUnexpectedResult,
+        betweenMarkers(source, "fn markPoisonedForDeferredCleanup(", "pub fn terminalReasonInvariant(") orelse return error.TestUnexpectedResult,
+        betweenMarkers(source, "test \"client source seal binds explicit schema descriptors", "test \"external source fold keeps seed tags") orelse return error.TestUnexpectedResult,
+    };
+    for (allowed) |slice|
+        try std.testing.expectEqual(@as(usize, 1), countOccurrences(slice, ".unusable ="));
+
+    // The first-fatal latch is immutable in product code. The other three assignments are an
+    // ownership snapshot and two deliberately scoped mutation tests; adding or moving any direct
+    // assignment must update this inventory instead of silently bypassing poison(reason).
+    try std.testing.expectEqual(
+        @as(usize, 4),
+        countFieldAssignments(source, "first_poison_reason"),
+    );
+    const reason_assignment_owners = [_][]const u8{
+        betweenMarkers(source, "fn externalAdoptionSnapshot(", "fn externalAdoptionSnapshotForProof(") orelse return error.TestUnexpectedResult,
+        betweenMarkers(source, "fn latchFirstPoisonReason(", "fn markPoisonedForDeferredCleanup(") orelse return error.TestUnexpectedResult,
+        betweenMarkers(source, "test \"client source seal binds explicit schema descriptors and ordered payload bytes\"", "test \"external source fold keeps seed tags and scans terminal FIFO tails\"") orelse return error.TestUnexpectedResult,
+        betweenMarkers(source, "test \"client poison reason participates in projection authority", "test \"external transfer normalize quarantine") orelse return error.TestUnexpectedResult,
+    };
+    for (reason_assignment_owners) |slice| {
+        const sentinel_slice = try allocator.dupeZ(u8, slice);
+        defer allocator.free(sentinel_slice);
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            countFieldAssignments(sentinel_slice, "first_poison_reason"),
+        );
+    }
+}
+
+fn countFieldAssignments(source: [:0]const u8, field_name: []const u8) usize {
+    var tokenizer = std.zig.Tokenizer.init(source);
+    var state: enum { start, period, field } = .start;
+    var count: usize = 0;
+    while (true) {
+        const token = tokenizer.next();
+        if (token.tag == .eof) return count;
+        const text = source[token.loc.start..token.loc.end];
+        switch (state) {
+            .start => {
+                if (std.mem.eql(u8, text, ".")) state = .period;
+            },
+            .period => {
+                if (std.mem.eql(u8, text, field_name))
+                    state = .field
+                else
+                    state = if (std.mem.eql(u8, text, ".")) .period else .start;
+            },
+            .field => {
+                if (std.mem.eql(u8, text, "=")) count += 1;
+                state = if (std.mem.eql(u8, text, ".")) .period else .start;
+            },
+        }
+    }
+}
+
 fn containsForbiddenExternalBuiltin(source: [:0]const u8) bool {
     var tokenizer = std.zig.Tokenizer.init(source);
     while (true) {

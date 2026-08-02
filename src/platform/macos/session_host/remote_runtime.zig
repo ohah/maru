@@ -15,6 +15,7 @@ const terminal = maru.terminal;
 const Surface = maru.session.Surface;
 const term_backend = maru.app.term_runtime_backend;
 const client_mod = @import("client.zig");
+const client_poison = @import("client_poison.zig");
 const control_response_wire = @import("control_response_wire.zig");
 const protocol = @import("protocol.zig");
 const screen_assembler = @import("screen_assembler.zig");
@@ -55,9 +56,9 @@ fn attachmentDropStream(context: *anyopaque, stream_id: u64) void {
     client.dropBufferedStream(stream_id);
 }
 
-fn attachmentFailClosed(context: *anyopaque) void {
+fn attachmentFailClosed(context: *anyopaque, reason: client_poison.ConnectionReason) void {
     const client: *client_mod.Client = @ptrCast(@alignCast(context));
-    client.failClosed();
+    client.poison(reason);
 }
 
 fn attachmentTransport(client: *client_mod.Client) remote_attachment.AttachmentTransport {
@@ -233,14 +234,14 @@ pub const RemoteRuntime = struct {
             // `Client.call` can consume a committed response and then fail while duplicating its
             // payload. At that point no stream id exists for targeted rollback, so even an OOM
             // that might have happened before send is conservatively connection-fatal.
-            if (err == error.OutOfMemory) self.client.failClosed();
+            if (err == error.OutOfMemory) self.client.poison(.local_resource_exhausted);
             return err;
         };
         defer self.allocator.free(attach_resp);
         const runtime_id = std.fmt.parseInt(u128, &self.runtime_id_hex, 16) catch
             return error.AttachFailed;
         const compatibility_profile = self.client.compatibility_profile orelse {
-            self.client.failClosed();
+            self.client.poison(.local_invariant_violation);
             return error.AttachFailed;
         };
         const generation_schema: runtime_metadata_wire.AttachGenerationSchema = switch (compatibility_profile.attach_schema) {
@@ -261,11 +262,11 @@ pub const RemoteRuntime = struct {
             },
         ) catch |err| switch (err) {
             error.OutOfMemory => {
-                self.client.failClosed();
+                self.client.poison(.local_resource_exhausted);
                 return error.OutOfMemory;
             },
             error.Malformed, error.ResourceExhausted, error.CapabilityViolation => {
-                self.client.failClosed();
+                self.client.poison(.peer_contract_violation);
                 return error.AttachFailed;
             },
         };
@@ -280,7 +281,7 @@ pub const RemoteRuntime = struct {
         };
         switch (accepted.initial_metadata) {
             .current => |*dto| _ = self.applyMetadataDto(dto) catch |err| {
-                self.client.failClosed();
+                self.client.poison(.peer_contract_violation);
                 return err;
             },
             .unsupported, .unavailable => {},
@@ -291,7 +292,7 @@ pub const RemoteRuntime = struct {
             .granted_with_generation => .tracked,
         };
         self.attachment.bindTransport(attachmentTransport(self.client)) catch {
-            self.client.failClosed();
+            self.client.poison(.local_invariant_violation);
             return error.AttachFailed;
         };
         // attach RPC가 controller lease를 잡은 뒤 snapshot/화면 조립이 실패하면 caller에는 아직 완성된
@@ -424,7 +425,7 @@ pub const RemoteRuntime = struct {
         // cap 초과뿐 아니라 queue allocation OOM도 caller가 UI best-effort로 삼키면 최종 focus/config 상태가
         // 조용히 유실된다. 이 stream만 복구할 ACK가 없으므로 shared connection을 poison해 다음 pump가
         // 명시적 disconnect와 surface exit latch를 관측하게 한다.
-        self.client.failClosed();
+        self.client.poison(.local_queue_exhausted);
         return error.ConnectionClosed;
     }
 
@@ -598,7 +599,7 @@ pub const RemoteRuntime = struct {
         if (generation == self.resize_generation and
             !std.meta.eql(size, self.observation.size))
         {
-            self.client.failClosed();
+            self.client.poison(.peer_contract_violation);
             return error.ProtocolError;
         }
         return false;
@@ -624,7 +625,7 @@ pub const RemoteRuntime = struct {
         const resp = try self.callOrdered(encoded.method, encoded.params);
         defer self.allocator.free(resp);
         const reply = decodeResizeReply(self.allocator, resp, self.resize_seq) catch |err| {
-            if (err == error.ProtocolError) self.client.failClosed();
+            if (err == error.ProtocolError) self.client.poison(.peer_contract_violation);
             return err;
         };
         switch (reply) {
@@ -722,7 +723,10 @@ pub const RemoteRuntime = struct {
                     .payload = frame.payload,
                 },
             ) catch |err| {
-                self.client.failClosed();
+                self.client.poison(if (err == error.OutOfMemory)
+                    .local_resource_exhausted
+                else
+                    .peer_contract_violation);
                 return switch (err) {
                     error.OutOfMemory => error.OutOfMemory,
                     else => error.ProtocolError,
@@ -731,21 +735,21 @@ pub const RemoteRuntime = struct {
             const event = switch (classification) {
                 .accepted => |accepted| accepted,
                 .violation => {
-                    self.client.failClosed();
+                    self.client.poison(.peer_contract_violation);
                     return error.ProtocolError;
                 },
             };
             switch (event) {
                 .revoked => |generation| {
                     self.attachment.applyValidatedRevoked(generation) catch {
-                        self.client.failClosed();
+                        self.client.poison(.local_invariant_violation);
                         return error.ProtocolError;
                     };
                     self.discardQueuedMutations();
                     switch (try self.client.fenceRevokedStream(self.attachment.streamId())) {
                         .no_pending_stream_frame, .cancelled_before_write => {},
                         .partial_frame_requires_close => {
-                            self.client.failClosed();
+                            self.client.poison(.outbound_partial_write);
                             return error.ConnectionClosed;
                         },
                     }
@@ -765,7 +769,7 @@ pub const RemoteRuntime = struct {
                     var dto = metadata;
                     defer dto.deinit();
                     result.metadata = (self.applyMetadataDto(&dto) catch |err| {
-                        self.client.failClosed();
+                        self.client.poison(.peer_contract_violation);
                         return err;
                     }) or result.metadata;
                 },
@@ -871,7 +875,7 @@ pub const RemoteRuntime = struct {
             self.allocator,
             resp,
         ) catch |err| {
-            self.client.failClosed();
+            self.client.poison(.peer_contract_violation);
             return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
                 error.Malformed, error.ResourceExhausted, error.CapabilityViolation => error.ProtocolError,
@@ -881,25 +885,25 @@ pub const RemoteRuntime = struct {
         const dto = switch (seed) {
             .current => |*current| current,
             .unsupported, .unavailable => {
-                self.client.failClosed();
+                self.client.poison(.peer_contract_violation);
                 return error.ProtocolError;
             },
         };
         const revision = dto.revision;
         if (revision < before) {
-            self.client.failClosed();
+            self.client.poison(.peer_contract_violation);
             return error.ProtocolError;
         }
         const changed = self.applyMetadataDto(dto) catch |err| {
-            self.client.failClosed();
+            self.client.poison(.peer_contract_violation);
             return err;
         };
         if (revision > before and !changed) {
-            self.client.failClosed();
+            self.client.poison(.peer_contract_violation);
             return error.ProtocolError;
         }
         if (self.observation.availability != .current or self.observation.revision != revision) {
-            self.client.failClosed();
+            self.client.poison(.peer_contract_violation);
             return error.ProtocolError;
         }
     }
@@ -920,14 +924,14 @@ pub const RemoteRuntime = struct {
     fn decodeSelectedTextResponse(self: *RemoteRuntime, resp: []const u8) client_mod.ClientError!?[]u8 {
         const obj = decodeStrictObject(self.allocator, resp) catch |err| {
             if (err == error.OutOfMemory) return error.OutOfMemory;
-            self.client.failClosed();
+            self.client.poison(.peer_contract_violation);
             return error.ProtocolError;
         };
         defer obj.deinit();
         // error envelope는 알려진 코드일 때만 "선택 없음"으로 접는다(모르는 코드 = schema 드리프트).
         if (obj.string("error")) |code| {
             if (obj.fields.len != 1 or protocol.ErrorCode.fromWireName(code) == null) {
-                self.client.failClosed();
+                self.client.poison(.peer_contract_violation);
                 return error.ProtocolError;
             }
             return null;
@@ -935,11 +939,11 @@ pub const RemoteRuntime = struct {
         // capability를 광고한 host가 success schema를 지키지 않으면 같은 connection의 나머지 RPC도 신뢰할 수 없다.
         // 구 host 호환은 capability=false에서만 허용하고, 거짓 광고/드리프트는 빈 복사로 숨기지 않는다.
         const text = obj.string("text") orelse {
-            self.client.failClosed();
+            self.client.poison(.peer_contract_violation);
             return error.ProtocolError;
         };
         if (obj.fields.len != 1) { // 선언한 키(text) 하나만 허용.
-            self.client.failClosed();
+            self.client.poison(.peer_contract_violation);
             return error.ProtocolError;
         }
         if (text.len == 0) return null;
@@ -969,36 +973,36 @@ pub const RemoteRuntime = struct {
     fn decodeLinkAtResponse(self: *RemoteRuntime, resp: []const u8) client_mod.ClientError!?RemoteLink {
         const obj = decodeStrictObject(self.allocator, resp) catch |err| {
             if (err == error.OutOfMemory) return error.OutOfMemory;
-            self.client.failClosed();
+            self.client.poison(.peer_contract_violation);
             return error.ProtocolError;
         };
         defer obj.deinit();
         if (obj.string("error")) |code| {
             if (obj.fields.len != 1 or protocol.ErrorCode.fromWireName(code) == null) {
-                self.client.failClosed();
+                self.client.poison(.peer_contract_violation);
                 return error.ProtocolError;
             }
             return null; // 알려진 error = 링크 없음(일반 클릭으로 흐른다 — 선택 복사와 같은 정책).
         }
         const text = obj.string("text") orelse {
-            self.client.failClosed();
+            self.client.poison(.peer_contract_violation);
             return error.ProtocolError;
         };
         // host의 no-link success는 `{text:""}` 하나뿐이다. 이 분기를 kind보다 먼저 판정해야 기존 same-major host가
         // 미존재 경로를 정상적으로 "링크 없음"으로 돌려줄 때 schema 위반으로 오인하지 않는다.
         if (text.len == 0) {
             if (obj.fields.len != 1) {
-                self.client.failClosed();
+                self.client.poison(.peer_contract_violation);
                 return error.ProtocolError;
             }
             return null;
         }
         const kind_raw = obj.number("kind") orelse {
-            self.client.failClosed();
+            self.client.poison(.peer_contract_violation);
             return error.ProtocolError;
         };
         if (obj.hasUnknownKey(&.{ "text", "kind" })) { // 선언 밖 키 = schema 드리프트.
-            self.client.failClosed();
+            self.client.poison(.peer_contract_violation);
             return error.ProtocolError;
         }
         const kind: terminal.LinkKind = switch (kind_raw) {
@@ -1007,7 +1011,7 @@ pub const RemoteRuntime = struct {
             else => {
                 // 숫자로 파싱됐다는 사실만으로 wire enum이 유효한 것은 아니다. 미래 kind를 URL로 추측하면 새 의미를
                 // 잘못 실행하므로, 같은 major의 정의된 값만 받고 나머지는 connection 전체를 신뢰하지 않는다.
-                self.client.failClosed();
+                self.client.poison(.peer_contract_violation);
                 return error.ProtocolError;
             },
         };
@@ -1039,36 +1043,36 @@ pub const RemoteRuntime = struct {
     fn decodeClipboardWriteResponse(self: *RemoteRuntime, resp: []const u8) client_mod.ClientError!?ClipboardWrite {
         const obj = decodeStrictObject(self.allocator, resp) catch |err| {
             if (err == error.OutOfMemory) return error.OutOfMemory;
-            self.client.failClosed();
+            self.client.poison(.peer_contract_violation);
             return error.ProtocolError;
         };
         defer obj.deinit();
         if (obj.string("error")) |code| {
             if (obj.fields.len != 1 or protocol.ErrorCode.fromWireName(code) == null) {
-                self.client.failClosed();
+                self.client.poison(.peer_contract_violation);
                 return error.ProtocolError;
             }
             return null;
         }
         const b64 = obj.string("b64") orelse {
-            self.client.failClosed();
+            self.client.poison(.peer_contract_violation);
             return error.ProtocolError;
         };
         const too_large = (obj.number("too_large") orelse 0) != 0;
         if (obj.hasUnknownKey(&.{ "b64", "too_large" })) {
-            self.client.failClosed();
+            self.client.poison(.peer_contract_violation);
             return error.ProtocolError;
         }
         if (b64.len == 0) return .{ .text = null, .too_large = too_large };
         const dec = std.base64.standard.Decoder;
         const size = dec.calcSizeForSlice(b64) catch {
-            self.client.failClosed(); // capability를 광고한 host가 유효하지 않은 base64를 보냈다 = schema 드리프트
+            self.client.poison(.peer_contract_violation); // capability를 광고한 host가 유효하지 않은 base64를 보냈다 = schema 드리프트
             return error.ProtocolError;
         };
         const out = self.allocator.alloc(u8, size) catch return error.OutOfMemory;
         errdefer self.allocator.free(out);
         dec.decode(out, b64) catch {
-            self.client.failClosed();
+            self.client.poison(.peer_contract_violation);
             return error.ProtocolError;
         };
         return .{ .text = out, .too_large = false };
@@ -1200,27 +1204,27 @@ pub const RemoteRuntime = struct {
         // RPC마다 다르게 다루지 않는다는 §"같은 major" 불변식을 알림 경로도 함께 지킨다.
         const obj = decodeStrictObject(self.allocator, resp) catch |err| {
             if (err == error.OutOfMemory) return error.OutOfMemory;
-            self.client.failClosed();
+            self.client.poison(.peer_contract_violation);
             return error.ProtocolError;
         };
         defer obj.deinit();
         if (obj.string("error")) |code| {
             if (obj.fields.len != 1 or protocol.ErrorCode.fromWireName(code) == null) {
-                self.client.failClosed();
+                self.client.poison(.peer_contract_violation);
                 return error.ProtocolError;
             }
             return null;
         }
         const title_src = obj.string("title") orelse {
-            self.client.failClosed();
+            self.client.poison(.peer_contract_violation);
             return error.ProtocolError;
         };
         const body_src = obj.string("body") orelse {
-            self.client.failClosed();
+            self.client.poison(.peer_contract_violation);
             return error.ProtocolError;
         };
         if (obj.hasUnknownKey(&.{ "title", "body" })) {
-            self.client.failClosed();
+            self.client.poison(.peer_contract_violation);
             return error.ProtocolError;
         }
         if (title_src.len == 0 and body_src.len == 0) return null; // host에 대기 알림 없음(빈 {title,body}).
@@ -1480,7 +1484,7 @@ pub const RemoteRuntime = struct {
         const resp = self.client.call("runtime.terminate", params) catch |err| {
             // cleanup request를 만들거나 응답을 추적할 메모리조차 없으면 shared connection을 닫아 host EOF 경로가
             // 모든 attachment/controller lease를 회수하게 한다.
-            if (err == error.OutOfMemory) self.client.failClosed();
+            if (err == error.OutOfMemory) self.client.poison(.local_resource_exhausted);
             return;
         };
         self.allocator.free(resp);
@@ -1510,11 +1514,11 @@ pub const RemoteRuntime = struct {
         // attach가 `controller_busy`가 되고, 사용자는 입력이 안 되는 터미널을 보게 된다. connection이 이미
         // 죽었다면 아래 detach도 실패할 뿐이라 시도 자체는 무해하다.
         self.flushQueuedInputBlocking() catch |err| {
-            if (err == error.OutOfMemory) self.client.failClosed();
+            if (err == error.OutOfMemory) self.client.poison(.local_resource_exhausted);
             logDetachIncomplete("flush", err);
         };
         const resp = self.client.call("runtime.detach", params) catch |err| {
-            if (err == error.OutOfMemory) self.client.failClosed();
+            if (err == error.OutOfMemory) self.client.poison(.local_resource_exhausted);
             logDetachIncomplete("detach", err);
             return;
         };
@@ -1546,7 +1550,7 @@ fn decodeResyncReply(
     payload: []const u8,
 ) client_mod.ClientError!void {
     control_response_wire.decodeResyncEnvelope(allocator, payload) catch |err| {
-        if (err != error.OutOfMemory) client.failClosed();
+        if (err != error.OutOfMemory) client.poison(.peer_contract_violation);
         return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             else => error.ProtocolError,
@@ -2947,7 +2951,7 @@ test "remote runtime actual attach seed and event path share revision and semant
                 );
             },
         }
-        if (!client.unusable) client.failClosed();
+        if (!client.unusable) client.poison(.peer_contract_violation);
         rr.detachClientSide();
     }
 }

@@ -25652,7 +25652,7 @@ test "external pump release terminalizes deferred Client close and canonical tea
         @intFromPtr(&scratch),
         @sizeOf(client_external_tx.PreparedTxAdmission),
     );
-    storage.owned_client.?.failClosed();
+    storage.owned_client.?.poison(.local_invariant_violation);
     try std.testing.expect(storage.owned_client != null);
     try std.testing.expectEqual(
         WholeTurnReleaseResult.aborted_terminal,
@@ -38628,7 +38628,7 @@ test "external pump storage rejects blocking and closed sources without ownershi
     var closed = try TestClient.init();
     defer closed.deinitPeer();
     defer closed.client.deinit();
-    closed.client.failClosed();
+    closed.client.poison(.local_invariant_violation);
     const closed_failure = initTestStorage(
         &storage,
         &closed.client,

@@ -332,10 +332,10 @@ pub const RemoteTermBackend = struct {
             .allocator = allocator,
             .fd = -1,
             .host_id = 1,
-            .unusable = true,
             .parser = framing.FrameParser.init(allocator),
         };
         defer client.deinit();
+        client.poison(.local_invariant_violation);
 
         var rr: RemoteRuntime = undefined;
         rr.client = &client;

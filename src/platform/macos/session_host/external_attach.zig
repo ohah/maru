@@ -10,6 +10,7 @@ const attach_cli = @import("maru").cli.attach;
 const attach_phase_deadline = @import("attach_phase_deadline.zig");
 const attach_product_resolver = @import("attach_product_resolver.zig");
 const client_mod = @import("client.zig");
+const client_poison = @import("client_poison.zig");
 const compatibility = @import("compatibility.zig");
 const framing = @import("framing.zig");
 const protocol = @import("protocol.zig");
@@ -247,7 +248,13 @@ fn attachSnapshot(
             .generation_schema = generation_schema,
             .metadata_support = client.metadata_support,
         },
-    ) catch |err| return failAttachStage(client, decodeAttachExit(err));
+    ) catch |err| {
+        client.poison(if (err == error.OutOfMemory)
+            .local_resource_exhausted
+        else
+            .peer_contract_violation);
+        return failAttachStage(client, decodeAttachExit(err));
+    };
     defer decoded.deinit();
     var accepted: remote_attachment.AttachResult = switch (decoded) {
         .wire_error => |code| return failAttachStage(client, attach_cli.remoteExitCode(code)),
@@ -402,12 +409,17 @@ fn transitionExit(err: client_mod.EnterExternalModeError) attach_cli.ExitCode {
 }
 
 fn failClient(client: *client_mod.Client, code: attach_cli.ExitCode) Result {
-    client.failClosed();
+    // The caller still owns `client` and its defer performs the one-shot CLI connection close.
+    // Fatal transport paths have already crossed `Client.poison`; semantic attach/takeover
+    // outcomes must not be relabeled as unexpected shared-connection corruption here.
+    _ = client;
     return .{ .failed = code };
 }
 
 fn failAttachStage(client: *client_mod.Client, code: attach_cli.ExitCode) AttachStage {
-    client.failClosed();
+    // Same ownership rule as `failClient`: this helper classifies a result, not a poison cause.
+    // Outer cleanup closes the dedicated CLI connection after attachment cleanup.
+    _ = client;
     return .{ .failed = code };
 }
 
@@ -430,6 +442,74 @@ test "external attach maps exact takeover wire errors" {
         attach_cli.ExitCode.protocol,
         responseErrorExit(allocator, "{\"error\":\"unknown\"}").?,
     );
+}
+
+test "external attach semantic wire errors do not fabricate a poison reason" {
+    const builtin = @import("builtin");
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const Peer = struct {
+        fn run(fd: std.c.fd_t, response: []const u8) void {
+            defer _ = std.c.close(fd);
+            if (!readMethod(fd, 1, "runtime.attach")) return;
+            socket_server.writeAll(fd, response) catch return;
+        }
+    };
+    const cases = .{
+        .{ "runtime_not_found", attach_cli.ExitCode.runtime_not_found },
+        .{ "unauthorized", attach_cli.ExitCode.denied },
+        .{ "resource_exhausted", attach_cli.ExitCode.busy },
+    };
+    inline for (cases) |case| {
+        var fds: [2]std.c.fd_t = undefined;
+        try std.testing.expectEqual(
+            @as(c_int, 0),
+            std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds),
+        );
+        var body_buffer: [96]u8 = undefined;
+        const body = try std.fmt.bufPrint(
+            &body_buffer,
+            "{{\"error\":\"{s}\"}}",
+            .{case[0]},
+        );
+        const response = try framing.encodeFrame(
+            std.testing.allocator,
+            .{ .kind = .response, .request_id = 1 },
+            body,
+        );
+        defer std.testing.allocator.free(response);
+        var peer = try std.Thread.spawn(.{}, Peer.run, .{ fds[1], response });
+        var client: client_mod.Client = .{
+            .allocator = std.testing.allocator,
+            .fd = fds[0],
+            .host_id = 1,
+            .parser = framing.FrameParser.init(std.testing.allocator),
+            .attachment_capabilities = .{
+                .peer_attach_generation = true,
+                .negotiated_controller_transfer = true,
+            },
+            .metadata_support = .supported,
+        };
+        defer client.deinit();
+        const absolute = try @import("client_deadline.zig").AbsoluteDeadline.after(
+            std.testing.io,
+            std.time.ns_per_s,
+        );
+        const stage = attachSnapshot(
+            std.testing.allocator,
+            std.testing.io,
+            &client,
+            0xaa,
+            .controller,
+            attach_phase_deadline.PhaseDeadline.fromAbsolute(.attach_snapshot, absolute),
+        );
+        peer.join();
+        try std.testing.expectEqual(case[1], stage.failed);
+        try std.testing.expectEqual(
+            @as(?client_poison.ConnectionReason, null),
+            client.firstPoisonReason(),
+        );
+        try std.testing.expect(!client.unusable);
+    }
 }
 
 test "external attach maps mode transition failures without ambiguity" {
@@ -459,7 +539,6 @@ test "external attach transition failure closes without follow-up wire" {
         .parser = framing.FrameParser.init(std.testing.allocator),
     };
     const result = failClient(&client, transitionExit(error.FlagFailed));
-    defer client.deinit();
     try std.testing.expectEqual(
         attach_cli.ExitCode.internal,
         switch (result) {
@@ -467,6 +546,8 @@ test "external attach transition failure closes without follow-up wire" {
             .prepared => return error.TestUnexpectedResult,
         },
     );
+    // Product `prepare` closes this dedicated CLI client while unwinding its owner defer.
+    client.deinit();
     var byte: [1]u8 = undefined;
     try std.testing.expectEqual(@as(isize, 0), c.read(fds[1], &byte, byte.len));
 }

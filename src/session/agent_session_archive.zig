@@ -84,17 +84,20 @@ fn parseClaude(allocator: std.mem.Allocator, bytes: []const u8) !?Parsed {
         const obj = root.value.object;
         if (string(obj.get("sessionId"))) |value| session_id = copyInto(&session_id_buf, value);
         if (string(obj.get("cwd"))) |value| cwd = copyInto(&cwd_buf, value);
-        if (string(obj.get("model"))) |value| model = copyInto(&model_buf, value);
         if (string(obj.get("custom-title")) orelse string(obj.get("customTitle")) orelse string(obj.get("title"))) |value| {
             if (value.len > 0) title = copyInto(&title_buf, value);
         }
         const kind = string(obj.get("type")) orelse "";
         if (std.mem.eql(u8, kind, "ai-title")) {
-            if (string(obj.get("title")) orelse nestedString(obj, "message", "text")) |value| {
+            if (string(obj.get("aiTitle")) orelse string(obj.get("title")) orelse nestedString(obj, "message", "text")) |value| {
                 if (value.len > 0) title = copyInto(&title_buf, value);
             }
         }
         const message = object(obj.get("message"));
+        // Current Claude Code writes the invoked model on assistant
+        // `message.model`; a top-level model is only a compatibility fallback.
+        if ((if (message) |m| string(m.get("model")) else null) orelse string(obj.get("model"))) |value|
+            model = copyInto(&model_buf, value);
         const role = if (message) |m| string(m.get("role")) orelse "" else string(obj.get("role")) orelse "";
         const text = if (message) |m| string(m.get("text")) orelse contentText(m) else string(obj.get("text"));
         if (text) |value| {
@@ -273,13 +276,14 @@ test "Codex user session parses and worker is rejected" {
 
 test "Claude title prefers explicit title then latest user summary" {
     const fixture =
-        \\{"sessionId":"claude-1","cwd":"/repo","type":"ai-title","title":"명시 제목"}
+        \\{"sessionId":"claude-1","cwd":"/repo","type":"ai-title","aiTitle":"명시 제목"}
         \\{"type":"user","message":{"role":"user","text":"첫 요청"}}
-        \\{"type":"assistant","message":{"role":"assistant","text":"응답"}}
+        \\{"type":"assistant","message":{"role":"assistant","model":"claude-test","text":"응답"}}
         \\{"type":"user","message":{"role":"user","text":"마지막 요청"}}
     ;
     var parsed = (try parse(std.testing.allocator, .claude, fixture)).?;
     defer parsed.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("명시 제목", parsed.title);
     try std.testing.expectEqualStrings("마지막 요청", parsed.summary);
+    try std.testing.expectEqualStrings("claude-test", parsed.model);
 }

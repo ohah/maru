@@ -665,13 +665,40 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   last release 뒤 Client/node exact-one destroy를 검증한다. fork child PID-domain mismatch에서 low-level mint/consume/tryDeinit의
   typed reject와 callback/free/owner mutation 0, strict 제품 wrapper의 fail-stop을 구분해 검증한다. HostPool membership
   lease와 ConnectionLease는 별개이며 external-pump owner graph는 변경하지 않는다. 증거 수준은 production-type unit이다.
-- CR3a-2(계획): generation 1 compatibility wiring으로 raw `AttachmentTransport.context=*Client` production callsite 0,
-  final-address `RemoteAttachment.initInPlace` 뒤 lease 발급, live transport와 cleanup lease 분리, 0/1/max pending token의 별도
+- CR3a-2(계획, 2a~e): generation 1 compatibility wiring으로 GUI raw `RemoteRuntime.client=*Client`와
+  `AttachmentTransport.context=*Client` production callsite 0, GUI-only final-address `GenerationAttachment.initInPlace`,
+  external movable `RemoteAttachment`/`Prepared|Attached` owner-schema 불변, live transport와 cleanup lease 분리,
+  batch table 0/1/4096/4097과 별도 stream-drop table 0/1/4096/4097의
   one-shot permit, 실제 attach/pump/deinit·failed-release·callback reentry에서 bound generation-1 node cleanup exact 1,
   slot/current admission과 별도 sentinel node mutation·wire 0을 검증한다. lease 발급 뒤 attachment move/copy와 기존
-  return-by-value production construction은 0이다. same-token two-address prepare, prepare→reentry→consume/abort, nested permit,
-  permit callback 안 parent release/deinit은 typed busy이고 active permit 0 뒤에만 pin release가 성공한다. owner cleanup ledger의
-  0/1/max/cap+1에서 duplicate release/drop/cancel과 node 조기 destroy는 0이다. permit preflight stale/move/splice/fail-index는
+  GUI generation-bound attachment return-by-value production construction은 0이다. neutral pre-attach binding은 self/incarnation/
+  lifecycle seal 아래 node pin과 빈 registry entry를 먼저 예약하고 그 뒤 Client가 같은 owner turn에서 만든 typed attach request
+  receipt를 no-fail pair한다. binding/request 어느 준비 실패도 wire 0과 request/TX/pin/drop final-zero이며 copy/move/two-address/
+  same-address ABA abort·commit은 mutation 0이다. execute 전 abort와 execute 뒤 typed reject만 connection을 유지하고, execute 시작
+  전에는 `ExecutedResponse` pristine/final-address/incarnation/non-alias/allocator를 wire 0으로 preflight하고 copy/move/same-address
+  ABA/alias/fail-index 실패가 request/binding/out mutation 0임을 검증한다. execute 뒤에는 outcome과 무관하게 request slot/TX
+  backing owner가 내부 exact settle된다. response allocation OOM은 payload owner 0+close이고, accepted만 caller final-address
+  `ExecutedResponse`에 request backing과 별개인 bounded owned response bytes+digest+allocator와 pointer-free receipt를 seal하고,
+  typed reject/uncertain은 payload owner 0이다. response copy/replay는 payload read 전 거부하며 success/malformed/binding mismatch
+  모두 exact once free한다. uncertain/connection failure나 accepted decode 실패는 response deinit+local binding abort+connection
+  close다. valid stream ID
+  commit은 prepared pin을 pristine lease로 allocation/failure/pin-count 변화 0으로 이전한다.
+  valid-shaped accepted의 request-ID cross, duplicate replay, stream reuse/splice, binding mirror/destination mismatch도 canonical
+  attachment mutation 0 뒤 offending connection close와 server subscription final-zero다.
+  execute 전 abort, typed reject, accepted valid, accepted malformed, accepted binding mismatch, uncertain 각각의
+  `{prepared request owner,TX backing,response payload,binding,pin/drop entry}` final-zero/consumed/terminal 상태를 전수한다.
+  같은 token의 two-address prepare, prepare→reentry→consume/abort, nested permit,
+  permit callback 안 parent release/deinit은 typed busy이고 active permit 0 뒤에만 pin release가 성공한다. node-local GUI cleanup
+  registry에서 duplicate release/drop과 node 조기 destroy는 0이다. buffered Client queue 또는 direct parser descriptor에서 같은
+  Client transferred accounting+registry descriptor→pointer-free attachment token publish는 all-or-none이며 18 MiB/4096-item 합계를 이중 계수하지
+  않는다. allocator callback 반환 전까지 transferred charge를 보존해 cross-stream reentry도 resident cap을 넘지 않는다.
+  reserve-first read의 `idle|terminal|error`는 entry를 exact abort하며 0/1/4096회 idle 뒤 live count 0과 다음 batch 성공을 검증한다.
+  stream drop callback 동안 node-wide batch admission은 닫혀 기존 pending accounting의 decrement-before-free 순서에서도 다른
+  stream resident cap 초과가 0이다. ordinary release와 exact residual terminal receipt의 node drain은 captured allocator payload를
+  합쳐 exact once free하고, allocation
+  authority가 불명확한 indeterminate entry는 bounded no-free quarantine이라 재해제하지 않는다. CR3a-2 제품 cancel callback은
+  0이고 CR3b R1이 별도
+  소유한다. permit preflight stale/move/splice/fail-index는
   private owner receipt로 reservation available·active cleanup 0을 exact once 복구하고 callback 0이다. callback
   `completed|retryable_preserved|indeterminate_or_partial` 각각 consumed|available|terminal 전이, 1회 retry 실패 뒤 deinit 재시도,
   `tryDeinit()` busy와 strict `deinit()` fail-stop을 production type으로 검증한다. private receipt 자체 손상은 callback/free와
@@ -679,9 +706,31 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   operation typed reject를 검증한다. process fail-stop은 실제 owner-specific strict adapter가 생기는 CR3a-2 gate다.
   first retryable 뒤 deinit의 second
   completed/retryable/indeterminate 세 경우는 각각 cleaned/terminal_handoff/terminal_handoff, attachment local owner 0, poison과
-  node/ledger terminal owner exact 1을 검증한다. reconnect/current
+  node/ledger terminal owner exact 1을 검증한다. 첫 indeterminate/두 번째 retryable 뒤 남은 token 전부의 aggregate terminal
+  handoff, registry drain/quarantine→Client.deinit→node destroy 순서를 검증한다. batch release completed/retryable은 stream open,
+  stream drop completed는 terminal, indeterminate/second retryable만 terminal_handoff인 entry/stream 직교 표를 전수한다.
+  `GenerationTransport`는 SSOT의 exact 15-declaration primitive set, closed `RuntimeRequest` variants와 exact-field
+  `GenerationCapabilities`만 노출하고 arbitrary method-string `call`, generic callback, Client-containing aggregate,
+  `*Client|*anyopaque` escape는 0이다. recursive signature audit와 self-address/PID/owner-thread/same-stream cleanup gate는
+  copy/fork/reentry를 wire/mutation 0으로 거부한다. initial snapshot은 stack-owned 별도 payload로 exact once free하고 registry
+  accounting에 들어가지 않는다. no-wire local OOM, complete snapshot apply OOM, malformed payload, partial/timeout/EOF, detach
+  prepare OOM, success, invalid_request/unauthorized/conflict reject와 detach reply-loss 상태표를 actual
+  socket/fail-index로 전수한다.
+  모든 success/errdefer/map-put/terminate/detach 경로는 `pool retain -> prepared binding -> runtime publish`와
+  `live admission close -> registry settle/handoff -> lease release -> RemoteRuntime destroy -> pool release` 순서를 exact once
+  지킨다. fork child의 prepared abort/commit, live method, registry token, permit consume는 callback/wire/free/registry mutation 0이고
+  strict 제품 wrapper만 fail-stop한다.
+  reconnect/current
   publish/retired node 생성, incident/artifact mutation과 AppSession 동작 변화는 0이며
-  real socket/AppKit은 완료 조건이 아니다.
+  real socket은 2e parity gate이고 AppKit은 완료 조건이 아니다. uncertain/malformed accepted attach response는 local reservation
+  abort 뒤 connection close로 server subscription final-zero가 된다. 2a는 neutral contract leaf와 GUI shell+transport 최소 core의
+  실제 attach/deinit/drop/lease, external owner-schema digest, 2b는 실제 pump의 buffered/direct→registry transaction·두 cap·release와
+  GUI raw AttachmentTransport context와 raw Client 경유 batch read/release/drop callsite 0, 2c는 남은 exact primitive facade와
+  `RemoteRuntime.client`를 포함한 raw escape zero,
+  2d는 actual-owner permit/reentry/quarantine/typed teardown, 2e는 actual socket
+  attach/pump/deinit/uncertain/malformed/snapshot-failure/failed-release fixture와 전체 source
+  boundary를 각각 증명한다. 각 gate는 production-type unit과 boundary를 재실행하며 전체가 green이기 전 CR3a-2 완료를 주장하지
+  않는다.
 - CR3b: pool-membership과 독립된 connection generation 전이·publish·overflow, stale callback/동시 attempt,
   R1 admission close/cancel → R2 store-only detach+placeholder publish+callback cleanup → R3 final seal/canRetire/tick-end destroy의
   three-phase retirement, retired Client cap 2. CR3c: 실제 RemoteGeneration slot integration.

@@ -16,12 +16,14 @@ React/shadcn의 **작고 조합 가능한 component·props·slot** 모델과 CSS
 ```mermaid
 flowchart TD
     A[domain snapshot] --> B[component props and slots]
-    B --> C[UiTree]
+    B --> C[component build UiTree]
     C --> D[UiLayout.flex]
     D --> E[computed UiRect tree]
-    E --> F[component view and hitTest]
-    F --> G[ChromeDraw]
-    G --> H[Metal GPU lowering]
+    C --> F[ui paint_style semantic resolver]
+    E --> F
+    E --> G[ui interaction hit test]
+    F --> H[ChromeDraw]
+    H --> I[Metal GPU lowering]
 ```
 
 - component tree는 화면의 구조와 slot을 표현하고, domain I/O·PTY·provider file을
@@ -60,22 +62,21 @@ ArchiveDetailPanel
 └── DetailActions
 ```
 
-각 component는 다음의 순수 계약을 노출한다.
+새 tree용 semantic component는 다음의 순수 **build 계약**만 노출한다. `view`/`hitTest`
+함수를 component마다 두지 않는다. 같은 AST와 rect를 `ui/paint*`/`ui/interaction`이 각각
+한 번만 소비해야 theme·clip·click 영역이 분산되지 않는다.
 
 ```zig
 pub const Props = struct { /* immutable values and stable identities */ };
-pub const State = struct { /* UI-local, no file/PTY ownership */ };
-pub const Action = union(enum) { /* intent only */ };
-
-pub fn layout(props: Props, style: UiStyle, available: UiSize) UiLayoutNode;
-pub fn view(props: Props, rects: *const UiRectTree, paint: PaintStyle, out: *DrawList) void;
-pub fn hitTest(props: Props, rects: *const UiRectTree, point: UiPoint) ?Action;
+pub fn build(props: Props, children: []const UiNode) UiNode;
 ```
 
-Host만 domain snapshot을 component props로 만들고 Action을 실제 side effect로
-dispatch한다. component는 `AppSession`, `NativeMetalCell`, Metal API, filesystem을
-import하지 않는다. children/slot은 명시 prop으로 넘기며, component가 전역 UI
-상태를 찾아보지 않는다.
+Host만 domain snapshot을 component props로 만들고 `UiActionId` intent를 실제 side effect로
+dispatch한다. UI-local state는 `ui/interaction.InteractionState`, semantic paint는
+`ui/paint_style`, draw emission은 `ui/paint`, platform
+adapter는 input/lowering이 단일 소유한다. component는 `AppSession`, `NativeMetalCell`, Metal API,
+filesystem을 import하지 않는다. children/slot은 명시 prop으로 넘기며, component가 전역 UI 상태를
+찾아보지 않는다.
 
 실제 작성 문법은 JSX/XML parser가 아니라 compile-time Zig value builder다. ML2a의
 `UiNode`는 `identity`, `UiStyle`, tagged `props`, `[]const UiNode` children을 가지며,
@@ -84,11 +85,15 @@ import하지 않는다. children/slot은 명시 prop으로 넘기며, component�
 
 ```zig
 const tree = ui.container(.{ .id = .session_dock, .direction = .column, .style = .{ .gap = 8 } }, &.{
-    ui.card(.{ .id = session_id, .action = .open_archive }, &.{
-        ui.text(.{ .value = "adsf", .max_lines = 2, .overflow = .ellipsis }),
+    ui.card(.{ .id = session_id, .action = .{ .id = 100 } }, &.{
+        ui.text(.{ .id = session_title_id, .value = "adsf" }),
     }),
 });
 ```
+
+위 예시는 현재 ML2 `ui/tree.zig`가 실제로 받는 최소 문법이다. `variant`, `tone`,
+`max_lines`, `overflow` 같은 제품 props는 아래 ML3 target contract가 구현될 때 같은 builder에
+추가하며, 그 전에는 예시에 섞어 현재 지원한다고 보이지 않게 한다.
 
 `container`·`card`·`text`는 `UiNode` value를 반환하는 작은 Zig 함수일 뿐이고, React runtime,
 virtual DOM diff, arbitrary callback closure를 만들지 않는다. `Container`는 CSS 클래스가 아니라
@@ -193,6 +198,118 @@ pub const UiStyle = struct {
   radius, shadow, opacity, overflow clip만 둔다. style은 immutable input이고 paint가
   layout rect나 hit target을 몰래 바꾸지 않는다.
 
+### semantic paint props와 event intent
+
+`UiStyle`은 layout 전용이다. background·font·shadow처럼 보이는 값을 여기에 넣거나, CSS
+문자열/임의 key-value bag을 허용하지 않는다. ML3의 제품 node는 다음처럼 **닫힌 semantic prop**을
+함께 보관해, 같은 `UiRectTree` entry를 paint와 hit-test가 공유한다.
+
+```zig
+pub const CardVariant = enum { surface, raised, selected, danger };
+pub const TextTone = enum { primary, muted, accent, danger };
+pub const ShadowKind = enum { none, raised };
+
+pub const PaintStyle = struct {
+    background: ?ColorRole = null,
+    foreground: ?ColorRole = null,
+    border: ?ColorRole = null,
+    corner_radii_px: ?[4]u16 = null,
+    border_widths_px: ?[4]u16 = null,
+    shadow: ?ShadowKind = null,
+    opacity: u8 = 0xFF,
+};
+
+pub const CardOptions = struct {
+    id: UiId,
+    style: UiStyle = .{},
+    variant: CardVariant = .surface,
+    paint: PaintStyle = .{},
+    action: ?UiAction = null,
+    // direction/align/overflow/children ...
+};
+
+pub const TextOptions = struct {
+    id: UiId,
+    value: []const u8,
+    tone: TextTone = .primary,
+    paint: PaintStyle = .{},
+    // ML3 TextLayout props ...
+};
+```
+
+- `CardVariant`/`TextTone`은 domain props다. selected는 archive/session selection처럼 model이
+  결정하고, hover/focus/pressed는 `InteractionState`만 결정한다. disabled는 별도 bool로
+  중복하지 않고 `UiAction.enabled=false`에서만 나온다. painter의 precedence는
+  `disabled > pressed > focus > hover > selected > base variant`로 고정한다.
+- `PaintStyle`은 semantic `ColorRole`과 geometry override만 받을 수 있다. raw RGB, CSS variable,
+  selector, callback은 금지한다. `null`은 component variant가 정한 theme token을 쓴다는 뜻이다.
+  `opacity`는 0..255이고, corner/border array는 `[top-left, top-right, bottom-right, bottom-left]`/
+  `[top, right, bottom, left]` 순서다. shadow의 blur/offset/color는 component가 직접 들지 않고
+  `Tokens.space`의 named token을 쓴다.
+- explicit background/foreground/border·shape override는 base variant 다음에 적용한다. hover/focus/
+  pressed는 그 위에서 다시 visual feedback을 주며 disabled만은 항상 최우선이다. 따라서 작은 prop
+  문법으로도 custom base와 접근 가능한 interaction feedback을 함께 보장한다. `shadow = null`은
+  variant default를 보존하고 `.none`은 명시적으로 끈다.
+- click/keyboard/context 같은 event도 `onClick` closure가 아니라 stable `UiActionId` intent다.
+  ML2b의 현재 primary pointer action은 `UiAction { id, enabled }` 한 개만 소비한다. keyboard
+  activation, context menu, tooltip/accessibility는 각 intent를 추가하는 후속 slice에서 열며,
+  provider/process side effect는 항상 host dispatcher만 실행한다. hover는 action event가 아니라
+  paint state다.
+- `resolveVisualStyle(Tokens, variant/tone, PaintStyle, InteractionState, UiAction)`은 ML3의 유일한
+  theme 경계다. component는 `Tokens.rich()`/`Tokens.tui()`나 light/dark를 분기하지 않고
+  `ColorRole`만 반환한다. token 교체는 rect/identity/action을 바꾸지 않고 paint artifact만
+  invalidation한다. Chrome Lab은 같은 scenario를 light/dark token으로 그려 role·alpha·geometry
+  probe와 readback PNG가 모두 달라지는지, hit rect/action은 불변인지 검증한다.
+
+### 장기 책임 분리와 단일 출처
+
+새 Chrome UI는 “간단한 typed 문법”과 “한 데이터의 한 소유자”를 함께 지켜야 한다. 아래 경계가
+그 단일 출처이며, 같은 prop·rect·theme mapping을 다른 모듈에서 다시 계산하거나 선언하면 안 된다.
+
+```mermaid
+flowchart TD
+    Component[Card Text semantic props] --> Tree[ui tree immutable AST and identity]
+    Tree --> Layout[ui layout typed geometry]
+    Layout --> Rects[UiRectTree]
+    Tree --> Resolve[ui paint_style visual resolver]
+    Rects --> Paint
+    Resolve --> Paint[ui paint draw emission]
+    Interaction[ui interaction local state] --> Resolve
+    Tokens[tokens resolved theme] --> Resolve
+    Paint --> Draw[ChromeDraw semantic ops]
+    Draw --> Lower[platform Metal lowering]
+```
+
+| 책임 | 코드 단일 출처 | 금지되는 중복 |
+| --- | --- | --- |
+| 길이·flex·clip·rect 유효성 | `src/chrome/ui/layout.zig` | component/paint/backend의 별도 좌표·크기 계산 |
+| 닫힌 variant/tone/paint prop 어휘 | `src/chrome/ui/style.zig` | CSS/RGB/callback bag |
+| child 구조·stable ID·action enabled·semantic prop의 rect snapshot 투영 | `src/chrome/ui/tree.zig` | sibling index·allocator 주소를 identity로 쓰기 |
+| hover/focus/pressed/capture와 action intent | `src/chrome/ui/interaction.zig` | component-local callback state·platform side effect |
+| tree prop + interaction state를 theme role/shape로 해석 | **ML3 `src/chrome/ui/paint_style.zig`** | host, Metal backend의 light/dark/rich 분기 |
+| backing-pixel snap + fixed buffer ChromeDraw emission | **ML3 `src/chrome/ui/paint.zig`** | resolver/backend의 별도 snap·draw 생성 |
+| 실제 RGB·spacing·shape token | `src/chrome/tokens.zig` | component가 literal RGB·shadow blur를 보유 |
+| backend-neutral draw op | `src/chrome/draw.zig` | component가 `NativeMetalCell`/Metal DTO를 생성 |
+| GPU/셀 lowering과 AppKit 입력 adapter | platform boundary | layout/paint를 Swift·Objective-C에서 재구현 |
+
+- `docs/metal-ui-layout.md`는 위 typed UI contract의 설계 단일 출처다. `docs/chrome-strategy.md`
+  는 기존 ChromeHost·token/lowering의 제품 수명과 migration만 소유하며, 새 tree의 prop grammar를
+  재정의하지 않고 이 문서를 링크한다. `docs/agent-session-list.md`는 Session Dock의 archive data,
+  worker, resume/reveal 정책만 소유하고 pixel/layout/event grammar를 중복하지 않는다.
+- 제품 author 문법은 `ui.card(.{ .id, .variant, .action }, children)`와
+  `ui.text(.{ .id, .value, .tone, .wrap }, ...)`처럼 작고 닫혀 있어야 한다. `Container`는 내부
+  구조 노드이며 `.direction/.style`만 받는다. arbitrary `style = .{ .custom = ... }`, DOM-like
+  tag, CSS selector/cascade, callback closure는 장기적으로도 추가하지 않는다.
+- ML3a 현재 구현은 `ui/layout`·`ui/style`·`ui/tree`·`ui/interaction`·`ui/paint_style`·`ui/paint`
+  까지다. paint는 headless `ChromeDraw` 후보만 만들며 실제 Metal lowering, text shaping, clip
+  scissor와 GPU shadow emission은 아직 없다. 따라서 새 tree가 rich/light/dark token을 실제 Metal
+  output으로 소비한다고 주장하면 안 된다. ML3b Chrome Lab의 dark/light artifact로만 그 연결을 완료로
+  판정한다.
+- 새 tree의 제품 token input은 **rich/Metal `Tokens` snapshot만**이다. legacy `Tokens.tui()`와
+  cell-grid lowering은 기존 config/read compatibility·회귀 fixture의 별도 경로이며, ML3
+  resolver에 fallback/조건문으로 넣지 않는다. `tokens.zig`가 두 값을 표현하는 것은 migration
+  호환성일 뿐 새 component contract가 두 renderer를 지원한다는 뜻이 아니다.
+
 ### Text layout은 flex solver의 외부 입력이 아니라 frame artifact다
 
 `Text`의 폭과 높이는 문자 수·셀 폭으로 추정하지 않는다. font family/weight/size,
@@ -200,7 +317,7 @@ fallback face, letter spacing, line height, writing direction, Unicode grapheme 
 규칙, 그리고 최종 content width가 모두 결과를 바꾼다. 따라서 layout과 Metal paint가 서로
 다른 곳에서 같은 문자열을 다시 잘라서는 안 된다.
 
-다음 선언은 **ML3 제품 Text contract의 목표 형태**다. 현재 `ui_tree.zig`의 동명
+다음 선언은 **ML3 제품 Text contract의 목표 형태**다. 현재 `ui/tree.zig`의 동명
 `TextOptions`는 ML1 synthetic `MeasureFn` fixture seam이므로 이 필드를 아직 제공하지
 않으며, ML3에서 한 번에 교체한다.
 
@@ -284,10 +401,13 @@ solver를 분리해야 한다는 Maru의 근거다. Maru는 Rust crate나 WASM/F
 
 `UiRectTree`의 모든 rect는 one-source다.
 
-- `view`는 rect에서 `ChromeDraw.fill/border/text/quad`를 만들고 Metal backend가
-  glyph/cell/GPU quad로 lower한다.
-- `hitTest`는 동일 rect와 clip chain을 역순으로 검사한다. radius는 visual-only가
-  아니라 hit-test mask에도 동일하게 적용한다.
+- `ui/paint`만 rect와 `ui/paint_style`의 semantic paint 결과에서 `ChromeDraw.fill/border/text/quad`를 만들고,
+  Metal backend가 glyph/cell/GPU quad로 lower한다. component와 backend는 draw op를 따로 만들지
+  않는다.
+- `ui/interaction`은 동일 rect와 clip chain을 역순으로 검사한다. ML2b의 현재 action hit 영역은
+  axis-aligned rect이며, ML3의 corner radius는 painter만 소비한다. rounded hit mask가 필요해지면
+  paint의 radius를 복제하지 않고 shared typed shape를 `ui/tree`에서 추가하고, 그 mask의
+  unit/clip/경계 fixture를 같은 slice에서 먼저 추가한다.
 - scroll viewport와 virtualization은 list child를 그리기 전에 같은 rect tree로
   visible range를 정한다. fixed header와 scroll body가 서로 다른 y origin을
   재계산하면 안 된다.
@@ -330,8 +450,8 @@ pressed, focus, pointer capture, scroll offset은 `ChromeHost`가 소유하는 U
 
 ### ML2b interaction 계약
 
-ML2b는 `src/chrome/ui_interaction.zig`의 순수 상태 머신이다. `ui_tree.zig`가
-immutable `UiRectTree`를 만들고, `ui_interaction.zig`가 그 snapshot을 **빌려서만**
+ML2b는 `src/chrome/ui/interaction.zig`의 순수 상태 머신이다. `ui/tree.zig`가
+immutable `UiRectTree`를 만들고, `ui/interaction.zig`가 그 snapshot을 **빌려서만**
 hit-test한다. 어느 쪽도 `ChromeHost`, `AppSession`, provider archive, Metal draw를
 import하지 않는다. 따라서 실제 macOS adapter는 기존 `input.PointerEvent`를 이 DTO로
 한 번 변환하고, `ChromeHost`는 반환 intent와 repaint 요구만 platform에 전달한다.
@@ -464,18 +584,24 @@ macOS screenshot/readback gate를 대체하지 않는다. browser runner 의존�
 v1에는 animation과 transform을 구현하지 않는다. Web-like visual quality는 먼저
 정확한 layout, rounded quad, border, shadow, opacity, CoreText shaping으로 만든다.
 
-후속 static transform slice는 `translate/scale/rotate`를 paint transform으로
-추가하고 transformed rect, clip, hit-test inverse mapping, dirty region을 함께
-검증한다. 그 뒤 transition/animation slice가 stable component identity에 time-varying
-paint/layout value를 붙인다. animation timer를 component마다 만들거나 main thread에
-file work를 섞지 않으며, 공용 frame phase가 살아 있는 animation만 tick한다.
+후속 static transform slice는 `ui/transform.zig`가 `translate/scale/rotate`의 typed
+값, forward/inverse matrix, transformed clip과 dirty bounds를 **한 번만** 계산하게 한다.
+`ui/paint.zig`는 그 forward transform으로 draw op를 내고, `ui/interaction.zig`는 같은
+모듈의 inverse mapping으로 hit-test한다. layout의 untransformed rect는 계속 layout/tree의
+단일 출처이며, paint나 hit-test가 각각 새 rect를 재계산하면 안 된다.
+
+그 뒤 transition/animation slice는 `ui/animation.zig`가 stable component identity별
+timeline·progress·dirty signal만 소유하고, `ui/paint_style.zig`가 해당 시점의 visual override를
+해석한다. component-local timer, callback closure, background worker 또는 main thread file work는
+허용하지 않는다. host의 공용 frame phase가 `now`를 한 번 전달하고, 살아 있는 animation만 tick한다.
+layout-affecting animation은 paint-only animation과 별도 정책/성능 gate를 가진 후속 slice다.
 
 ## 8. 구현·검증 순서
 
 1. **ML1 — typed rect/flex core:** `UiLength`, edge/min-max resolve, measure callback,
    row/column flex, overflow clip의 pure test. px/percent/auto/fill, zero/negative,
    NaN/∞ fail-close, tiny container, min/max freeze 재분배, text measurement을 단언한다.
-2. **ML2a — nested component layout seam:** `src/chrome/ui_tree.zig`가
+2. **ML2a — nested component layout seam:** `src/chrome/ui/tree.zig`가
    `UiNode` builder와 `UiRectTree`, tree-wide unique stable identity, parent/clip
    ancestry, same rect 소비 seam, successful-only rebuild counter를 headless로 고정한다.
    이 tree는 legacy TUI cell/ANSI path를 읽지 않는다. 아직 draw/hit/focus consumer는
@@ -483,18 +609,26 @@ file work를 섞지 않으며, 공용 frame phase가 살아 있는 animation만 
 3. **ML2b — pointer interaction seam:** `UiPointerEvent` mapping, hover enter/leave의
    two-dirty fast path와 focus/pressed의 complete dirty set, outside move/up pointer
    capture, tree mutation/snapshot swap의 cancelled capture와 stale up action=0을 ML2a
-   rect tree를 소비하는 **pure `ui_interaction.zig` test**로 고정한다. macOS host adapter의
+   rect tree를 소비하는 **pure `ui/interaction.zig` test**로 고정한다. macOS host adapter의
    event mapping·paint 결과는 ML3 Chrome Lab에서 별도로 고정한다.
-4. **ML3 — Chrome Lab과 Metal paint seam:** test-only `ChromeLabScenario` surface를
-   먼저 만들고 rounded/border/shadow/opacity/clip을 `ChromeDraw`와 production Metal
-   lowering에 연결한다. Lab screenshot/readback fixture가 rect·clip 정합과 scripted
-   action identity를 고정한다. clip scissor는 Metal framebuffer의 좌상단 원점을
-   명시적으로 사용하며, clip 미연결 인프라나 하단-원점 변환을 남기지 않는다. nested
-   clip·부분 pixel scroll의 경계 screenshot이 y축 반전과 header bleed를 막는 gate다.
-5. **ML4 — Session Dock:** `SessionDock`과 `ArchiveDetailPanel`이 ML1~3만 소비해
+4. **ML3a — typed paint resolver:** `ui/style`이 immutable variant/tone/paint prop을 정의하고
+   `ui/tree`가 snapshot에 투영하며, 순수 `ui/paint_style.zig`가 그것과 `InteractionState`·rich `Tokens`
+   snapshot을 resolved semantic style로 해석한다. `ui/paint.zig`만 `UiRectTree`를 snap해 fixed-capacity
+   `ChromeDraw` 후보를 만든다. card의 base/selected/hover/focus/pressed/disabled
+   precedence, role override, corner/border/opacity, backing-pixel snap, fixed-capacity
+   overflow를 headless draw snapshot으로 고정한다. shadow는 이 단계에서 named token 값까지
+   resolve하지만 GPU shadow emission은 ML3b가 연결한다. 이 단계는 platform lowering이나 실제
+   text shaping을 연결하지 않으므로 pixel screenshot E2E 완료를 주장하지 않는다.
+5. **ML3b — Chrome Lab과 Metal paint seam:** test-only `ChromeLabScenario` surface를
+   먼저 만들고 ML3a draw를 production Metal lowering에 연결한다. Lab screenshot/readback
+   fixture가 rounded/border/shadow/opacity/clip과 rect·clip 정합, scripted action identity를
+   고정한다. clip scissor는 Metal framebuffer의 좌상단 원점을 명시적으로 사용하며,
+   clip 미연결 인프라나 하단-원점 변환을 남기지 않는다. nested clip·부분 pixel scroll의
+   경계 screenshot이 y축 반전과 header bleed를 막는 gate다.
+6. **ML4 — Session Dock:** `SessionDock`과 `ArchiveDetailPanel`이 ML1~3만 소비해
    direct text draw/ANSI guidance를 대체한다. worker, archive identity, resume/reveal
    계약은 바꾸지 않는다.
-6. **ML5+ — 필요가 증명된 기능:** grid, static transform, transition/animation을
+7. **ML5+ — 필요가 증명된 기능:** grid, static transform, transition/animation을
    각각 별도 PR과 fixture로 연다.
 
 각 slice의 적대적 검증은 (a) draw/hit/clip rect drift, (b) parent resize와

@@ -48,6 +48,10 @@ pub const ColorRole = enum {
     cursor,
     accent_bar, // U1(C4b 이후): maru accent — **테마-구동**(ThemeColors.accent). 프리셋별 시그니처 색(null이면 브랜드 앰버 폴백). 탭/포커스 언더바·사이드바 활성 좌측 막대·세팅 강조가 소비(U2).
     keycap_bg, // KH-5: 단축키 힌트 키캡(키별 박스) 배경 — 패널 대비(명암 기준 밝게/어둡게)라 tui·rich·light·dark 모두 또렷(keycapBg).
+    /// Destructive-action surface. ThemeColors has no semantic error input yet, so this token
+    /// layer owns the conservative fallback instead of leaking literal RGB into a component.
+    danger_bg,
+    danger_fg,
 };
 
 /// 비-색 레이아웃 토큰(픽셀/비율, 정적 디자인 값 — rich는 바꾼다). chrome-strategy.md §5.1이 정의한 계획 기반
@@ -154,6 +158,10 @@ pub const Tokens = struct {
         palette.set(.cursor, theme.cursor);
         palette.set(.accent_bar, theme.accent); // maru accent(테마-구동) — 프리셋별 시그니처 색. config.accent null이면 resolve가 브랜드 앰버(#dda15e)로 폴백. rich가 상속.
         palette.set(.keycap_bg, keycapBg(theme.sidebar_background)); // KH-5: 키캡 배경 = 패널 대비(명암 기준 밝게/어둡게) — tui·rich 공통으로 light·dark 모두 또렷.
+        // Error remains role-only at product call sites. A future ThemeColors.error field will
+        // replace this mapping once, without changing Card variants or Metal lowering.
+        palette.set(.danger_bg, .{ .r = 176, .g = 52, .b = 60 });
+        palette.set(.danger_fg, .{ .r = 255, .g = 255, .b = 255 });
         return .{ .palette = palette };
     }
 

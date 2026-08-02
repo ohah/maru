@@ -12,6 +12,25 @@ Maru는 초기에 파일 이동을 최소화한다. 기존 `src/*.zig` 파일은
 - 테스트, trace, snapshot, replay 자료는 기능 코드와 같은 책임 이름을 사용한다.
 - 빈 폴더도 의도를 문서화해서 나중에 위치를 다시 정하는 리팩토링을 줄인다.
 
+### Zig 파일·폴더 네이밍 컨벤션
+
+- public facade(`maru.zig`, `chrome.zig`, `session.zig` 등)만 `src/` 또는 도메인 루트에 둔다.
+  facade는 re-export와 안정된 import 진입점만 소유하며 구현 파일을 다시 품지 않는다.
+- 구현 Zig 파일은 반드시 가장 가까운 **책임 namespace 폴더**에 둔다. 기능 prefix가 파일명에
+  반복되기 시작하면(`ui_tree.zig`, `ui_paint.zig`, `ui_interaction.zig`처럼) prefix를 계속 붙이지
+  않고 `ui/{tree,paint,interaction}.zig`로 승격한다. 폴더가 domain, 파일명이 그 안의 한 책임을
+  표현한다.
+- 한 namespace 안의 파일은 한 가지 변경 이유만 가진다. 예를 들어 `ui/style.zig`는 닫힌 제품
+  prop 어휘, `ui/tree.zig`는 identity/AST/rect snapshot, `ui/paint_style.zig`는 token state 해석,
+  `ui/paint.zig`는 pixel snap과 draw emission만 소유한다. layout·provider I/O·platform lowering을
+  같은 파일에 넣지 않는다.
+- 새 구현은 이 규칙을 즉시 따른다. 기존 flat 파일은 무관한 대규모 rename PR로 한꺼번에 이동하지
+  않는다. 해당 도메인을 수정할 때 facade import, build test, 문서 링크를 같은 PR에서 바꾸어
+  점진적으로 namespace로 옮긴다. 이동만으로 public facade path를 깨지 않는다.
+- 이름이 한 파일뿐인 범용 leaf(`color.zig`, `width.zig` 등)와 executable entrypoint는 억지로
+  한-file 폴더를 만들지 않는다. 둘 이상의 협력 구현 파일이 생기거나 책임 경계가 분명해지는 즉시
+  위 namespace 규칙을 적용한다.
+
 ## 소스 구조
 
 ```text
@@ -40,6 +59,7 @@ src/
                         SurfaceRuntime을 감쌈)를 둔다. GUI layout 정책과 session-host transport(P3 session_host/)를 한
                         파일에 섞지 않는다. P2 배선은 완료되어 app_session이 opaque handle과 backend 계약만 사용한다.
   chrome/               플랫폼 중립 디자인 시스템 구현 — draw/tokens/props/input/state/host + components/(sidebar·tabbar·settings·palette·find·notice·modal 등)
+    ui/                 새 rich/Metal typed component tree. style(닫힌 prop 어휘)·layout(typed flex)·tree(identity/rect snapshot)·interaction(pointer-local state)·paint_style(token/state resolver)·paint(pixel snap→ChromeDraw)를 책임별로 둔다. `chrome.zig`는 `chrome.ui.*` namespace로만 re-export한다.
   cli/                  CLI 서브커맨드의 테스트 가능한 순수 로직(ssh: 원격 terminfo 전파 — 파싱·셸 스크립트·exec argv; install: maru CLI를 PATH에 symlink하는 경로/PATH 헬퍼; terminfo: `maru terminfo` 캐시 관리 인자 파싱 — 캐시 메커니즘은 top-level terminfo_cache.zig; sessions: 컨트롤 플레인 `sessions list`/`session get` 파서·`--help`·client wire — 1d — 및 소켓 발견 순수 정책 `controlDir`/`pickSocket` — A2a; persistent-session P5는 runtime.zig(`host status`, `runtime list/get/end`)와 attach.zig(ANSI adapter·detach chord)를 추가하되 protocol codec은 아래 session_host/를 재사용; trace: `maru trace anonymize` 인자 파싱 — 익명화 로직은 observability.trace/redact). main.zig는 얇은 디스패처로 두고 실질 로직을 여기 둔다(A2a: `runSessionRequest`가 결정론 경로 발견→`std.c.connect`→왕복→`renderResponse`, 서버 부재면 graceful; 소켓 syscall만 main에)
   session/              L2 세션 코어(OS-중립·app/pty/platform import 0, check-boundaries 강제): 세션 모델(Model·Tab·Pane·surface·split_tree·workspace·dock_panel·core_command)과 **컨트롤 플레인/이동성 골격** — surface_id(M0a), window_membership(M0b), window_graph(M1), live_surface_registry(M2a generic), control_plane(1a JSON-RPC/ndjson), control_surface(1c Surface DTO·scope 응답), control_dispatch(1d read-only 라우터), layout/input math·ime·keyhint. platform이 런타임 타입을 넣어 인스턴스화한다
   config/               action parsing, raw theme/font/cursor config, resolved appearance config

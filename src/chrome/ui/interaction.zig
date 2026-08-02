@@ -5,9 +5,9 @@
 //! the boundary. Tests can therefore exercise click/capture correctness without a macOS window.
 
 const std = @import("std");
-const input = @import("input.zig");
+const input = @import("../input.zig");
 const layout = @import("layout.zig");
-const ui_tree = @import("ui_tree.zig");
+const ui_tree = @import("tree.zig");
 
 pub const UiId = ui_tree.UiId;
 pub const UiActionId = ui_tree.UiActionId;

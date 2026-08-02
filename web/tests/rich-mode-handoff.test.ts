@@ -169,14 +169,16 @@ describe("rich mode hand-off", () => {
     }
   });
 
-  test("잠긴 문서는 리치에서 저장되지 않는다", async () => {
-    // 잠금이 타이핑만 막고 저장 경로가 열려 있으면 ⌘S 한 번에 각주 정의가 인라인 링크로 덮인다.
-    // (frontmatter는 이제 노드로 지원하므로 잠금 픽스처가 아니다 — §2.5.)
-    const harness = await bootMarkdownShell("텍스트[^1]\n\n[^1]: 각주");
+  test("예전에 잠갔던 문서도 리치에서 저장되고, 나간 바이트가 원문이다", async () => {
+    // 잠금을 없앤 근거가 여기서 증명된다 — 막던 이유는 ⌘S 한 번에 각주 정의가 뭉개지는 것이었고, 보존
+    // 노드가 그 파괴를 없앴다. 저장이 열렸는데 원문이 달라지면 잠금을 푼 것이 잘못이 된다(§2.5).
+    const source = "텍스트[^1]\n\n[^1]: 각주";
+    const harness = await bootMarkdownShell(source);
     try {
       setMode(harness.dom, "rich");
       for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
-      expect(harness.dom.window.document.querySelector(".maru-rich-notice")).not.toBeNull();
+      // 안내 밴드라는 개념 자체가 없어졌다.
+      expect(harness.dom.window.document.querySelector(".maru-rich-notice")).toBeNull();
 
       harness.writes.length = 0;
       harness.dom.window.document.querySelector("#rich-editor .maru-rich-content")?.dispatchEvent(
@@ -187,7 +189,8 @@ describe("rich mode hand-off", () => {
         }),
       );
       for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
-      expect(harness.writes).toEqual([]); // 디스크로 나간 바이트가 없어야 한다
+      expect(harness.writes.length).toBe(1);
+      expect(harness.writes[0]?.trim()).toBe(source);
     } finally {
       await harness.cleanup();
     }

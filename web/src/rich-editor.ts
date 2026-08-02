@@ -5,8 +5,11 @@
  * 결과이고, 파일을 열 때 마크다운을 문서모델로 파싱해 들어왔다가 저장할 때 다시 마크다운으로 직렬화해 나간다.
  * **그 왕복이 원문을 정규화할 수 있다는 것이 이 모드의 명시된 대가다** — 손실이 곤란한 문서는 소스 모드가 받는다.
  *
- * 편집기 본문은 문서모델 라이브러리가 DOM에 직접 마운트하고, 그 **주변 chrome(툴바·잠금 안내)은 React가
- * 그린다**(§2.1) — 둘은 형제 노드이고 편집기를 React 컴포넌트로 다시 쓰지 않는다.
+ * 편집기 본문은 문서모델 라이브러리가 DOM에 직접 마운트하고, 그 **주변 chrome(툴바)은 React가 그린다**(§2.1)
+ * — 둘은 형제 노드이고 편집기를 React 컴포넌트로 다시 쓰지 않는다.
+ *
+ * **문법 목록으로 편집을 잠그던 장치는 없다.** 문서모델이 모르는 원문 조각은 그대로 보존되므로(§2.5 보존
+ * 규칙, `rich-raw-node.ts`) 저장해도 원문이 파괴되지 않는다 — 막을 근거 자체가 사라졌다.
  */
 
 import { Editor, type JSONContent } from "@tiptap/core";
@@ -19,44 +22,13 @@ import { Table, TableRow, TableCell, TableHeader } from "@tiptap/extension-table
 import { mountShellUi, type ShellUiHandle } from "./shell-ui";
 import { splitFrontmatter } from "./frontmatter";
 import { Frontmatter, frontmatterNodeName } from "./rich-frontmatter-node";
+import { RawBlock, RawInline } from "./rich-raw-node";
 import type { ToolbarItem } from "./ui/toolbar";
-
-/**
- * 리치가 문서모델로 표현하지 못해 **저장할 때 잃어버리는** 문법을 찾는다.
- *
- * 실측(왕복 테스트)으로 확인된 것들이다 — 원시 HTML은 태그가 사라지고, 각주는 정의가 인라인 링크로 뭉개진다.
- * 이미지·표는 확장으로, frontmatter는 전용 노드로 해결했지만(`rich-frontmatter-node.ts`) 이 둘은 그렇게 못
- * 한다: frontmatter는 **문서 맨 앞이라는 위치**로 떼어 낼 수 있었던 반면, 각주와 원시 HTML은 본문 **안에
- * 섞여** 있어 경계로 가를 수 없고 문서모델에 노드를 주는 별도 작업이다.
- *
- * 그래서 이런 문서는 리치에서 **읽기만** 하게 하고 편집을 막는다. 저장 경로가 닫히면 원문은 안전하고,
- * 사용자는 소스 모드에서 손실 없이 고칠 수 있다(docs/file-panel.md §2.5).
- */
-export function unsupportedRichSyntax(markdown: string): string[] {
-  // 코드 안의 텍스트는 내용일 뿐이라 검사 대상이 아니다. 코드펜스와 인라인 코드를 모두 지운 뒤 본다 —
-  // `설정은 \`<div>\` 태그로…` 같은 평범한 설명문이 원시 HTML로 오탐되면 그 문서는 영영 리치에서 못 연다.
-  const withoutCode = markdown
-    .replace(/^ {0,3}(`{3,}|~{3,})[\s\S]*?^ {0,3}\1[ \t]*$/gm, "")
-    .replace(/`[^`\n]*`/g, "");
-  const found: string[] = [];
-  if (/^\[\^[^\]]+\]:/m.test(withoutCode)) found.push("각주");
-  // 태그뿐 아니라 주석·doctype도 왕복에서 사라진다(`<!-- toc -->`, `<!-- prettier-ignore -->`, `<!DOCTYPE html>`).
-  if (
-    /<!--|<!DOCTYPE/i.test(withoutCode) ||
-    /<\/?[a-zA-Z][a-zA-Z0-9-]*(\s[^<>]*)?>/.test(withoutCode)
-  ) {
-    found.push("원시 HTML");
-  }
-  return found;
-}
 
 export type RichEditorHandle = {
   /** 현재 문서를 마크다운으로 직렬화한다. 저장·모드 전환의 유일한 출력 경로다. */
   getMarkdown: () => string;
-  /**
-   * 외부 변경(디스크 reload)이나 모드 인계로 문서를 통째로 갈아끼운다. dirty 판정은 호출자가 소유한다.
-   * **표현 불가 문법 검사도 여기서 다시 돈다** — 내용이 바뀌면 잠금 여부도 바뀌기 때문이다.
-   */
+  /** 외부 변경(디스크 reload)이나 모드 인계로 문서를 통째로 갈아끼운다. dirty 판정은 호출자가 소유한다. */
   setMarkdown: (markdown: string) => void;
   focus: () => void;
   destroy: () => void;
@@ -212,8 +184,6 @@ export function createRichEditor(
   markdown: string,
   onChange: () => void,
   onSave: () => void,
-  /** 표현 불가 문법 때문에 잠겼는지 알린다. shell이 저장 경로를 막는 데 쓴다. */
-  onLockChanged: (locked: boolean) => void = () => {},
 ): RichEditorHandle {
   const doc = parent.ownerDocument;
   const shell = doc.createElement("div");
@@ -223,8 +193,6 @@ export function createRichEditor(
   parent.appendChild(shell);
 
   let syncToolbar: () => void = () => {};
-  /// close lock으로 잠긴 상태인가(표현 불가 잠금과 독립 — 둘 중 하나라도 걸리면 편집 불가).
-  let closeLocked = false;
   // frontmatter는 **위치로 정의된다**(문서 맨 앞) — 마크다운 파서에 맡기면 본문 중간의 구분선까지 삼킨다.
   // 그래서 경계에서 갈라 별도 노드로 넣는다(`frontmatter.ts`).
   const initial = splitFrontmatter(markdown);
@@ -237,6 +205,10 @@ export function createRichEditor(
       // 문서 맨 앞 메타데이터를 보이고 고칠 수 있는 블록으로 둔다(§2.5). 이 노드가 없으면 왕복에서 뭉개져
       // 예전처럼 편집을 통째로 잠가야 한다.
       Frontmatter,
+      // 문서모델이 모르는 원문 조각을 그대로 통과시킨다(§2.5 보존 규칙). 이 둘이 없으면 원시 HTML·각주가
+      // 왕복에서 사라지고, 그래서 예전에는 문법 목록으로 편집을 잠가야 했다.
+      RawBlock,
+      RawInline,
       Markdown,
       TaskList,
       // 체크박스를 눌러 바로 토글할 수 있게 한다(GFM `- [ ]`).
@@ -276,22 +248,6 @@ export function createRichEditor(
   syncToolbar = ui.sync;
   shell.appendChild(content);
 
-  // 리치가 표현하지 못하는 문법이 있으면 편집을 막는다. **내용이 바뀔 때마다 다시 판정한다** — 생성 시
-  // 한 번만 보면, 소스에서 frontmatter를 붙였다 리치로 돌아온 문서에는 잠금이 걸리지 않는다(그 반대도 마찬가지).
-  let locked = false;
-  const applyLock = (source: string) => {
-    const unsupported = unsupportedRichSyntax(source);
-    locked = unsupported.length > 0;
-    editor.setEditable(!locked && !closeLocked);
-    ui.setNotice(
-      locked
-        ? `이 문서에는 리치 편집이 다루지 못하는 문법이 있어 편집을 잠갔습니다(${unsupported.join(", ")}). 소스 모드에서 고치면 원문이 그대로 보존됩니다.`
-        : null,
-    );
-    onLockChanged(locked);
-  };
-  applyLock(markdown);
-
   // ⌘S는 편집기가 소유한다 — native가 web_editor로 라우팅한 키가 여기 도달한다(§2.3 키 경계).
   content.addEventListener("keydown", (event) => {
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
@@ -307,7 +263,6 @@ export function createRichEditor(
       // "리치를 잠깐 들여다보기만 해도 탭에 ●가 붙는" 상태가 된다.
       const split = splitFrontmatter(next);
       editor.commands.setContent(withFrontmatter(editor, split), { emitUpdate: false });
-      applyLock(next);
       syncToolbar();
     },
     focus: () => editor.commands.focus(),
@@ -315,11 +270,9 @@ export function createRichEditor(
       ui.destroy();
       editor.destroy();
     },
-    setEditable: (editable: boolean) => {
-      closeLocked = !editable;
-      // 표현 불가 잠금이 걸린 문서는 close lock이 풀려도 계속 잠긴 상태여야 한다.
-      editor.setEditable(editable && !locked);
-    },
+    // close lock이 리치를 잠그는 **유일한** 이유다 — 문법 때문에 잠그던 장치는 원문 보존 규칙(§2.5)이
+    // 대체했다. 그래서 상태를 따로 들고 조합할 것이 없다.
+    setEditable: (editable: boolean) => editor.setEditable(editable),
     selectAll: () => {
       editor.commands.focus();
       return editor.commands.selectAll();

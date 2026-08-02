@@ -319,15 +319,29 @@ body {
   white-space: pre-wrap;
 }
 
-/* 리치가 다루지 못하는 문법이 있어 편집을 잠갔을 때의 안내. 저장 경로가 닫혔다는 사실을 사용자가 알아야
-   소스 모드로 옮겨 갈 수 있다. */
-.maru-rich-notice {
+/* 문서모델이 모르는 원문 조각(§2.5 보존 규칙). 본문과 **다른 것**임이 보여야 한다 — 여기 적힌 것은 렌더된
+   결과가 아니라 파일에 그대로 들어갈 글자다. frontmatter 블록과 같은 계열로 둔다. */
+.maru-rich-raw-block {
+  margin: 0 0 1rem;
   padding: 0.5rem 0.75rem;
-  border-bottom: 1px solid color-mix(in srgb, CanvasText 14%, Canvas);
-  background: color-mix(in srgb, #b45309 18%, Canvas);
-  color: CanvasText;
+  border-left: 3px solid color-mix(in srgb, CanvasText 30%, Canvas);
+  background: color-mix(in srgb, CanvasText 4%, Canvas);
+  color: color-mix(in srgb, CanvasText 72%, Canvas);
+  font-family: var(--maru-editor-font-family, ui-monospace, monospace);
   font-size: 0.8125rem;
-  line-height: 1.5;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+/* 문장 안 조각은 흐름을 끊지 않아야 하므로 배경만 옅게 준다. atom이라 통째로 선택된다. */
+.maru-rich-raw-inline {
+  padding: 0 0.15em;
+  border-radius: 3px;
+  background: color-mix(in srgb, CanvasText 8%, Canvas);
+  color: color-mix(in srgb, CanvasText 72%, Canvas);
+  font-family: var(--maru-editor-font-family, ui-monospace, monospace);
+  font-size: 0.9em;
+  white-space: pre;
 }
 
 /* 지금 selection이 그 서식 안에 있음을 표시한다 — 버튼을 누르기 전에 현재 상태를 알 수 있어야 한다. */

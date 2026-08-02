@@ -293,6 +293,105 @@ describe("rich editing mode", () => {
     });
   });
 
+  test("블록 조각은 미리보기를 함께 보여 주되, 편집 대상은 소스 칸뿐이다", async () => {
+    // 보존과 렌더는 별개 축이다(§2.5). 미리보기는 "안전하게 그릴 수 있는가"만 보고, 그 판정과 무관하게
+    // 원문은 항상 보존된다.
+    await withEditorDom(async (dom) => {
+      const doc = (globalThis as unknown as { document: Document }).document;
+      const rich = mountRich(dom, "<details>\n<summary>접기</summary>\n안쪽\n</details>\n");
+      try {
+        const preview = doc.querySelector<HTMLElement>(".maru-rich-raw-preview");
+        expect(preview).not.toBeNull();
+        expect(preview?.hidden).toBe(false);
+        expect(preview?.innerHTML).toContain("<details");
+        expect(preview?.innerHTML).toContain("<summary");
+        // 미리보기에 커서가 들어가면 그 DOM 변경을 되쓸 방법이 없다.
+        expect(preview?.getAttribute("contenteditable")).toBe("false");
+        // 소스 칸은 편집 대상이라 그대로 있어야 한다.
+        expect(doc.querySelector(".maru-rich-raw-block")).not.toBeNull();
+        expect(rich.getMarkdown().trim()).toBe(
+          "<details>\n<summary>접기</summary>\n안쪽\n</details>",
+        );
+      } finally {
+        rich.destroy();
+      }
+    });
+  });
+
+  test("미리보기의 id는 접두사가 붙어 shell 부품을 가로채지 못하고, 원문은 그대로다", async () => {
+    // shell은 자기 부품을 `#renderer`·`#editor` id 셀렉터로 찾는다. 미리보기가 shell DOM에 들어가는 유일한
+    // 예외이므로 여기서 같은 id가 살아 있으면 문서가 부품을 가로챈다. sanitizer의 clobber 접두사가 막는다.
+    // **그리고 파일에 들어갈 원문은 건드리지 않는다** — 렌더 판정이 사용자의 문서를 고쳐 쓰면 안 된다.
+    await withEditorDom(async (dom) => {
+      const doc = (globalThis as unknown as { document: Document }).document;
+      const source = '<div id="renderer" name="editor">가로채기</div>';
+      const rich = mountRich(dom, `${source}\n`);
+      try {
+        const preview = doc.querySelector<HTMLElement>(".maru-rich-raw-preview");
+        expect(preview?.innerHTML).toContain("가로채기");
+        expect(preview?.innerHTML).toContain("user-content-renderer");
+        expect(preview?.innerHTML).not.toContain('id="renderer"');
+        // 미리보기 안에서 shell 부품 셀렉터가 걸리지 않아야 한다 — 이것이 실제로 막고 싶은 일이다.
+        expect(preview?.querySelector("#renderer")).toBeNull();
+        expect(preview?.querySelector("#editor")).toBeNull();
+        // 보존은 렌더와 별개 축이다.
+        expect(rich.getMarkdown().trim()).toBe(source);
+      } finally {
+        rich.destroy();
+      }
+    });
+  });
+
+  test("그릴 것이 없는 조각은 미리보기를 감추고 원문만 남긴다", async () => {
+    // 각주 정의·HTML 주석은 렌더 결과가 비어 있다. 빈 미리보기 칸을 남기면 이유 없는 여백만 생긴다.
+    await withEditorDom(async (dom) => {
+      const doc = (globalThis as unknown as { document: Document }).document;
+      for (const source of ["[^1]: 각주 정의", "<!-- prettier-ignore -->"]) {
+        const rich = mountRich(dom, `${source}\n`);
+        try {
+          expect(doc.querySelector<HTMLElement>(".maru-rich-raw-preview")?.hidden).toBe(true);
+          expect(rich.getMarkdown().trim()).toBe(source);
+        } finally {
+          rich.destroy();
+        }
+      }
+    });
+  });
+
+  test("미리보기도 실행 가능한 것은 그리지 않는다", async () => {
+    // 미리보기는 **신뢰 shell DOM에 들어가는 유일한 예외**다(§2.1 ②). 읽기와 같은 파이프라인을 쓰므로
+    // 여기서 새는 것이 있으면 그건 파이프라인 자체의 결함이다.
+    await withEditorDom(async (dom) => {
+      const doc = (globalThis as unknown as { document: Document }).document;
+      const source = '<div><script>alert(1)</script><img src=x onerror="alert(2)"></div>';
+      const rich = mountRich(dom, `${source}\n`);
+      try {
+        const preview = doc.querySelector<HTMLElement>(".maru-rich-raw-preview");
+        expect(preview?.innerHTML).not.toContain("<script");
+        expect(preview?.innerHTML).not.toContain("onerror");
+        expect(rich.getMarkdown().trim()).toBe(source);
+      } finally {
+        rich.destroy();
+      }
+    });
+  });
+
+  test("인라인 조각에는 미리보기를 붙이지 않는다", async () => {
+    // 여는·닫는 태그가 각각 별도 노드라 짝을 맞출 수 없다. 조각 하나만 그리면 `<kbd>`가 빈
+    // `<kbd></kbd>`로 자동 완성돼 원문에 없는 것이 보인다(실측).
+    await withEditorDom(async (dom) => {
+      const doc = (globalThis as unknown as { document: Document }).document;
+      const rich = mountRich(dom, "누르세요 <kbd>⌘S</kbd> 입니다\n");
+      try {
+        expect(doc.querySelector(".maru-rich-raw-preview")).toBeNull();
+        expect(doc.querySelectorAll(".maru-rich-raw-inline").length).toBe(2);
+        expect(rich.getMarkdown().trim()).toBe("누르세요 <kbd>⌘S</kbd> 입니다");
+      } finally {
+        rich.destroy();
+      }
+    });
+  });
+
   test("임의로 조합한 문서도 조각 단위로 보존된다(속성 테스트)", async () => {
     // 왜 속성 테스트인가: 문법을 하나씩 세는 방식은 **우리가 떠올린 것만** 검사한다. 보존 규칙의 값어치는
     // 목록에 없는 문법에서 나오므로, 조각을 무작위로 이어 붙여 "원문 조각이 출력에 그대로 남는가"를 본다.

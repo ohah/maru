@@ -9,11 +9,15 @@
  * 태그를 **각각 별도 토큰**으로 준다(실측). 짝을 맞추려 들지 않고 조각 그대로 보존하면 왕복이 성립한다 —
  * `<kbd>`·`⌘S`·`</kbd>` 셋이 순서대로 남으면 다시 이어 붙였을 때 원문과 같다.
  *
- * **렌더는 이 노드의 일이 아니다.** 보존과 렌더는 별개 축이고(§2.5), 여기서는 원문을 보여 준다. 안전하게 그릴
- * 수 있는 것을 렌더된 모습으로 바꾸는 일은 그 위에 얹는다.
+ * **보존과 렌더는 별개 축이다**(§2.5). 보존은 항상 하고, 블록 조각에 한해 안전하게 그릴 수 있는 것만 미리보기를
+ * 함께 보여 준다. 미리보기가 비면 원문만 남을 뿐 보존은 그대로다 — 렌더가 실패해도 문서는 손상되지 않는다.
+ *
+ * **인라인 조각에는 미리보기를 붙이지 않는다.** 여는·닫는 태그가 각각 별도 노드라 짝을 맞출 수 없고, 조각
+ * 하나만 그리면 `<kbd>`가 빈 `<kbd></kbd>`로 자동 완성돼 원문에 없는 것이 보인다(실측).
  */
 
 import { Node, type MarkdownParseResult, type MarkdownToken } from "@tiptap/core";
+import { renderMarkdown } from "./markdown";
 
 export const rawBlockName = "rawBlock";
 export const rawInlineName = "rawInline";
@@ -111,6 +115,50 @@ export const RawBlock = Node.create({
   },
   renderHTML() {
     return ["pre", { "data-maru-raw-block": "", class: "maru-rich-raw-block" }, 0];
+  },
+  /**
+   * 소스 칸과 미리보기를 함께 그린다(§2.5 조건 ④ — **미리보기는 편집 대상이 아니다**).
+   *
+   * 편집은 `contentDOM`인 소스 칸에서만 일어나고, 미리보기는 그 결과를 비추기만 한다. 미리보기를 편집
+   * 가능하게 두면 그 DOM 변경을 다시 HTML로 되쓸 방법이 없어 왕복이 깨진다.
+   */
+  addNodeView() {
+    return ({ node }: { node: { textContent: string } }) => {
+      const dom = document.createElement("div");
+      dom.className = "maru-rich-raw";
+      const preview = document.createElement("div");
+      preview.className = "maru-rich-raw-preview";
+      // **편집 대상이 아님을 DOM에도 못 박는다.** 클래스만으로는 ProseMirror가 이 안으로 커서를 넣는다.
+      // 프로퍼티 대입이 아니라 **속성**으로 단다 — ProseMirror가 읽는 것이 속성이고, 프로퍼티 대입은 DOM
+      // 구현에 따라 속성에 반영되지 않는다(실측: 속성이 null로 남았다).
+      preview.setAttribute("contenteditable", "false");
+      const contentDOM = document.createElement("pre");
+      contentDOM.className = "maru-rich-raw-block";
+      contentDOM.setAttribute("data-maru-raw-block", "");
+
+      const paint = (raw: string) => {
+        // **읽기와 정확히 같은 함수**를 쓴다(§2.5 조건 ①). 같은 파이프라인이라고 적어 두는 것보다 같은
+        // 함수를 부르는 것이 갈라지지 않는 유일한 방법이다. shell 특유의 위험(문서가 `#renderer` 같은 id로
+        // 부품을 가로채기)은 sanitizer가 `id`·`name`에 `user-content-` 접두사를 붙여 이미 막는다.
+        //
+        // 빈 결과면 그릴 것이 없다는 뜻이라 미리보기를 감추고 원문만 보여 준다 — 각주 정의·주석이 그 경우다.
+        const html = renderMarkdown(raw);
+        preview.innerHTML = html;
+        preview.hidden = html.trim().length === 0;
+      };
+      paint(node.textContent);
+
+      dom.append(preview, contentDOM);
+      return {
+        dom,
+        contentDOM,
+        update: (next: { type: { name: string }; textContent: string }) => {
+          if (next.type.name !== rawBlockName) return false;
+          paint(next.textContent);
+          return true;
+        },
+      };
+    };
   },
 });
 

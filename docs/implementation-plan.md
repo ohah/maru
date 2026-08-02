@@ -932,11 +932,11 @@ restore 설정 alias, 과거 hook/mapping cleanup과 전용 환경변수 차단�
 - 새 코드가 이전 단계의 facade 계약을 깨지 않는가?
 - 자동화할 수 없는 한계를 PR 설명에 보고했는가?
 
-## 에이전트 세션 기록 도크 (AS1·AS2 bootstrap 구현, AS3~AS4 진행 전)
+## 에이전트 세션 기록 도크 (AS1·AS2 구현, AS3 부분 구현, AS4 진행 중)
 
 우측 `agent_sessions`는 현재 열려 있는 Term의 보조 목록이 아니라, Codex·Claude가 로컬에 남긴 **검증된 사용자 세션 전체의 최근 목록**이다. 기본 scope는 전체이며, 살아 있는 세션은 선택적으로 이동할 수 있는 행일 뿐 후보 선정 조건이 아니다. 계약은 [에이전트 세션 기록 도크](agent-session-list.md)가 소유한다.
 
 1. **AS1** — provider-neutral record와 Claude/Codex streaming parser, title/summary/filter/sort/dedup/redaction의 synthetic fixture TDD.
 2. **AS2** — worker-only bounded discovery/parse, no-follow identity recheck, cancel/generation, 앱 실행 중만 유지하는 file-identity parse cache, 동시 parse≤4와 first/continuation immutable batch snapshot. 현재 bootstrap은 candidate/file/total cap, no-follow open 후 device·inode 재검사, memory-only identity cache, 첫 record·50개 continuation batch를 제공한다. cancellation/request generation, bounded parse pool과 제품-path counter/fixture gate는 남아 있다. main thread는 cache snapshot render·queue apply만 하며 I/O/parse/정렬/wait=0이다. persistent metadata cache는 개인정보 정책 승인 전 범위 밖이다.
-3. **AS3** — 도크 header/scope/search/group/row/detail/action, dedicated keyboard focus와 virtualized row rendering. 검색/선택이 filesystem I/O나 provider 실행을 만들지 않는 integration gate.
+3. **AS3** — 도크 header/scope/search/row/detail/action은 부분 구현됐다. `전체`·현재 작업공간·현재 프로젝트 scope, snapshot-only search, 행 선택과 explicit resume/reveal action이 있다. 현재 프로젝트 root는 active-surface id 변화에서만 별도 worker가 canonicalize·git ancestor walk하며, frame/search/click은 I/O 없이 immutable snapshot을 재투영한다. group/focus owner·키보드 전체 계약과 제품-path integration gate는 남아 있다.
 4. **AS4** — exact live mapping과 explicit copy/reveal/resume(▶/detail 버튼 → 즉시 argv-only new Term), macOS fixture manual E2E. 실제 사용자 이력 resume은 CI가 아니라 사용자가 승인하는 수동 gate다.

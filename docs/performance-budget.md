@@ -122,6 +122,7 @@ RSS는 Maru 앱 프로세스와 해당 WebContent process를 분리해서 재고
 | worker first batch | candidate metadata만으로 newest-first, parse concurrency ≤ 4, batch ≤ 50 | 파일 내용 전체를 먼저 읽어 정렬하거나, 500개 완료를 기다려 첫 결과를 publish하면 실패한다. 최초 batch wall-clock은 macOS fixture에서 별도 artifact로 관측하며, 개인 history를 artifact에 넣지 않는다. |
 | refresh parse | file ≤ 128 MiB, refresh read ≤ 512 MiB, unchanged identity cache hit read = 0 | `(device,inode,mtime,size)`가 같은 파일은 이번 앱 실행에서 재parse하지 않는다. stale identity·cap·cancel은 partial로 표시하며 cache가 오래된 record를 현재 결과로 위장하면 실패한다. |
 | frame tick·검색·행 선택 | filesystem I/O = 0, JSON parse = 0, worker wait = 0 | tick은 immutable batch queue drain과 snapshot 교체만 한다. 검색/선택은 published snapshot만 소비하며 scan·provider 실행을 요청하지 않는다. |
+| scope 선택·현재 프로젝트 root | main actor filesystem I/O = 0, JSON parse = 0, worker wait = 0 | 작업공간은 이미 검증된 explorer root snapshot만 복사한다. 현재 프로젝트는 활성 Term의 in-memory cwd만 capture해 별도 worker가 canonicalize·`.git` ancestor walk를 수행하고, 결과가 돌아오기 전에는 `프로젝트 분석 중`으로 표시한다. |
 
 ## 파일 탐색기 scrollbar/icon 예산
 

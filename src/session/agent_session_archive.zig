@@ -29,6 +29,10 @@ pub const Parsed = struct {
     title: []u8,
     summary: []u8,
     cwd: []u8,
+    /// Set only by the worker after this provider value resolves to a local
+    /// directory.  Raw JSONL cwd text must never be used for scoped
+    /// containment because it can be deleted, remote, or a lexical alias.
+    cwd_canonical: bool = false,
     model: []u8,
     message_count: u32,
     verified_user: bool,
@@ -43,7 +47,7 @@ pub const Parsed = struct {
     }
 
     pub fn clone(self: *const Parsed, allocator: std.mem.Allocator) !Parsed {
-        return duplicateParsed(allocator, self.provider, self.session_id, self.title, self.summary, self.cwd, self.model, self.message_count, self.verified_user);
+        return duplicateParsed(allocator, self.provider, self.session_id, self.title, self.summary, self.cwd, self.cwd_canonical, self.model, self.message_count, self.verified_user);
     }
 };
 
@@ -105,7 +109,7 @@ fn parseClaude(allocator: std.mem.Allocator, bytes: []const u8) !?Parsed {
     if (session_id.len == 0) return null;
     const display_title = if (title.len > 0) title else if (first_user.len > 0) first_user else "제목 없는 세션";
     const summary = if (last_user.len > 0) last_user else last_assistant;
-    return try duplicateParsed(allocator, .claude, session_id, display_title, summary, cwd, model, count, true);
+    return try duplicateParsed(allocator, .claude, session_id, display_title, summary, cwd, false, model, count, true);
 }
 
 fn parseCodex(allocator: std.mem.Allocator, bytes: []const u8) !?Parsed {
@@ -166,16 +170,17 @@ fn parseCodex(allocator: std.mem.Allocator, bytes: []const u8) !?Parsed {
     if (!saw_meta or !is_user or session_id.len == 0) return null;
     const title = if (first_user.len > 0) first_user else "제목 없는 세션";
     const summary = if (last_user.len > 0) last_user else last_assistant;
-    return try duplicateParsed(allocator, .codex, session_id, title, summary, cwd, model, count, true);
+    return try duplicateParsed(allocator, .codex, session_id, title, summary, cwd, false, model, count, true);
 }
 
-fn duplicateParsed(allocator: std.mem.Allocator, provider: Provider, session_id: []const u8, title: []const u8, summary: []const u8, cwd: []const u8, model: []const u8, message_count: u32, verified_user: bool) !Parsed {
+fn duplicateParsed(allocator: std.mem.Allocator, provider: Provider, session_id: []const u8, title: []const u8, summary: []const u8, cwd: []const u8, cwd_canonical: bool, model: []const u8, message_count: u32, verified_user: bool) !Parsed {
     const out = Parsed{
         .provider = provider,
         .session_id = try allocator.dupe(u8, session_id),
         .title = try displayCopy(allocator, title, max_title_bytes),
         .summary = try displayCopy(allocator, summary, max_summary_bytes),
         .cwd = try displayCopy(allocator, cwd, max_cwd_bytes),
+        .cwd_canonical = cwd_canonical,
         .model = try displayCopy(allocator, model, max_title_bytes),
         .message_count = message_count,
         .verified_user = verified_user,
@@ -260,6 +265,7 @@ test "Codex user session parses and worker is rejected" {
     try std.testing.expectEqualStrings("codex-1", parsed.session_id);
     try std.testing.expectEqualStrings("fix it", parsed.title);
     try std.testing.expectEqual(@as(u32, 2), parsed.message_count);
+    try std.testing.expect(!parsed.cwd_canonical); // worker boundary owns filesystem canonicalization
 
     const worker = "{\"type\":\"session_meta\",\"payload\":{\"id\":\"x\",\"thread_source\":\"subagent\"}}\n";
     try std.testing.expect((try parse(std.testing.allocator, .codex, worker)) == null);

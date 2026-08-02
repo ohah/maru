@@ -480,12 +480,30 @@ fn appendCandidateFile(state: *State, candidate: Candidate, result: *Result, rem
     const n = file.readPositionalAll(io, bytes, 0) catch return;
     var parsed = archive.parse(allocator, candidate.provider, bytes[0..n]) catch return orelse return;
     errdefer parsed.deinit(allocator);
+    canonicalizeParsedCwd(state, &parsed);
     cacheParsed(state, candidate, &parsed);
     const path = allocator.dupe(u8, candidate.open_path) catch return;
     result.records.append(allocator, .{ .parsed = parsed, .source_path = path, .mtime_ns = candidate.mtime_ns, .inode = candidate.inode, .device = candidate.device }) catch {
         allocator.free(path);
         return;
     };
+}
+
+/// Provider JSONL may retain a lexical cwd reached through a symlink.  Scope
+/// filtering compares that cwd with explorer/git roots, so normalize it while
+/// this worker already owns filesystem work.  A missing, remote, or otherwise
+/// unresolvable cwd deliberately remains unchanged; the UI then fail-closes it
+/// out of workspace/project scope instead of guessing containment.
+fn canonicalizeParsedCwd(state: *State, parsed: *archive.Parsed) void {
+    if (!std.fs.path.isAbsolute(parsed.cwd) or parsed.cwd.len == 0) return;
+    var dir = std.Io.Dir.cwd().openDir(state.io, parsed.cwd, .{}) catch return;
+    dir.close(state.io);
+    var canonical_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const canonical_len = std.Io.Dir.realPathFileAbsolute(state.io, parsed.cwd, &canonical_buf) catch return;
+    const replacement = state.allocator.dupe(u8, canonical_buf[0..canonical_len]) catch return;
+    state.allocator.free(parsed.cwd);
+    parsed.cwd = replacement;
+    parsed.cwd_canonical = true;
 }
 
 fn openedDevice(file: std.Io.File) u64 {

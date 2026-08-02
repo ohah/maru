@@ -61558,6 +61558,17 @@ test "소스 컨트롤: 두 번째 행 클릭도 diff를 연다(좌표 경로)" 
     session.mouse(1, @floatFromInt(launcher.x + 1), @floatFromInt(launcher.y + 1), 0, 0);
     session.setDockView(.source_control);
 
+    // 검증 대상은 좌표→행 매핑과 "두 번째 클릭도 diff Term을 연다"이지 git 실행이 아니다. 그런데 diff Term을
+    // 열면 `requestDiffContent`가 백그라운드 `diffWorker`를 띄우고, 그 스레드는 **detach라 테스트가 기다릴 수
+    // 없다**. 테스트 함수가 반환할 때 워커가 아직 `git show` 중이면 그 argv 버퍼가 leak으로 판정돼 테스트가
+    // ABRT로 죽는다(제품 코드는 refcount라 늦게 끝나도 안전하게 회수된다). 10회 반복에서 3/3 재현했다.
+    //
+    // backend를 미리 만들고 `shutting_down`을 세워 `submitDiff`가 워커를 **띄우지 않게** 한다. 실제 git
+    // 프로세스를 fork하고 기다리는 것보다 빠르고, 환경(git 설치 여부·PATH)에 의존하지 않는다.
+    // PATH를 비우는 방법은 통하지 않는다 — `git_locate`가 PATH 뒤에 `fallback_dirs`(/usr/bin 등)를 훑는다.
+    session.git_backend = try git_backend_mod.Backend.init(allocator, session.io);
+    session.git_backend.?.state.?.shutting_down = true;
+
     // 실제 git 없이 목록만 채운다(클릭 경로 검증이 목적).
     session.git_result = .{
         .status = try allocator.dupe(u8, "# branch.head main\n1 .M N... 1 2 3 a b one.txt\n1 .M N... 1 2 3 a b two.txt\n"),
@@ -61612,6 +61623,11 @@ test "소스 컨트롤: 여러 행을 연달아 눌러도 각각 diff Term이 �
     const session = try initSmokeSessionSized(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
+
+    // 위 테스트와 같은 이유로 backend를 `shutting_down` 상태로 미리 만든다 — diff Term을 열면 detach된
+    // `diffWorker`가 뜨는데 테스트가 그 완료를 기다릴 수 없어, 반환 시점에 워커의 argv 버퍼가 leak으로 판정된다.
+    session.git_backend = try git_backend_mod.Backend.init(allocator, session.io);
+    session.git_backend.?.state.?.shutting_down = true;
 
     // gitRepoRoot가 이 저장소를 찾도록 탐색기 root 대신 임시 저장소를 흉내 낼 수는 없으므로, 클릭 경로의
     // 앞단(openDiffTerm)을 직접 부른다 — 검증 대상은 "두 번째 열기가 되는가"이지 저장소 탐색이 아니다.
@@ -61668,6 +61684,24 @@ test "diff Term을 읽는 중에 닫아도 결과가 안전하게 버려진다" 
         }
         try std.testing.expect(!matched);
         late.deinit(allocator);
+    }
+
+    // 이 테스트는 **워커가 도는 것을 전제**한다("결과는 뒤에 온다"). 그런데 `diffWorker`는 detach라 join할 수
+    // 없고, 테스트 함수가 반환할 때 워커가 아직 `git show` 중이면 그 argv 버퍼가 leak으로 판정돼 ABRT로 죽는다
+    // (제품 코드는 refcount라 늦게 끝나도 안전하게 회수된다).
+    //
+    // 그래서 워커가 실제로 끝난 것을 확인하고 반환한다 — 결과가 버려지는 것까지 봐야 "안전하게 버려진다"를
+    // 검증한 것이기도 하다. `/repo`는 없는 저장소라 git이 즉시 실패해 대기는 수십 ms 수준이다.
+    if (session.git_backend) |*backend| {
+        var waited_ms: usize = 0;
+        while (waited_ms < 5_000) : (waited_ms += 5) {
+            if (backend.takeDiffResult()) |result| {
+                var owned = result;
+                owned.deinit(allocator);
+                break;
+            }
+            std.Thread.sleep(5 * std.time.ns_per_ms);
+        }
     }
 }
 

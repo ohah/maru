@@ -35,7 +35,107 @@ N개 표시 · 최근 500개
   메시지 94개 · 3분 전 · claude-…
 ```
 
-- header의 `Local Mac`은 현재 사용자 홈 아래 provider log만 읽는다는 provenance label이며 host 선택기가 아니다. v1 정렬은 mtime 내림차순 하나로 고정한다. 탭 재진입은 현재 앱 실행 중의 snapshot을 즉시 보이고, 마지막 완료 scan 뒤 **15초** 안이면 새 refresh를 시작하지 않는다. 목록 첫 행의 `AI 세션 · ⟳ 새로 고침`은 명시적인 refresh control이며 클릭은 이 TTL을 우회한다. worker가 실행 중이면 같은 control은 `분석 중`으로 바뀌고 추가 job을 만들지 않는다.
+### 2.1 native card layout와 컴포넌트 경계
+
+이 화면은 React·WebView·외부 UI kit을 추가하지 않는다. `agent_sessions`는 다른
+chrome과 같은 Zig semantic draw → Metal lowering 경로를 쓰는 native dock이다. 다만
+조합 방식은 작은 독립 primitive를 쌓는 design-system 패턴을 따른다. 즉
+`app_session.zig`가 header 문장·scope 문장·카드 문장을 직접 이어 붙여 그리는 것은
+금지한다. platform host는 archive snapshot을 immutable props로 투영하고, 순수
+컴포넌트가 같은 layout model로 `view`와 `hitTest`를 만든다. 이 경계는
+[Chrome 전략](chrome-strategy.md)의 `State + view + hitTest + Action` 계약을 따른다.
+
+```text
+┌ SessionDockHeader ───────────────────────────────────────────┐
+│ Agent 세션 기록                 N개 표시 · 최근 500개        │
+│ Local Mac                                  [refresh/spinner] │
+├ SegmentedScopeControl ────────────────────────────────────────┤
+│ [현재 작업공간] [현재 프로젝트] [전체]                        │
+├ SessionSearchField ───────────────────────────────────────────┤
+│ ⌕ 세션 검색                                                   │
+├ SessionDockScrollArea ────────────────────────────────────────┤
+│ ⌄ workspace-name                                         228 │
+│   ┌ SessionCard ────────────────────────────────────────────┐ │
+│   │ Codex badge                         제목                │ │
+│   │ 마지막 사용자 요청의 안전한 짧은 요약                   │ │
+│   │ 메시지 140개 · 22시간 전 · gpt-…                        │ │
+│   └────────────────────────────────────────────────────────┘ │
+│   ┌ SessionCard …                                            │ │
+└───────────────────────────────────────────────────────────────┘
+```
+
+- `SessionDockLayout`이 header, scope, search, scroll-area, group header,
+  card, scrollbar의 pixel rect를 **한 번만** 계산한다. `view`, pointer
+  hit-test, virtualized visible-row 범위, keyboard scroll이 이 결과를 함께
+  소비한다. 그러므로 카드가 보이는 곳과 클릭 영역, scroll origin은 서로 다른
+  행/문자열 계산으로 갈라질 수 없다.
+- `SessionDockHeader`는 title, displayed/recent count, `Local Mac`
+  provenance, refresh affordance만 소유한다. refresh가 실행 중이면 같은 위치의
+  control이 spinner로 바뀌며 다시 누른다고 worker를 더 만들지 않는다. refresh는
+  group body가 아니고 항상 고정 chrome이다. provider·원격 source 선택기 같은
+  별도 filter control은 v1에 추가하지 않는다.
+- `SegmentedScopeControl`은 세 개의 동일 폭 segment와 selected/disabled/focused
+  state를 각각 그린다. pipe-separated text label이나 group처럼 보이는 제목줄로
+  대체하지 않는다. `SessionSearchField`는 search icon, placeholder, query,
+  focus ring/caret를 별도 surface로 그린다. 검색은 이미 publish된 snapshot을
+  필터할 뿐 worker를 시작하지 않는다.
+- `SessionDockScrollArea`만 목록을 scroll한다. header/scope/search는 scroll과
+  무관하게 상단에 남고, workspace group만 독립적으로 접힌다. `CollapsibleWorkspaceGroup`
+  header는 chevron·이름·count와 full-width hit target을 가지며, selected
+  scope가 아니라 각 group의 collapse state만 바꾼다.
+- `SessionCard`는 `provider badge`, title, summary, metadata라는 **명시적
+  slot**을 가진다. title/provider를 같은 raw text run으로, 또는 전체 카드를
+  terminal guidance 문자열로 만들지 않는다. 선택/hover/focus background는 카드
+  rect 전체에 적용하고 provider badge에는 provider를 나타내는 색 이외의 명령
+  의미를 부여하지 않는다. summary와 metadata는 overflow에서 line clamp/ellipsis만
+  허용하며 다른 카드나 카드 hit target으로 넘치지 않는다.
+- initial scan은 `SessionDockLoadingState`로 header spinner와 3-line skeleton
+  cards를 보인다. 완료 snapshot이 하나라도 있으면 같은 loading state가 header
+  spinner와 작은 진행 문구만 덧그리며 **기존 cards·선택·scroll을 유지**한다.
+  spinner는 이미 frame loop가 제공하는 animation phase만 읽고 I/O·parse·worker
+  wait를 하지 않는다. empty·partial·error는 skeleton을 완료 목록처럼 보이게
+  하지 않고 각각의 truthful notice를 scroll-area 안에 낸다.
+
+`ArchiveSessionDetailPanel`은 card click/Enter가 여는 전용 native archive tab의
+내용이다. 이것도 terminal에 ANSI guidance를 write하는 방식이 아니라 같은 native
+component/layout/lowering 경로를 쓴다.
+
+```text
+┌ ArchiveSessionDetailPanel ────────────────────────────────────┐
+│ provider badge · 제목                                  [닫기] │
+│ model · 상대 시각 · 안전한 상태                              │
+├ 최근 대화 ────────────────────────────────────────────────────┤
+│ [사용자] 안전하게 정규화한 최근 turn                          │
+│ [에이전트] 안전하게 정규화한 최근 turn                        │
+│ 도구/권한 관련 기록 n건 (payload 원문 없음)                   │
+├ actions ──────────────────────────────────────────────────────┤
+│ [▶ 워크트리에서 재개  ⌘↵] [로그 보기  ⌘L]                    │
+│ [열린 세션으로 이동] (exact live identity가 있을 때만)        │
+└───────────────────────────────────────────────────────────────┘
+```
+
+- detail panel은 loading/stale/unavailable/ready state를 자체적으로 표현한다.
+  loading은 native spinner와 skeleton turn으로, stale/unavailable은 이유와
+  disabled action으로 보인다. 이전 안전한 detail을 다른 identity에 재사용하지
+  않는다.
+- ready panel은 bounded detail worker가 만든 최근 turn과 `도구/권한 관련 기록
+  n건`만 보여 준다. 권한·도구 payload, 환경 변수, 명령 출력, raw JSONL은
+  panel·tooltip·trace 어느 곳에도 표시하지 않는다. `로그 보기`는 source reveal만
+  하며, `워크트리에서 재개`는 기존 `새 탭에서 이어하기`의 visible label로서 exact
+  argv 새 local Term을 즉시 연다. 별도의 raw transcript, 실행 전 preview, 자동
+  resume, `새 세션에서 계속` action은 이 계약 밖이다.
+- exact provider/session identity의 live Term을 다시 검증했을 때만 `열린 세션으로
+  이동` 보조 action을 action row에 추가한다. 이 action의 존재 여부가 card 순서,
+  archive 후보, resume/reveal identity를 바꾸지 않으며, path·mtime 유사성만으로
+  버튼을 보이게 하지 않는다.
+- `SessionDockHeader`, `SegmentedScopeControl`, `SessionSearchField`,
+  `CollapsibleWorkspaceGroup`, `SessionCard`, `SessionDockScrollArea`,
+  `ArchiveSessionDetailPanel`은 각각 props/state/layout/view/hit-test/action을
+  노출하는 native primitive다. component는 `AppSession`, provider file, PTY,
+  `NativeMetalCell`을 import하지 않는다. host가 stable archive identity를 action에
+  붙이고 backend만 semantic draw를 glyph/cell/GPU primitive로 lower한다.
+
+- header의 `Local Mac`은 현재 사용자 홈 아래 provider log만 읽는다는 provenance label이며 host 선택기가 아니다. v1 정렬은 mtime 내림차순 하나로 고정한다. 탭 재진입은 현재 앱 실행 중의 snapshot을 즉시 보이고, 마지막 완료 scan 뒤 **15초** 안이면 새 refresh를 시작하지 않는다. `SessionDockHeader`의 refresh control은 이 TTL을 우회한다. worker가 실행 중이면 동일 rect의 spinner/disabled state로 바뀌고 추가 job을 만들지 않는다.
 - 도크 view bar의 `AI 세션`을 누르면 archive refresh를 요청한다. **refresh 중에는 직전 완료 snapshot과 scroll(새 결과가 짧으면 상한 clamp), 같은 source identity의 선택을 유지하고, 새 bounded scan 전체가 끝난 뒤에만 새 immutable snapshot으로 한 번에 교체한다.** 결과 큐의 OOM 등 새 snapshot을 publish할 수 없는 완료는 spinner만 끝내고 기존 목록을 유지하며 notice를 보인다. 따라서 새로 고침이 기존 목록을 비우거나 첫 record/중간 batch로 목록을 흔들지 않는다. 첫 진입처럼 이전 snapshot이 없을 때만 skeleton/진행 문구를 보이며, frame tick에서 파일 I/O를 하지 않는다. 창 재포커스와 새 provider session identity 감지는 같은 refresh를 요청하되, forced refresh는 5초 전역 throttle로 합친다. filesystem polling/watcher는 v1에 없다.
 - scope는 `현재 작업공간`, `현재 프로젝트`, `전체`다. 기본값은 `전체`이며 마지막 선택만 창 UI 상태로 보존한다. **`현재 작업공간`은 활성 워크스페이스 탭의 활성 local Term이 마지막으로 보고한 CWD를 worker가 canonicalize한 단일 root snapshot 아래에 `cwd`가 있는 기록**이다. 창 전역 탐색기 root와 다른 권위이므로, 다른 워크스페이스 탭의 폴더가 섞이지 않는다. `현재 프로젝트`는 같은 active Term CWD에서 worker가 찾은 canonical git root 아래 `cwd`가 있는 기록이며, local CWD 또는 git root가 없으면 각각 비활성화한다. `전체`는 모든 provider의 검증된 사용자 세션이다. remote/불명 `cwd`는 전체에서만 보인다. 도크 진입, scope click, 활성 workspace/pane/Term 전환 **및 같은 활성 pane의 CWD 보고 변경**에서 root snapshot을 갱신하며, 결과가 오기 전에는 이전 tab 또는 이전 CWD의 범위를 재사용하지 않는다. CWD 비교는 main actor의 메모리 observation만 사용하고 canonicalize·git walk는 worker만 수행한다. 이후 scope/search/scroll/frame은 그 메모리 snapshot만 읽는다.
 - 이 필터는 접근 제어가 아닌 표시 범위다. 경로는 provider log의 `cwd`를 canonicalize할 수 있을 때만 containment 비교하며, 실패·삭제·비로컬 값은 workspace/project에 억지로 넣지 않는다.
@@ -84,8 +184,8 @@ Codex의 과거 파일에는 `thread_source`가 없을 수 있다. 이 경우 us
 
 1. **AS1 — 순수 모델·parser:** provider-neutral record, Claude/Codex streaming parser, trust grade, dedup/title/summary/redaction/filter/sort pure tests. 실제 사용자 log는 fixture로 넣지 않는다.
 2. **AS2 — bounded scanner:** no-follow discovery, candidate/file/total caps, cancellation/generation, in-memory identity parse cache, 최신순 bounded worker pool과 완료 snapshot atomic publish, metrics. refresh는 직전 완료 snapshot을 유지하고 새 scan이 끝날 때만 교체한다. main tick filesystem I/O=0·JSON parse=0·worker wait=0을 counter와 source boundary test로 고정한다.
-3. **AS3 — 도크 chrome:** header/scope/search, 접이식 workspace group, 세 줄 virtualized card, `agent_session_list` focus owner와 selection identity. search keypress I/O=0, row 한 번 클릭 provider 실행=0·main thread JSONL I/O=0을 integration test로 고정한다.
-4. **AS4 — archive session tab·explicit actions·제품 gate:** bounded recent/permission summary의 native tab, stale identity disable, exact live mapping, copy/reveal, tab의 `새 탭에서 이어하기`와 argv-only immediate new-Term activation, macOS fixture manual E2E. 실제 provider 계정/개인 이력에 대한 재개는 사용자가 직접 승인한 수동 gate일 뿐 CI 증거가 아니다.
+3. **AS3 — 도크 native component vertical slice:** `SessionDockLayout`과 header/scope/search/group/card/scroll-area primitive를 순수 props/state/layout/view/hit-test/action으로 만든 뒤 host/backend에 연결한다. 기존 direct text draw와 pipe scope label은 이 slice에서 제거한다. layout 공유 test가 view rect=hit rect=visible-row origin을, search keypress I/O=0·row 한 번 클릭 provider 실행=0·main thread JSONL I/O=0을 고정한다. loading spinner는 snapshot 유무별로 skeleton 또는 기존 목록 유지인지도 integration test로 고정한다.
+4. **AS4 — archive native detail panel·explicit actions·제품 gate:** `ArchiveSessionDetailPanel`을 PTY 없는 native surface로 연결하고 bounded recent/permission summary, loading/stale identity disable, exact live mapping, source reveal, `워크트리에서 재개`의 argv-only immediate new-Term activation을 닫는다. resume/log의 click rect와 `⌘↵`/`⌘L` shortcut은 같은 action identity를 소비한다. `열린 세션으로 이동`은 exact live identity가 있을 때만 별도 pointer/Enter action으로 제공한다. macOS fixture E2E는 dock card hover/selection/collapse/scroll, refresh 중 snapshot 보존, detail loading→ready/stale, disabled action, resume/reveal을 확인한다. 실제 provider 계정/개인 이력에 대한 재개는 사용자가 직접 승인한 수동 gate일 뿐 CI 증거가 아니다.
 
 ## 7. 설계 검토 기록 — 적대적 5회
 

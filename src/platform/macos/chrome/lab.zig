@@ -61,9 +61,10 @@ pub fn buildFrame(
     }, &.{chrome.ui.tree.card(.{
         .id = 2,
         // The Lab fixture is responsive too: an auto-width, clipped card with an unmeasured text
-        // leaf has a zero-width content clip and cannot be hit. Fill makes the card's paint, clip,
-        // and action rect one concrete product-tree result at every supplied viewport size.
-        .style = .{ .width = .{ .fill = 1 }, .height = .{ .px = 72 }, .padding = .{ .top = 12, .right = 12, .bottom = 12, .left = 12 } },
+        // leaf has a zero-width content clip and cannot be hit. The root is a column, so width is
+        // its cross axis: a definite 100% resolves the card paint, clip, and action rect without
+        // using the intentionally-invalid cross-axis fill vocabulary.
+        .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = 72 }, .padding = .{ .top = 12, .right = 12, .bottom = 12, .left = 12 } },
         .variant = visual.variant,
         .paint = visual.paint,
         .action = .{ .id = 100 },
@@ -148,6 +149,10 @@ test "Chrome Lab builds a deterministic card and records only its action" {
     const card_rect = frame.tree.entries[1].rect;
     try std.testing.expect(card_rect.width > 0);
     try std.testing.expect(card_rect.height > 0);
+    try std.testing.expect(frame.tree.entries[1].effective_clip != null);
+    const card_clip = frame.tree.entries[1].effective_clip.?;
+    try std.testing.expect(card_clip.width > 0);
+    try std.testing.expect(card_clip.height > 0);
     const card_x = card_rect.x + card_rect.width / 2;
     const card_y = card_rect.y + card_rect.height / 2;
 

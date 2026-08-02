@@ -2242,6 +2242,27 @@ fn validateExternalOwnerRanges(self: *const Client) ExternalAdoptionInspectError
     _ = try validateExternalOwnerRangesAgainst(self, null);
 }
 
+/// Generation guarded allocator가 parent allocation 결과를 첫 write 전에 검사하는
+/// callback-free owner-range query다. 오류나 overflow는 alias로 취급해 fail-close한다.
+pub fn generationAllocationAliasesOwnedBacking(
+    self: *const Client,
+    ptr: [*]u8,
+    len: usize,
+) bool {
+    const target = (externalRangeForSlice(ptr[0..len], len) catch return true) orelse
+        return false;
+    var outer: [max_external_outer_owner_range_count]ExternalRange = undefined;
+    const outer_count = fillExternalOuterOwnerRanges(self, &outer) catch return true;
+    for (outer[0..outer_count]) |range|
+        if (externalRangesOverlap(range, target)) return true;
+    const nested_count = externalNestedOwnerRangeCount(self) catch return true;
+    for (0..nested_count) |index| {
+        const range = externalNestedOwnerRangeAt(self, index) catch return true;
+        if (range) |present| if (externalRangesOverlap(present, target)) return true;
+    }
+    return false;
+}
+
 const ExternalSourceOwnerRangeProofStats = struct {
     outer_ranges: usize,
     total_ranges: usize,

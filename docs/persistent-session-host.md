@@ -710,21 +710,126 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    observation/queue` 순으로 retire한다. GUI Client operation은 coordinator owner turn 하나로 직렬화하고 reconnect가 old
    Client의 새 RPC/frame admission을 먼저 닫는다. `ClientSlot`은 macOS main-thread confined이며
    `withCurrent(expected_generation, fn)` stack borrow만 노출하고 raw `logicalClient()` 장기 포인터를 허용하지 않는다.
-   `withCurrent`는 신규 RPC admission 전용이다. 현 `AttachmentTransport.context=*Client` raw callback은 CR3a에서
-   generation-bound cleanup thunk로 교체하고 attachment가 exact `ConnectionLease`를 deinit 마지막까지 소유한다. lease는
-   retired Client의 drop/release/cancel만 허용하는 `withLease` cleanup capability이며 새 request를 만들 수 없다. retirement는
+   `withCurrent`는 신규 RPC admission 전용이다. CR3a는 이를 두 단계로 닫는다. CR3a-1은 cleanup lease의 product callback이
+   0인 inactive lease와 generation 1 전용 slot skeleton이며 아래의 exact 3-argument `HostAdapter.initInPlace`만 허용한다.
+   inline `ClientSlot`이 연결 세대마다 별도 heap-pinned `ClientNode`를 단독 소유하므로 current/retired publication은 Client value move가
+   아니라 pointer flip만 한다. `HostAdapter.initInPlace(out,node_allocator,source)`는 모든 allocation/validation을 먼저 끝내며
+   실패는 `{source=preserved,out=pristine}`, 성공은 `{source=moved tombstone,node owns exact Client}`다. slot은 node allocator를
+   저장하고 deinit에서 Client exact once 뒤 같은 allocator로 node를 destroy한다. out/source/node backing alias와 allocator callback
+   reentry는 거부한다. slot과 node는 초기화 뒤 이동할 수 없고, HostPool은 adapter membership만 소유하며 AppSession에 병렬
+   Client owner를 두지 않는다.
+
+   주소 재사용 ABA는 address 자체를 identity로 간주하지 않는다. process-global atomic `ClientIdentityIssuer` 하나가 slot/node
+   kind tag와 같은 checked-monotonic counter에서 nonzero incarnation을 reserve한다. reservation은 allocation/source move보다
+   먼저 일어나고 allocator callback nested init과 실패에서도 ID를 burn해 재사용하지 않는다. slot과 node는 서로 다른 발급값을
+   가지며 kind tag가 cross-kind splice를 거부한다. max exhaustion은 sticky이고 다음 생성은 allocation/source/out mutation 0으로
+   거부한다. issuer domain은 process nonce와 PID를 seal한다. exec/relaunch에서는 lease를 serialize·전달하지 않고 새 domain을
+   만든다. fork child는 inherited slot/lease API 사용이 비지원이며 PID mismatch가 exec 전 모든 mint/consume/deinit을 fail-stop한다.
+   attachment당 `ConnectionLease`는 final address에서 초기화해
+   `{self_addr,slot_addr,slot_incarnation,node_addr,node_incarnation,host_id,connection_generation=1,stream_id}`을 immutable seal하고
+   exact node lifetime만 pin한다. 이 seed는 checked-nonzero identity일 뿐이며 increment/current-retired publish/overflow는 CR3b가
+   소유한다. identity/seal은 immutable이고 final-address lifecycle은
+   `empty|live|release_reserved|released|terminal`이며 bitwise copy의 self-address mismatch는 pin release 0이다. node는 checked
+   `cleanup_pin_count`를 소유한다. acquire overflow는 mutation 0, permit terminal/active cleanup 0 뒤의 exact lease만 pin을 한 번
+   감소시킨다. `ClientSlot.deinit`/`HostAdapter.deinit`은 pin 0에서만 Client exact once와 node destroy를 수행하며 live pin이면
+   모든 build mode에서 fail-stop한다.
+
+   여러 pending batch와 마지막 drop을 한 lease의 one-shot 연산으로 뭉치지 않는다. 각 drop/release/cancel 직전에
+   caller의 final stack/storage 주소에 별도 `CleanupPermit`을 init하고
+   `{self_addr,lease seal,cleanup kind,stream_id,opaque token digest}`를 봉인해 그 연산 한 번만 consume한다. transport-neutral core는
+   플랫폼 token 타입을 import하지 않고 opaque scalar/digest만 알며 owner-specific adapter가 실제 token을 해석한다.
+   `preparePermit`은 canonical bounded cleanup owner의 exact token/stream/call entry를 `available -> reserved`로 먼저 전이한다.
+   외부 닫힌 결과는 `prepared|busy|terminal|capacity_exhausted`다. 같은 token을 다른 permit 주소로 다시 준비하거나 active permit
+   중 같은 lease에서 nested prepare하면 mutation 0의 retryable `busy`, owner entry가 already consumed/terminal이면 `terminal`이다.
+   owner 내부의 `already_reserved|consumed`는 각각 이 외부 결과로만 투영한다. prepare는 parent lease의 private
+   `ActiveCleanupReceipt`에도 permit final address와 canonical owner reservation
+   identity를 seal한다. permit preflight가 stale/move/splice/corruption으로 callback 전에 실패하면 손상된 permit 필드가 아니라 이
+   private mirror를 사용해 owner reservation을 `reserved -> available`, parent active cleanup을 0으로 exact once 되돌리고 permit을
+   terminal로 만든다. mirror 자체가 검증되지 않으면 canonical reservation/resource owner를 mutate하지 않고 별도 process
+   quarantine latch/accounting에 그 owner identity를 exact once 기록한 뒤 process fail-stop한다.
+
+   `consume`은 callback 전 node/token/owner와 private receipt를 전량 검증한 뒤 owner-specific cleanup callback을 정확히 한 번
+   호출한다. 이 callback이 destructive resource 처리와 canonical owner entry 전이를 함께 소유하므로 caller는 callback 뒤 raw
+   node/token/owner pointer를 재독하지 않는다. 닫힌 결과는 다음과 같다.
+
+   | cleanup result | callback 보장 | canonical owner 결과 | permit/parent 결과 |
+   | --- | --- | --- | --- |
+   | `completed` | cleanup exact once | `reserved -> consumed` | permit consumed, active cleanup 0 |
+   | `retryable_preserved` | resource/owner mutation 0 | `reserved -> available` | permit terminal, active cleanup 0; fresh permit retry 허용 |
+   | `indeterminate_or_partial` | 일부 진전 가능 | `reserved -> terminal` | permit terminal, active cleanup 0; 자동 retry 0 |
+
+   `abort`는 callback 0으로 private receipt를 통해 `reserved -> available`과 active cleanup 0을 exact once 수행한다. 기존
+   `RemoteAttachment.failed_release`의 retry budget은 정확히 1이다. 최초 `retryable_preserved`만 보존해 deinit에서 fresh
+   permit으로 한 번 재시도한다. 두 번째
+   `completed`는 attachment cleanup을 정상 완료한다. 두 번째 `retryable_preserved` 또는 `indeterminate_or_partial`은 canonical
+   external inbox ledger/Client queue가 이미 실제 payload owner라는 증거를 고정한 뒤 allocation/callback 0의 terminal handoff로
+   token handle을 attachment에서 tombstone하고 connection을 `.attachment_cleanup_failed`로 poison한다. 반환은
+   `terminal_handoff`이며 attachment local owner/pin은 0, node/ledger terminal owner는 exact 1이다. node final teardown이 exact
+   cleanup 또는 기존 bounded quarantine을 소유하며 자동 재시도는 없다. ledger는 기존 bounded
+   attachment queue/external inbox token table/stream-drop/call-cancel owner entry를 재사용하고 숨은 unbounded consumed 목록을
+   만들지 않는다.
+
+   permit prepare는 parent lease의 `active_cleanup` operation pin을 0에서 1로 올린다. consume/abort/preflight-failure terminal
+   suffix가 이를 0으로 내리기 전 `releasePin`, attachment cleanup 재진입, 두 번째 permit prepare는 typed busy이고
+   node/current/wire/free mutation 0이다.
+   lease의 마지막 `releasePin`과 각 permit consume만 one-shot이다. raw `*Client`, 임의 `withLease(fn(*Client))`, request/read/write API를
+   제공하지 않는다. stale/moved/copied/spliced/double-consume lease/permit은 새 current를 조회하거나 mutate하지 않고 typed terminal로
+   닫힌다. HostPool runtime membership retain/release와 이 connection cleanup lease는 서로 다른 수명·세대다. external-pump의
+   final-address `ExternalPumpStorage.owned_client` owner graph는 slot으로 흡수하지 않고 기존 계약을 유지한다.
+
+   CR3a-2에서 현 `AttachmentTransport.context=*Client` raw callback을 generation 1의 generation-bound live transport와 exact
+   cleanup thunk로 교체한다. `RemoteAttachment`는 final destination에서 `initInPlace`한 뒤 그 내부 pristine lease storage에
+   bind가 직접 `ConnectionLease.initInPlace`를 수행하고 deinit 마지막까지 소유한다. lease 발급 뒤 attachment move/copy와 기존
+   return-by-value production construction은 금지한다. canonical `tryDeinit()`은 `cleaned|busy|terminal_handoff|corrupt`를 반환하고
+   active permit 재진입은 `busy`와 mutation 0이다. 기존 `deinit()`은 `cleaned`와 authority가 node/ledger에 exact 이전된
+   `terminal_handoff`를 정상 수용하고, `busy|corrupt`는 모든 build mode에서 fail-stop하는 strict wrapper로 남겨 기존 정상 caller
+   signature와 fail-closed teardown parity를 보존한다. live transport는 read/admission,
+   lease는 cleanup만 담당하며 둘을 하나의 generic Client callback으로 합치지 않는다. 이 호환 배선은 reconnect/current 교체/
+   retired node 생성을 시작하지 않고 기존 attach/pump/deinit의 동작 parity만 증명한다. lease는
+   retired Client의 drop/release/cancel만 허용하는 closed cleanup capability이며 새 request를 만들 수 없다. retirement는
    R1 admission close+pending call typed cancel, R2 attachment pending lease release/drop+detached tombstone+placeholder publish,
    R3 parser/event/outbound backing final seal의 세 단계다. R2는 `prepareDetachForRetirement()` → proxy gate 아래 store-only
    `commitDetachTransportUnchecked(out_cleanup)` → gate 밖 `finishDetachedCleanup(out_cleanup)`으로 나뉜다. commit은 proxy
    target을 preallocated `UnavailableCore`로 바꾸고 transport/screen owner descriptor를 final-address cleanup handle로
    move+tombstone할 뿐 callback/free를 호출하지 않는다. reconnect R2에서 기존 monolithic `RemoteAttachment.deinit()` 직접
-   호출은 금지한다. retired fail-closed callback은 incident child만 기록하고 새 reconnect를 예약하지 않는다.
+   호출은 금지한다. retired fail-closed callback은 typed cleanup reason만 반환하고 새 reconnect를 예약하지 않는다. CR0b 이후
+   coordinator/observability adapter가 그 reason을 child incident에 연결한다.
    shared old Client는 모든 member가 `published_new|frozen_unavailable|ended`이고 `Client.canRetire()`의
    `{ownership_mode_terminal=true,external_pump_receipt_terminal=true,stack_borrows=0,pending_calls=0,attachment_batches=0,
    event_frames=0,parser_views=0,outbound_frames=0}`를 검증한 뒤 tick-end deferred destruction에서 마지막으로 회수한다.
    범용 refcount를 모든 frame에 퍼뜨리지 않고 escape
    가능한 owned lease만 계수한다. 한 slot의 동시 retired Client hard cap은 2이며 초과가 예상되면 새 reconnect를 시작하지
    않고 backoff한다. 향후 실제 multi-thread Client reader가 생길 때 generation lease를 확장한다.
+
+#### CR3a ownership target inventory
+
+CR3a-1의 compile-time/source boundary는 다음 행을 전부 분류하고 새 raw owner·escape가 추가되면 실패한다.
+
+| 현재 symbol | 현재 owner/escape | CR3a 목표 owner | CR3a-1 허용 상태 |
+| --- | --- | --- | --- |
+| `HostAdapter.client` / `HostAdapter.deinit` | adapter inline value와 단일 deinit | `HostAdapter.slot.current: *ClientNode`와 slot 단일 deinit | construction/deinit을 generation 1 slot으로 parity migration |
+| `HostPool.Entry.adapter` / `runtime_refs` | heap-pin adapter와 membership 수명 | 동일; connection lease와 합치지 않음 | 동작 변화 0 |
+| `RemoteTermBackend.client` / pool mode | legacy borrowed Client 또는 pooled adapter | CR3a-2 뒤 slot generation 1 live transport | CR3a-1 callsite 변화 0 |
+| `HostAdapter.logicalClient()` | raw `*Client` 장기 escape | CR3b의 closed `withCurrent` admission | CR3a-1 product callsite 변화 0 |
+| `RemoteRuntime.client` | raw borrowed `*Client` | stable shell의 generation-bound live transport | CR3a-1 product callsite 변화 0 |
+| `AttachmentTransport.context` | read와 cleanup이 섞인 raw Client callback | CR3a-2의 live transport + exact cleanup lease | CR3a-1 product callsite 변화 0 |
+| `Client.ownership` | `standalone`, `external_pump`, `moved` | node가 standalone Client만 소유; external graph는 별도 | enum/전이 변화 0 |
+| `ExternalPumpStorage.owned_client` | final-address adoption/receipt/cleanup graph | 기존 owner 유지 | slot 흡수·이동 0 |
+| `RemoteAttachment.deinit` | pending release/drop/fail-close callback owner | CR3a-2 exact lease를 마지막에 consume | CR3a-1 동작 변화 0 |
+
+CR3a-1 source oracle은 tokenizer identifier scan+compile-time field allowlist+production runtime test를 함께 쓴다.
+`HostAdapter.client` raw field는 0, `logicalClient()` production callsite는 현재 exact allowlist/수를 동결하고, `RemoteRuntime.client`
+및 raw `AttachmentTransport.context`는 CR3a-1의 현재 allowlist/수에서 변화 0·CR3a-2에서 0이다. `ExternalPumpStorage.owned_client`
+field definition은 exact 1이고 adoption/teardown owner-schema digest는 불변이며 AppSession의 새 Client/slot owner field는 0이다.
+`connection_lease.zig`는 neutral definition과 component test, `client_slot.zig`는 owner adapter, `host_adapter.zig`는 slot construction만
+import할 수 있고 umbrella public export·lease mint/consume product callsite는 0이다.
+
+CR3a-1 종료 oracle은 실제 production `HostAdapter` construction/deinit을 generation-1 slot으로 parity migration하고,
+`Client`를 import해 slot/node final-address, same-address destroy→re-init incarnation, allocator fail-index, immutable lease와 one-shot
+permit의 copy·move·splice·stale 거부, cleanup API의 Client admission symbol 0, inventory에서 명시한 raw escape product callsite
+변화 0이다. CR3a-2 종료
+oracle은 실제 `RemoteAttachment` generation 1 attach/pump/deinit/failed-release parity와 raw Client callback production
+callsite 0이다. 두 단계 모두 incident/artifact mutation, workspace write, host/runtime spawn·upgrade, reconnect job 시작은 0이다.
 
 현 `controller.takeover`는 response/revoke batch admission 뒤 host registry를 commit하므로 성공 reply 유실 시 새 Client가
 그 전환이 자기 요청이었는지 `controller.status`만으로 증명할 수 없다. 불확실 candidate는 close를 요청하되 EOF cleanup

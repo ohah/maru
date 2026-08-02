@@ -844,9 +844,22 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    cursor, CR2d4는 cross-Window old transfer 제거/parity를 각각 golden trace로 닫는다. CR2e에서 순수
    `ReconnectReducer`의 exhaustive/illegal-transition model test와 fake `PreparedReconnect` prepare/publish/retire,
    allocator fail-index를 검증한다.
-5. **CR3 — shared Client 세대:** CR3a는 현 Client/external-pump/final-address cleanup ownership inventory를 먼저 고정한 뒤
-   transport-neutral `ConnectionLease`와 `HostAdapter.ClientSlot` skeleton을 넣는다.
-   CR3b는 pool membership과 독립된 connection generation, main-thread `withCurrent` stack borrow, admission close,
+5. **CR3 — shared Client 세대:** CR3a는 두 merge slice로 닫는다. **CR3a-1**은 현
+   Client/external-pump/final-address cleanup ownership inventory를 먼저 고정하고 cleanup lease의 제품 callback이 0인
+   transport-neutral `ConnectionLease`와 generation 1 전용 `HostAdapter.ClientSlot` skeleton을 넣는다. `HostAdapter`는
+   `initInPlace(out,node_allocator,source)`로만 생성하고 inline slot이 세대별 heap-pinned `ClientNode`를 단독 소유한다.
+   process-global atomic `ClientIdentityIssuer`가 한 tagged checked counter에서 burn-on-reserve하는 nonzero
+   `slot_incarnation`/`node_incarnation`이 address reuse ABA를 막는다. attachment당
+   `ConnectionLease`는 exact node를 pin하는 immutable cleanup-only capability이고 마지막 pin release만 one-shot이다. 각
+   drop/release/cancel은 canonical cleanup owner의 reservation을 얻어 `{kind,stream,opaque token digest}`에 결속된 별도
+   final-address one-shot `CleanupPermit`으로 실행한다. permit 동안 parent pin release는 busy이며 cleanup result는
+   `completed|retryable_preserved|indeterminate_or_partial`의 닫힌 전이다.
+   두 타입 모두 raw `*Client`, 임의 callback, request/read/write admission을 노출하지 않는다. **CR3a-2**는 generation 1 compatibility
+   wiring으로 현 `AttachmentTransport.context=*Client`를 generation-bound live transport와 exact `ConnectionLease`로 분리하고,
+   실제 `RemoteAttachment` attach/pump/deinit·failed-release parity를 닫는다. 이때 reconnect, current 교체, retired node 생성은
+   여전히 0이고 cleanup은 typed result만 반환하며 incident/artifact mutation은 CR0b까지 0이다.
+   CR3b는 pool membership과 독립된 connection generation의 checked-monotonic 전이·publish·overflow, main-thread
+   `withCurrent` stack borrow, admission close,
    `Client.canRetire()`와 tick-end deferred retirement(동시 retired Client hard cap 2)를 닫는다. CR3c에서 `RemoteGeneration`을
    실제 slot에 연결한다.
 6. **CR4 — 단일 host 실제 reconnect:** `connectExistingHost`, bounded snapshot+delta catch-up, mutation lease/seal,
@@ -859,8 +872,8 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
 CR0a~CR3은 사용자 가시 동작이 없는 구조/TDD 단계다. 어느 단계도 workspace를 쓰거나 host/runtime을 spawn·upgrade하지
 않는다. 새 transfer receipt RPC는 현재 범위에 포함하지 않으며 seamless lost-reply 복구가 별도 목표가 될 때 다시 결정한다.
 각 gate의 증거를 `model-only | production-type unit | real socket | real AppKit`으로 표시하며 CR2/CR3 완료는 `/tmp` PoC가 아니라
-실제 production type을 import한 테스트가 필요하다. 최초 구현 순서는 CR0a → CR3a lease/slot skeleton → CR2a → inactive
-CR2b이며 이
+실제 production type을 import한 테스트가 필요하다. 최초 구현 순서는 CR0a → CR3a-1 inactive skeleton → CR3a-2
+generation 1 compatibility wiring → CR2a → inactive CR2b이며 이
 비제품 구조 slice가 green이기 전 CR4 socket reconnect를 시작하지 않는다.
 
 실행 중 connection invalidation이 현재 session-host 제품 사용과 검증을 막으므로 CR은 나머지 제품 polish보다 먼저 닫는

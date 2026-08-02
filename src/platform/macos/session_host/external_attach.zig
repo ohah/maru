@@ -208,6 +208,32 @@ const Attached = struct {
     }
 };
 
+fn exactOwnerSchema(comptime Actual: type, comptime Expected: type) bool {
+    const actual = std.meta.fields(Actual);
+    const expected = std.meta.fields(Expected);
+    if (actual.len != expected.len) return false;
+    inline for (actual, expected) |a, e| {
+        if (!std.mem.eql(u8, a.name, e.name) or a.type != e.type) return false;
+    }
+    return true;
+}
+
+comptime {
+    const PreparedSchema = struct {
+        attach_instance_id: u64,
+        client: client_mod.Client,
+        attachment: remote_attachment.RemoteAttachment,
+        initial_metadata: runtime_metadata_wire.InitialMetadataSeed,
+    };
+    const AttachedSchema = struct {
+        attachment: remote_attachment.RemoteAttachment,
+        initial_metadata: runtime_metadata_wire.InitialMetadataSeed,
+    };
+    if (!exactOwnerSchema(Prepared, PreparedSchema) or
+        !exactOwnerSchema(Attached, AttachedSchema))
+        @compileError("CR3a external attach owner schema changed; update SSOT before implementation");
+}
+
 fn attachSnapshot(
     allocator: std.mem.Allocator,
     io: std.Io,

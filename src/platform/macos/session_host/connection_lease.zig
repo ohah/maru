@@ -206,6 +206,45 @@ pub const ConnectionLease = struct {
         };
     }
 
+    /// Publishes a lease for a pin that ClientSlot already reserved before the attach RPC. The
+    /// caller must run `canInitFromReservedPin` before mutating its registry entry; the unchecked
+    /// suffix neither allocates nor changes `cleanup_pin_count`.
+    pub fn canInitFromReservedPin(
+        out: *const ConnectionLease,
+        pin_owner: *const PinOwner,
+        stream_id: u64,
+        current_pid: u32,
+    ) bool {
+        return out.lifecycle == .empty and out.self_addr == 0 and
+            stream_id != 0 and pin_owner.valid(current_pid) and
+            pin_owner.state == .live and pin_owner.cleanup_pin_count != 0;
+    }
+
+    pub fn initFromReservedPinUnchecked(
+        out: *ConnectionLease,
+        pin_owner: *PinOwner,
+        stream_id: u64,
+        current_pid: u32,
+    ) void {
+        if (!canInitFromReservedPin(out, pin_owner, stream_id, current_pid))
+            @panic("invalid pre-reserved connection lease publication");
+        out.* = .{
+            .self_addr = @intFromPtr(out),
+            .owner_addr = @intFromPtr(pin_owner),
+            .canonical_owner_addr = @intFromPtr(pin_owner),
+            .slot_addr = pin_owner.slot_addr,
+            .node_addr = pin_owner.node_addr,
+            .slot_incarnation = pin_owner.slot_incarnation,
+            .node_incarnation = pin_owner.node_incarnation,
+            .host_id = pin_owner.host_id,
+            .connection_generation = pin_owner.connection_generation,
+            .stream_id = stream_id,
+            .pid = pin_owner.pid,
+            .process_nonce = pin_owner.process_nonce,
+            .lifecycle = .live,
+        };
+    }
+
     fn owner(self: *const ConnectionLease, current_pid: u32) ?*PinOwner {
         if (self.self_addr != @intFromPtr(self) or self.owner_addr == 0 or
             self.owner_addr != self.canonical_owner_addr or
@@ -241,6 +280,32 @@ pub const ConnectionLease = struct {
         pin_owner.cleanup_pin_count -= 1;
         self.lifecycle = .released;
         return .released;
+    }
+
+    pub fn canRelease(self: *const ConnectionLease, current_pid: u32) bool {
+        if (self.self_addr != @intFromPtr(self) or self.pid != current_pid or
+            self.lifecycle != .live or self.active_cleanup.permit_addr != 0)
+            return false;
+        const pin_owner = self.owner(current_pid) orelse return false;
+        return pin_owner.active_cleanup == 0 and pin_owner.cleanup_pin_count != 0;
+    }
+
+    /// Owner-specific no-fail suffix after ClientSlot has already preflighted this exact lease and
+    /// published `PinOwner.active_cleanup=1`. General callers must use `release` instead.
+    pub fn releaseDuringActiveCleanupUnchecked(
+        self: *ConnectionLease,
+        expected_owner: *PinOwner,
+        current_pid: u32,
+    ) void {
+        const pin_owner = self.owner(current_pid) orelse
+            @panic("active cleanup lease lost its owner");
+        if (pin_owner != expected_owner or pin_owner.active_cleanup != 1 or
+            self.lifecycle != .live or self.active_cleanup.permit_addr != 0 or
+            pin_owner.cleanup_pin_count == 0)
+            @panic("invalid active cleanup lease release");
+        self.lifecycle = .release_reserved;
+        pin_owner.cleanup_pin_count -= 1;
+        self.lifecycle = .released;
     }
 
     /// Parent-owned recovery for a permit whose public bytes were moved, spliced, or corrupted.
@@ -683,6 +748,19 @@ test "lease rejects same-address reincarnation and pin overflow without mutation
     try std.testing.expectEqual(ReleaseOutcome.corrupt, lease.release(pid));
     try std.testing.expectEqual(@as(usize, 1), owner.cleanup_pin_count);
     try std.testing.expectEqual(OwnerState.live, owner.state);
+}
+
+test "CR3a-2a pre-reserved pin transfers into lease without a second increment" {
+    const pid: u32 = 149;
+    var owner: PinOwner = undefined;
+    PinOwner.initInPlace(&owner, 150, 151, .{ .tagged = 2 }, .{ .tagged = 3 }, 152, pid, 153);
+    owner.cleanup_pin_count = 1;
+    var lease: ConnectionLease = .{};
+    try std.testing.expect(ConnectionLease.canInitFromReservedPin(&lease, &owner, 154, pid));
+    ConnectionLease.initFromReservedPinUnchecked(&lease, &owner, 154, pid);
+    try std.testing.expectEqual(@as(usize, 1), owner.cleanup_pin_count);
+    try std.testing.expectEqual(ReleaseOutcome.released, lease.release(pid));
+    try std.testing.expectEqual(@as(usize, 0), owner.cleanup_pin_count);
 }
 
 test "closed cleanup owner rejects sequential replay and exposes bounded capacity" {

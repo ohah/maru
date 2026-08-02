@@ -10,6 +10,9 @@ const protocol = @import("protocol.zig");
 const screen_stream = @import("screen_stream.zig");
 const compatibility = @import("compatibility.zig");
 const client_slot_mod = @import("client_slot.zig");
+const generation_transport = @import("generation_transport.zig");
+const generation_contract = @import("generation_attachment_contract.zig");
+const connection_lease = @import("connection_lease.zig");
 
 pub const Kind = enum {
     current,
@@ -75,6 +78,90 @@ pub const HostAdapter = struct {
     /// Client 내부의 selected wire major와 bounded screen reader가 current logical DTO로 normalize한다.
     pub fn logicalClient(self: *HostAdapter) *client_mod.Client {
         return self.slot.logicalClient();
+    }
+
+    pub fn mintGenerationTransport(
+        self: *HostAdapter,
+        out: *generation_transport.GenerationTransport,
+        owner_addr: usize,
+        owner_size: usize,
+        reservation: client_slot_mod.AttachmentBindingReservation,
+    ) (generation_transport.Error || client_slot_mod.BindingError)!void {
+        return generation_transport.mintInPlace(out, &self.slot, owner_addr, owner_size, reservation);
+    }
+
+    pub fn responseOwnerSeal(
+        self: *HostAdapter,
+        reservation: client_slot_mod.AttachmentBindingReservation,
+    ) client_slot_mod.BindingError!*generation_contract.ExecutedResponseOwnerSeal {
+        return self.slot.responseOwnerSeal(reservation);
+    }
+
+    pub fn reserveAttachmentBinding(
+        self: *HostAdapter,
+        binding_out: *generation_contract.PreparedAttachmentBinding,
+        lease_out: *connection_lease.ConnectionLease,
+        runtime_id: u128,
+        role: generation_contract.AttachmentRole,
+    ) client_slot_mod.BindingError!client_slot_mod.AttachmentBindingReservation {
+        return self.slot.reserveAttachmentBinding(
+            binding_out,
+            lease_out,
+            runtime_id,
+            role,
+        );
+    }
+
+    pub fn abortAttachmentBinding(
+        self: *HostAdapter,
+        binding: *generation_contract.PreparedAttachmentBinding,
+        reservation: client_slot_mod.AttachmentBindingReservation,
+    ) client_slot_mod.BindingError!void {
+        return self.slot.abortAttachmentBinding(binding, reservation);
+    }
+
+    pub fn abortExecutedAttachmentBinding(
+        self: *HostAdapter,
+        binding: *generation_contract.PreparedAttachmentBinding,
+        reservation: client_slot_mod.AttachmentBindingReservation,
+        executed: generation_contract.ExecutedCallReceipt,
+    ) client_slot_mod.BindingError!void {
+        return self.slot.abortExecutedAttachmentBinding(binding, reservation, executed);
+    }
+
+    pub fn commitAttachmentBinding(
+        self: *HostAdapter,
+        binding: *generation_contract.PreparedAttachmentBinding,
+        reservation: client_slot_mod.AttachmentBindingReservation,
+        accepted: generation_contract.CorrelatedExecutedCall,
+        stream_id: u64,
+        lease_out: *connection_lease.ConnectionLease,
+    ) client_slot_mod.BindingError!void {
+        return self.slot.commitAttachmentBinding(
+            binding,
+            reservation,
+            accepted,
+            stream_id,
+            lease_out,
+        );
+    }
+
+    pub fn beginAttachmentDrop(
+        self: *HostAdapter,
+        binding: *generation_contract.PreparedAttachmentBinding,
+        reservation: client_slot_mod.AttachmentBindingReservation,
+        lease: *connection_lease.ConnectionLease,
+    ) client_slot_mod.BindingError!void {
+        return self.slot.beginAttachmentDrop(binding, reservation, lease);
+    }
+
+    pub fn finishActiveAttachmentDrop(
+        self: *HostAdapter,
+        binding: *generation_contract.PreparedAttachmentBinding,
+        reservation: client_slot_mod.AttachmentBindingReservation,
+        lease: *connection_lease.ConnectionLease,
+    ) void {
+        return self.slot.finishActiveAttachmentDrop(binding, reservation, lease);
     }
 };
 

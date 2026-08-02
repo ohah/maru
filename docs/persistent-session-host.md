@@ -905,6 +905,22 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    HostAdapter가 조립만 소유하는 단방향 import graph다. transport나 binding이 서로의 구현 타입을 nested declaration으로
    소유하지 않는다.
 
+   node-local canonical cleanup registry는 opaque prepared request storage와 transport/response seal을 소유한다.
+   `GenerationTransport`는 5-method 최소 core만 노출하고, GUI `GenerationAttachment`는 final-address shell로 이를 소유한다.
+   response final storage는 binding/transport/prepared backing/slot/node/Client/canonical seal과 wire 전에 range-disjoint여야 하며,
+   allocator는 첫 request byte 전에 capture한다. parser는 Frame schema를 바꾸지 않고 caller-owned out-parameter로 실제 frame
+   payload를 만든 allocator descriptor를 반환한다. RPC loop는 OOB/mismatch/deadline 분류나 free/store 전에 매 frame의 descriptor를
+   captured descriptor와 비교한다. descriptor가 다르거나 payload가 GUI attachment parent 전체 또는 node canonical owner range와
+   겹치면 connection을 poison하고 forged bounded slice를 free하지 않는다.
+
+   OOB queue의 append/coalesce/free는 captured allocator local만 사용한다. callback drift가 있으면 Client/parser descriptor를 같은
+   canonical allocator로 복원한 뒤 connection을 poison한다. checked OOB owner가 active인 동안 같은 thread의 Client
+   RPC/take/release/drop/deinit 재진입은 callback/free 0으로 busy 거부한다. `poison` 재진입은 최초 reason과 unusable만 latch하고
+   fd/external/pending owner cleanup은 canonical allocator 복원 뒤 최종 owner로 미룬다. external-mode
+   reserve/finish/cancel/transfer 재진입도 busy/false로 닫힌다. 따라서 callback 내부와 반환 이후 모두 queue backing과 payload를
+   drift된 descriptor 아래 publish하거나 해제하지 않는다. registry entry는 live child seal이 남은
+   abort/settle/active-drop completion을 모두 거부한다.
+
    attach 전 neutral `PreparedAttachmentBinding` 하나가 final destination 밖 caller-owned final storage에서 node pin과 빈
    stream-drop registry entry를 **먼저** 예약한다. binding은 `{self_addr,binding incarnation,lifecycle,destination address,binding
    reservation ID,slot/node incarnation,host ID,generation,runtime ID,role,PID/process nonce}`를 seal한다. 그 다음

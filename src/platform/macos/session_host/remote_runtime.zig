@@ -24,6 +24,103 @@ const runtime_metadata_wire = @import("runtime_metadata_wire.zig");
 const resize_wire = @import("resize_wire.zig");
 const core_command_wire = @import("core_command_wire.zig");
 const remote_attachment = @import("remote_attachment.zig");
+const generation_attachment_mod = @import("generation_attachment.zig");
+const generation_contract = @import("generation_attachment_contract.zig");
+const host_adapter_mod = @import("host_adapter.zig");
+
+const RuntimeAttachment = union(enum) {
+    legacy: remote_attachment.RemoteAttachment,
+    generation: generation_attachment_mod.GenerationAttachment,
+
+    pub fn init(allocator: std.mem.Allocator, state: remote_attachment.State) RuntimeAttachment {
+        return .{ .legacy = remote_attachment.RemoteAttachment.init(allocator, state) };
+    }
+
+    fn initGenerationInPlace(
+        self: *RuntimeAttachment,
+        adapter: *host_adapter_mod.HostAdapter,
+    ) !void {
+        self.* = .{ .generation = .{} };
+        try generation_attachment_mod.GenerationAttachment.initInPlace(&self.generation, adapter);
+    }
+
+    fn deinit(self: *RuntimeAttachment) void {
+        switch (self.*) {
+            .legacy => |*value| value.deinit(),
+            .generation => @panic("generation attachment requires its retained adapter"),
+        }
+    }
+
+    fn deinitWithAdapter(self: *RuntimeAttachment, generation_adapter: ?*host_adapter_mod.HostAdapter) void {
+        switch (self.*) {
+            .legacy => |*value| value.deinit(),
+            .generation => |*value| value.deinit(generation_adapter orelse
+                @panic("generation attachment lost its retained adapter")),
+        }
+    }
+
+    fn streamId(self: *const RuntimeAttachment) u64 {
+        return switch (self.*) {
+            .legacy => |*value| value.streamId(),
+            .generation => |*value| value.streamId(),
+        };
+    }
+
+    fn allowsMutation(self: *const RuntimeAttachment) bool {
+        return switch (self.*) {
+            .legacy => |*value| value.allowsMutation(),
+            .generation => |*value| value.allowsMutation(),
+        };
+    }
+
+    fn statePtr(self: *RuntimeAttachment) *remote_attachment.State {
+        return switch (self.*) {
+            .legacy => |*value| &value.state,
+            .generation => |*value| value.statePtr(),
+        };
+    }
+
+    pub fn screenPtr(self: *RuntimeAttachment) ?*@import("remote_screen.zig").RemoteScreen {
+        return switch (self.*) {
+            .legacy => |*value| if (value.screen) |*screen| screen else null,
+            .generation => |*value| value.screenPtr(),
+        };
+    }
+
+    fn initScreen(self: *RuntimeAttachment, codec: u16) anyerror!void {
+        return switch (self.*) {
+            .legacy => |*value| value.initScreen(codec),
+            .generation => |*value| value.initScreen(codec),
+        };
+    }
+
+    fn pumpScreen(
+        self: *RuntimeAttachment,
+        io: std.Io,
+    ) (client_mod.ClientError || screen_assembler.ApplyError || remote_attachment.LeaseError)!remote_attachment.PumpScreenResult {
+        return switch (self.*) {
+            .legacy => |*value| value.pumpScreen(io),
+            .generation => |*value| value.pumpScreen(io),
+        };
+    }
+
+    fn applyValidatedRevoked(self: *RuntimeAttachment, generation: u64) anyerror!void {
+        return switch (self.*) {
+            .legacy => |*value| value.applyValidatedRevoked(generation),
+            .generation => |*value| value.applyValidatedRevoked(generation),
+        };
+    }
+
+    fn bindLegacyTransport(
+        self: *RuntimeAttachment,
+        transport: remote_attachment.AttachmentTransport,
+    ) error{AlreadyBound}!void {
+        return switch (self.*) {
+            .legacy => |*value| value.bindTransport(transport),
+            .generation => error.AlreadyBound,
+        };
+    }
+};
 
 const EventGenerationTracking = enum {
     untracked,
@@ -111,10 +208,11 @@ fn metadataDtoMatchesObservation(
 /// (caller가 `var rr: RemoteRuntime = undefined; try rr.spawn(...)`). spawn 후 이 값을 이동하면 안 된다.
 pub const RemoteRuntime = struct {
     client: *client_mod.Client, // borrowed — 여러 runtime이 한 connection을 공유한다(stream_id로 구분).
+    generation_adapter: ?*host_adapter_mod.HostAdapter,
     allocator: std.mem.Allocator,
     io: std.Io,
     runtime_id_hex: [32]u8, // host 발급 runtime_id(hex) — terminate에 되먹인다.
-    attachment: remote_attachment.RemoteAttachment,
+    attachment: RuntimeAttachment,
     event_generation_tracking: EventGenerationTracking,
     resize_seq: u64, // 단조 증가 client_sequence — registry가 이하 sequence를 stale로 거부하므로 매 resize마다 올린다.
     resize_generation: u64,
@@ -155,11 +253,57 @@ pub const RemoteRuntime = struct {
         size: terminal.Size,
         initial_config: ?maru.session.core_command.RuntimeConfig,
     ) anyerror!void {
+        return self.spawnWithOwner(
+            client,
+            null,
+            allocator,
+            io,
+            surface_id,
+            request,
+            size,
+            initial_config,
+        );
+    }
+
+    pub fn spawnWithAdapter(
+        self: *RemoteRuntime,
+        adapter: *host_adapter_mod.HostAdapter,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        surface_id: u64,
+        request: maru.pty.SpawnRequest,
+        size: terminal.Size,
+        initial_config: ?maru.session.core_command.RuntimeConfig,
+    ) anyerror!void {
+        return self.spawnWithOwner(
+            adapter.logicalClient(),
+            adapter,
+            allocator,
+            io,
+            surface_id,
+            request,
+            size,
+            initial_config,
+        );
+    }
+
+    fn spawnWithOwner(
+        self: *RemoteRuntime,
+        client: *client_mod.Client,
+        generation_adapter: ?*host_adapter_mod.HostAdapter,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        surface_id: u64,
+        request: maru.pty.SpawnRequest,
+        size: terminal.Size,
+        initial_config: ?maru.session.core_command.RuntimeConfig,
+    ) anyerror!void {
         // origin/main의 구 v2 daemon도 runtime.spawn_full 이름은 알지만 unknown `runtime_config` 필드를 무시한다.
         // 새 config codec과 함께 도입된 capability가 없으면 잘못된 기본값으로 spawn 성공을 가장하지 않고,
         // AppSession이 명시적인 in-process fallback 경로를 선택하게 한다.
         if (initial_config != null and !client.runtime_core_command_v1) return error.UnsupportedSpawnContract;
         self.client = client;
+        self.generation_adapter = generation_adapter;
         self.allocator = allocator;
         self.io = io;
         self.resize_seq = 0;
@@ -206,7 +350,49 @@ pub const RemoteRuntime = struct {
         runtime_id_hex: [32]u8,
         size: terminal.Size,
     ) anyerror!void {
+        return self.attachExistingWithOwner(
+            client,
+            null,
+            allocator,
+            io,
+            surface_id,
+            runtime_id_hex,
+            size,
+        );
+    }
+
+    pub fn attachExistingWithAdapter(
+        self: *RemoteRuntime,
+        adapter: *host_adapter_mod.HostAdapter,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        surface_id: u64,
+        runtime_id_hex: [32]u8,
+        size: terminal.Size,
+    ) anyerror!void {
+        return self.attachExistingWithOwner(
+            adapter.logicalClient(),
+            adapter,
+            allocator,
+            io,
+            surface_id,
+            runtime_id_hex,
+            size,
+        );
+    }
+
+    fn attachExistingWithOwner(
+        self: *RemoteRuntime,
+        client: *client_mod.Client,
+        generation_adapter: ?*host_adapter_mod.HostAdapter,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        surface_id: u64,
+        runtime_id_hex: [32]u8,
+        size: terminal.Size,
+    ) anyerror!void {
         self.client = client;
+        self.generation_adapter = generation_adapter;
         self.allocator = allocator;
         self.io = io;
         self.resize_seq = 0;
@@ -230,16 +416,54 @@ pub const RemoteRuntime = struct {
         // 2. runtime.attach(controller) — stream_id + snapshot 순서(§10).
         var attach_buf: [96]u8 = undefined;
         const attach_params = std.fmt.bufPrint(&attach_buf, "{{\"runtime_id\":\"{s}\",\"mode\":\"controller\"}}", .{self.runtime_id_hex}) catch return error.AttachFailed;
-        const attach_resp = self.client.call("runtime.attach", attach_params) catch |err| {
-            // `Client.call` can consume a committed response and then fail while duplicating its
-            // payload. At that point no stream id exists for targeted rollback, so even an OOM
-            // that might have happened before send is conservatively connection-fatal.
-            if (err == error.OutOfMemory) self.client.poison(.local_resource_exhausted);
-            return err;
-        };
-        defer self.allocator.free(attach_resp);
         const runtime_id = std.fmt.parseInt(u128, &self.runtime_id_hex, 16) catch
             return error.AttachFailed;
+        var legacy_response: ?[]u8 = null;
+        defer if (legacy_response) |bytes| self.allocator.free(bytes);
+        var generation_accepted: ?generation_contract.CorrelatedExecutedCall = null;
+        var generation_binding_open = false;
+        defer if (generation_binding_open) {
+            const accepted = generation_accepted orelse
+                @panic("generation attach cleanup lost execute receipt");
+            _ = self.attachment.generation.finishResponse(self.generation_adapter.?);
+            self.attachment.generation.abortExecutedAttach(
+                self.generation_adapter.?,
+                accepted.executed_call,
+            ) catch @panic("generation attach rollback failed");
+        };
+        const attach_resp: []const u8 = if (self.generation_adapter) |adapter| blk: {
+            try self.attachment.initGenerationInPlace(adapter);
+            const prepared = try self.attachment.generation.prepareControllerAttach(
+                adapter,
+                runtime_id,
+                attach_params,
+            );
+            const result = try self.attachment.generation.executePreparedAttach(adapter, prepared);
+            const correlated = switch (result) {
+                .accepted => |value| value,
+                .typed_reject => {
+                    _ = self.attachment.generation.finishResponse(adapter);
+                    return error.AttachFailed;
+                },
+                .uncertain_or_connection_failure => {
+                    _ = self.attachment.generation.finishResponse(adapter);
+                    return error.AttachFailed;
+                },
+            };
+            generation_accepted = correlated;
+            generation_binding_open = true;
+            break :blk try self.attachment.generation.responseBytes(adapter);
+        } else blk: {
+            const response = self.client.call("runtime.attach", attach_params) catch |err| {
+                // `Client.call` can consume a committed response and then fail while duplicating its
+                // payload. At that point no stream id exists for targeted rollback, so even an OOM
+                // that might have happened before send is conservatively connection-fatal.
+                if (err == error.OutOfMemory) self.client.poison(.local_resource_exhausted);
+                return err;
+            };
+            legacy_response = response;
+            break :blk response;
+        };
         const compatibility_profile = self.client.compatibility_profile orelse {
             self.client.poison(.local_invariant_violation);
             return error.AttachFailed;
@@ -286,20 +510,33 @@ pub const RemoteRuntime = struct {
             },
             .unsupported, .unavailable => {},
         }
-        self.attachment = .init(self.allocator, accepted.state);
         self.event_generation_tracking = switch (generation_schema) {
             .frozen_controller_only, .granted_without_generation => .untracked,
             .granted_with_generation => .tracked,
         };
-        self.attachment.bindTransport(attachmentTransport(self.client)) catch {
-            self.client.poison(.local_invariant_violation);
-            return error.AttachFailed;
-        };
+        if (self.generation_adapter) |adapter| {
+            if (self.attachment.generation.finishResponse(adapter) != .cleaned)
+                @panic("generation attach response cleanup failed");
+            try self.attachment.generation.commitAccepted(
+                adapter,
+                generation_accepted.?,
+                accepted.state,
+                self.allocator,
+                attachmentTransport(self.client),
+            );
+            generation_binding_open = false;
+        } else {
+            self.attachment = .init(self.allocator, accepted.state);
+            self.attachment.bindLegacyTransport(attachmentTransport(self.client)) catch {
+                self.client.poison(.local_invariant_violation);
+                return error.AttachFailed;
+            };
+        }
         // attach RPC가 controller lease를 잡은 뒤 snapshot/화면 조립이 실패하면 caller에는 아직 완성된
         // RemoteRuntime이 없어 detachClientSide를 부를 수 없다. 이 구간에서 반드시 lease와 demux 큐를 되돌린다.
         errdefer {
             self.detachBestEffort();
-            self.attachment.deinit();
+            self.attachment.deinitWithAdapter(self.generation_adapter);
         }
 
         // 3. 첫 snapshot을 읽어 원격 화면을 조립한다.
@@ -309,12 +546,12 @@ pub const RemoteRuntime = struct {
         // mode bit 자체는 v2에도 우연히 존재할 수 있으므로 hello_ack에서 명시 협상한 host일 때만 "0 = live bottom"을
         // 신뢰한다. 구 host는 capability=false로 두고, RemoteScreen이 snapshot별 visible cursor 증거만으로
         // legacy live preedit/candidate를 허용한다. hidden/ambiguous snapshot은 계속 fail-closed다.
-        self.attachment.screen.?.viewport_scrolled_known = self.client.screen_viewport_scrolled_v1;
-        try self.attachment.screen.?.applySnapshot(snap, self.io);
+        self.attachment.screenPtr().?.viewport_scrolled_known = self.client.screen_viewport_scrolled_v1;
+        try self.attachment.screenPtr().?.applySnapshot(snap, self.io);
 
         // 4. 원격-backed Surface를 세운다(로컬 core는 placeholder — 렌더는 remote 소스로 간다).
         self.surface = try Surface.init(self.allocator, surface_id, size);
-        self.surface.remote = self.attachment.screen.?.screenSource();
+        self.surface.remote = self.attachment.screenPtr().?.screenSource();
     }
 
     /// host가 발급한 runtime_id(hex)를 돌려준다 — workspace가 저장해 재실행 시 `attachExisting`으로 재접속한다(§7, e3-5).
@@ -327,7 +564,7 @@ pub const RemoteRuntime = struct {
         self.terminateBestEffort();
         // terminate response보다 먼저 온 async continuation도 call이 pending_stream에 보존하므로 RPC 뒤 한 번에 회수한다.
         self.surface.deinit();
-        self.attachment.deinit();
+        self.attachment.deinitWithAdapter(self.generation_adapter);
         self.observation.deinit(self.allocator);
         self.direct_input.deinit(self.allocator);
         self.pending_controls.deinit(self.allocator);
@@ -342,7 +579,7 @@ pub const RemoteRuntime = struct {
         // lease가 남아 같은 connection의 재attach가 controller_busy가 되므로 subscription을 먼저 명시 해제한다.
         self.detachBestEffort();
         self.surface.deinit();
-        self.attachment.deinit(); // stream demux queue + attachment-owned screen.
+        self.attachment.deinitWithAdapter(self.generation_adapter); // stream demux queue + attachment-owned screen.
         self.observation.deinit(self.allocator);
         self.direct_input.deinit(self.allocator);
         self.pending_controls.deinit(self.allocator);
@@ -358,6 +595,13 @@ pub const RemoteRuntime = struct {
     /// 마주한다. 강등 자체를 막지 않고(계약대로다) 관측만 가능하게 한다.
     pub fn attachedAsObserver(self: *const RemoteRuntime) bool {
         return !self.attachment.allowsMutation();
+    }
+
+    pub fn usesGenerationAttachment(self: *const RemoteRuntime) bool {
+        return switch (self.attachment) {
+            .generation => true,
+            .legacy => false,
+        };
     }
 
     /// 렌더/입력 라우팅에 쓸 Surface(GUI가 in-process처럼 다룬다).
@@ -704,18 +948,18 @@ pub const RemoteRuntime = struct {
             const classification = runtime_metadata_wire.classifyAndMaterializeEvent(
                 self.allocator,
                 .{
-                    .runtime_id = self.attachment.state.runtime_id,
-                    .stream_id = self.attachment.state.stream_id,
+                    .runtime_id = self.attachment.statePtr().runtime_id,
+                    .stream_id = self.attachment.statePtr().stream_id,
                 },
                 .{
-                    .role = switch (self.attachment.state.role) {
+                    .role = switch (self.attachment.statePtr().role) {
                         .observer => .observer,
                         .controller => .controller,
                     },
                     .generation = switch (self.event_generation_tracking) {
                         .untracked => .untracked,
                         .tracked => .{
-                            .tracked = self.attachment.state.controller_generation,
+                            .tracked = self.attachment.statePtr().controller_generation,
                         },
                     },
                 },
@@ -1093,7 +1337,7 @@ pub const RemoteRuntime = struct {
     /// multi-row 선형 선택은 보이는 행 사이에 개행을 보존하는 degraded 정책이며, capability가 있는 최신 host에서는 반드시
     /// 위 RPC를 써 host SSOT를 유지한다.
     fn selectedTextFromProjection(self: *RemoteRuntime, span: terminal.SelectionSpan) client_mod.ClientError!?[]u8 {
-        return self.attachment.screen.?.extractVisibleSelection(self.allocator, self.io, span);
+        return self.attachment.screenPtr().?.extractVisibleSelection(self.allocator, self.io, span);
     }
 
     /// 원격 검색(§6c): 검색어로 host가 **콘텐츠·스크롤백을 아는 자기 core**에서 `findMatches`(로컬과 같은 함수)로 매치를 찾게
@@ -1748,9 +1992,12 @@ test "remote runtime: advertised selected-text capability with a missing respons
         .runtime_selected_text_v1 = true,
         .parser = framing.FrameParser.init(allocator),
     };
-    defer client.deinit();
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    try host_adapter_mod.HostAdapter.initInPlace(&adapter, allocator, &client);
+    defer adapter.deinit();
     var rr: RemoteRuntime = undefined;
-    rr.client = &client;
+    rr.client = adapter.logicalClient();
+    rr.generation_adapter = &adapter;
     rr.allocator = allocator;
 
     try std.testing.expectError(
@@ -2218,12 +2465,23 @@ test "remote runtime: actual GUI attach resource failure closes and preserves ex
             protocol.version_major,
         ).?,
     };
-    defer client.deinit();
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    try host_adapter_mod.HostAdapter.initInPlace(&adapter, allocator, &client);
+    defer adapter.deinit();
     var rr: RemoteRuntime = undefined;
-    rr.client = &client;
+    rr.client = adapter.logicalClient();
+    rr.generation_adapter = &adapter;
     rr.allocator = allocator;
     rr.io = std.testing.io;
     rr.runtime_id_hex = "000000000000000000000000000000aa".*;
+    rr.resize_seq = 0;
+    rr.resize_generation = 0;
+    rr.resize_baseline_present = false;
+    rr.direct_input = .empty;
+    rr.direct_input_offset = 0;
+    rr.pending_controls = .empty;
+    rr.pump_ended = false;
+    rr.resync_needed = false;
     rr.observation = .{};
     defer rr.observation.deinit(allocator);
     try rr.observation.replace(allocator, .{
@@ -2240,11 +2498,87 @@ test "remote runtime: actual GUI attach resource failure closes and preserves ex
     );
     peer.join();
     try std.testing.expect(eof_seen);
-    try std.testing.expect(client.unusable);
+    try std.testing.expect(adapter.logicalClient().unusable);
     try std.testing.expectEqual(@as(u64, 2), rr.observation.revision);
     try std.testing.expectEqualStrings("/safe", rr.observation.cwd.items);
     try std.testing.expectEqualStrings("work", rr.observation.window_title.items);
     try std.testing.expectEqualStrings("safe-host", rr.observation.ssh_remote_dest.items);
+}
+
+test "CR3a-2a committed GUI attach rolls back generation ownership when snapshot EOF follows" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const body =
+        "{\"result\":{\"stream_id\":7,\"controller_generation\":1," ++
+        "\"granted\":{\"observe\":true,\"input\":true,\"resize\":true}," ++
+        "\"controller_busy\":false,\"metadata_revision\":0,\"metadata\":null}}";
+    const response = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .response, .request_id = 1 },
+        body,
+    );
+    defer allocator.free(response);
+    const AttachThenEofPeer = struct {
+        fn run(fd: c.fd_t, wire: []const u8) void {
+            defer _ = c.close(fd);
+            const peer_allocator = std.heap.page_allocator;
+            const request = readPeerFrame(fd, peer_allocator) catch return;
+            defer peer_allocator.free(request.payload);
+            if (request.header.kind != .request or
+                std.mem.indexOf(u8, request.payload, "\"method\":\"runtime.attach\"") == null)
+                return;
+            socket_server.writeAll(fd, wire) catch return;
+            // Closing immediately after the accepted response makes the product readSnapshot
+            // path fail after binding commit, where generation cleanup must be exact.
+        }
+    };
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    var peer = try std.Thread.spawn(.{}, AttachThenEofPeer.run, .{ fds[1], response });
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+        .attachment_capabilities = .{ .peer_attach_generation = true },
+        .metadata_support = .supported,
+        .compatibility_profile = @import("compatibility.zig").profileForMajor(
+            protocol.version_major,
+        ).?,
+    };
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    try host_adapter_mod.HostAdapter.initInPlace(&adapter, allocator, &client);
+    defer adapter.deinit();
+    var rr: RemoteRuntime = undefined;
+    rr.client = adapter.logicalClient();
+    rr.generation_adapter = &adapter;
+    rr.allocator = allocator;
+    rr.io = std.testing.io;
+    rr.runtime_id_hex = "000000000000000000000000000000aa".*;
+    rr.resize_seq = 0;
+    rr.resize_generation = 0;
+    rr.resize_baseline_present = false;
+    rr.direct_input = .empty;
+    rr.direct_input_offset = 0;
+    rr.pending_controls = .empty;
+    rr.pump_ended = false;
+    rr.resync_needed = false;
+    rr.observation = .{};
+    defer rr.observation.deinit(allocator);
+
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        rr.attachAndAssemble(1, .{ .cols = 80, .rows = 24 }),
+    );
+    peer.join();
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try adapter.slot.current.cleanup_registry.count(),
+    );
+    try std.testing.expectEqual(@as(usize, 0), adapter.slot.current.pin_owner.cleanup_pin_count);
 }
 
 test "remote runtime: actual GUI metadata event is atomic across every projection allocation failure" {
@@ -3113,8 +3447,8 @@ test "remote runtime revoke demotes authority and cancels queued mutation before
 
     const drained = try runtime.drainObservationEvents();
     try testing.expect(drained.metadata);
-    try testing.expectEqual(remote_attachment.Role.observer, runtime.attachment.state.role);
-    try testing.expectEqual(@as(u64, 4), runtime.attachment.state.controller_generation);
+    try testing.expectEqual(remote_attachment.Role.observer, runtime.attachment.statePtr().role);
+    try testing.expectEqual(@as(u64, 4), runtime.attachment.statePtr().controller_generation);
     try testing.expectEqual(@as(usize, 0), runtime.direct_input.items.len);
     try testing.expectEqual(@as(usize, 0), runtime.pending_controls.items.len);
     try testing.expect(client.pending_outbound == null);
@@ -3156,7 +3490,7 @@ test "remote runtime rejects revoke when attach generation is untracked" {
 
     try testing.expectError(error.ProtocolError, runtime.drainObservationEvents());
     try testing.expect(client.unusable);
-    try testing.expectEqual(remote_attachment.Role.controller, runtime.attachment.state.role);
+    try testing.expectEqual(remote_attachment.Role.controller, runtime.attachment.statePtr().role);
 }
 
 test "own buffered revoke suppresses newly arriving input before role cache catches up" {

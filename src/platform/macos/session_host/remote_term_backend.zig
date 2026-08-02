@@ -163,10 +163,12 @@ pub const RemoteTermBackend = struct {
         if (self.runtimes.contains(handle)) return error.RuntimeAlreadyRegistered;
         var retained = false;
         errdefer if (retained) self.host_pool.?.release(host_id);
+        var selected_adapter: ?*HostAdapter = null;
         const selected_client = if (self.host_pool) |pool| blk: {
             const adapter = try pool.retain(host_id);
             retained = true;
             if (adapter.hostId() != host_id) return error.HostIdentityMismatch;
+            selected_adapter = adapter;
             break :blk adapter.logicalClient();
         } else if ((self.client orelse return error.HostNotFound).host_id == host_id)
             self.client.?
@@ -174,7 +176,10 @@ pub const RemoteTermBackend = struct {
             return error.HostNotFound;
         const rr = try self.allocator.create(RemoteRuntime);
         errdefer self.allocator.destroy(rr);
-        try rr.attachExisting(selected_client, self.allocator, self.io, handle, runtime_id_hex, size);
+        if (selected_adapter) |adapter|
+            try rr.attachExistingWithAdapter(adapter, self.allocator, self.io, handle, runtime_id_hex, size)
+        else
+            try rr.attachExisting(selected_client, self.allocator, self.io, handle, runtime_id_hex, size);
         // 재접속은 **기존** host runtime이라 이후 단계(map put)가 실패해도 terminate 금지(§7 attach는 terminate 안 함) —
         // client-side(surface/screen)만 회수한다. spawn 경로는 방금 우리가 띄운 runtime이라 deinit(terminate)이 맞지만
         // attach는 남의 runtime이므로 detachClientSide로 되돌려야 재접속 실패가 세션을 죽이지 않는다.
@@ -247,11 +252,13 @@ pub const RemoteTermBackend = struct {
         var selected_host_id: u128 = 0;
         var retained = false;
         errdefer if (retained) self.host_pool.?.release(selected_host_id);
+        var selected_adapter: ?*HostAdapter = null;
         const selected_client = if (self.host_pool) |pool| blk: {
             selected_host_id = pool.spawnHostId() orelse return error.SpawnHostUnavailable;
             const adapter = try pool.retain(selected_host_id);
             retained = true;
             if (adapter.hostId() != selected_host_id) return error.HostIdentityMismatch;
+            selected_adapter = adapter;
             break :blk adapter.logicalClient();
         } else blk: {
             const client = self.client orelse return error.HostNotFound;
@@ -261,7 +268,10 @@ pub const RemoteTermBackend = struct {
         const rr = try self.allocator.create(RemoteRuntime);
         errdefer self.allocator.destroy(rr);
         const request = persistentSpawnRequest(params.request);
-        try rr.spawnWithConfig(selected_client, self.allocator, self.io, params.handle, request, params.size, params.initial_config);
+        if (selected_adapter) |adapter|
+            try rr.spawnWithAdapter(adapter, self.allocator, self.io, params.handle, request, params.size, params.initial_config)
+        else
+            try rr.spawnWithConfig(selected_client, self.allocator, self.io, params.handle, request, params.size, params.initial_config);
         errdefer rr.deinit(); // spawn 성공 후 map 삽입이 실패하면 방금 띄운 host runtime을 회수한다(orphan 방지).
         try self.runtimes.put(self.allocator, params.handle, .{ .runtime = rr, .host_id = selected_host_id });
         return &rr.surface;
@@ -512,7 +522,7 @@ pub const RemoteTermBackend = struct {
     fn dumpRecentText(ctx: *anyopaque, handle: RuntimeHandle, allocator: std.mem.Allocator, max_rows: usize, max_bytes: usize) anyerror![]u8 {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
         const rr = (self.runtimes.get(handle) orelse return error.UnknownSurface).runtime;
-        return rr.attachment.screen.?.dumpRecentTextUtf8(allocator, self.io, max_rows, max_bytes);
+        return rr.attachment.screenPtr().?.dumpRecentTextUtf8(allocator, self.io, max_rows, max_bytes);
     }
 
     // ── 원격 PtyIo(SurfaceRuntime link의 input/resize sink) ─────────────────────────
@@ -714,6 +724,17 @@ test "remote term backend: drives a real host runtime through the TermRuntimeBac
     if (child < 0) return error.SkipZigTest;
     if (child == 0) {
         _ = c.setsid();
+        // The test runner control pipe must not survive an unexpected parent abort, otherwise the
+        // build waits forever on an orphaned daemon instead of reporting the failing assertion.
+        const devnull = c.open("/dev/null", .{ .ACCMODE = .RDWR });
+        if (devnull >= 0) {
+            _ = c.dup2(devnull, 0);
+            _ = c.dup2(devnull, 1);
+            _ = c.dup2(devnull, 2);
+            if (devnull > 2) _ = c.close(devnull);
+        }
+        var inherited_fd: c_int = 3;
+        while (inherited_fd < 4096) : (inherited_fd += 1) _ = c.close(inherited_fd);
         daemon.runSessionHost(std.heap.page_allocator, io, dir_path, socket_path) catch {};
         std.c._exit(0);
     }
@@ -761,6 +782,7 @@ test "remote term backend: drives a real host runtime through the TermRuntimeBac
         .queue_capacity = 16,
     }));
     const existing_runtime_id = be_impl.runtimeIdFor(1).?;
+    try testing.expect(be_impl.runtimes.get(1).?.runtime.usesGenerationAttachment());
     try testing.expectError(
         error.RuntimeAlreadyRegistered,
         be_impl.attachTermOnHost(host_id, 1, existing_runtime_id, size),
@@ -931,6 +953,7 @@ test "remote term backend: two daemon pool routes exact hosts and retiring A pre
     // Adapter pool removal은 daemon retirement가 아니며, host 종료 가능 여부는 후속 authoritative inventory가 판정한다.
     be_impl.detachTerm(11);
     _ = try be_impl.attachTermOnHost(host_a, 33, runtime_a_id, size);
+    try testing.expect(be_impl.runtimes.get(33).?.runtime.usesGenerationAttachment());
     _ = try be.attach(33, true);
     try testing.expectEqual(host_a, be_impl.runtimeHostId(33).?);
     be.closeAndDetach(33);

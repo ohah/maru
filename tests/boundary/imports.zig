@@ -1,5 +1,80 @@
 const std = @import("std");
 
+test "CR3a-2a generation attachment contract remains a neutral authority leaf" {
+    const allocator = std.testing.allocator;
+    const source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/generation_attachment_contract.zig",
+    );
+    defer allocator.free(source);
+    // The leaf carries scalar identities only. In particular, a stored address is never turned
+    // back into an owner pointer here; only the node-specific adapter may access backing owners.
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(source, "@import("));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(source, "@import(\"std\")"));
+    try std.testing.expectEqual(@as(usize, 0), countOccurrences(source, "@ptrFromInt"));
+    const forbidden = [_][]const u8{
+        "@import(\"client.zig\")",
+        "@import(\"client_slot.zig\")",
+        "@import(\"host_adapter.zig\")",
+        "@import(\"remote_runtime.zig\")",
+        "@import(\"remote_attachment.zig\")",
+        "*anyopaque",
+    };
+    for (forbidden) |needle|
+        try std.testing.expectEqual(@as(usize, 0), countOccurrences(source, needle));
+}
+
+test "CR3a-2a attachment cleanup registry stays node-local and callback-free" {
+    const allocator = std.testing.allocator;
+    const source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/attachment_cleanup_registry.zig",
+    );
+    defer allocator.free(source);
+    try std.testing.expectEqual(@as(usize, 2), countOccurrences(source, "@import("));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(source, "@import(\"std\")"));
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(source, "@import(\"generation_attachment_contract.zig\")"),
+    );
+    const forbidden = [_][]const u8{
+        "@import(\"client.zig\")",
+        "@import(\"remote_runtime.zig\")",
+        "@import(\"remote_attachment.zig\")",
+        "*anyopaque",
+        "callback: ",
+        "CleanupPermit",
+        "Batch",
+    };
+    for (forbidden) |needle|
+        try std.testing.expectEqual(@as(usize, 0), countOccurrences(source, needle));
+}
+
+test "CR3a-2a generation transport exposes only the five-method live core" {
+    const allocator = std.testing.allocator;
+    const source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/generation_transport.zig",
+    );
+    defer allocator.free(source);
+    const first_test = std.mem.indexOf(u8, source, "\ntest \"") orelse
+        return error.TestUnexpectedResult;
+    const product_source = source[0..first_test];
+    const methods = [_][]const u8{
+        "    pub fn capabilities(",
+        "    pub fn prepareRequest(",
+        "    pub fn executePreparedRequest(",
+        "    pub fn abortPreparedRequest(",
+        "    pub fn poison(",
+    };
+    try std.testing.expectEqual(@as(usize, methods.len), countOccurrences(product_source, "    pub fn "));
+    for (methods) |signature|
+        try std.testing.expectEqual(@as(usize, 1), countOccurrences(product_source, signature));
+    try std.testing.expectEqual(@as(usize, 0), countOccurrences(product_source, "*anyopaque"));
+    try std.testing.expectEqual(@as(usize, 0), countOccurrences(product_source, "pub fn call("));
+    try std.testing.expectEqual(@as(usize, 0), countOccurrences(product_source, "method: []const u8"));
+}
+
 test "external pump acquires storage claim before reading owned Client" {
     const allocator = std.testing.allocator;
     const source = try readZigFileZ(
@@ -898,6 +973,22 @@ test "session host unchecked teardown authority cannot escape anywhere in src" {
     };
     const symbols = [_]Symbol{
         .{
+            .name = "initFromReservedPinUnchecked",
+            .owner_suffixes = &.{
+                "platform/macos/session_host/connection_lease.zig",
+                "platform/macos/session_host/client_slot.zig",
+            },
+            .pump_references = 0,
+        },
+        .{
+            .name = "releaseDuringActiveCleanupUnchecked",
+            .owner_suffixes = &.{
+                "platform/macos/session_host/connection_lease.zig",
+                "platform/macos/session_host/client_slot.zig",
+            },
+            .pump_references = 0,
+        },
+        .{
             .name = "commitExternalAdoptionTakeUnchecked",
             .owner_suffixes = &.{"platform/macos/session_host/client.zig"},
             .pump_references = 1,
@@ -1106,7 +1197,7 @@ test "session host unchecked teardown authority cannot escape anywhere in src" {
             }
         }
     }
-    try std.testing.expectEqual(@as(usize, 31), unchecked_declarations);
+    try std.testing.expectEqual(@as(usize, 33), unchecked_declarations);
     for (symbols) |symbol| {
         var pump_references: usize = 0;
         var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
@@ -2950,11 +3041,17 @@ test "d2b3d live owner substrate stays private with one buffered product travers
         const first_test = std.mem.indexOf(u8, source, "\ntest \"") orelse
             return error.TestUnexpectedResult;
         const product_source = source[0..first_test];
+        const schema_start = std.mem.indexOf(
+            u8,
+            product_source,
+            "\nfn exactCr3aOwnerSchema(",
+        ) orelse return error.TestUnexpectedResult;
+        const owner_product_source = product_source[0..schema_start];
         try std.testing.expectEqual(
             @as(usize, 1),
             std.mem.count(
                 u8,
-                product_source,
+                owner_product_source,
                 "control_correlation: ControlCorrelationOwner",
             ),
         );
@@ -2962,7 +3059,7 @@ test "d2b3d live owner substrate stays private with one buffered product travers
             @as(usize, 1),
             std.mem.count(
                 u8,
-                product_source,
+                owner_product_source,
                 "completed_control: CompletedControlOwner",
             ),
         );
@@ -3709,11 +3806,31 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
             entry.path,
             "platform/macos/session_host/connection_lease.zig",
         );
+        const is_host_adapter = std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/host_adapter.zig",
+        );
+        const is_generation_attachment = std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/generation_attachment.zig",
+        );
+        const is_generation_transport = std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/generation_transport.zig",
+        );
+        const is_remote_attachment = std.mem.eql(
+            u8,
+            entry.path,
+            "platform/macos/session_host/remote_attachment.zig",
+        );
         // Count the filename rather than one relative spelling so imports from anywhere under
         // `src/` cannot bypass the product-wide mint/consume-zero gate with a longer path.
-        const imports_lease = countOccurrences(source, "connection_lease.zig");
+        const imports_lease = countStringLiteralOutsideTopLevelTests(source, "connection_lease.zig");
         try std.testing.expectEqual(
-            @as(usize, if (is_client_slot) 1 else 0),
+            @as(usize, if (is_client_slot or is_host_adapter or is_generation_attachment) 1 else 0),
             imports_lease,
         );
         const lease_type_count = countIdentifierOutsideTopLevelTests(source, "ConnectionLease");
@@ -3723,7 +3840,21 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
             // defining module are forbidden until CR3a-2 wires the compatibility adapter.
             try std.testing.expect(lease_type_count > 0);
         } else {
-            try std.testing.expectEqual(@as(usize, 0), lease_type_count);
+            // CR3a-2a stores the lease only in the final-address GUI attachment, while HostAdapter
+            // forwards its exact address to ClientSlot. Transport and external movable owners may
+            // not name the cleanup capability.
+            const expected_lease_count: usize = if (is_client_slot)
+                7
+            else if (is_host_adapter)
+                4
+            else if (is_generation_attachment)
+                1
+            else
+                0;
+            try std.testing.expectEqual(
+                expected_lease_count,
+                lease_type_count,
+            );
         }
         const move_count = countIdentifierOutsideTopLevelTests(source, "moveToGenerationNode");
         const expected_move_count: usize = if (std.mem.eql(
@@ -3733,7 +3864,18 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
         ) or is_client_slot) 1 else 0;
         try std.testing.expectEqual(expected_move_count, move_count);
         if (!is_client_slot)
-            try std.testing.expectEqual(@as(usize, 0), countOccurrences(source, ".slot.current"));
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                countIdentifierOutsideTopLevelTests(source, "slot.current"),
+            );
+        try std.testing.expectEqual(
+            @as(usize, if (is_remote_attachment or is_generation_attachment) 1 else 0),
+            countIdentifierOutsideTopLevelTests(source, "deinitPayloadOnly"),
+        );
+        try std.testing.expectEqual(
+            @as(usize, if (is_generation_transport or is_generation_attachment) 1 else 0),
+            countIdentifierOutsideTopLevelTests(source, "terminalizeOwned"),
+        );
     }
 
     const app = try readZigFileZ(allocator, "src/platform/macos/app_session.zig");
@@ -3766,6 +3908,14 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
     try std.testing.expectEqual(
         @as(usize, 2),
         countIdentifierOutsideTopLevelTests(backend, "logicalClient"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(backend, "try rr.spawnWithAdapter("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(backend, "try rr.attachExistingWithAdapter("),
     );
     try std.testing.expectEqual(
         @as(usize, 1),
@@ -3820,6 +3970,41 @@ fn countIdentifierOutsideTopLevelTests(source: [:0]const u8, wanted: []const u8)
             },
             .identifier => if (test_body_depth == null and
                 std.mem.eql(u8, source[token.loc.start..token.loc.end], wanted))
+            {
+                count += 1;
+            },
+            else => {},
+        }
+    }
+}
+
+fn countStringLiteralOutsideTopLevelTests(source: [:0]const u8, wanted: []const u8) usize {
+    var tokenizer = std.zig.Tokenizer.init(source);
+    var brace_depth: usize = 0;
+    var waiting_for_test_body = false;
+    var test_body_depth: ?usize = null;
+    var count: usize = 0;
+    while (true) {
+        const token = tokenizer.next();
+        switch (token.tag) {
+            .eof => return count,
+            .keyword_test => if (brace_depth == 0 and test_body_depth == null) {
+                waiting_for_test_body = true;
+            },
+            .l_brace => {
+                brace_depth += 1;
+                if (waiting_for_test_body) {
+                    test_body_depth = brace_depth;
+                    waiting_for_test_body = false;
+                }
+            },
+            .r_brace => {
+                if (test_body_depth != null and test_body_depth.? == brace_depth)
+                    test_body_depth = null;
+                if (brace_depth > 0) brace_depth -= 1;
+            },
+            .string_literal => if (test_body_depth == null and
+                std.mem.indexOf(u8, source[token.loc.start..token.loc.end], wanted) != null)
             {
                 count += 1;
             },

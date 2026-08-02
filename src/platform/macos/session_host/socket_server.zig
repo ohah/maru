@@ -147,6 +147,10 @@ pub const SocketServer = struct {
         registry: *reg.TerminalRuntimeRegistry,
     ) BindError!SocketServer {
         if (!socketPathFits(socket_path.len)) return error.SocketPathTooLong;
+        // 이 adapter의 실제 bind 경로는 macOS 전용이다. Linux CI는 위의 syscall-free path preflight와
+        // protocol/boundary 테스트를 위해 모듈을 컴파일하지만 Zig 0.16의 std.c.fstatat은 Linux에서
+        // 의도적으로 노출되지 않는다. 비-macOS에서는 syscall을 분석하거나 실행하지 않고 typed 실패로 닫는다.
+        if (comptime builtin.os.tag != .macos) return error.SocketCreateFailed;
         const server_uid = c.getuid();
 
         // dir 0700 + 소유자/타입 검증(다른 uid traverse 차단).

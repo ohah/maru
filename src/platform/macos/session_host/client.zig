@@ -12,6 +12,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const c = std.c;
 const posix = std.posix;
+threadlocal var checked_allocator_owner_addr: usize = 0;
 const protocol = @import("protocol.zig");
 const compatibility = @import("compatibility.zig");
 const runtime_event_reducer = @import("runtime_event_reducer.zig");
@@ -35,6 +36,14 @@ const max_pending_event_count: usize = 4 * 256;
 comptime {
     if (max_pending_event_count > std.math.maxInt(u32))
         @compileError("external adoption event ordinal exceeds reducer u32 domain");
+}
+
+fn preparedRpcFromStorage(storage: *PreparedBlockingRpcStorage) *PreparedBlockingRpc {
+    return @ptrCast(@alignCast(storage));
+}
+
+fn preparedRpcFromStorageConst(storage: *const PreparedBlockingRpcStorage) *const PreparedBlockingRpc {
+    return @ptrCast(@alignCast(storage));
 }
 
 pub const ClientError = error{
@@ -64,6 +73,104 @@ pub const ClientError = error{
 /// Only absolute-deadline APIs expose this extra error. Legacy blocking callers retain the closed
 /// `ClientError` switch, while the public attach phase owner can map an exact timeout by phase.
 pub const DeadlineClientError = ClientError || error{DeadlineExceeded};
+
+pub const PreparedBlockingRpcError = ClientError || error{
+    DestinationOccupied,
+    InvalidPreparedRpc,
+    MovedOrCopied,
+};
+
+pub const ExecutedBlockingRpcResponse = struct {
+    payload: []u8,
+    payload_allocator: std.mem.Allocator,
+    response_request_id: u64,
+};
+
+pub const PreparedBlockingRpcExecution = union(enum) {
+    accepted: ExecutedBlockingRpcResponse,
+    not_executed: PreparedBlockingRpcError,
+    uncertain: PreparedBlockingRpcError,
+};
+
+const PreparedBlockingRpcLifecycle = enum {
+    pristine,
+    prepared,
+    executing,
+    terminal,
+};
+
+/// Final-address owner for one encoded blocking RPC request. Preparation owns the complete frame
+/// without consuming the Client request ID or touching the wire. Execute consumes that ID once and
+/// settles this backing on every outcome; abort settles it without I/O.
+const PreparedBlockingRpc = struct {
+    self_addr: usize = 0,
+    incarnation: u64 = 0,
+    client_addr: usize = 0,
+    request_id: u64 = 0,
+    frame_digest: u64 = 0,
+    frame: []u8 = &.{},
+    allocator: std.mem.Allocator = undefined,
+    lifecycle: PreparedBlockingRpcLifecycle = .pristine,
+
+    fn validFor(self: *const PreparedBlockingRpc, client: *const Client) bool {
+        return self.self_addr == @intFromPtr(self) and
+            self.incarnation != 0 and
+            self.client_addr == @intFromPtr(client) and
+            self.request_id != 0 and
+            self.frame_digest != 0 and
+            self.frame.len >= protocol.header_size and
+            self.lifecycle == .prepared;
+    }
+
+    fn frameIntact(self: *const PreparedBlockingRpc) bool {
+        var digest = std.hash.Wyhash.hash(0, self.frame);
+        if (digest == 0) digest = 1;
+        return digest == self.frame_digest;
+    }
+
+    fn settle(self: *PreparedBlockingRpc) void {
+        const allocator = self.allocator;
+        const frame = self.frame;
+        self.frame = &.{};
+        self.client_addr = 0;
+        self.frame_digest = 0;
+        self.lifecycle = .terminal;
+        allocator.free(frame);
+    }
+};
+
+/// Opaque final-address storage for one prepared blocking RPC. Callers can embed the storage but
+/// cannot inspect or mutate Client's request-frame authority as a typed aggregate; only the
+/// Client methods below may interpret these bytes.
+pub const PreparedBlockingRpcStorage = struct {
+    bytes: [@sizeOf(PreparedBlockingRpc)]u8 align(@alignOf(PreparedBlockingRpc)) =
+        [_]u8{0} ** @sizeOf(PreparedBlockingRpc),
+};
+
+pub const PreparedBlockingRpcIdentity = struct {
+    request_id: u64,
+    frame_digest: u64,
+};
+
+comptime {
+    if (@sizeOf(PreparedBlockingRpcStorage) != @sizeOf(PreparedBlockingRpc) or
+        @alignOf(PreparedBlockingRpcStorage) != @alignOf(PreparedBlockingRpc))
+        @compileError("opaque prepared RPC storage must exactly preserve backing layout");
+}
+
+var prepared_rpc_issuer: std.atomic.Value(u64) = .init(1);
+
+fn issuePreparedRpcIncarnation() error{OutOfMemory}!u64 {
+    var observed = prepared_rpc_issuer.load(.acquire);
+    while (true) {
+        if (observed == 0 or observed == std.math.maxInt(u64)) return error.OutOfMemory;
+        if (prepared_rpc_issuer.cmpxchgWeak(observed, observed + 1, .acq_rel, .acquire)) |actual| {
+            observed = actual;
+            continue;
+        }
+        return observed;
+    }
+}
 
 pub const EnterExternalModeError = error{
     ConnectionClosed,
@@ -4189,6 +4296,7 @@ pub const Client = struct {
     }
 
     pub fn tryDeinit(self: *Client) bool {
+        if (checkedAllocatorReentry(self)) return false;
         if (self.ownership == .moved) {
             return true;
         }
@@ -5443,6 +5551,7 @@ pub const Client = struct {
     }
 
     pub fn prepareExternalModeDeinit(self: *Client) bool {
+        if (checkedAllocatorReentry(self)) return false;
         switch (self.io_mode) {
             .blocking => {},
             .external => |*state| {
@@ -5466,6 +5575,7 @@ pub const Client = struct {
     pub fn reserveExternalModeDeinit(
         self: *Client,
     ) ExternalModeDeinitReservationResult {
+        if (checkedAllocatorReentry(self)) return .busy;
         return switch (self.io_mode) {
             .blocking => .already_dead,
             .external => |*state| blk: {
@@ -5480,6 +5590,7 @@ pub const Client = struct {
     }
 
     pub fn finishReservedExternalModeDeinit(self: *Client) bool {
+        if (checkedAllocatorReentry(self)) return false;
         switch (self.io_mode) {
             .blocking => return true,
             .external => |*state| switch (state.finishReservedDeinit(self.allocator)) {
@@ -5492,6 +5603,7 @@ pub const Client = struct {
     }
 
     pub fn cancelReservedExternalModeDeinit(self: *Client) bool {
+        if (checkedAllocatorReentry(self)) return false;
         return switch (self.io_mode) {
             .blocking => true,
             .external => |*state| state.cancelReservedDeinit(),
@@ -5502,6 +5614,7 @@ pub const Client = struct {
         self: *Client,
         destination: *Client,
     ) bool {
+        if (checkedAllocatorReentry(self) or checkedAllocatorReentry(destination)) return false;
         return switch (self.io_mode) {
             .blocking => destination.io_mode == .blocking,
             .external => |*source_state| switch (destination.io_mode) {
@@ -5548,9 +5661,16 @@ pub const Client = struct {
         try self.requireBlockingMode();
         // non-blocking input이 backpressure로 일부만 전송됐어도 뒤 request가 wire에서 추월하면 안 된다.
         try self.flushPendingOutboundBlocking();
-        const frame_bytes = try self.buildRequestFrame(method, params_json);
-        defer self.allocator.free(frame_bytes);
-        return self.callPreparedWithIo(self.next_request_id, frame_bytes, io);
+        var prepared: PreparedBlockingRpc = .{};
+        self.prepareBlockingRpc(&prepared, method, params_json) catch |err| return switch (err) {
+            error.DestinationOccupied, error.InvalidPreparedRpc, error.MovedOrCopied => error.ProtocolError,
+            else => |client_err| client_err,
+        };
+        const executed = self.executePreparedWithIo(&prepared, io, false, null) catch |err| return switch (err) {
+            error.InvalidPreparedRpc, error.MovedOrCopied => error.ProtocolError,
+            else => |client_err| client_err,
+        };
+        return executed.payload;
     }
 
     fn callUntilWithOps(
@@ -5561,8 +5681,12 @@ pub const Client = struct {
         ops: client_deadline.Ops,
     ) DeadlineClientError![]u8 {
         try self.requireBlockingMode();
-        const frame_bytes = try self.buildRequestFrame(method, params_json);
-        defer self.allocator.free(frame_bytes);
+        var prepared: PreparedBlockingRpc = .{};
+        self.prepareBlockingRpc(&prepared, method, params_json) catch |err| return switch (err) {
+            error.DestinationOccupied, error.InvalidPreparedRpc, error.MovedOrCopied => error.ProtocolError,
+            else => |client_err| client_err,
+        };
+        errdefer self.abortPreparedBlockingRpc(&prepared) catch {};
 
         const saved_flags = ops.get_flags(ops.context, self.fd) orelse {
             self.poisonWithOps(.local_invariant_violation, ops);
@@ -5589,14 +5713,19 @@ pub const Client = struct {
             };
             self.clearPendingOutbound();
         }
-        const payload = self.callPreparedWithIo(
-            self.next_request_id,
-            frame_bytes,
+        const executed = self.executePreparedWithIo(
+            &prepared,
             .{ .deadline = .{ .absolute = deadline, .ops = ops } },
+            false,
+            null,
         ) catch |err| {
             self.poisonWithOps(.response_correlation_lost, ops);
-            return err;
+            return switch (err) {
+                error.InvalidPreparedRpc, error.MovedOrCopied => error.ProtocolError,
+                else => |client_err| client_err,
+            };
         };
+        const payload = executed.payload;
         if (!ops.set_flags(ops.context, self.fd, saved_flags)) {
             self.allocator.free(payload);
             self.poisonWithOps(.local_invariant_violation, ops);
@@ -5624,13 +5753,187 @@ pub const Client = struct {
         ) catch return error.OutOfMemory;
     }
 
-    fn callPreparedWithIo(
+    fn prepareBlockingRpc(
         self: *Client,
-        request_id: u64,
-        frame_bytes: []const u8,
+        out: *PreparedBlockingRpc,
+        method: []const u8,
+        params_json: ?[]const u8,
+    ) PreparedBlockingRpcError!void {
+        try self.requireBlockingMode();
+        if (out.self_addr != 0 or out.lifecycle != .pristine or out.frame.len != 0)
+            return error.DestinationOccupied;
+        if (self.next_request_id == 0 or self.next_request_id == std.math.maxInt(u64))
+            return error.InvalidPreparedRpc;
+        const incarnation = try issuePreparedRpcIncarnation();
+        const frame_bytes = self.buildRequestFrame(method, params_json) catch |err| return switch (err) {
+            error.DeadlineExceeded => unreachable,
+            else => |client_err| client_err,
+        };
+        var digest = std.hash.Wyhash.hash(0, frame_bytes);
+        if (digest == 0) digest = 1;
+        out.* = .{
+            .self_addr = @intFromPtr(out),
+            .incarnation = incarnation,
+            .client_addr = @intFromPtr(self),
+            .request_id = self.next_request_id,
+            .frame_digest = digest,
+            .frame = frame_bytes,
+            .allocator = self.allocator,
+            .lifecycle = .prepared,
+        };
+    }
+
+    fn abortPreparedBlockingRpc(
+        self: *Client,
+        prepared: *PreparedBlockingRpc,
+    ) PreparedBlockingRpcError!void {
+        if (prepared.self_addr != @intFromPtr(prepared)) return error.MovedOrCopied;
+        if (!prepared.validFor(self)) return error.InvalidPreparedRpc;
+        prepared.settle();
+    }
+
+    fn executePreparedBlockingRpc(
+        self: *Client,
+        prepared: *PreparedBlockingRpc,
+    ) PreparedBlockingRpcError![]u8 {
+        return switch (self.executePreparedBlockingRpcClassified(prepared)) {
+            .accepted => |response| response.payload,
+            .not_executed, .uncertain => |err| err,
+        };
+    }
+
+    fn executePreparedBlockingRpcClassified(
+        self: *Client,
+        prepared: *PreparedBlockingRpc,
+    ) PreparedBlockingRpcExecution {
+        const response = self.executePreparedWithIo(prepared, .blocking, true, null) catch |err| {
+            const classified: PreparedBlockingRpcError = switch (err) {
+                error.DeadlineExceeded => unreachable,
+                else => |client_err| client_err,
+            };
+            return if (prepared.lifecycle == .prepared)
+                .{ .not_executed = classified }
+            else
+                .{ .uncertain = classified };
+        };
+        return .{ .accepted = response };
+    }
+
+    pub fn prepareBlockingRpcStorage(
+        self: *Client,
+        storage: *PreparedBlockingRpcStorage,
+        method: []const u8,
+        params_json: ?[]const u8,
+    ) PreparedBlockingRpcError!PreparedBlockingRpcIdentity {
+        const prepared = preparedRpcFromStorage(storage);
+        try self.prepareBlockingRpc(prepared, method, params_json);
+        return .{ .request_id = prepared.request_id, .frame_digest = prepared.frame_digest };
+    }
+
+    pub fn abortPreparedBlockingRpcStorage(
+        self: *Client,
+        storage: *PreparedBlockingRpcStorage,
+    ) PreparedBlockingRpcError!void {
+        // local prepared backing 정리는 connection이 terminal이어도 가능해야 한다. allocator callback
+        // 재진입만 막고, 일반 usability gate로 poison 이후 exact abort까지 막지는 않는다.
+        if (checkedAllocatorReentry(self)) return error.AdminBusy;
+        return self.abortPreparedBlockingRpc(preparedRpcFromStorage(storage));
+    }
+
+    fn executePreparedBlockingRpcStorageClassified(
+        self: *Client,
+        storage: *PreparedBlockingRpcStorage,
+    ) PreparedBlockingRpcExecution {
+        return self.executePreparedBlockingRpcClassified(preparedRpcFromStorage(storage));
+    }
+
+    /// Completes pre-existing outbound ownership before the caller captures the allocator used by
+    /// this Client/parser domain. No byte from the prepared request is written here.
+    pub fn preflightPreparedBlockingRpcStorageExecution(
+        self: *Client,
+        storage: *PreparedBlockingRpcStorage,
+    ) PreparedBlockingRpcError!std.mem.Allocator {
+        try self.ensureUsable();
+        const prepared = preparedRpcFromStorage(storage);
+        if (prepared.self_addr != @intFromPtr(prepared)) return error.MovedOrCopied;
+        if (!prepared.validFor(self) or !prepared.frameIntact() or
+            prepared.request_id != self.next_request_id)
+            return error.InvalidPreparedRpc;
+        const allocator = self.allocator;
+        try self.flushPendingOutboundBlocking();
+        if (!std.meta.eql(self.allocator, allocator) or !self.parser.usesAllocator(allocator)) {
+            self.poison(.local_invariant_violation);
+            return error.InvalidPreparedRpc;
+        }
+        return allocator;
+    }
+
+    pub fn executePreparedBlockingRpcStorageWithAllocator(
+        self: *Client,
+        storage: *PreparedBlockingRpcStorage,
+        allocator: std.mem.Allocator,
+    ) PreparedBlockingRpcExecution {
+        if (checkedAllocatorReentry(self))
+            return .{ .not_executed = error.AdminBusy };
+        const prepared = preparedRpcFromStorage(storage);
+        if (self.pending_outbound != null or
+            !std.meta.eql(self.allocator, allocator) or
+            !self.parser.usesAllocator(allocator))
+            return .{ .not_executed = error.InvalidPreparedRpc };
+        const response = self.executePreparedWithIo(
+            prepared,
+            .blocking,
+            false,
+            allocator,
+        ) catch |err| {
+            const classified: PreparedBlockingRpcError = switch (err) {
+                error.DeadlineExceeded => unreachable,
+                else => |client_err| client_err,
+            };
+            return if (prepared.lifecycle == .prepared)
+                .{ .not_executed = classified }
+            else
+                .{ .uncertain = classified };
+        };
+        return .{ .accepted = response };
+    }
+
+    pub fn preparedBlockingRpcStorageMatches(
+        self: *const Client,
+        storage: *const PreparedBlockingRpcStorage,
+        identity: PreparedBlockingRpcIdentity,
+    ) bool {
+        const prepared = preparedRpcFromStorageConst(storage);
+        return prepared.validFor(self) and prepared.request_id == identity.request_id and
+            prepared.frame_digest == identity.frame_digest;
+    }
+
+    pub fn preparedBlockingRpcStorageSettled(
+        storage: *const PreparedBlockingRpcStorage,
+    ) bool {
+        const prepared = preparedRpcFromStorageConst(storage);
+        return prepared.frame.len == 0 and prepared.client_addr == 0 and
+            (prepared.lifecycle == .pristine or prepared.lifecycle == .terminal);
+    }
+
+    fn executePreparedWithIo(
+        self: *Client,
+        prepared: *PreparedBlockingRpc,
         io: RpcIo,
-    ) DeadlineClientError![]u8 {
+        flush_pending: bool,
+        expected_payload_allocator: ?std.mem.Allocator,
+    ) (DeadlineClientError || error{ InvalidPreparedRpc, MovedOrCopied })!ExecutedBlockingRpcResponse {
+        if (prepared.self_addr != @intFromPtr(prepared)) return error.MovedOrCopied;
+        if (!prepared.validFor(self) or !prepared.frameIntact() or
+            prepared.request_id != self.next_request_id)
+            return error.InvalidPreparedRpc;
+        if (flush_pending) try self.flushPendingOutboundBlocking();
+
+        prepared.lifecycle = .executing;
+        const request_id = prepared.request_id;
+        const frame_bytes = prepared.frame;
         self.next_request_id += 1;
+        defer prepared.settle();
         switch (io) {
             .blocking => socket_server.writeAll(self.fd, frame_bytes) catch {
                 // request prefix가 이미 kernel에 들어갔을 수 있다. 이 connection은 frame 경계를 다시 찾을 수 없으므로
@@ -5653,18 +5956,31 @@ pub const Client = struct {
         // 응답을 기다리는 동안 host가 비동기로 push하는 stream frame(delta_chunk/snapshot_chunk)은 **버퍼에 쌓는다** — 드롭하면
         // 그 사이 화면 갱신이 유실된다(§9 delta는 증분이라 한 배치만 놓쳐도 desync). 다음 `readStreamBatch`가 이 버퍼부터 소비한다.
         while (true) {
+            var actual_payload_allocator = self.allocator;
             const resp = switch (io) {
-                .blocking => try self.readFrame(),
+                .blocking => try self.readFrameWithAllocator(&actual_payload_allocator),
                 .deadline => |bounded| try self.readFrameUntilEstablished(
                     bounded.absolute,
                     bounded.ops,
                 ),
             };
-            if (try self.bufferOutOfBandFrame(resp)) continue;
+            if (expected_payload_allocator) |expected| {
+                if (!std.meta.eql(actual_payload_allocator, expected) or
+                    !std.meta.eql(self.allocator, expected) or
+                    !self.parser.usesAllocator(expected))
+                {
+                    // The allocation callback changed the Client/parser allocator domain. The
+                    // frame's actual owner is now outside this request's sealed domain: do not
+                    // publish, queue, classify, or free the bounded payload.
+                    self.poison(.local_invariant_violation);
+                    return error.ProtocolError;
+                }
+            }
+            if (try self.bufferOutOfBandFrame(resp, expected_payload_allocator)) continue;
             // kind와 request_id를 함께 확인한다 — out-of-order frame을 이 call의 응답으로 오귀속하지 않는다.
             if (resp.header.kind != .response or resp.header.request_id != request_id) {
-                resp.deinit(self.allocator);
                 self.poison(.response_correlation_lost);
+                resp.deinit(self.allocator);
                 return error.ProtocolError;
             }
             if (rpcDeadlineExpired(io)) {
@@ -5673,7 +5989,11 @@ pub const Client = struct {
             }
             // FrameParser already returned an owned payload. Transfer it directly so a committed
             // mutating response cannot be consumed and then lost to a second allocation failure.
-            return resp.payload;
+            return .{
+                .payload = resp.payload,
+                .payload_allocator = actual_payload_allocator,
+                .response_request_id = resp.header.request_id,
+            };
         }
     }
 
@@ -5686,17 +6006,36 @@ pub const Client = struct {
 
     /// Buffer a frame that may legally interleave with an RPC response. Returning false transfers
     /// ownership back to the caller, which must classify the response/control frame.
-    fn bufferOutOfBandFrame(self: *Client, frame: framing.Frame) ClientError!bool {
+    fn bufferOutOfBandFrame(
+        self: *Client,
+        frame: framing.Frame,
+        expected_allocator: ?std.mem.Allocator,
+    ) ClientError!bool {
+        const allocator = expected_allocator orelse self.allocator;
+        if (expected_allocator != null) {
+            if (checked_allocator_owner_addr != 0) return error.AdminBusy;
+            checked_allocator_owner_addr = @intFromPtr(self);
+        }
+        defer if (expected_allocator != null) {
+            checked_allocator_owner_addr = 0;
+        };
+        defer if (expected_allocator != null and
+            (!std.meta.eql(self.allocator, allocator) or !self.parser.usesAllocator(allocator)))
+        {
+            self.allocator = allocator;
+            self.parser.restoreAllocatorAfterDrift(allocator);
+            self.poison(.local_invariant_violation);
+        };
         if (frame.header.kind == .delta_chunk or frame.header.kind == .snapshot_chunk) {
             if (self.pending_stream.items.len >= protocol.max_client_screen_items or
                 self.screenInboxBytes() +| frame.payload.len > protocol.max_client_screen_inbox)
             {
-                frame.deinit(self.allocator);
+                frame.deinit(allocator);
                 self.poison(.event_queue_overflow);
                 return error.EventQueueFull;
             }
-            self.pending_stream.append(self.allocator, frame) catch {
-                frame.deinit(self.allocator);
+            self.pending_stream.append(allocator, frame) catch {
+                frame.deinit(allocator);
                 // The frame is already consumed from the socket. Losing it would break the next
                 // stream delta base, so the whole shared connection must fail closed.
                 self.poison(.local_resource_exhausted);
@@ -5706,7 +6045,7 @@ pub const Client = struct {
             return true;
         }
         if (frame.header.kind == .event) {
-            try self.bufferEvent(frame);
+            try self.bufferEventWithAllocator(frame, allocator);
             return true;
         }
         return false;
@@ -5730,7 +6069,7 @@ pub const Client = struct {
             };
             const owned = maybe orelse continue;
             const frame = try self.requireWireMajor(owned);
-            if (try self.bufferOutOfBandFrame(frame)) continue;
+            if (try self.bufferOutOfBandFrame(frame, null)) continue;
             frame.deinit(self.allocator);
             self.poison(.peer_contract_violation);
             return error.ProtocolError;
@@ -6163,6 +6502,7 @@ pub const Client = struct {
     /// `stream_id` 앞으로 버퍼된 demux 배치를 모두 버린다(runtime이 detach/remove될 때 그 runtime의 pump가 다신 안 도므로
     /// 잔여 배치가 영구히 쌓이지 않게 — RemoteRuntime.deinit/detachClientSide가 부른다). 없으면 no-op.
     pub fn dropBufferedStream(self: *Client, stream_id: u64) void {
+        if (checkedAllocatorReentry(self)) return;
         var i: usize = 0;
         while (i < self.pending_batches.items.len) {
             if (self.pending_batches.items[i].stream_id == stream_id) {
@@ -6204,6 +6544,7 @@ pub const Client = struct {
     /// `Client.releaseEvent`로 반환한다. Admission seal 불일치는 손상된 route를 caller에게 넘기지 않고
     /// connection-wide ProtocolError로 닫는다.
     pub fn takeEventForStream(self: *Client, stream_id: u64) ClientError!?BufferedEvent {
+        if (checkedAllocatorReentry(self)) return error.AdminBusy;
         // poison 전에 쌓인 event도 어느 stream의 누락보다 최신인지 증명할 수 없다. 일부 runtime만 한 번 더 전진시키지 않고
         // 모든 shared runtime이 다음 pump에서 같은 ConnectionClosed를 보게 한다.
         if (self.unusable) return null;
@@ -6232,23 +6573,32 @@ pub const Client = struct {
     /// Releases an event through the allocator that admitted it. Consumers must not assume their
     /// projection allocator is identical to the shared Client transport allocator.
     pub fn releaseEvent(self: *const Client, event: BufferedEvent) void {
+        if (checkedAllocatorReentry(self)) return;
         event.deinit(self.allocator);
     }
 
     /// full-state event는 같은 stream+종류의 이전 pending을 최신으로 교체한다. 악성/버그 host가 임의 stream id를
     /// 쏟아 count/byte cap을 넘기면 oldest를 버리지 않고 shared connection 전체를 poison해 모든 runtime을 fail-closed한다.
     fn bufferEvent(self: *Client, frame: framing.Frame) ClientError!void {
+        return self.bufferEventWithAllocator(frame, self.allocator);
+    }
+
+    fn bufferEventWithAllocator(
+        self: *Client,
+        frame: framing.Frame,
+        allocator: std.mem.Allocator,
+    ) ClientError!void {
         if (frame.header.kind != .event or frame.header.request_id != 0 or
             frame.header.stream_id == 0 or frame.header.flags != 0)
         {
-            frame.deinit(self.allocator);
+            frame.deinit(allocator);
             self.poison(.peer_contract_violation);
             return error.ProtocolError;
         }
         if (self.connection_profile != null and
             self.connection_profile.?.requiresStrictExternalEvents())
         {
-            return self.appendRawEvent(frame);
+            return self.appendRawEvent(frame, allocator);
         }
         const verdict = runtime_event_wire.preflightEventObserved(
             frame.payload,
@@ -6259,18 +6609,18 @@ pub const Client = struct {
             .accepted => |accepted| accepted.event,
             .unknown => null,
             .foreign => {
-                frame.deinit(self.allocator);
+                frame.deinit(allocator);
                 self.poison(.peer_contract_violation);
                 return error.ProtocolError;
             },
             .malformed => {
                 // GUI fresh ingress preserves the historical malformed-drop policy. It must not
                 // publish/coalesce or evict a previously admitted latest event.
-                frame.deinit(self.allocator);
+                frame.deinit(allocator);
                 return;
             },
             .resource_exhausted => {
-                frame.deinit(self.allocator);
+                frame.deinit(allocator);
                 self.poison(.peer_contract_violation);
                 return error.ProtocolError;
             },
@@ -6278,7 +6628,7 @@ pub const Client = struct {
         const metadata_revision: ?u64 = if (accepted_event) |event| switch (event) {
             .metadata => |metadata| blk: {
                 if (self.metadata_support == .unsupported) {
-                    frame.deinit(self.allocator);
+                    frame.deinit(allocator);
                     self.poison(.peer_contract_violation);
                     return error.ProtocolError;
                 }
@@ -6297,7 +6647,7 @@ pub const Client = struct {
                 // payload that revokes another stream would leave both stream-local latches able
                 // to skip it before the later attachment-aware classifier runs.
                 if (revoked.stream_id != frame.header.stream_id) {
-                    frame.deinit(self.allocator);
+                    frame.deinit(allocator);
                     self.poison(.peer_contract_violation);
                     return error.ProtocolError;
                 }
@@ -6321,7 +6671,7 @@ pub const Client = struct {
         // parsed scalar until its independent admission copy has rebound all three components.
         for (self.pending_events.items) |old| {
             if (!old.sealMatches()) {
-                buffered.deinit(self.allocator);
+                buffered.deinit(allocator);
                 self.poison(.local_invariant_violation);
                 return error.ProtocolError;
             }
@@ -6336,7 +6686,7 @@ pub const Client = struct {
                 if (self.pending_events.items[ended_index].header.stream_id == ended_stream) {
                     const replaced = self.pending_events.orderedRemove(ended_index);
                     self.pending_event_bytes -= replaced.payload.len;
-                    replaced.deinit(self.allocator);
+                    replaced.deinit(allocator);
                 } else ended_index += 1;
             }
         }
@@ -6353,7 +6703,7 @@ pub const Client = struct {
                 } else null;
                 if (old_metadata) |old_value| {
                     if (metadata_revision.? < old_value.revision) {
-                        buffered.deinit(self.allocator);
+                        buffered.deinit(allocator);
                         return;
                     }
                     if (metadata_revision.? == old_value.revision) {
@@ -6367,24 +6717,24 @@ pub const Client = struct {
                             buffered.payload,
                             &next_value,
                         )) {
-                            buffered.deinit(self.allocator);
+                            buffered.deinit(allocator);
                             self.poison(.peer_contract_violation);
                             return error.ProtocolError;
                         }
-                        buffered.deinit(self.allocator);
+                        buffered.deinit(allocator);
                         return;
                     }
                     const replaced = self.pending_events.items[i];
                     const next_bytes = self.pending_event_bytes - replaced.payload.len +|
                         buffered.payload.len;
                     if (next_bytes > protocol.max_client_queue) {
-                        buffered.deinit(self.allocator);
+                        buffered.deinit(allocator);
                         self.poison(.event_queue_overflow);
                         return error.EventQueueFull;
                     }
                     self.pending_events.items[i] = buffered;
                     self.pending_event_bytes = next_bytes;
-                    replaced.deinit(self.allocator);
+                    replaced.deinit(allocator);
                     return;
                 }
             }
@@ -6398,66 +6748,74 @@ pub const Client = struct {
                 } else null;
                 if (old_resize) |old_value| {
                     if (resized.?.runtime_id != old_value.runtime_id) {
-                        buffered.deinit(self.allocator);
+                        buffered.deinit(allocator);
                         self.poison(.peer_contract_violation);
                         return error.ProtocolError;
                     }
                     if (resized.?.resize_generation < old_value.resize_generation) {
-                        buffered.deinit(self.allocator);
+                        buffered.deinit(allocator);
                         return;
                     }
                     if (resized.?.resize_generation == old_value.resize_generation) {
                         if (resized.?.cols != old_value.cols or
                             resized.?.rows != old_value.rows)
                         {
-                            buffered.deinit(self.allocator);
+                            buffered.deinit(allocator);
                             self.poison(.peer_contract_violation);
                             return error.ProtocolError;
                         }
-                        buffered.deinit(self.allocator);
+                        buffered.deinit(allocator);
                         return;
                     }
                     const replaced = self.pending_events.items[i];
                     const next_bytes =
                         self.pending_event_bytes - replaced.payload.len +| buffered.payload.len;
                     if (next_bytes > protocol.max_client_queue) {
-                        buffered.deinit(self.allocator);
+                        buffered.deinit(allocator);
                         self.poison(.event_queue_overflow);
                         return error.EventQueueFull;
                     }
                     self.pending_events.items[i] = buffered;
                     self.pending_event_bytes = next_bytes;
-                    replaced.deinit(self.allocator);
+                    replaced.deinit(allocator);
                     return;
                 }
             }
         }
-        return self.appendBufferedEvent(buffered);
+        return self.appendBufferedEvent(buffered, allocator);
     }
 
     /// Strict external attach는 identity/authority/baseline을 adoption 전에는 아직 갖지 않는다. 따라서 header/cap
     /// 이외의 semantic 판단, coalesce, supersession 없이 arrival-order bytes를 그대로 보존한다.
-    fn appendRawEvent(self: *Client, frame: framing.Frame) ClientError!void {
+    fn appendRawEvent(
+        self: *Client,
+        frame: framing.Frame,
+        allocator: std.mem.Allocator,
+    ) ClientError!void {
         return self.appendBufferedEvent(.{
             .header = frame.header,
             .payload = frame.payload,
             .preflight = null,
-        });
+        }, allocator);
     }
 
-    fn appendBufferedEvent(self: *Client, event: BufferedEvent) ClientError!void {
+    fn appendBufferedEvent(
+        self: *Client,
+        event: BufferedEvent,
+        allocator: std.mem.Allocator,
+    ) ClientError!void {
         if (self.pending_events.items.len >= max_pending_event_count or
             self.pending_event_bytes +| event.payload.len > protocol.max_client_queue)
         {
             // Eviction 금지: server는 event를 만들 때 이미 subscription base/revision을 전진시켰다. 해당 stream의 최신
             // full-state를 조용히 버리면 같은 상태를 다시 보내지 않는다. 어느 shared stream이 누락됐든 connection 전체를
             // 닫아 모든 runtime이 fail-closed하고, 다음 attach의 initial metadata에서만 복구한다.
-            event.deinit(self.allocator);
+            event.deinit(allocator);
             self.poison(.event_queue_overflow);
             return error.EventQueueFull;
         }
-        self.pending_events.append(self.allocator, event) catch {
-            event.deinit(self.allocator);
+        self.pending_events.append(allocator, event) catch {
+            event.deinit(allocator);
             self.poison(.local_resource_exhausted);
             return error.OutOfMemory;
         };
@@ -6843,10 +7201,17 @@ pub const Client = struct {
 
     /// 다음 완성 frame을 읽는다(partial read 재조립). EOF/timeout는 ConnectionClosed, codec 위반은 ProtocolError.
     fn readFrame(self: *Client) ClientError!framing.Frame {
+        return self.readFrameWithAllocator(null);
+    }
+
+    fn readFrameWithAllocator(
+        self: *Client,
+        payload_allocator_out: ?*std.mem.Allocator,
+    ) ClientError!framing.Frame {
         try self.ensureUsable();
         var buf: [4096]u8 = undefined;
         while (true) {
-            if (self.parser.next() catch {
+            if (self.parser.nextWithAllocator(payload_allocator_out) catch {
                 self.poison(.frame_malformed);
                 return error.ProtocolError;
             }) |frame|
@@ -6969,7 +7334,16 @@ pub const Client = struct {
     }
 
     fn ensureUsable(self: *const Client) ClientError!void {
+        if (checkedAllocatorReentry(self)) return error.AdminBusy;
         if (self.ownership == .moved or self.unusable) return error.ConnectionClosed;
+    }
+
+    fn checkedAllocatorReentry(_: *const Client) bool {
+        // allocator callback은 Client별이 아니라 thread-local이다. Client A의 callback 안에서는 Client B도
+        // 막아야 한다. 그렇지 않으면 B가 wire byte를 소비한 뒤 interleaved OOB frame을 이미 소유한 상태에서야
+        // active latch를 발견한다. 이 thread에 checked allocator owner가 하나라도 있으면 모든 public Client
+        // 진입점은 wire/callback/free 전에 거부한다.
+        return checked_allocator_owner_addr != 0;
     }
 
     fn requireBlockingMode(self: *const Client) ClientError!void {
@@ -7021,6 +7395,10 @@ pub const Client = struct {
     /// lifecycle cleanup frame조차 할당할 수 없는 경우 host가 EOF로 attachment를 정리하도록 shared connection을
     /// 명시적으로 닫는 fail-closed fallback.
     pub fn poison(self: *Client, reason: client_poison.ConnectionReason) void {
+        if (checkedAllocatorReentry(self)) {
+            self.markPoisonedForDeferredCleanup(reason);
+            return;
+        }
         self.latchFirstPoisonReason(reason);
         if (self.poisonAndTakeFd()) |fd| _ = c.close(fd);
         std.debug.assert(self.terminalReasonInvariant());
@@ -7311,6 +7689,376 @@ test "client pending outbound pump finishes the last accepted frame without anot
     defer allocator.free(received);
     try readExactFd(fds[1], received);
     try std.testing.expectEqualSlices(u8, expected, received);
+}
+
+const PreparedRpcReentrantFreeAllocator = struct {
+    parent: std.mem.Allocator,
+    client: ?*Client = null,
+    prepared: ?*PreparedBlockingRpc = null,
+    armed: bool = false,
+    reentered: bool = false,
+    free_calls: usize = 0,
+    reentry_error: ?PreparedBlockingRpcError = null,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        return self.parent.vtable.alloc(self.parent.ptr, len, alignment, ret_addr);
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        return self.parent.vtable.resize(self.parent.ptr, memory, alignment, new_len, ret_addr);
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        return self.parent.vtable.remap(self.parent.ptr, memory, alignment, new_len, ret_addr);
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        self.free_calls += 1;
+        if (self.armed and !self.reentered) {
+            self.reentered = true;
+            self.client.?.abortPreparedBlockingRpc(self.prepared.?) catch |err| {
+                self.reentry_error = err;
+            };
+        }
+        self.parent.vtable.free(self.parent.ptr, memory, alignment, ret_addr);
+    }
+};
+
+const PreparedRpcAllocatorDriftProbe = struct {
+    parent: std.mem.Allocator,
+    client: ?*Client = null,
+    replacement: std.mem.Allocator,
+    armed: bool = false,
+    drifted: bool = false,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        return self.parent.vtable.alloc(self.parent.ptr, len, alignment, ret_addr);
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        return self.parent.vtable.resize(self.parent.ptr, memory, alignment, new_len, ret_addr);
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        return self.parent.vtable.remap(self.parent.ptr, memory, alignment, new_len, ret_addr);
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        if (self.armed and !self.drifted) {
+            self.drifted = true;
+            self.client.?.allocator = self.replacement;
+        }
+        self.parent.vtable.free(self.parent.ptr, memory, alignment, ret_addr);
+    }
+};
+
+const CrossClientOobReentryAllocator = struct {
+    parent: std.mem.Allocator,
+    foreign: ?*Client = null,
+    foreign_storage: ?*PreparedBlockingRpcStorage = null,
+    armed: bool = false,
+    reentered: bool = false,
+    reentry_error: ?PreparedBlockingRpcError = null,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        if (self.armed and !self.reentered) {
+            self.reentered = true;
+            _ = self.foreign.?.prepareBlockingRpcStorage(
+                self.foreign_storage.?,
+                "host.info",
+                null,
+            ) catch |err| {
+                self.reentry_error = err;
+            };
+        }
+        return self.parent.vtable.alloc(self.parent.ptr, len, alignment, ret_addr);
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        return self.parent.vtable.resize(self.parent.ptr, memory, alignment, new_len, ret_addr);
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        return self.parent.vtable.remap(self.parent.ptr, memory, alignment, new_len, ret_addr);
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        self.parent.vtable.free(self.parent.ptr, memory, alignment, ret_addr);
+    }
+};
+
+test "CR3a-2a checked OOB allocator callback fences a foreign Client before wire ownership" {
+    var probe = CrossClientOobReentryAllocator{ .parent = std.testing.allocator };
+    const checked_allocator = probe.allocator();
+    var owner = Client{
+        .allocator = checked_allocator,
+        .fd = -1,
+        .host_id = 1,
+        .parser = framing.FrameParser.init(checked_allocator),
+    };
+    defer owner.deinit();
+    var foreign = Client{
+        .allocator = std.testing.allocator,
+        .fd = -1,
+        .host_id = 2,
+        .parser = framing.FrameParser.init(std.testing.allocator),
+    };
+    defer foreign.deinit();
+    var foreign_storage: PreparedBlockingRpcStorage = .{};
+    probe.foreign = &foreign;
+    probe.foreign_storage = &foreign_storage;
+
+    const payload = try checked_allocator.dupe(u8, "delta");
+    probe.armed = true;
+    try std.testing.expect(try owner.bufferOutOfBandFrame(.{
+        .header = .{ .kind = .delta_chunk, .stream_id = 7 },
+        .payload = payload,
+    }, checked_allocator));
+    probe.armed = false;
+
+    try std.testing.expect(probe.reentered);
+    try std.testing.expectEqual(error.AdminBusy, probe.reentry_error.?);
+    try std.testing.expect(Client.preparedBlockingRpcStorageSettled(&foreign_storage));
+    try std.testing.expectEqual(@as(u64, 1), foreign.next_request_id);
+    try std.testing.expectEqual(@as(usize, 1), owner.pending_stream.items.len);
+}
+
+test "CR3a-2a prepared execution rejects allocator drift while flushing older outbound" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var probe = PreparedRpcAllocatorDriftProbe{
+        .parent = allocator,
+        .replacement = allocator,
+    };
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var client: Client = .{
+        .allocator = probe.allocator(),
+        .fd = fds[0],
+        .host_id = 0xA11,
+        .parser = framing.FrameParser.init(probe.allocator()),
+    };
+    probe.client = &client;
+    defer {
+        client.allocator = probe.allocator();
+        client.deinit();
+    }
+    const pending = try probe.allocator().dupe(u8, "older");
+    client.pending_outbound = .{ .frame = pending, .stream_id = 7 };
+    var storage: PreparedBlockingRpcStorage = .{};
+    _ = try client.prepareBlockingRpcStorage(&storage, "runtime.detach", null);
+    probe.armed = true;
+    try std.testing.expectError(
+        error.InvalidPreparedRpc,
+        client.preflightPreparedBlockingRpcStorageExecution(&storage),
+    );
+    probe.armed = false;
+    try std.testing.expect(probe.drifted);
+    try std.testing.expect(client.unusable);
+    try std.testing.expect(client.pending_outbound == null);
+    try client.abortPreparedBlockingRpcStorage(&storage);
+}
+
+test "prepared blocking RPC tombstones before allocator free callback reentry" {
+    var probe = PreparedRpcReentrantFreeAllocator{ .parent = std.testing.allocator };
+    var client = Client{
+        .allocator = probe.allocator(),
+        .fd = -1,
+        .host_id = 1,
+        .parser = framing.FrameParser.init(probe.allocator()),
+    };
+    defer client.deinit();
+    var prepared: PreparedBlockingRpc = .{};
+    try client.prepareBlockingRpc(&prepared, "host.info", null);
+    probe.client = &client;
+    probe.prepared = &prepared;
+    probe.free_calls = 0;
+    probe.armed = true;
+    try client.abortPreparedBlockingRpc(&prepared);
+    probe.armed = false;
+    try std.testing.expect(probe.reentered);
+    try std.testing.expectEqual(error.InvalidPreparedRpc, probe.reentry_error.?);
+    try std.testing.expectEqual(@as(usize, 1), probe.free_calls);
+    try std.testing.expectEqual(PreparedBlockingRpcLifecycle.terminal, prepared.lifecycle);
+    try std.testing.expectEqual(@as(usize, 0), prepared.frame.len);
+}
+
+test "prepared blocking RPC owns no wire or request id until exact abort" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    var prepared: PreparedBlockingRpc = .{};
+    try client.prepareBlockingRpc(&prepared, "host.info", null);
+    try std.testing.expectEqual(@as(u64, 1), client.next_request_id);
+    try std.testing.expectEqual(PreparedBlockingRpcLifecycle.prepared, prepared.lifecycle);
+    try client.abortPreparedBlockingRpc(&prepared);
+    try std.testing.expectEqual(@as(u64, 1), client.next_request_id);
+    try std.testing.expectEqual(PreparedBlockingRpcLifecycle.terminal, prepared.lifecycle);
+    try std.testing.expectEqual(@as(usize, 0), prepared.frame.len);
+    try std.testing.expectError(error.InvalidPreparedRpc, client.abortPreparedBlockingRpc(&prepared));
+}
+
+test "prepared blocking RPC rejects copied moved foreign drift and stale duplicate owners" {
+    const allocator = std.testing.allocator;
+    var first = Client{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer first.deinit();
+    var foreign = Client{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 2,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer foreign.deinit();
+
+    var prepared: PreparedBlockingRpc = .{};
+    try first.prepareBlockingRpc(&prepared, "host.info", null);
+    var copied = prepared;
+    try std.testing.expectError(error.MovedOrCopied, first.abortPreparedBlockingRpc(&copied));
+    try std.testing.expectError(error.InvalidPreparedRpc, foreign.abortPreparedBlockingRpc(&prepared));
+
+    prepared.frame[prepared.frame.len - 1] ^= 1;
+    try std.testing.expectError(error.InvalidPreparedRpc, first.executePreparedBlockingRpc(&prepared));
+    prepared.frame[prepared.frame.len - 1] ^= 1;
+    try first.abortPreparedBlockingRpc(&prepared);
+    try std.testing.expectError(error.InvalidPreparedRpc, first.executePreparedBlockingRpc(&prepared));
+}
+
+test "prepared blocking RPC execute consumes id and settles backing on write failure" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    var prepared: PreparedBlockingRpc = .{};
+    try client.prepareBlockingRpc(&prepared, "host.info", null);
+    try std.testing.expectError(error.WriteFailed, client.executePreparedBlockingRpc(&prepared));
+    try std.testing.expectEqual(@as(u64, 2), client.next_request_id);
+    try std.testing.expectEqual(PreparedBlockingRpcLifecycle.terminal, prepared.lifecycle);
+    try std.testing.expectEqual(@as(usize, 0), prepared.frame.len);
+    try std.testing.expectError(error.InvalidPreparedRpc, client.executePreparedBlockingRpc(&prepared));
+    try std.testing.expectError(error.InvalidPreparedRpc, client.abortPreparedBlockingRpc(&prepared));
+}
+
+test "prepared blocking RPC execute reuses exact response correlation and settles request backing" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    socket_server.setNoSigPipe(fds[0]);
+    defer _ = c.close(fds[1]);
+    var client = Client{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    setReadTimeoutMs(fds[0], 1000);
+    setReadTimeoutMs(fds[1], 1000);
+
+    var prepared: PreparedBlockingRpc = .{};
+    try client.prepareBlockingRpc(&prepared, "host.info", null);
+    const expected = try allocator.dupe(u8, prepared.frame);
+    defer allocator.free(expected);
+    const response_frame = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .response, .request_id = prepared.request_id },
+        "{\"result\":{\"prepared\":true}}",
+    );
+    defer allocator.free(response_frame);
+    var peer_ok = false;
+    const peer = try std.Thread.spawn(.{}, callOrderingPeer, .{ fds[1], expected, response_frame, &peer_ok });
+    const response = client.executePreparedBlockingRpc(&prepared) catch |err| {
+        peer.join();
+        return err;
+    };
+    defer allocator.free(response);
+    peer.join();
+    try std.testing.expect(peer_ok);
+    try std.testing.expectEqualStrings("{\"result\":{\"prepared\":true}}", response);
+    try std.testing.expectEqual(@as(u64, 2), client.next_request_id);
+    try std.testing.expectEqual(PreparedBlockingRpcLifecycle.terminal, prepared.lifecycle);
+    try std.testing.expectEqual(@as(usize, 0), prepared.frame.len);
+}
+
+fn checkPreparedBlockingRpcAllocation(allocator: std.mem.Allocator) !void {
+    var client = Client{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    var prepared: PreparedBlockingRpc = .{};
+    client.prepareBlockingRpc(&prepared, "runtime.attach", "{\"runtime_id\":\"01\"}") catch |err| {
+        try std.testing.expectEqual(error.OutOfMemory, err);
+        try std.testing.expectEqual(@as(u64, 1), client.next_request_id);
+        try std.testing.expectEqual(PreparedBlockingRpcLifecycle.pristine, prepared.lifecycle);
+        try std.testing.expectEqual(@as(usize, 0), prepared.frame.len);
+        return err;
+    };
+    try client.abortPreparedBlockingRpc(&prepared);
+}
+
+test "prepared blocking RPC prepare is leak-free at every allocation index" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        checkPreparedBlockingRpcAllocation,
+        .{},
+    );
 }
 
 test "client call flushes accepted nonblocking input before its request frame" {

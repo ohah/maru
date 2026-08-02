@@ -2875,7 +2875,12 @@ pub const AppSession = struct {
     agent_session_archive_detail_request_id: u64 = 0,
     agent_session_archive_completed_ns: i128 = 0,
     agent_session_archive_partial: bool = false,
-    agent_session_archive_scroll_rows: usize = 0,
+    /// Session Dock keeps the retained position in backing pixels so its paint and published
+    /// pointer tree agree even when the first card is only partly visible.
+    agent_session_archive_scroll: chrome.components.session_dock.scroll.SessionDockScrollState = .{},
+    /// Precise AppKit wheel input is fractional in points. This residue belongs only to the dock;
+    /// sharing terminal `wheel_accum` would make one surface steal another's first pixel.
+    agent_session_archive_wheel_residue_px: f64 = 0,
     /// archive 행 선택은 레코드 index만 든다. refresh가 목록을 바꾸면 update 경로에서 범위를 재검증한다.
     agent_session_archive_selected: ?usize = null,
     file_tree_mutation_backend: file_tree_mutation_backend.Backend = undefined,
@@ -3590,8 +3595,8 @@ pub const AppSession = struct {
         self.agent_session_archive_selected = preserved_selected;
         self.rebuildAgentSessionArchiveFilter();
         self.reconcileArchiveSessionTabsAgainstSnapshot();
-        const visible = self.agentSessionArchiveVisibleContentRows();
-        self.agent_session_archive_scroll_rows = @min(self.agent_session_archive_scroll_rows, self.agent_session_archive_projection.visual_rows -| visible);
+        self.agent_session_archive_scroll.clamp(self.agentSessionDockScrollProjection().max_offset_px);
+        self.agent_session_archive_wheel_residue_px = 0;
         if (result.complete) {
             self.agent_session_archive_loading = false;
             self.agent_session_archive_completed_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
@@ -3671,7 +3676,7 @@ pub const AppSession = struct {
             if (self.agent_session_archive_scope != .all) {
                 self.rebuildAgentSessionArchiveFilter();
                 self.agent_session_archive_selected = null;
-                self.agent_session_archive_scroll_rows = 0;
+                self.resetAgentSessionDockScroll();
                 self.metal_dirty = true;
             }
             return;
@@ -3692,7 +3697,7 @@ pub const AppSession = struct {
             self.clearAgentSessionArchiveProjectRoot();
             self.rebuildAgentSessionArchiveFilter();
             self.agent_session_archive_selected = null;
-            self.agent_session_archive_scroll_rows = 0;
+            self.resetAgentSessionDockScroll();
             self.metal_dirty = true;
         }
         if (self.agent_session_archive_project_scope_loading) {
@@ -3741,7 +3746,7 @@ pub const AppSession = struct {
         if (self.agent_session_archive_scope != .all) {
             self.rebuildAgentSessionArchiveFilter();
             self.agent_session_archive_selected = null;
-            self.agent_session_archive_scroll_rows = 0;
+            self.resetAgentSessionDockScroll();
         }
         if (self.agent_session_archive_workspace_scope_requested) {
             self.agent_session_archive_workspace_scope_requested = false;
@@ -3751,7 +3756,7 @@ pub const AppSession = struct {
                 self.agent_session_archive_scope = .workspace;
                 self.rebuildAgentSessionArchiveFilter();
                 self.agent_session_archive_selected = null;
-                self.agent_session_archive_scroll_rows = 0;
+                self.resetAgentSessionDockScroll();
             }
         }
         if (self.agent_session_archive_project_scope_requested) {
@@ -3762,7 +3767,7 @@ pub const AppSession = struct {
                 self.agent_session_archive_scope = .project;
                 self.rebuildAgentSessionArchiveFilter();
                 self.agent_session_archive_selected = null;
-                self.agent_session_archive_scroll_rows = 0;
+                self.resetAgentSessionDockScroll();
             }
         }
         self.metal_dirty = true;
@@ -3787,7 +3792,7 @@ pub const AppSession = struct {
         self.clearAgentSessionArchiveScopeObservedCwd();
         self.rebuildAgentSessionArchiveFilter();
         self.agent_session_archive_selected = null;
-        self.agent_session_archive_scroll_rows = 0;
+        self.resetAgentSessionDockScroll();
     }
 
     fn selectAgentSessionArchiveScope(self: *AppSession, scope: AgentSessionArchiveScope) void {
@@ -3811,7 +3816,7 @@ pub const AppSession = struct {
         self.agent_session_archive_scope = scope;
         self.rebuildAgentSessionArchiveFilter();
         self.agent_session_archive_selected = null;
-        self.agent_session_archive_scroll_rows = 0;
+        self.resetAgentSessionDockScroll();
         self.metal_dirty = true;
     }
 
@@ -13018,10 +13023,36 @@ pub const AppSession = struct {
         return if (index < self.file_tree_rows.items.len) index else null;
     }
 
-    fn agentSessionArchiveVisibleContentRows(self: *const AppSession) usize {
-        if (self.cell_height_px == 0) return 0;
-        const rows = self.dockGeometry().tree_content.h / self.cell_height_px;
-        return rows -| 2;
+    fn agentSessionDockContentViewportHeightPx(self: *const AppSession) u32 {
+        const content = self.dockGeometry().tree_content;
+        const m = chrome.components.session_dock.types.Metrics.fromCellHeight(self.cell_height_px);
+        const fixed_h = m.pad * 2 + m.header_h + m.scope_h + m.search_h + m.gap * 3;
+        return content.h -| fixed_h;
+    }
+
+    fn agentSessionDockProjectionKind(entries: []const agent_session_archive_view.Entry, index: usize) chrome.components.session_dock.scroll.Kind {
+        return switch (entries[index]) {
+            .group => .group,
+            .card => .card,
+        };
+    }
+
+    /// This is the sole translation from archive entries to fixed chrome pixel metrics. It is pure
+    /// and bounded (records are capped at 500), and therefore safe on the render/input path.
+    fn agentSessionDockScrollProjection(self: *const AppSession) chrome.components.session_dock.scroll.Projection {
+        const m = chrome.components.session_dock.types.Metrics.fromCellHeight(self.cell_height_px);
+        return chrome.components.session_dock.scroll.project(
+            self.agent_session_archive_projection.entries.items,
+            agentSessionDockProjectionKind,
+            .{ .group_h_px = m.group_h, .card_h_px = m.card_h, .gap_px = m.gap },
+            self.agentSessionDockContentViewportHeightPx(),
+            self.agent_session_archive_scroll.offset_y_px,
+        );
+    }
+
+    fn resetAgentSessionDockScroll(self: *AppSession) void {
+        self.agent_session_archive_scroll.reset();
+        self.agent_session_archive_wheel_residue_px = 0;
     }
 
     fn rebuildAgentSessionArchiveFilter(self: *AppSession) void {
@@ -13086,8 +13117,8 @@ pub const AppSession = struct {
             };
         }
         self.rebuildAgentSessionArchiveProjection();
-        const visible = self.agentSessionArchiveVisibleContentRows();
-        self.agent_session_archive_scroll_rows = @min(self.agent_session_archive_scroll_rows, self.agent_session_archive_projection.visual_rows -| visible);
+        self.agent_session_archive_scroll.clamp(self.agentSessionDockScrollProjection().max_offset_px);
+        self.agent_session_archive_wheel_residue_px = 0;
         self.metal_dirty = true;
     }
 
@@ -13112,6 +13143,7 @@ pub const AppSession = struct {
             else => return true,
         }
         self.rebuildAgentSessionArchiveFilter();
+        self.resetAgentSessionDockScroll();
         // A query may hide the selected record; do not leave a hidden archive
         // identity selected for the later explicit action/tab path.
         self.agent_session_archive_selected = null;
@@ -20947,6 +20979,35 @@ pub const AppSession = struct {
         // 그 외 오버레이(notice·context_menu·find·palette·settings)가 열려 있으면 휠을 **소비**한다 — 터미널/스크롤백으로
         // 안 흘린다(클릭이 mouse()에서 막히는 것과 짝, 오버레이는 배타적이라 한 번에 하나). 자체 스크롤은 아직 없다(후속).
         if (self.anyOverlayOpen()) return;
+        const session_dock_wheel_target = self.dockVisible() and self.dock.view == .agent_sessions and
+            layout_math.pointInRect(x_px, y_px, self.dockGeometry().tree_content);
+        // Do not carry a sub-pixel trackpad remainder from the dock into a later re-entry. The
+        // next dock gesture must start from its own physical direction and owner.
+        if (!session_dock_wheel_target) self.agent_session_archive_wheel_residue_px = 0;
+        if (session_dock_wheel_target) {
+            // The dock consumes its own wheel event even at either clamp boundary. Otherwise a
+            // trackpad gesture that reaches the list end leaks into the terminal/PTy behind it.
+            if (!std.math.isFinite(delta_y)) return;
+            if (delta_y * self.agent_session_archive_wheel_residue_px < 0)
+                self.agent_session_archive_wheel_residue_px = 0;
+            const m = chrome.components.session_dock.types.Metrics.fromCellHeight(self.cell_height_px);
+            const unit: f64 = if (precise)
+                @as(f64, @floatFromInt(self.scale_milli)) / 1000.0
+            else
+                @as(f64, @floatFromInt(m.card_h));
+            const next_residue = self.agent_session_archive_wheel_residue_px + delta_y * unit * @as(f64, self.appearance.scroll_multiplier);
+            // A finite NSEvent delta can still overflow after scaling. Clamp before conversion so
+            // malformed/automated input cannot trap the main thread at `@intFromFloat`.
+            if (!std.math.isFinite(next_residue)) return;
+            const safe_limit: f64 = @floatFromInt(std.math.maxInt(i64) - 1);
+            self.agent_session_archive_wheel_residue_px = std.math.clamp(next_residue, -safe_limit, safe_limit);
+            const whole: i64 = @intFromFloat(std.math.trunc(self.agent_session_archive_wheel_residue_px));
+            self.agent_session_archive_wheel_residue_px -= @as(f64, @floatFromInt(whole));
+            const projection = self.agentSessionDockScrollProjection();
+            if (whole != 0 and self.agent_session_archive_scroll.scrollByPx(-whole, projection.max_offset_px))
+                self.metal_dirty = true;
+            return;
+        }
         // 방향이 뒤집히면 1줄 미만 잔여를 버린다 — 이전 방향의 residue가 첫 반대 틱을 상쇄해
         // 방향 전환이 굼뜨게 느껴지는 것 방지(iTerm2/xterm.js 동작).
         if (std.math.isFinite(delta_y) and delta_y * self.wheel_accum < 0) self.wheel_accum = 0;
@@ -20966,19 +21027,6 @@ pub const AppSession = struct {
             const clamped: usize = @intCast(std.math.clamp(next, 0, @as(i64, @intCast(max_scroll))));
             if (clamped != self.scm_scroll_rows) {
                 self.scm_scroll_rows = clamped;
-                self.metal_dirty = true;
-            }
-            return;
-        }
-        if (self.dockVisible() and self.dock.view == .agent_sessions and
-            layout_math.pointInRect(x_px, y_px, self.dockGeometry().tree_content))
-        {
-            const visible = self.agentSessionArchiveVisibleContentRows();
-            const max_scroll = self.agent_session_archive_projection.visual_rows -| visible;
-            const next = @as(i64, @intCast(self.agent_session_archive_scroll_rows)) - @as(i64, lines);
-            const clamped: usize = @intCast(std.math.clamp(next, 0, @as(i64, @intCast(max_scroll))));
-            if (clamped != self.agent_session_archive_scroll_rows) {
-                self.agent_session_archive_scroll_rows = clamped;
                 self.metal_dirty = true;
             }
             return;
@@ -30700,7 +30748,8 @@ pub const AppSession = struct {
         var arena_state = std.heap.ArenaAllocator.init(self.allocator);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
-        const items = self.buildAgentSessionDockItems(arena, content) catch return;
+        const scroll_projection = self.agentSessionDockScrollProjection();
+        const items = self.buildAgentSessionDockItems(arena, scroll_projection) catch return;
         const props = chrome.components.session_dock.types.Props{
             .viewport_px = .{ .width = @floatFromInt(content.w), .height = @floatFromInt(content.h) },
             .cell_width_px = self.cell_width_px,
@@ -30722,6 +30771,7 @@ pub const AppSession = struct {
             .loading = self.agent_session_archive_loading and self.agent_session_archive_records.items.len == 0,
             .refreshing = self.agent_session_archive_loading and self.agent_session_archive_records.items.len > 0,
             .spinner_phase = @intCast(self.agent_spin_frame & 7),
+            .content_first_item_origin_y_px = scroll_projection.first_origin_y_px,
             .items = items,
         };
         const node_count = items.len + 7;
@@ -30786,27 +30836,14 @@ pub const AppSession = struct {
     fn buildAgentSessionDockItems(
         self: *const AppSession,
         allocator: std.mem.Allocator,
-        content: maru.session.SplitRect,
+        scroll_projection: chrome.components.session_dock.scroll.Projection,
     ) ![]chrome.components.session_dock.types.Item {
         var out: std.ArrayList(chrome.components.session_dock.types.Item) = .empty;
-        const m = chrome.components.session_dock.types.Metrics.fromCellHeight(self.cell_height_px);
-        const fixed_h = m.pad * 2 + m.header_h + m.scope_h + m.search_h + m.gap * 3;
-        const available_h = content.h -| fixed_h;
-        if (available_h == 0) return try out.toOwnedSlice(allocator);
-        const first_entry = if (self.agent_session_archive_projection.visualRowAt(self.agent_session_archive_scroll_rows)) |row|
-            row.entry_index
-        else
-            0;
-        var used_h: u32 = 0;
-        var entry_index = first_entry;
+        if (scroll_projection.first_index == scroll_projection.end_exclusive) return try out.toOwnedSlice(allocator);
+        var entry_index = scroll_projection.first_index;
         const now_ns: i128 = std.Io.Clock.real.now(self.io).nanoseconds;
-        while (entry_index < self.agent_session_archive_projection.entries.items.len) : (entry_index += 1) {
+        while (entry_index < scroll_projection.end_exclusive) : (entry_index += 1) {
             const entry = self.agent_session_archive_projection.entries.items[entry_index];
-            const item_h = switch (entry) {
-                .group => m.group_h,
-                .card => m.card_h,
-            } + m.gap;
-            if (out.items.len > 0 and used_h +| item_h > available_h) break;
             switch (entry) {
                 .group => |group_index| {
                     if (group_index >= self.agent_session_archive_projection.groups.items.len) continue;
@@ -30839,7 +30876,6 @@ pub const AppSession = struct {
                     } });
                 },
             }
-            used_h +|= item_h;
         }
         return try out.toOwnedSlice(allocator);
     }

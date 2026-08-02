@@ -180,6 +180,7 @@ fn scenarioFromEnvValue(raw: []const u8) ?lab.ScenarioId {
     if (std.mem.eql(u8, raw, "empty")) return .empty;
     if (std.mem.eql(u8, raw, "loading")) return .loading;
     if (std.mem.eql(u8, raw, "retained-list")) return .retained_list;
+    if (std.mem.eql(u8, raw, "partial-scroll")) return .partial_scroll;
     return null;
 }
 
@@ -188,6 +189,7 @@ fn artifactName(id: lab.ScenarioId) []const u8 {
         .empty => "empty",
         .loading => "loading",
         .retained_list => "retained-list",
+        .partial_scroll => "partial-scroll",
     };
 }
 
@@ -297,10 +299,12 @@ test "Chrome Lab scenario parser keeps one process bound to one deterministic ar
     try std.testing.expectEqual(lab.ScenarioId.empty, scenarioFromEnvValue("empty").?);
     try std.testing.expectEqual(lab.ScenarioId.loading, scenarioFromEnvValue("loading").?);
     try std.testing.expectEqual(lab.ScenarioId.retained_list, scenarioFromEnvValue("retained-list").?);
+    try std.testing.expectEqual(lab.ScenarioId.partial_scroll, scenarioFromEnvValue("partial-scroll").?);
     try std.testing.expect(scenarioFromEnvValue("unknown") == null);
     try std.testing.expectEqualStrings("empty", artifactName(.empty));
     try std.testing.expectEqualStrings("loading", artifactName(.loading));
     try std.testing.expectEqualStrings("retained-list", artifactName(.retained_list));
+    try std.testing.expectEqualStrings("partial-scroll", artifactName(.partial_scroll));
 }
 
 test "Chrome Lab PPM probe rejects background-only and malformed readbacks" {

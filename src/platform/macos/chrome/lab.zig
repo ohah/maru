@@ -10,7 +10,7 @@ const lowering = @import("metal_lowering.zig");
 const chrome = maru.chrome;
 const session_dock = chrome.components.session_dock;
 
-pub const ScenarioId = enum { empty, loading, retained_list };
+pub const ScenarioId = enum { empty, loading, retained_list, partial_scroll };
 
 pub const Scenario = struct {
     id: ScenarioId,
@@ -61,12 +61,19 @@ pub fn buildFrame(
         .cell_width_px = 8,
         .cell_height_px = 16,
         .snapshot_generation = 1,
-        .displayed_count = if (scenario.id == .retained_list) 3 else 0,
+        .displayed_count = if (scenario.id == .empty or scenario.id == .loading) 0 else 3,
         .loading = scenario.id == .loading,
         .refreshing = false,
         .spinner_phase = @intCast(scenario.now_ns % 8),
         .search = if (scenario.id == .empty) "" else "",
-        .items = if (scenario.id == .retained_list) &retained else &.{},
+        // The partial fixture starts at the first card with an integer negative origin. It is the
+        // same component geometry used by the host virtualization path, not a screenshot-only crop.
+        .content_first_item_origin_y_px = if (scenario.id == .partial_scroll) -28 else 0,
+        .items = switch (scenario.id) {
+            .retained_list => &retained,
+            .partial_scroll => retained[1..],
+            .empty, .loading => &.{},
+        },
     };
     const session_frame = try session_dock.build.build(dock_props, .{
         .nodes = buffers.dock_nodes,

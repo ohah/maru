@@ -22,6 +22,73 @@ pub const Result = struct {
     recorded_action: ?chrome.ui.tree.UiActionId = null,
 };
 
+/// Caller-owned fixed storage. A Lab scenario cannot allocate a layout cache or retain a previous
+/// frame; the next scenario rebuild overwrites this candidate exactly like the normal Chrome path.
+pub const FrameBuffers = struct {
+    entries: []chrome.ui.tree.RectEntry,
+    items: []chrome.ui.layout.Item,
+    flex_scratch: []chrome.ui.layout.FlexScratch,
+    child_rects: []chrome.ui.layout.UiRect,
+    ops: []chrome.draw.Op,
+};
+
+pub const Frame = struct {
+    tree: chrome.ui.tree.UiRectTree,
+    draws: chrome.ChromeDraw,
+};
+
+/// Produces a deterministic, effect-free card fixture through the product UI tree and paint path.
+/// Text nodes intentionally remain semantic until the later CoreText/readback slice owns shaping.
+pub fn buildFrame(
+    scenario: Scenario,
+    tokens: *const chrome.Tokens,
+    buffers: FrameBuffers,
+) !Frame {
+    const title: []const u8 = switch (scenario.id) {
+        .empty => "No sessions yet",
+        .loading => "Analyzing sessions",
+        .retained_list => "Notion document root cause",
+    };
+    const visual: chrome.ui.tree.CardVisual = switch (scenario.id) {
+        .empty => .{ .variant = .surface, .paint = .{} },
+        .loading => .{ .variant = .raised, .paint = .{} },
+        .retained_list => .{ .variant = .selected, .paint = .{} },
+    };
+    const root = chrome.ui.tree.container(.{
+        .id = 1,
+        .style = .{ .padding = .{ .top = 16, .right = 16, .bottom = 16, .left = 16 } },
+        .overflow = .clip,
+    }, &.{chrome.ui.tree.card(.{
+        .id = 2,
+        .style = .{ .height = .{ .px = 72 }, .padding = .{ .top = 12, .right = 12, .bottom = 12, .left = 12 } },
+        .variant = visual.variant,
+        .paint = visual.paint,
+        .action = .{ .id = 100 },
+        .overflow = .clip,
+    }, &.{chrome.ui.tree.text(.{ .id = 3, .value = title, .tone = .primary })})});
+
+    const tree = try chrome.ui.tree.build(root, .{
+        .root_size = scenario.viewport_px,
+        .max_entries = 3,
+        .max_depth = 3,
+    }, .{
+        .entries = buffers.entries,
+        .items = buffers.items,
+        .flex_scratch = buffers.flex_scratch,
+        .child_rects = buffers.child_rects,
+    });
+    const draws = try chrome.ui.paint.paint(tree, .{}, tokens, .sidebar, .{ .ops = buffers.ops });
+    return .{ .tree = tree, .draws = draws };
+}
+
+pub fn dispatchRecordedAction(
+    state: *chrome.ui.interaction.InteractionState,
+    frame: Frame,
+    event: chrome.ui.interaction.UiPointerEvent,
+) !?chrome.ui.tree.UiActionId {
+    return (try chrome.ui.interaction.dispatch(state, frame.tree, event)).action;
+}
+
 /// Lowers one already-built synthetic draw frame through the production lowerer. The caller owns
 /// scenario construction and raster deinit; this leaf cannot create an OS surface or dispatch an
 /// external effect.

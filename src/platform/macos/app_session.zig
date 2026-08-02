@@ -499,6 +499,13 @@ fn archiveSnapshotSelectionIndex(
     return null;
 }
 
+/// Scope refresh is driven by the cheap runtime observation, never a
+/// filesystem comparison. A same-pane `cd` must therefore be distinguishable
+/// from a repeated frame carrying the same CWD.
+fn agentSessionArchiveObservedCwdChanged(previous: ?[]const u8, current: []const u8) bool {
+    return if (previous) |path| !std.mem.eql(u8, path, current) else true;
+}
+
 test "archive scope admits only canonical cwd beneath the exact root boundary" {
     const parsed = maru.session.agent_session_archive.Parsed{
         .provider = .codex,
@@ -551,6 +558,12 @@ test "archive snapshot replacement preserves selection only for the exact source
     try std.testing.expectEqual(@as(?usize, 1), archiveSnapshotSelectionIndex(&selected, &replacement));
     replacement[1].inode = 9;
     try std.testing.expect(archiveSnapshotSelectionIndex(&selected, &replacement) == null);
+}
+
+test "archive scope refresh detects same-pane cwd changes but ignores repeated observations" {
+    try std.testing.expect(agentSessionArchiveObservedCwdChanged(null, "/workspace/a"));
+    try std.testing.expect(!agentSessionArchiveObservedCwdChanged("/workspace/a", "/workspace/a"));
+    try std.testing.expect(agentSessionArchiveObservedCwdChanged("/workspace/a", "/workspace/b"));
 }
 
 test "archive relative age uses the worker mtime without filesystem access" {
@@ -3649,10 +3662,7 @@ pub const AppSession = struct {
             }
             return;
         }
-        const cwd_changed = if (self.agent_session_archive_scope_observed_cwd) |previous|
-            !std.mem.eql(u8, previous, cwd)
-        else
-            true;
+        const cwd_changed = agentSessionArchiveObservedCwdChanged(self.agent_session_archive_scope_observed_cwd, cwd);
         if (!cwd_changed and requested == null) return;
         const observed_cwd = self.allocator.dupe(u8, cwd) catch return;
         const owned_cwd = self.allocator.dupe(u8, cwd) catch {

@@ -1301,6 +1301,17 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run all Zig tests");
     test_step.dependOn(&run_core_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+    // ML2a/ML2b Chrome tree는 std만 읽는 pure layout·pointer state seam이다. 제품 host에
+    // 연결되기 전에도 기본 test에 넣어 Container/clip/capture contract가 CI 밖으로 새지 않게 한다.
+    const chrome_ui_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/chrome/ui_interaction.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_chrome_ui_tests = b.addRunArtifact(chrome_ui_tests);
+    test_step.dependOn(&run_chrome_ui_tests.step);
     // update_check.zig는 std만 의존하는 순수 로직(tag 파싱·semver 비교)이라 macOS smoke가 아니라
     // 기본 Zig test에서 어느 플랫폼에서든 돌린다(인앱 새 버전 안내의 판정 동작 고정).
     const update_check_tests = addProjectTest(b, .{

@@ -83,18 +83,22 @@ import하지 않는다. children/slot은 명시 prop으로 넘기며, component�
 다음처럼 tree의 실제 child로 작성한다.
 
 ```zig
-const tree = ui.column(.{ .id = .session_dock, .style = .{ .gap = 8 } }, &.{
+const tree = ui.container(.{ .id = .session_dock, .direction = .column, .style = .{ .gap = 8 } }, &.{
     ui.card(.{ .id = session_id, .action = .open_archive }, &.{
-        ui.text(.{ .value = "adsf" }),
+        ui.text(.{ .value = "adsf", .max_lines = 2, .overflow = .ellipsis }),
     }),
 });
 ```
 
-`column`·`card`·`text`는 `UiNode` value를 반환하는 작은 Zig 함수일 뿐이고, React
-runtime, virtual DOM diff, arbitrary callback closure를 만들지 않는다. host가 immutable
-snapshot마다 frame arena에 이 tree를 만들고, ML2a가 재귀 layout해 `UiRectTree`를 낸다.
-ML1의 `layoutFlex(..., []Item, ...)`는 이때 한 parent의 sibling children을 계산하는
-순수 solver이며, 아직 component tree API나 제품 UI를 구현했다는 뜻이 아니다.
+`container`·`card`·`text`는 `UiNode` value를 반환하는 작은 Zig 함수일 뿐이고, React runtime,
+virtual DOM diff, arbitrary callback closure를 만들지 않는다. `Container`는 CSS 클래스가 아니라
+native rect solver에 direction/gap/align을 전달하는 **chrome 내부 구조 노드**다. `Column`/`Row`
+및 `Flex`는 shadcn component도 아니고 사용자-facing 디자인 시스템 API로 만들지 않는다. 제품
+API에는 `Card`·`Text`·후속 `Button`/`Input`처럼 의미 있는 component만 보이고, 각 component가
+필요할 때 내부 `Container`를 조합한다. host가 immutable snapshot마다 이 tree를 만들고, ML2a가
+재귀 layout해 `UiRectTree`를 낸다. ML1의 `layoutFlex(..., []Item, ...)`는 이때 한 parent의
+sibling children을 계산하는 순수 solver이며, 아직 component tree API나 제품 UI를 구현했다는
+뜻이 아니다.
 
 ### ML2a tree 경계
 
@@ -127,10 +131,11 @@ completed snapshot을 유지한다. 이를 위해 candidate frame buffer는 publ
 분리하며, in-place rebuild는 금지한다. publish 시에는 old tree를 retire하기 전에
 capture/focus의 stale identity를 cancel하고, 그 뒤 old frame arena를 회수한다.
 
-`column`, `card`, `text` builder는 이 tagged node value를 만들 뿐 TUI cell 수를
+`container`, `card`, `text` builder는 이 tagged node value를 만들 뿐 TUI cell 수를
 계산하거나 ANSI 문자열을 반환하지 않는다. `card`의 action은 callback이 아니라 stable
-action identity와 enabled policy이고, host가 나중에 dispatch한다. text measurement는
-ML1 callback seam을 통하며 실제 CoreText measure와 paint는 ML3에서 연결한다.
+action identity와 enabled policy이고, host가 나중에 dispatch한다. 현재 ML1의 scalar
+`MeasureFn`은 synthetic layout fixture 전용 seam이다. 제품 `Text`가 paint되기 전 ML3에서
+측정과 paint가 공유하는 immutable `TextLayout` artifact로 반드시 교체한다.
 
 ## 3. typed style과 responsive sizing
 
@@ -188,6 +193,68 @@ pub const UiStyle = struct {
   radius, shadow, opacity, overflow clip만 둔다. style은 immutable input이고 paint가
   layout rect나 hit target을 몰래 바꾸지 않는다.
 
+### Text layout은 flex solver의 외부 입력이 아니라 frame artifact다
+
+`Text`의 폭과 높이는 문자 수·셀 폭으로 추정하지 않는다. font family/weight/size,
+fallback face, letter spacing, line height, writing direction, Unicode grapheme 및 line-break
+규칙, 그리고 최종 content width가 모두 결과를 바꾼다. 따라서 layout과 Metal paint가 서로
+다른 곳에서 같은 문자열을 다시 잘라서는 안 된다.
+
+다음 선언은 **ML3 제품 Text contract의 목표 형태**다. 현재 `ui_tree.zig`의 동명
+`TextOptions`는 ML1 synthetic `MeasureFn` fixture seam이므로 이 필드를 아직 제공하지
+않으며, ML3에서 한 번에 교체한다.
+
+```zig
+pub const TextOptions = struct {
+    id: UiId,
+    value: []const u8,
+    wrap: TextWrap = .unicode,
+    max_lines: ?u16 = null,
+    overflow: TextOverflow = .clip,
+};
+
+pub const TextWrap = enum { unicode, none };
+pub const TextOverflow = enum { clip, ellipsis };
+```
+
+- `.unicode`는 공백만 찾는 word-wrap이 아니라 UAX #14 line-break opportunity와 grapheme
+  cluster 경계를 따른다. 한글/NFD 조합·emoji ZWJ·variation selector 내부에는 줄바꿈하거나
+  `…`를 끼우지 않는다. `.none`은 한 줄만 만들며 `max_lines`가 `1`인 것과 동등한 visible
+  line limit을 가진다. `max_lines=0`은 layout diagnostic으로 fail-close하며, `max_lines=1`
+  과 `.none`을 함께 준 경우에는 한 줄 규칙을 중복 적용할 뿐 별도 의미를 만들지 않는다.
+- `max_lines=null`은 필요한 줄 수만큼 자연 높이를 만든다. 유한한 `max_lines` 또는 `.none`
+  에서 content가 넘칠 때만 `overflow`가 적용된다. `.ellipsis`는 마지막 **표시** 줄에 U+2026을
+  포함해 다시 shape하여 들어가는 가장 긴 grapheme prefix를 선택한다. `…`가 fallback face를
+  써도 실제 advance를 다시 측정한다. content width가 `…` 하나의 advance보다도 좁으면 partial
+  ellipsis를 그리지 않고 visible glyph run을 비운다. `.clip`은 glyph run의 clip 밖 부분만
+  숨기며 원문 prop은 줄이지 않는다. accessibility/copy 노출은 별도 platform contract가 생길
+  때 이 원문 prop을 소비해야 하며, TextLayout이 자체적으로 문자열을 바꾸지 않는다.
+- host는 theme/config에서 `ResolvedTextStyle`(primary face·size·weight·line height·letter
+  spacing·locale/direction)을 snapshot 시작 시 한 번 정한다. `TextLayoutRequest`는 이 style,
+  원문, wrap/limit/overflow, final content width를 key로 삼고, text engine은 caller frame
+  arena에 `TextLayoutArtifact`(content size, visible line range, did_truncate, shaped glyph
+  runs)를 만든다. `UiRectTree`의 text entry와 Metal paint는 같은 artifact handle만 읽는다.
+- 최초 제품 Text slice에서 `.unicode`, `max_lines`, `.ellipsis`를 쓰는 node의 final content
+  width는 explicit width 또는 parent cross-axis stretch로 **먼저 definite**해야 한다. session
+  card처럼 vertical container의 stretch child는 이 규칙을 만족한다. horizontal flex line에서
+  wrap-dependent intrinsic width를 서로 추측하게 만드는 tree는 `IndefiniteTextWidth` diagnostic으로
+  candidate snapshot을 fail-close한다. final border/content rect가 정해진 뒤에는 final width key로
+  artifact를 얻어야 하며, preliminary width의 shape를 paint하는 것은 금지한다.
+- multi-line text의 intrinsic main-axis sizing, flex-wrap, min-content/max-content reflow는 이
+  first consumer 범위 밖이다. 이를 열 때에는 Taffy behavior fixture를 oracle로 삼되, available
+  width가 바뀌는 모든 pass에서 line count·card height·glyph artifact가 같은 final width key로
+  수렴하는 별도 solver slice를 추가한다. 그 전에는 임의의 pass 횟수나 문자열 폭 추정으로
+  fallback하지 않는다.
+- font 설정·fallback registry generation·scale·available width·text props 중 하나가 바뀌면
+  해당 artifact만 invalidation한다. UI frame path는 font file I/O나 worker wait를 하지 않고,
+  이미 renderer 수명과 함께 유지되는 font identity registry 및 frame-owned shape result만
+  소비한다. 제품 CoreText adapter의 thread affinity와 glyph-run ABI는 ML3에서 별도 정한다.
+
+Taffy(`references/taffy`, 검토 commit `945de0d`)는 tree+style+measure callback으로 flex/grid
+rect를 계산하지만 text shaping 자체는 제공하지 않는다. Maru는 이 사실을 layout API와 component
+API를 분리하는 benchmark로만 사용한다. Rust crate/FFI/WASM을 제품에 넣거나 Taffy의 자료구조·
+제어 흐름을 이식하지 않는다.
+
 ## 4. Flex 먼저, Grid는 예약
 
 첫 solver는 column/row flex만 구현한다. direction, justify-content, align-items,
@@ -207,11 +274,11 @@ fixture를 같은 PR에서 추가한다. 지원하지 않는 layout value를 조
 하는 방식은 허용하지 않는다. 세션 도크의 header, scope tabs, cards, detail action
 row는 flex로 완성한다.
 
-Taffy는 제품 의존성이 아니라 layout behavior의 benchmark/oracle이다. Taffy가
-CSS Flexbox·Grid·Block, tree API, text 같은 동적 content의 custom measurement를
-제공하므로 typed style vocabulary와 edge-case fixture를 비교하는 데 사용한다.
-Maru는 Rust crate나 WASM/FFI를 shipping path에 넣지 않고, synthetic layout input과
-computed rect expected result를 독립 fixture로 유지한다.
+Taffy는 제품 의존성이 아니라 layout behavior의 benchmark/oracle이다. Taffy의 공개 tree/style
+모델은 component library가 아니라 flex·grid·block rect 계산기이며, 동적 content는 caller가
+measure callback으로 제공한다. 이 분리는 `Card`/`Text` 같은 의미 component와 내부 container
+solver를 분리해야 한다는 Maru의 근거다. Maru는 Rust crate나 WASM/FFI를 shipping path에 넣지
+않고, synthetic layout input과 computed rect expected result를 독립 fixture로 유지한다.
 
 ## 5. Metal paint와 입력 정합
 
@@ -243,22 +310,102 @@ pressed, focus, pointer capture, scroll offset은 `ChromeHost`가 소유하는 U
    이름이 아니라 ML2에서 추가하는 layout-layer DTO다. ML2는 기존 backing-px
    `down/move/up` 변환을 보존하면서 `scroll`과 monotonic timestamp를 같은 adapter
    경계에서 보강하고, platform → `ChromeHost` event mapping이 하나뿐임을 test로 고정한다.
-2. `ChromeHost`는 같은 `UiRectTree`를 z-order와 clip chain 역순으로 hit-test해
-   target stable identity를 찾고, move에서 이전/새 target을 비교해 hover enter/leave를
-   만든다. 바뀐 두 rect만 dirty로 표시한다.
+2. `ChromeHost`는 ML2b 순수 상태 머신에 같은 `UiRectTree`를 주어 z-order와 clip chain
+   역순 hit-test를 수행한다. move의 hover enter/leave는 이전/새 target의 two-dirty fast
+   path를 쓰고, focus/pressed까지 바뀌는 전이는 모든 변경 visual identity의 bounded dirty
+   set을 반환한다.
 3. down은 target identity를 pointer capture로 보관한다. 이후 move/up은 포인터가
    target 밖으로 나가거나 다른 element 위를 지나도 capture target에 보낸다. up은
    down/up의 action identity와 enabled policy가 모두 여전히 맞을 때만 click Action을
    만든다. drag threshold를 넘으면 click Action 대신 component가 선언한 drag intent만
    허용한다. layout tree mutation, snapshot swap, surface deactivation, capture target
-   identity 제거는 capture를 `cancelled`로 끝내 hover/pressed를 지우고 이후 up Action을
-   만들지 않는다.
+   identity 제거는 capture를 `cancelled`로 끝내 pressed를 지우고 이후 up Action을 만들지
+   않는다. hover/focus 보존·정리는 새 enabled snapshot을 기준으로 `reconcile`이 결정한다.
 4. wheel/trackpad는 hit target의 scroll owner만 소비하고, viewport clamp 뒤 같은
    rect tree를 다시 사용한다. pointer action과 keyboard focus action은 같은 stable
    identity를 통해 `Action`으로 합류한다.
 5. component는 `Action` intent만 반환한다. host dispatcher만 resume/reveal/new-Term
    같은 side effect를 실행하며, Lab dispatcher는 recorded action만 남겨 filesystem,
    provider, process 실행을 절대 하지 않는다.
+
+### ML2b interaction 계약
+
+ML2b는 `src/chrome/ui_interaction.zig`의 순수 상태 머신이다. `ui_tree.zig`가
+immutable `UiRectTree`를 만들고, `ui_interaction.zig`가 그 snapshot을 **빌려서만**
+hit-test한다. 어느 쪽도 `ChromeHost`, `AppSession`, provider archive, Metal draw를
+import하지 않는다. 따라서 실제 macOS adapter는 기존 `input.PointerEvent`를 이 DTO로
+한 번 변환하고, `ChromeHost`는 반환 intent와 repaint 요구만 platform에 전달한다.
+
+```zig
+pub const UiPointerEvent = struct {
+    phase: enum { move, down, up, cancel },
+    x_px: f64,
+    y_px: f64,
+    button: input.PointerButton = .left,
+    timestamp_ns: u64,
+};
+
+pub const InteractionState = struct {
+    hovered: ?UiId = null,
+    focused: ?UiId = null,
+    capture: ?Capture = null,
+};
+
+pub const Dispatch = struct {
+    action: ?UiActionId = null,
+    /// frame arena가 소유하는 bounded, insertion-order, duplicate-free repaint set.
+    /// ML2b state는 hovered/focused/capture 세 visual identity를 동시에 바꿀 수 있으므로
+    /// two-rect hover fast path보다 넓은 상한을 둔다.
+    dirty: DirtySet = .{},
+};
+
+pub const DirtySet = struct {
+    ids: [4]?UiId = .{ null, null, null, null },
+};
+```
+
+- `InteractionState`는 visual prop의 source다. `Card` paint는 immutable node prop과
+  `hovered/focused/capture`의 id equality만 읽어 hover·pressed·focus variant를 고른다.
+  component API에 arbitrary `onHover` closure나 provider callback을 넣지 않는다.
+- hit-test 후보는 preorder의 **역순**으로 검사한다. 좌표가 NaN/∞이면 즉시 target 없음이며,
+  유한 좌표도 candidate의 half-open `rect`(`x <= px < x+width`, `y <= py < y+height`)와
+  `effective_clip` 양쪽 안에 있어야 한다. clip 밖이면 후보도 그 subtree도 선택할 수 없다.
+  후보의 `UiAction`이 없거나 `enabled=false`이면 포인터 focus·capture·click target이 될 수
+  없다. `text`처럼 inert node는 hit-test를 가로채지 않아 action을 가진 조상 `Card`가
+  선택될 수 있다.
+- `dirty`는 상태 전/후를 비교해 visual identity(`hovered`, `focused`, `capture`)가 바뀐 모든
+  id를 insertion-order·중복 없이 담는다. ML2b에는 이 상태가 세 개뿐이므로 fixed `[4]`로
+  충분하며 overflow는 programmer error로 fail-close한다. `move`의 hover A→B는 여전히 정확히
+  two-dirty fast path이고, 같거나 둘 다 null이면 repaint 요구가 없다. `down`은 left button의
+  enabled target만 `focused` 및 `capture`로 기록하고 pressed variant를 시작하며, 같은 event의
+  hit target으로 hover도 갱신한다. `up`/`cancel`은 capture를 끝낸 뒤 현재 좌표의 enabled
+  target으로 hover를 다시 계산한다. 이 전이 규칙을 통해 drag 뒤 pointer가 놓인 위치와
+  hover paint가 한 frame에서 일치한다.
+- ML2b는 pointer id 없는 single-primary-pointer protocol이다. left capture가 남은 상태로 또
+  `down`이 오면 기존 capture를 action 없이 먼저 cancel한 뒤 새 `down`을 처리한다. capture는
+  left `up` 또는 `cancel`에서만 끝내며, right/other `up`은 left capture와 focus를 지우거나
+  action을 만들지 않는다. `cancel`은 button 값과 무관하게 action 0으로 capture를 끝낸다.
+- capture에는 down 당시 `UiId`와 `UiActionId`를 함께 보관한다. `up`은 좌표가 target
+  밖이어도 capture 대상으로 끝나지만, **down과 같은 published snapshot**에 capture가
+  계속 남아 있을 때만 action을 하나 낸다. 우클릭/other button, target 없는 down,
+  capture 없는 up은 action 0이다. drag intent·multi-pointer·double-click은 이 slice 밖이다.
+- host가 새 tree를 publish하기 전 `reconcile(old_tree, new_tree)`를 호출한다. 새 snapshot
+  publish는 capture를 항상 `.cancel`과 동등하게 끝내 pressed를 지우고 이후 stale `up`
+  action을 금지한다. hover/focus는 새 tree에 같은 enabled id가 있을 때만 보존하고, 없으면
+  null로 정리한다. old rect의 repaint는 old tree가 retire되기 전에 요청한다. build 실패에는
+  새 tree가 없으므로 reconcile도 publish도 하지 않아 기존 capture/focus를 보존한다.
+- surface가 deactivate되면 `deactivate`가 capture·hover·focus를 모두 action 0으로 지운다.
+  다음 활성 surface가 재사용한 numeric id를 이전 surface의 hover/focus state로 오인하지 않는다.
+- `timestamp_ns`는 adapter에서 단조 clock으로만 만든다. ML2b는 시간·worker·lock을 읽지
+  않으며, 이후 drag threshold가 필요할 때만 이 event의 시간과 최초 down 좌표를 사용한다.
+  `scroll`은 ML2b의 action/capture contract에 넣지 않는다. scroll owner/viewport는 ML3의
+  paint/virtualization seam과 함께 별도 slice에서 연다.
+
+검증은 순수 `UiRectTree` fixture로 다음을 고정한다: clip 뒤의 action 무시, 겹친 card의
+z-order, hover A→B의 two-dirty, focus/pressed 전환이 관련 모든 rect를 dirty에 넣는지, outside
+move/up capture, disabled·action 변경 후 stale up=0, snapshot swap·surface deactivation의 cancel,
+build 실패 뒤 기존 interaction 보존이다. 이들은 headless 계약 증거이고, 실제 Metal
+cursor/hover paint와 scripted macOS 입력은 ML3 Chrome Lab capture에서 별도로 증명한다.
 
 ## 6. Chrome Lab — Storybook 같은 Metal visual/E2E fixture
 
@@ -334,9 +481,10 @@ file work를 섞지 않으며, 공용 frame phase가 살아 있는 animation만 
    이 tree는 legacy TUI cell/ANSI path를 읽지 않는다. 아직 draw/hit/focus consumer는
    연결하지 않았다.
 3. **ML2b — pointer interaction seam:** `UiPointerEvent` mapping, hover enter/leave의
-   두-rect dirty, outside move/up pointer capture, tree mutation/snapshot swap의
-   cancelled capture와 stale up action=0을 ML2a rect tree를 소비하는 host test로
-   고정한다.
+   two-dirty fast path와 focus/pressed의 complete dirty set, outside move/up pointer
+   capture, tree mutation/snapshot swap의 cancelled capture와 stale up action=0을 ML2a
+   rect tree를 소비하는 **pure `ui_interaction.zig` test**로 고정한다. macOS host adapter의
+   event mapping·paint 결과는 ML3 Chrome Lab에서 별도로 고정한다.
 4. **ML3 — Chrome Lab과 Metal paint seam:** test-only `ChromeLabScenario` surface를
    먼저 만들고 rounded/border/shadow/opacity/clip을 `ChromeDraw`와 production Metal
    lowering에 연결한다. Lab screenshot/readback fixture가 rect·clip 정합과 scripted

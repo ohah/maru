@@ -9,8 +9,9 @@ const lowering = @import("metal_lowering.zig");
 
 const chrome = maru.chrome;
 const session_dock = chrome.components.session_dock;
+const archive_detail = chrome.components.archive_detail;
 
-pub const ScenarioId = enum { empty, loading, retained_list, partial_scroll };
+pub const ScenarioId = enum { empty, loading, retained_list, partial_scroll, detail_loading, detail_ready, detail_stale, detail_unavailable };
 
 pub const Scenario = struct {
     id: ScenarioId,
@@ -33,6 +34,8 @@ pub const FrameBuffers = struct {
     ops: []chrome.draw.Op,
     dock_nodes: []chrome.ui.tree.UiNode,
     dock_actions: []session_dock.ids.Entry,
+    detail_nodes: []chrome.ui.tree.UiNode = &.{},
+    detail_actions: []archive_detail.ids.Entry = &.{},
     text_runs: []chrome.draw.Run,
     text_bytes: []u8,
 };
@@ -42,10 +45,21 @@ pub const Frame = struct {
     draws: chrome.ChromeDraw,
 };
 
-/// Produces a deterministic, effect-free Session Dock through the product UI tree and paint path.
-/// The fixture carries only synthetic/redacted strings; it cannot import an archive provider or an
-/// AppSession merely to make a visual regression test pass.
+/// Produces a deterministic, effect-free Chrome component through the product UI tree and paint
+/// path. Detail fixtures carry only synthetic/redacted strings; the Lab cannot import an archive
+/// provider or an AppSession merely to make a visual regression test pass.
 pub fn buildFrame(
+    scenario: Scenario,
+    tokens: *const chrome.Tokens,
+    buffers: FrameBuffers,
+) !Frame {
+    return switch (scenario.id) {
+        .detail_loading, .detail_ready, .detail_stale, .detail_unavailable => buildDetailFrame(scenario, tokens, buffers),
+        .empty, .loading, .retained_list, .partial_scroll => buildDockFrame(scenario, tokens, buffers),
+    };
+}
+
+fn buildDockFrame(
     scenario: Scenario,
     tokens: *const chrome.Tokens,
     buffers: FrameBuffers,
@@ -73,6 +87,7 @@ pub fn buildFrame(
             .retained_list => &retained,
             .partial_scroll => retained[1..],
             .empty, .loading => &.{},
+            .detail_loading, .detail_ready, .detail_stale, .detail_unavailable => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{
@@ -85,6 +100,51 @@ pub fn buildFrame(
     });
     const draws = try session_dock.view.view(dock_props, session_frame, .{}, tokens, .{ .ops = buffers.ops, .runs = buffers.text_runs, .text_bytes = buffers.text_bytes });
     return .{ .tree = session_frame.tree, .draws = draws };
+}
+
+fn buildDetailFrame(
+    scenario: Scenario,
+    tokens: *const chrome.Tokens,
+    buffers: FrameBuffers,
+) !Frame {
+    const state: archive_detail.types.State = switch (scenario.id) {
+        .detail_loading => .loading,
+        .detail_ready => .ready,
+        .detail_stale => .stale,
+        .detail_unavailable => .unavailable,
+        else => unreachable,
+    };
+    const turns = [_]archive_detail.types.Turn{
+        .{ .role = .user, .text = "Show the current document work" },
+        .{ .role = .assistant, .text = "This is a synthetic redacted recent-turn summary." },
+    };
+    const props = archive_detail.types.Props{
+        .viewport_px = scenario.viewport_px,
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .snapshot_generation = 1,
+        .state = state,
+        .provider = .claude,
+        .title = "Document implementation review",
+        .metadata = "3 messages · 3m ago · claude-opus-5",
+        .turns = if (state == .ready) &turns else &.{},
+        .action_record_count = if (state == .ready) 2 else 0,
+        .spinner_phase = @intCast(scenario.now_ns % 8),
+        .resume_enabled = state == .ready,
+        .reveal_enabled = state == .ready,
+        // A Lab fixture deliberately never claims a live provider mapping.
+        .focus_live_enabled = false,
+    };
+    const detail_frame = try archive_detail.build.build(props, .{
+        .nodes = buffers.detail_nodes,
+        .entries = buffers.entries,
+        .layout_items = buffers.items,
+        .flex_scratch = buffers.flex_scratch,
+        .child_rects = buffers.child_rects,
+        .actions = buffers.detail_actions,
+    });
+    const draws = try archive_detail.view.view(props, detail_frame, .{}, tokens, .{ .ops = buffers.ops, .runs = buffers.text_runs, .text_bytes = buffers.text_bytes });
+    return .{ .tree = detail_frame.tree, .draws = draws };
 }
 
 pub fn dispatchRecordedAction(

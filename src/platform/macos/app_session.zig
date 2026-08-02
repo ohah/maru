@@ -53,6 +53,11 @@ const agent_session_archive_backend = @import("agent_session_archive_backend.zig
 const agent_session_archive_detail_backend = @import("agent_session_archive_detail_backend.zig");
 const agent_session_archive_scope_backend = @import("agent_session_archive_scope_backend.zig");
 const chrome_metal_lowering = @import("chrome/metal_lowering.zig");
+test {
+    // Chrome Lab은 제품 AppSession이 소유하지 않는 test-only fixture다. 다만 이 import로 app-host
+    // 테스트 빌드에서 facade/module ownership과 lowering API drift를 컴파일 시점에 잡는다.
+    _ = @import("chrome/lab.zig");
+}
 const agent_session_archive_view = maru.session.agent_session_archive_view;
 const agent_session_archive_detail = maru.session.agent_session_archive_detail;
 const metal_frame = renderer.metal_frame; // §8: metal_frame이 renderer로 이주 — maru.renderer barrel 경유(중립 frame DTO)

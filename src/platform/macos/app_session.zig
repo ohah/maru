@@ -429,6 +429,13 @@ const bell_flash_peak_milli: u32 = 350;
 const drag_autoscroll_step_ms: u32 = 33;
 const agent_session_archive_snapshot_ttl_ns: i128 = 15 * std.time.ns_per_s;
 
+fn archiveOpenedDevice(file: std.Io.File) u64 {
+    if (comptime builtin.os.tag != .macos) return 0;
+    var stat: std.posix.Stat = undefined;
+    if (std.c.fstat(file.handle, &stat) != 0) return std.math.maxInt(u64);
+    return @intCast(stat.dev);
+}
+
 // 세로 탭 사이드바의 기본 논리 폭(pt). backing 픽셀 폭은 scale을 곱해 구한다(refreshCellMetrics에서).
 // 터미널 surface는 이 폭만큼 오른쪽으로 그려지고, 왼쪽 strip이 사이드바다("surface→rect" 첫 적용). 사용자가
 // 우측 경계를 드래그해 바꾸면 `AppSession.sidebar_width_pt`(현재 폭, pt)가 [min,max]로 갱신된다 — pt로 들어
@@ -5634,6 +5641,19 @@ pub const AppSession = struct {
         errdefer self.destroyTerm(term);
         try pane.terms.append(self.allocator, term);
         self.focusTerm(pane.terms.items.len - 1);
+    }
+
+    /// Explicit archive-log action. The pending external-open ABI is shared
+    /// with file-tree reveal, but this admission first reopens the exact
+    /// no-follow regular file and compares the worker snapshot identity.
+    fn revealAgentSessionArchiveLog(self: *AppSession, record: *const agent_session_archive_backend.Record) !void {
+        const file = try std.Io.Dir.cwd().openFile(self.io, record.source_path, .{ .follow_symlinks = false });
+        defer file.close(self.io);
+        const stat = try file.stat(self.io);
+        if (stat.kind != .file or stat.inode != record.inode or archiveOpenedDevice(file) != record.device) return error.StaleArchiveSource;
+        const owned = try self.allocator.dupe(u8, record.source_path);
+        if (self.file_tree_external_open) |old| self.allocator.free(old);
+        self.file_tree_external_open = owned;
     }
 
     /// §7 묘비를 **같은 pane 슬롯에서 제자리 교체**해 새 셸로 되살린다(⏎). `newTermInActivePane`을 쓰면 안 되는
@@ -19772,6 +19792,24 @@ pub const AppSession = struct {
             if (self.agent_session_archive_selected) |selected| if (selected < self.agent_session_archive_records.items.len) {
                 self.resumeAgentSessionInNewTerm(&self.agent_session_archive_records.items[selected]) catch {
                     self.showNotice("세션을 다시 시작하지 못했습니다. Claude 또는 Codex CLI 설치와 작업 경로를 확인하세요.");
+                };
+                self.metal_dirty = true;
+                self.total_app_key_events += 1;
+                self.writeSummaryFromState();
+                self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
+                return self.last_summary;
+            };
+        }
+        // Explicit raw-log reveal for the selected archive row. The eventual
+        // detail action uses this same capability; no transcript is injected
+        // into a terminal or rendered as trusted content.
+        if (self.dockVisible() and self.dock.view == .agent_sessions and event.modifiers.command and switch (event.key) {
+            .char => |codepoint| codepoint == 'l' or codepoint == 'L',
+            else => false,
+        }) {
+            if (self.agent_session_archive_selected) |selected| if (selected < self.agent_session_archive_records.items.len) {
+                self.revealAgentSessionArchiveLog(&self.agent_session_archive_records.items[selected]) catch {
+                    self.showNotice("로그 원본이 변경되었거나 더 이상 열 수 없습니다.");
                 };
                 self.metal_dirty = true;
                 self.total_app_key_events += 1;

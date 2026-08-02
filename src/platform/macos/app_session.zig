@@ -3372,7 +3372,7 @@ pub const AppSession = struct {
             result.records.clearRetainingCapacity();
         }
         if (!result.first_batch) self.agent_session_archive_partial = self.agent_session_archive_partial or result.partial;
-        const visible = if (self.cell_height_px == 0) 0 else (self.dockGeometry().tree_content.h / self.cell_height_px) -| 1;
+        const visible = self.agentSessionArchiveVisibleRecordRows();
         self.agent_session_archive_scroll_rows = @min(self.agent_session_archive_scroll_rows, self.agent_session_archive_records.items.len -| @as(usize, visible));
         if (result.complete) {
             self.agent_session_archive_loading = false;
@@ -12370,10 +12370,36 @@ pub const AppSession = struct {
         const local_row: usize = @intFromFloat((y_px - @as(f64, @floatFromInt(content.y))) /
             @as(f64, @floatFromInt(self.cell_height_px)));
         const visible_rows = content.h / self.cell_height_px;
-        // Row zero is the archive header/refresh control, not a selectable session.
-        if (local_row == 0 or local_row >= visible_rows) return null;
-        const row = self.agent_session_archive_scroll_rows + local_row - 1;
+        const detail_rows = self.agentSessionArchiveDetailRows();
+        // Header and expanded detail/action rows are not selectable sessions.
+        if (local_row < 1 + detail_rows or local_row >= visible_rows) return null;
+        const row = self.agent_session_archive_scroll_rows + local_row - 1 - detail_rows;
         return if (row < self.agent_session_archive_records.items.len) row else null;
+    }
+
+    fn agentSessionArchiveDetailRows(self: *const AppSession) usize {
+        const selected = self.agent_session_archive_selected orelse return 0;
+        return if (selected < self.agent_session_archive_records.items.len) 3 else 0;
+    }
+
+    fn agentSessionArchiveVisibleRecordRows(self: *const AppSession) usize {
+        if (self.cell_height_px == 0) return 0;
+        const rows = self.dockGeometry().tree_content.h / self.cell_height_px;
+        return rows -| 1 -| self.agentSessionArchiveDetailRows();
+    }
+
+    const AgentSessionArchiveDetailAction = enum { resume_session, reveal_log };
+
+    fn agentSessionArchiveDetailActionAt(self: *const AppSession, x_px: f64, y_px: f64) ?AgentSessionArchiveDetailAction {
+        if (self.dock.view != .agent_sessions or !self.dockVisible() or self.agentSessionArchiveDetailRows() == 0) return null;
+        const content = self.dockGeometry().tree_content;
+        if (!layout_math.pointInRect(x_px, y_px, content)) return null;
+        const local_row: usize = @intFromFloat((y_px - @as(f64, @floatFromInt(content.y))) / @as(f64, @floatFromInt(self.cell_height_px)));
+        return switch (local_row) {
+            2 => .resume_session,
+            3 => .reveal_log,
+            else => null,
+        };
     }
 
     fn agentSessionArchiveRefreshAt(self: *const AppSession, x_px: f64, y_px: f64) bool {
@@ -20167,8 +20193,7 @@ pub const AppSession = struct {
         if (self.dockVisible() and self.dock.view == .agent_sessions and
             layout_math.pointInRect(x_px, y_px, self.dockGeometry().tree_content))
         {
-            const rect = self.dockGeometry().tree_content;
-            const visible = if (self.cell_height_px == 0) 0 else (rect.h / self.cell_height_px) -| 1;
+            const visible = self.agentSessionArchiveVisibleRecordRows();
             const max_scroll = self.agent_session_archive_records.items.len -| @as(usize, visible);
             const next = @as(i64, @intCast(self.agent_session_archive_scroll_rows)) - @as(i64, lines);
             const clamped: usize = @intCast(std.math.clamp(next, 0, @as(i64, @intCast(max_scroll))));
@@ -21046,6 +21071,16 @@ pub const AppSession = struct {
                     };
                 }
                 if (self.dock.view == .agent_sessions) {
+                    if (self.agentSessionArchiveDetailActionAt(x_px, y_px)) |action| {
+                        const selected = self.agent_session_archive_selected.?;
+                        const record = &self.agent_session_archive_records.items[selected];
+                        switch (action) {
+                            .resume_session => self.resumeAgentSessionInNewTerm(record) catch self.showNotice("세션을 다시 시작하지 못했습니다. Claude 또는 Codex CLI 설치와 작업 경로를 확인하세요."),
+                            .reveal_log => self.revealAgentSessionArchiveLog(record) catch self.showNotice("로그 원본이 변경되었거나 더 이상 열 수 없습니다."),
+                        }
+                        self.metal_dirty = true;
+                        return;
+                    }
                     if (self.agentSessionArchiveRefreshAt(x_px, y_px)) {
                         self.refreshAgentSessionArchive(true);
                         return;
@@ -27684,8 +27719,9 @@ pub const AppSession = struct {
                         if (self.dock.view == .agent_sessions and tree_content_cols > 0 and visible_rows > 0) {
                             // 현재 열려 있는 Term 목록이 아니라 로컬 Codex/Claude archive를 표시한다. worker가
                             // 소유 경계를 넘겨 준 record만 main thread가 읽으며, 다음 refresh 전까지 안정적이다.
-                            const archive_rows = visible_rows -| 1; // row zero is the persistent refresh/progress header.
-                            const archive_origin_y = dg.tree_content.y + self.cell_height_px;
+                            const detail_rows = self.agentSessionArchiveDetailRows();
+                            const archive_rows = visible_rows -| 1 -| detail_rows;
+                            const archive_origin_y = dg.tree_content.y + self.cell_height_px * @as(u32, @intCast(1 + detail_rows));
                             const header = if (self.agent_session_archive_loading)
                                 "AI 세션 · 분석 중"
                             else
@@ -27697,6 +27733,23 @@ pub const AppSession = struct {
                                     .colors = tabbar_colors,
                                 } });
                             } else |_| {}
+                            if (self.agent_session_archive_selected) |selected| if (selected < self.agent_session_archive_records.items.len) {
+                                const record = &self.agent_session_archive_records.items[selected];
+                                const model = if (record.parsed.model.len > 0) record.parsed.model else "모델 정보 없음";
+                                const detail_labels = [_][]const u8{
+                                    try std.fmt.allocPrint(self.allocator, "{s} · {s}", .{ record.parsed.provider.label(), model }),
+                                    "⌘↵ 새 탭에서 이어하기",
+                                    "⌘L 로그 보기",
+                                };
+                                defer self.allocator.free(detail_labels[0]);
+                                if (coretext_frame_builder.buildDockSessionListDrawList(self.allocator, tree_content_cols, @intCast(detail_rows), &detail_labels, null, dock_fg, dock_active_fg)) |ddl| {
+                                    self.collectShaped(&collected, ddl, pane_frame_builder, .{ .pane = .{
+                                        .origin_x = dg.tree_content.x,
+                                        .origin_y = dg.tree_content.y + self.cell_height_px,
+                                        .colors = tabbar_colors,
+                                    } });
+                                } else |_| {}
+                            };
                             var labels: std.ArrayList([]const u8) = .empty;
                             defer labels.deinit(self.allocator);
                             const start = @min(self.agent_session_archive_scroll_rows, self.agent_session_archive_records.items.len);

@@ -636,7 +636,7 @@ success/rollback 대칭 republish와 경쟁 launcher 0을 포함한다.
 
 ### 영속 host CR 실행 중 transport reconnect gate
 
-**상태: 부분 구현(CR0a 완료).** `RemoteRuntime`/Surface/pump/routing 주소를 고정한 stable shell과 generation bundle,
+**상태: 부분 구현(CR0a·CR3a-1 완료).** `RemoteRuntime`/Surface/pump/routing 주소를 고정한 stable shell과 generation bundle,
 stable `ScreenSource` borrow, 앱 전역 host job, existing-host-only controller recovery를
 [persistent-session-host.md](persistent-session-host.md#실행-중-connection-invalidation과-재연결)가 소유한다. raw in-place
 field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다.
@@ -655,15 +655,15 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   reentrant lock 거부, writer-pending 뒤 신규 reader 차단, generation ABA/max와 destroy-vs-borrow. CR2c: local/remote
   `InputOwner` facade parity. CR2d: queue/cursor의 Window 이동·close 및 cross-Window parity. CR2e: fake
   `PreparedReconnect`, allocator fail-index, old destructor exact 1.
-- CR3a-1(계획): `ConnectionLease` product callback 0인 transport-neutral lease와 generation 1 전용 slot skeleton. 실제
+- CR3a-1(구현): `ConnectionLease` product callback 0인 transport-neutral lease와 generation 1 전용 slot skeleton. 실제
   `HostAdapter`/`Client`를 import해
   final-address `initInPlace`, heap-pinned node 주소 불변, same-address reincarnation, immutable cleanup lease와 one-shot permit의
   move/copy/replay/cross-slot/cross-host/cross-incarnation/stale-generation 거부, raw Client·RPC API export 0, allocator fail-index
   exact-one cleanup을 검증한다. `initInPlace(out,node_allocator,source)` 실패는 source preserved/out pristine이고 성공은 source
   moved tombstone/node exact owner다. single tagged identity issuer의 nested init·failure burn·max-1/max/next reject는 no-wrap,
   source/out mutation 0을 증명한다. node cleanup pin max/overflow, live-pin adapter deinit fail-stop, copied/double release count 불변,
-  last release 뒤 Client/node exact-one destroy를 검증한다. fork child PID-domain mismatch의 mint/consume/deinit fail-stop도
-  callback/free/owner mutation 0으로 검증한다. HostPool membership
+  last release 뒤 Client/node exact-one destroy를 검증한다. fork child PID-domain mismatch에서 low-level mint/consume/tryDeinit의
+  typed reject와 callback/free/owner mutation 0, strict 제품 wrapper의 fail-stop을 구분해 검증한다. HostPool membership
   lease와 ConnectionLease는 별개이며 external-pump owner graph는 변경하지 않는다. 증거 수준은 production-type unit이다.
 - CR3a-2(계획): generation 1 compatibility wiring으로 raw `AttachmentTransport.context=*Client` production callsite 0,
   final-address `RemoteAttachment.initInPlace` 뒤 lease 발급, live transport와 cleanup lease 분리, 0/1/max pending token의 별도
@@ -675,7 +675,8 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   private owner receipt로 reservation available·active cleanup 0을 exact once 복구하고 callback 0이다. callback
   `completed|retryable_preserved|indeterminate_or_partial` 각각 consumed|available|terminal 전이, 1회 retry 실패 뒤 deinit 재시도,
   `tryDeinit()` busy와 strict `deinit()` fail-stop을 production type으로 검증한다. private receipt 자체 손상은 callback/free와
-  canonical reservation/resource-owner mutation 0, 별도 quarantine latch/accounting exact once, process fail-stop이어야 한다.
+  canonical reservation/resource-owner mutation 0, owner address+reservation ID quarantine latch/accounting exact once와 후속 component
+  operation typed reject를 검증한다. process fail-stop은 실제 owner-specific strict adapter가 생기는 CR3a-2 gate다.
   first retryable 뒤 deinit의 second
   completed/retryable/indeterminate 세 경우는 각각 cleaned/terminal_handoff/terminal_handoff, attachment local owner 0, poison과
   node/ledger terminal owner exact 1을 검증한다. reconnect/current

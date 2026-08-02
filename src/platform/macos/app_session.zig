@@ -5790,7 +5790,7 @@ pub const AppSession = struct {
                 return;
             };
             // §6 L291: host 연결/spawn 실패 시 조용히 in-process로 폴백하지 않고 사용자에게 알린다("유지된다" 오인 방지).
-            const client = switch (session_host.host_connect.connectOrLaunchDetailed(alloc, exe_path, base, .{})) {
+            var client = switch (session_host.host_connect.connectOrLaunchDetailed(alloc, exe_path, base, .{})) {
                 .connected => |connected| connected,
                 .failed => |reason| {
                     self.markHostConnectFailedReason(.connect, reason);
@@ -5799,17 +5799,29 @@ pub const AppSession = struct {
             };
             const host_id = client.host_id;
             const owned_adapter = alloc.create(RemoteSessionAdapter) catch {
-                var failed_client = client;
-                failed_client.deinit();
+                client.deinit();
                 self.markHostConnectFailedReason(.adapter, .out_of_memory);
                 return;
             };
-            owned_adapter.* = RemoteSessionAdapter.init(client) catch {
-                var failed_client = client;
-                failed_client.deinit();
-                alloc.destroy(owned_adapter);
-                self.markHostConnectFailedReason(.adapter, .incompatible_version);
-                return;
+            RemoteSessionAdapter.initInPlace(owned_adapter, alloc, &client) catch |err| {
+                switch (err) {
+                    error.UnsupportedProtocol => {
+                        client.deinit();
+                        alloc.destroy(owned_adapter);
+                        self.markHostConnectFailedReason(.adapter, .incompatible_version);
+                        return;
+                    },
+                    error.IdentityExhausted, error.OutOfMemory => {
+                        client.deinit();
+                        alloc.destroy(owned_adapter);
+                        self.markHostConnectFailedReason(.adapter, .resource_exhausted);
+                        return;
+                    },
+                    else => {
+                        self.markHostConnectFailedError(.adapter, err);
+                        @panic("session-host HostAdapter ownership invariant violated");
+                    },
+                }
             };
             app_remote_host_pool = RemoteHostPool.init(alloc);
             app_remote_host_pool.?.addOwned(host_id, owned_adapter) catch {
@@ -5877,7 +5889,7 @@ pub const AppSession = struct {
         var arena = std.heap.ArenaAllocator.init(alloc);
         defer arena.deinit();
         const base = sessionCacheBase(arena.allocator()) orelse return .unavailable;
-        const connected = switch (session_host.host_connect.connectExistingHost(
+        var connected = switch (session_host.host_connect.connectExistingHost(
             alloc,
             base,
             wanted_host_id,
@@ -5892,15 +5904,23 @@ pub const AppSession = struct {
             },
         };
         const adapter = alloc.create(RemoteSessionAdapter) catch {
-            var failed = connected;
-            failed.deinit();
+            self.logRestoreAdapterInitFailure(error.OutOfMemory);
+            connected.deinit();
             return .unavailable;
         };
-        adapter.* = RemoteSessionAdapter.init(connected) catch {
-            var failed = connected;
-            failed.deinit();
-            alloc.destroy(adapter);
-            return .unavailable;
+        RemoteSessionAdapter.initInPlace(adapter, alloc, &connected) catch |err| {
+            switch (err) {
+                error.UnsupportedProtocol, error.IdentityExhausted, error.OutOfMemory => {
+                    self.logRestoreAdapterInitFailure(err);
+                    connected.deinit();
+                    alloc.destroy(adapter);
+                    return .unavailable;
+                },
+                else => {
+                    self.markHostConnectFailedError(.adapter, err);
+                    @panic("session-host restore adapter ownership invariant violated");
+                },
+            }
         };
         if (app_remote_host_pool) |*pool| {
             pool.addOwned(wanted_host_id, adapter) catch {
@@ -5976,6 +5996,15 @@ pub const AppSession = struct {
                 .{hostConnectFailureDetail(&buf, stage, reason, error_name)},
             );
         }
+    }
+
+    fn logRestoreAdapterInitFailure(_: *AppSession, err: anyerror) void {
+        // Restore remains retryable/unavailable and must not trip the process-global initial-host
+        // failure latch, but losing the exact adapter cause makes a living N-1 host impossible to
+        // distinguish from local resource exhaustion.  CR0b will route this same typed cause into
+        // the bounded incident ring; until then the immediate local log is the authoritative seam.
+        if (!builtin.is_test)
+            std.log.err("persistent session restore adapter unavailable: {s}", .{@errorName(err)});
     }
 
     /// keep-alive host 연결이 실패해 in-process로 폴백했으면(§6 L291) notice를 한 번 띄운다 — 첫 tick에서 호출한다(init 중엔

@@ -4209,6 +4209,40 @@ pub const Client = struct {
         return true;
     }
 
+    /// CR3a generation-node ownership move.  This is intentionally narrower than external-pump
+    /// adoption: only a standalone, blocking Client may enter the heap-pinned ClientSlot node.
+    /// The caller allocates and validates the final destination before invoking this no-fail
+    /// suffix, so a failed HostAdapter initialization never partially moves socket ownership.
+    pub fn canMoveToGenerationNode(self: *const Client) bool {
+        return self.ownership == .standalone and self.io_mode == .blocking and !self.unusable;
+    }
+
+    pub fn moveToGenerationNode(self: *Client, destination: *Client) void {
+        if (!self.canMoveToGenerationNode()) @panic("invalid Client generation-node move");
+        const source_start = @intFromPtr(self);
+        const destination_start = @intFromPtr(destination);
+        const source_end = std.math.add(usize, source_start, @sizeOf(Client)) catch
+            @panic("invalid Client generation-node source range");
+        const destination_end = std.math.add(usize, destination_start, @sizeOf(Client)) catch
+            @panic("invalid Client generation-node destination range");
+        if (source_start < destination_end and destination_start < source_end)
+            @panic("aliased Client generation-node move");
+        const allocator = self.allocator;
+        const expected_major = self.parser.expected_major;
+        destination.* = self.*;
+        // Rebuild from defaults rather than clearing selected fields.  New Client-owned fields
+        // must therefore opt into the destination copy above and cannot silently leave a second
+        // owner in the moved-from tombstone.
+        self.* = .{
+            .allocator = allocator,
+            .fd = -1,
+            .host_id = 0,
+            .parser = framing.FrameParser.initForMajor(allocator, expected_major),
+            .ownership = .moved,
+            .unusable = true,
+        };
+    }
+
     /// Deep snapshot of the descriptors and descriptor elements consumed by `deinit`. This is
     /// process-local authority evidence; payload contents are intentionally excluded.
     pub fn projectionAuthorityDigest(self: *const Client) owner_seal.Digest {

@@ -22,6 +22,82 @@ import { renderMarkdown } from "./markdown";
 export const rawBlockName = "rawBlock";
 export const rawInlineName = "rawInline";
 
+/**
+ * 검증된 상대 경로를 실제로 보여 줄 수 있는 URL로 바꾼다.
+ *
+ * 리치는 신뢰 shell에 살아서 `file:`을 직접 읽지 못한다 — 바이트는 파일 브리지를 거쳐야 한다. 그 브리지는
+ * shell이 소유하므로 노드가 직접 부르지 않고 **주입받는다**(계층 방향: viewer → rich-editor → node).
+ * 없으면 이미지를 그리지 않는다(경로만 남은 `<img>`는 깨진 그림으로 보인다).
+ */
+export type ResolveAsset = (path: string) => Promise<string | null>;
+
+/** 닫는 태그를 갖지 않는 태그들. 짝 검사에서 제외한다. */
+const voidTags = new Set([
+  "area",
+  "base",
+  "br",
+  "col",
+  "embed",
+  "hr",
+  "img",
+  "input",
+  "link",
+  "meta",
+  "param",
+  "source",
+  "track",
+  "wbr",
+]);
+
+const tagPattern = /<\/?([a-zA-Z][a-zA-Z0-9-]*)(?:\s[^<>]*?)?\/?>/g;
+
+/**
+ * 이 조각 하나만으로 온전한 구조인가.
+ *
+ * **왜 필요한가**: `<details>` 안에 빈 줄과 마크다운이 있으면(가장 흔한 형태다) 토크나이저가 조각을 셋으로
+ * 나눈다 — 여는 태그, 그 사이의 일반 문단, 닫는 태그. 보존은 조각 단위라 왕복이 정확하지만, **여는 태그만
+ * 렌더하면 안쪽 본문이 빠진 접기가 보인다**(실측 — 실제보다 적게 보여 주니 오해를 부른다).
+ *
+ * 그래서 짝이 맞을 때만 미리보기를 보여 준다. 반쪽 미리보기보다 원문만 보이는 편이 정직하다.
+ */
+function isSelfContained(raw: string): boolean {
+  const open: string[] = [];
+  tagPattern.lastIndex = 0;
+  for (let match = tagPattern.exec(raw); match !== null; match = tagPattern.exec(raw)) {
+    const tag = match[1].toLowerCase();
+    if (voidTags.has(tag) || match[0].endsWith("/>")) continue;
+    if (match[0].startsWith("</")) {
+      if (open.pop() !== tag) return false;
+    } else {
+      open.push(tag);
+    }
+  }
+  return open.length === 0;
+}
+
+/** renderer가 검증한 상대 경로를 실어 두는 attribute. 문서가 위조해도 파이프라인이 먼저 지운다. */
+const assetPathAttribute = "data-maru-asset-path";
+
+/**
+ * 미리보기 안의 이미지를 실제 바이트로 채운다.
+ *
+ * **경로를 고르는 것은 문서가 아니다.** 이 값은 렌더 파이프라인이 검증해 붙인 것이고, 문서가 같은 이름을
+ * 써 넣어도 파이프라인이 자기 값으로 덮는다(§2.1). 그래서 여기서는 그 값을 그대로 신뢰한다.
+ */
+async function paintAssets(root: HTMLElement, resolve: ResolveAsset | null): Promise<void> {
+  if (resolve === null) return;
+  for (const image of Array.from(
+    root.querySelectorAll<HTMLImageElement>(`img[${assetPathAttribute}]`),
+  )) {
+    const path = image.getAttribute(assetPathAttribute);
+    if (path === null || path.length === 0) continue;
+    const url = await resolve(path);
+    // 이 사이에 조각이 다시 그려졌으면 이 노드는 이미 문서 밖이다. 그때 쓰면 보이지 않는 DOM만 건드린다.
+    if (url === null || !image.isConnected) continue;
+    image.src = url;
+  }
+}
+
 /** 블록 조각은 마크다운 토크나이저가 이미 이 이름으로 준다. */
 const rawBlockTokenName = "html";
 
@@ -66,6 +142,9 @@ function rawOf(token: MarkdownToken): string {
  */
 export const RawBlock = Node.create({
   name: rawBlockName,
+  addOptions() {
+    return { resolveAsset: null as ResolveAsset | null };
+  },
   group: "block",
   content: "text*",
   marks: "",
@@ -123,6 +202,7 @@ export const RawBlock = Node.create({
    * 가능하게 두면 그 DOM 변경을 다시 HTML로 되쓸 방법이 없어 왕복이 깨진다.
    */
   addNodeView() {
+    const resolveAsset = (this.options as { resolveAsset: ResolveAsset | null }).resolveAsset;
     return ({ node }: { node: { textContent: string } }) => {
       const dom = document.createElement("div");
       dom.className = "maru-rich-raw";
@@ -142,9 +222,12 @@ export const RawBlock = Node.create({
         // 부품을 가로채기)은 sanitizer가 `id`·`name`에 `user-content-` 접두사를 붙여 이미 막는다.
         //
         // 빈 결과면 그릴 것이 없다는 뜻이라 미리보기를 감추고 원문만 보여 준다 — 각주 정의·주석이 그 경우다.
-        const html = renderMarkdown(raw);
+        // 짝이 맞지 않는 조각은 그리지 않는다 — 반쪽 구조를 보여 주면 실제 문서보다 적게 보인다.
+        const html = isSelfContained(raw) ? renderMarkdown(raw) : "";
         preview.innerHTML = html;
         preview.hidden = html.trim().length === 0;
+        // 이미지는 경로만 실려 오므로 브리지로 바이트를 받아 채운다. 실패해도 조각은 그대로 보존된다.
+        void paintAssets(preview, resolveAsset);
       };
       paint(node.textContent);
 

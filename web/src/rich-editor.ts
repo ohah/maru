@@ -17,12 +17,12 @@ import StarterKit from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
 import TaskList from "@tiptap/extension-task-list";
 import TaskItem from "@tiptap/extension-task-item";
-import Image from "@tiptap/extension-image";
 import { Table, TableRow, TableCell, TableHeader } from "@tiptap/extension-table";
 import { mountShellUi, type ShellUiHandle } from "./shell-ui";
 import { splitFrontmatter } from "./frontmatter";
 import { Frontmatter, frontmatterNodeName } from "./rich-frontmatter-node";
-import { RawBlock, RawInline } from "./rich-raw-node";
+import { RawBlock, RawInline, type ResolveAsset } from "./rich-raw-node";
+import { LocalImage } from "./rich-image-node";
 import type { ToolbarItem } from "./ui/toolbar";
 
 export type RichEditorHandle = {
@@ -184,6 +184,12 @@ export function createRichEditor(
   markdown: string,
   onChange: () => void,
   onSave: () => void,
+  /**
+   * 검증된 상대 경로를 화면에 보여 줄 URL로 바꾼다. 리치는 신뢰 shell에 살아 `file:`을 직접 읽지 못하므로
+   * 바이트는 shell이 소유한 브리지를 거쳐야 한다 — 그래서 노드가 직접 부르지 않고 여기로 주입받는다.
+   * 넘기지 않으면 이미지를 그리지 않는다(문서와 저장 결과는 영향받지 않는다).
+   */
+  resolveAsset: ResolveAsset | null = null,
 ): RichEditorHandle {
   const doc = parent.ownerDocument;
   const shell = doc.createElement("div");
@@ -207,7 +213,7 @@ export function createRichEditor(
       Frontmatter,
       // 문서모델이 모르는 원문 조각을 그대로 통과시킨다(§2.5 보존 규칙). 이 둘이 없으면 원시 HTML·각주가
       // 왕복에서 사라지고, 그래서 예전에는 문법 목록으로 편집을 잠가야 했다.
-      RawBlock,
+      RawBlock.configure({ resolveAsset }),
       RawInline,
       Markdown,
       TaskList,
@@ -215,7 +221,8 @@ export function createRichEditor(
       TaskItem.configure({ nested: true }),
       // 이미지·표 확장이 없으면 문서모델이 그 노드를 만들지 못해 **저장할 때 통째로 사라진다**
       // (실측: `![alt](img.png)` → `alt`, 표 3줄 → 한 줄로 뭉갬). 리치가 다룰 수 있는 문법은 확장으로 채운다.
-      Image,
+      // 이미지는 경로를 바이트로 바꿔 **화면에만** 채운다 — 속성을 바꾸면 그 URL이 파일에 저장된다.
+      LocalImage.configure({ resolveAsset }),
       Table,
       TableRow,
       TableCell,

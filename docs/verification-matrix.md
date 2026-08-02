@@ -655,7 +655,33 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   reentrant lock 거부, writer-pending 뒤 신규 reader 차단, generation ABA/max와 destroy-vs-borrow. CR2c: local/remote
   `InputOwner` facade parity. CR2d: queue/cursor의 Window 이동·close 및 cross-Window parity. CR2e: fake
   `PreparedReconnect`, allocator fail-index, old destructor exact 1.
-- CR3a: transport-neutral lease/slot skeleton. CR3b: pool-membership/connection generation 분리, stale callback/동시 attempt,
+- CR3a-1(계획): `ConnectionLease` product callback 0인 transport-neutral lease와 generation 1 전용 slot skeleton. 실제
+  `HostAdapter`/`Client`를 import해
+  final-address `initInPlace`, heap-pinned node 주소 불변, same-address reincarnation, immutable cleanup lease와 one-shot permit의
+  move/copy/replay/cross-slot/cross-host/cross-incarnation/stale-generation 거부, raw Client·RPC API export 0, allocator fail-index
+  exact-one cleanup을 검증한다. `initInPlace(out,node_allocator,source)` 실패는 source preserved/out pristine이고 성공은 source
+  moved tombstone/node exact owner다. single tagged identity issuer의 nested init·failure burn·max-1/max/next reject는 no-wrap,
+  source/out mutation 0을 증명한다. node cleanup pin max/overflow, live-pin adapter deinit fail-stop, copied/double release count 불변,
+  last release 뒤 Client/node exact-one destroy를 검증한다. fork child PID-domain mismatch의 mint/consume/deinit fail-stop도
+  callback/free/owner mutation 0으로 검증한다. HostPool membership
+  lease와 ConnectionLease는 별개이며 external-pump owner graph는 변경하지 않는다. 증거 수준은 production-type unit이다.
+- CR3a-2(계획): generation 1 compatibility wiring으로 raw `AttachmentTransport.context=*Client` production callsite 0,
+  final-address `RemoteAttachment.initInPlace` 뒤 lease 발급, live transport와 cleanup lease 분리, 0/1/max pending token의 별도
+  one-shot permit, 실제 attach/pump/deinit·failed-release·callback reentry에서 bound generation-1 node cleanup exact 1,
+  slot/current admission과 별도 sentinel node mutation·wire 0을 검증한다. lease 발급 뒤 attachment move/copy와 기존
+  return-by-value production construction은 0이다. same-token two-address prepare, prepare→reentry→consume/abort, nested permit,
+  permit callback 안 parent release/deinit은 typed busy이고 active permit 0 뒤에만 pin release가 성공한다. owner cleanup ledger의
+  0/1/max/cap+1에서 duplicate release/drop/cancel과 node 조기 destroy는 0이다. permit preflight stale/move/splice/fail-index는
+  private owner receipt로 reservation available·active cleanup 0을 exact once 복구하고 callback 0이다. callback
+  `completed|retryable_preserved|indeterminate_or_partial` 각각 consumed|available|terminal 전이, 1회 retry 실패 뒤 deinit 재시도,
+  `tryDeinit()` busy와 strict `deinit()` fail-stop을 production type으로 검증한다. private receipt 자체 손상은 callback/free와
+  canonical reservation/resource-owner mutation 0, 별도 quarantine latch/accounting exact once, process fail-stop이어야 한다.
+  first retryable 뒤 deinit의 second
+  completed/retryable/indeterminate 세 경우는 각각 cleaned/terminal_handoff/terminal_handoff, attachment local owner 0, poison과
+  node/ledger terminal owner exact 1을 검증한다. reconnect/current
+  publish/retired node 생성, incident/artifact mutation과 AppSession 동작 변화는 0이며
+  real socket/AppKit은 완료 조건이 아니다.
+- CR3b: pool-membership과 독립된 connection generation 전이·publish·overflow, stale callback/동시 attempt,
   R1 admission close/cancel → R2 store-only detach+placeholder publish+callback cleanup → R3 final seal/canRetire/tick-end destroy의
   three-phase retirement, retired Client cap 2. CR3c: 실제 RemoteGeneration slot integration.
 - CR4: 실제 socket poison→observer attach→takeover→input/resize. takeover reply-loss는 local authority 미발행,
@@ -673,6 +699,10 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   grid/scrollback/selection/search/link/image backing은 0이며 Retry full snapshot이 새 screen을 구성해야 한다. store-only
   detach commit 중 callback/allocation 0, finish cleanup exact once와 실제 placeholder marker/title/runtime ID를
   production-type/headless render로 검증한다.
+- 테스트 가능 수준을 혼동하지 않는다. CR3a~CR3c의 `production-type unit`은 내부 소유권 구조만 증명하며 실제 앱 reconnect를
+  사용자가 시험할 수 있다는 뜻이 아니다. CR4 real-socket E2E가 단일 host reconnect를 처음 자동 검증하는 gate이고 CR4 제품
+  배선 뒤에야 단일 Window 실제 앱 수동 시험을 시작한다. CR5가 멀티윈도우·다중 runtime 일상 사용 시험 범위를 닫고, CR6
+  real-AppKit/IME/clipboard/soak가 사용자에게 기능 완성을 안내할 수 있는 유일한 제품 gate다.
 - termination revoke는 writer offset 0 purge와 모든 partial offset의 connection abort를 검증하며, 이미 전송된 prefix 외
   payload suffix와 후속 sibling frame은 0이다.
 - mutation `beginMutation`과 freeze/seal의 두 interleaving, Window 이동 중 X partial 뒤 Y/input/control/paste/IME suffix

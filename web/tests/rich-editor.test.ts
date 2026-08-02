@@ -9,7 +9,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { withEditorDom } from "./editor-dom";
-import { createRichEditor, unsupportedRichSyntax } from "../src/rich-editor";
+import { createRichEditor } from "../src/rich-editor";
 
 function mountRich(dom: ReturnType<typeof Object>, markdown: string) {
   const host = (globalThis as unknown as { document: Document }).document.querySelector(
@@ -24,22 +24,15 @@ function mountRich(dom: ReturnType<typeof Object>, markdown: string) {
 }
 
 describe("rich editing mode", () => {
-  test("잠금 안내는 툴바와 **같은 React 트리**에서 그려지고, 풀리면 사라진다", async () => {
-    // 왜 중요한가: 안내는 편집기 위에 한 줄 밴드로 뜨고 사라지며 **레이아웃을 바꾼다**. 예전엔 이 안내만
-    // DOM으로 직접 만들어 붙였는데, 그러면 문서 주변 UI가 React 트리와 손으로 만든 노드 둘로 갈린다.
+  test("문서모델이 모르는 문법도 편집을 잠그지 않는다(원문 보존 규칙)", async () => {
+    // 왜 중요한가: 예전에는 원시 HTML·각주가 있으면 편집과 저장을 통째로 막았다. 막던 이유는 왕복에서 원문이
+    // 파괴되기 때문이었는데(태그 소실, `[^1]`→`\[^1\]`), 보존 노드가 그 파괴를 없앴으므로 막을 근거가 없다.
     await withEditorDom(async (dom) => {
       const doc = (globalThis as unknown as { document: Document }).document;
-      // 각주는 리치가 표현하지 못하는 문법이라 편집이 잠긴다(§2.5 — frontmatter는 이제 지원한다).
       const rich = mountRich(dom, "텍스트[^1]\n\n[^1]: 각주");
       try {
-        const notice = doc.querySelector(".maru-rich-notice");
-        expect(notice).not.toBeNull();
-        expect(notice?.textContent).toContain("소스 모드");
-        // 툴바와 형제여야 한다 — 한 루트가 둘 다 그린다.
-        expect(notice?.parentElement?.querySelector("[role='toolbar']")).not.toBeNull();
-
-        // 표현 가능한 문서로 갈아끼우면 잠금이 풀리고 안내도 사라진다.
-        rich.setMarkdown("# 그냥 제목");
+        expect(doc.querySelector(".ProseMirror")?.getAttribute("contenteditable")).toBe("true");
+        // 안내 밴드라는 개념 자체가 없어졌다.
         expect(doc.querySelector(".maru-rich-notice")).toBeNull();
       } finally {
         rich.destroy();
@@ -219,69 +212,67 @@ describe("rich editing mode", () => {
     });
   });
 
-  test("표현할 수 없는 문법이 있는 문서는 편집을 잠근다", async () => {
-    // 저장 경로가 열려 있으면 왕복에서 원문이 파괴된다 — 태그는 사라지고 각주 정의는 인라인 링크로 뭉개진다.
-    expect(unsupportedRichSyntax("텍스트[^1]\n\n[^1]: 각주")).toContain("각주");
-    // **frontmatter는 더 이상 잠그지 않는다** — 노드를 만들어 보이고 고칠 수 있게 했다(§2.5).
-    expect(unsupportedRichSyntax("---\ntitle: 문서\n---\n\n본문")).toEqual([]);
-    expect(unsupportedRichSyntax('<div class="x">raw</div>')).toContain("원시 HTML");
-    // 주석·doctype도 왕복에서 사라진다 — 태그만 보면 `<!-- toc -->`가 있는 문서가 조용히 손상된다.
-    expect(unsupportedRichSyntax("# 제목\n\n<!-- prettier-ignore -->\n\n본문")).toContain(
-      "원시 HTML",
-    );
-    expect(unsupportedRichSyntax("<!DOCTYPE html>\n\n본문")).toContain("원시 HTML");
-
-    // 평범한 문서는 잠그지 않는다.
-    expect(unsupportedRichSyntax("# 제목\n\n- 목록\n\n**굵게**")).toEqual([]);
-    // 코드펜스 안의 HTML은 내용일 뿐이라 대상이 아니다(HTML 예제를 담은 문서를 잠그면 안 된다).
-    expect(unsupportedRichSyntax("```html\n<div>example</div>\n```")).toEqual([]);
-    // 인라인 코드로 태그를 설명하는 문장도 마찬가지다.
-    expect(unsupportedRichSyntax("설정은 `<div>` 태그로 합니다.")).toEqual([]);
-    expect(unsupportedRichSyntax("제목\n---\n\n본문\n\n---\n\n다음 절")).toEqual([]);
-
+  test("원시 HTML·각주는 원문 그대로 왕복한다", async () => {
+    // 이 넷이 예전 잠금 목록의 전부였다. 실측으로 각각 이렇게 깨졌다 — `<kbd>⌘S</kbd>`→`⌘S`,
+    // `<details>…</details>`→내부 텍스트만, `<!-- c -->`→빈 줄, `[^1]`→`\[^1\]`(각주가 리터럴 대괄호로).
     await withEditorDom(async (dom) => {
-      const rich = mountRich(dom, "텍스트[^1]\n\n[^1]: 각주");
+      const roundTrip = (source: string) => {
+        const rich = mountRich(dom, source);
+        try {
+          return rich.getMarkdown();
+        } finally {
+          rich.destroy();
+        }
+      };
+
+      // 블록 조각: 여는 태그부터 닫는 태그까지 통째로.
+      expect(roundTrip("<details>\n<summary>접기</summary>\n안쪽\n</details>\n")).toBe(
+        "<details>\n<summary>접기</summary>\n안쪽\n</details>",
+      );
+      // 인라인 조각: 여는·닫는 태그가 각각 별도 토큰이라 조각 그대로 이어 붙여야 원문이 된다.
+      expect(roundTrip("누르세요 <kbd>⌘S</kbd> 그리고 H<sub>2</sub>O\n")).toBe(
+        "누르세요 <kbd>⌘S</kbd> 그리고 H<sub>2</sub>O",
+      );
+      // void 태그도 hard break로 정규화되지 않고 원문으로 남는다.
+      expect(roundTrip("줄바꿈<br>\n다음 줄\n")).toBe("줄바꿈<br>\n다음 줄");
+      // 각주는 토크나이저가 떼어 주지 않아 **토큰 규칙을 더해** 인식시킨 문법이다(§2.5).
+      expect(roundTrip("본문[^1] 입니다.\n\n[^1]: 각주 정의\n")).toBe(
+        "본문[^1] 입니다.\n\n[^1]: 각주 정의",
+      );
+      // 각주 참조가 문단 중간에 있어도 그 자리에서 문단이 끊기지 않는다.
+      expect(roundTrip("앞[^a] 뒤\n")).toBe("앞[^a] 뒤");
+    });
+  });
+
+  test("코드 안의 태그는 조각이 아니라 내용이라 그대로 코드로 남는다", async () => {
+    // 보존 노드가 코드펜스·인라인 코드까지 삼키면 HTML 예제를 담은 문서가 통째로 조각이 된다.
+    await withEditorDom(async (dom) => {
+      const rich = mountRich(
+        dom,
+        "설정은 `<div>` 태그로 합니다.\n\n```html\n<b>example</b>\n```\n",
+      );
       try {
-        const doc = (globalThis as unknown as { document: Document }).document;
-        expect(doc.querySelector(".maru-rich-notice")).not.toBeNull();
-        expect(doc.querySelector(".ProseMirror")?.getAttribute("contenteditable")).toBe("false");
+        const out = rich.getMarkdown();
+        expect(out).toContain("`<div>`");
+        expect(out).toContain("```html");
+        expect(out).toContain("<b>example</b>");
       } finally {
         rich.destroy();
       }
     });
   });
 
-  test("내용이 바뀌면 잠금도 다시 판정한다", async () => {
-    // 생성 시 한 번만 보면, 소스에서 각주를 붙였다 리치로 돌아온 문서에 잠금이 걸리지 않아 그대로 저장돼
-    // 원문이 파괴된다. 반대로 각주를 지운 문서가 영영 읽기 전용으로 남는 것도 막는다.
-    await withEditorDom(async (dom) => {
-      const doc = (globalThis as unknown as { document: Document }).document;
-      const rich = mountRich(dom, "# 깨끗한 문서");
-      try {
-        expect(doc.querySelector(".maru-rich-notice")).toBeNull();
-
-        rich.setMarkdown("텍스트[^1]\n\n[^1]: 각주");
-        expect(doc.querySelector(".maru-rich-notice")).not.toBeNull();
-        expect(doc.querySelector(".ProseMirror")?.getAttribute("contenteditable")).toBe("false");
-
-        rich.setMarkdown("# 다시 깨끗해진 문서");
-        expect(doc.querySelector(".maru-rich-notice")).toBeNull();
-        expect(doc.querySelector(".ProseMirror")?.getAttribute("contenteditable")).toBe("true");
-      } finally {
-        rich.destroy();
-      }
-    });
-  });
-
-  test("close lock이 풀려도 표현 불가 잠금은 유지된다", async () => {
+  test("close lock이 리치를 잠그는 유일한 이유다", async () => {
+    // 예전에는 잠금 이유가 둘이라(close lock + 표현 불가 문법) 해제할 때 서로를 덮지 않게 조합해야 했다.
+    // 보존 규칙이 뒤엣것을 없앴으므로 이제 close lock 하나만 본다 — 획득하면 잠기고 풀면 곧바로 열린다.
     await withEditorDom(async (dom) => {
       const doc = (globalThis as unknown as { document: Document }).document;
       const rich = mountRich(dom, "텍스트[^1]\n\n[^1]: 각주");
       try {
         rich.setEditable(false); // close lock 획득
         expect(doc.querySelector(".ProseMirror")?.getAttribute("contenteditable")).toBe("false");
-        rich.setEditable(true); // close lock 해제 — 표현 불가 잠금까지 풀리면 안 된다
-        expect(doc.querySelector(".ProseMirror")?.getAttribute("contenteditable")).toBe("false");
+        rich.setEditable(true); // close lock 해제
+        expect(doc.querySelector(".ProseMirror")?.getAttribute("contenteditable")).toBe("true");
       } finally {
         rich.destroy();
       }
@@ -298,6 +289,66 @@ describe("rich editing mode", () => {
         expect(out).not.toContain("처음 내용");
       } finally {
         rich.destroy();
+      }
+    });
+  });
+
+  test("임의로 조합한 문서도 조각 단위로 보존된다(속성 테스트)", async () => {
+    // 왜 속성 테스트인가: 문법을 하나씩 세는 방식은 **우리가 떠올린 것만** 검사한다. 보존 규칙의 값어치는
+    // 목록에 없는 문법에서 나오므로, 조각을 무작위로 이어 붙여 "원문 조각이 출력에 그대로 남는가"를 본다.
+    // 결정적으로 돌려야 하므로 난수 대신 고정 시드 LCG를 쓴다 — 실패를 재현할 수 없으면 가드가 아니다.
+    const fragments = [
+      "# 제목",
+      "본문 한 줄",
+      "- 목록 항목",
+      "> 인용",
+      "<details>\n<summary>접기</summary>\n안쪽\n</details>",
+      "<!-- 주석 -->",
+      "[^ref]: 각주 정의",
+      "문장 안 <kbd>⌘S</kbd> 태그",
+      "참조[^ref] 포함 문장",
+      "`인라인 코드`",
+      "| a | b |\n| --- | --- |\n| 1 | 2 |",
+      "```js\nconst a = 1;\n```",
+      "![alt](img.png)",
+      "---",
+    ];
+    // 보존 대상 조각(이 문자열이 출력에 그대로 남아야 한다). 제목·목록 등은 정규화가 허용되므로 제외한다.
+    const mustSurvive = [
+      "<details>",
+      "</details>",
+      "<!-- 주석 -->",
+      "[^ref]: 각주 정의",
+      "<kbd>",
+      "</kbd>",
+      "[^ref]",
+    ];
+
+    await withEditorDom(async (dom) => {
+      let seed = 20260802;
+      const next = (bound: number) => {
+        seed = (seed * 1103515245 + 12345) % 2147483648;
+        return seed % bound;
+      };
+
+      for (let round = 0; round < 40; round += 1) {
+        const picked: string[] = [];
+        const count = 2 + next(4);
+        for (let i = 0; i < count; i += 1) picked.push(fragments[next(fragments.length)]);
+        const source = picked.join("\n\n");
+
+        const rich = mountRich(dom, source);
+        try {
+          const out = rich.getMarkdown();
+          for (const needle of mustSurvive) {
+            if (!source.includes(needle)) continue;
+            // 코드펜스·인라인 코드 안에 들어간 경우는 내용이지 조각이 아니다 — 이 조합에서는 생기지 않지만
+            // 실패 메시지에 원문을 실어 두면 회귀가 났을 때 어느 조합인지 바로 보인다.
+            expect(`${needle} in ${JSON.stringify(out)}`).toContain(needle);
+          }
+        } finally {
+          rich.destroy();
+        }
       }
     });
   });

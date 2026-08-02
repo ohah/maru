@@ -819,9 +819,6 @@ export function bootShell(document: Document, targetWindow: ViewerWindow): void 
   // 리치 모드(§2.5)의 문서모델 편집기. CM6와 동시에 살 수 있지만 화면에는 한 번에 하나만 보인다.
   let richEditor: RichEditorHandle | null = null;
   let richHost: HTMLElement | null = null;
-  /// 리치가 표현하지 못하는 문법 때문에 잠긴 상태인가. close lock 해제가 이 잠금까지 풀면 안 되고,
-  /// 저장 경로도 이 값을 보고 막는다(잠금이 타이핑만 막으면 원문이 그대로 파괴된다).
-  let richLockedByUnsupportedSyntax = false;
   let savedContent = "";
   let savedDocument: Text | null = null;
   let contentLoaded = false;
@@ -870,7 +867,7 @@ export function bootShell(document: Document, targetWindow: ViewerWindow): void 
     if (editor !== null) editor.contentDOM.contentEditable = requestId === null ? "true" : "false";
     // 리치도 함께 잠근다. 여기서 빠뜨리면 close-confirm이 떠 있는 동안 사용자가 계속 타이핑하고, ACK가
     // clean이었다면 native가 프롬프트 없이 탭을 닫아 그 입력이 통째로 버려진다.
-    richEditor?.setEditable(requestId === null && !richLockedByUnsupportedSyntax);
+    richEditor?.setEditable(requestId === null);
   };
 
   const syncDirty = async (next: boolean, requestId = 0) => {
@@ -965,14 +962,6 @@ export function bootShell(document: Document, targetWindow: ViewerWindow): void 
     // `editorEpoch`가 다른 값이 되어, 방금 검사한 것과 다른 문서에 쓰게 된다. 타입 검사가 이 구멍을 짚어 줬다.
     const saving_epoch = editorEpoch;
     if (editor === null && richEditor === null) return false;
-    // 리치가 표현하지 못하는 문법이 있는 문서는 저장을 거부한다. 잠금이 타이핑만 막으면 ⌘S 한 번에
-    // frontmatter·원시 HTML·각주가 직렬화 결과로 덮여 원문이 파괴된다(§2.5의 안전 근거가 여기 있다).
-    if (mode === "rich" && richLockedByUnsupportedSyntax) {
-      if (status !== null)
-        status.textContent =
-          "이 문서는 리치 모드에서 저장할 수 없습니다. 소스 모드에서 저장하세요.";
-      return false;
-    }
     // mode는 **지금** 고정한다. queue 콜백 안에서 읽으면 저장이 끝나기 전 사용자가 모드를 바꿨을 때
     // 다른 모드의 기준점을 갱신해 dirty 판정이 어긋난다.
     const savingMode = mode;
@@ -1086,9 +1075,6 @@ export function bootShell(document: Document, targetWindow: ViewerWindow): void 
         reportDirty(currentDocumentIsDirty());
       },
       () => void save(),
-      (locked) => {
-        richLockedByUnsupportedSyntax = locked;
-      },
     );
     if (closeLockRequestId !== null) richEditor.setEditable(false);
     return richEditor;

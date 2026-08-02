@@ -20,9 +20,9 @@ describe("shell UI stack", () => {
     // 오염시킨다**(실제로 겪었다 — window is not defined가 7건 터졌다). 이 파일은 스택 배선만 본다.
     const source = readFileSync(join(webRoot, "src", "shell-ui.tsx"), "utf8");
     expect(source).toContain("createRoot");
-    // 루트는 편집기당 **하나**다 — 툴바와 안내가 같은 트리에서 그려진다(둘로 갈리면 뒤 UI마다 루트가 는다).
+    // 루트는 편집기당 **하나**다 — 문서와 함께 사는 UI가 전부 이 트리에서 그려진다(둘로 갈리면 뒤 UI마다
+    // 루트가 는다). 지금 그 트리의 내용은 툴바뿐이다 — 잠금 안내는 원문 보존 규칙(§2.5)이 없앴다.
     expect(source).toContain("RichToolbar");
-    expect(source).toContain("maru-rich-notice");
     // automatic runtime이라 `import React`가 없어야 한다 — 있으면 jsx 설정이 classic으로 새고 있다는 뜻이다.
     expect(source).not.toMatch(/^import React /m);
 

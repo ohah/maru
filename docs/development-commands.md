@@ -11,6 +11,14 @@ Maru 작업에서 사용하는 기본 명령이다.
 
 테스트된 Zig 버전은 정확히 `0.16.0`이다(`.mise.toml`, `build.zig.zon`의 `minimum_zig_version`). 0.16 개발 주기에서 `std.Io`(I/O 인터페이스), Writer/Reader, process 진입 API가 크게 바뀌었으므로, 같은 `0.16.0`이라도 다른 스냅샷/커밋에서는 빌드가 깨질 수 있다. 빌드가 std API 불일치로 실패하면 먼저 `mise current zig`로 정확한 버전을 확인한다.
 
+### Zig 0.16 테스트 runner
+
+`zig build test`와 이를 호출하는 `mise run test`는 프로젝트의 `tools/simple_test_runner.zig`를 모든 Zig test artifact에 명시적으로 주입한다. Zig 0.16 기본 Build runner의 `--listen=-` IPC 경로가 일부 macOS 환경에서 stdin `EndOfStream`으로 종료되는 문제를 피하기 위한 것이다.
+
+- runner는 `builtin.test_functions` 전체를 실행하고, 테스트별 testing allocator 누수·error log·실패를 exit code로 반환한다. 따라서 `zig build test`의 의존 artifact 범위, test filter, 실패 판정은 줄지 않는다.
+- 이 설정은 fuzz server protocol을 대체하지 않는다. Maru의 기본 test graph에는 fuzz test가 없으며, fuzz를 도입하면 server-mode runner 지원을 별도 gate로 추가해야 한다.
+- Zig를 올리거나 upstream IPC 경로를 재검증할 때는 custom runner를 제거한 상태의 `zig build test`와 CI를 먼저 green으로 만든 뒤에만 이 우회를 삭제한다.
+
 ## 빌드와 테스트
 
 - 파일 패널 웹 의존성 설치: `bun install --cwd web --frozen-lockfile`

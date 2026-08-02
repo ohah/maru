@@ -34,6 +34,10 @@ reveal은 이 다섯을 전부 피한다: root·접힘·watcher·영속을 **하
 
 **남는 것(이 슬라이스 밖)**: root 밖 cwd에 대한 "이 폴더를 루트로 추가" 어포던스, 끄기 위한 config 키. 둘 다 실사용 근거가 생기면 한다(measure-first) — 지금은 reveal이 비파괴적이라 끌 이유가 약하다.
 
+**구현 상태(2026-08-02).** 위 ET-CWD는 확정된 **정책 계약**이지만 아직 제품 경로에 배선되지 않았다. 현재 `AppSession`은 활성 Term CWD를 소스 컨트롤과 AI 세션 scope에는 소비하지만 file tree에는 전달하지 않아, 탐색기가 열린 파일/명시 root만 보며 active pane을 따라 reveal하지 않는다. 이는 경로를 얻지 못한 문제가 아니라 문서-구현 드리프트다.
+
+다음 구현 slice는 active workspace → active pane → active local Term의 관측 CWD가 변할 때만, 도크가 보이고 tree root 안에 있을 때 기존 `reveal_path` intent를 제출한다. explicit/inferred root·watcher·workspace persistence는 변경하지 않으며, 파일/브라우저 pane의 CWD 부재에서는 마지막 local CWD와 현재 tree 상태를 유지한다. 자동 gate는 pane/Term 전환, 같은 pane의 `cd`, root 밖 no-op, visible target 무스크롤, lazy reveal 완료/취소, explicit root·watcher 불변을 포함해야 한다.
+
 ## 2. root 모델과 열기 UX
 
 **탐색기 열기와 root 권위(ABI v137)**: 빈 도크 launcher는 `DockPanel.presented=true, collapsed=false`만 만들며 picker를 열지 않는다. `file_tree.Tree.mode`는 `inferred | explicit`이다. inferred에서는 `openFilePanelPath`가 파일의 git root(없으면 부모)를 합류시키고, explicit에서는 root 밖 파일을 열어도 recent MRU만 갱신한다. context menu의 `폴더 열기…`는 선택 directory 하나로 explicit root snapshot을 교체하고, `작업공간에 폴더 추가…`는 현재 보이는 root를 보존해 explicit으로 전환하며, root row의 `작업공간에서 폴더 제거`는 마지막 root도 제거해 explicit-empty를 유지한다. 이 open/add/remove UX는 VS Code workspace·multi-root workspace를 clean-room 행동 기준으로 삼고, 기존 Zed 기준은 scan/sort/exclusion/lazy expansion에만 유지한다.

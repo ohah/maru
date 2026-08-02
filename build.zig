@@ -4,6 +4,18 @@ const builtin = @import("builtin");
 // releases/latest tag를 비교 — distribution.md). 릴리스 시 .version만 올리면 앱 버전도 따라간다.
 const build_zig_zon = @import("build.zig.zon");
 
+/// Zig 0.16 Build의 test-server IPC 대신 project-owned simple runner를 쓴다.
+/// `simple_test_runner`는 standard terminal runner와 같은 test/leak/log failure
+/// semantics를 exit code로 보존한다. docs/development-commands.md를 함께 갱신한다.
+fn addProjectTest(b: *std.Build, options: std.Build.TestOptions) *std.Build.Step.Compile {
+    var configured = options;
+    configured.test_runner = .{
+        .path = b.path("tools/simple_test_runner.zig"),
+        .mode = .simple,
+    };
+    return b.addTest(configured);
+}
+
 pub fn build(b: *std.Build) void {
     // macOS 배포 하한을 11.0(Big Sur, Apple Silicon 시작 버전)으로 고정해 구형 macOS에서도
     // 실행되게 한다. 단 이 기본값은 macOS 호스트에서 빌드할 때만 건다.
@@ -160,7 +172,7 @@ pub fn build(b: *std.Build) void {
         // native AppKit bridge는 호출하지 않는다. extern fn은 참조되지 않으므로
         // 이 test 바이너리는 `.m`/Cocoa 링크 없이 순수 Zig로 빌드한다. 그래야
         // "summary 포맷 변경"과 "창 생성 실패"가 toolchain 의존 없이 분리된다.
-        const macos_window_smoke_tests = b.addTest(.{
+        const macos_window_smoke_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/window_smoke.zig"),
                 .target = target,
@@ -210,7 +222,7 @@ pub fn build(b: *std.Build) void {
         macos_metal_smoke_cmd.setCwd(b.path("."));
         macos_metal_smoke_step.dependOn(&macos_metal_smoke_cmd.step);
 
-        const macos_metal_smoke_tests = b.addTest(.{
+        const macos_metal_smoke_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/metal_smoke.zig"),
                 .target = target,
@@ -271,7 +283,7 @@ pub fn build(b: *std.Build) void {
         macos_app_pty_interactive_metal_smoke_cmd.setEnvironmentVariable("MARU_APP_PTY_METAL_SCENARIO", "interactive-shell");
         macos_app_pty_interactive_metal_smoke_step.dependOn(&macos_app_pty_interactive_metal_smoke_cmd.step);
 
-        const macos_app_pty_metal_smoke_tests = b.addTest(.{
+        const macos_app_pty_metal_smoke_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/app_pty_metal_smoke.zig"),
                 .target = target,
@@ -341,7 +353,7 @@ pub fn build(b: *std.Build) void {
         macos_coretext_smoke_cmd.setCwd(b.path("."));
         macos_coretext_smoke_step.dependOn(&macos_coretext_smoke_cmd.step);
 
-        const macos_coretext_smoke_tests = b.addTest(.{
+        const macos_coretext_smoke_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/coretext_smoke.zig"),
                 .target = target,
@@ -395,7 +407,7 @@ pub fn build(b: *std.Build) void {
         macos_glyph_texture_smoke_cmd.setCwd(b.path("."));
         macos_glyph_texture_smoke_step.dependOn(&macos_glyph_texture_smoke_cmd.step);
 
-        const macos_glyph_texture_smoke_tests = b.addTest(.{
+        const macos_glyph_texture_smoke_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/glyph_texture_smoke.zig"),
                 .target = target,
@@ -439,7 +451,7 @@ pub fn build(b: *std.Build) void {
         macos_glyph_text_smoke_cmd.setCwd(b.path("."));
         macos_glyph_text_smoke_step.dependOn(&macos_glyph_text_smoke_cmd.step);
 
-        const macos_glyph_text_smoke_tests = b.addTest(.{
+        const macos_glyph_text_smoke_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/glyph_text_smoke.zig"),
                 .target = target,
@@ -457,17 +469,17 @@ pub fn build(b: *std.Build) void {
         test_macos_glyph_text_smoke_step.dependOn(&run_macos_glyph_text_smoke_tests.step);
     }
 
-    const core_tests = b.addTest(.{
+    const core_tests = addProjectTest(b, .{
         .root_module = maru_mod,
     });
     const run_core_tests = b.addRunArtifact(core_tests);
 
-    const exe_tests = b.addTest(.{
+    const exe_tests = addProjectTest(b, .{
         .root_module = exe.root_module,
     });
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
-    const macos_coretext_font_tests = b.addTest(.{
+    const macos_coretext_font_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/coretext_font.zig"),
             .target = target,
@@ -479,7 +491,7 @@ pub fn build(b: *std.Build) void {
     });
     const run_macos_coretext_font_tests = b.addRunArtifact(macos_coretext_font_tests);
 
-    const macos_coretext_probe_tests = b.addTest(.{
+    const macos_coretext_probe_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/coretext_probe.zig"),
             .target = target,
@@ -491,7 +503,7 @@ pub fn build(b: *std.Build) void {
     });
     const run_macos_coretext_probe_tests = b.addRunArtifact(macos_coretext_probe_tests);
 
-    const macos_coretext_shaper_tests = b.addTest(.{
+    const macos_coretext_shaper_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/coretext_shaper.zig"),
             .target = target,
@@ -503,7 +515,7 @@ pub fn build(b: *std.Build) void {
     });
     const run_macos_coretext_shaper_tests = b.addRunArtifact(macos_coretext_shaper_tests);
 
-    const macos_coretext_raster_tests = b.addTest(.{
+    const macos_coretext_raster_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/coretext_raster.zig"),
             .target = target,
@@ -515,7 +527,7 @@ pub fn build(b: *std.Build) void {
     });
     const run_macos_coretext_raster_tests = b.addRunArtifact(macos_coretext_raster_tests);
 
-    const macos_coretext_frame_builder_tests = b.addTest(.{
+    const macos_coretext_frame_builder_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/coretext_frame_builder.zig"),
             .target = target,
@@ -544,7 +556,7 @@ pub fn build(b: *std.Build) void {
         break :blk opts.createModule();
     };
 
-    const macos_app_host_abi_tests = b.addTest(.{
+    const macos_app_host_abi_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/app_host_abi.zig"),
             .target = target,
@@ -576,7 +588,7 @@ pub fn build(b: *std.Build) void {
     // 파일 탐색기 제품-path 성능 gate는 app_host_abi 모듈의 실제 AppSession glue를 쓰되
     // 해당 테스트 하나만 컴파일·실행한다. 전체 ABI suite에 결합하면 무관한 socket/WebKit
     // 회귀나 flaky test가 탐색기 artifact의 신호를 가리므로 전용 step으로 분리한다.
-    const macos_file_explorer_perf_tests = b.addTest(.{
+    const macos_file_explorer_perf_tests = addProjectTest(b, .{
         .root_module = macos_app_host_abi_tests.root_module,
         .filters = &.{"file tree production hot paths emit bounded counter artifact"},
     });
@@ -585,7 +597,7 @@ pub fn build(b: *std.Build) void {
     const test_macos_file_explorer_perf_step = b.step("test-macos-file-explorer-perf", "Run the macOS AppSession file-explorer performance artifact gate");
     test_macos_file_explorer_perf_step.dependOn(&run_macos_file_explorer_perf_tests.step);
 
-    const provider_no_mutation_tests = b.addTest(.{
+    const provider_no_mutation_tests = addProjectTest(b, .{
         .root_module = macos_app_host_abi_tests.root_module,
         .filters = &.{
             "provider files remain unchanged across AppSession.init when the statusline hook is off",
@@ -1291,7 +1303,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_exe_tests.step);
     // update_check.zig는 std만 의존하는 순수 로직(tag 파싱·semver 비교)이라 macOS smoke가 아니라
     // 기본 Zig test에서 어느 플랫폼에서든 돌린다(인앱 새 버전 안내의 판정 동작 고정).
-    const update_check_tests = b.addTest(.{
+    const update_check_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/update_check.zig"),
             .target = target,
@@ -1302,7 +1314,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_update_check_tests.step);
     // validate_json_artifact.zig는 std만 의존하는 perf artifact 스키마 validator다. 부분 문자열
     // false-green 회귀(예산 10배가 통과하던 grep)와 스키마 락(누락·추가 키·타입)을 기본 test에서 고정한다.
-    const perf_validate_tests = b.addTest(.{
+    const perf_validate_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/perf/validate_json_artifact.zig"),
             .target = target,
@@ -1318,7 +1330,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const session_host_slow_observer_validator_tests = b.addTest(.{
+    const session_host_slow_observer_validator_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path(
                 "tools/perf/session_host_slow_observer_validator.zig",
@@ -1385,7 +1397,7 @@ pub fn build(b: *std.Build) void {
         run_browser_result_registry_tests.addFileArg(browser_result_registry_test_bin);
         test_step.dependOn(&run_browser_result_registry_tests.step);
 
-        const control_socket_tests = b.addTest(.{
+        const control_socket_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/control_socket.zig"),
                 .target = target,
@@ -1398,7 +1410,7 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_control_socket_tests.step);
         // control_server.zig(Track C A2b)는 앱 전역 라이브 컨트롤 소켓 + accept 스레드 + 메인 marshal 큐다.
         // control_socket과 같은 이유로 **macOS에서만** test step에 배선한다(실 unix socket·스레드·peer-cred).
-        const control_server_tests = b.addTest(.{
+        const control_server_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/control_server.zig"),
                 .target = target,
@@ -1433,7 +1445,7 @@ pub fn build(b: *std.Build) void {
     // 플랫폼 독립 테스트로 기본 check에 넣어 drift를 빨리 잡는다.
     test_step.dependOn(&run_macos_app_host_abi_tests.step);
 
-    const e2e_tests = b.addTest(.{
+    const e2e_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/e2e/headless.zig"),
             .target = target,
@@ -1450,7 +1462,7 @@ pub fn build(b: *std.Build) void {
     const e2e_step = b.step("test-e2e", "Run headless E2E tests");
     e2e_step.dependOn(&run_e2e_tests.step);
 
-    const pty_tests = b.addTest(.{
+    const pty_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/integration/pty/macos.zig"),
             .target = target,
@@ -1468,7 +1480,7 @@ pub fn build(b: *std.Build) void {
     const pty_step = b.step("test-pty", "Run opt-in macOS PTY integration tests, including interactive shell smoke");
     pty_step.dependOn(&run_pty_tests.step);
 
-    const oracle_tests = b.addTest(.{
+    const oracle_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/oracle/recorded.zig"),
             .target = target,
@@ -1487,7 +1499,7 @@ pub fn build(b: *std.Build) void {
 
     // Trace fixture + CI: replay committed trace fixtures and assert the reconstructed screen matches the golden
     // (and that each fixture passes the redaction guard, so it is commit-safe). Runs in the default `test` step.
-    const replay_fixture_tests = b.addTest(.{
+    const replay_fixture_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/oracle/replay.zig"),
             .target = target,
@@ -1505,7 +1517,7 @@ pub fn build(b: *std.Build) void {
     const replay_step = b.step("test-replay", "Replay committed trace fixtures against golden screens (MARU_UPDATE_GOLDEN=1 to refresh)");
     replay_step.dependOn(&run_replay_fixture_tests.step);
 
-    const boundary_tests = b.addTest(.{
+    const boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/boundary/imports.zig"),
             .target = target,
@@ -1517,7 +1529,7 @@ pub fn build(b: *std.Build) void {
 
     // chrome 셀 텍스트의 grapheme cluster 규율(CG1) — 셀을 만드는 함수가 문자열을 codepoint 단위로 디코드하면
     // NFD가 자모로 흩어진다(docs/grapheme-clustering.md §3.1a). import 경계와 같은 결의 소스 스캔이라 같은 step에 건다.
-    const chrome_text_boundary_tests = b.addTest(.{
+    const chrome_text_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/boundary/chrome_text_clusters.zig"),
             .target = target,
@@ -1535,7 +1547,7 @@ pub fn build(b: *std.Build) void {
     // 이쪽은 "문서가 광고하는 키가 실재하는가"(역방향)를 막는다 — 문서만 보고 config에 적었는데 조용히 무시되던
     // 드리프트를 CI가 잡는다. docs/*.md를 런타임에 훑어야 해서(@embedFile은 디렉터리 순회 불가) 별도 테스트 바이너리로
     // 두고 cwd를 리포지토리 루트로 고정한다(boundary 테스트와 같은 구조). 단일 출처: docs/config-schema.md §7.
-    const config_docs_tests = b.addTest(.{
+    const config_docs_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/config_docs/keys.zig"),
             .target = target,
@@ -1553,7 +1565,7 @@ pub fn build(b: *std.Build) void {
     // 쓰는 순수 계층이지만, macOS 전용 `runtime_manager`(P3-e2b)가 `@import("maru")`로 app InProcessTermBackend를
     // 재사용하므로 `maru` 모듈을 import로 준다(non-macOS 크로스컴파일에선 barrel이 runtime_manager를 제외해 maru가
     // 도달되지 않는다). 기본 `test` 스텝에 편입해 wire 회귀를 항상 잡고, `test-session-host`로 개별 실행도 가능하게 한다.
-    const session_host_tests = b.addTest(.{
+    const session_host_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/platform/macos/session_host.zig"),
             .target = target,
@@ -1658,7 +1670,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "session_host", .module = session_host_fixture_mod },
             },
         });
-        const signed_upgrade_e2e_tests = b.addTest(.{
+        const signed_upgrade_e2e_tests = addProjectTest(b, .{
             .root_module = signed_upgrade_e2e_mod,
         });
         const run_signed_upgrade_e2e_tests = b.addRunArtifact(signed_upgrade_e2e_tests);
@@ -1712,7 +1724,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "session_host", .module = slow_observer_session_host_mod },
             },
         });
-        const slow_observer_probe_tests = b.addTest(.{
+        const slow_observer_probe_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(
                     "tests/support/session_host_slow_observer_probe.zig",
@@ -1757,7 +1769,7 @@ pub fn build(b: *std.Build) void {
                 },
             }),
         });
-        const slow_observer_e2e_tests = b.addTest(.{
+        const slow_observer_e2e_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(
                     "tests/session_host_slow_observer_e2e.zig",
@@ -1833,7 +1845,7 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag == .macos) {
         // The d2d authority proof is a pure leaf with its own hostile lifecycle matrix. Compile it
         // independently so pump reachability cannot accidentally become the only test root.
-        const external_turn_authority_tests = b.addTest(.{
+        const external_turn_authority_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(
                     "src/platform/macos/session_host/client_external_turn_authority.zig",
@@ -1852,7 +1864,7 @@ pub fn build(b: *std.Build) void {
         // The stable external-pump storage is intentionally not re-exported by the session_host
         // barrel: only the future final owner may import its raw mechanics. Compile its inline TDD
         // suite as a dedicated root while keeping it in both default and focused host gates.
-        const external_pump_storage_tests = b.addTest(.{
+        const external_pump_storage_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(
                     "src/platform/macos/session_host/client_external_pump.zig",
@@ -1873,7 +1885,7 @@ pub fn build(b: *std.Build) void {
         // `zig build ... -- --test-filter` passes arguments to a run artifact and does not
         // configure Zig's compile-time test selection. Keep the F3b regression gate explicit so
         // a command that selected zero tests cannot be mistaken for evidence.
-        const external_pump_f3b_tests = b.addTest(.{
+        const external_pump_f3b_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(
                     "src/platform/macos/session_host/client_external_pump.zig",
@@ -1895,7 +1907,7 @@ pub fn build(b: *std.Build) void {
         );
         session_host_f3b_step.dependOn(&run_external_pump_f3b_tests.step);
 
-        const external_pump_f3c1_tests = b.addTest(.{
+        const external_pump_f3c1_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(
                     "src/platform/macos/session_host/client_external_pump.zig",
@@ -1944,7 +1956,7 @@ pub fn build(b: *std.Build) void {
         run_session_host_f3c1_sentinel.setCwd(b.path("."));
         session_host_f3c1_step.dependOn(&run_session_host_f3c1_sentinel.step);
 
-        const integration_2b2e_policy_tests = b.addTest(.{
+        const integration_2b2e_policy_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(
                     "src/platform/macos/session_host/client_pump.zig",
@@ -1957,7 +1969,7 @@ pub fn build(b: *std.Build) void {
         const run_integration_2b2e_policy_tests = b.addRunArtifact(
             integration_2b2e_policy_tests,
         );
-        const integration_2b2e_pump_tests = b.addTest(.{
+        const integration_2b2e_pump_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(
                     "src/platform/macos/session_host/client_external_pump.zig",
@@ -2015,7 +2027,7 @@ pub fn build(b: *std.Build) void {
             &run_integration_2b2e_sentinel.step,
         );
 
-        const external_pump_f3c2_tests = b.addTest(.{
+        const external_pump_f3c2_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(
                     "src/platform/macos/session_host/client_external_pump.zig",
@@ -2064,7 +2076,7 @@ pub fn build(b: *std.Build) void {
         session_host_f3c2_step.dependOn(&run_external_pump_f3c2_tests.step);
         session_host_f3c2_step.dependOn(&run_session_host_f3c2_sentinel.step);
 
-        const control_wire_f3c0_tests = b.addTest(.{
+        const control_wire_f3c0_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(
                     "src/platform/macos/session_host/control_response_wire.zig",
@@ -2079,7 +2091,7 @@ pub fn build(b: *std.Build) void {
             control_wire_f3c0_tests,
         );
         run_control_wire_f3c0_tests.setCwd(b.path("."));
-        const remote_runtime_f3c0_tests = b.addTest(.{
+        const remote_runtime_f3c0_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(
                     "src/platform/macos/session_host/remote_runtime.zig",
@@ -2095,7 +2107,7 @@ pub fn build(b: *std.Build) void {
             remote_runtime_f3c0_tests,
         );
         run_remote_runtime_f3c0_tests.setCwd(b.path("."));
-        const external_pump_f3c0_tests = b.addTest(.{
+        const external_pump_f3c0_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(
                     "src/platform/macos/session_host/client_external_pump.zig",
@@ -2198,7 +2210,7 @@ pub fn build(b: *std.Build) void {
         session_host_f3c0_step.dependOn(&run_session_host_f3c0_codec_sentinel.step);
         session_host_f3c0_step.dependOn(&run_session_host_f3c0_remote_sentinel.step);
 
-        const recovery_contract_types_tests = b.addTest(.{
+        const recovery_contract_types_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(
                     "src/platform/macos/session_host/external_recovery_types.zig",
@@ -2211,7 +2223,7 @@ pub fn build(b: *std.Build) void {
         const run_recovery_contract_types_tests = b.addRunArtifact(
             recovery_contract_types_tests,
         );
-        const recovery_contract_pump_tests = b.addTest(.{
+        const recovery_contract_pump_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(
                     "src/platform/macos/session_host/client_pump.zig",
@@ -2224,7 +2236,7 @@ pub fn build(b: *std.Build) void {
         const run_recovery_contract_pump_tests = b.addRunArtifact(
             recovery_contract_pump_tests,
         );
-        const recovery_contract_external_tests = b.addTest(.{
+        const recovery_contract_external_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(
                     "src/platform/macos/session_host/client_external_pump.zig",
@@ -2300,7 +2312,7 @@ pub fn build(b: *std.Build) void {
 
         // Buffered traversal fixtures stay outside the product barrel so test-only authority and
         // hostile allocators cannot become reachable from the shipped session-host module graph.
-        const external_rx_turn_tests = b.addTest(.{
+        const external_rx_turn_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(
                     "src/platform/macos/session_host/client_external_rx_turn_test_support.zig",
@@ -2320,7 +2332,7 @@ pub fn build(b: *std.Build) void {
 
         // C3 collector fixtures inject authority/read callbacks without making the transport-only
         // leaf or the product barrel depend on hostile test owners.
-        const external_rx_read_tests = b.addTest(.{
+        const external_rx_read_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(
                     "src/platform/macos/session_host/client_external_rx_read_test_support.zig",
@@ -2356,7 +2368,7 @@ pub fn build(b: *std.Build) void {
     oracle_ext_mod.linkSystemLibrary("vterm", .{});
     oracle_ext_mod.addIncludePath(b.path("tests/oracle"));
     oracle_ext_mod.addCSourceFile(.{ .file = b.path("tests/oracle/vterm_shim.c") });
-    const oracle_ext_tests = b.addTest(.{ .root_module = oracle_ext_mod });
+    const oracle_ext_tests = addProjectTest(b, .{ .root_module = oracle_ext_mod });
     const run_oracle_ext_tests = b.addRunArtifact(oracle_ext_tests);
     run_oracle_ext_tests.setCwd(b.path("."));
 
@@ -2381,7 +2393,7 @@ pub fn build(b: *std.Build) void {
     oracle_ghostty_mod.addIncludePath(b.path("tests/oracle"));
     oracle_ghostty_mod.addCSourceFile(.{ .file = b.path("tests/oracle/ghostty_shim.c") });
     oracle_ghostty_mod.addObjectFile(b.path("references/ghostty/zig-out/lib/libghostty-vt.a"));
-    const oracle_ghostty_tests = b.addTest(.{ .root_module = oracle_ghostty_mod });
+    const oracle_ghostty_tests = addProjectTest(b, .{ .root_module = oracle_ghostty_mod });
     const run_oracle_ghostty_tests = b.addRunArtifact(oracle_ghostty_tests);
     run_oracle_ghostty_tests.setCwd(b.path("."));
 
@@ -2399,7 +2411,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "test_support", .module = test_support_mod },
         },
     });
-    const oracle_alacritty_tests = b.addTest(.{ .root_module = oracle_alacritty_mod });
+    const oracle_alacritty_tests = addProjectTest(b, .{ .root_module = oracle_alacritty_mod });
     const run_oracle_alacritty_tests = b.addRunArtifact(oracle_alacritty_tests);
     run_oracle_alacritty_tests.setCwd(b.path("."));
 
@@ -2408,7 +2420,7 @@ pub fn build(b: *std.Build) void {
 
     const stress_options = b.addOptions();
     stress_options.addOption(bool, "soak", false);
-    const stress_tests = b.addTest(.{
+    const stress_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/stress/core.zig"),
             .target = target,
@@ -2428,7 +2440,7 @@ pub fn build(b: *std.Build) void {
 
     const stress_soak_options = b.addOptions();
     stress_soak_options.addOption(bool, "soak", true);
-    const stress_soak_tests = b.addTest(.{
+    const stress_soak_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/stress/core.zig"),
             .target = target,

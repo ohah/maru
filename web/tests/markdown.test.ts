@@ -259,3 +259,18 @@ test("Mermaid SVG sanitizer removes executable and network-capable sinks", () =>
   expect(svg).not.toContain("110000");
   expect(svg).not.toContain("ffffff");
 });
+
+describe("shell DOM 삽입 전제", () => {
+  test("id·name은 clobber 접두사가 붙어 shell 셀렉터와 만나지 않는다", () => {
+    // 리치 미리보기는 이 결과를 **신뢰 shell DOM에 넣는 유일한 예외**다(file-panel.md §2.1 ②). shell은 자기
+    // 부품을 `#renderer`·`#editor`·`#viewer-status` id 셀렉터로 찾으므로, 문서가 같은 id를 쓸 수 있으면
+    // querySelector가 문서의 노드를 돌려준다. sanitizer의 clobber 접두사가 그 경로를 막는다 — **이 접두사가
+    // 그 예외의 전제이므로**, 스키마에서 꺼지면 여기서 실패해야 한다.
+    const rendered = renderMarkdown('<div id="renderer" name="editor">본문</div>');
+
+    expect(rendered).toContain("본문");
+    expect(rendered).toContain("user-content-renderer");
+    expect(rendered).not.toContain('id="renderer"');
+    expect(rendered).not.toContain('name="editor"');
+  });
+});

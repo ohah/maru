@@ -319,12 +319,29 @@ body {
   white-space: pre-wrap;
 }
 
+/* 조각 하나를 감싸는 틀. 미리보기(위)와 소스 칸(아래)이 한 덩어리로 보여야 둘이 같은 것의 두 면임이 읽힌다. */
+.maru-rich-raw {
+  margin: 0 0 1rem;
+  border: 1px solid color-mix(in srgb, CanvasText 14%, Canvas);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+/* 렌더된 모습. 편집 대상이 아니라는 것이 보여야 하므로 배경을 본문과 같게 두고 아래 소스 칸과 선으로 가른다. */
+.maru-rich-raw-preview {
+  padding: 0.625rem 0.875rem;
+  border-bottom: 1px solid color-mix(in srgb, CanvasText 14%, Canvas);
+}
+
+.maru-rich-raw-preview[hidden] {
+  display: none;
+}
+
 /* 문서모델이 모르는 원문 조각(§2.5 보존 규칙). 본문과 **다른 것**임이 보여야 한다 — 여기 적힌 것은 렌더된
    결과가 아니라 파일에 그대로 들어갈 글자다. frontmatter 블록과 같은 계열로 둔다. */
 .maru-rich-raw-block {
-  margin: 0 0 1rem;
+  margin: 0;
   padding: 0.5rem 0.75rem;
-  border-left: 3px solid color-mix(in srgb, CanvasText 30%, Canvas);
   background: color-mix(in srgb, CanvasText 4%, Canvas);
   color: color-mix(in srgb, CanvasText 72%, Canvas);
   font-family: var(--maru-editor-font-family, ui-monospace, monospace);

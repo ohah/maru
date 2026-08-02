@@ -667,7 +667,8 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   lease와 ConnectionLease는 별개이며 external-pump owner graph는 변경하지 않는다. 증거 수준은 production-type unit이다.
 - CR3a-2(진행, **2a 구현**, 2b~e 계획): generation 1 compatibility wiring으로 GUI raw `RemoteRuntime.client=*Client`와
   `AttachmentTransport.context=*Client` production callsite 0, GUI-only final-address `GenerationAttachment.initInPlace`,
-  external movable `RemoteAttachment`/`Prepared|Attached` owner-schema 불변, live transport와 cleanup lease 분리,
+  external movable `RemoteAttachment`의 outer field 목록·기존 `untracked|charged` reachable 의미와 external `Prepared|Attached`의
+  outer owner schema 불변(`AttachmentBatchLease` 내부 generation variant/layout 변화는 허용), live transport와 cleanup lease 분리,
   batch table 0/1/4096/4097과 별도 stream-drop table 0/1/4096/4097의
   one-shot permit, 실제 attach/pump/deinit·failed-release·callback reentry에서 bound generation-1 node cleanup exact 1,
   slot/current admission과 별도 sentinel node mutation·wire 0을 검증한다. lease 발급 뒤 attachment move/copy와 기존
@@ -725,7 +726,10 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   real socket은 2e parity gate이고 AppKit은 완료 조건이 아니다. uncertain/malformed accepted attach response는 local reservation
   abort 뒤 connection close로 server subscription final-zero가 된다. 2a는 neutral contract leaf와 GUI shell+transport 최소 core의
   실제 attach/deinit/drop/lease, external owner-schema digest, 2b는 실제 pump의 buffered/direct→registry transaction·두 cap·release와
-  GUI raw AttachmentTransport context와 raw Client 경유 batch read/release/drop callsite 0, 2c는 남은 exact primitive facade와
+  generation GUI batch 경로의 raw AttachmentTransport Client context와 raw Client 경유 batch read/release/drop callsite 0을
+  증명한다. 2b의 상태는
+  **2b1(node batch registry와 Client transferred accounting, 계획) → 2b2(GUI node-bound adapter와 제품 pump/release/drop, 계획)**로
+  나누며, 2b1만 green이어도 GUI raw context가 남아 있으므로 2b 전체를 구현으로 표시하지 않는다. 2c는 남은 exact primitive facade와
   `RemoteRuntime.client`를 포함한 raw escape zero,
   2d는 actual-owner permit/reentry/quarantine/typed teardown, 2e는 actual socket
   attach/pump/deinit/uncertain/malformed/snapshot-failure/failed-release fixture와 전체 source

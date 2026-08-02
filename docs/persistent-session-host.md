@@ -802,8 +802,13 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    token handle을 attachment에서 tombstone하고 connection을 `.attachment_cleanup_failed`로 poison한다. 반환은
    `terminal_handoff`이며 attachment local owner/pin은 0, node/ledger terminal owner는 exact 1이다. node final teardown이 exact
    cleanup 또는 기존 bounded quarantine을 소유하며 자동 재시도는 없다. GUI registry는 mirror가 아니라 GUI attachment로
-   인출된 batch payload의 단일 allocator/free owner다. attachment는 payload descriptor나 allocator를 복사해 갖지 않고
-   pointer-free `{entry_slot,entry_generation,stream_id}` token만 소유한다. batch 인출은 registry entry를 먼저 reserve한 뒤 Client의
+   인출된 batch payload의 단일 allocator/free owner다. attachment는 payload descriptor나 allocator를 복사해 갖지 않고 external
+   ledger의 charged token과 타입으로 구분되는 generation 전용 `AttachmentBatchLease.generation`의 pointer-free
+   `{entry_slot,entry_generation,stream_id}` token만 소유한다. 이 내부 union variant 추가는 `AttachmentBatchLease`의 state space와
+   layout을 바꾸므로 byte/layout 불변을 주장하지 않는다. 대신 movable `RemoteAttachment`의 outer owner field 목록, external 경로가
+   mint/observe하는 기존 `untracked|charged` tag와 `charged` token/ledger/adoption 소유 의미는 불변이다. external 경로는
+   `.generation`을 mint하거나 관측하면 fail-close하고, generation 제품 경로는 기존 raw-owner `untracked` variant를 발행하지 않는다.
+   batch 인출은 registry entry를 먼저 reserve한 뒤 Client의
    closed `readGenerationBatch(out_descriptor,out_receipt,stream_id)`가 두 source를 한 transaction으로 처리한다. 이미 buffered된
    foreign/own-stream batch는 Client queue의 exact descriptor와 pending accounting을 entry/transferred accounting으로
    move+tombstone한다. socket/parser에서 방금 완성된 requested-stream batch는 queue를 우회해 parser-local descriptor를 같은
@@ -817,7 +822,8 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
 
    registry의 batch table cap은 `max_client_screen_items=4,096`이다. accounting SSOT는 `Client` 안에 유지한다. generation GUI
    전용 closed take가 queue의 `pending_batch_count/bytes`를 같은 Client의 `transferred_batch_count/bytes`로 옮기므로 기존
-   `max_client_screen_items=4,096`/`max_client_screen_inbox=18 MiB` admission 합계는 변하지 않는다. registry는 Client나 상위
+   `max_client_screen_items=4,096`/`max_client_screen_inbox=18 MiB` admission 합계는 변하지 않는다. batch payload table은 기존
+   stream-drop table과 별도 fixed-cap 4,096 table이며 두 table은 동시에 각자의 cap까지 찰 수 있다. registry는 Client나 상위
    budget을 역참조하지 않고 exact descriptor와 opaque accounting receipt만 소유한다. release/node drain은 allocator callback이
    반환해 backing resident lifetime이 끝난 뒤 closed Client accounting consume을 호출한다. callback 재진입 중에는 transferred
    charge가 남아 있어 다른 stream도 실제 18 MiB resident cap을 초과해 admit할 수 없다. stream-drop reservation은 payload table과
@@ -825,6 +831,18 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    다른 stream 경쟁을 검증한다. entry storage는 attach/batch admission 때 확보해 cleanup suffix에서 allocation하지 않는다.
    consumed slot은 재사용하되 checked-monotonic reservation ID로 ABA를 막는다. call cancel은 CR3a-2 제품 callback이 0이므로
    이 단계에서 synthetic entry를 만들지 않고 CR3b R1의 pending-call typed cancel이 소유한다.
+
+   2b의 normal generation release는 token/entry/allocator seal뿐 아니라 canonical Client/node incarnation, exact opaque accounting
+   receipt, transferred count/bytes와 decrement underflow까지 callback 전에 전량 검증하고 consume을 reserve한다. 이 preflight가
+   실패하면 callback/free/accounting mutation 0이고 registry가 payload owner를 유지한다. non-strict component adapter는 token을
+   그대로 보존해 `invariant_failure`를 반환할 수 있지만, 2b의 generation 제품 strict adapter는 첫 실패에서 즉시 fail-stop하므로
+   `RemoteAttachment.deinit`이 두 번째 sibling token으로 진행하거나 단일 `failed_release` 슬롯에서 owner를 잃지 않는다. 검사를
+   통과한 뒤에는 entry를 callback-local descriptor로 무실패 이동하고 captured allocator를 exact once 호출한다. allocator 반환 뒤
+   accounting consume과 entry settle은 allocation/callback/재검증이 없는 no-fail suffix다. 따라서 valid 경로는 free exact 1 뒤
+   transferred charge를 exact decrement하고, callback 반환 불능은 process fail-stop이며 void callback 뒤 retryable을 추측하지
+   않는다. generation drop의 strict adapter도 정상 제품 경로에서는 `completed`만 허용한다.
+   `retryable_preserved|indeterminate_or_partial`, recoverable failed-release retry, terminal quarantine와 aggregate handoff의 실제 제품
+   배선은 2d가 소유한다.
 
    terminal handoff는 payload token과 남은 sibling batch/drop token 전부를 allocation/callback 0의 한 node-owned teardown
    receipt로 결속하고 attachment token들을 tombstone한 뒤 lease pin을 해제한다. 첫 `indeterminate_or_partial` 또는 두 번째
@@ -1040,10 +1058,12 @@ final-address `GenerationAttachment` + neutral contract leaf + `GenerationTransp
 pump/release에 배선하고 GUI raw AttachmentTransport context를 node-bound batch/drop adapter로 교체한다. **2c** 나머지 small closed
 transport primitive를 옮겨 `RemoteRuntime.client`와 모든 GUI raw Client escape를 제거한다. **2d** 실제 registry의 permit·reentry·typed
 failure·aggregate handoff를 배선한다. **2e** 실제 GUI attach/pump/deinit/failed-release socket parity와 source boundary를 닫는다.
-2b 종료 시 GUI의 batch read/release/drop은 node-bound adapter만 호출하며, 아직 2c까지 남아 있는
-`RemoteRuntime.client`나 다른 raw Client 경유 `readStreamBatch|readGenerationBatch|dropBufferedStream` 제품 callsite는 0이다.
+2b 종료 시 generation GUI attachment의 batch read/release/drop은 node-bound adapter만 호출하며, 이 경로의
+`AttachmentTransport.context=*Client`, raw Client cast와 `readStreamBatch|readGenerationBatch|dropBufferedStream` 직접 호출은 0이다.
+legacy GUI fallback과 external movable attachment의 기존 transport는 이 source-boundary 수에 포함하지 않는다. 2c까지 남아 있는
+`RemoteRuntime.client`의 event/input/RPC 및 ended-event 정리 경로는 명시적 allowlist로 남고, 2c에서 closed facade로 제거한다.
 2a~e 전체가 green이기 전 CR3a-2 완료를 주장하지 않는다. 종료 oracle은 GUI generation 1 attachment의
-attach/pump/deinit/failed-release parity, GUI raw Client callback/context production callsite 0,
+attach/pump/deinit/failed-release parity, generation GUI batch 경로의 raw Client callback/context production callsite 0,
 `ExternalPumpStorage.owned_client` 및 external `Prepared|Attached` owner-schema digest 불변이다. 두 단계 모두 incident/artifact
 mutation, workspace write, host/runtime spawn·upgrade, reconnect job 시작은 0이다.
 

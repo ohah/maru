@@ -61705,7 +61705,7 @@ test "diff Term을 읽는 중에 닫아도 결과가 안전하게 버려진다" 
                 owned.deinit(allocator);
                 break;
             }
-            std.Thread.sleep(5 * std.time.ns_per_ms);
+            std.Io.sleep(session.io, std.Io.Duration.fromMilliseconds(5), .awake) catch {};
         }
     }
 }

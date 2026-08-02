@@ -10,6 +10,7 @@ const client_mod = @import("client.zig");
 const lease_mod = @import("connection_lease.zig");
 const cleanup_registry_mod = @import("attachment_cleanup_registry.zig");
 const batch_registry_mod = @import("generation_batch_registry.zig");
+const owner_seal = @import("external_owner_seal.zig");
 const contract = @import("generation_attachment_contract.zig");
 const framing = @import("framing.zig");
 const protocol = @import("protocol.zig");
@@ -197,6 +198,102 @@ pub const StreamOperationPermit = struct {
 
 pub const InitialSnapshotPermit = StreamOperationPermit;
 
+const EndedPurgePreparationLifecycle = enum(u8) { empty, prepared, aborted };
+
+pub const EndedPurgePreparation = struct {
+    self_addr: usize = 0,
+    target_stream: u64 = 0,
+    permit: StreamOperationPermit = undefined,
+    inventory: client_mod.PreparedEndedPurgeInventory = .{},
+    authority_seal: owner_seal.Digest = [_]u8{0} ** 32,
+    lifecycle: EndedPurgePreparationLifecycle = .empty,
+
+    pub fn abort(self: *EndedPurgePreparation, slot: *ClientSlot) bool {
+        if (self.lifecycle != .prepared or self.self_addr != @intFromPtr(self) or
+            !slot.streamOperationPermitLive(self.permit) or
+            !self.inventory.validPreparedAtFinalAddress() or
+            !std.mem.eql(u8, &self.authority_seal, &endedPurgePreparationSeal(self)))
+            return false;
+        slot.abortStreamOperationPermit(self.permit) catch return false;
+        if (!self.inventory.abort()) @panic("validated ended purge inventory abort failed");
+        self.lifecycle = .aborted;
+        return true;
+    }
+};
+
+fn endedPurgePreparationSeal(prepared: *const EndedPurgePreparation) owner_seal.Digest {
+    var writer = owner_seal.Writer.init("maru.ended-purge.preparation.v1");
+    writer.writeUsize(prepared.self_addr);
+    writer.writeU64(prepared.target_stream);
+    writer.writeUsize(@intFromPtr(prepared.permit.slot));
+    writer.writeU16(prepared.permit.registry_index);
+    writer.writeU64(prepared.permit.registry_id);
+    writer.writeU64(prepared.permit.slot_incarnation);
+    writer.writeU64(prepared.permit.node_incarnation);
+    writer.writeU64(prepared.permit.generation);
+    writer.writeU8(@intFromEnum(prepared.permit.kind));
+    writer.writeU64(prepared.permit.owner_thread_incarnation);
+    writer.writeUsize(prepared.permit.owner_addr);
+    writer.writeU64(prepared.permit.transport_incarnation);
+    writer.writeU64(prepared.permit.binding.binding_incarnation);
+    writer.writeUsize(prepared.permit.binding.binding_storage_addr);
+    writer.writeUsize(prepared.permit.binding.destination_addr);
+    writer.writeU64(prepared.permit.binding.binding_reservation_id);
+    writer.writeU64(prepared.permit.binding.slot_incarnation);
+    writer.writeU64(prepared.permit.binding.node_incarnation);
+    writer.writeU128(prepared.permit.binding.host_id);
+    writer.writeU64(prepared.permit.binding.connection_generation);
+    writer.writeU128(prepared.permit.binding.runtime_id);
+    writer.writeU8(@intFromEnum(prepared.permit.binding.role));
+    writer.writeU64(prepared.permit.binding.pid);
+    writer.writeU64(prepared.permit.binding.process_nonce);
+    writer.writeUsize(prepared.inventory.self_addr);
+    writer.writeUsize(prepared.inventory.client_addr);
+    writer.writeUsize(prepared.inventory.scratch_addr);
+    writer.writeU64(prepared.inventory.target_stream);
+    writer.writeU64(prepared.inventory.hint_index);
+    writeArrayDescriptor(&writer, prepared.inventory.batches);
+    writeArrayDescriptor(&writer, prepared.inventory.stream);
+    writeArrayDescriptor(&writer, prepared.inventory.events);
+    if (prepared.inventory.partial) |partial| {
+        writer.writeBool(true);
+        writer.writeU64(partial.stream_id);
+        writer.writeBool(partial.is_snapshot);
+        writeArrayDescriptor(&writer, partial.bytes);
+        writer.writeUsize(partial.chunk_count);
+    } else writer.writeBool(false);
+    writer.writeUsize(prepared.inventory.batch_payload_bytes);
+    writer.writeUsize(prepared.inventory.stream_payload_bytes);
+    writer.writeUsize(prepared.inventory.event_payload_bytes);
+    writer.writeUsize(prepared.inventory.target_batch_count);
+    writer.writeUsize(prepared.inventory.target_stream_count);
+    writer.writeUsize(prepared.inventory.target_event_count);
+    writer.writeUsize(prepared.inventory.target_payload_bytes);
+    writer.writeUsize(prepared.inventory.quarantine_bytes);
+    writer.writeBytes(&prepared.inventory.batch_seal);
+    writer.writeBytes(&prepared.inventory.stream_seal);
+    writer.writeBytes(&prepared.inventory.event_seal);
+    writer.writeBytes(&prepared.inventory.partial_seal);
+    writer.writeBytes(&prepared.inventory.target_map_seal);
+    writer.writeU8(@intFromEnum(prepared.inventory.lifecycle));
+    writer.writeU8(@intFromEnum(prepared.lifecycle));
+    return writer.finish();
+}
+
+fn writeArrayDescriptor(writer: *owner_seal.Writer, descriptor: anytype) void {
+    writer.writeUsize(descriptor.address);
+    writer.writeUsize(descriptor.len);
+    writer.writeUsize(descriptor.capacity);
+}
+
+pub const EndedPurgePreparationError = error{
+    InvalidOwner,
+    Busy,
+    Corrupt,
+    IdentityExhausted,
+    DestinationOccupied,
+};
+
 pub const InitError = error{
     InvalidSource,
     InvalidDestination,
@@ -233,6 +330,69 @@ threadlocal var batch_release_callback_active: bool = false;
 threadlocal var operation_thread_incarnation: u64 = 0;
 var next_operation_thread_incarnation: std.atomic.Value(u64) = .init(1);
 var alias_quarantine_events: std.atomic.Value(u64) = .init(0);
+
+const max_live_client_slots = 4096;
+const ClientSlotRegistryEntry = struct {
+    live: bool = false,
+    ready: bool = false,
+    slot_addr: usize = 0,
+    node_addr: usize = 0,
+    slot_incarnation: u64 = 0,
+    node_incarnation: u64 = 0,
+    owner_thread_incarnation: u64 = 0,
+};
+var client_slot_registry_mutex: std.atomic.Mutex = .unlocked;
+var client_slot_registry: [max_live_client_slots]ClientSlotRegistryEntry =
+    [_]ClientSlotRegistryEntry{.{}} ** max_live_client_slots;
+
+fn registerClientSlot(entry: ClientSlotRegistryEntry) error{IdentityExhausted}!void {
+    while (!client_slot_registry_mutex.tryLock()) std.atomic.spinLoopHint();
+    defer client_slot_registry_mutex.unlock();
+    var free_index: ?usize = null;
+    for (&client_slot_registry, 0..) |*candidate, index| {
+        if (candidate.live and candidate.slot_addr == entry.slot_addr)
+            return error.IdentityExhausted;
+        if (!candidate.live and free_index == null) free_index = index;
+    }
+    const index = free_index orelse return error.IdentityExhausted;
+    client_slot_registry[index] = entry;
+}
+
+fn clientSlotRegistryEntry(slot_addr: usize) ?ClientSlotRegistryEntry {
+    while (!client_slot_registry_mutex.tryLock()) std.atomic.spinLoopHint();
+    defer client_slot_registry_mutex.unlock();
+    for (client_slot_registry) |entry| {
+        if (entry.live and entry.ready and entry.slot_addr == slot_addr) return entry;
+    }
+    return null;
+}
+
+fn publishClientSlot(expected: ClientSlotRegistryEntry) void {
+    while (!client_slot_registry_mutex.tryLock()) std.atomic.spinLoopHint();
+    defer client_slot_registry_mutex.unlock();
+    for (&client_slot_registry) |*entry| {
+        if (entry.live and entry.slot_addr == expected.slot_addr and
+            std.meta.eql(entry.*, expected))
+        {
+            entry.ready = true;
+            return;
+        }
+    }
+    @panic("reserved ClientSlot registry publication drifted");
+}
+
+fn unregisterClientSlot(expected: ClientSlotRegistryEntry) bool {
+    while (!client_slot_registry_mutex.tryLock()) std.atomic.spinLoopHint();
+    defer client_slot_registry_mutex.unlock();
+    for (&client_slot_registry) |*entry| {
+        if (entry.live and entry.slot_addr == expected.slot_addr) {
+            if (!std.meta.eql(entry.*, expected)) return false;
+            entry.* = .{};
+            return true;
+        }
+    }
+    return false;
+}
 
 fn acquireOperationThreadIncarnation() error{IdentityExhausted}!u64 {
     if (operation_thread_incarnation != 0) return operation_thread_incarnation;
@@ -353,6 +513,68 @@ fn generationBatchOwnerAliases(
     return sliceOverlapsObject(owned.bytes, slot) or
         sliceOverlapsObject(owned.bytes, slot.current) or
         sliceOverlapsObject(owned.bytes, owned);
+}
+
+fn checkedObjectRange(address: usize, comptime T: type) ?struct { start: usize, end: usize } {
+    if (address == 0) return null;
+    return .{
+        .start = address,
+        .end = std.math.add(usize, address, @sizeOf(T)) catch return null,
+    };
+}
+
+fn endedPurgeOwnersAlias(
+    entry: ClientSlotRegistryEntry,
+    reservation: AttachmentBindingReservation,
+    scratch: *client_mod.EndedPurgeScratch,
+    out: *EndedPurgePreparation,
+) bool {
+    const scratch_range = checkedObjectRange(@intFromPtr(scratch), client_mod.EndedPurgeScratch) orelse
+        return true;
+    const out_range = checkedObjectRange(@intFromPtr(out), EndedPurgePreparation) orelse return true;
+    const slot_range = checkedObjectRange(entry.slot_addr, ClientSlot) orelse return true;
+    const node_range = checkedObjectRange(entry.node_addr, ClientNode) orelse return true;
+    const binding_range = checkedObjectRange(
+        reservation.identity.binding_storage_addr,
+        contract.PreparedAttachmentBinding,
+    ) orelse return true;
+    const destination_range = checkedObjectRange(
+        reservation.identity.destination_addr,
+        lease_mod.ConnectionLease,
+    ) orelse return true;
+    const owners = [_]@TypeOf(slot_range){ slot_range, node_range, binding_range, destination_range };
+    if (rawRangesOverlap(scratch_range.start, scratch_range.end, out_range.start, out_range.end))
+        return true;
+    for (owners) |owner| {
+        if (rawRangesOverlap(scratch_range.start, scratch_range.end, owner.start, owner.end) or
+            rawRangesOverlap(out_range.start, out_range.end, owner.start, owner.end))
+            return true;
+    }
+    return false;
+}
+
+fn endedPurgeAliasesClientOwnedBacking(
+    client: *const client_mod.Client,
+    scratch: *client_mod.EndedPurgeScratch,
+    out: *EndedPurgePreparation,
+) bool {
+    const scratch_bytes: [*]u8 = @ptrCast(scratch);
+    const out_bytes: [*]u8 = @ptrCast(out);
+    return client_mod.generationAllocationAliasesOwnedBacking(
+        client,
+        scratch_bytes,
+        @sizeOf(client_mod.EndedPurgeScratch),
+    ) or client_mod.generationAllocationAliasesOwnedBacking(
+        client,
+        out_bytes,
+        @sizeOf(EndedPurgePreparation),
+    );
+}
+
+fn poisonEndedPurgeCorrupt(slot: *ClientSlot) EndedPurgePreparationError {
+    if (slot.current.client.firstPoisonReason() == null)
+        slot.current.client.poison(.local_invariant_violation);
+    return error.Corrupt;
 }
 
 fn productionIssuer() *lease_mod.IdentityIssuer {
@@ -484,6 +706,15 @@ pub const ClientSlot = struct {
             .source_start = source_start,
             .source_end = source_end,
         };
+        const registry_reservation: ClientSlotRegistryEntry = .{
+            .live = true,
+            .slot_addr = out_start,
+            .node_addr = node_start,
+            .slot_incarnation = slot_identity.tagged,
+            .node_incarnation = node_identity.tagged,
+            .owner_thread_incarnation = operation_owner_thread_incarnation,
+        };
+        try registerClientSlot(registry_reservation);
         source.moveToGenerationNode(&node.client);
         node.guarded_allocator.client = &node.client;
         node.client.bindGenerationAccountingLedger(&node.accounting_ledger) catch unreachable;
@@ -509,6 +740,7 @@ pub const ClientSlot = struct {
             .next_binding_incarnation = 1,
             .lifecycle = .live,
         };
+        publishClientSlot(registry_reservation);
     }
 
     fn rangesOverlap(a_start: usize, a_end: usize, b_start: usize, b_end: usize) bool {
@@ -984,6 +1216,80 @@ pub const ClientSlot = struct {
             self.current.active_operation_transport_incarnation == 0;
     }
 
+    pub fn prepareEndedPurge(
+        self: *ClientSlot,
+        transport_incarnation: u64,
+        reservation: AttachmentBindingReservation,
+        target_stream: u64,
+        hint: client_mod.EndedEventHint,
+        scratch: *client_mod.EndedPurgeScratch,
+        out: *EndedPurgePreparation,
+    ) EndedPurgePreparationError!void {
+        // A fork child must reject from caller-owned slot storage before touching a process-global
+        // mutex that may have been inherited locked by a vanished sibling thread.
+        if (self.pid != currentPid()) return error.InvalidOwner;
+        const registry_entry = clientSlotRegistryEntry(@intFromPtr(self)) orelse
+            return error.InvalidOwner;
+        if (!operationThreadMatches(registry_entry.owner_thread_incarnation))
+            return error.InvalidOwner;
+        if (!self.valid() or registry_entry.node_addr != @intFromPtr(self.current) or
+            registry_entry.slot_incarnation != self.incarnation.tagged or
+            registry_entry.node_incarnation != self.current.incarnation.tagged or
+            registry_entry.owner_thread_incarnation != self.operation_owner_thread_incarnation)
+            return error.InvalidOwner;
+        if (endedPurgeOwnersAlias(registry_entry, reservation, scratch, out))
+            return error.InvalidOwner;
+        if (endedPurgeAliasesClientOwnedBacking(&self.current.client, scratch, out))
+            return error.InvalidOwner;
+        if (out.lifecycle != .empty or out.self_addr != 0 or out.target_stream != 0 or
+            !std.mem.allEqual(u8, &out.authority_seal, 0) or
+            !std.meta.eql(out.inventory, client_mod.PreparedEndedPurgeInventory{}))
+            return error.DestinationOccupied;
+        self.current.cleanup_registry.preflightBoundDrop(
+            reservation.cleanup,
+            reservation.identity,
+            target_stream,
+        ) catch return error.InvalidOwner;
+        const idle_before = self.current.batch_registry.streamIdle(target_stream) catch {
+            return poisonEndedPurgeCorrupt(self);
+        };
+        if (!idle_before) return error.Busy;
+        const permit = self.prepareStreamOperationPermit(
+            .ended_purge,
+            @intFromPtr(out),
+            transport_incarnation,
+            reservation.identity,
+        ) catch |err| return switch (err) {
+            error.InvalidStreamOperationPermit => error.InvalidOwner,
+            error.AdminBusy => error.Busy,
+            error.IdentityExhausted => error.IdentityExhausted,
+        };
+        errdefer self.abortStreamOperationPermit(permit) catch
+            @panic("ended purge preparation permit rollback failed");
+        const idle = self.current.batch_registry.streamIdle(target_stream) catch {
+            return poisonEndedPurgeCorrupt(self);
+        };
+        if (!idle) return error.Busy;
+        self.current.client.prepareEndedPurgeInventory(
+            target_stream,
+            hint,
+            scratch,
+            &out.inventory,
+        ) catch |err| switch (err) {
+            error.DestinationOccupied => return error.DestinationOccupied,
+            error.InvalidHint,
+            error.InvalidSource,
+            error.InvalidAlias,
+            error.ArithmeticOverflow,
+            => return poisonEndedPurgeCorrupt(self),
+        };
+        out.self_addr = @intFromPtr(out);
+        out.target_stream = target_stream;
+        out.permit = permit;
+        out.lifecycle = .prepared;
+        out.authority_seal = endedPurgePreparationSeal(out);
+    }
+
     fn clearStreamOperationPermit(self: *ClientSlot) void {
         self.current.active_operation_generation = 0;
         self.current.active_operation_kind = .none;
@@ -1125,7 +1431,25 @@ pub const ClientSlot = struct {
 
     pub fn tryDeinit(self: *ClientSlot) DeinitOutcome {
         if (self.lifecycle == .dead) return .already_dead;
+        // Teardown shares the canonical operation thread with admission. This closes the gap
+        // between a registry liveness snapshot and the first node dereference without adding a
+        // second cross-thread lifetime protocol. PID is checked before the process-global mutex so
+        // a fork child cannot spin on a lock inherited from a vanished sibling thread.
+        if (self.pid != currentPid() or
+            !operationThreadMatches(self.operation_owner_thread_incarnation))
+            return .corrupt;
         if (!self.valid()) return if (self.lifecycle == .deinit_reserved) .busy else .corrupt;
+        const registry_entry = clientSlotRegistryEntry(@intFromPtr(self)) orelse return .corrupt;
+        const expected_registry_entry: ClientSlotRegistryEntry = .{
+            .live = true,
+            .ready = true,
+            .slot_addr = @intFromPtr(self),
+            .node_addr = @intFromPtr(self.current),
+            .slot_incarnation = self.incarnation.tagged,
+            .node_incarnation = self.current.incarnation.tagged,
+            .owner_thread_incarnation = self.operation_owner_thread_incarnation,
+        };
+        if (!std.meta.eql(registry_entry, expected_registry_entry)) return .corrupt;
         if (batch_release_callback_active) return .busy;
         if (self.generationAllocatorCallbackActive()) return .busy;
         if (self.current.active_operation_generation != 0) return .busy;
@@ -1152,6 +1476,8 @@ pub const ClientSlot = struct {
             .corrupt, .already_dead => return .corrupt,
         }
         self.lifecycle = .deinit_reserved;
+        if (!unregisterClientSlot(expected_registry_entry))
+            @panic("preflighted ClientSlot registry teardown drifted");
         self.current.pin_owner.state = .terminal;
         self.current.client.deinit();
         switch (self.current.accounting_ledger.tryDeinit()) {
@@ -2537,6 +2863,495 @@ test "CR3a-2c2 node stream operation permit serializes snapshot and ended purge"
     );
     try slot.abortStreamOperationPermit(purge);
     try std.testing.expect(slot.streamOperationPermitIdle());
+}
+
+test "CR3a-2c2b2 corrupt ended preparation poisons once and rolls back permit" {
+    const allocator = std.testing.allocator;
+    var source = fixtureClient(allocator, 0xF7);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0xF7);
+    defer slot.deinit();
+    var binding: contract.PreparedAttachmentBinding = .{};
+    var lease: lease_mod.ConnectionLease = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0x47);
+    try slot.current.cleanup_registry.bindStream(
+        reservation.cleanup,
+        reservation.identity,
+        9,
+    );
+    defer {
+        slot.current.cleanup_registry.settleBoundDrop(
+            reservation.cleanup,
+            reservation.identity,
+            9,
+        ) catch @panic("ended preparation test cleanup registry drifted");
+        slot.current.pin_owner.cleanup_pin_count -= 1;
+        binding.lifecycle = .terminal;
+    }
+    var scratch: client_mod.EndedPurgeScratch = .{};
+    var prepared: EndedPurgePreparation = .{};
+
+    try std.testing.expectError(
+        error.Corrupt,
+        slot.prepareEndedPurge(
+            11,
+            reservation,
+            9,
+            .{ .event_index = 0 },
+            &scratch,
+            &prepared,
+        ),
+    );
+    try std.testing.expect(slot.streamOperationPermitIdle());
+    try std.testing.expectEqual(EndedPurgePreparationLifecycle.empty, prepared.lifecycle);
+    try std.testing.expect(slot.current.client.firstPoisonReason().? == .local_invariant_violation);
+    try std.testing.expectError(
+        error.Corrupt,
+        slot.prepareEndedPurge(
+            11,
+            reservation,
+            9,
+            .{ .event_index = 0 },
+            &scratch,
+            &prepared,
+        ),
+    );
+    try std.testing.expect(slot.current.client.firstPoisonReason().? == .local_invariant_violation);
+    try std.testing.expect(slot.streamOperationPermitIdle());
+}
+
+test "CR3a-2c2b2 busy ended preparation does not burn operation generation" {
+    const allocator = std.testing.allocator;
+    var source = fixtureClient(allocator, 0xF8);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0xF8);
+    defer slot.deinit();
+    var binding: contract.PreparedAttachmentBinding = .{};
+    var lease: lease_mod.ConnectionLease = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0x48);
+    try slot.current.cleanup_registry.bindStream(
+        reservation.cleanup,
+        reservation.identity,
+        9,
+    );
+    defer {
+        slot.current.cleanup_registry.settleBoundDrop(
+            reservation.cleanup,
+            reservation.identity,
+            9,
+        ) catch @panic("busy ended preparation cleanup registry drifted");
+        slot.current.pin_owner.cleanup_pin_count -= 1;
+        binding.lifecycle = .terminal;
+    }
+    var scratch: client_mod.EndedPurgeScratch = .{};
+    var prepared: EndedPurgePreparation = .{};
+
+    const batch = try slot.current.batch_registry.reserve(9);
+    defer slot.current.batch_registry.abort(batch) catch
+        @panic("ended preparation test batch cleanup drifted");
+    const generation_before_busy = slot.current.next_operation_generation;
+    try std.testing.expectError(
+        error.Busy,
+        slot.prepareEndedPurge(
+            11,
+            reservation,
+            9,
+            .{ .event_index = 0 },
+            &scratch,
+            &prepared,
+        ),
+    );
+    try std.testing.expect(slot.streamOperationPermitIdle());
+    try std.testing.expectEqual(
+        generation_before_busy,
+        slot.current.next_operation_generation,
+    );
+    try std.testing.expect(slot.current.client.firstPoisonReason() == null);
+}
+
+test "CR3a-2c2b2 ended preparation rejects wrong stream foreign binding and owner aliases before mutation" {
+    const allocator = std.testing.allocator;
+    var source = fixtureClient(allocator, 0xF9);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0xF9);
+    defer slot.deinit();
+    var binding: contract.PreparedAttachmentBinding = .{};
+    var lease: lease_mod.ConnectionLease = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0x49);
+    try slot.current.cleanup_registry.bindStream(reservation.cleanup, reservation.identity, 9);
+    defer {
+        slot.current.cleanup_registry.settleBoundDrop(
+            reservation.cleanup,
+            reservation.identity,
+            9,
+        ) catch @panic("ended preparation owner preflight cleanup drifted");
+        slot.current.pin_owner.cleanup_pin_count -= 1;
+        binding.lifecycle = .terminal;
+    }
+    var scratch: client_mod.EndedPurgeScratch = .{};
+    var prepared: EndedPurgePreparation = .{};
+    const generation_before = slot.current.next_operation_generation;
+
+    var foreign_thread_rejected: std.atomic.Value(bool) = .init(false);
+    const ForeignPrepare = struct {
+        fn run(
+            target: *ClientSlot,
+            captured: AttachmentBindingReservation,
+            local_scratch: *client_mod.EndedPurgeScratch,
+            local_out: *EndedPurgePreparation,
+            rejected: *std.atomic.Value(bool),
+        ) void {
+            target.prepareEndedPurge(
+                11,
+                captured,
+                9,
+                .{ .event_index = 0 },
+                local_scratch,
+                local_out,
+            ) catch |err| {
+                if (err == error.InvalidOwner) rejected.store(true, .release);
+            };
+        }
+    };
+    const foreign_thread = try std.Thread.spawn(
+        .{},
+        ForeignPrepare.run,
+        .{ &slot, reservation, &scratch, &prepared, &foreign_thread_rejected },
+    );
+    foreign_thread.join();
+    try std.testing.expect(foreign_thread_rejected.load(.acquire));
+
+    try std.testing.expectError(error.InvalidOwner, slot.prepareEndedPurge(
+        11,
+        reservation,
+        10,
+        .{ .event_index = 0 },
+        &scratch,
+        &prepared,
+    ));
+    var foreign = reservation;
+    foreign.identity.runtime_id += 1;
+    try std.testing.expectError(error.InvalidOwner, slot.prepareEndedPurge(
+        11,
+        foreign,
+        9,
+        .{ .event_index = 0 },
+        &scratch,
+        &prepared,
+    ));
+
+    const node_scratch_addr = std.mem.alignForward(
+        usize,
+        @intFromPtr(slot.current),
+        @alignOf(client_mod.EndedPurgeScratch),
+    );
+    const node_scratch: *client_mod.EndedPurgeScratch = @ptrFromInt(node_scratch_addr);
+    try std.testing.expectError(error.InvalidOwner, slot.prepareEndedPurge(
+        11,
+        reservation,
+        9,
+        .{ .event_index = 0 },
+        node_scratch,
+        &prepared,
+    ));
+    const slot_out_addr = std.mem.alignForward(
+        usize,
+        @intFromPtr(&slot),
+        @alignOf(EndedPurgePreparation),
+    );
+    const slot_out: *EndedPurgePreparation = @ptrFromInt(slot_out_addr);
+    try std.testing.expectError(error.InvalidOwner, slot.prepareEndedPurge(
+        11,
+        reservation,
+        9,
+        .{ .event_index = 0 },
+        &scratch,
+        slot_out,
+    ));
+    const scratch_out_addr = std.mem.alignForward(
+        usize,
+        @intFromPtr(&scratch),
+        @alignOf(EndedPurgePreparation),
+    );
+    const scratch_out: *EndedPurgePreparation = @ptrFromInt(scratch_out_addr);
+    try std.testing.expectError(error.InvalidOwner, slot.prepareEndedPurge(
+        11,
+        reservation,
+        9,
+        .{ .event_index = 0 },
+        &scratch,
+        scratch_out,
+    ));
+    const binding_out_addr = std.mem.alignForward(
+        usize,
+        @intFromPtr(&binding),
+        @alignOf(EndedPurgePreparation),
+    );
+    const binding_out: *EndedPurgePreparation = @ptrFromInt(binding_out_addr);
+    try std.testing.expectError(error.InvalidOwner, slot.prepareEndedPurge(
+        11,
+        reservation,
+        9,
+        .{ .event_index = 0 },
+        &scratch,
+        binding_out,
+    ));
+
+    prepared.inventory.self_addr = 1;
+    try std.testing.expectError(error.DestinationOccupied, slot.prepareEndedPurge(
+        11,
+        reservation,
+        9,
+        .{ .event_index = 0 },
+        &scratch,
+        &prepared,
+    ));
+    prepared.inventory = .{};
+    try std.testing.expectEqual(generation_before, slot.current.next_operation_generation);
+    try std.testing.expect(slot.streamOperationPermitIdle());
+    try std.testing.expect(slot.current.client.firstPoisonReason() == null);
+}
+
+test "CR3a-2c2b2 ended preparation seal rejects copy field splice and preserves all or none abort" {
+    const allocator = std.testing.allocator;
+    var source = fixtureClient(allocator, 0xFA);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0xFA);
+    defer slot.deinit();
+    var binding: contract.PreparedAttachmentBinding = .{};
+    var lease: lease_mod.ConnectionLease = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0x4A);
+    defer slot.abortAttachmentBinding(&binding, reservation) catch
+        @panic("ended preparation seal binding cleanup drifted");
+    var scratch: client_mod.EndedPurgeScratch = .{};
+    var prepared: EndedPurgePreparation = .{};
+    const permit = try slot.prepareStreamOperationPermit(
+        .ended_purge,
+        @intFromPtr(&prepared),
+        11,
+        reservation.identity,
+    );
+    prepared = .{
+        .self_addr = @intFromPtr(&prepared),
+        .target_stream = 9,
+        .permit = permit,
+        .inventory = .{
+            .self_addr = @intFromPtr(&prepared.inventory),
+            .client_addr = @intFromPtr(&slot.current.client),
+            .scratch_addr = @intFromPtr(&scratch),
+            .target_stream = 9,
+            .target_event_count = 1,
+            .lifecycle = .prepared,
+        },
+        .lifecycle = .prepared,
+    };
+    prepared.authority_seal = endedPurgePreparationSeal(&prepared);
+
+    var copied = prepared;
+    try std.testing.expect(!copied.abort(&slot));
+    try std.testing.expect(slot.streamOperationPermitLive(permit));
+    try std.testing.expect(prepared.inventory.validPreparedAtFinalAddress());
+
+    prepared.inventory.events.address = 8;
+    try std.testing.expect(!prepared.abort(&slot));
+    try std.testing.expect(slot.streamOperationPermitLive(permit));
+    prepared.inventory.events.address = 0;
+    prepared.permit.binding.runtime_id += 1;
+    try std.testing.expect(!prepared.abort(&slot));
+    try std.testing.expect(slot.streamOperationPermitLive(permit));
+    prepared.permit.binding.runtime_id -= 1;
+
+    try std.testing.expect(prepared.abort(&slot));
+    try std.testing.expect(!prepared.abort(&slot));
+    try std.testing.expect(slot.streamOperationPermitIdle());
+}
+
+test "CR3a-2c2b2 stale ClientSlot prepare rejects before freed node dereference" {
+    const allocator = std.testing.allocator;
+    var source = fixtureClient(allocator, 0xFB);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0xFB);
+    var binding: contract.PreparedAttachmentBinding = .{};
+    var lease: lease_mod.ConnectionLease = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0x4B);
+    try slot.abortAttachmentBinding(&binding, reservation);
+    try std.testing.expectEqual(DeinitOutcome.cleaned, slot.tryDeinit());
+
+    var scratch: client_mod.EndedPurgeScratch = .{};
+    var prepared: EndedPurgePreparation = .{};
+    try std.testing.expectError(error.InvalidOwner, slot.prepareEndedPurge(
+        11,
+        reservation,
+        9,
+        .{ .event_index = 0 },
+        &scratch,
+        &prepared,
+    ));
+}
+
+test "CR3a-2c2b2 foreign thread teardown cannot race owner preparation" {
+    const allocator = std.testing.allocator;
+    var source = fixtureClient(allocator, 0xFC);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0xFC);
+    defer slot.deinit();
+    var outcome: ?DeinitOutcome = null;
+    const ForeignTeardown = struct {
+        fn run(target: *ClientSlot, result: *?DeinitOutcome) void {
+            result.* = target.tryDeinit();
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, ForeignTeardown.run, .{ &slot, &outcome });
+    thread.join();
+    try std.testing.expectEqual(DeinitOutcome.corrupt, outcome.?);
+    try std.testing.expect(slot.valid());
+}
+
+test "CR3a-2c2b2 Client owned backing aliases reject before permit generation" {
+    const allocator = std.testing.allocator;
+    var source = fixtureClient(allocator, 0xFD);
+    try source.parser.buf.appendSlice(allocator, &([_]u8{0} ** 64));
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0xFD);
+    defer slot.deinit();
+    var binding: contract.PreparedAttachmentBinding = .{};
+    var lease: lease_mod.ConnectionLease = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0x4D);
+    try slot.current.cleanup_registry.bindStream(reservation.cleanup, reservation.identity, 9);
+    defer {
+        slot.current.cleanup_registry.settleBoundDrop(
+            reservation.cleanup,
+            reservation.identity,
+            9,
+        ) catch @panic("owned backing alias cleanup registry drifted");
+        slot.current.pin_owner.cleanup_pin_count -= 1;
+        binding.lifecycle = .terminal;
+    }
+    const scratch_addr = std.mem.alignForward(
+        usize,
+        @intFromPtr(slot.current.client.parser.buf.items.ptr),
+        @alignOf(client_mod.EndedPurgeScratch),
+    );
+    const aliased_scratch: *client_mod.EndedPurgeScratch = @ptrFromInt(scratch_addr);
+    var prepared: EndedPurgePreparation = .{};
+    const generation_before = slot.current.next_operation_generation;
+    try std.testing.expectError(error.InvalidOwner, slot.prepareEndedPurge(
+        11,
+        reservation,
+        9,
+        .{ .event_index = 0 },
+        aliased_scratch,
+        &prepared,
+    ));
+    try std.testing.expectEqual(generation_before, slot.current.next_operation_generation);
+    try std.testing.expect(slot.streamOperationPermitIdle());
+    try std.testing.expect(slot.current.client.firstPoisonReason() == null);
+}
+
+test "CR3a-2c2b2 ClientSlot registry enforces exact cap and address ABA reuse" {
+    comptime {
+        if (@typeInfo(@TypeOf(client_slot_registry)).array.len != max_live_client_slots)
+            @compileError("ClientSlot registry storage drifted from max_live_client_slots");
+    }
+    defer {
+        while (!client_slot_registry_mutex.tryLock()) std.atomic.spinLoopHint();
+        defer client_slot_registry_mutex.unlock();
+        client_slot_registry = [_]ClientSlotRegistryEntry{.{}} ** max_live_client_slots;
+    }
+
+    for (0..max_live_client_slots) |index| try registerClientSlot(.{
+        .live = true,
+        .slot_addr = index + 1,
+        .node_addr = max_live_client_slots + index + 1,
+        .slot_incarnation = index + 1,
+        .node_incarnation = index + 1,
+        .owner_thread_incarnation = 1,
+    });
+    try std.testing.expectError(error.IdentityExhausted, registerClientSlot(.{
+        .live = true,
+        .slot_addr = max_live_client_slots + 1,
+        .node_addr = max_live_client_slots * 2 + 1,
+        .slot_incarnation = max_live_client_slots + 1,
+        .node_incarnation = max_live_client_slots + 1,
+        .owner_thread_incarnation = 1,
+    }));
+
+    const old = ClientSlotRegistryEntry{
+        .live = true,
+        .slot_addr = 1,
+        .node_addr = max_live_client_slots + 1,
+        .slot_incarnation = 1,
+        .node_incarnation = 1,
+        .owner_thread_incarnation = 1,
+    };
+    try std.testing.expect(unregisterClientSlot(old));
+    const replacement = ClientSlotRegistryEntry{
+        .live = true,
+        .slot_addr = old.slot_addr,
+        .node_addr = old.node_addr + max_live_client_slots,
+        .slot_incarnation = old.slot_incarnation + max_live_client_slots,
+        .node_incarnation = old.node_incarnation + max_live_client_slots,
+        .owner_thread_incarnation = 2,
+    };
+    try registerClientSlot(replacement);
+    try std.testing.expect(!unregisterClientSlot(old));
+    try std.testing.expect(clientSlotRegistryEntry(replacement.slot_addr) == null);
+    publishClientSlot(replacement);
+    var published = replacement;
+    published.ready = true;
+    try std.testing.expect(std.meta.eql(
+        published,
+        clientSlotRegistryEntry(replacement.slot_addr).?,
+    ));
+    try std.testing.expect(unregisterClientSlot(published));
+}
+
+test "CR3a-2c2b2 ClientSlot registry serializes bounded concurrent reuse" {
+    defer {
+        while (!client_slot_registry_mutex.tryLock()) std.atomic.spinLoopHint();
+        defer client_slot_registry_mutex.unlock();
+        client_slot_registry = [_]ClientSlotRegistryEntry{.{}} ** max_live_client_slots;
+    }
+    var failed: std.atomic.Value(bool) = .init(false);
+    const Worker = struct {
+        fn run(worker: usize, failure: *std.atomic.Value(bool)) void {
+            for (0..64) |generation| {
+                const incarnation = generation + 1;
+                const reserved = ClientSlotRegistryEntry{
+                    .live = true,
+                    .slot_addr = worker + 1,
+                    .node_addr = 1024 + worker,
+                    .slot_incarnation = incarnation,
+                    .node_incarnation = incarnation,
+                    .owner_thread_incarnation = worker + 1,
+                };
+                registerClientSlot(reserved) catch {
+                    failure.store(true, .release);
+                    return;
+                };
+                publishClientSlot(reserved);
+                var published = reserved;
+                published.ready = true;
+                const observed = clientSlotRegistryEntry(reserved.slot_addr) orelse {
+                    failure.store(true, .release);
+                    return;
+                };
+                if (!std.meta.eql(observed, published) or !unregisterClientSlot(published)) {
+                    failure.store(true, .release);
+                    return;
+                }
+                if (clientSlotRegistryEntry(reserved.slot_addr) != null) {
+                    failure.store(true, .release);
+                    return;
+                }
+            }
+        }
+    };
+    var threads: [4]std.Thread = undefined;
+    for (&threads, 0..) |*thread, index|
+        thread.* = try std.Thread.spawn(.{}, Worker.run, .{ index, &failed });
+    for (threads) |thread| thread.join();
+    try std.testing.expect(!failed.load(.acquire));
 }
 
 test "CR3a-2c2 stale stream operation permit rejects before deinitialized node access" {

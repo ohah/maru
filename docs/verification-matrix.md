@@ -668,11 +668,14 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   last release 뒤 Client/node exact-one destroy를 검증한다. fork child PID-domain mismatch에서 low-level mint/consume/tryDeinit의
   typed reject와 callback/free/owner mutation 0, strict 제품 wrapper의 fail-stop을 구분해 검증한다. HostPool membership
   lease와 ConnectionLease는 별개이며 external-pump owner graph는 변경하지 않는다. 증거 수준은 production-type unit이다.
-- CR3a-2(진행, **2a·2b·2c1·2c2a·2c2b1 구현**, 2c2b2~e 계획): 2c2a는 snapshot 전용 permit을 kind-tagged common
+- CR3a-2(진행, **2a·2b·2c1·2c2a·2c2b1·2c2b2 구현**, 2c2b3~e 계획): 2c2a는 snapshot 전용 permit을 kind-tagged common
   `StreamOperationPermit`/단일 active tuple/process registry로 migration하고 `GenerationBatchRegistry.streamIdle`이
   reserved/ingress/live/releasing 전 상태를 purge blocker로 분류한다. 2c2b1은 대상 stream의 첫 event에 대한 무할당·무변경
-  ended hot peek와 비권위적 index hint까지만 구현한다. payload/전체 queue ownership metadata를 재검증하는 slow transaction,
-  callback/quarantine suffix와 제품 배선은 2c2b2 이후다.
+  ended hot peek와 비권위적 index hint까지만 구현한다. 2c2b2는 exact binding과 common permit 아래 fixed inline scratch로 전체 Client
+  owner graph와 demux queue의 descriptor·allocator provenance·counter·event admission seal·payload·alias를 재검증하고 target map,
+  queue별 aggregate seal, checked quarantine capacity를 final-address private preparation에 봉인한다. 이 prepare는 allocation/free/queue 및
+  process-global quarantine mutation 0이다. target detach/stable compaction, callback cleanup, post-validation, 실제 quarantine
+  reservation/commit과 poison suffix, transport/GUI 제품 배선은 2c2b3 이후다.
   generation 1 compatibility wiring으로 GUI raw `RemoteRuntime.client=*Client`와
   `AttachmentTransport.context=*Client` production callsite 0, GUI-only final-address `GenerationAttachment.initInPlace`,
   external movable `RemoteAttachment`의 outer field 목록·기존 `untracked|charged` reachable 의미와 external `Prepared|Attached`의

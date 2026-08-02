@@ -760,11 +760,13 @@ pub const BufferedEvent = struct {
 
 /// ended purge의 빠른 판정 결과다. `event_index`는 느린 트랜잭션이 다시 검증할 힌트일 뿐
 /// 소유권이나 commit 권위를 나타내지 않는다.
+pub const EndedEventHint = struct {
+    event_index: u32,
+};
+
 pub const EndedEventPeek = union(enum) {
     not_ended,
-    candidate: struct {
-        event_index: u32,
-    },
+    candidate: EndedEventHint,
 };
 
 const buffered_event_source_schema_field_allowlist = [_][]const u8{
@@ -940,6 +942,85 @@ const ExternalPartialDescriptor = struct {
     is_snapshot: bool,
     bytes: ExternalArrayDescriptor,
     chunk_count: usize,
+};
+
+pub const max_ended_purge_scratch_bytes: usize = 512 * 1024;
+pub const ended_purge_scratch_bytes_v1: usize = 462_256;
+const max_external_owner_range_count: usize = 4 + 1 +
+    protocol.max_client_screen_items + protocol.max_client_screen_items + max_pending_event_count +
+    client_external_mode.max_tx_frames + 3;
+comptime {
+    if (max_external_owner_range_count > std.math.maxInt(u16))
+        @compileError("external owner range index exceeds u16");
+}
+
+pub const EndedPurgeScratch = struct {
+    batches: [protocol.max_client_screen_items]ExternalBatchDescriptor = undefined,
+    stream: [protocol.max_client_screen_items]ExternalFrameDescriptor = undefined,
+    events: [max_pending_event_count]ExternalFrameDescriptor = undefined,
+    batch_targets: std.StaticBitSet(protocol.max_client_screen_items) = .initEmpty(),
+    stream_targets: std.StaticBitSet(protocol.max_client_screen_items) = .initEmpty(),
+    event_targets: std.StaticBitSet(max_pending_event_count) = .initEmpty(),
+    partial: ?ExternalPartialDescriptor = null,
+    partial_target: bool = false,
+    parser_backing: ExternalArrayDescriptor = .{ .address = 0, .len = 0, .capacity = 0 },
+    batch_backing: ExternalArrayDescriptor = .{ .address = 0, .len = 0, .capacity = 0 },
+    stream_backing: ExternalArrayDescriptor = .{ .address = 0, .len = 0, .capacity = 0 },
+    event_backing: ExternalArrayDescriptor = .{ .address = 0, .len = 0, .capacity = 0 },
+    range_order: [max_external_owner_range_count]u16 = undefined,
+};
+comptime {
+    if (@sizeOf(EndedPurgeScratch) != ended_purge_scratch_bytes_v1 or
+        @sizeOf(EndedPurgeScratch) > max_ended_purge_scratch_bytes)
+        @compileError("ended purge scratch exceeds its fixed-buffer budget");
+}
+
+const EndedPurgePrepareLifecycle = enum(u8) { empty, prepared, aborted };
+
+pub const PreparedEndedPurgeInventory = struct {
+    self_addr: usize = 0,
+    client_addr: usize = 0,
+    scratch_addr: usize = 0,
+    target_stream: u64 = 0,
+    hint_index: u32 = 0,
+    batches: ExternalArrayDescriptor = .{ .address = 0, .len = 0, .capacity = 0 },
+    stream: ExternalArrayDescriptor = .{ .address = 0, .len = 0, .capacity = 0 },
+    events: ExternalArrayDescriptor = .{ .address = 0, .len = 0, .capacity = 0 },
+    partial: ?ExternalPartialDescriptor = null,
+    batch_payload_bytes: usize = 0,
+    stream_payload_bytes: usize = 0,
+    event_payload_bytes: usize = 0,
+    target_batch_count: usize = 0,
+    target_stream_count: usize = 0,
+    target_event_count: usize = 0,
+    target_payload_bytes: usize = 0,
+    quarantine_bytes: usize = 0,
+    batch_seal: owner_seal.Digest = [_]u8{0} ** 32,
+    stream_seal: owner_seal.Digest = [_]u8{0} ** 32,
+    event_seal: owner_seal.Digest = [_]u8{0} ** 32,
+    partial_seal: owner_seal.Digest = [_]u8{0} ** 32,
+    target_map_seal: owner_seal.Digest = [_]u8{0} ** 32,
+    lifecycle: EndedPurgePrepareLifecycle = .empty,
+
+    pub fn validPreparedAtFinalAddress(self: *const PreparedEndedPurgeInventory) bool {
+        return self.lifecycle == .prepared and self.self_addr == @intFromPtr(self) and
+            self.client_addr != 0 and self.scratch_addr != 0 and self.target_stream != 0 and
+            self.target_event_count == 1;
+    }
+
+    pub fn abort(self: *PreparedEndedPurgeInventory) bool {
+        if (!self.validPreparedAtFinalAddress()) return false;
+        self.lifecycle = .aborted;
+        return true;
+    }
+};
+
+pub const EndedPurgePrepareError = error{
+    InvalidSource,
+    InvalidHint,
+    InvalidAlias,
+    DestinationOccupied,
+    ArithmeticOverflow,
 };
 
 const ClientOwnership = enum { standalone, external_pump, moved };
@@ -2077,12 +2158,6 @@ fn externalOwnerRangeCount(self: *const Client) ExternalAdoptionInspectError!usi
     return count;
 }
 
-const max_external_owner_range_count =
-    6 + 1 + 1 +
-    protocol.max_client_screen_items +
-    protocol.max_client_screen_items +
-    max_pending_event_count +
-    client_external_mode.max_tx_frames;
 const max_external_owner_range_scratch_bytes =
     max_external_owner_range_count * @sizeOf(ExternalRange);
 const max_external_outer_owner_range_count = 7;
@@ -2198,6 +2273,25 @@ fn externalNestedOwnerRangeAt(
     }
     return error.InvalidClientState;
 }
+
+/// Allocation-free stable ordinal view over the complete Client-owned range graph. Keep this as
+/// the single random-access projection of the outer+nested SSOT used by fixed-buffer proofs.
+fn externalOwnerRangeAt(
+    self: *const Client,
+    ordinal: usize,
+) ExternalAdoptionInspectError!?ExternalRange {
+    var outer: [max_external_outer_owner_range_count]ExternalRange = undefined;
+    const outer_count = try fillExternalOuterOwnerRanges(self, &outer);
+    if (ordinal < outer_count) return outer[ordinal];
+    return externalNestedOwnerRangeAt(self, ordinal - outer_count);
+}
+
+// Compile-time wiring gate: ended purge must consume the complete Client owner-graph ordinal SSOT
+// rather than introducing a queue-specific owner enumeration.
+const ended_purge_owner_range_ssot: *const fn (
+    *const Client,
+    usize,
+) ExternalAdoptionInspectError!?ExternalRange = externalOwnerRangeAt;
 
 fn collectExternalOwnerRanges(
     self: *const Client,
@@ -3836,6 +3930,206 @@ fn externalFrameDescriptor(frame: anytype) ExternalFrameDescriptor {
         .header = frame.header,
         .payload_address = externalSliceAddress(frame.payload),
         .payload_len = frame.payload.len,
+    };
+}
+
+fn writeEndedPurgeHeaderSeal(writer: *owner_seal.Writer, header: protocol.Header) void {
+    const encoded = header.encode();
+    writer.writeBytes(&encoded);
+}
+
+fn writeEndedPurgeBatchSeal(
+    writer: *owner_seal.Writer,
+    descriptor: ExternalBatchDescriptor,
+    bytes: []const u8,
+) void {
+    writer.writeU64(descriptor.stream_id);
+    writer.writeBool(descriptor.is_snapshot);
+    writer.writeUsize(descriptor.bytes_address);
+    writer.writeUsize(descriptor.bytes_len);
+    writer.writeUsize(@intFromPtr(descriptor.allocator.ptr));
+    writer.writeUsize(@intFromPtr(descriptor.allocator.vtable));
+    writer.writeBytes(bytes);
+}
+
+fn writeEndedPurgeFrameSeal(
+    writer: *owner_seal.Writer,
+    descriptor: ExternalFrameDescriptor,
+    payload: []const u8,
+) void {
+    writeEndedPurgeHeaderSeal(writer, descriptor.header);
+    writer.writeUsize(descriptor.payload_address);
+    writer.writeUsize(descriptor.payload_len);
+    writer.writeBytes(payload);
+}
+
+fn writeEndedPurgePartialSeal(
+    writer: *owner_seal.Writer,
+    descriptor: ExternalPartialDescriptor,
+    bytes: []const u8,
+) void {
+    writer.writeU64(descriptor.stream_id);
+    writer.writeBool(descriptor.is_snapshot);
+    writer.writeUsize(descriptor.bytes.address);
+    writer.writeUsize(descriptor.bytes.len);
+    writer.writeUsize(descriptor.bytes.capacity);
+    writer.writeUsize(descriptor.chunk_count);
+    writer.writeBytes(bytes);
+}
+
+fn endedPurgeTargetMapSeal(scratch: *const EndedPurgeScratch) owner_seal.Digest {
+    var writer = owner_seal.Writer.init("maru.ended-purge.target-map.v1");
+    inline for (.{
+        &scratch.batch_targets,
+        &scratch.stream_targets,
+        &scratch.event_targets,
+    }) |set| {
+        var iterator = set.iterator(.{});
+        while (iterator.next()) |index| writer.writeUsize(index);
+        writer.writeUsize(std.math.maxInt(usize));
+    }
+    writer.writeBool(scratch.partial_target);
+    return writer.finish();
+}
+
+const EndedPurgeRangeContext = struct {
+    client: *const Client,
+    comparisons: *usize,
+    owner_lookups: *usize,
+};
+
+fn endedPurgeRangeForId(context: EndedPurgeRangeContext, id: u16) ExternalRange {
+    context.owner_lookups.* += 1;
+    return (ended_purge_owner_range_ssot(context.client, id) catch unreachable).?;
+}
+
+fn endedPurgeRangeLessThan(
+    context: EndedPurgeRangeContext,
+    left: u16,
+    right: u16,
+) bool {
+    context.comparisons.* += 1;
+    return endedPurgeRangeForId(context, left).start <
+        endedPurgeRangeForId(context, right).start;
+}
+
+fn appendEndedPurgeRangeId(
+    scratch: *EndedPurgeScratch,
+    used: *usize,
+    id: usize,
+    range: ?ExternalRange,
+) EndedPurgePrepareError!void {
+    if (range == null) return;
+    if (used.* >= scratch.range_order.len or id > std.math.maxInt(u16))
+        return error.InvalidSource;
+    scratch.range_order[used.*] = @intCast(id);
+    used.* += 1;
+}
+
+fn endedPurgeCheckedDescriptorRange(
+    descriptor: ExternalArrayDescriptor,
+    element_size: usize,
+) EndedPurgePrepareError!?ExternalRange {
+    const bytes = std.math.mul(usize, descriptor.capacity, element_size) catch
+        return error.ArithmeticOverflow;
+    return checkedExternalRange(descriptor.address, bytes) catch |err| switch (err) {
+        error.ArithmeticOverflow => error.ArithmeticOverflow,
+        else => error.InvalidAlias,
+    };
+}
+
+fn endedPurgeCheckedPayloadRange(
+    address: usize,
+    len: usize,
+) EndedPurgePrepareError!?ExternalRange {
+    return checkedExternalRange(address, len) catch |err| switch (err) {
+        error.ArithmeticOverflow => error.ArithmeticOverflow,
+        else => error.InvalidAlias,
+    };
+}
+
+fn endedPurgeRangeOutsideProtected(
+    range: ?ExternalRange,
+    self: *const Client,
+    scratch: *const EndedPurgeScratch,
+    out: *const PreparedEndedPurgeInventory,
+) EndedPurgePrepareError!void {
+    const present = range orelse return;
+    inline for (.{ self, scratch, out }) |owner|
+        if (externalRangesOverlap(present, externalRangeOfValue(owner)))
+            return error.InvalidAlias;
+}
+
+fn validateEndedPurgeOuterRanges(
+    self: *const Client,
+    scratch: *const EndedPurgeScratch,
+    out: *const PreparedEndedPurgeInventory,
+) EndedPurgePrepareError!void {
+    var ranges: [max_external_outer_owner_range_count]ExternalRange = undefined;
+    const used = fillExternalOuterOwnerRanges(self, &ranges) catch |err| return switch (err) {
+        error.ArithmeticOverflow => error.ArithmeticOverflow,
+        else => error.InvalidSource,
+    };
+    for (ranges[0..used], 0..) |range, index| {
+        try endedPurgeRangeOutsideProtected(range, self, scratch, out);
+        for (ranges[0..index]) |prior|
+            if (externalRangesOverlap(range, prior)) return error.InvalidAlias;
+    }
+}
+
+const EndedPurgeOwnerRangeProofStats = struct {
+    total_ranges: usize,
+    comparisons: usize,
+    owner_lookups: usize,
+};
+
+fn validateEndedPurgeOwnerRanges(
+    self: *const Client,
+    scratch: *EndedPurgeScratch,
+    out: *const PreparedEndedPurgeInventory,
+) EndedPurgePrepareError!EndedPurgeOwnerRangeProofStats {
+    var outer: [max_external_outer_owner_range_count]ExternalRange = undefined;
+    const outer_count = fillExternalOuterOwnerRanges(self, &outer) catch |err| return switch (err) {
+        error.ArithmeticOverflow => error.ArithmeticOverflow,
+        else => error.InvalidSource,
+    };
+    const nested_count = externalNestedOwnerRangeCount(self) catch |err| return switch (err) {
+        error.ArithmeticOverflow => error.ArithmeticOverflow,
+        else => error.InvalidSource,
+    };
+    const count = std.math.add(usize, outer_count, nested_count) catch
+        return error.ArithmeticOverflow;
+    if (count > scratch.range_order.len) return error.InvalidSource;
+    var used: usize = 0;
+    for (0..count) |id| {
+        const range = ended_purge_owner_range_ssot(self, id) catch |err| return switch (err) {
+            error.ArithmeticOverflow => error.ArithmeticOverflow,
+            else => error.InvalidSource,
+        };
+        try endedPurgeRangeOutsideProtected(range, self, scratch, out);
+        try appendEndedPurgeRangeId(scratch, &used, id, range);
+    }
+
+    var comparisons: usize = 0;
+    var owner_lookups: usize = 0;
+    const context = EndedPurgeRangeContext{
+        .client = self,
+        .comparisons = &comparisons,
+        .owner_lookups = &owner_lookups,
+    };
+    std.mem.sort(u16, scratch.range_order[0..used], context, endedPurgeRangeLessThan);
+    for (scratch.range_order[0..used], 0..) |id, index| {
+        const range = endedPurgeRangeForId(context, id);
+        try endedPurgeRangeOutsideProtected(range, self, scratch, out);
+        if (index != 0 and externalRangesOverlap(
+            endedPurgeRangeForId(context, scratch.range_order[index - 1]),
+            range,
+        )) return error.InvalidAlias;
+    }
+    return .{
+        .total_ranges = used,
+        .comparisons = comparisons,
+        .owner_lookups = owner_lookups,
     };
 }
 
@@ -7326,6 +7620,256 @@ pub const Client = struct {
         return .not_ended;
     }
 
+    /// ended purge의 느린 경로가 사용할 전체 Client-owned queue inventory를 만든다.
+    /// 이 단계는 owner를 옮기거나 해제하지 않으며, `out`의 마지막 publish 전까지 권위를 만들지 않는다.
+    pub fn prepareEndedPurgeInventory(
+        self: *const Client,
+        target_stream: u64,
+        hint: EndedEventHint,
+        scratch: *EndedPurgeScratch,
+        out: *PreparedEndedPurgeInventory,
+    ) EndedPurgePrepareError!void {
+        if (out.lifecycle != .empty or out.self_addr != 0 or target_stream == 0)
+            return error.DestinationOccupied;
+        const client_start = @intFromPtr(self);
+        const scratch_start = @intFromPtr(scratch);
+        const out_start = @intFromPtr(out);
+        const client_end = std.math.add(usize, client_start, @sizeOf(Client)) catch
+            return error.ArithmeticOverflow;
+        const scratch_end = std.math.add(usize, scratch_start, @sizeOf(EndedPurgeScratch)) catch
+            return error.ArithmeticOverflow;
+        const out_end = std.math.add(usize, out_start, @sizeOf(PreparedEndedPurgeInventory)) catch
+            return error.ArithmeticOverflow;
+        if (rawRangesOverlap(client_start, client_end, scratch_start, scratch_end) or
+            rawRangesOverlap(client_start, client_end, out_start, out_end) or
+            rawRangesOverlap(scratch_start, scratch_end, out_start, out_end))
+            return error.InvalidAlias;
+
+        validateExternalAdoptionStructure(self) catch return error.InvalidSource;
+        if (!std.meta.eql(self.parser.allocator, self.allocator)) return error.InvalidSource;
+        const outer_descriptors = [4]ExternalArrayDescriptor{
+            externalArrayDescriptor(self.parser.buf),
+            externalArrayDescriptor(self.pending_batches),
+            externalArrayDescriptor(self.pending_stream),
+            externalArrayDescriptor(self.pending_events),
+        };
+        try validateEndedPurgeOuterRanges(self, scratch, out);
+        scratch.parser_backing = outer_descriptors[0];
+        scratch.batch_backing = outer_descriptors[1];
+        scratch.stream_backing = outer_descriptors[2];
+        scratch.event_backing = outer_descriptors[3];
+
+        // Once every outer backing is proven, enumerate the complete Client owner SSOT before
+        // queue semantics, hint traversal, or payload hashing can give a forged alias precedence.
+        _ = try validateEndedPurgeOwnerRanges(self, scratch, out);
+
+        const event_index: usize = hint.event_index;
+        if (event_index >= self.pending_events.items.len) return error.InvalidHint;
+        for (self.pending_events.items[0..event_index]) |event|
+            if (event.header.stream_id == target_stream) return error.InvalidHint;
+        const ended = self.pending_events.items[event_index];
+        if (ended.header.stream_id != target_stream or ended.header.kind != .event or
+            ended.header.request_id != 0 or ended.header.flags != 0 or
+            ended.header.payload_len != ended.payload.len)
+            return error.InvalidHint;
+        const ended_preflight = switch (ended.preflight orelse return error.InvalidHint) {
+            .accepted => |accepted| accepted,
+            else => return error.InvalidHint,
+        };
+        const ended_admission = ended.admission_seal orelse return error.InvalidHint;
+        if (ended_preflight.event != .ended or
+            !std.meta.eql(ended_admission.header, ended.header) or
+            !std.mem.eql(u8, &ended_admission.payload_digest, &ended_preflight.raw_digest) or
+            !runtime_event_wire.eventPreflightEql(ended_admission.preflight, ended_preflight))
+            return error.InvalidHint;
+
+        scratch.batch_targets = .initEmpty();
+        scratch.stream_targets = .initEmpty();
+        scratch.event_targets = .initEmpty();
+        scratch.partial = null;
+        scratch.partial_target = false;
+
+        var batch_bytes: usize = 0;
+        var stream_bytes: usize = 0;
+        var event_bytes: usize = 0;
+        var target_bytes: usize = 0;
+        var target_batch_count: usize = 0;
+        var target_stream_count: usize = 0;
+        var target_event_count: usize = 0;
+        var quarantine_bytes: usize = 0;
+
+        for (self.pending_batches.items, 0..) |batch, index| {
+            if (!std.meta.eql(batch.allocator, self.allocator) or
+                batch.stream_id == 0 or batch.bytes.len > protocol.max_viewport_snapshot)
+                return error.InvalidSource;
+            const descriptor = externalBatchDescriptor(batch);
+            try endedPurgeRangeOutsideProtected(
+                try endedPurgeCheckedPayloadRange(descriptor.bytes_address, descriptor.bytes_len),
+                self,
+                scratch,
+                out,
+            );
+            scratch.batches[index] = descriptor;
+            batch_bytes = std.math.add(usize, batch_bytes, batch.bytes.len) catch
+                return error.ArithmeticOverflow;
+            if (batch.stream_id == target_stream) {
+                scratch.batch_targets.set(index);
+                target_batch_count += 1;
+                target_bytes = std.math.add(usize, target_bytes, batch.bytes.len) catch
+                    return error.ArithmeticOverflow;
+            }
+        }
+        if (batch_bytes != self.pending_batch_bytes) return error.InvalidSource;
+
+        for (self.pending_stream.items, 0..) |frame, index| {
+            if ((frame.header.kind != .snapshot_chunk and frame.header.kind != .delta_chunk) or
+                frame.header.major != self.wire_major or frame.header.request_id != 0 or
+                frame.header.stream_id == 0 or
+                frame.header.flags & ~protocol.Flags.end_stream != 0 or
+                frame.header.payload_len != frame.payload.len or
+                frame.payload.len > protocol.max_binary_chunk)
+                return error.InvalidSource;
+            const descriptor = externalFrameDescriptor(frame);
+            try endedPurgeRangeOutsideProtected(
+                try endedPurgeCheckedPayloadRange(descriptor.payload_address, descriptor.payload_len),
+                self,
+                scratch,
+                out,
+            );
+            scratch.stream[index] = descriptor;
+            stream_bytes = std.math.add(usize, stream_bytes, frame.payload.len) catch
+                return error.ArithmeticOverflow;
+            if (frame.header.stream_id == target_stream) {
+                scratch.stream_targets.set(index);
+                target_stream_count += 1;
+                target_bytes = std.math.add(usize, target_bytes, frame.payload.len) catch
+                    return error.ArithmeticOverflow;
+            }
+        }
+        if (stream_bytes != self.pending_stream_bytes) return error.InvalidSource;
+
+        for (self.pending_events.items, 0..) |event, index| {
+            if (event.header.major != self.wire_major or event.header.kind != .event or
+                event.header.request_id != 0 or event.header.stream_id == 0 or
+                event.header.flags != 0 or event.header.payload_len != event.payload.len or
+                event.payload.len > protocol.max_control_json)
+                return error.InvalidSource;
+            const accepted = switch (event.preflight orelse return error.InvalidSource) {
+                .accepted => |value| value,
+                else => return error.InvalidSource,
+            };
+            const admission = event.admission_seal orelse return error.InvalidSource;
+            if (!std.meta.eql(admission.header, event.header) or
+                !std.mem.eql(u8, &admission.payload_digest, &accepted.raw_digest) or
+                !runtime_event_wire.eventPreflightEql(admission.preflight, accepted))
+                return error.InvalidSource;
+            const descriptor = externalFrameDescriptor(event);
+            try endedPurgeRangeOutsideProtected(
+                try endedPurgeCheckedPayloadRange(descriptor.payload_address, descriptor.payload_len),
+                self,
+                scratch,
+                out,
+            );
+            scratch.events[index] = descriptor;
+            event_bytes = std.math.add(usize, event_bytes, event.payload.len) catch
+                return error.ArithmeticOverflow;
+            if (event.header.stream_id == target_stream) {
+                scratch.event_targets.set(index);
+                target_event_count += 1;
+                target_bytes = std.math.add(usize, target_bytes, event.payload.len) catch
+                    return error.ArithmeticOverflow;
+            }
+        }
+        if (event_bytes != self.pending_event_bytes or target_event_count != 1 or
+            !scratch.event_targets.isSet(event_index))
+            return error.InvalidSource;
+
+        inline for (.{
+            .{ self.pending_batches.capacity, @sizeOf(StreamBatch) },
+            .{ self.pending_stream.capacity, @sizeOf(framing.Frame) },
+            .{ self.pending_events.capacity, @sizeOf(BufferedEvent) },
+        }) |entry| {
+            const backing_bytes = std.math.mul(usize, entry[0], entry[1]) catch
+                return error.ArithmeticOverflow;
+            quarantine_bytes = std.math.add(usize, quarantine_bytes, backing_bytes) catch
+                return error.ArithmeticOverflow;
+        }
+        inline for (.{ batch_bytes, stream_bytes, event_bytes }) |payload_bytes|
+            quarantine_bytes = std.math.add(usize, quarantine_bytes, payload_bytes) catch
+                return error.ArithmeticOverflow;
+
+        if (self.partial_batch) |partial| {
+            if (partial.stream_id == 0 or partial.chunk_count == 0 or
+                partial.bytes.items.len > partial.bytes.capacity or
+                partial.bytes.items.len > protocol.max_viewport_snapshot)
+                return error.InvalidSource;
+            const descriptor: ExternalPartialDescriptor = .{
+                .stream_id = partial.stream_id,
+                .is_snapshot = partial.is_snapshot,
+                .bytes = externalArrayDescriptor(partial.bytes),
+                .chunk_count = partial.chunk_count,
+            };
+            try endedPurgeRangeOutsideProtected(
+                try endedPurgeCheckedPayloadRange(descriptor.bytes.address, descriptor.bytes.capacity),
+                self,
+                scratch,
+                out,
+            );
+            scratch.partial = descriptor;
+            if (partial.stream_id == target_stream) {
+                scratch.partial_target = true;
+                target_bytes = std.math.add(usize, target_bytes, partial.bytes.items.len) catch
+                    return error.ArithmeticOverflow;
+            }
+            quarantine_bytes = std.math.add(
+                usize,
+                quarantine_bytes,
+                partial.bytes.capacity,
+            ) catch return error.ArithmeticOverflow;
+        }
+
+        var batch_writer = owner_seal.Writer.init("maru.ended-purge.batch.v1");
+        var stream_writer = owner_seal.Writer.init("maru.ended-purge.stream.v1");
+        var event_writer = owner_seal.Writer.init("maru.ended-purge.event.v1");
+        var partial_writer = owner_seal.Writer.init("maru.ended-purge.partial.v1");
+        for (self.pending_batches.items, 0..) |batch, index|
+            writeEndedPurgeBatchSeal(&batch_writer, scratch.batches[index], batch.bytes);
+        for (self.pending_stream.items, 0..) |frame, index|
+            writeEndedPurgeFrameSeal(&stream_writer, scratch.stream[index], frame.payload);
+        for (self.pending_events.items, 0..) |event, index| {
+            if (!event.sealMatches()) return error.InvalidSource;
+            writeEndedPurgeFrameSeal(&event_writer, scratch.events[index], event.payload);
+        }
+        if (self.partial_batch) |partial|
+            writeEndedPurgePartialSeal(&partial_writer, scratch.partial.?, partial.bytes.items);
+
+        out.* = .{
+            .self_addr = out_start,
+            .client_addr = client_start,
+            .scratch_addr = scratch_start,
+            .target_stream = target_stream,
+            .hint_index = hint.event_index,
+            .batches = externalArrayDescriptor(self.pending_batches),
+            .stream = externalArrayDescriptor(self.pending_stream),
+            .events = externalArrayDescriptor(self.pending_events),
+            .partial = scratch.partial,
+            .batch_payload_bytes = batch_bytes,
+            .stream_payload_bytes = stream_bytes,
+            .event_payload_bytes = event_bytes,
+            .target_batch_count = target_batch_count,
+            .target_stream_count = target_stream_count,
+            .target_event_count = target_event_count,
+            .target_payload_bytes = target_bytes,
+            .quarantine_bytes = quarantine_bytes,
+            .batch_seal = batch_writer.finish(),
+            .stream_seal = stream_writer.finish(),
+            .event_seal = event_writer.finish(),
+            .partial_seal = partial_writer.finish(),
+            .target_map_seal = endedPurgeTargetMapSeal(scratch),
+            .lifecycle = .prepared,
+        };
+    }
+
     /// Releases an event through the allocator that admitted it. Consumers must not assume their
     /// projection allocator is identical to the shared Client transport allocator.
     pub fn releaseEvent(self: *const Client, event: BufferedEvent) void {
@@ -10466,6 +11010,372 @@ test "CR3a-2c2b ended peek rejects list length beyond capacity before item acces
     client.pending_events.capacity = original_capacity;
 }
 
+test "CR3a-2c2b2 prepare inventories mixed target and sibling owners without mutation" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 1,
+        .wire_major = protocol.version_major,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+
+    try client.pending_batches.append(allocator, .{
+        .stream_id = 9,
+        .is_snapshot = false,
+        .bytes = try allocator.dupe(u8, "target-batch"),
+        .allocator = allocator,
+    });
+    try client.pending_batches.append(allocator, .{
+        .stream_id = 10,
+        .is_snapshot = false,
+        .bytes = try allocator.dupe(u8, "sibling-batch"),
+        .allocator = allocator,
+    });
+    client.pending_batch_bytes = "target-batch".len + "sibling-batch".len;
+    const target_stream_payload = try allocator.dupe(u8, "target-stream");
+    try client.pending_stream.append(allocator, .{
+        .header = .{
+            .kind = .delta_chunk,
+            .stream_id = 9,
+            .payload_len = @intCast(target_stream_payload.len),
+            .flags = protocol.Flags.end_stream,
+        },
+        .payload = target_stream_payload,
+    });
+    client.pending_stream_bytes = target_stream_payload.len;
+    client.partial_batch = .{
+        .stream_id = 10,
+        .is_snapshot = false,
+        .bytes = .empty,
+        .chunk_count = 1,
+    };
+    try client.partial_batch.?.bytes.appendSlice(allocator, "sibling-partial");
+
+    const ended_payload = "{\"event\":\"runtime.ended\"}";
+    try client.bufferEvent(.{
+        .header = .{
+            .kind = .event,
+            .stream_id = 9,
+            .payload_len = ended_payload.len,
+        },
+        .payload = try allocator.dupe(u8, ended_payload),
+    });
+    const hint = (try client.peekEndedEventForStream(9)).candidate;
+    var scratch: EndedPurgeScratch = .{};
+    var prepared: PreparedEndedPurgeInventory = .{};
+    const batches_ptr = client.pending_batches.items.ptr;
+    const events_ptr = client.pending_events.items.ptr;
+
+    try client.prepareEndedPurgeInventory(9, hint, &scratch, &prepared);
+    try std.testing.expectEqual(@as(usize, 1), prepared.target_batch_count);
+    try std.testing.expectEqual(@as(usize, 1), prepared.target_stream_count);
+    try std.testing.expectEqual(@as(usize, 1), prepared.target_event_count);
+    try std.testing.expect(scratch.batch_targets.isSet(0));
+    try std.testing.expect(!scratch.batch_targets.isSet(1));
+    try std.testing.expect(scratch.stream_targets.isSet(0));
+    try std.testing.expect(scratch.event_targets.isSet(0));
+    try std.testing.expect(!scratch.partial_target);
+    try std.testing.expectEqual(batches_ptr, client.pending_batches.items.ptr);
+    try std.testing.expectEqual(events_ptr, client.pending_events.items.ptr);
+    try std.testing.expect(prepared.abort());
+    try std.testing.expect(!prepared.abort());
+}
+
+test "CR3a-2c2b2 prepare rejects payload drift and stale hint without publishing" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 1,
+        .wire_major = protocol.version_major,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    const payload = "{\"event\":\"runtime.ended\"}";
+    try client.bufferEvent(.{
+        .header = .{ .kind = .event, .stream_id = 9, .payload_len = payload.len },
+        .payload = try allocator.dupe(u8, payload),
+    });
+    const hint = (try client.peekEndedEventForStream(9)).candidate;
+    client.pending_events.items[0].payload[1] ^= 1;
+    var scratch: EndedPurgeScratch = .{};
+    var prepared: PreparedEndedPurgeInventory = .{};
+    try std.testing.expectError(
+        error.InvalidSource,
+        client.prepareEndedPurgeInventory(9, hint, &scratch, &prepared),
+    );
+    try std.testing.expectEqual(EndedPurgePrepareLifecycle.empty, prepared.lifecycle);
+
+    client.pending_events.items[0].payload[1] ^= 1;
+    var stale_hint = hint;
+    stale_hint.event_index +%= 1;
+    try std.testing.expectError(
+        error.InvalidHint,
+        client.prepareEndedPurgeInventory(9, stale_hint, &scratch, &prepared),
+    );
+    try std.testing.expectEqual(EndedPurgePrepareLifecycle.empty, prepared.lifecycle);
+}
+
+test "CR3a-2c2b2 prepare rejects exact and partial payload owner aliases before hashing" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 1,
+        .wire_major = protocol.version_major,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    const first = try allocator.dupe(u8, "first-owner");
+    const second = try allocator.dupe(u8, "second-owner");
+    try client.pending_batches.append(allocator, .{
+        .stream_id = 9,
+        .is_snapshot = false,
+        .bytes = first,
+        .allocator = allocator,
+    });
+    try client.pending_batches.append(allocator, .{
+        .stream_id = 10,
+        .is_snapshot = false,
+        .bytes = second,
+        .allocator = allocator,
+    });
+    const ended_payload = "{\"event\":\"runtime.ended\"}";
+    try client.bufferEvent(.{
+        .header = .{ .kind = .event, .stream_id = 9, .payload_len = ended_payload.len },
+        .payload = try allocator.dupe(u8, ended_payload),
+    });
+    const hint = (try client.peekEndedEventForStream(9)).candidate;
+    var scratch: EndedPurgeScratch = .{};
+    var prepared: PreparedEndedPurgeInventory = .{};
+
+    client.pending_batches.items[1].bytes = first;
+    client.pending_batch_bytes = first.len * 2;
+    try std.testing.expectError(
+        error.InvalidAlias,
+        client.prepareEndedPurgeInventory(9, hint, &scratch, &prepared),
+    );
+    try std.testing.expectEqual(EndedPurgePrepareLifecycle.empty, prepared.lifecycle);
+
+    client.pending_batches.items[1].bytes = first[1..];
+    client.pending_batch_bytes = first.len + first.len - 1;
+    try std.testing.expectError(
+        error.InvalidAlias,
+        client.prepareEndedPurgeInventory(9, hint, &scratch, &prepared),
+    );
+    try std.testing.expectEqual(EndedPurgePrepareLifecycle.empty, prepared.lifecycle);
+
+    client.pending_batches.items[1].bytes = second;
+    client.pending_batch_bytes = first.len + second.len;
+}
+
+test "CR3a-2c2b2 prepare rejects parser and scratch payload aliases before hashing" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 1,
+        .wire_major = protocol.version_major,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    try client.parser.push("parser-owner");
+    const owned = try allocator.dupe(u8, "batch-owner");
+    try client.pending_batches.append(allocator, .{
+        .stream_id = 9,
+        .is_snapshot = false,
+        .bytes = owned,
+        .allocator = allocator,
+    });
+    const ended_payload = "{\"event\":\"runtime.ended\"}";
+    try client.bufferEvent(.{
+        .header = .{ .kind = .event, .stream_id = 9, .payload_len = ended_payload.len },
+        .payload = try allocator.dupe(u8, ended_payload),
+    });
+    const hint = (try client.peekEndedEventForStream(9)).candidate;
+    var scratch: EndedPurgeScratch = .{};
+    var prepared: PreparedEndedPurgeInventory = .{};
+
+    client.pending_batches.items[0].bytes = client.parser.buf.items;
+    client.pending_batch_bytes = client.parser.buf.items.len;
+    try std.testing.expectError(
+        error.InvalidAlias,
+        client.prepareEndedPurgeInventory(9, hint, &scratch, &prepared),
+    );
+
+    const scratch_bytes = std.mem.asBytes(&scratch);
+    client.pending_batches.items[0].bytes = scratch_bytes[scratch_bytes.len - 8 ..];
+    client.pending_batch_bytes = 8;
+    try std.testing.expectError(
+        error.InvalidAlias,
+        client.prepareEndedPurgeInventory(9, hint, &scratch, &prepared),
+    );
+    const out_bytes = std.mem.asBytes(&prepared);
+    client.pending_batches.items[0].bytes = out_bytes[0..8];
+    client.pending_batch_bytes = 8;
+    try std.testing.expectError(
+        error.InvalidAlias,
+        client.prepareEndedPurgeInventory(9, hint, &scratch, &prepared),
+    );
+    try std.testing.expectEqual(EndedPurgePrepareLifecycle.empty, prepared.lifecycle);
+
+    client.pending_batches.items[0].bytes = owned;
+    client.pending_batch_bytes = owned.len;
+}
+
+test "CR3a-2c2b2 prepare rejects outer list backing aliases before item access" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 1,
+        .wire_major = protocol.version_major,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    const ended_payload = "{\"event\":\"runtime.ended\"}";
+    try client.bufferEvent(.{
+        .header = .{ .kind = .event, .stream_id = 9, .payload_len = ended_payload.len },
+        .payload = try allocator.dupe(u8, ended_payload),
+    });
+    const hint = (try client.peekEndedEventForStream(9)).candidate;
+    var scratch: EndedPurgeScratch = .{};
+    var prepared: PreparedEndedPurgeInventory = .{};
+
+    const original_batches = client.pending_batches;
+    const scratch_start: [*]align(@alignOf(StreamBatch)) StreamBatch = @ptrCast(@alignCast(&scratch));
+    client.pending_batches = .{
+        .items = scratch_start[0..0],
+        .capacity = 1,
+    };
+    try std.testing.expectError(
+        error.InvalidAlias,
+        client.prepareEndedPurgeInventory(9, hint, &scratch, &prepared),
+    );
+    client.pending_batches = original_batches;
+    try std.testing.expectEqual(EndedPurgePrepareLifecycle.empty, prepared.lifecycle);
+}
+
+test "CR3a-2c2b2 prepare rejects complete Client owner graph aliases before payload hashing" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    defer _ = c.close(fds[1]);
+    var client = makeConnectedTestClient(allocator, fds[0]);
+    defer client.deinit();
+    try client.enterExternalMode();
+
+    const outer_bytes = @sizeOf(StreamBatch);
+    client.build_id = try allocator.alloc(u8, outer_bytes);
+    client.lifecycle = try allocator.alloc(u8, outer_bytes + @alignOf(StreamBatch));
+    const owned = try allocator.dupe(u8, "batch-owner");
+    try client.pending_batches.append(allocator, .{
+        .stream_id = 9,
+        .is_snapshot = false,
+        .bytes = owned,
+        .allocator = allocator,
+    });
+    client.pending_batch_bytes = owned.len;
+    const ended_payload = "{\"event\":\"runtime.ended\"}";
+    try client.bufferEvent(.{
+        .header = .{ .kind = .event, .stream_id = 9, .payload_len = ended_payload.len },
+        .payload = try allocator.dupe(u8, ended_payload),
+    });
+    const hint = (try client.peekEndedEventForStream(9)).candidate;
+
+    var tx_payload: []u8 = undefined;
+    var tx_backing_bytes: []u8 = undefined;
+    switch (client.io_mode) {
+        .blocking => return error.TestUnexpectedResult,
+        .external => |*state| {
+            tx_payload = try state.tx_allocator.alloc(u8, outer_bytes);
+            state.external_tx.appendAssumeCapacity(.{
+                .bytes = tx_payload,
+                .kind = .input_bytes,
+                .stream_id = 10,
+                .request_id = 0,
+                .activated_at_ns = 1,
+                .wire_digest = [_]u8{1} ** 32,
+                .descriptor_digest = [_]u8{0} ** 32,
+            });
+            state.external_tx.items[0].descriptor_digest =
+                client_external_mode.txFrameDescriptorDigest(state.external_tx.items[0]);
+            state.external_tx_bytes = tx_payload.len;
+            tx_backing_bytes = std.mem.sliceAsBytes(
+                state.external_tx.items.ptr[0..state.external_tx.capacity],
+            );
+        },
+    }
+
+    var scratch: EndedPurgeScratch = .{};
+    var prepared: PreparedEndedPurgeInventory = .{};
+    const original_batches = client.pending_batches;
+    defer {
+        client.pending_batches = original_batches;
+        client.pending_batches.items[0].bytes = owned;
+        client.pending_batch_bytes = owned.len;
+    }
+
+    // Exact build-id backing alias is rejected before a StreamBatch item can be read.
+    const build_batches: [*]align(@alignOf(StreamBatch)) StreamBatch =
+        @ptrCast(@alignCast(client.build_id.?.ptr));
+    client.pending_batches = .{ .items = build_batches[0..0], .capacity = 1 };
+    try std.testing.expectError(
+        error.InvalidAlias,
+        client.prepareEndedPurgeInventory(9, hint, &scratch, &prepared),
+    );
+
+    // A list range wholly inside lifecycle is still a partial owner overlap.
+    const lifecycle_inner = client.lifecycle[@alignOf(StreamBatch)..];
+    const lifecycle_batches: [*]align(@alignOf(StreamBatch)) StreamBatch =
+        @ptrCast(@alignCast(lifecycle_inner.ptr));
+    client.pending_batches = .{ .items = lifecycle_batches[0..0], .capacity = 1 };
+    try std.testing.expectError(
+        error.InvalidAlias,
+        client.prepareEndedPurgeInventory(9, hint, &scratch, &prepared),
+    );
+
+    const tx_backing_batches: [*]align(@alignOf(StreamBatch)) StreamBatch =
+        @ptrCast(@alignCast(tx_backing_bytes.ptr));
+    client.pending_batches = .{ .items = tx_backing_batches[0..0], .capacity = 1 };
+    try std.testing.expectError(
+        error.InvalidAlias,
+        client.prepareEndedPurgeInventory(9, hint, &scratch, &prepared),
+    );
+
+    const tx_payload_batches: [*]align(@alignOf(StreamBatch)) StreamBatch =
+        @ptrCast(@alignCast(tx_payload.ptr));
+    client.pending_batches = .{ .items = tx_payload_batches[0..0], .capacity = 1 };
+    try std.testing.expectError(
+        error.InvalidAlias,
+        client.prepareEndedPurgeInventory(9, hint, &scratch, &prepared),
+    );
+
+    client.pending_batches = original_batches;
+    inline for (.{
+        client.build_id.?,
+        client.lifecycle[1..],
+        tx_backing_bytes[0..@min(outer_bytes, tx_backing_bytes.len)],
+        tx_payload,
+    }) |aliased| {
+        client.pending_batches.items[0].bytes = aliased;
+        client.pending_batch_bytes = aliased.len;
+        try std.testing.expectError(
+            error.InvalidAlias,
+            client.prepareEndedPurgeInventory(9, hint, &scratch, &prepared),
+        );
+        try std.testing.expectEqual(EndedPurgePrepareLifecycle.empty, prepared.lifecycle);
+    }
+    client.pending_batches.items[0].bytes = owned;
+    client.pending_batch_bytes = owned.len;
+}
+
 const strict_cli_inherited_event_payloads = [_][]const u8{
     "{\"event\":\"runtime.metadata\",\"metadata_revision\":2,\"metadata\":{}}",
     "{\"event\":\"runtime.metadata\",\"metadata_revision\":1,\"metadata\":{}}",
@@ -13215,6 +14125,25 @@ test "external adoption owner alias validation stays n log n at every queue cap"
         });
     }
 
+    switch (client.io_mode) {
+        .blocking => return error.TestUnexpectedResult,
+        .external => |*state| for (0..client_external_mode.max_tx_frames) |index| {
+            const payload = try state.tx_allocator.dupe(u8, "t");
+            state.external_tx.appendAssumeCapacity(.{
+                .bytes = payload,
+                .kind = .input_bytes,
+                .stream_id = index + 1,
+                .request_id = 0,
+                .activated_at_ns = 1,
+                .wire_digest = [_]u8{1} ** 32,
+                .descriptor_digest = [_]u8{0} ** 32,
+            });
+            state.external_tx.items[index].descriptor_digest =
+                client_external_mode.txFrameDescriptorDigest(state.external_tx.items[index]);
+            state.external_tx_bytes += payload.len;
+        },
+    }
+
     const range_count = try externalOwnerRangeCount(&client);
     const comparisons = try validateExternalOwnerRangesAgainst(&client, null);
     try std.testing.expect(comparisons <= range_count * 64);
@@ -13222,7 +14151,7 @@ test "external adoption owner alias validation stays n log n at every queue cap"
     const source_stats = try validateExternalSourceOwnerRanges(&client, &source_scratch);
     try std.testing.expectEqual(range_count, source_stats.total_ranges);
     try std.testing.expectEqual(
-        max_external_owner_range_count - client_external_mode.max_tx_frames,
+        max_external_owner_range_count,
         source_stats.total_ranges,
     );
     try std.testing.expect(
@@ -13232,6 +14161,29 @@ test "external adoption owner alias validation stays n log n at every queue cap"
     try std.testing.expectEqual(
         @as(usize, 148_608),
         max_external_owner_range_scratch_bytes,
+    );
+    var ended_scratch: EndedPurgeScratch = .{};
+    var ended_out: PreparedEndedPurgeInventory = .{};
+    const ended_stats = try validateEndedPurgeOwnerRanges(
+        &client,
+        &ended_scratch,
+        &ended_out,
+    );
+    try std.testing.expectEqual(max_external_owner_range_count, ended_stats.total_ranges);
+    try std.testing.expect(ended_stats.comparisons <= ended_stats.total_ranges * 64);
+    // externalOwnerRangeAt is a fixed outer-table plus four-way nested ordinal lookup. Keep that
+    // bounded projection work linear in the sort comparisons and the final adjacency scan.
+    try std.testing.expect(
+        ended_stats.owner_lookups <=
+            ended_stats.comparisons * 2 + ended_stats.total_ranges * 2,
+    );
+    try std.testing.expectEqual(
+        ended_purge_scratch_bytes_v1,
+        @sizeOf(EndedPurgeScratch),
+    );
+    try std.testing.expectEqual(
+        max_ended_purge_scratch_bytes - ended_purge_scratch_bytes_v1,
+        62_032,
     );
 }
 

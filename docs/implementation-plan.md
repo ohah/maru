@@ -952,8 +952,13 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    reserved/ingress/live/releasing 전 상태를 target purge blocker로 분류한다. **2c2b1(구현)**은 `pending_events`에서 대상 stream의 첫
    event만 bounded scan하고, admission identity가 보존된 `runtime.ended` 후보의 비권위적 index hint만 allocation·payload hash·queue/counter
    mutation 0으로 반환한다. payload byte와 전체 queue ownership metadata의 권위 검증은 permit 아래 slow transaction이 다시 수행하며,
-   hint 자체로 receipt나 purge 권위를 만들지 않는다. 아직 Client queue transaction, callback/quarantine suffix, transport/GUI 제품 배선은
-   구현하지 않았으므로 2c2 완료를 주장하지 않는다. **2c3**은 capability/input/control/
+   hint 자체로 receipt나 purge 권위를 만들지 않는다. **2c2b2(구현)**는 exact binding과 common stream-operation permit 아래 fixed inline
+   scratch를 사용해 모든 Client-owned demux queue와 기존 Client owner graph의 descriptor·allocator provenance·counter·event admission
+   seal·payload·exact/partial alias를 allocation/free와 Client queue/owner 및 process-global quarantine mutation 0으로 검증한다. target
+   bitset·queue별 aggregate seal·checked quarantine capacity는 final-address private preparation에 봉인한다. process-global quarantine은
+   이 prepare 단계에서 예약하지 않으며 실제 reservation은 첫
+   allocator callback 전에 수행하는 commit gate가 소유한다. 아직 target detach/stable compaction, callback cleanup, post-validation,
+   quarantine reservation/commit과 poison suffix, transport/GUI 제품 배선은 구현하지 않았으므로 2c2 완료를 주장하지 않는다. **2c3**은 capability/input/control/
    event/RPC primitive를 exact facade로 옮기고 generation의 `logicalClient()` 사용을 0으로 만든다. **2c4**는
    `RuntimeConnection` union을 mode SSOT로 전환해 `RemoteRuntime.client`와 `generation_adapter` 병렬 필드를 제거하고 exact
    15-method/signature/source oracle을 닫는다. 각 gate는 reconnect/current publish와 제품 동작 변화 0을 유지하며 마지막 2c4

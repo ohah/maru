@@ -3610,7 +3610,7 @@ pub const AppSession = struct {
         if (!available) {
             if (scope == .workspace) self.clearAgentSessionArchiveWorkspaceRoots();
             self.showNotice(switch (scope) {
-                .workspace => "현재 작업공간 경로가 없습니다.",
+                .workspace => "탐색기 작업공간이 없습니다. 폴더를 열거나 현재 프로젝트를 선택하세요.",
                 .project => unreachable,
                 .all => unreachable,
             });
@@ -28073,7 +28073,7 @@ pub const AppSession = struct {
                                     .colors = tabbar_colors,
                                 } });
                             } else |_| {}
-                            const workspace_scope_label = if (self.agent_session_archive_workspace_roots.items.len > 0) "현재 작업공간" else "작업공간 없음";
+                            const workspace_scope_label = if (self.agent_session_archive_workspace_roots.items.len > 0) "현재 작업공간" else "탐색기 없음";
                             const project_scope_label = if (self.agent_session_archive_project_scope_loading)
                                 "프로젝트 분석 중"
                             else if (self.agent_session_archive_project_root != null)

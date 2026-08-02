@@ -46,6 +46,7 @@ pub const keyhint_hold = @import("session/keyhint_hold.zig"); // 단축키 힌�
 pub const agent_observer = @import("session/agent_observer.zig");
 pub const agent_transcript = @import("session/agent_transcript.zig"); // 세션 기록 파일에서 마지막 대화(사이드바 행 §7)
 pub const agent_session_archive = @import("session/agent_session_archive.zig"); // Codex·Claude 과거 세션 JSONL 요약(우측 기록 도크)
+pub const agent_session_archive_view = @import("session/agent_session_archive_view.zig"); // archive workspace group·3줄 카드 순수 투영
 pub const agent_statusline = @import("session/agent_statusline.zig"); // claude 상태줄 훅(§7.2.2 — 옵션 보강)
 pub const session_model = @import("session/session_model.zig");
 pub const split_tree = @import("session/split_tree.zig");

@@ -51,6 +51,7 @@ const file_tree_backend = @import("file_tree_backend.zig");
 const file_tree_mutation_backend = @import("file_tree_mutation_backend.zig");
 const agent_session_archive_backend = @import("agent_session_archive_backend.zig");
 const agent_session_archive_scope_backend = @import("agent_session_archive_scope_backend.zig");
+const agent_session_archive_view = maru.session.agent_session_archive_view;
 const metal_frame = renderer.metal_frame; // §8: metal_frame이 renderer로 이주 — maru.renderer barrel 경유(중립 frame DTO)
 const shell_integration = @import("shell_integration.zig");
 const global_hotkey = @import("global_hotkey.zig");
@@ -461,6 +462,20 @@ fn agentSessionArchiveMatches(record: agent_session_archive_backend.Record, quer
         asciiContainsIgnoreCase(record.parsed.model, query);
 }
 
+/// Archive file mtime is already part of the immutable worker snapshot, so a
+/// card can show relative age without touching the filesystem. Clock rollback
+/// and future mtimes are intentionally rendered as "방금".
+fn formatAgentSessionArchiveRelativeAge(now_ns: i128, mtime_ns: i96, buf: []u8) []const u8 {
+    const then: i128 = mtime_ns;
+    const delta_ns = if (now_ns > then) now_ns - then else 0;
+    const minutes = @divFloor(delta_ns, 60 * std.time.ns_per_s);
+    if (minutes == 0) return "방금";
+    if (minutes < 60) return std.fmt.bufPrint(buf, "{d}분 전", .{minutes}) catch "방금";
+    const hours = @divFloor(minutes, 60);
+    if (hours < 24) return std.fmt.bufPrint(buf, "{d}시간 전", .{hours}) catch "방금";
+    return std.fmt.bufPrint(buf, "{d}일 전", .{@divFloor(hours, 24)}) catch "방금";
+}
+
 fn agentSessionArchiveWithinRoot(record: agent_session_archive_backend.Record, root: []const u8) bool {
     return record.parsed.cwd_canonical and record.parsed.cwd.len > 0 and std.fs.path.isAbsolute(record.parsed.cwd) and
         file_tree.Tree.pathWithinRoot(record.parsed.cwd, root);
@@ -490,6 +505,13 @@ test "archive scope admits only canonical cwd beneath the exact root boundary" {
     var unresolved = record;
     unresolved.parsed.cwd_canonical = false;
     try std.testing.expect(!agentSessionArchiveWithinRoot(unresolved, "/workspace/project"));
+}
+
+test "archive relative age uses the worker mtime without filesystem access" {
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("방금", formatAgentSessionArchiveRelativeAge(100, 200, &buf));
+    try std.testing.expectEqualStrings("5분 전", formatAgentSessionArchiveRelativeAge(5 * 60 * std.time.ns_per_s, 0, &buf));
+    try std.testing.expectEqualStrings("2시간 전", formatAgentSessionArchiveRelativeAge(2 * 60 * 60 * std.time.ns_per_s, 0, &buf));
 }
 
 // 세로 탭 사이드바의 기본 논리 폭(pt). backing 픽셀 폭은 scale을 곱해 구한다(refreshCellMetrics에서).
@@ -2726,6 +2748,10 @@ pub const AppSession = struct {
     agent_session_archive_initialized: bool = false,
     agent_session_archive_records: std.ArrayList(agent_session_archive_backend.Record) = .empty,
     agent_session_archive_filtered_indices: std.ArrayList(usize) = .empty,
+    agent_session_archive_projection: agent_session_archive_view.Projection = .{},
+    /// View-lifetime only canonical cwd keys. A missing/deleted/remote cwd uses
+    /// the empty unknown-location key and remains distinct from lexical paths.
+    agent_session_archive_collapsed_groups: std.ArrayList([]u8) = .empty,
     agent_session_archive_search: std.ArrayList(u8) = .empty,
     agent_session_archive_search_active: bool = false,
     agent_session_archive_scope: AgentSessionArchiveScope = .all,
@@ -3454,8 +3480,8 @@ pub const AppSession = struct {
         }
         if (!result.first_batch) self.agent_session_archive_partial = self.agent_session_archive_partial or result.partial;
         self.rebuildAgentSessionArchiveFilter();
-        const visible = self.agentSessionArchiveVisibleRecordRows();
-        self.agent_session_archive_scroll_rows = @min(self.agent_session_archive_scroll_rows, self.agent_session_archive_filtered_indices.items.len -| @as(usize, visible));
+        const visible = self.agentSessionArchiveVisibleContentRows();
+        self.agent_session_archive_scroll_rows = @min(self.agent_session_archive_scroll_rows, self.agent_session_archive_projection.visual_rows -| visible);
         if (result.complete) {
             self.agent_session_archive_loading = false;
             self.agent_session_archive_completed_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
@@ -12603,35 +12629,30 @@ pub const AppSession = struct {
         return if (index < self.file_tree_rows.items.len) index else null;
     }
 
-    /// 세션 아카이브의 보이는 한 줄과 record index의 대응. scope/search는
-    /// immutable snapshot의 index만 재투영하므로 행 hit-test도 같은 index를 써야 한다.
-    fn agentSessionArchiveRowAt(self: *const AppSession, x_px: f64, y_px: f64) ?usize {
+    const AgentSessionArchiveHit = union(enum) { group: usize, record: usize };
+
+    /// Archive 본문은 group header 한 줄 또는 session card 세 줄이다. Fixed
+    /// chrome(header/scope)는 visual-row 좌표계에 절대 섞지 않는다.
+    fn agentSessionArchiveHitAt(self: *const AppSession, x_px: f64, y_px: f64) ?AgentSessionArchiveHit {
         if (self.dock.view != .agent_sessions or !self.dockVisible() or self.cell_height_px == 0) return null;
         const content = self.dockGeometry().tree_content;
         if (!layout_math.pointInRect(x_px, y_px, content)) return null;
         const local_row: usize = @intFromFloat((y_px - @as(f64, @floatFromInt(content.y))) /
             @as(f64, @floatFromInt(self.cell_height_px)));
         const visible_rows = content.h / self.cell_height_px;
-        const detail_rows = self.agentSessionArchiveDetailRows();
-        // Header, scope selector, and expanded detail/action rows are not
-        // selectable sessions.
-        if (local_row < 2 + detail_rows or local_row >= visible_rows) return null;
-        const row = self.agent_session_archive_scroll_rows + local_row - 2 - detail_rows;
-        return if (row < self.agent_session_archive_filtered_indices.items.len) self.agent_session_archive_filtered_indices.items[row] else null;
+        if (local_row < 2 or local_row >= visible_rows) return null;
+        const visual = self.agent_session_archive_scroll_rows + local_row - 2;
+        const found = self.agent_session_archive_projection.visualRowAt(visual) orelse return null;
+        return switch (self.agent_session_archive_projection.entries.items[found.entry_index]) {
+            .group => |group_index| .{ .group = group_index },
+            .card => |record_index| .{ .record = record_index },
+        };
     }
 
-    fn agentSessionArchiveDetailRows(self: *const AppSession) usize {
-        const selected = self.agent_session_archive_selected orelse return 0;
-        if (selected >= self.agent_session_archive_records.items.len or self.cell_height_px == 0) return 0;
-        // header + scope selector + provider/model + two actions must fit before reserving
-        // record rows; otherwise preserve the compact list without overflow.
-        return if (self.dockGeometry().tree_content.h / self.cell_height_px >= 5) 3 else 0;
-    }
-
-    fn agentSessionArchiveVisibleRecordRows(self: *const AppSession) usize {
+    fn agentSessionArchiveVisibleContentRows(self: *const AppSession) usize {
         if (self.cell_height_px == 0) return 0;
         const rows = self.dockGeometry().tree_content.h / self.cell_height_px;
-        return rows -| 2 -| self.agentSessionArchiveDetailRows();
+        return rows -| 2;
     }
 
     fn rebuildAgentSessionArchiveFilter(self: *AppSession) void {
@@ -12652,6 +12673,52 @@ pub const AppSession = struct {
             if (scope_matches and agentSessionArchiveMatches(record, self.agent_session_archive_search.items))
                 self.agent_session_archive_filtered_indices.append(self.allocator, index) catch break;
         }
+        self.rebuildAgentSessionArchiveProjection();
+    }
+
+    fn rebuildAgentSessionArchiveProjection(self: *AppSession) void {
+        var items: std.ArrayList(agent_session_archive_view.Item) = .empty;
+        defer items.deinit(self.allocator);
+        items.ensureTotalCapacity(self.allocator, self.agent_session_archive_filtered_indices.items.len) catch return;
+        for (self.agent_session_archive_filtered_indices.items) |record_index| {
+            if (record_index >= self.agent_session_archive_records.items.len) continue;
+            const parsed = &self.agent_session_archive_records.items[record_index].parsed;
+            items.appendAssumeCapacity(.{
+                .record_index = record_index,
+                .cwd = parsed.cwd,
+                .cwd_canonical = parsed.cwd_canonical,
+            });
+        }
+        const collapsed: []const []const u8 = self.agent_session_archive_collapsed_groups.items;
+        const staged = agent_session_archive_view.build(self.allocator, items.items, collapsed) catch return;
+        self.agent_session_archive_projection.deinit(self.allocator);
+        self.agent_session_archive_projection = staged;
+    }
+
+    fn toggleAgentSessionArchiveGroup(self: *AppSession, group_index: usize) void {
+        if (group_index >= self.agent_session_archive_projection.groups.items.len) return;
+        const key = self.agent_session_archive_projection.groups.items[group_index].key;
+        var existing: ?usize = null;
+        for (self.agent_session_archive_collapsed_groups.items, 0..) |collapsed, index| {
+            if (std.mem.eql(u8, collapsed, key)) {
+                existing = index;
+                break;
+            }
+        }
+        if (existing) |index| {
+            const removed = self.agent_session_archive_collapsed_groups.orderedRemove(index);
+            self.allocator.free(removed);
+        } else {
+            const owned = self.allocator.dupe(u8, key) catch return;
+            self.agent_session_archive_collapsed_groups.append(self.allocator, owned) catch {
+                self.allocator.free(owned);
+                return;
+            };
+        }
+        self.rebuildAgentSessionArchiveProjection();
+        const visible = self.agentSessionArchiveVisibleContentRows();
+        self.agent_session_archive_scroll_rows = @min(self.agent_session_archive_scroll_rows, self.agent_session_archive_projection.visual_rows -| visible);
+        self.metal_dirty = true;
     }
 
     fn handleAgentSessionArchiveSearchKey(self: *AppSession, event: terminal.KeyEvent) bool {
@@ -12675,25 +12742,11 @@ pub const AppSession = struct {
             else => return true,
         }
         self.rebuildAgentSessionArchiveFilter();
-        // A query may hide the selected record; clear the expanded detail
-        // rather than leaving actions for an item outside the visible result.
+        // A query may hide the selected record; do not leave a hidden archive
+        // identity selected for the later explicit action/tab path.
         self.agent_session_archive_selected = null;
         self.metal_dirty = true;
         return true;
-    }
-
-    const AgentSessionArchiveDetailAction = enum { resume_session, reveal_log };
-
-    fn agentSessionArchiveDetailActionAt(self: *const AppSession, x_px: f64, y_px: f64) ?AgentSessionArchiveDetailAction {
-        if (self.dock.view != .agent_sessions or !self.dockVisible() or self.agentSessionArchiveDetailRows() == 0) return null;
-        const content = self.dockGeometry().tree_content;
-        if (!layout_math.pointInRect(x_px, y_px, content)) return null;
-        const local_row: usize = @intFromFloat((y_px - @as(f64, @floatFromInt(content.y))) / @as(f64, @floatFromInt(self.cell_height_px)));
-        return switch (local_row) {
-            3 => .resume_session,
-            4 => .reveal_log,
-            else => null,
-        };
     }
 
     fn agentSessionArchiveRefreshAt(self: *const AppSession, x_px: f64, y_px: f64) bool {
@@ -20522,8 +20575,8 @@ pub const AppSession = struct {
         if (self.dockVisible() and self.dock.view == .agent_sessions and
             layout_math.pointInRect(x_px, y_px, self.dockGeometry().tree_content))
         {
-            const visible = self.agentSessionArchiveVisibleRecordRows();
-            const max_scroll = self.agent_session_archive_filtered_indices.items.len -| @as(usize, visible);
+            const visible = self.agentSessionArchiveVisibleContentRows();
+            const max_scroll = self.agent_session_archive_projection.visual_rows -| visible;
             const next = @as(i64, @intCast(self.agent_session_archive_scroll_rows)) - @as(i64, lines);
             const clamped: usize = @intCast(std.math.clamp(next, 0, @as(i64, @intCast(max_scroll))));
             if (clamped != self.agent_session_archive_scroll_rows) {
@@ -21400,16 +21453,6 @@ pub const AppSession = struct {
                     };
                 }
                 if (self.dock.view == .agent_sessions) {
-                    if (self.agentSessionArchiveDetailActionAt(x_px, y_px)) |action| {
-                        const selected = self.agent_session_archive_selected.?;
-                        const record = &self.agent_session_archive_records.items[selected];
-                        switch (action) {
-                            .resume_session => self.resumeAgentSessionInNewTerm(record) catch self.showNotice("세션을 다시 시작하지 못했습니다. Claude 또는 Codex CLI 설치와 작업 경로를 확인하세요."),
-                            .reveal_log => self.revealAgentSessionArchiveLog(record) catch self.showNotice("로그 원본이 변경되었거나 더 이상 열 수 없습니다."),
-                        }
-                        self.metal_dirty = true;
-                        return;
-                    }
                     if (self.agentSessionArchiveRefreshAt(x_px, y_px)) {
                         self.refreshAgentSessionArchive(true);
                         return;
@@ -21418,13 +21461,20 @@ pub const AppSession = struct {
                         self.selectAgentSessionArchiveScope(scope);
                         return;
                     }
-                    // 행 클릭은 세션을 재개하지 않고 먼저 상세 대상을 고른다.
-                    // 선택 상태는 새 탭 재개 액션이 소비하며, archive transcript 자체는 절대 실행하지 않는다.
-                    if (self.agentSessionArchiveRowAt(x_px, y_px)) |row_index| {
-                        self.agent_session_archive_selected = row_index;
-                        self.metal_dirty = true;
-                        return;
-                    }
+                    if (self.agentSessionArchiveHitAt(x_px, y_px)) |hit| switch (hit) {
+                        .group => |group_index| {
+                            self.toggleAgentSessionArchiveGroup(group_index);
+                            return;
+                        },
+                        // The tab opener is the next AS4 slice. Until then a card
+                        // click is deliberately selection-only and never resumes
+                        // the provider or exposes the raw archive.
+                        .record => |record_index| {
+                            self.agent_session_archive_selected = record_index;
+                            self.metal_dirty = true;
+                            return;
+                        },
+                    };
                 }
                 if (self.dock.view == .explorer) {
                     if (self.beginFileTreeScrollbarGesture(x_px, y_px)) return;
@@ -28054,9 +28104,8 @@ pub const AppSession = struct {
                         if (self.dock.view == .agent_sessions and tree_content_cols > 0 and visible_rows > 0) {
                             // 현재 열려 있는 Term 목록이 아니라 로컬 Codex/Claude archive를 표시한다. worker가
                             // 소유 경계를 넘겨 준 record만 main thread가 읽으며, 다음 refresh 전까지 안정적이다.
-                            const detail_rows = self.agentSessionArchiveDetailRows();
-                            const archive_rows = visible_rows -| 2 -| detail_rows;
-                            const archive_origin_y = dg.tree_content.y + self.cell_height_px * @as(u32, @intCast(2 + detail_rows));
+                            const archive_rows = visible_rows -| 2;
+                            const archive_origin_y = dg.tree_content.y + self.cell_height_px * 2;
                             const header_owned: ?[]u8 = if (self.agent_session_archive_search_active)
                                 std.fmt.allocPrint(self.allocator, "AI 세션 · 검색: {s}", .{self.agent_session_archive_search.items}) catch null
                             else
@@ -28094,40 +28143,81 @@ pub const AppSession = struct {
                                     .colors = tabbar_colors,
                                 } });
                             } else |_| {}
-                            if (detail_rows > 0) if (self.agent_session_archive_selected) |selected| if (selected < self.agent_session_archive_records.items.len) {
-                                const record = &self.agent_session_archive_records.items[selected];
-                                const model = if (record.parsed.model.len > 0) record.parsed.model else "모델 정보 없음";
-                                const detail_labels = [_][]const u8{
-                                    try std.fmt.allocPrint(self.allocator, "{s} · {s}", .{ record.parsed.provider.label(), model }),
-                                    "⌘↵ 새 탭에서 이어하기",
-                                    "⌘L 로그 보기",
-                                };
-                                defer self.allocator.free(detail_labels[0]);
-                                if (coretext_frame_builder.buildDockSessionListDrawList(self.allocator, tree_content_cols, @intCast(detail_rows), &detail_labels, null, dock_fg, dock_active_fg)) |ddl| {
-                                    self.collectShaped(&collected, ddl, pane_frame_builder, .{ .pane = .{
-                                        .origin_x = dg.tree_content.x,
-                                        .origin_y = dg.tree_content.y + self.cell_height_px * 2,
-                                        .colors = tabbar_colors,
-                                    } });
-                                } else |_| {}
-                            };
                             var labels: std.ArrayList([]const u8) = .empty;
                             defer labels.deinit(self.allocator);
-                            const start = @min(self.agent_session_archive_scroll_rows, self.agent_session_archive_filtered_indices.items.len);
-                            for (self.agent_session_archive_filtered_indices.items[start..]) |record_index| {
-                                if (labels.items.len >= archive_rows) break;
-                                const record = &self.agent_session_archive_records.items[record_index];
-                                labels.append(self.allocator, record.parsed.title) catch break;
+                            var owned_labels: std.ArrayList([]u8) = .empty;
+                            defer {
+                                for (owned_labels.items) |label| self.allocator.free(label);
+                                owned_labels.deinit(self.allocator);
                             }
-                            var loading_label: ?[]u8 = null;
-                            defer if (loading_label) |label| self.allocator.free(label);
+                            var selected_line: ?usize = null;
+                            // The archive worker owns filesystem reads.  A single wall-clock
+                            // snapshot makes every card in this frame agree on its relative
+                            // age without a main-thread stat call per row.
+                            const archive_now_ns: i128 = std.Io.Clock.real.now(self.io).nanoseconds;
+                            var visual = @min(self.agent_session_archive_scroll_rows, self.agent_session_archive_projection.visual_rows);
+                            while (labels.items.len < archive_rows) : (visual += 1) {
+                                const located = self.agent_session_archive_projection.visualRowAt(visual) orelse break;
+                                const entry = self.agent_session_archive_projection.entries.items[located.entry_index];
+                                switch (entry) {
+                                    .group => |group_index| {
+                                        const group = &self.agent_session_archive_projection.groups.items[group_index];
+                                        const marker = if (group.collapsed) "›" else "⌄";
+                                        const label = std.fmt.allocPrint(self.allocator, "{s} {s}  {d}", .{ marker, group.label, group.count }) catch break;
+                                        owned_labels.append(self.allocator, label) catch {
+                                            self.allocator.free(label);
+                                            break;
+                                        };
+                                        labels.append(self.allocator, label) catch break;
+                                    },
+                                    .card => |record_index| {
+                                        if (record_index >= self.agent_session_archive_records.items.len) break;
+                                        const record = &self.agent_session_archive_records.items[record_index];
+                                        const parsed = &record.parsed;
+                                        switch (located.line) {
+                                            0 => {
+                                                const label = std.fmt.allocPrint(self.allocator, "  {s} · {s}", .{ parsed.provider.label(), parsed.title }) catch break;
+                                                owned_labels.append(self.allocator, label) catch {
+                                                    self.allocator.free(label);
+                                                    break;
+                                                };
+                                                if (self.agent_session_archive_selected) |selected| {
+                                                    if (selected == record_index) selected_line = labels.items.len;
+                                                }
+                                                labels.append(self.allocator, label) catch break;
+                                            },
+                                            1 => labels.append(self.allocator, parsed.summary) catch break,
+                                            2 => {
+                                                const model = if (parsed.model.len > 0) parsed.model else "모델 정보 없음";
+                                                var age_buf: [32]u8 = undefined;
+                                                const age = formatAgentSessionArchiveRelativeAge(archive_now_ns, record.mtime_ns, &age_buf);
+                                                const label = std.fmt.allocPrint(self.allocator, "  메시지 {d}개 · {s} · {s}", .{ parsed.message_count, age, model }) catch break;
+                                                owned_labels.append(self.allocator, label) catch {
+                                                    self.allocator.free(label);
+                                                    break;
+                                                };
+                                                labels.append(self.allocator, label) catch break;
+                                            },
+                                            else => unreachable,
+                                        }
+                                    },
+                                }
+                            }
                             // Keep already-published sessions stable and reserve only one
                             // trailing row for progress; a refresh never blanks the list.
                             if (self.agent_session_archive_loading and labels.items.len < archive_rows) {
                                 const bars = self.spinnerBarsUtf8(self.allocator) catch "";
                                 defer if (bars.len > 0) self.allocator.free(bars);
-                                loading_label = std.fmt.allocPrint(self.allocator, "{s} 세션 분석 중", .{bars}) catch null;
-                                if (loading_label) |label| labels.append(self.allocator, label) catch {};
+                                if (std.fmt.allocPrint(self.allocator, "{s} 세션 분석 중", .{bars}) catch null) |label| {
+                                    const retained = blk: {
+                                        owned_labels.append(self.allocator, label) catch {
+                                            self.allocator.free(label);
+                                            break :blk false;
+                                        };
+                                        break :blk true;
+                                    };
+                                    if (retained) labels.append(self.allocator, label) catch {};
+                                }
                             }
                             if (labels.items.len > 0) {
                                 if (coretext_frame_builder.buildDockSessionListDrawList(
@@ -28135,13 +28225,7 @@ pub const AppSession = struct {
                                     tree_content_cols,
                                     @intCast(@min(labels.items.len, archive_rows)),
                                     labels.items,
-                                    if (self.agent_session_archive_selected) |selected| blk: {
-                                        for (self.agent_session_archive_filtered_indices.items[start..], 0..) |record_index, visible_index| {
-                                            if (visible_index >= labels.items.len) break;
-                                            if (record_index == selected) break :blk visible_index;
-                                        }
-                                        break :blk null;
-                                    } else null,
+                                    selected_line,
                                     dock_fg,
                                     dock_active_fg,
                                 )) |sdl| {
@@ -31988,6 +32072,9 @@ pub const AppSession = struct {
                 for (self.agent_session_archive_records.items) |*record| record.deinit(self.allocator);
                 self.agent_session_archive_records.deinit(self.allocator);
                 self.agent_session_archive_filtered_indices.deinit(self.allocator);
+                self.agent_session_archive_projection.deinit(self.allocator);
+                for (self.agent_session_archive_collapsed_groups.items) |key| self.allocator.free(key);
+                self.agent_session_archive_collapsed_groups.deinit(self.allocator);
                 self.agent_session_archive_search.deinit(self.allocator);
                 for (self.agent_session_archive_workspace_roots.items) |path| self.allocator.free(path);
                 self.agent_session_archive_workspace_roots.deinit(self.allocator);

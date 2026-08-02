@@ -4,6 +4,7 @@
 //! allocator와 generation/binding stream identity를 봉인하고 apply 성공·실패 뒤 exact once 해제한다.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const client_slot_mod = @import("client_slot.zig");
 const contract = @import("generation_attachment_contract.zig");
 
@@ -275,5 +276,7 @@ fn consumeCanonicalPermit(
 }
 
 fn currentPid() u32 {
-    return @intCast(std.c.getpid());
+    // Keep the process-domain sentinel identical to ClientSlot/GenerationTransport on
+    // non-macOS test targets. Production macOS always seals the real process ID.
+    return if (builtin.os.tag == .macos) @intCast(std.c.getpid()) else 1;
 }

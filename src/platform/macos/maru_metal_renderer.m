@@ -22,6 +22,15 @@ static const char *maru_screenshot_path(void) {
     return path;
 }
 
+/* Chrome Lab처럼 한 frame capture 뒤 Zig 쪽에서 artifact를 검사해야 하는 test executable만
+   `maru-test-only-v1`을 넣어 종료를 억제한다. 일반 MARU_SCREENSHOT은 기존처럼 capture 직후
+   종료하고, 값이 다르면 fail-closed로 일반 동작을 유지한다. 이 조회는 screenshot mode 안에서만
+   일어나므로 평소 renderer hot path에는 새 getenv가 없다. */
+static bool maru_screenshot_keeps_process(void) {
+    const char *value = getenv("MARU_SCREENSHOT_KEEP_PROCESS");
+    return value != NULL && strcmp(value, "maru-test-only-v1") == 0;
+}
+
 /* MARU_SCREENSHOT_DELAY_MS: 캡처를 "내용이 있는 첫 frame"에서 N ms 늦춘다(그동안은 평소 present).
    기본(미설정/0)은 기존과 동일한 즉시 캡처. 첫 frame은 탭바/커서만으로도 '내용'이 되므로, PTY
    출력(셸 스크립트의 색 테스트 등)이 화면에 도달한 뒤를 찍으려면 이 지연이 필요하다 — 렌더 검증
@@ -1465,6 +1474,11 @@ bool maru_metal_renderer_draw(
             exit(1);
         }
         fprintf(stderr, "MARU_SCREENSHOT: %zux%zu PPM 캡처 → %s\n", shot_w, shot_h, screenshot_path);
+        if (maru_screenshot_keeps_process()) {
+            // Chrome Lab bridge는 같은 process에서 PPM→PNG·JSON 검증을 끝내야 한다. 이 opt-in은
+            // fixture executable만 설정하며, 일반 제품 screenshot의 one-frame-and-exit 계약은 그대로다.
+            return true;
+        }
         exit(0);
     }
 

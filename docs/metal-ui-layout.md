@@ -628,6 +628,44 @@ flowchart TD
   검증하지만 실제 provider scan과 real resume은 호출하지 않으므로, 그 I/O 수명과
   권한 경계는 AS2/AS4 별도 E2E가 계속 소유한다.
 
+### 6.3 ML3b2 — deterministic Metal readback 실행 계약
+
+readback 실행 파일 `maru-macos-chrome-lab-smoke`는 `empty`·`loading`·`retained-list`
+각 scenario를 **서로 다른 프로세스**에서 한 번씩 실행한다. 제품 renderer의 screenshot
+hook은 프로세스 단위 환경값을 한 번만 읽으므로, 한 프로세스에서 path를 바꿔 여러 frame을
+찍으면 이전 artifact를 덮거나 잘못된 scenario로 판정할 수 있다. scenario별 process 격리는
+그 cache 경계까지 검증하고, 일반 앱의 launch·workspace restore·control-plane에는 Lab을
+노출하지 않는다.
+
+```mermaid
+flowchart TD
+    A[ChromeLabScenario] --> B[lab.buildFrame]
+    B --> C[lab.lowerDraws]
+    C --> D[maru_metal_renderer_draw]
+    D --> E[offscreen BGRA readback]
+    E --> F[scenario PPM]
+    F --> G[scenario PNG]
+    G --> H[scenario JSON summary]
+```
+
+- executable은 `ChromeLabScenario`와 `OverlayRaster`만 받아 C bridge에 넘긴다. bridge는
+  fixture-only `CAMetalLayer`와 1×1 empty glyph atlas을 만들고,
+  `maru_metal_renderer_create` → `maru_metal_renderer_set_atlas` →
+  `maru_metal_renderer_draw`의 **제품** quad/shadow path를 호출한다. window, `AppSession`, PTY,
+  worker, filesystem/provider action은 만들지 않는다.
+- `MARU_SCREENSHOT_KEEP_PROCESS=maru-test-only-v1`은 Lab bridge처럼 test executable이 screenshot write 뒤
+  summary를 검사해야 할 때만 `exit(0)`을 억제하는 renderer debug hook이다. 일반
+  `MARU_SCREENSHOT` 제품 실행은 기존대로 한 frame을 쓰고 종료하며, 두 환경값 모두 없으면
+  일반 renderer hot path에 추가 work가 없다.
+- 각 process는 `zig-out/maru-macos-chrome-lab/<scenario>.ppm`을 쓴 뒤 macOS 기본
+  `sips`로 같은 RGB readback을 `<scenario>.png`로 변환하고, `<scenario>.json`에 scenario,
+  viewport, appearance, product-renderer success, non-background pixel probe, PPM/PNG 경로를
+  기록한다. PNG 변환 실패·파일 크기 0·background-only readback은 모두 smoke 실패다.
+- 첫 readback fixture는 typed `paint`가 아직 text glyph를 방출하지 않는 상태를 숨기지 않는다.
+  따라서 JSON은 `text_rasterized=false`를 명시하고 card geometry/rounded corner/shadow의
+  GPU readback만 증명한다. CoreText text raster와 long-title mask oracle은 text paint slice에서
+  별도 scenario와 함께 추가한다.
+
 순수 `UiLayout` fixture는 필요하면 test-only WASM build에서도 실행해 browser
 property/differential test를 추가할 수 있다. 이는 DOM/CSS runtime이나 shipping WASM을
 도입하는 결정이 아니다. WASM 결과는 layout solver의 보조 oracle일 뿐, Metal scissor,

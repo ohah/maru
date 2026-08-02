@@ -54,6 +54,14 @@ run = "zig build macos-metal-smoke"
 description = "Run macOS Metal smoke contract tests"
 run = "zig build test-macos-metal-smoke"
 
+[tasks.macos-chrome-lab-smoke]
+description = "Capture deterministic Chrome Lab scenarios through the product Metal renderer"
+run = "zig build macos-chrome-lab-smoke"
+
+[tasks.test-macos-chrome-lab-smoke]
+description = "Run Chrome Lab readback artifact contract tests"
+run = "zig build test-macos-chrome-lab-smoke"
+
 [tasks.macos-app-pty-metal-smoke]
 description = "Run visible macOS live PTY Metal smoke"
 run = "zig build macos-app-pty-metal-smoke"

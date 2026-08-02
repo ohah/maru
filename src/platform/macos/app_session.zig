@@ -17021,15 +17021,24 @@ pub const AppSession = struct {
         };
     }
 
+    /// UI에 새로 노출해도 되는 config 키인가. `chrome.theme=tui`와 `chrome.preset=cell`은 이미 저장된
+    /// config를 읽는 호환 경로만 남기며, GUI·검색에서 다시 선택·변경할 수 있게 만들지 않는다.
+    /// 이 예외를 field 생성과 section 생성이 함께 써야 검색/직접 섹션 전환 중 되살아나는 우회가 없다.
+    /// 단일 출처: docs/chrome-strategy.md "Chrome 전용 전환 정책".
+    fn settingsExposesConfigKey(key: []const u8) bool {
+        return !std.mem.eql(u8, key, "chrome.theme") and
+            !std.mem.eql(u8, key, "chrome.preset");
+    }
+
     fn settingsSectionHasField(bools: []const config_mod.schema.BoolField, nums: []const config_mod.schema.NumberField, enums: []const config_mod.schema.EnumField, texts: []const config_mod.schema.TextField, colors: []const config_mod.schema.ColorField, sec: ?config_mod.Section) bool {
         // `.global_hotkey`는 schema 필드가 없는 특수 섹션이라 강제로 목록에 넣는다(전역 단축키 녹음 행만 — theme의
         // palette·input의 keybind 특수 행 패턴처럼 currentSectionFields가 행을 합성한다). 좌측 네비에 항상 보여야 한다.
         if (sec == .global_hotkey) return true;
-        for (bools) |b| if (b.section == sec) return true;
-        for (nums) |n| if (n.section == sec) return true;
-        for (enums) |e| if (e.section == sec) return true;
-        for (texts) |t| if (t.section == sec) return true;
-        for (colors) |c| if (c.section == sec) return true;
+        for (bools) |b| if (settingsExposesConfigKey(b.key) and b.section == sec) return true;
+        for (nums) |n| if (settingsExposesConfigKey(n.key) and n.section == sec) return true;
+        for (enums) |e| if (settingsExposesConfigKey(e.key) and e.section == sec) return true;
+        for (texts) |t| if (settingsExposesConfigKey(t.key) and t.section == sec) return true;
+        for (colors) |c| if (settingsExposesConfigKey(c.key) and c.section == sec) return true;
         return false;
     }
 
@@ -17082,11 +17091,11 @@ pub const AppSession = struct {
         const q = self.chrome_host.settings.searchQuery();
         const cross = q.len > 0;
         var bools: std.ArrayList(config_mod.schema.BoolField) = .empty;
-        for (bools_all.items) |b| if ((cross or b.section == sel_sec) and settingsRowMatches(b.doc, b.key, q)) try bools.append(arena, b);
+        for (bools_all.items) |b| if (settingsExposesConfigKey(b.key) and (cross or b.section == sel_sec) and settingsRowMatches(b.doc, b.key, q)) try bools.append(arena, b);
         var nums: std.ArrayList(config_mod.schema.NumberField) = .empty;
-        for (nums_all.items) |n| if ((cross or n.section == sel_sec) and settingsRowMatches(n.doc, n.key, q)) try nums.append(arena, n);
+        for (nums_all.items) |n| if (settingsExposesConfigKey(n.key) and (cross or n.section == sel_sec) and settingsRowMatches(n.doc, n.key, q)) try nums.append(arena, n);
         var enums: std.ArrayList(config_mod.schema.EnumField) = .empty;
-        for (enums_all.items) |e| if ((cross or e.section == sel_sec) and settingsRowMatches(e.doc, e.key, q)) try enums.append(arena, e);
+        for (enums_all.items) |e| if (settingsExposesConfigKey(e.key) and (cross or e.section == sel_sec) and settingsRowMatches(e.doc, e.key, q)) try enums.append(arena, e);
         // theme 섹션엔 named 테마 프리셋(특수 — schema 필드 아님)을 synthetic enum 행으로 주입한다(dropdown 재사용).
         // 현재값은 config 색에서 derive(매칭 프리셋 @tagName 또는 "사용자 지정"). 핸들러가 key="theme.preset"만 특수 처리.
         // follow-system이 켜지면 색을 preset-light/dark가 정하므로 단일 theme.preset 행은 무의미(골라도 곧 덮임) — 숨긴다(리뷰 C).
@@ -17097,7 +17106,7 @@ pub const AppSession = struct {
             try enums.insert(arena, 0, .{ .key = "theme.preset", .doc = "테마 프리셋", .current = cur_name, .section = .theme });
         }
         var texts: std.ArrayList(config_mod.schema.TextField) = .empty;
-        for (texts_all.items) |t| if ((cross or t.section == sel_sec) and settingsRowMatches(t.doc, t.key, q)) try texts.append(arena, t);
+        for (texts_all.items) |t| if (settingsExposesConfigKey(t.key) and (cross or t.section == sel_sec) and settingsRowMatches(t.doc, t.key, q)) try texts.append(arena, t);
         // terminal 섹션엔 특수 키(schema 필드 아님)를 synthetic text 행으로 주입한다(theme.preset enum 선례 — .text 위젯
         // 재사용, 핸들러가 key로 라우팅). shell.args(공백-토큰 리스트) + env.<KEY> 각 행(값 편집) + env 추가 행(KEY=VALUE).
         if (cross or sel_sec == .terminal) {
@@ -17134,7 +17143,7 @@ pub const AppSession = struct {
                 try texts.append(arena, .{ .key = "workspace.root", .doc = "시작 디렉터리 (절대경로 또는 ~, 빈 값=상속)", .value = self.loaded_config.config.workspace.root, .section = .workspace });
         }
         var colors: std.ArrayList(config_mod.schema.ColorField) = .empty;
-        for (colors_all.items) |c| if ((cross or c.section == sel_sec) and settingsRowMatches(c.doc, c.key, q)) try colors.append(arena, c);
+        for (colors_all.items) |c| if (settingsExposesConfigKey(c.key) and (cross or c.section == sel_sec) and settingsRowMatches(c.doc, c.key, q)) try colors.append(arena, c);
         // theme 섹션엔 ANSI 16색 팔레트 그리드 한 행, input 섹션엔 command_catalog 액션별 keybind 행(둘 다 특수 — schema
         // 필드 아님). 검색 쿼리로도 필터한다(palette=한 행, keybind=매칭 액션만). 핸들러가 selected 인덱스로 라우팅.
         // 교차 검색에선 palette(theme)·keybind(input)가 함께 나올 수 있어 keybindRowStart가 palette 오프셋을 더한다.
@@ -56478,6 +56487,45 @@ test "view options menu: ⚙ toggles sidebar show-branch/folder, stays open, sig
     session.mouse(1, out_x, out_y, 0, 0);
     try std.testing.expect(!session.view_options_menu);
     try std.testing.expect(!session.chrome_host.context_menu.open);
+}
+
+test "settings hides legacy TUI chrome selector while preserving loaded config" {
+    // 이 테스트가 증명하는 것: 기존 파일에서 읽은 tui 값은 이 전환 slice에서 자동 변경하지 않지만,
+    // 설정의 일반 섹션과 교차 검색 어느 경로에서도 chrome.theme 행이 다시 생기지 않는다. 따라서
+    // dropdown/keyboard의 선택·변경 handler에 닿는 선택 인덱스가 없다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.loaded_config.config.chrome_theme = .tui;
+    try std.testing.expect(!AppSession.settingsExposesConfigKey("chrome.theme"));
+    try std.testing.expect(!AppSession.settingsExposesConfigKey("chrome.preset"));
+    try std.testing.expect(AppSession.settingsExposesConfigKey("chrome.tab-style"));
+
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const sections = try session.buildSectionList(scratch.allocator());
+    for (sections, 0..) |entry, index| if (entry.section == .theme) {
+        session.chrome_host.settings.section = index;
+    };
+    const no_search = try session.currentSectionFields(scratch.allocator());
+    for (no_search.enums) |field|
+        try std.testing.expect(!std.mem.eql(u8, field.key, "chrome.theme"));
+
+    session.chrome_host.settings.startSearch();
+    for ("chrome") |cp| session.chrome_host.settings.appendSearchCp(cp);
+    const cross_search = try session.currentSectionFields(scratch.allocator());
+    for (cross_search.enums) |field|
+        try std.testing.expect(!std.mem.eql(u8, field.key, "chrome.theme"));
+    try std.testing.expectEqual(config_mod.theme.ChromeTheme.tui, session.loaded_config.config.chrome_theme);
 }
 
 // 세팅 화면 토글 → 선택 행 bool config flip(라이브) + config_dirty_keys persist 예약(CS-4-4c). 실제 파일 write는

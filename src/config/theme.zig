@@ -805,9 +805,10 @@ pub const QuickTerminalChrome = enum {
     minimal,
 };
 
-/// chrome(탭바·사이드바·divider·focus 테두리) 디자인 테마. tui=cell-grid 룩(현행), rich=분리 색 팔레트(C4a — tui가
-/// sidebar_active로 공유하던 role을 파생색으로 분리; 둥근 모서리·그라데이션은 C4b 후속). 컴포넌트는 토큰셋만 바꿔
-/// 소비(코드 불변 — 같은 ColorRole 읽음). platform buildChromeTokens가 tui()/rich()로 분기한다.
+/// chrome(탭바·사이드바·divider·focus 테두리) 디자인 테마. `tui`는 이미 저장된 config와 회귀 fixture를 위한
+/// 읽기 호환 값이고, 새 component/UI의 설정 진입점은 rich/Metal만 쓴다. rich는 분리 색 팔레트(C4a — tui가
+/// sidebar_active로 공유하던 role을 파생색으로 분리)를 쓴다. platform buildChromeTokens가 호환 config를 위해
+/// tui()/rich()로 분기한다. 제거·migration은 별도 정책이 확정된 뒤에만 한다.
 pub const ChromeTheme = enum {
     tui,
     rich,
@@ -830,7 +831,7 @@ pub const ChromePreset = enum {
     minimal, // rich + underline — 박스 없이 언더바만(가장 미니멀, 현 기본과 동일 조합)
     cutout, // rich + connected — 본문색 cutout 탭(아래 본문과 이어짐)
     capsule, // rich + pill — Warp식 lifted 둥근 캡슐 탭
-    cell, // tui — cell-grid 룩(탭은 셀 밴드, tab-style 무관)
+    cell, // tui legacy compatibility — settings UI에는 노출하지 않는다.
 };
 
 /// 프리셋이 *제어하는* 축만 담는다. `chrome_tab_style = null`이면 그 프리셋은 탭 스타일 축을 **건드리지 않는다**
@@ -935,8 +936,9 @@ pub const Config = struct {
     quick_terminal: QuickTerminalConfig = .{},
     /// 파일 도크에서 동시에 유지할 WKWebView 상한. 탭 metadata는 남기고 non-dirty LRU view만 해제한다.
     file_panel: FilePanelConfig = .{},
-    /// chrome(탭바·사이드바·divider·테두리) 디자인 테마(tui|rich). 기본 rich(둥근 모서리·분리 색 팔레트 룩 — 사용자
-    /// 요청으로 기본값을 tui에서 rich로 변경). cell-grid 룩을 원하면 `chrome.theme = tui`. loader가 `chrome.theme` 키로 파싱.
+    /// chrome(탭바·사이드바·divider·테두리) 디자인 테마. 기본 rich(둥근 모서리·분리 색 팔레트 룩)이며 세팅 UI는
+    /// 이 Chrome 전용 경로만 노출한다. `tui`는 기존 파일을 읽는 호환 값일 뿐 새 선택지로 제공하지 않는다.
+    /// loader가 `chrome.theme` 키를 파싱한다.
     chrome_theme: ChromeTheme = .rich,
     /// 활성 탭 룩(`chrome.tab-style` = connected|underline|pill). 기본 **underline**(미니멀 — 언더바만, 사용자 요청). connected는
     /// 본문색 cutout + 앰버 언더바, pill은 Warp식 lifted 캡슐. `chrome.theme`·`theme.preset`과 직교. schema-driven(Config.schema).

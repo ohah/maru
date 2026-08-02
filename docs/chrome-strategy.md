@@ -2,6 +2,16 @@
 
 chrome(탭바·사이드바·divider·focus 테두리·탭점·팝업·모달)을 **이식 가능한 디자인 시스템**으로 재구성하는 1차 구조 설계다. 터미널 콘텐츠(셀·글리프)는 이 문서의 범위가 아니다 — 코어 렌더러 경로를 그대로 둔다. chrome만 이 디자인 시스템을 따른다.
 
+### Chrome 전용 전환 정책
+
+새 디자인 시스템과 새 제품 chrome surface는 **rich/Metal Chrome만** 대상으로 한다. 기존
+cell-grid TUI chrome은 제거 전까지 이미 저장된 config를 읽고 회귀 fixture를 유지하기 위한
+호환 경로일 뿐, 새 component·layout·interaction에 TUI fallback을 추가하지 않는다. 설정 UI는
+`chrome.theme = tui`와 `chrome.preset = cell`을 새로 선택·변경하는 진입점을 제공하지 않으며, 기존 config에
+그 값이 있더라도 이 전환 단계에서는 자동 변경·삭제하지 않는다. TUI enum/parser·lowering과
+그 fixture의 실제 제거는 호환 기간·설정 migration·기존 config 처리 정책을 별도 문서로 확정한
+뒤 수행한다.
+
 새 Metal UI의 component tree·typed flex layout·paint/Metal 경계는 [Metal UI 레이아웃·컴포넌트 시스템](metal-ui-layout.md)이 단일 출처다. 이 문서는 그 시스템이 소비하는 chrome token·semantic draw·host 구조를 소유한다.
 
 이 문서는 chrome 레이어(L3)의 **목표 구조와 점진 경로**를 정의한다. chrome이 속한 4층 위상(renderer 계약·session core·chrome·platform 어댑터), 두 번의 추출(chrome + session core), 전체 시퀀싱, 이식성 현실은 상위 단일 출처 [레이어링과 이식성 전략](layering-and-portability.md)을 따른다. 단일 출처: 구현이 진행되면 이 문서를 코드와 맞춘다([project-rules](project-rules.md#문서와-설명)).
@@ -13,7 +23,8 @@ chrome(탭바·사이드바·divider·focus 테두리·탭점·팝업·모달)�
 ## 1. 목표
 
 - chrome 컴포넌트는 **플랫폼·세션·렌더 백엔드를 모른다.** 순수 로직(상태) + 순수 렌더(상태+토큰 → semantic draw) + 순수 hit-test로, macOS·PTY 없이 헤드리스 단위 테스트한다.
-- **TUI(현재 cell-grid 룩)는 theme로 보존**하고 rich를 추가한다(교체 아님). 같은 컴포넌트 코드가 두 룩을 다 만든다.
+- 새 Chrome 디자인 시스템은 **rich/Metal 경로만** 확장한다. TUI cell-grid 룩은 기존 config와 회귀 fixture를 위한
+  호환 경로로만 유지하며, 설정 UI의 선택지나 새 component의 fallback이 아니다.
 - 거대해진 `app_session.zig`(이 문서 작성 시점 7,600줄 — 2026-07 현재 35,000줄+)의 chrome를 `src/chrome/`로 옮겨 세션은 "세션 코어(수명·입력·워크스페이스·ABI)"로 줄인다.
 
 ## 2. 베이스·결정 (왜 이 구조인가)
@@ -27,7 +38,7 @@ chrome(탭바·사이드바·divider·focus 테두리·탭점·팝업·모달)�
 | `src/chrome/` facade + check-boundaries | "터미널 코어 API는 Maru 내부 facade 뒤에" | project-rules §기본 규칙 |
 | Zig가 chrome 로직·draw 소유, platform은 백엔드/입력 어댑터 | ABI capabilities: `zig_owns_frame_loop` vs `swift_owns_focus_and_input` | app_host_abi |
 | 네이티브 UI 프레임워크 없이 Zig draw + GPU | 런타임 의존성 0·native 최소(SwiftUI=Apple 전용) | project-rules §의존성 |
-| theme = 토큰(데이터), 코드 분기 없음(tui\|rich) | 기존 TUI를 theme로 보존 + 같은 chrome 모델을 두 스킨이 소비 | 사용자 결정 |
+| theme = 토큰(데이터), 새 UI는 rich/Metal만 | 기존 TUI는 설정 UI에서 숨긴 읽기 호환·회귀 fixture로만 유지하고 새 component는 rich/Metal만 소비 | 사용자 결정 |
 | props seam + 단일 ChromeState로 구조 분해 | "버그는 루트커즈. 구조가 원인이면 구조를 바꾼다" | project-rules §버그 수정 |
 | 컴포넌트·룩을 cmux/Ghostty 코드 표현 안 옮김 | clean-room(renderer·platform interop에도 적용) | project-rules §기본 규칙 |
 

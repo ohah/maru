@@ -284,7 +284,10 @@ shaping은 이후 별도 ML slice이며, 이 bridge의 문자열/geometry contra
 paint한** action table만 선택하며, 새 snapshot publish는 기존 capture를 취소한다. card action은 같은 도크 안의
 expanded disclosure를 toggle할 수 있지만 provider 실행은 절대 하지 않는다. refresh/scope/group/selection은 기존
 memory-only state만 바꾸며, 검색 keypress/hover/frame은 filesystem I/O, JSONL parse, worker wait를 하지 않는다.
-이 AS3 slice는 `ExpandedSessionCard` detail 및 resume/reveal action을 포함하지 않는다(AS4-d).
+AS3 base slice는 `ExpandedSessionCard` detail 및 resume/reveal action을 포함하지 않는다.
+AS4-d가 이 base tree에 disclosure rect와 generation-bound action을 추가한다. 즉 action은 별도
+archive-tab tree나 host 좌표 계산으로 재구성하지 않고, expanded card를 포함한 같은 published tree에서만
+pointer/shortcut capability를 얻는다.
 
 Lab product capture는 최소한 `empty`, initial `loading`, retained list를 포함한다. Lab은 실제 `SessionDock`
 component를 거쳐 card/scope/header/search와 semantic text op를 만들고, 그 op를
@@ -440,7 +443,7 @@ titlebar launcher와 dock slot만 관측하도록 한다.
   capture를 폐기하는지는 stale scenario에서 별도로 검증한다.
 - reveal 성공 scenario도 host의 외부 앱 열기를 호출하지 않는다. Swift가 smoke 모드에서 same
   `take_file_tree_external_open` consumer를 drain해 allowlisted fixture token과 횟수만 summary에 기록한다.
-- artifact는 ready session **목록**, loading/ready/stale inline expansion의 **1920×1200 pt fixture 창** 제품 Metal PPM·PNG와 redacted key/value summary다. 한 프레임 뒤 종료하는
+- artifact는 ready session **목록**, loading/ready/stale inline expansion의 **1920×960 backing-pixel fixture 창** 제품 Metal PPM·PNG와 redacted key/value summary다. 한 프레임 뒤 종료하는
   일반 `MARU_SCREENSHOT` 훅은 쓰지 않고, smoke process 안에서만 여러 completed Metal frame을 readback하는 capture
   sink를 쓴다. sink는 이미 paint·publish된 probe가 증명한 상태에서만 **다음 동일 frame**의 renderer output 복사를 요청한다.
   `resume-pointer` scenario는 card click 전의 ready 목록(서로 다른 synthetic record 세 개)·loading·ready, `detail-stale` scenario는 loading·stale를 각각 한 장씩 남긴다.

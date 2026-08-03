@@ -12,6 +12,9 @@ pub const Intent = union(enum) {
     focus_search,
     toggle_group: u64,
     select_card: u64,
+    resume_session,
+    reveal_log,
+    focus_live,
 };
 
 pub const Entry = struct {

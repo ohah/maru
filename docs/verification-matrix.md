@@ -873,8 +873,15 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   handoff, registry drain/quarantine→Client.deinit→node destroy 순서를 검증한다. batch release completed/retryable은 stream open,
   stream drop completed는 terminal, indeterminate/second retryable만 terminal_handoff인 entry/stream 직교 표를 전수한다.
   2c는 2c1(구현) initial snapshot final-address owner, 2c2 sealed ended receipt+all-or-none early purge, 2c3 closed
-  capability/input/control/event/RPC primitive, 2c4 `RuntimeConnection` union+exact 15-method source oracle 순으로 병합한다. 중간
+  capability/input/control/event/RPC primitive, 2c4 `RuntimeConnection` union+exact 15-method source oracle 순으로 병합한다.
+  2c3은 2c3a input/revoke/output-progress+raw lifecycle admission, 2c3b capability+closed RPC, 2c3c control,
+  2c3d one-shot event, 2c3e generation source-zero+actual socket parity로 나누며 모두 green 전 2c3 완료를 주장하지 않는다. 중간
   gate는 자기 raw allowlist만 줄이며 2c4 전에는 `RemoteRuntime.client` 0이나 2c 전체 완료를 주장하지 않는다.
+  2c3a는 generation 제품 input/revoke/output-progress의 direct Client 호출을 0으로 만들고 legacy baseline은 유지한다.
+  exact public signature와 closed error/outcome은 persistent-session-host SSOT를 따르며, accepted byte ownership, 0-byte
+  backpressure, revoke-before-input, zero/partial pending frame, controller/observer, copied/moved/fork/foreign-thread,
+  stale slot/node/binding, cleanup busy, OOM/socket failure를 production type과 Darwin socketpair로 검증한다. facade public
+  lifecycle은 raw `u8` 0...255 sweep를 Debug/ReleaseFast에서 통과해야 하고 invalid tag는 Client/node/wire mutation 0이다.
   `GenerationTransport`는 SSOT의 exact 15-declaration primitive set(`readAttachmentBatch` 제외,
   `purgeEndedStream` 포함), closed `RuntimeRequest` variants와 exact-field
   `GenerationCapabilities`만 노출하고 arbitrary method-string `call`, generic callback, Client-containing aggregate,

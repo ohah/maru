@@ -1033,10 +1033,21 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    registry-resolved canonical node operation pin 아래 exact `GenerationCapabilities` value projection을 구현했다. untrusted slot 주소는
    registry 비교 전 역참조하지 않고 owner-seal/capability enum의 invalid raw byte를 fail-close하며, facade production callsite 0과
    shared `RemoteRuntime` architecture raw-read exact baseline을 boundary gate로 고정했다.
-   **2c3b-2~3 closed RPC 미착수**:
-   `RuntimeRequest`→method의 exhaustive closed mapping을 먼저 고정한 뒤, attach는 기존 registry의 one-shot
-   `ExecutedResponse`를 유지하고 반복 RPC는 transport-owned·node-sealed checked-monotonic epoch authority와 stack-final-address
-   `RpcExecutedResponse` borrow/owner-only finish로 분리한다. 독립 movable payload, terminal seal reset과 fixed response pool은 두지 않는다. red gate는
+   **2c3b-2~3 closed RPC 미착수**이며 다음 두 merge gate를 섞지 않는다. **2c3b-2는 request-side canonical authority만**
+   구현한다. `RuntimeRequestTag -> RequestFamily -> role/phase -> method` 전수표와 닫힌 prepare/abort error를 먼저 고정하고,
+   같은 binding entry의 node-sealed `PreparedRequestAuthority`가 opaque `PreparedBlockingRpcStorage`의 frame descriptor·allocator
+   provenance·incarnation·tag/id/digest를 한 transaction으로 pair-seal한다. `GenerationTransport`의 direct prepared-Client API 호출은
+   0이 되며 모든 prepare/abort는 registry scalar lookup 뒤 canonical node operation pin 아래 실행한다. 이 gate는 public RPC
+   destination, response payload publish, 새 wire/product behavior를 열지 않고 기존 attach 실행 parity를 유지한다. `spawn_full`은
+   connection/bootstrap 전용 tag로 union에는 유지하지만 attachment-bound facade의 classifier가 prepare 전에 항상
+   `Unauthorized`/wire 0으로 거부한다. union 제거 여부는 2c4 surface cleanup에서 판단하며 그 전까지 허용 의미는 바뀌지 않는다.
+
+   **2c3b-3은 response-side execution/ownership**을 구현한다. public `ResponseDestination = attach|rpc` 전환, 별도 node-sealed
+   checked-monotonic RPC epoch authority, Client의 zero-write/ambiguous-write closed progress evidence, stack-final-address
+   `RpcExecutedResponse` publish·private lexical borrow·owner-only finish와 strict fail-stop을 한 gate로 닫는다. production
+   `RemoteRuntime` decoder 전환과 legacy/generation observable parity는 2c3e가 소유하며, 2c3b-3은 private borrow bridge와 production
+   callsite 0 baseline까지만 고정한다. attach는 기존 registry의 one-shot `ExecutedResponse`를 유지하고 반복 RPC는 독립 authority로
+   분리한다. 독립 movable payload, terminal seal reset과 fixed response pool은 두지 않는다. red gate는
    2회·64회 순차 RPC, attach/RPC destination tag mismatch wire 0, copy/move/same-address ABA, cross transport/binding/request/
    digest/epoch splice, pre-wire typed reject 뒤 재사용, uncertain·accepted 미소비 뒤 terminal, allocator drift·alias·free callback 재진입,
    node-sealed authority/whole-transport restore, exact safe-free와 ambiguous no-free product fail-stop, epoch 소진,

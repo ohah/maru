@@ -21,6 +21,11 @@
   authority 자체는 checked-monotonic epoch로 다음 호출에 재사용한다.
 - attach 응답의 registry one-shot owner와 반복 RPC의 transport-local monotonic epoch owner를 분리하고, 닫힌 response destination으로
   둘을 혼용하지 못하게 한다.
+- 2c3b-2는 node-sealed prepared transcript와 opaque request backing의 all-or-none prepare/abort까지만 제공하며 wire·제품 동작을
+  바꾸지 않는다. 2c3b-3이 별도 response epoch와 stack-final response borrow/finish를 함께 연다. connection/bootstrap 전용
+  `spawn_full`은 attachment facade에서 항상 wire 전에 거부한다.
+- request payload는 variant별 typed DTO이며 bound stream identity와 권한을 바꾸는 discriminator는 canonical encoder가 한 번만
+  소유한다. caller가 raw method, arbitrary encoded JSON 또는 다른 stream ID를 주입하는 경로는 facade 밖 legacy arm에만 남는다.
 
 몰라야 하는 것:
 

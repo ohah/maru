@@ -889,7 +889,15 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   mutation 없이 거부한다. 이 증거는 2c3a만 닫으며 capability/RPC/control/event/source-zero는 2c3b~e, raw field 제거는 2c4다.
   connection-wide buffered revoke는 generation 조회와 `Client` blocking/deadline RPC의 pre-flush gate를 함께 통과해야 하며,
   sibling RPC·detach가 pending mutation wire를 보내지 않는 socketpair 회귀를 포함한다.
-  2c3b는 부분 구현(2c3b-1 capability facade 완료, closed RPC 미착수)이다. 구현 gate는
+  2c3b는 부분 구현(2c3b-1 capability facade 완료, closed RPC 미착수)이다. 2c3b-2는 request-side authority만 닫는
+  wire/product-behavior-zero gate다. 14-tag family/role/phase/method 전수표, node-entry `PreparedRequestAuthority` raw lifecycle과
+  settledExact, opaque prepared storage와의 all-or-none prepare/abort, canonical frame descriptor·allocator provenance, registry-first
+  admission을 Debug/ReleaseFast에서 검증한다. allocation fail-index, copy/move/same-address restore, cross binding/tag splice, forged
+  ptr/len/cap/allocator와 owner range alias는 frame hash/역참조/free/wire 0이어야 한다. `spawn_full`은 connection-only denied로
+  prepare 전 거부한다. public RuntimeRequest의 arbitrary method/encoded JSON/stream ID escape는 0이고 typed variant DTO에서 canonical
+  binding stream과 role-sensitive discriminator를 한 번만 encode한다. exact `PrepareError|AbortError`와 Client error mapping을 compile-time
+  inventory로 고정하고, GenerationTransport direct prepared Client API callsite는 0이며 기존 attach socket parity는 유지한다.
+  2c3b-3만 public RPC destination과 response payload behavior를 연다. 구현 gate는
   `capabilities(*const GenerationTransport) -> error{Busy,InvalidOwner}!GenerationCapabilities`의 raw-first admission,
   capability DTO exact-field projection과 closed request tag 전수 mapping, attach 전용 one-shot
   `ExecutedResponse`와 반복 RPC 전용 transport epoch authority의 분리를 검증한다. 반복 RPC는 2회·64회 순차 성공과 pre-wire reject 뒤
@@ -909,7 +917,9 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   whole-transport+stack response same-address restore도 node-sealed epoch/lifecycle을 되살리지 못해야 한다. pending mutation frame partial
   flush 실패는 새 RPC byte 0이어도 terminal이고, mutation-zero pre-wire reject만 idle 재사용한다. raw response borrow의 production 저장/
   반환·transitive helper callsite 0, exact decoder caller/signature inventory와 reusable/protocol-failure finish의 idle/terminal 분기를
-  tokenizer source oracle·compile-time inventory·socketpair로 고정한다. 반복 RPC는 accepted/uncertain만 만들고 typed reject는 attach
+  tokenizer source oracle·compile-time inventory·socketpair로 고정한다. 이 gate의 product source oracle은 private borrow bridge와
+  실제 RemoteRuntime callsite 0 baseline까지만 소유하고, family decoder 전환·application error/malformed disposition·legacy/generation
+  parity는 2c3e에서 닫는다. 반복 RPC는 accepted/uncertain만 만들고 typed reject는 attach
   호환 arm에 한정한다. request family/phase/role/destination별 exact `ExecuteError|ExecuteResult` 표를 전수한다.
   `GenerationTransport`는 SSOT의 exact 15-declaration primitive set(`readAttachmentBatch` 제외,
   `purgeEndedStream` 포함), closed `RuntimeRequest` variants와 exact-field

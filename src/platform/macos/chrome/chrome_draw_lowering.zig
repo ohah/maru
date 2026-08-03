@@ -194,6 +194,34 @@ pub fn buildTextDrawList(
     cols: u16,
     rows: u16,
 ) !renderer.DrawList {
+    return buildTextDrawListFiltered(allocator, ops, tk, cell_width_px, cell_height_px, cols, rows, null);
+}
+
+/// Measured system text owns ordinary labels; this companion list retains only registered
+/// Chrome SVG glyphs for the existing synthesized icon path.  Keeping the filter here makes
+/// the two paint paths share the same semantic op and avoids duplicate monospaced text.
+pub fn buildIconTextDrawList(
+    allocator: std.mem.Allocator,
+    ops: []const chrome.draw.Op,
+    tk: *const chrome.Tokens,
+    cell_width_px: u32,
+    cell_height_px: u32,
+    cols: u16,
+    rows: u16,
+) !renderer.DrawList {
+    return buildTextDrawListFiltered(allocator, ops, tk, cell_width_px, cell_height_px, cols, rows, true);
+}
+
+fn buildTextDrawListFiltered(
+    allocator: std.mem.Allocator,
+    ops: []const chrome.draw.Op,
+    tk: *const chrome.Tokens,
+    cell_width_px: u32,
+    cell_height_px: u32,
+    cols: u16,
+    rows: u16,
+    only_wide_icons: ?bool,
+) !renderer.DrawList {
     var cells: std.ArrayList(renderer.DrawCell) = .empty;
     errdefer cells.deinit(allocator);
     var pool: std.ArrayList(u32) = .empty;
@@ -202,6 +230,7 @@ pub fn buildTextDrawList(
     if (cell_width_px == 0 or cell_height_px == 0 or cols == 0 or rows == 0) return error.NoSpace;
     for (ops) |op| switch (op) {
         .text => |text| {
+            if (only_wide_icons) |expected| if (text.wide_icons != expected) continue;
             if (text.origin.x < 0 or text.origin.y < 0) continue;
             const col: u16 = @intCast(@min(@as(u32, @intCast(text.origin.x)) / cell_width_px, cols));
             const row: u16 = @intCast(@min(@as(u32, @intCast(text.origin.y)) / cell_height_px, rows));

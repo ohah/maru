@@ -17,10 +17,38 @@ pub const NodeIds = struct {
     pub const scope_all: u64 = 0x5344_0005;
     pub const search: u64 = 0x5344_0006;
     pub const content: u64 = 0x5344_0007;
+    // Every projected list item gets an eight-id lane.  A closed card uses `item`; an expanded
+    // card turns that same id into a container and puts its visible title/action rect in
+    // `card_header`.  This keeps a stable archive item's node ids independent of virtualization.
     pub const item_base: u64 = 0x5344_1000;
+    const item_stride: u64 = 8;
 
     pub fn item(index: usize) u64 {
-        return item_base + index;
+        return item_base + @as(u64, @intCast(index)) * item_stride;
+    }
+
+    pub fn cardHeader(index: usize) u64 {
+        return item(index) + 1;
+    }
+
+    pub fn expandedDetail(index: usize) u64 {
+        return item(index) + 2;
+    }
+
+    pub fn expandedActions(index: usize) u64 {
+        return item(index) + 3;
+    }
+
+    pub fn resumeAction(index: usize) u64 {
+        return item(index) + 4;
+    }
+
+    pub fn reveal(index: usize) u64 {
+        return item(index) + 5;
+    }
+
+    pub fn focusLive(index: usize) u64 {
+        return item(index) + 6;
     }
 };
 
@@ -39,13 +67,22 @@ pub const Frame = struct {
     actions: []const ids.Entry,
 };
 
-pub const BuildError = tree.BuildError || error{ InsufficientNodeBuffer, InsufficientActionBuffer };
+pub const BuildError = tree.BuildError || error{ InsufficientNodeBuffer, InsufficientActionBuffer, TooManyTurns };
 
 /// Builds a column whose text is emitted later from the resulting rect tree. Every interactive
 /// rectangle belongs to this one candidate tree: no platform y-row arithmetic is allowed to make
 /// a second hit region for scopes/groups/cards.
 pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
-    const needed_nodes = props.items.len + 7; // item leaves + 3 scopes + header/scope-row/search/content
+    var expanded_extra_nodes: usize = 0;
+    for (props.items) |item| switch (item) {
+        .group => {},
+        .card => |card| if (card.expanded != null) {
+            if (card.expanded.?.turns.len > 3) return error.TooManyTurns;
+            // header + detail + action-row + resume/reveal, plus optional focus-live
+            expanded_extra_nodes += 5 + @as(usize, @intFromBool(card.expanded.?.focus_live_enabled));
+        },
+    };
+    const needed_nodes = props.items.len + expanded_extra_nodes + 7; // item roots + nested expansion + 3 scopes + header/scope-row/search/content
     if (buffers.nodes.len < needed_nodes) return error.InsufficientNodeBuffer;
 
     const m = types.Metrics.fromCellHeight(props.cell_height_px);
@@ -59,37 +96,67 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
     // Children are stored first, then parent slices borrow these stable ranges. `UiNode` is a
     // value tree, so this avoids heap allocation and makes the buffer cap part of the contract.
     const item_nodes = buffers.nodes[0..props.items.len];
+    var nested_cursor: usize = props.items.len;
     for (props.items, item_nodes, 0..) |item, *node, index| {
-        const action = switch (item) {
-            .group => |group| table.append(props.snapshot_generation, .{ .toggle_group = group.identity }) catch return error.InsufficientActionBuffer,
-            .card => |card| table.append(props.snapshot_generation, .{ .select_card = card.identity }) catch return error.InsufficientActionBuffer,
-        };
-        const height = switch (item) {
-            .group => m.group_h,
-            .card => m.card_h,
-        };
-        const visual: tree.CardVisual = switch (item) {
-            // A session list is a continuous divided list, not a stack of rounded cards. Hover
-            // and selected state still resolve through the semantic card variant above this base.
-            .group => .{ .variant = .surface, .paint = dividedRowPaint() },
-            .card => |card| .{ .variant = if (card.selected) .selected else .surface, .paint = dividedRowPaint() },
-        };
-        node.* = tree.card(.{
-            .id = NodeIds.item(index),
-            .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(height) }, .margin = .{ .bottom = @floatFromInt(m.item_gap) } },
-            .variant = visual.variant,
-            .paint = visual.paint,
-            .action = action,
-            .overflow = .clip,
-        }, &.{});
+        switch (item) {
+            .group => |group| {
+                const action = table.append(props.snapshot_generation, .{ .toggle_group = group.identity }) catch return error.InsufficientActionBuffer;
+                node.* = tree.card(.{
+                    .id = NodeIds.item(index),
+                    .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(m.group_h) }, .margin = .{ .bottom = @floatFromInt(m.item_gap) } },
+                    .variant = .surface,
+                    .paint = dividedRowPaint(),
+                    .action = action,
+                    .overflow = .clip,
+                }, &.{});
+            },
+            .card => |card| {
+                const select = table.append(props.snapshot_generation, .{ .select_card = card.identity }) catch return error.InsufficientActionBuffer;
+                if (card.expanded) |expanded| {
+                    const action_count: usize = 2 + @as(usize, @intFromBool(expanded.focus_live_enabled));
+                    const nested = buffers.nodes[nested_cursor .. nested_cursor + 3 + action_count];
+                    nested_cursor += nested.len;
+                    nested[0] = sessionCardNode(NodeIds.cardHeader(index), select, card.selected, m.card_h);
+                    nested[1] = tree.card(.{
+                        .id = NodeIds.expandedDetail(index),
+                        .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(m.expanded_detail_h) } },
+                        .variant = .raised,
+                        .paint = .{},
+                        .overflow = .clip,
+                    }, &.{});
+                    const action_nodes = nested[3..][0..action_count];
+                    const resume_action = table.append(props.snapshot_generation, .resume_session) catch return error.InsufficientActionBuffer;
+                    const reveal = table.append(props.snapshot_generation, .reveal_log) catch return error.InsufficientActionBuffer;
+                    action_nodes[0] = expansionActionNode(NodeIds.resumeAction(index), resume_action, expanded.state == .ready and expanded.resume_enabled, action_count);
+                    action_nodes[1] = expansionActionNode(NodeIds.reveal(index), reveal, expanded.state == .ready and expanded.reveal_enabled, action_count);
+                    if (expanded.focus_live_enabled) {
+                        const focus = table.append(props.snapshot_generation, .focus_live) catch return error.InsufficientActionBuffer;
+                        action_nodes[2] = expansionActionNode(NodeIds.focusLive(index), focus, expanded.state == .ready, action_count);
+                    }
+                    nested[2] = tree.container(.{
+                        .id = NodeIds.expandedActions(index),
+                        .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(m.expanded_actions_h) }, .gap = @floatFromInt(m.item_gap) },
+                        .direction = .row,
+                        .overflow = .clip,
+                    }, action_nodes);
+                    node.* = tree.container(.{
+                        .id = NodeIds.item(index),
+                        .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(m.card_h + m.expanded_detail_h + m.expanded_actions_h) }, .margin = .{ .bottom = @floatFromInt(m.item_gap) } },
+                        .overflow = .clip,
+                    }, nested[0..3]);
+                } else {
+                    node.* = sessionCardNode(NodeIds.item(index), select, card.selected, m.card_h);
+                }
+            },
+        }
     }
 
-    const scope_nodes = buffers.nodes[props.items.len..][0..3];
+    const scope_nodes = buffers.nodes[nested_cursor..][0..3];
     scope_nodes[0] = scopeNode(NodeIds.scope_workspace, workspace, props.workspace_scope_enabled, props.scope == .workspace);
     scope_nodes[1] = scopeNode(NodeIds.scope_project, project, props.project_scope_enabled, props.scope == .project);
     scope_nodes[2] = scopeNode(NodeIds.scope_all, all, true, props.scope == .all);
 
-    const top = buffers.nodes[props.items.len + 3 ..][0..4];
+    const top = buffers.nodes[nested_cursor + 3 ..][0..4];
     top[0] = tree.card(.{
         .id = NodeIds.header,
         .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(m.header_h) }, .margin = .{ .bottom = @floatFromInt(m.control_gap) } },
@@ -105,7 +172,9 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
         .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(m.scope_h) }, .margin = .{ .bottom = @floatFromInt(m.control_gap) }, .gap = @floatFromInt(m.item_gap) },
         .direction = .row,
         .variant = .surface,
-        .paint = .{},
+        // The segmented control is one outlined surface. Child scope cards paint only their
+        // selected state, so the inactive thirds do not turn into three unrelated buttons.
+        .paint = .{ .border = .divider },
         .overflow = .clip,
     }, scope_nodes);
     top[2] = tree.card(.{
@@ -130,7 +199,10 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
     const built = try tree.build(root, .{
         .root_size = props.viewport_px,
         .max_entries = needed_nodes + 1,
-        .max_depth = 3,
+        // ExpandedSessionCard adds `root → content → expanded item → action row → action`.
+        // Keep this explicit so a later accidental wrapper cannot silently grow the published
+        // interaction tree without a bounded-cap review.
+        .max_depth = 5,
     }, .{
         .entries = buffers.entries,
         .items = buffers.layout_items,
@@ -174,6 +246,28 @@ fn scopeNode(id: u64, action: tree.UiAction, enabled: bool, selected: bool) tree
         // use a percentage rather than `fill` so this leaf remains valid in both contexts.
         .style = .{ .width = .{ .percent = 1.0 / 3.0 }, .height = .{ .percent = 1 } },
         .variant = if (selected) .selected else .surface,
+        .paint = .{},
+        .action = .{ .id = action.id, .enabled = enabled },
+        .overflow = .clip,
+    }, &.{});
+}
+
+fn sessionCardNode(id: u64, action: tree.UiAction, selected: bool, height: u32) tree.UiNode {
+    return tree.card(.{
+        .id = id,
+        .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(height) } },
+        .variant = if (selected) .selected else .surface,
+        .paint = dividedRowPaint(),
+        .action = action,
+        .overflow = .clip,
+    }, &.{});
+}
+
+fn expansionActionNode(id: u64, action: tree.UiAction, enabled: bool, action_count: usize) tree.UiNode {
+    return tree.card(.{
+        .id = id,
+        .style = .{ .width = .{ .percent = 1.0 / @as(f32, @floatFromInt(action_count)) }, .height = .{ .percent = 1 } },
+        .variant = if (enabled) .selected else .surface,
         .paint = .{},
         .action = .{ .id = action.id, .enabled = enabled },
         .overflow = .clip,
@@ -269,4 +363,52 @@ test "SessionDock partial item keeps one content clip for paint and hit testing"
     const clip = first.effective_clip.?;
     try @import("std").testing.expectEqual(content.rect.y, clip.y);
     try @import("std").testing.expect(clip.height <= content.rect.height);
+}
+
+test "SessionDock expanded card keeps detail actions in the same published tree" {
+    const props = types.Props{
+        .viewport_px = .{ .width = 480, .height = 720 },
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .snapshot_generation = 21,
+        .displayed_count = 1,
+        .expanded_identity = 12,
+        .items = &.{.{ .card = .{
+            .identity = 12,
+            .provider = .claude,
+            .title = "title",
+            .summary = "summary",
+            .metadata = "metadata",
+            .selected = true,
+            .expanded = .{ .state = .ready, .resume_enabled = true, .reveal_enabled = true },
+        } }},
+    };
+    var nodes: [13]tree.UiNode = undefined;
+    var entries: [14]tree.RectEntry = undefined;
+    var layout_items: [14]layout.Item = undefined;
+    var flex_scratch: [14]layout.FlexScratch = undefined;
+    var child_rects: [14]layout.UiRect = undefined;
+    var actions: [8]ids.Entry = undefined;
+    const frame = try build(props, .{
+        .nodes = &nodes,
+        .entries = &entries,
+        .layout_items = &layout_items,
+        .flex_scratch = &flex_scratch,
+        .child_rects = &child_rects,
+        .actions = &actions,
+    });
+    const outer = frame.tree.entries[frame.tree.find(NodeIds.item(0)).?];
+    const header = frame.tree.entries[frame.tree.find(NodeIds.cardHeader(0)).?];
+    const detail = frame.tree.entries[frame.tree.find(NodeIds.expandedDetail(0)).?];
+    const resume_entry = frame.tree.entries[frame.tree.find(NodeIds.resumeAction(0)).?];
+    const reveal = frame.tree.entries[frame.tree.find(NodeIds.reveal(0)).?];
+    try @import("std").testing.expectEqual(outer.rect.x, header.rect.x);
+    try @import("std").testing.expect(header.rect.y < detail.rect.y);
+    try @import("std").testing.expect(detail.rect.y < resume_entry.rect.y);
+    try @import("std").testing.expect(resume_entry.action.?.enabled);
+    try @import("std").testing.expect(reveal.action.?.enabled);
+    var table = ids.Table.init(@constCast(frame.actions));
+    table.count = frame.actions.len;
+    try @import("std").testing.expectEqual(@as(?ids.Intent, .resume_session), table.resolve(resume_entry.action.?.id, 21));
+    try @import("std").testing.expectEqual(@as(?ids.Intent, .reveal_log), table.resolve(reveal.action.?.id, 21));
 }

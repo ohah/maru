@@ -19,6 +19,27 @@ pub const Provider = enum {
     }
 };
 
+/// Detail data is already redacted by the host worker.  The dock compares neither its text nor
+/// its provider identity; it only projects the immutable value for one selected card.
+pub const DetailState = enum { loading, ready, stale, unavailable };
+pub const TurnRole = enum { user, assistant };
+
+pub const Turn = struct {
+    role: TurnRole,
+    text: []const u8,
+};
+
+/// Only the card whose stable archive identity equals `Props.expanded_identity` may carry this
+/// value.  `Card.selected` remains keyboard/hover selection, not a proxy for expansion.
+pub const Expanded = struct {
+    state: DetailState,
+    turns: []const Turn = &.{},
+    action_record_count: u32 = 0,
+    resume_enabled: bool = false,
+    reveal_enabled: bool = false,
+    focus_live_enabled: bool = false,
+};
+
 /// `identity`는 platform이 snapshot generation과 함께 검증하는 opaque 값이다. component는 이 값을
 /// 비교/표시/명령 인자로 해석하지 않고 action table에 그대로 되돌린다.
 pub const Card = struct {
@@ -28,6 +49,7 @@ pub const Card = struct {
     summary: []const u8,
     metadata: []const u8,
     selected: bool = false,
+    expanded: ?Expanded = null,
 };
 
 pub const Group = struct {
@@ -58,6 +80,9 @@ pub const Props = struct {
     loading: bool = false,
     refreshing: bool = false,
     spinner_phase: u3 = 0,
+    /// The host owns this stable identity and clears it atomically with detail/action capture
+    /// when a snapshot replacement changes `(provider, session_id, device, inode)`.
+    expanded_identity: ?u64 = null,
     /// The first virtualized item origin relative to the content clip. It is normally zero or
     /// negative, but can be positive when an offset lands in an inter-item gap.
     content_first_item_origin_y_px: i32 = 0,
@@ -70,6 +95,8 @@ pub const Metrics = struct {
     search_h: u32,
     group_h: u32,
     card_h: u32,
+    expanded_detail_h: u32,
+    expanded_actions_h: u32,
     /// Header/scope/search 사이의 세로 gap. 이 값은 cell-aligned control text의 clip 안전성도 보장한다.
     control_gap: u32,
     /// Group/card 사이의 목록 gap. 목록은 row bottom divider로 구분하므로 기본값은 0이다.
@@ -93,6 +120,11 @@ pub const Metrics = struct {
             .search_h = ch * 3,
             .group_h = ch * 3,
             .card_h = ch * 5,
+            // Reserve the same bounded space for loading/ready/stale/unavailable so the action
+            // row never jumps while a background detail result arrives.  The text view may use
+            // at most three two-line turns inside this rect.
+            .expanded_detail_h = ch * 9,
+            .expanded_actions_h = ch * 2,
             .control_gap = @max(ch / 2, 4),
             .item_gap = 0,
             .pad = @max(ch, 8),

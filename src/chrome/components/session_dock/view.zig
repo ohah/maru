@@ -21,6 +21,9 @@ const refresh_icon = "\u{F0021}";
 const search_icon = "\u{F0022}";
 const chevron_down_icon = "\u{F0023}";
 const chevron_right_icon = "\u{F0024}";
+const resume_icon = "\u{F000C}";
+const reveal_icon = "\u{F0011}";
+const host_label = "Local Mac";
 
 pub const Buffers = struct {
     ops: []draw.Op,
@@ -46,6 +49,7 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
     var count_buf: [48]u8 = undefined;
     const count = std.fmt.bufPrint(&count_buf, "{d}개 표시 · 최근 {d}개", .{ props.displayed_count, props.recent_limit }) catch "";
     try writer.text(header, 1, count, .muted_fg, 2, false, true);
+    try writer.headerLabel(header, host_label);
     try writer.textRight(header, if (props.loading or props.refreshing) spinner(props.spinner_phase) else refresh_icon, if (props.loading or props.refreshing) .muted_fg else .surface_fg, !(props.loading or props.refreshing));
 
     try writer.text(find(frame.tree, build.NodeIds.scope_workspace) orelse return error.MissingRect, 0, "작업공간", .surface_fg, 1, false, true);
@@ -68,11 +72,21 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
                 try writer.text(rect, 0, label, .surface_fg, 1, true, true);
             },
             .card => |card| {
-                var title_buf: [384]u8 = undefined;
-                const title = std.fmt.bufPrint(&title_buf, "{s}  {s}", .{ card.provider.label(), card.title }) catch card.title;
-                try writer.text(rect, 0, title, .surface_fg, 3, false, false);
-                try writer.text(rect, 1, card.summary, .muted_fg, 3, false, false);
-                try writer.text(rect, 2, card.metadata, .muted_fg, 3, false, false);
+                const card_rect = if (card.expanded != null)
+                    find(frame.tree, build.NodeIds.cardHeader(index)) orelse return error.MissingRect
+                else
+                    rect;
+                // Provider belongs to the metadata badge, not the title.  Prefixing the title
+                // made long session names lose their first useful words and differed from the
+                // dock's reference hierarchy (title → safe summary → provider metadata).
+                try writer.text(card_rect, 0, card.title, .surface_fg, 3, false, false);
+                try writer.text(card_rect, 1, card.summary, .muted_fg, 3, false, false);
+                try writer.cardMetadata(card_rect, card.provider.label(), card.metadata);
+                // The whole title card remains one disclosure action, but its trailing chevron
+                // makes that interaction discoverable and shares the exact card rect used by
+                // pointer/Enter. No separate tiny hit target is manufactured for the icon.
+                try writer.textRight(card_rect, chevron_down_icon, .surface_fg, true);
+                if (card.expanded) |expanded| try writer.expanded(frame.tree, index, expanded);
             },
         }
     }
@@ -140,6 +154,106 @@ const Writer = struct {
         const x = rect.rect.x + rect.rect.width - inset_px - slot_width + (slot_width - glyph_width) / 2;
         const y = rect.rect.y + (rect.rect.height - @as(f32, @floatFromInt(ch))) / 2;
         try self.emit(x, y, source, start, .tail, role, wide_icon);
+    }
+
+    /// The provenance label shares the header baseline with refresh but is placed from the same
+    /// measured display-column plan as every other Chrome label. It is intentionally text-only
+    /// until the registered host icon is added; a terminal fallback glyph would reintroduce the
+    /// font-dependent size drift this component otherwise avoids.
+    fn headerLabel(self: *Writer, rect: tree.RectEntry, source: []const u8) ViewError!void {
+        const cw = self.props.cell_width_px;
+        const ch = self.props.cell_height_px;
+        if (cw == 0 or ch == 0) return;
+        const label_cols = plannedCols(source, 16);
+        const refresh_slot_cols: u32 = 3;
+        const total_cols: u32 = @intCast(label_cols);
+        const required_cols = total_cols + refresh_slot_cols + 2;
+        const available_cols: u32 = @intFromFloat(@floor(rect.rect.width / @as(f32, @floatFromInt(cw))));
+        if (required_cols > available_cols) return;
+        const x = rect.rect.x + rect.rect.width - @as(f32, @floatFromInt((refresh_slot_cols + total_cols + 1) * cw));
+        const y = rect.rect.y + (rect.rect.height - @as(f32, @floatFromInt(ch))) / 2;
+        try self.emit(x, y, source, label_cols, .head, .surface_fg, false);
+    }
+
+    /// Provider is a dedicated metadata slot rather than a title prefix.  Both runs use the
+    /// same third-line baseline and bounded column plan, keeping the label readable without
+    /// letting long model metadata overlap the card's disclosure affordance.
+    fn cardMetadata(self: *Writer, rect: tree.RectEntry, provider: []const u8, metadata: []const u8) ViewError!void {
+        try self.text(rect, 2, provider, .surface_fg, 3, false, false);
+        const cw = self.props.cell_width_px;
+        const ch = self.props.cell_height_px;
+        if (cw == 0 or ch == 0) return;
+        const provider_cols = plannedCols(provider, 24);
+        const left_inset_cols: u16 = provider_cols + 2;
+        const line: u32 = 2;
+        const y = rect.rect.y + @as(f32, @floatFromInt(ch)) * @as(f32, @floatFromInt(line + 1));
+        if (!loweredTextCellFitsClip(rect, y, ch)) return;
+        const used_px = @as(f32, @floatFromInt((left_inset_cols + 1) * cw));
+        const available_px = rect.rect.width - used_px;
+        if (available_px <= 0) return;
+        const max_cols: u16 = @intFromFloat(@floor(available_px / @as(f32, @floatFromInt(cw))));
+        const x = rect.rect.x + @as(f32, @floatFromInt(left_inset_cols * cw));
+        try self.emit(x, y, metadata, max_cols, .head, .muted_fg, false);
+    }
+
+    fn expanded(self: *Writer, snapshot: tree.UiRectTree, index: usize, expanded_props: types.Expanded) ViewError!void {
+        const detail = find(snapshot, build.NodeIds.expandedDetail(index)) orelse return error.MissingRect;
+        // The reserved detail rect contains a bounded line stack.  Passing one as the line count
+        // here used to make `textInset` reject every line after the heading, leaving ready cards
+        // visually empty even though the worker had returned safe turns.
+        const detail_lines: u32 = 9;
+        try self.text(detail, 0, switch (expanded_props.state) {
+            .loading => "세션 분석 중",
+            .ready => "최근 대화",
+            .stale => "세션 원본이 변경되었습니다",
+            .unavailable => "세션을 열 수 없습니다",
+        }, .surface_fg, detail_lines, false, false);
+        switch (expanded_props.state) {
+            .ready => {
+                if (expanded_props.action_record_count > 0) {
+                    var count: [80]u8 = undefined;
+                    const label = std.fmt.bufPrint(&count, "도구/권한 관련 기록 {d}건", .{expanded_props.action_record_count}) catch "도구/권한 관련 기록";
+                    try self.text(detail, 1, label, .muted_fg, detail_lines, false, false);
+                }
+                for (expanded_props.turns, 0..) |turn, turn_index| {
+                    const line: u32 = @intCast(2 + turn_index * 2);
+                    try self.text(detail, line, switch (turn.role) {
+                        .user => "사용자",
+                        .assistant => "에이전트",
+                    }, .muted_fg, detail_lines, false, false);
+                    try self.text(detail, line + 1, turn.text, .surface_fg, detail_lines, false, false);
+                }
+            },
+            .loading => try self.skeletons(detail),
+            .stale => try self.text(detail, 2, "안전하게 재개하거나 로그를 열 수 없습니다.", .muted_fg, detail_lines, false, false),
+            .unavailable => try self.text(detail, 2, "원본을 읽을 수 없습니다.", .muted_fg, detail_lines, false, false),
+        }
+        try self.action(find(snapshot, build.NodeIds.resumeAction(index)) orelse return error.MissingRect, resume_icon ++ " 터미널에서 이어하기");
+        try self.action(find(snapshot, build.NodeIds.reveal(index)) orelse return error.MissingRect, reveal_icon ++ " 로그 보기");
+        if (expanded_props.focus_live_enabled)
+            try self.action(find(snapshot, build.NodeIds.focusLive(index)) orelse return error.MissingRect, "열린 세션으로 이동");
+    }
+
+    fn action(self: *Writer, rect: tree.RectEntry, source: []const u8) ViewError!void {
+        const cw = self.props.cell_width_px;
+        const ch = self.props.cell_height_px;
+        if (cw == 0 or ch == 0) return;
+        const available_px = rect.rect.width - @as(f32, @floatFromInt(cw * 2));
+        if (available_px <= 0) return;
+        const max_cols: u16 = @intFromFloat(@floor(available_px / @as(f32, @floatFromInt(cw))));
+        const planned = plannedCols(source, max_cols);
+        if (planned == 0) return;
+        const text_width: f32 = @floatFromInt(@as(u32, planned) * cw);
+        const x = rect.rect.x + (rect.rect.width - text_width) / 2;
+        const y = rect.rect.y + (rect.rect.height - @as(f32, @floatFromInt(ch))) / 2;
+        if (!loweredTextCellFitsClip(rect, y, ch)) return;
+        try self.emit(x, y, source, max_cols, .head, if (rect.action.?.enabled) .surface_fg else .muted_fg, true);
+    }
+
+    fn plannedCols(source: []const u8, max_cols: u16) u16 {
+        var plan = text_layout.plan(source, 0, max_cols, .head, isSessionDockIcon);
+        while (plan.next()) |_| {}
+        return plan.endCol();
     }
 
     fn emit(self: *Writer, x: f32, y: f32, source: []const u8, cols: u16, anchor: text_layout.Anchor, role: tokens.ColorRole, wide_icons: bool) ViewError!void {
@@ -221,7 +335,7 @@ fn loweredTextCellFitsClip(rect: tree.RectEntry, origin_y: f32, cell_height_px: 
 
 fn isSessionDockIcon(codepoint: u21) bool {
     return switch (codepoint) {
-        0xF0021, 0xF0022, 0xF0023, 0xF0024 => true,
+        0xF000C, 0xF0011, 0xF0021, 0xF0022, 0xF0023, 0xF0024 => true,
         else => false,
     };
 }
@@ -254,7 +368,7 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
         .search = "long query",
         .items = &.{
             .{ .group = .{ .identity = 1, .label = "workspace", .count = 1 } },
-            .{ .card = .{ .identity = 2, .provider = .claude, .title = "a title that intentionally exceeds a narrow card", .summary = "summary", .metadata = "메시지 1개 · claude-fixture", .selected = true } },
+            .{ .card = .{ .identity = 2, .provider = .claude, .title = "a title that intentionally exceeds a narrow card", .summary = "summary", .metadata = "Claude · 메시지 1개 · claude-fixture", .selected = true } },
         },
     };
     var nodes: [9]tree.UiNode = undefined;
@@ -289,7 +403,6 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
     try std.testing.expect(out.ops.len > 8);
     var saw_quad = false;
     var saw_provider = false;
-    var saw_model_metadata = false;
     var refresh_origin_x: ?i32 = null;
     var workspace_origin_y: ?i32 = null;
     var project_origin_y: ?i32 = null;
@@ -301,7 +414,6 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
         .text => |text| {
             for (text.runs) |run| {
                 saw_provider = saw_provider or std.mem.indexOf(u8, run.text, "Claude") != null;
-                saw_model_metadata = saw_model_metadata or std.mem.indexOf(u8, run.text, "claude-fixture") != null;
                 if (std.mem.eql(u8, run.text, refresh_icon)) {
                     refresh_origin_x = text.origin.x;
                     try std.testing.expect(text.wide_icons);
@@ -323,7 +435,6 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
     };
     try std.testing.expect(saw_quad);
     try std.testing.expect(saw_provider);
-    try std.testing.expect(saw_model_metadata);
     try std.testing.expect(saw_search_icon);
     try std.testing.expect(saw_group_chevron);
     inline for (.{ .scope_workspace, .scope_project, .scope_all }, .{ workspace_origin_y, project_origin_y, all_origin_y }) |id, origin| {
@@ -455,7 +566,7 @@ test "SessionDock initial loading paints inert three-line skeleton cards" {
         .accent = .{ .r = 13, .g = 14, .b = 15 },
     });
     var ops: [24]draw.Op = undefined;
-    var runs: [8]draw.Run = undefined;
+    var runs: [9]draw.Run = undefined;
     var text_bytes: [256]u8 = undefined;
     const out = try view(props, frame, .{}, &tk, .{ .ops = &ops, .runs = &runs, .text_bytes = &text_bytes });
     var skeleton_lines: usize = 0;

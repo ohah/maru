@@ -128,10 +128,39 @@ _Static_assert(sizeof(MaruRendererImageVertex) == 16, "MaruRendererImageVertex m
 // 빈→빈이면 오버레이 present를 통째로 건너뛴다(모달 없는 평상시 매 프레임 이중 present 방지). 기본 false(초기
 // 오버레이=미present=투명). per-surface impl이라 창마다 자기 오버레이 상태를 정확히 추적한다.
 @property (nonatomic) bool overlayHadContent;
+// AS4-c host fixture만 다음 completed frame의 최종 합성 결과를 복사한다. 일반 screenshot env와
+// 별개인 one-shot request라 여러 상태를 한 process에서 capture해도 다음 user frame에 남지 않는다.
+@property (nonatomic, copy) NSString *testCapturePath;
 @end
 
 @implementation MaruMetalRendererImpl
 @end
+
+bool maru_metal_renderer_request_test_capture(
+    MaruMetalRenderer *renderer,
+    const char *ppm_path
+) {
+    if (renderer == NULL || ppm_path == NULL || ppm_path[0] == '\0') {
+        return false;
+    }
+    // This is deliberately unavailable to ordinary screenshot/product launches. The host also
+    // verifies an isolated fixture root, but keeping the renderer seam independently test-gated
+    // prevents another caller from accidentally changing MARU_SCREENSHOT's one-frame exit contract.
+    const char *smoke = getenv("MARU_AGENT_SESSION_ARCHIVE_SMOKE");
+    if (smoke == NULL || strcmp(smoke, "1") != 0) {
+        return false;
+    }
+    MaruMetalRendererImpl *impl = (__bridge MaruMetalRendererImpl *)renderer;
+    if (impl.testCapturePath != nil) {
+        return false;
+    }
+    NSString *path = [NSString stringWithUTF8String:ppm_path];
+    if (path == nil || path.length == 0) {
+        return false;
+    }
+    impl.testCapturePath = path;
+    return true;
+}
 
 MaruMetalRenderer *maru_metal_renderer_create(id<MTLDevice> device, MTLPixelFormat pixel_format) {
     if (device == nil) {
@@ -1328,7 +1357,12 @@ bool maru_metal_renderer_draw(
     // 분기가 없는 것과 같다. atlas==nil·cols/rows==0 같은 이른 return은 위에서 걸러지므로 캡처는 "내용이 있는
     // 첫 frame"에서만 일어난다 — MARU_SCREENSHOT_DELAY_MS가 있으면 그 시점부터 N ms 지난 frame에서 찍는다.
     const char *screenshot_path = maru_screenshot_path();
-    const bool screenshot_mode = (screenshot_path != NULL) && maru_screenshot_delay_elapsed();
+    const bool normal_screenshot_mode = (screenshot_path != NULL) && maru_screenshot_delay_elapsed();
+    const bool test_capture_mode = impl.testCapturePath != nil;
+    // Keep the NSString strongly held by `impl` for the whole draw. The request is cleared only
+    // after the synchronous readback has reached the PPM writer below.
+    const char *capture_path = test_capture_mode ? impl.testCapturePath.fileSystemRepresentation : screenshot_path;
+    const bool screenshot_mode = normal_screenshot_mode || test_capture_mode;
 
     // C4b: 레이어 순서 = [사이드바 배경 strip] → [터미널 cells(헤더 glyph 포함)] → quad(둥근 밴드) → [사이드바
     // cells(제목)]. 배경 strip(불투명 bg quad)을 '맨 앞'에 그려야 (a)사이드바 헤더 glyph(origin_x=0, 터미널 셀 패스)가
@@ -1526,12 +1560,18 @@ bool maru_metal_renderer_draw(
 
         const uint8_t *pixels = (const uint8_t *)readback.contents;
         const BOOL wrote = maru_write_ppm_from_bgra8_buffer(
-            screenshot_path, pixels, shot_w, shot_h, bytes_per_row);
+            capture_path, pixels, shot_w, shot_h, bytes_per_row);
         if (!wrote) {
-            fprintf(stderr, "MARU_SCREENSHOT: PPM 쓰기 실패 → %s\n", screenshot_path);
+            fprintf(stderr, "MARU_SCREENSHOT: PPM 쓰기 실패 → %s\n", capture_path);
             exit(1);
         }
-        fprintf(stderr, "MARU_SCREENSHOT: %zux%zu PPM 캡처 → %s\n", shot_w, shot_h, screenshot_path);
+        fprintf(stderr, "MARU_SCREENSHOT: %zux%zu PPM 캡처 → %s\n", shot_w, shot_h, capture_path);
+        if (test_capture_mode) {
+            // The sink has copied this exact completed renderer output. Clear before returning so
+            // an idle/cursor redraw cannot overwrite it or keep readback enabled in product mode.
+            impl.testCapturePath = nil;
+            return true;
+        }
         if (maru_screenshot_keeps_process()) {
             // Chrome Lab bridge는 같은 process에서 PPM→PNG·JSON 검증을 끝내야 한다. 이 opt-in은
             // fixture executable만 설정하며, 일반 제품 screenshot의 one-frame-and-exit 계약은 그대로다.

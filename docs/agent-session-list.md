@@ -389,7 +389,11 @@ titlebar launcher와 dock slot만 관측하도록 한다.
   `take_file_tree_external_open` consumer를 drain해 allowlisted fixture token과 횟수만 summary에 기록한다.
 - artifact는 loading/ready/stale의 제품 Metal PPM·PNG와 redacted key/value summary다. 한 프레임 뒤 종료하는
   일반 `MARU_SCREENSHOT` 훅은 쓰지 않고, smoke process 안에서만 여러 completed Metal frame을 readback하는 capture
-  sink를 쓴다. sink는 같은 제품 renderer output을 복사할 뿐 frame/action/worker state를 바꾸지 않는다. summary에는 frame request id,
+  sink를 쓴다. sink는 이미 paint·publish된 probe가 증명한 상태에서만 **다음 동일 frame**의 renderer output 복사를 요청한다.
+  `resume-pointer` scenario는 loading·ready, `detail-stale` scenario는 loading·stale를 각각 한 장씩 남겨 세 상태를
+  모두 덮는다. request는 fixture root 아래의 고정 상대 artifact 이름만 받을 수 있고, 일반 실행·Chrome Lab·provider 입력에는
+  도달하지 않는다. capture 요청·copy 완료는 frame/action/worker state를 바꾸지 않으며, pending request는 한 장을 쓴 뒤 즉시
+  사라진다. summary에는 frame request id,
   input source(pointer/keyboard), enabled/disabled action count, fake argv verdict, reveal success/rejected/stale-identity count,
   actual worker scan/detail completion 및 screenshot path만 남긴다. session id·title·prompt·absolute path·raw JSONL은
   artifact·stderr·PR image에 남기지 않는다.

@@ -262,7 +262,13 @@ pub const StreamOperationPermit = struct {
 
 pub const InitialSnapshotPermit = StreamOperationPermit;
 
-const EndedPurgePreparationLifecycle = enum(u8) { empty, prepared, aborted };
+const EndedPurgePreparationLifecycle = enum(u8) {
+    empty,
+    prepared,
+    committing,
+    consumed,
+    aborted,
+};
 
 pub const EndedPurgePreparation = struct {
     self_addr: usize = 0,
@@ -272,16 +278,83 @@ pub const EndedPurgePreparation = struct {
     authority_seal: owner_seal.Digest = [_]u8{0} ** 32,
     lifecycle: EndedPurgePreparationLifecycle = .empty,
 
+    fn rawTagsValid(self: *const EndedPurgePreparation) bool {
+        const lifecycle_raw = @as(*const u8, @ptrCast(&self.lifecycle)).*;
+        return lifecycle_raw <= @intFromEnum(EndedPurgePreparationLifecycle.aborted) and
+            ClientSlot.streamOperationPermitRawTagsValid(&self.permit) and
+            self.inventory.validPreparedAtFinalAddress();
+    }
+
     pub fn abort(self: *EndedPurgePreparation, slot: *ClientSlot) bool {
-        if (self.lifecycle != .prepared or self.self_addr != @intFromPtr(self) or
+        if (!self.rawTagsValid() or self.lifecycle != .prepared or
+            self.self_addr != @intFromPtr(self) or
             !slot.streamOperationPermitLive(self.permit) or
-            !self.inventory.validPreparedAtFinalAddress() or
             !std.mem.eql(u8, &self.authority_seal, &endedPurgePreparationSeal(self)))
             return false;
         slot.abortStreamOperationPermit(self.permit) catch return false;
         if (!self.inventory.abort()) @panic("validated ended purge inventory abort failed");
         self.lifecycle = .aborted;
         return true;
+    }
+
+    fn sealForCommit(self: *EndedPurgePreparation, slot: *ClientSlot) bool {
+        if (slot.pid != currentPid() or
+            !operationThreadMatches(slot.operation_owner_thread_incarnation))
+            return false;
+        const index: usize = self.permit.registry_index;
+        if (index >= stream_operation_registry.len) return false;
+        const entry = &stream_operation_registry[index];
+        if (!self.rawTagsValid() or self.lifecycle != .prepared or
+            self.self_addr != @intFromPtr(self) or
+            !std.mem.eql(u8, &self.authority_seal, &endedPurgePreparationSeal(self)) or
+            entry.state.load(.acquire) !=
+                @intFromEnum(StreamOperationRegistryEntry.State.consume_reserved) or
+            entry.id != self.permit.registry_id or
+            !std.meta.eql(entry.permit, self.permit) or
+            self.permit.slot != slot or
+            self.permit.generation != slot.current.active_operation_generation or
+            self.permit.kind != slot.current.active_operation_kind or
+            self.permit.owner_thread_incarnation !=
+                slot.current.active_operation_owner_thread_incarnation or
+            self.permit.owner_addr != slot.current.active_operation_owner_addr or
+            self.permit.transport_incarnation !=
+                slot.current.active_operation_transport_incarnation or
+            !std.meta.eql(self.permit.binding, slot.current.active_operation_binding))
+            return false;
+        self.lifecycle = .committing;
+        self.authority_seal = endedPurgePreparationSeal(self);
+        return true;
+    }
+
+    fn consumeAfterPermit(self: *EndedPurgePreparation, slot: *ClientSlot) void {
+        if (slot.pid != currentPid() or
+            !operationThreadMatches(slot.operation_owner_thread_incarnation))
+            @panic("ended purge transport receipt crossed its operation thread");
+        const index: usize = self.permit.registry_index;
+        if (index >= stream_operation_registry.len)
+            @panic("ended purge transport receipt registry index drifted");
+        const entry = &stream_operation_registry[index];
+        if (!self.rawTagsValid() or self.lifecycle != .committing or
+            self.self_addr != @intFromPtr(self) or
+            !std.mem.eql(u8, &self.authority_seal, &endedPurgePreparationSeal(self)) or
+            entry.state.load(.acquire) !=
+                @intFromEnum(StreamOperationRegistryEntry.State.consumed) or
+            entry.id != self.permit.registry_id or
+            !std.meta.eql(entry.permit, self.permit) or
+            slot.current.active_operation_generation != 0 or
+            slot.current.active_operation_kind != .none or
+            slot.current.active_operation_owner_thread_incarnation != 0 or
+            slot.current.active_operation_owner_addr != 0 or
+            slot.current.active_operation_transport_incarnation != 0)
+            @panic("ended purge transport receipt authority drifted");
+        self.lifecycle = .consumed;
+        self.authority_seal = endedPurgePreparationSeal(self);
+        if (entry.state.cmpxchgStrong(
+            @intFromEnum(StreamOperationRegistryEntry.State.consumed),
+            @intFromEnum(StreamOperationRegistryEntry.State.empty),
+            .acq_rel,
+            .acquire,
+        ) != null) @panic("ended purge transport receipt reclaim drifted");
     }
 };
 
@@ -484,7 +557,9 @@ fn operationThreadMatches(incarnation: u64) bool {
 
 const max_stream_operation_permits = 4096;
 const StreamOperationRegistryEntry = struct {
-    live: bool = false,
+    const State = enum(u8) { empty, live, consume_reserved, consumed };
+
+    state: std.atomic.Value(u8) = .init(@intFromEnum(State.empty)),
     id: u64 = 0,
     permit: StreamOperationPermit = undefined,
 };
@@ -497,7 +572,10 @@ fn registerStreamOperationPermit(fields: StreamOperationPermit) error{ AdminBusy
     while (!stream_operation_registry_mutex.tryLock()) std.atomic.spinLoopHint();
     defer stream_operation_registry_mutex.unlock();
     var index: usize = 0;
-    while (index < stream_operation_registry.len and stream_operation_registry[index].live) : (index += 1) {}
+    while (index < stream_operation_registry.len and
+        stream_operation_registry[index].state.load(.acquire) !=
+            @intFromEnum(StreamOperationRegistryEntry.State.empty)) : (index += 1)
+    {}
     if (index == stream_operation_registry.len) return error.AdminBusy;
     const id = next_stream_operation_registry_id;
     next_stream_operation_registry_id = std.math.add(u64, id, 1) catch
@@ -505,7 +583,10 @@ fn registerStreamOperationPermit(fields: StreamOperationPermit) error{ AdminBusy
     var permit = fields;
     permit.registry_index = @intCast(index);
     permit.registry_id = id;
-    stream_operation_registry[index] = .{ .live = true, .id = id, .permit = permit };
+    const entry = &stream_operation_registry[index];
+    entry.id = id;
+    entry.permit = permit;
+    entry.state.store(@intFromEnum(StreamOperationRegistryEntry.State.live), .release);
     return permit;
 }
 
@@ -514,8 +595,9 @@ fn streamOperationPermitRegistryLive(permit: StreamOperationPermit) bool {
     if (index >= stream_operation_registry.len or permit.registry_id == 0) return false;
     while (!stream_operation_registry_mutex.tryLock()) std.atomic.spinLoopHint();
     defer stream_operation_registry_mutex.unlock();
-    const entry = stream_operation_registry[index];
-    return entry.live and entry.id == permit.registry_id and std.meta.eql(entry.permit, permit);
+    const entry = &stream_operation_registry[index];
+    return entry.state.load(.acquire) == @intFromEnum(StreamOperationRegistryEntry.State.live) and
+        entry.id == permit.registry_id and std.meta.eql(entry.permit, permit);
 }
 
 fn unregisterStreamOperationPermit(permit: StreamOperationPermit) error{InvalidStreamOperationPermit}!void {
@@ -524,11 +606,16 @@ fn unregisterStreamOperationPermit(permit: StreamOperationPermit) error{InvalidS
         return error.InvalidStreamOperationPermit;
     while (!stream_operation_registry_mutex.tryLock()) std.atomic.spinLoopHint();
     defer stream_operation_registry_mutex.unlock();
-    const entry = stream_operation_registry[index];
-    if (!entry.live or entry.id != permit.registry_id or !std.meta.eql(entry.permit, permit))
+    const entry = &stream_operation_registry[index];
+    if (entry.state.load(.acquire) != @intFromEnum(StreamOperationRegistryEntry.State.live) or
+        entry.id != permit.registry_id or !std.meta.eql(entry.permit, permit))
         return error.InvalidStreamOperationPermit;
-    stream_operation_registry[index].live = false;
-    stream_operation_registry[index].permit = undefined;
+    if (entry.state.cmpxchgStrong(
+        @intFromEnum(StreamOperationRegistryEntry.State.live),
+        @intFromEnum(StreamOperationRegistryEntry.State.empty),
+        .acq_rel,
+        .acquire,
+    ) != null) return error.InvalidStreamOperationPermit;
 }
 
 fn recordAliasQuarantine() bool {
@@ -663,6 +750,20 @@ pub const ClientSlot = struct {
         node: *ClientNode,
     };
 
+    const PreparedStreamOperationPermitConsume = struct {
+        const Lifecycle = enum(u8) { pristine, prepared, consumed };
+
+        self_addr: usize = 0,
+        registry_index: u16 = 0,
+        registry_id: u64 = 0,
+        slot_addr: usize = 0,
+        slot_incarnation: u64 = 0,
+        node_incarnation: u64 = 0,
+        operation_generation: u64 = 0,
+        permit_seal: owner_seal.Digest = [_]u8{0} ** 32,
+        lifecycle: PreparedStreamOperationPermitConsume.Lifecycle = .pristine,
+    };
+
     self_addr: usize,
     current: *ClientNode,
     node_allocator: std.mem.Allocator,
@@ -674,6 +775,50 @@ pub const ClientSlot = struct {
     lifecycle: Lifecycle,
 
     pub const ProcessRuntimeInitError = error{ProcessDomainMismatch};
+    pub const EndedPurgeCommitError = error{
+        InvalidOwner,
+        InvalidState,
+        Busy,
+        Corrupt,
+        ArithmeticOverflow,
+        DestinationOccupied,
+        QuarantineUnavailable,
+    };
+    pub const EndedPurgeResult = enum { purged };
+
+    fn streamOperationPermitRawTagsValid(permit: *const StreamOperationPermit) bool {
+        const kind_raw = @as(*const u8, @ptrCast(&permit.kind)).*;
+        const role_raw = @as(*const u8, @ptrCast(&permit.binding.role)).*;
+        return kind_raw <= @intFromEnum(StreamOperationKind.ended_purge) and
+            role_raw <= @intFromEnum(contract.AttachmentRole.observer);
+    }
+
+    fn streamOperationPermitSeal(permit: StreamOperationPermit) owner_seal.Digest {
+        var writer = owner_seal.Writer.init("maru.stream-operation-permit.v1");
+        writer.writeUsize(@intFromPtr(permit.slot));
+        writer.writeU16(permit.registry_index);
+        writer.writeU64(permit.registry_id);
+        writer.writeU64(permit.slot_incarnation);
+        writer.writeU64(permit.node_incarnation);
+        writer.writeU64(permit.generation);
+        writer.writeU8(@intFromEnum(permit.kind));
+        writer.writeU64(permit.owner_thread_incarnation);
+        writer.writeUsize(permit.owner_addr);
+        writer.writeU64(permit.transport_incarnation);
+        writer.writeU64(permit.binding.binding_incarnation);
+        writer.writeUsize(permit.binding.binding_storage_addr);
+        writer.writeUsize(permit.binding.destination_addr);
+        writer.writeU64(permit.binding.binding_reservation_id);
+        writer.writeU64(permit.binding.slot_incarnation);
+        writer.writeU64(permit.binding.node_incarnation);
+        writer.writeU128(permit.binding.host_id);
+        writer.writeU64(permit.binding.connection_generation);
+        writer.writeU128(permit.binding.runtime_id);
+        writer.writeU8(@intFromEnum(permit.binding.role));
+        writer.writeU64(permit.binding.pid);
+        writer.writeU64(permit.binding.process_nonce);
+        return writer.finish();
+    }
 
     pub fn initializeProcessRuntime() ProcessRuntimeInitError!void {
         const pid = currentPid();
@@ -1337,13 +1482,15 @@ pub const ClientSlot = struct {
         self: *const ClientSlot,
         permit: InitialSnapshotPermit,
     ) bool {
-        return permit.kind == .initial_snapshot and self.streamOperationPermitLive(permit);
+        return streamOperationPermitRawTagsValid(&permit) and
+            permit.kind == .initial_snapshot and self.streamOperationPermitLive(permit);
     }
 
     pub fn streamOperationPermitLive(
         self: *const ClientSlot,
         permit: StreamOperationPermit,
     ) bool {
+        if (!streamOperationPermitRawTagsValid(&permit)) return false;
         if (!operationThreadMatches(permit.owner_thread_incarnation)) return false;
         if (!streamOperationPermitRegistryLive(permit)) return false;
         return self.valid() and permit.slot == self and
@@ -1403,6 +1550,109 @@ pub const ClientSlot = struct {
             return error.InvalidStreamOperationPermit;
         try unregisterStreamOperationPermit(permit);
         self.clearStreamOperationPermit();
+    }
+
+    fn prepareStreamOperationPermitConsume(
+        self: *ClientSlot,
+        permit: StreamOperationPermit,
+        out: *PreparedStreamOperationPermitConsume,
+    ) error{ InvalidStreamOperationPermit, DestinationOccupied }!void {
+        if (!streamOperationPermitRawTagsValid(&permit) or self.pid != currentPid() or
+            !operationThreadMatches(permit.owner_thread_incarnation))
+            return error.InvalidStreamOperationPermit;
+        if (!std.meta.eql(out.*, PreparedStreamOperationPermitConsume{}))
+            return error.DestinationOccupied;
+        const index: usize = permit.registry_index;
+        if (index >= stream_operation_registry.len or permit.registry_id == 0 or
+            !self.valid() or permit.slot != self or
+            permit.slot_incarnation != self.incarnation.tagged or
+            permit.node_incarnation != self.current.incarnation.tagged or
+            permit.generation == 0 or
+            permit.generation != self.current.active_operation_generation or
+            permit.kind == .none or permit.kind != self.current.active_operation_kind or
+            permit.owner_thread_incarnation != self.operation_owner_thread_incarnation or
+            permit.owner_thread_incarnation !=
+                self.current.active_operation_owner_thread_incarnation or
+            permit.owner_addr != self.current.active_operation_owner_addr or
+            permit.transport_incarnation != self.current.active_operation_transport_incarnation or
+            !std.meta.eql(permit.binding, self.current.active_operation_binding))
+            return error.InvalidStreamOperationPermit;
+
+        while (!stream_operation_registry_mutex.tryLock()) std.atomic.spinLoopHint();
+        defer stream_operation_registry_mutex.unlock();
+        const entry = &stream_operation_registry[index];
+        if (entry.state.load(.acquire) !=
+            @intFromEnum(StreamOperationRegistryEntry.State.live) or
+            entry.id != permit.registry_id or !std.meta.eql(entry.permit, permit))
+            return error.InvalidStreamOperationPermit;
+        if (entry.state.cmpxchgStrong(
+            @intFromEnum(StreamOperationRegistryEntry.State.live),
+            @intFromEnum(StreamOperationRegistryEntry.State.consume_reserved),
+            .acq_rel,
+            .acquire,
+        ) != null) return error.InvalidStreamOperationPermit;
+        out.* = .{
+            .self_addr = @intFromPtr(out),
+            .registry_index = permit.registry_index,
+            .registry_id = permit.registry_id,
+            .slot_addr = @intFromPtr(self),
+            .slot_incarnation = permit.slot_incarnation,
+            .node_incarnation = permit.node_incarnation,
+            .operation_generation = permit.generation,
+            .permit_seal = streamOperationPermitSeal(permit),
+            .lifecycle = .prepared,
+        };
+    }
+
+    fn consumeStreamOperationPermitUnchecked(
+        self: *ClientSlot,
+        prepared: *PreparedStreamOperationPermitConsume,
+    ) bool {
+        if (self.pid != currentPid() or
+            !operationThreadMatches(self.operation_owner_thread_incarnation))
+            return false;
+        const index: usize = prepared.registry_index;
+        const lifecycle_raw = @as(*const u8, @ptrCast(&prepared.lifecycle)).*;
+        if (index >= stream_operation_registry.len or
+            lifecycle_raw != @intFromEnum(PreparedStreamOperationPermitConsume.Lifecycle.prepared) or
+            prepared.self_addr != @intFromPtr(prepared) or
+            prepared.registry_id == 0 or prepared.slot_addr != @intFromPtr(self) or
+            prepared.slot_incarnation != self.incarnation.tagged or
+            prepared.node_incarnation != self.current.incarnation.tagged or
+            prepared.operation_generation == 0 or
+            prepared.operation_generation != self.current.active_operation_generation)
+            return false;
+        const entry = &stream_operation_registry[index];
+        if (entry.state.load(.acquire) !=
+            @intFromEnum(StreamOperationRegistryEntry.State.consume_reserved) or
+            entry.id != prepared.registry_id or
+            !streamOperationPermitRawTagsValid(&entry.permit) or
+            !std.mem.eql(
+                u8,
+                &prepared.permit_seal,
+                &streamOperationPermitSeal(entry.permit),
+            ) or
+            entry.permit.slot != self or
+            entry.permit.slot_incarnation != prepared.slot_incarnation or
+            entry.permit.node_incarnation != prepared.node_incarnation or
+            entry.permit.generation != prepared.operation_generation or
+            entry.permit.kind != self.current.active_operation_kind or
+            entry.permit.owner_thread_incarnation !=
+                self.current.active_operation_owner_thread_incarnation or
+            entry.permit.owner_addr != self.current.active_operation_owner_addr or
+            entry.permit.transport_incarnation !=
+                self.current.active_operation_transport_incarnation or
+            !std.meta.eql(entry.permit.binding, self.current.active_operation_binding))
+            return false;
+        if (entry.state.cmpxchgStrong(
+            @intFromEnum(StreamOperationRegistryEntry.State.consume_reserved),
+            @intFromEnum(StreamOperationRegistryEntry.State.consumed),
+            .acq_rel,
+            .acquire,
+        ) != null) return false;
+        self.clearStreamOperationPermit();
+        prepared.lifecycle = .consumed;
+        return true;
     }
 
     pub fn streamOperationPermitIdle(self: *const ClientSlot) bool {
@@ -1485,6 +1735,126 @@ pub const ClientSlot = struct {
         out.permit = permit;
         out.lifecycle = .prepared;
         out.authority_seal = endedPurgePreparationSeal(out);
+    }
+
+    pub fn commitEndedPurge(
+        self: *ClientSlot,
+        scratch: *client_mod.EndedPurgeScratch,
+        preparation: *EndedPurgePreparation,
+    ) EndedPurgeCommitError!EndedPurgeResult {
+        // Fork children must reject before touching either inherited process-global registry.
+        const pid = currentPid();
+        if (pid == 0 or self.pid != pid or process_runtime_pid.load(.acquire) != pid)
+            return error.InvalidOwner;
+        const registry_entry = clientSlotRegistryEntry(@intFromPtr(self)) orelse
+            return error.InvalidOwner;
+        if (!operationThreadMatches(registry_entry.owner_thread_incarnation) or
+            !self.valid() or registry_entry.node_addr != @intFromPtr(self.current) or
+            registry_entry.slot_incarnation != self.incarnation.tagged or
+            registry_entry.node_incarnation != self.current.incarnation.tagged or
+            !preparation.rawTagsValid() or preparation.lifecycle != .prepared or
+            preparation.self_addr != @intFromPtr(preparation) or
+            preparation.target_stream == 0 or
+            preparation.permit.owner_addr != @intFromPtr(preparation) or
+            preparation.inventory.scratch_addr != @intFromPtr(scratch) or
+            !std.mem.eql(
+                u8,
+                &preparation.authority_seal,
+                &endedPurgePreparationSeal(preparation),
+            ) or
+            !self.streamOperationPermitLive(preparation.permit))
+            return error.InvalidOwner;
+
+        self.current.client.tryAcquireEndedPurgeExclusive() catch |err| return switch (err) {
+            error.AdminBusy => error.Busy,
+            error.InvalidOwner => error.InvalidOwner,
+            error.InvalidState => error.InvalidState,
+        };
+        var release_exclusive = true;
+        defer if (release_exclusive and
+            !self.current.client.releaseEndedPurgeExclusiveClean())
+            @panic("ended purge precommit exclusive rollback failed");
+
+        var client_prepared: client_mod.PreparedEndedPurgeCommit = .{};
+        self.current.client.prepareEndedPurgeCommit(
+            preparation.target_stream,
+            preparation.permit.generation,
+            scratch,
+            &preparation.inventory,
+            &client_prepared,
+        ) catch |err| return switch (err) {
+            error.InvalidOwner => error.InvalidOwner,
+            error.InvalidState => error.Busy,
+            error.Corrupt => error.Corrupt,
+            error.ArithmeticOverflow => error.ArithmeticOverflow,
+            error.DestinationOccupied => error.DestinationOccupied,
+        };
+
+        const quarantine_registry = &(ended_purge_quarantine_registry orelse
+            @panic("ended purge quarantine registry missing after process bootstrap"));
+        var quarantine_reservation: ended_purge_quarantine.Reservation = .{};
+        quarantine_registry.reserve(
+            self.current.incarnation.tagged,
+            preparation.permit.generation,
+            client_prepared.complete_owned_extent_bytes,
+            &quarantine_reservation,
+        ) catch |err| {
+            scratch.lifecycle = .inventory_prepared;
+            client_prepared = .{};
+            return switch (err) {
+                error.InvalidOwner => error.InvalidOwner,
+                error.ArithmeticOverflow => error.ArithmeticOverflow,
+                error.InvalidState, error.CapacityExceeded => error.QuarantineUnavailable,
+            };
+        };
+
+        var permit_consume: PreparedStreamOperationPermitConsume = .{};
+        self.prepareStreamOperationPermitConsume(
+            preparation.permit,
+            &permit_consume,
+        ) catch |err| {
+            if (!quarantine_registry.release(&quarantine_reservation))
+                @panic("ended purge quarantine rollback failed");
+            scratch.lifecycle = .inventory_prepared;
+            client_prepared = .{};
+            return switch (err) {
+                error.InvalidStreamOperationPermit => error.InvalidOwner,
+                error.DestinationOccupied => error.DestinationOccupied,
+            };
+        };
+        if (!preparation.sealForCommit(self))
+            @panic("ended purge transport receipt seal failed after permit consume reservation");
+
+        const outcome = self.current.client.commitEndedPurgePrepared(
+            preparation.permit.generation,
+            scratch,
+            &preparation.inventory,
+            &client_prepared,
+        );
+        switch (outcome) {
+            .clean => {
+                if (!quarantine_registry.release(&quarantine_reservation))
+                    @panic("ended purge clean quarantine release failed");
+            },
+            .drift_pending_finalize => {
+                var commit_receipt: ended_purge_quarantine.CommitReceipt = .{};
+                if (!quarantine_registry.commit(&quarantine_reservation, &commit_receipt))
+                    @panic("ended purge quarantine commit failed");
+                var proof: ended_purge_quarantine.ConsumedCommitProof = .{};
+                if (!quarantine_registry.consumeCommitted(&commit_receipt, &proof))
+                    @panic("ended purge quarantine proof consume failed");
+                self.current.client.finalizeEndedPurgeNoFreePoison(
+                    preparation.permit.generation,
+                    &client_prepared,
+                    proof,
+                );
+                release_exclusive = false;
+            },
+        }
+        if (!self.consumeStreamOperationPermitUnchecked(&permit_consume))
+            @panic("ended purge node permit consume failed");
+        preparation.consumeAfterPermit(self);
+        return .purged;
     }
 
     fn clearStreamOperationPermit(self: *ClientSlot) void {
@@ -3155,6 +3525,455 @@ test "CR3a-2c2 node stream operation permit serializes snapshot and ended purge"
     );
     try slot.abortStreamOperationPermit(purge);
     try std.testing.expect(slot.streamOperationPermitIdle());
+}
+
+test "CR3a-2c2b3b B3b-O atomic permit receipt is exact once and delays index reuse" {
+    const allocator = std.testing.allocator;
+    var source = fixtureClient(allocator, 0xF501);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0xF501);
+    defer slot.deinit();
+    var binding: contract.PreparedAttachmentBinding = .{};
+    var lease: lease_mod.ConnectionLease = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0x4501);
+    defer slot.abortAttachmentBinding(&binding, reservation) catch
+        @panic("atomic permit receipt binding cleanup drifted");
+
+    var scratch: client_mod.EndedPurgeScratch = .{};
+    var preparation: EndedPurgePreparation = .{};
+    const permit = try slot.prepareStreamOperationPermit(
+        .ended_purge,
+        @intFromPtr(&preparation),
+        17,
+        reservation.identity,
+    );
+    preparation = .{
+        .self_addr = @intFromPtr(&preparation),
+        .target_stream = 9,
+        .permit = permit,
+        .inventory = .{
+            .self_addr = @intFromPtr(&preparation.inventory),
+            .client_addr = @intFromPtr(&slot.current.client),
+            .scratch_addr = @intFromPtr(&scratch),
+            .target_stream = 9,
+            .target_event_count = 1,
+            .lifecycle = .prepared,
+        },
+        .lifecycle = .prepared,
+    };
+    preparation.authority_seal = endedPurgePreparationSeal(&preparation);
+
+    var receipt: ClientSlot.PreparedStreamOperationPermitConsume = .{};
+    try slot.prepareStreamOperationPermitConsume(permit, &receipt);
+    const entry = &stream_operation_registry[permit.registry_index];
+    try std.testing.expectEqual(
+        @intFromEnum(StreamOperationRegistryEntry.State.consume_reserved),
+        entry.state.load(.acquire),
+    );
+    try std.testing.expect(!slot.streamOperationPermitLive(permit));
+
+    const ForeignThreadProbe = struct {
+        fn run(
+            target_slot: *ClientSlot,
+            target_preparation: *EndedPurgePreparation,
+            target_receipt: *ClientSlot.PreparedStreamOperationPermitConsume,
+            seal_result: *bool,
+            consume_result: *bool,
+        ) void {
+            seal_result.* = target_preparation.sealForCommit(target_slot);
+            consume_result.* = target_slot.consumeStreamOperationPermitUnchecked(target_receipt);
+        }
+    };
+    var foreign_seal_result = true;
+    var foreign_consume_result = true;
+    const foreign_thread = try std.Thread.spawn(.{}, ForeignThreadProbe.run, .{
+        &slot,
+        &preparation,
+        &receipt,
+        &foreign_seal_result,
+        &foreign_consume_result,
+    });
+    foreign_thread.join();
+    try std.testing.expect(!foreign_seal_result);
+    try std.testing.expect(!foreign_consume_result);
+    try std.testing.expectEqual(
+        @intFromEnum(StreamOperationRegistryEntry.State.consume_reserved),
+        entry.state.load(.acquire),
+    );
+
+    var sibling_source = fixtureClient(allocator, 0xF505);
+    var sibling_slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&sibling_slot, allocator, &sibling_source, 0xF505);
+    defer sibling_slot.deinit();
+    var sibling_binding: contract.PreparedAttachmentBinding = .{};
+    var sibling_lease: lease_mod.ConnectionLease = .{};
+    const sibling_reservation = try sibling_slot.reserveAttachmentBindingForTest(
+        &sibling_binding,
+        &sibling_lease,
+        0x4505,
+    );
+    defer sibling_slot.abortAttachmentBinding(&sibling_binding, sibling_reservation) catch
+        @panic("atomic permit sibling binding cleanup drifted");
+    const sibling_permit = try sibling_slot.prepareStreamOperationPermit(
+        .initial_snapshot,
+        41,
+        43,
+        sibling_reservation.identity,
+    );
+    try std.testing.expect(sibling_permit.registry_index != permit.registry_index);
+    try sibling_slot.consumeStreamOperationPermit(sibling_permit);
+    try std.testing.expect(sibling_slot.streamOperationPermitIdle());
+
+    const preparation_lifecycle_raw: *u8 = @ptrCast(&preparation.lifecycle);
+    var raw_tag: u16 = @intFromEnum(EndedPurgePreparationLifecycle.aborted) + 1;
+    while (raw_tag <= std.math.maxInt(u8)) : (raw_tag += 1) {
+        preparation_lifecycle_raw.* = @intCast(raw_tag);
+        try std.testing.expect(!preparation.sealForCommit(&slot));
+    }
+    preparation_lifecycle_raw.* = @intFromEnum(EndedPurgePreparationLifecycle.prepared);
+
+    const permit_kind_raw: *u8 = @ptrCast(&preparation.permit.kind);
+    raw_tag = @intFromEnum(StreamOperationKind.ended_purge) + 1;
+    while (raw_tag <= std.math.maxInt(u8)) : (raw_tag += 1) {
+        permit_kind_raw.* = @intCast(raw_tag);
+        try std.testing.expect(!preparation.sealForCommit(&slot));
+    }
+    permit_kind_raw.* = @intFromEnum(StreamOperationKind.ended_purge);
+
+    const binding_role_raw: *u8 = @ptrCast(&preparation.permit.binding.role);
+    raw_tag = @intFromEnum(contract.AttachmentRole.observer) + 1;
+    while (raw_tag <= std.math.maxInt(u8)) : (raw_tag += 1) {
+        binding_role_raw.* = @intCast(raw_tag);
+        try std.testing.expect(!preparation.sealForCommit(&slot));
+    }
+    binding_role_raw.* = @intFromEnum(permit.binding.role);
+
+    const inventory_lifecycle_raw: *u8 = @ptrCast(&preparation.inventory.lifecycle);
+    raw_tag = 3;
+    while (raw_tag <= std.math.maxInt(u8)) : (raw_tag += 1) {
+        inventory_lifecycle_raw.* = @intCast(raw_tag);
+        try std.testing.expect(!preparation.sealForCommit(&slot));
+    }
+    inventory_lifecycle_raw.* = 1;
+
+    try std.testing.expect(preparation.sealForCommit(&slot));
+
+    var copied = receipt;
+    try std.testing.expect(!slot.consumeStreamOperationPermitUnchecked(&copied));
+    const receipt_lifecycle_raw: *u8 = @ptrCast(&receipt.lifecycle);
+    raw_tag = @intFromEnum(ClientSlot.PreparedStreamOperationPermitConsume.Lifecycle.consumed) + 1;
+    while (raw_tag <= std.math.maxInt(u8)) : (raw_tag += 1) {
+        receipt_lifecycle_raw.* = @intCast(raw_tag);
+        try std.testing.expect(!slot.consumeStreamOperationPermitUnchecked(&receipt));
+    }
+    receipt_lifecycle_raw.* =
+        @intFromEnum(ClientSlot.PreparedStreamOperationPermitConsume.Lifecycle.prepared);
+    try std.testing.expect(slot.consumeStreamOperationPermitUnchecked(&receipt));
+    try std.testing.expectEqual(
+        @intFromEnum(StreamOperationRegistryEntry.State.consumed),
+        entry.state.load(.acquire),
+    );
+    try std.testing.expect(slot.streamOperationPermitIdle());
+    try std.testing.expect(!slot.consumeStreamOperationPermitUnchecked(&receipt));
+    preparation.consumeAfterPermit(&slot);
+    try std.testing.expectEqual(
+        @intFromEnum(StreamOperationRegistryEntry.State.empty),
+        entry.state.load(.acquire),
+    );
+
+    const reused = try slot.prepareStreamOperationPermit(
+        .initial_snapshot,
+        19,
+        23,
+        reservation.identity,
+    );
+    try std.testing.expectEqual(permit.registry_index, reused.registry_index);
+    try std.testing.expect(reused.registry_id != permit.registry_id);
+    try std.testing.expect(!slot.consumeStreamOperationPermitUnchecked(&receipt));
+    try slot.abortStreamOperationPermit(reused);
+
+    var raw_state: u16 = 0;
+    while (raw_state <= std.math.maxInt(u8)) : (raw_state += 1) {
+        entry.state.store(@intCast(raw_state), .release);
+        try std.testing.expect(!slot.streamOperationPermitLive(permit));
+        try std.testing.expect(!slot.streamOperationPermitLive(reused));
+        try std.testing.expect(!slot.consumeStreamOperationPermitUnchecked(&receipt));
+    }
+    entry.state.store(@intFromEnum(StreamOperationRegistryEntry.State.empty), .release);
+}
+
+test "CR3a-2c2b3b B3b-O validated suffix mismatch fail-stops in a subprocess" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var source = fixtureClient(allocator, 0xF503);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0xF503);
+    defer slot.deinit();
+    var binding: contract.PreparedAttachmentBinding = .{};
+    var lease: lease_mod.ConnectionLease = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0x4503);
+    defer slot.abortAttachmentBinding(&binding, reservation) catch
+        @panic("suffix mismatch fixture binding cleanup drifted");
+
+    var preparation: EndedPurgePreparation = .{};
+    const permit = try slot.prepareStreamOperationPermit(
+        .ended_purge,
+        @intFromPtr(&preparation),
+        31,
+        reservation.identity,
+    );
+    defer if (slot.streamOperationPermitLive(permit))
+        slot.abortStreamOperationPermit(permit) catch
+            @panic("suffix mismatch fixture permit cleanup drifted");
+    var receipt: ClientSlot.PreparedStreamOperationPermitConsume = .{};
+    try slot.prepareStreamOperationPermitConsume(permit, &receipt);
+
+    var panic_pipe: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.pipe(&panic_pipe));
+    defer _ = c.close(panic_pipe[0]);
+    const child = std.c.fork();
+    if (child < 0) return error.TestUnexpectedResult;
+    if (child == 0) {
+        _ = c.close(panic_pipe[0]);
+        if (c.dup2(panic_pipe[1], 2) < 0) c._exit(126);
+        _ = c.close(panic_pipe[1]);
+        slot.pid = currentPid();
+        if (!operationThreadMatches(slot.operation_owner_thread_incarnation))
+            std.c._exit(4);
+        receipt.registry_id +%= 1;
+        if (!slot.consumeStreamOperationPermitUnchecked(&receipt))
+            @panic("validated ended purge suffix mismatch");
+        _ = c.write(2, "suffix mismatch returned\n", "suffix mismatch returned\n".len);
+        std.c._exit(0);
+    }
+    _ = c.close(panic_pipe[1]);
+
+    var status: c_int = 0;
+    var attempts: usize = 0;
+    while (attempts < 2_000) : (attempts += 1) {
+        const waited = std.c.waitpid(child, &status, std.c.W.NOHANG);
+        if (waited == child) break;
+        if (waited < 0 and std.posix.errno(waited) != .INTR)
+            return error.TestUnexpectedResult;
+        var delay_fd = c.pollfd{ .fd = -1, .events = 0, .revents = 0 };
+        _ = c.poll(@ptrCast(&delay_fd), 0, 1);
+    }
+    if (attempts == 2_000) {
+        _ = c.kill(child, c.SIG.KILL);
+        _ = c.waitpid(child, &status, 0);
+        return error.TestUnexpectedResult;
+    }
+    const wait_status: u32 = @bitCast(status);
+    try std.testing.expect(!c.W.IFEXITED(wait_status) or c.W.EXITSTATUS(wait_status) != 0);
+    var panic_output: [4096]u8 = undefined;
+    const panic_len = c.read(panic_pipe[0], &panic_output, panic_output.len);
+    try std.testing.expect(panic_len > 0);
+    const panic_bytes = panic_output[0..@intCast(panic_len)];
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        panic_bytes,
+        "validated ended purge suffix mismatch",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, panic_bytes, "suffix mismatch returned") == null);
+
+    try std.testing.expect(slot.consumeStreamOperationPermitUnchecked(&receipt));
+    const entry = &stream_operation_registry[permit.registry_index];
+    try std.testing.expectEqual(
+        @intFromEnum(StreamOperationRegistryEntry.State.consumed),
+        entry.state.load(.acquire),
+    );
+    entry.state.store(@intFromEnum(StreamOperationRegistryEntry.State.empty), .release);
+}
+
+test "CR3a-2c2b3b B3b-O drift subprocess finalizes quarantine and paired receipts" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const marker_ptr = c.getenv("MARU_SESSION_HOST_B3BO_DRIFT_SUBPROCESS") orelse
+        return error.MissingDriftSubprocessMode;
+    const marker = std.mem.span(marker_ptr);
+    if (std.mem.eql(u8, marker, "skip-in-aggregate-v1")) return error.SkipZigTest;
+    if (!std.mem.eql(u8, marker, "run-isolated-v1"))
+        return error.InvalidDriftSubprocessMode;
+    const DriftAllocator = struct {
+        parent: std.mem.Allocator,
+        replacement: std.mem.Allocator,
+        client: ?*client_mod.Client = null,
+        armed: bool = false,
+        drifted: bool = false,
+
+        fn allocator(self: *@This()) std.mem.Allocator {
+            return .{ .ptr = self, .vtable = &.{
+                .alloc = alloc,
+                .resize = resize,
+                .remap = remap,
+                .free = free,
+            } };
+        }
+        fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            return self.parent.vtable.alloc(self.parent.ptr, len, alignment, ret_addr);
+        }
+        fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            return self.parent.vtable.resize(self.parent.ptr, memory, alignment, new_len, ret_addr);
+        }
+        fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            return self.parent.vtable.remap(self.parent.ptr, memory, alignment, new_len, ret_addr);
+        }
+        fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (self.armed and !self.drifted) {
+                self.drifted = true;
+                self.client.?.allocator = self.replacement;
+            }
+            self.parent.vtable.free(self.parent.ptr, memory, alignment, ret_addr);
+        }
+    };
+    try ClientSlot.initializeProcessRuntime();
+    var probe = DriftAllocator{
+        .parent = std.heap.page_allocator,
+        .replacement = std.heap.c_allocator,
+    };
+    const allocator = probe.allocator();
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds),
+    );
+    defer _ = c.close(fds[1]);
+    var source = fixtureClient(allocator, 0xF504);
+    source.fd = fds[0];
+    source.build_id = try allocator.dupe(u8, "build");
+    source.lifecycle = try allocator.dupe(u8, "running");
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, source.host_id);
+    probe.client = &slot.current.client;
+    var binding: contract.PreparedAttachmentBinding = .{};
+    var lease: lease_mod.ConnectionLease = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(
+        &binding,
+        &lease,
+        0x4504,
+    );
+    try slot.current.cleanup_registry.bindStream(
+        reservation.cleanup,
+        reservation.identity,
+        9,
+    );
+    const ended_payload = "{\"event\":\"runtime.ended\"}";
+    const event_wire = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .event, .stream_id = 9 },
+        ended_payload,
+    );
+    const snapshot_wire = try framing.encodeFrame(
+        allocator,
+        .{
+            .kind = .snapshot_chunk,
+            .stream_id = 99,
+            .flags = protocol.Flags.end_stream,
+        },
+        "snapshot",
+    );
+    try socket_server.writeAll(fds[1], event_wire);
+    try socket_server.writeAll(fds[1], snapshot_wire);
+    _ = try slot.current.client.readSnapshot(99);
+    const hint = (try slot.current.client.peekEndedEventForStream(9)).candidate;
+    var scratch: client_mod.EndedPurgeScratch = .{};
+    var preparation: EndedPurgePreparation = .{};
+    try slot.prepareEndedPurge(37, reservation, 9, hint, &scratch, &preparation);
+    probe.armed = true;
+    try std.testing.expectEqual(
+        ClientSlot.EndedPurgeResult.purged,
+        try slot.commitEndedPurge(&scratch, &preparation),
+    );
+    try std.testing.expect(probe.drifted);
+    try std.testing.expect(slot.streamOperationPermitIdle());
+    try std.testing.expectEqual(
+        @intFromEnum(EndedPurgePreparationLifecycle.consumed),
+        @as(*const u8, @ptrCast(&preparation.lifecycle)).*,
+    );
+    try std.testing.expectEqual(@as(c.fd_t, -1), slot.current.client.fd);
+}
+
+test "CR3a-2c2b3b B3b-O product clean commit purges ended event and consumes paired authority" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds),
+    );
+    defer _ = c.close(fds[1]);
+    var source = fixtureClient(allocator, 0xF502);
+    source.fd = fds[0];
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0xF502);
+    defer slot.deinit();
+    var binding: contract.PreparedAttachmentBinding = .{};
+    var lease: lease_mod.ConnectionLease = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0x4502);
+    try slot.current.cleanup_registry.bindStream(
+        reservation.cleanup,
+        reservation.identity,
+        9,
+    );
+    defer {
+        slot.current.cleanup_registry.settleBoundDrop(
+            reservation.cleanup,
+            reservation.identity,
+            9,
+        ) catch @panic("B3b-O clean product binding cleanup drifted");
+        slot.current.pin_owner.cleanup_pin_count -= 1;
+        binding.lifecycle = .terminal;
+    }
+
+    const ended_payload = "{\"event\":\"runtime.ended\"}";
+    const event_wire = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .event, .stream_id = 9 },
+        ended_payload,
+    );
+    defer allocator.free(event_wire);
+    const snapshot_wire = try framing.encodeFrame(
+        allocator,
+        .{
+            .kind = .snapshot_chunk,
+            .stream_id = 99,
+            .flags = protocol.Flags.end_stream,
+        },
+        "snapshot",
+    );
+    defer allocator.free(snapshot_wire);
+    try socket_server.writeAll(fds[1], event_wire);
+    try socket_server.writeAll(fds[1], snapshot_wire);
+    const snapshot = try slot.current.client.readSnapshot(99);
+    defer allocator.free(snapshot);
+    try std.testing.expectEqualStrings("snapshot", snapshot);
+
+    const hint = (try slot.current.client.peekEndedEventForStream(9)).candidate;
+    var scratch: client_mod.EndedPurgeScratch = .{};
+    var preparation: EndedPurgePreparation = .{};
+    try slot.prepareEndedPurge(
+        29,
+        reservation,
+        9,
+        hint,
+        &scratch,
+        &preparation,
+    );
+    try std.testing.expectEqual(
+        ClientSlot.EndedPurgeResult.purged,
+        try slot.commitEndedPurge(&scratch, &preparation),
+    );
+    try std.testing.expectEqual(EndedPurgePreparationLifecycle.consumed, preparation.lifecycle);
+    try std.testing.expect(slot.streamOperationPermitIdle());
+    try std.testing.expectEqual(
+        client_mod.EndedEventPeek.not_ended,
+        try slot.current.client.peekEndedEventForStream(9),
+    );
+    try std.testing.expect(slot.current.client.firstPoisonReason() == null);
 }
 
 test "CR3a-2c2b2 corrupt ended preparation poisons once and rolls back permit" {

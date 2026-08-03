@@ -1265,15 +1265,22 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "ClientSlot", .kind = "const", .visibility = "pub", .modifier = "", .name = "ProcessRuntimeInitError" },
                 .{ .parent = "ClientSlot", .kind = "const", .visibility = "pub", .modifier = "", .name = "EndedPurgeCommitError" },
                 .{ .parent = "ClientSlot", .kind = "const", .visibility = "pub", .modifier = "", .name = "EndedPurgeResult" },
+                .{ .parent = "ClientSlot", .kind = "const", .visibility = "private", .modifier = "", .name = "PreparedStreamOperationPermitConsume" },
                 .{ .parent = "ClientSlot", .kind = "const", .visibility = "private", .modifier = "", .name = "ExclusiveTeardownReservation" },
                 .{ .parent = "ClientSlot", .kind = "const", .visibility = "private", .modifier = "", .name = "RegisteredClientOperation" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "initializeProcessRuntime" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "commitEndedPurge" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "streamOperationPermitRawTagsValid" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "streamOperationPermitSeal" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "prepareStreamOperationPermitConsume" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "consumeStreamOperationPermitUnchecked" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "beginRegisteredClientOperation" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "endRegisteredClientOperation" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "beginRegisteredExclusiveTeardown" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "abortRegisteredExclusiveTeardown" },
-                .{ .parent = "EndedPurgePreparation", .kind = "fn", .visibility = "pub", .modifier = "", .name = "tombstoneForCommit" },
+                .{ .parent = "EndedPurgePreparation", .kind = "fn", .visibility = "private", .modifier = "", .name = "rawTagsValid" },
+                .{ .parent = "EndedPurgePreparation", .kind = "fn", .visibility = "private", .modifier = "", .name = "sealForCommit" },
+                .{ .parent = "EndedPurgePreparation", .kind = "fn", .visibility = "private", .modifier = "", .name = "consumeAfterPermit" },
             },
         },
     };
@@ -1353,10 +1360,13 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
         allocator,
         client_slot,
         "EndedPurgePreparationLifecycle",
-        &.{ "empty", "prepared", "aborted" },
-        "consumed",
+        &.{ "empty", "prepared", "committing", "consumed", "aborted" },
+        "__forbidden__",
     );
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(client_slot, "const State = enum(u8) { empty, live, consume_reserved, consumed };"));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(client_slot, "state: std.atomic.Value(u8) = .init(@intFromEnum(State.empty)),"));
     try expectPreparedEndedPurgeCommitSchema(allocator, client);
+    try expectPreparedStreamOperationPermitConsumeSchema(allocator, client_slot);
     inline for (.{
         "prepareEndedPurgeCommit",
         "commitEndedPurgePrepared",
@@ -1528,14 +1538,55 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
         );
     for ([_][]const u8{
         "tryAcquireEndedPurgeExclusive",
-        "endedPurgeFenceIntruded",
         "releaseEndedPurgeExclusiveClean",
+    }) |exclusive_wrapper|
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            countIdentifierOutsideTopLevelTests(client_slot, exclusive_wrapper),
+        );
+    for ([_][]const u8{
+        "endedPurgeFenceIntruded",
         "commitEndedPurgeExclusiveTerminal",
     }) |exclusive_wrapper|
         try std.testing.expectEqual(
             @as(usize, 0),
             countIdentifierOutsideTopLevelTests(client_slot, exclusive_wrapper),
         );
+    inline for (.{
+        "prepareEndedPurgeCommit",
+        "commitEndedPurgePrepared",
+        "finalizeEndedPurgeNoFreePoison",
+    }) |client_method| try std.testing.expectEqual(
+        @as(usize, 1),
+        countIdentifierOutsideTopLevelTests(client_slot, client_method),
+    );
+    try expectContainerMethodMarkersInOrder(
+        allocator,
+        client_slot,
+        "ClientSlot",
+        "commitEndedPurge",
+        &.{
+            "tryAcquireEndedPurgeExclusive",
+            "prepareEndedPurgeCommit",
+            "quarantine_registry.reserve",
+            "prepareStreamOperationPermitConsume",
+            "sealForCommit",
+            "commitEndedPurgePrepared",
+            "quarantine_registry.commit",
+            "quarantine_registry.consumeCommitted",
+            "finalizeEndedPurgeNoFreePoison",
+            "consumeStreamOperationPermitUnchecked",
+            "consumeAfterPermit",
+        },
+    );
+    try expectContainerMethodMarkerCount(
+        allocator,
+        client_slot,
+        "ClientSlot",
+        "commitEndedPurge",
+        "unregisterStreamOperationPermit",
+        0,
+    );
     try expectEndedPurgeInventorySubtotalMigration(allocator, client);
     try expectEndedPurgeScratchDelta(allocator, client);
     try expectRootErrorSetExact(
@@ -5718,7 +5769,10 @@ test "CR3a-2c1 initial snapshot ownership stays final-address and generation-bou
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(runtime, "self.client.readSnapshot("));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(transport_product, "pub fn readInitialSnapshot("));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(transport_product, ".readInitialSnapshotGuarded("));
-    try std.testing.expectEqual(@as(usize, 1), countOccurrences(slot, ".readSnapshot("));
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countIdentifierOutsideTopLevelTests(slot, "readSnapshot"),
+    );
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(runtime, ".readInitialSnapshot("));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(owner_type, "self_addr: usize = 0"));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(owner_type, "actual_allocator:"));
@@ -6932,6 +6986,64 @@ fn expectPreparedEndedPurgeCommitSchema(
         const type_node = field.ast.type_expr.unwrap() orelse return error.TestUnexpectedResult;
         try std.testing.expectEqualStrings(expected.type_name, nodeSource(&tree, source, type_node));
     }
+}
+
+fn expectPreparedStreamOperationPermitConsumeSchema(
+    allocator: std.mem.Allocator,
+    source: [:0]const u8,
+) !void {
+    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    defer tree.deinit(allocator);
+    const client_slot_members = findRootContainerMembers(&tree, "ClientSlot") orelse
+        return error.TestUnexpectedResult;
+    var receipt_decl: ?std.zig.Ast.Node.Index = null;
+    for (client_slot_members) |member| {
+        const tuple = declarationTuple(&tree, "ClientSlot", member);
+        if (std.mem.eql(u8, tuple.name, "PreparedStreamOperationPermitConsume"))
+            receipt_decl = member;
+    }
+    const variable = tree.fullVarDecl(receipt_decl orelse return error.TestUnexpectedResult) orelse
+        return error.TestUnexpectedResult;
+    const init = variable.ast.init_node.unwrap() orelse return error.TestUnexpectedResult;
+    var receipt_buffer: [2]std.zig.Ast.Node.Index = undefined;
+    const receipt = tree.fullContainerDecl(&receipt_buffer, init) orelse
+        return error.TestUnexpectedResult;
+    const fields = [_]struct { name: []const u8, type_name: []const u8 }{
+        .{ .name = "self_addr", .type_name = "usize" },
+        .{ .name = "registry_index", .type_name = "u16" },
+        .{ .name = "registry_id", .type_name = "u64" },
+        .{ .name = "slot_addr", .type_name = "usize" },
+        .{ .name = "slot_incarnation", .type_name = "u64" },
+        .{ .name = "node_incarnation", .type_name = "u64" },
+        .{ .name = "operation_generation", .type_name = "u64" },
+        .{ .name = "permit_seal", .type_name = "owner_seal.Digest" },
+        .{ .name = "lifecycle", .type_name = "PreparedStreamOperationPermitConsume.Lifecycle" },
+    };
+    try std.testing.expectEqual(fields.len + 1, receipt.ast.members.len);
+    const lifecycle_decl = tree.fullVarDecl(receipt.ast.members[0]) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(
+        "Lifecycle",
+        tree.tokenSlice(lifecycle_decl.ast.mut_token + 1),
+    );
+    const lifecycle_init = lifecycle_decl.ast.init_node.unwrap() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(
+        "enum(u8) { pristine, prepared, consumed }",
+        nodeSource(&tree, source, lifecycle_init),
+    );
+    var lifecycle_buffer: [2]std.zig.Ast.Node.Index = undefined;
+    const lifecycle = tree.fullContainerDecl(&lifecycle_buffer, lifecycle_init) orelse
+        return error.TestUnexpectedResult;
+    try expectFieldNames(&tree, lifecycle.ast.members, &.{ "pristine", "prepared", "consumed" });
+    for (fields, 0..) |field, index|
+        try expectTypedField(
+            &tree,
+            source,
+            receipt.ast.members[index + 1],
+            field.name,
+            field.type_name,
+        );
 }
 
 fn expectClientOperationFenceSchema(

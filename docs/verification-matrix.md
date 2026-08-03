@@ -675,8 +675,8 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   last release 뒤 Client/node exact-one destroy를 검증한다. fork child PID-domain mismatch에서 low-level mint/consume/tryDeinit의
   typed reject와 callback/free/owner mutation 0, strict 제품 wrapper의 fail-stop을 구분해 검증한다. HostPool membership
   lease와 ConnectionLease는 별개이며 external-pump owner graph는 변경하지 않는다. 증거 수준은 production-type unit이다.
-- CR3a-2(진행, **2a·2b·2c1·2c2a·2c2b1·2c2b2·2c2b3a·2c2b3b-F·2c2b3b-S 구현**,
-  2c2b3b-O·2c2c~e 계획): 2c2a는 snapshot 전용 permit을 kind-tagged common
+- CR3a-2(진행, **2a·2b·2c1·2c2a·2c2b1·2c2b2·2c2b3a·2c2b3b-F·2c2b3b-S·2c2b3b-O 구현**,
+  2c2c~e 계획): 2c2a는 snapshot 전용 permit을 kind-tagged common
   `StreamOperationPermit`/단일 active tuple/process registry로 migration하고 `GenerationBatchRegistry.streamIdle`이
   reserved/ingress/live/releasing 전 상태를 purge blocker로 분류한다. 2c2b1은 대상 stream의 첫 event에 대한 무할당·무변경
   ended hot peek와 비권위적 index hint까지만 구현한다. 2c2b2는 exact binding과 common permit 아래 fixed inline scratch로 전체 Client
@@ -797,6 +797,17 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   `Registry.State|init|reserve|release|commit|consumeCommitted` 및 persistent-session-host의 exact field schema를 함께 고정한다.
   proof는 runtime authentication capability가 아니므로 semantic-exact scalar copy를 거부한다고 주장하지 않고, B3b-O exact caller와
   `Registry.consumeCommitted→finalizer` source order가 제품 authenticity를 소유한다.
+  **B3b-O는 구현 완료다.** `EndedPurgePreparation`의 final-address
+  `prepared→committing→consumed` 전이와 abort/재시도 차단, Client prepare/commit/finalize production callsite exact one,
+  clean의 reservation release→node permit→transport receipt→exclusive release, drift의 Registry commit→consume→finalizer→node permit→transport receipt를
+  product-type test와 source-order oracle로 먼저 실패시킨다. Debug·ReleaseFast subprocess에서 validated suffix mismatch가 정상 반환이나 다음 admission 없이
+  fail-stop하는 증거를 Debug·ReleaseFast 및 boundary에서 green으로 고정한다.
+  permit registry는 mutex-protected register와 per-entry atomic `empty|live|consume_reserved|consumed` terminal consume을 분리한다. callback 전
+  final-address consume receipt 준비 뒤 callback 후 `consume_reserved→consumed` CAS, node tuple clear, preparation consume,
+  `consumed→empty` reclaim만 허용하며 entry payload clear는 0이다. `consumed` 동안 같은 index 등록은 실패해야 한다.
+  canonical operation-thread 선검증과 same-thread exact-one consume, copied/moved/replayed receipt, 같은 index old-id ABA,
+  CAS→tuple clear→receipt consume의 무개입 source order와 foreign-thread teardown 선거부, sibling entry progress,
+  initial snapshot abort/consume 무회귀와 raw state 전수 검증을 Debug·ReleaseFast에 고정한다.
   `ClientSlot.initializeProcessRuntime`을 AppSession의 fork 가능 작업 전에 명시적으로 호출하고 pre-fork parent PID `init` exact-one과
   같은 PID idempotence, non-test `process_runtime_bootstrap_fixture.zig`의 미초기화 ClientSlot 생성 거부와 bootstrap 뒤 실제
   ClientSlot 생성·valid·deinit 및 macOS fork child의 mutex-before-reject 0,

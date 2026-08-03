@@ -1171,10 +1171,29 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
      B3b-S 완료나 제품 caller 개방을 뜻하지 않는다. 기존 `ClientOwnership`에는
      `quarantined_no_free` arm만 추가한다.
    - B3b-S/O의 `client_slot.zig` top-level 신규 exact allowlist는 import `ended_purge_quarantine`, process singleton
-     `ended_purge_quarantine_registry`, PID bootstrap latch `process_runtime_pid` 세 개뿐이다. `ClientSlot` nested declaration은
-     `ProcessRuntimeInitError`, `EndedPurgeCommitError`, `EndedPurgeResult`, method `initializeProcessRuntime`, `commitEndedPurge`만, 기존
-     `EndedPurgePreparation`에는 lifecycle `committing|consumed`와 method `sealForCommit|consumeAfterPermit`만 허용한다.
-     preparation은 transport incarnation/binding과 node permit을 봉인한 local transport receipt이며 별도 receipt DTO를 추가하지 않는다.
+     `ended_purge_quarantine_registry`, PID bootstrap latch `process_runtime_pid` 세 개뿐이다. B3b-O는 기존
+     `StreamOperationRegistryEntry`에 nested `State=enum(u8){empty,live,consume_reserved,consumed}`와 atomic raw state만 추가하고
+     live payload `{id,permit}`는 다음 mutex-protected register 전까지 immutable하게 유지한다. `ClientSlot` nested declaration은
+     `ProcessRuntimeInitError`, `EndedPurgeCommitError`, `EndedPurgeResult`, private final-address
+     `PreparedStreamOperationPermitConsume`, method `initializeProcessRuntime`, `commitEndedPurge`, private
+     `streamOperationPermitRawTagsValid|streamOperationPermitSeal|prepareStreamOperationPermitConsume|
+     consumeStreamOperationPermitUnchecked`만, 기존
+     `EndedPurgePreparation`에는 lifecycle `committing|consumed`와 private raw-tag gate `rawTagsValid`, method
+     `sealForCommit|consumeAfterPermit`만 허용한다.
+     `PreparedStreamOperationPermitConsume`은 `{self_addr,registry_index,registry_id,slot_addr,slot_incarnation,node_incarnation,
+     operation_generation,permit_seal,lifecycle}` exact fields와 nested `Lifecycle=enum(u8){pristine,prepared,consumed}`만 갖는다.
+     preparation은 transport incarnation/binding을 봉인한 local transport receipt이며 permit terminal receipt와 권위를 공유하지 않는다.
+     register는 global mutex 아래 empty entry의 payload를 쓴 뒤 state를 release `live`로 게시한다. callback 전 permit-consume prepare는
+     같은 mutex 아래 exact id/payload와 node active tuple을 검증하고 state를 `live→consume_reserved`로 CAS한 뒤 final-address receipt를
+     마지막으로 게시한다. 이후 abort/retry는 없으며 callback 뒤 unchecked consume은 canonical operation thread를 첫 graph 접근 전에
+     fail-close 검증한 뒤 receipt와 immutable payload를 scalar-first로 검증하고
+     `consume_reserved→consumed` 단일 CAS, node active tuple clear, receipt consumed를 수행하고 preparation receipt consumed 게시 뒤
+     `consumed→empty` atomic reclaim만 실행한다. 이 suffix에는 mutex·scan·allocation·callback·fallible lookup이 0이다.
+     `consumed`는 transport receipt 게시 전 같은 index 재등록을 막는다. reclaim 뒤에도 entry payload를 지우지 않으며 다음 register가 mutex 아래 덮어써 concurrent reader와의 data race를 막는다.
+     old receipt는 checked-monotonic registry id와 slot/node incarnation 때문에 같은 index 재사용 뒤에도 실패한다. 이 API는
+     teardown과 같은 operation-thread confined suffix이며 multi-thread winner 경쟁을 계약하지 않는다. cross-thread 호출은 node tuple,
+     receipt lifecycle, registry payload를 읽기 전에 거부하고 동일 owner thread의 copy/replay에서만 exact-once를 보장한다.
+     따라서 CAS와 tuple clear 사이에 합법적인 teardown interleaving은 없고 boundary source-order oracle이 연속 suffix를 고정한다.
      B3b-F가 먼저 추가하는 별도 private exact allowlist의
      `RegisteredClientOperation{node}`와 `beginRegisteredClientOperation|endRegisteredClientOperation`은 process registry lock 아래
      `entry.node_addr == self.current`를 역참조 전에 확인하고 Client shared fence를 잡은 뒤, registry가 선택한 exact node capability로만
@@ -1321,24 +1340,27 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
        preparation: *EndedPurgePreparation,
    ) EndedPurgeCommitError!EndedPurgeResult
 
-   pub fn sealForCommit(
+   fn sealForCommit(
        self: *EndedPurgePreparation,
        slot: *ClientSlot,
    ) bool
 
-   pub fn consumeAfterPermit(
+   fn consumeAfterPermit(
        self: *EndedPurgePreparation,
        slot: *ClientSlot,
-   ) bool
+   ) void
    ```
 
    `EndedPurgePreparationLifecycle`의 exact arms는 `empty|prepared|committing|consumed|aborted`다.
    `ClientSlot.commitEndedPurge`의 preparation은 `prepareEndedPurge`가 같은 final address에 게시한 exact owner이고 별도 inventory,
-   permit, binding 또는 transport receipt 인자를 받지 않는다. `sealForCommit`은 preparation/slot/PID/thread/binding/permit/inventory
-   seal과 paired-consume precondition을 전부 확인한 뒤 `prepared→committing`만 게시한다. fields는 synchronous commit이 끝날 때까지
+   permit, binding 또는 transport receipt 인자를 받지 않는다. 내부 stack-final-address permit terminal receipt는 public 인자가 아니며
+   callback 전에만 준비한다. `sealForCommit`은 preparation/slot/PID/thread/binding/permit/inventory
+   seal과 prepared permit-consume receipt를 전부 확인한 뒤 `prepared→committing`만 게시한다. fields는 synchronous commit이 끝날 때까지
    immutable evidence로 남고 authority seal은 committing lifecycle을 포함해 다시 봉인된다. 이 전이 뒤 abort/retry/다른 commit은 0이다.
-   `consumeAfterPermit`은 prevalidated no-fail suffix에서 node permit이 exact unchecked consume된 직후 `committing→consumed`만 게시하며,
-   lifecycle/seal mismatch 또는 permit이 아직 live이면 `false`이고 caller는 즉시 `@panic`한다. consumed preparation의 retained scalar는
+   private unchecked permit consume이 prevalidated no-fail suffix에서 prepared receipt의 `consume_reserved→consumed` CAS와 node tuple
+   clear 및 permit receipt consumed를 게시하고, 그 직후 `consumeAfterPermit`이 `committing→consumed`를 게시한 뒤 entry를
+   `consumed→empty`로 reclaim한다. lifecycle/seal mismatch, permit live 또는 reclaim CAS 실패는 leaf 내부에서 즉시 fail-stop한다.
+   consumed preparation의 retained scalar는
    진단 evidence일 뿐 다시 dereference하거나 authority로 사용하지 않는다. clean과 drift 모두 node permit→preparation transport receipt
    사이에 callback, lock, allocation, fallible lookup과 public reentry가 0이며 둘 중 하나만 consumed인 정상 반환은 없다.
 
@@ -1349,8 +1371,9 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    `PreparedEndedPurgeCommit` consumed를 함께 본다.
    B3b-O source/runtime gate가 `Registry.commit → Registry.consumeCommitted → finalizer` 뒤 node permit→transport receipt paired consume
    순서를 고정한다. validated `Registry.commit`, `consumeCommitted`, finalizer identity/lifecycle/seal/proof 또는 terminal publication이 실패하면
-   `@panic`으로 process fail-stop하며 복구나 후속 consume을 시도하지 않는다. 별도 non-test subprocess fixture가 Debug/ReleaseFast에서
-   2초 watchdog 안의 abnormal nonzero exit와 failure marker 뒤 code path 0을 고정한다. B3b-S에서는 세 method의 test 밖 production
+   `@panic`으로 process fail-stop하며 복구나 후속 consume을 시도하지 않는다. private suffix를 production API로 노출하지 않는 별도
+   filtered test subprocess가 Debug/ReleaseFast에서 2초 watchdog 안의 abnormal nonzero exit와 failure marker 뒤 code path 0을
+   고정한다. B3b-S에서는 세 method의 test 밖 production
    caller가 0이고 B3b-O에서만 `ClientSlot.commitEndedPurge`가 각 method의 production source callsite exact one이다. runtime에서
    finalizer는 drift에 exact once, clean에 0회다.
    proof의 mismatched/cross-operation/cross-node scalar와 consumed preparation replay는 fail-stop하지만, trusted call이 전달한

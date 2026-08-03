@@ -5,6 +5,7 @@
 //! does not know about AppSession, Metal DTOs, or terminal `ResolvedAppearance`.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const maru = @import("maru");
 const chrome = maru.chrome;
 const renderer = maru.renderer;
@@ -263,6 +264,10 @@ pub fn shapeRun(
 }
 
 fn shapeUnresolvedRun(allocator: std.mem.Allocator, run: Request.Run, scale_milli: u32) ![]UnresolvedGlyph {
+    // The boundary/portable test targets link this module without the macOS CoreText object
+    // file. Keep the product-only bridge unreachable there instead of leaving an undefined
+    // native symbol merely because a detached-worker test imports its type.
+    if (builtin.os.tag != .macos) return error.UnsupportedSystemText;
     const point_size = chrome.ui.typography.token(run.role).point_size;
     const scaled_size = @as(f64, @floatFromInt(point_size)) * @as(f64, @floatFromInt(scale_milli)) / 1000.0;
     var native: bridge.NativeChromeTextShapeResult = .{};

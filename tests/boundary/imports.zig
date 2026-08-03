@@ -70,7 +70,7 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     // `topLevelTestTokenMask` replaced the AST range approximation. Keep the reviewed product
     // inventory aligned with that lexical scanner so a source that has not changed since main
     // does not make every unrelated PR fail the boundary gate.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 3, .digest_hex = "5ecb5e0979a923b2d1297f8069861fe358868800fdf6c71244b93b1d7c503b55" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 3, .digest_hex = "1eaa9114c99412028f244315bd02f51d4f4059168a6c5f885a4967fe1d6c8565" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

@@ -3,9 +3,11 @@
 //! (rich의 sub-cell 정밀도 대비). 컴포넌트는 NativeMetalCell·Metal·atlas를 모른다.
 //! 단일 출처: docs/chrome-strategy.md §5.2, docs/layering-and-portability.md.
 
+const std = @import("std");
 const tokens = @import("tokens.zig");
 const Rgb = @import("../color.zig").Rgb;
 const typography = @import("ui/typography.zig");
+const text_layout = @import("text_layout.zig");
 
 /// 픽셀 좌표 한 점.
 pub const Px = struct { x: i32, y: i32 };
@@ -92,6 +94,12 @@ pub const Op = union(enum) {
         /// keeps its legacy default; the measured Chrome path consumes this instead of guessing
         /// from color/bold/source text.
         text_role: typography.ChromeTextRole = .body,
+        /// The component-owned available width and overflow anchor.  Legacy cell lowering still
+        /// derives its grid plan here, while measured rich text receives the untouched source and
+        /// uses the same constraint in device pixels.  Keeping this on the semantic op prevents
+        /// either path from inventing a second title/search truncation policy.
+        max_cols: u16 = std.math.maxInt(u16),
+        anchor: text_layout.Anchor = .head,
         wide_icons: bool = false,
     };
 

@@ -270,8 +270,17 @@ shortcut은 B1 첫 slice에서는 Text child가 명시적으로 제공할 때만
 
 1. **B1-doc (현재 문서 slice):** 이 계약, 상태 표, verification gate를 고정한다. code/API는 추가하지 않는다.
 2. **B1-text:** final text content rect와 pixel glyph placement artifact를 제품 rich Chrome path에
-   추가한다. cell row로 절삭되는 기존 action text를 이 path로 자동 전환하지 않는다. text unit,
-   lowering unit, Metal Lab readback으로 fractional y와 CJK/ellipsis/icon alignment를 증명한다.
+   추가한다. 첫 구현은 Session Dock의 한 줄 text op를 대상으로 한다. macOS adapter는
+   `CTFontCreateUIFontForLanguage`의 system UI primary와 role weight로 **문자열 전체를 한 CTLine으로
+   shape**하고, 그 실제 glyph advance·baseline·fallback face를 renderer-neutral record로 돌려준다.
+   `ChromeTextRole`과 final content rect는 이 요청의 닫힌 입력이며, terminal `font.*`, `DrawCell`,
+   `row × cell_height`는 이 경로의 입력이 아니다. ellipsis는 같은 CTLine 측정에서 가장 긴 grapheme
+   prefix를 다시 shape하여 정하고, 중앙 정렬은 ink bounds가 아닌 role line-height box를 content rect에
+   맞춰 한 번만 계산한다. native handle은 frame 밖으로 나가지 않으며, 결과 record는 기존
+   `RendererState`/shared glyph atlas/raster upload를 통해 `GpuGlyph`의 final pixel rect로만 내려간다.
+   즉 별도 Chrome atlas, label별 y nudge, terminal grid ABI 변경은 금지한다. cell row로 절삭되는 기존
+   action text를 이 path로 자동 전환하지 않는다. text unit, lowering unit, Metal Lab readback으로
+   fractional y와 CJK/ellipsis/icon alignment를 증명한다.
 3. **B1-button:** `ui/button.zig`·`UiNode.button`·paint/interaction을 추가한다. default/hover/
    pressed/focus/disabled, ButtonSize floor보다 작은 max fail-close, zero/two/non-Text child fail-close,
    narrow CJK ellipsis, pointer·keyboard action parity를 headless와 Lab fixture로 고정한다.
@@ -294,7 +303,11 @@ primary face가 없는 한글을 시스템 fallback으로 그린 경우를 다�
 오인하지 않으며, PR 본문은 이 수치와 PNG를 함께 제시한다.
 B1-archive migration은 기존 `mise run macos-agent-session-archive-smoke`의 pointer/keyboard resume·reveal
 parity도 다시 통과해야 한다. frame path는 artifact/cache만 읽고 font I/O·shape worker wait·provider I/O를
-하지 않으며, artifact invalidation은 text/style/rect/icon/scale 변화에만 일어난다.
+하지 않으며, artifact invalidation은 text/style/rect/icon/scale 변화에만 일어난다. B1-text의 CoreText
+호출은 candidate artifact build에서만 허용되고, published artifact cache hit은 native shape 호출 없이
+renderer-neutral glyph record와 final placement만 복제한다. system UI primary face/weight/scale/fallback
+generation 또는 text/content rect/overflow policy가 바뀌면 cache를 폐기하고, terminal font picker 변경만으로
+폐기해서는 안 된다.
 
 ## 3. typed style과 responsive sizing
 

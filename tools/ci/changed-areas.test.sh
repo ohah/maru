@@ -66,6 +66,10 @@ expect "code=false web=true docs=false" web/package.json web/bun.lock
 # 문서와 코드가 섞이면 코드 쪽 축이 이긴다(문서만이라는 판정은 문서'만' 바뀔 때 성립한다).
 expect "code=true web=false docs=true" docs/architecture.md src/core.zig
 
+# docs/configuration.md는 @embedFile로 빌드에 들어가는 **코드**다. 문서로 분류하면 표 행 삭제나
+# range 오기입이 src/config/schema.zig의 doc-drift 테스트를 건너뛴다.
+expect "code=true web=false docs=false" docs/configuration.md
+
 # 파이프라인 정의는 어느 축에 영향을 줄지 파일 안을 봐야 알므로 둘 다 켠다.
 expect "code=true web=true docs=false" .mise.toml
 expect "code=true web=true docs=false" .github/workflows/ci.yml
@@ -73,6 +77,29 @@ expect "code=true web=true docs=false" tools/ci/changed-areas.sh
 
 # 분류되지 않은 새 경로는 fail-safe로 전부 실행한다 — 목록을 갱신하지 않아도 게이트가 열리지 않는다.
 expect "code=true web=true docs=false" newtop/thing.txt
+
+# 비ASCII 경로. git 기본 core.quotePath는 `"docs/\355\225\234.md"`로 내보내 앞의 따옴표가 docs/* 매칭을
+# 깨뜨린다 — 문서 하나에 macOS 러너가 전부 도는 과대 판정이 된다.
+expect "code=false web=false docs=true" "docs/한글문서.md"
+
+# rename으로 코드를 문서 경로에 숨길 수 없어야 한다. git은 rename을 감지하면 **새 경로만** 내보내므로,
+# `src/*.zig` → `docs/*.md` 이동이 "문서 전용"으로 오판되면 Zig 소스가 사라진 채 게이트가 열린다.
+git -C "$work" checkout -q "$base"
+mkdir -p "$work/src"
+printf 'const a = 1;\nconst b = 2;\nconst c = 3;\n' >"$work/src/moved.zig"
+git -C "$work" add src/moved.zig
+git -C "$work" commit -qm add-source
+renamed_base=$(git -C "$work" rev-parse HEAD)
+mkdir -p "$work/docs"
+git -C "$work" mv src/moved.zig docs/moved.md
+git -C "$work" commit -qm rename-source-to-doc
+renamed=$(cd "$work" && sh "$script" "$renamed_base" "$(git -C "$work" rev-parse HEAD)" 2>/dev/null | tr '\n' ' ')
+if [ "${renamed% }" = "code=true web=false docs=true" ]; then
+	echo "ok: src -> docs rename -> Zig 게이트 유지"
+else
+	echo "FAIL: src -> docs rename -> ${renamed% }"
+	failures=$((failures + 1))
+fi
 
 # base/head가 없거나(push·schedule) SHA가 못 미더우면 전부 실행한다.
 noargs=$(cd "$work" && sh "$script" "" "" 2>/dev/null | tr '\n' ' ')

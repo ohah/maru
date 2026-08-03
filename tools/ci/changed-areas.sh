@@ -43,7 +43,15 @@ if [ -z "$base" ] || [ -z "$head" ]; then
 fi
 
 # three-dot diff: base 브랜치가 그 사이 전진했어도 merge-base 이후의 PR 변경분만 본다.
-if ! files=$(git diff --name-only "$base...$head" 2>/dev/null); then
+#
+# --no-renames: rename을 감지하면 git이 **새 경로만** 출력한다. `src/foo.zig`를 `docs/foo.md`로
+# 옮기면 목록에 `docs/foo.md`만 남아 "문서 전용 변경"으로 오판되고, Zig 소스가 사라졌는데 Zig
+# 게이트를 건너뛴다(실측 확인). rename 감지를 끄면 삭제된 원본과 추가된 대상이 둘 다 나온다.
+#
+# core.quotePath=false: 기본값이면 비ASCII 경로를 `"docs/\355\225\234.md"`처럼 따옴표+8진 이스케이프로
+# 내보내 앞의 `"`가 `docs/*` 매칭을 깨뜨린다. fail-safe라 전 영역 실행으로 틀리지만, 한글 문서 하나에
+# macOS 러너가 전부 도는 것은 이 스크립트의 목적을 무너뜨린다.
+if ! files=$(git -c core.quotePath=false diff --no-renames --name-only "$base...$head" 2>/dev/null); then
 	echo "changed-areas: git diff $base...$head 실패 — 전 영역을 실행한다" >&2
 	emit_all
 	exit 0
@@ -64,6 +72,13 @@ docs=false
 while IFS= read -r path; do
 	[ -n "$path" ] || continue
 	case "$path" in
+	# **빌드 입력인 문서**. build.zig가 `docs/configuration.md`를 anonymous import로 등록하고
+	# src/config/schema.zig가 @embedFile("config_doc_md")로 컴파일 타임에 박는다. 표에서 키 행을
+	# 지우거나 range 숫자를 틀리게 고치면 `zig build test`의 doc-drift 테스트 두 개가 깨지므로,
+	# 이 파일은 문서가 아니라 코드로 취급해야 게이트가 열리지 않는다.
+	docs/configuration.md)
+		code=true
+		;;
 	# 문서·라이선스와 에이전트 로컬 설정. 제품 빌드에도 파이프라인에도 들어가지 않는다.
 	# docs/*.md는 check-config-docs가 런타임에 훑으므로 `check` job의 축소 실행이 계속 검증한다
 	# (tests/config_docs/keys.zig).

@@ -44,6 +44,10 @@ pub const Result = struct {
     /// (for example because the result queue allocation failed). The main
     /// actor must clear its spinner yet retain the prior completed snapshot.
     retain_previous: bool = false,
+    /// A cancelled generation is never allowed to replace the visible snapshot. The host uses
+    /// this truthful completion to clear its spinner and, if the dock was reopened, request the
+    /// newest generation after this worker has released its descriptors and allocations.
+    cancelled: bool = false,
 
     pub fn deinit(self: *Result, allocator: std.mem.Allocator) void {
         for (self.records.items) |*record| record.deinit(allocator);
@@ -60,7 +64,11 @@ const State = struct {
     results: std.ArrayList(Result) = .empty,
     cache: std.ArrayList(CacheEntry) = .empty,
     inflight: bool = false,
+    inflight_generation: u64 = 0,
+    next_generation: u64 = 1,
+    cancelled_generation: u64 = 0,
     completion_without_snapshot: bool = false,
+    completion_cancelled: bool = false,
     shutting_down: bool = false,
 
     fn release(self: *State) void {
@@ -74,7 +82,7 @@ const State = struct {
     }
 };
 
-const Job = struct { state: *State, home: []u8 };
+const Job = struct { state: *State, home: []u8, generation: u64 };
 
 /// A bounded, metadata-only candidate.  We collect these before reading JSONL so
 /// traversal order cannot make an old, large transcript spend the refresh budget
@@ -132,7 +140,12 @@ pub const Backend = struct {
             return false;
         }
         state.inflight = true;
+        const generation = state.next_generation;
+        state.next_generation +%= 1;
+        if (state.next_generation == 0) state.next_generation = 1;
+        state.inflight_generation = generation;
         state.completion_without_snapshot = false;
+        state.completion_cancelled = false;
         _ = state.refs.fetchAdd(1, .monotonic);
         state.mutex.unlock(state.io);
 
@@ -140,13 +153,25 @@ pub const Backend = struct {
             finishWithoutResult(state);
             return false;
         };
-        job.* = .{ .state = state, .home = home };
+        job.* = .{ .state = state, .home = home, .generation = generation };
         const thread = std.Thread.spawn(.{}, worker, .{job}) catch {
             state.allocator.destroy(job);
             finishWithoutResult(state);
             return false;
         };
         thread.detach();
+        return true;
+    }
+
+    /// Cooperative only: filesystem calls already in progress are allowed to return, but every
+    /// later candidate/file boundary observes this generation and discards its staged result.
+    /// The caller retains the current completed snapshot; it never receives an empty replacement.
+    pub fn cancel(self: *Backend) bool {
+        const state = self.state orelse return false;
+        state.mutex.lockUncancelable(state.io);
+        defer state.mutex.unlock(state.io);
+        if (!state.inflight or state.cancelled_generation == state.inflight_generation) return false;
+        state.cancelled_generation = state.inflight_generation;
         return true;
     }
 
@@ -157,7 +182,7 @@ pub const Backend = struct {
         if (state.results.items.len == 0) {
             if (!state.completion_without_snapshot) return null;
             state.completion_without_snapshot = false;
-            return .{ .complete = true, .retain_previous = true };
+            return .{ .complete = true, .retain_previous = true, .cancelled = state.completion_cancelled };
         }
         return state.results.orderedRemove(0);
     }
@@ -167,6 +192,7 @@ pub const Backend = struct {
         self.state = null;
         state.mutex.lockUncancelable(state.io);
         state.shutting_down = true;
+        state.cancelled_generation = state.inflight_generation;
         for (state.results.items) |*result| result.deinit(state.allocator);
         state.results.deinit(state.allocator);
         state.results = .empty;
@@ -181,27 +207,36 @@ pub const Backend = struct {
 fn finishWithoutResult(state: *State) void {
     state.mutex.lockUncancelable(state.io);
     state.inflight = false;
+    state.inflight_generation = 0;
+    state.completion_without_snapshot = true;
+    state.completion_cancelled = false;
     state.mutex.unlock(state.io);
     state.release();
 }
 
 fn worker(job: *Job) void {
     const state = job.state;
-    const published = scan(state, job.home);
+    const generation = job.generation;
+    const published = scan(state, job.home, generation);
     state.allocator.free(job.home);
     state.allocator.destroy(job);
 
     state.mutex.lockUncancelable(state.io);
     state.inflight = false;
-    if (!published and !state.shutting_down) state.completion_without_snapshot = true;
+    state.inflight_generation = 0;
+    const was_cancelled = state.cancelled_generation == generation;
+    if (!published and !state.shutting_down) {
+        state.completion_without_snapshot = true;
+        state.completion_cancelled = was_cancelled;
+    }
     state.mutex.unlock(state.io);
     state.release();
 }
 
-fn publish(state: *State, result: *Result) bool {
+fn publish(state: *State, generation: u64, result: *Result) bool {
     state.mutex.lockUncancelable(state.io);
     defer state.mutex.unlock(state.io);
-    if (state.shutting_down) {
+    if (state.shutting_down or state.cancelled_generation == generation) {
         result.deinit(state.allocator);
         return false;
     }
@@ -277,7 +312,7 @@ fn cacheParsed(state: *State, candidate: Candidate, parsed: *const archive.Parse
     };
 }
 
-fn scan(state: *State, home: []const u8) bool {
+fn scan(state: *State, home: []const u8, generation: u64) bool {
     const allocator = state.allocator;
     const io = state.io;
     var result: Result = .{};
@@ -294,7 +329,9 @@ fn scan(state: *State, home: []const u8) bool {
     }
 
     scanClaude(allocator, io, home, &claude_candidates, &result.partial);
+    if (cancelled(state, generation)) return false;
     scanCodex(allocator, io, home, &codex_candidates, &result.partial);
+    if (cancelled(state, generation)) return false;
     claude_candidates.appendSlice(allocator, codex_candidates.items) catch return false;
     codex_candidates.clearRetainingCapacity(); // ownership moved into claude_candidates
     std.mem.sort(Candidate, claude_candidates.items, {}, struct {
@@ -305,6 +342,7 @@ fn scan(state: *State, home: []const u8) bool {
 
     var remaining_bytes = max_total_bytes;
     for (claude_candidates.items) |candidate| {
+        if (cancelled(state, generation)) return false;
         if (result.records.items.len == max_records) {
             result.partial = true;
             break;
@@ -314,7 +352,7 @@ fn scan(state: *State, home: []const u8) bool {
                 var owned = record;
                 owned.deinit(allocator);
             };
-        } else appendCandidateFile(state, candidate, &result, &remaining_bytes);
+        } else appendCandidateFile(state, candidate, generation, &result, &remaining_bytes);
     }
     std.mem.sort(Record, result.records.items, {}, struct {
         fn lessThan(_: void, a: Record, b: Record) bool {
@@ -327,7 +365,14 @@ fn scan(state: *State, home: []const u8) bool {
         result.partial = true;
     }
     result.complete = true;
-    return publish(state, &result);
+    if (cancelled(state, generation)) return false;
+    return publish(state, generation, &result);
+}
+
+fn cancelled(state: *State, generation: u64) bool {
+    state.mutex.lockUncancelable(state.io);
+    defer state.mutex.unlock(state.io);
+    return state.shutting_down or state.cancelled_generation == generation;
 }
 
 fn scanClaude(allocator: std.mem.Allocator, io: std.Io, home: []const u8, candidates: *std.ArrayList(Candidate), partial: *bool) void {
@@ -452,9 +497,10 @@ fn fileDevice(allocator: std.mem.Allocator, dir: std.Io.Dir, name: []const u8) ?
     return @intCast(stat.dev);
 }
 
-fn appendCandidateFile(state: *State, candidate: Candidate, result: *Result, remaining_bytes: *usize) void {
+fn appendCandidateFile(state: *State, candidate: Candidate, generation: u64, result: *Result, remaining_bytes: *usize) void {
     const allocator = state.allocator;
     const io = state.io;
+    if (cancelled(state, generation)) return;
     const file = std.Io.Dir.cwd().openFile(io, candidate.open_path, .{ .follow_symlinks = false }) catch return;
     defer file.close(io);
     const stat = file.stat(io) catch return;
@@ -474,8 +520,10 @@ fn appendCandidateFile(state: *State, candidate: Candidate, result: *Result, rem
     const bytes = allocator.alloc(u8, size) catch return;
     defer allocator.free(bytes);
     const n = file.readPositionalAll(io, bytes, 0) catch return;
+    if (cancelled(state, generation)) return;
     var parsed = archive.parse(allocator, candidate.provider, bytes[0..n]) catch return orelse return;
     errdefer parsed.deinit(allocator);
+    if (cancelled(state, generation)) return;
     canonicalizeParsedCwd(state, &parsed);
     cacheParsed(state, candidate, &parsed);
     const path = allocator.dupe(u8, candidate.open_path) catch return;
@@ -561,6 +609,44 @@ test "archive backend reports an enqueue failure without manufacturing an empty 
     try std.testing.expect(result.retain_previous);
     try std.testing.expectEqual(@as(usize, 0), result.records.items.len);
     try std.testing.expect(backend.takeResult() == null);
+}
+
+test "archive cancellation fences only the inflight generation and reports a retain-previous completion" {
+    var state = State{ .allocator = std.testing.allocator, .io = std.testing.io };
+    defer state.results.deinit(std.testing.allocator);
+    var backend = Backend{ .state = &state };
+    state.inflight = true;
+    state.inflight_generation = 7;
+    try std.testing.expect(backend.cancel());
+    try std.testing.expectEqual(@as(u64, 7), state.cancelled_generation);
+    try std.testing.expect(!backend.cancel());
+
+    state.inflight = false;
+    state.inflight_generation = 0;
+    state.completion_without_snapshot = true;
+    state.completion_cancelled = true;
+    const result = backend.takeResult() orelse return error.TestUnexpectedResult;
+    defer {
+        var owned = result;
+        owned.deinit(std.testing.allocator);
+    }
+    try std.testing.expect(result.complete and result.retain_previous and result.cancelled);
+}
+
+test "cancelled archive generation cannot publish a replacement snapshot" {
+    var state = State{ .allocator = std.testing.allocator, .io = std.testing.io };
+    defer {
+        for (state.results.items) |*result| result.deinit(std.testing.allocator);
+        state.results.deinit(std.testing.allocator);
+    }
+    state.cancelled_generation = 9;
+    var cancelled_result = Result{ .complete = true };
+    try std.testing.expect(!publish(&state, 9, &cancelled_result));
+    try std.testing.expectEqual(@as(usize, 0), state.results.items.len);
+
+    var latest_result = Result{ .complete = true };
+    try std.testing.expect(publish(&state, 10, &latest_result));
+    try std.testing.expectEqual(@as(usize, 1), state.results.items.len);
 }
 
 test "archive scanner refuses a symlinked history directory" {

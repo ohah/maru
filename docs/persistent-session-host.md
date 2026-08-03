@@ -1056,10 +1056,10 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    attachment/slot teardown은 모두 `busy`이고 read-only scalar 관측만 허용한다. callback이 public Maru API로 재진입한 경우 sibling은
    byte-for-byte 보존한다. callback이 raw sibling backing을 직접 변조한 경우 복원은 주장하지 않는다. callback 전에 process-global
    generation Client의 `io_mode=.blocking`과 complete Client-owned deinit graph를 먼저 봉인하고,
-   `build_id`, Client lifecycle, parser capacity backing, `pending_outbound`, 네 queue backing 및 모든 nested owned extent의 checked sum이
+   `build_id`, `Client.lifecycle`, parser capacity backing, `pending_outbound`, 네 queue backing 및 모든 nested owned extent의 checked sum이
    `max_ended_purge_quarantine_bytes = 64 MiB` 이하인지 검증한다. `pending_outbound`는 purge 대상이 아니지만 generic teardown owner이므로
-   owner SSOT·alias·owned length·post-validation에 포함한다. list/parser/partial은 capacity backing을, slice payload와 `build_id`/Client
-   lifecycle/pending outbound는 exact owned length를 합산한다. allocator 자체와 generation accounting ledger, observer, attachment, registry,
+   owner SSOT·alias·owned length·post-validation에 포함한다. list/parser/partial은 capacity backing을, slice payload와
+   `build_id`/`Client.lifecycle`/pending outbound는 exact owned length를 합산한다. allocator 자체와 generation accounting ledger, observer, attachment, registry,
    lease 같은 borrowed authority는 capacity에 더하거나 quarantine에서 dereference/release/mutate하지 않는다. 이 검증과 cap 판정이 mutation
    0으로 모두 끝난 뒤 commit gate의 마지막 fallible step으로 process-global one-slot quarantine reservation을 잡는다. reservation 성공
    뒤에는 preparation `committing` 전이와 no-fail suffix만 남으므로 typed precommit failure가 reserved slot을 남기는 경로는 0이다.
@@ -1153,7 +1153,8 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
      성공하기 전에는 registry/node를 해제하지 않아 제품 경로에서 그 입력을 만들지 않는다.
    - B3b-S의 `client.zig` top-level 신규 exact allowlist는 import `ended_purge_transaction`, `ended_purge_quarantine`,
      `PreparedEndedPurgeCommit`, `EndedPurgeCommitError`, `EndedPurgeClientCommitOutcome` 다섯 개다. `ended_purge_quarantine` 사용은
-     pointer-free `ConsumedCommitProof` 타입과 pure `matches`에만 한정하며 `Registry|Reservation|CommitReceipt|reserve|release|commit|
+     complete Client-owned extent의 단일 상한인 `max_ended_purge_quarantine_bytes`, pointer-free `ConsumedCommitProof` 타입과 pure
+     `matches`에만 한정하며 `Registry|Reservation|CommitReceipt|reserve|release|commit|
      consumeCommitted` 이름은 Client production
      body에서 0이다. lifecycle, queue plan/cursor와
      cleanup state는 `PreparedEndedPurgeCommit` nested declaration으로 둔다. `Client` 신규 method exact allowlist는 public
@@ -1242,7 +1243,7 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    `pending_outbound`는 `?PendingOutboundDescriptor = null`이다. `PendingOutboundDescriptor` 네 field는 모두 zero default다.
    `client_lifecycle`은 transaction lifecycle field와 다른 `Client.lifecycle: []u8` owner의 frozen descriptor다. prepare는 두 exact-owned
    descriptor의 address/len/capacity와 모든 owner range의 비중첩을 payload 역참조 전에 검증하고, post-validation도 current descriptor가
-   frozen scalar와 정확히 일치할 때만 Client lifecycle contents를 seal에 다시 넣는다. 이 field가 없으면 callback 뒤 descriptor drift와
+   frozen scalar와 정확히 일치할 때만 `Client.lifecycle` contents를 seal에 다시 넣는다. 이 field가 없으면 callback 뒤 descriptor drift와
    content drift를 구분해 scalar-first로 닫을 수 없으므로 aggregate digest만으로 대체하지 않는다.
    inventory 성공은 `empty→inventory_prepared`, abort는 `inventory_prepared→consumed`, commit preparation 성공은 caller-owned
    publication으로 `inventory_prepared→commit_frozen`, commit 진입은 첫 callback 전 `commit_frozen→consumed`를 수행한다.
@@ -1345,21 +1346,25 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
 
    `ClientOperationFence`는 `owner_process_id`, `self_addr`, `client_addr`, `slot_incarnation`, `node_incarnation`,
    `fence_generation`의 immutable identity와 `std.atomic.Value(u64)` 하나를 가진다. state의 low 31 bit는 public mutation
-   inflight count, bit 61은 absorbing terminal, bit 62는 exclusive 동안 거부된 intrusion, bit 63은 commit exclusive이며
-   나머지 reserved bit는 항상 0이다. bound Client의 post-publication product mutating entry는 getpid와 final-address/generation을
+   inflight count, bit 60은 prepare authority publication seal, bit 61은 absorbing terminal, bit 62는 exclusive 동안 거부된 intrusion,
+   bit 63은 commit exclusive이며 나머지 reserved bit는 항상 0이다. bound Client의 post-publication product mutating entry는 getpid와 final-address/generation을
    **atomic load/CAS 전에** 검증하고
    open state에서 count를 CAS 증가한 뒤 defer에서 exact decrement한다. commit exclusive는 state exact 0에서만
    `0→exclusive` CAS로 잡으며 기다리거나 spin하지 않는다. shared가 먼저면 commit은 mutation/callback 0의 Busy, exclusive가
    먼저면 새 public mutation은 Client graph/fd/allocator를 읽지 않고 AdminBusy/기존 busy result/void no-op으로 끝나며 intrusion만
-   atomic OR한다. `tryDeinit`은 false, `deinit`은 no-op, `poison`은 Client를 바꾸지 않고 intrusion만 기록한다. commit의 private
+   publication 없는 exact exclusive 관측값에만 CAS로 intrusion을 기록한다. prepare의 모든 fallible 검증 뒤에는 exact
+   `exclusive→exclusive|publication` CAS가 마지막 gate다. intrusion이 먼저면
+   CAS가 실패하고 publication 0이며, publication seal이 먼저면 이후 public mutation은 graph를 읽거나 intrusion을 만들지 않고 Busy로 끝난다.
+   따라서 seal 성공 뒤 `scratch.commit_frozen`과 prepared out의 no-fail publication 사이에는 새 intrusion race가 없다.
+   `tryDeinit`은 false, `deinit`은 no-op, `poison`은 Client를 바꾸지 않고 intrusion만 기록한다. commit의 private
    no-fail leaf는 public API를 재호출하지 않는다. Client-local commit은 clean과 drift 모두 exclusive를 유지한다. B3b-O의 clean path만
    quarantine reservation release와 node permit→transport receipt paired consume이 모두 끝난 뒤 exclusive를 마지막으로 0에 release한다.
    drift commit은 graph tombstone과 `finalization_pending`만 게시하고,
    ClientSlot의 quarantine commit 뒤 exact finalizer가 terminal bit와 poison을 게시한다. TLS allocator latch는 same-thread 진단일 뿐
    concurrency 권위가 아니다.
    fence의 exact field order는 `{self_addr,client_addr,owner_process_id,slot_incarnation,node_incarnation,fence_generation,state}`이고
-   상수는 `{shared_count_mask,reserved_mask,terminal_bit,intrusion_bit,exclusive_bit}`다. exact method allowlist는
-   `initInPlace|tryEnterShared|leaveShared|tryAcquireExclusive|intruded|abortExclusive|releaseExclusiveClean|
+   상수는 `{shared_count_mask,reserved_mask,publication_bit,terminal_bit,intrusion_bit,exclusive_bit}`다. exact method allowlist는
+   `initInPlace|tryEnterShared|leaveShared|tryAcquireExclusive|recordIntrusionIfExactExclusive|sealExclusiveForPublication|intruded|abortExclusive|releaseExclusiveClean|
    commitExclusiveTerminal|identityMatches`다. `abortExclusive`는 callback/mutation 전 teardown preflight가 실패했을 때만
    exclusive와 거부된 intrusion bit를 함께 0으로 되돌리며 `EndedPurgePreparation.sealForCommit` 뒤에는 caller가 0이다.
    B3b-F는 실제 post-publication critical entry의 fence-before-TLS/body 순서와 ClientSlot aggregate caller를 executable source oracle로

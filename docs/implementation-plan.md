@@ -937,11 +937,11 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    queue ownership metadata를 비교하는 post-validation을 정확히 한 번 수행하고, 구조가 일치할 때만 sibling aggregate payload seal을 다시 읽는다.
    node permit은 이 post-validation까지 유지한 뒤 node permit→transport receipt 순으로 소비한다. permit이 live인 동안 sibling을
    포함한 Client input/event/RPC/queue mutation과 attachment/slot teardown은 모두 `busy`이며 read-only scalar 관측만 허용한다. public
-   Maru API callback 재진입은 같은 규칙으로 sibling을 byte-for-byte 보존한다. blocking generation Client의 `build_id`/Client lifecycle,
+   Maru API callback 재진입은 같은 규칙으로 sibling을 byte-for-byte 보존한다. blocking generation Client의 `build_id`/`Client.lifecycle`,
    parser backing, optional pending outbound, 네 queue
    backing과 nested owned extent를 포함한 complete Client-owned deinit graph checked sum이
    `max_ended_purge_quarantine_bytes = 64 MiB` 이하임을 검증한다. list/parser/partial은 capacity backing을, slice payload와
-   `build_id`/Client lifecycle/pending outbound는 exact owned length를 합산한다. external mode는 mutation 0으로 거부한다. cap 초과의 precommit
+   `build_id`/`Client.lifecycle`/pending outbound는 exact owned length를 합산한다. external mode는 mutation 0으로 거부한다. cap 초과의 precommit
    no-cleanup poison은 owner free/tombstone/quarantine 0으로 reason/unusable을 latch하고 validated captured fd만 detach+close해 later ordinary
    deinit이 intact owner를 회수하게 한다. 모든 graph/cap/profile 검증 뒤 commit gate의 마지막 fallible step으로 one-slot reservation을
    잡고, 성공 뒤에는 `EndedPurgePreparation.sealForCommit`과 no-fail suffix만 남긴다. 정상 post-validation은 reservation을 release하되

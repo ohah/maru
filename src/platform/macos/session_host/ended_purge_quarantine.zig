@@ -23,6 +23,43 @@ pub const Reservation = struct {
     lifecycle: Lifecycle = .pristine,
 };
 
+pub const CommitReceipt = struct {
+    const Lifecycle = enum { pristine, committed, consumed };
+
+    self_addr: usize = 0,
+    registry_addr: usize = 0,
+    reservation_generation: u64 = 0,
+    process_id: u64 = 0,
+    node_incarnation: u64 = 0,
+    operation_generation: u64 = 0,
+    bytes: usize = 0,
+    lifecycle: Lifecycle = .pristine,
+};
+
+/// Registry consumption을 마친 뒤 Client finalizer가 비교하는 pointer-free 상관관계 증거다.
+/// 인증 capability가 아니므로 pointer나 mutable lifecycle을 넣지 않는다.
+pub const ConsumedCommitProof = struct {
+    reservation_generation: u64 = 0,
+    process_id: u64 = 0,
+    node_incarnation: u64 = 0,
+    operation_generation: u64 = 0,
+    bytes: usize = 0,
+
+    pub fn matches(
+        self: ConsumedCommitProof,
+        process_id: u64,
+        node_incarnation: u64,
+        operation_generation: u64,
+        bytes: usize,
+    ) bool {
+        return self.reservation_generation != 0 and
+            self.process_id == process_id and
+            self.node_incarnation == node_incarnation and
+            self.operation_generation == operation_generation and
+            self.bytes == bytes;
+    }
+};
+
 pub const Registry = struct {
     const State = enum { idle, reserved, committed };
 
@@ -36,7 +73,13 @@ pub const Registry = struct {
     reserved_node_incarnation: u64 = 0,
     reserved_operation_generation: u64 = 0,
     reserved_bytes: usize = 0,
+    committed_receipt_addr: usize = 0,
+    committed_generation: u64 = 0,
+    committed_process_id: u64 = 0,
+    committed_node_incarnation: u64 = 0,
+    committed_operation_generation: u64 = 0,
     committed_bytes: usize = 0,
+    finalization_consumed: bool = false,
 
     pub fn init() Registry {
         return .{ .owner_process_id = @intCast(std.c.getpid()) };
@@ -107,20 +150,75 @@ pub const Registry = struct {
         return true;
     }
 
-    pub fn commit(self: *Registry, reservation: *Reservation) bool {
+    pub fn commit(
+        self: *Registry,
+        reservation: *Reservation,
+        out: *CommitReceipt,
+    ) bool {
         const process_id: u64 = @intCast(std.c.getpid());
         if (self.owner_process_id == 0 or self.owner_process_id != process_id or
             objectsOverlap(self, reservation) or
-            reservation.process_id != process_id)
+            objectsOverlap(self, out) or
+            objectsOverlap(reservation, out) or
+            reservation.process_id != process_id or
+            !commitReceiptPristine(out))
             return false;
         while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
         defer self.mutex.unlock();
         if (!matchesReservation(self, process_id, reservation)) return false;
         const bytes = self.reserved_bytes;
+        const generation = self.reserved_generation;
+        const node_incarnation = self.reserved_node_incarnation;
+        const operation_generation = self.reserved_operation_generation;
+        out.* = .{
+            .self_addr = @intFromPtr(out),
+            .registry_addr = @intFromPtr(self),
+            .reservation_generation = generation,
+            .process_id = process_id,
+            .node_incarnation = node_incarnation,
+            .operation_generation = operation_generation,
+            .bytes = bytes,
+            .lifecycle = .committed,
+        };
         reservation.lifecycle = .spent;
         clearReserved(self);
+        self.committed_receipt_addr = @intFromPtr(out);
+        self.committed_generation = generation;
+        self.committed_process_id = process_id;
+        self.committed_node_incarnation = node_incarnation;
+        self.committed_operation_generation = operation_generation;
         self.committed_bytes = bytes;
+        self.finalization_consumed = false;
         self.state = .committed;
+        return true;
+    }
+
+    pub fn consumeCommitted(
+        self: *Registry,
+        receipt: *CommitReceipt,
+        out: *ConsumedCommitProof,
+    ) bool {
+        const process_id: u64 = @intCast(std.c.getpid());
+        if (self.owner_process_id == 0 or self.owner_process_id != process_id or
+            objectsOverlap(self, receipt) or
+            objectsOverlap(self, out) or
+            objectsOverlap(receipt, out) or
+            receipt.process_id != process_id or
+            !consumedCommitProofPristine(out))
+            return false;
+        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        defer self.mutex.unlock();
+        if (!matchesCommittedReceipt(self, process_id, receipt)) return false;
+        out.* = .{
+            .reservation_generation = self.committed_generation,
+            .process_id = self.committed_process_id,
+            .node_incarnation = self.committed_node_incarnation,
+            .operation_generation = self.committed_operation_generation,
+            .bytes = self.committed_bytes,
+        };
+        receipt.lifecycle = .consumed;
+        self.committed_receipt_addr = 0;
+        self.finalization_consumed = true;
         return true;
     }
 };
@@ -151,6 +249,32 @@ fn matchesReservation(
         reservation.bytes == self.reserved_bytes;
 }
 
+fn matchesCommittedReceipt(
+    self: *const Registry,
+    process_id: u64,
+    receipt: *const CommitReceipt,
+) bool {
+    return committedProjectionValid(self) and
+        receipt.lifecycle == .committed and
+        receipt.self_addr == @intFromPtr(receipt) and
+        receipt.registry_addr == @intFromPtr(self) and
+        self.committed_receipt_addr == @intFromPtr(receipt) and
+        receipt.reservation_generation == self.committed_generation and
+        receipt.process_id == process_id and
+        receipt.process_id == self.committed_process_id and
+        receipt.node_incarnation == self.committed_node_incarnation and
+        receipt.operation_generation == self.committed_operation_generation and
+        receipt.bytes == self.committed_bytes;
+}
+
+fn commitReceiptPristine(receipt: *const CommitReceipt) bool {
+    return std.meta.eql(receipt.*, CommitReceipt{});
+}
+
+fn consumedCommitProofPristine(proof: *const ConsumedCommitProof) bool {
+    return std.meta.eql(proof.*, ConsumedCommitProof{});
+}
+
 fn idleProjectionValid(self: *const Registry) bool {
     return self.state == .idle and
         self.next_generation != 0 and
@@ -160,7 +284,7 @@ fn idleProjectionValid(self: *const Registry) bool {
         self.reserved_node_incarnation == 0 and
         self.reserved_operation_generation == 0 and
         self.reserved_bytes == 0 and
-        self.committed_bytes == 0;
+        committedProjectionEmpty(self);
 }
 
 fn reservedProjectionValid(self: *const Registry) bool {
@@ -172,7 +296,36 @@ fn reservedProjectionValid(self: *const Registry) bool {
         self.reserved_process_id == self.owner_process_id and
         self.reserved_node_incarnation != 0 and
         self.reserved_operation_generation != 0 and
-        self.committed_bytes == 0;
+        committedProjectionEmpty(self);
+}
+
+fn committedProjectionEmpty(self: *const Registry) bool {
+    return self.committed_receipt_addr == 0 and
+        self.committed_generation == 0 and
+        self.committed_process_id == 0 and
+        self.committed_node_incarnation == 0 and
+        self.committed_operation_generation == 0 and
+        self.committed_bytes == 0 and
+        !self.finalization_consumed;
+}
+
+fn committedProjectionValid(self: *const Registry) bool {
+    return self.state == .committed and
+        self.reserved_reservation_addr == 0 and
+        self.reserved_generation == 0 and
+        self.reserved_process_id == 0 and
+        self.reserved_node_incarnation == 0 and
+        self.reserved_operation_generation == 0 and
+        self.reserved_bytes == 0 and
+        self.committed_generation != 0 and
+        self.committed_generation != std.math.maxInt(u64) and
+        self.committed_process_id == self.owner_process_id and
+        self.committed_node_incarnation != 0 and
+        self.committed_operation_generation != 0 and
+        if (self.finalization_consumed)
+            self.committed_receipt_addr == 0
+        else
+            self.committed_receipt_addr != 0;
 }
 
 fn clearReserved(self: *Registry) void {
@@ -235,10 +388,12 @@ test "default registry and zero identities reject before state mutation" {
 test "committed quarantine is absorbing and rejects replay" {
     var registry = Registry.init();
     var reservation: Reservation = .{};
+    var receipt: CommitReceipt = .{};
     try registry.reserve(7, 11, 4096, &reservation);
-    try std.testing.expect(registry.commit(&reservation));
+    try std.testing.expect(registry.commit(&reservation, &receipt));
     try std.testing.expectEqual(@as(usize, 4096), registry.committed_bytes);
-    try std.testing.expect(!registry.commit(&reservation));
+    var replay_receipt: CommitReceipt = .{};
+    try std.testing.expect(!registry.commit(&reservation, &replay_receipt));
 
     var later: Reservation = .{};
     try std.testing.expectError(
@@ -257,7 +412,8 @@ test "copied reservation and cap plus one cannot consume authority" {
     try registry.reserve(7, 11, 8, &reservation);
     var copied = reservation;
     copied.self_addr = @intFromPtr(&copied);
-    try std.testing.expect(!registry.commit(&copied));
+    var receipt: CommitReceipt = .{};
+    try std.testing.expect(!registry.commit(&copied, &receipt));
     try std.testing.expect(registry.release(&reservation));
 }
 
@@ -277,7 +433,8 @@ test "reservation storage cannot overlap registry state" {
     var reservation: Reservation = .{};
     try registry.reserve(7, 11, 8, &reservation);
     try std.testing.expect(!registry.release(exact_alias));
-    try std.testing.expect(!registry.commit(partial_alias));
+    var receipt: CommitReceipt = .{};
+    try std.testing.expect(!registry.commit(partial_alias, &receipt));
     try std.testing.expect(registry.release(&reservation));
 }
 
@@ -312,11 +469,13 @@ test "every reservation scalar and registry mirror drift fails without consumpti
         var forged = reservation;
         forged.self_addr = @intFromPtr(&forged);
         @field(forged, field_name) +%= 1;
-        try std.testing.expect(!registry.commit(&forged));
+        var receipt: CommitReceipt = .{};
+        try std.testing.expect(!registry.commit(&forged, &receipt));
     }
     const saved_bytes = registry.reserved_bytes;
     registry.reserved_bytes +%= 1;
-    try std.testing.expect(!registry.commit(&reservation));
+    var drift_receipt: CommitReceipt = .{};
+    try std.testing.expect(!registry.commit(&reservation, &drift_receipt));
     registry.reserved_bytes = saved_bytes;
     try std.testing.expect(registry.release(&reservation));
     try std.testing.expectEqual(@as(usize, 0), registry.reserved_reservation_addr);
@@ -364,8 +523,10 @@ test "cross registry is rejected and committed projection clears every reserved 
     var other = Registry.init();
     var reservation: Reservation = .{};
     try registry.reserve(41, 43, 0, &reservation);
-    try std.testing.expect(!other.commit(&reservation));
-    try std.testing.expect(registry.commit(&reservation));
+    var other_receipt: CommitReceipt = .{};
+    try std.testing.expect(!other.commit(&reservation, &other_receipt));
+    var receipt: CommitReceipt = .{};
+    try std.testing.expect(registry.commit(&reservation, &receipt));
     try std.testing.expectEqual(Registry.State.committed, registry.state);
     try std.testing.expectEqual(@as(usize, 0), registry.committed_bytes);
     try std.testing.expectEqual(@as(usize, 0), registry.reserved_reservation_addr);
@@ -374,6 +535,68 @@ test "cross registry is rejected and committed projection clears every reserved 
     try std.testing.expectEqual(@as(u64, 0), registry.reserved_node_incarnation);
     try std.testing.expectEqual(@as(u64, 0), registry.reserved_operation_generation);
     try std.testing.expectEqual(@as(usize, 0), registry.reserved_bytes);
+}
+
+test "commit receipt is final-address and consumed proof is exact once" {
+    var registry = Registry.init();
+    var reservation: Reservation = .{};
+    var receipt: CommitReceipt = .{};
+    try registry.reserve(41, 43, 128, &reservation);
+    try std.testing.expect(registry.commit(&reservation, &receipt));
+    try std.testing.expectEqual(CommitReceipt.Lifecycle.committed, receipt.lifecycle);
+    try std.testing.expect(committedProjectionValid(&registry));
+
+    var proof: ConsumedCommitProof = .{};
+    try std.testing.expect(registry.consumeCommitted(&receipt, &proof));
+    try std.testing.expectEqual(CommitReceipt.Lifecycle.consumed, receipt.lifecycle);
+    try std.testing.expect(proof.matches(physProcessId(), 41, 43, 128));
+    try std.testing.expect(registry.finalization_consumed);
+    try std.testing.expectEqual(@as(usize, 0), registry.committed_receipt_addr);
+
+    var replay: ConsumedCommitProof = .{};
+    try std.testing.expect(!registry.consumeCommitted(&receipt, &replay));
+    try std.testing.expectEqual(ConsumedCommitProof{}, replay);
+}
+
+test "commit and consume outputs reject alias and occupied storage before mutation" {
+    var registry = Registry.init();
+    var reservation: Reservation = .{};
+    try registry.reserve(47, 53, 64, &reservation);
+
+    const registry_receipt_alias: *CommitReceipt = @ptrCast(@alignCast(&registry));
+    try std.testing.expect(!registry.commit(&reservation, registry_receipt_alias));
+    try std.testing.expectEqual(Reservation.Lifecycle.reserved, reservation.lifecycle);
+
+    var occupied: CommitReceipt = .{ .reservation_generation = 1 };
+    try std.testing.expect(!registry.commit(&reservation, &occupied));
+    try std.testing.expectEqual(@as(u64, 1), occupied.reservation_generation);
+
+    var receipt: CommitReceipt = .{};
+    try std.testing.expect(registry.commit(&reservation, &receipt));
+    const receipt_proof_alias: *ConsumedCommitProof = @ptrCast(@alignCast(&receipt));
+    try std.testing.expect(!registry.consumeCommitted(&receipt, receipt_proof_alias));
+    try std.testing.expectEqual(CommitReceipt.Lifecycle.committed, receipt.lifecycle);
+
+    var occupied_proof: ConsumedCommitProof = .{ .reservation_generation = 1 };
+    try std.testing.expect(!registry.consumeCommitted(&receipt, &occupied_proof));
+    try std.testing.expectEqual(@as(u64, 1), occupied_proof.reservation_generation);
+}
+
+test "copied and cross-registry commit receipts cannot mint proof" {
+    var registry = Registry.init();
+    var reservation: Reservation = .{};
+    var receipt: CommitReceipt = .{};
+    try registry.reserve(59, 61, 32, &reservation);
+    try std.testing.expect(registry.commit(&reservation, &receipt));
+
+    var copied = receipt;
+    copied.self_addr = @intFromPtr(&copied);
+    var proof: ConsumedCommitProof = .{};
+    try std.testing.expect(!registry.consumeCommitted(&copied, &proof));
+    var other = Registry.init();
+    try std.testing.expect(!other.consumeCommitted(&receipt, &proof));
+    try std.testing.expectEqual(ConsumedCommitProof{}, proof);
+    try std.testing.expect(registry.consumeCommitted(&receipt, &proof));
 }
 
 test "fork child rejects inherited reservation before an inherited locked mutex" {
@@ -387,7 +610,8 @@ test "fork child rejects inherited reservation before an inherited locked mutex"
         return error.SkipZigTest;
     }
     if (child == 0) {
-        const rejected = !registry.commit(&reservation);
+        var receipt: CommitReceipt = .{};
+        const rejected = !registry.commit(&reservation, &receipt);
         std.c._exit(if (rejected) 0 else 1);
     }
     const status = waitChildBounded(child) catch |err| {
@@ -397,4 +621,35 @@ test "fork child rejects inherited reservation before an inherited locked mutex"
     registry.mutex.unlock();
     try std.testing.expectEqual(@as(c_int, 0), status);
     try std.testing.expect(registry.release(&reservation));
+}
+
+test "fork child rejects committed receipt before an inherited locked mutex" {
+    var registry = Registry.init();
+    var reservation: Reservation = .{};
+    var receipt: CommitReceipt = .{};
+    try registry.reserve(67, 71, 64, &reservation);
+    try std.testing.expect(registry.commit(&reservation, &receipt));
+    while (!registry.mutex.tryLock()) std.atomic.spinLoopHint();
+    const child = std.c.fork();
+    if (child < 0) {
+        registry.mutex.unlock();
+        return error.SkipZigTest;
+    }
+    if (child == 0) {
+        var proof: ConsumedCommitProof = .{};
+        const rejected = !registry.consumeCommitted(&receipt, &proof);
+        std.c._exit(if (rejected) 0 else 1);
+    }
+    const status = waitChildBounded(child) catch |err| {
+        registry.mutex.unlock();
+        return err;
+    };
+    registry.mutex.unlock();
+    try std.testing.expectEqual(@as(c_int, 0), status);
+    var proof: ConsumedCommitProof = .{};
+    try std.testing.expect(registry.consumeCommitted(&receipt, &proof));
+}
+
+fn physProcessId() u64 {
+    return @intCast(std.c.getpid());
 }

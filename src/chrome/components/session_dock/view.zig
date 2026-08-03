@@ -96,10 +96,17 @@ const Writer = struct {
         const cw = self.props.cell_width_px;
         const ch = self.props.cell_height_px;
         if (cw == 0 or ch == 0) return;
-        const cols: u16 = @intFromFloat(@floor(rect.rect.width / @as(f32, @floatFromInt(cw))));
+        // Trailing header affordances need the same one-cell horizontal inset as ordinary
+        // labels. Placing the refresh glyph at the outer rect edge works for a cell-sized
+        // terminal glyph, but a CoreText fallback glyph can have wider natural ink and will
+        // visibly touch or cross the rounded-card clip once it is lowered as a pixel GpuGlyph.
+        const inset_px: f32 = @floatFromInt(cw);
+        const usable_width = rect.rect.width - inset_px;
+        if (usable_width <= 0) return;
+        const cols: u16 = @intFromFloat(@floor(usable_width / @as(f32, @floatFromInt(cw))));
         const width = text_layout.displayCols(source, null);
         const start: u16 = @intCast(@min(width, cols));
-        const x = rect.rect.x + @as(f32, @floatFromInt((cols - start) * @as(u16, @intCast(cw))));
+        const x = rect.rect.x + rect.rect.width - inset_px - @as(f32, @floatFromInt(start * @as(u16, @intCast(cw))));
         const y = rect.rect.y + @as(f32, @floatFromInt(ch * (line + 1)));
         try self.emit(x, y, source, start, .tail, role);
     }
@@ -245,12 +252,14 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
     var saw_quad = false;
     var saw_provider = false;
     var saw_model_metadata = false;
+    var refresh_origin_x: ?i32 = null;
     for (out.ops) |op| switch (op) {
         .quad => saw_quad = true,
         .text => |text| {
             for (text.runs) |run| {
                 saw_provider = saw_provider or std.mem.indexOf(u8, run.text, "Claude") != null;
                 saw_model_metadata = saw_model_metadata or std.mem.indexOf(u8, run.text, "claude-fixture") != null;
+                if (std.mem.eql(u8, run.text, "↻")) refresh_origin_x = text.origin.x;
             }
         },
         else => {},
@@ -258,6 +267,11 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
     try std.testing.expect(saw_quad);
     try std.testing.expect(saw_provider);
     try std.testing.expect(saw_model_metadata);
+    const refresh_x = refresh_origin_x orelse return error.TestUnexpectedResult;
+    const header = find(frame.tree, build.NodeIds.header) orelse return error.TestUnexpectedResult;
+    const right_ink_edge = refresh_x + @as(i32, @intCast(props.cell_width_px));
+    const expected_right_edge: i32 = @intFromFloat(@floor(header.rect.x + header.rect.width - @as(f32, @floatFromInt(props.cell_width_px))));
+    try std.testing.expect(right_ink_edge <= expected_right_edge);
 }
 
 test "SessionDock partial card never emits a CoreText cell that crosses its published clip" {

@@ -319,6 +319,33 @@ body {
   white-space: pre-wrap;
 }
 
+/* 문서가 직접 쓴 HTML 중 **통과시킨 것들**의 기본 모습(§2.1). 태그를 살려 놓고 스타일을 주지 않으면
+   "그린다"는 약속이 반쪽이 된다 — `<kbd>`가 일반 텍스트와 구분되지 않으면 살린 의미가 없다. */
+kbd {
+  padding: 0.1em 0.4em;
+  border: 1px solid color-mix(in srgb, CanvasText 28%, Canvas);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: color-mix(in srgb, CanvasText 6%, Canvas);
+  font-family: var(--maru-editor-font-family, ui-monospace, monospace);
+  font-size: 0.85em;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+/* 접기는 클릭 대상임이 보여야 한다. */
+details {
+  margin: 0 0 1rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid color-mix(in srgb, CanvasText 16%, Canvas);
+  border-radius: 4px;
+}
+
+details > summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
 /* 조각 하나를 감싸는 틀. 미리보기(위)와 소스 칸(아래)이 한 덩어리로 보여야 둘이 같은 것의 두 면임이 읽힌다. */
 .maru-rich-raw {
   margin: 0 0 1rem;

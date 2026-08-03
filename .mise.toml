@@ -58,6 +58,21 @@ run = "zig build test-macos-metal-smoke"
 description = "Capture deterministic Chrome Lab scenarios through the product Metal renderer"
 run = "zig build macos-chrome-lab-smoke"
 
+[tasks.macos-chrome-lab-font-review]
+description = "Capture product font specimens and write nearest-neighbor 2x PR review PNGs (requires ffmpeg)"
+depends = ["macos-chrome-lab-smoke"]
+run = '''
+set -eu
+command -v ffmpeg >/dev/null
+for input in zig-out/maru-macos-chrome-lab/font-specimen*.png; do
+  case "$input" in
+    *-review-2x.png) continue ;;
+  esac
+  output="${input%.png}-review-2x.png"
+  ffmpeg -y -loglevel error -i "$input" -vf "scale=iw*2:ih*2:flags=neighbor" "$output"
+done
+'''
+
 [tasks.test-macos-chrome-lab-smoke]
 description = "Run Chrome Lab readback artifact contract tests"
 run = "zig build test-macos-chrome-lab-smoke"

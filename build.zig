@@ -283,19 +283,21 @@ pub fn build(b: *std.Build) void {
         macos_chrome_lab_smoke.root_module.linkFramework("QuartzCore", .{});
 
         const macos_chrome_lab_smoke_step = b.step("macos-chrome-lab-smoke", "Capture deterministic Chrome Lab scenarios through the product Metal renderer");
-        inline for ([_][]const u8{ "empty", "loading", "retained-list", "partial-scroll", "detail-loading", "detail-ready", "detail-stale", "detail-unavailable" }) |scenario| {
+        inline for ([_][]const u8{ "empty", "loading", "retained-list", "font-specimen", "partial-scroll", "detail-loading", "detail-ready", "detail-stale", "detail-unavailable" }) |scenario| {
             const run_chrome_lab = b.addRunArtifact(macos_chrome_lab_smoke);
             run_chrome_lab.setCwd(b.path("."));
             run_chrome_lab.setEnvironmentVariable("MARU_CHROME_LAB_SCENARIO", scenario);
             macos_chrome_lab_smoke_step.dependOn(&run_chrome_lab.step);
         }
-        // The default retained-list uses the bundled JetBrains Mono asset. Capture the other
-        // selectable bundled families in isolated processes too: each process registers exactly
-        // one TTF and rejects CoreText fallback before it can write a misleading PNG.
+        // Retained-list remains the product-state fixture. Font review uses font-specimen instead:
+        // it contains deliberately distinctive ASCII primary glyphs and a Korean fallback probe,
+        // so reviewers do not have to infer a face change from ordinary 8×16 card copy.
+        // Each process registers exactly one bundled TTF and rejects a failed requested-family
+        // match before it can write a misleading PNG.
         inline for ([_][]const u8{ "jetendard", "fira-code", "cascadia-code", "hack" }) |font| {
             const run_chrome_lab_font = b.addRunArtifact(macos_chrome_lab_smoke);
             run_chrome_lab_font.setCwd(b.path("."));
-            run_chrome_lab_font.setEnvironmentVariable("MARU_CHROME_LAB_SCENARIO", "retained-list");
+            run_chrome_lab_font.setEnvironmentVariable("MARU_CHROME_LAB_SCENARIO", "font-specimen");
             run_chrome_lab_font.setEnvironmentVariable("MARU_CHROME_LAB_FONT", font);
             macos_chrome_lab_smoke_step.dependOn(&run_chrome_lab_font.step);
         }

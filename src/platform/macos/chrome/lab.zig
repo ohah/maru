@@ -11,7 +11,7 @@ const chrome = maru.chrome;
 const session_dock = chrome.components.session_dock;
 const archive_detail = chrome.components.archive_detail;
 
-pub const ScenarioId = enum { empty, loading, retained_list, partial_scroll, detail_loading, detail_ready, detail_stale, detail_unavailable };
+pub const ScenarioId = enum { empty, loading, retained_list, font_specimen, partial_scroll, detail_loading, detail_ready, detail_stale, detail_unavailable };
 
 pub const Scenario = struct {
     id: ScenarioId,
@@ -55,7 +55,7 @@ pub fn buildFrame(
 ) !Frame {
     return switch (scenario.id) {
         .detail_loading, .detail_ready, .detail_stale, .detail_unavailable => buildDetailFrame(scenario, tokens, buffers),
-        .empty, .loading, .retained_list, .partial_scroll => buildDockFrame(scenario, tokens, buffers),
+        .empty, .loading, .retained_list, .font_specimen, .partial_scroll => buildDockFrame(scenario, tokens, buffers),
     };
 }
 
@@ -69,6 +69,16 @@ fn buildDockFrame(
         .{ .card = .{ .identity = 2, .provider = .claude, .title = "Notion document root cause", .summary = "Check the original document and isolate the cause", .metadata = "94 messages · 3m ago · claude-opus-5", .selected = scenario.id == .retained_list } },
         .{ .card = .{ .identity = 3, .provider = .codex, .title = "Implement session dock layout", .summary = "Wire the snapshot, interaction tree, and host renderer", .metadata = "140 messages · 22h ago · gpt-5.6-sol" } },
         .{ .card = .{ .identity = 4, .provider = .claude, .title = "Refresh list without flicker", .summary = "Keep the prior snapshot until the replacement is complete", .metadata = "356 messages · 1d ago · claude-opus-5" } },
+    };
+    // This is deliberately a real Session Dock card, not an out-of-band font test canvas. The
+    // retained-list fixture proves list behavior; this specimen instead makes font selection
+    // reviewable at PR scale. ASCII differentiators expose the selected primary face, while the
+    // Korean line makes a missing primary glyph visibly exercise CoreText's fallback face.
+    const font_specimen = [_]session_dock.types.Item{
+        .{ .group = .{ .identity = 1, .label = "font specimen", .count = 3 } },
+        .{ .card = .{ .identity = 2, .provider = .claude, .title = "Il1 O0 MWmw @# [] {} <>", .summary = "ASCII primary-face specimen", .metadata = "한글 가나다라마바사 · primary or fallback", .selected = true } },
+        .{ .card = .{ .identity = 3, .provider = .codex, .title = "rn m w |! `.,:; /\\", .summary = "narrow and wide glyph contours", .metadata = "가각간 한글 폰트 비교" } },
+        .{ .card = .{ .identity = 4, .provider = .claude, .title = "S5 2Z 8B 0O 1l I|", .summary = "same fixed grid, distinct ink", .metadata = "fallback face is reported in JSON" } },
     };
     const dock_props = session_dock.types.Props{
         .viewport_px = scenario.viewport_px,
@@ -85,6 +95,7 @@ fn buildDockFrame(
         .content_first_item_origin_y_px = if (scenario.id == .partial_scroll) -28 else 0,
         .items = switch (scenario.id) {
             .retained_list => &retained,
+            .font_specimen => &font_specimen,
             .partial_scroll => retained[1..],
             .empty, .loading => &.{},
             .detail_loading, .detail_ready, .detail_stale, .detail_unavailable => unreachable,
@@ -175,7 +186,7 @@ test "Chrome Lab has no implicit surface and fails closed for an empty synthetic
     try std.testing.expectError(error.NoBox, lowerDraws(std.testing.allocator, &.{}, &undefined_tokens, 8, 16));
 }
 
-test "Chrome Lab builds a deterministic card and records only its action" {
+test "Chrome Lab builds a deterministic font specimen card and records only its action" {
     const tokens = chrome.Tokens.rich(.{
         .foreground = .{ .r = 240, .g = 240, .b = 240 },
         .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
@@ -197,8 +208,8 @@ test "Chrome Lab builds a deterministic card and records only its action" {
     var text_runs: [32]chrome.draw.Run = undefined;
     var text_bytes: [2048]u8 = undefined;
     const frame = try buildFrame(.{
-        .id = .retained_list,
-        .viewport_px = .{ .width = 320, .height = 240 },
+        .id = .font_specimen,
+        .viewport_px = .{ .width = 720, .height = 960 },
         .now_ns = 77,
     }, &tokens, .{
         .entries = &entries,
@@ -215,6 +226,17 @@ test "Chrome Lab builds a deterministic card and records only its action" {
     try std.testing.expect(frame.tree.entries.len > 7);
     try std.testing.expect(frame.draws.ops.len > 8);
     try std.testing.expect(frame.draws.ops[0] == .quad);
+    var saw_primary_ascii_probe = false;
+    var saw_korean_fallback_probe = false;
+    for (frame.draws.ops) |op| switch (op) {
+        .text => |text| for (text.runs) |run| {
+            saw_primary_ascii_probe = saw_primary_ascii_probe or std.mem.indexOf(u8, run.text, "Il1 O0 MWmw") != null;
+            saw_korean_fallback_probe = saw_korean_fallback_probe or std.mem.indexOf(u8, run.text, "가각간") != null;
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_primary_ascii_probe);
+    try std.testing.expect(saw_korean_fallback_probe);
 
     const card_index = frame.tree.find(session_dock.build.NodeIds.item(1)).?;
     const card_rect = frame.tree.entries[card_index].rect;

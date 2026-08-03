@@ -69,8 +69,8 @@ chrome과 같은 Zig semantic draw → Metal GPU lowering 경로를 쓰는 custo
 AS4-d의 inline disclosure는 동작 이관이다. 이 절은 첨부 레퍼런스와 비교했을 때 남아 있던
 "작은 terminal 행들의 집합" 인상을 없애기 위한 **별도 시각 계약**이다. 데이터·action·scroll
 identity는 바꾸지 않으며, `SessionDock`의 같은 completed `UiRectTree`에서만 기하와 paint를 바꾼다.
-아래 bullet은 **AS4-f-b 완료 뒤의 목표 상태**다. 현재 AS4-f-a는 확장 action의 content
-metric만 이관했으며, 단계별 실제 완료 범위는 [2.1.3](#213-logical-spacingdock-metric-계약-as4-f)을 따른다.
+아래 contract의 pixel geometry는 `DockMetrics` snapshot 하나가 결정한다. 진행·검증 상태는
+[검증 매트릭스](verification-matrix.md)의 해당 행을 따른다.
 
 - dock의 자동 폭 640pt 안에서 outer padding, header, segmented scope, search, group header의
   기하는 **terminal cell**이 아니라 Chrome의 logical spacing/type token과 backing scale에서만
@@ -94,10 +94,10 @@ metric만 이관했으며, 단계별 실제 완료 범위는 [2.1.3](#213-logica
   직각 fill로만 lower한다. component가 `if (rich)` 또는 font별 좌표 nudge를 두지 않는다.
 
 `ChromeTextRole`은 role별 line box와 final-pixel glyph placement를 전달한다. B1-button-b는 확장
-action의 measured label/SVG group centre를 완료했지만, 기본 목록·header utility의 남은 width reservation과
-전체 row geometry는 아직 terminal cell metric을 쓴다. AS4-f가 이 기하를 logical spacing/type metric으로
-옮기기 전에는 레퍼런스의 padding/density parity를 주장하지 않는다. 이를 cell 수를 억지로 키우거나
-fallback font별 nudge로 흉내 내지 않는다.
+action의 measured label/SVG group centre를 완료했고, AS4-f-b는 기본 목록·header utility·detail·action의
+고정 기하와 scroll unit을 같은 `DockMetrics` snapshot으로 옮겼다. terminal cell은 텍스트의 보수적
+수평 truncate fallback에만 남고, padding·height·pointer hit rect는 입력으로 쓰지 않는다. 이를 cell 수를
+억지로 키우거나 fallback font별 nudge로 흉내 내지 않는다.
 
 #### 2.1.2 측정형 Button·action text 계약 (B1-button)
 
@@ -131,12 +131,11 @@ target을 표현한다. generic tree/paint/interaction은 둘의 rect·clip·poi
 
 #### 2.1.3 logical spacing·dock metric 계약 (AS4-f)
 
-AS4-f는 레퍼런스와의 여백·밀도 차이를 고치는 시각 slice다. **AS4-f-a(현재)**는 action의 icon/text
-content inset, icon extent/gap, 48pt minimum height만 Chrome logical spacing metric으로 옮긴다.
-**AS4-f-b(후속)**가 outer inset, fixed chrome/card/detail/action 높이, scroll unit까지 같은 metric으로
-옮긴다. AS4-f-b가 끝나야 terminal font·line spacing을 바꾸어도 dock 전체 geometry·pointer hit rect가
-유지되고 backing scale에만 비례한다고 말할 수 있다. typed layout과 spacing SSOT, 48pt action target·
-1×/2×/terminal-font capture 판정은
+AS4-f는 레퍼런스와의 여백·밀도 차이를 Chrome logical metric으로 고친다. `ButtonMetrics`는 action의
+icon/text content inset, icon extent/gap, 48pt minimum target을 소유한다. `DockMetrics`는 outer inset,
+fixed chrome/card/detail/action 높이와 scroll unit을 같은 immutable snapshot으로 resolve한다. terminal
+font·line spacing은 dock geometry·pointer hit rect의 입력이 아니며, backing scale에만 비례한다. typed
+layout과 spacing SSOT, 48pt action target·1×/2×/terminal-font capture 판정은
 [Metal UI 레이아웃·컴포넌트 시스템](metal-ui-layout.md#logical-spacing과-component-metric)이 소유한다.
 이 visual slice는 실제 사용자 Claude/Codex resume을 자동 실행하지 않는다.
 

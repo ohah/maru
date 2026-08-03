@@ -85,7 +85,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
     const needed_nodes = props.items.len + expanded_extra_nodes + 7; // item roots + nested expansion + 3 scopes + header/scope-row/search/content
     if (buffers.nodes.len < needed_nodes) return error.InsufficientNodeBuffer;
 
-    const m = types.Metrics.fromCellHeight(props.cell_height_px, props.scale_milli);
+    const m = types.DockMetrics.resolve(props.scale_milli);
     var table = ids.Table.init(buffers.actions);
     const refresh = table.append(props.snapshot_generation, .refresh) catch return error.InsufficientActionBuffer;
     const workspace = table.append(props.snapshot_generation, .{ .scope = .workspace }) catch return error.InsufficientActionBuffer;
@@ -196,7 +196,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
 
     const root = tree.container(.{
         .id = NodeIds.root,
-        .style = .{ .padding = .{ .top = @floatFromInt(m.pad), .right = @floatFromInt(m.pad), .bottom = @floatFromInt(m.pad), .left = @floatFromInt(m.pad) } },
+        .style = .{ .padding = .{ .top = @floatFromInt(m.root_inset), .right = @floatFromInt(m.root_inset), .bottom = @floatFromInt(m.root_inset), .left = @floatFromInt(m.root_inset) } },
         .overflow = .clip,
     }, top);
     const built = try tree.build(root, .{
@@ -280,19 +280,19 @@ fn expansionActionNode(id: u64, action: tree.UiAction, enabled: bool, variant: t
 /// defaults to a column container and correctly rejects cross-axis fill. The dock root width is
 /// already definite when we build its one published tree, therefore divide that exact content
 /// width after the explicit gaps instead of weakening the generic layout invariant.
-fn expansionActionWidth(viewport_width_px: f32, m: types.Metrics, action_count: usize) f32 {
+fn expansionActionWidth(viewport_width_px: f32, m: types.DockMetrics, action_count: usize) f32 {
     if (action_count == 0) return 0;
-    const content_width = @max(viewport_width_px - @as(f32, @floatFromInt(m.pad * 2)), 0);
+    const content_width = @max(viewport_width_px - @as(f32, @floatFromInt(m.root_inset * 2)), 0);
     const total_gap = @as(f32, @floatFromInt(m.action_gap * @as(u32, @intCast(action_count - 1))));
     return @max((content_width - total_gap) / @as(f32, @floatFromInt(action_count)), 0);
 }
 
 test "expanded action widths leave the declared gap for two and three actions" {
-    const m = types.Metrics.fromCellHeight(16, 1000);
-    // 480px viewport - 24px outer padding on both sides leaves 432px. The same source of truth
+    const m = types.DockMetrics.resolve(1000);
+    // 480px viewport - 20px outer padding on both sides leaves 440px. The same source of truth
     // must work for resume/reveal and the optional live-focus third action.
-    try @import("std").testing.expectEqual(@as(f32, 212), expansionActionWidth(480, m, 2));
-    try @import("std").testing.expectApproxEqAbs(@as(f32, 138.66667), expansionActionWidth(480, m, 3), 0.0001);
+    try @import("std").testing.expectEqual(@as(f32, 216), expansionActionWidth(480, m, 2));
+    try @import("std").testing.expectApproxEqAbs(@as(f32, 141.33333), expansionActionWidth(480, m, 3), 0.0001);
     // A viewport narrower than its fixed outer padding produces inert zero-width leaf cards,
     // not unsigned underflow or a negative rect that could capture a neighboring surface.
     try @import("std").testing.expectEqual(@as(f32, 0), expansionActionWidth(40, m, 2));
@@ -351,6 +351,59 @@ test "SessionDock build shares action rects with the completed tree" {
     var table = ids.Table.init(@constCast(frame.actions));
     table.count = frame.actions.len;
     try @import("std").testing.expectEqual(@as(?ids.Intent, .{ .select_card = 12 }), table.resolve(7, 9));
+}
+
+test "SessionDock published geometry ignores terminal cell dimensions" {
+    const base_props = types.Props{
+        .viewport_px = .{ .width = 640, .height = 720 },
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .scale_milli = 1000,
+        .snapshot_generation = 11,
+        .displayed_count = 1,
+        .items = &.{
+            .{ .group = .{ .identity = 1, .label = "workspace", .count = 1 } },
+            .{ .card = .{ .identity = 2, .provider = .codex, .title = "title", .summary = "summary", .metadata = "metadata", .selected = true, .expanded = .{ .state = .ready, .resume_enabled = true, .reveal_enabled = true } } },
+        },
+    };
+    var large_font_props = base_props;
+    large_font_props.cell_width_px = 21;
+    large_font_props.cell_height_px = 37;
+
+    var nodes_a: [15]tree.UiNode = undefined;
+    var entries_a: [16]tree.RectEntry = undefined;
+    var layout_items_a: [16]layout.Item = undefined;
+    var flex_scratch_a: [16]layout.FlexScratch = undefined;
+    var child_rects_a: [16]layout.UiRect = undefined;
+    var actions_a: [12]ids.Entry = undefined;
+    const frame_a = try build(base_props, .{
+        .nodes = &nodes_a,
+        .entries = &entries_a,
+        .layout_items = &layout_items_a,
+        .flex_scratch = &flex_scratch_a,
+        .child_rects = &child_rects_a,
+        .actions = &actions_a,
+    });
+    var nodes_b: [15]tree.UiNode = undefined;
+    var entries_b: [16]tree.RectEntry = undefined;
+    var layout_items_b: [16]layout.Item = undefined;
+    var flex_scratch_b: [16]layout.FlexScratch = undefined;
+    var child_rects_b: [16]layout.UiRect = undefined;
+    var actions_b: [12]ids.Entry = undefined;
+    const frame_b = try build(large_font_props, .{
+        .nodes = &nodes_b,
+        .entries = &entries_b,
+        .layout_items = &layout_items_b,
+        .flex_scratch = &flex_scratch_b,
+        .child_rects = &child_rects_b,
+        .actions = &actions_b,
+    });
+    try @import("std").testing.expectEqual(frame_a.tree.entries.len, frame_b.tree.entries.len);
+    for (frame_a.tree.entries) |entry_a| {
+        const index_b = frame_b.tree.find(entry_a.id) orelse return error.TestUnexpectedResult;
+        try @import("std").testing.expectEqualDeep(entry_a.rect, frame_b.tree.entries[index_b].rect);
+        try @import("std").testing.expectEqualDeep(entry_a.effective_clip, frame_b.tree.entries[index_b].effective_clip);
+    }
 }
 
 test "SessionDock partial item keeps one content clip for paint and hit testing" {

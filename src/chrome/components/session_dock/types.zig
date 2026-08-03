@@ -6,6 +6,7 @@
 const std = @import("std");
 const layout = @import("../../ui/layout.zig");
 const spacing = @import("../../ui/spacing.zig");
+const typography = @import("../../ui/typography.zig");
 
 pub const Scope = enum { workspace, project, all };
 
@@ -94,7 +95,11 @@ pub const Props = struct {
     items: []const Item = &.{},
 };
 
-pub const Metrics = struct {
+/// One immutable geometry snapshot for all Session Dock consumers. The host gets this same
+/// value for virtualization and wheel motion; build gets it for the published UiRectTree; view
+/// gets it for component-owned text offsets. Keeping terminal-cell metrics out of this type
+/// prevents a terminal-font preference from moving a visible Chrome hit target.
+pub const DockMetrics = struct {
     header_h: u32,
     scope_h: u32,
     search_h: u32,
@@ -102,48 +107,66 @@ pub const Metrics = struct {
     card_h: u32,
     expanded_detail_h: u32,
     expanded_actions_h: u32,
-    /// Header/scope/search 사이의 세로 gap. 이 값은 cell-aligned control text의 clip 안전성과
-    /// reference-like fixed-chrome breathing room을 함께 보장한다.
+    /// Header/scope/search 사이의 fixed Chrome gap.
     control_gap: u32,
     /// Group/card 사이의 목록 gap. 목록은 row bottom divider로 구분하므로 기본값은 0이다.
     item_gap: u32,
     /// Expanded action siblings 사이의 가로 gap. 기본 목록 divider와 달리 버튼은 서로 독립된 target으로
     /// 보여야 하므로, shared row 안에서도 경계를 맞닿게 두지 않는다.
     action_gap: u32,
-    pad: u32,
+    root_inset: u32,
+    card_inset_x: u32,
+    card_title_y: u32,
+    card_summary_y: u32,
+    card_metadata_y: u32,
+    detail_inset_x: u32,
+    detail_heading_y: u32,
+    detail_record_y: u32,
+    detail_turn_y: u32,
+    detail_turn_step: u32,
 
-    /// Cell metric에서만 파생해 fixed/response layout 모두 같은 density를 갖게 한다. 기본 목록은 세 줄
-    /// (title·summary·metadata)을 6행 row 안에 둔다. title/summary/metadata 사이에 cell 하나씩을
-    /// 남겨 작은 terminal 행처럼 붙어 보이지 않게 하되, row 사이의 별도 외곽 card gap은 만들지 않는다.
-    /// Header/scope/search의 1/2행 control gap은 목록과 분리한다. 그것을 줄이면 cell-based text lowering이
-    /// control glyph를 앞 cell로 내리고 own clip에 의해 사라지게 할 수 있다.
-    /// 바깥 padding은 cell 한 행으로 유지해, content의 첫 group/카드 text가 CoreText cell lowering 뒤 clip
-    /// 밖으로 이동하지 않고 exact vertical centring을 계속 지킨다.
-    /// viewport가 작아도 build 단계가 empty rect로 fail-close하므로 component가 별도 pixel magic number를
-    /// 들고 있지 않다.
-    pub fn fromCellHeight(cell_height_px: u32, scale_milli: u32) Metrics {
-        const ch = @max(cell_height_px, 1);
+    pub fn resolve(scale_milli: u32) DockMetrics {
+        const scale = effectiveScale(scale_milli);
         const button = ButtonMetrics.resolve(scale_milli);
+        const card_inset = spacing.px(.md, scale);
+        const card_title_y = card_inset;
+        const card_summary_y = saturatedAdd(saturatedAdd(card_title_y, typography.lineHeightPx(.card_heading, scale)), spacing.px(.xs, scale));
+        const card_metadata_y = saturatedAdd(saturatedAdd(card_summary_y, typography.lineHeightPx(.body, scale)), spacing.px(.xs, scale));
+        const detail_inset = spacing.px(.md, scale);
+        const detail_heading_y = detail_inset;
+        const detail_record_y = saturatedAdd(saturatedAdd(detail_heading_y, typography.lineHeightPx(.body, scale)), spacing.px(.xxs, scale));
+        const detail_turn_y = @max(saturatedAdd(saturatedAdd(detail_record_y, typography.lineHeightPx(.metadata, scale)), spacing.px(.sm, scale)), spacing.pointsPx(64, scale));
+        const detail_turn_step = saturatedAdd(saturatedAdd(saturatedAdd(typography.lineHeightPx(.overline, scale), spacing.px(.xxs, scale)), typography.lineHeightPx(.body, scale)), spacing.px(.sm, scale));
         return .{
-            // Title/count stack과 trailing utility cluster가 같은 header 안에서 숨 막히지 않도록 4행.
-            .header_h = ch * 4,
-            .scope_h = ch * 3,
-            .search_h = ch * 3,
-            .group_h = ch * 3,
-            .card_h = ch * 6,
-            // Reserve the same bounded space for loading/ready/stale/unavailable so the action
-            // row never jumps while a background detail result arrives.  The text view may use
-            // at most three two-line turns inside this rect.
-            .expanded_detail_h = ch * 10,
-            // The action target is native Chrome geometry. The surrounding archive list remains
-            // cell-derived until AS4-f moves all DockMetrics, but terminal font size cannot
-            // shrink this explicit command below the 48pt target.
+            // Heading + supporting + 4pt stack gap + 12pt vertical inset on each side.
+            .header_h = geometryPx(@max(spacing.pointsPx(76, scale), saturatedAdd(saturatedAdd(saturatedAdd(typography.lineHeightPx(.dock_heading, scale), typography.lineHeightPx(.supporting, scale)), spacing.px(.xxs, scale)), saturatedMul(spacing.px(.sm, scale), 2)))),
+            .scope_h = geometryPx(@max(button.minimum_height_px, saturatedAdd(typography.lineHeightPx(.control, scale), saturatedMul(spacing.px(.sm, scale), 2)))),
+            .search_h = geometryPx(@max(button.minimum_height_px, saturatedAdd(typography.lineHeightPx(.control, scale), saturatedMul(spacing.px(.sm, scale), 2)))),
+            .group_h = geometryPx(@max(spacing.pointsPx(48, scale), saturatedAdd(typography.lineHeightPx(.group_heading, scale), saturatedMul(spacing.px(.sm, scale), 2)))),
+            .card_h = geometryPx(@max(spacing.pointsPx(112, scale), saturatedAdd(saturatedAdd(card_metadata_y, typography.lineHeightPx(.metadata, scale)), spacing.px(.sm, scale)))),
+            .expanded_detail_h = geometryPx(@max(spacing.pointsPx(256, scale), saturatedAdd(saturatedSub(saturatedAdd(detail_turn_y, saturatedMul(detail_turn_step, 3)), spacing.px(.sm, scale)), detail_inset))),
             .expanded_actions_h = button.minimum_height_px,
-            .control_gap = ch,
+            .control_gap = geometryPx(spacing.px(.sm, scale)),
             .item_gap = 0,
-            .action_gap = @max(ch / 2, 4),
-            .pad = @max(ch + ch / 2, 12),
+            .action_gap = geometryPx(spacing.px(.xs, scale)),
+            .root_inset = geometryPx(spacing.px(.lg, scale)),
+            .card_inset_x = geometryPx(card_inset),
+            .card_title_y = geometryPx(card_title_y),
+            .card_summary_y = geometryPx(card_summary_y),
+            .card_metadata_y = geometryPx(card_metadata_y),
+            .detail_inset_x = geometryPx(detail_inset),
+            .detail_heading_y = geometryPx(detail_heading_y),
+            .detail_record_y = geometryPx(detail_record_y),
+            .detail_turn_y = geometryPx(detail_turn_y),
+            .detail_turn_step = geometryPx(detail_turn_step),
         };
+    }
+
+    /// The host uses exactly this sum before projecting the virtualized content viewport.  It
+    /// intentionally lives beside the rect values so adding a fixed control cannot make build
+    /// and wheel/scroll disagree about where the first item starts.
+    pub fn fixedChromeHeight(self: DockMetrics) u32 {
+        return geometryPx(saturatedAdd(saturatedAdd(saturatedAdd(saturatedAdd(saturatedMul(self.root_inset, 2), self.header_h), self.scope_h), self.search_h), saturatedMul(self.control_gap, 3)));
     }
 };
 
@@ -160,7 +183,7 @@ pub const ButtonMetrics = struct {
         // Props default to 1000, but malformed/pre-render snapshots may still carry zero.
         // `view.effectiveScale` uses the same fallback; matching it here keeps the published
         // action rect large enough for the content artifact rather than producing a blank button.
-        const scale = if (scale_milli == 0) 1000 else scale_milli;
+        const scale = effectiveScale(scale_milli);
         return .{
             .content_inset_x_px = geometryPx(spacing.px(.md, scale)),
             .content_inset_y_px = geometryPx(spacing.px(.sm, scale)),
@@ -169,23 +192,61 @@ pub const ButtonMetrics = struct {
             .minimum_height_px = geometryPx(spacing.pointsPx(48, scale)),
         };
     }
-
-    fn geometryPx(value: u32) u32 {
-        return @min(value, @as(u32, std.math.maxInt(i32)));
-    }
 };
 
-test "Metrics keeps the three-line session list readable without inter-row whitespace" {
-    const m = Metrics.fromCellHeight(32, 1000);
-    try std.testing.expectEqual(@as(u32, 192), m.card_h);
-    try std.testing.expectEqual(@as(u32, 96), m.scope_h);
-    try std.testing.expectEqual(@as(u32, 32), m.control_gap);
+fn effectiveScale(scale_milli: u32) u32 {
+    return if (scale_milli == 0) 1000 else scale_milli;
+}
+
+fn geometryPx(value: u32) u32 {
+    return @min(value, @as(u32, std.math.maxInt(i32)));
+}
+
+fn saturatedAdd(a: u32, b: u32) u32 {
+    return a +| b;
+}
+
+fn saturatedSub(a: u32, b: u32) u32 {
+    return a -| b;
+}
+
+fn saturatedMul(a: u32, b: u32) u32 {
+    return a *| b;
+}
+
+test "DockMetrics fixes all Session Dock geometry independently of terminal cells" {
+    const m = DockMetrics.resolve(1000);
+    try std.testing.expectEqual(@as(u32, 76), m.header_h);
+    try std.testing.expectEqual(@as(u32, 48), m.scope_h);
+    try std.testing.expectEqual(@as(u32, 48), m.search_h);
+    try std.testing.expectEqual(@as(u32, 48), m.group_h);
+    try std.testing.expectEqual(@as(u32, 112), m.card_h);
+    try std.testing.expectEqual(@as(u32, 256), m.expanded_detail_h);
+    try std.testing.expectEqual(@as(u32, 48), m.expanded_actions_h);
+    try std.testing.expectEqual(@as(u32, 12), m.control_gap);
     try std.testing.expectEqual(@as(u32, 0), m.item_gap);
-    try std.testing.expectEqual(@as(u32, 16), m.action_gap);
-    try std.testing.expectEqual(@as(u32, 48), m.pad);
-    // view.zig places base rows at 1/3/5 cell heights. Their cells fit before the divider while
-    // every information line keeps one full cell of separation.
-    try std.testing.expect(m.card_h >= 6 * 32);
+    try std.testing.expectEqual(@as(u32, 8), m.action_gap);
+    try std.testing.expectEqual(@as(u32, 20), m.root_inset);
+    try std.testing.expectEqual(@as(u32, 248), m.fixedChromeHeight());
+    try std.testing.expect(m.card_metadata_y < m.card_h);
+    try std.testing.expect(m.detail_turn_y + m.detail_turn_step * 3 <= m.expanded_detail_h);
+}
+
+test "DockMetrics scales only with backing scale" {
+    const one_x = DockMetrics.resolve(1000);
+    const two_x = DockMetrics.resolve(2000);
+    inline for (std.meta.fields(DockMetrics)) |field| {
+        try std.testing.expectEqual(@field(one_x, field.name) * 2, @field(two_x, field.name));
+    }
+    try std.testing.expectEqual(one_x.header_h, DockMetrics.resolve(0).header_h);
+}
+
+test "DockMetrics fails closed at extreme backing scale without overflow" {
+    const m = DockMetrics.resolve(std.math.maxInt(u32));
+    inline for (std.meta.fields(DockMetrics)) |field| {
+        try std.testing.expect(@field(m, field.name) <= @as(u32, std.math.maxInt(i32)));
+    }
+    try std.testing.expect(m.fixedChromeHeight() <= @as(u32, std.math.maxInt(i32)));
 }
 
 test "ButtonMetrics is independent of terminal cell height and scales in backing pixels" {

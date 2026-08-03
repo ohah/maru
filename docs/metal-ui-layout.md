@@ -201,12 +201,13 @@ Tailwind class 또는 임의 raw pixel을 직접 나열하는 API는 아니다. 
 `spacing.px(step, scale_milli)`로 backing pixel에 한 번 resolve한다. step 확장은 component별
 숫자 추가가 아니라 spacing module의 unit/scale/capture 검증을 포함한 별도 설계 변경이다.
 
-AS4-f는 두 단계다. **AS4-f-a(현재)**는 `ButtonMetrics.resolve(scale_milli)`로 action content inset,
-icon box/gap, minimum height만 먼저 옮긴다. **AS4-f-b(후속)**는 `SessionDock`에
-`DockMetrics.resolve(scale_milli)`를 추가해 root inset, control gap, fixed chrome/card/detail/action
-height와 action gap을 한 snapshot에 얻게 한다. f-b의 함수는 `ChromeTypography` line box와 `Space`만
-읽고 terminal cell width/height·terminal font·terminal line spacing은 읽지 않는다. `UiRectTree`, paint,
-hit-test, virtualized visible window, wheel step은 그 동일 metric snapshot을 공유해야 한다. 이 경계가
+`SessionDock`은 `ButtonMetrics.resolve(scale_milli)`와 `DockMetrics.resolve(scale_milli)`를 함께
+사용한다. `DockMetrics`는 root inset 20pt, fixed control gap 12pt, header 76pt,
+scope/search/group 48pt, three-line divider card 112pt, bounded detail 256pt, action 48pt,
+action gap 8pt와 item gap 0pt를 한 snapshot으로 제공한다. header/card/detail의 line offset은
+`ChromeTypography` line box와 `Space`로부터 그 snapshot 안에서 계산한다. terminal cell width/height,
+terminal font, terminal line spacing은 이 함수의 입력이 아니다. `UiRectTree`, paint, hit-test,
+virtualized visible window, page/wheel step은 그 동일 metric snapshot을 공유해야 한다. 이 경계가
 terminal font를 크게/작게 바꿨을 때 native Chrome의 밀도와 pointer target까지 같이 흔들리는 회귀를
 막는다.
 
@@ -218,7 +219,7 @@ box, `.xs` icon gap과 48pt minimum height를 소유한다. icon SVG의 source v
 API로 노출하지 않는다. view의 available height가 complete `ButtonMetrics`를 수용하지 못하면 action
 leaf를 조용히 압축하지 않고 candidate tree를 fail-close한다.
 
-AS4-f-b capture는 같은 dock backing rect에서 기본·큰 terminal font와 1×/2×를 비교한다. PNG/JSON은
+Dock metric capture는 같은 dock backing rect에서 기본·큰 terminal font와 1×/2×를 비교한다. PNG/JSON은
 action border/content/icon/label rect, header/scope/search/card rect, terminal font metric을 함께 남긴다.
 terminal-font 변화 뒤 dock rect나 action hit rect가 달라지면 실패다. 실제 사용자 Claude/Codex resume은
 이 시각 slice의 자동 실행 대상이 아니며, 기존 explicit-action fixture만 다시 실행한다.

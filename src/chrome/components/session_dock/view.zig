@@ -9,6 +9,7 @@ const tokens = @import("../../tokens.zig");
 const text_layout = @import("../../text_layout.zig");
 const interaction = @import("../../ui/interaction.zig");
 const ui_paint = @import("../../ui/paint.zig");
+const spacing = @import("../../ui/spacing.zig");
 const tree = @import("../../ui/tree.zig");
 const typography = @import("../../ui/typography.zig");
 const build = @import("build.zig");
@@ -46,6 +47,7 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
     };
 
     const header = find(frame.tree, build.NodeIds.header) orelse return error.MissingRect;
+    const dock_metrics = types.DockMetrics.resolve(props.scale_milli);
     var count_buf: [48]u8 = undefined;
     const count = std.fmt.bufPrint(&count_buf, "{d}개 표시 · 최근 {d}개", .{ props.displayed_count, props.recent_limit }) catch "";
     try writer.headerStack(header, "Agent 세션 기록", count);
@@ -74,15 +76,12 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
                     find(frame.tree, build.NodeIds.cardHeader(index)) orelse return error.MissingRect
                 else
                     rect;
-                // Provider belongs to the metadata badge, not the title.  Prefixing the title
-                // made long session names lose their first useful words and differed from the
-                // dock's reference hierarchy (title → safe summary → provider metadata).
-                // The three base rows deliberately occupy 1/3/5 cell baselines.  This gives
-                // title, safe summary, and metadata visible breathing room without inventing a
-                // second card rect or breaking the one shared scroll/hit-test geometry.
-                try writer.textStrong(card_rect, 0, card.title, .surface_fg, .card_heading, 6, false, false);
-                try writer.text(card_rect, 2, card.summary, .muted_fg, .body, 6, false, false);
-                try writer.cardMetadata(card_rect, 4, 6, card.provider.label(), card.metadata);
+                // Card y offsets are DockMetrics values, not 1/3/5 terminal rows. This keeps
+                // its three-line density and the disclosure hit rect stable across terminal
+                // font zoom while the worker still owns actual glyph shaping and ellipsis.
+                try writer.textAtY(card_rect, dock_metrics.card_inset_x, dock_metrics.card_title_y, card.title, .surface_fg, .card_heading, false);
+                try writer.textAtY(card_rect, dock_metrics.card_inset_x, dock_metrics.card_summary_y, card.summary, .muted_fg, .body, false);
+                try writer.cardMetadataAtY(card_rect, dock_metrics, card.provider.label(), card.metadata);
                 // The whole title card remains one disclosure action, but its trailing chevron
                 // makes that interaction discoverable and shares the exact card rect used by
                 // pointer/Enter. No separate tiny hit target is manufactured for the icon.
@@ -209,8 +208,7 @@ const Writer = struct {
     /// font-dependent size drift this component otherwise avoids.
     fn headerLabel(self: *Writer, rect: tree.RectEntry, source: []const u8) ViewError!void {
         const cw = self.props.cell_width_px;
-        const ch = self.props.cell_height_px;
-        if (cw == 0 or ch == 0) return;
+        if (cw == 0) return;
         const label_cols = plannedCols(source, 16);
         // Display columns are only a conservative placement estimate. Passing that exact width
         // to CTLine caused `Local Mac` to become `Local…` because the system face's proportional
@@ -223,27 +221,48 @@ const Writer = struct {
         const available_cols: u32 = @intFromFloat(@floor(rect.rect.width / @as(f32, @floatFromInt(cw))));
         if (required_cols > available_cols) return;
         const x = rect.rect.x + rect.rect.width - @as(f32, @floatFromInt((refresh_slot_cols + total_cols + 1) * cw));
-        const y = rect.rect.y + (rect.rect.height - @as(f32, @floatFromInt(ch))) / 2;
+        const control_h: f32 = @floatFromInt(typography.lineHeightPx(.control, effectiveScale(self.props.scale_milli)));
+        if (rect.rect.height < control_h) return;
+        const y = rect.rect.y + (rect.rect.height - control_h) / 2;
         try self.emit(x, y, source, label_slot_cols, .head, .surface_fg, .control, false, true);
     }
 
-    /// Provider is a dedicated metadata slot rather than a title prefix.  Both runs use the
-    /// same third-line baseline and bounded column plan, keeping the label readable without
-    /// letting long model metadata overlap the card's disclosure affordance.
-    fn cardMetadata(self: *Writer, rect: tree.RectEntry, line: u32, line_count: u32, provider: []const u8, metadata: []const u8) ViewError!void {
-        try self.text(rect, line, provider, .surface_fg, .metadata, line_count, false, false);
+    /// A fixed Chrome component can use terminal columns only as a conservative horizontal
+    /// truncation budget. Its vertical hierarchy must come from the published DockMetrics
+    /// snapshot, otherwise terminal zoom moves text inside a stable card/hit rect.
+    fn textAtY(self: *Writer, rect: tree.RectEntry, inset_x: u32, offset_y: u32, source: []const u8, role: tokens.ColorRole, text_role: typography.ChromeTextRole, bold: bool) ViewError!void {
+        const cw = self.props.cell_width_px;
+        const ch = self.props.cell_height_px;
+        if (cw == 0 or ch == 0) return;
+        const x = rect.rect.x + @as(f32, @floatFromInt(inset_x));
+        const y = rect.rect.y + @as(f32, @floatFromInt(offset_y));
+        if (!loweredTextCellFitsClip(rect, y, ch)) return;
+        const available_px = rect.rect.width - @as(f32, @floatFromInt(inset_x + cw));
+        if (available_px <= 0) return;
+        const max_cols: u16 = @intFromFloat(@min(
+            @floor(available_px / @as(f32, @floatFromInt(cw))),
+            @as(f32, @floatFromInt(std.math.maxInt(u16))),
+        ));
+        try self.emit(x, y, source, max_cols, .head, role, text_role, false, bold);
+    }
+
+    fn cardMetadataAtY(self: *Writer, rect: tree.RectEntry, metrics: types.DockMetrics, provider: []const u8, metadata: []const u8) ViewError!void {
+        try self.textAtY(rect, metrics.card_inset_x, metrics.card_metadata_y, provider, .surface_fg, .metadata, false);
         const cw = self.props.cell_width_px;
         const ch = self.props.cell_height_px;
         if (cw == 0 or ch == 0) return;
         const provider_cols = plannedCols(provider, 24);
-        const left_inset_cols: u16 = provider_cols + 2;
-        const y = rect.rect.y + @as(f32, @floatFromInt(ch)) * @as(f32, @floatFromInt(line + 1));
+        const provider_width = @as(u32, provider_cols) * cw;
+        const metadata_inset = metrics.card_inset_x + provider_width + spacing.px(.xs, effectiveScale(self.props.scale_milli));
+        const x = rect.rect.x + @as(f32, @floatFromInt(metadata_inset));
+        const y = rect.rect.y + @as(f32, @floatFromInt(metrics.card_metadata_y));
         if (!loweredTextCellFitsClip(rect, y, ch)) return;
-        const used_px = @as(f32, @floatFromInt((left_inset_cols + 1) * cw));
-        const available_px = rect.rect.width - used_px;
+        const available_px = rect.rect.width - @as(f32, @floatFromInt(metadata_inset + cw));
         if (available_px <= 0) return;
-        const max_cols: u16 = @intFromFloat(@floor(available_px / @as(f32, @floatFromInt(cw))));
-        const x = rect.rect.x + @as(f32, @floatFromInt(left_inset_cols * cw));
+        const max_cols: u16 = @intFromFloat(@min(
+            @floor(available_px / @as(f32, @floatFromInt(cw))),
+            @as(f32, @floatFromInt(std.math.maxInt(u16))),
+        ));
         try self.emit(x, y, metadata, max_cols, .head, .muted_fg, .metadata, false, false);
     }
 
@@ -254,21 +273,22 @@ const Writer = struct {
     /// only and cannot introduce a competing pointer region.
     fn groupHeader(self: *Writer, rect: tree.RectEntry, group: types.Group) ViewError!void {
         const cw = self.props.cell_width_px;
-        const ch = self.props.cell_height_px;
-        if (cw == 0 or ch == 0) return;
+        if (cw == 0) return;
+        const metrics = types.DockMetrics.resolve(self.props.scale_milli);
+        const scale = effectiveScale(self.props.scale_milli);
 
         var count_buf: [16]u8 = undefined;
         const count = std.fmt.bufPrint(&count_buf, "{d}", .{group.count}) catch return;
-        const horizontal_inset: u32 = cw;
-        const pill_pad: u32 = cw;
+        const horizontal_inset = metrics.card_inset_x;
+        const pill_pad = spacing.px(.xs, scale);
         const count_cols = @max(plannedCols(count, 4), 1);
-        // A one-digit count must still read as a horizontal count pill rather than a circular
-        // notification dot. Three cell-heights gives the same stable visual slot to 1, 12, and
-        // 230 while longer values can grow from their measured cell budget.
-        const pill_width = @max(ch * 3, @as(u32, count_cols) * cw + pill_pad * 2);
-        if (rect.rect.width < @as(f32, @floatFromInt(horizontal_inset * 2 + pill_width + cw * 3))) return;
+        // A one-digit count remains a horizontal count pill at every terminal font size; the
+        // cell estimate only reserves enough room for a longer measured label.
+        const pill_width = @max(spacing.pointsPx(44, scale), @as(u32, count_cols) * cw + pill_pad * 2);
+        const icon_slot = spacing.px(.xl, scale) + spacing.px(.xxs, scale);
+        if (rect.rect.width < @as(f32, @floatFromInt(horizontal_inset * 2 + pill_width + icon_slot))) return;
 
-        const pill_h = @min(ch * 2, @as(u32, @intFromFloat(@floor(rect.rect.height))));
+        const pill_h = @min(spacing.pointsPx(32, scale), @as(u32, @intFromFloat(@floor(rect.rect.height))));
         if (pill_h == 0) return;
         const pill_x: f32 = rect.rect.x + rect.rect.width - @as(f32, @floatFromInt(horizontal_inset + pill_width));
         const pill_y: f32 = rect.rect.y + (rect.rect.height - @as(f32, @floatFromInt(pill_h)) / 2);
@@ -286,7 +306,9 @@ const Writer = struct {
             .border_role = .divider,
         });
 
-        const icon_y = rect.rect.y + (rect.rect.height - @as(f32, @floatFromInt(ch))) / 2;
+        const control_h: f32 = @floatFromInt(typography.lineHeightPx(.control, scale));
+        if (rect.rect.height < control_h) return;
+        const icon_y = rect.rect.y + (rect.rect.height - control_h) / 2;
         try self.emit(
             rect.rect.x + @as(f32, @floatFromInt(horizontal_inset)),
             icon_y,
@@ -299,21 +321,24 @@ const Writer = struct {
             false,
         );
 
-        const label_x = rect.rect.x + @as(f32, @floatFromInt(horizontal_inset + cw * 3));
-        const label_end = pill_x - @as(f32, @floatFromInt(cw));
+        const label_x = rect.rect.x + @as(f32, @floatFromInt(horizontal_inset + icon_slot));
+        const label_end = pill_x - @as(f32, @floatFromInt(spacing.px(.xs, scale)));
         if (label_end > label_x) {
             const max_cols: u16 = @intFromFloat(@floor((label_end - label_x) / @as(f32, @floatFromInt(cw))));
-            const group_heading_h: f32 = @floatFromInt(typography.lineHeightPx(.group_heading, effectiveScale(self.props.scale_milli)));
+            const group_heading_h: f32 = @floatFromInt(typography.lineHeightPx(.group_heading, scale));
             if (max_cols > 0 and rect.rect.height >= group_heading_h)
                 try self.emit(label_x, rect.rect.y + (rect.rect.height - group_heading_h) / 2, group.label, max_cols, .head, .surface_fg, .group_heading, false, true);
         }
 
-        const count_width: f32 = @floatFromInt(@as(u32, count_cols) * cw);
+        const count_width: f32 = @min(
+            @as(f32, @floatFromInt(@as(u32, count_cols) * cw)),
+            @as(f32, @floatFromInt(pill_width -| pill_pad * 2)),
+        );
         const count_x = pill_x + (@as(f32, @floatFromInt(pill_width)) - count_width) / 2;
         // The group row and its count pill intentionally have different heights.  Centre the
         // count in the pill's own rect; using the row baseline lifted it above the dark pill in
         // real Metal captures even though the horizontal slot was correct.
-        const count_line_h: f32 = @floatFromInt(typography.lineHeightPx(.control, effectiveScale(self.props.scale_milli)));
+        const count_line_h: f32 = @floatFromInt(typography.lineHeightPx(.control, scale));
         if (@as(f32, @floatFromInt(pill_h)) < count_line_h) return;
         const count_y = pill_y + (@as(f32, @floatFromInt(pill_h)) - count_line_h) / 2;
         try self.emit(count_x, count_y, count, count_cols, .head, .surface_fg, .control, false, true);
@@ -327,35 +352,33 @@ const Writer = struct {
 
     fn expanded(self: *Writer, snapshot: tree.UiRectTree, index: usize, expanded_props: types.Expanded) ViewError!void {
         const detail = find(snapshot, build.NodeIds.expandedDetail(index)) orelse return error.MissingRect;
-        // The reserved detail rect contains a bounded line stack.  Passing one as the line count
-        // here used to make `textInset` reject every line after the heading, leaving ready cards
-        // visually empty even though the worker had returned safe turns.
-        const detail_lines: u32 = 9;
-        try self.text(detail, 0, switch (expanded_props.state) {
+        const metrics = types.DockMetrics.resolve(self.props.scale_milli);
+        try self.textAtY(detail, metrics.detail_inset_x, metrics.detail_heading_y, switch (expanded_props.state) {
             .loading => "세션 분석 중",
             .ready => "최근 대화",
             .stale => "세션 원본이 변경되었습니다",
             .unavailable => "세션을 열 수 없습니다",
-        }, .surface_fg, .body, detail_lines, false, false);
+        }, .surface_fg, .body, false);
         switch (expanded_props.state) {
             .ready => {
                 if (expanded_props.action_record_count > 0) {
                     var count: [80]u8 = undefined;
                     const label = std.fmt.bufPrint(&count, "도구/권한 관련 기록 {d}건", .{expanded_props.action_record_count}) catch "도구/권한 관련 기록";
-                    try self.text(detail, 1, label, .muted_fg, .metadata, detail_lines, false, false);
+                    try self.textAtY(detail, metrics.detail_inset_x, metrics.detail_record_y, label, .muted_fg, .metadata, false);
                 }
                 for (expanded_props.turns, 0..) |turn, turn_index| {
-                    const line: u32 = @intCast(2 + turn_index * 2);
-                    try self.text(detail, line, switch (turn.role) {
+                    const turn_y = metrics.detail_turn_y + @as(u32, @intCast(turn_index)) * metrics.detail_turn_step;
+                    try self.textAtY(detail, metrics.detail_inset_x, turn_y, switch (turn.role) {
                         .user => "사용자",
                         .assistant => "에이전트",
-                    }, .muted_fg, .overline, detail_lines, false, false);
-                    try self.text(detail, line + 1, turn.text, .surface_fg, .body, detail_lines, false, false);
+                    }, .muted_fg, .overline, false);
+                    const body_y = turn_y + typography.lineHeightPx(.overline, effectiveScale(self.props.scale_milli)) + spacing.px(.xxs, effectiveScale(self.props.scale_milli));
+                    try self.textAtY(detail, metrics.detail_inset_x, body_y, turn.text, .surface_fg, .body, false);
                 }
             },
             .loading => try self.skeletons(detail),
-            .stale => try self.text(detail, 2, "안전하게 재개하거나 로그를 열 수 없습니다.", .muted_fg, .body, detail_lines, false, false),
-            .unavailable => try self.text(detail, 2, "원본을 읽을 수 없습니다.", .muted_fg, .body, detail_lines, false, false),
+            .stale => try self.textAtY(detail, metrics.detail_inset_x, metrics.detail_turn_y, "안전하게 재개하거나 로그를 열 수 없습니다.", .muted_fg, .body, false),
+            .unavailable => try self.textAtY(detail, metrics.detail_inset_x, metrics.detail_turn_y, "원본을 읽을 수 없습니다.", .muted_fg, .body, false),
         }
         try self.action(find(snapshot, build.NodeIds.resumeAction(index)) orelse return error.MissingRect, resume_icon, "터미널에서 이어하기");
         try self.action(find(snapshot, build.NodeIds.reveal(index)) orelse return error.MissingRect, reveal_icon, "로그 보기");
@@ -376,7 +399,10 @@ const Writer = struct {
             .w = @intFromFloat(@floor(rect.rect.width)),
             .h = @intFromFloat(@floor(rect.rect.height)),
         };
-        if (border.h < button.minimum_height_px) return;
+        // `ButtonMetrics.minimum_height_px` is enforced by the layout tree.  Do not repeat that
+        // rule after the final physical-pixel rounding: a valid 48pt action may become 46px at a
+        // fractional backing scale, and the content-area checks below are the renderer's real
+        // safety boundary.
         const content = border.inset(.{
             .top = @intCast(button.content_inset_y_px),
             .right = @intCast(button.content_inset_x_px),
@@ -465,20 +491,18 @@ const Writer = struct {
     /// deliberately do not enter the rect tree or action table, so an impatient click cannot
     /// resolve to a stale/fictional session action.
     fn skeletons(self: *Writer, content: tree.RectEntry) ViewError!void {
-        const ch = self.props.cell_height_px;
-        if (ch == 0) return;
-        const metrics = types.Metrics.fromCellHeight(ch, self.props.scale_milli);
-        const left = content.rect.x + @as(f32, @floatFromInt(metrics.pad));
-        const available = content.rect.width - @as(f32, @floatFromInt(metrics.pad * 2));
+        const metrics = types.DockMetrics.resolve(self.props.scale_milli);
+        const left = content.rect.x + @as(f32, @floatFromInt(metrics.card_inset_x));
+        const available = content.rect.width - @as(f32, @floatFromInt(metrics.card_inset_x * 2));
         if (available <= 0) return;
-        const line_h = @max(ch / 2, 2);
+        const line_h = @max(spacing.px(.xs, effectiveScale(self.props.scale_milli)), 2);
         const start_y = content.rect.y + @as(f32, @floatFromInt(metrics.item_gap));
         for (0..3) |card_index| {
             const card_y = start_y + @as(f32, @floatFromInt(card_index * (metrics.card_h + metrics.item_gap)));
             if (card_y >= content.rect.y + content.rect.height) break;
-            try self.skeletonLine(left, card_y + @as(f32, @floatFromInt(ch)), available, line_h);
-            try self.skeletonLine(left, card_y + @as(f32, @floatFromInt(ch * 2 + metrics.item_gap)), available * 0.82, line_h);
-            try self.skeletonLine(left, card_y + @as(f32, @floatFromInt(ch * 3 + metrics.item_gap * 2)), available * 0.58, line_h);
+            try self.skeletonLine(left, card_y + @as(f32, @floatFromInt(metrics.card_title_y)), available, line_h);
+            try self.skeletonLine(left, card_y + @as(f32, @floatFromInt(metrics.card_summary_y)), available * 0.82, line_h);
+            try self.skeletonLine(left, card_y + @as(f32, @floatFromInt(metrics.card_metadata_y)), available * 0.58, line_h);
         }
     }
 
@@ -612,7 +636,7 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
             if (quad.fill_role == .inset_bg) {
                 saw_group_count_pill = true;
                 group_count_pill_y = quad.rect.y;
-                try std.testing.expect(quad.rect.w >= props.cell_height_px * 3);
+                try std.testing.expect(quad.rect.w >= spacing.pointsPx(44, effectiveScale(props.scale_milli)));
             }
         },
         .text => |text| {
@@ -657,7 +681,7 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
     try std.testing.expect(saw_group_label);
     try std.testing.expect(saw_group_count);
     try std.testing.expect(saw_group_count_pill);
-    const expected_pill_centered_y = (group_count_pill_y orelse return error.TestUnexpectedResult) + @as(i32, @intCast((props.cell_height_px * 2 - typography.lineHeightPx(.control, effectiveScale(props.scale_milli))) / 2));
+    const expected_pill_centered_y = (group_count_pill_y orelse return error.TestUnexpectedResult) + @as(i32, @intCast((spacing.pointsPx(32, effectiveScale(props.scale_milli)) - typography.lineHeightPx(.control, effectiveScale(props.scale_milli))) / 2));
     try std.testing.expectEqual(expected_pill_centered_y, group_count_origin_y orelse return error.TestUnexpectedResult);
     try std.testing.expect(saw_dock_heading);
     try std.testing.expect(saw_card_heading);
@@ -699,7 +723,7 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
 }
 
 test "SessionDock partial card never emits a CoreText cell that crosses its published clip" {
-    const metrics = types.Metrics.fromCellHeight(16, 1000);
+    const metrics = types.DockMetrics.resolve(1000);
     const props = types.Props{
         // Fixed chrome is intentionally roomier in AS4-e. Keep enough scroll viewport below it
         // to prove a one-pixel partial first card cannot suppress the next card's title.
@@ -821,7 +845,7 @@ test "SessionDock Retina controls centre measured line boxes instead of terminal
     const scope = find(frame.tree, build.NodeIds.scope_workspace) orelse return error.TestUnexpectedResult;
     const control_h: f32 = @floatFromInt(typography.lineHeightPx(.control, props.scale_milli));
     try std.testing.expectEqual(@as(i32, @intFromFloat(@floor(scope.rect.y + (scope.rect.height - control_h) / 2))), workspace_y orelse return error.TestUnexpectedResult);
-    const expected_count_y = (count_pill_y orelse return error.TestUnexpectedResult) + @as(i32, @intCast((props.cell_height_px * 2 - typography.lineHeightPx(.control, props.scale_milli)) / 2));
+    const expected_count_y = (count_pill_y orelse return error.TestUnexpectedResult) + @as(i32, @intCast((spacing.pointsPx(32, props.scale_milli) - typography.lineHeightPx(.control, props.scale_milli)) / 2));
     try std.testing.expectEqual(expected_count_y, count_y orelse return error.TestUnexpectedResult);
 }
 

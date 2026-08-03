@@ -11,6 +11,23 @@
 - 계약을 의도적으로 바꾸기로 합의한 경우, 같은 PR에서 문서·테스트·전략 영향 평가를 함께 갱신한다. 코드와 문서가 어긋났을 때의 일반 처리 규칙은 [PR 체크리스트](pr-checklist.md)를 단일 출처로 둔다.
 - import boundary는 테스트로 확인한다. 단순히 "조심한다"는 규칙만으로 경계를 지켰다고 보지 않는다.
 
+## `GenerationTransport`
+
+책임:
+
+- generation GUI attachment가 봉인한 단일 stream에 대해 closed input, control, event, RPC primitive만 제공한다.
+- 매 호출에서 final address, process, owner thread, slot/node incarnation, binding과 role을 다시 검증한다.
+- partial write와 response/event payload의 소유권을 typed outcome과 one-shot receipt로 표현한다.
+
+몰라야 하는 것:
+
+- raw `Client` pointer, 임의 RPC method string, `*anyopaque`, generic callback.
+- `RemoteRuntime`의 input FIFO/barrier, response decode, metadata 적용 정책.
+- legacy/external movable attachment의 owner graph.
+
+정확한 15개 declaration, 단계별 migration gate와 오류/소유권 계약은
+[영속 터미널 세션 호스트](persistent-session-host.md)의 CR3a-2 `GenerationTransport` 절을 단일 출처로 둔다.
+
 ## `TerminalCore`
 
 책임:

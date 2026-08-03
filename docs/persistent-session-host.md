@@ -886,6 +886,29 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    async_scroll_to_bottom,notification_stream_auth,runtime_clipboard,runtime_core_command,runtime_link_at,
    runtime_selected_text}`뿐이다.
 
+   2c3은 한 번에 완료 처리하지 않고 다음 세로 gate로 병합한다. **2c3a**는
+   `sendInput|sendInputNonBlocking|pumpPendingOutput|fenceRevoke`와 모든 public entry의 raw lifecycle admission을,
+   **2c3b**는 capability projection과 closed RPC transaction을, **2c3c**는
+   `sendControl|sendControlNonBlocking`을, **2c3d**는 one-shot event owner의
+   `takeEvent|releaseEvent`와 ended purge 우선순위를, **2c3e**는 generation 제품 callsite source-zero와 actual socket
+   parity를 닫는다. 2c3a~e가 모두 green이기 전에는 2c3 또는 2c 전체 완료를 주장하지 않는다. 중간 gate는 legacy
+   `Client` 경로를 바꾸지 않고 generation arm에서 자기가 맡은 direct `Client` 호출만 단조 감소시키며, facade 실패를
+   legacy로 fallback하지 않는다. 2c3은 generation arm의 direct `logicalClient()`/`Client` method callsite 0을,
+   2c4는 `RemoteRuntime.client` 필드 자체 제거와 `RuntimeConnection.legacy|generation` 타입 격리를 소유한다.
+
+   2c3a의 exact signature는 `sendInput(bytes: []const u8) -> InputError!void`,
+   `sendInputNonBlocking(bytes: []const u8) -> InputError!usize`,
+   `pumpPendingOutput() -> InputError!bool`, `fenceRevoke() -> InputError!RevokeFence`다.
+   `InputError`는 `Busy|InvalidOwner|Unauthorized|ResourceExhausted|ConnectionClosed|ProtocolError`의 닫힌 집합이고,
+   `RevokeFence`는 `no_pending_stream_frame|cancelled_before_write|partial_frame_requires_close`다. transport가 봉인한
+   stream만 사용하므로 stream ID 인자는 받지 않는다. nonblocking 반환값은 wire write량이 아니라 facade가 소유권을
+   인수한 payload byte 수이고, 0이면 caller가 전량 소유한다. `pumpPendingOutput`의 false는 기존 outbound owner가
+   backpressure로 남았다는 뜻이다. revoke fence는 zero-byte pending frame만 취소하며 partial frame은 직접 close하지 않고
+   `partial_frame_requires_close`를 반환해 `RemoteRuntime`의 기존 poison 정책이 fail-close한다. 네 메서드는 controller binding만
+   허용하고 copied/moved/fork/foreign-thread, stale slot/node/binding, cleanup-reserved 상태를 Client/queue/socket mutation 전에
+   typed reject한다. transport lifecycle은 typed enum 비교 전에 raw `u8` 범위를 검증하며 0...255 sweep를 Debug와
+   ReleaseFast에서 실행한다.
+
    `readAttachmentBatch`는 이 집합에 넣지 않는다. post-initial batch의 유일한 owner는 2b2의 별도 inline
    `GenerationBatchAdapter`이며 transport가 같은 queue authority를 중복하지 않는다. `purgeEndedStream`은 임의 stream ID를
    받는 drop이 아니다. 이 메서드가 일반 `takeEvent`보다 먼저 node-local ended-only target-head peek/classify를 수행하고,

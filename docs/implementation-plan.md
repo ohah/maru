@@ -1024,8 +1024,10 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    receipt 게시 전 같은 index 재사용을 막는다. multi-thread winner 경쟁은 범위가 아니며 same-thread copy/replay exact-once만
    계약한다. 등록과 empty entry 재사용은 기존 mutex와
    checked-monotonic id를 유지하며 CAS 뒤 payload는 다음 등록 전까지 지우지 않는다.
-   **2c3**은 capability/input/control/
-   event/RPC primitive를 exact facade로 옮기고 generation의 `logicalClient()` 사용을 0으로 만든다. **2c4**는
+   **2c3**은 capability/input/control/event/RPC primitive를 exact facade로 옮긴다. 내부 순서는 2c3a
+   input/revoke/output-progress+raw lifecycle admission, 2c3b capability+closed RPC, 2c3c control, 2c3d one-shot event,
+   2c3e generation 제품 source-zero+socket parity다. 2c3a~e가 모두 green일 때만 generation arm의 direct
+   `logicalClient()`/`Client` method 사용 0을 주장한다. **2c4**는
    `RuntimeConnection` union을 mode SSOT로 전환해 `RemoteRuntime.client`와 `generation_adapter` 병렬 필드를 제거하고 exact
    15-method/signature/source oracle을 닫는다. 각 gate는 reconnect/current publish와 제품 동작 변화 0을 유지하며 마지막 2c4
    전에는 2c 전체 완료를 주장하지 않는다. CR3a-2d는

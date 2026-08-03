@@ -408,6 +408,28 @@ test "Chrome draw lowering widens only explicitly owned registered SVG icons" {
     try std.testing.expectEqual(@as(u2, 1), plain.cells[0].width);
 }
 
+test "icon-only lowering excludes ordinary Session Dock text" {
+    const tk = chrome.tokens.Tokens.rich(.{
+        .foreground = .{ .r = 1, .g = 2, .b = 3 },
+        .sidebar_background = .{ .r = 4, .g = 5, .b = 6 },
+        .sidebar_foreground = .{ .r = 7, .g = 8, .b = 9 },
+        .sidebar_active = .{ .r = 10, .g = 11, .b = 12 },
+        .search_match = .{ .r = 13, .g = 14, .b = 15 },
+        .search_match_current = .{ .r = 16, .g = 17, .b = 18 },
+        .selection = .{ .r = 19, .g = 20, .b = 21 },
+        .cursor = .{ .r = 22, .g = 23, .b = 24 },
+        .accent = .{ .r = 25, .g = 26, .b = 27 },
+    });
+    const ops = [_]chrome.draw.Op{
+        .{ .text = .{ .origin = .{ .x = 0, .y = 0 }, .runs = &.{.{ .text = "ordinary" }}, .role = .surface_fg } },
+        .{ .text = .{ .origin = .{ .x = 8, .y = 0 }, .runs = &.{.{ .text = "\u{F000C}" }}, .role = .surface_fg, .wide_icons = true } },
+    };
+    var list = try buildIconTextDrawList(std.testing.allocator, &ops, &tk, 8, 16, 20, 1);
+    defer list.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), list.cells.len);
+    try std.testing.expectEqual(@as(u21, 0xF000C), list.cells[0].codepoint);
+}
+
 test "rich text artifact preserves fractional pixel origin instead of coercing it to a cell row" {
     const tk = chrome.Tokens.rich(.{
         .foreground = .{ .r = 1, .g = 2, .b = 3 },

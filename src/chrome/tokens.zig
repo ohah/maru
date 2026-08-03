@@ -27,12 +27,22 @@ fn keycapBg(panel: Rgb) Rgb {
     return if (lum < 128) lightenRgb(panel, 40) else darkenRgb(panel, 40);
 }
 
+/// 패널 안쪽의 count pill/detail처럼 한 단계 들어간 표면. 어두운 테마에서는 panel보다 더
+/// 어둡고, 밝은 테마에서는 더 밝아야 양쪽 모두 "구멍"처럼 보이면서 raw RGB를 강제하지 않는다.
+fn insetBg(panel: Rgb) Rgb {
+    const lum: u16 = (@as(u16, panel.r) * 77 + @as(u16, panel.g) * 150 + @as(u16, panel.b) * 29) >> 8;
+    return if (lum < 128) darkenRgb(panel, 14) else lightenRgb(panel, 14);
+}
+
 /// 색 역할(semantic). 컴포넌트는 역할만 알고, 실제 Rgb는 토큰이 준다. divider/focus_accent/drop_zone은
 /// 현재 sidebar_active를 공유하지만 rich에서 분리할 수 있게 별도 role로 둔다.
 pub const ColorRole = enum {
     surface_bg,
     surface_fg,
     muted_fg,
+    /// Panel-local recessed surface. Count pills and inset detail can use this without
+    /// depending on a dark-theme literal or misusing an interactive tab color.
+    inset_bg,
     tab_active_bg,
     tab_hover_bg,
     /// 목록 행(에이전트 행·토글) 호버 — **활성 밴드 위에 겹쳐도 구분되어야** 하므로 활성보다 한 단계 밝다.
@@ -130,22 +140,23 @@ pub const ThemeColors = struct {
     accent: Rgb, // maru accent(테마-구동) — accent_bar 역할이 소비. 호출자가 ResolvedTheme.accent를 넘긴다(null은 resolve가 앰버로 폴백).
 };
 
-/// 한 테마 = 토큰 묶음. `Tokens.tui(theme)`가 resolved 테마 색에서 14개 ColorRole을 채운다(C0 구현).
+/// 한 테마 = 토큰 묶음. `Tokens.tui(theme)`가 resolved 테마 색에서 15개 ColorRole을 채운다(C0 구현).
 /// `Tokens.rich(...)`는 C4. 컴포넌트는 이 값만 소비한다.
 pub const Tokens = struct {
     palette: std.EnumArray(ColorRole, Rgb),
     space: Spacing = .{},
     border: Border = .{},
 
-    /// tui 토큰셋: resolved 테마(chrome-중립 ThemeColors)에서 14개 ColorRole을 채운다 — **역할→색 매핑의 단일
+    /// tui 토큰셋: resolved 테마(chrome-중립 ThemeColors)에서 15개 ColorRole을 채운다 — **역할→색 매핑의 단일
     /// 출처**. focus_accent/tab_*/drop_zone은 sidebar_active를 공유하고, divider만 sidebar_background에서 살짝 밝은 은은한 색이다(렌더 sidebarActiveBg와 같은
-    /// 출처), rich(C4)는 토큰셋만 바꿔 분리한다. muted_fg는 C0에선 sidebar_foreground. initFill 기본값은 14역할을
+    /// 출처), rich(C4)는 토큰셋만 바꿔 분리한다. muted_fg는 C0에선 sidebar_foreground. initFill 기본값은 15역할을
     /// 전부 명시 set하므로 실제로 안 쓰이지만(foreground로 채워 둠) EnumArray 초기화에 필요하다.
     pub fn tui(theme: ThemeColors) Tokens {
         var palette = std.EnumArray(ColorRole, Rgb).initFill(theme.foreground);
         palette.set(.surface_bg, theme.sidebar_background);
         palette.set(.surface_fg, theme.sidebar_foreground);
         palette.set(.muted_fg, theme.sidebar_foreground);
+        palette.set(.inset_bg, insetBg(theme.sidebar_background));
         palette.set(.tab_active_bg, theme.sidebar_active);
         palette.set(.tab_hover_bg, theme.sidebar_active);
         palette.set(.row_hover_bg, theme.sidebar_active);
@@ -234,6 +245,7 @@ test "Tokens.tui maps resolved theme colors to the semantic roles" {
         .accent = c.rgb(9, 9, 9),
     });
     try std.testing.expectEqual(c.rgb(2, 2, 2), tk.get(.surface_bg));
+    try std.testing.expectEqual(c.rgb(0, 0, 0), tk.get(.inset_bg)); // dark surface는 한 단계 recessed
     try std.testing.expectEqual(c.rgb(3, 3, 3), tk.get(.surface_fg));
     try std.testing.expectEqual(c.rgb(4, 4, 4), tk.get(.focus_accent)); // sidebar_active 공유
     try std.testing.expectEqual(c.rgb(16, 16, 16), tk.get(.divider)); // sidebar_background(2) lighten 14 = 16 — 은은한 구분선(sidebar_active 공유 아님)
@@ -260,6 +272,23 @@ test "keycap_bg는 패널(surface_bg)과 항상 대비 — 어두우면 밝게·
     inline for ([_]Tokens{ Tokens.tui(c.theme(c.rgb(238, 232, 213))), Tokens.rich(c.theme(c.rgb(238, 232, 213))) }) |tk| {
         try std.testing.expect(!std.meta.eql(tk.get(.keycap_bg), tk.get(.surface_bg)));
         try std.testing.expect(tk.get(.keycap_bg).r < tk.get(.surface_bg).r); // 밝은 패널 → 더 어둡게
+    }
+}
+
+test "inset_bg는 dark/light 테마에서 surface와 반대 방향으로 분리된다" {
+    const c = struct {
+        fn rgb(r: u8, g: u8, b: u8) Rgb {
+            return .{ .r = r, .g = g, .b = b };
+        }
+        fn theme(bg: Rgb) ThemeColors {
+            return .{ .foreground = rgb(128, 128, 128), .sidebar_background = bg, .sidebar_foreground = rgb(180, 180, 180), .sidebar_active = rgb(120, 120, 120), .search_match = rgb(5, 5, 5), .search_match_current = rgb(6, 6, 6), .selection = rgb(7, 7, 7), .cursor = rgb(8, 8, 8), .accent = rgb(9, 9, 9) };
+        }
+    };
+    inline for ([_]Tokens{ Tokens.tui(c.theme(c.rgb(40, 40, 40))), Tokens.rich(c.theme(c.rgb(40, 40, 40))) }) |tk| {
+        try std.testing.expect(tk.get(.inset_bg).r < tk.get(.surface_bg).r);
+    }
+    inline for ([_]Tokens{ Tokens.tui(c.theme(c.rgb(220, 220, 220))), Tokens.rich(c.theme(c.rgb(220, 220, 220))) }) |tk| {
+        try std.testing.expect(tk.get(.inset_bg).r > tk.get(.surface_bg).r);
     }
 }
 

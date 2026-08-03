@@ -115,10 +115,10 @@ font size, line height와 screenshot E2E)을 먼저 설계한 뒤 별도 slice�
   affordance도 같은 registry의 명시 icon slot으로만 그린다. icon의 코드포인트·two-cell slot·hit
   rect는 component가 함께 소유하며, raw provider 문자열에는 `wide_icons`를 절대 적용하지 않는다.
 - 한 줄 control(`작업공간`/`프로젝트`/`전체`, search, group)은 completed rect의 정확한 세로 중앙에
-  glyph cell을 놓고, 두 줄 header는 **전체 line stack**을 rect 중앙에 놓은 뒤 각 line을 cell-height
-  간격으로 배치한다. virtualized card는 partial clip에서 보이는 line을 없애지 않도록 기존 top-origin
-  line stack을 유지한다. paint·clip·hit-test는 계속 같은 completed tree만 소비하며, font의
-  ink/baseline 보정은 후속 `TextLayoutArtifact`가 맡는다. 따라서 이 slice는 font advance를 추측해
+  그 role의 line box를 놓고, 두 줄 header는 **heading/supporting role의 실제 line-height 합**으로 만든
+  전체 stack을 rect 중앙에 놓는다. virtualized card는 partial clip에서 보이는 line을 없애지 않도록 기존
+  top-origin line stack을 유지한다. paint·clip·hit-test는 계속 같은 completed tree만 소비하며,
+  font의 ink/baseline 보정은 `TextLayoutArtifact`가 맡는다. 따라서 이 slice는 font advance를 추측해
   개별 label을 nudge하지 않는다.
 - 기본 목록의 `SessionCard`는 title·summary·metadata **3행**을 유지하되, cell-height의 **5행** 고정
   row를 쓴다. row 사이에는 별도 빈 gap을 두지 않고 각 row의 bottom divider로만 구분한다. 따라서 세

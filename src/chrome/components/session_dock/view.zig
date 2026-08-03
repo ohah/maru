@@ -46,10 +46,9 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
     };
 
     const header = find(frame.tree, build.NodeIds.header) orelse return error.MissingRect;
-    try writer.textStrong(header, 0, "AI 세션 기록", .surface_fg, .dock_heading, 2, false, true);
     var count_buf: [48]u8 = undefined;
     const count = std.fmt.bufPrint(&count_buf, "{d}개 표시 · 최근 {d}개", .{ props.displayed_count, props.recent_limit }) catch "";
-    try writer.text(header, 1, count, .muted_fg, .supporting, 2, false, true);
+    try writer.headerStack(header, "Agent 세션 기록", count);
     try writer.headerLabel(header, host_label);
     try writer.textRight(header, if (props.loading or props.refreshing) spinner(props.spinner_phase) else refresh_icon, if (props.loading or props.refreshing) .muted_fg else .surface_fg, !(props.loading or props.refreshing));
 
@@ -68,9 +67,7 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
         const rect = find(frame.tree, build.NodeIds.item(index)) orelse return error.MissingRect;
         switch (item) {
             .group => |group| {
-                var group_buf: [96]u8 = undefined;
-                const label = std.fmt.bufPrint(&group_buf, "{s} {s}  {d}", .{ if (group.collapsed) chevron_right_icon else chevron_down_icon, group.label, group.count }) catch group.label;
-                try writer.textStrong(rect, 0, label, .surface_fg, .group_heading, 1, true, true);
+                try writer.groupHeader(rect, group);
             },
             .card => |card| {
                 const card_rect = if (card.expanded != null)
@@ -115,6 +112,27 @@ const Writer = struct {
     /// the selected face and its measured advance, so title/group emphasis remains font-safe.
     fn textStrong(self: *Writer, rect: tree.RectEntry, line: u32, source: []const u8, role: tokens.ColorRole, text_role: typography.ChromeTextRole, line_count: u32, wide_icons: bool, centered: bool) ViewError!void {
         return self.textStyled(rect, line, source, role, text_role, line_count, wide_icons, centered, true);
+    }
+
+    /// The dock header is a real two-role typographic stack, not two terminal cells.  Centre
+    /// its heading/supporting line boxes together so point-size changes or a 2x backing scale
+    /// cannot make the count cling to the heading as in the legacy cell path.
+    fn headerStack(self: *Writer, rect: tree.RectEntry, heading: []const u8, supporting: []const u8) ViewError!void {
+        const cw = self.props.cell_width_px;
+        if (cw == 0) return;
+        const available_px = rect.rect.width - @as(f32, @floatFromInt(cw * 2));
+        if (available_px <= 0) return;
+        const max_cols: u16 = @intFromFloat(@floor(available_px / @as(f32, @floatFromInt(cw))));
+        if (max_cols == 0) return;
+        const scale = if (self.props.scale_milli == 0) 1000 else self.props.scale_milli;
+        const heading_h: f32 = @floatFromInt(typography.lineHeightPx(.dock_heading, scale));
+        const supporting_h: f32 = @floatFromInt(typography.lineHeightPx(.supporting, scale));
+        const stack_h = heading_h + supporting_h;
+        if (rect.rect.height < stack_h) return;
+        const x = rect.rect.x + @as(f32, @floatFromInt(cw));
+        const y = rect.rect.y + (rect.rect.height - stack_h) / 2;
+        try self.emit(x, y, heading, max_cols, .head, .surface_fg, .dock_heading, false, true);
+        try self.emit(x, y + heading_h, supporting, max_cols, .head, .muted_fg, .supporting, false, false);
     }
 
     fn textStyled(self: *Writer, rect: tree.RectEntry, line: u32, source: []const u8, role: tokens.ColorRole, text_role: typography.ChromeTextRole, line_count: u32, wide_icons: bool, centered: bool, bold: bool) ViewError!void {
@@ -183,14 +201,19 @@ const Writer = struct {
         const ch = self.props.cell_height_px;
         if (cw == 0 or ch == 0) return;
         const label_cols = plannedCols(source, 16);
+        // Display columns are only a conservative placement estimate. Passing that exact width
+        // to CTLine caused `Local Mac` to become `Local…` because the system face's proportional
+        // advance was a few pixels wider than terminal cells. Reserve a small utility slot and
+        // let the measured path ellipsize only at the actual slot edge.
+        const label_slot_cols: u16 = label_cols +| 2;
         const refresh_slot_cols: u32 = 3;
-        const total_cols: u32 = @intCast(label_cols);
+        const total_cols: u32 = @intCast(label_slot_cols);
         const required_cols = total_cols + refresh_slot_cols + 2;
         const available_cols: u32 = @intFromFloat(@floor(rect.rect.width / @as(f32, @floatFromInt(cw))));
         if (required_cols > available_cols) return;
         const x = rect.rect.x + rect.rect.width - @as(f32, @floatFromInt((refresh_slot_cols + total_cols + 1) * cw));
         const y = rect.rect.y + (rect.rect.height - @as(f32, @floatFromInt(ch))) / 2;
-        try self.emit(x, y, source, label_cols, .head, .surface_fg, .control, false, true);
+        try self.emit(x, y, source, label_slot_cols, .head, .surface_fg, .control, false, true);
     }
 
     /// Provider is a dedicated metadata slot rather than a title prefix.  Both runs use the
@@ -211,6 +234,80 @@ const Writer = struct {
         const max_cols: u16 = @intFromFloat(@floor(available_px / @as(f32, @floatFromInt(cw))));
         const x = rect.rect.x + @as(f32, @floatFromInt(left_inset_cols * cw));
         try self.emit(x, y, metadata, max_cols, .head, .muted_fg, .metadata, false, false);
+    }
+
+    /// A workspace group has three independent slots: disclosure affordance, name, and count.
+    /// Packing them into one terminal-style string made the count drift next to a long workspace
+    /// name, which is visibly unlike the reference and leaves no stable place for its count pill.
+    /// The group row itself remains the sole hit target from the completed tree; the pill is paint
+    /// only and cannot introduce a competing pointer region.
+    fn groupHeader(self: *Writer, rect: tree.RectEntry, group: types.Group) ViewError!void {
+        const cw = self.props.cell_width_px;
+        const ch = self.props.cell_height_px;
+        if (cw == 0 or ch == 0) return;
+
+        var count_buf: [16]u8 = undefined;
+        const count = std.fmt.bufPrint(&count_buf, "{d}", .{group.count}) catch return;
+        const horizontal_inset: u32 = cw;
+        const pill_pad: u32 = cw;
+        const count_cols = @max(plannedCols(count, 4), 1);
+        // A one-digit count must still read as a horizontal count pill rather than a circular
+        // notification dot. Three cell-heights gives the same stable visual slot to 1, 12, and
+        // 230 while longer values can grow from their measured cell budget.
+        const pill_width = @max(ch * 3, @as(u32, count_cols) * cw + pill_pad * 2);
+        if (rect.rect.width < @as(f32, @floatFromInt(horizontal_inset * 2 + pill_width + cw * 3))) return;
+
+        const pill_h = @min(ch * 2, @as(u32, @intFromFloat(@floor(rect.rect.height))));
+        if (pill_h == 0) return;
+        const pill_x: f32 = rect.rect.x + rect.rect.width - @as(f32, @floatFromInt(horizontal_inset + pill_width));
+        const pill_y: f32 = rect.rect.y + (rect.rect.height - @as(f32, @floatFromInt(pill_h)) / 2);
+        const pill_radius: u16 = @intCast(@min(pill_h / 2, @as(u32, std.math.maxInt(u16))));
+        try self.appendQuad(.{
+            .rect = .{
+                .x = @intFromFloat(@floor(pill_x)),
+                .y = @intFromFloat(@floor(pill_y)),
+                .w = pill_width,
+                .h = pill_h,
+            },
+            .fill_role = .inset_bg,
+            .corner_radii = .{ pill_radius, pill_radius, pill_radius, pill_radius },
+            .border_widths = .{ 1, 1, 1, 1 },
+            .border_role = .divider,
+        });
+
+        const line_y = rect.rect.y + (rect.rect.height - @as(f32, @floatFromInt(ch))) / 2;
+        try self.emit(
+            rect.rect.x + @as(f32, @floatFromInt(horizontal_inset)),
+            line_y,
+            if (group.collapsed) chevron_right_icon else chevron_down_icon,
+            2,
+            .head,
+            .surface_fg,
+            .control,
+            true,
+            false,
+        );
+
+        const label_x = rect.rect.x + @as(f32, @floatFromInt(horizontal_inset + cw * 3));
+        const label_end = pill_x - @as(f32, @floatFromInt(cw));
+        if (label_end > label_x) {
+            const max_cols: u16 = @intFromFloat(@floor((label_end - label_x) / @as(f32, @floatFromInt(cw))));
+            if (max_cols > 0) try self.emit(label_x, line_y, group.label, max_cols, .head, .surface_fg, .group_heading, false, true);
+        }
+
+        const count_width: f32 = @floatFromInt(@as(u32, count_cols) * cw);
+        const count_x = pill_x + (@as(f32, @floatFromInt(pill_width)) - count_width) / 2;
+        // The group row and its count pill intentionally have different heights.  Centre the
+        // count in the pill's own rect; using the row baseline lifted it above the dark pill in
+        // real Metal captures even though the horizontal slot was correct.
+        const count_y = pill_y + (@as(f32, @floatFromInt(pill_h)) - @as(f32, @floatFromInt(ch))) / 2;
+        try self.emit(count_x, count_y, count, count_cols, .head, .surface_fg, .control, false, true);
+    }
+
+    fn appendQuad(self: *Writer, quad: draw.Op.Quad) ViewError!void {
+        if (self.op_count == self.ops.len) return error.InsufficientTextBuffer;
+        self.ops[self.op_count] = .{ .quad = quad };
+        self.op_count += 1;
     }
 
     fn expanded(self: *Writer, snapshot: tree.UiRectTree, index: usize, expanded_props: types.Expanded) ViewError!void {
@@ -434,13 +531,26 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
     var all_origin_y: ?i32 = null;
     var saw_search_icon = false;
     var saw_group_chevron = false;
+    var saw_group_label = false;
+    var saw_group_count = false;
+    var saw_group_count_pill = false;
+    var group_count_origin_y: ?i32 = null;
+    var group_count_pill_y: ?i32 = null;
     var saw_dock_heading = false;
     var saw_card_heading = false;
     var saw_metadata = false;
     var title_max_cols: ?u16 = null;
+    var host_label_max_cols: ?u16 = null;
     var saw_untruncated_title = false;
     for (out.ops) |op| switch (op) {
-        .quad => saw_quad = true,
+        .quad => |quad| {
+            saw_quad = true;
+            if (quad.fill_role == .inset_bg) {
+                saw_group_count_pill = true;
+                group_count_pill_y = quad.rect.y;
+                try std.testing.expect(quad.rect.w >= props.cell_height_px * 3);
+            }
+        },
         .text => |text| {
             saw_dock_heading = saw_dock_heading or text.text_role == .dock_heading;
             saw_card_heading = saw_card_heading or text.text_role == .card_heading;
@@ -455,9 +565,15 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
                     refresh_origin_x = text.origin.x;
                     try std.testing.expect(text.wide_icons);
                 }
+                if (std.mem.eql(u8, run.text, host_label)) host_label_max_cols = text.max_cols;
                 if (std.mem.eql(u8, run.text, "작업공간")) workspace_origin_y = text.origin.y;
                 if (std.mem.eql(u8, run.text, "프로젝트")) project_origin_y = text.origin.y;
                 if (std.mem.eql(u8, run.text, "전체")) all_origin_y = text.origin.y;
+                saw_group_label = saw_group_label or std.mem.eql(u8, run.text, "workspace");
+                if (std.mem.eql(u8, run.text, "1")) {
+                    saw_group_count = true;
+                    group_count_origin_y = text.origin.y;
+                }
                 if (std.mem.eql(u8, run.text, search_icon)) {
                     saw_search_icon = true;
                     try std.testing.expect(text.wide_icons);
@@ -474,6 +590,11 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
     try std.testing.expect(saw_provider);
     try std.testing.expect(saw_search_icon);
     try std.testing.expect(saw_group_chevron);
+    try std.testing.expect(saw_group_label);
+    try std.testing.expect(saw_group_count);
+    try std.testing.expect(saw_group_count_pill);
+    const expected_pill_centered_y = (group_count_pill_y orelse return error.TestUnexpectedResult) + @as(i32, @intCast(props.cell_height_px / 2));
+    try std.testing.expectEqual(expected_pill_centered_y, group_count_origin_y orelse return error.TestUnexpectedResult);
     try std.testing.expect(saw_dock_heading);
     try std.testing.expect(saw_card_heading);
     try std.testing.expect(saw_metadata);
@@ -481,6 +602,7 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
     // what lets the measured path choose an ellipsis from the actual system UI font advance.
     try std.testing.expect(saw_untruncated_title);
     try std.testing.expect((title_max_cols orelse 0) < "a title that intentionally exceeds a narrow card".len);
+    try std.testing.expect((host_label_max_cols orelse 0) > Writer.plannedCols(host_label, 16));
     inline for (.{ .scope_workspace, .scope_project, .scope_all }, .{ workspace_origin_y, project_origin_y, all_origin_y }) |id, origin| {
         const scope = find(frame.tree, @field(build.NodeIds, @tagName(id))) orelse return error.TestUnexpectedResult;
         const expected_y: i32 = @intFromFloat(@floor(scope.rect.y + (scope.rect.height - @as(f32, @floatFromInt(props.cell_height_px))) / 2));

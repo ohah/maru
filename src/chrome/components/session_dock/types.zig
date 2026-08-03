@@ -69,6 +69,9 @@ pub const Props = struct {
     viewport_px: layout.UiSize,
     cell_width_px: u32,
     cell_height_px: u32,
+    /// Backing pixels per logical point. Semantic components use this only to reserve role
+    /// line boxes; platform adapters still own actual glyph ink/baseline measurement.
+    scale_milli: u32 = 1000,
     snapshot_generation: u64,
     displayed_count: u16,
     recent_limit: u16 = 500,

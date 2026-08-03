@@ -31374,6 +31374,7 @@ pub const AppSession = struct {
             .viewport_px = .{ .width = @floatFromInt(content.w), .height = @floatFromInt(content.h) },
             .cell_width_px = self.cell_width_px,
             .cell_height_px = self.cell_height_px,
+            .scale_milli = self.scale_milli,
             // Archive records are atomically swapped by the worker. Its scan generation is
             // not exposed here yet, so the projection generation is the stable, main-thread
             // action guard for this first host slice.
@@ -32262,10 +32263,13 @@ pub const AppSession = struct {
                     )) |_| {
                         if (rich_glyphs.items.len > 0) {
                             if (self.gpu_glyphs.appendSlice(self.allocator, rich_glyphs.items)) |_| {
-                                // This pane's DrawList deliberately has no terminal cells.  Do
-                                // not suppress the sibling icon-only pane, which still owns
-                                // registered SVG affordances through the legacy atlas path.
-                                rich_text_only = false;
+                                // The measured pane owns no terminal cells, yet its shaped runs
+                                // still pass through MetalFrame's cell projection. Suppress only
+                                // this pane's synthetic row/column cell pass: otherwise the same
+                                // glyphs appear once at row 0 and once at their final pixel rect.
+                                // The registered-icon pane is a separate CollectedPane, so its
+                                // legacy synthesized glyphs remain visible.
+                                rich_text_only = true;
                                 rich_glyph_start = self.gpu_glyphs.items.len - rich_glyphs.items.len;
                             } else |_| {
                                 // Global frame storage allocation also falls back to the original

@@ -15,7 +15,12 @@ const types = @import("types.zig");
 
 // The dock owns this registered SVG icon. A text glyph such as `↻` varies by fallback font and
 // cannot promise the size or optical centre of a Chrome header affordance.
-const refresh_icon = "\u{F000B}"; // reset.svg
+// Dock controls use component-specific coverage glyphs: all occupy the standard two-cell
+// icon slot, while their tighter SVG view boxes keep their optical size consistent with cards.
+const refresh_icon = "\u{F0021}";
+const search_icon = "\u{F0022}";
+const chevron_down_icon = "\u{F0023}";
+const chevron_right_icon = "\u{F0024}";
 
 pub const Buffers = struct {
     ops: []draw.Op,
@@ -37,17 +42,18 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
     };
 
     const header = find(frame.tree, build.NodeIds.header) orelse return error.MissingRect;
-    try writer.text(header, 0, "AI 세션 기록", .surface_fg);
+    try writer.text(header, 0, "AI 세션 기록", .surface_fg, 2, false, true);
     var count_buf: [48]u8 = undefined;
     const count = std.fmt.bufPrint(&count_buf, "{d}개 표시 · 최근 {d}개", .{ props.displayed_count, props.recent_limit }) catch "";
-    try writer.text(header, 1, count, .muted_fg);
-    try writer.textRight(header, 0, if (props.loading or props.refreshing) spinner(props.spinner_phase) else refresh_icon, .accent_bar, !(props.loading or props.refreshing));
+    try writer.text(header, 1, count, .muted_fg, 2, false, true);
+    try writer.textRight(header, if (props.loading or props.refreshing) spinner(props.spinner_phase) else refresh_icon, if (props.loading or props.refreshing) .muted_fg else .surface_fg, !(props.loading or props.refreshing));
 
-    try writer.text(find(frame.tree, build.NodeIds.scope_workspace) orelse return error.MissingRect, 0, "작업공간", .surface_fg);
-    try writer.text(find(frame.tree, build.NodeIds.scope_project) orelse return error.MissingRect, 0, "프로젝트", .surface_fg);
-    try writer.text(find(frame.tree, build.NodeIds.scope_all) orelse return error.MissingRect, 0, "전체", .surface_fg);
+    try writer.text(find(frame.tree, build.NodeIds.scope_workspace) orelse return error.MissingRect, 0, "작업공간", .surface_fg, 1, false, true);
+    try writer.text(find(frame.tree, build.NodeIds.scope_project) orelse return error.MissingRect, 0, "프로젝트", .surface_fg, 1, false, true);
+    try writer.text(find(frame.tree, build.NodeIds.scope_all) orelse return error.MissingRect, 0, "전체", .surface_fg, 1, false, true);
     const search = find(frame.tree, build.NodeIds.search) orelse return error.MissingRect;
-    try writer.text(search, 0, if (props.search.len == 0) "⌕ 세션 검색" else props.search, if (props.search.len == 0) .muted_fg else .surface_fg);
+    try writer.textInset(search, 0, search_icon, .muted_fg, 1, true, true, 1);
+    try writer.textInset(search, 0, if (props.search.len == 0) "세션 검색" else props.search, if (props.search.len == 0) .muted_fg else .surface_fg, 1, false, true, 4);
 
     if (props.loading and props.items.len == 0) {
         try writer.skeletons(find(frame.tree, build.NodeIds.content) orelse return error.MissingRect);
@@ -58,15 +64,15 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
         switch (item) {
             .group => |group| {
                 var group_buf: [96]u8 = undefined;
-                const label = std.fmt.bufPrint(&group_buf, "{s}  {s}  {d}", .{ if (group.collapsed) "›" else "⌄", group.label, group.count }) catch group.label;
-                try writer.text(rect, 0, label, .surface_fg);
+                const label = std.fmt.bufPrint(&group_buf, "{s} {s}  {d}", .{ if (group.collapsed) chevron_right_icon else chevron_down_icon, group.label, group.count }) catch group.label;
+                try writer.text(rect, 0, label, .surface_fg, 1, true, true);
             },
             .card => |card| {
                 var title_buf: [384]u8 = undefined;
                 const title = std.fmt.bufPrint(&title_buf, "{s}  {s}", .{ card.provider.label(), card.title }) catch card.title;
-                try writer.text(rect, 0, title, .surface_fg);
-                try writer.text(rect, 1, card.summary, .muted_fg);
-                try writer.text(rect, 2, card.metadata, .muted_fg);
+                try writer.text(rect, 0, title, .surface_fg, 3, false, false);
+                try writer.text(rect, 1, card.summary, .muted_fg, 3, false, false);
+                try writer.text(rect, 2, card.metadata, .muted_fg, 3, false, false);
             },
         }
     }
@@ -83,20 +89,32 @@ const Writer = struct {
     text_count: usize = 0,
     corner_radius_px: u16,
 
-    fn text(self: *Writer, rect: tree.RectEntry, line: u32, source: []const u8, role: tokens.ColorRole) ViewError!void {
-        const cw = self.props.cell_width_px;
-        const ch = self.props.cell_height_px;
-        if (cw == 0 or ch == 0) return;
-        const x = rect.rect.x + @as(f32, @floatFromInt(cw));
-        const y = rect.rect.y + @as(f32, @floatFromInt(ch * (line + 1)));
-        if (!loweredTextCellFitsClip(rect, y, ch)) return;
-        const available_px = rect.rect.width - @as(f32, @floatFromInt(cw * 2));
-        if (available_px <= 0) return;
-        const max_cols: u16 = @intFromFloat(@floor(available_px / @as(f32, @floatFromInt(cw))));
-        try self.emit(x, y, source, max_cols, .head, role, false);
+    fn text(self: *Writer, rect: tree.RectEntry, line: u32, source: []const u8, role: tokens.ColorRole, line_count: u32, wide_icons: bool, centered: bool) ViewError!void {
+        return self.textInset(rect, line, source, role, line_count, wide_icons, centered, 1);
     }
 
-    fn textRight(self: *Writer, rect: tree.RectEntry, line: u32, source: []const u8, role: tokens.ColorRole, wide_icon: bool) ViewError!void {
+    /// Places an entire line stack inside the completed rect before selecting the requested line.
+    /// This keeps scope/search/group labels optically centred without font-specific pixel nudges.
+    fn textInset(self: *Writer, rect: tree.RectEntry, line: u32, source: []const u8, role: tokens.ColorRole, line_count: u32, wide_icons: bool, centered: bool, left_inset_cols: u16) ViewError!void {
+        const cw = self.props.cell_width_px;
+        const ch = self.props.cell_height_px;
+        if (cw == 0 or ch == 0 or line_count == 0 or line >= line_count) return;
+        const cell_height: f32 = @floatFromInt(ch);
+        const stack_height = cell_height * @as(f32, @floatFromInt(line_count));
+        const x = rect.rect.x + @as(f32, @floatFromInt(cw)) * @as(f32, @floatFromInt(left_inset_cols));
+        const y = if (centered)
+            if (rect.rect.height >= stack_height) rect.rect.y + (rect.rect.height - stack_height) / 2 + cell_height * @as(f32, @floatFromInt(line)) else return
+        else
+            rect.rect.y + cell_height * @as(f32, @floatFromInt(line + 1));
+        if (!loweredTextCellFitsClip(rect, y, ch)) return;
+        const required_inset_cols = @as(u32, left_inset_cols) + 1;
+        const available_px = rect.rect.width - @as(f32, @floatFromInt(cw)) * @as(f32, @floatFromInt(required_inset_cols));
+        if (available_px <= 0) return;
+        const max_cols: u16 = @intFromFloat(@floor(available_px / @as(f32, @floatFromInt(cw))));
+        try self.emit(x, y, source, max_cols, .head, role, wide_icons);
+    }
+
+    fn textRight(self: *Writer, rect: tree.RectEntry, source: []const u8, role: tokens.ColorRole, wide_icon: bool) ViewError!void {
         const cw = self.props.cell_width_px;
         const ch = self.props.cell_height_px;
         if (cw == 0 or ch == 0) return;
@@ -120,7 +138,7 @@ const Writer = struct {
         const slot_width = @as(f32, @floatFromInt(slot_cols)) * cell_width;
         const glyph_width = @as(f32, @floatFromInt(start)) * cell_width;
         const x = rect.rect.x + rect.rect.width - inset_px - slot_width + (slot_width - glyph_width) / 2;
-        const y = rect.rect.y + @as(f32, @floatFromInt(ch * (line + 1)));
+        const y = rect.rect.y + (rect.rect.height - @as(f32, @floatFromInt(ch))) / 2;
         try self.emit(x, y, source, start, .tail, role, wide_icon);
     }
 
@@ -202,7 +220,10 @@ fn loweredTextCellFitsClip(rect: tree.RectEntry, origin_y: f32, cell_height_px: 
 }
 
 fn isSessionDockIcon(codepoint: u21) bool {
-    return codepoint == 0xF000B;
+    return switch (codepoint) {
+        0xF0021, 0xF0022, 0xF0023, 0xF0024 => true,
+        else => false,
+    };
 }
 
 fn find(snapshot: tree.UiRectTree, id: tree.UiId) ?tree.RectEntry {
@@ -270,6 +291,11 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
     var saw_provider = false;
     var saw_model_metadata = false;
     var refresh_origin_x: ?i32 = null;
+    var workspace_origin_y: ?i32 = null;
+    var project_origin_y: ?i32 = null;
+    var all_origin_y: ?i32 = null;
+    var saw_search_icon = false;
+    var saw_group_chevron = false;
     for (out.ops) |op| switch (op) {
         .quad => saw_quad = true,
         .text => |text| {
@@ -280,6 +306,17 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
                     refresh_origin_x = text.origin.x;
                     try std.testing.expect(text.wide_icons);
                 }
+                if (std.mem.eql(u8, run.text, "작업공간")) workspace_origin_y = text.origin.y;
+                if (std.mem.eql(u8, run.text, "프로젝트")) project_origin_y = text.origin.y;
+                if (std.mem.eql(u8, run.text, "전체")) all_origin_y = text.origin.y;
+                if (std.mem.eql(u8, run.text, search_icon)) {
+                    saw_search_icon = true;
+                    try std.testing.expect(text.wide_icons);
+                }
+                if (std.mem.indexOf(u8, run.text, chevron_down_icon) != null) {
+                    saw_group_chevron = true;
+                    try std.testing.expect(text.wide_icons);
+                }
             }
         },
         else => {},
@@ -287,6 +324,13 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
     try std.testing.expect(saw_quad);
     try std.testing.expect(saw_provider);
     try std.testing.expect(saw_model_metadata);
+    try std.testing.expect(saw_search_icon);
+    try std.testing.expect(saw_group_chevron);
+    inline for (.{ .scope_workspace, .scope_project, .scope_all }, .{ workspace_origin_y, project_origin_y, all_origin_y }) |id, origin| {
+        const scope = find(frame.tree, @field(build.NodeIds, @tagName(id))) orelse return error.TestUnexpectedResult;
+        const expected_y: i32 = @intFromFloat(@floor(scope.rect.y + (scope.rect.height - @as(f32, @floatFromInt(props.cell_height_px))) / 2));
+        try std.testing.expectEqual(expected_y, origin orelse return error.TestUnexpectedResult);
+    }
     const refresh_x = refresh_origin_x orelse return error.TestUnexpectedResult;
     const header = find(frame.tree, build.NodeIds.header) orelse return error.TestUnexpectedResult;
     const right_ink_edge = refresh_x + @as(i32, @intCast(props.cell_width_px * 2));

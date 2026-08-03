@@ -31,6 +31,19 @@ pub extern fn maru_macos_coretext_font_cell_metrics(
     result: *CellMetricsResult,
 ) void;
 
+/// Chrome Lab 전용 번들 TTF 등록·검증 seam. 일반 앱은 Info.plist의
+/// ATSApplicationFontsPath가 등록을 소유하므로 이 함수는 test executable에서만 호출한다.
+/// 0=해당 asset을 등록한 뒤 requested family를 CoreText가 실제로 선택할 수 있음.
+/// 성공하면 `postscript_name_out`에 실제 선택된 face의 PostScript 이름을 NUL 종료로 돌려준다.
+pub extern fn maru_macos_coretext_lab_register_font(
+    font_path: [*]const u8,
+    font_path_len: usize,
+    requested_font_family: [*]const u8,
+    requested_font_family_len: usize,
+    postscript_name_out: [*]u8,
+    postscript_name_out_len: usize,
+) c_int;
+
 pub extern fn maru_macos_coretext_shape_draw_list(
     requested_font_family: [*]const u8,
     requested_font_family_len: usize,

@@ -1,8 +1,11 @@
 The following icons in this directory are derived from GitHub Octicons
 (https://github.com/primer/octicons):
 
-  bell.svg, folder.svg, gear.svg, git-branch.svg, mark-github.svg,
-  plus.svg, reset.svg, search.svg, sidebar-collapse.svg
+  bell.svg, chevron-down.svg, chevron-right.svg, folder.svg, gear.svg,
+  git-branch.svg, mark-github.svg, plus.svg, reset.svg, search.svg,
+  session-dock-chevron-down.svg, session-dock-chevron-right.svg,
+  session-dock-refresh.svg, session-dock-search.svg,
+  sidebar-collapse.svg
 
 (reset.svg is derived from the Octicons "sync" icon.)
 

@@ -226,3 +226,5 @@ CR2b benchmark는 gate 획득 시간, render critical-section, writer-pending �
 기록한다. 숫자 예산은 구현 전 baseline 대비 회귀율로 먼저 고정하고, 측정 없이 "영향 없음"으로 완료 처리하지 않는다.
 기능 exact gate는 writer-pending publish 뒤 신규 reader admission 0, nested lock 0, configured absolute deadline을 넘긴 publish
 wait 0이다. latency p50/p99 상한은 CR2a baseline artifact에 수치와 하드웨어 조건을 기록한 뒤 CR2b 착수 전에 확정한다.
+
+<!-- CI 변경-영역 게이트 검증용 임시 커밋 — 이 PR은 머지하지 않고 닫는다. -->

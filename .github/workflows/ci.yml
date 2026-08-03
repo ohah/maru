@@ -123,20 +123,22 @@ jobs:
 
   # session-host live-upgrade fixture는 macOS에서만 활성화되고, Debug와 ReleaseFast는 서로 다른 결함을
   # 잡는 독립 컴파일이다(Debug는 safety check, ReleaseFast는 no-fail 경로). 둘을 한 job에 직렬로 두면
-  # 콜드 러너에서 합계가 11분을 넘어 CI 전체 wall-clock을 이 job 하나가 결정했다. matrix로 병렬 실행해
-  # wall-clock을 둘 중 느린 쪽으로 낮춘다(총 러너 시간은 동일).
-  # fail-fast: false — 한쪽 optimize가 깨져도 다른 쪽 결과를 봐야 회귀가 safety check인지 최적화
-  # 의존인지 한 번에 가려낸다. 직렬 구성에서는 Debug가 실패하면 ReleaseFast를 아예 실행하지 못했다.
-  session-host-macos:
-    name: session host macOS (${{ matrix.optimize }})
+  # 콜드 러너에서 합계가 11분을 넘어 CI 전체 wall-clock을 이 job 하나가 결정했다. 두 job으로 병렬
+  # 실행해 wall-clock을 둘 중 느린 쪽으로 낮춘다(총 러너 시간은 동일). 서로 독립 job이라 한쪽이
+  # 깨져도 다른 쪽 결과를 볼 수 있다 — 회귀가 safety check인지 최적화 의존인지 한 번에 가려낸다.
+  #
+  # **matrix가 아니라 명시 job 두 개인 이유**: matrix job이 조건으로 skip되면 GitHub은 확장 전
+  # 이름(`session host macOS (${{ matrix.optimize }})`)으로 **한 번만** 보고한다. required 컨텍스트인
+  # `session host macOS (Debug)`·`(ReleaseFast)`는 그 run에 아예 나타나지 않아, 코드가 안 바뀐 PR이
+  # 두 컨텍스트 pending으로 영구 BLOCKED된다(2026-08-03 PR #1823에서 실측). 이름을 리터럴로 고정하면
+  # skip될 때도 그 이름 그대로 conclusion=skipped가 보고돼 branch protection이 통과로 본다.
+  # 두 job의 유일한 차이는 `-Doptimize`다 — 한쪽을 고치면 다른 쪽도 같이 고친다.
+  session-host-macos-debug:
+    name: session host macOS (Debug)
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
     runs-on: macos-15
     timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        optimize: [Debug, ReleaseFast]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -146,7 +148,24 @@ jobs:
           version: 2026.2.7
           sha256: f8becf318705e1bd91227ed0efee4f9fd988d1d5c66bb48e996f030792a0d3b7 # macos-arm64 binary
       - name: Verify session host and live-upgrade fixtures
-        run: zig build test-session-host -Doptimize=${{ matrix.optimize }}
+        run: zig build test-session-host -Doptimize=Debug
+
+  session-host-macos-releasefast:
+    name: session host macOS (ReleaseFast)
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          version: 2026.2.7
+          sha256: f8becf318705e1bd91227ed0efee4f9fd988d1d5c66bb48e996f030792a0d3b7 # macos-arm64 binary
+      - name: Verify session host and live-upgrade fixtures
+        run: zig build test-session-host -Doptimize=ReleaseFast
 
   # Mermaid 제품 pump는 macOS helper/WKWebView와 native tick adapter가 모두 필요하다.
   # 1,000 tick artifact가 process/pipe/wait 0과 completion drain 상한을 어기면 merge하지 않는다.

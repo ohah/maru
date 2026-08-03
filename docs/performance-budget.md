@@ -49,8 +49,8 @@ PR 경로의 성능 workflow 실패는 머지를 막는다. 예산은 runner 변
 | `core performance budget` | performance.yml `core-performance-budget` | `code` 변경 PR(+main push·수동·주간). core perf guardrail. |
 | `file explorer macOS product path` | ci.yml `file-explorer-macos` | `code` 변경 PR(macos-15). 16,384-row/1,000-event 탐색기 artifact. |
 | `mermaid macOS product path` | ci.yml `mermaid-macos` | `code` 또는 `web` 변경 PR(macos-15). Mermaid 제품 1,000 tick·helper smoke artifact. `web/dist/mermaid-helper.js`를 빌드해 소비하므로 web 축도 트리거다. |
-| `session host macOS (Debug)` | ci.yml `session-host-macos` (matrix `optimize`) | `code` 변경 PR(macos-15). `zig build test-session-host` — codec/state machine·live-upgrade fixture를 safety check가 켜진 채 검증. |
-| `session host macOS (ReleaseFast)` | ci.yml `session-host-macos` (matrix `optimize`) | `code` 변경 PR(macos-15). 같은 스위트의 no-fail 경로. Debug와 독립 컴파일이라 별도 컨텍스트다. |
+| `session host macOS (Debug)` | ci.yml `session-host-macos-debug` | `code` 변경 PR(macos-15). `zig build test-session-host` — codec/state machine·live-upgrade fixture를 safety check가 켜진 채 검증. |
+| `session host macOS (ReleaseFast)` | ci.yml `session-host-macos-releasefast` | `code` 변경 PR(macos-15). 같은 스위트의 no-fail 경로. Debug와 독립 컴파일이라 별도 컨텍스트다. |
 | `session host slow observer macOS` | ci.yml `session-host-slow-observer-macos` | `code` 변경 PR(macos-15). 독립 ReleaseFast host의 실제 forkpty/3-client isolation과 host-PID RSS artifact. |
 | `web build and security fixtures` | web.yml `check` | `web` 변경 PR. web build·보안 fixture. |
 
@@ -72,7 +72,9 @@ PR 경로의 성능 workflow 실패는 머지를 막는다. 예산은 runner 변
 
 이 목록을 바꿀 때는 `gh api repos/<owner>/<repo>/branches/main/protection/required_status_checks`의 `contexts`도 함께 갱신한다.
 
-**matrix job은 조합마다 별개 컨텍스트다.** `session-host-macos`처럼 matrix로 병렬화한 job은 `session host macOS (Debug)`·`session host macOS (ReleaseFast)`가 각각 독립 required 컨텍스트로 보고되므로 **전부** 등록해야 한다. 하나만 등록하면 나머지 조합은 실패해도 머지를 막지 못한다. 반대로 job을 쪼개면서 required 등록을 빠뜨리면, 쪼개기 전에는 상위 job의 실패로 잡히던 게이트가 조용히 advisory로 강등된다.
+**조건부 job은 matrix로 두지 않는다.** matrix job이 job-level `if`로 skip되면 GitHub은 확장 **전** 이름(`session host macOS (${{ matrix.optimize }})`)으로 한 번만 보고한다. 조합별 required 컨텍스트는 그 run에 아예 나타나지 않으므로, 코드가 안 바뀐 PR이 두 컨텍스트 pending으로 영구 BLOCKED된다(2026-08-03 PR #1823에서 실측). 그래서 `session-host-macos-debug`·`session-host-macos-releasefast`는 `name:`을 리터럴로 고정한 **명시 job 두 개**다 — skip될 때도 그 이름 그대로 `conclusion=skipped`가 보고돼 branch protection이 통과로 본다. 조건 없이 항상 도는 job만 matrix를 써도 안전하다.
+
+**job을 쪼개면 required 등록도 함께 늘린다.** 조합·job마다 독립 컨텍스트로 보고되므로 **전부** 등록해야 한다. 하나만 등록하면 나머지는 실패해도 머지를 막지 못한다. 반대로 job을 쪼개면서 required 등록을 빠뜨리면, 쪼개기 전에는 상위 job의 실패로 잡히던 게이트가 조용히 advisory로 강등된다.
 
 ## 현재 자동 예산
 

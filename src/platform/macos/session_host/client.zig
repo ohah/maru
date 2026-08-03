@@ -7126,6 +7126,9 @@ pub const Client = struct {
     ) DeadlineClientError![]u8 {
         const operation_fence_held = try self.requireBlockingMode();
         defer if (operation_fence_held) self.endPublicMutation();
+        // A buffered controller revoke is a connection-wide ordering latch. No sibling RPC may
+        // flush an older admitted mutation frame before the owning runtime consumes and fences it.
+        if (self.bufferedControllerRevokeForStreamUnchecked(null)) return error.AdminBusy;
         // non-blocking input이 backpressure로 일부만 전송됐어도 뒤 request가 wire에서 추월하면 안 된다.
         try self.flushPendingOutboundBlocking();
         var prepared: PreparedBlockingRpc = .{};
@@ -7149,6 +7152,7 @@ pub const Client = struct {
     ) DeadlineClientError![]u8 {
         const operation_fence_held = try self.requireBlockingMode();
         defer if (operation_fence_held) self.endPublicMutation();
+        if (self.bufferedControllerRevokeForStreamUnchecked(null)) return error.AdminBusy;
         var prepared: PreparedBlockingRpc = .{};
         self.prepareBlockingRpc(&prepared, method, params_json) catch |err| return switch (err) {
             error.DestinationOccupied, error.InvalidPreparedRpc, error.MovedOrCopied => error.ProtocolError,
@@ -7331,6 +7335,7 @@ pub const Client = struct {
         if (!prepared.validFor(self) or !prepared.frameIntact() or
             prepared.request_id != self.next_request_id)
             return error.InvalidPreparedRpc;
+        if (self.bufferedControllerRevokeForStreamUnchecked(null)) return error.AdminBusy;
         const allocator = self.allocator;
         try self.flushPendingOutboundBlocking();
         if (!std.meta.eql(self.allocator, allocator) or !self.parser.usesAllocator(allocator)) {
@@ -7352,6 +7357,8 @@ pub const Client = struct {
             } };
         defer if (operation_fence_held) self.endPublicMutation();
         if (checkedAllocatorReentry(self))
+            return .{ .not_executed = error.AdminBusy };
+        if (self.bufferedControllerRevokeForStreamUnchecked(null))
             return .{ .not_executed = error.AdminBusy };
         const prepared = preparedRpcFromStorage(storage);
         if (self.pending_outbound != null or
@@ -10224,6 +10231,13 @@ pub const Client = struct {
         // the event graph while an exclusive owner is compacting it.
         const operation_fence_held = self.beginPublicMutation() catch return true;
         defer if (operation_fence_held) self.endPublicMutation();
+        return self.bufferedControllerRevokeForStreamUnchecked(stream_id);
+    }
+
+    fn bufferedControllerRevokeForStreamUnchecked(
+        self: *const Client,
+        stream_id: ?u64,
+    ) bool {
         for (self.pending_events.items) |frame| {
             if (!frame.sealMatches()) return true;
             const verdict = frame.preflight orelse
@@ -11861,6 +11875,62 @@ test "client authority refresh drains a complete coalesced revoke without socket
 
     try testing.expectEqual(@as(usize, 0), client.parser.bufferedBytes());
     try testing.expect(client.hasBufferedControllerRevokeForStream(7));
+}
+
+test "CR3a-2c3a buffered revoke blocks blocking and deadline RPC before pending wire flush" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var client = makeConnectedTestClient(allocator, fds[0]);
+    defer client.deinit();
+
+    var prepared_storage: PreparedBlockingRpcStorage = undefined;
+    @memset(std.mem.asBytes(&prepared_storage), 0);
+    _ = try client.prepareBlockingRpcStorage(
+        &prepared_storage,
+        "runtime.observation",
+        "{}",
+    );
+    defer client.abortPreparedBlockingRpcStorage(&prepared_storage) catch {};
+
+    const pending = try allocator.dupe(u8, "sealed-pending-input-frame");
+    client.pending_outbound = .{ .frame = pending, .stream_id = 7 };
+    const revoke_payload =
+        "{\"event\":\"controller.revoked\",\"data\":{\"runtime_id\":\"000000000000000000000000000000aa\",\"stream_id\":7,\"controller_generation\":2,\"reason\":\"takeover\"}}";
+    try client.bufferEvent(.{
+        .header = .{ .kind = .event, .stream_id = 7 },
+        .payload = try allocator.dupe(u8, revoke_payload),
+    });
+
+    const request_before = client.next_request_id;
+    try testing.expectError(error.AdminBusy, client.call("runtime.observation", "{}"));
+    try testing.expectEqual(request_before, client.next_request_id);
+    try testing.expectEqual(@as(usize, 0), client.pending_outbound.?.offset);
+    try testing.expectEqualStrings("sealed-pending-input-frame", client.pending_outbound.?.frame);
+
+    const deadline = try client_deadline.AbsoluteDeadline.after(testing.io, std.time.ns_per_s);
+    try testing.expectError(
+        error.AdminBusy,
+        client.callUntil("runtime.attach", "{}", deadline),
+    );
+    try testing.expectEqual(request_before, client.next_request_id);
+    try testing.expectEqual(@as(usize, 0), client.pending_outbound.?.offset);
+
+    try testing.expectError(
+        error.AdminBusy,
+        client.preflightPreparedBlockingRpcStorageExecution(&prepared_storage),
+    );
+    switch (client.executePreparedBlockingRpcStorageWithAllocator(
+        &prepared_storage,
+        allocator,
+    )) {
+        .not_executed => |err| try testing.expectEqual(error.AdminBusy, err),
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expectEqual(request_before, client.next_request_id);
+    try testing.expectEqual(@as(usize, 0), client.pending_outbound.?.offset);
 }
 
 test "client revoke latch uses decoded event semantics for escaped and nested strings" {

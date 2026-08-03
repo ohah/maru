@@ -904,10 +904,26 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    stream만 사용하므로 stream ID 인자는 받지 않는다. nonblocking 반환값은 wire write량이 아니라 facade가 소유권을
    인수한 payload byte 수이고, 0이면 caller가 전량 소유한다. `pumpPendingOutput`의 false는 기존 outbound owner가
    backpressure로 남았다는 뜻이다. revoke fence는 zero-byte pending frame만 취소하며 partial frame은 직접 close하지 않고
-   `partial_frame_requires_close`를 반환해 `RemoteRuntime`의 기존 poison 정책이 fail-close한다. 네 메서드는 controller binding만
-   허용하고 copied/moved/fork/foreign-thread, stale slot/node/binding, cleanup-reserved 상태를 Client/queue/socket mutation 전에
+   `partial_frame_requires_close`를 반환해 `RemoteRuntime`의 기존 poison 정책이 fail-close한다. input과 revoke fence는 controller
+   binding만 허용한다. connection-wide `pumpPendingOutput`은 observer도 호출할 수 있지만 buffered controller revoke가 있으면
+   false로 wire 진행을 멈춘다. 네 메서드는 copied/moved/fork/foreign-thread, stale slot/node/binding, cleanup-reserved 상태를 Client/queue/socket mutation 전에
    typed reject한다. transport lifecycle은 typed enum 비교 전에 raw `u8` 범위를 검증하며 0...255 sweep를 Debug와
    ReleaseFast에서 실행한다.
+   buffered controller revoke는 connection-wide wire ordering latch다. generation attachment도 sealed transport를 통해
+   실제 latch를 조회하고, `Client`의 blocking/deadline RPC는 pending outbound flush 전에 같은 latch를 재검증한다.
+   따라서 sibling RPC와 detach가 revoke 이전 input/control frame을 우회 flush할 수 없다. teardown 시 latch를 소비할
+   retry owner가 없으면 detach RPC를 보내지 않고 connection fail-close로 host EOF lease 회수를 선택한다.
+   controller mutation authority는 caller-writable transport bool이 아니라 node-local cleanup registry의 raw-tag-guarded
+   `unavailable|live|revoke_pending|revoked` 상태가 SSOT다. validated revoke는 canonical stream operation permit을 잡고
+   `live -> revoke_pending`으로 input을 먼저 닫은 뒤 payload demotion과 zero/partial pending-wire fence를 수행하고, 모든 반환에서
+   permit consume과 `revoke_pending -> revoked`를 끝낸다. `revoke_pending`만 one-shot fence를 허용하며 transport bytes를 revoke 전
+   값으로 복원해도 canonical `revoked`를 되살릴 수 없다. 정상 attachment drop은 별도 close capability를 노출하지 않는다.
+   node-local `beginBoundDrop`이 controller `live -> revoked`와 entry `bound -> drop_active`를 한 no-fail publication으로
+   수행하고 observer의 `unavailable`은 유지한다. 이미 `revoked`인 controller drop은 허용하지만 `revoke_pending`은 wire fence가
+   끝나지 않은 authority이므로 mutation 없이 거부한다. `completeActiveDrop`은 controller `revoked` 또는 observer
+   `unavailable`만 clear할 수 있어 registry entry 삭제가 authority 폐쇄를 암묵적으로 대신하지 않는다. registry/entry/role/authority
+   enum은 모두 typed 비교 전에 raw tag를 검증한다. authority entrypoint 자체도 원 PID·owner thread·등록 node shared-operation을
+   다시 획득하므로 facade를 우회한 in-process 호출도 node dereference 전에 fail-closed다.
 
    `readAttachmentBatch`는 이 집합에 넣지 않는다. post-initial batch의 유일한 owner는 2b2의 별도 inline
    `GenerationBatchAdapter`이며 transport가 같은 queue authority를 중복하지 않는다. `purgeEndedStream`은 임의 stream ID를

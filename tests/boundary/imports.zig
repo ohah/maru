@@ -1250,6 +1250,7 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "tryAcquireClientSlotTeardownExclusive" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "abortClientSlotTeardownExclusive" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "tryDeinitClientSlotExclusiveHeld" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "bufferedControllerRevokeForStreamUnchecked" },
             },
         },
         .{
@@ -1276,6 +1277,11 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "consumeStreamOperationPermitUnchecked" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "beginRegisteredClientOperation" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "endRegisteredClientOperation" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "beginCanonicalAuthorityAccess" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "controllerAuthorityLive" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "controllerRevokePending" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "beginControllerRevoke" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "finishControllerRevoke" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "beginRegisteredExclusiveTeardown" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "abortRegisteredExclusiveTeardown" },
                 .{ .parent = "EndedPurgePreparation", .kind = "fn", .visibility = "private", .modifier = "", .name = "rawTagsValid" },
@@ -1436,11 +1442,11 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
         countIdentifierOutsideTopLevelTests(client_slot, "endClientSlotOperation"),
     );
     try std.testing.expectEqual(
-        @as(usize, 4),
+        @as(usize, 5),
         countIdentifierOutsideTopLevelTests(client_slot, "beginRegisteredClientOperation"),
     );
     try std.testing.expectEqual(
-        @as(usize, 4),
+        @as(usize, 9),
         countIdentifierOutsideTopLevelTests(client_slot, "endRegisteredClientOperation"),
     );
     try std.testing.expectEqual(
@@ -1764,7 +1770,7 @@ test "CR3a-2a attachment cleanup registry stays node-local and callback-free" {
         try std.testing.expectEqual(@as(usize, 0), countOccurrences(source, needle));
 }
 
-test "CR3a-2c1 generation transport exposes the five-method core plus initial snapshot" {
+test "CR3a-2c3a generation transport adds the exact input revoke output facade" {
     const allocator = std.testing.allocator;
     const source = try readZigFileZ(
         allocator,
@@ -1779,6 +1785,10 @@ test "CR3a-2c1 generation transport exposes the five-method core plus initial sn
         "    pub fn prepareRequest(",
         "    pub fn executePreparedRequest(",
         "    pub fn abortPreparedRequest(",
+        "    pub fn sendInput(",
+        "    pub fn sendInputNonBlocking(",
+        "    pub fn pumpPendingOutput(",
+        "    pub fn fenceRevoke(",
         "    pub fn readInitialSnapshot(",
         "    pub fn poison(",
     };
@@ -5904,6 +5914,29 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
             @as(usize, if (is_generation_transport or is_generation_attachment) 1 else 0),
             countIdentifierOutsideTopLevelTests(source, "terminalizeOwned"),
         );
+        const owned_helpers = [_]struct {
+            name: []const u8,
+            transport_count: usize,
+        }{
+            .{ .name = "bindCommittedStreamOwned", .transport_count = 1 },
+            .{ .name = "beginControllerRevokeOwned", .transport_count = 1 },
+            .{ .name = "finishControllerRevokeOwned", .transport_count = 1 },
+            .{ .name = "mutationAllowedOwned", .transport_count = 1 },
+            .{ .name = "bufferedControllerRevokeOwned", .transport_count = 1 },
+            .{ .name = "preflightTerminalizeOwned", .transport_count = 2 },
+        };
+        for (owned_helpers) |helper| {
+            const expected: usize = if (is_generation_transport)
+                helper.transport_count
+            else if (is_generation_attachment)
+                1
+            else
+                0;
+            try std.testing.expectEqual(
+                expected,
+                countIdentifierOutsideTopLevelTests(source, helper.name),
+            );
+        }
     }
 
     const app = try readZigFileZ(allocator, "src/platform/macos/app_session.zig");
@@ -5952,6 +5985,53 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
     try std.testing.expectEqual(
         @as(usize, 2),
         countOccurrences(runtime, "        self.client = client;"),
+    );
+    // CR3a-2c3a moves generation input/revoke/output-progress behind RuntimeAttachment's closed
+    // switch. The one raw call per primitive is the explicit legacy arm; product methods must not
+    // regain a direct self.client call while RemoteRuntime.client still exists for 2c4.
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        countOccurrences(runtime, "self.client.sendInput("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        countOccurrences(runtime, "self.client.sendInputNonBlocking("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        countOccurrences(runtime, "self.client.pumpPendingOutput("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        countOccurrences(runtime, "self.client.fenceRevokedStream("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        countOccurrences(runtime, "self.client.hasBufferedControllerRevoke("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        countOccurrences(runtime, "self.client.hasBufferedControllerRevokeForStream("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(runtime, "client.sendInput(value.streamId(), bytes)"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(runtime, "client.sendInputNonBlocking(value.streamId(), bytes)"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(runtime, ".legacy => client.pumpPendingOutput(),"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(runtime, "client.fenceRevokedStream(value.streamId())"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(runtime, ".legacy => client.hasBufferedControllerRevoke(),"),
     );
     try std.testing.expectEqual(
         @as(usize, 1),

@@ -243,6 +243,7 @@ pub const ClientNode = struct {
 pub const StreamOperationKind = enum(u8) {
     none,
     initial_snapshot,
+    controller_revoke,
     ended_purge,
 };
 
@@ -1255,27 +1256,31 @@ pub const ClientSlot = struct {
         reservation: AttachmentBindingReservation,
         lease: *lease_mod.ConnectionLease,
     ) BindingError!void {
-        if (!self.valid()) return error.MovedOrCopied;
-        if (self.current.active_operation_generation != 0) return error.AdminBusy;
+        const operation = try self.beginCanonicalAuthorityAccess();
+        defer self.endRegisteredClientOperation(operation);
+        if (!self.valid() or operation.node != self.current) return error.MovedOrCopied;
+        if (operation.node.active_operation_generation != 0) return error.AdminBusy;
         if (!binding.validAtFinalAddress()) return error.MovedOrCopied;
+        if (!contract.attachmentRoleRawValid(&reservation.identity.role))
+            return error.InvalidIdentity;
         const canonical = binding.identity orelse return error.InvalidIdentity;
         if (!canonical.matches(reservation.identity) or
             canonical.binding_storage_addr != @intFromPtr(binding) or
             binding.lifecycle != .committed or
             lease.stream_id == 0 or !lease.canRelease(self.pid))
             return error.InvalidLease;
-        try self.current.cleanup_registry.preflightBoundDrop(
+        try operation.node.cleanup_registry.preflightBoundDrop(
             reservation.cleanup,
             canonical,
             lease.stream_id,
         );
 
-        self.current.cleanup_registry.beginBoundDrop(
+        operation.node.cleanup_registry.beginBoundDrop(
             reservation.cleanup,
             canonical,
             lease.stream_id,
         ) catch unreachable;
-        self.current.pin_owner.active_cleanup = 1;
+        operation.node.pin_owner.active_cleanup = 1;
     }
 
     /// No-fail suffix for a successfully begun attachment drop. The owner must call this exactly
@@ -1322,6 +1327,81 @@ pub const ClientSlot = struct {
         return self.current.cleanup_registry.transportOwnerSeal(
             reservation.cleanup,
             reservation.identity,
+        );
+    }
+
+    fn beginCanonicalAuthorityAccess(
+        self: *ClientSlot,
+    ) BindingError!RegisteredClientOperation {
+        // These methods protect the canonical input authority itself, so they cannot rely on the
+        // caller having reached them through GenerationTransport. Reject fork/thread aliases
+        // before node dereference, then pin the exact registered node against concurrent teardown.
+        if (self.pid != currentPid() or
+            !operationThreadMatches(self.operation_owner_thread_incarnation))
+            return error.MovedOrCopied;
+        return self.beginRegisteredClientOperation() catch |err| switch (err) {
+            error.MovedOrCopied => error.MovedOrCopied,
+            error.AdminBusy => error.AdminBusy,
+        };
+    }
+
+    pub fn controllerAuthorityLive(
+        self: *ClientSlot,
+        reservation: AttachmentBindingReservation,
+        stream_id: u64,
+    ) BindingError!bool {
+        const operation = try self.beginCanonicalAuthorityAccess();
+        defer self.endRegisteredClientOperation(operation);
+        if (!self.valid() or operation.node != self.current) return error.MovedOrCopied;
+        return operation.node.cleanup_registry.controllerAuthorityLive(
+            reservation.cleanup,
+            reservation.identity,
+            stream_id,
+        );
+    }
+
+    pub fn controllerRevokePending(
+        self: *ClientSlot,
+        reservation: AttachmentBindingReservation,
+        stream_id: u64,
+    ) BindingError!bool {
+        const operation = try self.beginCanonicalAuthorityAccess();
+        defer self.endRegisteredClientOperation(operation);
+        if (!self.valid() or operation.node != self.current) return error.MovedOrCopied;
+        return operation.node.cleanup_registry.controllerRevokePending(
+            reservation.cleanup,
+            reservation.identity,
+            stream_id,
+        );
+    }
+
+    pub fn beginControllerRevoke(
+        self: *ClientSlot,
+        reservation: AttachmentBindingReservation,
+        stream_id: u64,
+    ) BindingError!void {
+        const operation = try self.beginCanonicalAuthorityAccess();
+        defer self.endRegisteredClientOperation(operation);
+        if (!self.valid() or operation.node != self.current) return error.MovedOrCopied;
+        try operation.node.cleanup_registry.beginControllerRevoke(
+            reservation.cleanup,
+            reservation.identity,
+            stream_id,
+        );
+    }
+
+    pub fn finishControllerRevoke(
+        self: *ClientSlot,
+        reservation: AttachmentBindingReservation,
+        stream_id: u64,
+    ) BindingError!void {
+        const operation = try self.beginCanonicalAuthorityAccess();
+        defer self.endRegisteredClientOperation(operation);
+        if (!self.valid() or operation.node != self.current) return error.MovedOrCopied;
+        try operation.node.cleanup_registry.finishControllerRevoke(
+            reservation.cleanup,
+            reservation.identity,
+            stream_id,
         );
     }
 
@@ -3527,6 +3607,118 @@ test "CR3a-2c2 node stream operation permit serializes snapshot and ended purge"
     try std.testing.expect(slot.streamOperationPermitIdle());
 }
 
+test "CR3a-2c3a canonical authority entrypoints reject foreign thread and fork child" {
+    try ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var source = fixtureClient(allocator, 0x2C3A);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0x2C3A);
+    defer slot.deinit();
+    var binding: contract.PreparedAttachmentBinding = .{};
+    var lease: lease_mod.ConnectionLease = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0x2C3B);
+    try slot.current.cleanup_registry.bindStream(
+        reservation.cleanup,
+        reservation.identity,
+        53,
+    );
+
+    const Foreign = struct {
+        fn run(
+            target: *ClientSlot,
+            captured: AttachmentBindingReservation,
+            binding_owner: *contract.PreparedAttachmentBinding,
+            lease_owner: *lease_mod.ConnectionLease,
+            rejected: *std.atomic.Value(bool),
+        ) void {
+            const live_rejected = if (target.controllerAuthorityLive(captured, 53)) |_| false else |err| err == error.MovedOrCopied;
+            const pending_rejected = if (target.controllerRevokePending(captured, 53)) |_| false else |err| err == error.MovedOrCopied;
+            const begin_rejected = if (target.beginControllerRevoke(captured, 53)) |_| false else |err| err == error.MovedOrCopied;
+            const finish_rejected = if (target.finishControllerRevoke(captured, 53)) |_| false else |err| err == error.MovedOrCopied;
+            const drop_rejected = if (target.beginAttachmentDrop(
+                binding_owner,
+                captured,
+                lease_owner,
+            )) |_| false else |err| err == error.MovedOrCopied;
+            rejected.store(
+                live_rejected and pending_rejected and begin_rejected and finish_rejected and
+                    drop_rejected,
+                .release,
+            );
+        }
+    };
+    var rejected: std.atomic.Value(bool) = .init(false);
+    const thread = try std.Thread.spawn(
+        .{},
+        Foreign.run,
+        .{ &slot, reservation, &binding, &lease, &rejected },
+    );
+    thread.join();
+    try std.testing.expect(rejected.load(.acquire));
+    try std.testing.expect(try slot.controllerAuthorityLive(reservation, 53));
+
+    var corrupt_reservation = reservation;
+    const role_raw: *u8 = @ptrCast(&corrupt_reservation.identity.role);
+    var raw: u16 = @intFromEnum(contract.AttachmentRole.observer) + 1;
+    while (raw <= std.math.maxInt(u8)) : (raw += 1) {
+        role_raw.* = @intCast(raw);
+        try std.testing.expectError(
+            error.InvalidIdentity,
+            slot.controllerAuthorityLive(corrupt_reservation, 53),
+        );
+        try std.testing.expectError(
+            error.InvalidIdentity,
+            slot.controllerRevokePending(corrupt_reservation, 53),
+        );
+        try std.testing.expectError(
+            error.InvalidIdentity,
+            slot.beginControllerRevoke(corrupt_reservation, 53),
+        );
+        try std.testing.expectError(
+            error.InvalidIdentity,
+            slot.finishControllerRevoke(corrupt_reservation, 53),
+        );
+        try std.testing.expectError(
+            error.InvalidIdentity,
+            slot.beginAttachmentDrop(&binding, corrupt_reservation, &lease),
+        );
+    }
+    try std.testing.expect(try slot.controllerAuthorityLive(reservation, 53));
+
+    if (builtin.os.tag == .macos) {
+        const child = c.fork();
+        try std.testing.expect(child >= 0);
+        if (child == 0) {
+            var child_rejected: std.atomic.Value(bool) = .init(false);
+            Foreign.run(&slot, reservation, &binding, &lease, &child_rejected);
+            const mutation_zero = slot.current.cleanup_registry.controllerAuthorityLive(
+                reservation.cleanup,
+                reservation.identity,
+                53,
+            ) catch false;
+            std.c._exit(if (child_rejected.load(.acquire) and mutation_zero) 0 else 1);
+        }
+        var status: c_int = 0;
+        try std.testing.expectEqual(child, c.waitpid(child, &status, 0));
+        try std.testing.expectEqual(@as(c_int, 0), status);
+    }
+
+    try slot.beginControllerRevoke(reservation, 53);
+    try slot.finishControllerRevoke(reservation, 53);
+    try slot.current.cleanup_registry.beginBoundDrop(
+        reservation.cleanup,
+        reservation.identity,
+        53,
+    );
+    try slot.current.cleanup_registry.completeActiveDrop(
+        reservation.cleanup,
+        reservation.identity,
+        53,
+    );
+    slot.current.pin_owner.cleanup_pin_count -= 1;
+    binding.lifecycle = .terminal;
+}
+
 test "CR3a-2c2b3b B3b-O atomic permit receipt is exact once and delays index reuse" {
     const allocator = std.testing.allocator;
     var source = fixtureClient(allocator, 0xF501);
@@ -3920,11 +4112,16 @@ test "CR3a-2c2b3b B3b-O product clean commit purges ended event and consumes pai
         9,
     );
     defer {
-        slot.current.cleanup_registry.settleBoundDrop(
+        slot.current.cleanup_registry.beginBoundDrop(
             reservation.cleanup,
             reservation.identity,
             9,
         ) catch @panic("B3b-O clean product binding cleanup drifted");
+        slot.current.cleanup_registry.completeActiveDrop(
+            reservation.cleanup,
+            reservation.identity,
+            9,
+        ) catch @panic("B3b-O clean product binding cleanup completion drifted");
         slot.current.pin_owner.cleanup_pin_count -= 1;
         binding.lifecycle = .terminal;
     }
@@ -3991,11 +4188,16 @@ test "CR3a-2c2b2 corrupt ended preparation poisons once and rolls back permit" {
         9,
     );
     defer {
-        slot.current.cleanup_registry.settleBoundDrop(
+        slot.current.cleanup_registry.beginBoundDrop(
             reservation.cleanup,
             reservation.identity,
             9,
         ) catch @panic("ended preparation test cleanup registry drifted");
+        slot.current.cleanup_registry.completeActiveDrop(
+            reservation.cleanup,
+            reservation.identity,
+            9,
+        ) catch @panic("ended preparation test cleanup registry completion drifted");
         slot.current.pin_owner.cleanup_pin_count -= 1;
         binding.lifecycle = .terminal;
     }
@@ -4046,11 +4248,16 @@ test "CR3a-2c2b2 busy ended preparation does not burn operation generation" {
         9,
     );
     defer {
-        slot.current.cleanup_registry.settleBoundDrop(
+        slot.current.cleanup_registry.beginBoundDrop(
             reservation.cleanup,
             reservation.identity,
             9,
         ) catch @panic("busy ended preparation cleanup registry drifted");
+        slot.current.cleanup_registry.completeActiveDrop(
+            reservation.cleanup,
+            reservation.identity,
+            9,
+        ) catch @panic("busy ended preparation cleanup registry completion drifted");
         slot.current.pin_owner.cleanup_pin_count -= 1;
         binding.lifecycle = .terminal;
     }
@@ -4091,11 +4298,16 @@ test "CR3a-2c2b2 ended preparation rejects wrong stream foreign binding and owne
     const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0x49);
     try slot.current.cleanup_registry.bindStream(reservation.cleanup, reservation.identity, 9);
     defer {
-        slot.current.cleanup_registry.settleBoundDrop(
+        slot.current.cleanup_registry.beginBoundDrop(
             reservation.cleanup,
             reservation.identity,
             9,
         ) catch @panic("ended preparation owner preflight cleanup drifted");
+        slot.current.cleanup_registry.completeActiveDrop(
+            reservation.cleanup,
+            reservation.identity,
+            9,
+        ) catch @panic("ended preparation owner preflight cleanup completion drifted");
         slot.current.pin_owner.cleanup_pin_count -= 1;
         binding.lifecycle = .terminal;
     }
@@ -4330,11 +4542,16 @@ test "CR3a-2c2b2 Client owned backing aliases reject before permit generation" {
     const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0x4D);
     try slot.current.cleanup_registry.bindStream(reservation.cleanup, reservation.identity, 9);
     defer {
-        slot.current.cleanup_registry.settleBoundDrop(
+        slot.current.cleanup_registry.beginBoundDrop(
             reservation.cleanup,
             reservation.identity,
             9,
         ) catch @panic("owned backing alias cleanup registry drifted");
+        slot.current.cleanup_registry.completeActiveDrop(
+            reservation.cleanup,
+            reservation.identity,
+            9,
+        ) catch @panic("owned backing alias cleanup registry completion drifted");
         slot.current.pin_owner.cleanup_pin_count -= 1;
         binding.lifecycle = .terminal;
     }

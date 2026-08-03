@@ -162,9 +162,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
     const top = buffers.nodes[nested_cursor + 3 ..][0..4];
     top[0] = tree.card(.{
         .id = NodeIds.header,
-        // Fixed chrome keeps the 20pt dock inset. The scroll area below is deliberately
-        // full-bleed, so group disclosure does not accidentally add this inset a second time.
-        .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(m.header_h) }, .margin = .{ .bottom = @floatFromInt(m.control_gap), .left = @floatFromInt(m.root_inset), .right = @floatFromInt(m.root_inset) } },
+        .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(m.header_h) }, .margin = .{ .bottom = @floatFromInt(m.control_gap) } },
         // Header text has no enclosing card in the dock reference. It remains a Card only so
         // refresh retains one completed action rect, while its base/background border is hidden.
         .variant = .surface,
@@ -174,7 +172,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
     }, &.{});
     top[1] = tree.card(.{
         .id = NodeIds.scope_row,
-        .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(m.scope_h) }, .margin = .{ .bottom = @floatFromInt(m.control_gap), .left = @floatFromInt(m.root_inset), .right = @floatFromInt(m.root_inset) }, .gap = @floatFromInt(m.item_gap) },
+        .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(m.scope_h) }, .margin = .{ .bottom = @floatFromInt(m.control_gap) }, .gap = @floatFromInt(m.item_gap) },
         .direction = .row,
         .variant = .surface,
         // The segmented control is one outlined surface. Child scope cards paint only their
@@ -184,7 +182,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
     }, scope_nodes);
     top[2] = tree.card(.{
         .id = NodeIds.search,
-        .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(m.search_h) }, .margin = .{ .bottom = @floatFromInt(m.control_gap), .left = @floatFromInt(m.root_inset), .right = @floatFromInt(m.root_inset) } },
+        .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(m.search_h) }, .margin = .{ .bottom = @floatFromInt(m.control_gap) } },
         .variant = if (props.search_focused) .selected else .surface,
         .paint = .{},
         .action = search,
@@ -198,10 +196,10 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
 
     const root = tree.container(.{
         .id = NodeIds.root,
-        // The vertical root inset is shared by every dock layer. Horizontal fixed-chrome
-        // margins above preserve the header/control alignment while letting the virtualized
-        // list reach the dock divider and own its disclosure inset exactly once.
-        .style = .{ .padding = .{ .top = @floatFromInt(m.root_inset), .bottom = @floatFromInt(m.root_inset) } },
+        // All dock layers share this bounded content rect. Keeping the clipping boundary here
+        // prevents a fixed chrome width from overflowing after margins are applied and keeps
+        // list dividers on the same logical edge as the header/search controls.
+        .style = .{ .padding = .{ .top = @floatFromInt(m.root_inset), .right = @floatFromInt(m.root_inset), .bottom = @floatFromInt(m.root_inset), .left = @floatFromInt(m.root_inset) } },
         .overflow = .clip,
     }, top);
     const built = try tree.build(root, .{
@@ -282,27 +280,24 @@ fn expansionActionNode(id: u64, action: tree.UiAction, enabled: bool, variant: t
 }
 
 /// Action cards are leaf nodes, so their own validation cannot use main-axis `fill`: a leaf
-/// defaults to a column container and correctly rejects cross-axis fill. The full-bleed scroll
-/// area width is already definite when we build its one published tree, therefore divide that
-/// exact content width after the explicit gaps instead of weakening the generic layout invariant.
+/// defaults to a column container and correctly rejects cross-axis fill. The shared dock content
+/// width is already definite when we build its one published tree, therefore divide that exact
+/// width after the explicit gaps instead of weakening the generic layout invariant.
 fn expansionActionWidth(viewport_width_px: f32, m: types.DockMetrics, action_count: usize) f32 {
     if (action_count == 0) return 0;
-    // Expanded actions live inside the full-bleed scroll area. Their own component content
-    // insets remain responsible for readable text; inheriting fixed-chrome margins here would
-    // turn the action row into a narrower, unrelated coordinate system.
-    const content_width = viewport_width_px;
+    const content_width = @max(viewport_width_px - @as(f32, @floatFromInt(m.root_inset * 2)), 0);
     const total_gap = @as(f32, @floatFromInt(m.action_gap * @as(u32, @intCast(action_count - 1))));
     return @max((content_width - total_gap) / @as(f32, @floatFromInt(action_count)), 0);
 }
 
 test "expanded action widths leave the declared gap for two and three actions" {
     const m = types.DockMetrics.resolve(1000);
-    // The full-bleed scroll area owns its width; only the action gap is removed before equal
+    // The shared content rect owns its width; only the action gap is removed before equal
     // division for resume/reveal and the optional live-focus third action.
-    try @import("std").testing.expectEqual(@as(f32, 236), expansionActionWidth(480, m, 2));
-    try @import("std").testing.expectApproxEqAbs(@as(f32, 154.66667), expansionActionWidth(480, m, 3), 0.0001);
+    try @import("std").testing.expectEqual(@as(f32, 216), expansionActionWidth(480, m, 2));
+    try @import("std").testing.expectApproxEqAbs(@as(f32, 141.33333), expansionActionWidth(480, m, 3), 0.0001);
     // An ultra-narrow viewport still cannot underflow or create a negative leaf width.
-    try @import("std").testing.expectEqual(@as(f32, 16), expansionActionWidth(40, m, 2));
+    try @import("std").testing.expectEqual(@as(f32, 0), expansionActionWidth(40, m, 2));
 }
 
 fn dividedRowPaint() tree.PaintStyle {
@@ -360,7 +355,7 @@ test "SessionDock build shares action rects with the completed tree" {
     try @import("std").testing.expectEqual(@as(?ids.Intent, .{ .select_card = 12 }), table.resolve(7, 9));
 }
 
-test "SessionDock keeps fixed chrome inset while the scroll list is full bleed" {
+test "SessionDock shares one bounded content rect while group disclosure avoids double inset" {
     const props = types.Props{
         .viewport_px = .{ .width = 480, .height = 720 },
         .cell_width_px = 8,
@@ -392,9 +387,12 @@ test "SessionDock keeps fixed chrome inset while the scroll list is full bleed" 
     try @import("std").testing.expectEqual(@as(f32, @floatFromInt(m.root_inset)), header.rect.x);
     try @import("std").testing.expectEqual(header.rect.x, scope.rect.x);
     try @import("std").testing.expectEqual(header.rect.x, search.rect.x);
-    try @import("std").testing.expectEqual(@as(f32, 0), content.rect.x);
+    try @import("std").testing.expectEqual(props.viewport_px.width - @as(f32, @floatFromInt(m.root_inset * 2)), header.rect.width);
+    try @import("std").testing.expectEqual(header.rect.width, scope.rect.width);
+    try @import("std").testing.expectEqual(header.rect.width, search.rect.width);
+    try @import("std").testing.expectEqual(header.rect.x, content.rect.x);
     try @import("std").testing.expectEqual(content.rect.x, group.rect.x);
-    try @import("std").testing.expectEqual(@as(f32, props.viewport_px.width), group.rect.width);
+    try @import("std").testing.expectEqual(header.rect.width, group.rect.width);
 }
 
 test "SessionDock published geometry ignores terminal cell dimensions" {

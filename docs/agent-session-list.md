@@ -72,10 +72,11 @@ identity는 바꾸지 않으며, `SessionDock`의 같은 completed `UiRectTree`�
 아래 contract의 pixel geometry는 `DockMetrics` snapshot 하나가 결정한다. 진행·검증 상태는
 [검증 매트릭스](verification-matrix.md)의 해당 행을 따른다.
 
-- dock의 자동 폭 640pt 안에서 fixed chrome(header·segmented scope·search)는 20pt 좌우
-  inset을 쓰되, scroll-area는 dock divider까지 full-bleed다. group disclosure의 20pt leading
-  slot은 **dock 좌측에서 한 번만** 적용한다. 즉 fixed-chrome outer inset과 group disclosure
-  inset을 중첩해 chevron·목록을 불필요하게 안쪽으로 밀지 않는다. 이 기하는 **terminal cell**이
+- dock의 자동 폭 640pt 안에서 fixed chrome(header·segmented scope·search)와 scroll-area는 같은
+  20pt 좌우 content inset·clip rect를 공유한다. 따라서 refresh의 trailing slot과 목록 divider가
+  dock 밖으로 overflow하거나 서로 다른 경계에 놓이지 않는다. group disclosure는 이 content rect
+  안에서 별도의 8pt leading slot만 쓴다. 즉 root inset을 다시 20pt 더하지 않아 chevron·목록을
+  불필요하게 안쪽으로 밀지 않는다. 이 기하는 **terminal cell**이
   아니라 Chrome의 logical spacing/type token과 backing scale에서만 결정한다. header·scope·search는
   scroll하지 않고, group부터만 scroll한다. terminal font·line spacing을 바꿔도 도크의 버튼
   여백·목록 밀도·hit rect가 바뀌어서는 안 된다.
@@ -179,9 +180,9 @@ layout과 spacing SSOT, 48pt action target·1×/2×/terminal-font capture 판정
   card, scrollbar의 pixel rect를 **한 번만** 계산한다. `view`, pointer
   hit-test, virtualized visible-row 범위, keyboard scroll이 이 결과를 함께
   소비한다. 그러므로 카드가 보이는 곳과 클릭 영역, scroll origin은 서로 다른
-  행/문자열 계산으로 갈라질 수 없다. fixed chrome의 좌우 inset과 full-bleed scroll-area의
-  leading disclosure slot은 별도 logical layer다. 그러므로 `tmp` 같은 workspace group의
-  chevron은 root padding을 다시 더한 위치가 아니라 dock 기준 20pt slot의 가운데에 놓이고,
+  행/문자열 계산으로 갈라질 수 없다. fixed chrome과 scroll-area는 같은 bounded content rect를
+  공유하고, group disclosure만 그 안의 8pt local slot을 쓴다. 그러므로 `tmp` 같은 workspace group의
+  chevron은 root padding을 다시 더한 위치가 아니라 shared content edge 기준 local slot의 가운데에 놓이고,
   header의 `로컬`/refresh utility와도 서로 다른 baseline·hit rect를 공유하지 않는다.
 - `SessionDockHeader`는 title, displayed/recent count, host SVG와 `로컬`
   provenance, refresh affordance만 소유한다. host+label은 72pt box 안에서 실제 glyph advance로

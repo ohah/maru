@@ -150,13 +150,22 @@ const Writer = struct {
         const ch = self.props.cell_height_px;
         if (cw == 0 or ch == 0 or line_count == 0 or line >= line_count) return;
         const cell_height: f32 = @floatFromInt(ch);
-        const stack_height = cell_height * @as(f32, @floatFromInt(line_count));
+        // Registered SVG icons remain in the legacy cell path, but ordinary semantic text now
+        // has a measured system-UI raster path.  Centre those controls by their role line box,
+        // not the terminal cell: the old calculation was visibly low at 1x and diverged further
+        // at Retina scale. Non-centred card rows intentionally retain their fixed virtualization
+        // rhythm until the card line-stack migration owns their reserved height as a whole.
+        const role_line_height: f32 = if (centered and !wide_icons)
+            @floatFromInt(typography.lineHeightPx(text_role, effectiveScale(self.props.scale_milli)))
+        else
+            cell_height;
+        const stack_height = role_line_height * @as(f32, @floatFromInt(line_count));
         const x = rect.rect.x + @as(f32, @floatFromInt(cw)) * @as(f32, @floatFromInt(left_inset_cols));
         const y = if (centered)
-            if (rect.rect.height >= stack_height) rect.rect.y + (rect.rect.height - stack_height) / 2 + cell_height * @as(f32, @floatFromInt(line)) else return
+            if (rect.rect.height >= stack_height) rect.rect.y + (rect.rect.height - stack_height) / 2 + role_line_height * @as(f32, @floatFromInt(line)) else return
         else
             rect.rect.y + cell_height * @as(f32, @floatFromInt(line + 1));
-        if (!loweredTextCellFitsClip(rect, y, ch)) return;
+        if ((wide_icons or !centered) and !loweredTextCellFitsClip(rect, y, ch)) return;
         const required_inset_cols = @as(u32, left_inset_cols) + 1;
         const available_px = rect.rect.width - @as(f32, @floatFromInt(cw)) * @as(f32, @floatFromInt(required_inset_cols));
         if (available_px <= 0) return;
@@ -188,7 +197,9 @@ const Writer = struct {
         const slot_width = @as(f32, @floatFromInt(slot_cols)) * cell_width;
         const glyph_width = @as(f32, @floatFromInt(start)) * cell_width;
         const x = rect.rect.x + rect.rect.width - inset_px - slot_width + (slot_width - glyph_width) / 2;
-        const y = rect.rect.y + (rect.rect.height - @as(f32, @floatFromInt(ch))) / 2;
+        const control_h: f32 = @floatFromInt(typography.lineHeightPx(.control, effectiveScale(self.props.scale_milli)));
+        if (rect.rect.height < control_h) return;
+        const y = rect.rect.y + (rect.rect.height - control_h) / 2;
         try self.emit(x, y, source, start, .tail, role, .control, wide_icon, false);
     }
 
@@ -275,10 +286,10 @@ const Writer = struct {
             .border_role = .divider,
         });
 
-        const line_y = rect.rect.y + (rect.rect.height - @as(f32, @floatFromInt(ch))) / 2;
+        const icon_y = rect.rect.y + (rect.rect.height - @as(f32, @floatFromInt(ch))) / 2;
         try self.emit(
             rect.rect.x + @as(f32, @floatFromInt(horizontal_inset)),
-            line_y,
+            icon_y,
             if (group.collapsed) chevron_right_icon else chevron_down_icon,
             2,
             .head,
@@ -292,7 +303,9 @@ const Writer = struct {
         const label_end = pill_x - @as(f32, @floatFromInt(cw));
         if (label_end > label_x) {
             const max_cols: u16 = @intFromFloat(@floor((label_end - label_x) / @as(f32, @floatFromInt(cw))));
-            if (max_cols > 0) try self.emit(label_x, line_y, group.label, max_cols, .head, .surface_fg, .group_heading, false, true);
+            const group_heading_h: f32 = @floatFromInt(typography.lineHeightPx(.group_heading, effectiveScale(self.props.scale_milli)));
+            if (max_cols > 0 and rect.rect.height >= group_heading_h)
+                try self.emit(label_x, rect.rect.y + (rect.rect.height - group_heading_h) / 2, group.label, max_cols, .head, .surface_fg, .group_heading, false, true);
         }
 
         const count_width: f32 = @floatFromInt(@as(u32, count_cols) * cw);
@@ -300,7 +313,9 @@ const Writer = struct {
         // The group row and its count pill intentionally have different heights.  Centre the
         // count in the pill's own rect; using the row baseline lifted it above the dark pill in
         // real Metal captures even though the horizontal slot was correct.
-        const count_y = pill_y + (@as(f32, @floatFromInt(pill_h)) - @as(f32, @floatFromInt(ch))) / 2;
+        const count_line_h: f32 = @floatFromInt(typography.lineHeightPx(.control, effectiveScale(self.props.scale_milli)));
+        if (@as(f32, @floatFromInt(pill_h)) < count_line_h) return;
+        const count_y = pill_y + (@as(f32, @floatFromInt(pill_h)) - count_line_h) / 2;
         try self.emit(count_x, count_y, count, count_cols, .head, .surface_fg, .control, false, true);
     }
 
@@ -455,6 +470,10 @@ fn loweredTextCellFitsClip(rect: tree.RectEntry, origin_y: f32, cell_height_px: 
     return lowered_top >= clip_top and lowered_top <= clip_bottom - cell_height;
 }
 
+fn effectiveScale(scale_milli: u32) u32 {
+    return if (scale_milli == 0) 1000 else scale_milli;
+}
+
 fn isSessionDockIcon(codepoint: u21) bool {
     return switch (codepoint) {
         0xF000C, 0xF0011, 0xF0021, 0xF0022, 0xF0023, 0xF0024 => true,
@@ -593,7 +612,7 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
     try std.testing.expect(saw_group_label);
     try std.testing.expect(saw_group_count);
     try std.testing.expect(saw_group_count_pill);
-    const expected_pill_centered_y = (group_count_pill_y orelse return error.TestUnexpectedResult) + @as(i32, @intCast(props.cell_height_px / 2));
+    const expected_pill_centered_y = (group_count_pill_y orelse return error.TestUnexpectedResult) + @as(i32, @intCast((props.cell_height_px * 2 - typography.lineHeightPx(.control, effectiveScale(props.scale_milli))) / 2));
     try std.testing.expectEqual(expected_pill_centered_y, group_count_origin_y orelse return error.TestUnexpectedResult);
     try std.testing.expect(saw_dock_heading);
     try std.testing.expect(saw_card_heading);
@@ -605,7 +624,8 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
     try std.testing.expect((host_label_max_cols orelse 0) > Writer.plannedCols(host_label, 16));
     inline for (.{ .scope_workspace, .scope_project, .scope_all }, .{ workspace_origin_y, project_origin_y, all_origin_y }) |id, origin| {
         const scope = find(frame.tree, @field(build.NodeIds, @tagName(id))) orelse return error.TestUnexpectedResult;
-        const expected_y: i32 = @intFromFloat(@floor(scope.rect.y + (scope.rect.height - @as(f32, @floatFromInt(props.cell_height_px))) / 2));
+        const expected_line_h: f32 = @floatFromInt(typography.lineHeightPx(.control, effectiveScale(props.scale_milli)));
+        const expected_y: i32 = @intFromFloat(@floor(scope.rect.y + (scope.rect.height - expected_line_h) / 2));
         try std.testing.expectEqual(expected_y, origin orelse return error.TestUnexpectedResult);
     }
     const refresh_x = refresh_origin_x orelse return error.TestUnexpectedResult;

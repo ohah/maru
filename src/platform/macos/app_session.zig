@@ -54,6 +54,7 @@ const agent_session_archive_detail_backend = @import("agent_session_archive_deta
 const agent_session_archive_scope_backend = @import("agent_session_archive_scope_backend.zig");
 const chrome_metal_lowering = @import("chrome/metal_lowering.zig");
 const chrome_draw_lowering = @import("chrome/chrome_draw_lowering.zig");
+const chrome_system_text = @import("chrome/system_text.zig");
 test {
     // Chrome Lab은 제품 AppSession이 소유하지 않는 test-only fixture다. 다만 이 import로 app-host
     // 테스트 빌드에서 facade/module ownership과 lowering API drift를 컴파일 시점에 잡는다.
@@ -2370,7 +2371,7 @@ pub const SessionCollection = struct {
 
 const AgentSessionDockRichTextCache = struct {
     fingerprint: u64,
-    placements: []chrome_draw_lowering.RichTextArtifact.Placement,
+    placements: []chrome_system_text.Placement,
     records: []renderer.ShapedGlyphRecord,
 };
 
@@ -31232,7 +31233,7 @@ pub const AppSession = struct {
         builder: coretext_frame_builder.CoreTextFrameBuilder,
         // B1 rich Chrome text borrows immutable cache-owned component placement until the shared
         // atlas assigns slots. It is then emitted as GpuGlyphs instead of NativeMetalCells.
-        rich_text: ?chrome_draw_lowering.RichTextArtifact = null,
+        measured_text: ?chrome_system_text.Artifact = null,
 
         fn deinit(self: *CollectedPane, allocator: std.mem.Allocator) void {
             self.pane.deinit(allocator);
@@ -31289,38 +31290,33 @@ pub const AppSession = struct {
 
     /// B1 rich Chrome cache miss. The only synchronous CoreText call for a semantic dock key is
     /// made here; after it succeeds we retain renderer-neutral records, never native handles.
-    fn collectRichTextShapedAndCache(
+    fn collectMeasuredTextShapedAndCache(
         self: *AppSession,
         collected: *std.ArrayList(CollectedPane),
         dl: renderer.DrawList,
-        artifact: chrome_draw_lowering.RichTextArtifact,
+        artifact: chrome_system_text.Artifact,
         fingerprint: u64,
         builder: coretext_frame_builder.CoreTextFrameBuilder,
         dest: CollectDest,
     ) void {
-        const pane = builder.shapeOnly(self.allocator, dl, &self.renderer_state.font_registry) catch {
-            return;
-        };
-        const records = shapedRecordsFromRuns(self.allocator, pane.shaped.runs.glyphs) catch {
-            var failed = pane;
-            failed.deinit(self.allocator);
+        const pane = builder.shapeFromRecords(self.allocator, dl, artifact.records) catch {
             return;
         };
         self.clearAgentSessionDockRichTextCache();
         self.agent_session_dock_rich_text_cache = .{
             .fingerprint = fingerprint,
             .placements = artifact.placements,
-            .records = records,
+            .records = artifact.records,
         };
         var p = pane;
-        collected.append(self.allocator, .{ .pane = p, .dest = dest, .builder = builder, .rich_text = artifact }) catch {
+        collected.append(self.allocator, .{ .pane = p, .dest = dest, .builder = builder, .measured_text = artifact }) catch {
             p.deinit(self.allocator);
         };
     }
 
     /// B1 rich Chrome cache hit. `shapeFromRecords` duplicates only per-frame renderer run
     /// ownership; it does not call CoreText or wait for a font worker.
-    fn collectRichTextFromCache(
+    fn collectMeasuredTextFromCache(
         self: *AppSession,
         collected: *std.ArrayList(CollectedPane),
         dl: renderer.DrawList,
@@ -31330,7 +31326,7 @@ pub const AppSession = struct {
     ) void {
         const pane = builder.shapeFromRecords(self.allocator, dl, cache.records) catch return;
         var p = pane;
-        collected.append(self.allocator, .{ .pane = p, .dest = dest, .builder = builder, .rich_text = .{ .placements = cache.placements } }) catch {
+        collected.append(self.allocator, .{ .pane = p, .dest = dest, .builder = builder, .measured_text = .{ .records = cache.records, .placements = cache.placements } }) catch {
             p.deinit(self.allocator);
         };
     }
@@ -31453,7 +31449,7 @@ pub const AppSession = struct {
         // the whole batch exactly once to backing coordinates.
         const cols: u16 = @intCast(@min(content.w / self.cell_width_px, std.math.maxInt(u16)));
         const rows: u16 = @intCast(@min(content.h / self.cell_height_px, std.math.maxInt(u16)));
-        const dl = chrome_draw_lowering.buildTextDrawList(
+        const icon_dl = chrome_draw_lowering.buildIconTextDrawList(
             self.allocator,
             draws.ops,
             &tokens,
@@ -31472,7 +31468,12 @@ pub const AppSession = struct {
         );
         if (self.agent_session_dock_rich_text_cache) |*cache| {
             if (cache.fingerprint == fingerprint) {
-                self.collectRichTextFromCache(collected, dl, cache, builder, .{ .pane = .{
+                self.collectMeasuredTextFromCache(collected, chrome_system_text.emptyDrawList(self.allocator, cache.records.len) catch return, cache, builder, .{ .pane = .{
+                    .origin_x = content.x,
+                    .origin_y = content.y,
+                    .colors = colors,
+                } });
+                self.collectShaped(collected, icon_dl, builder, .{ .pane = .{
                     .origin_x = content.x,
                     .origin_y = content.y,
                     .colors = colors,
@@ -31480,23 +31481,20 @@ pub const AppSession = struct {
                 return;
             }
         }
-        const rich_text = chrome_draw_lowering.buildRichTextArtifact(
-            self.allocator,
-            draws.ops,
-            &tokens,
-            self.cell_width_px,
-            self.cell_height_px,
-            cols,
-            rows,
-        ) catch {
-            self.collectShaped(collected, dl, builder, .{ .pane = .{
+        const measured = chrome_system_text.shapeOps(self.allocator, &self.renderer_state.font_registry, draws.ops, &tokens, self.cell_width_px, self.scale_milli) catch {
+            self.collectShaped(collected, icon_dl, builder, .{ .pane = .{
                 .origin_x = content.x,
                 .origin_y = content.y,
                 .colors = colors,
             } });
             return;
         };
-        self.collectRichTextShapedAndCache(collected, dl, rich_text, fingerprint, builder, .{ .pane = .{
+        self.collectMeasuredTextShapedAndCache(collected, chrome_system_text.emptyDrawList(self.allocator, measured.records.len) catch return, measured, fingerprint, builder, .{ .pane = .{
+            .origin_x = content.x,
+            .origin_y = content.y,
+            .colors = colors,
+        } });
+        self.collectShaped(collected, icon_dl, builder, .{ .pane = .{
             .origin_x = content.x,
             .origin_y = content.y,
             .colors = colors,
@@ -32242,7 +32240,7 @@ pub const AppSession = struct {
             // normal cell path for this frame rather than publishing a text-less Chrome panel.
             var rich_text_only = false;
             var rich_glyph_start: ?usize = null;
-            if (c.rich_text) |*artifact| {
+            if (c.measured_text) |*artifact| {
                 const placement: ?PanePlacement = switch (c.dest) {
                     .pane, .dock_toggle => |p| p,
                     else => null,
@@ -32258,15 +32256,16 @@ pub const AppSession = struct {
                         self.allocator,
                         rf,
                         self.renderer_state.atlas.config,
-                        self.cell_width_px,
-                        self.cell_height_px,
                         p.origin_x,
                         p.origin_y,
                         &rich_glyphs,
                     )) |_| {
                         if (rich_glyphs.items.len > 0) {
                             if (self.gpu_glyphs.appendSlice(self.allocator, rich_glyphs.items)) |_| {
-                                rich_text_only = true;
+                                // This pane's DrawList deliberately has no terminal cells.  Do
+                                // not suppress the sibling icon-only pane, which still owns
+                                // registered SVG affordances through the legacy atlas path.
+                                rich_text_only = false;
                                 rich_glyph_start = self.gpu_glyphs.items.len - rich_glyphs.items.len;
                             } else |_| {
                                 // Global frame storage allocation also falls back to the original
@@ -32278,7 +32277,7 @@ pub const AppSession = struct {
                         // assembled completely for this frame.
                     }
                 }
-                c.rich_text = null;
+                c.measured_text = null;
             }
             switch (c.dest) {
                 .sidebar => sidebar_frame.* = rf,

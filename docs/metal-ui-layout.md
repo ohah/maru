@@ -205,7 +205,7 @@ Tailwind class 또는 임의 raw pixel을 직접 나열하는 API는 아니다. 
 사용한다. `DockMetrics`는 root inset 20pt, fixed control gap 12pt, header 76pt,
 scope/search/group 48pt, three-line divider card 112pt, bounded detail 256pt, action 48pt,
 action gap 8pt와 item gap 0pt를 한 snapshot으로 제공한다. header utility는 72pt host-label box,
-12pt sibling gap, 20pt refresh slot, 8pt trailing inset을, group disclosure는 20pt inset/slot과 8pt
+12pt sibling gap, 20pt refresh slot, 16pt trailing safe inset을, group disclosure는 20pt inset/slot과 8pt
   label gap을 같은 snapshot으로 제공한다. refresh와 group disclosure의 idle SVG는
 `TextPlacement.icon_in_rect`로 그 slot 자체를 final-pixel placement로 넘긴다. 이 placement는
 CoreText label이나 terminal cell을 만들지 않으며, worker가 등록 SVG만 slot의 정확한 중심에

@@ -126,47 +126,82 @@ chrome과 같은 Zig semantic draw → Metal GPU lowering 경로를 쓰는 custo
   wait를 하지 않는다. empty·partial·error는 skeleton을 완료 목록처럼 보이게
   하지 않고 각각의 truthful notice를 scroll-area 안에 낸다.
 
-`ArchiveSessionDetailPanel`은 card click/Enter가 여는 전용 Metal GPU archive tab의
-내용이다. 이것도 terminal에 ANSI guidance를 write하는 방식이 아니라 같은 Metal
-component/layout/lowering 경로를 쓴다.
+`ExpandedSessionCard`는 선택한 카드 **하나만** 우측 도크 목록 안에서 여는 Metal GPU
+inline disclosure다. card click/Enter는 새 archive tab이나 terminal surface를 만들지 않고
+같은 stable identity를 다시 누르면 닫는다. 이것도 terminal에 ANSI guidance를 write하는 방식이
+아니라 같은 Metal component/layout/lowering 경로를 쓴다.
 
 ```text
-┌ ArchiveSessionDetailPanel ────────────────────────────────────┐
-│ provider badge · 제목                                  [닫기] │
-│ model · 상대 시각 · 안전한 상태                              │
-├ 최근 대화 ────────────────────────────────────────────────────┤
-│ [사용자] 안전하게 정규화한 최근 turn                          │
-│ [에이전트] 안전하게 정규화한 최근 turn                        │
-│ 도구/권한 관련 기록 n건 (payload 원문 없음)                   │
-├ actions ──────────────────────────────────────────────────────┤
-│ [▶ 터미널에서 이어하기  ⌘↵] [로그 보기  ⌘L]                  │
-│ [열린 세션으로 이동] (exact live identity가 있을 때만)        │
-└───────────────────────────────────────────────────────────────┘
+┌ SessionDockScrollArea ─────────────────────────────────────────┐
+│ ⌄ selected session title                                  […] │
+│   provider · model · relative age                                │
+│   ┌ ExpandedSessionCard ──────────────────────────────────────┐ │
+│   │ 최근 대화 (선택된 세션만)                                  │ │
+│   │ [사용자/에이전트] 안전하게 정규화한 최근 turn 최대 3개     │ │
+│   │ 도구/권한 관련 기록 n건 (payload 원문 없음)                │ │
+│   ├ actions ─────────────────────────────────────────────────┤ │
+│   │ [▶ 터미널에서 이어하기] [로그 보기]                        │ │
+│   │ [열린 세션으로 이동] (exact live identity가 있을 때만)     │ │
+│   └───────────────────────────────────────────────────────────┘ │
+│ ⌄ ordinary session title                                   […] │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-- detail panel은 loading/stale/unavailable/ready state를 자체적으로 표현한다.
+- inline expansion은 `closed/loading/stale/unavailable/ready` state를 자체적으로 표현한다.
+  `closed`는 기본 세 줄 행이며, 다른 card를 열면 이전 identity는 atomically `closed`가 된다.
   loading은 Metal-rendered spinner와 skeleton turn으로, stale/unavailable은 이유와
   disabled action으로 보인다. 이전 안전한 detail을 다른 identity에 재사용하지
   않는다.
-- ready panel은 bounded detail worker가 만든 최근 turn과 `도구/권한 관련 기록
+- ready expansion은 bounded detail worker가 만든 최근 turn과 `도구/권한 관련 기록
   n건`만 보여 준다. 권한·도구 payload, 환경 변수, 명령 출력, raw JSONL은
-  panel·tooltip·trace 어느 곳에도 표시하지 않는다. `로그 보기`는 source reveal만
-  하며, `터미널에서 이어하기`는 기존 `새 탭에서 이어하기`의 visible label로서 exact
+  expansion·tooltip·trace 어느 곳에도 표시하지 않는다. `로그 보기`는 source reveal만
+  하며, `터미널에서 이어하기`는 exact
   argv 새 local Term을 즉시 연다. action 앞에는 기존 Chrome 합성 벡터 아이콘을 **명시적으로 opt-in한 2-cell slot**으로 써,
   terminal font의 작은 Unicode 기호에 의존하지 않는다. 하나의 detail card 안에서 논리적으로 개행된
   text line은 cell height의 1/4(최소 3px) 여백을 둬 제목·role·본문이 붙어 보이지
-  않으며, 그 여백은 card height/clip과 함께 계산한다. 별도의 raw transcript, 실행 전 preview, 자동
+  않으며, 그 여백은 expansion height/clip과 함께 계산한다. 별도의 raw transcript, 실행 전 preview, 자동
   resume, `새 세션에서 계속` action은 이 계약 밖이다.
 - exact provider/session identity의 live Term을 다시 검증했을 때만 `열린 세션으로
-  이동` 보조 action을 action row에 추가한다. 이 action의 존재 여부가 card 순서,
+  이동` 보조 action을 expansion action row에 추가한다. 이 action의 존재 여부가 card 순서,
   archive 후보, resume/reveal identity를 바꾸지 않으며, path·mtime 유사성만으로
   버튼을 보이게 하지 않는다.
 - `SessionDockHeader`, `SegmentedScopeControl`, `SessionSearchField`,
   `CollapsibleWorkspaceGroup`, `SessionCard`, `SessionDockScrollArea`,
-  `ArchiveSessionDetailPanel`은 각각 props/state/layout/view/hit-test/action을
+  `ExpandedSessionCard`는 각각 props/state/layout/view/hit-test/action을
   노출하는 Metal UI primitive다. component는 `AppSession`, provider file, PTY,
   `NativeMetalCell`을 import하지 않는다. host가 stable archive identity를 action에
   붙이고 backend만 semantic draw를 glyph/cell/GPU primitive로 lower한다.
+
+### 2.2 선택·확장·geometry 계약
+
+- `SessionDockProps`는 `expanded_identity: ?ArchiveIdentity`와 그 identity에만 결합된
+  immutable `ExpandedSessionProps`를 받는다. `selected` boolean만으로 expanded를
+  추측하거나 row index를 persistent identity로 쓰지 않는다. snapshot generation 또는
+  `(provider, session_id, device, inode)`가 달라지면 expansion/capture/focus/action table을
+  함께 폐기한다.
+- `SessionDockLayout`은 기본 card와 expanded card의 높이, 내부 recent-turn card,
+  tool/permission summary, action row, divider, scrollbar을 **한 번** 계산한다. view, clip, pointer hit-test,
+  keyboard focus, visible row window, scroll anchor가 같은 completed tree를 쓴다. 선택 행의
+  content만 host가 별도 y-offset으로 덧그리거나 click rect를 재계산해서는 안 된다.
+- expanded height는 최대 3 recent-turn slot, summary slot, action row의 **고정된 예약 높이**에서
+  결정한다. ready content가 짧으면 turn slot 안에서만 빈 영역을 줄이고, loading/stale/unavailable도
+  같은 outer rect와 action slots를 유지해 pointer target이 frame마다 점프하지 않게 한다.
+  recent turn은 최대 3개이며, tool/permission summary가 없으면 그 section을 숨기되 action row와
+  outer padding은 남긴다. nested subagent transcript/목록은 provider 입력 정책과 개인정보 범위 밖이므로
+  expansion에 투영하지 않는다. 따라서 모든 세션을 미리 detail parse하거나
+  모든 행을 항상 큰 card로 만들지 않는다.
+- anchor가 expanded card보다 위이면 open/close가 같은 anchor의 screen y를 보존한다. anchor가
+  선택 card 자신이면 title row가 content clip 안에 남도록 최소 scroll만 보정한다. group collapse,
+  filter/scope 변경, snapshot identity 교체는 expansion을 닫고 기존 AS3-c identity-first fallback을
+  적용한다. 숫자 offset만으로 이전 expanded row를 추측해 다시 열지 않는다.
+- title/summary/metadata는 기본 행의 기존 typography role을 유지하되, selected title row는
+  title·chevron·more action의 visual center를 같은 baseline artifact로 정렬한다. expansion의
+  role label, body, pill, button은 비례 font의 measured advance와 line-height를 사용한다.
+  terminal cell count나 fallback glyph ink에 맞추어 label별 nudge를 두지 않는다.
+- pointer/Enter는 card disclosure만 toggle하며 provider를 실행하지 않는다. `터미널에서 이어하기`,
+  `로그 보기`, `열린 세션으로 이동`은 expanded action table의 distinct enabled intent여야 한다.
+  `⌘↵`/`⌘L`은 expanded ready state에서만 같은 intents를 호출하며, closed/loading/stale state에서는
+  no-op이다. Escape는 search를 먼저 닫고, 그 다음 expanded card를 닫는다.
 
 - header의 `Local Mac`은 현재 사용자 홈 아래 provider log만 읽는다는 provenance label이며 host 선택기가 아니다. v1 정렬은 mtime 내림차순 하나로 고정한다. 탭 재진입은 현재 앱 실행 중의 snapshot을 즉시 보이고, 마지막 완료 scan 뒤 **15초** 안이면 새 refresh를 시작하지 않는다. `SessionDockHeader`의 refresh control은 이 TTL을 우회한다. worker가 실행 중이면 동일 rect의 spinner/disabled state로 바뀌고 추가 job을 만들지 않는다.
 - 도크 view bar의 `AI 세션`을 누르면 archive refresh를 요청한다. **refresh 중에는 직전 완료 snapshot과 current scroll/selection을 그대로 paint하고, 새 bounded scan 전체가 끝난 뒤에만 새 immutable snapshot으로 한 번에 교체한다.** AS3-c부터 교체 commit은 first partially-visible card의 exact identity와 intra-card pixel offset을 restore하고, identity가 없으면 기존 numeric offset만 새 상한에 clamp한다. 결과 큐의 OOM 등 새 snapshot을 publish할 수 없는 완료는 spinner만 끝내고 기존 목록과 scroll/selection을 유지하며 notice를 보인다. 따라서 새로 고침이 기존 목록을 비우거나 첫 record/중간 batch로 목록을 흔들지 않는다. 첫 진입처럼 이전 snapshot이 없을 때만 skeleton/진행 문구를 보이며, frame tick에서 파일 I/O를 하지 않는다. 창 재포커스와 새 provider session identity 감지는 같은 refresh를 요청하되, forced refresh는 5초 전역 throttle로 합친다. filesystem polling/watcher는 v1에 없다.
@@ -178,11 +213,11 @@ component/layout/lowering 경로를 쓴다.
 - 기본 그룹은 canonical `cwd`의 프로젝트/폴더 이름이다. cwd가 없거나 project 밖이면 `알 수 없는 위치` 한 그룹으로 낸다. 각 그룹 header는 chevron·이름·표시 개수를 갖고 click/Left/Right로 접고 편다. 접힌 그룹은 header만 남기며 다른 그룹과 고정 chrome의 위치는 바꾸지 않는다. 그룹 접힘은 현재 view 수명 안에서만 유지하며 JSONL이나 workspace에 저장하지 않는다.
 - 세션 행은 **세 줄 카드**다: 제목과 provider badge, 마지막 사용자 요청의 안전한 짧은 요약, 메시지 수·상대 시각·model metadata. 카드 내부의 provider/title/summary를 한 줄 label로 합치거나 raw JSONL line을 그대로 표시하지 않는다. 행 제목은 provider 고유 제목이 있으면 그것, 없으면 첫 신뢰 가능한 사용자 요청의 single-line prefix(최대 120 display bytes), 끝내 없으면 `제목 없는 세션`이다. 요약은 마지막 사용자 요청 우선, 없으면 마지막 assistant text의 single-line prefix(최대 240 display bytes)다. raw escape/control byte·경로 외 홈 사용자명은 렌더 전에 제거/일반화하며 Markdown/ANSI를 해석하지 않는다.
 - `메시지 n개`는 전체 파일을 budget 안에서 끝까지 분석한 경우만 정확한 수다. cap에 걸리면 `메시지 ≥n개`, 아직 분석하지 않았으면 메시지 수를 생략한다. 숫자를 추정치처럼 표시하지 않는다.
-- 한 번 클릭/Enter는 provider를 실행하지 않고 **전용 archive session tab**을 연다. 도크 목록은 탭이 열려도 카드 위치·scroll을 유지하며 detail/action을 fixed chrome에 끼워 넣지 않는다. tab은 PTY 없는 Metal-rendered read-only surface이고, 먼저 `세션 분석 중` 상태로 열려도 UI를 막지 않는다. detail worker가 source를 no-follow로 다시 열어 `(device,inode)`를 대조한 뒤 마지막 **512 KiB** 안의 완결 JSONL record만 해석해, 안전하게 정규화한 최근 세 user/assistant turn과 `도구/권한 관련 record n건`처럼 원문을 숨긴 action 요약만 publish한다. raw JSONL·tool payload·환경 변수·명령 출력의 전체 원문은 tab에 넣지 않는다. tail 밖의 더 오래된 대화·불완전 마지막 JSON line은 의도적으로 표시하지 않는다.
-- tab의 `터미널에서 이어하기`와 `로그 보기`는 명시 action이다. 초기 Metal tab은 각각 `⌘↵`, `⌘L`로 실행하고 그 shortcut을 화면에 항상 적는다. `로그 보기`는 source-reveal만 수행하고, raw JSONL을 terminal에 paste하거나 WebView에 trusted content로 넣지 않는다. 동일 identity의 tab이 이미 열려 있으면 새 tab을 만들지 않고 기존 tab을 활성화한다. snapshot 교체 뒤 source identity가 달라지거나 detail worker가 재검증에 실패하면 tab은 stale 상태로 남기고 resume/reveal을 비활성화한다.
+- 한 번 클릭/Enter는 provider를 실행하지 않고 **도크 안의 해당 card를 확장**한다. 도크 목록의 fixed header/scope/search는 움직이지 않으며, expanded detail/action은 선택 row 바로 아래 같은 scroll area 안에만 나타난다. expansion은 PTY 없는 Metal-rendered read-only component이고, 먼저 `세션 분석 중` 상태가 되어도 UI를 막지 않는다. detail worker가 source를 no-follow로 다시 열어 `(device,inode)`를 대조한 뒤 마지막 **512 KiB** 안의 완결 JSONL record만 해석해, 안전하게 정규화한 최근 세 user/assistant turn과 `도구/권한 관련 record n건`처럼 원문을 숨긴 action 요약만 publish한다. raw JSONL·tool payload·환경 변수·명령 출력의 전체 원문은 expansion에 넣지 않는다. tail 밖의 더 오래된 대화·불완전 마지막 JSON line은 의도적으로 표시하지 않는다.
+- expansion의 `터미널에서 이어하기`와 `로그 보기`는 명시 action이다. 각각 `⌘↵`, `⌘L`로 실행하고 ready action row에 shortcut을 보조 정보로 표시한다. `로그 보기`는 source-reveal만 수행하고, raw JSONL을 terminal에 paste하거나 WebView에 trusted content로 넣지 않는다. 같은 identity를 다시 선택하면 expansion을 닫고, 다른 identity를 선택하면 먼저 이전 expansion의 detail request/action capture를 폐기한 뒤 새 하나를 연다. snapshot 교체 뒤 source identity가 달라지거나 detail worker가 재검증에 실패하면 expansion은 stale 상태로 남기고 resume/reveal을 비활성화한다.
 - `터미널에서 이어하기`는 사용자가 그 명시 버튼을 누르는 즉시 새 local Term 탭을 만들고 활성화한다(추가 확인 dialog 없음). shell 없이 정확한 argv로 실행한다: Claude는 `claude --resume <session-id>`, Codex는 `codex resume <session-id>`. 실행 cwd는 archive record의 canonical local cwd가 아직 directory일 때만 쓰며, 아니면 새 Term의 기본 cwd와 함께 "원래 cwd를 찾지 못함"을 보여 준다. 기존 Term에 키를 주입하지 않는다. 이 action은 worktree를 생성·선택·변경하지 않는다.
-- open live Term과 provider+session id가 정확히 일치하면 detail에 **부가 동작**으로 `열린 세션으로 이동`을 제공한다. 이것은 archive 후보 선정·정렬·표시를 바꾸지 않으며, 일치하지 않는 과거 세션도 완전히 같은 행으로 보인다. mapping은 live session identity가 다시 검증된 경우만 만들며 path/mtime 유사성으로 추정하지 않는다.
-- 새 focus owner `agent_session_list`가 선택 identity `{ provider, session_id, source_file_identity }`를 소유한다. Up/Down, PageUp/PageDown, Home/End는 보이는 카드를 움직이고, Right/Left는 그룹을 펼치고 접으며, Enter는 archive session tab을 연다. Escape는 search focus를 먼저 해제한다. 도크를 떠나거나 snapshot 교체 뒤 identity가 사라지면 선택을 해제한다. `⌘⇧E`는 기존대로 탐색기로 돌아간다.
+- open live Term과 provider+session id가 정확히 일치하면 expansion에 **부가 동작**으로 `열린 세션으로 이동`을 제공한다. 이것은 archive 후보 선정·정렬·표시를 바꾸지 않으며, 일치하지 않는 과거 세션도 완전히 같은 행으로 보인다. mapping은 live session identity가 다시 검증된 경우만 만들며 path/mtime 유사성으로 추정하지 않는다.
+- 새 focus owner `agent_session_list`가 선택 identity `{ provider, session_id, source_file_identity }`를 소유한다. Up/Down, PageUp/PageDown, Home/End는 보이는 카드를 움직이고, Right/Left는 그룹을 펼치고 접으며, Enter는 selected card expansion을 toggle한다. Escape는 search focus를 먼저 해제하고 그 다음 expansion을 닫는다. 도크를 떠나거나 snapshot 교체 뒤 identity가 사라지면 선택과 expansion을 해제한다. `⌘⇧E`는 기존대로 탐색기로 돌아간다.
 
 ## 3. provider 입력과 신뢰 등급
 
@@ -246,10 +281,10 @@ shaping은 이후 별도 ML slice이며, 이 bridge의 문자열/geometry contra
 
 `AppSession`은 완료된 archive projection을 한 frame의 `Props`로 투영하고, component가 돌려준 action table과
 `UiRectTree`의 완료 snapshot을 함께 publish한다. pointer는 다음 frame에 tree를 재계산하지 않고 **직전에 실제로
-paint한** action table만 선택하며, 새 snapshot publish는 기존 capture를 취소한다. card action은 archive tab을 열 수
-있지만 provider 실행은 절대 하지 않는다. refresh/scope/group/selection은 기존 memory-only state만 바꾸며,
-검색 keypress/hover/frame은 filesystem I/O, JSONL parse, worker wait를 하지 않는다. 이 slice는
-`ArchiveSessionDetailPanel` 및 resume/reveal action을 포함하지 않는다(AS4).
+paint한** action table만 선택하며, 새 snapshot publish는 기존 capture를 취소한다. card action은 같은 도크 안의
+expanded disclosure를 toggle할 수 있지만 provider 실행은 절대 하지 않는다. refresh/scope/group/selection은 기존
+memory-only state만 바꾸며, 검색 keypress/hover/frame은 filesystem I/O, JSONL parse, worker wait를 하지 않는다.
+이 AS3 slice는 `ExpandedSessionCard` detail 및 resume/reveal action을 포함하지 않는다(AS4-d).
 
 Lab product capture는 최소한 `empty`, initial `loading`, retained list를 포함한다. Lab은 실제 `SessionDock`
 component를 거쳐 card/scope/header/search와 semantic text op를 만들고, 그 op를
@@ -356,7 +391,7 @@ host wheel screenshot은 AS3-c 뒤에도 별도 manual/automation gate로 남긴
 1. **AS1 — 순수 모델·parser:** provider-neutral record, Claude/Codex streaming parser, trust grade, dedup/title/summary/redaction/filter/sort pure tests. 실제 사용자 log는 fixture로 넣지 않는다.
 2. **AS2 — bounded scanner:** no-follow discovery, candidate/file/total caps, cancellation/generation, in-memory identity parse cache, 최신순 bounded worker pool과 완료 snapshot atomic publish, metrics. refresh는 직전 완료 snapshot을 유지하고 새 scan이 끝날 때만 교체한다. main tick filesystem I/O=0·JSON parse=0·worker wait=0을 counter와 source boundary test로 고정한다.
 3. **AS3 — 도크 Metal component vertical slice:** `SessionDockLayout`과 header/scope/search/group/card/scroll-area primitive를 순수 props/state/layout/view/hit-test/action으로 만든 뒤 host/backend의 semantic draw → Metal GPU lowering에 연결한다. 기존 direct text draw와 pipe scope label은 이 slice에서 제거한다. layout 공유 test가 view rect=hit rect=visible-row origin을, search keypress I/O=0·row 한 번 클릭 provider 실행=0·main thread JSONL I/O=0을 고정한다. loading spinner는 snapshot 유무별로 skeleton 또는 기존 목록 유지인지도 integration test로 고정한다. **AS3-a는 component→CoreText/Metal card background, AS3-b는 published-tree hover/down/up lifecycle, AS3-c는 pixel scroll projection·refresh identity anchor·partial-scroll Lab artifact를 연결한다. active host screenshot E2E는 AS3의 남은 gate다.**
-4. **AS4 — archive Metal detail panel·explicit actions·제품 gate:** `ArchiveSessionDetailPanel`을 PTY 없는 Metal-rendered surface로 연결하고 bounded recent/permission summary, loading/stale identity disable, exact live mapping, source reveal, `터미널에서 이어하기`의 argv-only immediate new-Term activation을 닫는다. action label은 각 clickable card 안에서 실제 ellipsis/CJK glyph 폭 기준으로 수평 중앙 정렬한다. resume/log의 click rect와 `⌘↵`/`⌘L` shortcut은 같은 action identity를 소비한다. `열린 세션으로 이동`은 exact live identity가 있을 때만 별도 pointer/Enter action으로 제공한다. macOS fixture E2E는 dock card hover/selection/collapse/scroll, refresh 중 snapshot 보존, detail loading→ready/stale, disabled action, resume/reveal을 확인한다. 실제 provider 계정/개인 이력에 대한 재개는 사용자가 직접 승인한 수동 gate일 뿐 CI 증거가 아니다.
+4. **AS4 — inline expanded session·explicit actions·제품 gate:** `ExpandedSessionCard`를 `SessionDockScrollArea` 안의 PTY 없는 Metal-rendered component로 연결하고 bounded recent/permission summary, loading/stale identity disable, exact live mapping, source reveal, `터미널에서 이어하기`의 argv-only immediate new-Term activation을 닫는다. 기본/expanded row의 action·clip·scroll anchor는 하나의 completed tree를 소비한다. action label은 각 clickable card 안에서 실제 ellipsis/CJK glyph 폭 기준으로 수평 중앙 정렬한다. resume/log의 click rect와 `⌘↵`/`⌘L` shortcut은 같은 action identity를 소비한다. `열린 세션으로 이동`은 exact live identity가 있을 때만 별도 pointer/Enter action으로 제공한다. macOS fixture E2E는 dock card hover/selection/inline-expand/collapse/scroll, refresh 중 snapshot 보존, detail loading→ready/stale, disabled action, resume/reveal을 확인한다. 실제 provider 계정/개인 이력에 대한 재개는 사용자가 직접 승인한 수동 gate일 뿐 CI 증거가 아니다.
 
 ### AS4-c — 실제 AppKit host archive fixture
 
@@ -377,7 +412,7 @@ Claude transcript를 고르고, parser의 model metadata가 세 줄 카드의 mo
 Metal view의 backing metric을 session에 전달해, probe가 존재하지 않는 가상 좌표가 아니라 사용자도 누를 수 있는
 titlebar launcher와 dock slot만 관측하도록 한다.
 
-- fixture는 실제 archive scanner와 detail worker를 통해 목록→archive tab을 연다. `AppSession` private method를
+- fixture는 실제 archive scanner와 detail worker를 통해 목록→inline expanded card를 연다. `AppSession` private method를
   직접 호출하거나 provider transcript를 terminal에 write하는 우회는 금지한다. Swift는 `MaruMetalTerminalView`가
   평소 쓰는 mouse/key ABI 경로로만 down/up 및 `⌘↵`/`⌘L`을 보낸다.
 - 입력 좌표는 상수/창 크기 추측이 아니라 **직전에 paint·publish된** cold-start titlebar dock launcher, dock view-switcher, session-dock card tree와 detail action tree의
@@ -405,7 +440,7 @@ titlebar launcher와 dock slot만 관측하도록 한다.
   capture를 폐기하는지는 stale scenario에서 별도로 검증한다.
 - reveal 성공 scenario도 host의 외부 앱 열기를 호출하지 않는다. Swift가 smoke 모드에서 same
   `take_file_tree_external_open` consumer를 drain해 allowlisted fixture token과 횟수만 summary에 기록한다.
-- artifact는 ready session **목록**, loading/ready/stale detail의 **1920×1200 pt fixture 창** 제품 Metal PPM·PNG와 redacted key/value summary다. 한 프레임 뒤 종료하는
+- artifact는 ready session **목록**, loading/ready/stale inline expansion의 **1920×1200 pt fixture 창** 제품 Metal PPM·PNG와 redacted key/value summary다. 한 프레임 뒤 종료하는
   일반 `MARU_SCREENSHOT` 훅은 쓰지 않고, smoke process 안에서만 여러 completed Metal frame을 readback하는 capture
   sink를 쓴다. sink는 이미 paint·publish된 probe가 증명한 상태에서만 **다음 동일 frame**의 renderer output 복사를 요청한다.
   `resume-pointer` scenario는 card click 전의 ready 목록(서로 다른 synthetic record 세 개)·loading·ready, `detail-stale` scenario는 loading·stale를 각각 한 장씩 남긴다.

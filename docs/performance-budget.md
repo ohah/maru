@@ -60,6 +60,7 @@ PR 경로의 성능 workflow 실패는 머지를 막는다. 예산은 runner 변
 
 | 변경 경로 | `code` | `web` | `docs` |
 | --- | --- | --- | --- |
+| `docs/configuration.md` | ✓ | | |
 | `docs/**`, `*.md`, `LICENSE`, `.claude/**` | | | ✓ |
 | `src/**`, `tests/**`, `tools/**`, `terminfo/**`, `assets/**`, `build.zig`, `build.zig.zon` | ✓ | | |
 | `web/**` | | ✓ | |
@@ -67,6 +68,10 @@ PR 경로의 성능 workflow 실패는 머지를 막는다. 예산은 runner 변
 | 그 밖의 모든 경로(미분류) | ✓ | ✓ | |
 
 **workflow-level `paths` 필터는 여전히 쓰지 않는다.** required 워크플로에 `paths`를 두면 무관한 PR에서 워크플로 자체가 트리거되지 않아 required 컨텍스트가 영원히 pending으로 머지를 막는다. 반면 job-level `if:`로 건너뛴 job은 GitHub이 `conclusion=skipped`로 **보고**하고 branch protection은 이를 통과로 취급한다. 그래서 `pull_request` 트리거는 모든 PR에 열어 두고 job 단위로 거른다.
+
+**`docs/configuration.md`는 문서가 아니라 빌드 입력이다.** `build.zig`가 anonymous import로 등록하고 `src/config/schema.zig`가 `@embedFile("config_doc_md")`로 컴파일 타임에 박아, 키 표에서 행을 지우거나 range 숫자를 틀리게 적으면 `zig build test`의 doc-drift 테스트 두 개가 깨진다. 그래서 이 파일만 `code` 축이다 — 문서로 분류하면 그 두 테스트를 건너뛴다. 앞으로 문서를 빌드 입력으로 추가하면 이 표에도 함께 올린다.
+
+diff를 읽을 때 두 가지를 강제한다. `--no-renames`는 rename 감지를 꺼서 원본 삭제와 대상 추가를 **둘 다** 보게 한다(감지가 켜지면 새 경로만 나와 `src/foo.zig` → `docs/foo.md` 이동이 "문서 전용"으로 오판된다). `core.quotePath=false`는 비ASCII 경로가 `"docs/\355\225\234.md"`로 이스케이프돼 앞의 따옴표가 경로 매칭을 깨뜨리는 것을 막는다.
 
 판정이 없을 때 게이트가 조용히 열리면 안 되므로 모든 경로를 fail-safe로 잡는다. 분류기는 base/head가 없거나(push·schedule·수동) diff가 실패하면 전 영역 실행을 내보내고, 어느 패턴에도 안 걸린 새 경로도 전 영역으로 본다. 소비 job은 `needs.changes.result != 'success'`를 조건에 함께 넣어, `changes` job이 실패·오류로 끝나도 skip이 아니라 실행된다. `changes` 자체는 required 컨텍스트가 아니다. 분류기의 동작은 `mise run ci:changed-areas-check`(=`tools/ci/changed-areas.test.sh`)가 실제 git diff로 고정하며 매 PR의 `changes` job이 판정 전에 이 테스트를 먼저 돌린다.
 

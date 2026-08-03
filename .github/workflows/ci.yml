@@ -94,7 +94,8 @@ jobs:
 
   # AppSession 제품 glue는 macOS에서만 활성화된다. Ubuntu의 기본 test가 이 경로를 컴파일하지 않으므로
   # 이 PR job에서 provider 파일 무변경 계약과 16,384-row/1,000-event 탐색기 artifact를 실행한다.
-  # session-host 스위트는 컴파일이 압도적으로 무거워(아래 session-host-macos) 별도 job이 병렬로 소유한다.
+  # session-host 스위트는 컴파일이 압도적으로 무거워(아래 session-host-macos-debug·-releasefast)
+  # 별도 job이 병렬로 소유한다.
   file-explorer-macos:
     name: file explorer macOS product path
     needs: changes

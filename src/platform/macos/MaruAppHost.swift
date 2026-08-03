@@ -3885,14 +3885,24 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var agentSessionArchiveSmokeStaleRevealCount: UInt32 = 0
     private var agentSessionArchiveSmokeClaudeModelPresent: UInt32 = 0
     private var agentSessionArchiveSmokeTerminalInvariant = false
+    private var agentSessionArchiveSmokeScrollDispatched = false
+    private var agentSessionArchiveSmokeAnchorBeforePresent = false
+    private var agentSessionArchiveSmokeAnchorAfterPresent = false
+    private var agentSessionArchiveSmokeAnchorRawTopPreserved = false
+    private var agentSessionArchiveSmokeAnchorSnapshotReordered = false
+    private var agentSessionArchiveSmokeAnchorNewGenerationPublished = false
     private var agentSessionArchiveSmokeCaptureList = false
     private var agentSessionArchiveSmokeCaptureLoading = false
     private var agentSessionArchiveSmokeCaptureReady = false
     private var agentSessionArchiveSmokeCaptureStale = false
+    private var agentSessionArchiveSmokeCaptureScrollAnchorBefore = false
+    private var agentSessionArchiveSmokeCaptureScrollAnchorAfter = false
     private var agentSessionArchiveSmokeCaptureListArtifact = ""
     private var agentSessionArchiveSmokeCaptureLoadingArtifact = ""
     private var agentSessionArchiveSmokeCaptureReadyArtifact = ""
     private var agentSessionArchiveSmokeCaptureStaleArtifact = ""
+    private var agentSessionArchiveSmokeCaptureScrollAnchorBeforeArtifact = ""
+    private var agentSessionArchiveSmokeCaptureScrollAnchorAfterArtifact = ""
     private var isAgentSessionArchiveSmokeMode: Bool {
         smokeMode && ProcessInfo.processInfo.environment["MARU_AGENT_SESSION_ARCHIVE_SMOKE"] == "1"
     }
@@ -8115,6 +8125,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 pointerUp: { probe in
                     self.dispatchArchiveSmokePointerUp(probe, in: view, window: window)
                 },
+                preciseScroll: { probe in
+                    self.dispatchArchiveSmokePreciseScroll(probe, in: view, window: window)
+                },
                 shortcut: { shortcut in
                     self.dispatchArchiveSmokeShortcut(shortcut, in: view, window: window)
                 },
@@ -8140,6 +8153,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 replaceRevealSource: {
                     self.replaceArchiveSmokeRevealSource()
                 },
+                reorderArchiveSnapshot: {
+                    self.reorderArchiveSmokeSnapshot()
+                },
                 capture: { state in
                     self.captureAgentSessionArchiveSmokeFrame(state, in: surface)
                 }
@@ -8152,6 +8168,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             }
         }
         agentSessionArchiveSmokeTerminalInvariant = driver.terminalInvariantSatisfied
+        agentSessionArchiveSmokeScrollDispatched = driver.scrollDispatched
+        agentSessionArchiveSmokeAnchorBeforePresent = driver.anchorBeforePresent
+        agentSessionArchiveSmokeAnchorAfterPresent = driver.anchorAfterPresent
+        agentSessionArchiveSmokeAnchorRawTopPreserved = driver.anchorRawTopPreserved
+        agentSessionArchiveSmokeAnchorSnapshotReordered = driver.anchorSnapshotReordered
+        agentSessionArchiveSmokeAnchorNewGenerationPublished = driver.anchorNewGenerationPublished
         guard driver.finished else { return }
         agentSessionArchiveSmokeDriver = driver
         smokeTimer?.invalidate()
@@ -8191,6 +8213,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         case .loading: "loading"
         case .ready: "ready"
         case .stale: "stale"
+        case .scrollAnchorBefore: "scroll-anchor-before"
+        case .scrollAnchorAfter: "scroll-anchor-after"
         }
         let captureDir = root.appendingPathComponent("captures", isDirectory: true)
         var isDirectory: ObjCBool = false
@@ -8222,6 +8246,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         case .stale:
             agentSessionArchiveSmokeCaptureStale = true
             agentSessionArchiveSmokeCaptureStaleArtifact = artifact
+        case .scrollAnchorBefore:
+            agentSessionArchiveSmokeCaptureScrollAnchorBefore = true
+            agentSessionArchiveSmokeCaptureScrollAnchorBeforeArtifact = artifact
+        case .scrollAnchorAfter:
+            agentSessionArchiveSmokeCaptureScrollAnchorAfter = true
+            agentSessionArchiveSmokeCaptureScrollAnchorAfterArtifact = artifact
         }
         return true
     }
@@ -8300,6 +8330,38 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         return true
     }
 
+    /// Sends a precise scroll event through the exact `NSView.scrollWheel → handleScroll → Zig`
+    /// route. The event is intentionally created at a published card coordinate rather than
+    /// calling the controller directly, so AppKit's point/backing conversion remains part of
+    /// the AS3-c product gate.
+    private func dispatchArchiveSmokePreciseScroll(
+        _ probe: MaruAppHostAgentSessionArchiveSmokeProbe,
+        in view: MaruMetalTerminalView,
+        window: NSWindow
+    ) -> Bool {
+        guard probe.present != 0, probe.width_px > 0, probe.height_px > 0 else { return false }
+        let scale = window.backingScaleFactor
+        guard scale > 0 else { return false }
+        let backingX = CGFloat(probe.x_px + probe.width_px / 2)
+        let backingY = CGFloat(probe.y_px + probe.height_px / 2)
+        let local = NSPoint(x: backingX / scale, y: view.bounds.height - (backingY / scale))
+        let location = view.convert(local, to: nil)
+        guard let source = CGEventSource(stateID: .hidSystemState),
+              let event = CGEvent(
+                scrollWheelEvent2Source: source,
+                units: .pixel,
+                wheelCount: 1,
+                wheel1: -96,
+                wheel2: 0,
+                wheel3: 0
+              )
+        else { return false }
+        event.location = location
+        guard let nsEvent = NSEvent(cgEvent: event) else { return false }
+        view.scrollWheel(with: nsEvent)
+        return true
+    }
+
     /// Uses the same `MaruMetalTerminalView.keyDown` route as a physical shortcut.  The driver
     /// chooses only the documented action shortcut; Zig still resolves it through the published
     /// generation-bound table and rejects a disabled or stale detail action.
@@ -8366,6 +8428,30 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
               replacementURL.path.hasPrefix(homeURL.path + "/")
         else { return false }
         return Darwin.rename(replacementURL.path, sourceURL.path) == 0
+    }
+
+    /// The scroll-anchor fixture reorders a *different* synthetic archive record without
+    /// replacing either file. The expanded detail therefore retains its exact device/inode
+    /// identity; only the next completed projection changes order. This remains a closed smoke
+    /// seam: no caller-provided path is accepted and normal app runs cannot enter this branch.
+    private func reorderArchiveSmokeSnapshot() -> Bool {
+        guard isAgentSessionArchiveSmokeMode,
+              ProcessInfo.processInfo.environment["MARU_AGENT_SESSION_ARCHIVE_SMOKE_SCENARIO"] == "expanded-scroll-anchor",
+              let raw = ProcessInfo.processInfo.environment["MARU_AGENT_SESSION_ARCHIVE_SMOKE_REORDER_PATH"]
+        else { return false }
+        let candidate = URL(fileURLWithPath: raw).standardizedFileURL
+        let home = URL(fileURLWithPath: NSHomeDirectory()).standardizedFileURL
+        guard candidate.path.hasPrefix(home.path + "/"),
+              candidate.deletingLastPathComponent() == home.appendingPathComponent(".codex/sessions/2026/08/03", isDirectory: true),
+              candidate.lastPathComponent == "rollout-fixture-scroll-anchor.jsonl",
+              FileManager.default.fileExists(atPath: candidate.path)
+        else { return false }
+        do {
+            try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: 60)], ofItemAtPath: candidate.path)
+            return true
+        } catch {
+            return false
+        }
     }
 
     private func sendKeyEvent(_ event: MaruAppHostKeyEvent) {
@@ -9197,14 +9283,24 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         agent_session_archive_smoke_stale_reveal_count=\(agentSessionArchiveSmokeStaleRevealCount)
         agent_session_archive_smoke_claude_model_present=\(agentSessionArchiveSmokeClaudeModelPresent)
         agent_session_archive_smoke_terminal_invariant=\(agentSessionArchiveSmokeTerminalInvariant)
+        agent_session_archive_smoke_scroll_dispatched=\(agentSessionArchiveSmokeScrollDispatched)
+        agent_session_archive_smoke_anchor_before_present=\(agentSessionArchiveSmokeAnchorBeforePresent)
+        agent_session_archive_smoke_anchor_after_present=\(agentSessionArchiveSmokeAnchorAfterPresent)
+        agent_session_archive_smoke_anchor_raw_top_preserved=\(agentSessionArchiveSmokeAnchorRawTopPreserved)
+        agent_session_archive_smoke_anchor_snapshot_reordered=\(agentSessionArchiveSmokeAnchorSnapshotReordered)
+        agent_session_archive_smoke_anchor_new_generation_published=\(agentSessionArchiveSmokeAnchorNewGenerationPublished)
         agent_session_archive_smoke_capture_list=\(agentSessionArchiveSmokeCaptureList)
         agent_session_archive_smoke_capture_loading=\(agentSessionArchiveSmokeCaptureLoading)
         agent_session_archive_smoke_capture_ready=\(agentSessionArchiveSmokeCaptureReady)
         agent_session_archive_smoke_capture_stale=\(agentSessionArchiveSmokeCaptureStale)
+        agent_session_archive_smoke_capture_scroll_anchor_before=\(agentSessionArchiveSmokeCaptureScrollAnchorBefore)
+        agent_session_archive_smoke_capture_scroll_anchor_after=\(agentSessionArchiveSmokeCaptureScrollAnchorAfter)
         agent_session_archive_smoke_capture_list_artifact=\(agentSessionArchiveSmokeCaptureListArtifact)
         agent_session_archive_smoke_capture_loading_artifact=\(agentSessionArchiveSmokeCaptureLoadingArtifact)
         agent_session_archive_smoke_capture_ready_artifact=\(agentSessionArchiveSmokeCaptureReadyArtifact)
         agent_session_archive_smoke_capture_stale_artifact=\(agentSessionArchiveSmokeCaptureStaleArtifact)
+        agent_session_archive_smoke_capture_scroll_anchor_before_artifact=\(agentSessionArchiveSmokeCaptureScrollAnchorBeforeArtifact)
+        agent_session_archive_smoke_capture_scroll_anchor_after_artifact=\(agentSessionArchiveSmokeCaptureScrollAnchorAfterArtifact)
         mermaid_pending_replies=\(mermaidReplyDelivery.count)
         mermaid_product_tick_calls=\(mermaidProductTick.tickCalls)
         mermaid_product_work_ticks=\(mermaidProductTick.workTicks)

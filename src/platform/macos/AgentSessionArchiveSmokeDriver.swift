@@ -17,6 +17,7 @@ final class AgentSessionArchiveSmokeDriver {
         case detailStale = "detail-stale"
         case detailCloseReopen = "detail-close-reopen"
         case snapshotReplacePointer = "snapshot-replace-pointer"
+        case expandedScrollAnchor = "expanded-scroll-anchor"
         case claudeResumePointer = "claude-resume-pointer"
 
         init?(environment: [String: String] = ProcessInfo.processInfo.environment) {
@@ -38,6 +39,8 @@ final class AgentSessionArchiveSmokeDriver {
         case loading
         case ready
         case stale
+        case scrollAnchorBefore
+        case scrollAnchorAfter
     }
 
     /// A narrow read-only witness for AS4-d. The fixture never receives a Term pointer or any
@@ -66,6 +69,11 @@ final class AgentSessionArchiveSmokeDriver {
         case waitForSnapshotReplacement
         case releaseStalePointer
         case waitForStalePointer
+        case scrollExpandedAnchor
+        case waitForExpandedAnchorBefore
+        case startExpandedAnchorRefresh
+        case waitForExpandedAnchorGate
+        case waitForExpandedAnchorAfter
         case invokeAction
         case waitForAction
         case succeeded
@@ -93,8 +101,17 @@ final class AgentSessionArchiveSmokeDriver {
     /// sends down before replacement and the matching up only after the normal product refresh
     /// has invalidated the prior tree.
     private var stalePointerProbe: MaruAppHostAgentSessionArchiveSmokeProbe?
+    /// Both are raw, un-clipped outer-card rects. A clipped visible rect would be pinned to the
+    /// content edge and falsely pass even if refresh lost the intra-card scroll position.
+    private var expandedAnchorBefore: MaruAppHostAgentSessionArchiveSmokeProbe?
     private var terminalBaseline: TerminalInvariant?
     private(set) var terminalInvariantSatisfied = false
+    private(set) var scrollDispatched = false
+    private(set) var anchorBeforePresent = false
+    private(set) var anchorAfterPresent = false
+    private(set) var anchorRawTopPreserved = false
+    private(set) var anchorSnapshotReordered = false
+    private(set) var anchorNewGenerationPublished = false
 
     init?(
         scenario: Scenario? = Scenario(environment: ProcessInfo.processInfo.environment),
@@ -131,6 +148,7 @@ final class AgentSessionArchiveSmokeDriver {
         click: (MaruAppHostAgentSessionArchiveSmokeProbe) -> Bool,
         pointerDown: (MaruAppHostAgentSessionArchiveSmokeProbe) -> Bool,
         pointerUp: (MaruAppHostAgentSessionArchiveSmokeProbe) -> Bool,
+        preciseScroll: (MaruAppHostAgentSessionArchiveSmokeProbe) -> Bool,
         shortcut: (Shortcut) -> Bool,
         fakeResumeVerdict: () -> Bool,
         revealAllowedCount: () -> UInt32,
@@ -138,6 +156,7 @@ final class AgentSessionArchiveSmokeDriver {
         staleRevealCount: () -> UInt32,
         claudeModelMetadataPresent: () -> Bool,
         replaceRevealSource: () -> Bool,
+        reorderArchiveSnapshot: () -> Bool,
         capture: (CaptureState) -> Bool
     ) {
         guard !finished else { return }
@@ -257,6 +276,11 @@ final class AgentSessionArchiveSmokeDriver {
             }
             if scenario == .snapshotReplacePointer {
                 stage = .startSnapshotRefresh
+                paintRequested = true
+                return
+            }
+            if scenario == .expandedScrollAnchor {
+                stage = .scrollExpandedAnchor
                 paintRequested = true
                 return
             }
@@ -396,6 +420,90 @@ final class AgentSessionArchiveSmokeDriver {
             terminalInvariantSatisfied = true
             stage = .succeeded
 
+        case .scrollExpandedAnchor:
+            // Wheel coordinates come from the already-painted ordinary card capability. The
+            // closure sends a genuine NSView scrollWheel event; it does not call Zig's scroll
+            // method or mutate the dock state through a test seam.
+            guard let card = probe(MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_DOCK_CARD),
+                  card.present != 0, card.enabled != 0,
+                  preciseScroll(card)
+            else {
+                fail("expanded_anchor_scroll")
+                return
+            }
+            scrollDispatched = true
+            stage = .waitForExpandedAnchorBefore
+            paintRequested = true
+
+        case .waitForExpandedAnchorBefore:
+            guard let anchor = probe(MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_EXPANDED_SCROLL_ANCHOR),
+                  anchor.request_id != 0, anchor.state == 2, anchor.present != 0,
+                  anchor.generation != 0,
+                  anchor.height_px > 0
+            else { return }
+            expandedAnchorBefore = anchor
+            anchorBeforePresent = true
+            if !capture(.scrollAnchorBefore) {
+                fail("capture_expanded_anchor_before")
+                return
+            }
+            stage = .startExpandedAnchorRefresh
+            paintRequested = true
+
+        case .startExpandedAnchorRefresh:
+            // Normal refresh is the only worker admission. The bounded gate simply makes the
+            // retained completed tree observable before the fixture changes the independent
+            // record's mtime to reorder the next immutable snapshot.
+            guard let refresh = probe(MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_REFRESH),
+                  refresh.present != 0, refresh.enabled != 0,
+                  setScanGate(true), click(refresh)
+            else {
+                fail("expanded_anchor_refresh")
+                return
+            }
+            stage = .waitForExpandedAnchorGate
+            paintRequested = true
+
+        case .waitForExpandedAnchorGate:
+            guard scanGateReached(), let before = expandedAnchorBefore,
+                  let retained = probe(MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_EXPANDED_SCROLL_ANCHOR),
+                  retained.request_id == before.request_id, retained.present != 0,
+                  retained.generation == before.generation,
+                  retained.y_px == before.y_px
+            else { return }
+            guard reorderArchiveSnapshot(), setScanGate(false) else {
+                fail("expanded_anchor_reorder_or_release")
+                return
+            }
+            anchorSnapshotReordered = true
+            stage = .waitForExpandedAnchorAfter
+            paintRequested = true
+
+        case .waitForExpandedAnchorAfter:
+            guard let before = expandedAnchorBefore,
+                  let after = probe(MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_EXPANDED_SCROLL_ANCHOR),
+                  after.request_id == before.request_id, after.state == 2, after.present != 0,
+                  after.generation != before.generation,
+                  after.height_px == before.height_px
+            else { return }
+            anchorAfterPresent = true
+            anchorNewGenerationPublished = true
+            guard after.y_px == before.y_px else {
+                fail("expanded_anchor_raw_top_changed")
+                return
+            }
+            guard matchesTerminalBaseline(sessionInvariant()) else {
+                fail("expanded_anchor_changed_terminal")
+                return
+            }
+            anchorRawTopPreserved = true
+            if !capture(.scrollAnchorAfter) {
+                fail("capture_expanded_anchor_after")
+                return
+            }
+            terminalInvariantSatisfied = true
+            stage = .succeeded
+
         case .invokeAction:
             switch scenario {
             case .resumePointer, .claudeResumePointer:
@@ -422,7 +530,7 @@ final class AgentSessionArchiveSmokeDriver {
                       let detail = probe(MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_REVEAL_LOG),
                       detail.present != 0, detail.enabled != 0,
                       click(detail) else { return }
-            case .detailStale, .detailCloseReopen, .snapshotReplacePointer:
+            case .detailStale, .detailCloseReopen, .snapshotReplacePointer, .expandedScrollAnchor:
                 return
             }
             stage = .waitForAction
@@ -440,7 +548,7 @@ final class AgentSessionArchiveSmokeDriver {
                 guard revealAllowedCount() == 0,
                       revealRejectedCount() == 0,
                       staleRevealCount() == 1 else { return }
-            case .detailStale, .detailCloseReopen, .snapshotReplacePointer:
+            case .detailStale, .detailCloseReopen, .snapshotReplacePointer, .expandedScrollAnchor:
                 return
             }
             stage = .succeeded

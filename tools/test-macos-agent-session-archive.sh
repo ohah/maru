@@ -18,6 +18,11 @@ claude_path="$home/.claude/projects/fixture-project/fixture-claude.jsonl"
 # scanner candidate before the stale scenario. A non-JSONL temporary name keeps the published
 # archive card bound to `source_path`; rename then gives the replacement its JSONL target name.
 replacement_path="$home/.codex/sessions/2026/08/03/.rollout-replacement.tmp"
+# This record is deliberately distinct from the opened source. The scroll-anchor scenario only
+# changes its mtime while the normal refresh worker is gated, so the expanded source retains its
+# inode and the replacement projection must exercise identity-anchor restoration rather than the
+# stale-source fallback.
+reorder_path="$home/.codex/sessions/2026/08/03/rollout-fixture-scroll-anchor.jsonl"
 summary="$workspace/zig-out/maru-macos-app/app.summary.txt"
 
 case "$root" in
@@ -43,7 +48,10 @@ run_scenario() {
     rm -f "$marker"
     # Each cold process starts from a new pair: a prior atomic replacement cannot leak into the
     # next scenario, and the temporary sibling remains outside the scanner's JSONL candidate set.
-    rm -f "$source_path" "$replacement_path" "$claude_path"
+    rm -f "$source_path" "$replacement_path" "$claude_path" "$reorder_path"
+    for index in 1 2 3 4 5; do
+        rm -f "$home/.codex/sessions/2026/08/03/rollout-fixture-scroll-$index.jsonl"
+    done
     case "$provider" in
         codex)
             cp tests/fixtures/agent-session-archive/codex-ready.jsonl "$source_path"
@@ -55,6 +63,20 @@ run_scenario() {
             cp tests/fixtures/agent-session-archive/codex-list-second.jsonl "$home/.codex/sessions/2026/08/03/rollout-fixture-list-second.jsonl"
             cp tests/fixtures/agent-session-archive/codex-list-third.jsonl "$home/.codex/sessions/2026/08/03/rollout-fixture-list-third.jsonl"
             touch -t 202001010000 "$home/.codex/sessions/2026/08/03/rollout-fixture-list-second.jsonl" "$home/.codex/sessions/2026/08/03/rollout-fixture-list-third.jsonl"
+            if [ "$scenario" = expanded-scroll-anchor ]; then
+                # Keep the source record newest at initial scan. Eight distinct records make the
+                # expanded row scrollable in the real 1920×960 AppKit viewport; ids differ so
+                # scanner dedup cannot collapse the fixture back to a non-scrollable list.
+                cp tests/fixtures/agent-session-archive/codex-list-second.jsonl "$reorder_path"
+                sed -i '' 's/fixture-codex-list-second/fixture-codex-scroll-anchor/' "$reorder_path"
+                for index in 1 2 3 4 5; do
+                    path="$home/.codex/sessions/2026/08/03/rollout-fixture-scroll-$index.jsonl"
+                    cp tests/fixtures/agent-session-archive/codex-list-third.jsonl "$path"
+                    sed -i '' "s/fixture-codex-list-third/fixture-codex-scroll-$index/" "$path"
+                    touch -t 202001010000 "$path"
+                done
+                touch -t 202001010000 "$reorder_path"
+            fi
             ;;
         claude)
             cp tests/fixtures/agent-session-archive/claude-ready.jsonl "$claude_path"
@@ -74,6 +96,7 @@ run_scenario() {
     MARU_AGENT_SESSION_ARCHIVE_SMOKE_FAKE_CLAUDE="$bin/claude" \
     MARU_AGENT_SESSION_ARCHIVE_SMOKE_REVEAL_PATH="$source_path" \
     MARU_AGENT_SESSION_ARCHIVE_SMOKE_REPLACEMENT_PATH="$replacement_path" \
+    MARU_AGENT_SESSION_ARCHIVE_SMOKE_REORDER_PATH="$reorder_path" \
     MARU_AGENT_SESSION_ARCHIVE_SMOKE_ARTIFACT_DIR="$root" \
     "$app_path"
     test -f "$summary"
@@ -150,6 +173,21 @@ grep -Eq '^agent_session_archive_smoke_reveal_rejected_count=0$' "$root/snapshot
 grep -Eq '^agent_session_archive_smoke_stale_reveal_count=0$' "$root/snapshot-replace-pointer.summary.txt"
 grep -Eq '^agent_session_archive_smoke_terminal_invariant=true$' "$root/snapshot-replace-pointer.summary.txt"
 
+run_scenario expanded-scroll-anchor
+grep -Eq '^agent_session_archive_smoke_stage=succeeded$' "$root/expanded-scroll-anchor.summary.txt"
+grep -Eq '^agent_session_archive_smoke_scenario=expanded-scroll-anchor$' "$root/expanded-scroll-anchor.summary.txt"
+grep -Eq '^agent_session_archive_smoke_scroll_dispatched=true$' "$root/expanded-scroll-anchor.summary.txt"
+grep -Eq '^agent_session_archive_smoke_anchor_before_present=true$' "$root/expanded-scroll-anchor.summary.txt"
+grep -Eq '^agent_session_archive_smoke_anchor_after_present=true$' "$root/expanded-scroll-anchor.summary.txt"
+grep -Eq '^agent_session_archive_smoke_anchor_raw_top_preserved=true$' "$root/expanded-scroll-anchor.summary.txt"
+grep -Eq '^agent_session_archive_smoke_anchor_snapshot_reordered=true$' "$root/expanded-scroll-anchor.summary.txt"
+grep -Eq '^agent_session_archive_smoke_anchor_new_generation_published=true$' "$root/expanded-scroll-anchor.summary.txt"
+grep -Eq '^agent_session_archive_smoke_terminal_invariant=true$' "$root/expanded-scroll-anchor.summary.txt"
+grep -Eq '^agent_session_archive_smoke_capture_scroll_anchor_before=true$' "$root/expanded-scroll-anchor.summary.txt"
+grep -Eq '^agent_session_archive_smoke_capture_scroll_anchor_after=true$' "$root/expanded-scroll-anchor.summary.txt"
+grep -Eq '^agent_session_archive_smoke_capture_scroll_anchor_before_artifact=captures/expanded-scroll-anchor-scroll-anchor-before\.ppm$' "$root/expanded-scroll-anchor.summary.txt"
+grep -Eq '^agent_session_archive_smoke_capture_scroll_anchor_after_artifact=captures/expanded-scroll-anchor-scroll-anchor-after\.ppm$' "$root/expanded-scroll-anchor.summary.txt"
+
 run_scenario reveal-recheck-pointer
 grep -Eq '^agent_session_archive_smoke_stage=succeeded$' "$root/reveal-recheck-pointer.summary.txt"
 grep -Eq '^agent_session_archive_smoke_scenario=reveal-recheck-pointer$' "$root/reveal-recheck-pointer.summary.txt"
@@ -169,7 +207,7 @@ grep -Eq '^agent_session_archive_smoke_stale_reveal_count=0$' "$root/claude-resu
 # The two sentinel cold processes cover every product detail state without making every action
 # variant perform expensive Metal readback. `sips` only repackages renderer-written PPM so the
 # resulting PNG is reviewable in a PR; it never captures an AppKit view through another path.
-for capture in resume-pointer-list resume-pointer-loading resume-pointer-ready detail-stale-loading detail-stale-stale; do
+for capture in resume-pointer-list resume-pointer-loading resume-pointer-ready detail-stale-loading detail-stale-stale expanded-scroll-anchor-scroll-anchor-before expanded-scroll-anchor-scroll-anchor-after; do
     ppm="$root/captures/$capture.ppm"
     png="$root/captures/$capture.png"
     test -s "$ppm"

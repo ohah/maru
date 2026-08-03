@@ -30,11 +30,63 @@ pub const Artifact = struct {
     }
 };
 
+/// Shapes every non-icon Session Dock text op into one immutable artifact. Registered SVG icon
+/// ops stay on the legacy synthesized-glyph path until their vector texture migration lands;
+/// treating their PUA values as system UI text would silently erase affordances.
+pub fn shapeOps(
+    allocator: std.mem.Allocator,
+    registry: *renderer.FontIdentityRegistry,
+    ops: []const chrome.draw.Op,
+    tk: *const chrome.Tokens,
+    cell_width_px: u32,
+    scale_milli: u32,
+) !Artifact {
+    var records: std.ArrayList(renderer.ShapedGlyphRecord) = .empty;
+    errdefer records.deinit(allocator);
+    var placements: std.ArrayList(Placement) = .empty;
+    errdefer placements.deinit(allocator);
+    for (ops) |op| switch (op) {
+        .text => |text| {
+            if (text.wide_icons or text.origin.x < 0 or text.origin.y < 0) continue;
+            const max_width = std.math.mul(u32, text.max_cols, cell_width_px) catch continue;
+            for (text.runs) |run| {
+                var shaped = shapeRun(allocator, registry, run.text, text.text_role, text.origin, max_width, packRgb(tk.get(text.role)), scale_milli) catch continue;
+                defer shaped.deinit(allocator);
+                const base = records.items.len;
+                try records.appendSlice(allocator, shaped.records);
+                try placements.appendSlice(allocator, shaped.placements);
+                for (records.items[base..], base..) |*record, index| {
+                    record.row = @intCast(index / 256);
+                    record.col = @intCast(index % 256);
+                }
+            }
+        },
+        else => {},
+    };
+    return .{ .records = try records.toOwnedSlice(allocator), .placements = try placements.toOwnedSlice(allocator) };
+}
+
+pub fn emptyDrawList(allocator: std.mem.Allocator, glyph_count: usize) !renderer.DrawList {
+    const rows: u16 = @intCast(@max(@as(usize, 1), (glyph_count + 255) / 256));
+    return .{
+        .size = .{ .cols = 256, .rows = rows },
+        .cursor = .{ .visible = false },
+        .dirty = .{ .start_row = 0, .end_row = rows - 1 },
+        .cells = try allocator.alloc(renderer.DrawCell, 0),
+        .grapheme_pool = try allocator.alloc(u32, 0),
+        .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
+    };
+}
+
 fn weight(role: chrome.ui.typography.ChromeTextRole) u32 {
     return switch (chrome.ui.typography.token(role).weight) {
         .regular => 0,
         .medium, .semibold => 1,
     };
+}
+
+fn packRgb(rgb: maru.color.Rgb) u32 {
+    return (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
 }
 
 /// Shapes exactly one semantic run.  `origin` is the component's final local line-box origin;

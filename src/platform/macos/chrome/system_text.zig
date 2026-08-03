@@ -169,6 +169,46 @@ pub fn prepareRequest(
     return .{ .fingerprint = fingerprint, .runs = try runs.toOwnedSlice(allocator) };
 }
 
+test "prepareRequest keeps a Korean button label on measured text path while excluding its SVG icon" {
+    const allocator = std.testing.allocator;
+    const icon_runs = [_]chrome.draw.Run{.{ .text = "\u{F000C}" }};
+    const label_runs = [_]chrome.draw.Run{.{ .text = "터미널에서 이어하기" }};
+    const ops = [_]chrome.draw.Op{
+        .{ .text = .{
+            .origin = .{ .x = 24, .y = 8 },
+            .runs = &icon_runs,
+            .role = .surface_fg,
+            .text_role = .button_label,
+            .max_cols = 2,
+            .wide_icons = true,
+        } },
+        .{ .text = .{
+            .origin = .{ .x = 48, .y = 8 },
+            .runs = &label_runs,
+            .role = .surface_fg,
+            .text_role = .button_label,
+            .max_cols = 18,
+        } },
+    };
+    const tk = chrome.Tokens.rich(.{
+        .foreground = .{ .r = 240, .g = 240, .b = 240 },
+        .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
+        .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
+        .sidebar_active = .{ .r = 80, .g = 80, .b = 80 },
+        .search_match = .{ .r = 1, .g = 2, .b = 3 },
+        .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
+        .selection = .{ .r = 7, .g = 8, .b = 9 },
+        .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .accent = .{ .r = 13, .g = 14, .b = 15 },
+    });
+    var request = try prepareRequest(allocator, 17, &ops, &tk, 8);
+    defer request.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), request.runs.len);
+    try std.testing.expectEqualStrings("터미널에서 이어하기", request.runs[0].text);
+    try std.testing.expectEqual(chrome.ui.typography.ChromeTextRole.button_label, request.runs[0].role);
+    try std.testing.expectEqual(@as(u32, 18 * 8), request.runs[0].max_width_px);
+}
+
 /// Calls CoreText without touching the renderer.  `Request` owns every input byte, so this is
 /// safe to run in a detached worker under CoreText's documented thread-safety contract.
 pub fn shapeRequest(allocator: std.mem.Allocator, request: *const Request, scale_milli: u32) !UnresolvedArtifact {

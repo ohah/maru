@@ -357,25 +357,41 @@ const Writer = struct {
             .stale => try self.text(detail, 2, "안전하게 재개하거나 로그를 열 수 없습니다.", .muted_fg, .body, detail_lines, false, false),
             .unavailable => try self.text(detail, 2, "원본을 읽을 수 없습니다.", .muted_fg, .body, detail_lines, false, false),
         }
-        try self.action(find(snapshot, build.NodeIds.resumeAction(index)) orelse return error.MissingRect, resume_icon ++ " 터미널에서 이어하기");
-        try self.action(find(snapshot, build.NodeIds.reveal(index)) orelse return error.MissingRect, reveal_icon ++ " 로그 보기");
+        try self.action(find(snapshot, build.NodeIds.resumeAction(index)) orelse return error.MissingRect, resume_icon, "터미널에서 이어하기");
+        try self.action(find(snapshot, build.NodeIds.reveal(index)) orelse return error.MissingRect, reveal_icon, "로그 보기");
         if (expanded_props.focus_live_enabled)
-            try self.action(find(snapshot, build.NodeIds.focusLive(index)) orelse return error.MissingRect, "열린 세션으로 이동");
+            try self.action(find(snapshot, build.NodeIds.focusLive(index)) orelse return error.MissingRect, null, "열린 세션으로 이동");
     }
 
-    fn action(self: *Writer, rect: tree.RectEntry, source: []const u8) ViewError!void {
+    /// The action label must not inherit the SVG icon's legacy cell lowering.  Combining both
+    /// into one `wide_icons` run made Korean labels bypass the detached CoreText worker, so
+    /// their advance, ellipsis and line box were all terminal-font guesses.  Keep the existing
+    /// registered icon path as a separate op while B1-button-b moves its final-pixel placement
+    /// into the same worker artifact as the label.
+    fn action(self: *Writer, rect: tree.RectEntry, icon: ?[]const u8, label: []const u8) ViewError!void {
         const cw = self.props.cell_width_px;
         const ch = self.props.cell_height_px;
         if (cw == 0 or ch == 0) return;
+        const icon_cols: u16 = if (icon != null) 2 else 0;
+        const icon_gap_cols: u16 = if (icon != null) 1 else 0;
         const available_px = rect.rect.width - @as(f32, @floatFromInt(cw * 2));
         if (available_px <= 0) return;
         const max_cols: u16 = @intFromFloat(@floor(available_px / @as(f32, @floatFromInt(cw))));
-        const planned = plannedCols(source, max_cols);
-        if (planned == 0) return;
-        const text_width: f32 = @floatFromInt(@as(u32, planned) * cw);
-        const x = rect.rect.x + (rect.rect.width - text_width) / 2;
-        const y = rect.rect.y + (rect.rect.height - @as(f32, @floatFromInt(ch))) / 2;
-        if (!loweredTextCellFitsClip(rect, y, ch)) return;
+        const reserved_cols = icon_cols + icon_gap_cols;
+        if (max_cols <= reserved_cols) return;
+        const label_max_cols = max_cols - reserved_cols;
+        const planned_label_cols = plannedCols(label, label_max_cols);
+        if (planned_label_cols == 0) return;
+        // B1-button-a deliberately uses this conservative icon-slot plan only to position the
+        // still-cell-backed SVG. The adjacent label is a normal semantic text op, so CoreText
+        // owns its proportional Korean/fallback advance and ellipsis instead of this estimate.
+        const group_cols = reserved_cols + planned_label_cols;
+        const group_width: f32 = @floatFromInt(@as(u32, group_cols) * cw);
+        const x = rect.rect.x + (rect.rect.width - group_width) / 2;
+        const icon_y = rect.rect.y + (rect.rect.height - @as(f32, @floatFromInt(ch))) / 2;
+        const line_h: f32 = @floatFromInt(typography.lineHeightPx(.button_label, effectiveScale(self.props.scale_milli)));
+        if (rect.rect.height < line_h) return;
+        const label_y = rect.rect.y + (rect.rect.height - line_h) / 2;
         const enabled = rect.action != null and rect.action.?.enabled;
         const foreground: tokens.ColorRole = if (!enabled) .muted_fg else switch (rect.visual) {
             .button => |visual| switch (visual.variant) {
@@ -386,7 +402,11 @@ const Writer = struct {
             // stale/malformed published snapshot readable rather than guessing a Card variant.
             else => .surface_fg,
         };
-        try self.emit(x, y, source, max_cols, .head, foreground, .button_label, true, true);
+        if (icon) |source| {
+            if (loweredTextCellFitsClip(rect, icon_y, ch))
+                try self.emit(x, icon_y, source, icon_cols, .head, foreground, .button_label, true, false);
+        }
+        try self.emit(x + @as(f32, @floatFromInt(@as(u32, reserved_cols) * cw)), label_y, label, label_max_cols, .head, foreground, .button_label, false, true);
     }
 
     fn plannedCols(source: []const u8, max_cols: u16) u16 {
@@ -788,6 +808,79 @@ test "SessionDock Retina controls centre measured line boxes instead of terminal
     try std.testing.expectEqual(@as(i32, @intFromFloat(@floor(scope.rect.y + (scope.rect.height - control_h) / 2))), workspace_y orelse return error.TestUnexpectedResult);
     const expected_count_y = (count_pill_y orelse return error.TestUnexpectedResult) + @as(i32, @intCast((props.cell_height_px * 2 - typography.lineHeightPx(.control, props.scale_milli)) / 2));
     try std.testing.expectEqual(expected_count_y, count_y orelse return error.TestUnexpectedResult);
+}
+
+test "SessionDock action keeps SVG icon separate from measured Korean label" {
+    const props = types.Props{
+        .viewport_px = .{ .width = 640, .height = 960 },
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .snapshot_generation = 9,
+        .displayed_count = 1,
+        .expanded_identity = 7,
+        .items = &.{.{ .card = .{
+            .identity = 7,
+            .provider = .codex,
+            .title = "measured action",
+            .summary = "summary",
+            .metadata = "metadata",
+            .expanded = .{ .state = .ready, .resume_enabled = true, .reveal_enabled = true },
+        } }},
+    };
+    var nodes: [16]tree.UiNode = undefined;
+    var entries: [17]tree.RectEntry = undefined;
+    var layout_items: [17]@import("../../ui/layout.zig").Item = undefined;
+    var flex_scratch: [17]@import("../../ui/layout.zig").FlexScratch = undefined;
+    var child_rects: [17]@import("../../ui/layout.zig").UiRect = undefined;
+    var actions: [8]@import("ids.zig").Entry = undefined;
+    const frame = try build.build(props, .{
+        .nodes = &nodes,
+        .entries = &entries,
+        .layout_items = &layout_items,
+        .flex_scratch = &flex_scratch,
+        .child_rects = &child_rects,
+        .actions = &actions,
+    });
+    const tk = tokens.Tokens.rich(.{
+        .foreground = .{ .r = 240, .g = 240, .b = 240 },
+        .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
+        .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
+        .sidebar_active = .{ .r = 80, .g = 80, .b = 80 },
+        .search_match = .{ .r = 1, .g = 2, .b = 3 },
+        .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
+        .selection = .{ .r = 7, .g = 8, .b = 9 },
+        .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .accent = .{ .r = 13, .g = 14, .b = 15 },
+    });
+    var ops: [48]draw.Op = undefined;
+    var runs: [48]draw.Run = undefined;
+    var text_bytes: [1024]u8 = undefined;
+    const out = try view(props, frame, .{}, &tk, .{ .ops = &ops, .runs = &runs, .text_bytes = &text_bytes });
+    var icon_x: ?i32 = null;
+    var label_x: ?i32 = null;
+    var label_y: ?i32 = null;
+    var label_cols: ?u16 = null;
+    for (out.ops) |op| switch (op) {
+        .text => |text| for (text.runs) |run| {
+            if (std.mem.eql(u8, run.text, resume_icon)) {
+                try std.testing.expect(text.wide_icons);
+                icon_x = text.origin.x;
+            }
+            if (std.mem.eql(u8, run.text, "터미널에서 이어하기")) {
+                try std.testing.expect(!text.wide_icons);
+                try std.testing.expectEqual(typography.ChromeTextRole.button_label, text.text_role);
+                label_x = text.origin.x;
+                label_y = text.origin.y;
+                label_cols = text.max_cols;
+            }
+        },
+        else => {},
+    };
+    const action_rect = find(frame.tree, build.NodeIds.resumeAction(0)) orelse return error.TestUnexpectedResult;
+    try std.testing.expect((label_x orelse return error.TestUnexpectedResult) > (icon_x orelse return error.TestUnexpectedResult));
+    try std.testing.expect((label_cols orelse 0) < @as(u16, @intFromFloat(@floor(action_rect.rect.width / @as(f32, @floatFromInt(props.cell_width_px))))));
+    const line_h: f32 = @floatFromInt(typography.lineHeightPx(.button_label, props.scale_milli));
+    try std.testing.expectEqual(@as(i32, @intFromFloat(@floor(action_rect.rect.y + (action_rect.rect.height - line_h) / 2))), label_y orelse return error.TestUnexpectedResult);
 }
 
 test "SessionDock initial loading paints inert three-line skeleton cards" {

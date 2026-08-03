@@ -31430,8 +31430,11 @@ pub const AppSession = struct {
         // quad and title/summary/provider/metadata/disclosure text runs per projection item, or nine inert initial-loading
         // skeleton stripes. Keep the placeholder budget explicit so the first scan cannot
         // silently drop its loading affordance through a fixed-capacity overflow.
-        const ops = arena.alloc(chrome.draw.Op, 21 + items.len * 6 + expansion_actions + expansion_turns * 2 + 4) catch return;
-        const runs = arena.alloc(chrome.draw.Run, 9 + items.len * 5 + expansion_actions + expansion_turns * 2 + 4) catch return;
+        // B1-button-a emits the registered SVG icon and the measured action label as two
+        // semantic ops. Reserve both before the view runs: dropping only the label on a full
+        // fixed buffer would leave an enabled-looking icon with no command text.
+        const ops = arena.alloc(chrome.draw.Op, 21 + items.len * 6 + expansion_actions * 2 + expansion_turns * 2 + 4) catch return;
+        const runs = arena.alloc(chrome.draw.Run, 9 + items.len * 5 + expansion_actions * 2 + expansion_turns * 2 + 4) catch return;
         const text_bytes = arena.alloc(u8, 1024 + items.len * 1024 + expansion_turns * 1024) catch return;
         const tokens = self.buildChromeTokens();
         const draws = chrome.components.session_dock.view.view(props, frame, self.agent_session_dock_interaction, &tokens, .{

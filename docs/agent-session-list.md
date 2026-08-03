@@ -99,11 +99,13 @@ line height와 screenshot E2E)을 먼저 설계한 뒤 별도 B1 slice에서 다
 
 #### 2.1.2 측정형 Button·action text 계약 (B1-button)
 
-`Button`은 click 가능한 `Card`의 별칭이 아니다. `UiNode.button`은 `primary`/`secondary` visual,
-enabled/disabled state, 한 개의 published `UiAction`, `label`과 선택적 leading icon slot을 가진
-독립 semantic leaf다. `Card`는 정보 표면과 disclosure container를, `Button`은 명시 command target을
-표현한다. generic tree/paint/interaction은 둘의 rect·clip·pointer capture·disabled inertness를 같은
-completed snapshot에서 소비하되, action의 색·border·focus/pressed feedback을 card variant에서
+`Button`은 click 가능한 `Card`의 별칭이 아니다. 최종 `Button` 계약은 `primary`/`secondary` visual,
+enabled/disabled state, 한 개의 published `UiAction`, `label`과 선택적 leading icon slot을 가진 독립
+semantic leaf다. 현재 `UiNode.button` 구조 slice는 visual·action·border box까지 소유하고 label/icon은
+component view의 immutable draw op로 분리해 둔다. label/content DTO를 tree leaf로 승격하기 전까지 이
+경계를 완료라고 부르지 않는다. `Card`는 정보 표면과 disclosure container를, `Button`은 명시 command
+target을 표현한다. generic tree/paint/interaction은 둘의 rect·clip·pointer capture·disabled inertness를
+같은 completed snapshot에서 소비하되, action의 색·border·focus/pressed feedback을 card variant에서
 추론하지 않는다.
 
 - Button content는 fallback cell 수가 아니라 platform text artifact가 반환한 **actual glyph advance**로
@@ -124,6 +126,22 @@ completed snapshot에서 소비하되, action의 색·border·focus/pressed feed
 - B1 capture는 system UI primary와 Jetendard에서 1×/2× 각각 action의 ink box가 border box 안에 있고,
   두 sibling label의 visual center가 같은 action-row center에서 1 backing pixel 이내임을 PNG/JSON으로 남긴다.
   text artifact가 없거나 fallback만 선택되면 캡처 성공으로 표시하지 않는다.
+
+#### 2.1.3 B1-button 이관 순서
+
+기존 action은 등록 SVG icon과 한글 label을 한 terminal-cell run으로 합쳐 `wide_icons=true`로 낮췄다.
+그 결과 icon이 아닌 label까지 CoreText worker를 우회해 CJK advance·ellipsis·line box를 잃었다. B1-button은
+이 결합을 다음 순서로 해체한다.
+
+1. **B1-button-a (이번 slice)** — component는 icon과 label을 별도 semantic draw op로 낸다. icon은 기존
+   등록 SVG glyph path를 유지하고, label은 `wide_icons=false`인 measured system-text artifact로만 shape한다.
+   action rect 안의 보수적 icon-slot·gap 예약은 그대로 두며, label의 CJK ellipsis와 vertical line box는
+   platform artifact가 결정한다. 이 단계는 label이 terminal cell/fallback font 폭으로 다시 lower되는 회귀를
+   막는 데 목적이 있고, 전체 icon+label group의 수평 중심이 final-pixel이라는 주장은 하지 않는다.
+2. **B1-button-b (후속)** — worker result가 label advance와 icon slot placement를 같은 immutable artifact로
+   publish하고, synthesized SVG icon도 그 final-pixel placement를 소비한다. 그때만 group의 수평/수직 중심과
+   overflow clip을 실제 measured content rect로 완료 처리한다. 매 frame main actor CoreText 호출, font별 nudge,
+   cell-column으로 worker 결과를 역산하는 구현은 금지한다.
 
 - `SessionDockLayout`이 header, scope, search, scroll-area, group header,
   card, scrollbar의 pixel rect를 **한 번만** 계산한다. `view`, pointer

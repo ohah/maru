@@ -3875,6 +3875,19 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // NSApp.terminate를 다시 부르지 않도록 저장해 두고 종료 시 invalidate한다.
     private var smokeTimer: Timer?
     private var smokeMode = false
+    /// AS4-c uses its own explicit env gate so the ordinary PTY/file-panel smoke never gains
+    /// fixture worker controls or synthetic archive input.
+    private var agentSessionArchiveSmokeDriver: AgentSessionArchiveSmokeDriver?
+    // These counters are only a host-side receipt for the fixture's normal one-shot consumer.
+    // They never cross the Zig ABI and deliberately contain no source path or provider payload.
+    private var agentSessionArchiveSmokeRevealAllowedCount: UInt32 = 0
+    private var agentSessionArchiveSmokeRevealRejectedCount: UInt32 = 0
+    private var agentSessionArchiveSmokeStaleRevealCount: UInt32 = 0
+    private var agentSessionArchiveSmokeClaudeModelPresent: UInt32 = 0
+    private var isAgentSessionArchiveSmokeMode: Bool {
+        smokeMode && ProcessInfo.processInfo.environment["MARU_AGENT_SESSION_ARCHIVE_SMOKE"] == "1"
+    }
+
     // 5b: 웹 패널이 격리 E2E probe(evaluateJavaScript)를 스모크에서만 돌리게 노출(정상 런은 probe 안 함 — 오버헤드 0).
     var isSmokeMode: Bool { smokeMode }
     // 실제 Markdown bytes를 변경하는 probe는 일반 smoke duration과 분리한 명시 opt-in이다. 공식 build target만
@@ -4099,9 +4112,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         buildMainMenu()
 
         // 첫 tick(startAppSession 안)이 cell 메트릭을 캐시했으니, 창 크기에 맞춰 cols/rows를
-        // 한 번 맞춘다(80×24 기본에서 실제 창 grid로). smoke는 자체 scripted resize를 쓴다.
-        if !smokeMode {
+        // 한 번 맞춘다(80×24 기본에서 실제 창 grid로). 일반 smoke는 자체 scripted resize를 쓰지만,
+        // archive fixture는 첫 published pointer rect가 실제 view backing 좌표여야 하므로 같은 제품 resize를
+        // 명시적으로 한 번 통과시킨다.
+        if !smokeMode || isAgentSessionArchiveSmokeMode {
             resizeAppSessionFromWindow()
+        }
+        if !smokeMode {
             // 전역(OS) 단축키를 OS에 등록한다(앱이 비활성이어도 동작). smoke는 자동 종료라 등록하지 않는다.
             registerGlobalHotkeys()
         }
@@ -4114,6 +4131,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             UNUserNotificationCenter.current().delegate = self
         }
 
+        // The first frame can already expose the cold dock launcher.  Install the fixture driver
+        // before starting the loop so it cannot miss that frame and wait for a later redraw.
+        if isAgentSessionArchiveSmokeMode {
+            guard let scenario = AgentSessionArchiveSmokeDriver.Scenario() else {
+                exitCode = 1
+                DispatchQueue.main.async { NSApp.terminate(nil) }
+                return
+            }
+            agentSessionArchiveSmokeDriver = AgentSessionArchiveSmokeDriver(scenario: scenario)
+        }
         startFrameLoopTicks()
 
         // 세션 컨트롤 플레인 라이브 서버(A2b): 앱 전역 소켓 + accept 스레드를 띄운다. 이 뒤로 tickAppSession이 매
@@ -4121,7 +4148,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 꺼짐 — maru sessions list가 "인스턴스 없음"으로 접힌다). 소켓·스레드·collector·dispatch·auth는 전부 Zig.
         controlServerStarted = (maru_macos_control_server_start() == Self.statusOK)
 
-        if smokeMode && ProcessInfo.processInfo.environment["MARU_APP_INSTANCE_LEASE_SMOKE_HOLD"] != "1" {
+        if smokeMode && !isAgentSessionArchiveSmokeMode && ProcessInfo.processInfo.environment["MARU_APP_INSTANCE_LEASE_SMOKE_HOLD"] != "1" {
             if filePanelHookEnabled {
                 // FP11f cold helper/WKWebView Mermaid와 iframe→read→render→edit→save가 끝나기 전에 controlled
                 // PTY가 `a\n`을 받아 종료하지 않게 입력을 늦춘다. 일반 smoke는 기존 즉시 입력 동작을 유지한다.
@@ -4132,7 +4159,6 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 sendSmokeDevEvents()
             }
         }
-
         if let smokeDuration {
             smokeTimer = Timer.scheduledTimer(withTimeInterval: Double(smokeDuration) / 1000.0, repeats: false) { _ in
                 NSApp.terminate(nil)
@@ -5013,7 +5039,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 셸 PTY를 처음부터 실제 창 크기로 띄우도록 backing px+scale을 넘긴다(80×24 기본 spawn→resize 핸드셰이크
         // 제거 → zsh 첫 프롬프트 PROMPT_EOL_MARK % 잔상 방지). 창이 아직 레이아웃 전이면 (0,0,0)이라 Zig가 cols/rows로
         // 폴백한다(smoke는 자체 scripted resize라 0으로 두고 80×24 유지). cols/rows는 0 폴백 시 winsize·grid 단일 출처.
-        let m = smokeMode ? (widthPx: UInt32(0), heightPx: UInt32(0), scaleMilli: UInt32(0)) : spawnMetricsForCurrentWindow()
+        // Ordinary controlled smoke intentionally starts at 80×24 and scripts its own resize.  The
+        // archive fixture instead needs the real Metal view geometry before its first published
+        // probe: a zero backing size has no clickable titlebar launcher or dock view slot.
+        let m = (smokeMode && !isAgentSessionArchiveSmokeMode)
+            ? (widthPx: UInt32(0), heightPx: UInt32(0), scaleMilli: UInt32(0))
+            : spawnMetricsForCurrentWindow()
         var config = MaruAppHostSessionConfig(
             abi_version: MARU_MACOS_APP_HOST_ABI_VERSION,
             cols: 80,
@@ -5517,6 +5548,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
         // 닫을 창 처리(마지막 창이면 앱 종료 — 그 경우 아래 quick tick은 건너뛴다).
         for surface in toClose { closeWindowOrQuit(surface) }
+        maybeRunAgentSessionArchiveSmoke()
         // quick terminal — 보일 때만 tick. 그 셸이 종료/fault면 quick만 정리한다(앱은 계속 산다).
         if let quick, quick.window?.isVisible == true {
             explicitSurface = quick
@@ -7296,7 +7328,19 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             maru_macos_app_session_take_file_tree_external_open(session, $0.baseAddress, $0.count)
         }
         if len > 0, len <= fileTreePathBuf.count {
-            NSWorkspace.shared.open(URL(fileURLWithPath: String(decoding: fileTreePathBuf[0 ..< len], as: UTF8.self)))
+            let path = String(decoding: fileTreePathBuf[0 ..< len], as: UTF8.self)
+            if isAgentSessionArchiveSmokeMode {
+                // Fixture reveal must run the exact same one-shot ABI consumer, but it must not
+                // open Finder or expose a local path.  The build harness passes the one synthetic
+                // path only as a private allowlist comparison; summary stores counts, never it.
+                if path == ProcessInfo.processInfo.environment["MARU_AGENT_SESSION_ARCHIVE_SMOKE_REVEAL_PATH"] {
+                    agentSessionArchiveSmokeRevealAllowedCount &+= 1
+                } else {
+                    agentSessionArchiveSmokeRevealRejectedCount &+= 1
+                }
+            } else {
+                NSWorkspace.shared.open(URL(fileURLWithPath: path))
+            }
         }
         if !surface.fileTreeTrashInFlight {
             var requestId: UInt64 = 0
@@ -8011,6 +8055,179 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             raw_key_code: 0
         )
         sendKeyEvent(enterEvent)
+    }
+
+    /// Drives the archive fixture through `MaruMetalTerminalView.mouseDown/up`, never by calling
+    /// a Zig domain method directly. The only ABI reads are read-only published probes and the
+    /// gate is one-way worker synchronization; opening the dock/tab remains normal pointer input.
+    private func maybeRunAgentSessionArchiveSmoke() {
+        guard let driver = agentSessionArchiveSmokeDriver, let surface = primary,
+              let session = surface.appSession, let view = surface.view, let window = surface.window else { return }
+        withSurface(surface) {
+            driver.tick(
+                probe: { target in
+                    var out = MaruAppHostAgentSessionArchiveSmokeProbe()
+                    let status = maru_macos_app_session_agent_session_archive_smoke_probe(session, target, &out)
+                    return status == Self.statusOK ? out : nil
+                },
+                setGate: { blocked in
+                    maru_macos_app_session_set_agent_session_archive_detail_smoke_gate(session, blocked ? 1 : 0) == Self.statusOK
+                },
+                gateReached: {
+                    maru_macos_app_session_agent_session_archive_detail_smoke_gate_reached(session) != 0
+                },
+                click: { probe in
+                    self.dispatchArchiveSmokeClick(probe, in: view, window: window)
+                },
+                shortcut: { shortcut in
+                    self.dispatchArchiveSmokeShortcut(shortcut, in: view, window: window)
+                },
+                fakeResumeVerdict: {
+                    self.archiveSmokeFakeResumeVerdict()
+                },
+                revealAllowedCount: {
+                    self.agentSessionArchiveSmokeRevealAllowedCount
+                },
+                revealRejectedCount: {
+                    self.agentSessionArchiveSmokeRevealRejectedCount
+                },
+                staleRevealCount: {
+                    let count = maru_macos_app_session_agent_session_archive_smoke_stale_reveal_count(session)
+                    self.agentSessionArchiveSmokeStaleRevealCount = count
+                    return count
+                },
+                claudeModelMetadataPresent: {
+                    let present = maru_macos_app_session_agent_session_archive_smoke_claude_model_present(session) != 0
+                    self.agentSessionArchiveSmokeClaudeModelPresent = present ? 1 : 0
+                    return present
+                },
+                replaceRevealSource: {
+                    self.replaceArchiveSmokeRevealSource()
+                }
+            )
+            // Mouse down/up has just traversed the regular product handler, after the outer
+            // frame tick. Render once through that same host path so a following read-only probe
+            // observes the newly published loading/ready tree instead of an idle old frame.
+            if driver.takePaintRequest() {
+                _ = self.renderTick()
+            }
+        }
+        guard driver.finished else { return }
+        agentSessionArchiveSmokeDriver = driver
+        smokeTimer?.invalidate()
+        smokeTimer = nil
+        if driver.stage != .succeeded { exitCode = 1 }
+        DispatchQueue.main.async { NSApp.terminate(nil) }
+    }
+
+    /// Converts an already-published backing-pixel rect to an AppKit window point and sends the
+    /// full NSView pointer lifecycle. `handleMouse` performs the usual y/scale conversion back to
+    /// Zig, making this exercise precisely the product event route.
+    private func dispatchArchiveSmokeClick(
+        _ probe: MaruAppHostAgentSessionArchiveSmokeProbe,
+        in view: MaruMetalTerminalView,
+        window: NSWindow
+    ) -> Bool {
+        guard probe.present != 0, probe.enabled != 0, probe.width_px > 0, probe.height_px > 0 else { return false }
+        let scale = window.backingScaleFactor
+        guard scale > 0 else { return false }
+        let backingX = CGFloat(probe.x_px + probe.width_px / 2)
+        let backingY = CGFloat(probe.y_px + probe.height_px / 2)
+        let local = NSPoint(x: backingX / scale, y: view.bounds.height - (backingY / scale))
+        let location = view.convert(local, to: nil)
+        let timestamp = ProcessInfo.processInfo.systemUptime
+        guard let down = NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: location,
+            modifierFlags: [],
+            timestamp: timestamp,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 0,
+            clickCount: 1,
+            pressure: 1
+        ), let up = NSEvent.mouseEvent(
+            with: .leftMouseUp,
+            location: location,
+            modifierFlags: [],
+            timestamp: timestamp + 0.001,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 0,
+            clickCount: 1,
+            pressure: 0
+        ) else { return false }
+        view.mouseDown(with: down)
+        view.mouseUp(with: up)
+        return true
+    }
+
+    /// Uses the same `MaruMetalTerminalView.keyDown` route as a physical shortcut.  The driver
+    /// chooses only the documented action shortcut; Zig still resolves it through the published
+    /// generation-bound table and rejects a disabled or stale detail action.
+    private func dispatchArchiveSmokeShortcut(
+        _ shortcut: AgentSessionArchiveSmokeDriver.Shortcut,
+        in view: MaruMetalTerminalView,
+        window: NSWindow
+    ) -> Bool {
+        let input: (characters: String, keyCode: UInt16) = switch shortcut {
+        case .resume: ("\r", 36)
+        case .reveal: ("l", 37)
+        }
+        guard let event = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [.command],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber,
+            context: nil,
+            characters: input.characters,
+            charactersIgnoringModifiers: input.characters,
+            isARepeat: false,
+            keyCode: input.keyCode
+        ) else { return false }
+        view.keyDown(with: event)
+        return true
+    }
+
+    /// Fixture-only provider executables write a constant verdict only after seeing the expected
+    /// direct argv. The host reads only that boolean, so no provider id or user content enters the
+    /// smoke summary or Swift state.
+    private func archiveSmokeFakeResumeVerdict() -> Bool {
+        guard isAgentSessionArchiveSmokeMode else { return false }
+        let marker = ProcessInfo.processInfo.environment["MARU_AGENT_SESSION_ARCHIVE_SMOKE_MARKER"]
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".maru-agent-session-archive-marker").path
+        guard let value = try? String(contentsOfFile: marker, encoding: .utf8) else { return false }
+        switch ProcessInfo.processInfo.environment["MARU_AGENT_SESSION_ARCHIVE_SMOKE_SCENARIO"] {
+        case "resume-pointer", "resume-keyboard":
+            return value == "codex-resume-direct-argv\n"
+        case "claude-resume-pointer":
+            return value == "claude-resume-direct-argv\n"
+        default:
+            return false
+        }
+    }
+
+    /// Replaces only the synthetic source for the stale-reveal scenario. This is deliberately
+    /// narrower than a generic smoke filesystem API: both paths must remain in the isolated
+    /// HOME's same directory, and a normal app run never satisfies the scenario gate. `rename`
+    /// is atomic on this one fixture volume, so the published `(device,inode)` is now stale.
+    private func replaceArchiveSmokeRevealSource() -> Bool {
+        guard isAgentSessionArchiveSmokeMode,
+              let scenario = ProcessInfo.processInfo.environment["MARU_AGENT_SESSION_ARCHIVE_SMOKE_SCENARIO"],
+              scenario == "reveal-recheck-pointer" || scenario == "detail-stale",
+              let source = ProcessInfo.processInfo.environment["MARU_AGENT_SESSION_ARCHIVE_SMOKE_REVEAL_PATH"],
+              let replacement = ProcessInfo.processInfo.environment["MARU_AGENT_SESSION_ARCHIVE_SMOKE_REPLACEMENT_PATH"]
+        else { return false }
+        let sourceURL = URL(fileURLWithPath: source).standardizedFileURL
+        let replacementURL = URL(fileURLWithPath: replacement).standardizedFileURL
+        let homeURL = URL(fileURLWithPath: NSHomeDirectory()).standardizedFileURL
+        guard sourceURL.path != replacementURL.path,
+              sourceURL.deletingLastPathComponent() == replacementURL.deletingLastPathComponent(),
+              sourceURL.path.hasPrefix(homeURL.path + "/"),
+              replacementURL.path.hasPrefix(homeURL.path + "/")
+        else { return false }
+        return Darwin.rename(replacementURL.path, sourceURL.path) == 0
     }
 
     private func sendKeyEvent(_ event: MaruAppHostKeyEvent) {
@@ -8788,6 +9005,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let glyphUvReady = latestFrameSummary.glyph_uv_ready != 0
         let glyphRasterReady = latestFrameSummary.glyph_raster_ready != 0
         let frameEnded = latestFrameSummary.ended != 0
+        let archiveSmokeStage = agentSessionArchiveSmokeDriver?.stage.rawValue ?? (isAgentSessionArchiveSmokeMode ? "not_started" : "disabled")
+        let archiveSmokeFailure = agentSessionArchiveSmokeDriver?.failure ?? ""
+        let archiveSmokeScenario = agentSessionArchiveSmokeDriver?.scenarioName ?? (isAgentSessionArchiveSmokeMode ? "invalid" : "disabled")
         let sortedPumpMs = browserResultPumpSamplesMs.sorted()
         let pumpP95Ms = sortedPumpMs.isEmpty ? 0 : sortedPumpMs[max(0, Int(ceil(Double(sortedPumpMs.count) * 0.95)) - 1)]
         let pumpMaxMs = sortedPumpMs.last ?? 0
@@ -8830,6 +9050,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         final_frame_ended=\(frameEnded)
         smoke_mode=\(smokeMode)
         smoke_duration_ms=\(duration)
+        agent_session_archive_smoke_stage=\(archiveSmokeStage)
+        agent_session_archive_smoke_failure=\(archiveSmokeFailure)
+        agent_session_archive_smoke_scenario=\(archiveSmokeScenario)
+        agent_session_archive_smoke_fake_resume_verdict=\(archiveSmokeFakeResumeVerdict())
+        agent_session_archive_smoke_reveal_allowed_count=\(agentSessionArchiveSmokeRevealAllowedCount)
+        agent_session_archive_smoke_reveal_rejected_count=\(agentSessionArchiveSmokeRevealRejectedCount)
+        agent_session_archive_smoke_stale_reveal_count=\(agentSessionArchiveSmokeStaleRevealCount)
+        agent_session_archive_smoke_claude_model_present=\(agentSessionArchiveSmokeClaudeModelPresent)
         mermaid_pending_replies=\(mermaidReplyDelivery.count)
         mermaid_product_tick_calls=\(mermaidProductTick.tickCalls)
         mermaid_product_work_ticks=\(mermaidProductTick.workTicks)

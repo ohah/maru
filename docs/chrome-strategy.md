@@ -124,7 +124,8 @@ pub const Op = union(enum) {
     fill:   struct { rect: Rect, role: ColorRole, alpha: u8 = 0xFF },   // 밴드·탭bg·hover·drop-zone
     border: struct { rect: Rect, sides: Sides, role: ColorRole },       // focus 테두리(상/우선)
     rule:   struct { from: Px, to: Px, role: ColorRole },               // divider 선
-    text:   struct { origin: Px, runs: []const Run, role: ColorRole },  // 탭 제목·팝업·Notice 글자
+    text:   struct { origin: Px, runs: []const Run, role: ColorRole, wide_icons: bool = false },
+    // wide_icons=true는 컴포넌트가 직접 소유한 등록 SVG glyph만 2셀로 측정·lower한다.
 };
 pub const Run = struct { text: []const u8, bold: bool = false };
 pub const ChromeDraw = struct { layer: Layer, ops: []const Op };  // 한 컴포넌트의 한 프레임 출력
@@ -314,7 +315,7 @@ pill은 기존 GPU quad 프리미티브(`GpuQuad.corner_radii`+`border_widths`/`
 3. **좌표 = 픽셀.** rich의 sub-cell 정밀도 위해. tui 백엔드가 셀로 스냅.
 4. **컴포넌트 디스패치 = 컴파일타임 고정(vtable 없음).** 3rd-party 확장은 비목표(컴파일타임 라이브러리). host가 컴포넌트 집합을 명시 소유(현 패턴).
 5. **터미널 콘텐츠는 별도 경로 유지.** chrome만 이 시스템. 둘은 `replace()`에서 합성.
-6. **(§9.6) 헤더·git·Explorer chrome 아이콘 = 빌드타임 SVG→coverage 합성.** 폰트에 없는 단색 아이콘(설정·검색·알림·새 워크스페이스·접기·GitHub/폴더 카드와 Explorer semantic file/folder glyph)을 SVG→coverage 마스터로 만들고(개발 시 `tools/svg_to_coverage.py` + `rsvg-convert`[librsvg] → PIL alpha → `src/renderer/icon_coverage_data.zig`로 **커밋**), `renderer/icon_glyph.zig`가 `synthesizeGlyph` 경로(box/braille 합성과 동형)로 슬롯 크기에 area-average 다운스케일해 그린다. codepoint는 **Plane 15 PUA(0xF0000~)**이며 현재 generator registry는 `0xF0001~0xF001E` 안의 명시된 30종만 등록한다. 합성 게이트는 **등록된 codepoint만** 본다 — Zig `icon_glyph.isRegisteredIcon`과 CoreText C 게이트가 같은 `ICONS` 소스에서 생성된 Zig/C registry를 보고, 모든 `IconKind→codepoint`도 자동 테스트가 coverage 등록을 확인한다. 단색이라 셰이더가 coverage×전경색으로 칠해 테마색이 자동 적용되고 런타임 의존성은 0이다. **주의(Nerd Fonts v3 겹침)**: Nerd Fonts v3의 Plane-15 MDI 영역과 겹치므로 미등록 in-range는 반드시 폰트로 폴백한다. 정확한 SVG provenance/license와 Maru 자작 Explorer v1 목록은 [third-party-licenses.md](third-party-licenses.md#maru-자작-explorer-아이콘)가 소유한다. 기본 Zig test는 SVG SHA-256 manifest와 C/Zig registry를 외부 도구 없이 검증하고, coverage 재생성 drift는 opt-in `mise run icons:check`가 맡는다. 카드 보조줄의 등록 아이콘만 `text_layout.clusterCols`에 주입된 predicate가 width-2로 확대하며, Explorer glyph는 한 row에 한 셀만 쓴다.
+6. **(§9.6) 헤더·git·Explorer chrome 아이콘 = 빌드타임 SVG→coverage 합성.** 폰트에 없는 단색 아이콘(설정·검색·알림·새 워크스페이스·접기·GitHub/폴더 카드와 Explorer semantic file/folder glyph)을 SVG→coverage 마스터로 만들고(개발 시 `tools/svg_to_coverage.py` + `rsvg-convert`[librsvg] → PIL alpha → `src/renderer/icon_coverage_data.zig`로 **커밋**), `renderer/icon_glyph.zig`가 `synthesizeGlyph` 경로(box/braille 합성과 동형)로 슬롯 크기에 area-average 다운스케일해 그린다. codepoint는 **Plane 15 PUA(0xF0000~)**이며 현재 generator registry는 `0xF0001~0xF001E` 안의 명시된 30종만 등록한다. 합성 게이트는 **등록된 codepoint만** 본다 — Zig `icon_glyph.isRegisteredIcon`과 CoreText C 게이트가 같은 `ICONS` 소스에서 생성된 Zig/C registry를 보고, 모든 `IconKind→codepoint`도 자동 테스트가 coverage 등록을 확인한다. 단색이라 셰이더가 coverage×전경색으로 칠해 테마색이 자동 적용되고 런타임 의존성은 0이다. **주의(Nerd Fonts v3 겹침)**: Nerd Fonts v3의 Plane-15 MDI 영역과 겹치므로 미등록 in-range는 반드시 폰트로 폴백한다. 정확한 SVG provenance/license와 Maru 자작 Explorer v1 목록은 [third-party-licenses.md](third-party-licenses.md#maru-자작-explorer-아이콘)가 소유한다. 기본 Zig test는 SVG SHA-256 manifest와 C/Zig registry를 외부 도구 없이 검증하고, coverage 재생성 drift는 opt-in `mise run icons:check`가 맡는다. 컴포넌트가 직접 소유한 아이콘 text op만 `wide_icons=true`로 선언하면 component plan과 backend lowering이 같은 등록 predicate로 width-2를 쓰며, 사용자/세션 문자열은 false라 우연한 PUA가 폭을 바꾸지 않는다. Explorer glyph는 한 row에 한 셀만 쓴다.
 
 ## 10. 리스크 & 미해결
 

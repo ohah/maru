@@ -122,7 +122,10 @@ component/layout/lowering 경로를 쓴다.
   n건`만 보여 준다. 권한·도구 payload, 환경 변수, 명령 출력, raw JSONL은
   panel·tooltip·trace 어느 곳에도 표시하지 않는다. `로그 보기`는 source reveal만
   하며, `워크트리에서 재개`는 기존 `새 탭에서 이어하기`의 visible label로서 exact
-  argv 새 local Term을 즉시 연다. 별도의 raw transcript, 실행 전 preview, 자동
+  argv 새 local Term을 즉시 연다. action 앞에는 기존 Chrome 합성 벡터 아이콘을 **명시적으로 opt-in한 2-cell slot**으로 써,
+  terminal font의 작은 Unicode 기호에 의존하지 않는다. 하나의 detail card 안에서 논리적으로 개행된
+  text line은 cell height의 1/4(최소 3px) 여백을 둬 제목·role·본문이 붙어 보이지
+  않으며, 그 여백은 card height/clip과 함께 계산한다. 별도의 raw transcript, 실행 전 preview, 자동
   resume, `새 세션에서 계속` action은 이 계약 밖이다.
 - exact provider/session identity의 live Term을 다시 검증했을 때만 `열린 세션으로
   이동` 보조 action을 action row에 추가한다. 이 action의 존재 여부가 card 순서,
@@ -266,6 +269,13 @@ clip top에서 반쯤 보이면 그 보이는 반쪽만 draw/hit 가능하고, h
 비목표다. 최대 500개 record와 그에 대응하는 bounded group header의 projection은 O(n) scan 하나이며 frame/hover에는
 I/O, worker, JSON parse, allocation을 추가하지 않는다.
 
+Card background와 pointer rect만 clip에 맞추고 텍스트를 넘기면 partial card가 header/search 영역을 침범한다. 현재
+CoreText lowering은 semantic text origin을 terminal cell grid로 내리므로 per-glyph scissor를 따로 만들지 않는다. 따라서
+vertical partial item의 텍스트는 **원점이 아니라 실제 lowering될 한 cell-height band 전체**가 `effective_clip` 안에 있을
+때만 emit한다. 부분적으로 걸친 glyph를 잘라 보이게 하거나, clip 밖 row를 반올림으로 되살리는 것은 금지한다. 이 조건은
+component의 `cell_height_px`와 lowering의 같은 floor division을 사용해 card background·text·hit-test의 가시 경계가
+어긋나지 않게 한다.
+
 wheel의 owner는 published `SessionDockScrollArea` rect 하나다. `delta_y > 0`(위)는 offset을 줄이고 `< 0`(아래)은
 offset을 늘린다. mouse wheel은 기존 line delta를 card 높이 기반의 bounded pixel step으로 변환하고, precise trackpad는
 AppKit point delta를 scale로 backing px로 바꾼다. `scroll.multiplier`는 둘에 같이 적용한다. `AppSession`은
@@ -307,7 +317,64 @@ host wheel screenshot은 AS3-c 뒤에도 별도 manual/automation gate로 남긴
 1. **AS1 — 순수 모델·parser:** provider-neutral record, Claude/Codex streaming parser, trust grade, dedup/title/summary/redaction/filter/sort pure tests. 실제 사용자 log는 fixture로 넣지 않는다.
 2. **AS2 — bounded scanner:** no-follow discovery, candidate/file/total caps, cancellation/generation, in-memory identity parse cache, 최신순 bounded worker pool과 완료 snapshot atomic publish, metrics. refresh는 직전 완료 snapshot을 유지하고 새 scan이 끝날 때만 교체한다. main tick filesystem I/O=0·JSON parse=0·worker wait=0을 counter와 source boundary test로 고정한다.
 3. **AS3 — 도크 Metal component vertical slice:** `SessionDockLayout`과 header/scope/search/group/card/scroll-area primitive를 순수 props/state/layout/view/hit-test/action으로 만든 뒤 host/backend의 semantic draw → Metal GPU lowering에 연결한다. 기존 direct text draw와 pipe scope label은 이 slice에서 제거한다. layout 공유 test가 view rect=hit rect=visible-row origin을, search keypress I/O=0·row 한 번 클릭 provider 실행=0·main thread JSONL I/O=0을 고정한다. loading spinner는 snapshot 유무별로 skeleton 또는 기존 목록 유지인지도 integration test로 고정한다. **AS3-a는 component→CoreText/Metal card background, AS3-b는 published-tree hover/down/up lifecycle, AS3-c는 pixel scroll projection·refresh identity anchor·partial-scroll Lab artifact를 연결한다. active host screenshot E2E는 AS3의 남은 gate다.**
-4. **AS4 — archive Metal detail panel·explicit actions·제품 gate:** `ArchiveSessionDetailPanel`을 PTY 없는 Metal-rendered surface로 연결하고 bounded recent/permission summary, loading/stale identity disable, exact live mapping, source reveal, `워크트리에서 재개`의 argv-only immediate new-Term activation을 닫는다. resume/log의 click rect와 `⌘↵`/`⌘L` shortcut은 같은 action identity를 소비한다. `열린 세션으로 이동`은 exact live identity가 있을 때만 별도 pointer/Enter action으로 제공한다. macOS fixture E2E는 dock card hover/selection/collapse/scroll, refresh 중 snapshot 보존, detail loading→ready/stale, disabled action, resume/reveal을 확인한다. 실제 provider 계정/개인 이력에 대한 재개는 사용자가 직접 승인한 수동 gate일 뿐 CI 증거가 아니다.
+4. **AS4 — archive Metal detail panel·explicit actions·제품 gate:** `ArchiveSessionDetailPanel`을 PTY 없는 Metal-rendered surface로 연결하고 bounded recent/permission summary, loading/stale identity disable, exact live mapping, source reveal, `워크트리에서 재개`의 argv-only immediate new-Term activation을 닫는다. action label은 각 clickable card 안에서 실제 ellipsis/CJK glyph 폭 기준으로 수평 중앙 정렬한다. resume/log의 click rect와 `⌘↵`/`⌘L` shortcut은 같은 action identity를 소비한다. `열린 세션으로 이동`은 exact live identity가 있을 때만 별도 pointer/Enter action으로 제공한다. macOS fixture E2E는 dock card hover/selection/collapse/scroll, refresh 중 snapshot 보존, detail loading→ready/stale, disabled action, resume/reveal을 확인한다. 실제 provider 계정/개인 이력에 대한 재개는 사용자가 직접 승인한 수동 gate일 뿐 CI 증거가 아니다.
+
+### AS4-c — 실제 AppKit host archive fixture
+
+AS4-a/AS4-b의 component/Lab 및 `AppSession` test만으로는 실제 Swift `NSApplication`의 frame loop,
+`MaruMetalTerminalView` 입력 경로와 source-reveal consumer를 증명하지 못한다. 그래서 별도
+`mise run macos-agent-session-archive-smoke`는 기존 일반 `macos-app-smoke`에 얹지 않고, 격리 HOME과
+synthetic·redacted Codex JSONL을 쓰는 전용 AppKit/CAMetalLayer process로 실행한다. 이 command와
+`zig-out/maru-agent-session-archive-smoke/` fixture root를 쓴다. fixture는 synthetic Codex record 하나로 cold-start
+titlebar dock launcher→view-switcher→card 실제 pointer, loading publish, worker gate release 뒤 ready action을 자동 검증한다.
+ready 뒤 `resume`·`로그 보기`는 각각 pointer와 `⌘↵`·`⌘L`을 **서로 다른 cold AppKit process**로 보내 결과가 섞이지 않게 한다.
+Codex action fixture와 별도로, Claude fixture는 직속 `~/.claude/projects/<project>/<session>.jsonl` 하나만
+격리 HOME에 두고 assistant `message.model`을 포함한다. 이 scenario는 scanner가 nested `subagents`가 아닌 직속
+Claude transcript를 고르고, parser의 model metadata가 세 줄 카드의 model line으로 투영되며, 명시적 재개가
+`claude --resume <session-id>`의 provider-native argv로 향하는 것을 함께 고정한다. summary에는 모델명·세션 id·경로·원문을
+남기지 않고 fake-exec verdict만 남긴다. stale replace와 multi-state capture는 동일 command의 별도 scenario다.
+
+이 fixture는 일반 controlled-smoke의 80×24 zero-backing 시작을 재사용하지 않는다. 첫 paint 전에 실제
+Metal view의 backing metric을 session에 전달해, probe가 존재하지 않는 가상 좌표가 아니라 사용자도 누를 수 있는
+titlebar launcher와 dock slot만 관측하도록 한다.
+
+- fixture는 실제 archive scanner와 detail worker를 통해 목록→archive tab을 연다. `AppSession` private method를
+  직접 호출하거나 provider transcript를 terminal에 write하는 우회는 금지한다. Swift는 `MaruMetalTerminalView`가
+  평소 쓰는 mouse/key ABI 경로로만 down/up 및 `⌘↵`/`⌘L`을 보낸다.
+- 입력 좌표는 상수/창 크기 추측이 아니라 **직전에 paint·publish된** cold-start titlebar dock launcher, dock view-switcher, session-dock card tree와 detail action tree의
+  smoke 전용 읽기 probe에서 얻는다. probe는 request generation, stable identity, enabled bit, backing-pixel rect와
+  관측 counter만 읽으며 intent를 실행하거나 worker/state를 변경하지 않는다. 따라서 probe 자체가 테스트의 두 번째
+  action path가 되지 않고, stale frame/rect이면 fixture는 실패한다.
+- loading capture는 sleep race로 만들지 않는다. detail worker는 fixture에서만 닫힌 test gate를 만나고, card action 뒤
+  loading frame·spinner/skeleton·disabled action tree가 present된 것을 먼저 capture한다. gate release 뒤 동일 identity의
+  ready frame을 기다린다. 이 gate와 fixture input은 일반 앱, 일반 refresh, 실제 provider log에서 완전히 비활성이다.
+- resume과 reveal은 각각 pointer·keyboard의 clean process scenario를 하나씩 가져야 한다. resume 두 scenario는
+  fake `codex`/`claude` executable이 남긴 provider-kind·argument count·argument position verdict가 같고
+  `codex resume <synthetic-id>` 또는 `claude --resume <synthetic-id>` 외의 shell wrapper·prompt text·추가 인자가
+  없음을 확인한다. reveal 두 scenario도 allow/reject count와 source-identity verdict가 같아야 한다. 실제 provider
+  binary, 계정, 네트워크, 사용자 이력은 실행하지 않는다.
+- **exact-live는 현재 미구현/차단 상태다.** 2026-08-03 macOS POC에서 일반 PTY child의
+  `KERN_PROCARGS2` 조회가 argv-only payload(29 bytes)를 돌려 provider가 tool child에 둔
+  `CODEX_THREAD_ID`/`CLAUDE_CODE_SESSION_ID`를 읽지 못했다. 따라서 path·mtime·활동시각 추측이나 test-only mapping
+  주입으로 `focus_live`를 보이게 해서는 안 된다. Codex는 provider 공식 hook payload를 `MARU_PANE_ID`에 묶은
+  명시 mapping으로, Claude는 현재 statusline mapping과 공통 lifecycle/사용자 설정 보존 정책으로 재설계·승인한 뒤에만
+  다시 연다. 그 전에는 action을 materialize하거나 success fixture를 추가하지 않는다.
+- stale scenario는 detail gate가 열린 뒤 worker가 source를 다시 검사하기 **전** fixture가 source를 atomic replace해
+  만든다. 그러면 worker의 no-follow `(device,inode)` 재검증 실패가 stale DTO와 disabled action tree를 publish해야 한다.
+  별도 reveal-recheck scenario는 ready 뒤 source를 replace하고 `로그 보기`를 실행해 external-open count 0만 요구한다.
+  이는 ready frame을 즉시 stale이라고 오인하지 않으며, replacement 뒤 refresh/detail publish가 action table과 pointer
+  capture를 폐기하는지는 stale scenario에서 별도로 검증한다.
+- reveal 성공 scenario도 host의 외부 앱 열기를 호출하지 않는다. Swift가 smoke 모드에서 same
+  `take_file_tree_external_open` consumer를 drain해 allowlisted fixture token과 횟수만 summary에 기록한다.
+- artifact는 loading/ready/stale의 제품 Metal PPM·PNG와 redacted key/value summary다. 한 프레임 뒤 종료하는
+  일반 `MARU_SCREENSHOT` 훅은 쓰지 않고, smoke process 안에서만 여러 completed Metal frame을 readback하는 capture
+  sink를 쓴다. sink는 같은 제품 renderer output을 복사할 뿐 frame/action/worker state를 바꾸지 않는다. summary에는 frame request id,
+  input source(pointer/keyboard), enabled/disabled action count, fake argv verdict, reveal success/rejected/stale-identity count,
+  actual worker scan/detail completion 및 screenshot path만 남긴다. session id·title·prompt·absolute path·raw JSONL은
+  artifact·stderr·PR image에 남기지 않는다.
+
+이 fixture는 provider-native binary가 실제 계정 세션을 재개한다는 보장은 아니다. 그 수동 검증은 사용자가 명시적으로
+승인한 실제 이력에서만 하며, CI evidence와 섞지 않는다.
 
 ## 7. 설계 검토 기록 — 적대적 5회
 

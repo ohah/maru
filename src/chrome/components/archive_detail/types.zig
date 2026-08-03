@@ -38,25 +38,34 @@ pub const Metrics = struct {
     turn_h: u32,
     actions_h: u32,
     gap: u32,
+    /// Logical text lines in a detail card use this vertical breathing room.  It belongs to the
+    /// component metric rather than a renderer font setting so the card rect, clipping and paint
+    /// baseline remain one layout contract at every backing scale.
+    line_gap: u32,
     pad: u32,
 
     pub fn fromCellHeight(cell_height_px: u32) Metrics {
         const ch = @max(cell_height_px, 1);
         return .{
-            .header_h = ch * 3,
+            .header_h = ch * 3 + line_gap(ch),
             // Text baselines are one cell below a card's top edge. Two metadata lines therefore
             // need three cells: 1ch for the first baseline, 1ch between baselines, and a final
             // descender/clip cell. Keeping this in the shared metric prevents a painted count
             // from existing semantically but being clipped by the same rect tree.
-            .metadata_h = ch * 3,
+            .metadata_h = ch * 3 + line_gap(ch),
             .section_h = ch * 2,
-            .turn_h = ch * 4,
+            .turn_h = ch * 4 + line_gap(ch),
             .actions_h = ch * 2,
             .gap = @max(ch / 2, 4),
+            .line_gap = line_gap(ch),
             .pad = @max(ch, 8),
         };
     }
 };
+
+fn line_gap(cell_height_px: u32) u32 {
+    return @max(cell_height_px / 4, 3);
+}
 
 pub fn isActionable(props: Props) bool {
     return props.state == .ready;

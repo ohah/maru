@@ -200,7 +200,20 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 150;
+pub const abi_version: u32 = 156;
+// 156: AS4-c Claude fixture exposes one boolean that an already-open archive detail has a
+// parsed Claude model. It is read-only evidence and never exposes model/session/path text.
+// 155: AS4-c stale-reveal fixture reads one closed, counter-only result that proves the normal
+// detail action reached `StaleArchiveSource`; it grants no action or archive-state mutation.
+// 154: cold app에서 숨겨진 dock도 실제 titlebar launcher를 pointer로 먼저 열 수 있게, AS4-c의
+// closed read-only probe target에 launcher geometry를 추가한다. 이것도 state/action을 변경하지 않는다.
+// 153: AS4-c fixture가 세션 목록으로 들어가는 실제 dock view-switcher 슬롯도 같은 read-only
+// paint/hit geometry에서 읽을 수 있게 한다. 이는 화면 state/action을 직접 변경하는 test hook이 아니다.
+// 152: AS4-c host fixture가 마지막으로 paint된 세션 dock/detail action capability의 rect만
+// 읽을 수 있는 probe ABI를 추가한다. 제목·세션 ID·경로·원문과 action execution은 노출하지 않는다.
+// 151: agent-session archive detail fixture의 loading→stale 전이를 실제 AppKit host 경로에서
+// 재현하기 위한 one-way smoke gate export 두 개를 추가한다. production 입력은 이 gate를 arm할 수
+// 없고, host는 detail/action/session source를 읽거나 변경하지 않는다.
 // 150: 파일 패널 리치 편집 모드(raw 2)를 추가한다 — markdown 전용 문서모델 WYSIWYG(docs/file-panel.md §2.5).
 // 149: 파일 패널 mode를 surface_id로 설정하는 export를 추가한다(헤더 클릭과 같은 경로·같은 pending action).
 // 148: 라이브 프리뷰 폐기 — file panel mode 2(live-preview)와 앱 전역 live-preview worker budget ABI를 제거하고
@@ -1343,6 +1356,32 @@ pub const CommandKind = enum(u32) {
     interactive_shell = 1,
     // quick은 같은 대화형 셸을 쓰지만 workspace manifest에 아직 저장하지 않으므로 lifecycle을 구분한다.
     quick_interactive_shell = 2,
+};
+
+/// AS4-c fixture가 실제로 paint되어 pointer 입력에 쓰이는 capability만 읽기 위해 쓰는
+/// 내부 target vocabulary다. provider source, action payload, 세션 제목/ID/경로는 이
+/// 경계를 절대 통과하지 않는다.
+pub const AgentSessionArchiveSmokeProbeTarget = enum(u32) {
+    session_dock_card = 1,
+    archive_resume = 2,
+    archive_reveal_log = 3,
+    archive_focus_live = 4,
+    dock_agent_sessions = 5,
+    dock_launcher = 6,
+};
+
+/// Published tree에서 나온 backing-pixel capability snapshot이다. `present=false`면 다른
+/// 필드가 stale일 수 있으므로 consumer는 읽지 않는다. host ABI는 이 타입을 즉시
+/// fixed-width record로 복사할 뿐, source-derived 값이나 action identity를 추가하지 않는다.
+pub const AgentSessionArchiveSmokeProbe = struct {
+    request_id: u64 = 0,
+    x_px: f32 = 0,
+    y_px: f32 = 0,
+    width_px: f32 = 0,
+    height_px: f32 = 0,
+    state: u32 = 0,
+    present: bool = false,
+    enabled: bool = false,
 };
 
 pub const SessionConfig = extern struct {
@@ -3008,6 +3047,9 @@ pub const AppSession = struct {
     /// Monotonic tab-detail request identity. A result may arrive after its tab
     /// closes, so surface id alone is insufficient to authorize publication.
     agent_session_archive_detail_request_id: u64 = 0,
+    /// Fixture-only evidence that an already-published detail action reached the stale source
+    /// admission check. It is never used to authorize, render, or recover an archive action.
+    agent_session_archive_smoke_stale_reveal_count: u32 = 0,
     agent_session_archive_completed_ns: i128 = 0,
     agent_session_archive_partial: bool = false,
     /// Session Dock keeps the retained position in backing pixels so its paint and published
@@ -6217,14 +6259,59 @@ pub const AppSession = struct {
             .claude => [_][]const u8{ "claude", "--resume", record.parsed.session_id },
             .codex => [_][]const u8{ "codex", "resume", record.parsed.session_id },
         };
-        req.command = "/usr/bin/env";
-        req.args = &args;
+        // Production intentionally resolves the provider from the user's PATH through env.  The
+        // isolated AppKit fixture instead supplies one absolute fake executable, so it can prove
+        // the provider-native argv without starting a real account session or depending on the
+        // build runner's inherited PATH.  This branch is unreachable outside the explicit smoke
+        // environment and still has no shell wrapper.
+        if (archiveSmokeFakeProviderExecutable(record.parsed.provider)) |fake_executable| {
+            req.command = fake_executable;
+            req.args = args[1..];
+        } else {
+            req.command = "/usr/bin/env";
+            req.args = &args;
+        }
         req.login = false;
         if (usableRestoreCwd(record.parsed.cwd)) |cwd| req.cwd = cwd;
         const term = try self.createTerm(req, size, cfg.queue_capacity, provider_command, args[0]);
         errdefer self.destroyTerm(term);
         try pane.terms.append(self.allocator, term);
         self.focusTerm(pane.terms.items.len - 1);
+    }
+
+    fn archiveSmokeFakeProviderExecutable(provider: maru.session.agent_session_archive.Provider) ?[]const u8 {
+        const enabled = std.c.getenv("MARU_AGENT_SESSION_ARCHIVE_SMOKE") orelse return null;
+        if (!std.mem.eql(u8, std.mem.span(enabled), "1")) return null;
+        // Keep the test-only direct-exec seam narrower than a single generic flag: it is valid
+        // only for one named cold-process action scenario per provider. Normal launches,
+        // including a user who happens to export the generic flag, retain `/usr/bin/env`.
+        const raw_scenario = std.c.getenv("MARU_AGENT_SESSION_ARCHIVE_SMOKE_SCENARIO") orelse return null;
+        const scenario = std.mem.span(raw_scenario);
+        const known_codex_scenario = std.mem.eql(u8, scenario, "resume-pointer") or
+            std.mem.eql(u8, scenario, "resume-keyboard") or
+            std.mem.eql(u8, scenario, "reveal-pointer") or
+            std.mem.eql(u8, scenario, "reveal-keyboard") or
+            std.mem.eql(u8, scenario, "reveal-recheck-pointer");
+        const raw = switch (provider) {
+            .codex => if (known_codex_scenario)
+                std.c.getenv("MARU_AGENT_SESSION_ARCHIVE_SMOKE_FAKE_CODEX")
+            else
+                null,
+            .claude => if (std.mem.eql(u8, scenario, "claude-resume-pointer"))
+                std.c.getenv("MARU_AGENT_SESSION_ARCHIVE_SMOKE_FAKE_CLAUDE")
+            else
+                null,
+        } orelse return null;
+        const path = std.mem.span(raw);
+        if (!std.fs.path.isAbsolute(path)) return null;
+        return path;
+    }
+
+    fn archiveSmokeScenarioIs(expected: []const u8) bool {
+        const enabled = std.c.getenv("MARU_AGENT_SESSION_ARCHIVE_SMOKE") orelse return false;
+        if (!std.mem.eql(u8, std.mem.span(enabled), "1")) return false;
+        const raw = std.c.getenv("MARU_AGENT_SESSION_ARCHIVE_SMOKE_SCENARIO") orelse return false;
+        return std.mem.eql(u8, std.mem.span(raw), expected);
     }
 
     /// Explicit archive-log action. The pending external-open ABI is shared
@@ -6263,6 +6350,51 @@ pub const AppSession = struct {
         self.agent_session_archive_detail_request_id +%= 1;
         if (self.agent_session_archive_detail_request_id == 0) self.agent_session_archive_detail_request_id = 1;
         return self.agent_session_archive_detail_request_id;
+    }
+
+    /// The AppKit archive smoke is allowed to coordinate a deterministic detail
+    /// read, but production configuration and normal input never arm this
+    /// backend-only gate.  Keeping this narrow seam on AppSession means Swift
+    /// cannot mutate archive detail state or invoke an action directly.
+    pub fn setAgentSessionArchiveDetailSmokeGate(self: *AppSession, blocked: bool) void {
+        if (!self.agent_session_archive_initialized) return;
+        self.agent_session_archive_detail_backend.setTestGate(blocked);
+    }
+
+    pub fn agentSessionArchiveDetailSmokeGateReached(self: *const AppSession) bool {
+        if (!self.agent_session_archive_initialized) return false;
+        return self.agent_session_archive_detail_backend.testGateReached();
+    }
+
+    /// Read-only stale-action evidence for the closed AppKit fixture. A zero value is also the
+    /// normal product state; the counter is incremented only under the named smoke scenario.
+    pub fn agentSessionArchiveSmokeStaleRevealCount(self: *const AppSession) u32 {
+        return self.agent_session_archive_smoke_stale_reveal_count;
+    }
+
+    /// Closed-fixture evidence that the normal archive-detail path retained a parsed Claude
+    /// model. The host receives only a boolean: it cannot read model text, session ids, paths,
+    /// or mutate archive state.
+    pub fn agentSessionArchiveSmokeClaudeModelPresent(self: *const AppSession) bool {
+        const archive_tab = self.activeArchiveSessionTabConst() orelse return false;
+        return archive_tab.record.parsed.provider == .claude and archive_tab.record.parsed.model.len > 0;
+    }
+
+    /// Smoke host가 정적 좌표를 추측하지 않게, 마지막으로 **성공적으로 paint/publish된**
+    /// action tree에서만 한 target의 rect를 돌려준다. 이 함수는 refresh, worker, selection,
+    /// action resolve를 호출하지 않는 read-only observer다.
+    pub fn agentSessionArchiveSmokeProbe(
+        self: *const AppSession,
+        target: AgentSessionArchiveSmokeProbeTarget,
+    ) AgentSessionArchiveSmokeProbe {
+        switch (target) {
+            .session_dock_card => return self.agentSessionDockSmokeProbe(),
+            .archive_resume => return self.archiveDetailSmokeProbe(.resume_session),
+            .archive_reveal_log => return self.archiveDetailSmokeProbe(.reveal_log),
+            .archive_focus_live => return self.archiveDetailSmokeProbe(.focus_live),
+            .dock_agent_sessions => return self.agentSessionDockSwitcherSmokeProbe(),
+            .dock_launcher => return self.dockLauncherSmokeProbe(),
+        }
     }
 
     /// Finds and focuses an existing read-only tab for the exact archive file.
@@ -22118,11 +22250,14 @@ pub const AppSession = struct {
                         },
                     };
                 }
-                if (self.dock.view == .agent_sessions) {
+                if (self.dock.view == .agent_sessions and layout_math.pointInRect(x_px, y_px, dg.dock)) {
                     // Primary down only arms the completed component tree. The matching up below
                     // is the one place that resolves and applies an archive intent, so a drag or
                     // a snapshot replacement cannot open a session merely because the pointer
-                    // first touched a card.
+                    // first touched a card.  This must be limited to the dock rect: an archive
+                    // detail tab can remain visible while the session dock stays open, and an
+                    // earlier unconditional return there swallowed its detail-card down event
+                    // before `archive_detail_interaction` could arm the matching up action.
                     _ = self.agentSessionDockPointer(.down, x_px, y_px);
                     return;
                 }
@@ -26997,9 +27132,7 @@ pub const AppSession = struct {
     /// 그래서 이 함수는 error를 내지 않는다.
     fn pollAgentTranscript(self: *AppSession, term: *Term, displayed: bool) void {
         if (term.agent_kind == .none) return;
-        const cwd = term.rt.observation.cwd.items;
         const cache = &term.agent_transcript;
-        if (cwd.len == 0) return;
         const now = self.awakeMs();
         if (cache.last_poll_ms != 0 and now -| cache.last_poll_ms < transcript_poll_interval_ms) return;
         cache.last_poll_ms = now;
@@ -27010,7 +27143,14 @@ pub const AppSession = struct {
         // (code-review max). 프롬프트는 1행 안에서 자리를 바꿀 뿐이라 줄 수에 영향이 없다.
         // **provider가 밝힌 세션 신원**을 먼저 확보한다(§7.2 채택안). 얻으면 그 값으로 파일을 확정하고, 못 얻으면
         // 아래 provider 경로가 활동 상관 폴백으로 내려간다. 자식이 떠 있는 순간에만 읽히므로 캐시가 필수다.
+        // The provider-native identity is also the authority for the archive detail's exact
+        // live-Term action.  It must not depend on a shell OSC-7 CWD report: an agent launched
+        // before its shell integration emits CWD can still be the already-open session the user
+        // asked to return to.  Transcript path lookup below does require CWD, so keep that
+        // optional enrichment separate from identity observation.
         self.refreshAgentSessionIdentity(term);
+        const cwd = term.rt.observation.cwd.items;
+        if (cwd.len == 0) return;
         const had_reply = cache.owned.reply().len > 0;
         // provider마다 다른 건 **경로 규칙·신원 확인·레코드 모양** 셋뿐이다(§7.3). 매핑 규율(고정하지 않음)·throttle·
         // 재투영은 여기 공통으로 남는다.
@@ -31303,6 +31443,83 @@ pub const AppSession = struct {
         return .{ .intent = table.resolve(action_id, generation), .visual_changed = visual_changed };
     }
 
+    fn agentSessionDockSmokeProbe(self: *const AppSession) AgentSessionArchiveSmokeProbe {
+        if (self.dock.view != .agent_sessions or !self.dockVisible()) return .{};
+        const content = self.dockGeometry().tree_content;
+        for (self.agent_session_dock_actions.items) |action| {
+            switch (action.intent) {
+                .select_card => {},
+                else => continue,
+            }
+            if (action.snapshot_generation != self.agent_session_dock_snapshot_generation) continue;
+            for (self.agent_session_dock_entries.items) |entry| {
+                const ui_action = entry.action orelse continue;
+                if (ui_action.id != action.action_id) continue;
+                const visible = smokeProbeVisibleRect(entry) orelse continue;
+                return .{
+                    .request_id = self.agent_session_dock_snapshot_generation,
+                    .x_px = @as(f32, @floatFromInt(content.x)) + visible.x,
+                    .y_px = @as(f32, @floatFromInt(content.y)) + visible.y,
+                    .width_px = visible.width,
+                    .height_px = visible.height,
+                    .present = true,
+                    .enabled = ui_action.enabled,
+                };
+            }
+        }
+        return .{};
+    }
+
+    /// The fixture enters the list through exactly the same view-switcher slot as a user click.
+    /// This is geometry-only: it neither changes `dock.view` nor starts a scan. The normal mouse
+    /// dispatcher remains the sole authority that turns the later physical click into `setDockView`.
+    fn agentSessionDockSwitcherSmokeProbe(self: *const AppSession) AgentSessionArchiveSmokeProbe {
+        if (!self.dockVisible() or self.cell_width_px == 0) return .{};
+        const bar = self.dockGeometry().view_bar;
+        const slot = dock_view_bar.slotRect(
+            .{ .x = bar.x, .y = bar.y, .w = bar.w, .h = bar.h },
+            self.cell_width_px,
+            2,
+        ) orelse return .{};
+        if (slot.w == 0 or slot.h == 0) return .{};
+        return .{
+            .x_px = @floatFromInt(slot.x),
+            .y_px = @floatFromInt(slot.y),
+            .width_px = @floatFromInt(slot.w),
+            .height_px = @floatFromInt(slot.h),
+            .present = true,
+            .enabled = true,
+        };
+    }
+
+    /// A cold app starts with its dock hidden.  The fixture must enter through the same titlebar
+    /// control a user uses before it can click the session view switcher; returning this geometry
+    /// does not open the dock or request a file picker.
+    fn dockLauncherSmokeProbe(self: *const AppSession) AgentSessionArchiveSmokeProbe {
+        const rect = self.filePanelDockControlRect() orelse return .{};
+        return .{
+            .x_px = @floatFromInt(rect.x),
+            .y_px = @floatFromInt(rect.y),
+            .width_px = @floatFromInt(rect.w),
+            .height_px = @floatFromInt(rect.h),
+            .present = true,
+            .enabled = true,
+        };
+    }
+
+    /// A probe coordinate is only useful if the regular pointer dispatcher can hit it. The
+    /// published tree's effective clip is therefore intersected here rather than returning an
+    /// offscreen portion of a virtualized/partially scrolled action rect.
+    fn smokeProbeVisibleRect(entry: chrome.ui.tree.RectEntry) ?chrome.ui.layout.UiRect {
+        const clip = entry.effective_clip orelse return entry.rect;
+        const left = @max(entry.rect.x, clip.x);
+        const top = @max(entry.rect.y, clip.y);
+        const right = @min(entry.rect.x + entry.rect.width, clip.x + clip.width);
+        const bottom = @min(entry.rect.y + entry.rect.height, clip.y + clip.height);
+        if (!(right > left and bottom > top)) return null;
+        return .{ .x = left, .y = top, .width = right - left, .height = bottom - top };
+    }
+
     /// Pointer의 backing-px를 component-local px로 한 번만 변환해 같은 completed
     /// SessionDock tree에 lifecycle event를 보낸다. 예전 archive 행 번호 계산을 병행하지
     /// 않으므로 카드가 둥근 여백/가변 높이로 바뀌어도 "보이는 곳 = 눌리는 곳"이 유지된다.
@@ -31367,6 +31584,13 @@ pub const AppSession = struct {
     fn activeArchiveSessionTab(self: *AppSession) ?*ArchiveSessionTab {
         if (!self.surface_initialized or self.tabs.items.len == 0) return null;
         return self.activePane().activeTerm().rt.archive_session_tab;
+    }
+
+    fn activeArchiveSessionTabConst(self: *const AppSession) ?*const ArchiveSessionTab {
+        if (!self.surface_initialized or self.tabs.items.len == 0) return null;
+        const tab = self.tabs.items[self.app_window.active_tab];
+        const pane = tab.panes.items[tab.active_pane];
+        return pane.terms.items[pane.active_term].rt.archive_session_tab;
     }
 
     fn archiveSessionTermIsActive(self: *const AppSession, term: *const Term) bool {
@@ -31489,13 +31713,48 @@ pub const AppSession = struct {
         return null;
     }
 
+    fn archiveDetailSmokeProbe(
+        self: *const AppSession,
+        wanted: chrome.components.archive_detail.ids.Intent,
+    ) AgentSessionArchiveSmokeProbe {
+        const archive_tab = self.activeArchiveSessionTabConst() orelse return .{};
+        if (self.archive_detail_request_id != archive_tab.request_id) return .{};
+        const state: u32 = switch (archive_tab.state) {
+            .loading => 1,
+            .ready => 2,
+            .stale => 3,
+            .unavailable => 4,
+        };
+        for (self.archive_detail_actions.items) |action| {
+            if (action.intent != wanted or action.snapshot_generation != archive_tab.request_id) continue;
+            for (self.archive_detail_entries.items) |entry| {
+                const ui_action = entry.action orelse continue;
+                if (ui_action.id != action.action_id) continue;
+                const visible = smokeProbeVisibleRect(entry) orelse continue;
+                return .{
+                    .request_id = archive_tab.request_id,
+                    .x_px = @as(f32, @floatFromInt(self.active_pane_rect.x)) + visible.x,
+                    .y_px = @as(f32, @floatFromInt(self.active_pane_rect.y)) + visible.y,
+                    .width_px = visible.width,
+                    .height_px = visible.height,
+                    .state = state,
+                    .present = true,
+                    .enabled = action.enabled and ui_action.enabled,
+                };
+            }
+        }
+        return .{ .request_id = archive_tab.request_id, .state = state };
+    }
+
     fn applyArchiveDetailIntent(self: *AppSession, intent: chrome.components.archive_detail.ids.Intent) void {
         const archive_tab = self.activeArchiveSessionTab() orelse return;
         switch (intent) {
             .resume_session => self.resumeAgentSessionInNewTerm(&archive_tab.record) catch {
                 self.showNotice("세션을 다시 시작하지 못했습니다. Claude 또는 Codex CLI 설치와 작업 경로를 확인하세요.");
             },
-            .reveal_log => self.revealAgentSessionArchiveLog(&archive_tab.record) catch {
+            .reveal_log => self.revealAgentSessionArchiveLog(&archive_tab.record) catch |err| {
+                if (err == error.StaleArchiveSource and archiveSmokeScenarioIs("reveal-recheck-pointer"))
+                    self.agent_session_archive_smoke_stale_reveal_count +%= 1;
                 self.showNotice("로그 원본이 변경되었거나 더 이상 열 수 없습니다.");
             },
             .focus_live => if (!self.focusLiveArchiveSession(archive_tab)) {
@@ -63786,6 +64045,23 @@ test "SessionDock published tree dispatches hover/down/up once and rejects a rec
     }};
     try std.testing.expect(AppSession.agentSessionDockFrameEql(&entries, &actions, &entries, &actions));
     try std.testing.expect(!AppSession.agentSessionDockFrameEql(&entries, &actions, &entries, &changed_actions));
+}
+
+test "archive smoke probe returns only the pointer-hittable clipped capability rect" {
+    const entry = chrome.ui.tree.RectEntry{
+        .id = 1,
+        .parent_index = null,
+        .kind = .card,
+        .rect = .{ .x = 10, .y = 20, .width = 80, .height = 40 },
+        .effective_clip = .{ .x = 30, .y = 25, .width = 25, .height = 20 },
+        .action = .{ .id = 1 },
+        .visual = .{ .card = .{ .variant = .surface, .paint = .{} } },
+    };
+    try std.testing.expectEqual(chrome.ui.layout.UiRect{ .x = 30, .y = 25, .width = 25, .height = 20 }, AppSession.smokeProbeVisibleRect(entry).?);
+
+    var hidden = entry;
+    hidden.effective_clip = .{ .x = 100, .y = 100, .width = 1, .height = 1 };
+    try std.testing.expect(AppSession.smokeProbeVisibleRect(hidden) == null);
 }
 
 // Archive detail uses the same input primitive but has source-affecting intents. This focused

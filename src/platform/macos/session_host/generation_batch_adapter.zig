@@ -203,6 +203,7 @@ comptime {
 }
 
 test "CR3a-2b2 batch adapter rejects copy foreign slot and wrong thread before mutation" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
     const allocator = std.testing.allocator;
     const framing = @import("framing.zig");
     const Owner = struct {

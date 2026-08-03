@@ -712,6 +712,7 @@ fn addOwnedClient(pool: *AdapterPool, allocator: std.mem.Allocator, source: *cli
 
 test "remote term backend: drives a real host runtime through the TermRuntimeBackend contract" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try HostAdapter.initializeProcessRuntime();
     const allocator = testing.allocator;
     const io = testing.io;
 
@@ -837,6 +838,7 @@ test "remote term backend: drives a real host runtime through the TermRuntimeBac
 
 test "remote term backend: two daemon pool routes exact hosts and retiring A preserves B" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try HostAdapter.initializeProcessRuntime();
     const allocator = testing.allocator;
     const io = testing.io;
 

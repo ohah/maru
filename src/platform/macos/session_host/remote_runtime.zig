@@ -2008,6 +2008,7 @@ test "remote runtime: new spawn config fails closed against a legacy daemon that
 }
 
 test "remote runtime: advertised selected-text capability with a missing response field fails the connection closed" {
+    try host_adapter_mod.HostAdapter.initializeProcessRuntime();
     const allocator = std.testing.allocator;
     var client = client_mod.Client{
         .allocator = allocator,
@@ -2431,6 +2432,7 @@ test "remote runtime: GUI metadata ingress drops malformed and fail-closes resou
 }
 
 test "remote runtime: actual GUI attach resource failure closes and preserves existing cache" {
+    try host_adapter_mod.HostAdapter.initializeProcessRuntime();
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     var processes: std.Io.Writer.Allocating = .init(allocator);
@@ -2530,6 +2532,7 @@ test "remote runtime: actual GUI attach resource failure closes and preserves ex
 }
 
 test "CR3a-2a committed GUI attach rolls back generation ownership when snapshot EOF follows" {
+    try host_adapter_mod.HostAdapter.initializeProcessRuntime();
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const body =
@@ -2670,6 +2673,7 @@ const SnapshotFreeReentryProbe = struct {
 };
 
 test "CR3a-2c1 generation GUI attach applies an initial snapshot through its final owner" {
+    try host_adapter_mod.HostAdapter.initializeProcessRuntime();
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const response_body =
@@ -2783,6 +2787,7 @@ test "CR3a-2c1 generation GUI attach applies an initial snapshot through its fin
 }
 
 test "CR3a-2c1 malformed generation snapshot poisons before exact attachment rollback" {
+    try host_adapter_mod.HostAdapter.initializeProcessRuntime();
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const response = try framing.encodeFrame(

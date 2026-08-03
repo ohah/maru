@@ -197,6 +197,7 @@ comptime {
 }
 
 test "host adapter classifies current and N-1 without exposing N-1 as a current screen client" {
+    try HostAdapter.initializeProcessRuntime();
     const allocator = std.testing.allocator;
     var current_client: client_mod.Client = .{
         .allocator = allocator,
@@ -232,6 +233,7 @@ test "host adapter classifies current and N-1 without exposing N-1 as a current 
 }
 
 test "host adapter validation failure preserves Client ownership and destination publication" {
+    try HostAdapter.initializeProcessRuntime();
     const allocator = std.testing.allocator;
     var source: client_mod.Client = .{
         .allocator = allocator,
@@ -251,6 +253,7 @@ test "host adapter validation failure preserves Client ownership and destination
 }
 
 test "copied host adapter rejects access before reading a freed generation node" {
+    try HostAdapter.initializeProcessRuntime();
     const allocator = std.testing.allocator;
     var source: client_mod.Client = .{
         .allocator = allocator,
@@ -269,6 +272,7 @@ test "copied host adapter rejects access before reading a freed generation node"
 
 test "all copied host adapter public entrypoints fail-stop before freed-node access" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    try HostAdapter.initializeProcessRuntime();
     const allocator = std.testing.allocator;
     var source: client_mod.Client = .{
         .allocator = allocator,

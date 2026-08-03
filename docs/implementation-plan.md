@@ -966,11 +966,15 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    이 prepare 단계에서 예약하지 않으며 실제 reservation은 첫
    allocator callback 전에 수행하는 commit gate가 소유한다. 아직 target detach/stable compaction, callback cleanup, post-validation,
    quarantine reservation/commit과 poison suffix, transport/GUI 제품 배선은 구현하지 않았으므로 2c2 완료를 주장하지 않는다.
-   **2c2b3a(계획)**는 neutral `ended_purge_transaction.zig`가 target bitset의 stable source/target/survivor ordinal과 b2-provided
+   **2c2b3a(구현)**는 neutral `ended_purge_transaction.zig`가 target bitset의 stable source/target/survivor ordinal과 b2-provided
    count/byte scalar의 checked survivor 산술만 계산하는 non-owning pure plan이다. pointer-free/copyable `QueueInput`은 source/claimed-target
    count와 source/target bytes만, `QueuePlan=union(enum){pristine,planned:QueueScalars}`는 성공한 source/target/survivor count와 bytes만 가진다.
-   empty success도 planned이며 오류에서는 pristine out을 보존한다. ephemeral `DispositionCursor`만 bitset을 borrow하고
-   stable `{source ordinal,target-or-survivor ordinal}`을 반환한다. plan/step의 address·allocator·payload pointer·scratch reference와 seal
+   empty success도 planned이며 오류에서는 입력 out을 byte-for-byte 보존한다(pristine 실패는 pristine, occupied 실패는 기존 값 유지).
+   검증 우선순위는 destination→count→target map→checked arithmetic이고 `max_items<=4,096`, 비용은
+   `O(source_count + ceil(max_items / word bits))`다. ephemeral `DispositionCursor`만 bitset을 borrow해 stable
+   `{source ordinal,target-or-survivor ordinal}`을 반환하고 위조 ordinal/count는 typed error로 fail-close하며 완주 상태는
+   `validateComplete()`가 target map/count/ordinal을 typed 재검증한다. caller의 targets/out non-alias는 b3b actual preflight가 재검증한다. plan/step의
+   address·allocator·payload pointer·scratch reference와 seal
    mint/검증은 0이다. `buildQueuePlan` error set은 `InvalidCount|InvalidTargetMap|ArithmeticOverflow|DestinationOccupied`다. Client/allocator callback/quarantine import, scratch·queue·process mutation,
    owner freeze, allocation/free와 permit/receipt consume은 0이다. **2c2b3b(계획)**가 private scratch의 immutable/no-escape 원본 descriptor를
    cleanup authority로 사용해 exact preparation revalidation부터 reservation, receipt tombstone, stable compaction/counter publication,

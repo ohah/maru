@@ -14,6 +14,7 @@ pub const input = @import("chrome/input.zig");
 pub const ui = struct {
     pub const layout = @import("chrome/ui/layout.zig");
     pub const style = @import("chrome/ui/style.zig");
+    pub const typography = @import("chrome/ui/typography.zig");
     pub const tree = @import("chrome/ui/tree.zig");
     pub const interaction = @import("chrome/ui/interaction.zig");
     pub const paint_style = @import("chrome/ui/paint_style.zig");

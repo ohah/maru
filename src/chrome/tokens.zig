@@ -34,8 +34,17 @@ fn insetBg(panel: Rgb) Rgb {
     return if (lum < 128) darkenRgb(panel, 14) else lightenRgb(panel, 14);
 }
 
-/// 색 역할(semantic). 컴포넌트는 역할만 알고, 실제 Rgb는 토큰이 준다. divider/focus_accent/drop_zone은
-/// 현재 sidebar_active를 공유하지만 rich에서 분리할 수 있게 별도 role로 둔다.
+/// Panel 경계선은 interactive active color에서 파생하지 않는다. active와 panel의 우연한 조합(예:
+/// panel=40, active=64, active-24=40)이 1px rule을 배경과 완전히 같게 만들어 목록 경계가 사라졌기
+/// 때문이다. 명암 반대 방향의 작은 이동은 dark/light panel 모두에서 semantic divider가 배경과 다름을
+/// 보장하며 tui/rich가 같은 content hierarchy를 유지하게 한다.
+fn dividerBg(panel: Rgb) Rgb {
+    const lum: u16 = (@as(u16, panel.r) * 77 + @as(u16, panel.g) * 150 + @as(u16, panel.b) * 29) >> 8;
+    return if (lum < 128) lightenRgb(panel, 16) else darkenRgb(panel, 16);
+}
+
+/// 색 역할(semantic). 컴포넌트는 역할만 알고, 실제 Rgb는 토큰이 준다. divider는 panel background 대비에서
+/// 오고, focus_accent/drop_zone은 rich에서 분리할 수 있게 별도 role로 둔다.
 pub const ColorRole = enum {
     surface_bg,
     surface_fg,
@@ -148,8 +157,9 @@ pub const Tokens = struct {
     border: Border = .{},
 
     /// tui 토큰셋: resolved 테마(chrome-중립 ThemeColors)에서 15개 ColorRole을 채운다 — **역할→색 매핑의 단일
-    /// 출처**. focus_accent/tab_*/drop_zone은 sidebar_active를 공유하고, divider만 sidebar_background에서 살짝 밝은 은은한 색이다(렌더 sidebarActiveBg와 같은
-    /// 출처), rich(C4)는 토큰셋만 바꿔 분리한다. muted_fg는 C0에선 sidebar_foreground. initFill 기본값은 15역할을
+    /// 출처**. focus_accent/tab_*/drop_zone은 sidebar_active를 공유하고, divider는 sidebar_background의 명암
+    /// 반대 방향으로 파생해 light/dark 모두에서 panel과 다른 RGB를 보장한다. rich도 divider의 출처를 바꾸지 않는다.
+    /// muted_fg는 C0에선 sidebar_foreground. initFill 기본값은 15역할을
     /// 전부 명시 set하므로 실제로 안 쓰이지만(foreground로 채워 둠) EnumArray 초기화에 필요하다.
     pub fn tui(theme: ThemeColors) Tokens {
         var palette = std.EnumArray(ColorRole, Rgb).initFill(theme.foreground);
@@ -160,7 +170,7 @@ pub const Tokens = struct {
         palette.set(.tab_active_bg, theme.sidebar_active);
         palette.set(.tab_hover_bg, theme.sidebar_active);
         palette.set(.row_hover_bg, theme.sidebar_active);
-        palette.set(.divider, lightenRgb(theme.sidebar_background, 14)); // 박스 배경에서 살짝 밝은 은은한 구분선(표 경계선·모달 외곽선·pane 분할선 공용) — 예전 sidebar_active(강조)는 너무 도드라졌다
+        palette.set(.divider, dividerBg(theme.sidebar_background));
         palette.set(.focus_accent, theme.sidebar_active);
         palette.set(.drop_zone, theme.sidebar_active);
         palette.set(.search_match, theme.search_match);
@@ -176,13 +186,13 @@ pub const Tokens = struct {
         return .{ .palette = palette };
     }
 
-    /// rich 토큰셋(C4a): tui 색에서 출발해 tui가 sidebar_active로 **공유**하던 role(divider/focus_accent/drop_zone/
-    /// tab_hover_bg)을 분리된 파생색으로 채운다 — divider 약간 어둡게, focus_accent 밝게, drop_zone 밝게, tab_hover 어둡게,
+    /// rich 토큰셋(C4a): tui 색에서 출발해 tui가 sidebar_active로 **공유**하던 role(focus_accent/drop_zone/
+    /// tab_hover_bg)을 분리된 파생색으로 채운다. divider는 panel 대비 semantic role이라 tui 값 그대로 유지하고,
+    /// focus_accent 밝게, drop_zone 밝게, tab_hover 어둡게,
     /// muted_fg 더 흐리게. 컴포넌트는 같은 role을 읽으므로 코드 불변(테마=토큰셋 교체). 둥근 모서리(C4b)는 space.corner_radius_px/border_width_px로 분리(tui=0 → 직각·셀 fill).
     /// 그라데이션·shadow는 후속. 색 파생은 lightenRgb/darkenRgb(neutral, config import 없이).
     pub fn rich(theme: ThemeColors) Tokens {
         var tk = tui(theme);
-        tk.palette.set(.divider, darkenRgb(theme.sidebar_active, 24));
         tk.palette.set(.focus_accent, lightenRgb(theme.sidebar_active, 40));
         tk.palette.set(.drop_zone, lightenRgb(theme.sidebar_active, 16));
         tk.palette.set(.tab_hover_bg, darkenRgb(theme.sidebar_active, 12));
@@ -248,7 +258,7 @@ test "Tokens.tui maps resolved theme colors to the semantic roles" {
     try std.testing.expectEqual(c.rgb(0, 0, 0), tk.get(.inset_bg)); // dark surface는 한 단계 recessed
     try std.testing.expectEqual(c.rgb(3, 3, 3), tk.get(.surface_fg));
     try std.testing.expectEqual(c.rgb(4, 4, 4), tk.get(.focus_accent)); // sidebar_active 공유
-    try std.testing.expectEqual(c.rgb(16, 16, 16), tk.get(.divider)); // sidebar_background(2) lighten 14 = 16 — 은은한 구분선(sidebar_active 공유 아님)
+    try std.testing.expectEqual(c.rgb(18, 18, 18), tk.get(.divider)); // sidebar_background(2) 대비 파생 = 18
     try std.testing.expectEqual(c.rgb(8, 8, 8), tk.get(.cursor));
 }
 
@@ -311,9 +321,9 @@ test "Tokens.rich separates the sidebar_active-shared roles into derived colors 
     };
     const t = Tokens.tui(theme);
     const r = Tokens.rich(theme);
-    // tui: focus_accent/drop_zone/tab_hover_bg = sidebar_active(공유), divider = sidebar_background lighten(은은). rich: 분리 파생.
-    try std.testing.expectEqual(c.rgb(34, 34, 34), t.get(.divider)); // sidebar_background(20) lighten 14 = 34
-    try std.testing.expectEqual(c.rgb(76, 76, 76), r.get(.divider)); // darken 24
+    // tui: focus_accent/drop_zone/tab_hover_bg = sidebar_active(공유), divider = panel 대비 파생. rich: interactive role만 분리 파생.
+    try std.testing.expectEqual(c.rgb(36, 36, 36), t.get(.divider)); // sidebar_background(20) 대비 파생 = 36
+    try std.testing.expectEqual(c.rgb(36, 36, 36), r.get(.divider)); // rich도 panel 대비 규칙 유지
     try std.testing.expectEqual(c.rgb(140, 140, 140), r.get(.focus_accent)); // lighten 40
     try std.testing.expectEqual(c.rgb(116, 116, 116), r.get(.drop_zone)); // lighten 16
     try std.testing.expectEqual(c.rgb(88, 88, 88), r.get(.tab_hover_bg)); // darken 12
@@ -325,6 +335,34 @@ test "Tokens.rich separates the sidebar_active-shared roles into derived colors 
     try std.testing.expectEqual(t.get(.surface_bg), r.get(.surface_bg));
     try std.testing.expectEqual(t.get(.cursor), r.get(.cursor));
     try std.testing.expectEqual(t.get(.search_match), r.get(.search_match));
+}
+
+test "divider is always distinct from the panel in tui and rich, including the prior active collision" {
+    const c = struct {
+        fn rgb(value: u8) Rgb {
+            return .{ .r = value, .g = value, .b = value };
+        }
+        fn theme(background: u8, active: u8) ThemeColors {
+            return .{
+                .foreground = rgb(220),
+                .sidebar_background = rgb(background),
+                .sidebar_foreground = rgb(180),
+                .sidebar_active = rgb(active),
+                .search_match = rgb(5),
+                .search_match_current = rgb(6),
+                .selection = rgb(7),
+                .cursor = rgb(8),
+                .accent = rgb(9),
+            };
+        }
+    };
+    inline for ([_]ThemeColors{ c.theme(40, 64), c.theme(240, 180), c.theme(0, 255), c.theme(255, 0) }) |theme| {
+        const tui = Tokens.tui(theme);
+        const rich = Tokens.rich(theme);
+        try std.testing.expect(!std.meta.eql(tui.get(.divider), tui.get(.surface_bg)));
+        try std.testing.expect(!std.meta.eql(rich.get(.divider), rich.get(.surface_bg)));
+        try std.testing.expectEqual(tui.get(.divider), rich.get(.divider));
+    }
 }
 
 test "Tokens.rich sets box-shape tokens (radius/border) while tui keeps 0" {

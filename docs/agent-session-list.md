@@ -83,14 +83,18 @@ identity는 바꾸지 않으며, `SessionDock`의 같은 completed `UiRectTree`�
 - header는 title(강조) → count(secondary)의 좌측 두 줄과 Maru 등록 host SVG + `로컬`/refresh의 우측
   utility cluster를 서로 독립 logical slot으로 둔다. title/count/utility가 한 baseline 또는 terminal
   prompt처럼 보이지 않아야 한다. host+label은 72pt content box, refresh는 20pt trailing slot,
-  둘 사이는 12pt gap이며 이 x 좌표는 terminal cell 폭에서 계산하지 않는다.
+  둘 사이는 12pt gap이며 이 x 좌표는 terminal cell 폭에서 계산하지 않는다. refresh slot의 trailing
+  edge에는 **16pt logical safe inset**을 더 둔다. 이 inset은 backing scale에서만 resolve하며 SVG와
+  spinner의 ink·hit rect가 dock clip 또는 우측 edge에 닿지 않게 한다.
 - scope는 하나의 rounded outlined control이며 selected segment만 lifted background를 갖는다. search는
   같은 radius 계열의 별도 filled field이고 icon·placeholder/query 사이에 최소 1ch 간격을 둔다.
 - group은 위아래 rule과 20pt disclosure slot·8pt label gap·workspace name·count pill을 갖는 독립
   header다. 기본 session row는
   반복된 외곽 card 대신 full-width divider 목록이고, title은 bold, summary는 muted, provider와
   metadata는 마지막 baseline의 두 slot으로 분리한다. 각 row는 최소 6행을 써 title과 summary,
-  metadata가 붙어 보이지 않게 한다.
+  metadata가 붙어 보이지 않게 한다. divider는 interactive active 색이 아니라 panel background에서
+  명암 반대 방향으로 파생한 semantic color를 쓰며, dark/light theme 모두에서 surface background와
+  정확히 같은 RGB가 될 수 없다.
 - 선택/expanded session은 card header와 dark raised detail surface를 한 disclosure 안에 묶는다.
   detail은 outer padding을 가진 inset surface, recent-turn은 role/body 사이 여백, action은 최소
   3행 높이의 같은 baseline 버튼으로 보인다. sibling action에는 최소 `0.5ch` gap을 두고, 각 button은
@@ -189,7 +193,7 @@ layout과 spacing SSOT, 48pt action target·1×/2×/terminal-font capture 판정
   함께 중앙 정렬하고, refresh는 그 오른쪽 12pt gap 뒤의 20pt trailing slot에 둔다. refresh가 실행 중이면 같은 위치의
   control이 spinner로 바뀌며 다시 누른다고 worker를 더 만들지 않는다. refresh는
   group body가 아니고 항상 고정 chrome이다. idle refresh는 registered SVG icon, spinner는 같은
-  trailing slot을 유지한다. 둘 다 header 오른쪽 외곽이 아니라 8pt logical inset 안에 정렬해
+  trailing slot을 유지한다. 둘 다 header 오른쪽 외곽이 아니라 16pt logical safe inset 안에 정렬해
   fallback font 또는 icon ink가 rounded-card clip에 닿지 않게 한다. provider·원격 source 선택기 같은
   별도 filter control은 v1에 추가하지 않는다.
 - Header refresh와 search affordance는 일반 Unicode/fallback font glyph를 쓰지 않고 등록된

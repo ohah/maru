@@ -96,7 +96,7 @@ pub const ColorRole = enum {
     surface_bg, surface_fg, muted_fg,          // 사이드바/패널 기본
     inset_bg,                                  // count pill·inset detail 같은 패널 내부의 한 단계 낮은 표면
     tab_active_bg, tab_hover_bg,               // 탭 밴드
-    divider, focus_accent, drop_zone,          // 현재 sidebar_active 재사용 → rich 위해 분리 role
+    divider, focus_accent, drop_zone,          // divider는 panel-bg 대비 파생, 나머지는 rich 위해 분리 role
     search_match, search_match_current,        // Find 하이라이트
     selection, cursor,                         // 터미널과 공유하는 role(참조만)
 };
@@ -110,7 +110,10 @@ pub const Tokens = struct {
     pub fn rich(resolved: appearance.ResolvedTheme) Tokens { ... }  // C4
 };
 ```
-`appearance.ResolvedTheme`(9 색)는 유지하되, `Tokens.tui()`가 그걸 받아 role+derivation을 채운다. **로더 갭(5 key)은 여기서 config→Tokens로 메운다.**
+`appearance.ResolvedTheme`(9 색)는 유지하되, `Tokens.tui()`가 그걸 받아 role+derivation을 채운다. `ColorRole.divider`를
+소비하는 Chrome component는 `sidebar_active`에서 다시 파생하지 않고 panel background의 루미넌스 반대 방향으로만
+파생한다. 따라서 rich 토큰도 그 divider의 출처를 바꾸지 않으며, active 색과 background의 우연한 조합이
+component divider를 background와 같은 RGB로 만드는 회귀를 막는다. **로더 갭(5 key)은 여기서 config→Tokens로 메운다.**
 
 ### 5.2 ChromeDraw — `chrome/draw.zig` (semantic 어휘, 백엔드 중립)
 컴포넌트의 유일한 출력. **픽셀 좌표**로 표현하고, Metal lowerer가 필요한 셀 경계로 스냅한다.

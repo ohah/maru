@@ -58,6 +58,20 @@ pub const Layer = enum { sidebar, pane_overlay, modal };
 /// 텍스트 한 조각(스타일 변화 단위). 멀티-run은 한 줄 안의 스타일 구간들.
 pub const Run = struct { text: []const u8, bold: bool = false };
 
+/// The component may declare a text-content group without taking ownership of native font
+/// metrics.  Ordinary text keeps `.origin`; the platform text worker resolves the two centred
+/// variants after it knows the actual primary/fallback glyph advance.
+pub const TextPlacement = union(enum) {
+    origin,
+    center_in_rect: Rect,
+    leading_icon_group: struct {
+        content_rect: Rect,
+        icon_codepoint: u21,
+        icon_extent_px: u16,
+        gap_px: u16,
+    },
+};
+
 /// 한 그리기 명령(semantic). 색은 값이 아니라 ColorRole — 백엔드가 토큰으로 해석한다.
 pub const Op = union(enum) {
     fill: Fill,
@@ -101,6 +115,11 @@ pub const Op = union(enum) {
         max_cols: u16 = std.math.maxInt(u16),
         anchor: text_layout.Anchor = .head,
         wide_icons: bool = false,
+        /// Pixel constraint is needed when the worker centres an icon+label group.  `max_cols`
+        /// remains the legacy grid fallback; a rich-only action can preserve the final content
+        /// rect instead of rounding its available width down to terminal cells.
+        max_width_px: ?u32 = null,
+        placement: TextPlacement = .origin,
     };
 
     /// C4b rich 박스 — 둥근 모서리·변별 테두리·solid/gradient 채움. tui 백엔드는 corner/border가 0이면

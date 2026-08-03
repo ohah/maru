@@ -487,6 +487,61 @@ static void maru_fill_glyph_quad(
     memcpy(out, quad, sizeof(quad));
 }
 
+/* B1 rich Chrome text uses the same atlas/premultiplied glyph pipeline as terminal text, but its
+   final rect comes from the component text artifact instead of a cell row/column. Keeping this a
+   distinct DTO prevents a future Button from smuggling sub-cell y through NativeMetalCell. */
+static void maru_fill_rich_glyph_quad(
+    MaruRendererVertex *out,
+    const MaruAppHostGpuGlyph glyph,
+    float drawable_w,
+    float drawable_h
+) {
+    const float left = (glyph.x / drawable_w) * 2.0f - 1.0f;
+    const float right = ((glyph.x + glyph.w) / drawable_w) * 2.0f - 1.0f;
+    const float top = 1.0f - (glyph.y / drawable_h) * 2.0f;
+    const float bottom = 1.0f - ((glyph.y + glyph.h) / drawable_h) * 2.0f;
+    const float fr = (float)((glyph.foreground >> 16) & 0xff) / 255.0f;
+    const float fg = (float)((glyph.foreground >> 8) & 0xff) / 255.0f;
+    const float fb = (float)(glyph.foreground & 0xff) / 255.0f;
+    const MaruRendererVertex quad[6] = {
+        {{left, top}, {glyph.u0, glyph.v0}, {fr, fg, fb}, {0.0f, 0.0f, 0.0f, 0.0f}},
+        {{left, bottom}, {glyph.u0, glyph.v1}, {fr, fg, fb}, {0.0f, 0.0f, 0.0f, 0.0f}},
+        {{right, bottom}, {glyph.u1, glyph.v1}, {fr, fg, fb}, {0.0f, 0.0f, 0.0f, 0.0f}},
+        {{left, top}, {glyph.u0, glyph.v0}, {fr, fg, fb}, {0.0f, 0.0f, 0.0f, 0.0f}},
+        {{right, bottom}, {glyph.u1, glyph.v1}, {fr, fg, fb}, {0.0f, 0.0f, 0.0f, 0.0f}},
+        {{right, top}, {glyph.u1, glyph.v0}, {fr, fg, fb}, {0.0f, 0.0f, 0.0f, 0.0f}},
+    };
+    memcpy(out, quad, sizeof(quad));
+}
+
+static void maru_draw_rich_glyphs(
+    id<MTLRenderCommandEncoder> encoder,
+    MaruMetalRendererImpl *impl,
+    const MaruAppHostGpuGlyph *glyphs,
+    size_t glyph_count,
+    CGSize drawable_size
+) {
+    if (glyphs == NULL || glyph_count == 0 || drawable_size.width <= 0.0 || drawable_size.height <= 0.0) return;
+    if (glyph_count > SIZE_MAX / 6 || glyph_count * 6 > SIZE_MAX / sizeof(MaruRendererVertex)) return;
+    id<MTLBuffer> buffer = [impl.device newBufferWithLength:glyph_count * 6 * sizeof(MaruRendererVertex)
+                                                     options:MTLResourceStorageModeShared];
+    if (buffer == nil) return;
+    MaruRendererVertex *vertices = (MaruRendererVertex *)buffer.contents;
+    size_t count = 0;
+    for (size_t i = 0; i < glyph_count; i++) {
+        if (glyphs[i].layer != 0u || glyphs[i].w <= 0.0f || glyphs[i].h <= 0.0f) continue;
+        maru_fill_rich_glyph_quad(&vertices[count * 6], glyphs[i], (float)drawable_size.width, (float)drawable_size.height);
+        count += 1;
+    }
+    if (count == 0) return;
+    const float opacity = 1.0f;
+    [encoder setRenderPipelineState:impl.pipeline];
+    [encoder setVertexBuffer:buffer offset:0 atIndex:0];
+    [encoder setFragmentBytes:&opacity length:sizeof(float) atIndex:1];
+    [encoder setFragmentTexture:impl.atlas atIndex:0];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:count * 6];
+}
+
 /* C4b: 한 GpuQuad를 6정점 quad로 채운다(out에 6개). 픽셀 bounds를 NDC로 투영하고(셀과 같은 좌상단
    원점 방식) local 픽셀 좌표·half size·radii·border·색을 각 정점에 싣는다. 색 0xAARRGGBB를 rgba(0..1)로
    언팩한다(셰이더가 sRGB로 받아 linear blend). 모양/SDF는 셰이더가 — 여기선 순수 산술뿐(렌더 백엔드
@@ -924,7 +979,9 @@ bool maru_metal_renderer_draw(
     uint32_t cursor_fade_milli,
     uint32_t overlay_cells_present,
     /* 커서 구간 시작(ABI v146) — 근거는 헤더 주석 단일 출처. */
-    size_t cursor_start_in
+    size_t cursor_start_in,
+    const MaruAppHostGpuGlyph *gpu_glyphs,
+    size_t gpu_glyph_count
 ) {
     if (renderer == NULL || terminal_layer == nil || cols == 0 || rows == 0) {
         return false;
@@ -1416,6 +1473,7 @@ bool maru_metal_renderer_draw(
         }
         pass_ctx.encoder = tenc;
         maru_draw_terminal_layer(&pass_ctx);
+        maru_draw_rich_glyphs(tenc, impl, gpu_glyphs, gpu_glyph_count, drawable_size);
         [tenc endEncoding];
         // pass 2: 오버레이(Load — 터미널 결과 위에 합성)
         MTLRenderPassDescriptor *opass = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -1540,6 +1598,7 @@ bool maru_metal_renderer_draw(
     }
     pass_ctx.encoder = tenc;
     maru_draw_terminal_layer(&pass_ctx); // 맨 아래: 터미널 셀·사이드바·chrome·kitty·(모달 없을 때)터미널 커서
+    maru_draw_rich_glyphs(tenc, impl, gpu_glyphs, gpu_glyph_count, drawable_size);
     [tenc endEncoding];
 
     // pass 2: 오버레이 레이어(Clear=투명). 모달만 그리고 나머지는 투명이라 아래 터미널이 비친다. present 대상이

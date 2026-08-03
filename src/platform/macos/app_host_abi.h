@@ -8,7 +8,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 156u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 158u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -342,6 +342,25 @@ typedef struct MaruAppHostGpuShadow {
     uint32_t color;          /* 0xAARRGGBB */
 } MaruAppHostGpuShadow;
 
+/* B1 rich Chrome text의 최종 glyph quad. terminal cell grid와 별개로 backing-pixel rect를
+   전달한다. atlas upload는 기존 raster 채널을 공유한다. layer=0은 terminal physical layer다. */
+typedef struct MaruAppHostGpuGlyph {
+    float x;
+    float y;
+    float w;
+    float h;
+    uint32_t atlas_x_px;
+    uint32_t atlas_y_px;
+    uint32_t atlas_width_px;
+    uint32_t atlas_height_px;
+    float u0;
+    float v0;
+    float u1;
+    float v1;
+    uint32_t foreground;     /* 0x00RRGGBB */
+    uint32_t layer;          /* 0=terminal */
+} MaruAppHostGpuGlyph;
+
 /* kitty graphics 이미지 placement의 GPU 드로우 프리미티브(K2). Zig metal_frame.GpuImage와 1:1. 셀 그리드와
    별개 파이프라인(textured quad)으로, image_id로 캐시된 텍스처를 dest 사각형에 source UV로 그린다. pass(0/1/2)로
    셀배경/텍스트 전후에 그린다. 좌표는 터미널-로컬 backing px(origin_x/y는 split panel 오프셋). */
@@ -482,6 +501,9 @@ typedef struct MaruAppHostMetalFrame {
        불투명하게 그려졌다(=blink 죽음, 포커스 테두리는 상시라 사실상 항상). 시작을 명시로 실어 커서가 버퍼 중간에
        있어도 페이드 pass를 건다 — 렌더러가 본문을 커서 앞/뒤 두 구간으로 나눠 그린다. 끝에 추가해 기존 offset 불변. */
     size_t cursor_start;
+    /* B1: final pixel glyph placements for rich Chrome text. NULL/0 keeps old cell-only draw. */
+    const MaruAppHostGpuGlyph *gpu_glyphs;
+    size_t gpu_glyph_count;
 } MaruAppHostMetalFrame;
 
 uint32_t maru_macos_app_host_abi_version(void);

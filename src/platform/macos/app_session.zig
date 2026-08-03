@@ -110,6 +110,7 @@ pub const MetalRasterUpload = metal_frame.NativeMetalRasterUpload;
 pub const MetalFrame = metal_frame.MetalFrame;
 pub const MetalGpuQuad = metal_frame.GpuQuad;
 pub const MetalGpuShadow = metal_frame.GpuShadow;
+pub const MetalGpuGlyph = metal_frame.GpuGlyph;
 pub const MetalGpuImage = metal_frame.GpuImage;
 pub const MetalGpuImageUpload = metal_frame.GpuImageUpload;
 
@@ -200,7 +201,10 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 156;
+pub const abi_version: u32 = 158;
+// 158: B1 GpuGlyph가 final shared-atlas 재정규화를 위한 original pixel slot을 들게 한다.
+// 157: B1 rich Chrome text final pixel glyph placements(`gpu_glyphs`)를 MetalFrame tail에
+// append한다. terminal NativeMetalCell ABI와 기존 field offset은 그대로 유지한다.
 // 156: AS4-c Claude fixture exposes one boolean that an already-open archive detail has a
 // parsed Claude model. It is read-only evidence and never exposes model/session/path text.
 // 155: AS4-c stale-reveal fixture reads one closed, counter-only result that proves the normal
@@ -2364,6 +2368,12 @@ pub const SessionCollection = struct {
     }
 };
 
+const AgentSessionDockRichTextCache = struct {
+    fingerprint: u64,
+    placements: []chrome_draw_lowering.RichTextArtifact.Placement,
+    records: []renderer.ShapedGlyphRecord,
+};
+
 pub const AppSession = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -2835,6 +2845,9 @@ pub const AppSession = struct {
     gpu_quads: std.ArrayList(metal_frame.GpuQuad) = .empty,
     // C4b 모달: chrome 그림자(GpuShadow) — 모달 배경 blur. per-frame(모달만, renderFrame이 매 프레임 clear).
     gpu_shadows: std.ArrayList(metal_frame.GpuShadow) = .empty,
+    // B1: rich Chrome text의 final pixel glyph placement. 기존 cell DrawList와 분리해 두어 Button/텍스트
+    // artifact가 row/col 절삭 없이 최종 rect를 Metal에 넘길 수 있다. renderFrame이 매 frame clear한다.
+    gpu_glyphs: std.ArrayList(metal_frame.GpuGlyph) = .empty,
     // kitty graphics(K2d): image_id → 렌더러가 마지막으로 업로드한 generation. planImageUploads가 매 frame
     // 비교해 바뀐 것만 업로드 채널에 싣는다(이미지당 개별 텍스처·upload-once). Swift 렌더러 텍스처 캐시의
     // Zig측 미러 — 둘이 desync하면(렌더러 재생성 등) 그 이미지는 다음 transmit까지 안 그려질 뿐이다.
@@ -3009,6 +3022,10 @@ pub const AppSession = struct {
     /// frame. Mouse events consume this snapshot rather than rebuilding archive geometry.
     agent_session_dock_entries: std.ArrayList(chrome.ui.tree.RectEntry) = .empty,
     agent_session_dock_actions: std.ArrayList(chrome.components.session_dock.ids.Entry) = .empty,
+    // B1 rich-text artifact. It owns neither provider data nor native CoreText objects: the
+    // immutable renderer-neutral records let an unchanged dock rebuild atlas/frame ownership
+    // without synchronously shaping text again on the UI frame path.
+    agent_session_dock_rich_text_cache: ?AgentSessionDockRichTextCache = null,
     agent_session_dock_interaction: chrome.ui.interaction.InteractionState = .{},
     agent_session_dock_snapshot_generation: u64 = 1,
     /// Active archive-tab detail uses the same publish-before-input rule as SessionDock, but it
@@ -20233,6 +20250,10 @@ pub const AppSession = struct {
     fn applyMetricsPipeline(self: *AppSession) void {
         self.refreshCellMetrics();
         _ = self.renderer_state.atlas.invalidate(.font_size_changed);
+        // The renderer's FontId registry deliberately lives as long as the atlas. A font family
+        // switch may retain identical cell metrics, so metric-only fingerprinting is insufficient:
+        // discard Chrome shaped records before the next frame can replay an old face identity.
+        self.clearAgentSessionDockRichTextCache();
         if (self.backing_width_px > 0 and self.backing_height_px > 0) {
             const grid = layout_math.gridFromBacking(self.backing_width_px, self.backing_height_px, self.cell_width_px, self.cell_height_px, self.sidebar_width_px, self.gridPadding());
             self.resizeActiveTabPanes() catch {};
@@ -20243,6 +20264,14 @@ pub const AppSession = struct {
         // 폰트 크기가 바뀌었으니 열린 파일 패널 webview도 같은 크기로 따라오게 signal(§2.3). setFontSize(⌘+/−)·
         // applyAppearance(config)가 공유하는 초크포인트라 여기 한 곳에서 세운다. Swift가 tick마다 drain한다.
         self.file_panel_zoom_dirty = true;
+    }
+
+    fn clearAgentSessionDockRichTextCache(self: *AppSession) void {
+        if (self.agent_session_dock_rich_text_cache) |cache| {
+            self.allocator.free(cache.placements);
+            self.allocator.free(cache.records);
+            self.agent_session_dock_rich_text_cache = null;
+        }
     }
 
     /// 파일 패널 webview 줌 배율을 milli(1000=1.0)로 반환한다 — 프리뷰 iframe `zoom`·HTML/PDF `pageZoom`이 쓴다.
@@ -26927,6 +26956,9 @@ pub const AppSession = struct {
         if (scale_changed) {
             self.scale_milli = next_scale;
             self.refreshCellMetrics();
+            // B1 text artifacts key both pixel placement and glyph raster scale. Rebuild from
+            // the resolved appearance rather than replaying a 1x/2x shaped-record cache.
+            self.clearAgentSessionDockRichTextCache();
         }
         // grid(cols/rows)를 Swift가 아니라 app session이 backing 픽셀 + 자기 cell 메트릭에서 직접
         // 계산한다. init이 메트릭을 미리 뽑으므로 cell 크기는 항상 준비돼 있어, Swift가 첫 resize에서
@@ -28190,7 +28222,7 @@ pub const AppSession = struct {
             // (정상 경로에선 placeAndDistribute가 collected를 비운다).
             var collected: std.ArrayList(CollectedPane) = .empty;
             defer {
-                for (collected.items) |*c| c.pane.deinit(self.allocator);
+                for (collected.items) |*c| c.deinit(self.allocator);
                 collected.deinit(self.allocator);
             }
             // 활성 panel: macOS면 shapeOnly까지만(atlas 무접촉) — 아래 멀티 페인 collect(.active)로 합류해 다른
@@ -28391,6 +28423,7 @@ pub const AppSession = struct {
             self.appendSidebarScrollbar(); // 사이드바 우측 thumb(워크스페이스 카드가 뷰포트 넘칠 때만) — 단일 트랙 fade
             self.appendFileTreeScrollbar(); // 탐색기 overflow-only thumb — render/hit/drag 공용 geometry
             self.gpu_shadows.clearRetainingCapacity(); // C4b 모달: 그림자도 per-frame — 매 프레임 비우고 lowering이 재채움.
+            self.gpu_glyphs.clearRetainingCapacity(); // B1: final pixel text도 completed frame 단위로만 보관한다.
             var overlay_frame: ?metal_frame.PaneFrame = null;
             defer if (overlay_frame) |*pf| pf.frame.deinit(self.allocator);
             if (builtin.os.tag == .macos) {
@@ -29213,7 +29246,7 @@ pub const AppSession = struct {
                     }
                 }
                 self.appendBellFlashQuad(); // 시각 벨(bell.visual): flash 중이면 전경색 반투명 full-screen quad를 맨 위에(F2-4)
-                if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, sidebar_header_frame, self.sidebar_cells.items, sidebar_colors, pane_chrome.items, pane_overlay.items, overlay_frame, floating_pf, drag_overlay_cells.items, self.gpu_quads.items, self.gpu_shadows.items, kg_images, kg_uploads, kg_pixels, kg_live_ids.items)) |_| {
+                if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, sidebar_header_frame, self.sidebar_cells.items, sidebar_colors, pane_chrome.items, pane_overlay.items, overlay_frame, floating_pf, drag_overlay_cells.items, self.gpu_quads.items, self.gpu_shadows.items, self.gpu_glyphs.items, kg_images, kg_uploads, kg_pixels, kg_live_ids.items)) |_| {
                     self.applySidebarGlyphPyTop(); // 카드 glyph py_top을 rowTop 기반 origin_y로(가변 높이 정합 — SG3b-2-ii)
                     self.metal_dirty = false;
                     self.force_reproject = false; // [A] full 투영이 atlas를 GPU에 정합했으므로 강제 재투영 요구 해제(code-review [0])
@@ -29246,7 +29279,7 @@ pub const AppSession = struct {
             if (builtin.os.tag == .macos) {
                 var collected: std.ArrayList(CollectedPane) = .empty;
                 defer {
-                    for (collected.items) |*c| c.pane.deinit(self.allocator);
+                    for (collected.items) |*c| c.deinit(self.allocator);
                     collected.deinit(self.allocator);
                 }
                 if (self.buildSidebarTitleDrawList()) |dl| {
@@ -31055,6 +31088,13 @@ pub const AppSession = struct {
         pane: coretext_frame_builder.ShapedPane,
         dest: CollectDest,
         builder: coretext_frame_builder.CoreTextFrameBuilder,
+        // B1 rich Chrome text borrows immutable cache-owned component placement until the shared
+        // atlas assigns slots. It is then emitted as GpuGlyphs instead of NativeMetalCells.
+        rich_text: ?chrome_draw_lowering.RichTextArtifact = null,
+
+        fn deinit(self: *CollectedPane, allocator: std.mem.Allocator) void {
+            self.pane.deinit(allocator);
+        }
     };
 
     /// chrome 오버레이의 shape 전 준비 — DrawList + 배치(origin/colors/cursor/clip) + builder(오버레이는 호출자
@@ -31103,6 +31143,71 @@ pub const AppSession = struct {
             }
         }
         self.collectShapedPane(collected, pane, builder, dest);
+    }
+
+    /// B1 rich Chrome cache miss. The only synchronous CoreText call for a semantic dock key is
+    /// made here; after it succeeds we retain renderer-neutral records, never native handles.
+    fn collectRichTextShapedAndCache(
+        self: *AppSession,
+        collected: *std.ArrayList(CollectedPane),
+        dl: renderer.DrawList,
+        artifact: chrome_draw_lowering.RichTextArtifact,
+        fingerprint: u64,
+        builder: coretext_frame_builder.CoreTextFrameBuilder,
+        dest: CollectDest,
+    ) void {
+        const pane = builder.shapeOnly(self.allocator, dl, &self.renderer_state.font_registry) catch {
+            return;
+        };
+        const records = shapedRecordsFromRuns(self.allocator, pane.shaped.runs.glyphs) catch {
+            var failed = pane;
+            failed.deinit(self.allocator);
+            return;
+        };
+        self.clearAgentSessionDockRichTextCache();
+        self.agent_session_dock_rich_text_cache = .{
+            .fingerprint = fingerprint,
+            .placements = artifact.placements,
+            .records = records,
+        };
+        var p = pane;
+        collected.append(self.allocator, .{ .pane = p, .dest = dest, .builder = builder, .rich_text = artifact }) catch {
+            p.deinit(self.allocator);
+        };
+    }
+
+    /// B1 rich Chrome cache hit. `shapeFromRecords` duplicates only per-frame renderer run
+    /// ownership; it does not call CoreText or wait for a font worker.
+    fn collectRichTextFromCache(
+        self: *AppSession,
+        collected: *std.ArrayList(CollectedPane),
+        dl: renderer.DrawList,
+        cache: *const AgentSessionDockRichTextCache,
+        builder: coretext_frame_builder.CoreTextFrameBuilder,
+        dest: CollectDest,
+    ) void {
+        const pane = builder.shapeFromRecords(self.allocator, dl, cache.records) catch return;
+        var p = pane;
+        collected.append(self.allocator, .{ .pane = p, .dest = dest, .builder = builder, .rich_text = .{ .placements = cache.placements } }) catch {
+            p.deinit(self.allocator);
+        };
+    }
+
+    fn shapedRecordsFromRuns(allocator: std.mem.Allocator, runs: []const renderer.GlyphRun) ![]renderer.ShapedGlyphRecord {
+        const out = try allocator.alloc(renderer.ShapedGlyphRecord, runs.len);
+        for (runs, out) |run, *record| record.* = .{
+            .row = run.row,
+            .col = run.col,
+            .cell_width = run.cell_width,
+            .codepoint = run.codepoint,
+            .font_id = run.font_id,
+            .glyph_id = run.glyph_id,
+            .fallback = run.fallback,
+            .replacement = run.replacement,
+            .style = run.style,
+            .color_glyph_kind = run.cache_key.color_glyph_kind,
+        };
+        return out;
     }
 
     /// AS3-a 제품 경계: archive의 immutable projection을 SessionDock component props로만
@@ -31197,7 +31302,41 @@ pub const AppSession = struct {
             cols,
             rows,
         ) catch return;
-        self.collectShaped(collected, dl, builder, .{ .pane = .{
+        const fingerprint = chrome_draw_lowering.richTextFingerprint(
+            draws.ops,
+            &tokens,
+            self.cell_width_px,
+            self.cell_height_px,
+            cols,
+            rows,
+        );
+        if (self.agent_session_dock_rich_text_cache) |*cache| {
+            if (cache.fingerprint == fingerprint) {
+                self.collectRichTextFromCache(collected, dl, cache, builder, .{ .pane = .{
+                    .origin_x = content.x,
+                    .origin_y = content.y,
+                    .colors = colors,
+                } });
+                return;
+            }
+        }
+        const rich_text = chrome_draw_lowering.buildRichTextArtifact(
+            self.allocator,
+            draws.ops,
+            &tokens,
+            self.cell_width_px,
+            self.cell_height_px,
+            cols,
+            rows,
+        ) catch {
+            self.collectShaped(collected, dl, builder, .{ .pane = .{
+                .origin_x = content.x,
+                .origin_y = content.y,
+                .colors = colors,
+            } });
+            return;
+        };
+        self.collectRichTextShapedAndCache(collected, dl, rich_text, fingerprint, builder, .{ .pane = .{
             .origin_x = content.x,
             .origin_y = content.y,
             .colors = colors,
@@ -31303,6 +31442,9 @@ pub const AppSession = struct {
             cols,
             rows,
         ) catch return;
+        // B1-text deliberately leaves direct archive actions on the legacy cell path. The
+        // B1-button migration owns the final button content rect and is the only slice allowed
+        // to switch resume/reveal labels to pixel placement (docs/metal-ui-layout.md §B1).
         self.collectShaped(collected, dl, builder, .{ .pane = .{
             .origin_x = content.x,
             .origin_y = content.y,
@@ -31796,14 +31938,14 @@ pub const AppSession = struct {
         if (collected.items.len == 0) return;
 
         const lists = self.allocator.alloc(renderer.glyph_layout.GlyphRunList, collected.items.len) catch {
-            for (collected.items) |*c| c.pane.deinit(self.allocator);
+            for (collected.items) |*c| c.deinit(self.allocator);
             return;
         };
         defer self.allocator.free(lists);
         for (collected.items, lists) |c, *l| l.* = c.pane.shaped.runs;
 
         const frames = self.renderer_state.placeMultiPane(self.allocator, lists) catch {
-            for (collected.items) |*c| c.pane.deinit(self.allocator);
+            for (collected.items) |*c| c.deinit(self.allocator);
             return;
         };
         defer self.allocator.free(frames);
@@ -31811,9 +31953,52 @@ pub const AppSession = struct {
         for (collected.items, frames) |*c, frame| {
             const rf = c.builder.finishPane(self.allocator, &c.pane, frame, &self.renderer_state) catch {
                 // finishPane 실패: frame은 buildQuadRaster가 정리, pane은 미consume → deinit. 그 페인만 skip.
-                c.pane.deinit(self.allocator);
+                c.deinit(self.allocator);
                 continue;
             };
+            // Once `finishPane` has assigned final atlas slots, the B1 artifact can turn those
+            // slots into pixel glyph placements. If allocation fails we deliberately retain the
+            // normal cell path for this frame rather than publishing a text-less Chrome panel.
+            var rich_text_only = false;
+            var rich_glyph_start: ?usize = null;
+            if (c.rich_text) |*artifact| {
+                const placement: ?PanePlacement = switch (c.dest) {
+                    .pane, .dock_toggle => |p| p,
+                    else => null,
+                };
+                if (placement) |p| {
+                    // Build into an isolated list first. `appendGpuGlyphs` can fail after a
+                    // successful append; publishing that partial list while suppressing cells
+                    // would make a component lose an arbitrary suffix of its text for one
+                    // frame. Commit is therefore all-or-cell-fallback.
+                    var rich_glyphs: std.ArrayList(metal_frame.GpuGlyph) = .empty;
+                    defer rich_glyphs.deinit(self.allocator);
+                    if (artifact.appendGpuGlyphs(
+                        self.allocator,
+                        rf,
+                        self.renderer_state.atlas.config,
+                        self.cell_width_px,
+                        self.cell_height_px,
+                        p.origin_x,
+                        p.origin_y,
+                        &rich_glyphs,
+                    )) |_| {
+                        if (rich_glyphs.items.len > 0) {
+                            if (self.gpu_glyphs.appendSlice(self.allocator, rich_glyphs.items)) |_| {
+                                rich_text_only = true;
+                                rich_glyph_start = self.gpu_glyphs.items.len - rich_glyphs.items.len;
+                            } else |_| {
+                                // Global frame storage allocation also falls back to the original
+                                // NativeMetalCell frame; `rich_glyphs` is discarded by the defer.
+                            }
+                        }
+                    } else |_| {
+                        // Preserve the normal cell path if the rich placement cannot be
+                        // assembled completely for this frame.
+                    }
+                }
+                c.rich_text = null;
+            }
             switch (c.dest) {
                 .sidebar => sidebar_frame.* = rf,
                 .sidebar_header => sidebar_header_frame.* = rf,
@@ -31827,7 +32012,14 @@ pub const AppSession = struct {
                             .colors = p.colors,
                             .clip_rect = p.clip_rect,
                             .role = if (std.meta.activeTag(c.dest) == .dock_toggle) .dock_toggle else .normal,
-                        }) catch {};
+                            .rich_text_only = rich_text_only,
+                        }) catch {
+                            // `GpuGlyph` has no frame owner once it reaches the global Metal
+                            // list. If this pane metadata cannot be published, roll its glyphs
+                            // back too; otherwise a failed pane would leave orphan text at its
+                            // old pixel coordinates for this frame.
+                            if (rich_glyph_start) |start| self.gpu_glyphs.items.len = start;
+                        };
                     } else |_| {
                         var v = rf;
                         v.deinit(self.allocator);
@@ -33215,9 +33407,11 @@ pub const AppSession = struct {
         self.web_nav_states.deinit(self.allocator);
         self.addr_field.deinit(self.allocator); // 슬라이스 3: 주소창 편집 TextField(text/preedit ArrayList) 해제
         self.metal_buffer.deinit(self.allocator);
+        self.clearAgentSessionDockRichTextCache();
         self.sidebar_cells.deinit(self.allocator);
         self.gpu_quads.deinit(self.allocator);
         self.gpu_shadows.deinit(self.allocator);
+        self.gpu_glyphs.deinit(self.allocator);
         self.kitty_uploaded.deinit(self.allocator);
         // F2-1 배경 이미지 디코드 캐시 — owned 픽셀·경로 문자열(빈 경로면 empty라 무해).
         if (self.bg_image_pixels.len > 0) self.allocator.free(self.bg_image_pixels);
@@ -45326,7 +45520,7 @@ test "placeAndDistribute: 멀티 페인 collect를 dest별로 분배 + collected
     // renderTick의 멀티 페인 빌드와 동일한 out 변수 셋업. defer들이 testing.allocator로 누수/double-free를 잡는다.
     var collected: std.ArrayList(AppSession.CollectedPane) = .empty;
     defer {
-        for (collected.items) |*c| c.pane.deinit(allocator); // placeAndDistribute가 소진하면 빈 배열(no-op)
+        for (collected.items) |*c| c.deinit(allocator); // placeAndDistribute가 소진하면 빈 배열(no-op)
         collected.deinit(allocator);
     }
     var pane_frames: std.ArrayList(metal_frame.PaneFrame) = .empty;

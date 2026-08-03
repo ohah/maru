@@ -36,5 +36,7 @@ pub extern fn maru_macos_chrome_lab_smoke_render(
     quad_count: usize,
     shadows: ?[*]const renderer.metal_frame.GpuShadow,
     shadow_count: usize,
+    glyphs: ?[*]const renderer.metal_frame.GpuGlyph,
+    glyph_count: usize,
     result: *NativeResult,
 ) void;

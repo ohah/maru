@@ -140,7 +140,11 @@ bool maru_metal_renderer_draw(
        암묵 가정했지만, caret 없는 오버레이 셀(포커스 테두리·drop 하이라이트·드래그 고스트)이 커서 뒤에 붙으면
        그 가정이 깨져 커서가 본문과 함께 불투명하게 그려졌다(=blink 죽음). 시작을 명시로 받아 커서가 버퍼 중간에
        있어도 본문을 [.., cursor_start)와 [cursor_start+cursor_cells, ..) 두 구간으로 나눠 그린다(ABI v146). */
-    size_t cursor_start
+    size_t cursor_start,
+    /* B1 rich Chrome text: pre-shaped/pre-rasterized atlas glyphs at final backing-pixel rects.
+       NULL/0 preserves the existing terminal cell path. */
+    const MaruAppHostGpuGlyph *gpu_glyphs,
+    size_t gpu_glyph_count
 );
 
 void maru_metal_renderer_destroy(MaruMetalRenderer *renderer);

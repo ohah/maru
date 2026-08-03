@@ -5000,7 +5000,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             frame.cursor_cells,           // 커서 blink 페이드: 커서 overlay 구간 길이(본문서 제외·별도 pass; 패스스루)
             frame.cursor_fade_milli,      // 커서 overlay 불투명도 ×1000 — blink 페이드 위상(cursor.blink-fade-ms; 패스스루)
             frame.overlay_cells_present,  // ABI v131: overlay가 cell index 0에서 시작해도 명시적으로 구분
-            frame.cursor_start            // ABI v146: 커서 구간 시작 index — 커서가 버퍼 중간이어도 페이드(패스스루)
+            frame.cursor_start,           // ABI v146: 커서 구간 시작 index — 커서가 버퍼 중간이어도 페이드(패스스루)
+            frame.gpu_glyphs,             // B1: rich Chrome final pixel glyph placement(셀 grid와 분리)
+            frame.gpu_glyph_count
         )
         if drew {
             lastDrawnGeneration = frame.generation

@@ -64,6 +64,8 @@ void maru_macos_chrome_lab_smoke_render(
     size_t quad_count,
     const MaruAppHostGpuShadow *shadows,
     size_t shadow_count,
+    const MaruAppHostGpuGlyph *glyphs,
+    size_t glyph_count,
     MaruChromeLabSmokeResult *result
 ) {
     if (result == NULL) {
@@ -155,7 +157,9 @@ void maru_macos_chrome_lab_smoke_render(
         0,
         0,
         0,
-        0
+        0,
+        glyphs,
+        glyph_count
     );
     result->draw_submitted = drew ? 1 : 0;
     maru_metal_renderer_destroy(renderer);

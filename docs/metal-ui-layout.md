@@ -142,6 +142,96 @@ action identity와 enabled policy이고, host가 나중에 dispatch한다. 현�
 `MeasureFn`은 synthetic layout fixture 전용 seam이다. 제품 `Text`가 paint되기 전 ML3에서
 측정과 paint가 공유하는 immutable `TextLayout` artifact로 반드시 교체한다.
 
+### B1 — rich `Button`과 정렬 가능한 텍스트 (설계 제안, 사용자 승인 전·미구현)
+
+`ArchiveSessionDetailPanel`의 재개·로그 액션은 현재 `Card`를 action 표면으로 사용하고
+component가 `ChromeDraw.Text.origin`을 직접 계산한다. 이는 일시적인 소비자 구현이지
+재사용 Button이 아니다. 특히 현재 `chrome_draw_lowering`과 `metal_lowering`은 text origin을
+`NativeMetalCell{row,col}`로 내리므로 y가 한 cell 행으로 절삭된다. 2-cell 높이 action card의
+글자가 하단 행으로 쏠리는 이유가 이것이다. `Button` 파일만 추가하거나 y 상수를 바꾸는 것은
+루트 원인을 고치지 못한다.
+
+다음 B1의 제안 API는 semantic component만 공개한다. `Row`/`Column`/`Flex`나 callback closure를
+Button API로 올리지 않는다. 제품 component는 내부 layout node를 조합하고, action은 기존처럼
+opaque `UiActionId`로 host에 반환한다.
+
+```zig
+const button = ui.button(.{
+    .id = ids.resume_session,
+    .action = .{ .id = resume_action_id, .enabled = can_resume },
+    .variant = .primary,
+    .size = .default,
+    .leading_icon = .recent,
+    .style = .{ .width = .{ .percent = 1 }, .min_height = 32 },
+}, &.{
+    ui.text(.{ .id = ids.resume_label, .value = "워크트리에서 재개", .align = .center }),
+});
+```
+
+위 문법은 목표 API이며 현재 `ui.tree`가 아직 받지 않는 필드는 구현 전까지 추가하지 않는다.
+`style`은 기존 `UiStyle`의 width/height/flex/margin/padding을 그대로 받아 반응형과 고정 크기를
+닫힌 typed union으로 계산한다. 현 `min_width`/`max_width`/`min_height`/`max_height`는 backing-pixel
+`?f32` clamp이며 Button도 이를 그대로 받는다. Button이 별도 `minWidth`/`maxHeight` 문자열 속성을
+만들지 않는다. percentage min/max는 B1 범위가 아니며, 필요해지면 일반 `UiStyle` 확장으로 별도
+layout fixture와 함께 연다. 호출자가 min/max를 생략하면 `ButtonSize`가 token 기반 최소 hit target을
+제공한다. builder는 `ButtonSize` floor와 호출자의 min을 합쳐 one resolved min으로 만들고, caller의
+max가 그 값을 밑돌면 candidate tree를 fail-close한다. 작은 창에서 hit target을 조용히 압축하지 않는다.
+
+| 책임 | B1 계약 |
+| --- | --- |
+| `src/chrome/ui/button.zig` | `ButtonProps`, 닫힌 `ButtonVariant`(`primary`, `secondary`, `ghost`, `danger`), `ButtonSize`, icon slot, semantic `UiNode.button` builder를 소유한다. archive/provider/AppKit을 import하지 않는다. |
+| `src/chrome/ui/tree.zig` | `button` kind와 immutable visual/action projection을 보관한다. Button을 `.card`로 가장하지 않으며 tree rect와 action identity를 단일 출처로 유지한다. |
+| `src/grapheme.zig`, `src/chrome/text_layout.zig`, `src/chrome/ui/text_artifact.zig` | `grapheme.zig`의 UAX cluster 경계만 Button artifact와 legacy cell text가 공유한다. `chrome/text_layout.zig`의 EAW cell plan은 terminal/cell Chrome 전용으로 유지한다. 새 artifact는 `ResolvedTextStyle`의 실제 font glyph advance로 CJK·ellipsis·icon slot을 측정해 final content rect·glyph run·pixel baseline/ink rect를 만든다. `horizontal_align`과 `vertical_align`은 artifact에서만 해석하며 origin을 cell row로 다시 추측하지 않는다. |
+| `src/chrome/ui/paint_style.zig` 및 `ui/paint.zig` | hover/focus/pressed/disabled precedence와 token mapping, 배경/테두리/text/icon semantic draw를 한 번만 만든다. component는 직접 `ChromeDraw`를 emit하지 않는다. |
+| rich Metal text lowering | Button text/icon의 final pixel placement를 glyph quad/raster placement로 lower한다. terminal `NativeMetalCell` path는 그대로 두며, Button 때문에 terminal grid ABI를 바꾸지 않는다. |
+| `ui/interaction.zig`와 host | 기존 pointer capture·keyboard focus가 button의 same `UiActionId`를 dispatch한다. `onClick`/`onHover` closure, provider I/O, shell spawn은 props에 넣지 않는다. |
+
+Button은 정확히 하나의 `Text` leaf child만 받는다. 아이콘은 `leading_icon` prop으로만 받고 Button 내부에
+임의 container/slot child를 노출하지 않는다. 이 제한은 Button의 final content rect, ellipsis, accessible
+label source와 action rect가 각기 다른 tree에서 계산되는 것을 막는다.
+
+Button의 painter 상태는 다음 순서를 고정한다. disabled는 항상 마지막이며, disabled action은
+hover/focus/capture target이나 click intent가 될 수 없다. pressed는 capture를 가진 primary-pointer
+down부터 같은 enabled identity의 up/cancel/reconcile까지이며, hover는 pointer 위치, focus는 keyboard
+focus와 함께 같은 rect를 소비한다. Button이 tree 밖에서 별도 hit-test rect를 만들면 안 된다.
+
+```mermaid
+flowchart TD
+    A[Button Props and Text child] --> B[UiNode.button]
+    B --> C[UiRectTree]
+    C --> D[TextLayoutArtifact final content rect]
+    C --> E[ui interaction shared action rect]
+    D --> F[ui paint semantic button and glyph draw]
+    F --> G[rich pixel glyph lowering]
+    G --> H[Metal readback capture]
+    E --> I[host opaque action dispatch]
+```
+
+`leading_icon`은 raw Unicode가 아니라 이미 등록된 SVG `IconId`만 받는다. icon slot width, target
+pixel size, label gap은 `ButtonSize`와 token에서 결정하고 text artifact·paint·lowerer가 같은
+측정 결과를 쓴다. user/provider transcript의 PUA 문자열은 icon으로 승격하지 않는다. trailing
+shortcut은 B1 첫 slice에서는 Text child가 명시적으로 제공할 때만 보이며, Button이 `⌘↵` 같은
+문자열을 도메인별로 합성하지 않는다.
+
+사용자 승인 뒤 구현은 네 PR로 나눈다. 한 PR은 선행 PR이 병합된 `main`에서만 시작한다.
+
+1. **B1-doc (현재 문서 slice):** 이 계약, 상태 표, verification gate를 고정한다. code/API는 추가하지 않는다.
+2. **B1-text:** final text content rect와 pixel glyph placement artifact를 제품 rich Chrome path에
+   추가한다. cell row로 절삭되는 기존 action text를 이 path로 자동 전환하지 않는다. text unit,
+   lowering unit, Metal Lab readback으로 fractional y와 CJK/ellipsis/icon alignment를 증명한다.
+3. **B1-button:** `ui/button.zig`·`UiNode.button`·paint/interaction을 추가한다. default/hover/
+   pressed/focus/disabled, ButtonSize floor보다 작은 max fail-close, zero/two/non-Text child fail-close,
+   narrow CJK ellipsis, pointer·keyboard action parity를 headless와 Lab fixture로 고정한다.
+4. **B1-archive migration:** archive detail action을 Button으로 전환하고 `detail-ready` before/after
+   capture와 실제 AppKit resume/reveal fixture를 갱신한다. provider와 action identity 정책은 바꾸지 않는다.
+
+각 구현 PR은 `mise run macos-chrome-lab-smoke`의 제품 Metal PNG와 `gh attach` 본문 이미지를
+포함한다. B1-text/B1-button은 `zig build test-chrome-ui`, `zig build check-boundaries`, `mise run check`,
+그리고 capture가 실제 rich GPU glyph path인지 확인하는 readback artifact를 함께 통과해야 한다.
+B1-archive migration은 기존 `mise run macos-agent-session-archive-smoke`의 pointer/keyboard resume·reveal
+parity도 다시 통과해야 한다. frame path는 artifact/cache만 읽고 font I/O·shape worker wait·provider I/O를
+하지 않으며, artifact invalidation은 text/style/rect/icon/scale 변화에만 일어난다.
+
 ## 3. typed style과 responsive sizing
 
 길이는 문자열 CSS가 아니라 닫힌 typed union이다.

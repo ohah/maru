@@ -67,7 +67,7 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     .{ .path = "src/app/term_runtime_backend.zig", .count = 3, .digest_hex = "da55524e0da397637fae2ce52c0030719551a1ae2a931ae9cbd7bf9c8814a335" },
     .{ .path = "src/config/schema.zig", .count = 108, .digest_hex = "53943f2f20ec8e47ab22c0eb0c0206869e0ddb26e6ddb57ef02df1b2ae2d34c9" },
     .{ .path = "src/platform/macos/git_backend.zig", .count = 2, .digest_hex = "2c0c8a5fd78388c85a7914123340b357829cbfc0ab92ab474df60d1639b8bb4f" },
-    .{ .path = "src/platform/macos/app_session.zig", .count = 3, .digest_hex = "af7d5d43e5692b9e050f32f83e6c107c709da4ac1cf24ec3766e3e5c69fd99c8" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 3, .digest_hex = "e18fbd7906f2c185e1a405714ec3e446f41d16bf7478548f60932d2fa44f041d" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },
@@ -967,6 +967,57 @@ test "CR3a-2c2b3a joined import oracle excludes only top-level test bodies" {
         test_only,
         "ended_purge_transaction.zig",
     ));
+}
+
+test "B3b-S reflection digest excludes top-level tests with a lexical token mask" {
+    const allocator = std.testing.allocator;
+    const source: [:0]const u8 =
+        \\const Product = struct {
+        \\    fn retained() void { const label = "test"; }
+        \\    test "container declarations remain product input" { const containerRetained = true; _ = containerRetained; }
+        \\};
+        \\test "excluded" { const Hidden = struct { fn nested() void {} }; _ = Hidden; }
+        \\test { const anonymousExcluded = true; _ = anonymousExcluded; }
+        \\const After = struct { fn retainedAfter() void {} };
+    ;
+    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    defer tree.deinit(allocator);
+    const excluded = try topLevelTestTokenMask(allocator, &tree);
+    defer allocator.free(excluded);
+
+    var retained_count: usize = 0;
+    var excluded_count: usize = 0;
+    var anonymous_excluded_count: usize = 0;
+    var container_retained_count: usize = 0;
+    var retained_after_count: usize = 0;
+    for (0..tree.tokens.len) |raw_token| {
+        const token: std.zig.Ast.TokenIndex = @intCast(raw_token);
+        const part = tree.tokenSlice(token);
+        if (std.mem.eql(u8, part, "retained"))
+            retained_count += @intFromBool(!excluded[token]);
+        if (std.mem.eql(u8, part, "nested"))
+            excluded_count += @intFromBool(excluded[token]);
+        if (std.mem.eql(u8, part, "anonymousExcluded"))
+            anonymous_excluded_count += @intFromBool(excluded[token]);
+        if (std.mem.eql(u8, part, "containerRetained"))
+            container_retained_count += @intFromBool(!excluded[token]);
+        if (std.mem.eql(u8, part, "retainedAfter"))
+            retained_after_count += @intFromBool(!excluded[token]);
+    }
+    try std.testing.expectEqual(@as(usize, 1), retained_count);
+    try std.testing.expectEqual(@as(usize, 1), excluded_count);
+    try std.testing.expectEqual(@as(usize, 2), anonymous_excluded_count);
+    try std.testing.expectEqual(@as(usize, 2), container_retained_count);
+    try std.testing.expectEqual(@as(usize, 1), retained_after_count);
+
+    const malformed: [:0]const u8 = "const broken = ;";
+    var malformed_tree = try std.zig.Ast.parse(allocator, malformed, .zig);
+    defer malformed_tree.deinit(allocator);
+    try std.testing.expect(malformed_tree.errors.len != 0);
+    try std.testing.expectError(
+        error.TestUnexpectedResult,
+        topLevelTestTokenMask(allocator, &malformed_tree),
+    );
 }
 
 test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
@@ -7235,6 +7286,8 @@ fn scanClientConstructionSource(
     unreviewed: *usize,
     report_unreviewed: bool,
 ) !void {
+    const top_level_test_tokens = try topLevelTestTokenMask(std.testing.allocator, tree);
+    defer std.testing.allocator.free(top_level_test_tokens);
     var reflection_observed = [_]usize{0} ** client_reflection_owners.len;
     var external_source_hasher = std.crypto.hash.sha2.Sha256.init(.{});
     var external_reflection_count: usize = 0;
@@ -7243,7 +7296,7 @@ fn scanClientConstructionSource(
         var buffer: [1]std.zig.Ast.Node.Index = undefined;
         const proto = tree.fullFnProto(&buffer, node) orelse continue;
         const name_token = proto.name_token orelse continue;
-        if (tokenInsideTopLevelTest(tree, name_token)) continue;
+        if (top_level_test_tokens[name_token]) continue;
         const name = tree.tokenSlice(name_token);
         for (proofs) |proof| {
             if (std.mem.eql(u8, proof.receiver, "enterExternalMode") or
@@ -7264,7 +7317,7 @@ fn scanClientConstructionSource(
     }
     var token: std.zig.Ast.TokenIndex = 0;
     while (token + 1 < tree.tokens.len) : (token += 1) {
-        if (tokenInsideTopLevelTest(tree, token)) continue;
+        if (top_level_test_tokens[token]) continue;
         external_source_hasher.update(tree.tokenSlice(token));
         external_source_hasher.update(&.{0});
         if (std.mem.eql(u8, tree.tokenSlice(token), "@field")) {
@@ -7651,12 +7704,51 @@ fn expectedClientConstructionContainer(receiver: []const u8, use: ClientConstruc
     return "<root>";
 }
 
-fn tokenInsideTopLevelTest(tree: *const std.zig.Ast, token: std.zig.Ast.TokenIndex) bool {
-    for (tree.rootDecls()) |node| {
-        if (tree.nodeTag(node) != .test_decl) continue;
-        if (tree.firstToken(node) <= token and token <= tree.lastToken(node)) return true;
+fn topLevelTestTokenMask(
+    allocator: std.mem.Allocator,
+    tree: *const std.zig.Ast,
+) ![]bool {
+    if (tree.errors.len != 0) return error.TestUnexpectedResult;
+    const excluded = try allocator.alloc(bool, tree.tokens.len);
+    errdefer allocator.free(excluded);
+    @memset(excluded, false);
+
+    var lexical_depth: usize = 0;
+    var token: std.zig.Ast.TokenIndex = 0;
+    while (token < tree.tokens.len) {
+        const part = tree.tokenSlice(token);
+        if (lexical_depth == 0 and std.mem.eql(u8, part, "test")) {
+            var cursor = token;
+            var body_depth: usize = 0;
+            var body_started = false;
+            while (cursor < tree.tokens.len) : (cursor += 1) {
+                excluded[cursor] = true;
+                const body_part = tree.tokenSlice(cursor);
+                if (std.mem.eql(u8, body_part, "{")) {
+                    body_started = true;
+                    body_depth += 1;
+                } else if (std.mem.eql(u8, body_part, "}")) {
+                    if (!body_started or body_depth == 0)
+                        return error.TestUnexpectedResult;
+                    body_depth -= 1;
+                    if (body_depth == 0) break;
+                }
+            }
+            if (!body_started or body_depth != 0 or cursor == tree.tokens.len)
+                return error.TestUnexpectedResult;
+            token = cursor + 1;
+            continue;
+        }
+        if (std.mem.eql(u8, part, "{")) {
+            lexical_depth += 1;
+        } else if (std.mem.eql(u8, part, "}")) {
+            if (lexical_depth == 0) return error.TestUnexpectedResult;
+            lexical_depth -= 1;
+        }
+        token += 1;
     }
-    return false;
+    if (lexical_depth != 0) return error.TestUnexpectedResult;
+    return excluded;
 }
 
 const ClientReferenceOwner = struct {

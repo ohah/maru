@@ -720,7 +720,8 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   external-mode teardown 5의 합이 C35와 exact equality여야 한다. tokenizer/AST는 top-level test body만 제외하고 모든 `.method` reference를
   모으며 direct-call이 아닌 function-value alias, sibling/nested/동일 leaf·다른 outer container, 다른 타입의 동명 method를 음성 fixture로
   거부한다. session-host reflection은 codec 등 기존 canonical owner별 normalized token expression/count만 허용하고, 나머지 `src`의
-  reflection 보유 7개 파일은 top-level test 제외 전체 normalized token stream digest와 `@field` count를 exact 고정한다. 따라서 semantic
+  reflection 보유 7개 파일은 root lexical depth에서 한 번 만든 OS-independent token mask로 top-level test를 제외한 전체 normalized token
+  stream digest와 `@field` count를 exact 고정한다. 따라서 semantic
   relocation/variable rebinding, 허용 owner 내부 치환과 외부 `anytype` trampoline을 포함한 Client
   alias·`@TypeOf`·computed name 우회도 fail-close한다. category metadata도 4/4/22/5 exact set이다. generation init은 final-address
   `canMove→move→bind fence→bind ledger→publication`, transfer는 양 Client unbound, teardown은 external-pump owner와 guarded exclusive

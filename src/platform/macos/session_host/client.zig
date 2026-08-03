@@ -994,7 +994,7 @@ pub const PreparedEndedPurgeInventory = struct {
     target_stream_count: usize = 0,
     target_event_count: usize = 0,
     target_payload_bytes: usize = 0,
-    quarantine_bytes: usize = 0,
+    demux_owned_extent_bytes: usize = 0,
     batch_seal: owner_seal.Digest = [_]u8{0} ** 32,
     stream_seal: owner_seal.Digest = [_]u8{0} ** 32,
     event_seal: owner_seal.Digest = [_]u8{0} ** 32,
@@ -7696,7 +7696,7 @@ pub const Client = struct {
         var target_batch_count: usize = 0;
         var target_stream_count: usize = 0;
         var target_event_count: usize = 0;
-        var quarantine_bytes: usize = 0;
+        var demux_owned_extent_bytes: usize = 0;
 
         for (self.pending_batches.items, 0..) |batch, index| {
             if (!std.meta.eql(batch.allocator, self.allocator) or
@@ -7791,11 +7791,11 @@ pub const Client = struct {
         }) |entry| {
             const backing_bytes = std.math.mul(usize, entry[0], entry[1]) catch
                 return error.ArithmeticOverflow;
-            quarantine_bytes = std.math.add(usize, quarantine_bytes, backing_bytes) catch
+            demux_owned_extent_bytes = std.math.add(usize, demux_owned_extent_bytes, backing_bytes) catch
                 return error.ArithmeticOverflow;
         }
         inline for (.{ batch_bytes, stream_bytes, event_bytes }) |payload_bytes|
-            quarantine_bytes = std.math.add(usize, quarantine_bytes, payload_bytes) catch
+            demux_owned_extent_bytes = std.math.add(usize, demux_owned_extent_bytes, payload_bytes) catch
                 return error.ArithmeticOverflow;
 
         if (self.partial_batch) |partial| {
@@ -7821,9 +7821,9 @@ pub const Client = struct {
                 target_bytes = std.math.add(usize, target_bytes, partial.bytes.items.len) catch
                     return error.ArithmeticOverflow;
             }
-            quarantine_bytes = std.math.add(
+            demux_owned_extent_bytes = std.math.add(
                 usize,
-                quarantine_bytes,
+                demux_owned_extent_bytes,
                 partial.bytes.capacity,
             ) catch return error.ArithmeticOverflow;
         }
@@ -7860,7 +7860,7 @@ pub const Client = struct {
             .target_stream_count = target_stream_count,
             .target_event_count = target_event_count,
             .target_payload_bytes = target_bytes,
-            .quarantine_bytes = quarantine_bytes,
+            .demux_owned_extent_bytes = demux_owned_extent_bytes,
             .batch_seal = batch_writer.finish(),
             .stream_seal = stream_writer.finish(),
             .event_seal = event_writer.finish(),

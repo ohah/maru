@@ -26,6 +26,10 @@ pub const HostAdapter = struct {
 
     pub const InitError = client_slot_mod.InitError || error{UnsupportedProtocol};
 
+    pub fn initializeProcessRuntime() client_slot_mod.ClientSlot.ProcessRuntimeInitError!void {
+        try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    }
+
     pub fn initInPlace(
         out: *HostAdapter,
         node_allocator: std.mem.Allocator,

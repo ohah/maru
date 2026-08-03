@@ -15,8 +15,70 @@ const contract = @import("generation_attachment_contract.zig");
 const framing = @import("framing.zig");
 const protocol = @import("protocol.zig");
 const socket_server = @import("socket_server.zig");
+const ended_purge_quarantine = @import("ended_purge_quarantine.zig");
 
 const c = std.c;
+var ended_purge_quarantine_registry: ?ended_purge_quarantine.Registry = null;
+var process_runtime_pid: std.atomic.Value(u32) = .init(0);
+
+test "CR3a-2c2b3b quarantine leaf participates in the session-host gate" {
+    _ = ended_purge_quarantine;
+}
+
+test "CR3a-2c2b3b process runtime bootstrap is explicit and same-process idempotent" {
+    try ClientSlot.initializeProcessRuntime();
+    try ClientSlot.initializeProcessRuntime();
+}
+
+test "CR3a-2c2b3b fork child rejects bootstrap before inherited issuer mutex" {
+    const ChildCleanup = struct {
+        fn terminateAndReap(child_pid: std.c.pid_t) void {
+            _ = std.c.kill(child_pid, std.c.SIG.KILL);
+            var child_status: c_int = 0;
+            while (true) {
+                const waited = std.c.waitpid(child_pid, &child_status, 0);
+                if (waited == child_pid or
+                    (waited < 0 and std.posix.errno(waited) == .CHILD)) return;
+                if (waited < 0 and std.posix.errno(waited) == .INTR) continue;
+                return;
+            }
+        }
+    };
+    try ClientSlot.initializeProcessRuntime();
+    while (!issuer_mutex.tryLock()) std.atomic.spinLoopHint();
+    const child = std.c.fork();
+    if (child < 0) {
+        issuer_mutex.unlock();
+        return error.TestUnexpectedResult;
+    }
+    if (child == 0) {
+        ClientSlot.initializeProcessRuntime() catch |err|
+            std.c._exit(if (err == error.ProcessDomainMismatch) 0 else 2);
+        std.c._exit(3);
+    }
+    defer issuer_mutex.unlock();
+
+    var status: c_int = 0;
+    var attempts: usize = 0;
+    while (attempts < 2000) : (attempts += 1) {
+        const waited = std.c.waitpid(child, &status, std.c.W.NOHANG);
+        if (waited == child) {
+            const wait_status: u32 = @bitCast(status);
+            try std.testing.expect(std.c.W.IFEXITED(wait_status));
+            try std.testing.expectEqual(@as(u8, 0), std.c.W.EXITSTATUS(wait_status));
+            return;
+        }
+        if (waited < 0) {
+            if (std.posix.errno(waited) == .INTR) continue;
+            ChildCleanup.terminateAndReap(child);
+            return error.TestUnexpectedResult;
+        }
+        var delay_fd = std.c.pollfd{ .fd = -1, .events = 0, .revents = 0 };
+        _ = std.c.poll(@ptrCast(&delay_fd), 0, 1);
+    }
+    ChildCleanup.terminateAndReap(child);
+    return error.TestUnexpectedResult;
+}
 
 fn rawRangesOverlap(a_start: usize, a_end: usize, b_start: usize, b_end: usize) bool {
     return a_start < b_end and b_start < a_end;
@@ -269,7 +331,7 @@ fn endedPurgePreparationSeal(prepared: *const EndedPurgePreparation) owner_seal.
     writer.writeUsize(prepared.inventory.target_stream_count);
     writer.writeUsize(prepared.inventory.target_event_count);
     writer.writeUsize(prepared.inventory.target_payload_bytes);
-    writer.writeUsize(prepared.inventory.quarantine_bytes);
+    writer.writeUsize(prepared.inventory.demux_owned_extent_bytes);
     writer.writeBytes(&prepared.inventory.batch_seal);
     writer.writeBytes(&prepared.inventory.stream_seal);
     writer.writeBytes(&prepared.inventory.event_seal);
@@ -577,22 +639,16 @@ fn poisonEndedPurgeCorrupt(slot: *ClientSlot) EndedPurgePreparationError {
     return error.Corrupt;
 }
 
-fn productionIssuer() *lease_mod.IdentityIssuer {
+fn productionIssuer() InitError!*lease_mod.IdentityIssuer {
+    const pid = currentPid();
+    // Fork children must fail before touching a mutex that a vanished parent thread may have held.
+    if (pid == 0 or process_runtime_pid.load(.acquire) != pid)
+        return error.ProcessDomainMismatch;
     while (!issuer_mutex.tryLock()) std.atomic.spinLoopHint();
     defer issuer_mutex.unlock();
-    if (process_issuer == null) {
-        var nonce: u64 = 0;
-        if (builtin.os.tag == .macos) {
-            std.c.arc4random_buf(std.mem.asBytes(&nonce).ptr, @sizeOf(u64));
-        } else {
-            // The product owner is macOS-only.  This non-secret fallback exists solely so
-            // cross-target compile tests can instantiate the type without a Darwin syscall.
-            nonce = @as(u64, currentPid()) ^ @as(u64, @intFromPtr(&process_issuer));
-        }
-        if (nonce == 0) nonce = 1;
-        process_issuer = lease_mod.IdentityIssuer.init(currentPid(), nonce);
-    }
-    return &process_issuer.?;
+    if ((process_issuer == null) != (ended_purge_quarantine_registry == null))
+        @panic("process issuer and ended purge quarantine registry initialization diverged");
+    return &(process_issuer orelse return error.ProcessDomainMismatch);
 }
 
 pub const ClientSlot = struct {
@@ -606,6 +662,38 @@ pub const ClientSlot = struct {
     next_binding_incarnation: u64,
     lifecycle: Lifecycle,
 
+    pub const ProcessRuntimeInitError = error{ProcessDomainMismatch};
+
+    pub fn initializeProcessRuntime() ProcessRuntimeInitError!void {
+        const pid = currentPid();
+        if (pid == 0) return error.ProcessDomainMismatch;
+        const observed = process_runtime_pid.load(.acquire);
+        if (observed != 0 and observed != pid) return error.ProcessDomainMismatch;
+        if (observed == 0) {
+            if (process_runtime_pid.cmpxchgStrong(0, pid, .acq_rel, .acquire)) |winner|
+                if (winner != pid) return error.ProcessDomainMismatch;
+        }
+
+        while (!issuer_mutex.tryLock()) std.atomic.spinLoopHint();
+        defer issuer_mutex.unlock();
+        if (process_runtime_pid.load(.acquire) != pid) return error.ProcessDomainMismatch;
+        if ((process_issuer == null) != (ended_purge_quarantine_registry == null))
+            @panic("process issuer and ended purge quarantine registry initialization diverged");
+        if (process_issuer == null) {
+            var nonce: u64 = 0;
+            if (builtin.os.tag == .macos) {
+                std.c.arc4random_buf(std.mem.asBytes(&nonce).ptr, @sizeOf(u64));
+            } else {
+                // The product owner is macOS-only.  This non-secret fallback exists solely so
+                // cross-target compile tests can instantiate the type without a Darwin syscall.
+                nonce = @as(u64, pid) ^ @as(u64, @intFromPtr(&process_issuer));
+            }
+            if (nonce == 0) nonce = 1;
+            ended_purge_quarantine_registry = ended_purge_quarantine.Registry.init();
+            process_issuer = lease_mod.IdentityIssuer.init(pid, nonce);
+        }
+    }
+
     pub fn initInPlace(
         out: *ClientSlot,
         node_allocator: std.mem.Allocator,
@@ -617,7 +705,7 @@ pub const ClientSlot = struct {
             node_allocator,
             source,
             host_id,
-            productionIssuer(),
+            try productionIssuer(),
             currentPid(),
         );
     }

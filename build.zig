@@ -1658,6 +1658,40 @@ pub fn build(b: *std.Build) void {
     // install step을 거치지 않으므로 `zig build test* --prefix ...`가 사용자 설치 경로를 쓰거나 덮어쓰지 않는다.
     const run_session_host_tests = b.addSystemCommand(&.{"/usr/bin/env"});
     run_session_host_tests.addPrefixedArtifactArg("MARU_SESSION_HOST_PRODUCT_EXE=", exe);
+    if (target.result.os.tag == .macos) {
+        const process_runtime_bootstrap_fixture = b.addExecutable(.{
+            .name = "maru-session-host-process-runtime-bootstrap-fixture",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/process_runtime_bootstrap_fixture.zig",
+                ),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+        });
+        const run_process_runtime_bootstrap_fixture =
+            b.addRunArtifact(process_runtime_bootstrap_fixture);
+        run_session_host_tests.step.dependOn(&run_process_runtime_bootstrap_fixture.step);
+
+        const ended_purge_quarantine_concurrency_fixture = b.addExecutable(.{
+            .name = "maru-session-host-ended-purge-quarantine-concurrency-fixture",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/ended_purge_quarantine_concurrency_fixture.zig",
+                ),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            }),
+        });
+        const run_ended_purge_quarantine_concurrency_fixture =
+            b.addRunArtifact(ended_purge_quarantine_concurrency_fixture);
+        run_session_host_tests.step.dependOn(
+            &run_ended_purge_quarantine_concurrency_fixture.step,
+        );
+    }
     // 같은 session_host 모듈은 전체 maru test에도 중복 수집된다. 전용 step만
     // product launch smoke를 필수화하도록 root-module introspection 대신
     // 명시적인 test-only marker를 전달한다.

@@ -39,9 +39,14 @@ pub const Artifact = struct {
         origin_y_px: u32,
         out: *std.ArrayList(metal_frame.GpuGlyph),
     ) !void {
-        if (frame.glyph_quad_frame.glyphs.len != self.placements.len) return error.MeasuredGlyphCountMismatch;
         const texture = renderer.AtlasTextureSize{ .width_px = atlas.atlas_width_px, .height_px = atlas.atlas_height_px };
-        for (frame.glyph_quad_frame.glyphs, self.placements) |glyph, placement| {
+        for (frame.glyph_quad_frame.glyphs) |glyph| {
+            // Atlas placement may reorder/repack glyph runs.  The synthetic row/column pair is
+            // the immutable record identity created in shapeOps; positional zip here would put
+            // a later label at an earlier label's pixel origin and visibly stack the dock header.
+            const placement_index = @as(usize, glyph.run.row) * 256 + glyph.run.col;
+            if (placement_index >= self.placements.len) return error.MeasuredGlyphPlacementMissing;
+            const placement = self.placements[placement_index];
             const uv = try renderer.glyph_quads.uvRectForSlot(glyph.slot, texture);
             try out.append(allocator, .{
                 .x = @as(f32, @floatFromInt(origin_x_px)) + placement.x_px,

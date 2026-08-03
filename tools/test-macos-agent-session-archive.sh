@@ -139,6 +139,17 @@ grep -Eq '^agent_session_archive_smoke_reveal_rejected_count=0$' "$root/detail-c
 grep -Eq '^agent_session_archive_smoke_stale_reveal_count=0$' "$root/detail-close-reopen.summary.txt"
 grep -Eq '^agent_session_archive_smoke_terminal_invariant=true$' "$root/detail-close-reopen.summary.txt"
 
+run_scenario snapshot-replace-pointer
+grep -Eq '^agent_session_archive_smoke_stage=succeeded$' "$root/snapshot-replace-pointer.summary.txt"
+grep -Eq '^agent_session_archive_smoke_scenario=snapshot-replace-pointer$' "$root/snapshot-replace-pointer.summary.txt"
+# The held press belongs to a now-stale immutable snapshot. Its later release must not invoke
+# the provider, admit the old log path, or create/focus a terminal surface.
+grep -Eq '^agent_session_archive_smoke_fake_resume_verdict=false$' "$root/snapshot-replace-pointer.summary.txt"
+grep -Eq '^agent_session_archive_smoke_reveal_allowed_count=0$' "$root/snapshot-replace-pointer.summary.txt"
+grep -Eq '^agent_session_archive_smoke_reveal_rejected_count=0$' "$root/snapshot-replace-pointer.summary.txt"
+grep -Eq '^agent_session_archive_smoke_stale_reveal_count=0$' "$root/snapshot-replace-pointer.summary.txt"
+grep -Eq '^agent_session_archive_smoke_terminal_invariant=true$' "$root/snapshot-replace-pointer.summary.txt"
+
 run_scenario reveal-recheck-pointer
 grep -Eq '^agent_session_archive_smoke_stage=succeeded$' "$root/reveal-recheck-pointer.summary.txt"
 grep -Eq '^agent_session_archive_smoke_scenario=reveal-recheck-pointer$' "$root/reveal-recheck-pointer.summary.txt"

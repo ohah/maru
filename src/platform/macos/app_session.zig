@@ -203,7 +203,7 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 159;
+pub const abi_version: u32 = 160;
 // 159: AS4-d fixture exposes read-only active-surface and Term-count witnesses, proving that
 // archive-card disclosure remains dock-local rather than creating a hidden archive terminal.
 // 158: B1 GpuGlyph가 final shared-atlas 재정규화를 위한 original pixel slot을 들게 한다.
@@ -1376,6 +1376,7 @@ pub const AgentSessionArchiveSmokeProbeTarget = enum(u32) {
     archive_focus_live = 4,
     dock_agent_sessions = 5,
     dock_launcher = 6,
+    archive_refresh = 7,
 };
 
 /// Published tree에서 나온 backing-pixel capability snapshot이다. `present=false`면 다른
@@ -6414,6 +6415,18 @@ pub const AppSession = struct {
         return self.agent_session_archive_detail_backend.testGateReached();
     }
 
+    /// The archive-scan gate is fixture-only synchronization. It never starts a refresh or
+    /// carries source data: the host must still click the normal published refresh capability.
+    pub fn setAgentSessionArchiveSmokeGate(self: *AppSession, blocked: bool) void {
+        if (!self.agent_session_archive_initialized) return;
+        self.agent_session_archive_backend.setTestGate(blocked);
+    }
+
+    pub fn agentSessionArchiveSmokeGateReached(self: *const AppSession) bool {
+        if (!self.agent_session_archive_initialized) return false;
+        return self.agent_session_archive_backend.testGateReached();
+    }
+
     /// Read-only stale-action evidence for the closed AppKit fixture. A zero value is also the
     /// normal product state; the counter is incremented only under the named smoke scenario.
     pub fn agentSessionArchiveSmokeStaleRevealCount(self: *const AppSession) u32 {
@@ -6463,6 +6476,7 @@ pub const AppSession = struct {
             .archive_focus_live => return self.inlineDetailSmokeProbe(.focus_live),
             .dock_agent_sessions => return self.agentSessionDockSwitcherSmokeProbe(),
             .dock_launcher => return self.dockLauncherSmokeProbe(),
+            .archive_refresh => return self.agentSessionDockRefreshSmokeProbe(),
         }
     }
 
@@ -31513,6 +31527,35 @@ pub const AppSession = struct {
         for (self.agent_session_dock_actions.items) |action| {
             switch (action.intent) {
                 .select_card => {},
+                else => continue,
+            }
+            if (action.snapshot_generation != self.agent_session_dock_snapshot_generation) continue;
+            for (self.agent_session_dock_entries.items) |entry| {
+                const ui_action = entry.action orelse continue;
+                if (ui_action.id != action.action_id) continue;
+                const visible = smokeProbeVisibleRect(entry) orelse continue;
+                return .{
+                    .request_id = self.agent_session_dock_snapshot_generation,
+                    .x_px = @as(f32, @floatFromInt(content.x)) + visible.x,
+                    .y_px = @as(f32, @floatFromInt(content.y)) + visible.y,
+                    .width_px = visible.width,
+                    .height_px = visible.height,
+                    .present = true,
+                    .enabled = ui_action.enabled,
+                };
+            }
+        }
+        return .{};
+    }
+
+    /// The fixture may locate the refresh hit rect only after the normal component has painted
+    /// it. This observer neither requests a scan nor exposes the internal action id.
+    fn agentSessionDockRefreshSmokeProbe(self: *const AppSession) AgentSessionArchiveSmokeProbe {
+        if (self.dock.view != .agent_sessions or !self.dockVisible()) return .{};
+        const content = self.dockGeometry().tree_content;
+        for (self.agent_session_dock_actions.items) |action| {
+            switch (action.intent) {
+                .refresh => {},
                 else => continue,
             }
             if (action.snapshot_generation != self.agent_session_dock_snapshot_generation) continue;

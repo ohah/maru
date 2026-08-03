@@ -16,6 +16,7 @@ final class AgentSessionArchiveSmokeDriver {
         case revealRecheckPointer = "reveal-recheck-pointer"
         case detailStale = "detail-stale"
         case detailCloseReopen = "detail-close-reopen"
+        case snapshotReplacePointer = "snapshot-replace-pointer"
         case claudeResumePointer = "claude-resume-pointer"
 
         init?(environment: [String: String] = ProcessInfo.processInfo.environment) {
@@ -59,6 +60,12 @@ final class AgentSessionArchiveSmokeDriver {
         case waitForReopenGate
         case observeReopenLoading
         case waitForReopenReady
+        case startSnapshotRefresh
+        case waitForSnapshotGate
+        case holdOldResume
+        case waitForSnapshotReplacement
+        case releaseStalePointer
+        case waitForStalePointer
         case invokeAction
         case waitForAction
         case succeeded
@@ -82,6 +89,10 @@ final class AgentSessionArchiveSmokeDriver {
     /// The same-card toggle must revoke the prior detail capability before it starts the next
     /// request. Keeping only the opaque request id proves that no old ready action is reused.
     private var firstDetailRequestId: UInt64?
+    /// This is a copy of an already-published backing rect, never an action token. The fixture
+    /// sends down before replacement and the matching up only after the normal product refresh
+    /// has invalidated the prior tree.
+    private var stalePointerProbe: MaruAppHostAgentSessionArchiveSmokeProbe?
     private var terminalBaseline: TerminalInvariant?
     private(set) var terminalInvariantSatisfied = false
 
@@ -115,7 +126,11 @@ final class AgentSessionArchiveSmokeDriver {
         sessionInvariant: () -> TerminalInvariant?,
         setGate: (Bool) -> Bool,
         gateReached: () -> Bool,
+        setScanGate: (Bool) -> Bool,
+        scanGateReached: () -> Bool,
         click: (MaruAppHostAgentSessionArchiveSmokeProbe) -> Bool,
+        pointerDown: (MaruAppHostAgentSessionArchiveSmokeProbe) -> Bool,
+        pointerUp: (MaruAppHostAgentSessionArchiveSmokeProbe) -> Bool,
         shortcut: (Shortcut) -> Bool,
         fakeResumeVerdict: () -> Bool,
         revealAllowedCount: () -> UInt32,
@@ -240,6 +255,11 @@ final class AgentSessionArchiveSmokeDriver {
                 paintRequested = true
                 return
             }
+            if scenario == .snapshotReplacePointer {
+                stage = .startSnapshotRefresh
+                paintRequested = true
+                return
+            }
             stage = .invokeAction
 
         case .closeDetail:
@@ -310,6 +330,72 @@ final class AgentSessionArchiveSmokeDriver {
             terminalInvariantSatisfied = true
             stage = .succeeded
 
+        case .startSnapshotRefresh:
+            // Only the ordinary published header control can submit the scan. Arm the test gate
+            // first so the retained ready snapshot remains observable after this physical click.
+            guard let refresh = probe(MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_REFRESH),
+                  refresh.present != 0, refresh.enabled != 0,
+                  setScanGate(true), click(refresh)
+            else {
+                fail("snapshot_refresh_click")
+                return
+            }
+            stage = .waitForSnapshotGate
+            paintRequested = true
+
+        case .waitForSnapshotGate:
+            if scanGateReached() { stage = .holdOldResume }
+
+        case .holdOldResume:
+            // The old ready capability is still the retained completed snapshot. Hold only its
+            // ordinary pointer capture; no action may execute on down.
+            guard let detail = probe(MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_RESUME),
+                  detail.request_id != 0, detail.state == 2, detail.present != 0, detail.enabled != 0,
+                  pointerDown(detail)
+            else {
+                fail("snapshot_old_resume_down")
+                return
+            }
+            stalePointerProbe = detail
+            guard replaceRevealSource(), setScanGate(false) else {
+                fail("snapshot_replace_or_release")
+                return
+            }
+            stage = .waitForSnapshotReplacement
+            paintRequested = true
+
+        case .waitForSnapshotReplacement:
+            // A same-provider/session replacement with a different inode turns this disclosure
+            // stale. Selection is exact-identity based, so the replacement card must not
+            // materialize the old detail capability at all; the prior capture must already have
+            // been cancelled before the next pointer up reaches product routing.
+            guard let detail = probe(MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_RESUME),
+                  detail.request_id != 0, detail.state == 3, detail.present == 0, detail.enabled == 0
+            else { return }
+            guard matchesTerminalBaseline(sessionInvariant()) else {
+                fail("snapshot_replace_changed_terminal")
+                return
+            }
+            stage = .releaseStalePointer
+
+        case .releaseStalePointer:
+            guard let stalePointerProbe, pointerUp(stalePointerProbe) else {
+                fail("snapshot_old_resume_up")
+                return
+            }
+            stage = .waitForStalePointer
+            paintRequested = true
+
+        case .waitForStalePointer:
+            guard !fakeResumeVerdict(), revealAllowedCount() == 0, revealRejectedCount() == 0,
+                  staleRevealCount() == 0, matchesTerminalBaseline(sessionInvariant())
+            else {
+                fail("snapshot_stale_up_executed")
+                return
+            }
+            terminalInvariantSatisfied = true
+            stage = .succeeded
+
         case .invokeAction:
             switch scenario {
             case .resumePointer, .claudeResumePointer:
@@ -336,7 +422,7 @@ final class AgentSessionArchiveSmokeDriver {
                       let detail = probe(MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_REVEAL_LOG),
                       detail.present != 0, detail.enabled != 0,
                       click(detail) else { return }
-            case .detailStale, .detailCloseReopen:
+            case .detailStale, .detailCloseReopen, .snapshotReplacePointer:
                 return
             }
             stage = .waitForAction
@@ -354,7 +440,7 @@ final class AgentSessionArchiveSmokeDriver {
                 guard revealAllowedCount() == 0,
                       revealRejectedCount() == 0,
                       staleRevealCount() == 1 else { return }
-            case .detailStale, .detailCloseReopen:
+            case .detailStale, .detailCloseReopen, .snapshotReplacePointer:
                 return
             }
             stage = .succeeded

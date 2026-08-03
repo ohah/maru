@@ -1,0 +1,89 @@
+//! Session Dock measured system-UI text adapter.
+//!
+//! CoreText owns CTLine/CTRun and returns only scalar glyph facts.  This module owns the
+//! conversion to renderer-neutral records plus final local pixel positions; it deliberately
+//! does not know about AppSession, Metal DTOs, or terminal `ResolvedAppearance`.
+
+const std = @import("std");
+const maru = @import("maru");
+const chrome = maru.chrome;
+const renderer = maru.renderer;
+const bridge = @import("../coretext_smoke_bridge.zig");
+const probe = @import("../coretext_probe.zig");
+
+pub const Placement = struct {
+    x_px: f32,
+    y_px: f32,
+    advance_px: f32,
+    line_height_px: f32,
+    foreground: u32,
+};
+
+pub const Artifact = struct {
+    records: []renderer.ShapedGlyphRecord,
+    placements: []Placement,
+
+    pub fn deinit(self: *Artifact, allocator: std.mem.Allocator) void {
+        allocator.free(self.records);
+        allocator.free(self.placements);
+        self.* = undefined;
+    }
+};
+
+fn weight(role: chrome.ui.typography.ChromeTextRole) u32 {
+    return switch (chrome.ui.typography.token(role).weight) {
+        .regular => 0,
+        .medium, .semibold => 1,
+    };
+}
+
+/// Shapes exactly one semantic run.  `origin` is the component's final local line-box origin;
+/// the native bridge supplies proportional advances and actual fallback face identity.
+pub fn shapeRun(
+    allocator: std.mem.Allocator,
+    registry: *renderer.FontIdentityRegistry,
+    text: []const u8,
+    role: chrome.ui.typography.ChromeTextRole,
+    origin: chrome.draw.Px,
+    max_width_px: u32,
+    foreground: u32,
+    scale_milli: u32,
+) !Artifact {
+    if (text.len == 0 or max_width_px == 0) return .{ .records = try allocator.alloc(renderer.ShapedGlyphRecord, 0), .placements = try allocator.alloc(Placement, 0) };
+    const point_size = chrome.ui.typography.token(role).point_size;
+    const scaled_size = @as(f64, @floatFromInt(point_size)) * @as(f64, @floatFromInt(scale_milli)) / 1000.0;
+    var native: bridge.NativeChromeTextShapeResult = .{};
+    const capacity = @max(@as(usize, 16), text.len * 2);
+    var glyphs = try allocator.alloc(bridge.NativeChromeTextGlyphRecord, capacity);
+    defer allocator.free(glyphs);
+    bridge.maru_macos_coretext_shape_chrome_text(text.ptr, text.len, scaled_size, weight(role), @floatFromInt(max_width_px), &native, glyphs.ptr, glyphs.len);
+    if (native.status != 0 or native.glyph_record_overflow != 0) return error.CoreTextChromeTextShapeFailed;
+    const count = @min(@as(usize, native.glyph_record_count), glyphs.len);
+    const records = try allocator.alloc(renderer.ShapedGlyphRecord, count);
+    errdefer allocator.free(records);
+    const placements = try allocator.alloc(Placement, count);
+    for (glyphs[0..count], records, placements, 0..) |native_glyph, *record, *placement, index| {
+        const name = probe.cStringField(&native_glyph.font_name);
+        const font_id = try registry.intern(.{ .postscript_name = name });
+        const advance = @max(native_glyph.advance_px, 1.0);
+        const line_height: f32 = @floatFromInt(chrome.ui.typography.lineHeightPx(role, scale_milli));
+        record.* = .{
+            .row = 0,
+            .col = @intCast(index),
+            .cell_width = 1,
+            .codepoint = @intCast(@min(native_glyph.codepoint, std.math.maxInt(u21))),
+            .font_id = font_id,
+            .glyph_id = native_glyph.glyph_id,
+            .fallback = native_glyph.fallback != 0,
+            .color_glyph_kind = if (native_glyph.color_glyph_kind != 0) .color else .monochrome,
+        };
+        placement.* = .{
+            .x_px = @as(f32, @floatFromInt(origin.x)) + native_glyph.x_px,
+            .y_px = @floatFromInt(origin.y),
+            .advance_px = advance,
+            .line_height_px = line_height,
+            .foreground = foreground,
+        };
+    }
+    return .{ .records = records, .placements = placements };
+}

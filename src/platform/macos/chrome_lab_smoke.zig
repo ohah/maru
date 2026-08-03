@@ -8,6 +8,7 @@ const maru = @import("maru");
 const lab = @import("chrome/lab.zig");
 const bridge = @import("chrome/lab_smoke_bridge.zig");
 const chrome_draw_lowering = @import("chrome/chrome_draw_lowering.zig");
+const system_text = @import("chrome/system_text.zig");
 const coretext_bridge = @import("coretext_smoke_bridge.zig");
 const coretext_frame_builder = @import("coretext_frame_builder.zig");
 const coretext_raster = @import("coretext_raster.zig");
@@ -24,6 +25,10 @@ const viewport = chrome.ui.layout.UiSize{ .width = 480, .height = 720 };
 const cell_width_px: u32 = 8;
 const cell_height_px: u32 = 16;
 const terminal_background = [3]u8{ 20, 20, 20 };
+
+test "measured Chrome text adapter stays in the macOS platform boundary" {
+    _ = system_text.Artifact;
+}
 
 const FontVariant = enum {
     jetbrains_mono,

@@ -63,6 +63,36 @@ pub extern fn maru_macos_coretext_shape_draw_list(
     glyph_record_capacity: usize,
 ) void;
 
+/// Rich Chrome 한 줄의 system UI CoreText shape 결과. 이 ABI는 CTLine/CTRun을 platform
+/// 경계 안에 가두고, Zig에는 glyph id·selected face·final advance만 전달한다.
+pub const NativeChromeTextShapeResult = extern struct {
+    status: c_int = -1,
+    primary_font_found: u32 = 0,
+    glyph_record_count: u32 = 0,
+    glyph_record_overflow: u32 = 0,
+};
+
+pub const NativeChromeTextGlyphRecord = extern struct {
+    glyph_id: u32 = 0,
+    codepoint: u32 = 0,
+    fallback: u32 = 0,
+    color_glyph_kind: u32 = 0,
+    x_px: f32 = 0,
+    advance_px: f32 = 0,
+    font_name: [128]u8 = [_]u8{0} ** 128,
+};
+
+pub extern fn maru_macos_coretext_shape_chrome_text(
+    utf8: [*]const u8,
+    utf8_len: usize,
+    font_size_px: f64,
+    weight: u32,
+    max_width_px: f64,
+    result: *NativeChromeTextShapeResult,
+    glyph_records: [*]NativeChromeTextGlyphRecord,
+    glyph_record_capacity: usize,
+) void;
+
 pub extern fn maru_macos_coretext_smoke_rasterize_glyph(
     requested_font_family: [*]const u8,
     requested_font_family_len: usize,

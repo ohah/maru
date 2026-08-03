@@ -60,6 +60,10 @@ final class AgentSessionArchiveSmokeDriver {
     /// A card probe proves geometry/input publication, but one additional ordinary frame proves
     /// the screenshot is not the intentional first-frame skeleton before rich text arrives.
     private var stableListFrames = 0
+    /// Detail data and its measured Korean/SVG action content are produced independently.  The
+    /// action probe becomes ready with the detail DTO; wait through one regular worker-poll frame
+    /// before recording the ready detail so the artifact is part of the captured product frame.
+    private var stableReadyFrames = 0
 
     init?(
         scenario: Scenario? = Scenario(environment: ProcessInfo.processInfo.environment),
@@ -177,6 +181,11 @@ final class AgentSessionArchiveSmokeDriver {
                 return
             }
             guard detail.request_id != 0, detail.state == 2, detail.present != 0, detail.enabled != 0 else { return }
+            stableReadyFrames += 1
+            guard stableReadyFrames >= 2 else {
+                paintRequested = true
+                return
+            }
             if shouldCapture(.ready), !capture(.ready) {
                 fail("capture_ready")
                 return

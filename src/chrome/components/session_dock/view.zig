@@ -363,35 +363,23 @@ const Writer = struct {
             try self.action(find(snapshot, build.NodeIds.focusLive(index)) orelse return error.MissingRect, null, "열린 세션으로 이동");
     }
 
-    /// The action label must not inherit the SVG icon's legacy cell lowering.  Combining both
-    /// into one `wide_icons` run made Korean labels bypass the detached CoreText worker, so
-    /// their advance, ellipsis and line box were all terminal-font guesses.  Keep the existing
-    /// registered icon path as a separate op while B1-button-b moves its final-pixel placement
-    /// into the same worker artifact as the label.
+    /// Button text is one semantic content group, not an icon op whose cell estimate happens to
+    /// precede a measured label.  The detached worker receives the unrounded content rect and
+    /// publishes both the actual label advance and registered-SVG placement in one artifact.
     fn action(self: *Writer, rect: tree.RectEntry, icon: ?[]const u8, label: []const u8) ViewError!void {
         const cw = self.props.cell_width_px;
-        const ch = self.props.cell_height_px;
-        if (cw == 0 or ch == 0) return;
-        const icon_cols: u16 = if (icon != null) 2 else 0;
-        const icon_gap_cols: u16 = if (icon != null) 1 else 0;
-        const available_px = rect.rect.width - @as(f32, @floatFromInt(cw * 2));
-        if (available_px <= 0) return;
-        const max_cols: u16 = @intFromFloat(@floor(available_px / @as(f32, @floatFromInt(cw))));
-        const reserved_cols = icon_cols + icon_gap_cols;
-        if (max_cols <= reserved_cols) return;
-        const label_max_cols = max_cols - reserved_cols;
-        const planned_label_cols = plannedCols(label, label_max_cols);
-        if (planned_label_cols == 0) return;
-        // B1-button-a deliberately uses this conservative icon-slot plan only to position the
-        // still-cell-backed SVG. The adjacent label is a normal semantic text op, so CoreText
-        // owns its proportional Korean/fallback advance and ellipsis instead of this estimate.
-        const group_cols = reserved_cols + planned_label_cols;
-        const group_width: f32 = @floatFromInt(@as(u32, group_cols) * cw);
-        const x = rect.rect.x + (rect.rect.width - group_width) / 2;
-        const icon_y = rect.rect.y + (rect.rect.height - @as(f32, @floatFromInt(ch))) / 2;
-        const line_h: f32 = @floatFromInt(typography.lineHeightPx(.button_label, effectiveScale(self.props.scale_milli)));
-        if (rect.rect.height < line_h) return;
-        const label_y = rect.rect.y + (rect.rect.height - line_h) / 2;
+        if (cw == 0) return;
+        const inset: i32 = @intCast(cw);
+        const border = draw.Rect{
+            .x = @intFromFloat(@floor(rect.rect.x)),
+            .y = @intFromFloat(@floor(rect.rect.y)),
+            .w = @intFromFloat(@floor(rect.rect.width)),
+            .h = @intFromFloat(@floor(rect.rect.height)),
+        };
+        const content = border.inset(.{ .left = @intCast(cw), .right = @intCast(cw) });
+        if (content.w == 0 or content.h == 0) return;
+        const line_height = typography.lineHeightPx(.button_label, effectiveScale(self.props.scale_milli));
+        if (content.h < line_height) return;
         const enabled = rect.action != null and rect.action.?.enabled;
         const foreground: tokens.ColorRole = if (!enabled) .muted_fg else switch (rect.visual) {
             .button => |visual| switch (visual.variant) {
@@ -402,13 +390,28 @@ const Writer = struct {
             // stale/malformed published snapshot readable rather than guessing a Card variant.
             else => .surface_fg,
         };
-        if (icon) |source| {
-            if (loweredTextCellFitsClip(rect, icon_y, ch))
-                try self.emit(x, icon_y, source, icon_cols, .head, foreground, .button_label, true, false);
-        }
-        try self.emit(x + @as(f32, @floatFromInt(@as(u32, reserved_cols) * cw)), label_y, label, label_max_cols, .head, foreground, .button_label, false, true);
+        const placement: draw.TextPlacement = if (icon) |source| .{ .leading_icon_group = .{
+            .content_rect = content,
+            .icon_codepoint = std.unicode.utf8Decode(source) catch return,
+            .icon_extent_px = @intCast(@min(line_height, std.math.maxInt(u16))),
+            .gap_px = @intCast(@min(line_height / 2, std.math.maxInt(u16))),
+        } } else .{ .center_in_rect = content };
+        const reserved_px: u32 = switch (placement) {
+            .leading_icon_group => |group| @as(u32, group.icon_extent_px) + group.gap_px,
+            else => 0,
+        };
+        if (content.w <= reserved_px) return;
+        const max_width_px = content.w - reserved_px;
+        const label_max_cols: u16 = @intFromFloat(@min(
+            @ceil(@as(f32, @floatFromInt(max_width_px)) / @as(f32, @floatFromInt(cw))),
+            @as(f32, @floatFromInt(std.math.maxInt(u16))),
+        ));
+        if (label_max_cols == 0) return;
+        try self.emitPlaced(@floatFromInt(border.x + inset), @floatFromInt(border.y), label, label_max_cols, .head, foreground, .button_label, false, true, max_width_px, placement);
     }
 
+    /// Fixed-width header utility slots still use this conservative display-column estimate;
+    /// Button content deliberately does not, because its worker policy receives pixels above.
     fn plannedCols(source: []const u8, max_cols: u16) u16 {
         var plan = text_layout.plan(source, 0, max_cols, .head, isSessionDockIcon);
         while (plan.next()) |_| {}
@@ -416,6 +419,10 @@ const Writer = struct {
     }
 
     fn emit(self: *Writer, x: f32, y: f32, source: []const u8, cols: u16, anchor: text_layout.Anchor, role: tokens.ColorRole, text_role: typography.ChromeTextRole, wide_icons: bool, bold: bool) ViewError!void {
+        return self.emitPlaced(x, y, source, cols, anchor, role, text_role, wide_icons, bold, null, .origin);
+    }
+
+    fn emitPlaced(self: *Writer, x: f32, y: f32, source: []const u8, cols: u16, anchor: text_layout.Anchor, role: tokens.ColorRole, text_role: typography.ChromeTextRole, wide_icons: bool, bold: bool, max_width_px: ?u32, placement: draw.TextPlacement) ViewError!void {
         if (cols == 0) return;
         if (self.op_count == self.ops.len) return error.InsufficientTextBuffer;
         if (self.run_count == self.runs.len) return error.InsufficientRunBuffer;
@@ -434,6 +441,8 @@ const Writer = struct {
             .max_cols = cols,
             .anchor = anchor,
             .wide_icons = wide_icons,
+            .max_width_px = max_width_px,
+            .placement = placement,
         } };
         self.run_count += 1;
         self.op_count += 1;
@@ -810,7 +819,7 @@ test "SessionDock Retina controls centre measured line boxes instead of terminal
     try std.testing.expectEqual(expected_count_y, count_y orelse return error.TestUnexpectedResult);
 }
 
-test "SessionDock action keeps SVG icon separate from measured Korean label" {
+test "SessionDock action declares one worker-measured SVG icon and Korean label group" {
     const props = types.Props{
         .viewport_px = .{ .width = 640, .height = 960 },
         .cell_width_px = 8,
@@ -856,31 +865,35 @@ test "SessionDock action keeps SVG icon separate from measured Korean label" {
     var runs: [48]draw.Run = undefined;
     var text_bytes: [1024]u8 = undefined;
     const out = try view(props, frame, .{}, &tk, .{ .ops = &ops, .runs = &runs, .text_bytes = &text_bytes });
-    var icon_x: ?i32 = null;
-    var label_x: ?i32 = null;
-    var label_y: ?i32 = null;
     var label_cols: ?u16 = null;
+    var label_max_width: ?u32 = null;
+    var label_placement: ?draw.TextPlacement = null;
     for (out.ops) |op| switch (op) {
         .text => |text| for (text.runs) |run| {
-            if (std.mem.eql(u8, run.text, resume_icon)) {
-                try std.testing.expect(text.wide_icons);
-                icon_x = text.origin.x;
-            }
             if (std.mem.eql(u8, run.text, "터미널에서 이어하기")) {
                 try std.testing.expect(!text.wide_icons);
                 try std.testing.expectEqual(typography.ChromeTextRole.button_label, text.text_role);
-                label_x = text.origin.x;
-                label_y = text.origin.y;
                 label_cols = text.max_cols;
+                label_max_width = text.max_width_px;
+                label_placement = text.placement;
             }
         },
         else => {},
     };
     const action_rect = find(frame.tree, build.NodeIds.resumeAction(0)) orelse return error.TestUnexpectedResult;
-    try std.testing.expect((label_x orelse return error.TestUnexpectedResult) > (icon_x orelse return error.TestUnexpectedResult));
-    try std.testing.expect((label_cols orelse 0) < @as(u16, @intFromFloat(@floor(action_rect.rect.width / @as(f32, @floatFromInt(props.cell_width_px))))));
-    const line_h: f32 = @floatFromInt(typography.lineHeightPx(.button_label, props.scale_milli));
-    try std.testing.expectEqual(@as(i32, @intFromFloat(@floor(action_rect.rect.y + (action_rect.rect.height - line_h) / 2))), label_y orelse return error.TestUnexpectedResult);
+    const line_h = typography.lineHeightPx(.button_label, props.scale_milli);
+    const expected_content_width: u32 = @intFromFloat(@floor(action_rect.rect.width - @as(f32, @floatFromInt(props.cell_width_px * 2))));
+    try std.testing.expect((label_cols orelse 0) > 0);
+    try std.testing.expectEqual(expected_content_width - line_h - line_h / 2, label_max_width orelse return error.TestUnexpectedResult);
+    switch (label_placement orelse return error.TestUnexpectedResult) {
+        .leading_icon_group => |group| {
+            try std.testing.expectEqual(@as(u21, 0xF000C), group.icon_codepoint);
+            try std.testing.expectEqual(@as(u16, @intCast(line_h)), group.icon_extent_px);
+            try std.testing.expectEqual(@as(u16, @intCast(line_h / 2)), group.gap_px);
+            try std.testing.expectEqual(expected_content_width, group.content_rect.w);
+        },
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "SessionDock initial loading paints inert three-line skeleton cards" {

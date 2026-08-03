@@ -34,6 +34,7 @@ pub const Request = struct {
         origin: chrome.draw.Px,
         max_width_px: u32,
         foreground: u32,
+        placement: chrome.draw.TextPlacement = .origin,
     };
 
     pub fn deinit(self: *Request, allocator: std.mem.Allocator) void {
@@ -58,13 +59,16 @@ pub const UnresolvedGlyph = struct {
     line_height_px: f32,
     origin: chrome.draw.Px,
     foreground: u32,
+    run_index: u16,
 };
 
 pub const UnresolvedArtifact = struct {
     glyphs: []UnresolvedGlyph,
+    placements: []chrome.draw.TextPlacement,
 
     pub fn deinit(self: *UnresolvedArtifact, allocator: std.mem.Allocator) void {
         allocator.free(self.glyphs);
+        allocator.free(self.placements);
         self.* = undefined;
     }
 };
@@ -152,7 +156,7 @@ pub fn prepareRequest(
     for (ops) |op| switch (op) {
         .text => |text| {
             if (text.wide_icons or text.origin.x < 0 or text.origin.y < 0) continue;
-            const max_width = std.math.mul(u32, text.max_cols, cell_width_px) catch continue;
+            const max_width = text.max_width_px orelse std.math.mul(u32, text.max_cols, cell_width_px) catch continue;
             for (text.runs) |run| {
                 if (run.text.len == 0 or max_width == 0) continue;
                 try runs.append(allocator, .{
@@ -161,6 +165,7 @@ pub fn prepareRequest(
                     .origin = text.origin,
                     .max_width_px = max_width,
                     .foreground = packRgb(tk.get(text.role)),
+                    .placement = text.placement,
                 });
             }
         },
@@ -214,12 +219,29 @@ test "prepareRequest keeps a Korean button label on measured text path while exc
 pub fn shapeRequest(allocator: std.mem.Allocator, request: *const Request, scale_milli: u32) !UnresolvedArtifact {
     var glyphs: std.ArrayList(UnresolvedGlyph) = .empty;
     errdefer glyphs.deinit(allocator);
-    for (request.runs) |run| {
-        const shaped = shapeUnresolvedRun(allocator, run, scale_milli) catch continue;
+    const placements = try allocator.alloc(chrome.draw.TextPlacement, request.runs.len);
+    errdefer allocator.free(placements);
+    for (request.runs, 0..) |run, index| {
+        if (index > std.math.maxInt(u16)) return error.TooManySystemTextRuns;
+        placements[index] = run.placement;
+        const shaped = shapeUnresolvedRun(allocator, run, scale_milli) catch |err| switch (run.placement) {
+            // A centred Button is all-or-nothing: publishing only its background or a lone
+            // icon would make an enabled command look corrupt while hiding the failed label.
+            .origin => continue,
+            else => return err,
+        };
         defer allocator.free(shaped);
-        try glyphs.appendSlice(allocator, shaped);
+        if (shaped.len == 0) switch (run.placement) {
+            .origin => continue,
+            else => return error.EmptyMeasuredButtonLabel,
+        };
+        for (shaped) |glyph| {
+            var owned = glyph;
+            owned.run_index = @intCast(index);
+            try glyphs.append(allocator, owned);
+        }
     }
-    return .{ .glyphs = try glyphs.toOwnedSlice(allocator) };
+    return .{ .glyphs = try glyphs.toOwnedSlice(allocator), .placements = placements };
 }
 
 /// Resolves a completed worker DTO on the main actor.  This bounded conversion is the sole
@@ -229,16 +251,46 @@ pub fn resolveArtifact(
     registry: *renderer.FontIdentityRegistry,
     unresolved: UnresolvedArtifact,
 ) !Artifact {
-    const records = try allocator.alloc(renderer.ShapedGlyphRecord, unresolved.glyphs.len);
+    var advances = try allocator.alloc(f32, unresolved.placements.len);
+    defer allocator.free(advances);
+    @memset(advances, 0);
+    var line_heights = try allocator.alloc(f32, unresolved.placements.len);
+    defer allocator.free(line_heights);
+    @memset(line_heights, 0);
+    var shaped = try allocator.alloc(bool, unresolved.placements.len);
+    defer allocator.free(shaped);
+    @memset(shaped, false);
+    for (unresolved.glyphs) |glyph| {
+        const run_index: usize = glyph.run_index;
+        if (run_index >= advances.len) return error.InvalidSystemTextRunIndex;
+        advances[run_index] = @max(advances[run_index], glyph.x_px + glyph.advance_px);
+        line_heights[run_index] = @max(line_heights[run_index], glyph.line_height_px);
+        shaped[run_index] = true;
+    }
+    var icon_count: usize = 0;
+    for (unresolved.placements, shaped) |placement, has_glyph| switch (placement) {
+        .leading_icon_group => {
+            if (has_glyph) icon_count += 1;
+        },
+        else => {},
+    };
+    const total_count = std.math.add(usize, unresolved.glyphs.len, icon_count) catch return error.TooManySystemTextGlyphs;
+    const records = try allocator.alloc(renderer.ShapedGlyphRecord, total_count);
     errdefer allocator.free(records);
-    const placements = try allocator.alloc(Placement, unresolved.glyphs.len);
-    for (unresolved.glyphs, records, placements, 0..) |glyph, *record, *placement, index| {
+    const placements = try allocator.alloc(Placement, total_count);
+    var record_index: usize = 0;
+    for (unresolved.glyphs) |glyph| {
+        const run_index: usize = glyph.run_index;
+        const layout = unresolved.placements[run_index];
+        const label_origin = labelOrigin(layout, glyph.origin, advances[run_index], glyph.line_height_px);
+        const record = &records[record_index];
+        const placement = &placements[record_index];
         const name = probe.cStringField(&glyph.font_name);
         const font_id = try registry.intern(.{ .postscript_name = name });
         const advance = @max(glyph.advance_px, 1.0);
         record.* = .{
-            .row = @intCast(index / 256),
-            .col = @intCast(index % 256),
+            .row = @intCast(record_index / 256),
+            .col = @intCast(record_index % 256),
             .cell_width = 1,
             .codepoint = @intCast(@min(glyph.codepoint, std.math.maxInt(u21))),
             .font_id = font_id,
@@ -250,14 +302,108 @@ pub fn resolveArtifact(
             .raster_height_px = @intFromFloat(@ceil(glyph.line_height_px)),
         };
         placement.* = .{
-            .x_px = @as(f32, @floatFromInt(glyph.origin.x)) + glyph.x_px,
-            .y_px = @floatFromInt(glyph.origin.y),
+            .x_px = label_origin.x_px + glyph.x_px,
+            .y_px = label_origin.y_px,
             .advance_px = advance,
             .line_height_px = glyph.line_height_px,
             .foreground = glyph.foreground,
         };
+        record_index += 1;
     }
+    for (unresolved.placements, shaped, advances, line_heights, 0..) |layout, has_glyph, advance, line_height, run_index| switch (layout) {
+        .leading_icon_group => |group| {
+            if (!has_glyph) continue;
+            if (!renderer.icon_glyph.isRegisteredIcon(group.icon_codepoint)) return error.UnregisteredChromeIcon;
+            const group_width = @as(f32, @floatFromInt(group.icon_extent_px + group.gap_px)) + advance;
+            const x = @as(f32, @floatFromInt(group.content_rect.x)) + (@as(f32, @floatFromInt(group.content_rect.w)) - group_width) / 2;
+            const y = @as(f32, @floatFromInt(group.content_rect.y)) + (@as(f32, @floatFromInt(group.content_rect.h)) - @as(f32, @floatFromInt(group.icon_extent_px))) / 2;
+            records[record_index] = .{
+                .row = @intCast(record_index / 256),
+                .col = @intCast(record_index % 256),
+                .cell_width = 1,
+                .codepoint = group.icon_codepoint,
+                // Registered SVG coverage is selected by codepoint.  No platform font or
+                // CoreText call is needed for this record, and the renderer's glyph_id=0
+                // synthetic gate prevents it from sharing a font glyph atlas slot.
+                .font_id = 0,
+                .glyph_id = 0,
+                .color_glyph_kind = .monochrome,
+                .raster_width_px = group.icon_extent_px,
+                .raster_height_px = group.icon_extent_px,
+            };
+            placements[record_index] = .{
+                .x_px = x,
+                .y_px = y,
+                .advance_px = @floatFromInt(group.icon_extent_px),
+                .line_height_px = if (line_height > 0) line_height else @floatFromInt(group.icon_extent_px),
+                .foreground = unresolved.glyphs[indexForRun(unresolved.glyphs, @intCast(run_index)) orelse return error.InvalidSystemTextRunIndex].foreground,
+            };
+            record_index += 1;
+        },
+        else => {},
+    };
+    if (record_index != total_count) return error.InvalidSystemTextArtifact;
     return .{ .records = records, .placements = placements };
+}
+
+const ResolvedOrigin = struct { x_px: f32, y_px: f32 };
+
+fn labelOrigin(layout: chrome.draw.TextPlacement, fallback: chrome.draw.Px, advance: f32, line_height: f32) ResolvedOrigin {
+    return switch (layout) {
+        .origin => .{ .x_px = @floatFromInt(fallback.x), .y_px = @floatFromInt(fallback.y) },
+        .center_in_rect => |rect| .{
+            .x_px = @as(f32, @floatFromInt(rect.x)) + (@as(f32, @floatFromInt(rect.w)) - advance) / 2,
+            .y_px = @as(f32, @floatFromInt(rect.y)) + (@as(f32, @floatFromInt(rect.h)) - line_height) / 2,
+        },
+        .leading_icon_group => |group| .{
+            .x_px = @as(f32, @floatFromInt(group.content_rect.x)) + (@as(f32, @floatFromInt(group.content_rect.w)) - (@as(f32, @floatFromInt(group.icon_extent_px + group.gap_px)) + advance)) / 2 + @as(f32, @floatFromInt(group.icon_extent_px + group.gap_px)),
+            .y_px = @as(f32, @floatFromInt(group.content_rect.y)) + (@as(f32, @floatFromInt(group.content_rect.h)) - line_height) / 2,
+        },
+    };
+}
+
+fn indexForRun(glyphs: []const UnresolvedGlyph, run_index: u16) ?usize {
+    for (glyphs, 0..) |glyph, index| if (glyph.run_index == run_index) return index;
+    return null;
+}
+
+test "leading icon group resolves measured label and SVG to one final-pixel artifact" {
+    const allocator = std.testing.allocator;
+    var font_name = [_]u8{0} ** 128;
+    @memcpy(font_name[0..6], "System");
+    const glyphs = try allocator.dupe(UnresolvedGlyph, &.{.{
+        .glyph_id = 12,
+        .codepoint = 'A',
+        .fallback = false,
+        .color_glyph_kind = .monochrome,
+        .x_px = 0,
+        .advance_px = 30,
+        .font_name = font_name,
+        .point_size = 14,
+        .line_height_px = 20,
+        .origin = .{ .x = 0, .y = 0 },
+        .foreground = 0xAABBCC,
+        .run_index = 0,
+    }});
+    const layouts = try allocator.dupe(chrome.draw.TextPlacement, &.{.{ .leading_icon_group = .{
+        .content_rect = .{ .x = 20, .y = 10, .w = 100, .h = 30 },
+        .icon_codepoint = 0xF000C,
+        .icon_extent_px = 20,
+        .gap_px = 10,
+    } }});
+    var unresolved = UnresolvedArtifact{ .glyphs = glyphs, .placements = layouts };
+    defer unresolved.deinit(allocator);
+    var registry = renderer.FontIdentityRegistry.init(allocator);
+    defer registry.deinit();
+    var artifact = try resolveArtifact(allocator, &registry, unresolved);
+    defer artifact.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), artifact.records.len);
+    try std.testing.expectEqual(@as(f32, 70), artifact.placements[0].x_px);
+    try std.testing.expectEqual(@as(f32, 15), artifact.placements[0].y_px);
+    try std.testing.expectEqual(@as(u21, 0xF000C), artifact.records[1].codepoint);
+    try std.testing.expectEqual(@as(u32, 0), artifact.records[1].glyph_id);
+    try std.testing.expectEqual(@as(f32, 40), artifact.placements[1].x_px);
+    try std.testing.expectEqual(@as(f32, 15), artifact.placements[1].y_px);
 }
 
 pub fn emptyDrawList(allocator: std.mem.Allocator, glyph_count: usize) !renderer.DrawList {
@@ -331,6 +477,7 @@ fn shapeUnresolvedRun(allocator: std.mem.Allocator, run: Request.Run, scale_mill
             .line_height_px = @floatFromInt(chrome.ui.typography.lineHeightPx(run.role, scale_milli)),
             .origin = run.origin,
             .foreground = run.foreground,
+            .run_index = 0,
         };
     }
     return out;

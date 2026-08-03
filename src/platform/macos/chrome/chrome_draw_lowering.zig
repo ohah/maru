@@ -163,6 +163,8 @@ pub fn richTextFingerprint(
             fingerprintMixValue(&state, packRgb(tk.get(text.role)));
             fingerprintMixValue(&state, @intFromEnum(text.text_role));
             fingerprintMixValue(&state, @intFromBool(text.wide_icons));
+            fingerprintMixValue(&state, text.max_width_px orelse 0);
+            fingerprintMixTextPlacement(&state, text.placement);
             for (text.runs) |run| {
                 fingerprintMixValue(&state, run.text.len);
                 fingerprintMixValue(&state, @intFromBool(run.bold));
@@ -172,6 +174,29 @@ pub fn richTextFingerprint(
         else => fingerprintMixValue(&state, 0),
     };
     return state;
+}
+
+fn fingerprintMixTextPlacement(state: *u64, placement: chrome.draw.TextPlacement) void {
+    switch (placement) {
+        .origin => fingerprintMixValue(state, @as(u8, 0)),
+        .center_in_rect => |rect| {
+            fingerprintMixValue(state, @as(u8, 1));
+            fingerprintMixValue(state, @as(u32, @bitCast(rect.x)));
+            fingerprintMixValue(state, @as(u32, @bitCast(rect.y)));
+            fingerprintMixValue(state, rect.w);
+            fingerprintMixValue(state, rect.h);
+        },
+        .leading_icon_group => |group| {
+            fingerprintMixValue(state, @as(u8, 2));
+            fingerprintMixValue(state, @as(u32, @bitCast(group.content_rect.x)));
+            fingerprintMixValue(state, @as(u32, @bitCast(group.content_rect.y)));
+            fingerprintMixValue(state, group.content_rect.w);
+            fingerprintMixValue(state, group.content_rect.h);
+            fingerprintMixValue(state, group.icon_codepoint);
+            fingerprintMixValue(state, group.icon_extent_px);
+            fingerprintMixValue(state, group.gap_px);
+        },
+    }
 }
 
 fn fingerprintMixValue(state: *u64, value: anytype) void {

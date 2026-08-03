@@ -138,10 +138,23 @@ target을 표현한다. generic tree/paint/interaction은 둘의 rect·clip·poi
    action rect 안의 보수적 icon-slot·gap 예약은 그대로 두며, label의 CJK ellipsis와 vertical line box는
    platform artifact가 결정한다. 이 단계는 label이 terminal cell/fallback font 폭으로 다시 lower되는 회귀를
    막는 데 목적이 있고, 전체 icon+label group의 수평 중심이 final-pixel이라는 주장은 하지 않는다.
-2. **B1-button-b (후속)** — worker result가 label advance와 icon slot placement를 같은 immutable artifact로
-   publish하고, synthesized SVG icon도 그 final-pixel placement를 소비한다. 그때만 group의 수평/수직 중심과
-   overflow clip을 실제 measured content rect로 완료 처리한다. 매 frame main actor CoreText 호출, font별 nudge,
-   cell-column으로 worker 결과를 역산하는 구현은 금지한다.
+2. **B1-button-b** — component는 button border box에서 양쪽 content inset만 선언하고, platform
+   text request에는 `center-in-content` 또는 `leading-icon-group` 정책을 함께 싣는다. worker는 같은
+   immutable result에서 (a) native primary/fallback shaping 뒤의 실제 label advance, (b) truncation 뒤 label의
+   final-pixel origin, (c) registered SVG icon의 optical box·gap·final-pixel origin을 산출한다. main actor는
+   font identity를 renderer record로 resolve할 뿐 CoreText를 다시 부르지 않으며, SVG record는 `glyph_id=0`
+   합성 경로와 동일 shared atlas를 통해 그 placement를 소비한다. 그때만 group의 수평/수직 중심과 overflow clip을
+   실제 measured content rect로 완료 처리한다. `leading-icon-group`의 icon extent는 `.button_label` line box와
+   current backing scale에서 정해지며 terminal cell height·사용자 terminal font는 입력이 아니다. 매 frame
+   main actor CoreText 호출, font별 nudge, cell-column으로 worker 결과를 역산하는 구현은 금지한다.
+
+   - `leading-icon-group`은 `content_width - icon_extent - gap`을 label의 최대 width로 넘긴다. worker가 만든
+     ellipsis의 advance를 다시 읽어 `icon + gap + label` 전체를 content rect의 정확한 가운데에 놓는다. label이
+     비어 있거나 shape에 실패하면 icon-only action을 추측해 활성화하지 않고 해당 artifact를 publish하지 않는다.
+   - `center-in-content`는 leading icon 없는 action에 쓰며, 동일하게 measured label advance 하나만으로 수평
+     중심을 결정한다. pointer/key hit box와 disabled state는 변하지 않는다.
+   - artifact의 icon record는 ordinary CoreText glyph인 척하지 않는다. 등록 codepoint, mono foreground, 목표
+     raster extent, final placement만 전달하며, renderer의 registered-SVG coverage gate가 이를 검증한다.
 
 - `SessionDockLayout`이 header, scope, search, scroll-area, group header,
   card, scrollbar의 pixel rect를 **한 번만** 계산한다. `view`, pointer

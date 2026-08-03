@@ -193,6 +193,36 @@ ellipsis를 결정한다. 특히 한글·emoji·fallback glyph가 있어도 byte
 publish하지 않는다. 목록의 고정 row height는 이 token의 line boxes와 기존 padding을 수용하는
 layout 결과일 뿐, 작은 글자를 빈 cell로 둘러싼 대체 typography가 아니다.
 
+#### Logical spacing과 component metric
+
+Chrome의 `UiStyle.padding`·`margin`·`gap`은 CSS와 같은 기하 의미를 가지지만, 제품 view가
+Tailwind class 또는 임의 raw pixel을 직접 나열하는 API는 아니다. `src/chrome/ui/spacing.zig`의
+닫힌 `Space` step(`xxs=4`, `xs=8`, `sm=12`, `md=16`, `lg=20`, `xl=24`, `xxl=32` logical point)을
+`spacing.px(step, scale_milli)`로 backing pixel에 한 번 resolve한다. step 확장은 component별
+숫자 추가가 아니라 spacing module의 unit/scale/capture 검증을 포함한 별도 설계 변경이다.
+
+AS4-f는 두 단계다. **AS4-f-a(현재)**는 `ButtonMetrics.resolve(scale_milli)`로 action content inset,
+icon box/gap, minimum height만 먼저 옮긴다. **AS4-f-b(후속)**는 `SessionDock`에
+`DockMetrics.resolve(scale_milli)`를 추가해 root inset, control gap, fixed chrome/card/detail/action
+height와 action gap을 한 snapshot에 얻게 한다. f-b의 함수는 `ChromeTypography` line box와 `Space`만
+읽고 terminal cell width/height·terminal font·terminal line spacing은 읽지 않는다. `UiRectTree`, paint,
+hit-test, virtualized visible window, wheel step은 그 동일 metric snapshot을 공유해야 한다. 이 경계가
+terminal font를 크게/작게 바꿨을 때 native Chrome의 밀도와 pointer target까지 같이 흔들리는 회귀를
+막는다.
+
+AS4-f-a의 `ButtonMetrics`는 `content_inset_x=.md`, `content_inset_y=.sm`, 18pt leading-icon optical
+box, `.xs` icon gap과 48pt minimum height를 소유한다. icon SVG의 source viewBox 여백, terminal cell
+폭, label별 font nudge는 metric이 아니다. text artifact가 실제 label advance를 반환한 뒤
+`icon + gap + label` group을 이 content box 중심에 놓는 B1-button-b 경로만 final placement를 만든다.
+색/radius/shadow는 `Tokens`가 계속 소유한다. 즉 spacing 책임을 theme color token에 섞거나 `Row`/`Flex`
+API로 노출하지 않는다. view의 available height가 complete `ButtonMetrics`를 수용하지 못하면 action
+leaf를 조용히 압축하지 않고 candidate tree를 fail-close한다.
+
+AS4-f-b capture는 같은 dock backing rect에서 기본·큰 terminal font와 1×/2×를 비교한다. PNG/JSON은
+action border/content/icon/label rect, header/scope/search/card rect, terminal font metric을 함께 남긴다.
+terminal-font 변화 뒤 dock rect나 action hit rect가 달라지면 실패다. 실제 사용자 Claude/Codex resume은
+이 시각 slice의 자동 실행 대상이 아니며, 기존 explicit-action fixture만 다시 실행한다.
+
 시각 합격 자료는 `session-dock-typography` Chrome Lab과 동일 fixture를 소비하는 AppKit capture
 두 종류다. 1920×1080 logical viewport의 480pt auto dock에서 header, segmented scope, search,
 group, 기본 row, expanded detail, 두 action을 한 화면에 보이고, JSON에는 role별 resolved face,
@@ -266,26 +296,22 @@ pixel size, label gap은 `ButtonSize`와 token에서 결정하고 text artifact�
 shortcut은 B1 첫 slice에서는 Text child가 명시적으로 제공할 때만 보이며, Button이 `⌘↵` 같은
 문자열을 도메인별로 합성하지 않는다.
 
-구현은 네 PR로 나눈다. 한 PR은 선행 PR이 병합된 `main`에서만 시작한다.
+현재 B1-text와 archive action의 B1-button-a/b는 구현됐다. `UiNode.button`의 visual/action/border box와
+worker-owned final-pixel `leading-icon-group`도 제품 Session Dock에서 소비한다. 다만 아래의 generic
+`ui/button.zig` props/one-Text-child API와 generic paint ownership은 아직 만들지 않았으므로, 현재
+archive consumer 하나가 성공했다는 이유로 reusable Button 전체를 완료로 부르지 않는다.
 
-1. **B1-doc (현재 문서 slice):** 이 계약, 상태 표, verification gate를 고정한다. code/API는 추가하지 않는다.
-2. **B1-text:** final text content rect와 pixel glyph placement artifact를 제품 rich Chrome path에
-   추가한다. 첫 구현은 Session Dock의 한 줄 text op를 대상으로 한다. macOS adapter는
-   `CTFontCreateUIFontForLanguage`의 system UI primary와 role weight로 **문자열 전체를 한 CTLine으로
-   shape**하고, 그 실제 glyph advance·baseline·fallback face를 renderer-neutral record로 돌려준다.
-   `ChromeTextRole`과 final content rect는 이 요청의 닫힌 입력이며, terminal `font.*`, `DrawCell`,
-   `row × cell_height`는 이 경로의 입력이 아니다. ellipsis는 같은 CTLine 측정에서 가장 긴 grapheme
-   prefix를 다시 shape하여 정하고, 중앙 정렬은 ink bounds가 아닌 role line-height box를 content rect에
-   맞춰 한 번만 계산한다. native handle은 frame 밖으로 나가지 않으며, 결과 record는 기존
-   `RendererState`/shared glyph atlas/raster upload를 통해 `GpuGlyph`의 final pixel rect로만 내려간다.
-   즉 별도 Chrome atlas, label별 y nudge, terminal grid ABI 변경은 금지한다. cell row로 절삭되는 기존
-   action text를 이 path로 자동 전환하지 않는다. text unit, lowering unit, Metal Lab readback으로
-   fractional y와 CJK/ellipsis/icon alignment를 증명한다.
-3. **B1-button:** `ui/button.zig`·`UiNode.button`·paint/interaction을 추가한다. default/hover/
+남은 generic Button 이관은 다음 PR로 나눈다. 한 PR은 선행 PR이 병합된 `main`에서만 시작한다.
+
+1. **B1-generic-component:** `ui/button.zig`를 추가해 `ButtonProps`, icon slot, semantic text child를
+   `UiNode.button`에 투영한다. archive/provider/AppKit을 import하지 않고, 이미 구현된 Session Dock
+   final-pixel artifact를 generic API가 다시 cell origin으로 되돌리지 않음을 unit/readback으로 증명한다.
+2. **B1-generic-state:** default/hover/
    pressed/focus/disabled, ButtonSize floor보다 작은 max fail-close, zero/two/non-Text child fail-close,
    narrow CJK ellipsis, pointer·keyboard action parity를 headless와 Lab fixture로 고정한다.
-4. **B1-archive migration:** archive detail action을 Button으로 전환하고 `detail-ready` before/after
-   capture와 실제 AppKit resume/reveal fixture를 갱신한다. provider와 action identity 정책은 바꾸지 않는다.
+3. **B1-archive refactor:** archive detail action의 current local writer가 generic Button만 소비하도록
+   바꾸고 `detail-ready` before/after capture와 실제 AppKit resume/reveal fixture를 갱신한다. provider와
+   action identity 정책은 바꾸지 않는다.
 
 각 구현 PR은 `mise run macos-chrome-lab-smoke`의 제품 Metal PNG와 `gh attach` 본문 이미지를
 포함한다. B1-text/B1-button은 `zig build test-chrome-ui`, `zig build check-boundaries`, `mise run check`,

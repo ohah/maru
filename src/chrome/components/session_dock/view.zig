@@ -369,14 +369,20 @@ const Writer = struct {
     fn action(self: *Writer, rect: tree.RectEntry, icon: ?[]const u8, label: []const u8) ViewError!void {
         const cw = self.props.cell_width_px;
         if (cw == 0) return;
-        const inset: i32 = @intCast(cw);
+        const button = types.ButtonMetrics.resolve(effectiveScale(self.props.scale_milli));
         const border = draw.Rect{
             .x = @intFromFloat(@floor(rect.rect.x)),
             .y = @intFromFloat(@floor(rect.rect.y)),
             .w = @intFromFloat(@floor(rect.rect.width)),
             .h = @intFromFloat(@floor(rect.rect.height)),
         };
-        const content = border.inset(.{ .left = @intCast(cw), .right = @intCast(cw) });
+        if (border.h < button.minimum_height_px) return;
+        const content = border.inset(.{
+            .top = @intCast(button.content_inset_y_px),
+            .right = @intCast(button.content_inset_x_px),
+            .bottom = @intCast(button.content_inset_y_px),
+            .left = @intCast(button.content_inset_x_px),
+        });
         if (content.w == 0 or content.h == 0) return;
         const line_height = typography.lineHeightPx(.button_label, effectiveScale(self.props.scale_milli));
         if (content.h < line_height) return;
@@ -393,8 +399,8 @@ const Writer = struct {
         const placement: draw.TextPlacement = if (icon) |source| .{ .leading_icon_group = .{
             .content_rect = content,
             .icon_codepoint = std.unicode.utf8Decode(source) catch return,
-            .icon_extent_px = @intCast(@min(line_height, std.math.maxInt(u16))),
-            .gap_px = @intCast(@min(line_height / 2, std.math.maxInt(u16))),
+            .icon_extent_px = @intCast(@min(button.leading_icon_extent_px, std.math.maxInt(u16))),
+            .gap_px = @intCast(@min(button.leading_icon_gap_px, std.math.maxInt(u16))),
         } } else .{ .center_in_rect = content };
         const reserved_px: u32 = switch (placement) {
             .leading_icon_group => |group| @as(u32, group.icon_extent_px) + group.gap_px,
@@ -407,7 +413,7 @@ const Writer = struct {
             @as(f32, @floatFromInt(std.math.maxInt(u16))),
         ));
         if (label_max_cols == 0) return;
-        try self.emitPlaced(@floatFromInt(border.x + inset), @floatFromInt(border.y), label, label_max_cols, .head, foreground, .button_label, false, true, max_width_px, placement);
+        try self.emitPlaced(@floatFromInt(content.x), @floatFromInt(content.y), label, label_max_cols, .head, foreground, .button_label, false, true, max_width_px, placement);
     }
 
     /// Fixed-width header utility slots still use this conservative display-column estimate;
@@ -461,7 +467,7 @@ const Writer = struct {
     fn skeletons(self: *Writer, content: tree.RectEntry) ViewError!void {
         const ch = self.props.cell_height_px;
         if (ch == 0) return;
-        const metrics = types.Metrics.fromCellHeight(ch);
+        const metrics = types.Metrics.fromCellHeight(ch, self.props.scale_milli);
         const left = content.rect.x + @as(f32, @floatFromInt(metrics.pad));
         const available = content.rect.width - @as(f32, @floatFromInt(metrics.pad * 2));
         if (available <= 0) return;
@@ -693,7 +699,7 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
 }
 
 test "SessionDock partial card never emits a CoreText cell that crosses its published clip" {
-    const metrics = types.Metrics.fromCellHeight(16);
+    const metrics = types.Metrics.fromCellHeight(16, 1000);
     const props = types.Props{
         // Fixed chrome is intentionally roomier in AS4-e. Keep enough scroll viewport below it
         // to prove a one-pixel partial first card cannot suppress the next card's title.
@@ -881,16 +887,18 @@ test "SessionDock action declares one worker-measured SVG icon and Korean label 
         else => {},
     };
     const action_rect = find(frame.tree, build.NodeIds.resumeAction(0)) orelse return error.TestUnexpectedResult;
-    const line_h = typography.lineHeightPx(.button_label, props.scale_milli);
-    const expected_content_width: u32 = @intFromFloat(@floor(action_rect.rect.width - @as(f32, @floatFromInt(props.cell_width_px * 2))));
+    const button = types.ButtonMetrics.resolve(props.scale_milli);
+    const expected_content_width: u32 = @intFromFloat(@floor(action_rect.rect.width - @as(f32, @floatFromInt(button.content_inset_x_px * 2))));
+    const expected_content_height: u32 = @intFromFloat(@floor(action_rect.rect.height - @as(f32, @floatFromInt(button.content_inset_y_px * 2))));
     try std.testing.expect((label_cols orelse 0) > 0);
-    try std.testing.expectEqual(expected_content_width - line_h - line_h / 2, label_max_width orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqual(expected_content_width - button.leading_icon_extent_px - button.leading_icon_gap_px, label_max_width orelse return error.TestUnexpectedResult);
     switch (label_placement orelse return error.TestUnexpectedResult) {
         .leading_icon_group => |group| {
             try std.testing.expectEqual(@as(u21, 0xF000C), group.icon_codepoint);
-            try std.testing.expectEqual(@as(u16, @intCast(line_h)), group.icon_extent_px);
-            try std.testing.expectEqual(@as(u16, @intCast(line_h / 2)), group.gap_px);
+            try std.testing.expectEqual(@as(u16, @intCast(button.leading_icon_extent_px)), group.icon_extent_px);
+            try std.testing.expectEqual(@as(u16, @intCast(button.leading_icon_gap_px)), group.gap_px);
             try std.testing.expectEqual(expected_content_width, group.content_rect.w);
+            try std.testing.expectEqual(expected_content_height, group.content_rect.h);
         },
         else => return error.TestUnexpectedResult,
     }

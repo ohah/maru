@@ -3,7 +3,9 @@
 //! 이 파일은 archive scanner의 record나 AppSession을 보관하지 않는다. platform은 이미 redaction과
 //! scope/filter를 끝낸 화면용 문자열만 이 구조로 투영하고, component는 그 immutable snapshot만 읽는다.
 
+const std = @import("std");
 const layout = @import("../../ui/layout.zig");
+const spacing = @import("../../ui/spacing.zig");
 
 pub const Scope = enum { workspace, project, all };
 
@@ -119,8 +121,9 @@ pub const Metrics = struct {
     /// 밖으로 이동하지 않고 exact vertical centring을 계속 지킨다.
     /// viewport가 작아도 build 단계가 empty rect로 fail-close하므로 component가 별도 pixel magic number를
     /// 들고 있지 않다.
-    pub fn fromCellHeight(cell_height_px: u32) Metrics {
+    pub fn fromCellHeight(cell_height_px: u32, scale_milli: u32) Metrics {
         const ch = @max(cell_height_px, 1);
+        const button = ButtonMetrics.resolve(scale_milli);
         return .{
             // Title/count stack과 trailing utility cluster가 같은 header 안에서 숨 막히지 않도록 4행.
             .header_h = ch * 4,
@@ -132,8 +135,10 @@ pub const Metrics = struct {
             // row never jumps while a background detail result arrives.  The text view may use
             // at most three two-line turns inside this rect.
             .expanded_detail_h = ch * 10,
-            // Two rows made action icon/text cling to the lower border in actual Metal captures.
-            .expanded_actions_h = ch * 3,
+            // The action target is native Chrome geometry. The surrounding archive list remains
+            // cell-derived until AS4-f moves all DockMetrics, but terminal font size cannot
+            // shrink this explicit command below the 48pt target.
+            .expanded_actions_h = button.minimum_height_px,
             .control_gap = ch,
             .item_gap = 0,
             .action_gap = @max(ch / 2, 4),
@@ -142,15 +147,58 @@ pub const Metrics = struct {
     }
 };
 
+/// Metrics of one measured action-content group. These values use Chrome logical points and the
+/// backing scale only; terminal cell width and SVG viewBox whitespace are not padding inputs.
+pub const ButtonMetrics = struct {
+    content_inset_x_px: u32,
+    content_inset_y_px: u32,
+    leading_icon_extent_px: u32,
+    leading_icon_gap_px: u32,
+    minimum_height_px: u32,
+
+    pub fn resolve(scale_milli: u32) ButtonMetrics {
+        // Props default to 1000, but malformed/pre-render snapshots may still carry zero.
+        // `view.effectiveScale` uses the same fallback; matching it here keeps the published
+        // action rect large enough for the content artifact rather than producing a blank button.
+        const scale = if (scale_milli == 0) 1000 else scale_milli;
+        return .{
+            .content_inset_x_px = geometryPx(spacing.px(.md, scale)),
+            .content_inset_y_px = geometryPx(spacing.px(.sm, scale)),
+            .leading_icon_extent_px = geometryPx(spacing.pointsPx(18, scale)),
+            .leading_icon_gap_px = geometryPx(spacing.px(.xs, scale)),
+            .minimum_height_px = geometryPx(spacing.pointsPx(48, scale)),
+        };
+    }
+
+    fn geometryPx(value: u32) u32 {
+        return @min(value, @as(u32, std.math.maxInt(i32)));
+    }
+};
+
 test "Metrics keeps the three-line session list readable without inter-row whitespace" {
-    const m = Metrics.fromCellHeight(32);
-    try @import("std").testing.expectEqual(@as(u32, 192), m.card_h);
-    try @import("std").testing.expectEqual(@as(u32, 96), m.scope_h);
-    try @import("std").testing.expectEqual(@as(u32, 32), m.control_gap);
-    try @import("std").testing.expectEqual(@as(u32, 0), m.item_gap);
-    try @import("std").testing.expectEqual(@as(u32, 16), m.action_gap);
-    try @import("std").testing.expectEqual(@as(u32, 48), m.pad);
+    const m = Metrics.fromCellHeight(32, 1000);
+    try std.testing.expectEqual(@as(u32, 192), m.card_h);
+    try std.testing.expectEqual(@as(u32, 96), m.scope_h);
+    try std.testing.expectEqual(@as(u32, 32), m.control_gap);
+    try std.testing.expectEqual(@as(u32, 0), m.item_gap);
+    try std.testing.expectEqual(@as(u32, 16), m.action_gap);
+    try std.testing.expectEqual(@as(u32, 48), m.pad);
     // view.zig places base rows at 1/3/5 cell heights. Their cells fit before the divider while
     // every information line keeps one full cell of separation.
-    try @import("std").testing.expect(m.card_h >= 6 * 32);
+    try std.testing.expect(m.card_h >= 6 * 32);
+}
+
+test "ButtonMetrics is independent of terminal cell height and scales in backing pixels" {
+    const one_x = ButtonMetrics.resolve(1000);
+    const two_x = ButtonMetrics.resolve(2000);
+    try std.testing.expectEqual(@as(u32, 16), one_x.content_inset_x_px);
+    try std.testing.expectEqual(@as(u32, 12), one_x.content_inset_y_px);
+    try std.testing.expectEqual(@as(u32, 18), one_x.leading_icon_extent_px);
+    try std.testing.expectEqual(@as(u32, 8), one_x.leading_icon_gap_px);
+    try std.testing.expectEqual(@as(u32, 48), one_x.minimum_height_px);
+    try std.testing.expectEqual(one_x.minimum_height_px * 2, two_x.minimum_height_px);
+    try std.testing.expectEqual(one_x.minimum_height_px, ButtonMetrics.resolve(0).minimum_height_px);
+    const extreme = ButtonMetrics.resolve(std.math.maxInt(u32)).minimum_height_px;
+    try std.testing.expect(extreme > 0);
+    try std.testing.expect(extreme <= @as(u32, std.math.maxInt(i32)));
 }

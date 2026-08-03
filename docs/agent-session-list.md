@@ -69,10 +69,13 @@ chrome과 같은 Zig semantic draw → Metal GPU lowering 경로를 쓰는 custo
 AS4-d의 inline disclosure는 동작 이관이다. 이 절은 첨부 레퍼런스와 비교했을 때 남아 있던
 "작은 terminal 행들의 집합" 인상을 없애기 위한 **별도 시각 계약**이다. 데이터·action·scroll
 identity는 바꾸지 않으며, `SessionDock`의 같은 completed `UiRectTree`에서만 기하와 paint를 바꾼다.
+아래 bullet은 **AS4-f-b 완료 뒤의 목표 상태**다. 현재 AS4-f-a는 확장 action의 content
+metric만 이관했으며, 단계별 실제 완료 범위는 [2.1.3](#213-logical-spacingdock-metric-계약-as4-f)을 따른다.
 
-- dock의 자동 폭 640pt 안에서 outer padding은 `1.5ch` 이상, header는 4행, segmented scope와
-  search는 각각 3행, group header는 3행을 예약한다. header·scope·search는 scroll하지 않고,
-  group부터만 scroll한다.
+- dock의 자동 폭 640pt 안에서 outer padding, header, segmented scope, search, group header의
+  기하는 **terminal cell**이 아니라 Chrome의 logical spacing/type token과 backing scale에서만
+  결정한다. header·scope·search는 scroll하지 않고, group부터만 scroll한다. terminal font·line
+  spacing을 바꿔도 도크의 버튼 여백·목록 밀도·hit rect가 바뀌어서는 안 된다.
 - header는 title(강조) → count(secondary)의 좌측 두 줄과 `Local Mac`/refresh의 우측 utility
   cluster를 서로 독립 slot으로 둔다. title/count/utility가 한 baseline 또는 terminal prompt처럼
   보이지 않아야 한다.
@@ -90,12 +93,11 @@ identity는 바꾸지 않으며, `SessionDock`의 같은 completed `UiRectTree`�
 - rich Chrome은 radius/border/shadow token을 사용하고, tui legacy lowering은 같은 rect/spacing을
   직각 fill로만 lower한다. component가 `if (rich)` 또는 font별 좌표 nudge를 두지 않는다.
 
-`ChromeTextRole`은 role별 line box와 final-pixel glyph placement를 전달하지만, 목록의 기본 행과
-확장 action은 아직 cell 폭으로만 남은 공간을 보수적으로 예약한다. 따라서 AS4-e는 title의
-**bold/foreground/공간 계층**까지를 보장하고, 레퍼런스의 headline-size typography·실제 advance
-기반 ellipsis·button content alignment는 `draw.TextStyle` 확장(측정 가능한 advance, font size,
-line height와 screenshot E2E)을 먼저 설계한 뒤 별도 B1 slice에서 다룬다. 이를 cell 수를 억지로
-키우거나 fallback font별 nudge로 흉내 내지 않는다.
+`ChromeTextRole`은 role별 line box와 final-pixel glyph placement를 전달한다. B1-button-b는 확장
+action의 measured label/SVG group centre를 완료했지만, 기본 목록·header utility의 남은 width reservation과
+전체 row geometry는 아직 terminal cell metric을 쓴다. AS4-f가 이 기하를 logical spacing/type metric으로
+옮기기 전에는 레퍼런스의 padding/density parity를 주장하지 않는다. 이를 cell 수를 억지로 키우거나
+fallback font별 nudge로 흉내 내지 않는다.
 
 #### 2.1.2 측정형 Button·action text 계약 (B1-button)
 
@@ -127,25 +129,36 @@ target을 표현한다. generic tree/paint/interaction은 둘의 rect·clip·poi
   두 sibling label의 visual center가 같은 action-row center에서 1 backing pixel 이내임을 PNG/JSON으로 남긴다.
   text artifact가 없거나 fallback만 선택되면 캡처 성공으로 표시하지 않는다.
 
-#### 2.1.3 B1-button 이관 순서
+#### 2.1.3 logical spacing·dock metric 계약 (AS4-f)
+
+AS4-f는 레퍼런스와의 여백·밀도 차이를 고치는 시각 slice다. **AS4-f-a(현재)**는 action의 icon/text
+content inset, icon extent/gap, 48pt minimum height만 Chrome logical spacing metric으로 옮긴다.
+**AS4-f-b(후속)**가 outer inset, fixed chrome/card/detail/action 높이, scroll unit까지 같은 metric으로
+옮긴다. AS4-f-b가 끝나야 terminal font·line spacing을 바꾸어도 dock 전체 geometry·pointer hit rect가
+유지되고 backing scale에만 비례한다고 말할 수 있다. typed layout과 spacing SSOT, 48pt action target·
+1×/2×/terminal-font capture 판정은
+[Metal UI 레이아웃·컴포넌트 시스템](metal-ui-layout.md#logical-spacing과-component-metric)이 소유한다.
+이 visual slice는 실제 사용자 Claude/Codex resume을 자동 실행하지 않는다.
+
+#### 2.1.4 B1-button 이관 순서
 
 기존 action은 등록 SVG icon과 한글 label을 한 terminal-cell run으로 합쳐 `wide_icons=true`로 낮췄다.
 그 결과 icon이 아닌 label까지 CoreText worker를 우회해 CJK advance·ellipsis·line box를 잃었다. B1-button은
 이 결합을 다음 순서로 해체한다.
 
-1. **B1-button-a (이번 slice)** — component는 icon과 label을 별도 semantic draw op로 낸다. icon은 기존
+1. **B1-button-a (완료)** — component는 icon과 label을 별도 semantic draw op로 낸다. icon은 기존
    등록 SVG glyph path를 유지하고, label은 `wide_icons=false`인 measured system-text artifact로만 shape한다.
    action rect 안의 보수적 icon-slot·gap 예약은 그대로 두며, label의 CJK ellipsis와 vertical line box는
    platform artifact가 결정한다. 이 단계는 label이 terminal cell/fallback font 폭으로 다시 lower되는 회귀를
    막는 데 목적이 있고, 전체 icon+label group의 수평 중심이 final-pixel이라는 주장은 하지 않는다.
-2. **B1-button-b** — component는 button border box에서 양쪽 content inset만 선언하고, platform
+2. **B1-button-b (완료)** — component는 button border box에서 양쪽 content inset만 선언하고, platform
    text request에는 `center-in-content` 또는 `leading-icon-group` 정책을 함께 싣는다. worker는 같은
    immutable result에서 (a) native primary/fallback shaping 뒤의 실제 label advance, (b) truncation 뒤 label의
    final-pixel origin, (c) registered SVG icon의 optical box·gap·final-pixel origin을 산출한다. main actor는
    font identity를 renderer record로 resolve할 뿐 CoreText를 다시 부르지 않으며, SVG record는 `glyph_id=0`
    합성 경로와 동일 shared atlas를 통해 그 placement를 소비한다. 그때만 group의 수평/수직 중심과 overflow clip을
-   실제 measured content rect로 완료 처리한다. `leading-icon-group`의 icon extent는 `.button_label` line box와
-   current backing scale에서 정해지며 terminal cell height·사용자 terminal font는 입력이 아니다. 매 frame
+   실제 measured content rect로 완료 처리한다. `leading-icon-group`의 icon extent와 gap은 `ButtonMetrics`
+   logical spacing과 current backing scale에서 정해지며 terminal cell height·사용자 terminal font는 입력이 아니다. 매 frame
    main actor CoreText 호출, font별 nudge, cell-column으로 worker 결과를 역산하는 구현은 금지한다.
 
    - `leading-icon-group`은 `content_width - icon_extent - gap`을 label의 최대 width로 넘긴다. worker가 만든
@@ -180,14 +193,11 @@ target을 표현한다. generic tree/paint/interaction은 둘의 rect·clip·poi
   top-origin line stack을 유지한다. paint·clip·hit-test는 계속 같은 completed tree만 소비하며,
   font의 ink/baseline 보정은 `TextLayoutArtifact`가 맡는다. 따라서 이 slice는 font advance를 추측해
   개별 label을 nudge하지 않는다.
-- 기본 목록의 `SessionCard`는 title·summary·metadata **3행**을 유지하되, cell-height의 **5행** 고정
-  row를 쓴다. row 사이에는 별도 빈 gap을 두지 않고 각 row의 bottom divider로만 구분한다. 따라서 세
-  정보행은 읽을 크기와 마지막 행 아래의 한 행 breathing room을 갖되, 카드 외곽의 반복된 둥근 사각형이나
-  card마다 남는 margin이 목록을 성기게 만들지 않는다. header·scope·search의 1/2행 control gap은 text
-  lowering의 cell-aligned clip 안전성을 위해 목록 row와 분리한다. 바깥 padding은 cell 한 행으로 유지해
-  group/card의 세로 중심과 clip이 어긋나지 않는다. 요약을 임의로 여러 줄로 reflow하거나 card마다 가변
-  높이를 만드는 변경은 아니다. scroll projection·paint·clip·hit-test는 같은 `Metrics`를 읽으므로 밀도
-  변경 뒤에도 보이는 위치와 눌리는 위치가 갈라지지 않는다.
+- AS4-f-b 뒤 기본 목록의 `SessionCard`는 title·summary·metadata **3행**을 유지하는 full-width divider
+  목록이다. 각 행의 높이·내부 inset·행 사이 규칙은 Chrome type/spacing token으로 정하며, 반복된 외곽
+  card나 카드별 임의 margin으로 목록을 성기게 만들지 않는다. 요약을 임의로 여러 줄로 reflow하거나
+  card마다 가변 높이를 만드는 변경은 아니다. scroll projection·paint·clip·hit-test는 같은 `DockMetrics`를
+  읽으므로 밀도 변경 뒤에도 보이는 위치와 눌리는 위치가 갈라지지 않는다.
 - `SegmentedScopeControl`은 세 개의 동일 폭 segment와 selected/disabled/focused
   state를 각각 그린다. pipe-separated text label이나 group처럼 보이는 제목줄로
   대체하지 않는다. `SessionSearchField`는 search icon, placeholder, query,

@@ -169,7 +169,9 @@ pub const DockMetrics = struct {
             .header_utility_gap = geometryPx(spacing.px(.sm, scale)),
             .header_refresh_extent = geometryPx(spacing.pointsPx(20, scale)),
             .header_trailing_inset = geometryPx(spacing.px(.xs, scale)),
-            .group_disclosure_inset_x = geometryPx(spacing.px(.lg, scale)),
+            // The root already contributes the dock's 20pt content inset. The disclosure gets
+            // only its local 8pt slot, preventing the chevron from inheriting a second 20pt.
+            .group_disclosure_inset_x = geometryPx(spacing.px(.xs, scale)),
             .group_disclosure_extent = geometryPx(spacing.pointsPx(20, scale)),
             .group_disclosure_label_gap = geometryPx(spacing.px(.xs, scale)),
             .card_inset_x = geometryPx(card_inset),
@@ -260,7 +262,7 @@ test "DockMetrics fixes all Session Dock geometry independently of terminal cell
     try std.testing.expectEqual(@as(u32, 12), m.header_utility_gap);
     try std.testing.expectEqual(@as(u32, 20), m.header_refresh_extent);
     try std.testing.expectEqual(@as(u32, 8), m.header_trailing_inset);
-    try std.testing.expectEqual(@as(u32, 20), m.group_disclosure_inset_x);
+    try std.testing.expectEqual(@as(u32, 8), m.group_disclosure_inset_x);
     try std.testing.expectEqual(@as(u32, 20), m.group_disclosure_extent);
     try std.testing.expectEqual(@as(u32, 8), m.group_disclosure_label_gap);
     try std.testing.expectEqual(@as(u32, 112), m.headerUtilityWidth());

@@ -973,15 +973,17 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    quarantine reservation/commit과 poison suffix, transport/GUI 제품 배선은 구현하지 않았으므로 2c2 완료를 주장하지 않는다.
    **2c2b3a(구현)**는 neutral `ended_purge_transaction.zig`가 target bitset의 stable source/target/survivor ordinal과 b2-provided
    count/byte scalar의 checked survivor 산술만 계산하는 non-owning pure plan이다. pointer-free/copyable `QueueInput`은 source/claimed-target
-   count와 source/target bytes만, `QueuePlan=union(enum){pristine,planned:QueueScalars}`는 성공한 source/target/survivor count와 bytes만 가진다.
+   count와 source/target bytes만, `QueuePlan={state:u8,scalars:QueueScalars}`는 성공한 source/target/survivor count와 bytes만 가진다.
+   raw state 0/1 이외 값은 ReleaseFast에서도 scalar 해석 전에 `InvalidState`로 닫는다.
    empty success도 planned이며 오류에서는 입력 out을 byte-for-byte 보존한다(pristine 실패는 pristine, occupied 실패는 기존 값 유지).
    검증 우선순위는 destination→count→target map→checked arithmetic이고 `max_items<=4,096`, 비용은
    `O(source_count + ceil(max_items / word bits))`다. ephemeral `DispositionCursor`만 bitset을 borrow해 stable
    `{source ordinal,target-or-survivor ordinal}`을 반환하고 위조 ordinal/count는 typed error로 fail-close하며 완주 상태는
    `validateComplete()`가 target map/count/ordinal을 typed 재검증한다. caller의 targets/out non-alias는 b3b actual preflight가 재검증한다. plan/step의
    address·allocator·payload pointer·scratch reference와 seal
-   mint/검증은 0이다. `buildQueuePlan` error set은 `InvalidCount|InvalidTargetMap|ArithmeticOverflow|DestinationOccupied`다. Client/allocator callback/quarantine import, scratch·queue·process mutation,
-   owner freeze, allocation/free와 permit/receipt consume은 0이다. **2c2b3b(계획)**가 private scratch의 immutable/no-escape 원본 descriptor를
+   mint/검증은 0이다. `buildQueuePlan` error set은 `InvalidCount|InvalidTargetMap|ArithmeticOverflow|DestinationOccupied|InvalidState`다. Client/allocator callback/quarantine import, scratch·queue·process mutation,
+   owner freeze, allocation/free와 permit/receipt consume은 0이다. **2c2b3b(진행: B3b-F·B3b-S 구현,
+   B3b-O 미착수)**가 private scratch의 immutable/no-escape 원본 descriptor를
    cleanup authority로 사용해 exact preparation revalidation부터 reservation, `EndedPurgePreparation.sealForCommit`, stable compaction/counter publication,
    모든 target exact-once callback, post-validation, 정상 release 또는 absorbing no-free quarantine을 하나의 vertical transaction으로
    닫는다. revalidation/cap/reservation까지는 typed precommit failure, `EndedPurgePreparation.sealForCommit` 뒤 suffix만 no-fail이다. private scratch의 coherent arbitrary overwrite와 cleanup authority 밖에서 이미 수행된 deallocation의
@@ -998,7 +1000,8 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    B3b-S/O 범위이며, B3b-F의 `ClientOperationFence` nested constants/methods와 Client/ClientSlot private guard declarations/wrappers는
    `persistent-session-host.md`의 B3b-F exact allowlist를 SSOT로 사용하고 여기서 중복 열거하지 않는다.
    `Client.prepareEndedPurgeCommit|commitEndedPurgePrepared|finalizeEndedPurgeNoFreePoison|tombstoneEndedPurgeOwnedGraph|
-   publishEndedPurgeNoFreePoison|endedPurgeCompleteOwnerSeal|endedPurgePostValidate|publishEndedPurgeCompaction|cleanupEndedPurgeTargetDirect`,
+   publishEndedPurgeNoFreePoison|endedPurgeCompleteOwnerSeal|endedPurgePostValidate|endedPurgeFinalizationSeal|
+   endedPurgeRawFinalizerStateValid|publishEndedPurgeCompaction|cleanupEndedPurgeTargetDirect`,
    `ClientSlot.ProcessRuntimeInitError|EndedPurgeCommitError|EndedPurgeResult|initializeProcessRuntime|commitEndedPurge`,
    `EndedPurgePreparation.sealForCommit|consumeAfterPermit`이다. 별도
    `ended_purge_quarantine.zig`는 std와 scalar identity/bytes만 아는 allocation-free one-slot

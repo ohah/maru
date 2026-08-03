@@ -675,7 +675,8 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   last release 뒤 Client/node exact-one destroy를 검증한다. fork child PID-domain mismatch에서 low-level mint/consume/tryDeinit의
   typed reject와 callback/free/owner mutation 0, strict 제품 wrapper의 fail-stop을 구분해 검증한다. HostPool membership
   lease와 ConnectionLease는 별개이며 external-pump owner graph는 변경하지 않는다. 증거 수준은 production-type unit이다.
-- CR3a-2(진행, **2a·2b·2c1·2c2a·2c2b1·2c2b2·2c2b3a 구현**, 2c2b3b 및 2c2c~e 계획): 2c2a는 snapshot 전용 permit을 kind-tagged common
+- CR3a-2(진행, **2a·2b·2c1·2c2a·2c2b1·2c2b2·2c2b3a·2c2b3b-F·2c2b3b-S 구현**,
+  2c2b3b-O·2c2c~e 계획): 2c2a는 snapshot 전용 permit을 kind-tagged common
   `StreamOperationPermit`/단일 active tuple/process registry로 migration하고 `GenerationBatchRegistry.streamIdle`이
   reserved/ingress/live/releasing 전 상태를 purge blocker로 분류한다. 2c2b1은 대상 stream의 첫 event에 대한 무할당·무변경
   ended hot peek와 비권위적 index hint까지만 구현한다. 2c2b2는 exact binding과 common permit 아래 fixed inline scratch로 전체 Client
@@ -806,7 +807,12 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   `client_lifecycle: ExternalArrayDescriptor`는 zero default이고 exact-owned slice를 `capacity=len`으로 canonicalize한다. empty는 address/len/capacity
   모두 0이며, current descriptor와 모든 owner range의 exact·partial alias를 payload/hash 전에 검사한다. callback 뒤에도 frozen scalar와
   정확히 일치할 때만 Client lifecycle contents를 hash한다.
-  AST gate는 `PreparedEndedPurgeCommit`이 나타나면 exact `Lifecycle{pristine,prepared,finalization_pending,consumed}`+18 fields를 검사하고,
+  AST gate는 `PreparedEndedPurgeCommit`이 나타나면 exact `Lifecycle=enum(u8){pristine,prepared,finalization_pending,consumed}`+19 fields
+  (`finalization_seal` 포함)를 검사하고, drift finalizer가 pointer-free preparation transcript를 재계산해 seal mismatch를
+  poison/terminal mutation 0의 fail-stop으로 닫는지 검사한다. Debug/ReleaseFast fixture는 inherited parent PID proof의 process-domain
+  mismatch, lifecycle raw byte 0~255 중 `finalization_pending` 외 전 값의 raw-state mismatch, preparation transcript 각 field와 네 plan의
+  state/6 scalars 및 fence identity 각각의 seal 민감도, batch/stream/event/partial 혼합 owning commit의 stable survivor·counter·cleanup ordinal을
+  검증하고,
   `ClientOwnership.quarantined_no_free`와
   `EndedPurgePreparationLifecycle{empty,prepared,committing,consumed,aborted}` 외 enum 증분을 거부한다. 각 신규 import는 raw substring이
   아니라 AST initializer가 exact `@import`인지 검사한다. fork-child RED는 모든 process-global lock 전 PID 거부를 고정한다.

@@ -31,6 +31,7 @@ esac
 test -x "$app_path"
 rm -rf "$root"
 mkdir -p "$home/.codex/sessions/2026/08/03" "$home/.claude/projects/fixture-project" "$bin"
+mkdir -p "$root/captures"
 cp tests/fixtures/agent-session-archive/fake-codex.sh "$bin/codex"
 cp tests/fixtures/agent-session-archive/fake-claude.sh "$bin/claude"
 chmod 755 "$bin/codex"
@@ -66,6 +67,7 @@ run_scenario() {
     MARU_AGENT_SESSION_ARCHIVE_SMOKE_FAKE_CLAUDE="$bin/claude" \
     MARU_AGENT_SESSION_ARCHIVE_SMOKE_REVEAL_PATH="$source_path" \
     MARU_AGENT_SESSION_ARCHIVE_SMOKE_REPLACEMENT_PATH="$replacement_path" \
+    MARU_AGENT_SESSION_ARCHIVE_SMOKE_ARTIFACT_DIR="$root" \
     "$app_path"
     test -f "$summary"
     cp "$summary" "$root/$scenario.summary.txt"
@@ -77,6 +79,11 @@ grep -Eq '^agent_session_archive_smoke_scenario=resume-pointer$' "$root/resume-p
 grep -Eq '^agent_session_archive_smoke_fake_resume_verdict=true$' "$root/resume-pointer.summary.txt"
 grep -Eq '^agent_session_archive_smoke_reveal_allowed_count=0$' "$root/resume-pointer.summary.txt"
 grep -Eq '^agent_session_archive_smoke_stale_reveal_count=0$' "$root/resume-pointer.summary.txt"
+grep -Eq '^agent_session_archive_smoke_capture_loading=true$' "$root/resume-pointer.summary.txt"
+grep -Eq '^agent_session_archive_smoke_capture_ready=true$' "$root/resume-pointer.summary.txt"
+grep -Eq '^agent_session_archive_smoke_capture_stale=false$' "$root/resume-pointer.summary.txt"
+grep -Eq '^agent_session_archive_smoke_capture_loading_artifact=captures/resume-pointer-loading\.ppm$' "$root/resume-pointer.summary.txt"
+grep -Eq '^agent_session_archive_smoke_capture_ready_artifact=captures/resume-pointer-ready\.ppm$' "$root/resume-pointer.summary.txt"
 
 run_scenario resume-keyboard
 grep -Eq '^agent_session_archive_smoke_stage=succeeded$' "$root/resume-keyboard.summary.txt"
@@ -108,6 +115,11 @@ grep -Eq '^agent_session_archive_smoke_fake_resume_verdict=false$' "$root/detail
 grep -Eq '^agent_session_archive_smoke_reveal_allowed_count=0$' "$root/detail-stale.summary.txt"
 grep -Eq '^agent_session_archive_smoke_reveal_rejected_count=0$' "$root/detail-stale.summary.txt"
 grep -Eq '^agent_session_archive_smoke_stale_reveal_count=0$' "$root/detail-stale.summary.txt"
+grep -Eq '^agent_session_archive_smoke_capture_loading=true$' "$root/detail-stale.summary.txt"
+grep -Eq '^agent_session_archive_smoke_capture_ready=false$' "$root/detail-stale.summary.txt"
+grep -Eq '^agent_session_archive_smoke_capture_stale=true$' "$root/detail-stale.summary.txt"
+grep -Eq '^agent_session_archive_smoke_capture_loading_artifact=captures/detail-stale-loading\.ppm$' "$root/detail-stale.summary.txt"
+grep -Eq '^agent_session_archive_smoke_capture_stale_artifact=captures/detail-stale-stale\.ppm$' "$root/detail-stale.summary.txt"
 
 run_scenario reveal-recheck-pointer
 grep -Eq '^agent_session_archive_smoke_stage=succeeded$' "$root/reveal-recheck-pointer.summary.txt"
@@ -124,3 +136,16 @@ grep -Eq '^agent_session_archive_smoke_fake_resume_verdict=true$' "$root/claude-
 grep -Eq '^agent_session_archive_smoke_claude_model_present=1$' "$root/claude-resume-pointer.summary.txt"
 grep -Eq '^agent_session_archive_smoke_reveal_allowed_count=0$' "$root/claude-resume-pointer.summary.txt"
 grep -Eq '^agent_session_archive_smoke_stale_reveal_count=0$' "$root/claude-resume-pointer.summary.txt"
+
+# The two sentinel cold processes cover every product detail state without making every action
+# variant perform expensive Metal readback. `sips` only repackages renderer-written PPM so the
+# resulting PNG is reviewable in a PR; it never captures an AppKit view through another path.
+for capture in resume-pointer-loading resume-pointer-ready detail-stale-loading detail-stale-stale; do
+    ppm="$root/captures/$capture.ppm"
+    png="$root/captures/$capture.png"
+    test -s "$ppm"
+    test "$(head -n 1 "$ppm")" = 'P6'
+    sips -s format png "$ppm" --out "$png" >/dev/null
+    test -s "$png"
+    file "$png" | grep -q 'PNG image data'
+done

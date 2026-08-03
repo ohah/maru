@@ -22,6 +22,15 @@ typedef struct MaruMetalRenderer MaruMetalRenderer;
 /* device + drawable pixel format으로 pipeline과 command queue를 만든다. 실패 시 NULL. */
 MaruMetalRenderer *maru_metal_renderer_create(id<MTLDevice> device, MTLPixelFormat pixel_format);
 
+/* AS4-c fixture 전용 다중 frame readback 요청. 일반 `MARU_SCREENSHOT`과 달리 프로세스를
+   종료하지 않고, 다음 성공 draw 한 장의 최종 두 레이어 합성 결과만 PPM으로 복사한 뒤 요청을
+   소모한다. 호출자는 테스트 artifact의 절대 경로를 이미 allowlist해야 하며, pending 요청이
+   있거나 경로가 비어 있으면 false로 fail-closed 한다. 일반 앱은 이 API를 호출하지 않는다. */
+bool maru_metal_renderer_request_test_capture(
+    MaruMetalRenderer *renderer,
+    const char *ppm_path
+);
+
 /* raster upload를 GPU atlas texture에 올린다. 텍스처는 처음 호출 때 atlas 크기로 만들고
    이후 누적한다(uploads는 frame마다의 delta다 — 새로 rasterize된 glyph만 온다).
    generation이 바뀐 frame에서만 호출하면 된다. 성공 시 true.

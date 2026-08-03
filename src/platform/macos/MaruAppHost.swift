@@ -3884,6 +3884,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var agentSessionArchiveSmokeRevealRejectedCount: UInt32 = 0
     private var agentSessionArchiveSmokeStaleRevealCount: UInt32 = 0
     private var agentSessionArchiveSmokeClaudeModelPresent: UInt32 = 0
+    private var agentSessionArchiveSmokeCaptureLoading = false
+    private var agentSessionArchiveSmokeCaptureReady = false
+    private var agentSessionArchiveSmokeCaptureStale = false
+    private var agentSessionArchiveSmokeCaptureLoadingArtifact = ""
+    private var agentSessionArchiveSmokeCaptureReadyArtifact = ""
+    private var agentSessionArchiveSmokeCaptureStaleArtifact = ""
     private var isAgentSessionArchiveSmokeMode: Bool {
         smokeMode && ProcessInfo.processInfo.environment["MARU_AGENT_SESSION_ARCHIVE_SMOKE"] == "1"
     }
@@ -8105,6 +8111,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 },
                 replaceRevealSource: {
                     self.replaceArchiveSmokeRevealSource()
+                },
+                capture: { state in
+                    self.captureAgentSessionArchiveSmokeFrame(state, in: surface)
                 }
             )
             // Mouse down/up has just traversed the regular product handler, after the outer
@@ -8120,6 +8129,68 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         smokeTimer = nil
         if driver.stage != .succeeded { exitCode = 1 }
         DispatchQueue.main.async { NSApp.terminate(nil) }
+    }
+
+    /// AS4-c의 one-shot Metal readback sink. The driver reaches this only after a read-only probe
+    /// has observed an already-published loading/ready/stale frame. This method neither changes
+    /// Zig archive state nor replays an input; it asks the current renderer to copy the next
+    /// ordinary redraw of that same frame into the isolated fixture root.
+    private func captureAgentSessionArchiveSmokeFrame(
+        _ state: AgentSessionArchiveSmokeDriver.CaptureState,
+        in surface: TerminalSurface
+    ) -> Bool {
+        guard isAgentSessionArchiveSmokeMode,
+              let scenario = agentSessionArchiveSmokeDriver?.scenarioName,
+              let rawRoot = ProcessInfo.processInfo.environment["MARU_AGENT_SESSION_ARCHIVE_SMOKE_ARTIFACT_DIR"],
+              !rawRoot.isEmpty,
+              let renderer = surface.metalRenderer
+        else { return false }
+
+        let root = URL(fileURLWithPath: rawRoot).standardizedFileURL
+        let home = URL(fileURLWithPath: NSHomeDirectory()).standardizedFileURL
+        let expectedRoot = home.deletingLastPathComponent()
+        // The shell fixture owns `.../maru-agent-session-archive-smoke/home`; accepting only its
+        // direct parent prevents a test-only environment value from becoming an arbitrary-write
+        // path. The nested capture directory must already be made by the shell harness.
+        guard root == expectedRoot,
+              root.lastPathComponent == "maru-agent-session-archive-smoke",
+              root.deletingLastPathComponent().lastPathComponent == "zig-out"
+        else { return false }
+
+        let stateName: String = switch state {
+        case .loading: "loading"
+        case .ready: "ready"
+        case .stale: "stale"
+        }
+        let captureDir = root.appendingPathComponent("captures", isDirectory: true)
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: captureDir.path, isDirectory: &isDirectory), isDirectory.boolValue else { return false }
+        let path = captureDir.appendingPathComponent("\(scenario)-\(stateName).ppm").standardizedFileURL
+        guard path.deletingLastPathComponent() == captureDir,
+              !FileManager.default.fileExists(atPath: path.path),
+              maru_metal_renderer_request_test_capture(renderer, path.path)
+        else { return false }
+
+        withSurface(surface) {
+            // `drawMetalFrame` otherwise skips an unchanged generation. This is still the normal
+            // frame construction and renderer call; only the fixture-only copy request differs.
+            metalNeedsRedraw = true
+            _ = renderTick()
+        }
+        guard FileManager.default.fileExists(atPath: path.path) else { return false }
+        let artifact = "captures/\(scenario)-\(stateName).ppm"
+        switch state {
+        case .loading:
+            agentSessionArchiveSmokeCaptureLoading = true
+            agentSessionArchiveSmokeCaptureLoadingArtifact = artifact
+        case .ready:
+            agentSessionArchiveSmokeCaptureReady = true
+            agentSessionArchiveSmokeCaptureReadyArtifact = artifact
+        case .stale:
+            agentSessionArchiveSmokeCaptureStale = true
+            agentSessionArchiveSmokeCaptureStaleArtifact = artifact
+        }
+        return true
     }
 
     /// Converts an already-published backing-pixel rect to an AppKit window point and sends the
@@ -9060,6 +9131,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         agent_session_archive_smoke_reveal_rejected_count=\(agentSessionArchiveSmokeRevealRejectedCount)
         agent_session_archive_smoke_stale_reveal_count=\(agentSessionArchiveSmokeStaleRevealCount)
         agent_session_archive_smoke_claude_model_present=\(agentSessionArchiveSmokeClaudeModelPresent)
+        agent_session_archive_smoke_capture_loading=\(agentSessionArchiveSmokeCaptureLoading)
+        agent_session_archive_smoke_capture_ready=\(agentSessionArchiveSmokeCaptureReady)
+        agent_session_archive_smoke_capture_stale=\(agentSessionArchiveSmokeCaptureStale)
+        agent_session_archive_smoke_capture_loading_artifact=\(agentSessionArchiveSmokeCaptureLoadingArtifact)
+        agent_session_archive_smoke_capture_ready_artifact=\(agentSessionArchiveSmokeCaptureReadyArtifact)
+        agent_session_archive_smoke_capture_stale_artifact=\(agentSessionArchiveSmokeCaptureStaleArtifact)
         mermaid_pending_replies=\(mermaidReplyDelivery.count)
         mermaid_product_tick_calls=\(mermaidProductTick.tickCalls)
         mermaid_product_work_ticks=\(mermaidProductTick.workTicks)

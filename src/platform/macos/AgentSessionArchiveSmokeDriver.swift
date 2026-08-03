@@ -28,6 +28,15 @@ final class AgentSessionArchiveSmokeDriver {
         case reveal
     }
 
+    /// Renderer capture is deliberately a fixture observer, not an input/action path. Only the
+    /// two sentinel scenarios write artifacts: together they prove loading, ready, and stale
+    /// without multiplying every pointer/keyboard action scenario's GPU readback cost.
+    enum CaptureState {
+        case loading
+        case ready
+        case stale
+    }
+
     enum Stage: String {
         case openDock
         case enterAgentSessions
@@ -83,7 +92,8 @@ final class AgentSessionArchiveSmokeDriver {
         revealRejectedCount: () -> UInt32,
         staleRevealCount: () -> UInt32,
         claudeModelMetadataPresent: () -> Bool,
-        replaceRevealSource: () -> Bool
+        replaceRevealSource: () -> Bool,
+        capture: (CaptureState) -> Bool
     ) {
         guard !finished else { return }
         guard now <= deadline else {
@@ -123,6 +133,10 @@ final class AgentSessionArchiveSmokeDriver {
             // The stale scenario mutates only the synthetic source after the completed loading
             // tree is visible and before the worker's no-follow read. This is the TOCTOU window
             // the detail backend must close; normal scenarios release without a replacement.
+            if shouldCapture(.loading), !capture(.loading) {
+                fail("capture_loading")
+                return
+            }
             if scenario == .detailStale, !replaceRevealSource() {
                 fail("stale_replace")
                 return
@@ -137,10 +151,18 @@ final class AgentSessionArchiveSmokeDriver {
                       let reveal = probe(MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_REVEAL_LOG),
                       reveal.request_id == detail.request_id, reveal.state == 3, reveal.present != 0, reveal.enabled == 0
                 else { return }
+                if shouldCapture(.stale), !capture(.stale) {
+                    fail("capture_stale")
+                    return
+                }
                 stage = .succeeded
                 return
             }
             guard detail.request_id != 0, detail.state == 2, detail.present != 0, detail.enabled != 0 else { return }
+            if shouldCapture(.ready), !capture(.ready) {
+                fail("capture_ready")
+                return
+            }
             if scenario == .claudeResumePointer, !claudeModelMetadataPresent() {
                 fail("claude_model_metadata")
                 return
@@ -204,5 +226,14 @@ final class AgentSessionArchiveSmokeDriver {
     private func fail(_ reason: String) {
         failure = reason
         stage = .failed
+    }
+
+    private func shouldCapture(_ state: CaptureState) -> Bool {
+        switch (scenario, state) {
+        case (.resumePointer, .loading), (.resumePointer, .ready), (.detailStale, .loading), (.detailStale, .stale):
+            return true
+        default:
+            return false
+        }
     }
 }

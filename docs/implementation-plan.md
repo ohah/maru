@@ -981,7 +981,22 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    모든 target exact-once callback, post-validation, 정상 release 또는 absorbing no-free quarantine을 하나의 vertical transaction으로
    닫는다. revalidation/cap/reservation까지는 typed precommit failure, receipt tombstone 뒤 suffix만 no-fail이다. private scratch의 coherent arbitrary overwrite와 cleanup authority 밖에서 이미 수행된 deallocation의
    탐지·복구는 비목표지만 callback 재진입·canonical descriptor drift·allocator provenance/alias 검증은 유지한다. b3a만으로 target
-   final-zero나 2c2 완료를 주장하지 않는다. **2c3**은 capability/input/control/
+   final-zero나 2c2 완료를 주장하지 않는다. b3b의 doc-first boundary는 AST canonical
+   `(parent,kind,visibility,modifier,name)` production inventory를 사용해 root와 owner container를 함께 검사한다.
+   허용 tuple 제외 baseline은 client(root+Client+EndedPurgeScratch+PreparedEndedPurgeInventory)=527/SHA-256
+   `594178e6c653e30be0ddc64564d2783922e0c0b4895c3543479f86e5977db6fd`,
+   client_slot(root+ClientSlot+EndedPurgePreparation)=126/SHA-256
+   `03a92a146dbf8935466d0b9250b09c884d575f15fc148f73c6db8979bc69d968`이다. 신규 top-level allowlist는 client의
+   `ended_purge_transaction|PreparedEndedPurgeCommit|EndedPurgeCommitError|EndedPurgeClientCommitOutcome`, client_slot의
+   `ended_purge_quarantine|ended_purge_quarantine_registry`뿐이다. 신규 nested method/type exact allowlist는
+   `Client.prepareEndedPurgeCommit|commitEndedPurgePrepared|tombstoneEndedPurgeOwnedGraph|publishEndedPurgeNoFreePoison`,
+   `ClientSlot.EndedPurgeCommitError|EndedPurgeResult|commitEndedPurge`, `EndedPurgePreparation.tombstoneForCommit`이다. 별도
+   `ended_purge_quarantine.zig`는 std와 scalar identity/bytes만 아는 allocation-free one-slot
+   `max_ended_purge_quarantine_bytes|Error|Reservation|Registry` API를
+   소유한다. `pending_outbound`는 nullable 거부가 아니라 build/lifecycle과 함께 scratch frozen descriptor, complete-owner cap/alias/seal,
+   postvalidation과 tombstone 전 구간에 포함한다. preparation 재검증 뒤 registry reservation이 마지막 fallible step이고, receipt tombstone
+   뒤 Client no-fail commit만 실행한다. client는 raw owner mutation/direct cleanup만, client_slot은 permit/receipt/reservation 순서만 소유한다.
+   **2c3**은 capability/input/control/
    event/RPC primitive를 exact facade로 옮기고 generation의 `logicalClient()` 사용을 0으로 만든다. **2c4**는
    `RuntimeConnection` union을 mode SSOT로 전환해 `RemoteRuntime.client`와 `generation_adapter` 병렬 필드를 제거하고 exact
    15-method/signature/source oracle을 닫는다. 각 gate는 reconnect/current publish와 제품 동작 변화 0을 유지하며 마지막 2c4

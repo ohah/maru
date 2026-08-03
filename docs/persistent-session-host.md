@@ -1113,6 +1113,86 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    b3a merge diff의 `client.zig`·`client_slot.zig` 변경은 0이다. b3b는 코드 작성 전에 두 파일의 신규 top-level declaration exact
    allowlist와 baseline count를 문서·boundary fixture에 먼저 고정하고, allowlist 밖 declaration이나 neutral helper의 역이동이 있으면 실패한다.
 
+   b3b의 코드 작성 전 declaration baseline은 `std.zig.Ast`가 파싱한 root와 명시한 owner container의 production
+   declaration을 canonical `(parent, kind, visibility, modifier, name)` tuple로 직렬화한 inventory다. top-level test declaration은
+   제외하지만 공백·AST가 tuple에 투영하는 declaration modifier·container member는 제외하지 않는다. ABI/placement 전체 token span을
+   뜻하지 않으며 b3b 허용 declaration에는 빈 modifier만 인정한다. allowlist tuple을 빼고 계산한 baseline은
+   `client.zig(root+Client+EndedPurgeScratch+PreparedEndedPurgeInventory)=527`, SHA-256
+   `594178e6c653e30be0ddc64564d2783922e0c0b4895c3543479f86e5977db6fd`,
+   `client_slot.zig(root+ClientSlot+EndedPurgePreparation)=126`, SHA-256
+   `03a92a146dbf8935466d0b9250b09c884d575f15fc148f73c6db8979bc69d968`이다. boundary fixture는 baseline count/digest를
+   exact 고정하고 전체 count가 baseline 이상·baseline+allowlist 이하인지 검사한다. 따라서 기존 declaration 삭제/rename,
+   visibility/kind/modifier 변경, 허용 이름 추가와 기존 항목 삭제를 맞바꾸는 우회도 실패한다.
+
+   - `client.zig` top-level 신규 exact allowlist는 import `ended_purge_transaction`,
+     `PreparedEndedPurgeCommit`, `EndedPurgeCommitError`, `EndedPurgeClientCommitOutcome` 네 개뿐이다. lifecycle, queue plan/cursor와
+     cleanup state는 `PreparedEndedPurgeCommit` nested declaration으로 둔다. `Client` 신규 method exact allowlist는 public
+     `prepareEndedPurgeCommit`, `commitEndedPurgePrepared`와 private
+     `tombstoneEndedPurgeOwnedGraph`, `publishEndedPurgeNoFreePoison` 네 개다. private mutation leaf는
+     `commitEndedPurgePrepared`의 no-fail suffix 외 production caller가 0이어야 한다. 기존 `ClientOwnership`에는
+     `quarantined_no_free` arm만 추가한다.
+   - `client_slot.zig` top-level 신규 exact allowlist는 import `ended_purge_quarantine`과 process singleton
+     `ended_purge_quarantine_registry` 두 개뿐이다. `ClientSlot` nested declaration은 `EndedPurgeCommitError`, `EndedPurgeResult`,
+     method `commitEndedPurge`만, 기존 `EndedPurgePreparation`에는 lifecycle `consumed`와 method `tombstoneForCommit`만 허용한다.
+   - 새 `ended_purge_quarantine.zig`의 public top-level exact API는 `max_ended_purge_quarantine_bytes`, `Error`, `Reservation`, `Registry` 네 개다.
+     이 모듈은 std 외 import, Client/allocator/callback/pointer payload를 갖지 않고 scalar process/node/operation identity와 bytes만 받는다.
+     `Error`는 `InvalidOwner|InvalidState|ArithmeticOverflow|CapacityExceeded`다. final-address `Reservation`은 nested
+     `Lifecycle{pristine,reserved,spent}`와 exact scalar fields
+     `{self_addr,registry_addr,reservation_generation,process_id,node_incarnation,operation_generation,bytes,lifecycle}`만 가진다.
+     `Registry`는 nested `State{idle,reserved,committed}`, private fields
+     `{mutex,state,next_generation,reserved_reservation_addr,reserved_generation,reserved_process_id,reserved_node_incarnation,
+     reserved_operation_generation,reserved_bytes,committed_bytes}`와 public
+     `reserve|release|commit`만 소유하며 heap allocation은 0이다. `reserve`만 `Error!void`, `release|commit`은 validated reservation을
+     no-fail로 consume한다. reserved state에서는 여섯 `reserved_*` scalar가 Reservation final address까지 포함한 canonical mirror이고,
+     idle/committed에서는
+     모두 0이다. `committed_bytes`는 committed에서만 nonzero일 수 있어 reserved byte와 이중 의미로 재사용하지 않는다. pointer-bearing
+     field와 별도 force/reset API는 금지한다.
+     exact API는 `reserve(self:*Registry,node_incarnation:u64,operation_generation:u64,bytes:usize,out:*Reservation) Error!void`,
+     `release(self:*Registry,reservation:*Reservation) bool`, `commit(self:*Registry,reservation:*Reservation) bool`이다. 세 method가
+     실제 PID를 내부에서 먼저 읽어 검증하므로 caller-supplied PID를 신뢰하지 않는다. 상한 const는 exact
+     `max_ended_purge_quarantine_bytes: usize = 64 * 1024 * 1024`다.
+
+   `PreparedEndedPurgeCommit`은 final-address `pristine|prepared|consumed` owner다. nested declaration은 `Lifecycle` 하나뿐이고,
+   exact field allowlist는 아래에 열거한 18개뿐이며 boundary가 container가 생기는 순간 member tuple을 검사한다. 정확한 scalar schema는
+   `self_addr`, `client_addr`, `scratch_addr`, `inventory_addr`, `target_stream`, `captured_fd`,
+   `complete_owned_extent_bytes`, `complete_owner_seal`, `pre_callback_survivor_seal`, batch/stream/event/partial 네 pointer-free
+   `QueuePlan`, queue별 monotonic cleanup ordinal과 lifecycle이다. cursor 자체나 slice/pointer는 저장하지 않는다.
+   payload/allocator authority는 복제하지 않고 immutable `EndedPurgeScratch` descriptor가 계속 소유한다. `EndedPurgeScratch`의 기존 exact
+   13 fields(`batches,stream,events,batch_targets,stream_targets,event_targets,partial,partial_target,parser_backing,batch_backing,
+   stream_backing,event_backing,range_order`)에 nested `PendingOutboundDescriptor`와 fields `build_id`, `lifecycle`, `pending_outbound`만
+   추가하고 새 scratch size를
+   compile-time 512 KiB 상한과 boundary fixture에 함께 고정한다. `PreparedEndedPurgeInventory.quarantine_bytes`는 b3b에서
+   `demux_owned_extent_bytes`로 rename해 demux queue/list/partial의 중간 subtotal만 뜻하게 한다. 이 subtotal은 cap admission 권한이
+   아니며 `PreparedEndedPurgeCommit.complete_owned_extent_bytes`만 parser/screen/event/queue backing과 optional outbound를 모두 더한
+   최종 checked sum의 SSOT다. `PreparedEndedPurgeInventory`와 `EndedPurgePreparation`에 final total, commit plan, cursor나 quarantine
+   token을 중복 저장하지 않는다.
+
+   `pending_outbound` frozen descriptor는 `{frame_address,frame_len,stream_id,offset}`이며 allocator provenance는 complete graph의 Client
+   allocator identity/seal에 한 번만 포함한다. prepare는 `offset <= frame_len`, address+len overflow, scratch/commit/inventory/queue
+   backing과의 exact·partial alias, frame contents와 allocator provenance를 payload dereference 전에 검증한다. 정상 purge와 모든 precommit
+   실패는 `pending_outbound`를 byte-for-byte 보존한다. receipt tombstone 뒤 callback drift suffix만 descriptor를 다시 읽지 않고 frozen
+   scalar를 먼저 재검증한 뒤 Client field를 null tombstone하며, captured frame은 free하지 않고 complete graph와 함께 단일 quarantine
+   charge에 귀속한다. scalar 검증 실패도 dereference/free 0으로 같은 absorbing `quarantined_no_free`에 합류한다.
+
+   정확한 public 결과 계약은 Client의 `EndedPurgeCommitError = error{InvalidOwner,InvalidState,Corrupt,ArithmeticOverflow,
+   DestinationOccupied}`와 `EndedPurgeClientCommitOutcome = enum{clean,drift}`, ClientSlot의
+   `EndedPurgeCommitError = error{InvalidOwner,InvalidState,Busy,Corrupt,ArithmeticOverflow,DestinationOccupied,
+   QuarantineUnavailable}`와 `EndedPurgeResult = enum{purged}`다. `prepareEndedPurgeCommit`은 prepared output을 받아 typed precommit
+   error만 반환하고, `commitEndedPurgePrepared`는 receipt 뒤 no-fail outcome만 반환한다. `ClientSlot.commitEndedPurge`는 정상과
+   postcallback drift를 모두 `.purged`로 정규화하고 poison/quarantine 여부는 Client terminal state와 진단 reason에서만 관측한다.
+
+   commit entry는 현재 process id를 operation thread/permit/quarantine registry를 포함한 **모든 process-global lock 접근보다 먼저**
+   검증한다. fork child는 상속한 TLS incarnation이나 reservation scalar가 일치해 보여도 lock 진입 전 typed `InvalidOwner`로 거부한다.
+   reservation은 process id를 seal에 포함하고 `reserve|release|commit` 모두 lock 전 PID gate를 반복한다. RED는 parent가 registry mutex를
+   잡은 상태에서 fork한 child가 bounded 시간 안에 syscall/lock/callback 0으로 거부되는지를 검증한다.
+
+   `Client.prepareEndedPurgeCommit`은 current graph/profile/alias를 전부 다시 검증하고 b3a plans, complete deinit extent/seal과 captured fd를
+   준비하지만 mutation/callback/free는 0이다. `ClientSlot.commitEndedPurge`가 preparation·permit·binding을 재검증한 뒤
+   `ended_purge_quarantine.Registry.reserve`를 마지막 fallible step으로 호출하고, preparation/commit receipt를 tombstone한 다음에만
+   `Client.commitEndedPurgePrepared` no-fail suffix로 진입한다. 정상 outcome은 reservation release, drift outcome은
+   `tombstoneEndedPurgeOwnedGraph -> Reservation.commit -> publishEndedPurgeNoFreePoison` 순서다. `client_slot.zig`는 raw queue field를
+   순회하거나 payload를 dereference/free하지 않고, `client.zig`는 permit/receipt/quarantine registry를 import하거나 조작하지 않는다.
+
    아래 표의 제외는 정상 purge와 모든 precommit failure가 payload cleanup authority를 소비하지 않는다는 뜻이다. postcommit callback 뒤
    Client-owned deinit graph drift가 확인된 terminal suffix만 그 owner를 개별 정리하거나 권위를 넘기지 않고 no-free 상태로 버린다.
    attachment/registry/ledger/lease 같은 borrowed authority는 이 예외에서도 dereference/release/mutate하지 않는다.

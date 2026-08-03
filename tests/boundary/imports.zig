@@ -6,6 +6,150 @@ const ClientReceiverSpec = struct {
     receiver_type: []const u8,
     class: ClientReceiverClass,
 };
+const ClientGuardProof = struct {
+    receiver: []const u8,
+    funnel: []const u8,
+    gate: []const u8,
+    gate_prefix: []const u8 = "self",
+    gate_depth: usize = 1,
+    release: []const u8 = "endPublicMutation",
+    release_prefix: []const u8 = "self",
+    release_depth: usize = 1,
+    pre_gate_self_fields: []const []const u8 = &.{},
+};
+
+test "CR3a-2c2b3b B3b-S shared guard oracle rejects alias late and unbound release shapes" {
+    const good =
+        "const Client = struct { fn sample(self: *Client) !void {" ++
+        "const operation_fence_held = try self.ensureUsable();" ++
+        "defer if (operation_fence_held) self.endPublicMutation(); _ = self.fd; } };";
+    try checkSyntheticSharedGuard(good);
+    const alias_before =
+        "const Client = struct { fn sample(self: *Client) !void {" ++
+        "helper(self); const operation_fence_held = try self.ensureUsable();" ++
+        "defer if (operation_fence_held) self.endPublicMutation(); } };";
+    try std.testing.expect(!syntheticSharedGuardValid(alias_before));
+    const unrelated_defer =
+        "const Client = struct { fn sample(self: *Client) !void {" ++
+        "const operation_fence_held = try self.ensureUsable(); defer noop();" ++
+        "self.endPublicMutation(); } };";
+    try std.testing.expect(!syntheticSharedGuardValid(unrelated_defer));
+    const late =
+        "const Client = struct { fn sample(self: *Client) !void { _ = self.fd;" ++
+        "const operation_fence_held = try self.ensureUsable();" ++
+        "defer if (operation_fence_held) self.endPublicMutation(); } };";
+    try std.testing.expect(!syntheticSharedGuardValid(late));
+    const fail_open =
+        "const Client = struct { fn sample(self: *Client) void {" ++
+        "const operation_fence_held = self.ensureUsable() catch false;" ++
+        "defer if (operation_fence_held) self.endPublicMutation(); _ = self.fd; } };";
+    try std.testing.expect(!syntheticSharedGuardValid(fail_open));
+    const catch_return =
+        "const Client = struct { fn sample(self: *Client) bool {" ++
+        "const operation_fence_held = self.ensureUsable() catch return false;" ++
+        "defer if (operation_fence_held) self.endPublicMutation(); _ = self.fd; return true; } };";
+    try checkSyntheticSharedGuard(catch_return);
+    const catch_reads_client =
+        "const Client = struct { fn sample(self: *Client) bool {" ++
+        "const operation_fence_held = self.ensureUsable() catch return helper(self);" ++
+        "defer if (operation_fence_held) self.endPublicMutation(); return true; } };";
+    try std.testing.expect(!syntheticSharedGuardValid(catch_reads_client));
+    const catch_block_reads_client =
+        "const Client = struct { fn sample(self: *Client) bool {" ++
+        "const operation_fence_held = self.ensureUsable() catch return blk: { _ = 0; break :blk helper(self); };" ++
+        "defer if (operation_fence_held) self.endPublicMutation(); return true; } };";
+    try std.testing.expect(!syntheticSharedGuardValid(catch_block_reads_client));
+}
+
+test "CR3a-2c2b3b B3b-S trusted guard oracle rejects pre-acquire graph and unbound errdefer" {
+    const late_graph =
+        "const Client = struct { fn ensureUsable(self: *const Client) !bool {" ++
+        "_ = self.fd; const operation_fence_held = try self.beginPublicMutation();" ++
+        "errdefer if (operation_fence_held) self.endPublicMutation(); return operation_fence_held; } };";
+    try std.testing.expect(!syntheticTrustedSharedGuardValid(late_graph, "ensureUsable", "beginPublicMutation"));
+    const unrelated_errdefer =
+        "const Client = struct { fn ensureUsable(self: *const Client) !bool {" ++
+        "const operation_fence_held = try self.beginPublicMutation(); errdefer noop();" ++
+        "self.endPublicMutation(); return operation_fence_held; } };";
+    try std.testing.expect(!syntheticTrustedSharedGuardValid(unrelated_errdefer, "ensureUsable", "beginPublicMutation"));
+    const lost_capability =
+        "const Client = struct { fn ensureUsable(self: *const Client) !bool {" ++
+        "const operation_fence_held = try self.beginPublicMutation();" ++
+        "errdefer if (operation_fence_held) self.endPublicMutation();" ++
+        "if (force_short_success) return false; return operation_fence_held; } };";
+    try std.testing.expect(!syntheticTrustedSharedGuardValid(lost_capability, "ensureUsable", "beginPublicMutation"));
+    const post_delegate_escape =
+        "const Client = struct { fn sample(self: *Client) void {" ++
+        "self.funnel(); helper(self); } fn funnel(_: *Client) void {} };";
+    try std.testing.expect(!syntheticDelegateValid(post_delegate_escape));
+
+    const good_begin =
+        "const Client = struct { fn beginPublicMutation(self: *const Client) !bool {" ++
+        "const fence = self.operation_fence orelse { if (self.operation_fence_generation != 0) " ++
+        "return error.ConnectionClosed; return false; };" ++
+        "fence.tryEnterShared(@intFromPtr(self), self.operation_fence_generation) catch |err| " ++
+        "return switch (err) { error.AdminBusy, error.CounterOverflow => error.AdminBusy, " ++
+        "error.InvalidOwner, error.InvalidState => error.ConnectionClosed, }; return true; } };";
+    try std.testing.expect(syntheticTrustedLeafValid(good_begin, "beginPublicMutation"));
+    const wrong_begin_mapping =
+        "const Client = struct { fn beginPublicMutation(self: *const Client) !bool {" ++
+        "const fence = self.operation_fence orelse { if (self.operation_fence_generation != 0) " ++
+        "return error.ConnectionClosed; return false; };" ++
+        "fence.tryEnterShared(@intFromPtr(self), self.operation_fence_generation) catch |err| " ++
+        "return switch (err) { error.AdminBusy, error.CounterOverflow => error.ConnectionClosed, " ++
+        "error.InvalidOwner, error.InvalidState => error.AdminBusy, }; return true; } };";
+    try std.testing.expect(!syntheticTrustedLeafValid(wrong_begin_mapping, "beginPublicMutation"));
+    const good_end =
+        "const Client = struct { fn endPublicMutation(self: *const Client) void {" ++
+        "const fence = self.operation_fence orelse @panic(\"bound Client operation fence disappeared\");" ++
+        "if (!fence.leaveShared(@intFromPtr(self), self.operation_fence_generation)) " ++
+        "@panic(\"Client operation fence shared release failed\"); } };";
+    try std.testing.expect(syntheticTrustedLeafValid(good_end, "endPublicMutation"));
+    const wrong_end_identity =
+        "const Client = struct { fn endPublicMutation(self: *const Client) void {" ++
+        "const fence = self.operation_fence orelse @panic(\"bound Client operation fence disappeared\");" ++
+        "if (!fence.leaveShared(@intFromPtr(self), 0)) " ++
+        "@panic(\"Client operation fence shared release failed\"); } };";
+    try std.testing.expect(!syntheticTrustedLeafValid(wrong_end_identity, "endPublicMutation"));
+
+    const exclusive_prefix =
+        "const Client = struct { fn tryDeinit(self: *Client) bool {" ++
+        "const operation_fence = self.operation_fence; var operation_fence_exclusive = false;" ++
+        "if (operation_fence) |fence| { fence.tryAcquireExclusive(@intFromPtr(self), " ++
+        "self.operation_fence_generation) ";
+    const exclusive_latch = " operation_fence_exclusive = true;";
+    const exclusive_guard_suffix =
+        " } else if (self.operation_fence_generation != 0) return false;" ++
+        "defer if (operation_fence_exclusive) { const fence = operation_fence.?;" ++
+        "if (!fence.abortExclusive(@intFromPtr(self), self.operation_fence_generation)) " ++
+        "@panic(\"Client deinit operation fence abort failed\"); };";
+    const exclusive_terminal_prefix =
+        "self.finishDeinitGraph();" ++
+        "const client_addr = @intFromPtr(self); const operation_fence_generation = self.operation_fence_generation;" ++
+        "if (operation_fence) |fence| { if (!fence.commitExclusiveTerminal(client_addr, operation_fence_generation)) " ++
+        "@panic(\"Client deinit operation fence commit failed\"); operation_fence_exclusive = false;";
+    const exclusive_terminal_suffix = " } self.* = undefined; return true; } };";
+    const exclusive_good = exclusive_prefix ++ "catch return false;" ++ exclusive_latch ++
+        exclusive_guard_suffix ++ exclusive_terminal_prefix ++ exclusive_terminal_suffix;
+    try std.testing.expect(syntheticExclusiveGuardValid(exclusive_good));
+    const exclusive_swallow = exclusive_prefix ++ "catch {};" ++ exclusive_latch ++
+        exclusive_guard_suffix ++ exclusive_terminal_prefix ++ exclusive_terminal_suffix;
+    try std.testing.expect(!syntheticExclusiveGuardValid(exclusive_swallow));
+    const exclusive_gap = exclusive_prefix ++ "catch return false;" ++ exclusive_latch ++
+        " helper(self);" ++ exclusive_guard_suffix ++ exclusive_terminal_prefix ++ exclusive_terminal_suffix;
+    try std.testing.expect(!syntheticExclusiveGuardValid(exclusive_gap));
+    const exclusive_early_disarm = exclusive_prefix ++ "catch return false;" ++ exclusive_latch ++
+        " operation_fence_exclusive = false;" ++ exclusive_guard_suffix ++
+        exclusive_terminal_prefix ++ exclusive_terminal_suffix;
+    try std.testing.expect(!syntheticExclusiveGuardValid(exclusive_early_disarm));
+    const exclusive_alias_disarm = exclusive_prefix ++ "catch return false;" ++ exclusive_latch ++
+        exclusive_guard_suffix ++ "const latch = &operation_fence_exclusive; latch.* = false;" ++
+        exclusive_terminal_prefix ++ exclusive_terminal_suffix;
+    try std.testing.expect(!syntheticExclusiveGuardValid(exclusive_alias_disarm));
+    const exclusive_post_commit_use = exclusive_prefix ++ "catch return false;" ++ exclusive_latch ++
+        exclusive_guard_suffix ++ exclusive_terminal_prefix ++ " helper(self);" ++ exclusive_terminal_suffix;
+    try std.testing.expect(!syntheticExclusiveGuardValid(exclusive_post_commit_use));
+}
 
 test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy closure" {
     const allocator = std.testing.allocator;
@@ -22,6 +166,7 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .name = "deinit", .receiver_type = mutable, .class = .guarded },
         .{ .name = "tryDeinit", .receiver_type = mutable, .class = .guarded },
         .{ .name = "requireBufferedGenerationBatch", .receiver_type = immutable, .class = .guarded },
+        .{ .name = "enterExternalMode", .receiver_type = mutable, .class = .guarded },
         .{ .name = "call", .receiver_type = mutable, .class = .guarded },
         .{ .name = "callUntil", .receiver_type = mutable, .class = .guarded },
         .{ .name = "prepareBlockingRpcStorage", .receiver_type = mutable, .class = .guarded },
@@ -87,7 +232,6 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .name = "validateSealedExternalAdoptionPlan", .receiver_type = immutable, .class = .construction },
         .{ .name = "prepareExternalAdoptionTake", .receiver_type = immutable, .class = .construction },
         .{ .name = "commitExternalAdoption", .receiver_type = mutable, .class = .construction },
-        .{ .name = "enterExternalMode", .receiver_type = mutable, .class = .construction },
         .{ .name = "prepareExternalModeDeinit", .receiver_type = mutable, .class = .construction },
         .{ .name = "reserveExternalModeDeinit", .receiver_type = mutable, .class = .construction },
         .{ .name = "finishReservedExternalModeDeinit", .receiver_type = mutable, .class = .construction },
@@ -114,6 +258,51 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .name = "endedPurgeFenceIntruded", .receiver_type = immutable, .class = .observation },
     };
     try expectClientReceiverManifest(allocator, source, &manifest);
+    const guarded = [_]ClientGuardProof{
+        .{ .receiver = "requireAdminRuntimeEnd", .funnel = "requireAdminRuntimeEnd", .gate = "requireBlockingMode" },
+        .{ .receiver = "deinit", .funnel = "tryDeinit", .gate = "tryAcquireExclusive", .gate_prefix = "fence", .gate_depth = 2, .release = "abortExclusive", .release_prefix = "fence", .release_depth = 2, .pre_gate_self_fields = &.{ "operation_fence", "operation_fence_generation" } },
+        .{ .receiver = "tryDeinit", .funnel = "tryDeinit", .gate = "tryAcquireExclusive", .gate_prefix = "fence", .gate_depth = 2, .release = "abortExclusive", .release_prefix = "fence", .release_depth = 2, .pre_gate_self_fields = &.{ "operation_fence", "operation_fence_generation" } },
+        .{ .receiver = "beginGenerationBatchAllocator", .funnel = "beginGenerationBatchAllocator", .gate = "ensureUsable" },
+        .{ .receiver = "requireBufferedGenerationBatch", .funnel = "requireBufferedGenerationBatch", .gate = "ensureUsable" },
+        .{ .receiver = "restoreGenerationBatchAllocatorUnchecked", .funnel = "restoreGenerationBatchAllocatorUnchecked", .gate = "beginPublicMutation" },
+        .{ .receiver = "enterExternalMode", .funnel = "enterExternalMode", .gate = "beginPublicMutation" },
+        .{ .receiver = "call", .funnel = "callWithIo", .gate = "requireBlockingMode" },
+        .{ .receiver = "callUntil", .funnel = "callUntilWithOps", .gate = "requireBlockingMode" },
+        .{ .receiver = "prepareBlockingRpcStorage", .funnel = "prepareBlockingRpc", .gate = "requireBlockingMode" },
+        .{ .receiver = "abortPreparedBlockingRpcStorage", .funnel = "abortPreparedBlockingRpcStorage", .gate = "beginPublicMutation" },
+        .{ .receiver = "preflightPreparedBlockingRpcStorageExecution", .funnel = "preflightPreparedBlockingRpcStorageExecution", .gate = "ensureUsable" },
+        .{ .receiver = "executePreparedBlockingRpcStorageWithAllocator", .funnel = "executePreparedBlockingRpcStorageWithAllocator", .gate = "beginPublicMutation" },
+        .{ .receiver = "preparedBlockingRpcStorageMatches", .funnel = "preparedBlockingRpcStorageMatches", .gate = "beginPublicMutation" },
+        .{ .receiver = "refreshBufferedAuthorityEvidence", .funnel = "refreshBufferedAuthorityEvidence", .gate = "requireBlockingMode" },
+        .{ .receiver = "runtimeInventory", .funnel = "runtimeInventory", .gate = "requireBlockingMode" },
+        .{ .receiver = "runtimeInventoryBounded", .funnel = "runtimeInventoryBounded", .gate = "requireBlockingMode" },
+        .{ .receiver = "prepareUpgrade", .funnel = "prepareUpgrade", .gate = "requireBlockingMode" },
+        .{ .receiver = "upgradeStatus", .funnel = "upgradeStatus", .gate = "requireBlockingMode" },
+        .{ .receiver = "readSnapshot", .funnel = "readSnapshotWithIo", .gate = "requireBlockingMode" },
+        .{ .receiver = "readSnapshotUntil", .funnel = "readSnapshotUntilWithOps", .gate = "requireBlockingMode" },
+        .{ .receiver = "readStreamBatch", .funnel = "readStreamBatchWithIo", .gate = "requireBlockingMode" },
+        .{ .receiver = "readGenerationBatch", .funnel = "readGenerationBatch", .gate = "requireBlockingMode" },
+        .{ .receiver = "dropBufferedStream", .funnel = "dropBufferedStream", .gate = "beginPublicMutation" },
+        .{ .receiver = "takeEventForStream", .funnel = "takeEventForStream", .gate = "beginPublicMutation" },
+        .{ .receiver = "peekEndedEventForStream", .funnel = "peekEndedEventForStream", .gate = "beginPublicMutation" },
+        .{ .receiver = "prepareEndedPurgeInventory", .funnel = "prepareEndedPurgeInventory", .gate = "beginPublicMutation" },
+        .{ .receiver = "releaseEvent", .funnel = "releaseEvent", .gate = "beginPublicMutation" },
+        .{ .receiver = "sendInput", .funnel = "sendInput", .gate = "requireBlockingMode" },
+        .{ .receiver = "sendInputNonBlocking", .funnel = "sendInputNonBlocking", .gate = "requireBlockingMode" },
+        .{ .receiver = "sendScrollToBottomNonBlocking", .funnel = "sendScrollToBottomNonBlocking", .gate = "requireBlockingMode" },
+        .{ .receiver = "sendResyncNonBlocking", .funnel = "sendResyncNonBlocking", .gate = "requireBlockingMode" },
+        .{ .receiver = "sendCoreCommandNonBlocking", .funnel = "sendCoreCommandNonBlocking", .gate = "requireBlockingMode" },
+        .{ .receiver = "sendScrollToBottom", .funnel = "sendScrollToBottom", .gate = "requireBlockingMode" },
+        .{ .receiver = "sendCoreCommand", .funnel = "sendCoreCommand", .gate = "requireBlockingMode" },
+        .{ .receiver = "pumpPendingOutput", .funnel = "pumpPendingOutput", .gate = "requireBlockingMode" },
+        .{ .receiver = "fenceRevokedStream", .funnel = "fenceRevokedStream", .gate = "requireBlockingMode" },
+        .{ .receiver = "hasBufferedControllerRevoke", .funnel = "hasBufferedControllerRevokeForStream", .gate = "beginPublicMutation" },
+        .{ .receiver = "hasBufferedControllerRevokeForStream", .funnel = "hasBufferedControllerRevokeForStream", .gate = "beginPublicMutation" },
+        .{ .receiver = "terminalReasonInvariant", .funnel = "terminalReasonInvariant", .gate = "beginPublicMutation" },
+        .{ .receiver = "poison", .funnel = "poison", .gate = "beginPublicMutation" },
+        .{ .receiver = "firstPoisonReason", .funnel = "firstPoisonReason", .gate = "beginPublicMutation" },
+    };
+    try expectGuardedClientReceiverPolicies(allocator, source, &manifest, &guarded);
     try expectContainerMethodMarkersInOrder(
         allocator,
         source,
@@ -6362,6 +6551,799 @@ fn expectClientReceiverManifest(
         found_count += 1;
     }
     try std.testing.expectEqual(manifest.len, found_count);
+}
+
+fn expectGuardedClientReceiverPolicies(
+    allocator: std.mem.Allocator,
+    source: [:0]const u8,
+    manifest: []const ClientReceiverSpec,
+    proofs: []const ClientGuardProof,
+) !void {
+    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    defer tree.deinit(allocator);
+    const members = findRootContainerMembers(&tree, "Client") orelse
+        return error.TestUnexpectedResult;
+
+    var guarded_count: usize = 0;
+    var guarded_authority_count: usize = 0;
+    for (manifest) |entry| {
+        const guarded_authority = entry.class == .unchecked and
+            (std.mem.eql(u8, entry.name, "beginGenerationBatchAllocator") or
+                std.mem.eql(u8, entry.name, "restoreGenerationBatchAllocatorUnchecked"));
+        if (entry.class != .guarded and !guarded_authority) continue;
+        if (guarded_authority) guarded_authority_count += 1 else guarded_count += 1;
+        var proof_count: usize = 0;
+        for (proofs) |proof| proof_count += @intFromBool(std.mem.eql(u8, entry.name, proof.receiver));
+        try std.testing.expectEqual(@as(usize, 1), proof_count);
+    }
+    try std.testing.expectEqual(guarded_count + guarded_authority_count, proofs.len);
+    try std.testing.expectEqual(@as(usize, 2), guarded_authority_count);
+
+    for (proofs) |proof| {
+        var receiver_node: ?std.zig.Ast.Node.Index = null;
+        var funnel_node: ?std.zig.Ast.Node.Index = null;
+        for (members) |member| {
+            const tuple = declarationTuple(&tree, "Client", member);
+            if (!std.mem.eql(u8, tuple.kind, "fn")) continue;
+            if (std.mem.eql(u8, tuple.name, proof.receiver)) receiver_node = member;
+            if (std.mem.eql(u8, tuple.name, proof.funnel)) funnel_node = member;
+        }
+        const receiver = receiver_node orelse return error.TestUnexpectedResult;
+        if (!std.mem.eql(u8, proof.receiver, proof.funnel)) {
+            const delegation = nodeCallToken(&tree, receiver, "self", proof.funnel) orelse
+                return error.TestUnexpectedResult;
+            try expectNoUnlistedSelfFieldBefore(&tree, receiver, delegation, &.{});
+            try std.testing.expectEqual(@as(usize, 1), tokenBraceDepthAt(&tree, receiver, delegation));
+            try std.testing.expectEqual(@as(usize, 1), countBodySelfTokens(&tree, receiver));
+        }
+        const gate_token = nodeCallToken(
+            &tree,
+            funnel_node orelse return error.TestUnexpectedResult,
+            proof.gate_prefix,
+            proof.gate,
+        ) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(proof.gate_depth, tokenBraceDepthAt(
+            &tree,
+            funnel_node.?,
+            gate_token,
+        ));
+        if (std.mem.eql(u8, proof.gate_prefix, "self")) {
+            const previous = tree.tokenSlice(gate_token - 1);
+            try std.testing.expect(std.mem.eql(u8, previous, "try") or
+                std.mem.eql(u8, previous, "="));
+        }
+        try expectNoUnlistedSelfFieldBefore(
+            &tree,
+            funnel_node.?,
+            gate_token,
+            proof.pre_gate_self_fields,
+        );
+        if (std.mem.eql(u8, proof.gate_prefix, "self")) {
+            try expectSharedGuardPrologue(
+                &tree,
+                funnel_node.?,
+                gate_token,
+                proof.gate,
+                "defer",
+                proof.release_prefix,
+                proof.release,
+                proof.release_depth,
+            );
+        } else {
+            try expectExclusiveDeinitGuard(
+                &tree,
+                funnel_node.?,
+                gate_token,
+                proof.gate_prefix,
+                proof.gate,
+                proof.release_prefix,
+                proof.release,
+                proof.release_depth,
+            );
+        }
+    }
+    try expectTrustedClientGuardChain(allocator, source);
+}
+
+fn expectExclusiveDeinitGuard(
+    tree: *const std.zig.Ast,
+    node: std.zig.Ast.Node.Index,
+    gate_token: std.zig.Ast.TokenIndex,
+    gate_prefix: []const u8,
+    gate: []const u8,
+    release_prefix: []const u8,
+    release: []const u8,
+    release_depth: usize,
+) !void {
+    if (!std.mem.eql(u8, gate_prefix, "fence") or
+        !std.mem.eql(u8, gate, "tryAcquireExclusive") or
+        !std.mem.eql(u8, release_prefix, "fence") or
+        !std.mem.eql(u8, release, "abortExclusive"))
+        return error.TestUnexpectedResult;
+    const acquire = [_][]const u8{
+        "fence", ".", "tryAcquireExclusive",        "(", "@intFromPtr", "(", "self", ")", ",",
+        "self",  ".", "operation_fence_generation", ")",
+    };
+    try expectTokensAt(tree, gate_token, &acquire);
+    const close_paren = matchingCloseParen(tree, node, gate_token + 3) orelse
+        return error.TestUnexpectedResult;
+    const acquire_tail = [_][]const u8{
+        "catch", "return", "false", ";", "operation_fence_exclusive", "=", "true", ";",
+    };
+    try expectTokensAt(tree, close_paren + 1, &acquire_tail);
+
+    const abort = nodeCallTokenAfter(
+        tree,
+        node,
+        release_prefix,
+        release,
+        close_paren + 1,
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(release_depth, tokenBraceDepthAt(tree, node, abort));
+    const defer_token = findTokenAfter(tree, node, close_paren + 1, "defer") orelse
+        return error.TestUnexpectedResult;
+    const acquire_to_defer = [_][]const u8{
+        "catch", "return", "false",  ";",     "operation_fence_exclusive", "=", "true",                       ";",
+        "}",     "else",   "if",     "(",     "self",                      ".", "operation_fence_generation", "!=",
+        "0",     ")",      "return", "false", ";",
+    };
+    try expectTokensAt(tree, close_paren + 1, &acquire_to_defer);
+    try std.testing.expectEqual(
+        close_paren + 1 + @as(std.zig.Ast.TokenIndex, @intCast(acquire_to_defer.len)),
+        defer_token,
+    );
+    const defer_prefix = [_][]const u8{
+        "defer",           "if", "(", "operation_fence_exclusive", ")",  "{", "const", "fence", "=",
+        "operation_fence", ".",  "?", ";",                         "if", "(", "!",
+    };
+    try expectTokensAt(tree, defer_token, &defer_prefix);
+    try std.testing.expectEqual(
+        defer_token + @as(std.zig.Ast.TokenIndex, @intCast(defer_prefix.len)),
+        abort,
+    );
+    const abort_call = [_][]const u8{
+        "fence", ".", "abortExclusive",             "(", "@intFromPtr", "(",      "self", ")",                                              ",",
+        "self",  ".", "operation_fence_generation", ")", ")",           "@panic", "(",    "\"Client deinit operation fence abort failed\"", ")",
+        ";",     "}", ";",
+    };
+    try expectTokensAt(tree, abort, &abort_call);
+
+    const commit = nodeCallTokenAfter(
+        tree,
+        node,
+        "fence",
+        "commitExclusiveTerminal",
+        abort + 1,
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 2), tokenBraceDepthAt(tree, node, commit));
+    try std.testing.expectEqual(@as(usize, 1), countPrefixedMemberCalls(
+        tree,
+        node,
+        "fence",
+        "commitExclusiveTerminal",
+    ));
+    const finish = nodeCallTokenAfter(
+        tree,
+        node,
+        "self",
+        "finishDeinitGraph",
+        abort + 1,
+    ) orelse return error.TestUnexpectedResult;
+    const terminal_prefix = [_][]const u8{
+        "self",  ".",                          "finishDeinitGraph", "(",                          ")", ";",
+        "const", "client_addr",                "=",                 "@intFromPtr",                "(", "self",
+        ")",     ";",                          "const",             "operation_fence_generation", "=", "self",
+        ".",     "operation_fence_generation", ";",                 "if",                         "(", "operation_fence",
+        ")",     "|",                          "fence",             "|",                          "{", "if",
+        "(",     "!",
+    };
+    try expectTokensAt(tree, finish, &terminal_prefix);
+    try std.testing.expectEqual(
+        finish + @as(std.zig.Ast.TokenIndex, @intCast(terminal_prefix.len)),
+        commit,
+    );
+    const commit_sequence = [_][]const u8{
+        "fence",                      ".", "commitExclusiveTerminal",   "(",      "client_addr", ",",
+        "operation_fence_generation", ")", ")",                         "@panic", "(",           "\"Client deinit operation fence commit failed\"",
+        ")",                          ";", "operation_fence_exclusive", "=",      "false",       ";",
+    };
+    try expectTokensAt(tree, commit, &commit_sequence);
+    const terminal_suffix = [_][]const u8{
+        "}", "self", ".*", "=", "undefined", ";", "return", "true", ";", "}",
+    };
+    try expectTokensAt(
+        tree,
+        commit + @as(std.zig.Ast.TokenIndex, @intCast(commit_sequence.len)),
+        &terminal_suffix,
+    );
+    try expectExclusiveLatchAssignments(tree, node);
+}
+
+fn expectExclusiveLatchAssignments(
+    tree: *const std.zig.Ast,
+    node: std.zig.Ast.Node.Index,
+) !void {
+    var assignment_count: usize = 0;
+    var true_count: usize = 0;
+    var false_count: usize = 0;
+    var use_count: usize = 0;
+    var condition_count: usize = 0;
+    var token = functionBodyStart(tree, node) orelse return error.TestUnexpectedResult;
+    while (token + 2 <= tree.lastToken(node)) : (token += 1) {
+        if (!std.mem.eql(u8, tree.tokenSlice(token), "operation_fence_exclusive")) continue;
+        use_count += 1;
+        if (std.mem.eql(u8, tree.tokenSlice(token + 1), "=")) {
+            assignment_count += 1;
+            true_count += @intFromBool(std.mem.eql(u8, tree.tokenSlice(token + 2), "true"));
+            false_count += @intFromBool(std.mem.eql(u8, tree.tokenSlice(token + 2), "false"));
+            continue;
+        }
+        const exact_condition = token >= 1 and
+            std.mem.eql(u8, tree.tokenSlice(token - 1), "(") and
+            std.mem.eql(u8, tree.tokenSlice(token + 1), ")");
+        if (!exact_condition) return error.TestUnexpectedResult;
+        condition_count += 1;
+    }
+    // The declaration initializes false, acquire arms true, and terminal commit disarms false.
+    try std.testing.expectEqual(@as(usize, 3), assignment_count);
+    try std.testing.expectEqual(@as(usize, 1), true_count);
+    try std.testing.expectEqual(@as(usize, 2), false_count);
+    try std.testing.expectEqual(@as(usize, 1), condition_count);
+    try std.testing.expectEqual(@as(usize, 4), use_count);
+}
+
+fn countPrefixedMemberCalls(
+    tree: *const std.zig.Ast,
+    node: std.zig.Ast.Node.Index,
+    prefix: []const u8,
+    member: []const u8,
+) usize {
+    var count: usize = 0;
+    var token = functionBodyStart(tree, node) orelse return 0;
+    while (token + 3 <= tree.lastToken(node)) : (token += 1) {
+        if (std.mem.eql(u8, tree.tokenSlice(token), prefix) and
+            std.mem.eql(u8, tree.tokenSlice(token + 1), ".") and
+            std.mem.eql(u8, tree.tokenSlice(token + 2), member) and
+            std.mem.eql(u8, tree.tokenSlice(token + 3), "("))
+        {
+            count += 1;
+        }
+    }
+    return count;
+}
+
+fn expectSharedGuardPrologue(
+    tree: *const std.zig.Ast,
+    node: std.zig.Ast.Node.Index,
+    gate_token: std.zig.Ast.TokenIndex,
+    gate: []const u8,
+    release_keyword: []const u8,
+    release_prefix: []const u8,
+    release: []const u8,
+    release_depth: usize,
+) !void {
+    const has_try = std.mem.eql(u8, tree.tokenSlice(gate_token - 1), "try");
+    const start = gate_token - @as(std.zig.Ast.TokenIndex, if (has_try) 4 else 3);
+    const prefix = if (has_try)
+        [_][]const u8{ "const", "operation_fence_held", "=", "try" }
+    else
+        [_][]const u8{ "const", "operation_fence_held", "=", "self" };
+    for (prefix, 0..) |wanted, index|
+        if (!std.mem.eql(u8, wanted, tree.tokenSlice(start + @as(std.zig.Ast.TokenIndex, @intCast(index)))))
+            return error.TestUnexpectedResult;
+    if (has_try and !std.mem.eql(u8, "self", tree.tokenSlice(gate_token)))
+        return error.TestUnexpectedResult;
+    if (!std.mem.eql(u8, gate, tree.tokenSlice(gate_token + 2)) or
+        tokenBraceDepthAt(tree, node, start) != 1)
+        return error.TestUnexpectedResult;
+
+    const close_paren = matchingCloseParen(tree, node, gate_token + 3) orelse
+        return error.TestUnexpectedResult;
+    if (has_try) {
+        if (!std.mem.eql(u8, tree.tokenSlice(close_paren + 1), ";"))
+            return error.TestUnexpectedResult;
+    } else {
+        var suffix = close_paren + 1;
+        if (!std.mem.eql(u8, tree.tokenSlice(suffix), "catch"))
+            return error.TestUnexpectedResult;
+        suffix += 1;
+        if (std.mem.eql(u8, tree.tokenSlice(suffix), "|")) {
+            suffix += 1;
+            if (std.mem.eql(u8, tree.tokenSlice(suffix), "|"))
+                return error.TestUnexpectedResult;
+            while (!std.mem.eql(u8, tree.tokenSlice(suffix), "|")) : (suffix += 1)
+                if (suffix >= tree.lastToken(node)) return error.TestUnexpectedResult;
+            suffix += 1;
+        }
+        if (!std.mem.eql(u8, tree.tokenSlice(suffix), "return"))
+            return error.TestUnexpectedResult;
+        var returned = suffix + 1;
+        while (returned <= tree.lastToken(node) and
+            !std.mem.eql(u8, tree.tokenSlice(returned), ";")) : (returned += 1)
+        {
+            if (std.mem.eql(u8, tree.tokenSlice(returned), "self"))
+                return error.TestUnexpectedResult;
+        }
+    }
+
+    var statement_end = gate_token;
+    while (statement_end <= tree.lastToken(node)) : (statement_end += 1)
+        if (std.mem.eql(u8, tree.tokenSlice(statement_end), ";") and
+            tokenBraceDepthAt(tree, node, statement_end) == 1) break;
+    if (!has_try) {
+        var returned = close_paren + 1;
+        while (returned < statement_end) : (returned += 1)
+            if (std.mem.eql(u8, tree.tokenSlice(returned), "self"))
+                return error.TestUnexpectedResult;
+    }
+    const expected = [_][]const u8{
+        release_keyword, "if", "(", "operation_fence_held", ")", release_prefix, ".",
+        release,         "(",  ")", ";",
+    };
+    for (expected, 0..) |wanted, index|
+        if (!std.mem.eql(u8, wanted, tree.tokenSlice(
+            statement_end + 1 + @as(std.zig.Ast.TokenIndex, @intCast(index)),
+        ))) return error.TestUnexpectedResult;
+    const release_token = nodeCallTokenAfter(
+        tree,
+        node,
+        release_prefix,
+        release,
+        statement_end + 1,
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(release_depth, tokenBraceDepthAt(tree, node, release_token));
+}
+
+fn syntheticSharedGuardValid(source: [:0]const u8) bool {
+    checkSyntheticSharedGuard(source) catch return false;
+    return true;
+}
+
+fn checkSyntheticSharedGuard(source: [:0]const u8) !void {
+    const allocator = std.testing.allocator;
+    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    defer tree.deinit(allocator);
+    const members = findRootContainerMembers(&tree, "Client") orelse
+        return error.TestUnexpectedResult;
+    var method: ?std.zig.Ast.Node.Index = null;
+    for (members) |member| {
+        const tuple = declarationTuple(&tree, "Client", member);
+        if (std.mem.eql(u8, tuple.name, "sample")) method = member;
+    }
+    const node = method orelse return error.TestUnexpectedResult;
+    const gate = nodeCallToken(&tree, node, "self", "ensureUsable") orelse
+        return error.TestUnexpectedResult;
+    try expectNoUnlistedSelfFieldBefore(&tree, node, gate, &.{});
+    try expectSharedGuardPrologue(
+        &tree,
+        node,
+        gate,
+        "ensureUsable",
+        "defer",
+        "self",
+        "endPublicMutation",
+        1,
+    );
+}
+
+fn expectTrustedClientGuardChain(allocator: std.mem.Allocator, source: [:0]const u8) !void {
+    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    defer tree.deinit(allocator);
+    const members = findRootContainerMembers(&tree, "Client") orelse
+        return error.TestUnexpectedResult;
+    const require_blocking = findContainerMethod(&tree, members, "Client", "requireBlockingMode") orelse
+        return error.TestUnexpectedResult;
+    const ensure_usable = findContainerMethod(&tree, members, "Client", "ensureUsable") orelse
+        return error.TestUnexpectedResult;
+    const begin_mutation = findContainerMethod(&tree, members, "Client", "beginPublicMutation") orelse
+        return error.TestUnexpectedResult;
+    const end_mutation = findContainerMethod(&tree, members, "Client", "endPublicMutation") orelse
+        return error.TestUnexpectedResult;
+    try expectTrustedSharedGuard(&tree, require_blocking, "ensureUsable");
+    try expectOnlySelfMembers(&tree, require_blocking, &.{ "ensureUsable", "endPublicMutation", "io_mode" }, &.{});
+    try expectHeldCapabilityReturn(&tree, require_blocking);
+    try expectTrustedSharedGuard(&tree, ensure_usable, "beginPublicMutation");
+    try expectOnlySelfMembers(
+        &tree,
+        ensure_usable,
+        &.{ "beginPublicMutation", "endPublicMutation", "ownership", "unusable" },
+        &.{"checkedAllocatorReentry"},
+    );
+    try expectHeldCapabilityReturn(&tree, ensure_usable);
+    try expectTrustedBeginPublicMutation(&tree, begin_mutation);
+    try expectTrustedEndPublicMutation(&tree, end_mutation);
+}
+
+fn expectTrustedSharedGuard(
+    tree: *const std.zig.Ast,
+    node: std.zig.Ast.Node.Index,
+    gate_name: []const u8,
+) !void {
+    const gate = nodeCallToken(tree, node, "self", gate_name) orelse
+        return error.TestUnexpectedResult;
+    try expectNoUnlistedSelfFieldBefore(tree, node, gate, &.{});
+    try expectSharedGuardPrologue(
+        tree,
+        node,
+        gate,
+        gate_name,
+        "errdefer",
+        "self",
+        "endPublicMutation",
+        1,
+    );
+    try std.testing.expectEqual(@as(usize, 1), countSelfMemberUses(tree, node, gate_name));
+    try std.testing.expectEqual(@as(usize, 1), countSelfMemberUses(tree, node, "endPublicMutation"));
+    try expectNonErrorReturnsHeld(tree, node);
+}
+
+fn expectNonErrorReturnsHeld(
+    tree: *const std.zig.Ast,
+    node: std.zig.Ast.Node.Index,
+) !void {
+    var token = functionBodyStart(tree, node) orelse return error.TestUnexpectedResult;
+    while (token + 1 <= tree.lastToken(node)) : (token += 1) {
+        if (!std.mem.eql(u8, tree.tokenSlice(token), "return")) continue;
+        const next = tree.tokenSlice(token + 1);
+        if (std.mem.eql(u8, next, "error")) continue;
+        if (!std.mem.eql(u8, next, "operation_fence_held"))
+            return error.TestUnexpectedResult;
+    }
+}
+
+fn countSelfMemberUses(
+    tree: *const std.zig.Ast,
+    node: std.zig.Ast.Node.Index,
+    member: []const u8,
+) usize {
+    var count: usize = 0;
+    var token = functionBodyStart(tree, node) orelse return 0;
+    while (token + 2 <= tree.lastToken(node)) : (token += 1) {
+        if (std.mem.eql(u8, tree.tokenSlice(token), "self") and
+            std.mem.eql(u8, tree.tokenSlice(token + 1), ".") and
+            std.mem.eql(u8, tree.tokenSlice(token + 2), member))
+        {
+            count += 1;
+        }
+    }
+    return count;
+}
+
+fn expectTrustedBeginPublicMutation(
+    tree: *const std.zig.Ast,
+    node: std.zig.Ast.Node.Index,
+) !void {
+    const gate = nodeCallToken(tree, node, "fence", "tryEnterShared") orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), tokenBraceDepthAt(tree, node, gate));
+    const body_start = functionBodyStart(tree, node) orelse return error.TestUnexpectedResult;
+    const prefix = [_][]const u8{
+        "const",  "fence", "=",    "self",             ".",                          "operation_fence", "orelse", "{",
+        "if",     "(",     "self", ".",                "operation_fence_generation", "!=",              "0",      ")",
+        "return", "error", ".",    "ConnectionClosed", ";",                          "return",          "false",  ";",
+        "}",      ";",
+    };
+    try expectTokensAt(tree, body_start + 1, &prefix);
+    try std.testing.expectEqual(body_start + 1 + prefix.len, gate);
+    const acquire = [_][]const u8{
+        "fence", ".", "tryEnterShared",             "(", "@intFromPtr", "(", "self", ")", ",",
+        "self",  ".", "operation_fence_generation", ")",
+    };
+    try expectTokensAt(tree, gate, &acquire);
+    const close_paren = matchingCloseParen(tree, node, gate + 3) orelse
+        return error.TestUnexpectedResult;
+    const suffix = [_][]const u8{
+        "catch",     "|", "err",              "|", "return",       "switch", "(",               "err",  ")",            "{",
+        "error",     ".", "AdminBusy",        ",", "error",        ".",      "CounterOverflow", "=>",   "error",        ".",
+        "AdminBusy", ",", "error",            ".", "InvalidOwner", ",",      "error",           ".",    "InvalidState", "=>",
+        "error",     ".", "ConnectionClosed", ",", "}",            ";",      "return",          "true", ";",
+    };
+    try expectTokensAt(tree, close_paren + 1, &suffix);
+    try std.testing.expectEqualStrings("}", tree.tokenSlice(
+        close_paren + 1 + @as(std.zig.Ast.TokenIndex, @intCast(suffix.len)),
+    ));
+}
+
+fn expectTrustedEndPublicMutation(
+    tree: *const std.zig.Ast,
+    node: std.zig.Ast.Node.Index,
+) !void {
+    const body_start = functionBodyStart(tree, node) orelse return error.TestUnexpectedResult;
+    const body = [_][]const u8{
+        "const",                                        "fence",       "=",      "self", ".",                                                "operation_fence", "orelse", "@panic", "(",
+        "\"bound Client operation fence disappeared\"", ")",           ";",      "if",   "(",                                                "!",               "fence",  ".",      "leaveShared",
+        "(",                                            "@intFromPtr", "(",      "self", ")",                                                ",",               "self",   ".",      "operation_fence_generation",
+        ")",                                            ")",           "@panic", "(",    "\"Client operation fence shared release failed\"", ")",               ";",
+    };
+    try expectTokensAt(tree, body_start + 1, &body);
+    try std.testing.expectEqualStrings("}", tree.tokenSlice(
+        body_start + 1 + @as(std.zig.Ast.TokenIndex, @intCast(body.len)),
+    ));
+}
+
+fn expectHeldCapabilityReturn(
+    tree: *const std.zig.Ast,
+    node: std.zig.Ast.Node.Index,
+) !void {
+    var matches: usize = 0;
+    var token = functionBodyStart(tree, node) orelse return error.TestUnexpectedResult;
+    while (token + 2 <= tree.lastToken(node)) : (token += 1) {
+        if (tokenBraceDepthAt(tree, node, token) == 1 and
+            std.mem.eql(u8, tree.tokenSlice(token), "return") and
+            std.mem.eql(u8, tree.tokenSlice(token + 1), "operation_fence_held") and
+            std.mem.eql(u8, tree.tokenSlice(token + 2), ";"))
+        {
+            matches += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), matches);
+}
+
+fn expectOnlySelfMembers(
+    tree: *const std.zig.Ast,
+    node: std.zig.Ast.Node.Index,
+    allowed: []const []const u8,
+    allowed_bare_calls: []const []const u8,
+) !void {
+    var token = functionBodyStart(tree, node) orelse return error.TestUnexpectedResult;
+    while (token + 2 <= tree.lastToken(node)) : (token += 1) {
+        if (!std.mem.eql(u8, tree.tokenSlice(token), "self")) continue;
+        if (!std.mem.eql(u8, tree.tokenSlice(token + 1), ".")) {
+            var admitted_bare = token >= 2 and std.mem.eql(u8, tree.tokenSlice(token - 1), "(");
+            if (admitted_bare) {
+                admitted_bare = false;
+                for (allowed_bare_calls) |name| {
+                    admitted_bare = admitted_bare or std.mem.eql(u8, name, tree.tokenSlice(token - 2));
+                }
+            }
+            if (!admitted_bare) return error.TestUnexpectedResult;
+            continue;
+        }
+        var admitted = false;
+        for (allowed) |name| {
+            admitted = admitted or std.mem.eql(u8, name, tree.tokenSlice(token + 2));
+        }
+        if (!admitted) return error.TestUnexpectedResult;
+    }
+}
+
+fn expectTokensAt(
+    tree: *const std.zig.Ast,
+    start: std.zig.Ast.TokenIndex,
+    expected: []const []const u8,
+) !void {
+    for (expected, 0..) |wanted, index|
+        if (!std.mem.eql(u8, wanted, tree.tokenSlice(
+            start + @as(std.zig.Ast.TokenIndex, @intCast(index)),
+        ))) return error.TestUnexpectedResult;
+}
+
+fn functionBodyStart(
+    tree: *const std.zig.Ast,
+    node: std.zig.Ast.Node.Index,
+) ?std.zig.Ast.TokenIndex {
+    var token = tree.firstToken(node);
+    while (token <= tree.lastToken(node)) : (token += 1)
+        if (std.mem.eql(u8, tree.tokenSlice(token), "{")) return token;
+    return null;
+}
+
+fn syntheticTrustedSharedGuardValid(
+    source: [:0]const u8,
+    method_name: []const u8,
+    gate_name: []const u8,
+) bool {
+    const allocator = std.testing.allocator;
+    var tree = std.zig.Ast.parse(allocator, source, .zig) catch return false;
+    defer tree.deinit(allocator);
+    const members = findRootContainerMembers(&tree, "Client") orelse return false;
+    const node = findContainerMethod(&tree, members, "Client", method_name) orelse return false;
+    expectTrustedSharedGuard(&tree, node, gate_name) catch return false;
+    return true;
+}
+
+fn syntheticDelegateValid(source: [:0]const u8) bool {
+    const allocator = std.testing.allocator;
+    var tree = std.zig.Ast.parse(allocator, source, .zig) catch return false;
+    defer tree.deinit(allocator);
+    const members = findRootContainerMembers(&tree, "Client") orelse return false;
+    const node = findContainerMethod(&tree, members, "Client", "sample") orelse return false;
+    const call = nodeCallToken(&tree, node, "self", "funnel") orelse return false;
+    if (tokenBraceDepthAt(&tree, node, call) != 1) return false;
+    return countBodySelfTokens(&tree, node) == 1;
+}
+
+fn syntheticTrustedLeafValid(source: [:0]const u8, method_name: []const u8) bool {
+    const allocator = std.testing.allocator;
+    var tree = std.zig.Ast.parse(allocator, source, .zig) catch return false;
+    defer tree.deinit(allocator);
+    const members = findRootContainerMembers(&tree, "Client") orelse return false;
+    const node = findContainerMethod(&tree, members, "Client", method_name) orelse return false;
+    if (std.mem.eql(u8, method_name, "beginPublicMutation")) {
+        expectTrustedBeginPublicMutation(&tree, node) catch return false;
+    } else if (std.mem.eql(u8, method_name, "endPublicMutation")) {
+        expectTrustedEndPublicMutation(&tree, node) catch return false;
+    } else return false;
+    return true;
+}
+
+fn syntheticExclusiveGuardValid(source: [:0]const u8) bool {
+    const allocator = std.testing.allocator;
+    var tree = std.zig.Ast.parse(allocator, source, .zig) catch return false;
+    defer tree.deinit(allocator);
+    const members = findRootContainerMembers(&tree, "Client") orelse return false;
+    const node = findContainerMethod(&tree, members, "Client", "tryDeinit") orelse return false;
+    const gate = nodeCallToken(&tree, node, "fence", "tryAcquireExclusive") orelse return false;
+    expectExclusiveDeinitGuard(
+        &tree,
+        node,
+        gate,
+        "fence",
+        "tryAcquireExclusive",
+        "fence",
+        "abortExclusive",
+        2,
+    ) catch return false;
+    return true;
+}
+
+fn findContainerMethod(
+    tree: *const std.zig.Ast,
+    members: []const std.zig.Ast.Node.Index,
+    container_name: []const u8,
+    method_name: []const u8,
+) ?std.zig.Ast.Node.Index {
+    var found: ?std.zig.Ast.Node.Index = null;
+    for (members) |member| {
+        const tuple = declarationTuple(tree, container_name, member);
+        if (!std.mem.eql(u8, tuple.kind, "fn") or
+            !std.mem.eql(u8, tuple.name, method_name)) continue;
+        if (found != null) return null;
+        found = member;
+    }
+    return found;
+}
+
+fn matchingCloseParen(
+    tree: *const std.zig.Ast,
+    node: std.zig.Ast.Node.Index,
+    open: std.zig.Ast.TokenIndex,
+) ?std.zig.Ast.TokenIndex {
+    if (!std.mem.eql(u8, tree.tokenSlice(open), "(")) return null;
+    var depth: usize = 0;
+    var token = open;
+    while (token <= tree.lastToken(node)) : (token += 1) {
+        const slice = tree.tokenSlice(token);
+        if (std.mem.eql(u8, slice, "(")) depth += 1 else if (std.mem.eql(u8, slice, ")")) {
+            depth -= 1;
+            if (depth == 0) return token;
+        }
+    }
+    return null;
+}
+
+fn countBodySelfTokens(tree: *const std.zig.Ast, node: std.zig.Ast.Node.Index) usize {
+    var count: usize = 0;
+    var token = tree.firstToken(node);
+    const last = tree.lastToken(node);
+    while (token <= last and !std.mem.eql(u8, tree.tokenSlice(token), "{")) : (token += 1) {}
+    while (token <= last) : (token += 1)
+        count += @intFromBool(std.mem.eql(u8, tree.tokenSlice(token), "self"));
+    return count;
+}
+
+fn nodeCallTokenAfter(
+    tree: *const std.zig.Ast,
+    node: std.zig.Ast.Node.Index,
+    prefix: []const u8,
+    callee: []const u8,
+    start: std.zig.Ast.TokenIndex,
+) ?std.zig.Ast.TokenIndex {
+    var token = @max(tree.firstToken(node), start);
+    const last = tree.lastToken(node);
+    while (token + 3 <= last) : (token += 1)
+        if (std.mem.eql(u8, tree.tokenSlice(token), prefix) and
+            std.mem.eql(u8, tree.tokenSlice(token + 1), ".") and
+            std.mem.eql(u8, tree.tokenSlice(token + 2), callee) and
+            std.mem.eql(u8, tree.tokenSlice(token + 3), "(")) return token;
+    return null;
+}
+
+fn findTokenAfter(
+    tree: *const std.zig.Ast,
+    node: std.zig.Ast.Node.Index,
+    start: std.zig.Ast.TokenIndex,
+    wanted: []const u8,
+) ?std.zig.Ast.TokenIndex {
+    var token = @max(tree.firstToken(node), start);
+    while (token <= tree.lastToken(node)) : (token += 1)
+        if (std.mem.eql(u8, tree.tokenSlice(token), wanted)) return token;
+    return null;
+}
+
+fn tokenRangeContains(
+    tree: *const std.zig.Ast,
+    first: std.zig.Ast.TokenIndex,
+    last: std.zig.Ast.TokenIndex,
+    wanted: []const u8,
+) bool {
+    var token = first;
+    while (token < last) : (token += 1)
+        if (std.mem.eql(u8, tree.tokenSlice(token), wanted)) return true;
+    return false;
+}
+
+fn tokenBraceDepthAt(
+    tree: *const std.zig.Ast,
+    node: std.zig.Ast.Node.Index,
+    target: std.zig.Ast.TokenIndex,
+) usize {
+    var depth: usize = 0;
+    var token = tree.firstToken(node);
+    while (token < target) : (token += 1) {
+        const slice = tree.tokenSlice(token);
+        if (std.mem.eql(u8, slice, "{")) depth += 1 else if (std.mem.eql(u8, slice, "}")) depth -= 1;
+    }
+    return depth;
+}
+
+fn nodeHasCallTokens(
+    tree: *const std.zig.Ast,
+    node: std.zig.Ast.Node.Index,
+    prefix: ?[]const u8,
+    callee: []const u8,
+) bool {
+    return nodeCallToken(tree, node, prefix, callee) != null;
+}
+
+fn nodeCallToken(
+    tree: *const std.zig.Ast,
+    node: std.zig.Ast.Node.Index,
+    prefix: ?[]const u8,
+    callee: []const u8,
+) ?std.zig.Ast.TokenIndex {
+    var token = tree.firstToken(node);
+    const last = tree.lastToken(node);
+    while (token <= last) : (token += 1) {
+        if (prefix) |wanted_prefix| {
+            if (token + 3 > last or
+                !std.mem.eql(u8, tree.tokenSlice(token), wanted_prefix) or
+                !std.mem.eql(u8, tree.tokenSlice(token + 1), ".") or
+                !std.mem.eql(u8, tree.tokenSlice(token + 2), callee) or
+                !std.mem.eql(u8, tree.tokenSlice(token + 3), "("))
+                continue;
+            return token;
+        }
+        if (token + 1 <= last and
+            std.mem.eql(u8, tree.tokenSlice(token), callee) and
+            std.mem.eql(u8, tree.tokenSlice(token + 1), "("))
+            return token;
+    }
+    return null;
+}
+
+fn expectNoUnlistedSelfFieldBefore(
+    tree: *const std.zig.Ast,
+    node: std.zig.Ast.Node.Index,
+    gate_token: std.zig.Ast.TokenIndex,
+    allowed: []const []const u8,
+) !void {
+    var token = tree.firstToken(node);
+    while (token < gate_token and !std.mem.eql(u8, tree.tokenSlice(token), "{")) : (token += 1) {}
+    while (token + 2 < gate_token) : (token += 1) {
+        if (!std.mem.eql(u8, tree.tokenSlice(token), "self")) continue;
+        if (std.mem.eql(u8, tree.tokenSlice(token + 1), ".")) {
+            const field = tree.tokenSlice(token + 2);
+            var admitted = false;
+            for (allowed) |name| admitted = admitted or std.mem.eql(u8, name, field);
+            try std.testing.expect(admitted);
+            continue;
+        }
+        const final_address_identity = token >= 2 and
+            std.mem.eql(u8, tree.tokenSlice(token - 1), "(") and
+            std.mem.eql(u8, tree.tokenSlice(token - 2), "@intFromPtr");
+        try std.testing.expect(allowed.len != 0 and final_address_identity);
+    }
 }
 
 fn expectContainerMethodMarkersInOrder(

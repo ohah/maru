@@ -719,6 +719,67 @@ test "SessionDock partial card never emits a CoreText cell that crosses its publ
     try std.testing.expect(saw_next_title);
 }
 
+test "SessionDock Retina controls centre measured line boxes instead of terminal cells" {
+    const props = types.Props{
+        .viewport_px = .{ .width = 640, .height = 960 },
+        .cell_width_px = 16,
+        .cell_height_px = 32,
+        .scale_milli = 2000,
+        .snapshot_generation = 6,
+        .displayed_count = 1,
+        .items = &.{
+            .{ .group = .{ .identity = 1, .label = "workspace", .count = 12 } },
+        },
+    };
+    var nodes: [8]tree.UiNode = undefined;
+    var entries: [9]tree.RectEntry = undefined;
+    var layout_items: [9]@import("../../ui/layout.zig").Item = undefined;
+    var flex_scratch: [9]@import("../../ui/layout.zig").FlexScratch = undefined;
+    var child_rects: [9]@import("../../ui/layout.zig").UiRect = undefined;
+    var actions: [6]@import("ids.zig").Entry = undefined;
+    const frame = try build.build(props, .{
+        .nodes = &nodes,
+        .entries = &entries,
+        .layout_items = &layout_items,
+        .flex_scratch = &flex_scratch,
+        .child_rects = &child_rects,
+        .actions = &actions,
+    });
+    const tk = tokens.Tokens.rich(.{
+        .foreground = .{ .r = 240, .g = 240, .b = 240 },
+        .sidebar_background = .{ .r = 28, .g = 28, .b = 28 },
+        .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
+        .sidebar_active = .{ .r = 82, .g = 82, .b = 82 },
+        .search_match = .{ .r = 1, .g = 2, .b = 3 },
+        .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
+        .selection = .{ .r = 7, .g = 8, .b = 9 },
+        .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .accent = .{ .r = 13, .g = 14, .b = 15 },
+    });
+    var ops: [24]draw.Op = undefined;
+    var runs: [16]draw.Run = undefined;
+    var text_bytes: [512]u8 = undefined;
+    const out = try view(props, frame, .{}, &tk, .{ .ops = &ops, .runs = &runs, .text_bytes = &text_bytes });
+    var workspace_y: ?i32 = null;
+    var count_y: ?i32 = null;
+    var count_pill_y: ?i32 = null;
+    for (out.ops) |op| switch (op) {
+        .quad => |quad| {
+            if (quad.fill_role == .inset_bg) count_pill_y = quad.rect.y;
+        },
+        .text => |text| for (text.runs) |run| {
+            if (std.mem.eql(u8, run.text, "작업공간")) workspace_y = text.origin.y;
+            if (std.mem.eql(u8, run.text, "12")) count_y = text.origin.y;
+        },
+        else => {},
+    };
+    const scope = find(frame.tree, build.NodeIds.scope_workspace) orelse return error.TestUnexpectedResult;
+    const control_h: f32 = @floatFromInt(typography.lineHeightPx(.control, props.scale_milli));
+    try std.testing.expectEqual(@as(i32, @intFromFloat(@floor(scope.rect.y + (scope.rect.height - control_h) / 2))), workspace_y orelse return error.TestUnexpectedResult);
+    const expected_count_y = (count_pill_y orelse return error.TestUnexpectedResult) + @as(i32, @intCast((props.cell_height_px * 2 - typography.lineHeightPx(.control, props.scale_milli)) / 2));
+    try std.testing.expectEqual(expected_count_y, count_y orelse return error.TestUnexpectedResult);
+}
+
 test "SessionDock initial loading paints inert three-line skeleton cards" {
     const props = types.Props{
         .viewport_px = .{ .width = 320, .height = 480 },

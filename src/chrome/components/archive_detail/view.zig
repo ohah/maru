@@ -19,7 +19,7 @@ const types = @import("types.zig");
 // font's one-cell ink and make the button look unlike the rest of rich Chrome.
 const resume_icon = "\u{F000C}"; // recent.svg: continue an existing conversation
 const reveal_icon = "\u{F0011}"; // document.svg: reveal the archived transcript source
-const resume_label = resume_icon ++ " 워크트리에서 재개  ⌘↵";
+const resume_label = resume_icon ++ " 터미널에서 이어하기  ⌘↵";
 const reveal_label = reveal_icon ++ " 로그 보기  ⌘L";
 
 pub const Buffers = struct {
@@ -294,7 +294,7 @@ test "archive detail view renders only redacted turn DTOs and exact action label
     var saw_action_count = false;
     for (out.ops) |op| switch (op) {
         .text => |text| for (text.runs) |run| {
-            if (std.mem.indexOf(u8, run.text, "워크트리에서 재개") != null) {
+            if (std.mem.indexOf(u8, run.text, "터미널에서 이어하기") != null) {
                 saw_resume = true;
                 saw_resume_icon = std.mem.startsWith(u8, run.text, resume_icon);
                 resume_origin_x = text.origin.x;

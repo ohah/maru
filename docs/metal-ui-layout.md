@@ -164,7 +164,7 @@ const button = ui.button(.{
     .leading_icon = .recent,
     .style = .{ .width = .{ .percent = 1 }, .min_height = 32 },
 }, &.{
-    ui.text(.{ .id = ids.resume_label, .value = "워크트리에서 재개", .align = .center }),
+    ui.text(.{ .id = ids.resume_label, .value = "터미널에서 이어하기", .align = .center }),
 });
 ```
 

@@ -39,6 +39,8 @@ const observation_wire = @import("observation_wire.zig");
 const resize_wire = @import("resize_wire.zig");
 const upgrade_wire = @import("upgrade_wire.zig");
 const generation_batch_registry = @import("generation_batch_registry.zig");
+const ended_purge_transaction = @import("ended_purge_transaction.zig");
+const ended_purge_quarantine = @import("ended_purge_quarantine.zig");
 const max_pending_event_count: usize = 4 * 256;
 comptime {
     if (max_pending_event_count > std.math.maxInt(u32))
@@ -951,7 +953,7 @@ const ExternalPartialDescriptor = struct {
 };
 
 pub const max_ended_purge_scratch_bytes: usize = 512 * 1024;
-pub const ended_purge_scratch_bytes_v1: usize = 462_256;
+pub const ended_purge_scratch_bytes_v1: usize = 462_344;
 const max_external_owner_range_count: usize = 4 + 1 +
     protocol.max_client_screen_items + protocol.max_client_screen_items + max_pending_event_count +
     client_external_mode.max_tx_frames + 3;
@@ -961,6 +963,15 @@ comptime {
 }
 
 pub const EndedPurgeScratch = struct {
+    const PendingOutboundDescriptor = struct {
+        frame_address: usize = 0,
+        frame_len: usize = 0,
+        stream_id: u64 = 0,
+        offset: usize = 0,
+    };
+
+    const Lifecycle = enum(u8) { empty, inventory_prepared, commit_frozen, consumed };
+
     batches: [protocol.max_client_screen_items]ExternalBatchDescriptor = undefined,
     stream: [protocol.max_client_screen_items]ExternalFrameDescriptor = undefined,
     events: [max_pending_event_count]ExternalFrameDescriptor = undefined,
@@ -974,6 +985,10 @@ pub const EndedPurgeScratch = struct {
     stream_backing: ExternalArrayDescriptor = .{ .address = 0, .len = 0, .capacity = 0 },
     event_backing: ExternalArrayDescriptor = .{ .address = 0, .len = 0, .capacity = 0 },
     range_order: [max_external_owner_range_count]u16 = undefined,
+    build_id: ExternalArrayDescriptor = .{ .address = 0, .len = 0, .capacity = 0 },
+    client_lifecycle: ExternalArrayDescriptor = .{ .address = 0, .len = 0, .capacity = 0 },
+    lifecycle: Lifecycle = .empty,
+    pending_outbound: ?PendingOutboundDescriptor = null,
 };
 comptime {
     if (@sizeOf(EndedPurgeScratch) != ended_purge_scratch_bytes_v1 or
@@ -1021,6 +1036,44 @@ pub const PreparedEndedPurgeInventory = struct {
     }
 };
 
+/// Ended-purge cleanup의 final-address transaction owner다. Pointer와 allocator 권위는
+/// `EndedPurgeScratch`에 남기고 이 값에는 재검증 가능한 scalar plan/cursor만 보존한다.
+pub const PreparedEndedPurgeCommit = struct {
+    const Lifecycle = enum { pristine, prepared, finalization_pending, consumed };
+
+    self_addr: usize = 0,
+    client_addr: usize = 0,
+    scratch_addr: usize = 0,
+    inventory_addr: usize = 0,
+    target_stream: u64 = 0,
+    captured_fd: c.fd_t = -1,
+    complete_owned_extent_bytes: usize = 0,
+    complete_owner_seal: owner_seal.Digest = [_]u8{0} ** 32,
+    pre_callback_survivor_seal: owner_seal.Digest = [_]u8{0} ** 32,
+    batch_plan: ended_purge_transaction.QueuePlan = .pristine,
+    stream_plan: ended_purge_transaction.QueuePlan = .pristine,
+    event_plan: ended_purge_transaction.QueuePlan = .pristine,
+    partial_plan: ended_purge_transaction.QueuePlan = .pristine,
+    batch_cleanup_ordinal: usize = 0,
+    stream_cleanup_ordinal: usize = 0,
+    event_cleanup_ordinal: usize = 0,
+    partial_cleanup_ordinal: usize = 0,
+    lifecycle: Lifecycle = .pristine,
+};
+
+pub const EndedPurgeCommitError = error{
+    InvalidOwner,
+    InvalidState,
+    Corrupt,
+    ArithmeticOverflow,
+    DestinationOccupied,
+};
+
+pub const EndedPurgeClientCommitOutcome = enum {
+    clean,
+    drift_pending_finalize,
+};
+
 pub const EndedPurgePrepareError = error{
     InvalidSource,
     InvalidHint,
@@ -1029,7 +1082,7 @@ pub const EndedPurgePrepareError = error{
     ArithmeticOverflow,
 };
 
-const ClientOwnership = enum { standalone, external_pump, moved };
+const ClientOwnership = enum { standalone, external_pump, moved, quarantined_no_free };
 
 const ExternalAdoptionSnapshot = struct {
     allocator: std.mem.Allocator,
@@ -2154,6 +2207,7 @@ fn externalOwnerRangeCount(self: *const Client) ExternalAdoptionInspectError!usi
     };
     inline for (.{
         @as(usize, @intFromBool(self.build_id != null)),
+        @as(usize, @intFromBool(self.pending_outbound != null)),
         @as(usize, @intFromBool(self.partial_batch != null)),
         self.pending_batches.items.len,
         self.pending_stream.items.len,
@@ -2202,6 +2256,10 @@ fn fillExternalOuterOwnerRanges(
         try externalRangeForList(self.pending_batches, StreamBatch),
         try externalRangeForList(self.pending_stream, framing.Frame),
         try externalRangeForList(self.pending_events, BufferedEvent),
+        if (self.pending_outbound) |pending|
+            try externalRangeForSlice(pending.frame, pending.frame.len)
+        else
+            null,
         switch (self.io_mode) {
             .blocking => null,
             .external => |state| try externalRangeForList(
@@ -4020,15 +4078,15 @@ fn endedPurgeRangeLessThan(
 }
 
 fn appendEndedPurgeRangeId(
-    scratch: *EndedPurgeScratch,
+    range_order: []u16,
     used: *usize,
     id: usize,
     range: ?ExternalRange,
 ) EndedPurgePrepareError!void {
     if (range == null) return;
-    if (used.* >= scratch.range_order.len or id > std.math.maxInt(u16))
+    if (used.* >= range_order.len or id > std.math.maxInt(u16))
         return error.InvalidSource;
-    scratch.range_order[used.*] = @intCast(id);
+    range_order[used.*] = @intCast(id);
     used.* += 1;
 }
 
@@ -4059,17 +4117,21 @@ fn endedPurgeRangeOutsideProtected(
     self: *const Client,
     scratch: *const EndedPurgeScratch,
     out: *const PreparedEndedPurgeInventory,
+    additional_protected: ?ExternalRange,
 ) EndedPurgePrepareError!void {
     const present = range orelse return;
     inline for (.{ self, scratch, out }) |owner|
         if (externalRangesOverlap(present, externalRangeOfValue(owner)))
             return error.InvalidAlias;
+    if (additional_protected) |protected|
+        if (externalRangesOverlap(present, protected)) return error.InvalidAlias;
 }
 
 fn validateEndedPurgeOuterRanges(
     self: *const Client,
     scratch: *const EndedPurgeScratch,
     out: *const PreparedEndedPurgeInventory,
+    additional_protected: ?ExternalRange,
 ) EndedPurgePrepareError!void {
     var ranges: [max_external_outer_owner_range_count]ExternalRange = undefined;
     const used = fillExternalOuterOwnerRanges(self, &ranges) catch |err| return switch (err) {
@@ -4077,7 +4139,7 @@ fn validateEndedPurgeOuterRanges(
         else => error.InvalidSource,
     };
     for (ranges[0..used], 0..) |range, index| {
-        try endedPurgeRangeOutsideProtected(range, self, scratch, out);
+        try endedPurgeRangeOutsideProtected(range, self, scratch, out, additional_protected);
         for (ranges[0..index]) |prior|
             if (externalRangesOverlap(range, prior)) return error.InvalidAlias;
     }
@@ -4093,6 +4155,8 @@ fn validateEndedPurgeOwnerRanges(
     self: *const Client,
     scratch: *EndedPurgeScratch,
     out: *const PreparedEndedPurgeInventory,
+    additional_protected: ?ExternalRange,
+    range_order: []u16,
 ) EndedPurgePrepareError!EndedPurgeOwnerRangeProofStats {
     var outer: [max_external_outer_owner_range_count]ExternalRange = undefined;
     const outer_count = fillExternalOuterOwnerRanges(self, &outer) catch |err| return switch (err) {
@@ -4105,15 +4169,15 @@ fn validateEndedPurgeOwnerRanges(
     };
     const count = std.math.add(usize, outer_count, nested_count) catch
         return error.ArithmeticOverflow;
-    if (count > scratch.range_order.len) return error.InvalidSource;
+    if (count > range_order.len) return error.InvalidSource;
     var used: usize = 0;
     for (0..count) |id| {
         const range = ended_purge_owner_range_ssot(self, id) catch |err| return switch (err) {
             error.ArithmeticOverflow => error.ArithmeticOverflow,
             else => error.InvalidSource,
         };
-        try endedPurgeRangeOutsideProtected(range, self, scratch, out);
-        try appendEndedPurgeRangeId(scratch, &used, id, range);
+        try endedPurgeRangeOutsideProtected(range, self, scratch, out, additional_protected);
+        try appendEndedPurgeRangeId(range_order, &used, id, range);
     }
 
     var comparisons: usize = 0;
@@ -4123,12 +4187,12 @@ fn validateEndedPurgeOwnerRanges(
         .comparisons = &comparisons,
         .owner_lookups = &owner_lookups,
     };
-    std.mem.sort(u16, scratch.range_order[0..used], context, endedPurgeRangeLessThan);
-    for (scratch.range_order[0..used], 0..) |id, index| {
+    std.mem.sort(u16, range_order[0..used], context, endedPurgeRangeLessThan);
+    for (range_order[0..used], 0..) |id, index| {
         const range = endedPurgeRangeForId(context, id);
-        try endedPurgeRangeOutsideProtected(range, self, scratch, out);
+        try endedPurgeRangeOutsideProtected(range, self, scratch, out, additional_protected);
         if (index != 0 and externalRangesOverlap(
-            endedPurgeRangeForId(context, scratch.range_order[index - 1]),
+            endedPurgeRangeForId(context, range_order[index - 1]),
             range,
         )) return error.InvalidAlias;
     }
@@ -4613,7 +4677,8 @@ pub fn commitExternalAdoptionTakeFrozenCleanupUnchecked(
 /// substrate는 direct Client API가 다른 thread에서 callback cleanup과 겹치는 것만 막는다.
 pub const ClientOperationFence = struct {
     const shared_count_mask: u64 = (@as(u64, 1) << 31) - 1;
-    const reserved_mask: u64 = ((@as(u64, 1) << 61) - 1) & ~shared_count_mask;
+    const reserved_mask: u64 = ((@as(u64, 1) << 60) - 1) & ~shared_count_mask;
+    const publication_bit: u64 = @as(u64, 1) << 60;
     const terminal_bit: u64 = @as(u64, 1) << 61;
     const intrusion_bit: u64 = @as(u64, 1) << 62;
     const exclusive_bit: u64 = @as(u64, 1) << 63;
@@ -4657,8 +4722,9 @@ pub const ClientOperationFence = struct {
         while (true) {
             if (observed & reserved_mask != 0 or observed & terminal_bit != 0)
                 return error.InvalidState;
+            if (observed & publication_bit != 0) return error.AdminBusy;
             if (observed & exclusive_bit != 0) {
-                _ = self.state.fetchOr(intrusion_bit, .acq_rel);
+                self.recordIntrusionIfExactExclusive(observed);
                 return error.AdminBusy;
             }
             const count = observed & shared_count_mask;
@@ -4696,11 +4762,36 @@ pub const ClientOperationFence = struct {
     ) error{ InvalidOwner, InvalidState, AdminBusy }!void {
         if (!self.identityMatches(client_addr, fence_generation)) return error.InvalidOwner;
         if (self.state.cmpxchgStrong(0, exclusive_bit, .acq_rel, .acquire)) |observed| {
-            if (observed & (reserved_mask | terminal_bit) != 0) return error.InvalidState;
+            if (observed & (reserved_mask | publication_bit | terminal_bit) != 0)
+                return error.InvalidState;
             if (observed & exclusive_bit != 0)
-                _ = self.state.fetchOr(intrusion_bit, .acq_rel);
+                self.recordIntrusionIfExactExclusive(observed);
             return error.AdminBusy;
         }
+    }
+
+    fn recordIntrusionIfExactExclusive(self: *ClientOperationFence, observed: u64) void {
+        if (observed != exclusive_bit) return;
+        _ = self.state.cmpxchgStrong(
+            exclusive_bit,
+            exclusive_bit | intrusion_bit,
+            .acq_rel,
+            .acquire,
+        );
+    }
+
+    fn sealExclusiveForPublication(
+        self: *ClientOperationFence,
+        client_addr: usize,
+        fence_generation: u64,
+    ) bool {
+        if (!self.identityMatches(client_addr, fence_generation)) return false;
+        return self.state.cmpxchgStrong(
+            exclusive_bit,
+            exclusive_bit | publication_bit,
+            .acq_rel,
+            .acquire,
+        ) == null;
     }
 
     fn intruded(
@@ -4721,7 +4812,7 @@ pub const ClientOperationFence = struct {
         if (!self.identityMatches(client_addr, fence_generation)) return false;
         var observed = self.state.load(.acquire);
         while (true) {
-            if (observed & exclusive_bit == 0 or observed & terminal_bit != 0 or
+            if (observed & exclusive_bit == 0 or observed & (publication_bit | terminal_bit) != 0 or
                 observed & shared_count_mask != 0 or observed & reserved_mask != 0)
                 return false;
             if (self.state.cmpxchgWeak(observed, 0, .acq_rel, .acquire)) |actual| {
@@ -4738,7 +4829,15 @@ pub const ClientOperationFence = struct {
         fence_generation: u64,
     ) bool {
         if (!self.identityMatches(client_addr, fence_generation)) return false;
-        return self.state.cmpxchgStrong(exclusive_bit, 0, .acq_rel, .acquire) == null;
+        var observed = self.state.load(.acquire);
+        while (observed == exclusive_bit or observed == exclusive_bit | publication_bit) {
+            if (self.state.cmpxchgWeak(observed, 0, .acq_rel, .acquire)) |actual| {
+                observed = actual;
+                continue;
+            }
+            return true;
+        }
+        return false;
     }
 
     fn commitExclusiveTerminal(
@@ -4922,6 +5021,32 @@ test "CR3a B3b-F exclusive fence rejects a foreign thread Client mutation" {
     try std.testing.expect(client.endedPurgeFenceIntruded());
     try std.testing.expect(client.commitEndedPurgeExclusiveTerminal());
     client.parser.deinit();
+}
+
+test "CR3a B3b-S publication seal atomically excludes a late intrusion" {
+    var client: Client = .{
+        .allocator = std.testing.allocator,
+        .fd = -1,
+        .host_id = 67,
+        .parser = framing.FrameParser.init(std.testing.allocator),
+    };
+    defer client.parser.deinit();
+    var fence: ClientOperationFence = undefined;
+    const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
+    fence.initInPlace(@intFromPtr(&client), pid, 68, 69, 70);
+    try std.testing.expect(client.bindOperationFence(&fence, 70));
+    try client.tryAcquireEndedPurgeExclusive();
+    const stale_public_observation = ClientOperationFence.exclusive_bit;
+    try std.testing.expect(fence.sealExclusiveForPublication(@intFromPtr(&client), 70));
+    fence.recordIntrusionIfExactExclusive(stale_public_observation);
+
+    try std.testing.expectError(error.AdminBusy, client.requireBufferedGenerationBatch(1));
+    try std.testing.expect(!client.endedPurgeFenceIntruded());
+    try std.testing.expectEqual(
+        ClientOperationFence.exclusive_bit | ClientOperationFence.publication_bit,
+        fence.state.load(.acquire),
+    );
+    try std.testing.expect(client.releaseEndedPurgeExclusiveClean());
 }
 
 test "CR3a B3b-S mutable terminal observations fail closed behind exclusive fence" {
@@ -8242,7 +8367,8 @@ pub const Client = struct {
         const operation_fence_held = self.beginPublicMutation() catch
             return error.InvalidSource;
         defer if (operation_fence_held) self.endPublicMutation();
-        if (out.lifecycle != .empty or out.self_addr != 0 or target_stream == 0)
+        if (out.lifecycle != .empty or out.self_addr != 0 or
+            scratch.lifecycle != .empty or target_stream == 0)
             return error.DestinationOccupied;
         const client_start = @intFromPtr(self);
         const scratch_start = @intFromPtr(scratch);
@@ -8266,7 +8392,7 @@ pub const Client = struct {
             externalArrayDescriptor(self.pending_stream),
             externalArrayDescriptor(self.pending_events),
         };
-        try validateEndedPurgeOuterRanges(self, scratch, out);
+        try validateEndedPurgeOuterRanges(self, scratch, out, null);
         scratch.parser_backing = outer_descriptors[0];
         scratch.batch_backing = outer_descriptors[1];
         scratch.stream_backing = outer_descriptors[2];
@@ -8274,7 +8400,13 @@ pub const Client = struct {
 
         // Once every outer backing is proven, enumerate the complete Client owner SSOT before
         // queue semantics, hint traversal, or payload hashing can give a forged alias precedence.
-        _ = try validateEndedPurgeOwnerRanges(self, scratch, out);
+        _ = try validateEndedPurgeOwnerRanges(
+            self,
+            scratch,
+            out,
+            null,
+            &scratch.range_order,
+        );
 
         const event_index: usize = hint.event_index;
         if (event_index >= self.pending_events.items.len) return error.InvalidHint;
@@ -8321,6 +8453,7 @@ pub const Client = struct {
                 self,
                 scratch,
                 out,
+                null,
             );
             scratch.batches[index] = descriptor;
             batch_bytes = std.math.add(usize, batch_bytes, batch.bytes.len) catch
@@ -8348,6 +8481,7 @@ pub const Client = struct {
                 self,
                 scratch,
                 out,
+                null,
             );
             scratch.stream[index] = descriptor;
             stream_bytes = std.math.add(usize, stream_bytes, frame.payload.len) catch
@@ -8382,6 +8516,7 @@ pub const Client = struct {
                 self,
                 scratch,
                 out,
+                null,
             );
             scratch.events[index] = descriptor;
             event_bytes = std.math.add(usize, event_bytes, event.payload.len) catch
@@ -8427,6 +8562,7 @@ pub const Client = struct {
                 self,
                 scratch,
                 out,
+                null,
             );
             scratch.partial = descriptor;
             if (partial.stream_id == target_stream) {
@@ -8456,6 +8592,24 @@ pub const Client = struct {
         if (self.partial_batch) |partial|
             writeEndedPurgePartialSeal(&partial_writer, scratch.partial.?, partial.bytes.items);
 
+        const build_id = self.build_id orelse &.{};
+        scratch.build_id = .{
+            .address = externalOwnedSliceAddress(u8, build_id),
+            .len = build_id.len,
+            .capacity = build_id.len,
+        };
+        scratch.client_lifecycle = .{
+            .address = externalOwnedSliceAddress(u8, self.lifecycle),
+            .len = self.lifecycle.len,
+            .capacity = self.lifecycle.len,
+        };
+        scratch.pending_outbound = if (self.pending_outbound) |pending| .{
+            .frame_address = externalOwnedSliceAddress(u8, pending.frame),
+            .frame_len = pending.frame.len,
+            .stream_id = pending.stream_id,
+            .offset = pending.offset,
+        } else null;
+        scratch.lifecycle = .inventory_prepared;
         out.* = .{
             .self_addr = out_start,
             .client_addr = client_start,
@@ -8481,6 +8635,444 @@ pub const Client = struct {
             .target_map_seal = endedPurgeTargetMapSeal(scratch),
             .lifecycle = .prepared,
         };
+    }
+
+    fn endedPurgeCompleteOwnerSeal(
+        self: *const Client,
+        operation_generation: u64,
+        scratch: *const EndedPurgeScratch,
+        inventory: *const PreparedEndedPurgeInventory,
+        prepared: *PreparedEndedPurgeCommit,
+    ) EndedPurgeCommitError!void {
+        if (operation_generation == 0 or prepared.self_addr != 0 or
+            prepared.client_addr != 0 or prepared.scratch_addr != 0 or
+            prepared.inventory_addr != 0 or prepared.target_stream != 0 or
+            prepared.captured_fd != -1 or prepared.complete_owned_extent_bytes != 0 or
+            prepared.lifecycle != .pristine)
+            return error.InvalidState;
+
+        var stat: c.Stat = undefined;
+        if (self.fd < 0 or c.fstat(self.fd, &stat) != 0 or !posix.S.ISSOCK(stat.mode))
+            return error.Corrupt;
+        var socket_type: c_int = 0;
+        var socket_type_len: c.socklen_t = @sizeOf(c_int);
+        if (c.getsockopt(
+            self.fd,
+            c.SOL.SOCKET,
+            c.SO.TYPE,
+            &socket_type,
+            &socket_type_len,
+        ) != 0 or socket_type_len != @sizeOf(c_int) or
+            socket_type != posix.SOCK.STREAM)
+            return error.Corrupt;
+
+        var total = inventory.demux_owned_extent_bytes;
+        inline for (.{
+            self.parser.buf.capacity,
+            scratch.build_id.len,
+            scratch.client_lifecycle.len,
+            if (scratch.pending_outbound) |pending| pending.frame_len else 0,
+        }) |owned_bytes| total = std.math.add(usize, total, owned_bytes) catch
+            return error.ArithmeticOverflow;
+        if (total > ended_purge_quarantine.max_ended_purge_quarantine_bytes)
+            return error.Corrupt;
+
+        var complete = owner_seal.Writer.init("maru.ended-purge.complete-owner.v1");
+        complete.writeUsize(@intFromPtr(self));
+        complete.writeU64(operation_generation);
+        complete.writeUsize(@intFromPtr(self.allocator.ptr));
+        complete.writeUsize(@intFromPtr(self.allocator.vtable));
+        complete.writeU64(@intCast(self.fd));
+        // Darwin dev_t is signed. Seal its sign-extended kernel bit pattern instead
+        // of requiring the device identifier to be numerically non-negative.
+        complete.writeU64(@bitCast(@as(i64, stat.dev)));
+        complete.writeU64(@intCast(stat.ino));
+        complete.writeU64(@intCast(stat.mode & posix.S.IFMT));
+        complete.writeU64(@intCast(socket_type));
+        complete.writeUsize(total);
+        complete.writeU16(self.wire_major);
+        complete.writeU16(self.parser.expected_major);
+        complete.writeUsize(self.parser.head);
+        inline for (.{
+            scratch.parser_backing,
+            scratch.batch_backing,
+            scratch.stream_backing,
+            scratch.event_backing,
+            scratch.build_id,
+            scratch.client_lifecycle,
+        }) |descriptor| {
+            complete.writeUsize(descriptor.address);
+            complete.writeUsize(descriptor.len);
+            complete.writeUsize(descriptor.capacity);
+        }
+        complete.writeBytes(self.build_id orelse &.{});
+        complete.writeBytes(self.lifecycle);
+        if (scratch.pending_outbound) |pending| {
+            complete.writeBool(true);
+            complete.writeUsize(pending.frame_address);
+            complete.writeUsize(pending.frame_len);
+            complete.writeU64(pending.stream_id);
+            complete.writeUsize(pending.offset);
+            complete.writeBytes(self.pending_outbound.?.frame);
+        } else complete.writeBool(false);
+        inline for (.{
+            inventory.batch_seal,
+            inventory.stream_seal,
+            inventory.event_seal,
+            inventory.partial_seal,
+            inventory.target_map_seal,
+        }) |digest| complete.writeBytes(&digest);
+
+        var survivors = owner_seal.Writer.init("maru.ended-purge.pre-callback-survivor.v1");
+        survivors.writeU64(operation_generation);
+        survivors.writeBytes(self.build_id orelse &.{});
+        survivors.writeBytes(self.lifecycle);
+        survivors.writeUsize(scratch.parser_backing.address);
+        survivors.writeUsize(scratch.parser_backing.len);
+        survivors.writeUsize(scratch.parser_backing.capacity);
+        survivors.writeBytes(self.parser.buf.items);
+        if (self.pending_outbound) |pending| {
+            survivors.writeBool(true);
+            survivors.writeU64(pending.stream_id);
+            survivors.writeUsize(pending.offset);
+            survivors.writeBytes(pending.frame);
+        } else survivors.writeBool(false);
+        for (self.pending_batches.items, 0..) |batch, index|
+            if (!scratch.batch_targets.isSet(index))
+                writeEndedPurgeBatchSeal(&survivors, scratch.batches[index], batch.bytes);
+        for (self.pending_stream.items, 0..) |frame, index|
+            if (!scratch.stream_targets.isSet(index))
+                writeEndedPurgeFrameSeal(&survivors, scratch.stream[index], frame.payload);
+        for (self.pending_events.items, 0..) |event, index|
+            if (!scratch.event_targets.isSet(index))
+                writeEndedPurgeFrameSeal(&survivors, scratch.events[index], event.payload);
+        if (!scratch.partial_target) if (self.partial_batch) |partial|
+            writeEndedPurgePartialSeal(&survivors, scratch.partial.?, partial.bytes.items);
+
+        prepared.captured_fd = self.fd;
+        prepared.complete_owned_extent_bytes = total;
+        prepared.complete_owner_seal = complete.finish();
+        prepared.pre_callback_survivor_seal = survivors.finish();
+    }
+
+    pub fn prepareEndedPurgeCommit(
+        self: *Client,
+        target_stream: u64,
+        operation_generation: u64,
+        scratch: *EndedPurgeScratch,
+        inventory: *const PreparedEndedPurgeInventory,
+        out: *PreparedEndedPurgeCommit,
+    ) EndedPurgeCommitError!void {
+        const actual_pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
+        if (actual_pid == 0) return error.InvalidOwner;
+        // This TLS gate must precede every Client graph read. A hostile allocator callback may
+        // have drifted pointer-bearing descriptors before attempting a nested prepare.
+        if (generationAllocatorCallbackActive()) return error.InvalidState;
+        const fence = self.operation_fence orelse return error.InvalidOwner;
+        if (fence.owner_process_id != actual_pid) return error.InvalidOwner;
+        if (!fence.identityMatches(@intFromPtr(self), self.operation_fence_generation))
+            return error.InvalidOwner;
+        if (fence.intruded(@intFromPtr(self), self.operation_fence_generation))
+            return error.InvalidState;
+        if (self.ownership != .standalone or self.unusable or
+            self.first_poison_reason != null or
+            operation_generation == 0 or target_stream == 0 or
+            self.io_mode != .blocking)
+            return error.InvalidState;
+
+        const client_range = externalRangeOfValue(self);
+        const scratch_range = externalRangeOfValue(scratch);
+        const inventory_range = externalRangeOfValue(inventory);
+        const out_range = externalRangeOfValue(out);
+        const object_ranges = [_]ExternalRange{
+            client_range,
+            scratch_range,
+            inventory_range,
+            out_range,
+        };
+        for (object_ranges, 0..) |range, index|
+            for (object_ranges[0..index]) |prior|
+                if (externalRangesOverlap(range, prior)) return error.InvalidOwner;
+        validateEndedPurgeOuterRanges(self, scratch, inventory, out_range) catch |err|
+            return switch (err) {
+                error.ArithmeticOverflow => error.ArithmeticOverflow,
+                else => error.Corrupt,
+            };
+        var range_order: [max_external_owner_range_count]u16 = undefined;
+        _ = validateEndedPurgeOwnerRanges(
+            self,
+            scratch,
+            inventory,
+            out_range,
+            &range_order,
+        ) catch |err| return switch (err) {
+            error.ArithmeticOverflow => error.ArithmeticOverflow,
+            else => error.Corrupt,
+        };
+        if (!std.meta.eql(out.*, PreparedEndedPurgeCommit{}))
+            return error.DestinationOccupied;
+        if (!inventory.validPreparedAtFinalAddress() or
+            inventory.client_addr != @intFromPtr(self) or
+            inventory.scratch_addr != @intFromPtr(scratch) or
+            inventory.target_stream != target_stream or
+            scratch.lifecycle != .inventory_prepared)
+            return error.InvalidOwner;
+        if (!self.prepareDeinitGraph(true)) return error.InvalidState;
+
+        validateExternalAdoptionStructure(self) catch return error.Corrupt;
+        if (!std.meta.eql(self.parser.allocator, self.allocator) or
+            self.parser.head > self.parser.buf.items.len)
+            return error.Corrupt;
+        const current_parser = externalArrayDescriptor(self.parser.buf);
+        const current_batches = externalArrayDescriptor(self.pending_batches);
+        const current_stream = externalArrayDescriptor(self.pending_stream);
+        const current_events = externalArrayDescriptor(self.pending_events);
+        const build_id = self.build_id orelse &.{};
+        const current_build_id = ExternalArrayDescriptor{
+            .address = externalOwnedSliceAddress(u8, build_id),
+            .len = build_id.len,
+            .capacity = build_id.len,
+        };
+        const current_lifecycle = ExternalArrayDescriptor{
+            .address = externalOwnedSliceAddress(u8, self.lifecycle),
+            .len = self.lifecycle.len,
+            .capacity = self.lifecycle.len,
+        };
+        const current_pending: ?EndedPurgeScratch.PendingOutboundDescriptor =
+            if (self.pending_outbound) |pending| .{
+                .frame_address = externalOwnedSliceAddress(u8, pending.frame),
+                .frame_len = pending.frame.len,
+                .stream_id = pending.stream_id,
+                .offset = pending.offset,
+            } else null;
+        const current_partial: ?ExternalPartialDescriptor = if (self.partial_batch) |partial| .{
+            .stream_id = partial.stream_id,
+            .is_snapshot = partial.is_snapshot,
+            .bytes = externalArrayDescriptor(partial.bytes),
+            .chunk_count = partial.chunk_count,
+        } else null;
+        if (!std.meta.eql(scratch.parser_backing, current_parser) or
+            !std.meta.eql(scratch.batch_backing, current_batches) or
+            !std.meta.eql(scratch.stream_backing, current_stream) or
+            !std.meta.eql(scratch.event_backing, current_events) or
+            !std.meta.eql(scratch.build_id, current_build_id) or
+            !std.meta.eql(scratch.client_lifecycle, current_lifecycle) or
+            !std.meta.eql(scratch.pending_outbound, current_pending) or
+            !std.meta.eql(scratch.partial, current_partial) or
+            !std.meta.eql(inventory.batches, current_batches) or
+            !std.meta.eql(inventory.stream, current_stream) or
+            !std.meta.eql(inventory.events, current_events) or
+            !std.meta.eql(inventory.partial, current_partial))
+            return error.Corrupt;
+        if (current_pending) |pending| {
+            if (pending.offset > pending.frame_len or pending.stream_id == 0)
+                return error.Corrupt;
+            _ = checkedExternalRange(pending.frame_address, pending.frame_len) catch |err|
+                return switch (err) {
+                    error.ArithmeticOverflow => error.ArithmeticOverflow,
+                    else => error.Corrupt,
+                };
+        }
+
+        var current_demux_extent: usize = 0;
+        inline for (.{
+            .{ self.pending_batches.capacity, @sizeOf(StreamBatch) },
+            .{ self.pending_stream.capacity, @sizeOf(framing.Frame) },
+            .{ self.pending_events.capacity, @sizeOf(BufferedEvent) },
+        }) |entry| {
+            const backing_bytes = std.math.mul(usize, entry[0], entry[1]) catch
+                return error.ArithmeticOverflow;
+            current_demux_extent = std.math.add(
+                usize,
+                current_demux_extent,
+                backing_bytes,
+            ) catch return error.ArithmeticOverflow;
+        }
+        inline for (.{
+            self.pending_batch_bytes,
+            self.pending_stream_bytes,
+            self.pending_event_bytes,
+            if (self.partial_batch) |partial| partial.bytes.capacity else 0,
+        }) |owned_bytes| current_demux_extent = std.math.add(
+            usize,
+            current_demux_extent,
+            owned_bytes,
+        ) catch return error.ArithmeticOverflow;
+        if (current_demux_extent != inventory.demux_owned_extent_bytes)
+            return error.Corrupt;
+
+        var candidate: PreparedEndedPurgeCommit = .{};
+        try self.endedPurgeCompleteOwnerSeal(
+            operation_generation,
+            scratch,
+            inventory,
+            &candidate,
+        );
+
+        var batch_writer = owner_seal.Writer.init("maru.ended-purge.batch.v1");
+        var stream_writer = owner_seal.Writer.init("maru.ended-purge.stream.v1");
+        var event_writer = owner_seal.Writer.init("maru.ended-purge.event.v1");
+        var partial_writer = owner_seal.Writer.init("maru.ended-purge.partial.v1");
+        var batch_bytes: usize = 0;
+        var stream_bytes: usize = 0;
+        var event_bytes: usize = 0;
+        var target_batch_bytes: usize = 0;
+        var target_stream_bytes: usize = 0;
+        var target_event_bytes: usize = 0;
+        for (self.pending_batches.items, 0..) |batch, index| {
+            if (!std.meta.eql(batch.allocator, self.allocator)) return error.Corrupt;
+            writeEndedPurgeBatchSeal(&batch_writer, scratch.batches[index], batch.bytes);
+            batch_bytes = std.math.add(usize, batch_bytes, batch.bytes.len) catch
+                return error.ArithmeticOverflow;
+            if (scratch.batch_targets.isSet(index))
+                target_batch_bytes = std.math.add(
+                    usize,
+                    target_batch_bytes,
+                    batch.bytes.len,
+                ) catch return error.ArithmeticOverflow;
+        }
+        for (self.pending_stream.items, 0..) |frame, index| {
+            writeEndedPurgeFrameSeal(&stream_writer, scratch.stream[index], frame.payload);
+            stream_bytes = std.math.add(usize, stream_bytes, frame.payload.len) catch
+                return error.ArithmeticOverflow;
+            if (scratch.stream_targets.isSet(index))
+                target_stream_bytes = std.math.add(
+                    usize,
+                    target_stream_bytes,
+                    frame.payload.len,
+                ) catch return error.ArithmeticOverflow;
+        }
+        for (self.pending_events.items, 0..) |event, index| {
+            if (!event.sealMatches()) return error.Corrupt;
+            writeEndedPurgeFrameSeal(&event_writer, scratch.events[index], event.payload);
+            event_bytes = std.math.add(usize, event_bytes, event.payload.len) catch
+                return error.ArithmeticOverflow;
+            if (scratch.event_targets.isSet(index))
+                target_event_bytes = std.math.add(
+                    usize,
+                    target_event_bytes,
+                    event.payload.len,
+                ) catch return error.ArithmeticOverflow;
+        }
+        if (self.partial_batch) |partial|
+            writeEndedPurgePartialSeal(&partial_writer, scratch.partial.?, partial.bytes.items);
+        const current_batch_seal = batch_writer.finish();
+        const current_stream_seal = stream_writer.finish();
+        const current_event_seal = event_writer.finish();
+        const current_partial_seal = partial_writer.finish();
+        const current_target_map_seal = endedPurgeTargetMapSeal(scratch);
+        var current_target_payload_bytes = std.math.add(
+            usize,
+            target_batch_bytes,
+            target_stream_bytes,
+        ) catch return error.ArithmeticOverflow;
+        current_target_payload_bytes = std.math.add(
+            usize,
+            current_target_payload_bytes,
+            target_event_bytes,
+        ) catch return error.ArithmeticOverflow;
+        if (scratch.partial_target) current_target_payload_bytes = std.math.add(
+            usize,
+            current_target_payload_bytes,
+            if (self.partial_batch) |partial| partial.bytes.items.len else 0,
+        ) catch return error.ArithmeticOverflow;
+        if (batch_bytes != inventory.batch_payload_bytes or
+            stream_bytes != inventory.stream_payload_bytes or
+            event_bytes != inventory.event_payload_bytes or
+            batch_bytes != self.pending_batch_bytes or
+            stream_bytes != self.pending_stream_bytes or
+            event_bytes != self.pending_event_bytes or
+            current_target_payload_bytes != inventory.target_payload_bytes or
+            !std.mem.eql(u8, &inventory.batch_seal, &current_batch_seal) or
+            !std.mem.eql(u8, &inventory.stream_seal, &current_stream_seal) or
+            !std.mem.eql(u8, &inventory.event_seal, &current_event_seal) or
+            !std.mem.eql(u8, &inventory.partial_seal, &current_partial_seal) or
+            !std.mem.eql(u8, &inventory.target_map_seal, &current_target_map_seal))
+            return error.Corrupt;
+
+        ended_purge_transaction.buildQueuePlan(
+            protocol.max_client_screen_items,
+            &scratch.batch_targets,
+            .{
+                .source_count = self.pending_batches.items.len,
+                .claimed_target_count = inventory.target_batch_count,
+                .source_bytes = batch_bytes,
+                .target_bytes = target_batch_bytes,
+            },
+            &candidate.batch_plan,
+        ) catch |err| return switch (err) {
+            error.ArithmeticOverflow => error.ArithmeticOverflow,
+            error.DestinationOccupied => error.DestinationOccupied,
+            else => error.Corrupt,
+        };
+        ended_purge_transaction.buildQueuePlan(
+            protocol.max_client_screen_items,
+            &scratch.stream_targets,
+            .{
+                .source_count = self.pending_stream.items.len,
+                .claimed_target_count = inventory.target_stream_count,
+                .source_bytes = stream_bytes,
+                .target_bytes = target_stream_bytes,
+            },
+            &candidate.stream_plan,
+        ) catch |err| return switch (err) {
+            error.ArithmeticOverflow => error.ArithmeticOverflow,
+            error.DestinationOccupied => error.DestinationOccupied,
+            else => error.Corrupt,
+        };
+        ended_purge_transaction.buildQueuePlan(
+            max_pending_event_count,
+            &scratch.event_targets,
+            .{
+                .source_count = self.pending_events.items.len,
+                .claimed_target_count = inventory.target_event_count,
+                .source_bytes = event_bytes,
+                .target_bytes = target_event_bytes,
+            },
+            &candidate.event_plan,
+        ) catch |err| return switch (err) {
+            error.ArithmeticOverflow => error.ArithmeticOverflow,
+            error.DestinationOccupied => error.DestinationOccupied,
+            else => error.Corrupt,
+        };
+        var partial_targets = std.StaticBitSet(1).initEmpty();
+        if (scratch.partial_target) partial_targets.set(0);
+        const partial_count: usize = @intFromBool(self.partial_batch != null);
+        const partial_bytes = if (self.partial_batch) |partial| partial.bytes.items.len else 0;
+        ended_purge_transaction.buildQueuePlan(
+            1,
+            &partial_targets,
+            .{
+                .source_count = partial_count,
+                .claimed_target_count = @intFromBool(scratch.partial_target),
+                .source_bytes = partial_bytes,
+                .target_bytes = if (scratch.partial_target) partial_bytes else 0,
+            },
+            &candidate.partial_plan,
+        ) catch |err| return switch (err) {
+            error.ArithmeticOverflow => error.ArithmeticOverflow,
+            error.DestinationOccupied => error.DestinationOccupied,
+            else => error.Corrupt,
+        };
+
+        candidate.self_addr = @intFromPtr(out);
+        candidate.client_addr = @intFromPtr(self);
+        candidate.scratch_addr = @intFromPtr(scratch);
+        candidate.inventory_addr = @intFromPtr(inventory);
+        candidate.target_stream = target_stream;
+        candidate.lifecycle = .prepared;
+        // All expensive/fallible validation above ran under the exclusive fence. A competing
+        // public call records intrusion instead of entering; recheck immediately before the
+        // no-fail publication suffix so stale preparation authority is never minted.
+        if (fence.owner_process_id != actual_pid)
+            return error.InvalidOwner;
+        if (!fence.sealExclusiveForPublication(
+            @intFromPtr(self),
+            self.operation_fence_generation,
+        ))
+            return error.InvalidState;
+        scratch.lifecycle = .commit_frozen;
+        out.* = candidate;
     }
 
     /// Releases an event through the allocator that admitted it. Consumers must not assume their
@@ -12117,6 +12709,404 @@ test "CR3a-2c2b2 prepare rejects complete Client owner graph aliases before payl
     client.pending_batch_bytes = owned.len;
 }
 
+test "CR3a-2c2b3b prepare commit freezes a final-address blocking owner graph" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    defer _ = c.close(fds[1]);
+    var client = makeConnectedTestClient(allocator, fds[0]);
+    defer client.deinit();
+    client.build_id = try allocator.dupe(u8, "build");
+    client.lifecycle = try allocator.dupe(u8, "running");
+
+    const payload = "{\"event\":\"runtime.ended\"}";
+    try client.bufferEvent(.{
+        .header = .{ .kind = .event, .stream_id = 9, .payload_len = payload.len },
+        .payload = try allocator.dupe(u8, payload),
+    });
+    const hint = (try client.peekEndedEventForStream(9)).candidate;
+    var scratch: EndedPurgeScratch = .{};
+    var inventory: PreparedEndedPurgeInventory = .{};
+    try client.prepareEndedPurgeInventory(9, hint, &scratch, &inventory);
+
+    var fence: ClientOperationFence = undefined;
+    const pid: u32 = @intCast(c.getpid());
+    fence.initInPlace(@intFromPtr(&client), pid, 101, 103, 107);
+    try std.testing.expect(client.bindOperationFence(&fence, 107));
+    try client.tryAcquireEndedPurgeExclusive();
+    var prepared: PreparedEndedPurgeCommit = .{};
+
+    try client.prepareEndedPurgeCommit(9, 109, &scratch, &inventory, &prepared);
+    try std.testing.expectEqual(PreparedEndedPurgeCommit.Lifecycle.prepared, prepared.lifecycle);
+    try std.testing.expectEqual(@intFromPtr(&prepared), prepared.self_addr);
+    try std.testing.expectEqual(@intFromPtr(&client), prepared.client_addr);
+    try std.testing.expectEqual(@intFromPtr(&scratch), prepared.scratch_addr);
+    try std.testing.expectEqual(@intFromPtr(&inventory), prepared.inventory_addr);
+    try std.testing.expectEqual(@as(u64, 9), prepared.target_stream);
+    try std.testing.expectEqual(fds[0], prepared.captured_fd);
+    try std.testing.expect(
+        prepared.complete_owned_extent_bytes > inventory.demux_owned_extent_bytes,
+    );
+    try std.testing.expect(!std.mem.allEqual(u8, &prepared.complete_owner_seal, 0));
+    try std.testing.expect(!std.mem.allEqual(u8, &prepared.pre_callback_survivor_seal, 0));
+    try std.testing.expectEqual(EndedPurgeScratch.Lifecycle.commit_frozen, scratch.lifecycle);
+    try std.testing.expect(prepared.batch_plan == .planned);
+    try std.testing.expect(prepared.stream_plan == .planned);
+    try std.testing.expect(prepared.event_plan == .planned);
+    try std.testing.expect(prepared.partial_plan == .planned);
+    try std.testing.expect(!client.endedPurgeFenceIntruded());
+    try std.testing.expect(client.releaseEndedPurgeExclusiveClean());
+}
+
+test "CR3a-2c2b3b prepare commit requires exclusive and preserves destinations" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    defer _ = c.close(fds[1]);
+    var client = makeConnectedTestClient(allocator, fds[0]);
+    defer client.deinit();
+    const payload = "{\"event\":\"runtime.ended\"}";
+    try client.bufferEvent(.{
+        .header = .{ .kind = .event, .stream_id = 9, .payload_len = payload.len },
+        .payload = try allocator.dupe(u8, payload),
+    });
+    const hint = (try client.peekEndedEventForStream(9)).candidate;
+    var scratch: EndedPurgeScratch = .{};
+    var inventory: PreparedEndedPurgeInventory = .{};
+    try client.prepareEndedPurgeInventory(9, hint, &scratch, &inventory);
+    var fence: ClientOperationFence = undefined;
+    fence.initInPlace(@intFromPtr(&client), @intCast(c.getpid()), 113, 127, 131);
+    try std.testing.expect(client.bindOperationFence(&fence, 131));
+    var prepared: PreparedEndedPurgeCommit = .{};
+    const inventory_before = inventory;
+    const scratch_build_id_before = scratch.build_id;
+    const scratch_lifecycle_before = scratch.client_lifecycle;
+    const scratch_pending_outbound_before = scratch.pending_outbound;
+
+    try std.testing.expectError(
+        error.InvalidState,
+        client.prepareEndedPurgeCommit(9, 137, &scratch, &inventory, &prepared),
+    );
+    try std.testing.expectEqual(
+        EndedPurgeScratch.Lifecycle.inventory_prepared,
+        scratch.lifecycle,
+    );
+    try std.testing.expect(std.meta.eql(scratch_build_id_before, scratch.build_id));
+    try std.testing.expect(std.meta.eql(scratch_lifecycle_before, scratch.client_lifecycle));
+    try std.testing.expect(std.meta.eql(scratch_pending_outbound_before, scratch.pending_outbound));
+    try std.testing.expect(std.meta.eql(inventory_before, inventory));
+    try std.testing.expect(std.meta.eql(PreparedEndedPurgeCommit{}, prepared));
+}
+
+test "CR3a-2c2b3b prepare commit rejects a non-stream fd without publication" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.DGRAM, 0, &fds),
+    );
+    defer _ = c.close(fds[1]);
+    var client = makeConnectedTestClient(allocator, fds[0]);
+    defer client.deinit();
+    const payload = "{\"event\":\"runtime.ended\"}";
+    try client.bufferEvent(.{
+        .header = .{ .kind = .event, .stream_id = 9, .payload_len = payload.len },
+        .payload = try allocator.dupe(u8, payload),
+    });
+    const hint = (try client.peekEndedEventForStream(9)).candidate;
+    var scratch: EndedPurgeScratch = .{};
+    var inventory: PreparedEndedPurgeInventory = .{};
+    try client.prepareEndedPurgeInventory(9, hint, &scratch, &inventory);
+    var fence: ClientOperationFence = undefined;
+    fence.initInPlace(@intFromPtr(&client), @intCast(c.getpid()), 139, 149, 151);
+    try std.testing.expect(client.bindOperationFence(&fence, 151));
+    try client.tryAcquireEndedPurgeExclusive();
+    var prepared: PreparedEndedPurgeCommit = .{};
+
+    try std.testing.expectError(
+        error.Corrupt,
+        client.prepareEndedPurgeCommit(9, 157, &scratch, &inventory, &prepared),
+    );
+    try std.testing.expectEqual(EndedPurgeScratch.Lifecycle.inventory_prepared, scratch.lifecycle);
+    try std.testing.expect(std.meta.eql(PreparedEndedPurgeCommit{}, prepared));
+    try std.testing.expect(client.releaseEndedPurgeExclusiveClean());
+}
+
+test "CR3a-2c2b3b complete owner extent accepts exact cap and rejects cap plus one" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const Case = struct {
+        fn run(extra_bytes: usize, expect_success: bool) !void {
+            const allocator = std.testing.allocator;
+            var fds: [2]c.fd_t = undefined;
+            try std.testing.expectEqual(
+                @as(c_int, 0),
+                c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+            );
+            defer _ = c.close(fds[1]);
+            var client = makeConnectedTestClient(allocator, fds[0]);
+            defer client.deinit();
+            const payload = "{\"event\":\"runtime.ended\"}";
+            try client.bufferEvent(.{
+                .header = .{ .kind = .event, .stream_id = 9, .payload_len = payload.len },
+                .payload = try allocator.dupe(u8, payload),
+            });
+            const hint = (try client.peekEndedEventForStream(9)).candidate;
+
+            var sizing_scratch: EndedPurgeScratch = .{};
+            var sizing_inventory: PreparedEndedPurgeInventory = .{};
+            try client.prepareEndedPurgeInventory(9, hint, &sizing_scratch, &sizing_inventory);
+            var fixed_bytes = sizing_inventory.demux_owned_extent_bytes;
+            fixed_bytes = try std.math.add(usize, fixed_bytes, client.parser.buf.capacity);
+            fixed_bytes = try std.math.add(usize, fixed_bytes, client.lifecycle.len);
+            if (client.pending_outbound) |pending|
+                fixed_bytes = try std.math.add(usize, fixed_bytes, pending.frame.len);
+            try std.testing.expect(fixed_bytes < ended_purge_quarantine.max_ended_purge_quarantine_bytes);
+            const exact_build_bytes = ended_purge_quarantine.max_ended_purge_quarantine_bytes - fixed_bytes;
+            const build_bytes = try std.math.add(usize, exact_build_bytes, extra_bytes);
+            client.build_id = try allocator.alloc(u8, build_bytes);
+            @memset(client.build_id.?, 0x6b);
+
+            var scratch: EndedPurgeScratch = .{};
+            var inventory: PreparedEndedPurgeInventory = .{};
+            try client.prepareEndedPurgeInventory(9, hint, &scratch, &inventory);
+            var fence: ClientOperationFence = undefined;
+            fence.initInPlace(@intFromPtr(&client), @intCast(c.getpid()), 277, 281, 283);
+            try std.testing.expect(client.bindOperationFence(&fence, 283));
+            try client.tryAcquireEndedPurgeExclusive();
+            var prepared: PreparedEndedPurgeCommit = .{};
+            if (expect_success) {
+                try client.prepareEndedPurgeCommit(9, 293, &scratch, &inventory, &prepared);
+                try std.testing.expectEqual(
+                    ended_purge_quarantine.max_ended_purge_quarantine_bytes,
+                    prepared.complete_owned_extent_bytes,
+                );
+            } else {
+                try std.testing.expectError(
+                    error.Corrupt,
+                    client.prepareEndedPurgeCommit(9, 293, &scratch, &inventory, &prepared),
+                );
+                try std.testing.expectEqual(EndedPurgeScratch.Lifecycle.inventory_prepared, scratch.lifecycle);
+                try std.testing.expect(std.meta.eql(PreparedEndedPurgeCommit{}, prepared));
+            }
+            try std.testing.expect(client.releaseEndedPurgeExclusiveClean());
+        }
+    };
+    try Case.run(0, true);
+    try Case.run(1, false);
+}
+
+test "CR3a-2c2b3b prepare commit rejects occupied forged and aliased evidence" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    defer _ = c.close(fds[1]);
+    var client = makeConnectedTestClient(allocator, fds[0]);
+    defer client.deinit();
+    client.build_id = try allocator.alloc(u8, @sizeOf(PreparedEndedPurgeCommit));
+    @memset(client.build_id.?, 0x5a);
+    client.lifecycle = try allocator.dupe(u8, "running");
+    const outbound = try allocator.dupe(u8, "pending-frame");
+    client.pending_outbound = .{ .frame = outbound, .stream_id = 9, .offset = 1 };
+    const payload = "{\"event\":\"runtime.ended\"}";
+    try client.bufferEvent(.{
+        .header = .{ .kind = .event, .stream_id = 9, .payload_len = payload.len },
+        .payload = try allocator.dupe(u8, payload),
+    });
+    const hint = (try client.peekEndedEventForStream(9)).candidate;
+    var scratch: EndedPurgeScratch = .{};
+    var inventory: PreparedEndedPurgeInventory = .{};
+    try client.prepareEndedPurgeInventory(9, hint, &scratch, &inventory);
+    var fence: ClientOperationFence = undefined;
+    fence.initInPlace(@intFromPtr(&client), @intCast(c.getpid()), 163, 167, 173);
+    try std.testing.expect(client.bindOperationFence(&fence, 173));
+    try client.tryAcquireEndedPurgeExclusive();
+
+    var occupied: PreparedEndedPurgeCommit = .{ .lifecycle = .consumed };
+    const occupied_before = occupied;
+    try std.testing.expectError(
+        error.DestinationOccupied,
+        client.prepareEndedPurgeCommit(9, 179, &scratch, &inventory, &occupied),
+    );
+    try std.testing.expect(std.meta.eql(occupied_before, occupied));
+    try std.testing.expectEqual(EndedPurgeScratch.Lifecycle.inventory_prepared, scratch.lifecycle);
+
+    const original_lifecycle_descriptor = scratch.client_lifecycle;
+    scratch.client_lifecycle.address = 0x9000;
+    var pristine: PreparedEndedPurgeCommit = .{};
+    try std.testing.expectError(
+        error.Corrupt,
+        client.prepareEndedPurgeCommit(9, 181, &scratch, &inventory, &pristine),
+    );
+    try std.testing.expect(std.meta.eql(PreparedEndedPurgeCommit{}, pristine));
+    scratch.client_lifecycle = original_lifecycle_descriptor;
+
+    const original_offset = client.pending_outbound.?.offset;
+    client.pending_outbound.?.offset = client.pending_outbound.?.frame.len + 1;
+    try std.testing.expectError(
+        error.Corrupt,
+        client.prepareEndedPurgeCommit(9, 191, &scratch, &inventory, &pristine),
+    );
+    try std.testing.expect(std.meta.eql(PreparedEndedPurgeCommit{}, pristine));
+    client.pending_outbound.?.offset = original_offset;
+
+    const aliased_out: *PreparedEndedPurgeCommit = @ptrCast(@alignCast(client.build_id.?.ptr));
+    try std.testing.expectError(
+        error.Corrupt,
+        client.prepareEndedPurgeCommit(9, 193, &scratch, &inventory, aliased_out),
+    );
+    try std.testing.expectEqual(EndedPurgeScratch.Lifecycle.inventory_prepared, scratch.lifecycle);
+
+    try client.prepareEndedPurgeCommit(9, 197, &scratch, &inventory, &pristine);
+    try std.testing.expectEqual(PreparedEndedPurgeCommit.Lifecycle.prepared, pristine.lifecycle);
+    try std.testing.expectEqual(outbound.len, scratch.pending_outbound.?.frame_len);
+    try std.testing.expect(client.releaseEndedPurgeExclusiveClean());
+}
+
+test "CR3a-2c2b3b allocator callback reentry rejects prepare before graph traversal" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    defer _ = c.close(fds[1]);
+    var client = makeConnectedTestClient(allocator, fds[0]);
+    defer client.deinit();
+    const payload = "{\"event\":\"runtime.ended\"}";
+    try client.bufferEvent(.{
+        .header = .{ .kind = .event, .stream_id = 9, .payload_len = payload.len },
+        .payload = try allocator.dupe(u8, payload),
+    });
+    const hint = (try client.peekEndedEventForStream(9)).candidate;
+    var scratch: EndedPurgeScratch = .{};
+    var inventory: PreparedEndedPurgeInventory = .{};
+    try client.prepareEndedPurgeInventory(9, hint, &scratch, &inventory);
+    var fence: ClientOperationFence = undefined;
+    fence.initInPlace(@intFromPtr(&client), @intCast(c.getpid()), 229, 233, 239);
+    try std.testing.expect(client.bindOperationFence(&fence, 239));
+    try client.tryAcquireEndedPurgeExclusive();
+    var prepared: PreparedEndedPurgeCommit = .{};
+
+    try std.testing.expect(client.enterGenerationAllocatorCallback());
+    defer client.leaveGenerationAllocatorCallbackUnchecked();
+    try std.testing.expectError(
+        error.InvalidState,
+        client.prepareEndedPurgeCommit(9, 241, &scratch, &inventory, &prepared),
+    );
+    try std.testing.expectEqual(EndedPurgeScratch.Lifecycle.inventory_prepared, scratch.lifecycle);
+    try std.testing.expect(std.meta.eql(PreparedEndedPurgeCommit{}, prepared));
+    try std.testing.expect(client.releaseEndedPurgeExclusiveClean());
+}
+
+test "CR3a-2c2b3b fence intrusion prevents prepare authority publication" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    defer _ = c.close(fds[1]);
+    var client = makeConnectedTestClient(allocator, fds[0]);
+    defer client.deinit();
+    const payload = "{\"event\":\"runtime.ended\"}";
+    try client.bufferEvent(.{
+        .header = .{ .kind = .event, .stream_id = 9, .payload_len = payload.len },
+        .payload = try allocator.dupe(u8, payload),
+    });
+    const hint = (try client.peekEndedEventForStream(9)).candidate;
+    var scratch: EndedPurgeScratch = .{};
+    var inventory: PreparedEndedPurgeInventory = .{};
+    try client.prepareEndedPurgeInventory(9, hint, &scratch, &inventory);
+    var fence: ClientOperationFence = undefined;
+    fence.initInPlace(@intFromPtr(&client), @intCast(c.getpid()), 251, 257, 263);
+    try std.testing.expect(client.bindOperationFence(&fence, 263));
+    try client.tryAcquireEndedPurgeExclusive();
+    var prepared: PreparedEndedPurgeCommit = .{};
+
+    try std.testing.expectError(error.AdminBusy, client.requireBufferedGenerationBatch(9));
+    try std.testing.expect(client.endedPurgeFenceIntruded());
+    try std.testing.expectError(
+        error.InvalidState,
+        client.prepareEndedPurgeCommit(9, 269, &scratch, &inventory, &prepared),
+    );
+    try std.testing.expectEqual(EndedPurgeScratch.Lifecycle.inventory_prepared, scratch.lifecycle);
+    try std.testing.expect(std.meta.eql(PreparedEndedPurgeCommit{}, prepared));
+    try std.testing.expect(fence.abortExclusive(@intFromPtr(&client), 263));
+}
+
+test "CR3a-2c2b3b fork child rejects prepare commit before inherited state mutation" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    defer _ = c.close(fds[1]);
+    var client = makeConnectedTestClient(allocator, fds[0]);
+    defer client.deinit();
+    const payload = "{\"event\":\"runtime.ended\"}";
+    try client.bufferEvent(.{
+        .header = .{ .kind = .event, .stream_id = 9, .payload_len = payload.len },
+        .payload = try allocator.dupe(u8, payload),
+    });
+    const hint = (try client.peekEndedEventForStream(9)).candidate;
+    var scratch: EndedPurgeScratch = .{};
+    var inventory: PreparedEndedPurgeInventory = .{};
+    try client.prepareEndedPurgeInventory(9, hint, &scratch, &inventory);
+    var fence: ClientOperationFence = undefined;
+    fence.initInPlace(@intFromPtr(&client), @intCast(c.getpid()), 199, 211, 223);
+    try std.testing.expect(client.bindOperationFence(&fence, 223));
+    try client.tryAcquireEndedPurgeExclusive();
+    var prepared: PreparedEndedPurgeCommit = .{};
+
+    const child = c.fork();
+    try std.testing.expect(child >= 0);
+    if (child == 0) {
+        const rejected = if (client.prepareEndedPurgeCommit(
+            9,
+            227,
+            &scratch,
+            &inventory,
+            &prepared,
+        )) |_| false else |err| err == error.InvalidOwner;
+        c._exit(if (rejected) 0 else 1);
+    }
+    var status: c_int = 0;
+    var attempts: usize = 0;
+    while (attempts < 2_000) : (attempts += 1) {
+        const waited = c.waitpid(child, &status, c.W.NOHANG);
+        if (waited == child) break;
+        if (waited < 0 and posix.errno(waited) != .INTR)
+            return error.TestUnexpectedResult;
+        var delay_fd = c.pollfd{ .fd = -1, .events = 0, .revents = 0 };
+        _ = c.poll(@ptrCast(&delay_fd), 0, 1);
+    }
+    try std.testing.expect(attempts < 2_000);
+    const wait_status: u32 = @bitCast(status);
+    try std.testing.expect(c.W.IFEXITED(wait_status));
+    try std.testing.expectEqual(@as(u8, 0), c.W.EXITSTATUS(wait_status));
+    try std.testing.expect(std.meta.eql(PreparedEndedPurgeCommit{}, prepared));
+    try std.testing.expectEqual(EndedPurgeScratch.Lifecycle.inventory_prepared, scratch.lifecycle);
+    try std.testing.expectEqual(ClientOperationFence.exclusive_bit, fence.state.load(.acquire));
+    try std.testing.expect(client.releaseEndedPurgeExclusiveClean());
+}
+
 const strict_cli_inherited_event_payloads = [_][]const u8{
     "{\"event\":\"runtime.metadata\",\"metadata_revision\":2,\"metadata\":{}}",
     "{\"event\":\"runtime.metadata\",\"metadata_revision\":1,\"metadata\":{}}",
@@ -14909,6 +15899,8 @@ test "external adoption owner alias validation stays n log n at every queue cap"
         &client,
         &ended_scratch,
         &ended_out,
+        null,
+        &ended_scratch.range_order,
     );
     try std.testing.expectEqual(max_external_owner_range_count, ended_stats.total_ranges);
     try std.testing.expect(ended_stats.comparisons <= ended_stats.total_ranges * 64);
@@ -14924,7 +15916,7 @@ test "external adoption owner alias validation stays n log n at every queue cap"
     );
     try std.testing.expectEqual(
         max_ended_purge_scratch_bytes - ended_purge_scratch_bytes_v1,
-        62_032,
+        61_944,
     );
 }
 

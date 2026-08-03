@@ -428,6 +428,7 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .name = "prepareGenerationAccountingConsume", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "consumeGenerationAccountingUnchecked", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "tryAcquireEndedPurgeExclusive", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "prepareEndedPurgeCommit", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "tryAcquireClientSlotTeardownExclusive", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "abortClientSlotTeardownExclusive", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "tryDeinitClientSlotExclusiveHeld", .receiver_type = mutable, .class = .unchecked },
@@ -886,6 +887,71 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
     );
 }
 
+test "CR3a-2c2b3b prepare commit reads PID and callback TLS before graph then rechecks the fence at publish" {
+    const allocator = std.testing.allocator;
+    const source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/client.zig",
+    );
+    defer allocator.free(source);
+    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    defer tree.deinit(allocator);
+    const members = findRootContainerMembers(&tree, "Client") orelse
+        return error.TestUnexpectedResult;
+    const method = findContainerMethod(
+        &tree,
+        members,
+        "Client",
+        "prepareEndedPurgeCommit",
+    ) orelse return error.TestUnexpectedResult;
+    const body_start = functionBodyStart(&tree, method) orelse
+        return error.TestUnexpectedResult;
+    var getpid_token: ?std.zig.Ast.TokenIndex = null;
+    var callback_tls_token: ?std.zig.Ast.TokenIndex = null;
+    var first_self_token: ?std.zig.Ast.TokenIndex = null;
+    var alias_gate_token: ?std.zig.Ast.TokenIndex = null;
+    var ledger_gate_token: ?std.zig.Ast.TokenIndex = null;
+    var token = body_start + 1;
+    while (token <= tree.lastToken(method)) : (token += 1) {
+        const text = tree.tokenSlice(token);
+        if (getpid_token == null and std.mem.eql(u8, text, "getpid")) getpid_token = token;
+        if (callback_tls_token == null and
+            std.mem.eql(u8, text, "generationAllocatorCallbackActive"))
+            callback_tls_token = token;
+        if (first_self_token == null and std.mem.eql(u8, text, "self")) first_self_token = token;
+        if (alias_gate_token == null and
+            std.mem.eql(u8, text, "validateEndedPurgeOwnerRanges"))
+            alias_gate_token = token;
+        if (ledger_gate_token == null and std.mem.eql(u8, text, "prepareDeinitGraph"))
+            ledger_gate_token = token;
+    }
+    try std.testing.expect(getpid_token.? < callback_tls_token.?);
+    try std.testing.expect(callback_tls_token.? < first_self_token.?);
+    try std.testing.expect(alias_gate_token.? < ledger_gate_token.?);
+    try expectContainerMethodMarkersInOrder(
+        allocator,
+        source,
+        "Client",
+        "prepareEndedPurgeCommit",
+        &.{
+            "candidate.lifecycle = .prepared;",
+            "if (fence.owner_process_id != actual_pid",
+            "if (!fence.sealExclusiveForPublication(",
+            "scratch.lifecycle = .commit_frozen;",
+            "out.* = candidate;",
+        },
+    );
+    inline for (.{ "tryEnterShared", "tryAcquireExclusive" }) |receiver|
+        try expectContainerMethodMarkerCount(
+            allocator,
+            source,
+            "ClientOperationFence",
+            receiver,
+            "recordIntrusionIfExactExclusive(observed)",
+            1,
+        );
+}
+
 test "CR3a-2c2b3a ended purge plan remains a neutral test-only leaf" {
     const allocator = std.testing.allocator;
     const leaf = try readZigFileZ(
@@ -921,6 +987,11 @@ test "CR3a-2c2b3a ended purge plan remains a neutral test-only leaf" {
                 u8,
                 entry.path,
                 "platform/macos/session_host/ended_purge_transaction.zig",
+            ) or
+            std.mem.eql(
+                u8,
+                entry.path,
+                "platform/macos/session_host/client.zig",
             ))
             continue;
         const path = try std.fmt.allocPrint(
@@ -1042,11 +1113,11 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
             .allowed = &.{
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "ClientOperationFence" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "ended_purge_transaction" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "ended_purge_quarantine" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "PreparedEndedPurgeCommit" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "EndedPurgeCommitError" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "EndedPurgeClientCommitOutcome" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "prepareEndedPurgeCommit" },
-                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "commitEndedPurgePrepared" },
                 .{ .parent = "Client", .kind = "field", .visibility = "private", .modifier = "", .name = "operation_fence" },
                 .{ .parent = "Client", .kind = "field", .visibility = "private", .modifier = "", .name = "operation_fence_generation" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "bindOperationFence" },
@@ -1058,15 +1129,13 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "commitEndedPurgeExclusiveTerminal" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "beginPublicMutation" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "endPublicMutation" },
-                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "tombstoneEndedPurgeOwnedGraph" },
-                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "publishEndedPurgeNoFreePoison" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "endedPurgeCompleteOwnerSeal" },
                 .{ .parent = "EndedPurgeScratch", .kind = "const", .visibility = "private", .modifier = "", .name = "PendingOutboundDescriptor" },
                 .{ .parent = "EndedPurgeScratch", .kind = "const", .visibility = "private", .modifier = "", .name = "Lifecycle" },
                 .{ .parent = "EndedPurgeScratch", .kind = "field", .visibility = "private", .modifier = "", .name = "build_id" },
                 .{ .parent = "EndedPurgeScratch", .kind = "field", .visibility = "private", .modifier = "", .name = "client_lifecycle" },
                 .{ .parent = "EndedPurgeScratch", .kind = "field", .visibility = "private", .modifier = "", .name = "lifecycle" },
                 .{ .parent = "EndedPurgeScratch", .kind = "field", .visibility = "private", .modifier = "", .name = "pending_outbound" },
-                .{ .parent = "PreparedEndedPurgeInventory", .kind = "field", .visibility = "private", .modifier = "", .name = "quarantine_bytes" },
                 .{ .parent = "PreparedEndedPurgeInventory", .kind = "field", .visibility = "private", .modifier = "", .name = "demux_owned_extent_bytes" },
                 .{ .parent = "PreparedEndedPurgeCommit", .kind = "const", .visibility = "private", .modifier = "", .name = "Lifecycle" },
                 .{ .parent = "PreparedEndedPurgeCommit", .kind = "field", .visibility = "private", .modifier = "", .name = "self_addr" },
@@ -1089,6 +1158,7 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "PreparedEndedPurgeCommit", .kind = "field", .visibility = "private", .modifier = "", .name = "lifecycle" },
                 .{ .parent = "ClientOperationFence", .kind = "const", .visibility = "private", .modifier = "", .name = "shared_count_mask" },
                 .{ .parent = "ClientOperationFence", .kind = "const", .visibility = "private", .modifier = "", .name = "reserved_mask" },
+                .{ .parent = "ClientOperationFence", .kind = "const", .visibility = "private", .modifier = "", .name = "publication_bit" },
                 .{ .parent = "ClientOperationFence", .kind = "const", .visibility = "private", .modifier = "", .name = "terminal_bit" },
                 .{ .parent = "ClientOperationFence", .kind = "const", .visibility = "private", .modifier = "", .name = "intrusion_bit" },
                 .{ .parent = "ClientOperationFence", .kind = "const", .visibility = "private", .modifier = "", .name = "exclusive_bit" },
@@ -1103,6 +1173,8 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "ClientOperationFence", .kind = "fn", .visibility = "private", .modifier = "", .name = "tryEnterShared" },
                 .{ .parent = "ClientOperationFence", .kind = "fn", .visibility = "private", .modifier = "", .name = "leaveShared" },
                 .{ .parent = "ClientOperationFence", .kind = "fn", .visibility = "private", .modifier = "", .name = "tryAcquireExclusive" },
+                .{ .parent = "ClientOperationFence", .kind = "fn", .visibility = "private", .modifier = "", .name = "recordIntrusionIfExactExclusive" },
+                .{ .parent = "ClientOperationFence", .kind = "fn", .visibility = "private", .modifier = "", .name = "sealExclusiveForPublication" },
                 .{ .parent = "ClientOperationFence", .kind = "fn", .visibility = "private", .modifier = "", .name = "intruded" },
                 .{ .parent = "ClientOperationFence", .kind = "fn", .visibility = "private", .modifier = "", .name = "abortExclusive" },
                 .{ .parent = "ClientOperationFence", .kind = "fn", .visibility = "private", .modifier = "", .name = "releaseExclusiveClean" },
@@ -1166,11 +1238,17 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
     defer allocator.free(client);
     const client_slot = try readZigFileZ(allocator, cases[1].path);
     defer allocator.free(client_slot);
-    try expectAbsentOrExactImport(
+    try expectExactImport(
         allocator,
         client,
         "ended_purge_transaction",
         "@import(\"ended_purge_transaction.zig\")",
+    );
+    try expectExactImport(
+        allocator,
+        client,
+        "ended_purge_quarantine",
+        "@import(\"ended_purge_quarantine.zig\")",
     );
     try expectAbsentOrExactImport(
         allocator,
@@ -1214,14 +1292,25 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
         &.{ "empty", "prepared", "aborted" },
         "consumed",
     );
-    try expectOptionalPreparedEndedPurgeCommitSchema(allocator, client);
+    try expectPreparedEndedPurgeCommitSchema(allocator, client);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        try inventoryCount(allocator, client, .{
+            .parent = "Client",
+            .kind = "fn",
+            .visibility = "pub",
+            .modifier = "",
+            .name = "prepareEndedPurgeCommit",
+        }),
+    );
     try expectClientOperationFenceSchema(allocator, client);
     try expectClientOperationFenceBindingSchema(allocator, client);
     try expectClientNodeOperationFenceSchema(allocator, client_slot);
     try expectClientSlotOperationReservationSchemas(allocator, client_slot);
     const fence_bit_contract = [_][]const u8{
         "const shared_count_mask: u64 = (@as(u64, 1) << 31) - 1;",
-        "const reserved_mask: u64 = ((@as(u64, 1) << 61) - 1) & ~shared_count_mask;",
+        "const reserved_mask: u64 = ((@as(u64, 1) << 60) - 1) & ~shared_count_mask;",
+        "const publication_bit: u64 = @as(u64, 1) << 60;",
         "const terminal_bit: u64 = @as(u64, 1) << 61;",
         "const intrusion_bit: u64 = @as(u64, 1) << 62;",
         "const exclusive_bit: u64 = @as(u64, 1) << 63;",
@@ -1356,18 +1445,18 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
             countIdentifierOutsideTopLevelTests(client_slot, exclusive_wrapper),
         );
     try expectEndedPurgeInventorySubtotalMigration(allocator, client);
-    try expectOptionalEndedPurgeScratchDelta(allocator, client);
-    try expectRootErrorSetAbsentOrExact(
+    try expectEndedPurgeScratchDelta(allocator, client);
+    try expectRootErrorSetExact(
         allocator,
         client,
         "EndedPurgeCommitError",
         &.{ "InvalidOwner", "InvalidState", "Corrupt", "ArithmeticOverflow", "DestinationOccupied" },
     );
-    try expectRootEnumAbsentOrExact(
+    try expectRootEnumExact(
         allocator,
         client,
         "EndedPurgeClientCommitOutcome",
-        &.{ "clean", "drift" },
+        &.{ "clean", "drift_pending_finalize" },
     );
     try expectNestedErrorSetAbsentOrExact(
         allocator,
@@ -1405,6 +1494,8 @@ test "CR3a-2c2b3b quarantine leaf is absent or exposes only the frozen public AP
         .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "max_ended_purge_quarantine_bytes" },
         .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "Error" },
         .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "Reservation" },
+        .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "CommitReceipt" },
+        .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "ConsumedCommitProof" },
         .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "Registry" },
     };
     try expectPublicRootDeclarationsExact(allocator, source, &expected);
@@ -6647,6 +6738,16 @@ fn expectAbsentOrExactImport(
     try std.testing.expect(matches <= 1);
 }
 
+fn expectExactImport(
+    allocator: std.mem.Allocator,
+    source: [:0]const u8,
+    identifier: []const u8,
+    exact_initializer: []const u8,
+) !void {
+    try expectAbsentOrExactImport(allocator, source, identifier, exact_initializer);
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(source, exact_initializer));
+}
+
 fn expectPublicRootDeclarationsExact(
     allocator: std.mem.Allocator,
     source: [:0]const u8,
@@ -6691,13 +6792,14 @@ fn expectRootContainerFieldsWithOptional(
     }
 }
 
-fn expectOptionalPreparedEndedPurgeCommitSchema(
+fn expectPreparedEndedPurgeCommitSchema(
     allocator: std.mem.Allocator,
     source: [:0]const u8,
 ) !void {
     var tree = try std.zig.Ast.parse(allocator, source, .zig);
     defer tree.deinit(allocator);
-    const members = findRootContainerMembers(&tree, "PreparedEndedPurgeCommit") orelse return;
+    const members = findRootContainerMembers(&tree, "PreparedEndedPurgeCommit") orelse
+        return error.TestUnexpectedResult;
     const fields = [_]struct { name: []const u8, type_name: []const u8 }{
         .{ .name = "self_addr", .type_name = "usize" },
         .{ .name = "client_addr", .type_name = "usize" },
@@ -6725,7 +6827,11 @@ fn expectOptionalPreparedEndedPurgeCommitSchema(
     var lifecycle_buffer: [2]std.zig.Ast.Node.Index = undefined;
     const lifecycle = tree.fullContainerDecl(&lifecycle_buffer, lifecycle_init) orelse
         return error.TestUnexpectedResult;
-    try expectFieldNames(&tree, lifecycle.ast.members, &.{ "pristine", "prepared", "consumed" });
+    try expectFieldNames(
+        &tree,
+        lifecycle.ast.members,
+        &.{ "pristine", "prepared", "finalization_pending", "consumed" },
+    );
     for (fields, 0..) |expected, index| {
         const field = tree.fullContainerField(members[index + 1]) orelse
             return error.TestUnexpectedResult;
@@ -6743,10 +6849,11 @@ fn expectClientOperationFenceSchema(
     defer tree.deinit(allocator);
     const members = findRootContainerMembers(&tree, "ClientOperationFence") orelse
         return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 21), members.len);
+    try std.testing.expectEqual(@as(usize, 24), members.len);
     const constants = [_][]const u8{
         "shared_count_mask",
         "reserved_mask",
+        "publication_bit",
         "terminal_bit",
         "intrusion_bit",
         "exclusive_bit",
@@ -6756,16 +6863,16 @@ fn expectClientOperationFenceSchema(
         try std.testing.expectEqualStrings("const", tuple.kind);
         try std.testing.expectEqualStrings(name, tuple.name);
     }
-    try expectTypedFieldWithDefault(&tree, source, members[5], "self_addr", "usize", "0");
-    try expectTypedFieldWithDefault(&tree, source, members[6], "client_addr", "usize", "0");
-    try expectTypedFieldWithDefault(&tree, source, members[7], "owner_process_id", "u32", "0");
-    try expectTypedFieldWithDefault(&tree, source, members[8], "slot_incarnation", "u64", "0");
-    try expectTypedFieldWithDefault(&tree, source, members[9], "node_incarnation", "u64", "0");
-    try expectTypedFieldWithDefault(&tree, source, members[10], "fence_generation", "u64", "0");
+    try expectTypedFieldWithDefault(&tree, source, members[6], "self_addr", "usize", "0");
+    try expectTypedFieldWithDefault(&tree, source, members[7], "client_addr", "usize", "0");
+    try expectTypedFieldWithDefault(&tree, source, members[8], "owner_process_id", "u32", "0");
+    try expectTypedFieldWithDefault(&tree, source, members[9], "slot_incarnation", "u64", "0");
+    try expectTypedFieldWithDefault(&tree, source, members[10], "node_incarnation", "u64", "0");
+    try expectTypedFieldWithDefault(&tree, source, members[11], "fence_generation", "u64", "0");
     try expectTypedFieldWithDefault(
         &tree,
         source,
-        members[11],
+        members[12],
         "state",
         "std.atomic.Value(u64)",
         ".init(0)",
@@ -6775,6 +6882,8 @@ fn expectClientOperationFenceSchema(
         "tryEnterShared",
         "leaveShared",
         "tryAcquireExclusive",
+        "recordIntrusionIfExactExclusive",
+        "sealExclusiveForPublication",
         "intruded",
         "abortExclusive",
         "releaseExclusiveClean",
@@ -6782,7 +6891,7 @@ fn expectClientOperationFenceSchema(
         "identityMatches",
     };
     for (methods, 0..) |name, index| {
-        const tuple = declarationTuple(&tree, "ClientOperationFence", members[index + 12]);
+        const tuple = declarationTuple(&tree, "ClientOperationFence", members[index + 13]);
         try std.testing.expectEqualStrings("fn", tuple.kind);
         try std.testing.expectEqualStrings(name, tuple.name);
     }
@@ -6913,7 +7022,7 @@ fn expectEndedPurgeInventorySubtotalMigration(
     try std.testing.expectEqual(@as(usize, 1), old_count + new_count);
 }
 
-fn expectRootEnumAbsentOrExact(
+fn expectRootEnumExact(
     allocator: std.mem.Allocator,
     source: [:0]const u8,
     name: []const u8,
@@ -6921,8 +7030,12 @@ fn expectRootEnumAbsentOrExact(
 ) !void {
     var tree = try std.zig.Ast.parse(allocator, source, .zig);
     defer tree.deinit(allocator);
-    const members = findRootContainerMembers(&tree, name) orelse return;
-    try expectFieldNames(&tree, members, fields);
+    const init = findRootVariableInitializer(&tree, name) orelse
+        return error.TestUnexpectedResult;
+    var buffer: [2]std.zig.Ast.Node.Index = undefined;
+    const container = tree.fullContainerDecl(&buffer, init) orelse
+        return error.TestUnexpectedResult;
+    try expectFieldNames(&tree, container.ast.members, fields);
 }
 
 fn expectNestedEnumAbsentOrExact(
@@ -6946,7 +7059,7 @@ fn expectNestedEnumAbsentOrExact(
     }
 }
 
-fn expectRootErrorSetAbsentOrExact(
+fn expectRootErrorSetExact(
     allocator: std.mem.Allocator,
     source: [:0]const u8,
     name: []const u8,
@@ -6954,7 +7067,8 @@ fn expectRootErrorSetAbsentOrExact(
 ) !void {
     var tree = try std.zig.Ast.parse(allocator, source, .zig);
     defer tree.deinit(allocator);
-    const init = findRootVariableInitializer(&tree, name) orelse return;
+    const init = findRootVariableInitializer(&tree, name) orelse
+        return error.TestUnexpectedResult;
     try expectErrorSetNodeFields(&tree, init, fields);
 }
 
@@ -6995,7 +7109,7 @@ fn expectErrorSetNodeFields(
     try std.testing.expectEqual(expected.len, index);
 }
 
-fn expectOptionalEndedPurgeScratchDelta(
+fn expectEndedPurgeScratchDelta(
     allocator: std.mem.Allocator,
     source: [:0]const u8,
 ) !void {
@@ -7023,8 +7137,8 @@ fn expectOptionalEndedPurgeScratchDelta(
         }
     }
     const present = counts[0];
-    try std.testing.expect(present <= 1);
-    for (counts) |count| try std.testing.expectEqual(present, count);
+    try std.testing.expectEqual(@as(usize, 1), present);
+    for (counts) |count| try std.testing.expectEqual(@as(usize, 1), count);
     if (nodes[0]) |node| {
         const variable = tree.fullVarDecl(node) orelse return error.TestUnexpectedResult;
         const init = variable.ast.init_node.unwrap() orelse return error.TestUnexpectedResult;
@@ -7036,48 +7150,46 @@ fn expectOptionalEndedPurgeScratchDelta(
         try expectTypedField(&tree, source, descriptor.ast.members[2], "stream_id", "u64");
         try expectTypedField(&tree, source, descriptor.ast.members[3], "offset", "usize");
     }
-    if (present == 1) {
-        try expectNestedEnumAbsentOrExact(
-            allocator,
-            source,
-            "EndedPurgeScratch",
-            "Lifecycle",
-            &.{ "empty", "inventory_prepared", "commit_frozen", "consumed" },
-        );
-        const zero_descriptor = ".{ .address = 0, .len = 0, .capacity = 0 }";
-        try expectTypedFieldWithDefault(
-            &tree,
-            source,
-            nodes[2].?,
-            "build_id",
-            "ExternalArrayDescriptor",
-            zero_descriptor,
-        );
-        try expectTypedFieldWithDefault(
-            &tree,
-            source,
-            nodes[3].?,
-            "client_lifecycle",
-            "ExternalArrayDescriptor",
-            zero_descriptor,
-        );
-        try expectTypedFieldWithDefault(
-            &tree,
-            source,
-            nodes[4].?,
-            "lifecycle",
-            "Lifecycle",
-            ".empty",
-        );
-        try expectTypedFieldWithDefault(
-            &tree,
-            source,
-            nodes[5].?,
-            "pending_outbound",
-            "?PendingOutboundDescriptor",
-            "null",
-        );
-    }
+    try expectNestedEnumAbsentOrExact(
+        allocator,
+        source,
+        "EndedPurgeScratch",
+        "Lifecycle",
+        &.{ "empty", "inventory_prepared", "commit_frozen", "consumed" },
+    );
+    const zero_descriptor = ".{ .address = 0, .len = 0, .capacity = 0 }";
+    try expectTypedFieldWithDefault(
+        &tree,
+        source,
+        nodes[2].?,
+        "build_id",
+        "ExternalArrayDescriptor",
+        zero_descriptor,
+    );
+    try expectTypedFieldWithDefault(
+        &tree,
+        source,
+        nodes[3].?,
+        "client_lifecycle",
+        "ExternalArrayDescriptor",
+        zero_descriptor,
+    );
+    try expectTypedFieldWithDefault(
+        &tree,
+        source,
+        nodes[4].?,
+        "lifecycle",
+        "Lifecycle",
+        ".empty",
+    );
+    try expectTypedFieldWithDefault(
+        &tree,
+        source,
+        nodes[5].?,
+        "pending_outbound",
+        "?PendingOutboundDescriptor",
+        "null",
+    );
 }
 
 fn expectEndedPurgeQuarantineSchema(
@@ -7111,9 +7223,41 @@ fn expectEndedPurgeQuarantineSchema(
     for (reservation_fields, 0..) |expected, index|
         try expectTypedField(&tree, source, reservation[index + 1], expected.name, expected.type_name);
 
+    const receipt = findRootContainerMembers(&tree, "CommitReceipt") orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(reservation_fields.len + 1, receipt.len);
+    try expectNestedEnum(&tree, receipt[0], "Lifecycle", &.{ "pristine", "committed", "consumed" });
+    for (reservation_fields, 0..) |expected, index|
+        try expectTypedField(&tree, source, receipt[index + 1], expected.name, expected.type_name);
+
+    const proof = findRootContainerMembers(&tree, "ConsumedCommitProof") orelse
+        return error.TestUnexpectedResult;
+    const proof_fields = [_]struct { name: []const u8, type_name: []const u8 }{
+        .{ .name = "reservation_generation", .type_name = "u64" },
+        .{ .name = "process_id", .type_name = "u64" },
+        .{ .name = "node_incarnation", .type_name = "u64" },
+        .{ .name = "operation_generation", .type_name = "u64" },
+        .{ .name = "bytes", .type_name = "usize" },
+    };
+    try std.testing.expectEqual(proof_fields.len + 1, proof.len);
+    for (proof_fields, 0..) |expected, index|
+        try expectTypedField(&tree, source, proof[index], expected.name, expected.type_name);
+    const matches_tuple = declarationTuple(&tree, "ConsumedCommitProof", proof[proof_fields.len]);
+    try std.testing.expectEqualStrings("fn", matches_tuple.kind);
+    try std.testing.expectEqualStrings("pub", matches_tuple.visibility);
+    try std.testing.expectEqualStrings("matches", matches_tuple.name);
+    try expectFnSignature(
+        &tree,
+        source,
+        proof[proof_fields.len],
+        &.{ "self", "process_id", "node_incarnation", "operation_generation", "bytes" },
+        &.{ "ConsumedCommitProof", "u64", "u64", "u64", "usize" },
+        "bool",
+    );
+
     const registry = findRootContainerMembers(&tree, "Registry") orelse
         return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 16), registry.len);
+    try std.testing.expectEqual(@as(usize, 23), registry.len);
     try expectNestedEnum(&tree, registry[0], "State", &.{ "idle", "reserved", "committed" });
     try expectTypedField(&tree, source, registry[1], "mutex", "std.atomic.Mutex");
     try expectTypedField(&tree, source, registry[2], "owner_process_id", "u64");
@@ -7125,19 +7269,25 @@ fn expectEndedPurgeQuarantineSchema(
     try expectTypedField(&tree, source, registry[8], "reserved_node_incarnation", "u64");
     try expectTypedField(&tree, source, registry[9], "reserved_operation_generation", "u64");
     try expectTypedField(&tree, source, registry[10], "reserved_bytes", "usize");
-    try expectTypedField(&tree, source, registry[11], "committed_bytes", "usize");
-    const methods = [_][]const u8{ "init", "reserve", "release", "commit" };
+    try expectTypedField(&tree, source, registry[11], "committed_receipt_addr", "usize");
+    try expectTypedField(&tree, source, registry[12], "committed_generation", "u64");
+    try expectTypedField(&tree, source, registry[13], "committed_process_id", "u64");
+    try expectTypedField(&tree, source, registry[14], "committed_node_incarnation", "u64");
+    try expectTypedField(&tree, source, registry[15], "committed_operation_generation", "u64");
+    try expectTypedField(&tree, source, registry[16], "committed_bytes", "usize");
+    try expectTypedField(&tree, source, registry[17], "finalization_consumed", "bool");
+    const methods = [_][]const u8{ "init", "reserve", "release", "commit", "consumeCommitted" };
     for (methods, 0..) |name, index| {
-        const tuple = declarationTuple(&tree, "Registry", registry[index + 12]);
+        const tuple = declarationTuple(&tree, "Registry", registry[index + 18]);
         try std.testing.expectEqualStrings("fn", tuple.kind);
         try std.testing.expectEqualStrings("pub", tuple.visibility);
         try std.testing.expectEqualStrings(name, tuple.name);
     }
-    try expectFnSignature(&tree, source, registry[12], &.{}, &.{}, "Registry");
+    try expectFnSignature(&tree, source, registry[18], &.{}, &.{}, "Registry");
     try expectFnSignature(
         &tree,
         source,
-        registry[13],
+        registry[19],
         &.{ "self", "node_incarnation", "operation_generation", "bytes", "out" },
         &.{ "*Registry", "u64", "u64", "usize", "*Reservation" },
         "Error!void",
@@ -7145,7 +7295,7 @@ fn expectEndedPurgeQuarantineSchema(
     try expectFnSignature(
         &tree,
         source,
-        registry[14],
+        registry[20],
         &.{ "self", "reservation" },
         &.{ "*Registry", "*Reservation" },
         "bool",
@@ -7153,9 +7303,17 @@ fn expectEndedPurgeQuarantineSchema(
     try expectFnSignature(
         &tree,
         source,
-        registry[15],
-        &.{ "self", "reservation" },
-        &.{ "*Registry", "*Reservation" },
+        registry[21],
+        &.{ "self", "reservation", "out" },
+        &.{ "*Registry", "*Reservation", "*CommitReceipt" },
+        "bool",
+    );
+    try expectFnSignature(
+        &tree,
+        source,
+        registry[22],
+        &.{ "self", "receipt", "out" },
+        &.{ "*Registry", "*CommitReceipt", "*ConsumedCommitProof" },
         "bool",
     );
 }

@@ -76,7 +76,13 @@ pub const CoreTextGlyphRasterizer = struct {
         self.rasterize_glyph(
             self.appearance.font.family.ptr,
             self.appearance.font.family.len,
-            renderer.deviceFontSizeFromMilli(self.appearance.font.size, self.scale_milli),
+            renderer.deviceFontSizeFromMilli(
+                if (request.run.cache_key.raster_font_size_milli == 0)
+                    self.appearance.font.size
+                else
+                    @as(f32, @floatFromInt(request.run.cache_key.raster_font_size_milli)) / 1000.0,
+                self.scale_milli,
+            ),
             font_identity.postscript_name.ptr,
             font_identity.postscript_name.len,
             request.run.codepoint,
@@ -127,6 +133,7 @@ pub const CoreTextGlyphRasterizer = struct {
 const TestBridgeCapture = struct {
     call_count: usize = 0,
     font_postscript_name: []const u8 = "",
+    requested_font_size: f64 = 0,
     glyph_id: u32 = 0,
     width_px: usize = 0,
     height_px: usize = 0,
@@ -147,7 +154,7 @@ fn resetTestBridge(status: c_int, non_clear_pixels: u32) void {
 fn captureRasterizeGlyph(
     _: [*]const u8,
     _: usize,
-    _: f64,
+    requested_font_size: f64,
     font_postscript_name: [*]const u8,
     font_postscript_name_len: usize,
     _: u32,
@@ -162,6 +169,7 @@ fn captureRasterizeGlyph(
     test_bridge_capture = .{
         .call_count = test_bridge_capture.call_count + 1,
         .font_postscript_name = font_postscript_name[0..font_postscript_name_len],
+        .requested_font_size = requested_font_size,
         .glyph_id = glyph_id,
         .width_px = width_px,
         .height_px = height_px,
@@ -232,6 +240,7 @@ test "CoreText rasterizer calls native bridge with registry font identity" {
 
     try std.testing.expectEqual(@as(usize, 1), test_bridge_capture.call_count);
     try std.testing.expectEqualStrings("Menlo-Regular", test_bridge_capture.font_postscript_name);
+    try std.testing.expectEqual(@as(f64, 14), test_bridge_capture.requested_font_size);
     try std.testing.expectEqual(@as(u32, 42), test_bridge_capture.glyph_id);
     try std.testing.expectEqual(@as(usize, 2), test_bridge_capture.width_px);
     try std.testing.expectEqual(@as(usize, 2), test_bridge_capture.height_px);
@@ -239,6 +248,25 @@ test "CoreText rasterizer calls native bridge with registry font identity" {
     try std.testing.expectEqual(@as(usize, 16), test_bridge_capture.pixel_capacity);
     try std.testing.expectEqual(@as(usize, 3), result.non_clear_pixels);
     try std.testing.expectEqual(@as(u8, 0xff), pixels[0]);
+}
+
+test "CoreText rasterizer honors a rich text role size override" {
+    resetTestBridge(0, 1);
+    var registry = renderer.FontIdentityRegistry.init(std.testing.allocator);
+    defer registry.deinit();
+    const font_id = try registry.intern(.{ .postscript_name = "Menlo-Regular" });
+    var run = testRun(font_id, 42);
+    run.cache_key.raster_font_size_milli = 18_000;
+    const slot = testSlot(run.cache_key);
+    var pixels = [_]u8{0} ** 16;
+    const rasterizer = CoreTextGlyphRasterizer{
+        .appearance = try config.resolveAppearance(.{}),
+        .font_registry = &registry,
+        .rasterize_glyph = captureRasterizeGlyph,
+        .scale_milli = 2000,
+    };
+    _ = try rasterizer.rasterize(.{ .run = run, .slot = slot, .pixels = &pixels, .bytes_per_row = 8 });
+    try std.testing.expectEqual(@as(f64, 36), test_bridge_capture.requested_font_size);
 }
 
 test "CoreText rasterizer fails closed when font identity is missing" {

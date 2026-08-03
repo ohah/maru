@@ -56,6 +56,10 @@ pub const GlyphCacheKey = struct {
     glyph_id: GlyphId,
     font_size_px: u16,
     device_scale: u16,
+    // Rich Chrome can request a role-specific UI font size while sharing the terminal atlas.
+    // Zero preserves the terminal appearance size; non-zero is a logical-point milli override
+    // consumed only by the platform rasterizer and therefore belongs to atlas identity.
+    raster_font_size_milli: u16 = 0,
     // atlas slot 폭의 단일 출처. **TextLayoutConfig.slotCellWidthPx의 결과**가 들어온다 — 폰트 글리프는 자연폭(자간
     // 무관), 합성/notdef(glyph_id==0)은 grid advance(셀폭). 0이면 정사각 대체. slot 폭이 바뀌면 같은 glyph라도 새 slot이라
     // cache identity의 일부다. (높이는 advance×line-height의 cell_height_px.)

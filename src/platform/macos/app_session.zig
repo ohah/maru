@@ -3740,6 +3740,7 @@ pub const AppSession = struct {
         // view 전환만으로 resize하지 않는다.
         const auto_right_width_changed = self.dockVisible() and self.dock.side == .right and self.dock.size == 0 and
             dock_layout.defaultRightPtForView(self.dock.view) != dock_layout.defaultRightPtForView(view);
+        if (self.dock.view == .agent_sessions and view != .agent_sessions) self.cancelAgentSessionArchive();
         self.dock.view = view;
         // The SessionDock's component-local keyboard/pointer focus is meaningful only while its
         // tree is visible.  Returning later must not resurrect a stale PageUp/PageDown owner.
@@ -3777,6 +3778,16 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
+    /// Hiding this view must not let an old local-history scan replace a later, reopened dock.
+    /// The backend owns descriptor/allocation cleanup; this main-actor edge only withdraws the
+    /// generation and stops rendering a spinner for UI that is no longer visible.
+    fn cancelAgentSessionArchive(self: *AppSession) void {
+        if (!self.agent_session_archive_initialized) return;
+        if (!self.agent_session_archive_backend.cancel()) return;
+        self.agent_session_archive_loading = false;
+        self.metal_dirty = true;
+    }
+
     fn updateAgentSessionArchive(self: *AppSession) void {
         if (!self.agent_session_archive_initialized) return;
         // The worker publishes one completed immutable snapshot only. Keeping
@@ -3787,7 +3798,11 @@ pub const AppSession = struct {
         std.debug.assert(result.complete);
         if (result.retain_previous) {
             self.agent_session_archive_loading = false;
-            self.showNotice("새 세션 목록을 적용하지 못해 기존 목록을 유지했습니다.");
+            if (result.cancelled) {
+                // A reopened dock requests again only after the cancelled worker has fully
+                // released its state. This makes the newest entry win without concurrent scans.
+                if (self.dockVisible() and self.dock.view == .agent_sessions) self.refreshAgentSessionArchive(true);
+            } else self.showNotice("새 세션 목록을 적용하지 못해 기존 목록을 유지했습니다.");
             self.metal_dirty = true;
             return;
         }
@@ -4403,7 +4418,11 @@ pub const AppSession = struct {
     }
 
     fn activateFilePanelDockControl(self: *AppSession) void {
-        switch (self.filePanelDockControlAction() orelse return) {
+        const action = self.filePanelDockControlAction() orelse return;
+        // A collapsed right dock has no consumer for archive work.  Withdraw the current
+        // generation before changing geometry so reopening can request a fresh snapshot.
+        if (action == .collapse and self.dock.view == .agent_sessions) self.cancelAgentSessionArchive();
+        switch (action) {
             .open => {
                 self.dock.presented = true;
                 self.dock.collapsed = false;

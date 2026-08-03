@@ -199,6 +199,8 @@ Codex의 과거 파일에는 `thread_source`가 없을 수 있다. 이 경우 us
 
 `SessionArchiveScanner`는 worker에서만 directory enumerate·open·stat·JSONL parse를 하고, main actor에는 immutable `SessionArchiveSnapshot` **완료본 하나**만 건넨다. main actor는 마지막 snapshot을 메모리에 보존해 재진입 즉시 렌더하며, file I/O·JSON parse·정렬·worker wait를 하지 않는다. 대기 중 refresh는 하나로 coalesce하며 old worker completion은 request generation이 맞을 때만 publish한다. dock을 닫거나 앱을 종료하면 cancel을 요청하고, 이미 열린 fd와 staged allocation은 worker가 회수한다.
 
+AS2는 한 PR에 병렬 parser까지 억지로 섞지 않는다. **AS2-a**는 backend-owned monotonic request generation, dock 이탈/종료 cancel, candidate/file 경계의 cooperative cancel, cancelled generation의 publish 폐기와 재진입 latest-wins 재요청을 닫는다. **AS2-b**가 그 동일 cancellation token과 총 byte reservation을 소비하는 최대 4개 parse worker pool 및 actual peak-concurrency metric/fixture gate를 추가한다. 따라서 AS2-a가 끝나기 전에는 현재 단일 scanner thread를 “동시 parse≤4 구현”이라고 주장하지 않는다.
+
 1. trusted discovery root에서 no-follow directory traversal로 regular file만 수집한다. symlink, socket, FIFO, device, nested Claude directory, 예상 밖 파일명은 skip하며 debug artifact에는 raw 제목/프롬프트/경로를 남기지 않는다.
 2. provider별 최대 4,096개 후보 metadata를 mtime 순으로 고르고, 합쳐 최근 순으로 분석한다. 이 상한을 넘으면 header에 `일부 최근 후보만 검사함`을 표시한다.
 3. worker는 최근 후보를 제한된 worker pool(동시 parse 최대 4)로 분석한다. 파일은 streaming JSONL parser로 읽고 파일당 128 MiB, refresh당 512 MiB budget을 둔다. worker는 새 **완료** immutable snapshot만 publish하며 main actor는 그것을 한 번에 swap한다. 손상 JSON line은 그 line만 버리고 record를 추측해 만들지 않는다. cap/cancel/OOM이면 완성된 record만 포함한 partial snapshot을 publish한다.

@@ -8,7 +8,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 159u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 160u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -69,6 +69,7 @@
 #define MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_FOCUS_LIVE 4u
 #define MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_DOCK_AGENT_SESSIONS 5u
 #define MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_DOCK_LAUNCHER 6u
+#define MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_REFRESH 7u
 
 /* browser.wait의 Zig protocol ↔ Swift polling 숫자 계약. app_host_abi.zig 테스트가 L2 상수와 정합을 고정한다. */
 #define MARU_BROWSER_WAIT_DEFAULT_TIMEOUT_MS 25000u
@@ -536,6 +537,15 @@ int32_t maru_macos_app_session_set_agent_session_archive_detail_smoke_gate(
     uint32_t blocked
 );
 uint32_t maru_macos_app_session_agent_session_archive_detail_smoke_gate_reached(
+    const MaruAppHostSession *session
+);
+/* AS4 snapshot-replace fixture-only scan gate. It only blocks/releases a detached scan before
+   discovery; normal refresh input remains the sole path that submits the worker. v160. */
+int32_t maru_macos_app_session_set_agent_session_archive_smoke_gate(
+    MaruAppHostSession *session,
+    uint32_t blocked
+);
+uint32_t maru_macos_app_session_agent_session_archive_smoke_gate_reached(
     const MaruAppHostSession *session
 );
 /* Read-only evidence for the stale-reveal fixture: this becomes 1 only when an ordinary detail

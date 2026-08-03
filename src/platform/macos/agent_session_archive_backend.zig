@@ -70,6 +70,13 @@ const State = struct {
     completion_without_snapshot: bool = false,
     completion_cancelled: bool = false,
     shutting_down: bool = false,
+    // Production never arms this. The dedicated AppKit archive fixture uses the gate to hold a
+    // refresh before discovery so it can replace the old source between a real pointer down and
+    // the immutable replacement publication. The worker owns the wait; the main actor continues
+    // rendering the retained snapshot throughout.
+    test_gate_enabled: std.atomic.Value(bool) = .init(false),
+    test_gate_reached: std.atomic.Value(bool) = .init(false),
+    test_gate_released: std.atomic.Value(bool) = .init(true),
 
     fn release(self: *State) void {
         if (self.refs.fetchSub(1, .acq_rel) != 1) return;
@@ -175,6 +182,20 @@ pub const Backend = struct {
         return true;
     }
 
+    /// Test-only synchronization for the isolated AppKit archive fixture. A caller must arm it
+    /// before the ordinary refresh input submits a worker; no environment/config path enables it.
+    pub fn setTestGate(self: *Backend, blocked: bool) void {
+        const state = self.state orelse return;
+        state.test_gate_reached.store(false, .release);
+        state.test_gate_released.store(!blocked, .release);
+        state.test_gate_enabled.store(blocked, .release);
+    }
+
+    pub fn testGateReached(self: *const Backend) bool {
+        const state = self.state orelse return false;
+        return state.test_gate_reached.load(.acquire);
+    }
+
     pub fn takeResult(self: *Backend) ?Result {
         const state = self.state orelse return null;
         state.mutex.lockUncancelable(state.io);
@@ -217,6 +238,7 @@ fn finishWithoutResult(state: *State) void {
 fn worker(job: *Job) void {
     const state = job.state;
     const generation = job.generation;
+    waitForTestGate(state, generation);
     const published = scan(state, job.home, generation);
     state.allocator.free(job.home);
     state.allocator.destroy(job);
@@ -231,6 +253,18 @@ fn worker(job: *Job) void {
     }
     state.mutex.unlock(state.io);
     state.release();
+}
+
+fn waitForTestGate(state: *State, generation: u64) void {
+    if (!state.test_gate_enabled.load(.acquire)) return;
+    state.test_gate_reached.store(true, .release);
+    while (!state.test_gate_released.load(.acquire)) {
+        if (cancelled(state, generation)) break;
+        // This is a detached scanner only. The main actor keeps the completed list and can
+        // release the gate without waiting for filesystem discovery or JSON parsing.
+        std.Io.sleep(state.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+    }
+    state.test_gate_reached.store(false, .release);
 }
 
 fn publish(state: *State, generation: u64, result: *Result) bool {
@@ -631,6 +665,39 @@ test "archive cancellation fences only the inflight generation and reports a ret
         owned.deinit(std.testing.allocator);
     }
     try std.testing.expect(result.complete and result.retain_previous and result.cancelled);
+}
+
+test "archive worker smoke gate waits without blocking the releasing actor" {
+    var backend = try Backend.init(std.testing.allocator, std.testing.io);
+    defer backend.deinit();
+    backend.setTestGate(true);
+
+    const Probe = struct {
+        backend: *Backend,
+        finished: std.atomic.Value(bool) = .init(false),
+
+        fn run(self: *@This()) void {
+            waitForTestGate(self.backend.state.?, 1);
+            self.finished.store(true, .release);
+        }
+    };
+    var probe = Probe{ .backend = &backend };
+    const thread = try std.Thread.spawn(.{}, Probe.run, .{&probe});
+    defer thread.join();
+
+    var spins: usize = 0;
+    while (!backend.testGateReached() and spins < 1_000) : (spins += 1) {
+        std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+    }
+    try std.testing.expect(backend.testGateReached());
+    try std.testing.expect(!probe.finished.load(.acquire));
+
+    backend.setTestGate(false);
+    spins = 0;
+    while (!probe.finished.load(.acquire) and spins < 1_000) : (spins += 1) {
+        std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+    }
+    try std.testing.expect(probe.finished.load(.acquire));
 }
 
 test "cancelled archive generation cannot publish a replacement snapshot" {

@@ -8100,8 +8100,20 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 gateReached: {
                     maru_macos_app_session_agent_session_archive_detail_smoke_gate_reached(session) != 0
                 },
+                setScanGate: { blocked in
+                    maru_macos_app_session_set_agent_session_archive_smoke_gate(session, blocked ? 1 : 0) == Self.statusOK
+                },
+                scanGateReached: {
+                    maru_macos_app_session_agent_session_archive_smoke_gate_reached(session) != 0
+                },
                 click: { probe in
                     self.dispatchArchiveSmokeClick(probe, in: view, window: window)
+                },
+                pointerDown: { probe in
+                    self.dispatchArchiveSmokePointerDown(probe, in: view, window: window)
+                },
+                pointerUp: { probe in
+                    self.dispatchArchiveSmokePointerUp(probe, in: view, window: window)
                 },
                 shortcut: { shortcut in
                     self.dispatchArchiveSmokeShortcut(shortcut, in: view, window: window)
@@ -8222,6 +8234,18 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         in view: MaruMetalTerminalView,
         window: NSWindow
     ) -> Bool {
+        dispatchArchiveSmokePointerDown(probe, in: view, window: window) &&
+        dispatchArchiveSmokePointerUp(probe, in: view, window: window)
+    }
+
+    /// The snapshot-replace fixture deliberately separates the ordinary mouse lifecycle. The
+    /// probe is copied from a published tree before replacement; this method still routes its
+    /// down through the same view handler that a user click uses.
+    private func dispatchArchiveSmokePointerDown(
+        _ probe: MaruAppHostAgentSessionArchiveSmokeProbe,
+        in view: MaruMetalTerminalView,
+        window: NSWindow
+    ) -> Bool {
         guard probe.present != 0, probe.enabled != 0, probe.width_px > 0, probe.height_px > 0 else { return false }
         let scale = window.backingScaleFactor
         guard scale > 0 else { return false }
@@ -8240,7 +8264,28 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             eventNumber: 0,
             clickCount: 1,
             pressure: 1
-        ), let up = NSEvent.mouseEvent(
+        ) else { return false }
+        view.mouseDown(with: down)
+        return true
+    }
+
+    /// Completes an already-started fixture pointer lifecycle at the same backing coordinate.
+    /// It intentionally does not re-probe: a fresh capability here would hide the stale-up race
+    /// instead of exercising the product's capture reconciliation.
+    private func dispatchArchiveSmokePointerUp(
+        _ probe: MaruAppHostAgentSessionArchiveSmokeProbe,
+        in view: MaruMetalTerminalView,
+        window: NSWindow
+    ) -> Bool {
+        guard probe.present != 0, probe.enabled != 0, probe.width_px > 0, probe.height_px > 0 else { return false }
+        let scale = window.backingScaleFactor
+        guard scale > 0 else { return false }
+        let backingX = CGFloat(probe.x_px + probe.width_px / 2)
+        let backingY = CGFloat(probe.y_px + probe.height_px / 2)
+        let local = NSPoint(x: backingX / scale, y: view.bounds.height - (backingY / scale))
+        let location = view.convert(local, to: nil)
+        let timestamp = ProcessInfo.processInfo.systemUptime
+        guard let up = NSEvent.mouseEvent(
             with: .leftMouseUp,
             location: location,
             modifierFlags: [],
@@ -8251,7 +8296,6 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             clickCount: 1,
             pressure: 0
         ) else { return false }
-        view.mouseDown(with: down)
         view.mouseUp(with: up)
         return true
     }
@@ -8309,7 +8353,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private func replaceArchiveSmokeRevealSource() -> Bool {
         guard isAgentSessionArchiveSmokeMode,
               let scenario = ProcessInfo.processInfo.environment["MARU_AGENT_SESSION_ARCHIVE_SMOKE_SCENARIO"],
-              scenario == "reveal-recheck-pointer" || scenario == "detail-stale",
+              scenario == "reveal-recheck-pointer" || scenario == "detail-stale" || scenario == "snapshot-replace-pointer",
               let source = ProcessInfo.processInfo.environment["MARU_AGENT_SESSION_ARCHIVE_SMOKE_REVEAL_PATH"],
               let replacement = ProcessInfo.processInfo.environment["MARU_AGENT_SESSION_ARCHIVE_SMOKE_REPLACEMENT_PATH"]
         else { return false }

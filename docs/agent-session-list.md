@@ -586,6 +586,17 @@ titlebar launcher와 dock slot만 관측하도록 한다.
   surface id·전체 Term 수 불변을 한 cold AppKit process에서 확인한다. 이 scenario는 provider action을 실행하지 않으며,
   `same card toggle`이 별도 tab/surface를 만들지 않고 detail capability와 worker request만 정확히 폐기·재발급하는지
   증명한다.
+- **snapshot-replace stale-up scenario**는 detail이 ready인 기존 completed tree에서만 시작한다. fixture는 일반
+  refresh slot을 실제 pointer click해 archive scan을 요청하고, fixture 전용 scan gate가 worker discovery 전에 도달한
+  것을 기다린다. 그동안 old snapshot·ready action은 그대로 paint된다. fixture는 그 published resume rect에
+  `mouseDown`만 보낸 뒤 source를 같은 디렉터리에서 atomic replace하고 gate를 푼다. 새 immutable snapshot이
+  publish되면 exact `{provider, session_id, device, inode}`가 달라진 disclosure는 stale이 되고, replacement card에는
+  old detail capability를 materialize하지 않으며 old pointer capture와 action table을 먼저 폐기해야 한다. 그 다음
+  **old backing rect에** 일반 `mouseUp`을 보내도
+  fake provider argv·새 Term·external-open이 하나도 생기지 않고 active terminal surface id·전체 Term 수가
+  baseline과 같아야 한다. source/ID/path/원문이나 callable action identity는 fixture ABI를 통과하지 않는다.
+  scan gate와 refresh probe는 이 named isolated smoke scenario에서만 host가 명시적으로 사용하며 일반 refresh,
+  provider history, 제품 설정에는 도달하지 않는다.
 - reveal 성공 scenario도 host의 외부 앱 열기를 호출하지 않는다. Swift가 smoke 모드에서 same
   `take_file_tree_external_open` consumer를 drain해 allowlisted fixture token과 횟수만 summary에 기록한다.
 - artifact는 ready session **목록**, loading/ready/stale inline expansion의 **1920×960 backing-pixel fixture 창** 제품 Metal PPM·PNG와 redacted key/value summary다. 목록 capture는 published card/action tree만 확인한 첫 frame이 아니라 detached rich-text artifact가 poll·atlas 연결된 뒤의 다음 ordinary frame에서만 요청한다. 한 프레임 뒤 종료하는

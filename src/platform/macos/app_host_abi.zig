@@ -109,8 +109,8 @@ pub const AgentSessionArchiveSmokeProbe = extern struct {
     enabled: u32 = 0,
 };
 
-test "ABI v159 app instance lease result values match the C header" {
-    try std.testing.expectEqual(@as(u32, 159), abi_version);
+test "ABI v160 app instance lease result values match the C header" {
+    try std.testing.expectEqual(@as(u32, 160), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -435,6 +435,27 @@ pub export fn maru_macos_app_session_agent_session_archive_detail_smoke_gate_rea
     return @intFromBool(app_session.agentSessionArchiveDetailSmokeGateReached());
 }
 
+/// AS4 snapshot-replace fixture-only synchronization. This has no archive/action mutation
+/// capability: it can only hold/release a detached scan before discovery.
+pub export fn maru_macos_app_session_set_agent_session_archive_smoke_gate(
+    session: ?*AppSession,
+    blocked: u32,
+) c_int {
+    const app_session = session orelse return @intFromEnum(Status.null_out);
+    if (blocked > 1) return @intFromEnum(Status.invalid_config);
+    app_session.setAgentSessionArchiveSmokeGate(blocked != 0);
+    return @intFromEnum(Status.ok);
+}
+
+/// Read-only companion for the fixture's bounded wait. A false result means an unarmed gate or
+/// a worker that has not reached it yet.
+pub export fn maru_macos_app_session_agent_session_archive_smoke_gate_reached(
+    session: ?*const AppSession,
+) u32 {
+    const app_session = session orelse return 0;
+    return @intFromBool(app_session.agentSessionArchiveSmokeGateReached());
+}
+
 /// Closed-fixture evidence only. The host can read this after dispatching a real pointer event,
 /// but cannot use it to mutate archive state or invoke an action.
 pub export fn maru_macos_app_session_agent_session_archive_smoke_stale_reveal_count(
@@ -488,6 +509,7 @@ pub export fn maru_macos_app_session_agent_session_archive_smoke_probe(
         c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_FOCUS_LIVE => .archive_focus_live,
         c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_DOCK_AGENT_SESSIONS => .dock_agent_sessions,
         c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_DOCK_LAUNCHER => .dock_launcher,
+        c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_REFRESH => .archive_refresh,
         else => return @intFromEnum(Status.invalid_config),
     };
     const probe = app_session.agentSessionArchiveSmokeProbe(typed_target);
@@ -5294,6 +5316,7 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@as(u32, c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_FOCUS_LIVE), @intFromEnum(session_mod.AgentSessionArchiveSmokeProbeTarget.archive_focus_live));
     try std.testing.expectEqual(@as(u32, c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_DOCK_AGENT_SESSIONS), @intFromEnum(session_mod.AgentSessionArchiveSmokeProbeTarget.dock_agent_sessions));
     try std.testing.expectEqual(@as(u32, c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_DOCK_LAUNCHER), @intFromEnum(session_mod.AgentSessionArchiveSmokeProbeTarget.dock_launcher));
+    try std.testing.expectEqual(@as(u32, c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_REFRESH), @intFromEnum(session_mod.AgentSessionArchiveSmokeProbeTarget.archive_refresh));
     try std.testing.expectEqual(@sizeOf(c.MaruAppHostAgentSessionArchiveSmokeProbe), @sizeOf(AgentSessionArchiveSmokeProbe));
     try std.testing.expectEqual(@alignOf(c.MaruAppHostAgentSessionArchiveSmokeProbe), @alignOf(AgentSessionArchiveSmokeProbe));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostAgentSessionArchiveSmokeProbe, "request_id"), @offsetOf(AgentSessionArchiveSmokeProbe, "request_id"));
@@ -5704,6 +5727,14 @@ test "macOS app exported session API reports null outputs as ABI errors" {
     try std.testing.expectEqual(
         @as(u32, 0),
         maru_macos_app_session_agent_session_archive_detail_smoke_gate_reached(null),
+    );
+    try std.testing.expectEqual(
+        @as(c_int, @intFromEnum(Status.null_out)),
+        maru_macos_app_session_set_agent_session_archive_smoke_gate(null, 0),
+    );
+    try std.testing.expectEqual(
+        @as(u32, 0),
+        maru_macos_app_session_agent_session_archive_smoke_gate_reached(null),
     );
     try std.testing.expectEqual(
         @as(u64, 0),

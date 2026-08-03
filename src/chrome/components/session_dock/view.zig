@@ -292,6 +292,24 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
     const right_ink_edge = refresh_x + @as(i32, @intCast(props.cell_width_px * 2));
     const expected_right_edge: i32 = @intFromFloat(@floor(header.rect.x + header.rect.width - @as(f32, @floatFromInt(props.cell_width_px))));
     try std.testing.expect(right_ink_edge <= expected_right_edge);
+
+    // The loading indicator must not re-anchor at the outer header edge. It is a one-cell
+    // glyph optically centred in the same two-cell slot as the registered refresh SVG.
+    var loading_props = props;
+    loading_props.loading = true;
+    const loading_out = try view(loading_props, frame, .{}, &tk, .{ .ops = &ops, .runs = &runs, .text_bytes = &text_bytes });
+    var spinner_origin_x: ?i32 = null;
+    for (loading_out.ops) |op| switch (op) {
+        .text => |text| for (text.runs) |run| {
+            if (std.mem.eql(u8, run.text, spinner(loading_props.spinner_phase))) {
+                spinner_origin_x = text.origin.x;
+                try std.testing.expect(!text.wide_icons);
+            }
+        },
+        else => {},
+    };
+    const spinner_x = spinner_origin_x orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(refresh_x + @as(i32, @intCast(props.cell_width_px / 2)), spinner_x);
 }
 
 test "SessionDock partial card never emits a CoreText cell that crosses its published clip" {

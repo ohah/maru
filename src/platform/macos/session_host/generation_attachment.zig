@@ -11,6 +11,7 @@ const contract = @import("generation_attachment_contract.zig");
 const executed_response_mod = @import("executed_response.zig");
 const generation_transport_mod = @import("generation_transport.zig");
 const generation_batch_adapter_mod = @import("generation_batch_adapter.zig");
+const framing = @import("framing.zig");
 const initial_snapshot_owner_mod = @import("initial_snapshot_owner.zig");
 const host_adapter_mod = @import("host_adapter.zig");
 const remote_attachment = @import("remote_attachment.zig");
@@ -49,7 +50,8 @@ pub const GenerationAttachment = struct {
         out: *GenerationAttachment,
         adapter: *host_adapter_mod.HostAdapter,
     ) generation_transport_mod.Error!void {
-        if (out.self_addr != 0 or out.lifecycle != .pristine or out.payload != null)
+        if (!rawLifecycleValid(&out.lifecycle) or out.self_addr != 0 or
+            out.lifecycle != .pristine or out.payload != null)
             return error.DestinationOccupied;
         _ = adapter;
         out.self_addr = @intFromPtr(out);
@@ -257,6 +259,7 @@ pub const GenerationAttachment = struct {
         self: *GenerationAttachment,
         adapter: *host_adapter_mod.HostAdapter,
     ) DeinitOutcome {
+        if (!rawLifecycleValid(&self.lifecycle)) return .corrupt;
         if (self.lifecycle == .terminal)
             return if (self.self_addr == @intFromPtr(self)) .already_terminal else .corrupt;
         if (!self.valid()) return .corrupt;
@@ -313,7 +316,18 @@ pub const GenerationAttachment = struct {
     }
 
     pub fn allowsMutation(self: *const GenerationAttachment) bool {
-        return self.payloadConst().allowsMutation();
+        if (!self.payloadConst().allowsMutation()) return false;
+        return generation_transport_mod.mutationAllowedOwned(
+            @constCast(&self.transport),
+            @intFromPtr(self),
+        );
+    }
+
+    pub fn hasBufferedControllerRevoke(self: *const GenerationAttachment) bool {
+        return generation_transport_mod.bufferedControllerRevokeOwned(
+            @constCast(&self.transport),
+            @intFromPtr(self),
+        );
     }
 
     pub fn statePtr(self: *GenerationAttachment) *remote_attachment.State {
@@ -329,6 +343,36 @@ pub const GenerationAttachment = struct {
         return self.payloadMut().initScreen(codec);
     }
 
+    pub fn sendInput(
+        self: *GenerationAttachment,
+        bytes: []const u8,
+    ) generation_transport_mod.InputError!void {
+        if (!self.valid() or self.lifecycle != .attached) return error.InvalidOwner;
+        return self.transport.sendInput(bytes);
+    }
+
+    pub fn sendInputNonBlocking(
+        self: *GenerationAttachment,
+        bytes: []const u8,
+    ) generation_transport_mod.InputError!usize {
+        if (!self.valid() or self.lifecycle != .attached) return error.InvalidOwner;
+        return self.transport.sendInputNonBlocking(bytes);
+    }
+
+    pub fn pumpPendingOutput(
+        self: *GenerationAttachment,
+    ) generation_transport_mod.InputError!bool {
+        if (!self.valid() or self.lifecycle != .attached) return error.InvalidOwner;
+        return self.transport.pumpPendingOutput();
+    }
+
+    pub fn fenceRevoke(
+        self: *GenerationAttachment,
+    ) generation_transport_mod.InputError!generation_transport_mod.RevokeFence {
+        if (!self.valid() or self.lifecycle != .attached) return error.InvalidOwner;
+        return self.transport.fenceRevoke();
+    }
+
     pub fn pumpScreen(
         self: *GenerationAttachment,
         io: std.Io,
@@ -336,12 +380,28 @@ pub const GenerationAttachment = struct {
         return self.payloadMut().pumpScreen(io);
     }
 
-    pub fn applyValidatedRevoked(self: *GenerationAttachment, generation: u64) anyerror!void {
-        return self.payloadMut().applyValidatedRevoked(generation);
+    pub fn applyValidatedRevokedAndFence(
+        self: *GenerationAttachment,
+        generation: u64,
+    ) anyerror!generation_transport_mod.RevokeFence {
+        const permit = try generation_transport_mod.beginControllerRevokeOwned(
+            &self.transport,
+            @intFromPtr(self),
+        );
+        // revoke_pending already rejects every input admission while retaining only the one-shot
+        // pending-wire cleanup authority. Every exit consumes it into absorbing revoked state.
+        defer generation_transport_mod.finishControllerRevokeOwned(
+            &self.transport,
+            @intFromPtr(self),
+            permit,
+        ) catch @panic("generation revoke authority close failed");
+        try self.payloadMut().applyValidatedRevoked(generation);
+        return self.transport.fenceRevoke();
     }
 
     fn valid(self: *const GenerationAttachment) bool {
-        return self.self_addr == @intFromPtr(self) and self.lifecycle != .pristine;
+        return rawLifecycleValid(&self.lifecycle) and
+            self.self_addr == @intFromPtr(self) and self.lifecycle != .pristine;
     }
 
     fn terminalizeTransport(self: *GenerationAttachment) void {
@@ -361,6 +421,25 @@ pub const GenerationAttachment = struct {
         return if (self.payload) |*payload| payload else @panic("generation attachment payload missing");
     }
 };
+
+fn rawLifecycleValid(value: *const Lifecycle) bool {
+    const raw = @as(*const u8, @ptrCast(value)).*;
+    return raw <= @intFromEnum(Lifecycle.terminal);
+}
+
+test "CR3a-2c3a attachment facade raw lifecycle sweep is fail closed in ReleaseFast" {
+    var attachment: GenerationAttachment = .{};
+    const lifecycle_raw: *u8 = @ptrCast(&attachment.lifecycle);
+    var raw: u16 = 0;
+    while (raw <= std.math.maxInt(u8)) : (raw += 1) {
+        lifecycle_raw.* = @intCast(raw);
+        try std.testing.expectError(error.InvalidOwner, attachment.sendInput("x"));
+        try std.testing.expectError(error.InvalidOwner, attachment.sendInputNonBlocking("x"));
+        try std.testing.expectError(error.InvalidOwner, attachment.pumpPendingOutput());
+        try std.testing.expectError(error.InvalidOwner, attachment.fenceRevoke());
+    }
+    attachment = .{};
+}
 
 const AttachmentReentrantFreeAllocator = struct {
     parent: std.mem.Allocator,
@@ -552,7 +631,7 @@ test "CR3a-2a whole-parent restore cannot revive accepted response or transport 
     try std.testing.expectEqual(DeinitOutcome.corrupt, attachment.finishResponse(&adapter));
 }
 
-test "CR3a-2b2 generation GUI pump transfers and releases a node-owned snapshot before canonical drop" {
+test "CR3a-2b2 CR3a-2c3a generation GUI pump transfers and revoke closes direct input authority" {
     try client_slot_mod.ClientSlot.initializeProcessRuntime();
     const allocator = std.testing.allocator;
     var client: @import("client.zig").Client = .{
@@ -645,7 +724,34 @@ test "CR3a-2b2 generation GUI pump transfers and releases a node-owned snapshot 
         adapter.slot.current.accounting_ledger.preflightDeinit(),
     );
 
+    // A validated revoke closes both the ordinary attachment wrapper and the independently
+    // reachable embedded transport. The original sealed controller role cannot revive input.
+    const revoke_pending = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .input_bytes, .stream_id = 0x2B5 },
+        "pending-before-revoke",
+    );
+    const pre_revoke_transport = attachment.transport;
+    logical_client.pending_outbound = .{ .frame = revoke_pending, .stream_id = 0x2B5 };
+    try std.testing.expectEqual(
+        generation_transport_mod.RevokeFence.cancelled_before_write,
+        try attachment.applyValidatedRevokedAndFence(2),
+    );
+    try std.testing.expect(logical_client.pending_outbound == null);
+    try std.testing.expectError(error.Unauthorized, attachment.sendInput("after-revoke"));
+    try std.testing.expectError(
+        error.Unauthorized,
+        attachment.transport.sendInputNonBlocking("direct-after-revoke"),
+    );
+    try std.testing.expect(logical_client.pending_outbound == null);
+    attachment.transport = pre_revoke_transport;
+    try std.testing.expectError(
+        error.Unauthorized,
+        attachment.transport.sendInputNonBlocking("restored-pre-revoke-bytes"),
+    );
+
     // RemoteAttachment queue append OOM도 generation token을 즉시 exact-once release한다.
+    // Revoke fencing is deliberately tested first because this OOM fail-closes the connection.
     attachment.payload.?.pending_batches.deinit(allocator);
     attachment.payload.?.pending_batches = .empty;
     var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
@@ -738,7 +844,6 @@ test "CR3a-2b2 generation GUI pump transfers a direct parser frame through the n
     try client_slot_mod.ClientSlot.initializeProcessRuntime();
     const allocator = std.testing.allocator;
     const protocol = @import("protocol.zig");
-    const framing = @import("framing.zig");
     const socket_server = @import("socket_server.zig");
     var fds: [2]std.c.fd_t = undefined;
     try std.testing.expectEqual(

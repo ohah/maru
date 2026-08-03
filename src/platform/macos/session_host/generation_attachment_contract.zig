@@ -75,6 +75,11 @@ pub const AttachmentRole = enum(u8) {
     observer,
 };
 
+pub fn attachmentRoleRawValid(value: *const AttachmentRole) bool {
+    const raw = @as(*const u8, @ptrCast(value)).*;
+    return raw <= @intFromEnum(AttachmentRole.observer);
+}
+
 /// Immutable, storage-neutral half of a prepared attachment binding. The
 /// actual pin and cleanup entry remain private to ClientNode; this value only
 /// lets the final-address owner reject foreign request or generation splices.
@@ -97,7 +102,8 @@ pub const BindingIdentity = struct {
     }
 
     pub fn valid(self: @This()) bool {
-        return self.binding_incarnation != 0 and
+        return attachmentRoleRawValid(&self.role) and
+            self.binding_incarnation != 0 and
             self.binding_storage_addr != 0 and
             self.destination_addr != 0 and
             self.binding_reservation_id != 0 and
@@ -455,6 +461,30 @@ test "CR3a-2a binding identity rejects zero and foreign request splices" {
         .pid = 71,
         .process_nonce = 73,
     }) == null);
+}
+
+test "CR3a-2c3a binding identity rejects every invalid raw attachment role" {
+    var identity = BindingIdentity{
+        .binding_incarnation = 1,
+        .binding_storage_addr = 2,
+        .destination_addr = 3,
+        .binding_reservation_id = 4,
+        .slot_incarnation = 5,
+        .node_incarnation = 6,
+        .host_id = 7,
+        .connection_generation = 1,
+        .runtime_id = 8,
+        .role = .controller,
+        .pid = 9,
+        .process_nonce = 10,
+    };
+    const role_raw: *u8 = @ptrCast(&identity.role);
+    var raw: u16 = @intFromEnum(AttachmentRole.observer) + 1;
+    while (raw <= std.math.maxInt(u8)) : (raw += 1) {
+        role_raw.* = @intCast(raw);
+        try std.testing.expect(!identity.valid());
+        try std.testing.expect(!identity.matches(identity));
+    }
 }
 
 test "CR3a-2a neutral lifecycle and request vocabularies are closed" {

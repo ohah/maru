@@ -880,6 +880,15 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   backpressure, revoke-before-input, zero/partial pending frame, controller/observer, copied/moved/fork/foreign-thread,
   stale slot/node/binding, cleanup busy, OOM/socket failure를 production type과 Darwin socketpair로 검증한다. facade public
   lifecycle은 raw `u8` 0...255 sweep를 Debug/ReleaseFast에서 통과해야 하고 invalid tag는 Client/node/wire mutation 0이다.
+  현재 2c3a 자동 증거는 `GenerationTransport`/`GenerationAttachment` lifecycle 전수 sweep, canonical registry/entry/role
+  raw-first admission, direct `ClientSlot` authority의 foreign-thread·fork·invalid-role 전수 거부, stale slot/node/binding,
+  controller/observer, allocator OOM·닫힌 socket, zero/partial pending frame을 production-type unit과 Darwin socketpair로
+  실행한다. `RemoteRuntime` generation attach 제품 경로는 partial frame revoke가
+  `outbound_partial_write` poison 뒤 `ConnectionClosed`로 닫히는 것까지 real socket으로 검증한다. bound drop은 controller
+  `live -> revoked`와 `bound -> drop_active`를 같은 registered-node operation에서 게시하고 pending revoke·live/pending clear를
+  mutation 없이 거부한다. 이 증거는 2c3a만 닫으며 capability/RPC/control/event/source-zero는 2c3b~e, raw field 제거는 2c4다.
+  connection-wide buffered revoke는 generation 조회와 `Client` blocking/deadline RPC의 pre-flush gate를 함께 통과해야 하며,
+  sibling RPC·detach가 pending mutation wire를 보내지 않는 socketpair 회귀를 포함한다.
   `GenerationTransport`는 SSOT의 exact 15-declaration primitive set(`readAttachmentBatch` 제외,
   `purgeEndedStream` 포함), closed `RuntimeRequest` variants와 exact-field
   `GenerationCapabilities`만 노출하고 arbitrary method-string `call`, generic callback, Client-containing aggregate,

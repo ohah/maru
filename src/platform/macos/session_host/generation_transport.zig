@@ -25,6 +25,21 @@ pub const Error = client_mod.PreparedBlockingRpcError || error{
     InvalidResponseDestination,
 };
 
+pub const InputError = error{
+    Busy,
+    InvalidOwner,
+    Unauthorized,
+    ResourceExhausted,
+    ConnectionClosed,
+    ProtocolError,
+};
+
+pub const RevokeFence = enum {
+    no_pending_stream_frame,
+    cancelled_before_write,
+    partial_frame_requires_close,
+};
+
 const Lifecycle = enum(u8) {
     pristine,
     live,
@@ -225,6 +240,42 @@ pub const GenerationTransport = struct {
         try client.abortPreparedBlockingRpcStorage(&self.prepared_storage);
     }
 
+    pub fn sendInput(self: *GenerationTransport, bytes: []const u8) InputError!void {
+        const client = try self.borrowInputClient();
+        client.sendInput(self.bound_stream_id, bytes) catch |err| return mapInputError(err);
+    }
+
+    pub fn sendInputNonBlocking(
+        self: *GenerationTransport,
+        bytes: []const u8,
+    ) InputError!usize {
+        const client = try self.borrowInputClient();
+        return client.sendInputNonBlocking(self.bound_stream_id, bytes) catch |err|
+            return mapInputError(err);
+    }
+
+    pub fn pumpPendingOutput(self: *GenerationTransport) InputError!bool {
+        const client = self.borrowClient() orelse return error.InvalidOwner;
+        const slot: *client_slot_mod.ClientSlot = @ptrFromInt(self.slot_addr);
+        if (!slot.streamOperationPermitIdle()) return error.Busy;
+        // Output progress is connection-wide and observer-safe, but a buffered controller revoke
+        // must win before any sibling flushes an already admitted mutation frame.
+        if (client.hasBufferedControllerRevoke()) return false;
+        return client.pumpPendingOutput() catch |err| return mapInputError(err);
+    }
+
+    pub fn fenceRevoke(self: *GenerationTransport) InputError!RevokeFence {
+        const client = self.borrowClient() orelse return error.InvalidOwner;
+        if (!self.controllerRevokePending()) return error.Unauthorized;
+        const result = client.fenceRevokedStream(self.bound_stream_id) catch |err|
+            return mapInputError(err);
+        return switch (result) {
+            .no_pending_stream_frame => .no_pending_stream_frame,
+            .cancelled_before_write => .cancelled_before_write,
+            .partial_frame_requires_close => .partial_frame_requires_close,
+        };
+    }
+
     pub fn readInitialSnapshot(
         self: *GenerationTransport,
         out: *initial_snapshot_owner_mod.InitialSnapshotOwner,
@@ -335,7 +386,8 @@ pub const GenerationTransport = struct {
     }
 
     fn borrowClient(self: *GenerationTransport) ?*client_mod.Client {
-        if (self.self_addr != @intFromPtr(self) or self.lifecycle != .live or
+        if (!rawLifecycleValid(&self.lifecycle) or self.self_addr != @intFromPtr(self) or
+            self.lifecycle != .live or
             self.slot_addr == 0 or self.owner_seal_addr == 0 or self.owner_size == 0 or
             self.transport_incarnation == 0 or
             self.connection_generation != 1 or self.pid != currentPid() or
@@ -343,7 +395,8 @@ pub const GenerationTransport = struct {
             return null;
         const owner_seal: *const contract.TransportOwnerSeal = @ptrFromInt(self.owner_seal_addr);
         const slot: *client_slot_mod.ClientSlot = @ptrFromInt(self.slot_addr);
-        if (!slot.valid() or slot.incarnation.tagged != self.slot_incarnation or
+        if (!bindingRoleRawValid(&self.binding_reservation.identity.role) or
+            !slot.valid() or slot.incarnation.tagged != self.slot_incarnation or
             slot.current.incarnation.tagged != self.node_incarnation or
             slot.current.client.host_id != self.host_id or
             slot.process_nonce != self.process_nonce)
@@ -352,6 +405,39 @@ pub const GenerationTransport = struct {
         if (canonical_seal != owner_seal or !canonical_seal.valid(self.transport_incarnation))
             return null;
         return slot.logicalClient();
+    }
+
+    fn borrowInputClient(self: *GenerationTransport) InputError!*client_mod.Client {
+        const client = self.borrowClient() orelse return error.InvalidOwner;
+        if (!self.controllerBindingValid()) return error.Unauthorized;
+        const slot: *client_slot_mod.ClientSlot = @ptrFromInt(self.slot_addr);
+        if (!slot.streamOperationPermitIdle() or client.hasBufferedControllerRevoke())
+            return error.Busy;
+        return client;
+    }
+
+    fn controllerBindingValid(self: *const GenerationTransport) bool {
+        if (self.bound_stream_id == 0 or
+            !bindingRoleRawValid(&self.binding_reservation.identity.role) or
+            self.binding_reservation.identity.role != .controller or self.slot_addr == 0)
+            return false;
+        const slot: *client_slot_mod.ClientSlot = @ptrFromInt(self.slot_addr);
+        return slot.controllerAuthorityLive(
+            self.binding_reservation,
+            self.bound_stream_id,
+        ) catch false;
+    }
+
+    fn controllerRevokePending(self: *const GenerationTransport) bool {
+        if (self.bound_stream_id == 0 or
+            !bindingRoleRawValid(&self.binding_reservation.identity.role) or
+            self.binding_reservation.identity.role != .controller or self.slot_addr == 0)
+            return false;
+        const slot: *client_slot_mod.ClientSlot = @ptrFromInt(self.slot_addr);
+        return slot.controllerRevokePending(
+            self.binding_reservation,
+            self.bound_stream_id,
+        ) catch false;
     }
 
     fn matchesPrepared(
@@ -366,6 +452,32 @@ pub const GenerationTransport = struct {
             );
     }
 };
+
+fn rawLifecycleValid(value: *const Lifecycle) bool {
+    const raw = @as(*const u8, @ptrCast(value)).*;
+    return raw <= @intFromEnum(Lifecycle.terminal);
+}
+
+fn bindingRoleRawValid(value: *const contract.AttachmentRole) bool {
+    return contract.attachmentRoleRawValid(value);
+}
+
+fn mapInputError(err: client_mod.ClientError) InputError {
+    return switch (err) {
+        error.AdminBusy => error.Busy,
+        error.Unauthorized => error.Unauthorized,
+        error.OutOfMemory, error.EventQueueFull => error.ResourceExhausted,
+        error.ConnectionClosed, error.WriteFailed => error.ConnectionClosed,
+        error.EndpointAbsent,
+        error.EndpointDenied,
+        error.EndpointTransient,
+        error.HandshakeFailed,
+        error.IncompatibleVersion,
+        error.ProtocolError,
+        error.ExternalMode,
+        => error.ProtocolError,
+    };
+}
 
 pub fn mintInPlace(
     out: *GenerationTransport,
@@ -384,7 +496,7 @@ pub fn mintInPlace(
         owner_addr == @intFromPtr(slot) or owner_addr == @intFromPtr(slot.current) or
         owner_addr == @intFromPtr(&slot.current.client) or owner_addr == @intFromPtr(owner_seal))
         return error.InvalidTransport;
-    if (out.self_addr != 0 or out.lifecycle != .pristine or
+    if (!rawLifecycleValid(&out.lifecycle) or out.self_addr != 0 or out.lifecycle != .pristine or
         owner_seal.self_addr != 0 or owner_seal.lifecycle != .pristine)
         return error.DestinationOccupied;
     if (!slot.valid() or owner_addr == 0) return error.InvalidTransport;
@@ -421,15 +533,79 @@ pub fn bindCommittedStreamOwned(
     owner_addr: usize,
     stream_id: u64,
 ) Error!void {
-    if (stream_id == 0 or transport.self_addr != @intFromPtr(transport) or
+    if (!rawLifecycleValid(&transport.lifecycle) or stream_id == 0 or
+        transport.self_addr != @intFromPtr(transport) or
         transport.lifecycle != .live or transport.owner_addr != owner_addr or
         transport.bound_stream_id != 0 or transport.borrowClient() == null)
         return error.InvalidTransport;
     transport.bound_stream_id = stream_id;
 }
 
-/// Owner-only no-I/O authority fence. It is module-level so the public transport facade remains
-/// exactly five methods; source boundaries pin its sole production caller to GenerationAttachment.
+pub fn beginControllerRevokeOwned(
+    transport: *GenerationTransport,
+    owner_addr: usize,
+) Error!client_slot_mod.StreamOperationPermit {
+    if (transport.owner_addr != owner_addr or transport.borrowClient() == null or
+        !transport.controllerBindingValid())
+        return error.InvalidTransport;
+    const slot: *client_slot_mod.ClientSlot = @ptrFromInt(transport.slot_addr);
+    const permit = slot.prepareStreamOperationPermit(
+        .controller_revoke,
+        owner_addr,
+        transport.transport_incarnation,
+        transport.binding_reservation.identity,
+    ) catch return error.InvalidTransport;
+    errdefer slot.abortStreamOperationPermit(permit) catch
+        @panic("controller revoke permit rollback failed");
+    slot.beginControllerRevoke(
+        transport.binding_reservation,
+        transport.bound_stream_id,
+    ) catch return error.InvalidTransport;
+    return permit;
+}
+
+pub fn finishControllerRevokeOwned(
+    transport: *GenerationTransport,
+    owner_addr: usize,
+    permit: client_slot_mod.StreamOperationPermit,
+) Error!void {
+    if (transport.owner_addr != owner_addr or transport.borrowClient() == null or
+        !transport.controllerRevokePending())
+        return error.InvalidTransport;
+    const slot: *client_slot_mod.ClientSlot = @ptrFromInt(transport.slot_addr);
+    if (!slot.streamOperationPermitLive(permit) or permit.kind != .controller_revoke)
+        return error.InvalidTransport;
+    slot.finishControllerRevoke(
+        transport.binding_reservation,
+        transport.bound_stream_id,
+    ) catch return error.InvalidTransport;
+    slot.consumeStreamOperationPermit(permit) catch return error.InvalidTransport;
+}
+
+/// GenerationAttachment's read-only UI admission query. It keeps the stream-local revoke lookup
+/// behind the sealed transport without expanding the planned 2c4 exact facade or exposing Client.
+pub fn mutationAllowedOwned(transport: *GenerationTransport, owner_addr: usize) bool {
+    if (transport.owner_addr != owner_addr) return false;
+    const client = transport.borrowClient() orelse return false;
+    if (!transport.controllerBindingValid()) return false;
+    const slot: *client_slot_mod.ClientSlot = @ptrFromInt(transport.slot_addr);
+    return slot.streamOperationPermitIdle() and
+        !client.hasBufferedControllerRevokeForStream(transport.bound_stream_id);
+}
+
+/// Connection-wide revoke ordering query for the final-address GenerationAttachment owner.
+/// Invalid ownership is conservatively busy so no raw Client RPC can flush mutation wire.
+pub fn bufferedControllerRevokeOwned(
+    transport: *GenerationTransport,
+    owner_addr: usize,
+) bool {
+    if (transport.owner_addr != owner_addr) return true;
+    const client = transport.borrowClient() orelse return true;
+    return client.hasBufferedControllerRevoke();
+}
+
+/// Owner-only no-I/O authority fence. It remains module-level so terminalization is not exposed as
+/// a general facade operation; source boundaries pin its sole production caller to the attachment.
 pub fn terminalizeOwned(transport: *GenerationTransport, owner_addr: usize) Error!void {
     if (preflightTerminalizeOwned(transport, owner_addr) != .ready)
         return error.InvalidTransport;
@@ -452,7 +628,8 @@ pub fn preflightTerminalizeOwned(
     transport: *GenerationTransport,
     owner_addr: usize,
 ) TerminalizeReadiness {
-    if (transport.self_addr != @intFromPtr(transport) or transport.lifecycle != .live or
+    if (!rawLifecycleValid(&transport.lifecycle) or
+        transport.self_addr != @intFromPtr(transport) or transport.lifecycle != .live or
         transport.owner_addr == 0 or transport.owner_addr != owner_addr or transport.owner_seal_addr == 0 or
         !client_mod.Client.preparedBlockingRpcStorageSettled(&transport.prepared_storage))
         return .invalid;
@@ -547,16 +724,56 @@ fn isForbiddenFacadeType(comptime T: type) bool {
         .optional => |info| isForbiddenFacadeType(info.child),
         .array => |info| isForbiddenFacadeType(info.child),
         .error_union => |info| isForbiddenFacadeType(info.payload),
+        .@"struct" => |info| blk: {
+            for (info.fields) |field| if (isForbiddenFacadeType(field.type)) break :blk true;
+            break :blk false;
+        },
+        .@"union" => |info| blk: {
+            for (info.fields) |field| if (isForbiddenFacadeType(field.type)) break :blk true;
+            break :blk false;
+        },
         else => false,
     };
 }
 
 comptime {
+    if (InputError != error{
+        Busy,
+        InvalidOwner,
+        Unauthorized,
+        ResourceExhausted,
+        ConnectionClosed,
+        ProtocolError,
+    }) @compileError("GenerationTransport InputError changed without updating CR3a-2c3a SSOT");
+    if (@TypeOf(GenerationTransport.sendInput) !=
+        fn (*GenerationTransport, []const u8) InputError!void or
+        @TypeOf(GenerationTransport.sendInputNonBlocking) !=
+            fn (*GenerationTransport, []const u8) InputError!usize or
+        @TypeOf(GenerationTransport.pumpPendingOutput) !=
+            fn (*GenerationTransport) InputError!bool or
+        @TypeOf(GenerationTransport.fenceRevoke) !=
+            fn (*GenerationTransport) InputError!RevokeFence)
+        @compileError("GenerationTransport input facade signature drifted");
+    const expected_revoke_fields = [_][]const u8{
+        "no_pending_stream_frame",
+        "cancelled_before_write",
+        "partial_frame_requires_close",
+    };
+    const actual_revoke_fields = std.meta.fields(RevokeFence);
+    if (actual_revoke_fields.len != expected_revoke_fields.len)
+        @compileError("GenerationTransport RevokeFence changed without updating SSOT");
+    for (actual_revoke_fields, expected_revoke_fields) |actual, expected|
+        if (!std.mem.eql(u8, actual.name, expected))
+            @compileError("GenerationTransport RevokeFence changed without updating SSOT");
     const methods = .{
         GenerationTransport.capabilities,
         GenerationTransport.prepareRequest,
         GenerationTransport.executePreparedRequest,
         GenerationTransport.abortPreparedRequest,
+        GenerationTransport.sendInput,
+        GenerationTransport.sendInputNonBlocking,
+        GenerationTransport.pumpPendingOutput,
+        GenerationTransport.fenceRevoke,
         GenerationTransport.poison,
     };
     for (methods) |method| {
@@ -711,6 +928,246 @@ test "CR3a-2a copied generation transport cannot prepare or mutate Client" {
     try transport.abortPreparedRequest(receipt);
     try terminalizeOwned(&transport, 0x103);
     try slot.abortAttachmentBinding(&binding, reservation);
+}
+
+test "CR3a-2c3a input facade rejects every invalid lifecycle and role byte before mutation" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0x2C3A,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    var slot: client_slot_mod.ClientSlot = undefined;
+    try client_slot_mod.ClientSlot.initInPlace(&slot, allocator, &client, 0x2C3A);
+    defer slot.deinit();
+    var transport: GenerationTransport = .{};
+    var binding: contract.PreparedAttachmentBinding = .{};
+    var lease: @import("connection_lease.zig").ConnectionLease = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0x2C3A1);
+    try mintInPlace(&transport, &slot, 0x2C3A2, @sizeOf(GenerationTransport), reservation);
+    try slot.current.cleanup_registry.bindStream(reservation.cleanup, reservation.identity, 17);
+    try bindCommittedStreamOwned(&transport, 0x2C3A2, 17);
+
+    const lifecycle_raw: *u8 = @ptrCast(&transport.lifecycle);
+    var raw: u16 = 0;
+    while (raw <= std.math.maxInt(u8)) : (raw += 1) {
+        if (raw == @intFromEnum(Lifecycle.live)) continue;
+        lifecycle_raw.* = @intCast(raw);
+        try std.testing.expectError(error.InvalidOwner, transport.sendInput("x"));
+        try std.testing.expectError(error.InvalidOwner, transport.sendInputNonBlocking("x"));
+        try std.testing.expectError(error.InvalidOwner, transport.pumpPendingOutput());
+        try std.testing.expectError(error.InvalidOwner, transport.fenceRevoke());
+        try std.testing.expect(slot.logicalClient().pending_outbound == null);
+    }
+    lifecycle_raw.* = @intFromEnum(Lifecycle.live);
+
+    const role_raw: *u8 = @ptrCast(&transport.binding_reservation.identity.role);
+    raw = @intFromEnum(contract.AttachmentRole.observer) + 1;
+    while (raw <= std.math.maxInt(u8)) : (raw += 1) {
+        role_raw.* = @intCast(raw);
+        try std.testing.expectError(error.InvalidOwner, transport.sendInputNonBlocking("x"));
+        try std.testing.expectError(error.InvalidOwner, transport.pumpPendingOutput());
+        try std.testing.expectError(error.InvalidOwner, transport.fenceRevoke());
+        try std.testing.expect(slot.logicalClient().pending_outbound == null);
+    }
+    role_raw.* = @intFromEnum(contract.AttachmentRole.controller);
+
+    var copied = transport;
+    try std.testing.expectError(error.InvalidOwner, copied.sendInputNonBlocking("x"));
+    try std.testing.expect(slot.logicalClient().pending_outbound == null);
+
+    transport.slot_incarnation += 1;
+    try std.testing.expectError(error.InvalidOwner, transport.sendInputNonBlocking("stale-slot"));
+    transport.slot_incarnation -= 1;
+    transport.node_incarnation += 1;
+    try std.testing.expectError(error.InvalidOwner, transport.sendInputNonBlocking("stale-node"));
+    transport.node_incarnation -= 1;
+    transport.binding_reservation.identity.binding_reservation_id += 1;
+    try std.testing.expectError(error.InvalidOwner, transport.sendInputNonBlocking("stale-binding"));
+    transport.binding_reservation.identity.binding_reservation_id -= 1;
+    try std.testing.expect(slot.logicalClient().pending_outbound == null);
+
+    const ThreadProbe = struct {
+        fn run(target: *GenerationTransport, rejected: *bool) void {
+            _ = target.sendInputNonBlocking("x") catch {
+                rejected.* = true;
+            };
+        }
+    };
+    var cross_thread_rejected = false;
+    var thread = try std.Thread.spawn(.{}, ThreadProbe.run, .{ &transport, &cross_thread_rejected });
+    thread.join();
+    try std.testing.expect(cross_thread_rejected);
+    try std.testing.expect(slot.logicalClient().pending_outbound == null);
+
+    const permit = try slot.prepareStreamOperationPermit(
+        .ended_purge,
+        transport.owner_addr,
+        transport.transport_incarnation,
+        reservation.identity,
+    );
+    try std.testing.expectError(error.Busy, transport.sendInputNonBlocking("x"));
+    try std.testing.expect(slot.logicalClient().pending_outbound == null);
+    try slot.abortStreamOperationPermit(permit);
+    try slot.current.cleanup_registry.beginBoundDrop(reservation.cleanup, reservation.identity, 17);
+    try terminalizeOwned(&transport, 0x2C3A2);
+    try slot.current.cleanup_registry.completeActiveDrop(reservation.cleanup, reservation.identity, 17);
+    slot.current.pin_owner.cleanup_pin_count -= 1;
+    binding.lifecycle = .terminal;
+}
+
+test "CR3a-2c3a observer binding rejects input but permits shared output progress" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0x2C3C,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    var slot: client_slot_mod.ClientSlot = undefined;
+    try client_slot_mod.ClientSlot.initInPlace(&slot, allocator, &client, 0x2C3C);
+    defer slot.deinit();
+    var transport: GenerationTransport = .{};
+    var binding: contract.PreparedAttachmentBinding = .{};
+    var lease: @import("connection_lease.zig").ConnectionLease = .{};
+    const reservation = try slot.reserveAttachmentBinding(
+        &binding,
+        &lease,
+        0x2C3C1,
+        .observer,
+    );
+    try mintInPlace(&transport, &slot, 0x2C3C2, @sizeOf(GenerationTransport), reservation);
+    try slot.current.cleanup_registry.bindStream(reservation.cleanup, reservation.identity, 29);
+    try bindCommittedStreamOwned(&transport, 0x2C3C2, 29);
+    try std.testing.expectError(error.Unauthorized, transport.sendInputNonBlocking("x"));
+    try std.testing.expect(try transport.pumpPendingOutput());
+    try std.testing.expectError(error.Unauthorized, transport.fenceRevoke());
+    try std.testing.expect(slot.logicalClient().pending_outbound == null);
+    try slot.current.cleanup_registry.beginBoundDrop(reservation.cleanup, reservation.identity, 29);
+    try terminalizeOwned(&transport, 0x2C3C2);
+    try slot.current.cleanup_registry.completeActiveDrop(reservation.cleanup, reservation.identity, 29);
+    slot.current.pin_owner.cleanup_pin_count -= 1;
+    binding.lifecycle = .terminal;
+}
+
+test "CR3a-2c3a input facade binds the sealed stream and preserves wire ownership" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    socket_server.setNoSigPipe(fds[0]);
+    defer _ = c.close(fds[1]);
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 0x2C3B,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    var slot: client_slot_mod.ClientSlot = undefined;
+    try client_slot_mod.ClientSlot.initInPlace(&slot, allocator, &client, 0x2C3B);
+    defer slot.deinit();
+    var transport: GenerationTransport = .{};
+    var binding: contract.PreparedAttachmentBinding = .{};
+    var lease: @import("connection_lease.zig").ConnectionLease = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0x2C3B1);
+    try mintInPlace(&transport, &slot, 0x2C3B2, @sizeOf(GenerationTransport), reservation);
+    try slot.current.cleanup_registry.bindStream(reservation.cleanup, reservation.identity, 23);
+    try bindCommittedStreamOwned(&transport, 0x2C3B2, 23);
+
+    const payload = "generation-input";
+    try std.testing.expectEqual(payload.len, try transport.sendInputNonBlocking(payload));
+    while (!(try transport.pumpPendingOutput())) {}
+    const expected = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .input_bytes, .stream_id = 23 },
+        payload,
+    );
+    defer allocator.free(expected);
+    const received = try allocator.alloc(u8, expected.len);
+    defer allocator.free(received);
+    var offset: usize = 0;
+    while (offset < received.len) {
+        const count = c.read(fds[1], received[offset..].ptr, received.len - offset);
+        try std.testing.expect(count > 0);
+        offset += @intCast(count);
+    }
+    try std.testing.expectEqualSlices(u8, expected, received);
+
+    const partial = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .input_bytes, .stream_id = 23 },
+        "partial",
+    );
+    slot.logicalClient().pending_outbound = .{
+        .frame = partial,
+        .offset = 1,
+        .stream_id = 23,
+    };
+    const revoke_permit = try beginControllerRevokeOwned(&transport, 0x2C3B2);
+    try std.testing.expectError(error.Unauthorized, transport.sendInputNonBlocking("late"));
+    try std.testing.expectEqual(
+        RevokeFence.partial_frame_requires_close,
+        try transport.fenceRevoke(),
+    );
+    try finishControllerRevokeOwned(&transport, 0x2C3B2, revoke_permit);
+    try std.testing.expectError(error.Unauthorized, transport.sendInputNonBlocking("restored"));
+    try std.testing.expect(slot.logicalClient().pending_outbound != null);
+
+    try slot.current.cleanup_registry.beginBoundDrop(reservation.cleanup, reservation.identity, 23);
+    try terminalizeOwned(&transport, 0x2C3B2);
+    try slot.current.cleanup_registry.completeActiveDrop(reservation.cleanup, reservation.identity, 23);
+    slot.current.pin_owner.cleanup_pin_count -= 1;
+    binding.lifecycle = .terminal;
+}
+
+test "CR3a-2c3a input facade maps allocation and socket failure without authority drift" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    var client: client_mod.Client = .{
+        .allocator = failing.allocator(),
+        .fd = -1,
+        .host_id = 0x2C3D,
+        .parser = framing.FrameParser.init(failing.allocator()),
+    };
+    var slot: client_slot_mod.ClientSlot = undefined;
+    try client_slot_mod.ClientSlot.initInPlace(&slot, allocator, &client, 0x2C3D);
+    defer slot.deinit();
+    var transport: GenerationTransport = .{};
+    var binding: contract.PreparedAttachmentBinding = .{};
+    var lease: @import("connection_lease.zig").ConnectionLease = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0x2C3D1);
+    try mintInPlace(&transport, &slot, 0x2C3D2, @sizeOf(GenerationTransport), reservation);
+    try slot.current.cleanup_registry.bindStream(reservation.cleanup, reservation.identity, 31);
+    try bindCommittedStreamOwned(&transport, 0x2C3D2, 31);
+
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(
+        error.ResourceExhausted,
+        transport.sendInputNonBlocking("allocation-failure"),
+    );
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expect(slot.logicalClient().pending_outbound == null);
+
+    failing.fail_index = std.math.maxInt(usize);
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        transport.sendInputNonBlocking("closed-socket"),
+    );
+    try std.testing.expect(try slot.controllerAuthorityLive(reservation, 31));
+    try std.testing.expect(slot.logicalClient().unusable);
+    try slot.current.cleanup_registry.beginBoundDrop(reservation.cleanup, reservation.identity, 31);
+    try terminalizeOwned(&transport, 0x2C3D2);
+    try slot.current.cleanup_registry.completeActiveDrop(reservation.cleanup, reservation.identity, 31);
+    slot.current.pin_owner.cleanup_pin_count -= 1;
+    binding.lifecycle = .terminal;
 }
 
 test "CR3a-2a response destination cannot splice binding storage before wire" {

@@ -10,7 +10,7 @@ const contract = @import("generation_attachment_contract.zig");
 
 pub const max_entries: usize = 4096;
 
-pub const RegistryLifecycle = enum(u8) {
+const RegistryLifecycle = enum(u8) {
     pristine,
     live,
     dead,
@@ -22,6 +22,28 @@ const EntryLifecycle = enum(u8) {
     bound,
     drop_active,
 };
+
+const ControllerAuthority = enum(u8) {
+    unavailable,
+    live,
+    revoke_pending,
+    revoked,
+};
+
+fn registryLifecycleRawValid(value: *const RegistryLifecycle) bool {
+    const raw = @as(*const u8, @ptrCast(value)).*;
+    return raw <= @intFromEnum(RegistryLifecycle.dead);
+}
+
+fn entryLifecycleRawValid(value: *const EntryLifecycle) bool {
+    const raw = @as(*const u8, @ptrCast(value)).*;
+    return raw <= @intFromEnum(EntryLifecycle.drop_active);
+}
+
+fn controllerAuthorityRawValid(value: *const ControllerAuthority) bool {
+    const raw = @as(*const u8, @ptrCast(value)).*;
+    return raw <= @intFromEnum(ControllerAuthority.revoked);
+}
 
 /// Binding identity fields known before this registry mints its monotonic reservation ID.
 /// `reserve` materializes the canonical contract identity and returns it to the caller.
@@ -78,6 +100,7 @@ const Entry = struct {
     reservation_id: u64 = 0,
     identity: ?contract.BindingIdentity = null,
     stream_id: u64 = 0,
+    controller_authority: ControllerAuthority = .unavailable,
     transport_owner: contract.TransportOwnerSeal = .{},
     response_owner: contract.ExecutedResponseOwnerSeal = .{},
 
@@ -113,6 +136,7 @@ pub const AttachmentCleanupRegistry = struct {
 
     pub fn initInPlace(out: *AttachmentCleanupRegistry, incarnation: u64) Error!void {
         if (incarnation == 0) return error.InvalidIdentity;
+        if (!registryLifecycleRawValid(&out.lifecycle)) return error.InvalidState;
         switch (out.lifecycle) {
             .pristine => {
                 if (out.self_addr != 0 or out.incarnation != 0 or out.live_count != 0)
@@ -133,7 +157,8 @@ pub const AttachmentCleanupRegistry = struct {
     }
 
     fn valid(self: *const AttachmentCleanupRegistry) bool {
-        return self.self_addr == @intFromPtr(self) and
+        return registryLifecycleRawValid(&self.lifecycle) and
+            self.self_addr == @intFromPtr(self) and
             self.incarnation != 0 and
             self.next_reservation_id != 0 and
             self.live_count <= max_entries and
@@ -153,6 +178,7 @@ pub const AttachmentCleanupRegistry = struct {
         if (self.live_count == max_entries) return error.CapacityExhausted;
 
         const index = for (&self.entries, 0..) |*entry, index| {
+            if (!entryLifecycleRawValid(&entry.lifecycle)) return error.InvalidState;
             if (entry.lifecycle == .empty) break index;
         } else return error.InvalidState;
 
@@ -191,6 +217,7 @@ pub const AttachmentCleanupRegistry = struct {
             reservation.entry_index >= max_entries)
             return error.InvalidReservation;
         const entry = &self.entries[reservation.entry_index];
+        if (!entryLifecycleRawValid(&entry.lifecycle)) return error.InvalidState;
         if (entry.lifecycle == .empty or
             entry.reservation_id != reservation.reservation_id)
             return error.InvalidReservation;
@@ -245,26 +272,63 @@ pub const AttachmentCleanupRegistry = struct {
         if (entry.lifecycle != .reserved or entry.stream_id != 0)
             return error.InvalidState;
         entry.stream_id = stream_id;
+        entry.controller_authority = if (identity.role == .controller) .live else .unavailable;
         entry.lifecycle = .bound;
     }
 
-    /// Retires metadata for a bound drop entry after the higher ClientSlot owner has completed
-    /// the actual stream cleanup. This substrate performs no callback and owns no Client pointer.
-    pub fn settleBoundDrop(
+    pub fn controllerAuthorityLive(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        stream_id: u64,
+    ) Error!bool {
+        const entry = try self.exactEntry(reservation, identity);
+        if (!controllerAuthorityRawValid(&entry.controller_authority))
+            return error.InvalidState;
+        if (entry.lifecycle != .bound or entry.stream_id != stream_id)
+            return error.InvalidState;
+        return entry.controller_authority == .live;
+    }
+
+    pub fn controllerRevokePending(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        stream_id: u64,
+    ) Error!bool {
+        const entry = try self.exactEntry(reservation, identity);
+        if (!controllerAuthorityRawValid(&entry.controller_authority) or
+            entry.lifecycle != .bound or entry.stream_id != stream_id)
+            return error.InvalidState;
+        return entry.controller_authority == .revoke_pending;
+    }
+
+    pub fn beginControllerRevoke(
         self: *AttachmentCleanupRegistry,
         reservation: Reservation,
         identity: contract.BindingIdentity,
         stream_id: u64,
     ) Error!void {
-        if (stream_id == 0) return error.InvalidStream;
         const entry = try self.exactEntry(reservation, identity);
-        if (entry.lifecycle != .bound or entry.stream_id != stream_id)
+        if (!controllerAuthorityRawValid(&entry.controller_authority) or
+            entry.lifecycle != .bound or entry.stream_id != stream_id or
+            identity.role != .controller or entry.controller_authority != .live)
             return error.InvalidState;
-        if (!childAuthoritiesSettled(entry))
+        entry.controller_authority = .revoke_pending;
+    }
+
+    pub fn finishControllerRevoke(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        stream_id: u64,
+    ) Error!void {
+        const entry = try self.exactEntry(reservation, identity);
+        if (!controllerAuthorityRawValid(&entry.controller_authority) or
+            entry.lifecycle != .bound or entry.stream_id != stream_id or
+            identity.role != .controller or entry.controller_authority != .revoke_pending)
             return error.InvalidState;
-        if (self.live_count == 0) return error.InvalidState;
-        entry.clear();
-        self.live_count -= 1;
+        entry.controller_authority = .revoked;
     }
 
     pub fn preflightBoundDrop(
@@ -275,7 +339,8 @@ pub const AttachmentCleanupRegistry = struct {
     ) Error!void {
         if (stream_id == 0) return error.InvalidStream;
         const entry = try self.exactEntry(reservation, identity);
-        if (entry.lifecycle != .bound or entry.stream_id != stream_id or self.live_count == 0)
+        if (entry.lifecycle != .bound or entry.stream_id != stream_id or
+            self.live_count == 0 or !dropAuthorityCanBegin(entry))
             return error.InvalidState;
     }
 
@@ -287,6 +352,9 @@ pub const AttachmentCleanupRegistry = struct {
     ) Error!void {
         try self.preflightBoundDrop(reservation, identity, stream_id);
         const entry = try self.exactEntry(reservation, identity);
+        // Drop admission atomically consumes the last mutation authority. The remaining
+        // transport/payload destruction is therefore a release-only, no-fail suffix.
+        if (entry.controller_authority == .live) entry.controller_authority = .revoked;
         entry.lifecycle = .drop_active;
     }
 
@@ -301,21 +369,26 @@ pub const AttachmentCleanupRegistry = struct {
         // Pristine means this neutral registry entry never minted that optional authority;
         // terminal means it was minted and explicitly fenced. Only live is forbidden to erase.
         if (entry.lifecycle != .drop_active or entry.stream_id != stream_id or
-            !childAuthoritiesSettled(entry) or self.live_count == 0)
+            !dropAuthoritySettled(entry) or !childAuthoritiesSettled(entry) or
+            self.live_count == 0)
             return error.InvalidState;
         entry.clear();
         self.live_count -= 1;
     }
 
     pub fn preflightDeinit(self: *const AttachmentCleanupRegistry) DeinitOutcome {
+        if (!registryLifecycleRawValid(&self.lifecycle)) return .corrupt;
         if (self.lifecycle == .dead) {
             return if (self.self_addr == @intFromPtr(self)) .already_dead else .corrupt;
         }
         if (!self.valid()) return .corrupt;
         if (self.live_count != 0) return .busy;
         for (self.entries) |entry| {
-            if (entry.lifecycle != .empty or entry.reservation_id != 0 or
+            if (!entryLifecycleRawValid(&entry.lifecycle) or
+                !controllerAuthorityRawValid(&entry.controller_authority) or
+                entry.lifecycle != .empty or entry.reservation_id != 0 or
                 entry.identity != null or entry.stream_id != 0 or
+                entry.controller_authority != .unavailable or
                 entry.transport_owner.lifecycle != .pristine or
                 entry.response_owner.lifecycle != .pristine)
                 return .corrupt;
@@ -332,6 +405,27 @@ pub const AttachmentCleanupRegistry = struct {
 
 fn childAuthoritiesSettled(entry: *const Entry) bool {
     return entry.transport_owner.settledExact() and entry.response_owner.settledExact();
+}
+
+fn dropAuthorityCanBegin(entry: *const Entry) bool {
+    if (!controllerAuthorityRawValid(&entry.controller_authority)) return false;
+    const identity = entry.identity orelse return false;
+    if (!contract.attachmentRoleRawValid(&identity.role)) return false;
+    return switch (identity.role) {
+        .controller => entry.controller_authority == .live or
+            entry.controller_authority == .revoked,
+        .observer => entry.controller_authority == .unavailable,
+    };
+}
+
+fn dropAuthoritySettled(entry: *const Entry) bool {
+    if (!controllerAuthorityRawValid(&entry.controller_authority)) return false;
+    const identity = entry.identity orelse return false;
+    if (!contract.attachmentRoleRawValid(&identity.role)) return false;
+    return switch (identity.role) {
+        .controller => entry.controller_authority == .revoked,
+        .observer => entry.controller_authority == .unavailable,
+    };
 }
 
 fn fixtureSeed(destination_addr: usize, binding_incarnation: u64) ReserveIdentity {
@@ -381,21 +475,201 @@ test "stream-drop registry reserves, aborts, binds, and gates final-zero deinit"
     try std.testing.expectEqual(DeinitOutcome.busy, registry.tryDeinit());
     try std.testing.expectError(
         error.InvalidState,
-        registry.settleBoundDrop(second.reservation, second.identity, 30),
+        registry.preflightBoundDrop(second.reservation, second.identity, 30),
     );
     const response_seal = try registry.responseOwnerSeal(second.reservation, second.identity);
     try contract.ExecutedResponseOwnerSeal.initInPlace(response_seal, 31);
     try std.testing.expectError(
         error.InvalidState,
-        registry.settleBoundDrop(second.reservation, second.identity, 29),
+        registry.completeActiveDrop(second.reservation, second.identity, 29),
+    );
+    try registry.beginBoundDrop(second.reservation, second.identity, 29);
+    try std.testing.expectError(
+        error.InvalidState,
+        registry.completeActiveDrop(second.reservation, second.identity, 29),
     );
     try response_seal.terminalize(31);
-    try registry.settleBoundDrop(second.reservation, second.identity, 29);
+    try registry.completeActiveDrop(second.reservation, second.identity, 29);
     try std.testing.expectError(
         error.InvalidReservation,
-        registry.settleBoundDrop(second.reservation, second.identity, 29),
+        registry.completeActiveDrop(second.reservation, second.identity, 29),
     );
     try std.testing.expectEqual(@as(usize, 0), try registry.count());
+    try std.testing.expectEqual(DeinitOutcome.cleaned, registry.tryDeinit());
+}
+
+test "CR3a-2c3a controller revoke authority is canonical absorbing and raw-tag guarded" {
+    var registry: AttachmentCleanupRegistry = .{};
+    try AttachmentCleanupRegistry.initInPlace(&registry, 0x2C3A);
+    const reserved = try registry.reserve(fixtureSeed(0x2C3B, 0x2C3C));
+    try registry.bindStream(reserved.reservation, reserved.identity, 41);
+    try std.testing.expect(try registry.controllerAuthorityLive(
+        reserved.reservation,
+        reserved.identity,
+        41,
+    ));
+    try registry.beginControllerRevoke(reserved.reservation, reserved.identity, 41);
+    try std.testing.expect(!(try registry.controllerAuthorityLive(
+        reserved.reservation,
+        reserved.identity,
+        41,
+    )));
+    try std.testing.expect(try registry.controllerRevokePending(
+        reserved.reservation,
+        reserved.identity,
+        41,
+    ));
+    const entry = &registry.entries[reserved.reservation.entry_index];
+    const authority_raw: *u8 = @ptrCast(&entry.controller_authority);
+    authority_raw.* = @intFromEnum(ControllerAuthority.revoked) + 1;
+    try std.testing.expectError(
+        error.InvalidState,
+        registry.controllerRevokePending(reserved.reservation, reserved.identity, 41),
+    );
+    authority_raw.* = @intFromEnum(ControllerAuthority.revoke_pending);
+    try registry.finishControllerRevoke(reserved.reservation, reserved.identity, 41);
+    try std.testing.expect(!(try registry.controllerAuthorityLive(
+        reserved.reservation,
+        reserved.identity,
+        41,
+    )));
+    try std.testing.expectError(
+        error.InvalidState,
+        registry.beginControllerRevoke(reserved.reservation, reserved.identity, 41),
+    );
+    try registry.beginBoundDrop(reserved.reservation, reserved.identity, 41);
+    try registry.completeActiveDrop(reserved.reservation, reserved.identity, 41);
+    try std.testing.expectEqual(DeinitOutcome.cleaned, registry.tryDeinit());
+}
+
+test "CR3a-2c3a authority entrypoints reject every invalid enclosing raw lifecycle" {
+    var registry: AttachmentCleanupRegistry = .{};
+    try AttachmentCleanupRegistry.initInPlace(&registry, 0x2C3D);
+    const reserved = try registry.reserve(fixtureSeed(0x2C3E, 0x2C3F));
+    try registry.bindStream(reserved.reservation, reserved.identity, 43);
+
+    const registry_raw: *u8 = @ptrCast(&registry.lifecycle);
+    var raw: u16 = @intFromEnum(RegistryLifecycle.dead) + 1;
+    while (raw <= std.math.maxInt(u8)) : (raw += 1) {
+        registry_raw.* = @intCast(raw);
+        try std.testing.expectError(error.MovedOrCopied, registry.controllerAuthorityLive(
+            reserved.reservation,
+            reserved.identity,
+            43,
+        ));
+        try std.testing.expectError(error.MovedOrCopied, registry.controllerRevokePending(
+            reserved.reservation,
+            reserved.identity,
+            43,
+        ));
+        try std.testing.expectError(error.MovedOrCopied, registry.beginControllerRevoke(
+            reserved.reservation,
+            reserved.identity,
+            43,
+        ));
+        try std.testing.expectError(error.MovedOrCopied, registry.finishControllerRevoke(
+            reserved.reservation,
+            reserved.identity,
+            43,
+        ));
+    }
+    registry_raw.* = @intFromEnum(RegistryLifecycle.live);
+
+    const entry = &registry.entries[reserved.reservation.entry_index];
+    const entry_raw: *u8 = @ptrCast(&entry.lifecycle);
+    raw = @intFromEnum(EntryLifecycle.drop_active) + 1;
+    while (raw <= std.math.maxInt(u8)) : (raw += 1) {
+        entry_raw.* = @intCast(raw);
+        try std.testing.expectError(error.InvalidState, registry.controllerAuthorityLive(
+            reserved.reservation,
+            reserved.identity,
+            43,
+        ));
+        try std.testing.expectError(error.InvalidState, registry.controllerRevokePending(
+            reserved.reservation,
+            reserved.identity,
+            43,
+        ));
+        try std.testing.expectError(error.InvalidState, registry.beginControllerRevoke(
+            reserved.reservation,
+            reserved.identity,
+            43,
+        ));
+        try std.testing.expectError(error.InvalidState, registry.finishControllerRevoke(
+            reserved.reservation,
+            reserved.identity,
+            43,
+        ));
+    }
+    entry_raw.* = @intFromEnum(EntryLifecycle.bound);
+    try registry.beginControllerRevoke(reserved.reservation, reserved.identity, 43);
+    try registry.finishControllerRevoke(reserved.reservation, reserved.identity, 43);
+    try registry.beginBoundDrop(reserved.reservation, reserved.identity, 43);
+    try registry.completeActiveDrop(reserved.reservation, reserved.identity, 43);
+    try std.testing.expectEqual(DeinitOutcome.cleaned, registry.tryDeinit());
+}
+
+test "CR3a-2c3a reserve rejects every invalid raw role before publication" {
+    var registry: AttachmentCleanupRegistry = .{};
+    try AttachmentCleanupRegistry.initInPlace(&registry, 0x2C3F);
+    var seed = fixtureSeed(0x2C40, 0x2C41);
+    const role_raw: *u8 = @ptrCast(&seed.role);
+    var raw: u16 = @intFromEnum(contract.AttachmentRole.observer) + 1;
+    while (raw <= std.math.maxInt(u8)) : (raw += 1) {
+        role_raw.* = @intCast(raw);
+        try std.testing.expectError(error.InvalidIdentity, registry.reserve(seed));
+        try std.testing.expectEqual(@as(usize, 0), try registry.count());
+    }
+    try std.testing.expectEqual(DeinitOutcome.cleaned, registry.tryDeinit());
+}
+
+test "CR3a-2c3a bound drop atomically consumes canonical controller authority" {
+    var registry: AttachmentCleanupRegistry = .{};
+    try AttachmentCleanupRegistry.initInPlace(&registry, 0x2C40);
+
+    const live = try registry.reserve(fixtureSeed(0x2C41, 0x2C42));
+    try registry.bindStream(live.reservation, live.identity, 47);
+    try registry.beginBoundDrop(live.reservation, live.identity, 47);
+    const live_entry = &registry.entries[live.reservation.entry_index];
+    try std.testing.expectEqual(EntryLifecycle.drop_active, live_entry.lifecycle);
+    try std.testing.expectEqual(ControllerAuthority.revoked, live_entry.controller_authority);
+    // Even a corrupted caller cannot erase a live or pending mutation authority.
+    live_entry.controller_authority = .live;
+    try std.testing.expectError(
+        error.InvalidState,
+        registry.completeActiveDrop(live.reservation, live.identity, 47),
+    );
+    live_entry.controller_authority = .revoke_pending;
+    try std.testing.expectError(
+        error.InvalidState,
+        registry.completeActiveDrop(live.reservation, live.identity, 47),
+    );
+    live_entry.controller_authority = .revoked;
+    try registry.completeActiveDrop(live.reservation, live.identity, 47);
+
+    var observer_seed = fixtureSeed(0x2C43, 0x2C44);
+    observer_seed.role = .observer;
+    const observer = try registry.reserve(observer_seed);
+    try registry.bindStream(observer.reservation, observer.identity, 49);
+    try registry.beginBoundDrop(observer.reservation, observer.identity, 49);
+    const observer_entry = &registry.entries[observer.reservation.entry_index];
+    try std.testing.expectEqual(ControllerAuthority.unavailable, observer_entry.controller_authority);
+    try registry.completeActiveDrop(observer.reservation, observer.identity, 49);
+
+    const pending = try registry.reserve(fixtureSeed(0x2C45, 0x2C46));
+    try registry.bindStream(pending.reservation, pending.identity, 51);
+    try registry.beginControllerRevoke(pending.reservation, pending.identity, 51);
+    try std.testing.expectError(
+        error.InvalidState,
+        registry.beginBoundDrop(pending.reservation, pending.identity, 51),
+    );
+    const pending_entry = &registry.entries[pending.reservation.entry_index];
+    try std.testing.expectEqual(EntryLifecycle.bound, pending_entry.lifecycle);
+    try std.testing.expectEqual(ControllerAuthority.revoke_pending, pending_entry.controller_authority);
+    try registry.finishControllerRevoke(pending.reservation, pending.identity, 51);
+    try registry.beginBoundDrop(pending.reservation, pending.identity, 51);
+    try registry.completeActiveDrop(pending.reservation, pending.identity, 51);
+
     try std.testing.expectEqual(DeinitOutcome.cleaned, registry.tryDeinit());
 }
 

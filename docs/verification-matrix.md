@@ -715,13 +715,22 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   이 manifest는 AST가 첫 parameter 이름과 무관하게 `*Client|*const Client`인 public receiver 91개를 선언 순서와 무관한
   exact set으로 추출해 이름·mutability·G/C/U/R class를 비교한다(`G=40,C=35,U=15,R=1`). G는 guarded post-publication,
   C는 first-graph-read 전 bound-reject와 무관하게 35개 전부의 reviewed prepublication construction/transfer/teardown owner reference를
-  `{method,path,enclosing_fn,count}` exact multiset으로 제한한다. generation init 4, external transfer 4, adoption/materialization 22,
+  `{method,path,canonical_container_path,enclosing_fn,count}` exact multiset으로 제한한다. generation init 4, external transfer 4,
+  adoption/materialization 22,
   external-mode teardown 5의 합이 C35와 exact equality여야 한다. tokenizer/AST는 top-level test body만 제외하고 모든 `.method` reference를
-  모으며 alias와 `@field` reflection 우회를 음성 fixture로 거부한다. generation init은 final-address
+  모으며 direct-call이 아닌 function-value alias, sibling/nested/동일 leaf·다른 outer container, 다른 타입의 동명 method를 음성 fixture로
+  거부한다. session-host reflection은 codec 등 기존 canonical owner별 normalized token expression/count만 허용하고, 나머지 `src`의
+  reflection 보유 7개 파일은 top-level test 제외 전체 normalized token stream digest와 `@field` count를 exact 고정한다. 따라서 semantic
+  relocation/variable rebinding, 허용 owner 내부 치환과 외부 `anytype` trampoline을 포함한 Client
+  alias·`@TypeOf`·computed name 우회도 fail-close한다. category metadata도 4/4/22/5 exact set이다. generation init은 final-address
   `canMove→move→bind fence→bind ledger→publication`, transfer는 양 Client unbound, teardown은 external-pump owner와 guarded exclusive
-  내부 edge를 각각 증명한다. 인접 G row `enterExternalMode`도 bound generation Client 거부와 standalone caller closure를 중첩한다.
+  내부 edge를 각각 증명하고 tokenizer/AST token oracle이 transfer prepare→proof→commit→paired move와 commit 내부 source tombstone 순서를
+  exact-one으로 고정하고 두 ownership 구간 사이 call set/count를 closed allowlist로 제한한다. register/publish는 argument 무관 callee
+  exact-one과 canonical reservation argument를 함께 검사한다. 충돌 없는 `clientProjectionAuthorityDigest` 이름으로 다른 타입의 동명 호출 위장을 막는다.
+  register/publish는 exact one이라 early publication을 허용하지 않는다. 인접 G row `enterExternalMode`도
+  bound generation Client의 acquire/defer 직후 Busy와 standalone tail adjacency, standalone caller closure를 중첩한다.
   U는 ClientSlot authority caller exact 제한, R은 mutable Client graph를
-  읽지 않는 atomic-only observation이다. `projectionAuthorityDigest|externalTransferProfile`과 external-adoption graph reader는 C,
+  읽지 않는 atomic-only observation이다. `clientProjectionAuthorityDigest|externalTransferProfile`과 external-adoption graph reader는 C,
   non-atomic `terminalReasonInvariant|firstPoisonReason`은 G이며 R은 `endedPurgeFenceIntruded` 하나다. 모든 body에 공통 substring을
   반복하지 않고 direct gate/funnel kind와 위험한 U/C caller만 별도 source oracle로 검사한다. 91-row set equality는 inventory
   subgate일 뿐이며 이 class별 policy oracle이 모두 GREEN이 되기 전에는 closed manifest나 hostile callback 선행 gate 완료로 세지 않는다.

@@ -19,12 +19,58 @@ const ClientGuardProof = struct {
 };
 const ClientConstructionUse = struct {
     path: []const u8,
+    enclosing_container: []const u8 = "<derived>",
     enclosing_fn: []const u8,
     count: usize = 1,
 };
+const ClientConstructionKind = enum { generation_init, external_transfer, external_adoption, external_teardown };
 const ClientConstructionProof = struct {
     receiver: []const u8,
+    kind: ClientConstructionKind,
     uses: []const ClientConstructionUse,
+};
+const ClientReflectionOwnerProof = struct {
+    path: []const u8,
+    container: []const u8 = "<root>",
+    function: []const u8,
+    expression: []const u8,
+    count: usize,
+};
+const client_reflection_owners = [_]ClientReflectionOwnerProof{
+    .{ .path = "src/platform/macos/session_host/client.zig", .function = "canonicalExternalInventory", .expression = "@field(source,entry[1])", .count = 1 },
+    .{ .path = "src/platform/macos/session_host/client.zig", .function = "canonicalExternalInventory", .expression = "@field(source,entry[2])", .count = 1 },
+    .{ .path = "src/platform/macos/session_host/client.zig", .function = "canonicalExternalInventory", .expression = "@field(source,entry[3])", .count = 1 },
+    .{ .path = "src/platform/macos/session_host/client.zig", .function = "canonicalExternalInventory", .expression = "@field(source,entry[4])", .count = 1 },
+    .{ .path = "src/platform/macos/session_host/client.zig", .function = "canonicalExternalInventory", .expression = "@field(result,entry[1])", .count = 1 },
+    .{ .path = "src/platform/macos/session_host/client.zig", .function = "canonicalExternalInventory", .expression = "@field(result,entry[2])", .count = 1 },
+    .{ .path = "src/platform/macos/session_host/handoff_codec.zig", .function = "encodeValue", .expression = "@field(value.*,field.name)", .count = 2 },
+    .{ .path = "src/platform/macos/session_host/handoff_codec.zig", .function = "encodeValue", .expression = "@field(Tag,field.name)", .count = 1 },
+    .{ .path = "src/platform/macos/session_host/handoff_codec.zig", .function = "decodeValue", .expression = "@field(result,field.name)", .count = 2 },
+    .{ .path = "src/platform/macos/session_host/handoff_codec.zig", .function = "decodeValue", .expression = "@field(Tag,field.name)", .count = 1 },
+    .{ .path = "src/platform/macos/session_host/handoff_codec.zig", .function = "deinitValue", .expression = "@field(value.*,field.name)", .count = 2 },
+    .{ .path = "src/platform/macos/session_host/handoff_codec.zig", .function = "deinitValue", .expression = "@field(Tag,field.name)", .count = 1 },
+    .{ .path = "src/platform/macos/session_host/handoff_codec.zig", .function = "encodeCoreFields", .expression = "@field(core.*,spec.name)", .count = 2 },
+    .{ .path = "src/platform/macos/session_host/handoff_codec.zig", .function = "replaceCoreField", .expression = "@field(core.*,spec.name)", .count = 3 },
+    .{ .path = "src/platform/macos/session_host/client_external_adoption.zig", .function = "transferSliceAuthority", .expression = "@field(value,primary_field)", .count = 1 },
+    .{ .path = "src/platform/macos/session_host/client_external_adoption.zig", .function = "transferSliceAuthority", .expression = "@field(value,cleanup_field)", .count = 1 },
+    .{ .path = "src/platform/macos/session_host/client_external_adoption.zig", .function = "transferSliceAuthority", .expression = "@field(value,addr_field)", .count = 1 },
+    .{ .path = "src/platform/macos/session_host/client_external_adoption.zig", .function = "transferSliceAuthority", .expression = "@field(value,len_field)", .count = 1 },
+    .{ .path = "src/platform/macos/session_host/client_poison.zig", .function = "outcomeForConnection", .expression = "@field(Outcome,@tagName(tag))", .count = 1 },
+    .{ .path = "src/platform/macos/session_host/client_external_turn_authority.zig", .function = "writeSeed", .expression = "@field(seed,field.name)", .count = 1 },
+};
+const ExternalReflectionInventoryProof = struct {
+    path: []const u8,
+    count: usize,
+    digest_hex: []const u8,
+};
+const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
+    .{ .path = "src/app/term_runtime_backend.zig", .count = 3, .digest_hex = "da55524e0da397637fae2ce52c0030719551a1ae2a931ae9cbd7bf9c8814a335" },
+    .{ .path = "src/config/schema.zig", .count = 108, .digest_hex = "53943f2f20ec8e47ab22c0eb0c0206869e0ddb26e6ddb57ef02df1b2ae2d34c9" },
+    .{ .path = "src/platform/macos/git_backend.zig", .count = 2, .digest_hex = "2c0c8a5fd78388c85a7914123340b357829cbfc0ab92ab474df60d1639b8bb4f" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 3, .digest_hex = "af7d5d43e5692b9e050f32f83e6c107c709da4ac1cf24ec3766e3e5c69fd99c8" },
+    .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
+    .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
+    .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },
 };
 
 test "CR3a-2c2b3b B3b-S shared guard oracle rejects alias late and unbound release shapes" {
@@ -151,11 +197,139 @@ test "CR3a-2c2b3b B3b-S construction oracle rejects unreviewed member references
     const wrong_owner = "fn intruder(client: anytype) void { client.sample(); }";
     try std.testing.expect(!try syntheticConstructionPolicyValid(wrong_owner, "owner", 1));
     const alias = "fn owner() void { const escaped = Client.sample; _ = escaped; }";
-    try std.testing.expect(try syntheticConstructionPolicyValid(alias, "owner", 1));
+    try std.testing.expect(!try syntheticConstructionPolicyValid(alias, "owner", 1));
     const duplicate = "fn owner(client: anytype) void { client.sample(); client.sample(); }";
     try std.testing.expect(!try syntheticConstructionPolicyValid(duplicate, "owner", 1));
     const reflected = "fn owner() void { _ = @field(Client, \"sample\"); }";
     try std.testing.expect(!try syntheticConstructionPolicyValid(reflected, "owner", 1));
+    const joined_reflection = "fn owner() void { _ = @field(Client, \"sam\" ++ \"ple\"); }";
+    try std.testing.expect(!try syntheticConstructionPolicyValid(joined_reflection, "owner", 1));
+    const named_reflection =
+        "fn owner() void { const name = \"sample\"; _ = @field((((Client))), name); }";
+    try std.testing.expect(!try syntheticConstructionPolicyValid(named_reflection, "owner", 1));
+    const aliased_type_reflection =
+        "const C = Client; fn owner() void { const name = \"sample\"; _ = @field(C, name); }";
+    try std.testing.expect(!try syntheticConstructionPolicyValid(aliased_type_reflection, "owner", 1));
+    const typeof_reflection =
+        "fn owner(client: *Client) void { const name = \"sample\"; _ = @field(@TypeOf(client.*), name); }";
+    try std.testing.expect(!try syntheticConstructionPolicyValid(typeof_reflection, "owner", 1));
+    const external_generic_reflection =
+        "fn owner(value: anytype) void { const name = \"sample\";" ++
+        "_ = @field(@TypeOf(value.*), name); value.sample(); }";
+    try std.testing.expect(!try syntheticConstructionPolicyValidAtPath(
+        external_generic_reflection,
+        "src/support/invoke.zig",
+        "owner",
+        1,
+    ));
+    const admitted_reflection_owner =
+        "fn canonicalExternalInventory(client: anytype, source: anytype, result: anytype, entry: anytype) void {" ++
+        "_ = @field(source,entry[1]); _ = @field(source,entry[2]);" ++
+        "_ = @field(source,entry[3]); _ = @field(source,entry[4]);" ++
+        "_ = @field(result,entry[1]); _ = @field(result,entry[2]); client.sample(); }";
+    try std.testing.expect(try syntheticConstructionPolicyValidAtPath(
+        admitted_reflection_owner,
+        "src/platform/macos/session_host/client.zig",
+        "canonicalExternalInventory",
+        1,
+    ));
+    const substituted_reflection_owner =
+        "fn canonicalExternalInventory(client: anytype, source: anytype, result: anytype, entry: anytype) void {" ++
+        "_ = @field(source,entry[1]); _ = @field(source,entry[2]);" ++
+        "_ = @field(source,entry[3]); _ = @field(source,entry[4]);" ++
+        "_ = @field(result,entry[1]); const C = Client; const name = \"sample\";" ++
+        "_ = @field(C,name); client.sample(); }";
+    try std.testing.expect(!try syntheticConstructionPolicyValidAtPath(
+        substituted_reflection_owner,
+        "src/platform/macos/session_host/client.zig",
+        "canonicalExternalInventory",
+        1,
+    ));
+    const test_reflection =
+        "fn owner(client: anytype) void { client.sample(); }" ++
+        "test \"ignored reflection\" { _ = @field(Client, \"sample\"); }";
+    try std.testing.expect(try syntheticConstructionPolicyValid(test_reflection, "owner", 1));
+    const same_name_intruder =
+        "const Allowed = struct { fn owner(client: anytype) void { client.sample(); } };" ++
+        "const Intruder = struct { fn owner(client: anytype) void { client.sample(); } };";
+    try std.testing.expect(!try syntheticConstructionPolicyValidInContainer(
+        same_name_intruder,
+        "Allowed",
+        "owner",
+        1,
+    ));
+    const nested_intruder =
+        "fn owner(client: anytype) void { client.sample();" ++
+        "const Intruder = struct { fn steal(other: anytype) void { other.sample(); } };" ++
+        "_ = Intruder; }";
+    try std.testing.expect(!try syntheticConstructionPolicyValid(nested_intruder, "owner", 2));
+    const same_leaf_different_outer =
+        "const OuterA = struct { const Owner = struct { fn allowed(client: anytype) void { client.sample(); } }; };" ++
+        "const OuterB = struct { const Owner = struct { fn allowed(client: anytype) void { client.sample(); } }; };";
+    try std.testing.expect(!try syntheticConstructionPolicyValidInContainer(
+        same_leaf_different_outer,
+        "OuterA.Owner",
+        "allowed",
+        1,
+    ));
+    const unrelated_type =
+        "const Other = struct { fn sample(_: *Other) void {} };" ++
+        "fn owner(other: *Other) void { other.sample(); }";
+    try std.testing.expect(!try syntheticConstructionPolicyValid(unrelated_type, "owner", 1));
+    const nested_client_declaration =
+        "const Outer = struct { const Client = struct { fn sample(_: *Client) void {} };" ++
+        "fn owner(client: *Client) void { client.sample(); } };";
+    try std.testing.expect(!try syntheticConstructionPolicyValidAtPath(
+        nested_client_declaration,
+        "src/platform/macos/session_host/client.zig",
+        "owner",
+        1,
+    ));
+    const late_bound_reject =
+        "const Client = struct { fn enterExternalMode(self: *Client) !void {" ++
+        "const operation_fence_held = try self.beginPublicMutation();" ++
+        "defer if (operation_fence_held) self.endPublicMutation();" ++
+        "self.mutate(); if (operation_fence_held) return error.Busy;" ++
+        "return self.enterExternalModeWithOps(client_deadline.posix_ops); } };";
+    try std.testing.expect(!syntheticEnterExternalModePolicyValid(late_bound_reject));
+    const adjacency_good =
+        "const Client = struct { fn move(self: *Client, destination: anytype) void {" ++
+        "destination.* = self.*; self.rebindPreparedNormalizeExact(); self.* = .{}; } };";
+    try expectNoUnlistedCallsBetweenMarkers(
+        std.testing.allocator,
+        adjacency_good,
+        "Client",
+        "move",
+        "destination.* = self.*",
+        "self.* =",
+        &.{.{ .name = "rebindPreparedNormalizeExact", .count = 1 }},
+    );
+    const adjacency_gap =
+        "const Client = struct { fn move(self: *Client, destination: anytype) void {" ++
+        "destination.* = self.*; self.rebindPreparedNormalizeExact(); helper(); self.* = .{}; } };";
+    try std.testing.expect(!syntheticNoUnlistedCallsValid(adjacency_gap));
+    const builtin_gap =
+        "const Client = struct { fn move(self: *Client, destination: anytype) void {" ++
+        "destination.* = self.*; self.rebindPreparedNormalizeExact();" ++
+        "@call(.auto, helper, .{}); self.* = .{}; } };";
+    try std.testing.expect(!syntheticExactMoveRegionValid(builtin_gap));
+    const wrong_receiver =
+        "const Client = struct { fn move(self: *Client, destination: anytype, attacker: anytype) void {" ++
+        "destination.* = self.*; attacker.rebindPreparedNormalizeExact(); self.* = .{}; } };";
+    try std.testing.expect(!syntheticExactMoveRegionValid(wrong_receiver));
+    const duplicate_start_gap =
+        "const Client = struct { fn move(self: *Client, destination: anytype) void {" ++
+        "destination.* = self.*; @call(.auto, helper, .{}); destination.* = self.*;" ++
+        "self.rebindPreparedNormalizeExact(); self.* = .{}; } };";
+    try std.testing.expect(!syntheticExactMoveRegionValid(duplicate_start_gap));
+    const early_publish =
+        "const ClientSlot = struct { fn initInPlaceWithIssuer() void {" ++
+        "publishClientSlot(other); publishClientSlot(registry_reservation); } };";
+    try std.testing.expect(!syntheticMarkerCountValid(early_publish, "publishClientSlot(", 1));
+    const publish_alias =
+        "const ClientSlot = struct { fn initInPlaceWithIssuer() void {" ++
+        "const publish = publishClientSlot; publish(other); publishClientSlot(registry_reservation); } };";
+    try std.testing.expect(!syntheticDirectIdentifierValid(publish_alias, "publishClientSlot"));
 }
 
 test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy closure" {
@@ -213,7 +387,7 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .name = "canMoveToGenerationNode", .receiver_type = immutable, .class = .construction },
         .{ .name = "bindGenerationAccountingLedger", .receiver_type = mutable, .class = .construction },
         .{ .name = "moveToGenerationNode", .receiver_type = mutable, .class = .construction },
-        .{ .name = "projectionAuthorityDigest", .receiver_type = immutable, .class = .construction },
+        .{ .name = "clientProjectionAuthorityDigest", .receiver_type = immutable, .class = .construction },
         .{ .name = "externalTransferProfile", .receiver_type = immutable, .class = .construction },
         .{ .name = "prepareExternalRecoveryDiscard", .receiver_type = immutable, .class = .construction },
         .{ .name = "validateExternalRecoveryDiscard", .receiver_type = immutable, .class = .construction },
@@ -317,29 +491,20 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
     const materialization_path = "src/platform/macos/session_host/external_event_materialization.zig";
     const decision_path = "src/platform/macos/session_host/external_source_decision.zig";
     const construction = [_]ClientConstructionProof{
-        .{ .receiver = "canMoveToGenerationNode", .uses = &.{
+        .{ .receiver = "canMoveToGenerationNode", .kind = .generation_init, .uses = &.{
             .{ .path = client_path, .enclosing_fn = "moveToGenerationNode" },
             .{ .path = slot_path, .enclosing_fn = "initInPlaceWithIssuer" },
         } },
-        .{ .receiver = "bindGenerationAccountingLedger", .uses = &.{
+        .{ .receiver = "bindGenerationAccountingLedger", .kind = .generation_init, .uses = &.{
             .{ .path = slot_path, .enclosing_fn = "initInPlaceWithIssuer" },
         } },
-        .{ .receiver = "moveToGenerationNode", .uses = &.{
+        .{ .receiver = "moveToGenerationNode", .kind = .generation_init, .uses = &.{
             .{ .path = slot_path, .enclosing_fn = "initInPlaceWithIssuer" },
         } },
-        .{ .receiver = "projectionAuthorityDigest", .uses = &.{
-            .{ .path = client_path, .enclosing_fn = "overlapsCommittedOwnedRange" },
-            .{ .path = pump_path, .enclosing_fn = "captureResyncSemanticCleanupSnapshot" },
-            .{ .path = pump_path, .enclosing_fn = "cleanupInstalledF3c2FixtureOwners", .count = 2 },
-            .{ .path = pump_path, .enclosing_fn = "committedRecoverySnapshotBindingCurrent" },
-            .{ .path = pump_path, .enclosing_fn = "consumeProjectedRecoverySnapshotUnchecked" },
-            .{ .path = pump_path, .enclosing_fn = "detectResyncSemanticCleanupDrift" },
-            .{ .path = pump_path, .enclosing_fn = "finishPublishedRxAggregateCommit" },
-            .{ .path = pump_path, .enclosing_fn = "projectOwnerEventInternal", .count = 8 },
-            .{ .path = pump_path, .enclosing_fn = "publishRecoverySnapshotCommitUnchecked" },
-            .{ .path = pump_path, .enclosing_fn = "publishRxAggregateUnchecked" },
+        .{ .receiver = "clientProjectionAuthorityDigest", .kind = .external_adoption, .uses = &.{
+            .{ .path = pump_path, .enclosing_fn = "projectOwnerEventInternal", .count = 2 },
         } },
-        .{ .receiver = "externalTransferProfile", .uses = &.{
+        .{ .receiver = "externalTransferProfile", .kind = .external_transfer, .uses = &.{
             .{ .path = client_path, .enclosing_fn = "prepareExternalPumpTransfer" },
             .{ .path = client_path, .enclosing_fn = "validate" },
             .{ .path = pump_path, .enclosing_fn = "initFromAttachPartsInPlace" },
@@ -347,45 +512,45 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
             .{ .path = pump_path, .enclosing_fn = "validate" },
             .{ .path = pump_path, .enclosing_fn = "validateEventReduction" },
         } },
-        .{ .receiver = "prepareExternalRecoveryDiscard", .uses = &.{
+        .{ .receiver = "prepareExternalRecoveryDiscard", .kind = .external_adoption, .uses = &.{
             .{ .path = pump_path, .enclosing_fn = "finishImmediateTerminal" },
             .{ .path = pump_path, .enclosing_fn = "finishNonAdopted" },
         } },
-        .{ .receiver = "validateExternalRecoveryDiscard", .uses = &.{
+        .{ .receiver = "validateExternalRecoveryDiscard", .kind = .external_adoption, .uses = &.{
             .{ .path = pump_path, .enclosing_fn = "finishImmediateTerminal" },
             .{ .path = pump_path, .enclosing_fn = "finishNonAdopted" },
         } },
-        .{ .receiver = "prepareExternalPumpTransfer", .uses = &.{
+        .{ .receiver = "prepareExternalPumpTransfer", .kind = .external_transfer, .uses = &.{
             .{ .path = pump_path, .enclosing_fn = "initInPlaceWithOptions" },
         } },
-        .{ .receiver = "commitExternalPumpTransfer", .uses = &.{
+        .{ .receiver = "commitExternalPumpTransfer", .kind = .external_transfer, .uses = &.{
             .{ .path = pump_path, .enclosing_fn = "initInPlaceWithOptions" },
         } },
-        .{ .receiver = "foldExternalAdoptionSource", .uses = &.{
+        .{ .receiver = "foldExternalAdoptionSource", .kind = .external_adoption, .uses = &.{
             .{ .path = client_path, .enclosing_fn = "externalAdoptionFoldResultMatches" },
             .{ .path = pump_path, .enclosing_fn = "prepareAdoptionInner" },
         } },
-        .{ .receiver = "externalAdoptionFoldResultMatches", .uses = &.{
+        .{ .receiver = "externalAdoptionFoldResultMatches", .kind = .external_adoption, .uses = &.{
             .{ .path = client_path, .enclosing_fn = "externalMetadataDtoMatchesEventCandidate" },
             .{ .path = client_path, .enclosing_fn = "materializeExternalMetadataEvent", .count = 2 },
             .{ .path = decision_path, .enclosing_fn = "decide" },
             .{ .path = decision_path, .enclosing_fn = "decisionMatches" },
         } },
-        .{ .receiver = "materializeExternalMetadataEvent", .uses = &.{
+        .{ .receiver = "materializeExternalMetadataEvent", .kind = .external_adoption, .uses = &.{
             .{ .path = materialization_path, .enclosing_fn = "prepareInPlace" },
         } },
-        .{ .receiver = "externalMetadataDtoMatchesEventCandidate", .uses = &.{
+        .{ .receiver = "externalMetadataDtoMatchesEventCandidate", .kind = .external_adoption, .uses = &.{
             .{ .path = materialization_path, .enclosing_fn = "validate" },
         } },
-        .{ .receiver = "previewExternalAdoption", .uses = &.{
+        .{ .receiver = "previewExternalAdoption", .kind = .external_adoption, .uses = &.{
             .{ .path = adoption_path, .enclosing_fn = "preflightMetadata" },
         } },
-        .{ .receiver = "inspectExternalAdoption", .uses = &.{
+        .{ .receiver = "inspectExternalAdoption", .kind = .external_adoption, .uses = &.{
             .{ .path = client_path, .enclosing_fn = "checkExternalAdoptionAllocation" },
             .{ .path = client_path, .enclosing_fn = "preflightExternalAdoption" },
             .{ .path = adoption_path, .enclosing_fn = "initInPlace" },
         } },
-        .{ .receiver = "preflightExternalAdoptionDestination", .uses = &.{
+        .{ .receiver = "preflightExternalAdoptionDestination", .kind = .external_adoption, .uses = &.{
             .{ .path = client_path, .enclosing_fn = "prepareExternalAdoptionTake" },
             .{ .path = client_path, .enclosing_fn = "prepareExternalPumpTransfer", .count = 2 },
             .{ .path = client_path, .enclosing_fn = "stageExternalScreenCopies" },
@@ -394,7 +559,7 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
             .{ .path = pump_path, .enclosing_fn = "prepareAdoptionInner" },
             .{ .path = adoption_path, .enclosing_fn = "initInPlace" },
         } },
-        .{ .receiver = "preflightExternalAdoptionDestinationWithScratch", .uses = &.{
+        .{ .receiver = "preflightExternalAdoptionDestinationWithScratch", .kind = .external_adoption, .uses = &.{
             .{ .path = client_path, .enclosing_fn = "prepareExternalRecoveryDiscard", .count = 2 },
             .{ .path = pump_path, .enclosing_fn = "metadataDtoBackingDisjointFromClient" },
             .{ .path = pump_path, .enclosing_fn = "prepareAdoptionInner", .count = 2 },
@@ -405,76 +570,79 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
             .{ .path = pump_path, .enclosing_fn = "wholeTurnScratchDisjoint" },
             .{ .path = materialization_path, .enclosing_fn = "prepareInPlace" },
         } },
-        .{ .receiver = "appendExternalOwnerRangesForTeardown", .uses = &.{
+        .{ .receiver = "appendExternalOwnerRangesForTeardown", .kind = .external_adoption, .uses = &.{
             .{ .path = pump_path, .enclosing_fn = "buildRxOwnerAuthoritySnapshot" },
             .{ .path = pump_path, .enclosing_fn = "prepareAggregateOwnerRangeProof" },
             .{ .path = pump_path, .enclosing_fn = "rebuildProductReplacementInventory" },
         } },
-        .{ .receiver = "prepareExternalOwnerRangeProof", .uses = &.{
+        .{ .receiver = "prepareExternalOwnerRangeProof", .kind = .external_transfer, .uses = &.{
             .{ .path = pump_path, .enclosing_fn = "initInPlaceWithOptions" },
         } },
-        .{ .receiver = "preflightExternalAdoption", .uses = &.{
+        .{ .receiver = "preflightExternalAdoption", .kind = .external_adoption, .uses = &.{
             .{ .path = client_path, .enclosing_fn = "checkExternalAdoptionAllocation" },
             .{ .path = adoption_path, .enclosing_fn = "initInPlace" },
         } },
-        .{ .receiver = "stageExternalScreenCopies", .uses = &.{
+        .{ .receiver = "stageExternalScreenCopies", .kind = .external_adoption, .uses = &.{
             .{ .path = adoption_path, .enclosing_fn = "initInPlace" },
         } },
-        .{ .receiver = "externalScreenCopiesMatch", .uses = &.{
+        .{ .receiver = "externalScreenCopiesMatch", .kind = .external_adoption, .uses = &.{
             .{ .path = adoption_path, .enclosing_fn = "validate" },
         } },
-        .{ .receiver = "validateExternalAdoptionPlan", .uses = &.{
+        .{ .receiver = "validateExternalAdoptionPlan", .kind = .external_adoption, .uses = &.{
             .{ .path = client_path, .enclosing_fn = "checkExternalAdoptionAllocation" },
             .{ .path = client_path, .enclosing_fn = "sealExternalAdoption" },
             .{ .path = client_path, .enclosing_fn = "validateSealedExternalAdoptionPlan" },
             .{ .path = adoption_path, .enclosing_fn = "validate" },
         } },
-        .{ .receiver = "externalAdoptionDisarmMetadataBytes", .uses = &.{
+        .{ .receiver = "externalAdoptionDisarmMetadataBytes", .kind = .external_adoption, .uses = &.{
             .{ .path = adoption_path, .enclosing_fn = "initInPlace" },
             .{ .path = adoption_path, .enclosing_fn = "validate" },
         } },
-        .{ .receiver = "externalAdoptionDisarmMatchesInventory", .uses = &.{
+        .{ .receiver = "externalAdoptionDisarmMatchesInventory", .kind = .external_adoption, .uses = &.{
             .{ .path = adoption_path, .enclosing_fn = "validate" },
         } },
-        .{ .receiver = "sealExternalAdoption", .uses = &.{
+        .{ .receiver = "sealExternalAdoption", .kind = .external_adoption, .uses = &.{
             .{ .path = pump_path, .enclosing_fn = "prepareAdoptionInner" },
         } },
-        .{ .receiver = "validateSealedExternalAdoptionPlan", .uses = &.{
+        .{ .receiver = "validateSealedExternalAdoptionPlan", .kind = .external_adoption, .uses = &.{
             .{ .path = client_path, .enclosing_fn = "prepareExternalAdoptionTake" },
             .{ .path = client_path, .enclosing_fn = "validate" },
             .{ .path = adoption_path, .enclosing_fn = "commitScreenSeeds" },
         } },
-        .{ .receiver = "prepareExternalAdoptionTake", .uses = &.{
+        .{ .receiver = "prepareExternalAdoptionTake", .kind = .external_adoption, .uses = &.{
             .{ .path = pump_path, .enclosing_fn = "prepareAdoptionInner" },
         } },
-        .{ .receiver = "commitExternalAdoption", .uses = &.{} },
-        .{ .receiver = "prepareExternalModeDeinit", .uses = &.{
+        .{ .receiver = "commitExternalAdoption", .kind = .external_adoption, .uses = &.{} },
+        .{ .receiver = "prepareExternalModeDeinit", .kind = .external_teardown, .uses = &.{
             .{ .path = client_path, .enclosing_fn = "poisonAndTakeFd" },
             .{ .path = client_path, .enclosing_fn = "prepareDeinitGraph" },
         } },
-        .{ .receiver = "reserveExternalModeDeinit", .uses = &.{
+        .{ .receiver = "reserveExternalModeDeinit", .kind = .external_teardown, .uses = &.{
             .{ .path = pump_path, .enclosing_fn = "closeUncommittedOwned" },
             .{ .path = pump_path, .enclosing_fn = "latchCommitTerminal" },
             .{ .path = pump_path, .enclosing_fn = "latchCrossOwnerAliasTerminal" },
             .{ .path = pump_path, .enclosing_fn = "teardownUnderHeldOperationLease" },
         } },
-        .{ .receiver = "finishReservedExternalModeDeinit", .uses = &.{
+        .{ .receiver = "finishReservedExternalModeDeinit", .kind = .external_teardown, .uses = &.{
             .{ .path = pump_path, .enclosing_fn = "closeUncommittedOwned" },
             .{ .path = pump_path, .enclosing_fn = "latchCommitTerminal" },
             .{ .path = pump_path, .enclosing_fn = "latchCrossOwnerAliasTerminal" },
             .{ .path = pump_path, .enclosing_fn = "teardownUnderHeldOperationLease" },
         } },
-        .{ .receiver = "cancelReservedExternalModeDeinit", .uses = &.{
+        .{ .receiver = "cancelReservedExternalModeDeinit", .kind = .external_teardown, .uses = &.{
             .{ .path = pump_path, .enclosing_fn = "teardownUnderHeldOperationLease" },
         } },
-        .{ .receiver = "transferReservedExternalModeDeinit", .uses = &.{
+        .{ .receiver = "transferReservedExternalModeDeinit", .kind = .external_teardown, .uses = &.{
             .{ .path = pump_path, .enclosing_fn = "teardownUnderHeldOperationLease", .count = 2 },
         } },
-        .{ .receiver = "bindOperationFence", .uses = &.{
+        .{ .receiver = "bindOperationFence", .kind = .generation_init, .uses = &.{
             .{ .path = slot_path, .enclosing_fn = "initInPlaceWithIssuer" },
         } },
     };
-    try expectClientConstructionPolicies(allocator, &manifest, &construction);
+    var wrong_construction_category = construction;
+    wrong_construction_category[3].kind = .external_transfer;
+    try std.testing.expect(!clientConstructionCategoriesValid(&wrong_construction_category));
+    try expectClientConstructionCategories(&construction);
     const external_mode_manifest = [_]ClientReceiverSpec{.{
         .name = "enterExternalMode",
         .receiver_type = mutable,
@@ -482,6 +650,7 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
     }};
     const external_mode_proof = [_]ClientConstructionProof{.{
         .receiver = "enterExternalMode",
+        .kind = .external_transfer,
         .uses = &.{
             .{ .path = client_path, .enclosing_fn = "checkClientExternalModeAllocation" },
             .{ .path = client_path, .enclosing_fn = "checkExternalAdoptionAllocation" },
@@ -493,7 +662,36 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
             .{ .path = "src/platform/macos/session_host/external_pump_owner.zig", .enclosing_fn = "exerciseD3SocketpairRevokePosition" },
         },
     }};
-    try expectClientConstructionPolicies(allocator, &external_mode_manifest, &external_mode_proof);
+    var reviewed_manifest: [36]ClientReceiverSpec = undefined;
+    var reviewed_index: usize = 0;
+    for (manifest) |entry| {
+        if (entry.class != .construction) continue;
+        reviewed_manifest[reviewed_index] = entry;
+        reviewed_index += 1;
+    }
+    reviewed_manifest[reviewed_index] = external_mode_manifest[0];
+    reviewed_index += 1;
+    try std.testing.expectEqual(reviewed_manifest.len, reviewed_index);
+    var reviewed_proofs: [36]ClientConstructionProof = undefined;
+    @memcpy(reviewed_proofs[0..construction.len], &construction);
+    reviewed_proofs[construction.len] = external_mode_proof[0];
+    try expectClientConstructionPolicies(allocator, &reviewed_manifest, &reviewed_proofs);
+    try expectEnterExternalModeBoundReject(allocator, source);
+    try expectClientMethodBodyPrefix(allocator, source, "canMoveToGenerationNode", &.{
+        "if",   "(", "self",                       ".",  "operation_fence", "!=", "null",   "or",
+        "self", ".", "operation_fence_generation", "!=", "0",               ")",  "return", "false",
+        ";",
+    });
+    try expectClientMethodBodyPrefix(allocator, source, "externalTransferProfile", &.{
+        "if",   "(", "self",                       ".",  "operation_fence", "!=", "null",   "or",
+        "self", ".", "operation_fence_generation", "!=", "0",               ")",  "return", "null",
+        ";",
+    });
+    try expectClientMethodBodyPrefix(allocator, source, "prepareExternalPumpTransfer", &.{
+        "if",   "(",            "self",                       ".",  "operation_fence", "!=", "null",   "or",
+        "self", ".",            "operation_fence_generation", "!=", "0",               ")",  "return", "error",
+        ".",    "AlreadyBound", ";",
+    });
     const slot_source = try readZigFileZ(allocator, slot_path);
     defer allocator.free(slot_source);
     try expectContainerMethodMarkersInOrder(
@@ -502,14 +700,172 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         "ClientSlot",
         "initInPlaceWithIssuer",
         &.{
-            "source.canMoveToGenerationNode()",
+            "canMoveToGenerationNode(",
             "registerClientSlot(registry_reservation)",
-            "source.moveToGenerationNode(&node.client)",
-            "node.client.bindOperationFence",
-            "node.client.bindGenerationAccountingLedger",
+            "moveToGenerationNode(",
+            "bindOperationFence(",
+            "bindGenerationAccountingLedger(",
             "out.* =",
             "publishClientSlot(registry_reservation)",
         },
+    );
+    try expectContainerMethodMarkerCount(
+        allocator,
+        slot_source,
+        "ClientSlot",
+        "initInPlaceWithIssuer",
+        "registerClientSlot(registry_reservation)",
+        1,
+    );
+    try expectOnlyDirectIdentifierReference(
+        allocator,
+        slot_source,
+        "ClientSlot",
+        "initInPlaceWithIssuer",
+        "registerClientSlot",
+    );
+    try expectContainerMethodMarkerCount(
+        allocator,
+        slot_source,
+        "ClientSlot",
+        "initInPlaceWithIssuer",
+        "registerClientSlot(",
+        1,
+    );
+    try expectContainerMethodMarkersInOrder(
+        allocator,
+        source,
+        "Client",
+        "commitExternalPumpTransfer",
+        &.{
+            "destination.* = self.*",
+            "self.* =",
+            "prepared.lifecycle = .owners_moved",
+        },
+    );
+    try expectContainerMethodMarkerCount(
+        allocator,
+        source,
+        "Client",
+        "commitExternalPumpTransfer",
+        "self.* =",
+        1,
+    );
+    try expectNoUnlistedCallsBetweenMarkers(
+        allocator,
+        source,
+        "Client",
+        "commitExternalPumpTransfer",
+        "destination.* = self.*",
+        "self.* =",
+        &.{.{ .name = "rebindPreparedNormalizeExact", .count = 1 }},
+    );
+    try expectExactMethodTokenRegion(
+        allocator,
+        source,
+        "Client",
+        "commitExternalPumpTransfer",
+        "destination.*=self.*;destination.*.?.ownership=.external_pump;" ++
+            "self.parser.rebindPreparedNormalizeExact(&prepared.parser_replacement,&destination.*.?.parser,);self.*=",
+        true,
+    );
+    const pump_source = try readZigFileZ(allocator, pump_path);
+    defer allocator.free(pump_source);
+    try expectContainerMethodMarkersInOrder(
+        allocator,
+        pump_source,
+        "ExternalPumpStorage",
+        "initInPlaceWithOptions",
+        &.{
+            "prepareExternalPumpTransfer(",
+            "prepareExternalOwnerRangeProof(",
+            "commitExternalPumpTransfer(",
+            "moveInto(",
+        },
+    );
+    inline for (.{
+        .{ "prepareExternalPumpTransfer(", 1 },
+        .{ "prepareExternalOwnerRangeProof(", 1 },
+        .{ "commitExternalPumpTransfer(", 1 },
+        .{ "moveInto(", 1 },
+    }) |marker| try expectContainerMethodMarkerCount(
+        allocator,
+        pump_source,
+        "ExternalPumpStorage",
+        "initInPlaceWithOptions",
+        marker[0],
+        marker[1],
+    );
+    try expectNoUnlistedCallsBetweenMarkers(
+        allocator,
+        pump_source,
+        "ExternalPumpStorage",
+        "initInPlaceWithOptions",
+        "commitExternalPumpTransfer(",
+        "moveInto(",
+        &.{
+            .{ .name = "deinit", .count = 1 },
+            .{ .name = "failed", .count = 1 },
+        },
+    );
+    try expectExactMethodTokenRegion(
+        allocator,
+        pump_source,
+        "ExternalPumpStorage",
+        "initInPlaceWithOptions",
+        "source.commitExternalPumpTransfer(&out.client_transfer,&out.owned_client,)catch{" ++
+            "out.client_transfer.deinit();out.*=.{};return failed(.invalid_evidence,.preserved);};" ++
+            "out.owned_evidence=.{};evidence.moveInto(",
+        true,
+    );
+    try expectContainerMethodMarkersInOrder(
+        allocator,
+        pump_source,
+        "ExternalPumpStorage",
+        "teardownUnderHeldOperationLease",
+        &.{
+            "active_external_operation_addr != @intFromPtr(self)",
+            "owned.reserveExternalModeDeinit()",
+            "owned.cancelReservedExternalModeDeinit()",
+            "source.transferReservedExternalModeDeinit(destination)",
+            "owned.finishReservedExternalModeDeinit()",
+        },
+    );
+    inline for (.{
+        .{ "owned.reserveExternalModeDeinit()", 1 },
+        .{ "owned.cancelReservedExternalModeDeinit()", 1 },
+        .{ "source.transferReservedExternalModeDeinit(destination)", 2 },
+        .{ "owned.finishReservedExternalModeDeinit()", 1 },
+    }) |marker| try expectContainerMethodMarkerCount(
+        allocator,
+        pump_source,
+        "ExternalPumpStorage",
+        "teardownUnderHeldOperationLease",
+        marker[0],
+        marker[1],
+    );
+    try expectContainerMethodMarkerCount(
+        allocator,
+        slot_source,
+        "ClientSlot",
+        "initInPlaceWithIssuer",
+        "publishClientSlot(registry_reservation)",
+        1,
+    );
+    try expectOnlyDirectIdentifierReference(
+        allocator,
+        slot_source,
+        "ClientSlot",
+        "initInPlaceWithIssuer",
+        "publishClientSlot",
+    );
+    try expectContainerMethodMarkerCount(
+        allocator,
+        slot_source,
+        "ClientSlot",
+        "initInPlaceWithIssuer",
+        "publishClientSlot(",
+        1,
     );
     try expectContainerMethodMarkersInOrder(
         allocator,
@@ -626,7 +982,7 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
         .{
             .path = "src/platform/macos/session_host/client.zig",
             .baseline_count = 527,
-            .baseline_digest = .{ 0x59, 0x41, 0x78, 0xe6, 0xc6, 0x53, 0xe3, 0x0b, 0xe0, 0xdd, 0xc6, 0x45, 0x64, 0xd2, 0x78, 0x39, 0x22, 0xe0, 0xc0, 0xb4, 0x89, 0x5c, 0x35, 0x43, 0x47, 0x9f, 0x86, 0xe5, 0x97, 0x7d, 0xb6, 0xfd },
+            .baseline_digest = .{ 0x58, 0x75, 0xba, 0x4a, 0xaa, 0x83, 0x2e, 0xf2, 0x97, 0xc4, 0x07, 0xc0, 0xad, 0x82, 0x5c, 0x22, 0xeb, 0xa5, 0x4d, 0x00, 0xb8, 0x1f, 0x45, 0xc3, 0xc8, 0x61, 0xb5, 0xbf, 0x01, 0x29, 0x82, 0x61 },
             .containers = &.{ "Client", "EndedPurgeScratch", "PreparedEndedPurgeInventory" },
             .optional_containers = &.{ "PreparedEndedPurgeCommit", "ClientOperationFence" },
             .allowed = &.{
@@ -6811,11 +7167,64 @@ fn expectClientConstructionPolicies(
     var flat_index: usize = 0;
     for (proofs) |proof| {
         for (proof.uses) |use| {
+            if (use.count != observed[flat_index]) std.debug.print(
+                "Client construction reference count mismatch: {s} {s}:{s}.{s} expected={} observed={}\n",
+                .{
+                    proof.receiver,
+                    use.path,
+                    expectedClientConstructionContainer(proof.receiver, use),
+                    use.enclosing_fn,
+                    use.count,
+                    observed[flat_index],
+                },
+            );
             try std.testing.expectEqual(use.count, observed[flat_index]);
             flat_index += 1;
         }
     }
     try std.testing.expectEqual(@as(usize, 0), unreviewed);
+}
+
+fn expectClientConstructionCategories(proofs: []const ClientConstructionProof) !void {
+    try std.testing.expect(clientConstructionCategoriesValid(proofs));
+}
+
+fn clientConstructionCategoriesValid(proofs: []const ClientConstructionProof) bool {
+    var counts = [_]usize{0} ** 4;
+    for (proofs) |proof| {
+        const expected: ClientConstructionKind = if (stringInSet(proof.receiver, &.{
+            "canMoveToGenerationNode",
+            "moveToGenerationNode",
+            "bindOperationFence",
+            "bindGenerationAccountingLedger",
+        }))
+            .generation_init
+        else if (stringInSet(proof.receiver, &.{
+            "externalTransferProfile",
+            "prepareExternalPumpTransfer",
+            "commitExternalPumpTransfer",
+            "prepareExternalOwnerRangeProof",
+        }))
+            .external_transfer
+        else if (stringInSet(proof.receiver, &.{
+            "prepareExternalModeDeinit",
+            "reserveExternalModeDeinit",
+            "finishReservedExternalModeDeinit",
+            "cancelReservedExternalModeDeinit",
+            "transferReservedExternalModeDeinit",
+        }))
+            .external_teardown
+        else
+            .external_adoption;
+        if (expected != proof.kind) return false;
+        counts[@intFromEnum(proof.kind)] += 1;
+    }
+    return std.mem.eql(usize, &.{ 4, 4, 22, 5 }, &counts);
+}
+
+fn stringInSet(value: []const u8, set: []const []const u8) bool {
+    for (set) |candidate| if (std.mem.eql(u8, value, candidate)) return true;
+    return false;
 }
 
 fn scanClientConstructionSource(
@@ -6826,19 +7235,87 @@ fn scanClientConstructionSource(
     unreviewed: *usize,
     report_unreviewed: bool,
 ) !void {
+    var reflection_observed = [_]usize{0} ** client_reflection_owners.len;
+    var external_source_hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    var external_reflection_count: usize = 0;
+    for (0..tree.nodes.len) |raw_node| {
+        const node: std.zig.Ast.Node.Index = @enumFromInt(raw_node);
+        var buffer: [1]std.zig.Ast.Node.Index = undefined;
+        const proto = tree.fullFnProto(&buffer, node) orelse continue;
+        const name_token = proto.name_token orelse continue;
+        if (tokenInsideTopLevelTest(tree, name_token)) continue;
+        const name = tree.tokenSlice(name_token);
+        for (proofs) |proof| {
+            if (std.mem.eql(u8, proof.receiver, "enterExternalMode") or
+                !std.mem.eql(u8, proof.receiver, name)) continue;
+            const owner = innermostFunctionOwner(tree, name_token) orelse
+                return error.TestUnexpectedResult;
+            if (!std.mem.eql(u8, path, "src/platform/macos/session_host/client.zig") or
+                !std.mem.eql(u8, owner.container, "Client") or
+                owner.container_identity != expectedContainerPathIdentity("Client"))
+            {
+                if (report_unreviewed) std.debug.print(
+                    "unreviewed Client construction declaration: {s}:{s}.{s}\n",
+                    .{ path, owner.container, name },
+                );
+                return error.TestUnexpectedResult;
+            }
+        }
+    }
     var token: std.zig.Ast.TokenIndex = 0;
     while (token + 1 < tree.tokens.len) : (token += 1) {
+        if (tokenInsideTopLevelTest(tree, token)) continue;
+        external_source_hasher.update(tree.tokenSlice(token));
+        external_source_hasher.update(&.{0});
         if (std.mem.eql(u8, tree.tokenSlice(token), "@field")) {
             var lookahead = token + 1;
-            const end = @min(tree.tokens.len, token + 10);
-            while (lookahead < end) : (lookahead += 1) {
-                const literal = tree.tokenSlice(lookahead);
-                if (literal.len < 2 or literal[0] != '"') continue;
-                for (proofs) |proof| {
-                    if (literal.len == proof.receiver.len + 2 and
-                        std.mem.eql(u8, literal[1 .. literal.len - 1], proof.receiver))
-                        return error.TestUnexpectedResult;
-                }
+            while (lookahead < tree.tokens.len and
+                !std.mem.eql(u8, tree.tokenSlice(lookahead), "(")) : (lookahead += 1)
+            {}
+            if (lookahead == tree.tokens.len) return error.TestUnexpectedResult;
+            var depth: usize = 1;
+            lookahead += 1;
+            while (lookahead < tree.tokens.len and depth != 0) : (lookahead += 1) {
+                const part = tree.tokenSlice(lookahead);
+                if (std.mem.eql(u8, part, "(")) depth += 1;
+                if (std.mem.eql(u8, part, ")")) depth -= 1;
+            }
+            if (depth != 0) return error.TestUnexpectedResult;
+            if (!std.mem.startsWith(u8, path, "src/platform/macos/session_host/")) {
+                external_reflection_count += 1;
+            }
+            const reflection_closed_world = std.mem.startsWith(
+                u8,
+                path,
+                "src/platform/macos/session_host/",
+            ) or std.mem.eql(u8, path, "synthetic.zig");
+            if (!reflection_closed_world) continue;
+            const owner = innermostFunctionOwner(tree, token) orelse
+                return error.TestUnexpectedResult;
+            var admitted = false;
+            for (client_reflection_owners, 0..) |proof, proof_index| {
+                if (!std.mem.eql(u8, proof.path, path) or
+                    !std.mem.eql(u8, proof.function, owner.function) or
+                    expectedContainerPathIdentity(proof.container) != owner.container_identity) continue;
+                const expression_tokens = try tokenizeMarker(std.testing.allocator, proof.expression);
+                defer std.testing.allocator.free(expression_tokens);
+                if (findTreeTokenSequence(
+                    tree,
+                    token,
+                    lookahead - 1,
+                    proof.expression,
+                    expression_tokens,
+                ) != token) continue;
+                reflection_observed[proof_index] += 1;
+                admitted = true;
+                break;
+            }
+            if (!admitted) {
+                if (report_unreviewed) std.debug.print(
+                    "unreviewed session-host reflection: {s}:{s}.{s}\n",
+                    .{ path, owner.container, owner.function },
+                );
+                return error.TestUnexpectedResult;
             }
         }
         if (!std.mem.eql(u8, tree.tokenSlice(token), ".")) continue;
@@ -6851,14 +7328,26 @@ fn scanClientConstructionSource(
             }
         }
         const proof_index = proof_match orelse continue;
-        if (tokenInsideTopLevelTest(tree, token)) continue;
-        const enclosing_fn = innermostFunctionName(tree, token) orelse "<root>";
+        if (token + 2 >= tree.tokens.len or
+            !std.mem.eql(u8, tree.tokenSlice(token + 2), "("))
+            return error.TestUnexpectedResult;
+        const owner = innermostFunctionOwner(tree, token) orelse
+            ClientReferenceOwner{
+                .container = "<root>",
+                .container_identity = expectedContainerPathIdentity("<root>"),
+                .function = "<root>",
+                .first_token = token,
+                .last_token = token,
+            };
         var flat_index: usize = 0;
         var matched = false;
         for (proofs, 0..) |proof, index| {
             for (proof.uses) |use| {
+                const expected_container = expectedClientConstructionContainer(proof.receiver, use);
                 if (index == proof_index and std.mem.eql(u8, use.path, path) and
-                    std.mem.eql(u8, use.enclosing_fn, enclosing_fn))
+                    std.mem.eql(u8, expectedContainerLeaf(expected_container), owner.container) and
+                    expectedContainerPathIdentity(expected_container) == owner.container_identity and
+                    std.mem.eql(u8, use.enclosing_fn, owner.function))
                 {
                     observed[flat_index] += 1;
                     matched = true;
@@ -6868,18 +7357,73 @@ fn scanClientConstructionSource(
         }
         if (!matched) {
             if (report_unreviewed)
-                std.debug.print("unreviewed Client construction reference: {s} {s} {s}\n", .{
+                std.debug.print("unreviewed Client construction reference: {s} {s} {s}.{s}\n", .{
                     receiver,
                     path,
-                    enclosing_fn,
+                    owner.container,
+                    owner.function,
                 });
             unreviewed.* += 1;
         }
     }
+    for (client_reflection_owners, 0..) |proof, proof_index| {
+        if (!std.mem.eql(u8, proof.path, path)) continue;
+        if (reflection_observed[proof_index] != proof.count) {
+            if (report_unreviewed) std.debug.print(
+                "session-host reflection count mismatch: {s}:{s}.{s} expected={} observed={}\n",
+                .{ proof.path, proof.container, proof.function, proof.count, reflection_observed[proof_index] },
+            );
+            return error.TestUnexpectedResult;
+        }
+    }
+    if (!std.mem.startsWith(u8, path, "src/platform/macos/session_host/") and
+        !std.mem.eql(u8, path, "synthetic.zig"))
+    {
+        var digest: [32]u8 = undefined;
+        external_source_hasher.final(&digest);
+        const digest_hex = std.fmt.bytesToHex(digest, .lower);
+        var proof_match: ?ExternalReflectionInventoryProof = null;
+        for (external_reflection_inventory) |proof| {
+            if (!std.mem.eql(u8, proof.path, path)) continue;
+            proof_match = proof;
+            break;
+        }
+        if (proof_match) |proof| {
+            if (proof.count != external_reflection_count or
+                !std.mem.eql(u8, proof.digest_hex, &digest_hex))
+            {
+                if (report_unreviewed) std.debug.print(
+                    "external source inventory mismatch: {s} count={} digest={s}\n",
+                    .{ path, external_reflection_count, &digest_hex },
+                );
+                return error.TestUnexpectedResult;
+            }
+        } else if (external_reflection_count != 0) {
+            if (report_unreviewed) std.debug.print(
+                "unreviewed external reflection inventory: {s} count={} digest={s}\n",
+                .{ path, external_reflection_count, &digest_hex },
+            );
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+fn expectedContainerLeaf(path: []const u8) []const u8 {
+    const separator = std.mem.lastIndexOfScalar(u8, path, '.') orelse return path;
+    return path[separator + 1 ..];
 }
 
 fn syntheticConstructionPolicyValid(
     source: [:0]const u8,
+    enclosing_fn: []const u8,
+    count: usize,
+) !bool {
+    return syntheticConstructionPolicyValidInContainer(source, "<root>", enclosing_fn, count);
+}
+
+fn syntheticConstructionPolicyValidAtPath(
+    source: [:0]const u8,
+    path: []const u8,
     enclosing_fn: []const u8,
     count: usize,
 ) !bool {
@@ -6888,7 +7432,34 @@ fn syntheticConstructionPolicyValid(
     defer tree.deinit(allocator);
     const proofs = [_]ClientConstructionProof{.{
         .receiver = "sample",
-        .uses = &.{.{ .path = "synthetic.zig", .enclosing_fn = enclosing_fn, .count = count }},
+        .kind = .external_adoption,
+        .uses = &.{.{ .path = path, .enclosing_fn = enclosing_fn, .count = count }},
+    }};
+    var observed = [_]usize{0};
+    var unreviewed: usize = 0;
+    scanClientConstructionSource(&tree, path, &proofs, &observed, &unreviewed, false) catch
+        return false;
+    return unreviewed == 0 and observed[0] == count;
+}
+
+fn syntheticConstructionPolicyValidInContainer(
+    source: [:0]const u8,
+    enclosing_container: []const u8,
+    enclosing_fn: []const u8,
+    count: usize,
+) !bool {
+    const allocator = std.testing.allocator;
+    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    defer tree.deinit(allocator);
+    const proofs = [_]ClientConstructionProof{.{
+        .receiver = "sample",
+        .kind = .external_adoption,
+        .uses = &.{.{
+            .path = "synthetic.zig",
+            .enclosing_container = enclosing_container,
+            .enclosing_fn = enclosing_fn,
+            .count = count,
+        }},
     }};
     var observed = [_]usize{0};
     var unreviewed: usize = 0;
@@ -6897,9 +7468,187 @@ fn syntheticConstructionPolicyValid(
     return unreviewed == 0 and observed[0] == count;
 }
 
+fn syntheticEnterExternalModePolicyValid(source: [:0]const u8) bool {
+    expectEnterExternalModeBoundReject(std.testing.allocator, source) catch return false;
+    return true;
+}
+
+fn syntheticNoUnlistedCallsValid(source: [:0]const u8) bool {
+    expectNoUnlistedCallsBetweenMarkers(
+        std.testing.allocator,
+        source,
+        "Client",
+        "move",
+        "destination.* = self.*",
+        "self.* =",
+        &.{.{ .name = "rebindPreparedNormalizeExact", .count = 1 }},
+    ) catch return false;
+    return true;
+}
+
+fn syntheticExactMoveRegionValid(source: [:0]const u8) bool {
+    expectExactMethodTokenRegion(
+        std.testing.allocator,
+        source,
+        "Client",
+        "move",
+        "destination.*=self.*;self.rebindPreparedNormalizeExact();self.*=",
+        false,
+    ) catch return false;
+    return true;
+}
+
+fn syntheticMarkerCountValid(source: [:0]const u8, marker: []const u8, count: usize) bool {
+    const observed = containerMethodMarkerCount(
+        std.testing.allocator,
+        source,
+        "ClientSlot",
+        "initInPlaceWithIssuer",
+        marker,
+    ) catch return false;
+    return observed == count;
+}
+
+fn syntheticDirectIdentifierValid(source: [:0]const u8, identifier: []const u8) bool {
+    expectOnlyDirectIdentifierReference(
+        std.testing.allocator,
+        source,
+        "ClientSlot",
+        "initInPlaceWithIssuer",
+        identifier,
+    ) catch return false;
+    return true;
+}
+
+fn expectEnterExternalModeBoundReject(
+    allocator: std.mem.Allocator,
+    source: [:0]const u8,
+) !void {
+    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    defer tree.deinit(allocator);
+    const members = findRootContainerMembers(&tree, "Client") orelse
+        return error.TestUnexpectedResult;
+    var method: ?std.zig.Ast.Node.Index = null;
+    for (members) |member| {
+        const tuple = declarationTuple(&tree, "Client", member);
+        if (std.mem.eql(u8, tuple.kind, "fn") and
+            std.mem.eql(u8, tuple.name, "enterExternalMode")) method = member;
+    }
+    const node = method orelse return error.TestUnexpectedResult;
+    const release = nodeCallToken(&tree, node, "self", "endPublicMutation") orelse
+        return error.TestUnexpectedResult;
+    const release_close = matchingCloseParen(&tree, node, release + 3) orelse
+        return error.TestUnexpectedResult;
+    const suffix = [_][]const u8{
+        ";",     "if",                       "(",    "operation_fence_held", ")",      "return",
+        "error", ".",                        "Busy", ";",                    "return", "self",
+        ".",     "enterExternalModeWithOps", "(",    "client_deadline",      ".",      "posix_ops",
+        ")",     ";",
+    };
+    try expectTokensAt(&tree, release_close + 1, &suffix);
+}
+
+fn expectClientMethodBodyPrefix(
+    allocator: std.mem.Allocator,
+    source: [:0]const u8,
+    method_name: []const u8,
+    expected: []const []const u8,
+) !void {
+    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    defer tree.deinit(allocator);
+    const members = findRootContainerMembers(&tree, "Client") orelse
+        return error.TestUnexpectedResult;
+    var method: ?std.zig.Ast.Node.Index = null;
+    for (members) |member| {
+        const tuple = declarationTuple(&tree, "Client", member);
+        if (std.mem.eql(u8, tuple.kind, "fn") and
+            std.mem.eql(u8, tuple.name, method_name)) method = member;
+    }
+    const node = method orelse return error.TestUnexpectedResult;
+    const open = findTokenAfter(&tree, node, tree.firstToken(node), "{") orelse
+        return error.TestUnexpectedResult;
+    try expectTokensAt(&tree, open + 1, expected);
+}
+
 fn clientConstructionUseEql(a: ClientConstructionUse, b: ClientConstructionUse) bool {
     return std.mem.eql(u8, a.path, b.path) and
+        std.mem.eql(u8, a.enclosing_container, b.enclosing_container) and
         std.mem.eql(u8, a.enclosing_fn, b.enclosing_fn);
+}
+
+fn expectedClientConstructionContainer(receiver: []const u8, use: ClientConstructionUse) []const u8 {
+    if (!std.mem.eql(u8, use.enclosing_container, "<derived>")) return use.enclosing_container;
+    if (std.mem.eql(u8, receiver, "enterExternalMode")) {
+        if (std.mem.eql(u8, use.path, "src/platform/macos/session_host/external_attach_evidence.zig") and
+            std.mem.eql(u8, use.enclosing_fn, "init")) return "TestPrepared";
+        if (std.mem.eql(u8, use.path, "src/platform/macos/session_host/external_event_materialization.zig") and
+            std.mem.eql(u8, use.enclosing_fn, "init")) return "TestClient";
+        if (std.mem.eql(u8, use.path, "src/platform/macos/session_host/client_external_pump.zig") and
+            std.mem.eql(u8, use.enclosing_fn, "initWithAllocator")) return "TestClient";
+    }
+    if (std.mem.eql(u8, use.path, "src/platform/macos/session_host/client_slot.zig"))
+        return "ClientSlot";
+    if (std.mem.eql(u8, use.path, "src/platform/macos/session_host/client.zig")) {
+        if (std.mem.eql(u8, use.enclosing_fn, "overlapsCommittedOwnedRange") or
+            (std.mem.eql(u8, use.enclosing_fn, "validate") and
+                std.mem.eql(u8, receiver, "validateSealedExternalAdoptionPlan")))
+            return "ExternalAdoptionTake";
+        if (std.mem.eql(u8, use.enclosing_fn, "validate") and
+            std.mem.eql(u8, receiver, "externalTransferProfile"))
+            return "PreparedExternalPumpTransfer";
+        if (stringInSet(use.enclosing_fn, &.{
+            "moveToGenerationNode",
+            "prepareExternalPumpTransfer",
+            "externalAdoptionFoldResultMatches",
+            "materializeExternalMetadataEvent",
+            "externalMetadataDtoMatchesEventCandidate",
+            "preflightExternalAdoption",
+            "stageExternalScreenCopies",
+            "sealExternalAdoption",
+            "validateSealedExternalAdoptionPlan",
+            "prepareExternalAdoptionTake",
+            "prepareExternalRecoveryDiscard",
+            "prepareDeinitGraph",
+            "poisonAndTakeFd",
+        })) return "Client";
+        return "<root>";
+    }
+    if (std.mem.eql(u8, use.path, "src/platform/macos/session_host/client_external_pump.zig")) {
+        if (std.mem.eql(u8, use.enclosing_fn, "initFromAttachPartsInPlace") or
+            (std.mem.eql(u8, use.enclosing_fn, "validate") and
+                std.mem.eql(u8, receiver, "externalTransferProfile")))
+            return "PreparedAdoptionEvidence";
+        if (stringInSet(use.enclosing_fn, &.{
+            "consumeProjectedRecoverySnapshotUnchecked",
+            "publishRxAggregateUnchecked",
+            "publishRecoverySnapshotCommitUnchecked",
+            "committedRecoverySnapshotBindingCurrent",
+            "finishPublishedRxAggregateCommit",
+            "captureResyncSemanticCleanupSnapshot",
+            "detectResyncSemanticCleanupDrift",
+            "wholeTurnScratchDisjoint",
+            "initInPlaceWithOptions",
+            "projectOwnerEventInternal",
+            "projectionScratchDisjoint",
+            "prepareAdoptionInner",
+            "finishNonAdopted",
+            "finishImmediateTerminal",
+            "validateFinalSeal",
+            "latchCommitTerminal",
+            "latchCrossOwnerAliasTerminal",
+            "teardownUnderHeldOperationLease",
+            "prepareAggregateOwnerRangeProof",
+            "closeUncommittedOwned",
+        })) return "ExternalPumpStorage";
+        return "<root>";
+    }
+    if (std.mem.eql(u8, use.path, "src/platform/macos/session_host/client_external_adoption.zig") and
+        stringInSet(use.enclosing_fn, &.{ "initInPlace", "validate", "commitScreenSeeds" }))
+        return "PreparedScreenBacklog";
+    if (std.mem.eql(u8, use.path, "src/platform/macos/session_host/external_event_materialization.zig") and
+        std.mem.eql(u8, use.enclosing_fn, "validate"))
+        return "Prepared";
+    return "<root>";
 }
 
 fn tokenInsideTopLevelTest(tree: *const std.zig.Ast, token: std.zig.Ast.TokenIndex) bool {
@@ -6910,8 +7659,18 @@ fn tokenInsideTopLevelTest(tree: *const std.zig.Ast, token: std.zig.Ast.TokenInd
     return false;
 }
 
-fn innermostFunctionName(tree: *const std.zig.Ast, token: std.zig.Ast.TokenIndex) ?[]const u8 {
-    var result: ?[]const u8 = null;
+const ClientReferenceOwner = struct {
+    container: []const u8,
+    container_identity: u64,
+    function: []const u8,
+    first_token: std.zig.Ast.TokenIndex,
+    last_token: std.zig.Ast.TokenIndex,
+};
+
+fn innermostFunctionOwner(tree: *const std.zig.Ast, token: std.zig.Ast.TokenIndex) ?ClientReferenceOwner {
+    var function: ?[]const u8 = null;
+    var function_first: std.zig.Ast.TokenIndex = 0;
+    var function_last: std.zig.Ast.TokenIndex = 0;
     var result_span: usize = std.math.maxInt(usize);
     for (0..tree.nodes.len) |raw_node| {
         const node: std.zig.Ast.Node.Index = @enumFromInt(raw_node);
@@ -6923,10 +7682,86 @@ fn innermostFunctionName(tree: *const std.zig.Ast, token: std.zig.Ast.TokenIndex
         const name_token = proto.name_token orelse continue;
         const span: usize = @intCast(last - first);
         if (span >= result_span) continue;
-        result = tree.tokenSlice(name_token);
+        function = tree.tokenSlice(name_token);
+        function_first = first;
+        function_last = last;
         result_span = span;
     }
-    return result;
+    const function_name = function orelse return null;
+    var container: []const u8 = "<root>";
+    var container_span: usize = std.math.maxInt(usize);
+    for (0..tree.nodes.len) |raw_node| {
+        const node: std.zig.Ast.Node.Index = @enumFromInt(raw_node);
+        const variable = tree.fullVarDecl(node) orelse continue;
+        const init = variable.ast.init_node.unwrap() orelse continue;
+        var buffer: [2]std.zig.Ast.Node.Index = undefined;
+        _ = tree.fullContainerDecl(&buffer, init) orelse continue;
+        const first = tree.firstToken(node);
+        const last = tree.lastToken(node);
+        if (token < first or token > last) continue;
+        const span: usize = @intCast(last - first);
+        if (span >= container_span) continue;
+        container = tree.tokenSlice(variable.ast.mut_token + 1);
+        container_span = span;
+    }
+    return .{
+        .container = container,
+        .container_identity = containerPathIdentity(tree, token),
+        .function = function_name,
+        .first_token = function_first,
+        .last_token = function_last,
+    };
+}
+
+fn containerPathIdentity(tree: *const std.zig.Ast, token: std.zig.Ast.TokenIndex) u64 {
+    const Container = struct { name: []const u8, span: usize };
+    var containers: [16]Container = undefined;
+    var count: usize = 0;
+    for (0..tree.nodes.len) |raw_node| {
+        const node: std.zig.Ast.Node.Index = @enumFromInt(raw_node);
+        const variable = tree.fullVarDecl(node) orelse continue;
+        const init = variable.ast.init_node.unwrap() orelse continue;
+        var buffer: [2]std.zig.Ast.Node.Index = undefined;
+        _ = tree.fullContainerDecl(&buffer, init) orelse continue;
+        const first = tree.firstToken(node);
+        const last = tree.lastToken(node);
+        if (token < first or token > last) continue;
+        if (count == containers.len) return 0;
+        containers[count] = .{
+            .name = tree.tokenSlice(variable.ast.mut_token + 1),
+            .span = @intCast(last - first),
+        };
+        count += 1;
+    }
+    var index: usize = 1;
+    while (index < count) : (index += 1) {
+        const current = containers[index];
+        var destination = index;
+        while (destination > 0 and containers[destination - 1].span < current.span) : (destination -= 1)
+            containers[destination] = containers[destination - 1];
+        containers[destination] = current;
+    }
+    var identity: u64 = 14695981039346656037;
+    if (count == 0) return pathIdentityPart(identity, "<root>");
+    for (containers[0..count], 0..) |entry, ordinal| {
+        if (ordinal != 0) identity = pathIdentityPart(identity, ".");
+        identity = pathIdentityPart(identity, entry.name);
+    }
+    return identity;
+}
+
+fn expectedContainerPathIdentity(path: []const u8) u64 {
+    const identity: u64 = 14695981039346656037;
+    return pathIdentityPart(identity, path);
+}
+
+fn pathIdentityPart(initial: u64, bytes: []const u8) u64 {
+    var identity = initial;
+    for (bytes) |byte| {
+        identity ^= byte;
+        identity *%= 1099511628211;
+    }
+    return identity;
 }
 
 fn expectGuardedClientReceiverPolicies(
@@ -7741,13 +8576,252 @@ fn expectContainerMethodMarkersInOrder(
             method_node = member;
         }
     }
-    const body = nodeSource(&tree, source, method_node orelse return error.TestUnexpectedResult);
-    var cursor: usize = 0;
+    const method = method_node orelse return error.TestUnexpectedResult;
+    var cursor = tree.firstToken(method);
     for (markers) |marker| {
-        const found = std.mem.indexOfPos(u8, body, cursor, marker) orelse
+        const marker_tokens = try tokenizeMarker(allocator, marker);
+        defer allocator.free(marker_tokens);
+        const found = findTreeTokenSequence(
+            &tree,
+            cursor,
+            tree.lastToken(method),
+            marker,
+            marker_tokens,
+        ) orelse
             return error.TestUnexpectedResult;
-        cursor = found + marker.len;
+        cursor = found + @as(std.zig.Ast.TokenIndex, @intCast(marker_tokens.len));
     }
+}
+
+fn expectContainerMethodMarkerCount(
+    allocator: std.mem.Allocator,
+    source: [:0]const u8,
+    container_name: []const u8,
+    method_name: []const u8,
+    marker: []const u8,
+    expected: usize,
+) !void {
+    try std.testing.expectEqual(expected, try containerMethodMarkerCount(
+        allocator,
+        source,
+        container_name,
+        method_name,
+        marker,
+    ));
+}
+
+fn expectOnlyDirectIdentifierReference(
+    allocator: std.mem.Allocator,
+    source: [:0]const u8,
+    container_name: []const u8,
+    method_name: []const u8,
+    identifier: []const u8,
+) !void {
+    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    defer tree.deinit(allocator);
+    const method = try findUniqueContainerMethod(&tree, container_name, method_name);
+    var references: usize = 0;
+    var token = tree.firstToken(method);
+    while (token <= tree.lastToken(method)) : (token += 1) {
+        if (!std.mem.eql(u8, tree.tokenSlice(token), identifier)) continue;
+        references += 1;
+        if (token + 1 > tree.lastToken(method) or tree.tokenTag(token + 1) != .l_paren)
+            return error.TestUnexpectedResult;
+    }
+    try std.testing.expectEqual(@as(usize, 1), references);
+}
+
+fn expectExactMethodTokenRegion(
+    allocator: std.mem.Allocator,
+    source: [:0]const u8,
+    container_name: []const u8,
+    method_name: []const u8,
+    region: []const u8,
+    report_mismatch: bool,
+) !void {
+    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    defer tree.deinit(allocator);
+    const method = try findUniqueContainerMethod(&tree, container_name, method_name);
+    const region_tokens = try tokenizeMarker(allocator, region);
+    defer allocator.free(region_tokens);
+    const prefix_len = @min(region_tokens.len, 6);
+    const prefix = findTreeTokenSequence(
+        &tree,
+        tree.firstToken(method),
+        tree.lastToken(method),
+        region,
+        region_tokens[0..prefix_len],
+    ) orelse return error.TestUnexpectedResult;
+    if (findTreeTokenSequence(
+        &tree,
+        prefix + 1,
+        tree.lastToken(method),
+        region,
+        region_tokens[0..prefix_len],
+    ) != null) return error.TestUnexpectedResult;
+    for (region_tokens, 0..) |expected, offset| {
+        const actual_token = prefix + @as(std.zig.Ast.TokenIndex, @intCast(offset));
+        if (actual_token > tree.lastToken(method)) return error.TestUnexpectedResult;
+        const actual = tree.tokenSlice(actual_token);
+        const wanted = region[expected.start..expected.end];
+        if (!std.mem.eql(u8, actual, wanted)) {
+            if (report_mismatch) std.debug.print(
+                "exact token region mismatch {s}.{s} offset={} expected={s} actual={s}\n",
+                .{ container_name, method_name, offset, wanted, actual },
+            );
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+fn findUniqueContainerMethod(
+    tree: *const std.zig.Ast,
+    container_name: []const u8,
+    method_name: []const u8,
+) !std.zig.Ast.Node.Index {
+    const members = findRootContainerMembers(tree, container_name) orelse
+        return error.TestUnexpectedResult;
+    var method_node: ?std.zig.Ast.Node.Index = null;
+    for (members) |member| {
+        const tuple = declarationTuple(tree, container_name, member);
+        if (!std.mem.eql(u8, tuple.kind, "fn") or
+            !std.mem.eql(u8, tuple.name, method_name)) continue;
+        if (method_node != null) return error.TestUnexpectedResult;
+        method_node = member;
+    }
+    return method_node orelse error.TestUnexpectedResult;
+}
+
+fn containerMethodMarkerCount(
+    allocator: std.mem.Allocator,
+    source: [:0]const u8,
+    container_name: []const u8,
+    method_name: []const u8,
+    marker: []const u8,
+) !usize {
+    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    defer tree.deinit(allocator);
+    const members = findRootContainerMembers(&tree, container_name) orelse
+        return error.TestUnexpectedResult;
+    var method_node: ?std.zig.Ast.Node.Index = null;
+    for (members) |member| {
+        const tuple = declarationTuple(&tree, container_name, member);
+        if (!std.mem.eql(u8, tuple.kind, "fn") or
+            !std.mem.eql(u8, tuple.name, method_name)) continue;
+        if (method_node != null) return error.TestUnexpectedResult;
+        method_node = member;
+    }
+    const method = method_node orelse return error.TestUnexpectedResult;
+    const marker_tokens = try tokenizeMarker(allocator, marker);
+    defer allocator.free(marker_tokens);
+    var count: usize = 0;
+    var cursor = tree.firstToken(method);
+    while (findTreeTokenSequence(
+        &tree,
+        cursor,
+        tree.lastToken(method),
+        marker,
+        marker_tokens,
+    )) |found| {
+        count += 1;
+        cursor = found + @as(std.zig.Ast.TokenIndex, @intCast(marker_tokens.len));
+    }
+    return count;
+}
+
+fn tokenizeMarker(allocator: std.mem.Allocator, marker: []const u8) ![]std.zig.Token.Loc {
+    var tokens: std.ArrayList(std.zig.Token.Loc) = .empty;
+    errdefer tokens.deinit(allocator);
+    const terminated = try allocator.dupeZ(u8, marker);
+    defer allocator.free(terminated);
+    var tokenizer = std.zig.Tokenizer.init(terminated);
+    while (true) {
+        const token = tokenizer.next();
+        if (token.tag == .eof) break;
+        try tokens.append(allocator, token.loc);
+    }
+    return tokens.toOwnedSlice(allocator);
+}
+
+fn findTreeTokenSequence(
+    tree: *const std.zig.Ast,
+    start: std.zig.Ast.TokenIndex,
+    last: std.zig.Ast.TokenIndex,
+    marker: []const u8,
+    marker_tokens: []const std.zig.Token.Loc,
+) ?std.zig.Ast.TokenIndex {
+    if (marker_tokens.len == 0) return null;
+    var candidate = start;
+    while (candidate <= last) : (candidate += 1) {
+        if (@as(usize, @intCast(last - candidate + 1)) < marker_tokens.len) return null;
+        for (marker_tokens, 0..) |expected, offset| {
+            const actual = tree.tokenSlice(candidate + @as(std.zig.Ast.TokenIndex, @intCast(offset)));
+            if (!std.mem.eql(u8, actual, marker[expected.start..expected.end])) break;
+        } else return candidate;
+    }
+    return null;
+}
+
+const CallAllowance = struct { name: []const u8, count: usize };
+
+fn expectNoUnlistedCallsBetweenMarkers(
+    allocator: std.mem.Allocator,
+    source: [:0]const u8,
+    container_name: []const u8,
+    method_name: []const u8,
+    start_marker: []const u8,
+    end_marker: []const u8,
+    allowed: []const CallAllowance,
+) !void {
+    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    defer tree.deinit(allocator);
+    const members = findRootContainerMembers(&tree, container_name) orelse
+        return error.TestUnexpectedResult;
+    var method_node: ?std.zig.Ast.Node.Index = null;
+    for (members) |member| {
+        const tuple = declarationTuple(&tree, container_name, member);
+        if (!std.mem.eql(u8, tuple.kind, "fn") or
+            !std.mem.eql(u8, tuple.name, method_name)) continue;
+        if (method_node != null) return error.TestUnexpectedResult;
+        method_node = member;
+    }
+    const method = method_node orelse return error.TestUnexpectedResult;
+    const start_tokens = try tokenizeMarker(allocator, start_marker);
+    defer allocator.free(start_tokens);
+    const end_tokens = try tokenizeMarker(allocator, end_marker);
+    defer allocator.free(end_tokens);
+    const start = findTreeTokenSequence(
+        &tree,
+        tree.firstToken(method),
+        tree.lastToken(method),
+        start_marker,
+        start_tokens,
+    ) orelse return error.TestUnexpectedResult;
+    const after_start = start + @as(std.zig.Ast.TokenIndex, @intCast(start_tokens.len));
+    const end = findTreeTokenSequence(
+        &tree,
+        after_start,
+        tree.lastToken(method),
+        end_marker,
+        end_tokens,
+    ) orelse return error.TestUnexpectedResult;
+    const observed = try allocator.alloc(usize, allowed.len);
+    defer allocator.free(observed);
+    @memset(observed, 0);
+    var token = after_start;
+    while (token + 1 < end) : (token += 1) {
+        if (tree.tokenTag(token) != .identifier or tree.tokenTag(token + 1) != .l_paren) continue;
+        const call = tree.tokenSlice(token);
+        var admitted = false;
+        for (allowed, 0..) |entry, index| {
+            if (!std.mem.eql(u8, call, entry.name)) continue;
+            observed[index] += 1;
+            admitted = true;
+            break;
+        }
+        if (!admitted) return error.TestUnexpectedResult;
+    }
+    for (allowed, observed) |entry, count| try std.testing.expectEqual(entry.count, count);
 }
 
 fn expectRootConstTypeAndInitializer(

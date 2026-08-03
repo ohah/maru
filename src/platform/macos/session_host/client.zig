@@ -5564,8 +5564,8 @@ pub const Client = struct {
     /// The caller allocates and validates the final destination before invoking this no-fail
     /// suffix, so a failed HostAdapter initialization never partially moves socket ownership.
     pub fn canMoveToGenerationNode(self: *const Client) bool {
+        if (self.operation_fence != null or self.operation_fence_generation != 0) return false;
         return self.ownership == .standalone and self.io_mode == .blocking and !self.unusable and
-            self.operation_fence == null and self.operation_fence_generation == 0 and
             self.generation_batch_accounting.valid(@intFromPtr(self)) and
             (self.generation_batch_accounting.ledger == null or
                 self.generation_batch_accounting.ledger.?.item_count == 0) and
@@ -5675,7 +5675,7 @@ pub const Client = struct {
 
     /// Deep snapshot of the descriptors and descriptor elements consumed by `deinit`. This is
     /// process-local authority evidence; payload contents are intentionally excluded.
-    pub fn projectionAuthorityDigest(self: *const Client) owner_seal.Digest {
+    pub fn clientProjectionAuthorityDigest(self: *const Client) owner_seal.Digest {
         var writer = owner_seal.Writer.init("maru.client-owner.projection.v1");
         writer.writeBool(self.terminalReasonInvariant());
         writer.writeUsize(@intFromPtr(self));
@@ -5740,6 +5740,7 @@ pub const Client = struct {
     }
 
     pub fn externalTransferProfile(self: *const Client) ?ExternalTransferProfile {
+        if (self.operation_fence != null or self.operation_fence_generation != 0) return null;
         const connection_profile = self.connection_profile orelse return null;
         if (connection_profile != .cli_attach) return null;
         const selected = self.compatibility_profile orelse return null;
@@ -5981,6 +5982,8 @@ pub const Client = struct {
         destination: *?Client,
         resident_cap: usize,
     ) ExternalPumpTransferError!void {
+        if (self.operation_fence != null or self.operation_fence_generation != 0)
+            return error.AlreadyBound;
         const source_range = externalRangeOfValue(self);
         const out_range = externalRangeOfValue(out);
         const destination_range = externalRangeOfValue(destination);
@@ -15892,9 +15895,9 @@ test "client poison reason participates in projection authority and terminal inv
         .parser = framing.FrameParser.init(std.testing.allocator),
     };
     defer client.deinit();
-    const before = client.projectionAuthorityDigest();
+    const before = client.clientProjectionAuthorityDigest();
     client.markPoisonedForDeferredCleanup(.external_transfer_quarantined);
-    const after = client.projectionAuthorityDigest();
+    const after = client.clientProjectionAuthorityDigest();
     try std.testing.expect(!std.mem.eql(u8, &before, &after));
     try std.testing.expect(client.terminalReasonInvariant());
     try std.testing.expectEqual(
@@ -15902,7 +15905,7 @@ test "client poison reason participates in projection authority and terminal inv
         client.firstPoisonReason().?,
     );
     client.first_poison_reason = .frame_malformed;
-    const changed_reason = client.projectionAuthorityDigest();
+    const changed_reason = client.clientProjectionAuthorityDigest();
     try std.testing.expect(!std.mem.eql(u8, &after, &changed_reason));
 }
 

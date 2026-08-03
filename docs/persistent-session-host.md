@@ -1282,7 +1282,7 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    | class | exact public Client receiver methods |
    |---|---|
    | `G` (40) | `requireAdminRuntimeEnd`, `deinit`, `tryDeinit`, `requireBufferedGenerationBatch`, `enterExternalMode`, `call`, `callUntil`, `prepareBlockingRpcStorage`, `abortPreparedBlockingRpcStorage`, `preflightPreparedBlockingRpcStorageExecution`, `executePreparedBlockingRpcStorageWithAllocator`, `preparedBlockingRpcStorageMatches`, `refreshBufferedAuthorityEvidence`, `runtimeInventory`, `runtimeInventoryBounded`, `prepareUpgrade`, `upgradeStatus`, `readSnapshot`, `readSnapshotUntil`, `readStreamBatch`, `readGenerationBatch`, `dropBufferedStream`, `takeEventForStream`, `peekEndedEventForStream`, `prepareEndedPurgeInventory`, `releaseEvent`, `sendInput`, `sendInputNonBlocking`, `sendScrollToBottomNonBlocking`, `sendResyncNonBlocking`, `sendCoreCommandNonBlocking`, `sendScrollToBottom`, `sendCoreCommand`, `pumpPendingOutput`, `fenceRevokedStream`, `hasBufferedControllerRevoke`, `hasBufferedControllerRevokeForStream`, `terminalReasonInvariant`, `poison`, `firstPoisonReason` |
-   | `C` (35) | `canMoveToGenerationNode`, `bindGenerationAccountingLedger`, `moveToGenerationNode`, `projectionAuthorityDigest`, `externalTransferProfile`, `prepareExternalRecoveryDiscard`, `validateExternalRecoveryDiscard`, `prepareExternalPumpTransfer`, `commitExternalPumpTransfer`, `foldExternalAdoptionSource`, `externalAdoptionFoldResultMatches`, `materializeExternalMetadataEvent`, `externalMetadataDtoMatchesEventCandidate`, `previewExternalAdoption`, `inspectExternalAdoption`, `preflightExternalAdoptionDestination`, `preflightExternalAdoptionDestinationWithScratch`, `appendExternalOwnerRangesForTeardown`, `prepareExternalOwnerRangeProof`, `preflightExternalAdoption`, `stageExternalScreenCopies`, `externalScreenCopiesMatch`, `validateExternalAdoptionPlan`, `externalAdoptionDisarmMetadataBytes`, `externalAdoptionDisarmMatchesInventory`, `sealExternalAdoption`, `validateSealedExternalAdoptionPlan`, `prepareExternalAdoptionTake`, `commitExternalAdoption`, `prepareExternalModeDeinit`, `reserveExternalModeDeinit`, `finishReservedExternalModeDeinit`, `cancelReservedExternalModeDeinit`, `transferReservedExternalModeDeinit`, `bindOperationFence` |
+   | `C` (35) | `canMoveToGenerationNode`, `bindGenerationAccountingLedger`, `moveToGenerationNode`, `clientProjectionAuthorityDigest`, `externalTransferProfile`, `prepareExternalRecoveryDiscard`, `validateExternalRecoveryDiscard`, `prepareExternalPumpTransfer`, `commitExternalPumpTransfer`, `foldExternalAdoptionSource`, `externalAdoptionFoldResultMatches`, `materializeExternalMetadataEvent`, `externalMetadataDtoMatchesEventCandidate`, `previewExternalAdoption`, `inspectExternalAdoption`, `preflightExternalAdoptionDestination`, `preflightExternalAdoptionDestinationWithScratch`, `appendExternalOwnerRangesForTeardown`, `prepareExternalOwnerRangeProof`, `preflightExternalAdoption`, `stageExternalScreenCopies`, `externalScreenCopiesMatch`, `validateExternalAdoptionPlan`, `externalAdoptionDisarmMetadataBytes`, `externalAdoptionDisarmMatchesInventory`, `sealExternalAdoption`, `validateSealedExternalAdoptionPlan`, `prepareExternalAdoptionTake`, `commitExternalAdoption`, `prepareExternalModeDeinit`, `reserveExternalModeDeinit`, `finishReservedExternalModeDeinit`, `cancelReservedExternalModeDeinit`, `transferReservedExternalModeDeinit`, `bindOperationFence` |
    | `U` (15) | `beginGenerationBatchAllocator`, `restoreGenerationBatchAllocatorUnchecked`, `prepareGenerationAccountingConsume`, `consumeGenerationAccountingUnchecked`, `tryAcquireEndedPurgeExclusive`, `tryAcquireClientSlotTeardownExclusive`, `abortClientSlotTeardownExclusive`, `tryDeinitClientSlotExclusiveHeld`, `beginClientSlotOperation`, `endClientSlotOperation`, `releaseEndedPurgeExclusiveClean`, `commitEndedPurgeExclusiveTerminal`, `enterGenerationAllocatorCallback`, `rejectGenerationAllocatorCallbackReentry`, `leaveGenerationAllocatorCallbackUnchecked` |
    | `R` (1) | `endedPurgeFenceIntruded` |
 
@@ -1308,9 +1308,14 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    `C`는 test 밖의
    **모든 member reference**를 reviewed prepublication construction/transfer/teardown owner로 exact 제한한다. caller closure는 단순
    `.<method>(` 문자열이나 파일 allowlist가 아니다. tokenizer/AST가 comment/string과 top-level test body를 제외한 `src/**/*.zig`의
-   `.identifier` reference를 전부 모아 `{receiver,path,enclosing_fn,reference_count}` multiset을 proof table과 exact 비교한다. 따라서
-   `const f = Client.method` alias와 같은 파일의 새 무권한 함수도 실패하며, `@field(Client, "<C method>")` 같은 reflection 우회는 제품
-   session-host에서 금지한다. line number와 receiver 변수명은 고정하지 않는다.
+   `.identifier` reference를 전부 모아 `{receiver,path,canonical_container_path,enclosing_fn,reference_count}` multiset을 proof table과 exact
+   비교한다. reference는 즉시 `(`가 뒤따르는 direct call만 허용하므로 `const f = Client.method` function-value alias/return/store는
+   실패한다. 동일 파일·동일 함수명의 sibling/nested container와 같은 leaf 이름을 가진 다른 outer container, C35 이름을 선언한 다른 타입도
+   실패한다. 제품 session-host의 `@field`는 Client token 탐지에 의존하지 않고 codec 등 기존 canonical owner별 exact normalized token
+   expression/count의 closed allowlist만 허용한다. 나머지 `src`의 reflection 보유 7개 파일은 top-level test를 제외한 전체 normalized token
+   stream digest와 `@field` count를 exact 고정하므로 기존 expression의 semantic relocation/variable rebinding이나 외부 `anytype` helper를 새
+   reflection trampoline으로 만들 수 없다. 허용 owner 안의 안전한 reflection 하나를 같은 수의
+   type alias·`@TypeOf`·computed name Client reflection으로 치환해도 실패한다. line number와 receiver 변수명은 고정하지 않는다.
 
    C35 proof는 manifest C 집합과 이름 기준 exact equality이며 모든 row가 caller closure를 가진다. 현재 제품 owner 분류는 다음과 같다.
 
@@ -1319,13 +1324,16 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
 
    - generation prepublication 4개: `canMoveToGenerationNode`, `moveToGenerationNode`, `bindOperationFence`,
      `bindGenerationAccountingLedger`. `ClientSlot.initInPlaceWithIssuer`의 final-address destination에서
-     `canMove→move→bind fence→bind ledger→publication` 순서를 고정한다. `moveToGenerationNode→canMoveToGenerationNode` 내부 edge도
-     별도 exact reference다. `canMove`의 null-fence/generation-zero predicate는 caller proof에 중첩하지만, 현재 fence 검사 전
-     ownership/io-mode를 읽으므로 first-read bound-reject 증거로 세지 않는다.
+     tokenizer/AST token order로 `canMove→register→move→bind fence→bind ledger→publication` 순서를 고정하고 register/publish는 argument와
+     무관한 callee 전체 exact one에 더해 canonical reservation argument를 검증한다.
+     `moveToGenerationNode→canMoveToGenerationNode` 내부 edge도
+     별도 exact reference다. `canMove`는 null-fence/generation-zero reject를 첫 body statement로 두고 그 뒤에만 ownership/io-mode를 읽는다.
    - standalone→external-pump transfer 4개: `externalTransferProfile`, `prepareExternalPumpTransfer`,
      `commitExternalPumpTransfer`, `prepareExternalOwnerRangeProof`. 내부 Client funnel과 `client_external_pump.zig`의 exact enclosing owner를
-     분리하고, source와 destination 모두 unbound라는 precondition과 prepare 뒤 commit/tombstone 순서를 고정한다.
-   - external-pump adoption/materialization 22개: `projectionAuthorityDigest`부터 `commitExternalAdoption`까지의 C manifest 연속 구간을
+     분리하고, source와 destination 모두 unbound라는 precondition과 tokenizer/AST token order의 prepare→owner proof→commit→paired evidence
+     move 및 commit 내부 destination move→source tombstone→owners-moved publish 순서를 exact one으로 고정한다. 두 ownership 구간 사이의
+     call set/count도 closed allowlist라 새 callback/fallible helper를 끼울 수 없다.
+   - external-pump adoption/materialization 22개: `clientProjectionAuthorityDigest`부터 `commitExternalAdoption`까지의 C manifest 연속 구간을
      `client_external_pump.zig|client_external_adoption.zig|external_event_materialization.zig|external_source_decision.zig`의 exact
      enclosing function과 내부 Client funnel에 매핑한다. 파일만 맞거나 caller count만 맞는 것은 증거가 아니다.
    - external-mode teardown 5개: `prepareExternalModeDeinit`, `reserveExternalModeDeinit`, `finishReservedExternalModeDeinit`,
@@ -1333,13 +1341,16 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
      `prepareExternalModeDeinit`의 bound-exclusive `prepareDeinitGraph→poisonAndTakeFd` 내부 edge를 별도 허용하고, transfer는 양쪽
      Client owner 상태를 증명한다.
 
-   hostile fixture는 proof row 누락/중복, 허용 파일의 잘못된 enclosing 함수, member alias/reflection, caller count 보존 위장,
+   proof metadata의 category는 generation 4/transfer 4/adoption 22/teardown 5 exact set을 실행 가능하게 고정한다. hostile fixture는 proof row
+   누락/중복·category 변경, 허용 파일의 동일 이름 다른 container, function-value alias, 다른 타입의 동명 method, Client reflection,
+   caller count 보존 위장,
    generation publication 순서 변경, source-only transfer check, exclusive guard 밖 teardown edge를 각각 RED로 만든다. C policy를 닫는
    동안 인접 G row `enterExternalMode`도 shared fence 획득만으로 충분하다고 보지 않고 bound generation Client 거부와 standalone owner
-   caller closure를 중첩한다. generation-node Client가 external mode로 바뀌는 경로를 허용하면 B3b의 blocking-generation invariant와
+   caller closure를 중첩한다. acquire/defer 직후 `if (operation_fence_held) return error.Busy`와 standalone tail의 exact adjacency도
+   source oracle로 고정한다. generation-node Client가 external mode로 바뀌는 경로를 허용하면 B3b의 blocking-generation invariant와
    `prepareDeinitGraph` 가정이 깨지므로 이 인접 gate까지 GREEN이어야 C slice를 완료로 센다.
 
-   특히 `projectionAuthorityDigest`와 `externalTransferProfile`은 이름이 observation이어도 parser/list/allocator provenance를 읽으므로
+   특히 `clientProjectionAuthorityDigest`와 `externalTransferProfile`은 이름이 observation이어도 parser/list/allocator provenance를 읽으므로
    `R`이 아니다. `U`는 허용 owner file과 exact caller count 및 상위
    ClientSlot permit/receipt 순서를 별도 oracle로 고정한다. `R`은 const receiver만으로 충분하다고 간주하지 않고 atomic fence identity/state
    외 Client mutable field 접근을 금지한다. `terminalReasonInvariant`와 `firstPoisonReason`은 non-atomic terminal fields를 읽으므로 `G`이며,

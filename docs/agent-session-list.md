@@ -185,9 +185,11 @@ layout과 spacing SSOT, 48pt action target·1×/2×/terminal-font capture 판정
   별도 filter control은 v1에 추가하지 않는다.
 - Header refresh와 search affordance는 일반 Unicode/fallback font glyph를 쓰지 않고 등록된
   SVG coverage icon을 쓴다. idle refresh는 `surface_fg`, disabled spinner는 `muted_fg`라서
-  theme accent가 어두운 경우에도 utility icon의 대비가 사라지지 않는다. group expand/collapse
-  affordance도 같은 registry의 명시 icon slot으로만 그린다. icon의 코드포인트·two-cell slot·hit
-  rect는 component가 함께 소유하며, raw provider 문자열에는 `wide_icons`를 절대 적용하지 않는다.
+  theme accent가 어두운 경우에도 utility icon의 대비가 사라지지 않는다. idle refresh와 group
+  expand/collapse affordance는 `icon_in_rect`의 명시 logical slot으로만 lower한다. 즉 terminal
+  cell origin·glyph baseline·source viewBox ink가 아니라 component가 소유한 20pt slot의 정확한
+  중심이 최종 SVG 위치를 결정한다. icon의 코드포인트·slot·hit rect는 component가 함께 소유하며,
+  raw provider 문자열에는 `wide_icons`를 절대 적용하지 않는다.
 - 한 줄 control(`작업공간`/`프로젝트`/`전체`, search, group)은 completed rect의 정확한 세로 중앙에
   그 role의 line box를 놓고, 두 줄 header는 **heading/supporting role의 실제 line-height 합**으로 만든
   전체 stack을 rect 중앙에 놓는다. virtualized card는 partial clip에서 보이는 line을 없애지 않도록 기존
@@ -306,7 +308,7 @@ inline disclosure다. card click/Enter는 새 archive tab이나 terminal surface
   `⌘↵`/`⌘L`은 expanded ready state에서만 같은 intents를 호출하며, closed/loading/stale state에서는
   no-op이다. Escape는 search를 먼저 닫고, 그 다음 expanded card를 닫는다.
 
-- header의 `Local Mac`은 현재 사용자 홈 아래 provider log만 읽는다는 provenance label이며 host 선택기가 아니다. v1 정렬은 mtime 내림차순 하나로 고정한다. 탭 재진입은 현재 앱 실행 중의 snapshot을 즉시 보이고, 마지막 완료 scan 뒤 **15초** 안이면 새 refresh를 시작하지 않는다. `SessionDockHeader`의 refresh control은 이 TTL을 우회한다. worker가 실행 중이면 동일 rect의 spinner/disabled state로 바뀌고 추가 job을 만들지 않는다.
+- header의 `로컬`은 현재 사용자 홈 아래 provider log만 읽는다는 provenance label이며 host 선택기가 아니다. v1 정렬은 mtime 내림차순 하나로 고정한다. 탭 재진입은 현재 앱 실행 중의 snapshot을 즉시 보이고, 마지막 완료 scan 뒤 **15초** 안이면 새 refresh를 시작하지 않는다. `SessionDockHeader`의 refresh control은 이 TTL을 우회한다. worker가 실행 중이면 동일 rect의 spinner/disabled state로 바뀌고 추가 job을 만들지 않는다.
 - 도크 view bar의 `AI 세션`을 누르면 archive refresh를 요청한다. **refresh 중에는 직전 완료 snapshot과 current scroll/selection을 그대로 paint하고, 새 bounded scan 전체가 끝난 뒤에만 새 immutable snapshot으로 한 번에 교체한다.** AS3-c부터 교체 commit은 first partially-visible card의 exact identity와 intra-card pixel offset을 restore하고, identity가 없으면 기존 numeric offset만 새 상한에 clamp한다. 결과 큐의 OOM 등 새 snapshot을 publish할 수 없는 완료는 spinner만 끝내고 기존 목록과 scroll/selection을 유지하며 notice를 보인다. 따라서 새로 고침이 기존 목록을 비우거나 첫 record/중간 batch로 목록을 흔들지 않는다. 첫 진입처럼 이전 snapshot이 없을 때만 skeleton/진행 문구를 보이며, frame tick에서 파일 I/O를 하지 않는다. 창 재포커스와 새 provider session identity 감지는 같은 refresh를 요청하되, forced refresh는 5초 전역 throttle로 합친다. filesystem polling/watcher는 v1에 없다.
 - scope는 `현재 작업공간`, `현재 프로젝트`, `전체`다. 기본값은 `전체`이며 마지막 선택만 창 UI 상태로 보존한다. **`현재 작업공간`은 활성 워크스페이스 탭의 활성 local Term이 마지막으로 보고한 CWD를 worker가 canonicalize한 단일 root snapshot 아래에 `cwd`가 있는 기록**이다. 창 전역 탐색기 root와 다른 권위이므로, 다른 워크스페이스 탭의 폴더가 섞이지 않는다. `현재 프로젝트`는 같은 active Term CWD에서 worker가 찾은 canonical git root 아래 `cwd`가 있는 기록이며, local CWD 또는 git root가 없으면 각각 비활성화한다. `전체`는 모든 provider의 검증된 사용자 세션이다. remote/불명 `cwd`는 전체에서만 보인다. 도크 진입, scope click, 활성 workspace/pane/Term 전환 **및 같은 활성 pane의 CWD 보고 변경**에서 root snapshot을 갱신하며, 결과가 오기 전에는 이전 tab 또는 이전 CWD의 범위를 재사용하지 않는다. CWD 비교는 main actor의 메모리 observation만 사용하고 canonicalize·git walk는 worker만 수행한다. 이후 scope/search/scroll/frame은 그 메모리 snapshot만 읽는다.
 - 이 필터는 접근 제어가 아닌 표시 범위다. 경로는 provider log의 `cwd`를 canonicalize할 수 있을 때만 containment 비교하며, 실패·삭제·비로컬 값은 workspace/project에 억지로 넣지 않는다.

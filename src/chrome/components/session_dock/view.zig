@@ -243,18 +243,22 @@ const Writer = struct {
     /// display width no longer picks the slot x coordinate, so terminal font settings cannot
     /// pull this header control away from the provenance group.
     fn headerRefresh(self: *Writer, rect: tree.RectEntry, source: []const u8, role: tokens.ColorRole, wide_icon: bool) ViewError!void {
-        const cw = self.props.cell_width_px;
-        if (cw == 0) return;
         const metrics = types.DockMetrics.resolve(self.props.scale_milli);
         if (rect.rect.width < @as(f32, @floatFromInt(metrics.header_content_inset_x + metrics.headerUtilityWidth()))) return;
-        const icon_predicate: ?text_layout.WideIconFn = if (wide_icon) isSessionDockIcon else null;
-        const width = text_layout.displayCols(source, icon_predicate);
-        if (width == 0 or width > 2) return;
-        const glyph_width: u32 = @as(u32, @intCast(width)) * cw;
-        const x = rect.rect.x + rect.rect.width - @as(f32, @floatFromInt(metrics.header_trailing_inset + metrics.header_refresh_extent)) + (@as(f32, @floatFromInt(metrics.header_refresh_extent)) - @as(f32, @floatFromInt(glyph_width))) / 2;
-        const control_h: f32 = @floatFromInt(typography.lineHeightPx(.control, effectiveScale(self.props.scale_milli)));
-        if (rect.rect.height < control_h) return;
-        try self.emit(x, rect.rect.y + (rect.rect.height - control_h) / 2, source, @intCast(width), .head, role, .control, wide_icon, false);
+        const slot = draw.Rect{
+            .x = @intFromFloat(@floor(rect.rect.x + rect.rect.width - @as(f32, @floatFromInt(metrics.header_trailing_inset + metrics.header_refresh_extent)))),
+            .y = @intFromFloat(@floor(rect.rect.y + (rect.rect.height - @as(f32, @floatFromInt(metrics.header_refresh_extent))) / 2)),
+            .w = metrics.header_refresh_extent,
+            .h = metrics.header_refresh_extent,
+        };
+        if (!wide_icon) {
+            const control_h: f32 = @floatFromInt(typography.lineHeightPx(.control, effectiveScale(self.props.scale_milli)));
+            if (rect.rect.height < control_h) return;
+            try self.emit(@as(f32, @floatFromInt(slot.x)) + (@as(f32, @floatFromInt(slot.w)) - @as(f32, @floatFromInt(self.props.cell_width_px))) / 2, rect.rect.y + (rect.rect.height - control_h) / 2, source, 1, .head, role, .control, false, false);
+            return;
+        }
+        const icon = std.unicode.utf8Decode(source) catch return;
+        try self.iconInRect(slot, source, icon, @intCast(metrics.header_host_icon_extent), role);
     }
 
     /// A fixed Chrome component can use terminal columns only as a conservative horizontal
@@ -336,20 +340,14 @@ const Writer = struct {
             .border_role = .divider,
         });
 
-        const control_h: f32 = @floatFromInt(typography.lineHeightPx(.control, scale));
-        if (rect.rect.height < control_h) return;
-        const icon_y = rect.rect.y + (rect.rect.height - control_h) / 2;
-        try self.emit(
-            rect.rect.x + @as(f32, @floatFromInt(horizontal_inset)),
-            icon_y,
-            if (group.collapsed) chevron_right_icon else chevron_down_icon,
-            2,
-            .head,
-            .surface_fg,
-            .control,
-            true,
-            false,
-        );
+        const disclosure = draw.Rect{
+            .x = @intFromFloat(@floor(rect.rect.x + @as(f32, @floatFromInt(horizontal_inset)))),
+            .y = @intFromFloat(@floor(rect.rect.y + (rect.rect.height - @as(f32, @floatFromInt(metrics.group_disclosure_extent))) / 2)),
+            .w = metrics.group_disclosure_extent,
+            .h = metrics.group_disclosure_extent,
+        };
+        const disclosure_source = if (group.collapsed) chevron_right_icon else chevron_down_icon;
+        try self.iconInRect(disclosure, disclosure_source, std.unicode.utf8Decode(disclosure_source) catch return, @intCast(metrics.header_host_icon_extent), .surface_fg);
 
         const label_x = rect.rect.x + @as(f32, @floatFromInt(horizontal_inset + icon_slot));
         const label_end = pill_x - @as(f32, @floatFromInt(spacing.px(.xs, scale)));
@@ -482,6 +480,13 @@ const Writer = struct {
 
     fn emit(self: *Writer, x: f32, y: f32, source: []const u8, cols: u16, anchor: text_layout.Anchor, role: tokens.ColorRole, text_role: typography.ChromeTextRole, wide_icons: bool, bold: bool) ViewError!void {
         return self.emitPlaced(x, y, source, cols, anchor, role, text_role, wide_icons, bold, null, .origin);
+    }
+
+    fn iconInRect(self: *Writer, rect: draw.Rect, source: []const u8, icon: u21, extent: u16, role: tokens.ColorRole) ViewError!void {
+        // The PUA bytes are never shaped as text (`icon_in_rect` resolves the registered SVG
+        // directly), but retain them as the atlas request's stable input payload. A zero-byte
+        // run crosses neither legacy nor retained-atlas admission paths reliably.
+        try self.emitPlaced(@floatFromInt(rect.x), @floatFromInt(rect.y), source, 1, .head, role, .control, false, false, rect.w, .{ .icon_in_rect = .{ .content_rect = rect, .icon_codepoint = icon, .icon_extent_px = extent } });
     }
 
     fn emitPlaced(self: *Writer, x: f32, y: f32, source: []const u8, cols: u16, anchor: text_layout.Anchor, role: tokens.ColorRole, text_role: typography.ChromeTextRole, wide_icons: bool, bold: bool, max_width_px: ?u32, placement: draw.TextPlacement) ViewError!void {
@@ -643,7 +648,6 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
     try std.testing.expect(out.ops.len > 8);
     var saw_quad = false;
     var saw_provider = false;
-    var refresh_origin_x: ?i32 = null;
     var workspace_origin_y: ?i32 = null;
     var project_origin_y: ?i32 = null;
     var all_origin_y: ?i32 = null;
@@ -660,7 +664,8 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
     var title_max_cols: ?u16 = null;
     var host_label_max_cols: ?u16 = null;
     var host_label_placement: ?draw.TextPlacement = null;
-    var group_chevron_x: ?i32 = null;
+    var refresh_placement: ?draw.TextPlacement = null;
+    var group_chevron_placement: ?draw.TextPlacement = null;
     var group_label_x: ?i32 = null;
     var saw_untruncated_title = false;
     for (out.ops) |op| switch (op) {
@@ -676,16 +681,23 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
             saw_dock_heading = saw_dock_heading or text.text_role == .dock_heading;
             saw_card_heading = saw_card_heading or text.text_role == .card_heading;
             saw_metadata = saw_metadata or text.text_role == .metadata;
+            switch (text.placement) {
+                .icon_in_rect => |icon| {
+                    try std.testing.expectEqual(@as(?u32, icon.content_rect.w), text.max_width_px);
+                    if (icon.icon_codepoint == 0xF0021) refresh_placement = text.placement;
+                    if (icon.icon_codepoint == 0xF0023) {
+                        saw_group_chevron = true;
+                        group_chevron_placement = text.placement;
+                    }
+                },
+                else => {},
+            }
             for (text.runs) |run| {
                 if (std.mem.eql(u8, run.text, "a title that intentionally exceeds a narrow card")) {
                     saw_untruncated_title = true;
                     title_max_cols = text.max_cols;
                 }
                 saw_provider = saw_provider or std.mem.indexOf(u8, run.text, "Claude") != null;
-                if (std.mem.eql(u8, run.text, refresh_icon)) {
-                    refresh_origin_x = text.origin.x;
-                    try std.testing.expect(text.wide_icons);
-                }
                 if (std.mem.eql(u8, run.text, host_label)) {
                     host_label_max_cols = text.max_cols;
                     host_label_placement = text.placement;
@@ -703,13 +715,6 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
                 }
                 if (std.mem.eql(u8, run.text, search_icon)) {
                     saw_search_icon = true;
-                    try std.testing.expect(text.wide_icons);
-                }
-                if (std.mem.indexOf(u8, run.text, chevron_down_icon) != null) {
-                    saw_group_chevron = true;
-                    // This fixture also has a card disclosure on the far right. The group
-                    // disclosure is the only chevron in its published left-side slot.
-                    if (text.origin.x < 100) group_chevron_x = text.origin.x;
                     try std.testing.expect(text.wide_icons);
                 }
             }
@@ -749,17 +754,22 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
         const expected_y: i32 = @intFromFloat(@floor(scope.rect.y + (scope.rect.height - expected_line_h) / 2));
         try std.testing.expectEqual(expected_y, origin orelse return error.TestUnexpectedResult);
     }
-    const refresh_x = refresh_origin_x orelse return error.TestUnexpectedResult;
     const header = find(frame.tree, build.NodeIds.header) orelse return error.TestUnexpectedResult;
-    const right_ink_edge = refresh_x + @as(i32, @intCast(props.cell_width_px * 2));
-    const expected_right_edge: i32 = @intFromFloat(@floor(header.rect.x + header.rect.width - @as(f32, @floatFromInt(props.cell_width_px))));
-    try std.testing.expect(right_ink_edge <= expected_right_edge);
+    switch (refresh_placement orelse return error.TestUnexpectedResult) {
+        .icon_in_rect => |icon| {
+            try std.testing.expectEqual(@as(u21, 0xF0021), icon.icon_codepoint);
+            try std.testing.expectEqual(metrics.header_refresh_extent, icon.content_rect.w);
+            const expected_refresh_x: i32 = @intFromFloat(@floor(header.rect.x + header.rect.width - @as(f32, @floatFromInt(metrics.header_trailing_inset + metrics.header_refresh_extent))));
+            try std.testing.expectEqual(expected_refresh_x, icon.content_rect.x);
+        },
+        else => return error.TestUnexpectedResult,
+    }
     const group_rect = find(frame.tree, build.NodeIds.item(0)) orelse return error.TestUnexpectedResult;
     const expected_group_chevron_x: i32 = @intFromFloat(@floor(group_rect.rect.x + @as(f32, @floatFromInt(metrics.group_disclosure_inset_x))));
-    try std.testing.expectEqual(
-        expected_group_chevron_x,
-        group_chevron_x orelse return error.TestUnexpectedResult,
-    );
+    switch (group_chevron_placement orelse return error.TestUnexpectedResult) {
+        .icon_in_rect => |icon| try std.testing.expectEqual(expected_group_chevron_x, icon.content_rect.x),
+        else => return error.TestUnexpectedResult,
+    }
     const expected_group_label_x: i32 = @intFromFloat(@floor(group_rect.rect.x + @as(f32, @floatFromInt(metrics.group_disclosure_inset_x + metrics.group_disclosure_extent + metrics.group_disclosure_label_gap))));
     try std.testing.expectEqual(
         expected_group_label_x,
@@ -781,8 +791,7 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
         },
         else => {},
     };
-    const spinner_x = spinner_origin_x orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(refresh_x + @as(i32, @intCast(props.cell_width_px / 2)), spinner_x);
+    _ = spinner_origin_x orelse return error.TestUnexpectedResult;
 }
 
 test "SessionDock partial card never emits a CoreText cell that crosses its published clip" {

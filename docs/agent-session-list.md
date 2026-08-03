@@ -571,6 +571,12 @@ titlebar launcher와 dock slot만 관측하도록 한다.
   별도 reveal-recheck scenario는 ready 뒤 source를 replace하고 `로그 보기`를 실행해 external-open count 0만 요구한다.
   이는 ready frame을 즉시 stale이라고 오인하지 않으며, replacement 뒤 refresh/detail publish가 action table과 pointer
   capture를 폐기하는지는 stale scenario에서 별도로 검증한다.
+- `detail-close-reopen` scenario는 ready inline card의 **같은 published card rect**를 다시 pointer click해 disclosure를
+  닫고, 새 request gate를 arm한 뒤 같은 rect를 다시 click해 재연다. 첫 request와 재열기 request id는 달라야 하며,
+  닫힌 동안 resume/reveal capability는 present되지 않아야 한다. 재열기 loading→ready와 전 과정의 active terminal
+  surface id·전체 Term 수 불변을 한 cold AppKit process에서 확인한다. 이 scenario는 provider action을 실행하지 않으며,
+  `same card toggle`이 별도 tab/surface를 만들지 않고 detail capability와 worker request만 정확히 폐기·재발급하는지
+  증명한다.
 - reveal 성공 scenario도 host의 외부 앱 열기를 호출하지 않는다. Swift가 smoke 모드에서 same
   `take_file_tree_external_open` consumer를 drain해 allowlisted fixture token과 횟수만 summary에 기록한다.
 - artifact는 ready session **목록**, loading/ready/stale inline expansion의 **1920×960 backing-pixel fixture 창** 제품 Metal PPM·PNG와 redacted key/value summary다. 목록 capture는 published card/action tree만 확인한 첫 frame이 아니라 detached rich-text artifact가 poll·atlas 연결된 뒤의 다음 ordinary frame에서만 요청한다. 한 프레임 뒤 종료하는

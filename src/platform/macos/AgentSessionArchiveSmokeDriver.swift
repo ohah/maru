@@ -15,6 +15,7 @@ final class AgentSessionArchiveSmokeDriver {
         case revealKeyboard = "reveal-keyboard"
         case revealRecheckPointer = "reveal-recheck-pointer"
         case detailStale = "detail-stale"
+        case detailCloseReopen = "detail-close-reopen"
         case claudeResumePointer = "claude-resume-pointer"
 
         init?(environment: [String: String] = ProcessInfo.processInfo.environment) {
@@ -53,6 +54,11 @@ final class AgentSessionArchiveSmokeDriver {
         case waitForGate
         case observeLoading
         case waitForReady
+        case closeDetail
+        case waitForClosed
+        case waitForReopenGate
+        case observeReopenLoading
+        case waitForReopenReady
         case invokeAction
         case waitForAction
         case succeeded
@@ -72,6 +78,10 @@ final class AgentSessionArchiveSmokeDriver {
     /// action probe becomes ready with the detail DTO; wait through one regular worker-poll frame
     /// before recording the ready detail so the artifact is part of the captured product frame.
     private var stableReadyFrames = 0
+    private var stableReopenReadyFrames = 0
+    /// The same-card toggle must revoke the prior detail capability before it starts the next
+    /// request. Keeping only the opaque request id proves that no old ready action is reused.
+    private var firstDetailRequestId: UInt64?
     private var terminalBaseline: TerminalInvariant?
     private(set) var terminalInvariantSatisfied = false
 
@@ -224,7 +234,81 @@ final class AgentSessionArchiveSmokeDriver {
                 fail("claude_model_metadata")
                 return
             }
+            if scenario == .detailCloseReopen {
+                firstDetailRequestId = detail.request_id
+                stage = .closeDetail
+                paintRequested = true
+                return
+            }
             stage = .invokeAction
+
+        case .closeDetail:
+            // Use the exact same published card capability that opened the detail. This is an
+            // ordinary mouse lifecycle, so the test cannot close an inline disclosure through a
+            // private AppSession shortcut.
+            guard let card = probe(MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_DOCK_CARD),
+                  card.present != 0, card.enabled != 0,
+                  click(card) else { return }
+            stage = .waitForClosed
+            paintRequested = true
+
+        case .waitForClosed:
+            guard let card = probe(MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_DOCK_CARD),
+                  card.present != 0, card.enabled != 0,
+                  let resume = probe(MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_RESUME),
+                  let reveal = probe(MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_REVEAL_LOG),
+                  resume.request_id == 0, resume.present == 0,
+                  reveal.request_id == 0, reveal.present == 0
+            else { return }
+            guard matchesTerminalBaseline(sessionInvariant()) else {
+                fail("inline_detail_changed_terminal_closed")
+                return
+            }
+            // The next ordinary card click must create a fresh worker request. Arm the fixture
+            // gate before that physical click so loading is observable rather than racing ready.
+            guard setGate(true), click(card) else {
+                fail("reopen_card_click")
+                return
+            }
+            stage = .waitForReopenGate
+            paintRequested = true
+
+        case .waitForReopenGate:
+            if gateReached() { stage = .observeReopenLoading }
+
+        case .observeReopenLoading:
+            guard let detail = probe(MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_RESUME),
+                  let firstDetailRequestId,
+                  detail.request_id != 0, detail.request_id != firstDetailRequestId,
+                  detail.state == 1, detail.present != 0, detail.enabled == 0
+            else { return }
+            guard matchesTerminalBaseline(sessionInvariant()) else {
+                fail("inline_detail_changed_terminal_reopen_loading")
+                return
+            }
+            guard setGate(false) else {
+                fail("reopen_gate_release")
+                return
+            }
+            stage = .waitForReopenReady
+
+        case .waitForReopenReady:
+            guard let detail = probe(MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_RESUME),
+                  let firstDetailRequestId,
+                  detail.request_id != 0, detail.request_id != firstDetailRequestId,
+                  detail.state == 2, detail.present != 0, detail.enabled != 0
+            else { return }
+            guard matchesTerminalBaseline(sessionInvariant()) else {
+                fail("inline_detail_changed_terminal_reopen_ready")
+                return
+            }
+            stableReopenReadyFrames += 1
+            guard stableReopenReadyFrames >= 2 else {
+                paintRequested = true
+                return
+            }
+            terminalInvariantSatisfied = true
+            stage = .succeeded
 
         case .invokeAction:
             switch scenario {
@@ -252,7 +336,7 @@ final class AgentSessionArchiveSmokeDriver {
                       let detail = probe(MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_REVEAL_LOG),
                       detail.present != 0, detail.enabled != 0,
                       click(detail) else { return }
-            case .detailStale:
+            case .detailStale, .detailCloseReopen:
                 return
             }
             stage = .waitForAction
@@ -270,7 +354,7 @@ final class AgentSessionArchiveSmokeDriver {
                 guard revealAllowedCount() == 0,
                       revealRejectedCount() == 0,
                       staleRevealCount() == 1 else { return }
-            case .detailStale:
+            case .detailStale, .detailCloseReopen:
                 return
             }
             stage = .succeeded

@@ -33,6 +33,45 @@ pub const ResolvedTextStyle = struct {
     opacity: u8,
 };
 
+pub const ResolvedButtonStyle = ResolvedCardStyle;
+
+/// Buttons have their own base palette and interaction states.  Sharing only the resolved quad
+/// shape with cards keeps rendering cheap without letting a disclosure/card variant leak into a
+/// command target.
+pub fn resolveButton(
+    id: ui_tree.UiId,
+    visual: ui_style.ButtonVisual,
+    action: ?ui_tree.UiAction,
+    state: interaction.InteractionState,
+    tk: *const tokens.Tokens,
+) ResolvedButtonStyle {
+    var result = baseButtonStyle(visual.variant, tk);
+    applyPaintOverride(&result, visual.paint, tk);
+    const enabled = action != null and action.?.enabled;
+    if (enabled and state.capture != null and state.capture.?.id == id) {
+        result.background = .tab_active_bg;
+        result.foreground = .surface_fg;
+        result.border = .focus_accent;
+    } else if (enabled and state.focused != null and state.focused.? == id) {
+        result.border = .focus_accent;
+    } else if (enabled and state.hovered != null and state.hovered.? == id) {
+        result.background = .row_hover_bg;
+        // Primary begins with a light foreground-colored fill. Hover deliberately moves it to
+        // the dark shared hover token, so retaining its normal dark label would erase contrast.
+        // Resolve both from the same semantic Button variant instead of asking the view to
+        // special-case pointer state.
+        if (visual.variant == .primary) result.foreground = .surface_fg;
+    }
+    if (action != null and !action.?.enabled) {
+        result.background = .surface_bg;
+        result.foreground = .muted_fg;
+        result.border = .divider;
+        result.opacity = @min(result.opacity, 0x80);
+        result.shadow = null;
+    }
+    return result;
+}
+
 /// Resolves one card without touching a renderer. Explicit paint props replace only the base
 /// variant; pressed/focus/hover remain visible above them, and disabled is intentionally last so
 /// an inaccessible custom color cannot make an inert action look enabled.
@@ -116,6 +155,27 @@ fn baseCardStyle(variant: ui_style.CardVariant, tk: *const tokens.Tokens) Resolv
             .corner_radii_px = uniform(tk.space.corner_radius_px),
             .border_widths_px = uniform(tk.space.border_width_px),
             .shadow = default_shadow,
+        },
+    };
+}
+
+fn baseButtonStyle(variant: ui_style.ButtonVariant, tk: *const tokens.Tokens) ResolvedButtonStyle {
+    return switch (variant) {
+        .primary => .{
+            .background = .surface_fg,
+            .foreground = .surface_bg,
+            .border = .surface_fg,
+            .corner_radii_px = uniform(tk.space.corner_radius_px),
+            .border_widths_px = uniform(tk.space.border_width_px),
+            .shadow = null,
+        },
+        .secondary => .{
+            .background = .tab_hover_bg,
+            .foreground = .surface_fg,
+            .border = .divider,
+            .corner_radii_px = uniform(tk.space.corner_radius_px),
+            .border_widths_px = uniform(tk.space.border_width_px),
+            .shadow = null,
         },
     };
 }

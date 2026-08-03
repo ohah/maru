@@ -128,11 +128,11 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
                     const resume_action = table.append(props.snapshot_generation, .resume_session) catch return error.InsufficientActionBuffer;
                     const reveal = table.append(props.snapshot_generation, .reveal_log) catch return error.InsufficientActionBuffer;
                     const action_width = expansionActionWidth(props.viewport_px.width, m, action_count);
-                    action_nodes[0] = expansionActionNode(NodeIds.resumeAction(index), resume_action, expanded.state == .ready and expanded.resume_enabled, action_width);
-                    action_nodes[1] = expansionActionNode(NodeIds.reveal(index), reveal, expanded.state == .ready and expanded.reveal_enabled, action_width);
+                    action_nodes[0] = expansionActionNode(NodeIds.resumeAction(index), resume_action, expanded.state == .ready and expanded.resume_enabled, .primary, action_width);
+                    action_nodes[1] = expansionActionNode(NodeIds.reveal(index), reveal, expanded.state == .ready and expanded.reveal_enabled, .secondary, action_width);
                     if (expanded.focus_live_enabled) {
                         const focus = table.append(props.snapshot_generation, .focus_live) catch return error.InsufficientActionBuffer;
-                        action_nodes[2] = expansionActionNode(NodeIds.focusLive(index), focus, expanded.state == .ready, action_width);
+                        action_nodes[2] = expansionActionNode(NodeIds.focusLive(index), focus, expanded.state == .ready, .secondary, action_width);
                     }
                     nested[2] = tree.container(.{
                         .id = NodeIds.expandedActions(index),
@@ -266,15 +266,14 @@ fn sessionCardNode(id: u64, action: tree.UiAction, selected: bool, height: u32) 
     }, &.{});
 }
 
-fn expansionActionNode(id: u64, action: tree.UiAction, enabled: bool, width_px: f32) tree.UiNode {
-    return tree.card(.{
+fn expansionActionNode(id: u64, action: tree.UiAction, enabled: bool, variant: tree.ButtonVariant, width_px: f32) tree.UiNode {
+    return tree.button(.{
         .id = id,
         .style = .{ .width = .{ .px = width_px }, .height = .{ .percent = 1 } },
-        .variant = if (enabled) .selected else .surface,
-        .paint = .{},
+        .variant = variant,
         .action = .{ .id = action.id, .enabled = enabled },
         .overflow = .clip,
-    }, &.{});
+    });
 }
 
 /// Action cards are leaf nodes, so their own validation cannot use main-axis `fill`: a leaf
@@ -434,6 +433,10 @@ test "SessionDock expanded card keeps detail actions in the same published tree"
     // locks the visual separation to the same rects used by pointer hit testing.
     try @import("std").testing.expectEqual(@as(f32, 8), reveal.rect.x - (resume_entry.rect.x + resume_entry.rect.width));
     try @import("std").testing.expectEqual(resume_entry.rect.width, reveal.rect.width);
+    try @import("std").testing.expectEqual(tree.NodeKind.button, resume_entry.kind);
+    try @import("std").testing.expectEqual(tree.NodeKind.button, reveal.kind);
+    try @import("std").testing.expectEqual(tree.VisualProps{ .button = .{ .variant = .primary, .paint = .{} } }, resume_entry.visual);
+    try @import("std").testing.expectEqual(tree.VisualProps{ .button = .{ .variant = .secondary, .paint = .{} } }, reveal.visual);
     try @import("std").testing.expect(resume_entry.action.?.enabled);
     try @import("std").testing.expect(reveal.action.?.enabled);
     var table = ids.Table.init(@constCast(frame.actions));

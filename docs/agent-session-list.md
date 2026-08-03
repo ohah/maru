@@ -90,11 +90,40 @@ identity는 바꾸지 않으며, `SessionDock`의 같은 completed `UiRectTree`�
 - rich Chrome은 radius/border/shadow token을 사용하고, tui legacy lowering은 같은 rect/spacing을
   직각 fill로만 lower한다. component가 `if (rich)` 또는 font별 좌표 nudge를 두지 않는다.
 
-현재 `draw.Text`/CoreText lowering은 하나의 terminal cell font-size만 전달하고 role별 font size나
-line-height를 표현하지 않는다. 따라서 AS4-e는 title의 **bold/foreground/공간 계층**까지를 실제
-완료 범위로 하고, 레퍼런스의 headline-size typography는 `draw.TextStyle` 확장(측정 가능한 advance,
-font size, line height와 screenshot E2E)을 먼저 설계한 뒤 별도 slice에서 다룬다. 이를 cell 수를
-억지로 키우거나 fallback font별 nudge로 흉내 내지 않는다.
+`ChromeTextRole`은 role별 line box와 final-pixel glyph placement를 전달하지만, 목록의 기본 행과
+확장 action은 아직 cell 폭으로만 남은 공간을 보수적으로 예약한다. 따라서 AS4-e는 title의
+**bold/foreground/공간 계층**까지를 보장하고, 레퍼런스의 headline-size typography·실제 advance
+기반 ellipsis·button content alignment는 `draw.TextStyle` 확장(측정 가능한 advance, font size,
+line height와 screenshot E2E)을 먼저 설계한 뒤 별도 B1 slice에서 다룬다. 이를 cell 수를 억지로
+키우거나 fallback font별 nudge로 흉내 내지 않는다.
+
+#### 2.1.2 측정형 Button·action text 계약 (B1-button)
+
+`Button`은 click 가능한 `Card`의 별칭이 아니다. `UiNode.button`은 `primary`/`secondary` visual,
+enabled/disabled state, 한 개의 published `UiAction`, `label`과 선택적 leading icon slot을 가진
+독립 semantic leaf다. `Card`는 정보 표면과 disclosure container를, `Button`은 명시 command target을
+표현한다. generic tree/paint/interaction은 둘의 rect·clip·pointer capture·disabled inertness를 같은
+completed snapshot에서 소비하되, action의 색·border·focus/pressed feedback을 card variant에서
+추론하지 않는다.
+
+- Button content는 fallback cell 수가 아니라 platform text artifact가 반환한 **actual glyph advance**로
+  button content rect의 수평 중심을 계산한다. label이 너무 길면 leading icon slot·양쪽 inset을 먼저
+  보존하고 같은 artifact가 CJK/fallback glyph까지 포함해 ellipsis를 만든다. hit rect는 줄어든 text rect가
+  아니라 원래 button border box다.
+- Button의 line box와 icon optical box는 button content rect의 세로 중앙에 정렬한다. 이 정렬은
+  `font.family`/terminal cell height를 입력으로 삼지 않고 Chrome primary/fallback face와 scale의 measured
+  artifact만 따른다. 임의의 font별 y offset이나 fixture 전용 좌표 보정은 금지한다.
+- SessionDock의 `터미널에서 이어하기`는 primary Button, `로그 보기`와 정확한 live mapping이 생긴 뒤의
+  `열린 세션으로 이동`은 secondary Button으로 render한다. loading/stale/unavailable은 같은 button rect를
+  유지하되 disabled이며 action table에서 실행 불가다. `⌘↵`/`⌘L`은 pointer와 동일한 published action identity를
+  resolve한다.
+- Button semantic node는 text artifact/renderer를 소유하거나 provider/PTY를 import하지 않는다. component는
+  immutable label·icon·intent만, platform text adapter는 measured placement DTO만, host는 explicit effect
+  dispatch만 소유한다. 따라서 다른 Chrome component가 동일 Button을 재사용해도 archive 권한이나 session
+  identity가 섞이지 않는다.
+- B1 capture는 system UI primary와 Jetendard에서 1×/2× 각각 action의 ink box가 border box 안에 있고,
+  두 sibling label의 visual center가 같은 action-row center에서 1 backing pixel 이내임을 PNG/JSON으로 남긴다.
+  text artifact가 없거나 fallback만 선택되면 캡처 성공으로 표시하지 않는다.
 
 - `SessionDockLayout`이 header, scope, search, scroll-area, group header,
   card, scrollbar의 pixel rect를 **한 번만** 계산한다. `view`, pointer

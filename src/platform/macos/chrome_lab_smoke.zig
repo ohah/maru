@@ -116,6 +116,32 @@ pub fn main(init: std.process.Init) !void {
     );
     defer metal_fixture.deinit(allocator);
 
+    // B1 lowerer proof: the Lab intentionally consumes the final-pixel glyph DTO rather than
+    // handing Chrome text back as terminal cells. The same atlas uploads remain shared; only
+    // placement changes. A half-pixel y verifies that the renderer does not silently coerce the
+    // artifact back to a cell row before Metal receives it.
+    var rich_glyphs: std.ArrayList(renderer.metal_frame.GpuGlyph) = .empty;
+    defer rich_glyphs.deinit(allocator);
+    for (metal_fixture.cells) |cell| {
+        if (cell.slot_id == 0 or cell.atlas_width_px == 0 or cell.atlas_height_px == 0) continue;
+        try rich_glyphs.append(allocator, .{
+            .x = @as(f32, @floatFromInt(cell.col)) * @as(f32, @floatFromInt(cell_width_px)),
+            .y = @as(f32, @floatFromInt(cell.row)) * @as(f32, @floatFromInt(cell_height_px)) + 0.5,
+            .w = @floatFromInt(cell.atlas_width_px),
+            .h = @floatFromInt(cell_height_px),
+            .atlas_x_px = cell.atlas_x_px,
+            .atlas_y_px = cell.atlas_y_px,
+            .atlas_width_px = cell.atlas_width_px,
+            .atlas_height_px = cell.atlas_height_px,
+            .u0 = cell.u0,
+            .v0 = cell.v0,
+            .u1 = cell.u1,
+            .v1 = cell.v1,
+            .foreground = cell.foreground,
+            .layer = 0,
+        });
+    }
+
     var native: bridge.NativeResult = .{
         .status = -1,
         .renderer_created = 0,
@@ -133,8 +159,8 @@ pub fn main(init: std.process.Init) !void {
         metal_fixture.size.rows,
         cell_width_px,
         cell_height_px,
-        if (metal_fixture.cells.len > 0) metal_fixture.cells.ptr else null,
-        metal_fixture.cells.len,
+        null,
+        0,
         metal_fixture.atlas_width_px,
         metal_fixture.atlas_height_px,
         if (metal_fixture.raster_uploads.len > 0) metal_fixture.raster_uploads.ptr else null,
@@ -145,6 +171,8 @@ pub fn main(init: std.process.Init) !void {
         gpu_quads.items.len,
         null,
         0,
+        if (rich_glyphs.items.len > 0) rich_glyphs.items.ptr else null,
+        rich_glyphs.items.len,
         &native,
     );
 
@@ -161,8 +189,14 @@ pub fn main(init: std.process.Init) !void {
         native.draw_submitted != 0 and native.ppm_written != 0 and native.png_written != 0;
     const pixel_ok = ppm.width == viewport.width and ppm.height == viewport.height and ppm.non_background_pixels > 0;
     const text_rasterized = metal_fixture.cells.len > 0 and metal_fixture.raster_uploads.len > 0;
-    const success = native_ok and pixel_ok and valid_png and text_rasterized;
-    const summary = try renderSummary(allocator, scenario_name, ppm_path, png_path, native, ppm, valid_png, gpu_quads.items.len, metal_fixture.cells.len, text_rasterized, success);
+    // The lab intentionally routes component glyphs through the product pixel-placement pass
+    // (not its legacy cell list), so a green artifact proves that this ABI/Metal path received
+    // text in addition to the existing atlas uploads.
+    // A text-free scenario is valid (the empty fixture deliberately has no glyphs). Whenever
+    // the lowered fixture has text, however, the rich pass must receive at least one glyph.
+    const rich_text_rasterized = metal_fixture.cells.len == 0 or rich_glyphs.items.len > 0;
+    const success = native_ok and pixel_ok and valid_png and text_rasterized and rich_text_rasterized;
+    const summary = try renderSummary(allocator, scenario_name, ppm_path, png_path, native, ppm, valid_png, gpu_quads.items.len, metal_fixture.cells.len, text_rasterized, rich_glyphs.items.len, rich_text_rasterized, success);
     defer allocator.free(summary);
     try artifact_io.writeText(io, json_path, summary);
 
@@ -270,6 +304,8 @@ fn renderSummary(
     quad_count: usize,
     glyph_cell_count: usize,
     text_rasterized: bool,
+    rich_glyph_count: usize,
+    rich_text_rasterized: bool,
     success: bool,
 ) ![]u8 {
     return std.fmt.allocPrint(allocator,
@@ -281,7 +317,7 @@ fn renderSummary(
         \\  "artifacts": {{ "ppm": "{s}", "png": "{s}" }},
         \\  "product_renderer": {{ "status": {d}, "created": {}, "atlas_ready": {}, "draw_submitted": {} }},
         \\  "readback": {{ "ppm_written": {}, "png_written": {}, "valid_png": {}, "width": {d}, "height": {d}, "non_background_pixels": {d} }},
-        \\  "lowered": {{ "gpu_quads": {d}, "glyph_cells": {d}, "text_rasterized": {} }},
+        \\  "lowered": {{ "gpu_quads": {d}, "glyph_cells": {d}, "text_rasterized": {}, "gpu_glyphs": {d}, "rich_text_rasterized": {} }},
         \\  "success": {}
         \\}}
     , .{
@@ -303,6 +339,8 @@ fn renderSummary(
         quad_count,
         glyph_cell_count,
         text_rasterized,
+        rich_glyph_count,
+        rich_text_rasterized,
         success,
     });
 }
@@ -341,10 +379,12 @@ test "Chrome Lab summary records component text rasterization and artifact paths
         .draw_submitted = 1,
         .ppm_written = 1,
         .png_written = 1,
-    }, .{ .width = 320, .height = 240, .non_background_pixels = 1 }, true, 1, 2, true, true);
+    }, .{ .width = 320, .height = 240, .non_background_pixels = 1 }, true, 1, 2, true, 2, true, true);
     defer std.testing.allocator.free(summary);
     try std.testing.expect(std.mem.indexOf(u8, summary, "\"glyph_cells\": 2") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "\"text_rasterized\": true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "\"gpu_glyphs\": 2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "\"rich_text_rasterized\": true") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "\"ppm\": \"artifact.ppm\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "\"success\": true") != null);
 }

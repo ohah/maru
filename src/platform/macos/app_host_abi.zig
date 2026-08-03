@@ -109,8 +109,8 @@ pub const AgentSessionArchiveSmokeProbe = extern struct {
     enabled: u32 = 0,
 };
 
-test "ABI v156 app instance lease result values match the C header" {
-    try std.testing.expectEqual(@as(u32, 156), abi_version);
+test "ABI v157 app instance lease result values match the C header" {
+    try std.testing.expectEqual(@as(u32, 158), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -309,6 +309,7 @@ pub const AppMetalRasterUpload = session_mod.MetalRasterUpload;
 pub const AppMetalFrame = session_mod.MetalFrame;
 pub const AppGpuQuad = session_mod.MetalGpuQuad;
 pub const AppGpuShadow = session_mod.MetalGpuShadow;
+pub const AppGpuGlyph = session_mod.MetalGpuGlyph;
 pub const AppGpuImage = session_mod.MetalGpuImage;
 pub const AppGpuImageUpload = session_mod.MetalGpuImageUpload;
 
@@ -5320,6 +5321,8 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     // 추가한 포인터/인덱스 필드는 @offsetOf로 C↔Zig 위치를 대조한다(GpuQuad 선례와 동형).
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostMetalFrame, "gpu_quads"), @offsetOf(AppMetalFrame, "gpu_quads"));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostMetalFrame, "gpu_shadows"), @offsetOf(AppMetalFrame, "gpu_shadows"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostMetalFrame, "gpu_glyphs"), @offsetOf(AppMetalFrame, "gpu_glyphs"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostMetalFrame, "gpu_glyph_count"), @offsetOf(AppMetalFrame, "gpu_glyph_count"));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostMetalFrame, "modal_cells_start"), @offsetOf(AppMetalFrame, "modal_cells_start"));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostMetalFrame, "overlay_cells_present"), @offsetOf(AppMetalFrame, "overlay_cells_present"));
     try std.testing.expectEqual(@sizeOf(c.MaruAppHostGpuQuad), @sizeOf(AppGpuQuad));
@@ -5335,6 +5338,13 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostGpuShadow, "corner_radii"), @offsetOf(AppGpuShadow, "corner_radii"));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostGpuShadow, "blur_radius"), @offsetOf(AppGpuShadow, "blur_radius"));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostGpuShadow, "color"), @offsetOf(AppGpuShadow, "color"));
+    try std.testing.expectEqual(@sizeOf(c.MaruAppHostGpuGlyph), @sizeOf(AppGpuGlyph));
+    try std.testing.expectEqual(@alignOf(c.MaruAppHostGpuGlyph), @alignOf(AppGpuGlyph));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostGpuGlyph, "x"), @offsetOf(AppGpuGlyph, "x"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostGpuGlyph, "u0"), @offsetOf(AppGpuGlyph, "u0"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostGpuGlyph, "atlas_x_px"), @offsetOf(AppGpuGlyph, "atlas_x_px"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostGpuGlyph, "atlas_height_px"), @offsetOf(AppGpuGlyph, "atlas_height_px"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostGpuGlyph, "foreground"), @offsetOf(AppGpuGlyph, "foreground"));
     // kitty graphics(K2c): 이미지 드로우/업로드 프리미티브 + frame 채널. append-only라 @sizeOf가 필드 존재를
     // 강제하지만, 같은 폭 필드(GpuImage는 전부 4B, frame은 포인터/usize)는 reorder를 못 잡으므로 offset도 대조한다.
     try std.testing.expectEqual(@sizeOf(c.MaruAppHostGpuImage), @sizeOf(AppGpuImage));

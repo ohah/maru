@@ -142,7 +142,7 @@ action identity와 enabled policy이고, host가 나중에 dispatch한다. 현�
 `MeasureFn`은 synthetic layout fixture 전용 seam이다. 제품 `Text`가 paint되기 전 ML3에서
 측정과 paint가 공유하는 immutable `TextLayout` artifact로 반드시 교체한다.
 
-### B1 — rich `Button`과 정렬 가능한 텍스트 (설계 제안, 사용자 승인 전·미구현)
+### B1 — rich `Button`과 정렬 가능한 텍스트
 
 `ArchiveSessionDetailPanel`의 재개·로그 액션은 현재 `Card`를 action 표면으로 사용하고
 component가 `ChromeDraw.Text.origin`을 직접 계산한다. 이는 일시적인 소비자 구현이지
@@ -213,7 +213,7 @@ pixel size, label gap은 `ButtonSize`와 token에서 결정하고 text artifact�
 shortcut은 B1 첫 slice에서는 Text child가 명시적으로 제공할 때만 보이며, Button이 `⌘↵` 같은
 문자열을 도메인별로 합성하지 않는다.
 
-사용자 승인 뒤 구현은 네 PR로 나눈다. 한 PR은 선행 PR이 병합된 `main`에서만 시작한다.
+구현은 네 PR로 나눈다. 한 PR은 선행 PR이 병합된 `main`에서만 시작한다.
 
 1. **B1-doc (현재 문서 slice):** 이 계약, 상태 표, verification gate를 고정한다. code/API는 추가하지 않는다.
 2. **B1-text:** final text content rect와 pixel glyph placement artifact를 제품 rich Chrome path에

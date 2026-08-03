@@ -158,6 +158,47 @@ pub const CoreTextFrameBuilder = struct {
         return .{ .owned_list = owned_list, .shaped = shaped };
     }
 
+    /// A semantic Chrome text artifact may already own immutable, renderer-neutral shaped
+    /// records. Rebuilding its frame must not synchronously enter CoreText again when the
+    /// text/style/rect key is unchanged: this path recreates only the owned per-frame run list
+    /// required by atlas placement and raster upload accounting.
+    pub fn shapeFromRecords(
+        self: CoreTextFrameBuilder,
+        allocator: std.mem.Allocator,
+        draw_list: renderer.DrawList,
+        records: []const renderer.ShapedGlyphRecord,
+    ) !ShapedPane {
+        var owned_list = draw_list;
+        var draw_list_owned = true;
+        errdefer if (draw_list_owned) owned_list.deinit(allocator);
+
+        const surface: renderer.ShapedGlyphSurface = .{
+            .size = owned_list.size,
+            .cursor = owned_list.cursor,
+            .dirty = owned_list.dirty,
+            .overlays = owned_list.overlays,
+        };
+        const shaped = try renderer.buildGlyphRunListFromShapedRecordsWithSurface(
+            allocator,
+            records,
+            self.textLayoutConfig(),
+            surface,
+        );
+        draw_list_owned = false;
+        return .{ .owned_list = owned_list, .shaped = shaped };
+    }
+
+    fn textLayoutConfig(self: CoreTextFrameBuilder) renderer.TextLayoutConfig {
+        var layout_config = renderer.textConfigFromFontSize(
+            self.appearance.font.size,
+            renderer.deviceScaleFromMilli(self.scale_milli),
+        );
+        layout_config.cell_width_px = self.cell_width_px;
+        layout_config.glyph_cell_width_px = self.glyph_cell_width_px;
+        layout_config.cell_height_px = self.cell_height_px;
+        return layout_config;
+    }
+
     /// 통합 place로 만든 GlyphFrame과 ShapedPane을 합쳐 per-pane RenderFrame을 만든다(rasterizer가
     /// `renderer_state.font_registry`를 참조해 비트맵 생성 — shape 때 intern한 그 공유 registry라 FontId가 일관).
     /// **ShapedPane을 consume한다**: 성공 시 owned_list가 RenderFrame으로 이동하고 shaped는 정리되므로, caller는
@@ -1514,6 +1555,49 @@ fn testRasterizeGlyph(
         .status = 0,
         .non_clear_pixels = @intCast(pixel_capacity / 4),
     };
+}
+
+test "CoreText frame builder replays cached shaped records without calling the native shaper" {
+    const allocator = std.testing.allocator;
+    const cells = try allocator.dupe(renderer.DrawCell, &.{.{
+        .row = 0,
+        .col = 0,
+        .codepoint = 0x2500,
+        .width = 1,
+    }});
+    const overlays = try allocator.alloc(renderer.DrawOverlay, 0);
+    const list: renderer.DrawList = .{
+        .size = .{ .cols = 1, .rows = 1 },
+        .cursor = .{ .visible = false },
+        .dirty = .{ .start_row = 0, .end_row = 0 },
+        .cells = cells,
+        .overlays = overlays,
+    };
+    const records = [_]renderer.ShapedGlyphRecord{.{
+        .row = 0,
+        .col = 0,
+        .cell_width = 1,
+        .codepoint = 0x2500,
+        .font_id = 0,
+        .glyph_id = 0,
+        .drawable = true,
+    }};
+    const builder = CoreTextFrameBuilder{
+        .appearance = try config.resolveAppearance(.{}),
+        // This bridge always fails. A successful cached path proves shapeFromRecords never
+        // re-enters CoreText just to rebuild an unchanged Chrome text frame.
+        .shape_draw_list = failingShapeDrawList,
+        .rasterize_glyph = testRasterizeGlyph,
+    };
+    var renderer_state = renderer.RendererState.init(allocator, .{});
+    defer renderer_state.deinit();
+    var pane = try builder.shapeFromRecords(allocator, list, &records);
+    const placed = try renderer_state.placeMultiPane(allocator, &.{pane.shaped.runs});
+    defer allocator.free(placed);
+    var frame = try builder.finishPane(allocator, &pane, placed[0], &renderer_state);
+    defer frame.deinit(allocator);
+    try std.testing.expect(frame.glyphFrameConsistent());
+    try std.testing.expectEqual(@as(usize, 1), frame.glyph_quad_frame.glyphs.len);
 }
 
 test "CoreText frame builder builds AppHostFrame from active surface" {

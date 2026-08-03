@@ -12,6 +12,168 @@ const renderer = maru.renderer;
 const terminal = maru.terminal;
 const metal_frame = renderer.metal_frame;
 
+/// B1 rich Chrome text의 immutable placement artifact. semantic draw의 px origin을 cell
+/// DrawList와 함께 보존해, CoreText가 atlas slot을 준비한 뒤에도 final glyph quad가 row/col로
+/// 다시 절삭되지 않게 한다. Placement는 row 하나가 아니라 text op의 column span을 들고 있어,
+/// 같은 행의 scope tab·side-by-side control이 서로의 fractional origin을 훔치지 않는다.
+pub const RichTextArtifact = struct {
+    pub const Placement = struct {
+        row: u16,
+        start_col: u16,
+        end_col: u16,
+        offset_x_px: f32,
+        offset_y_px: f32,
+        foreground: u32,
+    };
+
+    placements: []Placement,
+
+    pub fn deinit(self: *RichTextArtifact, allocator: std.mem.Allocator) void {
+        allocator.free(self.placements);
+        self.* = undefined;
+    }
+
+    /// Converts an already shaped/rasterized RenderFrame to final pixel glyph placements. The
+    /// frame owns atlas slots; this artifact owns only component placement/color, keeping font
+    /// work out of the render tick's final assembly phase.
+    pub fn appendGpuGlyphs(
+        self: RichTextArtifact,
+        allocator: std.mem.Allocator,
+        frame: renderer.RenderFrame,
+        atlas: renderer.GlyphAtlasConfig,
+        cell_width_px: u32,
+        cell_height_px: u32,
+        origin_x_px: u32,
+        origin_y_px: u32,
+        out: *std.ArrayList(metal_frame.GpuGlyph),
+    ) !void {
+        if (cell_width_px == 0 or cell_height_px == 0) return;
+        const texture = renderer.AtlasTextureSize{ .width_px = atlas.atlas_width_px, .height_px = atlas.atlas_height_px };
+        for (frame.glyph_quad_frame.glyphs) |glyph| {
+            const placement = placementFor(self.placements, glyph.run.row, glyph.run.col) orelse continue;
+            const uv = renderer.glyph_quads.uvRectForSlot(glyph.slot, texture) catch continue;
+            try out.append(allocator, .{
+                .x = @as(f32, @floatFromInt(origin_x_px)) + @as(f32, @floatFromInt(glyph.run.col)) * @as(f32, @floatFromInt(cell_width_px)) + placement.offset_x_px,
+                .y = @as(f32, @floatFromInt(origin_y_px)) + @as(f32, @floatFromInt(glyph.run.row)) * @as(f32, @floatFromInt(cell_height_px)) + placement.offset_y_px,
+                .w = @floatFromInt(glyph.slot.width_px),
+                .h = @floatFromInt(cell_height_px),
+                .atlas_x_px = glyph.slot.x_px,
+                .atlas_y_px = glyph.slot.y_px,
+                .atlas_width_px = glyph.slot.width_px,
+                .atlas_height_px = glyph.slot.height_px,
+                // NativeMetalCell reserves u+2 for a CoreText-selected color glyph. The
+                // independent pixel pass uses the same fragment shader, so preserve that
+                // renderer contract rather than recoloring emoji with the text foreground.
+                .u0 = if (glyph.run.cache_key.color_glyph_kind == .color) uv.u0 + 2.0 else uv.u0,
+                .v0 = uv.v0,
+                .u1 = uv.u1,
+                .v1 = uv.v1,
+                .foreground = placement.foreground,
+                .layer = 0,
+            });
+        }
+    }
+};
+
+/// Captures the semantic pixel origin for each lowerable text row. The actual glyph shape/raster
+/// still comes from the shared CoreText+atlas pipeline; this is deliberately placement-only.
+pub fn buildRichTextArtifact(
+    allocator: std.mem.Allocator,
+    ops: []const chrome.draw.Op,
+    tk: *const chrome.Tokens,
+    cell_width_px: u32,
+    cell_height_px: u32,
+    cols: u16,
+    rows: u16,
+) !RichTextArtifact {
+    if (cell_width_px == 0 or cell_height_px == 0 or cols == 0 or rows == 0) return error.NoSpace;
+    var out: std.ArrayList(RichTextArtifact.Placement) = .empty;
+    errdefer out.deinit(allocator);
+    for (ops) |op| switch (op) {
+        .text => |text| {
+            if (text.origin.x < 0 or text.origin.y < 0) continue;
+            const col_px: u32 = @intCast(text.origin.x);
+            const row_px: u32 = @intCast(text.origin.y);
+            const row: u16 = @intCast(@min(row_px / cell_height_px, rows));
+            if (row >= rows or col_px / cell_width_px >= cols) continue;
+            const start_col: u16 = @intCast(col_px / cell_width_px);
+            for (text.runs) |run| {
+                var plan = chrome.text_layout.plan(run.text, start_col, cols, .head, if (text.wide_icons) &wideChromeIconGlyph else null);
+                while (plan.next()) |_| {}
+                const end_col = plan.endCol();
+                if (end_col <= start_col) continue;
+                try out.append(allocator, .{
+                    .row = row,
+                    .start_col = start_col,
+                    .end_col = end_col,
+                    .offset_x_px = @floatFromInt(col_px % cell_width_px),
+                    .offset_y_px = @floatFromInt(row_px % cell_height_px),
+                    .foreground = packRgb(tk.get(text.role)),
+                });
+            }
+        },
+        else => {},
+    };
+    return .{ .placements = try out.toOwnedSlice(allocator) };
+}
+
+fn placementFor(placements: []const RichTextArtifact.Placement, row: u16, col: u16) ?RichTextArtifact.Placement {
+    // DrawList/shape order matches semantic draw order. Reverse lookup gives a later text op
+    // precedence when a component deliberately overlays an earlier run in the same cell.
+    var i = placements.len;
+    while (i > 0) {
+        i -= 1;
+        const placement = placements[i];
+        if (placement.row == row and col >= placement.start_col and col < placement.end_col) return placement;
+    }
+    return null;
+}
+
+/// Cache key for a placement-only artifact. Font rasterization remains owned by the existing
+/// shared CoreText/atlas path; this key invalidates the immutable component placement whenever
+/// text, semantic color, rect, icon width policy, or grid metrics change.
+pub fn richTextFingerprint(
+    ops: []const chrome.draw.Op,
+    tk: *const chrome.Tokens,
+    cell_width_px: u32,
+    cell_height_px: u32,
+    cols: u16,
+    rows: u16,
+) u64 {
+    var state: u64 = 0xcbf29ce484222325;
+    fingerprintMixValue(&state, cell_width_px);
+    fingerprintMixValue(&state, cell_height_px);
+    fingerprintMixValue(&state, cols);
+    fingerprintMixValue(&state, rows);
+    for (ops) |op| switch (op) {
+        .text => |text| {
+            fingerprintMixValue(&state, 0x54);
+            fingerprintMixValue(&state, @as(u32, @bitCast(text.origin.x)));
+            fingerprintMixValue(&state, @as(u32, @bitCast(text.origin.y)));
+            fingerprintMixValue(&state, packRgb(tk.get(text.role)));
+            fingerprintMixValue(&state, @intFromBool(text.wide_icons));
+            for (text.runs) |run| {
+                fingerprintMixValue(&state, run.text.len);
+                fingerprintMixValue(&state, @intFromBool(run.bold));
+                for (run.text) |byte| fingerprintMixByte(&state, byte);
+            }
+        },
+        else => fingerprintMixValue(&state, 0),
+    };
+    return state;
+}
+
+fn fingerprintMixValue(state: *u64, value: anytype) void {
+    const v: u64 = @intCast(value);
+    inline for ([_]u6{ 0, 8, 16, 24, 32, 40, 48, 56 }) |shift| {
+        fingerprintMixByte(state, @truncate(v >> shift));
+    }
+}
+
+fn fingerprintMixByte(state: *u64, byte: u8) void {
+    state.* = (state.* ^ byte) *% 0x100000001b3;
+}
+
 /// A completed Chrome frame's text ops become **one** CoreText DrawList. `view.zig` already owns
 /// clipping/ellipsis; this adapter only places its clusters at the same component-grid origin.
 /// Batching prevents a card with three labels from causing three independent CoreText shaping
@@ -149,6 +311,10 @@ fn packRgba(rgb: maru.color.Rgb, alpha: u8) u32 {
     return (@as(u32, alpha) << 24) | (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
 }
 
+fn packRgb(rgb: maru.color.Rgb) u32 {
+    return (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
+}
+
 test "Chrome draw lowering preserves an NFD cluster and paints cards behind text" {
     const tk = chrome.tokens.Tokens.rich(.{
         .foreground = .{ .r = 1, .g = 2, .b = 3 },
@@ -203,4 +369,75 @@ test "Chrome draw lowering widens only explicitly owned registered SVG icons" {
     defer plain.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), plain.cells.len);
     try std.testing.expectEqual(@as(u2, 1), plain.cells[0].width);
+}
+
+test "rich text artifact preserves fractional pixel origin instead of coercing it to a cell row" {
+    const tk = chrome.Tokens.rich(.{
+        .foreground = .{ .r = 1, .g = 2, .b = 3 },
+        .sidebar_background = .{ .r = 4, .g = 5, .b = 6 },
+        .sidebar_foreground = .{ .r = 7, .g = 8, .b = 9 },
+        .sidebar_active = .{ .r = 10, .g = 11, .b = 12 },
+        .search_match = .{ .r = 13, .g = 14, .b = 15 },
+        .search_match_current = .{ .r = 16, .g = 17, .b = 18 },
+        .selection = .{ .r = 19, .g = 20, .b = 21 },
+        .cursor = .{ .r = 22, .g = 23, .b = 24 },
+        .accent = .{ .r = 25, .g = 26, .b = 27 },
+    });
+    const runs = [_]chrome.draw.Run{.{ .text = "가" }};
+    const ops = [_]chrome.draw.Op{.{ .text = .{ .origin = .{ .x = 19, .y = 33 }, .runs = &runs, .role = .accent_bar } }};
+    var artifact = try buildRichTextArtifact(std.testing.allocator, &ops, &tk, 8, 16, 20, 10);
+    defer artifact.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), artifact.placements.len);
+    try std.testing.expectEqual(@as(u16, 2), artifact.placements[0].row);
+    try std.testing.expectEqual(@as(u16, 2), artifact.placements[0].start_col);
+    try std.testing.expectEqual(@as(u16, 4), artifact.placements[0].end_col);
+    try std.testing.expectEqual(@as(f32, 3), artifact.placements[0].offset_x_px);
+    try std.testing.expectEqual(@as(f32, 1), artifact.placements[0].offset_y_px);
+    try std.testing.expectEqual(@as(u32, 0x00191A1B), artifact.placements[0].foreground);
+}
+
+test "rich text artifact keeps side-by-side origins independent on one cell row" {
+    const tk = chrome.Tokens.rich(.{
+        .foreground = .{ .r = 1, .g = 2, .b = 3 },
+        .sidebar_background = .{ .r = 4, .g = 5, .b = 6 },
+        .sidebar_foreground = .{ .r = 7, .g = 8, .b = 9 },
+        .sidebar_active = .{ .r = 10, .g = 11, .b = 12 },
+        .search_match = .{ .r = 13, .g = 14, .b = 15 },
+        .search_match_current = .{ .r = 16, .g = 17, .b = 18 },
+        .selection = .{ .r = 19, .g = 20, .b = 21 },
+        .cursor = .{ .r = 22, .g = 23, .b = 24 },
+        .accent = .{ .r = 25, .g = 26, .b = 27 },
+    });
+    const left_runs = [_]chrome.draw.Run{.{ .text = "A" }};
+    const right_runs = [_]chrome.draw.Run{.{ .text = "B" }};
+    const ops = [_]chrome.draw.Op{
+        .{ .text = .{ .origin = .{ .x = 1, .y = 17 }, .runs = &left_runs, .role = .surface_fg } },
+        .{ .text = .{ .origin = .{ .x = 18, .y = 19 }, .runs = &right_runs, .role = .accent_bar } },
+    };
+    var artifact = try buildRichTextArtifact(std.testing.allocator, &ops, &tk, 8, 16, 20, 10);
+    defer artifact.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 2), artifact.placements.len);
+    try std.testing.expectEqual(@as(f32, 1), placementFor(artifact.placements, 1, 0).?.offset_x_px);
+    try std.testing.expectEqual(@as(f32, 2), placementFor(artifact.placements, 1, 2).?.offset_x_px);
+    try std.testing.expectEqual(@as(f32, 3), placementFor(artifact.placements, 1, 2).?.offset_y_px);
+}
+
+test "rich text fingerprint changes for placement and semantic color inputs" {
+    var tk = chrome.Tokens.rich(.{
+        .foreground = .{ .r = 1, .g = 2, .b = 3 },
+        .sidebar_background = .{ .r = 4, .g = 5, .b = 6 },
+        .sidebar_foreground = .{ .r = 7, .g = 8, .b = 9 },
+        .sidebar_active = .{ .r = 10, .g = 11, .b = 12 },
+        .search_match = .{ .r = 13, .g = 14, .b = 15 },
+        .search_match_current = .{ .r = 16, .g = 17, .b = 18 },
+        .selection = .{ .r = 19, .g = 20, .b = 21 },
+        .cursor = .{ .r = 22, .g = 23, .b = 24 },
+        .accent = .{ .r = 25, .g = 26, .b = 27 },
+    });
+    const runs = [_]chrome.draw.Run{.{ .text = "가A" }};
+    const ops = [_]chrome.draw.Op{.{ .text = .{ .origin = .{ .x = 5, .y = 7 }, .runs = &runs, .role = .accent_bar } }};
+    const base = richTextFingerprint(&ops, &tk, 8, 16, 20, 10);
+    try std.testing.expect(base != richTextFingerprint(&ops, &tk, 9, 16, 20, 10));
+    tk.palette.set(.accent_bar, .{ .r = 99, .g = 26, .b = 27 });
+    try std.testing.expect(base != richTextFingerprint(&ops, &tk, 8, 16, 20, 10));
 }

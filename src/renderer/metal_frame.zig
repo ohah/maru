@@ -188,6 +188,21 @@ fn renormalizeGlyphCellUvs(cells: []NativeMetalCell, atlas_width_px: u32, atlas_
     }
 }
 
+/// GpuGlyph joins the same shared atlas as NativeMetalCell but bypasses the cell DTO. Keep its
+/// UVs tied to the final frame atlas rather than the size that happened to exist when one pane
+/// finished; otherwise a later pane growth corrupts only rich Chrome text.
+fn renormalizeGpuGlyphUvs(glyphs: []GpuGlyph, atlas_width_px: u32, atlas_height_px: u32) void {
+    const tex = renderer.AtlasTextureSize{ .width_px = atlas_width_px, .height_px = atlas_height_px };
+    for (glyphs) |*glyph| {
+        const rect = renderer.glyph_quads.uvRectForPx(glyph.atlas_x_px, glyph.atlas_y_px, glyph.atlas_width_px, glyph.atlas_height_px, tex) catch continue;
+        const color_off: f32 = if (glyph.u0 >= color_glyph_uv_offset) color_glyph_uv_offset else 0.0;
+        glyph.u0 = rect.u0 + color_off;
+        glyph.u1 = rect.u1 + color_off;
+        glyph.v0 = rect.v0;
+        glyph.v1 = rect.v1;
+    }
+}
+
 /// Rgb를 0x00RRGGBB로 packing한다(공용 — 전경/커서/배경 packing이 같은 byte 순서를 쓰게).
 fn packRgb(rgb: color.Rgb) u32 {
     return (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
@@ -845,6 +860,36 @@ pub const GpuShadow = extern struct {
     color: u32,
 };
 
+/// rich Chrome 텍스트 한 glyph의 최종 GPU placement. `NativeMetalCell`과 달리 row/col을
+/// 전혀 갖지 않으며, component가 확정한 backing-pixel rect를 그대로 소비한다. atlas upload는
+/// 기존 glyph raster 채널을 공유하므로 이 DTO는 새 font cache나 renderer I/O 경로를 만들지 않는다.
+///
+/// `layer`는 rich text의 합성 위치다. B1에서는 terminal layer(0)만 사용한다. 모달 text처럼
+/// 별도 physical overlay layer가 필요한 소비자는 같은 immutable artifact를 overlay 전용 채널로
+/// 내보내는 후속 slice에서 열며, 여기서 terminal cell의 modal/cursor 분할 규칙을 재해석하지 않는다.
+pub const GpuGlyph = extern struct {
+    // glyph quad의 최종 backing-pixel bounds(좌상단 기준). x/y는 fractional pixel을 허용한다.
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    // Final-atlas re-normalization needs the original pixel slot. Rich glyphs can be prepared
+    // before another pane grows the shared atlas, just like NativeMetalCell.
+    atlas_x_px: u32,
+    atlas_y_px: u32,
+    atlas_width_px: u32,
+    atlas_height_px: u32,
+    // atlas texture UV. color glyph sentinel(+2.0)은 NativeMetalCell과 같은 규칙으로 보존한다.
+    u0: f32,
+    v0: f32,
+    u1: f32,
+    v1: f32,
+    // 0x00RRGGBB 전경색. atlas coverage에 곱해 기존 glyph shader와 같은 결과를 만든다.
+    foreground: u32,
+    // 0=terminal physical layer. raw tag로 C ABI를 안정적으로 둔다.
+    layer: u32,
+};
+
 /// kitty graphics 이미지 한 placement의 GPU 드로우 프리미티브(K2). chrome GpuQuad와 같은 결의 별개
 /// 파이프라인(textured quad)이고, 셀 그리드와 무관하게 backing 픽셀 사각형으로 그린다. 좌표·UV는
 /// `buildGpuImages`가 placement(뷰포트 상대 셀 좌표) + 이미지 픽셀 크기 + 셀 메트릭으로 환산한다 —
@@ -1131,6 +1176,11 @@ pub const MetalFrame = extern struct {
     // 한다 — 렌더러는 본문을 [0,cursor_start)와 [cursor_start+cursor_cells,cell_count) 두 구간으로 그린다.
     // 끝에 추가해 기존 offset 불변(ABI v146).
     cursor_start: usize = 0,
+    // B1 rich Chrome text의 final pixel glyph placements. terminal NativeMetalCell grid와 독립된
+    // 채널이며, 빈 경우 null/0으로 기존 renderer 결과가 byte-identical다. frame buffer가 slice를
+    // 소유해 다음 replace/deinit 전까지만 유효하다.
+    gpu_glyphs: ?[*]const GpuGlyph = null,
+    gpu_glyph_count: usize = 0,
 };
 
 /// 사이드바 셀 = 밴드(전달받은 sentinel-UV 하이라이트) ++ 탭 제목 glyph(사이드바 RenderFrame 투영).
@@ -1181,6 +1231,10 @@ pub const PaneFrame = struct {
     /// 모달 오버레이 클리핑(px, w==0=없음) — finishOverlayFrame이 OverlayRaster.clip_rect에서 채우고,
     /// MetalFrameBuffer.view가 MetalFrame.modal_clip_*로 흘려 renderer가 모달 셀 draw에 scissor. 인프라(적용 후속).
     clip_rect: ?ClipPx = null,
+    /// B1 rich Chrome text frame. Its glyph slots/raster uploads still join the shared atlas, but
+    /// its visible glyphs are emitted through `GpuGlyph` at final pixel positions rather than
+    /// rebuilt as NativeMetalCell rows.
+    rich_text_only: bool = false,
 };
 
 /// 머지된 raster 업로드 스트림. pixels는 [panel0 ++ panel1 ++ … ++ 사이드바], uploads도 같은 순서로
@@ -1243,6 +1297,8 @@ pub const MetalFrameBuffer = struct {
     gpu_quads: []GpuQuad = &.{},
     // C4b 모달: chrome 그림자(GpuShadow) — 모달 배경의 떠 보이는 blur. per-frame(모달만), gpu_quads와 동형 소유.
     gpu_shadows: []GpuShadow = &.{},
+    // B1: rich Chrome final pixel text. cells와 별개라 row/col 절삭을 재도입하지 않는다.
+    gpu_glyphs: []GpuGlyph = &.{},
     // kitty graphics(K2): 이미지 placement 드로우 프리미티브 + 텍스처 업로드 채널. replace가 AppSession이
     // 모은 것을 dupe 소유한다(gpu_quads와 동형). 이미지 없으면 길이 0(렌더 무동작). image_pixels는 이
     // frame에 (재)업로드할 이미지들의 RGBA 연속 버퍼다.
@@ -1323,6 +1379,8 @@ pub const MetalFrameBuffer = struct {
         gpu_quads: []const GpuQuad,
         // C4b 모달: chrome 그림자(AppSession이 lowering으로 모은 것). buffer가 dupe 소유. 빈이면 0(무동작).
         gpu_shadows: []const GpuShadow,
+        // B1: rich Chrome final pixel glyph placement. atlas upload는 pane frames의 기존 merged upload를 공유한다.
+        gpu_glyphs: []const GpuGlyph,
         // kitty graphics(K2): 이미지 placement 드로우 프리미티브 + 텍스처 업로드 채널(AppSession이 모은 것).
         // buffer가 dupe 소유. 이미지 없으면 모두 빈 슬라이스(렌더 무동작). image_pixels는 image_uploads가
         // 가리키는 RGBA 연속 버퍼다(없으면 빈).
@@ -1340,6 +1398,7 @@ pub const MetalFrameBuffer = struct {
         try cells_list.appendSlice(allocator, pane_chrome_cells);
         var cursor_cells: usize = 0;
         for (pane_frames, 0..) |pf, i| {
+            if (pf.rich_text_only) continue;
             const built = try buildNativeCellsSplit(allocator, pf.frame.glyph_quad_frame, pf.frame.draw_list.cells, pf.colors);
             defer allocator.free(built.cells);
             setCellsPaneOrigin(built.cells, pf.origin_x, pf.origin_y);
@@ -1426,6 +1485,10 @@ pub const MetalFrameBuffer = struct {
         const new_gpu_shadows = try allocator.dupe(GpuShadow, gpu_shadows);
         errdefer allocator.free(new_gpu_shadows);
 
+        const new_gpu_glyphs = try allocator.dupe(GpuGlyph, gpu_glyphs);
+        errdefer allocator.free(new_gpu_glyphs);
+        renormalizeGpuGlyphUvs(new_gpu_glyphs, atlas_config.atlas_width_px, atlas_config.atlas_height_px);
+
         const new_gpu_images = try allocator.dupe(GpuImage, gpu_images);
         errdefer allocator.free(new_gpu_images);
         const new_image_uploads = try allocator.dupe(GpuImageUpload, image_uploads);
@@ -1445,6 +1508,7 @@ pub const MetalFrameBuffer = struct {
         allocator.free(self.sidebar_cells);
         allocator.free(self.gpu_quads);
         allocator.free(self.gpu_shadows);
+        allocator.free(self.gpu_glyphs);
         allocator.free(self.gpu_images);
         allocator.free(self.image_uploads);
         allocator.free(self.image_pixels);
@@ -1455,6 +1519,7 @@ pub const MetalFrameBuffer = struct {
         self.sidebar_cells = new_sidebar_cells;
         self.gpu_quads = new_gpu_quads;
         self.gpu_shadows = new_gpu_shadows;
+        self.gpu_glyphs = new_gpu_glyphs;
         self.gpu_images = new_gpu_images;
         self.image_uploads = new_image_uploads;
         self.image_pixels = new_image_pixels;
@@ -1583,6 +1648,8 @@ pub const MetalFrameBuffer = struct {
             // C4b 모달: chrome 그림자. 비면 null로 둬 렌더러가 shadow 패스를 건너뛴다.
             .gpu_shadows = if (self.gpu_shadows.len > 0) self.gpu_shadows.ptr else null,
             .gpu_shadow_count = self.gpu_shadows.len,
+            .gpu_glyphs = if (self.gpu_glyphs.len > 0) self.gpu_glyphs.ptr else null,
+            .gpu_glyph_count = self.gpu_glyphs.len,
             // C4b 모달: show_cursor로 잘려도 modal_cells_start는 그대로(커서 suffix는 모달 텍스트 '뒤'라
             // 모달 셀 시작에 영향 없음). exposed가 modal_cells_start보다 작으면 모달 텍스트가 안 보이는
             // 경우인데, 그땐 draw가 over quad를 모달 없음과 같게 다룬다(렌더러 가드).
@@ -1610,6 +1677,7 @@ pub const MetalFrameBuffer = struct {
         allocator.free(self.sidebar_cells);
         allocator.free(self.gpu_quads);
         allocator.free(self.gpu_shadows);
+        allocator.free(self.gpu_glyphs);
         allocator.free(self.gpu_images);
         allocator.free(self.image_uploads);
         allocator.free(self.image_pixels);
@@ -2814,6 +2882,19 @@ test "renormalizeGlyphCellUvs rescales glyph UVs to final atlas dims, preserves 
     try std.testing.expectEqual(@as(f32, 0.5), zero[0].u0); // baked 유지
 }
 
+test "renormalizeGpuGlyphUvs follows the final shared atlas and keeps color sentinel" {
+    var glyphs = [_]GpuGlyph{
+        .{ .x = 0, .y = 0, .w = 8, .h = 16, .atlas_x_px = 512, .atlas_y_px = 256, .atlas_width_px = 64, .atlas_height_px = 32, .u0 = 0.5, .v0 = 0.25, .u1 = 0.5625, .v1 = 0.28125, .foreground = 0, .layer = 0 },
+        .{ .x = 8, .y = 0, .w = 8, .h = 16, .atlas_x_px = 512, .atlas_y_px = 256, .atlas_width_px = 64, .atlas_height_px = 32, .u0 = 2.5, .v0 = 0.25, .u1 = 2.5625, .v1 = 0.28125, .foreground = 0, .layer = 0 },
+    };
+    renormalizeGpuGlyphUvs(&glyphs, 2048, 2048);
+    try std.testing.expectEqual(@as(f32, 0.25), glyphs[0].u0);
+    try std.testing.expectEqual(@as(f32, 0.28125), glyphs[0].u1);
+    try std.testing.expectEqual(@as(f32, 2.25), glyphs[1].u0);
+    try std.testing.expectEqual(@as(f32, 2.28125), glyphs[1].u1);
+    try std.testing.expectEqual(@as(f32, 0.125), glyphs[0].v0);
+}
+
 test "PaneFrameRole lowers dock toggle provenance without classifying the same PUA in a normal pane" {
     var dock = [_]NativeMetalCell{
         .{
@@ -2878,7 +2959,7 @@ test "replace: 드래그 drop 하이라이트가 오버레이 영역(modal_cells
     {
         var buf: MetalFrameBuffer = .{};
         defer buf.deinit(allocator);
-        try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, &.{}, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &chrome, &.{}, null, null, &drag_cells, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
+        try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, &.{}, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &chrome, &.{}, null, null, &drag_cells, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
         try std.testing.expectEqual(@as(usize, 1), buf.modal_cells_start); // has_modal=true → 오버레이 레이어
         try std.testing.expectEqual(@as(u32, 1), buf.view().overlay_cells_present);
         try std.testing.expectEqual(@as(usize, 0), buf.cursor_cells); // 드래그=caret 없음(정적 커서)
@@ -2889,7 +2970,7 @@ test "replace: 드래그 drop 하이라이트가 오버레이 영역(modal_cells
     {
         var buf: MetalFrameBuffer = .{};
         defer buf.deinit(allocator);
-        try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, &.{}, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &chrome, &.{}, null, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
+        try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, &.{}, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &chrome, &.{}, null, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
         try std.testing.expectEqual(@as(usize, 0), buf.modal_cells_start); // 오버레이 없음
         try std.testing.expectEqual(@as(u32, 0), buf.view().overlay_cells_present);
         try std.testing.expectEqual(@as(usize, 1), buf.cells.len); // chrome만
@@ -2898,7 +2979,7 @@ test "replace: 드래그 drop 하이라이트가 오버레이 영역(modal_cells
     {
         var buf: MetalFrameBuffer = .{};
         defer buf.deinit(allocator);
-        try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, &.{}, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, null, null, &drag_cells, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
+        try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, &.{}, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, null, null, &drag_cells, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
         const frame = buf.view();
         try std.testing.expectEqual(@as(usize, 0), frame.modal_cells_start);
         try std.testing.expectEqual(@as(u32, 1), frame.overlay_cells_present);
@@ -2934,7 +3015,7 @@ test "replace [5]: 모달(caret)+드래그 고스트 공존 → modal caret이 �
     var buf: MetalFrameBuffer = .{};
     defer buf.deinit(allocator);
     // 마우스 드래그 중 ⌘F: overlay_frame(모달)+drag_overlay_frame(고스트) 공존. replace가 [고스트][모달] 순으로 조립.
-    try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, &.{}, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, modal_pf, ghost_pf, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
+    try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, &.{}, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, modal_pf, ghost_pf, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
 
     // cursor_cells는 **모달**의 caret만(고스트 caret은 overlay_cursor_cells에 안 실림). 그 suffix가 버퍼 맨 끝 = 모달
     // 셀이어야 blink chop이 맞다. 고스트를 모달 '뒤'에 append하는 리팩터([0] 재발)면 buf.cells 끝이 고스트(origin 500)라 실패.
@@ -2960,7 +3041,7 @@ test "replace: caret 없는 오버레이 셀이 뒤에 붙어도 터미널 커�
 
     var buf: MetalFrameBuffer = .{};
     defer buf.deinit(allocator);
-    try buf.replace(allocator, &panes, atlas_config, 8, 16, null, null, &.{}, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, null, null, &border, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
+    try buf.replace(allocator, &panes, atlas_config, 8, 16, null, null, &.{}, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, null, null, &border, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
 
     // ★ 커서 구간이 살아 있어야 한다(옛 코드는 0이라 blink가 죽었다).
     try std.testing.expect(buf.cursor_cells >= 1);

@@ -25,12 +25,36 @@ pub const QueueScalars = struct {
     source_bytes: usize,
     target_bytes: usize,
     survivor_bytes: usize,
+
+    const zero: QueueScalars = .{
+        .source_count = 0,
+        .target_count = 0,
+        .survivor_count = 0,
+        .source_bytes = 0,
+        .target_bytes = 0,
+        .survivor_bytes = 0,
+    };
 };
 
-/// `pristine` makes failed construction observable even when a valid empty plan contains zeros.
-pub const QueuePlan = union(enum) {
-    pristine,
-    planned: QueueScalars,
+/// Raw state makes callback-corrupted preparation safe to inspect in ReleaseFast. A tagged union
+/// would require interpreting an untrusted tag before the finalizer could reject it.
+pub const QueuePlan = struct {
+    pub const pristine_state: u8 = 0;
+    pub const planned_state: u8 = 1;
+
+    state: u8 = pristine_state,
+    scalars: QueueScalars = .zero,
+
+    pub fn isPristine(self: QueuePlan) bool {
+        return self.state == pristine_state;
+    }
+
+    /// Validates only the raw publication state. The owning caller must still dry-run a
+    /// `DispositionCursor` against the sealed target map before trusting these scalars.
+    pub fn rawPlannedScalars(self: QueuePlan) PlanError!QueueScalars {
+        if (self.state != planned_state) return error.InvalidState;
+        return self.scalars;
+    }
 };
 
 pub const PlanError = error{
@@ -38,6 +62,7 @@ pub const PlanError = error{
     InvalidTargetMap,
     ArithmeticOverflow,
     DestinationOccupied,
+    InvalidState,
 };
 
 /// Stable destination ordinal for one source item. It is an index projection, not an owner handle.
@@ -59,7 +84,10 @@ pub fn buildQueuePlan(
     out: *QueuePlan,
 ) PlanError!void {
     comptime assertSupportedMaximum(max_items);
-    if (out.* != .pristine) return error.DestinationOccupied;
+    if (out.state != QueuePlan.pristine_state) {
+        if (out.state != QueuePlan.planned_state) return error.InvalidState;
+        return error.DestinationOccupied;
+    }
     if (input.source_count > max_items or
         input.claimed_target_count > input.source_count)
         return error.InvalidCount;
@@ -80,7 +108,7 @@ pub fn buildQueuePlan(
         input.source_bytes,
         input.target_bytes,
     ) catch return error.ArithmeticOverflow;
-    out.* = .{ .planned = .{
+    out.* = .{ .state = QueuePlan.planned_state, .scalars = .{
         .source_count = input.source_count,
         .target_count = target_count,
         .survivor_count = survivor_count,
@@ -235,14 +263,14 @@ fn expectStep(
 test "CR3a-2c2b3a empty input publishes a planned empty result" {
     const Bits = std.StaticBitSet(1);
     const targets: Bits = .initEmpty();
-    var out: QueuePlan = .pristine;
+    var out: QueuePlan = .{};
     try buildQueuePlan(1, &targets, .{
         .source_count = 0,
         .claimed_target_count = 0,
         .source_bytes = 0,
         .target_bytes = 0,
     }, &out);
-    const plan = out.planned;
+    const plan = try out.rawPlannedScalars();
     try std.testing.expectEqual(@as(usize, 0), plan.source_count);
     try std.testing.expectEqual(@as(usize, 0), plan.target_count);
     try std.testing.expectEqual(@as(usize, 0), plan.survivor_count);
@@ -275,14 +303,14 @@ test "CR3a-2c2b3a stable projection covers none all edges and alternating target
         }, .claimed = 4, .target_bytes = 16 },
     };
     for (inputs) |input| {
-        var out: QueuePlan = .pristine;
+        var out: QueuePlan = .{};
         try buildQueuePlan(8, &input.targets, .{
             .source_count = 8,
             .claimed_target_count = input.claimed,
             .source_bytes = 36,
             .target_bytes = input.target_bytes,
         }, &out);
-        const plan = out.planned;
+        const plan = try out.rawPlannedScalars();
         try std.testing.expectEqual(8 - input.claimed, plan.survivor_count);
         try std.testing.expectEqual(36 - input.target_bytes, plan.survivor_bytes);
         var cursor = try DispositionCursor(8).init(plan, &input.targets);
@@ -343,12 +371,12 @@ test "CR3a-2c2b3a invalid inputs preserve the pristine destination" {
         }, .expected = error.ArithmeticOverflow },
     };
     for (cases) |case| {
-        var out: QueuePlan = .pristine;
+        var out: QueuePlan = .{};
         try std.testing.expectError(
             case.expected,
             buildQueuePlan(4, &case.bits, case.input, &out),
         );
-        try std.testing.expect(out == .pristine);
+        try std.testing.expect(out.isPristine());
     }
 }
 
@@ -363,22 +391,22 @@ test "CR3a-2c2b3a occupied destination rejects without replacement" {
         .target_bytes = 0,
         .survivor_bytes = 7,
     };
-    var out: QueuePlan = .{ .planned = original };
+    var out: QueuePlan = .{ .state = QueuePlan.planned_state, .scalars = original };
     try std.testing.expectError(error.DestinationOccupied, buildQueuePlan(
         1,
         &targets,
         .{ .source_count = 0, .claimed_target_count = 0, .source_bytes = 0, .target_bytes = 0 },
         &out,
     ));
-    try std.testing.expect(std.meta.eql(original, out.planned));
+    try std.testing.expect(std.meta.eql(original, try out.rawPlannedScalars()));
 }
 
 test "CR3a-2c2b3a maximum target map is linear and deterministic" {
     const max_items = 4096;
     const Bits = std.StaticBitSet(max_items);
     const targets: Bits = .initFull();
-    var first: QueuePlan = .pristine;
-    var second: QueuePlan = .pristine;
+    var first: QueuePlan = .{};
+    var second: QueuePlan = .{};
     const input: QueueInput = .{
         .source_count = max_items,
         .claimed_target_count = max_items,
@@ -389,7 +417,7 @@ test "CR3a-2c2b3a maximum target map is linear and deterministic" {
     try buildQueuePlan(max_items, &targets, input, &second);
     try std.testing.expect(std.meta.eql(first, second));
 
-    var left = try DispositionCursor(max_items).init(first.planned, &targets);
+    var left = try DispositionCursor(max_items).init(try first.rawPlannedScalars(), &targets);
     var right = left;
     for (0..max_items) |source_ordinal| {
         const expected: Disposition = .{ .target = source_ordinal };
@@ -477,7 +505,7 @@ test "CR3a-2c2b3a validation error precedence is deterministic" {
     const Bits = std.StaticBitSet(2);
     var outside: Bits = .initEmpty();
     outside.set(1);
-    var occupied: QueuePlan = .{ .planned = .{
+    var occupied: QueuePlan = .{ .state = QueuePlan.planned_state, .scalars = .{
         .source_count = 0,
         .target_count = 0,
         .survivor_count = 0,
@@ -491,7 +519,7 @@ test "CR3a-2c2b3a validation error precedence is deterministic" {
         .{ .source_count = 3, .claimed_target_count = 3, .source_bytes = 0, .target_bytes = 1 },
         &occupied,
     ));
-    var out: QueuePlan = .pristine;
+    var out: QueuePlan = .{};
     try std.testing.expectError(error.InvalidCount, buildQueuePlan(
         2,
         &outside,
@@ -511,6 +539,36 @@ test "CR3a-2c2b3a validation error precedence is deterministic" {
         .{ .source_count = 1, .claimed_target_count = 0, .source_bytes = 0, .target_bytes = 1 },
         &out,
     ));
+}
+
+test "CR3a-2c2b3a unknown raw plan states fail before scalar interpretation" {
+    var state: u16 = 0;
+    while (state <= std.math.maxInt(u8)) : (state += 1) {
+        const raw: u8 = @intCast(state);
+        if (raw == QueuePlan.planned_state) continue;
+        const plan = QueuePlan{
+            .state = raw,
+            .scalars = .{
+                .source_count = std.math.maxInt(usize),
+                .target_count = std.math.maxInt(usize),
+                .survivor_count = std.math.maxInt(usize),
+                .source_bytes = std.math.maxInt(usize),
+                .target_bytes = std.math.maxInt(usize),
+                .survivor_bytes = std.math.maxInt(usize),
+            },
+        };
+        try std.testing.expectError(error.InvalidState, plan.rawPlannedScalars());
+    }
+
+    const targets = std.StaticBitSet(1).initEmpty();
+    var destination = QueuePlan{ .state = 2 };
+    try std.testing.expectError(error.InvalidState, buildQueuePlan(
+        1,
+        &targets,
+        .{ .source_count = 0, .claimed_target_count = 0, .source_bytes = 0, .target_bytes = 0 },
+        &destination,
+    ));
+    try std.testing.expectEqual(@as(u8, 2), destination.state);
 }
 
 fn typeContainsPointer(comptime T: type) bool {

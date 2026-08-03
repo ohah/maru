@@ -429,6 +429,8 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .name = "consumeGenerationAccountingUnchecked", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "tryAcquireEndedPurgeExclusive", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "prepareEndedPurgeCommit", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "commitEndedPurgePrepared", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "finalizeEndedPurgeNoFreePoison", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "tryAcquireClientSlotTeardownExclusive", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "abortClientSlotTeardownExclusive", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "tryDeinitClientSlotExclusiveHeld", .receiver_type = mutable, .class = .unchecked },
@@ -751,6 +753,14 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         allocator,
         source,
         "Client",
+        "commitEndedPurgePrepared",
+        "scratch.*",
+        0,
+    );
+    try expectContainerMethodMarkerCount(
+        allocator,
+        source,
+        "Client",
         "commitExternalPumpTransfer",
         "self.* =",
         1,
@@ -952,6 +962,50 @@ test "CR3a-2c2b3b prepare commit reads PID and callback TLS before graph then re
         );
 }
 
+test "CR3a-2c2b3b finalizer gates PID and raw states before inherited graph access" {
+    const allocator = std.testing.allocator;
+    const source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/client.zig",
+    );
+    defer allocator.free(source);
+    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    defer tree.deinit(allocator);
+    const members = findRootContainerMembers(&tree, "Client") orelse
+        return error.TestUnexpectedResult;
+    const method = findContainerMethod(
+        &tree,
+        members,
+        "Client",
+        "finalizeEndedPurgeNoFreePoison",
+    ) orelse return error.TestUnexpectedResult;
+    const body_start = functionBodyStart(&tree, method) orelse
+        return error.TestUnexpectedResult;
+    var getpid_token: ?std.zig.Ast.TokenIndex = null;
+    var proof_pid_token: ?std.zig.Ast.TokenIndex = null;
+    var raw_state_gate_token: ?std.zig.Ast.TokenIndex = null;
+    var first_fence_token: ?std.zig.Ast.TokenIndex = null;
+    var token = body_start + 1;
+    while (token <= tree.lastToken(method)) : (token += 1) {
+        const text = tree.tokenSlice(token);
+        if (getpid_token == null and std.mem.eql(u8, text, "getpid")) getpid_token = token;
+        if (proof_pid_token == null and std.mem.eql(u8, text, "process_id"))
+            proof_pid_token = token;
+        if (raw_state_gate_token == null and
+            std.mem.eql(u8, text, "endedPurgeRawFinalizerStateValid"))
+            raw_state_gate_token = token;
+        if (first_fence_token == null and std.mem.eql(u8, text, "operation_fence"))
+            first_fence_token = token;
+    }
+    try std.testing.expect(getpid_token != null);
+    try std.testing.expect(proof_pid_token != null);
+    try std.testing.expect(raw_state_gate_token != null);
+    try std.testing.expect(first_fence_token != null);
+    try std.testing.expect(getpid_token.? < proof_pid_token.?);
+    try std.testing.expect(proof_pid_token.? < raw_state_gate_token.?);
+    try std.testing.expect(raw_state_gate_token.? < first_fence_token.?);
+}
+
 test "CR3a-2c2b3a ended purge plan remains a neutral test-only leaf" {
     const allocator = std.testing.allocator;
     const leaf = try readZigFileZ(
@@ -1118,6 +1172,13 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "EndedPurgeCommitError" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "EndedPurgeClientCommitOutcome" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "prepareEndedPurgeCommit" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "commitEndedPurgePrepared" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "finalizeEndedPurgeNoFreePoison" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "tombstoneEndedPurgeOwnedGraph" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "publishEndedPurgeNoFreePoison" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "endedPurgePostValidate" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "publishEndedPurgeCompaction" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "cleanupEndedPurgeTargetDirect" },
                 .{ .parent = "Client", .kind = "field", .visibility = "private", .modifier = "", .name = "operation_fence" },
                 .{ .parent = "Client", .kind = "field", .visibility = "private", .modifier = "", .name = "operation_fence_generation" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "bindOperationFence" },
@@ -1130,6 +1191,8 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "beginPublicMutation" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "endPublicMutation" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "endedPurgeCompleteOwnerSeal" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "endedPurgeFinalizationSeal" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "endedPurgeRawFinalizerStateValid" },
                 .{ .parent = "EndedPurgeScratch", .kind = "const", .visibility = "private", .modifier = "", .name = "PendingOutboundDescriptor" },
                 .{ .parent = "EndedPurgeScratch", .kind = "const", .visibility = "private", .modifier = "", .name = "Lifecycle" },
                 .{ .parent = "EndedPurgeScratch", .kind = "field", .visibility = "private", .modifier = "", .name = "build_id" },
@@ -1155,6 +1218,7 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "PreparedEndedPurgeCommit", .kind = "field", .visibility = "private", .modifier = "", .name = "stream_cleanup_ordinal" },
                 .{ .parent = "PreparedEndedPurgeCommit", .kind = "field", .visibility = "private", .modifier = "", .name = "event_cleanup_ordinal" },
                 .{ .parent = "PreparedEndedPurgeCommit", .kind = "field", .visibility = "private", .modifier = "", .name = "partial_cleanup_ordinal" },
+                .{ .parent = "PreparedEndedPurgeCommit", .kind = "field", .visibility = "private", .modifier = "", .name = "finalization_seal" },
                 .{ .parent = "PreparedEndedPurgeCommit", .kind = "field", .visibility = "private", .modifier = "", .name = "lifecycle" },
                 .{ .parent = "ClientOperationFence", .kind = "const", .visibility = "private", .modifier = "", .name = "shared_count_mask" },
                 .{ .parent = "ClientOperationFence", .kind = "const", .visibility = "private", .modifier = "", .name = "reserved_mask" },
@@ -1293,6 +1357,14 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
         "consumed",
     );
     try expectPreparedEndedPurgeCommitSchema(allocator, client);
+    inline for (.{
+        "prepareEndedPurgeCommit",
+        "commitEndedPurgePrepared",
+        "finalizeEndedPurgeNoFreePoison",
+    }) |method_name| try std.testing.expectEqual(
+        @as(usize, 1),
+        countIdentifierOutsideTopLevelTests(client, method_name),
+    );
     try std.testing.expectEqual(
         @as(usize, 1),
         try inventoryCount(allocator, client, .{
@@ -1301,6 +1373,26 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
             .visibility = "pub",
             .modifier = "",
             .name = "prepareEndedPurgeCommit",
+        }),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        try inventoryCount(allocator, client, .{
+            .parent = "Client",
+            .kind = "fn",
+            .visibility = "pub",
+            .modifier = "",
+            .name = "finalizeEndedPurgeNoFreePoison",
+        }),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        try inventoryCount(allocator, client, .{
+            .parent = "Client",
+            .kind = "fn",
+            .visibility = "pub",
+            .modifier = "",
+            .name = "commitEndedPurgePrepared",
         }),
     );
     try expectClientOperationFenceSchema(allocator, client);
@@ -6818,6 +6910,7 @@ fn expectPreparedEndedPurgeCommitSchema(
         .{ .name = "stream_cleanup_ordinal", .type_name = "usize" },
         .{ .name = "event_cleanup_ordinal", .type_name = "usize" },
         .{ .name = "partial_cleanup_ordinal", .type_name = "usize" },
+        .{ .name = "finalization_seal", .type_name = "owner_seal.Digest" },
         .{ .name = "lifecycle", .type_name = "Lifecycle" },
     };
     try std.testing.expectEqual(fields.len + 1, members.len);

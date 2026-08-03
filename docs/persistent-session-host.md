@@ -1098,12 +1098,13 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    `ended_purge_transaction.zig`에서 target bitset을 stable source order의 `{source,target-or-survivor ordinal}` projection으로 바꾸고,
    b2가 봉인한 count/byte에서 authority나 seal을 mint하지 않고 checked survivor 산술만 수행하는 non-owning plan을 만든다. API는
    `buildQueuePlan(comptime max_items, targets, QueueInput, *QueuePlan)`이며 error set은
-   `InvalidCount|InvalidTargetMap|ArithmeticOverflow|DestinationOccupied`다. pointer-free/copyable `QueueInput`은 source/claimed-target
-   count와 source/target bytes만 가진다. pointer-free/copyable `QueuePlan`은
-   `union(enum){pristine, planned: QueueScalars}`이고 `QueueScalars`만 source/target/survivor count와 bytes를 가진다. empty source의 성공도
-   `.planned`라 pristine destination과 구분한다. destination이 pristine이 아니면 mutation 0의 `DestinationOccupied`다. 모든 오류는 out의
-   입력값을 byte-for-byte 보존하므로 pristine 입력의 실패는 pristine을, `DestinationOccupied`는 기존 occupied 값을 유지하며 성공에서만
-   `.planned`를 한 번 publish한다. 오류 우선순위는 destination, count, target map, checked arithmetic 순이다. `max_items` 지원 상한은
+   `InvalidCount|InvalidTargetMap|ArithmeticOverflow|DestinationOccupied|InvalidState`다. pointer-free/copyable `QueueInput`은 source/claimed-target
+   count와 source/target bytes만 가진다. pointer-free/copyable `QueuePlan`은 raw `state: u8`와 항상 초기화된 `QueueScalars`를 가진다.
+   `state=0`은 pristine, `state=1`은 planned이며 그 밖의 값은 typed `InvalidState`다. 이 표현은 callback 뒤 untrusted preparation을
+   ReleaseFast에서도 tagged-union switch 없이 먼저 검사하게 한다. empty source의 성공도 planned라 pristine destination과 구분한다.
+   destination이 pristine이 아니면 mutation 0의 `DestinationOccupied`다. 모든 오류는 out의 입력값을 byte-for-byte 보존하므로 pristine
+   입력의 실패는 pristine을, `DestinationOccupied`는 기존 occupied 값을 유지하며 성공에서만 planned state와 scalars를 한 번 publish한다.
+   오류 우선순위는 destination, count, target map, checked arithmetic 순이다. `max_items` 지원 상한은
    4,096이고 검증 비용은 `O(source_count + ceil(max_items / word bits))`다. ephemeral `DispositionCursor`만 bitset을 borrow해 source
    ordinal마다 stable target 또는 survivor ordinal을 반환한다. `next`는 위조된 cursor ordinal/count를 typed error로 fail-close하고 전체
    순회 뒤 `validateComplete()`가 target map/count/ordinal을 typed 재검증해야 한다. plan/step에는 address, allocator, payload pointer와 scratch reference가 없다. caller는
@@ -1160,9 +1161,14 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
      cleanup state는 `PreparedEndedPurgeCommit` nested declaration으로 둔다. `Client` 신규 method exact allowlist는 public
      `prepareEndedPurgeCommit`, `commitEndedPurgePrepared`, `finalizeEndedPurgeNoFreePoison`과 private
      `tombstoneEndedPurgeOwnedGraph`, `publishEndedPurgeNoFreePoison`, `endedPurgeCompleteOwnerSeal`,
-     `endedPurgePostValidate`, `publishEndedPurgeCompaction`, `cleanupEndedPurgeTargetDirect` 아홉 개다. cleanup/compaction/tombstone leaf는
+     `endedPurgePostValidate`, `endedPurgeFinalizationSeal`, `endedPurgeRawFinalizerStateValid`, `publishEndedPurgeCompaction`,
+     `cleanupEndedPurgeTargetDirect` 열한 개다. cleanup/compaction/tombstone leaf는
      `commitEndedPurgePrepared`, poison leaf는 `finalizeEndedPurgeNoFreePoison`의 no-fail suffix 외 production caller가 0이어야 한다.
-     기존 `ClientOwnership`에는
+     commit/finalizer gate는 `commitEndedPurgePrepared`와 그 private cleanup/compaction/tombstone leaf를 먼저 열고,
+     이어지는 finalizer subgate에서 `finalizeEndedPurgeNoFreePoison`과 poison leaf를 연다. finalizer는 proof scalar와
+     final-address pending preparation 및 fence identity를 모두 검증한 뒤 ownership/reason을 게시하고 preparation consumed 다음
+     terminal fence를 마지막으로 게시한다. commit subgate 단독 GREEN은
+     B3b-S 완료나 제품 caller 개방을 뜻하지 않는다. 기존 `ClientOwnership`에는
      `quarantined_no_free` arm만 추가한다.
    - B3b-S/O의 `client_slot.zig` top-level 신규 exact allowlist는 import `ended_purge_quarantine`, process singleton
      `ended_purge_quarantine_registry`, PID bootstrap latch `process_runtime_pid` 세 개뿐이다. `ClientSlot` nested declaration은
@@ -1227,12 +1233,13 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
      네 transition method가 실제 PID를 내부에서 먼저 읽어 검증하므로 caller-supplied PID를 신뢰하지 않는다. 상한 const는 exact
      `max_ended_purge_quarantine_bytes: usize = 64 * 1024 * 1024`다.
 
-   `PreparedEndedPurgeCommit`은 final-address `pristine|prepared|finalization_pending|consumed` owner다. nested declaration은 `Lifecycle` 하나뿐이고,
-   exact field allowlist는 아래에 열거한 18개뿐이며 boundary가 container가 생기는 순간 member tuple을 검사한다. 정확한 scalar schema는
+   `PreparedEndedPurgeCommit`은 final-address `pristine|prepared|finalization_pending|consumed` owner다. nested declaration은
+   `Lifecycle=enum(u8)` 하나뿐이고,
+   exact field allowlist는 아래에 열거한 19개뿐이며 boundary가 container가 생기는 순간 member tuple을 검사한다. 정확한 scalar schema는
    `self_addr`, `client_addr`, `scratch_addr`, `inventory_addr`, `target_stream`, `captured_fd`,
    `complete_owned_extent_bytes`, `complete_owner_seal`, `pre_callback_survivor_seal`, batch/stream/event/partial 네 pointer-free
-   `QueuePlan`, queue별 monotonic cleanup ordinal과 lifecycle이다. cursor 자체나 slice/pointer는 저장하지 않는다.
-   canonical pristine default는 address/stream/extent/ordinal 0, `captured_fd=-1`, 두 digest zero, 네 plan `.pristine`,
+   `QueuePlan`, queue별 monotonic cleanup ordinal, `finalization_seal`과 lifecycle이다. cursor 자체나 slice/pointer는 저장하지 않는다.
+   canonical pristine default는 address/stream/extent/ordinal 0, `captured_fd=-1`, 세 digest zero, 네 plan `.pristine`,
    lifecycle `.pristine`이다. prepare 성공의 마지막 whole-value publish 전에는 out bytes를 바꾸지 않는다.
    payload/allocator authority는 복제하지 않고 immutable `EndedPurgeScratch` descriptor가 계속 소유한다. `EndedPurgeScratch`의 기존 exact
    13 fields(`batches,stream,events,batch_targets,stream_targets,event_targets,partial,partial_target,parser_backing,batch_backing,
@@ -1269,7 +1276,13 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    `PreparedEndedPurgeCommit`을 consumed로, drift는 Client-owned graph를 tombstone한 뒤 `PreparedEndedPurgeCommit`을
    `finalization_pending`으로 만든다. 이 시점에는 poison, terminal fence,
    process quarantine commit이 모두 0이다. `finalizeEndedPurgeNoFreePoison`은 exact pending preparation만 받아 no-fail로
-   `quarantined_no_free` ownership, 최초 poison reason과 terminal fence를 게시하고 `PreparedEndedPurgeCommit`을 consumed로 만든다. 이 finalizer는
+   `quarantined_no_free` ownership, 최초 poison reason과 terminal fence를 게시하고 `PreparedEndedPurgeCommit`을 consumed로 만든다.
+   drift commit은 graph tombstone과 네 cleanup ordinal의 final count를 게시한 뒤 lifecycle을 `finalization_pending`으로 바꾸고,
+   final-address/client/fence identity, operation generation, target/fd/extent, complete/survivor seal, 네 QueuePlan과 네 cleanup ordinal을
+   domain-separated `finalization_seal`로 봉인한다. finalizer는 actual PID를 조회한 직후 `ConsumedCommitProof.process_id`만 raw scalar로
+   비교하고, preparation의 raw lifecycle byte와 네 `QueuePlan.state`가 알려진 값인지 확인한다. 이 PID/tag preflight 전에는 fence atomic,
+   Client graph, enum/tagged-union semantic access가 0이다. 그 뒤 graph를 다시 읽지 않고 같은 pointer-free transcript를 재계산해 exact
+   `finalization_seal`과 비교하며 zero/mismatch를 poison/terminal mutation 0 뒤 fail-stop한다. 이 finalizer는
    B3b-O가 이미 commit한 quarantine reservation을 되돌릴 수 없는 no-fail suffix이므로 identity/lifecycle 불일치는 복구나 no-op 대신
    process invariant fail-stop이다.
    `ClientSlot.commitEndedPurge`는 정상과 postcallback drift를 모두 `.purged`로 정규화하고 poison/quarantine 여부는 Client terminal state와
@@ -1330,8 +1343,8 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    사이에 callback, lock, allocation, fallible lookup과 public reentry가 0이며 둘 중 하나만 consumed인 정상 반환은 없다.
 
    PID와 final-address Client/fence identity는 bound `ClientOperationFence`가 내부에서 검증하며 caller scalar를 신뢰하지 않는다.
-   finalizer는 registry/callback/pointer receipt를 받지 않고 pointer-free consumed proof와 sealed preparation identity를 검증한다. exact 순서는
-   `proof/preparation scalar validate → ownership=no_free+first reason → PreparedEndedPurgeCommit consumed →
+   finalizer는 registry/callback/pointer receipt를 받지 않고 pointer-free consumed proof와 `finalization_seal`로 봉인한 preparation identity를 검증한다. exact 순서는
+   `actual PID와 proof process_id 비교 → raw lifecycle/plan state validate → proof/preparation scalar validate → ownership=no_free+first reason → PreparedEndedPurgeCommit consumed →
    commitExclusiveTerminal(last publication)`이다. terminal을 관측한 스레드는 이미 poison fields와
    `PreparedEndedPurgeCommit` consumed를 함께 본다.
    B3b-O source/runtime gate가 `Registry.commit → Registry.consumeCommitted → finalizer` 뒤 node permit→transport receipt paired consume

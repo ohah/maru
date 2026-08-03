@@ -14,9 +14,10 @@ on:
       - "src/**"
       - "tests/**"
       - "tools/perf/**"
-  # PR 필수 체크로 쓰므로 모든 PR에서 돈다(paths 필터를 두면 무관한 PR에서 skip돼 required 체크가
-  # 영원히 pending으로 머지를 막는다). perf job은 ~30s로 짧다. 이번 reflow perf 회귀가 PR 체크에
-  # 없어 main에 들어간 일을 막기 위함이다.
+  # 트리거는 모든 PR에 열어 둔다(paths 필터를 두면 무관한 PR에서 워크플로가 아예 안 돌아 required
+  # 체크가 영원히 pending으로 머지를 막는다). perf job은 ~30s로 짧다. 이번 reflow perf 회귀가 PR
+  # 체크에 없어 main에 들어간 일을 막기 위함이다. 코드가 안 바뀐 PR은 아래 job이 건너뛴다 —
+  # 조건으로 skip된 job은 required 컨텍스트에서 통과로 보고된다.
   pull_request:
 
 # 같은 ref·같은 트리거에서 새 실행이 오면 이전 실행만 취소한다. group에
@@ -27,8 +28,28 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # 분류 정책의 단일 출처는 tools/ci/changed-areas.sh다(ci.yml의 같은 job과 동일한 계약).
+  # schedule/workflow_dispatch/push에서는 base/head가 비어 전 영역 실행으로 떨어진다.
+  changes:
+    name: changed areas
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.areas.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: areas
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: sh tools/ci/changed-areas.sh "$BASE" "$HEAD" >> "$GITHUB_OUTPUT"
+
   core-performance-budget:
     name: core performance budget
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

@@ -237,6 +237,10 @@ run = "python3 tools/svg_to_coverage.py --check"
 description = "Check config docs against the real loader keys"
 run = "zig build check-config-docs"
 
+[tasks."ci:changed-areas-check"]
+description = "Verify the CI changed-area classifier (which jobs a diff must run)"
+run = "sh tools/ci/changed-areas.test.sh"
+
 [tasks.check]
 description = "Check format, tests, boundaries, config docs, and build"
 depends = ["fmt-check", "test", "e2e", "oracle", "stress", "check-boundaries", "check-config-docs", "build"]

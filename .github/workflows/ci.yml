@@ -14,10 +14,51 @@ permissions:
   contents: read
 
 jobs:
+  # 변경 영역 판정. 문서만 고친 PR에서 macOS 러너 4대와 외부 오라클까지 도는 것은 순수한 낭비다.
+  # 분류 정책의 단일 출처는 tools/ci/changed-areas.sh이고, 아래 job들은 그 플래그만 소비한다.
+  #
+  # workflow-level `paths` 필터가 아니라 job-level `if`인 이유: required 워크플로에 `paths`를 두면
+  # 무관한 PR에서 트리거 자체가 안 돼 required 컨텍스트가 영원히 pending으로 머지를 막는다. 반면
+  # 조건으로 건너뛴 job은 conclusion=skipped로 보고되고 branch protection은 이를 통과로 취급한다.
+  # 필수 체크 목록의 단일 출처는 docs/performance-budget.md "필수 CI 체크"다.
+  #
+  # 이 job은 required 컨텍스트가 아니다. 실패하면 소비 job들이 `needs.changes.result != 'success'`
+  # 로 fail-safe 실행되므로, 판정이 없을 때 게이트가 조용히 열리지 않는다.
+  changes:
+    name: changed areas
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.areas.outputs.code }}
+      web: ${{ steps.areas.outputs.web }}
+      docs: ${{ steps.areas.outputs.docs }}
+    steps:
+      # three-dot diff에 merge-base가 필요해 전체 히스토리를 받는다(얕은 클론은 base.sha가 없다).
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # 분류가 틀리면 게이트가 조용히 열린다. 판정을 쓰기 전에 분류기 자신을 먼저 검증한다
+      # (순수 sh라 수 초). web.yml·performance.yml은 같은 스크립트를 쓰므로 여기서 한 번만 돈다.
+      - run: sh tools/ci/changed-areas.test.sh
+      - id: areas
+        # push(main)에서는 두 값이 비어 전 영역 실행으로 떨어진다 — main은 항상 전부 검증한다.
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: sh tools/ci/changed-areas.sh "$BASE" "$HEAD" >> "$GITHUB_OUTPUT"
+
   # 기본 게이트: fmt-check, unit, e2e, recorded oracle, stress, facade import 경계와 build를
   # 한 번에 검증한다. SVG hash/C·Zig registry는 외부 도구 없이 Zig test가 검증한다.
+  #
+  # 이 job만 조건부 skip이 아니라 **항상 실행**하고 안에서 범위를 줄인다. check-config-docs가
+  # docs/*.md를 런타임에 훑는 게이트라(tests/config_docs/keys.zig) 문서만 바뀐 PR에서도 실행돼야
+  # 한다 — 문서가 없는 config 키를 설정처럼 소개하는 드리프트는 이 검사만 잡는다. web만 바뀐 PR은
+  # 검사할 것이 없어 즉시 통과한다(Zig 툴체인조차 세우지 않는다).
   check:
     name: check
+    needs: changes
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -27,7 +68,21 @@ jobs:
         with:
           version: 2026.2.7
           sha256: d23400ea220cfcbcd04856cf224dc6bc1a5e2a16e6c7365a433b7737c0774c23 # linux-x64 binary
-      - run: mise run check
+      - name: Run the checks the change needs
+        env:
+          CODE: ${{ needs.changes.outputs.code }}
+          DOCS: ${{ needs.changes.outputs.docs }}
+          CHANGES_RESULT: ${{ needs.changes.result }}
+        run: |
+          set -eu
+          if [ "$CHANGES_RESULT" != "success" ] || [ "$CODE" = "true" ]; then
+            mise run check
+          elif [ "$DOCS" = "true" ]; then
+            echo "문서 전용 변경 — Zig 게이트 대신 config 문서 드리프트만 검사한다"
+            mise run check-config-docs
+          else
+            echo "이 job이 소유한 게이트를 건드리지 않은 변경(web 전용 등) — 실행할 검사가 없다"
+          fi
       - name: Upload check artifacts
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -42,6 +97,8 @@ jobs:
   # session-host 스위트는 컴파일이 압도적으로 무거워(아래 session-host-macos) 별도 job이 병렬로 소유한다.
   file-explorer-macos:
     name: file explorer macOS product path
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
     runs-on: macos-15
     timeout-minutes: 15
     steps:
@@ -72,6 +129,8 @@ jobs:
   # 의존인지 한 번에 가려낸다. 직렬 구성에서는 Debug가 실패하면 ReleaseFast를 아예 실행하지 못했다.
   session-host-macos:
     name: session host macOS (${{ matrix.optimize }})
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
     runs-on: macos-15
     timeout-minutes: 20
     strategy:
@@ -91,8 +150,13 @@ jobs:
 
   # Mermaid 제품 pump는 macOS helper/WKWebView와 native tick adapter가 모두 필요하다.
   # 1,000 tick artifact가 process/pipe/wait 0과 completion drain 상한을 어기면 merge하지 않는다.
+  #
+  # web/**도 트리거다 — 이 job은 `web/dist/mermaid-helper.js`를 빌드해 소비하므로 web 변경이
+  # 제품 pump를 깨뜨릴 수 있다(build.zig의 mermaid digest/helper 복사 경로).
   mermaid-macos:
     name: mermaid macOS product path
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true' || needs.changes.outputs.web == 'true') }}
     runs-on: macos-15
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -119,10 +183,12 @@ jobs:
   # 실제 forkpty/3-client backpressure와 현재 RSS를 구조화 artifact로 판정한다.
   session-host-slow-observer-macos:
     name: session host slow observer macOS
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
     runs-on: macos-15
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5c # v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
@@ -146,6 +212,8 @@ jobs:
   # 기본 CI에서 제외한다(로컬에서 `mise run oracle-ghostty`).
   oracles:
     name: external oracles (libvterm, Alacritty)
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4

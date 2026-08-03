@@ -8,7 +8,7 @@
 
 - 기본 `mise run check`에는 성능 측정을 넣지 않는다. 하드웨어와 시스템 부하에 따라 결과가 흔들릴 수 있기 때문이다.
 - `mise run perf`는 로컬 opt-in 명령이다. 큰 구조 변경 전후에 실행한다.
-- GitHub `Performance` workflow는 모든 PR, `main` push, 수동 실행, 주간 schedule에서 돌고 **PR required check로 쓴다**. reflow perf 회귀가 PR 체크에 없어 main에 들어간 일이 있어 PR 게이트로 승격했다(`.github/workflows/performance.yml` 주석 참조). GitHub hosted runner의 부하가 숫자를 흔드는 문제는 예산에 여유를 둬(다른 벤치와 같은 2s급 상한) 흡수하고, 구조 회귀(2배+)만 잡는다.
+- GitHub `Performance` workflow는 코드가 바뀐 PR([변경 영역별 실행](#변경-영역별-실행job-level-게이트)의 `code` 축), `main` push, 수동 실행, 주간 schedule에서 돌고 **PR required check로 쓴다**. reflow perf 회귀가 PR 체크에 없어 main에 들어간 일이 있어 PR 게이트로 승격했다(`.github/workflows/performance.yml` 주석 참조). GitHub hosted runner의 부하가 숫자를 흔드는 문제는 예산에 여유를 둬(다른 벤치와 같은 2s급 상한) 흡수하고, 구조 회귀(2배+)만 잡는다.
 - 초기에 걸어두는 숫자는 보수적인 guardrail이다. 정확한 목표치는 macOS app, PTY, renderer가 붙은 뒤 다시 조정한다.
 - 성능 실패는 숫자만 보고 고치지 않는다. 어떤 책임 경계가 느린지 trace/snapshot/artifact로 확인한 뒤 루트커즈를 고친다.
 
@@ -44,17 +44,33 @@ PR 경로의 성능 workflow 실패는 머지를 막는다. 예산은 runner 변
 
 | required 컨텍스트 | 생성 워크플로 · job | 실행 조건 |
 | --- | --- | --- |
-| `check` | ci.yml `check` | 매 PR(ubuntu). fmt-check·unit·e2e·oracle·stress·boundary·build. |
+| `check` | ci.yml `check` | 매 PR(ubuntu). **항상 실행**하되 범위를 좁힌다 — `code`면 fmt-check·unit·e2e·oracle·stress·boundary·build, 문서 전용이면 `check-config-docs`만, web 전용이면 검사 없음. |
 | `require label and assignee=ohah` | pr-metadata.yml `require-label-and-assignee` | 매 PR. 라벨 1개 이상 + assignee=ohah. |
-| `core performance budget` | performance.yml `core-performance-budget` | 매 PR(paths 필터 없음). core perf guardrail. |
-| `file explorer macOS product path` | ci.yml `file-explorer-macos` | 매 PR(macos-15). 16,384-row/1,000-event 탐색기 artifact. |
-| `mermaid macOS product path` | ci.yml `mermaid-macos` | 매 PR(macos-15). Mermaid 제품 1,000 tick·helper smoke artifact. |
-| `session host macOS (Debug)` | ci.yml `session-host-macos` (matrix `optimize`) | 매 PR(macos-15). `zig build test-session-host` — codec/state machine·live-upgrade fixture를 safety check가 켜진 채 검증. |
-| `session host macOS (ReleaseFast)` | ci.yml `session-host-macos` (matrix `optimize`) | 매 PR(macos-15). 같은 스위트의 no-fail 경로. Debug와 독립 컴파일이라 별도 컨텍스트다. |
-| `session host slow observer macOS` | ci.yml `session-host-slow-observer-macos` | 매 PR(macos-15). 독립 ReleaseFast host의 실제 forkpty/3-client isolation과 host-PID RSS artifact. |
-| `web build and security fixtures` | web.yml `check` | 매 PR(paths 필터 없음). web build·보안 fixture. |
+| `core performance budget` | performance.yml `core-performance-budget` | `code` 변경 PR(+main push·수동·주간). core perf guardrail. |
+| `file explorer macOS product path` | ci.yml `file-explorer-macos` | `code` 변경 PR(macos-15). 16,384-row/1,000-event 탐색기 artifact. |
+| `mermaid macOS product path` | ci.yml `mermaid-macos` | `code` 또는 `web` 변경 PR(macos-15). Mermaid 제품 1,000 tick·helper smoke artifact. `web/dist/mermaid-helper.js`를 빌드해 소비하므로 web 축도 트리거다. |
+| `session host macOS (Debug)` | ci.yml `session-host-macos` (matrix `optimize`) | `code` 변경 PR(macos-15). `zig build test-session-host` — codec/state machine·live-upgrade fixture를 safety check가 켜진 채 검증. |
+| `session host macOS (ReleaseFast)` | ci.yml `session-host-macos` (matrix `optimize`) | `code` 변경 PR(macos-15). 같은 스위트의 no-fail 경로. Debug와 독립 컴파일이라 별도 컨텍스트다. |
+| `session host slow observer macOS` | ci.yml `session-host-slow-observer-macos` | `code` 변경 PR(macos-15). 독립 ReleaseFast host의 실제 forkpty/3-client isolation과 host-PID RSS artifact. |
+| `web build and security fixtures` | web.yml `check` | `web` 변경 PR. web build·보안 fixture. |
 
-path-filter가 있는 워크플로를 required로 두면 무관한 PR에서 skip돼 required 컨텍스트가 영원히 pending으로 머지를 막는다. 그래서 required로 쓰는 워크플로는 `pull_request`에 paths 필터를 두지 않고 모든 PR에서 돈다(performance.yml·web.yml). ci.yml의 macOS job은 원래 paths 필터가 없어 매 PR 실행되므로 그대로 required로 등록한다. 이 목록을 바꿀 때는 `gh api repos/<owner>/<repo>/branches/main/protection/required_status_checks`의 `contexts`도 함께 갱신한다.
+### 변경 영역별 실행(job-level 게이트)
+
+문서 한 줄을 고친 PR에 macOS 러너 4대와 외부 오라클을 태우지 않는다. 어떤 축을 실행할지는 **`tools/ci/changed-areas.sh`가 단일 출처**이고, 워크플로는 그 결과(`code`·`web`·`docs`)만 소비한다. 축은 서로 독립이다 — Zig만 바꾸면 `web:check`를 돌리지 않고, web만 바꾸면 Zig 게이트를 돌리지 않는다.
+
+| 변경 경로 | `code` | `web` | `docs` |
+| --- | --- | --- | --- |
+| `docs/**`, `*.md`, `LICENSE`, `.claude/**` | | | ✓ |
+| `src/**`, `tests/**`, `tools/**`, `terminfo/**`, `assets/**`, `build.zig`, `build.zig.zon` | ✓ | | |
+| `web/**` | | ✓ | |
+| `.mise.toml`, `.github/**`, `tools/ci/**` | ✓ | ✓ | |
+| 그 밖의 모든 경로(미분류) | ✓ | ✓ | |
+
+**workflow-level `paths` 필터는 여전히 쓰지 않는다.** required 워크플로에 `paths`를 두면 무관한 PR에서 워크플로 자체가 트리거되지 않아 required 컨텍스트가 영원히 pending으로 머지를 막는다. 반면 job-level `if:`로 건너뛴 job은 GitHub이 `conclusion=skipped`로 **보고**하고 branch protection은 이를 통과로 취급한다. 그래서 `pull_request` 트리거는 모든 PR에 열어 두고 job 단위로 거른다.
+
+판정이 없을 때 게이트가 조용히 열리면 안 되므로 모든 경로를 fail-safe로 잡는다. 분류기는 base/head가 없거나(push·schedule·수동) diff가 실패하면 전 영역 실행을 내보내고, 어느 패턴에도 안 걸린 새 경로도 전 영역으로 본다. 소비 job은 `needs.changes.result != 'success'`를 조건에 함께 넣어, `changes` job이 실패·오류로 끝나도 skip이 아니라 실행된다. `changes` 자체는 required 컨텍스트가 아니다. 분류기의 동작은 `mise run ci:changed-areas-check`(=`tools/ci/changed-areas.test.sh`)가 실제 git diff로 고정하며 매 PR의 `changes` job이 판정 전에 이 테스트를 먼저 돌린다.
+
+이 목록을 바꿀 때는 `gh api repos/<owner>/<repo>/branches/main/protection/required_status_checks`의 `contexts`도 함께 갱신한다.
 
 **matrix job은 조합마다 별개 컨텍스트다.** `session-host-macos`처럼 matrix로 병렬화한 job은 `session host macOS (Debug)`·`session host macOS (ReleaseFast)`가 각각 독립 required 컨텍스트로 보고되므로 **전부** 등록해야 한다. 하나만 등록하면 나머지 조합은 실패해도 머지를 막지 못한다. 반대로 job을 쪼개면서 required 등록을 빠뜨리면, 쪼개기 전에는 상위 job의 실패로 잡히던 게이트가 조용히 advisory로 강등된다.
 

@@ -86,6 +86,193 @@ test "CR3a-2c2b3a joined import oracle excludes only top-level test bodies" {
     ));
 }
 
+test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct {
+        path: []const u8,
+        baseline_count: usize,
+        baseline_digest: [32]u8,
+        containers: []const []const u8,
+        optional_containers: []const []const u8,
+        allowed: []const DeclarationTuple,
+    }{
+        .{
+            .path = "src/platform/macos/session_host/client.zig",
+            .baseline_count = 527,
+            .baseline_digest = .{ 0x59, 0x41, 0x78, 0xe6, 0xc6, 0x53, 0xe3, 0x0b, 0xe0, 0xdd, 0xc6, 0x45, 0x64, 0xd2, 0x78, 0x39, 0x22, 0xe0, 0xc0, 0xb4, 0x89, 0x5c, 0x35, 0x43, 0x47, 0x9f, 0x86, 0xe5, 0x97, 0x7d, 0xb6, 0xfd },
+            .containers = &.{ "Client", "EndedPurgeScratch", "PreparedEndedPurgeInventory" },
+            .optional_containers = &.{"PreparedEndedPurgeCommit"},
+            .allowed = &.{
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "ended_purge_transaction" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "PreparedEndedPurgeCommit" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "EndedPurgeCommitError" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "EndedPurgeClientCommitOutcome" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "prepareEndedPurgeCommit" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "commitEndedPurgePrepared" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "tombstoneEndedPurgeOwnedGraph" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "publishEndedPurgeNoFreePoison" },
+                .{ .parent = "EndedPurgeScratch", .kind = "const", .visibility = "private", .modifier = "", .name = "PendingOutboundDescriptor" },
+                .{ .parent = "EndedPurgeScratch", .kind = "field", .visibility = "private", .modifier = "", .name = "build_id" },
+                .{ .parent = "EndedPurgeScratch", .kind = "field", .visibility = "private", .modifier = "", .name = "lifecycle" },
+                .{ .parent = "EndedPurgeScratch", .kind = "field", .visibility = "private", .modifier = "", .name = "pending_outbound" },
+                .{ .parent = "PreparedEndedPurgeInventory", .kind = "field", .visibility = "private", .modifier = "", .name = "quarantine_bytes" },
+                .{ .parent = "PreparedEndedPurgeInventory", .kind = "field", .visibility = "private", .modifier = "", .name = "demux_owned_extent_bytes" },
+                .{ .parent = "PreparedEndedPurgeCommit", .kind = "const", .visibility = "private", .modifier = "", .name = "Lifecycle" },
+                .{ .parent = "PreparedEndedPurgeCommit", .kind = "field", .visibility = "private", .modifier = "", .name = "self_addr" },
+                .{ .parent = "PreparedEndedPurgeCommit", .kind = "field", .visibility = "private", .modifier = "", .name = "client_addr" },
+                .{ .parent = "PreparedEndedPurgeCommit", .kind = "field", .visibility = "private", .modifier = "", .name = "scratch_addr" },
+                .{ .parent = "PreparedEndedPurgeCommit", .kind = "field", .visibility = "private", .modifier = "", .name = "inventory_addr" },
+                .{ .parent = "PreparedEndedPurgeCommit", .kind = "field", .visibility = "private", .modifier = "", .name = "target_stream" },
+                .{ .parent = "PreparedEndedPurgeCommit", .kind = "field", .visibility = "private", .modifier = "", .name = "captured_fd" },
+                .{ .parent = "PreparedEndedPurgeCommit", .kind = "field", .visibility = "private", .modifier = "", .name = "complete_owned_extent_bytes" },
+                .{ .parent = "PreparedEndedPurgeCommit", .kind = "field", .visibility = "private", .modifier = "", .name = "complete_owner_seal" },
+                .{ .parent = "PreparedEndedPurgeCommit", .kind = "field", .visibility = "private", .modifier = "", .name = "pre_callback_survivor_seal" },
+                .{ .parent = "PreparedEndedPurgeCommit", .kind = "field", .visibility = "private", .modifier = "", .name = "batch_plan" },
+                .{ .parent = "PreparedEndedPurgeCommit", .kind = "field", .visibility = "private", .modifier = "", .name = "stream_plan" },
+                .{ .parent = "PreparedEndedPurgeCommit", .kind = "field", .visibility = "private", .modifier = "", .name = "event_plan" },
+                .{ .parent = "PreparedEndedPurgeCommit", .kind = "field", .visibility = "private", .modifier = "", .name = "partial_plan" },
+                .{ .parent = "PreparedEndedPurgeCommit", .kind = "field", .visibility = "private", .modifier = "", .name = "batch_cleanup_ordinal" },
+                .{ .parent = "PreparedEndedPurgeCommit", .kind = "field", .visibility = "private", .modifier = "", .name = "stream_cleanup_ordinal" },
+                .{ .parent = "PreparedEndedPurgeCommit", .kind = "field", .visibility = "private", .modifier = "", .name = "event_cleanup_ordinal" },
+                .{ .parent = "PreparedEndedPurgeCommit", .kind = "field", .visibility = "private", .modifier = "", .name = "partial_cleanup_ordinal" },
+                .{ .parent = "PreparedEndedPurgeCommit", .kind = "field", .visibility = "private", .modifier = "", .name = "lifecycle" },
+            },
+        },
+        .{
+            .path = "src/platform/macos/session_host/client_slot.zig",
+            .baseline_count = 126,
+            .baseline_digest = .{ 0x03, 0xa9, 0x2a, 0x14, 0x6d, 0xbf, 0x89, 0x35, 0x46, 0x6d, 0x0b, 0x92, 0x50, 0xb0, 0x9c, 0x88, 0x4d, 0x57, 0x5f, 0x15, 0xfc, 0x14, 0x8f, 0x73, 0xc6, 0xdb, 0x89, 0x79, 0xbc, 0x69, 0xd9, 0x68 },
+            .containers = &.{ "ClientSlot", "EndedPurgePreparation" },
+            .optional_containers = &.{},
+            .allowed = &.{
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "ended_purge_quarantine" },
+                .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "", .name = "ended_purge_quarantine_registry" },
+                .{ .parent = "ClientSlot", .kind = "const", .visibility = "pub", .modifier = "", .name = "EndedPurgeCommitError" },
+                .{ .parent = "ClientSlot", .kind = "const", .visibility = "pub", .modifier = "", .name = "EndedPurgeResult" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "commitEndedPurge" },
+                .{ .parent = "EndedPurgePreparation", .kind = "fn", .visibility = "pub", .modifier = "", .name = "tombstoneForCommit" },
+            },
+        },
+    };
+    for (cases) |case| {
+        const source = try readZigFileZ(allocator, case.path);
+        defer allocator.free(source);
+        const inventory = try declarationInventory(
+            allocator,
+            source,
+            case.containers,
+            case.optional_containers,
+            case.allowed,
+        );
+        try std.testing.expect(inventory.total_count >= case.baseline_count);
+        try std.testing.expect(inventory.total_count <= case.baseline_count + case.allowed.len);
+        try std.testing.expectEqual(case.baseline_count, inventory.baseline_count);
+        try std.testing.expectEqual(case.baseline_digest, inventory.baseline_digest);
+        for (case.allowed) |allowed|
+            try std.testing.expect((try inventoryCount(
+                allocator,
+                source,
+                allowed,
+            )) <= 1);
+    }
+    const client = try readZigFileZ(allocator, cases[0].path);
+    defer allocator.free(client);
+    const client_slot = try readZigFileZ(allocator, cases[1].path);
+    defer allocator.free(client_slot);
+    try expectAbsentOrExactImport(
+        allocator,
+        client,
+        "ended_purge_transaction",
+        "@import(\"ended_purge_transaction.zig\")",
+    );
+    try expectAbsentOrExactImport(
+        allocator,
+        client_slot,
+        "ended_purge_quarantine",
+        "@import(\"ended_purge_quarantine.zig\")",
+    );
+    try expectRootContainerFieldsWithOptional(
+        allocator,
+        client,
+        "ClientOwnership",
+        &.{ "standalone", "external_pump", "moved" },
+        "quarantined_no_free",
+    );
+    try expectRootContainerFieldsWithOptional(
+        allocator,
+        client_slot,
+        "EndedPurgePreparationLifecycle",
+        &.{ "empty", "prepared", "aborted" },
+        "consumed",
+    );
+    try expectOptionalPreparedEndedPurgeCommitSchema(allocator, client);
+    try expectEndedPurgeInventorySubtotalMigration(allocator, client);
+    try expectOptionalEndedPurgeScratchDelta(allocator, client);
+    try expectRootEnumAbsentOrExact(
+        allocator,
+        client,
+        "EndedPurgeCommitError",
+        &.{ "InvalidOwner", "InvalidState", "Corrupt", "ArithmeticOverflow", "DestinationOccupied" },
+    );
+    try expectRootEnumAbsentOrExact(
+        allocator,
+        client,
+        "EndedPurgeClientCommitOutcome",
+        &.{ "clean", "drift" },
+    );
+    try expectNestedEnumAbsentOrExact(
+        allocator,
+        client_slot,
+        "ClientSlot",
+        "EndedPurgeCommitError",
+        &.{ "InvalidOwner", "InvalidState", "Busy", "Corrupt", "ArithmeticOverflow", "DestinationOccupied", "QuarantineUnavailable" },
+    );
+    try expectNestedEnumAbsentOrExact(
+        allocator,
+        client_slot,
+        "ClientSlot",
+        "EndedPurgeResult",
+        &.{"purged"},
+    );
+}
+
+test "CR3a-2c2b3b quarantine leaf is absent or exposes only the frozen public API" {
+    const allocator = std.testing.allocator;
+    const source = (try readOptionalZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/ended_purge_quarantine.zig",
+    )) orelse return;
+    defer allocator.free(source);
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(source, "@import("));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(source, "@import(\"std\")"));
+    const expected = [_]DeclarationTuple{
+        .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "max_ended_purge_quarantine_bytes" },
+        .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "Error" },
+        .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "Reservation" },
+        .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "Registry" },
+    };
+    try expectPublicRootDeclarationsExact(allocator, source, &expected);
+    const forbidden = [_][]const u8{
+        "client.zig",
+        "client_slot.zig",
+        "std.mem.Allocator",
+        "*anyopaque",
+        "@ptrFromInt",
+        "callback",
+        "payload",
+    };
+    for (forbidden) |needle|
+        try std.testing.expectEqual(@as(usize, 0), countOccurrences(source, needle));
+    try expectEndedPurgeQuarantineSchema(allocator, source);
+    try expectRootConstTypeAndInitializer(
+        allocator,
+        source,
+        "max_ended_purge_quarantine_bytes",
+        "usize",
+        "64 * 1024 * 1024",
+    );
+}
+
 test "CR3a-2a generation attachment contract remains a neutral authority leaf" {
     const allocator = std.testing.allocator;
     const source = try readZigFileZ(
@@ -5036,6 +5223,553 @@ fn joinedStringLiteralsContainOutsideTopLevelTests(
     }
 }
 
+const DeclarationTuple = struct {
+    parent: []const u8,
+    kind: []const u8,
+    visibility: []const u8,
+    modifier: []const u8,
+    name: []const u8,
+};
+
+const DeclarationInventory = struct {
+    total_count: usize,
+    baseline_count: usize,
+    baseline_digest: [32]u8,
+};
+
+fn declarationInventory(
+    allocator: std.mem.Allocator,
+    source: [:0]const u8,
+    containers: []const []const u8,
+    optional_containers: []const []const u8,
+    allowed: []const DeclarationTuple,
+) !DeclarationInventory {
+    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    defer tree.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), tree.errors.len);
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    var result: DeclarationInventory = .{
+        .total_count = 0,
+        .baseline_count = 0,
+        .baseline_digest = undefined,
+    };
+    try hashDeclarationNodes(&tree, "root", tree.rootDecls(), allowed, &hasher, &result);
+    for (containers) |container_name| {
+        const members = findRootContainerMembers(&tree, container_name) orelse
+            return error.TestUnexpectedResult;
+        try hashDeclarationNodes(
+            &tree,
+            container_name,
+            members,
+            allowed,
+            &hasher,
+            &result,
+        );
+    }
+    for (optional_containers) |container_name| {
+        const members = findRootContainerMembers(&tree, container_name) orelse continue;
+        try hashDeclarationNodes(
+            &tree,
+            container_name,
+            members,
+            allowed,
+            &hasher,
+            &result,
+        );
+    }
+    hasher.final(&result.baseline_digest);
+    return result;
+}
+
+fn hashDeclarationNodes(
+    tree: *const std.zig.Ast,
+    parent: []const u8,
+    nodes: []const std.zig.Ast.Node.Index,
+    allowed: []const DeclarationTuple,
+    hasher: *std.crypto.hash.sha2.Sha256,
+    result: *DeclarationInventory,
+) !void {
+    for (nodes) |node| {
+        if (tree.nodeTag(node) == .test_decl) continue;
+        const tuple = declarationTuple(tree, parent, node);
+        result.total_count += 1;
+        var is_allowed = false;
+        for (allowed) |candidate| {
+            if (declarationTupleEql(tuple, candidate)) {
+                is_allowed = true;
+                break;
+            }
+        }
+        if (is_allowed) continue;
+        result.baseline_count += 1;
+        inline for (.{ tuple.parent, tuple.kind, tuple.visibility, tuple.modifier, tuple.name }) |part| {
+            hasher.update(part);
+            hasher.update(&.{0});
+        }
+    }
+}
+
+fn declarationTuple(
+    tree: *const std.zig.Ast,
+    parent: []const u8,
+    node: std.zig.Ast.Node.Index,
+) DeclarationTuple {
+    if (tree.fullVarDecl(node)) |decl| {
+        const modifier_token = decl.extern_export_token orelse
+            decl.threadlocal_token orelse decl.comptime_token;
+        return .{
+            .parent = parent,
+            .kind = tree.tokenSlice(decl.ast.mut_token),
+            .visibility = if (decl.visib_token != null) "pub" else "private",
+            .modifier = if (modifier_token) |token| tree.tokenSlice(token) else "",
+            .name = tree.tokenSlice(decl.ast.mut_token + 1),
+        };
+    }
+    var fn_buffer: [1]std.zig.Ast.Node.Index = undefined;
+    if (tree.fullFnProto(&fn_buffer, node)) |decl| {
+        const name_token = decl.name_token orelse tree.nodeMainToken(node);
+        return .{
+            .parent = parent,
+            .kind = "fn",
+            .visibility = if (decl.visib_token != null) "pub" else "private",
+            .modifier = if (decl.extern_export_inline_token) |token|
+                tree.tokenSlice(token)
+            else
+                "",
+            .name = tree.tokenSlice(name_token),
+        };
+    }
+    if (tree.fullContainerField(node)) |_| {
+        return .{
+            .parent = parent,
+            .kind = "field",
+            .visibility = "private",
+            .modifier = "",
+            .name = tree.tokenSlice(tree.nodeMainToken(node)),
+        };
+    }
+    return .{
+        .parent = parent,
+        .kind = "node",
+        .visibility = "private",
+        .modifier = "",
+        .name = @tagName(tree.nodeTag(node)),
+    };
+}
+
+fn declarationTupleEql(a: DeclarationTuple, b: DeclarationTuple) bool {
+    return std.mem.eql(u8, a.parent, b.parent) and
+        std.mem.eql(u8, a.kind, b.kind) and
+        std.mem.eql(u8, a.visibility, b.visibility) and
+        std.mem.eql(u8, a.modifier, b.modifier) and
+        std.mem.eql(u8, a.name, b.name);
+}
+
+fn findRootContainerMembers(
+    tree: *const std.zig.Ast,
+    wanted: []const u8,
+) ?[]const std.zig.Ast.Node.Index {
+    for (tree.rootDecls()) |node| {
+        const variable = tree.fullVarDecl(node) orelse continue;
+        if (!std.mem.eql(u8, tree.tokenSlice(variable.ast.mut_token + 1), wanted)) continue;
+        const init = variable.ast.init_node.unwrap() orelse return null;
+        var buffer: [2]std.zig.Ast.Node.Index = undefined;
+        const container = tree.fullContainerDecl(&buffer, init) orelse return null;
+        return container.ast.members;
+    }
+    return null;
+}
+
+fn inventoryCount(
+    allocator: std.mem.Allocator,
+    source: [:0]const u8,
+    wanted: DeclarationTuple,
+) !usize {
+    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    defer tree.deinit(allocator);
+    var count: usize = 0;
+    const nodes = if (std.mem.eql(u8, wanted.parent, "root"))
+        tree.rootDecls()
+    else
+        findRootContainerMembers(&tree, wanted.parent) orelse return 0;
+    for (nodes) |node| {
+        if (tree.nodeTag(node) == .test_decl) continue;
+        count += @intFromBool(declarationTupleEql(
+            declarationTuple(&tree, wanted.parent, node),
+            wanted,
+        ));
+    }
+    return count;
+}
+
+fn expectAbsentOrExactImport(
+    allocator: std.mem.Allocator,
+    source: [:0]const u8,
+    identifier: []const u8,
+    exact_initializer: []const u8,
+) !void {
+    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    defer tree.deinit(allocator);
+    var matches: usize = 0;
+    for (tree.rootDecls()) |node| {
+        if (tree.nodeTag(node) == .test_decl) continue;
+        const variable = tree.fullVarDecl(node) orelse continue;
+        if (!std.mem.eql(u8, tree.tokenSlice(variable.ast.mut_token + 1), identifier)) continue;
+        matches += 1;
+        const init = variable.ast.init_node.unwrap() orelse return error.TestUnexpectedResult;
+        const first = tree.tokenStart(tree.firstToken(init));
+        const last_token = tree.lastToken(init);
+        const last = tree.tokenStart(last_token) + tree.tokenSlice(last_token).len;
+        try std.testing.expectEqualStrings(exact_initializer, source[first..last]);
+    }
+    try std.testing.expect(matches <= 1);
+}
+
+fn expectPublicRootDeclarationsExact(
+    allocator: std.mem.Allocator,
+    source: [:0]const u8,
+    expected: []const DeclarationTuple,
+) !void {
+    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    defer tree.deinit(allocator);
+    var found: usize = 0;
+    for (tree.rootDecls()) |node| {
+        if (tree.nodeTag(node) == .test_decl) continue;
+        const tuple = declarationTuple(&tree, "root", node);
+        if (!std.mem.eql(u8, tuple.visibility, "pub")) continue;
+        var matched = false;
+        for (expected) |candidate| matched = matched or declarationTupleEql(tuple, candidate);
+        try std.testing.expect(matched);
+        found += 1;
+    }
+    try std.testing.expectEqual(expected.len, found);
+}
+
+fn expectRootContainerFieldsWithOptional(
+    allocator: std.mem.Allocator,
+    source: [:0]const u8,
+    container_name: []const u8,
+    baseline: []const []const u8,
+    optional_last: []const u8,
+) !void {
+    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    defer tree.deinit(allocator);
+    const members = findRootContainerMembers(&tree, container_name) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(members.len == baseline.len or members.len == baseline.len + 1);
+    for (baseline, 0..) |name, index| {
+        const tuple = declarationTuple(&tree, container_name, members[index]);
+        try std.testing.expectEqualStrings("field", tuple.kind);
+        try std.testing.expectEqualStrings(name, tuple.name);
+    }
+    if (members.len == baseline.len + 1) {
+        const tuple = declarationTuple(&tree, container_name, members[baseline.len]);
+        try std.testing.expectEqualStrings("field", tuple.kind);
+        try std.testing.expectEqualStrings(optional_last, tuple.name);
+    }
+}
+
+fn expectOptionalPreparedEndedPurgeCommitSchema(
+    allocator: std.mem.Allocator,
+    source: [:0]const u8,
+) !void {
+    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    defer tree.deinit(allocator);
+    const members = findRootContainerMembers(&tree, "PreparedEndedPurgeCommit") orelse return;
+    const fields = [_]struct { name: []const u8, type_name: []const u8 }{
+        .{ .name = "self_addr", .type_name = "usize" },
+        .{ .name = "client_addr", .type_name = "usize" },
+        .{ .name = "scratch_addr", .type_name = "usize" },
+        .{ .name = "inventory_addr", .type_name = "usize" },
+        .{ .name = "target_stream", .type_name = "u64" },
+        .{ .name = "captured_fd", .type_name = "c.fd_t" },
+        .{ .name = "complete_owned_extent_bytes", .type_name = "usize" },
+        .{ .name = "complete_owner_seal", .type_name = "owner_seal.Digest" },
+        .{ .name = "pre_callback_survivor_seal", .type_name = "owner_seal.Digest" },
+        .{ .name = "batch_plan", .type_name = "ended_purge_transaction.QueuePlan" },
+        .{ .name = "stream_plan", .type_name = "ended_purge_transaction.QueuePlan" },
+        .{ .name = "event_plan", .type_name = "ended_purge_transaction.QueuePlan" },
+        .{ .name = "partial_plan", .type_name = "ended_purge_transaction.QueuePlan" },
+        .{ .name = "batch_cleanup_ordinal", .type_name = "usize" },
+        .{ .name = "stream_cleanup_ordinal", .type_name = "usize" },
+        .{ .name = "event_cleanup_ordinal", .type_name = "usize" },
+        .{ .name = "partial_cleanup_ordinal", .type_name = "usize" },
+        .{ .name = "lifecycle", .type_name = "Lifecycle" },
+    };
+    try std.testing.expectEqual(fields.len + 1, members.len);
+    const lifecycle_decl = tree.fullVarDecl(members[0]) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("Lifecycle", tree.tokenSlice(lifecycle_decl.ast.mut_token + 1));
+    const lifecycle_init = lifecycle_decl.ast.init_node.unwrap() orelse return error.TestUnexpectedResult;
+    var lifecycle_buffer: [2]std.zig.Ast.Node.Index = undefined;
+    const lifecycle = tree.fullContainerDecl(&lifecycle_buffer, lifecycle_init) orelse
+        return error.TestUnexpectedResult;
+    try expectFieldNames(&tree, lifecycle.ast.members, &.{ "pristine", "prepared", "consumed" });
+    for (fields, 0..) |expected, index| {
+        const field = tree.fullContainerField(members[index + 1]) orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expectEqualStrings(expected.name, tree.tokenSlice(field.ast.main_token));
+        const type_node = field.ast.type_expr.unwrap() orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqualStrings(expected.type_name, nodeSource(&tree, source, type_node));
+    }
+}
+
+fn expectEndedPurgeInventorySubtotalMigration(
+    allocator: std.mem.Allocator,
+    source: [:0]const u8,
+) !void {
+    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    defer tree.deinit(allocator);
+    const members = findRootContainerMembers(&tree, "PreparedEndedPurgeInventory") orelse
+        return error.TestUnexpectedResult;
+    var old_count: usize = 0;
+    var new_count: usize = 0;
+    for (members) |member| {
+        const tuple = declarationTuple(&tree, "PreparedEndedPurgeInventory", member);
+        old_count += @intFromBool(std.mem.eql(u8, tuple.name, "quarantine_bytes"));
+        new_count += @intFromBool(std.mem.eql(u8, tuple.name, "demux_owned_extent_bytes"));
+        try std.testing.expect(!std.mem.eql(u8, tuple.name, "complete_owned_extent_bytes"));
+    }
+    try std.testing.expectEqual(@as(usize, 1), old_count + new_count);
+}
+
+fn expectRootEnumAbsentOrExact(
+    allocator: std.mem.Allocator,
+    source: [:0]const u8,
+    name: []const u8,
+    fields: []const []const u8,
+) !void {
+    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    defer tree.deinit(allocator);
+    const members = findRootContainerMembers(&tree, name) orelse return;
+    try expectFieldNames(&tree, members, fields);
+}
+
+fn expectNestedEnumAbsentOrExact(
+    allocator: std.mem.Allocator,
+    source: [:0]const u8,
+    parent_name: []const u8,
+    name: []const u8,
+    fields: []const []const u8,
+) !void {
+    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    defer tree.deinit(allocator);
+    const parent = findRootContainerMembers(&tree, parent_name) orelse
+        return error.TestUnexpectedResult;
+    for (parent) |member| {
+        const variable = tree.fullVarDecl(member) orelse continue;
+        if (!std.mem.eql(u8, tree.tokenSlice(variable.ast.mut_token + 1), name)) continue;
+        const init = variable.ast.init_node.unwrap() orelse return error.TestUnexpectedResult;
+        var buffer: [2]std.zig.Ast.Node.Index = undefined;
+        const container = tree.fullContainerDecl(&buffer, init) orelse return error.TestUnexpectedResult;
+        return expectFieldNames(&tree, container.ast.members, fields);
+    }
+}
+
+fn expectOptionalEndedPurgeScratchDelta(
+    allocator: std.mem.Allocator,
+    source: [:0]const u8,
+) !void {
+    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    defer tree.deinit(allocator);
+    const members = findRootContainerMembers(&tree, "EndedPurgeScratch") orelse
+        return error.TestUnexpectedResult;
+    const names = [_][]const u8{ "PendingOutboundDescriptor", "build_id", "lifecycle", "pending_outbound" };
+    var counts = [_]usize{0} ** names.len;
+    var descriptor_node: ?std.zig.Ast.Node.Index = null;
+    for (members) |member| {
+        const tuple = declarationTuple(&tree, "EndedPurgeScratch", member);
+        for (names, 0..) |name, index| {
+            if (std.mem.eql(u8, tuple.name, name)) {
+                counts[index] += 1;
+                if (index == 0) descriptor_node = member;
+            }
+        }
+    }
+    const present = counts[0];
+    try std.testing.expect(present <= 1);
+    for (counts) |count| try std.testing.expectEqual(present, count);
+    if (descriptor_node) |node| {
+        const variable = tree.fullVarDecl(node) orelse return error.TestUnexpectedResult;
+        const init = variable.ast.init_node.unwrap() orelse return error.TestUnexpectedResult;
+        var buffer: [2]std.zig.Ast.Node.Index = undefined;
+        const descriptor = tree.fullContainerDecl(&buffer, init) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@as(usize, 4), descriptor.ast.members.len);
+        try expectTypedField(&tree, source, descriptor.ast.members[0], "frame_address", "usize");
+        try expectTypedField(&tree, source, descriptor.ast.members[1], "frame_len", "usize");
+        try expectTypedField(&tree, source, descriptor.ast.members[2], "stream_id", "u64");
+        try expectTypedField(&tree, source, descriptor.ast.members[3], "offset", "usize");
+    }
+}
+
+fn expectEndedPurgeQuarantineSchema(
+    allocator: std.mem.Allocator,
+    source: [:0]const u8,
+) !void {
+    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    defer tree.deinit(allocator);
+    const error_members = findRootContainerMembers(&tree, "Error") orelse
+        return error.TestUnexpectedResult;
+    try expectFieldNames(
+        &tree,
+        error_members,
+        &.{ "InvalidOwner", "InvalidState", "ArithmeticOverflow", "CapacityExceeded" },
+    );
+
+    const reservation = findRootContainerMembers(&tree, "Reservation") orelse
+        return error.TestUnexpectedResult;
+    const reservation_fields = [_]struct { name: []const u8, type_name: []const u8 }{
+        .{ .name = "self_addr", .type_name = "usize" },
+        .{ .name = "registry_addr", .type_name = "usize" },
+        .{ .name = "reservation_generation", .type_name = "u64" },
+        .{ .name = "process_id", .type_name = "u64" },
+        .{ .name = "node_incarnation", .type_name = "u64" },
+        .{ .name = "operation_generation", .type_name = "u64" },
+        .{ .name = "bytes", .type_name = "usize" },
+        .{ .name = "lifecycle", .type_name = "Lifecycle" },
+    };
+    try std.testing.expectEqual(reservation_fields.len + 1, reservation.len);
+    try expectNestedEnum(&tree, reservation[0], "Lifecycle", &.{ "pristine", "reserved", "spent" });
+    for (reservation_fields, 0..) |expected, index|
+        try expectTypedField(&tree, source, reservation[index + 1], expected.name, expected.type_name);
+
+    const registry = findRootContainerMembers(&tree, "Registry") orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 14), registry.len);
+    try expectNestedEnum(&tree, registry[0], "State", &.{ "idle", "reserved", "committed" });
+    try expectTypedField(&tree, source, registry[1], "mutex", "std.Thread.Mutex");
+    try expectTypedField(&tree, source, registry[2], "state", "State");
+    try expectTypedField(&tree, source, registry[3], "next_generation", "u64");
+    try expectTypedField(&tree, source, registry[4], "reserved_reservation_addr", "usize");
+    try expectTypedField(&tree, source, registry[5], "reserved_generation", "u64");
+    try expectTypedField(&tree, source, registry[6], "reserved_process_id", "u64");
+    try expectTypedField(&tree, source, registry[7], "reserved_node_incarnation", "u64");
+    try expectTypedField(&tree, source, registry[8], "reserved_operation_generation", "u64");
+    try expectTypedField(&tree, source, registry[9], "reserved_bytes", "usize");
+    try expectTypedField(&tree, source, registry[10], "committed_bytes", "usize");
+    const methods = [_][]const u8{ "reserve", "release", "commit" };
+    for (methods, 0..) |name, index| {
+        const tuple = declarationTuple(&tree, "Registry", registry[index + 11]);
+        try std.testing.expectEqualStrings("fn", tuple.kind);
+        try std.testing.expectEqualStrings("pub", tuple.visibility);
+        try std.testing.expectEqualStrings(name, tuple.name);
+    }
+    try expectFnSignature(
+        &tree,
+        source,
+        registry[11],
+        &.{ "self", "node_incarnation", "operation_generation", "bytes", "out" },
+        &.{ "*Registry", "u64", "u64", "usize", "*Reservation" },
+        "Error!void",
+    );
+    try expectFnSignature(
+        &tree,
+        source,
+        registry[12],
+        &.{ "self", "reservation" },
+        &.{ "*Registry", "*Reservation" },
+        "bool",
+    );
+    try expectFnSignature(
+        &tree,
+        source,
+        registry[13],
+        &.{ "self", "reservation" },
+        &.{ "*Registry", "*Reservation" },
+        "bool",
+    );
+}
+
+fn expectFnSignature(
+    tree: *const std.zig.Ast,
+    source: [:0]const u8,
+    node: std.zig.Ast.Node.Index,
+    names: []const []const u8,
+    types: []const []const u8,
+    return_type: []const u8,
+) !void {
+    var buffer: [1]std.zig.Ast.Node.Index = undefined;
+    var proto = tree.fullFnProto(&buffer, node) orelse return error.TestUnexpectedResult;
+    var iterator = proto.iterate(tree);
+    var index: usize = 0;
+    while (iterator.next()) |param| : (index += 1) {
+        try std.testing.expect(index < names.len);
+        const name_token = param.name_token orelse return error.TestUnexpectedResult;
+        const type_node = param.type_expr orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqualStrings(names[index], tree.tokenSlice(name_token));
+        try std.testing.expectEqualStrings(types[index], nodeSource(tree, source, type_node));
+    }
+    try std.testing.expectEqual(names.len, index);
+    const result = proto.ast.return_type.unwrap() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(return_type, nodeSource(tree, source, result));
+}
+
+fn expectRootConstTypeAndInitializer(
+    allocator: std.mem.Allocator,
+    source: [:0]const u8,
+    name: []const u8,
+    type_name: []const u8,
+    initializer: []const u8,
+) !void {
+    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    defer tree.deinit(allocator);
+    for (tree.rootDecls()) |node| {
+        const variable = tree.fullVarDecl(node) orelse continue;
+        if (!std.mem.eql(u8, tree.tokenSlice(variable.ast.mut_token + 1), name)) continue;
+        const type_node = variable.ast.type_node.unwrap() orelse return error.TestUnexpectedResult;
+        const init_node = variable.ast.init_node.unwrap() orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqualStrings(type_name, nodeSource(&tree, source, type_node));
+        try std.testing.expectEqualStrings(initializer, nodeSource(&tree, source, init_node));
+        return;
+    }
+    return error.TestUnexpectedResult;
+}
+
+fn expectNestedEnum(
+    tree: *const std.zig.Ast,
+    node: std.zig.Ast.Node.Index,
+    name: []const u8,
+    fields: []const []const u8,
+) !void {
+    const variable = tree.fullVarDecl(node) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(name, tree.tokenSlice(variable.ast.mut_token + 1));
+    const init = variable.ast.init_node.unwrap() orelse return error.TestUnexpectedResult;
+    var buffer: [2]std.zig.Ast.Node.Index = undefined;
+    const container = tree.fullContainerDecl(&buffer, init) orelse return error.TestUnexpectedResult;
+    try expectFieldNames(tree, container.ast.members, fields);
+}
+
+fn expectTypedField(
+    tree: *const std.zig.Ast,
+    source: [:0]const u8,
+    node: std.zig.Ast.Node.Index,
+    name: []const u8,
+    type_name: []const u8,
+) !void {
+    const field = tree.fullContainerField(node) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(name, tree.tokenSlice(field.ast.main_token));
+    const type_node = field.ast.type_expr.unwrap() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(type_name, nodeSource(tree, source, type_node));
+}
+
+fn expectFieldNames(
+    tree: *const std.zig.Ast,
+    members: []const std.zig.Ast.Node.Index,
+    expected: []const []const u8,
+) !void {
+    try std.testing.expectEqual(expected.len, members.len);
+    for (members, expected) |member, name| {
+        const tuple = declarationTuple(tree, "enum", member);
+        try std.testing.expectEqualStrings("field", tuple.kind);
+        try std.testing.expectEqualStrings(name, tuple.name);
+    }
+}
+
+fn nodeSource(tree: *const std.zig.Ast, source: [:0]const u8, node: std.zig.Ast.Node.Index) []const u8 {
+    const first = tree.tokenStart(tree.firstToken(node));
+    const last_token = tree.lastToken(node);
+    return source[first .. tree.tokenStart(last_token) + tree.tokenSlice(last_token).len];
+}
+
 fn checkDirectory(
     allocator: std.mem.Allocator,
     rule: Rule,
@@ -5071,6 +5805,20 @@ fn readZigFileZ(allocator: std.mem.Allocator, path: []const u8) ![:0]u8 {
     };
     defer allocator.free(text);
     return allocator.dupeZ(u8, text);
+}
+
+fn readOptionalZigFileZ(allocator: std.mem.Allocator, path: []const u8) !?[:0]u8 {
+    const text = std.Io.Dir.cwd().readFileAlloc(
+        std.testing.io,
+        path,
+        allocator,
+        .limited(max_boundary_source_bytes),
+    ) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return err,
+    };
+    defer allocator.free(text);
+    return @as(?[:0]u8, try allocator.dupeZ(u8, text));
 }
 
 fn checkFile(

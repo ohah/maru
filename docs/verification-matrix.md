@@ -698,6 +698,21 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   모든 postcallback drift의 fd close 0과 `.not_ended` 대형 scratch 0을 고정한다. direct cleanup leaf가
   reentry-guarded public release API를 호출하지 않고, neutral module은 pure helper만, `client.zig`는 DTO adapter/queue mutation/direct cleanup만,
   `client_slot.zig`는 permit/receipt/quarantine orchestration만 소유하는지 source boundary로 검사한다.
+  doc-first source gate는 AST canonical `(parent,kind,visibility,modifier,name)` inventory로 root와 owner container를 검사하고,
+  허용 tuple 제외 baseline client(root+Client+EndedPurgeScratch+PreparedEndedPurgeInventory)=527/SHA-256
+  `594178e6c653e30be0ddc64564d2783922e0c0b4895c3543479f86e5977db6fd`,
+  client_slot(root+ClientSlot+EndedPurgePreparation)=126/SHA-256 `03a92a146dbf8935466d0b9250b09c884d575f15fc148f73c6db8979bc69d968`를
+  함께 고정한다. client top-level delta는 `ended_purge_transaction|PreparedEndedPurgeCommit|EndedPurgeCommitError|
+  EndedPurgeClientCommitOutcome`, client_slot delta는 `ended_purge_quarantine|ended_purge_quarantine_registry`만 허용한다. nested
+  Client/ClientSlot/EndedPurgePreparation method/type도 persistent-session-host의 exact allowlist 밖 증가는 실패한다. 새
+  `ended_purge_quarantine.zig`는 std 외 import·allocator·Client·callback·payload pointer 0, public API
+  `max_ended_purge_quarantine_bytes|Error|Reservation|Registry` exact 네 개와
+  `idle|reserved|committed`/reserve-release-commit/replay/cap/cap+1을 Debug/ReleaseFast로
+  검증한다. `pending_outbound` non-null도 build/lifecycle과 함께 frozen scratch descriptor, complete-owner sum/alias/seal/postvalidation/tombstone에
+  포함하며 b2의 기존 adoption-only null 가정을 purge authority로 재사용하지 않는다.
+  AST gate는 `PreparedEndedPurgeCommit`이 나타나면 exact `Lifecycle`+18 fields를 검사하고,
+  `ClientOwnership.quarantined_no_free`와 `EndedPurgePreparationLifecycle.consumed` 외 enum 증분을 거부한다. 두 신규 import는 raw substring이
+  아니라 AST initializer가 exact `@import`인지 검사한다. fork-child RED는 모든 process-global lock 전 PID 거부를 고정한다.
   generation 1 compatibility wiring으로 GUI raw `RemoteRuntime.client=*Client`와
   `AttachmentTransport.context=*Client` production callsite 0, GUI-only final-address `GenerationAttachment.initInPlace`,
   external movable `RemoteAttachment`의 outer field 목록·기존 `untracked|charged` reachable 의미와 external `Prepared|Attached`의

@@ -153,6 +153,10 @@ pub fn richTextFingerprint(
     fingerprintMixValue(&state, rows);
     for (ops) |op| switch (op) {
         .text => |text| {
+            // Registered SVG/PUA icons are emitted by buildIconTextDrawList, never by the
+            // proportional system-text worker. Their spinner phase may change every frame, so
+            // including them here would make every detached text result stale before polling.
+            if (text.wide_icons) continue;
             fingerprintMixValue(&state, 0x54);
             fingerprintMixValue(&state, @as(u32, @bitCast(text.origin.x)));
             fingerprintMixValue(&state, @as(u32, @bitCast(text.origin.y)));
@@ -502,4 +506,30 @@ test "rich text fingerprint changes for placement semantic color and typography 
     tk.palette.set(.accent_bar, .{ .r = 25, .g = 26, .b = 27 });
     ops[0].text.text_role = .card_heading;
     try std.testing.expect(base != richTextFingerprint(&ops, &tk, 8, 16, 20, 10));
+}
+
+test "rich text fingerprint ignores animated wide icon-only ops" {
+    const tk = chrome.Tokens.rich(.{
+        .foreground = .{ .r = 1, .g = 2, .b = 3 },
+        .sidebar_background = .{ .r = 4, .g = 5, .b = 6 },
+        .sidebar_foreground = .{ .r = 7, .g = 8, .b = 9 },
+        .sidebar_active = .{ .r = 10, .g = 11, .b = 12 },
+        .search_match = .{ .r = 13, .g = 14, .b = 15 },
+        .search_match_current = .{ .r = 16, .g = 17, .b = 18 },
+        .selection = .{ .r = 19, .g = 20, .b = 21 },
+        .cursor = .{ .r = 22, .g = 23, .b = 24 },
+        .accent = .{ .r = 25, .g = 26, .b = 27 },
+    });
+    const text_runs = [_]chrome.draw.Run{.{ .text = "Stable label" }};
+    const spinner_a = [_]chrome.draw.Run{.{ .text = "\u{f0002}" }};
+    const spinner_b = [_]chrome.draw.Run{.{ .text = "\u{f0003}" }};
+    const baseline = [_]chrome.draw.Op{
+        .{ .text = .{ .origin = .{ .x = 5, .y = 7 }, .runs = &text_runs, .role = .accent_bar } },
+        .{ .text = .{ .origin = .{ .x = 30, .y = 7 }, .runs = &spinner_a, .role = .accent_bar, .wide_icons = true } },
+    };
+    const next = [_]chrome.draw.Op{
+        baseline[0],
+        .{ .text = .{ .origin = .{ .x = 30, .y = 7 }, .runs = &spinner_b, .role = .accent_bar, .wide_icons = true } },
+    };
+    try std.testing.expectEqual(richTextFingerprint(&baseline, &tk, 8, 16, 20, 10), richTextFingerprint(&next, &tk, 8, 16, 20, 10));
 }

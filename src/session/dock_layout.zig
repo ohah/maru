@@ -14,7 +14,7 @@ const Rect = @import("split_tree.zig").Rect;
 pub const default_right_pt: u32 = 180;
 /// Session Dock은 제목·세그먼트·검색·카드 metadata가 한 column 안에 공존하므로, `size == 0` 자동 상태에서만
 /// explorer/source-control보다 넓게 시작한다. 수동으로 저장한 nonzero size는 이 값으로 덮지 않는다.
-pub const default_agent_sessions_right_pt: u32 = 480;
+pub const default_agent_sessions_right_pt: u32 = 640;
 pub const min_right_pt: u32 = 120;
 /// bottom은 가로 띠라 성격이 다르다(폭이 아니라 높이). 트리 행이 몇 줄은 보여야 하므로 그대로 둔다.
 pub const default_bottom_pt: u32 = 300;

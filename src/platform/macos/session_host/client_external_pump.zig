@@ -20799,7 +20799,7 @@ pub const ExternalPumpStorage = struct {
         // pointer could be dereferenced while trying to compute the deep digest that detects it.
         const client_outer_authority = self.owned_client;
         const client_authority = if (self.owned_client) |*client|
-            client.projectionAuthorityDigest()
+            client.clientProjectionAuthorityDigest()
         else
             null;
         const evidence_authority = self.owned_evidence;
@@ -20837,7 +20837,7 @@ pub const ExternalPumpStorage = struct {
         // The shallow equality above is the descriptor-first memory-safety gate. Only now may the
         // deep transcript traverse list elements through those exact pre-callback pointers.
         const post_client_authority = if (self.owned_client) |*client|
-            client.projectionAuthorityDigest()
+            client.clientProjectionAuthorityDigest()
         else
             null;
         if (!std.meta.eql(client_authority, post_client_authority))

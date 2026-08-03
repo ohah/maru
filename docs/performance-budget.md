@@ -49,10 +49,14 @@ PR 경로의 성능 workflow 실패는 머지를 막는다. 예산은 runner 변
 | `core performance budget` | performance.yml `core-performance-budget` | 매 PR(paths 필터 없음). core perf guardrail. |
 | `file explorer macOS product path` | ci.yml `file-explorer-macos` | 매 PR(macos-15). 16,384-row/1,000-event 탐색기 artifact. |
 | `mermaid macOS product path` | ci.yml `mermaid-macos` | 매 PR(macos-15). Mermaid 제품 1,000 tick·helper smoke artifact. |
+| `session host macOS (Debug)` | ci.yml `session-host-macos` (matrix `optimize`) | 매 PR(macos-15). `zig build test-session-host` — codec/state machine·live-upgrade fixture를 safety check가 켜진 채 검증. |
+| `session host macOS (ReleaseFast)` | ci.yml `session-host-macos` (matrix `optimize`) | 매 PR(macos-15). 같은 스위트의 no-fail 경로. Debug와 독립 컴파일이라 별도 컨텍스트다. |
 | `session host slow observer macOS` | ci.yml `session-host-slow-observer-macos` | 매 PR(macos-15). 독립 ReleaseFast host의 실제 forkpty/3-client isolation과 host-PID RSS artifact. |
 | `web build and security fixtures` | web.yml `check` | 매 PR(paths 필터 없음). web build·보안 fixture. |
 
 path-filter가 있는 워크플로를 required로 두면 무관한 PR에서 skip돼 required 컨텍스트가 영원히 pending으로 머지를 막는다. 그래서 required로 쓰는 워크플로는 `pull_request`에 paths 필터를 두지 않고 모든 PR에서 돈다(performance.yml·web.yml). ci.yml의 macOS job은 원래 paths 필터가 없어 매 PR 실행되므로 그대로 required로 등록한다. 이 목록을 바꿀 때는 `gh api repos/<owner>/<repo>/branches/main/protection/required_status_checks`의 `contexts`도 함께 갱신한다.
+
+**matrix job은 조합마다 별개 컨텍스트다.** `session-host-macos`처럼 matrix로 병렬화한 job은 `session host macOS (Debug)`·`session host macOS (ReleaseFast)`가 각각 독립 required 컨텍스트로 보고되므로 **전부** 등록해야 한다. 하나만 등록하면 나머지 조합은 실패해도 머지를 막지 못한다. 반대로 job을 쪼개면서 required 등록을 빠뜨리면, 쪼개기 전에는 상위 job의 실패로 잡히던 게이트가 조용히 advisory로 강등된다.
 
 ## 현재 자동 예산
 

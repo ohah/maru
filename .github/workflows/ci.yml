@@ -37,17 +37,13 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-  # AppSession 제품 glue와 session-host live-upgrade fixture는 macOS에서만 활성화된다. Ubuntu의 기본 test가
-  # 이 경로를 컴파일하지 않으므로 이 PR job에서 session-host, provider 파일 무변경 계약과
-  # 16,384-row/1,000-event 탐색기 artifact를 실행한다.
+  # AppSession 제품 glue는 macOS에서만 활성화된다. Ubuntu의 기본 test가 이 경로를 컴파일하지 않으므로
+  # 이 PR job에서 provider 파일 무변경 계약과 16,384-row/1,000-event 탐색기 artifact를 실행한다.
+  # session-host 스위트는 컴파일이 압도적으로 무거워(아래 session-host-macos) 별도 job이 병렬로 소유한다.
   file-explorer-macos:
     name: file explorer macOS product path
     runs-on: macos-15
-    # This job intentionally builds the full session-host suite twice (Debug and ReleaseFast)
-    # before the provider/file-explorer gates. A cold macOS runner can spend more than 15 minutes
-    # in those two independent compilations, so the job budget must cover the complete gate rather
-    # than cancelling a healthy ReleaseFast run halfway through.
-    timeout-minutes: 25
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -56,10 +52,6 @@ jobs:
         with:
           version: 2026.2.7
           sha256: f8becf318705e1bd91227ed0efee4f9fd988d1d5c66bb48e996f030792a0d3b7 # macos-arm64 binary
-      - name: Verify session host and live-upgrade fixtures
-        run: zig build test-session-host
-      - name: Verify session host no-fail paths in ReleaseFast
-        run: zig build test-session-host -Doptimize=ReleaseFast
       - name: Verify provider continuity removal
         run: mise run test-provider-session-removal
       - run: mise run macos-file-explorer-perf
@@ -71,6 +63,31 @@ jobs:
           path: tests/artifacts/perf/file-explorer.txt
           if-no-files-found: error
           retention-days: 14
+
+  # session-host live-upgrade fixture는 macOS에서만 활성화되고, Debug와 ReleaseFast는 서로 다른 결함을
+  # 잡는 독립 컴파일이다(Debug는 safety check, ReleaseFast는 no-fail 경로). 둘을 한 job에 직렬로 두면
+  # 콜드 러너에서 합계가 11분을 넘어 CI 전체 wall-clock을 이 job 하나가 결정했다. matrix로 병렬 실행해
+  # wall-clock을 둘 중 느린 쪽으로 낮춘다(총 러너 시간은 동일).
+  # fail-fast: false — 한쪽 optimize가 깨져도 다른 쪽 결과를 봐야 회귀가 safety check인지 최적화
+  # 의존인지 한 번에 가려낸다. 직렬 구성에서는 Debug가 실패하면 ReleaseFast를 아예 실행하지 못했다.
+  session-host-macos:
+    name: session host macOS (${{ matrix.optimize }})
+    runs-on: macos-15
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        optimize: [Debug, ReleaseFast]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          version: 2026.2.7
+          sha256: f8becf318705e1bd91227ed0efee4f9fd988d1d5c66bb48e996f030792a0d3b7 # macos-arm64 binary
+      - name: Verify session host and live-upgrade fixtures
+        run: zig build test-session-host -Doptimize=${{ matrix.optimize }}
 
   # Mermaid 제품 pump는 macOS helper/WKWebView와 native tick adapter가 모두 필요하다.
   # 1,000 tick artifact가 process/pipe/wait 0과 completion drain 상한을 어기면 merge하지 않는다.

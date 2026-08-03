@@ -69,6 +69,12 @@ ICONS = [
     ("folder_config", 0xF001C, "assets/icons/folder-config.svg"),
     ("folder_dependency", 0xF001D, "assets/icons/folder-dependency.svg"),
     ("folder_output", 0xF001E, "assets/icons/folder-output.svg"),
+    ("chevron_down", 0xF001F, "assets/icons/chevron-down.svg"),
+    ("chevron_right", 0xF0020, "assets/icons/chevron-right.svg"),
+    ("session_dock_refresh", 0xF0021, "assets/icons/session-dock-refresh.svg"),
+    ("session_dock_search", 0xF0022, "assets/icons/session-dock-search.svg"),
+    ("session_dock_chevron_down", 0xF0023, "assets/icons/session-dock-chevron-down.svg"),
+    ("session_dock_chevron_right", 0xF0024, "assets/icons/session-dock-chevron-right.svg"),
 ]
 
 

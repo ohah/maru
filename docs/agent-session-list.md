@@ -77,6 +77,17 @@ chrome과 같은 Zig semantic draw → Metal GPU lowering 경로를 쓰는 custo
   한 text-cell 안쪽 inset에 정렬해 fallback font 또는 icon ink가 rounded-card clip에
   닿지 않게 한다. provider·원격 source 선택기 같은
   별도 filter control은 v1에 추가하지 않는다.
+- Header refresh와 search affordance는 일반 Unicode/fallback font glyph를 쓰지 않고 등록된
+  SVG coverage icon을 쓴다. idle refresh는 `surface_fg`, disabled spinner는 `muted_fg`라서
+  theme accent가 어두운 경우에도 utility icon의 대비가 사라지지 않는다. group expand/collapse
+  affordance도 같은 registry의 명시 icon slot으로만 그린다. icon의 코드포인트·two-cell slot·hit
+  rect는 component가 함께 소유하며, raw provider 문자열에는 `wide_icons`를 절대 적용하지 않는다.
+- 한 줄 control(`작업공간`/`프로젝트`/`전체`, search, group)은 completed rect의 정확한 세로 중앙에
+  glyph cell을 놓고, 두 줄 header는 **전체 line stack**을 rect 중앙에 놓은 뒤 각 line을 cell-height
+  간격으로 배치한다. virtualized card는 partial clip에서 보이는 line을 없애지 않도록 기존 top-origin
+  line stack을 유지한다. paint·clip·hit-test는 계속 같은 completed tree만 소비하며, font의
+  ink/baseline 보정은 후속 `TextLayoutArtifact`가 맡는다. 따라서 이 slice는 font advance를 추측해
+  개별 label을 nudge하지 않는다.
 - `SegmentedScopeControl`은 세 개의 동일 폭 segment와 selected/disabled/focused
   state를 각각 그린다. pipe-separated text label이나 group처럼 보이는 제목줄로
   대체하지 않는다. `SessionSearchField`는 search icon, placeholder, query,
@@ -232,6 +243,13 @@ component를 거쳐 card/scope/header/search와 semantic text op를 만들고, �
 active `agent_sessions` host screenshot E2E와 precise scroll gesture, refresh 중 selection·scroll 보존은
 여전히 별도 gate다. component text/ellipsis와 scope width는 pure test로, primary card click은 published tree/action
 table을 소비하는 host path로 고정한다.
+
+Lab의 font matrix는 앱 번들의 `ATSApplicationFontsPath` 등록을 우회해서는 안 된다. Lab executable은
+독립 실행 파일이므로 단순 `font.family` override만으로 `assets/fonts/`의 번들 face를 증명할 수 없다.
+각 번들 family(`JetBrains Mono`, `Jetendard`, `Fira Code`, `Cascadia Code`, `Hack`)는 test-only 등록 seam 또는
+실제 app bundle capture를 통해 CoreText가 **요청한 face와 일치한 PostScript font**를 선택했음을 JSON artifact에
+기록하고, 같은 retained-list 제품 Metal PNG를 남겨야 한다. family가 없거나 fallback만 선택되면 캡처 성공으로
+표시하지 않는다. 이 matrix는 icon color/size와 scope label 세로 중심 visual gate를 함께 검사한다.
 
 ### AS3-b — published-tree pointer lifecycle
 

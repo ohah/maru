@@ -289,6 +289,16 @@ pub fn build(b: *std.Build) void {
             run_chrome_lab.setEnvironmentVariable("MARU_CHROME_LAB_SCENARIO", scenario);
             macos_chrome_lab_smoke_step.dependOn(&run_chrome_lab.step);
         }
+        // The default retained-list uses the bundled JetBrains Mono asset. Capture the other
+        // selectable bundled families in isolated processes too: each process registers exactly
+        // one TTF and rejects CoreText fallback before it can write a misleading PNG.
+        inline for ([_][]const u8{ "jetendard", "fira-code", "cascadia-code", "hack" }) |font| {
+            const run_chrome_lab_font = b.addRunArtifact(macos_chrome_lab_smoke);
+            run_chrome_lab_font.setCwd(b.path("."));
+            run_chrome_lab_font.setEnvironmentVariable("MARU_CHROME_LAB_SCENARIO", "retained-list");
+            run_chrome_lab_font.setEnvironmentVariable("MARU_CHROME_LAB_FONT", font);
+            macos_chrome_lab_smoke_step.dependOn(&run_chrome_lab_font.step);
+        }
 
         const macos_chrome_lab_smoke_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{

@@ -222,6 +222,54 @@ static bool maru_font_matches_requested(CTFontRef font, CFStringRef requested_na
     return matched;
 }
 
+// Chrome Lab은 Maru.app bundle 밖에서 실행되므로 Info.plist의 ATSApplicationFontsPath를 받지
+// 않는다. 이 test-only seam은 bundle에 들어갈 원본 TTF 하나를 process scope에 등록한 뒤,
+// 실제 CoreText family lookup까지 확인한다. 앱 제품 경로는 이 함수를 호출하지 않는다.
+int32_t maru_macos_coretext_lab_register_font(
+    const char *font_path,
+    size_t font_path_len,
+    const char *requested_font_family,
+    size_t requested_font_family_len,
+    char *postscript_name_out,
+    size_t postscript_name_out_len
+) {
+    @autoreleasepool {
+        if (font_path == NULL || font_path_len == 0 || requested_font_family == NULL || requested_font_family_len == 0 || postscript_name_out == NULL || postscript_name_out_len < 2) {
+            return 1;
+        }
+        postscript_name_out[0] = '\0';
+        CFStringRef path = maru_create_font_name(font_path, font_path_len);
+        CFStringRef family = maru_create_font_name(requested_font_family, requested_font_family_len);
+        if (path == NULL || family == NULL) {
+            if (path != NULL) CFRelease(path);
+            if (family != NULL) CFRelease(family);
+            return 2;
+        }
+        CFURLRef url = CFURLCreateWithFileSystemPath(kCFAllocatorDefault, path, kCFURLPOSIXPathStyle, false);
+        CFRelease(path);
+        if (url == NULL) {
+            CFRelease(family);
+            return 3;
+        }
+        CFErrorRef error = NULL;
+        const bool registered = CTFontManagerRegisterFontsForURL(url, kCTFontManagerScopeProcess, &error);
+        if (error != NULL) CFRelease(error);
+        CFRelease(url);
+        if (!registered) {
+            CFRelease(family);
+            return 4;
+        }
+        CTFontRef font = CTFontCreateWithName(family, 14.0, NULL);
+        const bool matched = maru_font_matches_requested(font, family);
+        CFStringRef actual_name = matched ? CTFontCopyPostScriptName(font) : NULL;
+        const bool copied_name = actual_name != NULL && maru_copy_cfstring(actual_name, postscript_name_out, postscript_name_out_len);
+        if (actual_name != NULL) CFRelease(actual_name);
+        if (font != NULL) CFRelease(font);
+        CFRelease(family);
+        return matched && copied_name && postscript_name_out[0] != '\0' ? 0 : 5;
+    }
+}
+
 static bool maru_font_postscript_name_matches(CTFontRef font, CFStringRef expected_name) {
     if (font == NULL || expected_name == NULL) {
         return false;

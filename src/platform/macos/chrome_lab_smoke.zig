@@ -25,6 +25,44 @@ const cell_width_px: u32 = 8;
 const cell_height_px: u32 = 16;
 const terminal_background = [3]u8{ 20, 20, 20 };
 
+const FontVariant = enum {
+    jetbrains_mono,
+    jetendard,
+    fira_code,
+    cascadia_code,
+    hack,
+
+    fn family(self: FontVariant) []const u8 {
+        return switch (self) {
+            .jetbrains_mono => "JetBrains Mono",
+            .jetendard => "Jetendard",
+            .fira_code => "Fira Code",
+            .cascadia_code => "Cascadia Code",
+            .hack => "Hack",
+        };
+    }
+
+    fn assetPath(self: FontVariant) []const u8 {
+        return switch (self) {
+            .jetbrains_mono => "assets/fonts/JetBrainsMono/JetBrainsMono-Regular.ttf",
+            .jetendard => "assets/fonts/Jetendard/Jetendard-Regular.ttf",
+            .fira_code => "assets/fonts/FiraCode/FiraCode-Regular.ttf",
+            .cascadia_code => "assets/fonts/CascadiaCode/CascadiaCode-Regular.ttf",
+            .hack => "assets/fonts/Hack/Hack-Regular.ttf",
+        };
+    }
+
+    fn slug(self: FontVariant) []const u8 {
+        return switch (self) {
+            .jetbrains_mono => "jetbrains-mono",
+            .jetendard => "jetendard",
+            .fira_code => "fira-code",
+            .cascadia_code => "cascadia-code",
+            .hack => "hack",
+        };
+    }
+};
+
 const PpmProbe = struct {
     width: u32,
     height: u32,
@@ -35,7 +73,14 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const allocator = init.gpa;
     const scenario_id = try readScenario();
-    const scenario_name = artifactName(scenario_id);
+    const font_variant = try readFontVariant();
+    var font_postscript_name_buf: [128]u8 = undefined;
+    const font_postscript_name = try registerLabFont(font_variant, &font_postscript_name_buf);
+    var scenario_name_buf: [96]u8 = undefined;
+    const scenario_name = if (font_variant == .jetbrains_mono)
+        artifactName(scenario_id)
+    else
+        try std.fmt.bufPrint(&scenario_name_buf, "{s}-{s}", .{ artifactName(scenario_id), font_variant.slug() });
     const ppm_path = try allocPathZ(allocator, "{s}/{s}.ppm", .{ artifact_dir, scenario_name });
     defer allocator.free(ppm_path);
     const png_path = try allocPathZ(allocator, "{s}/{s}.png", .{ artifact_dir, scenario_name });
@@ -91,7 +136,9 @@ pub fn main(init: std.process.Init) !void {
         cols,
         rows,
     );
-    const appearance = try config.resolveAppearance(.{});
+    var lab_config: config.Config = .{};
+    lab_config.font.family = font_variant.family();
+    const appearance = try config.resolveAppearance(lab_config);
     var renderer_state = renderer.RendererState.init(allocator, .{});
     defer renderer_state.deinit();
     const builder = coretext_frame_builder.CoreTextFrameBuilder{
@@ -196,7 +243,7 @@ pub fn main(init: std.process.Init) !void {
     // the lowered fixture has text, however, the rich pass must receive at least one glyph.
     const rich_text_rasterized = metal_fixture.cells.len == 0 or rich_glyphs.items.len > 0;
     const success = native_ok and pixel_ok and valid_png and text_rasterized and rich_text_rasterized;
-    const summary = try renderSummary(allocator, scenario_name, ppm_path, png_path, native, ppm, valid_png, gpu_quads.items.len, metal_fixture.cells.len, text_rasterized, rich_glyphs.items.len, rich_text_rasterized, success);
+    const summary = try renderSummary(allocator, scenario_name, font_variant, font_postscript_name, ppm_path, png_path, native, ppm, valid_png, gpu_quads.items.len, metal_fixture.cells.len, text_rasterized, rich_glyphs.items.len, rich_text_rasterized, success);
     defer allocator.free(summary);
     try artifact_io.writeText(io, json_path, summary);
 
@@ -212,6 +259,36 @@ pub fn main(init: std.process.Init) !void {
 fn readScenario() !lab.ScenarioId {
     const raw = std.c.getenv("MARU_CHROME_LAB_SCENARIO") orelse return .retained_list;
     return scenarioFromEnvValue(std.mem.span(raw)) orelse error.InvalidChromeLabScenario;
+}
+
+fn readFontVariant() !FontVariant {
+    const raw = std.c.getenv("MARU_CHROME_LAB_FONT") orelse return .jetbrains_mono;
+    return fontVariantFromValue(std.mem.span(raw)) orelse error.InvalidChromeLabFont;
+}
+
+fn fontVariantFromValue(value: []const u8) ?FontVariant {
+    if (std.mem.eql(u8, value, "jetbrains-mono")) return .jetbrains_mono;
+    if (std.mem.eql(u8, value, "jetendard")) return .jetendard;
+    if (std.mem.eql(u8, value, "fira-code")) return .fira_code;
+    if (std.mem.eql(u8, value, "cascadia-code")) return .cascadia_code;
+    if (std.mem.eql(u8, value, "hack")) return .hack;
+    return null;
+}
+
+fn registerLabFont(variant: FontVariant, postscript_name_out: []u8) ![]const u8 {
+    if (postscript_name_out.len < 2) return error.ChromeLabFontPostscriptNameBufferTooSmall;
+    const status = coretext_bridge.maru_macos_coretext_lab_register_font(
+        variant.assetPath().ptr,
+        variant.assetPath().len,
+        variant.family().ptr,
+        variant.family().len,
+        postscript_name_out.ptr,
+        postscript_name_out.len,
+    );
+    if (status != 0) return error.ChromeLabFontRegistrationFailed;
+    const len = std.mem.indexOfScalar(u8, postscript_name_out, 0) orelse return error.ChromeLabFontPostscriptNameMissing;
+    if (len == 0) return error.ChromeLabFontPostscriptNameMissing;
+    return postscript_name_out[0..len];
 }
 
 fn scenarioFromEnvValue(raw: []const u8) ?lab.ScenarioId {
@@ -257,7 +334,10 @@ fn labTokens() chrome.Tokens {
         .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
         .selection = .{ .r = 7, .g = 8, .b = 9 },
         .cursor = .{ .r = 10, .g = 11, .b = 12 },
-        .accent = .{ .r = 13, .g = 14, .b = 15 },
+        // Canonical rich-dark fixture uses the resolved default brand amber. A near-black test
+        // accent makes the capture claim a contrast regression in a utility icon that the real
+        // default theme never asks users to interpret.
+        .accent = .{ .r = 221, .g = 161, .b = 94 },
     });
 }
 
@@ -296,6 +376,8 @@ fn probePpm(bytes: []const u8) !PpmProbe {
 fn renderSummary(
     allocator: std.mem.Allocator,
     scenario_name: []const u8,
+    font_variant: FontVariant,
+    font_postscript_name: []const u8,
     ppm_path: []const u8,
     png_path: []const u8,
     native: bridge.NativeResult,
@@ -312,6 +394,7 @@ fn renderSummary(
         \\{{
         \\  "schema": "maru.macos-chrome-lab.v1",
         \\  "scenario": "{s}",
+        \\  "font": {{ "family": "{s}", "postscript_name": "{s}", "asset": "{s}", "coretext_requested_match": true }},
         \\  "viewport_backing_px": {{ "width": {d}, "height": {d} }},
         \\  "appearance": "rich-dark-fixed",
         \\  "artifacts": {{ "ppm": "{s}", "png": "{s}" }},
@@ -322,6 +405,9 @@ fn renderSummary(
         \\}}
     , .{
         scenario_name,
+        font_variant.family(),
+        font_postscript_name,
+        font_variant.assetPath(),
         viewport.width,
         viewport.height,
         ppm_path,
@@ -360,6 +446,9 @@ test "Chrome Lab scenario parser keeps one process bound to one deterministic ar
     try std.testing.expectEqualStrings("retained-list", artifactName(.retained_list));
     try std.testing.expectEqualStrings("partial-scroll", artifactName(.partial_scroll));
     try std.testing.expectEqualStrings("detail-ready", artifactName(.detail_ready));
+    try std.testing.expectEqual(FontVariant.jetendard, fontVariantFromValue("jetendard").?);
+    try std.testing.expectEqual(FontVariant.cascadia_code, fontVariantFromValue("cascadia-code").?);
+    try std.testing.expect(fontVariantFromValue("unknown") == null);
 }
 
 test "Chrome Lab PPM probe rejects background-only and malformed readbacks" {
@@ -372,7 +461,7 @@ test "Chrome Lab PPM probe rejects background-only and malformed readbacks" {
 }
 
 test "Chrome Lab summary records component text rasterization and artifact paths" {
-    const summary = try renderSummary(std.testing.allocator, "retained-list", "artifact.ppm", "artifact.png", .{
+    const summary = try renderSummary(std.testing.allocator, "retained-list", .jetbrains_mono, "JetBrainsMono-Regular", "artifact.ppm", "artifact.png", .{
         .status = 0,
         .renderer_created = 1,
         .atlas_ready = 1,
@@ -385,6 +474,8 @@ test "Chrome Lab summary records component text rasterization and artifact paths
     try std.testing.expect(std.mem.indexOf(u8, summary, "\"text_rasterized\": true") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "\"gpu_glyphs\": 2") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "\"rich_text_rasterized\": true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "\"family\": \"JetBrains Mono\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "\"postscript_name\": \"JetBrainsMono-Regular\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "\"ppm\": \"artifact.ppm\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "\"success\": true") != null);
 }

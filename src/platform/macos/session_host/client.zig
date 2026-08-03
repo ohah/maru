@@ -4924,6 +4924,29 @@ test "CR3a B3b-F exclusive fence rejects a foreign thread Client mutation" {
     client.parser.deinit();
 }
 
+test "CR3a B3b-S mutable terminal observations fail closed behind exclusive fence" {
+    var client: Client = .{
+        .allocator = std.testing.allocator,
+        .fd = -1,
+        .host_id = 68,
+        .parser = framing.FrameParser.init(std.testing.allocator),
+    };
+    client.latchFirstPoisonReason(.local_invariant_violation);
+    var fence: ClientOperationFence = undefined;
+    const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
+    fence.initInPlace(@intFromPtr(&client), pid, 69, 70, 71);
+    try std.testing.expect(client.bindOperationFence(&fence, 71));
+    try client.tryAcquireEndedPurgeExclusive();
+
+    // The underlying values would produce true/non-null. Conservative results therefore prove
+    // that rejection happened before either mutable Client field was observed.
+    try std.testing.expect(!client.terminalReasonInvariant());
+    try std.testing.expect(client.firstPoisonReason() == null);
+    try std.testing.expect(client.endedPurgeFenceIntruded());
+    try std.testing.expect(client.commitEndedPurgeExclusiveTerminal());
+    client.parser.deinit();
+}
+
 test "CR3a B3b-F allocator reentry poison defers to exclusive fence" {
     var client: Client = .{
         .allocator = std.testing.allocator,
@@ -9387,6 +9410,8 @@ pub const Client = struct {
     }
 
     pub fn terminalReasonInvariant(self: *const Client) bool {
+        const operation_fence_held = self.beginPublicMutation() catch return false;
+        defer if (operation_fence_held) self.endPublicMutation();
         return !self.unusable or self.ownership == .moved or self.first_poison_reason != null;
     }
 
@@ -9408,6 +9433,8 @@ pub const Client = struct {
     }
 
     pub fn firstPoisonReason(self: *const Client) ?client_poison.ConnectionReason {
+        const operation_fence_held = self.beginPublicMutation() catch return null;
+        defer if (operation_fence_held) self.endPublicMutation();
         return self.first_poison_reason;
     }
 };

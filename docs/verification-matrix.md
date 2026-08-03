@@ -710,6 +710,13 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   blocking RPC prepare/abort/preflight/execute의 fence-before-TLS/graph funnel, 세 ClientSlot aggregate scope의 begin→defer end→mutation
   순서, Client terminal 뒤 typed return 0을 고정한다. 모든 Client receiver public method의 G/C/U/R closed manifest는 B3b-S의 첫 hostile
   callback test보다 먼저 RED→GREEN으로 닫으며, B3b-F declaration baseline만으로 이를 완료했다고 주장하지 않는다.
+  이 manifest는 AST가 첫 parameter 이름과 무관하게 `*Client|*const Client`인 public receiver 91개를 선언 순서와 무관한
+  exact set으로 추출해 이름·mutability·G/C/U/R class를 비교한다(`G=39,C=36,U=15,R=1`). G는 guarded post-publication,
+  C는 bound-reject 또는 external-pump product-caller exact 제한, U는 ClientSlot authority caller exact 제한, R은 mutable Client graph를
+  읽지 않는 atomic-only observation이다. `projectionAuthorityDigest|externalTransferProfile`과 external-adoption graph reader는 C,
+  non-atomic `terminalReasonInvariant|firstPoisonReason`은 G이며 R은 `endedPurgeFenceIntruded` 하나다. 모든 body에 공통 substring을
+  반복하지 않고 direct gate/funnel kind와 위험한 U/C caller만 별도 source oracle로 검사한다. 91-row set equality는 inventory
+  subgate일 뿐이며 이 class별 policy oracle이 모두 GREEN이 되기 전에는 closed manifest나 hostile callback 선행 gate 완료로 세지 않는다.
   B3b-S는 blocking generation-only complete Client-owned deinit graph 64 MiB checked cap, `pending_outbound` owner SSOT, private immutable/no-escape scratch,
   별도 advance-before-callback cleanup cursor, stable compaction/counter publication, all-target exact-once callback, scalar-first post-validation과
   absorbing `quarantined_no_free` poison을 caller 0인 Client-local transaction으로 완성한다. 실제 ClientSlot permit/receipt/quarantine 배선은

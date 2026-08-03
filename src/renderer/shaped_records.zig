@@ -14,6 +14,11 @@ pub const ShapedGlyphRecord = struct {
     replacement: bool = false,
     style: terminal.Style = .{},
     color_glyph_kind: glyph_layout.ColorGlyphKind = .monochrome,
+    /// Non-terminal proportional UI text can request its role size and bitmap extents without
+    /// leaking a platform font handle into renderer records. Zero preserves TextLayoutConfig.
+    raster_font_size_milli: u16 = 0,
+    raster_width_px: u16 = 0,
+    raster_height_px: u16 = 0,
     drawable: bool = true,
 };
 
@@ -109,6 +114,9 @@ pub fn buildGlyphRunListFromShapedRecordsWithSurface(
                 .cell_width_px = config.slotCellWidthPx(record.glyph_id),
                 .cell_height_px = config.cell_height_px,
                 .cell_width = record.cell_width, // span — slot 폭 = cell_width_px × span이라 키에 포함(span 충돌 방지)
+                .raster_font_size_milli = record.raster_font_size_milli,
+                .raster_width_px = record.raster_width_px,
+                .raster_height_px = record.raster_height_px,
                 .style = flags,
                 .color_glyph_kind = record.color_glyph_kind,
             },

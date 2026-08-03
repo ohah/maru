@@ -31348,6 +31348,9 @@ pub const AppSession = struct {
             .replacement = run.replacement,
             .style = run.style,
             .color_glyph_kind = run.cache_key.color_glyph_kind,
+            .raster_font_size_milli = run.cache_key.raster_font_size_milli,
+            .raster_width_px = run.cache_key.raster_width_px,
+            .raster_height_px = run.cache_key.raster_height_px,
         };
         return out;
     }

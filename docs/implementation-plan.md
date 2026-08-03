@@ -928,21 +928,28 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    scratch는 per-item digest 대신 compact target bitset과 queue별 aggregate payload seal을 쓰며, descriptor 배열 cap은 제품 queue cap과
    같고 기존 `ExternalAdoptionCleanupScratch`와 같은 compile-time `<= 512 KiB` 예산을 지킨다. target stream에
    `GenerationBatchRegistry`의 reserved/ingress/live/releasing entry가 하나라도 있으면 mutation 전에 `busy`로 닫는다. transferred
-   batch/token/accounting, parser raw RX/framing, attachment pending lease/screen, cleanup registry와 connection lease는 inventory와 purge
-   대상이 아니다. commit은 receipt tombstone 뒤 inventory descriptor slot 중 target slot을 in-place frozen cleanup owner로 전환해 별도
+   batch/token/accounting, parser raw RX/framing, attachment pending lease/screen, cleanup registry와 connection lease는 정상 purge와 모든
+   precommit failure의 payload cleanup 대상이 아니다. postcommit Client-owned deinit graph drift의 terminal suffix만 owned allocation을
+   개별 정리하거나 권위를 넘기지 않고 no-free 상태로 버리며 borrowed ledger/attachment/registry/lease는 그대로 둔다. commit은 receipt
+   tombstone 뒤 immutable target descriptor scalar에 대한 cleanup authority를 취득하고 별도 private cursor를 callback 전에 advance한다. descriptor bytes를 overlay하거나 별도
    full-size 배열을 만들지 않고, 네 queue stable compaction과 최종 counter publish를 첫 allocator callback 전에 끝낸다. 이후 fallible
    work는 0이고 callback 중 canonical queue/source reread도 0이다. 마지막 callback 뒤에는 frozen survivor descriptor/range seal과 current
    queue ownership metadata를 비교하는 post-validation을 정확히 한 번 수행하고, 구조가 일치할 때만 sibling aggregate payload seal을 다시 읽는다.
    node permit은 이 post-validation까지 유지한 뒤 node permit→transport receipt 순으로 소비한다. permit이 live인 동안 sibling을
    포함한 Client input/event/RPC/queue mutation과 attachment/slot teardown은 모두 `busy`이며 read-only scalar 관측만 허용한다. public
-   Maru API callback 재진입은 같은 규칙으로 sibling을 byte-for-byte 보존한다. callback 전에 process-global one-slot quarantine
-   reservation을 무할당으로 잡고 frozen pre-callback capacity의 checked sum이
-   `max_ended_purge_quarantine_bytes = 64 MiB` 이하임을 검증한다. 정상 post-validation은 reservation을 release한다. 구조 drift에서는
-   pointer 역참조 없이 canonical demux queue·partial state·counter를 먼저 empty/zero로 tombstone하고 reservation을 exact once 영구
-   commit한 뒤 connection을 poison해 남은 sibling owner graph를 no-free quarantine한다. exact 순서는
-   `demux tombstone -> quarantine commit -> connection poison -> node permit/transport receipt consume`이다. 이 sticky process latch 뒤 새 generation Client/reconnect/ended-purge admission은 terminal로
+   Maru API callback 재진입은 같은 규칙으로 sibling을 byte-for-byte 보존한다. blocking generation Client의 build/lifecycle, parser backing, optional pending outbound, 네 queue
+   backing과 nested owned extent를 포함한 complete Client-owned deinit graph checked sum이
+   `max_ended_purge_quarantine_bytes = 64 MiB` 이하임을 검증한다. list/parser/partial은 capacity backing을, slice payload와
+   build/lifecycle/pending outbound는 exact owned length를 합산한다. external mode는 mutation 0으로 거부한다. cap 초과의 precommit
+   no-cleanup poison은 owner free/tombstone/quarantine 0으로 reason/unusable을 latch하고 validated captured fd만 detach+close해 later ordinary
+   deinit이 intact owner를 회수하게 한다. 모든 graph/cap/profile 검증 뒤 commit gate의 마지막 fallible step으로 one-slot reservation을
+   잡고, 성공 뒤에는 receipt tombstone과 no-fail suffix만 남긴다. 정상 post-validation은 reservation을 release한다. 구조 drift에서는
+   current pointer·allocator·fd를 역참조하지 않고 canonical Client-owned deinit fields를 empty/null로 tombstone하고 reservation을 exact
+   once 영구 commit한 뒤 `quarantined_no_free` absorbing poison을 게시한다. 어떤 postcallback drift에서도 fd는 close하지 않는다. allocator,
+   generation accounting ledger, observer, attachment, registry와 lease 같은 borrowed authority는 dereference/release/mutate 0이다. exact 순서는
+   `all target cleanup -> Client-owned deinit tombstone -> quarantine commit -> no-free poison -> node permit/transport receipt consume`이다. 이 sticky process latch 뒤 새 generation Client/reconnect/ended-purge admission은 terminal로
    거부되어 누적 quarantine은 한 건·64 MiB를 넘지 않는다. replay charge는 0이다. 이후 generic teardown은 변조된 pointer를 다시 읽거나
-   free하지 않으며 해당 connection의 buffered sibling data와 allocation은 버린다. commit 전 오류는 `.not_ended`와 구별된 typed error이며
+   free하지 않으며 해당 connection의 남은 Client-owned allocation은 버린다. commit 전 오류는 `.not_ended`와 구별된 typed error이며
    위 error별 허용 mutation만 수행한다. commit 뒤 정상과 drift-poison 모두 target cleanup을
    끝내고 no-fail node permit/transport receipt consume을 실행하며 public 결과는 `.purged`다. tests는 poison latch를 별도로
    검증한다. early purge는 canonical attachment drop·registry token release·node cleanup
@@ -958,7 +965,19 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    bitset·queue별 aggregate seal·checked quarantine capacity는 final-address private preparation에 봉인한다. process-global quarantine은
    이 prepare 단계에서 예약하지 않으며 실제 reservation은 첫
    allocator callback 전에 수행하는 commit gate가 소유한다. 아직 target detach/stable compaction, callback cleanup, post-validation,
-   quarantine reservation/commit과 poison suffix, transport/GUI 제품 배선은 구현하지 않았으므로 2c2 완료를 주장하지 않는다. **2c3**은 capability/input/control/
+   quarantine reservation/commit과 poison suffix, transport/GUI 제품 배선은 구현하지 않았으므로 2c2 완료를 주장하지 않는다.
+   **2c2b3a(계획)**는 neutral `ended_purge_transaction.zig`가 target bitset의 stable source/target/survivor ordinal과 b2-provided
+   count/byte scalar의 checked survivor 산술만 계산하는 non-owning pure plan이다. pointer-free/copyable `QueueInput`은 source/claimed-target
+   count와 source/target bytes만, `QueuePlan=union(enum){pristine,planned:QueueScalars}`는 성공한 source/target/survivor count와 bytes만 가진다.
+   empty success도 planned이며 오류에서는 pristine out을 보존한다. ephemeral `DispositionCursor`만 bitset을 borrow하고
+   stable `{source ordinal,target-or-survivor ordinal}`을 반환한다. plan/step의 address·allocator·payload pointer·scratch reference와 seal
+   mint/검증은 0이다. `buildQueuePlan` error set은 `InvalidCount|InvalidTargetMap|ArithmeticOverflow|DestinationOccupied`다. Client/allocator callback/quarantine import, scratch·queue·process mutation,
+   owner freeze, allocation/free와 permit/receipt consume은 0이다. **2c2b3b(계획)**가 private scratch의 immutable/no-escape 원본 descriptor를
+   cleanup authority로 사용해 exact preparation revalidation부터 reservation, receipt tombstone, stable compaction/counter publication,
+   모든 target exact-once callback, post-validation, 정상 release 또는 absorbing no-free quarantine을 하나의 vertical transaction으로
+   닫는다. revalidation/cap/reservation까지는 typed precommit failure, receipt tombstone 뒤 suffix만 no-fail이다. private scratch의 coherent arbitrary overwrite와 cleanup authority 밖에서 이미 수행된 deallocation의
+   탐지·복구는 비목표지만 callback 재진입·canonical descriptor drift·allocator provenance/alias 검증은 유지한다. b3a만으로 target
+   final-zero나 2c2 완료를 주장하지 않는다. **2c3**은 capability/input/control/
    event/RPC primitive를 exact facade로 옮기고 generation의 `logicalClient()` 사용을 0으로 만든다. **2c4**는
    `RuntimeConnection` union을 mode SSOT로 전환해 `RemoteRuntime.client`와 `generation_adapter` 병렬 필드를 제거하고 exact
    15-method/signature/source oracle을 닫는다. 각 gate는 reconnect/current publish와 제품 동작 변화 0을 유지하며 마지막 2c4

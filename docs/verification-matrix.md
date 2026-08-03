@@ -672,7 +672,7 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   last release 뒤 Client/node exact-one destroy를 검증한다. fork child PID-domain mismatch에서 low-level mint/consume/tryDeinit의
   typed reject와 callback/free/owner mutation 0, strict 제품 wrapper의 fail-stop을 구분해 검증한다. HostPool membership
   lease와 ConnectionLease는 별개이며 external-pump owner graph는 변경하지 않는다. 증거 수준은 production-type unit이다.
-- CR3a-2(진행, **2a·2b·2c1·2c2a·2c2b1·2c2b2 구현**, 2c2b3~e 계획): 2c2a는 snapshot 전용 permit을 kind-tagged common
+- CR3a-2(진행, **2a·2b·2c1·2c2a·2c2b1·2c2b2 구현**, 2c2b3a·2c2b3b 및 2c2c~e 계획): 2c2a는 snapshot 전용 permit을 kind-tagged common
   `StreamOperationPermit`/단일 active tuple/process registry로 migration하고 `GenerationBatchRegistry.streamIdle`이
   reserved/ingress/live/releasing 전 상태를 purge blocker로 분류한다. 2c2b1은 대상 stream의 첫 event에 대한 무할당·무변경
   ended hot peek와 비권위적 index hint까지만 구현한다. 2c2b2는 exact binding과 common permit 아래 fixed inline scratch로 전체 Client
@@ -680,6 +680,24 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   queue별 aggregate seal, checked quarantine capacity를 final-address private preparation에 봉인한다. 이 prepare는 allocation/free/queue 및
   process-global quarantine mutation 0이다. target detach/stable compaction, callback cleanup, post-validation, 실제 quarantine
   reservation/commit과 poison suffix, transport/GUI 제품 배선은 2c2b3 이후다.
+  2c2b3a는 Client/allocator/callback/quarantine을 import하지 않는 neutral pure plan으로 target bitset의 stable
+  source/target/survivor ordinal과 b2-provided count/byte scalar의 checked survivor 산술만 검증한다. pointer-free/copyable plan/step에는
+  address·allocator·payload pointer·scratch reference가 없고 ephemeral cursor만 target bitset을 borrow한다. product queue/scratch/process mutation,
+  owner freeze, allocation/free, reservation과 permit/receipt consume은 0이며 b3a만으로 target cleanup이나 2c2 완료를 주장하지 않는다.
+  component gate는 empty/none/all, first/middle/last/alternating, source cap/cap+1, target count mismatch, count/byte underflow·overflow,
+  deterministic replay와 stable survivor 순서를 Debug/ReleaseFast에서 검증하고 Client·client_slot·allocator·quarantine import와 제품 callsite
+  0을 source oracle로 고정한다.
+  2c2b3b가 blocking generation-only complete Client-owned deinit graph 64 MiB checked cap, `pending_outbound` owner SSOT, private immutable/no-escape scratch,
+  별도 advance-before-callback cleanup cursor, stable compaction/counter publication, all-target exact-once callback, scalar-first post-validation과
+  absorbing `quarantined_no_free` poison을 실제 ClientSlot transaction에 함께 배선한다. private scratch의 coherent arbitrary overwrite와 cleanup authority 밖에서
+  이미 수행된 deallocation의 탐지·복구만 비목표이며 public reentry·canonical drift·allocator provenance/alias gate는 유지한다.
+  b3b executable gate는 callback 전후 scratch byte 동일/no-escape, first/middle/last callback 진입 때 cursor가 이미 다음 ordinal인 관측,
+  outer/scalar/survivor drift, outer/scalar
+  mismatch의 payload read/hash 0, scalar exact/content drift의 payload hash exact 1, 모든 원 target callback exact 1, stable survivor order,
+  public reentry `busy`, normal/drift permit·receipt exact-one consume, exact drift suffix 순서, one-slot sticky/64 MiB/replay charge 0,
+  모든 postcallback drift의 fd close 0과 `.not_ended` 대형 scratch 0을 고정한다. direct cleanup leaf가
+  reentry-guarded public release API를 호출하지 않고, neutral module은 pure helper만, `client.zig`는 DTO adapter/queue mutation/direct cleanup만,
+  `client_slot.zig`는 permit/receipt/quarantine orchestration만 소유하는지 source boundary로 검사한다.
   generation 1 compatibility wiring으로 GUI raw `RemoteRuntime.client=*Client`와
   `AttachmentTransport.context=*Client` production callsite 0, GUI-only final-address `GenerationAttachment.initInPlace`,
   external movable `RemoteAttachment`의 outer field 목록·기존 `untracked|charged` reachable 의미와 external `Prepared|Attached`의
@@ -732,7 +750,9 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   `purgeEndedStream` 포함), closed `RuntimeRequest` variants와 exact-field
   `GenerationCapabilities`만 노출하고 arbitrary method-string `call`, generic callback, Client-containing aggregate,
   `*Client|*anyopaque` escape는 0이다. generation의 post-initial batch owner는 2b2 `GenerationBatchAdapter` 하나뿐이며,
-  ended purge는 exact one-shot receipt로 demux queue만 정리하고 canonical attachment drop/lease를 건드리지 않는다. 기존 raw
+  ended purge의 정상 경로와 모든 precommit failure는 exact one-shot receipt로 demux queue만 정리하거나 보존하고 canonical attachment
+  drop/lease를 건드리지 않는다. postcommit Client-owned deinit graph drift만 owned allocation을 no-free quarantine하며 borrowed
+  ledger/attachment/registry/lease는 이때도 dereference/release/mutate 0이다. 기존 raw
   Client entrypoint는 명시적 legacy union arm에만 격리되고 generation 실패의 legacy fallback은 0이다. recursive signature audit와
   self-address/PID/owner-thread/same-stream cleanup gate는
   copy/fork/reentry를 wire/mutation 0으로 거부한다. initial snapshot은 allocator·binding·stream identity를 봉인한 final-address
@@ -752,9 +772,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   0임을 계측/source oracle로 고정한다. ended slow helper의 descriptor 배열 cap은 제품 queue cap과 같고, compact target bitset과 queue별
   aggregate payload seal을 사용해 compile-time 전체 `<= 512 KiB`다. target의
   `GenerationBatchRegistry` entry가 reserved/ingress/live/releasing 어느 상태로든 존재하면 `busy`이며 registry/token/OwnedBatch/accounting,
-  parser raw RX/framing, attachment pending lease/screen, cleanup registry와 connection lease는 byte-for-byte 불변이다.
+  parser raw RX/framing, attachment pending lease/screen, cleanup registry와 connection lease는 정상 경로와 모든 precommit failure에서
+  byte-for-byte 불변이다. postcommit drift에서는 Client-owned parser allocation만 no-free로 버리고 borrowed authority는 불변이다.
 
-  commit은 inventory의 target descriptor slot을 in-place frozen cleanup owner로 전환해 별도 full-size 배열 0이며, receipt tombstone과 네
+  commit은 immutable target descriptor scalar에 대한 cleanup authority를 취득하되 slot bytes를 overlay하지 않고, 별도 small cursor를
+  callback 전에 advance해 exact-once를 소유한다. 별도 full-size 배열은 0이며 receipt tombstone과 네
   queue stable compaction·최종 counter publish가 첫 free callback보다 앞섬을 callback 관측으로 검증한다. receipt copy·wrong
   thread·same-address replay·binding/slot/node/transport splice, commit 직전 queue
   drift, first/middle/last free callback의 public API 재진입은 attachment/slot/client mutation `busy`와 sibling 순서·bytes·counter 보존을
@@ -764,11 +786,15 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   target descriptor는 callback 전에 전부 freeze되어 exact once free됨을 고정한다. node permit은 마지막 callback과 post-callback 검증까지
   live이다. callback 중 canonical queue/source reread는 0이고 마지막 callback 뒤 frozen survivor descriptor/range seal과 current
   queue ownership metadata를 비교하는 post-validation은 정확히 한 번뿐이다. 구조 drift면 payload pointer를 역참조하지 않고 canonical
-  demux queue·partial state·counter를 empty/zero로 tombstone해 sibling owner graph를 no-free quarantine한다. drift의 exact
-  suffix 순서는 `demux tombstone -> quarantine commit -> connection poison -> node permit/transport receipt consume`이다. callback 전
-  process-global `idle->reserved`와 frozen capacity checked sum `<= max_ended_purge_quarantine_bytes(64 MiB)`, 정상 release, drift exact-once
+  Client-owned deinit fields를 empty/null로 tombstone하고 quarantine을 commit한 뒤 absorbing `quarantined_no_free` poison을 게시해 generic teardown의
+  pointer/allocator/fd read와 free/close를 0으로 만든다. drift의 exact
+  suffix 순서는 `all target cleanup -> Client-owned deinit tombstone -> quarantine commit -> no-free poison -> node permit/transport receipt consume`이다. 어떤 postcallback drift에서도 fd close는 0이다. callback 전
+  process-global `idle->reserved`와 blocking generation Client complete owned extent checked sum `<= max_ended_purge_quarantine_bytes(64 MiB)`, 정상 release, drift exact-once
   `reserved->committed`, replay charge 0, committed 뒤 새 generation Client/reconnect/purge terminal 거부를 검증해 process 누적을 한 건으로
-  고정한다. cap 초과는 callback/free/quarantine 0과 precommit poison이다. 이후 generic teardown의 해당 pointer read/free가 0임을 hostile
+  고정한다. deinit owner SSOT는 build/lifecycle/pending outbound와 slice payload의 exact owned length, parser/list/partial capacity backing을
+  포함하고 borrowed ledger/attachment/registry/lease는 제외한다. external mode는 callback 전 mutation 0으로 거부한다. cap 초과는
+  callback/free/quarantine 0인 precommit no-cleanup poison이 reason/unusable을 latch하고 validated captured fd만 detach+close한 뒤 later ordinary
+  deinit이 intact owner를 회수한다. 이후 drift generic teardown의 pointer/allocator/fd read와 free/close가 0임을 hostile
   allocator oracle로 고정한다. 구조가 일치할 때만 aggregate payload seal을 재계산한다.
   commit 전 typed error는 mutation 0, commit 뒤 정상/poison은 모두 target cleanup과 no-fail node permit→transport receipt suffix를 끝내고
   public `.purged`로 정규화하며 poison latch를 별도로 검증한다. purge 뒤 attachment state·cleanup registry·connection lease가 live이고 later

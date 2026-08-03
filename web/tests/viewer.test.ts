@@ -11,6 +11,7 @@ import {
   bootShell,
   documentIsDirtyAgainstSnapshot,
   isLinkActivation,
+  linkActivationFor,
   closeLockCanAcquire,
   closeUnlockOwnsLock,
   isAssetRequest,
@@ -22,6 +23,13 @@ import {
   maxAssetRequests,
   viewerChannel,
 } from "../src/viewer";
+
+/** renderer가 보내는 여러 메시지 중 링크 열기만 고른다(ready·rendered 보고가 함께 섞인다). */
+function linkActivations(messages: unknown[]): unknown[] {
+  return messages.filter(
+    (message) => (message as { type?: unknown } | null)?.type === "link-activate",
+  );
+}
 
 describe("file viewer bridge boundary", () => {
   test("save cleanliness follows the CM6 Text snapshot even when revisions advance", () => {
@@ -901,17 +909,14 @@ describe("bridge-free renderer", () => {
 
     const link = dom.window.document.querySelector<HTMLAnchorElement>("a");
     expect(link).not.toBeNull();
-    const navigated = link?.dispatchEvent(
+    // **합성 클릭은 링크를 열지 않는다**(§13 경화). 스크립트가 만든 이벤트는 `isTrusted`가 거짓이라
+    // 여기서 걸린다 — 테스트가 만들 수 있는 이벤트는 전부 합성이므로 이 층에서는 거부만 검증할 수 있고,
+    // 정상 경로는 `linkActivationFor` 단위 테스트가 값으로 고정한다.
+    link?.dispatchEvent(
       new dom.window.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }),
     );
-
-    expect(navigated).toBe(false);
-    expect(messages).toContainEqual({
-      channel: viewerChannel,
-      type: "link-activate",
-      href: "../guide/next.md#usage",
-      forceSystem: false,
-    });
+    expect(linkActivations(messages)).toEqual([]);
+    // 그렇다고 renderer가 스스로 이동해서도 안 된다.
     expect(dom.window.location.href).toBe("maru-app://render/render.html");
   });
 
@@ -936,13 +941,9 @@ describe("bridge-free renderer", () => {
 
     const links = dom.window.document.querySelectorAll<HTMLAnchorElement>("a");
     expect(links.length).toBe(2);
-    expect(
-      links[0]?.dispatchEvent(
-        new dom.window.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }),
-      ),
-    ).toBe(false);
-    expect(
-      links[0]?.dispatchEvent(
+    // 합성 클릭은 disposition과 무관하게 아무것도 발급하지 않는다(§13 경화).
+    for (const link of links) {
+      link.dispatchEvent(
         new dom.window.MouseEvent("click", {
           bubbles: true,
           cancelable: true,
@@ -950,25 +951,43 @@ describe("bridge-free renderer", () => {
           metaKey: true,
           shiftKey: true,
         }),
-      ),
-    ).toBe(false);
-    expect(
-      links[1]?.dispatchEvent(
-        new dom.window.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }),
-      ),
-    ).toBe(true);
+      );
+    }
+    expect(linkActivations(messages)).toEqual([]);
+  });
 
-    expect(messages).toContainEqual({
+  test("링크 열기 판정은 사용자가 실제로 누른 클릭만 통과시킨다", () => {
+    // 이 판정이 리스너에서 떨어져 나온 이유가 여기 있다 — `isTrusted`는 브라우저만 세울 수 있어 DOM
+    // 테스트로는 **정상 경로를 만들 수 없다**(JSDOM에서 own·unconfigurable). 값으로 받으면 둘 다 고정된다.
+    const base = {
+      isTrusted: true,
+      button: 0,
+      metaKey: false,
+      shiftKey: false,
+      href: "https://example.com/guide",
+      linkInRoot: true,
+    };
+
+    expect(linkActivationFor(base)).toEqual({
       channel: viewerChannel,
       type: "link-activate",
       href: "https://example.com/guide",
       forceSystem: false,
     });
-    expect(messages).toContainEqual({
-      channel: viewerChannel,
-      type: "link-activate",
-      href: "https://example.com/guide",
-      forceSystem: true,
-    });
+    // ⌘⇧는 시스템 브라우저로 보내라는 뜻이다.
+    expect(linkActivationFor({ ...base, metaKey: true, shiftKey: true })?.forceSystem).toBe(true);
+    // 로컬 문서도 같은 경로다.
+    expect(linkActivationFor({ ...base, href: "../guide/next.md#usage" })?.href).toBe(
+      "../guide/next.md#usage",
+    );
+
+    // **합성 이벤트는 거부한다** — 이게 이 경화의 전부다.
+    expect(linkActivationFor({ ...base, isTrusted: false })).toBeNull();
+    // 나머지 기존 게이트도 그대로다.
+    expect(linkActivationFor({ ...base, button: 1 })).toBeNull();
+    expect(linkActivationFor({ ...base, href: null })).toBeNull();
+    expect(linkActivationFor({ ...base, linkInRoot: false })).toBeNull();
+    expect(linkActivationFor({ ...base, href: "javascript:alert(1)" })).toBeNull();
+    expect(linkActivationFor({ ...base, href: "#usage" })).toBeNull();
   });
 });

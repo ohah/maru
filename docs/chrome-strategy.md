@@ -112,7 +112,8 @@ pub const Tokens = struct {
 ```
 `appearance.ResolvedTheme`(9 색)는 유지하되, `Tokens.tui()`가 그걸 받아 role+derivation을 채운다. `ColorRole.divider`를
 소비하는 Chrome component는 `sidebar_active`에서 다시 파생하지 않고 panel background의 루미넌스 반대 방향으로만
-파생한다. 따라서 rich 토큰도 그 divider의 출처를 바꾸지 않으며, active 색과 background의 우연한 조합이
+파생한다. divider의 channel delta는 ±24로 고정해 1px scope/search outline과 group/row rule이 PNG 축소에서도
+panel과 구별되게 한다. 따라서 rich 토큰도 그 divider의 출처를 바꾸지 않으며, active 색과 background의 우연한 조합이
 component divider를 background와 같은 RGB로 만드는 회귀를 막는다. **로더 갭(5 key)은 여기서 config→Tokens로 메운다.**
 
 ### 5.2 ChromeDraw — `chrome/draw.zig` (semantic 어휘, 백엔드 중립)

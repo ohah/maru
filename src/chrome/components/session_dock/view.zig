@@ -761,6 +761,10 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
             try std.testing.expectEqual(metrics.header_refresh_extent, icon.content_rect.w);
             const expected_refresh_x: i32 = @intFromFloat(@floor(header.rect.x + header.rect.width - @as(f32, @floatFromInt(metrics.header_trailing_inset + metrics.header_refresh_extent))));
             try std.testing.expectEqual(expected_refresh_x, icon.content_rect.x);
+            const header_right: i32 = @intFromFloat(@floor(header.rect.x + header.rect.width));
+            try std.testing.expectEqual(@as(i32, @intCast(metrics.header_trailing_inset)), header_right - (icon.content_rect.x + @as(i32, @intCast(icon.content_rect.w))));
+            try std.testing.expect(icon.content_rect.x >= @as(i32, @intFromFloat(@floor(header.rect.x))));
+            try std.testing.expect(icon.content_rect.x + @as(i32, @intCast(icon.content_rect.w)) <= header_right);
         },
         else => return error.TestUnexpectedResult,
     }
@@ -777,7 +781,7 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
     );
 
     // The loading indicator must not re-anchor at the outer header edge. It is a one-cell
-    // glyph optically centred in the same two-cell slot as the registered refresh SVG.
+    // glyph optically centred in the same logical slot as the registered refresh SVG.
     var loading_props = props;
     loading_props.loading = true;
     const loading_out = try view(loading_props, frame, .{}, &tk, .{ .ops = &ops, .runs = &runs, .text_bytes = &text_bytes });

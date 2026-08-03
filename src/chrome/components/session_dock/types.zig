@@ -167,10 +167,11 @@ pub const DockMetrics = struct {
             .header_host_icon_extent = geometryPx(spacing.pointsPx(18, scale)),
             .header_host_icon_gap = geometryPx(spacing.px(.xs, scale)),
             .header_utility_gap = geometryPx(spacing.px(.sm, scale)),
-            .header_refresh_extent = geometryPx(spacing.pointsPx(20, scale)),
-            // Header utility ink and its hit rect keep a full logical medium safe inset from
-            // the dock edge; refresh/spinner no longer appears clipped beside the provenance.
-            .header_trailing_inset = geometryPx(spacing.px(.md, scale)),
+            // A 24pt target gives the 18pt registered refresh glyph three logical points of
+            // optical breathing room on every side.  The 20pt trailing inset matches the
+            // shared dock content edge, so neither the SVG nor the spinner reads as clipped.
+            .header_refresh_extent = geometryPx(spacing.pointsPx(24, scale)),
+            .header_trailing_inset = geometryPx(spacing.px(.lg, scale)),
             // The root already contributes the dock's 20pt content inset. The disclosure gets
             // only its local 8pt slot, preventing the chevron from inheriting a second 20pt.
             .group_disclosure_inset_x = geometryPx(spacing.px(.xs, scale)),
@@ -262,12 +263,12 @@ test "DockMetrics fixes all Session Dock geometry independently of terminal cell
     try std.testing.expectEqual(@as(u32, 18), m.header_host_icon_extent);
     try std.testing.expectEqual(@as(u32, 8), m.header_host_icon_gap);
     try std.testing.expectEqual(@as(u32, 12), m.header_utility_gap);
-    try std.testing.expectEqual(@as(u32, 20), m.header_refresh_extent);
-    try std.testing.expectEqual(@as(u32, 16), m.header_trailing_inset);
+    try std.testing.expectEqual(@as(u32, 24), m.header_refresh_extent);
+    try std.testing.expectEqual(@as(u32, 20), m.header_trailing_inset);
     try std.testing.expectEqual(@as(u32, 8), m.group_disclosure_inset_x);
     try std.testing.expectEqual(@as(u32, 20), m.group_disclosure_extent);
     try std.testing.expectEqual(@as(u32, 8), m.group_disclosure_label_gap);
-    try std.testing.expectEqual(@as(u32, 120), m.headerUtilityWidth());
+    try std.testing.expectEqual(@as(u32, 128), m.headerUtilityWidth());
     try std.testing.expectEqual(@as(u32, 248), m.fixedChromeHeight());
     try std.testing.expect(m.card_metadata_y < m.card_h);
     try std.testing.expect(m.detail_turn_y + m.detail_turn_step * 3 <= m.expanded_detail_h);

@@ -445,6 +445,11 @@ pub const TextOptions = struct {
 };
 ```
 
+`border_widths_px`의 순서는 `[top, right, bottom, left]`이며 각 값은 그 변만
+paint한다. 예를 들어 `{ 0, 0, 1, 0 }`은 bottom rule 하나이고, 다른 세 변의
+anti-alias·corner·fill을 border 색으로 바꾸지 않는다. Metal lowerer는 사분면에서 한
+폭을 추측하지 않고 각 edge까지의 거리로 이를 계산한다.
+
 - `CardVariant`/`TextTone`은 domain props다. selected는 archive/session selection처럼 model이
   결정하고, hover/focus/pressed는 `InteractionState`만 결정한다. disabled는 별도 bool로
   중복하지 않고 `UiAction.enabled=false`에서만 나온다. painter의 precedence는

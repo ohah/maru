@@ -114,11 +114,15 @@ static NSString *const MARU_METAL_QUAD_SHADER_SOURCE =
      "  float aa = max(fwidth(d), 1e-4);\n"
      "  float cov = 1.0 - smoothstep(-aa, aa, d);\n"
      "  if (cov <= 0.0) { discard_fragment(); }\n"
-     // 변별 border: 안쪽 깊이(-d)에서 가장 가까운 변의 폭으로 경계를 잡는다(토대 근사 — 모서리
-     // 변별 정밀화는 C4b 후속). top/right/bottom/left = border.x/y/z/w.
-     "  float bw = max((p.y < 0.0) ? in.border.x : in.border.z, (p.x < 0.0) ? in.border.w : in.border.y);\n"
-     "  float dist_in = -d;\n"
-     "  float border_mix = (bw > 0.0) ? (1.0 - smoothstep(bw - aa, bw + aa, dist_in)) : 0.0;\n"
+     // Side-specific border: each requested side measures its own distance from the matching
+     // rect edge.  Choosing one width from the fragment's quadrant would make a bottom-only
+     // rule leak onto the left/right edges of that half of the quad. top/right/bottom/left =
+     // border.x/y/z/w; rounded-corner coverage above clips the small corner overlap.
+     "  float border_mix = 0.0;\n"
+     "  if (in.border.x > 0.0) { border_mix = max(border_mix, 1.0 - smoothstep(in.border.x - aa, in.border.x + aa, in.local.y)); }\n"
+     "  if (in.border.y > 0.0) { border_mix = max(border_mix, 1.0 - smoothstep(in.border.y - aa, in.border.y + aa, in.half_size.x * 2.0 - in.local.x)); }\n"
+     "  if (in.border.z > 0.0) { border_mix = max(border_mix, 1.0 - smoothstep(in.border.z - aa, in.border.z + aa, in.half_size.y * 2.0 - in.local.y)); }\n"
+     "  if (in.border.w > 0.0) { border_mix = max(border_mix, 1.0 - smoothstep(in.border.w - aa, in.border.w + aa, in.local.x)); }\n"
      // fill gradient: 1=수직(local.y/h), 2=수평(local.x/w), 0=solid.
      "  float t = (in.gradient_kind > 1.5) ? (in.local.x / (in.half_size.x * 2.0)) : (in.local.y / (in.half_size.y * 2.0));\n"
      "  float4 fill = (in.gradient_kind < 0.5) ? in.fill0 : mix(in.fill0, in.fill1, clamp(t, 0.0, 1.0));\n"

@@ -76,6 +76,9 @@ pub fn shapeRun(
             .glyph_id = native_glyph.glyph_id,
             .fallback = native_glyph.fallback != 0,
             .color_glyph_kind = if (native_glyph.color_glyph_kind != 0) .color else .monochrome,
+            .raster_font_size_milli = @intCast(@as(u32, point_size) * 1000),
+            .raster_width_px = @intFromFloat(@ceil(advance)),
+            .raster_height_px = @intFromFloat(@ceil(line_height)),
         };
         placement.* = .{
             .x_px = @as(f32, @floatFromInt(origin.x)) + native_glyph.x_px,

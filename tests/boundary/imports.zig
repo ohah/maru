@@ -17,6 +17,15 @@ const ClientGuardProof = struct {
     release_depth: usize = 1,
     pre_gate_self_fields: []const []const u8 = &.{},
 };
+const ClientConstructionUse = struct {
+    path: []const u8,
+    enclosing_fn: []const u8,
+    count: usize = 1,
+};
+const ClientConstructionProof = struct {
+    receiver: []const u8,
+    uses: []const ClientConstructionUse,
+};
 
 test "CR3a-2c2b3b B3b-S shared guard oracle rejects alias late and unbound release shapes" {
     const good =
@@ -132,6 +141,21 @@ test "CR3a-2c2b3b B3b-S trusted guard oracle rejects pre-acquire graph and unbou
     const exclusive_post_commit_use = exclusive_prefix ++ "catch return false;" ++ exclusive_latch ++
         exclusive_guard_suffix ++ exclusive_terminal_prefix ++ " helper(self);" ++ exclusive_terminal_suffix;
     try std.testing.expect(!syntheticExclusiveGuardValid(exclusive_post_commit_use));
+}
+
+test "CR3a-2c2b3b B3b-S construction oracle rejects unreviewed member references" {
+    const good =
+        "fn owner(client: anytype) void { client.sample(); }" ++
+        "test \"ignored\" { client.sample(); }";
+    try std.testing.expect(try syntheticConstructionPolicyValid(good, "owner", 1));
+    const wrong_owner = "fn intruder(client: anytype) void { client.sample(); }";
+    try std.testing.expect(!try syntheticConstructionPolicyValid(wrong_owner, "owner", 1));
+    const alias = "fn owner() void { const escaped = Client.sample; _ = escaped; }";
+    try std.testing.expect(try syntheticConstructionPolicyValid(alias, "owner", 1));
+    const duplicate = "fn owner(client: anytype) void { client.sample(); client.sample(); }";
+    try std.testing.expect(!try syntheticConstructionPolicyValid(duplicate, "owner", 1));
+    const reflected = "fn owner() void { _ = @field(Client, \"sample\"); }";
+    try std.testing.expect(!try syntheticConstructionPolicyValid(reflected, "owner", 1));
 }
 
 test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy closure" {
@@ -286,6 +310,207 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .receiver = "firstPoisonReason", .funnel = "firstPoisonReason", .gate = "beginPublicMutation" },
     };
     try expectGuardedClientReceiverPolicies(allocator, source, &manifest, &guarded);
+    const client_path = "src/platform/macos/session_host/client.zig";
+    const slot_path = "src/platform/macos/session_host/client_slot.zig";
+    const pump_path = "src/platform/macos/session_host/client_external_pump.zig";
+    const adoption_path = "src/platform/macos/session_host/client_external_adoption.zig";
+    const materialization_path = "src/platform/macos/session_host/external_event_materialization.zig";
+    const decision_path = "src/platform/macos/session_host/external_source_decision.zig";
+    const construction = [_]ClientConstructionProof{
+        .{ .receiver = "canMoveToGenerationNode", .uses = &.{
+            .{ .path = client_path, .enclosing_fn = "moveToGenerationNode" },
+            .{ .path = slot_path, .enclosing_fn = "initInPlaceWithIssuer" },
+        } },
+        .{ .receiver = "bindGenerationAccountingLedger", .uses = &.{
+            .{ .path = slot_path, .enclosing_fn = "initInPlaceWithIssuer" },
+        } },
+        .{ .receiver = "moveToGenerationNode", .uses = &.{
+            .{ .path = slot_path, .enclosing_fn = "initInPlaceWithIssuer" },
+        } },
+        .{ .receiver = "projectionAuthorityDigest", .uses = &.{
+            .{ .path = client_path, .enclosing_fn = "overlapsCommittedOwnedRange" },
+            .{ .path = pump_path, .enclosing_fn = "captureResyncSemanticCleanupSnapshot" },
+            .{ .path = pump_path, .enclosing_fn = "cleanupInstalledF3c2FixtureOwners", .count = 2 },
+            .{ .path = pump_path, .enclosing_fn = "committedRecoverySnapshotBindingCurrent" },
+            .{ .path = pump_path, .enclosing_fn = "consumeProjectedRecoverySnapshotUnchecked" },
+            .{ .path = pump_path, .enclosing_fn = "detectResyncSemanticCleanupDrift" },
+            .{ .path = pump_path, .enclosing_fn = "finishPublishedRxAggregateCommit" },
+            .{ .path = pump_path, .enclosing_fn = "projectOwnerEventInternal", .count = 8 },
+            .{ .path = pump_path, .enclosing_fn = "publishRecoverySnapshotCommitUnchecked" },
+            .{ .path = pump_path, .enclosing_fn = "publishRxAggregateUnchecked" },
+        } },
+        .{ .receiver = "externalTransferProfile", .uses = &.{
+            .{ .path = client_path, .enclosing_fn = "prepareExternalPumpTransfer" },
+            .{ .path = client_path, .enclosing_fn = "validate" },
+            .{ .path = pump_path, .enclosing_fn = "initFromAttachPartsInPlace" },
+            .{ .path = pump_path, .enclosing_fn = "prepareEventReduction", .count = 2 },
+            .{ .path = pump_path, .enclosing_fn = "validate" },
+            .{ .path = pump_path, .enclosing_fn = "validateEventReduction" },
+        } },
+        .{ .receiver = "prepareExternalRecoveryDiscard", .uses = &.{
+            .{ .path = pump_path, .enclosing_fn = "finishImmediateTerminal" },
+            .{ .path = pump_path, .enclosing_fn = "finishNonAdopted" },
+        } },
+        .{ .receiver = "validateExternalRecoveryDiscard", .uses = &.{
+            .{ .path = pump_path, .enclosing_fn = "finishImmediateTerminal" },
+            .{ .path = pump_path, .enclosing_fn = "finishNonAdopted" },
+        } },
+        .{ .receiver = "prepareExternalPumpTransfer", .uses = &.{
+            .{ .path = pump_path, .enclosing_fn = "initInPlaceWithOptions" },
+        } },
+        .{ .receiver = "commitExternalPumpTransfer", .uses = &.{
+            .{ .path = pump_path, .enclosing_fn = "initInPlaceWithOptions" },
+        } },
+        .{ .receiver = "foldExternalAdoptionSource", .uses = &.{
+            .{ .path = client_path, .enclosing_fn = "externalAdoptionFoldResultMatches" },
+            .{ .path = pump_path, .enclosing_fn = "prepareAdoptionInner" },
+        } },
+        .{ .receiver = "externalAdoptionFoldResultMatches", .uses = &.{
+            .{ .path = client_path, .enclosing_fn = "externalMetadataDtoMatchesEventCandidate" },
+            .{ .path = client_path, .enclosing_fn = "materializeExternalMetadataEvent", .count = 2 },
+            .{ .path = decision_path, .enclosing_fn = "decide" },
+            .{ .path = decision_path, .enclosing_fn = "decisionMatches" },
+        } },
+        .{ .receiver = "materializeExternalMetadataEvent", .uses = &.{
+            .{ .path = materialization_path, .enclosing_fn = "prepareInPlace" },
+        } },
+        .{ .receiver = "externalMetadataDtoMatchesEventCandidate", .uses = &.{
+            .{ .path = materialization_path, .enclosing_fn = "validate" },
+        } },
+        .{ .receiver = "previewExternalAdoption", .uses = &.{
+            .{ .path = adoption_path, .enclosing_fn = "preflightMetadata" },
+        } },
+        .{ .receiver = "inspectExternalAdoption", .uses = &.{
+            .{ .path = client_path, .enclosing_fn = "checkExternalAdoptionAllocation" },
+            .{ .path = client_path, .enclosing_fn = "preflightExternalAdoption" },
+            .{ .path = adoption_path, .enclosing_fn = "initInPlace" },
+        } },
+        .{ .receiver = "preflightExternalAdoptionDestination", .uses = &.{
+            .{ .path = client_path, .enclosing_fn = "prepareExternalAdoptionTake" },
+            .{ .path = client_path, .enclosing_fn = "prepareExternalPumpTransfer", .count = 2 },
+            .{ .path = client_path, .enclosing_fn = "stageExternalScreenCopies" },
+            .{ .path = pump_path, .enclosing_fn = "initFromAttachPartsInPlace", .count = 3 },
+            .{ .path = pump_path, .enclosing_fn = "initInPlaceWithOptions", .count = 2 },
+            .{ .path = pump_path, .enclosing_fn = "prepareAdoptionInner" },
+            .{ .path = adoption_path, .enclosing_fn = "initInPlace" },
+        } },
+        .{ .receiver = "preflightExternalAdoptionDestinationWithScratch", .uses = &.{
+            .{ .path = client_path, .enclosing_fn = "prepareExternalRecoveryDiscard", .count = 2 },
+            .{ .path = pump_path, .enclosing_fn = "metadataDtoBackingDisjointFromClient" },
+            .{ .path = pump_path, .enclosing_fn = "prepareAdoptionInner", .count = 2 },
+            .{ .path = pump_path, .enclosing_fn = "projectionScratchDisjoint" },
+            .{ .path = pump_path, .enclosing_fn = "screenRangeDisjointFromClientAndMetadata" },
+            .{ .path = pump_path, .enclosing_fn = "teardownUnderHeldOperationLease" },
+            .{ .path = pump_path, .enclosing_fn = "validateFinalSeal", .count = 2 },
+            .{ .path = pump_path, .enclosing_fn = "wholeTurnScratchDisjoint" },
+            .{ .path = materialization_path, .enclosing_fn = "prepareInPlace" },
+        } },
+        .{ .receiver = "appendExternalOwnerRangesForTeardown", .uses = &.{
+            .{ .path = pump_path, .enclosing_fn = "buildRxOwnerAuthoritySnapshot" },
+            .{ .path = pump_path, .enclosing_fn = "prepareAggregateOwnerRangeProof" },
+            .{ .path = pump_path, .enclosing_fn = "rebuildProductReplacementInventory" },
+        } },
+        .{ .receiver = "prepareExternalOwnerRangeProof", .uses = &.{
+            .{ .path = pump_path, .enclosing_fn = "initInPlaceWithOptions" },
+        } },
+        .{ .receiver = "preflightExternalAdoption", .uses = &.{
+            .{ .path = client_path, .enclosing_fn = "checkExternalAdoptionAllocation" },
+            .{ .path = adoption_path, .enclosing_fn = "initInPlace" },
+        } },
+        .{ .receiver = "stageExternalScreenCopies", .uses = &.{
+            .{ .path = adoption_path, .enclosing_fn = "initInPlace" },
+        } },
+        .{ .receiver = "externalScreenCopiesMatch", .uses = &.{
+            .{ .path = adoption_path, .enclosing_fn = "validate" },
+        } },
+        .{ .receiver = "validateExternalAdoptionPlan", .uses = &.{
+            .{ .path = client_path, .enclosing_fn = "checkExternalAdoptionAllocation" },
+            .{ .path = client_path, .enclosing_fn = "sealExternalAdoption" },
+            .{ .path = client_path, .enclosing_fn = "validateSealedExternalAdoptionPlan" },
+            .{ .path = adoption_path, .enclosing_fn = "validate" },
+        } },
+        .{ .receiver = "externalAdoptionDisarmMetadataBytes", .uses = &.{
+            .{ .path = adoption_path, .enclosing_fn = "initInPlace" },
+            .{ .path = adoption_path, .enclosing_fn = "validate" },
+        } },
+        .{ .receiver = "externalAdoptionDisarmMatchesInventory", .uses = &.{
+            .{ .path = adoption_path, .enclosing_fn = "validate" },
+        } },
+        .{ .receiver = "sealExternalAdoption", .uses = &.{
+            .{ .path = pump_path, .enclosing_fn = "prepareAdoptionInner" },
+        } },
+        .{ .receiver = "validateSealedExternalAdoptionPlan", .uses = &.{
+            .{ .path = client_path, .enclosing_fn = "prepareExternalAdoptionTake" },
+            .{ .path = client_path, .enclosing_fn = "validate" },
+            .{ .path = adoption_path, .enclosing_fn = "commitScreenSeeds" },
+        } },
+        .{ .receiver = "prepareExternalAdoptionTake", .uses = &.{
+            .{ .path = pump_path, .enclosing_fn = "prepareAdoptionInner" },
+        } },
+        .{ .receiver = "commitExternalAdoption", .uses = &.{} },
+        .{ .receiver = "prepareExternalModeDeinit", .uses = &.{
+            .{ .path = client_path, .enclosing_fn = "poisonAndTakeFd" },
+            .{ .path = client_path, .enclosing_fn = "prepareDeinitGraph" },
+        } },
+        .{ .receiver = "reserveExternalModeDeinit", .uses = &.{
+            .{ .path = pump_path, .enclosing_fn = "closeUncommittedOwned" },
+            .{ .path = pump_path, .enclosing_fn = "latchCommitTerminal" },
+            .{ .path = pump_path, .enclosing_fn = "latchCrossOwnerAliasTerminal" },
+            .{ .path = pump_path, .enclosing_fn = "teardownUnderHeldOperationLease" },
+        } },
+        .{ .receiver = "finishReservedExternalModeDeinit", .uses = &.{
+            .{ .path = pump_path, .enclosing_fn = "closeUncommittedOwned" },
+            .{ .path = pump_path, .enclosing_fn = "latchCommitTerminal" },
+            .{ .path = pump_path, .enclosing_fn = "latchCrossOwnerAliasTerminal" },
+            .{ .path = pump_path, .enclosing_fn = "teardownUnderHeldOperationLease" },
+        } },
+        .{ .receiver = "cancelReservedExternalModeDeinit", .uses = &.{
+            .{ .path = pump_path, .enclosing_fn = "teardownUnderHeldOperationLease" },
+        } },
+        .{ .receiver = "transferReservedExternalModeDeinit", .uses = &.{
+            .{ .path = pump_path, .enclosing_fn = "teardownUnderHeldOperationLease", .count = 2 },
+        } },
+        .{ .receiver = "bindOperationFence", .uses = &.{
+            .{ .path = slot_path, .enclosing_fn = "initInPlaceWithIssuer" },
+        } },
+    };
+    try expectClientConstructionPolicies(allocator, &manifest, &construction);
+    const external_mode_manifest = [_]ClientReceiverSpec{.{
+        .name = "enterExternalMode",
+        .receiver_type = mutable,
+        .class = .construction,
+    }};
+    const external_mode_proof = [_]ClientConstructionProof{.{
+        .receiver = "enterExternalMode",
+        .uses = &.{
+            .{ .path = client_path, .enclosing_fn = "checkClientExternalModeAllocation" },
+            .{ .path = client_path, .enclosing_fn = "checkExternalAdoptionAllocation" },
+            .{ .path = pump_path, .enclosing_fn = "initWithAllocator" },
+            .{ .path = adoption_path, .enclosing_fn = "makePreparedClient" },
+            .{ .path = materialization_path, .enclosing_fn = "init" },
+            .{ .path = "src/platform/macos/session_host/external_attach.zig", .enclosing_fn = "enterExternalMode" },
+            .{ .path = "src/platform/macos/session_host/external_attach_evidence.zig", .enclosing_fn = "init" },
+            .{ .path = "src/platform/macos/session_host/external_pump_owner.zig", .enclosing_fn = "exerciseD3SocketpairRevokePosition" },
+        },
+    }};
+    try expectClientConstructionPolicies(allocator, &external_mode_manifest, &external_mode_proof);
+    const slot_source = try readZigFileZ(allocator, slot_path);
+    defer allocator.free(slot_source);
+    try expectContainerMethodMarkersInOrder(
+        allocator,
+        slot_source,
+        "ClientSlot",
+        "initInPlaceWithIssuer",
+        &.{
+            "source.canMoveToGenerationNode()",
+            "registerClientSlot(registry_reservation)",
+            "source.moveToGenerationNode(&node.client)",
+            "node.client.bindOperationFence",
+            "node.client.bindGenerationAccountingLedger",
+            "out.* =",
+            "publishClientSlot(registry_reservation)",
+        },
+    );
     try expectContainerMethodMarkersInOrder(
         allocator,
         source,
@@ -6534,6 +6759,174 @@ fn expectClientReceiverManifest(
         found_count += 1;
     }
     try std.testing.expectEqual(manifest.len, found_count);
+}
+
+fn expectClientConstructionPolicies(
+    allocator: std.mem.Allocator,
+    manifest: []const ClientReceiverSpec,
+    proofs: []const ClientConstructionProof,
+) !void {
+    var construction_count: usize = 0;
+    for (manifest) |entry| {
+        if (entry.class != .construction) continue;
+        construction_count += 1;
+        var matches: usize = 0;
+        for (proofs) |proof|
+            matches += @intFromBool(std.mem.eql(u8, entry.name, proof.receiver));
+        try std.testing.expectEqual(@as(usize, 1), matches);
+    }
+    try std.testing.expectEqual(construction_count, proofs.len);
+
+    var expected_edges: usize = 0;
+    for (proofs, 0..) |proof, proof_index| {
+        for (proofs[0..proof_index]) |prior|
+            try std.testing.expect(!std.mem.eql(u8, prior.receiver, proof.receiver));
+        for (proof.uses, 0..) |use, use_index| {
+            try std.testing.expect(use.count > 0);
+            expected_edges += 1;
+            for (proof.uses[0..use_index]) |prior|
+                try std.testing.expect(!clientConstructionUseEql(prior, use));
+        }
+    }
+    const observed = try allocator.alloc(usize, expected_edges);
+    defer allocator.free(observed);
+    @memset(observed, 0);
+    var unreviewed: usize = 0;
+
+    var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
+    defer dir.close(std.testing.io);
+    var walker = try dir.walk(allocator);
+    defer walker.deinit();
+    while (try walker.next(std.testing.io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".zig")) continue;
+        const path = try std.fmt.allocPrint(allocator, "src/{s}", .{entry.path});
+        defer allocator.free(path);
+        const source = try readZigFileZ(allocator, path);
+        defer allocator.free(source);
+        var tree = try std.zig.Ast.parse(allocator, source, .zig);
+        defer tree.deinit(allocator);
+        try scanClientConstructionSource(&tree, path, proofs, observed, &unreviewed, true);
+    }
+
+    var flat_index: usize = 0;
+    for (proofs) |proof| {
+        for (proof.uses) |use| {
+            try std.testing.expectEqual(use.count, observed[flat_index]);
+            flat_index += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), unreviewed);
+}
+
+fn scanClientConstructionSource(
+    tree: *const std.zig.Ast,
+    path: []const u8,
+    proofs: []const ClientConstructionProof,
+    observed: []usize,
+    unreviewed: *usize,
+    report_unreviewed: bool,
+) !void {
+    var token: std.zig.Ast.TokenIndex = 0;
+    while (token + 1 < tree.tokens.len) : (token += 1) {
+        if (std.mem.eql(u8, tree.tokenSlice(token), "@field")) {
+            var lookahead = token + 1;
+            const end = @min(tree.tokens.len, token + 10);
+            while (lookahead < end) : (lookahead += 1) {
+                const literal = tree.tokenSlice(lookahead);
+                if (literal.len < 2 or literal[0] != '"') continue;
+                for (proofs) |proof| {
+                    if (literal.len == proof.receiver.len + 2 and
+                        std.mem.eql(u8, literal[1 .. literal.len - 1], proof.receiver))
+                        return error.TestUnexpectedResult;
+                }
+            }
+        }
+        if (!std.mem.eql(u8, tree.tokenSlice(token), ".")) continue;
+        const receiver = tree.tokenSlice(token + 1);
+        var proof_match: ?usize = null;
+        for (proofs, 0..) |proof, index| {
+            if (std.mem.eql(u8, proof.receiver, receiver)) {
+                proof_match = index;
+                break;
+            }
+        }
+        const proof_index = proof_match orelse continue;
+        if (tokenInsideTopLevelTest(tree, token)) continue;
+        const enclosing_fn = innermostFunctionName(tree, token) orelse "<root>";
+        var flat_index: usize = 0;
+        var matched = false;
+        for (proofs, 0..) |proof, index| {
+            for (proof.uses) |use| {
+                if (index == proof_index and std.mem.eql(u8, use.path, path) and
+                    std.mem.eql(u8, use.enclosing_fn, enclosing_fn))
+                {
+                    observed[flat_index] += 1;
+                    matched = true;
+                }
+                flat_index += 1;
+            }
+        }
+        if (!matched) {
+            if (report_unreviewed)
+                std.debug.print("unreviewed Client construction reference: {s} {s} {s}\n", .{
+                    receiver,
+                    path,
+                    enclosing_fn,
+                });
+            unreviewed.* += 1;
+        }
+    }
+}
+
+fn syntheticConstructionPolicyValid(
+    source: [:0]const u8,
+    enclosing_fn: []const u8,
+    count: usize,
+) !bool {
+    const allocator = std.testing.allocator;
+    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    defer tree.deinit(allocator);
+    const proofs = [_]ClientConstructionProof{.{
+        .receiver = "sample",
+        .uses = &.{.{ .path = "synthetic.zig", .enclosing_fn = enclosing_fn, .count = count }},
+    }};
+    var observed = [_]usize{0};
+    var unreviewed: usize = 0;
+    scanClientConstructionSource(&tree, "synthetic.zig", &proofs, &observed, &unreviewed, false) catch
+        return false;
+    return unreviewed == 0 and observed[0] == count;
+}
+
+fn clientConstructionUseEql(a: ClientConstructionUse, b: ClientConstructionUse) bool {
+    return std.mem.eql(u8, a.path, b.path) and
+        std.mem.eql(u8, a.enclosing_fn, b.enclosing_fn);
+}
+
+fn tokenInsideTopLevelTest(tree: *const std.zig.Ast, token: std.zig.Ast.TokenIndex) bool {
+    for (tree.rootDecls()) |node| {
+        if (tree.nodeTag(node) != .test_decl) continue;
+        if (tree.firstToken(node) <= token and token <= tree.lastToken(node)) return true;
+    }
+    return false;
+}
+
+fn innermostFunctionName(tree: *const std.zig.Ast, token: std.zig.Ast.TokenIndex) ?[]const u8 {
+    var result: ?[]const u8 = null;
+    var result_span: usize = std.math.maxInt(usize);
+    for (0..tree.nodes.len) |raw_node| {
+        const node: std.zig.Ast.Node.Index = @enumFromInt(raw_node);
+        const first = tree.firstToken(node);
+        const last = tree.lastToken(node);
+        if (token < first or token > last) continue;
+        var buffer: [1]std.zig.Ast.Node.Index = undefined;
+        const proto = tree.fullFnProto(&buffer, node) orelse continue;
+        const name_token = proto.name_token orelse continue;
+        const span: usize = @intCast(last - first);
+        if (span >= result_span) continue;
+        result = tree.tokenSlice(name_token);
+        result_span = span;
+    }
+    return result;
 }
 
 fn expectGuardedClientReceiverPolicies(

@@ -5054,6 +5054,27 @@ test "CR3a B3b-F deinit retries only after a shared operation leaves" {
     );
 }
 
+test "CR3a B3b-S bound generation Client cannot enter external mode" {
+    var client: Client = .{
+        .allocator = std.testing.allocator,
+        .fd = -1,
+        .host_id = 75,
+        .parser = framing.FrameParser.init(std.testing.allocator),
+    };
+    var fence: ClientOperationFence = undefined;
+    const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
+    fence.initInPlace(@intFromPtr(&client), pid, 76, 77, 78);
+    try std.testing.expect(client.bindOperationFence(&fence, 78));
+
+    try std.testing.expectError(error.Busy, client.enterExternalMode());
+    try std.testing.expect(switch (client.io_mode) {
+        .blocking => true,
+        .external => false,
+    });
+    try std.testing.expectEqual(@as(u64, 0), fence.state.load(.acquire));
+    try std.testing.expect(client.tryDeinit());
+}
+
 test "CR3a B3b-F fork child rejects an inherited fence before atomic state access" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const ChildCleanup = struct {
@@ -6833,6 +6854,7 @@ pub const Client = struct {
             else => unreachable,
         };
         defer if (operation_fence_held) self.endPublicMutation();
+        if (operation_fence_held) return error.Busy;
         return self.enterExternalModeWithOps(client_deadline.posix_ops);
     }
 

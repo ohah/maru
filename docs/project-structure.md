@@ -179,6 +179,7 @@ fixture와 golden 파일의 저장 규칙은 [Fixture와 Oracle 포맷](fixture-
 ```text
 tools/
   perf/                 로컬 성능 예산 측정 harness
+  ci/                   CI 파이프라인 헬퍼. `changed-areas.sh`가 "이 diff는 어떤 CI 축을 실행해야 하는가"의 단일 출처이고 `changed-areas.test.sh`(=`mise run ci:changed-areas-check`)가 그 분류를 실제 git diff로 고정한다
 ```
 
 ## GitHub 구조
@@ -187,9 +188,9 @@ tools/
 .github/
   pull_request_template.md  PR마다 전략 영향 평가와 한계 보고를 빠뜨리지 않게 하는 템플릿
   workflows/
-    ci.yml                  check 게이트(`mise run check`: fmt-check/unit/e2e/recorded-oracle/stress/facade 경계/build) + 외부 오라클 oracles 잡(libvterm·Alacritty를 매 푸시/PR에 강제, Ghostty는 CI 제외) + 테스트 artifact 업로드
+    ci.yml                  changed-areas 판정(changes 잡) + check 게이트(`mise run check`: fmt-check/unit/e2e/recorded-oracle/stress/facade 경계/build) + macOS 제품 경로 잡 + 외부 오라클 oracles 잡(libvterm·Alacritty, Ghostty는 CI 제외) + 테스트 artifact 업로드. 무거운 잡은 `code`/`web` 축이 바뀐 PR에서만 돈다(performance-budget.md "변경 영역별 실행")
     web.yml                 `web/**` 변경 시 Bun lock install + zntc bundle/SRI + sanitizer fixture + Oxc + license audit를 실행하고 생성 bundle evidence를 업로드
-    performance.yml         `mise run perf`를 모든 PR(required check)·main push·수동·주간으로 실행한다(성능 회귀가 main에 들어가기 전에 잡는다 — 예산 정책은 performance-budget.md)
+    performance.yml         `mise run perf`를 `code` 변경 PR(required check)·main push·수동·주간으로 실행한다(성능 회귀가 main에 들어가기 전에 잡는다 — 예산 정책은 performance-budget.md)
     pr-metadata.yml         라벨 1개 이상 + assignee=ohah 강제(required check 지정은 branch protection에서 한다)
     release.yml             태그 푸시(v*) 시 universal .dmg를 서명·공증해 GitHub Release에 첨부한다(distribution.md "CI 릴리스")
 ```

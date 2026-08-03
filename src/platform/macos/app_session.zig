@@ -3734,6 +3734,12 @@ pub const AppSession = struct {
     /// 돌려준다 — 보이지 않는 트리가 키 입력을 계속 먹으면 안 된다(docs/file-explorer.md §3.5).
     fn setDockView(self: *AppSession, view: dock_panel.View) void {
         if (self.dock.view == view) return;
+        // `dock.size == 0`은 view별 자동 폭 sentinel이다. 따라서 explorer(180pt)와
+        // agent_sessions(480pt) 사이에서는 창 resize를 기다리지 않고 같은 event에서 모든 pane의
+        // grid와 Swift에 돌려주는 active rect를 갱신해야 한다. 수동 폭은 하나의 persisted state라
+        // view 전환만으로 resize하지 않는다.
+        const auto_right_width_changed = self.dockVisible() and self.dock.side == .right and self.dock.size == 0 and
+            dock_layout.defaultRightPtForView(self.dock.view) != dock_layout.defaultRightPtForView(view);
         self.dock.view = view;
         // The SessionDock's component-local keyboard/pointer focus is meaningful only while its
         // tree is visible.  Returning later must not resurrect a stale PageUp/PageDown owner.
@@ -3746,6 +3752,11 @@ pub const AppSession = struct {
             self.agent_session_archive_project_scope_surface_id = self.activeSurface().id;
             self.requestAgentSessionArchiveScopeRoots(null);
             self.refreshAgentSessionArchive(false);
+        }
+        if (auto_right_width_changed) {
+            for (self.tabs.items) |tab| self.resizeTabPanes(tab);
+            self.recomputeActivePaneRect();
+            self.last_resize_size = null;
         }
         self.metal_dirty = true;
     }
@@ -4270,6 +4281,7 @@ pub const AppSession = struct {
             .side = if (self.dock_initialized) self.dock.side else .right,
             .size_pt = if (self.dock_initialized) self.dock.size else 0,
             .visible = self.dockVisible(),
+            .view = if (self.dock_initialized) self.dock.view else .explorer,
         });
     }
 
@@ -13292,7 +13304,7 @@ pub const AppSession = struct {
     fn agentSessionDockContentViewportHeightPx(self: *const AppSession) u32 {
         const content = self.dockGeometry().tree_content;
         const m = chrome.components.session_dock.types.Metrics.fromCellHeight(self.cell_height_px);
-        const fixed_h = m.pad * 2 + m.header_h + m.scope_h + m.search_h + m.gap * 3;
+        const fixed_h = m.pad * 2 + m.header_h + m.scope_h + m.search_h + m.control_gap * 3;
         return content.h -| fixed_h;
     }
 
@@ -13310,7 +13322,7 @@ pub const AppSession = struct {
         return chrome.components.session_dock.scroll.project(
             self.agent_session_archive_projection.entries.items,
             agentSessionDockProjectionKind,
-            .{ .group_h_px = m.group_h, .card_h_px = m.card_h, .gap_px = m.gap },
+            .{ .group_h_px = m.group_h, .card_h_px = m.card_h, .gap_px = m.item_gap },
             self.agentSessionDockContentViewportHeightPx(),
             self.agent_session_archive_scroll.offset_y_px,
         );
@@ -13318,7 +13330,7 @@ pub const AppSession = struct {
 
     fn agentSessionDockMetrics(self: *const AppSession) chrome.components.session_dock.scroll.Metrics {
         const m = chrome.components.session_dock.types.Metrics.fromCellHeight(self.cell_height_px);
-        return .{ .group_h_px = m.group_h, .card_h_px = m.card_h, .gap_px = m.gap };
+        return .{ .group_h_px = m.group_h, .card_h_px = m.card_h, .gap_px = m.item_gap };
     }
 
     /// Captures only a card that crosses the old viewport top.  A group header or the inter-item
@@ -54333,6 +54345,47 @@ fn initSmokeSessionSized(allocator: std.mem.Allocator) !*AppSession {
     session.window_padding_px = .{};
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
     return session;
+}
+
+test "automatic agent sessions dock width reflows the live pane without persisting a view width" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try session.resize(1600, 900, 1000);
+
+    // The titlebar launcher additionally opens a native file-picker in an empty workspace; set
+    // the already-initialized shared dock directly so this test isolates the layout contract.
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    session.dock.size = 0;
+    session.dock.view = .explorer;
+    for (session.tabs.items) |tab| session.resizeTabPanes(tab);
+    session.recomputeActivePaneRect();
+    const explorer_dock = session.dockGeometry();
+    const explorer_pane = session.active_pane_rect;
+
+    session.setDockView(.agent_sessions);
+    const archive_dock = session.dockGeometry();
+    const archive_pane = session.active_pane_rect;
+    try std.testing.expectEqual(@as(u32, 0), session.dock.size); // view width must not leak into persistence
+    try std.testing.expectEqual(dock_layout.default_agent_sessions_right_pt, archive_dock.dock.w);
+    try std.testing.expectEqual(dock_layout.default_right_pt, explorer_dock.dock.w);
+    try std.testing.expect(archive_pane.w < explorer_pane.w);
+    try std.testing.expectEqual(
+        layout_math.gridFromRectPx(session.cell_width_px, session.cell_height_px, archive_pane.w, archive_pane.h),
+        session.activeSurface().core.size,
+    );
+
+    session.setDockView(.explorer);
+    try std.testing.expectEqual(@as(u32, 0), session.dock.size);
+    try std.testing.expectEqual(explorer_pane.w, session.active_pane_rect.w);
+    try std.testing.expectEqual(
+        layout_math.gridFromRectPx(session.cell_width_px, session.cell_height_px, session.active_pane_rect.w, session.active_pane_rect.h),
+        session.activeSurface().core.size,
+    );
 }
 
 // ── 3) 단일 term: 좌표·id·generation·kind·focused·membership + 없는 cwd/agent 생략(§2·§3) ──

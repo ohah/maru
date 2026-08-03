@@ -176,13 +176,13 @@ const Writer = struct {
         const available = content.rect.width - @as(f32, @floatFromInt(metrics.pad * 2));
         if (available <= 0) return;
         const line_h = @max(ch / 2, 2);
-        const start_y = content.rect.y + @as(f32, @floatFromInt(metrics.gap));
+        const start_y = content.rect.y + @as(f32, @floatFromInt(metrics.item_gap));
         for (0..3) |card_index| {
-            const card_y = start_y + @as(f32, @floatFromInt(card_index * (metrics.card_h + metrics.gap)));
+            const card_y = start_y + @as(f32, @floatFromInt(card_index * (metrics.card_h + metrics.item_gap)));
             if (card_y >= content.rect.y + content.rect.height) break;
             try self.skeletonLine(left, card_y + @as(f32, @floatFromInt(ch)), available, line_h);
-            try self.skeletonLine(left, card_y + @as(f32, @floatFromInt(ch * 2 + metrics.gap)), available * 0.82, line_h);
-            try self.skeletonLine(left, card_y + @as(f32, @floatFromInt(ch * 3 + metrics.gap * 2)), available * 0.58, line_h);
+            try self.skeletonLine(left, card_y + @as(f32, @floatFromInt(ch * 2 + metrics.item_gap)), available * 0.82, line_h);
+            try self.skeletonLine(left, card_y + @as(f32, @floatFromInt(ch * 3 + metrics.item_gap * 2)), available * 0.58, line_h);
         }
     }
 
@@ -357,13 +357,16 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
 }
 
 test "SessionDock partial card never emits a CoreText cell that crosses its published clip" {
+    const metrics = types.Metrics.fromCellHeight(16);
     const props = types.Props{
-        .viewport_px = .{ .width = 320, .height = 240 },
+        .viewport_px = .{ .width = 320, .height = 400 },
         .cell_width_px = 8,
         .cell_height_px = 16,
         .snapshot_generation = 4,
         .displayed_count = 2,
-        .content_first_item_origin_y_px = -20,
+        // Leave one backing pixel of the first row inside the clip. Its own lowered glyph cells
+        // must still be rejected, while the following row begins in the same content clip.
+        .content_first_item_origin_y_px = -@as(i32, @intCast(metrics.card_h - 1)),
         .items = &.{
             .{ .card = .{ .identity = 1, .provider = .claude, .title = "partial-card-title", .summary = "visible-summary", .metadata = "visible-meta" } },
             .{ .card = .{ .identity = 2, .provider = .codex, .title = "next-card-title", .summary = "next-summary", .metadata = "next-meta" } },

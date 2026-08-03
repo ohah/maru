@@ -48,6 +48,13 @@ run_scenario() {
         codex)
             cp tests/fixtures/agent-session-archive/codex-ready.jsonl "$source_path"
             cp tests/fixtures/agent-session-archive/codex-ready.jsonl "$replacement_path"
+            # The list capture needs more than one card to make card height and inter-item gap
+            # reviewable. Keep these extra scanner-only records deterministically older, so the
+            # original source remains the selected resume fixture and its direct argv verdict is
+            # unchanged.
+            cp tests/fixtures/agent-session-archive/codex-list-second.jsonl "$home/.codex/sessions/2026/08/03/rollout-fixture-list-second.jsonl"
+            cp tests/fixtures/agent-session-archive/codex-list-third.jsonl "$home/.codex/sessions/2026/08/03/rollout-fixture-list-third.jsonl"
+            touch -t 202001010000 "$home/.codex/sessions/2026/08/03/rollout-fixture-list-second.jsonl" "$home/.codex/sessions/2026/08/03/rollout-fixture-list-third.jsonl"
             ;;
         claude)
             cp tests/fixtures/agent-session-archive/claude-ready.jsonl "$claude_path"
@@ -79,9 +86,11 @@ grep -Eq '^agent_session_archive_smoke_scenario=resume-pointer$' "$root/resume-p
 grep -Eq '^agent_session_archive_smoke_fake_resume_verdict=true$' "$root/resume-pointer.summary.txt"
 grep -Eq '^agent_session_archive_smoke_reveal_allowed_count=0$' "$root/resume-pointer.summary.txt"
 grep -Eq '^agent_session_archive_smoke_stale_reveal_count=0$' "$root/resume-pointer.summary.txt"
+grep -Eq '^agent_session_archive_smoke_capture_list=true$' "$root/resume-pointer.summary.txt"
 grep -Eq '^agent_session_archive_smoke_capture_loading=true$' "$root/resume-pointer.summary.txt"
 grep -Eq '^agent_session_archive_smoke_capture_ready=true$' "$root/resume-pointer.summary.txt"
 grep -Eq '^agent_session_archive_smoke_capture_stale=false$' "$root/resume-pointer.summary.txt"
+grep -Eq '^agent_session_archive_smoke_capture_list_artifact=captures/resume-pointer-list\.ppm$' "$root/resume-pointer.summary.txt"
 grep -Eq '^agent_session_archive_smoke_capture_loading_artifact=captures/resume-pointer-loading\.ppm$' "$root/resume-pointer.summary.txt"
 grep -Eq '^agent_session_archive_smoke_capture_ready_artifact=captures/resume-pointer-ready\.ppm$' "$root/resume-pointer.summary.txt"
 
@@ -140,7 +149,7 @@ grep -Eq '^agent_session_archive_smoke_stale_reveal_count=0$' "$root/claude-resu
 # The two sentinel cold processes cover every product detail state without making every action
 # variant perform expensive Metal readback. `sips` only repackages renderer-written PPM so the
 # resulting PNG is reviewable in a PR; it never captures an AppKit view through another path.
-for capture in resume-pointer-loading resume-pointer-ready detail-stale-loading detail-stale-stale; do
+for capture in resume-pointer-list resume-pointer-loading resume-pointer-ready detail-stale-loading detail-stale-stale; do
     ppm="$root/captures/$capture.ppm"
     png="$root/captures/$capture.png"
     test -s "$ppm"

@@ -3884,9 +3884,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var agentSessionArchiveSmokeRevealRejectedCount: UInt32 = 0
     private var agentSessionArchiveSmokeStaleRevealCount: UInt32 = 0
     private var agentSessionArchiveSmokeClaudeModelPresent: UInt32 = 0
+    private var agentSessionArchiveSmokeCaptureList = false
     private var agentSessionArchiveSmokeCaptureLoading = false
     private var agentSessionArchiveSmokeCaptureReady = false
     private var agentSessionArchiveSmokeCaptureStale = false
+    private var agentSessionArchiveSmokeCaptureListArtifact = ""
     private var agentSessionArchiveSmokeCaptureLoadingArtifact = ""
     private var agentSessionArchiveSmokeCaptureReadyArtifact = ""
     private var agentSessionArchiveSmokeCaptureStaleArtifact = ""
@@ -4465,10 +4467,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 살아 있지만, 화면은 placeholder로 남겨 UI lifecycle과 runtime lifecycle 실패를
         // 분리해서 볼 수 있게 한다.
         // Archive fixture의 readback은 PR에서 실제 detail hierarchy를 검토하는 evidence다. 일반 창
-        // 크기는 보존하되, fixture만 1440×900 pt로 열어 button text/card가 좁은 960×600 frame에서
+        // 크기는 보존하되, fixture만 1920×1200 pt로 열어 button text/card와 오른쪽 세션 도크의 실제
+        // typography·row divider를 PR에서 충분한 해상도로 검토할 수 있게 한다. 좁은 960×600 frame에서
         // 잘려 보이지 않게 한다. backing scale은 기존 제품 resize path가 그대로 정한다.
         let initialContentSize = isAgentSessionArchiveSmokeMode
-            ? NSSize(width: 1440, height: 900)
+            ? NSSize(width: 1920, height: 1200)
             : NSSize(width: 960, height: 600)
         let window = NSWindow(
             contentRect: NSRect(origin: .zero, size: initialContentSize),
@@ -8138,7 +8141,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     /// AS4-c의 one-shot Metal readback sink. The driver reaches this only after a read-only probe
-    /// has observed an already-published loading/ready/stale frame. This method neither changes
+    /// has observed an already-published list/loading/ready/stale frame. This method neither changes
     /// Zig archive state nor replays an input; it asks the current renderer to copy the next
     /// ordinary redraw of that same frame into the isolated fixture root.
     private func captureAgentSessionArchiveSmokeFrame(
@@ -8164,6 +8167,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         else { return false }
 
         let stateName: String = switch state {
+        case .list: "list"
         case .loading: "loading"
         case .ready: "ready"
         case .stale: "stale"
@@ -8186,6 +8190,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard FileManager.default.fileExists(atPath: path.path) else { return false }
         let artifact = "captures/\(scenario)-\(stateName).ppm"
         switch state {
+        case .list:
+            agentSessionArchiveSmokeCaptureList = true
+            agentSessionArchiveSmokeCaptureListArtifact = artifact
         case .loading:
             agentSessionArchiveSmokeCaptureLoading = true
             agentSessionArchiveSmokeCaptureLoadingArtifact = artifact
@@ -9137,9 +9144,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         agent_session_archive_smoke_reveal_rejected_count=\(agentSessionArchiveSmokeRevealRejectedCount)
         agent_session_archive_smoke_stale_reveal_count=\(agentSessionArchiveSmokeStaleRevealCount)
         agent_session_archive_smoke_claude_model_present=\(agentSessionArchiveSmokeClaudeModelPresent)
+        agent_session_archive_smoke_capture_list=\(agentSessionArchiveSmokeCaptureList)
         agent_session_archive_smoke_capture_loading=\(agentSessionArchiveSmokeCaptureLoading)
         agent_session_archive_smoke_capture_ready=\(agentSessionArchiveSmokeCaptureReady)
         agent_session_archive_smoke_capture_stale=\(agentSessionArchiveSmokeCaptureStale)
+        agent_session_archive_smoke_capture_list_artifact=\(agentSessionArchiveSmokeCaptureListArtifact)
         agent_session_archive_smoke_capture_loading_artifact=\(agentSessionArchiveSmokeCaptureLoadingArtifact)
         agent_session_archive_smoke_capture_ready_artifact=\(agentSessionArchiveSmokeCaptureReadyArtifact)
         agent_session_archive_smoke_capture_stale_artifact=\(agentSessionArchiveSmokeCaptureStaleArtifact)

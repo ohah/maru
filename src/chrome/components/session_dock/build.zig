@@ -69,12 +69,14 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
             .card => m.card_h,
         };
         const visual: tree.CardVisual = switch (item) {
-            .group => .{ .variant = .surface, .paint = .{} },
-            .card => |card| .{ .variant = if (card.selected) .selected else .surface, .paint = .{} },
+            // A session list is a continuous divided list, not a stack of rounded cards. Hover
+            // and selected state still resolve through the semantic card variant above this base.
+            .group => .{ .variant = .surface, .paint = dividedRowPaint() },
+            .card => |card| .{ .variant = if (card.selected) .selected else .surface, .paint = dividedRowPaint() },
         };
         node.* = tree.card(.{
             .id = NodeIds.item(index),
-            .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(height) }, .margin = .{ .bottom = @floatFromInt(m.gap) } },
+            .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(height) }, .margin = .{ .bottom = @floatFromInt(m.item_gap) } },
             .variant = visual.variant,
             .paint = visual.paint,
             .action = action,
@@ -90,21 +92,25 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
     const top = buffers.nodes[props.items.len + 3 ..][0..4];
     top[0] = tree.card(.{
         .id = NodeIds.header,
-        .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(m.header_h) }, .margin = .{ .bottom = @floatFromInt(m.gap) } },
-        .variant = .raised,
-        .paint = .{},
+        .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(m.header_h) }, .margin = .{ .bottom = @floatFromInt(m.control_gap) } },
+        // Header text has no enclosing card in the dock reference. It remains a Card only so
+        // refresh retains one completed action rect, while its base/background border is hidden.
+        .variant = .surface,
+        .paint = .{ .background = .surface_bg, .border = .surface_bg, .shadow = .none },
         .action = refresh,
         .overflow = .clip,
     }, &.{});
-    top[1] = tree.container(.{
+    top[1] = tree.card(.{
         .id = NodeIds.scope_row,
-        .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(m.scope_h) }, .margin = .{ .bottom = @floatFromInt(m.gap) }, .gap = @floatFromInt(m.gap) },
+        .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(m.scope_h) }, .margin = .{ .bottom = @floatFromInt(m.control_gap) }, .gap = @floatFromInt(m.item_gap) },
         .direction = .row,
+        .variant = .surface,
+        .paint = .{},
         .overflow = .clip,
     }, scope_nodes);
     top[2] = tree.card(.{
         .id = NodeIds.search,
-        .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(m.search_h) }, .margin = .{ .bottom = @floatFromInt(m.gap) } },
+        .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(m.search_h) }, .margin = .{ .bottom = @floatFromInt(m.control_gap) } },
         .variant = if (props.search_focused) .selected else .surface,
         .paint = .{},
         .action = search,
@@ -174,6 +180,14 @@ fn scopeNode(id: u64, action: tree.UiAction, enabled: bool, selected: bool) tree
     }, &.{});
 }
 
+fn dividedRowPaint() tree.PaintStyle {
+    return .{
+        .border = .divider,
+        .corner_radii_px = .{ 0, 0, 0, 0 },
+        .border_widths_px = .{ 0, 0, 1, 0 },
+    };
+}
+
 test "SessionDock build shares action rects with the completed tree" {
     const props = types.Props{
         .viewport_px = .{ .width = 320, .height = 480 },
@@ -183,7 +197,7 @@ test "SessionDock build shares action rects with the completed tree" {
         .displayed_count = 1,
         .items = &.{
             .{ .group = .{ .identity = 11, .label = "workspace", .count = 1 } },
-            .{ .card = .{ .identity = 12, .provider = .codex, .title = "title", .summary = "summary", .metadata = "meta" } },
+            .{ .card = .{ .identity = 12, .provider = .codex, .title = "title", .summary = "summary", .metadata = "meta", .selected = true } },
         },
     };
     var nodes: [9]tree.UiNode = undefined;
@@ -208,6 +222,14 @@ test "SessionDock build shares action rects with the completed tree" {
     try @import("std").testing.expect(frame.tree.entries[all_index].rect.width > 0);
     const card_index = frame.tree.find(NodeIds.item(1)).?;
     try @import("std").testing.expect(frame.tree.entries[card_index].rect.width > 0);
+    const card_visual = switch (frame.tree.entries[card_index].visual) {
+        .card => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try @import("std").testing.expectEqual(tree.CardVariant.selected, card_visual.variant);
+    // Divider styling must not replace the selected variant's background token.
+    try @import("std").testing.expect(card_visual.paint.background == null);
+    try @import("std").testing.expectEqual(@as(?[4]u16, .{ 0, 0, 1, 0 }), card_visual.paint.border_widths_px);
     var table = ids.Table.init(@constCast(frame.actions));
     table.count = frame.actions.len;
     try @import("std").testing.expectEqual(@as(?ids.Intent, .{ .select_card = 12 }), table.resolve(7, 9));

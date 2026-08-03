@@ -88,6 +88,14 @@ chrome과 같은 Zig semantic draw → Metal GPU lowering 경로를 쓰는 custo
   line stack을 유지한다. paint·clip·hit-test는 계속 같은 completed tree만 소비하며, font의
   ink/baseline 보정은 후속 `TextLayoutArtifact`가 맡는다. 따라서 이 slice는 font advance를 추측해
   개별 label을 nudge하지 않는다.
+- 기본 목록의 `SessionCard`는 title·summary·metadata **3행**을 유지하되, cell-height의 **5행** 고정
+  row를 쓴다. row 사이에는 별도 빈 gap을 두지 않고 각 row의 bottom divider로만 구분한다. 따라서 세
+  정보행은 읽을 크기와 마지막 행 아래의 한 행 breathing room을 갖되, 카드 외곽의 반복된 둥근 사각형이나
+  card마다 남는 margin이 목록을 성기게 만들지 않는다. header·scope·search의 1/2행 control gap은 text
+  lowering의 cell-aligned clip 안전성을 위해 목록 row와 분리한다. 바깥 padding은 cell 한 행으로 유지해
+  group/card의 세로 중심과 clip이 어긋나지 않는다. 요약을 임의로 여러 줄로 reflow하거나 card마다 가변
+  높이를 만드는 변경은 아니다. scroll projection·paint·clip·hit-test는 같은 `Metrics`를 읽으므로 밀도
+  변경 뒤에도 보이는 위치와 눌리는 위치가 갈라지지 않는다.
 - `SegmentedScopeControl`은 세 개의 동일 폭 segment와 selected/disabled/focused
   state를 각각 그린다. pipe-separated text label이나 group처럼 보이는 제목줄로
   대체하지 않는다. `SessionSearchField`는 search icon, placeholder, query,
@@ -97,6 +105,14 @@ chrome과 같은 Zig semantic draw → Metal GPU lowering 경로를 쓰는 custo
   무관하게 상단에 남고, workspace group만 독립적으로 접힌다. `CollapsibleWorkspaceGroup`
   header는 chevron·이름·count와 full-width hit target을 가지며, selected
   scope가 아니라 각 group의 collapse state만 바꾼다.
+- 우측 도크는 하나이며 outer divider의 수동 폭도 모든 뷰가 공유한다. 다만 workspace에
+  저장된 `dock.size == 0`은 **자동 폭** sentinel이므로, `agent_sessions`는 제목·세그먼트·검색·카드
+  metadata가 같은 줄에서 읽히고 긴 한글 제목도 불필요하게 잘리지 않는 기본 **480pt**를 사용한다. `explorer`와 `source_control`의 자동 폭은
+  기존 **180pt**를 유지한다. 사용자가 divider를 드래그해 0이 아닌 값을 저장하면 view 전환은 그 값을
+  바꾸거나 480pt를 다시 저장하지 않는다. 작은 창에서는 공통 terminal floor와 outer-divider clamp가
+  최종 폭을 결정한다. 자동 폭이 다른 view로 전환되면 같은 input event에서 모든 terminal pane grid와
+  active pane rect를 재계산한다. 즉 별도 세션 도크·뷰별 영속 폭을 만들지 않고, 자동 상태에서만
+  consumer의 가독성 요구를 반영한다.
 - `SessionCard`는 `provider badge`, title, summary, metadata라는 **명시적
   slot**을 가진다. title/provider를 같은 raw text run으로, 또는 전체 카드를
   terminal guidance 문자열로 만들지 않는다. 선택/hover/focus background는 카드
@@ -387,11 +403,11 @@ titlebar launcher와 dock slot만 관측하도록 한다.
   capture를 폐기하는지는 stale scenario에서 별도로 검증한다.
 - reveal 성공 scenario도 host의 외부 앱 열기를 호출하지 않는다. Swift가 smoke 모드에서 same
   `take_file_tree_external_open` consumer를 drain해 allowlisted fixture token과 횟수만 summary에 기록한다.
-- artifact는 loading/ready/stale의 **1440×900 pt fixture 창** 제품 Metal PPM·PNG와 redacted key/value summary다. 한 프레임 뒤 종료하는
+- artifact는 ready session **목록**, loading/ready/stale detail의 **1920×1200 pt fixture 창** 제품 Metal PPM·PNG와 redacted key/value summary다. 한 프레임 뒤 종료하는
   일반 `MARU_SCREENSHOT` 훅은 쓰지 않고, smoke process 안에서만 여러 completed Metal frame을 readback하는 capture
   sink를 쓴다. sink는 이미 paint·publish된 probe가 증명한 상태에서만 **다음 동일 frame**의 renderer output 복사를 요청한다.
-  `resume-pointer` scenario는 loading·ready, `detail-stale` scenario는 loading·stale를 각각 한 장씩 남겨 세 상태를
-  모두 덮는다. request는 fixture root 아래의 고정 상대 artifact 이름만 받을 수 있고, 일반 실행·Chrome Lab·provider 입력에는
+  `resume-pointer` scenario는 card click 전의 ready 목록(서로 다른 synthetic record 세 개)·loading·ready, `detail-stale` scenario는 loading·stale를 각각 한 장씩 남긴다.
+  request는 fixture root 아래의 고정 상대 artifact 이름만 받을 수 있고, 일반 실행·Chrome Lab·provider 입력에는
   도달하지 않는다. capture 요청·copy 완료는 frame/action/worker state를 바꾸지 않으며, pending request는 한 장을 쓴 뒤 즉시
   사라진다. summary에는 frame request id,
   input source(pointer/keyboard), enabled/disabled action count, fake argv verdict, reveal success/rejected/stale-identity count,

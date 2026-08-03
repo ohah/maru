@@ -28,10 +28,11 @@ final class AgentSessionArchiveSmokeDriver {
         case reveal
     }
 
-    /// Renderer capture is deliberately a fixture observer, not an input/action path. Only the
-    /// two sentinel scenarios write artifacts: together they prove loading, ready, and stale
-    /// without multiplying every pointer/keyboard action scenario's GPU readback cost.
+    /// Renderer capture is deliberately a fixture observer, not an input/action path. The two
+    /// sentinel scenarios capture the ready session list plus loading, ready, and stale detail
+    /// states without multiplying every pointer/keyboard action scenario's GPU readback cost.
     enum CaptureState {
+        case list
         case loading
         case ready
         case stale
@@ -116,6 +117,14 @@ final class AgentSessionArchiveSmokeDriver {
 
         case .waitForCard:
             guard let card = probe(MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_DOCK_CARD), card.present != 0, card.enabled != 0 else { return }
+            // Capture the fully published SessionDock before the ordinary card click leaves the
+            // list. This is visual evidence for the right-dock list geometry, not an alternate
+            // activation path: the next two lines still arm the detail gate and use the same
+            // pointer event as a user.
+            if shouldCapture(.list), !capture(.list) {
+                fail("capture_list")
+                return
+            }
             guard setGate(true) else { fail("gate_arm") ; return }
             guard click(card) else { fail("card_click") ; return }
             stage = .waitForGate
@@ -230,7 +239,7 @@ final class AgentSessionArchiveSmokeDriver {
 
     private func shouldCapture(_ state: CaptureState) -> Bool {
         switch (scenario, state) {
-        case (.resumePointer, .loading), (.resumePointer, .ready), (.detailStale, .loading), (.detailStale, .stale):
+        case (.resumePointer, .list), (.resumePointer, .loading), (.resumePointer, .ready), (.detailStale, .loading), (.detailStale, .stale):
             return true
         default:
             return false

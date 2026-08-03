@@ -6,12 +6,15 @@ const dock_panel = @import("dock_panel.zig");
 const layout_math = @import("layout_math.zig");
 const Rect = @import("split_tree.zig").Rect;
 
-/// FP16: 도크가 **탐색기 전용**이 되면서 폭 기준이 바뀐다. 420/240pt는 editor(문서 본문) + tree를 함께
+/// FP16: 도크가 탐색기·소스 컨트롤을 보일 때의 자동 폭 기준. 420/240pt는 editor(문서 본문) + tree를 함께
 /// 담던 시절의 값이라 트리만 있는 지금은 화면을 절반 가까이 먹는다. 좌측 사이드바(카드 목록)와 같은
 /// 성격의 목록 열이므로 그쪽 기본값에 맞춘다 — `theme.SidebarConfig.width_pt` 기본 180pt와 같은 값이다
 /// (레이어가 달라 상수를 공유하진 못하고 값만 맞춘다, 그 필드 주석과 같은 규율).
 /// 하한도 "문서를 담아야 한다"는 근거가 사라져 사이드바 하한(120pt)과 같은 자리로 내린다.
 pub const default_right_pt: u32 = 180;
+/// Session Dock은 제목·세그먼트·검색·카드 metadata가 한 column 안에 공존하므로, `size == 0` 자동 상태에서만
+/// explorer/source-control보다 넓게 시작한다. 수동으로 저장한 nonzero size는 이 값으로 덮지 않는다.
+pub const default_agent_sessions_right_pt: u32 = 480;
 pub const min_right_pt: u32 = 120;
 /// bottom은 가로 띠라 성격이 다르다(폭이 아니라 높이). 트리 행이 몇 줄은 보여야 하므로 그대로 둔다.
 pub const default_bottom_pt: u32 = 300;
@@ -208,11 +211,22 @@ pub const Input = struct {
     side: dock_panel.Side,
     size_pt: u32,
     visible: bool,
+    /// `size_pt == 0`일 때만 자동 기본 폭을 고르는 현재 view. 수동 폭은 계속 하나의 dock state가 소유한다.
+    view: dock_panel.View = .explorer,
     /// 뷰 스위처 바 높이(px). **pane 탭 바와 같은 값**을 받아 두 바의 아래 경계선이 한 줄로 맞는다
     /// (docs/file-explorer.md §3.5). 탭 바 높이는 `cell_height + 2*pad`라 chrome 행의 배수가 아니므로
     /// 여기서 파생하지 않고 호출자가 그 단일 출처(`paneBarHeightPx`)를 그대로 넘긴다. 0이면 바 없음.
     view_bar_px: u32 = 0,
 };
+
+/// 하나의 도크를 유지하면서도 자동 상태만 consumer가 요구하는 가독성 폭을 고른다. 새 view를 추가하면
+/// 여기에서 명시적으로 기본값을 정해야 하며, unknown enum/persistence fallback은 dock_panel.View reader가 맡는다.
+pub fn defaultRightPtForView(view: dock_panel.View) u32 {
+    return switch (view) {
+        .agent_sessions => default_agent_sessions_right_pt,
+        .explorer, .source_control => default_right_pt,
+    };
+}
 
 pub fn compute(in: Input) Geometry {
     const available = Rect{
@@ -225,7 +239,7 @@ pub fn compute(in: Input) Geometry {
 
     const scale = if (in.scale_milli == 0) 1000 else in.scale_milli;
     const requested_pt = if (in.size_pt != 0) in.size_pt else switch (in.side) {
-        .right => default_right_pt,
+        .right => defaultRightPtForView(in.view),
         .bottom => default_bottom_pt,
     };
     const requested_px = layout_math.ptToPx(requested_pt, scale);
@@ -402,6 +416,29 @@ test "dock geometry collapses and clamps to leave a terminal floor" {
     const damaged = compute(.{ .backing_width_px = 800, .backing_height_px = 600, .sidebar_width_px = 200, .titlebar_height_px = 30, .cell_width_px = 8, .cell_height_px = 16, .scale_milli = 1000, .divider_px = 2, .side = .right, .size_pt = std.math.maxInt(u32), .visible = true });
     try std.testing.expect(damaged.terminal.w >= 320); // 손상 workspace의 u32 max도 overflow 없이 실효 크기로 clamp.
     try std.testing.expectEqual(damaged.terminal.w + damaged.divider.w + damaged.dock.w, hidden.terminal.w);
+}
+
+test "auto right dock widens only the agent sessions view and preserves explicit size" {
+    const base = Input{
+        .backing_width_px = 1600,
+        .backing_height_px = 900,
+        .sidebar_width_px = 200,
+        .titlebar_height_px = 32,
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .scale_milli = 1000,
+        .divider_px = 2,
+        .side = .right,
+        .size_pt = 0,
+        .visible = true,
+    };
+    const explorer = compute(base);
+    const archive = compute(.{ .backing_width_px = base.backing_width_px, .backing_height_px = base.backing_height_px, .sidebar_width_px = base.sidebar_width_px, .titlebar_height_px = base.titlebar_height_px, .cell_width_px = base.cell_width_px, .cell_height_px = base.cell_height_px, .scale_milli = base.scale_milli, .divider_px = base.divider_px, .side = base.side, .size_pt = 0, .visible = true, .view = .agent_sessions });
+    const explicit = compute(.{ .backing_width_px = base.backing_width_px, .backing_height_px = base.backing_height_px, .sidebar_width_px = base.sidebar_width_px, .titlebar_height_px = base.titlebar_height_px, .cell_width_px = base.cell_width_px, .cell_height_px = base.cell_height_px, .scale_milli = base.scale_milli, .divider_px = base.divider_px, .side = base.side, .size_pt = 220, .visible = true, .view = .agent_sessions });
+
+    try std.testing.expectEqual(@as(u32, default_right_pt), explorer.dock.w);
+    try std.testing.expectEqual(@as(u32, default_agent_sessions_right_pt), archive.dock.w);
+    try std.testing.expectEqual(@as(u32, 220), explicit.dock.w);
 }
 
 test "resize pointer maps backing pixels to persisted points and rejects non-finite" {

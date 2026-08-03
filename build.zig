@@ -1380,6 +1380,10 @@ pub fn build(b: *std.Build) void {
             "./zig-out/Maru.app/Contents/MacOS/maru-macos-app",
         });
         macos_agent_session_archive_smoke.setCwd(b.path("."));
+        // The fixture launches AppKit processes and rewrites isolated HOME/capture artifacts.
+        // Declaring no side effects lets `zig build` reuse an old successful step, silently
+        // leaving stale screenshots and summary assertions after the smoke driver changes.
+        macos_agent_session_archive_smoke.has_side_effects = true;
         macos_agent_session_archive_smoke.step.dependOn(&macos_app_bundle.step);
         macos_agent_session_archive_smoke_step.dependOn(&macos_agent_session_archive_smoke.step);
 

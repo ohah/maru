@@ -55,6 +55,7 @@ const agent_session_archive_scope_backend = @import("agent_session_archive_scope
 const chrome_metal_lowering = @import("chrome/metal_lowering.zig");
 const chrome_draw_lowering = @import("chrome/chrome_draw_lowering.zig");
 const chrome_system_text = @import("chrome/system_text.zig");
+const chrome_system_text_worker = @import("chrome/system_text_worker.zig");
 test {
     // Chrome Lab은 제품 AppSession이 소유하지 않는 test-only fixture다. 다만 이 import로 app-host
     // 테스트 빌드에서 facade/module ownership과 lowering API drift를 컴파일 시점에 잡는다.
@@ -3015,6 +3016,7 @@ pub const AppSession = struct {
     agent_session_archive_backend: agent_session_archive_backend.Backend = undefined,
     agent_session_archive_detail_backend: agent_session_archive_detail_backend.Backend = undefined,
     agent_session_archive_scope_backend: agent_session_archive_scope_backend.Backend = undefined,
+    agent_session_dock_text_backend: chrome_system_text_worker.Backend = undefined,
     agent_session_archive_initialized: bool = false,
     agent_session_archive_records: std.ArrayList(agent_session_archive_backend.Record) = .empty,
     agent_session_archive_filtered_indices: std.ArrayList(usize) = .empty,
@@ -3023,9 +3025,8 @@ pub const AppSession = struct {
     /// frame. Mouse events consume this snapshot rather than rebuilding archive geometry.
     agent_session_dock_entries: std.ArrayList(chrome.ui.tree.RectEntry) = .empty,
     agent_session_dock_actions: std.ArrayList(chrome.components.session_dock.ids.Entry) = .empty,
-    // B1 rich-text artifact. It owns neither provider data nor native CoreText objects: the
-    // immutable renderer-neutral records let an unchanged dock rebuild atlas/frame ownership
-    // without synchronously shaping text again on the UI frame path.
+    // B1 rich-text artifact. The detached CoreText worker owns only an immutable scalar DTO;
+    // this cache owns renderer-neutral records after the main actor resolves its font names.
     agent_session_dock_rich_text_cache: ?AgentSessionDockRichTextCache = null,
     agent_session_dock_interaction: chrome.ui.interaction.InteractionState = .{},
     agent_session_dock_snapshot_generation: u64 = 1,
@@ -3508,6 +3509,8 @@ pub const AppSession = struct {
             errdefer self.agent_session_archive_detail_backend.deinit();
             self.agent_session_archive_scope_backend = try agent_session_archive_scope_backend.Backend.init(allocator, io);
             errdefer self.agent_session_archive_scope_backend.deinit();
+            self.agent_session_dock_text_backend = try chrome_system_text_worker.Backend.init(allocator, io);
+            errdefer self.agent_session_dock_text_backend.deinit();
         }
         self.file_tree_initialized = true;
         self.agent_session_archive_initialized = true;
@@ -3740,7 +3743,7 @@ pub const AppSession = struct {
     fn setDockView(self: *AppSession, view: dock_panel.View) void {
         if (self.dock.view == view) return;
         // `dock.size == 0`은 view별 자동 폭 sentinel이다. 따라서 explorer(180pt)와
-        // agent_sessions(480pt) 사이에서는 창 resize를 기다리지 않고 같은 event에서 모든 pane의
+        // agent_sessions(640pt) 사이에서는 창 resize를 기다리지 않고 같은 event에서 모든 pane의
         // grid와 Swift에 돌려주는 active rect를 갱신해야 한다. 수동 폭은 하나의 persisted state라
         // view 전환만으로 resize하지 않는다.
         const auto_right_width_changed = self.dockVisible() and self.dock.side == .right and self.dock.size == 0 and
@@ -20429,6 +20432,23 @@ pub const AppSession = struct {
         }
     }
 
+    /// The frame path only drains a completed immutable CoreText DTO.  It never creates a
+    /// CTLine or waits for the detached worker; stale semantic output is discarded before it
+    /// can replace a newer list/layout snapshot.
+    fn pollAgentSessionDockRichTextWorker(self: *AppSession, fingerprint: u64) void {
+        var result = self.agent_session_dock_text_backend.takeResult() orelse return;
+        defer result.deinit(self.allocator);
+        if (result.fingerprint != fingerprint) return;
+        const artifact = chrome_system_text.resolveArtifact(self.allocator, &self.renderer_state.font_registry, result.artifact) catch return;
+        self.clearAgentSessionDockRichTextCache();
+        self.agent_session_dock_rich_text_cache = .{
+            .fingerprint = fingerprint,
+            .placements = artifact.placements,
+            .records = artifact.records,
+        };
+        self.metal_dirty = true;
+    }
+
     /// 파일 패널 webview 줌 배율을 milli(1000=1.0)로 반환한다 — 프리뷰 iframe `zoom`·HTML/PDF `pageZoom`이 쓴다.
     /// 배율 = 현재 폰트 크기 / base_font_size(⌘0 기준 config 크기)이므로, 기본/⌘0에서 정확히 1.0이고 ⌘+/− 만큼만
     /// 프리뷰가 확대/축소된다(사용자 결정 2026-07-23 "cmd +/− 로 조절할 때 같이"). base가 비정상(≤0)이면 1.0으로
@@ -28349,6 +28369,10 @@ pub const AppSession = struct {
         // 투영 게이트(shouldProjectFrame): sync hold는 라이브 화면 tearing만 막고, 스크롤백 탐색(view_offset 변화)
         // 리페인트는 막지 않는다 — rapid 스크롤 시 sync에 막혀 viewport가 stale로 멈추던 버그 수정. view_offset
         // 변화는 metal_dirty 누락(스크롤 reader 위임 race)에도 투영을 강제한다. timeout 넘긴 sync hold는 강제 해제.
+        // A detached text result has no access to AppSession's render flag.  Request a bounded
+        // follow-up frame while the Session Dock worker is in flight or has a result queued, so
+        // the main actor can poll it without any callback crossing into renderer state.
+        if (self.dock.view == .agent_sessions and self.agent_session_dock_text_backend.needsPoll()) self.metal_dirty = true;
         const will_project = shouldProjectFrame(self.metal_dirty, sync_active, self.sync_hold_ticks, self.syncTimeoutTicks(), active_view_offset, self.last_rendered_view_offset, esu_advanced, self.force_reproject);
         // [A: chrome 독립 present] grid는 hold됐지만 chrome(사이드바 스피너)만 dirty면 사이드바만 부분 투영한다(아래 else if).
         const project_chrome = self.chrome_dirty and !will_project;
@@ -31288,32 +31312,6 @@ pub const AppSession = struct {
         self.collectShapedPane(collected, pane, builder, dest);
     }
 
-    /// B1 rich Chrome cache miss. The only synchronous CoreText call for a semantic dock key is
-    /// made here; after it succeeds we retain renderer-neutral records, never native handles.
-    fn collectMeasuredTextShapedAndCache(
-        self: *AppSession,
-        collected: *std.ArrayList(CollectedPane),
-        dl: renderer.DrawList,
-        artifact: chrome_system_text.Artifact,
-        fingerprint: u64,
-        builder: coretext_frame_builder.CoreTextFrameBuilder,
-        dest: CollectDest,
-    ) void {
-        const pane = builder.shapeFromRecords(self.allocator, dl, artifact.records) catch {
-            return;
-        };
-        self.clearAgentSessionDockRichTextCache();
-        self.agent_session_dock_rich_text_cache = .{
-            .fingerprint = fingerprint,
-            .placements = artifact.placements,
-            .records = artifact.records,
-        };
-        var p = pane;
-        collected.append(self.allocator, .{ .pane = p, .dest = dest, .builder = builder, .measured_text = artifact }) catch {
-            p.deinit(self.allocator);
-        };
-    }
-
     /// B1 rich Chrome cache hit. `shapeFromRecords` duplicates only per-frame renderer run
     /// ownership; it does not call CoreText or wait for a font worker.
     fn collectMeasuredTextFromCache(
@@ -31389,8 +31387,10 @@ pub const AppSession = struct {
             .project_scope_enabled = self.agent_session_archive_project_root != null,
             .search = self.agent_session_archive_search.items,
             .search_focused = self.agent_session_archive_search_active,
-            .loading = self.agent_session_archive_loading and self.agent_session_archive_records.items.len == 0,
-            .refreshing = self.agent_session_archive_loading and self.agent_session_archive_records.items.len > 0,
+            // The rich system-text worker follows the same truthful loading rule as archive
+            // refresh: existing cards remain visible while its immutable artifact is pending.
+            .loading = (self.agent_session_archive_loading or self.agent_session_dock_text_backend.isInflight()) and self.agent_session_archive_records.items.len == 0,
+            .refreshing = (self.agent_session_archive_loading or self.agent_session_dock_text_backend.isInflight()) and self.agent_session_archive_records.items.len > 0,
             .spinner_phase = @intCast(self.agent_spin_frame & 7),
             .content_first_item_origin_y_px = scroll_projection.first_origin_y_px,
             .expanded_identity = if (self.agent_session_inline_detail != null and self.agent_session_archive_selected != null)
@@ -31459,7 +31459,7 @@ pub const AppSession = struct {
             cols,
             rows,
         ) catch return;
-        const fingerprint = chrome_draw_lowering.richTextFingerprint(
+        const base_fingerprint = chrome_draw_lowering.richTextFingerprint(
             draws.ops,
             &tokens,
             self.cell_width_px,
@@ -31467,6 +31467,10 @@ pub const AppSession = struct {
             cols,
             rows,
         );
+        // `richTextFingerprint` owns semantic component facts; scale changes the CoreText
+        // point size even when integer cell metrics happen to round to the same value.
+        const fingerprint = base_fingerprint ^ (@as(u64, self.scale_milli) *% 0x9e3779b185ebca87);
+        self.pollAgentSessionDockRichTextWorker(fingerprint);
         if (self.agent_session_dock_rich_text_cache) |*cache| {
             if (cache.fingerprint == fingerprint) {
                 self.collectMeasuredTextFromCache(collected, chrome_system_text.emptyDrawList(self.allocator, cache.records.len) catch return, cache, builder, .{ .pane = .{
@@ -31482,19 +31486,17 @@ pub const AppSession = struct {
                 return;
             }
         }
-        const measured = chrome_system_text.shapeOps(self.allocator, &self.renderer_state.font_registry, draws.ops, &tokens, self.cell_width_px, self.scale_milli) catch {
-            self.collectShaped(collected, icon_dl, builder, .{ .pane = .{
-                .origin_x = content.x,
-                .origin_y = content.y,
-                .colors = colors,
-            } });
-            return;
-        };
-        self.collectMeasuredTextShapedAndCache(collected, chrome_system_text.emptyDrawList(self.allocator, measured.records.len) catch return, measured, fingerprint, builder, .{ .pane = .{
-            .origin_x = content.x,
-            .origin_y = content.y,
-            .colors = colors,
-        } });
+        if (!self.agent_session_dock_text_backend.isInflight()) {
+            var request = chrome_system_text.prepareRequest(self.allocator, fingerprint, draws.ops, &tokens, self.cell_width_px) catch {
+                self.collectShaped(collected, icon_dl, builder, .{ .pane = .{
+                    .origin_x = content.x,
+                    .origin_y = content.y,
+                    .colors = colors,
+                } });
+                return;
+            };
+            if (!self.agent_session_dock_text_backend.submit(request, self.scale_milli)) request.deinit(self.allocator);
+        }
         self.collectShaped(collected, icon_dl, builder, .{ .pane = .{
             .origin_x = content.x,
             .origin_y = content.y,
@@ -33620,6 +33622,7 @@ pub const AppSession = struct {
             if (self.agent_session_archive_initialized) {
                 self.agent_session_archive_scope_backend.deinit();
                 self.agent_session_archive_detail_backend.deinit();
+                self.agent_session_dock_text_backend.deinit();
                 if (self.agent_session_inline_detail) |*detail| detail.deinit(self.allocator);
                 self.agent_session_inline_detail = null;
                 self.agent_session_archive_backend.deinit();

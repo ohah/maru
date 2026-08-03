@@ -56,6 +56,10 @@ final class AgentSessionArchiveSmokeDriver {
     private let deadline: TimeInterval
     private let scenario: Scenario
     private var paintRequested = false
+    /// The Session Dock's immutable system-text artifact is published by a detached worker.
+    /// A card probe proves geometry/input publication, but one additional ordinary frame proves
+    /// the screenshot is not the intentional first-frame skeleton before rich text arrives.
+    private var stableListFrames = 0
 
     init?(
         scenario: Scenario? = Scenario(environment: ProcessInfo.processInfo.environment),
@@ -117,6 +121,11 @@ final class AgentSessionArchiveSmokeDriver {
 
         case .waitForCard:
             guard let card = probe(MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_DOCK_CARD), card.present != 0, card.enabled != 0 else { return }
+            stableListFrames += 1
+            guard stableListFrames >= 2 else {
+                paintRequested = true
+                return
+            }
             // Capture the fully published SessionDock before the ordinary card click leaves the
             // list. This is visual evidence for the right-dock list geometry, not an alternate
             // activation path: the next two lines still arm the detail gate and use the same

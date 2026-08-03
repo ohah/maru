@@ -70,7 +70,7 @@ AS4-d의 inline disclosure는 동작 이관이다. 이 절은 첨부 레퍼런�
 "작은 terminal 행들의 집합" 인상을 없애기 위한 **별도 시각 계약**이다. 데이터·action·scroll
 identity는 바꾸지 않으며, `SessionDock`의 같은 completed `UiRectTree`에서만 기하와 paint를 바꾼다.
 
-- dock의 자동 폭 480pt 안에서 outer padding은 `1.5ch` 이상, header는 4행, segmented scope와
+- dock의 자동 폭 640pt 안에서 outer padding은 `1.5ch` 이상, header는 4행, segmented scope와
   search는 각각 3행, group header는 3행을 예약한다. header·scope·search는 scroll하지 않고,
   group부터만 scroll한다.
 - header는 title(강조) → count(secondary)의 좌측 두 줄과 `Local Mac`/refresh의 우측 utility
@@ -139,9 +139,9 @@ font size, line height와 screenshot E2E)을 먼저 설계한 뒤 별도 slice�
   scope가 아니라 각 group의 collapse state만 바꾼다.
 - 우측 도크는 하나이며 outer divider의 수동 폭도 모든 뷰가 공유한다. 다만 workspace에
   저장된 `dock.size == 0`은 **자동 폭** sentinel이므로, `agent_sessions`는 제목·세그먼트·검색·카드
-  metadata가 같은 줄에서 읽히고 긴 한글 제목도 불필요하게 잘리지 않는 기본 **480pt**를 사용한다. `explorer`와 `source_control`의 자동 폭은
+  metadata가 같은 줄에서 읽히고 긴 한글 제목도 불필요하게 잘리지 않는 기본 **640pt**를 사용한다. `explorer`와 `source_control`의 자동 폭은
   기존 **180pt**를 유지한다. 사용자가 divider를 드래그해 0이 아닌 값을 저장하면 view 전환은 그 값을
-  바꾸거나 480pt를 다시 저장하지 않는다. 작은 창에서는 공통 terminal floor와 outer-divider clamp가
+  바꾸거나 640pt를 다시 저장하지 않는다. 작은 창에서는 공통 terminal floor와 outer-divider clamp가
   최종 폭을 결정한다. 자동 폭이 다른 view로 전환되면 같은 input event에서 모든 terminal pane grid와
   active pane rect를 재계산한다. 즉 별도 세션 도크·뷰별 영속 폭을 만들지 않고, 자동 상태에서만
   consumer의 가독성 요구를 반영한다.
@@ -265,6 +265,22 @@ Codex의 과거 파일에는 `thread_source`가 없을 수 있다. 이 경우 us
 ## 4. 스캔·성능·수명
 
 `SessionArchiveScanner`는 worker에서만 directory enumerate·open·stat·JSONL parse를 하고, main actor에는 immutable `SessionArchiveSnapshot` **완료본 하나**만 건넨다. main actor는 마지막 snapshot을 메모리에 보존해 재진입 즉시 렌더하며, file I/O·JSON parse·정렬·worker wait를 하지 않는다. 대기 중 refresh는 하나로 coalesce하며 old worker completion은 request generation이 맞을 때만 publish한다. dock을 닫거나 앱을 종료하면 cancel을 요청하고, 이미 열린 fd와 staged allocation은 worker가 회수한다.
+
+`SessionDock`의 비례 system-UI text도 같은 frame-path 규율을 따른다. semantic draw op이 바뀌어 rich-text
+artifact cache가 miss하더라도 render tick은 `CTLine`/`CTRun`을 만들거나 worker를 기다리지 않는다. host는
+`{ fingerprint, scale, text role, origin, max-width, foreground, UTF-8 bytes }`를 deep-copy한 불변 request 하나만
+제출한다. 같은 fingerprint의 cache는 계속 paint한다. 새 fingerprint가 필요한 경우에도 목록의 카드·선택·scroll
+상태는 유지하되, 다른 geometry/content의 이전 text artifact를 새 frame에 재사용하지 않는다. 아직 artifact가 없는
+그 짧은 구간에는 목록의 기존 loading/skeleton 상태만 보인다. request는 하나만 inflight로 coalesce하며, 이후 layout·font scale·theme·snapshot이
+다시 바뀌면 결과의 fingerprint가 현재 semantic draw fingerprint와 정확히 일치할 때만 publish한다.
+
+이 text worker는 CoreText의 scalar 결과와 postscript font name을 **소유한 DTO**로만 반환한다. CoreText는 macOS
+SDK의 `CoreText.h` thread-safety 계약에 따라 worker에서 호출할 수 있지만, `FontIdentityRegistry`, atlas,
+`RenderFrame`, Metal/AppKit handle은 worker가 import하거나 소유하지 않는다. main actor는 완료 DTO를 poll한 뒤에만
+현재 registry에 font identity를 intern하고 renderer-neutral `ShapedGlyphRecord`·placement cache로 변환한다. 이
+변환은 파일 I/O·native text shaping·wait 없이 bounded DTO를 순회하는 작업이다. 종료 시 host는 새 request를 막고
+worker completion을 폐기하며 worker가 자신의 request/result allocation을 회수한다. 따라서 stale completion, app
+teardown, 연속 resize에서도 main actor가 native shaping이나 join으로 멈추지 않는다.
 
 AS2는 한 PR에 병렬 parser까지 억지로 섞지 않는다. **AS2-a**는 backend-owned monotonic request generation, dock 이탈/종료 cancel, candidate/file 경계의 cooperative cancel, cancelled generation의 publish 폐기와 재진입 latest-wins 재요청을 닫는다. **AS2-b**가 그 동일 cancellation token과 총 byte reservation을 소비하는 최대 4개 parse worker pool 및 actual peak-concurrency metric/fixture gate를 추가한다. 따라서 AS2-a가 끝나기 전에는 현재 단일 scanner thread를 “동시 parse≤4 구현”이라고 주장하지 않는다.
 
@@ -475,7 +491,7 @@ titlebar launcher와 dock slot만 관측하도록 한다.
   capture를 폐기하는지는 stale scenario에서 별도로 검증한다.
 - reveal 성공 scenario도 host의 외부 앱 열기를 호출하지 않는다. Swift가 smoke 모드에서 same
   `take_file_tree_external_open` consumer를 drain해 allowlisted fixture token과 횟수만 summary에 기록한다.
-- artifact는 ready session **목록**, loading/ready/stale inline expansion의 **1920×960 backing-pixel fixture 창** 제품 Metal PPM·PNG와 redacted key/value summary다. 한 프레임 뒤 종료하는
+- artifact는 ready session **목록**, loading/ready/stale inline expansion의 **1920×960 backing-pixel fixture 창** 제품 Metal PPM·PNG와 redacted key/value summary다. 목록 capture는 published card/action tree만 확인한 첫 frame이 아니라 detached rich-text artifact가 poll·atlas 연결된 뒤의 다음 ordinary frame에서만 요청한다. 한 프레임 뒤 종료하는
   일반 `MARU_SCREENSHOT` 훅은 쓰지 않고, smoke process 안에서만 여러 completed Metal frame을 readback하는 capture
   sink를 쓴다. sink는 이미 paint·publish된 probe가 증명한 상태에서만 **다음 동일 frame**의 renderer output 복사를 요청한다.
   `resume-pointer` scenario는 card click 전의 ready 목록(서로 다른 synthetic record 세 개)·loading·ready, `detail-stale` scenario는 loading·stale를 각각 한 장씩 남긴다.

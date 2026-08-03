@@ -20,6 +20,54 @@ pub const Placement = struct {
     foreground: u32,
 };
 
+/// An owned, renderer-free description of the semantic text that CoreText must shape.  It can
+/// cross to the detached worker because it contains no draw-list borrow, native handle, atlas
+/// state, or FontIdentityRegistry reference.
+pub const Request = struct {
+    fingerprint: u64,
+    runs: []Run,
+
+    pub const Run = struct {
+        text: []u8,
+        role: chrome.ui.typography.ChromeTextRole,
+        origin: chrome.draw.Px,
+        max_width_px: u32,
+        foreground: u32,
+    };
+
+    pub fn deinit(self: *Request, allocator: std.mem.Allocator) void {
+        for (self.runs) |run| allocator.free(run.text);
+        allocator.free(self.runs);
+        self.* = undefined;
+    }
+};
+
+/// Scalar CoreText result which deliberately keeps the selected PostScript name as bytes rather
+/// than a renderer FontId.  The worker may create this, but the main actor alone resolves it into
+/// renderer registry state.
+pub const UnresolvedGlyph = struct {
+    glyph_id: u32,
+    codepoint: u32,
+    fallback: bool,
+    color_glyph_kind: renderer.ColorGlyphKind,
+    x_px: f32,
+    advance_px: f32,
+    font_name: [128]u8,
+    point_size: u16,
+    line_height_px: f32,
+    origin: chrome.draw.Px,
+    foreground: u32,
+};
+
+pub const UnresolvedArtifact = struct {
+    glyphs: []UnresolvedGlyph,
+
+    pub fn deinit(self: *UnresolvedArtifact, allocator: std.mem.Allocator) void {
+        allocator.free(self.glyphs);
+        self.* = undefined;
+    }
+};
+
 pub const Artifact = struct {
     records: []renderer.ShapedGlyphRecord,
     placements: []Placement,
@@ -79,29 +127,96 @@ pub fn shapeOps(
     cell_width_px: u32,
     scale_milli: u32,
 ) !Artifact {
-    var records: std.ArrayList(renderer.ShapedGlyphRecord) = .empty;
-    errdefer records.deinit(allocator);
-    var placements: std.ArrayList(Placement) = .empty;
-    errdefer placements.deinit(allocator);
+    var request = try prepareRequest(allocator, 0, ops, tk, cell_width_px);
+    defer request.deinit(allocator);
+    var unresolved = try shapeRequest(allocator, &request, scale_milli);
+    defer unresolved.deinit(allocator);
+    return resolveArtifact(allocator, registry, unresolved);
+}
+
+/// Copies only non-icon semantic text out of the frame-local draw list.  This is intentionally
+/// cheap enough for the frame path; CoreText shaping is performed only by `shapeRequest`.
+pub fn prepareRequest(
+    allocator: std.mem.Allocator,
+    fingerprint: u64,
+    ops: []const chrome.draw.Op,
+    tk: *const chrome.Tokens,
+    cell_width_px: u32,
+) !Request {
+    var runs: std.ArrayList(Request.Run) = .empty;
+    errdefer {
+        for (runs.items) |run| allocator.free(run.text);
+        runs.deinit(allocator);
+    }
     for (ops) |op| switch (op) {
         .text => |text| {
             if (text.wide_icons or text.origin.x < 0 or text.origin.y < 0) continue;
             const max_width = std.math.mul(u32, text.max_cols, cell_width_px) catch continue;
             for (text.runs) |run| {
-                var shaped = shapeRun(allocator, registry, run.text, text.text_role, text.origin, max_width, packRgb(tk.get(text.role)), scale_milli) catch continue;
-                defer shaped.deinit(allocator);
-                const base = records.items.len;
-                try records.appendSlice(allocator, shaped.records);
-                try placements.appendSlice(allocator, shaped.placements);
-                for (records.items[base..], base..) |*record, index| {
-                    record.row = @intCast(index / 256);
-                    record.col = @intCast(index % 256);
-                }
+                if (run.text.len == 0 or max_width == 0) continue;
+                try runs.append(allocator, .{
+                    .text = try allocator.dupe(u8, run.text),
+                    .role = text.text_role,
+                    .origin = text.origin,
+                    .max_width_px = max_width,
+                    .foreground = packRgb(tk.get(text.role)),
+                });
             }
         },
         else => {},
     };
-    return .{ .records = try records.toOwnedSlice(allocator), .placements = try placements.toOwnedSlice(allocator) };
+    return .{ .fingerprint = fingerprint, .runs = try runs.toOwnedSlice(allocator) };
+}
+
+/// Calls CoreText without touching the renderer.  `Request` owns every input byte, so this is
+/// safe to run in a detached worker under CoreText's documented thread-safety contract.
+pub fn shapeRequest(allocator: std.mem.Allocator, request: *const Request, scale_milli: u32) !UnresolvedArtifact {
+    var glyphs: std.ArrayList(UnresolvedGlyph) = .empty;
+    errdefer glyphs.deinit(allocator);
+    for (request.runs) |run| {
+        const shaped = shapeUnresolvedRun(allocator, run, scale_milli) catch continue;
+        defer allocator.free(shaped);
+        try glyphs.appendSlice(allocator, shaped);
+    }
+    return .{ .glyphs = try glyphs.toOwnedSlice(allocator) };
+}
+
+/// Resolves a completed worker DTO on the main actor.  This bounded conversion is the sole
+/// owner of FontIdentityRegistry and intentionally contains no CoreText call.
+pub fn resolveArtifact(
+    allocator: std.mem.Allocator,
+    registry: *renderer.FontIdentityRegistry,
+    unresolved: UnresolvedArtifact,
+) !Artifact {
+    const records = try allocator.alloc(renderer.ShapedGlyphRecord, unresolved.glyphs.len);
+    errdefer allocator.free(records);
+    const placements = try allocator.alloc(Placement, unresolved.glyphs.len);
+    for (unresolved.glyphs, records, placements, 0..) |glyph, *record, *placement, index| {
+        const name = probe.cStringField(&glyph.font_name);
+        const font_id = try registry.intern(.{ .postscript_name = name });
+        const advance = @max(glyph.advance_px, 1.0);
+        record.* = .{
+            .row = @intCast(index / 256),
+            .col = @intCast(index % 256),
+            .cell_width = 1,
+            .codepoint = @intCast(@min(glyph.codepoint, std.math.maxInt(u21))),
+            .font_id = font_id,
+            .glyph_id = glyph.glyph_id,
+            .fallback = glyph.fallback,
+            .color_glyph_kind = glyph.color_glyph_kind,
+            .raster_font_size_milli = @intCast(@as(u32, glyph.point_size) * 1000),
+            .raster_width_px = @intFromFloat(@ceil(advance)),
+            .raster_height_px = @intFromFloat(@ceil(glyph.line_height_px)),
+        };
+        placement.* = .{
+            .x_px = @as(f32, @floatFromInt(glyph.origin.x)) + glyph.x_px,
+            .y_px = @floatFromInt(glyph.origin.y),
+            .advance_px = advance,
+            .line_height_px = glyph.line_height_px,
+            .foreground = glyph.foreground,
+        };
+    }
+    return .{ .records = records, .placements = placements };
 }
 
 pub fn emptyDrawList(allocator: std.mem.Allocator, glyph_count: usize) !renderer.DrawList {
@@ -139,44 +254,68 @@ pub fn shapeRun(
     foreground: u32,
     scale_milli: u32,
 ) !Artifact {
-    if (text.len == 0 or max_width_px == 0) return .{ .records = try allocator.alloc(renderer.ShapedGlyphRecord, 0), .placements = try allocator.alloc(Placement, 0) };
-    const point_size = chrome.ui.typography.token(role).point_size;
+    const owned = try allocator.dupe(u8, text);
+    var request = Request{ .fingerprint = 0, .runs = &.{.{ .text = owned, .role = role, .origin = origin, .max_width_px = max_width_px, .foreground = foreground }} };
+    defer request.deinit(allocator);
+    var unresolved = try shapeRequest(allocator, &request, scale_milli);
+    defer unresolved.deinit(allocator);
+    return resolveArtifact(allocator, registry, unresolved);
+}
+
+fn shapeUnresolvedRun(allocator: std.mem.Allocator, run: Request.Run, scale_milli: u32) ![]UnresolvedGlyph {
+    const point_size = chrome.ui.typography.token(run.role).point_size;
     const scaled_size = @as(f64, @floatFromInt(point_size)) * @as(f64, @floatFromInt(scale_milli)) / 1000.0;
     var native: bridge.NativeChromeTextShapeResult = .{};
-    const capacity = @max(@as(usize, 16), text.len * 2);
+    const capacity = @max(@as(usize, 16), run.text.len * 2);
     var glyphs = try allocator.alloc(bridge.NativeChromeTextGlyphRecord, capacity);
     defer allocator.free(glyphs);
-    bridge.maru_macos_coretext_shape_chrome_text(text.ptr, text.len, scaled_size, weight(role), @floatFromInt(max_width_px), &native, glyphs.ptr, glyphs.len);
+    bridge.maru_macos_coretext_shape_chrome_text(run.text.ptr, run.text.len, scaled_size, weight(run.role), @floatFromInt(run.max_width_px), &native, glyphs.ptr, glyphs.len);
     if (native.status != 0 or native.glyph_record_overflow != 0) return error.CoreTextChromeTextShapeFailed;
     const count = @min(@as(usize, native.glyph_record_count), glyphs.len);
-    const records = try allocator.alloc(renderer.ShapedGlyphRecord, count);
-    errdefer allocator.free(records);
-    const placements = try allocator.alloc(Placement, count);
-    for (glyphs[0..count], records, placements, 0..) |native_glyph, *record, *placement, index| {
-        const name = probe.cStringField(&native_glyph.font_name);
-        const font_id = try registry.intern(.{ .postscript_name = name });
-        const advance = @max(native_glyph.advance_px, 1.0);
-        const line_height: f32 = @floatFromInt(chrome.ui.typography.lineHeightPx(role, scale_milli));
-        record.* = .{
-            .row = 0,
-            .col = @intCast(index),
-            .cell_width = 1,
-            .codepoint = @intCast(@min(native_glyph.codepoint, std.math.maxInt(u21))),
-            .font_id = font_id,
+    const out = try allocator.alloc(UnresolvedGlyph, count);
+    for (glyphs[0..count], out) |native_glyph, *glyph| {
+        glyph.* = .{
             .glyph_id = native_glyph.glyph_id,
+            .codepoint = native_glyph.codepoint,
             .fallback = native_glyph.fallback != 0,
             .color_glyph_kind = if (native_glyph.color_glyph_kind != 0) .color else .monochrome,
-            .raster_font_size_milli = @intCast(@as(u32, point_size) * 1000),
-            .raster_width_px = @intFromFloat(@ceil(advance)),
-            .raster_height_px = @intFromFloat(@ceil(line_height)),
-        };
-        placement.* = .{
-            .x_px = @as(f32, @floatFromInt(origin.x)) + native_glyph.x_px,
-            .y_px = @floatFromInt(origin.y),
-            .advance_px = advance,
-            .line_height_px = line_height,
-            .foreground = foreground,
+            .x_px = native_glyph.x_px,
+            .advance_px = native_glyph.advance_px,
+            .font_name = native_glyph.font_name,
+            .point_size = point_size,
+            .line_height_px = @floatFromInt(chrome.ui.typography.lineHeightPx(run.role, scale_milli)),
+            .origin = run.origin,
+            .foreground = run.foreground,
         };
     }
-    return .{ .records = records, .placements = placements };
+    return out;
+}
+
+test "owned request shapes proportional text before renderer registry resolution" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const runs = [_]chrome.draw.Run{.{ .text = "Agent 세션 기록" }};
+    const ops = [_]chrome.draw.Op{.{ .text = .{
+        .origin = .{ .x = 12, .y = 8 },
+        .runs = &runs,
+        .role = .surface_fg,
+        .text_role = .dock_heading,
+        .max_cols = 40,
+    } }};
+    const tokens = chrome.Tokens.rich(.{
+        .foreground = .{ .r = 240, .g = 240, .b = 240 },
+        .sidebar_background = .{ .r = 10, .g = 10, .b = 10 },
+        .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
+        .sidebar_active = .{ .r = 50, .g = 50, .b = 50 },
+        .search_match = .{ .r = 20, .g = 120, .b = 255 },
+        .search_match_current = .{ .r = 255, .g = 180, .b = 20 },
+        .selection = .{ .r = 60, .g = 80, .b = 120 },
+        .cursor = .{ .r = 255, .g = 255, .b = 255 },
+        .accent = .{ .r = 20, .g = 120, .b = 255 },
+    });
+    var request = try prepareRequest(allocator, 44, &ops, &tokens, 16);
+    defer request.deinit(allocator);
+    var artifact = try shapeRequest(allocator, &request, 2000);
+    defer artifact.deinit(allocator);
+    try std.testing.expect(artifact.glyphs.len > 0);
 }

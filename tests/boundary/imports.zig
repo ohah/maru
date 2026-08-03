@@ -1,5 +1,135 @@
 const std = @import("std");
 
+const ClientReceiverClass = enum { guarded, construction, unchecked, observation };
+const ClientReceiverSpec = struct {
+    name: []const u8,
+    receiver_type: []const u8,
+    class: ClientReceiverClass,
+};
+
+test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy closure" {
+    const allocator = std.testing.allocator;
+    const source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/client.zig",
+    );
+    defer allocator.free(source);
+
+    const mutable = "*Client";
+    const immutable = "*const Client";
+    const manifest = [_]ClientReceiverSpec{
+        .{ .name = "requireAdminRuntimeEnd", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "deinit", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "tryDeinit", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "requireBufferedGenerationBatch", .receiver_type = immutable, .class = .guarded },
+        .{ .name = "call", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "callUntil", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "prepareBlockingRpcStorage", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "abortPreparedBlockingRpcStorage", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "preflightPreparedBlockingRpcStorageExecution", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "executePreparedBlockingRpcStorageWithAllocator", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "preparedBlockingRpcStorageMatches", .receiver_type = immutable, .class = .guarded },
+        .{ .name = "refreshBufferedAuthorityEvidence", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "runtimeInventory", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "runtimeInventoryBounded", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "prepareUpgrade", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "upgradeStatus", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "readSnapshot", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "readSnapshotUntil", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "readStreamBatch", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "readGenerationBatch", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "dropBufferedStream", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "takeEventForStream", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "peekEndedEventForStream", .receiver_type = immutable, .class = .guarded },
+        .{ .name = "prepareEndedPurgeInventory", .receiver_type = immutable, .class = .guarded },
+        .{ .name = "releaseEvent", .receiver_type = immutable, .class = .guarded },
+        .{ .name = "sendInput", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "sendInputNonBlocking", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "sendScrollToBottomNonBlocking", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "sendResyncNonBlocking", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "sendCoreCommandNonBlocking", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "sendScrollToBottom", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "sendCoreCommand", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "pumpPendingOutput", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "fenceRevokedStream", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "hasBufferedControllerRevoke", .receiver_type = immutable, .class = .guarded },
+        .{ .name = "hasBufferedControllerRevokeForStream", .receiver_type = immutable, .class = .guarded },
+        .{ .name = "terminalReasonInvariant", .receiver_type = immutable, .class = .guarded },
+        .{ .name = "poison", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "firstPoisonReason", .receiver_type = immutable, .class = .guarded },
+
+        .{ .name = "canMoveToGenerationNode", .receiver_type = immutable, .class = .construction },
+        .{ .name = "bindGenerationAccountingLedger", .receiver_type = mutable, .class = .construction },
+        .{ .name = "moveToGenerationNode", .receiver_type = mutable, .class = .construction },
+        .{ .name = "projectionAuthorityDigest", .receiver_type = immutable, .class = .construction },
+        .{ .name = "externalTransferProfile", .receiver_type = immutable, .class = .construction },
+        .{ .name = "prepareExternalRecoveryDiscard", .receiver_type = immutable, .class = .construction },
+        .{ .name = "validateExternalRecoveryDiscard", .receiver_type = immutable, .class = .construction },
+        .{ .name = "prepareExternalPumpTransfer", .receiver_type = mutable, .class = .construction },
+        .{ .name = "commitExternalPumpTransfer", .receiver_type = mutable, .class = .construction },
+        .{ .name = "foldExternalAdoptionSource", .receiver_type = immutable, .class = .construction },
+        .{ .name = "externalAdoptionFoldResultMatches", .receiver_type = immutable, .class = .construction },
+        .{ .name = "materializeExternalMetadataEvent", .receiver_type = immutable, .class = .construction },
+        .{ .name = "externalMetadataDtoMatchesEventCandidate", .receiver_type = immutable, .class = .construction },
+        .{ .name = "previewExternalAdoption", .receiver_type = immutable, .class = .construction },
+        .{ .name = "inspectExternalAdoption", .receiver_type = immutable, .class = .construction },
+        .{ .name = "preflightExternalAdoptionDestination", .receiver_type = immutable, .class = .construction },
+        .{ .name = "preflightExternalAdoptionDestinationWithScratch", .receiver_type = immutable, .class = .construction },
+        .{ .name = "appendExternalOwnerRangesForTeardown", .receiver_type = immutable, .class = .construction },
+        .{ .name = "prepareExternalOwnerRangeProof", .receiver_type = immutable, .class = .construction },
+        .{ .name = "preflightExternalAdoption", .receiver_type = immutable, .class = .construction },
+        .{ .name = "stageExternalScreenCopies", .receiver_type = immutable, .class = .construction },
+        .{ .name = "externalScreenCopiesMatch", .receiver_type = immutable, .class = .construction },
+        .{ .name = "validateExternalAdoptionPlan", .receiver_type = immutable, .class = .construction },
+        .{ .name = "externalAdoptionDisarmMetadataBytes", .receiver_type = immutable, .class = .construction },
+        .{ .name = "externalAdoptionDisarmMatchesInventory", .receiver_type = immutable, .class = .construction },
+        .{ .name = "sealExternalAdoption", .receiver_type = immutable, .class = .construction },
+        .{ .name = "validateSealedExternalAdoptionPlan", .receiver_type = immutable, .class = .construction },
+        .{ .name = "prepareExternalAdoptionTake", .receiver_type = immutable, .class = .construction },
+        .{ .name = "commitExternalAdoption", .receiver_type = mutable, .class = .construction },
+        .{ .name = "enterExternalMode", .receiver_type = mutable, .class = .construction },
+        .{ .name = "prepareExternalModeDeinit", .receiver_type = mutable, .class = .construction },
+        .{ .name = "reserveExternalModeDeinit", .receiver_type = mutable, .class = .construction },
+        .{ .name = "finishReservedExternalModeDeinit", .receiver_type = mutable, .class = .construction },
+        .{ .name = "cancelReservedExternalModeDeinit", .receiver_type = mutable, .class = .construction },
+        .{ .name = "transferReservedExternalModeDeinit", .receiver_type = mutable, .class = .construction },
+        .{ .name = "bindOperationFence", .receiver_type = mutable, .class = .construction },
+
+        .{ .name = "beginGenerationBatchAllocator", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "restoreGenerationBatchAllocatorUnchecked", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "prepareGenerationAccountingConsume", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "consumeGenerationAccountingUnchecked", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "tryAcquireEndedPurgeExclusive", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "tryAcquireClientSlotTeardownExclusive", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "abortClientSlotTeardownExclusive", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "tryDeinitClientSlotExclusiveHeld", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "beginClientSlotOperation", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "endClientSlotOperation", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "releaseEndedPurgeExclusiveClean", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "commitEndedPurgeExclusiveTerminal", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "enterGenerationAllocatorCallback", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "rejectGenerationAllocatorCallbackReentry", .receiver_type = immutable, .class = .unchecked },
+        .{ .name = "leaveGenerationAllocatorCallbackUnchecked", .receiver_type = mutable, .class = .unchecked },
+
+        .{ .name = "endedPurgeFenceIntruded", .receiver_type = immutable, .class = .observation },
+    };
+    try expectClientReceiverManifest(allocator, source, &manifest);
+    try expectContainerMethodMarkersInOrder(
+        allocator,
+        source,
+        "Client",
+        "terminalReasonInvariant",
+        &.{ "beginPublicMutation()", "self.unusable" },
+    );
+    try expectContainerMethodMarkersInOrder(
+        allocator,
+        source,
+        "Client",
+        "firstPoisonReason",
+        &.{ "beginPublicMutation()", "self.first_poison_reason" },
+    );
+}
+
 test "CR3a-2c2b3a ended purge plan remains a neutral test-only leaf" {
     const allocator = std.testing.allocator;
     const leaf = try readZigFileZ(
@@ -6194,6 +6324,44 @@ fn expectFnSignature(
     try std.testing.expectEqual(names.len, index);
     const result = proto.ast.return_type.unwrap() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings(return_type, nodeSource(tree, source, result));
+}
+
+fn expectClientReceiverManifest(
+    allocator: std.mem.Allocator,
+    source: [:0]const u8,
+    manifest: []const ClientReceiverSpec,
+) !void {
+    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    defer tree.deinit(allocator);
+    const members = findRootContainerMembers(&tree, "Client") orelse
+        return error.TestUnexpectedResult;
+    var found_count: usize = 0;
+    for (members) |member| {
+        const tuple = declarationTuple(&tree, "Client", member);
+        if (!std.mem.eql(u8, tuple.kind, "fn") or
+            !std.mem.eql(u8, tuple.visibility, "pub"))
+            continue;
+        var buffer: [1]std.zig.Ast.Node.Index = undefined;
+        var proto = tree.fullFnProto(&buffer, member) orelse
+            return error.TestUnexpectedResult;
+        var params = proto.iterate(&tree);
+        const first = params.next() orelse continue;
+        const type_node = first.type_expr orelse continue;
+        const receiver_type = nodeSource(&tree, source, type_node);
+        if (!std.mem.eql(u8, receiver_type, "*Client") and
+            !std.mem.eql(u8, receiver_type, "*const Client"))
+            continue;
+        var match_count: usize = 0;
+        for (manifest) |expected| {
+            if (!std.mem.eql(u8, expected.name, tuple.name)) continue;
+            try std.testing.expectEqualStrings(expected.receiver_type, receiver_type);
+            _ = expected.class;
+            match_count += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 1), match_count);
+        found_count += 1;
+    }
+    try std.testing.expectEqual(manifest.len, found_count);
 }
 
 fn expectContainerMethodMarkersInOrder(

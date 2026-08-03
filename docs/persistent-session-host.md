@@ -1270,6 +1270,35 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    baseline은 새 public surface를 막지만 기존 body/caller drift까지 증명하지는 않으므로 manifest 완료를 대체하지 않는다. (2)는 bound
    Client에서 거부하거나 product caller 0, (3)은 exact caller source oracle과 ClientSlot 상위 permit으로 닫는다. 단순 `pub` 표기만으로
    (2)/(3)/(4)를 concurrent product entry에서 면제하지 않는다.
+
+   B3b-S의 closed receiver manifest는 아래 **선언 순서와 무관한 exact set**을 SSOT로 삼는다. `G`는 bound Client에서
+   shared fence를 직접 잡거나 검증된 guarded funnel로 위임하는 post-publication entry, `C`는 standalone/external-pump의
+   publication 전 construction/transfer 전용 entry, `U`는 ClientSlot이 상위 permit·receipt 권위를 보유한 unchecked suffix,
+   `R`은 Client의 mutable graph/fd/allocator를 읽지 않는 immutable/atomic-only observation이다. boundary fixture는 AST로 첫
+   parameter의 **이름이 아니라 타입**이 `*Client|*const Client`인 모든 `pub fn`을 추출해 이름·receiver mutability·class의
+   unordered set equality를 검사한다. 따라서 `_ : *Client` receiver도 포함하며 새 receiver, 누락/중복 row, mutability/class drift는
+   모두 실패한다. static constructor와 receiver 없는 `preparedBlockingRpcStorageSettled`은 기존 declaration/signature gate가 맡는다.
+
+   | class | exact public Client receiver methods |
+   |---|---|
+   | `G` (39) | `requireAdminRuntimeEnd`, `deinit`, `tryDeinit`, `requireBufferedGenerationBatch`, `call`, `callUntil`, `prepareBlockingRpcStorage`, `abortPreparedBlockingRpcStorage`, `preflightPreparedBlockingRpcStorageExecution`, `executePreparedBlockingRpcStorageWithAllocator`, `preparedBlockingRpcStorageMatches`, `refreshBufferedAuthorityEvidence`, `runtimeInventory`, `runtimeInventoryBounded`, `prepareUpgrade`, `upgradeStatus`, `readSnapshot`, `readSnapshotUntil`, `readStreamBatch`, `readGenerationBatch`, `dropBufferedStream`, `takeEventForStream`, `peekEndedEventForStream`, `prepareEndedPurgeInventory`, `releaseEvent`, `sendInput`, `sendInputNonBlocking`, `sendScrollToBottomNonBlocking`, `sendResyncNonBlocking`, `sendCoreCommandNonBlocking`, `sendScrollToBottom`, `sendCoreCommand`, `pumpPendingOutput`, `fenceRevokedStream`, `hasBufferedControllerRevoke`, `hasBufferedControllerRevokeForStream`, `terminalReasonInvariant`, `poison`, `firstPoisonReason` |
+   | `C` (36) | `canMoveToGenerationNode`, `bindGenerationAccountingLedger`, `moveToGenerationNode`, `projectionAuthorityDigest`, `externalTransferProfile`, `prepareExternalRecoveryDiscard`, `validateExternalRecoveryDiscard`, `prepareExternalPumpTransfer`, `commitExternalPumpTransfer`, `foldExternalAdoptionSource`, `externalAdoptionFoldResultMatches`, `materializeExternalMetadataEvent`, `externalMetadataDtoMatchesEventCandidate`, `previewExternalAdoption`, `inspectExternalAdoption`, `preflightExternalAdoptionDestination`, `preflightExternalAdoptionDestinationWithScratch`, `appendExternalOwnerRangesForTeardown`, `prepareExternalOwnerRangeProof`, `preflightExternalAdoption`, `stageExternalScreenCopies`, `externalScreenCopiesMatch`, `validateExternalAdoptionPlan`, `externalAdoptionDisarmMetadataBytes`, `externalAdoptionDisarmMatchesInventory`, `sealExternalAdoption`, `validateSealedExternalAdoptionPlan`, `prepareExternalAdoptionTake`, `commitExternalAdoption`, `enterExternalMode`, `prepareExternalModeDeinit`, `reserveExternalModeDeinit`, `finishReservedExternalModeDeinit`, `cancelReservedExternalModeDeinit`, `transferReservedExternalModeDeinit`, `bindOperationFence` |
+   | `U` (15) | `beginGenerationBatchAllocator`, `restoreGenerationBatchAllocatorUnchecked`, `prepareGenerationAccountingConsume`, `consumeGenerationAccountingUnchecked`, `tryAcquireEndedPurgeExclusive`, `tryAcquireClientSlotTeardownExclusive`, `abortClientSlotTeardownExclusive`, `tryDeinitClientSlotExclusiveHeld`, `beginClientSlotOperation`, `endClientSlotOperation`, `releaseEndedPurgeExclusiveClean`, `commitEndedPurgeExclusiveTerminal`, `enterGenerationAllocatorCallback`, `rejectGenerationAllocatorCallbackReentry`, `leaveGenerationAllocatorCallbackUnchecked` |
+   | `R` (1) | `endedPurgeFenceIntruded` |
+
+   위 91-row exact set은 B3b-S의 **inventory subgate**이며 class label만으로 policy closure를 주장하지 않는다. 다음 policy
+   subgate가 각 `G` row를 direct/funnel proof, 각 `C` row를 bound-reject 또는 exact construction caller proof, 각 `U` row를
+   exact caller와 상위 authority proof, `R` row를 atomic-only body proof에 연결해 모두 GREEN이 된 뒤에만 closed receiver manifest와
+   hostile callback 선행 gate를 완료로 센다.
+
+   `C`는 `operation_fence != null`인 bound Client를 첫 mutable graph/payload read 전에 거부하거나 test 밖 product caller를
+   external-pump construction/transfer owner로 exact 제한한다. 특히 `projectionAuthorityDigest`와 `externalTransferProfile`은 이름이
+   observation이어도 parser/list/allocator provenance를 읽으므로 `R`이 아니다. `U`는 허용 owner file과 exact caller count 및 상위
+   ClientSlot permit/receipt 순서를 별도 oracle로 고정한다. `R`은 const receiver만으로 충분하다고 간주하지 않고 atomic fence identity/state
+   외 Client mutable field 접근을 금지한다. `terminalReasonInvariant`와 `firstPoisonReason`은 non-atomic terminal fields를 읽으므로 `G`이며,
+   fence 거부 시 각각 fail-closed `false|null`을 반환하고 Client graph를 읽지 않는다. 모든 `G` body에 동일 source substring을 반복
+   강제하지 않고 direct gate 또는 `ensureUsable|requireBlockingMode` 같은 검증된 funnel을 manifest metadata로 고정한다.
+
    `Client`의 public wrapper는 `bindOperationFence|tryAcquireEndedPurgeExclusive|endedPurgeFenceIntruded|
    beginClientSlotOperation|endClientSlotOperation|releaseEndedPurgeExclusiveClean|
    commitEndedPurgeExclusiveTerminal|tryAcquireClientSlotTeardownExclusive|

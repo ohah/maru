@@ -44,8 +44,15 @@ describe("markdown trust boundary", () => {
     // `body{display:none}`이 화면에 글자로 뜬다. `script`처럼 통째로 버려야 한다.
     expect(renderMarkdown("<style>body{display:none}</style>\n")).not.toContain("display:none");
     expect(renderMarkdown('<div style="position:fixed">x</div>\n')).not.toContain("position:fixed");
-    // 폼은 사용자 입력을 어딘가로 보내는 장치라 문서가 가질 수 없다(GFM 체크박스 `input`은 별개로 남는다).
+    // 폼은 사용자 입력을 어딘가로 보내는 장치라 문서가 가질 수 없다.
     expect(renderMarkdown('<form action="https://evil.test"></form>\n')).not.toContain("<form");
+    // **폼 안의 입력도 함께 사라져야 한다.** allowlist는 GFM 체크 목록 때문에 `input`을 남기면서
+    // `disabled type="checkbox"`로 강제하는데, 그러면 폼이 사라진 자리에 **뜻 없는 빈 체크박스**만 뜬다
+    // (실측 — 실제 화면에서 그렇게 보였다).
+    expect(renderMarkdown('<form action="x"><input name="a"></form>\n')).not.toContain("<input");
+    expect(renderMarkdown('<input type="text" value="v">\n')).not.toContain("<input");
+    // 진짜 체크 목록은 남는다 — 그것만이 문서의 내용이다.
+    expect(renderMarkdown("- [x] 완료\n")).toContain('type="checkbox"');
     expect(renderMarkdown("<!-- prettier-ignore -->\n본문\n")).not.toContain("prettier-ignore");
     expect(renderMarkdown("<!DOCTYPE html>\n본문\n")).not.toContain("DOCTYPE");
   });
@@ -90,6 +97,8 @@ describe("markdown trust boundary", () => {
     expect(html).toContain('href="https://example.com/docs"');
     expect(html).not.toContain('src="https://example.com/tracker.png"');
     expect(html).not.toContain("data-maru-asset-path");
+    // 그릴 수 없는 이미지는 요소째 사라진다 — `src`만 지우면 빈 `<img>`가 문서에 없던 점으로 보인다.
+    expect(html).not.toContain("<img");
   });
 
   test("retains only normalized local image paths as renderer-owned metadata", () => {

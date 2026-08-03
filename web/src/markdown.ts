@@ -63,6 +63,17 @@ function rehypeBlockResourceLoads(mode: AssetRenderMode) {
       delete node.properties.srcSet;
       delete node.properties.poster;
     });
+    // 그릴 수 없는 이미지는 **요소째** 지운다. `src`만 지우면 빈 `<img>`가 남아 문서에 없던 점 하나가
+    // 보인다(실측 — 원격 이미지 자리에 1px 자국이 남았다). 로컬 이미지는 위에서 asset 경로를 받았으므로
+    // 여기 걸리지 않고, 나중에 viewer가 그 경로로 바이트를 채운다.
+    visit(tree, "element", (node: Element, index, parent) => {
+      if (node.tagName !== "img") return;
+      if (node.properties[assetPathProperty] !== undefined) return;
+      if (node.properties[assetIdProperty] !== undefined) return;
+      if (parent === undefined || index === undefined) return;
+      (parent as { children: unknown[] }).children.splice(index, 1);
+      return index;
+    });
     file.data.maruAtomicAssetPaths = atomicPaths;
   };
 }
@@ -71,8 +82,24 @@ function rehypeBlockResourceLoads(mode: AssetRenderMode) {
 // fallback은 MathML-only에서도 inline color style을 붙이므로, 최종 경계에서
 // 실행·네트워크 가능 속성을 다시 제거해야 Markdown 파생 markup의 inline style 금지 계약이 유지된다
 // (CSP hash는 entry HTML의 고정 critical background bytes 하나에만 일치한다).
+/** GFM 체크 목록이 만드는 `<li class="task-list-item">` 안의 입력만 진짜 체크박스다. */
+function isTaskListItem(parent: unknown): boolean {
+  const className = (parent as Element | undefined)?.properties?.className;
+  return Array.isArray(className) && className.includes("task-list-item");
+}
+
 function rehypeHardenTrustedOutput() {
   return (tree: Root) => {
+    // 문서가 쓴 `<input>`을 지운다. allowlist는 GFM 체크 목록 때문에 `input`을 남기면서 `disabled
+    // type="checkbox"`로 강제하는데, 그 결과 `<form><input name="a"></form>` 같은 마크업이 **아무 뜻 없는
+    // 빈 체크박스**로 화면에 남는다(실측 — 폼은 사라졌는데 체크박스만 떠 있었다). 진짜 체크 목록은
+    // `task-list-item` 안에 있으므로 그것만 남긴다.
+    visit(tree, "element", (node: Element, index, parent) => {
+      if (node.tagName !== "input" || isTaskListItem(parent)) return;
+      if (parent === undefined || index === undefined) return;
+      (parent as { children: unknown[] }).children.splice(index, 1);
+      return index;
+    });
     visit(tree, "element", (node: Element) => {
       delete node.properties.style;
       delete node.properties.src;

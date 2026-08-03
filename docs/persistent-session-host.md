@@ -1093,10 +1093,14 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    `InvalidCount|InvalidTargetMap|ArithmeticOverflow|DestinationOccupied`다. pointer-free/copyable `QueueInput`은 source/claimed-target
    count와 source/target bytes만 가진다. pointer-free/copyable `QueuePlan`은
    `union(enum){pristine, planned: QueueScalars}`이고 `QueueScalars`만 source/target/survivor count와 bytes를 가진다. empty source의 성공도
-   `.planned`라 pristine destination과 구분한다. destination이 pristine이 아니면 mutation 0의 `DestinationOccupied`, 모든 오류에서 out은
-   byte-for-byte pristine, 성공에서만 `.planned`를 한 번 publish한다. ephemeral
-   `DispositionCursor`만 bitset을 borrow해 source ordinal마다 stable target 또는 survivor ordinal을 반환하며 plan/step에는 address,
-   allocator, payload pointer와 scratch reference가 없다. b3a는 Client queue/scratch/process state mutation,
+   `.planned`라 pristine destination과 구분한다. destination이 pristine이 아니면 mutation 0의 `DestinationOccupied`다. 모든 오류는 out의
+   입력값을 byte-for-byte 보존하므로 pristine 입력의 실패는 pristine을, `DestinationOccupied`는 기존 occupied 값을 유지하며 성공에서만
+   `.planned`를 한 번 publish한다. 오류 우선순위는 destination, count, target map, checked arithmetic 순이다. `max_items` 지원 상한은
+   4,096이고 검증 비용은 `O(source_count + ceil(max_items / word bits))`다. ephemeral `DispositionCursor`만 bitset을 borrow해 source
+   ordinal마다 stable target 또는 survivor ordinal을 반환한다. `next`는 위조된 cursor ordinal/count를 typed error로 fail-close하고 전체
+   순회 뒤 `validateComplete()`가 target map/count/ordinal을 typed 재검증해야 한다. plan/step에는 address, allocator, payload pointer와 scratch reference가 없다. caller는
+   `targets` backing과 `out` storage를 겹치지 않게 제공해야 하며 b3b가 실제 scratch/out exact-alias preflight로 이 조건을 다시 검증한다.
+   b3a는 Client queue/scratch/process state mutation,
    owner freeze, allocation/free, callback, reservation과 permit/receipt consume이 모두 0이며 이 단계만으로 target cleanup이나 2c2 완료를
    주장하지 않는다. **b3b**가 exact preparation 재검증, reservation, receipt tombstone, scratch descriptor의 frozen-owner 전환,
    stable compaction·counter publish, 모든 target exact-once cleanup, post-validation, 정상 release 또는 no-free quarantine suffix와

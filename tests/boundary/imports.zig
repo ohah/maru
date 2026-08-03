@@ -1,5 +1,91 @@
 const std = @import("std");
 
+test "CR3a-2c2b3a ended purge plan remains a neutral test-only leaf" {
+    const allocator = std.testing.allocator;
+    const leaf = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/ended_purge_transaction.zig",
+    );
+    defer allocator.free(leaf);
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(leaf, "@import("));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(leaf, "@import(\"std\")"));
+    const forbidden = [_][]const u8{
+        "@import(\"client.zig\")",
+        "@import(\"client_slot.zig\")",
+        "@import(\"generation_transport.zig\")",
+        "@import(\"external_owner_seal.zig\")",
+        "std.mem.Allocator",
+        "*anyopaque",
+        "@ptrFromInt",
+    };
+    for (forbidden) |needle|
+        try std.testing.expectEqual(@as(usize, 0), countOccurrences(leaf, needle));
+
+    var dir = try std.Io.Dir.cwd().openDir(
+        std.testing.io,
+        "src",
+        .{ .iterate = true },
+    );
+    defer dir.close(std.testing.io);
+    var walker = try dir.walk(allocator);
+    defer walker.deinit();
+    while (try walker.next(std.testing.io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig") or
+            std.mem.eql(
+                u8,
+                entry.path,
+                "platform/macos/session_host/ended_purge_transaction.zig",
+            ))
+            continue;
+        const path = try std.fmt.allocPrint(
+            allocator,
+            "src/{s}",
+            .{entry.path},
+        );
+        defer allocator.free(path);
+        const source = try readZigFileZ(allocator, path);
+        defer allocator.free(source);
+        if (std.mem.eql(u8, entry.path, "platform/macos/session_host.zig")) {
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                countStringLiteralOutsideTopLevelTests(source, "ended_purge_transaction.zig"),
+            );
+            try std.testing.expectEqual(
+                @as(usize, 1),
+                countOccurrences(source, "ended_purge_transaction.zig"),
+            );
+            try std.testing.expect(!joinedStringLiteralsContainOutsideTopLevelTests(
+                source,
+                "ended_purge_transaction.zig",
+            ));
+        } else {
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                countOccurrences(source, "ended_purge_transaction.zig"),
+            );
+            try std.testing.expect(!joinedStringLiteralsContain(
+                source,
+                "ended_purge_transaction.zig",
+            ));
+        }
+    }
+}
+
+test "CR3a-2c2b3a joined import oracle excludes only top-level test bodies" {
+    const product =
+        "const leaf = @import(\"ended_purge_\" ++ \"transaction.zig\");\n";
+    try std.testing.expect(joinedStringLiteralsContainOutsideTopLevelTests(
+        product,
+        "ended_purge_transaction.zig",
+    ));
+    const test_only =
+        "test { _ = @import(\"ended_purge_\" ++ \"transaction.zig\"); }\n";
+    try std.testing.expect(!joinedStringLiteralsContainOutsideTopLevelTests(
+        test_only,
+        "ended_purge_transaction.zig",
+    ));
+}
+
 test "CR3a-2a generation attachment contract remains a neutral authority leaf" {
     const allocator = std.testing.allocator;
     const source = try readZigFileZ(
@@ -4888,6 +4974,53 @@ fn joinedStringLiteralsContain(source: [:0]const u8, needle: []const u8) bool {
         switch (token.tag) {
             .eof => return false,
             .string_literal => {
+                const literal = source[token.loc.start + 1 .. token.loc.end - 1];
+                for (literal) |byte| {
+                    if (byte == needle[matched]) {
+                        matched += 1;
+                        if (matched == needle.len) return true;
+                    } else {
+                        matched = if (byte == needle[0]) 1 else 0;
+                    }
+                }
+            },
+            else => {},
+        }
+    }
+}
+
+fn joinedStringLiteralsContainOutsideTopLevelTests(
+    source: [:0]const u8,
+    needle: []const u8,
+) bool {
+    var tokenizer = std.zig.Tokenizer.init(source);
+    var brace_depth: usize = 0;
+    var waiting_for_test_body = false;
+    var test_body_depth: ?usize = null;
+    var matched: usize = 0;
+    while (true) {
+        const token = tokenizer.next();
+        switch (token.tag) {
+            .eof => return false,
+            .keyword_test => if (brace_depth == 0 and test_body_depth == null) {
+                waiting_for_test_body = true;
+            },
+            .l_brace => {
+                brace_depth += 1;
+                if (waiting_for_test_body) {
+                    test_body_depth = brace_depth;
+                    waiting_for_test_body = false;
+                    matched = 0;
+                }
+            },
+            .r_brace => {
+                if (test_body_depth != null and test_body_depth.? == brace_depth) {
+                    test_body_depth = null;
+                    matched = 0;
+                }
+                if (brace_depth > 0) brace_depth -= 1;
+            },
+            .string_literal => if (test_body_depth == null) {
                 const literal = source[token.loc.start + 1 .. token.loc.end - 1];
                 for (literal) |byte| {
                     if (byte == needle[matched]) {

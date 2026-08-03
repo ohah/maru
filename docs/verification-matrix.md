@@ -672,7 +672,7 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   last release 뒤 Client/node exact-one destroy를 검증한다. fork child PID-domain mismatch에서 low-level mint/consume/tryDeinit의
   typed reject와 callback/free/owner mutation 0, strict 제품 wrapper의 fail-stop을 구분해 검증한다. HostPool membership
   lease와 ConnectionLease는 별개이며 external-pump owner graph는 변경하지 않는다. 증거 수준은 production-type unit이다.
-- CR3a-2(진행, **2a·2b·2c1·2c2a·2c2b1·2c2b2 구현**, 2c2b3a·2c2b3b 및 2c2c~e 계획): 2c2a는 snapshot 전용 permit을 kind-tagged common
+- CR3a-2(진행, **2a·2b·2c1·2c2a·2c2b1·2c2b2·2c2b3a 구현**, 2c2b3b 및 2c2c~e 계획): 2c2a는 snapshot 전용 permit을 kind-tagged common
   `StreamOperationPermit`/단일 active tuple/process registry로 migration하고 `GenerationBatchRegistry.streamIdle`이
   reserved/ingress/live/releasing 전 상태를 purge blocker로 분류한다. 2c2b1은 대상 stream의 첫 event에 대한 무할당·무변경
   ended hot peek와 비권위적 index hint까지만 구현한다. 2c2b2는 exact binding과 common permit 아래 fixed inline scratch로 전체 Client
@@ -685,7 +685,7 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   address·allocator·payload pointer·scratch reference가 없고 ephemeral cursor만 target bitset을 borrow한다. product queue/scratch/process mutation,
   owner freeze, allocation/free, reservation과 permit/receipt consume은 0이며 b3a만으로 target cleanup이나 2c2 완료를 주장하지 않는다.
   component gate는 empty/none/all, first/middle/last/alternating, source cap/cap+1, target count mismatch, count/byte underflow·overflow,
-  deterministic replay와 stable survivor 순서를 Debug/ReleaseFast에서 검증하고 Client·client_slot·allocator·quarantine import와 제품 callsite
+  forged cursor fail-close, deterministic error precedence/replay와 stable survivor 순서를 Debug/ReleaseFast에서 검증하고 Client·client_slot·allocator·quarantine import와 제품 callsite
   0을 source oracle로 고정한다.
   2c2b3b가 blocking generation-only complete Client-owned deinit graph 64 MiB checked cap, `pending_outbound` owner SSOT, private immutable/no-escape scratch,
   별도 advance-before-callback cleanup cursor, stable compaction/counter publication, all-target exact-once callback, scalar-first post-validation과

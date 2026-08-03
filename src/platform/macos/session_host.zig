@@ -157,6 +157,7 @@ pub const external_recovery_types =
 pub const external_rx_types = @import("session_host/external_rx_types.zig");
 test {
     _ = @import("session_host/external_rx_demux.zig");
+    _ = @import("session_host/ended_purge_transaction.zig");
 }
 // runtime_event_reducer(P5c3c-2b2c3-c3b)는 이미 common wire/classifier를 통과한 inherited
 // event FIFO를 allocation/ownership 없이 fold한다. Client·ledger·pump lifecycle은 import하지 않는다.

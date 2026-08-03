@@ -710,7 +710,7 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   `max_ended_purge_quarantine_bytes|Error|Reservation|Registry` exact 네 개와
   `ClientSlot.initializeProcessRuntime`을 AppSession의 fork 가능 작업 전에 명시적으로 호출하고 pre-fork parent PID `init` exact-one과
   같은 PID idempotence, non-test `process_runtime_bootstrap_fixture.zig`의 미초기화 ClientSlot 생성 거부와 bootstrap 뒤 실제
-  ClientSlot 생성·valid·deinit 및 fork child의 mutex-before-reject 0,
+  ClientSlot 생성·valid·deinit 및 macOS fork child의 mutex-before-reject 0,
   self-exec 뒤에만 thread runtime을 시작하는 non-test `ended_purge_quarantine_concurrency_fixture.zig`의 2초 watchdog·8-thread
   single winner·exact release, `idle|reserved|committed`/reserve-release-commit/replay/cap/cap+1을 Debug/ReleaseFast로 검증한다.
   `pending_outbound` non-null도 build/lifecycle과 함께 frozen scratch descriptor, complete-owner sum/alias/seal/postvalidation/tombstone에

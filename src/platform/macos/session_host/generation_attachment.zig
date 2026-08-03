@@ -409,6 +409,7 @@ const AttachmentReentrantFreeAllocator = struct {
 };
 
 test "CR3a-2a generation attachment uncertain execute permits exact adapter teardown" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
     const allocator = std.testing.allocator;
     var client: @import("client.zig").Client = .{
         .allocator = allocator,
@@ -436,6 +437,7 @@ test "CR3a-2a generation attachment uncertain execute permits exact adapter tear
 }
 
 test "CR3a-2a attached teardown fences transport before adapter release" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
     const allocator = std.testing.allocator;
     var reentrant = AttachmentReentrantFreeAllocator{ .parent = allocator };
     var client: @import("client.zig").Client = .{
@@ -507,6 +509,7 @@ test "CR3a-2a attached teardown fences transport before adapter release" {
 }
 
 test "CR3a-2a whole-parent restore cannot revive accepted response or transport authority" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
     const allocator = std.testing.allocator;
     var client: @import("client.zig").Client = .{
         .allocator = allocator,
@@ -550,6 +553,7 @@ test "CR3a-2a whole-parent restore cannot revive accepted response or transport 
 }
 
 test "CR3a-2b2 generation GUI pump transfers and releases a node-owned snapshot before canonical drop" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
     const allocator = std.testing.allocator;
     var client: @import("client.zig").Client = .{
         .allocator = allocator,
@@ -668,6 +672,7 @@ test "CR3a-2b2 generation GUI pump transfers and releases a node-owned snapshot 
 }
 
 test "CR3a-2b2 generation GUI pump releases a malformed node-owned batch" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
     const allocator = std.testing.allocator;
     var client: @import("client.zig").Client = .{
         .allocator = allocator,
@@ -730,6 +735,7 @@ test "CR3a-2b2 generation GUI pump releases a malformed node-owned batch" {
 
 test "CR3a-2b2 generation GUI pump transfers a direct parser frame through the node adapter" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
     const allocator = std.testing.allocator;
     const protocol = @import("protocol.zig");
     const framing = @import("framing.zig");
@@ -828,6 +834,7 @@ test "CR3a-2b2 generation GUI pump transfers a direct parser frame through the n
 }
 
 test "CR3a-2a typed reject settles binding response and transport exactly once" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
     const allocator = std.testing.allocator;
     var client: @import("client.zig").Client = .{
         .allocator = allocator,

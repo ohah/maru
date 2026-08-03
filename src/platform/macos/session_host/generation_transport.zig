@@ -572,6 +572,7 @@ comptime {
 }
 
 test "CR3a-2a generation transport prepares and aborts a closed attach request" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
     const allocator = std.testing.allocator;
     var client: client_mod.Client = .{
         .allocator = allocator,
@@ -598,6 +599,7 @@ test "CR3a-2a generation transport prepares and aborts a closed attach request" 
 }
 
 test "CR3a-2c1 final snapshot owner rejects copy thread replay and restored transport authority" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
     const allocator = std.testing.allocator;
     var client: client_mod.Client = .{
         .allocator = allocator,
@@ -683,6 +685,7 @@ test "CR3a-2c1 final snapshot owner rejects copy thread replay and restored tran
 }
 
 test "CR3a-2a copied generation transport cannot prepare or mutate Client" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
     const allocator = std.testing.allocator;
     var client: client_mod.Client = .{
         .allocator = allocator,
@@ -711,6 +714,7 @@ test "CR3a-2a copied generation transport cannot prepare or mutate Client" {
 }
 
 test "CR3a-2a response destination cannot splice binding storage before wire" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
     const allocator = std.testing.allocator;
     var client: client_mod.Client = .{
         .allocator = allocator,
@@ -744,6 +748,7 @@ test "CR3a-2a response destination cannot splice binding storage before wire" {
 }
 
 test "CR3a-2a execute failure settles prepared backing and publishes uncertain response" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
     const allocator = std.testing.allocator;
     var client: client_mod.Client = .{
         .allocator = allocator,
@@ -783,6 +788,7 @@ test "CR3a-2a execute failure settles prepared backing and publishes uncertain r
 
 test "CR3a-2a response publication failure poisons before payload free reentry" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
     const allocator = std.testing.allocator;
     var probe = PoisonOrderAllocator{ .parent = allocator };
     const response_wire = try framing.encodeFrame(
@@ -843,6 +849,7 @@ test "CR3a-2a response publication failure poisons before payload free reentry" 
 
 test "CR3a-2a pending flush callback invalidates response before request wire" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
     const allocator = std.testing.allocator;
     var probe = PoisonOrderAllocator{ .parent = allocator };
     const fd = c.open("/dev/null", c.O{ .ACCMODE = .WRONLY });
@@ -885,6 +892,7 @@ test "CR3a-2a pending flush callback invalidates response before request wire" {
 
 test "CR3a-2a accepted response retains allocator captured before wire" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
     const allocator = std.testing.allocator;
     var probe = PoisonOrderAllocator{ .parent = allocator };
     const response_wire = try framing.encodeFrame(

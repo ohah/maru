@@ -31,6 +31,7 @@ test "CR3a-2c2b3b process runtime bootstrap is explicit and same-process idempot
 }
 
 test "CR3a-2c2b3b fork child rejects bootstrap before inherited issuer mutex" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
     const ChildCleanup = struct {
         fn terminateAndReap(child_pid: std.c.pid_t) void {
             _ = std.c.kill(child_pid, std.c.SIG.KILL);

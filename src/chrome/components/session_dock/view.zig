@@ -45,7 +45,7 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
     };
 
     const header = find(frame.tree, build.NodeIds.header) orelse return error.MissingRect;
-    try writer.text(header, 0, "AI 세션 기록", .surface_fg, 2, false, true);
+    try writer.textStrong(header, 0, "AI 세션 기록", .surface_fg, 2, false, true);
     var count_buf: [48]u8 = undefined;
     const count = std.fmt.bufPrint(&count_buf, "{d}개 표시 · 최근 {d}개", .{ props.displayed_count, props.recent_limit }) catch "";
     try writer.text(header, 1, count, .muted_fg, 2, false, true);
@@ -69,7 +69,7 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
             .group => |group| {
                 var group_buf: [96]u8 = undefined;
                 const label = std.fmt.bufPrint(&group_buf, "{s} {s}  {d}", .{ if (group.collapsed) chevron_right_icon else chevron_down_icon, group.label, group.count }) catch group.label;
-                try writer.text(rect, 0, label, .surface_fg, 1, true, true);
+                try writer.textStrong(rect, 0, label, .surface_fg, 1, true, true);
             },
             .card => |card| {
                 const card_rect = if (card.expanded != null)
@@ -79,9 +79,12 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
                 // Provider belongs to the metadata badge, not the title.  Prefixing the title
                 // made long session names lose their first useful words and differed from the
                 // dock's reference hierarchy (title → safe summary → provider metadata).
-                try writer.text(card_rect, 0, card.title, .surface_fg, 3, false, false);
-                try writer.text(card_rect, 1, card.summary, .muted_fg, 3, false, false);
-                try writer.cardMetadata(card_rect, card.provider.label(), card.metadata);
+                // The three base rows deliberately occupy 1/3/5 cell baselines.  This gives
+                // title, safe summary, and metadata visible breathing room without inventing a
+                // second card rect or breaking the one shared scroll/hit-test geometry.
+                try writer.textStrong(card_rect, 0, card.title, .surface_fg, 6, false, false);
+                try writer.text(card_rect, 2, card.summary, .muted_fg, 6, false, false);
+                try writer.cardMetadata(card_rect, 4, 6, card.provider.label(), card.metadata);
                 // The whole title card remains one disclosure action, but its trailing chevron
                 // makes that interaction discoverable and shares the exact card rect used by
                 // pointer/Enter. No separate tiny hit target is manufactured for the icon.
@@ -104,12 +107,26 @@ const Writer = struct {
     corner_radius_px: u16,
 
     fn text(self: *Writer, rect: tree.RectEntry, line: u32, source: []const u8, role: tokens.ColorRole, line_count: u32, wide_icons: bool, centered: bool) ViewError!void {
-        return self.textInset(rect, line, source, role, line_count, wide_icons, centered, 1);
+        return self.textStyled(rect, line, source, role, line_count, wide_icons, centered, false);
+    }
+
+    /// Weight is semantic hierarchy, not a per-font coordinate tweak. The backend already owns
+    /// the selected face and its measured advance, so title/group emphasis remains font-safe.
+    fn textStrong(self: *Writer, rect: tree.RectEntry, line: u32, source: []const u8, role: tokens.ColorRole, line_count: u32, wide_icons: bool, centered: bool) ViewError!void {
+        return self.textStyled(rect, line, source, role, line_count, wide_icons, centered, true);
+    }
+
+    fn textStyled(self: *Writer, rect: tree.RectEntry, line: u32, source: []const u8, role: tokens.ColorRole, line_count: u32, wide_icons: bool, centered: bool, bold: bool) ViewError!void {
+        return self.textInsetStyled(rect, line, source, role, line_count, wide_icons, centered, 1, bold);
     }
 
     /// Places an entire line stack inside the completed rect before selecting the requested line.
     /// This keeps scope/search/group labels optically centred without font-specific pixel nudges.
     fn textInset(self: *Writer, rect: tree.RectEntry, line: u32, source: []const u8, role: tokens.ColorRole, line_count: u32, wide_icons: bool, centered: bool, left_inset_cols: u16) ViewError!void {
+        return self.textInsetStyled(rect, line, source, role, line_count, wide_icons, centered, left_inset_cols, false);
+    }
+
+    fn textInsetStyled(self: *Writer, rect: tree.RectEntry, line: u32, source: []const u8, role: tokens.ColorRole, line_count: u32, wide_icons: bool, centered: bool, left_inset_cols: u16, bold: bool) ViewError!void {
         const cw = self.props.cell_width_px;
         const ch = self.props.cell_height_px;
         if (cw == 0 or ch == 0 or line_count == 0 or line >= line_count) return;
@@ -125,7 +142,7 @@ const Writer = struct {
         const available_px = rect.rect.width - @as(f32, @floatFromInt(cw)) * @as(f32, @floatFromInt(required_inset_cols));
         if (available_px <= 0) return;
         const max_cols: u16 = @intFromFloat(@floor(available_px / @as(f32, @floatFromInt(cw))));
-        try self.emit(x, y, source, max_cols, .head, role, wide_icons);
+        try self.emit(x, y, source, max_cols, .head, role, wide_icons, bold);
     }
 
     fn textRight(self: *Writer, rect: tree.RectEntry, source: []const u8, role: tokens.ColorRole, wide_icon: bool) ViewError!void {
@@ -153,7 +170,7 @@ const Writer = struct {
         const glyph_width = @as(f32, @floatFromInt(start)) * cell_width;
         const x = rect.rect.x + rect.rect.width - inset_px - slot_width + (slot_width - glyph_width) / 2;
         const y = rect.rect.y + (rect.rect.height - @as(f32, @floatFromInt(ch))) / 2;
-        try self.emit(x, y, source, start, .tail, role, wide_icon);
+        try self.emit(x, y, source, start, .tail, role, wide_icon, false);
     }
 
     /// The provenance label shares the header baseline with refresh but is placed from the same
@@ -172,20 +189,19 @@ const Writer = struct {
         if (required_cols > available_cols) return;
         const x = rect.rect.x + rect.rect.width - @as(f32, @floatFromInt((refresh_slot_cols + total_cols + 1) * cw));
         const y = rect.rect.y + (rect.rect.height - @as(f32, @floatFromInt(ch))) / 2;
-        try self.emit(x, y, source, label_cols, .head, .surface_fg, false);
+        try self.emit(x, y, source, label_cols, .head, .surface_fg, false, true);
     }
 
     /// Provider is a dedicated metadata slot rather than a title prefix.  Both runs use the
     /// same third-line baseline and bounded column plan, keeping the label readable without
     /// letting long model metadata overlap the card's disclosure affordance.
-    fn cardMetadata(self: *Writer, rect: tree.RectEntry, provider: []const u8, metadata: []const u8) ViewError!void {
-        try self.text(rect, 2, provider, .surface_fg, 3, false, false);
+    fn cardMetadata(self: *Writer, rect: tree.RectEntry, line: u32, line_count: u32, provider: []const u8, metadata: []const u8) ViewError!void {
+        try self.text(rect, line, provider, .surface_fg, line_count, false, false);
         const cw = self.props.cell_width_px;
         const ch = self.props.cell_height_px;
         if (cw == 0 or ch == 0) return;
         const provider_cols = plannedCols(provider, 24);
         const left_inset_cols: u16 = provider_cols + 2;
-        const line: u32 = 2;
         const y = rect.rect.y + @as(f32, @floatFromInt(ch)) * @as(f32, @floatFromInt(line + 1));
         if (!loweredTextCellFitsClip(rect, y, ch)) return;
         const used_px = @as(f32, @floatFromInt((left_inset_cols + 1) * cw));
@@ -193,7 +209,7 @@ const Writer = struct {
         if (available_px <= 0) return;
         const max_cols: u16 = @intFromFloat(@floor(available_px / @as(f32, @floatFromInt(cw))));
         const x = rect.rect.x + @as(f32, @floatFromInt(left_inset_cols * cw));
-        try self.emit(x, y, metadata, max_cols, .head, .muted_fg, false);
+        try self.emit(x, y, metadata, max_cols, .head, .muted_fg, false, false);
     }
 
     fn expanded(self: *Writer, snapshot: tree.UiRectTree, index: usize, expanded_props: types.Expanded) ViewError!void {
@@ -247,7 +263,7 @@ const Writer = struct {
         const x = rect.rect.x + (rect.rect.width - text_width) / 2;
         const y = rect.rect.y + (rect.rect.height - @as(f32, @floatFromInt(ch))) / 2;
         if (!loweredTextCellFitsClip(rect, y, ch)) return;
-        try self.emit(x, y, source, max_cols, .head, if (rect.action.?.enabled) .surface_fg else .muted_fg, true);
+        try self.emit(x, y, source, max_cols, .head, if (rect.action.?.enabled) .surface_fg else .muted_fg, true, true);
     }
 
     fn plannedCols(source: []const u8, max_cols: u16) u16 {
@@ -256,7 +272,7 @@ const Writer = struct {
         return plan.endCol();
     }
 
-    fn emit(self: *Writer, x: f32, y: f32, source: []const u8, cols: u16, anchor: text_layout.Anchor, role: tokens.ColorRole, wide_icons: bool) ViewError!void {
+    fn emit(self: *Writer, x: f32, y: f32, source: []const u8, cols: u16, anchor: text_layout.Anchor, role: tokens.ColorRole, wide_icons: bool, bold: bool) ViewError!void {
         if (cols == 0) return;
         if (self.op_count == self.ops.len) return error.InsufficientTextBuffer;
         if (self.run_count == self.runs.len) return error.InsufficientRunBuffer;
@@ -266,7 +282,7 @@ const Writer = struct {
             .cluster => |cluster| try self.appendBytes(source[cluster.start..cluster.end]),
             .ellipsis => try self.appendBytes("…"),
         };
-        self.runs[self.run_count] = .{ .text = self.text_bytes[start..self.text_count] };
+        self.runs[self.run_count] = .{ .text = self.text_bytes[start..self.text_count], .bold = bold };
         self.ops[self.op_count] = .{ .text = .{ .origin = .{ .x = @intFromFloat(@floor(x)), .y = @intFromFloat(@floor(y)) }, .runs = self.runs[self.run_count .. self.run_count + 1], .role = role, .wide_icons = wide_icons } };
         self.run_count += 1;
         self.op_count += 1;
@@ -470,7 +486,9 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
 test "SessionDock partial card never emits a CoreText cell that crosses its published clip" {
     const metrics = types.Metrics.fromCellHeight(16);
     const props = types.Props{
-        .viewport_px = .{ .width = 320, .height = 400 },
+        // Fixed chrome is intentionally roomier in AS4-e. Keep enough scroll viewport below it
+        // to prove a one-pixel partial first card cannot suppress the next card's title.
+        .viewport_px = .{ .width = 320, .height = 480 },
         .cell_width_px = 8,
         .cell_height_px = 16,
         .snapshot_generation = 4,

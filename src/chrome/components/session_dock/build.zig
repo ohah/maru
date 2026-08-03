@@ -127,15 +127,18 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
                     const action_nodes = nested[3..][0..action_count];
                     const resume_action = table.append(props.snapshot_generation, .resume_session) catch return error.InsufficientActionBuffer;
                     const reveal = table.append(props.snapshot_generation, .reveal_log) catch return error.InsufficientActionBuffer;
-                    action_nodes[0] = expansionActionNode(NodeIds.resumeAction(index), resume_action, expanded.state == .ready and expanded.resume_enabled, action_count);
-                    action_nodes[1] = expansionActionNode(NodeIds.reveal(index), reveal, expanded.state == .ready and expanded.reveal_enabled, action_count);
+                    const action_width = expansionActionWidth(props.viewport_px.width, m, action_count);
+                    action_nodes[0] = expansionActionNode(NodeIds.resumeAction(index), resume_action, expanded.state == .ready and expanded.resume_enabled, action_width);
+                    action_nodes[1] = expansionActionNode(NodeIds.reveal(index), reveal, expanded.state == .ready and expanded.reveal_enabled, action_width);
                     if (expanded.focus_live_enabled) {
                         const focus = table.append(props.snapshot_generation, .focus_live) catch return error.InsufficientActionBuffer;
-                        action_nodes[2] = expansionActionNode(NodeIds.focusLive(index), focus, expanded.state == .ready, action_count);
+                        action_nodes[2] = expansionActionNode(NodeIds.focusLive(index), focus, expanded.state == .ready, action_width);
                     }
                     nested[2] = tree.container(.{
                         .id = NodeIds.expandedActions(index),
-                        .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(m.expanded_actions_h) }, .gap = @floatFromInt(m.item_gap) },
+                        // Buttons divide the remaining main-axis width after this explicit gap;
+                        // percentage widths would add the gap on top and overflow the published clip.
+                        .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(m.expanded_actions_h) }, .gap = @floatFromInt(m.action_gap) },
                         .direction = .row,
                         .overflow = .clip,
                     }, action_nodes);
@@ -263,15 +266,37 @@ fn sessionCardNode(id: u64, action: tree.UiAction, selected: bool, height: u32) 
     }, &.{});
 }
 
-fn expansionActionNode(id: u64, action: tree.UiAction, enabled: bool, action_count: usize) tree.UiNode {
+fn expansionActionNode(id: u64, action: tree.UiAction, enabled: bool, width_px: f32) tree.UiNode {
     return tree.card(.{
         .id = id,
-        .style = .{ .width = .{ .percent = 1.0 / @as(f32, @floatFromInt(action_count)) }, .height = .{ .percent = 1 } },
+        .style = .{ .width = .{ .px = width_px }, .height = .{ .percent = 1 } },
         .variant = if (enabled) .selected else .surface,
         .paint = .{},
         .action = .{ .id = action.id, .enabled = enabled },
         .overflow = .clip,
     }, &.{});
+}
+
+/// Action cards are leaf nodes, so their own validation cannot use main-axis `fill`: a leaf
+/// defaults to a column container and correctly rejects cross-axis fill. The dock root width is
+/// already definite when we build its one published tree, therefore divide that exact content
+/// width after the explicit gaps instead of weakening the generic layout invariant.
+fn expansionActionWidth(viewport_width_px: f32, m: types.Metrics, action_count: usize) f32 {
+    if (action_count == 0) return 0;
+    const content_width = @max(viewport_width_px - @as(f32, @floatFromInt(m.pad * 2)), 0);
+    const total_gap = @as(f32, @floatFromInt(m.action_gap * @as(u32, @intCast(action_count - 1))));
+    return @max((content_width - total_gap) / @as(f32, @floatFromInt(action_count)), 0);
+}
+
+test "expanded action widths leave the declared gap for two and three actions" {
+    const m = types.Metrics.fromCellHeight(16);
+    // 480px viewport - 24px outer padding on both sides leaves 432px. The same source of truth
+    // must work for resume/reveal and the optional live-focus third action.
+    try @import("std").testing.expectEqual(@as(f32, 212), expansionActionWidth(480, m, 2));
+    try @import("std").testing.expectApproxEqAbs(@as(f32, 138.66667), expansionActionWidth(480, m, 3), 0.0001);
+    // A viewport narrower than its fixed outer padding produces inert zero-width leaf cards,
+    // not unsigned underflow or a negative rect that could capture a neighboring surface.
+    try @import("std").testing.expectEqual(@as(f32, 0), expansionActionWidth(40, m, 2));
 }
 
 fn dividedRowPaint() tree.PaintStyle {
@@ -405,6 +430,10 @@ test "SessionDock expanded card keeps detail actions in the same published tree"
     try @import("std").testing.expectEqual(outer.rect.x, header.rect.x);
     try @import("std").testing.expect(header.rect.y < detail.rect.y);
     try @import("std").testing.expect(detail.rect.y < resume_entry.rect.y);
+    // The two leaf cards share the content width only after their explicit action gap. This
+    // locks the visual separation to the same rects used by pointer hit testing.
+    try @import("std").testing.expectEqual(@as(f32, 8), reveal.rect.x - (resume_entry.rect.x + resume_entry.rect.width));
+    try @import("std").testing.expectEqual(resume_entry.rect.width, reveal.rect.width);
     try @import("std").testing.expect(resume_entry.action.?.enabled);
     try @import("std").testing.expect(reveal.action.?.enabled);
     var table = ids.Table.init(@constCast(frame.actions));

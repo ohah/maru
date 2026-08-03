@@ -64,6 +64,38 @@ chrome과 같은 Zig semantic draw → Metal GPU lowering 경로를 쓰는 custo
 └───────────────────────────────────────────────────────────────┘
 ```
 
+#### 2.1.1 레퍼런스 정렬 시각 계약 (AS4-e)
+
+AS4-d의 inline disclosure는 동작 이관이다. 이 절은 첨부 레퍼런스와 비교했을 때 남아 있던
+"작은 terminal 행들의 집합" 인상을 없애기 위한 **별도 시각 계약**이다. 데이터·action·scroll
+identity는 바꾸지 않으며, `SessionDock`의 같은 completed `UiRectTree`에서만 기하와 paint를 바꾼다.
+
+- dock의 자동 폭 480pt 안에서 outer padding은 `1.5ch` 이상, header는 4행, segmented scope와
+  search는 각각 3행, group header는 3행을 예약한다. header·scope·search는 scroll하지 않고,
+  group부터만 scroll한다.
+- header는 title(강조) → count(secondary)의 좌측 두 줄과 `Local Mac`/refresh의 우측 utility
+  cluster를 서로 독립 slot으로 둔다. title/count/utility가 한 baseline 또는 terminal prompt처럼
+  보이지 않아야 한다.
+- scope는 하나의 rounded outlined control이며 selected segment만 lifted background를 갖는다. search는
+  같은 radius 계열의 별도 filled field이고 icon·placeholder/query 사이에 최소 1ch 간격을 둔다.
+- group은 위아래 rule과 chevron·workspace name·count pill을 갖는 독립 header다. 기본 session row는
+  반복된 외곽 card 대신 full-width divider 목록이고, title은 bold, summary는 muted, provider와
+  metadata는 마지막 baseline의 두 slot으로 분리한다. 각 row는 최소 6행을 써 title과 summary,
+  metadata가 붙어 보이지 않게 한다.
+- 선택/expanded session은 card header와 dark raised detail surface를 한 disclosure 안에 묶는다.
+  detail은 outer padding을 가진 inset surface, recent-turn은 role/body 사이 여백, action은 최소
+  3행 높이의 같은 baseline 버튼으로 보인다. sibling action에는 최소 `0.5ch` gap을 두고, 각 button은
+  그 gap을 제외한 남은 row 폭을 동등하게 나눈다. action의 hit rect·clip·scroll height는 이 여백을 포함한
+  동일 tree rect다.
+- rich Chrome은 radius/border/shadow token을 사용하고, tui legacy lowering은 같은 rect/spacing을
+  직각 fill로만 lower한다. component가 `if (rich)` 또는 font별 좌표 nudge를 두지 않는다.
+
+현재 `draw.Text`/CoreText lowering은 하나의 terminal cell font-size만 전달하고 role별 font size나
+line-height를 표현하지 않는다. 따라서 AS4-e는 title의 **bold/foreground/공간 계층**까지를 실제
+완료 범위로 하고, 레퍼런스의 headline-size typography는 `draw.TextStyle` 확장(측정 가능한 advance,
+font size, line height와 screenshot E2E)을 먼저 설계한 뒤 별도 slice에서 다룬다. 이를 cell 수를
+억지로 키우거나 fallback font별 nudge로 흉내 내지 않는다.
+
 - `SessionDockLayout`이 header, scope, search, scroll-area, group header,
   card, scrollbar의 pixel rect를 **한 번만** 계산한다. `view`, pointer
   hit-test, virtualized visible-row 범위, keyboard scroll이 이 결과를 함께

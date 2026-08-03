@@ -97,15 +97,19 @@ pub const Metrics = struct {
     card_h: u32,
     expanded_detail_h: u32,
     expanded_actions_h: u32,
-    /// Header/scope/search 사이의 세로 gap. 이 값은 cell-aligned control text의 clip 안전성도 보장한다.
+    /// Header/scope/search 사이의 세로 gap. 이 값은 cell-aligned control text의 clip 안전성과
+    /// reference-like fixed-chrome breathing room을 함께 보장한다.
     control_gap: u32,
     /// Group/card 사이의 목록 gap. 목록은 row bottom divider로 구분하므로 기본값은 0이다.
     item_gap: u32,
+    /// Expanded action siblings 사이의 가로 gap. 기본 목록 divider와 달리 버튼은 서로 독립된 target으로
+    /// 보여야 하므로, shared row 안에서도 경계를 맞닿게 두지 않는다.
+    action_gap: u32,
     pad: u32,
 
     /// Cell metric에서만 파생해 fixed/response layout 모두 같은 density를 갖게 한다. 기본 목록은 세 줄
-    /// (title·summary·metadata)을 5행 row 안에 두고, row 사이의 빈 gap 대신 bottom divider만 둔다. 그래서
-    /// 3줄 정보와 마지막 행 아래 breathing room은 유지하되 카드 외곽 여백이 반복되지 않는다.
+    /// (title·summary·metadata)을 6행 row 안에 둔다. title/summary/metadata 사이에 cell 하나씩을
+    /// 남겨 작은 terminal 행처럼 붙어 보이지 않게 하되, row 사이의 별도 외곽 card gap은 만들지 않는다.
     /// Header/scope/search의 1/2행 control gap은 목록과 분리한다. 그것을 줄이면 cell-based text lowering이
     /// control glyph를 앞 cell로 내리고 own clip에 의해 사라지게 할 수 있다.
     /// 바깥 padding은 cell 한 행으로 유지해, content의 첫 group/카드 text가 CoreText cell lowering 뒤 clip
@@ -115,30 +119,35 @@ pub const Metrics = struct {
     pub fn fromCellHeight(cell_height_px: u32) Metrics {
         const ch = @max(cell_height_px, 1);
         return .{
-            .header_h = ch * 3,
+            // Title/count stack과 trailing utility cluster가 같은 header 안에서 숨 막히지 않도록 4행.
+            .header_h = ch * 4,
             .scope_h = ch * 3,
             .search_h = ch * 3,
             .group_h = ch * 3,
-            .card_h = ch * 5,
+            .card_h = ch * 6,
             // Reserve the same bounded space for loading/ready/stale/unavailable so the action
             // row never jumps while a background detail result arrives.  The text view may use
             // at most three two-line turns inside this rect.
-            .expanded_detail_h = ch * 9,
-            .expanded_actions_h = ch * 2,
-            .control_gap = @max(ch / 2, 4),
+            .expanded_detail_h = ch * 10,
+            // Two rows made action icon/text cling to the lower border in actual Metal captures.
+            .expanded_actions_h = ch * 3,
+            .control_gap = ch,
             .item_gap = 0,
-            .pad = @max(ch, 8),
+            .action_gap = @max(ch / 2, 4),
+            .pad = @max(ch + ch / 2, 12),
         };
     }
 };
 
 test "Metrics keeps the three-line session list readable without inter-row whitespace" {
     const m = Metrics.fromCellHeight(32);
-    try @import("std").testing.expectEqual(@as(u32, 160), m.card_h);
+    try @import("std").testing.expectEqual(@as(u32, 192), m.card_h);
     try @import("std").testing.expectEqual(@as(u32, 96), m.scope_h);
-    try @import("std").testing.expectEqual(@as(u32, 16), m.control_gap);
+    try @import("std").testing.expectEqual(@as(u32, 32), m.control_gap);
     try @import("std").testing.expectEqual(@as(u32, 0), m.item_gap);
-    try @import("std").testing.expectEqual(@as(u32, 32), m.pad);
-    // view.zig places the third line at `3 * cell_height`; the remaining two rows include its bottom room.
-    try @import("std").testing.expect(m.card_h >= 5 * 32);
+    try @import("std").testing.expectEqual(@as(u32, 16), m.action_gap);
+    try @import("std").testing.expectEqual(@as(u32, 48), m.pad);
+    // view.zig places base rows at 1/3/5 cell heights. Their cells fit before the divider while
+    // every information line keeps one full cell of separation.
+    try @import("std").testing.expect(m.card_h >= 6 * 32);
 }

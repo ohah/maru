@@ -202,10 +202,14 @@ test "Chrome Lab builds a deterministic font specimen card and records only its 
     var items: [16]chrome.ui.layout.Item = undefined;
     var flex_scratch: [16]chrome.ui.layout.FlexScratch = undefined;
     var child_rects: [16]chrome.ui.layout.UiRect = undefined;
-    var ops: [32]chrome.draw.Op = undefined;
+    // A specimen has three real cards. Each card now owns title, summary, provider,
+    // metadata, and its disclosure affordance, in addition to generic paint. Keep this
+    // fixture's explicit bounded scratch above that complete component contract rather
+    // than relying on the old pre-disclosure 32-op estimate.
+    var ops: [48]chrome.draw.Op = undefined;
     var dock_nodes: [16]chrome.ui.tree.UiNode = undefined;
     var dock_actions: [12]session_dock.ids.Entry = undefined;
-    var text_runs: [32]chrome.draw.Run = undefined;
+    var text_runs: [48]chrome.draw.Run = undefined;
     var text_bytes: [2048]u8 = undefined;
     const frame = try buildFrame(.{
         .id = .font_specimen,

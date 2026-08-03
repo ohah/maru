@@ -1305,9 +1305,42 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    U의 allocator-domain pair `beginGenerationBatchAllocator|restoreGenerationBatchAllocatorUnchecked`는 U caller/authority 의무를
    유지하면서 같은 shared acquire/defer-release proof도 중첩 적용한다.
 
-   `C`는 `operation_fence != null`인 bound Client를 첫 mutable graph/payload read 전에 거부하거나 test 밖 product caller를
-   external-pump construction/transfer owner로 exact 제한한다. 특히 `projectionAuthorityDigest`와 `externalTransferProfile`은 이름이
-   observation이어도 parser/list/allocator provenance를 읽으므로 `R`이 아니다. `U`는 허용 owner file과 exact caller count 및 상위
+   `C`는 test 밖의
+   **모든 member reference**를 reviewed prepublication construction/transfer/teardown owner로 exact 제한한다. caller closure는 단순
+   `.<method>(` 문자열이나 파일 allowlist가 아니다. tokenizer/AST가 comment/string과 top-level test body를 제외한 `src/**/*.zig`의
+   `.identifier` reference를 전부 모아 `{receiver,path,enclosing_fn,reference_count}` multiset을 proof table과 exact 비교한다. 따라서
+   `const f = Client.method` alias와 같은 파일의 새 무권한 함수도 실패하며, `@field(Client, "<C method>")` 같은 reflection 우회는 제품
+   session-host에서 금지한다. line number와 receiver 변수명은 고정하지 않는다.
+
+   C35 proof는 manifest C 집합과 이름 기준 exact equality이며 모든 row가 caller closure를 가진다. 현재 제품 owner 분류는 다음과 같다.
+
+   허용 owner가 bound Client를 받을 수 있는 row는 `operation_fence != null`을 첫 mutable graph/payload read 전에 typed reject하거나,
+   exclusive teardown처럼 이미 획득한 권위를 exact enclosing edge와 순서로 증명한다.
+
+   - generation prepublication 4개: `canMoveToGenerationNode`, `moveToGenerationNode`, `bindOperationFence`,
+     `bindGenerationAccountingLedger`. `ClientSlot.initInPlaceWithIssuer`의 final-address destination에서
+     `canMove→move→bind fence→bind ledger→publication` 순서를 고정한다. `moveToGenerationNode→canMoveToGenerationNode` 내부 edge도
+     별도 exact reference다. `canMove`의 null-fence/generation-zero predicate는 caller proof에 중첩하지만, 현재 fence 검사 전
+     ownership/io-mode를 읽으므로 first-read bound-reject 증거로 세지 않는다.
+   - standalone→external-pump transfer 4개: `externalTransferProfile`, `prepareExternalPumpTransfer`,
+     `commitExternalPumpTransfer`, `prepareExternalOwnerRangeProof`. 내부 Client funnel과 `client_external_pump.zig`의 exact enclosing owner를
+     분리하고, source와 destination 모두 unbound라는 precondition과 prepare 뒤 commit/tombstone 순서를 고정한다.
+   - external-pump adoption/materialization 22개: `projectionAuthorityDigest`부터 `commitExternalAdoption`까지의 C manifest 연속 구간을
+     `client_external_pump.zig|client_external_adoption.zig|external_event_materialization.zig|external_source_decision.zig`의 exact
+     enclosing function과 내부 Client funnel에 매핑한다. 파일만 맞거나 caller count만 맞는 것은 증거가 아니다.
+   - external-mode teardown 5개: `prepareExternalModeDeinit`, `reserveExternalModeDeinit`, `finishReservedExternalModeDeinit`,
+     `cancelReservedExternalModeDeinit`, `transferReservedExternalModeDeinit`. external-pump reservation owner 외에
+     `prepareExternalModeDeinit`의 bound-exclusive `prepareDeinitGraph→poisonAndTakeFd` 내부 edge를 별도 허용하고, transfer는 양쪽
+     Client owner 상태를 증명한다.
+
+   hostile fixture는 proof row 누락/중복, 허용 파일의 잘못된 enclosing 함수, member alias/reflection, caller count 보존 위장,
+   generation publication 순서 변경, source-only transfer check, exclusive guard 밖 teardown edge를 각각 RED로 만든다. C policy를 닫는
+   동안 인접 G row `enterExternalMode`도 shared fence 획득만으로 충분하다고 보지 않고 bound generation Client 거부와 standalone owner
+   caller closure를 중첩한다. generation-node Client가 external mode로 바뀌는 경로를 허용하면 B3b의 blocking-generation invariant와
+   `prepareDeinitGraph` 가정이 깨지므로 이 인접 gate까지 GREEN이어야 C slice를 완료로 센다.
+
+   특히 `projectionAuthorityDigest`와 `externalTransferProfile`은 이름이 observation이어도 parser/list/allocator provenance를 읽으므로
+   `R`이 아니다. `U`는 허용 owner file과 exact caller count 및 상위
    ClientSlot permit/receipt 순서를 별도 oracle로 고정한다. `R`은 const receiver만으로 충분하다고 간주하지 않고 atomic fence identity/state
    외 Client mutable field 접근을 금지한다. `terminalReasonInvariant`와 `firstPoisonReason`은 non-atomic terminal fields를 읽으므로 `G`이며,
    fence 거부 시 각각 fail-closed `false|null`을 반환하고 Client graph를 읽지 않는다. 모든 `G` body에 동일 source substring을 반복

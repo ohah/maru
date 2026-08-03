@@ -714,7 +714,13 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   callback test보다 먼저 RED→GREEN으로 닫으며, B3b-F declaration baseline만으로 이를 완료했다고 주장하지 않는다.
   이 manifest는 AST가 첫 parameter 이름과 무관하게 `*Client|*const Client`인 public receiver 91개를 선언 순서와 무관한
   exact set으로 추출해 이름·mutability·G/C/U/R class를 비교한다(`G=40,C=35,U=15,R=1`). G는 guarded post-publication,
-  C는 bound-reject 또는 external-pump product-caller exact 제한, U는 ClientSlot authority caller exact 제한, R은 mutable Client graph를
+  C는 first-graph-read 전 bound-reject와 무관하게 35개 전부의 reviewed prepublication construction/transfer/teardown owner reference를
+  `{method,path,enclosing_fn,count}` exact multiset으로 제한한다. generation init 4, external transfer 4, adoption/materialization 22,
+  external-mode teardown 5의 합이 C35와 exact equality여야 한다. tokenizer/AST는 top-level test body만 제외하고 모든 `.method` reference를
+  모으며 alias와 `@field` reflection 우회를 음성 fixture로 거부한다. generation init은 final-address
+  `canMove→move→bind fence→bind ledger→publication`, transfer는 양 Client unbound, teardown은 external-pump owner와 guarded exclusive
+  내부 edge를 각각 증명한다. 인접 G row `enterExternalMode`도 bound generation Client 거부와 standalone caller closure를 중첩한다.
+  U는 ClientSlot authority caller exact 제한, R은 mutable Client graph를
   읽지 않는 atomic-only observation이다. `projectionAuthorityDigest|externalTransferProfile`과 external-adoption graph reader는 C,
   non-atomic `terminalReasonInvariant|firstPoisonReason`은 G이며 R은 `endedPurgeFenceIntruded` 하나다. 모든 body에 공통 substring을
   반복하지 않고 direct gate/funnel kind와 위험한 U/C caller만 별도 source oracle로 검사한다. 91-row set equality는 inventory

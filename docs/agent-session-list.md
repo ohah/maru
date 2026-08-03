@@ -20,7 +20,7 @@
 ## 2. 화면과 상호작용
 
 ```text
-Agent 세션 기록                           Local Mac   [새로 고침]
+Agent 세션 기록                              로컬   [새로 고침]
 N개 표시 · 최근 500개
 [현재 작업공간] [현재 프로젝트] [전체]
 [⌕ 세션 검색]
@@ -48,7 +48,7 @@ chrome과 같은 Zig semantic draw → Metal GPU lowering 경로를 쓰는 custo
 ```text
 ┌ SessionDockHeader ───────────────────────────────────────────┐
 │ Agent 세션 기록                 N개 표시 · 최근 500개        │
-│ Local Mac                                  [refresh/spinner] │
+│ [host] 로컬                                [refresh/spinner] │
 ├ SegmentedScopeControl ────────────────────────────────────────┤
 │ [현재 작업공간] [현재 프로젝트] [전체]                        │
 ├ SessionSearchField ───────────────────────────────────────────┤
@@ -76,12 +76,14 @@ identity는 바꾸지 않으며, `SessionDock`의 같은 completed `UiRectTree`�
   기하는 **terminal cell**이 아니라 Chrome의 logical spacing/type token과 backing scale에서만
   결정한다. header·scope·search는 scroll하지 않고, group부터만 scroll한다. terminal font·line
   spacing을 바꿔도 도크의 버튼 여백·목록 밀도·hit rect가 바뀌어서는 안 된다.
-- header는 title(강조) → count(secondary)의 좌측 두 줄과 `Local Mac`/refresh의 우측 utility
-  cluster를 서로 독립 slot으로 둔다. title/count/utility가 한 baseline 또는 terminal prompt처럼
-  보이지 않아야 한다.
+- header는 title(강조) → count(secondary)의 좌측 두 줄과 Maru 등록 host SVG + `로컬`/refresh의 우측
+  utility cluster를 서로 독립 logical slot으로 둔다. title/count/utility가 한 baseline 또는 terminal
+  prompt처럼 보이지 않아야 한다. host+label은 72pt content box, refresh는 20pt trailing slot,
+  둘 사이는 12pt gap이며 이 x 좌표는 terminal cell 폭에서 계산하지 않는다.
 - scope는 하나의 rounded outlined control이며 selected segment만 lifted background를 갖는다. search는
   같은 radius 계열의 별도 filled field이고 icon·placeholder/query 사이에 최소 1ch 간격을 둔다.
-- group은 위아래 rule과 chevron·workspace name·count pill을 갖는 독립 header다. 기본 session row는
+- group은 위아래 rule과 20pt disclosure slot·8pt label gap·workspace name·count pill을 갖는 독립
+  header다. 기본 session row는
   반복된 외곽 card 대신 full-width divider 목록이고, title은 bold, summary는 muted, provider와
   metadata는 마지막 baseline의 두 slot으로 분리한다. 각 row는 최소 6행을 써 title과 summary,
   metadata가 붙어 보이지 않게 한다.
@@ -173,13 +175,13 @@ layout과 spacing SSOT, 48pt action target·1×/2×/terminal-font capture 판정
   hit-test, virtualized visible-row 범위, keyboard scroll이 이 결과를 함께
   소비한다. 그러므로 카드가 보이는 곳과 클릭 영역, scroll origin은 서로 다른
   행/문자열 계산으로 갈라질 수 없다.
-- `SessionDockHeader`는 title, displayed/recent count, `Local Mac`
-  provenance, refresh affordance만 소유한다. refresh가 실행 중이면 같은 위치의
+- `SessionDockHeader`는 title, displayed/recent count, host SVG와 `로컬`
+  provenance, refresh affordance만 소유한다. host+label은 72pt box 안에서 실제 glyph advance로
+  함께 중앙 정렬하고, refresh는 그 오른쪽 12pt gap 뒤의 20pt trailing slot에 둔다. refresh가 실행 중이면 같은 위치의
   control이 spinner로 바뀌며 다시 누른다고 worker를 더 만들지 않는다. refresh는
-  group body가 아니고 항상 고정 chrome이다. idle refresh는 registered SVG icon의 two-cell
-  slot을 쓰고, spinner는 같은 trailing slot을 유지한다. 둘 다 header 오른쪽 외곽이 아니라
-  한 text-cell 안쪽 inset에 정렬해 fallback font 또는 icon ink가 rounded-card clip에
-  닿지 않게 한다. provider·원격 source 선택기 같은
+  group body가 아니고 항상 고정 chrome이다. idle refresh는 registered SVG icon, spinner는 같은
+  trailing slot을 유지한다. 둘 다 header 오른쪽 외곽이 아니라 8pt logical inset 안에 정렬해
+  fallback font 또는 icon ink가 rounded-card clip에 닿지 않게 한다. provider·원격 source 선택기 같은
   별도 filter control은 v1에 추가하지 않는다.
 - Header refresh와 search affordance는 일반 Unicode/fallback font glyph를 쓰지 않고 등록된
   SVG coverage icon을 쓴다. idle refresh는 `surface_fg`, disabled spinner는 `muted_fg`라서

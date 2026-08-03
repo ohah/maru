@@ -115,6 +115,16 @@ pub const DockMetrics = struct {
     /// 보여야 하므로, shared row 안에서도 경계를 맞닿게 두지 않는다.
     action_gap: u32,
     root_inset: u32,
+    header_content_inset_x: u32,
+    header_host_label_w: u32,
+    header_host_icon_extent: u32,
+    header_host_icon_gap: u32,
+    header_utility_gap: u32,
+    header_refresh_extent: u32,
+    header_trailing_inset: u32,
+    group_disclosure_inset_x: u32,
+    group_disclosure_extent: u32,
+    group_disclosure_label_gap: u32,
     card_inset_x: u32,
     card_title_y: u32,
     card_summary_y: u32,
@@ -150,6 +160,18 @@ pub const DockMetrics = struct {
             .item_gap = 0,
             .action_gap = geometryPx(spacing.px(.xs, scale)),
             .root_inset = geometryPx(spacing.px(.lg, scale)),
+            .header_content_inset_x = geometryPx(spacing.px(.xs, scale)),
+            // The provenance pair has enough room for its 18pt SVG, 8pt gap, and Korean label
+            // without asking terminal-cell metrics where a Chrome header control should begin.
+            .header_host_label_w = geometryPx(spacing.pointsPx(72, scale)),
+            .header_host_icon_extent = geometryPx(spacing.pointsPx(18, scale)),
+            .header_host_icon_gap = geometryPx(spacing.px(.xs, scale)),
+            .header_utility_gap = geometryPx(spacing.px(.sm, scale)),
+            .header_refresh_extent = geometryPx(spacing.pointsPx(20, scale)),
+            .header_trailing_inset = geometryPx(spacing.px(.xs, scale)),
+            .group_disclosure_inset_x = geometryPx(spacing.px(.lg, scale)),
+            .group_disclosure_extent = geometryPx(spacing.pointsPx(20, scale)),
+            .group_disclosure_label_gap = geometryPx(spacing.px(.xs, scale)),
             .card_inset_x = geometryPx(card_inset),
             .card_title_y = geometryPx(card_title_y),
             .card_summary_y = geometryPx(card_summary_y),
@@ -167,6 +189,10 @@ pub const DockMetrics = struct {
     /// and wheel/scroll disagree about where the first item starts.
     pub fn fixedChromeHeight(self: DockMetrics) u32 {
         return geometryPx(saturatedAdd(saturatedAdd(saturatedAdd(saturatedAdd(saturatedMul(self.root_inset, 2), self.header_h), self.scope_h), self.search_h), saturatedMul(self.control_gap, 3)));
+    }
+
+    pub fn headerUtilityWidth(self: DockMetrics) u32 {
+        return geometryPx(saturatedAdd(saturatedAdd(saturatedAdd(self.header_host_label_w, self.header_utility_gap), self.header_refresh_extent), self.header_trailing_inset));
     }
 };
 
@@ -227,6 +253,17 @@ test "DockMetrics fixes all Session Dock geometry independently of terminal cell
     try std.testing.expectEqual(@as(u32, 0), m.item_gap);
     try std.testing.expectEqual(@as(u32, 8), m.action_gap);
     try std.testing.expectEqual(@as(u32, 20), m.root_inset);
+    try std.testing.expectEqual(@as(u32, 8), m.header_content_inset_x);
+    try std.testing.expectEqual(@as(u32, 72), m.header_host_label_w);
+    try std.testing.expectEqual(@as(u32, 18), m.header_host_icon_extent);
+    try std.testing.expectEqual(@as(u32, 8), m.header_host_icon_gap);
+    try std.testing.expectEqual(@as(u32, 12), m.header_utility_gap);
+    try std.testing.expectEqual(@as(u32, 20), m.header_refresh_extent);
+    try std.testing.expectEqual(@as(u32, 8), m.header_trailing_inset);
+    try std.testing.expectEqual(@as(u32, 20), m.group_disclosure_inset_x);
+    try std.testing.expectEqual(@as(u32, 20), m.group_disclosure_extent);
+    try std.testing.expectEqual(@as(u32, 8), m.group_disclosure_label_gap);
+    try std.testing.expectEqual(@as(u32, 112), m.headerUtilityWidth());
     try std.testing.expectEqual(@as(u32, 248), m.fixedChromeHeight());
     try std.testing.expect(m.card_metadata_y < m.card_h);
     try std.testing.expect(m.detail_turn_y + m.detail_turn_step * 3 <= m.expanded_detail_h);

@@ -27,7 +27,7 @@ Maru 자체는 MIT 라이선스다([LICENSE](../LICENSE)). 이 문서는 Maru가
 | bell · folder · gear · git-branch · mark-github · plus · search · sidebar-collapse | `assets/icons/<이름>.svg` | MIT | © GitHub, Inc. | <https://github.com/primer/octicons> |
 
 - 라이선스 전문은 `assets/icons/LICENSE-octicons.txt`에 둔다(MIT — 저작권·허가 고지 유지 의무).
-- `sparkle.svg`·`diamond.svg`는 Maru 자작(파일 헤더 주석 참조)이라 이 표 대상이 아니다(Maru 본체 MIT).
+- `sparkle.svg`·`diamond.svg`·`session-dock-host.svg`는 Maru 자작(파일 헤더 주석 참조)이라 이 표 대상이 아니다(Maru 본체 MIT).
 - **상표 주의**: `mark-github.svg`는 GitHub 로고 마크다. 라이선스(MIT)와 별개로 GitHub 상표이므로, GitHub(리포·프로필)로 연결하는 표시 용도로만 쓴다(<https://github.com/logos> 가이드라인). 현재 용도(사이드바 카드의 GitHub 리포 표시)는 이 범위 안이다.
 - 배포물 내 고지 노출은 아래 "About 화면 attribution"과 같은 후속으로 묶는다(현재는 리포 내 라이선스 파일 + 이 문서로 기록).
 

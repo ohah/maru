@@ -4464,8 +4464,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 아직 Metal terminal view는 붙이지 않는다. Zig 쪽 shell surface와 FrameLoop는
         // 살아 있지만, 화면은 placeholder로 남겨 UI lifecycle과 runtime lifecycle 실패를
         // 분리해서 볼 수 있게 한다.
+        // Archive fixture의 readback은 PR에서 실제 detail hierarchy를 검토하는 evidence다. 일반 창
+        // 크기는 보존하되, fixture만 1440×900 pt로 열어 button text/card가 좁은 960×600 frame에서
+        // 잘려 보이지 않게 한다. backing scale은 기존 제품 resize path가 그대로 정한다.
+        let initialContentSize = isAgentSessionArchiveSmokeMode
+            ? NSSize(width: 1440, height: 900)
+            : NSSize(width: 960, height: 600)
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 960, height: 600),
+            contentRect: NSRect(origin: .zero, size: initialContentSize),
             styleMask: [.titled, .closable, .resizable, .miniaturizable],
             backing: .buffered,
             defer: false
@@ -4488,7 +4494,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
         // Phase 4b-2: contentView를 컨테이너로 재편한다 — 터미널 뷰(맨 아래) + 모달 오버레이 뷰(맨 위). 4c WKWebView(insertWebPanel)가 그 사이.
         let container = MaruTerminalContainerView(
-            frame: window.contentView?.bounds ?? NSRect(x: 0, y: 0, width: 960, height: 600),
+            frame: window.contentView?.bounds ?? NSRect(origin: .zero, size: initialContentSize),
             controller: self
         )
         window.contentView = container

@@ -186,8 +186,17 @@ fn fingerprintMixTextPlacement(state: *u64, placement: chrome.draw.TextPlacement
             fingerprintMixValue(state, rect.w);
             fingerprintMixValue(state, rect.h);
         },
-        .leading_icon_group => |group| {
+        .icon_in_rect => |icon| {
             fingerprintMixValue(state, @as(u8, 2));
+            fingerprintMixValue(state, @as(u32, @bitCast(icon.content_rect.x)));
+            fingerprintMixValue(state, @as(u32, @bitCast(icon.content_rect.y)));
+            fingerprintMixValue(state, icon.content_rect.w);
+            fingerprintMixValue(state, icon.content_rect.h);
+            fingerprintMixValue(state, icon.icon_codepoint);
+            fingerprintMixValue(state, icon.icon_extent_px);
+        },
+        .leading_icon_group => |group| {
+            fingerprintMixValue(state, @as(u8, 3));
             fingerprintMixValue(state, @as(u32, @bitCast(group.content_rect.x)));
             fingerprintMixValue(state, @as(u32, @bitCast(group.content_rect.y)));
             fingerprintMixValue(state, group.content_rect.w);

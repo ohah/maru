@@ -59,11 +59,16 @@ pub const Layer = enum { sidebar, pane_overlay, modal };
 pub const Run = struct { text: []const u8, bold: bool = false };
 
 /// The component may declare a text-content group without taking ownership of native font
-/// metrics.  Ordinary text keeps `.origin`; the platform text worker resolves the two centred
-/// variants after it knows the actual primary/fallback glyph advance.
+/// metrics. Ordinary text keeps `.origin`; the platform text worker resolves measured label
+/// groups and registered SVG-only controls from the final logical rect.
 pub const TextPlacement = union(enum) {
     origin,
     center_in_rect: Rect,
+    icon_in_rect: struct {
+        content_rect: Rect,
+        icon_codepoint: u21,
+        icon_extent_px: u16,
+    },
     leading_icon_group: struct {
         content_rect: Rect,
         icon_codepoint: u21,

@@ -206,7 +206,10 @@ Tailwind class 또는 임의 raw pixel을 직접 나열하는 API는 아니다. 
 scope/search/group 48pt, three-line divider card 112pt, bounded detail 256pt, action 48pt,
 action gap 8pt와 item gap 0pt를 한 snapshot으로 제공한다. header utility는 72pt host-label box,
 12pt sibling gap, 20pt refresh slot, 8pt trailing inset을, group disclosure는 20pt inset/slot과 8pt
-label gap을 같은 snapshot으로 제공한다. header/card/detail의 line offset은
+  label gap을 같은 snapshot으로 제공한다. refresh와 group disclosure의 idle SVG는
+`TextPlacement.icon_in_rect`로 그 slot 자체를 final-pixel placement로 넘긴다. 이 placement는
+CoreText label이나 terminal cell을 만들지 않으며, worker가 등록 SVG만 slot의 정확한 중심에
+lower한다. header/card/detail의 line offset은
 `ChromeTypography` line box와 `Space`로부터 그 snapshot 안에서 계산한다. terminal cell width/height,
 terminal font, terminal line spacing은 이 함수의 입력이 아니다. `UiRectTree`, paint, hit-test,
 virtualized visible window, page/wheel step은 그 동일 metric snapshot을 공유해야 한다. 이 경계가

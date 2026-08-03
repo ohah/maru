@@ -99,7 +99,8 @@ pub fn buildRichTextArtifact(
             if (row >= rows or col_px / cell_width_px >= cols) continue;
             const start_col: u16 = @intCast(col_px / cell_width_px);
             for (text.runs) |run| {
-                var plan = chrome.text_layout.plan(run.text, start_col, cols, .head, if (text.wide_icons) &wideChromeIconGlyph else null);
+                const end_limit = @min(cols, std.math.add(u16, start_col, text.max_cols) catch cols);
+                var plan = chrome.text_layout.plan(run.text, start_col, end_limit, text.anchor, if (text.wide_icons) &wideChromeIconGlyph else null);
                 while (plan.next()) |_| {}
                 const end_col = plan.endCol();
                 if (end_col <= start_col) continue;
@@ -207,7 +208,8 @@ pub fn buildTextDrawList(
             if (col >= cols or row >= rows) continue;
             const style: terminal.Style = .{ .foreground = .{ .rgb = tk.get(text.role) } };
             for (text.runs) |run| {
-                var plan = chrome.text_layout.plan(run.text, col, cols, .head, if (text.wide_icons) &wideChromeIconGlyph else null);
+                const end_limit = @min(cols, std.math.add(u16, col, text.max_cols) catch cols);
+                var plan = chrome.text_layout.plan(run.text, col, end_limit, text.anchor, if (text.wide_icons) &wideChromeIconGlyph else null);
                 while (plan.next()) |item| switch (item) {
                     .ellipsis => |ellipsis_col| try cells.append(allocator, .{ .row = row, .col = ellipsis_col, .codepoint = chrome.text_layout.ellipsis_glyph, .width = 1, .style = style }),
                     .cluster => |cluster| try appendCluster(allocator, &cells, &pool, run.text, cluster, row, style),

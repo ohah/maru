@@ -277,14 +277,22 @@ const Writer = struct {
         if (cols == 0) return;
         if (self.op_count == self.ops.len) return error.InsufficientTextBuffer;
         if (self.run_count == self.runs.len) return error.InsufficientRunBuffer;
+        // Keep the source intact until lowering.  The legacy path and the measured CoreText
+        // path share `max_cols`/`anchor`, but only the latter can decide a Korean/fallback
+        // ellipsis from its actual glyph advances.  Pre-truncating here would make that
+        // information irrecoverable and would silently give the two renderers different text.
         const start = self.text_count;
-        var plan = text_layout.plan(source, 0, cols, anchor, if (wide_icons) isSessionDockIcon else null);
-        while (plan.next()) |item| switch (item) {
-            .cluster => |cluster| try self.appendBytes(source[cluster.start..cluster.end]),
-            .ellipsis => try self.appendBytes("…"),
-        };
+        try self.appendBytes(source);
         self.runs[self.run_count] = .{ .text = self.text_bytes[start..self.text_count], .bold = bold };
-        self.ops[self.op_count] = .{ .text = .{ .origin = .{ .x = @intFromFloat(@floor(x)), .y = @intFromFloat(@floor(y)) }, .runs = self.runs[self.run_count .. self.run_count + 1], .role = role, .text_role = text_role, .wide_icons = wide_icons } };
+        self.ops[self.op_count] = .{ .text = .{
+            .origin = .{ .x = @intFromFloat(@floor(x)), .y = @intFromFloat(@floor(y)) },
+            .runs = self.runs[self.run_count .. self.run_count + 1],
+            .role = role,
+            .text_role = text_role,
+            .max_cols = cols,
+            .anchor = anchor,
+            .wide_icons = wide_icons,
+        } };
         self.run_count += 1;
         self.op_count += 1;
     }
@@ -429,6 +437,8 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
     var saw_dock_heading = false;
     var saw_card_heading = false;
     var saw_metadata = false;
+    var title_max_cols: ?u16 = null;
+    var saw_untruncated_title = false;
     for (out.ops) |op| switch (op) {
         .quad => saw_quad = true,
         .text => |text| {
@@ -436,6 +446,10 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
             saw_card_heading = saw_card_heading or text.text_role == .card_heading;
             saw_metadata = saw_metadata or text.text_role == .metadata;
             for (text.runs) |run| {
+                if (std.mem.eql(u8, run.text, "a title that intentionally exceeds a narrow card")) {
+                    saw_untruncated_title = true;
+                    title_max_cols = text.max_cols;
+                }
                 saw_provider = saw_provider or std.mem.indexOf(u8, run.text, "Claude") != null;
                 if (std.mem.eql(u8, run.text, refresh_icon)) {
                     refresh_origin_x = text.origin.x;
@@ -463,6 +477,10 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
     try std.testing.expect(saw_dock_heading);
     try std.testing.expect(saw_card_heading);
     try std.testing.expect(saw_metadata);
+    // Overflow remains a semantic constraint instead of a pre-truncated source string. This is
+    // what lets the measured path choose an ellipsis from the actual system UI font advance.
+    try std.testing.expect(saw_untruncated_title);
+    try std.testing.expect((title_max_cols orelse 0) < "a title that intentionally exceeds a narrow card".len);
     inline for (.{ .scope_workspace, .scope_project, .scope_all }, .{ workspace_origin_y, project_origin_y, all_origin_y }) |id, origin| {
         const scope = find(frame.tree, @field(build.NodeIds, @tagName(id))) orelse return error.TestUnexpectedResult;
         const expected_y: i32 = @intFromFloat(@floor(scope.rect.y + (scope.rect.height - @as(f32, @floatFromInt(props.cell_height_px))) / 2));

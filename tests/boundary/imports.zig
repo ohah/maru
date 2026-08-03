@@ -147,8 +147,11 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
             .allowed = &.{
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "ended_purge_quarantine" },
                 .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "", .name = "ended_purge_quarantine_registry" },
+                .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "", .name = "process_runtime_pid" },
+                .{ .parent = "ClientSlot", .kind = "const", .visibility = "pub", .modifier = "", .name = "ProcessRuntimeInitError" },
                 .{ .parent = "ClientSlot", .kind = "const", .visibility = "pub", .modifier = "", .name = "EndedPurgeCommitError" },
                 .{ .parent = "ClientSlot", .kind = "const", .visibility = "pub", .modifier = "", .name = "EndedPurgeResult" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "initializeProcessRuntime" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "commitEndedPurge" },
                 .{ .parent = "EndedPurgePreparation", .kind = "fn", .visibility = "pub", .modifier = "", .name = "tombstoneForCommit" },
             },
@@ -191,6 +194,28 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
         "ended_purge_quarantine",
         "@import(\"ended_purge_quarantine.zig\")",
     );
+    if (countIdentifierOutsideTopLevelTests(client_slot, "ended_purge_quarantine_registry") != 0) {
+        try expectRootConstTypeAndInitializer(
+            allocator,
+            client_slot,
+            "ended_purge_quarantine_registry",
+            "?ended_purge_quarantine.Registry",
+            "null",
+        );
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            countOccurrences(client_slot, "ended_purge_quarantine.Registry.init()"),
+        );
+    }
+    if (countIdentifierOutsideTopLevelTests(client_slot, "process_runtime_pid") != 0) {
+        try expectRootConstTypeAndInitializer(
+            allocator,
+            client_slot,
+            "process_runtime_pid",
+            "std.atomic.Value(u32)",
+            ".init(0)",
+        );
+    }
     try expectRootContainerFieldsWithOptional(
         allocator,
         client,
@@ -208,7 +233,7 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
     try expectOptionalPreparedEndedPurgeCommitSchema(allocator, client);
     try expectEndedPurgeInventorySubtotalMigration(allocator, client);
     try expectOptionalEndedPurgeScratchDelta(allocator, client);
-    try expectRootEnumAbsentOrExact(
+    try expectRootErrorSetAbsentOrExact(
         allocator,
         client,
         "EndedPurgeCommitError",
@@ -220,7 +245,14 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
         "EndedPurgeClientCommitOutcome",
         &.{ "clean", "drift" },
     );
-    try expectNestedEnumAbsentOrExact(
+    try expectNestedErrorSetAbsentOrExact(
+        allocator,
+        client_slot,
+        "ClientSlot",
+        "ProcessRuntimeInitError",
+        &.{"ProcessDomainMismatch"},
+    );
+    try expectNestedErrorSetAbsentOrExact(
         allocator,
         client_slot,
         "ClientSlot",
@@ -271,6 +303,57 @@ test "CR3a-2c2b3b quarantine leaf is absent or exposes only the frozen public AP
         "usize",
         "64 * 1024 * 1024",
     );
+}
+
+test "CR3a-2c2b3b product process bootstrap stays explicit before AppSession ownership" {
+    const allocator = std.testing.allocator;
+    const client_slot = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/client_slot.zig",
+    );
+    defer allocator.free(client_slot);
+    const host_adapter = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/host_adapter.zig",
+    );
+    defer allocator.free(host_adapter);
+    const app_session = try readZigFileZ(
+        allocator,
+        "src/platform/macos/app_session.zig",
+    );
+    defer allocator.free(app_session);
+
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(
+            host_adapter,
+            "client_slot_mod.ClientSlot.initializeProcessRuntime()",
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(
+            app_session,
+            "RemoteSessionAdapter.initializeProcessRuntime()",
+        ),
+    );
+    const bootstrap = std.mem.indexOf(
+        u8,
+        app_session,
+        "RemoteSessionAdapter.initializeProcessRuntime()",
+    ) orelse return error.TestUnexpectedResult;
+    const owner_publish = std.mem.indexOfPos(
+        u8,
+        app_session,
+        bootstrap,
+        "self.* = .{",
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(bootstrap < owner_publish);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        client_slot,
+        "builtin.is_test and process_runtime_pid",
+    ) == null);
 }
 
 test "CR3a-2a generation attachment contract remains a neutral authority leaf" {
@@ -5380,6 +5463,18 @@ fn findRootContainerMembers(
     return null;
 }
 
+fn findRootVariableInitializer(
+    tree: *const std.zig.Ast,
+    wanted: []const u8,
+) ?std.zig.Ast.Node.Index {
+    for (tree.rootDecls()) |node| {
+        const variable = tree.fullVarDecl(node) orelse continue;
+        if (!std.mem.eql(u8, tree.tokenSlice(variable.ast.mut_token + 1), wanted)) continue;
+        return variable.ast.init_node.unwrap();
+    }
+    return null;
+}
+
 fn inventoryCount(
     allocator: std.mem.Allocator,
     source: [:0]const u8,
@@ -5565,6 +5660,55 @@ fn expectNestedEnumAbsentOrExact(
     }
 }
 
+fn expectRootErrorSetAbsentOrExact(
+    allocator: std.mem.Allocator,
+    source: [:0]const u8,
+    name: []const u8,
+    fields: []const []const u8,
+) !void {
+    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    defer tree.deinit(allocator);
+    const init = findRootVariableInitializer(&tree, name) orelse return;
+    try expectErrorSetNodeFields(&tree, init, fields);
+}
+
+fn expectNestedErrorSetAbsentOrExact(
+    allocator: std.mem.Allocator,
+    source: [:0]const u8,
+    parent_name: []const u8,
+    name: []const u8,
+    fields: []const []const u8,
+) !void {
+    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    defer tree.deinit(allocator);
+    const parent = findRootContainerMembers(&tree, parent_name) orelse
+        return error.TestUnexpectedResult;
+    for (parent) |member| {
+        const variable = tree.fullVarDecl(member) orelse continue;
+        if (!std.mem.eql(u8, tree.tokenSlice(variable.ast.mut_token + 1), name)) continue;
+        const init = variable.ast.init_node.unwrap() orelse return error.TestUnexpectedResult;
+        return expectErrorSetNodeFields(&tree, init, fields);
+    }
+}
+
+fn expectErrorSetNodeFields(
+    tree: *const std.zig.Ast,
+    node: std.zig.Ast.Node.Index,
+    expected: []const []const u8,
+) !void {
+    try std.testing.expectEqual(std.zig.Ast.Node.Tag.error_set_decl, tree.nodeTag(node));
+    var index: usize = 0;
+    var token = tree.firstToken(node);
+    const last = tree.lastToken(node);
+    while (token <= last) : (token += 1) {
+        if (tree.tokenTag(token) != .identifier) continue;
+        try std.testing.expect(index < expected.len);
+        try std.testing.expectEqualStrings(expected[index], tree.tokenSlice(token));
+        index += 1;
+    }
+    try std.testing.expectEqual(expected.len, index);
+}
+
 fn expectOptionalEndedPurgeScratchDelta(
     allocator: std.mem.Allocator,
     source: [:0]const u8,
@@ -5607,11 +5751,11 @@ fn expectEndedPurgeQuarantineSchema(
 ) !void {
     var tree = try std.zig.Ast.parse(allocator, source, .zig);
     defer tree.deinit(allocator);
-    const error_members = findRootContainerMembers(&tree, "Error") orelse
+    const error_node = findRootVariableInitializer(&tree, "Error") orelse
         return error.TestUnexpectedResult;
-    try expectFieldNames(
+    try expectErrorSetNodeFields(
         &tree,
-        error_members,
+        error_node,
         &.{ "InvalidOwner", "InvalidState", "ArithmeticOverflow", "CapacityExceeded" },
     );
 
@@ -5634,29 +5778,31 @@ fn expectEndedPurgeQuarantineSchema(
 
     const registry = findRootContainerMembers(&tree, "Registry") orelse
         return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 14), registry.len);
+    try std.testing.expectEqual(@as(usize, 16), registry.len);
     try expectNestedEnum(&tree, registry[0], "State", &.{ "idle", "reserved", "committed" });
-    try expectTypedField(&tree, source, registry[1], "mutex", "std.Thread.Mutex");
-    try expectTypedField(&tree, source, registry[2], "state", "State");
-    try expectTypedField(&tree, source, registry[3], "next_generation", "u64");
-    try expectTypedField(&tree, source, registry[4], "reserved_reservation_addr", "usize");
-    try expectTypedField(&tree, source, registry[5], "reserved_generation", "u64");
-    try expectTypedField(&tree, source, registry[6], "reserved_process_id", "u64");
-    try expectTypedField(&tree, source, registry[7], "reserved_node_incarnation", "u64");
-    try expectTypedField(&tree, source, registry[8], "reserved_operation_generation", "u64");
-    try expectTypedField(&tree, source, registry[9], "reserved_bytes", "usize");
-    try expectTypedField(&tree, source, registry[10], "committed_bytes", "usize");
-    const methods = [_][]const u8{ "reserve", "release", "commit" };
+    try expectTypedField(&tree, source, registry[1], "mutex", "std.atomic.Mutex");
+    try expectTypedField(&tree, source, registry[2], "owner_process_id", "u64");
+    try expectTypedField(&tree, source, registry[3], "state", "State");
+    try expectTypedField(&tree, source, registry[4], "next_generation", "u64");
+    try expectTypedField(&tree, source, registry[5], "reserved_reservation_addr", "usize");
+    try expectTypedField(&tree, source, registry[6], "reserved_generation", "u64");
+    try expectTypedField(&tree, source, registry[7], "reserved_process_id", "u64");
+    try expectTypedField(&tree, source, registry[8], "reserved_node_incarnation", "u64");
+    try expectTypedField(&tree, source, registry[9], "reserved_operation_generation", "u64");
+    try expectTypedField(&tree, source, registry[10], "reserved_bytes", "usize");
+    try expectTypedField(&tree, source, registry[11], "committed_bytes", "usize");
+    const methods = [_][]const u8{ "init", "reserve", "release", "commit" };
     for (methods, 0..) |name, index| {
-        const tuple = declarationTuple(&tree, "Registry", registry[index + 11]);
+        const tuple = declarationTuple(&tree, "Registry", registry[index + 12]);
         try std.testing.expectEqualStrings("fn", tuple.kind);
         try std.testing.expectEqualStrings("pub", tuple.visibility);
         try std.testing.expectEqualStrings(name, tuple.name);
     }
+    try expectFnSignature(&tree, source, registry[12], &.{}, &.{}, "Registry");
     try expectFnSignature(
         &tree,
         source,
-        registry[11],
+        registry[13],
         &.{ "self", "node_incarnation", "operation_generation", "bytes", "out" },
         &.{ "*Registry", "u64", "u64", "usize", "*Reservation" },
         "Error!void",
@@ -5664,7 +5810,7 @@ fn expectEndedPurgeQuarantineSchema(
     try expectFnSignature(
         &tree,
         source,
-        registry[12],
+        registry[14],
         &.{ "self", "reservation" },
         &.{ "*Registry", "*Reservation" },
         "bool",
@@ -5672,7 +5818,7 @@ fn expectEndedPurgeQuarantineSchema(
     try expectFnSignature(
         &tree,
         source,
-        registry[13],
+        registry[15],
         &.{ "self", "reservation" },
         &.{ "*Registry", "*Reservation" },
         "bool",

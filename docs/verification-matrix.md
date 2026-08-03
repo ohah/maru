@@ -704,12 +704,16 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   `594178e6c653e30be0ddc64564d2783922e0c0b4895c3543479f86e5977db6fd`,
   client_slot(root+ClientSlot+EndedPurgePreparation)=126/SHA-256 `03a92a146dbf8935466d0b9250b09c884d575f15fc148f73c6db8979bc69d968`를
   함께 고정한다. client top-level delta는 `ended_purge_transaction|PreparedEndedPurgeCommit|EndedPurgeCommitError|
-  EndedPurgeClientCommitOutcome`, client_slot delta는 `ended_purge_quarantine|ended_purge_quarantine_registry`만 허용한다. nested
+  EndedPurgeClientCommitOutcome`, client_slot delta는 `ended_purge_quarantine|ended_purge_quarantine_registry|process_runtime_pid`만 허용한다. nested
   Client/ClientSlot/EndedPurgePreparation method/type도 persistent-session-host의 exact allowlist 밖 증가는 실패한다. 새
   `ended_purge_quarantine.zig`는 std 외 import·allocator·Client·callback·payload pointer 0, public API
   `max_ended_purge_quarantine_bytes|Error|Reservation|Registry` exact 네 개와
-  `idle|reserved|committed`/reserve-release-commit/replay/cap/cap+1을 Debug/ReleaseFast로
-  검증한다. `pending_outbound` non-null도 build/lifecycle과 함께 frozen scratch descriptor, complete-owner sum/alias/seal/postvalidation/tombstone에
+  `ClientSlot.initializeProcessRuntime`을 AppSession의 fork 가능 작업 전에 명시적으로 호출하고 pre-fork parent PID `init` exact-one과
+  같은 PID idempotence, non-test `process_runtime_bootstrap_fixture.zig`의 미초기화 ClientSlot 생성 거부와 bootstrap 뒤 실제
+  ClientSlot 생성·valid·deinit 및 fork child의 mutex-before-reject 0,
+  self-exec 뒤에만 thread runtime을 시작하는 non-test `ended_purge_quarantine_concurrency_fixture.zig`의 2초 watchdog·8-thread
+  single winner·exact release, `idle|reserved|committed`/reserve-release-commit/replay/cap/cap+1을 Debug/ReleaseFast로 검증한다.
+  `pending_outbound` non-null도 build/lifecycle과 함께 frozen scratch descriptor, complete-owner sum/alias/seal/postvalidation/tombstone에
   포함하며 b2의 기존 adoption-only null 가정을 purge authority로 재사용하지 않는다.
   AST gate는 `PreparedEndedPurgeCommit`이 나타나면 exact `Lifecycle`+18 fields를 검사하고,
   `ClientOwnership.quarantined_no_free`와 `EndedPurgePreparationLifecycle.consumed` 외 enum 증분을 거부한다. 두 신규 import는 raw substring이

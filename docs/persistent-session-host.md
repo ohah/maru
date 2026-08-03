@@ -1131,23 +1131,26 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
      `tombstoneEndedPurgeOwnedGraph`, `publishEndedPurgeNoFreePoison` 네 개다. private mutation leaf는
      `commitEndedPurgePrepared`의 no-fail suffix 외 production caller가 0이어야 한다. 기존 `ClientOwnership`에는
      `quarantined_no_free` arm만 추가한다.
-   - `client_slot.zig` top-level 신규 exact allowlist는 import `ended_purge_quarantine`과 process singleton
-     `ended_purge_quarantine_registry` 두 개뿐이다. `ClientSlot` nested declaration은 `EndedPurgeCommitError`, `EndedPurgeResult`,
-     method `commitEndedPurge`만, 기존 `EndedPurgePreparation`에는 lifecycle `consumed`와 method `tombstoneForCommit`만 허용한다.
+   - `client_slot.zig` top-level 신규 exact allowlist는 import `ended_purge_quarantine`, process singleton
+     `ended_purge_quarantine_registry`, PID bootstrap latch `process_runtime_pid` 세 개뿐이다. `ClientSlot` nested declaration은
+     `ProcessRuntimeInitError`, `EndedPurgeCommitError`, `EndedPurgeResult`, method `initializeProcessRuntime`, `commitEndedPurge`만, 기존
+     `EndedPurgePreparation`에는 lifecycle `consumed`와 method `tombstoneForCommit`만 허용한다.
    - 새 `ended_purge_quarantine.zig`의 public top-level exact API는 `max_ended_purge_quarantine_bytes`, `Error`, `Reservation`, `Registry` 네 개다.
      이 모듈은 std 외 import, Client/allocator/callback/pointer payload를 갖지 않고 scalar process/node/operation identity와 bytes만 받는다.
      `Error`는 `InvalidOwner|InvalidState|ArithmeticOverflow|CapacityExceeded`다. final-address `Reservation`은 nested
      `Lifecycle{pristine,reserved,spent}`와 exact scalar fields
      `{self_addr,registry_addr,reservation_generation,process_id,node_incarnation,operation_generation,bytes,lifecycle}`만 가진다.
      `Registry`는 nested `State{idle,reserved,committed}`, private fields
-     `{mutex,state,next_generation,reserved_reservation_addr,reserved_generation,reserved_process_id,reserved_node_incarnation,
+     `{mutex:std.atomic.Mutex,owner_process_id,state,next_generation,reserved_reservation_addr,reserved_generation,reserved_process_id,reserved_node_incarnation,
      reserved_operation_generation,reserved_bytes,committed_bytes}`와 public
-     `reserve|release|commit`만 소유하며 heap allocation은 0이다. `reserve`만 `Error!void`, `release|commit`은 validated reservation을
+     `init|reserve|release|commit`만 소유하며 heap allocation은 0이다. `init`은 fork 가능 시점 전에 parent PID를 immutable
+     `owner_process_id`로 pin하고, zero/default Registry의 다른 API는 lock 전 `InvalidOwner`/false로 거부한다. module은 private import이며
+     제품 `ClientSlot.initializeProcessRuntime`의 process singleton 초기화 exact-one 외 `init` callsite는 0이다. `reserve`만 `Error!void`, `release|commit`은 validated reservation을
      no-fail로 consume한다. reserved state에서는 여섯 `reserved_*` scalar가 Reservation final address까지 포함한 canonical mirror이고,
      idle/committed에서는
      모두 0이다. `committed_bytes`는 committed에서만 nonzero일 수 있어 reserved byte와 이중 의미로 재사용하지 않는다. pointer-bearing
      field와 별도 force/reset API는 금지한다.
-     exact API는 `reserve(self:*Registry,node_incarnation:u64,operation_generation:u64,bytes:usize,out:*Reservation) Error!void`,
+     exact API는 `init() Registry`, `reserve(self:*Registry,node_incarnation:u64,operation_generation:u64,bytes:usize,out:*Reservation) Error!void`,
      `release(self:*Registry,reservation:*Reservation) bool`, `commit(self:*Registry,reservation:*Reservation) bool`이다. 세 method가
      실제 PID를 내부에서 먼저 읽어 검증하므로 caller-supplied PID를 신뢰하지 않는다. 상한 const는 exact
      `max_ended_purge_quarantine_bytes: usize = 64 * 1024 * 1024`다.
@@ -1181,10 +1184,25 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    error만 반환하고, `commitEndedPurgePrepared`는 receipt 뒤 no-fail outcome만 반환한다. `ClientSlot.commitEndedPurge`는 정상과
    postcallback drift를 모두 `.purged`로 정규화하고 poison/quarantine 여부는 Client terminal state와 진단 reason에서만 관측한다.
 
+   `ClientSlot.initializeProcessRuntime`은 macOS `AppSession.init`의 첫 session-host 동작이며 PTY/session-host helper를 포함한
+   fork 가능 작업보다 먼저 exact once 호출된다. 같은 PID의 반복 호출은 idempotent이고, 다른 PID에서 상속한 호출은
+   `process_runtime_pid` atomic latch를 먼저 읽어 process-global mutex 접근 0의
+   `ProcessRuntimeInitError{ProcessDomainMismatch}`로 거부한다. 제품
+   `ClientSlot.initInPlace`는 이 bootstrap을 암묵적으로 수행하지 않으며 미초기화 상태를 lock 전에 `ProcessDomainMismatch`로 거부한다.
+   `HostAdapter.initializeProcessRuntime`은 AppSession이 private `client_slot.zig`를 직접 import하지 않도록 하는 얇은 facade이며
+   registry/issuer 상태를 중복 소유하지 않는다. AppSession이 없는 session-host test root는 첫 제품-owner fixture보다 먼저 같은 public
+   bootstrap을 명시적으로 호출하며, `ClientSlot.initInPlace`에는 test-only implicit 초기화 분기가 없다. 별도 non-test
+   `process_runtime_bootstrap_fixture.zig` executable은 bootstrap 전 `initInPlace`의 `ProcessDomainMismatch`, bootstrap 뒤 same-PID
+   idempotence, 실제 제품 `ClientSlot` 생성·valid·deinit 수명까지 제품 compile mode로 고정한다. 별도 non-test
+   `ended_purge_quarantine_concurrency_fixture.zig` driver는 모든 child 입력을 fork 전에 준비하고 child에서 즉시 self-exec한 뒤에만
+   8-thread reserve 경쟁을 시작한다. parent watchdog은 2초 안에 worker를 회수하고, 한 winner와 그 reservation의 exact cleanup이
+   성립하지 않거나 deadlock이면 gate를 실패시킨다. 따라서 임의의 test runtime을 fork한 child가 thread runtime을 다시 호출하지 않는다.
+
    commit entry는 현재 process id를 operation thread/permit/quarantine registry를 포함한 **모든 process-global lock 접근보다 먼저**
-   검증한다. fork child는 상속한 TLS incarnation이나 reservation scalar가 일치해 보여도 lock 진입 전 typed `InvalidOwner`로 거부한다.
+   검증한다. fork child는 상속한 TLS incarnation이나 reservation scalar가 일치해 보여도 PID 조회 뒤 lock/callback/mutation 0으로 typed
+   `InvalidOwner`로 거부한다.
    reservation은 process id를 seal에 포함하고 `reserve|release|commit` 모두 lock 전 PID gate를 반복한다. RED는 parent가 registry mutex를
-   잡은 상태에서 fork한 child가 bounded 시간 안에 syscall/lock/callback 0으로 거부되는지를 검증한다.
+   잡은 상태에서 fork한 child가 bounded 시간 안에 PID 조회 외 syscall 0, lock/callback/mutation 0으로 거부되는지를 검증한다.
 
    `Client.prepareEndedPurgeCommit`은 current graph/profile/alias를 전부 다시 검증하고 b3a plans, complete deinit extent/seal과 captured fd를
    준비하지만 mutation/callback/free는 0이다. `ClientSlot.commitEndedPurge`가 preparation·permit·binding을 재검증한 뒤

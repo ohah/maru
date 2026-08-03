@@ -3453,6 +3453,7 @@ pub const AppSession = struct {
         raw_config: SessionConfig,
     ) !void {
         const config = try normalizeConfig(raw_config);
+        if (is_macos) try RemoteSessionAdapter.initializeProcessRuntime();
 
         self.* = .{
             .allocator = allocator,

@@ -69,6 +69,15 @@ const PpmProbe = struct {
     non_background_pixels: u32,
 };
 
+/// The Lab has one short, reviewable font specimen in addition to product-state fixtures. These
+/// counts come from CoreText's actual shaped runs, not from a source-string coverage guess, so a
+/// reviewer can tell whether a Korean sample used the registered face or a fallback face.
+const FontUsage = struct {
+    primary_glyphs: usize,
+    fallback_glyphs: usize,
+    distinct_font_faces: usize,
+};
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const allocator = init.gpa;
@@ -166,6 +175,7 @@ pub fn main(init: std.process.Init) !void {
     };
     var render_frame = try builder.buildFromDrawList(allocator, text_draw_list, &renderer_state);
     defer render_frame.deinit(allocator);
+    const font_usage = inspectFontUsage(render_frame, renderer_state.font_registry.count());
     var metal_fixture = try metal_smoke.buildSmokeFixtureFromRenderFrame(
         allocator,
         render_frame,
@@ -255,7 +265,7 @@ pub fn main(init: std.process.Init) !void {
     // the lowered fixture has text, however, the rich pass must receive at least one glyph.
     const rich_text_rasterized = metal_fixture.cells.len == 0 or rich_glyphs.items.len > 0;
     const success = native_ok and pixel_ok and valid_png and text_rasterized and rich_text_rasterized and rich_text_matches_artifact;
-    const summary = try renderSummary(allocator, scenario_name, font_variant, font_postscript_name, ppm_path, png_path, native, ppm, valid_png, gpu_quads.items.len, metal_fixture.cells.len, text_rasterized, rich_glyphs.items.len, rich_text_rasterized, rich_text_matches_artifact, success);
+    const summary = try renderSummary(allocator, scenario_name, font_variant, font_postscript_name, ppm_path, png_path, native, ppm, valid_png, gpu_quads.items.len, metal_fixture.cells.len, text_rasterized, rich_glyphs.items.len, rich_text_rasterized, rich_text_matches_artifact, font_usage, success);
     defer allocator.free(summary);
     try artifact_io.writeText(io, json_path, summary);
 
@@ -307,6 +317,7 @@ fn scenarioFromEnvValue(raw: []const u8) ?lab.ScenarioId {
     if (std.mem.eql(u8, raw, "empty")) return .empty;
     if (std.mem.eql(u8, raw, "loading")) return .loading;
     if (std.mem.eql(u8, raw, "retained-list")) return .retained_list;
+    if (std.mem.eql(u8, raw, "font-specimen")) return .font_specimen;
     if (std.mem.eql(u8, raw, "partial-scroll")) return .partial_scroll;
     if (std.mem.eql(u8, raw, "detail-loading")) return .detail_loading;
     if (std.mem.eql(u8, raw, "detail-ready")) return .detail_ready;
@@ -320,6 +331,7 @@ fn artifactName(id: lab.ScenarioId) []const u8 {
         .empty => "empty",
         .loading => "loading",
         .retained_list => "retained-list",
+        .font_specimen => "font-specimen",
         .partial_scroll => "partial-scroll",
         .detail_loading => "detail-loading",
         .detail_ready => "detail-ready",
@@ -401,6 +413,7 @@ fn renderSummary(
     rich_glyph_count: usize,
     rich_text_rasterized: bool,
     rich_text_matches_artifact: bool,
+    font_usage: FontUsage,
     success: bool,
 ) ![]u8 {
     return std.fmt.allocPrint(allocator,
@@ -414,6 +427,7 @@ fn renderSummary(
         \\  "product_renderer": {{ "status": {d}, "created": {}, "atlas_ready": {}, "draw_submitted": {} }},
         \\  "readback": {{ "ppm_written": {}, "png_written": {}, "valid_png": {}, "width": {d}, "height": {d}, "non_background_pixels": {d} }},
         \\  "lowered": {{ "gpu_quads": {d}, "glyph_cells": {d}, "text_rasterized": {}, "gpu_glyphs": {d}, "rich_text_rasterized": {}, "rich_text_matches_artifact": {} }},
+        \\  "font_usage": {{ "primary_glyphs": {d}, "fallback_glyphs": {d}, "distinct_font_faces": {d} }},
         \\  "success": {}
         \\}}
     , .{
@@ -441,8 +455,24 @@ fn renderSummary(
         rich_glyph_count,
         rich_text_rasterized,
         rich_text_matches_artifact,
+        font_usage.primary_glyphs,
+        font_usage.fallback_glyphs,
+        font_usage.distinct_font_faces,
         success,
     });
+}
+
+fn inspectFontUsage(frame: renderer.RenderFrame, distinct_font_faces: usize) FontUsage {
+    var primary_glyphs: usize = 0;
+    var fallback_glyphs: usize = 0;
+    for (frame.glyph_quad_frame.glyphs) |glyph| {
+        if (glyph.run.fallback) {
+            fallback_glyphs += 1;
+        } else {
+            primary_glyphs += 1;
+        }
+    }
+    return .{ .primary_glyphs = primary_glyphs, .fallback_glyphs = fallback_glyphs, .distinct_font_faces = distinct_font_faces };
 }
 
 /// This guard deliberately recomputes only the documented artifact-to-GPU projection.  It does
@@ -472,6 +502,7 @@ test "Chrome Lab scenario parser keeps one process bound to one deterministic ar
     try std.testing.expectEqual(lab.ScenarioId.empty, scenarioFromEnvValue("empty").?);
     try std.testing.expectEqual(lab.ScenarioId.loading, scenarioFromEnvValue("loading").?);
     try std.testing.expectEqual(lab.ScenarioId.retained_list, scenarioFromEnvValue("retained-list").?);
+    try std.testing.expectEqual(lab.ScenarioId.font_specimen, scenarioFromEnvValue("font-specimen").?);
     try std.testing.expectEqual(lab.ScenarioId.partial_scroll, scenarioFromEnvValue("partial-scroll").?);
     try std.testing.expectEqual(lab.ScenarioId.detail_loading, scenarioFromEnvValue("detail-loading").?);
     try std.testing.expectEqual(lab.ScenarioId.detail_ready, scenarioFromEnvValue("detail-ready").?);
@@ -481,6 +512,7 @@ test "Chrome Lab scenario parser keeps one process bound to one deterministic ar
     try std.testing.expectEqualStrings("empty", artifactName(.empty));
     try std.testing.expectEqualStrings("loading", artifactName(.loading));
     try std.testing.expectEqualStrings("retained-list", artifactName(.retained_list));
+    try std.testing.expectEqualStrings("font-specimen", artifactName(.font_specimen));
     try std.testing.expectEqualStrings("partial-scroll", artifactName(.partial_scroll));
     try std.testing.expectEqualStrings("detail-ready", artifactName(.detail_ready));
     try std.testing.expectEqual(FontVariant.jetendard, fontVariantFromValue("jetendard").?);
@@ -505,13 +537,16 @@ test "Chrome Lab summary records component text rasterization and artifact paths
         .draw_submitted = 1,
         .ppm_written = 1,
         .png_written = 1,
-    }, .{ .width = 320, .height = 240, .non_background_pixels = 1 }, true, 1, 2, true, 2, true, true, true);
+    }, .{ .width = 320, .height = 240, .non_background_pixels = 1 }, true, 1, 2, true, 2, true, true, .{ .primary_glyphs = 1, .fallback_glyphs = 2, .distinct_font_faces = 3 }, true);
     defer std.testing.allocator.free(summary);
     try std.testing.expect(std.mem.indexOf(u8, summary, "\"glyph_cells\": 2") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "\"text_rasterized\": true") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "\"gpu_glyphs\": 2") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "\"rich_text_rasterized\": true") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "\"rich_text_matches_artifact\": true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "\"primary_glyphs\": 1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "\"fallback_glyphs\": 2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "\"distinct_font_faces\": 3") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "\"family\": \"JetBrains Mono\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "\"postscript_name\": \"JetBrainsMono-Regular\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "\"ppm\": \"artifact.ppm\"") != null);

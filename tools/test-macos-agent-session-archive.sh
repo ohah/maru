@@ -130,6 +130,15 @@ grep -Eq '^agent_session_archive_smoke_capture_stale=true$' "$root/detail-stale.
 grep -Eq '^agent_session_archive_smoke_capture_loading_artifact=captures/detail-stale-loading\.ppm$' "$root/detail-stale.summary.txt"
 grep -Eq '^agent_session_archive_smoke_capture_stale_artifact=captures/detail-stale-stale\.ppm$' "$root/detail-stale.summary.txt"
 
+run_scenario detail-close-reopen
+grep -Eq '^agent_session_archive_smoke_stage=succeeded$' "$root/detail-close-reopen.summary.txt"
+grep -Eq '^agent_session_archive_smoke_scenario=detail-close-reopen$' "$root/detail-close-reopen.summary.txt"
+grep -Eq '^agent_session_archive_smoke_fake_resume_verdict=false$' "$root/detail-close-reopen.summary.txt"
+grep -Eq '^agent_session_archive_smoke_reveal_allowed_count=0$' "$root/detail-close-reopen.summary.txt"
+grep -Eq '^agent_session_archive_smoke_reveal_rejected_count=0$' "$root/detail-close-reopen.summary.txt"
+grep -Eq '^agent_session_archive_smoke_stale_reveal_count=0$' "$root/detail-close-reopen.summary.txt"
+grep -Eq '^agent_session_archive_smoke_terminal_invariant=true$' "$root/detail-close-reopen.summary.txt"
+
 run_scenario reveal-recheck-pointer
 grep -Eq '^agent_session_archive_smoke_stage=succeeded$' "$root/reveal-recheck-pointer.summary.txt"
 grep -Eq '^agent_session_archive_smoke_scenario=reveal-recheck-pointer$' "$root/reveal-recheck-pointer.summary.txt"

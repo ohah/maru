@@ -1266,6 +1266,15 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
             .containers = &.{ "ClientSlot", "EndedPurgePreparation" },
             .optional_containers = &.{},
             .allowed = &.{
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "compatibility" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "CapabilityProjectionError" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "CapabilityProjectionRequest" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "RegisteredNodeLookup" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "RegisteredNodeOperation" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "streamOperationNodeIdle" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "beginRegisteredNodeOperation" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "endRegisteredNodeOperation" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "projectGenerationCapabilities" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "ended_purge_quarantine" },
                 .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "", .name = "ended_purge_quarantine_registry" },
                 .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "", .name = "process_runtime_pid" },
@@ -1776,7 +1785,7 @@ test "CR3a-2a attachment cleanup registry stays node-local and callback-free" {
         try std.testing.expectEqual(@as(usize, 0), countOccurrences(source, needle));
 }
 
-test "CR3a-2c3a generation transport adds the exact input revoke output facade" {
+test "CR3a-2c3 generation transport keeps the exact reviewed public facade" {
     const allocator = std.testing.allocator;
     const source = try readZigFileZ(
         allocator,
@@ -1804,6 +1813,70 @@ test "CR3a-2c3a generation transport adds the exact input revoke output facade" 
     try std.testing.expectEqual(@as(usize, 0), countOccurrences(product_source, "*anyopaque"));
     try std.testing.expectEqual(@as(usize, 0), countOccurrences(product_source, "pub fn call("));
     try std.testing.expectEqual(@as(usize, 0), countOccurrences(product_source, "method: []const u8"));
+}
+
+test "CR3a-2c3b capability projection and shared RemoteRuntime raw-read baselines cannot expand" {
+    const allocator = std.testing.allocator;
+    const transport_source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/generation_transport.zig",
+    );
+    defer allocator.free(transport_source);
+    const transport_first_test = std.mem.indexOf(u8, transport_source, "\ntest \"") orelse
+        return error.TestUnexpectedResult;
+    const transport_product = transport_source[0..transport_first_test];
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(transport_product, "client_slot_mod.projectGenerationCapabilities("),
+    );
+    const capability_start = std.mem.indexOf(
+        u8,
+        transport_product,
+        "    pub fn capabilities(",
+    ) orelse return error.TestUnexpectedResult;
+    const capability_end = std.mem.indexOfPos(
+        u8,
+        transport_product,
+        capability_start,
+        "\n    pub fn prepareRequest(",
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        countOccurrences(transport_product[capability_start..capability_end], ".logicalClient"),
+    );
+
+    const runtime_source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/remote_runtime.zig",
+    );
+    defer allocator.free(runtime_source);
+    const runtime_first_test = std.mem.indexOf(u8, runtime_source, "\ntest \"") orelse
+        return error.TestUnexpectedResult;
+    const runtime_product = runtime_source[0..runtime_first_test];
+    const raw_baseline = [_]struct { name: []const u8, count: usize }{
+        .{ .name = "wire_major", .count = 2 },
+        .{ .name = "screen_codec_version", .count = 2 },
+        .{ .name = "metadata_support", .count = 4 },
+        .{ .name = "peer_attach_generation", .count = 1 },
+        .{ .name = "screen_viewport_scrolled_v1", .count = 1 },
+        .{ .name = "async_scroll_to_bottom_v1", .count = 1 },
+        .{ .name = "notification_stream_auth_v1", .count = 1 },
+        .{ .name = "runtime_clipboard_v1", .count = 1 },
+        .{ .name = "runtime_core_command_v1", .count = 5 },
+        .{ .name = "runtime_link_at_v1", .count = 1 },
+        .{ .name = "runtime_selected_text_v1", .count = 1 },
+    };
+    for (raw_baseline) |entry|
+        try std.testing.expectEqual(entry.count, countOccurrences(runtime_product, entry.name));
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(runtime_product, "self.client.compatibility_profile"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(runtime_product, "compatibility_profile.attach_schema"),
+    );
+    try std.testing.expectEqual(@as(usize, 0), countOccurrences(runtime_product, ".capabilities()"));
 }
 
 test "external pump acquires storage claim before reading owned Client" {

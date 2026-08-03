@@ -17,7 +17,10 @@
 
 - generation GUI attachment가 봉인한 단일 stream에 대해 closed input, control, event, RPC primitive만 제공한다.
 - 매 호출에서 final address, process, owner thread, slot/node incarnation, binding과 role을 다시 검증한다.
-- partial write와 response/event payload의 소유권을 typed outcome과 one-shot receipt로 표현한다.
+- partial write와 각 response/event payload의 소유권 이전·해제를 typed outcome과 one-shot receipt로 표현한다. 반복 RPC의 transport
+  authority 자체는 checked-monotonic epoch로 다음 호출에 재사용한다.
+- attach 응답의 registry one-shot owner와 반복 RPC의 transport-local monotonic epoch owner를 분리하고, 닫힌 response destination으로
+  둘을 혼용하지 못하게 한다.
 
 몰라야 하는 것:
 

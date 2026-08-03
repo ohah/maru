@@ -1029,7 +1029,20 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    bound-drop transaction을 Debug·ReleaseFast `test-session-host` 및 boundary gate로 닫았다. 내부 순서는 2c3a
    input/revoke/output-progress+raw lifecycle admission, 2c3b capability+closed RPC, 2c3c control, 2c3d one-shot event,
    2c3e generation 제품 source-zero+socket parity다. 2c3a~e가 모두 green일 때만 generation arm의 direct
-   `logicalClient()`/`Client` method 사용 0을 주장한다. **2c4**는
+   `logicalClient()`/`Client` method 사용 0을 주장한다. **2c3b-1 capability facade 구현 완료**: const receiver의 raw-first admission과
+   registry-resolved canonical node operation pin 아래 exact `GenerationCapabilities` value projection을 구현했다. untrusted slot 주소는
+   registry 비교 전 역참조하지 않고 owner-seal/capability enum의 invalid raw byte를 fail-close하며, facade production callsite 0과
+   shared `RemoteRuntime` architecture raw-read exact baseline을 boundary gate로 고정했다.
+   **2c3b-2~3 closed RPC 미착수**:
+   `RuntimeRequest`→method의 exhaustive closed mapping을 먼저 고정한 뒤, attach는 기존 registry의 one-shot
+   `ExecutedResponse`를 유지하고 반복 RPC는 transport-owned·node-sealed checked-monotonic epoch authority와 stack-final-address
+   `RpcExecutedResponse` borrow/owner-only finish로 분리한다. 독립 movable payload, terminal seal reset과 fixed response pool은 두지 않는다. red gate는
+   2회·64회 순차 RPC, attach/RPC destination tag mismatch wire 0, copy/move/same-address ABA, cross transport/binding/request/
+   digest/epoch splice, pre-wire typed reject 뒤 재사용, uncertain·accepted 미소비 뒤 terminal, allocator drift·alias·free callback 재진입,
+   node-sealed authority/whole-transport restore, exact safe-free와 ambiguous no-free product fail-stop, epoch 소진,
+   teardown busy/fail-close를 production type·subprocess·Darwin socketpair로 고정한다.
+   제품 gate는 RPC family별 legacy/generation decode parity와 input→RPC/revoke ordering을 포함한다. decode와 ordered input policy는
+   `RemoteRuntime` 하나만 소유한다. **2c4**는
    `RuntimeConnection` union을 mode SSOT로 전환해 `RemoteRuntime.client`와 `generation_adapter` 병렬 필드를 제거하고 exact
    15-method/signature/source oracle을 닫는다. 제거할 legacy 인자·shim·split helper의 exact 목록은
    persistent-session-host의 CR3a-2c4 계약과 boundary oracle을 단일 출처로 따른다.

@@ -203,7 +203,9 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 161;
+pub const abi_version: u32 = 162;
+// 162: AS4-f fixture reads only published SessionDock control/action border rects so four
+// font/scale cold AppKit runs can compare geometry without reconstructing layout in Swift.
 // 161: AS3-c fixture adds one read-only expanded-card raw-rect target and published tree
 // generation, proving a real AppKit scroll + reorder preserves an exact card anchor.
 // 159: AS4-d fixture exposes read-only active-surface and Term-count witnesses, proving that
@@ -1383,6 +1385,11 @@ pub const AgentSessionArchiveSmokeProbeTarget = enum(u32) {
     /// It carries no source identity or action capability; AS3-c's AppKit E2E uses it only to
     /// prove that an exact-card refresh anchor preserves the pre-existing intra-card pixel.
     archive_expanded_scroll_anchor = 8,
+    /// Fixture-only fixed control rects; neither target carries source identity or capability.
+    archive_scope_row = 9,
+    archive_search = 10,
+    /// Fixture-only un-clipped root of the currently expanded identity-bound card.
+    archive_expanded_card = 11,
 };
 
 /// Published tree에서 나온 backing-pixel capability snapshot이다. `present=false`면 다른
@@ -4290,18 +4297,26 @@ pub const AppSession = struct {
     }
 
     fn dockGeometry(self: *const AppSession) dock_layout.Geometry {
+        const agent_session_view = self.dock_initialized and self.dock.view == .agent_sessions;
         return dock_layout.compute(.{
             .backing_width_px = self.backing_width_px,
             .backing_height_px = self.backing_height_px,
             .sidebar_width_px = self.sidebar_width_px,
             .titlebar_height_px = self.titlebar_strip_px,
+            // Session Dock은 terminal font의 cell/titlebar metric을 Chrome layout input으로
+            // 삼지 않는다. 28pt native-title safety band와 component-owned 40pt switcher가
+            // font zoom에도 card/action/pointer origin을 고정한다.
+            .dock_top_px = if (agent_session_view) layout_math.ptToPx(titlebar_strip_min_pt, self.scale_milli) else 0,
             .cell_width_px = self.cell_width_px,
             .cell_height_px = self.cell_height_px,
             .scale_milli = self.scale_milli,
             .divider_px = self.dividerThicknessPx(),
-            // 뷰 스위처 바는 pane 탭 바와 **같은 높이**여야 아래 경계선이 한 줄로 맞는다(사용자 요청 2026-07-31).
-            // 그래서 chrome 행에서 파생하지 않고 그 단일 출처를 그대로 넘긴다.
-            .view_bar_px = self.paneBarHeightPx(),
+            // Explorer/source-control은 pane tab bar와 같은 높이를 유지한다. Session Dock만
+            // terminal font zoom에 독립된 component metric을 써서 fixed Chrome origin을 보장한다.
+            .view_bar_px = if (agent_session_view)
+                chrome.components.session_dock.types.DockMetrics.resolve(self.scale_milli).view_switcher_h
+            else
+                self.paneBarHeightPx(),
             .side = if (self.dock_initialized) self.dock.side else .right,
             .size_pt = if (self.dock_initialized) self.dock.size else 0,
             .visible = self.dockVisible(),
@@ -6487,6 +6502,9 @@ pub const AppSession = struct {
             .dock_launcher => return self.dockLauncherSmokeProbe(),
             .archive_refresh => return self.agentSessionDockRefreshSmokeProbe(),
             .archive_expanded_scroll_anchor => return self.agentSessionDockExpandedAnchorSmokeProbe(),
+            .archive_scope_row => return self.agentSessionDockNodeSmokeProbe(chrome.components.session_dock.build.NodeIds.scope_row),
+            .archive_search => return self.agentSessionDockNodeSmokeProbe(chrome.components.session_dock.build.NodeIds.search),
+            .archive_expanded_card => return self.agentSessionDockExpandedCardSmokeProbe(),
         }
     }
 
@@ -31546,6 +31564,7 @@ pub const AppSession = struct {
                 const visible = smokeProbeVisibleRect(entry) orelse continue;
                 return .{
                     .request_id = self.agent_session_dock_snapshot_generation,
+                    .generation = self.agent_session_dock_snapshot_generation,
                     .x_px = @as(f32, @floatFromInt(content.x)) + visible.x,
                     .y_px = @as(f32, @floatFromInt(content.y)) + visible.y,
                     .width_px = visible.width,
@@ -31575,12 +31594,77 @@ pub const AppSession = struct {
                 const visible = smokeProbeVisibleRect(entry) orelse continue;
                 return .{
                     .request_id = self.agent_session_dock_snapshot_generation,
+                    .generation = self.agent_session_dock_snapshot_generation,
                     .x_px = @as(f32, @floatFromInt(content.x)) + visible.x,
                     .y_px = @as(f32, @floatFromInt(content.y)) + visible.y,
                     .width_px = visible.width,
                     .height_px = visible.height,
                     .present = true,
                     .enabled = ui_action.enabled,
+                };
+            }
+        }
+        return .{};
+    }
+
+    /// Reads a fixed SessionDock node from the already-published tree. It deliberately returns
+    /// the border rect, not text/icon ink bounds: text placement belongs to the rich-text
+    /// artifact and a test observer must not reimplement layout in the platform host.
+    fn agentSessionDockNodeSmokeProbe(self: *const AppSession, node_id: chrome.ui.tree.UiId) AgentSessionArchiveSmokeProbe {
+        if (self.dock.view != .agent_sessions or !self.dockVisible()) return .{};
+        const content = self.dockGeometry().tree_content;
+        for (self.agent_session_dock_entries.items) |entry| {
+            if (entry.id != node_id) continue;
+            return .{
+                .request_id = self.agent_session_dock_snapshot_generation,
+                .generation = self.agent_session_dock_snapshot_generation,
+                .x_px = @as(f32, @floatFromInt(content.x)) + entry.rect.x,
+                .y_px = @as(f32, @floatFromInt(content.y)) + entry.rect.y,
+                .width_px = entry.rect.width,
+                .height_px = entry.rect.height,
+                .present = true,
+                .enabled = true,
+            };
+        }
+        return .{};
+    }
+
+    /// The expanded item's outer rect is a stable disclosure border, unlike its clipped child
+    /// action leaves. The observer ties it to the exact open detail before returning it, so a
+    /// recycled projected row can never stand in for a different archive identity.
+    fn agentSessionDockExpandedCardSmokeProbe(self: *const AppSession) AgentSessionArchiveSmokeProbe {
+        const detail = self.agent_session_inline_detail orelse return .{};
+        if (self.dock.view != .agent_sessions or !self.dockVisible()) return .{};
+        const content = self.dockGeometry().tree_content;
+        for (self.agent_session_dock_actions.items) |action| {
+            const record_index: usize = switch (action.intent) {
+                .select_card => |identity| if (identity <= std.math.maxInt(usize)) @intCast(identity) else continue,
+                else => continue,
+            };
+            if (action.snapshot_generation != self.agent_session_dock_snapshot_generation or
+                record_index >= self.agent_session_archive_records.items.len or
+                !inlineArchiveDetailMatchesRecord(&detail, &self.agent_session_archive_records.items[record_index])) continue;
+            for (self.agent_session_dock_entries.items) |entry| {
+                const ui_action = entry.action orelse continue;
+                if (ui_action.id != action.action_id) continue;
+                const root_index = entry.parent_index orelse continue;
+                if (root_index >= self.agent_session_dock_entries.items.len) continue;
+                const root = self.agent_session_dock_entries.items[root_index];
+                return .{
+                    .request_id = detail.request_id,
+                    .generation = self.agent_session_dock_snapshot_generation,
+                    .x_px = @as(f32, @floatFromInt(content.x)) + root.rect.x,
+                    .y_px = @as(f32, @floatFromInt(content.y)) + root.rect.y,
+                    .width_px = root.rect.width,
+                    .height_px = root.rect.height,
+                    .state = switch (detail.state) {
+                        .loading => 1,
+                        .ready => 2,
+                        .stale => 3,
+                        .unavailable => 4,
+                    },
+                    .present = true,
+                    .enabled = true,
                 };
             }
         }
@@ -31660,6 +31744,7 @@ pub const AppSession = struct {
                 const visible = smokeProbeVisibleRect(entry) orelse continue;
                 return .{
                     .request_id = detail.request_id,
+                    .generation = self.agent_session_dock_snapshot_generation,
                     .x_px = @as(f32, @floatFromInt(content.x)) + visible.x,
                     .y_px = @as(f32, @floatFromInt(content.y)) + visible.y,
                     .width_px = visible.width,

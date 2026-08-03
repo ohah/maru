@@ -204,6 +204,10 @@ pub const Input = struct {
     backing_height_px: u32,
     sidebar_width_px: u32,
     titlebar_height_px: u32,
+    /// Right dock만 terminal title strip과 다른 상단 Chrome 기준선을 쓸 수 있다. 0이면
+    /// `titlebar_height_px`를 그대로 써서 explorer/source-control의 기존 기하를 보존한다.
+    /// Session Dock은 terminal font zoom과 독립된 28pt title safety band를 넘긴다.
+    dock_top_px: u32 = 0,
     cell_width_px: u32,
     cell_height_px: u32,
     scale_milli: u32,
@@ -237,6 +241,17 @@ pub fn compute(in: Input) Geometry {
     };
     if (!in.visible or available.w == 0 or available.h == 0) return .{ .workspace = available, .terminal = available };
 
+    // Terminal title strip은 큰 terminal font에서 커질 수 있다. right Session Dock은 그
+    // implementation detail을 물려받지 않고 own Chrome point geometry에서 시작한다. bottom
+    // dock은 terminal 아래에 붙는 surface라 기존 `available`을 계속 쓴다.
+    const dock_top = if (in.dock_top_px == 0) in.titlebar_height_px else @min(in.dock_top_px, in.backing_height_px);
+    const dock_available = Rect{
+        .x = in.sidebar_width_px,
+        .y = dock_top,
+        .w = in.backing_width_px -| in.sidebar_width_px,
+        .h = in.backing_height_px -| dock_top,
+    };
+
     const scale = if (in.scale_milli == 0) 1000 else in.scale_milli;
     const requested_pt = if (in.size_pt != 0) in.size_pt else switch (in.side) {
         .right => defaultRightPtForView(in.view),
@@ -258,12 +273,12 @@ pub fn compute(in: Input) Geometry {
             if (dock_w == 0) break :right .{ .workspace = available, .terminal = available };
             const term_w = available.w -| divider -| dock_w;
             const dock_x = available.x + term_w + divider;
-            const dock = Rect{ .x = dock_x, .y = available.y, .w = dock_w, .h = available.h };
+            const dock = Rect{ .x = dock_x, .y = dock_available.y, .w = dock_w, .h = dock_available.h };
             break :right fromDock(
                 available,
                 .{ .x = available.x, .y = available.y, .w = term_w, .h = available.h },
                 dock,
-                .{ .x = available.x + term_w, .y = available.y, .w = divider, .h = available.h },
+                .{ .x = available.x + term_w, .y = dock_available.y, .w = divider, .h = dock_available.h },
                 chrome_h,
                 dock_w,
                 in.cell_width_px,
@@ -402,6 +417,29 @@ test "낮은 도크에서는 뷰 바부터 접어 콘텐츠를 남긴다" {
     const roomy = fromDock(.{ .x = 0, .y = 0, .w = 300, .h = 200 }, .{ .x = 0, .y = 0, .w = 300, .h = 100 }, .{ .x = 0, .y = 100, .w = 300, .h = 100 }, .{ .x = 0, .y = 96, .w = 300, .h = 4 }, 20, 100, 10, 1000, 24);
     try std.testing.expectEqual(@as(u32, 24), roomy.view_bar.h);
     try std.testing.expectEqual(@as(u32, 76), roomy.tree.h);
+}
+
+test "right dock may keep a fixed Chrome origin while terminal title strip grows" {
+    const geometry = compute(.{
+        .backing_width_px = 1600,
+        .backing_height_px = 1000,
+        .sidebar_width_px = 240,
+        .titlebar_height_px = 64, // large terminal font makes its own title strip taller.
+        .dock_top_px = 28, // Session Dock keeps the native Chrome safety band instead.
+        .cell_width_px = 10,
+        .cell_height_px = 36,
+        .scale_milli = 1000,
+        .divider_px = 2,
+        .view_bar_px = 40,
+        .side = .right,
+        .size_pt = 400,
+        .visible = true,
+    });
+    try std.testing.expectEqual(@as(u32, 64), geometry.terminal.y);
+    try std.testing.expectEqual(@as(u32, 28), geometry.dock.y);
+    try std.testing.expectEqual(@as(u32, 28), geometry.divider.y);
+    try std.testing.expectEqual(@as(u32, 40), geometry.view_bar.h);
+    try std.testing.expectEqual(@as(u32, 68), geometry.tree_content.y);
 }
 
 test "dock geometry collapses and clamps to leave a terminal floor" {

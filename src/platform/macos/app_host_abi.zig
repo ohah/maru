@@ -110,8 +110,8 @@ pub const AgentSessionArchiveSmokeProbe = extern struct {
     enabled: u32 = 0,
 };
 
-test "ABI v161 app instance lease result values match the C header" {
-    try std.testing.expectEqual(@as(u32, 161), abi_version);
+test "ABI v162 app instance lease result values match the C header" {
+    try std.testing.expectEqual(@as(u32, 162), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -512,6 +512,9 @@ pub export fn maru_macos_app_session_agent_session_archive_smoke_probe(
         c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_DOCK_LAUNCHER => .dock_launcher,
         c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_REFRESH => .archive_refresh,
         c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_EXPANDED_SCROLL_ANCHOR => .archive_expanded_scroll_anchor,
+        c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_SCOPE_ROW => .archive_scope_row,
+        c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_SEARCH => .archive_search,
+        c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_EXPANDED_CARD => .archive_expanded_card,
         else => return @intFromEnum(Status.invalid_config),
     };
     const probe = app_session.agentSessionArchiveSmokeProbe(typed_target);
@@ -5321,6 +5324,9 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@as(u32, c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_DOCK_LAUNCHER), @intFromEnum(session_mod.AgentSessionArchiveSmokeProbeTarget.dock_launcher));
     try std.testing.expectEqual(@as(u32, c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_REFRESH), @intFromEnum(session_mod.AgentSessionArchiveSmokeProbeTarget.archive_refresh));
     try std.testing.expectEqual(@as(u32, c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_EXPANDED_SCROLL_ANCHOR), @intFromEnum(session_mod.AgentSessionArchiveSmokeProbeTarget.archive_expanded_scroll_anchor));
+    try std.testing.expectEqual(@as(u32, c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_SCOPE_ROW), @intFromEnum(session_mod.AgentSessionArchiveSmokeProbeTarget.archive_scope_row));
+    try std.testing.expectEqual(@as(u32, c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_SEARCH), @intFromEnum(session_mod.AgentSessionArchiveSmokeProbeTarget.archive_search));
+    try std.testing.expectEqual(@as(u32, c.MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_EXPANDED_CARD), @intFromEnum(session_mod.AgentSessionArchiveSmokeProbeTarget.archive_expanded_card));
     try std.testing.expectEqual(@sizeOf(c.MaruAppHostAgentSessionArchiveSmokeProbe), @sizeOf(AgentSessionArchiveSmokeProbe));
     try std.testing.expectEqual(@alignOf(c.MaruAppHostAgentSessionArchiveSmokeProbe), @alignOf(AgentSessionArchiveSmokeProbe));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostAgentSessionArchiveSmokeProbe, "request_id"), @offsetOf(AgentSessionArchiveSmokeProbe, "request_id"));

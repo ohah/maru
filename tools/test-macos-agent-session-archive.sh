@@ -45,6 +45,26 @@ chmod 755 "$bin/claude"
 run_scenario() {
     scenario=$1
     provider=${2:-codex}
+    font_size=${3:-}
+    render_scale=${4:-}
+    font_config=
+    summary_name=$scenario
+    geometry_name=
+    if [ "$scenario" = font-scale-rects ]; then
+        case "$font_size:$render_scale" in
+            14:1000|14:2000|24:1000|24:2000)
+                font_config="$root/font-size-$font_size.config"
+                cp "tests/fixtures/agent-session-archive/font-size-$font_size.config" "$font_config"
+                summary_name="$scenario-font-$font_size-scale-$render_scale"
+                geometry_name="$root/$summary_name.geometry.json"
+                rm -f "$root/font-scale-rects.geometry.json" "$geometry_name"
+                ;;
+            *)
+                echo "font-scale-rects requires 14|24 pt and 1000|2000 scale" >&2
+                exit 2
+                ;;
+        esac
+    fi
     rm -f "$marker"
     # Each cold process starts from a new pair: a prior atomic replacement cannot leak into the
     # next scenario, and the temporary sibling remains outside the scanner's JSONL candidate set.
@@ -88,6 +108,7 @@ run_scenario() {
     esac
     HOME="$home" \
     CFFIXED_USER_HOME="$home" \
+    MARU_CONFIG="$font_config" \
     MARU_MACOS_APP_SMOKE_MS=15000 \
     MARU_AGENT_SESSION_ARCHIVE_SMOKE=1 \
     MARU_AGENT_SESSION_ARCHIVE_SMOKE_SCENARIO="$scenario" \
@@ -97,10 +118,15 @@ run_scenario() {
     MARU_AGENT_SESSION_ARCHIVE_SMOKE_REVEAL_PATH="$source_path" \
     MARU_AGENT_SESSION_ARCHIVE_SMOKE_REPLACEMENT_PATH="$replacement_path" \
     MARU_AGENT_SESSION_ARCHIVE_SMOKE_REORDER_PATH="$reorder_path" \
+    MARU_AGENT_SESSION_ARCHIVE_SMOKE_RENDER_SCALE_MILLI="$render_scale" \
     MARU_AGENT_SESSION_ARCHIVE_SMOKE_ARTIFACT_DIR="$root" \
     "$app_path"
     test -f "$summary"
-    cp "$summary" "$root/$scenario.summary.txt"
+    cp "$summary" "$root/$summary_name.summary.txt"
+    if [ -n "$geometry_name" ]; then
+        test -s "$root/font-scale-rects.geometry.json"
+        cp "$root/font-scale-rects.geometry.json" "$geometry_name"
+    fi
 }
 
 run_scenario resume-pointer
@@ -187,6 +213,35 @@ grep -Eq '^agent_session_archive_smoke_capture_scroll_anchor_before=true$' "$roo
 grep -Eq '^agent_session_archive_smoke_capture_scroll_anchor_after=true$' "$root/expanded-scroll-anchor.summary.txt"
 grep -Eq '^agent_session_archive_smoke_capture_scroll_anchor_before_artifact=captures/expanded-scroll-anchor-scroll-anchor-before\.ppm$' "$root/expanded-scroll-anchor.summary.txt"
 grep -Eq '^agent_session_archive_smoke_capture_scroll_anchor_after_artifact=captures/expanded-scroll-anchor-scroll-anchor-after\.ppm$' "$root/expanded-scroll-anchor.summary.txt"
+
+# Four cold AppKit processes use the real window/view/Metal host path. The fixture can only
+# control the render projection (not physical monitor migration), so the JSON records both.
+run_scenario font-scale-rects codex 14 1000
+run_scenario font-scale-rects codex 14 2000
+run_scenario font-scale-rects codex 24 1000
+run_scenario font-scale-rects codex 24 2000
+for combo in 14-scale-1000 14-scale-2000 24-scale-1000 24-scale-2000; do
+    geometry="$root/font-scale-rects-font-$combo.geometry.json"
+    summary_file="$root/font-scale-rects-font-$combo.summary.txt"
+    test -s "$geometry"
+    grep -Eq '^agent_session_archive_smoke_stage=succeeded$' "$summary_file"
+    grep -Eq '^agent_session_archive_smoke_scenario=font-scale-rects$' "$summary_file"
+    jq -e '.schema == "maru.agent-session.font-scale-rects.v1" and (.snapshot_generation > 0) and (.rects | keys == ["expanded_card", "first_card", "header", "resume", "reveal", "scope_row", "search"]) and all(.rects[]; .raw_px.width > 0 and .raw_px.height > 0)' "$geometry" >/dev/null
+done
+
+# Within a scale terminal font may change only terminal cells, never Chrome dock/action geometry.
+# Across scales the same raw backing rect must be exactly proportional within one low-scale px.
+jq -s -e '
+  def names: ["header", "scope_row", "search", "first_card", "expanded_card", "resume", "reveal"];
+  def fields: ["x", "y", "width", "height"];
+  def abs: if . < 0 then -. else . end;
+  . as [$f14s1, $f14s2, $f24s1, $f24s2]
+  | ($f14s1.render_scale_milli == 1000 and $f14s2.render_scale_milli == 2000 and $f24s1.render_scale_milli == 1000 and $f24s2.render_scale_milli == 2000)
+    and all(names[] as $n | $f14s1.rects[$n] == $f24s1.rects[$n])
+    and all(names[] as $n | $f14s2.rects[$n] == $f24s2.rects[$n])
+    and all(names[] as $n | fields[] as $f | (($f14s2.rects[$n].raw_px[$f] - (2 * $f14s1.rects[$n].raw_px[$f])) | abs) <= 1.0)
+    and all(names[] as $n | fields[] as $f | (($f24s2.rects[$n].raw_px[$f] - (2 * $f24s1.rects[$n].raw_px[$f])) | abs) <= 1.0)
+' "$root/font-scale-rects-font-14-scale-1000.geometry.json" "$root/font-scale-rects-font-14-scale-2000.geometry.json" "$root/font-scale-rects-font-24-scale-1000.geometry.json" "$root/font-scale-rects-font-24-scale-2000.geometry.json" >/dev/null
 
 run_scenario reveal-recheck-pointer
 grep -Eq '^agent_session_archive_smoke_stage=succeeded$' "$root/reveal-recheck-pointer.summary.txt"

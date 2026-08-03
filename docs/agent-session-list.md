@@ -157,6 +157,12 @@ layout과 spacing SSOT, 48pt action target·1×/2×/terminal-font capture 판정
 [Metal UI 레이아웃·컴포넌트 시스템](metal-ui-layout.md#logical-spacing과-component-metric)이 소유한다.
 이 visual slice는 실제 사용자 Claude/Codex resume을 자동 실행하지 않는다.
 
+이 독립성은 카드 내부에만 한정하지 않는다. Session Dock을 고르는 상단 switcher는 `DockMetrics`의
+40pt이고, right dock의 시작선은 terminal title strip이 아니라 28pt native-title safety band다.
+따라서 terminal font zoom은 terminal grid/title icon에는 영향을 줄 수 있어도 Session Dock의 header,
+scope, search, card, expanded card, resume/reveal border rect의 backing 좌표를 바꾸지 않는다.
+Explorer/source-control은 pane tab bar와 정렬해야 하므로 이 예외를 적용하지 않는다.
+
 #### 2.1.4 B1-button 이관 순서
 
 기존 action은 등록 SVG icon과 한글 label을 한 terminal-cell run으로 합쳐 `wide_icons=true`로 낮췄다.
@@ -530,11 +536,12 @@ delta의 Retina scale·residue·direction reset, (4) fixed header 불변, (5) 50
 anchor reorder restore와 identity-missing no-guess fallback, (7) retain-previous/OOM의 state byte-for-byte 보존을 고정한다.
 제품 test는 scroll-area 안/밖 wheel ownership, scroll 중 PTY mouse/terminal scrollback=0, resize/group/snapshot replace의
 capture cancel, same renderer Lab의 `partial-scroll` PNG/JSON(clip과 text rasterized evidence)을 추가한다. active AppKit
-host wheel screenshot은 AS3-c 뒤에도 별도 manual/automation gate로 남긴다.
+host wheel screenshot은 `expanded-scroll-anchor` isolated fixture가 실제 `NSView.scrollWheel`·refresh·새 published generation과
+전후 Metal capture로 검증한다.
 
 1. **AS1 — 순수 모델·parser:** provider-neutral record, Claude/Codex streaming parser, trust grade, dedup/title/summary/redaction/filter/sort pure tests. 실제 사용자 log는 fixture로 넣지 않는다.
 2. **AS2 — bounded scanner:** no-follow discovery, candidate/file/total caps, cancellation/generation, in-memory identity parse cache, 최신순 bounded worker pool과 완료 snapshot atomic publish, metrics. refresh는 직전 완료 snapshot을 유지하고 새 scan이 끝날 때만 교체한다. main tick filesystem I/O=0·JSON parse=0·worker wait=0을 counter와 source boundary test로 고정한다.
-3. **AS3 — 도크 Metal component vertical slice:** `SessionDockLayout`과 header/scope/search/group/card/scroll-area primitive를 순수 props/state/layout/view/hit-test/action으로 만든 뒤 host/backend의 semantic draw → Metal GPU lowering에 연결한다. 기존 direct text draw와 pipe scope label은 이 slice에서 제거한다. layout 공유 test가 view rect=hit rect=visible-row origin을, search keypress I/O=0·row 한 번 클릭 provider 실행=0·main thread JSONL I/O=0을 고정한다. loading spinner는 snapshot 유무별로 skeleton 또는 기존 목록 유지인지도 integration test로 고정한다. **AS3-a는 component→CoreText/Metal card background, AS3-b는 published-tree hover/down/up lifecycle, AS3-c는 pixel scroll projection·refresh identity anchor·partial-scroll Lab artifact를 연결한다. active host screenshot E2E는 AS3의 남은 gate다.**
+3. **AS3 — 도크 Metal component vertical slice:** `SessionDockLayout`과 header/scope/search/group/card/scroll-area primitive를 순수 props/state/layout/view/hit-test/action으로 만든 뒤 host/backend의 semantic draw → Metal GPU lowering에 연결한다. 기존 direct text draw와 pipe scope label은 이 slice에서 제거한다. layout 공유 test가 view rect=hit rect=visible-row origin을, search keypress I/O=0·row 한 번 클릭 provider 실행=0·main thread JSONL I/O=0을 고정한다. loading spinner는 snapshot 유무별로 skeleton 또는 기존 목록 유지인지도 integration test로 고정한다. **AS3-a는 component→CoreText/Metal card background, AS3-b는 published-tree hover/down/up lifecycle, AS3-c는 pixel scroll projection·refresh identity anchor·partial-scroll Lab artifact와 `expanded-scroll-anchor` active AppKit screenshot E2E를 연결한다.**
 4. **AS4 — inline expanded session·explicit actions·제품 gate:** `ExpandedSessionCard`를 `SessionDockScrollArea` 안의 PTY 없는 Metal-rendered component로 연결하고 bounded recent/permission summary, loading/stale identity disable, exact live mapping, source reveal, `터미널에서 이어하기`의 argv-only immediate new-Term activation을 닫는다. 기본/expanded row의 action·clip·scroll anchor는 하나의 completed tree를 소비한다. action label은 각 clickable card 안에서 실제 ellipsis/CJK glyph 폭 기준으로 수평 중앙 정렬한다. resume/log의 click rect와 `⌘↵`/`⌘L` shortcut은 같은 action identity를 소비한다. `열린 세션으로 이동`은 exact live identity가 있을 때만 별도 pointer/Enter action으로 제공한다. macOS fixture E2E는 dock card hover/selection/inline-expand/collapse/scroll, refresh 중 snapshot 보존, detail loading→ready/stale, disabled action, resume/reveal을 확인한다. 실제 provider 계정/개인 이력에 대한 재개는 사용자가 직접 승인한 수동 gate일 뿐 CI 증거가 아니다.
 
 ### AS4-c — 실제 AppKit host archive fixture

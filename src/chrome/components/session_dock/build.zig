@@ -164,9 +164,10 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
         .id = NodeIds.header,
         .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(m.header_h) }, .margin = .{ .bottom = @floatFromInt(m.control_gap) } },
         // Header text has no enclosing card in the dock reference. It remains a Card only so
-        // refresh retains one completed action rect, while its base/background border is hidden.
+        // refresh retains one completed action rect.  Its bottom rule is deliberately explicit:
+        // a borderless header must not make the fixed chrome merge into the control/list area.
         .variant = .surface,
-        .paint = .{ .background = .surface_bg, .border = .surface_bg, .shadow = .none },
+        .paint = .{ .background = .surface_bg, .border = .divider, .border_widths_px = .{ 0, 0, 1, 0 }, .shadow = .none },
         .action = refresh,
         .overflow = .clip,
     }, &.{});
@@ -350,6 +351,12 @@ test "SessionDock build shares action rects with the completed tree" {
     // Divider styling must not replace the selected variant's background token.
     try @import("std").testing.expect(card_visual.paint.background == null);
     try @import("std").testing.expectEqual(@as(?[4]u16, .{ 0, 0, 1, 0 }), card_visual.paint.border_widths_px);
+    const header_visual = switch (frame.tree.entries[frame.tree.find(NodeIds.header).?].visual) {
+        .card => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    try @import("std").testing.expectEqual(@as(?@import("../../tokens.zig").ColorRole, .divider), header_visual.paint.border);
+    try @import("std").testing.expectEqual(@as(?[4]u16, .{ 0, 0, 1, 0 }), header_visual.paint.border_widths_px);
     var table = ids.Table.init(@constCast(frame.actions));
     table.count = frame.actions.len;
     try @import("std").testing.expectEqual(@as(?ids.Intent, .{ .select_card = 12 }), table.resolve(7, 9));

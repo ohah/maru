@@ -82,13 +82,14 @@ identity는 바꾸지 않으며, `SessionDock`의 같은 completed `UiRectTree`�
   여백·목록 밀도·hit rect가 바뀌어서는 안 된다.
 - header는 title(강조) → count(secondary)의 좌측 두 줄과 Maru 등록 host SVG + `로컬`/refresh의 우측
   utility cluster를 서로 독립 logical slot으로 둔다. title/count/utility가 한 baseline 또는 terminal
-  prompt처럼 보이지 않아야 한다. host+label은 72pt content box, refresh는 20pt trailing slot,
+  prompt처럼 보이지 않아야 한다. host+label은 72pt content box, refresh는 **24pt trailing slot**,
   둘 사이는 12pt gap이며 이 x 좌표는 terminal cell 폭에서 계산하지 않는다. refresh slot의 trailing
-  edge에는 **16pt logical safe inset**을 더 둔다. 이 inset은 backing scale에서만 resolve하며 SVG와
+  edge에는 **20pt logical safe inset**을 더 둔다. 이 inset은 backing scale에서만 resolve하며 SVG와
   spinner의 ink·hit rect가 dock clip 또는 우측 edge에 닿지 않게 한다. Header 자체는 reference처럼
-  외곽 card border를 그리지 않는다. 이것이 scope/search/group/list의 경계가 사라져도 된다는 뜻은
-  아니다: refresh SVG의 전체 ink box는 slot 안에 있어야 하고, 1× readback에서 slot의 우측 끝과 dock
-  content edge 사이에는 16 logical pt가 남아야 한다.
+  외곽 card border를 그리지 않되, header의 **bottom 1px divider**는 `divider` token으로 반드시
+  lower한다. 이것이 scope/search/group/list의 경계가 사라져도 된다는 뜻은 아니다: refresh SVG의
+  전체 ink box는 24pt slot 안에 있어야 하고, 1× readback에서 slot의 우측 끝과 dock content edge
+  사이에는 20 logical pt가 남아야 하며 header·group·row 구획선도 읽혀야 한다.
 - scope는 하나의 rounded outlined control이며 selected segment만 lifted background를 갖는다. search는
   같은 radius 계열의 별도 filled field이고 icon·placeholder/query 사이에 최소 1ch 간격을 둔다.
 - group은 위아래 rule과 20pt disclosure slot·8pt label gap·workspace name·count pill을 갖는 독립
@@ -195,17 +196,18 @@ layout과 spacing SSOT, 48pt action target·1×/2×/terminal-font capture 판정
   header의 `로컬`/refresh utility와도 서로 다른 baseline·hit rect를 공유하지 않는다.
 - `SessionDockHeader`는 title, displayed/recent count, host SVG와 `로컬`
   provenance, refresh affordance만 소유한다. host+label은 72pt box 안에서 실제 glyph advance로
-  함께 중앙 정렬하고, refresh는 그 오른쪽 12pt gap 뒤의 20pt trailing slot에 둔다. refresh가 실행 중이면 같은 위치의
+  함께 중앙 정렬하고, refresh는 그 오른쪽 12pt gap 뒤의 24pt trailing slot에 둔다. refresh가 실행 중이면 같은 위치의
   control이 spinner로 바뀌며 다시 누른다고 worker를 더 만들지 않는다. refresh는
   group body가 아니고 항상 고정 chrome이다. idle refresh는 registered SVG icon, spinner는 같은
-  trailing slot을 유지한다. 둘 다 header 오른쪽 외곽이 아니라 16pt logical safe inset 안에 정렬해
-  fallback font 또는 icon ink가 rounded-card clip에 닿지 않게 한다. provider·원격 source 선택기 같은
+  trailing slot을 유지한다. 둘 다 header 오른쪽 외곽이 아니라 20pt logical safe inset 안에 정렬해
+  fallback font 또는 icon ink가 rounded-card clip에 닿지 않게 한다. Header의 bottom divider는 카드
+  외곽선이 아니라 fixed chrome과 아래 control을 구분하는 1px rule이다. provider·원격 source 선택기 같은
   별도 filter control은 v1에 추가하지 않는다.
 - Header refresh와 search affordance는 일반 Unicode/fallback font glyph를 쓰지 않고 등록된
   SVG coverage icon을 쓴다. idle refresh는 `surface_fg`, disabled spinner는 `muted_fg`라서
   theme accent가 어두운 경우에도 utility icon의 대비가 사라지지 않는다. idle refresh와 group
   expand/collapse affordance는 `icon_in_rect`의 명시 logical slot으로만 lower한다. 즉 terminal
-  cell origin·glyph baseline·source viewBox ink가 아니라 component가 소유한 20pt slot의 정확한
+  cell origin·glyph baseline·source viewBox ink가 아니라 component가 소유한 24pt slot의 정확한
   중심이 최종 SVG 위치를 결정한다. icon의 코드포인트·slot·hit rect는 component가 함께 소유하며,
   raw provider 문자열에는 `wide_icons`를 절대 적용하지 않는다.
 - 한 줄 control(`작업공간`/`프로젝트`/`전체`, search, group)은 completed rect의 정확한 세로 중앙에

@@ -151,6 +151,58 @@ component가 `ChromeDraw.Text.origin`을 직접 계산한다. 이는 일시적�
 글자가 하단 행으로 쏠리는 이유가 이것이다. `Button` 파일만 추가하거나 y 상수를 바꾸는 것은
 루트 원인을 고치지 못한다.
 
+#### Session Dock typography 계약
+
+Chrome 텍스트는 terminal grid의 고정폭 `ResolvedAppearance.font`와 다른 제품 표면이다.
+따라서 `ChromeTypography`는 macOS adapter가 `CTFontCreateUIFontForLanguage`로 얻는 platform UI
+primary face와 CoreText fallback chain을 별도로 resolve하고, terminal font picker가 Chrome의
+type scale·행간·글자 폭을 바꾸지 않는다. 이
+분리는 터미널을 JetBrains Mono 같은 고정폭 face로 쓰더라도 Session Dock이 레퍼런스처럼
+native UI의 비례 typography로 남게 한다. Chrome primary face는 macOS의 system UI face이고,
+bundled Jetendard는 결정적인 Lab font-review fixture에서만 선택한다. B1에서는 별도 Chrome
+font 설정 키를 만들지 않는다. 설정 표면을 열려면 theme/config 계약과 사용자 선택·fallback
+정책을 함께 별도 slice로 정의한다.
+
+`TextOptions`는 raw `font_size`나 family 문자열을 받지 않고 닫힌 `ChromeTextRole`만 받는다.
+`ChromeTypography.resolve(role, scale)`가 아래 point-equivalent token을 backing pixel로 한 번
+변환해 `ResolvedTextStyle`을 만든다. paint/component/backend가 각자 size·weight·baseline을
+다시 계산하거나, 특정 label·font의 y nudge를 두어서는 안 된다.
+
+| `ChromeTextRole` | size / line-height | weight | Session Dock 소비처 |
+| --- | --- | --- | --- |
+| `dock_heading` | 20 / 26 | semibold | `Agent 세션 기록` |
+| `supporting` | 15 / 20 | regular | 표시 개수·provenance |
+| `control` | 16 / 20 | medium | scope segment·search query/placeholder |
+| `group_heading` | 17 / 22 | semibold | workspace name·count pill label |
+| `card_heading` | 18 / 24 | semibold | session title |
+| `body` | 16 / 22 | regular | session summary·recent turn body |
+| `metadata` | 15 / 20 | regular | provider·message count·relative age·model |
+| `overline` | 14 / 20 | medium | recent turn role·section label |
+| `button_label` | 16 / 20 | semibold | resume·reveal action |
+
+각 role의 line box는 `TextLayoutArtifact`가 보관하는 font metrics와 final content rect에서
+정렬한다. 한 줄 control/button은 line box의 중심을 rect 중심에 맞추고, 두 줄 header는 line
+stack 전체를 rect 중심에 맞춘다. ink bounds는 clip과 optical diagnostics에만 쓰며 정렬 기준으로
+쓰지 않는다. 이 규칙이 작은 icon·위로 붙은 header·하단으로 쏠린 button label을 같은 원인에서
+제거한다. icon slot도 role의 line-height와 button content rect를 공유하며, text baseline을
+추측해 별도 row에 놓지 않는다.
+
+`card_heading`, `body`, `metadata`는 final measured width를 같은 artifact에서 받아 one-line
+ellipsis를 결정한다. 특히 한글·emoji·fallback glyph가 있어도 byte count/cell count로 잘라서는
+안 되며, card title의 visible text·clip·hit rect가 서로 다른 width를 쓰면 candidate snapshot을
+publish하지 않는다. 목록의 고정 row height는 이 token의 line boxes와 기존 padding을 수용하는
+layout 결과일 뿐, 작은 글자를 빈 cell로 둘러싼 대체 typography가 아니다.
+
+시각 합격 자료는 `session-dock-typography` Chrome Lab과 동일 fixture를 소비하는 AppKit capture
+두 종류다. 1920×1080 logical viewport의 480pt auto dock에서 header, segmented scope, search,
+group, 기본 row, expanded detail, 두 action을 한 화면에 보이고, JSON에는 role별 resolved face,
+size, line-height, baseline, final content rect, `did_truncate`를 기록한다. font-review는 같은
+artifact 입력으로 system UI primary와 bundled Jetendard primary를 각각 capture하여 primary와
+fallback face 목록이 실제로 다른지 기록한다. primary face가 바뀌지 않았거나 모든 role의
+font identity가 같지 않으면 "font별 capture"라고 주장하지 않는다. 두 capture 모두 GPU rich
+glyph readback과 actual AppKit path를 통과해야 하며, PR에는 원본과 2× 확인용 확대 PNG를
+`gh attach`로 함께 넣는다.
+
 다음 B1의 제안 API는 semantic component만 공개한다. `Row`/`Column`/`Flex`나 callback closure를
 Button API로 올리지 않는다. 제품 component는 내부 layout node를 조합하고, action은 기존처럼
 opaque `UiActionId`로 host에 반환한다.
@@ -181,6 +233,7 @@ max가 그 값을 밑돌면 candidate tree를 fail-close한다. 작은 창에서
 | --- | --- |
 | `src/chrome/ui/button.zig` | `ButtonProps`, 닫힌 `ButtonVariant`(`primary`, `secondary`, `ghost`, `danger`), `ButtonSize`, icon slot, semantic `UiNode.button` builder를 소유한다. archive/provider/AppKit을 import하지 않는다. |
 | `src/chrome/ui/tree.zig` | `button` kind와 immutable visual/action projection을 보관한다. Button을 `.card`로 가장하지 않으며 tree rect와 action identity를 단일 출처로 유지한다. |
+| `src/chrome/ui/typography.zig` | `ChromeTextRole`과 point-equivalent type token, platform UI face request를 소유한다. terminal `ResolvedAppearance`·SessionDock·Metal DTO를 import하지 않으며, macOS adapter가 돌려준 resolved face/fallback generation을 immutable style input으로만 받는다. |
 | `src/grapheme.zig`, `src/chrome/text_layout.zig`, `src/chrome/ui/text_artifact.zig` | `grapheme.zig`의 UAX cluster 경계만 Button artifact와 legacy cell text가 공유한다. `chrome/text_layout.zig`의 EAW cell plan은 terminal/cell Chrome 전용으로 유지한다. 새 artifact는 `ResolvedTextStyle`의 실제 font glyph advance로 CJK·ellipsis·icon slot을 측정해 final content rect·glyph run·pixel baseline/ink rect를 만든다. `horizontal_align`과 `vertical_align`은 artifact에서만 해석하며 origin을 cell row로 다시 추측하지 않는다. |
 | `src/chrome/ui/paint_style.zig` 및 `ui/paint.zig` | hover/focus/pressed/disabled precedence와 token mapping, 배경/테두리/text/icon semantic draw를 한 번만 만든다. component는 직접 `ChromeDraw`를 emit하지 않는다. |
 | rich Metal text lowering | Button text/icon의 final pixel placement를 glyph quad/raster placement로 lower한다. terminal `NativeMetalCell` path는 그대로 두며, Button 때문에 terminal grid ABI를 바꾸지 않는다. |
@@ -332,6 +385,7 @@ pub const CardOptions = struct {
 pub const TextOptions = struct {
     id: UiId,
     value: []const u8,
+    role: ChromeTextRole,
     tone: TextTone = .primary,
     paint: PaintStyle = .{},
     // ML3 TextLayout props ...
@@ -426,6 +480,7 @@ fallback face, letter spacing, line height, writing direction, Unicode grapheme 
 pub const TextOptions = struct {
     id: UiId,
     value: []const u8,
+    role: ChromeTextRole,
     wrap: TextWrap = .unicode,
     max_lines: ?u16 = null,
     overflow: TextOverflow = .clip,
@@ -447,8 +502,9 @@ pub const TextOverflow = enum { clip, ellipsis };
   ellipsis를 그리지 않고 visible glyph run을 비운다. `.clip`은 glyph run의 clip 밖 부분만
   숨기며 원문 prop은 줄이지 않는다. accessibility/copy 노출은 별도 platform contract가 생길
   때 이 원문 prop을 소비해야 하며, TextLayout이 자체적으로 문자열을 바꾸지 않는다.
-- host는 theme/config에서 `ResolvedTextStyle`(primary face·size·weight·line height·letter
-  spacing·locale/direction)을 snapshot 시작 시 한 번 정한다. `TextLayoutRequest`는 이 style,
+- host는 theme snapshot과 platform UI font resolver에서 `ResolvedTextStyle`(primary face·size·weight·line height·letter
+  spacing·locale/direction)을 snapshot 시작 시 한 번 정한다. terminal `font.*` config는 이 입력이
+  아니다. `TextLayoutRequest`는 이 style,
   원문, wrap/limit/overflow, final content width를 key로 삼고, text engine은 caller frame
   arena에 `TextLayoutArtifact`(content size, visible line range, did_truncate, shaped glyph
   runs)를 만든다. `UiRectTree`의 text entry와 Metal paint는 같은 artifact handle만 읽는다.
@@ -463,8 +519,9 @@ pub const TextOverflow = enum { clip, ellipsis };
   width가 바뀌는 모든 pass에서 line count·card height·glyph artifact가 같은 final width key로
   수렴하는 별도 solver slice를 추가한다. 그 전에는 임의의 pass 횟수나 문자열 폭 추정으로
   fallback하지 않는다.
-- font 설정·fallback registry generation·scale·available width·text props 중 하나가 바뀌면
-  해당 artifact만 invalidation한다. UI frame path는 font file I/O나 worker wait를 하지 않고,
+- ChromeTypography token·platform UI primary/fallback registry generation·scale·available width·text
+  props 중 하나가 바뀌면 해당 artifact만 invalidation한다. terminal `font.*` config 변경은 Chrome
+  artifact invalidation 원인이 아니다. UI frame path는 font file I/O나 worker wait를 하지 않고,
   이미 renderer 수명과 함께 유지되는 font identity registry 및 frame-owned shape result만
   소비한다. 제품 CoreText adapter의 thread affinity와 glyph-run ABI는 ML3에서 별도 정한다.
 

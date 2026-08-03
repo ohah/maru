@@ -204,7 +204,9 @@ Tailwind class 또는 임의 raw pixel을 직접 나열하는 API는 아니다. 
 `SessionDock`은 `ButtonMetrics.resolve(scale_milli)`와 `DockMetrics.resolve(scale_milli)`를 함께
 사용한다. `DockMetrics`는 root inset 20pt, fixed control gap 12pt, header 76pt,
 scope/search/group 48pt, three-line divider card 112pt, bounded detail 256pt, action 48pt,
-action gap 8pt와 item gap 0pt를 한 snapshot으로 제공한다. header/card/detail의 line offset은
+action gap 8pt와 item gap 0pt를 한 snapshot으로 제공한다. header utility는 72pt host-label box,
+12pt sibling gap, 20pt refresh slot, 8pt trailing inset을, group disclosure는 20pt inset/slot과 8pt
+label gap을 같은 snapshot으로 제공한다. header/card/detail의 line offset은
 `ChromeTypography` line box와 `Space`로부터 그 snapshot 안에서 계산한다. terminal cell width/height,
 terminal font, terminal line spacing은 이 함수의 입력이 아니다. `UiRectTree`, paint, hit-test,
 virtualized visible window, page/wheel step은 그 동일 metric snapshot을 공유해야 한다. 이 경계가

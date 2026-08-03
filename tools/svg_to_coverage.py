@@ -75,6 +75,7 @@ ICONS = [
     ("session_dock_search", 0xF0022, "assets/icons/session-dock-search.svg"),
     ("session_dock_chevron_down", 0xF0023, "assets/icons/session-dock-chevron-down.svg"),
     ("session_dock_chevron_right", 0xF0024, "assets/icons/session-dock-chevron-right.svg"),
+    ("session_dock_host", 0xF0025, "assets/icons/session-dock-host.svg"),
 ]
 
 

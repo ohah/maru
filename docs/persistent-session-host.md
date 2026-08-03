@@ -1110,7 +1110,13 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    count/byte arithmetic와 scalar comparison만 소유한다. `client.zig`는 Client→DTO snapshot, canonical queue mutation과 private direct
    cleanup leaf만, `client_slot.zig`는 permit/receipt/quarantine orchestration만 소유한다. boundary oracle은 neutral module의 Client/
    allocator/callback/quarantine import와 제품 callsite를 b3a에서 0으로, b3b 뒤에는 orchestration state가 `client.zig`로 새는 것을 0으로 고정한다.
-   b3a merge diff의 `client.zig`·`client_slot.zig` 변경은 0이다. b3b는 코드 작성 전에 두 파일의 신규 top-level declaration exact
+   b3a merge diff의 `client.zig`·`client_slot.zig` 변경은 0이다. b3b는 하나의 완료 표식으로 부분 구현을 숨기지 않고 내부 gate
+   **B3b-F(Client operation fence)** → **B3b-S(Client substrate)** → **B3b-O(ClientSlot orchestration)** 순서로 닫는다.
+   B3b-F는 direct Client API와 callback commit 사이의 cross-thread exclusion만 제공하고 stream/permit/binding 의미 권위를
+   복제하지 않는다. B3b-S는 Client prepare/commit과 hostile callback fixture를 완성하되 두 public transaction method의 test 밖
+   production caller를 0으로 고정한다. B3b-O에서만 `ClientSlot.commitEndedPurge`를 두 method의 exact-one caller로 열고
+   quarantine·receipt·permit 순서를 제품 경로에 배선한다. transport caller는 후속 gate가 열기 전까지 0이다.
+   b3b는 코드 작성 전에 두 파일의 신규 top-level declaration exact
    allowlist와 baseline count를 문서·boundary fixture에 먼저 고정하고, allowlist 밖 declaration이나 neutral helper의 역이동이 있으면 실패한다.
 
    b3b의 코드 작성 전 declaration baseline은 `std.zig.Ast`가 파싱한 root와 명시한 owner container의 production
@@ -1124,17 +1130,43 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    exact 고정하고 전체 count가 baseline 이상·baseline+allowlist 이하인지 검사한다. 따라서 기존 declaration 삭제/rename,
    visibility/kind/modifier 변경, 허용 이름 추가와 기존 항목 삭제를 맞바꾸는 우회도 실패한다.
 
-   - `client.zig` top-level 신규 exact allowlist는 import `ended_purge_transaction`,
-     `PreparedEndedPurgeCommit`, `EndedPurgeCommitError`, `EndedPurgeClientCommitOutcome` 네 개뿐이다. lifecycle, queue plan/cursor와
+   - B3b-F의 `client.zig` top-level 신규 exact allowlist는 `ClientOperationFence`와 Client를 역참조하지 않는
+     `generationAllocatorCallbackActive`다. 이 타입은 아래 packed atomic state와
+     final-address identity만 소유하며 permit kind/binding/receipt/quarantine를 알지 못한다. `Client`에는 nullable non-owning
+     `operation_fence: ?*ClientOperationFence = null`과 immutable mirror
+     `operation_fence_generation: u64 = 0` 두 field, private `beginPublicMutation`, `endPublicMutation` 두 method와 아래에 열거한
+     public fence wrapper만 허용한다. `ClientNode`에는 final-address `operation_fence: ClientOperationFence` 하나를 추가한다.
+     move 전 standalone Client와 moved-from tombstone은 pointer null/generation 0이고 heap node publication의 no-fail suffix에서만
+     fence init 뒤 destination Client에 bind한다. registry가 node 수명을 소유하는 동안의 Client value copy/move/rebind, stale
+     generation과 fork child는 graph/fd/allocator read 및 atomic 접근 전에 거부한다. registry가 node를 해제한 뒤의 raw Client/fence
+     pointer 사용은 일반적인 use-after-free이며 이 fence 계약의 입력이 아니다. `ClientSlot.tryDeinit`은 Client exclusive teardown이
+     성공하기 전에는 registry/node를 해제하지 않아 제품 경로에서 그 입력을 만들지 않는다.
+   - B3b-S의 `client.zig` top-level 신규 exact allowlist는 import `ended_purge_transaction`,
+     `PreparedEndedPurgeCommit`, `EndedPurgeCommitError`, `EndedPurgeClientCommitOutcome` 네 개다. lifecycle, queue plan/cursor와
      cleanup state는 `PreparedEndedPurgeCommit` nested declaration으로 둔다. `Client` 신규 method exact allowlist는 public
      `prepareEndedPurgeCommit`, `commitEndedPurgePrepared`와 private
-     `tombstoneEndedPurgeOwnedGraph`, `publishEndedPurgeNoFreePoison` 네 개다. private mutation leaf는
+     `tombstoneEndedPurgeOwnedGraph`, `publishEndedPurgeNoFreePoison`, `endedPurgeCompleteOwnerSeal`,
+     `endedPurgePostValidate`, `publishEndedPurgeCompaction`, `cleanupEndedPurgeTargetDirect` 여덟 개다. private mutation leaf는
      `commitEndedPurgePrepared`의 no-fail suffix 외 production caller가 0이어야 한다. 기존 `ClientOwnership`에는
      `quarantined_no_free` arm만 추가한다.
    - `client_slot.zig` top-level 신규 exact allowlist는 import `ended_purge_quarantine`, process singleton
      `ended_purge_quarantine_registry`, PID bootstrap latch `process_runtime_pid` 세 개뿐이다. `ClientSlot` nested declaration은
      `ProcessRuntimeInitError`, `EndedPurgeCommitError`, `EndedPurgeResult`, method `initializeProcessRuntime`, `commitEndedPurge`만, 기존
-     `EndedPurgePreparation`에는 lifecycle `consumed`와 method `tombstoneForCommit`만 허용한다.
+     `EndedPurgePreparation`에는 lifecycle `consumed`와 method `tombstoneForCommit`만 허용한다. B3b-F가 먼저 추가하는 private
+     `RegisteredClientOperation{node}`와 `beginRegisteredClientOperation|endRegisteredClientOperation`은 process registry lock 아래
+     `entry.node_addr == self.current`를 역참조 전에 확인하고 Client shared fence를 잡은 뒤, registry가 선택한 exact node capability로만
+     release하는 계약이다. binding/stream-permit admission과 batch release aggregate 외 caller가 0이다.
+     B3b-F private allowlist의 `ExclusiveTeardownReservation{registry_entry,node}`와 다른 exact pair인
+     `beginRegisteredExclusiveTeardown|abortRegisteredExclusiveTeardown`이 teardown reservation과 pre-callback rollback을 소유한다.
+     teardown은 이 registered-exclusive 진입으로 PID·operation-thread를 mutex 전에 확인하고, process registry mutex를 잡은 채 exact
+     ready node identity를 검증한 다음 Client exclusive fence를 획득한다. cleanup/batch/accounting/pin/active-operation 같은 mutable node
+     graph는 exclusive 성공 전에는 읽지 않는다. preflight의 모든 typed early return은 callback/mutation 전 `abortExclusive`로
+     exclusive와 direct-Client 거부가 남긴 intrusion을 함께 지우고, Client teardown
+     commit은 같은 exclusive를 terminal로 만든 뒤 slot registry·node 파괴를 no-fail suffix로 끝낸다. shared/exclusive의 락 순서는 모두
+     `process registry mutex → Client fence`이고 fence 획득은 대기하지 않는다.
+     일반 stream-operation permit은 allocator callback TLS를 Client/node 역참조 없이 fence 진입 전에 검사한다. 예상된 allocator callback
+     재진입은 `AdminBusy`만 반환하고 exclusive intrusion을 기록하지 않는다. fence-first intrusion이 필요한 `poison` 같은 fail-stop 경로와
+     일반 admission 규칙을 혼합하지 않는다.
    - 새 `ended_purge_quarantine.zig`의 public top-level exact API는 `max_ended_purge_quarantine_bytes`, `Error`, `Reservation`, `Registry` 네 개다.
      이 모듈은 std 외 import, Client/allocator/callback/pointer payload를 갖지 않고 scalar process/node/operation identity와 bytes만 받는다.
      `Error`는 `InvalidOwner|InvalidState|ArithmeticOverflow|CapacityExceeded`다. final-address `Reservation`은 nested
@@ -1160,10 +1192,17 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    `self_addr`, `client_addr`, `scratch_addr`, `inventory_addr`, `target_stream`, `captured_fd`,
    `complete_owned_extent_bytes`, `complete_owner_seal`, `pre_callback_survivor_seal`, batch/stream/event/partial 네 pointer-free
    `QueuePlan`, queue별 monotonic cleanup ordinal과 lifecycle이다. cursor 자체나 slice/pointer는 저장하지 않는다.
+   canonical pristine default는 address/stream/extent/ordinal 0, `captured_fd=-1`, 두 digest zero, 네 plan `.pristine`,
+   lifecycle `.pristine`이다. prepare 성공의 마지막 whole-value publish 전에는 out bytes를 바꾸지 않는다.
    payload/allocator authority는 복제하지 않고 immutable `EndedPurgeScratch` descriptor가 계속 소유한다. `EndedPurgeScratch`의 기존 exact
    13 fields(`batches,stream,events,batch_targets,stream_targets,event_targets,partial,partial_target,parser_backing,batch_backing,
    stream_backing,event_backing,range_order`)에 nested `PendingOutboundDescriptor`와 fields `build_id`, `lifecycle`, `pending_outbound`만
-   추가하고 새 scratch size를
+   추가한다. nested `Lifecycle=enum(u8){empty,inventory_prepared,commit_frozen,consumed}`이며 `build_id`는
+   `ExternalArrayDescriptor` zero default와 `capacity==len` exact-owned invariant, `lifecycle`은 `.empty`,
+   `pending_outbound`는 `?PendingOutboundDescriptor = null`이다. `PendingOutboundDescriptor` 네 field는 모두 zero default다.
+   inventory 성공은 `empty→inventory_prepared`, abort는 `inventory_prepared→consumed`, commit preparation 성공은 caller-owned
+   publication으로 `inventory_prepared→commit_frozen`, commit 진입은 첫 callback 전 `commit_frozen→consumed`를 수행한다.
+   precommit 실패는 Client owner graph mutation/callback/free 0이고 scratch lifecycle과 out bytes도 보존한다. 새 scratch size를
    compile-time 512 KiB 상한과 boundary fixture에 함께 고정한다. `PreparedEndedPurgeInventory.quarantine_bytes`는 b3b에서
    `demux_owned_extent_bytes`로 rename해 demux queue/list/partial의 중간 subtotal만 뜻하게 한다. 이 subtotal은 cap admission 권한이
    아니며 `PreparedEndedPurgeCommit.complete_owned_extent_bytes`만 parser/screen/event/queue backing과 optional outbound를 모두 더한
@@ -1183,6 +1222,68 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    QuarantineUnavailable}`와 `EndedPurgeResult = enum{purged}`다. `prepareEndedPurgeCommit`은 prepared output을 받아 typed precommit
    error만 반환하고, `commitEndedPurgePrepared`는 receipt 뒤 no-fail outcome만 반환한다. `ClientSlot.commitEndedPurge`는 정상과
    postcallback drift를 모두 `.purged`로 정규화하고 poison/quarantine 여부는 Client terminal state와 진단 reason에서만 관측한다.
+
+   public signature는 다음으로 고정한다.
+
+   ```zig
+   pub fn prepareEndedPurgeCommit(
+       self: *Client,
+       target_stream: u64,
+       operation_generation: u64,
+       scratch: *EndedPurgeScratch,
+       inventory: *const PreparedEndedPurgeInventory,
+       out: *PreparedEndedPurgeCommit,
+   ) EndedPurgeCommitError!void
+
+   pub fn commitEndedPurgePrepared(
+       self: *Client,
+       operation_generation: u64,
+       scratch: *EndedPurgeScratch,
+       inventory: *const PreparedEndedPurgeInventory,
+       prepared: *PreparedEndedPurgeCommit,
+   ) EndedPurgeClientCommitOutcome
+   ```
+
+   PID와 final-address Client/fence identity는 bound `ClientOperationFence`가 내부에서 검증하며 caller scalar를 신뢰하지 않는다.
+   B3b-S에서는 두 method의 test 밖 production caller가 0이고 B3b-O에서만 `ClientSlot.commitEndedPurge`가 각각 exact once 호출한다.
+
+   `ClientOperationFence`는 `owner_process_id`, `self_addr`, `client_addr`, `slot_incarnation`, `node_incarnation`,
+   `fence_generation`의 immutable identity와 `std.atomic.Value(u64)` 하나를 가진다. state의 low 31 bit는 public mutation
+   inflight count, bit 61은 absorbing terminal, bit 62는 exclusive 동안 거부된 intrusion, bit 63은 commit exclusive이며
+   나머지 reserved bit는 항상 0이다. bound Client의 post-publication product mutating entry는 getpid와 final-address/generation을
+   **atomic load/CAS 전에** 검증하고
+   open state에서 count를 CAS 증가한 뒤 defer에서 exact decrement한다. commit exclusive는 state exact 0에서만
+   `0→exclusive` CAS로 잡으며 기다리거나 spin하지 않는다. shared가 먼저면 commit은 mutation/callback 0의 Busy, exclusive가
+   먼저면 새 public mutation은 Client graph/fd/allocator를 읽지 않고 AdminBusy/기존 busy result/void no-op으로 끝나며 intrusion만
+   atomic OR한다. `tryDeinit`은 false, `deinit`은 no-op, `poison`은 Client를 바꾸지 않고 intrusion만 기록한다. commit의 private
+   no-fail leaf는 public API를 재호출하지 않는다. clean이고 intrusion/fd/owner drift가 없을 때만 exclusive를 0으로 release하고,
+   drift는 terminal bit를 publish한 뒤 quarantine suffix로 간다. TLS allocator latch는 same-thread 진단일 뿐 concurrency 권위가 아니다.
+   fence의 exact field order는 `{self_addr,client_addr,owner_process_id,slot_incarnation,node_incarnation,fence_generation,state}`이고
+   상수는 `{shared_count_mask,reserved_mask,terminal_bit,intrusion_bit,exclusive_bit}`다. exact method allowlist는
+   `initInPlace|tryEnterShared|leaveShared|tryAcquireExclusive|intruded|abortExclusive|releaseExclusiveClean|
+   commitExclusiveTerminal|identityMatches`다. `abortExclusive`는 callback/mutation 전 teardown preflight가 실패했을 때만
+   exclusive와 거부된 intrusion bit를 함께 0으로 되돌리며 ended-purge receipt tombstone 뒤에는 caller가 0이다.
+   B3b-F는 실제 post-publication critical entry의 fence-before-TLS/body 순서와 ClientSlot aggregate caller를 executable source oracle로
+   먼저 고정한다. 모든 기존 public API를 (1) post-publication product read/mutation entry, (2) publication 전 standalone/external-pump
+   construction API, (3) ClientSlot permit/receipt가 단독 호출하는 authority-bearing unchecked suffix, (4) immutable/atomic-only
+   observation으로 나누는 closed receiver manifest는 **B3b-S hostile callback fixture를 열기 전 선행 gate**다. B3b-F declaration
+   baseline은 새 public surface를 막지만 기존 body/caller drift까지 증명하지는 않으므로 manifest 완료를 대체하지 않는다. (2)는 bound
+   Client에서 거부하거나 product caller 0, (3)은 exact caller source oracle과 ClientSlot 상위 permit으로 닫는다. 단순 `pub` 표기만으로
+   (2)/(3)/(4)를 concurrent product entry에서 면제하지 않는다.
+   `Client`의 public wrapper는 `bindOperationFence|tryAcquireEndedPurgeExclusive|endedPurgeFenceIntruded|
+   beginClientSlotOperation|endClientSlotOperation|releaseEndedPurgeExclusiveClean|
+   commitEndedPurgeExclusiveTerminal|tryAcquireClientSlotTeardownExclusive|
+   abortClientSlotTeardownExclusive|tryDeinitClientSlotExclusiveHeld`, private wrapper는
+   `beginPublicMutation|endPublicMutation|prepareDeinitGraph|finishDeinitGraph`만 허용한다. fence init과 bind의 test 밖 caller는
+   `ClientSlot.initInPlace` no-fail publication suffix exact one이다. ended-purge exclusive wrapper의 B3b-F production caller는 0이고
+   B3b-O caller는 `ClientSlot.commitEndedPurge` exact one이다. ClientSlot teardown 전용 세 wrapper는 `ClientSlot.tryDeinit`에서만
+   각각 exact once 호출한다.
+
+   `complete_owner_seal`은 `captured_fd` 숫자뿐 아니라 callback 전 `fstat`의 `{st_dev,st_ino,st_mode&S_IFMT}`를 domain
+   `maru.ended-purge.complete-owner.v1`에 포함한다. post-validation은 pointer/len/cap/fd scalar를 먼저 비교하고 안전할 때만
+   current fd를 정확히 한 번 `fstat`해 seal을 재계산한다. EBADF 또는 identity 불일치는 drift이고 captured/current fd를 close하거나
+   write하지 않는다. 같은 번호로 다른 socket/file을 `dup2`한 ABA는 반드시 drift이며, 같은 underlying open-file description을
+   복제해 identity가 동일한 경우만 같은 owner로 취급한다.
 
    `ClientSlot.initializeProcessRuntime`은 macOS `AppSession.init`의 첫 session-host 동작이며 PTY/session-host helper를 포함한
    fork 가능 작업보다 먼저 exact once 호출된다. 같은 PID의 반복 호출은 idempotent이고, 다른 PID에서 상속한 호출은

@@ -13,6 +13,12 @@ const builtin = @import("builtin");
 const c = std.c;
 const posix = std.posix;
 threadlocal var checked_allocator_owner_addr: usize = 0;
+
+/// ClientSlot admission must reject an expected allocator callback before it dereferences the
+/// heap-pinned node or enters its operation fence. This TLS query intentionally needs no Client.
+pub fn generationAllocatorCallbackActive() bool {
+    return checked_allocator_owner_addr != 0;
+}
 const protocol = @import("protocol.zig");
 const compatibility = @import("compatibility.zig");
 const runtime_event_reducer = @import("runtime_event_reducer.zig");
@@ -4601,6 +4607,482 @@ pub fn commitExternalAdoptionTakeFrozenCleanupUnchecked(
     take.commitFrozenCleanupImpl(prepared, out);
 }
 
+/// Heap-pinned generation Client의 public mutation과 ended-purge commit callback을 직렬화한다.
+///
+/// Stream/attachment 의미 권위는 계속 ClientSlot의 StreamOperationPermit가 소유한다. 이 작은
+/// substrate는 direct Client API가 다른 thread에서 callback cleanup과 겹치는 것만 막는다.
+pub const ClientOperationFence = struct {
+    const shared_count_mask: u64 = (@as(u64, 1) << 31) - 1;
+    const reserved_mask: u64 = ((@as(u64, 1) << 61) - 1) & ~shared_count_mask;
+    const terminal_bit: u64 = @as(u64, 1) << 61;
+    const intrusion_bit: u64 = @as(u64, 1) << 62;
+    const exclusive_bit: u64 = @as(u64, 1) << 63;
+
+    self_addr: usize = 0,
+    client_addr: usize = 0,
+    owner_process_id: u32 = 0,
+    slot_incarnation: u64 = 0,
+    node_incarnation: u64 = 0,
+    fence_generation: u64 = 0,
+    state: std.atomic.Value(u64) = .init(0),
+
+    pub fn initInPlace(
+        self: *ClientOperationFence,
+        client_addr: usize,
+        owner_process_id: u32,
+        slot_incarnation: u64,
+        node_incarnation: u64,
+        fence_generation: u64,
+    ) void {
+        if (client_addr == 0 or owner_process_id == 0 or slot_incarnation == 0 or
+            node_incarnation == 0 or fence_generation == 0)
+            @panic("invalid Client operation fence identity");
+        self.* = .{
+            .self_addr = @intFromPtr(self),
+            .client_addr = client_addr,
+            .owner_process_id = owner_process_id,
+            .slot_incarnation = slot_incarnation,
+            .node_incarnation = node_incarnation,
+            .fence_generation = fence_generation,
+        };
+    }
+
+    fn tryEnterShared(
+        self: *ClientOperationFence,
+        client_addr: usize,
+        fence_generation: u64,
+    ) error{ InvalidOwner, InvalidState, AdminBusy, CounterOverflow }!void {
+        if (!self.identityMatches(client_addr, fence_generation)) return error.InvalidOwner;
+        var observed = self.state.load(.acquire);
+        while (true) {
+            if (observed & reserved_mask != 0 or observed & terminal_bit != 0)
+                return error.InvalidState;
+            if (observed & exclusive_bit != 0) {
+                _ = self.state.fetchOr(intrusion_bit, .acq_rel);
+                return error.AdminBusy;
+            }
+            const count = observed & shared_count_mask;
+            if (count == shared_count_mask) return error.CounterOverflow;
+            if (self.state.cmpxchgWeak(observed, observed + 1, .acq_rel, .acquire)) |actual| {
+                observed = actual;
+                continue;
+            }
+            return;
+        }
+    }
+
+    fn leaveShared(
+        self: *ClientOperationFence,
+        client_addr: usize,
+        fence_generation: u64,
+    ) bool {
+        if (!self.identityMatches(client_addr, fence_generation)) return false;
+        var observed = self.state.load(.acquire);
+        while (true) {
+            if (observed & ~shared_count_mask != 0 or observed & shared_count_mask == 0)
+                return false;
+            if (self.state.cmpxchgWeak(observed, observed - 1, .acq_rel, .acquire)) |actual| {
+                observed = actual;
+                continue;
+            }
+            return true;
+        }
+    }
+
+    fn tryAcquireExclusive(
+        self: *ClientOperationFence,
+        client_addr: usize,
+        fence_generation: u64,
+    ) error{ InvalidOwner, InvalidState, AdminBusy }!void {
+        if (!self.identityMatches(client_addr, fence_generation)) return error.InvalidOwner;
+        if (self.state.cmpxchgStrong(0, exclusive_bit, .acq_rel, .acquire)) |observed| {
+            if (observed & (reserved_mask | terminal_bit) != 0) return error.InvalidState;
+            if (observed & exclusive_bit != 0)
+                _ = self.state.fetchOr(intrusion_bit, .acq_rel);
+            return error.AdminBusy;
+        }
+    }
+
+    fn intruded(
+        self: *const ClientOperationFence,
+        client_addr: usize,
+        fence_generation: u64,
+    ) bool {
+        if (!self.identityMatches(client_addr, fence_generation)) return true;
+        const observed = self.state.load(.acquire);
+        return observed & exclusive_bit == 0 or observed & intrusion_bit != 0;
+    }
+
+    fn abortExclusive(
+        self: *ClientOperationFence,
+        client_addr: usize,
+        fence_generation: u64,
+    ) bool {
+        if (!self.identityMatches(client_addr, fence_generation)) return false;
+        var observed = self.state.load(.acquire);
+        while (true) {
+            if (observed & exclusive_bit == 0 or observed & terminal_bit != 0 or
+                observed & shared_count_mask != 0 or observed & reserved_mask != 0)
+                return false;
+            if (self.state.cmpxchgWeak(observed, 0, .acq_rel, .acquire)) |actual| {
+                observed = actual;
+                continue;
+            }
+            return true;
+        }
+    }
+
+    fn releaseExclusiveClean(
+        self: *ClientOperationFence,
+        client_addr: usize,
+        fence_generation: u64,
+    ) bool {
+        if (!self.identityMatches(client_addr, fence_generation)) return false;
+        return self.state.cmpxchgStrong(exclusive_bit, 0, .acq_rel, .acquire) == null;
+    }
+
+    fn commitExclusiveTerminal(
+        self: *ClientOperationFence,
+        client_addr: usize,
+        fence_generation: u64,
+    ) bool {
+        if (!self.identityMatches(client_addr, fence_generation)) return false;
+        var observed = self.state.load(.acquire);
+        while (true) {
+            if (observed & exclusive_bit == 0 or observed & terminal_bit != 0 or
+                observed & shared_count_mask != 0 or observed & reserved_mask != 0)
+                return false;
+            const terminal = observed | terminal_bit;
+            if (self.state.cmpxchgWeak(observed, terminal, .acq_rel, .acquire)) |actual| {
+                observed = actual;
+                continue;
+            }
+            return true;
+        }
+    }
+
+    fn identityMatches(
+        self: *const ClientOperationFence,
+        client_addr: usize,
+        fence_generation: u64,
+    ) bool {
+        const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
+        if (pid == 0 or self.owner_process_id != pid) return false;
+        return self.self_addr == @intFromPtr(self) and self.client_addr == client_addr and
+            self.slot_incarnation != 0 and self.node_incarnation != 0 and
+            self.fence_generation != 0 and self.fence_generation == fence_generation;
+    }
+};
+
+test "CR3a B3b-F operation fence linearizes shared and exclusive ownership" {
+    var client_storage: u8 = 0;
+    var fence: ClientOperationFence = undefined;
+    const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
+    fence.initInPlace(@intFromPtr(&client_storage), pid, 11, 13, 17);
+
+    try fence.tryEnterShared(@intFromPtr(&client_storage), 17);
+    try std.testing.expectError(
+        error.AdminBusy,
+        fence.tryAcquireExclusive(@intFromPtr(&client_storage), 17),
+    );
+    try std.testing.expect(fence.leaveShared(@intFromPtr(&client_storage), 17));
+
+    try fence.tryAcquireExclusive(@intFromPtr(&client_storage), 17);
+    try std.testing.expectError(
+        error.AdminBusy,
+        fence.tryEnterShared(@intFromPtr(&client_storage), 17),
+    );
+    try std.testing.expect(fence.intruded(@intFromPtr(&client_storage), 17));
+    try std.testing.expect(!fence.releaseExclusiveClean(@intFromPtr(&client_storage), 17));
+    try std.testing.expect(fence.commitExclusiveTerminal(@intFromPtr(&client_storage), 17));
+    try std.testing.expectError(
+        error.InvalidState,
+        fence.tryEnterShared(@intFromPtr(&client_storage), 17),
+    );
+}
+
+test "CR3a B3b-F operation fence rejects copied and stale identities before state mutation" {
+    var client_storage: u8 = 0;
+    var fence: ClientOperationFence = undefined;
+    const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
+    fence.initInPlace(@intFromPtr(&client_storage), pid, 19, 23, 29);
+    var copied = fence;
+
+    try std.testing.expectError(
+        error.InvalidOwner,
+        copied.tryEnterShared(@intFromPtr(&client_storage), 29),
+    );
+    try std.testing.expectError(
+        error.InvalidOwner,
+        fence.tryEnterShared(@intFromPtr(&client_storage), 31),
+    );
+    try std.testing.expectEqual(@as(u64, 0), fence.state.load(.acquire));
+}
+
+test "CR3a B3b-F nested count overflow and reserved states fail closed" {
+    var client_storage: u8 = 0;
+    var fence: ClientOperationFence = undefined;
+    const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
+    fence.initInPlace(@intFromPtr(&client_storage), pid, 32, 33, 34);
+
+    try fence.tryEnterShared(@intFromPtr(&client_storage), 34);
+    try fence.tryEnterShared(@intFromPtr(&client_storage), 34);
+    try std.testing.expectEqual(@as(u64, 2), fence.state.load(.acquire));
+    try std.testing.expect(fence.leaveShared(@intFromPtr(&client_storage), 34));
+    try std.testing.expect(fence.leaveShared(@intFromPtr(&client_storage), 34));
+
+    fence.state.store(ClientOperationFence.shared_count_mask, .release);
+    try std.testing.expectError(
+        error.CounterOverflow,
+        fence.tryEnterShared(@intFromPtr(&client_storage), 34),
+    );
+    fence.state.store(@as(u64, 1) << 31, .release);
+    try std.testing.expectError(
+        error.InvalidState,
+        fence.tryEnterShared(@intFromPtr(&client_storage), 34),
+    );
+    fence.state.store(0, .release);
+}
+
+test "CR3a B3b-F Client rejects rebind and same-address generation ABA" {
+    var client: Client = .{
+        .allocator = std.testing.allocator,
+        .fd = -1,
+        .host_id = 35,
+        .parser = framing.FrameParser.init(std.testing.allocator),
+    };
+    defer client.parser.deinit();
+    var fence: ClientOperationFence = undefined;
+    const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
+    fence.initInPlace(@intFromPtr(&client), pid, 36, 37, 38);
+    try std.testing.expect(client.bindOperationFence(&fence, 38));
+    try std.testing.expect(!client.bindOperationFence(&fence, 38));
+
+    // Reincarnating the same storage cannot make the old Client generation authoritative.
+    fence.initInPlace(@intFromPtr(&client), pid, 39, 40, 41);
+    try std.testing.expectError(error.ConnectionClosed, client.call("host.info", null));
+    try std.testing.expectEqual(@as(u64, 0), fence.state.load(.acquire));
+}
+
+test "CR3a B3b-F exclusive fence rejects public Client mutation before graph access" {
+    var client: Client = .{
+        .allocator = std.testing.allocator,
+        .fd = -1,
+        .host_id = 37,
+        .parser = framing.FrameParser.init(std.testing.allocator),
+    };
+    var fence: ClientOperationFence = undefined;
+    const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
+    fence.initInPlace(@intFromPtr(&client), pid, 41, 43, 47);
+    try std.testing.expect(client.bindOperationFence(&fence, 47));
+    try client.tryAcquireEndedPurgeExclusive();
+
+    try std.testing.expectError(error.AdminBusy, client.call("host.info", null));
+    try std.testing.expect(!client.tryDeinit());
+    client.poison(.local_invariant_violation);
+    try std.testing.expect(!client.unusable);
+    try std.testing.expect(client.first_poison_reason == null);
+    try std.testing.expect(client.endedPurgeFenceIntruded());
+    try std.testing.expect(client.commitEndedPurgeExclusiveTerminal());
+
+    // Terminal fence intentionally makes ordinary teardown a no-op. This fixture owns an empty
+    // parser and no fd, so it can release the inert parser storage directly without weakening the
+    // product no-dereference rule.
+    client.parser.deinit();
+}
+
+test "CR3a B3b-F exclusive fence rejects a foreign thread Client mutation" {
+    const Runner = struct {
+        fn run(client: *Client, rejected: *std.atomic.Value(bool)) void {
+            const rpc_rejected = if (client.call("host.info", null)) |_| false else |err| err == error.AdminBusy;
+            const deinit_rejected = !client.tryDeinit();
+            client.poison(.local_invariant_violation);
+            rejected.store(rpc_rejected and deinit_rejected, .release);
+        }
+    };
+
+    var client: Client = .{
+        .allocator = std.testing.allocator,
+        .fd = -1,
+        .host_id = 53,
+        .parser = framing.FrameParser.init(std.testing.allocator),
+    };
+    var fence: ClientOperationFence = undefined;
+    const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
+    fence.initInPlace(@intFromPtr(&client), pid, 59, 61, 67);
+    try std.testing.expect(client.bindOperationFence(&fence, 67));
+    try client.tryAcquireEndedPurgeExclusive();
+
+    var rejected = std.atomic.Value(bool).init(false);
+    const thread = try std.Thread.spawn(.{}, Runner.run, .{ &client, &rejected });
+    thread.join();
+    try std.testing.expect(rejected.load(.acquire));
+    try std.testing.expect(!client.unusable);
+    try std.testing.expect(client.first_poison_reason == null);
+    try std.testing.expect(client.endedPurgeFenceIntruded());
+    try std.testing.expect(client.commitEndedPurgeExclusiveTerminal());
+    client.parser.deinit();
+}
+
+test "CR3a B3b-F allocator reentry poison defers to exclusive fence" {
+    var client: Client = .{
+        .allocator = std.testing.allocator,
+        .fd = -1,
+        .host_id = 69,
+        .parser = framing.FrameParser.init(std.testing.allocator),
+    };
+    var fence: ClientOperationFence = undefined;
+    const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
+    fence.initInPlace(@intFromPtr(&client), pid, 70, 71, 72);
+    try std.testing.expect(client.bindOperationFence(&fence, 72));
+    try std.testing.expect(client.enterGenerationAllocatorCallback());
+    defer client.leaveGenerationAllocatorCallbackUnchecked();
+    try client.tryAcquireEndedPurgeExclusive();
+
+    client.poison(.local_invariant_violation);
+    try std.testing.expect(!client.unusable);
+    try std.testing.expect(client.first_poison_reason == null);
+    try std.testing.expect(client.endedPurgeFenceIntruded());
+    try std.testing.expect(client.commitEndedPurgeExclusiveTerminal());
+    client.parser.deinit();
+}
+
+test "CR3a B3b-F deinit-only reentry records exclusive intrusion" {
+    var client: Client = .{
+        .allocator = std.testing.allocator,
+        .fd = -1,
+        .host_id = 73,
+        .parser = framing.FrameParser.init(std.testing.allocator),
+    };
+    var fence: ClientOperationFence = undefined;
+    const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
+    fence.initInPlace(@intFromPtr(&client), pid, 74, 75, 76);
+    try std.testing.expect(client.bindOperationFence(&fence, 76));
+    try client.tryAcquireEndedPurgeExclusive();
+    try std.testing.expect(client.enterGenerationAllocatorCallback());
+    defer client.leaveGenerationAllocatorCallbackUnchecked();
+
+    try std.testing.expect(!client.tryDeinit());
+    try std.testing.expect(client.endedPurgeFenceIntruded());
+    try std.testing.expect(client.commitEndedPurgeExclusiveTerminal());
+    client.parser.deinit();
+}
+
+test "CR3a B3b-F foreign shared entry makes exclusive commit fail without waiting" {
+    const Runner = struct {
+        fn run(
+            fence: *ClientOperationFence,
+            client_addr: usize,
+            entered: *std.atomic.Value(bool),
+            release: *std.atomic.Value(bool),
+            released: *std.atomic.Value(bool),
+        ) void {
+            fence.tryEnterShared(client_addr, 73) catch return;
+            entered.store(true, .release);
+            while (!release.load(.acquire)) std.atomic.spinLoopHint();
+            released.store(fence.leaveShared(client_addr, 73), .release);
+        }
+    };
+
+    var client_storage: u8 = 0;
+    var fence: ClientOperationFence = undefined;
+    const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
+    fence.initInPlace(@intFromPtr(&client_storage), pid, 71, 72, 73);
+    var entered = std.atomic.Value(bool).init(false);
+    var release = std.atomic.Value(bool).init(false);
+    var released = std.atomic.Value(bool).init(false);
+    const thread = try std.Thread.spawn(.{}, Runner.run, .{
+        &fence,
+        @intFromPtr(&client_storage),
+        &entered,
+        &release,
+        &released,
+    });
+    while (!entered.load(.acquire)) std.atomic.spinLoopHint();
+    try std.testing.expectError(
+        error.AdminBusy,
+        fence.tryAcquireExclusive(@intFromPtr(&client_storage), 73),
+    );
+    release.store(true, .release);
+    thread.join();
+    try std.testing.expect(released.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 0), fence.state.load(.acquire));
+}
+
+test "CR3a B3b-F deinit retries only after a shared operation leaves" {
+    var client: Client = .{
+        .allocator = std.testing.allocator,
+        .fd = -1,
+        .host_id = 74,
+        .parser = framing.FrameParser.init(std.testing.allocator),
+    };
+    var fence: ClientOperationFence = undefined;
+    const pid: u32 = if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
+    fence.initInPlace(@intFromPtr(&client), pid, 75, 76, 77);
+    try std.testing.expect(client.bindOperationFence(&fence, 77));
+
+    try fence.tryEnterShared(@intFromPtr(&client), 77);
+    try std.testing.expect(!client.tryDeinit());
+    try std.testing.expect(fence.leaveShared(@intFromPtr(&client), 77));
+    try std.testing.expect(client.tryDeinit());
+    try std.testing.expectEqual(
+        ClientOperationFence.exclusive_bit | ClientOperationFence.terminal_bit,
+        fence.state.load(.acquire),
+    );
+}
+
+test "CR3a B3b-F fork child rejects an inherited fence before atomic state access" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ChildCleanup = struct {
+        fn terminateAndReap(child_pid: c.pid_t) void {
+            _ = c.kill(child_pid, c.SIG.KILL);
+            var child_status: c_int = 0;
+            while (true) {
+                const waited = c.waitpid(child_pid, &child_status, 0);
+                if (waited == child_pid or
+                    (waited < 0 and posix.errno(waited) == .CHILD)) return;
+                if (waited < 0 and posix.errno(waited) == .INTR) continue;
+                return;
+            }
+        }
+    };
+    var client_storage: u8 = 0;
+    var fence: ClientOperationFence = undefined;
+    const pid: u32 = @intCast(c.getpid());
+    fence.initInPlace(@intFromPtr(&client_storage), pid, 79, 83, 89);
+    try fence.tryAcquireExclusive(@intFromPtr(&client_storage), 89);
+
+    const child = c.fork();
+    try std.testing.expect(child >= 0);
+    if (child == 0) {
+        const rejected = if (fence.tryEnterShared(@intFromPtr(&client_storage), 89)) |_| false else |err| err == error.InvalidOwner;
+        c._exit(if (rejected) 0 else 1);
+    }
+    var child_live = true;
+    defer {
+        if (child_live) ChildCleanup.terminateAndReap(child);
+    }
+    var status: c_int = 0;
+    var attempts: usize = 0;
+    while (attempts < 2_000) : (attempts += 1) {
+        const waited = c.waitpid(child, &status, c.W.NOHANG);
+        if (waited == child) {
+            child_live = false;
+            break;
+        }
+        if (waited < 0 and posix.errno(waited) != .INTR)
+            return error.TestUnexpectedResult;
+        var delay_fd = c.pollfd{ .fd = -1, .events = 0, .revents = 0 };
+        _ = c.poll(@ptrCast(&delay_fd), 0, 1);
+    }
+    try std.testing.expect(!child_live);
+    const wait_status: u32 = @bitCast(status);
+    try std.testing.expect(c.W.IFEXITED(wait_status));
+    try std.testing.expectEqual(@as(u8, 0), c.W.EXITSTATUS(wait_status));
+    try std.testing.expectEqual(ClientOperationFence.exclusive_bit, fence.state.load(.acquire));
+    try std.testing.expect(fence.releaseExclusiveClean(@intFromPtr(&client_storage), 89));
+}
+
 pub const Client = struct {
     allocator: std.mem.Allocator,
     fd: c.fd_t,
@@ -4701,6 +5183,8 @@ pub const Client = struct {
     // 관점에서 accepted이므로 재전송하지 않는다. 한 슬롯 + RemoteRuntime의 stream별 sticky intent로 메모리가 고정 상한이다.
     pending_outbound: ?PendingOutbound = null,
     io_mode: client_external_mode.Mode = .blocking,
+    operation_fence: ?*ClientOperationFence = null,
+    operation_fence_generation: u64 = 0,
 
     const PendingOutbound = struct {
         frame: []u8,
@@ -4757,7 +5241,8 @@ pub const Client = struct {
     }
 
     pub fn requireAdminRuntimeEnd(self: *Client) ClientError!void {
-        try self.requireBlockingMode();
+        const operation_fence_held = try self.requireBlockingMode();
+        defer if (operation_fence_held) self.endPublicMutation();
         if (self.admin_runtime_end_v1) return;
         self.poison(.capability_incompatible);
         return error.IncompatibleVersion;
@@ -4969,15 +5454,53 @@ pub const Client = struct {
     }
 
     pub fn tryDeinit(self: *Client) bool {
+        const operation_fence = self.operation_fence;
+        var operation_fence_exclusive = false;
+        if (operation_fence) |fence| {
+            fence.tryAcquireExclusive(@intFromPtr(self), self.operation_fence_generation) catch
+                return false;
+            operation_fence_exclusive = true;
+        } else if (self.operation_fence_generation != 0) return false;
+        defer if (operation_fence_exclusive) {
+            const fence = operation_fence.?;
+            if (!fence.abortExclusive(@intFromPtr(self), self.operation_fence_generation))
+                @panic("Client deinit operation fence abort failed");
+        };
         if (checkedAllocatorReentry(self)) return false;
-        if (self.ownership == .moved) {
-            return true;
+        if (self.ownership == .moved) return true;
+        if (!self.prepareDeinitGraph(operation_fence != null)) return false;
+        self.finishDeinitGraph();
+        const client_addr = @intFromPtr(self);
+        const operation_fence_generation = self.operation_fence_generation;
+        if (operation_fence) |fence| {
+            if (!fence.commitExclusiveTerminal(client_addr, operation_fence_generation))
+                @panic("Client deinit operation fence commit failed");
+            operation_fence_exclusive = false;
         }
+        self.* = undefined;
+        return true;
+    }
+
+    fn prepareDeinitGraph(self: *Client, bound_client: bool) bool {
+        if (checkedAllocatorReentry(self)) return false;
+        if (self.ownership == .moved) return false;
         if (!self.generation_batch_accounting.valid(@intFromPtr(self)) or
             (self.generation_batch_accounting.ledger != null and
                 self.generation_batch_accounting.ledger.?.item_count != 0))
             return false;
-        if (!self.prepareExternalModeDeinit()) return false;
+        if (bound_client) {
+            // A generation-node Client is admitted only in blocking mode and the public external
+            // transition participates in this fence. Any external state here is pre-callback
+            // invariant drift, so the exclusive owner may abort without erasing mutation effects.
+            switch (self.io_mode) {
+                .blocking => {},
+                .external => return false,
+            }
+        } else if (!self.prepareExternalModeDeinit()) return false;
+        return true;
+    }
+
+    fn finishDeinitGraph(self: *Client) void {
         if (self.fd >= 0) _ = c.close(self.fd);
         if (self.build_id) |build_id| self.allocator.free(build_id);
         if (self.lifecycle.len != 0) self.allocator.free(self.lifecycle);
@@ -4990,8 +5513,6 @@ pub const Client = struct {
         self.pending_batches.deinit(self.allocator);
         if (self.partial_batch) |*partial| partial.bytes.deinit(self.allocator);
         self.parser.deinit();
-        self.* = undefined;
-        return true;
     }
 
     /// CR3a generation-node ownership move.  This is intentionally narrower than external-pump
@@ -5000,6 +5521,7 @@ pub const Client = struct {
     /// suffix, so a failed HostAdapter initialization never partially moves socket ownership.
     pub fn canMoveToGenerationNode(self: *const Client) bool {
         return self.ownership == .standalone and self.io_mode == .blocking and !self.unusable and
+            self.operation_fence == null and self.operation_fence_generation == 0 and
             self.generation_batch_accounting.valid(@intFromPtr(self)) and
             (self.generation_batch_accounting.ledger == null or
                 self.generation_batch_accounting.ledger.?.item_count == 0) and
@@ -5051,7 +5573,8 @@ pub const Client = struct {
         self: *Client,
         allocator: std.mem.Allocator,
     ) (ClientError || generation_batch_registry.Error)!std.mem.Allocator {
-        try self.ensureUsable();
+        const operation_fence_held = try self.ensureUsable();
+        defer if (operation_fence_held) self.endPublicMutation();
         if (self.generation_batch_accounting.ledger == null or self.io_mode != .blocking or
             self.ownership != .standalone or !self.parser.usesAllocator(self.allocator))
             return error.InvalidState;
@@ -5062,7 +5585,8 @@ pub const Client = struct {
     }
 
     pub fn requireBufferedGenerationBatch(self: *const Client, stream_id: u64) ClientError!void {
-        try self.ensureUsable();
+        const operation_fence_held = try self.ensureUsable();
+        defer if (operation_fence_held) self.endPublicMutation();
         for (self.pending_batches.items) |pending| {
             if (pending.stream_id == stream_id) return;
         }
@@ -5073,6 +5597,8 @@ pub const Client = struct {
         self: *Client,
         allocator: std.mem.Allocator,
     ) void {
+        const operation_fence_held = self.beginPublicMutation() catch return;
+        defer if (operation_fence_held) self.endPublicMutation();
         self.allocator = allocator;
         self.parser.restoreAllocatorAfterDrift(allocator);
     }
@@ -6278,6 +6804,12 @@ pub const Client = struct {
     /// One-way pre-raw transition. Every allocation is staged before fd flags are touched and an
     /// unprovable rollback poisons the sole-owned connection instead of exposing split mode.
     pub fn enterExternalMode(self: *Client) EnterExternalModeError!void {
+        const operation_fence_held = self.beginPublicMutation() catch |err| return switch (err) {
+            error.AdminBusy => error.Busy,
+            error.ConnectionClosed => error.ConnectionClosed,
+            else => unreachable,
+        };
+        defer if (operation_fence_held) self.endPublicMutation();
         return self.enterExternalModeWithOps(client_deadline.posix_ops);
     }
 
@@ -6416,7 +6948,8 @@ pub const Client = struct {
         params_json: ?[]const u8,
         io: RpcIo,
     ) DeadlineClientError![]u8 {
-        try self.requireBlockingMode();
+        const operation_fence_held = try self.requireBlockingMode();
+        defer if (operation_fence_held) self.endPublicMutation();
         // non-blocking input이 backpressure로 일부만 전송됐어도 뒤 request가 wire에서 추월하면 안 된다.
         try self.flushPendingOutboundBlocking();
         var prepared: PreparedBlockingRpc = .{};
@@ -6438,7 +6971,8 @@ pub const Client = struct {
         deadline: client_deadline.AbsoluteDeadline,
         ops: client_deadline.Ops,
     ) DeadlineClientError![]u8 {
-        try self.requireBlockingMode();
+        const operation_fence_held = try self.requireBlockingMode();
+        defer if (operation_fence_held) self.endPublicMutation();
         var prepared: PreparedBlockingRpc = .{};
         self.prepareBlockingRpc(&prepared, method, params_json) catch |err| return switch (err) {
             error.DestinationOccupied, error.InvalidPreparedRpc, error.MovedOrCopied => error.ProtocolError,
@@ -6517,7 +7051,8 @@ pub const Client = struct {
         method: []const u8,
         params_json: ?[]const u8,
     ) PreparedBlockingRpcError!void {
-        try self.requireBlockingMode();
+        const operation_fence_held = try self.requireBlockingMode();
+        defer if (operation_fence_held) self.endPublicMutation();
         if (out.self_addr != 0 or out.lifecycle != .pristine or out.frame.len != 0)
             return error.DestinationOccupied;
         if (self.next_request_id == 0 or self.next_request_id == std.math.maxInt(u64))
@@ -6594,6 +7129,8 @@ pub const Client = struct {
     ) PreparedBlockingRpcError!void {
         // local prepared backing 정리는 connection이 terminal이어도 가능해야 한다. allocator callback
         // 재진입만 막고, 일반 usability gate로 poison 이후 exact abort까지 막지는 않는다.
+        const operation_fence_held = try self.beginPublicMutation();
+        defer if (operation_fence_held) self.endPublicMutation();
         if (checkedAllocatorReentry(self)) return error.AdminBusy;
         return self.abortPreparedBlockingRpc(preparedRpcFromStorage(storage));
     }
@@ -6611,7 +7148,8 @@ pub const Client = struct {
         self: *Client,
         storage: *PreparedBlockingRpcStorage,
     ) PreparedBlockingRpcError!std.mem.Allocator {
-        try self.ensureUsable();
+        const operation_fence_held = try self.ensureUsable();
+        defer if (operation_fence_held) self.endPublicMutation();
         const prepared = preparedRpcFromStorage(storage);
         if (prepared.self_addr != @intFromPtr(prepared)) return error.MovedOrCopied;
         if (!prepared.validFor(self) or !prepared.frameIntact() or
@@ -6631,6 +7169,12 @@ pub const Client = struct {
         storage: *PreparedBlockingRpcStorage,
         allocator: std.mem.Allocator,
     ) PreparedBlockingRpcExecution {
+        const operation_fence_held = self.beginPublicMutation() catch |err|
+            return .{ .not_executed = switch (err) {
+                error.AdminBusy => error.AdminBusy,
+                else => error.ConnectionClosed,
+            } };
+        defer if (operation_fence_held) self.endPublicMutation();
         if (checkedAllocatorReentry(self))
             return .{ .not_executed = error.AdminBusy };
         const prepared = preparedRpcFromStorage(storage);
@@ -6661,6 +7205,8 @@ pub const Client = struct {
         storage: *const PreparedBlockingRpcStorage,
         identity: PreparedBlockingRpcIdentity,
     ) bool {
+        const operation_fence_held = self.beginPublicMutation() catch return false;
+        defer if (operation_fence_held) self.endPublicMutation();
         const prepared = preparedRpcFromStorageConst(storage);
         return prepared.validFor(self) and prepared.request_id == identity.request_id and
             prepared.frame_digest == identity.frame_digest;
@@ -6813,7 +7359,8 @@ pub const Client = struct {
     /// Publication gates use it so a response coalesced with an authority revoke cannot publish
     /// stale controller state.
     pub fn refreshBufferedAuthorityEvidence(self: *Client) ClientError!void {
-        try self.requireBlockingMode();
+        const operation_fence_held = try self.requireBlockingMode();
+        defer if (operation_fence_held) self.endPublicMutation();
         while (self.parser.bufferState() == .complete_or_error) {
             const maybe = self.parser.next() catch |err| {
                 self.poison(if (err == error.OutOfMemory)
@@ -6838,7 +7385,8 @@ pub const Client = struct {
     /// 절대 반환하지 않고 typed unavailable로 강등한다. Recovery projection의 malformed response는 canonical exact
     /// manifest attach가 같은 adapter에서 계속 가능하도록 connection 전체를 poison하지 않는다.
     pub fn runtimeInventory(self: *Client) ClientError!RuntimeInventory {
-        try self.requireBlockingMode();
+        const operation_fence_held = try self.requireBlockingMode();
+        defer if (operation_fence_held) self.endPublicMutation();
         var consumed: u8 = 0;
         return self.runtimeInventoryBounded(protocol.max_inventory_pages, &consumed);
     }
@@ -6848,7 +7396,8 @@ pub const Client = struct {
         max_pages: usize,
         consumed: *u8,
     ) ClientError!RuntimeInventory {
-        try self.requireBlockingMode();
+        const operation_fence_held = try self.requireBlockingMode();
+        defer if (operation_fence_held) self.endPublicMutation();
         consumed.* = 0;
         if (!self.runtime_inventory_v1) return .{ .unavailable = .{ .reason = .unsupported, .page_count = 0 } };
         var ids: std.ArrayListUnmanaged(u128) = .empty;
@@ -6955,7 +7504,8 @@ pub const Client = struct {
     };
 
     pub fn prepareUpgrade(self: *Client, request: upgrade_wire.PrepareRequest) ClientError!PrepareUpgradeOutcome {
-        try self.requireBlockingMode();
+        const operation_fence_held = try self.requireBlockingMode();
+        defer if (operation_fence_held) self.endPublicMutation();
         if (!self.host_exec_upgrade_v1) return error.IncompatibleVersion;
         var out: std.Io.Writer.Allocating = .init(self.allocator);
         defer out.deinit();
@@ -6989,7 +7539,8 @@ pub const Client = struct {
     }
 
     pub fn upgradeStatus(self: *Client, attempt_id: u128) ClientError!?upgrade_wire.AttemptReport {
-        try self.requireBlockingMode();
+        const operation_fence_held = try self.requireBlockingMode();
+        defer if (operation_fence_held) self.endPublicMutation();
         var attempt_buf: [32]u8 = undefined;
         const attempt = std.fmt.bufPrint(&attempt_buf, "{x:0>32}", .{attempt_id}) catch
             return error.ProtocolError;
@@ -7041,7 +7592,8 @@ pub const Client = struct {
         deadline: client_deadline.AbsoluteDeadline,
         ops: client_deadline.Ops,
     ) DeadlineClientError![]u8 {
-        try self.requireBlockingMode();
+        const operation_fence_held = try self.requireBlockingMode();
+        defer if (operation_fence_held) self.endPublicMutation();
         const saved_flags = ops.get_flags(ops.context, self.fd) orelse {
             self.poisonWithOps(.local_invariant_violation, ops);
             return error.ConnectionClosed;
@@ -7076,7 +7628,8 @@ pub const Client = struct {
         stream_id: u64,
         io: StreamIo,
     ) DeadlineClientError![]u8 {
-        try self.requireBlockingMode();
+        const operation_fence_held = try self.requireBlockingMode();
+        defer if (operation_fence_held) self.endPublicMutation();
         var attempts: usize = 0;
         while (true) {
             if (try self.readStreamBatchWithIo(stream_id, io)) |batch| {
@@ -7210,9 +7763,10 @@ pub const Client = struct {
         want_stream_id: u64,
         transfer_id: u64,
     ) (ClientError || generation_batch_registry.Error)!GenerationBatchReadResult {
+        const operation_fence_held = try self.requireBlockingMode();
+        defer if (operation_fence_held) self.endPublicMutation();
         if (checkedAllocatorReentry(self)) return error.AdminBusy;
         if (self.unusable) return .terminal;
-        try self.requireBlockingMode();
         if (want_stream_id == 0) return error.InvalidStream;
         if (transfer_id == 0 or transfer_id <= self.generation_batch_accounting.last_transfer_id)
             return error.InvalidIdentity;
@@ -7269,7 +7823,8 @@ pub const Client = struct {
         want_stream_id: u64,
         io: StreamIo,
     ) DeadlineClientError!?StreamBatch {
-        try self.requireBlockingMode();
+        const operation_fence_held = try self.requireBlockingMode();
+        defer if (operation_fence_held) self.endPublicMutation();
         // 1) 이 stream 앞으로 이미 버퍼된 배치(다른 runtime의 pump가 소켓을 비우며 넣어 둔 것)를 도착 순서대로 먼저 준다.
         for (self.pending_batches.items, 0..) |b, i| {
             if (b.stream_id == want_stream_id) {
@@ -7511,6 +8066,8 @@ pub const Client = struct {
     /// `stream_id` 앞으로 버퍼된 demux 배치를 모두 버린다(runtime이 detach/remove될 때 그 runtime의 pump가 다신 안 도므로
     /// 잔여 배치가 영구히 쌓이지 않게 — RemoteRuntime.deinit/detachClientSide가 부른다). 없으면 no-op.
     pub fn dropBufferedStream(self: *Client, stream_id: u64) void {
+        const operation_fence_held = self.beginPublicMutation() catch return;
+        defer if (operation_fence_held) self.endPublicMutation();
         if (checkedAllocatorReentry(self)) return;
         var i: usize = 0;
         while (i < self.pending_batches.items.len) {
@@ -7554,6 +8111,8 @@ pub const Client = struct {
     /// `Client.releaseEvent`로 반환한다. Admission seal 불일치는 손상된 route를 caller에게 넘기지 않고
     /// connection-wide ProtocolError로 닫는다.
     pub fn takeEventForStream(self: *Client, stream_id: u64) ClientError!?BufferedEvent {
+        const operation_fence_held = try self.beginPublicMutation();
+        defer if (operation_fence_held) self.endPublicMutation();
         if (checkedAllocatorReentry(self)) return error.AdminBusy;
         // poison 전에 쌓인 event도 어느 stream의 누락보다 최신인지 증명할 수 없다. 일부 runtime만 한 번 더 전진시키지 않고
         // 모든 shared runtime이 다음 pump에서 같은 ConnectionClosed를 보게 한다.
@@ -7587,6 +8146,9 @@ pub const Client = struct {
         self: *const Client,
         stream_id: u64,
     ) error{InvalidClientState}!EndedEventPeek {
+        const operation_fence_held = self.beginPublicMutation() catch
+            return error.InvalidClientState;
+        defer if (operation_fence_held) self.endPublicMutation();
         if (stream_id == 0 or
             self.pending_events.items.len > self.pending_events.capacity or
             self.pending_events.items.len > max_pending_event_count)
@@ -7629,6 +8191,9 @@ pub const Client = struct {
         scratch: *EndedPurgeScratch,
         out: *PreparedEndedPurgeInventory,
     ) EndedPurgePrepareError!void {
+        const operation_fence_held = self.beginPublicMutation() catch
+            return error.InvalidSource;
+        defer if (operation_fence_held) self.endPublicMutation();
         if (out.lifecycle != .empty or out.self_addr != 0 or target_stream == 0)
             return error.DestinationOccupied;
         const client_start = @intFromPtr(self);
@@ -7873,6 +8438,8 @@ pub const Client = struct {
     /// Releases an event through the allocator that admitted it. Consumers must not assume their
     /// projection allocator is identical to the shared Client transport allocator.
     pub fn releaseEvent(self: *const Client, event: BufferedEvent) void {
+        const operation_fence_held = self.beginPublicMutation() catch return;
+        defer if (operation_fence_held) self.endPublicMutation();
         if (checkedAllocatorReentry(self)) return;
         event.deinit(self.allocator);
     }
@@ -8138,7 +8705,8 @@ pub const Client = struct {
         io: StreamIo,
         payload_allocator_out: ?*std.mem.Allocator,
     ) DeadlineClientError!?framing.Frame {
-        try self.ensureUsable();
+        const operation_fence_held = try self.ensureUsable();
+        defer if (operation_fence_held) self.endPublicMutation();
         if (payload_allocator_out) |out| out.* = self.allocator;
         if (self.pending_stream.items.len > 0) {
             const owned = self.pending_stream.orderedRemove(0);
@@ -8227,7 +8795,8 @@ pub const Client = struct {
     /// terminal input bytes를 attach된 `stream_id`로 보낸다(§9 `input_bytes` — 응답 없는 fire-and-forget). controller만
     /// 유효하고, host는 비controller/미attach stream의 input을 조용히 버린다. attach 응답의 stream_id를 그대로 쓴다.
     pub fn sendInput(self: *Client, stream_id: u64, bytes: []const u8) ClientError!void {
-        try self.requireBlockingMode();
+        const operation_fence_held = try self.requireBlockingMode();
+        defer if (operation_fence_held) self.endPublicMutation();
         // 앞 tick의 non-blocking frame부터 끝낸 뒤 새 blocking input을 쓴다. 같은 stream뿐 아니라 connection을 공유하는
         // 여러 runtime 사이에서도 실제 socket write 순서를 보존한다.
         try self.flushPendingOutboundBlocking();
@@ -8257,7 +8826,8 @@ pub const Client = struct {
     /// 소유권을 인수한 payload 바이트 수다. 기존 pending frame이 아직 막혀 있으면 0, 새 frame을 pending 슬롯에 넣었으면
     /// DONTWAIT flush가 0/partial/full 어느 경우든 그 payload 길이를 반환한다 — caller가 동일 입력을 재전송하지 않게 한다.
     pub fn sendInputNonBlocking(self: *Client, stream_id: u64, bytes: []const u8) ClientError!usize {
-        try self.requireBlockingMode();
+        const operation_fence_held = try self.requireBlockingMode();
+        defer if (operation_fence_held) self.endPublicMutation();
 
         // 기존 frame을 먼저 밀어 FIFO를 지킨다. 여전히 막혔으면 새 payload는 caller가 계속 소유한다.
         if (!(try self.pumpPendingOutput())) return 0;
@@ -8281,7 +8851,8 @@ pub const Client = struct {
     /// outbound 슬롯에 admission한다. true면 frame 소유권을 인수했고, false면 기존 frame이 backpressure로
     /// 남아 caller가 stream-local sticky intent를 유지해야 한다. 구 host에는 절대 동기 RPC fallback하지 않는다.
     pub fn sendScrollToBottomNonBlocking(self: *Client, stream_id: u64) ClientError!bool {
-        try self.requireBlockingMode();
+        const operation_fence_held = try self.requireBlockingMode();
+        defer if (operation_fence_held) self.endPublicMutation();
         if (!self.async_scroll_to_bottom_v1) return false;
         if (!(try self.pumpPendingOutput())) return false;
         const frame = framing.encodeFrame(
@@ -8298,7 +8869,8 @@ pub const Client = struct {
     /// Coalesced invalidation recovery control for the UI frame pump. It shares the one bounded
     /// pending outbound slot with input/core commands and never waits for a response.
     pub fn sendResyncNonBlocking(self: *Client, stream_id: u64) ClientError!bool {
-        try self.requireBlockingMode();
+        const operation_fence_held = try self.requireBlockingMode();
+        defer if (operation_fence_held) self.endPublicMutation();
         if (!(try self.pumpPendingOutput())) return false;
         const frame = framing.encodeFrame(
             self.allocator,
@@ -8314,7 +8886,8 @@ pub const Client = struct {
     /// host core command JSON을 응답 없는 stream frame으로 admission한다. true면 Client가 frame 소유권을
     /// 인수했고, false면 기존 outbound frame의 backpressure 때문에 caller가 bounded sticky queue에서 재시도해야 한다.
     pub fn sendCoreCommandNonBlocking(self: *Client, stream_id: u64, payload: []const u8) ClientError!bool {
-        try self.requireBlockingMode();
+        const operation_fence_held = try self.requireBlockingMode();
+        defer if (operation_fence_held) self.endPublicMutation();
         if (!self.runtime_core_command_v1) return false;
         if (!(try self.pumpPendingOutput())) return false;
         const frame = framing.encodeFrame(
@@ -8331,7 +8904,8 @@ pub const Client = struct {
     /// 이미 RemoteRuntime의 ordered input FIFO가 소유한 scroll barrier를 후속 blocking RPC보다 먼저 보낸다.
     /// `call`과 마찬가지로 기존 nonblocking frame을 먼저 끝내므로 connection wire 순서는 보존된다.
     pub fn sendScrollToBottom(self: *Client, stream_id: u64) ClientError!void {
-        try self.requireBlockingMode();
+        const operation_fence_held = try self.requireBlockingMode();
+        defer if (operation_fence_held) self.endPublicMutation();
         if (!self.async_scroll_to_bottom_v1) return;
         try self.flushPendingOutboundBlocking();
         const frame = framing.encodeFrame(
@@ -8349,7 +8923,8 @@ pub const Client = struct {
     /// RemoteRuntime의 ordered queue를 뒤따르는 blocking RPC 직전에 남은 core frame을 전량 보낸다. 응답은 없지만
     /// 기존 pending frame을 먼저 끝내므로 connection wire FIFO를 보존한다.
     pub fn sendCoreCommand(self: *Client, stream_id: u64, payload: []const u8) ClientError!void {
-        try self.requireBlockingMode();
+        const operation_fence_held = try self.requireBlockingMode();
+        defer if (operation_fence_held) self.endPublicMutation();
         if (!self.runtime_core_command_v1) return;
         try self.flushPendingOutboundBlocking();
         const frame = framing.encodeFrame(
@@ -8388,7 +8963,8 @@ pub const Client = struct {
     /// backpressure라 false이며, 다른 오류는 partial frame 뒤 framing 복구가 불가능하므로 connection을 닫는다. Darwin은
     /// MSG_DONTWAIT만으로 blocking socket의 send가 멈추는 동작이 보장되지 않아 helper가 호출 구간에 O_NONBLOCK도 함께 건다.
     pub fn pumpPendingOutput(self: *Client) ClientError!bool {
-        try self.requireBlockingMode();
+        const operation_fence_held = try self.requireBlockingMode();
+        defer if (operation_fence_held) self.endPublicMutation();
         while (self.pending_outbound) |*pending| {
             const remaining = pending.frame[pending.offset..];
             switch (try self.sendDontWait(remaining)) {
@@ -8412,7 +8988,8 @@ pub const Client = struct {
     /// removed without changing the wire; a partial frame cannot be truncated without corrupting
     /// framing and requires connection fail-close. Another stream's frame is unrelated and stays.
     pub fn fenceRevokedStream(self: *Client, stream_id: u64) ClientError!RevokeFence {
-        try self.requireBlockingMode();
+        const operation_fence_held = try self.requireBlockingMode();
+        defer if (operation_fence_held) self.endPublicMutation();
         const pending = self.pending_outbound orelse return .no_pending_stream_frame;
         if (pending.stream_id != stream_id) return .no_pending_stream_frame;
         if (pending.offset != 0) return .partial_frame_requires_close;
@@ -8430,6 +9007,10 @@ pub const Client = struct {
     /// 권위 판정용 stream-local latch. foreign revoke는 shared wire 진행만 멈추지만 이 stream의
     /// revoke는 role cache가 아직 controller여도 새 mutation을 받아서는 안 된다.
     pub fn hasBufferedControllerRevokeForStream(self: *const Client, stream_id: ?u64) bool {
+        // Busy is conservative for an admission latch: callers stop mutation without observing
+        // the event graph while an exclusive owner is compacting it.
+        const operation_fence_held = self.beginPublicMutation() catch return true;
+        defer if (operation_fence_held) self.endPublicMutation();
         for (self.pending_events.items) |frame| {
             if (!frame.sealMatches()) return true;
             const verdict = frame.preflight orelse
@@ -8510,7 +9091,8 @@ pub const Client = struct {
         self: *Client,
         payload_allocator_out: ?*std.mem.Allocator,
     ) ClientError!framing.Frame {
-        try self.ensureUsable();
+        const operation_fence_held = try self.ensureUsable();
+        defer if (operation_fence_held) self.endPublicMutation();
         var buf: [4096]u8 = undefined;
         while (true) {
             if (self.parser.nextWithAllocator(payload_allocator_out) catch {
@@ -8635,9 +9217,107 @@ pub const Client = struct {
         return frame;
     }
 
-    fn ensureUsable(self: *const Client) ClientError!void {
+    fn ensureUsable(self: *const Client) ClientError!bool {
+        const operation_fence_held = try self.beginPublicMutation();
+        errdefer if (operation_fence_held) self.endPublicMutation();
         if (checkedAllocatorReentry(self)) return error.AdminBusy;
         if (self.ownership == .moved or self.unusable) return error.ConnectionClosed;
+        return operation_fence_held;
+    }
+
+    pub fn bindOperationFence(
+        self: *Client,
+        fence: *ClientOperationFence,
+        fence_generation: u64,
+    ) bool {
+        if (self.operation_fence != null or self.operation_fence_generation != 0 or
+            !fence.identityMatches(@intFromPtr(self), fence_generation))
+            return false;
+        self.operation_fence = fence;
+        self.operation_fence_generation = fence_generation;
+        return true;
+    }
+
+    pub fn tryAcquireEndedPurgeExclusive(
+        self: *Client,
+    ) error{ InvalidOwner, InvalidState, AdminBusy }!void {
+        const fence = self.operation_fence orelse return error.InvalidState;
+        return fence.tryAcquireExclusive(@intFromPtr(self), self.operation_fence_generation);
+    }
+
+    /// ClientSlot teardown acquires this before reading any mutable node-owned graph. Product
+    /// source-boundary tests keep the acquire/release/commit path inside ClientSlot.tryDeinit.
+    pub fn tryAcquireClientSlotTeardownExclusive(
+        self: *Client,
+    ) error{ InvalidOwner, InvalidState, AdminBusy }!void {
+        const fence = self.operation_fence orelse return error.InvalidState;
+        return fence.tryAcquireExclusive(@intFromPtr(self), self.operation_fence_generation);
+    }
+
+    pub fn abortClientSlotTeardownExclusive(self: *Client) bool {
+        const fence = self.operation_fence orelse return false;
+        return fence.abortExclusive(@intFromPtr(self), self.operation_fence_generation);
+    }
+
+    pub fn tryDeinitClientSlotExclusiveHeld(self: *Client) bool {
+        const fence = self.operation_fence orelse return false;
+        if (fence.intruded(@intFromPtr(self), self.operation_fence_generation)) return false;
+        if (!self.prepareDeinitGraph(true)) return false;
+        self.finishDeinitGraph();
+        const client_addr = @intFromPtr(self);
+        const operation_fence_generation = self.operation_fence_generation;
+        if (!fence.commitExclusiveTerminal(client_addr, operation_fence_generation))
+            @panic("ClientSlot Client deinit operation fence commit failed");
+        self.* = undefined;
+        return true;
+    }
+
+    pub fn endedPurgeFenceIntruded(self: *const Client) bool {
+        const fence = self.operation_fence orelse return true;
+        return fence.intruded(@intFromPtr(self), self.operation_fence_generation);
+    }
+
+    /// ClientSlot-only aggregate gate. Slot registry transactions use this around the publication
+    /// of blockers that Client teardown preflights, so exclusive teardown cannot pass a stale
+    /// all-idle snapshot. Source-boundary tests keep callers inside client_slot.zig.
+    pub fn beginClientSlotOperation(self: *Client) ClientError!void {
+        if (!(try self.beginPublicMutation())) return error.ConnectionClosed;
+    }
+
+    pub fn endClientSlotOperation(self: *Client) bool {
+        if (self.operation_fence == null) return false;
+        self.endPublicMutation();
+        return true;
+    }
+
+    pub fn releaseEndedPurgeExclusiveClean(self: *Client) bool {
+        const fence = self.operation_fence orelse return false;
+        return fence.releaseExclusiveClean(@intFromPtr(self), self.operation_fence_generation);
+    }
+
+    pub fn commitEndedPurgeExclusiveTerminal(self: *Client) bool {
+        const fence = self.operation_fence orelse return false;
+        return fence.commitExclusiveTerminal(@intFromPtr(self), self.operation_fence_generation);
+    }
+
+    fn beginPublicMutation(self: *const Client) ClientError!bool {
+        const fence = self.operation_fence orelse {
+            if (self.operation_fence_generation != 0) return error.ConnectionClosed;
+            return false;
+        };
+        fence.tryEnterShared(@intFromPtr(self), self.operation_fence_generation) catch |err|
+            return switch (err) {
+                error.AdminBusy, error.CounterOverflow => error.AdminBusy,
+                error.InvalidOwner, error.InvalidState => error.ConnectionClosed,
+            };
+        return true;
+    }
+
+    fn endPublicMutation(self: *const Client) void {
+        const fence = self.operation_fence orelse
+            @panic("bound Client operation fence disappeared");
+        if (!fence.leaveShared(@intFromPtr(self), self.operation_fence_generation))
+            @panic("Client operation fence shared release failed");
     }
 
     fn checkedAllocatorReentry(_: *const Client) bool {
@@ -8645,7 +9325,7 @@ pub const Client = struct {
         // 막아야 한다. 그렇지 않으면 B가 wire byte를 소비한 뒤 interleaved OOB frame을 이미 소유한 상태에서야
         // active latch를 발견한다. 이 thread에 checked allocator owner가 하나라도 있으면 모든 public Client
         // 진입점은 wire/callback/free 전에 거부한다.
-        return checked_allocator_owner_addr != 0;
+        return generationAllocatorCallbackActive();
     }
 
     pub fn enterGenerationAllocatorCallback(self: *Client) bool {
@@ -8662,9 +9342,11 @@ pub const Client = struct {
         checked_allocator_owner_addr = 0;
     }
 
-    fn requireBlockingMode(self: *const Client) ClientError!void {
-        try self.ensureUsable();
+    fn requireBlockingMode(self: *const Client) ClientError!bool {
+        const operation_fence_held = try self.ensureUsable();
+        errdefer if (operation_fence_held) self.endPublicMutation();
         if (self.io_mode == .external) return error.ExternalMode;
+        return operation_fence_held;
     }
 
     fn poisonWithOps(
@@ -8711,6 +9393,11 @@ pub const Client = struct {
     /// lifecycle cleanup frame조차 할당할 수 없는 경우 host가 EOF로 attachment를 정리하도록 shared connection을
     /// 명시적으로 닫는 fail-closed fallback.
     pub fn poison(self: *Client, reason: client_poison.ConnectionReason) void {
+        // The cross-thread fence must win over the same-thread allocator diagnostic. During an
+        // exclusive cleanup callback even the deferred poison path may not touch Client storage;
+        // the rejected shared entry records intrusion and the owner converges to quarantine.
+        const operation_fence_held = self.beginPublicMutation() catch return;
+        defer if (operation_fence_held) self.endPublicMutation();
         if (checkedAllocatorReentry(self)) {
             self.markPoisonedForDeferredCleanup(reason);
             return;
@@ -8768,6 +9455,8 @@ const client_source_schema_field_allowlist = [_][]const u8{
     "partial_batch",
     "pending_outbound",
     "io_mode",
+    "operation_fence",
+    "operation_fence_generation",
 };
 comptime {
     const fields = std.meta.fields(Client);

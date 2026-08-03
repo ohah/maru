@@ -117,7 +117,10 @@ pub fn buildRichTextArtifact(
     return .{ .placements = try out.toOwnedSlice(allocator) };
 }
 
-fn placementFor(placements: []const RichTextArtifact.Placement, row: u16, col: u16) ?RichTextArtifact.Placement {
+/// The final-pixel consumers must resolve placement through this one lookup.  In particular,
+/// Chrome Lab uses it to prove its submitted GpuGlyph coordinates still equal the product
+/// artifact rather than a fixture-local cell reconstruction.
+pub fn placementFor(placements: []const RichTextArtifact.Placement, row: u16, col: u16) ?RichTextArtifact.Placement {
     // DrawList/shape order matches semantic draw order. Reverse lookup gives a later text op
     // precedence when a component deliberately overlays an earlier run in the same cell.
     var i = placements.len;

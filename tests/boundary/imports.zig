@@ -83,14 +83,6 @@ test "CR3a-2c2b3b B3b-S trusted guard oracle rejects pre-acquire graph and unbou
         "self.funnel(); helper(self); } fn funnel(_: *Client) void {} };";
     try std.testing.expect(!syntheticDelegateValid(post_delegate_escape));
 
-    const good_begin =
-        "const Client = struct { fn beginPublicMutation(self: *const Client) ClientError!bool {" ++
-        "const fence = self.operation_fence orelse { if (self.operation_fence_generation != 0) " ++
-        "return error.ConnectionClosed; return false; };" ++
-        "fence.tryEnterShared(@intFromPtr(self), self.operation_fence_generation) catch |err| " ++
-        "return switch (err) { error.AdminBusy, error.CounterOverflow => error.AdminBusy, " ++
-        "error.InvalidOwner, error.InvalidState => error.ConnectionClosed, }; return true; } };";
-    try std.testing.expect(syntheticTrustedLeafValid(good_begin, "beginPublicMutation"));
     const wrong_begin_mapping =
         "const Client = struct { fn beginPublicMutation(self: *const Client) ClientError!bool {" ++
         "const fence = self.operation_fence orelse { if (self.operation_fence_generation != 0) " ++

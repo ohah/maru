@@ -9,6 +9,20 @@ import UniformTypeIdentifiers // NSOpenPanel.allowedContentTypes = [.png] (배�
 import UserNotifications
 import WebKit // Phase 4c: 빈 WKWebView를 pane 본문에 부착(터미널<웹뷰<오버레이 z-order). 콘텐츠·브리지·보안은 Phase 5.
 
+/// CI는 실제 `NSScreen.backingScaleFactor`를 고를 수 없으므로, font/scale fixture만 동일한
+/// drawable·resize·pointer projection scale을 주입한다. 일반 제품 경로와 다른 scenario는 반드시
+/// 물리 window scale을 그대로 쓴다.
+private func archiveSmokeRenderScale(_ window: NSWindow?) -> CGFloat {
+    let physical = window?.backingScaleFactor ?? 1.0
+    let environment = ProcessInfo.processInfo.environment
+    guard environment["MARU_AGENT_SESSION_ARCHIVE_SMOKE"] == "1",
+          environment["MARU_AGENT_SESSION_ARCHIVE_SMOKE_SCENARIO"] == "font-scale-rects",
+          let raw = environment["MARU_AGENT_SESSION_ARCHIVE_SMOKE_RENDER_SCALE_MILLI"],
+          let milli = UInt32(raw), milli == 1_000 || milli == 2_000
+    else { return physical }
+    return CGFloat(milli) / 1_000.0
+}
+
 private let browserResultCopyCallback: @convention(c) (
     UnsafeMutableRawPointer?, UInt64, UInt64, UnsafeMutablePointer<UInt8>?, Int
 ) -> Int64 = { context, transferId, offset, destination, capacity in
@@ -157,7 +171,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
     // drawableSize는 point가 아니라 backing pixel이어야 nextDrawable이 올바른 크기를 준다.
     func updateDrawableSize() {
         guard let metalLayer else { return }
-        let scale = window?.backingScaleFactor ?? layer?.contentsScale ?? 1.0
+        let scale = archiveSmokeRenderScale(window)
         let width = max(1.0, bounds.width * scale)
         let height = max(1.0, bounds.height * scale)
         let newSize = CGSize(width: width, height: height)
@@ -510,7 +524,7 @@ final class MaruMetalOverlayView: NSView {
     // drawableSize를 present 직전 lockstep으로 한 번 더 맞추지만(모달 NDC 정합), 뷰 레벨에서도 추종해 둔다.
     func updateDrawableSize() {
         guard let metalLayer else { return }
-        let scale = window?.backingScaleFactor ?? layer?.contentsScale ?? 1.0
+        let scale = archiveSmokeRenderScale(window)
         let width = max(1.0, bounds.width * scale)
         let height = max(1.0, bounds.height * scale)
         let newSize = CGSize(width: width, height: height)
@@ -6310,7 +6324,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // NSView 로컬 좌표(좌하단 원점)를 backing(device) 픽셀(좌상단 원점)로 환산한다 — Zig 좌표 규약.
     // scale·y 뒤집기 공식의 단일 출처(handleMouse·handleMouseMotion·updateHover 공용 — 규약이 바뀌면 여기만 고친다).
     private func backingPx(_ local: NSPoint, in view: NSView) -> (x: Double, y: Double) {
-        let scale = window?.backingScaleFactor ?? 1.0
+        let scale = archiveSmokeRenderScale(window)
         return (Double(local.x * scale), Double((view.bounds.height - local.y) * scale))
     }
 
@@ -8156,6 +8170,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 reorderArchiveSnapshot: {
                     self.reorderArchiveSmokeSnapshot()
                 },
+                captureGeometry: {
+                    self.writeArchiveSmokeFontScaleGeometry(session: session, window: window)
+                },
                 capture: { state in
                     self.captureAgentSessionArchiveSmokeFrame(state, in: surface)
                 }
@@ -8180,6 +8197,72 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         smokeTimer = nil
         if driver.stage != .succeeded { exitCode = 1 }
         DispatchQueue.main.async { NSApp.terminate(nil) }
+    }
+
+    /// Serializes only the already-published SessionDock border/action geometry for the four-way
+    /// terminal-font × render-scale fixture. This is a closed observer, never a second layout or
+    /// an input path: every rect originates in the same UiRectTree painted by the normal frame.
+    private func writeArchiveSmokeFontScaleGeometry(session: OpaquePointer, window: NSWindow) -> Bool {
+        guard isAgentSessionArchiveSmokeMode,
+              ProcessInfo.processInfo.environment["MARU_AGENT_SESSION_ARCHIVE_SMOKE_SCENARIO"] == "font-scale-rects",
+              let rawRoot = ProcessInfo.processInfo.environment["MARU_AGENT_SESSION_ARCHIVE_SMOKE_ARTIFACT_DIR"],
+              let rawScale = ProcessInfo.processInfo.environment["MARU_AGENT_SESSION_ARCHIVE_SMOKE_RENDER_SCALE_MILLI"],
+              let renderScaleMilli = UInt32(rawScale), renderScaleMilli == 1_000 || renderScaleMilli == 2_000
+        else { return false }
+
+        let root = URL(fileURLWithPath: rawRoot).standardizedFileURL
+        let home = URL(fileURLWithPath: NSHomeDirectory()).standardizedFileURL
+        guard root == home.deletingLastPathComponent(),
+              root.lastPathComponent == "maru-agent-session-archive-smoke",
+              root.deletingLastPathComponent().lastPathComponent == "zig-out"
+        else { return false }
+        let path = root.appendingPathComponent("font-scale-rects.geometry.json").standardizedFileURL
+        guard path.deletingLastPathComponent() == root, !FileManager.default.fileExists(atPath: path.path) else { return false }
+
+        let targets: [(String, UInt32)] = [
+            ("header", MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_REFRESH),
+            ("scope_row", MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_SCOPE_ROW),
+            ("search", MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_SEARCH),
+            ("first_card", MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_DOCK_CARD),
+            ("expanded_card", MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_EXPANDED_CARD),
+            ("resume", MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_RESUME),
+            ("reveal", MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_REVEAL_LOG),
+        ]
+        var generation: UInt64?
+        var rects: [String: Any] = [:]
+        for (name, target) in targets {
+            var probe = MaruAppHostAgentSessionArchiveSmokeProbe()
+            guard maru_macos_app_session_agent_session_archive_smoke_probe(session, target, &probe) == Self.statusOK,
+                  probe.present != 0, probe.width_px > 0, probe.height_px > 0, probe.generation != 0
+            else { return false }
+            if let generation {
+                guard generation == probe.generation else { return false }
+            } else {
+                generation = probe.generation
+            }
+            let raw: [String: Double] = [
+                "x": Double(probe.x_px), "y": Double(probe.y_px),
+                "width": Double(probe.width_px), "height": Double(probe.height_px),
+            ]
+            let factor = 1_000.0 / Double(renderScaleMilli)
+            let logical = raw.mapValues { $0 * factor }
+            rects[name] = ["raw_px": raw, "logical": logical, "enabled": probe.enabled != 0]
+        }
+        let actualWindowScaleMilli = UInt32((window.backingScaleFactor * 1_000).rounded())
+        let document: [String: Any] = [
+            "schema": "maru.agent-session.font-scale-rects.v1",
+            "render_scale_milli": renderScaleMilli,
+            "actual_window_scale_milli": actualWindowScaleMilli,
+            "snapshot_generation": generation ?? 0,
+            "rects": rects,
+        ]
+        guard JSONSerialization.isValidJSONObject(document) else { return false }
+        do {
+            try JSONSerialization.data(withJSONObject: document, options: [.prettyPrinted, .sortedKeys]).write(to: path, options: .atomic)
+            return true
+        } catch {
+            return false
+        }
     }
 
     /// AS4-c의 one-shot Metal readback sink. The driver reaches this only after a read-only probe
@@ -8277,7 +8360,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         window: NSWindow
     ) -> Bool {
         guard probe.present != 0, probe.enabled != 0, probe.width_px > 0, probe.height_px > 0 else { return false }
-        let scale = window.backingScaleFactor
+        let scale = archiveSmokeRenderScale(window)
         guard scale > 0 else { return false }
         let backingX = CGFloat(probe.x_px + probe.width_px / 2)
         let backingY = CGFloat(probe.y_px + probe.height_px / 2)
@@ -8308,7 +8391,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         window: NSWindow
     ) -> Bool {
         guard probe.present != 0, probe.enabled != 0, probe.width_px > 0, probe.height_px > 0 else { return false }
-        let scale = window.backingScaleFactor
+        let scale = archiveSmokeRenderScale(window)
         guard scale > 0 else { return false }
         let backingX = CGFloat(probe.x_px + probe.width_px / 2)
         let backingY = CGFloat(probe.y_px + probe.height_px / 2)
@@ -8340,7 +8423,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         window: NSWindow
     ) -> Bool {
         guard probe.present != 0, probe.width_px > 0, probe.height_px > 0 else { return false }
-        let scale = window.backingScaleFactor
+        let scale = archiveSmokeRenderScale(window)
         guard scale > 0 else { return false }
         let backingX = CGFloat(probe.x_px + probe.width_px / 2)
         let backingY = CGFloat(probe.y_px + probe.height_px / 2)
@@ -8484,7 +8567,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private func spawnMetricsForCurrentWindow() -> (widthPx: UInt32, heightPx: UInt32, scaleMilli: UInt32) {
         guard let window, let contentView = window.contentView else { return (0, 0, 0) }
         let bounds = contentView.bounds
-        let scale = window.backingScaleFactor
+        let scale = archiveSmokeRenderScale(window)
         let w = clampedUInt32(bounds.width * scale)
         let h = clampedUInt32(bounds.height * scale)
         if w == 0 || h == 0 { return (0, 0, 0) } // 레이아웃 전 — 폴백(cols/rows)
@@ -8497,25 +8580,25 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
 
         let bounds = contentView.bounds
-        let scale = window.backingScaleFactor
+        let scale = archiveSmokeRenderScale(window)
         // grid(cols/rows)는 Zig app session이 backing 픽셀 + 자기 cell 메트릭으로 직접 계산한다.
         // Swift는 창의 backing 픽셀만 모아 넘긴다(cell 크기·floor·placeholder 계산을 들고 있지
         // 않으므로, 메트릭이 준비되기 전 placeholder로 grid를 잘못 잡는 일이 없다).
         let widthPx = clampedUInt32(bounds.width * scale)
         let heightPx = clampedUInt32(bounds.height * scale)
-        resizeAppSession(widthPx: widthPx, heightPx: heightPx)
+        resizeAppSession(widthPx: widthPx, heightPx: heightPx, scale: scale)
     }
 
-    private func resizeAppSession(widthPx: UInt32, heightPx: UInt32) {
+    private func resizeAppSession(widthPx: UInt32, heightPx: UInt32, scale: CGFloat) {
         guard let appSession else {
             return
         }
 
-        let scaleMilli = clampedUInt32((window?.backingScaleFactor ?? 1.0) * 1_000)
+        let scaleMilli = clampedUInt32(scale * 1_000)
         // 같은 size+scale 중복 resize 방지(SIGWINCH storm)와 grid 계산 모두 Zig app session이
         // 한 곳에서 처리한다. Swift는 매번 backing 픽셀+scale만 보내고, app session이 변화 없으면
         // 비싼 재작업을 건너뛴다. tick의 scale-변화 감지용으로 보낸 backing scale만 기록한다.
-        lastSentBackingScale = window?.backingScaleFactor ?? 1.0
+        lastSentBackingScale = scale
 
         // cols/rows는 app session이 무시하고 backing 픽셀에서 계산하므로 0으로 둔다.
         var event = MaruAppHostResizeEvent(

@@ -100,6 +100,10 @@ pub const Props = struct {
 /// gets it for component-owned text offsets. Keeping terminal-cell metrics out of this type
 /// prevents a terminal-font preference from moving a visible Chrome hit target.
 pub const DockMetrics = struct {
+    /// Session Dock을 고르는 상단 view switcher의 고정 높이. 이 값은 terminal tab bar와
+    /// 공유하지 않는다. terminal zoom이 Session Dock의 content origin을 움직이면 component가
+    /// 고정하던 card/action rect 계약도 함께 깨지기 때문이다.
+    view_switcher_h: u32,
     header_h: u32,
     scope_h: u32,
     search_h: u32,
@@ -148,6 +152,7 @@ pub const DockMetrics = struct {
         const detail_turn_y = @max(saturatedAdd(saturatedAdd(detail_record_y, typography.lineHeightPx(.metadata, scale)), spacing.px(.sm, scale)), spacing.pointsPx(64, scale));
         const detail_turn_step = saturatedAdd(saturatedAdd(saturatedAdd(typography.lineHeightPx(.overline, scale), spacing.px(.xxs, scale)), typography.lineHeightPx(.body, scale)), spacing.px(.sm, scale));
         return .{
+            .view_switcher_h = geometryPx(spacing.pointsPx(40, scale)),
             // Heading + supporting + 4pt stack gap + 12pt vertical inset on each side.
             .header_h = geometryPx(@max(spacing.pointsPx(76, scale), saturatedAdd(saturatedAdd(saturatedAdd(typography.lineHeightPx(.dock_heading, scale), typography.lineHeightPx(.supporting, scale)), spacing.px(.xxs, scale)), saturatedMul(spacing.px(.sm, scale), 2)))),
             .scope_h = geometryPx(@max(button.minimum_height_px, saturatedAdd(typography.lineHeightPx(.control, scale), saturatedMul(spacing.px(.sm, scale), 2)))),
@@ -247,6 +252,7 @@ fn saturatedMul(a: u32, b: u32) u32 {
 
 test "DockMetrics fixes all Session Dock geometry independently of terminal cells" {
     const m = DockMetrics.resolve(1000);
+    try std.testing.expectEqual(@as(u32, 40), m.view_switcher_h);
     try std.testing.expectEqual(@as(u32, 76), m.header_h);
     try std.testing.expectEqual(@as(u32, 48), m.scope_h);
     try std.testing.expectEqual(@as(u32, 48), m.search_h);

@@ -18,6 +18,7 @@ final class AgentSessionArchiveSmokeDriver {
         case detailCloseReopen = "detail-close-reopen"
         case snapshotReplacePointer = "snapshot-replace-pointer"
         case expandedScrollAnchor = "expanded-scroll-anchor"
+        case fontScaleRects = "font-scale-rects"
         case claudeResumePointer = "claude-resume-pointer"
 
         init?(environment: [String: String] = ProcessInfo.processInfo.environment) {
@@ -157,6 +158,7 @@ final class AgentSessionArchiveSmokeDriver {
         claudeModelMetadataPresent: () -> Bool,
         replaceRevealSource: () -> Bool,
         reorderArchiveSnapshot: () -> Bool,
+        captureGeometry: () -> Bool,
         capture: (CaptureState) -> Bool
     ) {
         guard !finished else { return }
@@ -282,6 +284,14 @@ final class AgentSessionArchiveSmokeDriver {
             if scenario == .expandedScrollAnchor {
                 stage = .scrollExpandedAnchor
                 paintRequested = true
+                return
+            }
+            if scenario == .fontScaleRects {
+                guard captureGeometry() else {
+                    fail("font_scale_geometry")
+                    return
+                }
+                stage = .succeeded
                 return
             }
             stage = .invokeAction
@@ -506,6 +516,9 @@ final class AgentSessionArchiveSmokeDriver {
 
         case .invokeAction:
             switch scenario {
+            case .fontScaleRects:
+                fail("font_scale_unreachable_action")
+                return
             case .resumePointer, .claudeResumePointer:
                 guard let detail = probe(MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_RESUME),
                       detail.present != 0, detail.enabled != 0,
@@ -538,6 +551,9 @@ final class AgentSessionArchiveSmokeDriver {
 
         case .waitForAction:
             switch scenario {
+            case .fontScaleRects:
+                fail("font_scale_unreachable_wait")
+                return
             case .resumePointer, .resumeKeyboard, .claudeResumePointer:
                 guard fakeResumeVerdict() else { return }
             case .revealPointer, .revealKeyboard:

@@ -232,10 +232,28 @@ box, `.xs` icon gap과 48pt minimum height를 소유한다. icon SVG의 source v
 API로 노출하지 않는다. view의 available height가 complete `ButtonMetrics`를 수용하지 못하면 action
 leaf를 조용히 압축하지 않고 candidate tree를 fail-close한다.
 
-Dock metric capture는 같은 dock backing rect에서 기본·큰 terminal font와 1×/2×를 비교한다. PNG/JSON은
-action border/content/icon/label rect, header/scope/search/card rect, terminal font metric을 함께 남긴다.
-terminal-font 변화 뒤 dock rect나 action hit rect가 달라지면 실패다. 실제 사용자 Claude/Codex resume은
-이 시각 slice의 자동 실행 대상이 아니며, 기존 explicit-action fixture만 다시 실행한다.
+Dock metric capture는 같은 논리 dock rect에서 terminal font 14pt/24pt와 render scale 1×/2×를
+교차 비교한다. isolated AppKit process는 실제 `NSApplication`·`MaruMetalTerminalView`·`CAMetalLayer`와
+Swift→ABI→Zig resize/render 경로를 쓰되, CI가 물리 `NSScreen.backingScaleFactor`를 강제할 수 없으므로
+fixture 전용 `render_scale_milli`를 drawable·resize에 일관되게 주입한다. artifact는 실제
+`window.backingScaleFactor`와 주입된 scale을 **분리해** 기록한다. 따라서 이 gate는 제품 host 경로의
+1×/2× projection을 증명하지만 물리 모니터 이동 이벤트를 대체하지 않으며, 후자는 수동 gate다.
+
+`SessionDock`은 terminal tab bar 높이를 재사용하지 않는다. `DockMetrics.view_switcher_h`의 40pt와
+28pt native-title safety band가 right dock의 local origin을 결정한다. terminal font가 커져도 terminal
+title strip이 session header를 아래로 밀어서는 안 된다. explorer/source-control은 pane tab bar 정렬이
+별도 UX 계약이므로 이 예외를 쓰지 않는다.
+
+각 JSON은 raw backing-pixel과 `logical = raw_px × 1000 / render_scale_milli`를 함께 기록하고,
+header·scope·search·첫 card·expanded card·resume/log action의 published border/hit rect를 포함한다. icon/label의
+세부 ink bounds는 B1 font-review artifact가 소유하며 이 dock-geometry gate가
+parallel layout을 다시 계산해 복제하지 않는다.
+동일 scale의 14pt↔24pt는 모든 dock/action logical rect와 action hit rect가 정확히 같아야 한다.
+동일 font의 1×↔2×는 scale-normalized rect가 더 낮은 scale의 1 backing pixel 이내여야 하며, raw backing
+rect는 scale 비례여야 한다. 비어 있거나 unpublished/stale rect, 서로 다른 snapshot generation, text artifact
+미완료, 또는 열리지 않은 detail은 비교 성공으로 표시하지 않는다. terminal-font 변화 뒤 dock rect나 action
+hit rect가 달라지면 실패다. 실제 사용자 Claude/Codex resume은 이 시각 slice의 자동 실행 대상이 아니며,
+기존 explicit-action fixture만 다시 실행한다.
 
 시각 합격 자료는 `session-dock-typography` Chrome Lab과 동일 fixture를 소비하는 AppKit capture
 두 종류다. 1920×1080 logical viewport의 480pt auto dock에서 header, segmented scope, search,

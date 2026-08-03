@@ -49,6 +49,14 @@ const WorkerState = struct {
     results: std.ArrayList(Result) = .empty,
     inflight: bool = false,
     shutting_down: bool = false,
+    // The production path never arms this.  The AppKit archive smoke uses it
+    // to hold a detached detail read after the tab has published loading, so
+    // the test observes a state transition rather than racing a fast local
+    // filesystem.  Atomics keep the worker's wait independent of the main
+    // actor and `shutting_down` remains the escape hatch for teardown.
+    test_gate_enabled: std.atomic.Value(bool) = .init(false),
+    test_gate_reached: std.atomic.Value(bool) = .init(false),
+    test_gate_released: std.atomic.Value(bool) = .init(true),
 
     fn release(self: *WorkerState) void {
         if (self.refs.fetchSub(1, .acq_rel) != 1) return;
@@ -111,6 +119,21 @@ pub const Backend = struct {
         return state.results.orderedRemove(0);
     }
 
+    /// Test-only synchronization for the AppKit archive fixture.  It has no
+    /// environment/config reader: a caller must explicitly arm it before
+    /// submitting a detail job, and normal product code never does.
+    pub fn setTestGate(self: *Backend, blocked: bool) void {
+        const state = self.state orelse return;
+        state.test_gate_reached.store(false, .release);
+        state.test_gate_released.store(!blocked, .release);
+        state.test_gate_enabled.store(blocked, .release);
+    }
+
+    pub fn testGateReached(self: *const Backend) bool {
+        const state = self.state orelse return false;
+        return state.test_gate_reached.load(.acquire);
+    }
+
     pub fn deinit(self: *Backend) void {
         const state = self.state orelse return;
         self.state = null;
@@ -132,6 +155,7 @@ fn finishWithoutResult(state: *WorkerState) void {
 
 fn worker(job: *Job) void {
     const state = job.state;
+    waitForTestGate(state);
     var result = readSource(state, job.source, job.request_id, job.surface_id);
     job.source.deinit(state.allocator);
     state.allocator.destroy(job);
@@ -148,6 +172,21 @@ fn worker(job: *Job) void {
     state.inflight = false;
     state.mutex.unlock(state.io);
     state.release();
+}
+
+fn waitForTestGate(state: *WorkerState) void {
+    if (!state.test_gate_enabled.load(.acquire)) return;
+    state.test_gate_reached.store(true, .release);
+    while (!state.test_gate_released.load(.acquire)) {
+        state.mutex.lockUncancelable(state.io);
+        const shutting_down = state.shutting_down;
+        state.mutex.unlock(state.io);
+        if (shutting_down) break;
+        // This is a detached worker only.  The main actor continues to paint
+        // the loading panel and can release the gate without waiting on I/O.
+        std.Io.sleep(state.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+    }
+    state.test_gate_reached.store(false, .release);
 }
 
 fn readSource(state: *WorkerState, source: Source, request_id: u64, surface_id: u64) Result {
@@ -193,6 +232,39 @@ fn openedDevice(file: std.Io.File) u64 {
     var stat: std.posix.Stat = undefined;
     if (std.c.fstat(file.handle, &stat) != 0) return std.math.maxInt(u64);
     return @intCast(stat.dev);
+}
+
+test "detail worker smoke gate waits without blocking the releasing actor" {
+    var backend = try Backend.init(std.testing.allocator, std.testing.io);
+    defer backend.deinit();
+    backend.setTestGate(true);
+
+    const Probe = struct {
+        backend: *Backend,
+        finished: std.atomic.Value(bool) = .init(false),
+
+        fn run(self: *@This()) void {
+            waitForTestGate(self.backend.state.?);
+            self.finished.store(true, .release);
+        }
+    };
+    var probe = Probe{ .backend = &backend };
+    const thread = try std.Thread.spawn(.{}, Probe.run, .{&probe});
+    defer thread.join();
+
+    var spins: usize = 0;
+    while (!backend.testGateReached() and spins < 1_000) : (spins += 1) {
+        std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+    }
+    try std.testing.expect(backend.testGateReached());
+    try std.testing.expect(!probe.finished.load(.acquire));
+
+    backend.setTestGate(false);
+    spins = 0;
+    while (!probe.finished.load(.acquire) and spins < 1_000) : (spins += 1) {
+        std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+    }
+    try std.testing.expect(probe.finished.load(.acquire));
 }
 
 test "detail worker redacts sensitive turns before publication" {

@@ -14,6 +14,14 @@ const tree = @import("../../ui/tree.zig");
 const build = @import("build.zig");
 const types = @import("types.zig");
 
+// Both action icons are registered Chrome SVG glyphs. Their two-cell measurement is injected
+// into `text_layout` below; using a generic Unicode symbol here would shrink back to the terminal
+// font's one-cell ink and make the button look unlike the rest of rich Chrome.
+const resume_icon = "\u{F000C}"; // recent.svg: continue an existing conversation
+const reveal_icon = "\u{F0011}"; // document.svg: reveal the archived transcript source
+const resume_label = resume_icon ++ " 워크트리에서 재개  ⌘↵";
+const reveal_label = reveal_icon ++ " 로그 보기  ⌘L";
+
 pub const Buffers = struct {
     ops: []draw.Op,
     runs: []draw.Run,
@@ -79,8 +87,8 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
         try writer.text(content, 0, unavailableMessage(props.state), .muted_fg);
     }
 
-    try writer.action(find(frame.tree, build.NodeIds.resume_session) orelse return error.MissingRect, "▶ 워크트리에서 재개  ⌘↵");
-    try writer.action(find(frame.tree, build.NodeIds.reveal) orelse return error.MissingRect, "로그 보기  ⌘L");
+    try writer.action(find(frame.tree, build.NodeIds.resume_session) orelse return error.MissingRect, resume_label);
+    try writer.action(find(frame.tree, build.NodeIds.reveal) orelse return error.MissingRect, reveal_label);
     if (props.state == .ready and props.focus_live_enabled) {
         try writer.action(find(frame.tree, build.NodeIds.focus_live) orelse return error.MissingRect, "열린 세션으로 이동");
     }
@@ -101,30 +109,63 @@ const Writer = struct {
         const ch = self.props.cell_height_px;
         if (cw == 0 or ch == 0) return;
         const x = rect.rect.x + @as(f32, @floatFromInt(cw));
-        const y = rect.rect.y + @as(f32, @floatFromInt(ch * (line + 1)));
+        // A semantic line break in a title/metadata/turn card needs a little room at rich Chrome
+        // density.  `Metrics` also expands the matching card height, so this cannot push the
+        // final baseline under the next card or beyond its clip.
+        const m = types.Metrics.fromCellHeight(ch);
+        const y = rect.rect.y + @as(f32, @floatFromInt(ch * (line + 1) + m.line_gap * line));
         if (rect.effective_clip) |clip| if (y < clip.y or y >= clip.y + clip.height) return;
         const available_px = rect.rect.width - @as(f32, @floatFromInt(cw * 2));
         if (available_px <= 0) return;
         const max_cols: u16 = @intFromFloat(@floor(available_px / @as(f32, @floatFromInt(cw))));
-        try self.emit(x, y, source, max_cols, role);
+        try self.emit(x, y, source, max_cols, role, false);
     }
 
     fn action(self: *Writer, rect: tree.RectEntry, source: []const u8) ViewError!void {
-        try self.text(rect, 0, source, if (rect.action.?.enabled) .surface_fg else .muted_fg);
+        const cw = self.props.cell_width_px;
+        const ch = self.props.cell_height_px;
+        if (cw == 0 or ch == 0) return;
+        // Each action card can be a different fraction of the row (for example the optional
+        // live-session action).  Center the **planned**, possibly ellipsized glyph width inside
+        // its own card instead of centering the source byte length or the whole actions row.
+        // That keeps Korean/CJK width and narrow-card ellipsis aligned with the actual paint.
+        const available_px = rect.rect.width - @as(f32, @floatFromInt(cw * 2));
+        if (available_px <= 0) return;
+        const max_cols: u16 = @intFromFloat(@floor(available_px / @as(f32, @floatFromInt(cw))));
+        const text_cols = plannedCols(source, max_cols);
+        if (text_cols == 0) return;
+        const text_width_px: f32 = @floatFromInt(@as(u32, text_cols) * cw);
+        const x = rect.rect.x + (rect.rect.width - text_width_px) / 2;
+        const y = rect.rect.y + @as(f32, @floatFromInt(ch));
+        if (rect.effective_clip) |clip| if (y < clip.y or y >= clip.y + clip.height) return;
+        try self.emit(x, y, source, max_cols, if (rect.action.?.enabled) .surface_fg else .muted_fg, true);
     }
 
-    fn emit(self: *Writer, x: f32, y: f32, source: []const u8, cols: u16, role: tokens.ColorRole) ViewError!void {
+    /// Mirrors `emit`'s plan exactly, but only returns the rendered cell width so action labels
+    /// can be centred before the draw op is materialized.  Keeping this on `text_layout.plan`
+    /// avoids byte-length centering and makes an ellipsized label occupy the same space in both
+    /// the measurement and paint paths.
+    fn plannedCols(source: []const u8, max_cols: u16) u16 {
+        var plan = text_layout.plan(source, 0, max_cols, .head, isDetailIcon);
+        while (plan.next()) |_| {}
+        return plan.endCol();
+    }
+
+    fn emit(self: *Writer, x: f32, y: f32, source: []const u8, cols: u16, role: tokens.ColorRole, wide_icons: bool) ViewError!void {
         if (cols == 0) return;
         if (self.op_count == self.ops.len) return error.InsufficientTextBuffer;
         if (self.run_count == self.runs.len) return error.InsufficientRunBuffer;
         const start = self.text_count;
-        var plan = text_layout.plan(source, 0, cols, .head, null);
+        // Only component-owned action labels opt in. A transcript is user/provider data and can
+        // legally contain the same Plane-15 byte sequence; treating that as a Chrome icon here
+        // would make the component's truncation disagree with the false `wide_icons` backend.
+        var plan = text_layout.plan(source, 0, cols, .head, if (wide_icons) isDetailIcon else null);
         while (plan.next()) |item| switch (item) {
             .cluster => |cluster| try self.appendBytes(source[cluster.start..cluster.end]),
             .ellipsis => try self.appendBytes("…"),
         };
         self.runs[self.run_count] = .{ .text = self.text_bytes[start..self.text_count] };
-        self.ops[self.op_count] = .{ .text = .{ .origin = .{ .x = @intFromFloat(@floor(x)), .y = @intFromFloat(@floor(y)) }, .runs = self.runs[self.run_count .. self.run_count + 1], .role = role } };
+        self.ops[self.op_count] = .{ .text = .{ .origin = .{ .x = @intFromFloat(@floor(x)), .y = @intFromFloat(@floor(y)) }, .runs = self.runs[self.run_count .. self.run_count + 1], .role = role, .wide_icons = wide_icons } };
         self.run_count += 1;
         self.op_count += 1;
     }
@@ -165,6 +206,14 @@ const Writer = struct {
         self.op_count += 1;
     }
 };
+
+/// `chrome` remains renderer-independent, so it does not import the renderer's global registry.
+/// This component publishes only the two codepoints it owns and uses the same predicate for
+/// truncation, centering and lowering. The platform renderer independently rejects unregistered
+/// PUA codepoints before rasterization.
+fn isDetailIcon(codepoint: u21) bool {
+    return codepoint == 0xF000C or codepoint == 0xF0011;
+}
 
 fn find(snapshot: tree.UiRectTree, id: tree.UiId) ?tree.RectEntry {
     const index = snapshot.find(id) orelse return null;
@@ -217,7 +266,7 @@ test "archive detail view renders only redacted turn DTOs and exact action label
         .provider = .claude,
         .title = "문서 확인",
         .metadata = "메시지 3개 · 방금 전",
-        .turns = &.{ .{ .role = .user, .text = "문서에 남은 작업을 알려주세요" }, .{ .role = .assistant, .text = "요약된 안전한 최근 대화입니다" } },
+        .turns = &.{ .{ .role = .user, .text = "문서에 남은 작업을 알려주세요 \u{F000C}" }, .{ .role = .assistant, .text = "요약된 안전한 최근 대화입니다" } },
         .action_record_count = 2,
         .resume_enabled = true,
         .reveal_enabled = true,
@@ -236,17 +285,40 @@ test "archive detail view renders only redacted turn DTOs and exact action label
     const out = try view(props, frame, .{}, &testTokens(), .{ .ops = &ops, .runs = &runs, .text_bytes = &bytes });
     try std.testing.expectEqual(draw.Layer.pane_overlay, out.layer);
     var saw_resume = false;
+    var saw_resume_icon = false;
+    var resume_origin_x: ?i32 = null;
+    var user_role_origin_y: ?i32 = null;
+    var user_turn_origin_y: ?i32 = null;
+    var user_turn_wide_icons: ?bool = null;
     var saw_redacted_turn = false;
     var saw_action_count = false;
     for (out.ops) |op| switch (op) {
         .text => |text| for (text.runs) |run| {
-            if (std.mem.indexOf(u8, run.text, "워크트리에서 재개") != null) saw_resume = true;
+            if (std.mem.indexOf(u8, run.text, "워크트리에서 재개") != null) {
+                saw_resume = true;
+                saw_resume_icon = std.mem.startsWith(u8, run.text, resume_icon);
+                resume_origin_x = text.origin.x;
+            }
+            if (std.mem.eql(u8, run.text, "사용자")) user_role_origin_y = text.origin.y;
+            if (std.mem.indexOf(u8, run.text, "문서에 남은 작업") != null) {
+                user_turn_origin_y = text.origin.y;
+                user_turn_wide_icons = text.wide_icons;
+            }
             if (std.mem.indexOf(u8, run.text, "안전한 최근 대화") != null) saw_redacted_turn = true;
             if (std.mem.indexOf(u8, run.text, "도구/권한 관련 기록 2건") != null) saw_action_count = true;
         },
         else => {},
     };
     try std.testing.expect(saw_resume);
+    try std.testing.expect(saw_resume_icon);
+    const expected_line_step: i32 = @intCast(16 + types.Metrics.fromCellHeight(16).line_gap);
+    try std.testing.expectEqual(expected_line_step, user_turn_origin_y.? - user_role_origin_y.?);
+    try std.testing.expect(!user_turn_wide_icons.?);
+    const resume_entry = frame.tree.entries[frame.tree.find(build.NodeIds.resume_session).?];
+    const max_cols: u16 = @intFromFloat(@floor((resume_entry.rect.width - 16) / 8));
+    const cols = Writer.plannedCols(resume_label, max_cols);
+    const expected_x: i32 = @intFromFloat(@floor(resume_entry.rect.x + (resume_entry.rect.width - @as(f32, @floatFromInt(@as(u32, cols) * 8))) / 2));
+    try std.testing.expectEqual(expected_x, resume_origin_x.?);
     try std.testing.expect(saw_redacted_turn);
     try std.testing.expect(saw_action_count);
 }

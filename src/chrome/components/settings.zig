@@ -681,7 +681,7 @@ pub fn view(
             const runs = try arena.alloc(draw.Run, 1);
             runs[0] = .{ .text = reset_glyph };
             const rrole: tokens.ColorRole = if (actual == state.selected) .accent_bar else .surface_fg;
-            try out.append(arena, .{ .text = .{ .origin = .{ .x = resetGlyphX(l), .y = ctrl.y }, .runs = runs, .role = rrole } });
+            try out.append(arena, .{ .text = .{ .origin = .{ .x = resetGlyphX(l), .y = ctrl.y }, .runs = runs, .role = rrole, .wide_icons = true } });
         }
         switch (r.kind) {
             .toggle => |v| {

@@ -8,7 +8,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 150u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 156u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -63,6 +63,12 @@
 #define MARU_FILE_TREE_TRASH_OUTCOME_MOVED_VERIFIED 1u
 #define MARU_FILE_TREE_TRASH_OUTCOME_MOVED_UNVERIFIED 2u
 #define MARU_FILE_TREE_PATH_CAPACITY 4096u
+#define MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_DOCK_CARD 1u
+#define MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_RESUME 2u
+#define MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_REVEAL_LOG 3u
+#define MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_FOCUS_LIVE 4u
+#define MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_DOCK_AGENT_SESSIONS 5u
+#define MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_DOCK_LAUNCHER 6u
 
 /* browser.wait의 Zig protocol ↔ Swift polling 숫자 계약. app_host_abi.zig 테스트가 L2 상수와 정합을 고정한다. */
 #define MARU_BROWSER_WAIT_DEFAULT_TIMEOUT_MS 25000u
@@ -203,6 +209,20 @@ typedef struct MaruAppHostSessionConfig {
        완성한다. 일반 새 Window/quick/smoke는 0. v142. */
     uint32_t defer_initial_surface;
 } MaruAppHostSessionConfig;
+
+/* AS4-c fixture가 마지막으로 paint된 capability rectangle만 읽는 fixed-width snapshot.
+   present=0이면 나머지 필드는 사용하면 안 된다. 제목, 세션 ID, 경로, 원문, 실행 가능한
+   action token은 의도적으로 없다. 좌표는 MaruMetalTerminalView backing pixel 기준이다. */
+typedef struct MaruAppHostAgentSessionArchiveSmokeProbe {
+    uint64_t request_id;
+    float x_px;
+    float y_px;
+    float width_px;
+    float height_px;
+    uint32_t state;
+    uint32_t present;
+    uint32_t enabled;
+} MaruAppHostAgentSessionArchiveSmokeProbe;
 
 typedef struct MaruAppHostFrameSummary {
     uint32_t abi_version;
@@ -485,6 +505,33 @@ int32_t maru_macos_app_session_key_down(
     MaruAppHostSession *session,
     const MaruAppHostKeyEvent *event,
     MaruAppHostFrameSummary *out_summary
+);
+/* AS4-c fixture-only detail-worker gate.  The gate has no archive/action mutation
+   capability: it can only hold/release a worker before the no-follow source read,
+   and report whether that worker has reached the hold point.  v151. */
+int32_t maru_macos_app_session_set_agent_session_archive_detail_smoke_gate(
+    MaruAppHostSession *session,
+    uint32_t blocked
+);
+uint32_t maru_macos_app_session_agent_session_archive_detail_smoke_gate_reached(
+    const MaruAppHostSession *session
+);
+/* Read-only evidence for the stale-reveal fixture: this becomes 1 only when an ordinary detail
+   action reached the no-follow identity admission and was rejected as stale. v155. */
+uint32_t maru_macos_app_session_agent_session_archive_smoke_stale_reveal_count(
+    const MaruAppHostSession *session
+);
+/* Closed-fixture-only evidence that the currently open Claude archive detail retained a
+   non-empty parsed model. Returns a boolean only; model/session/path text is never exported. v156. */
+uint32_t maru_macos_app_session_agent_session_archive_smoke_claude_model_present(
+    const MaruAppHostSession *session
+);
+/* target은 MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_* 중 하나여야 한다. 읽기 전용이며
+   paint/publish된 rect만 반환한다. v152. */
+int32_t maru_macos_app_session_agent_session_archive_smoke_probe(
+    const MaruAppHostSession *session,
+    uint32_t target,
+    MaruAppHostAgentSessionArchiveSmokeProbe *out_probe
 );
 int32_t maru_macos_app_session_resize(
     MaruAppHostSession *session,

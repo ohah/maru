@@ -85,11 +85,7 @@ const Writer = struct {
         if (cw == 0 or ch == 0) return;
         const x = rect.rect.x + @as(f32, @floatFromInt(cw));
         const y = rect.rect.y + @as(f32, @floatFromInt(ch * (line + 1)));
-        if (rect.effective_clip) |clip| {
-            // CoreText lowering receives semantic baselines, not a second content scissor. Do not
-            // emit a baseline outside the tree's already-published clip while an item is partial.
-            if (y < clip.y or y >= clip.y + clip.height) return;
-        }
+        if (!loweredTextCellFitsClip(rect, y, ch)) return;
         const available_px = rect.rect.width - @as(f32, @floatFromInt(cw * 2));
         if (available_px <= 0) return;
         const max_cols: u16 = @intFromFloat(@floor(available_px / @as(f32, @floatFromInt(cw))));
@@ -170,6 +166,21 @@ const Writer = struct {
     }
 };
 
+/// `chrome_draw_lowering` floors a semantic text origin to a terminal cell row before CoreText
+/// rasterization. A partial item therefore cannot use the unquantized origin as a clip test: a
+/// nominally in-clip origin can lower to the preceding, out-of-clip glyph cell. We intentionally
+/// omit that whole cell rather than add an unrelated glyph scissor path just for scrolling.
+fn loweredTextCellFitsClip(rect: tree.RectEntry, origin_y: f32, cell_height_px: u32) bool {
+    const clip = rect.effective_clip orelse return true;
+    if (cell_height_px == 0) return false;
+    const cell_height: i32 = @intCast(cell_height_px);
+    const origin: i32 = @intFromFloat(@floor(origin_y));
+    const lowered_top = @divFloor(origin, cell_height) * cell_height;
+    const clip_top: i32 = @intFromFloat(@ceil(clip.y));
+    const clip_bottom: i32 = @intFromFloat(@floor(clip.y + clip.height));
+    return lowered_top >= clip_top and lowered_top <= clip_bottom - cell_height;
+}
+
 fn find(snapshot: tree.UiRectTree, id: tree.UiId) ?tree.RectEntry {
     const index = snapshot.find(id) orelse return null;
     return snapshot.entries[index];
@@ -198,7 +209,7 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
         .search = "long query",
         .items = &.{
             .{ .group = .{ .identity = 1, .label = "workspace", .count = 1 } },
-            .{ .card = .{ .identity = 2, .provider = .codex, .title = "a title that intentionally exceeds a narrow card", .summary = "summary", .metadata = "1 message", .selected = true } },
+            .{ .card = .{ .identity = 2, .provider = .claude, .title = "a title that intentionally exceeds a narrow card", .summary = "summary", .metadata = "메시지 1개 · claude-fixture", .selected = true } },
         },
     };
     var nodes: [9]tree.UiNode = undefined;
@@ -232,18 +243,82 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
     const out = try view(props, frame, .{}, &tk, .{ .ops = &ops, .runs = &runs, .text_bytes = &text_bytes });
     try std.testing.expect(out.ops.len > 8);
     var saw_quad = false;
-    var saw_title = false;
+    var saw_provider = false;
+    var saw_model_metadata = false;
     for (out.ops) |op| switch (op) {
         .quad => saw_quad = true,
         .text => |text| {
             for (text.runs) |run| {
-                if (std.mem.indexOf(u8, run.text, "Codex") != null) saw_title = true;
+                saw_provider = saw_provider or std.mem.indexOf(u8, run.text, "Claude") != null;
+                saw_model_metadata = saw_model_metadata or std.mem.indexOf(u8, run.text, "claude-fixture") != null;
             }
         },
         else => {},
     };
     try std.testing.expect(saw_quad);
-    try std.testing.expect(saw_title);
+    try std.testing.expect(saw_provider);
+    try std.testing.expect(saw_model_metadata);
+}
+
+test "SessionDock partial card never emits a CoreText cell that crosses its published clip" {
+    const props = types.Props{
+        .viewport_px = .{ .width = 320, .height = 240 },
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .snapshot_generation = 4,
+        .displayed_count = 2,
+        .content_first_item_origin_y_px = -20,
+        .items = &.{
+            .{ .card = .{ .identity = 1, .provider = .claude, .title = "partial-card-title", .summary = "visible-summary", .metadata = "visible-meta" } },
+            .{ .card = .{ .identity = 2, .provider = .codex, .title = "next-card-title", .summary = "next-summary", .metadata = "next-meta" } },
+        },
+    };
+    var nodes: [9]tree.UiNode = undefined;
+    var entries: [10]tree.RectEntry = undefined;
+    var layout_items: [10]@import("../../ui/layout.zig").Item = undefined;
+    var flex_scratch: [10]@import("../../ui/layout.zig").FlexScratch = undefined;
+    var child_rects: [10]@import("../../ui/layout.zig").UiRect = undefined;
+    var actions: [8]@import("ids.zig").Entry = undefined;
+    const frame = try build.build(props, .{
+        .nodes = &nodes,
+        .entries = &entries,
+        .layout_items = &layout_items,
+        .flex_scratch = &flex_scratch,
+        .child_rects = &child_rects,
+        .actions = &actions,
+    });
+    const tk = tokens.Tokens.rich(.{
+        .foreground = .{ .r = 240, .g = 240, .b = 240 },
+        .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
+        .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
+        .sidebar_active = .{ .r = 80, .g = 80, .b = 80 },
+        .search_match = .{ .r = 1, .g = 2, .b = 3 },
+        .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
+        .selection = .{ .r = 7, .g = 8, .b = 9 },
+        .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .accent = .{ .r = 13, .g = 14, .b = 15 },
+    });
+    var ops: [32]draw.Op = undefined;
+    var runs: [32]draw.Run = undefined;
+    var text_bytes: [1024]u8 = undefined;
+    const out = try view(props, frame, .{}, &tk, .{ .ops = &ops, .runs = &runs, .text_bytes = &text_bytes });
+    var saw_partial_title = false;
+    var saw_partial_summary = false;
+    var saw_partial_metadata = false;
+    var saw_next_title = false;
+    for (out.ops) |op| switch (op) {
+        .text => |text| for (text.runs) |run| {
+            saw_partial_title = saw_partial_title or std.mem.indexOf(u8, run.text, "partial-card-title") != null;
+            saw_partial_summary = saw_partial_summary or std.mem.indexOf(u8, run.text, "visible-summary") != null;
+            saw_partial_metadata = saw_partial_metadata or std.mem.indexOf(u8, run.text, "visible-meta") != null;
+            saw_next_title = saw_next_title or std.mem.indexOf(u8, run.text, "next-card-title") != null;
+        },
+        else => {},
+    };
+    try std.testing.expect(!saw_partial_title);
+    try std.testing.expect(!saw_partial_summary);
+    try std.testing.expect(!saw_partial_metadata);
+    try std.testing.expect(saw_next_title);
 }
 
 test "SessionDock initial loading paints inert three-line skeleton cards" {

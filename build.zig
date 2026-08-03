@@ -384,6 +384,7 @@ pub fn build(b: *std.Build) void {
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/MermaidHelperProcess.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/MermaidProductTick.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/MaruAppSchemeHandler.swift"));
+        macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/AgentSessionArchiveSmokeDriver.swift"));
         macos_app_host_swift_check_cmd.addFileArg(b.path("src/platform/macos/MaruAppHost.swift"));
         macos_app_host_swift_check_cmd.setCwd(b.path("."));
         macos_app_host_swift_check_step.dependOn(&macos_app_host_swift_check_cmd.step);
@@ -783,6 +784,7 @@ pub fn build(b: *std.Build) void {
         macos_app_compile.addFileArg(b.path("src/platform/macos/MermaidHelperProcess.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/MermaidProductTick.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/MaruAppSchemeHandler.swift"));
+        macos_app_compile.addFileArg(b.path("src/platform/macos/AgentSessionArchiveSmokeDriver.swift"));
         macos_app_compile.addFileArg(b.path("src/platform/macos/MaruAppHost.swift"));
         macos_app_compile.addFileArg(macos_app_host_abi_lib.getEmittedBin());
         macos_app_compile.addArgs(&.{
@@ -1352,6 +1354,22 @@ pub fn build(b: *std.Build) void {
         macos_app_html_smoke_assert.setCwd(b.path("."));
         macos_app_html_smoke_assert.step.dependOn(&macos_app_html_smoke.step);
         macos_app_smoke_step.dependOn(&macos_app_html_smoke_assert.step);
+
+        // AS4-c: isolated synthetic HOME and real AppKit pointer/key action lifecycle. The
+        // runner starts one cold process per source/action, executes a fixture-only `codex` by
+        // absolute path, and intercepts the regular external-open consumer before Finder opens.
+        const macos_agent_session_archive_smoke_step = b.step(
+            "macos-agent-session-archive-smoke",
+            "Run the visible AppKit Codex archive-detail fixture",
+        );
+        const macos_agent_session_archive_smoke = b.addSystemCommand(&.{
+            "sh",
+            "tools/test-macos-agent-session-archive.sh",
+            "./zig-out/Maru.app/Contents/MacOS/maru-macos-app",
+        });
+        macos_agent_session_archive_smoke.setCwd(b.path("."));
+        macos_agent_session_archive_smoke.step.dependOn(&macos_app_bundle.step);
+        macos_agent_session_archive_smoke_step.dependOn(&macos_agent_session_archive_smoke.step);
 
         const macos_browser_bounded_smoke_step = b.step("macos-browser-bounded-smoke", "Run and assert the bounded browser.executeScript WKWebView/socket smoke");
         const macos_browser_bounded_smoke = b.addSystemCommand(&.{ "sh", "tools/test-macos-browser-bounded-smoke.sh" });

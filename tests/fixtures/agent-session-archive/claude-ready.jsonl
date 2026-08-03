@@ -1,0 +1,2 @@
+{"type":"user","sessionId":"fixture-claude-session","cwd":"/tmp","message":{"role":"user","text":"show a safe Claude archive fixture"}}
+{"type":"assistant","sessionId":"fixture-claude-session","cwd":"/tmp","message":{"role":"assistant","model":"claude-fixture","text":"fixture response"}}

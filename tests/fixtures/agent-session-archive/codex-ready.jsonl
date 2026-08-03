@@ -1,0 +1,4 @@
+{"type":"session_meta","payload":{"id":"fixture-codex-session","cwd":"/tmp","thread_source":"user"}}
+{"type":"turn_context","payload":{"model":"gpt-fixture"}}
+{"type":"event_msg","payload":{"type":"user_message","message":"## My request for Codex: show a safe archive fixture"}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"fixture response"}}

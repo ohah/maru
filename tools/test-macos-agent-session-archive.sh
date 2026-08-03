@@ -1,0 +1,126 @@
+#!/bin/sh
+# Runs isolated cold AppKit processes so pointer and keyboard archive actions cannot share a
+# completed action, terminal, or external-open one-shot.  Paths stay inside the explicit
+# zig-out fixture root; the summaries contain only opaque scenario/verdict/count fields.
+set -eu
+
+app_path=${1:?Maru app executable path is required}
+# AppSession's config/statusline adapters intentionally require absolute HOME-derived paths.
+# Resolve once here instead of relying on the build runner's current directory.
+workspace=$(pwd -P)
+root="$workspace/zig-out/maru-agent-session-archive-smoke"
+home="$root/home"
+bin="$root/bin"
+marker="$root/fake-provider.verdict"
+source_path="$home/.codex/sessions/2026/08/03/rollout-fixture.jsonl"
+claude_path="$home/.claude/projects/fixture-project/fixture-claude.jsonl"
+# The replacement must share the source directory for atomic rename, but it must not be a
+# scanner candidate before the stale scenario. A non-JSONL temporary name keeps the published
+# archive card bound to `source_path`; rename then gives the replacement its JSONL target name.
+replacement_path="$home/.codex/sessions/2026/08/03/.rollout-replacement.tmp"
+summary="$workspace/zig-out/maru-macos-app/app.summary.txt"
+
+case "$root" in
+    "$workspace"/zig-out/maru-agent-session-archive-smoke) ;;
+    *)
+        echo "refusing an unexpected archive smoke fixture root: $root" >&2
+        exit 2
+        ;;
+esac
+
+test -x "$app_path"
+rm -rf "$root"
+mkdir -p "$home/.codex/sessions/2026/08/03" "$home/.claude/projects/fixture-project" "$bin"
+cp tests/fixtures/agent-session-archive/fake-codex.sh "$bin/codex"
+cp tests/fixtures/agent-session-archive/fake-claude.sh "$bin/claude"
+chmod 755 "$bin/codex"
+chmod 755 "$bin/claude"
+
+run_scenario() {
+    scenario=$1
+    provider=${2:-codex}
+    rm -f "$marker"
+    # Each cold process starts from a new pair: a prior atomic replacement cannot leak into the
+    # next scenario, and the temporary sibling remains outside the scanner's JSONL candidate set.
+    rm -f "$source_path" "$replacement_path" "$claude_path"
+    case "$provider" in
+        codex)
+            cp tests/fixtures/agent-session-archive/codex-ready.jsonl "$source_path"
+            cp tests/fixtures/agent-session-archive/codex-ready.jsonl "$replacement_path"
+            ;;
+        claude)
+            cp tests/fixtures/agent-session-archive/claude-ready.jsonl "$claude_path"
+            ;;
+        *)
+            echo "unknown archive smoke provider: $provider" >&2
+            exit 2
+            ;;
+    esac
+    HOME="$home" \
+    CFFIXED_USER_HOME="$home" \
+    MARU_MACOS_APP_SMOKE_MS=15000 \
+    MARU_AGENT_SESSION_ARCHIVE_SMOKE=1 \
+    MARU_AGENT_SESSION_ARCHIVE_SMOKE_SCENARIO="$scenario" \
+    MARU_AGENT_SESSION_ARCHIVE_SMOKE_MARKER="$marker" \
+    MARU_AGENT_SESSION_ARCHIVE_SMOKE_FAKE_CODEX="$bin/codex" \
+    MARU_AGENT_SESSION_ARCHIVE_SMOKE_FAKE_CLAUDE="$bin/claude" \
+    MARU_AGENT_SESSION_ARCHIVE_SMOKE_REVEAL_PATH="$source_path" \
+    MARU_AGENT_SESSION_ARCHIVE_SMOKE_REPLACEMENT_PATH="$replacement_path" \
+    "$app_path"
+    test -f "$summary"
+    cp "$summary" "$root/$scenario.summary.txt"
+}
+
+run_scenario resume-pointer
+grep -Eq '^agent_session_archive_smoke_stage=succeeded$' "$root/resume-pointer.summary.txt"
+grep -Eq '^agent_session_archive_smoke_scenario=resume-pointer$' "$root/resume-pointer.summary.txt"
+grep -Eq '^agent_session_archive_smoke_fake_resume_verdict=true$' "$root/resume-pointer.summary.txt"
+grep -Eq '^agent_session_archive_smoke_reveal_allowed_count=0$' "$root/resume-pointer.summary.txt"
+grep -Eq '^agent_session_archive_smoke_stale_reveal_count=0$' "$root/resume-pointer.summary.txt"
+
+run_scenario resume-keyboard
+grep -Eq '^agent_session_archive_smoke_stage=succeeded$' "$root/resume-keyboard.summary.txt"
+grep -Eq '^agent_session_archive_smoke_scenario=resume-keyboard$' "$root/resume-keyboard.summary.txt"
+grep -Eq '^agent_session_archive_smoke_fake_resume_verdict=true$' "$root/resume-keyboard.summary.txt"
+grep -Eq '^agent_session_archive_smoke_reveal_allowed_count=0$' "$root/resume-keyboard.summary.txt"
+grep -Eq '^agent_session_archive_smoke_stale_reveal_count=0$' "$root/resume-keyboard.summary.txt"
+
+run_scenario reveal-pointer
+grep -Eq '^agent_session_archive_smoke_stage=succeeded$' "$root/reveal-pointer.summary.txt"
+grep -Eq '^agent_session_archive_smoke_scenario=reveal-pointer$' "$root/reveal-pointer.summary.txt"
+grep -Eq '^agent_session_archive_smoke_fake_resume_verdict=false$' "$root/reveal-pointer.summary.txt"
+grep -Eq '^agent_session_archive_smoke_reveal_allowed_count=1$' "$root/reveal-pointer.summary.txt"
+grep -Eq '^agent_session_archive_smoke_reveal_rejected_count=0$' "$root/reveal-pointer.summary.txt"
+grep -Eq '^agent_session_archive_smoke_stale_reveal_count=0$' "$root/reveal-pointer.summary.txt"
+
+run_scenario reveal-keyboard
+grep -Eq '^agent_session_archive_smoke_stage=succeeded$' "$root/reveal-keyboard.summary.txt"
+grep -Eq '^agent_session_archive_smoke_scenario=reveal-keyboard$' "$root/reveal-keyboard.summary.txt"
+grep -Eq '^agent_session_archive_smoke_fake_resume_verdict=false$' "$root/reveal-keyboard.summary.txt"
+grep -Eq '^agent_session_archive_smoke_reveal_allowed_count=1$' "$root/reveal-keyboard.summary.txt"
+grep -Eq '^agent_session_archive_smoke_reveal_rejected_count=0$' "$root/reveal-keyboard.summary.txt"
+grep -Eq '^agent_session_archive_smoke_stale_reveal_count=0$' "$root/reveal-keyboard.summary.txt"
+
+run_scenario detail-stale
+grep -Eq '^agent_session_archive_smoke_stage=succeeded$' "$root/detail-stale.summary.txt"
+grep -Eq '^agent_session_archive_smoke_scenario=detail-stale$' "$root/detail-stale.summary.txt"
+grep -Eq '^agent_session_archive_smoke_fake_resume_verdict=false$' "$root/detail-stale.summary.txt"
+grep -Eq '^agent_session_archive_smoke_reveal_allowed_count=0$' "$root/detail-stale.summary.txt"
+grep -Eq '^agent_session_archive_smoke_reveal_rejected_count=0$' "$root/detail-stale.summary.txt"
+grep -Eq '^agent_session_archive_smoke_stale_reveal_count=0$' "$root/detail-stale.summary.txt"
+
+run_scenario reveal-recheck-pointer
+grep -Eq '^agent_session_archive_smoke_stage=succeeded$' "$root/reveal-recheck-pointer.summary.txt"
+grep -Eq '^agent_session_archive_smoke_scenario=reveal-recheck-pointer$' "$root/reveal-recheck-pointer.summary.txt"
+grep -Eq '^agent_session_archive_smoke_fake_resume_verdict=false$' "$root/reveal-recheck-pointer.summary.txt"
+grep -Eq '^agent_session_archive_smoke_reveal_allowed_count=0$' "$root/reveal-recheck-pointer.summary.txt"
+grep -Eq '^agent_session_archive_smoke_reveal_rejected_count=0$' "$root/reveal-recheck-pointer.summary.txt"
+grep -Eq '^agent_session_archive_smoke_stale_reveal_count=1$' "$root/reveal-recheck-pointer.summary.txt"
+
+run_scenario claude-resume-pointer claude
+grep -Eq '^agent_session_archive_smoke_stage=succeeded$' "$root/claude-resume-pointer.summary.txt"
+grep -Eq '^agent_session_archive_smoke_scenario=claude-resume-pointer$' "$root/claude-resume-pointer.summary.txt"
+grep -Eq '^agent_session_archive_smoke_fake_resume_verdict=true$' "$root/claude-resume-pointer.summary.txt"
+grep -Eq '^agent_session_archive_smoke_claude_model_present=1$' "$root/claude-resume-pointer.summary.txt"
+grep -Eq '^agent_session_archive_smoke_reveal_allowed_count=0$' "$root/claude-resume-pointer.summary.txt"
+grep -Eq '^agent_session_archive_smoke_stale_reveal_count=0$' "$root/claude-resume-pointer.summary.txt"

@@ -39,7 +39,7 @@ pub fn buildTextDrawList(
             if (col >= cols or row >= rows) continue;
             const style: terminal.Style = .{ .foreground = .{ .rgb = tk.get(text.role) } };
             for (text.runs) |run| {
-                var plan = chrome.text_layout.plan(run.text, col, cols, .head, null);
+                var plan = chrome.text_layout.plan(run.text, col, cols, .head, if (text.wide_icons) &wideChromeIconGlyph else null);
                 while (plan.next()) |item| switch (item) {
                     .ellipsis => |ellipsis_col| try cells.append(allocator, .{ .row = row, .col = ellipsis_col, .codepoint = chrome.text_layout.ellipsis_glyph, .width = 1, .style = style }),
                     .cluster => |cluster| try appendCluster(allocator, &cells, &pool, run.text, cluster, row, style),
@@ -58,6 +58,13 @@ pub fn buildTextDrawList(
         .grapheme_pool = owned_pool,
         .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
     };
+}
+
+/// The semantic draw explicitly opts in only component-owned SVG glyphs. Keeping this predicate
+/// in the platform lowerer preserves the Chrome→renderer boundary while making measurement and
+/// DrawCell width agree with the component's text plan.
+fn wideChromeIconGlyph(codepoint: u21) bool {
+    return renderer.icon_glyph.isRegisteredIcon(codepoint);
 }
 
 /// Chrome card는 terminal glyph보다 먼저 그리는 layer 2에 둔다. layer 0은 renderer의 draw
@@ -170,4 +177,30 @@ test "Chrome draw lowering preserves an NFD cluster and paints cards behind text
     try std.testing.expectEqual(@as(f32, 11), quads.items[0].x);
     try std.testing.expectEqual(@as(f32, 13), quads.items[0].y);
     try std.testing.expectEqual(@as(u32, 0x7f040506), quads.items[0].fill_color0);
+}
+
+test "Chrome draw lowering widens only explicitly owned registered SVG icons" {
+    const tk = chrome.tokens.Tokens.rich(.{
+        .foreground = .{ .r = 1, .g = 2, .b = 3 },
+        .sidebar_background = .{ .r = 4, .g = 5, .b = 6 },
+        .sidebar_foreground = .{ .r = 7, .g = 8, .b = 9 },
+        .sidebar_active = .{ .r = 10, .g = 11, .b = 12 },
+        .search_match = .{ .r = 13, .g = 14, .b = 15 },
+        .search_match_current = .{ .r = 16, .g = 17, .b = 18 },
+        .selection = .{ .r = 19, .g = 20, .b = 21 },
+        .cursor = .{ .r = 22, .g = 23, .b = 24 },
+        .accent = .{ .r = 25, .g = 26, .b = 27 },
+    });
+    const runs = [_]chrome.draw.Run{.{ .text = "\u{F000C}" }};
+    const wide_ops = [_]chrome.draw.Op{.{ .text = .{ .origin = .{ .x = 0, .y = 0 }, .runs = &runs, .role = .surface_fg, .wide_icons = true } }};
+    var wide = try buildTextDrawList(std.testing.allocator, &wide_ops, &tk, 8, 16, 4, 1);
+    defer wide.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), wide.cells.len);
+    try std.testing.expectEqual(@as(u2, 2), wide.cells[0].width);
+
+    const plain_ops = [_]chrome.draw.Op{.{ .text = .{ .origin = .{ .x = 0, .y = 0 }, .runs = &runs, .role = .surface_fg } }};
+    var plain = try buildTextDrawList(std.testing.allocator, &plain_ops, &tk, 8, 16, 4, 1);
+    defer plain.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), plain.cells.len);
+    try std.testing.expectEqual(@as(u2, 1), plain.cells[0].width);
 }

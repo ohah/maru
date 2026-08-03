@@ -1766,6 +1766,9 @@ test "foregroundProcessNames: login group leader가 사라져도 같은 foregrou
     try std.testing.expect(saw_group_child);
 }
 
+// 실제 Darwin proc_listchildpids + KERN_PROCARGS2 경로를 고정한다. 순수 parseEnvValue 테스트만으로는
+// sandbox/PTY 아래에서 자식 환경을 읽지 못하는 회귀를 잡지 못하므로, parent shell이 살아 있는 동안
+// provider-native env를 가진 도구 자식을 띄운다.
 test "validateRequest rejects requests that cannot produce a reliable PTY" {
     // Invalid spawn input should fail before openpty/fork so tests and users do
     // not get half-created child processes with confusing lifecycle artifacts.

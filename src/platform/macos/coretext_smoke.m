@@ -95,6 +95,23 @@ typedef struct {
     uint32_t non_clear_pixels;
 } MaruCoreTextGlyphRasterResult;
 
+typedef struct {
+    int32_t status;
+    uint32_t primary_font_found;
+    uint32_t glyph_record_count;
+    uint32_t glyph_record_overflow;
+} MaruChromeTextShapeResult;
+
+typedef struct {
+    uint32_t glyph_id;
+    uint32_t codepoint;
+    uint32_t fallback;
+    uint32_t color_glyph_kind;
+    float x_px;
+    float advance_px;
+    char font_name[128];
+} MaruChromeTextGlyphRecord;
+
 enum {
     MaruGlyphCategoryAscii = 1,
     MaruGlyphCategoryCjk = 2,
@@ -1294,6 +1311,105 @@ static bool maru_font_is_color(CTFontRef font) {
         return true;
     }
     return false;
+}
+
+// Chrome text is deliberately shaped as a complete proportional UI line, rather than one
+// terminal cell at a time.  Only portable scalar records escape this bridge; CTLine/CTRun and
+// font handles are released before returning to Zig.
+void maru_macos_coretext_shape_chrome_text(
+    const uint8_t *utf8,
+    size_t utf8_len,
+    double font_size_px,
+    uint32_t weight,
+    double max_width_px,
+    MaruChromeTextShapeResult *result,
+    MaruChromeTextGlyphRecord *glyph_records,
+    size_t glyph_record_capacity
+) {
+    @autoreleasepool {
+        if (result == NULL) return;
+        result->status = -1;
+        result->primary_font_found = 0;
+        result->glyph_record_count = 0;
+        result->glyph_record_overflow = 0;
+        if (utf8 == NULL || utf8_len == 0 || glyph_records == NULL || glyph_record_capacity == 0 ||
+            !isfinite(font_size_px) || font_size_px <= 0 || !isfinite(max_width_px) || max_width_px <= 0) {
+            result->status = 1;
+            return;
+        }
+        CFStringRef string = CFStringCreateWithBytes(kCFAllocatorDefault, utf8, (CFIndex)utf8_len, kCFStringEncodingUTF8, false);
+        if (string == NULL) { result->status = 2; return; }
+        CTFontRef primary = CTFontCreateUIFontForLanguage(kCTFontUIFontSystem, (CGFloat)font_size_px, NULL);
+        if (primary == NULL) { CFRelease(string); result->status = 3; return; }
+        // Role weights are closed in Zig.  CoreText's symbolic bold gives the system UI
+        // emphasized face without exposing an arbitrary family string at the Chrome boundary.
+        if (weight != 0) {
+            CTFontRef emphasized = CTFontCreateCopyWithSymbolicTraits(primary, 0.0, NULL, kCTFontBoldTrait, kCTFontBoldTrait);
+            if (emphasized != NULL) { CFRelease(primary); primary = emphasized; }
+        }
+        result->primary_font_found = 1;
+        const void *keys[] = { kCTFontAttributeName };
+        const void *values[] = { primary };
+        CFDictionaryRef attributes = CFDictionaryCreate(kCFAllocatorDefault, keys, values, 1,
+            &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        CFAttributedStringRef attributed = attributes == NULL ? NULL :
+            CFAttributedStringCreate(kCFAllocatorDefault, string, attributes);
+        CTLineRef line = attributed == NULL ? NULL : CTLineCreateWithAttributedString(attributed);
+        if (line == NULL) {
+            if (attributed) CFRelease(attributed);
+            if (attributes) CFRelease(attributes);
+            CFRelease(primary); CFRelease(string); result->status = 4; return;
+        }
+        CTLineRef draw_line = line;
+        CGFloat ascent = 0, descent = 0, leading = 0;
+        const double width = CTLineGetTypographicBounds(line, &ascent, &descent, &leading);
+        if (width > max_width_px) {
+            CFStringRef ellipsis_string = CFSTR("…");
+            CFAttributedStringRef ellipsis = CFAttributedStringCreate(kCFAllocatorDefault, ellipsis_string, attributes);
+            CTLineRef token = ellipsis == NULL ? NULL : CTLineCreateWithAttributedString(ellipsis);
+            CTLineRef truncated = token == NULL ? NULL : CTLineCreateTruncatedLine(line, (CGFloat)max_width_px, kCTLineTruncationEnd, token);
+            if (truncated != NULL) draw_line = truncated;
+            if (token) CFRelease(token);
+            if (ellipsis) CFRelease(ellipsis);
+        }
+        CFStringRef primary_name = CTFontCopyPostScriptName(primary);
+        CFArrayRef runs = CTLineGetGlyphRuns(draw_line);
+        const CFIndex run_count = runs == NULL ? 0 : CFArrayGetCount(runs);
+        size_t out = 0;
+        for (CFIndex run_index = 0; run_index < run_count; run_index++) {
+            CTRunRef run = (CTRunRef)CFArrayGetValueAtIndex(runs, run_index);
+            const CFIndex glyph_count = CTRunGetGlyphCount(run);
+            CFDictionaryRef run_attrs = CTRunGetAttributes(run);
+            CTFontRef run_font = run_attrs == NULL ? NULL : (CTFontRef)CFDictionaryGetValue(run_attrs, kCTFontAttributeName);
+            CFStringRef run_name = run_font == NULL ? NULL : CTFontCopyPostScriptName(run_font);
+            const bool fallback = run_name != NULL && primary_name != NULL && !CFEqual(run_name, primary_name);
+            for (CFIndex i = 0; i < glyph_count; i++) {
+                if (out == glyph_record_capacity) { result->glyph_record_overflow = 1; break; }
+                CGGlyph glyph = 0; CGPoint position = CGPointZero; CGSize advance = CGSizeZero; CFIndex string_index = 0;
+                CTRunGetGlyphs(run, CFRangeMake(i, 1), &glyph);
+                CTRunGetPositions(run, CFRangeMake(i, 1), &position);
+                CTRunGetAdvances(run, CFRangeMake(i, 1), &advance);
+                CTRunGetStringIndices(run, CFRangeMake(i, 1), &string_index);
+                UniChar ch = (string_index >= 0 && string_index < CFStringGetLength(string)) ? CFStringGetCharacterAtIndex(string, string_index) : 0x2026;
+                glyph_records[out].glyph_id = (uint32_t)glyph;
+                glyph_records[out].codepoint = (uint32_t)ch;
+                glyph_records[out].fallback = fallback ? 1u : 0u;
+                glyph_records[out].color_glyph_kind = run_font != NULL && maru_font_is_color(run_font) ? 1u : 0u;
+                glyph_records[out].x_px = (float)position.x;
+                glyph_records[out].advance_px = (float)advance.width;
+                glyph_records[out].font_name[0] = '\0';
+                (void)maru_copy_cfstring(run_name, glyph_records[out].font_name, sizeof(glyph_records[out].font_name));
+                out++;
+            }
+            if (run_name) CFRelease(run_name);
+            if (result->glyph_record_overflow) break;
+        }
+        result->glyph_record_count = (uint32_t)out;
+        if (primary_name) CFRelease(primary_name);
+        if (draw_line != line) CFRelease(draw_line);
+        CFRelease(line); CFRelease(attributed); CFRelease(attributes); CFRelease(primary); CFRelease(string);
+        result->status = result->glyph_record_overflow ? 5 : 0;
+    }
 }
 
 void maru_macos_coretext_smoke_rasterize_glyph(

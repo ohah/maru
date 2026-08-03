@@ -38,6 +38,14 @@ final class AgentSessionArchiveSmokeDriver {
         case stale
     }
 
+    /// A narrow read-only witness for AS4-d. The fixture never receives a Term pointer or any
+    /// archive content: it only compares the active terminal identity and global Term count
+    /// across the ordinary dock-card click and detached detail read.
+    struct TerminalInvariant: Equatable {
+        let activeSurfaceId: UInt64
+        let termCount: UInt32
+    }
+
     enum Stage: String {
         case openDock
         case enterAgentSessions
@@ -64,6 +72,8 @@ final class AgentSessionArchiveSmokeDriver {
     /// action probe becomes ready with the detail DTO; wait through one regular worker-poll frame
     /// before recording the ready detail so the artifact is part of the captured product frame.
     private var stableReadyFrames = 0
+    private var terminalBaseline: TerminalInvariant?
+    private(set) var terminalInvariantSatisfied = false
 
     init?(
         scenario: Scenario? = Scenario(environment: ProcessInfo.processInfo.environment),
@@ -92,6 +102,7 @@ final class AgentSessionArchiveSmokeDriver {
     func tick(
         now: TimeInterval = ProcessInfo.processInfo.systemUptime,
         probe: (UInt32) -> MaruAppHostAgentSessionArchiveSmokeProbe?,
+        sessionInvariant: () -> TerminalInvariant?,
         setGate: (Bool) -> Bool,
         gateReached: () -> Bool,
         click: (MaruAppHostAgentSessionArchiveSmokeProbe) -> Bool,
@@ -138,6 +149,11 @@ final class AgentSessionArchiveSmokeDriver {
                 fail("capture_list")
                 return
             }
+            guard let baseline = sessionInvariant(), baseline.activeSurfaceId != 0, baseline.termCount != 0 else {
+                fail("terminal_baseline")
+                return
+            }
+            terminalBaseline = baseline
             guard setGate(true) else { fail("gate_arm") ; return }
             guard click(card) else { fail("card_click") ; return }
             stage = .waitForGate
@@ -152,6 +168,10 @@ final class AgentSessionArchiveSmokeDriver {
             // explicitly disabled.  This proves both the loading detail and its non-executable
             // capability boundary were presented before the worker is released.
             guard detail.request_id != 0, detail.state == 1, detail.present != 0, detail.enabled == 0 else { return }
+            guard matchesTerminalBaseline(sessionInvariant()) else {
+                fail("inline_detail_changed_terminal_loading")
+                return
+            }
             // The stale scenario mutates only the synthetic source after the completed loading
             // tree is visible and before the worker's no-follow read. This is the TOCTOU window
             // the detail backend must close; normal scenarios release without a replacement.
@@ -173,14 +193,23 @@ final class AgentSessionArchiveSmokeDriver {
                       let reveal = probe(MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_REVEAL_LOG),
                       reveal.request_id == detail.request_id, reveal.state == 3, reveal.present != 0, reveal.enabled == 0
                 else { return }
+                guard matchesTerminalBaseline(sessionInvariant()) else {
+                    fail("inline_detail_changed_terminal_stale")
+                    return
+                }
                 if shouldCapture(.stale), !capture(.stale) {
                     fail("capture_stale")
                     return
                 }
+                terminalInvariantSatisfied = true
                 stage = .succeeded
                 return
             }
             guard detail.request_id != 0, detail.state == 2, detail.present != 0, detail.enabled != 0 else { return }
+            guard matchesTerminalBaseline(sessionInvariant()) else {
+                fail("inline_detail_changed_terminal_ready")
+                return
+            }
             stableReadyFrames += 1
             guard stableReadyFrames >= 2 else {
                 paintRequested = true
@@ -190,6 +219,7 @@ final class AgentSessionArchiveSmokeDriver {
                 fail("capture_ready")
                 return
             }
+            terminalInvariantSatisfied = true
             if scenario == .claudeResumePointer, !claudeModelMetadataPresent() {
                 fail("claude_model_metadata")
                 return
@@ -253,6 +283,11 @@ final class AgentSessionArchiveSmokeDriver {
     private func fail(_ reason: String) {
         failure = reason
         stage = .failed
+    }
+
+    private func matchesTerminalBaseline(_ observed: TerminalInvariant?) -> Bool {
+        guard let terminalBaseline, let observed else { return false }
+        return observed == terminalBaseline
     }
 
     private func shouldCapture(_ state: CaptureState) -> Bool {

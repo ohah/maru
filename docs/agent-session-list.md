@@ -72,10 +72,13 @@ identity는 바꾸지 않으며, `SessionDock`의 같은 completed `UiRectTree`�
 아래 contract의 pixel geometry는 `DockMetrics` snapshot 하나가 결정한다. 진행·검증 상태는
 [검증 매트릭스](verification-matrix.md)의 해당 행을 따른다.
 
-- dock의 자동 폭 640pt 안에서 outer padding, header, segmented scope, search, group header의
-  기하는 **terminal cell**이 아니라 Chrome의 logical spacing/type token과 backing scale에서만
-  결정한다. header·scope·search는 scroll하지 않고, group부터만 scroll한다. terminal font·line
-  spacing을 바꿔도 도크의 버튼 여백·목록 밀도·hit rect가 바뀌어서는 안 된다.
+- dock의 자동 폭 640pt 안에서 fixed chrome(header·segmented scope·search)는 20pt 좌우
+  inset을 쓰되, scroll-area는 dock divider까지 full-bleed다. group disclosure의 20pt leading
+  slot은 **dock 좌측에서 한 번만** 적용한다. 즉 fixed-chrome outer inset과 group disclosure
+  inset을 중첩해 chevron·목록을 불필요하게 안쪽으로 밀지 않는다. 이 기하는 **terminal cell**이
+  아니라 Chrome의 logical spacing/type token과 backing scale에서만 결정한다. header·scope·search는
+  scroll하지 않고, group부터만 scroll한다. terminal font·line spacing을 바꿔도 도크의 버튼
+  여백·목록 밀도·hit rect가 바뀌어서는 안 된다.
 - header는 title(강조) → count(secondary)의 좌측 두 줄과 Maru 등록 host SVG + `로컬`/refresh의 우측
   utility cluster를 서로 독립 logical slot으로 둔다. title/count/utility가 한 baseline 또는 terminal
   prompt처럼 보이지 않아야 한다. host+label은 72pt content box, refresh는 20pt trailing slot,
@@ -91,7 +94,9 @@ identity는 바꾸지 않으며, `SessionDock`의 같은 completed `UiRectTree`�
   detail은 outer padding을 가진 inset surface, recent-turn은 role/body 사이 여백, action은 최소
   3행 높이의 같은 baseline 버튼으로 보인다. sibling action에는 최소 `0.5ch` gap을 두고, 각 button은
   그 gap을 제외한 남은 row 폭을 동등하게 나눈다. action의 hit rect·clip·scroll height는 이 여백을 포함한
-  동일 tree rect다.
+  동일 tree rect다. disclosure는 도크가 소유하므로 선택·확장·닫기는 새 `Term`, tab, surface 또는
+  pane body를 만들지 않는다. 따라서 archive detail 때문에 terminal focus·workspace persistence·PTY
+  lifecycle에 별도 예외가 생기지 않는다.
 - rich Chrome은 radius/border/shadow token을 사용하고, tui legacy lowering은 같은 rect/spacing을
   직각 fill로만 lower한다. component가 `if (rich)` 또는 font별 좌표 nudge를 두지 않는다.
 
@@ -174,7 +179,10 @@ layout과 spacing SSOT, 48pt action target·1×/2×/terminal-font capture 판정
   card, scrollbar의 pixel rect를 **한 번만** 계산한다. `view`, pointer
   hit-test, virtualized visible-row 범위, keyboard scroll이 이 결과를 함께
   소비한다. 그러므로 카드가 보이는 곳과 클릭 영역, scroll origin은 서로 다른
-  행/문자열 계산으로 갈라질 수 없다.
+  행/문자열 계산으로 갈라질 수 없다. fixed chrome의 좌우 inset과 full-bleed scroll-area의
+  leading disclosure slot은 별도 logical layer다. 그러므로 `tmp` 같은 workspace group의
+  chevron은 root padding을 다시 더한 위치가 아니라 dock 기준 20pt slot의 가운데에 놓이고,
+  header의 `로컬`/refresh utility와도 서로 다른 baseline·hit rect를 공유하지 않는다.
 - `SessionDockHeader`는 title, displayed/recent count, host SVG와 `로컬`
   provenance, refresh affordance만 소유한다. host+label은 72pt box 안에서 실제 glyph advance로
   함께 중앙 정렬하고, refresh는 그 오른쪽 12pt gap 뒤의 20pt trailing slot에 둔다. refresh가 실행 중이면 같은 위치의

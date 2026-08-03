@@ -70,7 +70,10 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     // `topLevelTestTokenMask` replaced the AST range approximation. Keep the reviewed product
     // inventory aligned with that lexical scanner so a source that has not changed since main
     // does not make every unrelated PR fail the boundary gate.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 3, .digest_hex = "e2ce6b347417555e4b60422a94eaa0dbc4e10291e201b306ebdc1b395380fe6e" },
+    // The reviewed `@field` inventory changed when the legacy archive-tab lifecycle was
+    // removed; keep this source digest exact so unrelated reflection can never piggyback on
+    // that structural deletion.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 3, .digest_hex = "c4ac6d59c164a8772c2de98258cf6bdbbb62312c483a67651f9191e97198919d" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

@@ -54365,7 +54365,12 @@ test "automatic agent sessions dock width reflows the live pane without persisti
     const explorer_dock = session.dockGeometry();
     const explorer_pane = session.active_pane_rect;
 
+    // This is a synchronous geometry test.  The real archive scanner is covered by its
+    // own isolated AppKit fixture; starting its detached worker here would make this test
+    // depend on a filesystem job that outlives the layout assertion and test allocator.
+    session.agent_session_archive_initialized = false;
     session.setDockView(.agent_sessions);
+    session.agent_session_archive_initialized = true;
     const archive_dock = session.dockGeometry();
     const archive_pane = session.active_pane_rect;
     try std.testing.expectEqual(@as(u32, 0), session.dock.size); // view width must not leak into persistence

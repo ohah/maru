@@ -931,7 +931,7 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    batch/token/accounting, parser raw RX/framing, attachment pending lease/screen, cleanup registry와 connection lease는 정상 purge와 모든
    precommit failure의 payload cleanup 대상이 아니다. postcommit Client-owned deinit graph drift의 terminal suffix만 owned allocation을
    개별 정리하거나 권위를 넘기지 않고 no-free 상태로 버리며 borrowed ledger/attachment/registry/lease는 그대로 둔다. commit은 receipt
-   tombstone 뒤 immutable target descriptor scalar에 대한 cleanup authority를 취득하고 별도 private cursor를 callback 전에 advance한다. descriptor bytes를 overlay하거나 별도
+   `EndedPurgePreparation.sealForCommit` 뒤 immutable target descriptor scalar에 대한 cleanup authority를 취득하고 별도 private cursor를 callback 전에 advance한다. descriptor bytes를 overlay하거나 별도
    full-size 배열을 만들지 않고, 네 queue stable compaction과 최종 counter publish를 첫 allocator callback 전에 끝낸다. 이후 fallible
    work는 0이고 callback 중 canonical queue/source reread도 0이다. 마지막 callback 뒤에는 frozen survivor descriptor/range seal과 current
    queue ownership metadata를 비교하는 post-validation을 정확히 한 번 수행하고, 구조가 일치할 때만 sibling aggregate payload seal을 다시 읽는다.
@@ -943,15 +943,19 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    build/lifecycle/pending outbound는 exact owned length를 합산한다. external mode는 mutation 0으로 거부한다. cap 초과의 precommit
    no-cleanup poison은 owner free/tombstone/quarantine 0으로 reason/unusable을 latch하고 validated captured fd만 detach+close해 later ordinary
    deinit이 intact owner를 회수하게 한다. 모든 graph/cap/profile 검증 뒤 commit gate의 마지막 fallible step으로 one-slot reservation을
-   잡고, 성공 뒤에는 receipt tombstone과 no-fail suffix만 남긴다. 정상 post-validation은 reservation을 release한다. 구조 drift에서는
+   잡고, 성공 뒤에는 `EndedPurgePreparation.sealForCommit`과 no-fail suffix만 남긴다. 정상 post-validation은 reservation을 release하되
+   node permit→transport receipt paired consume이 끝날 때까지 Client exclusive를 유지하고, 그 뒤에만 exclusive를 clean release한다. 구조 drift에서는
    current pointer·allocator·fd를 역참조하지 않고 canonical Client-owned deinit fields를 empty/null로 tombstone하고 reservation을 exact
    once 영구 commit한 뒤 `quarantined_no_free` absorbing poison을 게시한다. 어떤 postcallback drift에서도 fd는 close하지 않는다. allocator,
    generation accounting ledger, observer, attachment, registry와 lease 같은 borrowed authority는 dereference/release/mutate 0이다. exact 순서는
-   `all target cleanup -> Client-owned deinit tombstone -> quarantine commit -> no-free poison -> node permit/transport receipt consume`이다. 이 sticky process latch 뒤 새 generation Client/reconnect/ended-purge admission은 terminal로
+   `all target cleanup -> Client-owned deinit tombstone -> Registry.commit(+CommitReceipt) ->
+   Registry.consumeCommitted(+ConsumedCommitProof) -> no-free poison + PreparedEndedPurgeCommit consumed -> terminal fence -> node permit ->
+   EndedPurgePreparation transport receipt`이다. 이 sticky process latch 뒤 새 generation Client/reconnect/ended-purge admission은 terminal로
    거부되어 누적 quarantine은 한 건·64 MiB를 넘지 않는다. replay charge는 0이다. 이후 generic teardown은 변조된 pointer를 다시 읽거나
    free하지 않으며 해당 connection의 남은 Client-owned allocation은 버린다. commit 전 오류는 `.not_ended`와 구별된 typed error이며
    위 error별 허용 mutation만 수행한다. commit 뒤 정상과 drift-poison 모두 target cleanup을
-   끝내고 no-fail node permit/transport receipt consume을 실행하며 public 결과는 `.purged`다. tests는 poison latch를 별도로
+   끝내고 no-fail node permit/transport receipt consume을 실행하며, clean은 그 뒤 Client exclusive clean release를 마지막으로 실행한다.
+   public 결과는 `.purged`다. tests는 poison latch를 별도로
    검증한다. early purge는 canonical attachment drop·registry token release·node cleanup
    registry·connection lease를 소비하지 않으며 later teardown의 raw demux 정리는 idempotent no-op이다. **2c2a(구현)**는 2c1의 snapshot
    전용 permit/active tuple/process registry를 kind-tagged `StreamOperationPermit` SSOT로 migration하고 snapshot↔ended-purge 상호 busy와
@@ -977,25 +981,38 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    address·allocator·payload pointer·scratch reference와 seal
    mint/검증은 0이다. `buildQueuePlan` error set은 `InvalidCount|InvalidTargetMap|ArithmeticOverflow|DestinationOccupied`다. Client/allocator callback/quarantine import, scratch·queue·process mutation,
    owner freeze, allocation/free와 permit/receipt consume은 0이다. **2c2b3b(계획)**가 private scratch의 immutable/no-escape 원본 descriptor를
-   cleanup authority로 사용해 exact preparation revalidation부터 reservation, receipt tombstone, stable compaction/counter publication,
+   cleanup authority로 사용해 exact preparation revalidation부터 reservation, `EndedPurgePreparation.sealForCommit`, stable compaction/counter publication,
    모든 target exact-once callback, post-validation, 정상 release 또는 absorbing no-free quarantine을 하나의 vertical transaction으로
-   닫는다. revalidation/cap/reservation까지는 typed precommit failure, receipt tombstone 뒤 suffix만 no-fail이다. private scratch의 coherent arbitrary overwrite와 cleanup authority 밖에서 이미 수행된 deallocation의
+   닫는다. revalidation/cap/reservation까지는 typed precommit failure, `EndedPurgePreparation.sealForCommit` 뒤 suffix만 no-fail이다. private scratch의 coherent arbitrary overwrite와 cleanup authority 밖에서 이미 수행된 deallocation의
    탐지·복구는 비목표지만 callback 재진입·canonical descriptor drift·allocator provenance/alias 검증은 유지한다. b3a만으로 target
    final-zero나 2c2 완료를 주장하지 않는다. b3b의 doc-first boundary는 AST canonical
    `(parent,kind,visibility,modifier,name)` production inventory를 사용해 root와 owner container를 함께 검사한다.
    허용 tuple 제외 baseline은 client(root+Client+EndedPurgeScratch+PreparedEndedPurgeInventory)=527/SHA-256
    `594178e6c653e30be0ddc64564d2783922e0c0b4895c3543479f86e5977db6fd`,
    client_slot(root+ClientSlot+EndedPurgePreparation)=126/SHA-256
-   `03a92a146dbf8935466d0b9250b09c884d575f15fc148f73c6db8979bc69d968`이다. 신규 top-level allowlist는 client의
-   `ended_purge_transaction|PreparedEndedPurgeCommit|EndedPurgeCommitError|EndedPurgeClientCommitOutcome`, client_slot의
-   `ended_purge_quarantine|ended_purge_quarantine_registry`뿐이다. 신규 nested method/type exact allowlist는
-   `Client.prepareEndedPurgeCommit|commitEndedPurgePrepared|tombstoneEndedPurgeOwnedGraph|publishEndedPurgeNoFreePoison`,
-   `ClientSlot.EndedPurgeCommitError|EndedPurgeResult|commitEndedPurge`, `EndedPurgePreparation.tombstoneForCommit`이다. 별도
+   `03a92a146dbf8935466d0b9250b09c884d575f15fc148f73c6db8979bc69d968`이다. B3b-F/S 전체 신규 top-level allowlist는 client의
+   `ClientOperationFence|generationAllocatorCallbackActive|ended_purge_transaction|ended_purge_quarantine|PreparedEndedPurgeCommit|
+   EndedPurgeCommitError|EndedPurgeClientCommitOutcome`, client_slot의
+   `ended_purge_quarantine|ended_purge_quarantine_registry|process_runtime_pid`뿐이다. 아래 신규 nested method/type exact allowlist는
+   B3b-S/O 범위이며, B3b-F의 `ClientOperationFence` nested constants/methods와 Client/ClientSlot private guard declarations/wrappers는
+   `persistent-session-host.md`의 B3b-F exact allowlist를 SSOT로 사용하고 여기서 중복 열거하지 않는다.
+   `Client.prepareEndedPurgeCommit|commitEndedPurgePrepared|finalizeEndedPurgeNoFreePoison|tombstoneEndedPurgeOwnedGraph|
+   publishEndedPurgeNoFreePoison|endedPurgeCompleteOwnerSeal|endedPurgePostValidate|publishEndedPurgeCompaction|cleanupEndedPurgeTargetDirect`,
+   `ClientSlot.ProcessRuntimeInitError|EndedPurgeCommitError|EndedPurgeResult|initializeProcessRuntime|commitEndedPurge`,
+   `EndedPurgePreparation.sealForCommit|consumeAfterPermit`이다. 별도
    `ended_purge_quarantine.zig`는 std와 scalar identity/bytes만 아는 allocation-free one-slot
-   `max_ended_purge_quarantine_bytes|Error|Reservation|Registry` API를
-   소유한다. `pending_outbound`는 nullable 거부가 아니라 build/lifecycle과 함께 scratch frozen descriptor, complete-owner cap/alias/seal,
-   postvalidation과 tombstone 전 구간에 포함한다. preparation 재검증 뒤 registry reservation이 마지막 fallible step이고, receipt tombstone
-   뒤 Client no-fail commit만 실행한다. client는 raw owner mutation/direct cleanup만, client_slot은 permit/receipt/reservation 순서만 소유한다.
+   `max_ended_purge_quarantine_bytes|Error|Reservation|CommitReceipt|ConsumedCommitProof|Registry` API를
+   소유한다. nested exact allowlist는 `Reservation.Lifecycle`, `CommitReceipt.Lifecycle`, `ConsumedCommitProof.matches`,
+   `Registry.State|init|reserve|release|commit|consumeCommitted`뿐이다. proof는 인증 capability가 아니라 pointer-free correlation evidence이며
+   semantic-exact 합성의 런타임 방지는 주장하지 않으며 B3b-O exact production caller/source closure가 정상 제품 proof의 provenance와
+   consume→finalizer 순서를 소유한다. `pending_outbound`는 nullable 거부가 아니라 build/lifecycle과 함께 scratch frozen descriptor, complete-owner cap/alias/seal,
+   postvalidation과 tombstone 전 구간에 포함한다. preparation 재검증 뒤 registry reservation이 마지막 fallible step이고,
+   `EndedPurgePreparation.sealForCommit` 뒤 Client no-fail commit을 실행한다. drift는 `finalization_pending` preparation과 Client-owned graph tombstone까지만 게시하고,
+   ClientSlot이 quarantine commit으로 발급한 exact-once `CommitReceipt`를 trusted Registry로 consume해 pointer-free
+   `ConsumedCommitProof`를 만들고, Client finalizer가 proof를 검증한 뒤 poison/terminal을 게시하고,
+   prevalidated node permit→`EndedPurgePreparation` transport receipt paired consume을 끝낸다. clean은 paired consume 뒤에만 Client
+   exclusive를 clean release하고, drift는 이미 terminal fence가 absorbing 상태를 소유한다. client는 raw owner mutation/direct cleanup과
+   scalar proof sealed finalization만, client_slot은 registry receipt consume과 node permit→preparation transport receipt paired consume 순서만 소유한다.
    **2c3**은 capability/input/control/
    event/RPC primitive를 exact facade로 옮기고 generation의 `logicalClient()` 사용을 0으로 만든다. **2c4**는
    `RuntimeConnection` union을 mode SSOT로 전환해 `RemoteRuntime.client`와 `generation_adapter` 병렬 필드를 제거하고 exact

@@ -1039,8 +1039,9 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    `pending_events[max_pending_event_count]`, optional `partial_batch`의 descriptor와 compact target bitset을 복사하고 queue별 aggregate
    payload seal을 계산한다. per-item digest는 9,216개 상한에서 예산을 초과하므로 쓰지 않는다. compile-time으로 기존
    `ExternalAdoptionCleanupScratch`와 같은 `@sizeOf(EndedPurgeScratch) <= 512 KiB`를 고정하며 heap allocation은 0이다. prepare는 list backing/len/cap, 모든 descriptor,
-   byte counter, allocator provenance, event admission seal과 target/sibling 합계를 전수 검증하고 mutation/free 0이다. commit은 private
-   receipt만 먼저 tombstone한 뒤 inventory descriptor target slot의 immutable scalar에 대한 cleanup authority를 transaction이 취득한다.
+   byte counter, allocator provenance, event admission seal과 target/sibling 합계를 전수 검증하고 mutation/free 0이다. commit은
+   `EndedPurgePreparation.sealForCommit`으로 local transport receipt를 `committing`에 봉인한 뒤 inventory descriptor target slot의
+   immutable scalar에 대한 cleanup authority를 transaction이 취득한다.
    이는 slot bytes를 overlay하거나 tombstone한다는 뜻이 아니며 별도 full-size descriptor 배열도 만들지 않는다. exact-once lifecycle은
    작은 final-address transaction owner의 queue별 monotonic cleanup cursor가 소유하고, 각 cursor를 callback 전에 advance한다. 첫 callback
    전에 네 Client queue를 stable compact·target owner detach·counter publish한다. scratch의 원본 descriptor와
@@ -1061,17 +1062,24 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    pending outbound는 exact owned length를 합산한다. allocator 자체와 generation accounting ledger, observer, attachment, registry,
    lease 같은 borrowed authority는 capacity에 더하거나 quarantine에서 dereference/release/mutate하지 않는다. 이 검증과 cap 판정이 mutation
    0으로 모두 끝난 뒤 commit gate의 마지막 fallible step으로 process-global one-slot quarantine reservation을 잡는다. reservation 성공
-   뒤에는 receipt tombstone과 no-fail suffix만 남으므로 typed precommit failure가 reserved slot을 남기는 경로는 0이다. 정상 post-validation은 slot을 release한다.
-   구조 drift는 current pointer를 역참조하지 않고 canonical Client-owned deinit fields를 empty/null로 tombstone한 뒤 reservation을 exact once
-   영구 commit하고 `ownership=.quarantined_no_free` absorbing 상태와 최초 poison reason을 게시한다. 기존
+   뒤에는 preparation `committing` 전이와 no-fail suffix만 남으므로 typed precommit failure가 reserved slot을 남기는 경로는 0이다.
+   정상 post-validation은 slot을 release하되 node permit→transport receipt paired consume이 끝날 때까지 Client exclusive를 유지하고,
+   paired consume 뒤에만 exclusive를 clean release한다. 구조 drift는 current pointer를 역참조하지 않고 canonical
+   Client-owned deinit fields를 empty/null로 tombstone한 뒤 reservation을 exact once 영구 commit해 final-address `CommitReceipt`를 발급한다.
+   trusted Registry가 receipt를 exact once consume해 pointer-free proof를 발급하고, Client finalizer가 proof를 검증한 뒤
+   `ownership=.quarantined_no_free`, 최초 poison reason, `PreparedEndedPurgeCommit` consumed를 게시하고 terminal fence를 마지막으로
+   publish한다. 기존
    `Client.poison`/일반 deinit은 이 상태에서 allocator callback, descriptor dereference와 free를 0으로 하며 current fd를 다시 읽어 닫지 않는다.
    어떤 post-callback 구조/content drift에서도 captured/current fd를 닫지 않고 process lifetime까지 버린다. 정상 purge는 connection을 계속
    사용하므로 fd를 닫지 않는다. exact 순서는
-   `all target cleanup -> Client-owned deinit tombstone -> quarantine commit -> no-free poison -> node permit/transport receipt consume`이다. committed sticky latch 뒤 새 generation Client/reconnect/ended-purge
+   `all target cleanup -> Client-owned deinit tombstone -> quarantine commit+CommitReceipt -> trusted receipt consume+proof -> no-free poison ->
+   terminal fence -> node permit -> preparation transport receipt`이다. committed sticky latch 뒤 새 generation Client/reconnect/ended-purge
    admission은 terminal로 거부하므로 process lifetime 누적은 한 건·64 MiB를 넘지 않고 replay charge는 0이다. 이후 generic teardown은
    변조된 pointer·allocator·fd를 읽거나 free/close하지 않으며 남은 Client-owned allocation은 process lifetime까지 버린다. commit 전 오류는
-   typed error와 mutation 0이다. commit 뒤에는 정상/poison 모두 target exact-once cleanup 후 no-fail node permit/transport receipt
-   consume을 실행하고 public `.purged`로 정규화한다. poison 여부는 connection latch/테스트 oracle이 별도로 관측한다.
+   typed error와 mutation 0이다. commit 뒤에는 정상/poison 모두 target exact-once cleanup 후 no-fail node permit→preparation transport
+   receipt paired consume을 실행하고, 정상 경로는 그 뒤 Client exclusive clean release를 마지막으로 수행한 다음 public `.purged`로
+   정규화한다. paired consume의 suffix mismatch는 `@panic`이며 반쪽 정상 반환은 없다.
+   poison 여부는 connection latch/테스트 oracle이 별도로 관측한다.
 
    2c2는 2c1의 snapshot 전용 `InitialSnapshotPermit`/`active_snapshot_*`/process registry를
    `StreamOperationPermit { kind = initial_snapshot|ended_purge }`와 node의 단일 active-operation tuple로 rename·migration한다. 두 kind는 같은
@@ -1102,10 +1110,10 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    `targets` backing과 `out` storage를 겹치지 않게 제공해야 하며 b3b가 실제 scratch/out exact-alias preflight로 이 조건을 다시 검증한다.
    b3a는 Client queue/scratch/process state mutation,
    owner freeze, allocation/free, callback, reservation과 permit/receipt consume이 모두 0이며 이 단계만으로 target cleanup이나 2c2 완료를
-   주장하지 않는다. **b3b**가 exact preparation 재검증, reservation, receipt tombstone, scratch descriptor의 frozen-owner 전환,
+   주장하지 않는다. **b3b**가 exact preparation 재검증, reservation, `EndedPurgePreparation.sealForCommit`, scratch descriptor의 frozen-owner 전환,
    stable compaction·counter publish, 모든 target exact-once cleanup, post-validation, 정상 release 또는 no-free quarantine suffix와
    permit/receipt consume을 하나의 vertical transaction으로 배선한다. exact revalidation, cap 확인과 reservation까지는 typed precommit
-   failure를 허용하고 receipt tombstone 뒤 suffix만 no-fail이다. b3a plan은 권위가 아니며 b3b가 current queue ownership
+   failure를 허용하고 `EndedPurgePreparation.sealForCommit` 뒤 suffix만 no-fail이다. b3a plan은 권위가 아니며 b3b가 current queue ownership
    metadata와 sealed preparation을 다시 검증하기 전에는 publication에 사용할 수 없다. neutral module은 bitset projection, checked
    count/byte arithmetic와 scalar comparison만 소유한다. `client.zig`는 Client→DTO snapshot, canonical queue mutation과 private direct
    cleanup leaf만, `client_slot.zig`는 permit/receipt/quarantine orchestration만 소유한다. boundary oracle은 neutral module의 Client/
@@ -1113,9 +1121,11 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    b3a merge diff의 `client.zig`·`client_slot.zig` 변경은 0이다. b3b는 하나의 완료 표식으로 부분 구현을 숨기지 않고 내부 gate
    **B3b-F(Client operation fence)** → **B3b-S(Client substrate)** → **B3b-O(ClientSlot orchestration)** 순서로 닫는다.
    B3b-F는 direct Client API와 callback commit 사이의 cross-thread exclusion만 제공하고 stream/permit/binding 의미 권위를
-   복제하지 않는다. B3b-S는 Client prepare/commit과 hostile callback fixture를 완성하되 두 public transaction method의 test 밖
-   production caller를 0으로 고정한다. B3b-O에서만 `ClientSlot.commitEndedPurge`를 두 method의 exact-one caller로 열고
-   quarantine·receipt·permit 순서를 제품 경로에 배선한다. transport caller는 후속 gate가 열기 전까지 0이다.
+   복제하지 않는다. B3b-S는 Client prepare/commit/finalize와 hostile callback fixture를 완성하되 세 public transaction method의 test 밖
+   production caller를 0으로 고정한다. drift commit은 Client-owned graph tombstone까지만 수행하고 final-address
+   `PreparedEndedPurgeCommit`을 `finalization_pending`으로 남긴다. B3b-O에서만 `ClientSlot.commitEndedPurge`를 세 method의
+   exact-one caller로 열어 process quarantine commit 뒤 no-free poison finalization, 그 뒤 prevalidated node permit→
+   `EndedPurgePreparation` transport receipt paired consume 순서를 제품 경로에 배선한다. transport caller는 후속 gate가 열기 전까지 0이다.
    b3b는 코드 작성 전에 두 파일의 신규 top-level declaration exact
    allowlist와 baseline count를 문서·boundary fixture에 먼저 고정하고, allowlist 밖 declaration이나 neutral helper의 역이동이 있으면 실패한다.
 
@@ -1141,22 +1151,28 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
      generation과 fork child는 graph/fd/allocator read 및 atomic 접근 전에 거부한다. registry가 node를 해제한 뒤의 raw Client/fence
      pointer 사용은 일반적인 use-after-free이며 이 fence 계약의 입력이 아니다. `ClientSlot.tryDeinit`은 Client exclusive teardown이
      성공하기 전에는 registry/node를 해제하지 않아 제품 경로에서 그 입력을 만들지 않는다.
-   - B3b-S의 `client.zig` top-level 신규 exact allowlist는 import `ended_purge_transaction`,
-     `PreparedEndedPurgeCommit`, `EndedPurgeCommitError`, `EndedPurgeClientCommitOutcome` 네 개다. lifecycle, queue plan/cursor와
+   - B3b-S의 `client.zig` top-level 신규 exact allowlist는 import `ended_purge_transaction`, `ended_purge_quarantine`,
+     `PreparedEndedPurgeCommit`, `EndedPurgeCommitError`, `EndedPurgeClientCommitOutcome` 다섯 개다. `ended_purge_quarantine` 사용은
+     pointer-free `ConsumedCommitProof` 타입과 pure `matches`에만 한정하며 `Registry|Reservation|CommitReceipt|reserve|release|commit|
+     consumeCommitted` 이름은 Client production
+     body에서 0이다. lifecycle, queue plan/cursor와
      cleanup state는 `PreparedEndedPurgeCommit` nested declaration으로 둔다. `Client` 신규 method exact allowlist는 public
-     `prepareEndedPurgeCommit`, `commitEndedPurgePrepared`와 private
+     `prepareEndedPurgeCommit`, `commitEndedPurgePrepared`, `finalizeEndedPurgeNoFreePoison`과 private
      `tombstoneEndedPurgeOwnedGraph`, `publishEndedPurgeNoFreePoison`, `endedPurgeCompleteOwnerSeal`,
-     `endedPurgePostValidate`, `publishEndedPurgeCompaction`, `cleanupEndedPurgeTargetDirect` 여덟 개다. private mutation leaf는
-     `commitEndedPurgePrepared`의 no-fail suffix 외 production caller가 0이어야 한다. 기존 `ClientOwnership`에는
+     `endedPurgePostValidate`, `publishEndedPurgeCompaction`, `cleanupEndedPurgeTargetDirect` 아홉 개다. cleanup/compaction/tombstone leaf는
+     `commitEndedPurgePrepared`, poison leaf는 `finalizeEndedPurgeNoFreePoison`의 no-fail suffix 외 production caller가 0이어야 한다.
+     기존 `ClientOwnership`에는
      `quarantined_no_free` arm만 추가한다.
-   - `client_slot.zig` top-level 신규 exact allowlist는 import `ended_purge_quarantine`, process singleton
+   - B3b-S/O의 `client_slot.zig` top-level 신규 exact allowlist는 import `ended_purge_quarantine`, process singleton
      `ended_purge_quarantine_registry`, PID bootstrap latch `process_runtime_pid` 세 개뿐이다. `ClientSlot` nested declaration은
      `ProcessRuntimeInitError`, `EndedPurgeCommitError`, `EndedPurgeResult`, method `initializeProcessRuntime`, `commitEndedPurge`만, 기존
-     `EndedPurgePreparation`에는 lifecycle `consumed`와 method `tombstoneForCommit`만 허용한다. B3b-F가 먼저 추가하는 private
+     `EndedPurgePreparation`에는 lifecycle `committing|consumed`와 method `sealForCommit|consumeAfterPermit`만 허용한다.
+     preparation은 transport incarnation/binding과 node permit을 봉인한 local transport receipt이며 별도 receipt DTO를 추가하지 않는다.
+     B3b-F가 먼저 추가하는 별도 private exact allowlist의
      `RegisteredClientOperation{node}`와 `beginRegisteredClientOperation|endRegisteredClientOperation`은 process registry lock 아래
      `entry.node_addr == self.current`를 역참조 전에 확인하고 Client shared fence를 잡은 뒤, registry가 선택한 exact node capability로만
      release하는 계약이다. binding/stream-permit admission과 batch release aggregate 외 caller가 0이다.
-     B3b-F private allowlist의 `ExclusiveTeardownReservation{registry_entry,node}`와 다른 exact pair인
+     같은 B3b-F private exact allowlist의 `ExclusiveTeardownReservation{registry_entry,node}`와 다른 exact pair인
      `beginRegisteredExclusiveTeardown|abortRegisteredExclusiveTeardown`이 teardown reservation과 pre-callback rollback을 소유한다.
      teardown은 이 registered-exclusive 진입으로 PID·operation-thread를 mutex 전에 확인하고, process registry mutex를 잡은 채 exact
      ready node identity를 검증한 다음 Client exclusive fence를 획득한다. cleanup/batch/accounting/pin/active-operation 같은 mutable node
@@ -1167,27 +1183,50 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
      일반 stream-operation permit은 allocator callback TLS를 Client/node 역참조 없이 fence 진입 전에 검사한다. 예상된 allocator callback
      재진입은 `AdminBusy`만 반환하고 exclusive intrusion을 기록하지 않는다. fence-first intrusion이 필요한 `poison` 같은 fail-stop 경로와
      일반 admission 규칙을 혼합하지 않는다.
-   - 새 `ended_purge_quarantine.zig`의 public top-level exact API는 `max_ended_purge_quarantine_bytes`, `Error`, `Reservation`, `Registry` 네 개다.
+   - 새 `ended_purge_quarantine.zig`의 public top-level exact API는 `max_ended_purge_quarantine_bytes`, `Error`, `Reservation`,
+     `CommitReceipt`, `ConsumedCommitProof`, `Registry` 여섯 개다.
      이 모듈은 std 외 import, Client/allocator/callback/pointer payload를 갖지 않고 scalar process/node/operation identity와 bytes만 받는다.
      `Error`는 `InvalidOwner|InvalidState|ArithmeticOverflow|CapacityExceeded`다. final-address `Reservation`은 nested
      `Lifecycle{pristine,reserved,spent}`와 exact scalar fields
      `{self_addr,registry_addr,reservation_generation,process_id,node_incarnation,operation_generation,bytes,lifecycle}`만 가진다.
+     `CommitReceipt`는 final-address `Lifecycle{pristine,committed,consumed}`와 exact scalar fields
+     `{self_addr,registry_addr,reservation_generation,process_id,node_incarnation,operation_generation,bytes,lifecycle}`만 가지며 public method는
+     0이다. pointer-free/copyable `ConsumedCommitProof`는 exact scalar
+     `{reservation_generation,process_id,node_incarnation,operation_generation,bytes}`와 pure `matches`만 가지며 registry address, pointer,
+     lifecycle mutation API가 없다. proof 단독은 인증 capability나 권위가 아니고 exact `finalization_pending` preparation과 결합되는
+     correlation evidence다. semantic-exact scalar 재합성을 genuine proof와 런타임에서 구별한다는 주장은 하지 않는다. 제품 권위는
+     `ClientSlot.commitEndedPurge` exact-one source closure와 그 내부의 trusted `Registry.consumeCommitted→finalizer` 순서가 소유한다.
+     임의 in-process 코드 실행·동일 scalar 합성은 v1 위협 모델 밖이고, 별도 process-secret MAC을 추가해 가짜 보안 경계를 만들지 않는다.
      `Registry`는 nested `State{idle,reserved,committed}`, private fields
      `{mutex:std.atomic.Mutex,owner_process_id,state,next_generation,reserved_reservation_addr,reserved_generation,reserved_process_id,reserved_node_incarnation,
-     reserved_operation_generation,reserved_bytes,committed_bytes}`와 public
-     `init|reserve|release|commit`만 소유하며 heap allocation은 0이다. `init`은 fork 가능 시점 전에 parent PID를 immutable
+     reserved_operation_generation,reserved_bytes,committed_receipt_addr,committed_generation,committed_process_id,
+     committed_node_incarnation,committed_operation_generation,committed_bytes,finalization_consumed}`와 public
+     `init|reserve|release|commit|consumeCommitted`만 소유하며 heap allocation은 0이다.
+     `init`은 fork 가능 시점 전에 parent PID를 immutable
      `owner_process_id`로 pin하고, zero/default Registry의 다른 API는 lock 전 `InvalidOwner`/false로 거부한다. module은 private import이며
      제품 `ClientSlot.initializeProcessRuntime`의 process singleton 초기화 exact-one 외 `init` callsite는 0이다. `reserve`만 `Error!void`, `release|commit`은 validated reservation을
      no-fail로 consume한다. reserved state에서는 여섯 `reserved_*` scalar가 Reservation final address까지 포함한 canonical mirror이고,
      idle/committed에서는
-     모두 0이다. `committed_bytes`는 committed에서만 nonzero일 수 있어 reserved byte와 이중 의미로 재사용하지 않는다. pointer-bearing
-     field와 별도 force/reset API는 금지한다.
+     모두 0이다. committed에서는 여섯 `committed_*` mirror가 receipt final address까지 일치하고 `finalization_consumed`만 consume 때
+     false→true가 된다. `committed_bytes`는 committed에서만 nonzero일 수 있어 reserved byte와 이중 의미로 재사용하지 않는다. pointer-bearing
+     payload field와 별도 force/reset API는 금지한다. `commit`은 caller의 pristine final-address `CommitReceipt` out을 받아 reservation
+     consume과 committed mirror/receipt publish를 한 mutex critical section에서 끝낸다. `consumeCommitted`은 caller가 제공하는 trusted
+     `self:*Registry`에서 실제 PID를 lock 전에 검사하고 receipt final address와 registry mirror를 재검증한 뒤 receipt를 exact once consumed로
+     전환하고 pristine out에 pointer-free proof를 publish한다. receipt의 `registry_addr`를 trusted root로 역참조하지 않는다. sticky committed
+     quarantine state 자체는 유지한다. consume 성공은 registry의 `committed_receipt_addr`를 0으로 지워 stack receipt address를 보존하지
+     않고 `finalization_consumed=true`로 replay를 막으며 나머지 committed scalar는 진단용으로 유지한다.
+     `commit`은 Registry/Reservation/CommitReceipt out의 exact·partial overlap과 non-pristine out을 lock 안의 state mutation 전에 거부하고
+     reservation/registry/out을 byte-for-byte 보존한다. `consumeCommitted`도 trusted Registry/receipt/proof out overlap, non-pristine proof,
+     receipt mirror drift를 receipt field 기반 pointer dereference 없이 거부한다. ClientSlot preflight는 receipt/proof storage와
+     Client/fence/prepared/preparation/scratch/inventory의 exact·partial overlap까지 callback 전에 추가로 닫는다.
      exact API는 `init() Registry`, `reserve(self:*Registry,node_incarnation:u64,operation_generation:u64,bytes:usize,out:*Reservation) Error!void`,
-     `release(self:*Registry,reservation:*Reservation) bool`, `commit(self:*Registry,reservation:*Reservation) bool`이다. 세 method가
-     실제 PID를 내부에서 먼저 읽어 검증하므로 caller-supplied PID를 신뢰하지 않는다. 상한 const는 exact
+     `release(self:*Registry,reservation:*Reservation) bool`,
+     `commit(self:*Registry,reservation:*Reservation,out:*CommitReceipt) bool`,
+     `consumeCommitted(self:*Registry,receipt:*CommitReceipt,out:*ConsumedCommitProof) bool`이다.
+     네 transition method가 실제 PID를 내부에서 먼저 읽어 검증하므로 caller-supplied PID를 신뢰하지 않는다. 상한 const는 exact
      `max_ended_purge_quarantine_bytes: usize = 64 * 1024 * 1024`다.
 
-   `PreparedEndedPurgeCommit`은 final-address `pristine|prepared|consumed` owner다. nested declaration은 `Lifecycle` 하나뿐이고,
+   `PreparedEndedPurgeCommit`은 final-address `pristine|prepared|finalization_pending|consumed` owner다. nested declaration은 `Lifecycle` 하나뿐이고,
    exact field allowlist는 아래에 열거한 18개뿐이며 boundary가 container가 생기는 순간 member tuple을 검사한다. 정확한 scalar schema는
    `self_addr`, `client_addr`, `scratch_addr`, `inventory_addr`, `target_stream`, `captured_fd`,
    `complete_owned_extent_bytes`, `complete_owner_seal`, `pre_callback_survivor_seal`, batch/stream/event/partial 네 pointer-free
@@ -1212,16 +1251,23 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    `pending_outbound` frozen descriptor는 `{frame_address,frame_len,stream_id,offset}`이며 allocator provenance는 complete graph의 Client
    allocator identity/seal에 한 번만 포함한다. prepare는 `offset <= frame_len`, address+len overflow, scratch/commit/inventory/queue
    backing과의 exact·partial alias, frame contents와 allocator provenance를 payload dereference 전에 검증한다. 정상 purge와 모든 precommit
-   실패는 `pending_outbound`를 byte-for-byte 보존한다. receipt tombstone 뒤 callback drift suffix만 descriptor를 다시 읽지 않고 frozen
+   실패는 `pending_outbound`를 byte-for-byte 보존한다. `EndedPurgePreparation.sealForCommit` 뒤 callback drift suffix만 descriptor를 다시 읽지 않고 frozen
    scalar를 먼저 재검증한 뒤 Client field를 null tombstone하며, captured frame은 free하지 않고 complete graph와 함께 단일 quarantine
    charge에 귀속한다. scalar 검증 실패도 dereference/free 0으로 같은 absorbing `quarantined_no_free`에 합류한다.
 
    정확한 public 결과 계약은 Client의 `EndedPurgeCommitError = error{InvalidOwner,InvalidState,Corrupt,ArithmeticOverflow,
-   DestinationOccupied}`와 `EndedPurgeClientCommitOutcome = enum{clean,drift}`, ClientSlot의
+   DestinationOccupied}`와 `EndedPurgeClientCommitOutcome = enum{clean,drift_pending_finalize}`, ClientSlot의
    `EndedPurgeCommitError = error{InvalidOwner,InvalidState,Busy,Corrupt,ArithmeticOverflow,DestinationOccupied,
    QuarantineUnavailable}`와 `EndedPurgeResult = enum{purged}`다. `prepareEndedPurgeCommit`은 prepared output을 받아 typed precommit
-   error만 반환하고, `commitEndedPurgePrepared`는 receipt 뒤 no-fail outcome만 반환한다. `ClientSlot.commitEndedPurge`는 정상과
-   postcallback drift를 모두 `.purged`로 정규화하고 poison/quarantine 여부는 Client terminal state와 진단 reason에서만 관측한다.
+   error만 반환한다. `commitEndedPurgePrepared`는 `EndedPurgePreparation.sealForCommit` 뒤 no-fail cleanup을 수행하며 clean은
+   `PreparedEndedPurgeCommit`을 consumed로, drift는 Client-owned graph를 tombstone한 뒤 `PreparedEndedPurgeCommit`을
+   `finalization_pending`으로 만든다. 이 시점에는 poison, terminal fence,
+   process quarantine commit이 모두 0이다. `finalizeEndedPurgeNoFreePoison`은 exact pending preparation만 받아 no-fail로
+   `quarantined_no_free` ownership, 최초 poison reason과 terminal fence를 게시하고 `PreparedEndedPurgeCommit`을 consumed로 만든다. 이 finalizer는
+   B3b-O가 이미 commit한 quarantine reservation을 되돌릴 수 없는 no-fail suffix이므로 identity/lifecycle 불일치는 복구나 no-op 대신
+   process invariant fail-stop이다.
+   `ClientSlot.commitEndedPurge`는 정상과 postcallback drift를 모두 `.purged`로 정규화하고 poison/quarantine 여부는 Client terminal state와
+   진단 reason에서만 관측한다.
 
    public signature는 다음으로 고정한다.
 
@@ -1242,10 +1288,55 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
        inventory: *const PreparedEndedPurgeInventory,
        prepared: *PreparedEndedPurgeCommit,
    ) EndedPurgeClientCommitOutcome
+
+   pub fn finalizeEndedPurgeNoFreePoison(
+       self: *Client,
+       operation_generation: u64,
+       prepared: *PreparedEndedPurgeCommit,
+       quarantine_proof: ended_purge_quarantine.ConsumedCommitProof,
+   ) void
+
+   pub fn commitEndedPurge(
+       self: *ClientSlot,
+       scratch: *client_mod.EndedPurgeScratch,
+       preparation: *EndedPurgePreparation,
+   ) EndedPurgeCommitError!EndedPurgeResult
+
+   pub fn sealForCommit(
+       self: *EndedPurgePreparation,
+       slot: *ClientSlot,
+   ) bool
+
+   pub fn consumeAfterPermit(
+       self: *EndedPurgePreparation,
+       slot: *ClientSlot,
+   ) bool
    ```
 
+   `EndedPurgePreparationLifecycle`의 exact arms는 `empty|prepared|committing|consumed|aborted`다.
+   `ClientSlot.commitEndedPurge`의 preparation은 `prepareEndedPurge`가 같은 final address에 게시한 exact owner이고 별도 inventory,
+   permit, binding 또는 transport receipt 인자를 받지 않는다. `sealForCommit`은 preparation/slot/PID/thread/binding/permit/inventory
+   seal과 paired-consume precondition을 전부 확인한 뒤 `prepared→committing`만 게시한다. fields는 synchronous commit이 끝날 때까지
+   immutable evidence로 남고 authority seal은 committing lifecycle을 포함해 다시 봉인된다. 이 전이 뒤 abort/retry/다른 commit은 0이다.
+   `consumeAfterPermit`은 prevalidated no-fail suffix에서 node permit이 exact unchecked consume된 직후 `committing→consumed`만 게시하며,
+   lifecycle/seal mismatch 또는 permit이 아직 live이면 `false`이고 caller는 즉시 `@panic`한다. consumed preparation의 retained scalar는
+   진단 evidence일 뿐 다시 dereference하거나 authority로 사용하지 않는다. clean과 drift 모두 node permit→preparation transport receipt
+   사이에 callback, lock, allocation, fallible lookup과 public reentry가 0이며 둘 중 하나만 consumed인 정상 반환은 없다.
+
    PID와 final-address Client/fence identity는 bound `ClientOperationFence`가 내부에서 검증하며 caller scalar를 신뢰하지 않는다.
-   B3b-S에서는 두 method의 test 밖 production caller가 0이고 B3b-O에서만 `ClientSlot.commitEndedPurge`가 각각 exact once 호출한다.
+   finalizer는 registry/callback/pointer receipt를 받지 않고 pointer-free consumed proof와 sealed preparation identity를 검증한다. exact 순서는
+   `proof/preparation scalar validate → ownership=no_free+first reason → PreparedEndedPurgeCommit consumed →
+   commitExclusiveTerminal(last publication)`이다. terminal을 관측한 스레드는 이미 poison fields와
+   `PreparedEndedPurgeCommit` consumed를 함께 본다.
+   B3b-O source/runtime gate가 `Registry.commit → Registry.consumeCommitted → finalizer` 뒤 node permit→transport receipt paired consume
+   순서를 고정한다. validated `Registry.commit`, `consumeCommitted`, finalizer identity/lifecycle/seal/proof 또는 terminal publication이 실패하면
+   `@panic`으로 process fail-stop하며 복구나 후속 consume을 시도하지 않는다. 별도 non-test subprocess fixture가 Debug/ReleaseFast에서
+   2초 watchdog 안의 abnormal nonzero exit와 failure marker 뒤 code path 0을 고정한다. B3b-S에서는 세 method의 test 밖 production
+   caller가 0이고 B3b-O에서만 `ClientSlot.commitEndedPurge`가 각 method의 production source callsite exact one이다. runtime에서
+   finalizer는 drift에 exact once, clean에 0회다.
+   proof의 mismatched/cross-operation/cross-node scalar와 consumed preparation replay는 fail-stop하지만, trusted call이 전달한
+   semantic-exact proof copy는 같은 correlation evidence다. production source closure 밖의 임의 direct finalizer call은 compile/source gate의
+   위반이며 런타임 인증 경계를 주장하지 않는다.
 
    `ClientOperationFence`는 `owner_process_id`, `self_addr`, `client_addr`, `slot_incarnation`, `node_incarnation`,
    `fence_generation`의 immutable identity와 `std.atomic.Value(u64)` 하나를 가진다. state의 low 31 bit는 public mutation
@@ -1256,13 +1347,16 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    `0→exclusive` CAS로 잡으며 기다리거나 spin하지 않는다. shared가 먼저면 commit은 mutation/callback 0의 Busy, exclusive가
    먼저면 새 public mutation은 Client graph/fd/allocator를 읽지 않고 AdminBusy/기존 busy result/void no-op으로 끝나며 intrusion만
    atomic OR한다. `tryDeinit`은 false, `deinit`은 no-op, `poison`은 Client를 바꾸지 않고 intrusion만 기록한다. commit의 private
-   no-fail leaf는 public API를 재호출하지 않는다. clean이고 intrusion/fd/owner drift가 없을 때만 exclusive를 0으로 release하고,
-   drift는 terminal bit를 publish한 뒤 quarantine suffix로 간다. TLS allocator latch는 same-thread 진단일 뿐 concurrency 권위가 아니다.
+   no-fail leaf는 public API를 재호출하지 않는다. Client-local commit은 clean과 drift 모두 exclusive를 유지한다. B3b-O의 clean path만
+   quarantine reservation release와 node permit→transport receipt paired consume이 모두 끝난 뒤 exclusive를 마지막으로 0에 release한다.
+   drift commit은 graph tombstone과 `finalization_pending`만 게시하고,
+   ClientSlot의 quarantine commit 뒤 exact finalizer가 terminal bit와 poison을 게시한다. TLS allocator latch는 same-thread 진단일 뿐
+   concurrency 권위가 아니다.
    fence의 exact field order는 `{self_addr,client_addr,owner_process_id,slot_incarnation,node_incarnation,fence_generation,state}`이고
    상수는 `{shared_count_mask,reserved_mask,terminal_bit,intrusion_bit,exclusive_bit}`다. exact method allowlist는
    `initInPlace|tryEnterShared|leaveShared|tryAcquireExclusive|intruded|abortExclusive|releaseExclusiveClean|
    commitExclusiveTerminal|identityMatches`다. `abortExclusive`는 callback/mutation 전 teardown preflight가 실패했을 때만
-   exclusive와 거부된 intrusion bit를 함께 0으로 되돌리며 ended-purge receipt tombstone 뒤에는 caller가 0이다.
+   exclusive와 거부된 intrusion bit를 함께 0으로 되돌리며 `EndedPurgePreparation.sealForCommit` 뒤에는 caller가 0이다.
    B3b-F는 실제 post-publication critical entry의 fence-before-TLS/body 순서와 ClientSlot aggregate caller를 executable source oracle로
    먼저 고정한다. 모든 기존 public API를 (1) post-publication product read/mutation entry, (2) publication 전 standalone/external-pump
    construction API, (3) ClientSlot permit/receipt가 단독 호출하는 authority-bearing unchecked suffix, (4) immutable/atomic-only
@@ -1368,11 +1462,14 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    B3b-O caller는 `ClientSlot.commitEndedPurge` exact one이다. ClientSlot teardown 전용 세 wrapper는 `ClientSlot.tryDeinit`에서만
    각각 exact once 호출한다.
 
-   `complete_owner_seal`은 `captured_fd` 숫자뿐 아니라 callback 전 `fstat`의 `{st_dev,st_ino,st_mode&S_IFMT}`를 domain
-   `maru.ended-purge.complete-owner.v1`에 포함한다. post-validation은 pointer/len/cap/fd scalar를 먼저 비교하고 안전할 때만
-   current fd를 정확히 한 번 `fstat`해 seal을 재계산한다. EBADF 또는 identity 불일치는 drift이고 captured/current fd를 close하거나
-   write하지 않는다. 같은 번호로 다른 socket/file을 `dup2`한 ABA는 반드시 drift이며, 같은 underlying open-file description을
-   복제해 identity가 동일한 경우만 같은 owner로 취급한다.
+   blocking generation Client fd는 callback 전에 `fstat`의 `S_IFSOCK`과 `getsockopt(SO_TYPE)==SOCK_STREAM`을 반드시 만족해야 한다.
+   `complete_owner_seal`은 `captured_fd` 숫자와 `{st_dev,st_ino,st_mode&S_IFMT,SO_TYPE}`을 domain
+   `maru.ended-purge.complete-owner.v1`에 포함한다. post-validation은 pointer/len/cap/fd scalar를 먼저 비교하고 안전할 때만 current fd를
+   정확히 한 번 `fstat`+`getsockopt`해 seal을 재계산한다. EBADF, non-socket, non-stream 또는 identity 불일치는 drift이고
+   captured/current fd를 close하거나 write하지 않는다. 이 tuple은 CI fixture에서 지원하는 close→new socket/file `dup2` 교체를 탐지하는
+   best-effort evidence이지 커널이 보장하는 connection-unique cookie나 open-file-description identity가 아니다. 같은 tuple이 재사용되는
+   coherent raw fd 교체의 완전한 탐지·복구는 비목표이며, allocator callback이 Maru owner fd를 직접 close/rebind하는 행위는 지원 계약 밖의
+   fail-stop 위협으로 분류한다.
 
    `ClientSlot.initializeProcessRuntime`은 macOS `AppSession.init`의 첫 session-host 동작이며 PTY/session-host helper를 포함한
    fork 가능 작업보다 먼저 exact once 호출된다. 같은 PID의 반복 호출은 idempotent이고, 다른 PID에서 상속한 호출은
@@ -1393,13 +1490,20 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    `InvalidOwner`로 거부한다.
    reservation은 process id를 seal에 포함하고 `reserve|release|commit` 모두 lock 전 PID gate를 반복한다. RED는 parent가 registry mutex를
    잡은 상태에서 fork한 child가 bounded 시간 안에 PID 조회 외 syscall 0, lock/callback/mutation 0으로 거부되는지를 검증한다.
+   `consumeCommitted`도 trusted Registry mutex 전에 PID를 반복 검증하며, Client finalizer는 proof/preparation/fence atomic이나 Client graph
+   접근 전에 PID를 검사한다. fork child의 direct finalizer는 graph/receipt/permit mutation 0의 `@panic` subprocess death로 닫는다.
 
    `Client.prepareEndedPurgeCommit`은 current graph/profile/alias를 전부 다시 검증하고 b3a plans, complete deinit extent/seal과 captured fd를
    준비하지만 mutation/callback/free는 0이다. `ClientSlot.commitEndedPurge`가 preparation·permit·binding을 재검증한 뒤
-   `ended_purge_quarantine.Registry.reserve`를 마지막 fallible step으로 호출하고, preparation/commit receipt를 tombstone한 다음에만
-   `Client.commitEndedPurgePrepared` no-fail suffix로 진입한다. 정상 outcome은 reservation release, drift outcome은
-   `tombstoneEndedPurgeOwnedGraph -> Reservation.commit -> publishEndedPurgeNoFreePoison` 순서다. `client_slot.zig`는 raw queue field를
-   순회하거나 payload를 dereference/free하지 않고, `client.zig`는 permit/receipt/quarantine registry를 import하거나 조작하지 않는다.
+   `ended_purge_quarantine.Registry.reserve`를 마지막 fallible step으로 호출하고, `EndedPurgePreparation.sealForCommit`으로 local
+   transport receipt를 `committing`에 봉인한 다음에만 `Client.commitEndedPurgePrepared` no-fail suffix로 진입한다. 정상 outcome은
+   `Reservation.release -> node permit consume -> EndedPurgePreparation.consumeAfterPermit -> Client exclusive clean release(last)`, drift outcome은
+   `tombstoneEndedPurgeOwnedGraph -> Registry.commit(+CommitReceipt) -> Registry.consumeCommitted(+ConsumedCommitProof) ->
+   finalizeEndedPurgeNoFreePoison -> node permit consume -> EndedPurgePreparation.consumeAfterPermit` 순서다. clean은 paired consume 뒤에만
+   exclusive를 풀고, drift는 terminal fence가 이미 absorbing 상태다.
+   `client_slot.zig`는 raw queue field를 순회하거나 payload를 dereference/free하지 않는다. `client.zig`는 scalar-only
+   pointer-free `ConsumedCommitProof.matches` 외 permit/transport receipt/quarantine
+   `Registry|Reservation|CommitReceipt|reserve|release|commit|consumeCommitted`을 import하거나 조작하지 않는다.
 
    아래 표의 제외는 정상 purge와 모든 precommit failure가 payload cleanup authority를 소비하지 않는다는 뜻이다. postcommit callback 뒤
    Client-owned deinit graph drift가 확인된 terminal suffix만 그 owner를 개별 정리하거나 권위를 넘기지 않고 no-free 상태로 버린다.

@@ -745,26 +745,56 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   commit 뒤 disarm을 검증한다.
   B3b-S는 blocking generation-only complete Client-owned deinit graph 64 MiB checked cap, `pending_outbound` owner SSOT, private immutable/no-escape scratch,
   별도 advance-before-callback cleanup cursor, stable compaction/counter publication, all-target exact-once callback, scalar-first post-validation과
-  absorbing `quarantined_no_free` poison을 caller 0인 Client-local transaction으로 완성한다. 실제 ClientSlot permit/receipt/quarantine 배선은
-  B3b-O만 소유한다. private scratch의 coherent arbitrary overwrite와 cleanup authority 밖에서
+  absorbing `quarantined_no_free` poison을 caller 0인 Client-local transaction으로 완성한다. drift commit은 graph tombstone 뒤 sealed
+  preparation을 `finalization_pending`으로 남기고 poison/terminal/quarantine mutation은 0이다. 실제 ClientSlot permit/receipt/quarantine 배선은
+  B3b-O만 소유하며 clean은 reservation release 뒤 node permit→transport receipt를 paired consume하고 Client exclusive clean release를
+  마지막으로 수행한다. drift는 quarantine commit이 발급한 exact-once
+  `CommitReceipt`를 trusted `Registry.consumeCommitted`가 consume해 pointer-free `ConsumedCommitProof`를 발급한 뒤 finalizer가
+  proof를 검증하고 poison fields/`PreparedEndedPurgeCommit` consumed를 게시하며 terminal fence를 마지막으로 publish한다.
+  finalizer identity/lifecycle/proof mismatch와 validated quarantine commit 실패는 `@panic` process fail-stop이다.
+  private scratch의 coherent arbitrary overwrite와 cleanup authority 밖에서
   이미 수행된 deallocation의 탐지·복구만 비목표이며 public reentry·canonical drift·allocator provenance/alias gate는 유지한다.
   b3b executable gate는 callback 전후 scratch byte 동일/no-escape, first/middle/last callback 진입 때 cursor가 이미 다음 ordinal인 관측,
   outer/scalar/survivor drift, outer/scalar
   mismatch의 payload read/hash 0, scalar exact/content drift의 payload hash exact 1, 모든 원 target callback exact 1, stable survivor order,
-  public reentry `busy`, normal/drift permit·receipt exact-one consume, exact drift suffix 순서, one-slot sticky/64 MiB/replay charge 0,
+  public reentry `busy`, normal/drift prevalidated node permit→preparation transport receipt paired consume, clean exclusive-last와 exact drift suffix 순서,
+  one-slot sticky/64 MiB/replay charge 0,
   모든 postcallback drift의 fd close 0, callback close→same-number `dup2` fd identity ABA의 fstat drift, `.not_ended` 대형 scratch 0을 고정한다.
-  B3b-S에서 Client prepare/commit의 test 밖 production caller는 0이고, B3b-O에서 ClientSlot method 하나만 각각 exact once 호출한다. direct cleanup leaf가
+  generation Client fd의 precondition은 `S_IFSOCK`+`SO_TYPE=SOCK_STREAM`이며 CI fixture의 close→new socket, regular file, EBADF
+  same-number 교체는 drift, replacement fd close/write 0이다. tuple 재사용이 불가능하다는 일반 socket/OFD identity 보장은 주장하지 않고,
+  coherent raw fd 교체는 지원 밖 fail-stop 위협이다.
+  B3b-S는 valid `finalization_pending`만으로 finalizer를 호출하거나 copied/moved/same-address-reset preparation, old/cross
+  operation generation, missing/copied/old/cross-registry `CommitReceipt` 또는 mismatched/cross-operation proof를 주입하면 Client/fence/preparation mutation 0 뒤 subprocess
+  `@panic` abnormal nonzero exit임을 Debug/ReleaseFast 2초 watchdog으로 고정한다. receipt consume 뒤에는 ownership/first reason,
+  `PreparedEndedPurgeCommit` consumed, terminal-last publication 순서이며 terminal 관측자는 앞 필드를 모두 final로 본다. B3b-O는 reservation mirror drift로
+  `Registry.commit`이 false인 경우 finalizer/poison/terminal/node permit/transport receipt consume 0 뒤 같은 fail-stop을 검증한다.
+  node permit과 preparation transport receipt는 callback 전 함께 prevalidate하고 suffix에 allocation/lock/fallible lookup 0으로 permit부터
+  consume한다. 둘 중 하나의 stale/copy/splice는 precommit 양쪽 보존이고 committing 뒤 mismatch는 process death이며 반쪽 정상 반환은 0이다.
+  clean suffix의 reservation release 뒤, node permit consume 뒤, transport receipt consume 뒤 barrier마다 concurrent public Client call은
+  exclusive clean release 전까지 `busy`이고 Client/queue/fd mutation 0이며, exclusive clean release 뒤에만 새 public mutation이 성공한다.
+  terminal publish 뒤 paired consume mismatch fixture는 다른 thread가 node destroy/reuse를 관측하기 전에 watchdog이 즉시 abnormal exit를
+  회수하고, 정상 반환·추가 callback·다음 admission marker가 0임을 고정한다.
+  `Registry.commit` receipt out과 Registry/Reservation, `consumeCommitted` proof out과 Registry/receipt의 exact·partial alias는 false와
+  모든 입력 byte 보존이며, ClientSlot은 두 out과 Client/fence/prepared/preparation/scratch/inventory alias를 precommit typed error로 닫는다.
+  Client는 quarantine Registry/Reservation/pointer receipt나 임의 callback을 받지 않고 pointer-free consumed proof만 검증한다.
+  B3b-S에서 Client prepare/commit/finalize의 test 밖 production caller는
+  0이고, B3b-O에서 ClientSlot method 하나만 각각 exact once 호출한다. direct cleanup leaf가
   reentry-guarded public release API를 호출하지 않고, neutral module은 pure helper만, `client.zig`는 DTO adapter/queue mutation/direct cleanup만,
   `client_slot.zig`는 permit/receipt/quarantine orchestration만 소유하는지 source boundary로 검사한다.
   doc-first source gate는 AST canonical `(parent,kind,visibility,modifier,name)` inventory로 root와 owner container를 검사하고,
   허용 tuple 제외 baseline client(root+Client+EndedPurgeScratch+PreparedEndedPurgeInventory)=527/SHA-256
   `594178e6c653e30be0ddc64564d2783922e0c0b4895c3543479f86e5977db6fd`,
   client_slot(root+ClientSlot+EndedPurgePreparation)=126/SHA-256 `03a92a146dbf8935466d0b9250b09c884d575f15fc148f73c6db8979bc69d968`를
-  함께 고정한다. client top-level delta는 `ClientOperationFence|ended_purge_transaction|PreparedEndedPurgeCommit|EndedPurgeCommitError|
+  함께 고정한다. client top-level delta는 `ClientOperationFence|generationAllocatorCallbackActive|ended_purge_transaction|ended_purge_quarantine|
+  PreparedEndedPurgeCommit|EndedPurgeCommitError|
   EndedPurgeClientCommitOutcome`, client_slot delta는 `ended_purge_quarantine|ended_purge_quarantine_registry|process_runtime_pid`만 허용한다. nested
   Client/ClientSlot/EndedPurgePreparation method/type도 persistent-session-host의 exact allowlist 밖 증가는 실패한다. 새
   `ended_purge_quarantine.zig`는 std 외 import·allocator·Client·callback·payload pointer 0, public API
-  `max_ended_purge_quarantine_bytes|Error|Reservation|Registry` exact 네 개와
+  `max_ended_purge_quarantine_bytes|Error|Reservation|CommitReceipt|ConsumedCommitProof|Registry` exact 여섯 개와
+  nested `Reservation.Lifecycle`, `CommitReceipt.Lifecycle`, `ConsumedCommitProof.matches`,
+  `Registry.State|init|reserve|release|commit|consumeCommitted` 및 persistent-session-host의 exact field schema를 함께 고정한다.
+  proof는 runtime authentication capability가 아니므로 semantic-exact scalar copy를 거부한다고 주장하지 않고, B3b-O exact caller와
+  `Registry.consumeCommitted→finalizer` source order가 제품 authenticity를 소유한다.
   `ClientSlot.initializeProcessRuntime`을 AppSession의 fork 가능 작업 전에 명시적으로 호출하고 pre-fork parent PID `init` exact-one과
   같은 PID idempotence, non-test `process_runtime_bootstrap_fixture.zig`의 미초기화 ClientSlot 생성 거부와 bootstrap 뒤 실제
   ClientSlot 생성·valid·deinit 및 macOS fork child의 mutex-before-reject 0,
@@ -772,8 +802,9 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   single winner·exact release, `idle|reserved|committed`/reserve-release-commit/replay/cap/cap+1을 Debug/ReleaseFast로 검증한다.
   `pending_outbound` non-null도 build/lifecycle과 함께 frozen scratch descriptor, complete-owner sum/alias/seal/postvalidation/tombstone에
   포함하며 b2의 기존 adoption-only null 가정을 purge authority로 재사용하지 않는다.
-  AST gate는 `PreparedEndedPurgeCommit`이 나타나면 exact `Lifecycle`+18 fields를 검사하고,
-  `ClientOwnership.quarantined_no_free`와 `EndedPurgePreparationLifecycle.consumed` 외 enum 증분을 거부한다. 두 신규 import는 raw substring이
+  AST gate는 `PreparedEndedPurgeCommit`이 나타나면 exact `Lifecycle{pristine,prepared,finalization_pending,consumed}`+18 fields를 검사하고,
+  `ClientOwnership.quarantined_no_free`와
+  `EndedPurgePreparationLifecycle{empty,prepared,committing,consumed,aborted}` 외 enum 증분을 거부한다. 각 신규 import는 raw substring이
   아니라 AST initializer가 exact `@import`인지 검사한다. fork-child RED는 모든 process-global lock 전 PID 거부를 고정한다.
   generation 1 compatibility wiring으로 GUI raw `RemoteRuntime.client=*Client`와
   `AttachmentTransport.context=*Client` production callsite 0, GUI-only final-address `GenerationAttachment.initInPlace`,
@@ -853,7 +884,7 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   byte-for-byte 불변이다. postcommit drift에서는 Client-owned parser allocation만 no-free로 버리고 borrowed authority는 불변이다.
 
   commit은 immutable target descriptor scalar에 대한 cleanup authority를 취득하되 slot bytes를 overlay하지 않고, 별도 small cursor를
-  callback 전에 advance해 exact-once를 소유한다. 별도 full-size 배열은 0이며 receipt tombstone과 네
+  callback 전에 advance해 exact-once를 소유한다. 별도 full-size 배열은 0이며 `EndedPurgePreparation.sealForCommit`과 네
   queue stable compaction·최종 counter publish가 첫 free callback보다 앞섬을 callback 관측으로 검증한다. receipt copy·wrong
   thread·same-address replay·binding/slot/node/transport splice, commit 직전 queue
   drift, first/middle/last free callback의 public API 재진입은 attachment/slot/client mutation `busy`와 sibling 순서·bytes·counter 보존을
@@ -863,9 +894,12 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   target descriptor는 callback 전에 전부 freeze되어 exact once free됨을 고정한다. node permit은 마지막 callback과 post-callback 검증까지
   live이다. callback 중 canonical queue/source reread는 0이고 마지막 callback 뒤 frozen survivor descriptor/range seal과 current
   queue ownership metadata를 비교하는 post-validation은 정확히 한 번뿐이다. 구조 drift면 payload pointer를 역참조하지 않고 canonical
-  Client-owned deinit fields를 empty/null로 tombstone하고 quarantine을 commit한 뒤 absorbing `quarantined_no_free` poison을 게시해 generic teardown의
+  Client-owned deinit fields를 empty/null로 tombstone하고 quarantine commit+trusted receipt consume으로 pointer-free proof를 발급한 뒤
+  absorbing `quarantined_no_free` poison fields와 `PreparedEndedPurgeCommit` consumed를 게시하고 terminal fence를 마지막으로 publish해 generic teardown의
   pointer/allocator/fd read와 free/close를 0으로 만든다. drift의 exact
-  suffix 순서는 `all target cleanup -> Client-owned deinit tombstone -> quarantine commit -> no-free poison -> node permit/transport receipt consume`이다. 어떤 postcallback drift에서도 fd close는 0이다. callback 전
+  suffix 순서는 `all target cleanup -> Client-owned deinit tombstone -> Registry.commit(+CommitReceipt) ->
+  Registry.consumeCommitted(+ConsumedCommitProof) -> no-free poison + PreparedEndedPurgeCommit consumed -> terminal fence -> node permit ->
+  EndedPurgePreparation transport receipt`이다. 어떤 postcallback drift에서도 fd close는 0이다. callback 전
   process-global `idle->reserved`와 blocking generation Client complete owned extent checked sum `<= max_ended_purge_quarantine_bytes(64 MiB)`, 정상 release, drift exact-once
   `reserved->committed`, replay charge 0, committed 뒤 새 generation Client/reconnect/purge terminal 거부를 검증해 process 누적을 한 건으로
   고정한다. deinit owner SSOT는 build/lifecycle/pending outbound와 slice payload의 exact owned length, parser/list/partial capacity backing을

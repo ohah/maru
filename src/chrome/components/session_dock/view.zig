@@ -10,6 +10,7 @@ const text_layout = @import("../../text_layout.zig");
 const interaction = @import("../../ui/interaction.zig");
 const ui_paint = @import("../../ui/paint.zig");
 const tree = @import("../../ui/tree.zig");
+const typography = @import("../../ui/typography.zig");
 const build = @import("build.zig");
 const types = @import("types.zig");
 
@@ -45,19 +46,19 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
     };
 
     const header = find(frame.tree, build.NodeIds.header) orelse return error.MissingRect;
-    try writer.textStrong(header, 0, "AI 세션 기록", .surface_fg, 2, false, true);
+    try writer.textStrong(header, 0, "AI 세션 기록", .surface_fg, .dock_heading, 2, false, true);
     var count_buf: [48]u8 = undefined;
     const count = std.fmt.bufPrint(&count_buf, "{d}개 표시 · 최근 {d}개", .{ props.displayed_count, props.recent_limit }) catch "";
-    try writer.text(header, 1, count, .muted_fg, 2, false, true);
+    try writer.text(header, 1, count, .muted_fg, .supporting, 2, false, true);
     try writer.headerLabel(header, host_label);
     try writer.textRight(header, if (props.loading or props.refreshing) spinner(props.spinner_phase) else refresh_icon, if (props.loading or props.refreshing) .muted_fg else .surface_fg, !(props.loading or props.refreshing));
 
-    try writer.text(find(frame.tree, build.NodeIds.scope_workspace) orelse return error.MissingRect, 0, "작업공간", .surface_fg, 1, false, true);
-    try writer.text(find(frame.tree, build.NodeIds.scope_project) orelse return error.MissingRect, 0, "프로젝트", .surface_fg, 1, false, true);
-    try writer.text(find(frame.tree, build.NodeIds.scope_all) orelse return error.MissingRect, 0, "전체", .surface_fg, 1, false, true);
+    try writer.text(find(frame.tree, build.NodeIds.scope_workspace) orelse return error.MissingRect, 0, "작업공간", .surface_fg, .control, 1, false, true);
+    try writer.text(find(frame.tree, build.NodeIds.scope_project) orelse return error.MissingRect, 0, "프로젝트", .surface_fg, .control, 1, false, true);
+    try writer.text(find(frame.tree, build.NodeIds.scope_all) orelse return error.MissingRect, 0, "전체", .surface_fg, .control, 1, false, true);
     const search = find(frame.tree, build.NodeIds.search) orelse return error.MissingRect;
-    try writer.textInset(search, 0, search_icon, .muted_fg, 1, true, true, 1);
-    try writer.textInset(search, 0, if (props.search.len == 0) "세션 검색" else props.search, if (props.search.len == 0) .muted_fg else .surface_fg, 1, false, true, 4);
+    try writer.textInset(search, 0, search_icon, .muted_fg, .control, 1, true, true, 1);
+    try writer.textInset(search, 0, if (props.search.len == 0) "세션 검색" else props.search, if (props.search.len == 0) .muted_fg else .surface_fg, .control, 1, false, true, 4);
 
     if (props.loading and props.items.len == 0) {
         try writer.skeletons(find(frame.tree, build.NodeIds.content) orelse return error.MissingRect);
@@ -69,7 +70,7 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
             .group => |group| {
                 var group_buf: [96]u8 = undefined;
                 const label = std.fmt.bufPrint(&group_buf, "{s} {s}  {d}", .{ if (group.collapsed) chevron_right_icon else chevron_down_icon, group.label, group.count }) catch group.label;
-                try writer.textStrong(rect, 0, label, .surface_fg, 1, true, true);
+                try writer.textStrong(rect, 0, label, .surface_fg, .group_heading, 1, true, true);
             },
             .card => |card| {
                 const card_rect = if (card.expanded != null)
@@ -82,8 +83,8 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
                 // The three base rows deliberately occupy 1/3/5 cell baselines.  This gives
                 // title, safe summary, and metadata visible breathing room without inventing a
                 // second card rect or breaking the one shared scroll/hit-test geometry.
-                try writer.textStrong(card_rect, 0, card.title, .surface_fg, 6, false, false);
-                try writer.text(card_rect, 2, card.summary, .muted_fg, 6, false, false);
+                try writer.textStrong(card_rect, 0, card.title, .surface_fg, .card_heading, 6, false, false);
+                try writer.text(card_rect, 2, card.summary, .muted_fg, .body, 6, false, false);
                 try writer.cardMetadata(card_rect, 4, 6, card.provider.label(), card.metadata);
                 // The whole title card remains one disclosure action, but its trailing chevron
                 // makes that interaction discoverable and shares the exact card rect used by
@@ -106,27 +107,27 @@ const Writer = struct {
     text_count: usize = 0,
     corner_radius_px: u16,
 
-    fn text(self: *Writer, rect: tree.RectEntry, line: u32, source: []const u8, role: tokens.ColorRole, line_count: u32, wide_icons: bool, centered: bool) ViewError!void {
-        return self.textStyled(rect, line, source, role, line_count, wide_icons, centered, false);
+    fn text(self: *Writer, rect: tree.RectEntry, line: u32, source: []const u8, role: tokens.ColorRole, text_role: typography.ChromeTextRole, line_count: u32, wide_icons: bool, centered: bool) ViewError!void {
+        return self.textStyled(rect, line, source, role, text_role, line_count, wide_icons, centered, false);
     }
 
     /// Weight is semantic hierarchy, not a per-font coordinate tweak. The backend already owns
     /// the selected face and its measured advance, so title/group emphasis remains font-safe.
-    fn textStrong(self: *Writer, rect: tree.RectEntry, line: u32, source: []const u8, role: tokens.ColorRole, line_count: u32, wide_icons: bool, centered: bool) ViewError!void {
-        return self.textStyled(rect, line, source, role, line_count, wide_icons, centered, true);
+    fn textStrong(self: *Writer, rect: tree.RectEntry, line: u32, source: []const u8, role: tokens.ColorRole, text_role: typography.ChromeTextRole, line_count: u32, wide_icons: bool, centered: bool) ViewError!void {
+        return self.textStyled(rect, line, source, role, text_role, line_count, wide_icons, centered, true);
     }
 
-    fn textStyled(self: *Writer, rect: tree.RectEntry, line: u32, source: []const u8, role: tokens.ColorRole, line_count: u32, wide_icons: bool, centered: bool, bold: bool) ViewError!void {
-        return self.textInsetStyled(rect, line, source, role, line_count, wide_icons, centered, 1, bold);
+    fn textStyled(self: *Writer, rect: tree.RectEntry, line: u32, source: []const u8, role: tokens.ColorRole, text_role: typography.ChromeTextRole, line_count: u32, wide_icons: bool, centered: bool, bold: bool) ViewError!void {
+        return self.textInsetStyled(rect, line, source, role, text_role, line_count, wide_icons, centered, 1, bold);
     }
 
     /// Places an entire line stack inside the completed rect before selecting the requested line.
     /// This keeps scope/search/group labels optically centred without font-specific pixel nudges.
-    fn textInset(self: *Writer, rect: tree.RectEntry, line: u32, source: []const u8, role: tokens.ColorRole, line_count: u32, wide_icons: bool, centered: bool, left_inset_cols: u16) ViewError!void {
-        return self.textInsetStyled(rect, line, source, role, line_count, wide_icons, centered, left_inset_cols, false);
+    fn textInset(self: *Writer, rect: tree.RectEntry, line: u32, source: []const u8, role: tokens.ColorRole, text_role: typography.ChromeTextRole, line_count: u32, wide_icons: bool, centered: bool, left_inset_cols: u16) ViewError!void {
+        return self.textInsetStyled(rect, line, source, role, text_role, line_count, wide_icons, centered, left_inset_cols, false);
     }
 
-    fn textInsetStyled(self: *Writer, rect: tree.RectEntry, line: u32, source: []const u8, role: tokens.ColorRole, line_count: u32, wide_icons: bool, centered: bool, left_inset_cols: u16, bold: bool) ViewError!void {
+    fn textInsetStyled(self: *Writer, rect: tree.RectEntry, line: u32, source: []const u8, role: tokens.ColorRole, text_role: typography.ChromeTextRole, line_count: u32, wide_icons: bool, centered: bool, left_inset_cols: u16, bold: bool) ViewError!void {
         const cw = self.props.cell_width_px;
         const ch = self.props.cell_height_px;
         if (cw == 0 or ch == 0 or line_count == 0 or line >= line_count) return;
@@ -142,7 +143,7 @@ const Writer = struct {
         const available_px = rect.rect.width - @as(f32, @floatFromInt(cw)) * @as(f32, @floatFromInt(required_inset_cols));
         if (available_px <= 0) return;
         const max_cols: u16 = @intFromFloat(@floor(available_px / @as(f32, @floatFromInt(cw))));
-        try self.emit(x, y, source, max_cols, .head, role, wide_icons, bold);
+        try self.emit(x, y, source, max_cols, .head, role, text_role, wide_icons, bold);
     }
 
     fn textRight(self: *Writer, rect: tree.RectEntry, source: []const u8, role: tokens.ColorRole, wide_icon: bool) ViewError!void {
@@ -170,7 +171,7 @@ const Writer = struct {
         const glyph_width = @as(f32, @floatFromInt(start)) * cell_width;
         const x = rect.rect.x + rect.rect.width - inset_px - slot_width + (slot_width - glyph_width) / 2;
         const y = rect.rect.y + (rect.rect.height - @as(f32, @floatFromInt(ch))) / 2;
-        try self.emit(x, y, source, start, .tail, role, wide_icon, false);
+        try self.emit(x, y, source, start, .tail, role, .control, wide_icon, false);
     }
 
     /// The provenance label shares the header baseline with refresh but is placed from the same
@@ -189,14 +190,14 @@ const Writer = struct {
         if (required_cols > available_cols) return;
         const x = rect.rect.x + rect.rect.width - @as(f32, @floatFromInt((refresh_slot_cols + total_cols + 1) * cw));
         const y = rect.rect.y + (rect.rect.height - @as(f32, @floatFromInt(ch))) / 2;
-        try self.emit(x, y, source, label_cols, .head, .surface_fg, false, true);
+        try self.emit(x, y, source, label_cols, .head, .surface_fg, .control, false, true);
     }
 
     /// Provider is a dedicated metadata slot rather than a title prefix.  Both runs use the
     /// same third-line baseline and bounded column plan, keeping the label readable without
     /// letting long model metadata overlap the card's disclosure affordance.
     fn cardMetadata(self: *Writer, rect: tree.RectEntry, line: u32, line_count: u32, provider: []const u8, metadata: []const u8) ViewError!void {
-        try self.text(rect, line, provider, .surface_fg, line_count, false, false);
+        try self.text(rect, line, provider, .surface_fg, .metadata, line_count, false, false);
         const cw = self.props.cell_width_px;
         const ch = self.props.cell_height_px;
         if (cw == 0 or ch == 0) return;
@@ -209,7 +210,7 @@ const Writer = struct {
         if (available_px <= 0) return;
         const max_cols: u16 = @intFromFloat(@floor(available_px / @as(f32, @floatFromInt(cw))));
         const x = rect.rect.x + @as(f32, @floatFromInt(left_inset_cols * cw));
-        try self.emit(x, y, metadata, max_cols, .head, .muted_fg, false, false);
+        try self.emit(x, y, metadata, max_cols, .head, .muted_fg, .metadata, false, false);
     }
 
     fn expanded(self: *Writer, snapshot: tree.UiRectTree, index: usize, expanded_props: types.Expanded) ViewError!void {
@@ -223,26 +224,26 @@ const Writer = struct {
             .ready => "최근 대화",
             .stale => "세션 원본이 변경되었습니다",
             .unavailable => "세션을 열 수 없습니다",
-        }, .surface_fg, detail_lines, false, false);
+        }, .surface_fg, .body, detail_lines, false, false);
         switch (expanded_props.state) {
             .ready => {
                 if (expanded_props.action_record_count > 0) {
                     var count: [80]u8 = undefined;
                     const label = std.fmt.bufPrint(&count, "도구/권한 관련 기록 {d}건", .{expanded_props.action_record_count}) catch "도구/권한 관련 기록";
-                    try self.text(detail, 1, label, .muted_fg, detail_lines, false, false);
+                    try self.text(detail, 1, label, .muted_fg, .metadata, detail_lines, false, false);
                 }
                 for (expanded_props.turns, 0..) |turn, turn_index| {
                     const line: u32 = @intCast(2 + turn_index * 2);
                     try self.text(detail, line, switch (turn.role) {
                         .user => "사용자",
                         .assistant => "에이전트",
-                    }, .muted_fg, detail_lines, false, false);
-                    try self.text(detail, line + 1, turn.text, .surface_fg, detail_lines, false, false);
+                    }, .muted_fg, .overline, detail_lines, false, false);
+                    try self.text(detail, line + 1, turn.text, .surface_fg, .body, detail_lines, false, false);
                 }
             },
             .loading => try self.skeletons(detail),
-            .stale => try self.text(detail, 2, "안전하게 재개하거나 로그를 열 수 없습니다.", .muted_fg, detail_lines, false, false),
-            .unavailable => try self.text(detail, 2, "원본을 읽을 수 없습니다.", .muted_fg, detail_lines, false, false),
+            .stale => try self.text(detail, 2, "안전하게 재개하거나 로그를 열 수 없습니다.", .muted_fg, .body, detail_lines, false, false),
+            .unavailable => try self.text(detail, 2, "원본을 읽을 수 없습니다.", .muted_fg, .body, detail_lines, false, false),
         }
         try self.action(find(snapshot, build.NodeIds.resumeAction(index)) orelse return error.MissingRect, resume_icon ++ " 터미널에서 이어하기");
         try self.action(find(snapshot, build.NodeIds.reveal(index)) orelse return error.MissingRect, reveal_icon ++ " 로그 보기");
@@ -263,7 +264,7 @@ const Writer = struct {
         const x = rect.rect.x + (rect.rect.width - text_width) / 2;
         const y = rect.rect.y + (rect.rect.height - @as(f32, @floatFromInt(ch))) / 2;
         if (!loweredTextCellFitsClip(rect, y, ch)) return;
-        try self.emit(x, y, source, max_cols, .head, if (rect.action.?.enabled) .surface_fg else .muted_fg, true, true);
+        try self.emit(x, y, source, max_cols, .head, if (rect.action.?.enabled) .surface_fg else .muted_fg, .button_label, true, true);
     }
 
     fn plannedCols(source: []const u8, max_cols: u16) u16 {
@@ -272,7 +273,7 @@ const Writer = struct {
         return plan.endCol();
     }
 
-    fn emit(self: *Writer, x: f32, y: f32, source: []const u8, cols: u16, anchor: text_layout.Anchor, role: tokens.ColorRole, wide_icons: bool, bold: bool) ViewError!void {
+    fn emit(self: *Writer, x: f32, y: f32, source: []const u8, cols: u16, anchor: text_layout.Anchor, role: tokens.ColorRole, text_role: typography.ChromeTextRole, wide_icons: bool, bold: bool) ViewError!void {
         if (cols == 0) return;
         if (self.op_count == self.ops.len) return error.InsufficientTextBuffer;
         if (self.run_count == self.runs.len) return error.InsufficientRunBuffer;
@@ -283,7 +284,7 @@ const Writer = struct {
             .ellipsis => try self.appendBytes("…"),
         };
         self.runs[self.run_count] = .{ .text = self.text_bytes[start..self.text_count], .bold = bold };
-        self.ops[self.op_count] = .{ .text = .{ .origin = .{ .x = @intFromFloat(@floor(x)), .y = @intFromFloat(@floor(y)) }, .runs = self.runs[self.run_count .. self.run_count + 1], .role = role, .wide_icons = wide_icons } };
+        self.ops[self.op_count] = .{ .text = .{ .origin = .{ .x = @intFromFloat(@floor(x)), .y = @intFromFloat(@floor(y)) }, .runs = self.runs[self.run_count .. self.run_count + 1], .role = role, .text_role = text_role, .wide_icons = wide_icons } };
         self.run_count += 1;
         self.op_count += 1;
     }
@@ -425,9 +426,15 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
     var all_origin_y: ?i32 = null;
     var saw_search_icon = false;
     var saw_group_chevron = false;
+    var saw_dock_heading = false;
+    var saw_card_heading = false;
+    var saw_metadata = false;
     for (out.ops) |op| switch (op) {
         .quad => saw_quad = true,
         .text => |text| {
+            saw_dock_heading = saw_dock_heading or text.text_role == .dock_heading;
+            saw_card_heading = saw_card_heading or text.text_role == .card_heading;
+            saw_metadata = saw_metadata or text.text_role == .metadata;
             for (text.runs) |run| {
                 saw_provider = saw_provider or std.mem.indexOf(u8, run.text, "Claude") != null;
                 if (std.mem.eql(u8, run.text, refresh_icon)) {
@@ -453,6 +460,9 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
     try std.testing.expect(saw_provider);
     try std.testing.expect(saw_search_icon);
     try std.testing.expect(saw_group_chevron);
+    try std.testing.expect(saw_dock_heading);
+    try std.testing.expect(saw_card_heading);
+    try std.testing.expect(saw_metadata);
     inline for (.{ .scope_workspace, .scope_project, .scope_all }, .{ workspace_origin_y, project_origin_y, all_origin_y }) |id, origin| {
         const scope = find(frame.tree, @field(build.NodeIds, @tagName(id))) orelse return error.TestUnexpectedResult;
         const expected_y: i32 = @intFromFloat(@floor(scope.rect.y + (scope.rect.height - @as(f32, @floatFromInt(props.cell_height_px))) / 2));

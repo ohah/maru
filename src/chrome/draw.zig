@@ -5,6 +5,7 @@
 
 const tokens = @import("tokens.zig");
 const Rgb = @import("../color.zig").Rgb;
+const typography = @import("ui/typography.zig");
 
 /// 픽셀 좌표 한 점.
 pub const Px = struct { x: i32, y: i32 };
@@ -83,7 +84,16 @@ pub const Op = union(enum) {
     /// 텍스트(탭 제목·팝업·Notice). origin = 베이스라인이 아니라 좌상단 픽셀.
     /// `wide_icons`는 이 컴포넌트가 직접 소유한 등록 Chrome SVG glyph만 2셀로 측정·lower하라는
     /// 명시적 opt-in이다. 사용자/세션 텍스트는 false를 유지해 우연한 PUA가 레이아웃을 바꾸지 않는다.
-    pub const Text = struct { origin: Px, runs: []const Run, role: tokens.ColorRole, wide_icons: bool = false };
+    pub const Text = struct {
+        origin: Px,
+        runs: []const Run,
+        role: tokens.ColorRole,
+        /// Semantic typography is carried to the renderer artifact.  The current cell lowerer
+        /// keeps its legacy default; the measured Chrome path consumes this instead of guessing
+        /// from color/bold/source text.
+        text_role: typography.ChromeTextRole = .body,
+        wide_icons: bool = false,
+    };
 
     /// C4b rich 박스 — 둥근 모서리·변별 테두리·solid/gradient 채움. tui 백엔드는 corner/border가 0이면
     /// Fill처럼 셀로 lowering하고, rich 백엔드는 GPU quad 프리미티브로 lowering한다. 모양 파라미터는

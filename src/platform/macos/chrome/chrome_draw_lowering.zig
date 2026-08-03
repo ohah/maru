@@ -24,6 +24,7 @@ pub const RichTextArtifact = struct {
         offset_x_px: f32,
         offset_y_px: f32,
         foreground: u32,
+        text_role: chrome.ui.typography.ChromeTextRole,
     };
 
     placements: []Placement,
@@ -109,6 +110,7 @@ pub fn buildRichTextArtifact(
                     .offset_x_px = @floatFromInt(col_px % cell_width_px),
                     .offset_y_px = @floatFromInt(row_px % cell_height_px),
                     .foreground = packRgb(tk.get(text.role)),
+                    .text_role = text.text_role,
                 });
             }
         },
@@ -154,6 +156,7 @@ pub fn richTextFingerprint(
             fingerprintMixValue(&state, @as(u32, @bitCast(text.origin.x)));
             fingerprintMixValue(&state, @as(u32, @bitCast(text.origin.y)));
             fingerprintMixValue(&state, packRgb(tk.get(text.role)));
+            fingerprintMixValue(&state, @intFromEnum(text.text_role));
             fingerprintMixValue(&state, @intFromBool(text.wide_icons));
             for (text.runs) |run| {
                 fingerprintMixValue(&state, run.text.len);
@@ -425,7 +428,7 @@ test "rich text artifact keeps side-by-side origins independent on one cell row"
     try std.testing.expectEqual(@as(f32, 3), placementFor(artifact.placements, 1, 2).?.offset_y_px);
 }
 
-test "rich text fingerprint changes for placement and semantic color inputs" {
+test "rich text fingerprint changes for placement semantic color and typography inputs" {
     var tk = chrome.Tokens.rich(.{
         .foreground = .{ .r = 1, .g = 2, .b = 3 },
         .sidebar_background = .{ .r = 4, .g = 5, .b = 6 },
@@ -438,9 +441,12 @@ test "rich text fingerprint changes for placement and semantic color inputs" {
         .accent = .{ .r = 25, .g = 26, .b = 27 },
     });
     const runs = [_]chrome.draw.Run{.{ .text = "가A" }};
-    const ops = [_]chrome.draw.Op{.{ .text = .{ .origin = .{ .x = 5, .y = 7 }, .runs = &runs, .role = .accent_bar } }};
+    var ops = [_]chrome.draw.Op{.{ .text = .{ .origin = .{ .x = 5, .y = 7 }, .runs = &runs, .role = .accent_bar } }};
     const base = richTextFingerprint(&ops, &tk, 8, 16, 20, 10);
     try std.testing.expect(base != richTextFingerprint(&ops, &tk, 9, 16, 20, 10));
     tk.palette.set(.accent_bar, .{ .r = 99, .g = 26, .b = 27 });
+    try std.testing.expect(base != richTextFingerprint(&ops, &tk, 8, 16, 20, 10));
+    tk.palette.set(.accent_bar, .{ .r = 25, .g = 26, .b = 27 });
+    ops[0].text.text_role = .card_heading;
     try std.testing.expect(base != richTextFingerprint(&ops, &tk, 8, 16, 20, 10));
 }

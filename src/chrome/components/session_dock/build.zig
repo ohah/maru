@@ -85,7 +85,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
     const needed_nodes = props.items.len + expanded_extra_nodes + 7; // item roots + nested expansion + 3 scopes + header/scope-row/search/content
     if (buffers.nodes.len < needed_nodes) return error.InsufficientNodeBuffer;
 
-    const m = types.Metrics.fromCellHeight(props.cell_height_px);
+    const m = types.Metrics.fromCellHeight(props.cell_height_px, props.scale_milli);
     var table = ids.Table.init(buffers.actions);
     const refresh = table.append(props.snapshot_generation, .refresh) catch return error.InsufficientActionBuffer;
     const workspace = table.append(props.snapshot_generation, .{ .scope = .workspace }) catch return error.InsufficientActionBuffer;
@@ -288,7 +288,7 @@ fn expansionActionWidth(viewport_width_px: f32, m: types.Metrics, action_count: 
 }
 
 test "expanded action widths leave the declared gap for two and three actions" {
-    const m = types.Metrics.fromCellHeight(16);
+    const m = types.Metrics.fromCellHeight(16, 1000);
     // 480px viewport - 24px outer padding on both sides leaves 432px. The same source of truth
     // must work for resume/reveal and the optional live-focus third action.
     try @import("std").testing.expectEqual(@as(f32, 212), expansionActionWidth(480, m, 2));
@@ -435,6 +435,10 @@ test "SessionDock expanded card keeps detail actions in the same published tree"
     try @import("std").testing.expectEqual(resume_entry.rect.width, reveal.rect.width);
     try @import("std").testing.expectEqual(tree.NodeKind.button, resume_entry.kind);
     try @import("std").testing.expectEqual(tree.NodeKind.button, reveal.kind);
+    // Command target height comes from logical Chrome metrics, not the 16px terminal row that
+    // happens to be used by this fixture.
+    try @import("std").testing.expectEqual(@as(f32, @floatFromInt(types.ButtonMetrics.resolve(props.scale_milli).minimum_height_px)), resume_entry.rect.height);
+    try @import("std").testing.expectEqual(resume_entry.rect.height, reveal.rect.height);
     try @import("std").testing.expectEqual(tree.VisualProps{ .button = .{ .variant = .primary, .paint = .{} } }, resume_entry.visual);
     try @import("std").testing.expectEqual(tree.VisualProps{ .button = .{ .variant = .secondary, .paint = .{} } }, reveal.visual);
     try @import("std").testing.expect(resume_entry.action.?.enabled);

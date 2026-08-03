@@ -13425,7 +13425,7 @@ pub const AppSession = struct {
 
     fn agentSessionDockContentViewportHeightPx(self: *const AppSession) u32 {
         const content = self.dockGeometry().tree_content;
-        const m = chrome.components.session_dock.types.Metrics.fromCellHeight(self.cell_height_px);
+        const m = chrome.components.session_dock.types.Metrics.fromCellHeight(self.cell_height_px, self.scale_milli);
         const fixed_h = m.pad * 2 + m.header_h + m.scope_h + m.search_h + m.control_gap * 3;
         return content.h -| fixed_h;
     }
@@ -13465,7 +13465,7 @@ pub const AppSession = struct {
     }
 
     fn agentSessionDockMetrics(self: *const AppSession) chrome.components.session_dock.scroll.Metrics {
-        const m = chrome.components.session_dock.types.Metrics.fromCellHeight(self.cell_height_px);
+        const m = chrome.components.session_dock.types.Metrics.fromCellHeight(self.cell_height_px, self.scale_milli);
         return .{
             .group_h_px = m.group_h,
             .card_h_px = m.card_h,
@@ -21505,7 +21505,7 @@ pub const AppSession = struct {
             if (!std.math.isFinite(delta_y)) return;
             if (delta_y * self.agent_session_archive_wheel_residue_px < 0)
                 self.agent_session_archive_wheel_residue_px = 0;
-            const m = chrome.components.session_dock.types.Metrics.fromCellHeight(self.cell_height_px);
+            const m = chrome.components.session_dock.types.Metrics.fromCellHeight(self.cell_height_px, self.scale_milli);
             const unit: f64 = if (precise)
                 @as(f64, @floatFromInt(self.scale_milli)) / 1000.0
             else

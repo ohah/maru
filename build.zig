@@ -1693,6 +1693,42 @@ pub fn build(b: *std.Build) void {
     const run_session_host_tests = b.addSystemCommand(&.{"/usr/bin/env"});
     run_session_host_tests.addPrefixedArtifactArg("MARU_SESSION_HOST_PRODUCT_EXE=", exe);
     if (target.result.os.tag == .macos) {
+        const ended_purge_orchestration_drift_test = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"B3b-O drift subprocess finalizes quarantine and paired receipts"},
+        });
+        const run_ended_purge_orchestration_drift_test =
+            b.addRunArtifact(ended_purge_orchestration_drift_test);
+        run_ended_purge_orchestration_drift_test.setEnvironmentVariable(
+            "MARU_SESSION_HOST_B3BO_DRIFT_SUBPROCESS",
+            "run-isolated-v1",
+        );
+        run_session_host_tests.step.dependOn(
+            &run_ended_purge_orchestration_drift_test.step,
+        );
+
+        const ended_purge_suffix_fail_stop_test = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"B3b-O validated suffix mismatch fail-stops in a subprocess"},
+        });
+        const run_ended_purge_suffix_fail_stop_test =
+            b.addRunArtifact(ended_purge_suffix_fail_stop_test);
+        run_session_host_tests.step.dependOn(
+            &run_ended_purge_suffix_fail_stop_test.step,
+        );
+
         const process_runtime_bootstrap_fixture = b.addExecutable(.{
             .name = "maru-session-host-process-runtime-bootstrap-fixture",
             .root_module = b.createModule(.{
@@ -1726,6 +1762,10 @@ pub fn build(b: *std.Build) void {
             &run_ended_purge_quarantine_concurrency_fixture.step,
         );
     }
+    run_session_host_tests.setEnvironmentVariable(
+        "MARU_SESSION_HOST_B3BO_DRIFT_SUBPROCESS",
+        "skip-in-aggregate-v1",
+    );
     // 같은 session_host 모듈은 전체 maru test에도 중복 수집된다. 전용 step만
     // product launch smoke를 필수화하도록 root-module introspection 대신
     // 명시적인 test-only marker를 전달한다.

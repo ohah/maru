@@ -1024,7 +1024,9 @@ pub const PreparedEndedPurgeInventory = struct {
     lifecycle: EndedPurgePrepareLifecycle = .empty,
 
     pub fn validPreparedAtFinalAddress(self: *const PreparedEndedPurgeInventory) bool {
-        return self.lifecycle == .prepared and self.self_addr == @intFromPtr(self) and
+        const lifecycle_raw = @as(*const u8, @ptrCast(&self.lifecycle)).*;
+        return lifecycle_raw == @intFromEnum(EndedPurgePrepareLifecycle.prepared) and
+            self.self_addr == @intFromPtr(self) and
             self.client_addr != 0 and self.scratch_addr != 0 and self.target_stream != 0 and
             self.target_event_count == 1;
     }

@@ -982,8 +982,7 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    `validateComplete()`가 target map/count/ordinal을 typed 재검증한다. caller의 targets/out non-alias는 b3b actual preflight가 재검증한다. plan/step의
    address·allocator·payload pointer·scratch reference와 seal
    mint/검증은 0이다. `buildQueuePlan` error set은 `InvalidCount|InvalidTargetMap|ArithmeticOverflow|DestinationOccupied|InvalidState`다. Client/allocator callback/quarantine import, scratch·queue·process mutation,
-   owner freeze, allocation/free와 permit/receipt consume은 0이다. **2c2b3b(진행: B3b-F·B3b-S 구현,
-   B3b-O 미착수)**가 private scratch의 immutable/no-escape 원본 descriptor를
+   owner freeze, allocation/free와 permit/receipt consume은 0이다. **2c2b3b(B3b-F·B3b-S·B3b-O 구현 완료)**가 private scratch의 immutable/no-escape 원본 descriptor를
    cleanup authority로 사용해 exact preparation revalidation부터 reservation, `EndedPurgePreparation.sealForCommit`, stable compaction/counter publication,
    모든 target exact-once callback, post-validation, 정상 release 또는 absorbing no-free quarantine을 하나의 vertical transaction으로
    닫는다. revalidation/cap/reservation까지는 typed precommit failure, `EndedPurgePreparation.sealForCommit` 뒤 suffix만 no-fail이다. private scratch의 coherent arbitrary overwrite와 cleanup authority 밖에서 이미 수행된 deallocation의
@@ -996,14 +995,8 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    `03a92a146dbf8935466d0b9250b09c884d575f15fc148f73c6db8979bc69d968`이다. B3b-F/S 전체 신규 top-level allowlist는 client의
    `ClientOperationFence|generationAllocatorCallbackActive|ended_purge_transaction|ended_purge_quarantine|PreparedEndedPurgeCommit|
    EndedPurgeCommitError|EndedPurgeClientCommitOutcome`, client_slot의
-   `ended_purge_quarantine|ended_purge_quarantine_registry|process_runtime_pid`뿐이다. 아래 신규 nested method/type exact allowlist는
-   B3b-S/O 범위이며, B3b-F의 `ClientOperationFence` nested constants/methods와 Client/ClientSlot private guard declarations/wrappers는
-   `persistent-session-host.md`의 B3b-F exact allowlist를 SSOT로 사용하고 여기서 중복 열거하지 않는다.
-   `Client.prepareEndedPurgeCommit|commitEndedPurgePrepared|finalizeEndedPurgeNoFreePoison|tombstoneEndedPurgeOwnedGraph|
-   publishEndedPurgeNoFreePoison|endedPurgeCompleteOwnerSeal|endedPurgePostValidate|endedPurgeFinalizationSeal|
-   endedPurgeRawFinalizerStateValid|publishEndedPurgeCompaction|cleanupEndedPurgeTargetDirect`,
-   `ClientSlot.ProcessRuntimeInitError|EndedPurgeCommitError|EndedPurgeResult|initializeProcessRuntime|commitEndedPurge`,
-   `EndedPurgePreparation.sealForCommit|consumeAfterPermit`이다. 별도
+   `ended_purge_quarantine|ended_purge_quarantine_registry|process_runtime_pid`뿐이다. B3b-F/S/O의 신규 nested method/type exact
+   allowlist는 `persistent-session-host.md`를 SSOT로 사용하고 executable boundary inventory가 이를 고정하므로 여기서 중복 열거하지 않는다. 별도
    `ended_purge_quarantine.zig`는 std와 scalar identity/bytes만 아는 allocation-free one-slot
    `max_ended_purge_quarantine_bytes|Error|Reservation|CommitReceipt|ConsumedCommitProof|Registry` API를
    소유한다. nested exact allowlist는 `Reservation.Lifecycle`, `CommitReceipt.Lifecycle`, `ConsumedCommitProof.matches`,
@@ -1018,6 +1011,19 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    prevalidated node permit→`EndedPurgePreparation` transport receipt paired consume을 끝낸다. clean은 paired consume 뒤에만 Client
    exclusive를 clean release하고, drift는 이미 terminal fence가 absorbing 상태를 소유한다. client는 raw owner mutation/direct cleanup과
    scalar proof sealed finalization만, client_slot은 registry receipt consume과 node permit→preparation transport receipt paired consume 순서만 소유한다.
+   B3b-O의 red gate는 `EndedPurgePreparation`의 `prepared→committing→consumed` final-address 전이,
+   Client prepare/commit/finalize의 test 밖 production callsite exact one, clean의 reservation release→node permit→transport receipt→exclusive release,
+   drift의 Registry commit→consume→finalizer→node permit→transport receipt 순서를 먼저 실패로 고정한다. 구현 green 뒤에도 reconnect/current publish는 0이며,
+   Debug·ReleaseFast subprocess의 validated suffix mismatch fail-stop, 격리된 drift subprocess의 quarantine commit→proof→finalizer→paired
+   consume과 boundary source-order oracle까지 통과해야 B3b-O를 구현으로 승격한다.
+   node permit consume은 기존 global mutex unregister를 callback 뒤 재호출하지 않는다. 기존 registry entry에 atomic
+   `empty|live|consume_reserved|consumed` state를 추가하고 live `{id,permit}` payload를 immutable하게 유지하며, callback 전 private final-address
+   `PreparedStreamOperationPermitConsume`을 준비한다. irreversible suffix는 canonical operation thread를 graph 접근 전에 검증하고
+   `consume_reserved→consumed` CAS, node active tuple clear,
+   preparation consume, `consumed→empty` reclaim만 수행하고 mutex·scan·allocation·fallible lookup은 0이다. 중간 `consumed`가 transport
+   receipt 게시 전 같은 index 재사용을 막는다. multi-thread winner 경쟁은 범위가 아니며 same-thread copy/replay exact-once만
+   계약한다. 등록과 empty entry 재사용은 기존 mutex와
+   checked-monotonic id를 유지하며 CAS 뒤 payload는 다음 등록 전까지 지우지 않는다.
    **2c3**은 capability/input/control/
    event/RPC primitive를 exact facade로 옮기고 generation의 `logicalClient()` 사용을 0으로 만든다. **2c4**는
    `RuntimeConnection` union을 mode SSOT로 전환해 `RemoteRuntime.client`와 `generation_adapter` 병렬 필드를 제거하고 exact

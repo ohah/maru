@@ -224,6 +224,7 @@ const GenerationGuardedAllocator = struct {
 
 pub const ClientNode = struct {
     client: client_mod.Client,
+    operation_fence: client_mod.ClientOperationFence,
     pin_owner: lease_mod.PinOwner,
     cleanup_registry: cleanup_registry_mod.AttachmentCleanupRegistry,
     batch_registry: batch_registry_mod.Registry,
@@ -653,6 +654,15 @@ fn productionIssuer() InitError!*lease_mod.IdentityIssuer {
 }
 
 pub const ClientSlot = struct {
+    const RegisteredClientOperation = struct {
+        node: *ClientNode,
+    };
+
+    const ExclusiveTeardownReservation = struct {
+        registry_entry: ClientSlotRegistryEntry,
+        node: *ClientNode,
+    };
+
     self_addr: usize,
     current: *ClientNode,
     node_allocator: std.mem.Allocator,
@@ -805,6 +815,16 @@ pub const ClientSlot = struct {
         };
         try registerClientSlot(registry_reservation);
         source.moveToGenerationNode(&node.client);
+        client_mod.ClientOperationFence.initInPlace(
+            &node.operation_fence,
+            @intFromPtr(&node.client),
+            pid,
+            slot_identity.tagged,
+            node_identity.tagged,
+            node_identity.tagged,
+        );
+        if (!node.client.bindOperationFence(&node.operation_fence, node_identity.tagged))
+            @panic("Client operation fence binding failed");
         node.guarded_allocator.client = &node.client;
         node.client.bindGenerationAccountingLedger(&node.accounting_ledger) catch unreachable;
         node.incarnation = node_identity;
@@ -834,6 +854,87 @@ pub const ClientSlot = struct {
 
     fn rangesOverlap(a_start: usize, a_end: usize, b_start: usize, b_end: usize) bool {
         return a_start < b_end and b_start < a_end;
+    }
+
+    fn beginRegisteredClientOperation(
+        self: *ClientSlot,
+    ) error{ MovedOrCopied, AdminBusy }!RegisteredClientOperation {
+        // Reject a fork child before touching a mutex inherited from another thread. Holding the
+        // registry mutex through the shared-fence CAS closes node destroy vs operation-entry ABA:
+        // teardown cannot unregister/destroy between registry validation and the Client pin.
+        if (self.pid != currentPid()) return error.MovedOrCopied;
+        while (!client_slot_registry_mutex.tryLock()) std.atomic.spinLoopHint();
+        defer client_slot_registry_mutex.unlock();
+        for (client_slot_registry) |entry| {
+            if (!entry.live or !entry.ready or entry.slot_addr != @intFromPtr(self)) continue;
+            if (entry.node_addr == 0 or entry.node_addr != @intFromPtr(self.current) or
+                entry.slot_incarnation != self.incarnation.tagged or
+                entry.node_incarnation == 0 or
+                entry.owner_thread_incarnation != self.operation_owner_thread_incarnation)
+                return error.MovedOrCopied;
+            const node: *ClientNode = @ptrFromInt(entry.node_addr);
+            node.client.beginClientSlotOperation() catch |err| return switch (err) {
+                error.AdminBusy => error.AdminBusy,
+                else => error.MovedOrCopied,
+            };
+            return .{ .node = node };
+        }
+        return error.MovedOrCopied;
+    }
+
+    fn endRegisteredClientOperation(_: *ClientSlot, operation: RegisteredClientOperation) void {
+        // The shared count itself keeps the node alive until this exact decrement.
+        if (!operation.node.client.endClientSlotOperation())
+            @panic("ClientSlot operation fence release failed");
+    }
+
+    fn beginRegisteredExclusiveTeardown(
+        self: *ClientSlot,
+    ) error{ MovedOrCopied, AdminBusy }!ExclusiveTeardownReservation {
+        if (self.pid != currentPid() or
+            !operationThreadMatches(self.operation_owner_thread_incarnation))
+            return error.MovedOrCopied;
+        while (!client_slot_registry_mutex.tryLock()) std.atomic.spinLoopHint();
+        defer client_slot_registry_mutex.unlock();
+        for (&client_slot_registry) |*entry| {
+            if (!entry.live or entry.slot_addr != @intFromPtr(self)) continue;
+            if (entry.node_addr == 0 or entry.node_addr != @intFromPtr(self.current) or
+                entry.slot_incarnation != self.incarnation.tagged or
+                entry.node_incarnation == 0 or
+                entry.owner_thread_incarnation != self.operation_owner_thread_incarnation)
+                return error.MovedOrCopied;
+            if (!entry.ready) return error.AdminBusy;
+            const node: *ClientNode = @ptrFromInt(entry.node_addr);
+            // Close registry admission while exclusive is held. New operations fail at the
+            // registry instead of setting fence intrusion. Direct Client calls can still record
+            // intrusion, so pre-callback rollback uses abortExclusive to clear both bits.
+            entry.ready = false;
+            node.client.tryAcquireClientSlotTeardownExclusive() catch |err| {
+                entry.ready = true;
+                return switch (err) {
+                    error.AdminBusy => error.AdminBusy,
+                    error.InvalidOwner, error.InvalidState => error.MovedOrCopied,
+                };
+            };
+            return .{ .registry_entry = entry.*, .node = node };
+        }
+        return error.MovedOrCopied;
+    }
+
+    fn abortRegisteredExclusiveTeardown(
+        _: *ClientSlot,
+        reserved: ExclusiveTeardownReservation,
+    ) void {
+        while (!client_slot_registry_mutex.tryLock()) std.atomic.spinLoopHint();
+        defer client_slot_registry_mutex.unlock();
+        for (&client_slot_registry) |*entry| {
+            if (!std.meta.eql(entry.*, reserved.registry_entry)) continue;
+            if (!reserved.node.client.abortClientSlotTeardownExclusive())
+                @panic("ClientSlot teardown exclusive abort failed");
+            entry.ready = true;
+            return;
+        }
+        @panic("ClientSlot teardown registry reservation drifted");
     }
 
     pub fn valid(self: *const ClientSlot) bool {
@@ -868,6 +969,8 @@ pub const ClientSlot = struct {
         runtime_id: u128,
         role: contract.AttachmentRole,
     ) BindingError!AttachmentBindingReservation {
+        const operation = try self.beginRegisteredClientOperation();
+        defer self.endRegisteredClientOperation(operation);
         if (!self.valid()) return error.MovedOrCopied;
         if (self.current.active_operation_generation != 0) return error.AdminBusy;
         const protected = .{
@@ -1185,6 +1288,12 @@ pub const ClientSlot = struct {
         transport_incarnation: u64,
         binding: contract.BindingIdentity,
     ) error{ InvalidStreamOperationPermit, AdminBusy, IdentityExhausted }!StreamOperationPermit {
+        if (client_mod.generationAllocatorCallbackActive()) return error.AdminBusy;
+        const operation = self.beginRegisteredClientOperation() catch |err| return switch (err) {
+            error.AdminBusy => error.AdminBusy,
+            error.MovedOrCopied => error.InvalidStreamOperationPermit,
+        };
+        defer self.endRegisteredClientOperation(operation);
         if (!self.valid() or
             !operationThreadMatches(self.operation_owner_thread_incarnation) or
             kind == .none or owner_addr == 0 or transport_incarnation == 0 or
@@ -1197,7 +1306,6 @@ pub const ClientSlot = struct {
         if (batch_release_callback_active or self.current.active_operation_generation != 0 or
             self.current.pin_owner.active_cleanup != 0)
             return error.AdminBusy;
-        if (self.generationAllocatorCallbackActive()) return error.AdminBusy;
         const generation = self.current.next_operation_generation;
         const next_generation = std.math.add(u64, generation, 1) catch
             return error.IdentityExhausted;
@@ -1497,6 +1605,8 @@ pub const ClientSlot = struct {
         self: *ClientSlot,
         token: batch_registry_mod.Token,
     ) BatchError!void {
+        const operation = try self.beginRegisteredClientOperation();
+        defer self.endRegisteredClientOperation(operation);
         if (!self.valid()) return error.MovedOrCopied;
         if (self.current.active_operation_generation != 0) return error.AdminBusy;
         if (batch_release_callback_active) return error.AdminBusy;
@@ -1520,60 +1630,60 @@ pub const ClientSlot = struct {
 
     pub fn tryDeinit(self: *ClientSlot) DeinitOutcome {
         if (self.lifecycle == .dead) return .already_dead;
+        if (self.lifecycle == .deinit_reserved) return .busy;
         // Teardown shares the canonical operation thread with admission. This closes the gap
         // between a registry liveness snapshot and the first node dereference without adding a
         // second cross-thread lifetime protocol. PID is checked before the process-global mutex so
         // a fork child cannot spin on a lock inherited from a vanished sibling thread.
         if (self.pid != currentPid() or
-            !operationThreadMatches(self.operation_owner_thread_incarnation))
-            return .corrupt;
+            !operationThreadMatches(self.operation_owner_thread_incarnation)) return .corrupt;
+        const reserved_registry_entry = self.beginRegisteredExclusiveTeardown() catch |err|
+            return switch (err) {
+                error.AdminBusy => .busy,
+                error.MovedOrCopied => .corrupt,
+            };
+        var exclusive_reserved = true;
+        defer if (exclusive_reserved)
+            self.abortRegisteredExclusiveTeardown(reserved_registry_entry);
+        const node = reserved_registry_entry.node;
         if (!self.valid()) return if (self.lifecycle == .deinit_reserved) .busy else .corrupt;
-        const registry_entry = clientSlotRegistryEntry(@intFromPtr(self)) orelse return .corrupt;
-        const expected_registry_entry: ClientSlotRegistryEntry = .{
-            .live = true,
-            .ready = true,
-            .slot_addr = @intFromPtr(self),
-            .node_addr = @intFromPtr(self.current),
-            .slot_incarnation = self.incarnation.tagged,
-            .node_incarnation = self.current.incarnation.tagged,
-            .owner_thread_incarnation = self.operation_owner_thread_incarnation,
-        };
-        if (!std.meta.eql(registry_entry, expected_registry_entry)) return .corrupt;
         if (batch_release_callback_active) return .busy;
         if (self.generationAllocatorCallbackActive()) return .busy;
-        if (self.current.active_operation_generation != 0) return .busy;
-        if (self.current.pin_owner.cleanup_pin_count != 0 or
-            self.current.pin_owner.active_cleanup != 0)
+        if (node.active_operation_generation != 0) return .busy;
+        if (node.pin_owner.cleanup_pin_count != 0 or
+            node.pin_owner.active_cleanup != 0)
             return .busy;
         // 두 registry 중 하나를 먼저 dead로 만든 뒤 다른 쪽 busy/corrupt를 발견하면 재시도할 수 없다.
         // 둘의 전체 entry를 먼저 검증한 뒤에만 mutation suffix에 들어간다.
-        const cleanup_ready = self.current.cleanup_registry.preflightDeinit();
-        const batch_ready = self.current.batch_registry.preflightDeinit();
-        const accounting_ready = self.current.accounting_ledger.preflightDeinit();
+        const cleanup_ready = node.cleanup_registry.preflightDeinit();
+        const batch_ready = node.batch_registry.preflightDeinit();
+        const accounting_ready = node.accounting_ledger.preflightDeinit();
         if (cleanup_ready == .busy or batch_ready == .busy or accounting_ready == .busy)
             return .busy;
         if (cleanup_ready != .cleaned or batch_ready != .cleaned or accounting_ready != .cleaned)
             return .corrupt;
-        switch (self.current.cleanup_registry.tryDeinit()) {
+        // Client teardown owns the cross-thread operation fence. It must succeed before any slot
+        // registry becomes terminal; otherwise a concurrent shared Client operation would make
+        // tryDeinit return false and freeing the node would turn that retry signal into a UAF.
+        if (!node.client.tryDeinitClientSlotExclusiveHeld()) return .busy;
+        exclusive_reserved = false;
+        switch (node.cleanup_registry.tryDeinit()) {
             .cleaned => {},
-            .busy => return .busy,
-            .corrupt, .already_dead => return .corrupt,
+            .busy, .corrupt, .already_dead => @panic("fenced ClientSlot cleanup registry teardown drifted"),
         }
-        switch (self.current.batch_registry.tryDeinit()) {
+        switch (node.batch_registry.tryDeinit()) {
             .cleaned => {},
-            .busy => return .busy,
-            .corrupt, .already_dead => return .corrupt,
+            .busy, .corrupt, .already_dead => @panic("fenced ClientSlot batch registry teardown drifted"),
         }
         self.lifecycle = .deinit_reserved;
-        if (!unregisterClientSlot(expected_registry_entry))
+        if (!unregisterClientSlot(reserved_registry_entry.registry_entry))
             @panic("preflighted ClientSlot registry teardown drifted");
-        self.current.pin_owner.state = .terminal;
-        self.current.client.deinit();
-        switch (self.current.accounting_ledger.tryDeinit()) {
+        node.pin_owner.state = .terminal;
+        switch (node.accounting_ledger.tryDeinit()) {
             .cleaned => {},
             .busy, .corrupt, .already_dead => @panic("preflighted generation accounting teardown drifted"),
         }
-        self.node_allocator.destroy(self.current);
+        self.node_allocator.destroy(node);
         self.lifecycle = .dead;
         return .cleaned;
     }
@@ -1605,6 +1715,63 @@ test "CR3a-2a ClientSlot teardown waits for node-local attachment reservations" 
     });
     try std.testing.expectEqual(DeinitOutcome.busy, slot.tryDeinit());
     try slot.current.cleanup_registry.abort(reserved.reservation, reserved.identity);
+    try std.testing.expectEqual(DeinitOutcome.cleaned, slot.tryDeinit());
+}
+
+test "CR3a B3b-F ClientSlot preserves its node when Client teardown is busy" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const Runner = struct {
+        fn run(client: *client_mod.Client) void {
+            if (client.call("host.info", null)) |response|
+                client.allocator.free(response)
+            else |_| {}
+        }
+    };
+
+    const allocator = std.testing.allocator;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds),
+    );
+    var peer_live = true;
+    defer {
+        if (peer_live) _ = c.close(fds[1]);
+    }
+    var source = fixtureClient(allocator, 0xAD);
+    source.fd = fds[0];
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0xAD);
+
+    const thread = try std.Thread.spawn(.{}, Runner.run, .{&slot.current.client});
+    var ready = c.pollfd{ .fd = fds[1], .events = c.POLL.IN, .revents = 0 };
+    try std.testing.expect(c.poll(@ptrCast(&ready), 1, 1_000) > 0);
+    try std.testing.expect(ready.revents & c.POLL.IN != 0);
+    try std.testing.expectEqual(DeinitOutcome.busy, slot.tryDeinit());
+    try std.testing.expect(slot.valid());
+    try std.testing.expect(clientSlotRegistryEntry(@intFromPtr(&slot)) != null);
+
+    _ = c.close(fds[1]);
+    peer_live = false;
+    thread.join();
+    try std.testing.expectEqual(DeinitOutcome.cleaned, slot.tryDeinit());
+}
+
+test "CR3a B3b-F allocator callback permit rejection does not intrude on exclusive teardown" {
+    const allocator = std.testing.allocator;
+    var source = fixtureClient(allocator, 0xAE);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0xAE);
+
+    try slot.current.client.tryAcquireEndedPurgeExclusive();
+    try std.testing.expect(slot.current.client.enterGenerationAllocatorCallback());
+    try std.testing.expectError(
+        error.AdminBusy,
+        slot.prepareStreamOperationPermit(.initial_snapshot, 1, 1, std.mem.zeroes(contract.BindingIdentity)),
+    );
+    slot.current.client.leaveGenerationAllocatorCallbackUnchecked();
+    try std.testing.expect(!slot.current.client.endedPurgeFenceIntruded());
+    try std.testing.expect(slot.current.client.releaseEndedPurgeExclusiveClean());
     try std.testing.expectEqual(DeinitOutcome.cleaned, slot.tryDeinit());
 }
 
@@ -1799,6 +1966,7 @@ const BatchFreeProbe = struct {
     parent: std.mem.Allocator,
     slot: ?*ClientSlot = null,
     observed_items_before_reentry: usize = 0,
+    deinit_outcome: ?DeinitOutcome = null,
     sibling_token: ?batch_registry_mod.Token = null,
     reentry_error: ?anyerror = null,
 
@@ -1864,6 +2032,7 @@ const BatchFreeProbe = struct {
         const self: *BatchFreeProbe = @ptrCast(@alignCast(context));
         if (self.slot) |slot| {
             self.observed_items_before_reentry = slot.current.accounting_ledger.item_count;
+            self.deinit_outcome = slot.tryDeinit();
             const result = slot.readAttachmentBatch(12) catch |err| {
                 self.reentry_error = err;
                 self.parent.vtable.free(
@@ -1913,6 +2082,7 @@ test "CR3a-2b1 release allocator callback 동안 charge를 유지하고 sibling 
     probe.slot = &slot;
     try slot.releaseAttachmentBatch(first_token);
     try std.testing.expectEqual(@as(usize, 1), probe.observed_items_before_reentry);
+    try std.testing.expectEqual(DeinitOutcome.busy, probe.deinit_outcome.?);
     try std.testing.expect(probe.reentry_error == null);
     const sibling_token = probe.sibling_token orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), slot.current.accounting_ledger.item_count);
@@ -2719,7 +2889,18 @@ test "client slot rejects a valid foreign generation node splice" {
     const canonical_first = first.current;
     first.current = second.current;
     try std.testing.expect(!first.valid());
+    try std.testing.expectEqual(DeinitOutcome.corrupt, first.tryDeinit());
+    try first.current.client.tryAcquireEndedPurgeExclusive();
+    try std.testing.expect(first.current.client.releaseEndedPurgeExclusiveClean());
+    first.current = @ptrFromInt(@alignOf(ClientNode));
+    try std.testing.expectEqual(DeinitOutcome.corrupt, first.tryDeinit());
     first.current = canonical_first;
+    const shared = try first.beginRegisteredClientOperation();
+    first.current = second.current;
+    first.endRegisteredClientOperation(shared);
+    first.current = canonical_first;
+    try first.current.client.tryAcquireEndedPurgeExclusive();
+    try std.testing.expect(first.current.client.releaseEndedPurgeExclusiveClean());
     first.deinit();
     second.deinit();
 }
@@ -2771,6 +2952,28 @@ test "client slot publishes deinit reservation before allocator free callback re
     try std.testing.expect(allocator.free_reentry_fired);
     try std.testing.expectEqual(DeinitOutcome.busy, allocator.free_reentry_outcome.?);
     try std.testing.expectEqual(Lifecycle.dead, slot.lifecycle);
+}
+
+test "CR3a B3b-F direct Client intrusion aborts a reserved slot teardown without panic" {
+    const Runner = struct {
+        fn run(client: *client_mod.Client, rejected: *std.atomic.Value(bool)) void {
+            if (!client.tryDeinit()) rejected.store(true, .release);
+        }
+    };
+    const allocator = std.testing.allocator;
+    var source = fixtureClient(allocator, 0xF4);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, allocator, &source, 0xF4);
+
+    const reserved = try slot.beginRegisteredExclusiveTeardown();
+    var rejected: std.atomic.Value(bool) = .init(false);
+    const thread = try std.Thread.spawn(.{}, Runner.run, .{ &reserved.node.client, &rejected });
+    thread.join();
+    try std.testing.expect(rejected.load(.acquire));
+    try std.testing.expect(reserved.node.client.endedPurgeFenceIntruded());
+    slot.abortRegisteredExclusiveTeardown(reserved);
+    try std.testing.expect(clientSlotRegistryEntry(@intFromPtr(&slot)) != null);
+    try std.testing.expectEqual(DeinitOutcome.cleaned, slot.tryDeinit());
 }
 
 test "client slot alias quarantine counter rejects overflow without wrapping" {

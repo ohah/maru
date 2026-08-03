@@ -688,22 +688,46 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   component gate는 empty/none/all, first/middle/last/alternating, source cap/cap+1, target count mismatch, count/byte underflow·overflow,
   forged cursor fail-close, deterministic error precedence/replay와 stable survivor 순서를 Debug/ReleaseFast에서 검증하고 Client·client_slot·allocator·quarantine import와 제품 callsite
   0을 source oracle로 고정한다.
-  2c2b3b가 blocking generation-only complete Client-owned deinit graph 64 MiB checked cap, `pending_outbound` owner SSOT, private immutable/no-escape scratch,
+  2c2b3b는 B3b-F(fence)→B3b-S(Client substrate, product caller 0)→B3b-O(ClientSlot orchestration, exact-one caller) 내부 gate로 나눈다.
+  B3b-F는 heap-pinned ClientNode의 final-address `ClientOperationFence`와 Client의 nullable non-owning binding을 추가한다. packed atomic의
+  shared inflight count와 exclusive/intrusion/terminal bit가 public Client mutation과 commit callback의 entry-check TOCTOU를 막고,
+  fork child는 PID mismatch를 atomic 접근 전에 거부한다. deterministic handoff로 shared-first→exclusive Busy/callback 0,
+  exclusive-first→cross-thread public mutation AdminBusy/no-op와 intrusion, nested count, stale/copy/rebind,
+  same-address node generation ABA, counter overflow/reserved-bit fail-close, parent locked-state fork child의 parent state 불변을
+  Debug/ReleaseFast에서 검증한다. atomic load 자체의 호출 횟수는 계측하지 않고 PID-first source order와 parent state 불변을 함께
+  증거로 사용한다. 의미 권위는 기존
+  `StreamOperationPermit`이며 fence는 kind/binding/receipt/quarantine를 저장하지 않는다.
+  ClientSlot의 새 blocker publication은 process registry mutex를 유지한 채 node shared fence를 먼저 잡는다. attachment binding
+  reserve와 stream-operation permit publication, generation batch release의 prepare→allocator callback→accounting consume→registry settle
+  전체가 이 aggregate shared gate 안에 있어 teardown의 registry preflight와 Client exclusive 사이에 새 blocker가 끼어들 수 없다.
+  ClientSlot teardown은 `registry mutex → exclusive fence`를 먼저 획득하고 그 전에는 mutable node graph를 읽지 않는다. preflight
+  early return은 callback/mutation 전 abort로 exclusive와 direct-Client intrusion을 함께 0으로 되돌리고, Client commit은 같은 exclusive의
+  terminal commit, 그 뒤 registry/node teardown은 typed return 0인
+  no-fail suffix여야 한다. callback 재진입과 socket shared-operation 경쟁에서 node를 보존하고, shared operation이 멈춘 동안 teardown이
+  graph를 관측하지 않은 채 Busy를 반환하는 것을 검증한다. 일반 permit admission은 node를 역참조하지 않는 allocator TLS precheck를
+  fence보다 먼저 수행하여 예상된 callback 재진입이 AdminBusy이면서 exclusive intrusion 0임을 검증한다.
+  B3b-F source oracle은 `tryDeinit|ensureUsable|poison|dropBufferedStream|takeEventForStream|releaseEvent|readGenerationBatch`와
+  blocking RPC prepare/abort/preflight/execute의 fence-before-TLS/graph funnel, 세 ClientSlot aggregate scope의 begin→defer end→mutation
+  순서, Client terminal 뒤 typed return 0을 고정한다. 모든 Client receiver public method의 G/C/U/R closed manifest는 B3b-S의 첫 hostile
+  callback test보다 먼저 RED→GREEN으로 닫으며, B3b-F declaration baseline만으로 이를 완료했다고 주장하지 않는다.
+  B3b-S는 blocking generation-only complete Client-owned deinit graph 64 MiB checked cap, `pending_outbound` owner SSOT, private immutable/no-escape scratch,
   별도 advance-before-callback cleanup cursor, stable compaction/counter publication, all-target exact-once callback, scalar-first post-validation과
-  absorbing `quarantined_no_free` poison을 실제 ClientSlot transaction에 함께 배선한다. private scratch의 coherent arbitrary overwrite와 cleanup authority 밖에서
+  absorbing `quarantined_no_free` poison을 caller 0인 Client-local transaction으로 완성한다. 실제 ClientSlot permit/receipt/quarantine 배선은
+  B3b-O만 소유한다. private scratch의 coherent arbitrary overwrite와 cleanup authority 밖에서
   이미 수행된 deallocation의 탐지·복구만 비목표이며 public reentry·canonical drift·allocator provenance/alias gate는 유지한다.
   b3b executable gate는 callback 전후 scratch byte 동일/no-escape, first/middle/last callback 진입 때 cursor가 이미 다음 ordinal인 관측,
   outer/scalar/survivor drift, outer/scalar
   mismatch의 payload read/hash 0, scalar exact/content drift의 payload hash exact 1, 모든 원 target callback exact 1, stable survivor order,
   public reentry `busy`, normal/drift permit·receipt exact-one consume, exact drift suffix 순서, one-slot sticky/64 MiB/replay charge 0,
-  모든 postcallback drift의 fd close 0과 `.not_ended` 대형 scratch 0을 고정한다. direct cleanup leaf가
+  모든 postcallback drift의 fd close 0, callback close→same-number `dup2` fd identity ABA의 fstat drift, `.not_ended` 대형 scratch 0을 고정한다.
+  B3b-S에서 Client prepare/commit의 test 밖 production caller는 0이고, B3b-O에서 ClientSlot method 하나만 각각 exact once 호출한다. direct cleanup leaf가
   reentry-guarded public release API를 호출하지 않고, neutral module은 pure helper만, `client.zig`는 DTO adapter/queue mutation/direct cleanup만,
   `client_slot.zig`는 permit/receipt/quarantine orchestration만 소유하는지 source boundary로 검사한다.
   doc-first source gate는 AST canonical `(parent,kind,visibility,modifier,name)` inventory로 root와 owner container를 검사하고,
   허용 tuple 제외 baseline client(root+Client+EndedPurgeScratch+PreparedEndedPurgeInventory)=527/SHA-256
   `594178e6c653e30be0ddc64564d2783922e0c0b4895c3543479f86e5977db6fd`,
   client_slot(root+ClientSlot+EndedPurgePreparation)=126/SHA-256 `03a92a146dbf8935466d0b9250b09c884d575f15fc148f73c6db8979bc69d968`를
-  함께 고정한다. client top-level delta는 `ended_purge_transaction|PreparedEndedPurgeCommit|EndedPurgeCommitError|
+  함께 고정한다. client top-level delta는 `ClientOperationFence|ended_purge_transaction|PreparedEndedPurgeCommit|EndedPurgeCommitError|
   EndedPurgeClientCommitOutcome`, client_slot delta는 `ended_purge_quarantine|ended_purge_quarantine_registry|process_runtime_pid`만 허용한다. nested
   Client/ClientSlot/EndedPurgePreparation method/type도 persistent-session-host의 exact allowlist 밖 증가는 실패한다. 새
   `ended_purge_quarantine.zig`는 std 외 import·allocator·Client·callback·payload pointer 0, public API

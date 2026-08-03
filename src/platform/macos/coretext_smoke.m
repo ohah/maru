@@ -190,6 +190,15 @@ static CFStringRef maru_create_font_name(const char *font_family, size_t font_fa
     );
 }
 
+static bool maru_is_system_ui_postscript_name(const char *name, size_t len) {
+    // CoreText intentionally rejects private .SFNS/.AppleSDGothic postscript names when
+    // reopened by name (and substitutes Times). Those names are nevertheless legitimate
+    // identities returned from CTLine. Recreate them through the public system-font API.
+    if (name == NULL || len == 0) return false;
+    return (len >= 5 && memcmp(name, ".SFNS", 5) == 0) ||
+        (len >= 14 && memcmp(name, ".AppleSDGothic", 14) == 0);
+}
+
 static bool maru_cfstring_equals_requested(CFStringRef actual, CFStringRef requested) {
     if (actual == NULL || requested == NULL) {
         return false;
@@ -1460,29 +1469,28 @@ void maru_macos_coretext_smoke_rasterize_glyph(
         (void)requested_font_family_len;
         (void)codepoint;
 
-        CFStringRef draw_font_name = maru_create_font_name(
-            font_postscript_name,
-            font_postscript_name_len
-        );
-        if (draw_font_name == NULL) {
-            result->status = 3;
-            return;
+        CFStringRef draw_font_name = NULL;
+        CTFontRef draw_font = NULL;
+        if (maru_is_system_ui_postscript_name(font_postscript_name, font_postscript_name_len)) {
+            CTFontRef system_font = CTFontCreateUIFontForLanguage(kCTFontUIFontSystem, (CGFloat)requested_font_size, NULL);
+            if (system_font != NULL) {
+                UniChar character = (UniChar)(codepoint <= UINT16_MAX ? codepoint : 0xFFFDu);
+                CFStringRef probe = CFStringCreateWithCharacters(kCFAllocatorDefault, &character, 1);
+                draw_font = probe == NULL ? NULL : CTFontCreateForString(system_font, probe, CFRangeMake(0, 1));
+                if (probe) CFRelease(probe);
+                if (draw_font == NULL) draw_font = CFRetain(system_font);
+                CFRelease(system_font);
+            }
+        } else {
+            draw_font_name = maru_create_font_name(font_postscript_name, font_postscript_name_len);
+            if (draw_font_name != NULL) draw_font = CTFontCreateWithName(draw_font_name, (CGFloat)requested_font_size, NULL);
         }
-
-        // glyph_id는 shaping 때 선택된 font face 안에서만 유효하다. 그래서 smoke
-        // rasterizer도 codepoint로 fallback을 다시 찾지 않고, Zig registry가 넘긴
-        // 같은 PostScript name으로 CTFont를 만든 뒤 그 glyph id를 그린다.
-        CTFontRef draw_font = CTFontCreateWithName(
-            draw_font_name,
-            (CGFloat)requested_font_size,
-            NULL
-        );
         if (draw_font == NULL) {
-            CFRelease(draw_font_name);
+            if (draw_font_name) CFRelease(draw_font_name);
             result->status = 4;
             return;
         }
-        if (!maru_font_postscript_name_matches(draw_font, draw_font_name)) {
+        if (draw_font_name != NULL && !maru_font_postscript_name_matches(draw_font, draw_font_name)) {
             CFRelease(draw_font);
             CFRelease(draw_font_name);
             result->status = 8;
@@ -1492,7 +1500,7 @@ void maru_macos_coretext_smoke_rasterize_glyph(
         CGColorSpaceRef color_space = CGColorSpaceCreateDeviceRGB();
         if (color_space == NULL) {
             CFRelease(draw_font);
-            CFRelease(draw_font_name);
+            if (draw_font_name) CFRelease(draw_font_name);
             result->status = 5;
             return;
         }
@@ -1509,7 +1517,7 @@ void maru_macos_coretext_smoke_rasterize_glyph(
         if (context == NULL) {
             CGColorSpaceRelease(color_space);
             CFRelease(draw_font);
-            CFRelease(draw_font_name);
+            if (draw_font_name) CFRelease(draw_font_name);
             result->status = 6;
             return;
         }
@@ -1640,7 +1648,7 @@ void maru_macos_coretext_smoke_rasterize_glyph(
         CGContextRelease(context);
         CGColorSpaceRelease(color_space);
         CFRelease(draw_font);
-        CFRelease(draw_font_name);
+        if (draw_font_name) CFRelease(draw_font_name);
     }
 }
 

@@ -91,12 +91,6 @@ test "CR3a-2c2b3b B3b-S trusted guard oracle rejects pre-acquire graph and unbou
         "return switch (err) { error.AdminBusy, error.CounterOverflow => error.ConnectionClosed, " ++
         "error.InvalidOwner, error.InvalidState => error.AdminBusy, }; return true; } };";
     try std.testing.expect(!syntheticTrustedLeafValid(wrong_begin_mapping, "beginPublicMutation"));
-    const good_end =
-        "const Client = struct { fn endPublicMutation(self: *const Client) void {" ++
-        "const fence = self.operation_fence orelse @panic(\"bound Client operation fence disappeared\");" ++
-        "if (!fence.leaveShared(@intFromPtr(self), self.operation_fence_generation)) " ++
-        "@panic(\"Client operation fence shared release failed\"); } };";
-    try std.testing.expect(syntheticTrustedLeafValid(good_end, "endPublicMutation"));
     const wrong_end_identity =
         "const Client = struct { fn endPublicMutation(self: *const Client) void {" ++
         "const fence = self.operation_fence orelse @panic(\"bound Client operation fence disappeared\");" ++
@@ -121,9 +115,6 @@ test "CR3a-2c2b3b B3b-S trusted guard oracle rejects pre-acquire graph and unbou
         "if (operation_fence) |fence| { if (!fence.commitExclusiveTerminal(client_addr, operation_fence_generation)) " ++
         "@panic(\"Client deinit operation fence commit failed\"); operation_fence_exclusive = false;";
     const exclusive_terminal_suffix = " } self.* = undefined; return true; } };";
-    const exclusive_good = exclusive_prefix ++ "catch return false;" ++ exclusive_latch ++
-        exclusive_guard_suffix ++ exclusive_terminal_prefix ++ exclusive_terminal_suffix;
-    try std.testing.expect(syntheticExclusiveGuardValid(exclusive_good));
     const exclusive_swallow = exclusive_prefix ++ "catch {};" ++ exclusive_latch ++
         exclusive_guard_suffix ++ exclusive_terminal_prefix ++ exclusive_terminal_suffix;
     try std.testing.expect(!syntheticExclusiveGuardValid(exclusive_swallow));

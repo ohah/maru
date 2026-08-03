@@ -3884,6 +3884,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var agentSessionArchiveSmokeRevealRejectedCount: UInt32 = 0
     private var agentSessionArchiveSmokeStaleRevealCount: UInt32 = 0
     private var agentSessionArchiveSmokeClaudeModelPresent: UInt32 = 0
+    private var agentSessionArchiveSmokeTerminalInvariant = false
     private var agentSessionArchiveSmokeCaptureList = false
     private var agentSessionArchiveSmokeCaptureLoading = false
     private var agentSessionArchiveSmokeCaptureReady = false
@@ -8076,7 +8077,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     /// Drives the archive fixture through `MaruMetalTerminalView.mouseDown/up`, never by calling
     /// a Zig domain method directly. The only ABI reads are read-only published probes and the
-    /// gate is one-way worker synchronization; opening the dock/tab remains normal pointer input.
+    /// gate is one-way worker synchronization; opening the dock/disclosure remains normal pointer input.
     private func maybeRunAgentSessionArchiveSmoke() {
         guard let driver = agentSessionArchiveSmokeDriver, let surface = primary,
               let session = surface.appSession, let view = surface.view, let window = surface.window else { return }
@@ -8086,6 +8087,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     var out = MaruAppHostAgentSessionArchiveSmokeProbe()
                     let status = maru_macos_app_session_agent_session_archive_smoke_probe(session, target, &out)
                     return status == Self.statusOK ? out : nil
+                },
+                sessionInvariant: {
+                    let activeSurfaceId = maru_macos_app_session_agent_session_archive_smoke_active_surface_id(session)
+                    let termCount = maru_macos_app_session_agent_session_archive_smoke_term_count(session)
+                    guard activeSurfaceId != 0, termCount != 0 else { return nil }
+                    return .init(activeSurfaceId: activeSurfaceId, termCount: termCount)
                 },
                 setGate: { blocked in
                     maru_macos_app_session_set_agent_session_archive_detail_smoke_gate(session, blocked ? 1 : 0) == Self.statusOK
@@ -8132,6 +8139,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 _ = self.renderTick()
             }
         }
+        agentSessionArchiveSmokeTerminalInvariant = driver.terminalInvariantSatisfied
         guard driver.finished else { return }
         agentSessionArchiveSmokeDriver = driver
         smokeTimer?.invalidate()
@@ -9144,6 +9152,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         agent_session_archive_smoke_reveal_rejected_count=\(agentSessionArchiveSmokeRevealRejectedCount)
         agent_session_archive_smoke_stale_reveal_count=\(agentSessionArchiveSmokeStaleRevealCount)
         agent_session_archive_smoke_claude_model_present=\(agentSessionArchiveSmokeClaudeModelPresent)
+        agent_session_archive_smoke_terminal_invariant=\(agentSessionArchiveSmokeTerminalInvariant)
         agent_session_archive_smoke_capture_list=\(agentSessionArchiveSmokeCaptureList)
         agent_session_archive_smoke_capture_loading=\(agentSessionArchiveSmokeCaptureLoading)
         agent_session_archive_smoke_capture_ready=\(agentSessionArchiveSmokeCaptureReady)

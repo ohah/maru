@@ -8,7 +8,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 158u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 159u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -546,6 +546,15 @@ uint32_t maru_macos_app_session_agent_session_archive_smoke_stale_reveal_count(
 /* Closed-fixture-only evidence that the currently open Claude archive detail retained a
    non-empty parsed model. Returns a boolean only; model/session/path text is never exported. v156. */
 uint32_t maru_macos_app_session_agent_session_archive_smoke_claude_model_present(
+    const MaruAppHostSession *session
+);
+/* Closed-fixture-only ownership observers. They expose neither archive content nor mutation:
+   the AppKit archive smoke compares these values before card activation and while detail is
+   loading/ready to prove the disclosure did not create a Term or change active focus. v159. */
+uint64_t maru_macos_app_session_agent_session_archive_smoke_active_surface_id(
+    const MaruAppHostSession *session
+);
+uint32_t maru_macos_app_session_agent_session_archive_smoke_term_count(
     const MaruAppHostSession *session
 );
 /* target은 MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_* 중 하나여야 한다. 읽기 전용이며

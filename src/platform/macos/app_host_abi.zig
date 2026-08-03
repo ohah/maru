@@ -109,8 +109,8 @@ pub const AgentSessionArchiveSmokeProbe = extern struct {
     enabled: u32 = 0,
 };
 
-test "ABI v157 app instance lease result values match the C header" {
-    try std.testing.expectEqual(@as(u32, 158), abi_version);
+test "ABI v159 app instance lease result values match the C header" {
+    try std.testing.expectEqual(@as(u32, 159), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -451,6 +451,24 @@ pub export fn maru_macos_app_session_agent_session_archive_smoke_claude_model_pr
 ) u32 {
     const app_session = session orelse return 0;
     return @intFromBool(app_session.agentSessionArchiveSmokeClaudeModelPresent());
+}
+
+/// Closed-fixture-only ownership observer. It exposes no text, path, action, or mutable
+/// archive state; it lets the AppKit smoke prove that a dock disclosure retained focus.
+pub export fn maru_macos_app_session_agent_session_archive_smoke_active_surface_id(
+    session: ?*const AppSession,
+) u64 {
+    const app_session = session orelse return 0;
+    return app_session.agentSessionArchiveSmokeActiveSurfaceId();
+}
+
+/// Closed-fixture-only ownership observer paired with `...active_surface_id`. The AppKit
+/// smoke compares this before card activation and while loading/ready; it is not automation.
+pub export fn maru_macos_app_session_agent_session_archive_smoke_term_count(
+    session: ?*const AppSession,
+) u32 {
+    const app_session = session orelse return 0;
+    return app_session.agentSessionArchiveSmokeTermCount();
 }
 
 /// Reads one already-published archive capability for the dedicated AppKit smoke fixture.
@@ -5686,6 +5704,14 @@ test "macOS app exported session API reports null outputs as ABI errors" {
     try std.testing.expectEqual(
         @as(u32, 0),
         maru_macos_app_session_agent_session_archive_detail_smoke_gate_reached(null),
+    );
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        maru_macos_app_session_agent_session_archive_smoke_active_surface_id(null),
+    );
+    try std.testing.expectEqual(
+        @as(u32, 0),
+        maru_macos_app_session_agent_session_archive_smoke_term_count(null),
     );
     try std.testing.expectEqual(
         @as(c_int, @intFromEnum(Status.null_out)),

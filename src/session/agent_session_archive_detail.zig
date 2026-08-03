@@ -2,7 +2,7 @@
 //!
 //! The platform worker supplies only a tail of one already-identified JSONL
 //! source.  This module never opens a file and deliberately discards tool
-//! input/output: an archive tab is a navigation aid, not a transcript viewer.
+//! input/output: an archive disclosure is a navigation aid, not a transcript viewer.
 //! The platform worker applies the shared redact policy before publishing a
 //! parsed turn across the worker boundary.
 

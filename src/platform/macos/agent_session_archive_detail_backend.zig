@@ -1,6 +1,6 @@
-//! One-shot, no-follow detail reader for an archive-session tab.
+//! One-shot, no-follow detail reader for a dock-local archive disclosure.
 //!
-//! Archive list discovery already proved a source identity.  A tab must prove
+//! Archive list discovery already proved a source identity.  A disclosure must prove
 //! that identity again before it reads any user transcript, because a pathname
 //! can be replaced between list publication and a later click.  This backend
 //! owns the blocking open/stat/read/JSON work; AppSession only drains immutable
@@ -31,7 +31,6 @@ pub const State = enum { ready, stale, unavailable };
 
 pub const Result = struct {
     request_id: u64,
-    surface_id: u64,
     state: State,
     detail: ?detail.Detail = null,
 
@@ -71,7 +70,6 @@ const Job = struct {
     state: *WorkerState,
     source: Source,
     request_id: u64,
-    surface_id: u64,
 };
 
 pub const Backend = struct {
@@ -84,9 +82,10 @@ pub const Backend = struct {
     }
 
     /// Caller owns source on false; the detached worker owns it on true.
-    /// One in-flight tab read is intentionally enough: a later click can show
-    /// its loading tab immediately and submit after this bounded read publishes.
-    pub fn submit(self: *Backend, source: Source, request_id: u64, surface_id: u64) bool {
+    /// One in-flight detail read is intentionally enough: a later disclosure can show loading
+    /// immediately and retry after this bounded read publishes. `request_id` is the only
+    /// completion authority; no UI surface is created or carried across this boundary.
+    pub fn submit(self: *Backend, source: Source, request_id: u64) bool {
         const state = self.state orelse return false;
         state.mutex.lockUncancelable(state.io);
         if (state.shutting_down or state.inflight) {
@@ -101,7 +100,7 @@ pub const Backend = struct {
             finishWithoutResult(state);
             return false;
         };
-        job.* = .{ .state = state, .source = source, .request_id = request_id, .surface_id = surface_id };
+        job.* = .{ .state = state, .source = source, .request_id = request_id };
         const thread = std.Thread.spawn(.{}, worker, .{job}) catch {
             state.allocator.destroy(job);
             finishWithoutResult(state);
@@ -156,7 +155,7 @@ fn finishWithoutResult(state: *WorkerState) void {
 fn worker(job: *Job) void {
     const state = job.state;
     waitForTestGate(state);
-    var result = readSource(state, job.source, job.request_id, job.surface_id);
+    var result = readSource(state, job.source, job.request_id);
     job.source.deinit(state.allocator);
     state.allocator.destroy(job);
 
@@ -189,25 +188,25 @@ fn waitForTestGate(state: *WorkerState) void {
     state.test_gate_reached.store(false, .release);
 }
 
-fn readSource(state: *WorkerState, source: Source, request_id: u64, surface_id: u64) Result {
+fn readSource(state: *WorkerState, source: Source, request_id: u64) Result {
     const file = std.Io.Dir.cwd().openFile(state.io, source.source_path, .{ .follow_symlinks = false }) catch
-        return .{ .request_id = request_id, .surface_id = surface_id, .state = .unavailable };
+        return .{ .request_id = request_id, .state = .unavailable };
     defer file.close(state.io);
-    const stat = file.stat(state.io) catch return .{ .request_id = request_id, .surface_id = surface_id, .state = .unavailable };
-    if (stat.kind != .file) return .{ .request_id = request_id, .surface_id = surface_id, .state = .unavailable };
+    const stat = file.stat(state.io) catch return .{ .request_id = request_id, .state = .unavailable };
+    if (stat.kind != .file) return .{ .request_id = request_id, .state = .unavailable };
     if (stat.inode != source.inode or openedDevice(file) != source.device)
-        return .{ .request_id = request_id, .surface_id = surface_id, .state = .stale };
+        return .{ .request_id = request_id, .state = .stale };
     const size: usize = @intCast(stat.size);
     const take = @min(size, max_tail_bytes);
     const start = size - take;
-    const bytes = state.allocator.alloc(u8, take) catch return .{ .request_id = request_id, .surface_id = surface_id, .state = .unavailable };
+    const bytes = state.allocator.alloc(u8, take) catch return .{ .request_id = request_id, .state = .unavailable };
     defer state.allocator.free(bytes);
-    const n = file.readPositionalAll(state.io, bytes, start) catch return .{ .request_id = request_id, .surface_id = surface_id, .state = .unavailable };
+    const n = file.readPositionalAll(state.io, bytes, start) catch return .{ .request_id = request_id, .state = .unavailable };
     var parsed = detail.parseTail(state.allocator, source.provider, bytes[0..n], start == 0) catch
-        return .{ .request_id = request_id, .surface_id = surface_id, .state = .unavailable };
+        return .{ .request_id = request_id, .state = .unavailable };
     errdefer parsed.deinit(state.allocator);
     redactTurns(state.allocator, &parsed);
-    return .{ .request_id = request_id, .surface_id = surface_id, .state = .ready, .detail = parsed };
+    return .{ .request_id = request_id, .state = .ready, .detail = parsed };
 }
 
 /// Detail text crosses the worker/main boundary only after the repository-wide

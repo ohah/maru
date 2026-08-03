@@ -599,12 +599,25 @@ titlebar launcher와 dock slot만 관측하도록 한다.
   baseline과 같아야 한다. source/ID/path/원문이나 callable action identity는 fixture ABI를 통과하지 않는다.
   scan gate와 refresh probe는 이 named isolated smoke scenario에서만 host가 명시적으로 사용하며 일반 refresh,
   provider history, 제품 설정에는 도달하지 않는다.
+- **expanded-scroll-anchor scenario**는 ready inline detail을 연 뒤 실제 `MaruMetalTerminalView.scrollWheel`의
+  precise backing-pixel gesture로 그 **동일 expanded card**가 content clip top을 부분적으로 가로지를 때까지 내린다.
+  fixture는 일반 refresh pointer와 scan gate로 scan을 멈추고, 같은 inode를 보존한 별도 fixture record의 mtime만 바꿔
+  replacement projection의 순서를 바꾼다. publish 뒤에는 원시 provider/session/path 대신 기존 detail request id와
+  read-only raw card-rect probe만 비교한다: request id가 유지되고, anchor card의 raw top(따라서 intra-card pixel)이
+  refresh 전과 정확히 같아야 한다. clip된 visible rect나 화면 행 번호를 비교하면 top edge가 항상 같은 값으로
+  포화되어 anchor 결함을 숨길 수 있으므로 금지한다. worker 완료 전에는 retained snapshot의 raw rect가 유지돼야 하고,
+  완료 뒤 새 published tree generation이 아니거나 새 card가 materialize되지 않았거나 raw top이 달라지면 실패한다. 이 gesture와 refresh는 모두 일반 AppKit
+  event route를 타며, probe는 읽기 전용이고 scan/detail/action/scroll state를 변경하지 않는다. summary에는 opaque
+  request id나 source metadata를 쓰지 않고 `scroll_dispatched`, `anchor_before/after_present`,
+  `anchor_raw_top_preserved`, `anchor_snapshot_reordered` 같은 boolean verdict만 남긴다.
 - reveal 성공 scenario도 host의 외부 앱 열기를 호출하지 않는다. Swift가 smoke 모드에서 same
   `take_file_tree_external_open` consumer를 drain해 allowlisted fixture token과 횟수만 summary에 기록한다.
 - artifact는 ready session **목록**, loading/ready/stale inline expansion의 **1920×960 backing-pixel fixture 창** 제품 Metal PPM·PNG와 redacted key/value summary다. 목록 capture는 published card/action tree만 확인한 첫 frame이 아니라 detached rich-text artifact가 poll·atlas 연결된 뒤의 다음 ordinary frame에서만 요청한다. 한 프레임 뒤 종료하는
   일반 `MARU_SCREENSHOT` 훅은 쓰지 않고, smoke process 안에서만 여러 completed Metal frame을 readback하는 capture
   sink를 쓴다. sink는 이미 paint·publish된 probe가 증명한 상태에서만 **다음 동일 frame**의 renderer output 복사를 요청한다.
-  `resume-pointer` scenario는 card click 전의 ready 목록(서로 다른 synthetic record 세 개)·loading·ready, `detail-stale` scenario는 loading·stale를 각각 한 장씩 남긴다.
+  `resume-pointer` scenario는 card click 전의 ready 목록(서로 다른 synthetic record 세 개)·loading·ready, `detail-stale` scenario는 loading·stale를 각각 한 장씩 남긴다. `expanded-scroll-anchor`는 refresh 전·후의
+  scrolled expanded-card frame을 각각 남긴다. 두 장은 layout goldens가 아니라 raw-top boolean verdict의 사람 검토
+  보조이며, 동일 card가 clip top을 가로지른 상태와 refresh 뒤 보존된 상태를 보여준다.
   request는 fixture root 아래의 고정 상대 artifact 이름만 받을 수 있고, 일반 실행·Chrome Lab·provider 입력에는
   도달하지 않는다. capture 요청·copy 완료는 frame/action/worker state를 바꾸지 않으며, pending request는 한 장을 쓴 뒤 즉시
   사라진다. summary에는 frame request id,

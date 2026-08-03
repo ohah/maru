@@ -1025,14 +1025,45 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    canonical cleanup으로 사용한다. socket E2E는 server subscription final-zero를 증명한다. 이는 “local registry callback 0”이지
    socket close/host EOF cleanup 0이라는 뜻이 아니다.
 
-   2c3b의 attach 이후 반복 RPC는 위 일회성 registry response seal을 reset하거나 재사용하지 않는다. exact 공개 signature는
+   2c3b는 두 merge gate로 나눈다. **2c3b-2 request authority gate**는 wire와 제품 동작을 바꾸지 않는다. 이 gate는
+   `RuntimeRequestTag -> RequestFamily -> role/phase -> method`의 exhaustive classifier, node-sealed canonical prepared transcript,
+   opaque `PreparedBlockingRpcStorage`의 all-or-none pair prepare/abort와 registry-pinned admission까지만 구현한다. public `.rpc`
+   destination과 response payload publish는 열지 않고 기존 attach execute signature/socket behavior를 보존한다. b-2 완료 시
+   `GenerationTransport`의 `prepareBlockingRpcStorage|abortPreparedBlockingRpcStorage|preparedBlockingRpcStorageMatches` 직접 호출은
+   0이어야 한다. **2c3b-3 response execution gate**가 아래 destination union, RPC epoch, progress evidence, response publish/borrow/
+   finish와 fail-stop을 함께 연다. 실제 `RemoteRuntime` family decoder 및 legacy/generation 제품 전환은 2c3e 소유다.
+
+   b-2의 공개 request-side signature는
+   `prepareRequest(request: RuntimeRequest) -> PrepareError!PreparedCallReceipt`와
+   `abortPreparedRequest(receipt: PreparedCallReceipt) -> AbortError!void`다. `PrepareError`는
+   `Busy|InvalidOwner|Unauthorized|IdentityExhausted|ResourceExhausted|ConnectionClosed|ProtocolError`, `AbortError`는
+   `Busy|InvalidOwner|InvalidReceipt|ProtocolError`의 exact set이다. Client 내부 error는 ClientSlot transaction이 다음처럼 닫는다.
+
+   | 내부 증거 | prepare/abort facade 결과 | canonical 결과 |
+   | --- | --- | --- |
+   | operation/cleanup/callback 충돌 | `Busy` | mutation 0, 기존 authority 유지 |
+   | stale/copy/move/fork/thread/binding mismatch | `InvalidOwner` | pointer dereference·mutation 0 |
+   | connection-only tag 또는 role/phase 불허 | `Unauthorized` | request backing·wire 0 |
+   | receipt/tag/id/digest mismatch | `InvalidReceipt`(abort) | backing read/free 0 |
+   | issuer 소진 | `IdentityExhausted` | authority terminal, connection poison |
+   | canonical frame allocation OOM | `ResourceExhausted` | both idle, allocation rollback exact |
+   | 이미 닫힌 connection | `ConnectionClosed` | authority terminal, backing은 exact-safe cleanup만 |
+   | descriptor/allocator/lifecycle corruption | `ProtocolError` 또는 strict fail-stop evidence | ambiguous pointer read/free 0, authority terminal |
+
+   `RuntimeRequest`의 public payload는 arbitrary encoded JSON이 아니다. b-2에서 각 variant의 typed DTO로 바꾸고 bound request의
+   `stream_id`·`runtime_id`·role-sensitive discriminator는 canonical binding에서 내부 encoder가 주입한다. caller가 외부 stream ID나
+   raw method string을 제공할 수 없다. `find`의 `scroll`처럼 권한을 바꾸는 값도 typed field가 family classifier와 encoder에 한 번만
+   전달하며, caller 제공 JSON과 별도 bool이 불일치하는 이중 출처를 만들지 않는다. attach의 기존 encoded request backing은 b-2
+   transaction 내부 private compatibility encoder로만 남고 public `EncodedRequestParams` escape는 0으로 줄인다.
+
+   2c3b의 attach 이후 반복 RPC는 위 일회성 registry response seal을 reset하거나 재사용하지 않는다. b-3의 exact 공개 signature는
    `executePreparedRequest(receipt: PreparedCallReceipt, destination: ResponseDestination) -> ExecuteError!ExecuteResult`이고
    `ResponseDestination=union(enum){attach:*ExecutedResponse,rpc:*RpcExecutedResponse}`다. `prepareRequest` 성공은 transport-local
    projection이 아니라 node-sealed canonical prepared transcript에 caller가 다시 쓸 수 없는 exact `RuntimeRequestTag`와
    `PreparedCallReceipt`를 함께 seal한다. 이 transcript와 기존 `PreparedBlockingRpcStorage`는 별도 lifecycle SSOT가 아니다.
    `ClientSlot`의 단일 prepare/abort/execute transaction이 semantic tag+receipt와 request backing을 pair로 publish/settle하며 한쪽만
    live인 상태를 외부에 게시하지 않는다.
-   execute는 이 canonical tag와 destination tag가 `attach_controller+attach` 또는 `non-attach+rpc`로 짝지어졌는지 첫 request byte
+   execute는 이 canonical tag와 destination tag가 `attach_only+attach` 또는 `bound_*+rpc`로 짝지어졌는지 첫 request byte
    전에 비교한다. request digest에서 semantic tag를 역추론하지 않는다. 잘못된 조합은 wire 0·owner mutation 0의
    `InvalidResponseDestination`이다. attach arm은 위 registry seal과 `PreparedAttachmentBinding` commit 계약을 그대로 사용한다.
    `ExecuteError`의 exact set은 `Busy|InvalidOwner|Unauthorized|InvalidReceipt|InvalidResponseDestination|IdentityExhausted|ResourceExhausted|
@@ -1048,6 +1079,35 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    변경하지 않는다. `GenerationTransport` 안에는 이 authority의 projection/receipt만 두므로 whole-transport bytes와 stale stack response를
    같은 주소에 복원해도 node seal의 epoch/lifecycle을 되살릴 수 없다. 구현은 공통 preflight 뒤 attach/RPC owner protocol을 별도
    private helper로 나눠 한 분기에서 interleave하지 않는다.
+
+   request-side canonical transcript는 같은 binding entry의 `PreparedRequestAuthority` 하나가 소유한다. lifecycle은 raw tag를 먼저
+   검사하는 `idle|prepared|executing|terminal`이고, seal은 transport/binding identity, request tag/family, request id/digest,
+   prepared incarnation, storage final address, frame `{ptr,len,capacity}`, allocator identity를 포함한다. `ClientSlot`의 단일
+   prepare/abort/begin-execute/settle API만 transcript와 opaque storage 양쪽을 만진다. publish 전 실패는 둘 다 pristine/idle,
+   prepare 성공은 둘 다 live, abort/execute settle은 authority를 먼저 tombstone한 뒤 exact canonical descriptor일 때만 frame을 free한다.
+   descriptor·allocator·range가 불명확하면 frame hash/역참조/free를 하지 않고 authority terminal+strict fail-stop evidence로 닫는다.
+   cleanup entry clear/deinit은 prepared authority가 `idle|terminal-settled`, attach response owner가 settledExact, RPC response authority가
+   `idle|terminal-settled`인 경우에만 허용한다.
+
+   request classifier는 다음 전수표가 SSOT다. `find`는 encoded JSON의 caller bool을 신뢰하지 않고 closed request variant 안의 typed
+   `scroll` 의미를 canonical encoder가 만들며, `scroll=false`만 observer 가능하고 `scroll=true`는 controller mutation으로 검사한다.
+
+   | RuntimeRequestTag | family | 허용 phase/role | method |
+   | --- | --- | --- | --- |
+   | `spawn_full` | `connection_only_denied` | attachment facade에서 항상 거부 | `runtime.spawn_full` |
+   | `attach_controller` | `attach_only` | unbound prepared controller + attach destination | `runtime.attach` |
+   | `observation` | `bound_observation` | committed controller/observer | `runtime.observation` |
+   | `selected_text` | `bound_observation` | committed controller/observer | `runtime.selected_text` |
+   | `link_at` | `bound_observation` | committed controller/observer | `runtime.link_at` |
+   | `select_op` | `bound_observation` | committed controller/observer | `runtime.select_op` |
+   | `find` | `bound_observation|bound_controller_mutation` | `scroll=false`: controller/observer, `scroll=true`: live controller | `runtime.find` |
+   | `resize` | `bound_controller_mutation` | committed live controller | `runtime.resize` |
+   | `clipboard_write` | `bound_controller_mutation` | committed live controller | `runtime.clipboard_write` |
+   | `core_command` | `bound_controller_mutation` | committed live controller | `runtime.core_command` |
+   | `report_mouse` | `bound_controller_mutation` | committed live controller | `runtime.report_mouse` |
+   | `notification` | `bound_controller_mutation` | committed live controller | `runtime.notification` |
+   | `terminate` | `bound_terminal` | committed live controller | `runtime.terminate` |
+   | `detach` | `bound_terminal` | committed controller/observer | `runtime.detach` |
 
    `RpcResponseAuthority.lifecycle`은 raw tag를 먼저 검사하는 `idle|executing|published|releasing|terminal`이다. `terminal`만 absorbing이고,
    `idle`에서만 checked-monotonic nonzero epoch를 발급해 transport당 blocking RPC를 정확히 하나만 in-flight로 둔다. epoch 소진은

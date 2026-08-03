@@ -10,6 +10,7 @@ const chrome = maru.chrome;
 const renderer = maru.renderer;
 const bridge = @import("../coretext_smoke_bridge.zig");
 const probe = @import("../coretext_probe.zig");
+const metal_frame = renderer.metal_frame;
 
 pub const Placement = struct {
     x_px: f32,
@@ -27,6 +28,38 @@ pub const Artifact = struct {
         allocator.free(self.records);
         allocator.free(self.placements);
         self.* = undefined;
+    }
+
+    pub fn appendGpuGlyphs(
+        self: Artifact,
+        allocator: std.mem.Allocator,
+        frame: renderer.RenderFrame,
+        atlas: renderer.GlyphAtlasConfig,
+        origin_x_px: u32,
+        origin_y_px: u32,
+        out: *std.ArrayList(metal_frame.GpuGlyph),
+    ) !void {
+        if (frame.glyph_quad_frame.glyphs.len != self.placements.len) return error.MeasuredGlyphCountMismatch;
+        const texture = renderer.AtlasTextureSize{ .width_px = atlas.atlas_width_px, .height_px = atlas.atlas_height_px };
+        for (frame.glyph_quad_frame.glyphs, self.placements) |glyph, placement| {
+            const uv = try renderer.glyph_quads.uvRectForSlot(glyph.slot, texture);
+            try out.append(allocator, .{
+                .x = @as(f32, @floatFromInt(origin_x_px)) + placement.x_px,
+                .y = @as(f32, @floatFromInt(origin_y_px)) + placement.y_px,
+                .w = @floatFromInt(glyph.slot.width_px),
+                .h = @floatFromInt(glyph.slot.height_px),
+                .atlas_x_px = glyph.slot.x_px,
+                .atlas_y_px = glyph.slot.y_px,
+                .atlas_width_px = glyph.slot.width_px,
+                .atlas_height_px = glyph.slot.height_px,
+                .u0 = if (glyph.run.cache_key.color_glyph_kind == .color) uv.u0 + 2.0 else uv.u0,
+                .v0 = uv.v0,
+                .u1 = uv.u1,
+                .v1 = uv.v1,
+                .foreground = placement.foreground,
+                .layer = 0,
+            });
+        }
     }
 };
 

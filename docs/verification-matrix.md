@@ -743,7 +743,8 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   optional error capture와 `return`만 허용하고 반환식의 `self` 접근을 0으로 고정하여 fail-open continuation을 거부한다. trusted transfer는
   동일 held capability 외 성공 반환을 금지하고, exclusive deinit은 exact acquire identity·catch-return·latch-bound deferred abort·terminal
   commit 뒤 disarm을 검증한다.
-  B3b-S는 blocking generation-only complete Client-owned deinit graph 64 MiB checked cap, `pending_outbound` owner SSOT, private immutable/no-escape scratch,
+  B3b-S는 blocking generation-only complete Client-owned deinit graph 64 MiB checked cap, `build_id`·`Client.lifecycle`·`pending_outbound`
+  owner SSOT와 각 exact-owned frozen descriptor, private immutable/no-escape scratch,
   별도 advance-before-callback cleanup cursor, stable compaction/counter publication, all-target exact-once callback, scalar-first post-validation과
   absorbing `quarantined_no_free` poison을 caller 0인 Client-local transaction으로 완성한다. drift commit은 graph tombstone 뒤 sealed
   preparation을 `finalization_pending`으로 남기고 poison/terminal/quarantine mutation은 0이다. 실제 ClientSlot permit/receipt/quarantine 배선은
@@ -800,8 +801,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   ClientSlot 생성·valid·deinit 및 macOS fork child의 mutex-before-reject 0,
   self-exec 뒤에만 thread runtime을 시작하는 non-test `ended_purge_quarantine_concurrency_fixture.zig`의 2초 watchdog·8-thread
   single winner·exact release, `idle|reserved|committed`/reserve-release-commit/replay/cap/cap+1을 Debug/ReleaseFast로 검증한다.
-  `pending_outbound` non-null도 build/lifecycle과 함께 frozen scratch descriptor, complete-owner sum/alias/seal/postvalidation/tombstone에
-  포함하며 b2의 기존 adoption-only null 가정을 purge authority로 재사용하지 않는다.
+  `pending_outbound` non-null도 `build_id`·`Client.lifecycle`과 함께 각각 독립된 frozen scratch descriptor,
+  complete-owner sum/alias/seal/postvalidation/tombstone에 포함하며 b2의 기존 adoption-only null 가정을 purge authority로 재사용하지 않는다.
+  `client_lifecycle: ExternalArrayDescriptor`는 zero default이고 exact-owned slice를 `capacity=len`으로 canonicalize한다. empty는 address/len/capacity
+  모두 0이며, current descriptor와 모든 owner range의 exact·partial alias를 payload/hash 전에 검사한다. callback 뒤에도 frozen scalar와
+  정확히 일치할 때만 Client lifecycle contents를 hash한다.
   AST gate는 `PreparedEndedPurgeCommit`이 나타나면 exact `Lifecycle{pristine,prepared,finalization_pending,consumed}`+18 fields를 검사하고,
   `ClientOwnership.quarantined_no_free`와
   `EndedPurgePreparationLifecycle{empty,prepared,committing,consumed,aborted}` 외 enum 증분을 거부한다. 각 신규 import는 raw substring이
@@ -902,7 +906,7 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   EndedPurgePreparation transport receipt`이다. 어떤 postcallback drift에서도 fd close는 0이다. callback 전
   process-global `idle->reserved`와 blocking generation Client complete owned extent checked sum `<= max_ended_purge_quarantine_bytes(64 MiB)`, 정상 release, drift exact-once
   `reserved->committed`, replay charge 0, committed 뒤 새 generation Client/reconnect/purge terminal 거부를 검증해 process 누적을 한 건으로
-  고정한다. deinit owner SSOT는 build/lifecycle/pending outbound와 slice payload의 exact owned length, parser/list/partial capacity backing을
+  고정한다. deinit owner SSOT는 `build_id`/Client lifecycle/pending outbound와 slice payload의 exact owned length, parser/list/partial capacity backing을
   포함하고 borrowed ledger/attachment/registry/lease는 제외한다. external mode는 callback 전 mutation 0으로 거부한다. cap 초과는
   callback/free/quarantine 0인 precommit no-cleanup poison이 reason/unusable을 latch하고 validated captured fd만 detach+close한 뒤 later ordinary
   deinit이 intact owner를 회수한다. 이후 drift generic teardown의 pointer/allocator/fd read와 free/close가 0임을 hostile

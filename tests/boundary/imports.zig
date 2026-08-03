@@ -1061,7 +1061,9 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "tombstoneEndedPurgeOwnedGraph" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "publishEndedPurgeNoFreePoison" },
                 .{ .parent = "EndedPurgeScratch", .kind = "const", .visibility = "private", .modifier = "", .name = "PendingOutboundDescriptor" },
+                .{ .parent = "EndedPurgeScratch", .kind = "const", .visibility = "private", .modifier = "", .name = "Lifecycle" },
                 .{ .parent = "EndedPurgeScratch", .kind = "field", .visibility = "private", .modifier = "", .name = "build_id" },
+                .{ .parent = "EndedPurgeScratch", .kind = "field", .visibility = "private", .modifier = "", .name = "client_lifecycle" },
                 .{ .parent = "EndedPurgeScratch", .kind = "field", .visibility = "private", .modifier = "", .name = "lifecycle" },
                 .{ .parent = "EndedPurgeScratch", .kind = "field", .visibility = "private", .modifier = "", .name = "pending_outbound" },
                 .{ .parent = "PreparedEndedPurgeInventory", .kind = "field", .visibility = "private", .modifier = "", .name = "quarantine_bytes" },
@@ -7001,22 +7003,29 @@ fn expectOptionalEndedPurgeScratchDelta(
     defer tree.deinit(allocator);
     const members = findRootContainerMembers(&tree, "EndedPurgeScratch") orelse
         return error.TestUnexpectedResult;
-    const names = [_][]const u8{ "PendingOutboundDescriptor", "build_id", "lifecycle", "pending_outbound" };
+    const names = [_][]const u8{
+        "PendingOutboundDescriptor",
+        "Lifecycle",
+        "build_id",
+        "client_lifecycle",
+        "lifecycle",
+        "pending_outbound",
+    };
     var counts = [_]usize{0} ** names.len;
-    var descriptor_node: ?std.zig.Ast.Node.Index = null;
+    var nodes = [_]?std.zig.Ast.Node.Index{null} ** names.len;
     for (members) |member| {
         const tuple = declarationTuple(&tree, "EndedPurgeScratch", member);
         for (names, 0..) |name, index| {
             if (std.mem.eql(u8, tuple.name, name)) {
                 counts[index] += 1;
-                if (index == 0) descriptor_node = member;
+                nodes[index] = member;
             }
         }
     }
     const present = counts[0];
     try std.testing.expect(present <= 1);
     for (counts) |count| try std.testing.expectEqual(present, count);
-    if (descriptor_node) |node| {
+    if (nodes[0]) |node| {
         const variable = tree.fullVarDecl(node) orelse return error.TestUnexpectedResult;
         const init = variable.ast.init_node.unwrap() orelse return error.TestUnexpectedResult;
         var buffer: [2]std.zig.Ast.Node.Index = undefined;
@@ -7026,6 +7035,48 @@ fn expectOptionalEndedPurgeScratchDelta(
         try expectTypedField(&tree, source, descriptor.ast.members[1], "frame_len", "usize");
         try expectTypedField(&tree, source, descriptor.ast.members[2], "stream_id", "u64");
         try expectTypedField(&tree, source, descriptor.ast.members[3], "offset", "usize");
+    }
+    if (present == 1) {
+        try expectNestedEnumAbsentOrExact(
+            allocator,
+            source,
+            "EndedPurgeScratch",
+            "Lifecycle",
+            &.{ "empty", "inventory_prepared", "commit_frozen", "consumed" },
+        );
+        const zero_descriptor = ".{ .address = 0, .len = 0, .capacity = 0 }";
+        try expectTypedFieldWithDefault(
+            &tree,
+            source,
+            nodes[2].?,
+            "build_id",
+            "ExternalArrayDescriptor",
+            zero_descriptor,
+        );
+        try expectTypedFieldWithDefault(
+            &tree,
+            source,
+            nodes[3].?,
+            "client_lifecycle",
+            "ExternalArrayDescriptor",
+            zero_descriptor,
+        );
+        try expectTypedFieldWithDefault(
+            &tree,
+            source,
+            nodes[4].?,
+            "lifecycle",
+            "Lifecycle",
+            ".empty",
+        );
+        try expectTypedFieldWithDefault(
+            &tree,
+            source,
+            nodes[5].?,
+            "pending_outbound",
+            "?PendingOutboundDescriptor",
+            "null",
+        );
     }
 }
 

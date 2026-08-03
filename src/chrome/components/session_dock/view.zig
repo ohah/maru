@@ -13,6 +13,10 @@ const tree = @import("../../ui/tree.zig");
 const build = @import("build.zig");
 const types = @import("types.zig");
 
+// The dock owns this registered SVG icon. A text glyph such as `↻` varies by fallback font and
+// cannot promise the size or optical centre of a Chrome header affordance.
+const refresh_icon = "\u{F000B}"; // reset.svg
+
 pub const Buffers = struct {
     ops: []draw.Op,
     runs: []draw.Run,
@@ -37,7 +41,7 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
     var count_buf: [48]u8 = undefined;
     const count = std.fmt.bufPrint(&count_buf, "{d}개 표시 · 최근 {d}개", .{ props.displayed_count, props.recent_limit }) catch "";
     try writer.text(header, 1, count, .muted_fg);
-    try writer.textRight(header, 0, if (props.loading or props.refreshing) spinner(props.spinner_phase) else "↻", .accent_bar);
+    try writer.textRight(header, 0, if (props.loading or props.refreshing) spinner(props.spinner_phase) else refresh_icon, .accent_bar, !(props.loading or props.refreshing));
 
     try writer.text(find(frame.tree, build.NodeIds.scope_workspace) orelse return error.MissingRect, 0, "작업공간", .surface_fg);
     try writer.text(find(frame.tree, build.NodeIds.scope_project) orelse return error.MissingRect, 0, "프로젝트", .surface_fg);
@@ -89,10 +93,10 @@ const Writer = struct {
         const available_px = rect.rect.width - @as(f32, @floatFromInt(cw * 2));
         if (available_px <= 0) return;
         const max_cols: u16 = @intFromFloat(@floor(available_px / @as(f32, @floatFromInt(cw))));
-        try self.emit(x, y, source, max_cols, .head, role);
+        try self.emit(x, y, source, max_cols, .head, role, false);
     }
 
-    fn textRight(self: *Writer, rect: tree.RectEntry, line: u32, source: []const u8, role: tokens.ColorRole) ViewError!void {
+    fn textRight(self: *Writer, rect: tree.RectEntry, line: u32, source: []const u8, role: tokens.ColorRole, wide_icon: bool) ViewError!void {
         const cw = self.props.cell_width_px;
         const ch = self.props.cell_height_px;
         if (cw == 0 or ch == 0) return;
@@ -104,25 +108,34 @@ const Writer = struct {
         const usable_width = rect.rect.width - inset_px;
         if (usable_width <= 0) return;
         const cols: u16 = @intFromFloat(@floor(usable_width / @as(f32, @floatFromInt(cw))));
-        const width = text_layout.displayCols(source, null);
-        const start: u16 = @intCast(@min(width, cols));
-        const x = rect.rect.x + rect.rect.width - inset_px - @as(f32, @floatFromInt(start * @as(u16, @intCast(cw))));
+        const icon_predicate: ?text_layout.WideIconFn = if (wide_icon) isSessionDockIcon else null;
+        const width = text_layout.displayCols(source, icon_predicate);
+        // The header owns one stable two-cell affordance slot. A loading spinner is only one
+        // cell wide, so centre it inside that same slot instead of letting refresh→spinner
+        // move one cell to the right.
+        const slot_cols: u16 = 2;
+        if (width == 0 or width > slot_cols or cols < slot_cols) return;
+        const start: u16 = @intCast(width);
+        const cell_width: f32 = @floatFromInt(cw);
+        const slot_width = @as(f32, @floatFromInt(slot_cols)) * cell_width;
+        const glyph_width = @as(f32, @floatFromInt(start)) * cell_width;
+        const x = rect.rect.x + rect.rect.width - inset_px - slot_width + (slot_width - glyph_width) / 2;
         const y = rect.rect.y + @as(f32, @floatFromInt(ch * (line + 1)));
-        try self.emit(x, y, source, start, .tail, role);
+        try self.emit(x, y, source, start, .tail, role, wide_icon);
     }
 
-    fn emit(self: *Writer, x: f32, y: f32, source: []const u8, cols: u16, anchor: text_layout.Anchor, role: tokens.ColorRole) ViewError!void {
+    fn emit(self: *Writer, x: f32, y: f32, source: []const u8, cols: u16, anchor: text_layout.Anchor, role: tokens.ColorRole, wide_icons: bool) ViewError!void {
         if (cols == 0) return;
         if (self.op_count == self.ops.len) return error.InsufficientTextBuffer;
         if (self.run_count == self.runs.len) return error.InsufficientRunBuffer;
         const start = self.text_count;
-        var plan = text_layout.plan(source, 0, cols, anchor, null);
+        var plan = text_layout.plan(source, 0, cols, anchor, if (wide_icons) isSessionDockIcon else null);
         while (plan.next()) |item| switch (item) {
             .cluster => |cluster| try self.appendBytes(source[cluster.start..cluster.end]),
             .ellipsis => try self.appendBytes("…"),
         };
         self.runs[self.run_count] = .{ .text = self.text_bytes[start..self.text_count] };
-        self.ops[self.op_count] = .{ .text = .{ .origin = .{ .x = @intFromFloat(@floor(x)), .y = @intFromFloat(@floor(y)) }, .runs = self.runs[self.run_count .. self.run_count + 1], .role = role } };
+        self.ops[self.op_count] = .{ .text = .{ .origin = .{ .x = @intFromFloat(@floor(x)), .y = @intFromFloat(@floor(y)) }, .runs = self.runs[self.run_count .. self.run_count + 1], .role = role, .wide_icons = wide_icons } };
         self.run_count += 1;
         self.op_count += 1;
     }
@@ -186,6 +199,10 @@ fn loweredTextCellFitsClip(rect: tree.RectEntry, origin_y: f32, cell_height_px: 
     const clip_top: i32 = @intFromFloat(@ceil(clip.y));
     const clip_bottom: i32 = @intFromFloat(@floor(clip.y + clip.height));
     return lowered_top >= clip_top and lowered_top <= clip_bottom - cell_height;
+}
+
+fn isSessionDockIcon(codepoint: u21) bool {
+    return codepoint == 0xF000B;
 }
 
 fn find(snapshot: tree.UiRectTree, id: tree.UiId) ?tree.RectEntry {
@@ -259,7 +276,10 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
             for (text.runs) |run| {
                 saw_provider = saw_provider or std.mem.indexOf(u8, run.text, "Claude") != null;
                 saw_model_metadata = saw_model_metadata or std.mem.indexOf(u8, run.text, "claude-fixture") != null;
-                if (std.mem.eql(u8, run.text, "↻")) refresh_origin_x = text.origin.x;
+                if (std.mem.eql(u8, run.text, refresh_icon)) {
+                    refresh_origin_x = text.origin.x;
+                    try std.testing.expect(text.wide_icons);
+                }
             }
         },
         else => {},
@@ -269,7 +289,7 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
     try std.testing.expect(saw_model_metadata);
     const refresh_x = refresh_origin_x orelse return error.TestUnexpectedResult;
     const header = find(frame.tree, build.NodeIds.header) orelse return error.TestUnexpectedResult;
-    const right_ink_edge = refresh_x + @as(i32, @intCast(props.cell_width_px));
+    const right_ink_edge = refresh_x + @as(i32, @intCast(props.cell_width_px * 2));
     const expected_right_edge: i32 = @intFromFloat(@floor(header.rect.x + header.rect.width - @as(f32, @floatFromInt(props.cell_width_px))));
     try std.testing.expect(right_ink_edge <= expected_right_edge);
 }

@@ -72,9 +72,10 @@ chrome과 같은 Zig semantic draw → Metal GPU lowering 경로를 쓰는 custo
 - `SessionDockHeader`는 title, displayed/recent count, `Local Mac`
   provenance, refresh affordance만 소유한다. refresh가 실행 중이면 같은 위치의
   control이 spinner로 바뀌며 다시 누른다고 worker를 더 만들지 않는다. refresh는
-  group body가 아니고 항상 고정 chrome이다. trailing refresh/spinner glyph은 header
-  오른쪽 외곽이 아니라 한 text-cell 안쪽 inset에 정렬해 CoreText fallback의 natural
-  ink가 rounded-card clip에 닿지 않게 한다. provider·원격 source 선택기 같은
+  group body가 아니고 항상 고정 chrome이다. idle refresh는 registered SVG icon의 two-cell
+  slot을 쓰고, spinner는 같은 trailing slot을 유지한다. 둘 다 header 오른쪽 외곽이 아니라
+  한 text-cell 안쪽 inset에 정렬해 fallback font 또는 icon ink가 rounded-card clip에
+  닿지 않게 한다. provider·원격 source 선택기 같은
   별도 filter control은 v1에 추가하지 않는다.
 - `SegmentedScopeControl`은 세 개의 동일 폭 segment와 selected/disabled/focused
   state를 각각 그린다. pipe-separated text label이나 group처럼 보이는 제목줄로

@@ -1056,10 +1056,10 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    attachment/slot teardown은 모두 `busy`이고 read-only scalar 관측만 허용한다. callback이 public Maru API로 재진입한 경우 sibling은
    byte-for-byte 보존한다. callback이 raw sibling backing을 직접 변조한 경우 복원은 주장하지 않는다. callback 전에 process-global
    generation Client의 `io_mode=.blocking`과 complete Client-owned deinit graph를 먼저 봉인하고,
-   `build_id`, lifecycle, parser capacity backing, `pending_outbound`, 네 queue backing 및 모든 nested owned extent의 checked sum이
+   `build_id`, Client lifecycle, parser capacity backing, `pending_outbound`, 네 queue backing 및 모든 nested owned extent의 checked sum이
    `max_ended_purge_quarantine_bytes = 64 MiB` 이하인지 검증한다. `pending_outbound`는 purge 대상이 아니지만 generic teardown owner이므로
-   owner SSOT·alias·owned length·post-validation에 포함한다. list/parser/partial은 capacity backing을, slice payload와 build/lifecycle/
-   pending outbound는 exact owned length를 합산한다. allocator 자체와 generation accounting ledger, observer, attachment, registry,
+   owner SSOT·alias·owned length·post-validation에 포함한다. list/parser/partial은 capacity backing을, slice payload와 `build_id`/Client
+   lifecycle/pending outbound는 exact owned length를 합산한다. allocator 자체와 generation accounting ledger, observer, attachment, registry,
    lease 같은 borrowed authority는 capacity에 더하거나 quarantine에서 dereference/release/mutate하지 않는다. 이 검증과 cap 판정이 mutation
    0으로 모두 끝난 뒤 commit gate의 마지막 fallible step으로 process-global one-slot quarantine reservation을 잡는다. reservation 성공
    뒤에는 preparation `committing` 전이와 no-fail suffix만 남으므로 typed precommit failure가 reserved slot을 남기는 경로는 0이다.
@@ -1235,10 +1235,15 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    lifecycle `.pristine`이다. prepare 성공의 마지막 whole-value publish 전에는 out bytes를 바꾸지 않는다.
    payload/allocator authority는 복제하지 않고 immutable `EndedPurgeScratch` descriptor가 계속 소유한다. `EndedPurgeScratch`의 기존 exact
    13 fields(`batches,stream,events,batch_targets,stream_targets,event_targets,partial,partial_target,parser_backing,batch_backing,
-   stream_backing,event_backing,range_order`)에 nested `PendingOutboundDescriptor`와 fields `build_id`, `lifecycle`, `pending_outbound`만
-   추가한다. nested `Lifecycle=enum(u8){empty,inventory_prepared,commit_frozen,consumed}`이며 `build_id`는
-   `ExternalArrayDescriptor` zero default와 `capacity==len` exact-owned invariant, `lifecycle`은 `.empty`,
+   stream_backing,event_backing,range_order`)에 nested `PendingOutboundDescriptor|Lifecycle`과 fields `build_id`, `client_lifecycle`, `lifecycle`,
+   `pending_outbound`만 추가한다. nested `Lifecycle=enum(u8){empty,inventory_prepared,commit_frozen,consumed}`이며 `build_id`와
+   `client_lifecycle`은 각각 `ExternalArrayDescriptor` zero default다. 두 exact-owned slice의 frozen descriptor는 실제 hidden capacity를
+   주장하지 않고 `capacity=len`으로 canonicalize하며, empty는 `{address=0,len=0,capacity=0}`이다. `lifecycle`은 `.empty`,
    `pending_outbound`는 `?PendingOutboundDescriptor = null`이다. `PendingOutboundDescriptor` 네 field는 모두 zero default다.
+   `client_lifecycle`은 transaction lifecycle field와 다른 `Client.lifecycle: []u8` owner의 frozen descriptor다. prepare는 두 exact-owned
+   descriptor의 address/len/capacity와 모든 owner range의 비중첩을 payload 역참조 전에 검증하고, post-validation도 current descriptor가
+   frozen scalar와 정확히 일치할 때만 Client lifecycle contents를 seal에 다시 넣는다. 이 field가 없으면 callback 뒤 descriptor drift와
+   content drift를 구분해 scalar-first로 닫을 수 없으므로 aggregate digest만으로 대체하지 않는다.
    inventory 성공은 `empty→inventory_prepared`, abort는 `inventory_prepared→consumed`, commit preparation 성공은 caller-owned
    publication으로 `inventory_prepared→commit_frozen`, commit 진입은 첫 callback 전 `commit_frozen→consumed`를 수행한다.
    precommit 실패는 Client owner graph mutation/callback/free 0이고 scratch lifecycle과 out bytes도 보존한다. 새 scratch size를
@@ -1463,6 +1468,10 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    각각 exact once 호출한다.
 
    blocking generation Client fd는 callback 전에 `fstat`의 `S_IFSOCK`과 `getsockopt(SO_TYPE)==SOCK_STREAM`을 반드시 만족해야 한다.
+   prepare 대상 Client는 final-address bound fence의 exact exclusive를 이미 보유한 `.standalone` ownership과 `.blocking` I/O mode여야 한다.
+   `.external_pump|moved|quarantined_no_free`, unbound/stale fence, exclusive 부재 또는 intrusion은 pointer-bearing owner graph와 fd를 읽기 전에
+   mutation 0으로 거부한다. exact precedence는 `actual PID → Client/fence final-address+generation → exclusive/intrusion atomic →
+   ownership/io_mode scalar → pointer-bearing owner graph/fd`다. prepare가 exclusive를 내부에서 acquire하거나 실패 시 release하지 않는다.
    `complete_owner_seal`은 `captured_fd` 숫자와 `{st_dev,st_ino,st_mode&S_IFMT,SO_TYPE}`을 domain
    `maru.ended-purge.complete-owner.v1`에 포함한다. post-validation은 pointer/len/cap/fd scalar를 먼저 비교하고 안전할 때만 current fd를
    정확히 한 번 `fstat`+`getsockopt`해 seal을 재계산한다. EBADF, non-socket, non-stream 또는 identity 불일치는 drift이고

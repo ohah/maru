@@ -73,10 +73,10 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     // The reviewed `@field` inventory changed when the legacy archive-tab lifecycle was
     // removed; keep this source digest exact so unrelated reflection can never piggyback on
     // that structural deletion.
-    // AS4 snapshot-replace adds only fixture synchronization/probing beside the existing
+    // AS4 font/scale fixture adds only published-tree geometry probes beside the existing
     // dock-local archive path. Keep the exact reviewed reflection inventory so unrelated
     // reflection cannot piggyback on this structural source change.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 3, .digest_hex = "98322dde125d96a4e98bbd155ea116989e5392c585d3db0b759c3c48ca289850" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 3, .digest_hex = "fae4b38a466756dbe40ada62b8e721ea491c5158821b71361841897d895179dc" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

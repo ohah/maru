@@ -11,6 +11,12 @@ const chrome = maru.chrome;
 const session_dock = chrome.components.session_dock;
 const archive_detail = chrome.components.archive_detail;
 
+/// A three-card dock specimen emits component text (five runs per card), header/search controls,
+/// and generic tree paint. Both the unit fixture and the product Metal smoke must use this one
+/// bound; otherwise a new affordance can pass the former while the latter fails before capture.
+pub const frame_op_capacity = 48;
+pub const frame_run_capacity = 48;
+
 pub const ScenarioId = enum { empty, loading, retained_list, font_specimen, partial_scroll, detail_loading, detail_ready, detail_stale, detail_unavailable };
 
 pub const Scenario = struct {
@@ -206,10 +212,10 @@ test "Chrome Lab builds a deterministic font specimen card and records only its 
     // metadata, and its disclosure affordance, in addition to generic paint. Keep this
     // fixture's explicit bounded scratch above that complete component contract rather
     // than relying on the old pre-disclosure 32-op estimate.
-    var ops: [48]chrome.draw.Op = undefined;
+    var ops: [frame_op_capacity]chrome.draw.Op = undefined;
     var dock_nodes: [16]chrome.ui.tree.UiNode = undefined;
     var dock_actions: [12]session_dock.ids.Entry = undefined;
-    var text_runs: [48]chrome.draw.Run = undefined;
+    var text_runs: [frame_run_capacity]chrome.draw.Run = undefined;
     var text_bytes: [2048]u8 = undefined;
     const frame = try buildFrame(.{
         .id = .font_specimen,

@@ -104,12 +104,12 @@ pub fn main(init: std.process.Init) !void {
     var items: [16]chrome.ui.layout.Item = undefined;
     var flex_scratch: [16]chrome.ui.layout.FlexScratch = undefined;
     var child_rects: [16]chrome.ui.layout.UiRect = undefined;
-    var ops: [32]chrome.draw.Op = undefined;
+    var ops: [lab.frame_op_capacity]chrome.draw.Op = undefined;
     var dock_nodes: [16]chrome.ui.tree.UiNode = undefined;
     var dock_actions: [12]chrome.components.session_dock.ids.Entry = undefined;
     var detail_nodes: [16]chrome.ui.tree.UiNode = undefined;
     var detail_actions: [3]chrome.components.archive_detail.ids.Entry = undefined;
-    var text_runs: [32]chrome.draw.Run = undefined;
+    var text_runs: [lab.frame_run_capacity]chrome.draw.Run = undefined;
     var text_bytes: [2048]u8 = undefined;
     const frame = try lab.buildFrame(.{
         .id = scenario_id,

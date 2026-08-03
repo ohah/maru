@@ -180,6 +180,40 @@ export function isLinkActivation(value: unknown): value is LinkActivation {
   );
 }
 
+/** 클릭 하나가 링크 열기가 되려면 만족해야 하는 것들. DOM 없이 판정할 수 있도록 값만 받는다. */
+export type LinkClick = {
+  isTrusted: boolean;
+  button: number;
+  metaKey: boolean;
+  shiftKey: boolean;
+  href: string | null;
+  /** 링크가 렌더된 문서 안에 있는가. 밖의 링크(shell chrome)는 이 경로가 다루지 않는다. */
+  linkInRoot: boolean;
+};
+
+/**
+ * 이 클릭이 링크 열기를 발급해도 되는지 판정한다. 열면 안 되면 `null`이다.
+ *
+ * **판정을 리스너에서 떼어 낸 이유**: `isTrusted`는 브라우저만 세울 수 있어 테스트가 진짜 값을 만들 수
+ * 없다(JSDOM에서 own·unconfigurable). 값으로 받으면 정상 경로와 거부 경로를 **둘 다** 단위로 고정할 수 있다.
+ *
+ * `isTrusted`는 **사용자가 실제로 누른 것만 통과시킨다**(file-panel.md §13 경화 1단계). 합성
+ * `anchor.click()`이나 `dispatchEvent`로 만든 이벤트는 여기서 걸린다. 지금 문서 스크립트는 sanitize와 CSP
+ * `script-src 'self'`로 이중 차단되므로 이건 심층 방어다 — 다만 이 판정이 **page world에서 도는 한** 그 둘이
+ * 뚫리면 리스너 제거·`postMessage` 직접 호출이 여전히 가능하고, 그 경로는 isolated world 이관이 닫는다(§13).
+ */
+export function linkActivationFor(click: LinkClick): LinkActivation | null {
+  if (!click.isTrusted || click.button !== 0) return null;
+  if (click.href === null || !click.linkInRoot) return null;
+  if (!isLocalDocumentHref(click.href) && !isExplicitHttpHref(click.href)) return null;
+  return {
+    channel: viewerChannel,
+    type: "link-activate",
+    href: click.href,
+    forceSystem: click.metaKey && click.shiftKey,
+  };
+}
+
 export function closeUnlockOwnsLock(
   currentRequestId: number | null,
   unlockRequestId: number,
@@ -1563,27 +1597,20 @@ export function bootRenderer(document: Document, targetWindow: ViewerWindow): vo
   };
 
   root.addEventListener("click", (event) => {
-    if (!(event instanceof targetWindow.MouseEvent) || event.button !== 0) return;
+    if (!(event instanceof targetWindow.MouseEvent)) return;
     const target = event.target;
-    if (!(target instanceof targetWindow.Element)) return;
-    const link = target.closest<HTMLAnchorElement>("a[href]");
-    // `?.`는 link가 null이면 undefined를 준다 — 아래 `href === null` 검사와 짝이 안 맞아 타입이 안 좁혀졌다.
-    // 동작은 같고(둘 다 "없음") 검사 하나로 합쳐진다.
-    const href = link?.getAttribute("href") ?? null;
-    if (
-      link === null ||
-      href === null ||
-      !root.contains(link) ||
-      (!isLocalDocumentHref(href) && !isExplicitHttpHref(href))
-    )
-      return;
+    const link =
+      target instanceof targetWindow.Element ? target.closest<HTMLAnchorElement>("a[href]") : null;
+    const activation = linkActivationFor({
+      isTrusted: event.isTrusted,
+      button: event.button,
+      metaKey: event.metaKey,
+      shiftKey: event.shiftKey,
+      href: link?.getAttribute("href") ?? null,
+      linkInRoot: link !== null && root.contains(link),
+    });
+    if (activation === null) return;
     event.preventDefault();
-    const activation: LinkActivation = {
-      channel: viewerChannel,
-      type: "link-activate",
-      href,
-      forceSystem: event.metaKey && event.shiftKey,
-    };
     targetWindow.parent.postMessage(activation, "*");
   });
 

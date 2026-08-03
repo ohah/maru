@@ -14,6 +14,7 @@ const owner_seal = @import("external_owner_seal.zig");
 const contract = @import("generation_attachment_contract.zig");
 const framing = @import("framing.zig");
 const protocol = @import("protocol.zig");
+const compatibility = @import("compatibility.zig");
 const socket_server = @import("socket_server.zig");
 const ended_purge_quarantine = @import("ended_purge_quarantine.zig");
 
@@ -461,6 +462,20 @@ pub const BindingError = cleanup_registry_mod.Error ||
     InvalidLease,
 };
 
+pub const CapabilityProjectionError = error{ InvalidOwner, Busy };
+
+pub const CapabilityProjectionRequest = struct {
+    slot_addr: usize,
+    slot_incarnation: u64,
+    node_incarnation: u64,
+    host_id: u128,
+    pid: u32,
+    process_nonce: u64,
+    transport_incarnation: u64,
+    owner_seal_addr: usize,
+    reservation: AttachmentBindingReservation,
+};
+
 var issuer_mutex: std.atomic.Mutex = .unlocked;
 var process_issuer: ?lease_mod.IdentityIssuer = null;
 threadlocal var init_active: bool = false;
@@ -638,6 +653,136 @@ fn recordAliasQuarantine() bool {
 
 fn currentPid() u32 {
     return if (builtin.os.tag == .macos) @intCast(c.getpid()) else 1;
+}
+
+fn streamOperationNodeIdle(node: *const ClientNode) bool {
+    const kind_raw = @as(*const u8, @ptrCast(&node.active_operation_kind)).*;
+    return kind_raw <= @intFromEnum(StreamOperationKind.ended_purge) and
+        node.active_operation_generation == 0 and node.active_operation_kind == .none and
+        node.active_operation_owner_thread_incarnation == 0 and
+        node.active_operation_owner_addr == 0 and
+        node.active_operation_transport_incarnation == 0;
+}
+
+const RegisteredNodeLookup = struct {
+    slot_addr: usize,
+    slot_incarnation: u64,
+    node: union(enum) {
+        incarnation: u64,
+        address: usize,
+    },
+    owner_thread_incarnation: ?u64 = null,
+};
+
+const RegisteredNodeOperation = struct {
+    node: *ClientNode,
+};
+
+fn beginRegisteredNodeOperation(
+    lookup: RegisteredNodeLookup,
+) error{ InvalidOwner, Busy }!RegisteredNodeOperation {
+    if (lookup.slot_addr == 0 or lookup.slot_incarnation == 0 or switch (lookup.node) {
+        .incarnation => |value| value == 0,
+        .address => |value| value == 0,
+    })
+        return error.InvalidOwner;
+    while (!client_slot_registry_mutex.tryLock()) std.atomic.spinLoopHint();
+    defer client_slot_registry_mutex.unlock();
+    for (client_slot_registry) |entry| {
+        if (!entry.live or !entry.ready or entry.slot_addr != lookup.slot_addr or
+            entry.slot_incarnation != lookup.slot_incarnation or
+            entry.node_addr == 0 or entry.node_incarnation == 0 or
+            switch (lookup.node) {
+                .incarnation => |value| entry.node_incarnation != value,
+                .address => |value| entry.node_addr != value,
+            } or
+            (lookup.owner_thread_incarnation != null and
+                entry.owner_thread_incarnation != lookup.owner_thread_incarnation.?) or
+            !operationThreadMatches(entry.owner_thread_incarnation))
+            continue;
+        const node: *ClientNode = @ptrFromInt(entry.node_addr);
+        node.client.beginClientSlotOperation() catch |err| return switch (err) {
+            error.AdminBusy => error.Busy,
+            else => error.InvalidOwner,
+        };
+        return .{ .node = node };
+    }
+    return error.InvalidOwner;
+}
+
+fn endRegisteredNodeOperation(operation: RegisteredNodeOperation) void {
+    if (!operation.node.client.endClientSlotOperation())
+        @panic("ClientSlot registered node operation fence release failed");
+}
+
+/// Resolves an untrusted transport's scalar slot identity through the canonical registry before
+/// converting any supplied address to a pointer. The registry lock pins the exact node operation,
+/// so teardown cannot create an address ABA between resolution and capability projection.
+pub fn projectGenerationCapabilities(
+    request: CapabilityProjectionRequest,
+) CapabilityProjectionError!contract.GenerationCapabilities {
+    if (client_mod.generationAllocatorCallbackActive() or batch_release_callback_active)
+        return error.Busy;
+    if (request.slot_addr == 0 or request.slot_incarnation == 0 or
+        request.node_incarnation == 0 or request.host_id == 0 or request.pid != currentPid() or
+        request.process_nonce == 0 or request.transport_incarnation == 0 or
+        request.owner_seal_addr == 0)
+        return error.InvalidOwner;
+
+    const operation = beginRegisteredNodeOperation(.{
+        .slot_addr = request.slot_addr,
+        .slot_incarnation = request.slot_incarnation,
+        .node = .{ .incarnation = request.node_incarnation },
+    }) catch |err| return switch (err) {
+        error.Busy => error.Busy,
+        error.InvalidOwner => error.InvalidOwner,
+    };
+    defer endRegisteredNodeOperation(operation);
+    const node = operation.node;
+
+    if (!streamOperationNodeIdle(node) or node.pin_owner.active_cleanup != 0)
+        return error.Busy;
+    const identity = request.reservation.identity;
+    if (identity.slot_incarnation != request.slot_incarnation or
+        identity.node_incarnation != request.node_incarnation or
+        identity.host_id != request.host_id or identity.connection_generation != 1 or
+        identity.pid != request.pid or identity.process_nonce != request.process_nonce)
+        return error.InvalidOwner;
+    const binding_owner_seal = node.cleanup_registry.transportOwnerSeal(
+        request.reservation.cleanup,
+        identity,
+    ) catch return error.InvalidOwner;
+    if (@intFromPtr(binding_owner_seal) != request.owner_seal_addr or
+        !binding_owner_seal.valid(request.transport_incarnation))
+        return error.InvalidOwner;
+    if (node.client.host_id != request.host_id) return error.InvalidOwner;
+
+    const profile = node.client.compatibility_profile orelse return error.InvalidOwner;
+    const attach_schema_raw = @as(*const u8, @ptrCast(&profile.attach_schema)).*;
+    const metadata_support_raw = @as(*const u8, @ptrCast(&node.client.metadata_support)).*;
+    if (attach_schema_raw > @intFromEnum(compatibility.AttachSchema.granted_roles) or
+        metadata_support_raw > @intFromEnum(contract.MetadataSupport.supported))
+        return error.InvalidOwner;
+    return .{
+        .wire_major = node.client.wire_major,
+        .screen_codec_version = node.client.screen_codec_version,
+        .attach_schema = switch (profile.attach_schema) {
+            .frozen_controller_only => .frozen_controller_only,
+            .granted_roles => .granted_roles,
+        },
+        .metadata_support = switch (node.client.metadata_support) {
+            .unsupported => .unsupported,
+            .supported => .supported,
+        },
+        .peer_attach_generation = node.client.attachment_capabilities.peer_attach_generation,
+        .screen_viewport_scrolled = node.client.screen_viewport_scrolled_v1,
+        .async_scroll_to_bottom = node.client.async_scroll_to_bottom_v1,
+        .notification_stream_auth = node.client.notification_stream_auth_v1,
+        .runtime_clipboard = node.client.runtime_clipboard_v1,
+        .runtime_core_command = node.client.runtime_core_command_v1,
+        .runtime_link_at = node.client.runtime_link_at_v1,
+        .runtime_selected_text = node.client.runtime_selected_text_v1,
+    };
 }
 
 fn rangesOverlapTyped(a: anytype, b: anytype) bool {
@@ -1009,29 +1154,21 @@ pub const ClientSlot = struct {
         // registry mutex through the shared-fence CAS closes node destroy vs operation-entry ABA:
         // teardown cannot unregister/destroy between registry validation and the Client pin.
         if (self.pid != currentPid()) return error.MovedOrCopied;
-        while (!client_slot_registry_mutex.tryLock()) std.atomic.spinLoopHint();
-        defer client_slot_registry_mutex.unlock();
-        for (client_slot_registry) |entry| {
-            if (!entry.live or !entry.ready or entry.slot_addr != @intFromPtr(self)) continue;
-            if (entry.node_addr == 0 or entry.node_addr != @intFromPtr(self.current) or
-                entry.slot_incarnation != self.incarnation.tagged or
-                entry.node_incarnation == 0 or
-                entry.owner_thread_incarnation != self.operation_owner_thread_incarnation)
-                return error.MovedOrCopied;
-            const node: *ClientNode = @ptrFromInt(entry.node_addr);
-            node.client.beginClientSlotOperation() catch |err| return switch (err) {
-                error.AdminBusy => error.AdminBusy,
-                else => error.MovedOrCopied,
-            };
-            return .{ .node = node };
-        }
-        return error.MovedOrCopied;
+        const operation = beginRegisteredNodeOperation(.{
+            .slot_addr = @intFromPtr(self),
+            .slot_incarnation = self.incarnation.tagged,
+            .node = .{ .address = @intFromPtr(self.current) },
+            .owner_thread_incarnation = self.operation_owner_thread_incarnation,
+        }) catch |err| return switch (err) {
+            error.Busy => error.AdminBusy,
+            error.InvalidOwner => error.MovedOrCopied,
+        };
+        return .{ .node = operation.node };
     }
 
     fn endRegisteredClientOperation(_: *ClientSlot, operation: RegisteredClientOperation) void {
         // The shared count itself keeps the node alive until this exact decrement.
-        if (!operation.node.client.endClientSlotOperation())
-            @panic("ClientSlot operation fence release failed");
+        endRegisteredNodeOperation(.{ .node = operation.node });
     }
 
     fn beginRegisteredExclusiveTeardown(
@@ -1736,11 +1873,7 @@ pub const ClientSlot = struct {
     }
 
     pub fn streamOperationPermitIdle(self: *const ClientSlot) bool {
-        return self.valid() and self.current.active_operation_generation == 0 and
-            self.current.active_operation_kind == .none and
-            self.current.active_operation_owner_thread_incarnation == 0 and
-            self.current.active_operation_owner_addr == 0 and
-            self.current.active_operation_transport_incarnation == 0;
+        return self.valid() and streamOperationNodeIdle(self.current);
     }
 
     pub fn prepareEndedPurge(

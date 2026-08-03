@@ -219,8 +219,14 @@ pub const TransportOwnerSeal = struct {
     incarnation: u64 = 0,
     lifecycle: TransportOwnerLifecycle = .pristine,
 
+    fn lifecycleRawValid(self: *const TransportOwnerSeal) bool {
+        const raw = @as(*const u8, @ptrCast(&self.lifecycle)).*;
+        return raw <= @intFromEnum(TransportOwnerLifecycle.terminal);
+    }
+
     pub fn initInPlace(out: *TransportOwnerSeal, incarnation: u64) error{ InvalidState, InvalidIncarnation }!void {
-        if (out.self_addr != 0 or out.incarnation != 0 or out.lifecycle != .pristine)
+        if (!out.lifecycleRawValid() or out.self_addr != 0 or out.incarnation != 0 or
+            out.lifecycle != .pristine)
             return error.InvalidState;
         if (incarnation == 0) return error.InvalidIncarnation;
         out.* = .{
@@ -231,7 +237,8 @@ pub const TransportOwnerSeal = struct {
     }
 
     pub fn valid(self: *const TransportOwnerSeal, incarnation: u64) bool {
-        return self.self_addr == @intFromPtr(self) and self.incarnation == incarnation and
+        return self.lifecycleRawValid() and self.self_addr == @intFromPtr(self) and
+            self.incarnation == incarnation and
             incarnation != 0 and self.lifecycle == .live;
     }
 
@@ -241,6 +248,7 @@ pub const TransportOwnerSeal = struct {
     }
 
     pub fn settledExact(self: *const TransportOwnerSeal) bool {
+        if (!self.lifecycleRawValid()) return false;
         return switch (self.lifecycle) {
             .pristine => self.self_addr == 0 and self.incarnation == 0,
             .terminal => self.self_addr == @intFromPtr(self) and self.incarnation != 0,

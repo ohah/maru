@@ -889,6 +889,28 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   mutation 없이 거부한다. 이 증거는 2c3a만 닫으며 capability/RPC/control/event/source-zero는 2c3b~e, raw field 제거는 2c4다.
   connection-wide buffered revoke는 generation 조회와 `Client` blocking/deadline RPC의 pre-flush gate를 함께 통과해야 하며,
   sibling RPC·detach가 pending mutation wire를 보내지 않는 socketpair 회귀를 포함한다.
+  2c3b는 부분 구현(2c3b-1 capability facade 완료, closed RPC 미착수)이다. 구현 gate는
+  `capabilities(*const GenerationTransport) -> error{Busy,InvalidOwner}!GenerationCapabilities`의 raw-first admission,
+  capability DTO exact-field projection과 closed request tag 전수 mapping, attach 전용 one-shot
+  `ExecutedResponse`와 반복 RPC 전용 transport epoch authority의 분리를 검증한다. 반복 RPC는 2회·64회 순차 성공과 pre-wire reject 뒤
+  다음 요청을 허용하되, accepted 미소비·uncertain·correlation/allocator/alias drift는 connection terminal로 닫는다. final-address
+  `RpcExecutedResponse` borrow/owner-only finish는 copy/move/same-address ABA, cross transport/binding/request/digest/epoch splice,
+  duplicate borrow/free와 allocator callback 재진입에서 wire·canonical mutation·double-free 0이어야 한다. attach/RPC destination tag
+  mismatch, epoch 0/max 소진, prepared abort와 published response abort 혼동, executing/published/releasing teardown을 production-type
+  Debug/ReleaseFast와 Darwin socketpair로 검증하기 전 2c3b 완료를 주장하지 않는다. registry attach response seal의 reset/recycle과
+  fixed response pool, 독립 movable payload와 계속 실행하는 quarantine registry는 이 gate의 구현이 아니다. publication 실패는 exact
+  safe-free와 ambiguous no-free를 구분하고 후자는 node terminal evidence 뒤 strict product subprocess fail-stop으로 수렴해야 한다.
+  **2c3b-1 자동 증거:** compile-time exact signature/error-set, granted+supported와 frozen+unsupported의 교차 true/false 전 필드,
+  lifecycle/role/attach-schema/metadata/owner-seal invalid raw-byte 전수, copy/move/fork/foreign-thread, stale slot/node/binding 및 unmapped
+  slot 주소, same-address restore, stream-operation residual field와 active-cleanup `Busy`를 검증한다. boundary
+  `CR3a-2c3b capability projection and shared RemoteRuntime raw-read baselines cannot expand`는 registry-resolved projection 1회, generation 제품
+  `capabilities()` callsite 0과 `remote_runtime` shared architecture raw-read exact baseline이 2c3e 전까지 증가하지 않음을 고정한다. 이 증거는
+  `zig build check-boundaries`와 Debug·ReleaseFast `zig build test-session-host`가 모두 green일 때만 유효하다.
+  whole-transport+stack response same-address restore도 node-sealed epoch/lifecycle을 되살리지 못해야 한다. pending mutation frame partial
+  flush 실패는 새 RPC byte 0이어도 terminal이고, mutation-zero pre-wire reject만 idle 재사용한다. raw response borrow의 production 저장/
+  반환·transitive helper callsite 0, exact decoder caller/signature inventory와 reusable/protocol-failure finish의 idle/terminal 분기를
+  tokenizer source oracle·compile-time inventory·socketpair로 고정한다. 반복 RPC는 accepted/uncertain만 만들고 typed reject는 attach
+  호환 arm에 한정한다. request family/phase/role/destination별 exact `ExecuteError|ExecuteResult` 표를 전수한다.
   `GenerationTransport`는 SSOT의 exact 15-declaration primitive set(`readAttachmentBatch` 제외,
   `purgeEndedStream` 포함), closed `RuntimeRequest` variants와 exact-field
   `GenerationCapabilities`만 노출하고 arbitrary method-string `call`, generic callback, Client-containing aggregate,

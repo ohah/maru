@@ -34,6 +34,11 @@ pub const InputError = error{
     ProtocolError,
 };
 
+pub const CapabilityError = error{
+    Busy,
+    InvalidOwner,
+};
+
 pub const RevokeFence = enum {
     no_pending_stream_frame,
     cancelled_before_write,
@@ -69,29 +74,34 @@ pub const GenerationTransport = struct {
     snapshot_authority: initial_snapshot_owner_mod.Authority = .{},
     prepared_storage: client_mod.PreparedBlockingRpcStorage = .{},
 
-    pub fn capabilities(self: *GenerationTransport) contract.GenerationCapabilities {
-        const client = self.borrowClient() orelse @panic("invalid generation transport");
-        const profile = client.compatibility_profile orelse
-            @panic("generation transport lacks compatibility profile");
-        return .{
-            .wire_major = client.wire_major,
-            .screen_codec_version = client.screen_codec_version,
-            .attach_schema = switch (profile.attach_schema) {
-                .frozen_controller_only => .frozen_controller_only,
-                .granted_roles => .granted_roles,
-            },
-            .metadata_support = switch (client.metadata_support) {
-                .unsupported => .unsupported,
-                .supported => .supported,
-            },
-            .peer_attach_generation = client.attachment_capabilities.peer_attach_generation,
-            .screen_viewport_scrolled = client.screen_viewport_scrolled_v1,
-            .async_scroll_to_bottom = client.async_scroll_to_bottom_v1,
-            .notification_stream_auth = client.notification_stream_auth_v1,
-            .runtime_clipboard = client.runtime_clipboard_v1,
-            .runtime_core_command = client.runtime_core_command_v1,
-            .runtime_link_at = client.runtime_link_at_v1,
-            .runtime_selected_text = client.runtime_selected_text_v1,
+    pub fn capabilities(
+        self: *const GenerationTransport,
+    ) CapabilityError!contract.GenerationCapabilities {
+        const identity = self.binding_reservation.identity;
+        if (!rawLifecycleValid(&self.lifecycle) or self.self_addr != @intFromPtr(self) or
+            self.lifecycle != .live or self.slot_addr == 0 or self.owner_seal_addr == 0 or
+            self.transport_incarnation == 0 or self.connection_generation != 1 or
+            self.pid != currentPid() or self.owner_thread_id != std.Thread.getCurrentId() or
+            !bindingRoleRawValid(&identity.role) or
+            self.slot_incarnation != identity.slot_incarnation or
+            self.node_incarnation != identity.node_incarnation or
+            self.host_id != identity.host_id or
+            self.connection_generation != identity.connection_generation or
+            self.pid != identity.pid or self.process_nonce != identity.process_nonce)
+            return error.InvalidOwner;
+        return client_slot_mod.projectGenerationCapabilities(.{
+            .slot_addr = self.slot_addr,
+            .slot_incarnation = self.slot_incarnation,
+            .node_incarnation = self.node_incarnation,
+            .host_id = self.host_id,
+            .pid = self.pid,
+            .process_nonce = self.process_nonce,
+            .transport_incarnation = self.transport_incarnation,
+            .owner_seal_addr = self.owner_seal_addr,
+            .reservation = self.binding_reservation,
+        }) catch |err| switch (err) {
+            error.Busy => error.Busy,
+            error.InvalidOwner => error.InvalidOwner,
         };
     }
 
@@ -737,6 +747,11 @@ fn isForbiddenFacadeType(comptime T: type) bool {
 }
 
 comptime {
+    if (CapabilityError != error{ Busy, InvalidOwner })
+        @compileError("GenerationTransport CapabilityError changed without updating CR3a-2c3b SSOT");
+    if (@TypeOf(GenerationTransport.capabilities) !=
+        fn (*const GenerationTransport) CapabilityError!contract.GenerationCapabilities)
+        @compileError("GenerationTransport capabilities signature drifted");
     if (InputError != error{
         Busy,
         InvalidOwner,
@@ -930,6 +945,183 @@ test "CR3a-2a copied generation transport cannot prepare or mutate Client" {
     try slot.abortAttachmentBinding(&binding, reservation);
 }
 
+test "CR3a-2c3b capability projection is exact and rejects stale or busy ownership" {
+    const test_protocol = @import("protocol.zig");
+    const test_compatibility = @import("compatibility.zig");
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0x2C3BCA,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    client.wire_major = test_protocol.version_major;
+    client.screen_codec_version = 2;
+    client.compatibility_profile = test_compatibility.profileForMajor(test_protocol.version_major).?;
+    client.metadata_support = .supported;
+    client.attachment_capabilities.peer_attach_generation = true;
+    client.screen_viewport_scrolled_v1 = false;
+    client.async_scroll_to_bottom_v1 = true;
+    client.notification_stream_auth_v1 = false;
+    client.runtime_clipboard_v1 = true;
+    client.runtime_core_command_v1 = false;
+    client.runtime_link_at_v1 = true;
+    client.runtime_selected_text_v1 = false;
+    var slot: client_slot_mod.ClientSlot = undefined;
+    try client_slot_mod.ClientSlot.initInPlace(&slot, allocator, &client, 0x2C3BCA);
+    defer slot.deinit();
+    var transport: GenerationTransport = .{};
+    var binding: contract.PreparedAttachmentBinding = .{};
+    var lease: @import("connection_lease.zig").ConnectionLease = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0x2C3BCB);
+    try mintInPlace(&transport, &slot, 0x2C3BCC, @sizeOf(GenerationTransport), reservation);
+    const canonical_client = slot.logicalClient();
+
+    const projected = try transport.capabilities();
+    try std.testing.expectEqual(test_protocol.version_major, projected.wire_major);
+    try std.testing.expectEqual(@as(u16, 2), projected.screen_codec_version);
+    try std.testing.expectEqual(contract.AttachSchema.granted_roles, projected.attach_schema);
+    try std.testing.expectEqual(contract.MetadataSupport.supported, projected.metadata_support);
+    try std.testing.expect(projected.peer_attach_generation);
+    try std.testing.expect(!projected.screen_viewport_scrolled);
+    try std.testing.expect(projected.async_scroll_to_bottom);
+    try std.testing.expect(!projected.notification_stream_auth);
+    try std.testing.expect(projected.runtime_clipboard);
+    try std.testing.expect(!projected.runtime_core_command);
+    try std.testing.expect(projected.runtime_link_at);
+    try std.testing.expect(!projected.runtime_selected_text);
+
+    canonical_client.wire_major = 1;
+    canonical_client.screen_codec_version = 1;
+    canonical_client.compatibility_profile = test_compatibility.profileForMajor(1).?;
+    canonical_client.metadata_support = .unsupported;
+    canonical_client.attachment_capabilities.peer_attach_generation = false;
+    canonical_client.screen_viewport_scrolled_v1 = true;
+    canonical_client.async_scroll_to_bottom_v1 = false;
+    canonical_client.notification_stream_auth_v1 = true;
+    canonical_client.runtime_clipboard_v1 = false;
+    canonical_client.runtime_core_command_v1 = true;
+    canonical_client.runtime_link_at_v1 = false;
+    canonical_client.runtime_selected_text_v1 = true;
+    const previous = try transport.capabilities();
+    try std.testing.expectEqual(@as(u16, 1), previous.wire_major);
+    try std.testing.expectEqual(@as(u16, 1), previous.screen_codec_version);
+    try std.testing.expectEqual(contract.AttachSchema.frozen_controller_only, previous.attach_schema);
+    try std.testing.expectEqual(contract.MetadataSupport.unsupported, previous.metadata_support);
+    try std.testing.expect(!previous.peer_attach_generation);
+    try std.testing.expect(previous.screen_viewport_scrolled);
+    try std.testing.expect(!previous.async_scroll_to_bottom);
+    try std.testing.expect(previous.notification_stream_auth);
+    try std.testing.expect(!previous.runtime_clipboard);
+    try std.testing.expect(previous.runtime_core_command);
+    try std.testing.expect(!previous.runtime_link_at);
+    try std.testing.expect(previous.runtime_selected_text);
+
+    var copied = transport;
+    try std.testing.expectError(error.InvalidOwner, copied.capabilities());
+    transport.slot_incarnation += 1;
+    try std.testing.expectError(error.InvalidOwner, transport.capabilities());
+    transport.slot_incarnation -= 1;
+    const permit = try slot.prepareStreamOperationPermit(
+        .ended_purge,
+        transport.owner_addr,
+        transport.transport_incarnation,
+        reservation.identity,
+    );
+    try std.testing.expectError(error.Busy, transport.capabilities());
+    try slot.abortStreamOperationPermit(permit);
+
+    slot.current.pin_owner.active_cleanup = 1;
+    try std.testing.expectError(error.Busy, transport.capabilities());
+    slot.current.pin_owner.active_cleanup = 0;
+
+    slot.current.active_operation_kind = .ended_purge;
+    try std.testing.expectError(error.Busy, transport.capabilities());
+    slot.current.active_operation_kind = .none;
+    slot.current.active_operation_owner_thread_incarnation = 1;
+    try std.testing.expectError(error.Busy, transport.capabilities());
+    slot.current.active_operation_owner_thread_incarnation = 0;
+    slot.current.active_operation_owner_addr = 1;
+    try std.testing.expectError(error.Busy, transport.capabilities());
+    slot.current.active_operation_owner_addr = 0;
+    slot.current.active_operation_transport_incarnation = 1;
+    try std.testing.expectError(error.Busy, transport.capabilities());
+    slot.current.active_operation_transport_incarnation = 0;
+    const operation_kind_raw: *u8 = @ptrCast(&slot.current.active_operation_kind);
+    var operation_kind_value: u16 =
+        @as(u16, @intFromEnum(client_slot_mod.StreamOperationKind.ended_purge)) + 1;
+    while (operation_kind_value <= std.math.maxInt(u8)) : (operation_kind_value += 1) {
+        operation_kind_raw.* = @intCast(operation_kind_value);
+        try std.testing.expectError(error.Busy, transport.capabilities());
+    }
+    slot.current.active_operation_kind = .none;
+
+    transport.slot_addr = 1;
+    try std.testing.expectError(error.InvalidOwner, transport.capabilities());
+    transport.slot_addr = @intFromPtr(&slot);
+    transport.host_id += 1;
+    try std.testing.expectError(error.InvalidOwner, transport.capabilities());
+    transport.host_id -= 1;
+    transport.process_nonce += 1;
+    try std.testing.expectError(error.InvalidOwner, transport.capabilities());
+    transport.process_nonce -= 1;
+
+    const canonical_owner_seal = try slot.transportOwnerSeal(reservation);
+    const owner_lifecycle_raw: *u8 = @ptrCast(&canonical_owner_seal.lifecycle);
+    var owner_lifecycle_value: u16 =
+        @as(u16, @intFromEnum(contract.TransportOwnerLifecycle.terminal)) + 1;
+    while (owner_lifecycle_value <= std.math.maxInt(u8)) : (owner_lifecycle_value += 1) {
+        owner_lifecycle_raw.* = @intCast(owner_lifecycle_value);
+        try std.testing.expectError(error.InvalidOwner, transport.capabilities());
+    }
+    canonical_owner_seal.lifecycle = .live;
+
+    if (canonical_client.compatibility_profile) |*profile| {
+        const schema_raw: *u8 = @ptrCast(&profile.attach_schema);
+        var raw: u16 = @as(u16, @intFromEnum(test_compatibility.AttachSchema.granted_roles)) + 1;
+        while (raw <= std.math.maxInt(u8)) : (raw += 1) {
+            schema_raw.* = @intCast(raw);
+            try std.testing.expectError(error.InvalidOwner, transport.capabilities());
+        }
+        profile.attach_schema = .frozen_controller_only;
+    }
+    const metadata_raw: *u8 = @ptrCast(&canonical_client.metadata_support);
+    var metadata_value: u16 = @as(u16, @intFromEnum(contract.MetadataSupport.supported)) + 1;
+    while (metadata_value <= std.math.maxInt(u8)) : (metadata_value += 1) {
+        metadata_raw.* = @intCast(metadata_value);
+        try std.testing.expectError(error.InvalidOwner, transport.capabilities());
+    }
+    canonical_client.metadata_support = .unsupported;
+
+    if (builtin.os.tag == .macos) {
+        const child = c.fork();
+        try std.testing.expect(child >= 0);
+        if (child == 0) {
+            const rejected = if (transport.capabilities()) |_| false else |err| err == error.InvalidOwner;
+            std.c._exit(if (rejected) 0 else 1);
+        }
+        var status: c_int = 0;
+        try std.testing.expectEqual(child, c.waitpid(child, &status, 0));
+        try std.testing.expectEqual(@as(c_int, 0), status);
+    }
+
+    transport.self_addr += 1;
+    try std.testing.expectError(error.InvalidOwner, transport.capabilities());
+    transport.self_addr -= 1;
+    transport.owner_seal_addr += 1;
+    try std.testing.expectError(error.InvalidOwner, transport.capabilities());
+    transport.owner_seal_addr -= 1;
+
+    const stale_transport = transport;
+    try terminalizeOwned(&transport, 0x2C3BCC);
+    const terminal_transport = transport;
+    transport = stale_transport;
+    try std.testing.expectError(error.InvalidOwner, transport.capabilities());
+    transport = terminal_transport;
+    try slot.abortAttachmentBinding(&binding, reservation);
+}
+
 test "CR3a-2c3a input facade rejects every invalid lifecycle and role byte before mutation" {
     try client_slot_mod.ClientSlot.initializeProcessRuntime();
     const allocator = std.testing.allocator;
@@ -955,6 +1147,7 @@ test "CR3a-2c3a input facade rejects every invalid lifecycle and role byte befor
     while (raw <= std.math.maxInt(u8)) : (raw += 1) {
         if (raw == @intFromEnum(Lifecycle.live)) continue;
         lifecycle_raw.* = @intCast(raw);
+        try std.testing.expectError(error.InvalidOwner, transport.capabilities());
         try std.testing.expectError(error.InvalidOwner, transport.sendInput("x"));
         try std.testing.expectError(error.InvalidOwner, transport.sendInputNonBlocking("x"));
         try std.testing.expectError(error.InvalidOwner, transport.pumpPendingOutput());
@@ -967,6 +1160,7 @@ test "CR3a-2c3a input facade rejects every invalid lifecycle and role byte befor
     raw = @intFromEnum(contract.AttachmentRole.observer) + 1;
     while (raw <= std.math.maxInt(u8)) : (raw += 1) {
         role_raw.* = @intCast(raw);
+        try std.testing.expectError(error.InvalidOwner, transport.capabilities());
         try std.testing.expectError(error.InvalidOwner, transport.sendInputNonBlocking("x"));
         try std.testing.expectError(error.InvalidOwner, transport.pumpPendingOutput());
         try std.testing.expectError(error.InvalidOwner, transport.fenceRevoke());
@@ -975,31 +1169,44 @@ test "CR3a-2c3a input facade rejects every invalid lifecycle and role byte befor
     role_raw.* = @intFromEnum(contract.AttachmentRole.controller);
 
     var copied = transport;
+    try std.testing.expectError(error.InvalidOwner, copied.capabilities());
     try std.testing.expectError(error.InvalidOwner, copied.sendInputNonBlocking("x"));
     try std.testing.expect(slot.logicalClient().pending_outbound == null);
 
     transport.slot_incarnation += 1;
+    try std.testing.expectError(error.InvalidOwner, transport.capabilities());
     try std.testing.expectError(error.InvalidOwner, transport.sendInputNonBlocking("stale-slot"));
     transport.slot_incarnation -= 1;
     transport.node_incarnation += 1;
+    try std.testing.expectError(error.InvalidOwner, transport.capabilities());
     try std.testing.expectError(error.InvalidOwner, transport.sendInputNonBlocking("stale-node"));
     transport.node_incarnation -= 1;
     transport.binding_reservation.identity.binding_reservation_id += 1;
+    try std.testing.expectError(error.InvalidOwner, transport.capabilities());
     try std.testing.expectError(error.InvalidOwner, transport.sendInputNonBlocking("stale-binding"));
     transport.binding_reservation.identity.binding_reservation_id -= 1;
     try std.testing.expect(slot.logicalClient().pending_outbound == null);
 
     const ThreadProbe = struct {
-        fn run(target: *GenerationTransport, rejected: *bool) void {
+        fn run(target: *GenerationTransport, rejected: *bool, capability_rejected: *bool) void {
+            _ = target.capabilities() catch {
+                capability_rejected.* = true;
+            };
             _ = target.sendInputNonBlocking("x") catch {
                 rejected.* = true;
             };
         }
     };
     var cross_thread_rejected = false;
-    var thread = try std.Thread.spawn(.{}, ThreadProbe.run, .{ &transport, &cross_thread_rejected });
+    var cross_thread_capability_rejected = false;
+    var thread = try std.Thread.spawn(.{}, ThreadProbe.run, .{
+        &transport,
+        &cross_thread_rejected,
+        &cross_thread_capability_rejected,
+    });
     thread.join();
     try std.testing.expect(cross_thread_rejected);
+    try std.testing.expect(cross_thread_capability_rejected);
     try std.testing.expect(slot.logicalClient().pending_outbound == null);
 
     const permit = try slot.prepareStreamOperationPermit(
@@ -1008,6 +1215,7 @@ test "CR3a-2c3a input facade rejects every invalid lifecycle and role byte befor
         transport.transport_incarnation,
         reservation.identity,
     );
+    try std.testing.expectError(error.Busy, transport.capabilities());
     try std.testing.expectError(error.Busy, transport.sendInputNonBlocking("x"));
     try std.testing.expect(slot.logicalClient().pending_outbound == null);
     try slot.abortStreamOperationPermit(permit);

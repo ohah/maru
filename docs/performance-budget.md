@@ -31,7 +31,7 @@ CI에서는 이 파일을 `maru-performance-artifacts` artifact로 업로드한�
 | 실행 경로 | PR 머지 차단 | 목적 |
 | --- | --- | --- |
 | `mise run perf` | 해당 없음 | 로컬에서 큰 구조 변경 전후를 직접 비교한다. |
-| GitHub `Performance` PR check | 예(required) | 성능 회귀가 main에 들어가기 전에 잡는다. paths 필터 없이 모든 PR에서 돈다 — 필터를 두면 무관한 PR에서 skip돼 required 체크가 영원히 pending으로 머지를 막는다. |
+| GitHub `Performance` PR check | 예(required) | 성능 회귀가 main에 들어가기 전에 잡는다. 트리거는 모든 PR에 열어 두고(workflow-level paths 필터를 두면 무관한 PR에서 required 체크가 영원히 pending으로 머지를 막는다) `code` 축이 바뀐 PR에서만 job-level 조건으로 실행한다([변경 영역별 실행](#변경-영역별-실행job-level-게이트)). |
 | GitHub `Performance` 수동 실행 | 아니오 | 의심스러운 변경 후 같은 runner 환경에서 한 번 더 확인한다. |
 | GitHub `Performance` `main` push | 아니오 | 머지 후 장기 추세를 확인한다. |
 | GitHub `Performance` 주간 schedule | 아니오 | 조용히 쌓이는 성능 회귀를 정기적으로 발견한다. |

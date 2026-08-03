@@ -1312,7 +1312,9 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    비교한다. reference는 즉시 `(`가 뒤따르는 direct call만 허용하므로 `const f = Client.method` function-value alias/return/store는
    실패한다. 동일 파일·동일 함수명의 sibling/nested container와 같은 leaf 이름을 가진 다른 outer container, C35 이름을 선언한 다른 타입도
    실패한다. 제품 session-host의 `@field`는 Client token 탐지에 의존하지 않고 codec 등 기존 canonical owner별 exact normalized token
-   expression/count의 closed allowlist만 허용한다. 나머지 `src`의 reflection 보유 7개 파일은 top-level test를 제외한 전체 normalized token
+   expression/count의 closed allowlist만 허용한다. top-level test 제외 범위는 AST `lastToken` 재귀 결과에 의존하지 않고 root lexical
+   depth에서 한 번 만든 token mask를 써서 host OS와 source 크기에 무관하게 동일해야 한다. 나머지 `src`의 reflection 보유 7개 파일은
+   top-level test를 제외한 전체 normalized token
    stream digest와 `@field` count를 exact 고정하므로 기존 expression의 semantic relocation/variable rebinding이나 외부 `anytype` helper를 새
    reflection trampoline으로 만들 수 없다. 허용 owner 안의 안전한 reflection 하나를 같은 수의
    type alias·`@TypeOf`·computed name Client reflection으로 치환해도 실패한다. line number와 receiver 변수명은 고정하지 않는다.

@@ -94,6 +94,7 @@ theme = 토큰 묶음(데이터). 컴포넌트는 `tokens.color(.tab_active_bg)`
 ```zig
 pub const ColorRole = enum {
     surface_bg, surface_fg, muted_fg,          // 사이드바/패널 기본
+    inset_bg,                                  // count pill·inset detail 같은 패널 내부의 한 단계 낮은 표면
     tab_active_bg, tab_hover_bg,               // 탭 밴드
     divider, focus_accent, drop_zone,          // 현재 sidebar_active 재사용 → rich 위해 분리 role
     search_match, search_match_current,        // Find 하이라이트

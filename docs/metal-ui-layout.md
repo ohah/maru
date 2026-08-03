@@ -216,6 +216,14 @@ virtualized visible window, page/wheel step은 그 동일 metric snapshot을 공
 terminal font를 크게/작게 바꿨을 때 native Chrome의 밀도와 pointer target까지 같이 흔들리는 회귀를
 막는다.
 
+Header는 reference의 borderless text/utility band이고, scope/search/group/list는 그것과 다른
+visible boundary를 가져야 한다. `ColorRole.divider`의 1px rule은 dark panel에서 channel `+24`,
+light panel에서 `-24`로 panel과 분리한다. 따라서 rich의 active/hover 색을 divider source로
+재사용하거나, header에 border가 없다는 이유로 scope/search outline 및 group/row rule을 생략하는 것은
+허용하지 않는다. token snapshot은 ±24 channel delta를 자동 검사한다. actual AppKit/Metal PPM
+readback review는 header refresh slot의 ink bounds가 16pt trailing safe inset 안에 있는지와 antialias
+뒤에도 panel과 구별되는 core rule이 남는지를 PR artifact에서 확인한다.
+
 AS4-f-a의 `ButtonMetrics`는 `content_inset_x=.md`, `content_inset_y=.sm`, 18pt leading-icon optical
 box, `.xs` icon gap과 48pt minimum height를 소유한다. icon SVG의 source viewBox 여백, terminal cell
 폭, label별 font nudge는 metric이 아니다. text artifact가 실제 label advance를 반환한 뒤

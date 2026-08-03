@@ -40,7 +40,7 @@ fn insetBg(panel: Rgb) Rgb {
 /// 보장하며 tui/rich가 같은 content hierarchy를 유지하게 한다.
 fn dividerBg(panel: Rgb) Rgb {
     const lum: u16 = (@as(u16, panel.r) * 77 + @as(u16, panel.g) * 150 + @as(u16, panel.b) * 29) >> 8;
-    return if (lum < 128) lightenRgb(panel, 16) else darkenRgb(panel, 16);
+    return if (lum < 128) lightenRgb(panel, 24) else darkenRgb(panel, 24);
 }
 
 /// 색 역할(semantic). 컴포넌트는 역할만 알고, 실제 Rgb는 토큰이 준다. divider는 panel background 대비에서
@@ -258,7 +258,7 @@ test "Tokens.tui maps resolved theme colors to the semantic roles" {
     try std.testing.expectEqual(c.rgb(0, 0, 0), tk.get(.inset_bg)); // dark surface는 한 단계 recessed
     try std.testing.expectEqual(c.rgb(3, 3, 3), tk.get(.surface_fg));
     try std.testing.expectEqual(c.rgb(4, 4, 4), tk.get(.focus_accent)); // sidebar_active 공유
-    try std.testing.expectEqual(c.rgb(18, 18, 18), tk.get(.divider)); // sidebar_background(2) 대비 파생 = 18
+    try std.testing.expectEqual(c.rgb(26, 26, 26), tk.get(.divider)); // sidebar_background(2) 대비 파생 = 26
     try std.testing.expectEqual(c.rgb(8, 8, 8), tk.get(.cursor));
 }
 
@@ -322,8 +322,8 @@ test "Tokens.rich separates the sidebar_active-shared roles into derived colors 
     const t = Tokens.tui(theme);
     const r = Tokens.rich(theme);
     // tui: focus_accent/drop_zone/tab_hover_bg = sidebar_active(공유), divider = panel 대비 파생. rich: interactive role만 분리 파생.
-    try std.testing.expectEqual(c.rgb(36, 36, 36), t.get(.divider)); // sidebar_background(20) 대비 파생 = 36
-    try std.testing.expectEqual(c.rgb(36, 36, 36), r.get(.divider)); // rich도 panel 대비 규칙 유지
+    try std.testing.expectEqual(c.rgb(44, 44, 44), t.get(.divider)); // sidebar_background(20) 대비 파생 = 44
+    try std.testing.expectEqual(c.rgb(44, 44, 44), r.get(.divider)); // rich도 panel 대비 규칙 유지
     try std.testing.expectEqual(c.rgb(140, 140, 140), r.get(.focus_accent)); // lighten 40
     try std.testing.expectEqual(c.rgb(116, 116, 116), r.get(.drop_zone)); // lighten 16
     try std.testing.expectEqual(c.rgb(88, 88, 88), r.get(.tab_hover_bg)); // darken 12
@@ -362,6 +362,25 @@ test "divider is always distinct from the panel in tui and rich, including the p
         try std.testing.expect(!std.meta.eql(tui.get(.divider), tui.get(.surface_bg)));
         try std.testing.expect(!std.meta.eql(rich.get(.divider), rich.get(.surface_bg)));
         try std.testing.expectEqual(tui.get(.divider), rich.get(.divider));
+    }
+}
+
+test "divider keeps the documented 24-channel separation away from gamut endpoints" {
+    const theme = ThemeColors{
+        .foreground = .{ .r = 220, .g = 220, .b = 220 },
+        .sidebar_background = .{ .r = 40, .g = 40, .b = 40 },
+        .sidebar_foreground = .{ .r = 180, .g = 180, .b = 180 },
+        .sidebar_active = .{ .r = 64, .g = 64, .b = 64 },
+        .search_match = .{ .r = 5, .g = 5, .b = 5 },
+        .search_match_current = .{ .r = 6, .g = 6, .b = 6 },
+        .selection = .{ .r = 7, .g = 7, .b = 7 },
+        .cursor = .{ .r = 8, .g = 8, .b = 8 },
+        .accent = .{ .r = 9, .g = 9, .b = 9 },
+    };
+    inline for ([_]Tokens{ Tokens.tui(theme), Tokens.rich(theme) }) |tk| {
+        try std.testing.expectEqual(@as(u8, 64), tk.get(.divider).r);
+        try std.testing.expectEqual(@as(u8, 64), tk.get(.divider).g);
+        try std.testing.expectEqual(@as(u8, 64), tk.get(.divider).b);
     }
 }
 

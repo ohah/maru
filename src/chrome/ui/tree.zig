@@ -18,6 +18,7 @@ pub const UiAction = struct {
 };
 
 pub const CardVariant = ui_style.CardVariant;
+pub const ButtonVariant = ui_style.ButtonVariant;
 pub const TextTone = ui_style.TextTone;
 pub const ShadowKind = ui_style.ShadowKind;
 pub const PaintStyle = ui_style.PaintStyle;
@@ -59,6 +60,18 @@ pub const TextOptions = struct {
     measure: ?layout.MeasureFn = null,
 };
 
+/// Button is an explicit command target, not an interactive Card alias.  It intentionally
+/// carries no text or provider payload: component views emit the immutable label separately,
+/// while this node is the one published border-box/action capability used by paint and input.
+pub const ButtonOptions = struct {
+    id: UiId,
+    style: layout.UiStyle = .{},
+    variant: ButtonVariant = .secondary,
+    paint: PaintStyle = .{},
+    action: UiAction,
+    overflow: layout.Overflow = .visible,
+};
+
 pub const NodeProps = union(enum) {
     container: struct {
         direction: layout.Direction,
@@ -75,6 +88,12 @@ pub const NodeProps = union(enum) {
         align_items: layout.Align,
         overflow: layout.Overflow,
     },
+    button: struct {
+        variant: ButtonVariant,
+        paint: PaintStyle,
+        action: UiAction,
+        overflow: layout.Overflow,
+    },
     text: struct {
         value: []const u8,
         tone: TextTone,
@@ -84,7 +103,7 @@ pub const NodeProps = union(enum) {
     },
 };
 
-pub const NodeKind = enum { container, card, text };
+pub const NodeKind = enum { container, card, button, text };
 
 /// children slice의 수명과 순서는 builder caller가 소유한다. node address나 형제 index는
 /// identity가 아니며, 한 build 안에 같은 `id`가 있으면 `DuplicateIdentity`로 끝난다.
@@ -98,6 +117,7 @@ pub const UiNode = struct {
         return switch (self.props) {
             .container => .container,
             .card => .card,
+            .button => .button,
             .text => .text,
         };
     }
@@ -146,6 +166,19 @@ pub fn text(options: TextOptions) UiNode {
             .paint = options.paint,
             .measure_context = options.measure_context,
             .measure = options.measure,
+        } },
+    };
+}
+
+pub fn button(options: ButtonOptions) UiNode {
+    return .{
+        .id = options.id,
+        .style = options.style,
+        .props = .{ .button = .{
+            .variant = options.variant,
+            .paint = options.paint,
+            .action = options.action,
+            .overflow = options.overflow,
         } },
     };
 }
@@ -342,6 +375,12 @@ fn containerFor(node: UiNode, rect: layout.UiRect) BuildError!layout.FlexContain
             .align_items = value.align_items,
             .overflow = value.overflow,
         },
+        .button => |value| .{
+            .style = node.style,
+            .size = .{ .width = rect.width, .height = rect.height },
+            .direction = .column,
+            .overflow = value.overflow,
+        },
         .text => .{
             .style = node.style,
             .size = .{ .width = rect.width, .height = rect.height },
@@ -366,6 +405,7 @@ fn itemFor(node: UiNode) layout.Item {
 fn actionFor(node: UiNode) ?UiAction {
     return switch (node.props) {
         .card => |value| value.action,
+        .button => |value| value.action,
         else => null,
     };
 }
@@ -374,6 +414,7 @@ fn visualFor(node: UiNode) VisualProps {
     return switch (node.props) {
         .container => .none,
         .card => |value| .{ .card = .{ .variant = value.variant, .paint = value.paint } },
+        .button => |value| .{ .button = .{ .variant = value.variant, .paint = value.paint } },
         .text => |value| .{ .text = .{ .tone = value.tone, .paint = value.paint } },
     };
 }
@@ -469,6 +510,30 @@ test "nested UiNode produces one preorder rect tree for cards and text" {
     try std.testing.expectApproxEqAbs(@as(f32, 24), tree.entries[1].rect.height, 0.001);
     try std.testing.expect(tree.entries[2].effective_clip != null);
     try std.testing.expectEqual(@as(?usize, 2), tree.find(3));
+}
+
+test "Button projects its explicit action and visual independently from Card" {
+    const root = container(.{ .id = 1 }, &.{button(.{
+        .id = 2,
+        .style = .{ .width = .{ .px = 80 }, .height = .{ .px = 28 } },
+        .variant = .primary,
+        .action = .{ .id = 42 },
+        .overflow = .clip,
+    })});
+    var entries: [2]RectEntry = undefined;
+    var items: [2]layout.Item = undefined;
+    var flex_scratch: [2]layout.FlexScratch = undefined;
+    var child_rects: [2]layout.UiRect = undefined;
+    const built = try build(root, .{ .root_size = .{ .width = 100, .height = 40 }, .max_entries = 2, .max_depth = 2 }, .{
+        .entries = &entries,
+        .items = &items,
+        .flex_scratch = &flex_scratch,
+        .child_rects = &child_rects,
+    });
+    const entry = built.entries[built.find(2).?];
+    try std.testing.expectEqual(NodeKind.button, entry.kind);
+    try std.testing.expectEqual(@as(?UiAction, .{ .id = 42 }), entry.action);
+    try std.testing.expectEqual(VisualProps{ .button = .{ .variant = .primary, .paint = .{} } }, entry.visual);
 }
 
 test "semantic paint props project once into the completed rect snapshot" {

@@ -376,7 +376,17 @@ const Writer = struct {
         const x = rect.rect.x + (rect.rect.width - text_width) / 2;
         const y = rect.rect.y + (rect.rect.height - @as(f32, @floatFromInt(ch))) / 2;
         if (!loweredTextCellFitsClip(rect, y, ch)) return;
-        try self.emit(x, y, source, max_cols, .head, if (rect.action.?.enabled) .surface_fg else .muted_fg, .button_label, true, true);
+        const enabled = rect.action != null and rect.action.?.enabled;
+        const foreground: tokens.ColorRole = if (!enabled) .muted_fg else switch (rect.visual) {
+            .button => |visual| switch (visual.variant) {
+                .primary => .surface_bg,
+                .secondary => .surface_fg,
+            },
+            // A SessionDock action must be a Button.  Keeping this fail-safe fallback makes a
+            // stale/malformed published snapshot readable rather than guessing a Card variant.
+            else => .surface_fg,
+        };
+        try self.emit(x, y, source, max_cols, .head, foreground, .button_label, true, true);
     }
 
     fn plannedCols(source: []const u8, max_cols: u16) u16 {

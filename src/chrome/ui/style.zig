@@ -7,6 +7,10 @@
 const tokens = @import("../tokens.zig");
 
 pub const CardVariant = enum { surface, raised, selected, danger };
+/// Command targets use a closed vocabulary independent of information surfaces.  Treating a
+/// Button as a selected Card made archive actions inherit disclosure hover/pressed colours and
+/// obscured which target was primary in the Session Dock reference.
+pub const ButtonVariant = enum { primary, secondary };
 pub const TextTone = enum { primary, muted, accent, danger };
 pub const ShadowKind = enum { none, raised };
 
@@ -27,6 +31,7 @@ pub const PaintStyle = struct {
 };
 
 pub const CardVisual = struct { variant: CardVariant, paint: PaintStyle };
+pub const ButtonVisual = struct { variant: ButtonVariant, paint: PaintStyle };
 pub const TextVisual = struct { tone: TextTone, paint: PaintStyle };
 
 /// Snapshot payload shared by interaction and paint consumers. `none` is reserved for the
@@ -34,5 +39,6 @@ pub const TextVisual = struct { tone: TextTone, paint: PaintStyle };
 pub const VisualProps = union(enum) {
     none,
     card: CardVisual,
+    button: ButtonVisual,
     text: TextVisual,
 };

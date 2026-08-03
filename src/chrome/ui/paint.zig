@@ -29,11 +29,12 @@ pub const ResolvedShadow = paint_style.ResolvedShadow;
 pub const ResolvedCardStyle = paint_style.ResolvedCardStyle;
 pub const ResolvedTextStyle = paint_style.ResolvedTextStyle;
 pub const resolveCard = paint_style.resolveCard;
+pub const resolveButton = paint_style.resolveButton;
 pub const resolveText = paint_style.resolveText;
 
-/// Emits one Quad per semantic card in preorder. Text is intentionally not emitted until the
-/// actual CoreText layout artifact is wired; callers can still resolve its typed visual style via
-/// `resolveText`. The result is safe to snapshot in a unit test but is not a production frame.
+/// Emits one Quad per semantic Card/Button in preorder. Text is intentionally not emitted until
+/// the actual CoreText layout artifact is wired; callers can still resolve its typed visual style
+/// via `resolveText`. The result is safe to snapshot in a unit test but is not a production frame.
 pub fn paint(
     tree: ui_tree.UiRectTree,
     state: interaction.InteractionState,
@@ -55,6 +56,23 @@ pub fn paint(
                 if (rect.w == 0 or rect.h == 0) continue;
                 if (count == buffers.ops.len) return error.InsufficientBuffer;
                 const style = paint_style.resolveCard(entry.id, visual, entry.action, state, tk);
+                buffers.ops[count] = .{ .quad = .{
+                    .rect = rect,
+                    .fill_role = style.background,
+                    .corner_radii = style.corner_radii_px,
+                    .border_widths = style.border_widths_px,
+                    .border_role = style.border,
+                    .alpha = style.opacity,
+                } };
+                count += 1;
+            },
+            .button => |visual| {
+                if (entry.kind != .button) return error.InvalidSnapshot;
+                const clipped = if (entry.effective_clip) |clip| intersect(entry.rect, clip) else entry.rect;
+                const rect = try snapRect(clipped);
+                if (rect.w == 0 or rect.h == 0) continue;
+                if (count == buffers.ops.len) return error.InsufficientBuffer;
+                const style = paint_style.resolveButton(entry.id, visual, entry.action, state, tk);
                 buffers.ops[count] = .{ .quad = .{
                     .rect = rect,
                     .fill_role = style.background,
@@ -159,6 +177,22 @@ test "every semantic card variant starts fully opaque" {
         const resolved = resolveCard(1, .{ .variant = variant, .paint = .{} }, null, .{}, &tk);
         try std.testing.expectEqual(@as(u8, 0xFF), resolved.opacity);
     }
+}
+
+test "Button primary and secondary keep command contrast independent of Card variants" {
+    const tk = testTokens();
+    const primary = resolveButton(5, .{ .variant = .primary, .paint = .{} }, .{ .id = 9 }, .{}, &tk);
+    try std.testing.expectEqual(tokens.ColorRole.surface_fg, primary.background);
+    try std.testing.expectEqual(tokens.ColorRole.surface_bg, primary.foreground);
+    const secondary = resolveButton(6, .{ .variant = .secondary, .paint = .{} }, .{ .id = 10 }, .{}, &tk);
+    try std.testing.expectEqual(tokens.ColorRole.tab_hover_bg, secondary.background);
+    try std.testing.expectEqual(tokens.ColorRole.surface_fg, secondary.foreground);
+    const hovered_primary = resolveButton(5, .{ .variant = .primary, .paint = .{} }, .{ .id = 9 }, .{ .hovered = 5 }, &tk);
+    try std.testing.expectEqual(tokens.ColorRole.row_hover_bg, hovered_primary.background);
+    try std.testing.expectEqual(tokens.ColorRole.surface_fg, hovered_primary.foreground);
+    const disabled = resolveButton(7, .{ .variant = .primary, .paint = .{} }, .{ .id = 11, .enabled = false }, .{}, &tk);
+    try std.testing.expectEqual(tokens.ColorRole.muted_fg, disabled.foreground);
+    try std.testing.expectEqual(@as(u8, 0x80), disabled.opacity);
 }
 
 test "paint emits preordered snapped card quads and ignores text until shaping exists" {

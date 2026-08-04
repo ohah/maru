@@ -9,6 +9,7 @@ const tokens = @import("../../tokens.zig");
 const text_layout = @import("../../text_layout.zig");
 const interaction = @import("../../ui/interaction.zig");
 const ui_paint = @import("../../ui/paint.zig");
+const paint_style = @import("../../ui/paint_style.zig");
 const spacing = @import("../../ui/spacing.zig");
 const tree = @import("../../ui/tree.zig");
 const typography = @import("../../ui/typography.zig");
@@ -477,10 +478,9 @@ const Writer = struct {
         if (content.h < line_height) return;
         const enabled = rect.action != null and rect.action.?.enabled;
         const foreground: tokens.ColorRole = if (!enabled) .muted_fg else switch (rect.visual) {
-            .button => |visual| switch (visual.variant) {
-                .primary => .surface_bg,
-                .secondary => .surface_fg,
-            },
+            // 전경 매핑은 `paint_style`이 단일 출처다. 여기서 다시 나열하면 variant가 늘 때 두 곳이
+            // 갈려 "보이는 색과 계산된 색"이 달라진다.
+            .button => |visual| paint_style.buttonForeground(visual.variant),
             // A SessionDock action must be a Button.  Keeping this fail-safe fallback makes a
             // stale/malformed published snapshot readable rather than guessing a Card variant.
             else => .surface_fg,

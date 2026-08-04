@@ -315,7 +315,7 @@ max가 그 값을 밑돌면 candidate tree를 fail-close한다. 작은 창에서
 
 | 책임 | B1 계약 |
 | --- | --- |
-| `src/chrome/ui/button.zig` | `ButtonProps`, `ButtonSize`, icon slot, semantic `UiNode.button` builder를 소유한다. archive/provider/AppKit을 import하지 않는다. 닫힌 `ButtonVariant`는 이미 `ui/style.zig`에 있으나 현재 `primary`·`secondary` 둘뿐이다 — `ghost`·`danger`는 **소비자가 생길 때** 토큰 매핑(`baseButtonStyle`)과 함께 여는 별도 slice이며 builder 추가만으로 늘리지 않는다. |
+| `src/chrome/ui/button.zig` | `ButtonProps`, `ButtonSize`, icon slot, semantic `UiNode.button` builder를 소유한다. archive/provider/AppKit을 import하지 않는다. 닫힌 `ButtonVariant`(`primary`·`secondary`·`ghost`·`danger`)는 `ui/style.zig`가 소유하고 토큰 매핑은 `paint_style`이 소유한다. label 전경은 `paint_style.buttonForeground` 하나가 정하며 component가 그 매핑을 다시 나열하지 않는다. |
 | `src/chrome/ui/tree.zig` | `button` kind와 immutable visual/action projection을 보관한다. Button을 `.card`로 가장하지 않으며 tree rect와 action identity를 단일 출처로 유지한다. |
 | `src/chrome/ui/typography.zig` | `ChromeTextRole`, `Weight`, point-equivalent `Token`과 `lineHeightPx`, platform UI face request를 소유한다. terminal `ResolvedAppearance`·SessionDock·Metal DTO를 import하지 않으며, macOS adapter가 돌려준 resolved face/fallback generation을 immutable style input으로만 받는다. |
 | `src/grapheme.zig`, `src/chrome/text_layout.zig` | `grapheme.zig`의 UAX cluster 경계만 Button artifact와 legacy cell text가 공유한다. `chrome/text_layout.zig`의 EAW cell plan은 terminal/cell Chrome 전용으로 유지한다. |

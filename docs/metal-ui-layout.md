@@ -156,7 +156,7 @@ component가 `ChromeDraw.Text.origin`을 직접 계산한다. 이는 일시적�
 #### Session Dock typography 계약
 
 Chrome 텍스트는 terminal grid의 고정폭 `ResolvedAppearance.font`와 다른 제품 표면이다.
-따라서 `ChromeTypography`는 macOS adapter가 `CTFontCreateUIFontForLanguage`로 얻는 platform UI
+따라서 `chrome/ui/typography.zig`는 macOS adapter가 `CTFontCreateUIFontForLanguage`로 얻는 platform UI
 primary face와 CoreText fallback chain을 별도로 resolve한다. terminal font picker의 **family와
 line spacing**은 Chrome의 face·행간·글자 폭을 바꾸지 않는다. 이
 분리는 터미널을 JetBrains Mono 같은 고정폭 face로 쓰더라도 Session Dock이 레퍼런스처럼
@@ -166,8 +166,9 @@ font 설정 키를 만들지 않는다. 설정 표면을 열려면 theme/config 
 정책을 함께 별도 slice로 정의한다.
 
 `TextOptions`는 raw `font_size`나 family 문자열을 받지 않고 닫힌 `ChromeTextRole`만 받는다.
-`ChromeTypography.resolve(role, scale)`가 아래 point-equivalent token을 backing pixel로 한 번
-변환해 `ResolvedTextStyle`을 만든다. paint/component/backend가 각자 size·weight·baseline을
+현재 `typography.token(role)`이 아래 point-equivalent token을, `typography.lineHeightPx(role, scale)`가
+backing pixel line height를 준다. platform adapter는 그 둘과 resolved face를 합쳐 `ResolvedTextStyle`을
+만든다. paint/component/backend가 각자 size·weight·baseline을
 다시 계산하거나, 특정 label·font의 y nudge를 두어서는 안 된다.
 
 | `ChromeTextRole` | size / line-height | weight | Session Dock 소비처 |
@@ -182,7 +183,7 @@ font 설정 키를 만들지 않는다. 설정 표면을 열려면 theme/config 
 | `overline` | 12 / 16 | medium | recent turn role·section label |
 | `button_label` | 14 / 18 | semibold | resume·reveal action |
 
-각 role의 line box는 `TextLayoutArtifact`가 보관하는 font metrics와 final content rect에서
+각 role의 line box는 `RichTextArtifact`가 보관하는 font metrics와 final content rect에서
 정렬한다. 한 줄 control/button은 line box의 중심을 rect 중심에 맞추고, 두 줄 header는 line
 stack 전체를 rect 중심에 맞춘다. ink bounds는 clip과 optical diagnostics에만 쓰며 정렬 기준으로
 쓰지 않는다. 이 규칙이 작은 icon·위로 붙은 header·하단으로 쏠린 button label을 같은 원인에서
@@ -222,7 +223,7 @@ action gap 8pt와 item gap 0pt를 한 snapshot으로 제공한다. header utilit
 `TextPlacement.icon_in_rect`로 그 slot 자체를 final-pixel placement로 넘긴다. 이 placement는
 CoreText label이나 terminal cell을 만들지 않으며, worker가 등록 SVG만 slot의 정확한 중심에
 lower한다. header/card/detail의 line offset은
-`ChromeTypography` line box와 `Space`로부터 그 snapshot 안에서 계산한다. terminal cell width/height,
+`typography` line box와 `Space`로부터 그 snapshot 안에서 계산한다. terminal cell width/height,
 terminal font family, terminal line spacing은 이 함수의 입력이 아니다. `UiRectTree`, paint, hit-test,
 virtualized visible window, page/wheel step은 그 동일 metric snapshot을 공유해야 한다. 이 경계가
 terminal font family/line spacing 변경이 native Chrome을 흔드는 회귀를 막는다. 반대로 명시된
@@ -275,7 +276,7 @@ stale text artifact가 새 scale에 섞이면 실패다. 실제 사용자 Claude
 시각 합격 자료는 `session-dock-typography` Chrome Lab과 동일 fixture를 소비하는 AppKit capture
 두 종류다. 1920×1080 logical viewport의 480pt auto dock에서 header, segmented scope, search,
 group, 기본 row, expanded detail, 두 action을 한 화면에 보이고, JSON에는 role별 resolved face,
-size, line-height, baseline, final content rect, `did_truncate`를 기록한다. font-review는 같은
+size, line-height, baseline, final content rect, truncation 여부를 기록한다. font-review는 같은
 artifact 입력으로 system UI primary와 bundled Jetendard primary를 각각 capture하여 primary와
 fallback face 목록이 실제로 다른지 기록한다. primary face가 바뀌지 않았거나 모든 role의
 font identity가 같지 않으면 "font별 capture"라고 주장하지 않는다. 두 capture 모두 GPU rich
@@ -299,7 +300,11 @@ const button = ui.button(.{
 });
 ```
 
-위 문법은 목표 API이며 현재 `ui.tree`가 아직 받지 않는 필드는 구현 전까지 추가하지 않는다.
+위 문법은 목표 API다. `id`·`action`·`variant`·`style`은 현재 tree/props로 표현되지만 `size`와
+`leading_icon`은 아직 props에 자리가 없고, `ui.text`의 정렬도 지금은 `TextVisual{tone, paint}`에
+없다 — component가 `draw.TextPlacement.center_in_rect` 같은 placement를 선언하면 platform artifact가
+그것을 해석한다. 현재 `ui.tree`가
+아직 받지 않는 필드는 구현 전까지 추가하지 않는다.
 `style`은 기존 `UiStyle`의 width/height/flex/margin/padding을 그대로 받아 반응형과 고정 크기를
 닫힌 typed union으로 계산한다. 현 `min_width`/`max_width`/`min_height`/`max_height`는 backing-pixel
 `?f32` clamp이며 Button도 이를 그대로 받는다. Button이 별도 `minWidth`/`maxHeight` 문자열 속성을
@@ -310,10 +315,11 @@ max가 그 값을 밑돌면 candidate tree를 fail-close한다. 작은 창에서
 
 | 책임 | B1 계약 |
 | --- | --- |
-| `src/chrome/ui/button.zig` | `ButtonProps`, 닫힌 `ButtonVariant`(`primary`, `secondary`, `ghost`, `danger`), `ButtonSize`, icon slot, semantic `UiNode.button` builder를 소유한다. archive/provider/AppKit을 import하지 않는다. |
+| `src/chrome/ui/button.zig` | `ButtonProps`, `ButtonSize`, icon slot, semantic `UiNode.button` builder를 소유한다. archive/provider/AppKit을 import하지 않는다. 닫힌 `ButtonVariant`는 이미 `ui/style.zig`에 있으나 현재 `primary`·`secondary` 둘뿐이다 — `ghost`·`danger`는 **소비자가 생길 때** 토큰 매핑(`baseButtonStyle`)과 함께 여는 별도 slice이며 builder 추가만으로 늘리지 않는다. |
 | `src/chrome/ui/tree.zig` | `button` kind와 immutable visual/action projection을 보관한다. Button을 `.card`로 가장하지 않으며 tree rect와 action identity를 단일 출처로 유지한다. |
-| `src/chrome/ui/typography.zig` | `ChromeTextRole`과 point-equivalent type token, platform UI face request를 소유한다. terminal `ResolvedAppearance`·SessionDock·Metal DTO를 import하지 않으며, macOS adapter가 돌려준 resolved face/fallback generation을 immutable style input으로만 받는다. |
-| `src/grapheme.zig`, `src/chrome/text_layout.zig`, `src/chrome/ui/text_artifact.zig` | `grapheme.zig`의 UAX cluster 경계만 Button artifact와 legacy cell text가 공유한다. `chrome/text_layout.zig`의 EAW cell plan은 terminal/cell Chrome 전용으로 유지한다. 새 artifact는 `ResolvedTextStyle`의 실제 font glyph advance로 CJK·ellipsis·icon slot을 측정해 final content rect·glyph run·pixel baseline/ink rect를 만든다. `horizontal_align`과 `vertical_align`은 artifact에서만 해석하며 origin을 cell row로 다시 추측하지 않는다. |
+| `src/chrome/ui/typography.zig` | `ChromeTextRole`, `Weight`, point-equivalent `Token`과 `lineHeightPx`, platform UI face request를 소유한다. terminal `ResolvedAppearance`·SessionDock·Metal DTO를 import하지 않으며, macOS adapter가 돌려준 resolved face/fallback generation을 immutable style input으로만 받는다. |
+| `src/grapheme.zig`, `src/chrome/text_layout.zig` | `grapheme.zig`의 UAX cluster 경계만 Button artifact와 legacy cell text가 공유한다. `chrome/text_layout.zig`의 EAW cell plan은 terminal/cell Chrome 전용으로 유지한다. |
+| `src/platform/macos/chrome/chrome_draw_lowering.zig`의 `RichTextArtifact` | **artifact는 platform이 소유한다.** 실제 font glyph advance 측정에 CoreText가 필요하고 `chrome`은 neutral layer라 OS 타입을 import할 수 없기 때문이다(`check-boundaries`가 강제). artifact는 `ResolvedTextStyle`로 CJK·ellipsis·icon slot을 측정해 final content rect·glyph run·pixel baseline/ink rect를 만들고, origin을 cell row로 다시 추측하지 않는다. 정렬은 별도 align 필드가 아니라 component가 선언한 `draw.TextPlacement`(`origin`·`center_in_rect`·`icon_in_rect`·`leading_icon_group`)를 artifact가 해석하는 형태다. neutral `chrome/ui`는 role·style·rect와 opaque handle만 다루고 측정 결과를 재계산하지 않는다. |
 | `src/chrome/ui/paint_style.zig` 및 `ui/paint.zig` | hover/focus/pressed/disabled precedence와 token mapping, 배경/테두리/text/icon semantic draw를 한 번만 만든다. component는 직접 `ChromeDraw`를 emit하지 않는다. |
 | rich Metal text lowering | Button text/icon의 final pixel placement를 glyph quad/raster placement로 lower한다. terminal `NativeMetalCell` path는 그대로 두며, Button 때문에 terminal grid ABI를 바꾸지 않는다. |
 | `ui/interaction.zig`와 host | 기존 pointer capture·keyboard focus가 button의 same `UiActionId`를 dispatch한다. `onClick`/`onHover` closure, provider I/O, shell spawn은 props에 넣지 않는다. |
@@ -331,7 +337,7 @@ focus와 함께 같은 rect를 소비한다. Button이 tree 밖에서 별도 hit
 flowchart TD
     A[Button Props and Text child] --> B[UiNode.button]
     B --> C[UiRectTree]
-    C --> D[TextLayoutArtifact final content rect]
+    C --> D[RichTextArtifact final content rect]
     C --> E[ui interaction shared action rect]
     D --> F[ui paint semantic button and glyph draw]
     F --> G[rich pixel glyph lowering]
@@ -339,28 +345,53 @@ flowchart TD
     E --> I[host opaque action dispatch]
 ```
 
-`leading_icon`은 raw Unicode가 아니라 이미 등록된 SVG `IconId`만 받는다. icon slot width, target
-pixel size, label gap은 `ButtonSize`와 token에서 결정하고 text artifact·paint·lowerer가 같은
-측정 결과를 쓴다. user/provider transcript의 PUA 문자열은 icon으로 승격하지 않는다. trailing
+`leading_icon`은 raw Unicode 문자열이 아니라 **등록된 SVG 아이콘 하나를 가리키는 닫힌 값**만 받는다.
+현재 wire 표현은 `draw.TextPlacement`의 `icon_codepoint: u21`(합성 게이트에 등록된 Plane 15 PUA
+codepoint)이며, Session Dock은 `utf8Decode`로 그 값을 만든다. 이 slice가 그 표현을 바꿀지 — 닫힌
+`IconId` enum을 새로 두고 codepoint로 매핑할지, 아니면 codepoint를 받되 등록 집합 검증을 builder가
+할지 — 는 구현 PR이 정하고 그 근거를 남긴다. 어느 쪽이든 **미등록 codepoint는 fail-close**이고
+user/provider transcript의 PUA 문자열은 icon으로 승격하지 않는다. icon slot width, target pixel size,
+label gap은 `ButtonSize`와 token에서 결정하고 text artifact·paint·lowerer가 같은 측정 결과를 쓴다. trailing
 shortcut은 B1 첫 slice에서는 Text child가 명시적으로 제공할 때만 보이며, Button이 `⌘↵` 같은
 문자열을 도메인별로 합성하지 않는다.
 
 현재 B1-text와 archive action의 B1-button-a/b는 구현됐다. `UiNode.button`의 visual/action/border box와
-worker-owned final-pixel `leading-icon-group`도 제품 Session Dock에서 소비한다. 다만 아래의 generic
-`ui/button.zig` props/one-Text-child API와 generic paint ownership은 아직 만들지 않았으므로, 현재
-archive consumer 하나가 성공했다는 이유로 reusable Button 전체를 완료로 부르지 않는다.
+worker-owned final-pixel `leading-icon-group`도 제품 Session Dock에서 소비하며, `ui/tree.zig`의 `button`
+props(`variant`·`paint`·`action`·`overflow`)와 `ui/paint_style.zig`의 `resolveButton`도 이미 있다
+(`433cb463`). 즉 tree kind와 paint 해석은 남은 범위가 아니다.
+
+아직 없는 것은 **호출자가 쓰는 generic builder와 그 제약**이다 — `ui/button.zig` 자체, `ButtonProps`,
+`ButtonSize`, `IconId`, one-Text-child API가 코드에 없다. `ButtonVariant`만 `ui/style.zig`에 있고,
+Session Dock은 자기 `ButtonMetrics`(`components/session_dock/types.zig`의 pt 치수)로 크기를 정하고,
+host도 hit-test·layout에서 같은 `ButtonMetrics.resolve`를 읽는다. `ButtonSize`는 그것을
+대체하는 이름이 아니라 **token 기반 최소 hit target floor**를 주는 generic 축이며, 두 값이 충돌하면
+builder가 둘을 합쳐 one resolved min을 만든다(아래 참조). archive consumer 하나가 성공했다는 이유로
+reusable Button 전체를 완료로 부르지 않는다.
 
 남은 generic Button 이관은 다음 PR로 나눈다. 한 PR은 선행 PR이 병합된 `main`에서만 시작한다.
 
-1. **B1-generic-component:** `ui/button.zig`를 추가해 `ButtonProps`, icon slot, semantic text child를
-   `UiNode.button`에 투영한다. archive/provider/AppKit을 import하지 않고, 이미 구현된 Session Dock
-   final-pixel artifact를 generic API가 다시 cell origin으로 되돌리지 않음을 unit/readback으로 증명한다.
+1. **B1-generic-component:** `ui/button.zig`를 추가해 `ButtonProps`, `ButtonSize`, icon slot,
+   semantic text child를 `UiNode.button`에 투영한다. tree의 `button` kind와 `resolveButton`은 이미
+   있으므로 재작성하지 않는다. 다만 현재 props는 `variant`·`paint`·`action`·`overflow`뿐이라
+   **size와 icon을 실을 자리가 없다** — Session Dock은 그 둘을 컴포넌트 로컬 `ButtonMetrics`와
+   `draw.TextPlacement.leading_icon_group`(worker가 final-pixel로 lower)으로 따로 흘린다. 이 slice는
+   그 두 축을 generic props로 받아 같은 placement로 내리는 경로를 정의하며, 필요한 최소한의 tree
+   props 확장은 이 단계에 포함한다. archive/provider/AppKit을 import하지 않고, artifact 측정은
+   platform `RichTextArtifact`가 계속 소유한다 — generic API가 그 결과를 재계산하거나 cell origin으로
+   되돌리지 않음을 unit/readback으로 증명한다.
 2. **B1-generic-state:** default/hover/
    pressed/focus/disabled, ButtonSize floor보다 작은 max fail-close, zero/two/non-Text child fail-close,
    narrow CJK ellipsis, pointer·keyboard action parity를 headless와 Lab fixture로 고정한다.
 3. **B1-archive refactor:** archive detail action의 current local writer가 generic Button만 소비하도록
    바꾸고 `detail-ready` before/after capture와 실제 AppKit resume/reveal fixture를 갱신한다. provider와
    action identity 정책은 바꾸지 않는다.
+
+`zig build test-chrome-ui`의 root(`src/ui_test.zig`)는 모듈을 명시로 나열해 `refAllDecls`한다.
+그 나열에 없어도 등재 모듈이 import하면 전이적으로 실행된다 — `typography`·`spacing`이 나열에
+없는데도 실행되는 것이 그 예다. 따라서 새 `ui/button.zig`가 tree/paint_style 같은 등재 모듈의
+import 그래프에 들어오면 별도 등재가 필요 없지만, 어느 등재 모듈도 참조하지 않는 독립 모듈이면
+`src/ui_test.zig`에 직접 등재해야 한다. 그러지 않으면 그 gate는 **테스트를 한 개도 실행하지 않은
+채 green**이 된다. PR은 새 테스트 이름이 실제 실행 목록에 나타나는지 확인한다.
 
 각 구현 PR은 `mise run macos-chrome-lab-smoke`의 제품 Metal PNG와 `gh attach` 본문 이미지를
 포함한다. B1-text/B1-button은 `zig build test-chrome-ui`, `zig build check-boundaries`, `mise run check`,
@@ -599,8 +630,10 @@ pub const TextOverflow = enum { clip, ellipsis };
   spacing·locale/direction)을 snapshot 시작 시 한 번 정한다. terminal `font.*` config는 이 입력이
   아니다. `TextLayoutRequest`는 이 style,
   원문, wrap/limit/overflow, final content width를 key로 삼고, text engine은 caller frame
-  arena에 `TextLayoutArtifact`(content size, visible line range, did_truncate, shaped glyph
-  runs)를 만든다. `UiRectTree`의 text entry와 Metal paint는 같은 artifact handle만 읽는다.
+  arena에 `RichTextArtifact`를 만든다. 현재 그 artifact는 role별 `Placement`(row, start/end col,
+  pixel offset, foreground, text role) 목록을 보관하며, content size·visible line range·truncation
+  여부처럼 이 slice가 요구하는 값은 아직 그 안에 없다 — 필요한 필드는 소비자가 생길 때 함께 연다.
+  `UiRectTree`의 text entry와 Metal paint는 같은 artifact handle만 읽는다.
 - 최초 제품 Text slice에서 `.unicode`, `max_lines`, `.ellipsis`를 쓰는 node의 final content
   width는 explicit width 또는 parent cross-axis stretch로 **먼저 definite**해야 한다. session
   card처럼 vertical container의 stretch child는 이 규칙을 만족한다. horizontal flex line에서
@@ -612,7 +645,7 @@ pub const TextOverflow = enum { clip, ellipsis };
   width가 바뀌는 모든 pass에서 line count·card height·glyph artifact가 같은 final width key로
   수렴하는 별도 solver slice를 추가한다. 그 전에는 임의의 pass 횟수나 문자열 폭 추정으로
   fallback하지 않는다.
-- ChromeTypography token·platform UI primary/fallback registry generation·scale·available width·text
+- typography token·platform UI primary/fallback registry generation·scale·available width·text
   props 중 하나가 바뀌면 해당 artifact만 invalidation한다. terminal `font.*` config 변경은 Chrome
   artifact invalidation 원인이 아니다. UI frame path는 font file I/O나 worker wait를 하지 않고,
   이미 renderer 수명과 함께 유지되는 font identity registry 및 frame-owned shape result만

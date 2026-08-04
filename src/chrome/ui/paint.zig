@@ -229,6 +229,60 @@ test "every Button variant resolves a distinct command surface and one foregroun
     try std.testing.expect(disabled_danger.background != .danger_bg);
 }
 
+test "Button painter state order is pressed, focus, hover, and disabled always last" {
+    const tk = testTokens();
+    const id: u64 = 5;
+    const enabled_action = ui_tree.UiAction{ .id = 9 };
+    const visual = ui_style.ButtonVisual{ .variant = .primary, .paint = .{} };
+
+    const base = resolveButton(id, visual, enabled_action, .{}, &tk);
+
+    // pressed(capture)는 focus·hover가 함께 있어도 이긴다. 셋을 동시에 준 상태가 capture 단독과 같다.
+    const all_three = resolveButton(id, visual, enabled_action, .{
+        .capture = .{ .id = id, .action_id = 9 },
+        .focused = id,
+        .hovered = id,
+    }, &tk);
+    const pressed_only = resolveButton(id, visual, enabled_action, .{ .capture = .{ .id = id, .action_id = 9 } }, &tk);
+    try std.testing.expectEqual(pressed_only.background, all_three.background);
+    try std.testing.expectEqual(pressed_only.foreground, all_three.foreground);
+
+    // focus는 hover보다 앞선다 — 둘 다 있으면 focus 결과가 나온다.
+    const focus_and_hover = resolveButton(id, visual, enabled_action, .{ .focused = id, .hovered = id }, &tk);
+    const focus_only = resolveButton(id, visual, enabled_action, .{ .focused = id }, &tk);
+    try std.testing.expectEqual(focus_only.background, focus_and_hover.background);
+    try std.testing.expectEqual(focus_only.border, focus_and_hover.border);
+
+    // hover는 base를 바꾼다 — 아무 상태도 없을 때와 달라야 한다.
+    const hover_only = resolveButton(id, visual, enabled_action, .{ .hovered = id }, &tk);
+    try std.testing.expect(hover_only.background != base.background);
+
+    // disabled는 언제나 마지막이다. 셋 중 무엇이 켜져 있어도 비활성 표현이 이긴다 — 접근 불가한
+    // 상태가 활성처럼 보이면 사용자가 누를 수 있다고 오해한다.
+    const disabled_action = ui_tree.UiAction{ .id = 9, .enabled = false };
+    for ([_]interaction.InteractionState{
+        .{},
+        .{ .hovered = id },
+        .{ .focused = id },
+        .{ .capture = .{ .id = id, .action_id = 9 }, .focused = id, .hovered = id },
+    }) |state| {
+        const disabled = resolveButton(id, visual, disabled_action, state, &tk);
+        try std.testing.expectEqual(tokens.ColorRole.muted_fg, disabled.foreground);
+        try std.testing.expectEqual(tokens.ColorRole.surface_bg, disabled.background);
+        try std.testing.expect(disabled.opacity < 0xFF);
+        try std.testing.expect(disabled.shadow == null);
+    }
+
+    // 다른 node의 상태는 이 node를 바꾸지 않는다 — id가 다르면 남의 hover/focus를 빌려오지 않는다.
+    const other = resolveButton(id, visual, enabled_action, .{
+        .hovered = id + 1,
+        .focused = id + 1,
+        .capture = .{ .id = id + 1, .action_id = 99 },
+    }, &tk);
+    try std.testing.expectEqual(base.background, other.background);
+    try std.testing.expectEqual(base.foreground, other.foreground);
+}
+
 test "paint emits preordered snapped card quads and ignores text until shaping exists" {
     const tk = testTokens();
     const entries = [_]ui_tree.RectEntry{

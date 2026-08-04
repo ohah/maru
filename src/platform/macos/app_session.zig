@@ -802,6 +802,11 @@ const titlebar_strip_min_pt: u32 = 28;
 // theme.font_size_min/max(세팅 슬라이더 range)와 **같은 값** — 단축키·GUI가 한 범위를 공유한다(drift 시 둘 다 갱신).
 const font_size_min: f32 = 6.0;
 const font_size_max: f32 = 72.0;
+// Session Dock은 terminal font family/line spacing과 별도 Chrome typography를 유지한다. 다만 사용자가
+// Cmd+/−/0으로 요청한 font-size zoom은 Dock 전체의 명시적 UI zoom으로 반영한다. 범위는 좁은 dock에서
+// 48pt action target과 최소 읽기 밀도를 보존하도록 [75%, 150%]로 제한한다.
+const session_dock_ui_zoom_min_milli: u32 = 750;
+const session_dock_ui_zoom_max_milli: u32 = 1500;
 // ⌘+/⌘- 한 번에 바꾸는 폰트 크기 보폭(pt). Terminal.app·iTerm2·Ghostty처럼 **고정 1pt** — 설정 항목으로 두지
 // 않는다(보폭값은 화면에 즉각 반영이 안 보여 슬라이더로 노출하면 혼란만 준다). ⌘0 reset은 보폭과 무관하게
 // base_font_size로 복귀.
@@ -4304,17 +4309,18 @@ pub const AppSession = struct {
             .sidebar_width_px = self.sidebar_width_px,
             .titlebar_height_px = self.titlebar_strip_px,
             // Session Dock은 terminal font의 cell/titlebar metric을 Chrome layout input으로
-            // 삼지 않는다. 28pt native-title safety band와 component-owned 40pt switcher가
-            // font zoom에도 card/action/pointer origin을 고정한다.
+            // 삼지 않는다. 28pt native-title safety band는 고정하고, component-owned switcher만
+            // bounded Dock UI zoom과 함께 같은 completed tree에서 확대/축소한다.
             .dock_top_px = if (agent_session_view) layout_math.ptToPx(titlebar_strip_min_pt, self.scale_milli) else 0,
             .cell_width_px = self.cell_width_px,
             .cell_height_px = self.cell_height_px,
             .scale_milli = self.scale_milli,
             .divider_px = self.dividerThicknessPx(),
             // Explorer/source-control은 pane tab bar와 같은 높이를 유지한다. Session Dock만
-            // terminal font zoom에 독립된 component metric을 써서 fixed Chrome origin을 보장한다.
+            // terminal family/line-spacing에 독립된 component metric을 쓰되, explicit bounded UI zoom은
+            // switcher와 동일 tree 전체에 반영한다.
             .view_bar_px = if (agent_session_view)
-                chrome.components.session_dock.types.DockMetrics.resolve(self.scale_milli).view_switcher_h
+                chrome.components.session_dock.types.DockMetrics.resolve(self.agentSessionDockScaleMilli()).view_switcher_h
             else
                 self.paneBarHeightPx(),
             .side = if (self.dock_initialized) self.dock.side else .right,
@@ -13329,7 +13335,7 @@ pub const AppSession = struct {
 
     fn agentSessionDockContentViewportHeightPx(self: *const AppSession) u32 {
         const content = self.dockGeometry().tree_content;
-        const m = chrome.components.session_dock.types.DockMetrics.resolve(self.scale_milli);
+        const m = chrome.components.session_dock.types.DockMetrics.resolve(self.agentSessionDockScaleMilli());
         return content.h -| m.fixedChromeHeight();
     }
 
@@ -13368,7 +13374,7 @@ pub const AppSession = struct {
     }
 
     fn agentSessionDockMetrics(self: *const AppSession) chrome.components.session_dock.scroll.Metrics {
-        const m = chrome.components.session_dock.types.DockMetrics.resolve(self.scale_milli);
+        const m = chrome.components.session_dock.types.DockMetrics.resolve(self.agentSessionDockScaleMilli());
         return .{
             .group_h_px = m.group_h,
             .card_h_px = m.card_h,
@@ -20269,8 +20275,17 @@ pub const AppSession = struct {
     fn setFontSize(self: *AppSession, size: f32) void {
         const clamped = std.math.clamp(size, font_size_min, font_size_max);
         if (clamped == self.appearance.font.size) return; // 경계에서 더 눌러도 변화 없으면 재작업 스킵
+        // SessionDockUiZoom changes every projected card height. Preserve the exact visible card
+        // identity before changing the resolved metric so Cmd+/− never turns a stable session
+        // position into an unrelated numeric backing-pixel offset. No card/closed detail falls
+        // back to the existing bounded offset policy.
+        const preserve_visible_dock_scroll = self.dock_initialized and self.dock.view == .agent_sessions and self.dockVisible();
+        const dock_scroll_anchor = if (preserve_visible_dock_scroll) self.captureAgentSessionDockScrollAnchor() else null;
+        const dock_scroll_fallback_offset_px = self.agent_session_archive_scroll.offset_y_px;
         self.appearance.font.size = clamped;
         self.applyMetricsPipeline();
+        if (preserve_visible_dock_scroll)
+            self.restoreAgentSessionDockScrollAnchor(dock_scroll_anchor, dock_scroll_fallback_offset_px);
     }
 
     /// appearance(폰트·여백·테마)가 통째로 바뀌었을 때의 일반 적용 경로. setFontSize의 메트릭 재계산을 일반화한 것 —
@@ -20361,6 +20376,33 @@ pub const AppSession = struct {
         if (!(base > 0) or !(self.appearance.font.size > 0)) return 1000;
         const ratio = std.math.clamp(self.appearance.font.size / base, 0.1, 10.0);
         return @intFromFloat(@round(ratio * 1000.0));
+    }
+
+    /// Cmd font-size zoom의 비율만 Session Dock의 native Chrome UI zoom으로 쓴다. Terminal font
+    /// family/line spacing/cell metrics은 intentionally excluded: one bounded value must be shared by
+    /// layout, text worker, paint, hit testing, and scroll projection so a stale scale cannot split
+    /// what is visible from what is clickable.
+    fn agentSessionDockUiZoomMilli(self: *const AppSession) u32 {
+        const base = self.base_font_size;
+        const current = self.appearance.font.size;
+        if (!(base > 0) or !(current > 0)) return 1000;
+        const ratio = current / base;
+        if (!std.math.isFinite(ratio)) return 1000;
+        const milli: f32 = std.math.clamp(
+            @round(ratio * 1000.0),
+            @as(f32, @floatFromInt(session_dock_ui_zoom_min_milli)),
+            @as(f32, @floatFromInt(session_dock_ui_zoom_max_milli)),
+        );
+        return @intFromFloat(milli);
+    }
+
+    /// Device backing scale and the user-visible bounded Dock zoom compose once. `0` remains the
+    /// pre-render fallback used by DockMetrics, while multiplication stays saturating for malformed
+    /// test/config input instead of wrapping a published Chrome tree to a tiny size.
+    fn agentSessionDockScaleMilli(self: *const AppSession) u32 {
+        const backing = if (self.scale_milli == 0) @as(u32, 1000) else self.scale_milli;
+        const product = @as(u64, backing) * @as(u64, self.agentSessionDockUiZoomMilli());
+        return @intCast(@min((product + 500) / 1000, @as(u64, std.math.maxInt(u32))));
     }
 
     /// take_bell 패턴의 1회성 drain: 세워져 있으면 true를 돌려주고 지운다(Swift tick이 매번 호출).
@@ -21387,9 +21429,10 @@ pub const AppSession = struct {
             if (!std.math.isFinite(delta_y)) return;
             if (delta_y * self.agent_session_archive_wheel_residue_px < 0)
                 self.agent_session_archive_wheel_residue_px = 0;
-            const m = chrome.components.session_dock.types.DockMetrics.resolve(self.scale_milli);
+            const dock_scale_milli = self.agentSessionDockScaleMilli();
+            const m = chrome.components.session_dock.types.DockMetrics.resolve(dock_scale_milli);
             const unit: f64 = if (precise)
-                @as(f64, @floatFromInt(self.scale_milli)) / 1000.0
+                @as(f64, @floatFromInt(dock_scale_milli)) / 1000.0
             else
                 @as(f64, @floatFromInt(m.card_h));
             const next_residue = self.agent_session_archive_wheel_residue_px + delta_y * unit * @as(f64, self.appearance.scroll_multiplier);
@@ -31215,11 +31258,12 @@ pub const AppSession = struct {
         const arena = arena_state.allocator();
         const scroll_projection = self.agentSessionDockScrollProjection();
         const items = self.buildAgentSessionDockItems(arena, scroll_projection) catch return;
+        const dock_scale_milli = self.agentSessionDockScaleMilli();
         const props = chrome.components.session_dock.types.Props{
             .viewport_px = .{ .width = @floatFromInt(content.w), .height = @floatFromInt(content.h) },
             .cell_width_px = self.cell_width_px,
             .cell_height_px = self.cell_height_px,
-            .scale_milli = self.scale_milli,
+            .scale_milli = dock_scale_milli,
             // Archive records are atomically swapped by the worker. Its scan generation is
             // not exposed here yet, so the projection generation is the stable, main-thread
             // action guard for this first host slice.
@@ -31319,7 +31363,7 @@ pub const AppSession = struct {
         );
         // `richTextFingerprint` owns semantic component facts; scale changes the CoreText
         // point size even when integer cell metrics happen to round to the same value.
-        const fingerprint = base_fingerprint ^ (@as(u64, self.scale_milli) *% 0x9e3779b185ebca87);
+        const fingerprint = base_fingerprint ^ (@as(u64, dock_scale_milli) *% 0x9e3779b185ebca87);
         self.pollAgentSessionDockRichTextWorker(fingerprint);
         if (self.agent_session_dock_rich_text_cache) |*cache| {
             if (cache.fingerprint == fingerprint) {
@@ -31345,7 +31389,7 @@ pub const AppSession = struct {
                 } });
                 return;
             };
-            if (!self.agent_session_dock_text_backend.submit(request, self.scale_milli)) request.deinit(self.allocator);
+            if (!self.agent_session_dock_text_backend.submit(request, dock_scale_milli)) request.deinit(self.allocator);
         }
         self.collectShaped(collected, icon_dl, builder, .{ .pane = .{
             .origin_x = content.x,
@@ -48065,6 +48109,47 @@ test "runtime font size: ⌘+/−/0 cell 메트릭·grid 재계산 + 하한·상
     i = 0;
     while (i < 200) : (i += 1) session.dispatchAppAction(.increase_font_size);
     try std.testing.expectEqual(font_size_max, session.appearance.font.size);
+}
+
+test "Session Dock Cmd zoom grows and shrinks one resolved layout/text/scroll scale" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1000, 700, 1000);
+
+    const base_scale = session.agentSessionDockScaleMilli();
+    const base_metrics = session.agentSessionDockMetrics();
+    try std.testing.expectEqual(@as(u32, 1000), session.agentSessionDockUiZoomMilli());
+    try std.testing.expectEqual(@as(u32, 1000), base_scale);
+
+    session.dispatchAppAction(.increase_font_size);
+    const larger_scale = session.agentSessionDockScaleMilli();
+    const larger_metrics = session.agentSessionDockMetrics();
+    try std.testing.expect(larger_scale > base_scale);
+    try std.testing.expect(larger_metrics.card_h_px > base_metrics.card_h_px);
+
+    session.dispatchAppAction(.reset_font_size);
+    session.dispatchAppAction(.decrease_font_size);
+    const smaller_scale = session.agentSessionDockScaleMilli();
+    const smaller_metrics = session.agentSessionDockMetrics();
+    try std.testing.expect(smaller_scale < base_scale);
+    try std.testing.expect(smaller_metrics.card_h_px < base_metrics.card_h_px);
+
+    session.setFontSize(font_size_min);
+    try std.testing.expectEqual(session_dock_ui_zoom_min_milli, session.agentSessionDockUiZoomMilli());
+    session.setFontSize(font_size_max);
+    try std.testing.expectEqual(session_dock_ui_zoom_max_milli, session.agentSessionDockUiZoomMilli());
+    session.dispatchAppAction(.reset_font_size);
+    try std.testing.expectEqual(@as(u32, 1000), session.agentSessionDockUiZoomMilli());
 }
 
 // reapplyLoadedConfig(세팅 GUI 라이브 재적용 — 커서 깜빡임 토글 등)가 런타임 ⌘+/− 줌을 날리지 않는지(버그 회귀

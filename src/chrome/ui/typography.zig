@@ -28,15 +28,15 @@ pub const Token = struct {
 
 pub fn token(role: ChromeTextRole) Token {
     return switch (role) {
-        .dock_heading => .{ .point_size = 20, .line_height = 26, .weight = .semibold },
-        .supporting => .{ .point_size = 15, .line_height = 20, .weight = .regular },
-        .control => .{ .point_size = 16, .line_height = 20, .weight = .medium },
-        .group_heading => .{ .point_size = 17, .line_height = 22, .weight = .semibold },
-        .card_heading => .{ .point_size = 18, .line_height = 24, .weight = .semibold },
-        .body => .{ .point_size = 16, .line_height = 22, .weight = .regular },
-        .metadata => .{ .point_size = 15, .line_height = 20, .weight = .regular },
-        .overline => .{ .point_size = 14, .line_height = 20, .weight = .medium },
-        .button_label => .{ .point_size = 16, .line_height = 20, .weight = .semibold },
+        .dock_heading => .{ .point_size = 18, .line_height = 24, .weight = .semibold },
+        .supporting => .{ .point_size = 14, .line_height = 18, .weight = .regular },
+        .control => .{ .point_size = 14, .line_height = 18, .weight = .medium },
+        .group_heading => .{ .point_size = 16, .line_height = 20, .weight = .semibold },
+        .card_heading => .{ .point_size = 16, .line_height = 22, .weight = .semibold },
+        .body => .{ .point_size = 14, .line_height = 20, .weight = .regular },
+        .metadata => .{ .point_size = 13, .line_height = 18, .weight = .regular },
+        .overline => .{ .point_size = 12, .line_height = 16, .weight = .medium },
+        .button_label => .{ .point_size = 14, .line_height = 18, .weight = .semibold },
     };
 }
 
@@ -57,7 +57,7 @@ test "every Chrome text role has a positive fixed token" {
 }
 
 test "line height converts point-equivalent token once at backing scale" {
-    try std.testing.expectEqual(@as(u32, 26), lineHeightPx(.dock_heading, 1000));
-    try std.testing.expectEqual(@as(u32, 52), lineHeightPx(.dock_heading, 2000));
-    try std.testing.expectEqual(@as(u32, 30), lineHeightPx(.metadata, 1500));
+    try std.testing.expectEqual(@as(u32, 24), lineHeightPx(.dock_heading, 1000));
+    try std.testing.expectEqual(@as(u32, 48), lineHeightPx(.dock_heading, 2000));
+    try std.testing.expectEqual(@as(u32, 27), lineHeightPx(.metadata, 1500));
 }

@@ -943,6 +943,47 @@ fn restoreSurfaceSize(sm: maru.session.workspace.Surface) terminal.Size {
     });
 }
 
+/// 저장할 만한 grid인가 — 아니면 null. `restoreSurfaceSize`의 짝(하나는 읽고 하나는 쓸 값을 고른다).
+///
+/// 0은 "관측 없음"이고, **`clampGridSize`의 하한(2×1)은 "기하를 몰라 하한에 걸린 값"**이다. 후자를 저장하면
+/// 다음 실행이 그 크기로 복원·재접속해 스스로를 재생산한다(실측: `workspace.v1`에 `cols=2 rows=1`이 박혀
+/// 재시작을 넘어 살아남았다). 하한값은 정상 크기와 숫자로 구별되지 않으므로 저장 직전에 걸러야 한다.
+/// 하한과 **정확히 같을 때만** 버린다 — 진짜로 작은 창의 정상 grid까지 버리지 않기 위해 좁게 잡는다.
+fn plausibleSurfaceSize(size: terminal.Size) ?terminal.Size {
+    if (size.cols == 0 or size.rows == 0) return null;
+    const floor = terminal.clampGridSize(.{ .cols = 0, .rows = 0 });
+    if (size.cols == floor.cols and size.rows == floor.rows) return null;
+    return size;
+}
+
+test "plausibleSurfaceSize: clamp 하한은 저장하지 않고 정상 grid는 통과시킨다" {
+    const floor = terminal.clampGridSize(.{ .cols = 0, .rows = 0 });
+    // 기하를 몰라 하한에 걸린 값 — 저장하면 다음 실행이 그 크기로 복원돼 스스로를 재생산한다.
+    try std.testing.expect(plausibleSurfaceSize(floor) == null);
+    try std.testing.expect(plausibleSurfaceSize(.{ .cols = 0, .rows = 0 }) == null);
+    try std.testing.expect(plausibleSurfaceSize(.{ .cols = 80, .rows = 0 }) == null);
+    try std.testing.expect(plausibleSurfaceSize(.{ .cols = 0, .rows = 24 }) == null);
+    // 하한과 정확히 같을 때만 버린다 — 진짜로 작은 창의 정상 grid는 살린다.
+    try std.testing.expectEqual(
+        terminal.Size{ .cols = floor.cols, .rows = floor.rows + 1 },
+        plausibleSurfaceSize(.{ .cols = floor.cols, .rows = floor.rows + 1 }).?,
+    );
+    try std.testing.expectEqual(
+        terminal.Size{ .cols = 135, .rows = 74 },
+        plausibleSurfaceSize(.{ .cols = 135, .rows = 74 }).?,
+    );
+}
+
+test "복원 왕복: 하한 grid를 저장하지 않으면 다음 복원이 하한으로 재접속하지 않는다" {
+    // 실측 회귀: workspace.v1에 `cols=2 rows=1`이 박혀 재시작을 넘어 살아남았고, 다음 복원이 그 크기로
+    // 재접속해 스스로를 재생산했다. 저장 직전 필터가 그 고리를 끊는지 왕복으로 고정한다.
+    const floor = terminal.clampGridSize(.{ .cols = 0, .rows = 0 });
+    const persisted = plausibleSurfaceSize(floor) orelse terminal.Size.default;
+    try std.testing.expectEqual(terminal.Size.default, persisted);
+    const restored = restoreSurfaceSize(.{ .cols = persisted.cols, .rows = persisted.rows });
+    try std.testing.expect(!(restored.cols == floor.cols and restored.rows == floor.rows));
+}
+
 // 복원 시 저장된 cwd를 spawn에 쓸지 결정한다(R6 "없는 cwd graceful"). 존재하는 절대-경로 디렉터리일 때만 그
 // cwd를, 아니면(빈값·상대경로·없음·파일·권한 없음) null을 돌려준다 — null이면 기본 cwd로 spawn해 surface를 잃지
 // 않는다. cwd 자식 chdir 실패는 _exit(126)이라(pty/macos childExec), 미리 확인 안 하면 복원된 셸이 즉시 죽어
@@ -5118,11 +5159,26 @@ pub const AppSession = struct {
         );
     }
 
+    /// 터미널 영역 기하가 **아직 없는가**(창 크기 미확정 — 복원 직후·첫 AppKit resize 전).
+    ///
+    /// 0인 rect를 그대로 레이아웃에 넣으면 `gridFromRectPx`가 0을 내고 `clampGridSize` 하한에 걸려 **2×1**이 된다.
+    /// 그 값은 "이 pane은 2칸짜리 터미널"이 아니라 **"아직 모른다"**인데, 하한을 거치면서 정상 크기와 구별할 수
+    /// 없는 숫자가 되어 세 곳을 연쇄로 오염시킨다: ① host runtime의 진짜 크기(135×74)를 덮어쓰고 ②
+    /// `resizeTermCoreToLayout`이 `observation.size`에 심고 ③ `captureWorkspaceTab`이 그걸 workspace에 저장해
+    /// **재시작을 넘어 영구화**한다 — 다음 복원이 2×1로 재접속해 스스로를 재생산한다(실측: workspace.v1에
+    /// `cols=2 rows=1` 기록됨). 기하를 모를 때는 아무에게도 알리지 않는 것이 유일하게 옳다. 실제 기하가 오면
+    /// `resize()`가 이 패스를 다시 돌린다.
+    fn layoutGeometryUnknown(self: *const AppSession) bool {
+        const r = self.termRect();
+        return r.w == 0 or r.h == 0;
+    }
+
     /// 활성 탭의 각 panel을 자기 leaf rect grid로 resize한다(window resize·split 후 재배치). 단일 leaf면
     /// 활성 surface 하나를 full term grid로 — 기존 resizeActiveSurface와 동일 효과. **레이아웃 적용은 개별 Term의
     /// runtime 전달 실패로 중단되지 않는다**(표시 grid는 `resizeTermForLayout`이 보장하고, 못 전달한 사실은
     /// `noteResizeDeliveryFailure`가 남긴다). leaf rect 계산 실패(OOM)만 전파한다.
     fn resizeActiveTabPanes(self: *AppSession) !void {
+        if (self.layoutGeometryUnknown()) return;
         var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
         defer leaf_rects.deinit(self.allocator);
         try self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects);
@@ -5147,6 +5203,7 @@ pub const AppSession = struct {
     /// try 계약대로 전파하지만, 이 경로는 자동 정리라 한 panel 실패가 다른 재배치를 막지 않게 한다). 레이아웃
     /// 실패(OOM)는 무시(다음 resize/tick이 다시 맞춘다).
     fn resizeTabPanes(self: *AppSession, tab: *Tab) void {
+        if (self.layoutGeometryUnknown()) return; // 기하 미확정 구간의 2×1 오염 방지 — layoutGeometryUnknown 주석
         var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
         defer leaf_rects.deinit(self.allocator);
         PaneTree.layout(self.allocator, tab.tree, self.termRect(), &leaf_rects) catch return;
@@ -26233,10 +26290,11 @@ pub const AppSession = struct {
                 }
                 persisted_index += 1;
                 self.refreshTermObservation(term, false, true);
-                const observed_size = if (term.rt.observation.size.cols > 0 and term.rt.observation.size.rows > 0)
-                    term.rt.observation.size
-                else
-                    term.surface.core.size; // metadata unavailable fallback; SurfaceRuntime이 현재 layout grid로 동기화
+                const observed_size = plausibleSurfaceSize(term.rt.observation.size) orelse
+                    plausibleSurfaceSize(term.surface.core.size) orelse
+                    // metadata unavailable fallback; SurfaceRuntime이 현재 layout grid로 동기화. 둘 다 못 믿으면
+                    // 기본 grid를 쓴다 — 복원이 창 크기에 맞춰 곧 다시 resize하므로 근사값이면 충분하다.
+                    terminal.Size.default;
                 // P3-e3-5: host-backed Term은 host_id + runtime_id를 함께 저장한다. runtime_id 단독으로 저장하면 host가
                 // 바뀐 뒤 같은 숫자 namespace를 잘못 attach할 수 있으므로 live capture는 둘 중 하나만 만들지 않는다.
                 var runtime_host_id: []const u8 = "";

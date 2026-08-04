@@ -28,6 +28,15 @@ pub const Lifecycle = enum(u8) {
     terminal,
 };
 
+fn testAllocationProvenance(generation: u64) executed_response_mod.AllocationProvenance {
+    return .{
+        .guard_addr = 0x201,
+        .node_addr = 0x202,
+        .operation_incarnation = 0x203,
+        .generation = generation,
+    };
+}
+
 pub const DeinitOutcome = enum {
     cleaned,
     already_terminal,
@@ -539,12 +548,13 @@ test "CR3a-2a attached teardown fences transport before adapter release" {
     const executed = contract.ExecutedCallReceipt.fromPrepared(receipt).?;
     const accepted = contract.CorrelatedExecutedCall.init(executed, receipt.request_id).?;
     const response_bytes = try allocator.dupe(u8, "accepted");
-    try attachment.response.initAcceptedInPlace(
+    try attachment.response.initAcceptedFromPromotedInPlace(
         allocator,
         try adapter.responseOwnerSeal(attachment.reservation.?),
         0xEF,
         accepted,
         response_bytes,
+        testAllocationProvenance(0xEF),
     );
     try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.finishResponse(&adapter));
     attachment.lifecycle = .executing;
@@ -609,12 +619,13 @@ test "CR3a-2a whole-parent restore cannot revive accepted response or transport 
     const executed = contract.ExecutedCallReceipt.fromPrepared(receipt).?;
     const correlated = contract.CorrelatedExecutedCall.init(executed, receipt.request_id).?;
     const bytes = try allocator.dupe(u8, "accepted");
-    try attachment.response.initAcceptedInPlace(
+    try attachment.response.initAcceptedFromPromotedInPlace(
         allocator,
         try adapter.responseOwnerSeal(attachment.reservation.?),
         0xDC,
         correlated,
         bytes,
+        testAllocationProvenance(0xDC),
     );
     const stale_parent = attachment;
     try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.finishResponse(&adapter));
@@ -654,12 +665,13 @@ test "CR3a-2b2 CR3a-2c3a generation GUI pump transfers and revoke closes direct 
     const executed = contract.ExecutedCallReceipt.fromPrepared(receipt).?;
     const accepted = contract.CorrelatedExecutedCall.init(executed, receipt.request_id).?;
     const response_bytes = try allocator.dupe(u8, "accepted");
-    try attachment.response.initAcceptedInPlace(
+    try attachment.response.initAcceptedFromPromotedInPlace(
         allocator,
         try adapter.responseOwnerSeal(attachment.reservation.?),
         0x2B4,
         accepted,
         response_bytes,
+        testAllocationProvenance(0x2B4),
     );
     try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.finishResponse(&adapter));
     try attachment.commitAccepted(&adapter, accepted, .{
@@ -799,12 +811,13 @@ test "CR3a-2b2 generation GUI pump releases a malformed node-owned batch" {
     const executed = contract.ExecutedCallReceipt.fromPrepared(receipt).?;
     const accepted = contract.CorrelatedExecutedCall.init(executed, receipt.request_id).?;
     const response_bytes = try allocator.dupe(u8, "accepted");
-    try attachment.response.initAcceptedInPlace(
+    try attachment.response.initAcceptedFromPromotedInPlace(
         allocator,
         try adapter.responseOwnerSeal(attachment.reservation.?),
         0x2D4,
         accepted,
         response_bytes,
+        testAllocationProvenance(0x2D4),
     );
     try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.finishResponse(&adapter));
     try attachment.commitAccepted(&adapter, accepted, .{
@@ -868,12 +881,13 @@ test "CR3a-2b2 generation GUI pump transfers a direct parser frame through the n
     const executed = contract.ExecutedCallReceipt.fromPrepared(receipt).?;
     const accepted = contract.CorrelatedExecutedCall.init(executed, receipt.request_id).?;
     const response_bytes = try allocator.dupe(u8, "accepted");
-    try attachment.response.initAcceptedInPlace(
+    try attachment.response.initAcceptedFromPromotedInPlace(
         allocator,
         try adapter.responseOwnerSeal(attachment.reservation.?),
         0x2C3,
         accepted,
         response_bytes,
+        testAllocationProvenance(0x2C3),
     );
     try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.finishResponse(&adapter));
     try attachment.commitAccepted(&adapter, accepted, .{

@@ -15,6 +15,9 @@ const protocol = @import("protocol.zig");
 pub const Frame = struct {
     header: protocol.Header,
     payload: []u8,
+    /// Operation-local provenance only. Client clears this before an OOB frame enters a durable
+    /// queue; a correlated response moves it into ExecutedBlockingRpcResponse.
+    payload_observation_generation: u64 = 0,
 
     pub fn deinit(self: Frame, allocator: std.mem.Allocator) void {
         allocator.free(self.payload);
@@ -30,6 +33,22 @@ pub const ParseError = error{
     UnknownRequiredFrame,
     IncompatibleMajor,
     OutOfMemory,
+};
+pub const ObservedParseError = ParseError || error{
+    PayloadIdentityExhausted,
+    PayloadProvenanceRejected,
+};
+
+pub const PayloadAllocationObserver = struct {
+    context: *anyopaque,
+    reserve_fn: *const fn (*anyopaque, usize, std.mem.Allocator) error{
+        OutOfMemory,
+        IdentityExhausted,
+        ProtocolError,
+    }!u64,
+    commit_fn: *const fn (*anyopaque, u64, []u8, std.mem.Allocator) error{ProtocolError}!void,
+    abort_fn: *const fn (*anyopaque, u64) void,
+    discard_fn: *const fn (*anyopaque, u64) void,
 };
 pub const EncodeError = error{ PayloadTooLarge, OutOfMemory };
 pub const NormalizeError = error{ ResidentTooLarge, MalformedState, OutOfMemory };
@@ -250,7 +269,23 @@ pub const FrameParser = struct {
         payload_allocator_out: ?*std.mem.Allocator,
     ) ParseError!?Frame {
         while (true) {
-            const outcome = try self.nextOutcomeWithAllocator(payload_allocator_out);
+            const outcome = self.nextOutcomeWithAllocator(payload_allocator_out, null) catch |err|
+                return narrowUnobservedError(err);
+            switch (outcome) {
+                .incomplete => return null,
+                .skipped => continue,
+                .frame => |frame| return frame,
+            }
+        }
+    }
+
+    pub fn nextWithPayloadObserver(
+        self: *FrameParser,
+        payload_allocator_out: ?*std.mem.Allocator,
+        observer: PayloadAllocationObserver,
+    ) ObservedParseError!?Frame {
+        while (true) {
+            const outcome = try self.nextOutcomeWithAllocator(payload_allocator_out, observer);
             switch (outcome) {
                 .incomplete => return null,
                 .skipped => continue,
@@ -269,13 +304,15 @@ pub const FrameParser = struct {
     };
 
     pub fn nextOutcome(self: *FrameParser) ParseError!Outcome {
-        return self.nextOutcomeWithAllocator(null);
+        return self.nextOutcomeWithAllocator(null, null) catch |err|
+            return narrowUnobservedError(err);
     }
 
     fn nextOutcomeWithAllocator(
         self: *FrameParser,
         payload_allocator_out: ?*std.mem.Allocator,
-    ) ParseError!Outcome {
+        observer: ?PayloadAllocationObserver,
+    ) ObservedParseError!Outcome {
         const pending = self.buf.items[self.head..];
         if (pending.len < protocol.header_size) return .incomplete;
         const header_bytes: *const [protocol.header_size]u8 = @ptrCast(pending.ptr);
@@ -294,13 +331,39 @@ pub const FrameParser = struct {
             return .skipped;
         }
         const payload_allocator = self.allocator;
+        const observer_reservation: ?u64 = if (observer) |active|
+            active.reserve_fn(active.context, header.payload_len, payload_allocator) catch |err|
+                return switch (err) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    error.IdentityExhausted => error.PayloadIdentityExhausted,
+                    error.ProtocolError => error.PayloadProvenanceRejected,
+                }
+        else
+            null;
         const payload = payload_allocator.dupe(
             u8,
             pending[protocol.header_size..total],
-        ) catch return error.OutOfMemory;
+        ) catch {
+            if (observer) |active| active.abort_fn(active.context, observer_reservation.?);
+            return error.OutOfMemory;
+        };
+        if (observer) |active| active.commit_fn(
+            active.context,
+            observer_reservation.?,
+            payload,
+            payload_allocator,
+        ) catch {
+            active.abort_fn(active.context, observer_reservation.?);
+            payload_allocator.free(payload);
+            return error.PayloadProvenanceRejected;
+        };
         self.consume(total);
         if (payload_allocator_out) |out| out.* = payload_allocator;
-        return .{ .frame = .{ .header = header, .payload = payload } };
+        return .{ .frame = .{
+            .header = header,
+            .payload = payload,
+            .payload_observation_generation = observer_reservation orelse 0,
+        } };
     }
 
     pub fn bufferedBytes(self: *const FrameParser) usize {
@@ -477,6 +540,17 @@ pub const FrameParser = struct {
         self.head = 0;
     }
 };
+
+fn narrowUnobservedError(err: ObservedParseError) ParseError {
+    return switch (err) {
+        error.BadMagic => error.BadMagic,
+        error.IncompatibleMajor => error.IncompatibleMajor,
+        error.OutOfMemory => error.OutOfMemory,
+        error.PayloadTooLarge => error.PayloadTooLarge,
+        error.UnknownRequiredFrame => error.UnknownRequiredFrame,
+        error.PayloadIdentityExhausted, error.PayloadProvenanceRejected => unreachable,
+    };
+}
 
 /// 한 frame(header + payload)을 하나의 연속 버퍼로 직렬화한다(caller 소유). socket write loop가 이 버퍼를 partial write로
 /// 흘려 보낸다. payload가 kind cap을 넘으면 `PayloadTooLarge`(보내는 쪽에서도 계약 위반을 조기에 잡는다).
@@ -971,4 +1045,144 @@ test "framing: prepared normalize tombstones before allocator free callback reen
     try std.testing.expect(probe.reentered);
     try std.testing.expectEqual(@as(usize, 1), probe.free_calls);
     try std.testing.expect(prepared.lifecycle == .aborted);
+}
+
+test "B3-0a payload observer sees only completed known frame payload allocation" {
+    const allocator = std.testing.allocator;
+    const Probe = struct {
+        reserve_count: usize = 0,
+        commit_count: usize = 0,
+        abort_count: usize = 0,
+        last_len: usize = 0,
+
+        fn observer(self: *@This()) PayloadAllocationObserver {
+            return .{
+                .context = self,
+                .reserve_fn = reserve,
+                .commit_fn = commit,
+                .abort_fn = abort,
+                .discard_fn = discard,
+            };
+        }
+
+        fn reserve(
+            context: *anyopaque,
+            len: usize,
+            _: std.mem.Allocator,
+        ) error{ OutOfMemory, IdentityExhausted, ProtocolError }!u64 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.reserve_count += 1;
+            self.last_len = len;
+            return self.reserve_count;
+        }
+
+        fn commit(
+            context: *anyopaque,
+            _: u64,
+            payload: []u8,
+            _: std.mem.Allocator,
+        ) error{ProtocolError}!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (payload.len != self.last_len) return error.ProtocolError;
+            self.commit_count += 1;
+        }
+
+        fn abort(context: *anyopaque, _: u64) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.abort_count += 1;
+        }
+
+        fn discard(_: *anyopaque, _: u64) void {}
+    };
+
+    const wire = try encodeFrame(
+        allocator,
+        .{ .kind = .response, .request_id = 7 },
+        "payload",
+    );
+    defer allocator.free(wire);
+    var parser = FrameParser.init(allocator);
+    defer parser.deinit();
+    try parser.push(wire[0 .. wire.len - 1]);
+    var probe: Probe = .{};
+    try std.testing.expect((try parser.nextWithPayloadObserver(null, probe.observer())) == null);
+    try std.testing.expectEqual(@as(usize, 0), probe.reserve_count);
+    try parser.push(wire[wire.len - 1 ..]);
+    const frame = (try parser.nextWithPayloadObserver(null, probe.observer())).?;
+    defer frame.deinit(allocator);
+    try std.testing.expectEqualStrings("payload", frame.payload);
+    try std.testing.expectEqual(@as(usize, 1), probe.reserve_count);
+    try std.testing.expectEqual(@as(usize, 1), probe.commit_count);
+    try std.testing.expectEqual(@as(usize, 0), probe.abort_count);
+}
+
+test "B3-0a payload observer aborts reservation when payload allocation fails" {
+    const allocator = std.testing.allocator;
+    const Probe = struct {
+        reserved: bool = false,
+        aborted: bool = false,
+
+        fn observer(self: *@This()) PayloadAllocationObserver {
+            return .{
+                .context = self,
+                .reserve_fn = reserve,
+                .commit_fn = commit,
+                .abort_fn = abort,
+                .discard_fn = discard,
+            };
+        }
+        fn reserve(_: *anyopaque, _: usize, _: std.mem.Allocator) error{
+            OutOfMemory,
+            IdentityExhausted,
+            ProtocolError,
+        }!u64 {
+            return 1;
+        }
+        fn commit(_: *anyopaque, _: u64, _: []u8, _: std.mem.Allocator) error{ProtocolError}!void {}
+        fn abort(context: *anyopaque, _: u64) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.aborted = true;
+        }
+        fn discard(_: *anyopaque, _: u64) void {}
+    };
+    const Failing = struct {
+        fn makeAllocator() std.mem.Allocator {
+            return .{ .ptr = undefined, .vtable = &.{
+                .alloc = alloc,
+                .resize = resize,
+                .remap = remap,
+                .free = free,
+            } };
+        }
+        fn alloc(_: *anyopaque, _: usize, _: std.mem.Alignment, _: usize) ?[*]u8 {
+            return null;
+        }
+        fn resize(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) bool {
+            return false;
+        }
+        fn remap(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) ?[*]u8 {
+            return null;
+        }
+        fn free(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize) void {}
+    };
+
+    const wire = try encodeFrame(
+        allocator,
+        .{ .kind = .response, .request_id = 8 },
+        "x",
+    );
+    defer allocator.free(wire);
+    var parser = FrameParser.init(Failing.makeAllocator());
+    defer parser.deinit();
+    // Seed through the test allocator so only the owned payload allocation uses the failure path.
+    parser.allocator = allocator;
+    try parser.push(wire);
+    parser.allocator = Failing.makeAllocator();
+    var probe: Probe = .{};
+    try std.testing.expectError(
+        error.OutOfMemory,
+        parser.nextWithPayloadObserver(null, probe.observer()),
+    );
+    try std.testing.expect(probe.aborted);
+    parser.allocator = allocator;
 }

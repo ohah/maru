@@ -19,6 +19,7 @@ const socket_server = @import("socket_server.zig");
 const ended_purge_quarantine = @import("ended_purge_quarantine.zig");
 const prepared_request_authority = @import("prepared_request_authority.zig");
 const executed_response_mod = @import("executed_response.zig");
+const response_payload_allocation = @import("response_payload_allocation.zig");
 
 const c = std.c;
 var ended_purge_quarantine_registry: ?ended_purge_quarantine.Registry = null;
@@ -1276,6 +1277,78 @@ pub fn abortGenerationRequest(request: GenerationRequestAbort) GenerationRequest
 
 const ExecuteDisposition = enum { reusable, terminal, settled };
 
+const ResponsePayloadObserverBridge = struct {
+    ledger: *response_payload_allocation.Ledger,
+
+    fn observer(self: *@This()) framing.PayloadAllocationObserver {
+        return .{
+            .context = self,
+            .reserve_fn = reserve,
+            .commit_fn = commit,
+            .abort_fn = abort,
+            .discard_fn = discard,
+        };
+    }
+
+    fn reserve(
+        context: *anyopaque,
+        len: usize,
+        allocator: std.mem.Allocator,
+    ) error{ OutOfMemory, IdentityExhausted, ProtocolError }!u64 {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        return self.ledger.reserveObserved(len, allocator) catch |err| switch (err) {
+            error.IdentityExhausted => error.IdentityExhausted,
+            error.ObservationBusy => error.ProtocolError,
+            else => error.ProtocolError,
+        };
+    }
+
+    fn commit(
+        context: *anyopaque,
+        generation: u64,
+        payload: []u8,
+        allocator: std.mem.Allocator,
+    ) error{ProtocolError}!void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.ledger.commitObserved(generation, payload, allocator) catch
+            return error.ProtocolError;
+    }
+
+    fn abort(context: *anyopaque, generation: u64) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.ledger.abortObserved(generation) catch
+            @panic("response payload observer abort drifted");
+    }
+
+    fn discard(context: *anyopaque, generation: u64) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.ledger.discardObserved(generation) catch
+            @panic("response payload observer discard drifted");
+    }
+};
+
+fn failStopResponsePayloadProvenance(
+    reason: response_payload_allocation.PayloadFailStopReason,
+) noreturn {
+    switch (reason) {
+        .allocator_drift => @panic("response payload provenance: allocator drift"),
+        .range_overflow => @panic("response payload provenance: range overflow"),
+        .owner_alias => @panic("response payload provenance: owner alias"),
+        .ledger_drift => @panic("response payload provenance: ledger drift"),
+    }
+}
+
+fn failStopResponsePayloadTransfer(
+    reason: response_payload_allocation.PayloadFailStopReason,
+) noreturn {
+    switch (reason) {
+        .allocator_drift => @panic("response payload transfer: allocator drift"),
+        .range_overflow => @panic("response payload transfer: range overflow"),
+        .owner_alias => @panic("response payload transfer: owner alias"),
+        .ledger_drift => @panic("response payload transfer: ledger drift"),
+    }
+}
+
 /// Executes the attach-compatible request while one registry operation pins the canonical
 /// ClientSlot node. No node, Client, binding, or response-owner address escapes this scope.
 pub fn executeGenerationRequest(
@@ -1348,6 +1421,7 @@ pub fn executeGenerationRequest(
     }
 
     var allocator_scope: client_mod.Client.GenerationAllocatorScope = .{};
+    var payload_ledger: response_payload_allocation.Ledger = .{};
     const response_ranges = [_]GenerationGuardedAllocator.OperationRangeInput{
         .{ .start = @intFromPtr(response_out), .len = @sizeOf(executed_response_mod.ExecutedResponse) },
         .{ .start = @intFromPtr(response_owner), .len = @sizeOf(contract.ExecutedResponseOwnerSeal) },
@@ -1356,6 +1430,19 @@ pub fn executeGenerationRequest(
         .{ .start = request.transport_addr, .len = 1 },
         .{ .start = execution.owner_addr, .len = execution.owner_size },
         .{ .start = @intFromPtr(&allocator_scope), .len = @sizeOf(client_mod.Client.GenerationAllocatorScope) },
+        .{ .start = @intFromPtr(&payload_ledger), .len = @sizeOf(response_payload_allocation.Ledger) },
+    };
+    const forbidden_payload_ranges = [_]response_payload_allocation.ForbiddenRange{
+        .{ .start = @intFromPtr(response_out), .len = @sizeOf(executed_response_mod.ExecutedResponse) },
+        .{ .start = @intFromPtr(response_owner), .len = @sizeOf(contract.ExecutedResponseOwnerSeal) },
+        .{ .start = @intFromPtr(binding), .len = @sizeOf(contract.PreparedAttachmentBinding) },
+        .{ .start = @intFromPtr(storage), .len = @sizeOf(client_mod.PreparedBlockingRpcStorage) },
+        .{ .start = request.transport_addr, .len = 1 },
+        .{ .start = execution.owner_addr, .len = execution.owner_size },
+        .{ .start = @intFromPtr(&allocator_scope), .len = @sizeOf(client_mod.Client.GenerationAllocatorScope) },
+        .{ .start = @intFromPtr(&payload_ledger), .len = @sizeOf(response_payload_allocation.Ledger) },
+        .{ .start = request.slot_addr, .len = @sizeOf(ClientSlot) },
+        .{ .start = @intFromPtr(node), .len = @sizeOf(ClientNode) },
     };
     const guard = &node.guarded_allocator;
     if (!guard.beginOperationGuard(&response_ranges)) {
@@ -1396,6 +1483,36 @@ pub fn executeGenerationRequest(
         if (!cleanup_ok) return error.ProtocolError;
         return error.IdentityExhausted;
     };
+    response_payload_allocation.Ledger.initInPlace(
+        &payload_ledger,
+        guard.allocator(),
+        .{
+            .guard_addr = @intFromPtr(guard),
+            .node_addr = @intFromPtr(node),
+            .operation_incarnation = response_incarnation,
+        },
+        1,
+    ) catch |err| {
+        const cleanup_ok = terminalizeExecutingRequestWithStorageCleanup(
+            node,
+            request,
+            identity,
+            canonical,
+        );
+        disposition = .settled;
+        if (!cleanup_ok) return error.ProtocolError;
+        return switch (err) {
+            error.IdentityExhausted => error.IdentityExhausted,
+            else => error.ProtocolError,
+        };
+    };
+    payload_ledger.bindForbiddenRanges(&forbidden_payload_ranges) catch {
+        node.client.poison(.local_invariant_violation);
+        @panic("response payload forbidden owner inventory drifted");
+    };
+    defer payload_ledger.endOperation() catch
+        @panic("response payload allocation ledger did not settle");
+    var payload_observer = ResponsePayloadObserverBridge{ .ledger = &payload_ledger };
     const executed = contract.ExecutedCallReceipt.fromPrepared(request.receipt) orelse {
         disposition = try rollbackExecutingRequest(node, request, identity, canonical);
         return error.InvalidReceipt;
@@ -1430,20 +1547,33 @@ pub fn executeGenerationRequest(
         return error.InvalidResponseDestination;
     }
 
-    const execution_result = node.client.executePreparedBlockingRpcStorageWithAllocator(
+    const execution_result = node.client.executePreparedBlockingRpcStorageWithAllocatorObserved(
         storage,
         response_allocator,
+        payload_observer.observer(),
     );
     if (guard.operation_alias_rejected) {
         node.client.poison(.local_invariant_violation);
-        return error.ProtocolError;
+        @panic("response payload allocator returned a canonical owner alias");
     }
     const response = switch (execution_result) {
         .not_executed => |err| {
-            disposition = try rollbackExecutingRequest(node, request, identity, canonical);
-            return err;
+            return switch (err) {
+                error.PayloadProvenanceRejected => {
+                    node.client.poison(.local_invariant_violation);
+                    @panic("response payload provenance failed before execution");
+                },
+                else => |execution_err| {
+                    disposition = try rollbackExecutingRequest(node, request, identity, canonical);
+                    return execution_err;
+                },
+            };
         },
-        .uncertain => {
+        .uncertain => |err| {
+            if (err == error.PayloadProvenanceRejected) {
+                node.client.poison(.local_invariant_violation);
+                @panic("response payload allocator provenance became ambiguous");
+            }
             node.client.poison(.transport_read_failure);
             const result: contract.ExecuteResult = .{
                 .uncertain_or_connection_failure = executed,
@@ -1460,31 +1590,28 @@ pub fn executeGenerationRequest(
         },
         .accepted => |value| value,
     };
-    if (!std.meta.eql(response.payload_allocator, response_allocator)) {
-        node.client.poison(.local_invariant_violation);
-        return error.InvalidResponseDestination;
-    }
-    if (!(node.cleanup_registry.executingRequestMatches(
+    const payload_receipt = switch (payload_ledger.classifyResponsePayloadProvenance(
+        response.payload_observation_generation,
+        response.payload,
+        response.payload_allocator,
+        response_allocator,
+    )) {
+        .promoted => |receipt| receipt,
+        .fail_stop_required => |reason| {
+            node.client.poison(.local_invariant_violation);
+            failStopResponsePayloadProvenance(reason);
+        },
+    };
+    const canonical_owner_drift = !(node.cleanup_registry.executingRequestMatches(
         request.reservation.cleanup,
         identity,
         canonical,
     ) catch false) or
-        !responseOwnerStillPristine(response_out, response_owner) or
-        payloadAliasesExecutionOwners(
-            response.payload,
-            response_out,
-            response_owner,
-            binding,
-            storage,
-            request.transport_addr,
-            execution.owner_addr,
-            execution.owner_size,
-            request.slot_addr,
-            node,
-        ))
-    {
+        !responseOwnerStillPristine(response_out, response_owner);
+    if (canonical_owner_drift) {
         node.client.poison(.local_invariant_violation);
-        response_allocator.free(response.payload);
+        payload_ledger.releasePromotedResponse(payload_receipt) catch
+            @panic("safe response provenance release drifted");
         return error.InvalidResponseDestination;
     }
     const correlated = contract.CorrelatedExecutedCall.init(
@@ -1492,26 +1619,34 @@ pub fn executeGenerationRequest(
         response.response_request_id,
     ) orelse {
         node.client.poison(.local_invariant_violation);
-        response_allocator.free(response.payload);
+        payload_ledger.releasePromotedResponse(payload_receipt) catch
+            @panic("safe response provenance release drifted");
         return error.InvalidReceipt;
     };
     if (!correlated.responseMatchesPrepared()) {
         node.client.poison(.response_correlation_lost);
-        response_allocator.free(response.payload);
+        payload_ledger.releasePromotedResponse(payload_receipt) catch
+            @panic("safe response provenance release drifted");
         return error.InvalidReceipt;
     }
     const result: contract.ExecuteResult = .{ .accepted = correlated };
-    response_out.initAcceptedInPlace(
-        response_allocator,
+    switch (payload_ledger.transferPromotedResponse(
+        payload_receipt,
+        response_out,
         response_owner,
         response_incarnation,
         correlated,
-        response.payload,
-    ) catch {
-        node.client.poison(.local_invariant_violation);
-        response_allocator.free(response.payload);
-        return error.InvalidResponseDestination;
-    };
+    )) {
+        .transferred => {},
+        .rejected_safe_released => {
+            node.client.poison(.local_invariant_violation);
+            return error.InvalidResponseDestination;
+        },
+        .fail_stop_required => |reason| {
+            node.client.poison(.local_invariant_violation);
+            failStopResponsePayloadTransfer(reason);
+        },
+    }
     disposition = .reusable;
     return result;
 }
@@ -1616,30 +1751,6 @@ fn responseOwnerStillPristine(
     response_owner: *const contract.ExecutedResponseOwnerSeal,
 ) bool {
     return response_out.canInitializeWithOwner(response_owner);
-}
-
-fn payloadAliasesExecutionOwners(
-    payload: []const u8,
-    response_out: *executed_response_mod.ExecutedResponse,
-    response_owner: *contract.ExecutedResponseOwnerSeal,
-    binding: *contract.PreparedAttachmentBinding,
-    storage: *client_mod.PreparedBlockingRpcStorage,
-    transport_addr: usize,
-    owner_addr: usize,
-    owner_size: usize,
-    slot_addr: usize,
-    node: *ClientNode,
-) bool {
-    const start = @intFromPtr(payload.ptr);
-    const len = payload.len;
-    return byteRangesOverlap(start, len, @intFromPtr(response_out), @sizeOf(executed_response_mod.ExecutedResponse)) or
-        byteRangesOverlap(start, len, @intFromPtr(response_owner), @sizeOf(contract.ExecutedResponseOwnerSeal)) or
-        byteRangesOverlap(start, len, @intFromPtr(binding), @sizeOf(contract.PreparedAttachmentBinding)) or
-        byteRangesOverlap(start, len, @intFromPtr(storage), @sizeOf(client_mod.PreparedBlockingRpcStorage)) or
-        byteRangesOverlap(start, len, transport_addr, 1) or
-        byteRangesOverlap(start, len, owner_addr, owner_size) or
-        byteRangesOverlap(start, len, slot_addr, @sizeOf(ClientSlot)) or
-        byteRangesOverlap(start, len, @intFromPtr(node), @sizeOf(ClientNode));
 }
 
 fn byteRangesOverlap(a_start: usize, a_len: usize, b_start: usize, b_len: usize) bool {

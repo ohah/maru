@@ -42,7 +42,7 @@ const generation_batch_registry = @import("generation_batch_registry.zig");
 const ended_purge_transaction = @import("ended_purge_transaction.zig");
 const ended_purge_quarantine = @import("ended_purge_quarantine.zig");
 const prepared_request_authority = @import("prepared_request_authority.zig");
-const max_pending_event_count: usize = 4 * 256;
+const max_pending_event_count: usize = protocol.max_client_pending_events;
 comptime {
     if (max_pending_event_count > std.math.maxInt(u32))
         @compileError("external adoption event ordinal exceeds reducer u32 domain");
@@ -89,17 +89,25 @@ pub const PreparedBlockingRpcError = ClientError || error{
     InvalidPreparedRpc,
     MovedOrCopied,
 };
+const ObservedPreparedBlockingRpcExecutionError = PreparedBlockingRpcError || error{PayloadProvenanceRejected};
 
 pub const ExecutedBlockingRpcResponse = struct {
     payload: []u8,
     payload_allocator: std.mem.Allocator,
     response_request_id: u64,
+    payload_observation_generation: u64 = 0,
 };
 
 pub const PreparedBlockingRpcExecution = union(enum) {
     accepted: ExecutedBlockingRpcResponse,
     not_executed: PreparedBlockingRpcError,
     uncertain: PreparedBlockingRpcError,
+};
+
+const ObservedPreparedBlockingRpcExecution = union(enum) {
+    accepted: ExecutedBlockingRpcResponse,
+    not_executed: ObservedPreparedBlockingRpcExecutionError,
+    uncertain: ObservedPreparedBlockingRpcExecutionError,
 };
 
 const PreparedBlockingRpcLifecycle = enum {
@@ -7303,8 +7311,8 @@ pub const Client = struct {
             error.DestinationOccupied, error.InvalidPreparedRpc, error.MovedOrCopied => error.ProtocolError,
             else => |client_err| client_err,
         };
-        const executed = self.executePreparedWithIo(&prepared, io, false, null) catch |err| return switch (err) {
-            error.InvalidPreparedRpc, error.MovedOrCopied => error.ProtocolError,
+        const executed = self.executePreparedWithIo(&prepared, io, false, null, null) catch |err| return switch (err) {
+            error.InvalidPreparedRpc, error.MovedOrCopied, error.PayloadProvenanceRejected => error.ProtocolError,
             else => |client_err| client_err,
         };
         return executed.payload;
@@ -7357,10 +7365,11 @@ pub const Client = struct {
             .{ .deadline = .{ .absolute = deadline, .ops = ops } },
             false,
             null,
+            null,
         ) catch |err| {
             self.poisonWithOps(.response_correlation_lost, ops);
             return switch (err) {
-                error.InvalidPreparedRpc, error.MovedOrCopied => error.ProtocolError,
+                error.InvalidPreparedRpc, error.MovedOrCopied, error.PayloadProvenanceRejected => error.ProtocolError,
                 else => |client_err| client_err,
             };
         };
@@ -7446,9 +7455,9 @@ pub const Client = struct {
         self: *Client,
         prepared: *PreparedBlockingRpc,
     ) PreparedBlockingRpcExecution {
-        const response = self.executePreparedWithIo(prepared, .blocking, true, null) catch |err| {
+        const response = self.executePreparedWithIo(prepared, .blocking, true, null, null) catch |err| {
             const classified: PreparedBlockingRpcError = switch (err) {
-                error.DeadlineExceeded => unreachable,
+                error.DeadlineExceeded, error.PayloadProvenanceRejected => unreachable,
                 else => |client_err| client_err,
             };
             return if (prepared.lifecycle == .prepared)
@@ -7547,6 +7556,42 @@ pub const Client = struct {
         storage: *PreparedBlockingRpcStorage,
         allocator: std.mem.Allocator,
     ) PreparedBlockingRpcExecution {
+        return switch (self.executePreparedBlockingRpcStorageWithAllocatorInternal(
+            storage,
+            allocator,
+            null,
+        )) {
+            .accepted => |response| .{ .accepted = response },
+            .not_executed => |err| .{ .not_executed = switch (err) {
+                error.PayloadProvenanceRejected => unreachable,
+                else => |legacy_err| legacy_err,
+            } },
+            .uncertain => |err| .{ .uncertain = switch (err) {
+                error.PayloadProvenanceRejected => unreachable,
+                else => |legacy_err| legacy_err,
+            } },
+        };
+    }
+
+    pub fn executePreparedBlockingRpcStorageWithAllocatorObserved(
+        self: *Client,
+        storage: *PreparedBlockingRpcStorage,
+        allocator: std.mem.Allocator,
+        observer: framing.PayloadAllocationObserver,
+    ) ObservedPreparedBlockingRpcExecution {
+        return self.executePreparedBlockingRpcStorageWithAllocatorInternal(
+            storage,
+            allocator,
+            observer,
+        );
+    }
+
+    fn executePreparedBlockingRpcStorageWithAllocatorInternal(
+        self: *Client,
+        storage: *PreparedBlockingRpcStorage,
+        allocator: std.mem.Allocator,
+        observer: ?framing.PayloadAllocationObserver,
+    ) ObservedPreparedBlockingRpcExecution {
         const operation_fence_held = self.beginPublicMutation() catch |err|
             return .{ .not_executed = switch (err) {
                 error.AdminBusy => error.AdminBusy,
@@ -7567,8 +7612,9 @@ pub const Client = struct {
             .blocking,
             false,
             allocator,
+            observer,
         ) catch |err| {
-            const classified: PreparedBlockingRpcError = switch (err) {
+            const classified: ObservedPreparedBlockingRpcExecutionError = switch (err) {
                 error.DeadlineExceeded => unreachable,
                 else => |client_err| client_err,
             };
@@ -7608,7 +7654,8 @@ pub const Client = struct {
         io: RpcIo,
         flush_pending: bool,
         expected_payload_allocator: ?std.mem.Allocator,
-    ) (DeadlineClientError || error{ InvalidPreparedRpc, MovedOrCopied })!ExecutedBlockingRpcResponse {
+        payload_observer: ?framing.PayloadAllocationObserver,
+    ) (DeadlineClientError || error{ InvalidPreparedRpc, MovedOrCopied, PayloadProvenanceRejected })!ExecutedBlockingRpcResponse {
         if (prepared.self_addr != @intFromPtr(prepared)) return error.MovedOrCopied;
         if (!prepared.validFor(self) or !prepared.frameIntact() or
             prepared.request_id != self.next_request_id)
@@ -7651,7 +7698,10 @@ pub const Client = struct {
         while (true) {
             var actual_payload_allocator = self.allocator;
             const resp = switch (io) {
-                .blocking => try self.readFrameWithAllocator(&actual_payload_allocator),
+                .blocking => try self.readFrameWithAllocatorObserved(
+                    &actual_payload_allocator,
+                    payload_observer,
+                ),
                 .deadline => |bounded| try self.readFrameUntilEstablished(
                     bounded.absolute,
                     bounded.ops,
@@ -7666,17 +7716,24 @@ pub const Client = struct {
                     // frame's actual owner is now outside this request's sealed domain: do not
                     // publish, queue, classify, or free the bounded payload.
                     self.poison(.local_invariant_violation);
-                    return error.ProtocolError;
+                    return error.PayloadProvenanceRejected;
                 }
             }
-            if (try self.bufferOutOfBandFrame(resp, expected_payload_allocator)) continue;
+            const buffered_out_of_band = self.bufferOutOfBandFrame(
+                resp,
+                expected_payload_allocator,
+                payload_observer,
+            ) catch |err| return err;
+            if (buffered_out_of_band) continue;
             // kind와 request_id를 함께 확인한다 — out-of-order frame을 이 call의 응답으로 오귀속하지 않는다.
             if (resp.header.kind != .response or resp.header.request_id != request_id) {
                 self.poison(.response_correlation_lost);
+                discardFramePayloadObservation(payload_observer, resp);
                 resp.deinit(self.allocator);
                 return error.ProtocolError;
             }
             if (rpcDeadlineExpired(io)) {
+                discardFramePayloadObservation(payload_observer, resp);
                 resp.deinit(self.allocator);
                 return error.DeadlineExceeded;
             }
@@ -7686,6 +7743,7 @@ pub const Client = struct {
                 .payload = resp.payload,
                 .payload_allocator = actual_payload_allocator,
                 .response_request_id = resp.header.request_id,
+                .payload_observation_generation = resp.payload_observation_generation,
             };
         }
     }
@@ -7697,21 +7755,24 @@ pub const Client = struct {
         };
     }
 
+    fn discardFramePayloadObservation(
+        observer: ?framing.PayloadAllocationObserver,
+        frame: framing.Frame,
+    ) void {
+        const active = observer orelse return;
+        if (frame.payload_observation_generation == 0) return;
+        active.discard_fn(active.context, frame.payload_observation_generation);
+    }
+
     /// Buffer a frame that may legally interleave with an RPC response. Returning false transfers
     /// ownership back to the caller, which must classify the response/control frame.
     fn bufferOutOfBandFrame(
         self: *Client,
         frame: framing.Frame,
         expected_allocator: ?std.mem.Allocator,
+        payload_observer: ?framing.PayloadAllocationObserver,
     ) ClientError!bool {
         const allocator = expected_allocator orelse self.allocator;
-        if (expected_allocator != null) {
-            if (checked_allocator_owner_addr != 0) return error.AdminBusy;
-            checked_allocator_owner_addr = @intFromPtr(self);
-        }
-        defer if (expected_allocator != null) {
-            checked_allocator_owner_addr = 0;
-        };
         defer if (expected_allocator != null and
             (!std.meta.eql(self.allocator, allocator) or !self.parser.usesAllocator(allocator)))
         {
@@ -7720,6 +7781,13 @@ pub const Client = struct {
             self.poison(.local_invariant_violation);
         };
         if (frame.header.kind == .delta_chunk or frame.header.kind == .snapshot_chunk) {
+            const manual_allocator_guard = expected_allocator != null and
+                self.operation_fence == null;
+            if (manual_allocator_guard and !self.enterGenerationAllocatorCallback())
+                return error.AdminBusy;
+            defer if (manual_allocator_guard)
+                self.leaveGenerationAllocatorCallbackUnchecked();
+            discardFramePayloadObservation(payload_observer, frame);
             if (self.pending_stream.items.len >= protocol.max_client_screen_items or
                 self.screenInboxBytes() +| frame.payload.len > protocol.max_client_screen_inbox)
             {
@@ -7727,7 +7795,9 @@ pub const Client = struct {
                 self.poison(.event_queue_overflow);
                 return error.EventQueueFull;
             }
-            self.pending_stream.append(allocator, frame) catch {
+            var durable_frame = frame;
+            durable_frame.payload_observation_generation = 0;
+            self.pending_stream.append(allocator, durable_frame) catch {
                 frame.deinit(allocator);
                 // The frame is already consumed from the socket. Losing it would break the next
                 // stream delta base, so the whole shared connection must fail closed.
@@ -7738,6 +7808,13 @@ pub const Client = struct {
             return true;
         }
         if (frame.header.kind == .event) {
+            const manual_allocator_guard = expected_allocator != null and
+                self.operation_fence == null;
+            if (manual_allocator_guard and !self.enterGenerationAllocatorCallback())
+                return error.AdminBusy;
+            defer if (manual_allocator_guard)
+                self.leaveGenerationAllocatorCallbackUnchecked();
+            discardFramePayloadObservation(payload_observer, frame);
             try self.bufferEventWithAllocator(frame, allocator);
             return true;
         }
@@ -7763,7 +7840,7 @@ pub const Client = struct {
             };
             const owned = maybe orelse continue;
             const frame = try self.requireWireMajor(owned);
-            if (try self.bufferOutOfBandFrame(frame, null)) continue;
+            if (try self.bufferOutOfBandFrame(frame, null, null)) continue;
             frame.deinit(self.allocator);
             self.poison(.peer_contract_violation);
             return error.ProtocolError;
@@ -10524,13 +10601,32 @@ pub const Client = struct {
         self: *Client,
         payload_allocator_out: ?*std.mem.Allocator,
     ) ClientError!framing.Frame {
+        return self.readFrameWithAllocatorObserved(payload_allocator_out, null);
+    }
+
+    fn readFrameWithAllocatorObserved(
+        self: *Client,
+        payload_allocator_out: ?*std.mem.Allocator,
+        observer: ?framing.PayloadAllocationObserver,
+    ) ClientError!framing.Frame {
         const operation_fence_held = try self.ensureUsable();
         defer if (operation_fence_held) self.endPublicMutation();
         var buf: [4096]u8 = undefined;
         while (true) {
-            if (self.parser.nextWithAllocator(payload_allocator_out) catch {
-                self.poison(.frame_malformed);
-                return error.ProtocolError;
+            const maybe_frame = if (observer) |active|
+                self.parser.nextWithPayloadObserver(payload_allocator_out, active)
+            else
+                self.parser.nextWithAllocator(payload_allocator_out);
+            if (maybe_frame catch |err| {
+                self.poison(switch (err) {
+                    error.OutOfMemory => .local_resource_exhausted,
+                    error.PayloadIdentityExhausted, error.PayloadProvenanceRejected => .local_invariant_violation,
+                    else => .frame_malformed,
+                });
+                return switch (err) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    else => error.ProtocolError,
+                };
             }) |frame|
                 return self.requireWireMajor(frame) catch |err| {
                     self.poison(.peer_contract_violation);
@@ -11297,7 +11393,7 @@ test "CR3a-2a checked OOB allocator callback fences a foreign Client before wire
     try std.testing.expect(try owner.bufferOutOfBandFrame(.{
         .header = .{ .kind = .delta_chunk, .stream_id = 7 },
         .payload = payload,
-    }, checked_allocator));
+    }, checked_allocator, null));
     probe.armed = false;
 
     try std.testing.expect(probe.reentered);

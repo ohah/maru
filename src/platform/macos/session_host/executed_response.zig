@@ -6,6 +6,18 @@
 const std = @import("std");
 const contract = @import("generation_attachment_contract.zig");
 
+pub const AllocationProvenance = struct {
+    guard_addr: usize,
+    node_addr: usize,
+    operation_incarnation: u64,
+    generation: u64,
+
+    pub fn valid(self: AllocationProvenance) bool {
+        return self.guard_addr != 0 and self.node_addr != 0 and
+            self.operation_incarnation != 0 and self.generation != 0;
+    }
+};
+
 /// Mirrors the neutral host-protocol control-frame cap. The session-host barrel pins equality to
 /// `protocol.max_control_json`; keeping the value here preserves standalone component tests.
 pub const max_owned_response_bytes: usize = 256 * 1024;
@@ -33,6 +45,10 @@ pub const ExecutedResponse = struct {
     allocator_vtable: usize = 0,
     owned_addr: usize = 0,
     owned_len: usize = 0,
+    allocation_guard_addr: usize = 0,
+    allocation_node_addr: usize = 0,
+    allocation_operation_incarnation: u64 = 0,
+    allocation_generation: u64 = 0,
     terminal_digest: u64 = 0,
 
     pub const InitError = error{
@@ -48,7 +64,7 @@ pub const ExecutedResponse = struct {
         return raw <= @intFromEnum(contract.ExecutedResponseLifecycle.terminal);
     }
 
-    fn pristine(self: *const ExecutedResponse) bool {
+    pub fn pristine(self: *const ExecutedResponse) bool {
         // Caller-owned destination storage is an opaque byte container until initialization.
         // Requiring its complete representation to be zero avoids interpreting enum padding or
         // future fields as typed values and makes newly added authority fields fail closed.
@@ -64,13 +80,14 @@ pub const ExecutedResponse = struct {
             owner_seal.lifecycle == .pristine and !rangesOverlapTyped(self, owner_seal);
     }
 
-    pub fn initAcceptedInPlace(
+    pub fn initAcceptedFromPromotedInPlace(
         out: *ExecutedResponse,
         allocator: std.mem.Allocator,
         owner_seal: *contract.ExecutedResponseOwnerSeal,
         incarnation: u64,
         correlated: contract.CorrelatedExecutedCall,
         owned_bytes: []u8,
+        provenance: AllocationProvenance,
     ) InitError!void {
         if (!out.canInitializeWithOwner(owner_seal))
             return error.DestinationOccupied;
@@ -78,6 +95,7 @@ pub const ExecutedResponse = struct {
         if (!correlated.executed_call.valid()) return error.InvalidResult;
         if (owned_bytes.len == 0 or owned_bytes.len > max_owned_response_bytes)
             return error.InvalidPayload;
+        if (!provenance.valid()) return error.InvalidPayload;
         const out_start = @intFromPtr(out);
         const out_end = std.math.add(usize, out_start, @sizeOf(ExecutedResponse)) catch
             return error.AliasedPayload;
@@ -108,6 +126,10 @@ pub const ExecutedResponse = struct {
             .allocator_vtable = @intFromPtr(allocator.vtable),
             .owned_addr = @intFromPtr(owned_bytes.ptr),
             .owned_len = owned_bytes.len,
+            .allocation_guard_addr = provenance.guard_addr,
+            .allocation_node_addr = provenance.node_addr,
+            .allocation_operation_incarnation = provenance.operation_incarnation,
+            .allocation_generation = provenance.generation,
         };
         contract.ExecutedResponseOwnerSeal.initInPlace(
             owner_seal,
@@ -191,6 +213,9 @@ pub const ExecutedResponse = struct {
             self.allocator_vtable == 0 or self.owned_addr == 0 or self.owned_len == 0 or
             self.owned_len > max_owned_response_bytes or self.payload_digest == 0)
             return error.Corrupt;
+        if (self.allocation_guard_addr == 0 or self.allocation_node_addr == 0 or
+            self.allocation_operation_incarnation == 0 or self.allocation_generation == 0)
+            return error.Corrupt;
         _ = std.math.add(usize, self.owned_addr, self.owned_len) catch return error.Corrupt;
         const bytes: []const u8 = @as([*]const u8, @ptrFromInt(self.owned_addr))[0..self.owned_len];
         if (payloadDigest(bytes) != self.payload_digest) return error.Corrupt;
@@ -226,6 +251,10 @@ pub const ExecutedResponse = struct {
                 self.allocator_ptr = 0;
                 self.allocator_vtable = 0;
                 self.payload_digest = 0;
+                self.allocation_guard_addr = 0;
+                self.allocation_node_addr = 0;
+                self.allocation_operation_incarnation = 0;
+                self.allocation_generation = 0;
                 self.owner_seal_addr = 0;
                 self.clearResult();
                 self.lifecycle = .terminal;
@@ -247,7 +276,9 @@ pub const ExecutedResponse = struct {
                     !self.resultScalarsValid(self.lifecycle == .typed_reject) or
                     self.allocator_present != 0 or self.allocator_ptr != 0 or
                     self.allocator_vtable != 0 or self.owned_addr != 0 or self.owned_len != 0 or
-                    self.payload_digest != 0)
+                    self.payload_digest != 0 or self.allocation_guard_addr != 0 or
+                    self.allocation_node_addr != 0 or self.allocation_operation_incarnation != 0 or
+                    self.allocation_generation != 0)
                     return .corrupt;
                 owner_seal.terminalize(self.incarnation) catch return .corrupt;
             },
@@ -293,6 +324,8 @@ pub const ExecutedResponse = struct {
             self.correlation_request_id == 0 and self.payload_digest == 0 and
             self.allocator_present == 0 and self.allocator_ptr == 0 and
             self.allocator_vtable == 0 and self.owned_addr == 0 and self.owned_len == 0 and
+            self.allocation_guard_addr == 0 and self.allocation_node_addr == 0 and
+            self.allocation_operation_incarnation == 0 and self.allocation_generation == 0 and
             self.terminal_digest != 0 and
             self.terminal_digest == terminalTombstoneDigest(self);
     }
@@ -348,6 +381,10 @@ comptime {
         .{ .name = "allocator_vtable", .field_type = usize },
         .{ .name = "owned_addr", .field_type = usize },
         .{ .name = "owned_len", .field_type = usize },
+        .{ .name = "allocation_guard_addr", .field_type = usize },
+        .{ .name = "allocation_node_addr", .field_type = usize },
+        .{ .name = "allocation_operation_incarnation", .field_type = u64 },
+        .{ .name = "allocation_generation", .field_type = u64 },
         .{ .name = "terminal_digest", .field_type = u64 },
     };
     const actual_fields = std.meta.fields(ExecutedResponse);
@@ -432,6 +469,15 @@ const ResponseReentrantFreeAllocator = struct {
     }
 };
 
+fn testAllocationProvenance(generation: u64) AllocationProvenance {
+    return .{
+        .guard_addr = 0x101,
+        .node_addr = 0x102,
+        .operation_incarnation = 0x103,
+        .generation = generation,
+    };
+}
+
 test "CR3a-2a accepted response tombstones before allocator free callback reentry" {
     var probe = ResponseReentrantFreeAllocator{ .parent = std.testing.allocator };
     const prepared = contract.PreparedCallReceipt.init(.{
@@ -444,7 +490,14 @@ test "CR3a-2a accepted response tombstones before allocator free callback reentr
     const bytes = try probe.allocator().dupe(u8, "accepted");
     var owner: contract.ExecutedResponseOwnerSeal = .{};
     var response: ExecutedResponse = .{};
-    try response.initAcceptedInPlace(probe.allocator(), &owner, 61, correlated, bytes);
+    try response.initAcceptedFromPromotedInPlace(
+        probe.allocator(),
+        &owner,
+        61,
+        correlated,
+        bytes,
+        testAllocationProvenance(61),
+    );
     probe.target = &response;
     probe.target_owner = &owner;
     probe.armed = true;
@@ -467,7 +520,14 @@ test "CR3a-2a accepted executed response frees once and copied owner frees zero"
     const correlated = contract.CorrelatedExecutedCall.init(executed, 5).?;
     const bytes = try std.testing.allocator.dupe(u8, "accepted");
 
-    try response.initAcceptedInPlace(std.testing.allocator, &response_owner, 11, correlated, bytes);
+    try response.initAcceptedFromPromotedInPlace(
+        std.testing.allocator,
+        &response_owner,
+        11,
+        correlated,
+        bytes,
+        testAllocationProvenance(11),
+    );
     try std.testing.expectEqualStrings("accepted", try response.borrowAccepted(&response_owner));
     const stale_same_address = response;
     var copied = response;
@@ -523,7 +583,14 @@ test "CR3a-2a accepted response owner rejects control cap plus one without takin
     var response_owner: contract.ExecutedResponseOwnerSeal = .{};
     try std.testing.expectError(
         error.InvalidPayload,
-        response.initAcceptedInPlace(std.testing.allocator, &response_owner, 43, correlated, bytes),
+        response.initAcceptedFromPromotedInPlace(
+            std.testing.allocator,
+            &response_owner,
+            43,
+            correlated,
+            bytes,
+            testAllocationProvenance(43),
+        ),
     );
     try std.testing.expect(response.pristine());
 }
@@ -586,7 +653,14 @@ test "CR3a-2a accepted response authenticates every scalar before payload or all
     const bytes = try std.testing.allocator.dupe(u8, "sealed-response");
     var owner: contract.ExecutedResponseOwnerSeal = .{};
     var response: ExecutedResponse = .{};
-    try response.initAcceptedInPlace(std.testing.allocator, &owner, 83, correlated, bytes);
+    try response.initAcceptedFromPromotedInPlace(
+        std.testing.allocator,
+        &owner,
+        83,
+        correlated,
+        bytes,
+        testAllocationProvenance(83),
+    );
 
     const Field = enum {
         result_present,
@@ -637,7 +711,14 @@ test "CR3a-2a forged terminal lifecycle cannot bypass live response cleanup auth
     const bytes = try std.testing.allocator.dupe(u8, "live-response");
     var owner: contract.ExecutedResponseOwnerSeal = .{};
     var response: ExecutedResponse = .{};
-    try response.initAcceptedInPlace(std.testing.allocator, &owner, 103, correlated, bytes);
+    try response.initAcceptedFromPromotedInPlace(
+        std.testing.allocator,
+        &owner,
+        103,
+        correlated,
+        bytes,
+        testAllocationProvenance(103),
+    );
 
     var forged = response;
     forged.lifecycle = .terminal;
@@ -676,7 +757,14 @@ test "CR3a-2a response free callback owner drift cannot publish settled cleanup"
         const bytes = try probe.allocator().dupe(u8, "owner-drift");
         var owner: contract.ExecutedResponseOwnerSeal = .{};
         var response: ExecutedResponse = .{};
-        try response.initAcceptedInPlace(probe.allocator(), &owner, 127, correlated, bytes);
+        try response.initAcceptedFromPromotedInPlace(
+            probe.allocator(),
+            &owner,
+            127,
+            correlated,
+            bytes,
+            testAllocationProvenance(127),
+        );
         probe.target_owner = &owner;
         try std.testing.expectEqual(DeinitOutcome.corrupt, response.deinit(&owner));
         try std.testing.expectEqual(@as(usize, 1), probe.free_calls);

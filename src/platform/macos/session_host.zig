@@ -354,6 +354,7 @@ test {
     // 자식 파일의 inline test를 이 barrel의 test 그래프에 모은다(refAllDecls는 얕아 명시 참조가 필요).
     _ = @import("session_host/generation_attachment_contract.zig");
     _ = @import("session_host/executed_response.zig");
+    _ = @import("session_host/response_payload_allocation.zig");
     _ = @import("session_host/attachment_cleanup_registry.zig");
     _ = @import("session_host/generation_batch_registry.zig");
     _ = @import("session_host/generation_transport.zig");

@@ -26,8 +26,9 @@ JS callback 또는 component-local gesture state를 도입하지 않는다.
 - WebView, editor, terminal renderer를 일반 component renderer로 통합하지 않는다.
 - 모든 기존 component를 한 PR에서 tree로 재작성하지 않는다.
 - `onClick`/`onHover` closure나 `*Pane`/`*Tab` pointer를 public UI props에 넣지 않는다.
-- 새 Chrome component에 TUI fallback을 추가하지 않는다. 기존 cell/TUI path는 이관 중의
-  호환 코드이며 새 API의 두 번째 renderer가 아니다.
+- 새 Chrome component에 TUI fallback을 추가하지 않는다. 전환 정책의 조건(설정 UI 비노출, 기존
+  config 읽기 호환 유지, parser/lowering 제거는 별도 결정)은 [Chrome 전략](chrome-strategy.md)이
+  단일 출처이며 이 문서는 그것을 다시 진술하거나 강화하지 않는다.
 
 ### 1.3 책임 분리
 
@@ -55,20 +56,39 @@ rewrite의 근거로 삼지 않는다.
 | 대상 | 현재 책임 | 이관 목표 | 이관 전 반드시 보존할 동작 |
 | --- | --- | --- | --- |
 | `components/divider.zig` | 순수 divider geometry/hit-test/ratio | `SplitDivider` + shared capture | split 최소 크기 clamp, resize, target split 해제 시 cancel |
+| sidebar 폭 divider (`sidebar_divider`) | `AppSession` 폭 drag | `SplitDivider`와 같은 capture, 폭 domain은 host | 최소/최대 폭 clamp, 폭 0(접힘) 상태에서 drag 미시작 |
+| dock outer divider (`dock_outer_divider`) | `AppSession` dock 경계 drag | `SplitDivider`와 같은 capture | dock 열림/닫힘 전이 중 offset 유효성, dock 소멸 시 cancel |
 | `components/tabbar.zig` | terminal tab bar segment/hit-test | `TabList`/`Tab` composite | select, close, overflow horizontal scroll, drag/drop/detach |
-| `components/sidebar.zig` | workspace/group/agent row geometry·hit-test | `ReorderableList`를 쓰는 Sidebar composite | group collapse, reorder preview, pin/group invariants |
+| pane drag (`pane`) | `AppSession` pane move/drop slot | `MovePane` typed intent | drop slot 판정, split 생성/detach, target pane 소멸 시 cancel |
+| sidebar group drag (`sidebar_group`) | `AppSession` armed→dragging 2-phase | `ReorderableList` capability | threshold 전 armed 상태의 click 보존, marker/slot 무결성 |
+| 주소창 selection drag (`address_selection`) | `AppSession` caret/selection | 이관하지 않는다 — [텍스트 필드 에디터](text-field-editor.md) 범위 | caret/selection 편집 모델, IME, first responder |
+| `components/sidebar.zig` | workspace/group/agent row geometry·hit-test·밴드 view·헤더 hit-test | `ReorderableList`를 쓰는 Sidebar composite | group collapse, reorder preview, pin/group invariants, 헤더 아이콘(◧/⚙/+/🔔) 영역, 검색 blur가 키 포커스를 터미널로 되돌리는 규율 |
 | `components/file_tree_scrollbar.zig` | scrollbar geometry/track/thumb math | `ScrollArea`/`Scrollbar` | thumb drag, track click, projection/root generation mismatch cancel |
 | terminal scrollbar | `AppSession` viewport mutation | `ScrollArea` adapter | terminal scrollback/selection/mouse mode와의 입력 우선순위 |
 | Session Dock | typed tree + action table + pixel scroll | 첫 modern consumer를 유지 | refresh anchor, stale action reject, read-only detail worker |
 | palette/find/notice/modal/dropdown | 화면별 `State`/view/handle | `Input`/`Menu`/`Popover`/`Dialog` composite | AppKit first responder, IME, Escape/outside-dismiss, keyboard navigation |
 | settings/toggle/text field | 화면별 form state | `Input`/`Toggle`/`Select`/`FormRow` | schema ownership, config write, validation/error presentation |
 
-`AppSession.PointerGestureOwner`는 현재 실제 pointer capture의 권위다. 이 문서는 그것을
-삭제하라고 요구하지 않는다. adapter 단계에서 shared interaction 결과를 이 owner의 안전한
-기존 effect path로 변환하고, 각 consumer가 migration gate를 통과할 때에만 해당 variant를
-줄인다.
+pointer capture의 권위는 현재 **둘**이다. 대부분의 Chrome drag는 `app_session.zig`의
+`PointerGestureOwner`가 소유하고, Session Dock은 이미 `chrome.ui.interaction.InteractionState`가
+소유한다. 이 문서는 어느 쪽도 즉시 삭제하라고 요구하지 않는다. adapter 단계에서 shared
+interaction 결과를 기존 effect path로 변환하고, 각 consumer가 migration gate를 통과할 때에만
+해당 `PointerGestureOwner` variant를 줄인다. 위 표의 variant를 **전부** 소진해 union이 `none`만
+남기 전에는 interaction 이관을 완료로 표시하지 않는다.
+
+두 권위가 공존하는 동안 §4.3의 "한 pointer stream에 capture owner는 하나"는 다음 규칙으로
+보장한다. 한 pointer down은 **`InteractionState`가 먼저** 판정하고, 그것이 capture를 잡으면
+`PointerGestureOwner`는 같은 stream에서 `none`을 유지하며 어떤 effect도 시작하지 않는다.
+반대로 `PointerGestureOwner`가 이미 `none`이 아니면 그 stream의 남은 이벤트는
+`InteractionState`로 보내지 않는다. 한 stream이 두 권위에 동시에 들어가면 실패이며, 이관 중
+어느 consumer도 이 판정 순서를 자기 화면에서 다시 정의하지 않는다.
 
 ## 3. 공개 component와 내부 capability
+
+공개 component API 표면의 단일 출처는 [Metal UI 레이아웃·컴포넌트 시스템](metal-ui-layout.md)이다.
+이 문서는 그 표면을 재정의하지 않고, 상호작용 이관이 **필요로 하는 후보**와 각 후보가 지켜야 할
+interaction 계약만 소유한다. 아래 목록을 실제 public API로 여는 결정과 props/slot 정의는
+`metal-ui-layout.md`에서 하며, 두 문서가 어긋나면 그쪽이 이긴다.
 
 공개 component는 의미와 접근성 역할이 명확한 작은 집합만 둔다.
 
@@ -149,6 +169,15 @@ wheel/selection/mouse reporting은 기존 terminal input policy가 계속 결정
 Chrome scroll로 바꾸지 않는다. `terminalOwnsInput`은 keyboard first-responder 정책의 단일 출처이므로
 pointer routing의 대체 판정으로 재사용하지 않는다.
 
+keyboard focus는 이 pointer route를 따르지 않는다. 어느 창이 key event를 받는지는 AppKit first
+responder가, 그 안에서 terminal이 키를 갖는지는 `terminalOwnsInput`이 계속 단일 출처로 정한다.
+component tree가 소유하는 것은 그 뒤의 **focusable node 집합과 이동 순서**뿐이다. 즉
+`InteractionState.focused`는 published snapshot의 focusable node 사이에서만 이동하고, terminal이
+키를 갖는 동안에는 새 focus를 요구하지 않으며, focus를 가진 node가 사라지면 host에 요청하지 않고
+focus를 비운다. keyboard로 실행하는 action은 pointer와 같은 action table·같은 live domain
+validation을 통과한다. modal/overlay가 열려 있는 동안의 focus 순환은 그 overlay의 기존 계약이
+소유하며, 이 문서는 그것을 generic tree로 흡수하지 않는다.
+
 그 뒤 같은 pointer stream 안에서는 다음 우선순위를 적용한다.
 
 ```text
@@ -160,7 +189,10 @@ captured gesture
 ```
 
 한 pointer stream에는 정확히 하나의 capture owner만 존재한다. pointer up, cancel, window
-deactivate, component removal, snapshot/window epoch mismatch는 모두 action 없이 capture를 취소한다.
+deactivate, component removal, snapshot/window epoch mismatch, **modal 또는 native overlay 진입**은
+모두 action 없이 capture를 취소한다. modal이 §4.2 라우팅의 최상단이므로, 진행 중이던 capture는
+modal이 열린 그 순간 cancel되어야 남은 move/up을 영영 못 받는 dangling capture가 생기지 않는다.
+capture가 modal보다 우선한다는 예외는 두지 않는다.
 macOS v1은 mouse pointer 하나만 쓰더라도 event DTO에는 `pointer_id`를 둬 future touch가 state를
 암묵적으로 공유하지 못하게 한다.
 
@@ -177,6 +209,12 @@ pointer 좌표를 domain clamp에 적용하고, pane geometry·terminal PTY size
 clamp·resize fan-out은 기존 host/domain 경로가 소유한다. persistent configuration write가 있다면
 up에서만 확정하며, resize 도중 split/window가 사라지면 effect 없이 cancel한다. 따라서
 `ResizeSplit`을 reorder와 같은 one-shot drop intent로 일반화해서는 안 된다.
+
+이 continuous effect는 §7의 "pointer move마다 비용을 만들지 않는다"에 대한 **명시적 예외**이며,
+대신 다음을 지킨다. 한 tick에 여러 move가 들어오면 **마지막 좌표 하나만** clamp·geometry·PTY
+resize에 반영한다(coalesce). 좌표가 이전 적용값과 같은 cell/pixel로 clamp되면 effect를 재실행하지
+않는다. 즉 move 이벤트 수가 아니라 tick 수와 실제 geometry 변화가 resize fan-out의 상한이다.
+allocation·filesystem I/O·worker wait 금지는 이 예외에서도 그대로 적용된다.
 
 **중요한 미결정:** 현재 terminal tab drag는 drag 중 실제 순서를 바꾸는 live-reorder 동작이다.
 `TabList` 이관 전 아래 중 하나를 별도 승인해야 한다.
@@ -203,14 +241,22 @@ array index, frame-arena address, raw `*Pane`/`*Tab` pointer는 public identity�
 action table은 identity를 current live object로 해석할 때 한 번 더 validate한다. stale/unknown/
 ambiguous 대상은 no-op/cancel이고, 이전 snapshot의 pointer up이 새 component action을 실행해서는 안 된다.
 
-현재 ML2b click interaction은 action/geometry가 달라진 tree replacement에서 capture를 항상
-cancel한다. 이 기본값은 유지한다. 다만 drag preview는 매 move마다 visual snapshot을 갱신할 수 있으므로,
-future drag extension은 단순 snapshot generation equality만 요구해서는 안 된다. capture를 다음
-snapshot으로 carry하려면 새 tree가 정확히 하나의 같은 component identity를 가지며, 그 node의
+현재 ML2b click interaction의 `reconcile`은 tree가 어떻게 달라졌는지 **비교하지 않고**, 모든 tree
+replacement에서 capture를 무조건 cancel한다. 이것이 현행 기본값이고, 이 문서는 그것을 완화하는
+어떤 해석도 허용하지 않는다. "geometry가 그대로면 carry해도 된다"는 현행 계약이 아니다.
+
+다만 drag와 continuous resize는 매 move마다 visual snapshot을 갱신하므로, 이 기본값 위에서는
+capture가 첫 move에 죽는다. 그래서 carry는 **명시적 verdict가 도입될 때에만** 열린다. capture를
+다음 snapshot으로 carry하려면 새 tree가 정확히 하나의 같은 component identity를 가지며, 그 node의
 `gesture compatibility key`(gesture kind, enabled policy, owner window/session epoch, source domain
 identity)가 변하지 않았다는 reconcile verdict가 필요하다. 이 verdict가 없거나 duplicate/disabled/
-clip-removed이면 cancel한다. up의 effect는 언제나 **현재** action table과 live domain validation을
-다시 통과해야 하며, 이전 action ID를 재사용하지 않는다.
+clip-removed이면 cancel한다. 이 verdict는 §8 CIM1이 소유하며, CIM2 이후의 어떤 consumer도
+verdict 없이 drag/resize capture를 snapshot 너머로 유지해서는 안 된다. up의 effect는 언제나
+**현재** action table과 live domain validation을 다시 통과해야 하며, 이전 action ID를 재사용하지 않는다.
+
+reorder drag의 commit destination 권위는 **up 시점의 pointer 좌표를 현재 published tree에 다시
+hit-test한 결과**다. 마지막 move가 만든 preview 배열이 아니다. 두 값이 다르면 좌표 재판정이
+이기고, 그 좌표가 유효한 destination을 못 짚으면 commit 없이 cancel한다.
 
 surface와 window 이동·detach/reattach은 해당 surface의 capture, hover, keyboard focus, pending
 drop target을 모두 revoke한다. 다른 window/surface가 같은 numeric ID를 재사용해도 이전 epoch의
@@ -242,7 +288,9 @@ Chrome draw·hit-test·external renderer frame은 같은 completed slot rect/cli
 ## 7. performance, platform, security
 
 - UI tree/action/gesture candidate는 fixed-capacity 또는 명시된 bounded arena에서 만들며 pointer move마다
-  heap allocation·filesystem I/O·worker wait를 하지 않는다.
+  heap allocation·filesystem I/O·worker wait를 하지 않는다. 유일한 예외는 §4.3의 continuous
+  `ResizeSplit` geometry/PTY effect이며, 그마저 tick당 최종 좌표 1회로 coalesce하고 allocation·I/O·
+  worker wait 금지는 그대로 받는다.
 - consumer는 candidate 수, drag preview buffer, action table의 상한을 PR에서 선언한다. 상한 초과나
   candidate build 실패는 partial snapshot을 publish하지 않고 마지막 completed snapshot을 유지하며,
   영향을 받은 capture는 effect 없이 cancel한다. "다음 frame에서 다시 시도"가 unbounded allocation 또는
@@ -271,10 +319,18 @@ payload나 action ID로 표현하면 OS drag lifecycle과 terminal paste 보안 
 각 단계는 최신 `main`에서 한 PR로 진행한다. 다음 단계는 이전 단계가 merge되고 회귀 gate가
 green일 때만 시작한다.
 
+이 순서는 [Metal UI 레이아웃·컴포넌트 시스템](metal-ui-layout.md)의 B1 generic Button 이관과 같은
+파일(`ui/tree.zig`, `ui/interaction.zig`, `ui/button.zig`)을 건드린다. **B1 시퀀스가 선행이다.**
+CIM1은 B1 이관 PR이 전부 merge된 뒤에 시작하고, 그 전에는 CIM0(문서)만 유효하다. 두 축을 동시에
+열지 않는다.
+
 1. **CIM0 — inventory와 contract (이 문서)**: 현행 gesture/renderer/effect ownership, migration
    non-goal, unresolved UX 결정을 고정한다. 코드 변경은 없다.
 2. **CIM1 — interaction adapter**: generation-bound pointer DTO, capture/cancel state machine,
-   action/drag intent table을 pure module로 만든다. 기존 `PointerGestureOwner` effect path는 유지한다.
+   action/drag intent table을 pure module로 만든다. §5의 `gesture compatibility key` reconcile
+   verdict도 **이 단계가 소유한다** — 그것 없이는 CIM2의 continuous resize가 첫 move에 cancel되므로
+   후속 단계로 미룰 수 없다. §2의 두 capture 권위 상호배제 판정 순서도 여기서 한 곳에 고정한다.
+   기존 `PointerGestureOwner` effect path는 유지한다.
 3. **CIM2 — SplitDivider**: 현 divider geometry를 재사용해 press/capture/cancel adapter 하나로
    옮긴다. split tree removal, resize clamp, WebView divider pass-through AppKit E2E를 포함한다.
 4. **CIM3 — ScrollArea/Scrollbar**: file tree와 Session Dock 중 하나를 first consumer로 삼는다.
@@ -293,7 +349,13 @@ green일 때만 시작한다.
 - pure interaction state-machine: capture winner, threshold, cancel, stale generation, disabled action.
 - 기존 component와 새 component가 같은 scenario에서 내는 typed intent/commit verdict 비교.
 - 실제 AppKit event → Metal frame → host effect E2E; terminal/PTY 변화가 있으면 controlled PTY fixture.
-- Chrome Lab 1×/2× PNG+JSON readback. 시각 변화 PR은 PR 본문에 `gh attach`한 대표 PNG를 포함한다.
+- Chrome Lab readback. 현재 `macos-chrome-lab-smoke`가 받는 축은 scenario와 font뿐이고 render
+  scale 축은 없다. `macos-chrome-lab-font-review`의 `-review-2x.png`는 ffmpeg nearest-neighbor로
+  키운 **리뷰용 확대본**이지 2× backing scale 렌더가 아니다. 따라서 이관 PR의 기본 gate는 제품
+  Metal PNG + JSON readback 하나이며, 시각 변화 PR은 그 PNG를 PR 본문에 `gh attach`한다. render
+  scale 1×/2×가 실제로 필요한 consumer는 [Metal UI 레이아웃·컴포넌트 시스템](metal-ui-layout.md)의
+  scale-normalized rect gate를 쓰고, Chrome Lab에 scale 축을 추가하려면 그 PR이 도구 확장을
+  자기 범위로 선언한다.
 - clip/hit rect/action ID/snapshot generation 및 final allocation/worker pending의 structured summary.
 
 ## 9. 완료와 보류 기준
@@ -332,3 +394,10 @@ grid, static transform, animation, multi-touch, rich accessibility tree는 이 �
 5. **keyboard·IME·accessibility 검토** — `UiActionId`만으로 native semantic/IME contract를 대신하지
    못함을 확인했다. 범용 문자열 버퍼 이관을 금지하고 typed semantic descriptor, consumer별
    first-responder/IME 검증을 §3·§8~9에 추가했다.
+6. **코드 대조 검토** — 문서의 현행 서술을 `main` 코드와 맞췄다. `reconcile`이 tree 비교 없이 항상
+   cancel한다는 사실(§5), capture 권위가 `PointerGestureOwner`와 Session Dock `InteractionState`
+   둘이라는 사실과 그 상호배제 규칙(§2), `PointerGestureOwner` variant 전수 inventory(§2), modal
+   진입을 capture cancel 트리거로 추가(§4.3), continuous resize의 tick 단위 coalesce와 §7 예외
+   명시, keyboard focus가 pointer route를 따르지 않는다는 계약(§4.2), Chrome Lab에 render scale
+   축이 없다는 사실에 맞춘 gate 재정의(§8), 공개 component 표면과 B1 시퀀스의 소유권을
+   `metal-ui-layout.md`로 되돌린 것(§3·§8)이 이 반복의 결과다.

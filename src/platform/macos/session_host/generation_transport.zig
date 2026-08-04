@@ -17,9 +17,10 @@ const builtin = @import("builtin");
 const posix = std.posix;
 
 const c = std.c;
-extern "c" fn execv(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+
+var response_alias_fail_stop_completed = false;
 
 pub const Error = client_mod.PreparedBlockingRpcError || error{
     IdentityExhausted,
@@ -2076,33 +2077,79 @@ test "CR3a-2c3b request allocation exact and partial transport-owner aliases are
 test "CR3a-2c3b response allocation alias is rejected before destination write" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const child_marker = "MARU_SESSION_HOST_RESPONSE_ALIAS_EXEC";
-    const child_mode = c.getenv(child_marker) != null;
+    const marker_ptr = c.getenv(child_marker) orelse return;
+    const marker = std.mem.span(marker_ptr);
+    if (std.mem.eql(u8, marker, "skip-in-aggregate-v1")) return;
+    const child_mode = std.mem.eql(u8, marker, "execute-fixture-v1");
     if (!child_mode) {
+        if (!std.mem.eql(u8, marker, "run-isolated-v1"))
+            return error.InvalidResponseAliasSubprocessMode;
         const allocator = std.testing.allocator;
         const self_path_z = try std.process.executablePathAlloc(std.testing.io, allocator);
         defer allocator.free(self_path_z);
-        try std.testing.expectEqual(@as(c_int, 0), setenv(child_marker, "1", 1));
-        defer _ = unsetenv(child_marker);
+        var capability_pipe: [2]c.fd_t = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), c.pipe(&capability_pipe));
+        var capability: u64 = undefined;
+        std.testing.io.random(std.mem.asBytes(&capability));
+        const capability_bytes = std.mem.asBytes(&capability);
+        if (c.write(capability_pipe[1], capability_bytes.ptr, capability_bytes.len) != capability_bytes.len) {
+            _ = c.close(capability_pipe[0]);
+            _ = c.close(capability_pipe[1]);
+            return error.TestUnexpectedResult;
+        }
         var stderr_pipe: [2]c.fd_t = undefined;
-        try std.testing.expectEqual(@as(c_int, 0), c.pipe(&stderr_pipe));
+        if (c.pipe(&stderr_pipe) != 0) {
+            _ = c.close(capability_pipe[0]);
+            _ = c.close(capability_pipe[1]);
+            return error.TestUnexpectedResult;
+        }
         defer _ = c.close(stderr_pipe[0]);
         const child = c.fork();
-        try std.testing.expect(child >= 0);
+        if (child < 0) {
+            _ = c.close(capability_pipe[0]);
+            _ = c.close(capability_pipe[1]);
+            _ = c.close(stderr_pipe[1]);
+            return error.TestUnexpectedResult;
+        }
         if (child == 0) {
+            _ = c.close(capability_pipe[1]);
             _ = c.close(stderr_pipe[0]);
             if (c.dup2(stderr_pipe[1], 2) < 0) c._exit(126);
             _ = c.close(stderr_pipe[1]);
+            var capability_fd_env_buf: [96]u8 = undefined;
+            const capability_fd_env = std.fmt.bufPrintZ(
+                &capability_fd_env_buf,
+                "MARU_SESSION_HOST_RESPONSE_ALIAS_CAP_FD={d}",
+                .{capability_pipe[0]},
+            ) catch c._exit(126);
+            var capability_env_buf: [96]u8 = undefined;
+            const capability_env = std.fmt.bufPrintZ(
+                &capability_env_buf,
+                "MARU_SESSION_HOST_RESPONSE_ALIAS_CAP={x}",
+                .{capability},
+            ) catch c._exit(126);
             const argv = [_:null]?[*:0]const u8{self_path_z.ptr};
-            _ = execv(self_path_z.ptr, &argv);
+            const child_env = [_:null]?[*:0]const u8{
+                "MARU_SESSION_HOST_RESPONSE_ALIAS_EXEC=execute-fixture-v1",
+                capability_fd_env.ptr,
+                capability_env.ptr,
+            };
+            _ = c.execve(self_path_z.ptr, &argv, &child_env);
             c._exit(127);
         }
+        _ = c.close(capability_pipe[0]);
+        _ = c.close(capability_pipe[1]);
         _ = c.close(stderr_pipe[1]);
         const stderr_flags = c.fcntl(stderr_pipe[0], c.F.GETFL, @as(c_int, 0));
         if (stderr_flags < 0 or c.fcntl(
             stderr_pipe[0],
             c.F.SETFL,
             stderr_flags | @as(c_int, @bitCast(posix.O{ .NONBLOCK = true })),
-        ) < 0) return error.TestUnexpectedResult;
+        ) < 0) {
+            _ = c.kill(child, c.SIG.KILL);
+            _ = c.waitpid(child, null, 0);
+            return error.TestUnexpectedResult;
+        }
         var stderr_output: [64 * 1024]u8 = undefined;
         var stderr_total: usize = 0;
         var status: c_int = 0;
@@ -2118,8 +2165,11 @@ test "CR3a-2c3b response allocation alias is rejected before destination write" 
             }
             const waited = c.waitpid(child, &status, c.W.NOHANG);
             if (waited == child) break;
-            if (waited < 0 and posix.errno(waited) != .INTR)
+            if (waited < 0 and posix.errno(waited) != .INTR) {
+                _ = c.kill(child, c.SIG.KILL);
+                _ = c.waitpid(child, null, 0);
                 return error.TestUnexpectedResult;
+            }
             var delay_fd = c.pollfd{ .fd = -1, .events = 0, .revents = 0 };
             _ = c.poll(@ptrCast(&delay_fd), 0, 1);
         }
@@ -2149,8 +2199,29 @@ test "CR3a-2c3b response allocation alias is rejected before destination write" 
             stderr_output[0..stderr_total],
             "FORGED_RESPONSE_ALIAS_FREED",
         ) == null);
+        response_alias_fail_stop_completed = true;
         return;
     }
+    const capability_fd_ptr = c.getenv("MARU_SESSION_HOST_RESPONSE_ALIAS_CAP_FD") orelse
+        return error.MissingResponseAliasCapability;
+    const capability_ptr = c.getenv("MARU_SESSION_HOST_RESPONSE_ALIAS_CAP") orelse
+        return error.MissingResponseAliasCapability;
+    const capability_fd = std.fmt.parseInt(
+        c.fd_t,
+        std.mem.span(capability_fd_ptr),
+        10,
+    ) catch return error.InvalidResponseAliasCapability;
+    const expected_capability = std.fmt.parseInt(
+        u64,
+        std.mem.span(capability_ptr),
+        16,
+    ) catch return error.InvalidResponseAliasCapability;
+    var capability_bytes: [@sizeOf(u64)]u8 = undefined;
+    const capability_len = c.read(capability_fd, &capability_bytes, capability_bytes.len);
+    _ = c.close(capability_fd);
+    if (capability_len != capability_bytes.len or
+        std.mem.bytesToValue(u64, &capability_bytes) != expected_capability)
+        return error.InvalidResponseAliasCapability;
     try client_slot_mod.ClientSlot.initializeProcessRuntime();
     const allocator = std.testing.allocator;
     const response_wire = try framing.encodeFrame(
@@ -2194,6 +2265,16 @@ test "CR3a-2c3b response allocation alias is rejected before destination write" 
     hostile.armed = true;
     _ = transport.executePreparedRequest(receipt, &response) catch {};
     c._exit(0);
+}
+
+test "CR3a-2c3b response allocation alias gate sentinel proves destructive fixture ran" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const marker_ptr = c.getenv("MARU_SESSION_HOST_RESPONSE_ALIAS_EXEC") orelse return;
+    const marker = std.mem.span(marker_ptr);
+    if (std.mem.eql(u8, marker, "skip-in-aggregate-v1")) return;
+    if (!std.mem.eql(u8, marker, "run-isolated-v1"))
+        return error.InvalidResponseAliasSentinelMode;
+    try std.testing.expect(response_alias_fail_stop_completed);
 }
 
 test "CR3a-2a pending flush callback invalidates response before request wire" {

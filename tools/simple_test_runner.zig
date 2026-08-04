@@ -19,6 +19,19 @@ var log_err_count: usize = 0;
 var is_fuzz_test: bool = false;
 const runner_io: Io = Io.Threaded.global_single_threaded.io();
 
+fn expectedTestCount(args: std.process.Args) ?usize {
+    comptime if (builtin.os.tag == .windows or builtin.os.tag == .wasi) return null;
+    var iterator = std.process.Args.Iterator.init(args);
+    _ = iterator.next();
+    const prefix = "--maru-expect-tests=";
+    while (iterator.next()) |arg_z| {
+        const arg: []const u8 = arg_z;
+        if (!std.mem.startsWith(u8, arg, prefix)) continue;
+        return std.fmt.parseInt(usize, arg[prefix.len..], 10) catch std.process.exit(1);
+    }
+    return null;
+}
+
 pub fn main(init: std.process.Init.Minimal) void {
     @disableInstrumentation();
 
@@ -27,6 +40,15 @@ pub fn main(init: std.process.Init.Minimal) void {
     };
 
     const test_functions = builtin.test_functions;
+    if (expectedTestCount(init.args)) |expected| {
+        if (test_functions.len != expected) {
+            std.debug.print(
+                "focused test selection mismatch: expected {d}, compiled {d}\n",
+                .{ expected, test_functions.len },
+            );
+            std.process.exit(1);
+        }
+    }
     const root_node = std.Progress.start(runner_io, .{
         .root_name = "Test",
         .estimated_total_items = test_functions.len,

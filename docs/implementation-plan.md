@@ -1090,6 +1090,14 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       destination까지 확장한다. component의 `fail_stop_required`를 절대 반환하지 않고 즉시 종료하는 subprocess/source oracle까지
       통과한 뒤에만 `2c3b-3 완료`로 승격한다. decoder 제품
       전환은 계속 2c3e 소유다.
+      파괴적 strict fail-stop subprocess는 전체 test binary를 재실행하지 않는다. compile filter
+      `CR3a-2c3b response allocation alias`를 가진 전용 artifact만 parent/child fixture와 process-local completion sentinel을
+      함께 실행하며 project test runner의 `--maru-expect-tests=4`가 선택된 함수 수를 실행 전에 강제한다.
+      전용 parent artifact 자체도 `/usr/bin/env -i`로 ambient loader/runtime 환경을 제거한 뒤 시작한다.
+      `MARU_SESSION_HOST_RESPONSE_ALIAS_EXEC`는 전용 parent의 `run-isolated-v1`, 정리된 `execve` 환경과
+      parent-minted pipe capability를 받은 child의 `execute-fixture-v1`, focused aggregate의 `skip-in-aggregate-v1`만 허용한다.
+      marker가 없는 다른 collector는 inert하며 실행 또는 명시적 제외 증거로 세지 않는다. 따라서 이름 drift의 zero-test green,
+      ambient child-mode 위조, 증거의 aggregate test 수·순서 의존을 허용하지 않는다.
    제품 gate는 RPC family별 legacy/generation decode parity와 input→RPC/revoke ordering을 포함한다. decode와 ordered input policy는
    `RemoteRuntime` 하나만 소유한다. **2c4**는
    `RuntimeConnection` union을 mode SSOT로 전환해 `RemoteRuntime.client`와 `generation_adapter` 병렬 필드를 제거하고 exact

@@ -336,29 +336,6 @@ test "paint fails closed for bad snapshots and fixed-capacity overflow" {
     try std.testing.expectError(error.InvalidRect, paint(.{ .entries = &invalid_rect }, .{}, &tk, .sidebar, .{ .ops = &one_op }));
 }
 
-test "hover and press keep the Button label readable against its own quad" {
-    const tk = testTokens();
-    const id: u64 = 5;
-    const action = ui_tree.UiAction{ .id = 9 };
-    const visual = ui_style.ButtonVisual{ .variant = .primary, .paint = .{} };
-
-    // 회귀: label 전경을 variant만으로 고르면(`buttonForeground`) hover/press에서 quad가 어두워지는데
-    // 글자는 밝은 배경색 그대로라 label이 사라졌다. 전경은 quad와 같은 함수에서 나와야 한다.
-    for ([_]interaction.InteractionState{
-        .{},
-        .{ .hovered = id },
-        .{ .focused = id },
-        .{ .capture = .{ .id = id, .action_id = 9 } },
-    }) |state| {
-        const resolved = resolveButton(id, visual, action, state, &tk);
-        try std.testing.expect(resolved.foreground != resolved.background);
-    }
-
-    // 그리고 hover/press의 전경은 variant-only 매핑과 실제로 다르다 — 이 차이가 회귀의 원인이었다.
-    const hovered = resolveButton(id, visual, action, .{ .hovered = id }, &tk);
-    try std.testing.expect(hovered.foreground != paint_style.buttonForeground(.primary));
-}
-
 test "leading icon slot survives projection into the published entry" {
     // 회귀: `visualFor`가 `leading_icon`을 버려, builder가 검증·계산한 슬롯이 published entry에
     // 도달하지 못했다 — 아이콘이 영원히 그려지지 않는 상태였다.

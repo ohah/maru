@@ -324,7 +324,9 @@ max가 그 값을 밑돌면 candidate tree를 fail-close한다. 작은 창에서
 | rich Metal text lowering | Button text/icon의 final pixel placement를 glyph quad/raster placement로 lower한다. terminal `NativeMetalCell` path는 그대로 두며, Button 때문에 terminal grid ABI를 바꾸지 않는다. |
 | `ui/interaction.zig`와 host | 기존 pointer capture·keyboard focus가 button의 same `UiActionId`를 dispatch한다. `onClick`/`onHover` closure, provider I/O, shell spawn은 props에 넣지 않는다. |
 
-Button은 정확히 하나의 `Text` leaf child만 받는다. 아이콘은 `leading_icon` prop으로만 받고 Button 내부에
+Button은 정확히 하나의 `Text` leaf child만 받는다. 그 자식은 **호출자 소유 버퍼의 슬라이스**로 넘긴다 —
+값으로 받은 node의 주소를 자식으로 실으면 builder가 반환하는 순간 사라진 스택 슬롯을 가리킨다. 따라서
+개수/종류 검증은 런타임이며 zero/two/non-Text가 각각 구분되는 오류를 낸다. 아이콘은 `leading_icon` prop으로만 받고 Button 내부에
 임의 container/slot child를 노출하지 않는다. 이 제한은 Button의 final content rect, ellipsis, accessible
 label source와 action rect가 각기 다른 tree에서 계산되는 것을 막는다.
 

@@ -196,11 +196,14 @@ pub fn button(options: ButtonOptions) UiNode {
     };
 }
 
-/// label 한 개를 자식으로 갖는 Button. 호출자는 `ui/button.zig`의 builder를 쓰고, 이 함수는 그
-/// builder가 검증을 마친 뒤 node를 조립하는 자리다 — 자식 개수/종류 계약은 그쪽이 소유한다.
-pub fn buttonWithLabel(options: ButtonOptions, label: UiNode) UiNode {
+/// label을 자식으로 갖는 Button. 호출자는 `ui/button.zig`의 builder를 쓰고, 이 함수는 그 builder가
+/// 검증을 마친 뒤 node를 조립하는 자리다 — 자식 개수/종류 계약은 그쪽이 소유한다.
+///
+/// `children`은 **호출자가 소유한 버퍼의 슬라이스**여야 한다. 값으로 받은 node의 주소를 실으면
+/// 반환 즉시 dangling이 된다(스택 슬롯이 사라진다). 다른 `UiNode` builder들과 같은 규율이다.
+pub fn buttonWithLabel(options: ButtonOptions, children: []const UiNode) UiNode {
     var node = button(options);
-    node.children = @as(*const [1]UiNode, &label);
+    node.children = children;
     return node;
 }
 

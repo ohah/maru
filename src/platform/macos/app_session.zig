@@ -64839,3 +64839,97 @@ test "Session Dock 검색은 사이드바 검색과 같은 입력 소유 판정�
     try std.testing.expect(session.terminalOwnsInput());
     _ = try session.tick();
 }
+
+// ── 입력 소유 두 축의 parity 가드 ────────────────────────────────────────────────────────────────
+// keyboard 소유는 두 축이 나눠 갖는다: `terminalOwnsInput`(host가 first responder를 터미널 뷰에 둘지 —
+// Swift `reconcileWebFocus`의 override 단일 출처)과 `InputFocus`(Zig 안에서 키/확정 텍스트를 어느 chrome
+// 소비자에게 보낼지). 한쪽에만 소비자를 추가하면 Zig는 키를 라우팅하는데 host는 first responder를
+// 되돌려 입력이 어긋난다 — Session Dock 검색이 실제로 그랬다(`f22be41e`).
+//
+// **두 축을 하나로 합치지는 않는다.** 집합이 다르고(`context_menu`·`notifications`는 `terminalOwnsInput`에만
+// 있다 — 텍스트를 안 받으니 `InputFocus` 값이 아니다), 동시 활성일 때 답도 달라야 한다(rename 편집 중
+// 토스트가 뜨면 `inputFocus`는 `.notice`지만 rename이 살아 있으므로 override는 참이어야 한다). 우선순위
+// 체인에서 파생시키면 그 조합에서 틀린 답을 낸다.
+//
+// 그래서 구조 대신 **기대표**로 강제한다. `InputFocus`에 값이 늘면 이미 제품 switch 네 곳(preedit 대상·
+// 조합 여부·caret rect·확정 처리)이 컴파일을 멈춘다. 그런데 `terminalOwnsInput`은 switch가 아니라 or
+// 체인이라 그 멈춤 목록에 없었고, 실제로 도크 검색이 그 틈으로 빠졌다. 아래 두 switch가 그 목록에
+// **host override 기대값**을 더해, 새 값을 채울 때 "이 소비자는 first responder를 요구하는가"를 반드시
+// 답하게 한다. 반대 방향(모달을 `anyModalOverlayOpen`에만 더하는 경우)은 이 가드의 범위 밖이다.
+
+/// `InputFocus` 값이 단독으로 활성일 때 host override(`terminalOwnsInput`)가 참이어야 하는가.
+fn expectedTerminalResponder(focus: AppSession.InputFocus) bool {
+    return switch (focus) {
+        // 터미널이 키를 갖는 기본 상태.
+        .terminal => false,
+        // 지나가는 토스트는 텍스트/IME를 받지 않으므로 웹 포커스를 뺏지 않는다(14차 리뷰 [3]).
+        .notice => false,
+        .confirm,
+        .settings,
+        .rename,
+        .sidebar_search,
+        .agent_session_search,
+        .find,
+        .palette,
+        .addr_edit,
+        .file_tree,
+        .dock_pending,
+        => true,
+    };
+}
+
+/// 그 focus 하나만 활성인 상태를 만든다. 만들 수 없으면 false(사유를 여기 남긴다).
+fn activateSoleFocus(session: *AppSession, focus: AppSession.InputFocus) bool {
+    switch (focus) {
+        .terminal => {},
+        .confirm => session.chrome_host.confirm.open = true,
+        .notice => session.chrome_host.notice.open = true,
+        .settings => session.chrome_host.settings.open = true,
+        .find => session.chrome_host.find.open = true,
+        .palette => session.chrome_host.palette.open = true,
+        .rename => session.startRename(.{ .workspace = session.tabs.items[0] }),
+        .sidebar_search => session.sidebar_search_active = true,
+        .addr_edit => session.addr_edit = 1,
+        .file_tree => session.focus_owner = .{ .file_tree = .{ .restore_surface = null } },
+        .agent_session_search => {
+            session.dock.presented = true;
+            session.dock.collapsed = false;
+            session.dock.side = .right;
+            session.agent_session_archive_initialized = false;
+            session.setDockView(.agent_sessions);
+            session.agent_session_archive_initialized = true;
+            session.agent_session_archive_search_active = true;
+        },
+        // pending dock focus는 live entry + async epoch가 맞아야 참이 된다(`pendingDockEntryOwnsInput`).
+        // 그 조합은 파일 패널 fixture가 소유하므로 여기서는 만들지 않는다 — 기대표에는 남아 있어
+        // `InputFocus`가 늘어날 때의 컴파일 강제는 그대로다.
+        .dock_pending => return false,
+    }
+    return true;
+}
+
+test "InputFocus의 모든 값이 terminalOwnsInput 기대와 일치한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    inline for (std.meta.fields(AppSession.InputFocus)) |field| {
+        const focus: AppSession.InputFocus = @enumFromInt(field.value);
+        const session = try allocator.create(AppSession);
+        defer allocator.destroy(session);
+        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+            .abi_version = abi_version,
+            .cols = 20,
+            .rows = 5,
+            .queue_capacity = 16,
+            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        });
+        defer session.deinit();
+        session.window_padding_px = .{};
+        _ = try session.resize(1600, 900, 1000);
+
+        if (activateSoleFocus(session, focus)) {
+            try std.testing.expectEqual(focus, session.inputFocus());
+            try std.testing.expectEqual(expectedTerminalResponder(focus), session.terminalOwnsInput());
+        }
+        _ = try session.tick();
+    }
+}

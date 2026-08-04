@@ -81,7 +81,9 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     // joined the `terminalOwnsInput` override through one shared gate. Neither adds reflection,
     // so the count stays 3 and only the source digest moves — keep it exact so unrelated
     // reflection cannot ride along with those fixes.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 3, .digest_hex = "dc07aa6cc98d762858b836c99ccfb076edae8fce532a596be71ddaae4ee23c2d" },
+    // 입력 소유 두 축의 parity 가드가 기대표 두 함수를 더한다. reflection은 늘지 않아 count는 3 그대로이고
+    // 소스 digest만 움직인다 — 무관한 reflection이 이 변경에 묻어 들어오지 못하게 값을 정확히 유지한다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 3, .digest_hex = "28580e94284ac7283be9cfc7cab61a47fe289c842783213258d3596567ed8c61" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

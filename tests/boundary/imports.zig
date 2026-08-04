@@ -68,24 +68,10 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     .{ .path = "src/app/term_runtime_backend.zig", .count = 3, .digest_hex = "da55524e0da397637fae2ce52c0030719551a1ae2a931ae9cbd7bf9c8814a335" },
     .{ .path = "src/config/schema.zig", .count = 108, .digest_hex = "53943f2f20ec8e47ab22c0eb0c0206869e0ddb26e6ddb57ef02df1b2ae2d34c9" },
     .{ .path = "src/platform/macos/git_backend.zig", .count = 2, .digest_hex = "2c0c8a5fd78388c85a7914123340b357829cbfc0ab92ab474df60d1639b8bb4f" },
-    // `topLevelTestTokenMask` replaced the AST range approximation. Keep the reviewed product
-    // inventory aligned with that lexical scanner so a source that has not changed since main
-    // does not make every unrelated PR fail the boundary gate.
-    // The reviewed `@field` inventory changed when the legacy archive-tab lifecycle was
-    // removed; keep this source digest exact so unrelated reflection can never piggyback on
-    // that structural deletion.
-    // AS4 font/scale fixture adds only published-tree geometry probes beside the existing
-    // dock-local archive path. Keep the exact reviewed reflection inventory so unrelated
-    // reflection cannot piggyback on this structural source change.
-    // The dock branch now yields to an in-flight `PointerGestureOwner`, and Session Dock search
-    // joined the `terminalOwnsInput` override through one shared gate. Neither adds reflection,
-    // so the count stays 3 and only the source digest moves — keep it exact so unrelated
-    // reflection cannot ride along with those fixes.
-    // 입력 소유 두 축의 parity 가드가 기대표 두 함수를 더한다. reflection은 늘지 않아 count는 3 그대로이고
-    // 소스 digest만 움직인다 — 무관한 reflection이 이 변경에 묻어 들어오지 못하게 값을 정확히 유지한다.
-    // chrome_host 컴포넌트 ↔ 입력 소유 두 축의 반대 방향 가드가 `FieldEnum` 역할표와 comptime 검사를 더한다.
-    // `@enumFromInt`로 필드를 돌아 `@field` reflection은 늘리지 않으므로 count는 3 그대로이고 digest만 움직인다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 3, .digest_hex = "a3369f450cb158b0d8141702cbd68c6778aff5b4cbed481b3c7fc68b1c44e3e9" },
+    // 모달 오버레이 집합이 `modalInputRole` 역할표에서 파생되면서 `@field(self.chrome_host, ...)` 접근
+    // 하나가 제품 경로에 들어왔다(count 3 → 4). 그 reflection은 오버레이 필드를 이름으로 읽는 데만 쓰고
+    // 다른 소유권을 만들지 않는다 — 손으로 유지하던 or 체인의 누락(`c822b336`)을 구조적으로 없애는 대가다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "6357820f83a293a8a23363927fc2b9b7dd17c1e13da620a38c0333cc33c6941c" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

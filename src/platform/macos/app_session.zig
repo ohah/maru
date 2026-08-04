@@ -1661,6 +1661,37 @@ const FocusOwner = union(enum) {
     file_tree: FileTreeFocusOwner,
 };
 
+const ChromeHostField = std.meta.FieldEnum(chrome.ChromeHost);
+
+/// `chrome_host` 컴포넌트가 입력 소유 두 축에서 갖는 역할.
+const ModalInputRole = union(enum) {
+    /// 오버레이가 아니다 — 입력 소유와 무관(상호작용 상태 캐시, 패시브 HUD).
+    not_an_overlay,
+    /// 열리면 키/확정 텍스트를 받는다. 대응하는 `InputFocus` 값을 **명시**하고 host override도 참이다.
+    routes_text: AppSession.InputFocus,
+    /// 열리면 입력을 막지만 텍스트는 받지 않는다. `InputFocus` 값 없이 override만 참이다.
+    blocks_without_text,
+    /// 지나가는 토스트. `InputFocus` 값은 있지만 override는 걸지 않는다(14차 리뷰 [3] — 토스트가 웹
+    /// 포커스를 뺏으면 안 된다).
+    transient_toast: AppSession.InputFocus,
+};
+
+/// 두 축의 대응은 이름 규약이 아니라 이 매핑이 소유한다 — `chrome_host` 필드명과 `InputFocus` 값 이름이
+/// 달라도 된다. payload 타입이 `InputFocus`라 없는 값을 적으면 컴파일되지 않으므로, `c822b336`의 settings
+/// 누락(모달 집합엔 있고 `inputFocus`엔 없던 상태)은 이 파일이 빌드되는 것만으로 불가능하다. 남는 실수는
+/// "존재하지만 엉뚱한 값을 적는 것"뿐이고, 그건 아래 실행 테스트가 실제 `inputFocus()`와 대조해 잡는다.
+fn modalInputRole(field: ChromeHostField) ModalInputRole {
+    return switch (field) {
+        .interaction, .key_hints => .not_an_overlay,
+        .confirm => .{ .routes_text = .confirm },
+        .find => .{ .routes_text = .find },
+        .palette => .{ .routes_text = .palette },
+        .settings => .{ .routes_text = .settings },
+        .context_menu, .notifications => .blocks_without_text,
+        .notice => .{ .transient_toast = .notice },
+    };
+}
+
 const FilePanelClosePhase = enum { syncing, confirm_dirty, confirm_conflict, saving };
 // JavaScript bridge arguments are IEEE-754 numbers. Keep close request IDs inside the exact integer range so the
 // request echoed by CM6 cannot alias a different native request after conversion through NSNumber/JavaScript.
@@ -21660,9 +21691,18 @@ pub const AppSession = struct {
 
     /// anyOverlayOpen에서 **notice(비-인터랙티브 토스트)만 제외**한 것 — 입력을 받는 모달(설정·팔레트·확인 등)이
     /// 열려 있는지. held 창의 ⏎ 재시도 개입이 이런 모달의 Enter를 뺏지 않도록 게이트로 쓴다(notice는 어차피 닫고 재시작).
+    /// 모달 오버레이 집합은 `modalInputRole`에서 **파생**한다. 손으로 유지하던 시절에는 새 오버레이를
+    /// `ChromeHost`에 더하면서 이 or 체인이나 `InputFocus` 중 하나를 빠뜨릴 수 있었다(`c822b336`).
+    /// 이제 역할만 등재하면 두 곳이 함께 따라오므로 누락 자체가 불가능하다. `transient_toast`(지나가는
+    /// 토스트)는 입력을 막지 않으므로 제외한다 — 14차 리뷰 [3]의 결론을 역할로 표현한 것이다.
     fn anyModalOverlayOpen(self: *const AppSession) bool {
-        const h = &self.chrome_host;
-        return h.confirm.open or h.context_menu.open or h.notifications.open or h.find.open or h.palette.open or h.settings.open;
+        inline for (std.meta.fields(ChromeHostField)) |field| {
+            switch (comptime modalInputRole(@as(ChromeHostField, @enumFromInt(field.value)))) {
+                .routes_text, .blocks_without_text => if (@field(self.chrome_host, field.name).open) return true,
+                .not_an_overlay, .transient_toast => {},
+            }
+        }
+        return false;
     }
 
     /// 도크 검색이 키/IME를 받는 상태인가. `inputFocus`·`terminalOwnsInput`·caret rect가 **같은 게이트**를 쓰도록
@@ -65018,37 +65058,6 @@ test "동시 활성일 때 host override는 우선순위 파생이 아니라 합
 // 두 집합을 같게 만들려는 게 아니다. `context_menu`·`notifications`는 입력을 막지만 텍스트를 받지 않아
 // `InputFocus` 값이 없고, `notice`는 값이 있지만 override는 안 건다 — 그 차이를 지우지 않고 **역할로
 // 분류해 등재**한다.
-
-const ChromeHostField = std.meta.FieldEnum(chrome.ChromeHost);
-
-/// `chrome_host` 컴포넌트가 입력 소유 두 축에서 갖는 역할.
-const ModalInputRole = union(enum) {
-    /// 오버레이가 아니다 — 입력 소유와 무관(상호작용 상태 캐시, 패시브 HUD).
-    not_an_overlay,
-    /// 열리면 키/확정 텍스트를 받는다. 대응하는 `InputFocus` 값을 **명시**하고 host override도 참이다.
-    routes_text: AppSession.InputFocus,
-    /// 열리면 입력을 막지만 텍스트는 받지 않는다. `InputFocus` 값 없이 override만 참이다.
-    blocks_without_text,
-    /// 지나가는 토스트. `InputFocus` 값은 있지만 override는 걸지 않는다(14차 리뷰 [3] — 토스트가 웹
-    /// 포커스를 뺏으면 안 된다).
-    transient_toast: AppSession.InputFocus,
-};
-
-/// 두 축의 대응은 이름 규약이 아니라 이 매핑이 소유한다 — `chrome_host` 필드명과 `InputFocus` 값 이름이
-/// 달라도 된다. payload 타입이 `InputFocus`라 없는 값을 적으면 컴파일되지 않으므로, `c822b336`의 settings
-/// 누락(모달 집합엔 있고 `inputFocus`엔 없던 상태)은 이 파일이 빌드되는 것만으로 불가능하다. 남는 실수는
-/// "존재하지만 엉뚱한 값을 적는 것"뿐이고, 그건 아래 실행 테스트가 실제 `inputFocus()`와 대조해 잡는다.
-fn modalInputRole(field: ChromeHostField) ModalInputRole {
-    return switch (field) {
-        .interaction, .key_hints => .not_an_overlay,
-        .confirm => .{ .routes_text = .confirm },
-        .find => .{ .routes_text = .find },
-        .palette => .{ .routes_text = .palette },
-        .settings => .{ .routes_text = .settings },
-        .context_menu, .notifications => .blocks_without_text,
-        .notice => .{ .transient_toast = .notice },
-    };
-}
 
 test "chrome_host 오버레이는 역할대로 입력 소유 두 축에 반영된다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;

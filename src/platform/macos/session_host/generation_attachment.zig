@@ -62,7 +62,6 @@ pub const GenerationAttachment = struct {
         self: *GenerationAttachment,
         adapter: *host_adapter_mod.HostAdapter,
         runtime_id: u128,
-        params_json: []const u8,
     ) anyerror!contract.PreparedCallReceipt {
         if (!self.valid() or self.lifecycle != .shell) return error.InvalidState;
         const reservation = try adapter.reserveAttachmentBinding(
@@ -81,7 +80,7 @@ pub const GenerationAttachment = struct {
         );
         errdefer self.terminalizeTransport();
         const receipt = try self.transport.prepareRequest(
-            .{ .attach_controller = .{ .json = params_json } },
+            contract.RuntimeRequest.attachController(),
         );
         errdefer self.transport.abortPreparedRequest(receipt) catch
             @panic("generation attachment request rollback failed");
@@ -480,7 +479,7 @@ const AttachmentReentrantFreeAllocator = struct {
             self.reentered = true;
             self.nested_outcome = self.target.?.tryDeinit(self.adapter.?);
             self.transport_rejected = if (self.target.?.transport.prepareRequest(
-                .{ .detach = .{ .json = null } },
+                contract.RuntimeRequest.detach(),
             )) |_| false else |_| true;
         }
         self.parent.vtable.free(self.parent.ptr, memory, alignment, ret_addr);
@@ -504,7 +503,6 @@ test "CR3a-2a generation attachment uncertain execute permits exact adapter tear
     const receipt = try attachment.prepareControllerAttach(
         &adapter,
         0xBB,
-        "{\"runtime_id\":\"000000000000000000000000000000bb\",\"mode\":\"controller\"}",
     );
     const result = try attachment.executePreparedAttach(&adapter, receipt);
     switch (result) {
@@ -533,7 +531,6 @@ test "CR3a-2a attached teardown fences transport before adapter release" {
     const receipt = try attachment.prepareControllerAttach(
         &adapter,
         0xDD,
-        "{\"runtime_id\":\"000000000000000000000000000000dd\",\"mode\":\"controller\"}",
     );
     try attachment.binding.beginExecute(receipt);
     try attachment.transport.abortPreparedRequest(receipt);
@@ -577,13 +574,13 @@ test "CR3a-2a attached teardown fences transport before adapter release" {
     try std.testing.expect(reentrant.transport_rejected);
     attachment.transport = stale_transport;
     try std.testing.expectError(
-        error.MovedOrCopied,
-        attachment.transport.prepareRequest(.{ .detach = .{ .json = null } }),
+        error.InvalidOwner,
+        attachment.transport.prepareRequest(contract.RuntimeRequest.detach()),
     );
     attachment = stale_parent;
     try std.testing.expectError(
-        error.MovedOrCopied,
-        attachment.transport.prepareRequest(.{ .detach = .{ .json = null } }),
+        error.InvalidOwner,
+        attachment.transport.prepareRequest(contract.RuntimeRequest.detach()),
     );
 }
 
@@ -603,7 +600,6 @@ test "CR3a-2a whole-parent restore cannot revive accepted response or transport 
     const receipt = try attachment.prepareControllerAttach(
         &adapter,
         0xDB,
-        "{\"runtime_id\":\"000000000000000000000000000000db\",\"mode\":\"controller\"}",
     );
     try attachment.binding.beginExecute(receipt);
     attachment.lifecycle = .executing;
@@ -625,8 +621,8 @@ test "CR3a-2a whole-parent restore cannot revive accepted response or transport 
 
     attachment = stale_parent;
     try std.testing.expectError(
-        error.MovedOrCopied,
-        attachment.transport.prepareRequest(.{ .detach = .{ .json = null } }),
+        error.InvalidOwner,
+        attachment.transport.prepareRequest(contract.RuntimeRequest.detach()),
     );
     try std.testing.expectEqual(DeinitOutcome.corrupt, attachment.finishResponse(&adapter));
 }
@@ -649,7 +645,6 @@ test "CR3a-2b2 CR3a-2c3a generation GUI pump transfers and revoke closes direct 
     const receipt = try attachment.prepareControllerAttach(
         &adapter,
         0x2B3,
-        "{\"runtime_id\":\"000000000000000000000000000002b3\",\"mode\":\"controller\"}",
     );
     try attachment.binding.beginExecute(receipt);
     attachment.lifecycle = .executing;
@@ -795,7 +790,6 @@ test "CR3a-2b2 generation GUI pump releases a malformed node-owned batch" {
     const receipt = try attachment.prepareControllerAttach(
         &adapter,
         0x2D3,
-        "{\"runtime_id\":\"000000000000000000000000000002d3\",\"mode\":\"controller\"}",
     );
     try attachment.binding.beginExecute(receipt);
     attachment.lifecycle = .executing;
@@ -865,7 +859,6 @@ test "CR3a-2b2 generation GUI pump transfers a direct parser frame through the n
     const receipt = try attachment.prepareControllerAttach(
         &adapter,
         0x2C2,
-        "{\"runtime_id\":\"000000000000000000000000000002c2\",\"mode\":\"controller\"}",
     );
     try attachment.binding.beginExecute(receipt);
     attachment.lifecycle = .executing;
@@ -955,7 +948,6 @@ test "CR3a-2a typed reject settles binding response and transport exactly once" 
     const receipt = try attachment.prepareControllerAttach(
         &adapter,
         0xFB,
-        "{\"runtime_id\":\"000000000000000000000000000000fb\",\"mode\":\"controller\"}",
     );
     try attachment.binding.beginExecute(receipt);
     attachment.lifecycle = .executing;

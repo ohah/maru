@@ -39,6 +39,54 @@ pub const CapabilityError = error{
     InvalidOwner,
 };
 
+pub const PrepareError = error{
+    Busy,
+    InvalidOwner,
+    Unauthorized,
+    IdentityExhausted,
+    ResourceExhausted,
+    ConnectionClosed,
+    ProtocolError,
+};
+
+pub const AbortError = error{
+    Busy,
+    InvalidOwner,
+    InvalidReceipt,
+    ProtocolError,
+};
+
+fn errorSetMatches(comptime ErrorSet: type, comptime expected: []const []const u8) bool {
+    const errors = @typeInfo(ErrorSet).error_set orelse return false;
+    if (errors.len != expected.len) return false;
+    inline for (expected) |name| {
+        var found = false;
+        inline for (errors) |entry| if (std.mem.eql(u8, entry.name, name)) {
+            found = true;
+        };
+        if (!found) return false;
+    }
+    return true;
+}
+
+comptime {
+    if (!errorSetMatches(PrepareError, &.{
+        "Busy",
+        "InvalidOwner",
+        "Unauthorized",
+        "IdentityExhausted",
+        "ResourceExhausted",
+        "ConnectionClosed",
+        "ProtocolError",
+    })) @compileError("PrepareError must match the documented closed facade set");
+    if (!errorSetMatches(AbortError, &.{
+        "Busy",
+        "InvalidOwner",
+        "InvalidReceipt",
+        "ProtocolError",
+    })) @compileError("AbortError must match the documented closed facade set");
+}
+
 pub const RevokeFence = enum {
     no_pending_stream_frame,
     cancelled_before_write,
@@ -52,7 +100,6 @@ const Lifecycle = enum(u8) {
 };
 
 var transport_incarnation_issuer: std.atomic.Value(u64) = .init(1);
-var response_incarnation_issuer: std.atomic.Value(u64) = .init(1);
 
 pub const GenerationTransport = struct {
     self_addr: usize = 0,
@@ -108,22 +155,24 @@ pub const GenerationTransport = struct {
     pub fn prepareRequest(
         self: *GenerationTransport,
         request: contract.RuntimeRequest,
-    ) Error!contract.PreparedCallReceipt {
-        const client = self.borrowClient() orelse return error.MovedOrCopied;
-        const identity = try client.prepareBlockingRpcStorage(
-            &self.prepared_storage,
-            methodFor(request),
-            request.params(),
-        );
-        return contract.PreparedCallReceipt.init(.{
+    ) PrepareError!contract.PreparedCallReceipt {
+        if (!self.requestIdentityValid()) return error.InvalidOwner;
+        const prepared = client_slot_mod.prepareGenerationRequest(.{
+            .slot_addr = self.slot_addr,
+            .slot_incarnation = self.slot_incarnation,
+            .node_incarnation = self.node_incarnation,
+            .host_id = self.host_id,
+            .pid = self.pid,
+            .process_nonce = self.process_nonce,
+            .transport_addr = @intFromPtr(self),
             .transport_incarnation = self.transport_incarnation,
-            .request_id = identity.request_id,
-            .request_digest = identity.frame_digest,
-        }) orelse {
-            client.abortPreparedBlockingRpcStorage(&self.prepared_storage) catch
-                @panic("prepared request rollback failed");
-            return error.InvalidReceipt;
-        };
+            .owner_seal_addr = self.owner_seal_addr,
+            .prepared_storage_addr = @intFromPtr(&self.prepared_storage),
+            .bound_stream_id = self.bound_stream_id,
+            .reservation = self.binding_reservation,
+            .request = request,
+        }) catch |err| return mapPrepareError(err);
+        return prepared.receipt;
     }
 
     pub fn executePreparedRequest(
@@ -131,123 +180,34 @@ pub const GenerationTransport = struct {
         receipt: contract.PreparedCallReceipt,
         response_out: *executed_response_mod.ExecutedResponse,
     ) Error!contract.ExecuteResult {
-        const client = self.borrowClient() orelse return error.MovedOrCopied;
-        if (!self.matchesPrepared(receipt)) return error.InvalidReceipt;
-        // Flush older outbound ownership and then capture the allocator before the first byte of
-        // this request. Later parser/prepared-frame callbacks cannot redirect response cleanup.
-        const response_allocator = client.preflightPreparedBlockingRpcStorageExecution(
-            &self.prepared_storage,
-        ) catch |err| {
-            client.abortPreparedBlockingRpcStorage(&self.prepared_storage) catch
-                @panic("preflighted request rollback failed");
-            return err;
-        };
-        // The flush above may invoke allocator callbacks. Re-resolve the canonical owner and
-        // repeat every destination check only after those callbacks and immediately before wire.
-        const slot: *client_slot_mod.ClientSlot = @ptrFromInt(self.slot_addr);
-        const response_owner = slot.responseOwnerSeal(self.binding_reservation) catch
-            return error.InvalidResponseDestination;
-        const binding: *contract.PreparedAttachmentBinding =
-            @ptrFromInt(self.binding_reservation.identity.binding_storage_addr);
-        if (!response_out.canInitializeWithOwner(response_owner) or
-            rangesOverlapTyped(response_out, binding) or
-            rangesOverlapTyped(response_out, self) or
-            rangesOverlapTyped(response_out, &self.prepared_storage) or
-            rangesOverlapTyped(response_out, slot) or
-            rangesOverlapTyped(response_out, slot.current) or
-            rangesOverlapTyped(response_out, client) or
-            rangesOverlapTyped(response_owner, self) or
-            rangesOverlapTyped(response_owner, &self.prepared_storage) or
-            rangesOverlapTyped(response_owner, binding))
-            return error.InvalidResponseDestination;
-        const response_incarnation = issueIncarnation(&response_incarnation_issuer) catch
-            return error.IdentityExhausted;
-        const executed = contract.ExecutedCallReceipt.fromPrepared(receipt) orelse
-            return error.InvalidReceipt;
-        const response = switch (client.executePreparedBlockingRpcStorageWithAllocator(
-            &self.prepared_storage,
-            response_allocator,
-        )) {
-            .not_executed => |err| {
-                client.abortPreparedBlockingRpcStorage(&self.prepared_storage) catch
-                    @panic("not-executed prepared request rollback failed");
-                return err;
-            },
-            .uncertain => {
-                client.poison(.transport_read_failure);
-                const result: contract.ExecuteResult = .{
-                    .uncertain_or_connection_failure = executed,
-                };
-                response_out.initWithoutPayloadInPlace(response_owner, response_incarnation, result) catch {
-                    client.poison(.local_invariant_violation);
-                    return error.InvalidResponseDestination;
-                };
-                return result;
-            },
-            .accepted => |value| value,
-        };
-        if (!std.meta.eql(response.payload_allocator, response_allocator)) {
-            // The parser records the allocator value used for the actual payload allocation.
-            // Any drift after preflight makes the owner ambiguous to this request; do not free it.
-            client.poison(.local_invariant_violation);
-            return error.InvalidResponseDestination;
-        }
-        if (payloadOverlaps(response.payload, .{
-            response_out,
-            response_owner,
-            binding,
-            self,
-            &self.prepared_storage,
-            slot,
-            slot.current,
-            client,
-        }) or rangeOverlaps(
-            @intFromPtr(response.payload.ptr),
-            response.payload.len,
-            self.owner_addr,
-            self.owner_size,
-        )) {
-            // A hostile allocator may return authoritative storage as an owned payload. Freeing
-            // that forged slice would corrupt the owner graph, so fail-stop the connection and
-            // quarantine the bounded slice instead of invoking an untrusted free authority.
-            client.poison(.local_invariant_violation);
-            return error.InvalidResponseDestination;
-        }
-        const correlated = contract.CorrelatedExecutedCall.init(
-            executed,
-            response.response_request_id,
-        ) orelse {
-            client.poison(.local_invariant_violation);
-            response_allocator.free(response.payload);
-            return error.InvalidReceipt;
-        };
-        if (!correlated.responseMatchesPrepared()) {
-            client.poison(.response_correlation_lost);
-            response_allocator.free(response.payload);
-            return error.InvalidReceipt;
-        }
-        const result: contract.ExecuteResult = .{ .accepted = correlated };
-        response_out.initAcceptedInPlace(
-            response_allocator,
-            response_owner,
-            response_incarnation,
-            correlated,
-            response.payload,
-        ) catch {
-            client.poison(.local_invariant_violation);
-            response_allocator.free(response.payload);
-            return error.InvalidResponseDestination;
-        };
-        return result;
+        if (!self.requestIdentityValid()) return error.MovedOrCopied;
+        return client_slot_mod.executeGenerationRequest(.{
+            .request = self.requestOperation(receipt),
+            .response_out_addr = @intFromPtr(response_out),
+            .owner_addr = self.owner_addr,
+            .owner_size = self.owner_size,
+        }) catch |err| return mapGenerationExecuteToLegacyError(err);
     }
 
     pub fn abortPreparedRequest(
         self: *GenerationTransport,
         receipt: contract.PreparedCallReceipt,
-    ) Error!void {
-        const client = self.borrowClient() orelse return error.MovedOrCopied;
-        if (!self.matchesPrepared(receipt)) return error.InvalidReceipt;
-        try client.abortPreparedBlockingRpcStorage(&self.prepared_storage);
+    ) AbortError!void {
+        if (!self.requestIdentityValid()) return error.InvalidOwner;
+        client_slot_mod.abortGenerationRequest(.{
+            .slot_addr = self.slot_addr,
+            .slot_incarnation = self.slot_incarnation,
+            .node_incarnation = self.node_incarnation,
+            .host_id = self.host_id,
+            .pid = self.pid,
+            .process_nonce = self.process_nonce,
+            .transport_addr = @intFromPtr(self),
+            .transport_incarnation = self.transport_incarnation,
+            .owner_seal_addr = self.owner_seal_addr,
+            .prepared_storage_addr = @intFromPtr(&self.prepared_storage),
+            .reservation = self.binding_reservation,
+            .receipt = receipt,
+        }) catch |err| return mapAbortError(err);
     }
 
     pub fn sendInput(self: *GenerationTransport, bytes: []const u8) InputError!void {
@@ -450,18 +410,108 @@ pub const GenerationTransport = struct {
         ) catch false;
     }
 
-    fn matchesPrepared(
+    fn requestIdentityValid(self: *const GenerationTransport) bool {
+        const identity = self.binding_reservation.identity;
+        return rawLifecycleValid(&self.lifecycle) and self.self_addr == @intFromPtr(self) and
+            self.lifecycle == .live and self.slot_addr != 0 and self.owner_seal_addr != 0 and
+            self.owner_size != 0 and self.transport_incarnation != 0 and
+            self.connection_generation == 1 and self.pid == currentPid() and
+            self.owner_thread_id == std.Thread.getCurrentId() and
+            bindingRoleRawValid(&identity.role) and
+            self.slot_incarnation == identity.slot_incarnation and
+            self.node_incarnation == identity.node_incarnation and self.host_id == identity.host_id and
+            self.connection_generation == identity.connection_generation and
+            self.pid == identity.pid and self.process_nonce == identity.process_nonce;
+    }
+
+    fn requestOperation(
         self: *GenerationTransport,
         receipt: contract.PreparedCallReceipt,
-    ) bool {
-        return receipt.valid() and
-            receipt.transport_incarnation == self.transport_incarnation and
-            (self.borrowClient() orelse return false).preparedBlockingRpcStorageMatches(
-                &self.prepared_storage,
-                .{ .request_id = receipt.request_id, .frame_digest = receipt.request_digest },
-            );
+    ) client_slot_mod.GenerationRequestAbort {
+        return .{
+            .slot_addr = self.slot_addr,
+            .slot_incarnation = self.slot_incarnation,
+            .node_incarnation = self.node_incarnation,
+            .host_id = self.host_id,
+            .pid = self.pid,
+            .process_nonce = self.process_nonce,
+            .transport_addr = @intFromPtr(self),
+            .transport_incarnation = self.transport_incarnation,
+            .owner_seal_addr = self.owner_seal_addr,
+            .prepared_storage_addr = @intFromPtr(&self.prepared_storage),
+            .reservation = self.binding_reservation,
+            .receipt = receipt,
+        };
+    }
+
+    fn ownerQuery(self: *GenerationTransport) client_slot_mod.GenerationTransportOwnerQuery {
+        return .{
+            .slot_addr = self.slot_addr,
+            .slot_incarnation = self.slot_incarnation,
+            .node_incarnation = self.node_incarnation,
+            .host_id = self.host_id,
+            .pid = self.pid,
+            .process_nonce = self.process_nonce,
+            .transport_addr = @intFromPtr(self),
+            .transport_incarnation = self.transport_incarnation,
+            .owner_seal_addr = self.owner_seal_addr,
+            .prepared_storage_addr = @intFromPtr(&self.prepared_storage),
+            .reservation = self.binding_reservation,
+        };
     }
 };
+
+fn mapPrepareError(err: client_slot_mod.GenerationRequestError) PrepareError {
+    return switch (err) {
+        error.Busy => error.Busy,
+        error.InvalidOwner => error.InvalidOwner,
+        error.Unauthorized => error.Unauthorized,
+        error.IdentityExhausted => error.IdentityExhausted,
+        error.ResourceExhausted => error.ResourceExhausted,
+        error.ConnectionClosed => error.ConnectionClosed,
+        error.InvalidReceipt, error.ProtocolError => error.ProtocolError,
+    };
+}
+
+fn mapAbortError(err: client_slot_mod.GenerationRequestError) AbortError {
+    return switch (err) {
+        error.Busy => error.Busy,
+        error.InvalidOwner => error.InvalidOwner,
+        error.InvalidReceipt => error.InvalidReceipt,
+        error.Unauthorized,
+        error.IdentityExhausted,
+        error.ResourceExhausted,
+        error.ConnectionClosed,
+        error.ProtocolError,
+        => error.ProtocolError,
+    };
+}
+
+fn mapGenerationRequestToLegacyError(err: client_slot_mod.GenerationRequestError) Error {
+    return switch (err) {
+        error.Busy => error.AdminBusy,
+        error.InvalidOwner => error.MovedOrCopied,
+        error.Unauthorized => error.ProtocolError,
+        error.InvalidReceipt => error.InvalidReceipt,
+        error.IdentityExhausted => error.IdentityExhausted,
+        error.ResourceExhausted => error.OutOfMemory,
+        error.ConnectionClosed => error.ConnectionClosed,
+        error.ProtocolError => error.InvalidReceipt,
+    };
+}
+
+fn mapGenerationExecuteToLegacyError(err: client_slot_mod.GenerationExecuteError) Error {
+    return switch (err) {
+        error.Busy => error.AdminBusy,
+        error.InvalidOwner => error.MovedOrCopied,
+        error.Unauthorized => error.ProtocolError,
+        error.InvalidReceipt => error.InvalidReceipt,
+        error.IdentityExhausted => error.IdentityExhausted,
+        error.ResourceExhausted => error.OutOfMemory,
+        error.InvalidResponseDestination => error.InvalidResponseDestination,
+        else => |client_err| client_err,
+    };
+}
 
 fn rawLifecycleValid(value: *const Lifecycle) bool {
     const raw = @as(*const u8, @ptrCast(value)).*;
@@ -512,7 +562,12 @@ pub fn mintInPlace(
     if (!slot.valid() or owner_addr == 0) return error.InvalidTransport;
     const incarnation = issueIncarnation(&transport_incarnation_issuer) catch
         return error.IdentityExhausted;
-    contract.TransportOwnerSeal.initInPlace(owner_seal, incarnation) catch
+    contract.TransportOwnerSeal.initInPlace(
+        owner_seal,
+        incarnation,
+        @intFromPtr(out),
+        @intFromPtr(&out.prepared_storage),
+    ) catch
         return error.InvalidTransport;
     out.* = .{
         .self_addr = @intFromPtr(out),
@@ -619,11 +674,9 @@ pub fn bufferedControllerRevokeOwned(
 pub fn terminalizeOwned(transport: *GenerationTransport, owner_addr: usize) Error!void {
     if (preflightTerminalizeOwned(transport, owner_addr) != .ready)
         return error.InvalidTransport;
-    const slot: *client_slot_mod.ClientSlot = @ptrFromInt(transport.slot_addr);
-    const owner_seal = slot.transportOwnerSeal(transport.binding_reservation) catch
-        return error.InvalidTransport;
     transport.snapshot_authority.terminalize(transport.transport_incarnation) catch unreachable;
-    owner_seal.terminalize(transport.transport_incarnation) catch return error.InvalidTransport;
+    client_slot_mod.terminalizeGenerationTransportOwner(transport.ownerQuery()) catch
+        return error.InvalidTransport;
     transport.lifecycle = .terminal;
     transport.slot_addr = 0;
     transport.owner_addr = 0;
@@ -645,11 +698,11 @@ pub fn preflightTerminalizeOwned(
         return .invalid;
     if (!transport.snapshot_authority.canTerminalize(transport.transport_incarnation))
         return .busy;
-    const slot: *client_slot_mod.ClientSlot = @ptrFromInt(transport.slot_addr);
-    if (!slot.initialSnapshotPermitIdle()) return .busy;
-    const owner_seal = slot.transportOwnerSeal(transport.binding_reservation) catch
-        return .invalid;
-    if (@intFromPtr(owner_seal) != transport.owner_seal_addr) return .invalid;
+    client_slot_mod.preflightGenerationTransportTerminalize(transport.ownerQuery()) catch |err|
+        return switch (err) {
+            error.Busy => .busy,
+            error.InvalidOwner => .invalid,
+        };
     return .ready;
 }
 
@@ -706,25 +759,6 @@ fn issueIncarnation(issuer: *std.atomic.Value(u64)) error{IdentityExhausted}!u64
         }
         return observed;
     }
-}
-
-fn methodFor(request: contract.RuntimeRequest) []const u8 {
-    return switch (request) {
-        .spawn_full => "runtime.spawn_full",
-        .attach_controller => "runtime.attach",
-        .resize => "runtime.resize",
-        .observation => "runtime.observation",
-        .selected_text => "runtime.selected_text",
-        .link_at => "runtime.link_at",
-        .clipboard_write => "runtime.clipboard_write",
-        .find => "runtime.find",
-        .select_op => "runtime.select",
-        .core_command => "runtime.core_command",
-        .report_mouse => "runtime.report_mouse",
-        .notification => "runtime.notification",
-        .terminate => "runtime.terminate",
-        .detach => "runtime.detach",
-    };
 }
 
 fn isForbiddenFacadeType(comptime T: type) bool {
@@ -821,12 +855,156 @@ test "CR3a-2a generation transport prepares and aborts a closed attach request" 
     var lease: @import("connection_lease.zig").ConnectionLease = .{};
     const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0xA1);
     try mintInPlace(&transport, &slot, 0x101, @sizeOf(GenerationTransport), reservation);
-    const receipt = try transport.prepareRequest(
-        .{ .attach_controller = .{ .json = "{\"runtime_id\":\"01\"}" } },
-    );
+    const receipt = try transport.prepareRequest(contract.RuntimeRequest.attachController());
     try std.testing.expectEqual(@as(u64, 1), receipt.request_id);
     try transport.abortPreparedRequest(receipt);
     try terminalizeOwned(&transport, 0x101);
+    try slot.abortAttachmentBinding(&binding, reservation);
+}
+
+test "CR3a-2c3b find family authority follows its typed scroll discriminator" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+
+    var controller_client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0x2C3BF1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    var controller_slot: client_slot_mod.ClientSlot = undefined;
+    try client_slot_mod.ClientSlot.initInPlace(
+        &controller_slot,
+        allocator,
+        &controller_client,
+        0x2C3BF1,
+    );
+    defer controller_slot.deinit();
+    var controller_transport: GenerationTransport = .{};
+    var controller_binding: contract.PreparedAttachmentBinding = .{};
+    var controller_lease: @import("connection_lease.zig").ConnectionLease = .{};
+    const controller_reservation = try controller_slot.reserveAttachmentBindingForTest(
+        &controller_binding,
+        &controller_lease,
+        0x2C3BF2,
+    );
+    try mintInPlace(
+        &controller_transport,
+        &controller_slot,
+        0x2C3BF3,
+        @sizeOf(GenerationTransport),
+        controller_reservation,
+    );
+    try controller_slot.current.cleanup_registry.bindStream(
+        controller_reservation.cleanup,
+        controller_reservation.identity,
+        41,
+    );
+    try bindCommittedStreamOwned(&controller_transport, 0x2C3BF3, 41);
+    const mutation = try controller_transport.prepareRequest(contract.RuntimeRequest.find(
+        contract.FindRequest.init("needle", 0, true).?,
+    ));
+    try controller_transport.abortPreparedRequest(mutation);
+    try controller_slot.current.cleanup_registry.beginBoundDrop(
+        controller_reservation.cleanup,
+        controller_reservation.identity,
+        41,
+    );
+    try terminalizeOwned(&controller_transport, 0x2C3BF3);
+    try controller_slot.current.cleanup_registry.completeActiveDrop(
+        controller_reservation.cleanup,
+        controller_reservation.identity,
+        41,
+    );
+    controller_slot.current.pin_owner.cleanup_pin_count -= 1;
+    controller_binding.lifecycle = .terminal;
+
+    var observer_client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0x2C3BF4,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    var observer_slot: client_slot_mod.ClientSlot = undefined;
+    try client_slot_mod.ClientSlot.initInPlace(
+        &observer_slot,
+        allocator,
+        &observer_client,
+        0x2C3BF4,
+    );
+    defer observer_slot.deinit();
+    var observer_transport: GenerationTransport = .{};
+    var observer_binding: contract.PreparedAttachmentBinding = .{};
+    var observer_lease: @import("connection_lease.zig").ConnectionLease = .{};
+    const observer_reservation = try observer_slot.reserveAttachmentBinding(
+        &observer_binding,
+        &observer_lease,
+        0x2C3BF5,
+        .observer,
+    );
+    try mintInPlace(
+        &observer_transport,
+        &observer_slot,
+        0x2C3BF6,
+        @sizeOf(GenerationTransport),
+        observer_reservation,
+    );
+    try observer_slot.current.cleanup_registry.bindStream(
+        observer_reservation.cleanup,
+        observer_reservation.identity,
+        43,
+    );
+    try bindCommittedStreamOwned(&observer_transport, 0x2C3BF6, 43);
+    try std.testing.expectError(error.Unauthorized, observer_transport.prepareRequest(
+        contract.RuntimeRequest.find(contract.FindRequest.init("needle", 0, true).?),
+    ));
+    const observation = try observer_transport.prepareRequest(contract.RuntimeRequest.find(
+        contract.FindRequest.init("needle", 0, false).?,
+    ));
+    try observer_transport.abortPreparedRequest(observation);
+    try observer_slot.current.cleanup_registry.beginBoundDrop(
+        observer_reservation.cleanup,
+        observer_reservation.identity,
+        43,
+    );
+    try terminalizeOwned(&observer_transport, 0x2C3BF6);
+    try observer_slot.current.cleanup_registry.completeActiveDrop(
+        observer_reservation.cleanup,
+        observer_reservation.identity,
+        43,
+    );
+    observer_slot.current.pin_owner.cleanup_pin_count -= 1;
+    observer_binding.lifecycle = .terminal;
+}
+
+test "CR3a-2c3b terminalize consults node request authority despite storage restore" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0x2C3B71,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    var slot: client_slot_mod.ClientSlot = undefined;
+    try client_slot_mod.ClientSlot.initInPlace(&slot, allocator, &client, 0x2C3B71);
+    defer slot.deinit();
+    var transport: GenerationTransport = .{};
+    var binding: contract.PreparedAttachmentBinding = .{};
+    var lease: @import("connection_lease.zig").ConnectionLease = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0x2C3B72);
+    try mintInPlace(&transport, &slot, 0x2C3B73, @sizeOf(GenerationTransport), reservation);
+    const receipt = try transport.prepareRequest(contract.RuntimeRequest.attachController());
+    const saved = transport.prepared_storage.bytes;
+    @memset(&transport.prepared_storage.bytes, 0);
+    try std.testing.expectEqual(
+        TerminalizeReadiness.busy,
+        preflightTerminalizeOwned(&transport, 0x2C3B73),
+    );
+    try std.testing.expectError(error.InvalidTransport, terminalizeOwned(&transport, 0x2C3B73));
+    transport.prepared_storage.bytes = saved;
+    try transport.abortPreparedRequest(receipt);
+    try terminalizeOwned(&transport, 0x2C3B73);
     try slot.abortAttachmentBinding(&binding, reservation);
 }
 
@@ -935,10 +1113,16 @@ test "CR3a-2a copied generation transport cannot prepare or mutate Client" {
     try mintInPlace(&transport, &slot, 0x103, @sizeOf(GenerationTransport), reservation);
     var copied = transport;
     try std.testing.expectError(
-        error.MovedOrCopied,
-        copied.prepareRequest(.{ .detach = .{ .json = null } }),
+        error.InvalidOwner,
+        copied.prepareRequest(contract.RuntimeRequest.attachController()),
     );
-    const receipt = try transport.prepareRequest(.{ .detach = .{ .json = null } });
+    try std.testing.expectEqual(Lifecycle.live, transport.lifecycle);
+    try std.testing.expectEqualSlices(
+        u8,
+        &([_]u8{0} ** @sizeOf(client_mod.PreparedBlockingRpcStorage)),
+        &transport.prepared_storage.bytes,
+    );
+    const receipt = try transport.prepareRequest(contract.RuntimeRequest.attachController());
     try std.testing.expectEqual(@as(u64, 1), receipt.request_id);
     try transport.abortPreparedRequest(receipt);
     try terminalizeOwned(&transport, 0x103);
@@ -1401,12 +1585,15 @@ test "CR3a-2a response destination cannot splice binding storage before wire" {
     const reservation = try slot.reserveAttachmentBindingForTest(binding, &lease, 0xB2);
     var transport: GenerationTransport = .{};
     try mintInPlace(&transport, &slot, 0x104, @sizeOf(GenerationTransport), reservation);
-    const receipt = try transport.prepareRequest(.{ .detach = .{ .json = null } });
+    const receipt = try transport.prepareRequest(contract.RuntimeRequest.attachController());
     try std.testing.expectError(
         error.InvalidResponseDestination,
         transport.executePreparedRequest(receipt, response),
     );
-    try transport.abortPreparedRequest(receipt);
+    try std.testing.expectError(
+        error.InvalidReceipt,
+        transport.abortPreparedRequest(receipt),
+    );
     try std.testing.expect(binding.validAtFinalAddress());
     try terminalizeOwned(&transport, 0x104);
     try slot.abortAttachmentBinding(binding, reservation);
@@ -1429,9 +1616,7 @@ test "CR3a-2a execute failure settles prepared backing and publishes uncertain r
     var lease: @import("connection_lease.zig").ConnectionLease = .{};
     const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0xC1);
     try mintInPlace(&transport, &slot, 0x105, @sizeOf(GenerationTransport), reservation);
-    const receipt = try transport.prepareRequest(.{
-        .attach_controller = .{ .json = "{\"runtime_id\":\"01\"}" },
-    });
+    const receipt = try transport.prepareRequest(contract.RuntimeRequest.attachController());
     var response: executed_response_mod.ExecutedResponse = .{};
     const result = try transport.executePreparedRequest(receipt, &response);
     switch (result) {
@@ -1491,9 +1676,7 @@ test "CR3a-2a response publication failure poisons before payload free reentry" 
     const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0xD1);
     var transport: GenerationTransport = .{};
     try mintInPlace(&transport, &slot, 0x106, @sizeOf(GenerationTransport), reservation);
-    const receipt = try transport.prepareRequest(.{
-        .attach_controller = .{ .json = "{\"runtime_id\":\"01\"}" },
-    });
+    const receipt = try transport.prepareRequest(contract.RuntimeRequest.attachController());
     var response: executed_response_mod.ExecutedResponse = .{};
     probe.response = &response;
     probe.armed = true;
@@ -1535,7 +1718,7 @@ test "CR3a-2a pending flush callback invalidates response before request wire" {
     const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0xD3);
     var transport: GenerationTransport = .{};
     try mintInPlace(&transport, &slot, 0x108, @sizeOf(GenerationTransport), reservation);
-    const receipt = try transport.prepareRequest(.{ .detach = .{ .json = null } });
+    const receipt = try transport.prepareRequest(contract.RuntimeRequest.attachController());
     slot.logicalClient().pending_outbound = .{
         .frame = try probe.allocator().dupe(u8, "older"),
         .stream_id = 9,
@@ -1549,9 +1732,64 @@ test "CR3a-2a pending flush callback invalidates response before request wire" {
     );
     probe.armed = false;
     try std.testing.expect(probe.mutated_after_preflight);
-    try transport.abortPreparedRequest(receipt);
+    try std.testing.expectError(
+        error.InvalidReceipt,
+        transport.abortPreparedRequest(receipt),
+    );
     response = .{};
     try terminalizeOwned(&transport, 0x108);
+    try slot.abortAttachmentBinding(&binding, reservation);
+}
+
+test "CR3a-2c3b pending flush callback cannot redirect canonical execute owners" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var probe = PoisonOrderAllocator{ .parent = allocator };
+    const fd = c.open("/dev/null", c.O{ .ACCMODE = .WRONLY });
+    try std.testing.expect(fd >= 0);
+    var client: client_mod.Client = .{
+        .allocator = probe.allocator(),
+        .fd = fd,
+        .host_id = 0x2C3BC1,
+        .parser = framing.FrameParser.init(probe.allocator()),
+    };
+    probe.client = &client;
+    var slot: client_slot_mod.ClientSlot = undefined;
+    try client_slot_mod.ClientSlot.initInPlace(&slot, allocator, &client, 0x2C3BC1);
+    probe.client = slot.logicalClient();
+    defer slot.deinit();
+    var binding: contract.PreparedAttachmentBinding = .{};
+    var lease: @import("connection_lease.zig").ConnectionLease = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0x2C3BC2);
+    var transport: GenerationTransport = .{};
+    try mintInPlace(&transport, &slot, 0x2C3BC3, @sizeOf(GenerationTransport), reservation);
+    const receipt = try transport.prepareRequest(contract.RuntimeRequest.attachController());
+    slot.logicalClient().pending_outbound = .{
+        .frame = try probe.allocator().dupe(u8, "older"),
+        .stream_id = 9,
+    };
+    const canonical_slot_addr = transport.slot_addr;
+    var response: executed_response_mod.ExecutedResponse = .{};
+    probe.transport = &transport;
+    probe.armed = true;
+    const result = try transport.executePreparedRequest(receipt, &response);
+    switch (result) {
+        .uncertain_or_connection_failure => {},
+        else => return error.TestUnexpectedResult,
+    }
+    probe.armed = false;
+    try std.testing.expect(probe.mutated_after_preflight);
+    try std.testing.expectEqual(@as(usize, 1), transport.slot_addr);
+    try std.testing.expect(client_mod.Client.preparedBlockingRpcStorageSettled(
+        &transport.prepared_storage,
+    ));
+    transport.slot_addr = canonical_slot_addr;
+    try std.testing.expectEqual(
+        executed_response_mod.DeinitOutcome.cleaned,
+        response.deinit(try slot.responseOwnerSeal(reservation)),
+    );
+    try terminalizeOwned(&transport, 0x2C3BC3);
     try slot.abortAttachmentBinding(&binding, reservation);
 }
 
@@ -1593,7 +1831,7 @@ test "CR3a-2a accepted response retains allocator captured before wire" {
     const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0xD2);
     var transport: GenerationTransport = .{};
     try mintInPlace(&transport, &slot, 0x107, @sizeOf(GenerationTransport), reservation);
-    const receipt = try transport.prepareRequest(.{ .detach = .{ .json = null } });
+    const receipt = try transport.prepareRequest(contract.RuntimeRequest.attachController());
     var response: executed_response_mod.ExecutedResponse = .{};
     probe.armed = true;
     const result = try transport.executePreparedRequest(receipt, &response);
@@ -1616,6 +1854,7 @@ const PoisonOrderAllocator = struct {
     parent: std.mem.Allocator,
     client: ?*client_mod.Client = null,
     response: ?*executed_response_mod.ExecutedResponse = null,
+    transport: ?*GenerationTransport = null,
     replacement_allocator: ?std.mem.Allocator = null,
     armed: bool = false,
     mutated_after_preflight: bool = false,
@@ -1655,6 +1894,8 @@ const PoisonOrderAllocator = struct {
             self.mutated_after_preflight = true;
             if (self.response) |response| {
                 response.self_addr = 1;
+            } else if (self.transport) |transport| {
+                transport.slot_addr = 1;
             } else if (self.replacement_allocator) |replacement| {
                 self.client.?.allocator = replacement;
             }

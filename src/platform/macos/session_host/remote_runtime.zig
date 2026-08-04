@@ -492,8 +492,6 @@ pub const RemoteRuntime = struct {
     /// `self.runtime_id_hex`가 이미 채워져 있어야 한다(spawn=runtime.spawn 응답, attachExisting=저장된 값).
     fn attachAndAssemble(self: *RemoteRuntime, surface_id: u64, size: terminal.Size) anyerror!void {
         // 2. runtime.attach(controller) — stream_id + snapshot 순서(§10).
-        var attach_buf: [96]u8 = undefined;
-        const attach_params = std.fmt.bufPrint(&attach_buf, "{{\"runtime_id\":\"{s}\",\"mode\":\"controller\"}}", .{self.runtime_id_hex}) catch return error.AttachFailed;
         const runtime_id = std.fmt.parseInt(u128, &self.runtime_id_hex, 16) catch
             return error.AttachFailed;
         var legacy_response: ?[]u8 = null;
@@ -514,7 +512,6 @@ pub const RemoteRuntime = struct {
             const prepared = try self.attachment.generation.prepareControllerAttach(
                 adapter,
                 runtime_id,
-                attach_params,
             );
             const result = try self.attachment.generation.executePreparedAttach(adapter, prepared);
             const correlated = switch (result) {
@@ -532,6 +529,12 @@ pub const RemoteRuntime = struct {
             generation_binding_open = true;
             break :blk try self.attachment.generation.responseBytes(adapter);
         } else blk: {
+            var attach_buf: [96]u8 = undefined;
+            const attach_params = std.fmt.bufPrint(
+                &attach_buf,
+                "{{\"runtime_id\":\"{s}\",\"mode\":\"controller\"}}",
+                .{self.runtime_id_hex},
+            ) catch return error.AttachFailed;
             const response = self.client.call("runtime.attach", attach_params) catch |err| {
                 // `Client.call` can consume a committed response and then fail while duplicating its
                 // payload. At that point no stream id exists for targeted rollback, so even an OOM

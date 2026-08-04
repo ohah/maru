@@ -41,6 +41,7 @@ const upgrade_wire = @import("upgrade_wire.zig");
 const generation_batch_registry = @import("generation_batch_registry.zig");
 const ended_purge_transaction = @import("ended_purge_transaction.zig");
 const ended_purge_quarantine = @import("ended_purge_quarantine.zig");
+const prepared_request_authority = @import("prepared_request_authority.zig");
 const max_pending_event_count: usize = 4 * 256;
 comptime {
     if (max_pending_event_count > std.math.maxInt(u32))
@@ -140,6 +141,17 @@ const PreparedBlockingRpc = struct {
     fn settle(self: *PreparedBlockingRpc) void {
         const allocator = self.allocator;
         const frame = self.frame;
+        self.settleCaptured(allocator, frame);
+    }
+
+    /// Callback-safe settlement consumes only the descriptor captured while the prepared owner
+    /// was authenticated. The storage is tombstoned before allocator re-entry and is never read
+    /// again to decide what to free.
+    fn settleCaptured(
+        self: *PreparedBlockingRpc,
+        allocator: std.mem.Allocator,
+        frame: []u8,
+    ) void {
         self.frame = &.{};
         self.client_addr = 0;
         self.frame_digest = 0;
@@ -159,7 +171,41 @@ pub const PreparedBlockingRpcStorage = struct {
 pub const PreparedBlockingRpcIdentity = struct {
     request_id: u64,
     frame_digest: u64,
+    descriptor: prepared_request_authority.PreparedDescriptor,
 };
+
+fn preparedLifecycleRawValid(prepared: *const PreparedBlockingRpc) bool {
+    const raw = @as(*const u8, @ptrCast(&prepared.lifecycle)).*;
+    return raw <= @intFromEnum(PreparedBlockingRpcLifecycle.terminal);
+}
+
+fn preparedDescriptor(
+    prepared: *const PreparedBlockingRpc,
+    storage: *const PreparedBlockingRpcStorage,
+) prepared_request_authority.PreparedDescriptor {
+    return .{
+        .storage_addr = @intFromPtr(storage),
+        .prepared_incarnation = prepared.incarnation,
+        .client_addr = prepared.client_addr,
+        .request_id = prepared.request_id,
+        .request_digest = prepared.frame_digest,
+        .frame_addr = @intFromPtr(prepared.frame.ptr),
+        .frame_len = prepared.frame.len,
+        .allocator_ptr = @intFromPtr(prepared.allocator.ptr),
+        .allocator_vtable = @intFromPtr(prepared.allocator.vtable),
+    };
+}
+
+/// Scalar-only comparison. It must remain safe before frame hashing or allocator invocation when
+/// opaque storage bytes have been restored or corrupted at the same address.
+fn preparedDescriptorRawMatches(
+    prepared: *const PreparedBlockingRpc,
+    storage: *const PreparedBlockingRpcStorage,
+    expected: prepared_request_authority.PreparedDescriptor,
+) bool {
+    return preparedLifecycleRawValid(prepared) and expected.valid() and
+        preparedDescriptor(prepared, storage).matches(expected);
+}
 
 comptime {
     if (@sizeOf(PreparedBlockingRpcStorage) != @sizeOf(PreparedBlockingRpc) or
@@ -7300,7 +7346,11 @@ pub const Client = struct {
     ) PreparedBlockingRpcError!PreparedBlockingRpcIdentity {
         const prepared = preparedRpcFromStorage(storage);
         try self.prepareBlockingRpc(prepared, method, params_json);
-        return .{ .request_id = prepared.request_id, .frame_digest = prepared.frame_digest };
+        return .{
+            .request_id = prepared.request_id,
+            .frame_digest = prepared.frame_digest,
+            .descriptor = preparedDescriptor(prepared, storage),
+        };
     }
 
     pub fn abortPreparedBlockingRpcStorage(
@@ -7313,6 +7363,32 @@ pub const Client = struct {
         defer if (operation_fence_held) self.endPublicMutation();
         if (checkedAllocatorReentry(self)) return error.AdminBusy;
         return self.abortPreparedBlockingRpc(preparedRpcFromStorage(storage));
+    }
+
+    pub const CanonicalPreparedAbortOutcome = enum {
+        reusable,
+        terminal,
+    };
+
+    /// Settles only the exact scalar descriptor sealed by the node authority. A forged pointer or
+    /// allocator is rejected before hashing or free; content drift is safe to hash/free because
+    /// descriptor provenance is already exact, but terminalizes the request transaction.
+    pub fn abortPreparedBlockingRpcStorageCanonical(
+        self: *Client,
+        storage: *PreparedBlockingRpcStorage,
+        identity: PreparedBlockingRpcIdentity,
+    ) PreparedBlockingRpcError!CanonicalPreparedAbortOutcome {
+        const operation_fence_held = try self.beginPublicMutation();
+        defer if (operation_fence_held) self.endPublicMutation();
+        if (checkedAllocatorReentry(self)) return error.AdminBusy;
+        const prepared = preparedRpcFromStorage(storage);
+        if (!preparedDescriptorRawMatches(prepared, storage, identity.descriptor) or
+            !prepared.validFor(self) or prepared.request_id != identity.request_id or
+            prepared.frame_digest != identity.frame_digest)
+            return error.InvalidPreparedRpc;
+        const intact = prepared.frameIntact();
+        prepared.settle();
+        return if (intact) .reusable else .terminal;
     }
 
     fn executePreparedBlockingRpcStorageClassified(
@@ -7391,7 +7467,8 @@ pub const Client = struct {
         const operation_fence_held = self.beginPublicMutation() catch return false;
         defer if (operation_fence_held) self.endPublicMutation();
         const prepared = preparedRpcFromStorageConst(storage);
-        return prepared.validFor(self) and prepared.request_id == identity.request_id and
+        return preparedDescriptorRawMatches(prepared, storage, identity.descriptor) and
+            prepared.validFor(self) and prepared.request_id == identity.request_id and
             prepared.frame_digest == identity.frame_digest;
     }
 
@@ -7399,6 +7476,7 @@ pub const Client = struct {
         storage: *const PreparedBlockingRpcStorage,
     ) bool {
         const prepared = preparedRpcFromStorageConst(storage);
+        if (!preparedLifecycleRawValid(prepared)) return false;
         return prepared.frame.len == 0 and prepared.client_addr == 0 and
             (prepared.lifecycle == .pristine or prepared.lifecycle == .terminal);
     }
@@ -7419,8 +7497,10 @@ pub const Client = struct {
         prepared.lifecycle = .executing;
         const request_id = prepared.request_id;
         const frame_bytes = prepared.frame;
+        const frame_allocator = prepared.allocator;
+        var request_settled = false;
         self.next_request_id += 1;
-        defer prepared.settle();
+        defer if (!request_settled) prepared.settleCaptured(frame_allocator, frame_bytes);
         switch (io) {
             .blocking => socket_server.writeAll(self.fd, frame_bytes) catch {
                 // request prefix가 이미 kernel에 들어갔을 수 있다. 이 connection은 frame 경계를 다시 찾을 수 없으므로
@@ -7439,6 +7519,11 @@ pub const Client = struct {
                 else => error.WriteFailed,
             },
         }
+
+        // No response-side allocation or parser callback may retain the request-frame owner.
+        // Retire it from the authenticated local descriptor immediately after the request write.
+        prepared.settleCaptured(frame_allocator, frame_bytes);
+        request_settled = true;
 
         // 응답을 기다리는 동안 host가 비동기로 push하는 stream frame(delta_chunk/snapshot_chunk)은 **버퍼에 쌓는다** — 드롭하면
         // 그 사이 화면 갱신이 유실된다(§9 delta는 증분이라 한 배치만 놓쳐도 desync). 다음 `readStreamBatch`가 이 버퍼부터 소비한다.
@@ -11208,6 +11293,80 @@ test "prepared blocking RPC rejects copied moved foreign drift and stale duplica
     prepared.frame[prepared.frame.len - 1] ^= 1;
     try first.abortPreparedBlockingRpc(&prepared);
     try std.testing.expectError(error.InvalidPreparedRpc, first.executePreparedBlockingRpc(&prepared));
+}
+
+test "CR3a-2c3b canonical prepared abort rejects forged descriptors before dereference" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    var storage: PreparedBlockingRpcStorage = .{};
+    const identity = try client.prepareBlockingRpcStorage(&storage, "runtime.detach", null);
+    const exact = storage;
+    const prepared = preparedRpcFromStorage(&storage);
+
+    prepared.frame = @as([*]u8, @ptrFromInt(1))[0..identity.descriptor.frame_len];
+    try std.testing.expectError(
+        error.InvalidPreparedRpc,
+        client.abortPreparedBlockingRpcStorageCanonical(&storage, identity),
+    );
+    storage = exact;
+    preparedRpcFromStorage(&storage).allocator.ptr = @ptrFromInt(1);
+    try std.testing.expectError(
+        error.InvalidPreparedRpc,
+        client.abortPreparedBlockingRpcStorageCanonical(&storage, identity),
+    );
+    storage = exact;
+    @as(*u8, @ptrCast(&preparedRpcFromStorage(&storage).lifecycle)).* = 0xff;
+    try std.testing.expectError(
+        error.InvalidPreparedRpc,
+        client.abortPreparedBlockingRpcStorageCanonical(&storage, identity),
+    );
+    storage = exact;
+    try std.testing.expectEqual(
+        Client.CanonicalPreparedAbortOutcome.reusable,
+        try client.abortPreparedBlockingRpcStorageCanonical(&storage, identity),
+    );
+}
+
+test "CR3a-2c3b canonical prepared abort safe-frees exact descriptor content drift terminally" {
+    const allocator = std.testing.allocator;
+    var client = Client{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    var storage: PreparedBlockingRpcStorage = .{};
+    const identity = try client.prepareBlockingRpcStorage(&storage, "runtime.detach", null);
+    const prepared = preparedRpcFromStorage(&storage);
+    prepared.frame[prepared.frame.len - 1] ^= 1;
+    try std.testing.expectEqual(
+        Client.CanonicalPreparedAbortOutcome.terminal,
+        try client.abortPreparedBlockingRpcStorageCanonical(&storage, identity),
+    );
+    try std.testing.expect(Client.preparedBlockingRpcStorageSettled(&storage));
+}
+
+test "CR3a-2c3b settled opaque storage rejects every invalid raw lifecycle" {
+    var storage: PreparedBlockingRpcStorage = .{};
+    const prepared = preparedRpcFromStorage(&storage);
+    var raw: u16 = 0;
+    while (raw <= std.math.maxInt(u8)) : (raw += 1) {
+        storage = .{};
+        @as(*u8, @ptrCast(&prepared.lifecycle)).* = @intCast(raw);
+        const valid = raw == @intFromEnum(PreparedBlockingRpcLifecycle.pristine) or
+            raw == @intFromEnum(PreparedBlockingRpcLifecycle.terminal);
+        try std.testing.expectEqual(
+            valid,
+            Client.preparedBlockingRpcStorageSettled(&storage),
+        );
+    }
 }
 
 test "prepared blocking RPC execute consumes id and settles backing on write failure" {

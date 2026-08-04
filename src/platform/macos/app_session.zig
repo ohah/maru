@@ -22100,7 +22100,12 @@ pub const AppSession = struct {
         // with the same published component tree even if the pointer leaves the dock; an up over
         // a terminal must not begin a terminal selection or leak a PTY mouse event. A bare up in
         // the content is also consumed, matching the down path below.
-        if (self.dockVisible() and self.dock.view == .agent_sessions and button == 0 and (kind == 2 or kind == 3)) {
+        // An in-flight `PointerGestureOwner` outranks this rect test. A divider, tab, pane, sidebar
+        // or scrollbar drag keeps its owner until up, so a pointer that merely crosses the dock must
+        // not be re-routed here: the gesture would stop tracking mid-drag and its up would be
+        // consumed by the dock, leaving the owner armed. Only capture-free pointers are classified
+        // by rect (docs/chrome-interaction-migration.md §2 — an in-flight capture wins first).
+        if (self.dockVisible() and self.dock.view == .agent_sessions and button == 0 and (kind == 2 or kind == 3) and self.pointerGestureIs(.none)) {
             const content = self.dockGeometry().tree_content;
             const captured = self.agent_session_dock_interaction.capture != null;
             if (captured or layout_math.pointInRect(x_px, y_px, content)) {
@@ -64547,4 +64552,211 @@ test "archive smoke probe returns only the pointer-hittable clipped capability r
     var hidden = entry;
     hidden.effective_clip = .{ .x = 100, .y = 100, .width = 1, .height = 1 };
     try std.testing.expect(AppSession.smokeProbeVisibleRect(hidden) == null);
+}
+
+// ── 진행 중 pointer gesture vs 에이전트 세션 도크 분기 ──────────────────────────────────────────
+// `mouse()`의 도크 분기는 rect 판정만으로 move/up을 소비하고 return한다. 그 분기가 모든
+// `pointerGestureIs(...)` 분기보다 위에 있어, 도크가 열린 채로 divider·탭·pane·사이드바 카드·
+// 스크롤바를 끌다 포인터가 도크 content 위로 들어가면 그 gesture가 이벤트를 잃었다(끌던 것이 멈추고,
+// up도 도크가 먹어 owner가 armed로 남았다). 아래 5개는 다섯 gesture 각각에서 "도크 위를 지나도
+// 소유권이 유지되고 up이 owner를 푼다"를 고정한다 — 옛 동작이면 전부 red다.
+// 단일 출처: docs/chrome-interaction-migration.md §2.
+
+/// 아카이브 worker를 띄우지 않고 오른쪽 에이전트 세션 도크만 연다(레이아웃/라우팅 격리 —
+/// `automatic agent sessions dock width` 테스트와 같은 규율).
+fn openAgentSessionsDockForRouting(session: *AppSession, side: dock_panel.Side) void {
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = side;
+    session.dock.size = 0;
+    session.agent_session_archive_initialized = false;
+    session.setDockView(.agent_sessions);
+    session.agent_session_archive_initialized = true;
+    for (session.tabs.items) |tab| session.resizeTabPanes(tab);
+    session.recomputeActivePaneRect();
+}
+
+fn initDockedRoutingSession(allocator: std.mem.Allocator, side: dock_panel.Side) !*AppSession {
+    const session = try allocator.create(AppSession);
+    errdefer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    errdefer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(1600, 900, 1000);
+    openAgentSessionsDockForRouting(session, side);
+    return session;
+}
+
+/// 도크 content 중앙 — 진행 중 gesture가 지나가더라도 도크로 새면 안 되는 좌표.
+fn dockContentCenter(session: *AppSession) struct { x: f64, y: f64 } {
+    const content = session.dockGeometry().tree_content;
+    return .{
+        .x = @floatFromInt(content.x + content.w / 2),
+        .y = @floatFromInt(content.y + content.h / 2),
+    };
+}
+
+test "라이브 divider 드래그는 도크 위를 지나도 ratio를 계속 추적하고 up에서 풀린다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initDockedRoutingSession(allocator, .right);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    try std.testing.expect(session.dockVisible());
+
+    try session.splitActivePane(.horizontal);
+    var segs: std.ArrayList(PaneTree.DividerSeg) = .empty;
+    defer segs.deinit(allocator);
+    try session.layoutActiveTabDividers(&segs);
+    const seg = segs.items[0];
+    const split = seg.split;
+    const div_x: f64 = @floatFromInt(seg.pos);
+    const div_y: f64 = @floatFromInt(seg.bounds.y + seg.bounds.h / 2);
+
+    session.mouse(1, div_x, div_y, 0, 0);
+    try std.testing.expect(session.pointerGestureIs(.pane_divider));
+    session.mouse(2, div_x - 200, div_y, 0, 0);
+    const ratio_outside = split.ratio;
+
+    // 도크 content 위로 이동 — clamp가 아니라 이벤트 미도달로 얼어붙던 자리다. divider bounds가 도크
+    // 왼쪽에서 끝나므로 ratio는 상한으로 가야 하고, 직전 값 그대로면 도크가 move를 가로챈 것이다.
+    const dock_center = dockContentCenter(session);
+    session.mouse(2, dock_center.x, dock_center.y, 0, 0);
+    try std.testing.expect(split.ratio != ratio_outside);
+    try std.testing.expect(session.pointerGestureIs(.pane_divider));
+    try std.testing.expect(session.agent_session_dock_interaction.capture == null);
+
+    session.mouse(3, dock_center.x, dock_center.y, 0, 0);
+    try std.testing.expect(!session.pointerGestureIs(.pane_divider));
+    _ = try session.tick();
+}
+
+test "라이브 Term 탭 드래그는 도크 위를 지나도 좌표를 계속 받고 up에서 풀린다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initDockedRoutingSession(allocator, .right);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    try session.newTermInActivePane(); // 탭 2개 — 탭 세그먼트가 생긴다
+    var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer lr.deinit(allocator);
+    try session.activeTabLeafRects(allocator, session.termRect(), &lr);
+    const pb = session.paneBar(lr.items[0].rect, lr.items[0].leaf).?;
+    const tab_x: f64 = @floatFromInt(pb.tabs.x + 2);
+    const tab_y: f64 = @floatFromInt(pb.full.y + 1);
+
+    session.mouse(1, tab_x, tab_y, 0, 0);
+    try std.testing.expect(session.pointerGestureIs(.terminal_tab));
+
+    // drag(2)는 owner의 마지막 좌표를 갱신한다. 도크가 가로채면 그 값이 down 좌표에 머문다.
+    const dock_center = dockContentCenter(session);
+    session.mouse(2, dock_center.x, dock_center.y, 0, 0);
+    try std.testing.expect(session.pointerGestureIs(.terminal_tab));
+    try std.testing.expectEqual(dock_center.x, session.pointer_gesture_owner.terminal_tab.x);
+    try std.testing.expect(session.agent_session_dock_interaction.capture == null);
+
+    session.mouse(3, dock_center.x, dock_center.y, 0, 0);
+    try std.testing.expect(!session.pointerGestureIs(.terminal_tab));
+    _ = try session.tick();
+}
+
+test "라이브 pane 드래그는 도크 위를 지나도 좌표를 계속 받고 up에서 풀린다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initDockedRoutingSession(allocator, .right);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    try session.splitActivePane(.horizontal);
+    var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer lr.deinit(allocator);
+    try session.activeTabLeafRects(allocator, session.termRect(), &lr);
+    const pb = session.paneBar(lr.items[1].rect, lr.items[1].leaf).?;
+
+    // grip(좌측, tabs.x 앞) down → pane 통째 드래그 arm.
+    session.mouse(1, @floatFromInt(pb.full.x + 1), @floatFromInt(pb.full.y + 1), 0, 0);
+    try std.testing.expect(session.pointerGestureIs(.pane));
+
+    const dock_center = dockContentCenter(session);
+    session.mouse(2, dock_center.x, dock_center.y, 0, 0);
+    try std.testing.expect(session.pointerGestureIs(.pane));
+    try std.testing.expectEqual(dock_center.x, session.pointer_gesture_owner.pane.x);
+    try std.testing.expectEqual(dock_center.y, session.pointer_gesture_owner.pane.y);
+    try std.testing.expect(session.agent_session_dock_interaction.capture == null);
+
+    session.mouse(3, dock_center.x, dock_center.y, 0, 0);
+    try std.testing.expect(!session.pointerGestureIs(.pane));
+    _ = try session.tick();
+}
+
+test "라이브 사이드바 카드 드래그는 도크 위를 지나도 소유권을 지키고 up에서 풀린다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initDockedRoutingSession(allocator, .right);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    _ = try session.newTab(); // 카드 2장
+    session.recomputeVisibleTabs();
+    const card_x: f64 = @floatFromInt(session.sidebar_width_px / 2);
+    const card_top = chrome.components.sidebar.rowTop(session.sidebar_rows.items, 0, session.sidebar_header_height_px, session.sidebarMetrics(), 0);
+    const card_y: f64 = @floatFromInt(card_top + @as(i64, @intCast(chrome.components.sidebar.rowHeight(session.sidebar_rows.items[0], session.sidebarMetrics()) / 2)));
+
+    session.mouse(1, card_x, card_y, 0, 0);
+    try std.testing.expect(session.pointerGestureIs(.sidebar_tab));
+    const origin = session.pointer_gesture_owner.sidebar_tab.index;
+
+    const dock_center = dockContentCenter(session);
+    session.mouse(2, dock_center.x, dock_center.y, 0, 0);
+    try std.testing.expect(session.pointerGestureIs(.sidebar_tab));
+    try std.testing.expectEqual(origin, session.pointer_gesture_owner.sidebar_tab.index);
+    try std.testing.expect(session.agent_session_dock_interaction.capture == null);
+
+    session.mouse(3, dock_center.x, dock_center.y, 0, 0);
+    try std.testing.expect(!session.pointerGestureIs(.sidebar_tab));
+    _ = try session.tick();
+}
+
+// 우측 도크는 경계 divider zone이 우측 스크롤바 위를 덮어 down 자체가 `dock_outer_divider`로 간다(별개 축).
+// 스크롤바 라우팅만 격리하려고 도크를 아래에 연다.
+test "라이브 스크롤바 thumb 드래그는 도크 위를 지나도 소유권을 지키고 up에서 풀린다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initDockedRoutingSession(allocator, .bottom);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    // 스크롤바는 스크롤백이 있어야 존재한다.
+    for (0..200) |i| {
+        var buf: [32]u8 = undefined;
+        const line = try std.fmt.bufPrint(&buf, "line {d}\r\n", .{i});
+        try session.activeSurface().core.write(line);
+    }
+    const rect = session.active_pane_rect;
+    const grab_x: f64 = @floatFromInt(rect.x + rect.w - 2);
+    const grab_y: f64 = @floatFromInt(rect.y + rect.h / 2);
+    try std.testing.expect(session.scrollbarGrabAt(grab_x, grab_y) != null);
+
+    session.mouse(1, grab_x, grab_y, 0, 0);
+    try std.testing.expect(session.pointerGestureIs(.scrollbar));
+
+    // 다른 네 gesture와 달리 이동 지표(offset 변화)는 쓰지 않는다. 우측 도크는 경계 divider zone이 스크롤바
+    // 위를 덮어 down 자체가 안 되고, 하단 도크는 content가 트랙의 세로 범위 밖이라 clamp 결과가 down이 만든
+    // 값과 같아질 수 있다. 소유권 유지와 **up 해제**만으로 도크 가로채기를 고정한다 — 가로채이면 up이 도크로
+    // 가서 owner가 armed로 남는다.
+    const dock_center = dockContentCenter(session);
+    session.mouse(2, dock_center.x, dock_center.y, 0, 0);
+    try std.testing.expect(session.pointerGestureIs(.scrollbar));
+    try std.testing.expect(session.agent_session_dock_interaction.capture == null);
+
+    session.mouse(3, dock_center.x, dock_center.y, 0, 0);
+    try std.testing.expect(!session.pointerGestureIs(.scrollbar));
+    _ = try session.tick();
 }

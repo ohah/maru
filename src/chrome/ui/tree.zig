@@ -89,6 +89,9 @@ pub const NodeProps = union(enum) {
         variant: CardVariant,
         paint: PaintStyle,
         action: ?UiAction,
+        /// Component가 선언한 drag 능력. 없으면 이 node는 click 전용이다. 의미(payload가 무엇을 옮기는지)는
+        /// host의 intent table만 알고, tree와 interaction은 opaque ID로만 다룬다.
+        drag: ?DragDeclaration = null,
         direction: layout.Direction,
         justify: layout.Justify,
         align_items: layout.Align,
@@ -204,6 +207,15 @@ pub fn buttonWithLabel(options: ButtonOptions, children: []const UiNode) UiNode 
     return node;
 }
 
+pub const DragAxis = enum { horizontal, vertical, free };
+
+/// Component가 선언하는 drag 능력. `ui/interaction.zig`가 같은 타입을 소비한다.
+pub const DragDeclaration = struct {
+    payload: u64,
+    axis: DragAxis = .free,
+    threshold_px: f32 = 3,
+};
+
 pub const RectEntry = struct {
     id: UiId,
     parent_index: ?usize,
@@ -213,6 +225,9 @@ pub const RectEntry = struct {
     /// 이 entry와 모든 visible ancestor가 clip하지 않는다는 뜻이다.
     effective_clip: ?layout.UiRect,
     action: ?UiAction,
+    /// Component가 선언한 drag 능력. 없으면 이 node는 click 전용이다. payload가 무엇을 옮기는지는
+    /// host의 intent table만 알고, tree와 interaction은 opaque ID로만 다룬다.
+    drag: ?DragDeclaration = null,
     /// This is an exact projection of immutable semantic props, not a second style source.
     /// `ui_paint` consumes this flattened snapshot alongside the same rect/action used by
     /// interaction, so later host/Metal stages cannot rediscover a variant from domain state.
@@ -223,6 +238,10 @@ pub const RectEntry = struct {
 /// `parent_index`를 쓰며, subtree 전체는 다음 sibling parent boundary까지의 range다.
 pub const UiRectTree = struct {
     entries: []const RectEntry,
+    /// 이 스냅샷의 published 세대. pointer 이벤트가 자기가 겨냥한 세대를 함께 실어 오므로, 이전
+    /// tree를 보고 누른 up이 새 tree의 action을 실행하는 것을 dispatch가 거부할 수 있다.
+    /// 기본 0은 "세대를 쓰지 않는 소비자"이며 그 경우 검사가 비활성이다.
+    generation: u64 = 0,
 
     pub fn find(self: UiRectTree, id: UiId) ?usize {
         for (self.entries, 0..) |entry, index| {

@@ -76,7 +76,7 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     // AS4 font/scale fixture adds only published-tree geometry probes beside the existing
     // dock-local archive path. Keep the exact reviewed reflection inventory so unrelated
     // reflection cannot piggyback on this structural source change.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 3, .digest_hex = "99df2e4d24c8706f248c05785dbf69b894444f6f18ce6bfde5126e5c01608e99" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 3, .digest_hex = "2ea6e1cdbbb663e10084b6bcd4d2d3c3cd5cdca7bbd82b6f476756661ba7dfb7" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

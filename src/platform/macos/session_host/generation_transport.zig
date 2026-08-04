@@ -1670,6 +1670,7 @@ test "CR3a-2a response publication failure poisons before payload free reentry" 
     probe.client = &client;
     var slot: client_slot_mod.ClientSlot = undefined;
     try client_slot_mod.ClientSlot.initInPlace(&slot, allocator, &client, 0xDD);
+    probe.client = slot.logicalClient();
     defer slot.deinit();
     var binding: contract.PreparedAttachmentBinding = .{};
     var lease: @import("connection_lease.zig").ConnectionLease = .{};
@@ -1692,6 +1693,107 @@ test "CR3a-2a response publication failure poisons before payload free reentry" 
     try std.testing.expect(slot.logicalClient().unusable);
     response = .{};
     try terminalizeOwned(&transport, 0x106);
+    try slot.abortAttachmentBinding(&binding, reservation);
+}
+
+test "CR3a-2c3b request allocation alias is rejected before canonical owner write" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0xE1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    var slot: client_slot_mod.ClientSlot = undefined;
+    try client_slot_mod.ClientSlot.initInPlace(&slot, allocator, &client, 0xE1);
+    defer slot.deinit();
+    var binding: contract.PreparedAttachmentBinding = .{};
+    var lease: @import("connection_lease.zig").ConnectionLease = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0xE11);
+    var transport: GenerationTransport = .{};
+    try mintInPlace(&transport, &slot, 0xE12, @sizeOf(GenerationTransport), reservation);
+
+    const binding_before = binding;
+    var hostile = OperationAliasAllocator{
+        .parent = allocator,
+        .target = std.mem.asBytes(&binding),
+        .armed = true,
+    };
+    slot.current.guarded_allocator.parent = hostile.allocator();
+    try std.testing.expectError(
+        error.ProtocolError,
+        transport.prepareRequest(contract.RuntimeRequest.attachController()),
+    );
+    slot.current.guarded_allocator.parent = allocator;
+    try std.testing.expect(hostile.alias_returned);
+    try std.testing.expect(!hostile.alias_freed);
+    try std.testing.expect(std.meta.eql(binding_before, binding));
+    try std.testing.expect(slot.logicalClient().unusable);
+    try terminalizeOwned(&transport, 0xE12);
+    try slot.abortAttachmentBinding(&binding, reservation);
+}
+
+test "CR3a-2c3b response allocation alias is rejected before destination write" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    const response_wire = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .response, .request_id = 1 },
+        "{}",
+    );
+    defer allocator.free(response_wire);
+    const Peer = struct {
+        fn run(fd: c.fd_t, wire: []const u8) void {
+            defer _ = c.close(fd);
+            var request: [4096]u8 = undefined;
+            if (c.read(fd, &request, request.len) <= 0) return;
+            socket_server.writeAll(fd, wire) catch return;
+        }
+    };
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    var peer = try std.Thread.spawn(.{}, Peer.run, .{ fds[1], response_wire });
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 0xE2,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    var slot: client_slot_mod.ClientSlot = undefined;
+    try client_slot_mod.ClientSlot.initInPlace(&slot, allocator, &client, 0xE2);
+    defer slot.deinit();
+    var binding: contract.PreparedAttachmentBinding = .{};
+    var lease: @import("connection_lease.zig").ConnectionLease = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0xE21);
+    var transport: GenerationTransport = .{};
+    try mintInPlace(&transport, &slot, 0xE22, @sizeOf(GenerationTransport), reservation);
+    var response: executed_response_mod.ExecutedResponse = .{};
+    const response_before = response;
+    var hostile = OperationAliasAllocator{
+        .parent = allocator,
+        .target = std.mem.asBytes(&response),
+    };
+    slot.current.guarded_allocator.parent = hostile.allocator();
+    // The request frame keeps this same allocator identity and delegates to its stable parent.
+    // Only response parsing is hostile.
+    const receipt = try transport.prepareRequest(contract.RuntimeRequest.attachController());
+    hostile.armed = true;
+    try std.testing.expectError(
+        error.ProtocolError,
+        transport.executePreparedRequest(receipt, &response),
+    );
+    slot.current.guarded_allocator.parent = allocator;
+    peer.join();
+    try std.testing.expect(hostile.alias_returned);
+    try std.testing.expect(!hostile.alias_freed);
+    try std.testing.expect(std.meta.eql(response_before, response));
+    try std.testing.expect(slot.logicalClient().unusable);
+    try terminalizeOwned(&transport, 0xE22);
     try slot.abortAttachmentBinding(&binding, reservation);
 }
 
@@ -1838,7 +1940,10 @@ test "CR3a-2a accepted response retains allocator captured before wire" {
     peer.join();
     try std.testing.expect(result == .accepted);
     try std.testing.expect(probe.mutated_after_preflight);
-    try std.testing.expect(std.meta.eql(response.allocator.?, probe.allocator()));
+    try std.testing.expectEqual(
+        @as(*anyopaque, @ptrCast(&slot.current.guarded_allocator)),
+        response.allocator.?.ptr,
+    );
     try std.testing.expectEqual(
         executed_response_mod.DeinitOutcome.cleaned,
         response.deinit(try slot.responseOwnerSeal(reservation)),
@@ -1904,10 +2009,55 @@ const PoisonOrderAllocator = struct {
         } else if (self.armed and self.client.?.unusable and !self.saw_poison_before_free) {
             self.saw_poison_before_free = true;
             const unexpected = self.client.?.call("host.info", null) catch |err| blk: {
-                self.reentry_rejected = err == error.ConnectionClosed;
+                self.reentry_rejected = err == error.ConnectionClosed or err == error.AdminBusy;
                 break :blk null;
             };
             if (unexpected) |bytes| self.client.?.allocator.free(bytes);
+        }
+        self.parent.vtable.free(self.parent.ptr, memory, alignment, ret_addr);
+    }
+};
+
+const OperationAliasAllocator = struct {
+    parent: std.mem.Allocator,
+    target: []u8,
+    armed: bool = false,
+    alias_returned: bool = false,
+    alias_freed: bool = false,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        if (self.armed) {
+            self.alias_returned = true;
+            return self.target.ptr;
+        }
+        return self.parent.vtable.alloc(self.parent.ptr, len, alignment, ret_addr);
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        return self.parent.vtable.resize(self.parent.ptr, memory, alignment, new_len, ret_addr);
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        return self.parent.vtable.remap(self.parent.ptr, memory, alignment, new_len, ret_addr);
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        if (@intFromPtr(memory.ptr) == @intFromPtr(self.target.ptr)) {
+            self.alias_freed = true;
+            return;
         }
         self.parent.vtable.free(self.parent.ptr, memory, alignment, ret_addr);
     }

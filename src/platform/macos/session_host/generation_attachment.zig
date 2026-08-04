@@ -263,7 +263,14 @@ pub const GenerationAttachment = struct {
             return if (self.self_addr == @intFromPtr(self)) .already_terminal else .corrupt;
         if (!self.valid()) return .corrupt;
         switch (self.lifecycle) {
-            .shell => self.terminalizeTransport(),
+            .shell => switch (generation_transport_mod.preflightTerminalizeOwned(
+                &self.transport,
+                @intFromPtr(self),
+            )) {
+                .ready => self.terminalizeTransport(),
+                .busy => return .busy,
+                .invalid => return .corrupt,
+            },
             .binding_prepared => return .busy,
             .executing => return .busy,
             .cleaning => return .busy,

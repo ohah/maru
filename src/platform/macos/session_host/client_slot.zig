@@ -95,6 +95,10 @@ pub const Lifecycle = enum {
 };
 
 const GenerationGuardedAllocator = struct {
+    const max_operation_ranges = 8;
+    const OperationRangeInput = struct { start: usize, len: usize };
+    const OperationRange = struct { start: usize, end: usize };
+
     parent: std.mem.Allocator,
     client: ?*client_mod.Client = null,
     node_start: usize,
@@ -109,6 +113,34 @@ const GenerationGuardedAllocator = struct {
     snapshot_out_end: usize = 0,
     snapshot_guard_active: bool = false,
     snapshot_alias_rejected: bool = false,
+    operation_ranges: [max_operation_ranges]OperationRange = undefined,
+    operation_range_count: usize = 0,
+    operation_guard_active: bool = false,
+    operation_alias_rejected: bool = false,
+
+    fn beginOperationGuard(
+        self: *GenerationGuardedAllocator,
+        ranges: []const OperationRangeInput,
+    ) bool {
+        if (self.operation_guard_active or ranges.len > self.operation_ranges.len) return false;
+        for (ranges, 0..) |range, index| {
+            if (range.start == 0 or range.len == 0) return false;
+            const end = std.math.add(usize, range.start, range.len) catch return false;
+            self.operation_ranges[index] = .{ .start = range.start, .end = end };
+        }
+        self.operation_range_count = ranges.len;
+        self.operation_alias_rejected = false;
+        self.operation_guard_active = true;
+        return true;
+    }
+
+    fn endOperationGuard(self: *GenerationGuardedAllocator) void {
+        if (!self.operation_guard_active)
+            @panic("generation operation allocator guard was not active");
+        self.operation_guard_active = false;
+        self.operation_range_count = 0;
+        self.operation_ranges = undefined;
+    }
 
     fn allocator(self: *GenerationGuardedAllocator) std.mem.Allocator {
         return .{ .ptr = self, .vtable = &.{
@@ -122,13 +154,28 @@ const GenerationGuardedAllocator = struct {
     fn rejects(self: *const GenerationGuardedAllocator, ptr: [*]u8, len: usize) bool {
         const start = @intFromPtr(ptr);
         const end = std.math.add(usize, start, len) catch return true;
-        return rawRangesOverlap(start, end, self.node_start, self.node_end) or
+        if (rawRangesOverlap(start, end, self.node_start, self.node_end) or
             rawRangesOverlap(start, end, self.slot_start, self.slot_end) or
             rawRangesOverlap(start, end, self.source_start, self.source_end) or
             (self.snapshot_guard_active and
                 (rawRangesOverlap(start, end, self.snapshot_owner_start, self.snapshot_owner_end) or
                     rawRangesOverlap(start, end, self.snapshot_out_start, self.snapshot_out_end) or
-                    client_mod.generationAllocationAliasesOwnedBacking(self.client.?, ptr, len)));
+                    client_mod.generationAllocationAliasesOwnedBacking(self.client.?, ptr, len))))
+            return true;
+        if (self.operation_guard_active)
+            for (self.operation_ranges[0..self.operation_range_count]) |range|
+                if (rawRangesOverlap(start, end, range.start, range.end)) return true;
+        return false;
+    }
+
+    fn recordAliasRejection(self: *GenerationGuardedAllocator) void {
+        if (self.operation_guard_active) {
+            self.operation_alias_rejected = true;
+        } else if (self.snapshot_guard_active) {
+            self.snapshot_alias_rejected = true;
+        } else {
+            @panic("generation allocator returned canonical owner alias");
+        }
     }
 
     fn alloc(
@@ -147,9 +194,7 @@ const GenerationGuardedAllocator = struct {
             return_address,
         ) orelse return null;
         if (self.rejects(result, len)) {
-            if (!self.snapshot_guard_active)
-                @panic("generation allocator returned canonical owner alias");
-            self.snapshot_alias_rejected = true;
+            self.recordAliasRejection();
             return null;
         }
         return result;
@@ -164,9 +209,7 @@ const GenerationGuardedAllocator = struct {
     ) bool {
         const self: *GenerationGuardedAllocator = @ptrCast(@alignCast(context));
         if (self.rejects(memory.ptr, new_len)) {
-            if (!self.snapshot_guard_active)
-                @panic("generation allocator resized into canonical owner");
-            self.snapshot_alias_rejected = true;
+            self.recordAliasRejection();
             return false;
         }
         if (!self.client.?.enterGenerationAllocatorCallback()) return false;
@@ -198,9 +241,7 @@ const GenerationGuardedAllocator = struct {
             return_address,
         ) orelse return null;
         if (self.rejects(result, new_len)) {
-            if (!self.snapshot_guard_active)
-                @panic("generation allocator remapped into canonical owner");
-            self.snapshot_alias_rejected = true;
+            self.recordAliasRejection();
             return null;
         }
         return result;
@@ -1097,6 +1138,20 @@ pub fn prepareGenerationRequest(
 
     const storage: *client_mod.PreparedBlockingRpcStorage =
         @ptrFromInt(request.prepared_storage_addr);
+    const request_ranges = [_]GenerationGuardedAllocator.OperationRangeInput{
+        .{ .start = request.transport_addr, .len = 1 },
+        .{ .start = identity.binding_storage_addr, .len = @sizeOf(contract.PreparedAttachmentBinding) },
+        .{ .start = request.prepared_storage_addr, .len = @sizeOf(client_mod.PreparedBlockingRpcStorage) },
+        .{ .start = request.owner_seal_addr, .len = @sizeOf(contract.TransportOwnerSeal) },
+    };
+    const guard = &node.guarded_allocator;
+    if (!guard.beginOperationGuard(&request_ranges)) return error.InvalidOwner;
+    defer guard.endOperationGuard();
+    const previous_allocator = node.client.beginGenerationAllocatorScope(
+        guard.allocator(),
+        .rpc_prepare,
+    ) catch return error.Busy;
+    defer node.client.restoreGenerationAllocatorScopeUnchecked(previous_allocator);
     var params_buffer: [4096]u8 = undefined;
     const params_json = encodeGenerationRequestParams(
         &params_buffer,
@@ -1108,7 +1163,13 @@ pub fn prepareGenerationRequest(
         storage,
         contract.requestMethod(tag),
         params_json,
-    ) catch |err| return mapGenerationRequestClientError(err);
+    ) catch |err| {
+        if (guard.operation_alias_rejected) {
+            node.client.poison(.local_invariant_violation);
+            return error.ProtocolError;
+        }
+        return mapGenerationRequestClientError(err);
+    };
     const receipt = contract.PreparedCallReceipt.init(.{
         .transport_incarnation = request.transport_incarnation,
         .request_id = prepared_identity.request_id,
@@ -1266,6 +1327,29 @@ pub fn executeGenerationRequest(
         return error.InvalidResponseDestination;
     }
 
+    const response_ranges = [_]GenerationGuardedAllocator.OperationRangeInput{
+        .{ .start = @intFromPtr(response_out), .len = @sizeOf(executed_response_mod.ExecutedResponse) },
+        .{ .start = @intFromPtr(response_owner), .len = @sizeOf(contract.ExecutedResponseOwnerSeal) },
+        .{ .start = @intFromPtr(binding), .len = @sizeOf(contract.PreparedAttachmentBinding) },
+        .{ .start = @intFromPtr(storage), .len = @sizeOf(client_mod.PreparedBlockingRpcStorage) },
+        .{ .start = request.transport_addr, .len = 1 },
+        .{ .start = execution.owner_addr, .len = execution.owner_size },
+    };
+    const guard = &node.guarded_allocator;
+    if (!guard.beginOperationGuard(&response_ranges)) {
+        disposition = try rollbackExecutingRequest(node, request, identity, canonical);
+        return error.InvalidOwner;
+    }
+    defer guard.endOperationGuard();
+    const previous_allocator = node.client.beginGenerationAllocatorScope(
+        guard.allocator(),
+        .rpc_execute,
+    ) catch {
+        disposition = try rollbackExecutingRequest(node, request, identity, canonical);
+        return error.Busy;
+    };
+    defer node.client.restoreGenerationAllocatorScopeUnchecked(previous_allocator);
+
     const response_incarnation = issueGenerationResponseIncarnation() catch {
         disposition = try rollbackExecutingRequest(node, request, identity, canonical);
         return error.IdentityExhausted;
@@ -1304,10 +1388,15 @@ pub fn executeGenerationRequest(
         return error.InvalidResponseDestination;
     }
 
-    const response = switch (node.client.executePreparedBlockingRpcStorageWithAllocator(
+    const execution_result = node.client.executePreparedBlockingRpcStorageWithAllocator(
         storage,
         response_allocator,
-    )) {
+    );
+    if (guard.operation_alias_rejected) {
+        node.client.poison(.local_invariant_violation);
+        return error.ProtocolError;
+    }
+    const response = switch (execution_result) {
         .not_executed => |err| {
             disposition = try rollbackExecutingRequest(node, request, identity, canonical);
             return err;
@@ -1353,6 +1442,7 @@ pub fn executeGenerationRequest(
         ))
     {
         node.client.poison(.local_invariant_violation);
+        response_allocator.free(response.payload);
         return error.InvalidResponseDestination;
     }
     const correlated = contract.CorrelatedExecutedCall.init(
@@ -1438,8 +1528,11 @@ fn responseDestinationValid(
 ) bool {
     const out_addr = @intFromPtr(response_out);
     const seal_addr = @intFromPtr(response_owner);
-    if (byteRangesOverlap(out_addr, @sizeOf(executed_response_mod.ExecutedResponse), owner_addr, owner_size) or
-        byteRangesOverlap(out_addr, @sizeOf(executed_response_mod.ExecutedResponse), slot_addr, @sizeOf(ClientSlot)) or
+    // The existing attach destination is an owned field inside GenerationAttachment, so overlap
+    // with the outer owner range is required to remain legal. It must still be disjoint from every
+    // canonical node/binding/storage authority; the allocator guard separately rejects payloads
+    // that alias any byte of the outer owner.
+    if (byteRangesOverlap(out_addr, @sizeOf(executed_response_mod.ExecutedResponse), slot_addr, @sizeOf(ClientSlot)) or
         byteRangesOverlap(out_addr, @sizeOf(executed_response_mod.ExecutedResponse), @intFromPtr(node), @sizeOf(ClientNode)) or
         byteRangesOverlap(out_addr, @sizeOf(executed_response_mod.ExecutedResponse), @intFromPtr(binding), @sizeOf(contract.PreparedAttachmentBinding)) or
         byteRangesOverlap(out_addr, @sizeOf(executed_response_mod.ExecutedResponse), @intFromPtr(storage), @sizeOf(client_mod.PreparedBlockingRpcStorage)) or
@@ -2891,8 +2984,11 @@ pub const ClientSlot = struct {
             guard.snapshot_out_end = 0;
         }
         const allocator = guard.allocator();
-        const previous_allocator = try self.current.client.beginGenerationBatchAllocator(allocator);
-        defer self.current.client.restoreGenerationBatchAllocatorUnchecked(previous_allocator);
+        const previous_allocator = try self.current.client.beginGenerationAllocatorScope(
+            allocator,
+            .initial_snapshot,
+        );
+        defer self.current.client.restoreGenerationAllocatorScopeUnchecked(previous_allocator);
         const bytes = self.current.client.readSnapshot(stream_id) catch |err| {
             if (guard.snapshot_alias_rejected) {
                 self.current.client.poison(.local_invariant_violation);
@@ -2920,10 +3016,11 @@ pub const ClientSlot = struct {
             try self.current.client.requireBufferedGenerationBatch(stream_id);
         // allocator callback 재진입은 registry generation을 예약하기 전에 막는다. 이 순서가 뒤집히면
         // 최종 entry를 abort해도 재진입만으로 checked-monotonic generation이 소모된다.
-        const previous_allocator = try self.current.client.beginGenerationBatchAllocator(
+        const previous_allocator = try self.current.client.beginGenerationAllocatorScope(
             self.current.guarded_allocator.allocator(),
+            .attachment_batch,
         );
-        defer self.current.client.restoreGenerationBatchAllocatorUnchecked(previous_allocator);
+        defer self.current.client.restoreGenerationAllocatorScopeUnchecked(previous_allocator);
         const reservation = try self.current.batch_registry.reserve(stream_id);
         var reservation_live = true;
         defer if (reservation_live)

@@ -5787,9 +5787,17 @@ pub const Client = struct {
         self.generation_batch_accounting.ledger = ledger;
     }
 
-    pub fn beginGenerationBatchAllocator(
+    pub const GenerationAllocatorPurpose = enum {
+        attachment_batch,
+        initial_snapshot,
+        rpc_prepare,
+        rpc_execute,
+    };
+
+    pub fn beginGenerationAllocatorScope(
         self: *Client,
         allocator: std.mem.Allocator,
+        _: GenerationAllocatorPurpose,
     ) (ClientError || generation_batch_registry.Error)!std.mem.Allocator {
         const operation_fence_held = try self.ensureUsable();
         defer if (operation_fence_held) self.endPublicMutation();
@@ -5811,7 +5819,7 @@ pub const Client = struct {
         return error.AdminBusy;
     }
 
-    pub fn restoreGenerationBatchAllocatorUnchecked(
+    pub fn restoreGenerationAllocatorScopeUnchecked(
         self: *Client,
         allocator: std.mem.Allocator,
     ) void {

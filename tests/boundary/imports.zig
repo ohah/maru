@@ -361,6 +361,7 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .name = "callUntil", .receiver_type = mutable, .class = .guarded },
         .{ .name = "prepareBlockingRpcStorage", .receiver_type = mutable, .class = .guarded },
         .{ .name = "abortPreparedBlockingRpcStorage", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "abortPreparedBlockingRpcStorageCanonical", .receiver_type = mutable, .class = .guarded },
         .{ .name = "preflightPreparedBlockingRpcStorageExecution", .receiver_type = mutable, .class = .guarded },
         .{ .name = "executePreparedBlockingRpcStorageWithAllocator", .receiver_type = mutable, .class = .guarded },
         .{ .name = "preparedBlockingRpcStorageMatches", .receiver_type = immutable, .class = .guarded },
@@ -463,6 +464,7 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .receiver = "callUntil", .funnel = "callUntilWithOps", .gate = "requireBlockingMode" },
         .{ .receiver = "prepareBlockingRpcStorage", .funnel = "prepareBlockingRpc", .gate = "requireBlockingMode" },
         .{ .receiver = "abortPreparedBlockingRpcStorage", .funnel = "abortPreparedBlockingRpcStorage", .gate = "beginPublicMutation" },
+        .{ .receiver = "abortPreparedBlockingRpcStorageCanonical", .funnel = "abortPreparedBlockingRpcStorageCanonical", .gate = "beginPublicMutation" },
         .{ .receiver = "preflightPreparedBlockingRpcStorageExecution", .funnel = "preflightPreparedBlockingRpcStorageExecution", .gate = "ensureUsable" },
         .{ .receiver = "executePreparedBlockingRpcStorageWithAllocator", .funnel = "executePreparedBlockingRpcStorageWithAllocator", .gate = "beginPublicMutation" },
         .{ .receiver = "preparedBlockingRpcStorageMatches", .funnel = "preparedBlockingRpcStorageMatches", .gate = "beginPublicMutation" },
@@ -1174,6 +1176,13 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "ClientOperationFence" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "ended_purge_transaction" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "ended_purge_quarantine" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "prepared_request_authority" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "executed_response_mod" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "preparedLifecycleRawValid" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "preparedDescriptor" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "preparedDescriptorRawMatches" },
+                .{ .parent = "Client", .kind = "const", .visibility = "pub", .modifier = "", .name = "CanonicalPreparedAbortOutcome" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "abortPreparedBlockingRpcStorageCanonical" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "PreparedEndedPurgeCommit" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "EndedPurgeCommitError" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "EndedPurgeClientCommitOutcome" },
@@ -1267,17 +1276,45 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
             .optional_containers = &.{},
             .allowed = &.{
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "compatibility" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "prepared_request_authority" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "CapabilityProjectionError" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "CapabilityProjectionRequest" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationRequestError" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationRequestPrepare" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationPreparedRequest" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationRequestAbort" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationTransportOwnerQuery" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationRequestExecute" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationExecuteError" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "ExecuteDisposition" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "RegisteredNodeLookup" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "RegisteredNodeOperation" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "GenerationRequestOwner" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "streamOperationNodeIdle" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "beginRegisteredNodeOperation" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "endRegisteredNodeOperation" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "beginGenerationRequestOwner" },
                 .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "projectGenerationCapabilities" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "stringifyGenerationParams" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "encodeGenerationRequestParams" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "encodeGenerationCoreCommand" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "prepareGenerationRequest" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "abortGenerationRequest" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "executeGenerationRequest" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "rollbackExecutingRequest" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "terminalizeExecutingRequest" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "responseDestinationValid" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "responseOwnerStillPristine" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "payloadAliasesExecutionOwners" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "byteRangesOverlap" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "issueGenerationResponseIncarnation" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "preflightGenerationTransportTerminalize" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "terminalizeGenerationTransportOwner" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "mapGenerationRequestClientError" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "ended_purge_quarantine" },
                 .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "", .name = "ended_purge_quarantine_registry" },
                 .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "", .name = "process_runtime_pid" },
+                .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "", .name = "generation_response_incarnation_issuer" },
                 .{ .parent = "ClientSlot", .kind = "const", .visibility = "pub", .modifier = "", .name = "ProcessRuntimeInitError" },
                 .{ .parent = "ClientSlot", .kind = "const", .visibility = "pub", .modifier = "", .name = "EndedPurgeCommitError" },
                 .{ .parent = "ClientSlot", .kind = "const", .visibility = "pub", .modifier = "", .name = "EndedPurgeResult" },
@@ -1766,11 +1803,15 @@ test "CR3a-2a attachment cleanup registry stays node-local and callback-free" {
         "src/platform/macos/session_host/attachment_cleanup_registry.zig",
     );
     defer allocator.free(source);
-    try std.testing.expectEqual(@as(usize, 2), countOccurrences(source, "@import("));
+    try std.testing.expectEqual(@as(usize, 3), countOccurrences(source, "@import("));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(source, "@import(\"std\")"));
     try std.testing.expectEqual(
         @as(usize, 1),
         countOccurrences(source, "@import(\"generation_attachment_contract.zig\")"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(source, "@import(\"prepared_request_authority.zig\")"),
     );
     const forbidden = [_][]const u8{
         "@import(\"client.zig\")",
@@ -1780,6 +1821,30 @@ test "CR3a-2a attachment cleanup registry stays node-local and callback-free" {
         "callback: ",
         "CleanupPermit",
         "Batch",
+    };
+    for (forbidden) |needle|
+        try std.testing.expectEqual(@as(usize, 0), countOccurrences(source, needle));
+}
+
+test "CR3a-2c3b prepared request authority remains pointer-free node-local mechanics" {
+    const allocator = std.testing.allocator;
+    const source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/prepared_request_authority.zig",
+    );
+    defer allocator.free(source);
+    try std.testing.expectEqual(@as(usize, 3), countOccurrences(source, "@import("));
+    try std.testing.expectEqual(@as(usize, 0), countOccurrences(source, "@ptrFromInt"));
+    const forbidden = [_][]const u8{
+        "@import(\"client.zig\")",
+        "@import(\"client_slot.zig\")",
+        "@import(\"attachment_cleanup_registry.zig\")",
+        "@import(\"generation_transport.zig\")",
+        "@import(\"remote_runtime.zig\")",
+        "*anyopaque",
+        "std.mem.Allocator",
+        "[]u8",
+        "[]const u8",
     };
     for (forbidden) |needle|
         try std.testing.expectEqual(@as(usize, 0), countOccurrences(source, needle));
@@ -1813,6 +1878,24 @@ test "CR3a-2c3 generation transport keeps the exact reviewed public facade" {
     try std.testing.expectEqual(@as(usize, 0), countOccurrences(product_source, "*anyopaque"));
     try std.testing.expectEqual(@as(usize, 0), countOccurrences(product_source, "pub fn call("));
     try std.testing.expectEqual(@as(usize, 0), countOccurrences(product_source, "method: []const u8"));
+    const direct_prepared_client_apis = [_][]const u8{
+        ".prepareBlockingRpcStorage(",
+        ".abortPreparedBlockingRpcStorage",
+        ".preparedBlockingRpcStorageMatches(",
+    };
+    for (direct_prepared_client_apis) |needle|
+        try std.testing.expectEqual(@as(usize, 0), countOccurrences(product_source, needle));
+
+    const contract_source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/generation_attachment_contract.zig",
+    );
+    defer allocator.free(contract_source);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        countOccurrences(contract_source, "EncodedRequestParams"),
+    );
+    try std.testing.expectEqual(@as(usize, 0), countOccurrences(contract_source, "json: ?[]const u8"));
 }
 
 test "CR3a-2c3b capability projection and shared RemoteRuntime raw-read baselines cannot expand" {

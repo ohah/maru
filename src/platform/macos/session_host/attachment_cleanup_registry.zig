@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const contract = @import("generation_attachment_contract.zig");
+const prepared_request_authority = @import("prepared_request_authority.zig");
 
 pub const max_entries: usize = 4096;
 
@@ -103,6 +104,7 @@ const Entry = struct {
     controller_authority: ControllerAuthority = .unavailable,
     transport_owner: contract.TransportOwnerSeal = .{},
     response_owner: contract.ExecutedResponseOwnerSeal = .{},
+    prepared_request: prepared_request_authority.Authority = .{},
 
     fn clear(self: *Entry) void {
         self.* = .{};
@@ -240,6 +242,129 @@ pub const AttachmentCleanupRegistry = struct {
         identity: contract.BindingIdentity,
     ) Error!*contract.ExecutedResponseOwnerSeal {
         return &(try self.exactEntry(reservation, identity)).response_owner;
+    }
+
+    pub fn publishPreparedRequest(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        prepared: prepared_request_authority.Prepared,
+    ) Error!void {
+        const entry = try self.exactEntry(reservation, identity);
+        entry.prepared_request.publish(prepared) catch return error.InvalidState;
+    }
+
+    pub fn preparedRequestMatches(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        prepared: prepared_request_authority.Prepared,
+    ) Error!bool {
+        return (try self.exactEntry(reservation, identity)).prepared_request.matches(prepared);
+    }
+
+    pub fn executingRequestMatches(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        prepared: prepared_request_authority.Prepared,
+    ) Error!bool {
+        return (try self.exactEntry(reservation, identity)).prepared_request
+            .matchesExecuting(prepared);
+    }
+
+    pub fn preparedRequestForReceipt(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        transport_addr: usize,
+        transport_incarnation: u64,
+        receipt: contract.PreparedCallReceipt,
+    ) Error!?prepared_request_authority.Prepared {
+        const authority = &(try self.exactEntry(reservation, identity)).prepared_request;
+        if (!authority.rawLifecycleValid() or authority.lifecycle != .prepared or
+            authority.prepared_present != 1)
+            return null;
+        const prepared = authority.prepared;
+        if (prepared.transport_addr != transport_addr or
+            prepared.transport_incarnation != transport_incarnation or
+            !prepared.receipt.matches(receipt) or !authority.matches(prepared))
+            return null;
+        return prepared;
+    }
+
+    pub fn beginPreparedRequestExecute(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        prepared: prepared_request_authority.Prepared,
+    ) Error!void {
+        const entry = try self.exactEntry(reservation, identity);
+        entry.prepared_request.beginExecute(prepared) catch return error.InvalidState;
+    }
+
+    pub fn settlePreparedRequest(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        prepared: prepared_request_authority.Prepared,
+        terminal: bool,
+    ) Error!void {
+        const entry = try self.exactEntry(reservation, identity);
+        if (terminal)
+            entry.prepared_request.settleTerminal(prepared) catch return error.InvalidState
+        else
+            entry.prepared_request.settleReusable(prepared) catch return error.InvalidState;
+    }
+
+    pub fn requestAuthorized(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        family: contract.RequestFamily,
+        tag: contract.RuntimeRequestTag,
+        bound_stream_id: u64,
+    ) Error!bool {
+        const entry = try self.exactEntry(reservation, identity);
+        if (!contract.requestFamilyRawValid(&family) or
+            !contract.runtimeRequestTagRawValid(&tag) or
+            !contract.requestFamilyAllowed(tag, family) or
+            !controllerAuthorityRawValid(&entry.controller_authority))
+            return error.InvalidState;
+        return switch (family) {
+            .connection_only_denied => false,
+            .attach_only => tag == .attach_controller and entry.lifecycle == .reserved and
+                entry.stream_id == 0 and bound_stream_id == 0 and identity.role == .controller,
+            .bound_observation => entry.lifecycle == .bound and entry.stream_id != 0 and
+                entry.stream_id == bound_stream_id,
+            .bound_controller_mutation => entry.lifecycle == .bound and entry.stream_id != 0 and
+                entry.stream_id == bound_stream_id and identity.role == .controller and
+                entry.controller_authority == .live,
+            .bound_terminal => entry.lifecycle == .bound and entry.stream_id != 0 and
+                entry.stream_id == bound_stream_id and
+                (tag == .detach or (tag == .terminate and identity.role == .controller and
+                    entry.controller_authority == .live)),
+        };
+    }
+
+    pub fn preparedRequestSettlementReadiness(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+    ) Error!prepared_request_authority.SettlementReadiness {
+        const entry = try self.exactEntry(reservation, identity);
+        return entry.prepared_request.settlementReadiness();
+    }
+
+    pub fn transportTerminalizeReadiness(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        require_drop_active: bool,
+    ) Error!prepared_request_authority.SettlementReadiness {
+        const entry = try self.exactEntry(reservation, identity);
+        if (require_drop_active and entry.lifecycle != .drop_active) return .invalid;
+        return entry.prepared_request.settlementReadiness();
     }
 
     pub fn abort(
@@ -404,7 +529,8 @@ pub const AttachmentCleanupRegistry = struct {
 };
 
 fn childAuthoritiesSettled(entry: *const Entry) bool {
-    return entry.transport_owner.settledExact() and entry.response_owner.settledExact();
+    return entry.transport_owner.settledExact() and entry.response_owner.settledExact() and
+        entry.prepared_request.settledExact();
 }
 
 fn dropAuthorityCanBegin(entry: *const Entry) bool {
@@ -454,7 +580,7 @@ test "stream-drop registry reserves, aborts, binds, and gates final-zero deinit"
 
     const guarded = try registry.reserve(fixtureSeed(0x1800, 22));
     const transport_seal = try registry.transportOwnerSeal(guarded.reservation, guarded.identity);
-    try contract.TransportOwnerSeal.initInPlace(transport_seal, 27);
+    try contract.TransportOwnerSeal.initInPlace(transport_seal, 27, 29, 31);
     try std.testing.expectError(
         error.InvalidState,
         registry.abort(guarded.reservation, guarded.identity),

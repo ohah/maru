@@ -217,6 +217,8 @@ pub const TransportOwnerLifecycle = enum(u8) { pristine, live, terminal };
 pub const TransportOwnerSeal = struct {
     self_addr: usize = 0,
     incarnation: u64 = 0,
+    transport_addr: usize = 0,
+    prepared_storage_addr: usize = 0,
     lifecycle: TransportOwnerLifecycle = .pristine,
 
     fn lifecycleRawValid(self: *const TransportOwnerSeal) bool {
@@ -224,14 +226,23 @@ pub const TransportOwnerSeal = struct {
         return raw <= @intFromEnum(TransportOwnerLifecycle.terminal);
     }
 
-    pub fn initInPlace(out: *TransportOwnerSeal, incarnation: u64) error{ InvalidState, InvalidIncarnation }!void {
+    pub fn initInPlace(
+        out: *TransportOwnerSeal,
+        incarnation: u64,
+        transport_addr: usize,
+        prepared_storage_addr: usize,
+    ) error{ InvalidState, InvalidIncarnation }!void {
         if (!out.lifecycleRawValid() or out.self_addr != 0 or out.incarnation != 0 or
+            out.transport_addr != 0 or out.prepared_storage_addr != 0 or
             out.lifecycle != .pristine)
             return error.InvalidState;
-        if (incarnation == 0) return error.InvalidIncarnation;
+        if (incarnation == 0 or transport_addr == 0 or prepared_storage_addr == 0)
+            return error.InvalidIncarnation;
         out.* = .{
             .self_addr = @intFromPtr(out),
             .incarnation = incarnation,
+            .transport_addr = transport_addr,
+            .prepared_storage_addr = prepared_storage_addr,
             .lifecycle = .live,
         };
     }
@@ -239,7 +250,8 @@ pub const TransportOwnerSeal = struct {
     pub fn valid(self: *const TransportOwnerSeal, incarnation: u64) bool {
         return self.lifecycleRawValid() and self.self_addr == @intFromPtr(self) and
             self.incarnation == incarnation and
-            incarnation != 0 and self.lifecycle == .live;
+            incarnation != 0 and self.transport_addr != 0 and self.prepared_storage_addr != 0 and
+            self.lifecycle == .live;
     }
 
     pub fn terminalize(self: *TransportOwnerSeal, incarnation: u64) error{InvalidState}!void {
@@ -250,8 +262,10 @@ pub const TransportOwnerSeal = struct {
     pub fn settledExact(self: *const TransportOwnerSeal) bool {
         if (!self.lifecycleRawValid()) return false;
         return switch (self.lifecycle) {
-            .pristine => self.self_addr == 0 and self.incarnation == 0,
-            .terminal => self.self_addr == @intFromPtr(self) and self.incarnation != 0,
+            .pristine => self.self_addr == 0 and self.incarnation == 0 and
+                self.transport_addr == 0 and self.prepared_storage_addr == 0,
+            .terminal => self.self_addr == @intFromPtr(self) and self.incarnation != 0 and
+                self.transport_addr != 0 and self.prepared_storage_addr != 0,
             .live => false,
         };
     }
@@ -307,32 +321,491 @@ pub const RuntimeRequestTag = enum(u8) {
     detach,
 };
 
-pub const EncodedRequestParams = struct {
-    json: ?[]const u8,
+pub fn runtimeRequestTagRawValid(value: *const RuntimeRequestTag) bool {
+    const raw = @as(*const u8, @ptrCast(value)).*;
+    return raw <= @intFromEnum(RuntimeRequestTag.detach);
+}
+
+pub const RequestFamily = enum(u8) {
+    connection_only_denied,
+    attach_only,
+    bound_observation,
+    bound_controller_mutation,
+    bound_terminal,
 };
 
-pub const RuntimeRequest = union(RuntimeRequestTag) {
-    spawn_full: EncodedRequestParams,
-    attach_controller: EncodedRequestParams,
-    resize: EncodedRequestParams,
-    observation: EncodedRequestParams,
-    selected_text: EncodedRequestParams,
-    link_at: EncodedRequestParams,
-    clipboard_write: EncodedRequestParams,
-    find: EncodedRequestParams,
-    select_op: EncodedRequestParams,
-    core_command: EncodedRequestParams,
-    report_mouse: EncodedRequestParams,
-    notification: EncodedRequestParams,
-    terminate: EncodedRequestParams,
-    detach: EncodedRequestParams,
+pub fn requestFamilyRawValid(value: *const RequestFamily) bool {
+    const raw = @as(*const u8, @ptrCast(value)).*;
+    return raw <= @intFromEnum(RequestFamily.bound_terminal);
+}
 
-    pub fn params(self: @This()) ?[]const u8 {
-        return switch (self) {
-            inline else => |value| value.json,
+pub fn requestFamilyForTag(tag: RuntimeRequestTag) RequestFamily {
+    return switch (tag) {
+        .spawn_full => .connection_only_denied,
+        .attach_controller => .attach_only,
+        .observation, .selected_text, .link_at, .find, .select_op => .bound_observation,
+        .resize, .clipboard_write, .core_command, .report_mouse, .notification => .bound_controller_mutation,
+        .terminate, .detach => .bound_terminal,
+    };
+}
+
+/// Most request tags have one static family. Find is the single reviewed
+/// exception: its typed `scroll` discriminator promotes observation to a
+/// controller mutation. Canonical authority stores the derived family, so
+/// validators must admit both reviewed find outcomes without re-reading the
+/// request payload.
+pub fn requestFamilyAllowed(tag: RuntimeRequestTag, family: RequestFamily) bool {
+    if (!runtimeRequestTagRawValid(&tag) or !requestFamilyRawValid(&family)) return false;
+    return if (tag == .find)
+        family == .bound_observation or family == .bound_controller_mutation
+    else
+        requestFamilyForTag(tag) == family;
+}
+
+pub fn requestMethod(tag: RuntimeRequestTag) []const u8 {
+    return switch (tag) {
+        .spawn_full => "runtime.spawn_full",
+        .attach_controller => "runtime.attach",
+        .resize => "runtime.resize",
+        .observation => "runtime.observation",
+        .selected_text => "runtime.selected_text",
+        .link_at => "runtime.link_at",
+        .clipboard_write => "runtime.clipboard_write",
+        .find => "runtime.find",
+        .select_op => "runtime.select_op",
+        .core_command => "runtime.core_command",
+        .report_mouse => "runtime.report_mouse",
+        .notification => "runtime.notification",
+        .terminate => "runtime.terminate",
+        .detach => "runtime.detach",
+    };
+}
+
+pub const ResizeRequest = extern struct {
+    cols: u16,
+    rows: u16,
+    client_sequence: u64,
+};
+
+pub const SelectedTextRequest = struct {
+    start_row: u64,
+    start_col: u64,
+    end_row: u64,
+    end_col: u64,
+    block: bool,
+};
+
+pub const LinkAtRequest = extern struct { row: u16, col: u16, scopes: u8 };
+pub const FindRequest = struct {
+    query: [256]u8 = [_]u8{0} ** 256,
+    query_len: u16 = 0,
+    current: u32,
+    scroll: bool,
+
+    pub fn init(text: []const u8, current: u32, scroll: bool) ?FindRequest {
+        if (text.len > 256) return null;
+        var result: FindRequest = .{ .current = current, .scroll = scroll };
+        @memcpy(result.query[0..text.len], text);
+        result.query_len = @intCast(text.len);
+        return result;
+    }
+
+    pub fn bytes(self: *const FindRequest) ?[]const u8 {
+        if (self.query_len > self.query.len) return null;
+        return self.query[0..self.query_len];
+    }
+};
+pub const SelectKind = enum(u8) { word, line };
+pub const SelectRequest = struct { kind: SelectKind, row: u16, col: u16 };
+
+/// Closed mirror of the host core-command wire. It deliberately contains no method string,
+/// encoded JSON, stream id, allocator, or process-local pointer.
+pub const CoreCommandRequest = union(enum) {
+    scroll: i64,
+    scroll_to_bottom,
+    scroll_to_abs: u64,
+    scroll_to_offset: u64,
+    report_focus: bool,
+    set_cell_metrics: struct { width: u32, height: u32 },
+    set_default_colors: struct { foreground: u32, background: u32 },
+    set_config_palette: [16]?u32,
+    set_max_scrollback: u64,
+    set_ambiguous_wide: bool,
+    set_emoji_wide: bool,
+    set_default_cursor_shape: u8,
+    set_runtime_config: struct {
+        max_scrollback: u64,
+        ambiguous_wide: bool,
+        emoji_wide: bool,
+        palette: [16]?u32,
+        foreground: u32,
+        background: u32,
+        cell_width: u32,
+        cell_height: u32,
+        cursor_shape: u8,
+    },
+    jump_to_prompt: i8,
+    reset_input_modes,
+};
+
+pub const MouseReportRequest = struct {
+    button: u8,
+    col: u16,
+    row: u16,
+    x_px: u32,
+    y_px: u32,
+    pressed: bool,
+    motion: bool,
+    mods: u8,
+};
+
+const RawOptionalU32 = extern struct { present: u8, value: u32 };
+const RawSelectedTextRequest = extern struct {
+    start_row: u64,
+    start_col: u64,
+    end_row: u64,
+    end_col: u64,
+    block: u8,
+};
+const RawFindRequest = extern struct {
+    query: [256]u8,
+    query_len: u16,
+    current: u32,
+    scroll: u8,
+};
+const RawSelectRequest = extern struct { kind: u8, row: u16, col: u16 };
+const RawMouseReportRequest = extern struct {
+    button: u8,
+    col: u16,
+    row: u16,
+    x_px: u32,
+    y_px: u32,
+    pressed: u8,
+    motion: u8,
+    mods: u8,
+};
+const RawRuntimeConfig = extern struct {
+    max_scrollback: u64,
+    ambiguous_wide: u8,
+    emoji_wide: u8,
+    palette: [16]RawOptionalU32,
+    foreground: u32,
+    background: u32,
+    cell_width: u32,
+    cell_height: u32,
+    cursor_shape: u8,
+};
+const RawCorePayload = extern union {
+    empty: u8,
+    scroll: i64,
+    unsigned: u64,
+    flag: u8,
+    cell_metrics: extern struct { width: u32, height: u32 },
+    colors: extern struct { foreground: u32, background: u32 },
+    palette: [16]RawOptionalU32,
+    shape: u8,
+    runtime_config: RawRuntimeConfig,
+    direction: i8,
+};
+const RawCoreCommand = extern struct { tag: u8, payload: RawCorePayload };
+const RuntimeRequestPayload = extern union {
+    empty: u8,
+    resize: ResizeRequest,
+    selected_text: RawSelectedTextRequest,
+    link_at: LinkAtRequest,
+    find: RawFindRequest,
+    select_op: RawSelectRequest,
+    core_command: RawCoreCommand,
+    report_mouse: RawMouseReportRequest,
+};
+
+/// Public request boundary with an explicit raw discriminator. A Zig tagged
+/// union cannot inspect an invalid discriminant without already invoking
+/// undefined behavior, so callers construct this closed DTO and ClientSlot
+/// decodes it before any tagged-union switch or semantic read.
+pub const RuntimeRequest = extern struct {
+    tag: u8,
+    payload: RuntimeRequestPayload,
+
+    fn empty(comptime tag: RuntimeRequestTag) RuntimeRequest {
+        return .{ .tag = @intFromEnum(tag), .payload = .{ .empty = 0 } };
+    }
+
+    pub fn spawnFull() RuntimeRequest {
+        return empty(.spawn_full);
+    }
+    pub fn attachController() RuntimeRequest {
+        return empty(.attach_controller);
+    }
+    pub fn resize(value: ResizeRequest) RuntimeRequest {
+        return .{ .tag = @intFromEnum(RuntimeRequestTag.resize), .payload = .{ .resize = value } };
+    }
+    pub fn observation() RuntimeRequest {
+        return empty(.observation);
+    }
+    pub fn selectedText(value: SelectedTextRequest) RuntimeRequest {
+        return .{ .tag = @intFromEnum(RuntimeRequestTag.selected_text), .payload = .{ .selected_text = .{
+            .start_row = value.start_row,
+            .start_col = value.start_col,
+            .end_row = value.end_row,
+            .end_col = value.end_col,
+            .block = @intFromBool(value.block),
+        } } };
+    }
+    pub fn linkAt(value: LinkAtRequest) RuntimeRequest {
+        return .{ .tag = @intFromEnum(RuntimeRequestTag.link_at), .payload = .{ .link_at = value } };
+    }
+    pub fn clipboardWrite() RuntimeRequest {
+        return empty(.clipboard_write);
+    }
+    pub fn find(value: FindRequest) RuntimeRequest {
+        return .{ .tag = @intFromEnum(RuntimeRequestTag.find), .payload = .{ .find = .{
+            .query = value.query,
+            .query_len = value.query_len,
+            .current = value.current,
+            .scroll = @intFromBool(value.scroll),
+        } } };
+    }
+    pub fn selectOp(value: SelectRequest) RuntimeRequest {
+        return .{ .tag = @intFromEnum(RuntimeRequestTag.select_op), .payload = .{ .select_op = .{
+            .kind = @intFromEnum(value.kind),
+            .row = value.row,
+            .col = value.col,
+        } } };
+    }
+    pub fn coreCommand(value: CoreCommandRequest) RuntimeRequest {
+        return .{ .tag = @intFromEnum(RuntimeRequestTag.core_command), .payload = .{
+            .core_command = encodeRawCoreCommand(value),
+        } };
+    }
+    pub fn reportMouse(value: MouseReportRequest) RuntimeRequest {
+        return .{ .tag = @intFromEnum(RuntimeRequestTag.report_mouse), .payload = .{ .report_mouse = .{
+            .button = value.button,
+            .col = value.col,
+            .row = value.row,
+            .x_px = value.x_px,
+            .y_px = value.y_px,
+            .pressed = @intFromBool(value.pressed),
+            .motion = @intFromBool(value.motion),
+            .mods = value.mods,
+        } } };
+    }
+    pub fn notification() RuntimeRequest {
+        return empty(.notification);
+    }
+    pub fn terminate() RuntimeRequest {
+        return empty(.terminate);
+    }
+    pub fn detach() RuntimeRequest {
+        return empty(.detach);
+    }
+
+    pub fn decode(self: *const RuntimeRequest) ?ValidatedRuntimeRequest {
+        return switch (self.tag) {
+            @intFromEnum(RuntimeRequestTag.spawn_full) => .spawn_full,
+            @intFromEnum(RuntimeRequestTag.attach_controller) => .attach_controller,
+            @intFromEnum(RuntimeRequestTag.resize) => blk: {
+                const value = self.payload.resize;
+                if (value.cols == 0 or value.rows == 0 or value.client_sequence == 0)
+                    break :blk null;
+                break :blk .{ .resize = value };
+            },
+            @intFromEnum(RuntimeRequestTag.observation) => .observation,
+            @intFromEnum(RuntimeRequestTag.selected_text) => blk: {
+                const value = self.payload.selected_text;
+                if (value.block > 1) break :blk null;
+                break :blk .{ .selected_text = .{
+                    .start_row = value.start_row,
+                    .start_col = value.start_col,
+                    .end_row = value.end_row,
+                    .end_col = value.end_col,
+                    .block = value.block == 1,
+                } };
+            },
+            @intFromEnum(RuntimeRequestTag.link_at) => .{ .link_at = self.payload.link_at },
+            @intFromEnum(RuntimeRequestTag.clipboard_write) => .clipboard_write,
+            @intFromEnum(RuntimeRequestTag.find) => blk: {
+                const value = self.payload.find;
+                if (value.scroll > 1 or value.query_len > value.query.len) break :blk null;
+                break :blk .{ .find = .{
+                    .query = value.query,
+                    .query_len = value.query_len,
+                    .current = value.current,
+                    .scroll = value.scroll == 1,
+                } };
+            },
+            @intFromEnum(RuntimeRequestTag.select_op) => blk: {
+                const value = self.payload.select_op;
+                const kind: SelectKind = switch (value.kind) {
+                    @intFromEnum(SelectKind.word) => .word,
+                    @intFromEnum(SelectKind.line) => .line,
+                    else => break :blk null,
+                };
+                break :blk .{ .select_op = .{ .kind = kind, .row = value.row, .col = value.col } };
+            },
+            @intFromEnum(RuntimeRequestTag.core_command) => .{
+                .core_command = decodeRawCoreCommand(&self.payload.core_command) orelse return null,
+            },
+            @intFromEnum(RuntimeRequestTag.report_mouse) => blk: {
+                const value = self.payload.report_mouse;
+                if (value.pressed > 1 or value.motion > 1) break :blk null;
+                break :blk .{ .report_mouse = .{
+                    .button = value.button,
+                    .col = value.col,
+                    .row = value.row,
+                    .x_px = value.x_px,
+                    .y_px = value.y_px,
+                    .pressed = value.pressed == 1,
+                    .motion = value.motion == 1,
+                    .mods = value.mods,
+                } };
+            },
+            @intFromEnum(RuntimeRequestTag.notification) => .notification,
+            @intFromEnum(RuntimeRequestTag.terminate) => .terminate,
+            @intFromEnum(RuntimeRequestTag.detach) => .detach,
+            else => null,
         };
     }
 };
+
+pub const ValidatedRuntimeRequest = union(RuntimeRequestTag) {
+    spawn_full,
+    attach_controller,
+    resize: ResizeRequest,
+    observation,
+    selected_text: SelectedTextRequest,
+    link_at: LinkAtRequest,
+    clipboard_write,
+    find: FindRequest,
+    select_op: SelectRequest,
+    core_command: CoreCommandRequest,
+    report_mouse: MouseReportRequest,
+    notification,
+    terminate,
+    detach,
+
+    pub fn family(self: @This()) RequestFamily {
+        return switch (self) {
+            .find => |value| if (value.scroll) .bound_controller_mutation else .bound_observation,
+            else => requestFamilyForTag(std.meta.activeTag(self)),
+        };
+    }
+};
+
+fn encodeRawOptional(value: ?u32) RawOptionalU32 {
+    return if (value) |color|
+        .{ .present = 1, .value = color }
+    else
+        .{ .present = 0, .value = 0 };
+}
+
+fn encodeRawPalette(values: [16]?u32) [16]RawOptionalU32 {
+    var result: [16]RawOptionalU32 = undefined;
+    for (&result, values) |*out, value| out.* = encodeRawOptional(value);
+    return result;
+}
+
+fn decodeRawPalette(values: *const [16]RawOptionalU32) ?[16]?u32 {
+    var result: [16]?u32 = undefined;
+    for (values, &result) |value, *out| {
+        out.* = switch (value.present) {
+            0 => null,
+            1 => value.value,
+            else => return null,
+        };
+    }
+    return result;
+}
+
+fn encodeRawCoreCommand(value: CoreCommandRequest) RawCoreCommand {
+    const Tag = std.meta.Tag(CoreCommandRequest);
+    return switch (value) {
+        .scroll => |arg| .{ .tag = @intFromEnum(Tag.scroll), .payload = .{ .scroll = arg } },
+        .scroll_to_bottom => .{ .tag = @intFromEnum(Tag.scroll_to_bottom), .payload = .{ .empty = 0 } },
+        .scroll_to_abs => |arg| .{ .tag = @intFromEnum(Tag.scroll_to_abs), .payload = .{ .unsigned = arg } },
+        .scroll_to_offset => |arg| .{ .tag = @intFromEnum(Tag.scroll_to_offset), .payload = .{ .unsigned = arg } },
+        .report_focus => |flag| .{ .tag = @intFromEnum(Tag.report_focus), .payload = .{ .flag = @intFromBool(flag) } },
+        .set_cell_metrics => |metrics| .{ .tag = @intFromEnum(Tag.set_cell_metrics), .payload = .{ .cell_metrics = .{
+            .width = metrics.width,
+            .height = metrics.height,
+        } } },
+        .set_default_colors => |colors| .{ .tag = @intFromEnum(Tag.set_default_colors), .payload = .{ .colors = .{
+            .foreground = colors.foreground,
+            .background = colors.background,
+        } } },
+        .set_config_palette => |palette| .{ .tag = @intFromEnum(Tag.set_config_palette), .payload = .{ .palette = encodeRawPalette(palette) } },
+        .set_max_scrollback => |lines| .{ .tag = @intFromEnum(Tag.set_max_scrollback), .payload = .{ .unsigned = lines } },
+        .set_ambiguous_wide => |flag| .{ .tag = @intFromEnum(Tag.set_ambiguous_wide), .payload = .{ .flag = @intFromBool(flag) } },
+        .set_emoji_wide => |flag| .{ .tag = @intFromEnum(Tag.set_emoji_wide), .payload = .{ .flag = @intFromBool(flag) } },
+        .set_default_cursor_shape => |shape| .{ .tag = @intFromEnum(Tag.set_default_cursor_shape), .payload = .{ .shape = shape } },
+        .set_runtime_config => |config| .{ .tag = @intFromEnum(Tag.set_runtime_config), .payload = .{ .runtime_config = .{
+            .max_scrollback = config.max_scrollback,
+            .ambiguous_wide = @intFromBool(config.ambiguous_wide),
+            .emoji_wide = @intFromBool(config.emoji_wide),
+            .palette = encodeRawPalette(config.palette),
+            .foreground = config.foreground,
+            .background = config.background,
+            .cell_width = config.cell_width,
+            .cell_height = config.cell_height,
+            .cursor_shape = config.cursor_shape,
+        } } },
+        .jump_to_prompt => |direction| .{ .tag = @intFromEnum(Tag.jump_to_prompt), .payload = .{ .direction = direction } },
+        .reset_input_modes => .{ .tag = @intFromEnum(Tag.reset_input_modes), .payload = .{ .empty = 0 } },
+    };
+}
+
+fn decodeRawCoreCommand(raw: *const RawCoreCommand) ?CoreCommandRequest {
+    const Tag = std.meta.Tag(CoreCommandRequest);
+    return switch (raw.tag) {
+        @intFromEnum(Tag.scroll) => .{ .scroll = raw.payload.scroll },
+        @intFromEnum(Tag.scroll_to_bottom) => .scroll_to_bottom,
+        @intFromEnum(Tag.scroll_to_abs) => .{ .scroll_to_abs = raw.payload.unsigned },
+        @intFromEnum(Tag.scroll_to_offset) => .{ .scroll_to_offset = raw.payload.unsigned },
+        @intFromEnum(Tag.report_focus) => if (raw.payload.flag <= 1)
+            .{ .report_focus = raw.payload.flag == 1 }
+        else
+            null,
+        @intFromEnum(Tag.set_cell_metrics) => .{ .set_cell_metrics = .{
+            .width = raw.payload.cell_metrics.width,
+            .height = raw.payload.cell_metrics.height,
+        } },
+        @intFromEnum(Tag.set_default_colors) => .{ .set_default_colors = .{
+            .foreground = raw.payload.colors.foreground,
+            .background = raw.payload.colors.background,
+        } },
+        @intFromEnum(Tag.set_config_palette) => .{
+            .set_config_palette = decodeRawPalette(&raw.payload.palette) orelse return null,
+        },
+        @intFromEnum(Tag.set_max_scrollback) => .{ .set_max_scrollback = raw.payload.unsigned },
+        @intFromEnum(Tag.set_ambiguous_wide) => if (raw.payload.flag <= 1)
+            .{ .set_ambiguous_wide = raw.payload.flag == 1 }
+        else
+            null,
+        @intFromEnum(Tag.set_emoji_wide) => if (raw.payload.flag <= 1)
+            .{ .set_emoji_wide = raw.payload.flag == 1 }
+        else
+            null,
+        @intFromEnum(Tag.set_default_cursor_shape) => .{ .set_default_cursor_shape = raw.payload.shape },
+        @intFromEnum(Tag.set_runtime_config) => blk: {
+            const config = raw.payload.runtime_config;
+            if (config.ambiguous_wide > 1 or config.emoji_wide > 1) break :blk null;
+            break :blk .{ .set_runtime_config = .{
+                .max_scrollback = config.max_scrollback,
+                .ambiguous_wide = config.ambiguous_wide == 1,
+                .emoji_wide = config.emoji_wide == 1,
+                .palette = decodeRawPalette(&config.palette) orelse break :blk null,
+                .foreground = config.foreground,
+                .background = config.background,
+                .cell_width = config.cell_width,
+                .cell_height = config.cell_height,
+                .cursor_shape = config.cursor_shape,
+            } };
+        },
+        @intFromEnum(Tag.jump_to_prompt) => .{ .jump_to_prompt = raw.payload.direction },
+        @intFromEnum(Tag.reset_input_modes) => .reset_input_modes,
+        else => null,
+    };
+}
 
 /// Capability projection exposed by GenerationTransport. Optional feature
 /// support is represented as booleans; no Client or wire storage escapes.
@@ -501,7 +974,86 @@ test "CR3a-2a neutral lifecycle and request vocabularies are closed" {
     // The SSOT list contains fourteen variants; an earlier RED inventory
     // accidentally omitted detach while the written list still included it.
     try std.testing.expectEqual(@as(usize, 14), std.meta.fields(RuntimeRequestTag).len);
+    try std.testing.expectEqual(@as(usize, 5), std.enums.values(RequestFamily).len);
     try std.testing.expectEqual(@as(usize, 3), std.enums.values(ExecuteOutcome).len);
+}
+
+test "CR3a-2c3b every request tag has one closed request family" {
+    const expected = [_]RequestFamily{
+        .connection_only_denied,
+        .attach_only,
+        .bound_controller_mutation,
+        .bound_observation,
+        .bound_observation,
+        .bound_observation,
+        .bound_controller_mutation,
+        .bound_observation,
+        .bound_observation,
+        .bound_controller_mutation,
+        .bound_controller_mutation,
+        .bound_controller_mutation,
+        .bound_terminal,
+        .bound_terminal,
+    };
+    inline for (std.enums.values(RuntimeRequestTag), expected) |tag, family|
+        try std.testing.expectEqual(family, requestFamilyForTag(tag));
+}
+
+test "CR3a-2c3b canonical family admission has one role-sensitive exception" {
+    inline for (std.enums.values(RuntimeRequestTag)) |tag| {
+        inline for (std.enums.values(RequestFamily)) |family| {
+            const expected = if (tag == .find)
+                family == .bound_observation or family == .bound_controller_mutation
+            else
+                family == requestFamilyForTag(tag);
+            try std.testing.expectEqual(expected, requestFamilyAllowed(tag, family));
+        }
+    }
+}
+
+test "CR3a-2c3b find scroll is the sole role-sensitive family discriminator" {
+    const observe = RuntimeRequest.find(FindRequest.init("needle", 3, false).?);
+    const mutate = RuntimeRequest.find(FindRequest.init("needle", 3, true).?);
+    const observed = observe.decode().?;
+    const mutated = mutate.decode().?;
+    try std.testing.expectEqual(RequestFamily.bound_observation, observed.family());
+    try std.testing.expectEqual(RequestFamily.bound_controller_mutation, mutated.family());
+    try std.testing.expectEqual(RuntimeRequestTag.find, std.meta.activeTag(observed));
+    try std.testing.expectEqual(RuntimeRequestTag.find, std.meta.activeTag(mutated));
+}
+
+test "CR3a-2c3b request raw discriminators fail closed before semantic reads" {
+    var request = RuntimeRequest.find(FindRequest.init("x", 0, false).?);
+    try std.testing.expect(request.decode() != null);
+    request.payload.find.scroll = 0xff;
+    try std.testing.expect(request.decode() == null);
+
+    request = RuntimeRequest.selectOp(.{ .kind = .word, .row = 1, .col = 2 });
+    request.payload.select_op.kind = 0xff;
+    try std.testing.expect(request.decode() == null);
+
+    var raw: u16 = @intFromEnum(RuntimeRequestTag.detach) + 1;
+    while (raw <= std.math.maxInt(u8)) : (raw += 1) {
+        request.tag = @intCast(raw);
+        try std.testing.expect(request.decode() == null);
+    }
+
+    request = RuntimeRequest.coreCommand(.{ .report_focus = true });
+    request.payload.core_command.payload.flag = 2;
+    try std.testing.expect(request.decode() == null);
+    request = RuntimeRequest.coreCommand(.{ .set_config_palette = [_]?u32{null} ** 16 });
+    request.payload.core_command.payload.palette[7].present = 2;
+    try std.testing.expect(request.decode() == null);
+    request = RuntimeRequest.coreCommand(.reset_input_modes);
+    request.payload.core_command.tag = 0xff;
+    try std.testing.expect(request.decode() == null);
+
+    request = RuntimeRequest.attachController();
+    @memset(std.mem.asBytes(&request.payload), 0xa5);
+    try std.testing.expectEqual(
+        RuntimeRequestTag.attach_controller,
+        std.meta.activeTag(request.decode().?),
+    );
 }
 
 test "CR3a-2a neutral identities and capabilities recursively contain no pointers" {
@@ -510,6 +1062,7 @@ test "CR3a-2a neutral identities and capabilities recursively contain no pointer
     try std.testing.expect(!containsPointer(CorrelatedExecutedCall));
     try std.testing.expect(!containsPointer(ExecuteResult));
     try std.testing.expect(!containsPointer(BindingIdentity));
+    try std.testing.expect(!containsPointer(RuntimeRequest));
     try std.testing.expect(!containsPointer(GenerationCapabilities));
 }
 

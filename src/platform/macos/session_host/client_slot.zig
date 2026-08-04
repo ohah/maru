@@ -17,6 +17,8 @@ const protocol = @import("protocol.zig");
 const compatibility = @import("compatibility.zig");
 const socket_server = @import("socket_server.zig");
 const ended_purge_quarantine = @import("ended_purge_quarantine.zig");
+const prepared_request_authority = @import("prepared_request_authority.zig");
+const executed_response_mod = @import("executed_response.zig");
 
 const c = std.c;
 var ended_purge_quarantine_registry: ?ended_purge_quarantine.Registry = null;
@@ -476,6 +478,77 @@ pub const CapabilityProjectionRequest = struct {
     reservation: AttachmentBindingReservation,
 };
 
+pub const GenerationRequestError = error{
+    Busy,
+    InvalidOwner,
+    Unauthorized,
+    InvalidReceipt,
+    IdentityExhausted,
+    ResourceExhausted,
+    ConnectionClosed,
+    ProtocolError,
+};
+
+pub const GenerationRequestPrepare = struct {
+    slot_addr: usize,
+    slot_incarnation: u64,
+    node_incarnation: u64,
+    host_id: u128,
+    pid: u32,
+    process_nonce: u64,
+    transport_addr: usize,
+    transport_incarnation: u64,
+    owner_seal_addr: usize,
+    prepared_storage_addr: usize,
+    bound_stream_id: u64,
+    reservation: AttachmentBindingReservation,
+    request: contract.RuntimeRequest,
+};
+
+pub const GenerationPreparedRequest = struct {
+    receipt: contract.PreparedCallReceipt,
+    canonical: prepared_request_authority.Prepared,
+};
+
+pub const GenerationRequestAbort = struct {
+    slot_addr: usize,
+    slot_incarnation: u64,
+    node_incarnation: u64,
+    host_id: u128,
+    pid: u32,
+    process_nonce: u64,
+    transport_addr: usize,
+    transport_incarnation: u64,
+    owner_seal_addr: usize,
+    prepared_storage_addr: usize,
+    reservation: AttachmentBindingReservation,
+    receipt: contract.PreparedCallReceipt,
+};
+
+pub const GenerationTransportOwnerQuery = struct {
+    slot_addr: usize,
+    slot_incarnation: u64,
+    node_incarnation: u64,
+    host_id: u128,
+    pid: u32,
+    process_nonce: u64,
+    transport_addr: usize,
+    transport_incarnation: u64,
+    owner_seal_addr: usize,
+    prepared_storage_addr: usize,
+    reservation: AttachmentBindingReservation,
+};
+
+pub const GenerationRequestExecute = struct {
+    request: GenerationRequestAbort,
+    response_out_addr: usize,
+    owner_addr: usize,
+    owner_size: usize,
+};
+
+pub const GenerationExecuteError = GenerationRequestError ||
+    client_mod.PreparedBlockingRpcError || error{InvalidResponseDestination};
+
 var issuer_mutex: std.atomic.Mutex = .unlocked;
 var process_issuer: ?lease_mod.IdentityIssuer = null;
 threadlocal var init_active: bool = false;
@@ -483,6 +556,7 @@ threadlocal var batch_release_callback_active: bool = false;
 threadlocal var operation_thread_incarnation: u64 = 0;
 var next_operation_thread_incarnation: std.atomic.Value(u64) = .init(1);
 var alias_quarantine_events: std.atomic.Value(u64) = .init(0);
+var generation_response_incarnation_issuer: std.atomic.Value(u64) = .init(1);
 
 const max_live_client_slots = 4096;
 const ClientSlotRegistryEntry = struct {
@@ -715,6 +789,58 @@ fn endRegisteredNodeOperation(operation: RegisteredNodeOperation) void {
         @panic("ClientSlot registered node operation fence release failed");
 }
 
+const GenerationRequestOwner = struct {
+    operation: RegisteredNodeOperation,
+    identity: contract.BindingIdentity,
+    owner: *contract.TransportOwnerSeal,
+};
+
+/// Shared registry-first admission for every prepared-request transition. The returned operation
+/// pins the canonical node until the caller settles both request backing and node authority.
+fn beginGenerationRequestOwner(
+    request: anytype,
+    comptime allow_active_cleanup: bool,
+) GenerationRequestError!GenerationRequestOwner {
+    if (client_mod.generationAllocatorCallbackActive() or batch_release_callback_active)
+        return error.Busy;
+    if (request.slot_addr == 0 or request.slot_incarnation == 0 or
+        request.node_incarnation == 0 or request.host_id == 0 or request.pid != currentPid() or
+        request.process_nonce == 0 or request.transport_addr == 0 or
+        request.transport_incarnation == 0 or request.owner_seal_addr == 0 or
+        request.prepared_storage_addr == 0)
+        return error.InvalidOwner;
+    const operation = beginRegisteredNodeOperation(.{
+        .slot_addr = request.slot_addr,
+        .slot_incarnation = request.slot_incarnation,
+        .node = .{ .incarnation = request.node_incarnation },
+    }) catch |err| return switch (err) {
+        error.Busy => error.Busy,
+        error.InvalidOwner => error.InvalidOwner,
+    };
+    errdefer endRegisteredNodeOperation(operation);
+    const node = operation.node;
+    if (!streamOperationNodeIdle(node) or
+        (node.pin_owner.active_cleanup != 0 and
+            !(allow_active_cleanup and node.pin_owner.active_cleanup == 1)))
+        return error.Busy;
+    const identity = request.reservation.identity;
+    if (!identity.valid() or identity.slot_incarnation != request.slot_incarnation or
+        identity.node_incarnation != request.node_incarnation or identity.host_id != request.host_id or
+        identity.connection_generation != 1 or identity.pid != request.pid or
+        identity.process_nonce != request.process_nonce or node.client.host_id != request.host_id)
+        return error.InvalidOwner;
+    const owner = node.cleanup_registry.transportOwnerSeal(
+        request.reservation.cleanup,
+        identity,
+    ) catch return error.InvalidOwner;
+    if (@intFromPtr(owner) != request.owner_seal_addr or
+        !owner.valid(request.transport_incarnation) or
+        owner.transport_addr != request.transport_addr or
+        owner.prepared_storage_addr != request.prepared_storage_addr)
+        return error.InvalidOwner;
+    return .{ .operation = operation, .identity = identity, .owner = owner };
+}
+
 /// Resolves an untrusted transport's scalar slot identity through the canonical registry before
 /// converting any supplied address to a pointer. The registry lock pins the exact node operation,
 /// so teardown cannot create an address ABA between resolution and capability projection.
@@ -782,6 +908,658 @@ pub fn projectGenerationCapabilities(
         .runtime_core_command = node.client.runtime_core_command_v1,
         .runtime_link_at = node.client.runtime_link_at_v1,
         .runtime_selected_text = node.client.runtime_selected_text_v1,
+    };
+}
+
+fn stringifyGenerationParams(out: []u8, value: anytype) ?[]const u8 {
+    var writer = std.Io.Writer.fixed(out);
+    var json: std.json.Stringify = .{ .writer = &writer, .options = .{} };
+    json.write(value) catch return null;
+    return writer.buffered();
+}
+
+/// Canonical request encoder. Binding-owned runtime/stream identity is injected here exactly once;
+/// no public request variant can carry a foreign identity or an encoded JSON discriminator.
+fn encodeGenerationRequestParams(
+    out: []u8,
+    identity: contract.BindingIdentity,
+    stream_id: u64,
+    request: contract.ValidatedRuntimeRequest,
+) ?[]const u8 {
+    return switch (request) {
+        .spawn_full => null,
+        .attach_controller => std.fmt.bufPrint(
+            out,
+            "{{\"runtime_id\":\"{x:0>32}\",\"mode\":\"controller\"}}",
+            .{identity.runtime_id},
+        ) catch null,
+        .resize => |v| stringifyGenerationParams(out, .{
+            .stream_id = stream_id,
+            .cols = v.cols,
+            .rows = v.rows,
+            .client_sequence = v.client_sequence,
+        }),
+        .observation, .clipboard_write, .notification, .detach => stringifyGenerationParams(out, .{ .stream_id = stream_id }),
+        .selected_text => |v| stringifyGenerationParams(out, .{
+            .stream_id = stream_id,
+            .sr = v.start_row,
+            .sc = v.start_col,
+            .er = v.end_row,
+            .ec = v.end_col,
+            .block = v.block,
+        }),
+        .link_at => |v| stringifyGenerationParams(out, .{
+            .stream_id = stream_id,
+            .row = v.row,
+            .col = v.col,
+            .scopes = v.scopes,
+        }),
+        .find => |v| blk: {
+            const query = v.bytes() orelse break :blk null;
+            var hex: [512]u8 = undefined;
+            const digits = "0123456789abcdef";
+            for (query, 0..) |byte, index| {
+                hex[index * 2] = digits[byte >> 4];
+                hex[index * 2 + 1] = digits[byte & 0x0f];
+            }
+            break :blk stringifyGenerationParams(out, .{
+                .stream_id = stream_id,
+                .q = hex[0 .. query.len * 2],
+                .cur = v.current,
+                .scroll = v.scroll,
+            });
+        },
+        .select_op => |v| stringifyGenerationParams(out, .{
+            .stream_id = stream_id,
+            .op = switch (v.kind) {
+                .word => "word",
+                .line => "line",
+            },
+            .row = v.row,
+            .col = v.col,
+        }),
+        .core_command => |v| encodeGenerationCoreCommand(out, stream_id, v),
+        .report_mouse => |v| stringifyGenerationParams(out, .{
+            .stream_id = stream_id,
+            .button = v.button,
+            .col = v.col,
+            .row = v.row,
+            .x_px = v.x_px,
+            .y_px = v.y_px,
+            .pressed = v.pressed,
+            .motion = v.motion,
+            .mods = v.mods,
+        }),
+        .terminate => std.fmt.bufPrint(
+            out,
+            "{{\"runtime_id\":\"{x:0>32}\"}}",
+            .{identity.runtime_id},
+        ) catch null,
+    };
+}
+
+fn encodeGenerationCoreCommand(
+    out: []u8,
+    stream_id: u64,
+    command: contract.CoreCommandRequest,
+) ?[]const u8 {
+    return switch (command) {
+        .scroll => |arg| stringifyGenerationParams(out, .{ .stream_id = stream_id, .op = "scroll", .arg = arg }),
+        .scroll_to_bottom => stringifyGenerationParams(out, .{ .stream_id = stream_id, .op = "scroll_to_bottom" }),
+        .scroll_to_abs => |arg| stringifyGenerationParams(out, .{ .stream_id = stream_id, .op = "scroll_to_abs", .arg = arg }),
+        .scroll_to_offset => |arg| stringifyGenerationParams(out, .{ .stream_id = stream_id, .op = "scroll_to_offset", .arg = arg }),
+        .report_focus => |gained| stringifyGenerationParams(out, .{ .stream_id = stream_id, .op = "report_focus", .gained = gained }),
+        .set_cell_metrics => |v| stringifyGenerationParams(out, .{ .stream_id = stream_id, .op = "set_cell_metrics", .width = v.width, .height = v.height }),
+        .set_default_colors => |v| stringifyGenerationParams(out, .{ .stream_id = stream_id, .op = "set_default_colors", .foreground = v.foreground, .background = v.background }),
+        .set_config_palette => |palette| stringifyGenerationParams(out, .{ .stream_id = stream_id, .op = "set_config_palette", .palette = palette }),
+        .set_max_scrollback => |lines| stringifyGenerationParams(out, .{ .stream_id = stream_id, .op = "set_max_scrollback", .lines = lines }),
+        .set_ambiguous_wide => |wide| stringifyGenerationParams(out, .{ .stream_id = stream_id, .op = "set_ambiguous_wide", .wide = wide }),
+        .set_emoji_wide => |wide| stringifyGenerationParams(out, .{ .stream_id = stream_id, .op = "set_emoji_wide", .wide = wide }),
+        .set_default_cursor_shape => |shape| stringifyGenerationParams(out, .{ .stream_id = stream_id, .op = "set_default_cursor_shape", .shape = shape }),
+        .set_runtime_config => |v| stringifyGenerationParams(out, .{
+            .stream_id = stream_id,
+            .op = "set_runtime_config",
+            .lines = v.max_scrollback,
+            .ambiguous_wide = v.ambiguous_wide,
+            .emoji_wide = v.emoji_wide,
+            .palette = v.palette,
+            .foreground = v.foreground,
+            .background = v.background,
+            .cell_width = v.cell_width,
+            .cell_height = v.cell_height,
+            .cursor_shape = v.cursor_shape,
+        }),
+        .jump_to_prompt => |direction| stringifyGenerationParams(out, .{ .stream_id = stream_id, .op = "jump_to_prompt", .direction = direction }),
+        .reset_input_modes => stringifyGenerationParams(out, .{ .stream_id = stream_id, .op = "reset_input_modes" }),
+    };
+}
+
+test "CR3a-2c3b typed request encoder injects only canonical binding identities" {
+    const identity: contract.BindingIdentity = .{
+        .binding_incarnation = 1,
+        .binding_storage_addr = 2,
+        .destination_addr = 3,
+        .binding_reservation_id = 4,
+        .slot_incarnation = 5,
+        .node_incarnation = 6,
+        .host_id = 7,
+        .connection_generation = 1,
+        .runtime_id = 0xaa,
+        .role = .controller,
+        .pid = 8,
+        .process_nonce = 9,
+    };
+    var buffer: [4096]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "{\"runtime_id\":\"000000000000000000000000000000aa\",\"mode\":\"controller\"}",
+        encodeGenerationRequestParams(&buffer, identity, 77, .attach_controller).?,
+    );
+    try std.testing.expectEqualStrings(
+        "{\"stream_id\":77,\"q\":\"61ed959c\",\"cur\":2,\"scroll\":true}",
+        encodeGenerationRequestParams(&buffer, identity, 77, .{
+            .find = contract.FindRequest.init("a한", 2, true).?,
+        }).?,
+    );
+    try std.testing.expectEqualStrings(
+        "{\"runtime_id\":\"000000000000000000000000000000aa\"}",
+        encodeGenerationRequestParams(&buffer, identity, 77, .terminate).?,
+    );
+    try std.testing.expect(encodeGenerationRequestParams(
+        &buffer,
+        identity,
+        77,
+        .spawn_full,
+    ) == null);
+}
+
+/// All-or-none request-side transaction. Untrusted transport addresses remain scalars until the
+/// live ClientSlot registry pins the canonical node and its owner seal proves the exact transport
+/// and opaque storage destinations.
+pub fn prepareGenerationRequest(
+    request: GenerationRequestPrepare,
+) GenerationRequestError!GenerationPreparedRequest {
+    const decoded = request.request.decode() orelse return error.InvalidOwner;
+    const tag = std.meta.activeTag(decoded);
+    const family = decoded.family();
+    if (family == .connection_only_denied) return error.Unauthorized;
+    const admission = try beginGenerationRequestOwner(request, false);
+    defer endRegisteredNodeOperation(admission.operation);
+    const node = admission.operation.node;
+    const identity = admission.identity;
+    const authorized = node.cleanup_registry.requestAuthorized(
+        request.reservation.cleanup,
+        identity,
+        family,
+        tag,
+        request.bound_stream_id,
+    ) catch return error.InvalidOwner;
+    if (!authorized) return error.Unauthorized;
+
+    const storage: *client_mod.PreparedBlockingRpcStorage =
+        @ptrFromInt(request.prepared_storage_addr);
+    var params_buffer: [4096]u8 = undefined;
+    const params_json = encodeGenerationRequestParams(
+        &params_buffer,
+        identity,
+        request.bound_stream_id,
+        decoded,
+    ) orelse return error.ResourceExhausted;
+    const prepared_identity = node.client.prepareBlockingRpcStorage(
+        storage,
+        contract.requestMethod(tag),
+        params_json,
+    ) catch |err| return mapGenerationRequestClientError(err);
+    const receipt = contract.PreparedCallReceipt.init(.{
+        .transport_incarnation = request.transport_incarnation,
+        .request_id = prepared_identity.request_id,
+        .request_digest = prepared_identity.frame_digest,
+    }) orelse {
+        _ = node.client.abortPreparedBlockingRpcStorageCanonical(
+            storage,
+            prepared_identity,
+        ) catch @panic("canonical prepared request receipt rollback failed");
+        return error.ProtocolError;
+    };
+    const canonical: prepared_request_authority.Prepared = .{
+        .transport_addr = request.transport_addr,
+        .transport_incarnation = request.transport_incarnation,
+        .binding = identity,
+        .tag = tag,
+        .family = family,
+        .receipt = receipt,
+        .descriptor = prepared_identity.descriptor,
+    };
+    node.cleanup_registry.publishPreparedRequest(
+        request.reservation.cleanup,
+        identity,
+        canonical,
+    ) catch {
+        const outcome = node.client.abortPreparedBlockingRpcStorageCanonical(
+            storage,
+            prepared_identity,
+        ) catch @panic("canonical prepared request publication rollback failed");
+        if (outcome == .terminal) node.client.poison(.local_invariant_violation);
+        return error.ProtocolError;
+    };
+    return .{ .receipt = receipt, .canonical = canonical };
+}
+
+pub fn abortGenerationRequest(request: GenerationRequestAbort) GenerationRequestError!void {
+    if (!request.receipt.valid()) return error.InvalidOwner;
+    const admission = try beginGenerationRequestOwner(request, false);
+    defer endRegisteredNodeOperation(admission.operation);
+    const node = admission.operation.node;
+    const identity = admission.identity;
+    const maybe_canonical = node.cleanup_registry.preparedRequestForReceipt(
+        request.reservation.cleanup,
+        identity,
+        request.transport_addr,
+        request.transport_incarnation,
+        request.receipt,
+    ) catch return error.InvalidOwner;
+    const canonical = maybe_canonical orelse return error.InvalidReceipt;
+    const storage: *client_mod.PreparedBlockingRpcStorage =
+        @ptrFromInt(request.prepared_storage_addr);
+    const prepared_identity: client_mod.PreparedBlockingRpcIdentity = .{
+        .request_id = canonical.receipt.request_id,
+        .frame_digest = canonical.receipt.request_digest,
+        .descriptor = canonical.descriptor,
+    };
+    const outcome = node.client.abortPreparedBlockingRpcStorageCanonical(
+        storage,
+        prepared_identity,
+    ) catch |err| switch (err) {
+        error.AdminBusy => return error.Busy,
+        else => {
+            node.cleanup_registry.settlePreparedRequest(
+                request.reservation.cleanup,
+                identity,
+                canonical,
+                true,
+            ) catch @panic("ambiguous prepared request authority terminalization failed");
+            node.client.poison(.local_invariant_violation);
+            return error.ProtocolError;
+        },
+    };
+    node.cleanup_registry.settlePreparedRequest(
+        request.reservation.cleanup,
+        identity,
+        canonical,
+        outcome == .terminal,
+    ) catch @panic("prepared request authority settlement drifted");
+    if (outcome == .terminal) {
+        node.client.poison(.local_invariant_violation);
+        return error.ProtocolError;
+    }
+}
+
+const ExecuteDisposition = enum { reusable, terminal, settled };
+
+/// Executes the attach-compatible request while one registry operation pins the canonical
+/// ClientSlot node. No node, Client, binding, or response-owner address escapes this scope.
+pub fn executeGenerationRequest(
+    execution: GenerationRequestExecute,
+) GenerationExecuteError!contract.ExecuteResult {
+    const request = execution.request;
+    if (!request.receipt.valid() or execution.response_out_addr == 0 or
+        execution.owner_addr == 0 or execution.owner_size == 0)
+        return error.InvalidOwner;
+    _ = std.math.add(usize, execution.owner_addr, execution.owner_size) catch
+        return error.InvalidOwner;
+
+    const admission = try beginGenerationRequestOwner(request, false);
+    defer endRegisteredNodeOperation(admission.operation);
+    const node = admission.operation.node;
+    const identity = admission.identity;
+    const maybe_canonical = node.cleanup_registry.preparedRequestForReceipt(
+        request.reservation.cleanup,
+        identity,
+        request.transport_addr,
+        request.transport_incarnation,
+        request.receipt,
+    ) catch return error.InvalidOwner;
+    const canonical = maybe_canonical orelse return error.InvalidReceipt;
+    const storage: *client_mod.PreparedBlockingRpcStorage =
+        @ptrFromInt(request.prepared_storage_addr);
+    const prepared_identity: client_mod.PreparedBlockingRpcIdentity = .{
+        .request_id = canonical.receipt.request_id,
+        .frame_digest = canonical.receipt.request_digest,
+        .descriptor = canonical.descriptor,
+    };
+    if (!node.client.preparedBlockingRpcStorageMatches(storage, prepared_identity)) {
+        try terminalizeExecutingRequest(node, request, identity, canonical);
+        return error.ProtocolError;
+    }
+    node.cleanup_registry.beginPreparedRequestExecute(
+        request.reservation.cleanup,
+        identity,
+        canonical,
+    ) catch return error.InvalidReceipt;
+
+    var disposition: ExecuteDisposition = .terminal;
+    defer if (disposition != .settled) node.cleanup_registry.settlePreparedRequest(
+        request.reservation.cleanup,
+        identity,
+        canonical,
+        disposition == .terminal,
+    ) catch @panic("prepared request execution authority settlement failed");
+
+    const response_out: *executed_response_mod.ExecutedResponse =
+        @ptrFromInt(execution.response_out_addr);
+    const response_owner = node.cleanup_registry.responseOwnerSeal(
+        request.reservation.cleanup,
+        identity,
+    ) catch return error.InvalidOwner;
+    const binding: *contract.PreparedAttachmentBinding =
+        @ptrFromInt(identity.binding_storage_addr);
+    if (!responseDestinationValid(
+        response_out,
+        response_owner,
+        binding,
+        storage,
+        execution.owner_addr,
+        execution.owner_size,
+        request.slot_addr,
+        node,
+    )) {
+        disposition = try rollbackExecutingRequest(node, request, identity, canonical);
+        return error.InvalidResponseDestination;
+    }
+
+    const response_incarnation = issueGenerationResponseIncarnation() catch {
+        disposition = try rollbackExecutingRequest(node, request, identity, canonical);
+        return error.IdentityExhausted;
+    };
+    const executed = contract.ExecutedCallReceipt.fromPrepared(request.receipt) orelse {
+        disposition = try rollbackExecutingRequest(node, request, identity, canonical);
+        return error.InvalidReceipt;
+    };
+    const response_allocator = node.client.preflightPreparedBlockingRpcStorageExecution(
+        storage,
+    ) catch |err| {
+        disposition = try rollbackExecutingRequest(node, request, identity, canonical);
+        return err;
+    };
+
+    // The pending flush may invoke allocator callbacks. Revalidate every canonical authority
+    // under the still-held registry operation immediately before the first request byte.
+    if (!(node.cleanup_registry.executingRequestMatches(
+        request.reservation.cleanup,
+        identity,
+        canonical,
+    ) catch false) or
+        !node.client.preparedBlockingRpcStorageMatches(storage, prepared_identity) or
+        !responseDestinationValid(
+            response_out,
+            response_owner,
+            binding,
+            storage,
+            execution.owner_addr,
+            execution.owner_size,
+            request.slot_addr,
+            node,
+        ))
+    {
+        disposition = try rollbackExecutingRequest(node, request, identity, canonical);
+        return error.InvalidResponseDestination;
+    }
+
+    const response = switch (node.client.executePreparedBlockingRpcStorageWithAllocator(
+        storage,
+        response_allocator,
+    )) {
+        .not_executed => |err| {
+            disposition = try rollbackExecutingRequest(node, request, identity, canonical);
+            return err;
+        },
+        .uncertain => {
+            node.client.poison(.transport_read_failure);
+            const result: contract.ExecuteResult = .{
+                .uncertain_or_connection_failure = executed,
+            };
+            response_out.initWithoutPayloadInPlace(
+                response_owner,
+                response_incarnation,
+                result,
+            ) catch {
+                node.client.poison(.local_invariant_violation);
+                return error.InvalidResponseDestination;
+            };
+            return result;
+        },
+        .accepted => |value| value,
+    };
+    if (!std.meta.eql(response.payload_allocator, response_allocator)) {
+        node.client.poison(.local_invariant_violation);
+        return error.InvalidResponseDestination;
+    }
+    if (!(node.cleanup_registry.executingRequestMatches(
+        request.reservation.cleanup,
+        identity,
+        canonical,
+    ) catch false) or
+        !responseOwnerStillPristine(response_out, response_owner) or
+        payloadAliasesExecutionOwners(
+            response.payload,
+            response_out,
+            response_owner,
+            binding,
+            storage,
+            request.transport_addr,
+            execution.owner_addr,
+            execution.owner_size,
+            request.slot_addr,
+            node,
+        ))
+    {
+        node.client.poison(.local_invariant_violation);
+        return error.InvalidResponseDestination;
+    }
+    const correlated = contract.CorrelatedExecutedCall.init(
+        executed,
+        response.response_request_id,
+    ) orelse {
+        node.client.poison(.local_invariant_violation);
+        response_allocator.free(response.payload);
+        return error.InvalidReceipt;
+    };
+    if (!correlated.responseMatchesPrepared()) {
+        node.client.poison(.response_correlation_lost);
+        response_allocator.free(response.payload);
+        return error.InvalidReceipt;
+    }
+    const result: contract.ExecuteResult = .{ .accepted = correlated };
+    response_out.initAcceptedInPlace(
+        response_allocator,
+        response_owner,
+        response_incarnation,
+        correlated,
+        response.payload,
+    ) catch {
+        node.client.poison(.local_invariant_violation);
+        response_allocator.free(response.payload);
+        return error.InvalidResponseDestination;
+    };
+    disposition = .reusable;
+    return result;
+}
+
+fn rollbackExecutingRequest(
+    node: *ClientNode,
+    request: GenerationRequestAbort,
+    identity: contract.BindingIdentity,
+    canonical: prepared_request_authority.Prepared,
+) GenerationRequestError!ExecuteDisposition {
+    const storage: *client_mod.PreparedBlockingRpcStorage =
+        @ptrFromInt(request.prepared_storage_addr);
+    const outcome = node.client.abortPreparedBlockingRpcStorageCanonical(storage, .{
+        .request_id = canonical.receipt.request_id,
+        .frame_digest = canonical.receipt.request_digest,
+        .descriptor = canonical.descriptor,
+    }) catch {
+        try terminalizeExecutingRequest(node, request, identity, canonical);
+        return error.ProtocolError;
+    };
+    const terminal = outcome == .terminal;
+    node.cleanup_registry.settlePreparedRequest(
+        request.reservation.cleanup,
+        identity,
+        canonical,
+        terminal,
+    ) catch @panic("executing request rollback settlement drifted");
+    if (terminal) node.client.poison(.local_invariant_violation);
+    return .settled;
+}
+
+fn terminalizeExecutingRequest(
+    node: *ClientNode,
+    request: GenerationRequestAbort,
+    identity: contract.BindingIdentity,
+    canonical: prepared_request_authority.Prepared,
+) GenerationRequestError!void {
+    node.cleanup_registry.settlePreparedRequest(
+        request.reservation.cleanup,
+        identity,
+        canonical,
+        true,
+    ) catch return error.ProtocolError;
+    node.client.poison(.local_invariant_violation);
+}
+
+fn responseDestinationValid(
+    response_out: *executed_response_mod.ExecutedResponse,
+    response_owner: *contract.ExecutedResponseOwnerSeal,
+    binding: *contract.PreparedAttachmentBinding,
+    storage: *client_mod.PreparedBlockingRpcStorage,
+    owner_addr: usize,
+    owner_size: usize,
+    slot_addr: usize,
+    node: *ClientNode,
+) bool {
+    const out_addr = @intFromPtr(response_out);
+    const seal_addr = @intFromPtr(response_owner);
+    if (byteRangesOverlap(out_addr, @sizeOf(executed_response_mod.ExecutedResponse), owner_addr, owner_size) or
+        byteRangesOverlap(out_addr, @sizeOf(executed_response_mod.ExecutedResponse), slot_addr, @sizeOf(ClientSlot)) or
+        byteRangesOverlap(out_addr, @sizeOf(executed_response_mod.ExecutedResponse), @intFromPtr(node), @sizeOf(ClientNode)) or
+        byteRangesOverlap(out_addr, @sizeOf(executed_response_mod.ExecutedResponse), @intFromPtr(binding), @sizeOf(contract.PreparedAttachmentBinding)) or
+        byteRangesOverlap(out_addr, @sizeOf(executed_response_mod.ExecutedResponse), @intFromPtr(storage), @sizeOf(client_mod.PreparedBlockingRpcStorage)) or
+        byteRangesOverlap(seal_addr, @sizeOf(contract.ExecutedResponseOwnerSeal), owner_addr, owner_size) or
+        byteRangesOverlap(seal_addr, @sizeOf(contract.ExecutedResponseOwnerSeal), @intFromPtr(binding), @sizeOf(contract.PreparedAttachmentBinding)) or
+        byteRangesOverlap(seal_addr, @sizeOf(contract.ExecutedResponseOwnerSeal), @intFromPtr(storage), @sizeOf(client_mod.PreparedBlockingRpcStorage)))
+        return false;
+    return response_out.canInitializeWithOwner(response_owner);
+}
+
+fn responseOwnerStillPristine(
+    response_out: *const executed_response_mod.ExecutedResponse,
+    response_owner: *const contract.ExecutedResponseOwnerSeal,
+) bool {
+    return response_out.canInitializeWithOwner(response_owner);
+}
+
+fn payloadAliasesExecutionOwners(
+    payload: []const u8,
+    response_out: *executed_response_mod.ExecutedResponse,
+    response_owner: *contract.ExecutedResponseOwnerSeal,
+    binding: *contract.PreparedAttachmentBinding,
+    storage: *client_mod.PreparedBlockingRpcStorage,
+    transport_addr: usize,
+    owner_addr: usize,
+    owner_size: usize,
+    slot_addr: usize,
+    node: *ClientNode,
+) bool {
+    const start = @intFromPtr(payload.ptr);
+    const len = payload.len;
+    return byteRangesOverlap(start, len, @intFromPtr(response_out), @sizeOf(executed_response_mod.ExecutedResponse)) or
+        byteRangesOverlap(start, len, @intFromPtr(response_owner), @sizeOf(contract.ExecutedResponseOwnerSeal)) or
+        byteRangesOverlap(start, len, @intFromPtr(binding), @sizeOf(contract.PreparedAttachmentBinding)) or
+        byteRangesOverlap(start, len, @intFromPtr(storage), @sizeOf(client_mod.PreparedBlockingRpcStorage)) or
+        byteRangesOverlap(start, len, transport_addr, 1) or
+        byteRangesOverlap(start, len, owner_addr, owner_size) or
+        byteRangesOverlap(start, len, slot_addr, @sizeOf(ClientSlot)) or
+        byteRangesOverlap(start, len, @intFromPtr(node), @sizeOf(ClientNode));
+}
+
+fn byteRangesOverlap(a_start: usize, a_len: usize, b_start: usize, b_len: usize) bool {
+    const a_end = std.math.add(usize, a_start, a_len) catch return true;
+    const b_end = std.math.add(usize, b_start, b_len) catch return true;
+    return a_start < b_end and b_start < a_end;
+}
+
+fn issueGenerationResponseIncarnation() error{IdentityExhausted}!u64 {
+    while (true) {
+        const current = generation_response_incarnation_issuer.load(.monotonic);
+        if (current == 0 or current == std.math.maxInt(u64)) return error.IdentityExhausted;
+        if (generation_response_incarnation_issuer.cmpxchgWeak(
+            current,
+            current + 1,
+            .monotonic,
+            .monotonic,
+        ) == null) return current;
+    }
+}
+
+pub fn preflightGenerationTransportTerminalize(
+    request: GenerationTransportOwnerQuery,
+) error{ Busy, InvalidOwner }!void {
+    const admission = beginGenerationRequestOwner(request, true) catch |err| return switch (err) {
+        error.Busy => error.Busy,
+        else => error.InvalidOwner,
+    };
+    defer endRegisteredNodeOperation(admission.operation);
+    const readiness = admission.operation.node.cleanup_registry
+        .transportTerminalizeReadiness(
+        request.reservation.cleanup,
+        admission.identity,
+        admission.operation.node.pin_owner.active_cleanup == 1,
+    ) catch return error.InvalidOwner;
+    return switch (readiness) {
+        .settled => {},
+        .busy => error.Busy,
+        .invalid => error.InvalidOwner,
+    };
+}
+
+pub fn terminalizeGenerationTransportOwner(
+    request: GenerationTransportOwnerQuery,
+) error{ Busy, InvalidOwner }!void {
+    const admission = beginGenerationRequestOwner(request, true) catch |err| return switch (err) {
+        error.Busy => error.Busy,
+        else => error.InvalidOwner,
+    };
+    defer endRegisteredNodeOperation(admission.operation);
+    const readiness = admission.operation.node.cleanup_registry
+        .transportTerminalizeReadiness(
+        request.reservation.cleanup,
+        admission.identity,
+        admission.operation.node.pin_owner.active_cleanup == 1,
+    ) catch return error.InvalidOwner;
+    switch (readiness) {
+        .settled => {},
+        .busy => return error.Busy,
+        .invalid => return error.InvalidOwner,
+    }
+    admission.owner.terminalize(request.transport_incarnation) catch
+        return error.InvalidOwner;
+}
+
+fn mapGenerationRequestClientError(err: client_mod.PreparedBlockingRpcError) GenerationRequestError {
+    return switch (err) {
+        error.AdminBusy => error.Busy,
+        error.Unauthorized => error.Unauthorized,
+        error.OutOfMemory, error.EventQueueFull, error.DestinationOccupied => error.ResourceExhausted,
+        error.ConnectionClosed, error.WriteFailed => error.ConnectionClosed,
+        error.MovedOrCopied => error.InvalidOwner,
+        error.InvalidPreparedRpc,
+        error.EndpointAbsent,
+        error.EndpointDenied,
+        error.EndpointTransient,
+        error.HandshakeFailed,
+        error.IncompatibleVersion,
+        error.ProtocolError,
+        error.ExternalMode,
+        => error.ProtocolError,
     };
 }
 

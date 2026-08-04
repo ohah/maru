@@ -132,6 +132,33 @@ pub fn reconcile(state: *InteractionState, old_tree: UiRectTree, new_tree: UiRec
     return result;
 }
 
+/// Keyboard activation of the focused node — the parity path for a pointer click.
+///
+/// 이 함수가 없으면 keyboard 사용자는 같은 command에 도달할 길이 없다. Session Dock은 지금
+/// "이 종류의 intent를 목록에서 찾아 실행"하는 별도 경로를 쓰는데, 그것은 focus와 무관해서 어떤
+/// 버튼이 선택돼 있든 같은 동작을 낸다 — parity가 아니다.
+///
+/// pointer up과 **정확히 같은 검증**을 통과한다: 지금 published tree에서 그 id가 여전히 enabled
+/// action을 가질 때만 실행한다. 그래서 stale focus나 사이에 disabled로 바뀐 action이 키로 되살아나지
+/// 않는다. capture가 살아 있으면(누군가 pointer로 누르고 있는 중) 아무것도 하지 않는다 — 한 stream에
+/// 하나의 owner라는 §4.3 규칙을 keyboard가 우회하지 못하게 한다.
+pub fn activateFocused(state: *InteractionState, snapshot: UiRectTree) InteractionError!Dispatch {
+    const before = state.*;
+    if (before.capture != null) return try finishTransition(before, before, null);
+    const id = before.focused orelse return try finishTransition(before, before, null);
+    const current = enabledActionForId(snapshot, id) orelse {
+        // focus만 남고 action이 사라졌거나 disabled가 됐다. 그 자리를 비워 다음 키가 유령 대상을
+        // 다시 겨냥하지 않게 한다.
+        var after = before;
+        after.focused = null;
+        const result = try finishTransition(before, after, null);
+        state.* = after;
+        return result;
+    };
+    // 시각 상태는 바뀌지 않는다(focus 그대로). action만 낸다.
+    return try finishTransition(before, before, current.id);
+}
+
 /// A surface lifetime boundary. Unlike a tree replacement, deactivation also discards focus and
 /// hover so a numeric ID in a future surface cannot inherit visual state from the retired one.
 pub fn deactivate(state: *InteractionState) InteractionError!Dispatch {
@@ -344,4 +371,65 @@ test "second down cancels predecessor and right up cannot release left capture" 
     try std.testing.expectEqual(@as(?Capture, .{ .id = 2, .action_id = 20 }), state.capture);
     const up = try dispatch(&state, rectTree(&entries), .{ .phase = .up, .x_px = 12, .y_px = 2, .timestamp_ns = 4 });
     try std.testing.expectEqual(@as(?UiActionId, 20), up.action);
+}
+
+test "keyboard activation matches a pointer click and refuses what a click would refuse" {
+    const entries = [_]ui_tree.RectEntry{
+        entry(1, .{ .x = 0, .y = 0, .width = 20, .height = 20 }, .{ .id = 10 }, null),
+        entry(2, .{ .x = 30, .y = 0, .width = 20, .height = 20 }, .{ .id = 20, .enabled = false }, null),
+    };
+    const snapshot = rectTree(&entries);
+
+    // focus가 없으면 키는 아무것도 하지 않는다 — 마지막에 눌린 것을 기억해 실행하지 않는다.
+    var state = InteractionState{};
+    const no_focus = try activateFocused(&state, snapshot);
+    try std.testing.expect(no_focus.action == null);
+
+    // pointer down이 focus를 남기고, 같은 rect에서 키가 같은 action을 낸다(parity).
+    _ = try dispatch(&state, snapshot, .{ .phase = .down, .x_px = 5, .y_px = 5, .timestamp_ns = 1 });
+    _ = try dispatch(&state, snapshot, .{ .phase = .up, .x_px = 5, .y_px = 5, .timestamp_ns = 2 });
+    try std.testing.expectEqual(@as(?UiId, 1), state.focused);
+    const activated = try activateFocused(&state, snapshot);
+    try std.testing.expectEqual(@as(?UiActionId, 10), activated.action);
+    // 시각 상태는 그대로다 — 키 실행이 focus를 옮기거나 hover를 만들지 않는다.
+    try std.testing.expectEqual(@as(?UiId, 1), state.focused);
+
+    // pointer로 누르고 있는 중이면 키가 끼어들지 못한다(§4.3 — 한 stream에 owner 하나).
+    _ = try dispatch(&state, snapshot, .{ .phase = .down, .x_px = 5, .y_px = 5, .timestamp_ns = 3 });
+    try std.testing.expect(state.capture != null);
+    const during_capture = try activateFocused(&state, snapshot);
+    try std.testing.expect(during_capture.action == null);
+    _ = try dispatch(&state, snapshot, .{ .phase = .cancel, .x_px = 5, .y_px = 5, .timestamp_ns = 4 });
+
+    // disabled는 click intent가 될 수 없다 — 키도 마찬가지다. focus 자체가 붙지 않는다.
+    _ = try dispatch(&state, snapshot, .{ .phase = .down, .x_px = 35, .y_px = 5, .timestamp_ns = 5 });
+    try std.testing.expectEqual(@as(?UiId, 1), state.focused);
+}
+
+test "keyboard activation revalidates against the current tree, not the focused past" {
+    const enabled = [_]ui_tree.RectEntry{
+        entry(1, .{ .x = 0, .y = 0, .width = 20, .height = 20 }, .{ .id = 10 }, null),
+    };
+    var state = InteractionState{};
+    _ = try dispatch(&state, rectTree(&enabled), .{ .phase = .down, .x_px = 5, .y_px = 5, .timestamp_ns = 1 });
+    _ = try dispatch(&state, rectTree(&enabled), .{ .phase = .up, .x_px = 5, .y_px = 5, .timestamp_ns = 2 });
+    try std.testing.expectEqual(@as(?UiId, 1), state.focused);
+
+    // 같은 id가 disabled로 바뀐 tree에서는 키가 실행되지 않고 focus도 비운다 — 유령 대상을 다음
+    // 키가 다시 겨냥하지 않게 한다. pointer up이 stale action을 거부하는 것과 같은 규율이다.
+    const disabled = [_]ui_tree.RectEntry{
+        entry(1, .{ .x = 0, .y = 0, .width = 20, .height = 20 }, .{ .id = 10, .enabled = false }, null),
+    };
+    const refused = try activateFocused(&state, rectTree(&disabled));
+    try std.testing.expect(refused.action == null);
+    try std.testing.expect(state.focused == null);
+
+    // node가 통째로 사라진 경우도 같다.
+    var gone_state = InteractionState{};
+    _ = try dispatch(&gone_state, rectTree(&enabled), .{ .phase = .down, .x_px = 5, .y_px = 5, .timestamp_ns = 3 });
+    _ = try dispatch(&gone_state, rectTree(&enabled), .{ .phase = .up, .x_px = 5, .y_px = 5, .timestamp_ns = 4 });
+    const empty = [_]ui_tree.RectEntry{};
+    const vanished = try activateFocused(&gone_state, rectTree(&empty));
+    try std.testing.expect(vanished.action == null);
+    try std.testing.expect(gone_state.focused == null);
 }

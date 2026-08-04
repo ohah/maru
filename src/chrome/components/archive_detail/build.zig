@@ -1,6 +1,7 @@
 //! Bounded geometry and opaque action projection for ArchiveSessionDetailPanel.
 
 const tree = @import("../../ui/tree.zig");
+const ui_button = @import("../../ui/button.zig");
 const layout = @import("../../ui/layout.zig");
 const ids = @import("ids.zig");
 const types = @import("types.zig");
@@ -18,10 +19,25 @@ pub const NodeIds = struct {
     pub const resume_session: u64 = 0x4152_0200;
     pub const reveal: u64 = 0x4152_0201;
     pub const focus_live: u64 = 0x4152_0202;
+    // Button의 유일한 Text child. label이 tree에 들어오면서 그 identity도 published tree가 소유한다.
+    pub const resume_label: u64 = 0x4152_0210;
+    pub const reveal_label: u64 = 0x4152_0211;
+    pub const focus_live_label: u64 = 0x4152_0212;
 
     pub fn turn(index: usize) u64 {
         return turn_base + index;
     }
+};
+
+/// Action label은 tree가 소유한다. 예전에는 view가 문자열 상수를 들고 직접 그려, 같은 label이
+/// hit rect와 다른 곳에서 계산될 여지가 있었다. 단축키 표기는 계약대로 label이 명시로 포함하며
+/// Button이 도메인별로 합성하지 않는다.
+pub const labels = struct {
+    // 두 아이콘은 등록된 Chrome SVG glyph다(recent.svg / document.svg). 지금은 label 문자열의
+    // 일부로 그려지며, `leading_icon` 슬롯으로 옮기는 것은 registry 주입 경로가 생기는 후속이다.
+    pub const resume_session = "\u{F000C} 터미널에서 이어하기  ⌘↵";
+    pub const reveal = "\u{F0011} 로그 보기  ⌘L";
+    pub const focus_live = "열린 세션으로 이동";
 };
 
 pub const Buffers = struct {
@@ -50,7 +66,9 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
     if (visible_turns.len > max_turns) return error.TooManyTurns;
     const live_count: usize = if (types.isActionable(props) and props.focus_live_enabled) 1 else 0;
     const action_count: usize = 2 + live_count;
-    const needed_nodes = visible_turns.len + action_count + 5;
+    // label은 Button의 자식이지만 호출자 버퍼에 살아 있어야 한다(값의 주소를 실으면 dangling).
+    // 그래서 action마다 node 두 개 — Button 하나와 그 label 하나 — 를 쓴다.
+    const needed_nodes = visible_turns.len + action_count * 2 + 5;
     if (buffers.nodes.len < needed_nodes) return error.InsufficientNodeBuffer;
 
     const action_ready = types.isActionable(props);
@@ -76,12 +94,18 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
         }, &.{});
     }
 
-    const action_nodes = buffers.nodes[visible_turns.len..][0..action_count];
-    action_nodes[0] = actionNode(NodeIds.resume_session, resume_action, resume_enabled, action_count);
-    action_nodes[1] = actionNode(NodeIds.reveal, reveal, reveal_enabled, action_count);
-    if (focus_live) |action| action_nodes[2] = actionNode(NodeIds.focus_live, action, true, action_count);
+    // label 슬롯을 먼저 잡고, Button이 그 슬라이스를 자식으로 든다. 두 배열은 같은 버퍼의 서로 다른
+    // 구간이라 label은 published tree가 살아 있는 동안 유효하다.
+    const label_nodes = buffers.nodes[visible_turns.len..][0..action_count];
+    const action_nodes = buffers.nodes[visible_turns.len + action_count ..][0..action_count];
+    label_nodes[0] = tree.text(.{ .id = NodeIds.resume_label, .value = labels.resume_session });
+    label_nodes[1] = tree.text(.{ .id = NodeIds.reveal_label, .value = labels.reveal });
+    if (focus_live != null) label_nodes[2] = tree.text(.{ .id = NodeIds.focus_live_label, .value = labels.focus_live });
+    action_nodes[0] = actionNode(NodeIds.resume_session, resume_action, resume_enabled, action_count, .primary, label_nodes[0..1]) catch return error.InsufficientNodeBuffer;
+    action_nodes[1] = actionNode(NodeIds.reveal, reveal, reveal_enabled, action_count, .secondary, label_nodes[1..2]) catch return error.InsufficientNodeBuffer;
+    if (focus_live) |action| action_nodes[2] = actionNode(NodeIds.focus_live, action, true, action_count, .secondary, label_nodes[2..3]) catch return error.InsufficientNodeBuffer;
 
-    const top = buffers.nodes[visible_turns.len + action_count ..][0..5];
+    const top = buffers.nodes[visible_turns.len + action_count * 2 ..][0..5];
     top[0] = tree.card(.{ .id = NodeIds.header, .style = fixed(m.header_h, m.gap), .variant = .raised, .paint = .{}, .overflow = .clip }, &.{});
     top[1] = tree.card(.{ .id = NodeIds.metadata, .style = fixed(m.metadata_h, m.gap), .variant = .surface, .paint = .{}, .overflow = .clip }, &.{});
     top[2] = tree.card(.{ .id = NodeIds.section, .style = fixed(m.section_h, m.gap), .variant = .surface, .paint = .{}, .overflow = .clip }, &.{});
@@ -97,7 +121,14 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
         .style = .{ .padding = .{ .top = @floatFromInt(m.pad), .right = @floatFromInt(m.pad), .bottom = @floatFromInt(m.pad), .left = @floatFromInt(m.pad) } },
         .overflow = .clip,
     }, top);
-    const built = try tree.build(root, .{ .root_size = props.viewport_px, .max_entries = needed_nodes + 1, .max_depth = 3 }, .{
+    // Button이 label을 Text child로 가지면서 published entry가 action마다 하나씩 늘고 깊이도 한 단
+    // 깊어졌다(root > actions > button > label). 상한은 그 구조를 정확히 수용하는 값이며, 넘치면
+    // partial publish 대신 candidate가 실패한다.
+    const built = try tree.build(root, .{
+        .root_size = props.viewport_px,
+        .max_entries = needed_nodes + action_count + 1,
+        .max_depth = 4,
+    }, .{
         .entries = buffers.entries,
         .items = buffers.layout_items,
         .flex_scratch = buffers.flex_scratch,
@@ -110,18 +141,31 @@ fn fixed(height: u32, bottom: u32) layout.UiStyle {
     return .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(height) }, .margin = .{ .bottom = @floatFromInt(bottom) } };
 }
 
-fn actionNode(id: u64, action: tree.UiAction, enabled: bool, action_count: usize) tree.UiNode {
-    return tree.card(.{
+/// Action 표면은 generic Button이다. 예전에는 `tree.card`를 눌리는 표면으로 쓰고 label을 view가
+/// 따로 그렸다 — 그러면 label의 전경·정렬을 컴포넌트가 알고 있어야 하고, 두 번째 소비자가 같은
+/// 결정을 다시 내린다. 이제 label은 Button의 유일한 Text child이므로 tree가 소유한다.
+///
+/// `variant`는 색을 직접 고르지 않고 의미를 고른다. 재개는 이 패널의 주 command라 `primary`,
+/// 나머지는 `secondary`다. 비활성은 variant가 아니라 `action.enabled`가 표현하며 `paint_style`이
+/// disabled를 언제나 마지막에 얹는다.
+fn actionNode(
+    id: u64,
+    action: tree.UiAction,
+    enabled: bool,
+    action_count: usize,
+    variant: tree.ButtonVariant,
+    label: []const tree.UiNode,
+) ui_button.ButtonError!tree.UiNode {
+    return ui_button.button(.{
         .id = id,
-        // `UiNode` validates a card both as its row child and as an independently composable
-        // node. A definite percent share therefore keeps all action cards materialized instead
+        // `UiNode` validates a button both as its row child and as an independently composable
+        // node. A definite percent share therefore keeps all action nodes materialized instead
         // of relying on a row-only `.fill` interpretation.
         .style = .{ .width = .{ .percent = 1.0 / @as(f32, @floatFromInt(action_count)) }, .height = .{ .percent = 1 } },
-        .variant = if (enabled) .selected else .surface,
-        .paint = .{},
+        .variant = variant,
         .action = .{ .id = action.id, .enabled = enabled },
         .overflow = .clip,
-    }, &.{});
+    }, label);
 }
 
 test "archive detail action identities disable stale source effects and omit absent live navigation" {
@@ -132,11 +176,11 @@ test "archive detail action identities disable stale source effects and omit abs
         .{ .role = .assistant, .text = "must not fail the stale shell" },
     };
     const props = types.Props{ .viewport_px = .{ .width = 320, .height = 480 }, .cell_width_px = 8, .cell_height_px = 16, .snapshot_generation = 7, .state = .stale, .provider = .codex, .title = "title", .metadata = "metadata", .turns = &stale_turns, .focus_live_enabled = true };
-    var nodes: [8]tree.UiNode = undefined;
-    var entries: [9]tree.RectEntry = undefined;
-    var items: [9]layout.Item = undefined;
-    var scratch: [9]layout.FlexScratch = undefined;
-    var rects: [9]layout.UiRect = undefined;
+    var nodes: [14]tree.UiNode = undefined;
+    var entries: [16]tree.RectEntry = undefined;
+    var items: [16]layout.Item = undefined;
+    var scratch: [16]layout.FlexScratch = undefined;
+    var rects: [16]layout.UiRect = undefined;
     var actions: [3]ids.Entry = undefined;
     const frame = try build(props, .{ .nodes = &nodes, .entries = &entries, .layout_items = &items, .flex_scratch = &scratch, .child_rects = &rects, .actions = &actions });
     try @import("std").testing.expect(frame.tree.find(NodeIds.focus_live) == null);

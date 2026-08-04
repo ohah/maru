@@ -85,7 +85,7 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     // 소스 digest만 움직인다 — 무관한 reflection이 이 변경에 묻어 들어오지 못하게 값을 정확히 유지한다.
     // chrome_host 컴포넌트 ↔ 입력 소유 두 축의 반대 방향 가드가 `FieldEnum` 역할표와 comptime 검사를 더한다.
     // `@enumFromInt`로 필드를 돌아 `@field` reflection은 늘리지 않으므로 count는 3 그대로이고 digest만 움직인다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 3, .digest_hex = "60f2b3a615e38e24f973ec8e0d19aae7e6c8de5580fada89471fa78a42702aaa" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 3, .digest_hex = "a3369f450cb158b0d8141702cbd68c6778aff5b4cbed481b3c7fc68b1c44e3e9" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

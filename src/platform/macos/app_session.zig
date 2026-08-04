@@ -65022,39 +65022,32 @@ test "동시 활성일 때 host override는 우선순위 파생이 아니라 합
 const ChromeHostField = std.meta.FieldEnum(chrome.ChromeHost);
 
 /// `chrome_host` 컴포넌트가 입력 소유 두 축에서 갖는 역할.
-const ModalInputRole = enum {
+const ModalInputRole = union(enum) {
     /// 오버레이가 아니다 — 입력 소유와 무관(상호작용 상태 캐시, 패시브 HUD).
     not_an_overlay,
-    /// 열리면 키/확정 텍스트를 받는다. 같은 이름의 `InputFocus` 값이 있어야 하고 host override도 참이다.
-    routes_text,
+    /// 열리면 키/확정 텍스트를 받는다. 대응하는 `InputFocus` 값을 **명시**하고 host override도 참이다.
+    routes_text: AppSession.InputFocus,
     /// 열리면 입력을 막지만 텍스트는 받지 않는다. `InputFocus` 값 없이 override만 참이다.
     blocks_without_text,
     /// 지나가는 토스트. `InputFocus` 값은 있지만 override는 걸지 않는다(14차 리뷰 [3] — 토스트가 웹
     /// 포커스를 뺏으면 안 된다).
-    transient_toast,
+    transient_toast: AppSession.InputFocus,
 };
 
+/// 두 축의 대응은 이름 규약이 아니라 이 매핑이 소유한다 — `chrome_host` 필드명과 `InputFocus` 값 이름이
+/// 달라도 된다. payload 타입이 `InputFocus`라 없는 값을 적으면 컴파일되지 않으므로, `c822b336`의 settings
+/// 누락(모달 집합엔 있고 `inputFocus`엔 없던 상태)은 이 파일이 빌드되는 것만으로 불가능하다. 남는 실수는
+/// "존재하지만 엉뚱한 값을 적는 것"뿐이고, 그건 아래 실행 테스트가 실제 `inputFocus()`와 대조해 잡는다.
 fn modalInputRole(field: ChromeHostField) ModalInputRole {
     return switch (field) {
         .interaction, .key_hints => .not_an_overlay,
-        .confirm, .find, .palette, .settings => .routes_text,
+        .confirm => .{ .routes_text = .confirm },
+        .find => .{ .routes_text = .find },
+        .palette => .{ .routes_text = .palette },
+        .settings => .{ .routes_text = .settings },
         .context_menu, .notifications => .blocks_without_text,
-        .notice => .transient_toast,
+        .notice => .{ .transient_toast = .notice },
     };
-}
-
-comptime {
-    @setEvalBranchQuota(10_000); // `stringToEnum`의 comptime 문자열 비교가 기본 quota를 넘는다.
-    // 텍스트를 받는 오버레이는 `InputFocus`에 같은 이름의 값이 있어야 한다. 이 검사가 `c822b336`의
-    // settings 누락을 컴파일 단계에서 막는다.
-    for (std.meta.fields(ChromeHostField)) |field| {
-        switch (modalInputRole(@enumFromInt(field.value))) {
-            .routes_text, .transient_toast => if (std.meta.stringToEnum(AppSession.InputFocus, field.name) == null)
-                @compileError("chrome_host." ++ field.name ++ " routes text but has no InputFocus value of the same name" ++
-                    " — add it to InputFocus and its switches, or re-classify it in modalInputRole"),
-            .not_an_overlay, .blocks_without_text => {},
-        }
-    }
 }
 
 test "chrome_host 오버레이는 역할대로 입력 소유 두 축에 반영된다" {
@@ -65080,21 +65073,20 @@ test "chrome_host 오버레이는 역할대로 입력 소유 두 축에 반영�
 
             @field(session.chrome_host, field.name).open = true;
             switch (comptime role) {
-                .routes_text => {
+                .routes_text => |focus| {
                     // 텍스트를 받는 오버레이는 키가 Zig 경로여야 하므로 host override가 참이고,
-                    // `inputFocus`도 같은 이름의 값을 가리켜야 한다.
+                    // `inputFocus`도 등재된 그 값을 가리켜야 한다(매핑이 틀리면 여기서 깨진다).
                     try std.testing.expect(session.terminalOwnsInput());
-                    const expected = std.meta.stringToEnum(AppSession.InputFocus, field.name).?;
-                    try std.testing.expectEqual(expected, session.inputFocus());
+                    try std.testing.expectEqual(focus, session.inputFocus());
                 },
                 .blocks_without_text => {
                     // 입력을 막으므로 override는 참이지만 텍스트 소비자가 아니라 `InputFocus` 값은 없다.
                     try std.testing.expect(session.terminalOwnsInput());
-                    try std.testing.expect(std.meta.stringToEnum(AppSession.InputFocus, field.name) == null);
                 },
-                .transient_toast => {
-                    // 토스트는 웹 포커스를 뺏지 않는다.
+                .transient_toast => |focus| {
+                    // 토스트는 웹 포커스를 뺏지 않는다. `InputFocus`는 등재된 값을 가리킨다.
                     try std.testing.expect(!session.terminalOwnsInput());
+                    try std.testing.expectEqual(focus, session.inputFocus());
                 },
                 .not_an_overlay => unreachable,
             }

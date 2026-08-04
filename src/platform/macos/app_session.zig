@@ -13404,7 +13404,7 @@ pub const AppSession = struct {
     /// This keeps a Korean composition inside the field rather than falling back to the active
     /// terminal cursor.
     fn agentSessionDockSearchCaretRect(self: *const AppSession) ?chrome.draw.Rect {
-        if (!self.agent_session_archive_search_active or self.dock.view != .agent_sessions or !self.dockVisible()) return null;
+        if (!self.agentSessionSearchOwnsInput()) return null;
         const cw = self.cell_width_px;
         if (cw == 0) return null;
         const content = self.dockGeometry().tree_content;
@@ -21665,11 +21665,20 @@ pub const AppSession = struct {
         return h.confirm.open or h.context_menu.open or h.notifications.open or h.find.open or h.palette.open or h.settings.open;
     }
 
+    /// 도크 검색이 키/IME를 받는 상태인가. `inputFocus`·`terminalOwnsInput`·caret rect가 **같은 게이트**를 쓰도록
+    /// 하는 단일 출처다. 플래그만 보면 도크를 닫거나 다른 뷰로 바꾼 뒤에도 참이 되어, 키를 못 받는 화면이
+    /// first responder를 요구한다.
+    fn agentSessionSearchOwnsInput(self: *const AppSession) bool {
+        return self.agent_session_archive_search_active and self.dockVisible() and self.dock.view == .agent_sessions;
+    }
+
     /// Phase 4g-1 후속(14차 리뷰 [0][3]): 입력이 **터미널 뷰→Zig handleKeyEvent 경로**로 가야 하는가 — 모달(notice 제외,
-    /// anyModalOverlayOpen) 또는 터미널-라우팅 텍스트 입력(주소창 편집·rename·사이드바 검색) 중 하나라도 활성. focus-sync
-    /// 불변식(reconcileWebFocus)의 **override 단일 출처**로 쓴다: 이 값이면 웹뷰가 아니라 터미널 뷰가 firstResponder여야
-    /// (그 키/IME가 Zig 경로). 옛 override(anyOverlayOpen or addr_edit만)는 rename·사이드바 검색을 빠뜨려 web pane 활성 중
-    /// 그 편집이 웹뷰로 새고(리뷰 [0]), notice까지 세어 토스트가 편집 키를 뺏었다(리뷰 [3]) — 여기서 정정.
+    /// anyModalOverlayOpen) 또는 터미널-라우팅 텍스트 입력(주소창 편집·rename·사이드바 검색·Session Dock 검색) 중 하나라도
+    /// 활성. focus-sync 불변식(reconcileWebFocus)의 **override 단일 출처**로 쓴다: 이 값이면 웹뷰가 아니라 터미널 뷰가
+    /// firstResponder여야 (그 키/IME가 Zig 경로). 옛 override(anyOverlayOpen or addr_edit만)는 rename·사이드바 검색을
+    /// 빠뜨려 web pane 활성 중 그 편집이 웹뷰로 새고(리뷰 [0]), notice까지 세어 토스트가 편집 키를 뺏었다(리뷰 [3]).
+    /// Session Dock 검색도 같은 이유로 여기 있어야 한다 — `InputFocus`에만 넣으면 Zig는 키를 도크로 라우팅하는데
+    /// reconcileWebFocus는 override 없이 활성 web term의 WKWebView를 firstResponder로 되돌린다(매 tick self-heal).
     pub fn terminalOwnsInput(self: *const AppSession) bool {
         // **파일 본문 우클릭 메뉴는 예외다**(docs/file-panel.md §2.6). 그 메뉴가 뜨는 동안 firstResponder를 터미널로
         // 옮기면 WKWebView가 포커스를 잃고, WebKit은 포커스 없는 문서의 선택을 **아예 안 그린다** — 사용자가 방금
@@ -21677,7 +21686,8 @@ pub const AppSession = struct {
         // 텍스트 노드가 아닌 것을 덮어 버려 접었다(§2.6). 그래서 그리게 두는 대신 **포커스를 안 뺏는다.**
         if (self.fileContentMenuHoldsWebFocus()) return false;
         return self.anyModalOverlayOpen() or self.addr_edit != null or self.rename != null or
-            self.sidebar_search_active or self.fileTreeFocused() or self.pendingDockEntryOwnsInput();
+            self.sidebar_search_active or self.agentSessionSearchOwnsInput() or
+            self.fileTreeFocused() or self.pendingDockEntryOwnsInput();
     }
 
     /// 파일 본문 메뉴가 떠 있고, 그것 말고 입력을 가져갈 오버레이가 없나. 다른 모달(확인·팔레트·세팅)이 함께
@@ -23125,7 +23135,7 @@ pub const AppSession = struct {
         if (self.chrome_host.settings.open) return .settings;
         if (self.rename != null) return .rename; // 인라인 rename(find/palette와 배타적 — startRename이 닫음)
         if (self.sidebar_search_active) return .sidebar_search; // 사이드바 검색바(상주 — 활성이면 키/IME를 받는다)
-        if (self.agent_session_archive_search_active and self.dockVisible() and self.dock.view == .agent_sessions) return .agent_session_search;
+        if (self.agentSessionSearchOwnsInput()) return .agent_session_search;
         if (self.chrome_host.find.open) return .find;
         if (self.chrome_host.palette.open) return .palette;
         // Phase 7e-2b 수정: browser 주소창 편집이 활성이면 확정 텍스트/조합이 터미널로 새지 않고 주소창 편집으로 간다
@@ -64758,5 +64768,64 @@ test "라이브 스크롤바 thumb 드래그는 도크 위를 지나도 소유�
 
     session.mouse(3, dock_center.x, dock_center.y, 0, 0);
     try std.testing.expect(!session.pointerGestureIs(.scrollbar));
+    _ = try session.tick();
+}
+
+// Session Dock 검색은 사이드바 검색과 같은 성격의 chrome 텍스트 입력이다. `InputFocus`에만 넣고
+// `terminalOwnsInput`에서 빠지면 Zig는 키를 도크로 라우팅하는데 `reconcileWebFocus`는 override 없이
+// 활성 web term의 WKWebView를 firstResponder로 되돌려(매 renderTick self-heal) 검색 키가 웹뷰로 샌다.
+// 두 검색이 같은 답을 내는지 대칭으로 고정하고, 게이트(도크 가시성·뷰 종류)도 함께 검증한다.
+test "Session Dock 검색은 사이드바 검색과 같은 입력 소유 판정을 낸다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(1600, 900, 1000);
+
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    session.agent_session_archive_initialized = false;
+    session.setDockView(.agent_sessions);
+    session.agent_session_archive_initialized = true;
+    try std.testing.expect(session.dockVisible());
+    try std.testing.expect(!session.terminalOwnsInput());
+    try std.testing.expectEqual(AppSession.InputFocus.terminal, session.inputFocus());
+
+    // 도크 검색 활성 → 키가 Zig 경로여야 하므로 host override가 걸려야 한다.
+    session.agent_session_archive_search_active = true;
+    try std.testing.expect(session.terminalOwnsInput());
+    try std.testing.expectEqual(AppSession.InputFocus.agent_session_search, session.inputFocus());
+
+    // 사이드바 검색과 대칭.
+    session.agent_session_archive_search_active = false;
+    session.sidebar_search_active = true;
+    try std.testing.expect(session.terminalOwnsInput());
+    try std.testing.expectEqual(AppSession.InputFocus.sidebar_search, session.inputFocus());
+    session.sidebar_search_active = false;
+    try std.testing.expect(!session.terminalOwnsInput());
+
+    // 게이트: 플래그가 남아 있어도 도크가 안 보이거나 다른 뷰면 입력을 요구하지 않는다.
+    session.agent_session_archive_search_active = true;
+    session.dock.collapsed = true;
+    try std.testing.expect(!session.dockVisible());
+    try std.testing.expect(!session.terminalOwnsInput());
+    try std.testing.expectEqual(AppSession.InputFocus.terminal, session.inputFocus());
+
+    session.dock.collapsed = false;
+    session.setDockView(.explorer);
+    try std.testing.expect(!session.terminalOwnsInput());
+
+    session.setDockView(.agent_sessions);
+    try std.testing.expect(session.terminalOwnsInput());
     _ = try session.tick();
 }

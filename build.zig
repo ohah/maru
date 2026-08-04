@@ -1729,6 +1729,30 @@ pub fn build(b: *std.Build) void {
             &run_ended_purge_suffix_fail_stop_test.step,
         );
 
+        // This strict fixture must reach its child branch independently of the aggregate test
+        // count/order. The aggregate carries an explicit skip marker; only this compile-filtered
+        // artifact is allowed to provide destructive fail-stop evidence.
+        const response_alias_fail_stop_test = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR3a-2c3b response allocation alias"},
+        });
+        const run_response_alias_fail_stop_test = b.addSystemCommand(&.{
+            "/usr/bin/env",
+            "-i",
+            "MARU_SESSION_HOST_RESPONSE_ALIAS_EXEC=run-isolated-v1",
+        });
+        run_response_alias_fail_stop_test.addArtifactArg(response_alias_fail_stop_test);
+        run_response_alias_fail_stop_test.addArg("--maru-expect-tests=4");
+        run_response_alias_fail_stop_test.expectExitCode(0);
+        run_response_alias_fail_stop_test.setCwd(b.path("."));
+        run_session_host_tests.step.dependOn(&run_response_alias_fail_stop_test.step);
+
         const process_runtime_bootstrap_fixture = b.addExecutable(.{
             .name = "maru-session-host-process-runtime-bootstrap-fixture",
             .root_module = b.createModule(.{
@@ -1764,6 +1788,10 @@ pub fn build(b: *std.Build) void {
     }
     run_session_host_tests.setEnvironmentVariable(
         "MARU_SESSION_HOST_B3BO_DRIFT_SUBPROCESS",
+        "skip-in-aggregate-v1",
+    );
+    run_session_host_tests.setEnvironmentVariable(
+        "MARU_SESSION_HOST_RESPONSE_ALIAS_EXEC",
         "skip-in-aggregate-v1",
     );
     // 같은 session_host 모듈은 전체 maru test에도 중복 수집된다. 전용 step만

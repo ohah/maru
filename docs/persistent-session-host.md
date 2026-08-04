@@ -1211,6 +1211,16 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    여는 원자적 publication+borrow/finish, B3-6은 aggregate exposure를 소유한다. B3-0a~B3-4/5 어느 단계도 `2c3b-3 완료`를
    주장하지 않는다.
 
+   B3-0a의 파괴적 strict fail-stop subprocess는 전체 test binary를 재실행하지 않는다. compile filter
+   `CR3a-2c3b response allocation alias`를 가진 전용 artifact만 parent/child fixture와 process-local completion sentinel을
+   함께 실행하며 project test runner의 `--maru-expect-tests=4`가 선택된 함수 수를 실행 전에 강제한다.
+   전용 parent artifact 자체도 `/usr/bin/env -i`로 ambient loader/runtime 환경을 제거한 뒤 시작한다.
+   `MARU_SESSION_HOST_RESPONSE_ALIAS_EXEC`는 전용 parent의 `run-isolated-v1`, 정리된 `execve` 환경과
+   parent-minted pipe capability를 받은 child의 `execute-fixture-v1`, focused aggregate의 `skip-in-aggregate-v1`만 허용한다.
+   marker가 없는 다른 collector는 inert하며 실행 또는 명시적 제외 증거로 세지 않는다. 전용 artifact의 non-zero child 종료,
+   exact panic text, forged-free 부재와 completion sentinel만 파괴적 경로의 실행 증거다. 따라서 이름 drift의 zero-test green,
+   ambient child-mode 위조, aggregate test 수·순서 의존을 허용하지 않는다.
+
    request-side canonical transcript는 같은 binding entry의 `PreparedRequestAuthority` 하나가 소유한다. lifecycle은 raw tag를 먼저
    검사하는 `idle|prepared|executing|terminal`이고, seal은 transport/binding identity, request tag/family, request id/digest,
    prepared incarnation, storage final address, frame `{ptr,len}` allocation extent, allocator identity를 포함한다. prepared frame은

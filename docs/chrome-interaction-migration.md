@@ -358,6 +358,10 @@ CIM1은 B1 이관 PR이 전부 merge된 뒤에 시작하고, 그 전에는 CIM0(
    명시하고, 주소창 caret/selection 편집은 [텍스트 필드 에디터](text-field-editor.md)의 별도 범위로
    유지한다. AppKit first responder/IME/accessibility의 실제 host E2E가 없으면 완료로 표시하지 않는다.
 
+각 단계가 무엇을 증명해야 완료인지와 무엇을 완료로 보지 않는지는
+[검증 매트릭스](verification-matrix.md)의 "Chrome 상호작용 이관 CIM gate"가 단일 출처다. 이 문서는
+순서와 책임 경계를 소유하고, 단계별 종료 gate는 그쪽을 따른다.
+
 모든 구현 PR은 최소한 다음 증거를 남긴다.
 
 - pure interaction state-machine: capture winner, threshold, cancel, stale generation, disabled action.

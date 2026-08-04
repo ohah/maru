@@ -622,6 +622,38 @@ allowlist(`primary+backup state`, owner lease, PTY masters), listen/client/wake/
 state slot close와 master/owner CLOEXEC 복구, `host.v1.json` protocol/build/epoch/lifecycle의
 success/rollback 대칭 republish와 경쟁 launcher 0을 포함한다.
 
+### Chrome 상호작용 이관 CIM gate
+
+[Chrome 상호작용 컴포넌트 이관 전략](chrome-interaction-migration.md)은 계약만 정의했고 CIM1 이후는
+아직 구현 전이다. 현재 자동 검증되는 것은 이관 **전** 경로뿐이다 — `chrome/ui/interaction.zig`의
+click/hover/focus capture와 tree replacement 시 무조건 cancel, Session Dock action table, 각
+`chrome/components/*.zig`의 순수 hit-test/geometry가 기존 unit과 macOS ABI 테스트에 있다. 나머지
+Chrome drag(divider·tab·sidebar reorder·scrollbar thumb·pane move)의 capture 수명은 여전히
+`app_session.zig`의 `PointerGestureOwner`가 소유하며 pure state-machine gate가 없다.
+
+이관 순서는 그 문서 §8이 소유하고, 아래는 각 단계가 무엇을 증명해야 완료인지의 단일 출처다.
+B1 generic Button 이관이 선행이며 그 전에는 CIM1을 시작하지 않는다.
+
+| 단계 | 목표 종료 gate | 현재 증거만으로 완료로 보지 않는 것 |
+| --- | --- | --- |
+| CIM1 interaction adapter | generation-bound pointer DTO, capture/cancel state machine, action/drag intent table의 pure test. §5 `gesture compatibility key` reconcile verdict가 duplicate/disabled/clip-removed/epoch mismatch를 각각 cancel로 판정하고, 동일 identity+동일 key에서만 carry한다. §2의 두 capture 권위 상호배제(한 stream이 `InteractionState`와 `PointerGestureOwner`에 동시 진입 0) | pure module 통과만으로 제품 pointer 경로가 이 판정을 실제로 쓴다고 주장하지 않는다. 기존 `PointerGestureOwner` effect path는 이 단계에서 그대로 살아 있다 |
+| CIM2 SplitDivider | press/capture/cancel adapter 하나로 이관. split tree removal·resize clamp·WebView divider pass-through의 실제 AppKit E2E. continuous resize가 tick당 최종 좌표 1회로 coalesce되고 같은 clamp 결과에서는 effect를 재실행하지 않음 | headless clamp 계산만으로 PTY resize fan-out과 pane geometry 갱신을 증명하지 않는다. 사이드바 폭·dock outer divider는 별도 variant이므로 pane divider 하나로 divider 축 완료를 주장하지 않는다 |
+| CIM3 ScrollArea/Scrollbar | file tree 또는 Session Dock 중 하나를 first consumer로 wheel/thumb/track click/keyboard, scroll anchor, projection/root generation mismatch cancel을 fixture와 capture로 고정 | 한 consumer 통과로 terminal scrollback·selection·mouse mode 우선순위가 함께 증명되지 않는다. terminal scrollbar는 입력 우선순위 축이 달라 별도 gate다 |
+| CIM4 TabList/Tab | §4.4 provisional live reorder 구현. select/close/overflow scroll/reorder/drop/split/detach와 terminal mouse routing 분리 검증. 복원 트리거(Escape·pointer cancel·window deactivate·modal 진입·source/target tab removal·epoch mismatch)마다 시작 순서 복원과 effect 0을 각각 고정. up commit destination이 up 좌표 재hit-test 결과와 일치 | 제품 동작을 영구 live reorder에서 바꾸는 변경이므로 fixture 갱신 없이 완료로 표시하지 않는다. drag 중 외부 tab 집합 변경(단축키 close·원격 관측·session restore)의 폐기·복원 경로가 없으면 부분 이관이다 |
+| CIM5 Reorderable Sidebar | row geometry와 drag preview/cancel만 common capability로 이관하고 group·pin·agent-row model은 domain 유지. armed→dragging threshold 전 click 보존, marker/slot 무결성 | 카드 reorder 통과만으로 헤더 아이콘 hit-test와 검색 blur가 키 포커스를 터미널로 되돌리는 규율이 증명되지 않는다 |
+| CIM6 Input/overlay composite | 한 consumer의 기존 keyboard/Escape/focus 계약을 `Input`/`Menu`/`Popover`/`Dialog` props로 명시하고 그 consumer의 실제 host E2E | AppKit first responder·IME·native accessibility는 headless pointer fixture로 증명할 수 없다. 실제 host E2E 또는 명시된 수동 검증 결과가 없으면 완료가 아니다. 주소창 caret/selection은 [텍스트 필드 에디터](text-field-editor.md) 범위이며 이 단계가 흡수하지 않는다 |
+
+모든 CIM PR의 공통 산출물은 clip/hit rect/action ID/snapshot generation과 final allocation/worker
+pending의 structured summary, 그리고 제품 Metal PNG + JSON readback이다. 현재
+`macos-chrome-lab-smoke`가 받는 축은 scenario와 font뿐이고 render scale 축은 없다
+(`macos-chrome-lab-font-review`의 `-review-2x.png`는 ffmpeg nearest-neighbor 확대본이지 2× backing
+scale 렌더가 아니다). render scale 1×/2× 비교가 필요한 consumer는
+[Metal UI 레이아웃·컴포넌트 시스템](metal-ui-layout.md)의 scale-normalized rect gate를 쓰거나, 그 PR이
+Chrome Lab 도구 확장을 자기 범위로 선언한다.
+
+`PointerGestureOwner` union이 `none`만 남기 전에는 interaction 이관 전체를 완료로 표시하지 않는다.
+한 consumer가 새 tree를 쓴다는 사실은 그 consumer의 부분 이관 증거일 뿐이다.
+
 ## 구현 전 TDD 절단 원칙
 
 세션 컨트롤 플레인과 웹 패널은 [control-plane.md](control-plane.md) §11의 micro-slice를 기본 구현 단위로 삼는다. Phase 1~7은 제품 milestone이고, 구현 PR 하나가 통째로 한 Phase를 끝내는 것을 기본값으로 보지 않는다.

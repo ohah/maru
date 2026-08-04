@@ -112,7 +112,8 @@ pub fn main(init: std.process.Init) !void {
     var ops: [lab.frame_op_capacity]chrome.draw.Op = undefined;
     var dock_nodes: [16]chrome.ui.tree.UiNode = undefined;
     var dock_actions: [12]chrome.components.session_dock.ids.Entry = undefined;
-    var detail_nodes: [16]chrome.ui.tree.UiNode = undefined;
+    // Button이 label을 자식으로 들면서 action마다 node가 둘이다(Button + label).
+    var detail_nodes: [20]chrome.ui.tree.UiNode = undefined;
     var detail_actions: [3]chrome.components.archive_detail.ids.Entry = undefined;
     var text_runs: [lab.frame_run_capacity]chrome.draw.Run = undefined;
     var text_bytes: [2048]u8 = undefined;

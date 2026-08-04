@@ -17,10 +17,9 @@ const types = @import("types.zig");
 // Both action icons are registered Chrome SVG glyphs. Their two-cell measurement is injected
 // into `text_layout` below; using a generic Unicode symbol here would shrink back to the terminal
 // font's one-cell ink and make the button look unlike the rest of rich Chrome.
+// Action label은 이제 `build.labels`가 소유하고 Button의 Text child로 published tree에 실린다.
+// view는 그 자식을 읽어 그린다 — 같은 label이 hit rect와 다른 곳에서 계산되지 않게 하기 위해서다.
 const resume_icon = "\u{F000C}"; // recent.svg: continue an existing conversation
-const reveal_icon = "\u{F0011}"; // document.svg: reveal the archived transcript source
-const resume_label = resume_icon ++ " 터미널에서 이어하기  ⌘↵";
-const reveal_label = reveal_icon ++ " 로그 보기  ⌘L";
 
 pub const Buffers = struct {
     ops: []draw.Op,
@@ -87,10 +86,11 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
         try writer.text(content, 0, unavailableMessage(props.state), .muted_fg);
     }
 
-    try writer.action(find(frame.tree, build.NodeIds.resume_session) orelse return error.MissingRect, resume_label);
-    try writer.action(find(frame.tree, build.NodeIds.reveal) orelse return error.MissingRect, reveal_label);
+    // label은 published tree가 소유한다. view가 자기 상수를 그리면 tree의 Text child와 갈릴 수 있다.
+    try writer.action(find(frame.tree, build.NodeIds.resume_session) orelse return error.MissingRect, build.labels.resume_session);
+    try writer.action(find(frame.tree, build.NodeIds.reveal) orelse return error.MissingRect, build.labels.reveal);
     if (props.state == .ready and props.focus_live_enabled) {
-        try writer.action(find(frame.tree, build.NodeIds.focus_live) orelse return error.MissingRect, "열린 세션으로 이동");
+        try writer.action(find(frame.tree, build.NodeIds.focus_live) orelse return error.MissingRect, build.labels.focus_live);
     }
     return .{ .layer = .pane_overlay, .ops = buffers.ops[0..writer.op_count] };
 }
@@ -272,11 +272,11 @@ test "archive detail view renders only redacted turn DTOs and exact action label
         .reveal_enabled = true,
         .focus_live_enabled = true,
     };
-    var nodes: [10]tree.UiNode = undefined;
-    var entries: [11]tree.RectEntry = undefined;
-    var items: [11]@import("../../ui/layout.zig").Item = undefined;
-    var scratch: [11]@import("../../ui/layout.zig").FlexScratch = undefined;
-    var rects: [11]@import("../../ui/layout.zig").UiRect = undefined;
+    var nodes: [16]tree.UiNode = undefined;
+    var entries: [18]tree.RectEntry = undefined;
+    var items: [18]@import("../../ui/layout.zig").Item = undefined;
+    var scratch: [18]@import("../../ui/layout.zig").FlexScratch = undefined;
+    var rects: [18]@import("../../ui/layout.zig").UiRect = undefined;
     var actions: [3]@import("ids.zig").Entry = undefined;
     const frame = try build.build(props, .{ .nodes = &nodes, .entries = &entries, .layout_items = &items, .flex_scratch = &scratch, .child_rects = &rects, .actions = &actions });
     var ops: [24]draw.Op = undefined;
@@ -316,7 +316,7 @@ test "archive detail view renders only redacted turn DTOs and exact action label
     try std.testing.expect(!user_turn_wide_icons.?);
     const resume_entry = frame.tree.entries[frame.tree.find(build.NodeIds.resume_session).?];
     const max_cols: u16 = @intFromFloat(@floor((resume_entry.rect.width - 16) / 8));
-    const cols = Writer.plannedCols(resume_label, max_cols);
+    const cols = Writer.plannedCols(build.labels.resume_session, max_cols);
     const expected_x: i32 = @intFromFloat(@floor(resume_entry.rect.x + (resume_entry.rect.width - @as(f32, @floatFromInt(@as(u32, cols) * 8))) / 2));
     try std.testing.expectEqual(expected_x, resume_origin_x.?);
     try std.testing.expect(saw_redacted_turn);
@@ -336,11 +336,11 @@ test "archive detail loading skeleton and stale state never enable source action
         .resume_enabled = true,
         .reveal_enabled = true,
     };
-    var nodes: [7]tree.UiNode = undefined;
-    var entries: [8]tree.RectEntry = undefined;
-    var items: [8]@import("../../ui/layout.zig").Item = undefined;
-    var scratch: [8]@import("../../ui/layout.zig").FlexScratch = undefined;
-    var rects: [8]@import("../../ui/layout.zig").UiRect = undefined;
+    var nodes: [13]tree.UiNode = undefined;
+    var entries: [15]tree.RectEntry = undefined;
+    var items: [15]@import("../../ui/layout.zig").Item = undefined;
+    var scratch: [15]@import("../../ui/layout.zig").FlexScratch = undefined;
+    var rects: [15]@import("../../ui/layout.zig").UiRect = undefined;
     var actions: [2]@import("ids.zig").Entry = undefined;
     const loading = try build.build(props, .{ .nodes = &nodes, .entries = &entries, .layout_items = &items, .flex_scratch = &scratch, .child_rects = &rects, .actions = &actions });
     try std.testing.expect(!loading.tree.entries[loading.tree.find(build.NodeIds.resume_session).?].action.?.enabled);

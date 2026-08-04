@@ -153,13 +153,11 @@ const Writer = struct {
         const x = rect.rect.x + (rect.rect.width - text_width_px) / 2;
         const y = rect.rect.y + @as(f32, @floatFromInt(ch));
         if (rect.effective_clip) |clip| if (y < clip.y or y >= clip.y + clip.height) return;
-        // 전경은 variant가 정한다. 여기서 다시 고르면 primary(밝은 배경)에 밝은 글자가 얹혀 label이
-        // 사라진다 — 실제로 그랬다. 단일 출처는 `paint_style.buttonForeground`다.
         // 전경은 quad를 칠한 그 함수에서 받는다 — `buttonForeground`는 variant만 봐서 hover/press의
         // 전경 변경을 놓쳤고, `.primary` label이 배경색으로 얹혀 사라졌다.
         const foreground: tokens.ColorRole = switch (rect.visual) {
             .button => |visual| paint_style.resolveButton(rect.id, visual, rect.action, self.state, self.tokens_ref).foreground,
-            else => if (rect.action.?.enabled) .surface_fg else .muted_fg,
+            else => if (rect.action != null and rect.action.?.enabled) .surface_fg else .muted_fg,
         };
         try self.emit(x, y, source, max_cols, foreground, true);
     }
@@ -370,4 +368,60 @@ test "archive detail loading skeleton and stale state never enable source action
     props.state = .stale;
     const stale = try build.build(props, .{ .nodes = &nodes, .entries = &entries, .layout_items = &items, .flex_scratch = &scratch, .child_rects = &rects, .actions = &actions });
     try std.testing.expect(!stale.tree.entries[stale.tree.find(build.NodeIds.reveal).?].action.?.enabled);
+}
+
+test "hovered primary action keeps its label distinguishable from the quad beneath it" {
+    // 회귀: label 전경을 variant만으로 고르면(`buttonForeground`) hover/press에서 `resolveButton`이
+    // quad와 전경을 함께 바꾸는 것을 놓쳐, `.primary` label이 배경색 그대로 어두운 quad 위에 얹혀
+    // 사라졌다. 이 테스트는 **view가 실제로 emit한 색**을 보므로 그 갈림을 잡는다.
+    const props = types.Props{
+        // 좁은 뷰포트에서는 label이 ellipsis로 잘려 부분 문자열이 사라진다. 기존 ready 테스트와
+        // 같은 폭을 써서 label 전체가 남게 한다.
+        .viewport_px = .{ .width = 960, .height = 560 },
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .snapshot_generation = 1,
+        .state = .ready,
+        .provider = .claude,
+        .title = "t",
+        .metadata = "m",
+        .resume_enabled = true,
+        .reveal_enabled = true,
+    };
+    var nodes: [16]tree.UiNode = undefined;
+    var entries: [18]tree.RectEntry = undefined;
+    var items: [18]@import("../../ui/layout.zig").Item = undefined;
+    var scratch: [18]@import("../../ui/layout.zig").FlexScratch = undefined;
+    var rects: [18]@import("../../ui/layout.zig").UiRect = undefined;
+    var actions: [3]@import("ids.zig").Entry = undefined;
+    const frame = try build.build(props, .{ .nodes = &nodes, .entries = &entries, .layout_items = &items, .flex_scratch = &scratch, .child_rects = &rects, .actions = &actions });
+
+    const tk = testTokens();
+    const resume_entry = frame.tree.entries[frame.tree.find(build.NodeIds.resume_session).?];
+    const hovered = interaction.InteractionState{ .hovered = build.NodeIds.resume_session };
+    const quad = @import("../../ui/paint_style.zig").resolveButton(
+        resume_entry.id,
+        resume_entry.visual.button,
+        resume_entry.action,
+        hovered,
+        &tk,
+    );
+
+    var ops: [24]draw.Op = undefined;
+    var runs: [24]draw.Run = undefined;
+    var bytes: [2048]u8 = undefined;
+    const out = try view(props, frame, hovered, &tk, .{ .ops = &ops, .runs = &runs, .text_bytes = &bytes });
+
+    var label_color: ?tokens.ColorRole = null;
+    for (out.ops) |op| switch (op) {
+        .text => |text| for (text.runs) |run| {
+            if (std.mem.indexOf(u8, run.text, "터미널에서 이어하기") != null) label_color = text.role;
+        },
+        else => {},
+    };
+    const color = label_color orelse return error.TestUnexpectedResult;
+    // 배경과 같은 role이면 글자가 사라진다.
+    try std.testing.expect(color != quad.background);
+    // 그리고 quad를 칠한 그 함수가 고른 전경과 정확히 같아야 한다 — 두 규칙이 아니라 하나다.
+    try std.testing.expectEqual(quad.foreground, color);
 }

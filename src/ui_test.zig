@@ -10,8 +10,10 @@ const tree = @import("chrome/ui/tree.zig");
 const ui_button = @import("chrome/ui/button.zig");
 const interaction = @import("chrome/ui/interaction.zig");
 const intent_table = @import("chrome/ui/intent_table.zig");
+const continuous_drag = @import("chrome/ui/continuous_drag.zig");
 const paint_style = @import("chrome/ui/paint_style.zig");
 const paint = @import("chrome/ui/paint.zig");
+const divider = @import("chrome/components/divider.zig");
 const session_dock = @import("chrome/components/session_dock.zig");
 const archive_detail = @import("chrome/components/archive_detail.zig");
 
@@ -25,6 +27,8 @@ test {
     testing.refAllDecls(tree);
     testing.refAllDecls(interaction);
     testing.refAllDecls(intent_table);
+    testing.refAllDecls(continuous_drag);
+    testing.refAllDecls(divider);
     testing.refAllDecls(paint_style);
     testing.refAllDecls(paint);
     testing.refAllDecls(session_dock);

@@ -8,6 +8,8 @@
 
 const std = @import("std");
 const draw = @import("../draw.zig");
+const layout = @import("../ui/layout.zig");
+const tree = @import("../ui/tree.zig");
 
 /// 이 컴포넌트가 그리는 레이어 — pane overlay(터미널 위, 커서·모달 아래). platform이 divider.view를 직접 lower해
 /// pane_overlay 셀 슬롯에 넣는다(host 키보드 라우팅을 안 거치는 마우스 컴포넌트라, 이 상수는 Z-순서 분류용).
@@ -36,30 +38,102 @@ pub fn hitHalfExtentPx(orientation: Orientation, cell_width_px: u32, cell_height
     return @as(f64, @floatFromInt(cell)) / 2 + 2;
 }
 
-/// 마우스 (x,y)가 어느 seg의 드래그 밴드 안인가 — 맞으면 그 index, 아니면 null. 밴드: normal 축은 경계 pos ± (cell
-/// 절반 + 2px 여유, 잡기 쉽게), 교차 축은 bounds 범위. 렌더 선(view)과 같은 seg라 "보이는 선 == 잡히는 선".
-/// 셀 0·비유한이면 매치 없음. 단일 panel(segs 빈)이면 항상 null. (옛 app_session.dividerHit 수학 이전.)
+/// 한 seg의 **드래그 밴드 rect** — normal 축은 경계 pos ± `hitHalfExtentPx`(잡기 쉽게 넓힌 폭),
+/// 교차 축은 bounds 범위다. hit-test와 published capture rect가 이 하나에서 나오므로 "보이는 선 ==
+/// 잡히는 선"에 더해 **"잡히는 rect == 발행된 rect"**도 성립한다. 셀 0이면 hit target이 없다(null).
+pub fn bandRect(seg: Seg, cell_width_px: u32, cell_height_px: u32) ?layout.UiRect {
+    if (cell_width_px == 0 or cell_height_px == 0) return null;
+    const pos: f32 = @floatFromInt(seg.pos);
+    const half: f32 = @floatCast(hitHalfExtentPx(seg.orientation, cell_width_px, cell_height_px));
+    return switch (seg.orientation) {
+        .vertical_line => .{
+            .x = pos - half,
+            .y = @floatFromInt(seg.bounds.y),
+            .width = half * 2,
+            .height = @floatFromInt(seg.bounds.h),
+        },
+        .horizontal_line => .{
+            .x = @floatFromInt(seg.bounds.x),
+            .y = pos - half,
+            .width = @floatFromInt(seg.bounds.w),
+            .height = half * 2,
+        },
+    };
+}
+
+fn bandContains(rect: layout.UiRect, x_px: f64, y_px: f64) bool {
+    if (rect.width <= 0 or rect.height <= 0) return false;
+    const x: f64 = rect.x;
+    const y: f64 = rect.y;
+    return x <= x_px and x_px < x + @as(f64, rect.width) and y <= y_px and y_px < y + @as(f64, rect.height);
+}
+
+/// 마우스 (x,y)가 어느 seg의 드래그 밴드 안인가 — 맞으면 그 index, 아니면 null. 밴드는 `bandRect`가
+/// 소유하며 **half-open**이다(`[x, x+w)`): 발행된 capture rect가 쓰는 규칙과 같아야 두 경로가 같은
+/// 점에서 같은 답을 낸다. 겹치는 밴드는 **낮은 index가 이긴다**. 셀 0·비유한이면 매치 없음.
+/// 단일 panel(segs 빈)이면 항상 null. (옛 app_session.dividerHit 수학 이전.)
 pub fn hitTest(segs: []const Seg, cell_width_px: u32, cell_height_px: u32, x_px: f64, y_px: f64) ?usize {
-    if (cell_width_px == 0 or cell_height_px == 0 or !std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return null;
+    if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return null;
     for (segs, 0..) |seg, i| {
-        const pos: f64 = @floatFromInt(seg.pos);
-        const hit = switch (seg.orientation) {
-            .vertical_line => blk: { // 세로선: x가 경계 근처, y가 bounds.y..y+h
-                const half = hitHalfExtentPx(.vertical_line, cell_width_px, cell_height_px);
-                const y0: f64 = @floatFromInt(seg.bounds.y);
-                const y1: f64 = y0 + @as(f64, @floatFromInt(seg.bounds.h));
-                break :blk @abs(x_px - pos) <= half and y_px >= y0 and y_px < y1;
-            },
-            .horizontal_line => blk: { // 가로선: y가 경계 근처, x가 bounds.x..x+w
-                const half = hitHalfExtentPx(.horizontal_line, cell_width_px, cell_height_px);
-                const x0: f64 = @floatFromInt(seg.bounds.x);
-                const x1: f64 = x0 + @as(f64, @floatFromInt(seg.bounds.w));
-                break :blk @abs(y_px - pos) <= half and x_px >= x0 and x_px < x1;
-            },
-        };
-        if (hit) return i;
+        const rect = bandRect(seg, cell_width_px, cell_height_px) orelse return null;
+        if (bandContains(rect, x_px, y_px)) return i;
     }
     return null;
+}
+
+pub const PublishError = error{InsufficientEntryBuffer};
+
+/// segs를 pointer capture가 소비할 수 있는 `UiRectTree`로 발행한다 — CIM2.
+///
+/// divider는 `view`가 Rule op로 직접 그리므로 이 tree는 **paint가 아니라 hit/capture 전용**이다.
+/// 각 entry는 `bandRect`(hit-test와 같은 출처)를 rect로 삼고, 자기 seg index를 action ID이자 drag
+/// payload로 싣는다. host는 그 payload를 다시 live `*Split`으로 되돌린다 — chrome은 app 트리를 모른다.
+///
+/// **entry 순서가 뒤집혀 있다.** `interaction.hitAction`은 reverse z-order로 훑어 마지막 entry가
+/// 이기는데, `hitTest`는 낮은 index가 이긴다. 밴드가 겹칠 때 두 경로가 다른 seg를 고르지 않도록
+/// segs를 역순으로 싣는다.
+///
+/// threshold는 0이다. divider를 누른 것 자체가 resize 의사이고 경쟁할 click action이 없으므로,
+/// 첫 move가 곧 resize여야 한다(계약 §4.3의 continuous resize).
+pub fn publish(
+    segs: []const Seg,
+    cell_width_px: u32,
+    cell_height_px: u32,
+    generation: u64,
+    out: []tree.RectEntry,
+) PublishError!tree.UiRectTree {
+    if (out.len < segs.len) return error.InsufficientEntryBuffer;
+    var count: usize = 0;
+    var remaining = segs.len;
+    while (remaining > 0) {
+        remaining -= 1;
+        const rect = bandRect(segs[remaining], cell_width_px, cell_height_px) orelse continue;
+        const identity: u64 = @intCast(remaining + 1);
+        out[count] = .{
+            .id = identity,
+            .parent_index = null,
+            .kind = .container,
+            .rect = rect,
+            .effective_clip = null,
+            .action = .{ .id = identity },
+            .drag = .{
+                .payload = identity,
+                .axis = switch (segs[remaining].orientation) {
+                    .vertical_line => .horizontal,
+                    .horizontal_line => .vertical,
+                },
+                .threshold_px = 0,
+            },
+        };
+        count += 1;
+    }
+    return .{ .entries = out[0..count], .generation = generation };
+}
+
+/// 발행된 identity를 seg index로 되돌린다. `publish`가 쓰는 1-기반 규칙의 유일한 역함수다.
+pub fn segIndexOf(identity: u64, seg_count: usize) ?usize {
+    if (identity == 0 or identity > seg_count) return null;
+    return @intCast(identity - 1);
 }
 
 /// 드래그 위치 → 새 분할 비율(normal 축 기준). 세로선=`(x − bounds.x)/bounds.w`, 가로선=`(y − bounds.y)/bounds.h`.
@@ -107,7 +181,11 @@ test "divider hitTest: 세로선/가로선 밴드 안에서 index, 밖/빈 segs�
     };
     // 세로선(idx 0): x가 경계 50 ± (5+2)=7 안, y는 bounds 0..200.
     try std.testing.expectEqual(@as(?usize, 0), hitTest(&segs, cw, ch, 50, 100));
-    try std.testing.expectEqual(@as(?usize, 0), hitTest(&segs, cw, ch, 57, 100)); // 밴드 경계
+    try std.testing.expectEqual(@as(?usize, 0), hitTest(&segs, cw, ch, 43, 100)); // 밴드 시작(포함)
+    try std.testing.expectEqual(@as(?usize, 0), hitTest(&segs, cw, ch, 56.9, 100));
+    // 밴드는 `bandRect`가 소유하는 half-open 구간 [43, 57)이다. 발행되는 capture rect와 같은
+    // 규칙이라 두 경로가 같은 점에서 갈리지 않는다 — 예전엔 이 끝점 하나만 hit-test가 더 받았다.
+    try std.testing.expectEqual(@as(?usize, null), hitTest(&segs, cw, ch, 57, 100));
     try std.testing.expectEqual(@as(?usize, null), hitTest(&segs, cw, ch, 58, 100)); // x 밴드 밖
     try std.testing.expectEqual(@as(?usize, null), hitTest(&segs, cw, ch, 50, 200)); // y bounds 밖(>=200)
     // 가로선(idx 1): y가 경계 80 ± (8+2)=10 안, x는 bounds 0..200.
@@ -160,4 +238,91 @@ test "divider view: seg마다 Rule op(세로/가로 좌표·role=divider)" {
     out.clearRetainingCapacity();
     try view(&.{}, arena, &out);
     try std.testing.expectEqual(@as(usize, 0), out.items.len);
+}
+
+test "published capture rects are the same geometry hit-test accepts" {
+    const cw: u32 = 10;
+    const ch: u32 = 16;
+    const segs = [_]Seg{
+        .{ .orientation = .vertical_line, .bounds = .{ .x = 0, .y = 0, .w = 100, .h = 200 }, .pos = 50 },
+        .{ .orientation = .horizontal_line, .bounds = .{ .x = 0, .y = 0, .w = 200, .h = 100 }, .pos = 80 },
+    };
+    var storage: [4]tree.RectEntry = undefined;
+    const published = try publish(&segs, cw, ch, 7, &storage);
+
+    try std.testing.expectEqual(@as(usize, 2), published.entries.len);
+    try std.testing.expectEqual(@as(u64, 7), published.generation);
+
+    // 두 경로가 같은 점에서 같은 답을 낸다. 밴드 rect가 하나뿐이므로 여기서 갈릴 수가 없다.
+    for (published.entries) |entry| {
+        const index = segIndexOf(entry.id, segs.len).?;
+        const rect = bandRect(segs[index], cw, ch).?;
+        try std.testing.expectEqual(rect.x, entry.rect.x);
+        try std.testing.expectEqual(rect.y, entry.rect.y);
+        try std.testing.expectEqual(rect.width, entry.rect.width);
+        try std.testing.expectEqual(rect.height, entry.rect.height);
+        // drag 축은 선의 방향에서 나온다 — 세로선은 좌우로만 끌린다.
+        const expected_axis: tree.DragAxis = switch (segs[index].orientation) {
+            .vertical_line => .horizontal,
+            .horizontal_line => .vertical,
+        };
+        try std.testing.expectEqual(expected_axis, entry.drag.?.axis);
+        // divider를 누른 것이 곧 resize 의사다. threshold가 있으면 첫 move가 먹힌다.
+        try std.testing.expectEqual(@as(f32, 0), entry.drag.?.threshold_px);
+        try std.testing.expect(entry.action.?.enabled);
+    }
+}
+
+test "overlapping bands resolve to the same seg in both paths" {
+    const cw: u32 = 10;
+    const ch: u32 = 16;
+    // 두 세로선이 8px 떨어져 있어 밴드(각 ±7)가 겹친다.
+    const segs = [_]Seg{
+        .{ .orientation = .vertical_line, .bounds = .{ .x = 0, .y = 0, .w = 100, .h = 200 }, .pos = 50 },
+        .{ .orientation = .vertical_line, .bounds = .{ .x = 0, .y = 0, .w = 100, .h = 200 }, .pos = 58 },
+    };
+    var storage: [4]tree.RectEntry = undefined;
+    const published = try publish(&segs, cw, ch, 1, &storage);
+
+    const x: f64 = 54; // 두 밴드 모두 안
+    try std.testing.expectEqual(@as(?usize, 0), hitTest(&segs, cw, ch, x, 100));
+
+    // `interaction.hitAction`은 reverse z-order로 훑어 **마지막** entry가 이긴다. 그래서 publish가
+    // segs를 역순으로 싣지 않으면 겹치는 지점에서 두 경로가 다른 seg를 고른다.
+    var winner: ?u64 = null;
+    var index = published.entries.len;
+    while (index > 0) {
+        index -= 1;
+        const entry = published.entries[index];
+        const rect = entry.rect;
+        if (rect.x <= x and x < rect.x + rect.width and rect.y <= 100 and 100 < rect.y + rect.height) {
+            winner = entry.id;
+            break;
+        }
+    }
+    try std.testing.expectEqual(@as(?usize, 0), segIndexOf(winner.?, segs.len));
+}
+
+test "publish fails closed and drops segs that have no hit target" {
+    const segs = [_]Seg{
+        .{ .orientation = .vertical_line, .bounds = .{ .x = 0, .y = 0, .w = 100, .h = 200 }, .pos = 50 },
+        .{ .orientation = .horizontal_line, .bounds = .{ .x = 0, .y = 0, .w = 200, .h = 100 }, .pos = 80 },
+    };
+    var small: [1]tree.RectEntry = undefined;
+    // partial publish 대신 후보 자체가 실패한다 — 절반만 잡히는 divider를 내놓지 않는다.
+    try std.testing.expectError(error.InsufficientEntryBuffer, publish(&segs, 10, 16, 1, &small));
+
+    // 셀 0이면 hit target이 없다. 그 seg는 발행되지 않고, 남은 것들의 identity는 그대로다.
+    var storage: [4]tree.RectEntry = undefined;
+    const none = try publish(&segs, 0, 16, 1, &storage);
+    try std.testing.expectEqual(@as(usize, 0), none.entries.len);
+
+    // 단일 panel(segs 빈)은 빈 tree다 — capture 대상이 없다는 뜻이지 실패가 아니다.
+    const empty = try publish(&.{}, 10, 16, 1, &storage);
+    try std.testing.expectEqual(@as(usize, 0), empty.entries.len);
+
+    // identity는 1-기반이고 그 역함수만 유효하다.
+    try std.testing.expectEqual(@as(?usize, null), segIndexOf(0, 2));
+    try std.testing.expectEqual(@as(?usize, 1), segIndexOf(2, 2));
+    try std.testing.expectEqual(@as(?usize, null), segIndexOf(3, 2));
 }

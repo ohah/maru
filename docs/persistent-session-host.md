@@ -1087,6 +1087,118 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    같은 주소에 복원해도 node seal의 epoch/lifecycle을 되살릴 수 없다. 구현은 공통 preflight 뒤 attach/RPC owner protocol을 별도
    private helper로 나눠 한 분기에서 interleave하지 않는다.
 
+   b-3 구현은 aggregate 계약을 조기에 공개하지 않고 `B3-0a`부터 `B3-6`까지 내부 merge gate로 닫는다. `B3-0a`는 현재
+   attach accepted tail에서 payload의 canonical allocation receipt·owner 비중첩이 증명된 경우만 safe-free하고, alias·range overflow·
+   allocator drift처럼 free 권위가 불명확하면 read/hash/free 0과 terminal evidence 뒤 attach execution의 production strict wrapper가
+   즉시 fail-stop하는 선행 보안 remediation이다. 이 구분 없이 generic finalizer로 payload cleanup을 옮기지 않는다.
+
+   `B3-0`의 private final-address `PreparedExecutionTxn`은
+   `{self_addr,node_addr,reservation,binding_identity,canonical_prepared,prepared_identity,phase,settlement}`만 소유하며 response
+   destination pointer, attach/RPC response owner 또는 payload를 소유하지 않는다. `phase`의 exact set은
+   `prepared_unbegun|pre_wire_backing_live|post_execute_backing_settled|settled`이고 별도 외부 disposition latch를 두지 않는다.
+   `initBeforeBeginExecute(out:*PreparedExecutionTxn,node:*ClientNode,request:GenerationRequestAbort,identity:contract.BindingIdentity,
+   canonical:prepared_request_authority.Prepared) InitError!void`만 caller의 pristine final-address storage에 in-place 생성하며 value-return,
+   assignment copy와 생성 뒤 이동은 금지한다. `reservation`과 `canonical_prepared`는 각각 request가 가진
+   `client_slot.AttachmentBindingReservation`과 value snapshot `prepared_request_authority.Prepared`이고 raw backing pointer ownership은
+   transaction으로 옮기지 않는다. `InitError=error{InvalidOwner,InvalidReceipt,ProtocolError}`,
+   `SettlementError=error{ProtocolError}`이며 exact private method signature는 다음과 같다.
+
+   - `commitBeginExecute(self:*PreparedExecutionTxn,node:*ClientNode) void`
+   - `revalidatePreWire(self:*PreparedExecutionTxn,node:*ClientNode) error{InvalidOwner,InvalidReceipt}!void`
+   - `rollbackPreWire(self:*PreparedExecutionTxn,node:*ClientNode) SettlementError!SettlementOutcome`
+   - `retireIssuerExhausted(self:*PreparedExecutionTxn,node:*ClientNode) SettlementError!SettlementOutcome`
+   - `settlePostExecuteReusable(self:*PreparedExecutionTxn,node:*ClientNode) SettlementError!SettlementOutcome`
+   - `settlePostExecuteTerminal(self:*PreparedExecutionTxn,node:*ClientNode,reason:client_poison.ConnectionReason) SettlementError!SettlementOutcome`
+   - `finishOrFailStop(self:*PreparedExecutionTxn,node:*ClientNode,outcome:SettlementOutcome) void`
+   - `ensureSettledOrFailStop(self:*PreparedExecutionTxn,node:*ClientNode) void`
+
+   init은 registry/storage/canonical begin 가능성을 mutation 0으로 preflight하고 txn을 `prepared_unbegun`에 게시한다.
+   `commitBeginExecute`만 registry begin과 txn `pre_wire_backing_live` publish를 한 no-fail suffix로 수행하며 예상 밖 registry 실패는
+   기존 canonical owner를 terminalize하고 즉시 fail-stop한다. 따라서 begin 뒤 owner 없는 init-failure window가 없다.
+   settlement method는 request backing과 prepared authority를 함께 exact once
+   소비하고 phase를 마지막에 `settled`로 게시한다. 정상 정산은 명시적 method가 수행하며 `defer`는 active residue를 terminal
+   fail-stop으로 닫는 `ensureSettledOrFailStop` 하나만 호출하는 최후 invariant guard다. `prepared_unbegun` residue는 canonical prepared
+   owner를 보존한 채 txn만 settled tombstone하고, begin 뒤 residue는 backing+authority를 terminalize한 뒤 fail-stop한다.
+   copied/moved transaction, 등록된 node operation scope 밖 호출과 중복 settlement는
+   canonical mutation·free 없이 거부한다. `SettlementOutcome=union(enum){reusable,terminal:client_poison.ConnectionReason,
+   fail_stop_required:FailStopReason}`이고 `FailStopReason`은 closed enum `authority_drift|backing_ambiguous|duplicate_settlement`다.
+   settlement leaf 밖의 caller는 이를 직접 switch하지 않는다. `finishOrFailStop`만 reusable/terminal을 facade 결과로 normalize하고
+   `fail_stop_required`는 반환·저장하지 않은 채 production strict suffix에서 즉시 종료한다.
+
+   safe-free 권위는 allocator equality나 caller의 `ptr/len`만으로 추론하지 않는다. B3-0a는 framing의 private
+   `PayloadAllocationObserver`를 RPC read에만 전달한다. parser buffer·pending descriptor backing과 temporary allocation은 기존
+   `GenerationGuardedAllocator`/Client ownership을 그대로 쓰고 observer 대상이 아니다. observer는 완성 frame payload `dupe` 직전에
+   `ResponseOperationAllocationLedger.reservePayload(len,allocator)`를 호출하고, 성공한 payload alloc 뒤
+   `commitPayload(reservation,ptr,len,allocator)`를 호출하며 alloc 실패는 `abortPayload(reservation)`으로 되돌린다. frame의 실제 durable
+   owner allocator는 수명이 긴 기존 guarded allocator로 보고하므로 OOB frame은 operation 뒤에도 기존 Client queue가 정상 deinit한다.
+
+   ledger는 operation guard마다 ClientNode가 캡처한 authority allocator로 소유하는 동적 backing이다. operation/reentry latch를 먼저
+   게시한 뒤에만 grow하며 새 backing 전체가 slot/node/Client/source/operation owner와 disjoint인지 scalar range로 검증한 뒤 publish한다.
+   grow 실패·alias는 payload parent alloc 전 mutation 0의 OOM 또는 fail-stop이고, old exact backing만 새 backing publish 뒤 free한다.
+   ledger backing allocator callback의 same/sibling Client·prepare/execute/drop/deinit 재진입은 기존 callback gate에서 Busy다.
+   generation과 entry capacity는 payload parent alloc **전에 함께 reserve**하고 parent alloc 실패 시 entry는 idle로 되돌리되 generation은
+   burn한다. 따라서 성공 allocation 뒤 generation wrap이 생기지 않는다. exact cap은 Client의 동시에 허용되는 pending batch 4,096 +
+   stream 4,096 + event 1,024 + target response 1인 payload 9,217 entries다. cap/OOM은 parent alloc 전 거부한다.
+   `AllocationEntry={allocator ptr/vtable,exact ptr/len,generation,lifecycle}`이고 lifecycle exact set은
+   `reserved|live|promoted_response|transferred_response|retired`다. observed frame payload는 immutable exact slice라 resize/remap API가
+   없고 0회다. 기존 parser/pending backing resize/remap은 payload ledger 밖의 기존 guarded allocator 경로를 그대로 따른다.
+   operation 중 observed payload exact free는 matching live entry를 먼저 retired로 게시한 뒤 durable owner allocator free를 호출한다.
+
+   `promoteResponseAllocation(payload,allocator) PromoteError!ResponsePayloadAllocationReceipt`는 Client가 correlation을 확인해 반환한
+   target payload의 exact live entry 하나만 `live->promoted_response`로 CAS하고, receipt에
+   `{guard/node/operation incarnation,allocator ptr/vtable,exact ptr/len,generation,lifecycle=promoted}`을 봉인한다.
+   `releasePromotedResponse(receipt) ReleaseError!void`는 publication 전 exact-safe failure만
+   `promoted_response->retired` 뒤 free한다. `transferPromotedResponse(receipt,out:*ExecutedResponse,
+   owner_seal:*contract.ExecutedResponseOwnerSeal,incarnation:u64,correlated:contract.CorrelatedExecutedCall) TransferOutcome`은
+   `union(enum){transferred,rejected_safe_released:executed_response.InitError,
+   fail_stop_required:PayloadFailStopReason}`다. destination/owner/receipt 재검증이 coherent한 prepublication init reject는 helper가 exact
+   once `promoted_response->retired`+free한 뒤 `rejected_safe_released`를 반환한다. destination/owner/receipt가 drift했거나 init이 partial
+   publication을 남기면 no-free terminal evidence의 `fail_stop_required`이며 promoted residue의 유일한 소비자는 strict wrapper다.
+   successful in-place response publication은 `transferred`와 함께 `promoted_response->transferred_response`로 옮겨 response transcript/owner seal에 receipt
+   generation을 포함한다. `endOperationGuard`는 promoted residue 0을 요구한 뒤 ledger backing만 회수한다. OOB allocation의 live
+   entry는 guard 종료 때 tracking에서 버리되 실제 payload ownership은 기존 Client queue에 그대로 있고, 이후 queue deinit은 response
+   receipt를 소비하지 않는다. target 뒤 추가 observed payload allocation과 OOB의 전후 free는 exact ptr/len/generation이
+   다르므로 promote할 수 없다. mismatch, generation wrap, overflow, retired entry와 owner overlap은 payload read/hash/free 0이다.
+   zero-length payload는 parent alloc/free가 없는 별도 `zero_length` receipt variant이며 nonzero extent 권위로 재사용하지 않는다.
+   `PromoteError=error{InvalidProvenance,IdentityExhausted,ProtocolError}`,
+   `ReleaseError=error{InvalidProvenance,ProtocolError}`다. private
+   `PayloadProvenanceOutcome=union(enum){promoted:ResponsePayloadAllocationReceipt,
+   fail_stop_required:PayloadFailStopReason}`이고 `PayloadFailStopReason=enum{allocator_drift,range_overflow,owner_alias,ledger_drift}`다.
+   `client_slot.executeGenerationRequest`만 이 outcome의 production consumer다. 이 기존-signature strict facade는 `.promoted`만
+   publication/release helper에 넘기고 `fail_stop_required`는 반환·저장하지 않고 same-stack `@panic`으로 종료한다. component helper
+   이름은 `classifyResponsePayloadProvenance`이고 test 밖 production caller는 이 facade 안 exact 1회다.
+
+   transaction의 prepared settlement와 connection action은 직교한다. B3-0은 미래 progress를 error tag에서 추측하지 않고 현재
+   attach 결과를 아래 표에 exact 매핑한다. B3-3에서 Client가 pointer-free closed progress evidence
+   `request_zero|pending_ambiguous|request_maybe_written|response_received` 또는 의미가 동등한 닫힌 타입을 직접 반환하도록 확장한다.
+   B3-0의 request transaction `rollbackPreWire`는 connection이 이미 terminal이어도 canonical request backing을 exact release해 prepared
+   authority가 reusable로 정산될 수 있으며 connection을 다시 usable로 만들지 않는다. B3-3에서 추가되는 **response authority의 idle
+   rollback**만 `request_zero`이며 prior pending ambiguity가 없는 증거에서 허용하고, 나머지는 response authority terminal을 강제한다.
+
+   | 현재 attach 종료 증거 | prepared settlement | connection action | B3-0 observable 결과 |
+   | --- | --- | --- | --- |
+   | admission 전 owner/receipt 거부 | untouched | keep | 기존 typed error, wire/allocation/free 0 |
+   | begin 뒤 local destination/guard/preflight 거부, wire 0, Client usable, backing reusable | reusable | keep | 기존 typed error, backing exact free |
+   | pending flush partial/ambiguous 또는 Client terminal, canonical request backing intact | reusable | preserve first terminal reason | 기존 Client error, connection terminal; B3-3 response authority는 terminal |
+   | 위 경우 canonical request backing/authority도 drift | terminal 또는 fail-stop residue | preserve first reason 또는 poison local invariant | 기존 Client error 또는 fail-stop |
+   | allocator-scope/response issuer 소진과 backing exact cleanup 성공 | terminal | poison local invariant | `IdentityExhausted` |
+   | 위 cleanup 또는 canonical backing/authority drift | terminal 또는 fail-stop residue | poison local invariant | `ProtocolError` 또는 기존 fail-stop |
+   | Client `.not_executed`, reusable abort, Client usable | reusable | keep | 기존 Client error |
+   | Client `.not_executed`, reusable abort, Client terminal | reusable | preserve first reason | 기존 Client error |
+   | Client `.not_executed`, terminal abort | terminal | preserve first reason 또는 poison local invariant | 기존 Client error |
+   | Client `.uncertain` | terminal | poison transport read failure | 기존 uncertain receipt publication |
+   | accepted 뒤 exact-owned correlation/publication 실패 | terminal | 기존 exact poison reason | 기존 error, safe-free exact once |
+   | accepted 뒤 allocator/range/owner alias ambiguity | terminal | fail-stop | payload read/hash/free 0 |
+   | accepted publication 성공 | reusable | keep | 기존 accepted bytes/result |
+
+   B3-0 characterization은 각 행의 반환 error/result, storage settled 여부, prepared authority readiness, Client 최초 poison,
+   response lifecycle/bytes와 allocation/free count를 전후 동일하게 고정한다. 단 B3-0a의 unsafe alias free 제거는 의도한 보안 변화로
+   별도 golden을 소유한다. Darwin socketpair accepted/uncertain bytes, request/response allocator fail-index, Debug·ReleaseFast와 public
+   declaration/callsite/frame/registry-layout delta 0 source oracle가 모두 green이어야 transaction refactor를 병합한다. B3-1은 inert
+   authority, B3-2는 private destination classifier, B3-3은 progress/execute, B3-4/5는 published payload의 생성과 정리 경로를 함께
+   여는 원자적 publication+borrow/finish, B3-6은 aggregate exposure를 소유한다. B3-0a~B3-4/5 어느 단계도 `2c3b-3 완료`를
+   주장하지 않는다.
+
    request-side canonical transcript는 같은 binding entry의 `PreparedRequestAuthority` 하나가 소유한다. lifecycle은 raw tag를 먼저
    검사하는 `idle|prepared|executing|terminal`이고, seal은 transport/binding identity, request tag/family, request id/digest,
    prepared incarnation, storage final address, frame `{ptr,len}` allocation extent, allocator identity를 포함한다. prepared frame은
@@ -1118,7 +1230,7 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    | `terminate` | `bound_terminal` | committed live controller | `runtime.terminate` |
    | `detach` | `bound_terminal` | committed controller/observer | `runtime.detach` |
 
-   `RpcResponseAuthority.lifecycle`은 raw tag를 먼저 검사하는 `idle|executing|published|releasing|terminal`이다. `terminal`만 absorbing이고,
+   `RpcResponseAuthority.lifecycle`은 raw tag를 먼저 검사하는 `idle|executing|published|borrowed|releasing|terminal`이다. `terminal`만 absorbing이고,
    `idle`에서만 checked-monotonic nonzero epoch를 발급해 transport당 blocking RPC를 정확히 하나만 in-flight로 둔다. epoch 소진은
    response authority terminal+connection poison으로 닫고 attachment transport 자체를 teardown 순서 밖에서 임의 terminalize하지 않는다.
    request tag는 `attach_only|bound_observation|bound_controller_mutation|bound_terminal` family로 exhaustive 분류한다. execute는
@@ -1144,9 +1256,19 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    production source allowlist 보장이다. raw slice accessor는 owner module private이고 유일한 decode bridge 및 family별 decoder의 exact
    caller/signature inventory를 compile-time oracle로 고정한다. tokenizer boundary test는 그 allowlist 밖의 raw response `[]const u8`
    parameter/return/field, transitive helper 전달, struct/global/queue 저장을 거부한다. decode가 끝나면
-   `finishRpcResponseOwned(response, disposition: reusable|protocol_failure)` 하나로 끝낸다. 이 helper는
-   response owner를 먼저 terminal tombstone하고 authority를 `published->releasing`으로 게시한 뒤 captured allocator로 payload를
-   exact once free한다. allocator callback 동안 새 RPC/drop/deinit과 stale owner replay는 `Busy`이며, 복귀 뒤 canonical seal이
+   `beginRpcResponseBorrow(response:*RpcExecutedResponse,authority:*RpcResponseAuthority,out:*RpcResponseBorrow) BorrowError!void`만
+   pristine caller storage에 in-place receipt를 만들며 value-return/copy/move는 금지한다. receipt는
+   `{self_addr,response_addr,authority_addr,transport/binding/request/digest/epoch,borrow_generation,lifecycle=live}`를 봉인한다.
+   node authority를 `published->borrowed`로 exact once 전이한 뒤에만 초기화하고, 모든 destination-pristine 검증은 전이 전에 끝난다.
+   `BorrowError=error{Busy,InvalidOwner,InvalidReceipt,ProtocolError}`다. module-private exact decoder bridge
+   `borrowRpcResponseBytes(borrow:*const RpcResponseBorrow,response:*const RpcExecutedResponse,
+   authority:*const RpcResponseAuthority) BorrowError![]const u8`만 immutable slice를 내준다. 두 번째·동시 borrow는 payload read 전에
+   거부한다. decode scope는 반드시
+   `finishRpcResponseOwned(response, borrow, disposition: reusable|protocol_failure)` 하나로 끝낸다. 이 helper는
+   response owner를 먼저 terminal tombstone하고 authority를 `borrowed->releasing`으로 게시한 뒤 captured allocator로 payload를
+   exact once free한다. exact live borrow receipt의 finish만 허용하며 stale/foreign/copied/duplicate/concurrent finish와 borrow receipt
+   초기화 실패 가능성이 있는 destination은 `published->borrowed` 전 pristine preflight에서 거부한다. borrowed 뒤 일반 abort는 없고
+   `finish(...protocol_failure)`만 terminal 정리를 소유한다. allocator callback 동안 새 RPC/drop/deinit과 stale owner replay는 `Busy`이며, 복귀 뒤 canonical seal이
    coherent하고 disposition이 `reusable`이면 no-fail `releasing->idle`; `protocol_failure`면 payload 해제 뒤
    `releasing->terminal`+connection poison을 한 canonical suffix로 게시한다. drift가 있으면 arbitrary free를 반복하지 않고 strict
    product wrapper가 process fail-stop한다.
@@ -1154,7 +1276,10 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
 
    response allocation/publication 실패는 actual allocator·range·digest authority가 exact하면 response owner tombstone 뒤 safe-free하고,
    allocator mismatch, pointer range overflow, owner와 exact/partial alias처럼 free authority가 불명확하면 forged slice를 free하지 않는다.
-   이 경우 component는 node-sealed terminal evidence와 `fail_stop_required`만 게시하고 strict 제품 wrapper가 즉시 process fail-stop한다.
+   이 경우 private component helper만 node-sealed terminal evidence와 `fail_stop_required`를 만들 수 있다. B3-0a의 attach-only
+   production strict wrapper는 이 outcome을 caller에게 반환하거나 저장하지 않고 같은 stack에서 즉시 process fail-stop하며, B3-6은
+   동일한 소비 경계를 RPC destination까지 확장한다. decoder 제품 callsite가 아직 0이어도 이 wrapper 자체는 production code이며
+   production-shaped exact-one callsite와 subprocess가 소비 경계를 고정한다.
    계속 실행하며 누수를 축적하는 quarantine registry는 만들지 않는다. GUI process 종료는 daemon PTY를 종료하지 않으므로 다음 앱
    실행은 host에 다시 attach할 수 있다. component test는 fail-stop 직전 forged pointer free 0·double-free 0·node terminal exact 1을
    검증하고, subprocess product test는 비정상 종료를 자동 단언한다. registry attach owner/pin을 response payload cleanup의 대리 SSOT로
@@ -1173,16 +1298,18 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    | executing | prior pending wire partial/ambiguous preflight | `error.ConnectionClosed|ProtocolError` | 없음, prepared abort | terminal | 거부 | poison+fail-close |
    | executing | request partial/timeout, response EOF/truncation, correlation loss | `.uncertain_or_connection_failure` | 없음 또는 terminal evidence | terminal | 거부 | poison+fail-close |
    | executing | correlated response publish | `.accepted` | `RpcExecutedResponse` | published | Busy | Busy |
-   | published | borrow/decode | 기존 `.accepted` | 같은 owner 유지 | published | Busy | Busy |
-   | published | finish reusable | finish outcome `reusable` | owner tombstone, exact payload free | releasing→idle | callback 뒤 허용 | callback 동안 Busy |
-   | published | finish protocol failure | finish outcome `terminal` | owner tombstone, exact payload free | releasing→terminal | 거부 | poison+fail-close |
+   | published | borrow 시작 | 기존 `.accepted`+private borrow receipt | 같은 owner 유지 | borrowed | Busy | Busy |
+   | borrowed | decode | private immutable slice | 같은 owner 유지 | borrowed | Busy | Busy |
+   | borrowed | finish reusable | finish outcome `reusable` | owner tombstone, exact payload free | releasing→idle | callback 뒤 허용 | callback 동안 Busy |
+   | borrowed | finish protocol failure | finish outcome `terminal` | owner tombstone, exact payload free | releasing→terminal | 거부 | poison+fail-close |
    | published | owner/epoch/digest/allocator/alias drift | `fail_stop_required` | safe-free 또는 no-free evidence | terminal | 거부 | strict process fail-stop |
+   | borrowed | owner/epoch/digest/allocator/borrow receipt drift | `fail_stop_required` | second read/free 0 | terminal | 거부 | strict process fail-stop |
    | idle | epoch 소진 | `error.IdentityExhausted` | 없음 | terminal | 거부 | poison+fail-close |
 
    `RpcExecutedResponse`의 copy/move/same-address reincarnation, stale epoch, 다른 transport/binding/request/tag/digest/destination splice,
    duplicate borrow/finish는 payload를 읽거나 free하기 전에 typed reject한다. `abortPreparedRequest`는 wire 전 prepared request만 취소하며
-   published/releasing response를 abort하지 않는다. attachment teardown은 registry attach owner가 settled이고 response authority가
-   `idle`일 때만 정상 진행한다. `executing|published|releasing`이면 `Busy`, `terminal`이면 terminal response cleanup 뒤 기존 connection
+   published/borrowed/releasing response를 abort하지 않는다. attachment teardown은 registry attach owner가 settled이고 response authority가
+   `idle`일 때만 정상 진행한다. `executing|published|borrowed|releasing`이면 `Busy`, `terminal`이면 terminal response cleanup 뒤 기존 connection
    fail-close graph로 수렴한다. `GenerationAttachment.response`와 registry `responseOwnerSeal`은 attach-only exact caller allowlist로
    고정하고 반복 RPC module의 cleanup-registry import/call은 0이다. 이 구조는 현재 `PreparedBlockingRpcStorage`의 단일 in-flight
    제약과 일치하며 fixed response pool이나 terminal seal reset을 도입하지 않는다.

@@ -22150,12 +22150,14 @@ pub const AppSession = struct {
         // with the same published component tree even if the pointer leaves the dock; an up over
         // a terminal must not begin a terminal selection or leak a PTY mouse event. A bare up in
         // the content is also consumed, matching the down path below.
-        // An in-flight `PointerGestureOwner` outranks this rect test. A divider, tab, pane, sidebar
-        // or scrollbar drag keeps its owner until up, so a pointer that merely crosses the dock must
-        // not be re-routed here: the gesture would stop tracking mid-drag and its up would be
-        // consumed by the dock, leaving the owner armed. Only capture-free pointers are classified
-        // by rect (docs/chrome-interaction-migration.md §2 — an in-flight capture wins first).
-        if (self.dockVisible() and self.dock.view == .agent_sessions and button == 0 and (kind == 2 or kind == 3) and self.pointerGestureIs(.none)) {
+        // 진행 중인 어떤 drag든 이 rect 판정보다 앞선다. divider·tab·pane·sidebar·scrollbar drag는
+        // `PointerGestureOwner`가, **터미널 텍스트 선택 drag는 `mouse_drag_selecting`이** 소유한다 —
+        // 후자는 owner union에 없어서 처음 가드가 놓쳤고, 그 결과 선택 drag를 도크 위에서 놓으면 up이
+        // 도크에 먹혀 `drag_autoscroll`이 latch된 채 터미널이 무한 스크롤했다.
+        // capture 없는 pointer만 rect로 분류한다(docs/chrome-interaction-migration.md §2).
+        if (self.dockVisible() and self.dock.view == .agent_sessions and button == 0 and (kind == 2 or kind == 3) and
+            self.pointerGestureIs(.none) and !self.mouse_drag_selecting)
+        {
             const content = self.dockGeometry().tree_content;
             const captured = self.agent_session_dock_interaction.capture != null;
             if (captured or layout_math.pointInRect(x_px, y_px, content)) {

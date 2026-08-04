@@ -63,13 +63,10 @@ pub const TextOptions = struct {
 /// Button is an explicit command target, not an interactive Card alias.  It intentionally
 /// carries no text or provider payload: component views emit the immutable label separately,
 /// while this node is the one published border-box/action capability used by paint and input.
-/// Button이 선언하는 아이콘 슬롯. codepoint는 합성 게이트에 등록된 값이며 등록 판정은
-/// `ui/button.zig`가 주입받은 predicate로 후보 단계에서 한다(chrome은 renderer를 import할 수 없다).
-pub const LeadingIconProps = struct {
-    codepoint: u21,
-    extent_px: u16,
-    gap_px: u16,
-};
+/// Button이 선언하는 아이콘 슬롯. 정의는 `ui/style.zig`가 소유한다 — published visual props와
+/// node props가 같은 타입을 써야 둘이 갈리지 않는다. 등록 판정은 `ui/button.zig`가 주입받은
+/// predicate로 후보 단계에서 한다(chrome은 renderer를 import할 수 없다).
+pub const LeadingIconProps = ui_style.LeadingIcon;
 
 pub const ButtonOptions = struct {
     id: UiId,
@@ -438,7 +435,9 @@ fn visualFor(node: UiNode) VisualProps {
     return switch (node.props) {
         .container => .none,
         .card => |value| .{ .card = .{ .variant = value.variant, .paint = value.paint } },
-        .button => |value| .{ .button = .{ .variant = value.variant, .paint = value.paint } },
+        // `leading_icon`도 함께 실어야 한다. 빠뜨리면 builder가 검증·계산한 슬롯이 published entry에
+        // 도달하지 못해, paint/lowering이 placement를 만들 길이 없다(화면에 영원히 안 나온다).
+        .button => |value| .{ .button = .{ .variant = value.variant, .paint = value.paint, .leading_icon = value.leading_icon } },
         .text => |value| .{ .text = .{ .tone = value.tone, .paint = value.paint } },
     };
 }

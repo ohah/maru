@@ -16,6 +16,9 @@ pub const Props = struct {
     viewport_px: layout.UiSize,
     cell_width_px: u32,
     cell_height_px: u32,
+    /// backing scale × dock zoom. Button floor 같은 logical point 치수를 이 값으로 한 번만 환산한다.
+    /// 넘기지 않으면 1× 기준이라 고배율에서 hit-target floor가 사실상 사라진다.
+    scale_milli: u32 = 1000,
     snapshot_generation: u64,
     state: State,
     provider: Provider,

@@ -362,38 +362,17 @@ worker-owned final-pixel `leading-icon-group`도 제품 Session Dock에서 소�
 props(`variant`·`paint`·`action`·`overflow`)와 `ui/paint_style.zig`의 `resolveButton`도 이미 있다
 (`433cb463`). 즉 tree kind와 paint 해석은 남은 범위가 아니다.
 
-아직 없는 것은 **호출자가 쓰는 generic builder와 그 제약**이다 — `ui/button.zig` 자체, `ButtonProps`,
-`ButtonSize`, `IconId`, one-Text-child API가 코드에 없다. `ButtonVariant`만 `ui/style.zig`에 있고,
-Session Dock은 자기 `ButtonMetrics`(`components/session_dock/types.zig`의 pt 치수)로 크기를 정하고,
-host도 hit-test·layout에서 같은 `ButtonMetrics.resolve`를 읽는다. `ButtonSize`는 그것을
-대체하는 이름이 아니라 **token 기반 최소 hit target floor**를 주는 generic 축이며, 두 값이 충돌하면
-builder가 둘을 합쳐 one resolved min을 만든다(아래 참조). archive consumer 하나가 성공했다는 이유로
-reusable Button 전체를 완료로 부르지 않는다.
+generic builder와 그 제약도 이제 있다 — `ui/button.zig`의 `ButtonProps`·`ButtonSize`·icon slot과
+one-Text-child API(`bf0cf6f5`), 상태 계약과 keyboard parity `activateFocused`(`7cb02395`), archive
+detail의 generic Button 소비(`ca0f127e`)까지 merge됐다. `ButtonVariant`는 `primary`·`secondary`·
+`ghost`·`danger` 넷이고(`7111c373`) 토큰 매핑은 `paint_style`이 소유한다. label 자식은 **호출자
+버퍼의 슬라이스**로 넘긴다(`ad32dc9f` — 값의 주소를 실으면 dangling).
 
-남은 generic Button 이관은 다음 PR로 나눈다. 한 PR은 선행 PR이 병합된 `main`에서만 시작한다.
+Session Dock은 자기 `ButtonMetrics`(`components/session_dock/types.zig`)로 action row의 완성 높이를
+정하고, `ButtonSize`는 그것과 경쟁하지 않는 **하한**만 준다. 소비자가 자기 높이를 알면
+`style.min_height`로 넘기고 builder가 둘 중 큰 쪽을 쓴다.
 
-1. **B1-generic-component:** `ui/button.zig`를 추가해 `ButtonProps`, `ButtonSize`, icon slot,
-   semantic text child를 `UiNode.button`에 투영한다. tree의 `button` kind와 `resolveButton`은 이미
-   있으므로 재작성하지 않는다. 다만 현재 props는 `variant`·`paint`·`action`·`overflow`뿐이라
-   **size와 icon을 실을 자리가 없다** — Session Dock은 그 둘을 컴포넌트 로컬 `ButtonMetrics`와
-   `draw.TextPlacement.leading_icon_group`(worker가 final-pixel로 lower)으로 따로 흘린다. 이 slice는
-   그 두 축을 generic props로 받아 같은 placement로 내리는 경로를 정의하며, 필요한 최소한의 tree
-   props 확장은 이 단계에 포함한다. archive/provider/AppKit을 import하지 않고, artifact 측정은
-   platform `RichTextArtifact`가 계속 소유한다 — generic API가 그 결과를 재계산하거나 cell origin으로
-   되돌리지 않음을 unit/readback으로 증명한다.
-2. **B1-generic-state:** default/hover/
-   pressed/focus/disabled, ButtonSize floor보다 작은 max fail-close, zero/two/non-Text child fail-close,
-   narrow CJK ellipsis, pointer·keyboard action parity를 headless와 Lab fixture로 고정한다.
-3. **B1-archive refactor:** archive detail action의 current local writer가 generic Button만 소비하도록
-   바꾸고 `detail-ready` before/after capture와 실제 AppKit resume/reveal fixture를 갱신한다. provider와
-   action identity 정책은 바꾸지 않는다.
-
-`zig build test-chrome-ui`의 root(`src/ui_test.zig`)는 모듈을 명시로 나열해 `refAllDecls`한다.
-그 나열에 없어도 등재 모듈이 import하면 전이적으로 실행된다 — `typography`·`spacing`이 나열에
-없는데도 실행되는 것이 그 예다. 따라서 새 `ui/button.zig`가 tree/paint_style 같은 등재 모듈의
-import 그래프에 들어오면 별도 등재가 필요 없지만, 어느 등재 모듈도 참조하지 않는 독립 모듈이면
-`src/ui_test.zig`에 직접 등재해야 한다. 그러지 않으면 그 gate는 **테스트를 한 개도 실행하지 않은
-채 green**이 된다. PR은 새 테스트 이름이 실제 실행 목록에 나타나는지 확인한다.
+진행 상태 자체는 `implementation-plan.md`와 `verification-matrix.md`가 소유한다.
 
 각 구현 PR은 `mise run macos-chrome-lab-smoke`의 제품 Metal PNG와 `gh attach` 본문 이미지를
 포함한다. B1-text/B1-button은 `zig build test-chrome-ui`, `zig build check-boundaries`, `mise run check`,

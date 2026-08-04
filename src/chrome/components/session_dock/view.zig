@@ -46,6 +46,8 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
         .runs = buffers.runs,
         .text_bytes = buffers.text_bytes,
         .corner_radius_px = tk.space.corner_radius_px,
+        .state = state,
+        .tokens_ref = tk,
     };
 
     const header = find(frame.tree, build.NodeIds.header) orelse return error.MissingRect;
@@ -107,6 +109,10 @@ const Writer = struct {
     text_bytes: []u8,
     text_count: usize = 0,
     corner_radius_px: u16,
+    /// label 전경은 quad와 **같은 함수**에서 나와야 한다. variant만으로 고르면 hover/press에서
+    /// `resolveButton`이 전경을 바꾸는 것을 놓쳐 배경색 label이 배경 위에 얹힌다.
+    state: interaction.InteractionState,
+    tokens_ref: *const tokens.Tokens,
 
     fn text(self: *Writer, rect: tree.RectEntry, line: u32, source: []const u8, role: tokens.ColorRole, text_role: typography.ChromeTextRole, line_count: u32, wide_icons: bool, centered: bool) ViewError!void {
         return self.textStyled(rect, line, source, role, text_role, line_count, wide_icons, centered, false);
@@ -476,14 +482,14 @@ const Writer = struct {
         if (content.w == 0 or content.h == 0) return;
         const line_height = typography.lineHeightPx(.button_label, effectiveScale(self.props.scale_milli));
         if (content.h < line_height) return;
-        const enabled = rect.action != null and rect.action.?.enabled;
-        const foreground: tokens.ColorRole = if (!enabled) .muted_fg else switch (rect.visual) {
-            // 전경 매핑은 `paint_style`이 단일 출처다. 여기서 다시 나열하면 variant가 늘 때 두 곳이
-            // 갈려 "보이는 색과 계산된 색"이 달라진다.
-            .button => |visual| paint_style.buttonForeground(visual.variant),
+        // 전경은 quad를 칠한 바로 그 함수에서 받는다. `buttonForeground`는 variant만 보므로
+        // hover/press에서 `resolveButton`이 전경을 `.surface_fg`로 바꾸는 것을 놓쳤고, 그때
+        // `.primary` label이 어두운 배경 위 배경색 글자가 되어 사라졌다.
+        const foreground: tokens.ColorRole = switch (rect.visual) {
+            .button => |visual| paint_style.resolveButton(rect.id, visual, rect.action, self.state, self.tokens_ref).foreground,
             // A SessionDock action must be a Button.  Keeping this fail-safe fallback makes a
             // stale/malformed published snapshot readable rather than guessing a Card variant.
-            else => .surface_fg,
+            else => if (rect.action != null and rect.action.?.enabled) .surface_fg else .muted_fg,
         };
         const placement: draw.TextPlacement = if (icon) |source| .{ .leading_icon_group = .{
             .content_rect = content,

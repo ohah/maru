@@ -34,7 +34,19 @@ pub const PaintStyle = struct {
 };
 
 pub const CardVisual = struct { variant: CardVariant, paint: PaintStyle };
-pub const ButtonVisual = struct { variant: ButtonVariant, paint: PaintStyle };
+/// `leading_icon`은 published entry까지 실려야 paint/lowering이 final placement를 만들 수 있다.
+/// 치수는 `ui/button.zig`가 `ButtonSize`와 token에서 한 번 계산해 넣는다.
+pub const ButtonVisual = struct {
+    variant: ButtonVariant,
+    paint: PaintStyle,
+    leading_icon: ?LeadingIcon = null,
+};
+
+pub const LeadingIcon = struct {
+    codepoint: u21,
+    extent_px: u16,
+    gap_px: u16,
+};
 pub const TextVisual = struct { tone: TextTone, paint: PaintStyle };
 
 /// Snapshot payload shared by interaction and paint consumers. `none` is reserved for the

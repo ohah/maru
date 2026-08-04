@@ -49,7 +49,11 @@ pub const ButtonSize = enum {
     compact,
 
     /// logical point floor. backing pixel 환산은 `spacing.pointsPx`가 한 번만 한다.
-    fn minHeightPt(self: ButtonSize) u16 {
+    ///
+    /// `session_dock.types.ButtonMetrics`는 자기 action row의 **완성 높이**(48pt)를 갖고, 이 값은
+    /// 그것과 경쟁하지 않는 **하한**이다. 둘이 같은 사실의 두 출처가 되지 않도록: 소비자가 자기
+    /// 높이를 알면 `style.min_height`로 넘기고 builder가 둘 중 큰 쪽을 쓴다.
+    pub fn minHeightPt(self: ButtonSize) u16 {
         return switch (self) {
             .default => 32,
             .compact => 24,

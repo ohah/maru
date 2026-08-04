@@ -18,8 +18,17 @@ const types = @import("types.zig");
 // Both action icons are registered Chrome SVG glyphs. Their two-cell measurement is injected
 // into `text_layout` below; using a generic Unicode symbol here would shrink back to the terminal
 // font's one-cell ink and make the button look unlike the rest of rich Chrome.
-// Action label은 이제 `build.labels`가 소유하고 Button의 Text child로 published tree에 실린다.
-// view는 그 자식을 읽어 그린다 — 같은 label이 hit rect와 다른 곳에서 계산되지 않게 하기 위해서다.
+// Action label 문자열의 현재 단일 출처는 `build.labels`다. published `RectEntry`가 텍스트를 싣지
+// 않으므로(tree.zig — "carries no text or provider payload") Button의 Text child는 문자열이 아니라
+// **identity·rect의 자리**만 소유하고, view가 같은 상수를 읽어 그린다.
+//
+// **이 분리는 임시다.** 이관 계약 §3은 interactive node가 "같은 immutable snapshot에 role, localized
+// label, enabled/selected/expanded/value를 담은 typed semantic descriptor"를 내라고 요구한다 — 즉
+// Swift adapter가 accessible name을 얻으려면 label이 결국 snapshot에 실려야 한다. 그때 문자열 수명은
+// `children`과 같은 규율(호출자 소유 버퍼가 published tree보다 오래 산다)로 풀면 되고, 별도 장치가
+// 필요하지 않다. 지금 미리 실으면 소비자 없는 필드가 하나 더 늘 뿐이라(같은 이유로 `leading_icon`이
+// 한동안 `visualFor`에서 누락된 채 지나갔다), **첫 accessibility descriptor 소비자가 생기는 PR**이
+// 그 이동을 함께 가져온다(§9의 consumer 완료 조건).
 const resume_icon = "\u{F000C}"; // recent.svg: continue an existing conversation
 
 pub const Buffers = struct {
@@ -41,6 +50,8 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
         .op_count = painted.ops.len,
         .runs = buffers.runs,
         .text_bytes = buffers.text_bytes,
+        .state = state,
+        .tokens_ref = tk,
     };
 
     const header = find(frame.tree, build.NodeIds.header) orelse return error.MissingRect;
@@ -104,6 +115,9 @@ const Writer = struct {
     run_count: usize = 0,
     text_bytes: []u8,
     text_count: usize = 0,
+    /// label 전경은 quad와 같은 함수에서 나온다(session_dock과 같은 규율).
+    state: interaction.InteractionState,
+    tokens_ref: *const tokens.Tokens,
 
     fn text(self: *Writer, rect: tree.RectEntry, line: u32, source: []const u8, role: tokens.ColorRole) ViewError!void {
         const cw = self.props.cell_width_px;
@@ -141,11 +155,11 @@ const Writer = struct {
         if (rect.effective_clip) |clip| if (y < clip.y or y >= clip.y + clip.height) return;
         // 전경은 variant가 정한다. 여기서 다시 고르면 primary(밝은 배경)에 밝은 글자가 얹혀 label이
         // 사라진다 — 실제로 그랬다. 단일 출처는 `paint_style.buttonForeground`다.
-        const foreground: tokens.ColorRole = if (!rect.action.?.enabled)
-            .muted_fg
-        else switch (rect.visual) {
-            .button => |visual| paint_style.buttonForeground(visual.variant),
-            else => .surface_fg,
+        // 전경은 quad를 칠한 그 함수에서 받는다 — `buttonForeground`는 variant만 봐서 hover/press의
+        // 전경 변경을 놓쳤고, `.primary` label이 배경색으로 얹혀 사라졌다.
+        const foreground: tokens.ColorRole = switch (rect.visual) {
+            .button => |visual| paint_style.resolveButton(rect.id, visual, rect.action, self.state, self.tokens_ref).foreground,
+            else => if (rect.action.?.enabled) .surface_fg else .muted_fg,
         };
         try self.emit(x, y, source, max_cols, foreground, true);
     }

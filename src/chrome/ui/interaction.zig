@@ -134,6 +134,11 @@ pub fn reconcile(state: *InteractionState, old_tree: UiRectTree, new_tree: UiRec
 
 /// Keyboard activation of the focused node — the parity path for a pointer click.
 ///
+/// **아직 host 배선이 없다.** Session Dock은 여전히 `agentSessionDockShortcutIntent`(intent 종류를
+/// 목록에서 찾아 실행)로 키보드 action을 처리하므로 focus와 무관하게 같은 동작을 낸다. 그 경로를
+/// 이 함수로 옮기는 것은 **사용자에게 보이는 동작 변경**(선택된 버튼만 실행)이라 승인과 fixture
+/// 갱신이 함께 필요하며, 그때까지 두 경로가 공존한다는 사실을 여기 적어 둔다.
+///
 /// 이 함수가 없으면 keyboard 사용자는 같은 command에 도달할 길이 없다. Session Dock은 지금
 /// "이 종류의 intent를 목록에서 찾아 실행"하는 별도 경로를 쓰는데, 그것은 focus와 무관해서 어떤
 /// 버튼이 선택돼 있든 같은 동작을 낸다 — parity가 아니다.

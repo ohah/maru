@@ -71,7 +71,7 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     // 모달 오버레이 집합이 `modalInputRole` 역할표에서 파생되면서 `@field(self.chrome_host, ...)` 접근
     // 하나가 제품 경로에 들어왔다(count 3 → 4). 그 reflection은 오버레이 필드를 이름으로 읽는 데만 쓰고
     // 다른 소유권을 만들지 않는다 — 손으로 유지하던 or 체인의 누락(`c822b336`)을 구조적으로 없애는 대가다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "6357820f83a293a8a23363927fc2b9b7dd17c1e13da620a38c0333cc33c6941c" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "e34b7f8b83c31eb765150d22cbb0d5aacc0775c8ecf77e3753036bf78c7114e8" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

@@ -65,7 +65,7 @@ rewrite의 근거로 삼지 않는다.
 | `components/sidebar.zig` | workspace/group/agent row geometry·hit-test·밴드 view·헤더 hit-test | `ReorderableList`를 쓰는 Sidebar composite | group collapse, reorder preview, pin/group invariants, 헤더 아이콘(◧/⚙/+/🔔) 영역, 검색 blur가 키 포커스를 터미널로 되돌리는 규율 |
 | `components/file_tree_scrollbar.zig` | scrollbar geometry/track/thumb math | `ScrollArea`/`Scrollbar` | thumb drag, track click, projection/root generation mismatch cancel |
 | terminal scrollbar | `AppSession` viewport mutation | `ScrollArea` adapter | terminal scrollback/selection/mouse mode와의 입력 우선순위 |
-| Session Dock | typed tree + action table + pixel scroll | 첫 modern consumer를 유지 | refresh anchor, stale action reject, read-only detail worker |
+| Session Dock | typed tree + action table + pixel scroll + 검색 필드(query·IME preedit 입력 owner) | 첫 modern consumer를 유지 | refresh anchor, stale action reject, read-only detail worker, `/`·필드 클릭 활성화와 Escape 해제, marked text가 필드·native 후보창에만 보이고 commit된 query만 목록을 필터하는 규율, 256 byte 절단, 검색 키·IME가 재스캔·stat·정렬을 일으키지 않고 terminal PTY로 새지 않음 |
 | palette/find/notice/modal/dropdown | 화면별 `State`/view/handle | `Input`/`Menu`/`Popover`/`Dialog` composite | AppKit first responder, IME, Escape/outside-dismiss, keyboard navigation |
 | settings/toggle/text field | 화면별 form state | `Input`/`Toggle`/`Select`/`FormRow` | schema ownership, config write, validation/error presentation |
 
@@ -120,12 +120,14 @@ internal interaction capability다. component가 capability를 선언하되, 경
 keyboard·lifecycle·accessibility 계약을 공유할 때만 public component로 승격한다. 그 전에는
 도메인 composite 안에 둔다.
 
-`Input`은 모든 문자열 상태를 하나의 범용 버퍼로 합치는 약속이 아니다. 검색 입력, 주소창의
-caret/selection 편집, settings의 검증 값은 서로 다른 키·Escape·IME·수명 계약을 가진다. component
+`Input`은 모든 문자열 상태를 하나의 범용 버퍼로 합치는 약속이 아니다. 사이드바 검색, Session Dock 검색,
+주소창의 caret/selection 편집, settings의 검증 값은 서로 다른 키·Escape·IME·수명 계약을 가진다. component
 tree에는 immutable presentation/semantic props와 opaque intent만 두고, 편집 모델은 해당 consumer의
 순수 모델이 소유한다. AppKit first responder와 `NSTextInputClient` bridge는 host가 유지한다. 따라서
-새 `Input` API가 생기더라도 기존 `OverlayInput`이나 주소창 `TextField`를 자동으로 흡수하지 않으며,
-각 이관은 [텍스트 필드 에디터](text-field-editor.md)의 범위·IME gate를 충족해야 한다.
+새 `Input` API가 생기더라도 기존 `OverlayInput`, Session Dock 검색 필드, 주소창 `TextField`를 자동으로
+흡수하지 않으며, 각 이관은 [텍스트 필드 에디터](text-field-editor.md)의 범위·IME gate를 충족해야 한다.
+Session Dock 검색은 이미 자체 preedit 버퍼와 commit 규율을 가진 modern consumer이므로, CIM6의 first
+consumer를 고를 때 "아직 아무 입력 모델도 없는 화면"으로 취급하지 않는다.
 
 `UiActionId`만으로 keyboard와 accessibility를 표현할 수는 없다. interactive node는 같은 immutable
 snapshot에 role, localized label, enabled/selected/expanded/value 및 keyboard focusability를 담은 typed
@@ -174,8 +176,13 @@ sibling**만 뜻한다. tab bar·divider·scrollbar처럼 terminal body 밖의 C
 reporting보다 먼저 처리할 수 있지만, terminal body 안의 보이지 않는/비-modal overlay가 입력을
 전역 소비해서는 안 된다. non-modal overlay는 자기 rect 밖에서 pass-through한다. terminal body의
 wheel/selection/mouse reporting은 기존 terminal input policy가 계속 결정하며, `ScrollArea`라는 이름만으로
-Chrome scroll로 바꾸지 않는다. `terminalOwnsInput`은 keyboard first-responder 정책의 단일 출처이므로
-pointer routing의 대체 판정으로 재사용하지 않는다.
+Chrome scroll로 바꾸지 않는다. keyboard 소유 판정은 pointer routing의 대체 판정으로 재사용하지 않는다.
+
+keyboard 소유는 현재 **두 축**이 나눠 가진다. `terminalOwnsInput`은 host가 AppKit first responder를 어디에
+둘지 정하는 Swift 쪽 단일 출처이고, `InputFocus`는 Zig 안에서 키를 어느 chrome 소비자에게 보낼지 고르는
+별개 enum이다. 새 chrome 입력 소비자를 추가하는 PR은 **두 축을 함께** 갱신해야 한다 — `InputFocus`에만
+넣고 `terminalOwnsInput`에 빠뜨리면 Zig는 키를 라우팅하는데 host는 first responder를 터미널로 되돌려
+입력이 어긋난다. 이관은 이 두 축을 하나로 합치지 않으며, 각각의 소유자를 옮길 때 그 사실을 PR에 적는다.
 
 keyboard focus는 이 pointer route를 따르지 않는다. 어느 창이 key event를 받는지는 AppKit first
 responder가, 그 안에서 terminal이 키를 갖는지는 `terminalOwnsInput`이 계속 단일 출처로 정한다.
@@ -439,3 +446,9 @@ grid, static transform, animation, multi-touch, rich accessibility tree는 이 �
    명시, keyboard focus가 pointer route를 따르지 않는다는 계약(§4.2), Chrome Lab에 render scale
    축이 없다는 사실에 맞춘 gate 재정의(§8), 공개 component 표면과 B1 시퀀스의 소유권을
    `metal-ui-layout.md`로 되돌린 것(§3·§8)이 이 반복의 결과다.
+7. **판정 순서·drift 검토** — §2의 "`InteractionState`가 먼저"가 실제 `mouse()` 순서와 달라, 진행 중인
+   capture를 rect 판정이 가로채는 동작을 계약으로 굳힐 뻔했다. 세 단계 순서(진행 중 capture 최우선 →
+   §4.2 route → 컴포넌트 rect)로 정정했고 제품 코드도 같은 규칙을 따르게 고쳤다. §4.4를 §4.3의
+   특수화로 명시하고, §9 공통 조건과 매트릭스 단계 gate를 별개 축으로 갈랐다. 이어 Session Dock에
+   검색 필드가 들어오면서 생긴 drift — inventory의 보존 동작(§2), keyboard 소유의 두 축(§4.2),
+   편집 모델 목록(§3) — 을 최신 `main` 기준으로 맞췄다.

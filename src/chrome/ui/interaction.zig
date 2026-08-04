@@ -301,7 +301,8 @@ pub const GestureCompatibility = struct {
 /// 매 move마다 tree를 다시 발행하므로, 그 기본값 위에서는 capture가 첫 move에 죽는다. 이 함수는
 /// 그때만 쓰는 좁은 문이며, 아래 셋을 **모두** 만족할 때에만 carry한다.
 ///
-///   1. 새 tree에 그 identity가 정확히 하나 있고, 그 node가 여전히 enabled action을 가진다.
+///   1. 새 tree에 그 identity가 정확히 하나 있고, 그 node가 여전히 enabled action을 **닿을 수 있는
+///      자리에** 가진다 — clip으로 완전히 잘려나간 node는 살아 있다고 보지 않는다.
 ///   2. host가 준 이전/현재 compatibility key가 같다.
 ///   3. capture가 drag를 들고 있다(click capture는 carry 대상이 아니다).
 ///
@@ -318,7 +319,7 @@ pub fn reconcileCarryingCapture(
 
     const carry = capture.drag != null and
         previous.eql(current) and
-        enabledActionForId(new_tree, capture.id) != null and
+        isReachable(new_tree, capture.id) and
         countIdentity(new_tree, capture.id) == 1;
 
     if (carry) {
@@ -338,6 +339,39 @@ pub fn reconcileCarryingCapture(
     var result = try reconcile(state, new_tree, new_tree);
     if (capture.drag) |d| result.drag = .{ .cancelled = .{ .payload = d.payload } };
     return result;
+}
+
+/// 그 identity가 새 tree에서 여전히 **닿을 수 있는가**. enabled 여부만으로는 부족하다 — 스크롤
+/// 밖으로 나가 clip이 rect를 완전히 잘라낸 node는 pointer가 도달할 수 없고, 그 위에서 drag를
+/// 계속 이어가면 보이지 않는 대상을 끌게 된다.
+fn isReachable(snapshot: UiRectTree, id: UiId) bool {
+    const index = snapshot.find(id) orelse return false;
+    const candidate = snapshot.entries[index];
+    const action = candidate.action orelse return false;
+    if (!action.enabled) return false;
+    if (!hasArea(candidate.rect)) return false;
+    const clip = candidate.effective_clip orelse return true;
+    return hasArea(clip) and intersects(candidate.rect, clip);
+}
+
+fn hasArea(rect: layout.UiRect) bool {
+    const width = @as(f64, rect.width);
+    const height = @as(f64, rect.height);
+    if (!std.math.isFinite(width) or !std.math.isFinite(height)) return false;
+    return width > 0 and height > 0;
+}
+
+fn intersects(a: layout.UiRect, b: layout.UiRect) bool {
+    const a_x = @as(f64, a.x);
+    const a_y = @as(f64, a.y);
+    const b_x = @as(f64, b.x);
+    const b_y = @as(f64, b.y);
+    if (!std.math.isFinite(a_x) or !std.math.isFinite(a_y) or !std.math.isFinite(b_x) or !std.math.isFinite(b_y)) return false;
+    const a_right = a_x + @as(f64, a.width);
+    const a_bottom = a_y + @as(f64, a.height);
+    const b_right = b_x + @as(f64, b.width);
+    const b_bottom = b_y + @as(f64, b.height);
+    return a_x < b_right and b_x < a_right and a_y < b_bottom and b_y < a_bottom;
 }
 
 fn countIdentity(snapshot: UiRectTree, id: UiId) usize {
@@ -760,6 +794,42 @@ test "carrying a capture across trees needs the same key, one identity, and a li
     };
     const dead = try reconcileCarryingCapture(&state, rectTree(&disabled), key, key);
     try std.testing.expectEqual(@as(u64, 77), dead.drag.?.cancelled.payload);
+}
+
+test "a target scrolled out from under its clip is not carried" {
+    const key = GestureCompatibility{ .kind = 77, .enabled = true, .owner_epoch = 3, .domain_identity = 42 };
+    const entries = [_]ui_tree.RectEntry{
+        draggableEntry(1, .{ .x = 0, .y = 0, .width = 40, .height = 40 }, .{ .id = 10 }, .{ .payload = 77 }),
+    };
+
+    var state = InteractionState{};
+    _ = try dispatch(&state, rectTree(&entries), .{ .phase = .down, .x_px = 10, .y_px = 10, .timestamp_ns = 1 });
+    _ = try dispatch(&state, rectTree(&entries), .{ .phase = .move, .x_px = 30, .y_px = 10, .timestamp_ns = 2 });
+
+    // action은 그대로 enabled다. 달라진 것은 clip이 rect를 완전히 벗어났다는 것뿐이며,
+    // 그것만으로 이 target은 더 이상 닿을 수 없다.
+    var clipped = entries;
+    clipped[0].effective_clip = .{ .x = 200, .y = 200, .width = 40, .height = 40 };
+    const gone = try reconcileCarryingCapture(&state, rectTree(&clipped), key, key);
+    try std.testing.expectEqual(@as(u64, 77), gone.drag.?.cancelled.payload);
+    try std.testing.expectEqual(@as(?Capture, null), state.capture);
+
+    // 빈 clip(면적 0)도 같다.
+    _ = try dispatch(&state, rectTree(&entries), .{ .phase = .down, .x_px = 10, .y_px = 10, .timestamp_ns = 3 });
+    _ = try dispatch(&state, rectTree(&entries), .{ .phase = .move, .x_px = 30, .y_px = 10, .timestamp_ns = 4 });
+    var collapsed = entries;
+    collapsed[0].effective_clip = .{ .x = 0, .y = 0, .width = 0, .height = 40 };
+    const empty = try reconcileCarryingCapture(&state, rectTree(&collapsed), key, key);
+    try std.testing.expectEqual(@as(u64, 77), empty.drag.?.cancelled.payload);
+
+    // 부분적으로만 잘린 것은 여전히 닿을 수 있다 — 보이는 부분이 남아 있으면 유지한다.
+    _ = try dispatch(&state, rectTree(&entries), .{ .phase = .down, .x_px = 10, .y_px = 10, .timestamp_ns = 5 });
+    _ = try dispatch(&state, rectTree(&entries), .{ .phase = .move, .x_px = 30, .y_px = 10, .timestamp_ns = 6 });
+    var partial = entries;
+    partial[0].effective_clip = .{ .x = 20, .y = 0, .width = 40, .height = 40 };
+    const kept = try reconcileCarryingCapture(&state, rectTree(&partial), key, key);
+    try std.testing.expect(kept.drag == null);
+    try std.testing.expectEqual(@as(?UiId, 1), state.capture.?.id);
 }
 
 test "a click capture is not carried, because only continuous gestures republish mid-stream" {

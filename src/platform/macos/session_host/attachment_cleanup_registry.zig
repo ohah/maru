@@ -580,7 +580,7 @@ test "stream-drop registry reserves, aborts, binds, and gates final-zero deinit"
 
     const guarded = try registry.reserve(fixtureSeed(0x1800, 22));
     const transport_seal = try registry.transportOwnerSeal(guarded.reservation, guarded.identity);
-    try contract.TransportOwnerSeal.initInPlace(transport_seal, 27, 29, 31);
+    try contract.TransportOwnerSeal.initInPlace(transport_seal, 27, 33, 35, 29, 31);
     try std.testing.expectError(
         error.InvalidState,
         registry.abort(guarded.reservation, guarded.identity),
@@ -604,7 +604,7 @@ test "stream-drop registry reserves, aborts, binds, and gates final-zero deinit"
         registry.preflightBoundDrop(second.reservation, second.identity, 30),
     );
     const response_seal = try registry.responseOwnerSeal(second.reservation, second.identity);
-    try contract.ExecutedResponseOwnerSeal.initInPlace(response_seal, 31);
+    try contract.ExecutedResponseOwnerSeal.initInPlace(response_seal, 31, 33, 35);
     try std.testing.expectError(
         error.InvalidState,
         registry.completeActiveDrop(second.reservation, second.identity, 29),

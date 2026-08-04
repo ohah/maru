@@ -5403,6 +5403,8 @@ pub const Client = struct {
     io_mode: client_external_mode.Mode = .blocking,
     operation_fence: ?*ClientOperationFence = null,
     operation_fence_generation: u64 = 0,
+    generation_allocator_scope_epoch: u64 = 0,
+    active_generation_allocator_scope: ?GenerationAllocatorScopeIdentity = null,
 
     const PendingOutbound = struct {
         frame: []u8,
@@ -5702,6 +5704,7 @@ pub const Client = struct {
     fn prepareDeinitGraph(self: *Client, bound_client: bool) bool {
         if (checkedAllocatorReentry(self)) return false;
         if (self.ownership == .moved) return false;
+        if (self.active_generation_allocator_scope != null) return false;
         if (!self.generation_batch_accounting.valid(@intFromPtr(self)) or
             (self.generation_batch_accounting.ledger != null and
                 self.generation_batch_accounting.ledger.?.item_count != 0))
@@ -5739,6 +5742,7 @@ pub const Client = struct {
     /// suffix, so a failed HostAdapter initialization never partially moves socket ownership.
     pub fn canMoveToGenerationNode(self: *const Client) bool {
         if (self.operation_fence != null or self.operation_fence_generation != 0) return false;
+        if (self.active_generation_allocator_scope != null) return false;
         return self.ownership == .standalone and self.io_mode == .blocking and !self.unusable and
             self.generation_batch_accounting.valid(@intFromPtr(self)) and
             (self.generation_batch_accounting.ledger == null or
@@ -5794,20 +5798,107 @@ pub const Client = struct {
         rpc_execute,
     };
 
+    pub const GenerationAllocatorScopeLifecycle = enum {
+        pristine,
+        active,
+        restored,
+    };
+
+    const GenerationAllocatorScopeIdentity = struct {
+        token_addr: usize,
+        client_addr: usize,
+        epoch: u64,
+        purpose: GenerationAllocatorPurpose,
+        previous_allocator: std.mem.Allocator,
+        installed_allocator: std.mem.Allocator,
+
+        fn matchesToken(
+            self: GenerationAllocatorScopeIdentity,
+            token: *const GenerationAllocatorScope,
+        ) bool {
+            return self.token_addr == @intFromPtr(token) and token.self_addr == @intFromPtr(token) and
+                self.client_addr == token.client_addr and self.epoch == token.epoch and
+                self.purpose == token.purpose and
+                @intFromPtr(self.previous_allocator.ptr) == token.previous_allocator_ptr and
+                @intFromPtr(self.previous_allocator.vtable) == token.previous_allocator_vtable and
+                @intFromPtr(self.installed_allocator.ptr) == token.installed_allocator_ptr and
+                @intFromPtr(self.installed_allocator.vtable) == token.installed_allocator_vtable;
+        }
+    };
+
+    pub const GenerationAllocatorScope = struct {
+        self_addr: usize = 0,
+        client_addr: usize = 0,
+        epoch: u64 = 0,
+        purpose: GenerationAllocatorPurpose = .attachment_batch,
+        previous_allocator_ptr: usize = 0,
+        previous_allocator_vtable: usize = 0,
+        installed_allocator_ptr: usize = 0,
+        installed_allocator_vtable: usize = 0,
+        lifecycle: GenerationAllocatorScopeLifecycle = .pristine,
+
+        fn rawDiscriminatorsValid(self: *const GenerationAllocatorScope) bool {
+            const purpose_raw = @as(*const u8, @ptrCast(&self.purpose)).*;
+            const lifecycle_raw = @as(*const u8, @ptrCast(&self.lifecycle)).*;
+            return purpose_raw <= @intFromEnum(GenerationAllocatorPurpose.rpc_execute) and
+                lifecycle_raw <= @intFromEnum(GenerationAllocatorScopeLifecycle.restored);
+        }
+    };
+
+    fn allocatorEql(left: std.mem.Allocator, right: std.mem.Allocator) bool {
+        return left.ptr == right.ptr and left.vtable == right.vtable;
+    }
+
     pub fn beginGenerationAllocatorScope(
         self: *Client,
         allocator: std.mem.Allocator,
-        _: GenerationAllocatorPurpose,
-    ) (ClientError || generation_batch_registry.Error)!std.mem.Allocator {
+        purpose: GenerationAllocatorPurpose,
+        out: *GenerationAllocatorScope,
+    ) (ClientError || generation_batch_registry.Error)!void {
         const operation_fence_held = try self.ensureUsable();
         defer if (operation_fence_held) self.endPublicMutation();
-        if (self.generation_batch_accounting.ledger == null or self.io_mode != .blocking or
-            self.ownership != .standalone or !self.parser.usesAllocator(self.allocator))
+        const client_start = @intFromPtr(self);
+        const client_end = std.math.add(usize, client_start, @sizeOf(Client)) catch
             return error.InvalidState;
-        const previous = self.allocator;
+        const out_start = @intFromPtr(out);
+        const out_end = std.math.add(usize, out_start, @sizeOf(GenerationAllocatorScope)) catch
+            return error.InvalidState;
+        if (self.generation_batch_accounting.ledger == null or self.io_mode != .blocking or
+            self.ownership != .standalone or !self.parser.usesAllocator(self.allocator) or
+            self.active_generation_allocator_scope != null or
+            !out.rawDiscriminatorsValid() or out.self_addr != 0 or
+            out.client_addr != 0 or out.epoch != 0 or
+            out.purpose != .attachment_batch or
+            out.previous_allocator_ptr != 0 or out.previous_allocator_vtable != 0 or
+            out.installed_allocator_ptr != 0 or out.installed_allocator_vtable != 0 or
+            out.lifecycle != .pristine or
+            rawRangesOverlap(client_start, client_end, out_start, out_end))
+            return error.InvalidState;
+        const epoch = std.math.add(u64, self.generation_allocator_scope_epoch, 1) catch
+            return error.IdentityExhausted;
+        if (epoch == 0) return error.IdentityExhausted;
+        out.* = .{
+            .self_addr = out_start,
+            .client_addr = @intFromPtr(self),
+            .epoch = epoch,
+            .purpose = purpose,
+            .previous_allocator_ptr = @intFromPtr(self.allocator.ptr),
+            .previous_allocator_vtable = @intFromPtr(self.allocator.vtable),
+            .installed_allocator_ptr = @intFromPtr(allocator.ptr),
+            .installed_allocator_vtable = @intFromPtr(allocator.vtable),
+            .lifecycle = .active,
+        };
+        self.generation_allocator_scope_epoch = epoch;
+        self.active_generation_allocator_scope = .{
+            .token_addr = out_start,
+            .client_addr = out.client_addr,
+            .epoch = out.epoch,
+            .purpose = purpose,
+            .previous_allocator = self.allocator,
+            .installed_allocator = allocator,
+        };
         self.allocator = allocator;
         self.parser.restoreAllocatorAfterDrift(allocator);
-        return previous;
     }
 
     pub fn requireBufferedGenerationBatch(self: *const Client, stream_id: u64) ClientError!void {
@@ -5819,14 +5910,24 @@ pub const Client = struct {
         return error.AdminBusy;
     }
 
-    pub fn restoreGenerationAllocatorScopeUnchecked(
+    pub fn restoreGenerationAllocatorScope(
         self: *Client,
-        allocator: std.mem.Allocator,
-    ) void {
-        const operation_fence_held = self.beginPublicMutation() catch return;
+        scope: *GenerationAllocatorScope,
+    ) (ClientError || generation_batch_registry.Error)!void {
+        const operation_fence_held = try self.beginPublicMutation();
         defer if (operation_fence_held) self.endPublicMutation();
-        self.allocator = allocator;
-        self.parser.restoreAllocatorAfterDrift(allocator);
+        const active = self.active_generation_allocator_scope orelse return error.InvalidState;
+        if (!scope.rawDiscriminatorsValid() or scope.lifecycle != .active or
+            !active.matchesToken(scope) or
+            active.client_addr != @intFromPtr(self) or
+            !allocatorEql(self.allocator, active.installed_allocator) or
+            !self.parser.usesAllocator(active.installed_allocator))
+            return error.InvalidState;
+        self.allocator = active.previous_allocator;
+        self.parser.restoreAllocatorAfterDrift(active.previous_allocator);
+        self.active_generation_allocator_scope = null;
+        scope.self_addr = 0;
+        scope.lifecycle = .restored;
     }
 
     pub fn moveToGenerationNode(self: *Client, destination: *Client) void {
@@ -5917,6 +6018,18 @@ pub const Client = struct {
             writer.writeUsize(outbound.frame.len);
             writer.writeU64(outbound.stream_id);
             writer.writeUsize(outbound.offset);
+        } else writer.writeBool(false);
+        writer.writeU64(self.generation_allocator_scope_epoch);
+        if (self.active_generation_allocator_scope) |scope| {
+            writer.writeBool(true);
+            writer.writeUsize(scope.token_addr);
+            writer.writeUsize(scope.client_addr);
+            writer.writeU64(scope.epoch);
+            writer.writeU8(@intFromEnum(scope.purpose));
+            writer.writeUsize(@intFromPtr(scope.previous_allocator.ptr));
+            writer.writeUsize(@intFromPtr(scope.previous_allocator.vtable));
+            writer.writeUsize(@intFromPtr(scope.installed_allocator.ptr));
+            writer.writeUsize(@intFromPtr(scope.installed_allocator.vtable));
         } else writer.writeBool(false);
         return writer.finish();
     }
@@ -10781,6 +10894,8 @@ const client_source_schema_field_allowlist = [_][]const u8{
     "io_mode",
     "operation_fence",
     "operation_fence_generation",
+    "generation_allocator_scope_epoch",
+    "active_generation_allocator_scope",
 };
 comptime {
     const fields = std.meta.fields(Client);
@@ -15308,6 +15423,174 @@ fn makeConnectedTestClient(
         .wire_major = protocol.version_major,
         .parser = framing.FrameParser.init(allocator),
     };
+}
+
+test "generation allocator scope rejects all cross-purpose restore splices" {
+    const purposes = std.enums.values(Client.GenerationAllocatorPurpose);
+    inline for (purposes, 0..) |purpose, index| {
+        var client = makeConnectedTestClient(std.testing.allocator, -1);
+        defer client.deinit();
+        var ledger: generation_batch_registry.AccountingLedger = .{};
+        try ledger.initInPlace();
+        try client.bindGenerationAccountingLedger(&ledger);
+
+        var scope: Client.GenerationAllocatorScope = .{};
+        try client.beginGenerationAllocatorScope(std.heap.page_allocator, purpose, &scope);
+        const canonical = scope;
+        const original_purpose = scope.purpose;
+        scope.purpose = purposes[(index + 1) % purposes.len];
+        try std.testing.expectError(error.InvalidState, client.restoreGenerationAllocatorScope(&scope));
+        try std.testing.expect(client.active_generation_allocator_scope != null);
+        try std.testing.expectEqual(canonical.installed_allocator_ptr, @intFromPtr(client.allocator.ptr));
+        try std.testing.expectEqual(canonical.installed_allocator_vtable, @intFromPtr(client.allocator.vtable));
+
+        scope.purpose = original_purpose;
+        try client.restoreGenerationAllocatorScope(&scope);
+        try std.testing.expectEqual(Client.GenerationAllocatorScopeLifecycle.restored, scope.lifecycle);
+        try std.testing.expectEqual(canonical.previous_allocator_ptr, @intFromPtr(client.allocator.ptr));
+        try std.testing.expectEqual(canonical.previous_allocator_vtable, @intFromPtr(client.allocator.vtable));
+    }
+}
+
+test "generation allocator scope rejects nested and duplicate restore" {
+    var client = makeConnectedTestClient(std.testing.allocator, -1);
+    defer client.deinit();
+    var ledger: generation_batch_registry.AccountingLedger = .{};
+    try ledger.initInPlace();
+    try client.bindGenerationAccountingLedger(&ledger);
+
+    var scope: Client.GenerationAllocatorScope = .{};
+    try client.beginGenerationAllocatorScope(
+        std.heap.page_allocator,
+        .attachment_batch,
+        &scope,
+    );
+    var nested: Client.GenerationAllocatorScope = .{};
+    try std.testing.expectError(
+        error.InvalidState,
+        client.beginGenerationAllocatorScope(
+            std.testing.allocator,
+            .initial_snapshot,
+            &nested,
+        ),
+    );
+    var active_copy = scope;
+    try std.testing.expectError(
+        error.InvalidState,
+        client.restoreGenerationAllocatorScope(&active_copy),
+    );
+    try client.restoreGenerationAllocatorScope(&scope);
+    try std.testing.expectError(error.InvalidState, client.restoreGenerationAllocatorScope(&scope));
+
+    var copied_scope = scope;
+    copied_scope.lifecycle = .active;
+    try std.testing.expectError(
+        error.InvalidState,
+        client.restoreGenerationAllocatorScope(&copied_scope),
+    );
+}
+
+test "generation allocator scope rejects every token identity mismatch before restore" {
+    const Field = enum {
+        self_addr,
+        client_addr,
+        epoch,
+        purpose,
+        previous_allocator_ptr,
+        previous_allocator_vtable,
+        installed_allocator_ptr,
+        installed_allocator_vtable,
+        lifecycle,
+    };
+    inline for (std.enums.values(Field)) |field| {
+        var client = makeConnectedTestClient(std.testing.allocator, -1);
+        defer client.deinit();
+        var ledger: generation_batch_registry.AccountingLedger = .{};
+        try ledger.initInPlace();
+        try client.bindGenerationAccountingLedger(&ledger);
+
+        var scope: Client.GenerationAllocatorScope = .{};
+        try client.beginGenerationAllocatorScope(
+            std.heap.page_allocator,
+            .attachment_batch,
+            &scope,
+        );
+        const canonical = scope;
+        switch (field) {
+            .self_addr => scope.self_addr +%= 1,
+            .client_addr => scope.client_addr +%= 1,
+            .epoch => scope.epoch +%= 1,
+            .purpose => scope.purpose = .initial_snapshot,
+            .previous_allocator_ptr => scope.previous_allocator_ptr +%= 1,
+            .previous_allocator_vtable => scope.previous_allocator_vtable +%= 1,
+            .installed_allocator_ptr => scope.installed_allocator_ptr +%= 1,
+            .installed_allocator_vtable => scope.installed_allocator_vtable +%= 1,
+            .lifecycle => scope.lifecycle = .restored,
+        }
+        try std.testing.expectError(error.InvalidState, client.restoreGenerationAllocatorScope(&scope));
+        try std.testing.expect(client.active_generation_allocator_scope != null);
+        try std.testing.expectEqual(canonical.installed_allocator_ptr, @intFromPtr(client.allocator.ptr));
+        try std.testing.expectEqual(canonical.installed_allocator_vtable, @intFromPtr(client.allocator.vtable));
+
+        scope = canonical;
+        try client.restoreGenerationAllocatorScope(&scope);
+    }
+}
+
+test "generation allocator scope rejects every invalid raw token discriminator" {
+    inline for (.{ "purpose", "lifecycle" }) |field_name| {
+        var client = makeConnectedTestClient(std.testing.allocator, -1);
+        defer client.deinit();
+        var ledger: generation_batch_registry.AccountingLedger = .{};
+        try ledger.initInPlace();
+        try client.bindGenerationAccountingLedger(&ledger);
+        var scope: Client.GenerationAllocatorScope = .{};
+        try client.beginGenerationAllocatorScope(
+            std.heap.page_allocator,
+            .attachment_batch,
+            &scope,
+        );
+        const canonical = scope;
+        const first_invalid: usize = if (std.mem.eql(u8, field_name, "purpose"))
+            @as(usize, @intFromEnum(Client.GenerationAllocatorPurpose.rpc_execute)) + 1
+        else
+            @as(usize, @intFromEnum(Client.GenerationAllocatorScopeLifecycle.restored)) + 1;
+        const offset: usize = if (std.mem.eql(u8, field_name, "purpose"))
+            @offsetOf(Client.GenerationAllocatorScope, "purpose")
+        else
+            @offsetOf(Client.GenerationAllocatorScope, "lifecycle");
+        for (first_invalid..256) |raw| {
+            @as([*]u8, @ptrCast(&scope))[offset] = @intCast(raw);
+            try std.testing.expectError(
+                error.InvalidState,
+                client.restoreGenerationAllocatorScope(&scope),
+            );
+            scope = canonical;
+        }
+        try client.restoreGenerationAllocatorScope(&scope);
+    }
+}
+
+test "generation allocator scope exhaustion publishes neither token nor allocator mutation" {
+    var client = makeConnectedTestClient(std.testing.allocator, -1);
+    defer client.deinit();
+    var ledger: generation_batch_registry.AccountingLedger = .{};
+    try ledger.initInPlace();
+    try client.bindGenerationAccountingLedger(&ledger);
+    client.generation_allocator_scope_epoch = std.math.maxInt(u64);
+    const allocator_before = client.allocator;
+    var scope: Client.GenerationAllocatorScope = .{};
+    try std.testing.expectError(
+        error.IdentityExhausted,
+        client.beginGenerationAllocatorScope(
+            std.heap.page_allocator,
+            .rpc_prepare,
+            &scope,
+        ),
+    );
+    try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&scope), 0));
+    try std.testing.expect(client.active_generation_allocator_scope == null);
+    try std.testing.expect(Client.allocatorEql(client.allocator, allocator_before));
 }
 
 const TransferNormalizeMutationAllocator = struct {

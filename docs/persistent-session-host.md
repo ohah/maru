@@ -878,10 +878,11 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    transport primitive만 노출한다. exact public declaration은
    `capabilities|prepareRequest|executePreparedRequest|abortPreparedRequest|sendInput|sendInputNonBlocking|sendControl|sendControlNonBlocking|
    pumpPendingOutput|takeEvent|releaseEvent|fenceRevoke|readInitialSnapshot|purgeEndedStream|poison`이다. `prepareRequest`는
-   `RuntimeRequest` tagged union만 받고 union variant는 `spawn_full|attach_controller|resize|observation|selected_text|link_at|
-   clipboard_write|find|select_op|core_command|report_mouse|notification|terminate|detach`로 닫힌다. 각 variant payload는 기존
-   `RemoteRuntime` encoder가 만든 bytes이고 method string은 facade 밖에서 받지 않는다. response decode/ordered input policy는
-   계속 `RemoteRuntime`의 SSOT다. `capabilities()`는 단일 `GenerationCapabilities` DTO를 반환하며 exact field는
+   raw discriminator를 먼저 검사하는 closed typed `RuntimeRequest` DTO만 받고 variant는
+   `spawn_full|attach_controller|resize|observation|selected_text|link_at|clipboard_write|find|select_op|core_command|report_mouse|
+   notification|terminate|detach`로 닫힌다. caller는 encoded payload, method string, stream ID를 제공하지 않는다. `ClientSlot`의
+   canonical encoder가 검증된 typed payload와 canonical binding identity에서 method와 wire JSON을 한 번만 만들며, response
+   decode/ordered input policy는 계속 `RemoteRuntime`의 SSOT다. `capabilities()`는 단일 `GenerationCapabilities` DTO를 반환하며 exact field는
    `{wire_major,screen_codec_version,attach_schema,metadata_support,peer_attach_generation,screen_viewport_scrolled,
    async_scroll_to_bottom,notification_stream_auth,runtime_clipboard,runtime_core_command,runtime_link_at,
    runtime_selected_text}`뿐이다. exact signature는
@@ -1013,8 +1014,12 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    실패는 prepared request+binding abort이고 execute/wire 0이다. execute 시작 뒤 response allocation OOM은 published payload owner
    0의 uncertain/connection-close로 닫고, accepted publication suffix는 allocation/failure 0의 owned-bytes move+seal만 수행한다.
    execute는 결과 종류와 무관하게 request slot/TX backing을 내부에서 exact once settle한다. caller가 제공한 final-address
-   `ExecutedResponse` storage는 `{self_addr,incarnation,lifecycle,ExecutedCallReceipt,payload digest,captured allocator,owned bounded
-   response bytes}`를 seal한다. `typed_reject|uncertain_or_connection_failure`는 payload owner 0이고, `accepted`만 request backing과
+   `ExecutedResponse` storage는 `{self_addr,owner-seal address,incarnation,lifecycle,scalar ExecutedCallReceipt,payload digest,
+   captured allocator ptr/vtable,owned bounded response extent,terminal digest}`를 seal한다. live transcript는 node-local owner seal과
+   pair-seal하고 cleanup은 owner seal을 먼저 authenticated terminal로 만든 뒤 response를 terminal tombstone으로 바꾼다. registry
+   entry가 clear된 뒤에는 canonical owner 증거가 사라지므로 response finish/attachment teardown 재호출을 성공으로 인정하지 않고
+   `corrupt`로 fail-close한다. generic response deinit도 pristine/foreign owner seal을 terminal 증거로 받지 않는다.
+   `typed_reject|uncertain_or_connection_failure`는 payload owner 0이고, `accepted`만 request backing과
    별개로 소유권 이전된 response bytes를 가진다. `RemoteRuntime` decode는 이 storage를 borrow하고 성공/실패 뒤 `deinit`이 exact
    once free한다. copy/move/replay는 payload를 읽기 전에 self/incarnation에서 거부하며 malformed/binding mismatch/close도 같은
    deinit을 사용한다. 따라서 execute는 raw request owner가 아닌 pointer-free immutable `ExecutedCallReceipt`와 final response owner만
@@ -1025,10 +1030,12 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    canonical cleanup으로 사용한다. socket E2E는 server subscription final-zero를 증명한다. 이는 “local registry callback 0”이지
    socket close/host EOF cleanup 0이라는 뜻이 아니다.
 
-   2c3b는 두 merge gate로 나눈다. **2c3b-2 request authority gate**는 wire와 제품 동작을 바꾸지 않는다. 이 gate는
+   2c3b는 두 merge gate로 나눈다. **2c3b-2 request authority gate**는 wire와 관측 가능한 제품 동작을 바꾸지 않는다. 이 gate는
    `RuntimeRequestTag -> RequestFamily -> role/phase -> method`의 exhaustive classifier, node-sealed canonical prepared transcript,
-   opaque `PreparedBlockingRpcStorage`의 all-or-none pair prepare/abort와 registry-pinned admission까지만 구현한다. public `.rpc`
-   destination과 response payload publish는 열지 않고 기존 attach execute signature/socket behavior를 보존한다. b-2 완료 시
+   opaque `PreparedBlockingRpcStorage`의 all-or-none pair prepare/abort와 registry-pinned admission을 구현하고, 기존 attach-compatible
+   response execution이 이 canonical request authority를 begin/revalidate/settle하도록 hardened한다. 이 hardening은 기존 attach execute
+   signature/socket behavior를 보존하기 위한 범위이며 public `.rpc` destination, 반복 RPC response authority, response borrow/finish는
+   열지 않는다. b-2 완료 시
    `GenerationTransport`의 `prepareBlockingRpcStorage|abortPreparedBlockingRpcStorage|preparedBlockingRpcStorageMatches` 직접 호출은
    0이어야 한다. **2c3b-3 response execution gate**가 아래 destination union, RPC epoch, progress evidence, response publish/borrow/
    finish와 fail-stop을 함께 연다. 실제 `RemoteRuntime` family decoder 및 legacy/generation 제품 전환은 2c3e 소유다.
@@ -1082,7 +1089,9 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
 
    request-side canonical transcript는 같은 binding entry의 `PreparedRequestAuthority` 하나가 소유한다. lifecycle은 raw tag를 먼저
    검사하는 `idle|prepared|executing|terminal`이고, seal은 transport/binding identity, request tag/family, request id/digest,
-   prepared incarnation, storage final address, frame `{ptr,len,capacity}`, allocator identity를 포함한다. `ClientSlot`의 단일
+   prepared incarnation, storage final address, frame `{ptr,len}` allocation extent, allocator identity를 포함한다. prepared frame은
+   allocator가 반환한 exact owned Zig slice라 독립 capacity 권위가 없고 allocation extent는 `len`이며, `allocator.free`에도 그 exact
+   slice만 전달한다. `ClientSlot`의 단일
    prepare/abort/begin-execute/settle API만 transcript와 opaque storage 양쪽을 만진다. publish 전 실패는 둘 다 pristine/idle,
    prepare 성공은 둘 다 live, abort/execute settle은 authority를 먼저 tombstone한 뒤 exact canonical descriptor일 때만 frame을 free한다.
    descriptor·allocator·range가 불명확하면 frame hash/역참조/free를 하지 않고 authority terminal+strict fail-stop evidence로 닫는다.
@@ -1625,7 +1634,7 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    |---|---|
    | `G` (40) | `requireAdminRuntimeEnd`, `deinit`, `tryDeinit`, `requireBufferedGenerationBatch`, `enterExternalMode`, `call`, `callUntil`, `prepareBlockingRpcStorage`, `abortPreparedBlockingRpcStorage`, `preflightPreparedBlockingRpcStorageExecution`, `executePreparedBlockingRpcStorageWithAllocator`, `preparedBlockingRpcStorageMatches`, `refreshBufferedAuthorityEvidence`, `runtimeInventory`, `runtimeInventoryBounded`, `prepareUpgrade`, `upgradeStatus`, `readSnapshot`, `readSnapshotUntil`, `readStreamBatch`, `readGenerationBatch`, `dropBufferedStream`, `takeEventForStream`, `peekEndedEventForStream`, `prepareEndedPurgeInventory`, `releaseEvent`, `sendInput`, `sendInputNonBlocking`, `sendScrollToBottomNonBlocking`, `sendResyncNonBlocking`, `sendCoreCommandNonBlocking`, `sendScrollToBottom`, `sendCoreCommand`, `pumpPendingOutput`, `fenceRevokedStream`, `hasBufferedControllerRevoke`, `hasBufferedControllerRevokeForStream`, `terminalReasonInvariant`, `poison`, `firstPoisonReason` |
    | `C` (35) | `canMoveToGenerationNode`, `bindGenerationAccountingLedger`, `moveToGenerationNode`, `clientProjectionAuthorityDigest`, `externalTransferProfile`, `prepareExternalRecoveryDiscard`, `validateExternalRecoveryDiscard`, `prepareExternalPumpTransfer`, `commitExternalPumpTransfer`, `foldExternalAdoptionSource`, `externalAdoptionFoldResultMatches`, `materializeExternalMetadataEvent`, `externalMetadataDtoMatchesEventCandidate`, `previewExternalAdoption`, `inspectExternalAdoption`, `preflightExternalAdoptionDestination`, `preflightExternalAdoptionDestinationWithScratch`, `appendExternalOwnerRangesForTeardown`, `prepareExternalOwnerRangeProof`, `preflightExternalAdoption`, `stageExternalScreenCopies`, `externalScreenCopiesMatch`, `validateExternalAdoptionPlan`, `externalAdoptionDisarmMetadataBytes`, `externalAdoptionDisarmMatchesInventory`, `sealExternalAdoption`, `validateSealedExternalAdoptionPlan`, `prepareExternalAdoptionTake`, `commitExternalAdoption`, `prepareExternalModeDeinit`, `reserveExternalModeDeinit`, `finishReservedExternalModeDeinit`, `cancelReservedExternalModeDeinit`, `transferReservedExternalModeDeinit`, `bindOperationFence` |
-   | `U` (15) | `beginGenerationBatchAllocator`, `restoreGenerationBatchAllocatorUnchecked`, `prepareGenerationAccountingConsume`, `consumeGenerationAccountingUnchecked`, `tryAcquireEndedPurgeExclusive`, `tryAcquireClientSlotTeardownExclusive`, `abortClientSlotTeardownExclusive`, `tryDeinitClientSlotExclusiveHeld`, `beginClientSlotOperation`, `endClientSlotOperation`, `releaseEndedPurgeExclusiveClean`, `commitEndedPurgeExclusiveTerminal`, `enterGenerationAllocatorCallback`, `rejectGenerationAllocatorCallbackReentry`, `leaveGenerationAllocatorCallbackUnchecked` |
+   | `U` (15) | `beginGenerationAllocatorScope`, `restoreGenerationAllocatorScope`, `prepareGenerationAccountingConsume`, `consumeGenerationAccountingUnchecked`, `tryAcquireEndedPurgeExclusive`, `tryAcquireClientSlotTeardownExclusive`, `abortClientSlotTeardownExclusive`, `tryDeinitClientSlotExclusiveHeld`, `beginClientSlotOperation`, `endClientSlotOperation`, `releaseEndedPurgeExclusiveClean`, `commitEndedPurgeExclusiveTerminal`, `enterGenerationAllocatorCallback`, `rejectGenerationAllocatorCallbackReentry`, `leaveGenerationAllocatorCallbackUnchecked` |
    | `R` (1) | `endedPurgeFenceIntruded` |
 
    위 91-row exact set은 B3b-S의 **inventory subgate**이며 class label만으로 policy closure를 주장하지 않는다. 다음 policy
@@ -1644,8 +1653,13 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    exact equality로 검사하며, U2는 U authority proof도 중첩해 새 guarded row가 증거 없이 추가될 수 없게 한다. private trusted chain
    `requireBlockingMode→ensureUsable→beginPublicMutation→ClientOperationFence.tryEnterShared`의 acquire-before-graph와 errdefer release,
    동일 held capability 외 성공 반환 0, exact `endPublicMutation` release leaf도 별도 token/AST oracle로 고정한다.
-   U의 allocator-domain pair `beginGenerationBatchAllocator|restoreGenerationBatchAllocatorUnchecked`는 U caller/authority 의무를
-   유지하면서 같은 shared acquire/defer-release proof도 중첩 적용한다.
+   U의 allocator-domain pair `beginGenerationAllocatorScope|restoreGenerationAllocatorScope`는
+   `{self_addr,client_addr,epoch,purpose,previous allocator ptr/vtable,installed allocator ptr/vtable,lifecycle}` final-address one-shot
+   token과 Client-private `{token_addr,typed previous allocator,typed installed allocator}` identity의 exact pairing을 요구한다.
+   token은 caller의 최종 stack storage에 in-place mint하고 request/response allocation guard의 protected range에 포함한다.
+   nested begin, token copy/move, purpose/allocator/client/epoch splice, duplicate restore와 allocator-returned token exact/partial alias는
+   allocator를 바꾸거나 token backing을 쓰기 전에 거부하며, U caller/authority
+   의무와 같은 shared acquire/defer-release proof를 함께 적용한다.
 
    `C`는 test 밖의
    **모든 member reference**를 reviewed prepublication construction/transfer/teardown owner로 exact 제한한다. caller closure는 단순

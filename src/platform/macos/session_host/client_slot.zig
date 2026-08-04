@@ -157,10 +157,10 @@ const GenerationGuardedAllocator = struct {
         if (rawRangesOverlap(start, end, self.node_start, self.node_end) or
             rawRangesOverlap(start, end, self.slot_start, self.slot_end) or
             rawRangesOverlap(start, end, self.source_start, self.source_end) or
+            client_mod.generationAllocationAliasesOwnedBacking(self.client.?, ptr, len) or
             (self.snapshot_guard_active and
                 (rawRangesOverlap(start, end, self.snapshot_owner_start, self.snapshot_owner_end) or
-                    rawRangesOverlap(start, end, self.snapshot_out_start, self.snapshot_out_end) or
-                    client_mod.generationAllocationAliasesOwnedBacking(self.client.?, ptr, len))))
+                    rawRangesOverlap(start, end, self.snapshot_out_start, self.snapshot_out_end))))
             return true;
         if (self.operation_guard_active)
             for (self.operation_ranges[0..self.operation_range_count]) |range|
@@ -538,6 +538,8 @@ pub const GenerationRequestPrepare = struct {
     pid: u32,
     process_nonce: u64,
     transport_addr: usize,
+    owner_addr: usize,
+    owner_size: usize,
     transport_incarnation: u64,
     owner_seal_addr: usize,
     prepared_storage_addr: usize,
@@ -879,6 +881,10 @@ fn beginGenerationRequestOwner(
         owner.transport_addr != request.transport_addr or
         owner.prepared_storage_addr != request.prepared_storage_addr)
         return error.InvalidOwner;
+    if (comptime @hasField(@TypeOf(request), "owner_addr")) {
+        if (owner.owner_addr != request.owner_addr or owner.owner_size != request.owner_size)
+            return error.InvalidOwner;
+    }
     return .{ .operation = operation, .identity = identity, .owner = owner };
 }
 
@@ -1120,6 +1126,10 @@ pub fn prepareGenerationRequest(
     request: GenerationRequestPrepare,
 ) GenerationRequestError!GenerationPreparedRequest {
     const decoded = request.request.decode() orelse return error.InvalidOwner;
+    if (request.owner_addr == 0 or request.owner_size == 0)
+        return error.InvalidOwner;
+    _ = std.math.add(usize, request.owner_addr, request.owner_size) catch
+        return error.InvalidOwner;
     const tag = std.meta.activeTag(decoded);
     const family = decoded.family();
     if (family == .connection_only_denied) return error.Unauthorized;
@@ -1138,20 +1148,30 @@ pub fn prepareGenerationRequest(
 
     const storage: *client_mod.PreparedBlockingRpcStorage =
         @ptrFromInt(request.prepared_storage_addr);
+    var allocator_scope: client_mod.Client.GenerationAllocatorScope = .{};
     const request_ranges = [_]GenerationGuardedAllocator.OperationRangeInput{
-        .{ .start = request.transport_addr, .len = 1 },
+        .{ .start = request.owner_addr, .len = request.owner_size },
         .{ .start = identity.binding_storage_addr, .len = @sizeOf(contract.PreparedAttachmentBinding) },
         .{ .start = request.prepared_storage_addr, .len = @sizeOf(client_mod.PreparedBlockingRpcStorage) },
         .{ .start = request.owner_seal_addr, .len = @sizeOf(contract.TransportOwnerSeal) },
+        .{ .start = @intFromPtr(&allocator_scope), .len = @sizeOf(client_mod.Client.GenerationAllocatorScope) },
     };
     const guard = &node.guarded_allocator;
     if (!guard.beginOperationGuard(&request_ranges)) return error.InvalidOwner;
     defer guard.endOperationGuard();
-    const previous_allocator = node.client.beginGenerationAllocatorScope(
+    node.client.beginGenerationAllocatorScope(
         guard.allocator(),
         .rpc_prepare,
-    ) catch return error.Busy;
-    defer node.client.restoreGenerationAllocatorScopeUnchecked(previous_allocator);
+        &allocator_scope,
+    ) catch |err| {
+        if (err == error.IdentityExhausted) {
+            node.client.poison(.local_invariant_violation);
+            return error.IdentityExhausted;
+        }
+        return error.Busy;
+    };
+    defer node.client.restoreGenerationAllocatorScope(&allocator_scope) catch
+        @panic("generation allocator scope restore drifted");
     var params_buffer: [4096]u8 = undefined;
     const params_json = encodeGenerationRequestParams(
         &params_buffer,
@@ -1327,6 +1347,7 @@ pub fn executeGenerationRequest(
         return error.InvalidResponseDestination;
     }
 
+    var allocator_scope: client_mod.Client.GenerationAllocatorScope = .{};
     const response_ranges = [_]GenerationGuardedAllocator.OperationRangeInput{
         .{ .start = @intFromPtr(response_out), .len = @sizeOf(executed_response_mod.ExecutedResponse) },
         .{ .start = @intFromPtr(response_owner), .len = @sizeOf(contract.ExecutedResponseOwnerSeal) },
@@ -1334,6 +1355,7 @@ pub fn executeGenerationRequest(
         .{ .start = @intFromPtr(storage), .len = @sizeOf(client_mod.PreparedBlockingRpcStorage) },
         .{ .start = request.transport_addr, .len = 1 },
         .{ .start = execution.owner_addr, .len = execution.owner_size },
+        .{ .start = @intFromPtr(&allocator_scope), .len = @sizeOf(client_mod.Client.GenerationAllocatorScope) },
     };
     const guard = &node.guarded_allocator;
     if (!guard.beginOperationGuard(&response_ranges)) {
@@ -1341,17 +1363,37 @@ pub fn executeGenerationRequest(
         return error.InvalidOwner;
     }
     defer guard.endOperationGuard();
-    const previous_allocator = node.client.beginGenerationAllocatorScope(
+    node.client.beginGenerationAllocatorScope(
         guard.allocator(),
         .rpc_execute,
-    ) catch {
+        &allocator_scope,
+    ) catch |err| {
+        if (err == error.IdentityExhausted) {
+            const cleanup_ok = terminalizeExecutingRequestWithStorageCleanup(
+                node,
+                request,
+                identity,
+                canonical,
+            );
+            disposition = .settled;
+            if (!cleanup_ok) return error.ProtocolError;
+            return error.IdentityExhausted;
+        }
         disposition = try rollbackExecutingRequest(node, request, identity, canonical);
         return error.Busy;
     };
-    defer node.client.restoreGenerationAllocatorScopeUnchecked(previous_allocator);
+    defer node.client.restoreGenerationAllocatorScope(&allocator_scope) catch
+        @panic("generation allocator scope restore drifted");
 
     const response_incarnation = issueGenerationResponseIncarnation() catch {
-        disposition = try rollbackExecutingRequest(node, request, identity, canonical);
+        const cleanup_ok = terminalizeExecutingRequestWithStorageCleanup(
+            node,
+            request,
+            identity,
+            canonical,
+        );
+        disposition = .settled;
+        if (!cleanup_ok) return error.ProtocolError;
         return error.IdentityExhausted;
     };
     const executed = contract.ExecutedCallReceipt.fromPrepared(request.receipt) orelse {
@@ -1487,7 +1529,7 @@ fn rollbackExecutingRequest(
         .frame_digest = canonical.receipt.request_digest,
         .descriptor = canonical.descriptor,
     }) catch {
-        try terminalizeExecutingRequest(node, request, identity, canonical);
+        node.client.poison(.local_invariant_violation);
         return error.ProtocolError;
     };
     const terminal = outcome == .terminal;
@@ -1514,6 +1556,32 @@ fn terminalizeExecutingRequest(
         true,
     ) catch return error.ProtocolError;
     node.client.poison(.local_invariant_violation);
+}
+
+/// Pre-wire identity exhaustion still owns a valid canonical request frame. Retire that backing
+/// before terminalizing the registry authority so transport teardown remains allocation-free.
+/// The return value separates an expected exhaustion from unexpected storage corruption while the
+/// caller records `.settled` before propagating either error.
+fn terminalizeExecutingRequestWithStorageCleanup(
+    node: *ClientNode,
+    request: GenerationRequestAbort,
+    identity: contract.BindingIdentity,
+    canonical: prepared_request_authority.Prepared,
+) bool {
+    const storage: *client_mod.PreparedBlockingRpcStorage =
+        @ptrFromInt(request.prepared_storage_addr);
+    const abort_outcome = node.client.abortPreparedBlockingRpcStorageCanonical(storage, .{
+        .request_id = canonical.receipt.request_id,
+        .frame_digest = canonical.receipt.request_digest,
+        .descriptor = canonical.descriptor,
+    }) catch {
+        terminalizeExecutingRequest(node, request, identity, canonical) catch
+            @panic("exhausted request authority terminalization failed");
+        return false;
+    };
+    terminalizeExecutingRequest(node, request, identity, canonical) catch
+        @panic("exhausted request authority terminalization failed");
+    return abort_outcome == .reusable;
 }
 
 fn responseDestinationValid(
@@ -2331,7 +2399,9 @@ pub const ClientSlot = struct {
         self: *ClientSlot,
         reservation: AttachmentBindingReservation,
     ) BindingError!*contract.TransportOwnerSeal {
-        if (!self.valid()) return error.MovedOrCopied;
+        if (!self.valid() or
+            !operationThreadMatches(self.operation_owner_thread_incarnation))
+            return error.MovedOrCopied;
         return self.current.cleanup_registry.transportOwnerSeal(
             reservation.cleanup,
             reservation.identity,
@@ -2968,8 +3038,17 @@ pub const ClientSlot = struct {
             return error.InvalidDestination;
         const out_end = std.math.add(usize, out_addr, out_size) catch
             return error.InvalidDestination;
+        var allocator_scope: client_mod.Client.GenerationAllocatorScope = .{};
         const guard = &self.current.guarded_allocator;
         if (guard.snapshot_guard_active) return error.AdminBusy;
+        const scope_ranges = [_]GenerationGuardedAllocator.OperationRangeInput{
+            .{
+                .start = @intFromPtr(&allocator_scope),
+                .len = @sizeOf(client_mod.Client.GenerationAllocatorScope),
+            },
+        };
+        if (!guard.beginOperationGuard(&scope_ranges)) return error.AdminBusy;
+        defer guard.endOperationGuard();
         guard.snapshot_owner_start = owner_addr;
         guard.snapshot_owner_end = owner_end;
         guard.snapshot_out_start = out_addr;
@@ -2984,19 +3063,21 @@ pub const ClientSlot = struct {
             guard.snapshot_out_end = 0;
         }
         const allocator = guard.allocator();
-        const previous_allocator = try self.current.client.beginGenerationAllocatorScope(
+        try self.current.client.beginGenerationAllocatorScope(
             allocator,
             .initial_snapshot,
+            &allocator_scope,
         );
-        defer self.current.client.restoreGenerationAllocatorScopeUnchecked(previous_allocator);
+        defer self.current.client.restoreGenerationAllocatorScope(&allocator_scope) catch
+            @panic("generation allocator scope restore drifted");
         const bytes = self.current.client.readSnapshot(stream_id) catch |err| {
-            if (guard.snapshot_alias_rejected) {
+            if (guard.snapshot_alias_rejected or guard.operation_alias_rejected) {
                 self.current.client.poison(.local_invariant_violation);
                 return error.AliasedAllocation;
             }
             return err;
         };
-        if (guard.snapshot_alias_rejected) {
+        if (guard.snapshot_alias_rejected or guard.operation_alias_rejected) {
             self.current.client.poison(.local_invariant_violation);
             return error.AliasedAllocation;
         }
@@ -3016,11 +3097,23 @@ pub const ClientSlot = struct {
             try self.current.client.requireBufferedGenerationBatch(stream_id);
         // allocator callback 재진입은 registry generation을 예약하기 전에 막는다. 이 순서가 뒤집히면
         // 최종 entry를 abort해도 재진입만으로 checked-monotonic generation이 소모된다.
-        const previous_allocator = try self.current.client.beginGenerationAllocatorScope(
-            self.current.guarded_allocator.allocator(),
+        var allocator_scope: client_mod.Client.GenerationAllocatorScope = .{};
+        const guard = &self.current.guarded_allocator;
+        const scope_ranges = [_]GenerationGuardedAllocator.OperationRangeInput{
+            .{
+                .start = @intFromPtr(&allocator_scope),
+                .len = @sizeOf(client_mod.Client.GenerationAllocatorScope),
+            },
+        };
+        if (!guard.beginOperationGuard(&scope_ranges)) return error.AdminBusy;
+        defer guard.endOperationGuard();
+        try self.current.client.beginGenerationAllocatorScope(
+            guard.allocator(),
             .attachment_batch,
+            &allocator_scope,
         );
-        defer self.current.client.restoreGenerationAllocatorScopeUnchecked(previous_allocator);
+        defer self.current.client.restoreGenerationAllocatorScope(&allocator_scope) catch
+            @panic("generation allocator scope restore drifted");
         const reservation = try self.current.batch_registry.reserve(stream_id);
         var reservation_live = true;
         defer if (reservation_live)
@@ -3028,11 +3121,17 @@ pub const ClientSlot = struct {
                 @panic("generation batch reservation rollback drifted");
         try self.current.batch_registry.prepareIngress(reservation);
         var owned: batch_registry_mod.OwnedBatch = .{};
-        switch (try self.current.client.readGenerationBatch(
+        switch (self.current.client.readGenerationBatch(
             &owned,
             stream_id,
             reservation.entry_generation,
-        )) {
+        ) catch |err| {
+            if (guard.operation_alias_rejected) {
+                self.current.client.poison(.local_invariant_violation);
+                return error.ProtocolError;
+            }
+            return err;
+        }) {
             .idle => return .idle,
             .terminal => return .terminal,
             .committed => {
@@ -3661,7 +3760,7 @@ const GenerationAllocatorReentryProbe = struct {
 };
 
 const SnapshotOwnerAliasAllocator = struct {
-    target: []align(16) u8,
+    target: []u8,
     alloc_calls: usize = 0,
     free_calls: usize = 0,
 
@@ -3685,6 +3784,81 @@ const SnapshotOwnerAliasAllocator = struct {
         self.alloc_calls += 1;
         if (len > self.target.len or !alignment.check(@intFromPtr(self.target.ptr))) return null;
         return self.target.ptr;
+    }
+
+    fn resize(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        return_address: usize,
+    ) bool {
+        _ = context;
+        _ = memory;
+        _ = alignment;
+        _ = new_len;
+        _ = return_address;
+        return false;
+    }
+
+    fn remap(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        return_address: usize,
+    ) ?[*]u8 {
+        _ = context;
+        _ = memory;
+        _ = alignment;
+        _ = new_len;
+        _ = return_address;
+        return null;
+    }
+
+    fn free(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        return_address: usize,
+    ) void {
+        _ = memory;
+        _ = alignment;
+        _ = return_address;
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.free_calls += 1;
+    }
+};
+
+const ScopeTokenAliasAllocator = struct {
+    client: *client_mod.Client,
+    offset: usize,
+    alloc_calls: usize = 0,
+    free_calls: usize = 0,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(
+        context: *anyopaque,
+        len: usize,
+        alignment: std.mem.Alignment,
+        return_address: usize,
+    ) ?[*]u8 {
+        _ = len;
+        _ = return_address;
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.alloc_calls += 1;
+        const active = self.client.active_generation_allocator_scope orelse return null;
+        const target = std.math.add(usize, active.token_addr, self.offset) catch return null;
+        if (!alignment.check(target)) return null;
+        return @ptrFromInt(target);
     }
 
     fn resize(
@@ -3763,6 +3937,79 @@ test "CR3a-2c1 snapshot allocation rejects owner alias before the first payload 
     try std.testing.expectEqual(@as(usize, 0), hostile.free_calls);
     for (owner_storage) |byte| try std.testing.expectEqual(@as(u8, 0xA5), byte);
     try std.testing.expect(slot.current.client.unusable);
+}
+
+test "CR3a-2c3b snapshot allocator rejects exact and partial scope-token aliases" {
+    inline for ([_]usize{ 0, @alignOf(client_mod.Client.GenerationAllocatorScope) }) |offset| {
+        const allocator = std.testing.allocator;
+        var source = fixtureClient(allocator, 0x2C3B20 + offset);
+        var slot: ClientSlot = undefined;
+        try ClientSlot.initInPlace(&slot, allocator, &source, 0x2C3B20 + offset);
+        defer slot.deinit();
+        const wire = try framing.encodeFrame(
+            allocator,
+            .{ .kind = .snapshot_chunk, .stream_id = 7, .flags = protocol.Flags.end_stream },
+            "scope-token-snapshot",
+        );
+        defer allocator.free(wire);
+        try slot.current.client.parser.push(wire);
+        var probe = ScopeTokenAliasAllocator{ .client = &slot.current.client, .offset = offset };
+        slot.current.guarded_allocator.parent = probe.allocator();
+        var owner_storage: [256]u8 align(16) = undefined;
+        try std.testing.expectError(error.AliasedAllocation, slot.readInitialSnapshotGuarded(
+            7,
+            @intFromPtr(&owner_storage),
+            owner_storage.len,
+            @intFromPtr(&owner_storage),
+            owner_storage.len,
+        ));
+        try std.testing.expect(probe.alloc_calls > 0);
+        try std.testing.expectEqual(@as(usize, 0), probe.free_calls);
+        try std.testing.expect(slot.current.client.unusable);
+    }
+}
+
+test "CR3a-2c3b attachment batch allocator rejects scope-token and parser backing aliases" {
+    const Case = enum { token_exact, token_partial, parser_backing };
+    inline for (std.enums.values(Case)) |case| {
+        const allocator = std.testing.allocator;
+        const case_offset: u128 = @intFromEnum(case);
+        var source = fixtureClient(allocator, 0x2C3B30 + case_offset);
+        var slot: ClientSlot = undefined;
+        try ClientSlot.initInPlace(&slot, allocator, &source, 0x2C3B30 + case_offset);
+        defer slot.deinit();
+        const wire = try framing.encodeFrame(
+            allocator,
+            .{ .kind = .delta_chunk, .stream_id = 7, .flags = protocol.Flags.end_stream },
+            "scope-token-batch",
+        );
+        defer allocator.free(wire);
+        try slot.current.client.parser.push(wire);
+
+        var token_probe = ScopeTokenAliasAllocator{
+            .client = &slot.current.client,
+            .offset = if (case == .token_partial)
+                @alignOf(client_mod.Client.GenerationAllocatorScope)
+            else
+                0,
+        };
+        var backing_probe = SnapshotOwnerAliasAllocator{
+            .target = slot.current.client.parser.buf.items,
+        };
+        slot.current.guarded_allocator.parent = if (case == .parser_backing)
+            backing_probe.allocator()
+        else
+            token_probe.allocator();
+        try std.testing.expectError(error.ProtocolError, slot.readAttachmentBatch(7));
+        if (case == .parser_backing) {
+            try std.testing.expect(backing_probe.alloc_calls > 0);
+            try std.testing.expectEqual(@as(usize, 0), backing_probe.free_calls);
+        } else {
+            try std.testing.expect(token_probe.alloc_calls > 0);
+            try std.testing.expectEqual(@as(usize, 0), token_probe.free_calls);
+        }
+        try std.testing.expect(slot.current.client.unusable);
+    }
 }
 
 test "CR3a-2b1 parser allocator callback은 same과 foreign ClientSlot mutation을 wire 전에 거부한다" {
@@ -4986,12 +5233,14 @@ test "CR3a-2c2b3b B3b-O validated suffix mismatch fail-stops in a subprocess" {
     entry.state.store(@intFromEnum(StreamOperationRegistryEntry.State.empty), .release);
 }
 
-test "CR3a-2c2b3b B3b-O drift subprocess finalizes quarantine and paired receipts" {
+test "CR3a-2c2b3b B3b-O isolated marker executes drift and aggregate marker only proves exclusion" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
-    const marker_ptr = c.getenv("MARU_SESSION_HOST_B3BO_DRIFT_SUBPROCESS") orelse
-        return error.MissingDriftSubprocessMode;
+    // The dedicated filtered artifact supplies run-isolated-v1 and is the only destructive
+    // evidence. Generic aggregates either supply skip-in-aggregate-v1 or have no marker; their OK
+    // result proves only that the process-global fixture was excluded, never that it ran.
+    const marker_ptr = c.getenv("MARU_SESSION_HOST_B3BO_DRIFT_SUBPROCESS") orelse return;
     const marker = std.mem.span(marker_ptr);
-    if (std.mem.eql(u8, marker, "skip-in-aggregate-v1")) return error.SkipZigTest;
+    if (std.mem.eql(u8, marker, "skip-in-aggregate-v1")) return;
     if (!std.mem.eql(u8, marker, "run-isolated-v1"))
         return error.InvalidDriftSubprocessMode;
     const DriftAllocator = struct {
@@ -5536,6 +5785,128 @@ test "CR3a-2c2b2 foreign thread teardown cannot race owner preparation" {
     thread.join();
     try std.testing.expectEqual(DeinitOutcome.corrupt, outcome.?);
     try std.testing.expect(slot.valid());
+}
+
+test "CR3a-2c3b pre-wire issuer exhaustion retires request backing before terminal authority" {
+    const Case = enum {
+        allocator_scope,
+        response_incarnation,
+        allocator_scope_with_content_drift,
+        response_incarnation_with_content_drift,
+    };
+    inline for (std.enums.values(Case)) |case| {
+        try ClientSlot.initializeProcessRuntime();
+        const allocator = std.testing.allocator;
+        const case_offset: u128 = @intFromEnum(case);
+        var source = fixtureClient(allocator, 0x2C3BE0 + case_offset);
+        var slot: ClientSlot = undefined;
+        try ClientSlot.initInPlace(
+            &slot,
+            allocator,
+            &source,
+            0x2C3BE0 + case_offset,
+        );
+        defer slot.deinit();
+
+        const Owner = struct {
+            transport_marker: u8 = 0,
+            storage: client_mod.PreparedBlockingRpcStorage = .{},
+            response: executed_response_mod.ExecutedResponse = .{},
+            binding: contract.PreparedAttachmentBinding = .{},
+            lease: lease_mod.ConnectionLease = .{},
+        };
+        var owner: Owner = .{};
+        const reservation = try slot.reserveAttachmentBindingForTest(
+            &owner.binding,
+            &owner.lease,
+            0x2C3BF0 + case_offset,
+        );
+        const transport_incarnation: u64 = 0x2C3B10 + @as(u64, @intCast(case_offset));
+        const transport_owner_seal = try slot.transportOwnerSeal(reservation);
+        try contract.TransportOwnerSeal.initInPlace(
+            transport_owner_seal,
+            transport_incarnation,
+            @intFromPtr(&owner),
+            @sizeOf(Owner),
+            @intFromPtr(&owner.transport_marker),
+            @intFromPtr(&owner.storage),
+        );
+        const identity = reservation.identity;
+        const prepared = try prepareGenerationRequest(.{
+            .slot_addr = @intFromPtr(&slot),
+            .slot_incarnation = identity.slot_incarnation,
+            .node_incarnation = identity.node_incarnation,
+            .host_id = identity.host_id,
+            .pid = identity.pid,
+            .process_nonce = identity.process_nonce,
+            .transport_addr = @intFromPtr(&owner.transport_marker),
+            .owner_addr = @intFromPtr(&owner),
+            .owner_size = @sizeOf(Owner),
+            .transport_incarnation = transport_incarnation,
+            .owner_seal_addr = @intFromPtr(transport_owner_seal),
+            .prepared_storage_addr = @intFromPtr(&owner.storage),
+            .bound_stream_id = 0,
+            .reservation = reservation,
+            .request = contract.RuntimeRequest.attachController(),
+        });
+        try owner.binding.pairRequest(prepared.receipt);
+        try owner.binding.beginExecute(prepared.receipt);
+
+        const saved_response_issuer = generation_response_incarnation_issuer.load(.monotonic);
+        defer generation_response_incarnation_issuer.store(saved_response_issuer, .monotonic);
+        switch (case) {
+            .allocator_scope, .allocator_scope_with_content_drift => slot.current.client.generation_allocator_scope_epoch =
+                std.math.maxInt(u64),
+            .response_incarnation, .response_incarnation_with_content_drift => generation_response_incarnation_issuer.store(
+                std.math.maxInt(u64),
+                .monotonic,
+            ),
+        }
+        const content_drifted = case == .allocator_scope_with_content_drift or
+            case == .response_incarnation_with_content_drift;
+        if (content_drifted) {
+            const frame: [*]u8 = @ptrFromInt(prepared.canonical.descriptor.frame_addr);
+            frame[prepared.canonical.descriptor.frame_len - 1] ^= 1;
+        }
+        const expected_error: GenerationExecuteError = if (content_drifted)
+            error.ProtocolError
+        else
+            error.IdentityExhausted;
+        try std.testing.expectError(expected_error, executeGenerationRequest(.{
+            .request = .{
+                .slot_addr = @intFromPtr(&slot),
+                .slot_incarnation = identity.slot_incarnation,
+                .node_incarnation = identity.node_incarnation,
+                .host_id = identity.host_id,
+                .pid = identity.pid,
+                .process_nonce = identity.process_nonce,
+                .transport_addr = @intFromPtr(&owner.transport_marker),
+                .transport_incarnation = transport_incarnation,
+                .owner_seal_addr = @intFromPtr(transport_owner_seal),
+                .prepared_storage_addr = @intFromPtr(&owner.storage),
+                .reservation = reservation,
+                .receipt = prepared.receipt,
+            },
+            .response_out_addr = @intFromPtr(&owner.response),
+            .owner_addr = @intFromPtr(&owner),
+            .owner_size = @sizeOf(Owner),
+        }));
+        try std.testing.expect(client_mod.Client.preparedBlockingRpcStorageSettled(&owner.storage));
+        try std.testing.expectEqual(
+            prepared_request_authority.SettlementReadiness.settled,
+            try slot.current.cleanup_registry.preparedRequestSettlementReadiness(
+                reservation.cleanup,
+                identity,
+            ),
+        );
+        try std.testing.expect(slot.current.client.unusable);
+        try transport_owner_seal.terminalize(transport_incarnation);
+        try slot.abortExecutedAttachmentBinding(
+            &owner.binding,
+            reservation,
+            contract.ExecutedCallReceipt.fromPrepared(prepared.receipt).?,
+        );
+    }
 }
 
 test "CR3a-2c2b2 Client owned backing aliases reject before permit generation" {

@@ -99,7 +99,10 @@ pub const Authority = struct {
             prepared.binding.host_id == 0 and prepared.binding.connection_generation == 0 and
             prepared.binding.pid == 0 and prepared.binding.process_nonce == 0 and
             prepared.binding.binding_incarnation == 0 and
-            prepared.binding.binding_storage_addr == 0 and role_raw == 0 and
+            prepared.binding.binding_storage_addr == 0 and
+            prepared.binding.destination_addr == 0 and
+            prepared.binding.binding_reservation_id == 0 and
+            prepared.binding.runtime_id == 0 and role_raw == 0 and
             tag_raw == 0 and family_raw == 0 and
             prepared.receipt.transport_incarnation == 0 and prepared.receipt.request_id == 0 and
             prepared.receipt.request_digest == 0 and
@@ -297,6 +300,75 @@ test "prepared request authority raw lifecycle sweep fails closed" {
     raw[@offsetOf(Authority, "lifecycle")] = @intFromEnum(Lifecycle.idle);
     for (2..256) |value| {
         raw[@offsetOf(Authority, "prepared_present")] = @intCast(value);
+        try std.testing.expect(!authority.settledExact());
+        try std.testing.expectEqual(SettlementReadiness.invalid, authority.settlementReadiness());
+    }
+}
+
+test "prepared request authority settled state rejects every semantic residue" {
+    const Field = enum {
+        transport_addr,
+        transport_incarnation,
+        binding_incarnation,
+        binding_storage_addr,
+        destination_addr,
+        binding_reservation_id,
+        slot_incarnation,
+        node_incarnation,
+        host_id,
+        connection_generation,
+        runtime_id,
+        role,
+        pid,
+        process_nonce,
+        tag,
+        family,
+        receipt_transport_incarnation,
+        receipt_request_id,
+        receipt_request_digest,
+        descriptor_storage_addr,
+        descriptor_prepared_incarnation,
+        descriptor_client_addr,
+        descriptor_request_id,
+        descriptor_request_digest,
+        descriptor_frame_addr,
+        descriptor_frame_len,
+        descriptor_allocator_ptr,
+        descriptor_allocator_vtable,
+    };
+
+    inline for (std.enums.values(Field)) |field| {
+        var authority: Authority = .{};
+        switch (field) {
+            .transport_addr => authority.prepared.transport_addr = 1,
+            .transport_incarnation => authority.prepared.transport_incarnation = 1,
+            .binding_incarnation => authority.prepared.binding.binding_incarnation = 1,
+            .binding_storage_addr => authority.prepared.binding.binding_storage_addr = 1,
+            .destination_addr => authority.prepared.binding.destination_addr = 1,
+            .binding_reservation_id => authority.prepared.binding.binding_reservation_id = 1,
+            .slot_incarnation => authority.prepared.binding.slot_incarnation = 1,
+            .node_incarnation => authority.prepared.binding.node_incarnation = 1,
+            .host_id => authority.prepared.binding.host_id = 1,
+            .connection_generation => authority.prepared.binding.connection_generation = 1,
+            .runtime_id => authority.prepared.binding.runtime_id = 1,
+            .role => authority.prepared.binding.role = .observer,
+            .pid => authority.prepared.binding.pid = 1,
+            .process_nonce => authority.prepared.binding.process_nonce = 1,
+            .tag => authority.prepared.tag = .attach_controller,
+            .family => authority.prepared.family = .attach_only,
+            .receipt_transport_incarnation => authority.prepared.receipt.transport_incarnation = 1,
+            .receipt_request_id => authority.prepared.receipt.request_id = 1,
+            .receipt_request_digest => authority.prepared.receipt.request_digest = 1,
+            .descriptor_storage_addr => authority.prepared.descriptor.storage_addr = 1,
+            .descriptor_prepared_incarnation => authority.prepared.descriptor.prepared_incarnation = 1,
+            .descriptor_client_addr => authority.prepared.descriptor.client_addr = 1,
+            .descriptor_request_id => authority.prepared.descriptor.request_id = 1,
+            .descriptor_request_digest => authority.prepared.descriptor.request_digest = 1,
+            .descriptor_frame_addr => authority.prepared.descriptor.frame_addr = 1,
+            .descriptor_frame_len => authority.prepared.descriptor.frame_len = 1,
+            .descriptor_allocator_ptr => authority.prepared.descriptor.allocator_ptr = 1,
+            .descriptor_allocator_vtable => authority.prepared.descriptor.allocator_vtable = 1,
+        }
         try std.testing.expect(!authority.settledExact());
         try std.testing.expectEqual(SettlementReadiness.invalid, authority.settlementReadiness());
     }

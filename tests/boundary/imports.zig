@@ -57,6 +57,7 @@ const client_reflection_owners = [_]ClientReflectionOwnerProof{
     .{ .path = "src/platform/macos/session_host/client_external_adoption.zig", .function = "transferSliceAuthority", .expression = "@field(value,len_field)", .count = 1 },
     .{ .path = "src/platform/macos/session_host/client_poison.zig", .function = "outcomeForConnection", .expression = "@field(Outcome,@tagName(tag))", .count = 1 },
     .{ .path = "src/platform/macos/session_host/client_external_turn_authority.zig", .function = "writeSeed", .expression = "@field(seed,field.name)", .count = 1 },
+    .{ .path = "src/platform/macos/session_host/executed_response.zig", .function = "responseTranscriptDigest", .expression = "@field(response,field.name)", .count = 1 },
 };
 const ExternalReflectionInventoryProof = struct {
     path: []const u8,
@@ -431,7 +432,7 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .name = "bindOperationFence", .receiver_type = mutable, .class = .construction },
 
         .{ .name = "beginGenerationAllocatorScope", .receiver_type = mutable, .class = .unchecked },
-        .{ .name = "restoreGenerationAllocatorScopeUnchecked", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "restoreGenerationAllocatorScope", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "prepareGenerationAccountingConsume", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "consumeGenerationAccountingUnchecked", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "tryAcquireEndedPurgeExclusive", .receiver_type = mutable, .class = .unchecked },
@@ -458,7 +459,7 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .receiver = "tryDeinit", .funnel = "tryDeinit", .gate = "tryAcquireExclusive", .gate_prefix = "fence", .gate_depth = 2, .release = "abortExclusive", .release_prefix = "fence", .release_depth = 2, .pre_gate_self_fields = &.{ "operation_fence", "operation_fence_generation" } },
         .{ .receiver = "beginGenerationAllocatorScope", .funnel = "beginGenerationAllocatorScope", .gate = "ensureUsable" },
         .{ .receiver = "requireBufferedGenerationBatch", .funnel = "requireBufferedGenerationBatch", .gate = "ensureUsable" },
-        .{ .receiver = "restoreGenerationAllocatorScopeUnchecked", .funnel = "restoreGenerationAllocatorScopeUnchecked", .gate = "beginPublicMutation" },
+        .{ .receiver = "restoreGenerationAllocatorScope", .funnel = "restoreGenerationAllocatorScope", .gate = "beginPublicMutation" },
         .{ .receiver = "enterExternalMode", .funnel = "enterExternalMode", .gate = "beginPublicMutation" },
         .{ .receiver = "call", .funnel = "callWithIo", .gate = "requireBlockingMode" },
         .{ .receiver = "callUntil", .funnel = "callUntilWithOps", .gate = "requireBlockingMode" },
@@ -1169,7 +1170,10 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
         .{
             .path = "src/platform/macos/session_host/client.zig",
             .baseline_count = 527,
-            .baseline_digest = .{ 0x89, 0x77, 0xc2, 0x92, 0xdb, 0x37, 0x5c, 0xb3, 0x66, 0x25, 0x0e, 0x33, 0xd5, 0xf8, 0x02, 0xfb, 0xdb, 0x33, 0x93, 0x43, 0x2d, 0xbe, 0xe0, 0xa6, 0xd1, 0x61, 0x89, 0x2d, 0xbb, 0x62, 0xa8, 0xa8 },
+            // The allocator restore receiver is now a checked one-shot token consume rather than
+            // an unchecked allocator setter; this reviewed API rename intentionally changes the
+            // frozen declaration digest without expanding the baseline count.
+            .baseline_digest = .{ 0xe6, 0xd2, 0xd8, 0x51, 0xf4, 0x0c, 0xd9, 0xdb, 0x04, 0xab, 0x89, 0x5d, 0xfc, 0xb1, 0xeb, 0x6f, 0xef, 0x5a, 0xe5, 0x73, 0x81, 0x92, 0xf4, 0x7a, 0xe7, 0xa6, 0x17, 0xa7, 0x3b, 0x18, 0x65, 0x21 },
             .containers = &.{ "Client", "EndedPurgeScratch", "PreparedEndedPurgeInventory" },
             .optional_containers = &.{ "PreparedEndedPurgeCommit", "ClientOperationFence" },
             .allowed = &.{
@@ -1267,6 +1271,12 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "tryDeinitClientSlotExclusiveHeld" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "bufferedControllerRevokeForStreamUnchecked" },
                 .{ .parent = "Client", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationAllocatorPurpose" },
+                .{ .parent = "Client", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationAllocatorScopeLifecycle" },
+                .{ .parent = "Client", .kind = "const", .visibility = "private", .modifier = "", .name = "GenerationAllocatorScopeIdentity" },
+                .{ .parent = "Client", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationAllocatorScope" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "allocatorEql" },
+                .{ .parent = "Client", .kind = "field", .visibility = "private", .modifier = "", .name = "generation_allocator_scope_epoch" },
+                .{ .parent = "Client", .kind = "field", .visibility = "private", .modifier = "", .name = "active_generation_allocator_scope" },
             },
         },
         .{
@@ -1304,11 +1314,13 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "executeGenerationRequest" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "rollbackExecutingRequest" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "terminalizeExecutingRequest" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "terminalizeExecutingRequestWithStorageCleanup" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "responseDestinationValid" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "responseOwnerStillPristine" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "payloadAliasesExecutionOwners" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "byteRangesOverlap" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "issueGenerationResponseIncarnation" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "ScopeTokenAliasAllocator" },
                 .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "preflightGenerationTransportTerminalize" },
                 .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "terminalizeGenerationTransportOwner" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "mapGenerationRequestClientError" },
@@ -2869,14 +2881,6 @@ test "session host unchecked teardown authority cannot escape anywhere in src" {
             .pump_references = 0,
         },
         .{
-            .name = "restoreGenerationAllocatorScopeUnchecked",
-            .owner_suffixes = &.{
-                "platform/macos/session_host/client.zig",
-                "platform/macos/session_host/client_slot.zig",
-            },
-            .pump_references = 0,
-        },
-        .{
             .name = "consumeUnchecked",
             .owner_suffixes = &.{
                 "platform/macos/session_host/generation_batch_registry.zig",
@@ -3157,7 +3161,9 @@ test "session host unchecked teardown authority cannot escape anywhere in src" {
             }
         }
     }
-    try std.testing.expectEqual(@as(usize, 42), unchecked_declarations);
+    // Allocator restoration is now a checked one-shot token consume, so it intentionally no
+    // longer contributes an `*Unchecked` declaration to this global authority inventory.
+    try std.testing.expectEqual(@as(usize, 41), unchecked_declarations);
     for (symbols) |symbol| {
         var pump_references: usize = 0;
         var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
@@ -3242,7 +3248,7 @@ test "generation batch Client ownership mutations have one node-bound production
         const begin_allocator_count = countOccurrences(source, ".beginGenerationAllocatorScope(");
         const restore_allocator_count = countOccurrences(
             source,
-            ".restoreGenerationAllocatorScopeUnchecked(",
+            ".restoreGenerationAllocatorScope(",
         );
         const enter_callback_count = countIdentifierOutsideTopLevelTests(
             source,
@@ -5832,6 +5838,53 @@ test "session host has zero raw untyped Client invalidation callsites" {
     }
 }
 
+test "2c3b executed response owner seal mutation stays in its canonical boundary" {
+    const allocator = std.testing.allocator;
+    var dir = try std.Io.Dir.cwd().openDir(
+        std.testing.io,
+        "src/platform/macos/session_host",
+        .{ .iterate = true },
+    );
+    defer dir.close(std.testing.io);
+    var walker = try dir.walk(allocator);
+    defer walker.deinit();
+
+    var init_in_owner: usize = 0;
+    var init_in_registry_fixture: usize = 0;
+    var terminalize_in_owner: usize = 0;
+    while (try walker.next(std.testing.io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".zig")) continue;
+        const path = try std.fmt.allocPrint(
+            allocator,
+            "src/platform/macos/session_host/{s}",
+            .{entry.path},
+        );
+        defer allocator.free(path);
+        const source = try readZigFileZ(allocator, path);
+        defer allocator.free(source);
+        const init_count = countOccurrences(source, "ExecutedResponseOwnerSeal.initInPlace(");
+        const terminalize_count = countOccurrences(
+            source,
+            "                owner_seal.terminalize(",
+        );
+        if (std.mem.eql(u8, entry.path, "executed_response.zig")) {
+            init_in_owner = init_count;
+            terminalize_in_owner = terminalize_count;
+        } else if (std.mem.eql(u8, entry.path, "attachment_cleanup_registry.zig")) {
+            init_in_registry_fixture = init_count;
+            try std.testing.expectEqual(@as(usize, 0), terminalize_count);
+        } else {
+            try std.testing.expectEqual(@as(usize, 0), init_count);
+            try std.testing.expectEqual(@as(usize, 0), terminalize_count);
+        }
+    }
+    // The registry occurrence is a top-level integration fixture. Production mutation remains
+    // inside ExecutedResponse so callers cannot synthesize or retire response authority.
+    try std.testing.expectEqual(@as(usize, 2), init_in_owner);
+    try std.testing.expectEqual(@as(usize, 1), init_in_registry_fixture);
+    try std.testing.expectEqual(@as(usize, 2), terminalize_in_owner);
+}
+
 test "CR3a-2b2 generation GUI batch path is node-bound while legacy fallback stays explicit" {
     const allocator = std.testing.allocator;
     const runtime = try readZigFileZ(
@@ -6080,19 +6133,22 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
         const owned_helpers = [_]struct {
             name: []const u8,
             transport_count: usize,
+            attachment_count: usize = 1,
         }{
             .{ .name = "bindCommittedStreamOwned", .transport_count = 1 },
             .{ .name = "beginControllerRevokeOwned", .transport_count = 1 },
             .{ .name = "finishControllerRevokeOwned", .transport_count = 1 },
             .{ .name = "mutationAllowedOwned", .transport_count = 1 },
             .{ .name = "bufferedControllerRevokeOwned", .transport_count = 1 },
-            .{ .name = "preflightTerminalizeOwned", .transport_count = 2 },
+            // Shell teardown now preflights allocator-callback reentry just like attached
+            // teardown; both call sites must stay behind GenerationAttachment.
+            .{ .name = "preflightTerminalizeOwned", .transport_count = 2, .attachment_count = 2 },
         };
         for (owned_helpers) |helper| {
             const expected: usize = if (is_generation_transport)
                 helper.transport_count
             else if (is_generation_attachment)
-                1
+                helper.attachment_count
             else
                 0;
             try std.testing.expectEqual(
@@ -8532,7 +8588,7 @@ fn expectGuardedClientReceiverPolicies(
     for (manifest) |entry| {
         const guarded_authority = entry.class == .unchecked and
             (std.mem.eql(u8, entry.name, "beginGenerationAllocatorScope") or
-                std.mem.eql(u8, entry.name, "restoreGenerationAllocatorScopeUnchecked"));
+                std.mem.eql(u8, entry.name, "restoreGenerationAllocatorScope"));
         if (entry.class != .guarded and !guarded_authority) continue;
         if (guarded_authority) guarded_authority_count += 1 else guarded_count += 1;
         var proof_count: usize = 0;

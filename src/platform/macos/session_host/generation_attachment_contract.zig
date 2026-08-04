@@ -217,6 +217,8 @@ pub const TransportOwnerLifecycle = enum(u8) { pristine, live, terminal };
 pub const TransportOwnerSeal = struct {
     self_addr: usize = 0,
     incarnation: u64 = 0,
+    owner_addr: usize = 0,
+    owner_size: usize = 0,
     transport_addr: usize = 0,
     prepared_storage_addr: usize = 0,
     lifecycle: TransportOwnerLifecycle = .pristine,
@@ -226,21 +228,34 @@ pub const TransportOwnerSeal = struct {
         return raw <= @intFromEnum(TransportOwnerLifecycle.terminal);
     }
 
+    fn ownerRangeValid(self: *const TransportOwnerSeal) bool {
+        if (self.owner_addr == 0 or self.owner_size == 0) return false;
+        _ = std.math.add(usize, self.owner_addr, self.owner_size) catch return false;
+        return true;
+    }
+
     pub fn initInPlace(
         out: *TransportOwnerSeal,
         incarnation: u64,
+        owner_addr: usize,
+        owner_size: usize,
         transport_addr: usize,
         prepared_storage_addr: usize,
     ) error{ InvalidState, InvalidIncarnation }!void {
         if (!out.lifecycleRawValid() or out.self_addr != 0 or out.incarnation != 0 or
-            out.transport_addr != 0 or out.prepared_storage_addr != 0 or
+            out.owner_addr != 0 or out.owner_size != 0 or out.transport_addr != 0 or
+            out.prepared_storage_addr != 0 or
             out.lifecycle != .pristine)
             return error.InvalidState;
-        if (incarnation == 0 or transport_addr == 0 or prepared_storage_addr == 0)
+        if (incarnation == 0 or owner_addr == 0 or owner_size == 0 or transport_addr == 0 or
+            prepared_storage_addr == 0)
             return error.InvalidIncarnation;
+        _ = std.math.add(usize, owner_addr, owner_size) catch return error.InvalidIncarnation;
         out.* = .{
             .self_addr = @intFromPtr(out),
             .incarnation = incarnation,
+            .owner_addr = owner_addr,
+            .owner_size = owner_size,
             .transport_addr = transport_addr,
             .prepared_storage_addr = prepared_storage_addr,
             .lifecycle = .live,
@@ -250,7 +265,8 @@ pub const TransportOwnerSeal = struct {
     pub fn valid(self: *const TransportOwnerSeal, incarnation: u64) bool {
         return self.lifecycleRawValid() and self.self_addr == @intFromPtr(self) and
             self.incarnation == incarnation and
-            incarnation != 0 and self.transport_addr != 0 and self.prepared_storage_addr != 0 and
+            incarnation != 0 and self.ownerRangeValid() and
+            self.transport_addr != 0 and self.prepared_storage_addr != 0 and
             self.lifecycle == .live;
     }
 
@@ -263,9 +279,12 @@ pub const TransportOwnerSeal = struct {
         if (!self.lifecycleRawValid()) return false;
         return switch (self.lifecycle) {
             .pristine => self.self_addr == 0 and self.incarnation == 0 and
-                self.transport_addr == 0 and self.prepared_storage_addr == 0,
+                self.owner_addr == 0 and self.owner_size == 0 and self.transport_addr == 0 and
+                self.prepared_storage_addr == 0,
             .terminal => self.self_addr == @intFromPtr(self) and self.incarnation != 0 and
-                self.transport_addr != 0 and self.prepared_storage_addr != 0,
+                self.ownerRangeValid() and
+                self.transport_addr != 0 and self.prepared_storage_addr != 0 and
+                self.lifecycle == .terminal,
             .live => false,
         };
     }
@@ -274,36 +293,87 @@ pub const TransportOwnerSeal = struct {
 pub const ExecutedResponseOwnerSeal = struct {
     self_addr: usize = 0,
     incarnation: u64 = 0,
-    lifecycle: TransportOwnerLifecycle = .pristine,
+    response_addr: usize = 0,
+    response_digest: u64 = 0,
+    terminal_digest: u64 = 0,
+    lifecycle: ExecutedResponseOwnerLifecycle = .pristine,
 
-    pub fn initInPlace(out: *@This(), incarnation: u64) error{ InvalidState, InvalidIncarnation }!void {
-        if (out.self_addr != 0 or out.incarnation != 0 or out.lifecycle != .pristine)
+    pub fn lifecycleRawValid(self: *const @This()) bool {
+        const raw = @as(*const u8, @ptrCast(&self.lifecycle)).*;
+        return raw <= @intFromEnum(ExecutedResponseOwnerLifecycle.terminal);
+    }
+
+    pub fn initInPlace(
+        out: *@This(),
+        incarnation: u64,
+        response_addr: usize,
+        response_digest: u64,
+    ) error{ InvalidState, InvalidIncarnation }!void {
+        // Lifecycle storage may have been restored from hostile/stale owner bytes. Prove the raw
+        // discriminator before Zig performs a typed enum comparison.
+        if (!out.lifecycleRawValid() or out.self_addr != 0 or out.incarnation != 0 or
+            out.response_addr != 0 or out.response_digest != 0 or out.terminal_digest != 0 or
+            out.lifecycle != .pristine)
             return error.InvalidState;
-        if (incarnation == 0) return error.InvalidIncarnation;
-        out.* = .{ .self_addr = @intFromPtr(out), .incarnation = incarnation, .lifecycle = .live };
+        if (incarnation == 0 or response_addr == 0 or response_digest == 0)
+            return error.InvalidIncarnation;
+        out.* = .{
+            .self_addr = @intFromPtr(out),
+            .incarnation = incarnation,
+            .response_addr = response_addr,
+            .response_digest = response_digest,
+            .lifecycle = .live,
+        };
     }
 
     pub fn valid(self: *const @This(), incarnation: u64) bool {
-        return self.self_addr == @intFromPtr(self) and self.incarnation == incarnation and
-            incarnation != 0 and self.lifecycle == .live;
+        return self.lifecycleRawValid() and self.self_addr == @intFromPtr(self) and
+            self.incarnation == incarnation and
+            incarnation != 0 and self.response_addr != 0 and self.response_digest != 0 and
+            self.terminal_digest == 0 and
+            self.lifecycle == .live;
     }
 
     pub fn terminalize(self: *@This(), incarnation: u64) error{InvalidState}!void {
         if (!self.valid(incarnation)) return error.InvalidState;
         self.lifecycle = .terminal;
+        self.terminal_digest = terminalDigest(self);
     }
 
     pub fn settledExact(self: *const @This()) bool {
+        if (!self.lifecycleRawValid()) return false;
         return switch (self.lifecycle) {
-            .pristine => self.self_addr == 0 and self.incarnation == 0,
-            .terminal => self.self_addr == @intFromPtr(self) and self.incarnation != 0,
+            .pristine => self.self_addr == 0 and self.incarnation == 0 and
+                self.response_addr == 0 and self.response_digest == 0 and self.terminal_digest == 0,
+            .terminal => self.self_addr == @intFromPtr(self) and self.incarnation != 0 and
+                self.response_addr != 0 and self.response_digest != 0 and
+                self.terminal_digest != 0 and self.terminal_digest == terminalDigest(self),
             .live => false,
         };
     }
+
+    fn terminalDigest(self: *const @This()) u64 {
+        var hasher = std.hash.Wyhash.init(0x4d_52_53_48_52_53_45_41);
+        inline for (.{
+            self.self_addr,
+            @as(usize, @intCast(self.incarnation)),
+            self.response_addr,
+            @as(usize, @intCast(self.response_digest)),
+            @as(usize, @as(*const u8, @ptrCast(&self.lifecycle)).*),
+        }) |value| hasher.update(std.mem.asBytes(&value));
+        const digest = hasher.final();
+        return if (digest == 0) 1 else digest;
+    }
 };
 
-/// Method strings remain inside GenerationTransport; callers select only one
-/// of these audited request families and supply the existing encoded payload.
+pub const ExecutedResponseOwnerLifecycle = enum(u8) {
+    pristine,
+    live,
+    terminal,
+};
+
+/// Method strings and canonical parameter encoding remain inside ClientSlot; callers select only
+/// one closed typed request and cannot supply an encoded payload or arbitrary stream identity.
 pub const RuntimeRequestTag = enum(u8) {
     spawn_full,
     attach_controller,

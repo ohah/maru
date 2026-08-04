@@ -165,6 +165,8 @@ pub const GenerationTransport = struct {
             .pid = self.pid,
             .process_nonce = self.process_nonce,
             .transport_addr = @intFromPtr(self),
+            .owner_addr = self.owner_addr,
+            .owner_size = self.owner_size,
             .transport_incarnation = self.transport_incarnation,
             .owner_seal_addr = self.owner_seal_addr,
             .prepared_storage_addr = @intFromPtr(&self.prepared_storage),
@@ -547,14 +549,29 @@ pub fn mintInPlace(
     binding_reservation: client_slot_mod.AttachmentBindingReservation,
 ) Error!void {
     if (owner_size == 0) return error.InvalidTransport;
-    _ = std.math.add(usize, owner_addr, owner_size) catch return error.InvalidTransport;
+    const owner_end = std.math.add(usize, owner_addr, owner_size) catch
+        return error.InvalidTransport;
+    const transport_start = @intFromPtr(out);
+    const transport_end = std.math.add(usize, transport_start, @sizeOf(GenerationTransport)) catch
+        return error.InvalidTransport;
+    const storage_start = @intFromPtr(&out.prepared_storage);
+    const storage_end = std.math.add(
+        usize,
+        storage_start,
+        @sizeOf(client_mod.PreparedBlockingRpcStorage),
+    ) catch return error.InvalidTransport;
+    if (owner_addr > transport_start or transport_end > owner_end or
+        owner_addr > storage_start or storage_end > owner_end)
+        return error.InvalidTransport;
     const owner_seal = slot.transportOwnerSeal(binding_reservation) catch
         return error.InvalidTransport;
-    if (rangesOverlapTyped(out, owner_seal) or rangesOverlapTyped(out, slot) or
+    if (rangeOverlapsTyped(owner_addr, owner_end, owner_seal) or
+        rangeOverlapsTyped(owner_addr, owner_end, slot) or
+        rangeOverlapsTyped(owner_addr, owner_end, slot.current) or
+        rangeOverlapsTyped(owner_addr, owner_end, &slot.current.client) or
+        rangesOverlapTyped(out, owner_seal) or rangesOverlapTyped(out, slot) or
         rangesOverlapTyped(out, slot.current) or
-        rangesOverlapTyped(out, &slot.current.client) or
-        owner_addr == @intFromPtr(slot) or owner_addr == @intFromPtr(slot.current) or
-        owner_addr == @intFromPtr(&slot.current.client) or owner_addr == @intFromPtr(owner_seal))
+        rangesOverlapTyped(out, &slot.current.client))
         return error.InvalidTransport;
     if (!rawLifecycleValid(&out.lifecycle) or out.self_addr != 0 or out.lifecycle != .pristine or
         owner_seal.self_addr != 0 or owner_seal.lifecycle != .pristine)
@@ -565,6 +582,8 @@ pub fn mintInPlace(
     contract.TransportOwnerSeal.initInPlace(
         owner_seal,
         incarnation,
+        owner_addr,
+        owner_size,
         @intFromPtr(out),
         @intFromPtr(&out.prepared_storage),
     ) catch
@@ -590,6 +609,78 @@ pub fn mintInPlace(
         &out.snapshot_authority,
         incarnation,
     ) catch unreachable;
+}
+
+test "CR3a-2c3b transport mint rejects every non-containing declared owner range" {
+    const Case = enum { disjoint, prefix_partial, suffix_partial, adjacent, overflow };
+    inline for (std.enums.values(Case)) |case| {
+        try client_slot_mod.ClientSlot.initializeProcessRuntime();
+        const allocator = std.testing.allocator;
+        var client: client_mod.Client = .{
+            .allocator = allocator,
+            .fd = -1,
+            .host_id = 0xC3B0,
+            .parser = framing.FrameParser.init(allocator),
+        };
+        var slot: client_slot_mod.ClientSlot = undefined;
+        try client_slot_mod.ClientSlot.initInPlace(&slot, allocator, &client, 0xC3B0);
+        defer slot.deinit();
+        var transport: GenerationTransport = .{};
+        const start = @intFromPtr(&transport);
+        const extent = @sizeOf(GenerationTransport);
+        const owner_range: struct { addr: usize, size: usize } = switch (case) {
+            .disjoint => .{ .addr = start + extent + 1, .size = extent },
+            .prefix_partial => .{ .addr = start, .size = extent - 1 },
+            .suffix_partial => .{ .addr = start + 1, .size = extent },
+            .adjacent => .{ .addr = start + extent, .size = 1 },
+            .overflow => .{ .addr = std.math.maxInt(usize) - 1, .size = 4 },
+        };
+        var binding: contract.PreparedAttachmentBinding = .{};
+        var lease: @import("connection_lease.zig").ConnectionLease = .{};
+        const reservation = try slot.reserveAttachmentBindingForTest(
+            &binding,
+            &lease,
+            owner_range.addr,
+        );
+        try std.testing.expectError(
+            error.InvalidTransport,
+            mintInPlace(&transport, &slot, owner_range.addr, owner_range.size, reservation),
+        );
+        try std.testing.expect(std.meta.eql(GenerationTransport{}, transport));
+        try std.testing.expect((try slot.transportOwnerSeal(reservation)).settledExact());
+        try slot.abortAttachmentBinding(&binding, reservation);
+    }
+}
+
+test "CR3a-2c3b transport mint rejects an overbroad owner range crossing canonical slot state" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0xC3B1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    var slot: client_slot_mod.ClientSlot = undefined;
+    try client_slot_mod.ClientSlot.initInPlace(&slot, allocator, &client, 0xC3B1);
+    defer slot.deinit();
+    var transport: GenerationTransport = .{};
+    var binding: contract.PreparedAttachmentBinding = .{};
+    var lease: @import("connection_lease.zig").ConnectionLease = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0xC3B2);
+    const transport_start = @intFromPtr(&transport);
+    const transport_end = transport_start + @sizeOf(GenerationTransport);
+    const slot_start = @intFromPtr(&slot);
+    const slot_end = slot_start + @sizeOf(client_slot_mod.ClientSlot);
+    const owner_start = @min(transport_start, slot_start);
+    const owner_end = @max(transport_end, slot_end);
+    try std.testing.expectError(
+        error.InvalidTransport,
+        mintInPlace(&transport, &slot, owner_start, owner_end - owner_start, reservation),
+    );
+    try std.testing.expect(std.meta.eql(GenerationTransport{}, transport));
+    try std.testing.expect((try slot.transportOwnerSeal(reservation)).settledExact());
+    try slot.abortAttachmentBinding(&binding, reservation);
 }
 
 /// Binding commit 직후 final attachment owner만 호출하는 allocation-free stream seal이다.
@@ -712,6 +803,13 @@ fn rangesOverlapTyped(a: anytype, b: anytype) bool {
     const a_end = std.math.add(usize, a_start, @sizeOf(@TypeOf(a.*))) catch return true;
     const b_end = std.math.add(usize, b_start, @sizeOf(@TypeOf(b.*))) catch return true;
     return a_start < b_end and b_start < a_end;
+}
+
+fn rangeOverlapsTyped(start: usize, end: usize, owner: anytype) bool {
+    const owner_start = @intFromPtr(owner);
+    const owner_end = std.math.add(usize, owner_start, @sizeOf(@TypeOf(owner.*))) catch
+        return true;
+    return start < owner_end and owner_start < end;
 }
 
 fn payloadOverlaps(payload: []const u8, owners: anytype) bool {
@@ -853,12 +951,12 @@ test "CR3a-2a generation transport prepares and aborts a closed attach request" 
     var transport: GenerationTransport = .{};
     var binding: contract.PreparedAttachmentBinding = .{};
     var lease: @import("connection_lease.zig").ConnectionLease = .{};
-    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0xA1);
-    try mintInPlace(&transport, &slot, 0x101, @sizeOf(GenerationTransport), reservation);
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, @intFromPtr(&transport));
+    try mintInPlace(&transport, &slot, @intFromPtr(&transport), @sizeOf(GenerationTransport), reservation);
     const receipt = try transport.prepareRequest(contract.RuntimeRequest.attachController());
     try std.testing.expectEqual(@as(u64, 1), receipt.request_id);
     try transport.abortPreparedRequest(receipt);
-    try terminalizeOwned(&transport, 0x101);
+    try terminalizeOwned(&transport, @intFromPtr(&transport));
     try slot.abortAttachmentBinding(&binding, reservation);
 }
 
@@ -886,12 +984,12 @@ test "CR3a-2c3b find family authority follows its typed scroll discriminator" {
     const controller_reservation = try controller_slot.reserveAttachmentBindingForTest(
         &controller_binding,
         &controller_lease,
-        0x2C3BF2,
+        @intFromPtr(&controller_transport),
     );
     try mintInPlace(
         &controller_transport,
         &controller_slot,
-        0x2C3BF3,
+        @intFromPtr(&controller_transport),
         @sizeOf(GenerationTransport),
         controller_reservation,
     );
@@ -900,7 +998,7 @@ test "CR3a-2c3b find family authority follows its typed scroll discriminator" {
         controller_reservation.identity,
         41,
     );
-    try bindCommittedStreamOwned(&controller_transport, 0x2C3BF3, 41);
+    try bindCommittedStreamOwned(&controller_transport, @intFromPtr(&controller_transport), 41);
     const mutation = try controller_transport.prepareRequest(contract.RuntimeRequest.find(
         contract.FindRequest.init("needle", 0, true).?,
     ));
@@ -910,7 +1008,7 @@ test "CR3a-2c3b find family authority follows its typed scroll discriminator" {
         controller_reservation.identity,
         41,
     );
-    try terminalizeOwned(&controller_transport, 0x2C3BF3);
+    try terminalizeOwned(&controller_transport, @intFromPtr(&controller_transport));
     try controller_slot.current.cleanup_registry.completeActiveDrop(
         controller_reservation.cleanup,
         controller_reservation.identity,
@@ -939,13 +1037,13 @@ test "CR3a-2c3b find family authority follows its typed scroll discriminator" {
     const observer_reservation = try observer_slot.reserveAttachmentBinding(
         &observer_binding,
         &observer_lease,
-        0x2C3BF5,
+        @intFromPtr(&observer_transport),
         .observer,
     );
     try mintInPlace(
         &observer_transport,
         &observer_slot,
-        0x2C3BF6,
+        @intFromPtr(&observer_transport),
         @sizeOf(GenerationTransport),
         observer_reservation,
     );
@@ -954,7 +1052,7 @@ test "CR3a-2c3b find family authority follows its typed scroll discriminator" {
         observer_reservation.identity,
         43,
     );
-    try bindCommittedStreamOwned(&observer_transport, 0x2C3BF6, 43);
+    try bindCommittedStreamOwned(&observer_transport, @intFromPtr(&observer_transport), 43);
     try std.testing.expectError(error.Unauthorized, observer_transport.prepareRequest(
         contract.RuntimeRequest.find(contract.FindRequest.init("needle", 0, true).?),
     ));
@@ -967,7 +1065,7 @@ test "CR3a-2c3b find family authority follows its typed scroll discriminator" {
         observer_reservation.identity,
         43,
     );
-    try terminalizeOwned(&observer_transport, 0x2C3BF6);
+    try terminalizeOwned(&observer_transport, @intFromPtr(&observer_transport));
     try observer_slot.current.cleanup_registry.completeActiveDrop(
         observer_reservation.cleanup,
         observer_reservation.identity,
@@ -992,19 +1090,19 @@ test "CR3a-2c3b terminalize consults node request authority despite storage rest
     var transport: GenerationTransport = .{};
     var binding: contract.PreparedAttachmentBinding = .{};
     var lease: @import("connection_lease.zig").ConnectionLease = .{};
-    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0x2C3B72);
-    try mintInPlace(&transport, &slot, 0x2C3B73, @sizeOf(GenerationTransport), reservation);
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, @intFromPtr(&transport));
+    try mintInPlace(&transport, &slot, @intFromPtr(&transport), @sizeOf(GenerationTransport), reservation);
     const receipt = try transport.prepareRequest(contract.RuntimeRequest.attachController());
     const saved = transport.prepared_storage.bytes;
     @memset(&transport.prepared_storage.bytes, 0);
     try std.testing.expectEqual(
         TerminalizeReadiness.busy,
-        preflightTerminalizeOwned(&transport, 0x2C3B73),
+        preflightTerminalizeOwned(&transport, @intFromPtr(&transport)),
     );
-    try std.testing.expectError(error.InvalidTransport, terminalizeOwned(&transport, 0x2C3B73));
+    try std.testing.expectError(error.InvalidTransport, terminalizeOwned(&transport, @intFromPtr(&transport)));
     transport.prepared_storage.bytes = saved;
     try transport.abortPreparedRequest(receipt);
-    try terminalizeOwned(&transport, 0x2C3B73);
+    try terminalizeOwned(&transport, @intFromPtr(&transport));
     try slot.abortAttachmentBinding(&binding, reservation);
 }
 
@@ -1022,8 +1120,8 @@ test "CR3a-2c1 final snapshot owner rejects copy thread replay and restored tran
     var transport: GenerationTransport = .{};
     var binding: contract.PreparedAttachmentBinding = .{};
     var lease: @import("connection_lease.zig").ConnectionLease = .{};
-    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0xA2);
-    try mintInPlace(&transport, &slot, 0x102, @sizeOf(GenerationTransport), reservation);
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, @intFromPtr(&transport));
+    try mintInPlace(&transport, &slot, @intFromPtr(&transport), @sizeOf(GenerationTransport), reservation);
 
     var owner: initial_snapshot_owner_mod.InitialSnapshotOwner = .{};
     const canonical = try slot.prepareInitialSnapshotPermit(
@@ -1085,7 +1183,7 @@ test "CR3a-2c1 final snapshot owner rejects copy thread replay and restored tran
     transport = copied_transport;
     try std.testing.expectError(error.MovedOrCopied, owner.deinit());
     transport = consumed_transport;
-    try terminalizeOwned(&transport, 0x102);
+    try terminalizeOwned(&transport, @intFromPtr(&transport));
     try slot.abortAttachmentBinding(&binding, reservation);
     slot.deinit();
     @memset(std.mem.asBytes(&slot), 0xA5);
@@ -1109,8 +1207,8 @@ test "CR3a-2a copied generation transport cannot prepare or mutate Client" {
     var transport: GenerationTransport = .{};
     var binding: contract.PreparedAttachmentBinding = .{};
     var lease: @import("connection_lease.zig").ConnectionLease = .{};
-    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0xB1);
-    try mintInPlace(&transport, &slot, 0x103, @sizeOf(GenerationTransport), reservation);
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, @intFromPtr(&transport));
+    try mintInPlace(&transport, &slot, @intFromPtr(&transport), @sizeOf(GenerationTransport), reservation);
     var copied = transport;
     try std.testing.expectError(
         error.InvalidOwner,
@@ -1125,7 +1223,7 @@ test "CR3a-2a copied generation transport cannot prepare or mutate Client" {
     const receipt = try transport.prepareRequest(contract.RuntimeRequest.attachController());
     try std.testing.expectEqual(@as(u64, 1), receipt.request_id);
     try transport.abortPreparedRequest(receipt);
-    try terminalizeOwned(&transport, 0x103);
+    try terminalizeOwned(&transport, @intFromPtr(&transport));
     try slot.abortAttachmentBinding(&binding, reservation);
 }
 
@@ -1158,8 +1256,8 @@ test "CR3a-2c3b capability projection is exact and rejects stale or busy ownersh
     var transport: GenerationTransport = .{};
     var binding: contract.PreparedAttachmentBinding = .{};
     var lease: @import("connection_lease.zig").ConnectionLease = .{};
-    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0x2C3BCB);
-    try mintInPlace(&transport, &slot, 0x2C3BCC, @sizeOf(GenerationTransport), reservation);
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, @intFromPtr(&transport));
+    try mintInPlace(&transport, &slot, @intFromPtr(&transport), @sizeOf(GenerationTransport), reservation);
     const canonical_client = slot.logicalClient();
 
     const projected = try transport.capabilities();
@@ -1298,7 +1396,7 @@ test "CR3a-2c3b capability projection is exact and rejects stale or busy ownersh
     transport.owner_seal_addr -= 1;
 
     const stale_transport = transport;
-    try terminalizeOwned(&transport, 0x2C3BCC);
+    try terminalizeOwned(&transport, @intFromPtr(&transport));
     const terminal_transport = transport;
     transport = stale_transport;
     try std.testing.expectError(error.InvalidOwner, transport.capabilities());
@@ -1321,10 +1419,10 @@ test "CR3a-2c3a input facade rejects every invalid lifecycle and role byte befor
     var transport: GenerationTransport = .{};
     var binding: contract.PreparedAttachmentBinding = .{};
     var lease: @import("connection_lease.zig").ConnectionLease = .{};
-    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0x2C3A1);
-    try mintInPlace(&transport, &slot, 0x2C3A2, @sizeOf(GenerationTransport), reservation);
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, @intFromPtr(&transport));
+    try mintInPlace(&transport, &slot, @intFromPtr(&transport), @sizeOf(GenerationTransport), reservation);
     try slot.current.cleanup_registry.bindStream(reservation.cleanup, reservation.identity, 17);
-    try bindCommittedStreamOwned(&transport, 0x2C3A2, 17);
+    try bindCommittedStreamOwned(&transport, @intFromPtr(&transport), 17);
 
     const lifecycle_raw: *u8 = @ptrCast(&transport.lifecycle);
     var raw: u16 = 0;
@@ -1372,25 +1470,40 @@ test "CR3a-2c3a input facade rejects every invalid lifecycle and role byte befor
     try std.testing.expect(slot.logicalClient().pending_outbound == null);
 
     const ThreadProbe = struct {
-        fn run(target: *GenerationTransport, rejected: *bool, capability_rejected: *bool) void {
+        fn run(
+            target: *GenerationTransport,
+            rejected: *bool,
+            capability_rejected: *bool,
+            spoofed_thread_id_rejected: *bool,
+        ) void {
             _ = target.capabilities() catch {
                 capability_rejected.* = true;
             };
             _ = target.sendInputNonBlocking("x") catch {
                 rejected.* = true;
             };
+            const saved_thread_id = target.owner_thread_id;
+            target.owner_thread_id = std.Thread.getCurrentId();
+            target.poison(.local_invariant_violation) catch {
+                spoofed_thread_id_rejected.* = true;
+            };
+            target.owner_thread_id = saved_thread_id;
         }
     };
     var cross_thread_rejected = false;
     var cross_thread_capability_rejected = false;
+    var spoofed_thread_id_rejected = false;
     var thread = try std.Thread.spawn(.{}, ThreadProbe.run, .{
         &transport,
         &cross_thread_rejected,
         &cross_thread_capability_rejected,
+        &spoofed_thread_id_rejected,
     });
     thread.join();
     try std.testing.expect(cross_thread_rejected);
     try std.testing.expect(cross_thread_capability_rejected);
+    try std.testing.expect(spoofed_thread_id_rejected);
+    try std.testing.expect(!slot.logicalClient().unusable);
     try std.testing.expect(slot.logicalClient().pending_outbound == null);
 
     const permit = try slot.prepareStreamOperationPermit(
@@ -1404,7 +1517,7 @@ test "CR3a-2c3a input facade rejects every invalid lifecycle and role byte befor
     try std.testing.expect(slot.logicalClient().pending_outbound == null);
     try slot.abortStreamOperationPermit(permit);
     try slot.current.cleanup_registry.beginBoundDrop(reservation.cleanup, reservation.identity, 17);
-    try terminalizeOwned(&transport, 0x2C3A2);
+    try terminalizeOwned(&transport, @intFromPtr(&transport));
     try slot.current.cleanup_registry.completeActiveDrop(reservation.cleanup, reservation.identity, 17);
     slot.current.pin_owner.cleanup_pin_count -= 1;
     binding.lifecycle = .terminal;
@@ -1428,18 +1541,18 @@ test "CR3a-2c3a observer binding rejects input but permits shared output progres
     const reservation = try slot.reserveAttachmentBinding(
         &binding,
         &lease,
-        0x2C3C1,
+        @intFromPtr(&transport),
         .observer,
     );
-    try mintInPlace(&transport, &slot, 0x2C3C2, @sizeOf(GenerationTransport), reservation);
+    try mintInPlace(&transport, &slot, @intFromPtr(&transport), @sizeOf(GenerationTransport), reservation);
     try slot.current.cleanup_registry.bindStream(reservation.cleanup, reservation.identity, 29);
-    try bindCommittedStreamOwned(&transport, 0x2C3C2, 29);
+    try bindCommittedStreamOwned(&transport, @intFromPtr(&transport), 29);
     try std.testing.expectError(error.Unauthorized, transport.sendInputNonBlocking("x"));
     try std.testing.expect(try transport.pumpPendingOutput());
     try std.testing.expectError(error.Unauthorized, transport.fenceRevoke());
     try std.testing.expect(slot.logicalClient().pending_outbound == null);
     try slot.current.cleanup_registry.beginBoundDrop(reservation.cleanup, reservation.identity, 29);
-    try terminalizeOwned(&transport, 0x2C3C2);
+    try terminalizeOwned(&transport, @intFromPtr(&transport));
     try slot.current.cleanup_registry.completeActiveDrop(reservation.cleanup, reservation.identity, 29);
     slot.current.pin_owner.cleanup_pin_count -= 1;
     binding.lifecycle = .terminal;
@@ -1468,10 +1581,10 @@ test "CR3a-2c3a input facade binds the sealed stream and preserves wire ownershi
     var transport: GenerationTransport = .{};
     var binding: contract.PreparedAttachmentBinding = .{};
     var lease: @import("connection_lease.zig").ConnectionLease = .{};
-    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0x2C3B1);
-    try mintInPlace(&transport, &slot, 0x2C3B2, @sizeOf(GenerationTransport), reservation);
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, @intFromPtr(&transport));
+    try mintInPlace(&transport, &slot, @intFromPtr(&transport), @sizeOf(GenerationTransport), reservation);
     try slot.current.cleanup_registry.bindStream(reservation.cleanup, reservation.identity, 23);
-    try bindCommittedStreamOwned(&transport, 0x2C3B2, 23);
+    try bindCommittedStreamOwned(&transport, @intFromPtr(&transport), 23);
 
     const payload = "generation-input";
     try std.testing.expectEqual(payload.len, try transport.sendInputNonBlocking(payload));
@@ -1502,18 +1615,18 @@ test "CR3a-2c3a input facade binds the sealed stream and preserves wire ownershi
         .offset = 1,
         .stream_id = 23,
     };
-    const revoke_permit = try beginControllerRevokeOwned(&transport, 0x2C3B2);
+    const revoke_permit = try beginControllerRevokeOwned(&transport, @intFromPtr(&transport));
     try std.testing.expectError(error.Unauthorized, transport.sendInputNonBlocking("late"));
     try std.testing.expectEqual(
         RevokeFence.partial_frame_requires_close,
         try transport.fenceRevoke(),
     );
-    try finishControllerRevokeOwned(&transport, 0x2C3B2, revoke_permit);
+    try finishControllerRevokeOwned(&transport, @intFromPtr(&transport), revoke_permit);
     try std.testing.expectError(error.Unauthorized, transport.sendInputNonBlocking("restored"));
     try std.testing.expect(slot.logicalClient().pending_outbound != null);
 
     try slot.current.cleanup_registry.beginBoundDrop(reservation.cleanup, reservation.identity, 23);
-    try terminalizeOwned(&transport, 0x2C3B2);
+    try terminalizeOwned(&transport, @intFromPtr(&transport));
     try slot.current.cleanup_registry.completeActiveDrop(reservation.cleanup, reservation.identity, 23);
     slot.current.pin_owner.cleanup_pin_count -= 1;
     binding.lifecycle = .terminal;
@@ -1535,10 +1648,10 @@ test "CR3a-2c3a input facade maps allocation and socket failure without authorit
     var transport: GenerationTransport = .{};
     var binding: contract.PreparedAttachmentBinding = .{};
     var lease: @import("connection_lease.zig").ConnectionLease = .{};
-    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0x2C3D1);
-    try mintInPlace(&transport, &slot, 0x2C3D2, @sizeOf(GenerationTransport), reservation);
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, @intFromPtr(&transport));
+    try mintInPlace(&transport, &slot, @intFromPtr(&transport), @sizeOf(GenerationTransport), reservation);
     try slot.current.cleanup_registry.bindStream(reservation.cleanup, reservation.identity, 31);
-    try bindCommittedStreamOwned(&transport, 0x2C3D2, 31);
+    try bindCommittedStreamOwned(&transport, @intFromPtr(&transport), 31);
 
     failing.fail_index = failing.alloc_index;
     try std.testing.expectError(
@@ -1556,7 +1669,7 @@ test "CR3a-2c3a input facade maps allocation and socket failure without authorit
     try std.testing.expect(try slot.controllerAuthorityLive(reservation, 31));
     try std.testing.expect(slot.logicalClient().unusable);
     try slot.current.cleanup_registry.beginBoundDrop(reservation.cleanup, reservation.identity, 31);
-    try terminalizeOwned(&transport, 0x2C3D2);
+    try terminalizeOwned(&transport, @intFromPtr(&transport));
     try slot.current.cleanup_registry.completeActiveDrop(reservation.cleanup, reservation.identity, 31);
     slot.current.pin_owner.cleanup_pin_count -= 1;
     binding.lifecycle = .terminal;
@@ -1582,9 +1695,9 @@ test "CR3a-2a response destination cannot splice binding storage before wire" {
     const binding: *contract.PreparedAttachmentBinding = @ptrCast(&shared);
     const response: *executed_response_mod.ExecutedResponse = @ptrCast(&shared);
     var lease: @import("connection_lease.zig").ConnectionLease = .{};
-    const reservation = try slot.reserveAttachmentBindingForTest(binding, &lease, 0xB2);
     var transport: GenerationTransport = .{};
-    try mintInPlace(&transport, &slot, 0x104, @sizeOf(GenerationTransport), reservation);
+    const reservation = try slot.reserveAttachmentBindingForTest(binding, &lease, @intFromPtr(&transport));
+    try mintInPlace(&transport, &slot, @intFromPtr(&transport), @sizeOf(GenerationTransport), reservation);
     const receipt = try transport.prepareRequest(contract.RuntimeRequest.attachController());
     try std.testing.expectError(
         error.InvalidResponseDestination,
@@ -1595,7 +1708,7 @@ test "CR3a-2a response destination cannot splice binding storage before wire" {
         transport.abortPreparedRequest(receipt),
     );
     try std.testing.expect(binding.validAtFinalAddress());
-    try terminalizeOwned(&transport, 0x104);
+    try terminalizeOwned(&transport, @intFromPtr(&transport));
     try slot.abortAttachmentBinding(binding, reservation);
 }
 
@@ -1614,8 +1727,8 @@ test "CR3a-2a execute failure settles prepared backing and publishes uncertain r
     var transport: GenerationTransport = .{};
     var binding: contract.PreparedAttachmentBinding = .{};
     var lease: @import("connection_lease.zig").ConnectionLease = .{};
-    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0xC1);
-    try mintInPlace(&transport, &slot, 0x105, @sizeOf(GenerationTransport), reservation);
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, @intFromPtr(&transport));
+    try mintInPlace(&transport, &slot, @intFromPtr(&transport), @sizeOf(GenerationTransport), reservation);
     const receipt = try transport.prepareRequest(contract.RuntimeRequest.attachController());
     var response: executed_response_mod.ExecutedResponse = .{};
     const result = try transport.executePreparedRequest(receipt, &response);
@@ -1632,7 +1745,7 @@ test "CR3a-2a execute failure settles prepared backing and publishes uncertain r
         executed_response_mod.DeinitOutcome.cleaned,
         response.deinit(try slot.responseOwnerSeal(reservation)),
     );
-    try terminalizeOwned(&transport, 0x105);
+    try terminalizeOwned(&transport, @intFromPtr(&transport));
     try slot.abortAttachmentBinding(&binding, reservation);
 }
 
@@ -1674,9 +1787,9 @@ test "CR3a-2a response publication failure poisons before payload free reentry" 
     defer slot.deinit();
     var binding: contract.PreparedAttachmentBinding = .{};
     var lease: @import("connection_lease.zig").ConnectionLease = .{};
-    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0xD1);
     var transport: GenerationTransport = .{};
-    try mintInPlace(&transport, &slot, 0x106, @sizeOf(GenerationTransport), reservation);
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, @intFromPtr(&transport));
+    try mintInPlace(&transport, &slot, @intFromPtr(&transport), @sizeOf(GenerationTransport), reservation);
     const receipt = try transport.prepareRequest(contract.RuntimeRequest.attachController());
     var response: executed_response_mod.ExecutedResponse = .{};
     probe.response = &response;
@@ -1692,7 +1805,7 @@ test "CR3a-2a response publication failure poisons before payload free reentry" 
     try std.testing.expect(probe.reentry_rejected);
     try std.testing.expect(slot.logicalClient().unusable);
     response = .{};
-    try terminalizeOwned(&transport, 0x106);
+    try terminalizeOwned(&transport, @intFromPtr(&transport));
     try slot.abortAttachmentBinding(&binding, reservation);
 }
 
@@ -1710,9 +1823,9 @@ test "CR3a-2c3b request allocation alias is rejected before canonical owner writ
     defer slot.deinit();
     var binding: contract.PreparedAttachmentBinding = .{};
     var lease: @import("connection_lease.zig").ConnectionLease = .{};
-    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0xE11);
     var transport: GenerationTransport = .{};
-    try mintInPlace(&transport, &slot, 0xE12, @sizeOf(GenerationTransport), reservation);
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, @intFromPtr(&transport));
+    try mintInPlace(&transport, &slot, @intFromPtr(&transport), @sizeOf(GenerationTransport), reservation);
 
     const binding_before = binding;
     var hostile = OperationAliasAllocator{
@@ -1730,8 +1843,231 @@ test "CR3a-2c3b request allocation alias is rejected before canonical owner writ
     try std.testing.expect(!hostile.alias_freed);
     try std.testing.expect(std.meta.eql(binding_before, binding));
     try std.testing.expect(slot.logicalClient().unusable);
-    try terminalizeOwned(&transport, 0xE12);
+    try terminalizeOwned(&transport, @intFromPtr(&transport));
     try slot.abortAttachmentBinding(&binding, reservation);
+}
+
+test "CR3a-2c3b request prepare sweeps every allocation failure before first success" {
+    var reached_success = false;
+    for (0..32) |fail_offset| {
+        const identity_offset: u128 = fail_offset;
+        try client_slot_mod.ClientSlot.initializeProcessRuntime();
+        const allocator = std.testing.allocator;
+        var failing = std.testing.FailingAllocator.init(allocator, .{});
+        var client: client_mod.Client = .{
+            .allocator = failing.allocator(),
+            .fd = -1,
+            .host_id = 0x2C3B40 + identity_offset,
+            .parser = framing.FrameParser.init(failing.allocator()),
+        };
+        var slot: client_slot_mod.ClientSlot = undefined;
+        try client_slot_mod.ClientSlot.initInPlace(
+            &slot,
+            allocator,
+            &client,
+            0x2C3B40 + identity_offset,
+        );
+        defer slot.deinit();
+        var binding: contract.PreparedAttachmentBinding = .{};
+        var lease: @import("connection_lease.zig").ConnectionLease = .{};
+        var transport: GenerationTransport = .{};
+        const reservation = try slot.reserveAttachmentBindingForTest(
+            &binding,
+            &lease,
+            @intFromPtr(&transport),
+        );
+        try mintInPlace(
+            &transport,
+            &slot,
+            @intFromPtr(&transport),
+            @sizeOf(GenerationTransport),
+            reservation,
+        );
+        const binding_before = binding;
+        failing.fail_index = failing.alloc_index + fail_offset;
+        if (transport.prepareRequest(contract.RuntimeRequest.attachController())) |receipt| {
+            reached_success = true;
+            try transport.abortPreparedRequest(receipt);
+        } else |err| {
+            try std.testing.expectEqual(error.ResourceExhausted, err);
+            try std.testing.expect(failing.has_induced_failure);
+            try std.testing.expect(std.meta.eql(binding_before, binding));
+            try std.testing.expect(client_mod.Client.preparedBlockingRpcStorageSettled(
+                &transport.prepared_storage,
+            ));
+            try std.testing.expect(!slot.logicalClient().unusable);
+        }
+        try terminalizeOwned(&transport, @intFromPtr(&transport));
+        try slot.abortAttachmentBinding(&binding, reservation);
+        if (reached_success) break;
+    }
+    try std.testing.expect(reached_success);
+}
+
+test "CR3a-2c3b prepared request rejects a live cross-binding transport splice" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0x2C3B51,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    var slot: client_slot_mod.ClientSlot = undefined;
+    try client_slot_mod.ClientSlot.initInPlace(&slot, allocator, &client, 0x2C3B51);
+    defer slot.deinit();
+
+    var binding_a: contract.PreparedAttachmentBinding = .{};
+    var binding_b: contract.PreparedAttachmentBinding = .{};
+    var lease_a: @import("connection_lease.zig").ConnectionLease = .{};
+    var lease_b: @import("connection_lease.zig").ConnectionLease = .{};
+    var transport_a: GenerationTransport = .{};
+    var transport_b: GenerationTransport = .{};
+    const reservation_a = try slot.reserveAttachmentBindingForTest(
+        &binding_a,
+        &lease_a,
+        @intFromPtr(&transport_a),
+    );
+    const reservation_b = try slot.reserveAttachmentBindingForTest(
+        &binding_b,
+        &lease_b,
+        @intFromPtr(&transport_b),
+    );
+    try mintInPlace(
+        &transport_a,
+        &slot,
+        @intFromPtr(&transport_a),
+        @sizeOf(GenerationTransport),
+        reservation_a,
+    );
+    try mintInPlace(
+        &transport_b,
+        &slot,
+        @intFromPtr(&transport_b),
+        @sizeOf(GenerationTransport),
+        reservation_b,
+    );
+
+    const receipt_a = try transport_a.prepareRequest(contract.RuntimeRequest.attachController());
+    var response_b: executed_response_mod.ExecutedResponse = .{};
+    try std.testing.expectError(
+        error.InvalidReceipt,
+        transport_b.executePreparedRequest(receipt_a, &response_b),
+    );
+    try std.testing.expect(std.meta.eql(executed_response_mod.ExecutedResponse{}, response_b));
+    try std.testing.expect(!slot.logicalClient().unusable);
+    try transport_a.abortPreparedRequest(receipt_a);
+
+    try terminalizeOwned(&transport_a, @intFromPtr(&transport_a));
+    try terminalizeOwned(&transport_b, @intFromPtr(&transport_b));
+    try slot.abortAttachmentBinding(&binding_a, reservation_a);
+    try slot.abortAttachmentBinding(&binding_b, reservation_b);
+}
+
+test "CR3a-2c3b stale prepared receipt fails after same-address transport reincarnation" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0x2C3B52,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    var slot: client_slot_mod.ClientSlot = undefined;
+    try client_slot_mod.ClientSlot.initInPlace(&slot, allocator, &client, 0x2C3B52);
+    defer slot.deinit();
+
+    var binding: contract.PreparedAttachmentBinding = .{};
+    var lease: @import("connection_lease.zig").ConnectionLease = .{};
+    var transport: GenerationTransport = .{};
+    const transport_addr = @intFromPtr(&transport);
+    const first = try slot.reserveAttachmentBindingForTest(&binding, &lease, transport_addr);
+    try mintInPlace(&transport, &slot, transport_addr, @sizeOf(GenerationTransport), first);
+    const stale_receipt = try transport.prepareRequest(contract.RuntimeRequest.attachController());
+    try transport.abortPreparedRequest(stale_receipt);
+    const first_incarnation = transport.transport_incarnation;
+    try terminalizeOwned(&transport, transport_addr);
+    try slot.abortAttachmentBinding(&binding, first);
+
+    binding = .{};
+    lease = .{};
+    transport = .{};
+    const second = try slot.reserveAttachmentBindingForTest(&binding, &lease, transport_addr);
+    try mintInPlace(&transport, &slot, transport_addr, @sizeOf(GenerationTransport), second);
+    try std.testing.expect(transport.transport_incarnation != first_incarnation);
+    var response: executed_response_mod.ExecutedResponse = .{};
+    try std.testing.expectError(
+        error.InvalidReceipt,
+        transport.executePreparedRequest(stale_receipt, &response),
+    );
+    try std.testing.expectError(error.InvalidReceipt, transport.abortPreparedRequest(stale_receipt));
+    try std.testing.expect(std.meta.eql(executed_response_mod.ExecutedResponse{}, response));
+    try std.testing.expect(!slot.logicalClient().unusable);
+
+    const fresh = try transport.prepareRequest(contract.RuntimeRequest.attachController());
+    try transport.abortPreparedRequest(fresh);
+    try terminalizeOwned(&transport, transport_addr);
+    try slot.abortAttachmentBinding(&binding, second);
+}
+
+test "CR3a-2c3b request allocation exact and partial transport-owner aliases are rejected before write" {
+    const Harness = struct {
+        fn run(partial_overlap: bool) !void {
+            try client_slot_mod.ClientSlot.initializeProcessRuntime();
+            const allocator = std.testing.allocator;
+            var client: client_mod.Client = .{
+                .allocator = allocator,
+                .fd = -1,
+                .host_id = 0xE3,
+                .parser = framing.FrameParser.init(allocator),
+            };
+            var slot: client_slot_mod.ClientSlot = undefined;
+            try client_slot_mod.ClientSlot.initInPlace(&slot, allocator, &client, 0xE3);
+            defer slot.deinit();
+            var binding: contract.PreparedAttachmentBinding = .{};
+            var lease: @import("connection_lease.zig").ConnectionLease = .{};
+            const Owner = struct {
+                prefix: [@alignOf(GenerationTransport)]u8 =
+                    [_]u8{0} ** @alignOf(GenerationTransport),
+                transport: GenerationTransport = .{},
+            };
+            var owner: Owner = .{};
+            const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, @intFromPtr(&owner.transport));
+            const transport_addr = @intFromPtr(&owner.transport);
+            try mintInPlace(
+                &owner.transport,
+                &slot,
+                transport_addr,
+                @sizeOf(GenerationTransport),
+                reservation,
+            );
+            const transport_before = owner.transport;
+            const target_addr = if (partial_overlap)
+                transport_addr - 1
+            else
+                @intFromPtr(&owner.transport.owner_addr);
+            const target: [*]u8 = @ptrFromInt(target_addr);
+            var hostile = OperationAliasAllocator{
+                .parent = allocator,
+                .target = target[0..1],
+                .armed = true,
+            };
+            slot.current.guarded_allocator.parent = hostile.allocator();
+            try std.testing.expectError(
+                error.ProtocolError,
+                owner.transport.prepareRequest(contract.RuntimeRequest.attachController()),
+            );
+            slot.current.guarded_allocator.parent = allocator;
+            try std.testing.expect(hostile.alias_returned);
+            try std.testing.expect(!hostile.alias_freed);
+            try std.testing.expect(std.meta.eql(transport_before, owner.transport));
+            try std.testing.expect(slot.logicalClient().unusable);
+            try terminalizeOwned(&owner.transport, transport_addr);
+            try slot.abortAttachmentBinding(&binding, reservation);
+        }
+    };
+    try Harness.run(false);
+    try Harness.run(true);
 }
 
 test "CR3a-2c3b response allocation alias is rejected before destination write" {
@@ -1769,9 +2105,9 @@ test "CR3a-2c3b response allocation alias is rejected before destination write" 
     defer slot.deinit();
     var binding: contract.PreparedAttachmentBinding = .{};
     var lease: @import("connection_lease.zig").ConnectionLease = .{};
-    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0xE21);
     var transport: GenerationTransport = .{};
-    try mintInPlace(&transport, &slot, 0xE22, @sizeOf(GenerationTransport), reservation);
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, @intFromPtr(&transport));
+    try mintInPlace(&transport, &slot, @intFromPtr(&transport), @sizeOf(GenerationTransport), reservation);
     var response: executed_response_mod.ExecutedResponse = .{};
     const response_before = response;
     var hostile = OperationAliasAllocator{
@@ -1793,7 +2129,7 @@ test "CR3a-2c3b response allocation alias is rejected before destination write" 
     try std.testing.expect(!hostile.alias_freed);
     try std.testing.expect(std.meta.eql(response_before, response));
     try std.testing.expect(slot.logicalClient().unusable);
-    try terminalizeOwned(&transport, 0xE22);
+    try terminalizeOwned(&transport, @intFromPtr(&transport));
     try slot.abortAttachmentBinding(&binding, reservation);
 }
 
@@ -1817,9 +2153,9 @@ test "CR3a-2a pending flush callback invalidates response before request wire" {
     defer slot.deinit();
     var binding: contract.PreparedAttachmentBinding = .{};
     var lease: @import("connection_lease.zig").ConnectionLease = .{};
-    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0xD3);
     var transport: GenerationTransport = .{};
-    try mintInPlace(&transport, &slot, 0x108, @sizeOf(GenerationTransport), reservation);
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, @intFromPtr(&transport));
+    try mintInPlace(&transport, &slot, @intFromPtr(&transport), @sizeOf(GenerationTransport), reservation);
     const receipt = try transport.prepareRequest(contract.RuntimeRequest.attachController());
     slot.logicalClient().pending_outbound = .{
         .frame = try probe.allocator().dupe(u8, "older"),
@@ -1839,7 +2175,7 @@ test "CR3a-2a pending flush callback invalidates response before request wire" {
         transport.abortPreparedRequest(receipt),
     );
     response = .{};
-    try terminalizeOwned(&transport, 0x108);
+    try terminalizeOwned(&transport, @intFromPtr(&transport));
     try slot.abortAttachmentBinding(&binding, reservation);
 }
 
@@ -1863,9 +2199,9 @@ test "CR3a-2c3b pending flush callback cannot redirect canonical execute owners"
     defer slot.deinit();
     var binding: contract.PreparedAttachmentBinding = .{};
     var lease: @import("connection_lease.zig").ConnectionLease = .{};
-    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0x2C3BC2);
     var transport: GenerationTransport = .{};
-    try mintInPlace(&transport, &slot, 0x2C3BC3, @sizeOf(GenerationTransport), reservation);
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, @intFromPtr(&transport));
+    try mintInPlace(&transport, &slot, @intFromPtr(&transport), @sizeOf(GenerationTransport), reservation);
     const receipt = try transport.prepareRequest(contract.RuntimeRequest.attachController());
     slot.logicalClient().pending_outbound = .{
         .frame = try probe.allocator().dupe(u8, "older"),
@@ -1891,11 +2227,11 @@ test "CR3a-2c3b pending flush callback cannot redirect canonical execute owners"
         executed_response_mod.DeinitOutcome.cleaned,
         response.deinit(try slot.responseOwnerSeal(reservation)),
     );
-    try terminalizeOwned(&transport, 0x2C3BC3);
+    try terminalizeOwned(&transport, @intFromPtr(&transport));
     try slot.abortAttachmentBinding(&binding, reservation);
 }
 
-test "CR3a-2a accepted response retains allocator captured before wire" {
+test "CR3a-2c3b actual socket accepted response retains allocator captured before wire" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     try client_slot_mod.ClientSlot.initializeProcessRuntime();
     const allocator = std.testing.allocator;
@@ -1930,9 +2266,9 @@ test "CR3a-2a accepted response retains allocator captured before wire" {
     defer slot.deinit();
     var binding: contract.PreparedAttachmentBinding = .{};
     var lease: @import("connection_lease.zig").ConnectionLease = .{};
-    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0xD2);
     var transport: GenerationTransport = .{};
-    try mintInPlace(&transport, &slot, 0x107, @sizeOf(GenerationTransport), reservation);
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, @intFromPtr(&transport));
+    try mintInPlace(&transport, &slot, @intFromPtr(&transport), @sizeOf(GenerationTransport), reservation);
     const receipt = try transport.prepareRequest(contract.RuntimeRequest.attachController());
     var response: executed_response_mod.ExecutedResponse = .{};
     probe.armed = true;
@@ -1941,8 +2277,8 @@ test "CR3a-2a accepted response retains allocator captured before wire" {
     try std.testing.expect(result == .accepted);
     try std.testing.expect(probe.mutated_after_preflight);
     try std.testing.expectEqual(
-        @as(*anyopaque, @ptrCast(&slot.current.guarded_allocator)),
-        response.allocator.?.ptr,
+        @intFromPtr(@as(*anyopaque, @ptrCast(&slot.current.guarded_allocator))),
+        response.allocator_ptr,
     );
     try std.testing.expectEqual(
         executed_response_mod.DeinitOutcome.cleaned,
@@ -1951,7 +2287,7 @@ test "CR3a-2a accepted response retains allocator captured before wire" {
     try std.testing.expect(probe.captured_payload_free_seen);
     probe.armed = false;
     client.allocator = probe.allocator();
-    try terminalizeOwned(&transport, 0x107);
+    try terminalizeOwned(&transport, @intFromPtr(&transport));
     try slot.abortAttachmentBinding(&binding, reservation);
 }
 

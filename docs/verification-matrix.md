@@ -848,6 +848,12 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   attachment mutation 0 뒤 offending connection close와 server subscription final-zero다.
   execute 전 abort, typed reject, accepted valid, accepted malformed, accepted binding mismatch, uncertain 각각의
   `{prepared request owner,TX backing,response payload,binding,pin/drop entry}` final-zero/consumed/terminal 상태를 전수한다.
+  request/execute allocator scope는 final-address token copy/move, exact/partial allocation alias, purpose/client/epoch/allocator splice,
+  duplicate restore, padding 비의존 pristine 판정과 epoch 소진 mutation 0을 검증한다. response tombstone은 live owner seal 없이는 generic
+  deinit이 승인하지 않고, registry clear 뒤의 finish/attachment teardown 재호출도 성공으로 접지 않고 fail-close한다.
+  declared owner range의 transport/storage 미포함 및 slot/node/Client/owner-seal partial overlap과 executing request의
+  allocator-scope·response-incarnation issuer exact-max/cap+1을 닫는다. publication 전 transport/registry issuer 소진은 별도
+  mutation-zero gate로 유지한다.
   같은 token의 two-address prepare, prepare→reentry→consume/abort, nested permit,
   permit callback 안 parent release/deinit은 typed busy이고 active permit 0 뒤에만 pin release가 성공한다. node-local GUI cleanup
   registry에서 duplicate release/drop과 node 조기 destroy는 0이다. buffered Client queue 또는 direct parser descriptor에서 같은
@@ -889,15 +895,24 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   mutation 없이 거부한다. 이 증거는 2c3a만 닫으며 capability/RPC/control/event/source-zero는 2c3b~e, raw field 제거는 2c4다.
   connection-wide buffered revoke는 generation 조회와 `Client` blocking/deadline RPC의 pre-flush gate를 함께 통과해야 하며,
   sibling RPC·detach가 pending mutation wire를 보내지 않는 socketpair 회귀를 포함한다.
-  2c3b는 부분 구현(2c3b-1 capability facade 완료, closed RPC 미착수)이다. 2c3b-2는 request-side authority만 닫는
-  wire/product-behavior-zero gate다. 14-tag family/role/phase/method 전수표, node-entry `PreparedRequestAuthority` raw lifecycle과
+  2c3b는 부분 구현이다. 2c3b-1 capability facade와 2c3b-2 request-side authority는 구현·검증 완료했고, 2c3b-3 public RPC
+  response execution/ownership은 구현 전이다. 2c3b-2는 관측 가능한 wire/product behavior를 유지하면서 request authority와 기존
+  attach-compatible response execution의 begin/revalidate/settle hardening까지만 닫는 gate다. 14-tag family/role/phase/method 전수표,
+  node-entry `PreparedRequestAuthority` raw lifecycle과
   settledExact, opaque prepared storage와의 all-or-none prepare/abort, canonical frame descriptor·allocator provenance, registry-first
   admission을 Debug/ReleaseFast에서 검증한다. allocation fail-index, copy/move/same-address restore, cross binding/tag splice, forged
-  ptr/len/cap/allocator와 owner range alias는 frame hash/역참조/free/wire 0이어야 한다. `spawn_full`은 connection-only denied로
+  ptr/len allocation extent/allocator와 owner range alias는 frame hash/역참조/free/wire 0이어야 한다. prepared frame은 allocator가
+  반환한 exact owned Zig slice이므로 독립 capacity 권위가 없고 allocation extent는 `len`이며, free도 exact slice만 받는다.
+  `spawn_full`은 connection-only denied로
   prepare 전 거부한다. public RuntimeRequest의 arbitrary method/encoded JSON/stream ID escape는 0이고 typed variant DTO에서 canonical
   binding stream과 role-sensitive discriminator를 한 번만 encode한다. exact `PrepareError|AbortError`와 Client error mapping을 compile-time
   inventory로 고정하고, GenerationTransport direct prepared Client API callsite는 0이며 기존 attach socket parity는 유지한다.
-  2c3b-3만 public RPC destination과 response payload behavior를 연다. 구현 gate는
+  제품 타입의 `prepared request rejects a live cross-binding transport splice`와
+  `stale prepared receipt fails after same-address transport reincarnation`이 각각 두 live binding 사이 receipt 교차 결합과
+  동일 final address 재민트 뒤 stale receipt의 execute/abort 거부를 직접 고정한다. registry가 response owner를 settle한 뒤에는
+  `registry-cleared uncertain response rejects finish and attachment retry`와
+  `registry-cleared typed reject rejects finish and attachment retry`가 finish/teardown 재호출의 `corrupt` 수렴을 고정한다.
+  2c3b-3만 public RPC destination, 반복 RPC response authority와 response payload borrow/finish behavior를 연다. 구현 gate는
   `capabilities(*const GenerationTransport) -> error{Busy,InvalidOwner}!GenerationCapabilities`의 raw-first admission,
   capability DTO exact-field projection과 closed request tag 전수 mapping, attach 전용 one-shot
   `ExecutedResponse`와 반복 RPC 전용 transport epoch authority의 분리를 검증한다. 반복 RPC는 2회·64회 순차 성공과 pre-wire reject 뒤

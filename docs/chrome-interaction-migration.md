@@ -421,34 +421,3 @@ consumer PR은 native host E2E 또는 명시된 수동 검증 절차와 결과�
 
 grid, static transform, animation, multi-touch, rich accessibility tree는 이 문서의 first migration
 범위 밖이다. 필요가 증명될 때 각각 별도 typed contract와 성능/host gate를 연다.
-
-## 10. 적대적 검토 기록
-
-이 문서는 다음 반복 검토에서 나온 수정 사항을 반영한다. 각 반복은 implementation approval이 아니라
-설계의 fail-closed 조건을 강화한 것이다.
-
-1. **runtime leak 검토** — generic UI에 live pointer를 넣지 않고 epoch/generation/identity 재검증을
-   §5에 추가했다.
-2. **terminal compatibility 검토** — gesture arena보다 terminal mouse reporting/input policy가 먼저
-   판정돼야 함을 §4.2에 추가했다.
-3. **UX regression 검토** — 현 terminal tab의 live reorder를 preview-only commit으로 무단 변경하지
-   않도록 approval gate를 뒀고, 그 결정은 §4.4의 provisional live reorder로 확정됐다.
-4. **resize·native drop 검토** — divider resize의 move 중 geometry/PTY resize를 reorder preview와
-   분리하고, native drop의 별도 `refused`/`not_applicable` 경계와 bounded-candidate 실패 규율을
-   §4.3·§7.1에 추가했다.
-5. **keyboard·IME·accessibility 검토** — `UiActionId`만으로 native semantic/IME contract를 대신하지
-   못함을 확인했다. 범용 문자열 버퍼 이관을 금지하고 typed semantic descriptor, consumer별
-   first-responder/IME 검증을 §3·§8~9에 추가했다.
-6. **코드 대조 검토** — 문서의 현행 서술을 `main` 코드와 맞췄다. `reconcile`이 tree 비교 없이 항상
-   cancel한다는 사실(§5), capture 권위가 `PointerGestureOwner`와 Session Dock `InteractionState`
-   둘이라는 사실과 그 상호배제 규칙(§2), `PointerGestureOwner` variant 전수 inventory(§2), modal
-   진입을 capture cancel 트리거로 추가(§4.3), continuous resize의 tick 단위 coalesce와 §7 예외
-   명시, keyboard focus가 pointer route를 따르지 않는다는 계약(§4.2), Chrome Lab에 render scale
-   축이 없다는 사실에 맞춘 gate 재정의(§8), 공개 component 표면과 B1 시퀀스의 소유권을
-   `metal-ui-layout.md`로 되돌린 것(§3·§8)이 이 반복의 결과다.
-7. **판정 순서·drift 검토** — §2의 "`InteractionState`가 먼저"가 실제 `mouse()` 순서와 달라, 진행 중인
-   capture를 rect 판정이 가로채는 동작을 계약으로 굳힐 뻔했다. 세 단계 순서(진행 중 capture 최우선 →
-   §4.2 route → 컴포넌트 rect)로 정정했고 제품 코드도 같은 규칙을 따르게 고쳤다. §4.4를 §4.3의
-   특수화로 명시하고, §9 공통 조건과 매트릭스 단계 gate를 별개 축으로 갈랐다. 이어 Session Dock에
-   검색 필드가 들어오면서 생긴 drift — inventory의 보존 동작(§2), keyboard 소유의 두 축(§4.2),
-   편집 모델 목록(§3) — 을 최신 `main` 기준으로 맞췄다.

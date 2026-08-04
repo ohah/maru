@@ -64801,13 +64801,23 @@ test "Session Dock 검색은 사이드바 검색과 같은 입력 소유 판정�
     try std.testing.expect(!session.terminalOwnsInput());
     try std.testing.expectEqual(AppSession.InputFocus.terminal, session.inputFocus());
 
-    // 도크 검색 활성 → 키가 Zig 경로여야 하므로 host override가 걸려야 한다.
-    session.agent_session_archive_search_active = true;
+    // 제품 경로로 연다 — `/`가 도크 검색을 활성화한다(필드 클릭과 같은 상태로 들어간다).
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = '/' }, .modifiers = .{} });
+    try std.testing.expect(session.agent_session_archive_search_active);
     try std.testing.expect(session.terminalOwnsInput());
     try std.testing.expectEqual(AppSession.InputFocus.agent_session_search, session.inputFocus());
 
+    // 타이핑도 같은 경로로 들어가고, override는 유지된다.
+    for ("maru") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    try std.testing.expect(session.terminalOwnsInput());
+
+    // Escape로 닫으면 override도 함께 풀린다.
+    _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
+    try std.testing.expect(!session.agent_session_archive_search_active);
+    try std.testing.expect(!session.terminalOwnsInput());
+    try std.testing.expectEqual(AppSession.InputFocus.terminal, session.inputFocus());
+
     // 사이드바 검색과 대칭.
-    session.agent_session_archive_search_active = false;
     session.sidebar_search_active = true;
     try std.testing.expect(session.terminalOwnsInput());
     try std.testing.expectEqual(AppSession.InputFocus.sidebar_search, session.inputFocus());

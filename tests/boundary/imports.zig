@@ -430,8 +430,8 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .name = "transferReservedExternalModeDeinit", .receiver_type = mutable, .class = .construction },
         .{ .name = "bindOperationFence", .receiver_type = mutable, .class = .construction },
 
-        .{ .name = "beginGenerationBatchAllocator", .receiver_type = mutable, .class = .unchecked },
-        .{ .name = "restoreGenerationBatchAllocatorUnchecked", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "beginGenerationAllocatorScope", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "restoreGenerationAllocatorScopeUnchecked", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "prepareGenerationAccountingConsume", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "consumeGenerationAccountingUnchecked", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "tryAcquireEndedPurgeExclusive", .receiver_type = mutable, .class = .unchecked },
@@ -456,9 +456,9 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .receiver = "requireAdminRuntimeEnd", .funnel = "requireAdminRuntimeEnd", .gate = "requireBlockingMode" },
         .{ .receiver = "deinit", .funnel = "tryDeinit", .gate = "tryAcquireExclusive", .gate_prefix = "fence", .gate_depth = 2, .release = "abortExclusive", .release_prefix = "fence", .release_depth = 2, .pre_gate_self_fields = &.{ "operation_fence", "operation_fence_generation" } },
         .{ .receiver = "tryDeinit", .funnel = "tryDeinit", .gate = "tryAcquireExclusive", .gate_prefix = "fence", .gate_depth = 2, .release = "abortExclusive", .release_prefix = "fence", .release_depth = 2, .pre_gate_self_fields = &.{ "operation_fence", "operation_fence_generation" } },
-        .{ .receiver = "beginGenerationBatchAllocator", .funnel = "beginGenerationBatchAllocator", .gate = "ensureUsable" },
+        .{ .receiver = "beginGenerationAllocatorScope", .funnel = "beginGenerationAllocatorScope", .gate = "ensureUsable" },
         .{ .receiver = "requireBufferedGenerationBatch", .funnel = "requireBufferedGenerationBatch", .gate = "ensureUsable" },
-        .{ .receiver = "restoreGenerationBatchAllocatorUnchecked", .funnel = "restoreGenerationBatchAllocatorUnchecked", .gate = "beginPublicMutation" },
+        .{ .receiver = "restoreGenerationAllocatorScopeUnchecked", .funnel = "restoreGenerationAllocatorScopeUnchecked", .gate = "beginPublicMutation" },
         .{ .receiver = "enterExternalMode", .funnel = "enterExternalMode", .gate = "beginPublicMutation" },
         .{ .receiver = "call", .funnel = "callWithIo", .gate = "requireBlockingMode" },
         .{ .receiver = "callUntil", .funnel = "callUntilWithOps", .gate = "requireBlockingMode" },
@@ -1169,7 +1169,7 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
         .{
             .path = "src/platform/macos/session_host/client.zig",
             .baseline_count = 527,
-            .baseline_digest = .{ 0x58, 0x75, 0xba, 0x4a, 0xaa, 0x83, 0x2e, 0xf2, 0x97, 0xc4, 0x07, 0xc0, 0xad, 0x82, 0x5c, 0x22, 0xeb, 0xa5, 0x4d, 0x00, 0xb8, 0x1f, 0x45, 0xc3, 0xc8, 0x61, 0xb5, 0xbf, 0x01, 0x29, 0x82, 0x61 },
+            .baseline_digest = .{ 0x89, 0x77, 0xc2, 0x92, 0xdb, 0x37, 0x5c, 0xb3, 0x66, 0x25, 0x0e, 0x33, 0xd5, 0xf8, 0x02, 0xfb, 0xdb, 0x33, 0x93, 0x43, 0x2d, 0xbe, 0xe0, 0xa6, 0xd1, 0x61, 0x89, 0x2d, 0xbb, 0x62, 0xa8, 0xa8 },
             .containers = &.{ "Client", "EndedPurgeScratch", "PreparedEndedPurgeInventory" },
             .optional_containers = &.{ "PreparedEndedPurgeCommit", "ClientOperationFence" },
             .allowed = &.{
@@ -1266,12 +1266,13 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "abortClientSlotTeardownExclusive" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "tryDeinitClientSlotExclusiveHeld" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "bufferedControllerRevokeForStreamUnchecked" },
+                .{ .parent = "Client", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationAllocatorPurpose" },
             },
         },
         .{
             .path = "src/platform/macos/session_host/client_slot.zig",
-            .baseline_count = 126,
-            .baseline_digest = .{ 0x03, 0xa9, 0x2a, 0x14, 0x6d, 0xbf, 0x89, 0x35, 0x46, 0x6d, 0x0b, 0x92, 0x50, 0xb0, 0x9c, 0x88, 0x4d, 0x57, 0x5f, 0x15, 0xfc, 0x14, 0x8f, 0x73, 0xc6, 0xdb, 0x89, 0x79, 0xbc, 0x69, 0xd9, 0x68 },
+            .baseline_count = 127,
+            .baseline_digest = .{ 0xa8, 0x74, 0x00, 0x69, 0x5e, 0xef, 0x13, 0xe4, 0x46, 0x69, 0x0f, 0x65, 0x59, 0x53, 0xb7, 0x40, 0x2b, 0x30, 0x61, 0x22, 0xb7, 0xf1, 0x94, 0xf7, 0xf6, 0x1f, 0x74, 0x00, 0x68, 0x6e, 0xd8, 0xc9 },
             .containers = &.{ "ClientSlot", "EndedPurgePreparation" },
             .optional_containers = &.{},
             .allowed = &.{
@@ -2868,7 +2869,7 @@ test "session host unchecked teardown authority cannot escape anywhere in src" {
             .pump_references = 0,
         },
         .{
-            .name = "restoreGenerationBatchAllocatorUnchecked",
+            .name = "restoreGenerationAllocatorScopeUnchecked",
             .owner_suffixes = &.{
                 "platform/macos/session_host/client.zig",
                 "platform/macos/session_host/client_slot.zig",
@@ -3238,10 +3239,10 @@ test "generation batch Client ownership mutations have one node-bound production
         const read_count = countOccurrences(source, ".readGenerationBatch(");
         const prepare_count = countOccurrences(source, ".prepareGenerationAccountingConsume(");
         const bind_count = countOccurrences(source, ".bindGenerationAccountingLedger(");
-        const begin_allocator_count = countOccurrences(source, ".beginGenerationBatchAllocator(");
+        const begin_allocator_count = countOccurrences(source, ".beginGenerationAllocatorScope(");
         const restore_allocator_count = countOccurrences(
             source,
-            ".restoreGenerationBatchAllocatorUnchecked(",
+            ".restoreGenerationAllocatorScopeUnchecked(",
         );
         const enter_callback_count = countIdentifierOutsideTopLevelTests(
             source,
@@ -3281,10 +3282,10 @@ test "generation batch Client ownership mutations have one node-bound production
     try std.testing.expectEqual(@as(usize, 1), read_references);
     try std.testing.expectEqual(@as(usize, 1), prepare_references);
     try std.testing.expectEqual(@as(usize, 1), bind_references);
-    // Batch와 one-shot initial snapshot은 같은 node-local allocator swap boundary를 쓰며,
-    // 그 밖의 파일에는 raw allocator authority가 없다.
-    try std.testing.expectEqual(@as(usize, 2), begin_allocator_references);
-    try std.testing.expectEqual(@as(usize, 2), restore_allocator_references);
+    // Batch, one-shot initial snapshot, RPC prepare/execute는 purpose-tagged node-local
+    // allocator scope를 공유하며, 그 밖의 파일에는 raw allocator authority가 없다.
+    try std.testing.expectEqual(@as(usize, 4), begin_allocator_references);
+    try std.testing.expectEqual(@as(usize, 4), restore_allocator_references);
     try std.testing.expectEqual(@as(usize, 4), enter_callback_references);
     try std.testing.expectEqual(@as(usize, 4), leave_callback_references);
     // 모든 node-local mutation은 callback TLS를 한 공통 guard에서만 읽는다.
@@ -8530,8 +8531,8 @@ fn expectGuardedClientReceiverPolicies(
     var guarded_authority_count: usize = 0;
     for (manifest) |entry| {
         const guarded_authority = entry.class == .unchecked and
-            (std.mem.eql(u8, entry.name, "beginGenerationBatchAllocator") or
-                std.mem.eql(u8, entry.name, "restoreGenerationBatchAllocatorUnchecked"));
+            (std.mem.eql(u8, entry.name, "beginGenerationAllocatorScope") or
+                std.mem.eql(u8, entry.name, "restoreGenerationAllocatorScopeUnchecked"));
         if (entry.class != .guarded and !guarded_authority) continue;
         if (guarded_authority) guarded_authority_count += 1 else guarded_count += 1;
         var proof_count: usize = 0;

@@ -216,16 +216,28 @@ resize에 반영한다(coalesce). 좌표가 이전 적용값과 같은 cell/pixe
 않는다. 즉 move 이벤트 수가 아니라 tick 수와 실제 geometry 변화가 resize fan-out의 상한이다.
 allocation·filesystem I/O·worker wait 금지는 이 예외에서도 그대로 적용된다.
 
-**중요한 미결정:** 현재 terminal tab drag는 drag 중 실제 순서를 바꾸는 live-reorder 동작이다.
-`TabList` 이관 전 아래 중 하나를 별도 승인해야 한다.
+### 4.4 terminal tab drag는 provisional live reorder다
 
-1. 기존 live reorder를 유지하는 adapter를 만든다.
-2. preview-only reorder로 제품 동작을 바꾸고 keyboard/accessibility·capture E2E를 함께 갱신한다.
-3. **권장: provisional live reorder** — drag 중에는 인접 tab의 위치를 즉시 바꾸되 시작 순서를
-   transaction에 보관하고, up에서만 model commit한다. Escape/cancel/window deactivate/target removal은
-   시작 순서를 복원한다. 이는 direct manipulation의 즉시성을 유지하면서 cancel을 안전하게 만든다.
+terminal tab drag는 **provisional live reorder**를 쓴다. drag 중에는 인접 tab의 위치를 즉시 바꿔
+direct manipulation의 즉시성을 유지하되, 그 순서는 아직 model이 아니다.
 
-승인 전에는 generic drag substrate가 terminal tab reorder 동작을 바꾸지 않는다.
+- drag 시작 시 host가 **시작 순서를 transaction에 보관**한다. 이 transaction은 drag 수명 동안만
+  살아 있고 다른 mutation과 공유하지 않는다.
+- drag 중 보이는 순서는 `InteractionState`에서 파생한 provisional 배열이다. 이 배열은 paint와
+  hit-test가 함께 쓰지만 `Tab` model, persisted workspace 순서, PTY, config write를 건드리지 않는다.
+- **up에서만** 한 번 commit한다. commit destination의 권위는 §5대로 up 좌표를 현재 published
+  tree에 재hit-test한 결과이고, 그 좌표가 유효한 destination을 못 짚으면 commit 없이 시작 순서를
+  복원한다.
+- Escape, pointer cancel, window deactivate, modal/native overlay 진입, source 또는 target tab
+  removal, snapshot/window epoch mismatch는 모두 **시작 순서를 복원**하고 effect 0으로 끝난다.
+  복원은 transaction 하나를 되돌리는 것이므로 부분 적용된 중간 순서를 남기지 않는다.
+- drag가 살아 있는 동안 다른 경로(단축키 select/close, 원격 관측, session restore)가 tab 집합을
+  바꾸면 provisional 배열을 폐기하고 시작 순서로 복원한 뒤 그 변경을 적용한다. provisional 배열을
+  새 집합에 맞춰 재봉합하지 않는다.
+
+이 선택은 기존 영구 live reorder(사용자가 손을 떼기 전에 model이 이미 바뀜)와 preview-only
+reorder(즉시성 상실) 사이에서, 즉시성은 유지하고 cancel만 안전하게 만들기 위한 것이다. 제품
+승인을 받은 결정이며, `TabList` 이관은 이 계약을 구현한다.
 
 ## 5. identity, snapshot, lifecycle
 
@@ -335,8 +347,10 @@ CIM1은 B1 이관 PR이 전부 merge된 뒤에 시작하고, 그 전에는 CIM0(
    옮긴다. split tree removal, resize clamp, WebView divider pass-through AppKit E2E를 포함한다.
 4. **CIM3 — ScrollArea/Scrollbar**: file tree와 Session Dock 중 하나를 first consumer로 삼는다.
    wheel/thumb/track click/keyboard, scroll anchor, stale projection cancel을 fixture와 capture로 고정한다.
-5. **CIM4 — TabList/Tab**: §4.3의 live-reorder UX 결정을 승인한 뒤 terminal tab을 이관한다.
-   select/close/overflow scroll/reorder/drop/split/detach와 terminal mouse routing을 분리 검증한다.
+5. **CIM4 — TabList/Tab**: §4.4의 provisional live reorder를 구현해 terminal tab을 이관한다.
+   select/close/overflow scroll/reorder/drop/split/detach와 terminal mouse routing을 분리 검증하고,
+   §4.4의 복원 트리거(Escape/cancel/deactivate/modal 진입/tab removal/epoch mismatch)마다 시작 순서
+   복원과 effect 0을 각각 고정한다.
 6. **CIM5 — Reorderable Sidebar**: group·pin·agent-row model은 domain에 두고, row geometry와 drag
    preview/cancel만 common capability로 바꾼다.
 7. **CIM6 — Input/overlay composite**: 한 PR에서 palette/find/settings를 일괄 이관하지 않는다. 먼저
@@ -387,7 +401,7 @@ grid, static transform, animation, multi-touch, rich accessibility tree는 이 �
 2. **terminal compatibility 검토** — gesture arena보다 terminal mouse reporting/input policy가 먼저
    판정돼야 함을 §4.2에 추가했다.
 3. **UX regression 검토** — 현 terminal tab의 live reorder를 preview-only commit으로 무단 변경하지
-   않도록 §4.3 approval gate를 추가했다.
+   않도록 approval gate를 뒀고, 그 결정은 §4.4의 provisional live reorder로 확정됐다.
 4. **resize·native drop 검토** — divider resize의 move 중 geometry/PTY resize를 reorder preview와
    분리하고, native drop의 별도 `refused`/`not_applicable` 경계와 bounded-candidate 실패 규율을
    §4.3·§7.1에 추가했다.

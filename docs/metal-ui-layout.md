@@ -7,7 +7,9 @@ React/shadcn의 **작고 조합 가능한 component·props·slot** 모델과 CSS
 
 상위 chrome 추출·토큰·semantic draw 계약은 [Chrome 전략](chrome-strategy.md)을,
 세션 도크의 첫 consumer 계약은 [에이전트 세션 기록 도크](agent-session-list.md)를
-따른다.
+따른다. 기존 탭·사이드바·divider·scroll·overlay를 이 tree와 interaction subsystem으로
+점진 이관하는 순서와 host 효과 경계는 [Chrome 상호작용 컴포넌트 이관 전략](chrome-interaction-migration.md)이
+단일 출처다.
 
 ## 1. 목표와 비목표
 

@@ -19,6 +19,7 @@ final class AgentSessionArchiveSmokeDriver {
         case snapshotReplacePointer = "snapshot-replace-pointer"
         case expandedScrollAnchor = "expanded-scroll-anchor"
         case fontScaleRects = "font-scale-rects"
+        case fontZoom = "font-zoom"
         case claudeResumePointer = "claude-resume-pointer"
 
         init?(environment: [String: String] = ProcessInfo.processInfo.environment) {
@@ -30,6 +31,8 @@ final class AgentSessionArchiveSmokeDriver {
     enum Shortcut {
         case resume
         case reveal
+        case increaseFont
+        case decreaseFont
     }
 
     /// Renderer capture is deliberately a fixture observer, not an input/action path. The two
@@ -75,6 +78,9 @@ final class AgentSessionArchiveSmokeDriver {
         case startExpandedAnchorRefresh
         case waitForExpandedAnchorGate
         case waitForExpandedAnchorAfter
+        case waitForFontZoomIncrease
+        case waitForFontZoomReset
+        case waitForFontZoomDecrease
         case invokeAction
         case waitForAction
         case succeeded
@@ -105,6 +111,10 @@ final class AgentSessionArchiveSmokeDriver {
     /// Both are raw, un-clipped outer-card rects. A clipped visible rect would be pinned to the
     /// content edge and falsely pass even if refresh lost the intra-card scroll position.
     private var expandedAnchorBefore: MaruAppHostAgentSessionArchiveSmokeProbe?
+    /// A fixed, fully visible control is the geometry witness for Cmd zoom. The inline resume
+    /// action can legitimately be clipped by the scroll viewport, in which case its visible
+    /// height is not its component metric and is therefore unsuitable for a scale assertion.
+    private var fontZoomBaselineScopeHeight: Float?
     private var terminalBaseline: TerminalInvariant?
     private(set) var terminalInvariantSatisfied = false
     private(set) var scrollDispatched = false
@@ -294,7 +304,56 @@ final class AgentSessionArchiveSmokeDriver {
                 stage = .succeeded
                 return
             }
+            if scenario == .fontZoom {
+                guard let scope = probe(MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_SCOPE_ROW),
+                      scope.present != 0, scope.height_px > 0
+                else { return }
+                fontZoomBaselineScopeHeight = scope.height_px
+                guard shortcut(.increaseFont) else {
+                    fail("font_zoom_increase_shortcut")
+                    return
+                }
+                stage = .waitForFontZoomIncrease
+                paintRequested = true
+                return
+            }
             stage = .invokeAction
+
+        case .waitForFontZoomIncrease:
+            guard let baseline = fontZoomBaselineScopeHeight,
+                  let scope = probe(MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_SCOPE_ROW),
+                  scope.present != 0, scope.height_px > baseline
+            else { return }
+            guard shortcut(.decreaseFont) else {
+                fail("font_zoom_reset_shortcut")
+                return
+            }
+            stage = .waitForFontZoomReset
+            paintRequested = true
+
+        case .waitForFontZoomReset:
+            guard let baseline = fontZoomBaselineScopeHeight,
+                  let scope = probe(MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_SCOPE_ROW),
+                  scope.present != 0, scope.height_px == baseline
+            else { return }
+            guard shortcut(.decreaseFont) else {
+                fail("font_zoom_decrease_shortcut")
+                return
+            }
+            stage = .waitForFontZoomDecrease
+            paintRequested = true
+
+        case .waitForFontZoomDecrease:
+            guard let baseline = fontZoomBaselineScopeHeight,
+                  let scope = probe(MARU_AGENT_SESSION_ARCHIVE_SMOKE_TARGET_SCOPE_ROW),
+                  scope.present != 0, scope.height_px < baseline
+            else { return }
+            guard matchesTerminalBaseline(sessionInvariant()) else {
+                fail("inline_detail_changed_terminal_font_zoom")
+                return
+            }
+            terminalInvariantSatisfied = true
+            stage = .succeeded
 
         case .closeDetail:
             // Use the exact same published card capability that opened the detail. This is an
@@ -516,7 +575,7 @@ final class AgentSessionArchiveSmokeDriver {
 
         case .invokeAction:
             switch scenario {
-            case .fontScaleRects:
+            case .fontScaleRects, .fontZoom:
                 fail("font_scale_unreachable_action")
                 return
             case .resumePointer, .claudeResumePointer:
@@ -551,7 +610,7 @@ final class AgentSessionArchiveSmokeDriver {
 
         case .waitForAction:
             switch scenario {
-            case .fontScaleRects:
+            case .fontScaleRects, .fontZoom:
                 fail("font_scale_unreachable_wait")
                 return
             case .resumePointer, .resumeKeyboard, .claudeResumePointer:

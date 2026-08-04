@@ -243,6 +243,15 @@ jq -s -e '
     and all(names[] as $n | fields[] as $f | (($f24s2.rects[$n].raw_px[$f] - (2 * $f24s1.rects[$n].raw_px[$f])) | abs) <= 1.0)
 ' "$root/font-scale-rects-font-14-scale-1000.geometry.json" "$root/font-scale-rects-font-14-scale-2000.geometry.json" "$root/font-scale-rects-font-24-scale-1000.geometry.json" "$root/font-scale-rects-font-24-scale-2000.geometry.json" >/dev/null
 
+# This is a physical `MaruMetalTerminalView.keyDown` route: Cmd+= grows the fully visible
+# published scope-row rect, Cmd+- returns it to its original height, and a second Cmd+- shrinks
+# it below baseline. The inline resume action may be scroll-clipped, so its visible hit height is
+# intentionally not used as a scale witness.
+run_scenario font-zoom
+grep -Eq '^agent_session_archive_smoke_stage=succeeded$' "$root/font-zoom.summary.txt"
+grep -Eq '^agent_session_archive_smoke_scenario=font-zoom$' "$root/font-zoom.summary.txt"
+grep -Eq '^agent_session_archive_smoke_terminal_invariant=true$' "$root/font-zoom.summary.txt"
+
 run_scenario reveal-recheck-pointer
 grep -Eq '^agent_session_archive_smoke_stage=succeeded$' "$root/reveal-recheck-pointer.summary.txt"
 grep -Eq '^agent_session_archive_smoke_scenario=reveal-recheck-pointer$' "$root/reveal-recheck-pointer.summary.txt"

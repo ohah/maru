@@ -72,7 +72,8 @@ pub const Props = struct {
     viewport_px: layout.UiSize,
     cell_width_px: u32,
     cell_height_px: u32,
-    /// Backing pixels per logical point. Semantic components use this only to reserve role
+    /// Resolved backing pixels per logical Dock point: device backing scale composed with the
+    /// host-owned bounded SessionDockUiZoom. Semantic components use this only to reserve role
     /// line boxes; platform adapters still own actual glyph ink/baseline measurement.
     scale_milli: u32 = 1000,
     snapshot_generation: u64,
@@ -98,11 +99,12 @@ pub const Props = struct {
 /// One immutable geometry snapshot for all Session Dock consumers. The host gets this same
 /// value for virtualization and wheel motion; build gets it for the published UiRectTree; view
 /// gets it for component-owned text offsets. Keeping terminal-cell metrics out of this type
-/// prevents a terminal-font preference from moving a visible Chrome hit target.
+/// prevents terminal family/line-spacing from moving a visible Chrome hit target; the host may
+/// deliberately compose an explicit bounded UI zoom into `scale_milli`.
 pub const DockMetrics = struct {
-    /// Session Dock을 고르는 상단 view switcher의 고정 높이. 이 값은 terminal tab bar와
-    /// 공유하지 않는다. terminal zoom이 Session Dock의 content origin을 움직이면 component가
-    /// 고정하던 card/action rect 계약도 함께 깨지기 때문이다.
+    /// Session Dock을 고르는 상단 view switcher의 logical height. 이 값은 terminal tab bar와
+    /// 공유하지 않는다. terminal family/line spacing은 content origin을 움직이지 않지만, explicit
+    /// bounded Dock UI zoom은 the same completed tree's card/action rect와 함께 적용된다.
     view_switcher_h: u32,
     header_h: u32,
     scope_h: u32,
@@ -207,7 +209,7 @@ pub const DockMetrics = struct {
 };
 
 /// Metrics of one measured action-content group. These values use Chrome logical points and the
-/// backing scale only; terminal cell width and SVG viewBox whitespace are not padding inputs.
+/// resolved Dock scale only; terminal cell width and SVG viewBox whitespace are not padding inputs.
 pub const ButtonMetrics = struct {
     content_inset_x_px: u32,
     content_inset_y_px: u32,
@@ -280,7 +282,7 @@ test "DockMetrics fixes all Session Dock geometry independently of terminal cell
     try std.testing.expect(m.detail_turn_y + m.detail_turn_step * 3 <= m.expanded_detail_h);
 }
 
-test "DockMetrics scales only with backing scale" {
+test "DockMetrics scales with one resolved Dock scale" {
     const one_x = DockMetrics.resolve(1000);
     const two_x = DockMetrics.resolve(2000);
     inline for (std.meta.fields(DockMetrics)) |field| {

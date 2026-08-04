@@ -8446,8 +8446,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     /// Uses the same `MaruMetalTerminalView.keyDown` route as a physical shortcut.  The driver
-    /// chooses only the documented action shortcut; Zig still resolves it through the published
-    /// generation-bound table and rejects a disabled or stale detail action.
+    /// chooses only documented shortcuts; Zig still resolves every event through the normal
+    /// keybinding path. Archive actions remain generation-bound, and the font cases prove the
+    /// physical Cmd zoom route without a test-only AppSession mutation.
     private func dispatchArchiveSmokeShortcut(
         _ shortcut: AgentSessionArchiveSmokeDriver.Shortcut,
         in view: MaruMetalTerminalView,
@@ -8456,6 +8457,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let input: (characters: String, keyCode: UInt16) = switch shortcut {
         case .resume: ("\r", 36)
         case .reveal: ("l", 37)
+        case .increaseFont: ("=", 24)
+        case .decreaseFont: ("-", 27)
         }
         guard let event = NSEvent.keyEvent(
             with: .keyDown,

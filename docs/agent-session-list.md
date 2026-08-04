@@ -77,9 +77,11 @@ identity는 바꾸지 않으며, `SessionDock`의 같은 completed `UiRectTree`�
   dock 밖으로 overflow하거나 서로 다른 경계에 놓이지 않는다. group disclosure는 이 content rect
   안에서 별도의 8pt leading slot만 쓴다. 즉 root inset을 다시 20pt 더하지 않아 chevron·목록을
   불필요하게 안쪽으로 밀지 않는다. 이 기하는 **terminal cell**이
-  아니라 Chrome의 logical spacing/type token과 backing scale에서만 결정한다. header·scope·search는
-  scroll하지 않고, group부터만 scroll한다. terminal font·line spacing을 바꿔도 도크의 버튼
-  여백·목록 밀도·hit rect가 바뀌어서는 안 된다.
+  아니라 Chrome의 logical spacing/type token과 `SessionDockUiZoom`을 합성한 dock scale에서만 결정한다.
+  header·scope·search는 scroll하지 않고, group부터만 scroll한다. terminal font family·line spacing을
+  바꿔도 도크의 버튼 여백·목록 밀도·hit rect가 바뀌어서는 안 된다. 단, `Cmd`+`+`/`-`/`0`의 font-size
+  비율은 750–1500 milli로 clamp된 `SessionDockUiZoom`이므로, 이 명시적 zoom에는 모든 dock rect와 hit rect가
+  함께 확대·축소된다.
 - header는 title(강조) → count(secondary)의 좌측 두 줄과 Maru 등록 host SVG + `로컬`/refresh의 우측
   utility cluster를 서로 독립 logical slot으로 둔다. title/count/utility가 한 baseline 또는 terminal
   prompt처럼 보이지 않아야 한다. host+label은 72pt content box, refresh는 **24pt trailing slot**,
@@ -111,7 +113,9 @@ identity는 바꾸지 않으며, `SessionDock`의 같은 completed `UiRectTree`�
 - rich Chrome은 radius/border/shadow token을 사용하고, tui legacy lowering은 같은 rect/spacing을
   직각 fill로만 lower한다. component가 `if (rich)` 또는 font별 좌표 nudge를 두지 않는다.
 
-`ChromeTextRole`은 role별 line box와 final-pixel glyph placement를 전달한다. B1-button-b는 확장
+`ChromeTextRole`은 role별 line box와 final-pixel glyph placement를 전달한다. 기본 목록은 compact
+Chrome scale(`card title` 16pt, `summary` 14pt, `metadata` 13pt)을 사용해 기존 Chrome의 본문 밀도와
+맞춘다. B1-button-b는 확장
 action의 measured label/SVG group centre를 완료했고, AS4-f-b는 기본 목록·header utility·detail·action의
 고정 기하와 scroll unit을 같은 `DockMetrics` snapshot으로 옮겼다. terminal cell은 텍스트의 보수적
 수평 truncate fallback에만 남고, padding·height·pointer hit rect는 입력으로 쓰지 않는다. 이를 cell 수를
@@ -152,15 +156,21 @@ target을 표현한다. generic tree/paint/interaction은 둘의 rect·clip·poi
 AS4-f는 레퍼런스와의 여백·밀도 차이를 Chrome logical metric으로 고친다. `ButtonMetrics`는 action의
 icon/text content inset, icon extent/gap, 48pt minimum target을 소유한다. `DockMetrics`는 outer inset,
 fixed chrome/card/detail/action 높이와 scroll unit을 같은 immutable snapshot으로 resolve한다. terminal
-font·line spacing은 dock geometry·pointer hit rect의 입력이 아니며, backing scale에만 비례한다. typed
-layout과 spacing SSOT, 48pt action target·1×/2×/terminal-font capture 판정은
+font family·line spacing은 dock geometry·pointer hit rect의 입력이 아니며, backing scale과
+`SessionDockUiZoom`만 비례한다. `SessionDockUiZoom`은 현재 font size / `Cmd`+`0` 기준 font size를
+750–1500 milli로 clamp한 값이며, layout·worker text scale·fingerprint·paint·hit-test·scroll projection이
+반드시 같은 resolved value를 사용한다. zoom 전 viewport top을 가로지르는 card identity는 old metric에서
+capture해 새 metric projection으로 restore하며, card가 없거나 materialize되지 않으면 기존 bounded numeric
+offset만 새 상한으로 clamp한다. typed layout과 spacing SSOT, 48pt action target·1×/2×/terminal-font
+capture 판정은
 [Metal UI 레이아웃·컴포넌트 시스템](metal-ui-layout.md#logical-spacing과-component-metric)이 소유한다.
 이 visual slice는 실제 사용자 Claude/Codex resume을 자동 실행하지 않는다.
 
 이 독립성은 카드 내부에만 한정하지 않는다. Session Dock을 고르는 상단 switcher는 `DockMetrics`의
 40pt이고, right dock의 시작선은 terminal title strip이 아니라 28pt native-title safety band다.
-따라서 terminal font zoom은 terminal grid/title icon에는 영향을 줄 수 있어도 Session Dock의 header,
-scope, search, card, expanded card, resume/reveal border rect의 backing 좌표를 바꾸지 않는다.
+따라서 terminal font family/line spacing은 terminal grid/title icon에는 영향을 줄 수 있어도 Session Dock의
+header, scope, search, card, expanded card, resume/reveal border rect의 backing 좌표를 바꾸지 않는다. 반면
+명시적 `Cmd` font-size zoom은 동일한 Dock tree 전체를 함께 확대·축소한다.
 Explorer/source-control은 pane tab bar와 정렬해야 하므로 이 예외를 적용하지 않는다.
 
 #### 2.1.4 B1-button 이관 순서

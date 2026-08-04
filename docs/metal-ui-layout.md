@@ -155,8 +155,8 @@ component가 `ChromeDraw.Text.origin`을 직접 계산한다. 이는 일시적�
 
 Chrome 텍스트는 terminal grid의 고정폭 `ResolvedAppearance.font`와 다른 제품 표면이다.
 따라서 `ChromeTypography`는 macOS adapter가 `CTFontCreateUIFontForLanguage`로 얻는 platform UI
-primary face와 CoreText fallback chain을 별도로 resolve하고, terminal font picker가 Chrome의
-type scale·행간·글자 폭을 바꾸지 않는다. 이
+primary face와 CoreText fallback chain을 별도로 resolve한다. terminal font picker의 **family와
+line spacing**은 Chrome의 face·행간·글자 폭을 바꾸지 않는다. 이
 분리는 터미널을 JetBrains Mono 같은 고정폭 face로 쓰더라도 Session Dock이 레퍼런스처럼
 native UI의 비례 typography로 남게 한다. Chrome primary face는 macOS의 system UI face이고,
 bundled Jetendard는 결정적인 Lab font-review fixture에서만 선택한다. B1에서는 별도 Chrome
@@ -170,15 +170,15 @@ font 설정 키를 만들지 않는다. 설정 표면을 열려면 theme/config 
 
 | `ChromeTextRole` | size / line-height | weight | Session Dock 소비처 |
 | --- | --- | --- | --- |
-| `dock_heading` | 20 / 26 | semibold | `Agent 세션 기록` |
-| `supporting` | 15 / 20 | regular | 표시 개수·provenance |
-| `control` | 16 / 20 | medium | scope segment·search query/placeholder |
-| `group_heading` | 17 / 22 | semibold | workspace name·count pill label |
-| `card_heading` | 18 / 24 | semibold | session title |
-| `body` | 16 / 22 | regular | session summary·recent turn body |
-| `metadata` | 15 / 20 | regular | provider·message count·relative age·model |
-| `overline` | 14 / 20 | medium | recent turn role·section label |
-| `button_label` | 16 / 20 | semibold | resume·reveal action |
+| `dock_heading` | 18 / 24 | semibold | `Agent 세션 기록` |
+| `supporting` | 14 / 18 | regular | 표시 개수·provenance |
+| `control` | 14 / 18 | medium | scope segment·search query/placeholder |
+| `group_heading` | 16 / 20 | semibold | workspace name·count pill label |
+| `card_heading` | 16 / 22 | semibold | session title |
+| `body` | 14 / 20 | regular | session summary·recent turn body |
+| `metadata` | 13 / 18 | regular | provider·message count·relative age·model |
+| `overline` | 12 / 16 | medium | recent turn role·section label |
+| `button_label` | 14 / 18 | semibold | resume·reveal action |
 
 각 role의 line box는 `TextLayoutArtifact`가 보관하는 font metrics와 final content rect에서
 정렬한다. 한 줄 control/button은 line box의 중심을 rect 중심에 맞추고, 두 줄 header는 line
@@ -186,6 +186,14 @@ stack 전체를 rect 중심에 맞춘다. ink bounds는 clip과 optical diagnost
 쓰지 않는다. 이 규칙이 작은 icon·위로 붙은 header·하단으로 쏠린 button label을 같은 원인에서
 제거한다. icon slot도 role의 line-height와 button content rect를 공유하며, text baseline을
 추측해 별도 row에 놓지 않는다.
+
+이 표는 Session Dock만 크게 보이게 하는 별도 display scale이 아니다. 14pt body/control을 기준으로
+heading·metadata·button의 위계를 만드는 compact Chrome scale이다. 다만 사용자가 `Cmd`+`+`/`-`/`0`로
+terminal font **size**를 조절하면 Session Dock은 그 기준 font 대비 비율만 `SessionDockUiZoom`으로
+변환한다. `SessionDockUiZoom`은 750–1500 milli(75–150%)에서 clamp하며, font family·terminal line
+spacing·terminal cell width/height는 여전히 입력이 아니다. 따라서 확대와 축소가 모두 Dock에 반영되고,
+`Cmd`+`0`은 1000 milli로 되돌린다. token 값 자체를 font-size마다 재정의하거나 Chrome 전체에 임의
+raw pixel을 덧씌우지 않는다.
 
 `card_heading`, `body`, `metadata`는 final measured width를 같은 artifact에서 받아 one-line
 ellipsis를 결정한다. 특히 한글·emoji·fallback glyph가 있어도 byte count/cell count로 잘라서는
@@ -201,8 +209,10 @@ Tailwind class 또는 임의 raw pixel을 직접 나열하는 API는 아니다. 
 `spacing.px(step, scale_milli)`로 backing pixel에 한 번 resolve한다. step 확장은 component별
 숫자 추가가 아니라 spacing module의 unit/scale/capture 검증을 포함한 별도 설계 변경이다.
 
-`SessionDock`은 `ButtonMetrics.resolve(scale_milli)`와 `DockMetrics.resolve(scale_milli)`를 함께
-사용한다. `DockMetrics`는 root inset 20pt, fixed control gap 12pt, header 76pt,
+`SessionDock`은 `ButtonMetrics.resolve(dock_scale_milli)`와 `DockMetrics.resolve(dock_scale_milli)`를 함께
+사용한다. `dock_scale_milli = backing_scale_milli × SessionDockUiZoom / 1000`이며 같은 값이 CoreText
+request, immutable text artifact fingerprint, layout, paint, hit-test, scroll projection/wheel unit에 모두
+전달된다. `DockMetrics`는 root inset 20pt, fixed control gap 12pt, header 76pt,
 scope/search/group 48pt, three-line divider card 112pt, bounded detail 256pt, action 48pt,
 action gap 8pt와 item gap 0pt를 한 snapshot으로 제공한다. header utility는 72pt host-label box,
 12pt sibling gap, 20pt refresh slot, 16pt trailing safe inset을, group disclosure는 20pt inset/slot과 8pt
@@ -211,10 +221,13 @@ action gap 8pt와 item gap 0pt를 한 snapshot으로 제공한다. header utilit
 CoreText label이나 terminal cell을 만들지 않으며, worker가 등록 SVG만 slot의 정확한 중심에
 lower한다. header/card/detail의 line offset은
 `ChromeTypography` line box와 `Space`로부터 그 snapshot 안에서 계산한다. terminal cell width/height,
-terminal font, terminal line spacing은 이 함수의 입력이 아니다. `UiRectTree`, paint, hit-test,
+terminal font family, terminal line spacing은 이 함수의 입력이 아니다. `UiRectTree`, paint, hit-test,
 virtualized visible window, page/wheel step은 그 동일 metric snapshot을 공유해야 한다. 이 경계가
-terminal font를 크게/작게 바꿨을 때 native Chrome의 밀도와 pointer target까지 같이 흔들리는 회귀를
-막는다.
+terminal font family/line spacing 변경이 native Chrome을 흔드는 회귀를 막는다. 반대로 명시된
+`SessionDockUiZoom` 변화에서는 같은 completed snapshot의 밀도와 pointer target이 함께 확대·축소되어야 한다.
+zoom 직전 viewport top을 가로지르는 materialized card는 old metric의 stable identity로 capture해 new metric
+projection에서 restore한다. identity가 없거나 새 projection에 materialize되지 않으면 numeric offset을 새 상한에만
+clamp하며 이웃 title/path를 추측하지 않는다.
 
 Header는 reference의 borderless text/utility band이고, scope/search/group/list는 그것과 다른
 visible boundary를 가져야 한다. `ColorRole.divider`의 1px rule은 dark panel에서 channel `+24`,
@@ -232,15 +245,16 @@ box, `.xs` icon gap과 48pt minimum height를 소유한다. icon SVG의 source v
 API로 노출하지 않는다. view의 available height가 complete `ButtonMetrics`를 수용하지 못하면 action
 leaf를 조용히 압축하지 않고 candidate tree를 fail-close한다.
 
-Dock metric capture는 같은 논리 dock rect에서 terminal font 14pt/24pt와 render scale 1×/2×를
-교차 비교한다. isolated AppKit process는 실제 `NSApplication`·`MaruMetalTerminalView`·`CAMetalLayer`와
+Dock metric capture는 같은 기본(`SessionDockUiZoom=1000`) dock rect에서 terminal font 14pt/24pt와 render
+scale 1×/2×를 교차 비교하고, 별도 zoom capture는 750/1000/1500에서 모두 작동하는 rect/action tree를
+확인한다. isolated AppKit process는 실제 `NSApplication`·`MaruMetalTerminalView`·`CAMetalLayer`와
 Swift→ABI→Zig resize/render 경로를 쓰되, CI가 물리 `NSScreen.backingScaleFactor`를 강제할 수 없으므로
 fixture 전용 `render_scale_milli`를 drawable·resize에 일관되게 주입한다. artifact는 실제
 `window.backingScaleFactor`와 주입된 scale을 **분리해** 기록한다. 따라서 이 gate는 제품 host 경로의
 1×/2× projection을 증명하지만 물리 모니터 이동 이벤트를 대체하지 않으며, 후자는 수동 gate다.
 
 `SessionDock`은 terminal tab bar 높이를 재사용하지 않는다. `DockMetrics.view_switcher_h`의 40pt와
-28pt native-title safety band가 right dock의 local origin을 결정한다. terminal font가 커져도 terminal
+28pt native-title safety band가 right dock의 local origin을 결정한다. `SessionDockUiZoom`이 커져도 terminal
 title strip이 session header를 아래로 밀어서는 안 된다. explorer/source-control은 pane tab bar 정렬이
 별도 UX 계약이므로 이 예외를 쓰지 않는다.
 
@@ -248,11 +262,12 @@ title strip이 session header를 아래로 밀어서는 안 된다. explorer/sou
 header·scope·search·첫 card·expanded card·resume/log action의 published border/hit rect를 포함한다. icon/label의
 세부 ink bounds는 B1 font-review artifact가 소유하며 이 dock-geometry gate가
 parallel layout을 다시 계산해 복제하지 않는다.
-동일 scale의 14pt↔24pt는 모든 dock/action logical rect와 action hit rect가 정확히 같아야 한다.
+동일한 기본 zoom의 14pt↔24pt는 모든 dock/action logical rect와 action hit rect가 정확히 같아야 한다.
 동일 font의 1×↔2×는 scale-normalized rect가 더 낮은 scale의 1 backing pixel 이내여야 하며, raw backing
 rect는 scale 비례여야 한다. 비어 있거나 unpublished/stale rect, 서로 다른 snapshot generation, text artifact
-미완료, 또는 열리지 않은 detail은 비교 성공으로 표시하지 않는다. terminal-font 변화 뒤 dock rect나 action
-hit rect가 달라지면 실패다. 실제 사용자 Claude/Codex resume은 이 시각 slice의 자동 실행 대상이 아니며,
+미완료, 또는 열리지 않은 detail은 비교 성공으로 표시하지 않는다. terminal font family/line-spacing 변화 뒤 dock rect나 action
+hit rect가 달라지면 실패다. 명시적 font-size zoom 뒤에는 dock rect와 action hit rect가 같은 방향으로 바뀌고,
+stale text artifact가 새 scale에 섞이면 실패다. 실제 사용자 Claude/Codex resume은 이 시각 slice의 자동 실행 대상이 아니며,
 기존 explicit-action fixture만 다시 실행한다.
 
 시각 합격 자료는 `session-dock-typography` Chrome Lab과 동일 fixture를 소비하는 AppKit capture

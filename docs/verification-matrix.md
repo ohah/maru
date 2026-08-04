@@ -956,7 +956,7 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   다음 요청을 허용하되, accepted 미소비·uncertain·correlation/allocator/alias drift는 connection terminal로 닫는다. final-address
   `RpcExecutedResponse` borrow/owner-only finish는 copy/move/same-address ABA, cross transport/binding/request/digest/epoch splice,
   duplicate borrow/free와 allocator callback 재진입에서 wire·canonical mutation·double-free 0이어야 한다. attach/RPC destination tag
-  mismatch, epoch 0/max 소진, prepared abort와 published response abort 혼동, executing/published/releasing teardown을 production-type
+  mismatch, epoch 0/max 소진, prepared abort와 published response abort 혼동, executing/published/borrowed/releasing teardown을 production-type
   Debug/ReleaseFast와 Darwin socketpair로 검증하기 전 2c3b 완료를 주장하지 않는다. registry attach response seal의 reset/recycle과
   fixed response pool, 독립 movable payload와 계속 실행하는 quarantine registry는 이 gate의 구현이 아니다. publication 실패는 exact
   safe-free와 ambiguous no-free를 구분하고 후자는 node terminal evidence 뒤 strict product subprocess fail-stop으로 수렴해야 한다.
@@ -973,6 +973,22 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   실제 RemoteRuntime callsite 0 baseline까지만 소유하고, family decoder 전환·application error/malformed disposition·legacy/generation
   parity는 2c3e에서 닫는다. 반복 RPC는 accepted/uncertain만 만들고 typed reject는 attach
   호환 arm에 한정한다. request family/phase/role/destination별 exact `ExecuteError|ExecuteResult` 표를 전수한다.
+  내부 merge 순서는 `B3-0a ambiguous-free remediation → B3-0 transaction seam → B3-1 inert authority → B3-2 private destination →
+  B3-3 progress/execute → B3-4/5 atomic publish+borrow/finish → B3-6 aggregate exposure`다. B3-0은 current attach exit decision table의
+  result/error, backing/authority settlement, 최초 poison, response lifecycle/bytes와 allocation/free count를 differential
+  characterization하고 public declaration/callsite/frame/registry-layout delta 0을 source oracle로 고정한다. B3-0a는 operation-scoped
+  9,217-entry payload allocation ledger와 private framing observer의 0/1/64/cap/cap+1, OOB→target promotion, observer 밖 parser/pending
+  backing resize/remap parity, target 전후 OOB free, ledger backing grow OOM/alias/reentry, pre-parent generation max/wrap,
+  zero-length, wrong-generation promote의 read/hash/free 0과
+  alias·overflow·allocator drift no-free를 검증한다. private component의 `fail_stop_required`는 exact production consumer
+  `client_slot.executeGenerationRequest` 밖 callsite/return/store 0이고 subprocess abnormal exit여야 한다. B3-0은
+  `PreparedExecutionTxn` in-place init, phase×method, copy/move/duplicate와 decision table 각 행의 storage/authority/poison/free를
+  Debug·ReleaseFast production type으로 전수한다. B3-1은 pure leaf/production-type unit, B3-2는 exhaustive classifier,
+  B3-3은 Darwin socketpair, B3-4/5는 published payload의 생성·정리 경로를 같은 merge gate로 여는 production-type+source oracle,
+  B3-6은 production strict-wrapper subprocess까지 증거 수준을
+  높인다. B3-4/5는 `RpcResponseBorrow` in-place ABI, raw lifecycle 전수, published/borrowed drift, decoder raw-slice exact allowlist를
+  추가로 닫는다. B3-0a~B3-4/5는 `구현 중`이며 공개 generation RPC callsite와 정상 observable product behavior 0을 유지한다. 모든 내부 gate가
+  Debug·ReleaseFast와 boundary에서 함께 green이 되기 전 `2c3b-3 완료`로 세지 않는다.
   `GenerationTransport`는 SSOT의 exact 15-declaration primitive set(`readAttachmentBatch` 제외,
   `purgeEndedStream` 포함), closed `RuntimeRequest` variants와 exact-field
   `GenerationCapabilities`만 노출하고 arbitrary method-string `call`, generic callback, Client-containing aggregate,

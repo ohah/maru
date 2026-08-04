@@ -1061,6 +1061,33 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    digest/epoch splice, pre-wire typed reject 뒤 재사용, uncertain·accepted 미소비 뒤 terminal, allocator drift·alias·free callback 재진입,
    node-sealed authority/whole-transport restore, exact safe-free와 ambiguous no-free product fail-stop, epoch 소진,
    teardown busy/fail-close를 production type·subprocess·Darwin socketpair로 고정한다.
+   이 aggregate gate는 내부 TDD slice `B3-0a`~`B3-6`을 순서대로 병합하되 마지막 slice 전까지 상태를
+   `2c3b-3 구현 중`으로 유지한다. 내부 slice는 공개 RPC surface를 부분 완료로 노출하지 않으며 generation 제품 callsite와 정상
+   observable wire/product behavior는 0이다.
+
+   1. **B3-0a attach ambiguous-free remediation:** 현재 attach accepted tail의 exact-owned safe-free와 owner/allocator/range가
+      불명확한 no-free를 먼저 분리한다. alias·overflow·allocator drift는 forged payload를 read/hash/free하지 않고 terminal evidence를
+      `client_slot.executeGenerationRequest` production strict wrapper가 즉시 fail-stop으로 소비한다. operation-scoped 9,217-entry
+      payload allocation ledger의 exact target promotion, OOB 1/64/cap, observer 밖 parser/pending backing resize/remap parity,
+      zero-length와 generation wrap을 함께 닫는다.
+   2. **B3-0 attach execution transaction seam:** request backing과 `PreparedRequestAuthority`만 함께 정산하는 private final-address
+      `PreparedExecutionTxn`의 상태·결정표를 characterization gate로 고정한 뒤 현재 attach-only 실행을 이 owner로 옮긴다. attach
+      response owner·payload와 미래 RPC authority는 transaction에 넣지 않는다. 공개 signature, registry layout, frame schema와 정상
+      response bytes는 바꾸지 않는다.
+   3. **B3-1 inert RPC authority:** production execute callsite 0인 node-local authority leaf와 registry idle field를 넣고 lifecycle,
+      epoch, copy·ABA·splice와 teardown 상태를 pure leaf/production-type unit으로 닫는다.
+   4. **B3-2 private destination admission:** public wrapper는 attach signature를 유지한 채 내부 `.attach`로 투영하고 test-private
+      `.rpc` classifier가 family/role/phase/destination mismatch를 wire·owner·epoch mutation 0으로 거부함을 전수한다.
+   5. **B3-3 progress/execute integration:** closed wire-progress evidence, RPC authority reserve, pending flush 뒤 재검증과 first-byte
+      경계를 Darwin socketpair로 닫는다. request bytes 0이고 prior pending ambiguity도 0인 경우만 reusable rollback한다.
+   6. **B3-4/5 원자적 publication+borrow/finish:** published payload를 정리할 production 경로 없이 중간 병합하지 않는다.
+      stack-final response publish, exact safe-free/ambiguous no-free,
+      `published→borrowed→releasing` exact-once lexical borrow와 owner finish, 2회·64회 순차 RPC를 구현한다.
+   7. **B3-6 aggregate exposure:** exact public destination/signature를 열고 B3-0a의 attach-only
+      `client_slot.executeGenerationRequest` strict wrapper를 RPC
+      destination까지 확장한다. component의 `fail_stop_required`를 절대 반환하지 않고 즉시 종료하는 subprocess/source oracle까지
+      통과한 뒤에만 `2c3b-3 완료`로 승격한다. decoder 제품
+      전환은 계속 2c3e 소유다.
    제품 gate는 RPC family별 legacy/generation decode parity와 input→RPC/revoke ordering을 포함한다. decode와 ordered input policy는
    `RemoteRuntime` 하나만 소유한다. **2c4**는
    `RuntimeConnection` union을 mode SSOT로 전환해 `RemoteRuntime.client`와 `generation_adapter` 병렬 필드를 제거하고 exact

@@ -3053,7 +3053,9 @@ pub const AppSession = struct {
     /// View-lifetime only canonical cwd keys. A missing/deleted/remote cwd uses
     /// the empty unknown-location key and remains distinct from lexical paths.
     agent_session_archive_collapsed_groups: std.ArrayList([]u8) = .empty,
-    agent_session_archive_search: std.ArrayList(u8) = .empty,
+    /// Session Dock 검색은 query와 IME marked text를 분리한다. preedit는 paint만 하고,
+    /// commit 전에는 목록 projection을 바꾸지 않는다.
+    agent_session_archive_search: chrome.components.overlay_input.OverlayInput = .{},
     agent_session_archive_search_active: bool = false,
     agent_session_archive_scope: AgentSessionArchiveScope = .all,
     /// These are copied only when the archive dock opens or the user changes
@@ -13339,6 +13341,40 @@ pub const AppSession = struct {
         return content.h -| m.fixedChromeHeight();
     }
 
+    /// Completed Session Dock geometry is the only coordinate source for the native IME
+    /// candidate window.  The field's label is shaped by CoreText, but its end caret follows
+    /// the same bounded EAW cell budget as the component before the worker has a new artifact.
+    /// This keeps a Korean composition inside the field rather than falling back to the active
+    /// terminal cursor.
+    fn agentSessionDockSearchCaretRect(self: *const AppSession) ?chrome.draw.Rect {
+        if (!self.agent_session_archive_search_active or self.dock.view != .agent_sessions or !self.dockVisible()) return null;
+        const cw = self.cell_width_px;
+        if (cw == 0) return null;
+        const content = self.dockGeometry().tree_content;
+        const entry = for (self.agent_session_dock_entries.items) |candidate| {
+            if (candidate.id == chrome.components.session_dock.build.NodeIds.search) break candidate;
+        } else return null;
+        const button = chrome.components.session_dock.types.ButtonMetrics.resolve(self.agentSessionDockScaleMilli());
+        const left = entry.rect.x + @as(f32, @floatFromInt(button.content_inset_x_px + button.leading_icon_extent_px + button.leading_icon_gap_px));
+        const right = entry.rect.x + entry.rect.width - @as(f32, @floatFromInt(button.content_inset_x_px));
+        if (right <= left) return null;
+        const query_cols = chrome.components.overlay_input.displayCols(self.agent_session_archive_search.query.items);
+        // Marked text is painted immediately after committed query. The native candidate window
+        // must follow that same visible end, otherwise a Korean composition is anchored before
+        // its own preedit syllable while waiting for commit.
+        const preedit_cols = chrome.components.overlay_input.displayCols(self.agent_session_archive_search.preedit.items);
+        const wanted_x = left + @as(f32, @floatFromInt(query_cols +| preedit_cols)) * @as(f32, @floatFromInt(cw));
+        const x = @min(wanted_x, right - @as(f32, @floatFromInt(cw)));
+        const line_h = chrome.ui.typography.lineHeightPx(.control, self.agentSessionDockScaleMilli());
+        if (entry.rect.height < @as(f32, @floatFromInt(line_h))) return null;
+        return .{
+            .x = @as(i32, @intCast(content.x)) + @as(i32, @intFromFloat(@floor(x))),
+            .y = @as(i32, @intCast(content.y)) + @as(i32, @intFromFloat(@floor(entry.rect.y + (entry.rect.height - @as(f32, @floatFromInt(line_h)) / 2)))),
+            .w = cw,
+            .h = line_h,
+        };
+    }
+
     fn agentSessionDockProjectionKind(entries: []const agent_session_archive_view.Entry, index: usize) chrome.components.session_dock.scroll.Kind {
         return switch (entries[index]) {
             .group => .group,
@@ -13463,7 +13499,7 @@ pub const AppSession = struct {
                 else
                     false,
             };
-            if (scope_matches and agentSessionArchiveMatches(record, self.agent_session_archive_search.items))
+            if (scope_matches and agentSessionArchiveMatches(record, self.agent_session_archive_search.query.items))
                 self.agent_session_archive_filtered_indices.append(self.allocator, index) catch break;
         }
         self.rebuildAgentSessionArchiveProjection();
@@ -13524,18 +13560,17 @@ pub const AppSession = struct {
         switch (event.key) {
             .escape => {
                 self.agent_session_archive_search_active = false;
-                self.agent_session_archive_search.clearRetainingCapacity();
+                self.agent_session_archive_search.clear();
             },
             .backspace => {
-                if (self.agent_session_archive_search.items.len > 0)
-                    _ = self.agent_session_archive_search.pop();
+                self.agent_session_archive_search.backspace();
             },
             .char => |codepoint| {
                 if (event.modifiers.command or event.modifiers.control or event.modifiers.option) return true;
                 var utf8: [4]u8 = undefined;
                 const len = std.unicode.utf8Encode(codepoint, &utf8) catch return true;
-                if (self.agent_session_archive_search.items.len + len <= 256)
-                    self.agent_session_archive_search.appendSlice(self.allocator, utf8[0..len]) catch {};
+                if (self.agent_session_archive_search.query.items.len + len <= 256)
+                    self.agent_session_archive_search.appendChar(self.allocator, codepoint) catch {};
             },
             else => return true,
         }
@@ -23018,7 +23053,7 @@ pub const AppSession = struct {
     /// togglePalette가 나머지를 닫아 한 번에 하나만 열린다)이다. notice는 텍스트 입력 대상이 아니지만(dismiss만) IME가
     /// 뒤(터미널/find)로 새지 않게 **최우선**으로 잡아 무시한다. 모든 IME 연산(preedit set·조합 판정·caret)이 이걸로
     /// 분기해, 라우팅이 콜백마다 흩어져 일부를 누락하던 단일-출처 위반을 없앤다.
-    const InputFocus = enum { terminal, file_tree, dock_pending, confirm, notice, settings, rename, sidebar_search, find, palette, addr_edit };
+    const InputFocus = enum { terminal, file_tree, dock_pending, confirm, notice, settings, rename, sidebar_search, agent_session_search, find, palette, addr_edit };
     fn inputFocus(self: *const AppSession) InputFocus {
         if (self.chrome_host.confirm.open) return .confirm; // 닫기 확인 — 파괴적 동작 게이트라 최우선(notice와 동형: IME 비대상)
         if (self.chrome_host.notice.open) return .notice; // 최우선 모달 — 텍스트/IME를 받지 않고 무시(뒤로 안 샘)
@@ -23028,6 +23063,7 @@ pub const AppSession = struct {
         if (self.chrome_host.settings.open) return .settings;
         if (self.rename != null) return .rename; // 인라인 rename(find/palette와 배타적 — startRename이 닫음)
         if (self.sidebar_search_active) return .sidebar_search; // 사이드바 검색바(상주 — 활성이면 키/IME를 받는다)
+        if (self.agent_session_archive_search_active and self.dockVisible() and self.dock.view == .agent_sessions) return .agent_session_search;
         if (self.chrome_host.find.open) return .find;
         if (self.chrome_host.palette.open) return .palette;
         // Phase 7e-2b 수정: browser 주소창 편집이 활성이면 확정 텍스트/조합이 터미널로 새지 않고 주소창 편집으로 간다
@@ -23068,6 +23104,7 @@ pub const AppSession = struct {
             .settings => self.chrome_host.settings.setSearchPreedit(bytes), // 세팅 검색줄 조합(고정 버퍼 — OverlayInput과 별개)
             .rename => self.rename_input.setPreedit(self.allocator, bytes) catch {},
             .sidebar_search => self.sidebar_search_input.setPreedit(self.allocator, bytes) catch {},
+            .agent_session_search => self.agent_session_archive_search.setPreedit(self.allocator, bytes) catch {},
             .find => self.chrome_host.find.input.setPreedit(self.allocator, bytes) catch {},
             .palette => self.chrome_host.palette.input.setPreedit(self.allocator, bytes) catch {},
             .addr_edit => {
@@ -23096,6 +23133,7 @@ pub const AppSession = struct {
             .settings => self.chrome_host.settings.searchPreedit().len > 0,
             .rename => self.rename_input.preedit.items.len > 0,
             .sidebar_search => self.sidebar_search_input.preedit.items.len > 0,
+            .agent_session_search => self.agent_session_archive_search.preedit.items.len > 0,
             .find => self.chrome_host.find.input.preedit.items.len > 0,
             .palette => self.chrome_host.palette.input.preedit.items.len > 0,
             .addr_edit => self.addr_field.preedit.items.len > 0, // 주소창 조합 중이면 true
@@ -23313,6 +23351,7 @@ pub const AppSession = struct {
             // 세팅 검색줄 caret — buildChromeOverlayPrep이 캐시한 rect(검색 중이 아니면 null → 터미널 커서 폴백).
             .settings => self.settings_search_caret,
             .sidebar_search => self.sidebarSearchCaretRect(),
+            .agent_session_search => self.agentSessionDockSearchCaretRect(),
             .find => chrome.components.find.caretRect(&self.chrome_host.find, props),
             .palette => chrome.components.palette.caretRect(&self.chrome_host.palette, props),
             // 주소창 편집 caret은 밴드가 자체 block caret으로 그린다 — 후보창을 그 caret 셀 옆에 띄운다(addrEditCaretRect가
@@ -23392,6 +23431,13 @@ pub const AppSession = struct {
             },
             .sidebar_search => if (self.sidebar_search_input.commitPreedit(self.allocator)) {
                 self.rebuildSidebar() catch {}; // 확정 글자로 필터 재적용
+                self.metal_dirty = true;
+            },
+            .agent_session_search => if (self.agent_session_archive_search.commitPreedit(self.allocator)) {
+                self.rebuildAgentSessionArchiveFilter();
+                self.resetAgentSessionDockScroll();
+                self.agent_session_archive_selected = null;
+                self.closeAgentSessionInlineDetail();
                 self.metal_dirty = true;
             },
             .addr_edit => if (self.addr_field.commitPreedit(self.allocator)) {
@@ -31276,8 +31322,10 @@ pub const AppSession = struct {
             },
             .workspace_scope_enabled = self.agent_session_archive_workspace_root != null,
             .project_scope_enabled = self.agent_session_archive_project_root != null,
-            .search = self.agent_session_archive_search.items,
+            .search = self.agent_session_archive_search.query.items,
+            .search_preedit = self.agent_session_archive_search.preedit.items,
             .search_focused = self.agent_session_archive_search_active,
+            .search_cursor_visible = self.blink_visible,
             // The rich system-text worker follows the same truthful loading rule as archive
             // refresh: existing cards remain visible while its immutable artifact is pending.
             .loading = (self.agent_session_archive_loading or self.agent_session_dock_text_backend.isInflight()) and self.agent_session_archive_records.items.len == 0,
@@ -48150,6 +48198,49 @@ test "Session Dock Cmd zoom grows and shrinks one resolved layout/text/scroll sc
     try std.testing.expectEqual(session_dock_ui_zoom_max_milli, session.agentSessionDockUiZoomMilli());
     session.dispatchAppAction(.reset_font_size);
     try std.testing.expectEqual(@as(u32, 1000), session.agentSessionDockUiZoomMilli());
+}
+
+test "Session Dock search owns committed text and IME preedit instead of leaking to the terminal" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1000, 700, 1000);
+
+    // Keep this input-routing test synchronous: archive scanning owns a detached worker and is
+    // separately covered by the AppKit fixture.  The visible dock is enough to establish the
+    // exact `InputFocus.agent_session_search` owner.
+    session.dock.presented = true;
+    session.dock.collapsed = false;
+    session.dock.side = .right;
+    session.agent_session_archive_initialized = false;
+    session.setDockView(.agent_sessions);
+    session.agent_session_archive_initialized = true;
+    session.agent_session_archive_search_active = true;
+    try std.testing.expectEqual(AppSession.InputFocus.agent_session_search, session.inputFocus());
+
+    const before_terminal_input = session.total_terminal_input_events;
+    session.routeCommittedText("codex");
+    try std.testing.expectEqualStrings("codex", session.agent_session_archive_search.query.items);
+    try std.testing.expectEqual(before_terminal_input, session.total_terminal_input_events);
+
+    // Marked text is visible immediately but must not filter until composition commits.
+    session.imeMarked("한");
+    try std.testing.expectEqualStrings("한", session.agent_session_archive_search.preedit.items);
+    try std.testing.expectEqualStrings("codex", session.agent_session_archive_search.query.items);
+    try std.testing.expect(session.imeComposingActive());
+    session.commitComposition();
+    try std.testing.expectEqualStrings("codex한", session.agent_session_archive_search.query.items);
+    try std.testing.expectEqual(@as(usize, 0), session.agent_session_archive_search.preedit.items.len);
+    try std.testing.expectEqual(before_terminal_input, session.total_terminal_input_events);
 }
 
 // reapplyLoadedConfig(세팅 GUI 라이브 재적용 — 커서 깜빡임 토글 등)가 런타임 ⌘+/− 줌을 날리지 않는지(버그 회귀

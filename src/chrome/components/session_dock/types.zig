@@ -83,7 +83,12 @@ pub const Props = struct {
     workspace_scope_enabled: bool = true,
     project_scope_enabled: bool = true,
     search: []const u8 = "",
+    /// IME marked text is display-only until the platform commits it into `search`.  Keeping it
+    /// in the immutable DTO lets the field paint exactly what the active input owner sees
+    /// without allowing an uncommitted composition to change the archive projection.
+    search_preedit: []const u8 = "",
     search_focused: bool = false,
+    search_cursor_visible: bool = false,
     loading: bool = false,
     refreshing: bool = false,
     spinner_phase: u3 = 0,

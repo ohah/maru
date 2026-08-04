@@ -7,6 +7,7 @@
 const layout = @import("chrome/ui/layout.zig");
 const style = @import("chrome/ui/style.zig");
 const tree = @import("chrome/ui/tree.zig");
+const ui_button = @import("chrome/ui/button.zig");
 const interaction = @import("chrome/ui/interaction.zig");
 const paint_style = @import("chrome/ui/paint_style.zig");
 const paint = @import("chrome/ui/paint.zig");
@@ -18,6 +19,7 @@ test {
     // scope obvious to a reader, and each namespace owns the tests for its one responsibility.
     const testing = @import("std").testing;
     testing.refAllDecls(layout);
+    testing.refAllDecls(ui_button);
     testing.refAllDecls(style);
     testing.refAllDecls(tree);
     testing.refAllDecls(interaction);

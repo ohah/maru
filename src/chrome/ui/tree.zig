@@ -63,6 +63,14 @@ pub const TextOptions = struct {
 /// Button is an explicit command target, not an interactive Card alias.  It intentionally
 /// carries no text or provider payload: component views emit the immutable label separately,
 /// while this node is the one published border-box/action capability used by paint and input.
+/// Button이 선언하는 아이콘 슬롯. codepoint는 합성 게이트에 등록된 값이며 등록 판정은
+/// `ui/button.zig`가 주입받은 predicate로 후보 단계에서 한다(chrome은 renderer를 import할 수 없다).
+pub const LeadingIconProps = struct {
+    codepoint: u21,
+    extent_px: u16,
+    gap_px: u16,
+};
+
 pub const ButtonOptions = struct {
     id: UiId,
     style: layout.UiStyle = .{},
@@ -70,6 +78,7 @@ pub const ButtonOptions = struct {
     paint: PaintStyle = .{},
     action: UiAction,
     overflow: layout.Overflow = .visible,
+    leading_icon: ?LeadingIconProps = null,
 };
 
 pub const NodeProps = union(enum) {
@@ -93,6 +102,9 @@ pub const NodeProps = union(enum) {
         paint: PaintStyle,
         action: UiAction,
         overflow: layout.Overflow,
+        /// 선언된 leading icon 슬롯. paint/lowering이 final placement를 만들 때 필요하므로 style이
+        /// 아니라 props에 실린다. 치수는 `ui/button.zig`가 `ButtonSize`와 token에서 한 번 계산한다.
+        leading_icon: ?LeadingIconProps = null,
     },
     text: struct {
         value: []const u8,
@@ -179,8 +191,17 @@ pub fn button(options: ButtonOptions) UiNode {
             .paint = options.paint,
             .action = options.action,
             .overflow = options.overflow,
+            .leading_icon = options.leading_icon,
         } },
     };
+}
+
+/// label 한 개를 자식으로 갖는 Button. 호출자는 `ui/button.zig`의 builder를 쓰고, 이 함수는 그
+/// builder가 검증을 마친 뒤 node를 조립하는 자리다 — 자식 개수/종류 계약은 그쪽이 소유한다.
+pub fn buttonWithLabel(options: ButtonOptions, label: UiNode) UiNode {
+    var node = button(options);
+    node.children = @as(*const [1]UiNode, &label);
+    return node;
 }
 
 pub const RectEntry = struct {

@@ -87,11 +87,11 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
 
     const m = types.DockMetrics.resolve(props.scale_milli);
     var table = ids.Table.init(buffers.actions);
-    const refresh = table.append(props.snapshot_generation, .refresh) catch return error.InsufficientActionBuffer;
-    const workspace = table.append(props.snapshot_generation, .{ .scope = .workspace }) catch return error.InsufficientActionBuffer;
-    const project = table.append(props.snapshot_generation, .{ .scope = .project }) catch return error.InsufficientActionBuffer;
-    const all = table.append(props.snapshot_generation, .{ .scope = .all }) catch return error.InsufficientActionBuffer;
-    const search = table.append(props.snapshot_generation, .focus_search) catch return error.InsufficientActionBuffer;
+    const refresh = table.append(props.snapshot_generation, .refresh, true) catch return error.InsufficientActionBuffer;
+    const workspace = table.append(props.snapshot_generation, .{ .scope = .workspace }, true) catch return error.InsufficientActionBuffer;
+    const project = table.append(props.snapshot_generation, .{ .scope = .project }, true) catch return error.InsufficientActionBuffer;
+    const all = table.append(props.snapshot_generation, .{ .scope = .all }, true) catch return error.InsufficientActionBuffer;
+    const search = table.append(props.snapshot_generation, .focus_search, true) catch return error.InsufficientActionBuffer;
 
     // Children are stored first, then parent slices borrow these stable ranges. `UiNode` is a
     // value tree, so this avoids heap allocation and makes the buffer cap part of the contract.
@@ -100,7 +100,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
     for (props.items, item_nodes, 0..) |item, *node, index| {
         switch (item) {
             .group => |group| {
-                const action = table.append(props.snapshot_generation, .{ .toggle_group = group.identity }) catch return error.InsufficientActionBuffer;
+                const action = table.append(props.snapshot_generation, .{ .toggle_group = group.identity }, true) catch return error.InsufficientActionBuffer;
                 node.* = tree.card(.{
                     .id = NodeIds.item(index),
                     .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(m.group_h) }, .margin = .{ .bottom = @floatFromInt(m.item_gap) } },
@@ -111,7 +111,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
                 }, &.{});
             },
             .card => |card| {
-                const select = table.append(props.snapshot_generation, .{ .select_card = card.identity }) catch return error.InsufficientActionBuffer;
+                const select = table.append(props.snapshot_generation, .{ .select_card = card.identity }, true) catch return error.InsufficientActionBuffer;
                 if (card.expanded) |expanded| {
                     const action_count: usize = 2 + @as(usize, @intFromBool(expanded.focus_live_enabled));
                     const nested = buffers.nodes[nested_cursor .. nested_cursor + 3 + action_count];
@@ -125,13 +125,13 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
                         .overflow = .clip,
                     }, &.{});
                     const action_nodes = nested[3..][0..action_count];
-                    const resume_action = table.append(props.snapshot_generation, .resume_session) catch return error.InsufficientActionBuffer;
-                    const reveal = table.append(props.snapshot_generation, .reveal_log) catch return error.InsufficientActionBuffer;
+                    const resume_action = table.append(props.snapshot_generation, .resume_session, true) catch return error.InsufficientActionBuffer;
+                    const reveal = table.append(props.snapshot_generation, .reveal_log, true) catch return error.InsufficientActionBuffer;
                     const action_width = expansionActionWidth(props.viewport_px.width, m, action_count);
                     action_nodes[0] = expansionActionNode(NodeIds.resumeAction(index), resume_action, expanded.state == .ready and expanded.resume_enabled, .primary, action_width);
                     action_nodes[1] = expansionActionNode(NodeIds.reveal(index), reveal, expanded.state == .ready and expanded.reveal_enabled, .secondary, action_width);
                     if (expanded.focus_live_enabled) {
-                        const focus = table.append(props.snapshot_generation, .focus_live) catch return error.InsufficientActionBuffer;
+                        const focus = table.append(props.snapshot_generation, .focus_live, true) catch return error.InsufficientActionBuffer;
                         action_nodes[2] = expansionActionNode(NodeIds.focusLive(index), focus, expanded.state == .ready, .secondary, action_width);
                     }
                     nested[2] = tree.container(.{

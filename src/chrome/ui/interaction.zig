@@ -21,11 +21,46 @@ pub const UiPointerEvent = struct {
     y_px: f64,
     button: input.PointerButton = .left,
     timestamp_ns: u64,
+    /// 이 이벤트가 겨냥한 published snapshot 세대. host가 이벤트를 만들 때 그 시점의 tree 세대를
+    /// 싣는다. 0은 "세대를 쓰지 않는다"이며 그때는 검사가 비활성이다 — click-only 소비자는 그대로
+    /// 쓰고, drag를 다루는 소비자만 세대를 채운다.
+    generation: u64 = 0,
+};
+
+/// Drag 축과 선언은 `ui/tree.zig`가 소유한다 — published entry와 여기가 같은 타입을 써야 둘이
+/// 갈리지 않는다. payload는 host의 intent table에서만 domain intent로 풀리는 opaque ID다.
+pub const DragAxis = ui_tree.DragAxis;
+pub const DragDeclaration = ui_tree.DragDeclaration;
+
+/// 진행 중인 drag의 수명. `started`가 false인 동안은 아직 click 후보다.
+pub const DragState = struct {
+    payload: u64,
+    axis: DragAxis,
+    threshold_px: f32,
+    origin_x_px: f64,
+    origin_y_px: f64,
+    last_x_px: f64,
+    last_y_px: f64,
+    started: bool = false,
+
+    /// 축을 존중한 이동 거리. `free`는 두 축의 큰 쪽을 쓴다(대각선이 두 축 모두에서 threshold를
+    /// 넘어야 시작되는 것을 막는다).
+    fn travel(self: DragState, x_px: f64, y_px: f64) f64 {
+        const dx = @abs(x_px - self.origin_x_px);
+        const dy = @abs(y_px - self.origin_y_px);
+        return switch (self.axis) {
+            .horizontal => dx,
+            .vertical => dy,
+            .free => @max(dx, dy),
+        };
+    }
 };
 
 pub const Capture = struct {
     id: UiId,
     action_id: UiActionId,
+    /// 이 capture가 drag를 선언한 node에서 시작됐다면 그 수명. click-only capture는 null이다.
+    drag: ?DragState = null,
 };
 
 pub const InteractionState = struct {
@@ -56,9 +91,30 @@ pub const DirtySet = struct {
     }
 };
 
+/// drag 수명에서 이번 이벤트가 만든 변화. host는 이것으로 preview/commit을 정한다 — pure module은
+/// 좌표와 payload만 전달하고 무엇을 옮길지는 모른다.
+pub const DragEvent = union(enum) {
+    /// threshold를 처음 넘었다. host가 preview를 시작한다.
+    began: DragUpdate,
+    /// 시작된 drag가 움직였다.
+    moved: DragUpdate,
+    /// up으로 끝났다. host가 현재 tree에 다시 hit-test해 destination을 정하고 한 번 commit한다.
+    dropped: DragUpdate,
+    /// cancel·stale·비호환 reconcile로 끝났다. effect 0이며 host는 시작 상태를 복원한다.
+    cancelled: struct { payload: u64 },
+};
+
+pub const DragUpdate = struct {
+    payload: u64,
+    x_px: f64,
+    y_px: f64,
+};
+
 pub const Dispatch = struct {
     action: ?UiActionId = null,
     dirty: DirtySet = .{},
+    /// click action과 배타적이지 않다 — threshold를 넘지 않은 up은 `action`만, 넘은 up은 `drag`만 낸다.
+    drag: ?DragEvent = null,
 };
 
 pub const InteractionError = error{DirtySetOverflow};
@@ -70,23 +126,64 @@ pub fn dispatch(state: *InteractionState, snapshot: UiRectTree, event: UiPointer
     const before = state.*;
     var after = before;
     var action: ?UiActionId = null;
+    var drag: ?DragEvent = null;
+
+    // 이벤트가 겨냥한 세대가 지금 published 세대와 다르면 이 tree에 대한 판정이 아니다. 진행 중이던
+    // capture는 effect 없이 취소하고 이벤트는 버린다 — 이전 tree를 보고 누른 up이 새 action을
+    // 실행하지 못하게 하는 §5의 규율을 pointer 입구에서 한 번 더 세운다.
+    if (event.generation != 0 and snapshot.generation != 0 and event.generation != snapshot.generation) {
+        if (after.capture) |capture| {
+            if (capture.drag) |d| drag = .{ .cancelled = .{ .payload = d.payload } };
+        }
+        after.capture = null;
+        const stale = try finishTransition(before, after, null);
+        state.* = after;
+        return .{ .action = null, .dirty = stale.dirty, .drag = drag };
+    }
 
     switch (event.phase) {
         .move => {
-            if (after.capture == null) {
+            if (after.capture) |*capture| {
+                if (capture.drag) |*d| {
+                    d.last_x_px = event.x_px;
+                    d.last_y_px = event.y_px;
+                    const update = DragUpdate{ .payload = d.payload, .x_px = event.x_px, .y_px = event.y_px };
+                    if (d.started) {
+                        drag = .{ .moved = update };
+                    } else if (d.travel(event.x_px, event.y_px) >= @as(f64, d.threshold_px)) {
+                        d.started = true;
+                        drag = .{ .began = update };
+                    }
+                }
+            } else {
                 after.hovered = if (hitAction(snapshot, event.x_px, event.y_px)) |value| value.id else null;
             }
         },
         .down => {
             // The protocol has no pointer ID. A second down is a new primary sequence, so its
             // predecessor cannot remain pressed or later receive a stale up action.
+            if (after.capture) |capture| {
+                if (capture.drag) |d| drag = .{ .cancelled = .{ .payload = d.payload } };
+            }
             after.capture = null;
             if (event.button == .left) {
                 const target = hitAction(snapshot, event.x_px, event.y_px);
                 after.hovered = if (target) |value| value.id else null;
                 if (target) |value| {
                     after.focused = value.id;
-                    after.capture = .{ .id = value.id, .action_id = value.action_id };
+                    after.capture = .{
+                        .id = value.id,
+                        .action_id = value.action_id,
+                        .drag = if (value.drag) |decl| .{
+                            .payload = decl.payload,
+                            .axis = decl.axis,
+                            .threshold_px = decl.threshold_px,
+                            .origin_x_px = event.x_px,
+                            .origin_y_px = event.y_px,
+                            .last_x_px = event.x_px,
+                            .last_y_px = event.y_px,
+                        } else null,
+                    };
                 }
             }
         },
@@ -96,19 +193,32 @@ pub fn dispatch(state: *InteractionState, snapshot: UiRectTree, event: UiPointer
                 after.capture = null;
                 after.hovered = if (hitAction(snapshot, event.x_px, event.y_px)) |value| value.id else null;
                 if (previous_capture) |capture| {
-                    if (enabledActionForId(snapshot, capture.id)) |current_action| {
-                        if (current_action.id == capture.action_id) action = capture.action_id;
+                    // 시작된 drag의 up은 drop이지 click이 아니다. threshold를 넘지 않았으면 여전히
+                    // click이며, 그 판정은 현재 action table을 다시 통과해야 한다.
+                    if (capture.drag) |d| {
+                        if (d.started) {
+                            drag = .{ .dropped = .{ .payload = d.payload, .x_px = event.x_px, .y_px = event.y_px } };
+                        }
+                    }
+                    if (drag == null) {
+                        if (enabledActionForId(snapshot, capture.id)) |current_action| {
+                            if (current_action.id == capture.action_id) action = capture.action_id;
+                        }
                     }
                 }
             }
         },
         .cancel => {
+            if (after.capture) |capture| {
+                if (capture.drag) |d| drag = .{ .cancelled = .{ .payload = d.payload } };
+            }
             after.capture = null;
             after.hovered = if (hitAction(snapshot, event.x_px, event.y_px)) |value| value.id else null;
         },
     }
 
-    const result = try finishTransition(before, after, action);
+    var result = try finishTransition(before, after, action);
+    result.drag = drag;
     state.* = after;
     return result;
 }
@@ -164,6 +274,80 @@ pub fn activateFocused(state: *InteractionState, snapshot: UiRectTree) Interacti
     return try finishTransition(before, before, current.id);
 }
 
+/// `gesture compatibility key` — capture를 다음 snapshot으로 넘겨도 되는지 판정하는 입력.
+///
+/// 네 요소 중 **epoch와 domain identity는 neutral chrome이 모른다**. `InteractionState`는 `UiId`만
+/// 알기 때문에, host가 그 둘을 opaque 값으로 주입하고 이 모듈은 **같은지만** 비교한다. 그 값이
+/// 무엇을 뜻하는지 해석하는 쪽은 계속 host다(docs/chrome-interaction-migration.md §5).
+pub const GestureCompatibility = struct {
+    /// drag payload 등 gesture의 종류. 같은 node라도 종류가 바뀌면 다른 gesture다.
+    kind: u64,
+    /// action이 여전히 활성인가. disabled로 바뀐 target은 carry하지 않는다.
+    enabled: bool,
+    /// host가 주는 window/session epoch.
+    owner_epoch: u64,
+    /// host가 주는 source domain identity(예: 이 drag가 붙은 live 객체).
+    domain_identity: u64,
+
+    fn eql(self: GestureCompatibility, other: GestureCompatibility) bool {
+        return self.kind == other.kind and self.enabled == other.enabled and
+            self.owner_epoch == other.owner_epoch and self.domain_identity == other.domain_identity;
+    }
+};
+
+/// Tree replacement에서 capture를 **명시적으로** 이어가는 경로.
+///
+/// 기본 `reconcile`은 언제나 cancel이고 그것이 click의 기본값이다. 그런데 drag와 continuous resize는
+/// 매 move마다 tree를 다시 발행하므로, 그 기본값 위에서는 capture가 첫 move에 죽는다. 이 함수는
+/// 그때만 쓰는 좁은 문이며, 아래 셋을 **모두** 만족할 때에만 carry한다.
+///
+///   1. 새 tree에 그 identity가 정확히 하나 있고, 그 node가 여전히 enabled action을 가진다.
+///   2. host가 준 이전/현재 compatibility key가 같다.
+///   3. capture가 drag를 들고 있다(click capture는 carry 대상이 아니다).
+///
+/// 하나라도 어긋나면 effect 없이 cancel하고 drag는 `cancelled`를 낸다 — "판정을 못 하겠으면
+/// 유지하지 않는다"가 이 문의 기본 방향이다.
+pub fn reconcileCarryingCapture(
+    state: *InteractionState,
+    new_tree: UiRectTree,
+    previous: GestureCompatibility,
+    current: GestureCompatibility,
+) InteractionError!Dispatch {
+    const before = state.*;
+    const capture = before.capture orelse return reconcile(state, new_tree, new_tree);
+
+    const carry = capture.drag != null and
+        previous.eql(current) and
+        enabledActionForId(new_tree, capture.id) != null and
+        countIdentity(new_tree, capture.id) == 1;
+
+    if (carry) {
+        // capture는 그대로 두고 hover/focus만 새 tree로 정리한다.
+        var after = before;
+        if (after.hovered) |id| {
+            if (enabledActionForId(new_tree, id) == null) after.hovered = null;
+        }
+        if (after.focused) |id| {
+            if (enabledActionForId(new_tree, id) == null) after.focused = null;
+        }
+        const kept = try finishTransition(before, after, null);
+        state.* = after;
+        return kept;
+    }
+
+    var result = try reconcile(state, new_tree, new_tree);
+    if (capture.drag) |d| result.drag = .{ .cancelled = .{ .payload = d.payload } };
+    return result;
+}
+
+fn countIdentity(snapshot: UiRectTree, id: UiId) usize {
+    var count: usize = 0;
+    for (snapshot.entries) |candidate| {
+        if (candidate.id == id) count += 1;
+    }
+    return count;
+}
+
 /// A surface lifetime boundary. Unlike a tree replacement, deactivation also discards focus and
 /// hover so a numeric ID in a future surface cannot inherit visual state from the retired one.
 pub fn deactivate(state: *InteractionState) InteractionError!Dispatch {
@@ -177,6 +361,8 @@ pub fn deactivate(state: *InteractionState) InteractionError!Dispatch {
 const HitAction = struct {
     id: UiId,
     action_id: UiActionId,
+    /// 이 node가 drag를 선언했다면 그 능력. 선언은 published entry가 싣고 pure module은 그대로 옮긴다.
+    drag: ?DragDeclaration = null,
 };
 
 fn hitAction(snapshot: UiRectTree, x_px: f64, y_px: f64) ?HitAction {
@@ -192,7 +378,7 @@ fn hitAction(snapshot: UiRectTree, x_px: f64, y_px: f64) ?HitAction {
         if (rect_entry.effective_clip) |clip| {
             if (!containsPoint(clip, x_px, y_px)) continue;
         }
-        return .{ .id = rect_entry.id, .action_id = action.id };
+        return .{ .id = rect_entry.id, .action_id = action.id, .drag = rect_entry.drag };
     }
     return null;
 }
@@ -437,4 +623,156 @@ test "keyboard activation revalidates against the current tree, not the focused 
     const vanished = try activateFocused(&gone_state, rectTree(&empty));
     try std.testing.expect(vanished.action == null);
     try std.testing.expect(gone_state.focused == null);
+}
+
+fn draggableEntry(
+    id: UiId,
+    rect: layout.UiRect,
+    action: ui_tree.UiAction,
+    decl: ui_tree.DragDeclaration,
+) ui_tree.RectEntry {
+    return .{
+        .id = id,
+        .parent_index = null,
+        .kind = .card,
+        .rect = rect,
+        .effective_clip = null,
+        .action = action,
+        .drag = decl,
+    };
+}
+
+fn generationTree(entries: []const ui_tree.RectEntry, generation: u64) UiRectTree {
+    return .{ .entries = entries, .generation = generation };
+}
+
+test "an event aimed at another generation decides nothing and leaves no capture behind" {
+    const entries = [_]ui_tree.RectEntry{
+        draggableEntry(1, .{ .x = 0, .y = 0, .width = 10, .height = 10 }, .{ .id = 10 }, .{ .payload = 77 }),
+    };
+    var state = InteractionState{};
+    _ = try dispatch(&state, generationTree(&entries, 5), .{ .phase = .down, .x_px = 2, .y_px = 2, .timestamp_ns = 1, .generation = 5 });
+    try std.testing.expect(state.capture != null);
+
+    // 이전 tree를 보고 눌렀다 뗀 up. action을 내지 않고, 들고 있던 drag는 cancel로 닫는다.
+    const stale = try dispatch(&state, generationTree(&entries, 6), .{ .phase = .up, .x_px = 2, .y_px = 2, .timestamp_ns = 2, .generation = 5 });
+    try std.testing.expectEqual(@as(?UiActionId, null), stale.action);
+    try std.testing.expectEqual(@as(u64, 77), stale.drag.?.cancelled.payload);
+    try std.testing.expectEqual(@as(?Capture, null), state.capture);
+
+    // 세대를 아무도 말하지 않으면(둘 중 하나가 0) 게이트는 열려 있다 — 아직 세대를 싣지 않는
+    // 소비자를 이 게이트가 통째로 막아버리지 않게 하는 완화다.
+    _ = try dispatch(&state, rectTree(&entries), .{ .phase = .down, .x_px = 2, .y_px = 2, .timestamp_ns = 3, .generation = 9 });
+    try std.testing.expect(state.capture != null);
+}
+
+test "a drag begins only past its threshold, and only along its declared axis" {
+    const entries = [_]ui_tree.RectEntry{
+        draggableEntry(1, .{ .x = 0, .y = 0, .width = 40, .height = 40 }, .{ .id = 10 }, .{ .payload = 77, .axis = .horizontal, .threshold_px = 4 }),
+    };
+    var state = InteractionState{};
+    _ = try dispatch(&state, rectTree(&entries), .{ .phase = .down, .x_px = 10, .y_px = 10, .timestamp_ns = 1 });
+
+    // 선언한 축과 직교하는 이동은 아무리 커도 drag를 시작시키지 않는다.
+    const vertical = try dispatch(&state, rectTree(&entries), .{ .phase = .move, .x_px = 10, .y_px = 34, .timestamp_ns = 2 });
+    try std.testing.expect(vertical.drag == null);
+
+    const under = try dispatch(&state, rectTree(&entries), .{ .phase = .move, .x_px = 13, .y_px = 34, .timestamp_ns = 3 });
+    try std.testing.expect(under.drag == null);
+
+    const began = try dispatch(&state, rectTree(&entries), .{ .phase = .move, .x_px = 14, .y_px = 34, .timestamp_ns = 4 });
+    try std.testing.expectEqual(@as(u64, 77), began.drag.?.began.payload);
+
+    // 시작한 뒤로는 threshold를 다시 묻지 않는다. origin 근처로 돌아와도 moved다.
+    const back = try dispatch(&state, rectTree(&entries), .{ .phase = .move, .x_px = 10, .y_px = 10, .timestamp_ns = 5 });
+    try std.testing.expectEqual(@as(u64, 77), back.drag.?.moved.payload);
+}
+
+test "a started drag ends in drop, and an unstarted one is still a click" {
+    const entries = [_]ui_tree.RectEntry{
+        draggableEntry(1, .{ .x = 0, .y = 0, .width = 40, .height = 40 }, .{ .id = 10 }, .{ .payload = 77 }),
+    };
+    var state = InteractionState{};
+
+    _ = try dispatch(&state, rectTree(&entries), .{ .phase = .down, .x_px = 10, .y_px = 10, .timestamp_ns = 1 });
+    _ = try dispatch(&state, rectTree(&entries), .{ .phase = .move, .x_px = 30, .y_px = 10, .timestamp_ns = 2 });
+    const dropped = try dispatch(&state, rectTree(&entries), .{ .phase = .up, .x_px = 30, .y_px = 12, .timestamp_ns = 3 });
+    // drop은 click이 아니다. 둘 다 내면 소비자가 한 제스처를 두 번 실행한다.
+    try std.testing.expectEqual(@as(?UiActionId, null), dropped.action);
+    try std.testing.expectEqual(@as(u64, 77), dropped.drag.?.dropped.payload);
+    try std.testing.expectEqual(@as(f64, 30), dropped.drag.?.dropped.x_px);
+
+    _ = try dispatch(&state, rectTree(&entries), .{ .phase = .down, .x_px = 10, .y_px = 10, .timestamp_ns = 4 });
+    const clicked = try dispatch(&state, rectTree(&entries), .{ .phase = .up, .x_px = 11, .y_px = 10, .timestamp_ns = 5 });
+    try std.testing.expectEqual(@as(?UiActionId, 10), clicked.action);
+    try std.testing.expect(clicked.drag == null);
+
+    // cancel과 두 번째 down은 진행 중이던 drag를 열린 채 두지 않는다.
+    _ = try dispatch(&state, rectTree(&entries), .{ .phase = .down, .x_px = 10, .y_px = 10, .timestamp_ns = 6 });
+    _ = try dispatch(&state, rectTree(&entries), .{ .phase = .move, .x_px = 30, .y_px = 10, .timestamp_ns = 7 });
+    const cancelled = try dispatch(&state, rectTree(&entries), .{ .phase = .cancel, .x_px = 30, .y_px = 10, .timestamp_ns = 8 });
+    try std.testing.expectEqual(@as(u64, 77), cancelled.drag.?.cancelled.payload);
+
+    _ = try dispatch(&state, rectTree(&entries), .{ .phase = .down, .x_px = 10, .y_px = 10, .timestamp_ns = 9 });
+    _ = try dispatch(&state, rectTree(&entries), .{ .phase = .move, .x_px = 30, .y_px = 10, .timestamp_ns = 10 });
+    const superseded = try dispatch(&state, rectTree(&entries), .{ .phase = .down, .x_px = 10, .y_px = 10, .timestamp_ns = 11 });
+    try std.testing.expectEqual(@as(u64, 77), superseded.drag.?.cancelled.payload);
+}
+
+test "carrying a capture across trees needs the same key, one identity, and a live action" {
+    const entries = [_]ui_tree.RectEntry{
+        draggableEntry(1, .{ .x = 0, .y = 0, .width = 40, .height = 40 }, .{ .id = 10 }, .{ .payload = 77 }),
+    };
+    const key = GestureCompatibility{ .kind = 77, .enabled = true, .owner_epoch = 3, .domain_identity = 42 };
+
+    var state = InteractionState{};
+    _ = try dispatch(&state, rectTree(&entries), .{ .phase = .down, .x_px = 10, .y_px = 10, .timestamp_ns = 1 });
+    _ = try dispatch(&state, rectTree(&entries), .{ .phase = .move, .x_px = 30, .y_px = 10, .timestamp_ns = 2 });
+
+    // 매 move마다 tree를 다시 발행해도 drag가 살아남는다 — 기본 reconcile로는 여기서 죽는다.
+    const carried = try reconcileCarryingCapture(&state, rectTree(&entries), key, key);
+    try std.testing.expect(carried.drag == null);
+    try std.testing.expectEqual(@as(?UiId, 1), state.capture.?.id);
+    try std.testing.expect(state.capture.?.drag.?.started);
+
+    // epoch가 바뀌면(창이 바뀌면) carry하지 않는다.
+    var moved_epoch = key;
+    moved_epoch.owner_epoch = 4;
+    const across_windows = try reconcileCarryingCapture(&state, rectTree(&entries), key, moved_epoch);
+    try std.testing.expectEqual(@as(u64, 77), across_windows.drag.?.cancelled.payload);
+    try std.testing.expectEqual(@as(?Capture, null), state.capture);
+
+    // 같은 identity가 새 tree에 둘이면 어느 쪽을 끌고 있었는지 판정할 수 없다 — 유지하지 않는다.
+    _ = try dispatch(&state, rectTree(&entries), .{ .phase = .down, .x_px = 10, .y_px = 10, .timestamp_ns = 3 });
+    _ = try dispatch(&state, rectTree(&entries), .{ .phase = .move, .x_px = 30, .y_px = 10, .timestamp_ns = 4 });
+    const twins = [_]ui_tree.RectEntry{
+        entries[0],
+        draggableEntry(1, .{ .x = 60, .y = 0, .width = 40, .height = 40 }, .{ .id = 10 }, .{ .payload = 77 }),
+    };
+    const ambiguous = try reconcileCarryingCapture(&state, rectTree(&twins), key, key);
+    try std.testing.expectEqual(@as(u64, 77), ambiguous.drag.?.cancelled.payload);
+
+    // 사이에 disabled로 바뀐 target도 마찬가지다.
+    _ = try dispatch(&state, rectTree(&entries), .{ .phase = .down, .x_px = 10, .y_px = 10, .timestamp_ns = 5 });
+    _ = try dispatch(&state, rectTree(&entries), .{ .phase = .move, .x_px = 30, .y_px = 10, .timestamp_ns = 6 });
+    const disabled = [_]ui_tree.RectEntry{
+        draggableEntry(1, .{ .x = 0, .y = 0, .width = 40, .height = 40 }, .{ .id = 10, .enabled = false }, .{ .payload = 77 }),
+    };
+    const dead = try reconcileCarryingCapture(&state, rectTree(&disabled), key, key);
+    try std.testing.expectEqual(@as(u64, 77), dead.drag.?.cancelled.payload);
+}
+
+test "a click capture is not carried, because only continuous gestures republish mid-stream" {
+    const entries = [_]ui_tree.RectEntry{
+        entry(1, .{ .x = 0, .y = 0, .width = 40, .height = 40 }, .{ .id = 10 }, null),
+    };
+    const key = GestureCompatibility{ .kind = 0, .enabled = true, .owner_epoch = 3, .domain_identity = 42 };
+
+    var state = InteractionState{};
+    _ = try dispatch(&state, rectTree(&entries), .{ .phase = .down, .x_px = 10, .y_px = 10, .timestamp_ns = 1 });
+
+    // drag 선언이 없는 capture는 이 좁은 문의 대상이 아니다 — 기본값인 cancel이 그대로 적용된다.
+    const result = try reconcileCarryingCapture(&state, rectTree(&entries), key, key);
+    try std.testing.expect(result.drag == null);
+    try std.testing.expectEqual(@as(?Capture, null), state.capture);
 }

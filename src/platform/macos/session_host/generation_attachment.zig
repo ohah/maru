@@ -168,11 +168,6 @@ pub const GenerationAttachment = struct {
         self: *GenerationAttachment,
         adapter: *host_adapter_mod.HostAdapter,
     ) DeinitOutcome {
-        if (self.response.lifecycle == .terminal)
-            return if (self.response.self_addr == @intFromPtr(&self.response))
-                .already_terminal
-            else
-                .corrupt;
         const owner = adapter.responseOwnerSeal(self.reservation orelse return .corrupt) catch
             return .corrupt;
         return switch (self.response.deinit(owner)) {
@@ -259,8 +254,7 @@ pub const GenerationAttachment = struct {
         adapter: *host_adapter_mod.HostAdapter,
     ) DeinitOutcome {
         if (!rawLifecycleValid(&self.lifecycle)) return .corrupt;
-        if (self.lifecycle == .terminal)
-            return if (self.self_addr == @intFromPtr(self)) .already_terminal else .corrupt;
+        if (self.lifecycle == .terminal) return .corrupt;
         if (!self.valid()) return .corrupt;
         switch (self.lifecycle) {
             .shell => switch (generation_transport_mod.preflightTerminalizeOwned(
@@ -275,6 +269,7 @@ pub const GenerationAttachment = struct {
             .executing => return .busy,
             .cleaning => return .busy,
             .attached => {
+                if (!self.response.lifecycleRawValid()) return .corrupt;
                 if (self.response.lifecycle != .terminal) return .busy;
                 switch (generation_transport_mod.preflightTerminalizeOwned(
                     &self.transport,
@@ -313,7 +308,7 @@ pub const GenerationAttachment = struct {
 
     pub fn deinit(self: *GenerationAttachment, adapter: *host_adapter_mod.HostAdapter) void {
         const outcome = self.tryDeinit(adapter);
-        if (outcome != .cleaned and outcome != .already_terminal)
+        if (outcome != .cleaned)
             @panic("generation attachment teardown invariant violated");
     }
 
@@ -493,7 +488,7 @@ const AttachmentReentrantFreeAllocator = struct {
     }
 };
 
-test "CR3a-2a generation attachment uncertain execute permits exact adapter teardown" {
+test "CR3a-2c3b registry-cleared uncertain response rejects finish and attachment retry" {
     try client_slot_mod.ClientSlot.initializeProcessRuntime();
     const allocator = std.testing.allocator;
     var client: @import("client.zig").Client = .{
@@ -516,8 +511,8 @@ test "CR3a-2a generation attachment uncertain execute permits exact adapter tear
         .uncertain_or_connection_failure => {},
         else => return error.TestUnexpectedResult,
     }
-    try std.testing.expectEqual(DeinitOutcome.already_terminal, attachment.finishResponse(&adapter));
-    try std.testing.expectEqual(DeinitOutcome.already_terminal, attachment.tryDeinit(&adapter));
+    try std.testing.expectEqual(DeinitOutcome.corrupt, attachment.finishResponse(&adapter));
+    try std.testing.expectEqual(DeinitOutcome.corrupt, attachment.tryDeinit(&adapter));
 }
 
 test "CR3a-2a attached teardown fences transport before adapter release" {
@@ -938,7 +933,7 @@ test "CR3a-2b2 generation GUI pump transfers a direct parser frame through the n
     try std.testing.expectEqual(@as(usize, 0), try adapter.slot.current.batch_registry.count());
 }
 
-test "CR3a-2a typed reject settles binding response and transport exactly once" {
+test "CR3a-2c3b registry-cleared typed reject rejects finish and attachment retry" {
     try client_slot_mod.ClientSlot.initializeProcessRuntime();
     const allocator = std.testing.allocator;
     var client: @import("client.zig").Client = .{
@@ -970,6 +965,6 @@ test "CR3a-2a typed reject settles binding response and transport exactly once" 
     attachment.settleExecutedOutcome(&adapter, result);
     try std.testing.expectEqual(Lifecycle.terminal, attachment.lifecycle);
     try std.testing.expectEqual(contract.BindingLifecycle.terminal, attachment.binding.lifecycle);
-    try std.testing.expectEqual(DeinitOutcome.already_terminal, attachment.finishResponse(&adapter));
-    try std.testing.expectEqual(DeinitOutcome.already_terminal, attachment.tryDeinit(&adapter));
+    try std.testing.expectEqual(DeinitOutcome.corrupt, attachment.finishResponse(&adapter));
+    try std.testing.expectEqual(DeinitOutcome.corrupt, attachment.tryDeinit(&adapter));
 }

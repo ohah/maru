@@ -1033,14 +1033,23 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    registry-resolved canonical node operation pin 아래 exact `GenerationCapabilities` value projection을 구현했다. untrusted slot 주소는
    registry 비교 전 역참조하지 않고 owner-seal/capability enum의 invalid raw byte를 fail-close하며, facade production callsite 0과
    shared `RemoteRuntime` architecture raw-read exact baseline을 boundary gate로 고정했다.
-   **2c3b-2~3 closed RPC 미착수**이며 다음 두 merge gate를 섞지 않는다. **2c3b-2는 request-side canonical authority만**
-   구현한다. `RuntimeRequestTag -> RequestFamily -> role/phase -> method` 전수표와 닫힌 prepare/abort error를 먼저 고정하고,
+   **2c3b-2 request-side canonical authority는 구현·검증 완료했고 2c3b-3 response-side execution/ownership은 구현 전**이며 두 merge
+   gate를 섞지 않는다. 2c3b-2는 `RuntimeRequestTag -> RequestFamily -> role/phase -> method` 전수표와 닫힌 prepare/abort error,
    같은 binding entry의 node-sealed `PreparedRequestAuthority`가 opaque `PreparedBlockingRpcStorage`의 frame descriptor·allocator
-   provenance·incarnation·tag/id/digest를 한 transaction으로 pair-seal한다. `GenerationTransport`의 direct prepared-Client API 호출은
-   0이 되며 모든 prepare/abort는 registry scalar lookup 뒤 canonical node operation pin 아래 실행한다. 이 gate는 public RPC
-   destination, response payload publish, 새 wire/product behavior를 열지 않고 기존 attach 실행 parity를 유지한다. `spawn_full`은
+   provenance·incarnation·tag/id/digest를 한 transaction으로 pair-seal하는 경로까지 구현했다. 기존 attach-compatible execute도 이
+   authority를 begin/revalidate/settle하도록 hardened했다. request allocation fail-index, scope token·owner/client-backing exact/partial
+   alias, cross-splice·same-address ABA, issuer exact-max와 actual socket accepted/uncertain 경계를 Debug/ReleaseFast에서 고정했다.
+   legacy/generation 제품 decoder parity는 계획대로 2c3e가 소유한다. `GenerationTransport`의 direct prepared-Client API 호출은 0이 되며 모든
+   prepare/abort는 registry scalar lookup 뒤 canonical node operation pin 아래 실행한다. 이 gate는 public RPC destination, 반복 RPC
+   response authority·borrow/finish 또는 새 관측 가능 wire/product behavior를 열지 않고 기존 attach 실행 parity를 유지한다. `spawn_full`은
    connection/bootstrap 전용 tag로 union에는 유지하지만 attachment-bound facade의 classifier가 prepare 전에 항상
    `Unauthorized`/wire 0으로 거부한다. union 제거 여부는 2c4 surface cleanup에서 판단하며 그 전까지 허용 의미는 바뀌지 않는다.
+   request/execute의 temporary allocator 교체는 final-address scope token을 caller stack에 in-place mint하고 그 exact range를 guarded
+   allocator에 포함한다. public token은 pointer-free allocator scalar만 가지며 Client-private identity만 typed allocator를 보유한다.
+   prepared request가 executing으로 전이된 뒤의 allocator-scope·response-incarnation issuer 소진은 canonical request backing을
+   먼저 exact settle한 뒤 authority terminal+connection poison으로 닫는다. 아직 authority를 publish하지 않은 transport/registry
+   issuer의 preflight 소진은 mutation 없는 `IdentityExhausted`다. declared attachment owner range는 transport와 opaque
+   prepared storage를 완전히 포함하면서 canonical slot/node/Client/owner-seal range와 겹치지 않아야 한다.
 
    **2c3b-3은 response-side execution/ownership**을 구현한다. public `ResponseDestination = attach|rpc` 전환, 별도 node-sealed
    checked-monotonic RPC epoch authority, Client의 zero-write/ambiguous-write closed progress evidence, stack-final-address

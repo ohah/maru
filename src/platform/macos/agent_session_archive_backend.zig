@@ -132,6 +132,10 @@ const CacheEntry = struct {
 pub const Backend = struct {
     state: ?*State,
 
+    /// In production `allocator` must be process-lifetime: `deinit` is intentionally nonblocking
+    /// and a filesystem call already in progress may keep the detached worker's final State ref
+    /// alive after the AppSession releases its Backend handle. Test builds enforce quiescence
+    /// before returning so a per-test allocator cannot be observed after its lifetime.
     pub fn init(allocator: std.mem.Allocator, io: std.Io) !Backend {
         const state = try allocator.create(State);
         state.* = .{ .allocator = allocator, .io = io };
@@ -214,6 +218,7 @@ pub const Backend = struct {
         state.mutex.lockUncancelable(state.io);
         state.shutting_down = true;
         state.cancelled_generation = state.inflight_generation;
+        state.test_gate_released.store(true, .release);
         for (state.results.items) |*result| result.deinit(state.allocator);
         state.results.deinit(state.allocator);
         state.results = .empty;
@@ -221,6 +226,22 @@ pub const Backend = struct {
         state.cache.deinit(state.allocator);
         state.cache = .empty;
         state.mutex.unlock(state.io);
+        // Production teardown stays nonblocking: the detached worker owns its State ref until its
+        // current filesystem call returns. Tests, however, commonly pass DebugAllocator storage
+        // whose lifetime ends with the test, so they must prove that no detached allocation
+        // survives that boundary. The finite test-only drain turns a stuck fixture into an
+        // explicit failure without making an unavailable provider mount hang app Quit.
+        if (builtin.is_test) {
+            var attempts: usize = 0;
+            while (attempts < 10_000) : (attempts += 1) {
+                state.mutex.lockUncancelable(state.io);
+                const inflight = state.inflight;
+                state.mutex.unlock(state.io);
+                if (!inflight) break;
+                std.Io.sleep(state.io, std.Io.Duration.fromMilliseconds(1), .awake) catch
+                    @panic("archive test worker drain sleep failed");
+            } else @panic("archive test worker did not stop within 10 seconds");
+        }
         state.release();
     }
 };
@@ -698,6 +719,20 @@ test "archive worker smoke gate waits without blocking the releasing actor" {
         std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
     }
     try std.testing.expect(probe.finished.load(.acquire));
+}
+
+test "archive backend deinit releases a gated detached worker before allocator return" {
+    var backend = try Backend.init(std.testing.allocator, std.testing.io);
+    backend.setTestGate(true);
+    const home = try std.testing.allocator.dupe(u8, "/nonexistent-maru-archive-home");
+    try std.testing.expect(backend.submit(home));
+    var spins: usize = 0;
+    while (!backend.testGateReached() and spins < 1_000) : (spins += 1) {
+        std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+    }
+    try std.testing.expect(backend.testGateReached());
+    backend.deinit();
+    try std.testing.expect(backend.state == null);
 }
 
 test "cancelled archive generation cannot publish a replacement snapshot" {

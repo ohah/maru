@@ -21,10 +21,19 @@ pub const ExecutedResponse = struct {
     owner_seal_addr: usize = 0,
     incarnation: u64 = 0,
     lifecycle: contract.ExecutedResponseLifecycle = .pristine,
-    result: ?contract.ExecuteResult = null,
+    result_present: u8 = 0,
+    result_tag: u8 = 0,
+    executed_transport_incarnation: u64 = 0,
+    executed_request_id: u64 = 0,
+    executed_request_digest: u64 = 0,
+    correlation_request_id: u64 = 0,
     payload_digest: u64 = 0,
-    allocator: ?std.mem.Allocator = null,
-    owned_bytes: []u8 = &.{},
+    allocator_present: u8 = 0,
+    allocator_ptr: usize = 0,
+    allocator_vtable: usize = 0,
+    owned_addr: usize = 0,
+    owned_len: usize = 0,
+    terminal_digest: u64 = 0,
 
     pub const InitError = error{
         DestinationOccupied,
@@ -34,18 +43,24 @@ pub const ExecutedResponse = struct {
         AliasedPayload,
     };
 
+    pub fn lifecycleRawValid(self: *const ExecutedResponse) bool {
+        const raw = @as(*const u8, @ptrCast(&self.lifecycle)).*;
+        return raw <= @intFromEnum(contract.ExecutedResponseLifecycle.terminal);
+    }
+
     fn pristine(self: *const ExecutedResponse) bool {
-        return self.self_addr == 0 and self.owner_seal_addr == 0 and self.incarnation == 0 and
-            self.lifecycle == .pristine and self.result == null and
-            self.payload_digest == 0 and self.allocator == null and
-            self.owned_bytes.len == 0;
+        // Caller-owned destination storage is an opaque byte container until initialization.
+        // Requiring its complete representation to be zero avoids interpreting enum padding or
+        // future fields as typed values and makes newly added authority fields fail closed.
+        return std.mem.allEqual(u8, std.mem.asBytes(self), 0);
     }
 
     pub fn canInitializeWithOwner(
         self: *const ExecutedResponse,
         owner_seal: *const contract.ExecutedResponseOwnerSeal,
     ) bool {
-        return self.pristine() and owner_seal.self_addr == 0 and
+        return self.pristine() and owner_seal.lifecycleRawValid() and
+            owner_seal.self_addr == 0 and
             owner_seal.lifecycle == .pristine and !rangesOverlapTyped(self, owner_seal);
     }
 
@@ -76,17 +91,32 @@ pub const ExecutedResponse = struct {
             (seal_start < bytes_end and bytes_start < seal_end))
             return error.AliasedPayload;
 
-        contract.ExecutedResponseOwnerSeal.initInPlace(owner_seal, incarnation) catch
-            return error.InvalidIncarnation;
         out.* = .{
             .self_addr = out_start,
             .owner_seal_addr = @intFromPtr(owner_seal),
             .incarnation = incarnation,
             .lifecycle = .accepted,
-            .result = .{ .accepted = correlated },
+            .result_present = 1,
+            .result_tag = @intFromEnum(contract.ExecuteOutcome.accepted),
+            .executed_transport_incarnation = correlated.executed_call.prepared_call.transport_incarnation,
+            .executed_request_id = correlated.executed_call.prepared_call.request_id,
+            .executed_request_digest = correlated.executed_call.prepared_call.request_digest,
+            .correlation_request_id = correlated.response_request_id,
             .payload_digest = payloadDigest(owned_bytes),
-            .allocator = allocator,
-            .owned_bytes = owned_bytes,
+            .allocator_present = 1,
+            .allocator_ptr = @intFromPtr(allocator.ptr),
+            .allocator_vtable = @intFromPtr(allocator.vtable),
+            .owned_addr = @intFromPtr(owned_bytes.ptr),
+            .owned_len = owned_bytes.len,
+        };
+        contract.ExecutedResponseOwnerSeal.initInPlace(
+            owner_seal,
+            incarnation,
+            out_start,
+            responseTranscriptDigest(out),
+        ) catch {
+            out.* = .{};
+            return error.InvalidIncarnation;
         };
     }
 
@@ -111,14 +141,36 @@ pub const ExecutedResponse = struct {
             else
                 return error.InvalidResult,
         };
-        contract.ExecutedResponseOwnerSeal.initInPlace(owner_seal, incarnation) catch
-            return error.InvalidIncarnation;
+        const executed = switch (result) {
+            .accepted => unreachable,
+            .typed_reject => |correlated| correlated.executed_call,
+            .uncertain_or_connection_failure => |receipt| receipt,
+        };
+        const correlation_request_id: u64 = switch (result) {
+            .accepted => unreachable,
+            .typed_reject => |correlated| correlated.response_request_id,
+            .uncertain_or_connection_failure => 0,
+        };
         out.* = .{
             .self_addr = @intFromPtr(out),
             .owner_seal_addr = @intFromPtr(owner_seal),
             .incarnation = incarnation,
             .lifecycle = lifecycle,
-            .result = result,
+            .result_present = 1,
+            .result_tag = @intFromEnum(std.meta.activeTag(result)),
+            .executed_transport_incarnation = executed.prepared_call.transport_incarnation,
+            .executed_request_id = executed.prepared_call.request_id,
+            .executed_request_digest = executed.prepared_call.request_digest,
+            .correlation_request_id = correlation_request_id,
+        };
+        contract.ExecutedResponseOwnerSeal.initInPlace(
+            owner_seal,
+            incarnation,
+            @intFromPtr(out),
+            responseTranscriptDigest(out),
+        ) catch {
+            out.* = .{};
+            return error.InvalidIncarnation;
         };
     }
 
@@ -126,56 +178,141 @@ pub const ExecutedResponse = struct {
         self: *const ExecutedResponse,
         owner_seal: *const contract.ExecutedResponseOwnerSeal,
     ) error{ NotAccepted, Corrupt }![]const u8 {
-        if (self.self_addr != @intFromPtr(self) or self.incarnation == 0 or
+        if (!self.lifecycleRawValid() or self.self_addr != @intFromPtr(self) or
+            self.incarnation == 0 or
             self.owner_seal_addr == 0 or self.owner_seal_addr != @intFromPtr(owner_seal))
             return error.Corrupt;
         if (!owner_seal.valid(self.incarnation)) return error.Corrupt;
         if (self.lifecycle != .accepted) return error.NotAccepted;
-        if (self.result == null or self.allocator == null or self.owned_bytes.len == 0 or
-            self.payload_digest == 0 or payloadDigest(self.owned_bytes) != self.payload_digest)
+        if (!self.transcriptMatchesOwner(owner_seal) or self.result_present != 1 or
+            self.result_tag != @intFromEnum(contract.ExecuteOutcome.accepted) or
+            !self.resultScalarsValid(true) or
+            self.allocator_present != 1 or self.allocator_ptr == 0 or
+            self.allocator_vtable == 0 or self.owned_addr == 0 or self.owned_len == 0 or
+            self.owned_len > max_owned_response_bytes or self.payload_digest == 0)
             return error.Corrupt;
-        switch (self.result.?) {
-            .accepted => |correlated| if (!correlated.executed_call.valid()) return error.Corrupt,
-            else => return error.Corrupt,
-        }
-        return self.owned_bytes;
+        _ = std.math.add(usize, self.owned_addr, self.owned_len) catch return error.Corrupt;
+        const bytes: []const u8 = @as([*]const u8, @ptrFromInt(self.owned_addr))[0..self.owned_len];
+        if (payloadDigest(bytes) != self.payload_digest) return error.Corrupt;
+        return bytes;
     }
 
     pub fn deinit(
         self: *ExecutedResponse,
         owner_seal: *contract.ExecutedResponseOwnerSeal,
     ) DeinitOutcome {
-        if (self.self_addr != @intFromPtr(self) or self.incarnation == 0)
+        if (!self.lifecycleRawValid() or self.self_addr != @intFromPtr(self) or
+            self.incarnation == 0)
             return .corrupt;
-        if (self.lifecycle == .terminal) return .already_terminal;
+        if (self.lifecycle == .terminal)
+            return if (self.terminalTombstoneMatchesOwner(owner_seal))
+                .already_terminal
+            else
+                .corrupt;
         if (self.owner_seal_addr == 0 or self.owner_seal_addr != @intFromPtr(owner_seal))
             return .corrupt;
         switch (self.lifecycle) {
             .accepted => {
-                _ = self.borrowAccepted(owner_seal) catch return .corrupt;
-                const allocator = self.allocator.?;
-                const bytes = self.owned_bytes;
+                const borrowed = self.borrowAccepted(owner_seal) catch return .corrupt;
+                const allocator = std.mem.Allocator{
+                    .ptr = @ptrFromInt(self.allocator_ptr),
+                    .vtable = @ptrFromInt(self.allocator_vtable),
+                };
+                const bytes: []u8 = @constCast(borrowed);
                 owner_seal.terminalize(self.incarnation) catch return .corrupt;
-                self.owned_bytes = &.{};
-                self.allocator = null;
+                self.owned_addr = 0;
+                self.owned_len = 0;
+                self.allocator_present = 0;
+                self.allocator_ptr = 0;
+                self.allocator_vtable = 0;
                 self.payload_digest = 0;
                 self.owner_seal_addr = 0;
-                self.result = null;
+                self.clearResult();
                 self.lifecycle = .terminal;
+                self.terminal_digest = terminalTombstoneDigest(self);
                 allocator.free(bytes);
-                return .cleaned;
+                return if (self.terminalTombstoneMatchesOwner(owner_seal))
+                    .cleaned
+                else
+                    .corrupt;
             },
             .typed_reject, .uncertain_or_connection_failure => {
-                if (self.allocator != null or self.owned_bytes.len != 0 or self.payload_digest != 0)
+                const expected_result_tag: u8 = switch (self.lifecycle) {
+                    .typed_reject => @intFromEnum(contract.ExecuteOutcome.typed_reject),
+                    .uncertain_or_connection_failure => @intFromEnum(contract.ExecuteOutcome.uncertain_or_connection_failure),
+                    else => unreachable,
+                };
+                if (!self.transcriptMatchesOwner(owner_seal) or self.result_present != 1 or
+                    self.result_tag != expected_result_tag or
+                    !self.resultScalarsValid(self.lifecycle == .typed_reject) or
+                    self.allocator_present != 0 or self.allocator_ptr != 0 or
+                    self.allocator_vtable != 0 or self.owned_addr != 0 or self.owned_len != 0 or
+                    self.payload_digest != 0)
                     return .corrupt;
                 owner_seal.terminalize(self.incarnation) catch return .corrupt;
             },
             .pristine, .terminal => unreachable,
         }
-        self.result = null;
+        self.clearResult();
         self.owner_seal_addr = 0;
         self.lifecycle = .terminal;
-        return .cleaned;
+        self.terminal_digest = terminalTombstoneDigest(self);
+        return if (self.terminalTombstoneMatchesOwner(owner_seal)) .cleaned else .corrupt;
+    }
+
+    fn clearResult(self: *ExecutedResponse) void {
+        self.result_present = 0;
+        self.result_tag = 0;
+        self.executed_transport_incarnation = 0;
+        self.executed_request_id = 0;
+        self.executed_request_digest = 0;
+        self.correlation_request_id = 0;
+    }
+
+    fn terminalTombstoneMatchesOwner(
+        self: *const ExecutedResponse,
+        owner_seal: *const contract.ExecutedResponseOwnerSeal,
+    ) bool {
+        return self.terminalTombstoneExact() and
+            owner_seal.lifecycleRawValid() and owner_seal.settledExact() and
+            owner_seal.lifecycle == .terminal and
+            owner_seal.incarnation == self.incarnation and
+            owner_seal.response_addr == @intFromPtr(self) and
+            owner_seal.response_digest != 0;
+    }
+
+    /// Checks the response-local half of a terminal pair. This is private validation only: once
+    /// the registry-owned seal is released, no caller may use the local tombstone as cleanup or
+    /// replay authority.
+    fn terminalTombstoneExact(self: *const ExecutedResponse) bool {
+        return self.lifecycleRawValid() and self.self_addr == @intFromPtr(self) and
+            self.incarnation != 0 and self.lifecycle == .terminal and
+            self.owner_seal_addr == 0 and self.result_present == 0 and
+            self.result_tag == 0 and self.executed_transport_incarnation == 0 and
+            self.executed_request_id == 0 and self.executed_request_digest == 0 and
+            self.correlation_request_id == 0 and self.payload_digest == 0 and
+            self.allocator_present == 0 and self.allocator_ptr == 0 and
+            self.allocator_vtable == 0 and self.owned_addr == 0 and self.owned_len == 0 and
+            self.terminal_digest != 0 and
+            self.terminal_digest == terminalTombstoneDigest(self);
+    }
+
+    fn resultScalarsValid(self: *const ExecutedResponse, correlated: bool) bool {
+        if (self.executed_transport_incarnation == 0 or self.executed_request_id == 0 or
+            self.executed_request_digest == 0)
+            return false;
+        return if (correlated)
+            self.correlation_request_id == self.executed_request_id
+        else
+            self.correlation_request_id == 0;
+    }
+
+    fn transcriptMatchesOwner(
+        self: *const ExecutedResponse,
+        owner_seal: *const contract.ExecutedResponseOwnerSeal,
+    ) bool {
+        return owner_seal.response_addr == @intFromPtr(self) and
+            owner_seal.response_digest == responseTranscriptDigest(self);
     }
 
     fn payloadDigest(bytes: []const u8) u64 {
@@ -183,6 +320,54 @@ pub const ExecutedResponse = struct {
         return if (digest == 0) 1 else digest;
     }
 };
+
+fn responseTranscriptDigest(response: *const ExecutedResponse) u64 {
+    var hasher = std.hash.Wyhash.init(0x4d_52_53_48_52_45_53_50);
+    inline for (std.meta.fields(ExecutedResponse)) |field|
+        hasher.update(std.mem.asBytes(&@field(response, field.name)));
+    const digest = hasher.final();
+    return if (digest == 0) 1 else digest;
+}
+
+comptime {
+    const FieldSpec = struct { name: []const u8, field_type: type };
+    const expected_fields = [_]FieldSpec{
+        .{ .name = "self_addr", .field_type = usize },
+        .{ .name = "owner_seal_addr", .field_type = usize },
+        .{ .name = "incarnation", .field_type = u64 },
+        .{ .name = "lifecycle", .field_type = contract.ExecutedResponseLifecycle },
+        .{ .name = "result_present", .field_type = u8 },
+        .{ .name = "result_tag", .field_type = u8 },
+        .{ .name = "executed_transport_incarnation", .field_type = u64 },
+        .{ .name = "executed_request_id", .field_type = u64 },
+        .{ .name = "executed_request_digest", .field_type = u64 },
+        .{ .name = "correlation_request_id", .field_type = u64 },
+        .{ .name = "payload_digest", .field_type = u64 },
+        .{ .name = "allocator_present", .field_type = u8 },
+        .{ .name = "allocator_ptr", .field_type = usize },
+        .{ .name = "allocator_vtable", .field_type = usize },
+        .{ .name = "owned_addr", .field_type = usize },
+        .{ .name = "owned_len", .field_type = usize },
+        .{ .name = "terminal_digest", .field_type = u64 },
+    };
+    const actual_fields = std.meta.fields(ExecutedResponse);
+    if (actual_fields.len != expected_fields.len)
+        @compileError("ExecutedResponse schema changed without lifecycle review");
+    for (actual_fields, expected_fields) |actual, expected|
+        if (!std.mem.eql(u8, actual.name, expected.name) or actual.type != expected.field_type)
+            @compileError("ExecutedResponse schema changed without lifecycle review");
+}
+
+fn terminalTombstoneDigest(response: *const ExecutedResponse) u64 {
+    var hasher = std.hash.Wyhash.init(0x4d_52_53_48_52_54_4f_4d);
+    inline for (.{
+        response.self_addr,
+        @as(usize, @intCast(response.incarnation)),
+        @as(usize, @as(*const u8, @ptrCast(&response.lifecycle)).*),
+    }) |value| hasher.update(std.mem.asBytes(&value));
+    const digest = hasher.final();
+    return if (digest == 0) 1 else digest;
+}
 
 fn rangesOverlapTyped(a: anytype, b: anytype) bool {
     const a_start = @intFromPtr(a);
@@ -193,6 +378,8 @@ fn rangesOverlapTyped(a: anytype, b: anytype) bool {
 }
 
 const ResponseReentrantFreeAllocator = struct {
+    const OwnerDrift = enum { none, response_addr, response_digest, incarnation, lifecycle, terminal_digest };
+
     parent: std.mem.Allocator,
     target: ?*ExecutedResponse = null,
     target_owner: ?*contract.ExecutedResponseOwnerSeal = null,
@@ -200,6 +387,7 @@ const ResponseReentrantFreeAllocator = struct {
     reentered: bool = false,
     free_calls: usize = 0,
     nested_outcome: ?DeinitOutcome = null,
+    owner_drift: OwnerDrift = .none,
 
     fn allocator(self: *@This()) std.mem.Allocator {
         return .{ .ptr = self, .vtable = &.{
@@ -232,6 +420,14 @@ const ResponseReentrantFreeAllocator = struct {
             self.reentered = true;
             self.nested_outcome = self.target.?.deinit(self.target_owner.?);
         }
+        if (self.target_owner) |owner| switch (self.owner_drift) {
+            .none => {},
+            .response_addr => owner.response_addr +%= 1,
+            .response_digest => owner.response_digest +%= 1,
+            .incarnation => owner.incarnation +%= 1,
+            .lifecycle => owner.lifecycle = .live,
+            .terminal_digest => owner.terminal_digest +%= 1,
+        };
         self.parent.vtable.free(self.parent.ptr, memory, alignment, ret_addr);
     }
 };
@@ -330,4 +526,160 @@ test "CR3a-2a accepted response owner rejects control cap plus one without takin
         response.initAcceptedInPlace(std.testing.allocator, &response_owner, 43, correlated, bytes),
     );
     try std.testing.expect(response.pristine());
+}
+
+test "CR3a-2a response and owner lifecycle raw discriminators fail closed exhaustively" {
+    var response_raw: [@sizeOf(ExecutedResponse)]u8 align(@alignOf(ExecutedResponse)) =
+        [_]u8{0} ** @sizeOf(ExecutedResponse);
+    const response: *ExecutedResponse = @ptrCast(&response_raw);
+    var owner_raw: [@sizeOf(contract.ExecutedResponseOwnerSeal)]u8 align(@alignOf(contract.ExecutedResponseOwnerSeal)) =
+        [_]u8{0} ** @sizeOf(contract.ExecutedResponseOwnerSeal);
+    const owner: *contract.ExecutedResponseOwnerSeal = @ptrCast(&owner_raw);
+
+    for (0..256) |value| {
+        response_raw[@offsetOf(ExecutedResponse, "lifecycle")] = @intCast(value);
+        const response_valid = value <= @intFromEnum(contract.ExecutedResponseLifecycle.terminal);
+        try std.testing.expectEqual(response_valid, response.lifecycleRawValid());
+        if (!response_valid) {
+            try std.testing.expect(!response.canInitializeWithOwner(owner));
+            try std.testing.expectError(error.Corrupt, response.borrowAccepted(owner));
+            try std.testing.expectEqual(DeinitOutcome.corrupt, response.deinit(owner));
+        }
+    }
+
+    response_raw = [_]u8{0} ** @sizeOf(ExecutedResponse);
+    for (0..256) |value| {
+        owner_raw[@offsetOf(contract.ExecutedResponseOwnerSeal, "lifecycle")] = @intCast(value);
+        const owner_valid = value <= @intFromEnum(contract.ExecutedResponseOwnerLifecycle.terminal);
+        try std.testing.expectEqual(owner_valid, owner.lifecycleRawValid());
+        if (!owner_valid) {
+            try std.testing.expect(!response.canInitializeWithOwner(owner));
+            try std.testing.expect(!owner.valid(1));
+            try std.testing.expect(!owner.settledExact());
+            try std.testing.expectError(error.InvalidState, owner.terminalize(1));
+        }
+    }
+}
+
+test "CR3a-2a pristine response rejects every nonzero storage byte without typed projection" {
+    var raw: [@sizeOf(ExecutedResponse)]u8 align(@alignOf(ExecutedResponse)) =
+        [_]u8{0} ** @sizeOf(ExecutedResponse);
+    const response: *ExecutedResponse = @ptrCast(&raw);
+    var owner: contract.ExecutedResponseOwnerSeal = .{};
+    for (0..raw.len) |offset| {
+        raw[offset] = 0xff;
+        try std.testing.expect(!response.canInitializeWithOwner(&owner));
+        raw[offset] = 0;
+    }
+}
+
+test "CR3a-2a accepted response authenticates every scalar before payload or allocator access" {
+    const prepared = contract.PreparedCallReceipt.init(.{
+        .transport_incarnation = 71,
+        .request_id = 73,
+        .request_digest = 79,
+    }).?;
+    const correlated = contract.CorrelatedExecutedCall.init(
+        contract.ExecutedCallReceipt.fromPrepared(prepared).?,
+        prepared.request_id,
+    ).?;
+    const bytes = try std.testing.allocator.dupe(u8, "sealed-response");
+    var owner: contract.ExecutedResponseOwnerSeal = .{};
+    var response: ExecutedResponse = .{};
+    try response.initAcceptedInPlace(std.testing.allocator, &owner, 83, correlated, bytes);
+
+    const Field = enum {
+        result_present,
+        result_tag,
+        executed_transport_incarnation,
+        executed_request_id,
+        executed_request_digest,
+        correlation_request_id,
+        payload_digest,
+        allocator_present,
+        allocator_ptr,
+        allocator_vtable,
+        owned_addr,
+        owned_len,
+    };
+    inline for (std.enums.values(Field)) |field| {
+        var forged = response;
+        switch (field) {
+            .result_present => forged.result_present = 0xff,
+            .result_tag => forged.result_tag = 0xff,
+            .executed_transport_incarnation => forged.executed_transport_incarnation +%= 1,
+            .executed_request_id => forged.executed_request_id +%= 1,
+            .executed_request_digest => forged.executed_request_digest +%= 1,
+            .correlation_request_id => forged.correlation_request_id +%= 1,
+            .payload_digest => forged.payload_digest +%= 1,
+            .allocator_present => forged.allocator_present = 0xff,
+            .allocator_ptr => forged.allocator_ptr = 1,
+            .allocator_vtable => forged.allocator_vtable = 1,
+            .owned_addr => forged.owned_addr = 1,
+            .owned_len => forged.owned_len = max_owned_response_bytes,
+        }
+        try std.testing.expectError(error.Corrupt, forged.borrowAccepted(&owner));
+        try std.testing.expectEqual(DeinitOutcome.corrupt, forged.deinit(&owner));
+    }
+    try std.testing.expectEqual(DeinitOutcome.cleaned, response.deinit(&owner));
+}
+
+test "CR3a-2a forged terminal lifecycle cannot bypass live response cleanup authority" {
+    const prepared = contract.PreparedCallReceipt.init(.{
+        .transport_incarnation = 89,
+        .request_id = 97,
+        .request_digest = 101,
+    }).?;
+    const correlated = contract.CorrelatedExecutedCall.init(
+        contract.ExecutedCallReceipt.fromPrepared(prepared).?,
+        prepared.request_id,
+    ).?;
+    const bytes = try std.testing.allocator.dupe(u8, "live-response");
+    var owner: contract.ExecutedResponseOwnerSeal = .{};
+    var response: ExecutedResponse = .{};
+    try response.initAcceptedInPlace(std.testing.allocator, &owner, 103, correlated, bytes);
+
+    var forged = response;
+    forged.lifecycle = .terminal;
+    try std.testing.expectEqual(DeinitOutcome.corrupt, forged.deinit(&owner));
+    try std.testing.expectEqual(DeinitOutcome.cleaned, response.deinit(&owner));
+    var pristine_owner: contract.ExecutedResponseOwnerSeal = .{};
+    try std.testing.expectEqual(DeinitOutcome.corrupt, response.deinit(&pristine_owner));
+    var drifted_terminal = response;
+    drifted_terminal.terminal_digest +%= 1;
+    try std.testing.expect(!drifted_terminal.terminalTombstoneExact());
+    try std.testing.expectEqual(DeinitOutcome.corrupt, drifted_terminal.deinit(&owner));
+    try std.testing.expectEqual(DeinitOutcome.already_terminal, response.deinit(&owner));
+}
+
+test "CR3a-2a response free callback owner drift cannot publish settled cleanup" {
+    inline for (.{
+        ResponseReentrantFreeAllocator.OwnerDrift.response_addr,
+        .response_digest,
+        .incarnation,
+        .lifecycle,
+        .terminal_digest,
+    }) |drift| {
+        var probe = ResponseReentrantFreeAllocator{
+            .parent = std.testing.allocator,
+            .owner_drift = drift,
+        };
+        const prepared = contract.PreparedCallReceipt.init(.{
+            .transport_incarnation = 107,
+            .request_id = 109,
+            .request_digest = 113,
+        }).?;
+        const correlated = contract.CorrelatedExecutedCall.init(
+            contract.ExecutedCallReceipt.fromPrepared(prepared).?,
+            prepared.request_id,
+        ).?;
+        const bytes = try probe.allocator().dupe(u8, "owner-drift");
+        var owner: contract.ExecutedResponseOwnerSeal = .{};
+        var response: ExecutedResponse = .{};
+        try response.initAcceptedInPlace(probe.allocator(), &owner, 127, correlated, bytes);
+        probe.target_owner = &owner;
+        try std.testing.expectEqual(DeinitOutcome.corrupt, response.deinit(&owner));
+        try std.testing.expectEqual(@as(usize, 1), probe.free_calls);
+        try std.testing.expect(!owner.settledExact());
+    }
 }

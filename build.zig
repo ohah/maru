@@ -1701,7 +1701,7 @@ pub fn build(b: *std.Build) void {
                 .link_libc = true,
                 .imports = &.{.{ .name = "maru", .module = maru_mod }},
             }),
-            .filters = &.{"B3b-O drift subprocess finalizes quarantine and paired receipts"},
+            .filters = &.{"B3b-O isolated marker executes drift and aggregate marker only proves exclusion"},
         });
         const run_ended_purge_orchestration_drift_test =
             b.addRunArtifact(ended_purge_orchestration_drift_test);

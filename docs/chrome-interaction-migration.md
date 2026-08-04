@@ -281,7 +281,10 @@ replacement에서 capture를 무조건 cancel한다. 이것이 현행 기본값�
 capture가 첫 move에 죽는다. 그래서 carry는 **명시적 verdict가 도입될 때에만** 열린다. capture를
 다음 snapshot으로 carry하려면 새 tree가 정확히 하나의 같은 component identity를 가지며, 그 node의
 `gesture compatibility key`(gesture kind, enabled policy, owner window/session epoch, source domain
-identity)가 변하지 않았다는 reconcile verdict가 필요하다. 이 verdict가 없거나 duplicate/disabled/
+identity)가 변하지 않았다는 reconcile verdict가 필요하다. 이 key의 네 요소 중 **epoch와 domain
+identity는 neutral `chrome/ui`가 모른다** — `InteractionState`는 `UiId`만 안다. 따라서 host가 그 둘을
+opaque 값으로 주입하고 pure module은 **같은지만** 비교한다. 그것이 무엇을 뜻하는지 해석하는 쪽은
+계속 host다. 이 verdict가 없거나 duplicate/disabled/
 clip-removed이면 cancel한다. 이 verdict는 §8 CIM1이 소유하며, CIM2 이후의 어떤 consumer도
 verdict 없이 drag/resize capture를 snapshot 너머로 유지해서는 안 된다. up의 effect는 언제나
 **현재** action table과 live domain validation을 다시 통과해야 하며, 이전 action ID를 재사용하지 않는다.
@@ -358,11 +361,20 @@ CIM1은 B1 이관 PR이 전부 merge된 뒤에 시작하고, 그 전에는 CIM0(
 
 1. **CIM0 — inventory와 contract (이 문서)**: 현행 gesture/renderer/effect ownership, migration
    non-goal, unresolved UX 결정을 고정한다. 코드 변경은 없다.
-2. **CIM1 — interaction adapter**: generation-bound pointer DTO, capture/cancel state machine,
-   action/drag intent table을 pure module로 만든다. §5의 `gesture compatibility key` reconcile
-   verdict도 **이 단계가 소유한다** — 그것 없이는 CIM2의 continuous resize가 첫 move에 cancel되므로
-   후속 단계로 미룰 수 없다. §2의 두 capture 권위 상호배제 판정 순서도 여기서 한 곳에 고정한다.
-   기존 `PointerGestureOwner` effect path는 유지한다.
+2. **CIM1 — interaction adapter**: pure module은 이미 있다 — `chrome/ui/interaction.zig`가
+   `InteractionState`(hovered/focused/capture)와 `dispatch`/`reconcile`/`deactivate`/`activateFocused`로
+   **click 수명**을 소유한다. 이 단계는 그것을 **drag 수명으로 확장**한다:
+   - `UiPointerEvent`에 published snapshot generation을 실어(현재는 phase·좌표·button·timestamp뿐),
+     이전 tree의 up이 새 action을 실행하지 못하게 한다.
+   - drag 개념을 도입한다. 지금 `Capture`는 click용 `action_id`만 들고 drag payload·threshold·
+     axis가 없다.
+   - generic action/drag intent table을 만든다. action table은 지금 컴포넌트 로컬로만 있고
+     (`session_dock`·`archive_detail`의 `ids.Table`) 공용 형태가 없다.
+   - §5의 `gesture compatibility key` reconcile verdict를 **이 단계가 소유한다** — 그것 없이는
+     CIM2의 continuous resize가 첫 move에 cancel되므로 후속 단계로 미룰 수 없다.
+
+   §2의 두 capture 권위 상호배제는 이미 제품 경로에 있고(`6d9c8c59`) 다섯 gesture 라우팅 fixture가
+   그것을 고정하므로, 이 단계가 다시 만들지 않는다. 기존 `PointerGestureOwner` effect path도 유지한다.
 3. **CIM2 — SplitDivider**: 현 divider geometry를 재사용해 press/capture/cancel adapter 하나로
    옮긴다. split tree removal, resize clamp, WebView divider pass-through AppKit E2E를 포함한다.
 4. **CIM3 — ScrollArea/Scrollbar**: file tree와 Session Dock 중 하나를 first consumer로 삼는다.

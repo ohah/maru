@@ -2131,7 +2131,6 @@ const PointerGestureOwner = union(enum) {
         drop_slot: ?usize = null,
     },
     dock_outer_divider: struct { offset_px: f64 },
-    pane_divider: struct { split: *PaneTree.Split, seg: chrome.components.divider.Seg },
     sidebar_divider: struct { start_pt: u32 },
     scrollbar: struct { grab: f32 },
     file_tree_scrollbar: struct {
@@ -3368,11 +3367,24 @@ pub const AppSession = struct {
     // 활성 탭), x/y는 floating 미리보기·드롭 판정용 커서 좌표. 그 pane이 reap으로 사라지면 invalidateForFreedPane이 비운다.
     // pane grip 드래그 중 사이드바 드롭 타겟 하이라이트 슬롯(표시 슬롯; == 표시 카드 수면 카드 아래 '새 워크스페이스'
     // 행). drag(2)가 paneDropHighlightSlot로 갱신해 바뀌면 rebuildSidebar가 .drop_zone 밴드를 그 슬롯에 그린다. up/취소면 null.
-    // panel 사이 divider 드래그 리사이즈 상태(PR6). down이 divider 밴드에서 시작하면 그 split 노드를 잡고,
-    // drag(kind 2)가 마우스 위치를 bounds 안 ratio로 매핑해 split.ratio를 바꿔 live 재배치, up(kind 3)이 끝낸다.
-    // split은 활성 탭 트리의 heap 노드(`*PaneTree.Split`) — 구조가 바뀌면(collapse/close) stale 방지로 null 비운다.
-    // 드래그 중 divider의 neutral seg(chrome `divider.dragRatio`용 — orientation·bounds). divider_drag != null일 때만
-    // 유효. 옛 divider_drag_dir/bounds를 대체(dir·bounds가 Seg에 다 들어 있다 — 중립 단일 출처).
+    // pane divider 드래그의 capture 수명 — CIM2. 옛 `PointerGestureOwner.pane_divider`를 대체한다.
+    // down은 `divider.publish`가 발행한 tree에 dispatch되고, 그 capture가 drag를 소유한다. 이 창의
+    // divider는 자기 tree만 보므로 dock/사이드바와 InteractionState를 공유하지 않는다.
+    divider_interaction: chrome.ui.interaction.InteractionState = .{},
+    // 발행된 divider entry와 그 세대. 매 pointer move마다 재발행하므로(선이 실제로 움직인다) 세대가
+    // 오르고, 그때 capture를 넘길지는 `reconcileCarryingCapture`가 판정한다.
+    divider_entry_scratch: std.ArrayList(chrome.ui.tree.RectEntry) = .empty,
+    divider_snapshot_generation: u64 = 0,
+    // 발행된 identity와 같은 순서의 live split 포인터. chrome은 app 트리를 모르므로 payload→split
+    // 역매핑은 host가 든다. 매 발행마다 다시 채운다.
+    divider_split_scratch: std.ArrayList(*PaneTree.Split) = .empty,
+    // 드래그 중인 divider의 down 시점 neutral seg(`divider.dragRatio`의 bounds 분모)와 그 split.
+    // capture가 살아 있을 때만 유효하며, carry verdict가 cancel하면 함께 비운다.
+    divider_capture_seg: ?chrome.components.divider.Seg = null,
+    divider_capture_split: ?*PaneTree.Split = null,
+    // move는 좌표를 덮어쓰기만 하고 tick이 최종 하나를 적용한다(계약 §4.3). clamp 결과가 같으면
+    // effect 자체가 없다 — 경계에 닿은 채 미는 동안 resize 팬아웃이 반복되지 않는다.
+    divider_coalescer: chrome.ui.continuous_drag.Coalescer(f32) = .{},
     // 트랙패드 정밀 스크롤의 1줄 미만 잔여 델타(줄 단위). scrollWheel이 누적/소비한다.
     wheel_accum: f64 = 0,
     // 트랙패드 가로 스와이프의 1셀 미만 잔여 델타(열 단위) — 탭 바 가로 스크롤용(#2b). wheel_accum의 가로 짝.
@@ -4411,6 +4423,9 @@ pub const AppSession = struct {
     fn cancelPointerGesture(self: *AppSession) void {
         self.clearSidebarDragPreview();
         self.pointer_gesture_owner = .none;
+        // divider capture는 이제 다른 축(`divider_interaction`)이라 union을 비우는 것만으로 끝나지
+        // 않는다. 두 capture 권위가 같은 stream에 공존하면 §4.3의 "한 stream에 owner 하나"가 깨진다.
+        self.endDividerCapture();
         self.metal_dirty = true;
     }
 
@@ -5440,18 +5455,166 @@ pub const AppSession = struct {
         try PaneTree.layoutDividers(self.allocator, self.activeTab().tree, self.termRect(), out);
     }
 
-    /// divider 드래그 중(kind 2) 마우스 위치를 bounds 안 ratio로 매핑해 split.ratio를 바꾸고 panel을 재배치한다.
-    /// ratio = (mouse - bounds.origin) / bounds.size를 maru.session.clampRatio(layout과 같은 한도)로 막는다. split이
-    /// 사라졌으면(드래그 중 구조 변경) divider_drag가 null로 비워지므로 여기 안 온다.
-    fn dragDividerTo(self: *AppSession, x_px: f64, y_px: f64) void {
-        const drag = switch (self.pointer_gesture_owner) {
-            .pane_divider => |drag| drag,
-            else => return,
+    /// 활성 탭의 divider를 capture가 볼 수 있는 tree로 다시 발행한다 — CIM2.
+    ///
+    /// 선이 실제로 움직이므로 pointer move마다 재발행하고 세대를 올린다. 그래서 drag 도중 capture를
+    /// 넘길지는 §5의 carry verdict가 판정하며, 그것 없이는 첫 move에 죽는다. 발행과 같은 순서로
+    /// live `*Split`을 담아 두는데, payload를 split으로 되돌리는 역매핑은 host의 몫이기 때문이다.
+    fn publishDividerTree(self: *AppSession) ?chrome.ui.tree.UiRectTree {
+        const segs = &self.hover_divider_scratch;
+        segs.clearRetainingCapacity();
+        self.layoutActiveTabDividers(segs) catch return null;
+
+        self.divider_seg_scratch.clearRetainingCapacity();
+        for (segs.items) |seg| self.divider_seg_scratch.append(self.allocator, appSegToDivider(seg)) catch return null;
+
+        self.divider_entry_scratch.resize(self.allocator, self.divider_seg_scratch.items.len) catch return null;
+        const published = chrome.components.divider.publish(
+            self.divider_seg_scratch.items,
+            self.cell_width_px,
+            self.cell_height_px,
+            self.divider_snapshot_generation +| 1,
+            self.divider_entry_scratch.items,
+        ) catch return null;
+        self.divider_snapshot_generation +|= 1;
+
+        self.divider_split_scratch.clearRetainingCapacity();
+        for (segs.items) |seg| self.divider_split_scratch.append(self.allocator, seg.split) catch return null;
+        return published;
+    }
+
+    /// 발행된 identity가 지금 가리키는 live split. 구조가 바뀌어 그 identity가 사라졌으면 null이다.
+    fn dividerSplitForIdentity(self: *AppSession, identity: u64) ?*PaneTree.Split {
+        const index = chrome.components.divider.segIndexOf(identity, self.divider_split_scratch.items.len) orelse return null;
+        return self.divider_split_scratch.items[index];
+    }
+
+    /// capture를 다음 발행으로 넘길지 판정하는 §5 compatibility key. epoch와 domain identity는
+    /// chrome이 모르는 값이라 host가 채우고, 중립 모듈은 **같은지만** 본다. 여기서 epoch는 활성 탭
+    /// (탭을 바꾸면 다른 트리)이고 domain identity는 그 identity가 지금 가리키는 split이다.
+    fn dividerCompatibilityKey(self: *AppSession, identity: u64) chrome.ui.interaction.GestureCompatibility {
+        return .{
+            .kind = identity,
+            .enabled = true,
+            .owner_epoch = @intFromPtr(self.activeTab()),
+            .domain_identity = if (self.dividerSplitForIdentity(identity)) |split| @intFromPtr(split) else 0,
         };
-        // ratio 수학은 chrome `divider.dragRatio`(normal 축 = (mouse − bounds.origin)/bounds.size)가 단일 출처. 클램프는
-        // 여기서(maru.session.clampRatio — layout과 같은 한도, chrome은 app 상수를 모른다). 드래그 시작 시 저장한 neutral seg를 쓴다.
-        const raw = chrome.components.divider.dragRatio(drag.seg, x_px, y_px) orelse return;
-        drag.split.ratio = maru.session.clampRatio(raw);
+    }
+
+    /// divider drag가 끝났거나(up/drop) 취소됐을 때 host 쪽 흔적을 전부 지운다. coalescer의 `applied`
+    /// 까지 비우는 것이 중요하다 — 남기면 다음 drag의 첫 move가 "안 바뀌었다"로 먹힌다.
+    fn endDividerCapture(self: *AppSession) void {
+        self.divider_interaction.capture = null;
+        self.divider_capture_seg = null;
+        self.divider_capture_split = null;
+        self.divider_coalescer.reset();
+    }
+
+    fn dividerCaptureActive(self: *const AppSession) bool {
+        return self.divider_interaction.capture != null;
+    }
+
+    /// pointer down이 divider 밴드에서 시작했으면 capture를 잡는다. 잡았으면 true.
+    fn beginDividerCapture(self: *AppSession, x_px: f64, y_px: f64) bool {
+        const tree_snapshot = self.publishDividerTree() orelse return false;
+        if (tree_snapshot.entries.len == 0) return false;
+        const dispatched = chrome.ui.interaction.dispatch(&self.divider_interaction, tree_snapshot, .{
+            .phase = .down,
+            .x_px = x_px,
+            .y_px = y_px,
+            .timestamp_ns = 0,
+            .generation = tree_snapshot.generation,
+        }) catch return false;
+        _ = dispatched;
+
+        const capture = self.divider_interaction.capture orelse return false;
+        const index = chrome.components.divider.segIndexOf(capture.id, self.divider_seg_scratch.items.len) orelse {
+            self.endDividerCapture();
+            return false;
+        };
+        // ratio의 분모가 되는 bounds는 down 시점 값을 쓴다 — drag 도중 선이 움직여도 나누는 부모
+        // 영역은 그대로이고, 매 move의 재발행에서 다시 읽으면 반올림이 누적될 자리가 생긴다.
+        // 옛 경로는 `beginPointerGesture`가 앞선 gesture를 취소했다. 축이 갈렸어도 그 규율은 같다.
+        self.clearSidebarDragPreview();
+        self.pointer_gesture_owner = .none;
+        self.divider_capture_seg = self.divider_seg_scratch.items[index];
+        self.divider_capture_split = self.divider_split_scratch.items[index];
+        self.divider_coalescer.reset();
+        self.metal_dirty = true;
+        return true;
+    }
+
+    /// capture가 살아 있는 동안의 move/up. 소비했으면 true.
+    fn routeDividerCapture(self: *AppSession, kind: i32, x_px: f64, y_px: f64) bool {
+        const capture = self.divider_interaction.capture orelse return false;
+        const identity = capture.id;
+        const previous_key = chrome.ui.interaction.GestureCompatibility{
+            .kind = identity,
+            .enabled = true,
+            .owner_epoch = @intFromPtr(self.activeTab()),
+            .domain_identity = if (self.divider_capture_split) |split| @intFromPtr(split) else 0,
+        };
+
+        const tree_snapshot = self.publishDividerTree() orelse {
+            self.endDividerCapture();
+            return true;
+        };
+        const current_key = self.dividerCompatibilityKey(identity);
+        const carried = chrome.ui.interaction.reconcileCarryingCapture(
+            &self.divider_interaction,
+            tree_snapshot,
+            previous_key,
+            current_key,
+        ) catch {
+            self.endDividerCapture();
+            return true;
+        };
+        // carry하지 못하면 `reconcileCarryingCapture`가 capture를 이미 비웠다(그리고 drag를
+        // `cancelled`로 닫았다). 그것이 곧 판정이므로 여기서 사유를 다시 묻지 않는다 — split이
+        // 사라졌거나 탭이 바뀐 경우가 전부 이 한 검사로 들어온다.
+        _ = carried;
+        if (self.divider_interaction.capture == null) {
+            self.endDividerCapture();
+            return true;
+        }
+
+        const dispatched = chrome.ui.interaction.dispatch(&self.divider_interaction, tree_snapshot, .{
+            .phase = if (kind == 2) .move else .up,
+            .x_px = x_px,
+            .y_px = y_px,
+            .timestamp_ns = 0,
+            .button = .left,
+            .generation = tree_snapshot.generation,
+        }) catch {
+            self.endDividerCapture();
+            return true;
+        };
+
+        if (dispatched.drag) |event| switch (event) {
+            // 좌표를 모으기만 한다. 실제 resize는 tick이 최종 하나로 한 번 한다.
+            .began, .moved => |update| self.divider_coalescer.absorb(update.x_px, update.y_px),
+            .dropped => |update| {
+                self.divider_coalescer.absorb(update.x_px, update.y_px);
+                self.applyPendingDividerResize();
+                self.endDividerCapture();
+            },
+            .cancelled => self.endDividerCapture(),
+        };
+        if (kind == 3) self.endDividerCapture();
+        return true;
+    }
+
+    /// tick이 부르는 소비 지점 — 계약 §4.3. move 이벤트가 몇 번 왔든 최종 좌표 하나만 적용하고,
+    /// clamp 결과가 직전과 같으면 resize 팬아웃 자체를 하지 않는다.
+    fn applyPendingDividerResize(self: *AppSession) void {
+        const point = self.divider_coalescer.take() orelse return;
+        const seg = self.divider_capture_seg orelse return;
+        const split = self.divider_capture_split orelse return;
+        const raw = chrome.components.divider.dragRatio(seg, point.x_px, point.y_px) orelse return;
+        // 클램프는 host가 한다(maru.session.clampRatio — layout과 같은 한도, chrome은 app 상수를 모른다).
+        const clamped = maru.session.clampRatio(raw);
+        if (!self.divider_coalescer.commitIfChanged(clamped)) return;
+        split.ratio = clamped;
         self.resizeActiveTabPanes() catch {};
         self.recomputeActivePaneRect();
         self.metal_dirty = true;
@@ -7952,9 +8115,8 @@ pub const AppSession = struct {
     /// 가리키면 표적 null한다(다른 split이면 유지 → 무관한 reap-collapse가 진행 중 divider 드래그를 안 끊는다).
     /// removeLeaf가 freed split을 surface하게 바뀌어 가능해진 표적 무효화(예전 보수적 blanket-null 대체).
     fn invalidateForFreedSplit(self: *AppSession, split: *PaneTree.Split) void {
-        switch (self.pointer_gesture_owner) {
-            .pane_divider => |drag| if (drag.split == split) self.finishPointerGesture(),
-            else => {},
+        if (self.divider_capture_split) |captured| {
+            if (captured == split) self.endDividerCapture();
         }
     }
 
@@ -8757,9 +8919,8 @@ pub const AppSession = struct {
             }
         }
         // divider_drag가 이 탭 트리 소속 split이면 표적 null(무관한 탭 트리를 가리키면 유지 — destroyTabStandalone 동형).
-        switch (self.pointer_gesture_owner) {
-            .pane_divider => |drag| if (PaneTree.containsSplit(tab.tree, drag.split)) self.finishPointerGesture(),
-            else => {},
+        if (self.divider_capture_split) |captured| {
+            if (PaneTree.containsSplit(tab.tree, captured)) self.endDividerCapture();
         }
     }
 
@@ -22150,13 +22311,14 @@ pub const AppSession = struct {
         // with the same published component tree even if the pointer leaves the dock; an up over
         // a terminal must not begin a terminal selection or leak a PTY mouse event. A bare up in
         // the content is also consumed, matching the down path below.
-        // 진행 중인 어떤 drag든 이 rect 판정보다 앞선다. divider·tab·pane·sidebar·scrollbar drag는
-        // `PointerGestureOwner`가, **터미널 텍스트 선택 drag는 `mouse_drag_selecting`이** 소유한다 —
-        // 후자는 owner union에 없어서 처음 가드가 놓쳤고, 그 결과 선택 drag를 도크 위에서 놓으면 up이
-        // 도크에 먹혀 `drag_autoscroll`이 latch된 채 터미널이 무한 스크롤했다.
+        // 진행 중인 어떤 drag든 이 rect 판정보다 앞선다. tab·pane·sidebar·scrollbar drag는
+        // `PointerGestureOwner`가, **divider는 `divider_interaction` capture가**(CIM2), **터미널 텍스트
+        // 선택 drag는 `mouse_drag_selecting`이** 소유한다 — 뒤의 둘은 owner union에 없어서 가드가
+        // 각각 따로 봐야 한다. 선택 drag는 처음 가드가 놓쳐 도크 위에서 놓으면 up이 도크에 먹히고
+        // `drag_autoscroll`이 latch된 채 터미널이 무한 스크롤했다.
         // capture 없는 pointer만 rect로 분류한다(docs/chrome-interaction-migration.md §2).
         if (self.dockVisible() and self.dock.view == .agent_sessions and button == 0 and (kind == 2 or kind == 3) and
-            self.pointerGestureIs(.none) and !self.mouse_drag_selecting)
+            self.pointerGestureIs(.none) and !self.dividerCaptureActive() and !self.mouse_drag_selecting)
         {
             const content = self.dockGeometry().tree_content;
             const captured = self.agent_session_dock_interaction.capture != null;
@@ -22377,13 +22539,12 @@ pub const AppSession = struct {
             }
             return;
         }
-        // divider 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다(PR6) — drag는 마우스를 bounds 안 ratio로 매핑해
-        // split.ratio를 live 변경(panel 재배치), up이 끝낸다. 새 down(1)은 아래 일반 처리로 흘려 새 드래그 시작.
-        if (self.pointerGestureIs(.pane_divider) and (kind == 2 or kind == 3)) {
-            if (kind == 2) self.dragDividerTo(x_px, y_px) else {
-                self.finishPointerGesture();
-            }
-            return;
+        // divider 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다 — 이제 그 capture는 chrome
+        // `InteractionState`가 든다(CIM2). move는 좌표를 모으기만 하고 tick이 최종 하나를 적용하며,
+        // 매 move의 재발행에서 capture를 넘길지는 §5 carry verdict가 판정한다. 새 down(1)은 아래
+        // 일반 처리로 흘려 새 드래그를 시작한다.
+        if (self.dividerCaptureActive() and (kind == 2 or kind == 3)) {
+            if (self.routeDividerCapture(kind, x_px, y_px)) return;
         }
         // 사이드바 폭 조절 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다(③a) — drag는 경계를 x로 잡아 폭을 live
         // 갱신, up이 끝낸다. 새 down(1)은 아래로 흘려 새 드래그를 시작한다.
@@ -22785,8 +22946,7 @@ pub const AppSession = struct {
                 // ⓐ divider 클릭 → 리사이즈 드래그 시작(PR6). 탭 바(①)보다 뒤·pane 선택(②)보다 앞 — 탭 바는
                 //    seam에 붙어 있어 우선권을 주고, divider는 terminal 영역 seam에서 잡는다. drag(2)/up(3)은 위
                 //    divider 캡처가 받는다. split일 때만(dividerAtPoint가 단일 panel이면 null).
-                if (self.dividerAtPoint(x_px, y_px)) |hit| {
-                    self.beginPointerGesture(.{ .pane_divider = .{ .split = hit.split, .seg = hit.seg } });
+                if (self.beginDividerCapture(x_px, y_px)) {
                     self.drag_autoscroll = 0;
                     self.mouse_drag_selecting = false;
                     return;
@@ -26820,9 +26980,8 @@ pub const AppSession = struct {
         for (tab.panes.items) |pane| self.destroyPane(pane);
         // 트리를 통째 해제하기 전에, divider_drag가 이 트리 소속 split이면 표적 null(다른 탭 트리를 가리키면 유지 —
         // 무관한 탭 close가 진행 중 divider 드래그를 안 끊는다). collapse 경로의 invalidateForFreedSplit과 같은 규율.
-        switch (self.pointer_gesture_owner) {
-            .pane_divider => |drag| if (PaneTree.containsSplit(tab.tree, drag.split)) self.finishPointerGesture(),
-            else => {},
+        if (self.divider_capture_split) |captured| {
+            if (PaneTree.containsSplit(tab.tree, captured)) self.endDividerCapture();
         }
         if (tab.custom_name) |n| self.allocator.free(n); // 워크스페이스 사용자 rename(owned) 해제
         if (tab.group_start) |g| self.allocator.free(g); // 사이드바 그룹 시작 마커(owned) 해제
@@ -28232,6 +28391,10 @@ pub const AppSession = struct {
         // (reader join/child reap)을 건너뛰지 않게 한다.
         // [계측: 프레임 타이밍] tick 단계별 wall-clock을 잰다(MARU_DEBUG 전용). defer가 단일 exit(단일 return)에서 로깅.
         // 마크는 아래 각 단계 경계에서 세팅한다(ft_on 아니면 clock read 자체를 안 함 = release 비용 0).
+        // 이 tick의 divider resize를 여기서 한 번 적용한다 — move가 몇 번 왔든 최종 좌표 하나이고,
+        // clamp 결과가 직전과 같으면 effect가 없다(계약 §4.3). frame 계측이 시작되기 전에 두어
+        // geometry가 확정된 상태로 아래 build/투영이 돌게 한다.
+        self.applyPendingDividerResize();
         const ft_on = diag_gate.maruDebugEnabled();
         const ft_start: i128 = if (ft_on) std.Io.Clock.awake.now(self.io).nanoseconds else 0;
         var ft_pre: i128 = ft_start;
@@ -33671,6 +33834,8 @@ pub const AppSession = struct {
         self.scrollbar_leaf_scratch.deinit(self.allocator);
         self.hover_divider_scratch.deinit(self.allocator);
         self.divider_seg_scratch.deinit(self.allocator);
+        self.divider_entry_scratch.deinit(self.allocator);
+        self.divider_split_scratch.deinit(self.allocator);
         // 1) 각 탭의 각 panel의 각 Term routing detach — closeAndDetach가 **앱 전역 라우팅**(app_runtime.routing)에서 이
         //    창의 링크만 뺀다(surface_id 키드 — 다른 창 링크는 안 건드림, M3b 창 격리 불변식). M3a: 번들 slot의 소유 해제
         //    (registry.remove=번들 deinit=reader join + surface.deinit)는 **아래 2)로 미룬다** — 번들 remove가 surface까지
@@ -41255,6 +41420,15 @@ test "R1: 터미널 tracking + Cmd 마우스 → report_mouse.mods에 32 없음(
     session.addr_edit = null; // 슬라이스 3: mouse()가 조기 addr 밴드 캡처에서 읽음(undefined면 UB — [[devsession-undefined-test-field-trap]])
     session.tabs = .empty;
     session.pointer_gesture_owner = .none;
+    // divider capture는 `PointerGestureOwner` 밖의 두 번째 pointer 축이라 여기서 함께 비운다
+    // — `undefined` 세션이 mouse()를 타면 이 필드도 읽는다(CIM2).
+    session.divider_interaction = .{};
+    session.divider_capture_seg = null;
+    session.divider_capture_split = null;
+    session.divider_coalescer = .{};
+    session.divider_entry_scratch = .empty;
+    session.divider_split_scratch = .empty;
+    session.divider_snapshot_generation = 0;
     session.allocator = std.testing.allocator;
     session.io = std.Io.Threaded.global_single_threaded.io();
     var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 8, .rows = 4 });
@@ -45160,6 +45334,15 @@ test "mouse reporting 진입은 진행 중이던 드래그 autoscroll을 멈춘�
     session.addr_edit = null; // 슬라이스 3: mouse()가 조기 addr 밴드 캡처에서 읽음(undefined면 UB — [[devsession-undefined-test-field-trap]])
     session.tabs = .empty; // legacy surface-only fixture: archive detail pointer routing has no structured Tab
     session.pointer_gesture_owner = .none;
+    // divider capture는 `PointerGestureOwner` 밖의 두 번째 pointer 축이라 여기서 함께 비운다
+    // — `undefined` 세션이 mouse()를 타면 이 필드도 읽는다(CIM2).
+    session.divider_interaction = .{};
+    session.divider_capture_seg = null;
+    session.divider_capture_split = null;
+    session.divider_coalescer = .{};
+    session.divider_entry_scratch = .empty;
+    session.divider_split_scratch = .empty;
+    session.divider_snapshot_generation = 0;
     session.allocator = std.testing.allocator;
     session.io = std.Io.Threaded.global_single_threaded.io(); // updateCursorBlink→readActiveSnapshot이 lockCore(self.io)
     var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
@@ -45174,6 +45357,15 @@ test "mouse reporting 진입은 진행 중이던 드래그 autoscroll을 멈춘�
     session.chrome_host = .{}; // mouse()가 context_menu.open을 kind 무관하게 읽음([[devsession-undefined-test-field-trap]])
     session.rename = null;
     session.pointer_gesture_owner = .none;
+    // divider capture는 `PointerGestureOwner` 밖의 두 번째 pointer 축이라 여기서 함께 비운다
+    // — `undefined` 세션이 mouse()를 타면 이 필드도 읽는다(CIM2).
+    session.divider_interaction = .{};
+    session.divider_capture_seg = null;
+    session.divider_capture_split = null;
+    session.divider_coalescer = .{};
+    session.divider_entry_scratch = .empty;
+    session.divider_split_scratch = .empty;
+    session.divider_snapshot_generation = 0;
     session.cell_width_px = 8;
     session.cell_height_px = 16;
     session.scale_milli = 1000;
@@ -45198,6 +45390,15 @@ test "drag autoscroll scrolls one line per tick and extends the selection to the
     session.addr_edit = null; // 슬라이스 3: mouse()가 조기 addr 밴드 캡처에서 읽음(undefined면 UB — [[devsession-undefined-test-field-trap]])
     session.tabs = .empty; // legacy surface-only fixture: archive detail pointer routing has no structured Tab
     session.pointer_gesture_owner = .none;
+    // divider capture는 `PointerGestureOwner` 밖의 두 번째 pointer 축이라 여기서 함께 비운다
+    // — `undefined` 세션이 mouse()를 타면 이 필드도 읽는다(CIM2).
+    session.divider_interaction = .{};
+    session.divider_capture_seg = null;
+    session.divider_capture_split = null;
+    session.divider_coalescer = .{};
+    session.divider_entry_scratch = .empty;
+    session.divider_split_scratch = .empty;
+    session.divider_snapshot_generation = 0;
     session.allocator = std.testing.allocator;
     session.io = std.Io.Threaded.global_single_threaded.io(); // updateCursorBlink→readActiveSnapshot이 lockCore(self.io)
     var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
@@ -45213,6 +45414,15 @@ test "drag autoscroll scrolls one line per tick and extends the selection to the
     session.rename = null;
     session.mouse_drag_selecting = true;
     session.pointer_gesture_owner = .none;
+    // divider capture는 `PointerGestureOwner` 밖의 두 번째 pointer 축이라 여기서 함께 비운다
+    // — `undefined` 세션이 mouse()를 타면 이 필드도 읽는다(CIM2).
+    session.divider_interaction = .{};
+    session.divider_capture_seg = null;
+    session.divider_capture_split = null;
+    session.divider_coalescer = .{};
+    session.divider_entry_scratch = .empty;
+    session.divider_split_scratch = .empty;
+    session.divider_snapshot_generation = 0;
     // 자동 스크롤은 frame rate 무관 ≈30줄/s(경과 ms 게이트). frame_loop_rate_hz=30이면 msPerTick=33=step_ms라 tick
     // 마다 한 줄 — 이 테스트의 "tick당 한 줄" 가정과 맞는 cadence를 명시한다(undefined frame_loop_rate_hz 트랩도 회피).
     session.frame_loop_rate_hz = 30;
@@ -45254,6 +45464,15 @@ test "drag autoscroll 속도는 frame rate에 비례하지 않는다 (경과 ms 
     var session: AppSession = undefined;
     session.addr_edit = null; // 슬라이스 3: mouse()가 조기 addr 밴드 캡처에서 읽음(undefined면 UB — [[devsession-undefined-test-field-trap]])
     session.pointer_gesture_owner = .none;
+    // divider capture는 `PointerGestureOwner` 밖의 두 번째 pointer 축이라 여기서 함께 비운다
+    // — `undefined` 세션이 mouse()를 타면 이 필드도 읽는다(CIM2).
+    session.divider_interaction = .{};
+    session.divider_capture_seg = null;
+    session.divider_capture_split = null;
+    session.divider_coalescer = .{};
+    session.divider_entry_scratch = .empty;
+    session.divider_split_scratch = .empty;
+    session.divider_snapshot_generation = 0;
     session.allocator = std.testing.allocator;
     session.io = std.Io.Threaded.global_single_threaded.io(); // updateCursorBlink→readActiveSnapshot이 lockCore(self.io)
     var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
@@ -50234,6 +50453,15 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     try std.testing.expect(surfaces.items[0].visible);
     try std.testing.expect(!surfaces.items[1].visible and !surfaces.items[2].visible);
     session.pointer_gesture_owner = .none;
+    // divider capture는 `PointerGestureOwner` 밖의 두 번째 pointer 축이라 여기서 함께 비운다
+    // — `undefined` 세션이 mouse()를 타면 이 필드도 읽는다(CIM2).
+    session.divider_interaction = .{};
+    session.divider_capture_seg = null;
+    session.divider_capture_split = null;
+    session.divider_coalescer = .{};
+    session.divider_entry_scratch = .empty;
+    session.divider_split_scratch = .empty;
+    session.divider_snapshot_generation = 0;
 
     // 확장 grab band 안쪽에서 시작해도 첫 drag가 경계를 클릭점으로 순간 이동시키지 않고 pointer delta만 반영한다.
     // 수정 전에는 divider 선 우선순위 문제를 고친 뒤에도 sizePtForPointer가 포인터를 경계로 간주해 최대 band 폭만큼 점프했다.
@@ -51969,6 +52197,15 @@ test "code-review #8: 리스트 아래(past-end) 새-워크스페이스 드롭 �
     }
     try std.testing.expect(saw_past_end_band);
     session.pointer_gesture_owner = .none;
+    // divider capture는 `PointerGestureOwner` 밖의 두 번째 pointer 축이라 여기서 함께 비운다
+    // — `undefined` 세션이 mouse()를 타면 이 필드도 읽는다(CIM2).
+    session.divider_interaction = .{};
+    session.divider_capture_seg = null;
+    session.divider_capture_split = null;
+    session.divider_coalescer = .{};
+    session.divider_entry_scratch = .empty;
+    session.divider_split_scratch = .empty;
+    session.divider_snapshot_generation = 0;
 }
 
 // 활성 탭이 단일 leaf SplitTree로 만들어지고, activeTabLeafRects가 그 leaf를 터미널 영역 전체에 펴는지
@@ -52252,19 +52489,16 @@ test "S1 표적 divider: 무관한 split의 pane이 collapse돼도 divider_drag 
 
     // 루트 split을 divider_drag로 잡는다. 활성(P2)을 닫으면 inner split이 collapse·해제되지만, divider_drag는
     // root split이라 표적 비교로 **보존**돼야 한다(예전 보수적 blanket-null이면 여기서 잘못 끊겼다).
-    session.pointer_gesture_owner = .{ .pane_divider = .{
-        .split = root_split,
-        .seg = .{ .orientation = .vertical_line, .bounds = .{ .x = 0, .y = 0, .w = 0, .h = 0 }, .pos = 0 },
-    } };
+    session.divider_capture_split = root_split;
+    session.divider_capture_seg = .{ .orientation = .vertical_line, .bounds = .{ .x = 0, .y = 0, .w = 0, .h = 0 }, .pos = 0 };
     session.closeActivePane(); // P2 해제 → removeLeaf가 inner split 반환 → invalidateForFreedSplit(inner≠root)
     try std.testing.expectEqual(@as(usize, 2), session.activeTab().panes.items.len);
-    try std.testing.expect(session.pointerGestureIs(.pane_divider));
-    try std.testing.expect(session.pointer_gesture_owner.pane_divider.split == root_split);
+    try std.testing.expect(session.divider_capture_split == root_split);
 
     // 남은 한 pane을 더 닫으면 이번엔 root split이 collapse → divider_drag(=root) 표적 null.
     session.closeActivePane(); // removeLeaf가 root split 반환 → invalidateForFreedSplit(root==divider_drag)
     try std.testing.expectEqual(@as(usize, 1), session.activeTab().panes.items.len);
-    try std.testing.expect(!session.pointerGestureIs(.pane_divider));
+    try std.testing.expect(session.divider_capture_split == null);
 }
 
 // Pane을 워크스페이스로 분리(promote)·합치기(merge) — grip 드래그의 트리 수술 코어를 헤드리스로 고정한다
@@ -56699,20 +56933,33 @@ test "PR6: dragging a split divider resizes the panes via split.ratio" {
 
     // down on divider → 드래그 시작.
     session.mouse(1, div_x, div_y, 0, 0);
-    try std.testing.expect(session.pointerGestureIs(.pane_divider));
+    try std.testing.expect(session.dividerCaptureActive());
 
-    // 왼쪽으로 200px 드래그 → ratio = 200/800 = 0.25(왼쪽 작아지고 오른쪽=활성 커진다).
+    // 왼쪽으로 200px 드래그 → ratio = 200/800 = 0.25(왼쪽 작아지고 오른쪽=활성 커진다). move는
+    // 좌표를 **모으기만** 하고 실제 resize는 tick이 한다(계약 §4.3) — move가 곧 resize이던 예전
+    // 경로에서는 한 프레임 안의 move 수만큼 pane 재배치가 돌았다.
+    const ratio_before_tick = split.ratio;
     session.mouse(2, div_x - 200, div_y, 0, 0);
+    session.mouse(2, div_x - 200, div_y, 0, 0);
+    try std.testing.expectEqual(ratio_before_tick, split.ratio);
+
+    _ = try session.tick();
     try std.testing.expect(split.ratio < 0.3); // 왼쪽 비율 감소
     try std.testing.expect(session.active_pane_rect.w > right_w_before); // 오른쪽 pane 넓어짐
 
+    // 같은 좌표로 한 번 더 밀어도 clamp 결과가 같으므로 effect가 없다.
+    const settled = split.ratio;
+    session.mouse(2, div_x - 200, div_y, 0, 0);
+    _ = try session.tick();
+    try std.testing.expectEqual(settled, split.ratio);
+
     // up → 드래그 종료.
     session.mouse(3, div_x - 200, div_y, 0, 0);
-    try std.testing.expect(!session.pointerGestureIs(.pane_divider));
+    try std.testing.expect(!session.dividerCaptureActive());
 
     // divider가 아닌 곳(왼쪽 pane 터미널 중앙) down은 divider 드래그를 시작하지 않는다.
     session.mouse(1, @floatFromInt(seg.bounds.x + 20), div_y, 0, 0);
-    try std.testing.expect(!session.pointerGestureIs(.pane_divider));
+    try std.testing.expect(!session.dividerCaptureActive());
     _ = try session.tick();
 }
 
@@ -60106,6 +60353,15 @@ test "drag autoscroll works after a double-click word selection and skips redraw
     session.addr_edit = null; // 슬라이스 3: mouse()가 조기 addr 밴드 캡처에서 읽음(undefined면 UB — [[devsession-undefined-test-field-trap]])
     session.tabs = .empty; // legacy surface-only fixture: archive detail pointer routing has no structured Tab
     session.pointer_gesture_owner = .none;
+    // divider capture는 `PointerGestureOwner` 밖의 두 번째 pointer 축이라 여기서 함께 비운다
+    // — `undefined` 세션이 mouse()를 타면 이 필드도 읽는다(CIM2).
+    session.divider_interaction = .{};
+    session.divider_capture_seg = null;
+    session.divider_capture_split = null;
+    session.divider_coalescer = .{};
+    session.divider_entry_scratch = .empty;
+    session.divider_split_scratch = .empty;
+    session.divider_snapshot_generation = 0;
     session.allocator = std.testing.allocator;
     session.io = std.Io.Threaded.global_single_threaded.io(); // updateCursorBlink→readActiveSnapshot이 lockCore(self.io)
     var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
@@ -60122,6 +60378,15 @@ test "drag autoscroll works after a double-click word selection and skips redraw
     session.rename = null;
     session.mouse_drag_selecting = false; // 더블클릭(kind 4) 후 상태
     session.pointer_gesture_owner = .none;
+    // divider capture는 `PointerGestureOwner` 밖의 두 번째 pointer 축이라 여기서 함께 비운다
+    // — `undefined` 세션이 mouse()를 타면 이 필드도 읽는다(CIM2).
+    session.divider_interaction = .{};
+    session.divider_capture_seg = null;
+    session.divider_capture_split = null;
+    session.divider_coalescer = .{};
+    session.divider_entry_scratch = .empty;
+    session.divider_split_scratch = .empty;
+    session.divider_snapshot_generation = 0;
     session.frame_loop_rate_hz = 30; // msPerTick=33=step_ms → 호출(tick)마다 한 줄(아래 "한 줄/호출" 가정과 맞춤)
     session.drag_autoscroll = 0;
     session.drag_autoscroll_accum_ms = 0;
@@ -64654,6 +64919,134 @@ fn dockContentCenter(session: *AppSession) struct { x: f64, y: f64 } {
     };
 }
 
+test "divider capture는 split이 사라지면 carry verdict가 취소한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    // 3 pane: split{P0, split{P1, P2}}. 안쪽 divider를 잡고 그 split을 없앤다.
+    try session.splitActivePane(.horizontal);
+    try session.splitActivePane(.horizontal);
+    var segs: std.ArrayList(PaneTree.DividerSeg) = .empty;
+    defer segs.deinit(allocator);
+    try session.layoutActiveTabDividers(&segs);
+    try std.testing.expectEqual(@as(usize, 2), segs.items.len);
+
+    // 활성 pane(P2)이 속한 안쪽 split의 divider를 찾는다.
+    var inner_index: usize = 0;
+    for (segs.items, 0..) |seg, i| {
+        if (seg.split != switch (session.activeTab().tree) {
+            .split => |sp| sp,
+            .leaf => return error.TestExpectedSplit,
+        }) inner_index = i;
+    }
+    const inner = segs.items[inner_index];
+    const div_x: f64 = @floatFromInt(inner.pos);
+    const div_y: f64 = @floatFromInt(inner.bounds.y + inner.bounds.h / 2);
+
+    session.mouse(1, div_x, div_y, 0, 0);
+    try std.testing.expect(session.dividerCaptureActive());
+    try std.testing.expect(session.divider_capture_split == inner.split);
+
+    // 드래그 중에 그 split이 collapse된다(단축키 close 등 외부 구조 변경).
+    session.closeActivePane();
+    try std.testing.expect(!session.dividerCaptureActive());
+
+    // 이후 move는 아무 것도 끌지 않는다 — 사라진 대상 위에서 resize가 계속되면 안 된다.
+    session.mouse(2, div_x - 100, div_y, 0, 0);
+    _ = try session.tick();
+    try std.testing.expect(!session.dividerCaptureActive());
+}
+
+test "드래그 중 탭이 바뀌면 carry verdict가 divider capture를 끊는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    try session.splitActivePane(.horizontal);
+
+    var segs: std.ArrayList(PaneTree.DividerSeg) = .empty;
+    defer segs.deinit(allocator);
+    try session.layoutActiveTabDividers(&segs);
+    const seg = segs.items[0];
+    const split = seg.split;
+    const div_x: f64 = @floatFromInt(seg.pos);
+    const div_y: f64 = @floatFromInt(seg.bounds.y + seg.bounds.h / 2);
+
+    session.mouse(1, div_x, div_y, 0, 0);
+    try std.testing.expect(session.dividerCaptureActive());
+    const ratio_at_capture = split.ratio;
+
+    // 드래그 도중 키보드로 다른 탭을 연다. split은 그대로 살아 있으므로 구조 무효화 경로는 아무
+    // 일도 하지 않는다 — 이 경우를 잡는 것은 §5 carry verdict의 owner epoch뿐이다.
+    _ = try session.newTab();
+    try std.testing.expect(session.tabs.items.len == 2);
+
+    session.mouse(2, div_x - 200, div_y, 0, 0);
+    _ = try session.tick();
+
+    // capture가 끊기고, 보이지도 않는 탭의 split이 조용히 resize되지 않는다.
+    try std.testing.expect(!session.dividerCaptureActive());
+    try std.testing.expectEqual(ratio_at_capture, split.ratio);
+}
+
+test "divider capture와 PointerGestureOwner는 같은 stream에 공존하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    try session.splitActivePane(.horizontal);
+
+    var segs: std.ArrayList(PaneTree.DividerSeg) = .empty;
+    defer segs.deinit(allocator);
+    try session.layoutActiveTabDividers(&segs);
+    const seg = segs.items[0];
+    const div_x: f64 = @floatFromInt(seg.pos);
+    const div_y: f64 = @floatFromInt(seg.bounds.y + seg.bounds.h / 2);
+
+    session.mouse(1, div_x, div_y, 0, 0);
+    try std.testing.expect(session.dividerCaptureActive());
+    // divider가 capture를 들고 있는 동안 owner union은 비어 있어야 한다. 두 권위가 겹치면
+    // 어느 쪽이 이 stream을 소유하는지 이벤트마다 달라진다(이관 계약 §4.3).
+    try std.testing.expect(session.pointerGestureIs(.none));
+
+    // 반대 방향: 다른 gesture가 시작되면 divider capture가 끝난다.
+    session.beginPointerGesture(.{ .scrollbar = .{ .grab = 0 } });
+    try std.testing.expect(!session.dividerCaptureActive());
+    try std.testing.expect(session.divider_capture_split == null);
+}
+
 test "라이브 divider 드래그는 도크 위를 지나도 ratio를 계속 추적하고 up에서 풀린다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -64672,20 +65065,22 @@ test "라이브 divider 드래그는 도크 위를 지나도 ratio를 계속 추
     const div_y: f64 = @floatFromInt(seg.bounds.y + seg.bounds.h / 2);
 
     session.mouse(1, div_x, div_y, 0, 0);
-    try std.testing.expect(session.pointerGestureIs(.pane_divider));
+    try std.testing.expect(session.dividerCaptureActive());
     session.mouse(2, div_x - 200, div_y, 0, 0);
+    _ = try session.tick();
     const ratio_outside = split.ratio;
 
     // 도크 content 위로 이동 — clamp가 아니라 이벤트 미도달로 얼어붙던 자리다. divider bounds가 도크
     // 왼쪽에서 끝나므로 ratio는 상한으로 가야 하고, 직전 값 그대로면 도크가 move를 가로챈 것이다.
     const dock_center = dockContentCenter(session);
     session.mouse(2, dock_center.x, dock_center.y, 0, 0);
+    _ = try session.tick();
     try std.testing.expect(split.ratio != ratio_outside);
-    try std.testing.expect(session.pointerGestureIs(.pane_divider));
+    try std.testing.expect(session.dividerCaptureActive());
     try std.testing.expect(session.agent_session_dock_interaction.capture == null);
 
     session.mouse(3, dock_center.x, dock_center.y, 0, 0);
-    try std.testing.expect(!session.pointerGestureIs(.pane_divider));
+    try std.testing.expect(!session.dividerCaptureActive());
     _ = try session.tick();
 }
 

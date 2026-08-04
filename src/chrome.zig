@@ -17,6 +17,8 @@ pub const ui = struct {
     pub const typography = @import("chrome/ui/typography.zig");
     pub const tree = @import("chrome/ui/tree.zig");
     pub const interaction = @import("chrome/ui/interaction.zig");
+    pub const intent_table = @import("chrome/ui/intent_table.zig");
+    pub const continuous_drag = @import("chrome/ui/continuous_drag.zig");
     pub const paint_style = @import("chrome/ui/paint_style.zig");
     pub const paint = @import("chrome/ui/paint.zig");
 };

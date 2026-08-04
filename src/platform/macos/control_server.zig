@@ -2154,9 +2154,16 @@ test "server max_connections(18차 [1]): 슬롯 초과 연결은 reject(hello �
         std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
     }
 
-    // B: 슬롯 없음 → reject(acceptOne이 hello 보낸 뒤 conn.deinit로 close) → clientReq는 hello skip 후 EOF = NoResponse.
+    // B: 슬롯 없음 → reject(acceptOne이 hello를 보낸 뒤 close). Peer close가 마지막 request
+    // write보다 먼저 관측되면 WriteFailed, read에서 먼저 관측되면 NoResponse다. 둘 다 같은
+    // "응답 없는 거부"이며 server-side slot/accounting 계약에는 차이가 없다.
     const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"sessions.list\"}";
-    try testing.expectError(error.NoResponse, clientReq(gpa, base, "k1", 10, null, req));
+    if (clientReq(gpa, base, "k1", 10, null, req)) |response| {
+        defer gpa.free(response);
+        return error.TestUnexpectedResult;
+    } else |err| {
+        try testing.expect(err == error.NoResponse or err == error.WriteFailed);
+    }
 
     holder.release.store(true, .release); // Holder hold 해제 → run return → fd close → server connThread EOF 종료
     hth.join();

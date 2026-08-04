@@ -9,6 +9,7 @@ const draw = @import("../../draw.zig");
 const tokens = @import("../../tokens.zig");
 const text_layout = @import("../../text_layout.zig");
 const interaction = @import("../../ui/interaction.zig");
+const paint_style = @import("../../ui/paint_style.zig");
 const ui_paint = @import("../../ui/paint.zig");
 const tree = @import("../../ui/tree.zig");
 const build = @import("build.zig");
@@ -138,7 +139,15 @@ const Writer = struct {
         const x = rect.rect.x + (rect.rect.width - text_width_px) / 2;
         const y = rect.rect.y + @as(f32, @floatFromInt(ch));
         if (rect.effective_clip) |clip| if (y < clip.y or y >= clip.y + clip.height) return;
-        try self.emit(x, y, source, max_cols, if (rect.action.?.enabled) .surface_fg else .muted_fg, true);
+        // 전경은 variant가 정한다. 여기서 다시 고르면 primary(밝은 배경)에 밝은 글자가 얹혀 label이
+        // 사라진다 — 실제로 그랬다. 단일 출처는 `paint_style.buttonForeground`다.
+        const foreground: tokens.ColorRole = if (!rect.action.?.enabled)
+            .muted_fg
+        else switch (rect.visual) {
+            .button => |visual| paint_style.buttonForeground(visual.variant),
+            else => .surface_fg,
+        };
+        try self.emit(x, y, source, max_cols, foreground, true);
     }
 
     /// Mirrors `emit`'s plan exactly, but only returns the rendered cell width so action labels

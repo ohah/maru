@@ -77,10 +77,11 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     // AS4 font/scale fixture adds only published-tree geometry probes beside the existing
     // dock-local archive path. Keep the exact reviewed reflection inventory so unrelated
     // reflection cannot piggyback on this structural source change.
-    // The dock branch now yields to an in-flight `PointerGestureOwner`. That guard adds no
-    // reflection, so the count stays 3 and only the source digest moves — keep it exact so
-    // unrelated reflection cannot ride along with the routing fix.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 3, .digest_hex = "a275627a759d8f2626feca87e7bf78d2afb02cb7d42ceeaf5a1713073d1feb8b" },
+    // The dock branch now yields to an in-flight `PointerGestureOwner`, and Session Dock search
+    // joined the `terminalOwnsInput` override through one shared gate. Neither adds reflection,
+    // so the count stays 3 and only the source digest moves — keep it exact so unrelated
+    // reflection cannot ride along with those fixes.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 3, .digest_hex = "dc07aa6cc98d762858b836c99ccfb076edae8fce532a596be71ddaae4ee23c2d" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

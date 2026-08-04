@@ -64933,3 +64933,74 @@ test "InputFocus의 모든 값이 terminalOwnsInput 기대와 일치한다" {
         _ = try session.tick();
     }
 }
+
+// 위 parity 가드는 각 `InputFocus` 값을 **단독으로** 켠다. 그것만으로는 `terminalOwnsInput`이 합집합인지
+// 우선순위 파생인지 구별되지 않는다 — 단독 활성에서는 두 방식의 답이 같기 때문이다. 이 테스트가 그
+// 구별을 고정한다.
+//
+// rename 편집 중 토스트가 뜨는 조합은 실제로 만들어진다. `showNotice`의 `dismissMessageOverlays`는
+// notice·find·palette·context_menu·settings를 닫지만 rename은 닫지 않고, `startRename`도 find·palette만
+// 닫는다. 그래서 두 순서 모두 공존 상태가 된다.
+//
+// 그 상태에서 `inputFocus`는 우선순위상 `.notice`(override 불필요)지만 host override는 **참**이어야 한다.
+// 토스트는 아무 입력으로나 닫히므로 첫 키가 notice를 닫고 rename 편집이 이어져야 하는데, 그 사이 host가
+// 웹뷰로 포커스를 넘기면 그 첫 키조차 웹뷰로 가서 notice도 안 닫히고 rename도 진행되지 않는다.
+// 따라서 `terminalOwnsInput`을 `inputFocus()`에서 파생시키면 이 조합에서 틀린 답을 낸다.
+test "동시 활성일 때 host override는 우선순위 파생이 아니라 합집합이다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+
+    // (1) rename 먼저, 그 위에 토스트.
+    {
+        const session = try allocator.create(AppSession);
+        defer allocator.destroy(session);
+        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+            .abi_version = abi_version,
+            .cols = 20,
+            .rows = 5,
+            .queue_capacity = 16,
+            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        });
+        defer session.deinit();
+        session.window_padding_px = .{};
+        _ = try session.resize(1600, 900, 1000);
+
+        session.startRename(.{ .workspace = session.tabs.items[0] });
+        try std.testing.expect(session.rename != null);
+        session.showNotice("작업공간 경로 분석을 시작하지 못했습니다.");
+
+        // 토스트가 rename을 닫지 않아 둘 다 살아 있다.
+        try std.testing.expect(session.chrome_host.notice.open);
+        try std.testing.expect(session.rename != null);
+        // 우선순위는 notice지만(그 값 단독이면 override 불필요),
+        try std.testing.expectEqual(AppSession.InputFocus.notice, session.inputFocus());
+        try std.testing.expect(!expectedTerminalResponder(session.inputFocus()));
+        // 합집합이라 rename 때문에 참이어야 한다.
+        try std.testing.expect(session.terminalOwnsInput());
+        _ = try session.tick();
+    }
+
+    // (2) 토스트 먼저, 그 위에 rename — `startRename`도 notice를 닫지 않는다.
+    {
+        const session = try allocator.create(AppSession);
+        defer allocator.destroy(session);
+        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+            .abi_version = abi_version,
+            .cols = 20,
+            .rows = 5,
+            .queue_capacity = 16,
+            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        });
+        defer session.deinit();
+        session.window_padding_px = .{};
+        _ = try session.resize(1600, 900, 1000);
+
+        session.showNotice("현재 터미널의 로컬 git 프로젝트를 찾을 수 없습니다.");
+        session.startRename(.{ .workspace = session.tabs.items[0] });
+        try std.testing.expect(session.chrome_host.notice.open);
+        try std.testing.expect(session.rename != null);
+        try std.testing.expectEqual(AppSession.InputFocus.notice, session.inputFocus());
+        try std.testing.expect(session.terminalOwnsInput());
+        _ = try session.tick();
+    }
+}

@@ -624,12 +624,16 @@ success/rollback 대칭 republish와 경쟁 launcher 0을 포함한다.
 
 ### Chrome 상호작용 이관 CIM gate
 
-[Chrome 상호작용 컴포넌트 이관 전략](chrome-interaction-migration.md)은 계약만 정의했고 CIM1 이후는
-아직 구현 전이다. 현재 자동 검증되는 것은 이관 **전** 경로뿐이다 — `chrome/ui/interaction.zig`의
-click/hover/focus capture와 tree replacement 시 무조건 cancel, Session Dock action table과 검색
-필드(query·IME preedit), 각 `chrome/components/*.zig`의 순수 hit-test/geometry가 기존 unit과 macOS ABI
-테스트에 있다. 나머지 Chrome drag(divider·tab·sidebar reorder·scrollbar thumb·pane move)의 capture
-수명은 여전히 `app_session.zig`의 `PointerGestureOwner`가 소유하며 **pure** state-machine gate가 없다.
+[Chrome 상호작용 컴포넌트 이관 전략](chrome-interaction-migration.md)의 CIM1 **pure** gate는 충족됐다 —
+`chrome/ui/interaction.zig`가 click/hover/focus에 더해 drag 수명(payload·axis·threshold,
+began/moved/dropped/cancelled)과 published generation gate를 소유하고, `reconcileCarryingCapture`가
+§5 carry verdict를 duplicate·disabled·clip-removed·key mismatch 각각의 cancel과 함께 판정한다.
+action ID를 domain intent로 되돌리는 표도 `chrome/ui/intent_table.zig` 하나로 모였고 Session Dock과
+archive detail이 그것을 쓴다.
+
+다만 **그 판정을 쓰는 제품 pointer 경로는 아직 없다.** Chrome drag(divider·tab·sidebar
+reorder·scrollbar thumb·pane move)의 capture 수명은 여전히 `app_session.zig`의 `PointerGestureOwner`가
+소유하며, 첫 소비자는 CIM2다. 그때까지 이 pure gate 통과는 "state machine이 옳다"까지만 주장한다.
 
 다만 §2 판정 순서의 제품 경로 fixture는 이미 있다. 도크 분기가 진행 중인 `PointerGestureOwner`에
 양보하도록 고치면서(`6d9c8c59`) 다섯 gesture — divider·Term 탭·pane·사이드바 카드·스크롤바 — 각각을
@@ -637,7 +641,7 @@ click/hover/focus capture와 tree replacement 시 무조건 cancel, Session Dock
 이것은 제품 경로 fixture이지 pure module gate가 아니므로, 아래 CIM1의 pure 항목을 대신하지 않는다.
 
 이관 순서는 그 문서 §8이 소유하고, 아래는 각 단계가 무엇을 증명해야 완료인지의 단일 출처다.
-B1 generic Button 이관이 선행이며 그 전에는 CIM1을 시작하지 않는다.
+B1 generic Button 이관이 선행이었고 완료됐다.
 
 | 단계 | 목표 종료 gate | 현재 증거만으로 완료로 보지 않는 것 |
 | --- | --- | --- |

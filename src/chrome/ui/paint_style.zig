@@ -150,7 +150,7 @@ fn baseCardStyle(variant: ui_style.CardVariant, tk: *const tokens.Tokens) Resolv
         },
         .danger => .{
             .background = .danger_bg,
-            .foreground = .danger_fg,
+            .foreground = buttonForeground(.danger),
             .border = .danger_bg,
             .corner_radii_px = uniform(tk.space.corner_radius_px),
             .border_widths_px = uniform(tk.space.border_width_px),
@@ -159,11 +159,21 @@ fn baseCardStyle(variant: ui_style.CardVariant, tk: *const tokens.Tokens) Resolv
     };
 }
 
+/// Label 전경은 variant가 정한다. paint와 component가 각자 매핑을 들면 값이 갈려 "보이는 색과
+/// 계산된 색"이 달라지므로, 그 매핑은 여기 하나만 둔다. token 인스턴스와 무관하게 role만 고른다.
+pub fn buttonForeground(variant: ui_style.ButtonVariant) tokens.ColorRole {
+    return switch (variant) {
+        .primary => .surface_bg,
+        .secondary, .ghost => .surface_fg,
+        .danger => .danger_fg,
+    };
+}
+
 fn baseButtonStyle(variant: ui_style.ButtonVariant, tk: *const tokens.Tokens) ResolvedButtonStyle {
     return switch (variant) {
         .primary => .{
             .background = .surface_fg,
-            .foreground = .surface_bg,
+            .foreground = buttonForeground(.primary),
             .border = .surface_fg,
             .corner_radii_px = uniform(tk.space.corner_radius_px),
             .border_widths_px = uniform(tk.space.border_width_px),
@@ -171,8 +181,28 @@ fn baseButtonStyle(variant: ui_style.ButtonVariant, tk: *const tokens.Tokens) Re
         },
         .secondary => .{
             .background = .tab_hover_bg,
-            .foreground = .surface_fg,
+            .foreground = buttonForeground(.secondary),
             .border = .divider,
+            .corner_radii_px = uniform(tk.space.corner_radius_px),
+            .border_widths_px = uniform(tk.space.border_width_px),
+            .shadow = null,
+        },
+        // Ghost는 panel과 같은 배경을 base로 삼아 테두리 없이 label만 남긴다. hover/focus는 상태
+        // 해석이 그 위에 얹으므로, 여기서 투명도를 낮추거나 별도 "없음" 색을 만들지 않는다.
+        .ghost => .{
+            .background = .surface_bg,
+            .foreground = buttonForeground(.ghost),
+            .border = null,
+            .corner_radii_px = uniform(tk.space.corner_radius_px),
+            .border_widths_px = uniform(tk.space.border_width_px),
+            .shadow = null,
+        },
+        // 파괴적 action. ThemeColors에 semantic error 입력이 없어 token layer가 보수적 fallback을
+        // 소유하며(`tokens.zig`), 컴포넌트가 literal RGB를 들고 오지 않는다.
+        .danger => .{
+            .background = .danger_bg,
+            .foreground = .danger_fg,
+            .border = .danger_bg,
             .corner_radii_px = uniform(tk.space.corner_radius_px),
             .border_widths_px = uniform(tk.space.border_width_px),
             .shadow = null,

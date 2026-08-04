@@ -10,7 +10,10 @@ pub const CardVariant = enum { surface, raised, selected, danger };
 /// Command targets use a closed vocabulary independent of information surfaces.  Treating a
 /// Button as a selected Card made archive actions inherit disclosure hover/pressed colours and
 /// obscured which target was primary in the Session Dock reference.
-pub const ButtonVariant = enum { primary, secondary };
+/// 닫힌 command 표면 집합. `ghost`는 평소 panel과 같은 배경을 써 테두리 없이 label만 보이고,
+/// `danger`는 파괴적 action 전용이라 token layer의 보수적 fallback(`danger_bg`/`danger_fg`)을 쓴다.
+/// 상태(hover/focus/pressed/disabled) 해석은 variant와 독립이며 `paint_style`이 한 곳에서 얹는다.
+pub const ButtonVariant = enum { primary, secondary, ghost, danger };
 pub const TextTone = enum { primary, muted, accent, danger };
 pub const ShadowKind = enum { none, raised };
 

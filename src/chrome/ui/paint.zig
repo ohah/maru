@@ -10,6 +10,7 @@ const draw = @import("../draw.zig");
 const interaction = @import("interaction.zig");
 const layout = @import("layout.zig");
 const paint_style = @import("paint_style.zig");
+const ui_style = @import("style.zig");
 const tokens = @import("../tokens.zig");
 const ui_tree = @import("tree.zig");
 
@@ -193,6 +194,39 @@ test "Button primary and secondary keep command contrast independent of Card var
     const disabled = resolveButton(7, .{ .variant = .primary, .paint = .{} }, .{ .id = 11, .enabled = false }, .{}, &tk);
     try std.testing.expectEqual(tokens.ColorRole.muted_fg, disabled.foreground);
     try std.testing.expectEqual(@as(u8, 0x80), disabled.opacity);
+}
+
+test "every Button variant resolves a distinct command surface and one foreground source" {
+    const tk = testTokens();
+    // 닫힌 집합 전체를 돈다 — variant가 늘면 이 배열도 컴파일 단계에서 함께 늘어야 한다.
+    const variants = [_]ui_style.ButtonVariant{ .primary, .secondary, .ghost, .danger };
+    inline for (variants) |variant| {
+        const resolved = resolveButton(1, .{ .variant = variant, .paint = .{} }, .{ .id = 2 }, .{}, &tk);
+        // 전경은 단일 출처가 정한다. base가 자기 매핑을 따로 들면 여기서 갈린다.
+        try std.testing.expectEqual(paint_style.buttonForeground(variant), resolved.foreground);
+        try std.testing.expectEqual(@as(u8, 0xFF), resolved.opacity);
+    }
+
+    // ghost는 panel과 같은 배경을 base로 삼고 테두리를 두지 않는다 — 그래서 평소에는 label만 보인다.
+    const ghost = resolveButton(1, .{ .variant = .ghost, .paint = .{} }, .{ .id = 2 }, .{}, &tk);
+    try std.testing.expectEqual(tokens.ColorRole.surface_bg, ghost.background);
+    try std.testing.expect(ghost.border == null);
+
+    // danger는 파괴적 action 전용 token을 쓴다. 다른 variant가 그 색을 빌려 쓰지 않는다.
+    const danger = resolveButton(1, .{ .variant = .danger, .paint = .{} }, .{ .id = 2 }, .{}, &tk);
+    try std.testing.expectEqual(tokens.ColorRole.danger_bg, danger.background);
+    try std.testing.expectEqual(tokens.ColorRole.danger_fg, danger.foreground);
+    for ([_]ui_style.ButtonVariant{ .primary, .secondary, .ghost }) |other| {
+        const style = resolveButton(1, .{ .variant = other, .paint = .{} }, .{ .id = 2 }, .{}, &tk);
+        try std.testing.expect(style.background != .danger_bg);
+    }
+
+    // 상태 해석은 variant와 독립이다 — ghost도 hover에서 같은 공유 token을 받는다.
+    const hovered_ghost = resolveButton(1, .{ .variant = .ghost, .paint = .{} }, .{ .id = 2 }, .{ .hovered = 1 }, &tk);
+    try std.testing.expectEqual(tokens.ColorRole.row_hover_bg, hovered_ghost.background);
+    // disabled는 언제나 마지막이라 danger의 강한 색도 비활성으로 가라앉는다.
+    const disabled_danger = resolveButton(1, .{ .variant = .danger, .paint = .{} }, .{ .id = 2, .enabled = false }, .{}, &tk);
+    try std.testing.expect(disabled_danger.background != .danger_bg);
 }
 
 test "paint emits preordered snapped card quads and ignores text until shaping exists" {

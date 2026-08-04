@@ -76,12 +76,20 @@ interaction 결과를 기존 effect path로 변환하고, 각 consumer가 migrat
 해당 `PointerGestureOwner` variant를 줄인다. 위 표의 variant를 **전부** 소진해 union이 `none`만
 남기 전에는 interaction 이관을 완료로 표시하지 않는다.
 
-두 권위가 공존하는 동안 §4.3의 "한 pointer stream에 capture owner는 하나"는 다음 규칙으로
-보장한다. 한 pointer down은 **`InteractionState`가 먼저** 판정하고, 그것이 capture를 잡으면
-`PointerGestureOwner`는 같은 stream에서 `none`을 유지하며 어떤 effect도 시작하지 않는다.
-반대로 `PointerGestureOwner`가 이미 `none`이 아니면 그 stream의 남은 이벤트는
-`InteractionState`로 보내지 않는다. 한 stream이 두 권위에 동시에 들어가면 실패이며, 이관 중
-어느 consumer도 이 판정 순서를 자기 화면에서 다시 정의하지 않는다.
+두 권위가 공존하는 동안 §4.3의 "한 pointer stream에 capture owner는 하나"는 다음 순서로 보장한다.
+
+1. **진행 중인 capture가 최우선이다.** 어느 권위든 capture를 들고 있으면 그 stream의 남은
+   move/up/cancel은 그 권위에만 간다. pointer가 다른 컴포넌트의 rect 위로 지나간다는 사실은
+   소유권을 옮길 근거가 아니다. rect 포함 판정만 보고 capture 없는 쪽으로 이벤트를 넘기면
+   진행 중이던 drag가 중간에 멈추고 up을 잃는다.
+2. capture가 없을 때만 §4.2의 route를 적용한다. modal 또는 active native overlay가 최상단이며
+   `InteractionState`가 그보다 앞서지 않는다.
+3. 그 route에서 Chrome이 이겼을 때, 어느 권위가 down을 받을지는 **해당 컴포넌트의 rect 판정**이
+   정한다. `InteractionState`가 관할하는 rect(현재는 Session Dock content) 안이면 그쪽이 capture를
+   잡고, 그 동안 `PointerGestureOwner`는 `none`을 유지하며 어떤 effect도 시작하지 않는다.
+
+한 stream이 두 권위에 동시에 들어가면 실패다. 이관 중 어느 consumer도 이 순서를 자기 화면에서
+다시 정의하지 않으며, 새 권위를 추가하는 PR은 1번 규칙을 자기 진입점에서 먼저 확인한다.
 
 ## 3. 공개 component와 내부 capability
 
@@ -218,6 +226,11 @@ allocation·filesystem I/O·worker wait 금지는 이 예외에서도 그대로 
 
 ### 4.4 terminal tab drag는 provisional live reorder다
 
+이 절은 §4.3 reorder 규칙의 **특수화**이지 예외가 아니다. §4.3대로 source layout과 model은
+mutation하지 않고, 그 위에서 "preview를 어떻게 보여줄지"만 정한다. ghost나 insertion line 대신
+인접 tab의 자리를 실제로 바꿔 보이는 preview를 쓴다는 뜻이며, model commit 시점은 §4.3과 같은
+up 한 번이다.
+
 terminal tab drag는 **provisional live reorder**를 쓴다. drag 중에는 인접 tab의 위치를 즉시 바꿔
 direct manipulation의 즉시성을 유지하되, 그 순서는 아직 model이 아니다.
 
@@ -231,7 +244,7 @@ direct manipulation의 즉시성을 유지하되, 그 순서는 아직 model이 
 - Escape, pointer cancel, window deactivate, modal/native overlay 진입, source 또는 target tab
   removal, snapshot/window epoch mismatch는 모두 **시작 순서를 복원**하고 effect 0으로 끝난다.
   복원은 transaction 하나를 되돌리는 것이므로 부분 적용된 중간 순서를 남기지 않는다.
-- drag가 살아 있는 동안 다른 경로(단축키 select/close, 원격 관측, session restore)가 tab 집합을
+- drag가 살아 있는 동안 다른 경로(단축키 select/close, 원격 관측의 Term 소멸)가 tab 집합을
   바꾸면 provisional 배열을 폐기하고 시작 순서로 복원한 뒤 그 변경을 적용한다. provisional 배열을
   새 집합에 맞춰 재봉합하지 않는다.
 
@@ -360,7 +373,8 @@ CIM1은 B1 이관 PR이 전부 merge된 뒤에 시작하고, 그 전에는 CIM0(
 
 각 단계가 무엇을 증명해야 완료인지와 무엇을 완료로 보지 않는지는
 [검증 매트릭스](verification-matrix.md)의 "Chrome 상호작용 이관 CIM gate"가 단일 출처다. 이 문서는
-순서와 책임 경계를 소유하고, 단계별 종료 gate는 그쪽을 따른다.
+순서와 책임 경계를 소유하고, 단계별 종료 gate는 그쪽을 따른다. §9의 공통 완료 조건은 그 gate와
+별개 축이며 두 가지를 모두 충족해야 한다.
 
 모든 구현 PR은 최소한 다음 증거를 남긴다.
 
@@ -377,6 +391,12 @@ CIM1은 B1 이관 PR이 전부 merge된 뒤에 시작하고, 그 전에는 CIM0(
 - clip/hit rect/action ID/snapshot generation 및 final allocation/worker pending의 structured summary.
 
 ## 9. 완료와 보류 기준
+
+이 절은 **모든 consumer에 공통으로 적용되는 최소 조건**이고, 단계별 종료 gate는
+[검증 매트릭스](verification-matrix.md)의 "Chrome 상호작용 이관 CIM gate"가 소유한다. 둘은
+경쟁하지 않는다 — 한 CIM PR은 매트릭스의 해당 단계 gate와 아래 공통 조건을 **모두** 충족해야 하며,
+어느 한쪽만으로 완료를 주장할 수 없다. 두 문서가 같은 항목을 다르게 적으면 그것은 drift이므로
+같은 PR에서 함께 고친다.
 
 한 consumer가 새 tree를 사용한다고 전체 interaction system 완료가 아니다. 다음 중 하나라도 없으면
 해당 consumer는 부분 이관이다.

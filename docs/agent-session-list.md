@@ -86,14 +86,16 @@ identity는 바꾸지 않으며, `SessionDock`의 같은 completed `UiRectTree`�
   utility cluster를 서로 독립 logical slot으로 둔다. title/count/utility가 한 baseline 또는 terminal
   prompt처럼 보이지 않아야 한다. host+label은 72pt content box, refresh는 **24pt trailing slot**,
   둘 사이는 12pt gap이며 이 x 좌표는 terminal cell 폭에서 계산하지 않는다. refresh slot의 trailing
-  edge에는 **20pt logical safe inset**을 더 둔다. 이 inset은 backing scale에서만 resolve하며 SVG와
-  spinner의 ink·hit rect가 dock clip 또는 우측 edge에 닿지 않게 한다. Header 자체는 reference처럼
+  edge에는 **20pt logical safe inset**을 더 둔다. 이 inset은 backing scale에서만 resolve하며 idle·busy
+  refresh SVG의 ink·hit rect가 dock clip 또는 우측 edge에 닿지 않게 한다. Header 자체는 reference처럼
   외곽 card border를 그리지 않되, header의 **bottom 1px divider**는 `divider` token으로 반드시
   lower한다. 이것이 scope/search/group/list의 경계가 사라져도 된다는 뜻은 아니다: refresh SVG의
   전체 ink box는 24pt slot 안에 있어야 하고, 1× readback에서 slot의 우측 끝과 dock content edge
   사이에는 20 logical pt가 남아야 하며 header·group·row 구획선도 읽혀야 한다.
 - scope는 하나의 rounded outlined control이며 selected segment만 lifted background를 갖는다. search는
-  같은 radius 계열의 별도 filled field이고 icon·placeholder/query 사이에 최소 1ch 간격을 둔다.
+  같은 radius 계열의 별도 filled field이며 16pt content inset, 18pt registered SVG, 8pt gap 뒤에
+  measured placeholder/query/preedit/caret을 둔다. icon·텍스트는 terminal cell baseline을 공유하지 않고
+  각각의 logical rect 중앙에 lower한다.
 - group은 위아래 rule과 20pt disclosure slot·8pt label gap·workspace name·count pill을 갖는 독립
   header다. 기본 session row는
   반복된 외곽 card 대신 full-width divider 목록이고, title은 bold, summary는 muted, provider와
@@ -213,14 +215,16 @@ Explorer/source-control은 pane tab bar와 정렬해야 하므로 이 예외를 
 - `SessionDockHeader`는 title, displayed/recent count, host SVG와 `로컬`
   provenance, refresh affordance만 소유한다. host+label은 72pt box 안에서 실제 glyph advance로
   함께 중앙 정렬하고, refresh는 그 오른쪽 12pt gap 뒤의 24pt trailing slot에 둔다. refresh가 실행 중이면 같은 위치의
-  control이 spinner로 바뀌며 다시 누른다고 worker를 더 만들지 않는다. refresh는
-  group body가 아니고 항상 고정 chrome이다. idle refresh는 registered SVG icon, spinner는 같은
-  trailing slot을 유지한다. 둘 다 header 오른쪽 외곽이 아니라 20pt logical safe inset 안에 정렬해
+  control은 muted·disabled registered refresh SVG로 바뀌며 다시 누른다고 worker를 더 만들지 않는다. 현재
+  Chrome component에는 SVG transform/rotation 계약이 없으므로 terminal Unicode clock을 대체 spinner로
+  쓰지 않는다. 그것은 1-cell ink라 클릭 순간 control이 작아 보이는 회귀를 만든다. refresh는
+  group body가 아니고 항상 고정 chrome이다. idle/busy 모두 같은 registered SVG와 trailing slot을 유지하며,
+  header 오른쪽 외곽이 아니라 20pt logical safe inset 안에 정렬해
   fallback font 또는 icon ink가 rounded-card clip에 닿지 않게 한다. Header의 bottom divider는 카드
   외곽선이 아니라 fixed chrome과 아래 control을 구분하는 1px rule이다. provider·원격 source 선택기 같은
   별도 filter control은 v1에 추가하지 않는다.
 - Header refresh와 search affordance는 일반 Unicode/fallback font glyph를 쓰지 않고 등록된
-  SVG coverage icon을 쓴다. idle refresh는 `surface_fg`, disabled spinner는 `muted_fg`라서
+  SVG coverage icon을 쓴다. idle refresh는 `surface_fg`, disabled busy refresh는 `muted_fg`라서
   theme accent가 어두운 경우에도 utility icon의 대비가 사라지지 않는다. idle refresh와 group
   expand/collapse affordance는 `icon_in_rect`의 명시 logical slot으로만 lower한다. 즉 terminal
   cell origin·glyph baseline·source viewBox ink가 아니라 component가 소유한 24pt slot의 정확한
@@ -344,11 +348,16 @@ inline disclosure다. card click/Enter는 새 archive tab이나 terminal surface
   `⌘↵`/`⌘L`은 expanded ready state에서만 같은 intents를 호출하며, closed/loading/stale state에서는
   no-op이다. Escape는 search를 먼저 닫고, 그 다음 expanded card를 닫는다.
 
-- header의 `로컬`은 현재 사용자 홈 아래 provider log만 읽는다는 provenance label이며 host 선택기가 아니다. v1 정렬은 mtime 내림차순 하나로 고정한다. 탭 재진입은 현재 앱 실행 중의 snapshot을 즉시 보이고, 마지막 완료 scan 뒤 **15초** 안이면 새 refresh를 시작하지 않는다. `SessionDockHeader`의 refresh control은 이 TTL을 우회한다. worker가 실행 중이면 동일 rect의 spinner/disabled state로 바뀌고 추가 job을 만들지 않는다.
+- header의 `로컬`은 현재 사용자 홈 아래 provider log만 읽는다는 provenance label이며 host 선택기가 아니다. v1 정렬은 mtime 내림차순 하나로 고정한다. 탭 재진입은 현재 앱 실행 중의 snapshot을 즉시 보이고, 마지막 완료 scan 뒤 **15초** 안이면 새 refresh를 시작하지 않는다. `SessionDockHeader`의 refresh control은 이 TTL을 우회한다. worker가 실행 중이면 동일 rect의 muted registered refresh/disabled state로 바뀌고 추가 job을 만들지 않는다.
 - 도크 view bar의 `AI 세션`을 누르면 archive refresh를 요청한다. **refresh 중에는 직전 완료 snapshot과 current scroll/selection을 그대로 paint하고, 새 bounded scan 전체가 끝난 뒤에만 새 immutable snapshot으로 한 번에 교체한다.** AS3-c부터 교체 commit은 first partially-visible card의 exact identity와 intra-card pixel offset을 restore하고, identity가 없으면 기존 numeric offset만 새 상한에 clamp한다. 결과 큐의 OOM 등 새 snapshot을 publish할 수 없는 완료는 spinner만 끝내고 기존 목록과 scroll/selection을 유지하며 notice를 보인다. 따라서 새로 고침이 기존 목록을 비우거나 첫 record/중간 batch로 목록을 흔들지 않는다. 첫 진입처럼 이전 snapshot이 없을 때만 skeleton/진행 문구를 보이며, frame tick에서 파일 I/O를 하지 않는다. 창 재포커스와 새 provider session identity 감지는 같은 refresh를 요청하되, forced refresh는 5초 전역 throttle로 합친다. filesystem polling/watcher는 v1에 없다.
 - scope는 `현재 작업공간`, `현재 프로젝트`, `전체`다. 기본값은 `전체`이며 마지막 선택만 창 UI 상태로 보존한다. **`현재 작업공간`은 활성 워크스페이스 탭의 활성 local Term이 마지막으로 보고한 CWD를 worker가 canonicalize한 단일 root snapshot 아래에 `cwd`가 있는 기록**이다. 창 전역 탐색기 root와 다른 권위이므로, 다른 워크스페이스 탭의 폴더가 섞이지 않는다. `현재 프로젝트`는 같은 active Term CWD에서 worker가 찾은 canonical git root 아래 `cwd`가 있는 기록이며, local CWD 또는 git root가 없으면 각각 비활성화한다. `전체`는 모든 provider의 검증된 사용자 세션이다. remote/불명 `cwd`는 전체에서만 보인다. 도크 진입, scope click, 활성 workspace/pane/Term 전환 **및 같은 활성 pane의 CWD 보고 변경**에서 root snapshot을 갱신하며, 결과가 오기 전에는 이전 tab 또는 이전 CWD의 범위를 재사용하지 않는다. CWD 비교는 main actor의 메모리 observation만 사용하고 canonicalize·git walk는 worker만 수행한다. 이후 scope/search/scroll/frame은 그 메모리 snapshot만 읽는다.
 - 이 필터는 접근 제어가 아닌 표시 범위다. 경로는 provider log의 `cwd`를 canonicalize할 수 있을 때만 containment 비교하며, 실패·삭제·비로컬 값은 workspace/project에 억지로 넣지 않는다.
-- 검색은 이미 publish된 snapshot만 대상으로 한다. `/`로 시작한 입력은 header에 표시되고 Esc는 query를 지우고 닫으며, UTF-8 byte substring(ASCII만 case-insensitive)으로 제목·요약·cwd leaf·branch·model을 찾고 입력은 256 byte로 자른다. 검색 키 입력은 재스캔·파일 stat·정렬을 일으키지 않는다. 한국어처럼 case가 없는 문자열은 정확 byte match로 검색된다.
+- 검색은 이미 publish된 snapshot만 대상으로 한다. search field click 또는 `/`가 `query + IME preedit` 입력 owner를
+  활성화한다. marked text는 field와 native IME 후보창에만 즉시 보이고, commit된 query만 목록 필터를 바꾼다.
+  Esc는 query/preedit를 함께 지우고 닫으며, Backspace는 UTF-8 codepoint 경계를 지킨다. UTF-8 byte substring
+  (ASCII만 case-insensitive)으로 제목·요약·cwd leaf·branch·model을 찾고 입력은 256 byte로 자른다. 검색 키·IME
+  입력은 재스캔·파일 stat·정렬을 일으키지 않으며 terminal PTY로 새지 않는다. 한국어처럼 case가 없는 문자열은 정확 byte
+  match로 검색된다.
 - 최근 window는 provider를 합쳐 mtime 내림차순 최대 500 **검증 완료** 세션이다. 후보 탐색 상한 또는 parser byte budget 때문에 더 오래된 항목을 보장하지 않으므로 header와 empty state는 항상 `최근`이라고 말하고 `전체 이력`이라고 주장하지 않는다.
 - fixed chrome은 header·scope segmented control·검색뿐이다. scope control은 **그룹 헤더가 아니며**, 목록 본문을 밀거나 선택된 세션의 detail/action으로 대체하지 않는다. 목록의 workspace/project 그룹만 본문에서 독립적으로 접고 펼친다.
 - 기본 그룹은 canonical `cwd`의 프로젝트/폴더 이름이다. cwd가 없거나 project 밖이면 `알 수 없는 위치` 한 그룹으로 낸다. 각 그룹 header는 chevron·이름·표시 개수를 갖고 click/Left/Right로 접고 편다. 접힌 그룹은 header만 남기며 다른 그룹과 고정 chrome의 위치는 바꾸지 않는다. 그룹 접힘은 현재 view 수명 안에서만 유지하며 JSONL이나 workspace에 저장하지 않는다.

@@ -53,14 +53,17 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
     const count = std.fmt.bufPrint(&count_buf, "{d}개 표시 · 최근 {d}개", .{ props.displayed_count, props.recent_limit }) catch "";
     try writer.headerStack(header, "Agent 세션 기록", count);
     try writer.headerProvenance(header, host_label);
-    try writer.headerRefresh(header, if (props.loading or props.refreshing) spinner(props.spinner_phase) else refresh_icon, if (props.loading or props.refreshing) .muted_fg else .surface_fg, !(props.loading or props.refreshing));
+    // The in-flight state deliberately keeps the registered SVG at its idle optical size.  The
+    // old Unicode clock frames were one terminal-cell glyphs, so clicking refresh made the
+    // control visibly shrink even though its hit rect stayed 24pt.  Until component transforms
+    // own SVG rotation, a muted registered refresh glyph is the truthful busy affordance.
+    try writer.headerRefresh(header, refresh_icon, if (props.loading or props.refreshing) .muted_fg else .surface_fg, true);
 
     try writer.text(find(frame.tree, build.NodeIds.scope_workspace) orelse return error.MissingRect, 0, "작업공간", .surface_fg, .control, 1, false, true);
     try writer.text(find(frame.tree, build.NodeIds.scope_project) orelse return error.MissingRect, 0, "프로젝트", .surface_fg, .control, 1, false, true);
     try writer.text(find(frame.tree, build.NodeIds.scope_all) orelse return error.MissingRect, 0, "전체", .surface_fg, .control, 1, false, true);
     const search = find(frame.tree, build.NodeIds.search) orelse return error.MissingRect;
-    try writer.textInset(search, 0, search_icon, .muted_fg, .control, 1, true, true, 1);
-    try writer.textInset(search, 0, if (props.search.len == 0) "세션 검색" else props.search, if (props.search.len == 0) .muted_fg else .surface_fg, .control, 1, false, true, 4);
+    try writer.searchField(search);
 
     if (props.loading and props.items.len == 0) {
         try writer.skeletons(find(frame.tree, build.NodeIds.content) orelse return error.MissingRect);
@@ -239,9 +242,8 @@ const Writer = struct {
         } });
     }
 
-    /// The refresh and temporary spinner share a logical trailing slot. The glyph's terminal
-    /// display width no longer picks the slot x coordinate, so terminal font settings cannot
-    /// pull this header control away from the provenance group.
+    /// Idle and busy refresh use one logical trailing SVG slot. Terminal glyph width therefore
+    /// cannot pull this header control away from the provenance group or shrink it in-flight.
     fn headerRefresh(self: *Writer, rect: tree.RectEntry, source: []const u8, role: tokens.ColorRole, wide_icon: bool) ViewError!void {
         const metrics = types.DockMetrics.resolve(self.props.scale_milli);
         if (rect.rect.width < @as(f32, @floatFromInt(metrics.header_content_inset_x + metrics.headerUtilityWidth()))) return;
@@ -259,6 +261,39 @@ const Writer = struct {
         }
         const icon = std.unicode.utf8Decode(source) catch return;
         try self.iconInRect(slot, source, icon, @intCast(metrics.header_host_icon_extent), role);
+    }
+
+    /// The search field is a real Chrome input: its SVG owns a fixed optical box and the text
+    /// begins after the same 16/18/8pt content group used by buttons.  It must not use the
+    /// terminal-cell icon path, which had a different baseline from the measured input label.
+    fn searchField(self: *Writer, rect: tree.RectEntry) ViewError!void {
+        const cw = self.props.cell_width_px;
+        if (cw == 0) return;
+        const button = types.ButtonMetrics.resolve(self.props.scale_milli);
+        const icon_extent = button.leading_icon_extent_px;
+        if (rect.rect.width <= @as(f32, @floatFromInt(button.content_inset_x_px * 2 + icon_extent + button.leading_icon_gap_px))) return;
+        const icon_slot = draw.Rect{
+            .x = @intFromFloat(@floor(rect.rect.x + @as(f32, @floatFromInt(button.content_inset_x_px)))),
+            .y = @intFromFloat(@floor(rect.rect.y + (rect.rect.height - @as(f32, @floatFromInt(icon_extent))) / 2)),
+            .w = icon_extent,
+            .h = icon_extent,
+        };
+        try self.iconInRect(icon_slot, search_icon, std.unicode.utf8Decode(search_icon) catch return, @intCast(icon_extent), .muted_fg);
+
+        const x = rect.rect.x + @as(f32, @floatFromInt(button.content_inset_x_px + icon_extent + button.leading_icon_gap_px));
+        const end = rect.rect.x + rect.rect.width - @as(f32, @floatFromInt(button.content_inset_x_px));
+        if (end <= x) return;
+        const max_cols: u16 = @intFromFloat(@floor((end - x) / @as(f32, @floatFromInt(cw))));
+        if (max_cols == 0) return;
+        const line_h: f32 = @floatFromInt(typography.lineHeightPx(.control, effectiveScale(self.props.scale_milli)));
+        if (rect.rect.height < line_h) return;
+        const y = rect.rect.y + (rect.rect.height - line_h) / 2;
+        const show_caret = self.props.search_focused and self.props.search_cursor_visible;
+        const empty = self.props.search.len == 0 and self.props.search_preedit.len == 0;
+        if (empty and !show_caret) {
+            return self.emit(x, y, "세션 검색", max_cols, .head, .muted_fg, .control, false, false);
+        }
+        return self.emitJoined(x, y, self.props.search, self.props.search_preedit, if (show_caret) "|" else "", max_cols, if (empty) .muted_fg else .surface_fg);
     }
 
     /// A fixed Chrome component can use terminal columns only as a conservative horizontal
@@ -482,6 +517,31 @@ const Writer = struct {
         return self.emitPlaced(x, y, source, cols, anchor, role, text_role, wide_icons, bold, null, .origin);
     }
 
+    /// A single measured input run preserves the actual system-font advance across committed
+    /// query, IME preedit, and caret.  Three separately lowered text ops would re-start at the
+    /// same origin or reintroduce terminal-cell advance guesses between them.
+    fn emitJoined(self: *Writer, x: f32, y: f32, first: []const u8, second: []const u8, third: []const u8, cols: u16, role: tokens.ColorRole) ViewError!void {
+        if (cols == 0) return;
+        if (self.op_count == self.ops.len) return error.InsufficientTextBuffer;
+        if (self.run_count == self.runs.len) return error.InsufficientRunBuffer;
+        const start = self.text_count;
+        try self.appendBytes(first);
+        try self.appendBytes(second);
+        try self.appendBytes(third);
+        self.runs[self.run_count] = .{ .text = self.text_bytes[start..self.text_count] };
+        self.ops[self.op_count] = .{ .text = .{
+            .origin = .{ .x = @intFromFloat(@floor(x)), .y = @intFromFloat(@floor(y)) },
+            .runs = self.runs[self.run_count .. self.run_count + 1],
+            .role = role,
+            .text_role = .control,
+            .max_cols = cols,
+            .anchor = .head,
+            .max_width_px = @intFromFloat(@floor(@as(f32, @floatFromInt(cols)) * @as(f32, @floatFromInt(self.props.cell_width_px)))),
+        } };
+        self.run_count += 1;
+        self.op_count += 1;
+    }
+
     fn iconInRect(self: *Writer, rect: draw.Rect, source: []const u8, icon: u21, extent: u16, role: tokens.ColorRole) ViewError!void {
         // The PUA bytes are never shaped as text (`icon_in_rect` resolves the registered SVG
         // directly), but retain them as the atlas request's stable input payload. A zero-byte
@@ -590,19 +650,6 @@ fn find(snapshot: tree.UiRectTree, id: tree.UiId) ?tree.RectEntry {
     return snapshot.entries[index];
 }
 
-fn spinner(phase: u3) []const u8 {
-    return switch (phase) {
-        0 => "◴",
-        1 => "◷",
-        2 => "◶",
-        3 => "◵",
-        4 => "◴",
-        5 => "◷",
-        6 => "◶",
-        7 => "◵",
-    };
-}
-
 test "SessionDock view emits card paint and ellipsized semantic text from one tree" {
     const props = types.Props{
         .viewport_px = .{ .width = 320, .height = 480 },
@@ -665,6 +712,7 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
     var host_label_max_cols: ?u16 = null;
     var host_label_placement: ?draw.TextPlacement = null;
     var refresh_placement: ?draw.TextPlacement = null;
+    var search_placement: ?draw.TextPlacement = null;
     var group_chevron_placement: ?draw.TextPlacement = null;
     var group_label_x: ?i32 = null;
     var saw_untruncated_title = false;
@@ -685,6 +733,7 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
                 .icon_in_rect => |icon| {
                     try std.testing.expectEqual(@as(?u32, icon.content_rect.w), text.max_width_px);
                     if (icon.icon_codepoint == 0xF0021) refresh_placement = text.placement;
+                    if (icon.icon_codepoint == 0xF0022) search_placement = text.placement;
                     if (icon.icon_codepoint == 0xF0023) {
                         saw_group_chevron = true;
                         group_chevron_placement = text.placement;
@@ -713,16 +762,26 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
                     saw_group_count = true;
                     group_count_origin_y = text.origin.y;
                 }
-                if (std.mem.eql(u8, run.text, search_icon)) {
-                    saw_search_icon = true;
-                    try std.testing.expect(text.wide_icons);
-                }
             }
         },
         else => {},
     };
     try std.testing.expect(saw_quad);
     try std.testing.expect(saw_provider);
+    switch (search_placement orelse return error.TestUnexpectedResult) {
+        .icon_in_rect => |icon| {
+            saw_search_icon = true;
+            const search_rect = find(frame.tree, build.NodeIds.search) orelse return error.TestUnexpectedResult;
+            const button = types.ButtonMetrics.resolve(props.scale_milli);
+            try std.testing.expectEqual(@as(u21, 0xF0022), icon.icon_codepoint);
+            try std.testing.expectEqual(button.leading_icon_extent_px, icon.content_rect.w);
+            try std.testing.expectEqual(
+                @as(i32, @intFromFloat(@floor(search_rect.rect.x + @as(f32, @floatFromInt(button.content_inset_x_px))))),
+                icon.content_rect.x,
+            );
+        },
+        else => return error.TestUnexpectedResult,
+    }
     try std.testing.expect(saw_search_icon);
     try std.testing.expect(saw_group_chevron);
     try std.testing.expect(saw_group_label);
@@ -780,22 +839,31 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
         group_label_x orelse return error.TestUnexpectedResult,
     );
 
-    // The loading indicator must not re-anchor at the outer header edge. It is a one-cell
-    // glyph optically centred in the same logical slot as the registered refresh SVG.
+    // Refreshing retains the registered SVG's exact optical box instead of replacing it with
+    // the old one-cell Unicode clock glyph.
     var loading_props = props;
     loading_props.loading = true;
     const loading_out = try view(loading_props, frame, .{}, &tk, .{ .ops = &ops, .runs = &runs, .text_bytes = &text_bytes });
-    var spinner_origin_x: ?i32 = null;
+    var loading_refresh: ?draw.TextPlacement = null;
     for (loading_out.ops) |op| switch (op) {
-        .text => |text| for (text.runs) |run| {
-            if (std.mem.eql(u8, run.text, spinner(loading_props.spinner_phase))) {
-                spinner_origin_x = text.origin.x;
-                try std.testing.expect(!text.wide_icons);
-            }
+        .text => |text| switch (text.placement) {
+            .icon_in_rect => |icon| {
+                if (icon.icon_codepoint == 0xF0021) loading_refresh = text.placement;
+            },
+            else => {},
         },
         else => {},
     };
-    _ = spinner_origin_x orelse return error.TestUnexpectedResult;
+    switch (loading_refresh orelse return error.TestUnexpectedResult) {
+        .icon_in_rect => |icon| switch (refresh_placement orelse return error.TestUnexpectedResult) {
+            .icon_in_rect => |idle| {
+                try std.testing.expectEqual(idle.content_rect, icon.content_rect);
+                try std.testing.expectEqual(idle.icon_extent_px, icon.icon_extent_px);
+            },
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "SessionDock partial card never emits a CoreText cell that crosses its published clip" {

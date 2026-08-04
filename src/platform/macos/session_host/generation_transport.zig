@@ -17,6 +17,9 @@ const builtin = @import("builtin");
 const posix = std.posix;
 
 const c = std.c;
+extern "c" fn execv(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 
 pub const Error = client_mod.PreparedBlockingRpcError || error{
     IdentityExhausted,
@@ -1774,6 +1777,7 @@ test "CR3a-2a response publication failure poisons before payload free reentry" 
         c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
     );
     var peer = try std.Thread.spawn(.{}, Peer.run, .{ fds[1], response_wire });
+    defer peer.join();
     var client: client_mod.Client = .{
         .allocator = probe.allocator(),
         .fd = fds[0],
@@ -1799,7 +1803,6 @@ test "CR3a-2a response publication failure poisons before payload free reentry" 
         transport.executePreparedRequest(receipt, &response),
     );
     probe.armed = false;
-    peer.join();
     try std.testing.expect(probe.mutated_after_preflight);
     try std.testing.expect(probe.saw_poison_before_free);
     try std.testing.expect(probe.reentry_rejected);
@@ -2072,6 +2075,82 @@ test "CR3a-2c3b request allocation exact and partial transport-owner aliases are
 
 test "CR3a-2c3b response allocation alias is rejected before destination write" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const child_marker = "MARU_SESSION_HOST_RESPONSE_ALIAS_EXEC";
+    const child_mode = c.getenv(child_marker) != null;
+    if (!child_mode) {
+        const allocator = std.testing.allocator;
+        const self_path_z = try std.process.executablePathAlloc(std.testing.io, allocator);
+        defer allocator.free(self_path_z);
+        try std.testing.expectEqual(@as(c_int, 0), setenv(child_marker, "1", 1));
+        defer _ = unsetenv(child_marker);
+        var stderr_pipe: [2]c.fd_t = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), c.pipe(&stderr_pipe));
+        defer _ = c.close(stderr_pipe[0]);
+        const child = c.fork();
+        try std.testing.expect(child >= 0);
+        if (child == 0) {
+            _ = c.close(stderr_pipe[0]);
+            if (c.dup2(stderr_pipe[1], 2) < 0) c._exit(126);
+            _ = c.close(stderr_pipe[1]);
+            const argv = [_:null]?[*:0]const u8{self_path_z.ptr};
+            _ = execv(self_path_z.ptr, &argv);
+            c._exit(127);
+        }
+        _ = c.close(stderr_pipe[1]);
+        const stderr_flags = c.fcntl(stderr_pipe[0], c.F.GETFL, @as(c_int, 0));
+        if (stderr_flags < 0 or c.fcntl(
+            stderr_pipe[0],
+            c.F.SETFL,
+            stderr_flags | @as(c_int, @bitCast(posix.O{ .NONBLOCK = true })),
+        ) < 0) return error.TestUnexpectedResult;
+        var stderr_output: [64 * 1024]u8 = undefined;
+        var stderr_total: usize = 0;
+        var status: c_int = 0;
+        var attempts: usize = 0;
+        while (attempts < 2_000) : (attempts += 1) {
+            if (stderr_total < stderr_output.len) {
+                const read_len = c.read(
+                    stderr_pipe[0],
+                    stderr_output[stderr_total..].ptr,
+                    stderr_output.len - stderr_total,
+                );
+                if (read_len > 0) stderr_total += @intCast(read_len);
+            }
+            const waited = c.waitpid(child, &status, c.W.NOHANG);
+            if (waited == child) break;
+            if (waited < 0 and posix.errno(waited) != .INTR)
+                return error.TestUnexpectedResult;
+            var delay_fd = c.pollfd{ .fd = -1, .events = 0, .revents = 0 };
+            _ = c.poll(@ptrCast(&delay_fd), 0, 1);
+        }
+        if (attempts == 2_000) {
+            _ = c.kill(child, c.SIG.KILL);
+            _ = c.waitpid(child, &status, 0);
+            return error.TestUnexpectedResult;
+        }
+        const wait_status: u32 = @bitCast(status);
+        try std.testing.expect(!c.W.IFEXITED(wait_status) or c.W.EXITSTATUS(wait_status) != 0);
+        if (stderr_total < stderr_output.len) {
+            const read_len = c.read(
+                stderr_pipe[0],
+                stderr_output[stderr_total..].ptr,
+                stderr_output.len - stderr_total,
+            );
+            if (read_len > 0) stderr_total += @intCast(read_len);
+        }
+        try std.testing.expect(stderr_total > 0);
+        try std.testing.expect(std.mem.indexOf(
+            u8,
+            stderr_output[0..stderr_total],
+            "response payload allocator returned a canonical owner alias",
+        ) != null);
+        try std.testing.expect(std.mem.indexOf(
+            u8,
+            stderr_output[0..stderr_total],
+            "FORGED_RESPONSE_ALIAS_FREED",
+        ) == null);
+        return;
+    }
     try client_slot_mod.ClientSlot.initializeProcessRuntime();
     const allocator = std.testing.allocator;
     const response_wire = try framing.encodeFrame(
@@ -2080,20 +2159,15 @@ test "CR3a-2c3b response allocation alias is rejected before destination write" 
         "{}",
     );
     defer allocator.free(response_wire);
-    const Peer = struct {
-        fn run(fd: c.fd_t, wire: []const u8) void {
-            defer _ = c.close(fd);
-            var request: [4096]u8 = undefined;
-            if (c.read(fd, &request, request.len) <= 0) return;
-            socket_server.writeAll(fd, wire) catch return;
-        }
-    };
     var fds: [2]c.fd_t = undefined;
     try std.testing.expectEqual(
         @as(c_int, 0),
         c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
     );
-    var peer = try std.Thread.spawn(.{}, Peer.run, .{ fds[1], response_wire });
+    // Prequeue the response so the post-fork fail-stop fixture has no helper thread whose runtime
+    // teardown could obscure whether the strict wrapper terminated.
+    try socket_server.writeAll(fds[1], response_wire);
+    defer _ = c.close(fds[1]);
     var client: client_mod.Client = .{
         .allocator = allocator,
         .fd = fds[0],
@@ -2109,7 +2183,6 @@ test "CR3a-2c3b response allocation alias is rejected before destination write" 
     const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, @intFromPtr(&transport));
     try mintInPlace(&transport, &slot, @intFromPtr(&transport), @sizeOf(GenerationTransport), reservation);
     var response: executed_response_mod.ExecutedResponse = .{};
-    const response_before = response;
     var hostile = OperationAliasAllocator{
         .parent = allocator,
         .target = std.mem.asBytes(&response),
@@ -2119,18 +2192,8 @@ test "CR3a-2c3b response allocation alias is rejected before destination write" 
     // Only response parsing is hostile.
     const receipt = try transport.prepareRequest(contract.RuntimeRequest.attachController());
     hostile.armed = true;
-    try std.testing.expectError(
-        error.ProtocolError,
-        transport.executePreparedRequest(receipt, &response),
-    );
-    slot.current.guarded_allocator.parent = allocator;
-    peer.join();
-    try std.testing.expect(hostile.alias_returned);
-    try std.testing.expect(!hostile.alias_freed);
-    try std.testing.expect(std.meta.eql(response_before, response));
-    try std.testing.expect(slot.logicalClient().unusable);
-    try terminalizeOwned(&transport, @intFromPtr(&transport));
-    try slot.abortAttachmentBinding(&binding, reservation);
+    _ = transport.executePreparedRequest(receipt, &response) catch {};
+    c._exit(0);
 }
 
 test "CR3a-2a pending flush callback invalidates response before request wire" {
@@ -2253,6 +2316,7 @@ test "CR3a-2c3b actual socket accepted response retains allocator captured befor
     var fds: [2]c.fd_t = undefined;
     try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
     var peer = try std.Thread.spawn(.{}, Peer.run, .{ fds[1], response_wire });
+    defer peer.join();
     var client: client_mod.Client = .{
         .allocator = probe.allocator(),
         .fd = fds[0],
@@ -2273,7 +2337,6 @@ test "CR3a-2c3b actual socket accepted response retains allocator captured befor
     var response: executed_response_mod.ExecutedResponse = .{};
     probe.armed = true;
     const result = try transport.executePreparedRequest(receipt, &response);
-    peer.join();
     try std.testing.expect(result == .accepted);
     try std.testing.expect(probe.mutated_after_preflight);
     try std.testing.expectEqual(
@@ -2287,6 +2350,84 @@ test "CR3a-2c3b actual socket accepted response retains allocator captured befor
     try std.testing.expect(probe.captured_payload_free_seen);
     probe.armed = false;
     client.allocator = probe.allocator();
+    try terminalizeOwned(&transport, @intFromPtr(&transport));
+    try slot.abortAttachmentBinding(&binding, reservation);
+}
+
+test "CR3a-2c3b actual socket retires OOB observation before exact target publication" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    const oob_wire = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .delta_chunk, .stream_id = 99 },
+        "oob-delta",
+    );
+    defer allocator.free(oob_wire);
+    const response_wire = try framing.encodeFrame(
+        allocator,
+        .{ .kind = .response, .request_id = 1 },
+        "{}",
+    );
+    defer allocator.free(response_wire);
+    const combined_wire = try std.mem.concat(allocator, u8, &.{ oob_wire, response_wire });
+    defer allocator.free(combined_wire);
+    const Peer = struct {
+        fn run(fd: c.fd_t, wire: []const u8) void {
+            defer _ = c.close(fd);
+            var request: [4096]u8 = undefined;
+            if (c.read(fd, &request, request.len) <= 0) return;
+            socket_server.writeAll(fd, wire) catch return;
+        }
+    };
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
+    );
+    var peer = try std.Thread.spawn(.{}, Peer.run, .{ fds[1], combined_wire });
+    defer peer.join();
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 0x2C3B0B,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    var slot: client_slot_mod.ClientSlot = undefined;
+    try client_slot_mod.ClientSlot.initInPlace(&slot, allocator, &client, 0x2C3B0B);
+    defer slot.deinit();
+    var binding: contract.PreparedAttachmentBinding = .{};
+    var lease: @import("connection_lease.zig").ConnectionLease = .{};
+    var transport: GenerationTransport = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(
+        &binding,
+        &lease,
+        @intFromPtr(&transport),
+    );
+    try mintInPlace(
+        &transport,
+        &slot,
+        @intFromPtr(&transport),
+        @sizeOf(GenerationTransport),
+        reservation,
+    );
+    const receipt = try transport.prepareRequest(contract.RuntimeRequest.attachController());
+    var response: executed_response_mod.ExecutedResponse = .{};
+    const result = try transport.executePreparedRequest(receipt, &response);
+    try std.testing.expect(result == .accepted);
+    try std.testing.expectEqual(@as(usize, 1), slot.logicalClient().pending_stream.items.len);
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        slot.logicalClient().pending_stream.items[0].payload_observation_generation,
+    );
+    try std.testing.expectEqualStrings(
+        "oob-delta",
+        slot.logicalClient().pending_stream.items[0].payload,
+    );
+    try std.testing.expectEqual(
+        executed_response_mod.DeinitOutcome.cleaned,
+        response.deinit(try slot.responseOwnerSeal(reservation)),
+    );
     try terminalizeOwned(&transport, @intFromPtr(&transport));
     try slot.abortAttachmentBinding(&binding, reservation);
 }
@@ -2393,6 +2534,7 @@ const OperationAliasAllocator = struct {
         const self: *@This() = @ptrCast(@alignCast(ctx));
         if (@intFromPtr(memory.ptr) == @intFromPtr(self.target.ptr)) {
             self.alias_freed = true;
+            _ = c.write(2, "FORGED_RESPONSE_ALIAS_FREED\n", "FORGED_RESPONSE_ALIAS_FREED\n".len);
             return;
         }
         self.parent.vtable.free(self.parent.ptr, memory, alignment, ret_addr);

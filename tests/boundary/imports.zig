@@ -359,6 +359,7 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .name = "abortPreparedBlockingRpcStorageCanonical", .receiver_type = mutable, .class = .guarded },
         .{ .name = "preflightPreparedBlockingRpcStorageExecution", .receiver_type = mutable, .class = .guarded },
         .{ .name = "executePreparedBlockingRpcStorageWithAllocator", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "executePreparedBlockingRpcStorageWithAllocatorObserved", .receiver_type = mutable, .class = .guarded },
         .{ .name = "preparedBlockingRpcStorageMatches", .receiver_type = immutable, .class = .guarded },
         .{ .name = "refreshBufferedAuthorityEvidence", .receiver_type = mutable, .class = .guarded },
         .{ .name = "runtimeInventory", .receiver_type = mutable, .class = .guarded },
@@ -461,7 +462,8 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .receiver = "abortPreparedBlockingRpcStorage", .funnel = "abortPreparedBlockingRpcStorage", .gate = "beginPublicMutation" },
         .{ .receiver = "abortPreparedBlockingRpcStorageCanonical", .funnel = "abortPreparedBlockingRpcStorageCanonical", .gate = "beginPublicMutation" },
         .{ .receiver = "preflightPreparedBlockingRpcStorageExecution", .funnel = "preflightPreparedBlockingRpcStorageExecution", .gate = "ensureUsable" },
-        .{ .receiver = "executePreparedBlockingRpcStorageWithAllocator", .funnel = "executePreparedBlockingRpcStorageWithAllocator", .gate = "beginPublicMutation" },
+        .{ .receiver = "executePreparedBlockingRpcStorageWithAllocator", .funnel = "executePreparedBlockingRpcStorageWithAllocatorInternal", .gate = "beginPublicMutation" },
+        .{ .receiver = "executePreparedBlockingRpcStorageWithAllocatorObserved", .funnel = "executePreparedBlockingRpcStorageWithAllocatorInternal", .gate = "beginPublicMutation" },
         .{ .receiver = "preparedBlockingRpcStorageMatches", .funnel = "preparedBlockingRpcStorageMatches", .gate = "beginPublicMutation" },
         .{ .receiver = "refreshBufferedAuthorityEvidence", .funnel = "refreshBufferedAuthorityEvidence", .gate = "requireBlockingMode" },
         .{ .receiver = "runtimeInventory", .funnel = "runtimeInventory", .gate = "requireBlockingMode" },
@@ -1176,6 +1178,12 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "ended_purge_quarantine" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "prepared_request_authority" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "executed_response_mod" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "ObservedPreparedBlockingRpcExecutionError" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "ObservedPreparedBlockingRpcExecution" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "executePreparedBlockingRpcStorageWithAllocatorObserved" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "executePreparedBlockingRpcStorageWithAllocatorInternal" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "discardFramePayloadObservation" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "readFrameWithAllocatorObserved" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "preparedLifecycleRawValid" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "preparedDescriptor" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "preparedDescriptorRawMatches" },
@@ -1311,7 +1319,10 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "terminalizeExecutingRequestWithStorageCleanup" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "responseDestinationValid" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "responseOwnerStillPristine" },
-                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "payloadAliasesExecutionOwners" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "response_payload_allocation" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "ResponsePayloadObserverBridge" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "failStopResponsePayloadProvenance" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "failStopResponsePayloadTransfer" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "byteRangesOverlap" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "issueGenerationResponseIncarnation" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "ScopeTokenAliasAllocator" },
@@ -1578,7 +1589,7 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
         .{ .name = "prepareBlockingRpc", .markers = &.{"requireBlockingMode"} },
         .{ .name = "abortPreparedBlockingRpcStorage", .markers = &.{ "beginPublicMutation", "checkedAllocatorReentry" } },
         .{ .name = "preflightPreparedBlockingRpcStorageExecution", .markers = &.{"ensureUsable"} },
-        .{ .name = "executePreparedBlockingRpcStorageWithAllocator", .markers = &.{ "beginPublicMutation", "checkedAllocatorReentry" } },
+        .{ .name = "executePreparedBlockingRpcStorageWithAllocatorInternal", .markers = &.{ "beginPublicMutation", "checkedAllocatorReentry" } },
     };
     for (client_fence_first) |contract_entry|
         try expectContainerMethodMarkersInOrder(
@@ -1967,6 +1978,235 @@ test "CR3a-2c3b capability projection and shared RemoteRuntime raw-read baseline
         countOccurrences(runtime_product, "compatibility_profile.attach_schema"),
     );
     try std.testing.expectEqual(@as(usize, 0), countOccurrences(runtime_product, ".capabilities()"));
+}
+
+test "CR3a-2c3b B3-0a response provenance has one strict production path" {
+    const allocator = std.testing.allocator;
+    const slot_source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/client_slot.zig",
+    );
+    defer allocator.free(slot_source);
+    const client_source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/client.zig",
+    );
+    defer allocator.free(client_source);
+    const framing_source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/framing.zig",
+    );
+    defer allocator.free(framing_source);
+    const ledger_source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/response_payload_allocation.zig",
+    );
+    defer allocator.free(ledger_source);
+    const response_source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/executed_response.zig",
+    );
+    defer allocator.free(response_source);
+    const attachment_source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/generation_attachment.zig",
+    );
+    defer allocator.free(attachment_source);
+    // These exact seam names have no test-only callsites; whole-file counting makes any future
+    // bypass explicit even in fixtures instead of relying on declaration order.
+    const slot_product = slot_source;
+    const client_product = client_source;
+    const framing_product = framing_source;
+    const ledger_product = ledger_source;
+    const limits_source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/client_queue_limits.zig",
+    );
+    defer allocator.free(limits_source);
+
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(limits_source, "pub const max_observed_response_payloads: usize = 1;"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(ledger_product, "entry_storage: [max_entries]Entry"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(
+            ledger_product,
+            "pub const max_entries: usize = client_queue_limits.max_observed_response_payloads;",
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        countOccurrences(ledger_product, "allocator.alloc(Entry"),
+    );
+
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(slot_product, ".executePreparedBlockingRpcStorageWithAllocatorObserved("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(client_product, ".nextWithPayloadObserver("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(slot_product, ".classifyResponsePayloadProvenance("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(slot_product, ".transferPromotedResponse("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        countIdentifierOutsideTopLevelTests(slot_product, "fail_stop_required"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        countIdentifierOutsideTopLevelTests(slot_product, "failStopResponsePayloadProvenance"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        countIdentifierOutsideTopLevelTests(slot_product, "failStopResponsePayloadTransfer"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        countOccurrences(slot_product, ") noreturn {"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(
+            slot_product,
+            "const payload_receipt = switch (payload_ledger.classifyResponsePayloadProvenance(",
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(
+            slot_product,
+            "switch (payload_ledger.transferPromotedResponse(",
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(ledger_product, ".initAcceptedFromPromotedInPlace("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countIdentifierOutsideTopLevelTests(
+            response_source,
+            "initAcceptedFromPromotedInPlace",
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countIdentifierOutsideTopLevelTests(
+            ledger_source,
+            "initAcceptedFromPromotedInPlace",
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        countIdentifierOutsideTopLevelTests(
+            attachment_source,
+            "initAcceptedFromPromotedInPlace",
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), countOccurrences(slot_product, ".promoteObserved("));
+    try std.testing.expectEqual(@as(usize, 0), countOccurrences(ledger_product, "promoteExact"));
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(framing_product, "pub fn nextWithPayloadObserver("),
+    );
+
+    // The raw publisher and ledger transitions are source-closed across the complete production
+    // tree, including the sibling barrel and future files outside this directory.
+    var dir = try std.Io.Dir.cwd().openDir(
+        std.testing.io,
+        "src",
+        .{ .iterate = true },
+    );
+    defer dir.close(std.testing.io);
+    var walker = try dir.walk(allocator);
+    defer walker.deinit();
+    while (try walker.next(std.testing.io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig")) continue;
+        const path = try std.fmt.allocPrint(
+            allocator,
+            "src/{s}",
+            .{entry.path},
+        );
+        defer allocator.free(path);
+        const source = try readZigFileZ(allocator, path);
+        defer allocator.free(source);
+        const is_response = std.mem.endsWith(
+            u8,
+            entry.path,
+            "platform/macos/session_host/executed_response.zig",
+        );
+        const is_ledger = std.mem.endsWith(
+            u8,
+            entry.path,
+            "platform/macos/session_host/response_payload_allocation.zig",
+        );
+        const is_slot = std.mem.endsWith(
+            u8,
+            entry.path,
+            "platform/macos/session_host/client_slot.zig",
+        );
+        const is_client = std.mem.endsWith(
+            u8,
+            entry.path,
+            "platform/macos/session_host/client.zig",
+        );
+        const is_framing = std.mem.endsWith(
+            u8,
+            entry.path,
+            "platform/macos/session_host/framing.zig",
+        );
+        try std.testing.expectEqual(
+            @as(usize, @intFromBool(is_response)) + @as(usize, @intFromBool(is_ledger)),
+            countIdentifierOutsideTopLevelTests(source, "initAcceptedFromPromotedInPlace"),
+        );
+        try std.testing.expectEqual(
+            @as(usize, @intFromBool(is_ledger)) + @as(usize, @intFromBool(is_slot)),
+            countIdentifierOutsideTopLevelTests(source, "classifyResponsePayloadProvenance"),
+        );
+        try std.testing.expectEqual(
+            @as(usize, @intFromBool(is_ledger)) + @as(usize, @intFromBool(is_slot)),
+            countIdentifierOutsideTopLevelTests(source, "transferPromotedResponse"),
+        );
+        try std.testing.expectEqual(
+            @as(usize, @intFromBool(is_ledger)) +
+                3 * @as(usize, @intFromBool(is_slot)),
+            countIdentifierOutsideTopLevelTests(source, "releasePromotedResponse"),
+        );
+        inline for (.{
+            "bindForbiddenRanges",
+            "reserveObserved",
+            "commitObserved",
+            "abortObserved",
+            "discardObserved",
+        }) |name| {
+            try std.testing.expectEqual(
+                @as(usize, @intFromBool(is_ledger)) + @as(usize, @intFromBool(is_slot)),
+                countIdentifierOutsideTopLevelTests(source, name),
+            );
+        }
+        if (!is_ledger and !is_slot)
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                countIdentifierOutsideTopLevelTests(source, "PayloadProvenanceOutcome"),
+            );
+        if (!is_framing and !is_client and !is_slot)
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                countIdentifierOutsideTopLevelTests(source, "payload_observation_generation"),
+            );
+    }
 }
 
 test "external pump acquires storage claim before reading owned Client" {

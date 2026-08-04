@@ -1127,27 +1127,40 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
 
    safe-free 권위는 allocator equality나 caller의 `ptr/len`만으로 추론하지 않는다. B3-0a는 framing의 private
    `PayloadAllocationObserver`를 RPC read에만 전달한다. parser buffer·pending descriptor backing과 temporary allocation은 기존
-   `GenerationGuardedAllocator`/Client ownership을 그대로 쓰고 observer 대상이 아니다. observer는 완성 frame payload `dupe` 직전에
-   `ResponseOperationAllocationLedger.reservePayload(len,allocator)`를 호출하고, 성공한 payload alloc 뒤
-   `commitPayload(reservation,ptr,len,allocator)`를 호출하며 alloc 실패는 `abortPayload(reservation)`으로 되돌린다. frame의 실제 durable
+   `GenerationGuardedAllocator`/Client ownership을 그대로 쓰고 observer 대상이 아니다. ledger는 첫 reserve 전에 slot/node/Client/
+   response/owner seal/binding/prepared storage/transport/outer owner/allocator scope/ledger 자체의 bounded forbidden-range inventory를
+   scalar로 봉인한다. observer는 완성 frame payload `dupe` 직전에
+   `Ledger.reserveObserved(len,allocator)->generation`을 호출하고, 성공한 payload alloc 뒤
+   `commitObserved(generation,payload:[]u8,allocator)`를 호출하며 alloc 실패는 `abortObserved(generation)`으로 되돌린다. generation은
+   operation-local ledger의 exact live entry 하나만 식별하며 ledger 주소·index·allocator 권위는 Frame에 싣지 않는다. frame의 실제 durable
    owner allocator는 수명이 긴 기존 guarded allocator로 보고하므로 OOB frame은 operation 뒤에도 기존 Client queue가 정상 deinit한다.
 
-   ledger는 operation guard마다 ClientNode가 캡처한 authority allocator로 소유하는 동적 backing이다. operation/reentry latch를 먼저
-   게시한 뒤에만 grow하며 새 backing 전체가 slot/node/Client/source/operation owner와 disjoint인지 scalar range로 검증한 뒤 publish한다.
-   grow 실패·alias는 payload parent alloc 전 mutation 0의 OOM 또는 fail-stop이고, old exact backing만 새 backing publish 뒤 free한다.
-   ledger backing allocator callback의 same/sibling Client·prepare/execute/drop/deinit 재진입은 기존 callback gate에서 Busy다.
+   ledger entry는 operation-local `Ledger` 안의 **단일 in-place 고정 슬롯**이다. framing parser는 한 번에 완성 payload 하나만
+   `reserve→alloc→commit→분류`하고, OOB는 다음 `readFrame` 전에 반드시 `discardObserved`되어 같은 슬롯을 새 monotonic generation으로
+   재사용한다. 따라서 동시에 live/reserved payload가 둘 이상인 상태는 protocol/owner drift이며 parent payload alloc 전에 fail-stop한다.
+   ledger entry backing의 heap allocate/grow/remap/free는 0이고 payload allocator callback 뒤 callback-reachable heap ledger를 다시
+   dereference하는 경로도 0이다. callback 전후에는 in-place ledger scalar와 entry semantic seal만 검증한다. 이 구조는 descriptor를
+   유지한 채 ledger heap backing만 해제·재사용하는 hostile callback의 UAF 가능성을 구조적으로 제거한다.
    generation과 entry capacity는 payload parent alloc **전에 함께 reserve**하고 parent alloc 실패 시 entry는 idle로 되돌리되 generation은
-   burn한다. 따라서 성공 allocation 뒤 generation wrap이 생기지 않는다. exact cap은 Client의 동시에 허용되는 pending batch 4,096 +
-   stream 4,096 + event 1,024 + target response 1인 payload 9,217 entries다. cap/OOM은 parent alloc 전 거부한다.
-   `AllocationEntry={allocator ptr/vtable,exact ptr/len,generation,lifecycle}`이고 lifecycle exact set은
-   `reserved|live|promoted_response|transferred_response|retired`다. observed frame payload는 immutable exact slice라 resize/remap API가
+   burn한다. 따라서 성공 allocation 뒤 generation wrap이 생기지 않는다. exact concurrent observed-payload cap은 1이며 누적 OOB 수나
+   Client durable queue cap과 무관하다. 두 번째 동시 reserve는 parent alloc 전 거부한다.
+   `AllocationEntry={allocator ptr/vtable,exact ptr/len,generation,lifecycle,terminal_reason?}`이고 lifecycle exact set은
+   `reserved|live|promoted_response|transferred_response|retired|terminal_no_free`다. 마지막 상태는 closed
+   `PayloadFailStopReason`과 함께 safe-retired와 구별되는 absorbing evidence이며 정상 `endOperation`이 허용하지 않는다.
+   observed frame payload는 immutable exact slice라 resize/remap API가
    없고 0회다. 기존 parser/pending backing resize/remap은 payload ledger 밖의 기존 guarded allocator 경로를 그대로 따른다.
-   operation 중 observed payload exact free는 matching live entry를 먼저 retired로 게시한 뒤 durable owner allocator free를 호출한다.
+   observer generation은 private `Frame` provenance에 함께 실린다. OOB kind 분류가 확정되면 queue admission·free callback 전에
+   `discardObserved(generation)`이 exact `live->retired`를 게시하고 operation-local token을 버린다. correlation/deadline 거부도 payload free 전에
+   같은 전이를 수행한다. retired slot은 새 monotonic generation으로
+   재사용하므로 한 RPC에서 OOB가 몇 개 누적되어도 ledger slot은 하나다. 기존 Client queue/free owner는 유지하며 target response만 Frame에서
+   generation을 payload와 함께 move한다. 따라서 allocator가 operation 중 OOB 주소를 free·재사용해도 generation 없이 `ptr/len`만
+   선형 검색해 target으로 승격하는 경로는 0이다. queue 거부/append OOM, correlation 거부와 deadline 폐기의 실제 free는 기존
+   Client owner 경로를 그대로 쓰며 죽은 operation ledger로 callback하지 않는다.
 
-   `promoteResponseAllocation(payload,allocator) PromoteError!ResponsePayloadAllocationReceipt`는 Client가 correlation을 확인해 반환한
-   target payload의 exact live entry 하나만 `live->promoted_response`로 CAS하고, receipt에
+   private `classifyResponsePayloadProvenance(generation,payload,allocator,expected_allocator)`는 Client가 correlation을
+   확인해 payload와 함께 반환한 exact generation의 live entry 하나를 sealed forbidden inventory로 분류해 `live->promoted_response`로 옮기고, `Receipt`에
    `{guard/node/operation incarnation,allocator ptr/vtable,exact ptr/len,generation,lifecycle=promoted}`을 봉인한다.
-   `releasePromotedResponse(receipt) ReleaseError!void`는 publication 전 exact-safe failure만
+   `releasePromotedResponse(receipt) Error!void`는 publication 전 exact-safe failure만
    `promoted_response->retired` 뒤 free한다. `transferPromotedResponse(receipt,out:*ExecutedResponse,
    owner_seal:*contract.ExecutedResponseOwnerSeal,incarnation:u64,correlated:contract.CorrelatedExecutedCall) TransferOutcome`은
    `union(enum){transferred,rejected_safe_released:executed_response.InitError,
@@ -1155,14 +1168,13 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    once `promoted_response->retired`+free한 뒤 `rejected_safe_released`를 반환한다. destination/owner/receipt가 drift했거나 init이 partial
    publication을 남기면 no-free terminal evidence의 `fail_stop_required`이며 promoted residue의 유일한 소비자는 strict wrapper다.
    successful in-place response publication은 `transferred`와 함께 `promoted_response->transferred_response`로 옮겨 response transcript/owner seal에 receipt
-   generation을 포함한다. `endOperationGuard`는 promoted residue 0을 요구한 뒤 ledger backing만 회수한다. OOB allocation의 live
-   entry는 guard 종료 때 tracking에서 버리되 실제 payload ownership은 기존 Client queue에 그대로 있고, 이후 queue deinit은 response
+   generation을 포함한다. `endOperation`은 promoted residue와 terminal-no-free evidence 0을 요구한 뒤 in-place ledger 전체를 tombstone/reset한다. OOB allocation의
+   entry는 OOB handoff/free 직후 retired slot으로 반환되며 실제 payload ownership은 기존 Client queue에 그대로 있고, 이후 queue deinit은 response
    receipt를 소비하지 않는다. target 뒤 추가 observed payload allocation과 OOB의 전후 free는 exact ptr/len/generation이
    다르므로 promote할 수 없다. mismatch, generation wrap, overflow, retired entry와 owner overlap은 payload read/hash/free 0이다.
-   zero-length payload는 parent alloc/free가 없는 별도 `zero_length` receipt variant이며 nonzero extent 권위로 재사용하지 않는다.
-   `PromoteError=error{InvalidProvenance,IdentityExhausted,ProtocolError}`,
-   `ReleaseError=error{InvalidProvenance,ProtocolError}`다. private
-   `PayloadProvenanceOutcome=union(enum){promoted:ResponsePayloadAllocationReceipt,
+   zero-length payload는 같은 `Receipt`의 `zero_length=true`로 표현하며 parent alloc/free 없이 nonzero extent 권위로 재사용하지 않는다.
+   component 내부 error set은 `Error` 하나로 닫고 bridge/facade 경계에서 공개 실행 오류로 정규화한다. private
+   `PayloadProvenanceOutcome=union(enum){promoted:Receipt,
    fail_stop_required:PayloadFailStopReason}`이고 `PayloadFailStopReason=enum{allocator_drift,range_overflow,owner_alias,ledger_drift}`다.
    `client_slot.executeGenerationRequest`만 이 outcome의 production consumer다. 이 기존-signature strict facade는 `.promoted`만
    publication/release helper에 넘기고 `fail_stop_required`는 반환·저장하지 않고 same-stack `@panic`으로 종료한다. component helper

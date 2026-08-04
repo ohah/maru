@@ -14,6 +14,7 @@
 //!   = 4 + 2 + 2 + 4 + 8 + 8 + 4 = 32.
 
 const std = @import("std");
+const client_queue_limits = @import("client_queue_limits.zig");
 
 /// wire 식별 magic. 첫 4바이트가 이것이 아니면 이 connection은 MRSH가 아니다(control-plane socket 혼선 방지).
 pub const magic = [4]u8{ 'M', 'R', 'S', 'H' };
@@ -45,7 +46,8 @@ pub const max_scrollback_page: usize = 1024 * 1024;
 pub const max_client_queue: usize = 8 * 1024 * 1024;
 /// Complete screen inbox across demux/pending RPC paths; mirrors one server connection slot.
 pub const max_client_screen_inbox: usize = 18 * 1024 * 1024;
-pub const max_client_screen_items: usize = 4096;
+pub const max_client_screen_items: usize = client_queue_limits.max_screen_items;
+pub const max_client_pending_events: usize = client_queue_limits.max_pending_events;
 
 /// frame 종류(§10 표). `enum(u16)`에 `_`를 둬 **open enum**으로 만든다 — 모르는 값도 decode되어 상위가
 /// required/optional flag로 처리를 가른다(모르는 required는 protocol error, optional은 skip). 값은 wire 약속이라 고정.

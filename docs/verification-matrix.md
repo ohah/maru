@@ -977,10 +977,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   B3-3 progress/execute → B3-4/5 atomic publish+borrow/finish → B3-6 aggregate exposure`다. B3-0은 current attach exit decision table의
   result/error, backing/authority settlement, 최초 poison, response lifecycle/bytes와 allocation/free count를 differential
   characterization하고 public declaration/callsite/frame/registry-layout delta 0을 source oracle로 고정한다. B3-0a는 operation-scoped
-  9,217-entry payload allocation ledger와 private framing observer의 0/1/64/cap/cap+1, OOB→target promotion, observer 밖 parser/pending
-  backing resize/remap parity, target 전후 OOB free, ledger backing grow OOM/alias/reentry, pre-parent generation max/wrap,
-  zero-length, wrong-generation promote의 read/hash/free 0과
-  alias·overflow·allocator drift no-free를 검증한다. private component의 `fail_stop_required`는 exact production consumer
+  framing의 단일 outstanding payload 상태기계에서 산출한 in-place 1-entry payload allocation ledger와 private observer의 0/1/64/누적 cap 초과, Darwin
+  socketpair의 OOB→target accepted 왕복, OOB immediate `live->retired` slot reuse 뒤 Frame generation 기반 target promotion, observer 밖 parser/pending
+  backing resize/remap parity, target 전후 OOB free, ledger heap backing allocate/grow/free 0, pre-parent generation max/wrap,
+  zero-length, ptr/len scan 0, wrong-generation promote의 read/hash/free 0과
+  alias·overflow·allocator drift no-free와 free callback 뒤 ledger descriptor scalar-first 검증을 검증한다. private component의 `fail_stop_required`는 exact production consumer
   `client_slot.executeGenerationRequest` 밖 callsite/return/store 0이고 subprocess abnormal exit여야 한다. B3-0은
   `PreparedExecutionTxn` in-place init, phase×method, copy/move/duplicate와 decision table 각 행의 storage/authority/poison/free를
   Debug·ReleaseFast production type으로 전수한다. B3-1은 pure leaf/production-type unit, B3-2는 exhaustive classifier,

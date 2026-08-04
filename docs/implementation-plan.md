@@ -1067,9 +1067,11 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
 
    1. **B3-0a attach ambiguous-free remediation:** 현재 attach accepted tail의 exact-owned safe-free와 owner/allocator/range가
       불명확한 no-free를 먼저 분리한다. alias·overflow·allocator drift는 forged payload를 read/hash/free하지 않고 terminal evidence를
-      `client_slot.executeGenerationRequest` production strict wrapper가 즉시 fail-stop으로 소비한다. operation-scoped 9,217-entry
-      payload allocation ledger의 exact target promotion, OOB 1/64/cap, observer 밖 parser/pending backing resize/remap parity,
-      zero-length와 generation wrap을 함께 닫는다.
+      `client_slot.executeGenerationRequest` production strict wrapper가 즉시 fail-stop으로 소비한다. operation-scoped 단일 in-place
+      payload allocation slot의 Frame generation 기반 exact target promotion(ptr/len scan 0), OOB 1/64/누적 cap 초과와 immediate retired-slot
+      reuse, observer 밖 parser/pending backing resize/remap parity, ledger heap backing allocate/grow/free 0과 callback 전후 in-place semantic seal,
+      sealed forbidden inventory 기반 payload disjoint 검증, zero-length와
+      generation wrap을 함께 닫는다.
    2. **B3-0 attach execution transaction seam:** request backing과 `PreparedRequestAuthority`만 함께 정산하는 private final-address
       `PreparedExecutionTxn`의 상태·결정표를 characterization gate로 고정한 뒤 현재 attach-only 실행을 이 owner로 옮긴다. attach
       response owner·payload와 미래 RPC authority는 transaction에 넣지 않는다. 공개 signature, registry layout, frame schema와 정상

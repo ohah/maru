@@ -2133,12 +2133,6 @@ const PointerGestureOwner = union(enum) {
     dock_outer_divider: struct { offset_px: f64 },
     sidebar_divider: struct { start_pt: u32 },
     scrollbar: struct { grab: f32 },
-    file_tree_scrollbar: struct {
-        geometry: file_tree_scrollbar.Geometry,
-        grab_y: f32,
-        root_generation: u64,
-        projection_generation: u64,
-    },
     address_selection,
 };
 const file_tree_trash_capacity: usize = 16;
@@ -3385,6 +3379,19 @@ pub const AppSession = struct {
     // move는 좌표를 덮어쓰기만 하고 tick이 최종 하나를 적용한다(계약 §4.3). clamp 결과가 같으면
     // effect 자체가 없다 — 경계에 닿은 채 미는 동안 resize 팬아웃이 반복되지 않는다.
     divider_coalescer: chrome.ui.continuous_drag.Coalescer(f32) = .{},
+    // file tree scrollbar thumb의 capture 수명 — CIM3. 옛 `PointerGestureOwner.file_tree_scrollbar`를
+    // 대체한다. divider와 같은 구조이며, 아래 세 필드가 down 시점 스냅샷이다.
+    scrollbar_interaction: chrome.ui.interaction.InteractionState = .{},
+    scrollbar_entry_scratch: [2]chrome.ui.tree.RectEntry = undefined,
+    scrollbar_snapshot_generation: u64 = 0,
+    scrollbar_capture: ?struct {
+        geometry: file_tree_scrollbar.Geometry,
+        grab_y: f32,
+        root_generation: u64,
+        projection_generation: u64,
+    } = null,
+    // move는 좌표만 모으고 tick이 최종 하나를 적용한다(계약 §4.3). 같은 행으로 clamp되면 무동작.
+    scrollbar_coalescer: chrome.ui.continuous_drag.Coalescer(usize) = .{},
     // AppKit E2E 전용 계측 — 이 drag에서 흡수한 move 수와 실제로 resize를 팬아웃한 횟수. 계약 §4.3의
     // "상한은 move 수가 아니라 tick 수와 실제 geometry 변화"를 제품 경로에서 증명하려면 그 둘이
     // **달라야** 하고, headless fixture는 ratio 값만 보므로 이 비교를 못 한다.
@@ -4431,6 +4438,7 @@ pub const AppSession = struct {
         // divider capture는 이제 다른 축(`divider_interaction`)이라 union을 비우는 것만으로 끝나지
         // 않는다. 두 capture 권위가 같은 stream에 공존하면 §4.3의 "한 stream에 owner 하나"가 깨진다.
         self.endDividerCapture();
+        self.endScrollbarCapture();
         self.metal_dirty = true;
     }
 
@@ -5678,6 +5686,7 @@ pub const AppSession = struct {
             .dropped => |update| {
                 self.divider_coalescer.absorb(update.x_px, update.y_px);
                 self.applyPendingDividerResize();
+                self.applyPendingScrollbarScroll();
                 self.endDividerCapture();
             },
             .cancelled => self.endDividerCapture(),
@@ -13950,7 +13959,7 @@ pub const AppSession = struct {
         if (self.file_tree_projection_generation == 0) self.file_tree_projection_generation = 1;
         self.file_tree_scrollbar_geometry = null;
         self.file_tree_scrollbar_hovered = false;
-        if (self.pointerGestureIs(.file_tree_scrollbar)) self.cancelPointerGesture();
+        if (self.scrollbarCaptureActive()) self.endScrollbarCapture();
     }
 
     fn computeFileTreeScrollbarGeometry(self: *const AppSession) ?file_tree_scrollbar.Geometry {
@@ -13989,6 +13998,110 @@ pub const AppSession = struct {
         self.metal_dirty = true;
     }
 
+    /// scrollbar를 capture가 볼 수 있는 tree로 다시 발행한다. thumb이 스크롤에 따라 움직이므로 매
+    /// move마다 재발행하고 세대를 올린다 — capture를 넘길지는 §5 carry verdict가 판정한다.
+    fn publishScrollbarTree(self: *AppSession) ?chrome.ui.tree.UiRectTree {
+        const geometry = self.fileTreeScrollbarGeometry() orelse return null;
+        self.scrollbar_snapshot_generation +|= 1;
+        return file_tree_scrollbar.publish(
+            geometry,
+            self.scrollbar_snapshot_generation,
+            &self.scrollbar_entry_scratch,
+        ) catch null;
+    }
+
+    fn scrollbarCaptureActive(self: *const AppSession) bool {
+        return self.scrollbar_interaction.capture != null;
+    }
+
+    fn endScrollbarCapture(self: *AppSession) void {
+        self.scrollbar_interaction.capture = null;
+        self.scrollbar_capture = null;
+        self.scrollbar_coalescer.reset();
+    }
+
+    /// capture가 살아 있는 동안의 move/up. 소비했으면 true.
+    fn routeScrollbarCapture(self: *AppSession, kind: i32, y_px: f64) bool {
+        const drag = self.scrollbar_capture orelse return false;
+        if (self.file_tree_perf_counters) |counters| counters.pointer_events += 1;
+
+        const key = chrome.ui.interaction.GestureCompatibility{
+            .kind = file_tree_scrollbar.drag_payload,
+            .enabled = true,
+            .owner_epoch = drag.root_generation,
+            .domain_identity = drag.projection_generation,
+        };
+        const current_key = chrome.ui.interaction.GestureCompatibility{
+            .kind = file_tree_scrollbar.drag_payload,
+            .enabled = true,
+            .owner_epoch = self.file_tree.rootGeneration(),
+            .domain_identity = self.file_tree_projection_generation,
+        };
+
+        const snapshot = self.publishScrollbarTree() orelse {
+            self.endScrollbarCapture();
+            return true;
+        };
+        _ = chrome.ui.interaction.reconcileCarryingCapture(
+            &self.scrollbar_interaction,
+            snapshot,
+            key,
+            current_key,
+        ) catch {
+            self.endScrollbarCapture();
+            return true;
+        };
+        if (self.scrollbar_interaction.capture == null) {
+            self.endScrollbarCapture();
+            return true;
+        }
+
+        // key가 같아도 track/thumb **기하**가 달라졌으면 down 시점 기하로 계산한 스크롤이 손가락과
+        // 어긋난다. carry key는 host가 주입한 값의 동등성만 보므로 이 축은 여기서 domain이 지킨다
+        // (계약 §5의 "up effect는 live domain validation을 다시 통과한다"와 같은 자리다).
+        const live = self.fileTreeScrollbarGeometry() orelse {
+            self.endScrollbarCapture();
+            return true;
+        };
+        if (!drag.geometry.sameSnapshot(live)) {
+            self.endScrollbarCapture();
+            return true;
+        }
+
+        const dispatched = chrome.ui.interaction.dispatch(&self.scrollbar_interaction, snapshot, .{
+            .phase = if (kind == 2) .move else .up,
+            .x_px = @as(f64, drag.geometry.track_x) + @as(f64, drag.geometry.track_w) / 2,
+            .y_px = y_px,
+            .timestamp_ns = 0,
+            .button = .left,
+            .generation = snapshot.generation,
+        }) catch {
+            self.endScrollbarCapture();
+            return true;
+        };
+        if (dispatched.drag) |event| switch (event) {
+            .began, .moved => |update| self.scrollbar_coalescer.absorb(update.x_px, update.y_px),
+            .dropped => |update| {
+                self.scrollbar_coalescer.absorb(update.x_px, update.y_px);
+                self.applyPendingScrollbarScroll();
+                self.endScrollbarCapture();
+            },
+            .cancelled => self.endScrollbarCapture(),
+        };
+        if (kind == 3) self.endScrollbarCapture();
+        return true;
+    }
+
+    /// tick이 부르는 소비 지점. move가 몇 번 왔든 최종 좌표 하나만 적용하고, 같은 행으로 clamp되면
+    /// 재투영하지 않는다.
+    fn applyPendingScrollbarScroll(self: *AppSession) void {
+        const point = self.scrollbar_coalescer.take() orelse return;
+        const drag = self.scrollbar_capture orelse return;
+        const rows = file_tree_scrollbar.scrollForPointer(drag.geometry, point.y_px, drag.grab_y);
+        if (!self.scrollbar_coalescer.commitIfChanged(rows)) return;
+        self.setFileTreeScrollRows(rows);
+    }
+
     fn beginFileTreeScrollbarGesture(self: *AppSession, x_px: f64, y_px: f64) bool {
         const geometry = self.fileTreeScrollbarGeometry() orelse return false;
         if (!geometry.trackContains(x_px, y_px)) return false;
@@ -13996,39 +14109,28 @@ pub const AppSession = struct {
         const grab_y = if (on_thumb) @as(f32, @floatCast(y_px)) - geometry.thumb_y else geometry.thumb_h / 2;
         if (!on_thumb) self.setFileTreeScrollRows(file_tree_scrollbar.scrollForTrackClick(geometry, y_px));
         const current = self.fileTreeScrollbarGeometry() orelse return false;
-        self.beginPointerGesture(.{ .file_tree_scrollbar = .{
+        const snapshot = self.publishScrollbarTree() orelse return false;
+        _ = chrome.ui.interaction.dispatch(&self.scrollbar_interaction, snapshot, .{
+            .phase = .down,
+            .x_px = x_px,
+            .y_px = y_px,
+            .timestamp_ns = 0,
+            .generation = snapshot.generation,
+        }) catch return false;
+        if (self.scrollbar_interaction.capture == null) return false;
+        // 옛 경로는 `beginPointerGesture`가 앞선 gesture를 취소했다. 축이 갈렸어도 규율은 같다.
+        self.clearSidebarDragPreview();
+        self.pointer_gesture_owner = .none;
+        self.scrollbar_capture = .{
             .geometry = current,
             .grab_y = grab_y,
             .root_generation = self.file_tree.rootGeneration(),
             .projection_generation = self.file_tree_projection_generation,
-        } });
+        };
+        self.scrollbar_coalescer.reset();
         self.file_tree_scrollbar_idle_ticks = 0;
         self.metal_dirty = true;
         return true;
-    }
-
-    fn dragFileTreeScrollbarTo(self: *AppSession, y_px: f64) void {
-        const drag = switch (self.pointer_gesture_owner) {
-            .file_tree_scrollbar => |value| value,
-            else => return,
-        };
-        if (self.file_tree_perf_counters) |counters| counters.pointer_events += 1;
-        if (!std.math.isFinite(y_px)) {
-            self.cancelPointerGesture();
-            return;
-        }
-        const current = self.fileTreeScrollbarGeometry() orelse {
-            self.cancelPointerGesture();
-            return;
-        };
-        if (drag.root_generation != self.file_tree.rootGeneration() or
-            drag.projection_generation != self.file_tree_projection_generation or
-            !drag.geometry.sameSnapshot(current))
-        {
-            self.cancelPointerGesture();
-            return;
-        }
-        self.setFileTreeScrollRows(file_tree_scrollbar.scrollForPointer(drag.geometry, y_px, drag.grab_y));
     }
 
     fn fileTreeFocused(self: *const AppSession) bool {
@@ -22650,9 +22752,8 @@ pub const AppSession = struct {
         // 스크롤바 thumb 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다 — drag는 마우스 y를 view_offset으로
         // 매핑(스크롤), up이 끝낸다. 새 down(1)은 아래로 흘려 새 드래그(또는 일반 클릭)를 시작한다. 다른
         // 드래그 가드처럼 x가 영역 밖으로 나가도 캡처를 유지한다(thumb를 잡았으면 끝까지 따라간다).
-        if (self.pointerGestureIs(.file_tree_scrollbar) and (kind == 2 or kind == 3)) {
-            if (kind == 2) self.dragFileTreeScrollbarTo(y_px) else self.finishPointerGesture();
-            return;
+        if (self.scrollbarCaptureActive() and (kind == 2 or kind == 3)) {
+            if (self.routeScrollbarCapture(kind, y_px)) return;
         }
         if (self.pointerGestureIs(.scrollbar) and (kind == 2 or kind == 3)) {
             if (kind == 2) self.dragScrollbarTo(y_px) else {
@@ -30904,7 +31005,7 @@ pub const AppSession = struct {
             self.file_tree_scrollbar_last_rows = self.fileTreeEffectiveScroll();
             if (self.file_tree_scrollbar_idle_ticks != 0) self.metal_dirty = true;
             self.file_tree_scrollbar_idle_ticks = 0;
-        } else if (self.file_tree_scrollbar_hovered or self.pointerGestureIs(.file_tree_scrollbar)) {
+        } else if (self.file_tree_scrollbar_hovered or self.scrollbarCaptureActive()) {
             if (self.file_tree_scrollbar_idle_ticks != 0) self.metal_dirty = true;
             self.file_tree_scrollbar_idle_ticks = 0;
         } else if (self.file_tree_scrollbar_idle_ticks < fade_done_ticks) {
@@ -31186,7 +31287,7 @@ pub const AppSession = struct {
 
     fn appendFileTreeScrollbar(self: *AppSession) void {
         const geometry = self.fileTreeScrollbarGeometry() orelse return;
-        const emphasized = self.file_tree_scrollbar_hovered or self.pointerGestureIs(.file_tree_scrollbar);
+        const emphasized = self.file_tree_scrollbar_hovered or self.scrollbarCaptureActive();
         const alpha: u8 = if (emphasized) scrollbar_alpha_full else self.scrollbarAlpha(self.file_tree_scrollbar_idle_ticks);
         const color = packRgbAlpha(self.mutedForeground(), alpha);
         const radius = geometry.track_w * 0.5;
@@ -41512,6 +41613,10 @@ test "R1: 터미널 tracking + Cmd 마우스 → report_mouse.mods에 32 없음(
     session.divider_entry_scratch = .empty;
     session.divider_split_scratch = .empty;
     session.divider_snapshot_generation = 0;
+    session.scrollbar_interaction = .{};
+    session.scrollbar_capture = null;
+    session.scrollbar_coalescer = .{};
+    session.scrollbar_snapshot_generation = 0;
     session.allocator = std.testing.allocator;
     session.io = std.Io.Threaded.global_single_threaded.io();
     var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 8, .rows = 4 });
@@ -45426,6 +45531,10 @@ test "mouse reporting 진입은 진행 중이던 드래그 autoscroll을 멈춘�
     session.divider_entry_scratch = .empty;
     session.divider_split_scratch = .empty;
     session.divider_snapshot_generation = 0;
+    session.scrollbar_interaction = .{};
+    session.scrollbar_capture = null;
+    session.scrollbar_coalescer = .{};
+    session.scrollbar_snapshot_generation = 0;
     session.allocator = std.testing.allocator;
     session.io = std.Io.Threaded.global_single_threaded.io(); // updateCursorBlink→readActiveSnapshot이 lockCore(self.io)
     var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
@@ -45449,6 +45558,10 @@ test "mouse reporting 진입은 진행 중이던 드래그 autoscroll을 멈춘�
     session.divider_entry_scratch = .empty;
     session.divider_split_scratch = .empty;
     session.divider_snapshot_generation = 0;
+    session.scrollbar_interaction = .{};
+    session.scrollbar_capture = null;
+    session.scrollbar_coalescer = .{};
+    session.scrollbar_snapshot_generation = 0;
     session.cell_width_px = 8;
     session.cell_height_px = 16;
     session.scale_milli = 1000;
@@ -45482,6 +45595,10 @@ test "drag autoscroll scrolls one line per tick and extends the selection to the
     session.divider_entry_scratch = .empty;
     session.divider_split_scratch = .empty;
     session.divider_snapshot_generation = 0;
+    session.scrollbar_interaction = .{};
+    session.scrollbar_capture = null;
+    session.scrollbar_coalescer = .{};
+    session.scrollbar_snapshot_generation = 0;
     session.allocator = std.testing.allocator;
     session.io = std.Io.Threaded.global_single_threaded.io(); // updateCursorBlink→readActiveSnapshot이 lockCore(self.io)
     var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
@@ -45506,6 +45623,10 @@ test "drag autoscroll scrolls one line per tick and extends the selection to the
     session.divider_entry_scratch = .empty;
     session.divider_split_scratch = .empty;
     session.divider_snapshot_generation = 0;
+    session.scrollbar_interaction = .{};
+    session.scrollbar_capture = null;
+    session.scrollbar_coalescer = .{};
+    session.scrollbar_snapshot_generation = 0;
     // 자동 스크롤은 frame rate 무관 ≈30줄/s(경과 ms 게이트). frame_loop_rate_hz=30이면 msPerTick=33=step_ms라 tick
     // 마다 한 줄 — 이 테스트의 "tick당 한 줄" 가정과 맞는 cadence를 명시한다(undefined frame_loop_rate_hz 트랩도 회피).
     session.frame_loop_rate_hz = 30;
@@ -45556,6 +45677,10 @@ test "drag autoscroll 속도는 frame rate에 비례하지 않는다 (경과 ms 
     session.divider_entry_scratch = .empty;
     session.divider_split_scratch = .empty;
     session.divider_snapshot_generation = 0;
+    session.scrollbar_interaction = .{};
+    session.scrollbar_capture = null;
+    session.scrollbar_coalescer = .{};
+    session.scrollbar_snapshot_generation = 0;
     session.allocator = std.testing.allocator;
     session.io = std.Io.Threaded.global_single_threaded.io(); // updateCursorBlink→readActiveSnapshot이 lockCore(self.io)
     var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
@@ -49425,6 +49550,39 @@ test "file tree header and populated blank left click are inert while right clic
     session.closeContextMenu();
 }
 
+test "두 세대가 그대로여도 track/thumb 기하가 바뀌면 스크롤 드래그를 놓는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    _ = try session.resize(1400, 900, 1000);
+    session.activateFilePanelDockControl();
+    session.file_tree_rows.clearRetainingCapacity();
+    try session.file_tree_rows.ensureTotalCapacity(allocator, 512);
+    for (0..512) |_| session.file_tree_rows.appendAssumeCapacity(.empty);
+    session.refreshFileTreeScrollbarGeometry();
+    const geometry = session.fileTreeScrollbarGeometry() orelse return error.SkipZigTest;
+    if (geometry.max_scroll == 0) return error.SkipZigTest;
+
+    try std.testing.expect(session.beginFileTreeScrollbarGesture(geometry.track_x, geometry.thumb_y));
+    try std.testing.expect(session.scrollbarCaptureActive());
+
+    // 세대는 둘 다 그대로 두고 기하만 바꾼다. carry key는 host가 주입한 값의 동등성만 보므로
+    // 이 축은 key로 표현되지 않는다 — down 시점 기하로 계산한 스크롤이 손가락과 어긋나기 전에
+    // domain 검증이 놓아야 한다.
+    const root_before = session.file_tree.rootGeneration();
+    const projection_before = session.file_tree_projection_generation;
+    session.scrollbar_capture.?.geometry.track_h += 40;
+    session.scrollbar_capture.?.geometry.thumb_h += 8;
+    try std.testing.expectEqual(root_before, session.file_tree.rootGeneration());
+    try std.testing.expectEqual(projection_before, session.file_tree_projection_generation);
+
+    _ = session.routeScrollbarCapture(2, geometry.track_y + geometry.track_h - 1);
+    try std.testing.expect(!session.scrollbarCaptureActive());
+}
+
 test "file tree scrollbar is overflow-only and stale drag snapshots cancel" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -49449,20 +49607,22 @@ test "file tree scrollbar is overflow-only and stale drag snapshots cancel" {
         top.track_x + top.track_w / 2,
         top.track_y + top.track_h - 1,
     ));
-    try std.testing.expect(session.pointerGestureIs(.file_tree_scrollbar));
+    try std.testing.expect(session.scrollbarCaptureActive());
     try std.testing.expect(session.fileTreeEffectiveScroll() > 0);
-    session.dragFileTreeScrollbarTo(top.track_y);
+    // move는 좌표만 모으고 tick이 적용한다(계약 §4.3) — 옛 경로는 move가 곧 재투영이었다.
+    _ = session.routeScrollbarCapture(2, top.track_y);
+    session.applyPendingScrollbarScroll();
     try std.testing.expectEqual(@as(usize, 0), session.fileTreeEffectiveScroll());
-    session.dragFileTreeScrollbarTo(std.math.nan(f64));
-    try std.testing.expect(session.pointerGestureIs(.none));
+    _ = session.routeScrollbarCapture(2, std.math.nan(f64));
+    session.applyPendingScrollbarScroll();
     try std.testing.expectEqual(@as(usize, 0), session.fileTreeEffectiveScroll());
 
     // Root authority is part of the drag snapshot. A late move after replacement must not commit.
     const restarted = session.fileTreeScrollbarGeometry().?;
     try std.testing.expect(session.beginFileTreeScrollbarGesture(restarted.track_x, restarted.thumb_y));
     try session.file_tree.replaceExplicitRoots(&.{"/different"});
-    session.dragFileTreeScrollbarTo(top.track_y + top.track_h);
-    try std.testing.expect(session.pointerGestureIs(.none));
+    _ = session.routeScrollbarCapture(2, top.track_y + top.track_h);
+    try std.testing.expect(!session.scrollbarCaptureActive());
     try std.testing.expectEqual(@as(usize, 0), session.fileTreeEffectiveScroll());
 
     session.refreshFileTreeScrollbarGeometry();
@@ -49517,9 +49677,10 @@ test "file tree production hot paths emit bounded counter artifact" {
     session.file_tree_perf_counters = &counters;
     for (0..1000) |event| {
         const y = geometry.track_y + @as(f32, @floatFromInt(event % @as(usize, @intFromFloat(geometry.track_h))));
-        session.dragFileTreeScrollbarTo(y);
+        _ = session.routeScrollbarCapture(2, y);
+        session.applyPendingScrollbarScroll();
     }
-    session.finishPointerGesture();
+    session.endScrollbarCapture();
 
     for (0..1000) |_| {
         session.dropQuadsByLayer(3);
@@ -50545,6 +50706,10 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     session.divider_entry_scratch = .empty;
     session.divider_split_scratch = .empty;
     session.divider_snapshot_generation = 0;
+    session.scrollbar_interaction = .{};
+    session.scrollbar_capture = null;
+    session.scrollbar_coalescer = .{};
+    session.scrollbar_snapshot_generation = 0;
 
     // 확장 grab band 안쪽에서 시작해도 첫 drag가 경계를 클릭점으로 순간 이동시키지 않고 pointer delta만 반영한다.
     // 수정 전에는 divider 선 우선순위 문제를 고친 뒤에도 sizePtForPointer가 포인터를 경계로 간주해 최대 band 폭만큼 점프했다.
@@ -52289,6 +52454,10 @@ test "code-review #8: 리스트 아래(past-end) 새-워크스페이스 드롭 �
     session.divider_entry_scratch = .empty;
     session.divider_split_scratch = .empty;
     session.divider_snapshot_generation = 0;
+    session.scrollbar_interaction = .{};
+    session.scrollbar_capture = null;
+    session.scrollbar_coalescer = .{};
+    session.scrollbar_snapshot_generation = 0;
 }
 
 // 활성 탭이 단일 leaf SplitTree로 만들어지고, activeTabLeafRects가 그 leaf를 터미널 영역 전체에 펴는지
@@ -60514,6 +60683,10 @@ test "drag autoscroll works after a double-click word selection and skips redraw
     session.divider_entry_scratch = .empty;
     session.divider_split_scratch = .empty;
     session.divider_snapshot_generation = 0;
+    session.scrollbar_interaction = .{};
+    session.scrollbar_capture = null;
+    session.scrollbar_coalescer = .{};
+    session.scrollbar_snapshot_generation = 0;
     session.allocator = std.testing.allocator;
     session.io = std.Io.Threaded.global_single_threaded.io(); // updateCursorBlink→readActiveSnapshot이 lockCore(self.io)
     var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
@@ -60539,6 +60712,10 @@ test "drag autoscroll works after a double-click word selection and skips redraw
     session.divider_entry_scratch = .empty;
     session.divider_split_scratch = .empty;
     session.divider_snapshot_generation = 0;
+    session.scrollbar_interaction = .{};
+    session.scrollbar_capture = null;
+    session.scrollbar_coalescer = .{};
+    session.scrollbar_snapshot_generation = 0;
     session.frame_loop_rate_hz = 30; // msPerTick=33=step_ms → 호출(tick)마다 한 줄(아래 "한 줄/호출" 가정과 맞춤)
     session.drag_autoscroll = 0;
     session.drag_autoscroll_accum_ms = 0;

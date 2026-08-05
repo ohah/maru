@@ -110,8 +110,8 @@ pub const AgentSessionArchiveSmokeProbe = extern struct {
     enabled: u32 = 0,
 };
 
-test "ABI v164 app instance lease result values match the C header" {
-    try std.testing.expectEqual(@as(u32, 164), abi_version);
+test "ABI v165 app instance lease result values match the C header" {
+    try std.testing.expectEqual(@as(u32, 165), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -506,7 +506,15 @@ pub const DividerSmokeProbe = extern struct {
     padding_left_px: u32,
     padding_right_px: u32,
     web_covered_dividers: u32,
-    _reserved: u32 = 0,
+    scrollbar_present: u32,
+    scrollbar_thumb_x_px: i32,
+    scrollbar_thumb_y_px: i32,
+    scrollbar_thumb_w_px: u32,
+    scrollbar_thumb_h_px: u32,
+    scrollbar_capture_active: u32,
+    scrollbar_rows: u64,
+    scrollbar_move_events: u64,
+    scrollbar_scroll_applications: u64,
 };
 
 /// Reads the published divider grab band and this drag's coalescing instrumentation for the
@@ -532,6 +540,15 @@ pub export fn maru_macos_app_session_divider_smoke_probe(
         .padding_left_px = probe.padding_left_px,
         .padding_right_px = probe.padding_right_px,
         .web_covered_dividers = probe.web_covered_dividers,
+        .scrollbar_present = @intFromBool(probe.scrollbar_present),
+        .scrollbar_thumb_x_px = probe.scrollbar_thumb_x_px,
+        .scrollbar_thumb_y_px = probe.scrollbar_thumb_y_px,
+        .scrollbar_thumb_w_px = probe.scrollbar_thumb_w_px,
+        .scrollbar_thumb_h_px = probe.scrollbar_thumb_h_px,
+        .scrollbar_capture_active = @intFromBool(probe.scrollbar_capture_active),
+        .scrollbar_rows = probe.scrollbar_rows,
+        .scrollbar_move_events = probe.scrollbar_move_events,
+        .scrollbar_scroll_applications = probe.scrollbar_scroll_applications,
     };
     return @intFromEnum(Status.ok);
 }

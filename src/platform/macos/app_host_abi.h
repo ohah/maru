@@ -8,7 +8,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 164u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 165u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -589,7 +589,15 @@ typedef struct MaruAppHostDividerSmokeProbe {
     uint32_t padding_left_px;
     uint32_t padding_right_px;
     uint32_t web_covered_dividers;
-    uint32_t reserved;
+    uint32_t scrollbar_present;
+    int32_t scrollbar_thumb_x_px;
+    int32_t scrollbar_thumb_y_px;
+    uint32_t scrollbar_thumb_w_px;
+    uint32_t scrollbar_thumb_h_px;
+    uint32_t scrollbar_capture_active;
+    uint64_t scrollbar_rows;
+    uint64_t scrollbar_move_events;
+    uint64_t scrollbar_scroll_applications;
 } MaruAppHostDividerSmokeProbe;
 int32_t maru_macos_app_session_divider_smoke_probe(
     MaruAppHostSession *session,

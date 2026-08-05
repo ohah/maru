@@ -1149,8 +1149,8 @@ pub const MetalFrame = extern struct {
     // 추가해 기존 offset 불변(ABI v70). app이 ResolvedAppearance.window_opacity에서 채운다.
     window_opacity_milli: u32 = 1000,
     // C4b 모달 클리핑(인프라): 모달 오버레이 셀을 이 px 사각(backing, 좌상단)으로 클리핑한다 — chrome 컴포넌트가
-    // draw.Op.clip을 내면 lowering이 채우고, 렌더러가 모달 셀 draw에 setScissorRect로 적용한다(Metal은 좌하단 원점
-    // 이라 y 변환). w==0이면 클리핑 없음(기존 동작 그대로). 부분 카드 픽셀 스크롤(알림 패널 등) 재사용 인프라 —
+    // draw.Op.clip을 내면 lowering이 채우고, 렌더러가 모달 셀 draw에 setScissorRect로 적용한다(MTLScissorRect도
+    // 좌상단 원점이라 y 변환 없음). w==0이면 클리핑 없음(기존 동작 그대로). 부분 카드 픽셀 스크롤(알림 패널 등) 재사용 인프라 —
     // 컴포넌트 적용은 후속. 끝에 추가해 기존 필드 offset 불변(ABI v84).
     modal_clip_x_px: u32 = 0,
     modal_clip_y_px: u32 = 0,
@@ -1228,9 +1228,10 @@ fn buildMergedSidebarCells(
 /// 동작한다. 비활성 panel은 colors.cursor=null이라 커서 cell을 안 낸다.
 /// 모달 오버레이 클리핑 영역(backing px, 좌상단). w==0이면 클리핑 없음.
 /// backing-pixel 클리핑 사각형의 **단일 규약**: 좌상단 원점, backing pixel, `w == 0`이면 클리핑 없음.
-/// Metal의 `MTLScissorRect`도, fragment의 `[[position]]`도 같은 좌상단 원점이라 변환 없이 대응한다
-/// (`maru_metal_renderer.m`의 modal 경로에 남아 있는 y-flip은 이 규약을 어긴 미사용 코드다 — 그 경로를
-/// 실제로 쓰는 컴포넌트가 생길 때 정정하고 함께 검증해야 한다).
+/// Metal의 `MTLScissorRect`도, fragment의 `[[position]]`도 같은 좌상단 원점이라 변환 없이 대응한다.
+/// (`maru_metal_renderer.m`의 modal 경로는 예전에 y를 뒤집어 이 규약을 어겼다. 그 경로를 쓰는 컴포넌트가
+/// 아직 없어 드러나지 않았지만, 첫 소비자가 자기 컴포넌트를 의심하며 렌더러를 디버깅하지 않도록 정정했다 —
+/// 근거는 같은 파일에서 실제로 동작하는 사이드바 스크롤 scissor다.)
 ///
 /// **일반화 트리거**: 지금 프레임 단위 clip 필드는 modal(오버레이 셀)과 이 타입 두 곳이고, chrome quad는
 /// per-quad clip(`GpuQuad.clip_*`)을 쓴다. 여기에 **세 번째** 프레임 단위 clip 소비자가 생기면 셀 경로도

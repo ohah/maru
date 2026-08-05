@@ -484,8 +484,8 @@ typedef struct MaruAppHostMetalFrame {
        정수로 ABI를 정수 유지. 끝에 추가해 기존 offset 불변(ABI v70). */
     uint32_t window_opacity_milli;
     /* C4b 모달 클리핑(인프라): 모달 오버레이 셀을 이 px 사각(backing, 좌상단)으로 클리핑한다 — chrome 컴포넌트가
-       draw.Op.clip을 내면 lowering이 채우고, renderer가 모달 셀 draw에 setScissorRect로 적용한다(Metal은 좌하단
-       원점이라 y = drawable_h - (y+h) 변환). w==0이면 클리핑 없음(기존 동작). 부분 카드 픽셀 스크롤(알림 패널 등)
+       draw.Op.clip을 내면 lowering이 채우고, renderer가 모달 셀 draw에 setScissorRect로 적용한다(MTLScissorRect도
+       좌상단 원점이라 y 변환 없음). w==0이면 클리핑 없음(기존 동작). 부분 카드 픽셀 스크롤(알림 패널 등)
        재사용 인프라 — 컴포넌트 적용은 후속. 끝에 4필드 추가해 기존 offset 불변(ABI v84). */
     uint32_t modal_clip_x_px;
     uint32_t modal_clip_y_px;

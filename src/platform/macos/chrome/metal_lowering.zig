@@ -184,6 +184,12 @@ fn paintRectBg(bg: []terminal.Color, cols: u16, rows: u16, origin_x: u32, origin
 }
 
 fn placeText(cp: []u21, fg: []terminal.Color, cwid: []u2, cols: u16, rows: u16, origin_x: u32, origin_y: u32, cw: u32, ch: u32, t: chrome.draw.Op.Text, color: terminal.Color) void {
+    // 이 경로는 셀 격자에 찍으므로 부분 클립이 불가능하다. 대신 셀 단위로 판정한다 — 같은 행의 배경
+    // quad는 GPU가 픽셀 단위로 자르는데 글자만 그대로 남으면 배경 반쪽에 글자가 떠 있는 그림이 된다.
+    if (t.clip) |clip| {
+        if (t.origin.y < clip.y or t.origin.y >= clip.y + @as(i32, @intCast(clip.h))) return;
+        if (t.origin.x < clip.x or t.origin.x >= clip.x + @as(i32, @intCast(clip.w))) return;
+    }
     const row_i = @divTrunc(t.origin.y - @as(i32, @intCast(origin_y)), @as(i32, @intCast(ch)));
     if (row_i < 0 or row_i >= rows) return;
     const row: usize = @intCast(row_i);

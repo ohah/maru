@@ -76,6 +76,9 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
     writer.scroll_clipped = true;
     for (props.items, 0..) |item, index| {
         const rect = find(frame.tree, build.NodeIds.item(index)) orelse return error.MissingRect;
+        // 이 행의 published clip을 op에 함께 싣는다. 배경 quad는 GPU가 픽셀 단위로 자르는데 셀 경로의
+        // 글자만 그대로 남으면 배경 반쪽에 글자가 떠 있는 그림이 된다.
+        writer.active_clip = clipRectOf(rect);
         switch (item) {
             .group => |group| {
                 try writer.groupHeader(rect, group);
@@ -118,6 +121,9 @@ const Writer = struct {
     /// 지금 emit 중인 op이 스크롤 목록에 속하는지. 고정 chrome(헤더·scope·검색)은 스크롤해도 제자리이므로
     /// 이 구분이 없으면 backend가 "스크롤은 순수 평행이동"이라는 사실을 쓸 수 없다.
     scroll_clipped: bool = false,
+    /// 지금 emit 중인 행의 published clip. 셀 격자로 lowering하는 backend(Lab·모달)는 뷰포트를 모르므로
+    /// 이 rect로 자른다. measured 경로는 무시한다(위 bool과 backend 뷰포트를 쓴다).
+    active_clip: ?draw.Rect = null,
 
     fn text(self: *Writer, rect: tree.RectEntry, line: u32, source: []const u8, role: tokens.ColorRole, text_role: typography.ChromeTextRole, line_count: u32, wide_icons: bool, centered: bool) ViewError!void {
         return self.textStyled(rect, line, source, role, text_role, line_count, wide_icons, centered, false);
@@ -420,12 +426,7 @@ const Writer = struct {
     /// 나중에 그 구현을 GPU로 옮길 때도 컴포넌트가 영향을 받지 않는다.
     fn appendQuadClippedBy(self: *Writer, rect: tree.RectEntry, quad: draw.Op.Quad) ViewError!void {
         var owned = quad;
-        if (rect.effective_clip) |clip| owned.clip = .{
-            .x = @intFromFloat(@ceil(clip.x)),
-            .y = @intFromFloat(@ceil(clip.y)),
-            .w = @intFromFloat(@max(@floor(clip.width), 0)),
-            .h = @intFromFloat(@max(@floor(clip.height), 0)),
-        };
+        owned.clip = clipRectOf(rect);
         return self.appendQuad(owned);
     }
 
@@ -553,6 +554,7 @@ const Writer = struct {
             .anchor = .head,
             .max_width_px = @intFromFloat(@floor(@as(f32, @floatFromInt(cols)) * @as(f32, @floatFromInt(self.props.cell_width_px)))),
             .scroll_clipped = self.scroll_clipped,
+            .clip = self.active_clip,
         } };
         self.run_count += 1;
         self.op_count += 1;
@@ -587,6 +589,7 @@ const Writer = struct {
             .max_width_px = max_width_px,
             .placement = placement,
             .scroll_clipped = self.scroll_clipped,
+            .clip = self.active_clip,
         } };
         self.run_count += 1;
         self.op_count += 1;
@@ -635,6 +638,17 @@ const Writer = struct {
         self.op_count += 1;
     }
 };
+
+/// published clip을 semantic op에 실을 수 있는 정수 rect로 옮긴다. 자르지 않고 **전달만** 한다.
+fn clipRectOf(entry: tree.RectEntry) ?draw.Rect {
+    const clip = entry.effective_clip orelse return null;
+    return .{
+        .x = @intFromFloat(@ceil(clip.x)),
+        .y = @intFromFloat(@ceil(clip.y)),
+        .w = @intFromFloat(@max(@floor(clip.width), 0)),
+        .h = @intFromFloat(@max(@floor(clip.height), 0)),
+    };
+}
 
 fn effectiveScale(scale_milli: u32) u32 {
     return if (scale_milli == 0) 1000 else scale_milli;

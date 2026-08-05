@@ -130,6 +130,13 @@ pub const Op = union(enum) {
         /// 통째로 무효화된다. 소속은 스크롤해도 바뀌지 않는 사실이라 캐시 키에 안전하게 들어간다.
         /// backend는 이 표시가 있는 glyph만 뷰포트로 잘라, 반쯤 걸친 행도 픽셀 단위로 정확히 보인다.
         scroll_clipped: bool = false,
+        /// 이 텍스트를 자를 뷰포트(published tree의 `effective_clip`을 그대로 전달한 값).
+        ///
+        /// measured(픽셀) 경로는 이 값을 쓰지 않는다 — `scroll_clipped`와 backend가 아는 뷰포트로 자르며,
+        /// 여기 rect를 실으면 스크롤 1px마다 shaping 캐시 키가 바뀐다. **셀 격자로 lowering하는 경로**
+        /// (Chrome Lab·모달)는 그 배선이 없으므로 이 rect로 자른다. 두 경로가 같은 clip을 못 보면 같은
+        /// 행의 배경 quad는 잘리는데 글자만 남는 어긋난 그림이 나온다.
+        clip: ?Rect = null,
     };
 
     /// C4b rich 박스 — 둥근 모서리·변별 테두리·solid/gradient 채움. tui 백엔드는 corner/border가 0이면

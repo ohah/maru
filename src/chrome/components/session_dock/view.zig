@@ -182,7 +182,6 @@ const Writer = struct {
             if (rect.rect.height >= stack_height) rect.rect.y + (rect.rect.height - stack_height) / 2 + role_line_height * @as(f32, @floatFromInt(line)) else return
         else
             rect.rect.y + cell_height * @as(f32, @floatFromInt(line + 1));
-        if ((wide_icons or !centered) and !loweredTextCellFitsClip(rect, y, ch)) return;
         const required_inset_cols = @as(u32, left_inset_cols) + 1;
         const available_px = rect.rect.width - @as(f32, @floatFromInt(cw)) * @as(f32, @floatFromInt(required_inset_cols));
         if (available_px <= 0) return;
@@ -317,7 +316,6 @@ const Writer = struct {
         if (cw == 0 or ch == 0) return;
         const x = rect.rect.x + @as(f32, @floatFromInt(inset_x));
         const y = rect.rect.y + @as(f32, @floatFromInt(offset_y));
-        if (!loweredTextCellFitsClip(rect, y, ch)) return;
         const available_px = rect.rect.width - @as(f32, @floatFromInt(inset_x + cw));
         if (available_px <= 0) return;
         const max_cols: u16 = @intFromFloat(@min(
@@ -337,7 +335,6 @@ const Writer = struct {
         const metadata_inset = metrics.card_inset_x + provider_width + spacing.px(.xs, effectiveScale(self.props.scale_milli));
         const x = rect.rect.x + @as(f32, @floatFromInt(metadata_inset));
         const y = rect.rect.y + @as(f32, @floatFromInt(metrics.card_metadata_y));
-        if (!loweredTextCellFitsClip(rect, y, ch)) return;
         const available_px = rect.rect.width - @as(f32, @floatFromInt(metadata_inset + cw));
         if (available_px <= 0) return;
         const max_cols: u16 = @intFromFloat(@min(
@@ -355,10 +352,6 @@ const Writer = struct {
     fn groupHeader(self: *Writer, rect: tree.RectEntry, group: types.Group) ViewError!void {
         const cw = self.props.cell_width_px;
         if (cw == 0) return;
-        // 그룹 행도 카드와 같은 published clip을 소비한다. 이 검사가 없으면 스크롤로 목록 위로 나간
-        // 그룹의 이름·chevron·count pill이 고정 chrome(헤더/scope/검색) 위에 그려진다. 다른 텍스트
-        // 경로(textAtY/cardMetadataAtY)는 이미 같은 게이트를 지난다.
-        if (!rowFitsClip(rect)) return;
         const metrics = types.DockMetrics.resolve(self.props.scale_milli);
         const scale = effectiveScale(self.props.scale_milli);
 
@@ -380,7 +373,7 @@ const Writer = struct {
         // 행 바닥 밖으로 내려가 아래 카드에 걸친다(사용자 보고).
         const pill_y: f32 = rect.rect.y + (rect.rect.height - @as(f32, @floatFromInt(pill_h))) / 2;
         const pill_radius: u16 = @intCast(@min(pill_h / 2, @as(u32, std.math.maxInt(u16))));
-        try self.appendQuad(.{
+        try self.appendClippedQuad(rect, .{
             .rect = .{
                 .x = @intFromFloat(@floor(pill_x)),
                 .y = @intFromFloat(@floor(pill_y)),
@@ -427,8 +420,29 @@ const Writer = struct {
 
     fn appendQuad(self: *Writer, quad: draw.Op.Quad) ViewError!void {
         if (self.op_count == self.ops.len) return error.InsufficientTextBuffer;
-        self.ops[self.op_count] = .{ .quad = quad };
+        var owned = quad;
+        owned.scroll_clipped = self.scroll_clipped;
+        self.ops[self.op_count] = .{ .quad = owned };
         self.op_count += 1;
+    }
+
+    /// `ui_paint`가 만드는 카드/버튼 배경은 이미 published clip으로 잘려 나온다. component가 직접 내는
+    /// 장식 quad(그룹 count pill 등)도 같은 규율을 따라야 스크롤로 목록 위로 나간 조각이 고정 chrome
+    /// 위에 남지 않는다.
+    fn appendClippedQuad(self: *Writer, rect: tree.RectEntry, quad: draw.Op.Quad) ViewError!void {
+        const clip = rect.effective_clip orelse return self.appendQuad(quad);
+        const left: i32 = @intFromFloat(@ceil(clip.x));
+        const top: i32 = @intFromFloat(@ceil(clip.y));
+        const right: i32 = @intFromFloat(@floor(clip.x + clip.width));
+        const bottom: i32 = @intFromFloat(@floor(clip.y + clip.height));
+        const x0 = @max(quad.rect.x, left);
+        const y0 = @max(quad.rect.y, top);
+        const x1 = @min(quad.rect.x + @as(i32, @intCast(quad.rect.w)), right);
+        const y1 = @min(quad.rect.y + @as(i32, @intCast(quad.rect.h)), bottom);
+        if (x1 <= x0 or y1 <= y0) return;
+        var owned = quad;
+        owned.rect = .{ .x = x0, .y = y0, .w = @intCast(x1 - x0), .h = @intCast(y1 - y0) };
+        return self.appendQuad(owned);
     }
 
     fn expanded(self: *Writer, snapshot: tree.UiRectTree, index: usize, expanded_props: types.Expanded) ViewError!void {
@@ -637,30 +651,6 @@ const Writer = struct {
         self.op_count += 1;
     }
 };
-
-/// `chrome_draw_lowering` floors a semantic text origin to a terminal cell row before CoreText
-/// rasterization. A partial item therefore cannot use the unquantized origin as a clip test: a
-/// nominally in-clip origin can lower to the preceding, out-of-clip glyph cell. We intentionally
-/// omit that whole cell rather than add an unrelated glyph scissor path just for scrolling.
-/// 행 전체가 published clip 안에 있는지. 카드는 줄 단위로 `loweredTextCellFitsClip`을 쓰지만, 그룹
-/// 행은 이름·chevron·count pill이 한 덩어리라 행 단위로 판정한다. 부분적으로 걸친 그룹을 통째로 숨기는
-/// 쪽이 고정 chrome 위로 새는 것보다 낫고, 그룹 행은 카드보다 훨씬 낮아 손실도 작다.
-fn rowFitsClip(rect: tree.RectEntry) bool {
-    const clip = rect.effective_clip orelse return true;
-    if (clip.height <= 0) return false;
-    return rect.rect.y >= clip.y and rect.rect.y + rect.rect.height <= clip.y + clip.height;
-}
-
-fn loweredTextCellFitsClip(rect: tree.RectEntry, origin_y: f32, cell_height_px: u32) bool {
-    const clip = rect.effective_clip orelse return true;
-    if (cell_height_px == 0) return false;
-    const cell_height: i32 = @intCast(cell_height_px);
-    const origin: i32 = @intFromFloat(@floor(origin_y));
-    const lowered_top = @divFloor(origin, cell_height) * cell_height;
-    const clip_top: i32 = @intFromFloat(@ceil(clip.y));
-    const clip_bottom: i32 = @intFromFloat(@floor(clip.y + clip.height));
-    return lowered_top >= clip_top and lowered_top <= clip_bottom - cell_height;
-}
 
 fn effectiveScale(scale_milli: u32) u32 {
     return if (scale_milli == 0) 1000 else scale_milli;
@@ -894,18 +884,18 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
     }
 }
 
-test "SessionDock partial card never emits a CoreText cell that crosses its published clip" {
+// 부분적으로 걸친 카드의 글자는 이제 **버려지지 않고** 잘린다. clip 판정은 component가 아니라 backend가
+// 픽셀 단위로 수행하므로(glyph quad ∩ viewport + UV 비례 조정), component가 할 일은 "이 op은 스크롤
+// 목록 소속"이라고 표시하는 것뿐이다. 예전처럼 셀 단위로 통째 버리면 반쯤 보이는 줄이 통으로 사라진다.
+test "SessionDock marks partial card runs as scroll clipped instead of dropping them" {
     const metrics = types.DockMetrics.resolve(1000);
     const props = types.Props{
-        // Fixed chrome is intentionally roomier in AS4-e. Keep enough scroll viewport below it
-        // to prove a one-pixel partial first card cannot suppress the next card's title.
         .viewport_px = .{ .width = 320, .height = 480 },
         .cell_width_px = 8,
         .cell_height_px = 16,
         .snapshot_generation = 4,
         .displayed_count = 2,
-        // Leave one backing pixel of the first row inside the clip. Its own lowered glyph cells
-        // must still be rejected, while the following row begins in the same content clip.
+        // 첫 카드를 1px만 남기고 위로 밀어 올린다.
         .content_first_item_origin_y_px = -@as(i32, @intCast(metrics.card_h - 1)),
         .items = &.{
             .{ .card = .{ .identity = 1, .provider = .claude, .title = "partial-card-title", .summary = "visible-summary", .metadata = "visible-meta" } },
@@ -941,23 +931,22 @@ test "SessionDock partial card never emits a CoreText cell that crosses its publ
     var runs: [32]draw.Run = undefined;
     var text_bytes: [1024]u8 = undefined;
     const out = try view(props, frame, .{}, &tk, .{ .ops = &ops, .runs = &runs, .text_bytes = &text_bytes });
-    var saw_partial_title = false;
-    var saw_partial_summary = false;
-    var saw_partial_metadata = false;
-    var saw_next_title = false;
+    var partial_title_scroll_clipped: ?bool = null;
+    var next_title_scroll_clipped: ?bool = null;
+    var header_scroll_clipped: ?bool = null;
     for (out.ops) |op| switch (op) {
         .text => |text| for (text.runs) |run| {
-            saw_partial_title = saw_partial_title or std.mem.indexOf(u8, run.text, "partial-card-title") != null;
-            saw_partial_summary = saw_partial_summary or std.mem.indexOf(u8, run.text, "visible-summary") != null;
-            saw_partial_metadata = saw_partial_metadata or std.mem.indexOf(u8, run.text, "visible-meta") != null;
-            saw_next_title = saw_next_title or std.mem.indexOf(u8, run.text, "next-card-title") != null;
+            if (std.mem.indexOf(u8, run.text, "partial-card-title") != null) partial_title_scroll_clipped = text.scroll_clipped;
+            if (std.mem.indexOf(u8, run.text, "next-card-title") != null) next_title_scroll_clipped = text.scroll_clipped;
+            if (std.mem.indexOf(u8, run.text, "Agent 세션 기록") != null) header_scroll_clipped = text.scroll_clipped;
         },
         else => {},
     };
-    try std.testing.expect(!saw_partial_title);
-    try std.testing.expect(!saw_partial_summary);
-    try std.testing.expect(!saw_partial_metadata);
-    try std.testing.expect(saw_next_title);
+    // 부분적으로 걸친 카드의 제목도 emit된다 — backend가 뷰포트로 자른다.
+    try std.testing.expectEqual(@as(?bool, true), partial_title_scroll_clipped);
+    try std.testing.expectEqual(@as(?bool, true), next_title_scroll_clipped);
+    // 고정 chrome은 스크롤 대상이 아니다. 여기에 같은 표시가 붙으면 backend가 헤더까지 잘라 버린다.
+    try std.testing.expectEqual(@as(?bool, false), header_scroll_clipped);
 }
 
 // 사용자 보고 회귀: 목록을 스크롤하면 펼친 카드의 내용이 다른 카드 위에 겹쳐 보였다. rect tree 단언만으로는
@@ -1144,11 +1133,11 @@ test "SessionDock keeps its action label when the expansion cannot fit the viewp
     }
 }
 
-// 사용자 보고 회귀: 목록을 스크롤하면 그룹 이름이 고정 chrome(검색 필드) 위에 그려졌다. 카드 텍스트는
-// `loweredTextCellFitsClip`을 지나지만 `groupHeader`만 그 검사를 하지 않아서다. clip은 published tree가
-// 이미 갖고 있으므로(§2.1.1 평행이동 후 부모 clip과 재교차) 이 결함은 "계약이 없어서"가 아니라 emit
-// 지점이 그 계약을 소비하지 않아서 생긴다.
-test "SessionDock group header does not paint above the scroll content clip" {
+// 사용자 보고 회귀: 목록을 스크롤하면 그룹 이름과 count pill이 고정 chrome(검색 필드) 위에 그려졌다.
+// 그룹 행은 텍스트와 **직접 만든 장식 quad**를 함께 내는 유일한 행이라, 두 경로 모두 published clip을
+// 소비해야 한다. 텍스트는 backend가 뷰포트로 자르도록 소속만 표시하고(픽셀 정확), component가 직접
+// 만드는 pill quad는 `ui_paint`의 카드 배경과 같은 규율로 여기서 교차시킨다.
+test "SessionDock group header runs are scroll clipped and its pill stays inside the clip" {
     const metrics = types.DockMetrics.resolve(1000);
     const props = types.Props{
         .viewport_px = .{ .width = 640, .height = 480 },
@@ -1156,8 +1145,9 @@ test "SessionDock group header does not paint above the scroll content clip" {
         .cell_height_px = 16,
         .snapshot_generation = 1,
         .displayed_count = 1,
-        // 그룹 행을 1px만 남기고 content clip 위로 밀어 올린다.
-        .content_first_item_origin_y_px = -@as(i32, @intCast(metrics.group_h - 1)),
+        // 그룹 행의 위쪽 절반을 content clip 위로 밀어 올린다. pill이 부분적으로 걸쳐야 "잘려서 남는다"를
+        // 볼 수 있다 — 완전히 밖이면 아예 안 나오는 것이 옳은 결과라 단언이 비어 버린다.
+        .content_first_item_origin_y_px = -@as(i32, @intCast(metrics.group_h / 2)),
         .items = &.{
             .{ .group = .{ .identity = 1, .label = "OVERFLOWGROUP", .count = 7 } },
             .{ .card = .{ .identity = 2, .provider = .claude, .title = "next-title", .summary = "next-summary", .metadata = "next-meta" } },
@@ -1183,24 +1173,35 @@ test "SessionDock group header does not paint above the scroll content clip" {
     var text_bytes: [2048]u8 = undefined;
     const out = try view(props, frame, .{}, &tk, .{ .ops = &ops, .runs = &runs, .text_bytes = &text_bytes });
     const content = find(frame.tree, build.NodeIds.content) orelse return error.TestUnexpectedResult;
-    const clip_top: i32 = @intFromFloat(@ceil(content.rect.y));
-    for (out.ops) |op| switch (op) {
-        .text => |text| for (text.runs) |run| {
-            if (std.mem.indexOf(u8, run.text, "OVERFLOWGROUP") == null) continue;
-            // clip 위로 나간 그룹은 라벨을 내지 않거나, 내더라도 clip 안이어야 한다.
-            try std.testing.expect(text.origin.y >= clip_top);
-        },
-        else => {},
-    };
-    // 뒤따르는 카드는 여전히 보여야 한다 — over-clipping도 결함이다.
+    const clip_top: f32 = content.rect.y;
+    const clip_bottom: f32 = content.rect.y + content.rect.height;
+    var label_scroll_clipped: ?bool = null;
     var saw_next = false;
     for (out.ops) |op| switch (op) {
         .text => |text| for (text.runs) |run| {
+            if (std.mem.indexOf(u8, run.text, "OVERFLOWGROUP") != null) label_scroll_clipped = text.scroll_clipped;
             saw_next = saw_next or std.mem.indexOf(u8, run.text, "next-title") != null;
         },
         else => {},
     };
+    // 라벨은 emit되되 스크롤 소속으로 표시된다 — 잘라내는 일은 backend가 픽셀 단위로 한다.
+    try std.testing.expectEqual(@as(?bool, true), label_scroll_clipped);
+    // 뒤따르는 카드는 여전히 보여야 한다 — over-clipping도 결함이다.
     try std.testing.expect(saw_next);
+    // component가 직접 만드는 pill quad는 published clip 밖으로 나가지 않는다.
+    var saw_pill = false;
+    for (out.ops) |op| switch (op) {
+        .quad => |quad| if (quad.fill_role == .inset_bg) {
+            saw_pill = true;
+            const top: f32 = @floatFromInt(quad.rect.y);
+            const bottom = top + @as(f32, @floatFromInt(quad.rect.h));
+            try std.testing.expect(top >= clip_top);
+            try std.testing.expect(bottom <= clip_bottom);
+            try std.testing.expect(quad.scroll_clipped);
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_pill);
 }
 
 // 사용자 보고 회귀: 그룹의 count pill이 행 아래로 밀려 카드 위에 걸쳐 보였다. 원인은 세로 중앙 계산의

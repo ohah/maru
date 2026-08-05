@@ -31992,6 +31992,20 @@ pub const AppSession = struct {
         // 스크롤 목록의 현재 원점. 목록 전체가 이 값만큼 함께 움직이므로, 셰이핑 키는 이 값을 뺀
         // 상대 좌표로 만들고(스크롤 불변) 캐시를 재사용할 때 차이만 다시 더한다.
         const scroll_origin_y_px = props.content_first_item_origin_y_px;
+        // 스크롤 뷰포트. published tree가 이미 갖고 있는 그 사각형을 backing 좌표로 옮겨 GPU 단계에
+        // 넘긴다. 이게 있으면 component가 "이 줄이 clip 안에 통째로 들어가는가"를 미리 판정할 필요가
+        // 없다 — 반쯤 걸친 카드/그룹도 픽셀 단위로 잘려 보인다.
+        const scroll_clip: ?metal_frame.ClipPx = blk: {
+            const index = frame.tree.find(chrome.components.session_dock.build.NodeIds.content) orelse break :blk null;
+            const rect = frame.tree.entries[index].rect;
+            if (rect.width <= 0 or rect.height <= 0) break :blk null;
+            break :blk .{
+                .x = content.x +| @as(u32, @intFromFloat(@max(rect.x, 0))),
+                .y = content.y +| @as(u32, @intFromFloat(@max(rect.y, 0))),
+                .w = @intFromFloat(@max(rect.width, 0)),
+                .h = @intFromFloat(@max(rect.height, 0)),
+            };
+        };
         const base_fingerprint = chrome_draw_lowering.richTextFingerprint(
             draws.ops,
             &tokens,
@@ -32011,6 +32025,7 @@ pub const AppSession = struct {
                     .origin_x = content.x,
                     .origin_y = content.y,
                     .colors = colors,
+                    .clip_rect = scroll_clip,
                     .scroll_delta_y_px = @floatFromInt(scroll_origin_y_px - cache.scroll_origin_y_px),
                 } });
                 self.collectShaped(collected, icon_dl, builder, .{ .pane = .{

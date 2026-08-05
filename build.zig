@@ -345,6 +345,18 @@ pub fn build(b: *std.Build) void {
                 },
             }),
         });
+        // 계약 테스트도 Lab main과 같은 measured text 경로(`chrome.system_text`)를 컴파일한다. 그
+        // 경로는 CoreText bridge 심볼을 참조하므로, 캡처 실행 파일과 **같은** ObjC 소스를 붙이지
+        // 않으면 `_maru_macos_coretext_shape_chrome_text` 미정의로 링크가 깨진다.
+        macos_chrome_lab_smoke_tests.root_module.addIncludePath(b.path("src/platform/macos"));
+        macos_chrome_lab_smoke_tests.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/macos/coretext_smoke.m"),
+            .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
+        });
+        macos_chrome_lab_smoke_tests.root_module.linkFramework("Foundation", .{});
+        macos_chrome_lab_smoke_tests.root_module.linkFramework("CoreText", .{});
+        macos_chrome_lab_smoke_tests.root_module.linkFramework("CoreGraphics", .{});
+
         const test_macos_chrome_lab_smoke_step = b.step("test-macos-chrome-lab-smoke", "Run Chrome Lab readback artifact contract tests");
         const run_macos_chrome_lab_smoke_tests = b.addRunArtifact(macos_chrome_lab_smoke_tests);
         run_macos_chrome_lab_smoke_tests.setCwd(b.path("."));

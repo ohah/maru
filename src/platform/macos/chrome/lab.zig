@@ -17,7 +17,7 @@ const archive_detail = chrome.components.archive_detail;
 pub const frame_op_capacity = 48;
 pub const frame_run_capacity = 48;
 
-pub const ScenarioId = enum { empty, loading, retained_list, font_specimen, partial_scroll, detail_loading, detail_ready, detail_stale, detail_unavailable };
+pub const ScenarioId = enum { empty, loading, retained_list, font_specimen, partial_scroll, partial_group_scroll, detail_loading, detail_ready, detail_stale, detail_unavailable };
 
 pub const Scenario = struct {
     id: ScenarioId,
@@ -61,7 +61,7 @@ pub fn buildFrame(
 ) !Frame {
     return switch (scenario.id) {
         .detail_loading, .detail_ready, .detail_stale, .detail_unavailable => buildDetailFrame(scenario, tokens, buffers),
-        .empty, .loading, .retained_list, .font_specimen, .partial_scroll => buildDockFrame(scenario, tokens, buffers),
+        .empty, .loading, .retained_list, .font_specimen, .partial_scroll, .partial_group_scroll => buildDockFrame(scenario, tokens, buffers),
     };
 }
 
@@ -98,11 +98,19 @@ fn buildDockFrame(
         .search = if (scenario.id == .empty) "" else "",
         // The partial fixture starts at the first card with an integer negative origin. It is the
         // same component geometry used by the host virtualization path, not a screenshot-only crop.
-        .content_first_item_origin_y_px = if (scenario.id == .partial_scroll) -28 else 0,
+        .content_first_item_origin_y_px = switch (scenario.id) {
+            .partial_scroll => -28,
+            // 그룹 행을 절반쯤 스크롤 영역 위로 밀어, **radius를 가진** count pill이 잘리는 상태를 만든다.
+            // 카드 배경(radius 0)으로는 못 보는 계약이 여기 걸린다: 잘린 변에 곡률이나 border stroke가
+            // 생기면 안 된다(CPU가 rect를 미리 자르면 shader가 줄어든 rect를 원본으로 착각해 그렇게 된다).
+            .partial_group_scroll => -22,
+            else => 0,
+        },
         .items = switch (scenario.id) {
             .retained_list => &retained,
             .font_specimen => &font_specimen,
             .partial_scroll => retained[1..],
+            .partial_group_scroll => &retained,
             .empty, .loading => &.{},
             .detail_loading, .detail_ready, .detail_stale, .detail_unavailable => unreachable,
         },

@@ -325,6 +325,7 @@ fn scenarioFromEnvValue(raw: []const u8) ?lab.ScenarioId {
     if (std.mem.eql(u8, raw, "retained-list")) return .retained_list;
     if (std.mem.eql(u8, raw, "font-specimen")) return .font_specimen;
     if (std.mem.eql(u8, raw, "partial-scroll")) return .partial_scroll;
+    if (std.mem.eql(u8, raw, "partial-group-scroll")) return .partial_group_scroll;
     if (std.mem.eql(u8, raw, "detail-loading")) return .detail_loading;
     if (std.mem.eql(u8, raw, "detail-ready")) return .detail_ready;
     if (std.mem.eql(u8, raw, "detail-stale")) return .detail_stale;
@@ -339,6 +340,7 @@ fn artifactName(id: lab.ScenarioId) []const u8 {
         .retained_list => "retained-list",
         .font_specimen => "font-specimen",
         .partial_scroll => "partial-scroll",
+        .partial_group_scroll => "partial-group-scroll",
         .detail_loading => "detail-loading",
         .detail_ready => "detail-ready",
         .detail_stale => "detail-stale",

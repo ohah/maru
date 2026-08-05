@@ -20919,7 +20919,7 @@ pub const AppSession = struct {
     /// The frame path only drains a completed immutable CoreText DTO.  It never creates a
     /// CTLine or waits for the detached worker; stale semantic output is discarded before it
     /// can replace a newer list/layout snapshot.
-    fn pollAgentSessionDockRichTextWorker(self: *AppSession, fingerprint: u64, scroll_origin_y_px: i32) void {
+    fn pollAgentSessionDockRichTextWorker(self: *AppSession, fingerprint: u64) void {
         var result = self.agent_session_dock_text_backend.takeResult() orelse return;
         defer result.deinit(self.allocator);
         if (result.fingerprint != fingerprint) return;
@@ -20929,7 +20929,10 @@ pub const AppSession = struct {
             .fingerprint = fingerprint,
             .placements = artifact.placements,
             .records = artifact.records,
-            .scroll_origin_y_px = scroll_origin_y_px,
+            // **submit 시점** 원점이어야 한다. placement는 그때의 op 좌표로 구워졌기 때문이다. 지금(poll)
+            // 프레임의 원점을 쓰면 worker가 도는 동안 스크롤한 만큼 기준이 어긋나고, 이후 delta가 계속 그
+            // 잘못된 기준에서 계산되므로 오차가 사라지지 않는다.
+            .scroll_origin_y_px = result.scroll_origin_y_px,
         };
         self.metal_dirty = true;
     }
@@ -32018,7 +32021,7 @@ pub const AppSession = struct {
         // `richTextFingerprint` owns semantic component facts; scale changes the CoreText
         // point size even when integer cell metrics happen to round to the same value.
         const fingerprint = base_fingerprint ^ (@as(u64, dock_scale_milli) *% 0x9e3779b185ebca87);
-        self.pollAgentSessionDockRichTextWorker(fingerprint, scroll_origin_y_px);
+        self.pollAgentSessionDockRichTextWorker(fingerprint);
         if (self.agent_session_dock_rich_text_cache) |*cache| {
             if (cache.fingerprint == fingerprint) {
                 self.collectMeasuredTextFromCache(collected, chrome_system_text.emptyDrawList(self.allocator, cache.records.len) catch return, cache, builder, .{ .pane = .{
@@ -32045,7 +32048,7 @@ pub const AppSession = struct {
                 } });
                 return;
             };
-            if (!self.agent_session_dock_text_backend.submit(request, dock_scale_milli)) request.deinit(self.allocator);
+            if (!self.agent_session_dock_text_backend.submit(request, dock_scale_milli, scroll_origin_y_px)) request.deinit(self.allocator);
         }
         self.collectShaped(collected, icon_dl, builder, .{ .pane = .{
             .origin_x = content.x,

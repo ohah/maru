@@ -145,8 +145,6 @@ pub const Op = union(enum) {
         fill_role_end: ?tokens.ColorRole = null, // gradient 끝 색(null=solid)
         gradient: GradientKind = .solid,
         alpha: u8 = 0xFF,
-        /// Text.scroll_clipped와 같은 의미다 — 스크롤 영역에 속한 배경/pill은 뷰포트 밖으로 새면 안 된다.
-        scroll_clipped: bool = false,
     };
     pub const GradientKind = enum(u8) { solid = 0, vertical = 1, horizontal = 2 };
 };

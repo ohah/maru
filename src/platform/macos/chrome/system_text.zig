@@ -126,24 +126,26 @@ pub const Artifact = struct {
                 .y = @as(f32, @floatFromInt(origin_y_px)) + scrolled_y,
                 .w = @floatFromInt(glyph.slot.width_px),
                 .h = @floatFromInt(glyph.slot.height_px),
-                .u0 = if (glyph.run.cache_key.color_glyph_kind == .color) uv.u0 + 2.0 else uv.u0,
-                .v0 = uv.v0,
-                .u1 = uv.u1,
-                .v1 = uv.v1,
+                .atlas_x_px = glyph.slot.x_px,
+                .atlas_y_px = glyph.slot.y_px,
+                .atlas_width_px = glyph.slot.width_px,
+                .atlas_height_px = glyph.slot.height_px,
             }, glyph_clip) orelse continue;
             try out.append(allocator, .{
                 .x = quad.x,
                 .y = quad.y,
                 .w = quad.w,
                 .h = quad.h,
-                .atlas_x_px = glyph.slot.x_px,
-                .atlas_y_px = glyph.slot.y_px,
-                .atlas_width_px = glyph.slot.width_px,
-                .atlas_height_px = glyph.slot.height_px,
-                .u0 = quad.u0,
-                .v0 = quad.v0,
-                .u1 = quad.u1,
-                .v1 = quad.v1,
+                .atlas_x_px = quad.atlas_x_px,
+                .atlas_y_px = quad.atlas_y_px,
+                .atlas_width_px = quad.atlas_width_px,
+                .atlas_height_px = quad.atlas_height_px,
+                // UV는 `renormalizeGpuGlyphUvs`가 위 슬롯에서 다시 만든다. color sentinel은 그 함수가
+                // 여기 실린 u0의 정수부로 판정하므로 그것만 보존한다.
+                .u0 = if (glyph.run.cache_key.color_glyph_kind == .color) uv.u0 + 2.0 else uv.u0,
+                .v0 = uv.v0,
+                .u1 = uv.u1,
+                .v1 = uv.v1,
                 .foreground = placement.foreground,
                 .layer = 0,
             });
@@ -151,20 +153,24 @@ pub const Artifact = struct {
     }
 };
 
-const ClippedQuad = struct {
+/// glyph quad와 그 atlas 슬롯을 함께 자른 결과. **UV는 여기서 계산하지 않는다** — `MetalFrameBuffer.replace`
+/// 가 매 프레임 `renormalizeGpuGlyphUvs`로 `atlas_*_px` 슬롯에서 UV를 다시 만들기 때문이다(atlas는 프레임
+/// 중간에 다른 pane 때문에 커질 수 있어 슬롯이 권위이고 UV는 파생값이다). 여기서 UV를 좁혀 봐야 그 재계산이
+/// 통째로 덮어써 기하만 줄고 텍스처는 원본이 남으므로, 부분적으로 보이는 행이 잘리는 대신 **찌그러진다**.
+const ClippedGlyph = struct {
     x: f32,
     y: f32,
     w: f32,
     h: f32,
-    u0: f32,
-    v0: f32,
-    u1: f32,
-    v1: f32,
+    atlas_x_px: u32,
+    atlas_y_px: u32,
+    atlas_width_px: u32,
+    atlas_height_px: u32,
 };
 
-/// glyph quad ∩ clip. 잘린 만큼 UV를 같은 비율로 좁혀 texture가 늘어나지 않게 한다. color glyph의
-/// `u0 + 2.0` sentinel은 렌더러가 정수부로 읽으므로 소수부만 보간하고 sentinel은 보존한다.
-fn clipGlyphQuad(quad: ClippedQuad, clip: ?metal_frame.ClipPx) ?ClippedQuad {
+/// glyph quad ∩ clip. 기하를 자르면서 대응하는 atlas 슬롯 영역도 같은 비율로 좁힌다. 슬롯은 정수 픽셀이라
+/// 부분 클립에서 1px 미만의 반올림 오차가 남는다(후속 GPU scissor 이관에서 자르기 자체가 없어지면 사라진다).
+fn clipGlyphQuad(quad: ClippedGlyph, clip: ?metal_frame.ClipPx) ?ClippedGlyph {
     const rect = clip orelse return quad;
     if (rect.w == 0 or rect.h == 0) return null;
     if (quad.w <= 0 or quad.h <= 0) return null;
@@ -177,43 +183,81 @@ fn clipGlyphQuad(quad: ClippedQuad, clip: ?metal_frame.ClipPx) ?ClippedQuad {
     const right = @min(quad.x + quad.w, clip_right);
     const bottom = @min(quad.y + quad.h, clip_bottom);
     if (right <= left or bottom <= top) return null;
-    const sentinel: f32 = if (quad.u0 >= 2.0) 2.0 else 0.0;
-    const u_start = quad.u0 - sentinel;
-    const u_span = quad.u1 - u_start;
-    const v_span = quad.v1 - quad.v0;
-    const left_ratio = (left - quad.x) / quad.w;
-    const right_ratio = (quad.x + quad.w - right) / quad.w;
-    const top_ratio = (top - quad.y) / quad.h;
-    const bottom_ratio = (quad.y + quad.h - bottom) / quad.h;
+    const slot_w: f32 = @floatFromInt(quad.atlas_width_px);
+    const slot_h: f32 = @floatFromInt(quad.atlas_height_px);
+    // glyph의 픽셀 origin은 fractional이라 두 반올림(잘라낸 양·남은 양)이 각각 올라갈 수 있다. 그대로 두면
+    // `cut + kept`가 슬롯을 한 텍셀 넘겨 **이웃 glyph의 텍셀**을 읽는다. 남은 폭/높이는 최소 1을 보장하되
+    // 잘라낸 양을 먼저 슬롯 안으로 가둔 뒤 그 나머지로 클램프한다.
+    const cut_x = @min(@as(u32, @intFromFloat(@round((left - quad.x) / quad.w * slot_w))), quad.atlas_width_px -| 1);
+    const cut_y = @min(@as(u32, @intFromFloat(@round((top - quad.y) / quad.h * slot_h))), quad.atlas_height_px -| 1);
+    const kept_w = @max(@as(u32, @intFromFloat(@round((right - left) / quad.w * slot_w))), 1);
+    const kept_h = @max(@as(u32, @intFromFloat(@round((bottom - top) / quad.h * slot_h))), 1);
     return .{
         .x = left,
         .y = top,
         .w = right - left,
         .h = bottom - top,
-        .u0 = u_start + u_span * left_ratio + sentinel,
-        .v0 = quad.v0 + v_span * top_ratio,
-        .u1 = quad.u1 - u_span * right_ratio,
-        .v1 = quad.v1 - v_span * bottom_ratio,
+        .atlas_x_px = quad.atlas_x_px + cut_x,
+        .atlas_y_px = quad.atlas_y_px + cut_y,
+        .atlas_width_px = @min(kept_w, quad.atlas_width_px - cut_x),
+        .atlas_height_px = @min(kept_h, quad.atlas_height_px - cut_y),
     };
 }
 
-test "clipGlyphQuad trims geometry and UV together and preserves the colour sentinel" {
-    const full = ClippedQuad{ .x = 100, .y = 200, .w = 10, .h = 20, .u0 = 0.5, .v0 = 0.25, .u1 = 0.6, .v1 = 0.45 };
+// 코드리뷰 회귀: 이전 구현은 clip한 만큼 UV를 좁혔는데, `MetalFrameBuffer.replace`가 매 프레임
+// `renormalizeGpuGlyphUvs`로 `atlas_*_px` 슬롯에서 UV를 다시 만들어 그 값을 통째로 덮어썼다. 기하만 줄고
+// 텍스처는 원본이 남아, 부분적으로 보이는 행이 **잘리는 대신 찌그러졌다**. clipGlyphQuad만 단언하는
+// 테스트는 이 결함을 못 잡는다 — 파이프라인의 그 다음 단계가 결과를 무효화하기 때문이다. 그래서 여기서는
+// 렌더러가 실제로 쓰는 재정규화 함수를 그대로 통과시킨 뒤의 UV가 남은 기하와 맞는지 본다.
+test "clipped glyph keeps matching UVs after the renderer renormalizes from the atlas slot" {
+    const tex = renderer.AtlasTextureSize{ .width_px = 512, .height_px = 512 };
+    const full = ClippedGlyph{ .x = 100, .y = 200, .w = 10, .h = 20, .atlas_x_px = 64, .atlas_y_px = 128, .atlas_width_px = 10, .atlas_height_px = 20 };
+    // 위 절반이 잘린 glyph. 남은 기하는 아래 절반이므로 텍스처도 아래 절반이어야 한다.
+    const clipped = clipGlyphQuad(full, .{ .x = 0, .y = 210, .w = 1000, .h = 1000 }) orelse return error.TestUnexpectedResult;
+    const uv = try renderer.glyph_quads.uvRectForPx(clipped.atlas_x_px, clipped.atlas_y_px, clipped.atlas_width_px, clipped.atlas_height_px, tex);
+    const full_uv = try renderer.glyph_quads.uvRectForPx(full.atlas_x_px, full.atlas_y_px, full.atlas_width_px, full.atlas_height_px, tex);
+    // v0가 원본과 최종 v1의 정확히 중간으로 내려가야 아래 절반이다. 재정규화가 원본 슬롯을 그대로 쓰면
+    // v0는 full_uv.v0에 머물고(= 이번 회귀), 그러면 전체 glyph가 절반 높이에 눌려 그려진다.
+    try std.testing.expectApproxEqAbs((full_uv.v0 + full_uv.v1) / 2, uv.v0, 0.0001);
+    try std.testing.expectApproxEqAbs(full_uv.v1, uv.v1, 0.0001);
+    try std.testing.expectApproxEqAbs(full_uv.u0, uv.u0, 0.0001);
+    try std.testing.expectApproxEqAbs(full_uv.u1, uv.u1, 0.0001);
+    // 텍스처가 차지하는 세로 비율과 기하가 차지하는 세로 비율이 같아야 찌그러지지 않는다.
+    const uv_ratio = (uv.v1 - uv.v0) / (full_uv.v1 - full_uv.v0);
+    const geom_ratio = clipped.h / full.h;
+    try std.testing.expectApproxEqAbs(geom_ratio, uv_ratio, 0.0001);
+}
+
+test "clipGlyphQuad trims the atlas slot with the geometry so UV renormalization stays correct" {
+    const full = ClippedGlyph{ .x = 100, .y = 200, .w = 10, .h = 20, .atlas_x_px = 64, .atlas_y_px = 128, .atlas_width_px = 10, .atlas_height_px = 20 };
     // clip 없음 = 원본 그대로.
-    try std.testing.expectEqual(full.w, (clipGlyphQuad(full, null) orelse return error.TestUnexpectedResult).w);
-    // 위쪽 절반이 잘리면 높이와 v0가 같은 비율로 움직인다.
+    try std.testing.expectEqual(full.atlas_height_px, (clipGlyphQuad(full, null) orelse return error.TestUnexpectedResult).atlas_height_px);
+    // 위쪽 절반이 잘리면 슬롯의 위쪽 절반도 함께 잘린다 — 그래야 renormalize가 만든 UV가 남은 기하와 맞는다.
     const half = clipGlyphQuad(full, .{ .x = 0, .y = 210, .w = 1000, .h = 1000 }) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(f32, 210), half.y);
     try std.testing.expectEqual(@as(f32, 10), half.h);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.35), half.v0, 0.0001);
-    try std.testing.expectEqual(full.v1, half.v1);
+    try std.testing.expectEqual(@as(u32, 138), half.atlas_y_px);
+    try std.testing.expectEqual(@as(u32, 10), half.atlas_height_px);
+    try std.testing.expectEqual(full.atlas_x_px, half.atlas_x_px);
+    try std.testing.expectEqual(full.atlas_width_px, half.atlas_width_px);
     // 완전히 밖이면 방출하지 않는다.
     try std.testing.expect(clipGlyphQuad(full, .{ .x = 0, .y = 0, .w = 10, .h = 10 }) == null);
-    // color glyph sentinel(+2.0)은 정수부로 살아남고 소수부만 좁아진다.
-    const colour = ClippedQuad{ .x = 0, .y = 0, .w = 10, .h = 10, .u0 = 2.5, .v0 = 0, .u1 = 0.6, .v1 = 1 };
-    const trimmed = clipGlyphQuad(colour, .{ .x = 5, .y = 0, .w = 100, .h = 100 }) orelse return error.TestUnexpectedResult;
-    try std.testing.expect(trimmed.u0 >= 2.0);
-    try std.testing.expectApproxEqAbs(@as(f32, 2.55), trimmed.u0, 0.0001);
+    // 잘린 슬롯이 원본을 넘지 않는다(반올림이 밖으로 새면 다른 glyph의 텍셀을 읽는다). glyph origin은
+    // fractional이라 "잘라낸 양"과 "남은 양"의 반올림이 **둘 다** 올라갈 수 있다 — 정수 origin만 보는
+    // 단언은 이 침범을 놓친다. 적대적 검증에서 나온 실제 케이스라 sub-pixel origin을 훑는다.
+    var offset: f32 = 0;
+    while (offset < 1.0) : (offset += 0.1) {
+        var fractional = full;
+        fractional.y = 200 + offset;
+        var clip_top: u32 = 200;
+        while (clip_top <= 221) : (clip_top += 1) {
+            const cut = clipGlyphQuad(fractional, .{ .x = 0, .y = clip_top, .w = 1000, .h = 1000 }) orelse continue;
+            try std.testing.expect(cut.atlas_y_px >= full.atlas_y_px);
+            try std.testing.expect(cut.atlas_y_px + cut.atlas_height_px <= full.atlas_y_px + full.atlas_height_px);
+            try std.testing.expect(cut.atlas_x_px + cut.atlas_width_px <= full.atlas_x_px + full.atlas_width_px);
+            try std.testing.expect(cut.atlas_height_px >= 1);
+        }
+    }
 }
 
 /// Shapes every non-icon Session Dock text op into one immutable artifact. Registered SVG icon
@@ -234,6 +278,30 @@ pub fn shapeOps(
     return resolveArtifact(allocator, registry, unresolved);
 }
 
+/// 이 text op이 measured 셰이핑 대상인지. **셰이핑 키(`richTextFingerprint`)와 request가 반드시 같은
+/// 답을 써야 한다.** 두 필터가 갈라지면 "키는 같은데 artifact에는 그 run이 없는" 상태가 만들어지고,
+/// 키가 스크롤 평행이동에 불변이므로 그 artifact가 그 줄이 보여야 할 위치에서 재사용되어 줄이 영구히 빈 채로
+/// 남는다(음수 origin 드롭이 실제로 그 결함을 냈다). 그래서 판정을 여기 한 곳에 둔다.
+pub fn shapesTextOp(text: chrome.draw.Op.Text) bool {
+    // 등록 SVG/PUA 아이콘은 icon draw list가 그린다 — spinner phase가 매 프레임 바뀌므로 셰이핑 키에
+    // 넣으면 모든 결과가 도착 전에 stale이 된다.
+    return !text.wide_icons;
+}
+
+/// op 안의 한 run이 셰이핑 대상인지. op 단위 판정과 같은 이유로 단일 출처다.
+pub fn shapesRun(text: chrome.draw.Op.Text, run: chrome.draw.Run, max_width_px: u32) bool {
+    if (max_width_px == 0) return false;
+    // 순수 등록 SVG placement는 CoreText source bytes가 없다. 그 semantic run은 유지한다(worker가
+    // 셰이핑을 건너뛰고 논리 rect에서 SVG를 직접 해석한다). 그 밖의 빈 텍스트는 inert다.
+    return run.text.len != 0 or text.placement == .icon_in_rect;
+}
+
+/// `max_cols`/`max_width_px`에서 이 op의 픽셀 폭 예산을 푼다. 키와 request가 같은 값을 봐야 하므로
+/// 이것도 단일 출처다.
+pub fn opMaxWidthPx(text: chrome.draw.Op.Text, cell_width_px: u32) ?u32 {
+    return text.max_width_px orelse (std.math.mul(u32, text.max_cols, cell_width_px) catch null);
+}
+
 /// Copies only non-icon semantic text out of the frame-local draw list.  This is intentionally
 /// cheap enough for the frame path; CoreText shaping is performed only by `shapeRequest`.
 pub fn prepareRequest(
@@ -250,14 +318,13 @@ pub fn prepareRequest(
     }
     for (ops) |op| switch (op) {
         .text => |text| {
-            if (text.wide_icons or text.origin.x < 0 or text.origin.y < 0) continue;
-            const max_width = text.max_width_px orelse std.math.mul(u32, text.max_cols, cell_width_px) catch continue;
+            // 좌표(특히 음수 origin)는 여기서 거르지 않는다. 좌표는 shaping 입력이 아니라 placement
+            // 계산에만 쓰이고, 화면 밖 여부는 backend의 뷰포트 클립이 판단한다. 거르면 셰이핑 키와 집합이
+            // 갈라져 캐시가 그 줄을 영구히 잃는다(`shapesTextOp` 주석).
+            if (!shapesTextOp(text)) continue;
+            const max_width = opMaxWidthPx(text, cell_width_px) orelse continue;
             for (text.runs) |run| {
-                // A pure registered SVG placement deliberately has no CoreText source bytes.
-                // Keep that semantic run: the detached worker will skip shaping it and resolve
-                // the SVG directly from its logical content rect. Ordinary empty text remains
-                // inert so an accidental blank label cannot allocate an artifact.
-                if ((run.text.len == 0 and text.placement != .icon_in_rect) or max_width == 0) continue;
+                if (!shapesRun(text, run, max_width)) continue;
                 try runs.append(allocator, .{
                     .text = try allocator.dupe(u8, run.text),
                     .role = text.text_role,
@@ -328,6 +395,37 @@ test "prepareRequest keeps a Korean button label and an icon-in-rect on the meas
     try std.testing.expectEqual(@as(u32, 18 * 8), request.runs[0].max_width_px);
     try std.testing.expectEqual(@as(usize, 0), request.runs[1].text.len);
     try std.testing.expectEqual(@as(u21, 0xF0021), request.runs[1].placement.icon_in_rect.icon_codepoint);
+}
+
+// 코드리뷰 회귀: 셰이핑 키가 스크롤 평행이동에 불변이 되면서, 같은 키가 "그 줄이 화면 위로 나가 있던
+// 프레임"과 "그 줄이 보이는 프레임" 양쪽을 가리킬 수 있게 됐다. 그런데 request는 음수 origin을 버리고
+// 있었으므로, 전자에서 만든 artifact에는 그 run이 없고 후자에서 그 artifact가 재사용되며 그 줄이 영구히
+// 빈 채로 남았다(확장 카드를 위로 밀었다 되돌리면 제목과 첫 turn이 사라진다). 좌표는 shaping 입력이
+// 아니므로 음수여도 셰이핑해야 하고, 화면 밖 여부는 backend의 뷰포트 클립이 판단한다.
+test "prepareRequest keeps runs scrolled above the pane so a translated cache stays complete" {
+    const allocator = std.testing.allocator;
+    const above_runs = [_]chrome.draw.Run{.{ .text = "scrolled-above" }};
+    const visible_runs = [_]chrome.draw.Run{.{ .text = "visible" }};
+    const ops = [_]chrome.draw.Op{
+        .{ .text = .{ .origin = .{ .x = 20, .y = -48 }, .runs = &above_runs, .role = .surface_fg, .text_role = .card_heading, .max_cols = 20, .scroll_clipped = true } },
+        .{ .text = .{ .origin = .{ .x = 20, .y = 120 }, .runs = &visible_runs, .role = .surface_fg, .text_role = .body, .max_cols = 20, .scroll_clipped = true } },
+    };
+    const tk = chrome.Tokens.rich(.{
+        .foreground = .{ .r = 240, .g = 240, .b = 240 },
+        .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
+        .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
+        .sidebar_active = .{ .r = 80, .g = 80, .b = 80 },
+        .search_match = .{ .r = 1, .g = 2, .b = 3 },
+        .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
+        .selection = .{ .r = 7, .g = 8, .b = 9 },
+        .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .accent = .{ .r = 13, .g = 14, .b = 15 },
+    });
+    var request = try prepareRequest(allocator, 5, &ops, &tk, 8);
+    defer request.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), request.runs.len);
+    try std.testing.expectEqualStrings("scrolled-above", request.runs[0].text);
+    try std.testing.expectEqual(@as(i32, -48), request.runs[0].origin.y);
 }
 
 /// Calls CoreText without touching the renderer.  `Request` owns every input byte, so this is
@@ -402,6 +500,9 @@ pub fn resolveArtifact(
     const records = try allocator.alloc(renderer.ShapedGlyphRecord, total_count);
     errdefer allocator.free(records);
     const placements = try allocator.alloc(Placement, total_count);
+    // 아래에는 아직 error return이 남아 있다(등록되지 않은 아이콘·불변식 위반·registry.intern OOM).
+    // records만 errdefer로 회수하면 그 경로마다 placement 배열이 프레임 단위로 샌다.
+    errdefer allocator.free(placements);
     var record_index: usize = 0;
     for (unresolved.glyphs) |glyph| {
         const run_index: usize = glyph.run_index;

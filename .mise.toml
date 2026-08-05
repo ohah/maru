@@ -158,9 +158,9 @@ description = "Compare Session Dock smoke captures against committed golden imag
 run = "zig build test-dock-visual-golden"
 
 [tasks.macos-dock-visual-golden]
-description = "Capture the Session Dock smoke and gate it against committed golden images"
-depends = ["macos-agent-session-archive-smoke"]
-# 스모크를 먼저 돌렸으므로 캡처가 없다는 건 그 스모크가 실패했다는 뜻이다 — skip으로 넘기면 게이트가
+description = "Capture Chrome Lab scenarios and gate them against committed golden images"
+depends = ["macos-chrome-lab-smoke"]
+# Lab을 먼저 돌렸으므로 캡처가 없다는 건 그 Lab이 실패했다는 뜻이다 — skip으로 넘기면 게이트가
 # 무력화되고 아무도 눈치채지 못한다.
 env = { MARU_REQUIRE_GOLDEN = "1" }
 run = "zig build test-dock-visual-golden"

@@ -570,7 +570,7 @@ renderer capability의 현재 검증 계약은 `editor_epoch`를 포함한 `Rend
 > **시각 골든 게이트(2026-08-05):** chrome/renderer의 시각 계약은 그동안 사람이 캡처를 **눈으로** 확인했고,
 > 그 방식이 실제로 회귀를 놓쳤다 — 부분적으로 보이는 행이 "잘린" 것과 "세로로 눌린" 것을 구분하지 못해
 > 클리핑이 죽은 상태를 정상으로 보고했다(#1882 코드리뷰가 잡았다). 이제 `macos-agent-session-archive-smoke`가
-> 남긴 실제 AppKit+Metal PPM 캡처의 **관심 영역**을 커밋된 골든과 픽셀 비교한다(`test-dock-visual-golden`,
+> 남긴 제품 lowering+Metal 오프스크린 PPM 캡처의 **관심 영역**을 커밋된 골든과 픽셀 비교한다(`test-dock-visual-golden`,
 > CI macOS job). 전체 프레임(5.5 MB)이 아니라 계약이 걸린 좁은 사각형만 저장해, 무관한 UI 변경으로 갱신되지
 > 않게 했다: 스크롤 클립 경계·확장 액션 라벨·목록 밀도 3장. 갱신은 `MARU_UPDATE_GOLDEN=1`(기존 replay 골든과
 > 같은 관례)이며 **갱신 후 눈으로 확인하고 커밋**한다 — 자동 갱신은 회귀를 골든으로 굳힐 수 있다. 실효성은

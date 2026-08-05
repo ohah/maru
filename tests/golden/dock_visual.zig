@@ -1,7 +1,7 @@
 //! Session Dock 시각 골든 게이트.
 //!
-//! 무엇을 증명하는가: `macos-agent-session-archive-smoke`가 **실제 AppKit + Metal 경로**로 남긴 캡처의
-//! 관심 영역이, 커밋된 골든과 픽셀 단위로 같은지. chrome/renderer의 시각 계약(스크롤 클리핑, 액션 라벨,
+//! 무엇을 증명하는가: Chrome Lab이 **제품 lowering + Metal 오프스크린 렌더**로 남긴 캡처의 관심 영역이,
+//! 커밋된 골든과 픽셀 단위로 같은지. chrome/renderer의 시각 계약(스크롤 클리핑, 액션 라벨,
 //! 카드 밀도)은 지금까지 사람이 캡처를 눈으로 확인해 왔는데, 그 방식이 실제로 놓친 회귀가 있었다 —
 //! 부분적으로 보이는 행이 "잘린" 것과 "세로로 눌린" 것을 구분하지 못해 클리핑이 죽은 상태를 정상으로
 //! 보고했다(#1882 코드리뷰가 잡았다). 사람 눈이 놓치는 종류의 차이를 기계가 보게 하는 것이 목적이다.
@@ -12,8 +12,14 @@
 //! 골든 갱신: `MARU_UPDATE_GOLDEN=1 zig build test-dock-visual-golden` (기존 replay 골든과 같은 관례).
 //! 갱신 후에는 **반드시 눈으로 확인**하고 커밋한다 — 자동 갱신은 회귀를 골든으로 굳힐 수 있다.
 //!
-//! 캡처가 없으면 skip한다. 이 게이트는 스모크를 먼저 돌린 환경에서만 의미가 있고, 캡처 부재를 실패로
-//! 만들면 스모크와 무관한 변경까지 막는다.
+//! 왜 archive 스모크가 아니라 Lab인가: archive 스모크는 실제 앱을 띄우는 visible AppKit 픽스처라
+//! `Maru.app` 번들(Swift host + web 번들 + 코드사인)을 통째로 요구한다. 시각 계약을 지키는 데 그 비용은
+//! 불필요하다. Lab은 같은 제품 lowering과 Metal 렌더를 오프스크린으로 태우므로 번들 없이 결정적이고,
+//! 창 생성 실패 같은 환경 변수도 없다. archive 스모크는 실제 사용자 플로우(포인터·키·provider 실행)
+//! 검증에 그대로 남는다 — 두 게이트가 서로 다른 것을 본다.
+//!
+//! 캡처가 없으면 skip한다. 이 게이트는 Lab을 먼저 돌린 환경에서만 의미가 있고, 캡처 부재를 실패로
+//! 만들면 Lab과 무관한 변경까지 막는다.
 //!
 //! 단 **CI처럼 스모크를 먼저 돌리도록 배선한 곳에서는 skip이 곧 무력화**다: 창 생성이나 캡처가 실패해도
 //! 초록으로 지나가고, 로그를 아무도 안 보면 "게이트가 있다"는 착각만 남는다. `MARU_REQUIRE_GOLDEN=1`이면
@@ -22,7 +28,7 @@
 const std = @import("std");
 const ppm = @import("ppm");
 
-const capture_root = "zig-out/maru-agent-session-archive-smoke/captures";
+const capture_root = "zig-out/maru-macos-chrome-lab";
 const golden_root = "tests/fixtures/golden/dock";
 
 /// GPU 렌더는 같은 기기·드라이버에서 결정적이지만, 러너가 바뀌면 rasterizer 미세 차이가 날 수 있다.
@@ -40,24 +46,22 @@ const Case = struct {
 
 const cases = [_]Case{
     .{
-        .name = "scroll-clip-boundary",
-        .capture = "expanded-scroll-anchor-scroll-anchor-after.ppm",
-        .contract = "부분적으로 보이는 카드가 스크롤 영역 상단에서 잘린다(눌리지 않는다) + 고정 chrome 미침범",
-        .rect = .{ .x = 1300, .y = 275, .w = 600, .h = 90 },
+        .name = "partial-scroll-cards",
+        .capture = "partial-scroll.ppm",
+        .contract = "부분 스크롤된 카드 3행의 높이·간격이 DockMetrics대로다(축소되지 않는다)",
+        .rect = .{ .x = 0, .y = 205, .w = 480, .h = 290 },
+    },
+    .{
+        .name = "group-header-pill",
+        .capture = "retained-list.ppm",
+        .contract = "그룹 헤더의 이름·chevron·count pill이 행 안 제자리에 있다(pill이 아래로 새지 않는다)",
+        .rect = .{ .x = 0, .y = 225, .w = 480, .h = 60 },
     },
     .{
         .name = "expanded-actions",
-        .capture = "expanded-scroll-anchor-scroll-anchor-after.ppm",
-        .contract = "펼친 카드의 액션 버튼에 아이콘과 라벨이 있다(빈 상자가 아니다)",
-        .rect = .{ .x = 1300, .y = 610, .w = 600, .h = 60 },
-    },
-    .{
-        .name = "list-density",
-        .capture = "resume-pointer-list.ppm",
-        .contract = "그룹 헤더와 카드 3행의 높이·간격이 DockMetrics대로다(축소되지 않는다)",
-        // 스코프 버튼 행을 반쯤 걸치지 않게 검색 필드 아래부터 잡는다 — 골든은 검증하려는 계약만 담아야
-        // 무관한 변경으로 갱신되지 않는다.
-        .rect = .{ .x = 1300, .y = 240, .w = 600, .h = 240 },
+        .capture = "detail-ready.ppm",
+        .contract = "펼친 detail의 액션 버튼에 아이콘과 라벨이 있다(빈 상자가 아니다)",
+        .rect = .{ .x = 0, .y = 660, .w = 480, .h = 60 },
     },
 };
 
@@ -126,7 +130,7 @@ test "session dock visual golden" {
 
     if (checked == 0) {
         // 캡처가 하나도 없으면 조용히 통과하지 않는다 — "게이트가 돌았다"는 착각이 가장 위험하다.
-        std.debug.print("dock 시각 골든: 캡처가 없어 건너뛴다(먼저 `zig build macos-agent-session-archive-smoke`)\n", .{});
+        std.debug.print("dock 시각 골든: 캡처가 없어 건너뛴다(먼저 `zig build macos-chrome-lab-smoke`)\n", .{});
         // 스모크를 먼저 돌리도록 배선한 곳(CI)에서는 캡처 부재 자체가 결함이다. 창 생성이나 캡처가
         // 실패했는데 게이트가 초록이면 그 실패를 영원히 못 본다.
         if (std.c.getenv("MARU_REQUIRE_GOLDEN") != null) return error.VisualGoldenCapturesMissing;

@@ -8,6 +8,7 @@ const layout = @import("chrome/ui/layout.zig");
 const style = @import("chrome/ui/style.zig");
 const tree = @import("chrome/ui/tree.zig");
 const ui_button = @import("chrome/ui/button.zig");
+const ui_badge = @import("chrome/ui/badge.zig");
 const interaction = @import("chrome/ui/interaction.zig");
 const intent_table = @import("chrome/ui/intent_table.zig");
 const continuous_drag = @import("chrome/ui/continuous_drag.zig");
@@ -25,6 +26,7 @@ test {
     const testing = @import("std").testing;
     testing.refAllDecls(layout);
     testing.refAllDecls(ui_button);
+    testing.refAllDecls(ui_badge);
     testing.refAllDecls(style);
     testing.refAllDecls(tree);
     testing.refAllDecls(interaction);

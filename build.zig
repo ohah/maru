@@ -217,6 +217,38 @@ pub fn build(b: *std.Build) void {
         macos_metal_smoke.root_module.linkFramework("Metal", .{});
         macos_metal_smoke.root_module.linkFramework("QuartzCore", .{});
 
+        // 제품 셰이더는 런타임에 컴파일된다(`newLibraryWithSource:`). 그래서 MSL 문법이 깨져도 빌드·단위
+        // 테스트·Metal 계약 테스트(실제 GPU를 만들지 않는다)가 전부 통과하고 앱을 띄워야만 드러난다.
+        // 이 스모크는 같은 소스를 같은 API로 컴파일하고 제품이 찾는 진입점 이름까지 확인해 그 갭만 닫는다.
+        // 렌더 결과는 보지 않으므로 수 초면 끝나고 CI macOS job에 얹을 수 있다.
+        const macos_shader_compile_smoke = b.addExecutable(.{
+            .name = "maru-macos-shader-compile-smoke",
+            .root_module = b.createModule(.{
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            }),
+        });
+        macos_shader_compile_smoke.root_module.addCSourceFile(.{
+            .file = b.path("src/platform/macos/shader_compile_smoke.m"),
+            .flags = &.{"-fobjc-arc"},
+        });
+        macos_shader_compile_smoke.root_module.addIncludePath(b.path("src/platform/macos"));
+        // 이 실행 파일은 `maru` 모듈을 쓰지 않으므로 위쪽에서 `maru_mod`에만 더한 SDK framework 경로 보강을
+        // 상속하지 못한다(os_version_min을 박으면 Zig가 자동 탐지를 끄는 그 문제 — 파일 상단 주석 참조).
+        if (macos_sdk) |sdk| {
+            macos_shader_compile_smoke.root_module.addSystemFrameworkPath(.{ .cwd_relative = b.fmt("{s}/System/Library/Frameworks", .{sdk}) });
+        }
+        macos_shader_compile_smoke.root_module.linkFramework("Foundation", .{});
+        macos_shader_compile_smoke.root_module.linkFramework("Metal", .{});
+        const macos_shader_compile_smoke_step = b.step(
+            "macos-shader-compile-smoke",
+            "Compile every product Metal shader and assert its entry points exist",
+        );
+        const macos_shader_compile_smoke_cmd = b.addRunArtifact(macos_shader_compile_smoke);
+        macos_shader_compile_smoke_cmd.setCwd(b.path("."));
+        macos_shader_compile_smoke_step.dependOn(&macos_shader_compile_smoke_cmd.step);
+
         const macos_metal_smoke_step = b.step("macos-metal-smoke", "Run the visible macOS Metal product atlas sampling smoke");
         const macos_metal_smoke_cmd = b.addRunArtifact(macos_metal_smoke);
         macos_metal_smoke_cmd.setCwd(b.path("."));

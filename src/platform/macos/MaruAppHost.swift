@@ -3977,6 +3977,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var tabDragSmokeEscapeModelFirst: UInt64 = 0
     private var tabDragSmokeEscapeVisibleFirst: UInt64 = 0
     private var tabDragSmokeEscapeCaptureCleared = false
+    private var tabDragSmokeCaptures: [String] = []
 
     // 5b: 웹 패널이 격리 E2E probe(evaluateJavaScript)를 스모크에서만 돌리게 노출(정상 런은 probe 안 함 — 오버헤드 0).
     var isSmokeMode: Bool { smokeMode }
@@ -8374,6 +8375,32 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         smokeMode && ProcessInfo.processInfo.environment["MARU_TAB_DRAG_SMOKE"] == "1"
     }
 
+    /// 지금 화면(제품 Metal 합성 결과)을 fixture 디렉터리에 PPM 한 장으로 떨어뜨린다. **끄는 도중**을 찍어야
+    /// 하므로 `MARU_SCREENSHOT`(내용 있는 첫 frame 한 장 뒤 종료)으로는 얻을 수 없고, renderer의 one-shot
+    /// test-capture seam을 쓴다. 경로는 격리된 스모크 HOME 아래로 고정한다 — env 값이 임의 쓰기 경로가 되지
+    /// 않도록 AS4-c와 같은 규율이다. 실패해도 스모크 단언에 영향을 주지 않는다(시각 증거는 부가 artifact).
+    @discardableResult
+    private func captureTabDragSmokeFrame(_ label: String, in surface: TerminalSurface) -> Bool {
+        guard isTabDragSmokeMode, let renderer = surface.metalRenderer else { return false }
+        let home = URL(fileURLWithPath: NSHomeDirectory()).standardizedFileURL
+        guard home.lastPathComponent == "tab-drag-home" else { return false }
+        let dir = home.appendingPathComponent("captures", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let path = dir.appendingPathComponent("tab-drag-\(label).ppm").standardizedFileURL
+        guard path.deletingLastPathComponent() == dir,
+              !FileManager.default.fileExists(atPath: path.path),
+              maru_metal_renderer_request_test_capture(renderer, path.path)
+        else { return false }
+        withSurface(surface) {
+            // 평소 frame 구성·renderer 호출 그대로다. drawMetalFrame이 세대가 같으면 건너뛰므로 한 번 깨운다.
+            metalNeedsRedraw = true
+            _ = renderTick()
+        }
+        guard FileManager.default.fileExists(atPath: path.path) else { return false }
+        tabDragSmokeCaptures.append("captures/tab-drag-\(label).ppm")
+        return true
+    }
+
     /// CIM4b — 탭을 실제 `NSEvent`로 끌어 §4.4 provisional live reorder를 제품 경로에서 본다.
     /// 두 가지를 본다: ① 끄는 **동안** 보이는 순서가 움직였는데 model은 그대로다(둘이 갈린다),
     /// 손을 떼면 그제서야 model이 따라온다. ② 두 번째 드래그를 Escape로 끊으면 model이 그대로다.
@@ -8442,6 +8469,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
         // ① 끌고 있는 동안: 보이는 첫 탭은 바뀌고 model 첫 탭은 그대로여야 한다.
         tabDragSmokeModelFirstBefore = current.tab_model_first_id
+        captureTabDragSmokeFrame("before", in: surface) // 드래그 전 탭 바(비교 기준)
         guard let down = event(.leftMouseDown, firstX) else { return }
         view.mouseDown(with: down)
         for step in 1...3 {
@@ -8449,6 +8477,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             guard let dragged = event(.leftMouseDragged, x) else { continue }
             view.mouseDragged(with: dragged)
         }
+        // **끄는 도중**의 실제 제품 프레임 — provisional preview가 화면에 보인다는 유일한 픽셀 증거다
+        // (probe는 identity만 본다). floating 고스트와 재배치된 탭 제목이 여기 들어 있다.
+        captureTabDragSmokeFrame("during", in: surface)
         if let during = probe() {
             tabDragSmokeCaptureDuringDrag = during.tab_drag_active != 0
             tabDragSmokeModelFirstDuringDrag = during.tab_model_first_id
@@ -8461,6 +8492,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             tabDragSmokeCaptureAfterUp = after.tab_drag_active != 0
             tabDragSmokeModelFirstAfterCommit = after.tab_model_first_id
         }
+        // commit 직후 — 고스트·drop 하이라이트가 걷히고 탭이 새 자리에 앉았는지(잔상 회귀 가드).
+        captureTabDragSmokeFrame("after-commit", in: surface)
 
         // ② 두 번째 드래그를 Escape로 끊는다 — model은 ①의 commit 결과에서 더 움직이지 않아야 한다.
         if let down2 = event(.leftMouseDown, firstX) {
@@ -8485,6 +8518,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 tabDragSmokeEscapeModelFirst = escaped.tab_model_first_id
                 tabDragSmokeEscapeVisibleFirst = escaped.tab_visible_first_id
             }
+            // Escape 복원 직후 — 화면이 `after-commit`과 같아야 한다(되돌아왔다는 픽셀 증거).
+            captureTabDragSmokeFrame("after-escape", in: surface)
         }
     }
 
@@ -10121,6 +10156,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             tab_drag_escape_capture_cleared=\(tabDragSmokeEscapeCaptureCleared)
             tab_drag_escape_model_first=\(tabDragSmokeEscapeModelFirst)
             tab_drag_escape_visible_first=\(tabDragSmokeEscapeVisibleFirst)
+            tab_drag_capture_count=\(tabDragSmokeCaptures.count)
+            tab_drag_captures=\(tabDragSmokeCaptures.joined(separator: ","))
 
             """
         }

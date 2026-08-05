@@ -137,6 +137,22 @@ _Static_assert(sizeof(MaruRendererImageVertex) == 16, "MaruRendererImageVertex m
 @implementation MaruMetalRendererImpl
 @end
 
+/* one-shot test capture seam을 열어 주는 fixture env 허용 목록. 값은 정확히 "1"이어야 하고(fail-closed),
+   여기 없는 실행에서는 seam 자체가 없다 — 제품·일반 스크린샷 경로는 이 함수를 통과하지 못한다. */
+static bool maru_test_capture_env_allows(void) {
+    static const char *const gates[] = {
+        "MARU_AGENT_SESSION_ARCHIVE_SMOKE", /* AS4-c 아카이브 상태 캡처 */
+        "MARU_TAB_DRAG_SMOKE",              /* CIM4b 탭 드래그 — 끄는 도중 프레임 */
+    };
+    for (size_t i = 0; i < sizeof(gates) / sizeof(gates[0]); i += 1) {
+        const char *value = getenv(gates[i]);
+        if (value != NULL && strcmp(value, "1") == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool maru_metal_renderer_request_test_capture(
     MaruMetalRenderer *renderer,
     const char *ppm_path
@@ -147,8 +163,9 @@ bool maru_metal_renderer_request_test_capture(
     // This is deliberately unavailable to ordinary screenshot/product launches. The host also
     // verifies an isolated fixture root, but keeping the renderer seam independently test-gated
     // prevents another caller from accidentally changing MARU_SCREENSHOT's one-frame exit contract.
-    const char *smoke = getenv("MARU_AGENT_SESSION_ARCHIVE_SMOKE");
-    if (smoke == NULL || strcmp(smoke, "1") != 0) {
+    // 허용 목록은 이 seam을 실제로 쓰는 AppKit E2E들이다 — CIM4b 탭 드래그 스모크는 **끄는 도중의**
+    // 프레임을 찍어야 해서 첫-프레임-후-종료인 MARU_SCREENSHOT으로는 얻을 수 없다.
+    if (!maru_test_capture_env_allows()) {
         return false;
     }
     MaruMetalRendererImpl *impl = (__bridge MaruMetalRendererImpl *)renderer;

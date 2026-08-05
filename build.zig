@@ -1425,7 +1425,12 @@ pub fn build(b: *std.Build) void {
                 "escaped=$(/usr/bin/sed -n 's/^tab_drag_escape_model_first=//p' \"$summary\"); " ++
                 "escaped_visible=$(/usr/bin/sed -n 's/^tab_drag_escape_visible_first=//p' \"$summary\"); " ++
                 "test \"$escaped\" = \"$committed\"; " ++
-                "test \"$escaped_visible\" = \"$committed\"",
+                "test \"$escaped_visible\" = \"$committed\"; " ++
+                // 시각 증거: 드래그 전/중/commit 후/Escape 후 네 장이 실제 파일로 남았다. **during**이 핵심이다 —
+                // probe는 identity만 보므로, preview가 화면에 실제로 보인다는 픽셀 증거는 이 한 장뿐이다.
+                "/usr/bin/grep -Eq '^tab_drag_capture_count=4$' \"$summary\"; " ++
+                "for f in before during after-commit after-escape; do " ++
+                "test -s zig-out/maru-macos-app/tab-drag-home/captures/tab-drag-$f.ppm; done",
         });
         macos_tab_drag_smoke_assert.setCwd(b.path("."));
         macos_tab_drag_smoke_assert.step.dependOn(&macos_tab_drag_smoke.step);

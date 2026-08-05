@@ -58,6 +58,16 @@ const cases = [_]Case{
         .rect = .{ .x = 0, .y = 225, .w = 480, .h = 60 },
     },
     .{
+        // GPU per-quad clip(ABI v95)의 핵심 주장을 **radius 있는 도형으로** 고정한다. CPU가 rect를 미리
+        // 자르면 shader가 줄어든 rect를 원본으로 착각해 잘린 변에도 곡률을 그리고 그 변을 따라 border
+        // stroke를 긋는다. 원본 모양을 그린 뒤 뷰포트 밖 fragment만 버려야 잘린 변이 직선으로 남는다.
+        // 카드 배경(radius 0)으로는 이 계약을 볼 수 없어 그동안 미검증으로 남아 있었다.
+        .name = "group-pill-clipped-edge",
+        .capture = "partial-group-scroll.ppm",
+        .contract = "스크롤 상단에 걸친 그룹 count pill의 잘린 변이 직선이다(곡률·border stroke가 생기지 않는다)",
+        .rect = .{ .x = 380, .y = 200, .w = 100, .h = 60 },
+    },
+    .{
         .name = "expanded-actions",
         .capture = "detail-ready.ppm",
         .contract = "펼친 detail의 액션 버튼에 아이콘과 라벨이 있다(빈 상자가 아니다)",

@@ -49550,7 +49550,7 @@ test "file tree header and populated blank left click are inert while right clic
     session.closeContextMenu();
 }
 
-test "wheel·track click·keyboard가 같은 스크롤 상태를 움직이고 anchor가 선택을 따라간다" {
+test "wheel·track click·keyboard가 하나의 스크롤 상태를 이어받고 발행이 그 값을 따른다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try initSmokeSessionSized(allocator);
@@ -49585,15 +49585,22 @@ test "wheel·track click·keyboard가 같은 스크롤 상태를 움직이고 an
     try std.testing.expect(after_track > after_wheel);
     session.endScrollbarCapture();
 
-    // ③ keyboard — 선택이 화면 밖으로 나가면 anchor가 그것을 따라 들어온다. 위로 크게 움직여
-    //    스크롤이 실제로 되돌아오는지 본다.
+    // ③ **상태 공유** — 앞 두 입구가 올려놓은 값을 keyboard anchor가 이어받는가. 단조 증가만
+    //    보면 각 입구가 자기 변수를 들고 있어도 통과한다(마지막에 쓴 쪽이 게터에 반영되므로).
+    //    그래서 "이미 보이는 행을 겨냥하면 아무 것도 움직이지 않는다"를 본다 — anchor가 현재
+    //    스크롤을 실제로 읽고 있어야만 성립하는 성질이다.
+    const visible_index = after_track + session.fileTreeVisibleRows() / 2;
+    session.scrollFileTreeSelectionIntoView(visible_index);
+    try std.testing.expectEqual(after_track, session.fileTreeEffectiveScroll());
+
+    // ④ keyboard — 선택이 화면 밖으로 나가면 anchor가 그것을 따라 들어온다.
     session.scrollFileTreeSelectionIntoView(0);
     try std.testing.expectEqual(@as(usize, 0), session.fileTreeEffectiveScroll());
     session.scrollFileTreeSelectionIntoView(500);
     const after_anchor = session.fileTreeEffectiveScroll();
     try std.testing.expect(after_anchor > 0);
 
-    // ④ 그리고 그 상태가 곧 thumb 위치다 — 발행된 tree가 같은 값에서 나온다.
+    // ⑤ 그리고 그 상태가 곧 thumb 위치다 — 발행된 tree가 같은 값에서 나온다.
     session.refreshFileTreeScrollbarGeometry();
     const moved = session.fileTreeScrollbarGeometry().?;
     try std.testing.expectEqual(after_anchor, moved.scroll_rows);

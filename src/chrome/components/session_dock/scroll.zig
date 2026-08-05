@@ -159,6 +159,10 @@ pub fn scrollbarGeometry(
     content_y: f32,
     content_w: f32,
     content_h: f32,
+    /// scroll-area 오른쪽에 남아 있는 도크 padding 폭. 스크롤바는 **그 여백 안에** 놓여 카드·버튼과
+    /// 겹치지 않는다. 여백이 모자라면 아예 그리지 않는다 — 목록 위에 겹쳐 그리는 대안은 사용자가
+    /// "UI랑 겹쳐 보인다"고 보고한 바로 그 상태다.
+    gutter_w: f32,
     content_height_px: u32,
     offset_px: u32,
     m: ScrollbarMetrics,
@@ -167,8 +171,8 @@ pub fn scrollbarGeometry(
     const viewport_h_px: u32 = @intFromFloat(@max(content_h, 0));
     const max_offset = content_height_px -| viewport_h_px;
     if (max_offset == 0) return null;
-    const occupied: f32 = @floatFromInt(m.width_px + m.inset_x_px);
-    if (content_w <= occupied) return null;
+    const width: f32 = @floatFromInt(m.width_px);
+    if (gutter_w < width) return null;
 
     const track_h = content_h;
     const proportional = track_h * content_h / @as(f32, @floatFromInt(content_height_px));
@@ -177,7 +181,9 @@ pub fn scrollbarGeometry(
     const clamped_offset = @min(offset_px, max_offset);
     const ratio = @as(f32, @floatFromInt(clamped_offset)) / @as(f32, @floatFromInt(max_offset));
     return .{
-        .track_x = content_x + content_w - @as(f32, @floatFromInt(m.width_px + m.inset_x_px)),
+        // 여백 안에서 가운데. 도크 바깥 edge에 붙이면 rounded clip에 닿아 잘려 보이고, content에
+        // 붙이면 다시 카드와 겹친다.
+        .track_x = content_x + content_w + (gutter_w - width) / 2,
         .track_y = content_y,
         .track_w = @floatFromInt(m.width_px),
         .track_h = track_h,
@@ -306,23 +312,23 @@ test "page and anchor helpers preserve bounded pixel semantics" {
 test "scrollbar geometry only exists when the list actually overflows" {
     const m = ScrollbarMetrics{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 };
     // 넘치지 않으면 발행하지 않는다 — 없는 여백을 있다고 말하지 않기 위해서다.
-    try std.testing.expect(scrollbarGeometry(0, 0, 200, 400, 400, 0, m) == null);
-    try std.testing.expect(scrollbarGeometry(0, 0, 200, 400, 300, 0, m) == null);
-    // 폭이 track+inset을 못 담으면 그리지 않는다(잘린 스크롤바를 내지 않는다).
-    try std.testing.expect(scrollbarGeometry(0, 0, 12, 400, 4000, 0, m) == null);
+    try std.testing.expect(scrollbarGeometry(0, 0, 200, 400, 40, 400, 0, m) == null);
+    try std.testing.expect(scrollbarGeometry(0, 0, 200, 400, 40, 300, 0, m) == null);
+    // 도크 여백이 track 폭을 못 담으면 그리지 않는다 — 목록 위에 겹쳐 그리는 대안은 두지 않는다.
+    try std.testing.expect(scrollbarGeometry(0, 0, 200, 400, 4, 4000, 0, m) == null);
 }
 
 test "scrollbar thumb spans the visible proportion and reaches both ends" {
     const m = ScrollbarMetrics{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 };
-    const top = scrollbarGeometry(10, 20, 200, 400, 1600, 0, m).?;
-    try std.testing.expectEqual(@as(f32, 198), top.track_x); // 10 + 200 - 8 - 4
+    const top = scrollbarGeometry(10, 20, 200, 400, 40, 1600, 0, m).?;
+    try std.testing.expectEqual(@as(f32, 226), top.track_x); // 10 + 200 + (40 - 8) / 2
     try std.testing.expectEqual(@as(f32, 20), top.track_y);
     try std.testing.expectEqual(@as(u32, 1200), top.max_offset_px);
     // 보이는 비율 400/1600 = 1/4.
     try std.testing.expectEqual(@as(f32, 100), top.thumb_h);
     try std.testing.expectEqual(@as(f32, 20), top.thumb_y);
 
-    const bottom = scrollbarGeometry(10, 20, 200, 400, 1600, 1200, m).?;
+    const bottom = scrollbarGeometry(10, 20, 200, 400, 40, 1600, 1200, m).?;
     // 맨 아래에서 thumb 밑변이 track 밑변과 정확히 맞는다.
     try std.testing.expectApproxEqAbs(bottom.track_y + bottom.track_h - bottom.thumb_h, bottom.thumb_y, 0.01);
 }
@@ -330,13 +336,13 @@ test "scrollbar thumb spans the visible proportion and reaches both ends" {
 test "scrollbar thumb never gets too thin to grab" {
     const m = ScrollbarMetrics{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 };
     // 아주 긴 목록: 비례 높이는 0.04px지만 최소 높이가 이긴다.
-    const geometry = scrollbarGeometry(0, 0, 200, 400, 4_000_000, 0, m).?;
+    const geometry = scrollbarGeometry(0, 0, 200, 400, 40, 4_000_000, 0, m).?;
     try std.testing.expectEqual(@as(f32, 24), geometry.thumb_h);
 }
 
 test "scrollbar drag round trips every reachable offset and clamps beyond the track" {
     const m = ScrollbarMetrics{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 };
-    const geometry = scrollbarGeometry(0, 5, 180, 400, 1200, 0, m).?;
+    const geometry = scrollbarGeometry(0, 5, 180, 400, 40, 1200, 0, m).?;
     const travel = geometry.track_h - geometry.thumb_h;
     // thumb top을 정확히 그 offset의 위치에 놓으면 같은 offset이 돌아온다.
     for ([_]u32{ 0, 1, 137, 400, 799, 800 }) |wanted| {
@@ -353,7 +359,7 @@ test "scrollbar drag round trips every reachable offset and clamps beyond the tr
 
 test "track click centers the thumb at the pointer" {
     const m = ScrollbarMetrics{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 };
-    const geometry = scrollbarGeometry(0, 0, 180, 400, 1200, 0, m).?;
+    const geometry = scrollbarGeometry(0, 0, 180, 400, 40, 1200, 0, m).?;
     // 트랙 정중앙을 누르면 thumb 중앙이 거기 오므로 offset도 대략 절반이다.
     const middle = geometry.offsetForTrackClick(geometry.track_y + geometry.track_h / 2);
     try std.testing.expect(middle > geometry.max_offset_px * 4 / 10);

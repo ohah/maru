@@ -296,6 +296,9 @@ fn scrollbarFor(props: types.Props, m: types.DockMetrics, entries: []const tree.
             entry.rect.y,
             entry.rect.width,
             entry.rect.height,
+            // scroll-area 오른쪽에 남은 도크 padding. root가 소유한 여백이라 카드/버튼이 절대 침범하지
+            // 않는 유일한 자리이고, 여기 놓으면 스크롤바가 나타나고 사라져도 목록 폭이 reflow하지 않는다.
+            @floatFromInt(m.root_inset),
             props.scroll_content_height_px,
             props.scroll_offset_px,
             m.scrollbarMetrics(),
@@ -896,7 +899,9 @@ test "SessionDock publishes a scrollbar that stays put while the list scrolls" {
     const content = rested.tree.entries[rested.tree.find(NodeIds.content).?];
     try std.testing.expectEqual(content.rect.y, track.rect.y);
     try std.testing.expectEqual(content.rect.height, track.rect.height);
-    try std.testing.expect(track.rect.x + track.rect.width <= content.rect.x + content.rect.width);
+    // content **오른쪽 여백** 안에 있다 — content 안이면 카드·버튼 위에 겹친다(사용자 보고).
+    try std.testing.expect(track.rect.x >= content.rect.x + content.rect.width);
+    try std.testing.expect(track.rect.x + track.rect.width <= base.viewport_px.width);
 
     // thumb만 drag를 선언하지 않는다 — track도 선언한다. track을 눌러 점프한 뒤 그대로 끌 수 있어야 한다.
     try std.testing.expectEqual(tree.DragAxis.vertical, thumb.drag.?.axis);

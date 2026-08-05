@@ -6,6 +6,7 @@
 const tree = @import("../../ui/tree.zig");
 const layout = @import("../../ui/layout.zig");
 const ids = @import("ids.zig");
+const scroll = @import("scroll.zig");
 const types = @import("types.zig");
 
 pub const NodeIds = struct {
@@ -50,6 +51,11 @@ pub const NodeIds = struct {
     pub fn focusLive(index: usize) u64 {
         return item(index) + 6;
     }
+
+    /// Scrollbar는 목록 아이템과 달리 virtualization 평행이동을 받지 않으므로 item lane 밖의 고정
+    /// id를 쓴다. track이 먼저, thumb이 나중에 발행된다(`hitAction`이 reverse z-order라 thumb이 이긴다).
+    pub const scroll_track: u64 = 0x5344_0008;
+    pub const scroll_thumb: u64 = 0x5344_0009;
 };
 
 pub const Buffers = struct {
@@ -237,7 +243,97 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
             entry.effective_clip = intersectClip(entries[entry.parent_index.?].effective_clip, entry.own_clip);
         }
     }
-    return .{ .tree = .{ .entries = buffers.entries[0..built.entries.len] }, .actions = table.slice() };
+    // Scrollbar는 목록이 넘칠 때만, 그리고 **평행이동이 끝난 뒤에** 붙인다. 스크롤 목록의 자식이 아니라
+    // 뷰포트에 고정된 chrome이므로 virtualization origin을 함께 받으면 스크롤할 때 같이 흘러내린다.
+    // 그렇다고 별도 tree로 빼지도 않는다 — docs/agent-session-list.md §2.2가 scrollbar를
+    // `SessionDockLayout`의 소유로 두었고, 같은 completed tree여야 paint·hit-test·clip이 갈라지지 않는다.
+    var entry_count = built.entries.len;
+    if (scrollbarFor(props, m, buffers.entries[0..entry_count])) |bar| {
+        if (entry_count + 2 > buffers.entries.len) return error.InsufficientNodeBuffer;
+        const track_action = table.append(props.snapshot_generation, .scroll_track, true) catch return error.InsufficientActionBuffer;
+        const thumb_action = table.append(props.snapshot_generation, .scroll_thumb, true) catch return error.InsufficientActionBuffer;
+        // track이 앞, thumb이 뒤다. `interaction.hitAction`은 reverse z-order라 마지막 entry가 이기고,
+        // 순서가 뒤집히면 thumb 위 down이 track click으로 판정돼 드래그 대신 점프가 일어난다.
+        buffers.entries[entry_count] = scrollbarEntry(NodeIds.scroll_track, track_action, .{
+            .x = bar.track_x,
+            .y = bar.track_y,
+            .width = bar.track_w,
+            .height = bar.track_h,
+        }, .inset_bg, .{
+            // track도 drag를 선언한다. 그러지 않으면 track을 눌러 점프한 뒤 그대로 끌 때 move가
+            // 오지 않아 손을 뗐다 다시 잡아야 한다 — 실제 스크롤바는 그렇게 동작하지 않는다.
+            .payload = scroll_drag_payload,
+            .axis = .vertical,
+            .threshold_px = 0,
+        });
+        buffers.entries[entry_count + 1] = scrollbarEntry(NodeIds.scroll_thumb, thumb_action, .{
+            .x = bar.track_x,
+            .y = bar.thumb_y,
+            .width = bar.track_w,
+            .height = bar.thumb_h,
+        }, .muted_fg, .{
+            // thumb을 누른 것 자체가 스크롤 의사이고 그 지점에 경쟁할 click이 없으므로 threshold는 0이다
+            // (file explorer scrollbar와 같은 판단).
+            .payload = scroll_drag_payload,
+            .axis = .vertical,
+            .threshold_px = 0,
+        });
+        entry_count += 2;
+    }
+    return .{ .tree = .{ .entries = buffers.entries[0..entry_count] }, .actions = table.slice() };
+}
+
+/// thumb drag가 싣는 opaque payload. tree/interaction은 이 값의 의미를 모르고, host의 intent 해석만 안다.
+pub const scroll_drag_payload: u64 = 0x5344_5342;
+
+/// 완성된 tree의 `content` rect에서 scrollbar 기하를 만든다. rect를 여기서 다시 계산하지 않고 published
+/// 값을 읽는 것이 핵심이다 — 그래야 scroll-area가 움직여도 스크롤바가 따라간다.
+fn scrollbarFor(props: types.Props, m: types.DockMetrics, entries: []const tree.RectEntry) ?scroll.ScrollbarGeometry {
+    for (entries) |entry| {
+        if (entry.id != NodeIds.content) continue;
+        return scroll.scrollbarGeometry(
+            entry.rect.x,
+            entry.rect.y,
+            entry.rect.width,
+            entry.rect.height,
+            props.scroll_content_height_px,
+            props.scroll_offset_px,
+            m.scrollbarMetrics(),
+        );
+    }
+    return null;
+}
+
+/// scrollbar entry는 generic paint가 그대로 칠하는 card다. thumb의 기본색은 `muted_fg`(패널보다 확실히
+/// 밝은 중간 회색)이고 track은 `inset_bg`의 옅은 홈이다 — 둘의 명암 차가 작으면 스크롤바가 있어도 안 보인다.
+/// hover/drag에서는 `paint_style.resolveCard`가 상태 배경을 얹으므로 컴포넌트가 상태 색을 따로 두지 않는다.
+fn scrollbarEntry(
+    id: u64,
+    action: tree.UiAction,
+    rect: layout.UiRect,
+    background: @import("../../tokens.zig").ColorRole,
+    drag: ?tree.DragDeclaration,
+) tree.RectEntry {
+    const radius: u16 = @intFromFloat(@max(rect.width / 2, 0));
+    return .{
+        .id = id,
+        .parent_index = null,
+        .kind = .card,
+        .rect = rect,
+        // 뷰포트에 고정된 chrome이므로 스크롤 clip을 받지 않는다.
+        .effective_clip = null,
+        .action = action,
+        .drag = drag,
+        .visual = .{ .card = .{
+            .variant = .surface,
+            .paint = .{
+                .background = background,
+                .corner_radii_px = .{ radius, radius, radius, radius },
+                .border_widths_px = .{ 0, 0, 0, 0 },
+                .shadow = .none,
+            },
+        } },
+    };
 }
 
 fn descendsFrom(entries: []const tree.RectEntry, index: usize, ancestor: usize) bool {
@@ -733,4 +829,133 @@ test "SessionDock expanded card keeps detail actions in the same published tree"
     table.count = frame.actions.len;
     try @import("std").testing.expectEqual(@as(?ids.Intent, .resume_session), table.resolve(resume_entry.action.?.id, 21));
     try @import("std").testing.expectEqual(@as(?ids.Intent, .reveal_log), table.resolve(reveal.action.?.id, 21));
+}
+
+// 이 테스트가 증명하는 것: scrollbar가 도크의 **같은 published tree**에 실리고, 스크롤 목록의
+// 평행이동을 따라가지 않으며, thumb이 track보다 뒤에 와서 hit-test에서 이긴다.
+//
+// 왜 중요한가 — scrollbar를 별도 tree나 host 계산으로 빼면 paint·hit-test·clip이 서로 다른 출처를
+// 읽게 되고, 그때부터 "보이는 곳과 눌리는 곳"이 갈라진다. 반대로 scroll-area의 자식으로 넣으면
+// virtualization origin을 함께 받아 스크롤할 때 스크롤바가 목록과 같이 흘러내린다.
+test "SessionDock publishes a scrollbar that stays put while the list scrolls" {
+    const std = @import("std");
+    const items = [_]types.Item{
+        .{ .card = .{ .identity = 1, .provider = .claude, .title = "a", .summary = "b", .metadata = "c" } },
+        .{ .card = .{ .identity = 2, .provider = .claude, .title = "d", .summary = "e", .metadata = "f" } },
+    };
+    const base = types.Props{
+        .viewport_px = .{ .width = 640, .height = 480 },
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .snapshot_generation = 77,
+        .displayed_count = 2,
+        .items = &items,
+        // 실제 목록은 뷰포트보다 훨씬 길다 — 보이는 카드는 둘뿐이어도 scrollbar는 전체를 대표한다.
+        .scroll_content_height_px = 4000,
+        .scroll_offset_px = 0,
+    };
+
+    const Built = struct {
+        entries: [16]tree.RectEntry = undefined,
+        nodes: [12]tree.UiNode = undefined,
+        layout_items: [16]layout.Item = undefined,
+        flex_scratch: [16]layout.FlexScratch = undefined,
+        child_rects: [16]layout.UiRect = undefined,
+        actions: [16]ids.Entry = undefined,
+
+        fn run(self: *@This(), props: types.Props) !Frame {
+            return build(props, .{
+                .nodes = &self.nodes,
+                .entries = &self.entries,
+                .layout_items = &self.layout_items,
+                .flex_scratch = &self.flex_scratch,
+                .child_rects = &self.child_rects,
+                .actions = &self.actions,
+            });
+        }
+    };
+
+    var rested_storage = Built{};
+    const rested = try rested_storage.run(base);
+    const track_index = rested.tree.find(NodeIds.scroll_track) orelse return error.TestUnexpectedResult;
+    const thumb_index = rested.tree.find(NodeIds.scroll_thumb) orelse return error.TestUnexpectedResult;
+    const track = rested.tree.entries[track_index];
+    const thumb = rested.tree.entries[thumb_index];
+
+    // thumb이 **마지막** entry다. reverse z-order라 track이 뒤에 오면 thumb 위 down이 track click으로
+    // 판정돼 드래그 대신 점프가 일어난다.
+    try std.testing.expectEqual(rested.tree.entries.len - 1, thumb_index);
+    try std.testing.expect(track_index < thumb_index);
+
+    // 같은 track 위에 있고, thumb은 보이는 비율만큼 짧다.
+    try std.testing.expectEqual(track.rect.x, thumb.rect.x);
+    try std.testing.expectEqual(track.rect.width, thumb.rect.width);
+    try std.testing.expect(thumb.rect.height < track.rect.height);
+
+    // scroll-area 안에 들어 있다(카드와 같은 content rect를 오른쪽에서 공유한다).
+    const content = rested.tree.entries[rested.tree.find(NodeIds.content).?];
+    try std.testing.expectEqual(content.rect.y, track.rect.y);
+    try std.testing.expectEqual(content.rect.height, track.rect.height);
+    try std.testing.expect(track.rect.x + track.rect.width <= content.rect.x + content.rect.width);
+
+    // thumb만 drag를 선언하지 않는다 — track도 선언한다. track을 눌러 점프한 뒤 그대로 끌 수 있어야 한다.
+    try std.testing.expectEqual(tree.DragAxis.vertical, thumb.drag.?.axis);
+    try std.testing.expectEqual(@as(f32, 0), thumb.drag.?.threshold_px);
+    try std.testing.expectEqual(scroll_drag_payload, track.drag.?.payload);
+
+    // 둘 다 published action을 갖는다(hover/capture 피드백이 generic paint에서 나온다).
+    var table = ids.Table.init(@constCast(rested.actions));
+    table.count = rested.actions.len;
+    try std.testing.expectEqual(@as(?ids.Intent, .scroll_track), table.resolve(track.action.?.id, base.snapshot_generation));
+    try std.testing.expectEqual(@as(?ids.Intent, .scroll_thumb), table.resolve(thumb.action.?.id, base.snapshot_generation));
+
+    // 목록을 스크롤하면 카드는 움직이지만 track은 제자리다. thumb만 track 안에서 내려간다.
+    var scrolled_props = base;
+    scrolled_props.content_first_item_origin_y_px = -37;
+    scrolled_props.scroll_offset_px = 2000;
+    var scrolled_storage = Built{};
+    const scrolled = try scrolled_storage.run(scrolled_props);
+    const scrolled_track = scrolled.tree.entries[scrolled.tree.find(NodeIds.scroll_track).?];
+    const scrolled_thumb = scrolled.tree.entries[scrolled.tree.find(NodeIds.scroll_thumb).?];
+    try std.testing.expectEqual(track.rect.y, scrolled_track.rect.y);
+    try std.testing.expectEqual(track.rect.height, scrolled_track.rect.height);
+    try std.testing.expect(scrolled_thumb.rect.y > thumb.rect.y);
+    // 그리고 track 밖으로 나가지 않는다.
+    try std.testing.expect(scrolled_thumb.rect.y + scrolled_thumb.rect.height <= scrolled_track.rect.y + scrolled_track.rect.height + 0.01);
+    // 카드는 실제로 평행이동했다(전제 확인 — 안 움직였다면 위 단언이 공허하다).
+    try std.testing.expect(scrolled.tree.entries[scrolled.tree.find(NodeIds.item(0)).?].rect.y < rested.tree.entries[rested.tree.find(NodeIds.item(0)).?].rect.y);
+}
+
+// 넘치지 않는 목록에는 scrollbar가 없다. 있는 척하면 사용자에게 없는 여백을 있다고 말하는 셈이고,
+// 잡을 수 없는 track이 카드 우측 클릭을 가로챈다.
+test "SessionDock publishes no scrollbar when the list fits" {
+    const std = @import("std");
+    const items = [_]types.Item{
+        .{ .card = .{ .identity = 1, .provider = .claude, .title = "a", .summary = "b", .metadata = "c" } },
+    };
+    const props = types.Props{
+        .viewport_px = .{ .width = 640, .height = 480 },
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .snapshot_generation = 5,
+        .displayed_count = 1,
+        .items = &items,
+        .scroll_content_height_px = 100,
+    };
+    var nodes: [10]tree.UiNode = undefined;
+    var entries: [14]tree.RectEntry = undefined;
+    var layout_items: [14]layout.Item = undefined;
+    var flex_scratch: [14]layout.FlexScratch = undefined;
+    var child_rects: [14]layout.UiRect = undefined;
+    var actions: [14]ids.Entry = undefined;
+    const frame = try build(props, .{
+        .nodes = &nodes,
+        .entries = &entries,
+        .layout_items = &layout_items,
+        .flex_scratch = &flex_scratch,
+        .child_rects = &child_rects,
+        .actions = &actions,
+    });
+    try std.testing.expect(frame.tree.find(NodeIds.scroll_track) == null);
+    try std.testing.expect(frame.tree.find(NodeIds.scroll_thumb) == null);
 }

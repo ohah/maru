@@ -110,8 +110,8 @@ pub const AgentSessionArchiveSmokeProbe = extern struct {
     enabled: u32 = 0,
 };
 
-test "ABI v165 app instance lease result values match the C header" {
-    try std.testing.expectEqual(@as(u32, 165), abi_version);
+test "ABI v166 app instance lease result values match the C header" {
+    try std.testing.expectEqual(@as(u32, 166), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -515,6 +515,15 @@ pub const DividerSmokeProbe = extern struct {
     scrollbar_rows: u64,
     scrollbar_move_events: u64,
     scrollbar_scroll_applications: u64,
+    // CIM4b: 탭 바 발행 기하 + provisional preview 관측치. 끝에 덧붙여 기존 필드 offset을 그대로 둔다.
+    tab_bar_present: u32,
+    tab_count: u32,
+    tab_first_x_px: i32,
+    tab_slot_w_px: u32,
+    tab_bar_y_px: i32,
+    tab_drag_active: u32,
+    tab_visible_first_id: u64,
+    tab_model_first_id: u64,
 };
 
 /// Reads the published divider grab band and this drag's coalescing instrumentation for the
@@ -549,6 +558,14 @@ pub export fn maru_macos_app_session_divider_smoke_probe(
         .scrollbar_rows = probe.scrollbar_rows,
         .scrollbar_move_events = probe.scrollbar_move_events,
         .scrollbar_scroll_applications = probe.scrollbar_scroll_applications,
+        .tab_bar_present = @intFromBool(probe.tab_bar_present),
+        .tab_count = probe.tab_count,
+        .tab_first_x_px = probe.tab_first_x_px,
+        .tab_slot_w_px = probe.tab_slot_w_px,
+        .tab_bar_y_px = probe.tab_bar_y_px,
+        .tab_drag_active = @intFromBool(probe.tab_drag_active),
+        .tab_visible_first_id = probe.tab_visible_first_id,
+        .tab_model_first_id = probe.tab_model_first_id,
     };
     return @intFromEnum(Status.ok);
 }

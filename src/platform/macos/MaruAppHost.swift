@@ -3961,6 +3961,22 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var scrollSmokeOpenRetries = 0
     private var webDividerBands = ""
     private var webDividerFrame = ""
+    // CIM4b: 탭을 실제 NSEvent로 끌어 provisional live reorder를 제품 경로에서 본다. headless fixture는
+    // "model이 안 바뀐다"까지만 증명하고, 끄는 동안 **보이는 순서가 실제로 움직였는지**는 여기서만 본다.
+    private var tabDragSmokeStage = 0
+    private var tabDragSmokeSpawnRetries = 0
+    private var tabDragSmokeTabCount: UInt32 = 0
+    private var tabDragSmokeBarPresent = false
+    private var tabDragSmokeCaptureDuringDrag = false
+    private var tabDragSmokeCaptureAfterUp = true
+    private var tabDragSmokePreviewDivergedDuringDrag = false
+    private var tabDragSmokeModelFirstBefore: UInt64 = 0
+    private var tabDragSmokeModelFirstDuringDrag: UInt64 = 0
+    private var tabDragSmokeModelFirstAfterCommit: UInt64 = 0
+    private var tabDragSmokeVisibleFirstDuringDrag: UInt64 = 0
+    private var tabDragSmokeEscapeModelFirst: UInt64 = 0
+    private var tabDragSmokeEscapeVisibleFirst: UInt64 = 0
+    private var tabDragSmokeEscapeCaptureCleared = false
 
     // 5b: 웹 패널이 격리 E2E probe(evaluateJavaScript)를 스모크에서만 돌리게 노출(정상 런은 probe 안 함 — 오버헤드 0).
     var isSmokeMode: Bool { smokeMode }
@@ -5634,6 +5650,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         maybeRunAgentSessionArchiveSmoke()
         maybeRunDividerSmoke()
         maybeRunScrollbarSmokeEntry()
+        maybeRunTabDragSmokeEntry()
         // quick terminal — 보일 때만 tick. 그 셸이 종료/fault면 quick만 정리한다(앱은 계속 산다).
         if let quick, quick.window?.isVisible == true {
             explicitSurface = quick
@@ -8343,6 +8360,134 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         scrollSmokeStage = 2
     }
 
+    /// 탭 드래그 E2E도 자기 env 게이트로만 돈다 — divider/scrollbar 스모크와 **같은 실행에 얹지 않는다**
+    /// (그쪽은 split·도크로 창 상태를 바꾸고, 이쪽은 탭 바 세그먼트 좌표를 그 상태에서 읽는다).
+    private func maybeRunTabDragSmokeEntry() {
+        guard isTabDragSmokeMode, let surface = primary, let session = surface.appSession,
+              let view = surface.view, let window = surface.window else { return }
+        withSurface(surface) {
+            maybeRunTabDragSmoke(surface: surface, session: session, view: view, window: window)
+        }
+    }
+
+    private var isTabDragSmokeMode: Bool {
+        smokeMode && ProcessInfo.processInfo.environment["MARU_TAB_DRAG_SMOKE"] == "1"
+    }
+
+    /// CIM4b — 탭을 실제 `NSEvent`로 끌어 §4.4 provisional live reorder를 제품 경로에서 본다.
+    /// 두 가지를 본다: ① 끄는 **동안** 보이는 순서가 움직였는데 model은 그대로다(둘이 갈린다),
+    /// 손을 떼면 그제서야 model이 따라온다. ② 두 번째 드래그를 Escape로 끊으면 model이 그대로다.
+    /// 겨냥 좌표는 전부 probe가 돌려준 **발행 rect**에서 만든다 — 자기 산수로 겨냥하면 제품이 잡는
+    /// 지점과 갈릴 수 있다(CIM2에서 실제로 밴드 중앙을 눌러 웹뷰 밖을 찍은 적이 있다).
+    private func maybeRunTabDragSmoke(
+        surface: TerminalSurface,
+        session: OpaquePointer,
+        view: MaruMetalTerminalView,
+        window: NSWindow
+    ) {
+        guard tabDragSmokeStage < 2 else { return }
+        func probe() -> MaruAppHostDividerSmokeProbe? {
+            var out = MaruAppHostDividerSmokeProbe()
+            return maru_macos_app_session_divider_smoke_probe(session, &out) == Self.statusOK ? out : nil
+        }
+        guard let current = probe() else { return }
+        // 탭 3개가 필요하다(가운데를 지나 끝으로 끄는 경로라야 preview 회전이 눈에 보인다). ⌘T를 정해진
+        // 횟수만 다시 보낸다 — 첫 키는 surface가 준비되기 전이라 삼켜질 수 있다.
+        guard current.tab_count >= 3, current.tab_bar_present != 0, current.tab_slot_w_px > 0 else {
+            tabDragSmokeSpawnRetries += 1
+            if tabDragSmokeSpawnRetries % 20 == 1 && tabDragSmokeSpawnRetries <= 400 {
+                sendKeyEvent(MaruAppHostKeyEvent(
+                    codepoint: UInt32(UnicodeScalar("t").value),
+                    base_codepoint: UInt32(UnicodeScalar("t").value),
+                    key_code: UInt32(MaruAppHostKeyCodeUnknown.rawValue),
+                    modifier_shift: 0,
+                    modifier_control: 0,
+                    modifier_option: 0,
+                    modifier_command: 1,
+                    is_repeat: 0,
+                    raw_key_code: 17
+                ))
+            }
+            return
+        }
+        tabDragSmokeBarPresent = true
+        tabDragSmokeTabCount = current.tab_count
+        // **여기서 latch한다.** 아래 시퀀스에는 `guard ... else { return }` 출구가 여럿인데, 그때 stage가
+        // 미완이면 다음 tick이 down/drag/up을 이미 바뀐 상태 위에 통째로 재생한다 — 캡처는 파일이 있어 실패하고
+        // (count가 4에 못 미친다) 두 번째 down이 드래그를 재-arm해, CIM4b 계약과 무관한 이유로 빨강이 된다.
+        // 중간에 끊기면 요약 필드가 초기값으로 남아 그대로 빨강이 되는 편이 정직하다.
+        tabDragSmokeStage = 2
+        let scale = window.backingScaleFactor
+        guard scale > 0 else { return }
+
+        let slot = CGFloat(current.tab_slot_w_px)
+        let firstX = CGFloat(current.tab_first_x_px)
+        let lastX = firstX + slot * CGFloat(current.tab_count - 1)
+        let barY = CGFloat(current.tab_bar_y_px)
+
+        func event(_ type: NSEvent.EventType, _ backingX: CGFloat) -> NSEvent? {
+            let local = NSPoint(x: backingX / scale, y: view.bounds.height - (barY / scale))
+            return NSEvent.mouseEvent(
+                with: type,
+                location: view.convert(local, to: nil),
+                modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber,
+                context: nil,
+                eventNumber: 0,
+                clickCount: 1,
+                pressure: 1
+            )
+        }
+
+        // ① 끌고 있는 동안: 보이는 첫 탭은 바뀌고 model 첫 탭은 그대로여야 한다.
+        tabDragSmokeModelFirstBefore = current.tab_model_first_id
+        guard let down = event(.leftMouseDown, firstX) else { return }
+        view.mouseDown(with: down)
+        for step in 1...3 {
+            let x = firstX + (lastX - firstX) * CGFloat(step) / 3
+            guard let dragged = event(.leftMouseDragged, x) else { continue }
+            view.mouseDragged(with: dragged)
+        }
+        if let during = probe() {
+            tabDragSmokeCaptureDuringDrag = during.tab_drag_active != 0
+            tabDragSmokeModelFirstDuringDrag = during.tab_model_first_id
+            tabDragSmokeVisibleFirstDuringDrag = during.tab_visible_first_id
+            tabDragSmokePreviewDivergedDuringDrag = during.tab_visible_first_id != during.tab_model_first_id
+        }
+        guard let up = event(.leftMouseUp, lastX) else { return }
+        view.mouseUp(with: up)
+        if let after = probe() {
+            tabDragSmokeCaptureAfterUp = after.tab_drag_active != 0
+            tabDragSmokeModelFirstAfterCommit = after.tab_model_first_id
+        }
+
+        // ② 두 번째 드래그를 Escape로 끊는다 — model은 ①의 commit 결과에서 더 움직이지 않아야 한다.
+        if let down2 = event(.leftMouseDown, firstX) {
+            view.mouseDown(with: down2)
+            for step in 1...3 {
+                let x = firstX + (lastX - firstX) * CGFloat(step) / 3
+                if let dragged = event(.leftMouseDragged, x) { view.mouseDragged(with: dragged) }
+            }
+            sendKeyEvent(MaruAppHostKeyEvent(
+                codepoint: 0,
+                base_codepoint: 0,
+                key_code: UInt32(MaruAppHostKeyCodeEscape.rawValue),
+                modifier_shift: 0,
+                modifier_control: 0,
+                modifier_option: 0,
+                modifier_command: 0,
+                is_repeat: 0,
+                raw_key_code: 53
+            ))
+            if let escaped = probe() {
+                tabDragSmokeEscapeCaptureCleared = escaped.tab_drag_active == 0
+                tabDragSmokeEscapeModelFirst = escaped.tab_model_first_id
+                tabDragSmokeEscapeVisibleFirst = escaped.tab_visible_first_id
+            }
+        }
+    }
+
     /// CIM2d — 웹 패널이 divider에 맞닿은 배치에서 seam 밴드 클릭이 **아래 터미널 뷰로 통과**하는지.
     /// WKWebView는 native라 자기 frame 클릭을 삼키므로, 이 통과가 없으면 divider를 잡을 수 없다.
     /// 통과 판정은 `hitTest` 조회 결과로 하고, 그 뒤 같은 좌표의 실제 down이 capture를 만드는지 본다.
@@ -9957,6 +10102,25 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             scroll_rows_after=\(scrollSmokeRowsAfter)
             scroll_move_events=\(scrollSmokeMoveEvents)
             scroll_applications=\(scrollSmokeApplications)
+
+            """
+        }
+
+        if isTabDragSmokeMode {
+            summary += """
+            tab_drag_stage=\(tabDragSmokeStage)
+            tab_drag_bar_present=\(tabDragSmokeBarPresent)
+            tab_drag_tab_count=\(tabDragSmokeTabCount)
+            tab_drag_capture_during_drag=\(tabDragSmokeCaptureDuringDrag)
+            tab_drag_capture_after_up=\(tabDragSmokeCaptureAfterUp)
+            tab_drag_preview_diverged=\(tabDragSmokePreviewDivergedDuringDrag)
+            tab_drag_model_first_before=\(tabDragSmokeModelFirstBefore)
+            tab_drag_model_first_during=\(tabDragSmokeModelFirstDuringDrag)
+            tab_drag_visible_first_during=\(tabDragSmokeVisibleFirstDuringDrag)
+            tab_drag_model_first_after_commit=\(tabDragSmokeModelFirstAfterCommit)
+            tab_drag_escape_capture_cleared=\(tabDragSmokeEscapeCaptureCleared)
+            tab_drag_escape_model_first=\(tabDragSmokeEscapeModelFirst)
+            tab_drag_escape_visible_first=\(tabDragSmokeEscapeVisibleFirst)
 
             """
         }

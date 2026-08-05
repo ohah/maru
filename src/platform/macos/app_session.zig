@@ -203,7 +203,12 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 165;
+pub const abi_version: u32 = 166;
+// 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
+// tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
+// export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
+// 버전을 안 올리면 낡은 Swift 바이너리와 새 Zig가 짝지어져도 가드를 통과해 호출자 스택을 넘어 쓴다. 같은 구조체를
+// 확장한 직전 변경(scrollbar 필드, 164→165)과 같은 이유로 올린다.
 // 162: AS4-f fixture reads only published SessionDock control/action border rects so four
 // font/scale cold AppKit runs can compare geometry without reconstructing layout in Swift.
 // 161: AS3-c fixture adds one read-only expanded-card raw-rect target and published tree
@@ -5605,7 +5610,46 @@ pub const AppSession = struct {
         scrollbar_capture_active: bool = false,
         scrollbar_move_events: u64 = 0,
         scrollbar_scroll_applications: u64 = 0,
+        /// CIM4b AppKit E2E: 활성 pane 탭 바의 **발행된** 세그먼트 기하와 provisional preview 관측치.
+        /// 좌표를 fixture가 따로 계산하지 않고 여기서 가져가야 겨냥한 지점과 제품이 잡는 지점이 갈리지 않는다.
+        tab_bar_present: bool = false,
+        tab_count: u32 = 0,
+        /// 탭 0 세그먼트 안의 한 점(✕ zone 아님)과 세그먼트 폭 — fixture는 `first_x + n*slot_w`로 탭 n을 겨냥한다.
+        tab_first_x_px: i32 = 0,
+        tab_slot_w_px: u32 = 0,
+        tab_bar_y_px: i32 = 0,
+        tab_drag_active: bool = false,
+        /// 보이는 순서의 첫 탭과 model 순서의 첫 탭. drag 중에는 **갈리고**(preview가 model과 다르다),
+        /// commit·복원 뒤에는 반드시 같아진다. 이 한 쌍이 provisional 이관의 관측 창이다.
+        tab_visible_first_id: u64 = 0,
+        tab_model_first_id: u64 = 0,
     };
+
+    /// CIM4b E2E용 탭 바 관측치. 좌표는 렌더·hit-test와 **같은 출처**(`paneBar`+`barMetrics`)에서 뽑는다 —
+    /// fixture가 자기 산수로 겨냥하면 제품이 잡는 지점과 갈릴 수 있다.
+    fn fillTabDragSmokeProbe(self: *AppSession, probe: *DividerSmokeProbe) void {
+        probe.tab_drag_active = self.pointerGestureIs(.terminal_tab);
+        const pane = self.activePane();
+        const count = pane.terms.items.len;
+        if (count == 0 or self.cell_width_px == 0) return;
+        probe.tab_count = std.math.lossyCast(u32, count);
+        probe.tab_model_first_id = pane.terms.items[0].surface.id;
+        probe.tab_visible_first_id = self.paneTermOrder(pane)[0].surface.id;
+
+        var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
+        defer leaf_rects.deinit(self.allocator);
+        self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return;
+        for (leaf_rects.items) |lr| {
+            if (lr.leaf != pane) continue;
+            const pb = self.paneBar(lr.rect, pane) orelse return;
+            const m = barMetrics(pb.tabs, self.cell_width_px, count, self.buildChromeTokens().space.tab_width_cols, pane.tab_scroll_cols) orelse return;
+            probe.tab_bar_present = true;
+            probe.tab_first_x_px = @intCast(pb.tabs.x + self.cell_width_px); // 세그먼트 안쪽(✕ zone 회피)
+            probe.tab_slot_w_px = m.tab_w * self.cell_width_px;
+            probe.tab_bar_y_px = @intCast(pb.full.y + 1);
+            return;
+        }
+    }
 
     /// 활성 탭의 **첫** divider를 발행 경로 그대로 읽는다(`publishDividerTree`와 같은 출처).
     pub fn dividerSmokeProbe(self: *AppSession) DividerSmokeProbe {
@@ -5620,6 +5664,7 @@ pub const AppSession = struct {
             .move_events = self.divider_move_events,
             .resize_applications = self.divider_resize_applications,
         };
+        self.fillTabDragSmokeProbe(&probe);
         if (self.fileTreeScrollbarGeometry()) |bar| {
             var storage: [2]chrome.ui.tree.RectEntry = undefined;
             if (file_tree_scrollbar.publish(bar, 1, &storage)) |bar_tree| {
@@ -6028,6 +6073,15 @@ pub const AppSession = struct {
             self.clearPointerGesture();
             return;
         }
+    }
+
+    /// 지금 탭 드래그가 **되돌릴 것을 갖고 있는가** — preview가 시작 순서에서 실제로 움직였는가.
+    /// 눌러만 두고 안 끈 상태(제스처는 arm돼 있지만 순서는 그대로)와 구분하는 판정이며, Escape가 터미널의
+    /// 키를 빼앗지 않게 하는 게이트다.
+    fn tabDragMovedPreview(self: *const AppSession) bool {
+        if (!self.pointerGestureIs(.terminal_tab)) return false;
+        if (self.tab_drag_start.items.len != self.tab_drag_preview.items.len) return false;
+        return !std.mem.eql(u64, self.tab_drag_start.items, self.tab_drag_preview.items);
     }
 
     /// 드래그 중 pane의 Term 집합이 밖에서 바뀌었는가(추가·제거·교체). §4.4는 그 경우 provisional 배열을
@@ -21618,6 +21672,23 @@ pub const AppSession = struct {
             self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
             return self.last_summary;
         }
+        // §4.4 복원 트리거(Escape). 탭 드래그가 **실제로 순서를 옮긴 상태**면 Escape는 시작 순서로 되돌리고
+        // 제스처를 끝낸다. model을 안 건드렸으므로 복원은 preview 파기 하나로 끝나고 effect는 0이다.
+        // rename/주소창/모달 라우팅보다 **앞**에 둔다 — 드래그는 지금 손이 붙어 있는 조작이라, 그 취소를
+        // 다른 소비자가 가로채면 사용자가 뗄 곳이 없다. 수식키가 붙은 Escape는 여기서 받지 않는다(단축키 축).
+        //
+        // **되돌릴 것이 있을 때만 소비한다.** `.terminal_tab` 태그는 threshold 없이 탭을 누르기만 해도 서고
+        // 대응하는 up까지 살아 있으므로, 태그만 보고 삼키면 탭을 누른 채(또는 up이 유실된 채) 누른 Escape가
+        // 터미널에 도달하지 못한다 — vim이 insert에 머물고 less/fzf가 안 닫힌다(2차 리뷰).
+        if (event.key == .escape and self.tabDragMovedPreview() and
+            !event.modifiers.command and !event.modifiers.control and !event.modifiers.option and !event.modifiers.shift)
+        {
+            self.cancelPointerGesture();
+            self.total_app_key_events += 1; // 앱이 소비 — 터미널로 흘리지 않는다
+            self.writeSummaryFromState();
+            self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
+            return self.last_summary;
+        }
         // 인라인 rename이 활성이면 키를 rename 편집기로 라우팅한다 — chrome 모달과 같은 최상위 규율(배타적: startRename이
         // find/palette를 닫음). Enter=확정·Esc=취소·Backspace·평문 글자를 handleRenameKey가 처리하고 모든 키를 소비한다
         // (텍스트 필드라 터미널/단축키로 안 흘린다). IME 조합은 imeSetPreedit/imeEnd가 rename_input에 직접 넣는다.
@@ -22891,11 +22962,22 @@ pub const AppSession = struct {
         // 그 분기보다 **먼저** 둔다 — 패널 위에 뜬 토스트도 클릭으로 닫게. find/palette·context_menu·settings는 notice와
         // 배타(dismissMessageOverlays)라 여기 안 걸린다. 키/휠도 handleKeyEvent(notice.handle)·scrollWheel이 같은 규율로 닫는다.
         if (self.chrome_host.notice.open) {
-            if (kind == 1 or kind == 4 or kind == 5) {
+            // **진행 중인 탭 드래그의 drag/up은 예외**다. 토스트는 사용자가 부른 것이 아니라 비동기로 뜨는데
+            // (에이전트 완료·리셋), 여기서 up까지 삼키면 손을 뗀 드래그가 끝나지 못한다. 그렇다고 tick에서
+            // 취소해 버리면 **사용자가 하던 재정렬을 배경 이벤트가 파기**한다 — 그래서 토스트를 닫고 드래그를
+            // 그대로 이어 준다(`routeDropAtPoint`가 파일 드롭에 쓰는 것과 같은 해법). down(1)은 아래 규율대로
+            // 토스트만 닫고 소비한다 — 새 제스처를 시작하는 클릭이 토스트 뒤로 새면 안 되기 때문이다.
+            if (self.pointerGestureIs(.terminal_tab) and (kind == 2 or kind == 3)) {
                 self.chrome_host.notice.dismiss();
                 self.metal_dirty = true;
+                // fall through — 아래 `.terminal_tab` capture 블록이 이 이벤트를 받는다.
+            } else {
+                if (kind == 1 or kind == 4 or kind == 5) {
+                    self.chrome_host.notice.dismiss();
+                    self.metal_dirty = true;
+                }
+                return;
             }
-            return;
         }
         // 인라인 rename 중 마우스 down(어디든)이면 편집을 확정한다(포커스 상실 = 확정 — docs/tabs-splits-layout.md).
         // 그 뒤 클릭은 정상 처리된다(탭 전환·pane 포커스 등). drag/up(2/3)은 down이 선행하므로 여기서 안 걸린다.
@@ -28940,6 +29022,16 @@ pub const AppSession = struct {
         // provisional 배열을 새 집합에 재봉합하지 않고 폐기한다. 폐기하지 않으면 transaction이 영구히 무효라
         // 나머지 드래그가 조용한 무동작이 되고 floating 고스트만 커서를 따라다닌다.
         if (self.tabDragSetChanged()) self.cancelPointerGesture();
+        // §4.4 복원 트리거(modal/native overlay 진입). 모달이 뜨면 포인터·키를 그쪽이 소유하므로 탭 드래그는
+        // 손을 뗄 곳을 잃는다 — 시작 순서로 되돌리고 제스처를 끝낸다(model 무변경이라 effect 0).
+        // 모달을 여는 자리마다 취소를 흩뿌리지 않고 여기 한 곳에서 판정하는 이유: 게이트가 역할표에서
+        // **파생**되므로 새 오버레이가 자동으로 포함된다. 열린 자리에 손으로 넣는 방식이면 오버레이를 하나
+        // 추가할 때마다 이 트리거가 조용히 비어 간다.
+        //
+        // 게이트는 `anyModalOverlayOpen`이다 — 비-모달 notice 토스트는 **포함하지 않는다**. 토스트는 사용자가
+        // 부른 것이 아니라 비동기로 뜨므로, 그걸로 취소하면 하던 재정렬이 배경 이벤트에 파기된다(2차 리뷰).
+        // 토스트가 `mouse()`를 삼켜 up이 못 오는 문제는 그쪽에서 드래그 이벤트를 통과시켜 푼다.
+        if (self.pointerGestureIs(.terminal_tab) and self.anyModalOverlayOpen()) self.cancelPointerGesture();
         const ft_on = diag_gate.maruDebugEnabled();
         const ft_start: i128 = if (ft_on) std.Io.Clock.awake.now(self.io).nanoseconds else 0;
         var ft_pre: i128 = ft_start;
@@ -56965,6 +57057,167 @@ test "CIM4b: 드래그 중에는 탭 바 스크롤을 건드리지 않는다(pre
     session.ensureActiveTermVisible(pane);
     const active_start: u32 = @as(u32, @intCast(pane.active_term)) * m.tab_w;
     try std.testing.expect(pane.tab_scroll_cols <= active_start); // 활성 탭 좌단이 보이는 범위 안
+}
+
+/// 복원됐는가 = 보이는 순서가 시작 순서와 같고, model이 한 번도 안 바뀌었다(effect 0).
+/// 각 복원 트리거는 `beginTabDragToLastSlot`이 만든 중간 상태에서 갈라져 이 한 가지만 본다.
+fn expectTabDragRestored(session: *AppSession, f: TabDragMidFlight) !void {
+    try std.testing.expect(!session.pointerGestureIs(.terminal_tab)); // 제스처가 끝났다
+    try std.testing.expectEqual(f.terms[0], f.pane.terms.items[0]);
+    try std.testing.expectEqual(f.terms[1], f.pane.terms.items[1]);
+    try std.testing.expectEqual(f.terms[2], f.pane.terms.items[2]);
+    try std.testing.expectEqual(@as(usize, 0), f.pane.active_term);
+    // 접근자가 model로 되돌아왔다 — 파기된 preview가 화면에 남지 않는다.
+    try std.testing.expectEqual(f.pane.terms.items.ptr, session.paneTermOrder(f.pane).ptr);
+    try std.testing.expectEqual(@as(usize, 0), session.paneActiveTermIndex(f.pane));
+}
+
+// §4.4 복원 트리거 ①: Escape. 드래그 중 Escape는 앱이 소비하고(터미널로 안 흘림) 시작 순서로 되돌린다.
+test "CIM4b 복원: Escape가 드래그를 시작 순서로 되돌린다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initTabDragSession(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    const f = try beginTabDragToLastSlot(session, allocator);
+
+    const app_keys_before = session.total_app_key_events;
+    _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
+    try expectTabDragRestored(session, f);
+    try std.testing.expectEqual(app_keys_before + 1, session.total_app_key_events); // 앱이 소비(터미널 미전달)
+}
+
+// §4.4 복원 트리거 ②: pointer cancel. AppKit에는 별도 cancel 이벤트가 없고(ABI mouse kind는 1~5),
+// 이 축의 실질은 "이전 capture의 up이 유실된 채 새 primary down이 온다"이다 — `mouse()` 진입의
+// exhaustive 취소가 그 자리다. 새 down이 이전 preview를 이어받지 않고 버리는지 고정한다.
+test "CIM4b 복원: 새 primary down이 이전 드래그를 버린다(up 유실 경로)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initTabDragSession(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    const f = try beginTabDragToLastSlot(session, allocator);
+
+    // up 없이 새 down. 취소가 먼저 돌아 이전 preview는 commit되지 않는다.
+    session.mouse(1, f.tab0_x, f.bar_y, 0, 0);
+    try std.testing.expectEqual(f.terms[0], f.pane.terms.items[0]); // 이전 preview가 commit되지 않았다
+    try std.testing.expectEqual(f.terms[1], f.pane.terms.items[1]);
+    try std.testing.expectEqual(f.terms[2], f.pane.terms.items[2]);
+    // 그 down이 겨냥한 것은 **화면에 있던** 슬롯 0 = T1이다(§4.4 "보이는 것이 눌린다") — 취소가 먼저
+    // 돌았다고 model 순서로 풀면 사용자가 안 누른 탭이 활성이 된다.
+    try std.testing.expectEqual(f.terms[1], f.pane.terms.items[f.pane.active_term]);
+    // 새 드래그는 자기 시작 순서를 처음부터 다시 잡는다(이어받기 없음) — 지금 model 순서가 곧 시작 순서다.
+    try std.testing.expect(session.pointerGestureIs(.terminal_tab));
+    try std.testing.expectEqual(f.terms[0], session.paneTermOrder(f.pane)[0]);
+}
+
+// §4.4 복원 트리거 ③: window deactivate. 창이 키를 잃으면 뗄 곳이 없으므로 드래그를 끝낸다.
+test "CIM4b 복원: 창 포커스 상실이 드래그를 시작 순서로 되돌린다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initTabDragSession(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    const f = try beginTabDragToLastSlot(session, allocator);
+
+    session.focusChanged(false);
+    try expectTabDragRestored(session, f);
+}
+
+// §4.4 복원 트리거 ④: modal/native overlay 진입. 게이트는 오버레이 집합에서 파생되므로 새 오버레이가
+// 자동으로 이 트리거에 들어온다 — 판정은 tick 한 곳이 소유한다.
+test "CIM4b 복원: 모달이 열리면 다음 tick이 드래그를 되돌린다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initTabDragSession(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    const f = try beginTabDragToLastSlot(session, allocator);
+
+    session.chrome_host.palette.open = true; // 모달 진입
+    _ = try session.tick();
+    try expectTabDragRestored(session, f);
+}
+
+// 비-모달 notice 토스트는 **복원 트리거가 아니다**. 토스트는 사용자가 부른 것이 아니라 비동기로 뜨므로
+// (에이전트 완료·리셋) 그걸로 취소하면 하던 재정렬이 배경 이벤트에 파기된다. 대신 `mouse()`가 토스트를 닫고
+// 드래그 이벤트를 통과시켜, 손을 떼면 정상적으로 commit된다.
+test "CIM4b: 드래그 중 뜬 notice 토스트는 재정렬을 파기하지 않는다(닫고 이어 간다)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initTabDragSession(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    const f = try beginTabDragToLastSlot(session, allocator);
+
+    session.chrome_host.notice.open = true; // 비-모달 토스트 — 사용자가 부른 것이 아니다
+    try std.testing.expect(!session.anyModalOverlayOpen());
+    _ = try session.tick();
+    try std.testing.expect(session.pointerGestureIs(.terminal_tab)); // 드래그는 살아 있다
+    try std.testing.expectEqual(f.terms[0], session.paneTermOrder(f.pane)[2]); // preview도 그대로
+
+    // 손을 떼면 토스트가 닫히고 그 up이 드래그를 정상 commit한다.
+    session.mouse(3, f.tab_last_x, f.bar_y, 0, 0);
+    try std.testing.expect(!session.chrome_host.notice.open);
+    try std.testing.expect(!session.pointerGestureIs(.terminal_tab));
+    try std.testing.expectEqual(f.terms[1], f.pane.terms.items[0]);
+    try std.testing.expectEqual(f.terms[2], f.pane.terms.items[1]);
+    try std.testing.expectEqual(f.terms[0], f.pane.terms.items[2]);
+}
+
+// Escape는 **되돌릴 것이 있을 때만** 소비한다. 탭을 누르고만 있어도 `.terminal_tab` 태그는 서므로, 태그만
+// 보고 삼키면 그 상태의 Escape가 터미널에 도달하지 못한다(vim이 insert에 머문다).
+test "CIM4b: 끌지 않은 탭 누름 상태의 Escape는 터미널로 간다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initTabDragSession(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
+    const pane = session.activePane();
+    var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer lr.deinit(allocator);
+    try session.activeTabLeafRects(allocator, session.termRect(), &lr);
+    const pb = session.paneBar(lr.items[0].rect, lr.items[0].leaf).?;
+    const m = barMetrics(pb.tabs, session.cell_width_px, 3, session.buildChromeTokens().space.tab_width_cols, 0).?;
+    const tab0_x: f64 = @floatFromInt(pb.tabs.x + (0 * m.tab_w + 1) * session.cell_width_px);
+    const bar_y: f64 = @floatFromInt(pb.full.y + 1);
+
+    session.mouse(1, tab0_x, bar_y, 0, 0); // 눌렀지만 끌지 않았다
+    try std.testing.expect(session.pointerGestureIs(.terminal_tab));
+    const app_keys_before = session.total_app_key_events;
+    _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
+    // 앱이 소비하지 않았다 = 터미널로 흘렀다. 제스처는 그대로 살아 있어 up이 정상 처리된다.
+    try std.testing.expectEqual(app_keys_before, session.total_app_key_events);
+    try std.testing.expect(session.pointerGestureIs(.terminal_tab));
+    // 드래그가 살아 있으니 접근자는 preview 뷰를 돌려주지만, 끈 적이 없으므로 내용은 model 그대로다.
+    const order = session.paneTermOrder(pane);
+    for (pane.terms.items, 0..) |t, i| try std.testing.expectEqual(t, order[i]);
+}
+
+// §4.4 복원 트리거 ⑤: source tab removal. 드래그 중 그 pane의 Term이 밖에서 사라지면(단축키 close·원격
+// 관측의 소멸) provisional 배열을 새 집합에 재봉합하지 않고 통째로 버린다. 남은 두 Term의 **상대 순서**가
+// 시작 그대로여야 한다 — preview가 살아남아 commit되면 여기서 어긋난다.
+test "CIM4b 복원: 드래그 중 Term이 사라지면 preview를 폐기한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initTabDragSession(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    const f = try beginTabDragToLastSlot(session, allocator);
+
+    session.closeActiveTerm(); // 활성 = 끌고 있던 T0
+    try std.testing.expect(!session.pointerGestureIs(.terminal_tab));
+    try std.testing.expectEqual(@as(usize, 2), f.pane.terms.items.len);
+    try std.testing.expectEqual(f.terms[1], f.pane.terms.items[0]);
+    try std.testing.expectEqual(f.terms[2], f.pane.terms.items[1]);
+    try std.testing.expectEqual(f.pane.terms.items.ptr, session.paneTermOrder(f.pane).ptr);
+    // 뒤늦은 up이 죽은 preview를 되살려 commit하지 않는다(effect 0).
+    session.mouse(3, f.tab0_x, f.bar_y, 0, 0);
+    try std.testing.expectEqual(f.terms[1], f.pane.terms.items[0]);
+    try std.testing.expectEqual(f.terms[2], f.pane.terms.items[1]);
 }
 
 // 탭을 드래그하면 pane 안에서 순서가 바뀌는지(PR-E1) — 실 init/spawn이라 macOS 게이트. ⌘T로 Term 3개를

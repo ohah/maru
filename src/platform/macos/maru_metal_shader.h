@@ -57,8 +57,8 @@ static NSString *const MARU_METAL_CELL_SHADER_SOURCE =
 static NSString *const MARU_METAL_QUAD_SHADER_SOURCE =
     @"#include <metal_stdlib>\n"
      "using namespace metal;\n"
-     "struct QuadIn { packed_float2 position; packed_float2 local; packed_float2 half_size; packed_float4 corner; packed_float4 border; packed_float4 fill0; packed_float4 fill1; packed_float4 border_color; float gradient_kind; };\n"
-     "struct QuadOut { float4 position [[position]]; float2 local; float2 half_size; float4 corner; float4 border; float4 fill0; float4 fill1; float4 border_color; float gradient_kind; };\n"
+     "struct QuadIn { packed_float2 position; packed_float2 local; packed_float2 half_size; packed_float4 corner; packed_float4 border; packed_float4 fill0; packed_float4 fill1; packed_float4 border_color; float gradient_kind; packed_float4 clip; };\n"
+     "struct QuadOut { float4 position [[position]]; float2 local; float2 half_size; float4 corner; float4 border; float4 fill0; float4 fill1; float4 border_color; float gradient_kind; float4 clip; };\n"
      "static inline float3 srgb_to_linear(float3 c) { return select(c/12.92, pow((c+0.055)/1.055, 2.4), c > 0.04045); }\n"
      "static inline float3 linear_to_srgb(float3 c) { return select(c*12.92, 1.055*pow(c, 1.0/2.4)-0.055, c > 0.0031308); }\n"
      "vertex QuadOut maru_quad_vertex(uint vid [[vertex_id]], const device QuadIn *v [[buffer(0)]]) {\n"
@@ -72,9 +72,17 @@ static NSString *const MARU_METAL_QUAD_SHADER_SOURCE =
      "  o.fill1 = float4(v[vid].fill1);\n"
      "  o.border_color = float4(v[vid].border_color);\n"
      "  o.gradient_kind = v[vid].gradient_kind;\n"
+     "  o.clip = float4(v[vid].clip);\n"
      "  return o;\n"
      "}\n"
      "fragment float4 maru_quad_fragment(QuadOut in [[stage_in]]) {\n"
+     // 뷰포트 클리핑(clip.z == 0이면 없음). `[[position]]`은 fragment 단계에서 **좌상단 원점** framebuffer
+     // 픽셀 좌표라 host가 보낸 backing-pixel 사각형과 같은 규약이다. 모양(corner radius·border)은 아래에서
+     // 원본 rect로 그대로 그리고 여기서 범위 밖만 버리므로, 잘린 변에 곡률이나 stroke가 생기지 않는다.
+     "  if (in.clip.z > 0.0) {\n"
+     "    float2 fp = in.position.xy;\n"
+     "    if (fp.x < in.clip.x || fp.y < in.clip.y || fp.x >= in.clip.x + in.clip.z || fp.y >= in.clip.y + in.clip.w) { discard_fragment(); }\n"
+     "  }\n"
      // gradient_kind==3: 위로 뾰족한 삼각형(말풍선 caret). rect에 내접하는 삼각형(apex=상단 중앙, base=하단)을
      // 3변 half-plane 거리의 max(convex SDF)로 그리고 fwidth 기반 edge AA를 준다 — 둥근-박스 경로보다 먼저 분기.
      // fill0(straight-alpha) 단색, premultiplied 출력(셀·quad와 같은 over 블렌딩). corner는 안 쓴다.

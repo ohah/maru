@@ -842,6 +842,15 @@ pub const GpuQuad = extern struct {
     // 위·모달 텍스트 아래, 최상위), 2=bottom(탭 밴드 — part1 터미널·탭 제목 '앞'·아래, C4b-5). draw가 layer로
     // quad 패스를 셋(bottom→under→over)으로 갈라 z를 맞춘다(모달-1 + C4b-5).
     layer: u32,
+    // 이 quad를 자를 backing-pixel 뷰포트(좌상단 원점). `clip_w == 0`이면 클리핑 없음이다.
+    //
+    // **rect를 미리 자르지 않고 원본 그대로 두는 것이 핵심이다.** shader는 corner radius와 변별 border를
+    // rect 기하에서 유도하므로, CPU가 rect를 먼저 자르면 잘린 변에 없어야 할 곡률과 stroke가 생긴다.
+    // 원본 모양을 그린 뒤 이 사각형 밖 fragment만 버리면 그 보정이 필요 없다.
+    clip_x: f32 = 0,
+    clip_y: f32 = 0,
+    clip_w: f32 = 0,
+    clip_h: f32 = 0,
 };
 
 /// C4b의 그림자 프리미티브 — quad 아래에 깔리는 둥근 drop shadow(blur). quad와 같은 별개 파이프라인이고
@@ -1218,6 +1227,14 @@ fn buildMergedSidebarCells(
 /// (커서가 거기만 있음): 커서 cell이 합쳐진 cells의 끝에 와 blink 노출 길이 조정(cursor suffix)이 그대로
 /// 동작한다. 비활성 panel은 colors.cursor=null이라 커서 cell을 안 낸다.
 /// 모달 오버레이 클리핑 영역(backing px, 좌상단). w==0이면 클리핑 없음.
+/// backing-pixel 클리핑 사각형의 **단일 규약**: 좌상단 원점, backing pixel, `w == 0`이면 클리핑 없음.
+/// Metal의 `MTLScissorRect`도, fragment의 `[[position]]`도 같은 좌상단 원점이라 변환 없이 대응한다
+/// (`maru_metal_renderer.m`의 modal 경로에 남아 있는 y-flip은 이 규약을 어긴 미사용 코드다 — 그 경로를
+/// 실제로 쓰는 컴포넌트가 생길 때 정정하고 함께 검증해야 한다).
+///
+/// **일반화 트리거**: 지금 프레임 단위 clip 필드는 modal(오버레이 셀)과 이 타입 두 곳이고, chrome quad는
+/// per-quad clip(`GpuQuad.clip_*`)을 쓴다. 여기에 **세 번째** 프레임 단위 clip 소비자가 생기면 셀 경로도
+/// per-primitive clip으로 일반화할 때다 — 그때까지 필드를 늘리는 편이 draw call 분리보다 싸다.
 pub const ClipPx = struct { x: u32, y: u32, w: u32, h: u32 };
 
 pub const PaneFrame = struct {

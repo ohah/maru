@@ -349,8 +349,7 @@ pub fn appendBackgroundQuads(
     out: *std.ArrayList(metal_frame.GpuQuad),
 ) void {
     for (draws) |draws_for_layer| for (draws_for_layer.ops) |op| switch (op) {
-        .quad => |raw_quad| {
-            const quad = clipQuad(raw_quad) orelse continue;
+        .quad => |quad| {
             // `ChromeDraw.Quad.alpha` is semantic paint data, not a Lab-only decoration.
             // Preserve it in the renderer's ARGB colors so loading skeletons and later hover
             // transitions keep the same token-relative contrast on the actual Metal host.
@@ -381,72 +380,16 @@ pub fn appendBackgroundQuads(
                 .border_color = border,
                 .gradient_kind = 0,
                 .layer = 2,
+                // 클리핑은 shader가 한다 — rect를 미리 자르면 잘린 변에 없어야 할 corner radius와 border
+                // stroke가 생긴다. 여기서는 component가 실어 보낸 뷰포트를 backing 좌표로 옮기기만 한다.
+                .clip_x = if (quad.clip) |c| @as(f32, @floatFromInt(c.x)) + @as(f32, @floatFromInt(origin_x_px)) else 0,
+                .clip_y = if (quad.clip) |c| @as(f32, @floatFromInt(c.y)) + @as(f32, @floatFromInt(origin_y_px)) else 0,
+                .clip_w = if (quad.clip) |c| @floatFromInt(c.w) else 0,
+                .clip_h = if (quad.clip) |c| @floatFromInt(c.h) else 0,
             }) catch {};
         },
         else => {},
     };
-}
-
-/// semantic quad를 자기 `clip`으로 자른다. 컴포넌트는 clip을 **전달만** 하고 자르지 않으므로, 잘린 변의
-/// 모양 보정도 여기 한 곳에서 한다.
-///
-/// 잘린 변은 원래 모양의 **내부**다. radius와 테두리를 그대로 남기면 shader가 줄어든 rect의 네 모서리를
-/// 다시 둥글리고 잘린 선을 따라 stroke를 그어, 클립 경계에 없어야 할 곡률과 1px 선이 생긴다. 그래서 잘린
-/// 변만 각지게 만들고 그 변의 테두리를 뗀다(반대 변은 원래 모양이므로 유지).
-///
-/// 이 CPU 보정은 per-quad GPU clip으로 옮기면 통째로 사라진다 — shader가 원본 rect로 모양을 그린 뒤
-/// 뷰포트 밖 fragment만 버리면 되기 때문이다. 그 이관 트리거는 `metal_frame.ClipPx` 주석이 소유한다.
-fn clipQuad(quad: chrome.draw.Op.Quad) ?chrome.draw.Op.Quad {
-    const clip = quad.clip orelse return quad;
-    if (clip.w == 0 or clip.h == 0) return null;
-    const left = @max(quad.rect.x, clip.x);
-    const top = @max(quad.rect.y, clip.y);
-    const right = @min(quad.rect.x + @as(i32, @intCast(quad.rect.w)), clip.x + @as(i32, @intCast(clip.w)));
-    const bottom = @min(quad.rect.y + @as(i32, @intCast(quad.rect.h)), clip.y + @as(i32, @intCast(clip.h)));
-    if (right <= left or bottom <= top) return null;
-    var out = quad;
-    out.rect = .{ .x = left, .y = top, .w = @intCast(right - left), .h = @intCast(bottom - top) };
-    const cut_left = left > quad.rect.x;
-    const cut_top = top > quad.rect.y;
-    const cut_right = right < quad.rect.x + @as(i32, @intCast(quad.rect.w));
-    const cut_bottom = bottom < quad.rect.y + @as(i32, @intCast(quad.rect.h));
-    // corner_radii = [tl, tr, br, bl], border_widths = [top, right, bottom, left].
-    if (cut_top or cut_left) out.corner_radii[0] = 0;
-    if (cut_top or cut_right) out.corner_radii[1] = 0;
-    if (cut_bottom or cut_right) out.corner_radii[2] = 0;
-    if (cut_bottom or cut_left) out.corner_radii[3] = 0;
-    if (cut_top) out.border_widths[0] = 0;
-    if (cut_right) out.border_widths[1] = 0;
-    if (cut_bottom) out.border_widths[2] = 0;
-    if (cut_left) out.border_widths[3] = 0;
-    return out;
-}
-
-test "clipQuad trims the rect and squares only the cut edges" {
-    const base = chrome.draw.Op.Quad{
-        .rect = .{ .x = 10, .y = 100, .w = 40, .h = 40 },
-        .fill_role = .inset_bg,
-        .corner_radii = .{ 8, 8, 8, 8 },
-        .border_widths = .{ 1, 1, 1, 1 },
-    };
-    // clip 없음 = 원본 그대로.
-    try std.testing.expectEqual(base.rect.h, (clipQuad(base) orelse return error.TestUnexpectedResult).rect.h);
-    // 위쪽이 잘리면 위 두 모서리와 위 테두리만 사라지고 아래는 원래 모양을 유지한다.
-    var top_cut = base;
-    top_cut.clip = .{ .x = 0, .y = 120, .w = 1000, .h = 1000 };
-    const cut = clipQuad(top_cut) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(i32, 120), cut.rect.y);
-    try std.testing.expectEqual(@as(u32, 20), cut.rect.h);
-    try std.testing.expectEqual(@as(u16, 0), cut.corner_radii[0]);
-    try std.testing.expectEqual(@as(u16, 0), cut.corner_radii[1]);
-    try std.testing.expectEqual(@as(u16, 8), cut.corner_radii[2]);
-    try std.testing.expectEqual(@as(u16, 8), cut.corner_radii[3]);
-    try std.testing.expectEqual(@as(u16, 0), cut.border_widths[0]);
-    try std.testing.expectEqual(@as(u16, 1), cut.border_widths[2]);
-    // 완전히 밖이면 방출하지 않는다.
-    var outside = base;
-    outside.clip = .{ .x = 0, .y = 0, .w = 10, .h = 10 };
-    try std.testing.expect(clipQuad(outside) == null);
 }
 
 fn appendCluster(

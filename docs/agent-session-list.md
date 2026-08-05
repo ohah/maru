@@ -119,8 +119,10 @@ identity는 바꾸지 않으며, `SessionDock`의 같은 completed `UiRectTree`�
   직각 fill로만 lower한다. component가 `if (rich)` 또는 font별 좌표 nudge를 두지 않는다.
 
 `ChromeTextRole`은 role별 line box와 final-pixel glyph placement를 전달한다. 기본 목록은 compact
-Chrome scale(`card title` 16pt, `summary` 14pt, `metadata` 13pt)을 사용해 기존 Chrome의 본문 밀도와
-맞춘다. B1-button-b는 확장
+Chrome scale(`card title` 14pt, `summary`/`body` 13pt, `metadata` 12pt, `dock heading` 16pt)을 사용한다.
+이 절대값은 terminal `font.*`와 **독립**이지만(그 독립성이 위 계약이다) 값 자체는 조정 가능한 결정이며,
+같은 화면의 터미널 글자보다 도크가 커 보인다는 사용자 보고로 한 차례 낮춘 결과다. 단일 출처는
+`src/chrome/ui/typography.zig`의 role 토큰이고, 이 문단은 그 값을 서술한다 — 한쪽만 바꾸지 않는다. B1-button-b는 확장
 action의 measured label/SVG group centre를 완료했고, AS4-f-b는 기본 목록·header utility·detail·action의
 고정 기하와 scroll unit을 같은 `DockMetrics` snapshot으로 옮겼다. terminal cell은 텍스트의 보수적
 수평 truncate fallback에만 남고, padding·height·pointer hit rect는 입력으로 쓰지 않는다. 이를 cell 수를

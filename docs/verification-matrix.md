@@ -567,6 +567,22 @@ renderer capability의 현재 검증 계약은 `editor_epoch`를 포함한 `Rend
 
 > **AS4 snapshot-replace·scroll-anchor 정정(현재):** 위 표의 snapshot replacement stale race와 expanded-card scroll-anchor 잔여 표기는 과거 상태다. `snapshot-replace-pointer` isolated AppKit process가 ordinary refresh pointer, scan worker discovery gate, old ready `resume` pointer-down, same-directory atomic replacement, immutable snapshot publication, old rect pointer-up을 순서대로 실행한다. 교체된 exact identity의 detail capability는 materialize되지 않고, 늦은 up은 provider argv·external open·새 Term/active surface 변경을 만들지 않는다. `expanded-scroll-anchor`는 실제 `NSView.scrollWheel` gesture 뒤 다른 fixture record의 mtime reorder를 ordinary refresh에 결합하고, 같은 detail request의 unclipped raw card top이 publish 전 retained snapshot과 새 published generation의 replacement snapshot에서 유지되는지 확인한다. 기본 `SessionDockUiZoom=1000`의 terminal font 14pt/24pt × render scale 1×/2× dock/action rect JSON도 완료됐다. actual AppKit fixture가 published tree의 header/scope/search/first·expanded card/resume/reveal rect를 비교해 font family/line-spacing 독립성과 raw 2× 비례를 확인하고, physical `keyDown` `Cmd+=`/`Cmd+-` font-zoom fixture와 Zig integration test가 확대·축소·clamp/reset을 같은 resolved Dock scale에서 확인한다. exact-live만 표에 적힌 별도 한계다.
 
+> **스크롤·클리핑 회귀(2026-08-05):** 사용자 보고(스크롤/새로고침 플리커, 글자가 카드 밖으로 샘, 액션이 빈 상자)의
+> 루트커즈는 layout이었다 — scroll-area가 `fill` container라 목록 아이템이 viewport에 맞춰 균등 축소되고 있었고,
+> 가상화가 마지막 아이템을 항상 viewport 밖으로 두므로 그 축소가 상시 상태였다(실측 112/256/48 → 83/190/35).
+> published rect가 `DockMetrics`와 갈라져 scroll projection·텍스트 offset·action label line box가 모두 어긋났다.
+> 아이템을 shrink 대상에서 빼고, 셰이핑 캐시 키를 스크롤 평행이동에 불변으로 만들고(캐시 miss 프레임은 measured
+> 텍스트를 하나도 안 그리므로 스크롤 내내 글자가 사라졌다), 클리핑을 emit 시점 all-or-nothing 판정에서 backend의
+> 픽셀 연산으로 옮겼다. `/code-review high` 6건과 그 뒤 적대적 검증 3건을 remediation했다(캐시가 submit이 아닌
+> poll 시점 원점을 저장, `renormalizeGpuGlyphUvs`가 클립 UV를 덮어써 부분 행이 찌그러짐, 음수 origin 드롭이
+> 스크롤 불변 키와 만나 영구 빈 줄, chevron이 legacy cell 경로라 clip 미적용, 잘린 pill의 radius/border, errdefer
+> 누락, 슬롯 반올림이 이웃 텍셀 침범, 셰이핑 키와 request의 필터 갈라짐). 도크 typography는 같은 화면 터미널
+> 글자보다 커 보인다는 보고로 두 단계 낮췄다. 자동 gate는 `zig build test`(142)와
+> `mise run macos-agent-session-archive-smoke`의 실제 AppKit+Metal PPM 캡처이며, 캡처 전후 비교로 빈 버튼·잘림·
+> 밀도를 확인했다. ⚠️ 남은 한계: 부분 클립의 atlas 슬롯이 정수 픽셀이라 1px 미만 반올림 오차가 있다(후속 GPU
+> scissor 이관에서 CPU 자르기가 없어지면 사라진다). quad는 여전히 CPU가 rect를 잘라 잘린 변의 radius를 손으로
+> 지우므로, 둥근 모서리 정확성은 GPU per-quad clip 이관 뒤에 완성된다.
+
 > **AS4 상태:** 최종 UI는 archive tab이 아니라 우측 dock 안의 하나의 `ExpandedSessionCard` disclosure다. `agent_session_inline_detail`이 cloned, identity-bound DTO를 소유하고 `SessionDock`의 completed tree/action table이 유일한 render/input owner다. `TermRuntime.archive_session_tab`, archive Term/tab/sentinel surface/pane renderer/body pointer·key routing, 그리고 backend `surface_id` multiplexing은 제거됐다. isolated HOME의 AppKit fixture는 list→loading→ready/stale readback, Codex·Claude pointer/key resume·reveal, ready 뒤 source replace reveal 차단에 더해 loading/ready/stale마다 active terminal surface id와 전체 Term 수가 변하지 않음을 확인한다. `detail-close-reopen`은 동일 card pointer로 closed capability 폐기와 새 request id의 loading→ready 재열기를 확인한다. snapshot replacement stale race, expanded scroll anchor, 기본 `SessionDockUiZoom=1000`의 font 14pt/24pt × render scale 1×/2× rect JSON active-host E2E와 Cmd zoom integration test가 완료됐다. exact-live mapping fixture만 별도 잔여 gate다. 최종 계약의 단일 출처는 [에이전트 세션 기록 도크](agent-session-list.md)다.
 
 > 파일 변경 성능 한계: queue slot은 경로 allocation 전에 예약되고 frame-tick의 worker/rename completion apply는 allocation 0·stable group/index O(N)으로 적용된다. ABI v129 `moved_unverified` native callback만 마지막 recovery path 하나를 최대 4,096바이트 복사하며 OOM/초과/invalid path는 경로 불명 fail-close로 강등한다. 다만 최대 dock 256 + recent 32 경로의 rename admission은 아직 main actor에서 expected/replacement를 개별 allocation한다. `file-panel.md`와 `performance-budget.md`가 요구하는 단일 contiguous snapshot + worker `PathRemapPlan`은 미완 gate다. 이 작업은 사용자 명령 1회 경로이고 상한이 고정돼 현재 PR의 frame-tick 안전성에는 영향을 주지 않지만, 288-entry rename의 admission allocation=1 artifact 없이는 해당 성능 계약을 완료로 간주하지 않는다.

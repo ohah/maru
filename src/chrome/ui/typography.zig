@@ -26,17 +26,21 @@ pub const Token = struct {
     weight: Weight,
 };
 
+/// 사용자 보고(2026-08-05): 도크 텍스트가 같은 화면의 터미널 글자보다 눈에 띄게 컸다. Chrome scale은
+/// terminal `font.*`와 의도적으로 독립이지만(그 독립성이 계약이다 — docs/agent-session-list.md §2.1.1),
+/// 절대값 자체는 조정 가능한 결정이라 두 단계 낮춘다. 이 값은 `DockMetrics`가 카드/행 높이를 계산하는
+/// 입력이기도 해서 목록 밀도도 함께 조금 촘촘해진다.
 pub fn token(role: ChromeTextRole) Token {
     return switch (role) {
-        .dock_heading => .{ .point_size = 18, .line_height = 24, .weight = .semibold },
-        .supporting => .{ .point_size = 14, .line_height = 18, .weight = .regular },
-        .control => .{ .point_size = 14, .line_height = 18, .weight = .medium },
-        .group_heading => .{ .point_size = 16, .line_height = 20, .weight = .semibold },
-        .card_heading => .{ .point_size = 16, .line_height = 22, .weight = .semibold },
-        .body => .{ .point_size = 14, .line_height = 20, .weight = .regular },
-        .metadata => .{ .point_size = 13, .line_height = 18, .weight = .regular },
-        .overline => .{ .point_size = 12, .line_height = 16, .weight = .medium },
-        .button_label => .{ .point_size = 14, .line_height = 18, .weight = .semibold },
+        .dock_heading => .{ .point_size = 16, .line_height = 22, .weight = .semibold },
+        .supporting => .{ .point_size = 12, .line_height = 16, .weight = .regular },
+        .control => .{ .point_size = 13, .line_height = 17, .weight = .medium },
+        .group_heading => .{ .point_size = 14, .line_height = 18, .weight = .semibold },
+        .card_heading => .{ .point_size = 14, .line_height = 20, .weight = .semibold },
+        .body => .{ .point_size = 13, .line_height = 18, .weight = .regular },
+        .metadata => .{ .point_size = 12, .line_height = 16, .weight = .regular },
+        .overline => .{ .point_size = 11, .line_height = 15, .weight = .medium },
+        .button_label => .{ .point_size = 13, .line_height = 17, .weight = .semibold },
     };
 }
 
@@ -57,7 +61,7 @@ test "every Chrome text role has a positive fixed token" {
 }
 
 test "line height converts point-equivalent token once at backing scale" {
-    try std.testing.expectEqual(@as(u32, 24), lineHeightPx(.dock_heading, 1000));
-    try std.testing.expectEqual(@as(u32, 48), lineHeightPx(.dock_heading, 2000));
-    try std.testing.expectEqual(@as(u32, 27), lineHeightPx(.metadata, 1500));
+    try std.testing.expectEqual(@as(u32, 22), lineHeightPx(.dock_heading, 1000));
+    try std.testing.expectEqual(@as(u32, 44), lineHeightPx(.dock_heading, 2000));
+    try std.testing.expectEqual(@as(u32, 24), lineHeightPx(.metadata, 1500));
 }

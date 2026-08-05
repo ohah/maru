@@ -567,6 +567,18 @@ renderer capability의 현재 검증 계약은 `editor_epoch`를 포함한 `Rend
 
 > **AS4 snapshot-replace·scroll-anchor 정정(현재):** 위 표의 snapshot replacement stale race와 expanded-card scroll-anchor 잔여 표기는 과거 상태다. `snapshot-replace-pointer` isolated AppKit process가 ordinary refresh pointer, scan worker discovery gate, old ready `resume` pointer-down, same-directory atomic replacement, immutable snapshot publication, old rect pointer-up을 순서대로 실행한다. 교체된 exact identity의 detail capability는 materialize되지 않고, 늦은 up은 provider argv·external open·새 Term/active surface 변경을 만들지 않는다. `expanded-scroll-anchor`는 실제 `NSView.scrollWheel` gesture 뒤 다른 fixture record의 mtime reorder를 ordinary refresh에 결합하고, 같은 detail request의 unclipped raw card top이 publish 전 retained snapshot과 새 published generation의 replacement snapshot에서 유지되는지 확인한다. 기본 `SessionDockUiZoom=1000`의 terminal font 14pt/24pt × render scale 1×/2× dock/action rect JSON도 완료됐다. actual AppKit fixture가 published tree의 header/scope/search/first·expanded card/resume/reveal rect를 비교해 font family/line-spacing 독립성과 raw 2× 비례를 확인하고, physical `keyDown` `Cmd+=`/`Cmd+-` font-zoom fixture와 Zig integration test가 확대·축소·clamp/reset을 같은 resolved Dock scale에서 확인한다. exact-live만 표에 적힌 별도 한계다.
 
+> **시각 골든 게이트(2026-08-05):** chrome/renderer의 시각 계약은 그동안 사람이 캡처를 **눈으로** 확인했고,
+> 그 방식이 실제로 회귀를 놓쳤다 — 부분적으로 보이는 행이 "잘린" 것과 "세로로 눌린" 것을 구분하지 못해
+> 클리핑이 죽은 상태를 정상으로 보고했다(#1882 코드리뷰가 잡았다). 이제 `macos-agent-session-archive-smoke`가
+> 남긴 실제 AppKit+Metal PPM 캡처의 **관심 영역**을 커밋된 골든과 픽셀 비교한다(`test-dock-visual-golden`,
+> CI macOS job). 전체 프레임(5.5 MB)이 아니라 계약이 걸린 좁은 사각형만 저장해, 무관한 UI 변경으로 갱신되지
+> 않게 했다: 스크롤 클립 경계·확장 액션 라벨·목록 밀도 3장. 갱신은 `MARU_UPDATE_GOLDEN=1`(기존 replay 골든과
+> 같은 관례)이며 **갱신 후 눈으로 확인하고 커밋**한다 — 자동 갱신은 회귀를 골든으로 굳힐 수 있다. 실효성은
+> 골든 1픽셀을 손상시켜 확인했다(다른 픽셀 1개, 최대 채널 차이 128, 좌표까지 지목). 채널당 2 허용치는 러너
+> rasterizer 미세 차이를 흡수하되 이 게이트가 잡으려는 결함(클리핑 실패·라벨 소실·밀도 변화)보다 훨씬 작다.
+> ⚠️ 한계: 캡처가 없으면 skip한다(스모크를 안 돌린 환경/플랫폼). 그리고 골든은 **관심 영역만** 보므로 그
+> 사각형 밖 회귀는 여전히 못 잡는다 — 새 시각 계약을 만들 때 case를 함께 추가해야 한다.
+
 > **스크롤·클리핑 회귀(2026-08-05):** 사용자 보고(스크롤/새로고침 플리커, 글자가 카드 밖으로 샘, 액션이 빈 상자)의
 > 루트커즈는 layout이었다 — scroll-area가 `fill` container라 목록 아이템이 viewport에 맞춰 균등 축소되고 있었고,
 > 가상화가 마지막 아이템을 항상 viewport 밖으로 두므로 그 축소가 상시 상태였다(실측 112/256/48 → 83/190/35).

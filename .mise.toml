@@ -153,6 +153,15 @@ run = "zig build macos-app-smoke"
 description = "Run the visible AppKit Codex archive action fixture"
 run = "zig build macos-agent-session-archive-smoke"
 
+[tasks.test-dock-visual-golden]
+description = "Compare Session Dock smoke captures against committed golden images"
+run = "zig build test-dock-visual-golden"
+
+[tasks.macos-dock-visual-golden]
+description = "Capture the Session Dock smoke and gate it against committed golden images"
+depends = ["macos-agent-session-archive-smoke"]
+run = "zig build test-dock-visual-golden"
+
 [tasks.macos-browser-bounded-smoke]
 description = "Run and assert the bounded browser.executeScript WKWebView/socket smoke"
 run = "zig build -Doptimize=ReleaseSafe macos-browser-bounded-smoke"

@@ -108,8 +108,11 @@ identity는 바꾸지 않으며, `SessionDock`의 같은 completed `UiRectTree`�
 - 선택/expanded session은 card header와 dark raised detail surface를 한 disclosure 안에 묶는다.
   detail은 outer padding을 가진 inset surface, recent-turn은 role/body 사이 여백, action은 최소
   3행 높이의 같은 baseline 버튼으로 보인다. sibling action에는 최소 `0.5ch` gap을 두고, 각 button은
-  그 gap을 제외한 남은 row 폭을 동등하게 나눈다. action의 hit rect·clip·scroll height는 이 여백을 포함한
-  동일 tree rect다. disclosure는 도크가 소유하므로 선택·확장·닫기는 새 `Term`, tab, surface 또는
+  그 gap을 제외한 남은 row 폭을 동등하게 나눈다. 여기서 "남은 row 폭"의 기준은 **dock content rect**이며
+  detail의 inset이 아니다 — action row는 detail surface의 형제이지 그 자식이 아니기 때문이다. action의
+  hit rect·clip·scroll height는 이 여백을 포함한 동일 tree rect다. action row 높이는 축소 대상이 아니다:
+  button content 높이가 label line box보다 작아지면 label과 icon이 함께 사라져 **활성처럼 보이는 빈 상자**가
+  남는데, 이는 §2.1.2가 금지한 상태다. disclosure는 도크가 소유하므로 선택·확장·닫기는 새 `Term`, tab, surface 또는
   pane body를 만들지 않는다. 따라서 archive detail 때문에 terminal focus·workspace persistence·PTY
   lifecycle에 별도 예외가 생기지 않는다.
 - rich Chrome은 radius/border/shadow token을 사용하고, tui legacy lowering은 같은 rect/spacing을
@@ -216,6 +219,19 @@ Explorer/source-control은 pane tab bar와 정렬해야 하므로 이 예외를 
   가진 container이므로, 직계 자식만 옮기면 펼쳐진 detail이 스크롤 전 y에 남아 지나간 카드 위에 겹쳐 그려지고
   그 action의 hit rect도 보이는 곳과 어긋난다. 각 entry는 평행이동한 자기 clip을 이미 평행이동한 부모 clip과
   다시 교차해, paint·clip·hit-test가 계속 같은 completed tree 하나만 소비하게 한다.
+- **목록 아이템은 viewport에 맞춰 축소되지 않는다.** scroll-area는 `fill` container이고 아이템은 그 flex 자식이라,
+  총합이 viewport를 넘으면 일반 flex 규칙은 자식을 균등 축소한다. 그런데 virtualization은 마지막 아이템이 항상
+  viewport를 넘도록 창을 잡으므로 그 축소가 상시 상태가 되고, published rect가 `DockMetrics`와 갈라진다. 그러면
+  scroll projection과 view의 텍스트 offset(둘 다 축소 전 metric을 읽는다)이 보이는 위치와 어긋나고, 축소된 action
+  rect 안에서는 label line box가 들어가지 못해 버튼이 배경만 남은 빈 상자가 된다. 스크롤 목록은 넘치면 **잘려야**
+  하고 줄어들어서는 안 된다.
+- **클리핑은 emit 시점 판정이 아니라 backend의 픽셀 연산이다.** component는 자기 op이 스크롤 영역에 속하는지만
+  표시하고, 뷰포트 사각형은 backend가 프레임마다 published tree에서 읽어 GPU 경로로 넘긴다. text는 glyph quad를
+  뷰포트와 교차시키며 잘린 비율만큼 atlas UV를 함께 좁혀 **픽셀 단위로** 자르므로, 반쯤 걸친 카드·그룹의 글자도
+  잘린 그대로 보인다. component가 "이 줄이 clip 안에 통째로 들어가는가"를 미리 판정해 통째로 버리는 방식은
+  금지한다 — 1px만 벗어나도 그 줄 전체가 사라지고, 판정 기준이 카드(줄 단위)와 그룹(행 단위)처럼 갈라지면 어느
+  한쪽만 고정 chrome 위로 새는 결함이 생긴다. 카드/버튼 배경 quad는 generic paint가 이미 같은 published clip과
+  교차시키며, component가 직접 만드는 장식 quad(그룹 count pill 등)도 같은 규율을 따른다.
 - `SessionDockHeader`는 title, displayed/recent count, host SVG와 `로컬`
   provenance, refresh affordance만 소유한다. host+label은 72pt box 안에서 실제 glyph advance로
   함께 중앙 정렬하고, refresh는 그 오른쪽 12pt gap 뒤의 24pt trailing slot에 둔다. refresh가 실행 중이면 같은 위치의
@@ -412,6 +428,20 @@ artifact cache가 miss하더라도 render tick은 `CTLine`/`CTRun`을 만들거�
 상태는 유지하되, 다른 geometry/content의 이전 text artifact를 새 frame에 재사용하지 않는다. 아직 artifact가 없는
 그 짧은 구간에는 목록의 기존 loading/skeleton 상태만 보인다. request는 하나만 inflight로 coalesce하며, 이후 layout·font scale·theme·snapshot이
 다시 바뀌면 결과의 fingerprint가 현재 semantic draw fingerprint와 정확히 일치할 때만 publish한다.
+
+**단, 스크롤은 이 무효화의 대상이 아니다.** CoreText 셰이핑 결과(글리프 id·advance·선택된 face)는 위치의
+함수가 아니므로, 목록이 통째로 위아래로 움직인 프레임은 **같은 artifact를 그대로 재사용해야 한다**. 이것은 위
+문단이 금지하는 "다른 geometry의 artifact 재사용"이 아니라, 같은 artifact를 올바른 위치에 놓는 일이다.
+그래서 fingerprint는 스크롤 목록에 속한 op의 y를 **스크롤 기준 상대값**으로 섞어 평행이동에 불변인 키를 만들고,
+host는 셰이핑 당시의 스크롤 원점을 cache와 함께 보관해 재사용할 때 그 차이만큼 스크롤 소속 glyph만 옮긴다.
+고정 chrome(header·scope·search)은 스크롤해도 제자리이므로 절대 y를 유지한다 — 전체가 같은 delta로 움직이지
+않으므로 단일 평행이동으로는 보정할 수 없다. 스크롤 뷰포트 사각형이나 스크롤 오프셋 자체를 semantic op에
+실어서는 안 된다. 그러면 스크롤 1px마다 op이 달라져 cache가 통째로 무효화되고, cache가 빗나간 프레임은 measured
+텍스트를 하나도 그리지 않으므로(§아래 all-or-cell-fallback) 스크롤이 끝날 때까지 글자가 사라진다. op이 싣는 것은
+**"이 op이 스크롤 영역에 속한다"는 소속 표시뿐**이며, 그 사실은 스크롤해도 바뀌지 않는다.
+
+가상화로 카드가 실제로 교체되면 텍스트 바이트가 달라져 fingerprint가 정상적으로 바뀐다. 그 경우에만 새 셰이핑을
+기다리며, 이전 카드의 artifact를 새 카드 자리에 재사용하지 않는다.
 
 이 text worker는 CoreText의 scalar 결과와 postscript font name을 **소유한 DTO**로만 반환한다. CoreText는 macOS
 SDK의 `CoreText.h` thread-safety 계약에 따라 worker에서 호출할 수 있지만, `FontIdentityRegistry`, atlas,

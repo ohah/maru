@@ -451,6 +451,19 @@ pub const UiStyle = struct {
 - paint style은 layout과 분리한다. v1은 background, foreground, border,
   radius, shadow, opacity, overflow clip만 둔다. style은 immutable input이고 paint가
   layout rect나 hit target을 몰래 바꾸지 않는다.
+- **clip을 소비하는 주체는 backend다.** `overflow clip`은 published tree의 `effective clip`으로
+  이미 표현돼 있으므로, component의 draw op emit 지점이 "이 요소가 clip 안에 통째로 들어가는가"를
+  판정해 통째로 버려서는 안 된다. 그 방식은 (a) 1px만 벗어난 요소를 통째로 지우고, (b) component마다
+  판정 단위(줄/행/요소)가 갈라져 어느 한쪽만 clip 밖으로 새는 결함을 만든다. component가 싣는 것은
+  "이 op이 어느 스크롤 영역에 속하는가"라는 **소속**이고, 실제 잘라내기는 backend가 픽셀 단위로 한다
+  (glyph는 quad와 atlas UV를 함께 좁히고, 배경 quad는 published clip과 교차한다). 소속은 스크롤해도
+  바뀌지 않으므로 shaping cache 키에 안전하게 들어가지만, **뷰포트 사각형이나 스크롤 오프셋을 semantic
+  op에 실으면** 스크롤 1px마다 op이 달라져 그 cache가 통째로 무효화된다.
+- **가상화 목록의 아이템은 flex 축소 대상이 아니다.** scroll-area가 `fill` container이면 자식 총합이
+  viewport를 넘을 때 일반 flex 규칙이 자식을 균등 축소하는데, 가상화는 마지막 아이템이 항상 viewport를
+  넘도록 창을 잡으므로 그 축소가 상시 상태가 된다. 그러면 published rect가 component가 선언한 metric과
+  갈라져, 같은 metric을 읽는 scroll projection·텍스트 offset·hit rect가 보이는 위치와 어긋난다. 목록은
+  넘치면 clip으로 잘리고, 줄어들지 않는다.
 
 ### semantic paint props와 event intent
 

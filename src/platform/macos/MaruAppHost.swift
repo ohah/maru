@@ -8384,8 +8384,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard isTabDragSmokeMode, let renderer = surface.metalRenderer else { return false }
         let home = URL(fileURLWithPath: NSHomeDirectory()).standardizedFileURL
         guard home.lastPathComponent == "tab-drag-home" else { return false }
+        // **쓰기 루트는 셸 하네스가 소유한다**(AS4-c와 같은 규율) — 여기서 디렉터리를 만들면 test-only 값이
+        // 임의 쓰기 경로가 될 여지를 이쪽이 도로 열게 된다. 없으면 캡처를 건너뛴다.
         let dir = home.appendingPathComponent("captures", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: dir.path, isDirectory: &isDirectory), isDirectory.boolValue
+        else { return false }
         let path = dir.appendingPathComponent("tab-drag-\(label).ppm").standardizedFileURL
         guard path.deletingLastPathComponent() == dir,
               !FileManager.default.fileExists(atPath: path.path),

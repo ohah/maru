@@ -1390,7 +1390,9 @@ pub fn build(b: *std.Build) void {
         const macos_tab_drag_smoke_fixture = b.addSystemCommand(&.{
             "sh", "-eu", "-c",
             "mkdir -p zig-out/maru-macos-app; " ++
-                "rm -rf zig-out/maru-macos-app/tab-drag-home; mkdir -p zig-out/maru-macos-app/tab-drag-home",
+                // captures 디렉터리는 **하네스가** 만든다 — 앱이 스스로 만들면 test-only env 값이 임의 쓰기
+                // 경로가 될 여지가 생긴다(AS4-c 아카이브 스모크와 같은 규율).
+                "rm -rf zig-out/maru-macos-app/tab-drag-home; mkdir -p zig-out/maru-macos-app/tab-drag-home/captures",
         });
         macos_tab_drag_smoke_fixture.setCwd(b.path("."));
         const macos_tab_drag_smoke = b.addSystemCommand(&.{"./zig-out/Maru.app/Contents/MacOS/maru-macos-app"});

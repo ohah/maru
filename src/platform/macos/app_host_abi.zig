@@ -110,8 +110,8 @@ pub const AgentSessionArchiveSmokeProbe = extern struct {
     enabled: u32 = 0,
 };
 
-test "ABI v163 app instance lease result values match the C header" {
-    try std.testing.expectEqual(@as(u32, 163), abi_version);
+test "ABI v164 app instance lease result values match the C header" {
+    try std.testing.expectEqual(@as(u32, 164), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -503,6 +503,10 @@ pub const DividerSmokeProbe = extern struct {
     capture_active: u32,
     move_events: u64,
     resize_applications: u64,
+    padding_left_px: u32,
+    padding_right_px: u32,
+    web_covered_dividers: u32,
+    _reserved: u32 = 0,
 };
 
 /// Reads the published divider grab band and this drag's coalescing instrumentation for the
@@ -525,6 +529,9 @@ pub export fn maru_macos_app_session_divider_smoke_probe(
         .capture_active = @intFromBool(probe.capture_active),
         .move_events = probe.move_events,
         .resize_applications = probe.resize_applications,
+        .padding_left_px = probe.padding_left_px,
+        .padding_right_px = probe.padding_right_px,
+        .web_covered_dividers = probe.web_covered_dividers,
     };
     return @intFromEnum(Status.ok);
 }

@@ -3939,6 +3939,18 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var dividerSmokeTermCount: UInt32 = 0
     private var dividerSmokeProbeStatusOK = false
     private var dividerSmokeSplitRetries = 0
+    // CIM2d: 웹 패널이 divider에 맞닿았을 때 seam 밴드 클릭이 아래 터미널 뷰로 통과하는지.
+    private var webDividerSmokeStage = 0
+    private var webDividerSmokeRetries = 0
+    private var webDividerSeamEdges: UInt32 = 0
+    private var webDividerPanelPresent = false
+    private var webDividerHitTestPassedThrough = false
+    private var webDividerHitTestOverPanel = false
+    private var webDividerCaptureAfterDown = false
+    private var webDividerPadding = ""
+    private var webDividerCovered: UInt32 = 0
+    private var webDividerBands = ""
+    private var webDividerFrame = ""
 
     // 5b: 웹 패널이 격리 E2E probe(evaluateJavaScript)를 스모크에서만 돌리게 노출(정상 런은 probe 안 함 — 오버헤드 0).
     var isSmokeMode: Bool { smokeMode }
@@ -8124,7 +8136,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// The only ABI reads are the read-only divider probe and the split shortcut goes through the
     /// normal key path, so nothing here bypasses the capture routing this fixture is meant to prove.
     private func maybeRunDividerSmoke() {
-        guard isDividerSmokeMode, dividerSmokeStage != .done,
+        // `.done`에서도 계속 들어온다 — 그 뒤를 CIM2d(웹 seam pass-through)가 이어받기 때문이다.
+        guard isDividerSmokeMode,
               let surface = primary, let session = surface.appSession,
               let view = surface.view, let window = surface.window else { return }
 
@@ -8222,8 +8235,123 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             }
             dividerSmokeStage = .done
         case .done:
+            maybeRunWebDividerSmoke(surface: surface, session: session, view: view, window: window)
+        }
+    }
+
+    /// CIM2d — 웹 패널이 divider에 맞닿은 배치에서 seam 밴드 클릭이 **아래 터미널 뷰로 통과**하는지.
+    /// WKWebView는 native라 자기 frame 클릭을 삼키므로, 이 통과가 없으면 divider를 잡을 수 없다.
+    /// 통과 판정은 `hitTest` 조회 결과로 하고, 그 뒤 같은 좌표의 실제 down이 capture를 만드는지 본다.
+    private func maybeRunWebDividerSmoke(
+        surface: TerminalSurface,
+        session: OpaquePointer,
+        view: MaruMetalTerminalView,
+        window: NSWindow
+    ) {
+        guard webDividerSmokeStage < 2 else { return }
+
+        if webDividerSmokeStage == 0 {
+            // ⌘⌥T — 활성 pane에 브라우저 Term. divider 스모크가 이미 split해 뒀으므로 이 pane은
+            // 반드시 한쪽 divider에 맞닿는다.
+            webDividerSmokeRetries += 1
+            if surface.webPanels.isEmpty {
+                if webDividerSmokeRetries % 30 == 1 && webDividerSmokeRetries <= 300 {
+                    withSurface(surface) {
+                        sendKeyEvent(MaruAppHostKeyEvent(
+                            codepoint: UInt32(UnicodeScalar("t").value),
+                            base_codepoint: UInt32(UnicodeScalar("t").value),
+                            key_code: UInt32(MaruAppHostKeyCodeUnknown.rawValue),
+                            modifier_shift: 0,
+                            modifier_control: 0,
+                            modifier_option: 1,
+                            modifier_command: 1,
+                            is_repeat: 0,
+                            raw_key_code: 17
+                        ))
+                    }
+                }
+                return
+            }
+            webDividerSmokeStage = 1
             return
         }
+
+        guard let panel = surface.webPanels.values.first, let contentView = window.contentView else { return }
+        webDividerPanelPresent = true
+        webDividerSeamEdges = panel.seamEdges
+        guard panel.seamEdges != 0 else { return }
+
+        // 겨냥할 좌표는 **divider가 실제로 있는 자리**다 — 웹 패널 frame에서 유추하지 않는다. CIM2c의
+        // probe가 발행된 밴드를 그대로 주므로 그 중앙을 쓴다.
+        var probe = MaruAppHostDividerSmokeProbe()
+        guard maru_macos_app_session_divider_smoke_probe(session, &probe) == Self.statusOK, probe.present != 0 else { return }
+        let scale = window.backingScaleFactor
+        guard scale > 0 else { return }
+        // 밴드 **중앙**은 divider 선 자체라 웹뷰가 seam만큼 물러난 그 자리에는 웹뷰가 없다. 덮인
+        // 구간은 밴드의 한쪽 끝(패널이 있는 쪽)이므로 양 끝을 후보로 두고 실제로 패널 안에 드는
+        // 쪽을 고른다 — 그 점이라야 `isInDividerGrabBand`의 통과가 시험된다.
+        let bandY = CGFloat(probe.y_px) + CGFloat(probe.height_px) / 2
+        func toLocal(_ backingX: CGFloat) -> NSPoint {
+            NSPoint(x: backingX / scale, y: view.bounds.height - (bandY / scale))
+        }
+        var local = toLocal(CGFloat(probe.x_px) + CGFloat(probe.width_px) / 2)
+        for candidate in [CGFloat(probe.x_px) + 1, CGFloat(probe.x_px) + CGFloat(probe.width_px) - 1] {
+            let point = toLocal(candidate)
+            if panel.bounds.contains(panel.convert(point, from: view)) {
+                local = point
+                break
+            }
+        }
+
+        // 이 fixture는 window padding 0으로 돈다. 그래야 WKWebView가 seam까지 차올라 divider를 덮고,
+        // `isInDividerGrabBand`의 통과가 **실제로 시험된다** — padding이 divider를 노출하는 기본
+        // 구성에서는 애초에 웹뷰가 그 자리에 없어 아무것도 증명하지 못한다.
+        let inPanel = panel.convert(local, from: view)
+        webDividerHitTestOverPanel = panel.bounds.contains(inPanel)
+
+        // hitTest가 웹 패널(또는 그 자손)을 돌려주면 divider는 영영 잡히지 않는다.
+        let hit = contentView.hitTest(contentView.convert(local, from: view))
+        var isWebPanelHit = false
+        var walk: NSView? = hit
+        while let candidate = walk {
+            if candidate === panel { isWebPanelHit = true; break }
+            walk = candidate.superview
+        }
+        webDividerHitTestPassedThrough = !isWebPanelHit
+        webDividerPadding = "l=\(probe.padding_left_px) r=\(probe.padding_right_px)"
+        webDividerCovered = probe.web_covered_dividers
+
+        if let down = NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: view.convert(local, to: nil),
+            modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 0,
+            clickCount: 1,
+            pressure: 1
+        ) {
+            view.mouseDown(with: down)
+            var after = MaruAppHostDividerSmokeProbe()
+            if maru_macos_app_session_divider_smoke_probe(session, &after) == Self.statusOK {
+                webDividerCaptureAfterDown = after.capture_active != 0
+            }
+            if let up = NSEvent.mouseEvent(
+                with: .leftMouseUp,
+                location: view.convert(local, to: nil),
+                modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber,
+                context: nil,
+                eventNumber: 0,
+                clickCount: 1,
+                pressure: 1
+            ) {
+                view.mouseUp(with: up)
+            }
+        }
+        webDividerSmokeStage = 2
     }
 
     /// Drives the archive fixture through `MaruMetalTerminalView.mouseDown/up`, never by calling
@@ -9728,6 +9856,15 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             divider_capture_after_up=\(dividerSmokeCaptureAfterUp)
             divider_ratio_before=\(dividerSmokeRatioBefore)
             divider_ratio_after=\(dividerSmokeRatioAfter)
+            web_divider_padding=\(webDividerPadding)
+            web_divider_covered=\(webDividerCovered)
+            web_divider_panel_present=\(webDividerPanelPresent)
+            web_divider_seam_edges=\(webDividerSeamEdges)
+            web_divider_bands=\(webDividerBands)
+            web_divider_frame=\(webDividerFrame)
+            web_divider_point_over_panel=\(webDividerHitTestOverPanel)
+            web_divider_hittest_passthrough=\(webDividerHitTestPassedThrough)
+            web_divider_capture_after_down=\(webDividerCaptureAfterDown)
             divider_move_events=\(dividerSmokeMoveEvents)
             divider_resize_applications=\(dividerSmokeResizeApplications)
 

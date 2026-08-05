@@ -243,14 +243,25 @@ direct manipulation의 즉시성을 유지하되, 그 순서는 아직 model이 
 
 - drag 시작 시 host가 **시작 순서를 transaction에 보관**한다. 이 transaction은 drag 수명 동안만
   살아 있고 다른 mutation과 공유하지 않는다.
-- drag 중 보이는 순서는 `InteractionState`에서 파생한 provisional 배열이다. 이 배열은 paint와
-  hit-test가 함께 쓰지만 `Tab` model, persisted workspace 순서, PTY, config write를 건드리지 않는다.
+- drag 중 보이는 순서는 그 transaction에서 파생한 provisional 배열이다. 이 배열은 paint와 hit-test가
+  함께 쓰지만 `Tab` model, persisted workspace 순서, PTY, config write를 건드리지 않는다. **"보이는
+  것이 조작되는 것"은 포인터에 한정되지 않는다** — 같은 배열이 키보드 탭 전환(다음/이전)과 탭 바
+  스크롤 대상 판정에도 권위를 갖는다. drag 중 파생된 값은 영속 상태(스크롤 offset 등)에 쓰지 않는다.
 - **up에서만** 한 번 commit한다. commit destination의 권위는 §5대로 up 좌표를 현재 published
   tree에 재hit-test한 결과이고, 그 좌표가 유효한 destination을 못 짚으면 commit 없이 시작 순서를
   복원한다.
-- Escape, pointer cancel, window deactivate, modal/native overlay 진입, source 또는 target tab
-  removal, snapshot/window epoch mismatch는 모두 **시작 순서를 복원**하고 effect 0으로 끝난다.
-  복원은 transaction 하나를 되돌리는 것이므로 부분 적용된 중간 순서를 남기지 않는다.
+- **진행 중인 drag는 어떤 overlay보다 먼저 자기 pointer 이벤트를 받는다.** overlay가 up을 삼키면
+  drag가 끝나지 못해 preview와 ghost가 화면에 박히고 사용자가 되돌릴 방법이 없다. overlay마다
+  예외를 두는 대신 라우팅 순서로 보장한다 — 새 drag를 시작하는 down만 overlay가 먼저 본다.
+- drag는 **primary 버튼에서만** 시작하고 끝난다. 다른 버튼의 press/release는 진행 중인 drag를
+  가로채지도, 새로 arm하지도 않는다.
+- Escape, pointer cancel, window deactivate, modal 진입, source 또는 target tab removal은 모두
+  **시작 순서를 복원**하고 effect 0으로 끝난다. 복원은 transaction 하나를 되돌리는 것이므로 부분
+  적용된 중간 순서를 남기지 않는다. 사용자가 유발하지 않은 비-모달 알림(토스트)은 이 목록에
+  **없다** — 배경 이벤트가 진행 중인 사용자 조작을 파기해서는 안 되고, 그것이 up을 가로막는
+  문제는 위 라우팅 순서가 이미 없앤다. snapshot/window epoch mismatch는 이 소비자의 축이 아니다
+  (§5의 generation gate는 `InteractionState` 소비자에 적용되며, terminal tab은 아직 그 축으로
+  이관되지 않았다 — [검증 매트릭스](verification-matrix.md)의 CIM4 행이 그 경계를 소유한다).
 - drag가 살아 있는 동안 다른 경로(단축키 select/close, 원격 관측의 Term 소멸)가 tab 집합을
   바꾸면 provisional 배열을 폐기하고 시작 순서로 복원한 뒤 그 변경을 적용한다. provisional 배열을
   새 집합에 맞춰 재봉합하지 않는다.

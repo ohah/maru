@@ -4467,7 +4467,9 @@ pub const AppSession = struct {
         return std.meta.activeTag(self.pointer_gesture_owner) == tag;
     }
 
-    fn cancelPointerGesture(self: *AppSession) void {
+    /// union과 부수 capture만 비우는 저수준 종료. **teardown 중에는 이것을 쓴다** — Term/Pane이 해제되는
+    /// 중에 레이아웃을 다시 재면(아래 `cancelPointerGesture`의 스크롤 정정) 죽어가는 트리를 짚는다.
+    fn clearPointerGesture(self: *AppSession) void {
         self.clearSidebarDragPreview();
         self.pointer_gesture_owner = .none;
         // divider capture는 이제 다른 축(`divider_interaction`)이라 union을 비우는 것만으로 끝나지
@@ -4475,6 +4477,18 @@ pub const AppSession = struct {
         self.endDividerCapture();
         self.endScrollbarCapture();
         self.metal_dirty = true;
+    }
+
+    fn cancelPointerGesture(self: *AppSession) void {
+        // 탭 드래그 중에는 `ensureActiveTermVisible`이 스크롤을 얼려 둔다(preview 슬롯이 영속 상태
+        // `tab_scroll_cols`로 새지 않게). 끝나는 자리에서 한 번 풀어 주지 않으면, 드래그 중 ⌘⌥]로 옮긴
+        // 활성 탭이 넘치는 바 밖에 남아 하이라이트가 어디에도 안 보이는 상태로 굳는다.
+        const tab_drag_pane: ?*Pane = switch (self.pointer_gesture_owner) {
+            .terminal_tab => |drag| drag.pane,
+            else => null,
+        };
+        self.clearPointerGesture();
+        if (tab_drag_pane) |pane| self.ensureActiveTermVisible(pane);
     }
 
     fn beginPointerGesture(self: *AppSession, owner: PointerGestureOwner) void {
@@ -5948,13 +5962,18 @@ pub const AppSession = struct {
     }
 
     /// 활성 pane의 Term을 delta(+1=다음, -1=이전)만큼 wrap-around로 옮긴다(⌘⌥]/⌘⌥[). Term이 1개면 무동작.
+    /// **이동은 보이는 순서에서 센다** — 드래그 중이면 탭 바가 preview 순서를 그리므로, model 인덱스로 세면
+    /// "오른쪽 다음 탭"이 화면에서 인접하지 않은 탭이 된다(§4.4 "보이는 것이 조작되는 것").
     fn focusTermRelative(self: *AppSession, delta: i64) void {
         const pane = self.activePane();
         const n = pane.terms.items.len;
         if (n <= 1) return;
-        const cur: i64 = @intCast(pane.active_term);
-        const next = @mod(cur + delta, @as(i64, @intCast(n)));
-        self.focusTerm(@intCast(next));
+        const order = self.paneTermOrder(pane);
+        if (order.len != n) return;
+        const cur: i64 = @intCast(self.paneActiveTermIndex(pane));
+        const next_slot: usize = @intCast(@mod(cur + delta, @as(i64, @intCast(n))));
+        // 고른 것은 슬롯이고 `focusTerm`은 model 인덱스를 받는다.
+        self.focusTerm(self.termModelIndex(pane, order[next_slot]) orelse return);
     }
 
     /// 활성 워크스페이스의 split(pane)을 delta(+1=다음, -1=이전)만큼 wrap-around로 옮긴다(⌘]/⌘[). pane이
@@ -5974,35 +5993,39 @@ pub const AppSession = struct {
         if (index >= pane.terms.items.len) return false;
         self.tab_drag_start.clearRetainingCapacity();
         self.tab_drag_preview.clearRetainingCapacity();
+        self.tab_drag_order.clearRetainingCapacity();
+        // 세 버퍼의 용량을 **여기서 한 번에** 확보한다 — 이후 드래그 동안 길이가 늘지 않으므로 `syncTabDragOrder`는
+        // 실패할 수 없고, 실패 처리를 뒤로 끌고 다니지 않아도 된다(그 폴백은 뷰만 비워 preview와 어긋난 상태를
+        // 만들었다: paint는 model, commit은 회전된 preview).
         self.tab_drag_start.ensureTotalCapacity(self.allocator, pane.terms.items.len) catch return false;
         self.tab_drag_preview.ensureTotalCapacity(self.allocator, pane.terms.items.len) catch return false;
+        self.tab_drag_order.ensureTotalCapacity(self.allocator, pane.terms.items.len) catch return false;
         for (pane.terms.items) |t| {
             self.tab_drag_start.appendAssumeCapacity(@intFromPtr(t));
             self.tab_drag_preview.appendAssumeCapacity(@intFromPtr(t));
         }
-        return self.syncTabDragOrder();
+        self.syncTabDragOrder();
+        return true;
     }
 
     /// preview(identity)에서 `*Term` 뷰를 다시 만든다. paint·hit-test가 이 뷰 하나만 읽으므로 preview를 바꾼
-    /// 모든 자리가 이것을 뒤따라 불러야 한다. 실패(OOM)면 false — 호출자가 뷰를 비워 model 순서로 되돌린다.
-    fn syncTabDragOrder(self: *AppSession) bool {
+    /// 모든 자리가 이것을 뒤따라 불러야 한다. 용량은 `beginTabDragOrder`가 이미 확보했다(길이 불변).
+    fn syncTabDragOrder(self: *AppSession) void {
         self.tab_drag_order.clearRetainingCapacity();
-        self.tab_drag_order.ensureTotalCapacity(self.allocator, self.tab_drag_preview.items.len) catch return false;
         for (self.tab_drag_preview.items) |id| self.tab_drag_order.appendAssumeCapacity(@ptrFromInt(id));
-        return true;
     }
 
     /// 해제되려는 Term이 지금 드래그의 preview에 실려 있으면 제스처를 통째로 끝낸다(§4.4 "집합이 바뀌면
     /// provisional 배열을 폐기한다"). preview는 해제된 뒤에도 남을 수 있는 유일한 `*Term` 캐시다.
-    /// **teardown 중이라 `ensureActiveTermVisible`을 부르지 않는다** — 그 Term은 곧 해제되고 `pane.terms`는
-    /// 아직 그것을 담고 있어, 레이아웃을 다시 재는 것이 이 시점에 안전한 일이 아니다. 스크롤 정정은 이 pane이
-    /// 살아남았다면 다음 `focusTerm`이 한다.
+    /// **teardown 중이라 저수준 `clearPointerGesture`를 쓴다** — 그 Term은 곧 해제되고 `pane.terms`는 아직
+    /// 그것을 담고 있어, 스크롤 정정이 레이아웃을 다시 재는 것이 이 시점에 안전한 일이 아니다. 정정은 이
+    /// pane이 살아남았다면 다음 `focusTerm`이 한다.
     fn cancelTabDragForTerm(self: *AppSession, term: *Term) void {
         if (!self.pointerGestureIs(.terminal_tab)) return;
         const id = @intFromPtr(term);
         for (self.tab_drag_preview.items) |item| {
             if (item != id) continue;
-            self.cancelPointerGesture();
+            self.clearPointerGesture();
             return;
         }
     }
@@ -6083,7 +6106,7 @@ pub const AppSession = struct {
             const before = txn.destination();
             txn.moveTo(target);
             if (txn.destination() != before) {
-                if (!self.syncTabDragOrder()) self.tab_drag_order.clearRetainingCapacity(); // 뷰 실패 시 model 순서로 폴백
+                self.syncTabDragOrder();
                 self.metal_dirty = true;
             }
             return;
@@ -22654,6 +22677,191 @@ pub const AppSession = struct {
         // 터미널 마우스 리포트로 갈 때는 아래 report_mouse 경로에서 32비트를 마스킹해 뺀다(command=32이 input_report.zig
         // reportMouse의 SGR motion 비트 32와 충돌 — cb=button+mods+motion이라 섞이면 리포트가 오염된다). shift/option 게이트는 불변.
         const cmd_held = (mods & 32) != 0;
+        // ── 진행 중인 포인터 제스처 라우팅(오버레이보다 먼저) ─────────────────────────────
+        // **살아 있는 제스처는 어떤 오버레이보다 먼저 자기 이벤트(move·up)를 받는다.** 오버레이 블록이
+        // 앞에 있으면 드래그 도중 비동기로 뜬 것(알림 토스트·패널)이 up을 삼켜 제스처가 영영 끝나지
+        // 못한다 — 고스트와 preview가 화면에 박히고 손을 뗀 사용자는 되돌릴 방법이 없다. 오버레이마다
+        // 예외를 뚫는 대신 순서를 뒤집어 그 구멍을 통째로 없앤다(오버레이를 하나 더해도 자동으로 안전).
+        //
+        // 반대로 **새 제스처를 시작하는 down은 오버레이가 먼저 본다** — 오버레이 위 클릭이 그 아래
+        // 터미널·탭으로 새면 안 되기 때문이다. 그래서 이 구간은 kind 2/3만 잡고 kind 1은 아래로 흘린다.
+        // 사이드바 탭 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다(x가 사이드바 밖으로 나가도) — 새
+        // down(1)은 아래 일반 처리로 흘려 드래그를 새로 시작한다. drag는 타겟 슬롯으로 live 재정렬한다.
+        if (self.pointerGestureIs(.sidebar_tab) and (kind == 2 or kind == 3)) {
+            const drag = &self.pointer_gesture_owner.sidebar_tab;
+            if (kind == 2 and drag.index < self.tabs.items.len) {
+                if (self.tabs.items[drag.index].group_start == null) {
+                    // 마커 없는 카드 = SG4 넣기/빼기. **SG8d 고스트 프리뷰**: 라이브 moveTab 커밋 대신 **비커밋 프리뷰**를
+                    // 재투영한다(docs/sidebar-groups.md §9 SG8). hit-test는 **원본 sidebar_rows**(불변)로 드롭 목표 탭을
+                    // 계산하고(sidebarGroupDropTargetTab — 카드 row=그 자리, 펼친 헤더=그룹 최상단, 접힌 헤더=그룹 끝),
+                    // 그 plan을 refreshDragPreview에 넘겨 sidebar_preview_rows에 고스트를 투영한다(self.tabs 불변). 렌더는
+                    // sidebarRenderRows()=preview_rows로 반투명 고스트+삽입선을 그리고, up이 이 마지막 plan을 정확히 1회
+                    // 커밋한다. self.tabs가 불변이라 sidebar_drag_index(=origin)도 드래그 내내 안정(옛 landed 팔로우 불필요).
+                    const origin = drag.index;
+                    // (A) y_px→raw_row→plan 실경로 단일 출처(프리뷰 시프트 보정 포함) — 헤드리스 테스트가 같은 함수를 탄다.
+                    const plan = self.cardDropPlan(origin, y_px);
+                    var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+                    defer arena_state.deinit();
+                    self.refreshDragPreview(origin, plan, y_px, arena_state.allocator()) catch {};
+                    // 원본-도메인 drop_slot은 프리뷰 렌더에 오강조를 주므로 세팅하지 않는다(고스트+삽입선이 대체, 위 rebuild의
+                    // drop_slot 게이트도 프리뷰 중 null). 매 프레임 재투영이 필요하므로 rebuild + dirty.
+                    self.rebuildSidebar() catch {};
+                    self.metal_dirty = true;
+                } else {
+                    // 마커 탭(group_start!=null) 카드 드래그 = **그룹 통째 이동(SG5-1)**. 마커는 group_start를 든 그 탭이라
+                    // 단독으로 못 옮긴다(옮기면 그룹이 딸려 온다) — 그룹 subtree [M,j)를 하나의 블록으로 재정렬한다(groupDragPreviewFrame).
+                    // 헤더 드래그(threshold 게이트)와 같은 프리미티브를 공유하며, 카드 드래그는 arm 시 이미 down에서 시작이라 별도 threshold 없음.
+                    // **SG8e 고스트 프리뷰**: groupDragPreviewFrame이 라이브 재배치 대신 plan+refreshDragPreview로 subtree 고스트를
+                    // 투영한다(self.tabs 불변). up이 마지막 plan(group_sibling/group_nest)을 1회 커밋한다(commitSidebarDragPreview).
+                    // self.tabs 불변이라 drag_index(=origin 마커)가 드래그 내내 안정 — SG8f: 옛 새-마커 반환값 대입 잔재 제거.
+                    // cmd_held: Cmd 눌림이면 헤더 드롭 시 중첩, 없으면 항상 형제(중첩 안 함).
+                    self.groupDragPreviewFrame(drag.index, y_px, cmd_held);
+                }
+            } else if (kind == 3) {
+                // SG8d 카드 + SG8e 그룹(마커 카드 = 그룹 통째) 확정 — 프리뷰가 있으면 마지막 plan을 실제 move로 정확히 1회
+                // 커밋하고(재계산 금지 — up-시점 재계산은 타이밍 divergence) 고스트를 정리한다. plan==none이면 제자리(고스트만 제거).
+                // commitSidebarDragPreview가 고스트 제거 + 확정 레이아웃 rebuild를 마무리한다(SG8f: 옛 drop_slot 하이라이트 해제 잔재 제거).
+                self.commitSidebarDragPreview();
+                self.finishPointerGesture();
+            }
+            return;
+        }
+        // 그룹 헤더 드래그(SG5-1)가 arm됐으면 drag(2)/up(3)을 캡처한다 — down에선 접기 토글 후보로만 arm하고(현 동작 보존),
+        // 여기서 클릭 vs 드래그를 threshold로 가른다: drag y 이동이 threshold(헤더 한 줄 절반)를 넘으면 active로 승격해 그룹
+        // 통째 이동, up까지 threshold 미달이면 접기 토글. 카드 드래그(sidebar_drag_*)와 배타 상태라 순서 무관하게 여기서 갈린다.
+        if (self.pointerGestureIs(.sidebar_group) and (kind == 2 or kind == 3)) {
+            const drag = &self.pointer_gesture_owner.sidebar_group;
+            if (kind == 2) {
+                if (drag.phase == .armed) {
+                    // threshold: 헤더 한 줄 절반(최소 4px). 넘으면 클릭 아님 = 그룹 통째 드래그 시작.
+                    const thr: f64 = @floatFromInt(@max(self.sidebar_header_row_h_px / 2, 4));
+                    if (@abs(y_px - drag.down_y) > thr) {
+                        drag.phase = .dragging;
+                        // 그룹 통째 드래그 시작 — 카드 드래그와 동형으로 stale 호버를 지운다(SG8). 재배치된 preview_rows에
+                        // 옛 hovered_slot 밴드가 남으면 고스트와 어긋난 위치에 호버 밴드가 뜬다(카드 드래그는 arm 시 ~hovered_slot=null).
+                        self.hovered_slot = null;
+                    }
+                }
+                if (drag.phase == .dragging and drag.marker < self.tabs.items.len) {
+                    // 마커 탭이어야 유효(승계·재정렬로 사라졌으면 무동작). groupDragPreviewFrame이 subtree 고스트를 재투영한다.
+                    if (self.tabs.items[drag.marker].group_start != null) {
+                        // self.tabs 불변이라 마커 인덱스가 안정 — SG8f: 옛 반환값 대입 잔재 제거(호출자 마커 갱신 불필요).
+                        // cmd_held: Cmd 눌림이면 다른 그룹 헤더 드롭 시 중첩, 없으면 항상 형제(중첩 안 함).
+                        self.groupDragPreviewFrame(drag.marker, y_px, cmd_held);
+                    }
+                }
+            } else { // kind == 3 (up)
+                if (drag.phase == .armed) {
+                    // threshold 미달 = 클릭 → 접기 토글(현 동작 보존). arm 이후 재정렬이 없었으므로 slot은 여전히 유효.
+                    // active로 승격되지 않았으면 드래그 프리뷰도 세워지지 않았다(groupDragPreviewFrame은 active일 때만 호출).
+                    self.toggleGroupCollapsedAt(drag.slot);
+                } else {
+                    // SG8e 확정 — 그룹 통째 드래그(subtree)의 마지막 plan(group_sibling/group_nest)을 실제 move로 정확히
+                    // 1회 커밋하고 고스트를 정리한다(commitSidebarDragPreview, 카드 드래그 확정과 동형). 재계산 없음.
+                    // 확정 rebuild는 commitSidebarDragPreview가 마무리한다(SG8f: 옛 drop_slot 하이라이트 해제 잔재 제거).
+                    self.commitSidebarDragPreview();
+                }
+                self.finishPointerGesture();
+            }
+            return;
+        }
+        // Term 탭 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다 — drag는 소스 pane 바 안에서 x로 타겟 탭을 잡아
+        // live 재정렬(PR-E1: pane 내). up이 끝낸다. 새 down(1)은 아래 일반 처리로 흘려 새 드래그를 시작한다.
+        if (self.pointerGestureIs(.terminal_tab) and (kind == 2 or kind == 3)) {
+            if (kind == 2) {
+                self.dragTabTo(x_px); // pane 내 live 재정렬(PR-E1)
+                self.setDropTarget(self.computeDropTarget(x_px, y_px)); // 드롭 타겟 하이라이트(④b)
+                self.pointer_gesture_owner.terminal_tab.x = x_px;
+                self.pointer_gesture_owner.terminal_tab.y = y_px;
+                self.metal_dirty = true;
+            } else {
+                const src = self.pointer_gesture_owner.terminal_tab.pane;
+                self.dropTabAt(x_px, y_px); // up: 다른 pane 바면 그 pane으로 이동(PR-E2)·본문이면 split(④)
+                self.finishPointerGesture();
+                // 드래그 중 얼려 뒀던 탭 바 스크롤을 model 기준으로 푼다(취소 경로는 cancelPointerGesture가
+                // 같은 일을 한다) — 안 풀면 넘치는 바에서 활성 탭이 화면 밖에 남는다.
+                self.ensureActiveTermVisible(src);
+                // 재정렬이 없어도 **반드시** 다시 그린다 — 직전 프레임에는 floating 고스트와 drop-target
+                // 하이라이트가 들어 있고 둘 다 `pointer_gesture_owner == .terminal_tab`로 게이트되므로,
+                // 리페인트를 안 걸면 손을 뗀 뒤에도 그 잔상이 화면에 남는다(effect 0은 model 축이지 화면 축이 아니다).
+                self.metal_dirty = true;
+            }
+            return;
+        }
+        // pane(분할 영역) 통째 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다 — drag는 커서 좌표만 갱신(floating
+        // 미리보기가 따라가게), up이 사이드바면 새 워크스페이스 분리/합치기(dropPaneAt). 사이드바 밖이면 no-op.
+        // 새 down(1)은 아래 일반 처리로 흘려 새 제스처를 시작한다.
+        if (self.pointerGestureIs(.pane) and (kind == 2 or kind == 3)) {
+            const drag = &self.pointer_gesture_owner.pane;
+            if (kind == 2) {
+                drag.x = x_px;
+                drag.y = y_px;
+                const slot = self.paneDropHighlightSlot(x_px, y_px); // 드롭 타겟 카드/빈 영역
+                if (!usizeOptEql(drag.drop_slot, slot)) {
+                    drag.drop_slot = slot;
+                    self.rebuildSidebar() catch {}; // .drop_zone 밴드를 새 슬롯으로 이동(슬롯 전환 시에만)
+                }
+                self.metal_dirty = true; // floating 미리보기가 커서를 따라가게
+            } else {
+                const was_highlighting = drag.drop_slot != null;
+                drag.drop_slot = null;
+                self.dropPaneAt(x_px, y_px); // up: 사이드바면 분리(빈 영역)/합치기(카드), 밖이면 no-op
+                self.finishPointerGesture();
+                // 밴드가 떠 있었으면 제거를 보장한다. 커밋(promote/merge)은 이미 rebuild하므로 그 경우만 약간 중복이나,
+                // 밴드가 없던 드롭(터미널 등)은 rebuild를 건너뛴다(드롭은 hot path 아님 — 무조건 rebuild 대비 절감).
+                if (was_highlighting) self.rebuildSidebar() catch {};
+                self.metal_dirty = true;
+            }
+            return;
+        }
+        // 파일 도크 divider는 workspace split과 독립적으로 캡처한다. mouse-down을 Metal view가 받았으므로 AppKit이
+        // 후속 drag/up을 같은 responder에 보내고, visible WKWebView는 surfaceDiff reframe으로 경계를 라이브 추종한다.
+        if (self.pointerGestureIs(.dock_outer_divider) and (kind == 2 or kind == 3)) {
+            if (kind == 2) {
+                self.setDockSizeFromPointer(x_px, y_px);
+            } else {
+                self.metal_dirty = true;
+                self.finishPointerGesture();
+            }
+            return;
+        }
+        // divider 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다 — 이제 그 capture는 chrome
+        // `InteractionState`가 든다(CIM2). move는 좌표를 모으기만 하고 tick이 최종 하나를 적용하며,
+        // 매 move의 재발행에서 capture를 넘길지는 §5 carry verdict가 판정한다. 새 down(1)은 아래
+        // 일반 처리로 흘려 새 드래그를 시작한다.
+        if (self.dividerCaptureActive() and (kind == 2 or kind == 3)) {
+            if (self.routeDividerCapture(kind, x_px, y_px)) return;
+        }
+        // 사이드바 폭 조절 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다(③a) — drag는 경계를 x로 잡아 폭을 live
+        // 갱신, up이 끝낸다. 새 down(1)은 아래로 흘려 새 드래그를 시작한다.
+        if (self.pointerGestureIs(.sidebar_divider) and (kind == 2 or kind == 3)) {
+            const start_pt = self.pointer_gesture_owner.sidebar_divider.start_pt;
+            if (kind == 2) self.setSidebarWidthPx(x_px) else {
+                // 드래그 종료 — 최종 폭(setSidebarWidthPx가 [동적 min, max]로 clamp해 둔 sidebar_width_pt)을 config에
+                // 영속한다. 매 move(kind 2)가 아니라 up에서 한 번만 해 디스크 write thrash를 막는다(divider·탭 드래그가
+                // up에서 마무리하는 패턴과 동일). 이번 드래그 시작값(down에서 캡처) 대비 폭이 실제로 바뀐 경우에만 미러
+                // 갱신+write-back 예약 — 경계를 눌렀다 안 움직이고 뗀 무동작 클릭(kind 2 없음 → 시작값 그대로)에선 발화하지
+                // 않는다. config 미러 대신 시작값과 비교하는 이유는 sidebar_resize_start_pt 주석 참고(init clamp 불일치 회피).
+                if (self.sidebar_width_pt != start_pt) {
+                    self.loaded_config.config.sidebar.width_pt = self.sidebar_width_pt;
+                    self.markConfigKeyDirty("sidebar.width");
+                }
+                self.finishPointerGesture();
+            }
+            return;
+        }
+        // 스크롤바 thumb 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다 — drag는 마우스 y를 view_offset으로
+        // 매핑(스크롤), up이 끝낸다. 새 down(1)은 아래로 흘려 새 드래그(또는 일반 클릭)를 시작한다. 다른
+        // 드래그 가드처럼 x가 영역 밖으로 나가도 캡처를 유지한다(thumb를 잡았으면 끝까지 따라간다).
+        if (self.scrollbarCaptureActive() and (kind == 2 or kind == 3)) {
+            if (self.routeScrollbarCapture(kind, y_px)) return;
+        }
+        if (self.pointerGestureIs(.scrollbar) and (kind == 2 or kind == 3)) {
+            if (kind == 2) self.dragScrollbarTo(y_px) else {
+                self.finishPointerGesture();
+            }
+            return;
+        }
         // 닫기 확인 모달이 열려 있으면 마우스는 **버튼 클릭만** 처리하고 나머지는 삼킨다 — 파괴적 게이트라 뒤
         // 터미널/사이드바/탭 ✕로 클릭이 새면 또 다른 닫기를 띄우거나 엉뚱한 조작이 된다. down(kind 1)이면
         // confirm.buttonAtPoint로 hit-test(view와 같은 buttonGeom 단일 레이아웃): 확인 버튼=confirmed, 취소 버튼·
@@ -22874,179 +23082,6 @@ pub const AppSession = struct {
                 self.startRename(target);
                 return;
             }
-        }
-        // 사이드바 탭 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다(x가 사이드바 밖으로 나가도) — 새
-        // down(1)은 아래 일반 처리로 흘려 드래그를 새로 시작한다. drag는 타겟 슬롯으로 live 재정렬한다.
-        if (self.pointerGestureIs(.sidebar_tab) and (kind == 2 or kind == 3)) {
-            const drag = &self.pointer_gesture_owner.sidebar_tab;
-            if (kind == 2 and drag.index < self.tabs.items.len) {
-                if (self.tabs.items[drag.index].group_start == null) {
-                    // 마커 없는 카드 = SG4 넣기/빼기. **SG8d 고스트 프리뷰**: 라이브 moveTab 커밋 대신 **비커밋 프리뷰**를
-                    // 재투영한다(docs/sidebar-groups.md §9 SG8). hit-test는 **원본 sidebar_rows**(불변)로 드롭 목표 탭을
-                    // 계산하고(sidebarGroupDropTargetTab — 카드 row=그 자리, 펼친 헤더=그룹 최상단, 접힌 헤더=그룹 끝),
-                    // 그 plan을 refreshDragPreview에 넘겨 sidebar_preview_rows에 고스트를 투영한다(self.tabs 불변). 렌더는
-                    // sidebarRenderRows()=preview_rows로 반투명 고스트+삽입선을 그리고, up이 이 마지막 plan을 정확히 1회
-                    // 커밋한다. self.tabs가 불변이라 sidebar_drag_index(=origin)도 드래그 내내 안정(옛 landed 팔로우 불필요).
-                    const origin = drag.index;
-                    // (A) y_px→raw_row→plan 실경로 단일 출처(프리뷰 시프트 보정 포함) — 헤드리스 테스트가 같은 함수를 탄다.
-                    const plan = self.cardDropPlan(origin, y_px);
-                    var arena_state = std.heap.ArenaAllocator.init(self.allocator);
-                    defer arena_state.deinit();
-                    self.refreshDragPreview(origin, plan, y_px, arena_state.allocator()) catch {};
-                    // 원본-도메인 drop_slot은 프리뷰 렌더에 오강조를 주므로 세팅하지 않는다(고스트+삽입선이 대체, 위 rebuild의
-                    // drop_slot 게이트도 프리뷰 중 null). 매 프레임 재투영이 필요하므로 rebuild + dirty.
-                    self.rebuildSidebar() catch {};
-                    self.metal_dirty = true;
-                } else {
-                    // 마커 탭(group_start!=null) 카드 드래그 = **그룹 통째 이동(SG5-1)**. 마커는 group_start를 든 그 탭이라
-                    // 단독으로 못 옮긴다(옮기면 그룹이 딸려 온다) — 그룹 subtree [M,j)를 하나의 블록으로 재정렬한다(groupDragPreviewFrame).
-                    // 헤더 드래그(threshold 게이트)와 같은 프리미티브를 공유하며, 카드 드래그는 arm 시 이미 down에서 시작이라 별도 threshold 없음.
-                    // **SG8e 고스트 프리뷰**: groupDragPreviewFrame이 라이브 재배치 대신 plan+refreshDragPreview로 subtree 고스트를
-                    // 투영한다(self.tabs 불변). up이 마지막 plan(group_sibling/group_nest)을 1회 커밋한다(commitSidebarDragPreview).
-                    // self.tabs 불변이라 drag_index(=origin 마커)가 드래그 내내 안정 — SG8f: 옛 새-마커 반환값 대입 잔재 제거.
-                    // cmd_held: Cmd 눌림이면 헤더 드롭 시 중첩, 없으면 항상 형제(중첩 안 함).
-                    self.groupDragPreviewFrame(drag.index, y_px, cmd_held);
-                }
-            } else if (kind == 3) {
-                // SG8d 카드 + SG8e 그룹(마커 카드 = 그룹 통째) 확정 — 프리뷰가 있으면 마지막 plan을 실제 move로 정확히 1회
-                // 커밋하고(재계산 금지 — up-시점 재계산은 타이밍 divergence) 고스트를 정리한다. plan==none이면 제자리(고스트만 제거).
-                // commitSidebarDragPreview가 고스트 제거 + 확정 레이아웃 rebuild를 마무리한다(SG8f: 옛 drop_slot 하이라이트 해제 잔재 제거).
-                self.commitSidebarDragPreview();
-                self.finishPointerGesture();
-            }
-            return;
-        }
-        // 그룹 헤더 드래그(SG5-1)가 arm됐으면 drag(2)/up(3)을 캡처한다 — down에선 접기 토글 후보로만 arm하고(현 동작 보존),
-        // 여기서 클릭 vs 드래그를 threshold로 가른다: drag y 이동이 threshold(헤더 한 줄 절반)를 넘으면 active로 승격해 그룹
-        // 통째 이동, up까지 threshold 미달이면 접기 토글. 카드 드래그(sidebar_drag_*)와 배타 상태라 순서 무관하게 여기서 갈린다.
-        if (self.pointerGestureIs(.sidebar_group) and (kind == 2 or kind == 3)) {
-            const drag = &self.pointer_gesture_owner.sidebar_group;
-            if (kind == 2) {
-                if (drag.phase == .armed) {
-                    // threshold: 헤더 한 줄 절반(최소 4px). 넘으면 클릭 아님 = 그룹 통째 드래그 시작.
-                    const thr: f64 = @floatFromInt(@max(self.sidebar_header_row_h_px / 2, 4));
-                    if (@abs(y_px - drag.down_y) > thr) {
-                        drag.phase = .dragging;
-                        // 그룹 통째 드래그 시작 — 카드 드래그와 동형으로 stale 호버를 지운다(SG8). 재배치된 preview_rows에
-                        // 옛 hovered_slot 밴드가 남으면 고스트와 어긋난 위치에 호버 밴드가 뜬다(카드 드래그는 arm 시 ~hovered_slot=null).
-                        self.hovered_slot = null;
-                    }
-                }
-                if (drag.phase == .dragging and drag.marker < self.tabs.items.len) {
-                    // 마커 탭이어야 유효(승계·재정렬로 사라졌으면 무동작). groupDragPreviewFrame이 subtree 고스트를 재투영한다.
-                    if (self.tabs.items[drag.marker].group_start != null) {
-                        // self.tabs 불변이라 마커 인덱스가 안정 — SG8f: 옛 반환값 대입 잔재 제거(호출자 마커 갱신 불필요).
-                        // cmd_held: Cmd 눌림이면 다른 그룹 헤더 드롭 시 중첩, 없으면 항상 형제(중첩 안 함).
-                        self.groupDragPreviewFrame(drag.marker, y_px, cmd_held);
-                    }
-                }
-            } else { // kind == 3 (up)
-                if (drag.phase == .armed) {
-                    // threshold 미달 = 클릭 → 접기 토글(현 동작 보존). arm 이후 재정렬이 없었으므로 slot은 여전히 유효.
-                    // active로 승격되지 않았으면 드래그 프리뷰도 세워지지 않았다(groupDragPreviewFrame은 active일 때만 호출).
-                    self.toggleGroupCollapsedAt(drag.slot);
-                } else {
-                    // SG8e 확정 — 그룹 통째 드래그(subtree)의 마지막 plan(group_sibling/group_nest)을 실제 move로 정확히
-                    // 1회 커밋하고 고스트를 정리한다(commitSidebarDragPreview, 카드 드래그 확정과 동형). 재계산 없음.
-                    // 확정 rebuild는 commitSidebarDragPreview가 마무리한다(SG8f: 옛 drop_slot 하이라이트 해제 잔재 제거).
-                    self.commitSidebarDragPreview();
-                }
-                self.finishPointerGesture();
-            }
-            return;
-        }
-        // Term 탭 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다 — drag는 소스 pane 바 안에서 x로 타겟 탭을 잡아
-        // live 재정렬(PR-E1: pane 내). up이 끝낸다. 새 down(1)은 아래 일반 처리로 흘려 새 드래그를 시작한다.
-        if (self.pointerGestureIs(.terminal_tab) and (kind == 2 or kind == 3)) {
-            if (kind == 2) {
-                self.dragTabTo(x_px); // pane 내 live 재정렬(PR-E1)
-                self.setDropTarget(self.computeDropTarget(x_px, y_px)); // 드롭 타겟 하이라이트(④b)
-                self.pointer_gesture_owner.terminal_tab.x = x_px;
-                self.pointer_gesture_owner.terminal_tab.y = y_px;
-                self.metal_dirty = true;
-            } else {
-                self.dropTabAt(x_px, y_px); // up: 다른 pane 바면 그 pane으로 이동(PR-E2)·본문이면 split(④)
-                self.finishPointerGesture();
-                // 재정렬이 없어도 **반드시** 다시 그린다 — 직전 프레임에는 floating 고스트와 drop-target
-                // 하이라이트가 들어 있고 둘 다 `pointer_gesture_owner == .terminal_tab`로 게이트되므로,
-                // 리페인트를 안 걸면 손을 뗀 뒤에도 그 잔상이 화면에 남는다(effect 0은 model 축이지 화면 축이 아니다).
-                self.metal_dirty = true;
-            }
-            return;
-        }
-        // pane(분할 영역) 통째 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다 — drag는 커서 좌표만 갱신(floating
-        // 미리보기가 따라가게), up이 사이드바면 새 워크스페이스 분리/합치기(dropPaneAt). 사이드바 밖이면 no-op.
-        // 새 down(1)은 아래 일반 처리로 흘려 새 제스처를 시작한다.
-        if (self.pointerGestureIs(.pane) and (kind == 2 or kind == 3)) {
-            const drag = &self.pointer_gesture_owner.pane;
-            if (kind == 2) {
-                drag.x = x_px;
-                drag.y = y_px;
-                const slot = self.paneDropHighlightSlot(x_px, y_px); // 드롭 타겟 카드/빈 영역
-                if (!usizeOptEql(drag.drop_slot, slot)) {
-                    drag.drop_slot = slot;
-                    self.rebuildSidebar() catch {}; // .drop_zone 밴드를 새 슬롯으로 이동(슬롯 전환 시에만)
-                }
-                self.metal_dirty = true; // floating 미리보기가 커서를 따라가게
-            } else {
-                const was_highlighting = drag.drop_slot != null;
-                drag.drop_slot = null;
-                self.dropPaneAt(x_px, y_px); // up: 사이드바면 분리(빈 영역)/합치기(카드), 밖이면 no-op
-                self.finishPointerGesture();
-                // 밴드가 떠 있었으면 제거를 보장한다. 커밋(promote/merge)은 이미 rebuild하므로 그 경우만 약간 중복이나,
-                // 밴드가 없던 드롭(터미널 등)은 rebuild를 건너뛴다(드롭은 hot path 아님 — 무조건 rebuild 대비 절감).
-                if (was_highlighting) self.rebuildSidebar() catch {};
-                self.metal_dirty = true;
-            }
-            return;
-        }
-        // 파일 도크 divider는 workspace split과 독립적으로 캡처한다. mouse-down을 Metal view가 받았으므로 AppKit이
-        // 후속 drag/up을 같은 responder에 보내고, visible WKWebView는 surfaceDiff reframe으로 경계를 라이브 추종한다.
-        if (self.pointerGestureIs(.dock_outer_divider) and (kind == 2 or kind == 3)) {
-            if (kind == 2) {
-                self.setDockSizeFromPointer(x_px, y_px);
-            } else {
-                self.metal_dirty = true;
-                self.finishPointerGesture();
-            }
-            return;
-        }
-        // divider 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다 — 이제 그 capture는 chrome
-        // `InteractionState`가 든다(CIM2). move는 좌표를 모으기만 하고 tick이 최종 하나를 적용하며,
-        // 매 move의 재발행에서 capture를 넘길지는 §5 carry verdict가 판정한다. 새 down(1)은 아래
-        // 일반 처리로 흘려 새 드래그를 시작한다.
-        if (self.dividerCaptureActive() and (kind == 2 or kind == 3)) {
-            if (self.routeDividerCapture(kind, x_px, y_px)) return;
-        }
-        // 사이드바 폭 조절 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다(③a) — drag는 경계를 x로 잡아 폭을 live
-        // 갱신, up이 끝낸다. 새 down(1)은 아래로 흘려 새 드래그를 시작한다.
-        if (self.pointerGestureIs(.sidebar_divider) and (kind == 2 or kind == 3)) {
-            const start_pt = self.pointer_gesture_owner.sidebar_divider.start_pt;
-            if (kind == 2) self.setSidebarWidthPx(x_px) else {
-                // 드래그 종료 — 최종 폭(setSidebarWidthPx가 [동적 min, max]로 clamp해 둔 sidebar_width_pt)을 config에
-                // 영속한다. 매 move(kind 2)가 아니라 up에서 한 번만 해 디스크 write thrash를 막는다(divider·탭 드래그가
-                // up에서 마무리하는 패턴과 동일). 이번 드래그 시작값(down에서 캡처) 대비 폭이 실제로 바뀐 경우에만 미러
-                // 갱신+write-back 예약 — 경계를 눌렀다 안 움직이고 뗀 무동작 클릭(kind 2 없음 → 시작값 그대로)에선 발화하지
-                // 않는다. config 미러 대신 시작값과 비교하는 이유는 sidebar_resize_start_pt 주석 참고(init clamp 불일치 회피).
-                if (self.sidebar_width_pt != start_pt) {
-                    self.loaded_config.config.sidebar.width_pt = self.sidebar_width_pt;
-                    self.markConfigKeyDirty("sidebar.width");
-                }
-                self.finishPointerGesture();
-            }
-            return;
-        }
-        // 스크롤바 thumb 드래그가 진행 중이면 drag(2)/up(3)을 캡처한다 — drag는 마우스 y를 view_offset으로
-        // 매핑(스크롤), up이 끝낸다. 새 down(1)은 아래로 흘려 새 드래그(또는 일반 클릭)를 시작한다. 다른
-        // 드래그 가드처럼 x가 영역 밖으로 나가도 캡처를 유지한다(thumb를 잡았으면 끝까지 따라간다).
-        if (self.scrollbarCaptureActive() and (kind == 2 or kind == 3)) {
-            if (self.routeScrollbarCapture(kind, y_px)) return;
-        }
-        if (self.pointerGestureIs(.scrollbar) and (kind == 2 or kind == 3)) {
-            if (kind == 2) self.dragScrollbarTo(y_px) else {
-                self.finishPointerGesture();
-            }
-            return;
         }
         // 슬라이스 3: 주소창 편집 밴드 드래그 선택(2/3 캡처)·더블클릭 단어(4)·트리플 전체(5) — 스크롤바 드래그와 같은 조기
         // 캡처(down(1) caret 배치·드래그 시작은 아래 ①b가). 편집 중일 때만. 소비하면 여기서 끝(터미널 선택/사이드바로 안 샘).
@@ -23349,8 +23384,11 @@ pub const AppSession = struct {
                             self.hovered_file_header_mode = null; // 파일 헤더 mode 호버도 같은 자리에서 정리(stale 강조 방지)
                             // 위에서 focusPaneByPtr+focusTerm로 클릭한 Term을 활성으로 만든 뒤라, 활성 cascade로 닫는다.
                             self.requestClose(.term_or_pane); // 실행 중 명령 있으면 확인 모달(없으면 즉시 닫음)
-                        } else {
+                        } else if (button == 0) {
                             // ✕가 아니면 탭 드래그를 arm한다(이어지는 drag(2)가 pane 내 재정렬). 안 끌면 그냥 전환.
+                            // **primary 버튼에서만** arm한다 — 드래그를 끝내는 것도 primary up뿐이라, 다른 버튼이
+                            // 제스처를 세우면 그 버튼의 up이 위 capture 블록에 들어가 사용자가 요청하지 않은
+                            // 재정렬을 commit한다(진행 중인 좌버튼 드래그를 가운데 클릭이 가로채는 경로).
                             self.beginPointerGesture(.{ .terminal_tab = .{ .pane = lr.leaf, .index = tab, .x = x_px, .y = y_px } });
                             // §4.4: 시작 순서를 transaction에 보관한다(begin 뒤에 — beginPointerGesture가 앞선 제스처를
                             // 취소하며 union을 갈아끼운다). 실패하면 preview 없이 끄는 무동작 드래그가 되므로 arm을 되돌린다.
@@ -56833,8 +56871,59 @@ test "CIM4b: preview가 떠 있을 때는 비-좌클릭 down도 보이던 탭을
     // 보이는 순서는 [T1,T2,T0]이라 슬롯 0에 있는 것은 T1이다. 그 자리를 **가운데 버튼**으로 누른다.
     session.mouse(1, f.tab0_x, f.bar_y, 1, 0);
     try std.testing.expectEqual(f.terms[1], f.pane.terms.items[f.pane.active_term]);
-    // 비-primary down은 진행 중인 드래그를 취소하지 않는다(primary 취소 규율과 별개 축).
+    // 비-primary down은 진행 중인 드래그를 취소하지도, **새 드래그를 arm하지도** 않는다 — arm하면 그 버튼의
+    // up이 위 capture 블록에 들어가 사용자가 요청하지 않은 재정렬을 commit한다. 원래 드래그가 그대로 살아 있다.
     try std.testing.expect(session.pointerGestureIs(.terminal_tab));
+    try std.testing.expectEqual(@as(usize, 0), session.pointer_gesture_owner.terminal_tab.index);
+    try std.testing.expectEqual(f.terms[0], session.paneTermOrder(f.pane)[2]); // 원래 preview 유지
+
+    // 그 가운데 버튼 up이 와도 model은 그대로다(가로챈 제스처가 없으므로 commit할 것이 없다).
+    session.mouse(3, f.tab0_x, f.bar_y, 1, 0);
+    try std.testing.expectEqual(f.terms[0], f.pane.terms.items[0]);
+    try std.testing.expectEqual(f.terms[1], f.pane.terms.items[1]);
+    try std.testing.expectEqual(f.terms[2], f.pane.terms.items[2]);
+}
+
+// 통합 규칙: **살아 있는 제스처는 어떤 오버레이보다 먼저 자기 이벤트를 받는다.** 드래그 도중 비동기로 뜬
+// 오버레이가 up을 삼키면 제스처가 영영 끝나지 못한다 — 고스트와 preview가 화면에 박히고 되돌릴 방법이 없다.
+// 이 규칙이 오버레이 종류와 제스처 종류 양쪽에서 성립하는지 본다.
+test "CIM4b: 드래그 중 뜬 오버레이는 up을 삼키지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initTabDragSession(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    const f = try beginTabDragToLastSlot(session, allocator);
+
+    // 비-모달 토스트(사용자가 부른 것이 아니라 비동기로 뜬다)가 드래그 도중 열린다.
+    session.chrome_host.notice.open = true;
+    session.mouse(2, f.tab_last_x, f.bar_y, 0, 0); // 토스트가 열린 채로도 드래그가 이어진다
+    try std.testing.expect(session.pointerGestureIs(.terminal_tab));
+    try std.testing.expect(session.chrome_host.notice.open); // 드래그가 토스트를 대신 닫아 주지 않는다
+
+    // up이 토스트를 통과해 제스처를 정상 종료하고 commit한다.
+    session.mouse(3, f.tab_last_x, f.bar_y, 0, 0);
+    try std.testing.expect(!session.pointerGestureIs(.terminal_tab));
+    try std.testing.expectEqual(f.terms[1], f.pane.terms.items[0]);
+    try std.testing.expectEqual(f.terms[2], f.pane.terms.items[1]);
+    try std.testing.expectEqual(f.terms[0], f.pane.terms.items[2]);
+}
+
+// §4.4 "보이는 것이 조작되는 것"은 키보드 탭 전환에도 적용된다 — 드래그 중 ⌘⌥]는 **화면에서** 오른쪽 탭으로
+// 가야 한다. model 인덱스로 세면 시각적으로 인접하지 않은 탭이 활성이 된다.
+test "CIM4b: 드래그 중 ⌘⌥]는 보이는 순서에서 다음 탭으로 간다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initTabDragSession(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    const f = try beginTabDragToLastSlot(session, allocator);
+
+    // 보이는 순서 [T1,T2,T0], 활성은 끌리는 T0(슬롯 2). 오른쪽 다음 = wrap해서 슬롯 0 = T1.
+    try std.testing.expectEqual(@as(usize, 2), session.paneActiveTermIndex(f.pane));
+    session.focusTermRelative(1);
+    try std.testing.expectEqual(f.terms[1], f.pane.terms.items[f.pane.active_term]);
+    try std.testing.expectEqual(@as(usize, 0), session.paneActiveTermIndex(f.pane)); // 보이는 슬롯 0
 }
 
 // preview 공간에서 파생된 값이 **영속 상태에 새지 않는지**. `tab_scroll_cols`는 model-영속인데 드래그 중

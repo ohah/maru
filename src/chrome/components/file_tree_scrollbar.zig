@@ -2,6 +2,8 @@
 //! hover, track clicks, and drag all consume the same `Geometry` value.
 
 const std = @import("std");
+const layout = @import("../ui/layout.zig");
+const tree = @import("../ui/tree.zig");
 
 pub const min_thumb_px: f32 = 24;
 pub const bar_width_px: u32 = 8;
@@ -56,6 +58,52 @@ pub const Geometry = struct {
         return next;
     }
 };
+
+/// 발행된 thumb과 track의 identity. thumb은 drag를, track은 click을 낸다 — 둘은 서로 다른 제스처라
+/// 같은 identity를 나눠 쓰지 않는다.
+pub const thumb_id: tree.UiId = 1;
+pub const track_id: tree.UiId = 2;
+pub const drag_payload: u64 = 1;
+
+pub const PublishError = error{InsufficientEntryBuffer};
+
+/// scrollbar를 pointer capture가 소비할 수 있는 `UiRectTree`로 발행한다 — CIM3.
+///
+/// divider와 같은 규율이다: 이 tree는 **paint가 아니라 hit/capture 전용**이고, 그리는 쪽은 계속
+/// 자기 경로를 쓴다. thumb이 먼저(뒤 entry) 이겨야 하므로 track을 앞에 싣는다 —
+/// `interaction.hitAction`이 reverse z-order라 마지막 entry가 이긴다.
+///
+/// thumb의 drag는 세로 축이고 threshold는 0이다. thumb을 누른 것 자체가 스크롤 의사이며, 그 지점에
+/// 경쟁할 click이 없다(track click은 thumb **밖**에서만 성립한다).
+pub fn publish(
+    geometry: Geometry,
+    generation: u64,
+    out: []tree.RectEntry,
+) PublishError!tree.UiRectTree {
+    if (out.len < 2) return error.InsufficientEntryBuffer;
+    // 스크롤할 것이 없으면 잡을 것도 없다. 빈 tree는 실패가 아니라 "대상 없음"이다.
+    if (geometry.max_scroll == 0 or geometry.track_w <= 0 or geometry.track_h <= 0) {
+        return .{ .entries = out[0..0], .generation = generation };
+    }
+    out[0] = .{
+        .id = track_id,
+        .parent_index = null,
+        .kind = .container,
+        .rect = .{ .x = geometry.track_x, .y = geometry.track_y, .width = geometry.track_w, .height = geometry.track_h },
+        .effective_clip = null,
+        .action = .{ .id = track_id },
+    };
+    out[1] = .{
+        .id = thumb_id,
+        .parent_index = null,
+        .kind = .container,
+        .rect = .{ .x = geometry.track_x, .y = geometry.thumb_y, .width = geometry.track_w, .height = geometry.thumb_h },
+        .effective_clip = null,
+        .action = .{ .id = thumb_id },
+        .drag = .{ .payload = drag_payload, .axis = .vertical, .threshold_px = 0 },
+    };
+    return .{ .entries = out[0..2], .generation = generation };
+}
 
 pub fn compute(
     total_rows: usize,
@@ -154,4 +202,61 @@ test "file tree scrollbar: pixel reservation never overlaps the last content cel
             try std.testing.expect(@as(f32, @floatFromInt(last_content_right)) <= geometry.track_x);
         }
     }
+}
+
+test "published scrollbar rects agree with the geometry both hit paths already use" {
+    const geometry = Geometry{
+        .total_rows = 100,
+        .visible_rows = 10,
+        .max_scroll = 90,
+        .scroll_rows = 0,
+        .track_x = 200,
+        .track_y = 0,
+        .track_w = 8,
+        .track_h = 400,
+        .thumb_y = 0,
+        .thumb_h = 40,
+    };
+    var storage: [4]tree.RectEntry = undefined;
+    const published = try publish(geometry, 5, &storage);
+    try std.testing.expectEqual(@as(usize, 2), published.entries.len);
+    try std.testing.expectEqual(@as(u64, 5), published.generation);
+
+    // thumb은 **마지막** entry여야 한다. `interaction.hitAction`이 reverse z-order라, track이 뒤에
+    // 오면 thumb 위 클릭이 track click으로 판정돼 드래그 대신 점프가 일어난다.
+    try std.testing.expectEqual(track_id, published.entries[0].id);
+    try std.testing.expectEqual(thumb_id, published.entries[1].id);
+
+    // 두 rect가 기존 hit 판정과 같은 기하에서 나온다.
+    const thumb = published.entries[1].rect;
+    try std.testing.expect(geometry.thumbContains(thumb.x + 1, thumb.y + 1));
+    const track = published.entries[0].rect;
+    try std.testing.expect(geometry.trackContains(track.x + 1, track.y + track.height - 1));
+
+    // thumb만 drag를 선언하고, 그 축은 세로다. track click은 drag가 아니다.
+    try std.testing.expect(published.entries[0].drag == null);
+    try std.testing.expectEqual(tree.DragAxis.vertical, published.entries[1].drag.?.axis);
+    try std.testing.expectEqual(@as(f32, 0), published.entries[1].drag.?.threshold_px);
+}
+
+test "a scrollbar with nothing to scroll publishes no capture target" {
+    const geometry = Geometry{
+        .total_rows = 5,
+        .visible_rows = 10,
+        .max_scroll = 0,
+        .scroll_rows = 0,
+        .track_x = 200,
+        .track_y = 0,
+        .track_w = 8,
+        .track_h = 400,
+        .thumb_y = 0,
+        .thumb_h = 400,
+    };
+    var storage: [4]tree.RectEntry = undefined;
+    // 잡을 것이 없다는 뜻이지 실패가 아니다 — 빈 tree를 내고 host는 아무 것도 capture하지 않는다.
+    try std.testing.expectEqual(@as(usize, 0), (try publish(geometry, 1, &storage)).entries.len);
+
+    var small: [1]tree.RectEntry = undefined;
+    // partial publish 대신 후보 자체가 실패한다(thumb만 있고 track이 없는 tree를 내지 않는다).
+    try std.testing.expectError(error.InsufficientEntryBuffer, publish(geometry, 1, &small));
 }

@@ -116,7 +116,8 @@ jobs:
         run: mise run macos-shader-compile-smoke
       # Session Dock의 시각 계약(스크롤 클리핑·액션 라벨·카드 밀도)은 지금까지 사람이 캡처를 눈으로
       # 확인해 왔고, 그 방식이 실제로 회귀를 놓쳤다(부분적으로 보이는 행이 "잘린" 것과 "눌린" 것을
-      # 구분하지 못했다). 스모크로 실제 Metal 캡처를 만들고 커밋된 골든과 픽셀 비교한다.
+      # 구분하지 못했다). Chrome Lab이 제품 lowering을 Metal 오프스크린으로 태운 캡처를 골든과 픽셀
+      # 비교한다 — 앱 번들이 필요 없어 이 job의 비용을 늘리지 않는다.
       - name: Gate Session Dock visuals against golden images
         run: mise run macos-dock-visual-golden
       - name: Upload dock visual captures
@@ -124,7 +125,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: maru-dock-visual-captures
-          path: zig-out/maru-agent-session-archive-smoke/captures
+          path: zig-out/maru-macos-chrome-lab
           if-no-files-found: warn
           retention-days: 14
       - name: Verify provider continuity removal

@@ -3921,6 +3921,25 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         smokeMode && ProcessInfo.processInfo.environment["MARU_AGENT_SESSION_ARCHIVE_SMOKE"] == "1"
     }
 
+    /// CIM2 divider E2E. 이 모드는 실제 `NSEvent`를 `MaruMetalTerminalView`에 흘려 제품 pointer
+    /// 경로를 그대로 탄다 — Zig 도메인 메서드를 직접 부르면 검증 대상인 capture 라우팅을 건너뛴다.
+    private var isDividerSmokeMode: Bool {
+        smokeMode && ProcessInfo.processInfo.environment["MARU_DIVIDER_SMOKE"] == "1"
+    }
+    private enum DividerSmokeStage { case idle, split, drag, done }
+    private var dividerSmokeStage: DividerSmokeStage = .idle
+    private var dividerSmokeRatioBefore: UInt32 = 0
+    private var dividerSmokeRatioAfter: UInt32 = 0
+    private var dividerSmokeMoveEvents: UInt64 = 0
+    private var dividerSmokeResizeApplications: UInt64 = 0
+    private var dividerSmokeCaptureDuringDrag = false
+    private var dividerSmokeCaptureAfterUp = true
+    private var dividerSmokeBandPresent = false
+    private var dividerSmokeTicks = 0
+    private var dividerSmokeTermCount: UInt32 = 0
+    private var dividerSmokeProbeStatusOK = false
+    private var dividerSmokeSplitRetries = 0
+
     // 5b: 웹 패널이 격리 E2E probe(evaluateJavaScript)를 스모크에서만 돌리게 노출(정상 런은 probe 안 함 — 오버헤드 0).
     var isSmokeMode: Bool { smokeMode }
     // 실제 Markdown bytes를 변경하는 probe는 일반 smoke duration과 분리한 명시 opt-in이다. 공식 build target만
@@ -5591,6 +5610,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 닫을 창 처리(마지막 창이면 앱 종료 — 그 경우 아래 quick tick은 건너뛴다).
         for surface in toClose { closeWindowOrQuit(surface) }
         maybeRunAgentSessionArchiveSmoke()
+        maybeRunDividerSmoke()
         // quick terminal — 보일 때만 tick. 그 셸이 종료/fault면 quick만 정리한다(앱은 계속 산다).
         if let quick, quick.window?.isVisible == true {
             explicitSurface = quick
@@ -8099,6 +8119,113 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         sendKeyEvent(enterEvent)
     }
 
+
+    /// Drives the CIM2 divider fixture through `MaruMetalTerminalView.mouseDown/Dragged/Up`.
+    /// The only ABI reads are the read-only divider probe and the split shortcut goes through the
+    /// normal key path, so nothing here bypasses the capture routing this fixture is meant to prove.
+    private func maybeRunDividerSmoke() {
+        guard isDividerSmokeMode, dividerSmokeStage != .done,
+              let surface = primary, let session = surface.appSession,
+              let view = surface.view, let window = surface.window else { return }
+
+        func probe() -> MaruAppHostDividerSmokeProbe? {
+            var out = MaruAppHostDividerSmokeProbe()
+            return maru_macos_app_session_divider_smoke_probe(session, &out) == Self.statusOK ? out : nil
+        }
+
+        dividerSmokeTicks += 1
+        switch dividerSmokeStage {
+        case .idle:
+            // ⌘D — 제품 단축키 경로로 split한다.
+            withSurface(surface) {
+                sendKeyEvent(MaruAppHostKeyEvent(
+                    codepoint: UInt32(UnicodeScalar("d").value),
+                    base_codepoint: UInt32(UnicodeScalar("d").value),
+                    key_code: UInt32(MaruAppHostKeyCodeUnknown.rawValue),
+                    modifier_shift: 0,
+                    modifier_control: 0,
+                    modifier_option: 0,
+                    modifier_command: 1,
+                    is_repeat: 0,
+                    raw_key_code: 2
+                ))
+            }
+            dividerSmokeStage = .split
+        case .split:
+            dividerSmokeTermCount = maru_macos_app_session_agent_session_archive_smoke_term_count(session)
+            guard let current = probe() else { return }
+            dividerSmokeProbeStatusOK = true
+            // 시작 직후 첫 ⌘D는 surface가 아직 입력을 받을 준비 전이라 삼켜질 수 있다. divider가
+            // 나타날 때까지 몇 tick 간격으로 다시 보낸다(무한 재시도는 아니다 — 실패는 실패로 남는다).
+            if current.present == 0 {
+                dividerSmokeSplitRetries += 1
+                if dividerSmokeSplitRetries % 30 == 0 && dividerSmokeSplitRetries <= 300 {
+                    withSurface(surface) {
+                        sendKeyEvent(MaruAppHostKeyEvent(
+                            codepoint: UInt32(UnicodeScalar("d").value),
+                            base_codepoint: UInt32(UnicodeScalar("d").value),
+                            key_code: UInt32(MaruAppHostKeyCodeUnknown.rawValue),
+                            modifier_shift: 0,
+                            modifier_control: 0,
+                            modifier_option: 0,
+                            modifier_command: 1,
+                            is_repeat: 0,
+                            raw_key_code: 2
+                        ))
+                    }
+                }
+                return
+            }
+            dividerSmokeBandPresent = true
+            dividerSmokeRatioBefore = current.ratio_milli
+            dividerSmokeStage = .drag
+        case .drag:
+            guard let current = probe(), current.present != 0 else { return }
+            let scale = window.backingScaleFactor
+            guard scale > 0 else { return }
+            let centerX = CGFloat(current.x_px) + CGFloat(current.width_px) / 2
+            let centerY = CGFloat(current.y_px) + CGFloat(current.height_px) / 2
+
+            func event(_ type: NSEvent.EventType, _ backingX: CGFloat) -> NSEvent? {
+                let local = NSPoint(x: backingX / scale, y: view.bounds.height - (centerY / scale))
+                return NSEvent.mouseEvent(
+                    with: type,
+                    location: view.convert(local, to: nil),
+                    modifierFlags: [],
+                    timestamp: ProcessInfo.processInfo.systemUptime,
+                    windowNumber: window.windowNumber,
+                    context: nil,
+                    eventNumber: 0,
+                    clickCount: 1,
+                    pressure: 1
+                )
+            }
+
+            guard let down = event(.leftMouseDown, centerX) else { return }
+            view.mouseDown(with: down)
+            // 한 tick 안에서 여러 move를 흘린다. 그 수와 실제 resize 횟수가 달라야 §4.3이 지켜진 것이다.
+            for step in 1...4 {
+                guard let dragged = event(.leftMouseDragged, centerX - CGFloat(step) * 30) else { continue }
+                view.mouseDragged(with: dragged)
+            }
+            if let during = probe() {
+                dividerSmokeCaptureDuringDrag = during.capture_active != 0
+                dividerSmokeMoveEvents = during.move_events
+            }
+            guard let up = event(.leftMouseUp, centerX - 120) else { return }
+            view.mouseUp(with: up)
+
+            if let after = probe() {
+                dividerSmokeRatioAfter = after.ratio_milli
+                dividerSmokeResizeApplications = after.resize_applications
+                dividerSmokeCaptureAfterUp = after.capture_active != 0
+            }
+            dividerSmokeStage = .done
+        case .done:
+            return
+        }
+    }
+
     /// Drives the archive fixture through `MaruMetalTerminalView.mouseDown/up`, never by calling
     /// a Zig domain method directly. The only ABI reads are read-only published probes and the
     /// gate is one-way worker synchronization; opening the dock/disclosure remains normal pointer input.
@@ -9585,6 +9712,24 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             web_role_scheme_render_shell_csp=\(roleSmoke.renderShellCSP)
             web_role_scheme_render_document_status=\(roleSmoke.renderDocumentStatus)
             web_role_scheme_render_document_none=\(roleSmoke.renderDocumentCSP.contains("worker-src 'none'"))
+
+            """
+        }
+
+        if isDividerSmokeMode {
+            summary += """
+            divider_stage=\(dividerSmokeStage)
+            divider_key_status=\(appSessionStatus)
+            divider_term_count=\(dividerSmokeTermCount)
+            divider_probe_ok=\(dividerSmokeProbeStatusOK)
+            divider_ticks=\(dividerSmokeTicks)
+            divider_band_present=\(dividerSmokeBandPresent)
+            divider_capture_during_drag=\(dividerSmokeCaptureDuringDrag)
+            divider_capture_after_up=\(dividerSmokeCaptureAfterUp)
+            divider_ratio_before=\(dividerSmokeRatioBefore)
+            divider_ratio_after=\(dividerSmokeRatioAfter)
+            divider_move_events=\(dividerSmokeMoveEvents)
+            divider_resize_applications=\(dividerSmokeResizeApplications)
 
             """
         }

@@ -203,7 +203,7 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 162;
+pub const abi_version: u32 = 163;
 // 162: AS4-f fixture reads only published SessionDock control/action border rects so four
 // font/scale cold AppKit runs can compare geometry without reconstructing layout in Swift.
 // 161: AS3-c fixture adds one read-only expanded-card raw-rect target and published tree
@@ -3385,6 +3385,11 @@ pub const AppSession = struct {
     // move는 좌표를 덮어쓰기만 하고 tick이 최종 하나를 적용한다(계약 §4.3). clamp 결과가 같으면
     // effect 자체가 없다 — 경계에 닿은 채 미는 동안 resize 팬아웃이 반복되지 않는다.
     divider_coalescer: chrome.ui.continuous_drag.Coalescer(f32) = .{},
+    // AppKit E2E 전용 계측 — 이 drag에서 흡수한 move 수와 실제로 resize를 팬아웃한 횟수. 계약 §4.3의
+    // "상한은 move 수가 아니라 tick 수와 실제 geometry 변화"를 제품 경로에서 증명하려면 그 둘이
+    // **달라야** 하고, headless fixture는 ratio 값만 보므로 이 비교를 못 한다.
+    divider_move_events: u64 = 0,
+    divider_resize_applications: u64 = 0,
     // 트랙패드 정밀 스크롤의 1줄 미만 잔여 델타(줄 단위). scrollWheel이 누적/소비한다.
     wheel_accum: f64 = 0,
     // 트랙패드 가로 스와이프의 1셀 미만 잔여 델타(열 단위) — 탭 바 가로 스크롤용(#2b). wheel_accum의 가로 짝.
@@ -5510,6 +5515,44 @@ pub const AppSession = struct {
         self.divider_coalescer.reset();
     }
 
+    /// 닫힌 fixture 전용 divider 관측치. 발행된 밴드 rect와 이 drag의 계측만 담고, split 포인터나
+    /// 트리 구조는 내보내지 않는다. 이것은 자동화 API가 아니라 AppKit E2E 하나를 위한 읽기 창이다.
+    pub const DividerSmokeProbe = struct {
+        present: bool = false,
+        x_px: i32 = 0,
+        y_px: i32 = 0,
+        width_px: u32 = 0,
+        height_px: u32 = 0,
+        /// 현재 split 비율 ×1000. 부동소수를 ABI로 내보내지 않으려는 정수 표현이다.
+        ratio_milli: u32 = 0,
+        capture_active: bool = false,
+        move_events: u64 = 0,
+        resize_applications: u64 = 0,
+    };
+
+    /// 활성 탭의 **첫** divider를 발행 경로 그대로 읽는다(`publishDividerTree`와 같은 출처).
+    pub fn dividerSmokeProbe(self: *AppSession) DividerSmokeProbe {
+        var probe = DividerSmokeProbe{
+            .capture_active = self.dividerCaptureActive(),
+            .move_events = self.divider_move_events,
+            .resize_applications = self.divider_resize_applications,
+        };
+        const published = self.publishDividerTree() orelse return probe;
+        if (published.entries.len == 0) return probe;
+        // publish는 역순이라 seg 0은 마지막 entry다. identity로 되찾아 순서 규칙에 기대지 않는다.
+        for (published.entries) |entry| {
+            if (chrome.components.divider.segIndexOf(entry.id, self.divider_split_scratch.items.len) != 0) continue;
+            probe.present = true;
+            probe.x_px = @intFromFloat(entry.rect.x);
+            probe.y_px = @intFromFloat(entry.rect.y);
+            probe.width_px = @intFromFloat(@max(entry.rect.width, 0));
+            probe.height_px = @intFromFloat(@max(entry.rect.height, 0));
+            probe.ratio_milli = @intFromFloat(@max(self.divider_split_scratch.items[0].ratio, 0) * 1000);
+            break;
+        }
+        return probe;
+    }
+
     fn dividerCaptureActive(self: *const AppSession) bool {
         return self.divider_interaction.capture != null;
     }
@@ -5592,7 +5635,10 @@ pub const AppSession = struct {
 
         if (dispatched.drag) |event| switch (event) {
             // 좌표를 모으기만 한다. 실제 resize는 tick이 최종 하나로 한 번 한다.
-            .began, .moved => |update| self.divider_coalescer.absorb(update.x_px, update.y_px),
+            .began, .moved => |update| {
+                self.divider_coalescer.absorb(update.x_px, update.y_px);
+                self.divider_move_events +|= 1;
+            },
             .dropped => |update| {
                 self.divider_coalescer.absorb(update.x_px, update.y_px);
                 self.applyPendingDividerResize();
@@ -5615,6 +5661,7 @@ pub const AppSession = struct {
         const clamped = maru.session.clampRatio(raw);
         if (!self.divider_coalescer.commitIfChanged(clamped)) return;
         split.ratio = clamped;
+        self.divider_resize_applications +|= 1;
         self.resizeActiveTabPanes() catch {};
         self.recomputeActivePaneRect();
         self.metal_dirty = true;
@@ -65009,6 +65056,56 @@ test "드래그 중 탭이 바뀌면 carry verdict가 divider capture를 끊는�
     // capture가 끊기고, 보이지도 않는 탭의 split이 조용히 resize되지 않는다.
     try std.testing.expect(!session.dividerCaptureActive());
     try std.testing.expectEqual(ratio_at_capture, split.ratio);
+}
+
+test "divider probe는 move 수가 아니라 tick 수만큼 resize했음을 드러낸다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    try session.splitActivePane(.horizontal);
+
+    var segs: std.ArrayList(PaneTree.DividerSeg) = .empty;
+    defer segs.deinit(allocator);
+    try session.layoutActiveTabDividers(&segs);
+    const seg = segs.items[0];
+    const div_x: f64 = @floatFromInt(seg.pos);
+    const div_y: f64 = @floatFromInt(seg.bounds.y + seg.bounds.h / 2);
+
+    // 발행된 밴드는 실제로 잡히는 자리와 같다 — probe가 렌더와 다른 rect를 내면 E2E가 헛좌표를 누른다.
+    const before = session.dividerSmokeProbe();
+    try std.testing.expect(before.present);
+    try std.testing.expect(!before.capture_active);
+    try std.testing.expect(div_x >= @as(f64, @floatFromInt(before.x_px)));
+    try std.testing.expect(div_x < @as(f64, @floatFromInt(before.x_px)) + @as(f64, @floatFromInt(before.width_px)));
+
+    session.mouse(1, div_x, div_y, 0, 0);
+    try std.testing.expect(session.dividerSmokeProbe().capture_active);
+
+    // 한 프레임 안에서 move 다섯 번. tick은 한 번.
+    var step: f64 = 0;
+    while (step < 5) : (step += 1) session.mouse(2, div_x - 40 - step * 20, div_y, 0, 0);
+    _ = try session.tick();
+
+    const after = session.dividerSmokeProbe();
+    try std.testing.expectEqual(@as(u64, 5), after.move_events);
+    // 계약 §4.3의 상한이 move 수가 아니라는 것을 이 부등식 하나가 증명한다. ratio 값만 보는
+    // fixture는 다섯 번 적용됐는지 한 번 적용됐는지 구분하지 못한다.
+    try std.testing.expectEqual(@as(u64, 1), after.resize_applications);
+    try std.testing.expect(after.ratio_milli != before.ratio_milli);
+
+    session.mouse(3, div_x - 140, div_y, 0, 0);
+    try std.testing.expect(!session.dividerSmokeProbe().capture_active);
 }
 
 test "divider capture와 PointerGestureOwner는 같은 stream에 공존하지 않는다" {

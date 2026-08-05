@@ -1248,6 +1248,44 @@ pub fn build(b: *std.Build) void {
         macos_app_instance_lease_smoke.step.dependOn(&macos_app_bundle.step);
         macos_app_instance_lease_smoke_step.dependOn(&macos_app_instance_lease_smoke.step);
 
+        // CIM2 divider AppKit E2E. 파일 패널 스모크와 섞으면 두 fixture가 같은 창을 두고 경합하므로
+        // 별도 실행으로 둔다 — divider는 pane 기하를 바꾸고 파일 패널 probe는 그 기하를 읽는다.
+        const macos_divider_smoke_step = b.step("macos-divider-smoke", "Run the macOS divider drag AppKit E2E");
+        const macos_divider_smoke_fixture = b.addSystemCommand(&.{
+            "sh", "-eu", "-c",
+            "mkdir -p zig-out/maru-macos-app; " ++
+                "rm -rf zig-out/maru-macos-app/divider-home; mkdir -p zig-out/maru-macos-app/divider-home",
+        });
+        macos_divider_smoke_fixture.setCwd(b.path("."));
+        const macos_divider_smoke = b.addSystemCommand(&.{"./zig-out/Maru.app/Contents/MacOS/maru-macos-app"});
+        macos_divider_smoke.setCwd(b.path("."));
+        macos_divider_smoke.setEnvironmentVariable("MARU_MACOS_APP_SMOKE_MS", "8000");
+        macos_divider_smoke.setEnvironmentVariable("MARU_DIVIDER_SMOKE", "1");
+        macos_divider_smoke.setEnvironmentVariable("HOME", b.pathFromRoot("zig-out/maru-macos-app/divider-home"));
+        macos_divider_smoke.setEnvironmentVariable("CFFIXED_USER_HOME", b.pathFromRoot("zig-out/maru-macos-app/divider-home"));
+        macos_divider_smoke.step.dependOn(&macos_app_bundle.step);
+        macos_divider_smoke.step.dependOn(&macos_divider_smoke_fixture.step);
+        const macos_divider_smoke_assert = b.addSystemCommand(&.{
+            "sh", "-eu", "-c",
+            "summary=zig-out/maru-macos-app/app.summary.txt; " ++
+                "test -f \"$summary\"; " ++
+                // 발행된 밴드가 실제로 있었고, down~up 사이에만 capture가 살아 있었다.
+                "/usr/bin/grep -Eq '^divider_band_present=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^divider_capture_during_drag=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^divider_capture_after_up=false$' \"$summary\"; " ++
+                // 드래그가 실제로 pane 기하를 바꿨다.
+                "before=$(/usr/bin/sed -n 's/^divider_ratio_before=//p' \"$summary\"); " ++
+                "after=$(/usr/bin/sed -n 's/^divider_ratio_after=//p' \"$summary\"); " ++
+                "test \"$before\" != \"$after\"; " ++
+                // 계약 §4.3: 상한은 move 수가 아니라 tick 수다. 제품 AppKit 경로에서 그 둘이 다르다.
+                "moves=$(/usr/bin/sed -n 's/^divider_move_events=//p' \"$summary\"); " ++
+                "applies=$(/usr/bin/sed -n 's/^divider_resize_applications=//p' \"$summary\"); " ++
+                "test \"$moves\" -gt \"$applies\"",
+        });
+        macos_divider_smoke_assert.setCwd(b.path("."));
+        macos_divider_smoke_assert.step.dependOn(&macos_divider_smoke.step);
+        macos_divider_smoke_step.dependOn(&macos_divider_smoke_assert.step);
+
         const macos_app_smoke_step = b.step("macos-app-smoke", "Run the macOS Swift app host app shell smoke");
         const macos_app_smoke_fixture = b.addSystemCommand(&.{
             "sh", "-eu", "-c",

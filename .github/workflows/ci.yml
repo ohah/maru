@@ -110,6 +110,10 @@ jobs:
         with:
           version: 2026.2.7
           sha256: f8becf318705e1bd91227ed0efee4f9fd988d1d5c66bb48e996f030792a0d3b7 # macos-arm64 binary
+      # 제품 셰이더는 런타임 컴파일(`newLibraryWithSource:`)이라 MSL 문법이 깨져도 빌드·단위 테스트·Metal
+      # 계약 테스트가 전부 통과하고 앱을 띄워야만 드러난다. 수 초짜리 컴파일 스모크로 그 사각지대를 닫는다.
+      - name: Compile product Metal shaders
+        run: mise run macos-shader-compile-smoke
       - name: Verify provider continuity removal
         run: mise run test-provider-session-removal
       - run: mise run macos-file-explorer-perf

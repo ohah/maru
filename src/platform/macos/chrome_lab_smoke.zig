@@ -168,14 +168,6 @@ pub fn main(init: std.process.Init) !void {
         1000,
     );
     defer measured.deinit(allocator);
-    // 제품(app_session.collectMeasuredTextFromCache)과 같은 순서다: artifact가 이미 가진 shaped
-    // record로 프레임을 만든다 — CoreText를 다시 부르지 않고, glyph run의 row/col이 artifact
-    // placement 인덱스(`row * 256 + col`)와 같은 도메인에 놓인다. 셀 DrawList로 만들면 run 좌표가
-    // 셀 격자라 placement를 못 찾는다(MeasuredGlyphPlacementMissing).
-    var render_frame = try buildFrameFromRecords(allocator, builder, &renderer_state, measured.records);
-    defer render_frame.deinit(allocator);
-    const font_usage = inspectFontUsage(render_frame, renderer_state.font_registry.count());
-
     // 제품은 Chrome 텍스트를 **두 패스**로 그린다(app_session): 등록 SVG/PUA 아이콘은 셀 draw
     // list(`buildIconTextDrawList`)로, 나머지 라벨은 measured artifact로. `shapesTextOp`가
     // wide_icons op를 셰이핑에서 빼기 때문에, 아이콘 패스를 같이 돌리지 않으면 액션 버튼이
@@ -189,8 +181,43 @@ pub fn main(init: std.process.Init) !void {
         cols,
         rows,
     );
-    var icon_frame = try builder.buildFromDrawList(allocator, icon_draw_list, &renderer_state);
+    // 두 패스를 **한 atlas 세대로** 함께 배치한다. 페인마다 따로 `placeMultiPane`을 부르면, 뒤 페인이
+    // 좌표를 소진해 invalidate/grow를 일으켰을 때 앞 페인의 slot이 repack된 atlas를 가리킨다 —
+    // `glyph_frame.prepareMultiPaneGlyphFrame` 문서가 "페인별 독립 빌드"를 cross-pane 깨짐의 원인으로
+    // 지목하는 그 baseline이다. 지금 fixture로는 소진이 안 나지만 잠복시키지 않는다.
+    var text_pane = try builder.shapeFromRecords(
+        allocator,
+        // artifact가 이미 가진 shaped record로 만든다 — CoreText를 다시 부르지 않고, glyph run의
+        // row/col이 artifact placement 인덱스(`row * 256 + col`)와 같은 도메인에 놓인다. 셀
+        // DrawList로 만들면 run 좌표가 셀 격자라 placement를 못 찾는다(MeasuredGlyphPlacementMissing).
+        try system_text.emptyDrawList(allocator, measured.records.len),
+        measured.records,
+    );
+    var text_pane_owned = true;
+    errdefer if (text_pane_owned) text_pane.deinit(allocator);
+    var icon_pane = try builder.shapeOnly(allocator, icon_draw_list, &renderer_state.font_registry);
+    var icon_pane_owned = true;
+    errdefer if (icon_pane_owned) icon_pane.deinit(allocator);
+
+    const pane_frames = try renderer_state.placeMultiPane(
+        allocator,
+        &.{ text_pane.shaped.runs, icon_pane.shaped.runs },
+    );
+    defer allocator.free(pane_frames);
+    // `placeMultiPane`은 프레임 소유권을 넘긴다. `finishPane`은 성공하면 프레임을 소비하고 실패하면
+    // **자기 프레임만** 정리하므로, 앞 페인이 실패하면 뒤 페인 프레임이 아무에게도 회수되지 않는다.
+    var frames_consumed: usize = 0;
+    errdefer for (pane_frames[frames_consumed..]) |*unconsumed| unconsumed.deinit(allocator);
+
+    frames_consumed = 1;
+    var render_frame = try builder.finishPane(allocator, &text_pane, pane_frames[0], &renderer_state);
+    text_pane_owned = false;
+    defer render_frame.deinit(allocator);
+    frames_consumed = 2;
+    var icon_frame = try builder.finishPane(allocator, &icon_pane, pane_frames[1], &renderer_state);
+    icon_pane_owned = false;
     defer icon_frame.deinit(allocator);
+    const font_usage = inspectFontUsage(render_frame, renderer_state.font_registry.count());
 
     // 아이콘은 제품과 같이 native **셀** 경로로 넘긴다(아래 bridge 호출의 cells 인자).
     var metal_fixture = try metal_smoke.buildSmokeFixtureFromRenderFrame(
@@ -323,8 +350,9 @@ pub fn main(init: std.process.Init) !void {
     const native_ok = native.status == 0 and native.renderer_created != 0 and native.atlas_ready != 0 and
         native.draw_submitted != 0 and native.ppm_written != 0 and native.png_written != 0;
     const pixel_ok = ppm.width == viewport.width and ppm.height == viewport.height and ppm.non_background_pixels > 0;
-    // measured 경로에는 셀이 없다. "텍스트가 있었나"는 artifact의 shaped record가 권위다.
-    const has_text = measured.records.len > 0;
+    // "이 캡처에 텍스트가 있었나"는 **두 패스 합**이다. measured record가 라벨을, 아이콘 셀이 등록
+    // SVG/PUA glyph를 대표한다 — 한쪽만 보면 아이콘만 있는 시나리오가 "텍스트 없음"으로 오인된다.
+    const has_text = measured.records.len > 0 or metal_fixture.cells.len > 0;
     const text_rasterized = has_text and raster_uploads.items.len > 0;
     // The lab intentionally routes component glyphs through the product pixel-placement pass
     // (not its legacy cell list), so a green artifact proves that this ABI/Metal path received
@@ -548,28 +576,6 @@ fn inspectFontUsage(frame: renderer.RenderFrame, distinct_font_faces: usize) Fon
 /// This guard deliberately recomputes only the documented artifact-to-GPU projection.  It does
 /// not inspect the cell fixture: if a future Lab path substitutes `row * cell_height` or a
 /// fixture nudge, at least one sub-cell semantic origin differs and the product smoke closes.
-/// `builder.buildFromDrawList`의 record 버전 — shape 단계만 `shapeFromRecords`로 바꾼 같은 파이프라인
-/// (shape → placeMultiPane → finishPane)이다. 제품은 이 세 단계를 멀티 페인 수집기가 나눠 밟지만,
-/// Lab은 페인이 하나라 여기서 붙인다.
-fn buildFrameFromRecords(
-    allocator: std.mem.Allocator,
-    builder: coretext_frame_builder.CoreTextFrameBuilder,
-    renderer_state: *renderer.RendererState,
-    records: []const renderer.ShapedGlyphRecord,
-) !renderer.RenderFrame {
-    const list = try system_text.emptyDrawList(allocator, records.len);
-    var pane = try builder.shapeFromRecords(allocator, list, records);
-    const frames = renderer_state.placeMultiPane(allocator, &.{pane.shaped.runs}) catch |e| {
-        pane.deinit(allocator);
-        return e;
-    };
-    defer allocator.free(frames);
-    return builder.finishPane(allocator, &pane, frames[0], renderer_state) catch |e| {
-        pane.deinit(allocator);
-        return e;
-    };
-}
-
 /// GPU에 넘긴 glyph 좌표가 artifact의 placement와 정확히 같은지 — 변환이 좌표를 왜곡하지 않았다는 증거다.
 ///
 /// measured artifact로 옮기면서 기대식이 단순해졌다. 예전 `RichTextArtifact`는 `col * cell_width + offset`

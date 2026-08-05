@@ -576,6 +576,15 @@ renderer capability의 현재 검증 계약은 `editor_epoch`를 포함한 `Rend
 > 같은 관례)이며 **갱신 후 눈으로 확인하고 커밋**한다 — 자동 갱신은 회귀를 골든으로 굳힐 수 있다. 실효성은
 > 골든 1픽셀을 손상시켜 확인했다(다른 픽셀 1개, 최대 채널 차이 128, 좌표까지 지목). 채널당 2 허용치는 러너
 > rasterizer 미세 차이를 흡수하되 이 게이트가 잡으려는 결함(클리핑 실패·라벨 소실·밀도 변화)보다 훨씬 작다.
+> ⚠️ **신뢰 범위**: Lab과 제품 Session Dock은 **서로 다른 text artifact**를 쓴다 — 제품은
+> `system_text.Artifact`(순수 픽셀 placement + 뷰포트 clip), Lab은 `chrome_draw_lowering.RichTextArtifact`
+> 다. 후자는 최종 좌표가 `origin + col*cell_width + offset`(셀 격자 + 오프셋)이고 clip 파라미터가 없다.
+> 그래서 Lab 캡처의 텍스트는 셀 격자로 스냅돼 픽셀 정확한 quad와 **상대 위치가 제품과 다르고**, 스크롤
+> 뷰포트로 **잘리지 않는다**. 이 골든은 레이아웃·구조(높이·간격·라벨 존재·배경 quad 클리핑)까지만
+> 신뢰하고, 텍스트 정렬과 텍스트 클리핑은 제품 캡처로 봐야 한다. 실제로 그런 case(잘린 pill 안 숫자)를
+> 넣었다가 Lab artifact의 성질을 정답으로 굳히는 것이라 제거했다. `RichTextArtifact` 소비자는 Lab
+> 하나뿐이라, Lab을 `system_text.Artifact`로 옮기면 이 간극이 사라진다(동기 `shapeOps`·CoreText 링크가
+> 이미 있다) — 별도 작업으로 남긴다.
 > ⚠️ 한계: 캡처가 없으면 skip한다(스모크를 안 돌린 환경/플랫폼). 그리고 골든은 **관심 영역만** 보므로 그
 > 사각형 밖 회귀는 여전히 못 잡는다 — 새 시각 계약을 만들 때 case를 함께 추가해야 한다.
 

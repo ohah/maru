@@ -19,6 +19,9 @@ pub const Placement = struct {
     advance_px: f32,
     line_height_px: f32,
     foreground: u32,
+    /// 스크롤 목록 소속이면 true. 캐시된 아티팩트를 다른 스크롤 위치에서 다시 쓸 때 backend가 이
+    /// placement에만 y delta를 더한다 — 고정 chrome은 스크롤해도 제자리이므로 건드리면 안 된다.
+    scroll_clipped: bool = false,
 };
 
 /// An owned, renderer-free description of the semantic text that CoreText must shape.  It can
@@ -35,6 +38,7 @@ pub const Request = struct {
         max_width_px: u32,
         foreground: u32,
         placement: chrome.draw.TextPlacement = .origin,
+        scroll_clipped: bool = false,
     };
 
     pub fn deinit(self: *Request, allocator: std.mem.Allocator) void {
@@ -66,11 +70,13 @@ pub const UnresolvedArtifact = struct {
     glyphs: []UnresolvedGlyph,
     placements: []chrome.draw.TextPlacement,
     foregrounds: []u32,
+    scroll_flags: []bool,
 
     pub fn deinit(self: *UnresolvedArtifact, allocator: std.mem.Allocator) void {
         allocator.free(self.glyphs);
         allocator.free(self.placements);
         allocator.free(self.foregrounds);
+        allocator.free(self.scroll_flags);
         self.* = undefined;
     }
 };
@@ -85,6 +91,10 @@ pub const Artifact = struct {
         self.* = undefined;
     }
 
+    /// `clip`이 있으면 각 glyph quad를 그 backing-pixel 사각형과 교차시켜 **부분적으로** 남긴다.
+    /// glyph는 atlas texture를 입힌 사각형이므로 잘린 비율만큼 UV를 같이 줄이면 결과가 픽셀 정확하다.
+    /// 그래서 component가 "이 줄이 clip 안에 통째로 들어가는가"를 미리 판정할 필요가 없다 — 반쯤
+    /// 걸친 카드/그룹의 글자도 잘린 그대로 보인다.
     pub fn appendGpuGlyphs(
         self: Artifact,
         allocator: std.mem.Allocator,
@@ -92,6 +102,10 @@ pub const Artifact = struct {
         atlas: renderer.GlyphAtlasConfig,
         origin_x_px: u32,
         origin_y_px: u32,
+        clip: ?metal_frame.ClipPx,
+        /// 아티팩트가 셰이핑된 시점의 스크롤 위치와 이번 프레임의 스크롤 위치 차이(px). 스크롤은 순수
+        /// 평행이동이므로 이 값만 더하면 같은 셰이핑 결과를 다른 스크롤 위치에 정확히 놓을 수 있다.
+        scroll_delta_y_px: f32,
         out: *std.ArrayList(metal_frame.GpuGlyph),
     ) !void {
         const texture = renderer.AtlasTextureSize{ .width_px = atlas.atlas_width_px, .height_px = atlas.atlas_height_px };
@@ -103,25 +117,101 @@ pub const Artifact = struct {
             if (placement_index >= self.placements.len) return error.MeasuredGlyphPlacementMissing;
             const placement = self.placements[placement_index];
             const uv = try renderer.glyph_quads.uvRectForSlot(glyph.slot, texture);
-            try out.append(allocator, .{
+            const scrolled_y = placement.y_px + if (placement.scroll_clipped) scroll_delta_y_px else 0;
+            const quad = clipGlyphQuad(.{
                 .x = @as(f32, @floatFromInt(origin_x_px)) + placement.x_px,
-                .y = @as(f32, @floatFromInt(origin_y_px)) + placement.y_px,
+                .y = @as(f32, @floatFromInt(origin_y_px)) + scrolled_y,
                 .w = @floatFromInt(glyph.slot.width_px),
                 .h = @floatFromInt(glyph.slot.height_px),
-                .atlas_x_px = glyph.slot.x_px,
-                .atlas_y_px = glyph.slot.y_px,
-                .atlas_width_px = glyph.slot.width_px,
-                .atlas_height_px = glyph.slot.height_px,
                 .u0 = if (glyph.run.cache_key.color_glyph_kind == .color) uv.u0 + 2.0 else uv.u0,
                 .v0 = uv.v0,
                 .u1 = uv.u1,
                 .v1 = uv.v1,
+            }, clip) orelse continue;
+            try out.append(allocator, .{
+                .x = quad.x,
+                .y = quad.y,
+                .w = quad.w,
+                .h = quad.h,
+                .atlas_x_px = glyph.slot.x_px,
+                .atlas_y_px = glyph.slot.y_px,
+                .atlas_width_px = glyph.slot.width_px,
+                .atlas_height_px = glyph.slot.height_px,
+                .u0 = quad.u0,
+                .v0 = quad.v0,
+                .u1 = quad.u1,
+                .v1 = quad.v1,
                 .foreground = placement.foreground,
                 .layer = 0,
             });
         }
     }
 };
+
+const ClippedQuad = struct {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    u0: f32,
+    v0: f32,
+    u1: f32,
+    v1: f32,
+};
+
+/// glyph quad ∩ clip. 잘린 만큼 UV를 같은 비율로 좁혀 texture가 늘어나지 않게 한다. color glyph의
+/// `u0 + 2.0` sentinel은 렌더러가 정수부로 읽으므로 소수부만 보간하고 sentinel은 보존한다.
+fn clipGlyphQuad(quad: ClippedQuad, clip: ?metal_frame.ClipPx) ?ClippedQuad {
+    const rect = clip orelse return quad;
+    if (rect.w == 0 or rect.h == 0) return null;
+    if (quad.w <= 0 or quad.h <= 0) return null;
+    const clip_left: f32 = @floatFromInt(rect.x);
+    const clip_top: f32 = @floatFromInt(rect.y);
+    const clip_right = clip_left + @as(f32, @floatFromInt(rect.w));
+    const clip_bottom = clip_top + @as(f32, @floatFromInt(rect.h));
+    const left = @max(quad.x, clip_left);
+    const top = @max(quad.y, clip_top);
+    const right = @min(quad.x + quad.w, clip_right);
+    const bottom = @min(quad.y + quad.h, clip_bottom);
+    if (right <= left or bottom <= top) return null;
+    const sentinel: f32 = if (quad.u0 >= 2.0) 2.0 else 0.0;
+    const u_start = quad.u0 - sentinel;
+    const u_span = quad.u1 - u_start;
+    const v_span = quad.v1 - quad.v0;
+    const left_ratio = (left - quad.x) / quad.w;
+    const right_ratio = (quad.x + quad.w - right) / quad.w;
+    const top_ratio = (top - quad.y) / quad.h;
+    const bottom_ratio = (quad.y + quad.h - bottom) / quad.h;
+    return .{
+        .x = left,
+        .y = top,
+        .w = right - left,
+        .h = bottom - top,
+        .u0 = u_start + u_span * left_ratio + sentinel,
+        .v0 = quad.v0 + v_span * top_ratio,
+        .u1 = quad.u1 - u_span * right_ratio,
+        .v1 = quad.v1 - v_span * bottom_ratio,
+    };
+}
+
+test "clipGlyphQuad trims geometry and UV together and preserves the colour sentinel" {
+    const full = ClippedQuad{ .x = 100, .y = 200, .w = 10, .h = 20, .u0 = 0.5, .v0 = 0.25, .u1 = 0.6, .v1 = 0.45 };
+    // clip 없음 = 원본 그대로.
+    try std.testing.expectEqual(full.w, (clipGlyphQuad(full, null) orelse return error.TestUnexpectedResult).w);
+    // 위쪽 절반이 잘리면 높이와 v0가 같은 비율로 움직인다.
+    const half = clipGlyphQuad(full, .{ .x = 0, .y = 210, .w = 1000, .h = 1000 }) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(f32, 210), half.y);
+    try std.testing.expectEqual(@as(f32, 10), half.h);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.35), half.v0, 0.0001);
+    try std.testing.expectEqual(full.v1, half.v1);
+    // 완전히 밖이면 방출하지 않는다.
+    try std.testing.expect(clipGlyphQuad(full, .{ .x = 0, .y = 0, .w = 10, .h = 10 }) == null);
+    // color glyph sentinel(+2.0)은 정수부로 살아남고 소수부만 좁아진다.
+    const colour = ClippedQuad{ .x = 0, .y = 0, .w = 10, .h = 10, .u0 = 2.5, .v0 = 0, .u1 = 0.6, .v1 = 1 };
+    const trimmed = clipGlyphQuad(colour, .{ .x = 5, .y = 0, .w = 100, .h = 100 }) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(trimmed.u0 >= 2.0);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.55), trimmed.u0, 0.0001);
+}
 
 /// Shapes every non-icon Session Dock text op into one immutable artifact. Registered SVG icon
 /// ops stay on the legacy synthesized-glyph path until their vector texture migration lands;
@@ -172,6 +262,7 @@ pub fn prepareRequest(
                     .max_width_px = max_width,
                     .foreground = packRgb(tk.get(text.role)),
                     .placement = text.placement,
+                    .scroll_clipped = text.scroll_clipped,
                 });
             }
         },
@@ -245,10 +336,13 @@ pub fn shapeRequest(allocator: std.mem.Allocator, request: *const Request, scale
     errdefer allocator.free(placements);
     const foregrounds = try allocator.alloc(u32, request.runs.len);
     errdefer allocator.free(foregrounds);
+    const scroll_flags = try allocator.alloc(bool, request.runs.len);
+    errdefer allocator.free(scroll_flags);
     for (request.runs, 0..) |run, index| {
         if (index > std.math.maxInt(u16)) return error.TooManySystemTextRuns;
         placements[index] = run.placement;
         foregrounds[index] = run.foreground;
+        scroll_flags[index] = run.scroll_clipped;
         if (run.placement == .icon_in_rect) continue;
         const shaped = shapeUnresolvedRun(allocator, run, scale_milli) catch |err| switch (run.placement) {
             // A centred Button is all-or-nothing: publishing only its background or a lone
@@ -267,7 +361,7 @@ pub fn shapeRequest(allocator: std.mem.Allocator, request: *const Request, scale
             try glyphs.append(allocator, owned);
         }
     }
-    return .{ .glyphs = try glyphs.toOwnedSlice(allocator), .placements = placements, .foregrounds = foregrounds };
+    return .{ .glyphs = try glyphs.toOwnedSlice(allocator), .placements = placements, .foregrounds = foregrounds, .scroll_flags = scroll_flags };
 }
 
 /// Resolves a completed worker DTO on the main actor.  This bounded conversion is the sole
@@ -334,14 +428,15 @@ pub fn resolveArtifact(
             .advance_px = advance,
             .line_height_px = glyph.line_height_px,
             .foreground = glyph.foreground,
+            .scroll_clipped = unresolved.scroll_flags[run_index],
         };
         record_index += 1;
     }
-    for (unresolved.placements, shaped, advances, line_heights, unresolved.foregrounds) |layout, has_glyph, advance, line_height, foreground| switch (layout) {
+    for (unresolved.placements, shaped, advances, line_heights, unresolved.foregrounds, unresolved.scroll_flags) |layout, has_glyph, advance, line_height, foreground, scroll_clipped| switch (layout) {
         .icon_in_rect => |icon| {
             if (!renderer.icon_glyph.isRegisteredIcon(icon.icon_codepoint)) return error.UnregisteredChromeIcon;
             records[record_index] = .{ .row = @intCast(record_index / 256), .col = @intCast(record_index % 256), .cell_width = 1, .codepoint = icon.icon_codepoint, .font_id = 0, .glyph_id = 0, .color_glyph_kind = .monochrome, .raster_width_px = icon.icon_extent_px, .raster_height_px = icon.icon_extent_px };
-            placements[record_index] = .{ .x_px = @as(f32, @floatFromInt(icon.content_rect.x)) + (@as(f32, @floatFromInt(icon.content_rect.w)) - @as(f32, @floatFromInt(icon.icon_extent_px))) / 2, .y_px = @as(f32, @floatFromInt(icon.content_rect.y)) + (@as(f32, @floatFromInt(icon.content_rect.h)) - @as(f32, @floatFromInt(icon.icon_extent_px))) / 2, .advance_px = @floatFromInt(icon.icon_extent_px), .line_height_px = @floatFromInt(icon.icon_extent_px), .foreground = foreground };
+            placements[record_index] = .{ .x_px = @as(f32, @floatFromInt(icon.content_rect.x)) + (@as(f32, @floatFromInt(icon.content_rect.w)) - @as(f32, @floatFromInt(icon.icon_extent_px))) / 2, .y_px = @as(f32, @floatFromInt(icon.content_rect.y)) + (@as(f32, @floatFromInt(icon.content_rect.h)) - @as(f32, @floatFromInt(icon.icon_extent_px))) / 2, .advance_px = @floatFromInt(icon.icon_extent_px), .line_height_px = @floatFromInt(icon.icon_extent_px), .foreground = foreground, .scroll_clipped = scroll_clipped };
             record_index += 1;
         },
         .leading_icon_group => |group| {
@@ -370,6 +465,7 @@ pub fn resolveArtifact(
                 .advance_px = @floatFromInt(group.icon_extent_px),
                 .line_height_px = if (line_height > 0) line_height else @floatFromInt(group.icon_extent_px),
                 .foreground = foreground,
+                .scroll_clipped = scroll_clipped,
             };
             record_index += 1;
         },
@@ -421,7 +517,7 @@ test "leading icon group resolves measured label and SVG to one final-pixel arti
         .gap_px = 10,
     } }});
     const foregrounds = try allocator.dupe(u32, &.{0xAABBCC});
-    var unresolved = UnresolvedArtifact{ .glyphs = glyphs, .placements = layouts, .foregrounds = foregrounds };
+    var unresolved = UnresolvedArtifact{ .glyphs = glyphs, .placements = layouts, .foregrounds = foregrounds, .scroll_flags = try allocator.dupe(bool, &.{false}) };
     defer unresolved.deinit(allocator);
     var registry = renderer.FontIdentityRegistry.init(allocator);
     defer registry.deinit();
@@ -445,7 +541,7 @@ test "icon in rect resolves a registered SVG without a CoreText glyph" {
         .icon_extent_px = 18,
     } }});
     const foregrounds = try allocator.dupe(u32, &.{0x123456});
-    var unresolved = UnresolvedArtifact{ .glyphs = glyphs, .placements = layouts, .foregrounds = foregrounds };
+    var unresolved = UnresolvedArtifact{ .glyphs = glyphs, .placements = layouts, .foregrounds = foregrounds, .scroll_flags = try allocator.dupe(bool, &.{false}) };
     defer unresolved.deinit(allocator);
     var registry = renderer.FontIdentityRegistry.init(allocator);
     defer registry.deinit();

@@ -2459,6 +2459,10 @@ const AgentSessionDockRichTextCache = struct {
     fingerprint: u64,
     placements: []chrome_system_text.Placement,
     records: []renderer.ShapedGlyphRecord,
+    /// 이 아티팩트를 셰이핑할 때의 스크롤 위치(목록 첫 아이템 origin, px). fingerprint는 스크롤에
+    /// 불변이므로 캐시는 다른 스크롤 위치에서도 hit한다. 그때 이 값과의 차이만큼 스크롤 소속 glyph를
+    /// 평행이동해 같은 셰이핑 결과를 재사용한다.
+    scroll_origin_y_px: i32,
 };
 
 pub const AppSession = struct {
@@ -20915,7 +20919,7 @@ pub const AppSession = struct {
     /// The frame path only drains a completed immutable CoreText DTO.  It never creates a
     /// CTLine or waits for the detached worker; stale semantic output is discarded before it
     /// can replace a newer list/layout snapshot.
-    fn pollAgentSessionDockRichTextWorker(self: *AppSession, fingerprint: u64) void {
+    fn pollAgentSessionDockRichTextWorker(self: *AppSession, fingerprint: u64, scroll_origin_y_px: i32) void {
         var result = self.agent_session_dock_text_backend.takeResult() orelse return;
         defer result.deinit(self.allocator);
         if (result.fingerprint != fingerprint) return;
@@ -20925,6 +20929,7 @@ pub const AppSession = struct {
             .fingerprint = fingerprint,
             .placements = artifact.placements,
             .records = artifact.records,
+            .scroll_origin_y_px = scroll_origin_y_px,
         };
         self.metal_dirty = true;
     }
@@ -31748,6 +31753,9 @@ pub const AppSession = struct {
         origin_y: u32,
         colors: metal_frame.CellColors,
         clip_rect: ?metal_frame.ClipPx = null,
+        /// 캐시된 measured 아티팩트를 이번 프레임 스크롤 위치로 옮기는 평행이동량(px). 스크롤 소속
+        /// glyph에만 적용된다.
+        scroll_delta_y_px: f32 = 0,
     };
     const CollectDest = union(enum) {
         sidebar,
@@ -31981,6 +31989,9 @@ pub const AppSession = struct {
             cols,
             rows,
         ) catch return;
+        // 스크롤 목록의 현재 원점. 목록 전체가 이 값만큼 함께 움직이므로, 셰이핑 키는 이 값을 뺀
+        // 상대 좌표로 만들고(스크롤 불변) 캐시를 재사용할 때 차이만 다시 더한다.
+        const scroll_origin_y_px = props.content_first_item_origin_y_px;
         const base_fingerprint = chrome_draw_lowering.richTextFingerprint(
             draws.ops,
             &tokens,
@@ -31988,17 +31999,19 @@ pub const AppSession = struct {
             self.cell_height_px,
             cols,
             rows,
+            scroll_origin_y_px,
         );
         // `richTextFingerprint` owns semantic component facts; scale changes the CoreText
         // point size even when integer cell metrics happen to round to the same value.
         const fingerprint = base_fingerprint ^ (@as(u64, dock_scale_milli) *% 0x9e3779b185ebca87);
-        self.pollAgentSessionDockRichTextWorker(fingerprint);
+        self.pollAgentSessionDockRichTextWorker(fingerprint, scroll_origin_y_px);
         if (self.agent_session_dock_rich_text_cache) |*cache| {
             if (cache.fingerprint == fingerprint) {
                 self.collectMeasuredTextFromCache(collected, chrome_system_text.emptyDrawList(self.allocator, cache.records.len) catch return, cache, builder, .{ .pane = .{
                     .origin_x = content.x,
                     .origin_y = content.y,
                     .colors = colors,
+                    .scroll_delta_y_px = @floatFromInt(scroll_origin_y_px - cache.scroll_origin_y_px),
                 } });
                 self.collectShaped(collected, icon_dl, builder, .{ .pane = .{
                     .origin_x = content.x,
@@ -32663,6 +32676,8 @@ pub const AppSession = struct {
                         self.renderer_state.atlas.config,
                         p.origin_x,
                         p.origin_y,
+                        p.clip_rect,
+                        p.scroll_delta_y_px,
                         &rich_glyphs,
                     )) |_| {
                         if (rich_glyphs.items.len > 0) {

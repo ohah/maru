@@ -72,6 +72,8 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
         try writer.skeletons(find(frame.tree, build.NodeIds.content) orelse return error.MissingRect);
     }
 
+    // 여기부터가 스크롤 목록이다. 고정 chrome은 위에서 이미 emit됐다.
+    writer.scroll_clipped = true;
     for (props.items, 0..) |item, index| {
         const rect = find(frame.tree, build.NodeIds.item(index)) orelse return error.MissingRect;
         switch (item) {
@@ -113,6 +115,9 @@ const Writer = struct {
     /// `resolveButton`이 전경을 바꾸는 것을 놓쳐 배경색 label이 배경 위에 얹힌다.
     state: interaction.InteractionState,
     tokens_ref: *const tokens.Tokens,
+    /// 지금 emit 중인 op이 스크롤 목록에 속하는지. 고정 chrome(헤더·scope·검색)은 스크롤해도 제자리이므로
+    /// 이 구분이 없으면 backend가 "스크롤은 순수 평행이동"이라는 사실을 쓸 수 없다.
+    scroll_clipped: bool = false,
 
     fn text(self: *Writer, rect: tree.RectEntry, line: u32, source: []const u8, role: tokens.ColorRole, text_role: typography.ChromeTextRole, line_count: u32, wide_icons: bool, centered: bool) ViewError!void {
         return self.textStyled(rect, line, source, role, text_role, line_count, wide_icons, centered, false);
@@ -549,6 +554,7 @@ const Writer = struct {
             .max_cols = cols,
             .anchor = .head,
             .max_width_px = @intFromFloat(@floor(@as(f32, @floatFromInt(cols)) * @as(f32, @floatFromInt(self.props.cell_width_px)))),
+            .scroll_clipped = self.scroll_clipped,
         } };
         self.run_count += 1;
         self.op_count += 1;
@@ -582,6 +588,7 @@ const Writer = struct {
             .wide_icons = wide_icons,
             .max_width_px = max_width_px,
             .placement = placement,
+            .scroll_clipped = self.scroll_clipped,
         } };
         self.run_count += 1;
         self.op_count += 1;

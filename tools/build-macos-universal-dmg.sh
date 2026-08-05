@@ -17,7 +17,9 @@
 # 산출물: dist/Maru-<버전>-universal.dmg (dist/는 git에 커밋하지 않는다)
 set -eu
 
-SIGN_ID="${MARU_SIGN_IDENTITY:-Developer ID Application: Payhere Inc. (2MS57VWFU8)}"
+# 서명 주체(조직명·Team ID)는 저장소에 두지 않는다. 키체인에 인증서가 하나면 이 접두사만으로 찾히고,
+# 여러 개면 MARU_SIGN_IDENTITY로 전체 이름을 지정한다.
+SIGN_ID="${MARU_SIGN_IDENTITY:-Developer ID Application}"
 PROFILE="${MARU_NOTARY_PROFILE:-maru-notary}"
 ZIG="${ZIG:-zig}"
 # 배포 하한(11.0)은 build.zig의 default_target과 맞춘다. arm64는 Apple Silicon 시작 버전이라

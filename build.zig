@@ -1199,7 +1199,13 @@ pub fn build(b: *std.Build) void {
             []const u8,
             "macos-sign-identity",
             "codesign에 쓸 Developer ID Application 인증서 이름(키체인에서 조회)",
-        ) orelse "Developer ID Application: Payhere Inc. (2MS57VWFU8)";
+        ) orelse
+            // 서명 주체(조직명·Team ID)는 저장소에 두지 않는다 — 소스에 박으면 공개 저장소에서 조직
+            // 식별자가 그대로 노출되고, 포크한 사람이 남의 인증서 이름으로 빌드하려다 실패한다.
+            // 릴리스 워크플로는 secret에서, 로컬은 `-Dmacos-sign-identity=`로 준다(스크립트 경로는
+            // `MARU_SIGN_IDENTITY` 환경변수도 받는다). 키체인에 Developer ID 인증서가 하나면 이 접두사만으로
+            // codesign이 찾는다.
+            "Developer ID Application";
         const macos_notary_profile = b.option(
             []const u8,
             "macos-notary-profile",

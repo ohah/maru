@@ -209,7 +209,7 @@ fn releaseRequirement(line: []const u8) bool {
 test "code signature requirement parser accepts only Apple team-designated lines" {
     const release =
         \\Executable=/Applications/Maru.app/Contents/MacOS/maru
-        \\designated => identifier "com.ohah.maru" and anchor apple generic and certificate leaf[subject.OU] = "2MS57VWFU8"
+        \\designated => identifier "com.ohah.maru" and anchor apple generic and certificate leaf[subject.OU] = "TEAMID0000"
     ;
     const line = requirementLine(release).?;
     try std.testing.expect(releaseRequirement(line));

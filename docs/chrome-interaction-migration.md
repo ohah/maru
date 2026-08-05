@@ -231,6 +231,10 @@ resize에 반영한다(coalesce). 좌표가 이전 적용값과 같은 cell/pixe
 않는다. 즉 move 이벤트 수가 아니라 tick 수와 실제 geometry 변화가 resize fan-out의 상한이다.
 allocation·filesystem I/O·worker wait 금지는 이 예외에서도 그대로 적용된다.
 
+이 규칙은 divider resize만의 것이 아니라 **모든 continuous drag**(scrollbar scroll 포함)에 같이 적용된다.
+소비 지점은 tick이며 up이 아니다 — up에서만 적용하면 사용자는 끄는 동안 아무 반응도 보지 못하고 손을 뗄
+때 한 번에 움직이는 것을 본다. 그것은 coalescing이 아니라 continuous effect의 부재다.
+
 ### 4.4 terminal tab drag는 provisional live reorder다
 
 이 절은 §4.3 reorder 규칙의 **특수화**이지 예외가 아니다. §4.3대로 source layout과 model은

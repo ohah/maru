@@ -55,7 +55,6 @@ const agent_session_archive_scope_backend = @import("agent_session_archive_scope
 const chrome_metal_lowering = @import("chrome/metal_lowering.zig");
 const chrome_draw_lowering = @import("chrome/chrome_draw_lowering.zig");
 const chrome_system_text = @import("chrome/system_text.zig");
-const chrome_system_text_worker = @import("chrome/system_text_worker.zig");
 test {
     // Chrome Lab은 제품 AppSession이 소유하지 않는 test-only fixture다. 다만 이 import로 app-host
     // 테스트 빌드에서 facade/module ownership과 lowering API drift를 컴파일 시점에 잡는다.
@@ -3126,7 +3125,6 @@ pub const AppSession = struct {
     agent_session_archive_backend: agent_session_archive_backend.Backend = undefined,
     agent_session_archive_detail_backend: agent_session_archive_detail_backend.Backend = undefined,
     agent_session_archive_scope_backend: agent_session_archive_scope_backend.Backend = undefined,
-    agent_session_dock_text_backend: chrome_system_text_worker.Backend = undefined,
     agent_session_archive_initialized: bool = false,
     agent_session_archive_records: std.ArrayList(agent_session_archive_backend.Record) = .empty,
     agent_session_archive_filtered_indices: std.ArrayList(usize) = .empty,
@@ -3656,8 +3654,6 @@ pub const AppSession = struct {
             errdefer self.agent_session_archive_detail_backend.deinit();
             self.agent_session_archive_scope_backend = try agent_session_archive_scope_backend.Backend.init(allocator, io);
             errdefer self.agent_session_archive_scope_backend.deinit();
-            self.agent_session_dock_text_backend = try chrome_system_text_worker.Backend.init(allocator, io);
-            errdefer self.agent_session_dock_text_backend.deinit();
         }
         self.file_tree_initialized = true;
         self.agent_session_archive_initialized = true;
@@ -21134,25 +21130,43 @@ pub const AppSession = struct {
         }
     }
 
-    /// The frame path only drains a completed immutable CoreText DTO.  It never creates a
-    /// CTLine or waits for the detached worker; stale semantic output is discarded before it
-    /// can replace a newer list/layout snapshot.
-    fn pollAgentSessionDockRichTextWorker(self: *AppSession, fingerprint: u64) void {
-        var result = self.agent_session_dock_text_backend.takeResult() orelse return;
-        defer result.deinit(self.allocator);
-        if (result.fingerprint != fingerprint) return;
-        const artifact = chrome_system_text.resolveArtifact(self.allocator, &self.renderer_state.font_registry, result.artifact) catch return;
+    /// 도크의 비례 텍스트를 **이번 프레임 안에서** 셰이핑해 캐시에 넣는다.
+    ///
+    /// 예전에는 이 일을 detached worker에 맡기고 결과를 다음 tick에 받았다. 그런데 도크의 모든 텍스트와
+    /// 등록 SVG 아이콘이 이 아티팩트 **하나**에 실리므로(`shapesTextOp`가 `!wide_icons` 전부를 담는다),
+    /// 결과가 없는 프레임의 도크는 카드 배경만 남은 빈 상자가 됐다. 게다가 in-flight가 1개라 스크롤처럼
+    /// 매 프레임 내용이 바뀌는 동안에는 도착한 결과가 계속 fingerprint 불일치로 버려져, 한 프레임 깜빡임이
+    /// 아니라 스크롤하는 내내 빈 상태가 유지됐다(사용자 보고).
+    ///
+    /// 나머지 chrome은 이미 이렇게 하고 있다 — 사이드바·탭바·터미널 본문은 `CoreTextFrameBuilder.shapeOnly`로
+    /// 같은 tick에 CoreText를 부르며, 터미널은 셀마다 `CTLine`을 하나씩 만든다. 도크 한 프레임은 그에 비하면
+    /// run 수십 개다(측정: 55 run·969 glyph에 1.4ms, ReleaseFast). 그러므로 캐시는 빈 프레임을 정당화하는
+    /// 장치가 아니라 **순수 최적화**이며, miss는 지금 셰이핑해서 메운다.
+    ///
+    /// 실패하면 캐시를 건드리지 않는다. 옛 fingerprint가 남아 hit되지 않으므로 호출자가 아이콘 없는
+    /// 프레임을 그리게 되지만, 잘못된 기하의 아티팩트를 재사용하는 것보다 낫다.
+    fn shapeAgentSessionDockRichText(
+        self: *AppSession,
+        ops: []const chrome.draw.Op,
+        tokens: *const chrome.Tokens,
+        fingerprint: u64,
+        dock_scale_milli: u32,
+        scroll_origin_y_px: i32,
+    ) void {
+        var request = chrome_system_text.prepareRequest(self.allocator, fingerprint, ops, tokens, self.cell_width_px) catch return;
+        defer request.deinit(self.allocator);
+        var unresolved = chrome_system_text.shapeRequest(self.allocator, &request, dock_scale_milli) catch return;
+        defer unresolved.deinit(self.allocator);
+        const artifact = chrome_system_text.resolveArtifact(self.allocator, &self.renderer_state.font_registry, unresolved) catch return;
         self.clearAgentSessionDockRichTextCache();
         self.agent_session_dock_rich_text_cache = .{
             .fingerprint = fingerprint,
             .placements = artifact.placements,
             .records = artifact.records,
-            // **submit 시점** 원점이어야 한다. placement는 그때의 op 좌표로 구워졌기 때문이다. 지금(poll)
-            // 프레임의 원점을 쓰면 worker가 도는 동안 스크롤한 만큼 기준이 어긋나고, 이후 delta가 계속 그
-            // 잘못된 기준에서 계산되므로 오차가 사라지지 않는다.
-            .scroll_origin_y_px = result.scroll_origin_y_px,
+            // 셰이핑이 이 프레임 안에서 끝나므로 기준 원점은 지금 그리는 그 값이다. worker 시절에는
+            // submit 시점과 poll 시점의 스크롤이 달라 이 기준이 어긋날 수 있었지만 이제 그 간극이 없다.
+            .scroll_origin_y_px = scroll_origin_y_px,
         };
-        self.metal_dirty = true;
     }
 
     /// 파일 패널 webview 줌 배율을 milli(1000=1.0)로 반환한다 — 프리뷰 iframe `zoom`·HTML/PDF `pageZoom`이 쓴다.
@@ -29220,10 +29234,6 @@ pub const AppSession = struct {
         // 투영 게이트(shouldProjectFrame): sync hold는 라이브 화면 tearing만 막고, 스크롤백 탐색(view_offset 변화)
         // 리페인트는 막지 않는다 — rapid 스크롤 시 sync에 막혀 viewport가 stale로 멈추던 버그 수정. view_offset
         // 변화는 metal_dirty 누락(스크롤 reader 위임 race)에도 투영을 강제한다. timeout 넘긴 sync hold는 강제 해제.
-        // A detached text result has no access to AppSession's render flag.  Request a bounded
-        // follow-up frame while the Session Dock worker is in flight or has a result queued, so
-        // the main actor can poll it without any callback crossing into renderer state.
-        if (self.dock.view == .agent_sessions and self.agent_session_dock_text_backend.needsPoll()) self.metal_dirty = true;
         const will_project = shouldProjectFrame(self.metal_dirty, sync_active, self.sync_hold_ticks, self.syncTimeoutTicks(), active_view_offset, self.last_rendered_view_offset, esu_advanced, self.force_reproject);
         // [A: chrome 독립 present] grid는 hold됐지만 chrome(사이드바 스피너)만 dirty면 사이드바만 부분 투영한다(아래 else if).
         const project_chrome = self.chrome_dirty and !will_project;
@@ -32241,8 +32251,8 @@ pub const AppSession = struct {
             .search_cursor_visible = self.blink_visible,
             // The rich system-text worker follows the same truthful loading rule as archive
             // refresh: existing cards remain visible while its immutable artifact is pending.
-            .loading = (self.agent_session_archive_loading or self.agent_session_dock_text_backend.isInflight()) and self.agent_session_archive_records.items.len == 0,
-            .refreshing = (self.agent_session_archive_loading or self.agent_session_dock_text_backend.isInflight()) and self.agent_session_archive_records.items.len > 0,
+            .loading = self.agent_session_archive_loading and self.agent_session_archive_records.items.len == 0,
+            .refreshing = self.agent_session_archive_loading and self.agent_session_archive_records.items.len > 0,
             .spinner_phase = @intCast(self.agent_spin_frame & 7),
             .content_first_item_origin_y_px = scroll_projection.first_origin_y_px,
             .expanded_identity = if (self.agent_session_inline_detail != null and self.agent_session_archive_selected != null)
@@ -32343,7 +32353,10 @@ pub const AppSession = struct {
         // `richTextFingerprint` owns semantic component facts; scale changes the CoreText
         // point size even when integer cell metrics happen to round to the same value.
         const fingerprint = base_fingerprint ^ (@as(u64, dock_scale_milli) *% 0x9e3779b185ebca87);
-        self.pollAgentSessionDockRichTextWorker(fingerprint);
+        // 캐시는 순수 최적화다. hit이면 CoreText 호출을 건너뛰고, miss면 지금 셰이핑해 이번 프레임에
+        // 그린다 — 다음 tick으로 미루면 그 프레임의 도크가 글자도 아이콘도 없는 빈 카드가 된다.
+        const cache_hit = if (self.agent_session_dock_rich_text_cache) |cache| cache.fingerprint == fingerprint else false;
+        if (!cache_hit) self.shapeAgentSessionDockRichText(draws.ops, &tokens, fingerprint, dock_scale_milli, scroll_origin_y_px);
         if (self.agent_session_dock_rich_text_cache) |*cache| {
             if (cache.fingerprint == fingerprint) {
                 self.collectMeasuredTextFromCache(collected, chrome_system_text.emptyDrawList(self.allocator, cache.records.len) catch return, cache, builder, .{ .pane = .{
@@ -32361,17 +32374,8 @@ pub const AppSession = struct {
                 return;
             }
         }
-        if (!self.agent_session_dock_text_backend.isInflight()) {
-            var request = chrome_system_text.prepareRequest(self.allocator, fingerprint, draws.ops, &tokens, self.cell_width_px) catch {
-                self.collectShaped(collected, icon_dl, builder, .{ .pane = .{
-                    .origin_x = content.x,
-                    .origin_y = content.y,
-                    .colors = colors,
-                } });
-                return;
-            };
-            if (!self.agent_session_dock_text_backend.submit(request, dock_scale_milli, scroll_origin_y_px)) request.deinit(self.allocator);
-        }
+        // 셰이핑이 실패한 프레임만 여기 온다(폰트 없음·할당 실패 등). 텍스트 없이 배경만 그리는 대신
+        // 아이콘 draw list라도 낸다 — 이 경로는 결함 상태이며 정상 흐름의 일부가 아니다.
         self.collectShaped(collected, icon_dl, builder, .{ .pane = .{
             .origin_x = content.x,
             .origin_y = content.y,
@@ -34381,7 +34385,6 @@ pub const AppSession = struct {
             if (self.agent_session_archive_initialized) {
                 self.agent_session_archive_scope_backend.deinit();
                 self.agent_session_archive_detail_backend.deinit();
-                self.agent_session_dock_text_backend.deinit();
                 if (self.agent_session_inline_detail) |*detail| detail.deinit(self.allocator);
                 self.agent_session_inline_detail = null;
                 self.agent_session_archive_backend.deinit();

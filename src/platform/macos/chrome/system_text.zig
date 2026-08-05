@@ -765,3 +765,74 @@ test "owned request shapes proportional text before renderer registry resolution
     defer artifact.deinit(allocator);
     try std.testing.expect(artifact.glyphs.len > 0);
 }
+
+// 이 테스트가 증명하는 것: chrome 텍스트 셰이핑이 run마다 face를 새로 만들지 않는다.
+//
+// 왜 터미널에서 중요한가 — 세션 도크의 텍스트는 캐시가 miss한 프레임에서 **렌더 tick 안에서 동기로**
+// 셰이핑된다(`AppSession.shapeAgentSessionDockRichText`). 그 비용이 프레임 예산 안에 있는 유일한 이유가
+// 브리지의 face 재사용이다. 예전처럼 run마다 `CTFontCreateUIFontForLanguage` +
+// `CTFontCreateCopyWithSymbolicTraits`를 다시 부르면 같은 프레임이 3배 이상 비싸지고, 그 상태로는 스크롤
+// 중 매 프레임 셰이핑을 감당할 수 없어 결국 글자가 사라지는 옛 비동기 구조로 되돌아가게 된다.
+//
+// 판정을 wall-clock 절대값이 아니라 **같은 머신에서 잰 두 측정의 비율**로 두는 이유는, 러너 부하가
+// 두 측정에 똑같이 실려 비율에는 거의 영향을 주지 않기 때문이다. face 재사용이 사라지면 비율이 3배
+// 근처로 튀므로 구조 회귀만 정확히 잡힌다.
+test "chrome text shaping reuses one face across roles instead of rebuilding it per run" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const roles = [_]chrome.ui.typography.ChromeTextRole{
+        .dock_heading, .supporting, .control, .group_heading, .card_heading, .body, .metadata, .overline, .button_label,
+    };
+
+    // 두 요청은 텍스트·길이·run 수가 완전히 같고 role만 다르다. 따라서 차이는 face 생성 비용뿐이다.
+    const Shape = struct {
+        const run_count = 55;
+
+        fn medianNs(gpa: std.mem.Allocator, clock_io: std.Io, varied_roles: bool, role_table: []const chrome.ui.typography.ChromeTextRole) !u64 {
+            const runs = try gpa.alloc(Request.Run, run_count);
+            for (runs, 0..) |*run, index| run.* = .{
+                .text = try gpa.dupe(u8, "세션 기록 도크 스크롤 측정"),
+                .role = if (varied_roles) role_table[index % role_table.len] else .card_heading,
+                .origin = .{ .x = 0, .y = 0 },
+                // truncation 경로는 이 테스트의 대상이 아니므로 타지 않게 한다.
+                .max_width_px = 1_000_000,
+                .foreground = 0xffffff,
+            };
+            var request = Request{ .fingerprint = 0, .runs = runs };
+            defer request.deinit(gpa);
+
+            // face 캐시를 채우는 첫 호출은 정상 상태 비용이 아니다.
+            var warm = try shapeRequest(gpa, &request, 2000);
+            warm.deinit(gpa);
+
+            var samples: [21]u64 = undefined;
+            for (&samples) |*sample| {
+                const start = std.Io.Clock.awake.now(clock_io).nanoseconds;
+                var artifact = try shapeRequest(gpa, &request, 2000);
+                sample.* = @intCast(std.Io.Clock.awake.now(clock_io).nanoseconds - start);
+                artifact.deinit(gpa);
+            }
+            std.mem.sort(u64, &samples, {}, std.sort.asc(u64));
+            return samples[samples.len / 2];
+        }
+    };
+
+    const same_role_ns = try Shape.medianNs(allocator, io, false, &roles);
+    const varied_role_ns = try Shape.medianNs(allocator, io, true, &roles);
+    if (same_role_ns == 0) return error.SkipZigTest; // 시계 해상도가 이 판정을 못 받치는 환경
+
+    // 측정 시점 기준값: face 재사용 전 3.07배, 후 1.00배. 2배는 러너 노이즈를 흡수하면서도 회귀를 잡는다.
+    const ratio = @as(f64, @floatFromInt(varied_role_ns)) / @as(f64, @floatFromInt(same_role_ns));
+    if (ratio > 2.0) {
+        std.debug.print(
+            "chrome text: role마다 face를 다시 만들고 있다 — same_role={d:.3}ms varied_role={d:.3}ms (ratio {d:.2})\n",
+            .{
+                @as(f64, @floatFromInt(same_role_ns)) / 1_000_000.0,
+                @as(f64, @floatFromInt(varied_role_ns)) / 1_000_000.0,
+                ratio,
+            },
+        );
+        return error.ChromeTextFaceNotReused;
+    }
+}

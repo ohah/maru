@@ -150,6 +150,7 @@ RSS는 Maru 앱 프로세스와 해당 WebContent process를 분리해서 재고
 | refresh parse | file ≤ 128 MiB, refresh read ≤ 512 MiB, unchanged identity cache hit read = 0 | `(device,inode,mtime,size)`가 같은 파일은 이번 앱 실행에서 재parse하지 않는다. stale identity·cap·cancel은 partial로 표시하며 cache가 오래된 record를 현재 결과로 위장하면 실패한다. |
 | frame tick·검색·행 선택 | filesystem I/O = 0, JSON parse = 0, worker wait = 0 | tick은 immutable batch queue drain과 snapshot 교체만 한다. 검색/선택은 published snapshot만 소비하며 scan·provider 실행을 요청하지 않는다. |
 | scope 선택·현재 프로젝트 root | main actor filesystem I/O = 0, JSON parse = 0, worker wait = 0 | 작업공간은 이미 검증된 explorer root snapshot만 복사한다. 현재 프로젝트는 활성 Term의 in-memory cwd만 capture해 별도 worker가 canonicalize·`.git` ancestor walk를 수행하고, 결과가 돌아오기 전에는 `프로젝트 분석 중`으로 표시한다. |
+| 도크 텍스트 셰이핑(cache miss frame) | run마다 face를 다시 만들지 않는다: 같은 role만 쓰는 frame 대비 role이 섞인 frame의 셰이핑 시간 **2배 이하** | 도크 텍스트는 cache miss frame에서 render tick 안 **동기**로 셰이핑한다([agent-session-list.md](agent-session-list.md) §4). 그 비용이 예산 안에 있는 근거가 native bridge의 face 재사용이다. 게이트는 wall-clock 절대값이 아니라 같은 머신에서 잰 두 측정의 비율이라 러너 부하에 흔들리지 않는다(`chrome text shaping reuses one face across roles…`). 재사용이 사라지면 비율이 3배 근처로 튄다. 참고 실측(ReleaseFast, Apple Silicon): 55 run·969 glyph 한 frame이 재사용 전 6.25ms, 후 **1.43ms**. |
 
 ## 파일 탐색기 scrollbar/icon 예산
 

@@ -110,8 +110,8 @@ pub const AgentSessionArchiveSmokeProbe = extern struct {
     enabled: u32 = 0,
 };
 
-test "ABI v162 app instance lease result values match the C header" {
-    try std.testing.expectEqual(@as(u32, 162), abi_version);
+test "ABI v163 app instance lease result values match the C header" {
+    try std.testing.expectEqual(@as(u32, 163), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -491,6 +491,42 @@ pub export fn maru_macos_app_session_agent_session_archive_smoke_term_count(
 ) u32 {
     const app_session = session orelse return 0;
     return app_session.agentSessionArchiveSmokeTermCount();
+}
+
+pub const DividerSmokeProbe = extern struct {
+    x_px: i32,
+    y_px: i32,
+    width_px: u32,
+    height_px: u32,
+    ratio_milli: u32,
+    present: u32,
+    capture_active: u32,
+    move_events: u64,
+    resize_applications: u64,
+};
+
+/// Reads the published divider grab band and this drag's coalescing instrumentation for the
+/// dedicated AppKit smoke. Like the archive probe this is deliberately not a general automation
+/// API: it carries no split pointer, no tree structure, and nothing the fixture could act on.
+pub export fn maru_macos_app_session_divider_smoke_probe(
+    session: ?*AppSession,
+    out_probe: ?*DividerSmokeProbe,
+) c_int {
+    const app_session = session orelse return @intFromEnum(Status.null_out);
+    const out = out_probe orelse return @intFromEnum(Status.null_out);
+    const probe = app_session.dividerSmokeProbe();
+    out.* = .{
+        .x_px = probe.x_px,
+        .y_px = probe.y_px,
+        .width_px = probe.width_px,
+        .height_px = probe.height_px,
+        .ratio_milli = probe.ratio_milli,
+        .present = @intFromBool(probe.present),
+        .capture_active = @intFromBool(probe.capture_active),
+        .move_events = probe.move_events,
+        .resize_applications = probe.resize_applications,
+    };
+    return @intFromEnum(Status.ok);
 }
 
 /// Reads one already-published archive capability for the dedicated AppKit smoke fixture.

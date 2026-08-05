@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const layout = @import("../../ui/layout.zig");
+const scroll = @import("scroll.zig");
 const spacing = @import("../../ui/spacing.zig");
 const typography = @import("../../ui/typography.zig");
 
@@ -98,6 +99,11 @@ pub const Props = struct {
     /// The first virtualized item origin relative to the content clip. It is normally zero or
     /// negative, but can be positive when an offset lands in an inter-item gap.
     content_first_item_origin_y_px: i32 = 0,
+    /// 스크롤 목록 **전체**의 content 높이와 현재 offset(backing px). 가상화 때문에 component는 보이는
+    /// 아이템만 받으므로, scrollbar가 얼마나 긴 목록의 어디를 보고 있는지는 이 두 값으로만 알 수 있다.
+    /// 둘 다 host의 `scroll.project` 결과이며, 0이면 scrollbar를 발행하지 않는다.
+    scroll_content_height_px: u32 = 0,
+    scroll_offset_px: u32 = 0,
     items: []const Item = &.{},
 };
 
@@ -136,6 +142,10 @@ pub const DockMetrics = struct {
     group_disclosure_inset_x: u32,
     group_disclosure_extent: u32,
     group_disclosure_label_gap: u32,
+    /// 스크롤바 track 폭·content edge와의 여백·최소 thumb 높이.
+    scrollbar_width: u32,
+    scrollbar_inset_x: u32,
+    scrollbar_min_thumb: u32,
     card_inset_x: u32,
     /// 카드 우측 disclosure chevron과 그 왼쪽 텍스트 사이의 최소 여백. 제목·요약·metadata의 폭 예산은
     /// 이 값과 disclosure slot을 함께 뺀 뒤 계산한다 — 그러지 않으면 measured ellipsis가 chevron 바로
@@ -153,6 +163,15 @@ pub const DockMetrics = struct {
     /// 카드 본문 텍스트가 침범하면 안 되는 우측 폭. disclosure slot 자체와 그 바깥 inset, 그리고 둘
     /// 사이의 최소 여백을 합친다. `cardDisclosure`가 slot을 놓는 식과 같은 항을 쓰므로, 한쪽만 바뀌어
     /// 텍스트가 chevron 아래로 흘러드는 상태가 생길 수 없다.
+    /// scrollbar 기하 모듈이 받는 형태. 치수의 단일 출처를 `DockMetrics` 하나로 유지한다.
+    pub fn scrollbarMetrics(self: DockMetrics) scroll.ScrollbarMetrics {
+        return .{
+            .width_px = self.scrollbar_width,
+            .inset_x_px = self.scrollbar_inset_x,
+            .min_thumb_px = self.scrollbar_min_thumb,
+        };
+    }
+
     pub fn cardDisclosureReserve(self: DockMetrics) u32 {
         return self.card_inset_x + self.group_disclosure_extent + self.card_disclosure_gap;
     }
@@ -204,6 +223,11 @@ pub const DockMetrics = struct {
             .group_disclosure_inset_x = geometryPx(spacing.px(.xs, scale)),
             .group_disclosure_extent = geometryPx(spacing.pointsPx(20, scale)),
             .group_disclosure_label_gap = geometryPx(spacing.px(.xs, scale)),
+            // 스크롤바는 8pt track을 content edge에서 4pt 안쪽에 둔다. thumb 최소 높이 24pt는 파일
+            // 탐색기 스크롤바와 같은 값으로, 아주 긴 목록에서도 집을 수 있는 크기를 보장한다.
+            .scrollbar_width = geometryPx(spacing.pointsPx(8, scale)),
+            .scrollbar_inset_x = geometryPx(spacing.pointsPx(4, scale)),
+            .scrollbar_min_thumb = geometryPx(spacing.pointsPx(24, scale)),
             .card_inset_x = geometryPx(card_inset),
             .card_disclosure_gap = geometryPx(spacing.px(.sm, scale)),
             .card_title_y = geometryPx(card_title_y),

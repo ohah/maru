@@ -278,6 +278,17 @@ Explorer/source-control은 pane tab bar와 정렬해야 하므로 이 예외를 
   무관하게 상단에 남고, workspace group만 독립적으로 접힌다. `CollapsibleWorkspaceGroup`
   header는 chevron·이름·count와 full-width hit target을 가지며, selected
   scope가 아니라 각 group의 collapse state만 바꾼다.
+- scroll-area는 목록이 **실제로 넘칠 때만** 우측에 scrollbar를 낸다. track과 thumb은 도크의 같은
+  completed tree에 실리되 scroll-area의 자식이 **아니다** — 자식이면 virtualization 평행이동을 함께
+  받아 스크롤할 때 스크롤바가 목록과 같이 흘러내린다. 그래서 tree가 완성된 **뒤에** 뷰포트 고정
+  entry로 덧붙이고, 그 rect는 published `content` rect에서 유도한다(두 번째 기하 출처를 만들지 않는다).
+  thumb 높이는 보이는 비율에 비례하되 집을 수 있는 최소 높이 아래로 내려가지 않는다. thumb과 track은
+  **둘 다** 세로 drag를 선언한다 — track을 눌러 그 지점으로 점프한 뒤 손을 떼지 않고 이어서 끌 수
+  있어야 하기 때문이다. 목표 offset은 pointer 좌표의 함수라 action intent에 실을 수 없으므로 host가
+  같은 published 기하로 좌표를 offset으로 바꾸며, 그 **소비 지점은 tick 하나**다(move 수가 아니라 tick
+  수가 상한이라는 [Chrome 상호작용 이관](chrome-interaction-migration.md) §4.3의 continuous drag 계약).
+  thumb의 기본색은 패널보다 확실히 밝아야 한다 — track과 명암이 비슷하면 스크롤바가 있어도 안 보인다.
+  스크롤바는 macOS overlay 관례대로 목록 위에 겹치며, 나타나고 사라질 때 목록 폭을 reflow하지 않는다.
 - 우측 도크는 하나이며 outer divider의 수동 폭도 모든 뷰가 공유한다. 다만 workspace에
   저장된 `dock.size == 0`은 **자동 폭** sentinel이므로, `agent_sessions`는 제목·세그먼트·검색·카드
   metadata가 같은 줄에서 읽히고 긴 한글 제목도 불필요하게 잘리지 않는 기본 **640pt**를 사용한다. `explorer`와 `source_control`의 자동 폭은

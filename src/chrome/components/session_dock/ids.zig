@@ -15,6 +15,11 @@ pub const Intent = union(enum) {
     resume_session,
     reveal_log,
     focus_live,
+    /// Scrollbar thumb/track. 목표 offset은 pointer 좌표의 함수이므로 intent에 실을 수 없다 —
+    /// host가 같은 published 기하로 좌표를 offset으로 바꾼다. 이 intent가 하는 일은 "눌린 곳이
+    /// 스크롤바의 어느 부분인가"를 알리는 것뿐이다.
+    scroll_thumb,
+    scroll_track,
 };
 
 /// 표 자체는 generic이다(`ui/intent_table.zig`). 이 파일이 소유하는 것은 **어떤 intent가 있는가**

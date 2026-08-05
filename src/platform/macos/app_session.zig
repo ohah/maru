@@ -2466,6 +2466,13 @@ pub const SessionCollection = struct {
     }
 };
 
+/// Session Dock scrollbar를 끌고 있는 동안의 불변 스냅샷. `grab_dy`는 누른 지점과 thumb top의 거리라
+/// 드래그 내내 유지되고, `geometry`는 down 시점의 track/thumb 치수다.
+const AgentSessionDockScrollDrag = struct {
+    grab_dy: f32,
+    geometry: chrome.components.session_dock.scroll.ScrollbarGeometry,
+};
+
 const AgentSessionDockRichTextCache = struct {
     fingerprint: u64,
     placements: []chrome_system_text.Placement,
@@ -3190,6 +3197,13 @@ pub const AppSession = struct {
     /// Precise AppKit wheel input is fractional in points. This residue belongs only to the dock;
     /// sharing terminal `wheel_accum` would make one surface steal another's first pixel.
     agent_session_archive_wheel_residue_px: f64 = 0,
+    /// Session Dock scrollbar를 잡고 있는 동안의 상태. `null`이면 잡고 있지 않다. 기하를 down 시점에
+    /// 고정하는 이유는 file explorer scrollbar와 같다 — 드래그 도중 thumb이 움직이는데 매 move마다
+    /// 새 기하로 다시 계산하면 손가락이 잡은 지점이 미끄러진다.
+    agent_session_dock_scroll_drag: ?AgentSessionDockScrollDrag = null,
+    /// move는 tick보다 훨씬 자주 온다. 좌표를 흡수만 하고 실제 offset 적용은 tick이 한 번 한다
+    /// (docs/chrome-interaction-migration.md §4.3 continuous drag 계약).
+    agent_session_dock_scroll_coalescer: chrome.ui.continuous_drag.Coalescer(u32) = .{},
     /// archive 행 선택은 레코드 index만 든다. refresh가 목록을 바꾸면 update 경로에서 범위를 재검증한다.
     agent_session_archive_selected: ?usize = null,
     file_tree_mutation_backend: file_tree_mutation_backend.Backend = undefined,
@@ -29025,6 +29039,9 @@ pub const AppSession = struct {
         // 스크롤만 "놓아야 움직이는" 것으로 보였다(제보).
         self.applyPendingDividerResize();
         self.applyPendingScrollbarScroll();
+        // Session Dock scrollbar도 같은 규율이다 — 도크의 drag는 chrome interaction tree가 소유하지만
+        // 소비 지점은 동일하게 tick 하나다.
+        self.applyAgentSessionDockScrollDrag();
         // §4.4: 드래그가 살아 있는 동안 다른 경로가 tab 집합을 바꾸면(⌘T·단축키 close·원격 관측의 Term 소멸)
         // provisional 배열을 새 집합에 재봉합하지 않고 폐기한다. 폐기하지 않으면 transaction이 영구히 무효라
         // 나머지 드래그가 조용한 무동작이 되고 floating 고스트만 커서를 따라다닌다.
@@ -32255,6 +32272,10 @@ pub const AppSession = struct {
             .refreshing = self.agent_session_archive_loading and self.agent_session_archive_records.items.len > 0,
             .spinner_phase = @intCast(self.agent_spin_frame & 7),
             .content_first_item_origin_y_px = scroll_projection.first_origin_y_px,
+            // 가상화 때문에 component는 보이는 아이템만 받는다. scrollbar가 "얼마나 긴 목록의 어디"인지
+            // 알 수 있는 유일한 입력이 이 두 값이다.
+            .scroll_content_height_px = scroll_projection.content_height_px,
+            .scroll_offset_px = scroll_projection.offset_y_px,
             .expanded_identity = if (self.agent_session_inline_detail != null and self.agent_session_archive_selected != null)
                 @intCast(self.agent_session_archive_selected.?)
             else
@@ -32274,11 +32295,13 @@ pub const AppSession = struct {
         };
         const node_count = items.len + expansion_nodes + 7;
         const nodes = arena.alloc(chrome.ui.tree.UiNode, node_count) catch return;
-        const entries = arena.alloc(chrome.ui.tree.RectEntry, node_count + 1) catch return;
+        // +1은 root, +2는 build가 tree 뒤에 붙이는 scrollbar track/thumb다.
+        const entries = arena.alloc(chrome.ui.tree.RectEntry, node_count + 3) catch return;
         const layout_items = arena.alloc(chrome.ui.layout.Item, node_count + 1) catch return;
         const flex_scratch = arena.alloc(chrome.ui.layout.FlexScratch, node_count + 1) catch return;
         const child_rects = arena.alloc(chrome.ui.layout.UiRect, node_count + 1) catch return;
-        const actions = arena.alloc(chrome.components.session_dock.ids.Entry, items.len + 5 + expansion_actions) catch return;
+        // +2는 scrollbar track/thumb action이다.
+        const actions = arena.alloc(chrome.components.session_dock.ids.Entry, items.len + 7 + expansion_actions) catch return;
         const frame = chrome.components.session_dock.build.build(props, .{
             .nodes = nodes,
             .entries = entries,
@@ -32295,7 +32318,13 @@ pub const AppSession = struct {
         // B1-button-a emits the registered SVG icon and the measured action label as two
         // semantic ops. Reserve both before the view runs: dropping only the label on a full
         // fixed buffer would leave an enabled-looking icon with no command text.
-        const ops = arena.alloc(chrome.draw.Op, 21 + items.len * 6 + expansion_actions * 2 + expansion_turns * 2 + 4) catch return;
+        // generic paint의 quad는 published entry 하나당 최대 하나다. 이 몫을 상수로 세면 tree가
+        // 자라는 변경마다 조용히 모자라는데, 그 결과가 "그 컴포넌트만 안 그려짐"이 아니라 **도크 전체
+        // 정지**다 — `view`가 실패하면 아래 `publishAgentSessionDockFrame`까지 못 가서 hit tree가
+        // 이전 프레임에 멈춘다(scrollbar를 추가하다 실제로 겪었다). 그래서 entry 수에서 유도한다.
+        const paint_quad_budget = frame.tree.entries.len;
+        const text_op_budget = 21 + items.len * 6 + expansion_actions * 2 + expansion_turns * 2 + 4;
+        const ops = arena.alloc(chrome.draw.Op, paint_quad_budget + text_op_budget) catch return;
         const runs = arena.alloc(chrome.draw.Run, 9 + items.len * 5 + expansion_actions * 2 + expansion_turns * 2 + 4) catch return;
         const text_bytes = arena.alloc(u8, 1024 + items.len * 1024 + expansion_turns * 1024) catch return;
         const tokens = self.buildChromeTokens();
@@ -32537,6 +32566,8 @@ pub const AppSession = struct {
     const AgentSessionDockPointerDispatch = struct {
         intent: ?chrome.components.session_dock.ids.Intent,
         visual_changed: bool,
+        /// scrollbar thumb/track이 선언한 drag의 lifecycle. click intent와 배타적이라 둘 다 실어 보낸다.
+        drag: ?chrome.ui.interaction.DragEvent = null,
     };
 
     fn dispatchAgentSessionDockPointer(
@@ -32554,10 +32585,10 @@ pub const AppSession = struct {
                 break;
             }
         }
-        const action_id = dispatched.action orelse return .{ .intent = null, .visual_changed = visual_changed };
+        const action_id = dispatched.action orelse return .{ .intent = null, .visual_changed = visual_changed, .drag = dispatched.drag };
         var table = chrome.components.session_dock.ids.Table.init(@constCast(actions));
         table.count = actions.len;
-        return .{ .intent = table.resolve(action_id, generation), .visual_changed = visual_changed };
+        return .{ .intent = table.resolve(action_id, generation), .visual_changed = visual_changed, .drag = dispatched.drag };
     }
 
     /// Keyboard shortcuts are not a second action path.  They resolve the same published,
@@ -32849,6 +32880,11 @@ pub const AppSession = struct {
         if (self.dock.view != .agent_sessions or !self.dockVisible() or self.cell_width_px == 0 or self.cell_height_px == 0) return null;
         const content = self.dockGeometry().tree_content;
         if (self.agent_session_dock_entries.items.len == 0) return null;
+        const local_x = x_px - @as(f64, @floatFromInt(content.x));
+        const local_y = y_px - @as(f64, @floatFromInt(content.y));
+        // scrollbar를 잡는 순간은 down이다(up의 action이 아니다). 눌린 지점이 thumb인지 track인지에 따라
+        // grab 지점이 달라지고, track이면 그 자리로 먼저 점프한 뒤 이어서 끌 수 있어야 한다.
+        if (phase == .down) self.beginAgentSessionDockScrollDrag(local_x, local_y);
         const dispatched = dispatchAgentSessionDockPointer(
             &self.agent_session_dock_interaction,
             self.agent_session_dock_entries.items,
@@ -32856,13 +32892,104 @@ pub const AppSession = struct {
             self.agent_session_dock_snapshot_generation,
             .{
                 .phase = phase,
-                .x_px = x_px - @as(f64, @floatFromInt(content.x)),
-                .y_px = y_px - @as(f64, @floatFromInt(content.y)),
+                .x_px = local_x,
+                .y_px = local_y,
                 .timestamp_ns = 0,
             },
         ) orelse return null;
         if (dispatched.visual_changed) self.metal_dirty = true;
+        if (dispatched.drag) |event| self.absorbAgentSessionDockScrollDrag(event);
         return dispatched.intent;
+    }
+
+    /// published tree가 발행한 track/thumb rect에서 현재 scrollbar 기하를 되읽는다. 여기서 다시 계산하면
+    /// 보이는 것과 다른 두 번째 출처가 생긴다 — 그 갈라짐이 정확히 "보이는 곳과 눌리는 곳이 다른" 결함이다.
+    fn agentSessionDockScrollbarGeometry(self: *const AppSession) ?chrome.components.session_dock.scroll.ScrollbarGeometry {
+        const build_ids = chrome.components.session_dock.build.NodeIds;
+        var track: ?chrome.ui.layout.UiRect = null;
+        var thumb: ?chrome.ui.layout.UiRect = null;
+        for (self.agent_session_dock_entries.items) |entry| {
+            if (entry.id == build_ids.scroll_track) track = entry.rect;
+            if (entry.id == build_ids.scroll_thumb) thumb = entry.rect;
+        }
+        const t = track orelse return null;
+        const h = thumb orelse return null;
+        return .{
+            .track_x = t.x,
+            .track_y = t.y,
+            .track_w = t.width,
+            .track_h = t.height,
+            .thumb_y = h.y,
+            .thumb_h = h.height,
+            .max_offset_px = self.agentSessionDockScrollProjection().max_offset_px,
+        };
+    }
+
+    /// down이 scrollbar 안이면 드래그를 연다. thumb이면 잡은 지점을 그대로 유지하고, track이면 그 지점으로
+    /// 먼저 점프한 뒤 thumb 중앙을 잡은 것으로 친다(그래야 눌렀다 끌기 시작할 때 위치가 튀지 않는다).
+    fn beginAgentSessionDockScrollDrag(self: *AppSession, local_x: f64, local_y: f64) void {
+        const bar = self.agentSessionDockScrollbarGeometry() orelse return;
+        if (!bar.trackContains(local_x, local_y)) return;
+        const on_thumb = bar.thumbContains(local_y);
+        const jumped = if (on_thumb) bar else blk: {
+            const offset = bar.offsetForTrackClick(local_y);
+            self.setAgentSessionDockScrollOffset(offset);
+            // 새 tree는 다음 frame에 나오므로 published 기하를 다시 읽을 수 없다. 같은 track에서
+            // offset만 옮긴 값을 직접 만든다.
+            break :blk bar.withOffset(offset);
+        };
+        self.agent_session_dock_scroll_coalescer.reset();
+        self.agent_session_dock_scroll_drag = .{
+            .grab_dy = if (on_thumb) @floatCast(local_y - bar.thumb_y) else jumped.thumb_h / 2,
+            .geometry = jumped,
+        };
+    }
+
+    /// drag 이벤트는 좌표만 흡수한다. 실제 offset 적용은 tick이 한 번 한다 — move는 tick보다 훨씬
+    /// 자주 오므로 여기서 바로 적용하면 한 프레임 안에서 같은 일을 여러 번 한다.
+    fn absorbAgentSessionDockScrollDrag(self: *AppSession, event: chrome.ui.interaction.DragEvent) void {
+        const payload = chrome.components.session_dock.build.scroll_drag_payload;
+        switch (event) {
+            .began, .moved => |update| {
+                if (update.payload != payload) return;
+                self.agent_session_dock_scroll_coalescer.absorb(update.x_px, update.y_px);
+            },
+            .dropped => |update| {
+                if (update.payload != payload) return;
+                // 마지막 좌표는 버리지 않는다 — 놓기 직전의 위치가 최종 스크롤이다.
+                self.agent_session_dock_scroll_coalescer.absorb(update.x_px, update.y_px);
+                self.applyAgentSessionDockScrollDrag();
+                self.endAgentSessionDockScrollDrag();
+            },
+            .cancelled => |cancelled| {
+                if (cancelled.payload != payload) return;
+                self.endAgentSessionDockScrollDrag();
+            },
+        }
+    }
+
+    fn endAgentSessionDockScrollDrag(self: *AppSession) void {
+        self.agent_session_dock_scroll_drag = null;
+        self.agent_session_dock_scroll_coalescer.reset();
+    }
+
+    /// tick이 부르는 소비 지점. 이 프레임에 쌓인 마지막 좌표 하나만 offset으로 바꾼다.
+    fn applyAgentSessionDockScrollDrag(self: *AppSession) void {
+        const drag = self.agent_session_dock_scroll_drag orelse return;
+        const point = self.agent_session_dock_scroll_coalescer.take() orelse return;
+        const offset = drag.geometry.offsetForPointer(point.y_px, drag.grab_dy);
+        // clamp를 통과한 값이 직전과 같으면 effect를 반복하지 않는다(track 끝에 닿은 채 계속 미는 동안).
+        if (!self.agent_session_dock_scroll_coalescer.commitIfChanged(offset)) return;
+        self.setAgentSessionDockScrollOffset(offset);
+    }
+
+    fn setAgentSessionDockScrollOffset(self: *AppSession, offset_px: u32) void {
+        const projection = self.agentSessionDockScrollProjection();
+        if (!self.agent_session_archive_scroll.setOffsetPx(offset_px, projection.max_offset_px)) return;
+        // 휠 잔여분은 스크롤 위치의 함수가 아니라 그 위치로 가는 도중의 상태다. 다른 경로가 위치를
+        // 확정했으면 남은 잔여분은 의미가 없다(키보드 스크롤과 같은 규율).
+        self.agent_session_archive_wheel_residue_px = 0;
+        self.metal_dirty = true;
     }
 
     fn applyAgentSessionDockIntent(self: *AppSession, intent: chrome.components.session_dock.ids.Intent) void {
@@ -32914,6 +33041,9 @@ pub const AppSession = struct {
             .focus_live => if (self.agent_session_inline_detail) |detail| if (detail.state == .ready) {
                 if (!self.focusLiveArchiveSession(&detail)) self.showNotice("현재 열린 동일 세션을 찾지 못했습니다.");
             },
+            // scrollbar는 up의 click이 아니라 down의 위치와 이어지는 drag가 결정한다. 목표 offset은
+            // pointer 좌표의 함수라 intent에 실을 수 없으므로 pointer 경로가 이미 처리했다.
+            .scroll_thumb, .scroll_track => {},
         }
     }
 
@@ -67134,4 +67264,78 @@ test "chrome_host 오버레이는 역할대로 입력 소유 두 축에 반영�
             _ = try session.tick();
         }
     }
+}
+
+// 이 테스트가 증명하는 것: Session Dock 스크롤바 드래그의 **소비 지점이 tick**이고, 그 한 번이
+// coalescing된 마지막 좌표만 적용한다.
+//
+// 왜 중요한가 — pointer move는 tick보다 훨씬 자주 온다. 매 move마다 offset을 적용하면 한 프레임
+// 안에서 같은 재투영을 여러 번 하고, 반대로 tick에서 소비하지 않으면 손을 뗄 때까지 목록이 안 움직여
+// "놓아야 스크롤되는" 스크롤바가 된다(파일 탐색기에서 실제로 겪은 회귀 — 9ec9520e).
+test "세션 도크 스크롤바 드래그는 move 수가 아니라 tick 수만큼 스크롤한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // 스크롤할 것이 있어야 스크롤바가 성립한다. 카드 서른 장이면 어떤 도크 높이에서도 넘친다.
+    for (0..30) |index| {
+        try session.agent_session_archive_projection.entries.append(allocator, .{ .card = index });
+    }
+    const projection = session.agentSessionDockScrollProjection();
+    try std.testing.expect(projection.max_offset_px > 0);
+
+    // down 시점의 기하를 직접 만든다. 실제 경로에서는 published tree에서 되읽지만, 이 테스트가 고정하려는
+    // 것은 그 기하가 아니라 **소비 지점**이다.
+    const geometry = chrome.components.session_dock.scroll.ScrollbarGeometry{
+        .track_x = 100,
+        .track_y = 0,
+        .track_w = 16,
+        .track_h = 400,
+        .thumb_y = 0,
+        .thumb_h = 40,
+        .max_offset_px = projection.max_offset_px,
+    };
+    session.agent_session_dock_scroll_drag = .{ .grab_dy = 0, .geometry = geometry };
+
+    // 한 프레임 안에서 move 다섯 번.
+    var step: f64 = 1;
+    while (step <= 5) : (step += 1) session.agent_session_dock_scroll_coalescer.absorb(100, step * 20);
+
+    // tick 전에는 아직 아무것도 적용되지 않았다 — move가 직접 스크롤을 옮기면 이 단언이 깨진다.
+    try std.testing.expectEqual(@as(u32, 0), session.agent_session_archive_scroll.offset_y_px);
+
+    session.applyAgentSessionDockScrollDrag();
+    const after_first_tick = session.agent_session_archive_scroll.offset_y_px;
+    // 마지막 좌표(y=100) 하나만 적용된다.
+    try std.testing.expectEqual(geometry.offsetForPointer(100, 0), after_first_tick);
+    try std.testing.expect(after_first_tick > 0);
+
+    // 남은 좌표가 없으면 다음 tick은 아무 일도 하지 않는다(같은 값을 다시 적용하지 않는다).
+    session.applyAgentSessionDockScrollDrag();
+    try std.testing.expectEqual(after_first_tick, session.agent_session_archive_scroll.offset_y_px);
+
+    // 트랙 끝에 닿은 채 계속 밀어도 clamp 결과가 같으면 effect가 반복되지 않는다.
+    session.agent_session_dock_scroll_coalescer.absorb(100, 100_000);
+    session.applyAgentSessionDockScrollDrag();
+    const at_end = session.agent_session_archive_scroll.offset_y_px;
+    try std.testing.expectEqual(projection.max_offset_px, at_end);
+    session.agent_session_dock_scroll_coalescer.absorb(100, 200_000);
+    session.applyAgentSessionDockScrollDrag();
+    try std.testing.expectEqual(at_end, session.agent_session_archive_scroll.offset_y_px);
+
+    // 드래그가 끝나면 남은 좌표가 다음 드래그로 새지 않는다.
+    session.agent_session_dock_scroll_coalescer.absorb(100, 7);
+    session.endAgentSessionDockScrollDrag();
+    try std.testing.expect(session.agent_session_dock_scroll_drag == null);
+    session.applyAgentSessionDockScrollDrag();
+    try std.testing.expectEqual(at_end, session.agent_session_archive_scroll.offset_y_px);
 }

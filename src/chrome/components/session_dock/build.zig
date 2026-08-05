@@ -251,24 +251,7 @@ fn descendsFrom(entries: []const tree.RectEntry, index: usize, ancestor: usize) 
 fn intersectClip(parent: ?layout.UiRect, own: ?layout.UiRect) ?layout.UiRect {
     const a = parent orelse return own;
     const b = own orelse return parent;
-    return intersect(a, b);
-}
-
-fn intersect(a: layout.UiRect, b: layout.UiRect) layout.UiRect {
-    const left = @max(a.x, b.x);
-    const top = @max(a.y, b.y);
-    const right = @min(a.x + a.width, b.x + b.width);
-    const bottom = @min(a.y + a.height, b.y + b.height);
-    // 목록 아이템이 더 이상 viewport에 맞춰 축소되지 않으므로, 완전히 벗어난 아이템의 교집합은 실제로
-    // 빈 사각형이 된다. 그때 origin을 그대로 두면 "clip은 부모 clip 안"이라는 불변식이 면적 0짜리
-    // rect 때문에 깨져 보인다. 빈 교집합은 위치에 의미가 없으니 부모 경계로 접어 그 불변식을 지킨다.
-    if (right <= left or bottom <= top) return .{
-        .x = @min(@max(left, a.x), a.x + a.width),
-        .y = @min(@max(top, a.y), a.y + a.height),
-        .width = 0,
-        .height = 0,
-    };
-    return .{ .x = left, .y = top, .width = right - left, .height = bottom - top };
+    return layout.intersectRect(a, b);
 }
 
 fn scopeNode(id: u64, action: tree.UiAction, enabled: bool, selected: bool) tree.UiNode {

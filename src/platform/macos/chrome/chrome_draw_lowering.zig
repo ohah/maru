@@ -11,6 +11,7 @@ const chrome = maru.chrome;
 const renderer = maru.renderer;
 const terminal = maru.terminal;
 const metal_frame = renderer.metal_frame;
+const system_text = @import("system_text.zig");
 
 /// B1 rich Chrome text의 immutable placement artifact. semantic draw의 px origin을 cell
 /// DrawList와 함께 보존해, CoreText가 atlas slot을 준비한 뒤에도 final glyph quad가 row/col로
@@ -164,7 +165,19 @@ pub fn richTextFingerprint(
             // Registered SVG/PUA icons are emitted by buildIconTextDrawList, never by the
             // proportional system-text worker. Their spinner phase may change every frame, so
             // including them here would make every detached text result stale before polling.
-            if (text.wide_icons) continue;
+            if (!system_text.shapesTextOp(text)) continue;
+            const op_max_width = system_text.opMaxWidthPx(text, cell_width_px) orelse continue;
+            // request는 셰이핑될 run이 하나도 없으면 이 op으로 아무것도 만들지 않는다. 키가 op 수준
+            // 값(origin·role·placement)을 먼저 섞어 버리면 그 op의 유무가 키를 바꾸어 두 필터가 다시
+            // 갈라진다. 그래서 run 판정을 먼저 한다.
+            var shapes_any_run = false;
+            for (text.runs) |run| {
+                if (system_text.shapesRun(text, run, op_max_width)) {
+                    shapes_any_run = true;
+                    break;
+                }
+            }
+            if (!shapes_any_run) continue;
             fingerprintMixValue(&state, 0x54);
             fingerprintMixValue(&state, @as(u32, @bitCast(text.origin.x)));
             fingerprintMixValue(&state, @as(u32, @bitCast(scrollRelativeY(text.origin.y, text.scroll_clipped, scroll_origin_y_px))));
@@ -175,6 +188,10 @@ pub fn richTextFingerprint(
             fingerprintMixValue(&state, text.max_width_px orelse 0);
             fingerprintMixTextPlacement(&state, text.placement, text.scroll_clipped, scroll_origin_y_px);
             for (text.runs) |run| {
+                // request와 **같은** 필터를 쓴다. 갈라지면 키는 같은데 artifact에는 그 run이 없는 상태가
+                // 만들어지고, 키가 스크롤 평행이동에 불변이라 그 artifact가 그 줄이 보여야 할 위치에서
+                // 재사용되어 줄이 영구히 빈 채로 남는다.
+                if (!system_text.shapesRun(text, run, op_max_width)) continue;
                 fingerprintMixValue(&state, run.text.len);
                 fingerprintMixValue(&state, @intFromBool(run.bold));
                 for (run.text) |byte| fingerprintMixByte(&state, byte);
@@ -613,6 +630,48 @@ test "rich text fingerprint is invariant to pure scroll translation" {
         .{ .text = .{ .origin = .{ .x = 20, .y = 300 }, .runs = &card_runs, .role = .surface_fg, .text_role = .card_heading } },
     };
     try std.testing.expect(base != richTextFingerprint(&not_scrolled, &tk, 8, 16, 20, 10, 0));
+}
+
+// 적대적 검증에서 나온 구조적 취약점: 셰이핑 키와 request가 **각자의 필터**를 갖고 있었다. 음수 origin
+// 드롭이 그 갈라짐의 한 사례였고(키는 그 run을 세는데 request는 버려서, 스크롤 불변 키가 그 artifact를
+// 그 줄이 보여야 할 위치에 재사용 → 영구 빈 줄), 같은 형태가 `max_width == 0`과 빈 run에도 남아 있었다.
+// 이제 둘 다 `system_text`의 판정을 쓰므로, 셰이핑되지 않는 op은 키에도 흔적을 남기지 않아야 한다.
+test "rich text fingerprint and the shaping request share one filter" {
+    const allocator = std.testing.allocator;
+    const tk = chrome.Tokens.rich(.{
+        .foreground = .{ .r = 240, .g = 240, .b = 240 },
+        .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
+        .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
+        .sidebar_active = .{ .r = 80, .g = 80, .b = 80 },
+        .search_match = .{ .r = 1, .g = 2, .b = 3 },
+        .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
+        .selection = .{ .r = 7, .g = 8, .b = 9 },
+        .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .accent = .{ .r = 13, .g = 14, .b = 15 },
+    });
+    const real_runs = [_]chrome.draw.Run{.{ .text = "카드 제목" }};
+    const empty_runs = [_]chrome.draw.Run{.{ .text = "" }};
+    const baseline = [_]chrome.draw.Op{
+        .{ .text = .{ .origin = .{ .x = 20, .y = 300 }, .runs = &real_runs, .role = .surface_fg, .text_role = .card_heading, .max_cols = 20, .scroll_clipped = true } },
+    };
+    // 셰이핑 대상이 아닌 op 둘을 덧붙인다: 폭 예산 0, 그리고 icon placement가 아닌 빈 run.
+    const with_inert = [_]chrome.draw.Op{
+        baseline[0],
+        .{ .text = .{ .origin = .{ .x = 20, .y = 340 }, .runs = &real_runs, .role = .surface_fg, .text_role = .body, .max_cols = 0, .max_width_px = 0, .scroll_clipped = true } },
+        .{ .text = .{ .origin = .{ .x = 20, .y = 360 }, .runs = &empty_runs, .role = .surface_fg, .text_role = .body, .max_cols = 20, .scroll_clipped = true } },
+    };
+    // 키가 같아야 한다 — 그 op들은 artifact에 아무것도 만들지 않기 때문이다.
+    try std.testing.expectEqual(
+        richTextFingerprint(&baseline, &tk, 8, 16, 20, 10, 0),
+        richTextFingerprint(&with_inert, &tk, 8, 16, 20, 10, 0),
+    );
+    // 그리고 request도 같은 개수를 만들어야 한다(= 같은 필터).
+    var base_request = try system_text.prepareRequest(allocator, 1, &baseline, &tk, 8);
+    defer base_request.deinit(allocator);
+    var inert_request = try system_text.prepareRequest(allocator, 1, &with_inert, &tk, 8);
+    defer inert_request.deinit(allocator);
+    try std.testing.expectEqual(base_request.runs.len, inert_request.runs.len);
+    try std.testing.expectEqual(@as(usize, 1), inert_request.runs.len);
 }
 
 test "rich text fingerprint ignores animated wide icon-only ops" {

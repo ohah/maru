@@ -487,17 +487,9 @@ fn offsetRect(rect: layout.UiRect, x: f32, y: f32) BuildError!layout.UiRect {
 fn intersectClip(parent: ?layout.UiRect, own: ?layout.UiRect) BuildError!?layout.UiRect {
     if (parent == null) return own;
     if (own == null) return parent;
-    const left = @max(parent.?.x, own.?.x);
-    const top = @max(parent.?.y, own.?.y);
-    const right = @min(parent.?.x + parent.?.width, own.?.x + own.?.width);
-    const bottom = @min(parent.?.y + parent.?.height, own.?.y + own.?.height);
-    const result: layout.UiRect = .{
-        .x = left,
-        .y = top,
-        .width = @max(0, right - left),
-        .height = @max(0, bottom - top),
-    };
-    try validateRect(result);
+    const result = layout.intersectRect(parent.?, own.?);
+    if (!std.math.isFinite(result.x) or !std.math.isFinite(result.y) or
+        !std.math.isFinite(result.width) or !std.math.isFinite(result.height)) return error.InvalidNumber;
     return result;
 }
 

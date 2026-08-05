@@ -47,6 +47,34 @@ pub const UiRect = struct {
     height: f32 = 0,
 };
 
+/// 두 rect의 교집합 — clip을 접는 모든 곳의 단일 출처(`ui/tree`의 ancestor clip fold, `ui/paint`의 카드
+/// 배경, component의 장식 quad). 빈 교집합은 위치에 의미가 없으므로 `a`(부모/뷰포트) 경계로 접어,
+/// "자식 clip은 항상 부모 clip 안"이라는 불변식이 면적 0짜리 rect 때문에 깨져 보이지 않게 한다.
+pub fn intersectRect(a: UiRect, b: UiRect) UiRect {
+    const left = @max(a.x, b.x);
+    const top = @max(a.y, b.y);
+    const right = @min(a.x + a.width, b.x + b.width);
+    const bottom = @min(a.y + a.height, b.y + b.height);
+    if (right <= left or bottom <= top) return .{
+        .x = @min(@max(left, a.x), a.x + a.width),
+        .y = @min(@max(top, a.y), a.y + a.height),
+        .width = 0,
+        .height = 0,
+    };
+    return .{ .x = left, .y = top, .width = right - left, .height = bottom - top };
+}
+
+test "intersectRect folds an empty result into the parent so clip containment still holds" {
+    const parent = UiRect{ .x = 0, .y = 100, .width = 200, .height = 50 };
+    const inside = intersectRect(parent, .{ .x = 10, .y = 110, .width = 20, .height = 20 });
+    try std.testing.expectEqual(@as(f32, 20), inside.width);
+    // 완전히 아래로 벗어난 자식: 면적 0이되 원점은 부모 경계 안이어야 한다.
+    const below = intersectRect(parent, .{ .x = 10, .y = 500, .width = 20, .height = 20 });
+    try std.testing.expectEqual(@as(f32, 0), below.height);
+    try std.testing.expect(below.y >= parent.y);
+    try std.testing.expect(below.y <= parent.y + parent.height);
+}
+
 pub const Direction = enum { row, column };
 pub const Justify = enum { start, center, end, space_between };
 pub const Align = enum { start, center, end, stretch };

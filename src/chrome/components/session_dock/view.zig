@@ -94,7 +94,7 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
                 // The whole title card remains one disclosure action, but its trailing chevron
                 // makes that interaction discoverable and shares the exact card rect used by
                 // pointer/Enter. No separate tiny hit target is manufactured for the icon.
-                try writer.textRight(card_rect, chevron_down_icon, .surface_fg, true);
+                try writer.cardDisclosure(card_rect, dock_metrics);
                 if (card.expanded) |expanded| try writer.expanded(frame.tree, index, expanded);
             },
         }
@@ -189,34 +189,25 @@ const Writer = struct {
         try self.emit(x, y, source, max_cols, .head, role, text_role, wide_icons, bold);
     }
 
-    fn textRight(self: *Writer, rect: tree.RectEntry, source: []const u8, role: tokens.ColorRole, wide_icon: bool) ViewError!void {
+    /// 카드의 disclosure chevron. 등록 SVG affordance는 `icon_in_rect`의 명시 slot으로만 lower한다는
+    /// 계약(docs/agent-session-list.md §2.1.1)을 이 아이콘만 지키지 않고 legacy cell 경로(`wide_icons`)에
+    /// 남아 있었다. 그 경로는 measured artifact를 타지 않아 어떤 clip도 닿지 않으므로, 카드가 스크롤로
+    /// 목록 위를 벗어나면 chevron만 고정 chrome 위에 그려졌다. 다른 affordance(refresh·search·group
+    /// chevron)와 같은 경로로 합류시켜 clip을 함께 받는다.
+    fn cardDisclosure(self: *Writer, rect: tree.RectEntry, metrics: types.DockMetrics) ViewError!void {
         const cw = self.props.cell_width_px;
-        const ch = self.props.cell_height_px;
-        if (cw == 0 or ch == 0) return;
-        // Trailing header affordances need the same one-cell horizontal inset as ordinary
-        // labels. Placing the refresh glyph at the outer rect edge works for a cell-sized
-        // terminal glyph, but a CoreText fallback glyph can have wider natural ink and will
-        // visibly touch or cross the rounded-card clip once it is lowered as a pixel GpuGlyph.
-        const inset_px: f32 = @floatFromInt(cw);
-        const usable_width = rect.rect.width - inset_px;
-        if (usable_width <= 0) return;
-        const cols: u16 = @intFromFloat(@floor(usable_width / @as(f32, @floatFromInt(cw))));
-        const icon_predicate: ?text_layout.WideIconFn = if (wide_icon) isSessionDockIcon else null;
-        const width = text_layout.displayCols(source, icon_predicate);
-        // The header owns one stable two-cell affordance slot. A loading spinner is only one
-        // cell wide, so centre it inside that same slot instead of letting refresh→spinner
-        // move one cell to the right.
-        const slot_cols: u16 = 2;
-        if (width == 0 or width > slot_cols or cols < slot_cols) return;
-        const start: u16 = @intCast(width);
-        const cell_width: f32 = @floatFromInt(cw);
-        const slot_width = @as(f32, @floatFromInt(slot_cols)) * cell_width;
-        const glyph_width = @as(f32, @floatFromInt(start)) * cell_width;
-        const x = rect.rect.x + rect.rect.width - inset_px - slot_width + (slot_width - glyph_width) / 2;
-        const control_h: f32 = @floatFromInt(typography.lineHeightPx(.control, effectiveScale(self.props.scale_milli)));
-        if (rect.rect.height < control_h) return;
-        const y = rect.rect.y + (rect.rect.height - control_h) / 2;
-        try self.emit(x, y, source, start, .tail, role, .control, wide_icon, false);
+        if (cw == 0) return;
+        const extent = metrics.group_disclosure_extent;
+        const inset: f32 = @floatFromInt(cw);
+        if (rect.rect.width <= inset + @as(f32, @floatFromInt(extent))) return;
+        if (rect.rect.height < @as(f32, @floatFromInt(extent))) return;
+        const slot = draw.Rect{
+            .x = @intFromFloat(@floor(rect.rect.x + rect.rect.width - inset - @as(f32, @floatFromInt(extent)))),
+            .y = @intFromFloat(@floor(rect.rect.y + (rect.rect.height - @as(f32, @floatFromInt(extent))) / 2)),
+            .w = extent,
+            .h = extent,
+        };
+        try self.iconInRect(slot, chevron_down_icon, std.unicode.utf8Decode(chevron_down_icon) catch return, @intCast(metrics.header_host_icon_extent), .surface_fg);
     }
 
     /// Provenance is a measured host-SVG + label group. Its content rect, the refresh sibling,
@@ -420,9 +411,7 @@ const Writer = struct {
 
     fn appendQuad(self: *Writer, quad: draw.Op.Quad) ViewError!void {
         if (self.op_count == self.ops.len) return error.InsufficientTextBuffer;
-        var owned = quad;
-        owned.scroll_clipped = self.scroll_clipped;
-        self.ops[self.op_count] = .{ .quad = owned };
+        self.ops[self.op_count] = .{ .quad = quad };
         self.op_count += 1;
     }
 
@@ -442,6 +431,22 @@ const Writer = struct {
         if (x1 <= x0 or y1 <= y0) return;
         var owned = quad;
         owned.rect = .{ .x = x0, .y = y0, .w = @intCast(x1 - x0), .h = @intCast(y1 - y0) };
+        // 잘린 변은 원래 모양의 **내부**다. 거기에 radius와 테두리를 그대로 남기면 shader가 줄어든 rect의
+        // 네 모서리를 다시 둥글리고 잘린 선을 따라 stroke를 그어, 클립 경계에 없어야 할 곡률과 1px 선이
+        // 생긴다. 잘린 변만 각지게 만들고 그 변의 테두리를 뗀다(반대 변은 원래 모양이므로 유지).
+        const cut_left = x0 > quad.rect.x;
+        const cut_top = y0 > quad.rect.y;
+        const cut_right = x1 < quad.rect.x + @as(i32, @intCast(quad.rect.w));
+        const cut_bottom = y1 < quad.rect.y + @as(i32, @intCast(quad.rect.h));
+        // corner_radii = [tl, tr, br, bl], border_widths = [top, right, bottom, left].
+        if (cut_top or cut_left) owned.corner_radii[0] = 0;
+        if (cut_top or cut_right) owned.corner_radii[1] = 0;
+        if (cut_bottom or cut_right) owned.corner_radii[2] = 0;
+        if (cut_bottom or cut_left) owned.corner_radii[3] = 0;
+        if (cut_top) owned.border_widths[0] = 0;
+        if (cut_right) owned.border_widths[1] = 0;
+        if (cut_bottom) owned.border_widths[2] = 0;
+        if (cut_left) owned.border_widths[3] = 0;
         return self.appendQuad(owned);
     }
 
@@ -752,7 +757,9 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
                     try std.testing.expectEqual(@as(?u32, icon.content_rect.w), text.max_width_px);
                     if (icon.icon_codepoint == 0xF0021) refresh_placement = text.placement;
                     if (icon.icon_codepoint == 0xF0022) search_placement = text.placement;
-                    if (icon.icon_codepoint == 0xF0023) {
+                    // 카드의 disclosure도 같은 chevron codepoint를 같은 `icon_in_rect` 경로로 낸다.
+                    // 목록에서 group이 먼저 나오므로 첫 매칭만 잡아 그룹 것을 본다.
+                    if (icon.icon_codepoint == 0xF0023 and group_chevron_placement == null) {
                         saw_group_chevron = true;
                         group_chevron_placement = text.placement;
                     }
@@ -1197,7 +1204,6 @@ test "SessionDock group header runs are scroll clipped and its pill stays inside
             const bottom = top + @as(f32, @floatFromInt(quad.rect.h));
             try std.testing.expect(top >= clip_top);
             try std.testing.expect(bottom <= clip_bottom);
-            try std.testing.expect(quad.scroll_clipped);
         },
         else => {},
     };

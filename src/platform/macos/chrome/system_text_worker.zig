@@ -9,6 +9,11 @@ const system_text = @import("system_text.zig");
 
 pub const Result = struct {
     fingerprint: u64,
+    /// 이 artifact의 placement가 구워진 **submit 시점** 스크롤 원점. host가 캐시를 다른 스크롤 위치에서
+    /// 재사용할 때 이 값을 기준으로 평행이동한다. poll 시점 원점을 대신 쓰면, worker가 도는 동안 사용자가
+    /// 스크롤한 만큼(관성 스크롤이면 수십 px) 모든 글자가 어긋난 채 고정된다 — 그 오차는 다음 프레임에도
+    /// 사라지지 않는다(delta는 항상 이 잘못된 기준에서 재계산되므로).
+    scroll_origin_y_px: i32,
     artifact: system_text.UnresolvedArtifact,
 
     pub fn deinit(self: *Result, allocator: std.mem.Allocator) void {
@@ -43,6 +48,7 @@ const Job = struct {
     state: *State,
     request: system_text.Request,
     scale_milli: u32,
+    scroll_origin_y_px: i32,
 };
 
 pub const Backend = struct {
@@ -57,7 +63,7 @@ pub const Backend = struct {
     /// Caller retains `request` on false; the detached worker owns it on true.  One in-flight
     /// request and one completed-but-unpolled DTO are the entire bounded queue: do not start a
     /// redundant second shape between worker completion and the next main-actor poll.
-    pub fn submit(self: *Backend, request: system_text.Request, scale_milli: u32) bool {
+    pub fn submit(self: *Backend, request: system_text.Request, scale_milli: u32, scroll_origin_y_px: i32) bool {
         const state = self.state orelse return false;
         state.mutex.lockUncancelable(state.io);
         if (state.shutting_down or state.inflight or state.result != null) {
@@ -71,7 +77,7 @@ pub const Backend = struct {
             finishWithoutResult(state);
             return false;
         };
-        job.* = .{ .state = state, .request = request, .scale_milli = scale_milli };
+        job.* = .{ .state = state, .request = request, .scale_milli = scale_milli, .scroll_origin_y_px = scroll_origin_y_px };
         const thread = std.Thread.spawn(.{}, worker, .{job}) catch {
             state.allocator.destroy(job);
             finishWithoutResult(state);
@@ -148,6 +154,7 @@ fn worker(job: *Job) void {
     };
     var result = Result{
         .fingerprint = job.request.fingerprint,
+        .scroll_origin_y_px = job.scroll_origin_y_px,
         .artifact = artifact,
     };
     job.request.deinit(state.allocator);
@@ -186,7 +193,7 @@ test "text shaping worker publishes only after a detached gate releases" {
     defer backend.deinit();
     backend.setTestGate(true);
     var request = system_text.Request{ .fingerprint = 77, .runs = try std.testing.allocator.alloc(system_text.Request.Run, 0) };
-    try std.testing.expect(backend.submit(request, 1000));
+    try std.testing.expect(backend.submit(request, 1000, 0));
     request = undefined; // worker owns the request after successful submit.
     var attempts: usize = 0;
     while (!backend.testGateReached() and attempts < 1000) : (attempts += 1) {
@@ -209,11 +216,35 @@ test "text shaping worker publishes only after a detached gate releases" {
     return error.TestExpectedResult;
 }
 
+// 코드리뷰 회귀: host가 결과를 poll하는 시점의 스크롤 원점을 artifact의 기준으로 저장했다. artifact의
+// placement는 **submit 시점** 좌표로 구워지므로, worker가 도는 동안 사용자가 스크롤하면 그 차이만큼 모든
+// 글자가 어긋난 채 고정된다(이후 delta가 계속 잘못된 기준에서 계산되므로 다음 프레임에도 안 없어진다).
+// 그래서 기준은 결과 자신이 실어 와야 한다 — poll 시점에는 그 값을 복원할 방법이 없다.
+test "shaping result carries the scroll origin it was shaped at" {
+    var backend = try Backend.init(std.testing.allocator, std.testing.io);
+    defer backend.deinit();
+    var request = system_text.Request{ .fingerprint = 91, .runs = try std.testing.allocator.alloc(system_text.Request.Run, 0) };
+    try std.testing.expect(backend.submit(request, 1000, -137));
+    request = undefined; // worker owns the request after successful submit.
+    var attempts: usize = 0;
+    while (attempts < 1000) : (attempts += 1) {
+        if (backend.takeResult()) |result| {
+            var owned = result;
+            defer owned.deinit(std.testing.allocator);
+            try std.testing.expectEqual(@as(u64, 91), owned.fingerprint);
+            try std.testing.expectEqual(@as(i32, -137), owned.scroll_origin_y_px);
+            return;
+        }
+        try std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake);
+    }
+    return error.TestExpectedResult;
+}
+
 test "queued completion prevents a redundant second shaping request" {
     var backend = try Backend.init(std.testing.allocator, std.testing.io);
     defer backend.deinit();
     var first = system_text.Request{ .fingerprint = 11, .runs = try std.testing.allocator.alloc(system_text.Request.Run, 0) };
-    try std.testing.expect(backend.submit(first, 1000));
+    try std.testing.expect(backend.submit(first, 1000, 0));
     first = undefined; // worker owns the request after successful submit.
     var attempts: usize = 0;
     while (attempts < 1000) : (attempts += 1) {
@@ -223,7 +254,7 @@ test "queued completion prevents a redundant second shaping request" {
     try std.testing.expect(!backend.isInflight());
     var second = system_text.Request{ .fingerprint = 12, .runs = try std.testing.allocator.alloc(system_text.Request.Run, 0) };
     defer second.deinit(std.testing.allocator);
-    try std.testing.expect(!backend.submit(second, 1000));
+    try std.testing.expect(!backend.submit(second, 1000, 0));
     var result = backend.takeResult() orelse return error.TestExpectedResult;
     defer result.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(u64, 11), result.fingerprint);

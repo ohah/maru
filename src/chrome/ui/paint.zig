@@ -52,7 +52,7 @@ pub fn paint(
             .none => if (entry.kind != .container) return error.InvalidSnapshot,
             .card => |visual| {
                 if (entry.kind != .card) return error.InvalidSnapshot;
-                const clipped = if (entry.effective_clip) |clip| intersect(entry.rect, clip) else entry.rect;
+                const clipped = if (entry.effective_clip) |clip| layout.intersectRect(clip, entry.rect) else entry.rect;
                 const rect = try snapRect(clipped);
                 if (rect.w == 0 or rect.h == 0) continue;
                 if (count == buffers.ops.len) return error.InsufficientBuffer;
@@ -69,7 +69,7 @@ pub fn paint(
             },
             .button => |visual| {
                 if (entry.kind != .button) return error.InvalidSnapshot;
-                const clipped = if (entry.effective_clip) |clip| intersect(entry.rect, clip) else entry.rect;
+                const clipped = if (entry.effective_clip) |clip| layout.intersectRect(clip, entry.rect) else entry.rect;
                 const rect = try snapRect(clipped);
                 if (rect.w == 0 or rect.h == 0) continue;
                 if (count == buffers.ops.len) return error.InsufficientBuffer;
@@ -91,14 +91,6 @@ pub fn paint(
         }
     }
     return .{ .layer = layer, .ops = buffers.ops[0..count] };
-}
-
-fn intersect(a: layout.UiRect, b: layout.UiRect) layout.UiRect {
-    const left = @max(a.x, b.x);
-    const top = @max(a.y, b.y);
-    const right = @min(a.x + a.width, b.x + b.width);
-    const bottom = @min(a.y + a.height, b.y + b.height);
-    return .{ .x = left, .y = top, .width = @max(right - left, 0), .height = @max(bottom - top, 0) };
 }
 
 /// Layout may produce fractional rects for percent/fill. Painting snaps once at the last neutral

@@ -995,7 +995,10 @@ layout-affecting animation은 paint-only animation과 별도 정책/성능 gate�
    먼저 만들고 ML3a draw를 production Metal lowering에 연결한다. Lab screenshot/readback
    fixture가 rounded/border/shadow/opacity/clip과 rect·clip 정합, scripted action identity를
    고정한다. clip scissor는 Metal framebuffer의 좌상단 원점을 명시적으로 사용하며,
-   clip 미연결 인프라나 하단-원점 변환을 남기지 않는다. nested clip·부분 pixel scroll의
+   clip 미연결 인프라나 하단-원점 변환을 남기지 않는다. (**현황 2026-08-06**: 렌더러 모달 scissor에
+   남아 있던 하단-원점 변환은 정정했다. 다만 그 경로에 `draw.Op.clip`을 내는 컴포넌트가 아직 없어
+   여기서 요구하는 **경계 screenshot gate는 미구현**이다 — 첫 소비자와 함께 만든다. GPU per-quad
+   clip(`GpuQuad.clip_*`)과 dock 스크롤 클리핑은 `test-dock-visual-golden`이 이미 픽셀로 고정한다.) nested clip·부분 pixel scroll의
    경계 screenshot이 y축 반전과 header bleed를 막는 gate다.
 6. **ML4 — Session Dock:** `SessionDock`과 `ArchiveDetailPanel`이 ML1~3만 소비해
    direct text draw/ANSI guidance를 대체한다. 첫 AS3 product slice에서 `SessionDock`
@@ -1005,6 +1008,29 @@ layout-affecting animation은 paint-only animation과 별도 정책/성능 gate�
    resume/reveal 계약은 바꾸지 않는다.
 7. **ML5+ — 필요가 증명된 기능:** grid, static transform, transition/animation을
    각각 별도 PR과 fixture로 연다.
+8. **ML6 — 나머지 chrome 컴포넌트의 typed-tree 이주:** 최종 목표는 **모든 chrome 컴포넌트가 `chrome/ui/`
+   프리미티브 조합으로 구현되는 것**이다. ML4까지는 `SessionDock`·`ArchiveDetailPanel` 둘만 그 형태이고,
+   나머지(`notifications`·`palette`·`find`·`notice`·`context_menu`·`settings`·`sidebar`·`tabbar`)는 rect를
+   직접 계산해 ops를 내고 짝이 되는 `hitTest`를 따로 유지한다. 그 방식은 "보이는 것 == 눌리는 것"을
+   자료구조가 아니라 규약으로 지키므로, 이주의 실질 이득은 **히트테스트가 published rect에서 파생되어 그
+   부류의 드리프트가 구조적으로 불가능해지는 것**이다.
+
+   이주는 컴포넌트를 하나씩 옮기는 일이 아니라 **먼저 프리미티브를 갖추는 일**이다. 코드에서 확인한 블로커:
+
+   - **텍스트 모델 전환**: legacy 쪽은 셀 격자다(예: `notifications.zig`의 `card_rows = 2`(셀 2행),
+     `text_indent_cols = 3`, 말줄임 `truncateToCols`(EAW 칸 추정)). typed 쪽은 measured 비례 텍스트
+     (`ChromeTextRole` line box + `system_text.Artifact`)다. 두 모델은 좌표계가 달라 부분 이주가 안 된다.
+   - **없는 프리미티브 — 스크롤 목록/가상화**: 지금 `chrome/components/session_dock/scroll.zig`에
+     **컴포넌트 안에** 있다. 알림 패널·설정 목록·palette가 모두 같은 것을 필요로 하므로 `chrome/ui/`로
+     올려야 두 번째 소비자가 결정을 다시 내리지 않는다(`ui/button.zig`·`ui/badge.zig`가 세운 선례).
+   - **없는 프리미티브 — sticky 헤더 밴드**: 알림 패널이 viewport 상단에 고정 헤더를 두고 그 아래만
+     스크롤한다.
+   - **부분 행 클리핑**: 픽셀 스크롤로 반쯤 걸친 행을 자르려면 `draw.Op.clip` 경로(ML3b의 scissor)가
+     필요하다. 렌더러의 하단-원점 변환은 정정했으나(2026-08-06) ML3b가 요구한 **경계 screenshot gate는
+     아직 없다** — 그 gate를 만드는 것이 첫 소비자 작업의 일부다.
+
+   각 컴포넌트 이주는 그 자체로 시각 회귀 위험이 크므로, `test-dock-visual-golden`처럼 **이주 전 캡처를
+   골든으로 박고 이주 후 전체 프레임 픽셀 차이를 보이는** 절차를 따른다(무변경이 목표면 0픽셀이 증거다).
 
 각 slice의 적대적 검증은 (a) draw/hit/clip rect drift, (b) parent resize와
 virtualization boundary, (c) identity/stale action과 thread ownership을 독립적으로

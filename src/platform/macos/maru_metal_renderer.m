@@ -951,20 +951,21 @@ static void maru_draw_overlay_layer(const MaruDrawPass *c) {
     if (c->quad_vertex_buffer != nil) MARU_DRAW_QUADS(c->bottom_vertex_count + c->under_vertex_count + c->header_vertex_count, c->quad_vertex_total - c->bottom_vertex_count - c->under_vertex_count - c->header_vertex_count); // 5. over quad(모달 배경)
     // 6. 모달 텍스트(cells_base_v 오프셋) — clip 영역이 있으면 모달 셀만 scissor로 자른다(부분 카드 픽셀 스크롤
     //    인프라). w==0이면 클리핑 없음(기존 동작). 모달 셀이 이 encoder의 마지막 본문 draw다.
-    //    ⚠️ 알려진 이슈: 아래 y-flip(cy = dh - (y+h))은 MTLScissorRect를 **좌하단 원점**으로 가정하지만, Metal의
-    //    실제 규약은 **좌상단 원점**이다(위 사이드바 scissor 참고). 이 modal_clip 경로는 아직 어떤 컴포넌트도
-    //    draw.Op.clip을 emit하지 않는 미사용 인프라(metal_frame.zig "적용 후속")라 이 버그가 런타임에 드러나지
-    //    않았다. 부분 픽셀 스크롤을 실제 컴포넌트에 연결할 때 좌상단 원점으로 정정(cy = modal_clip_y_px)하고 함께
-    //    검증할 것 — 지금 고치면 검증 경로가 없어 보류한다(4b 분할은 이 경로 동작을 그대로 이관).
+    //    좌표는 **좌상단 원점**이다 — `modal_clip_*`가 그렇게 오고(chrome draw.Op.clip은 backing 좌상단),
+    //    MTLScissorRect도 렌더 타깃 좌표계라 그렇다. 그래서 y를 뒤집지 않고 그대로 쓰며, 위 사이드바 스크롤
+    //    scissor(`.y = header_h`로 상단을 잘라내는, 실제로 동작하는 코드)와 같은 규약이다.
+    //    ⚠️ 이 경로는 아직 `draw.Op.clip`을 내는 컴포넌트가 없어(알림 패널 픽셀 스크롤이 첫 소비자 예정,
+    //    notifications.zig "부분 카드 클리핑 인프라가 없어") **런타임 검증 경로가 없다**. 예전엔 `dh - (y+h)`로
+    //    뒤집고 있었고, 그건 위 사이드바 scissor와 정반대라 둘 중 하나가 틀린 상태였다. 첫 소비자를 붙이는
+    //    사람이 자기 컴포넌트를 의심하며 렌더러를 디버깅하지 않도록 먼저 정정해 둔다 — 근거는 그 형제 코드다.
     if (c->vertex_buffer != nil && c->has_modal) {
         if (c->modal_clip_w_px > 0) {
             const NSUInteger dw = (NSUInteger)c->drawable_size.width;
             const NSUInteger dh = (NSUInteger)c->drawable_size.height;
             const NSUInteger cx = ((NSUInteger)c->modal_clip_x_px < dw) ? (NSUInteger)c->modal_clip_x_px : 0;
             const NSUInteger cw2 = ((NSUInteger)c->modal_clip_x_px + (NSUInteger)c->modal_clip_w_px <= dw) ? (NSUInteger)c->modal_clip_w_px : (dw - cx);
-            const NSUInteger top = (NSUInteger)c->modal_clip_y_px + (NSUInteger)c->modal_clip_h_px;
-            const NSUInteger cy = (top <= dh) ? (dh - top) : 0;
-            const NSUInteger ch2 = (cy + (NSUInteger)c->modal_clip_h_px <= dh) ? (NSUInteger)c->modal_clip_h_px : (dh - cy);
+            const NSUInteger cy = ((NSUInteger)c->modal_clip_y_px < dh) ? (NSUInteger)c->modal_clip_y_px : 0;
+            const NSUInteger ch2 = ((NSUInteger)c->modal_clip_y_px + (NSUInteger)c->modal_clip_h_px <= dh) ? (NSUInteger)c->modal_clip_h_px : (dh - cy);
             [c->encoder setScissorRect:(MTLScissorRect){ .x = cx, .y = cy, .width = cw2, .height = ch2 }];
         }
         // 모달 본문. 모달이 caret을 내면(find·palette) 그 구간을 빼고 앞/뒤로 나눠 그리고, 안 내면(notice·드래그
@@ -1003,7 +1004,7 @@ bool maru_metal_renderer_draw(
     const MaruAppHostGpuQuad *gpu_quads,
     size_t gpu_quad_count,
     size_t modal_cells_start,
-    /* C4b 모달 클리핑(px, 좌상단, w==0=없음). 모달 셀 draw에 setScissorRect로 적용(Metal 좌하단 원점 y 변환). */
+    /* C4b 모달 클리핑(px, 좌상단, w==0=없음). 모달 셀 draw에 setScissorRect로 그대로 적용(둘 다 좌상단 원점). */
     uint32_t modal_clip_x_px,
     uint32_t modal_clip_y_px,
     uint32_t modal_clip_w_px,

@@ -224,6 +224,10 @@ pub const RectEntry = struct {
     /// Parent overflow clip과 own overflow clip을 교차한 backing-pixel rect다. null은
     /// 이 entry와 모든 visible ancestor가 clip하지 않는다는 뜻이다.
     effective_clip: ?layout.UiRect,
+    /// 이 entry **자신의** overflow clip(padding box, absolute)이다. `overflow == .clip`이
+    /// 아니면 null이다. `effective_clip`은 ancestor 정보까지 접힌 값이라, 완성된 tree를 나중에
+    /// 평행이동하는 virtualization이 clip을 정확히 다시 접으려면 이 원본이 필요하다.
+    own_clip: ?layout.UiRect = null,
     action: ?UiAction,
     /// Component가 선언한 drag 능력. 없으면 이 node는 click 전용이다. payload가 무엇을 옮기는지는
     /// host의 intent table만 알고, tree와 interaction은 opaque ID로만 다룬다.
@@ -359,6 +363,7 @@ const BuildState = struct {
             .kind = node.kind(),
             .rect = rect,
             .effective_clip = effective_clip,
+            .own_clip = own_clip,
             .action = actionFor(node),
             .visual = visualFor(node),
         };
@@ -513,6 +518,7 @@ fn emptyRectEntry() RectEntry {
         .kind = .container,
         .rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 },
         .effective_clip = null,
+        .own_clip = null,
         .action = null,
         .visual = .none,
     };

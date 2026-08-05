@@ -3114,6 +3114,13 @@ pub const AppSession = struct {
     // this cache owns renderer-neutral records after the main actor resolves its font names.
     agent_session_dock_rich_text_cache: ?AgentSessionDockRichTextCache = null,
     agent_session_dock_interaction: chrome.ui.interaction.InteractionState = .{},
+    /// Session Dock가 키보드 owner인가(docs/agent-session-list.md의 `agent_session_list` focus).
+    /// **component-local `InteractionState.focused`로 대신할 수 없다**: 그건 published node id라
+    /// `invalidateAgentSessionDockFrame`이 selection/detail이 바뀔 때마다 통째로 지우고, 카드를 펼치면
+    /// action이 `item` → `card_header`로 옮겨가 `reconcile`도 지운다. 즉 카드를 클릭한 **바로 그 순간**
+    /// 소유권이 사라져, Enter/Page가 도크가 아니라 터미널로 가 버린다. 키보드 소유는 그 frame node가
+    /// 아니라 사용자의 마지막 focus 제스처에 묶인 session-level 사실이다.
+    agent_session_dock_key_focus: bool = false,
     agent_session_dock_snapshot_generation: u64 = 1,
     /// View-lifetime only canonical cwd keys. A missing/deleted/remote cwd uses
     /// the empty unknown-location key and remains distinct from lexical paths.
@@ -3868,6 +3875,9 @@ pub const AppSession = struct {
         // The SessionDock's component-local keyboard/pointer focus is meaningful only while its
         // tree is visible.  Returning later must not resurrect a stale PageUp/PageDown owner.
         if (view != .agent_sessions) self.agent_session_dock_interaction = .{};
+        // 뷰 전환은 어느 방향이든 도크 키보드 소유권을 놓는다. 들어올 때도 아직 누른 적이 없고,
+        // 나갈 때 남겨 두면 다시 돌아왔을 때 클릭 없이 Enter를 가져간다.
+        self.releaseAgentSessionDockKeyFocus();
         if (view != .explorer and self.fileTreeFocused()) self.restoreFileTreeFocus();
         // 뷰로 들어올 때 한 번 읽는다(§3.5의 갱신 시점 ①). 폴링하지 않는다.
         if (view == .source_control) self.refreshGitStatus();
@@ -4559,6 +4569,9 @@ pub const AppSession = struct {
         // A collapsed right dock has no consumer for archive work.  Withdraw the current
         // generation before changing geometry so reopening can request a fresh snapshot.
         if (action == .collapse and self.dock.view == .agent_sessions) self.cancelAgentSessionArchive();
+        // 열기/접기/펴기 어느 것도 도크 **내용**을 누른 게 아니다. 접었다 편 뒤 클릭 없이 Enter가
+        // 도크로 가지 않도록 소유권을 놓는다(게이트의 `dockVisible`만으로는 재표시 때 되살아난다).
+        self.releaseAgentSessionDockKeyFocus();
         switch (action) {
             .open => {
                 self.dock.presented = true;
@@ -13826,11 +13839,55 @@ pub const AppSession = struct {
         _ = self.agent_session_archive_scroll.setOffsetPx(fallback_offset_px, projection.max_offset_px);
     }
 
+    /// Session Dock가 키보드를 소유하는가 — 도크가 보이는 것만으로는 부족하고 사용자가 도크 안을 눌러
+    /// 키보드를 넘겨준 상태여야 한다(docs/agent-session-list.md §키보드: `agent_session_list` focus owner가
+    /// Enter/Page/Home/End를 갖는다). 스크롤 키·Enter·`/`가 **같은 게이트**를 써야 터미널에서 타이핑하는
+    /// 동안 도크가 그 키를 가져가지 않는다. 검색 필드가 활성이면 그쪽이 먼저다.
+    fn agentSessionDockOwnsKeys(self: *const AppSession) bool {
+        return self.dockVisible() and self.dock.view == .agent_sessions and
+            !self.agent_session_archive_search_active and
+            self.agent_session_dock_key_focus;
+    }
+
+    /// 도크 안 primary down은 키보드를 도크로 넘긴다. 카드/그룹뿐 아니라 헤더·빈 여백도 포함한다 —
+    /// 사용자가 도크를 눌렀다는 사실이 소유권이고, 그 frame에 어떤 action rect가 있었는지가 아니다.
+    fn takeAgentSessionDockKeyFocus(self: *AppSession) void {
+        if (self.agent_session_dock_key_focus) return;
+        self.agent_session_dock_key_focus = true;
+        self.metal_dirty = true;
+    }
+
+    /// 도크의 keyboard 소유권을 놓는다 — 선택 카드·펼친 detail·스크롤 위치는 그대로다. `focus_owner`는
+    /// 도크 카드를 눌러도 `.workspace`에 머무르므로, 터미널을 다시 클릭했을 때 조건부 `focusWorkspaceInput`
+    /// 하나로는 이 소유권이 남아 도크가 계속 키를 가져갔다. 도크 검색도 도크가 가진 키 소비자이므로
+    /// 여기서 함께 blur한다 — 그러지 않으면 `handleAgentSessionArchiveSearchKey`의 `else => return true`가
+    /// 터미널로 돌아온 뒤의 **모든** 키를 계속 삼킨다(Enter 하나가 아니라 타이핑 전체).
+    fn releaseAgentSessionDockKeyFocus(self: *AppSession) void {
+        const had_focus = self.agent_session_dock_key_focus or self.agent_session_dock_interaction.focused != null;
+        self.agent_session_dock_key_focus = false;
+        self.agent_session_dock_interaction.focused = null;
+        const blurred = self.blurAgentSessionDockSearch();
+        if (had_focus or blurred) self.metal_dirty = true;
+    }
+
+    /// 도크 검색바를 blur한다(포커스 아웃 — 도크 밖 클릭·view 전환·접기). 사이드바 검색의 `blurSidebarSearch`와
+    /// 같은 규율이다: **비활성만 하고 검색어는 보존**해 다시 검색바를 누르면 이어서 편집·필터한다. 조합 중이던
+    /// IME preedit는 잃지 않도록 확정한다(`commitPreedit`의 "포커스 상실" 계약). 완전히 비우려면 Esc다.
+    fn blurAgentSessionDockSearch(self: *AppSession) bool {
+        if (!self.agent_session_archive_search_active) return false;
+        self.agent_session_archive_search_active = false;
+        if (self.agent_session_archive_search.commitPreedit(self.allocator)) {
+            self.rebuildAgentSessionArchiveFilter();
+            self.resetAgentSessionDockScroll();
+        }
+        return true;
+    }
+
     /// Session Dock owns these navigation keys whenever its search field does not.  Returning
     /// true at a boundary is intentional: a key aimed at the visible dock must not leak into the
     /// focused terminal just because no further pixel motion is possible.
     fn handleAgentSessionDockScrollKey(self: *AppSession, event: terminal.KeyEvent) bool {
-        if (self.agent_session_archive_search_active or self.agent_session_dock_interaction.focused == null or
+        if (!self.agentSessionDockOwnsKeys() or
             event.modifiers.command or event.modifiers.control or event.modifiers.option or event.modifiers.shift)
             return false;
         const projection = self.agentSessionDockScrollProjection();
@@ -15360,9 +15417,9 @@ pub const AppSession = struct {
     pub fn focusWorkspaceInput(self: *AppSession) void {
         self.cancelPendingDockFocus();
         // A terminal/body click takes the keyboard owner away from the archive list.  Without
-        // clearing this component-local focus, PageUp/PageDown would keep scrolling an open dock
-        // while the user was visibly typing in the workspace terminal.
-        self.agent_session_dock_interaction.focused = null;
+        // releasing that ownership, Enter/PageUp/PageDown would keep driving an open dock while
+        // the user was visibly typing in the workspace terminal.
+        self.releaseAgentSessionDockKeyFocus();
         self.agent_session_dock_interaction.capture = null;
         self.focus_owner = .workspace;
         self.workspace_focus_pending = false;
@@ -21551,7 +21608,11 @@ pub const AppSession = struct {
                 self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
                 return self.last_summary;
             }
-            if (!event.modifiers.command and !event.modifiers.control and !event.modifiers.option and switch (event.key) {
+            // `/`도 Enter·Page와 같은 게이트를 쓴다. 도크가 보인다는 이유만으로 잡으면 터미널에서 친
+            // 경로(`/usr/local/...`)·정규식·vi 검색의 첫 글자가 셸이 아니라 도크 검색을 열고 사라진다.
+            // 수식키 없는 글자는 전부 터미널 입력이므로, 도크가 실제로 키보드를 갖고 있을 때만 가로챈다.
+            if (self.agentSessionDockOwnsKeys() and
+                !event.modifiers.command and !event.modifiers.control and !event.modifiers.option and switch (event.key) {
                 .char => |codepoint| codepoint == '/',
                 else => false,
             }) {
@@ -21562,6 +21623,13 @@ pub const AppSession = struct {
                 self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
                 return self.last_summary;
             }
+            // ⌘ 조합은 위 focus 게이트를 일부러 쓰지 않는다. 수식키 없는 키(Enter·`/`·Esc·Page)는 터미널로
+            // 갈 **입력**이라 도크가 focus 없이 가로채면 타이핑이 사라지지만, ⌘ chord는 어느 경우에도 PTY
+            // 바이트가 아니라 앱 명령이다. 대신 **소비는 실행의 결과여야 한다**: chord 모양만 맞고 published
+            // ready expansion이 없으면(`agentSessionDockShortcutIntent`가 null) 아무 일도 안 하면서 키만
+            // 삼키게 되고, 그러면 아래 keybind resolver에 도달하지 못해 메뉴 항목이 없는 액션 바인딩과
+            // 터미널 매크로(`keybind = Cmd+L = text:…`)가 조용히 죽는다. 그래서 실행했을 때만 소비한다.
+            // (메뉴 항목이 있는 액션은 애초에 AppKit keyEquivalent가 먼저 가져가 여기 오지 않는다.)
             const dock_shortcut: ?chrome.components.session_dock.ids.Intent = if (event.modifiers.command and event.key == .enter)
                 .resume_session
             else if (event.modifiers.command and switch (event.key) {
@@ -21569,14 +21637,19 @@ pub const AppSession = struct {
                 else => false,
             }) .reveal_log else null;
             if (dock_shortcut) |wanted| {
-                if (self.agentSessionDockShortcutIntent(wanted)) |intent| self.applyAgentSessionDockIntent(intent);
-                self.metal_dirty = true;
-                self.total_app_key_events += 1;
-                self.writeSummaryFromState();
-                self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
-                return self.last_summary;
+                if (self.agentSessionDockShortcutIntent(wanted)) |intent| {
+                    self.applyAgentSessionDockIntent(intent);
+                    self.metal_dirty = true;
+                    self.total_app_key_events += 1;
+                    self.writeSummaryFromState();
+                    self.last_summary.last_event_kind = @intFromEnum(EventKind.key_down);
+                    return self.last_summary;
+                }
             }
-            if (event.key == .escape and !event.modifiers.command and !event.modifiers.control and !event.modifiers.option and !event.modifiers.shift and
+            // Escape도 같은 게이트다. 카드를 펼쳐 둔 채 터미널로 돌아가면 vim의 Esc가 셸이 아니라 도크
+            // expansion을 닫고 사라진다 — Enter만큼이나 치명적인 터미널 키다.
+            if (self.agentSessionDockOwnsKeys() and
+                event.key == .escape and !event.modifiers.command and !event.modifiers.control and !event.modifiers.option and !event.modifiers.shift and
                 self.agent_session_inline_detail != null)
             {
                 self.closeAgentSessionInlineDetail();
@@ -21588,7 +21661,10 @@ pub const AppSession = struct {
         }
         // One plain activation toggles the selected dock card.  The provider remains inert
         // until the later explicit dock-local action has been published as ready.
-        if (self.dockVisible() and self.dock.view == .agent_sessions and event.key == .enter and
+        // 게이트는 스크롤 키와 같은 `agentSessionDockOwnsKeys`다. 도크가 보인다는 이유만으로 잡으면,
+        // 카드를 한 번 눌러 selection이 남은 뒤 터미널로 돌아와 친 Enter가 셸에 가지 않고 그 카드를
+        // 다시 접었다 폈다 한다(사용자 보고: "세션 기록 탭이 열려 있으면 Enter가 도크 동작을 한다").
+        if (self.agentSessionDockOwnsKeys() and event.key == .enter and
             !event.modifiers.command and !event.modifiers.control and !event.modifiers.option and !event.modifiers.shift)
         {
             if (self.agent_session_archive_selected) |selected| if (selected < self.agent_session_archive_records.items.len) {
@@ -22887,6 +22963,9 @@ pub const AppSession = struct {
                     };
                 }
                 if (self.dock.view == .agent_sessions and layout_math.pointInRect(x_px, y_px, dg.dock)) {
+                    // 도크를 눌렀다 = 키보드도 도크로. 아래 dispatch가 세우는 component-local focus는
+                    // 같은 클릭이 일으키는 snapshot 무효화에 곧바로 지워지므로 소유권 신호가 못 된다.
+                    self.takeAgentSessionDockKeyFocus();
                     // Primary down only arms the completed component tree. The matching up below
                     // is the one place that resolves and applies an archive intent, so a drag or
                     // a snapshot replacement cannot open a session merely because the pointer
@@ -22921,6 +23000,9 @@ pub const AppSession = struct {
             }
             // tree 밖의 명시적 primary click은 workspace 입력 축을 되찾는다. TerminalView가 이미 firstResponder라
             // AppKit responder 변화가 없을 수 있으므로 mouse policy도 같은 FocusOwner를 직접 갱신해야 한다.
+            // 도크 카드 클릭은 `focus_owner`를 바꾸지 않으므로(계속 `.workspace`) 아래 조건만으로는
+            // Session Dock의 component-local keyboard focus가 안 풀린다 — 그것부터 무조건 놓는다.
+            self.releaseAgentSessionDockKeyFocus();
             if (self.focus_owner != .workspace or self.pending_dock_focus != null) self.focusWorkspaceInput();
         }
         // 사이드바 우측 경계 down → 폭 조절 드래그 시작(사이드바 슬롯/터미널보다 먼저 — 경계는 둘 사이 밴드). 접힘이면
@@ -65619,6 +65701,149 @@ test "라이브 pane 드래그는 도크 위를 지나도 좌표를 계속 받�
     _ = try session.tick();
 }
 
+/// 픽스처 archive record 한 건 — 문자열은 session이 소유(deinit이 해제)한다.
+fn appendFixtureArchiveRecord(session: *AppSession, allocator: std.mem.Allocator) !void {
+    try session.agent_session_archive_records.append(allocator, .{
+        .parsed = .{
+            .provider = .claude,
+            .session_id = try allocator.dupe(u8, "fixture-session"),
+            .title = try allocator.dupe(u8, "fixture"),
+            .summary = try allocator.dupe(u8, "summary"),
+            .cwd = try allocator.dupe(u8, "/tmp"),
+            .cwd_canonical = true,
+            .model = try allocator.dupe(u8, "claude-fixture"),
+            .message_count = 1,
+            .verified_user = true,
+        },
+        .source_path = try allocator.dupe(u8, "/tmp/maru-archive-fixture-does-not-exist.jsonl"),
+        .mtime_ns = 0,
+        .inode = 1,
+        .device = 1,
+    });
+}
+
+// 사용자 보고 회귀: "Agent 세션 기록 탭이 열려 있으면 Enter가 오른쪽 도크 동작을 할 때가 있다".
+// 카드를 한 번 누르면 selection이 남는데, Enter 활성화 게이트가 "도크가 보이는가"만 봐서 그 뒤로는
+// 터미널에서 친 Enter가 셸로 가지 않고 그 카드를 계속 접었다 폈다 했다. 터미널에서 왜 중요한가:
+// Enter는 명령 실행 그 자체라, 삼켜지면 사용자는 아무 반응 없는 프롬프트를 보게 된다.
+test "도크 키보드 포커스가 없으면 Enter가 세션 카드가 아니라 터미널로 간다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initDockedRoutingSession(allocator, .right);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    try appendFixtureArchiveRecord(session, allocator);
+    session.agent_session_archive_selected = 0;
+    // 카드 클릭이 없었으므로 도크는 키보드를 갖고 있지 않다.
+    try std.testing.expect(!session.agentSessionDockOwnsKeys());
+
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
+    try std.testing.expect(session.agent_session_inline_detail == null); // 도크가 Enter를 가져가지 않았다
+    // 같은 게이트를 쓰는 `/`도 이때는 터미널 입력이다(경로·정규식 타이핑이 도크 검색으로 사라지지 않는다).
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = '/' }, .modifiers = .{} });
+    try std.testing.expect(!session.agent_session_archive_search_active);
+
+    // 대조군: **제품 경로**로 도크 안을 누르면 같은 Enter가 카드를 연다(게이트가 vacuous하지 않다).
+    const dock_center = dockContentCenter(session);
+    session.mouse(1, dock_center.x, dock_center.y, 0, 0);
+    session.mouse(3, dock_center.x, dock_center.y, 0, 0);
+    try std.testing.expect(session.agentSessionDockOwnsKeys());
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
+    try std.testing.expect(session.agent_session_inline_detail != null);
+
+    // 회귀 가드: 카드를 여는 그 순간 `invalidateAgentSessionDockFrame`이 component-local focus를
+    // 지운다. 소유권을 그 node id로 판정하면 여기서 도크가 키보드를 잃어 Enter로 다시 접을 수 없다.
+    try std.testing.expect(session.agent_session_dock_interaction.focused == null);
+    try std.testing.expect(session.agentSessionDockOwnsKeys());
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
+    try std.testing.expect(session.agent_session_inline_detail == null); // 같은 카드 Enter = 닫기
+
+    // 소유권이 있으면 `/`도 제품 경로대로 도크 검색을 연다.
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = '/' }, .modifiers = .{} });
+    try std.testing.expect(session.agent_session_archive_search_active);
+
+    // 검색이 활성이면 그쪽이 먼저다 — 같은 소유권에서도 카드 활성화 게이트는 닫힌다.
+    try std.testing.expect(!session.agentSessionDockOwnsKeys());
+    for ("ab") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    try std.testing.expectEqualStrings("ab", session.agent_session_archive_search.query.items);
+
+    // 터미널 본문 클릭은 도크의 keyboard 소유권을 놓는다. `focus_owner`는 도크를 눌러도
+    // `.workspace` 그대로라, 이 해제가 없으면 위 게이트가 계속 참으로 남는다.
+    const term_rect = session.active_pane_rect;
+    session.mouse(1, @floatFromInt(term_rect.x + term_rect.w / 2), @floatFromInt(term_rect.y + term_rect.h / 2), 0, 0);
+    try std.testing.expect(!session.agentSessionDockOwnsKeys());
+    // 도크 검색도 함께 blur된다(사이드바 `blurSidebarSearch`와 같은 규율 — 검색어는 보존). 이게 없으면
+    // `handleAgentSessionArchiveSearchKey`가 터미널로 돌아온 뒤의 모든 키를 계속 삼킨다.
+    try std.testing.expect(!session.agent_session_archive_search_active);
+    try std.testing.expectEqualStrings("ab", session.agent_session_archive_search.query.items);
+    for ("cd") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    try std.testing.expectEqualStrings("ab", session.agent_session_archive_search.query.items); // 터미널로 갔다
+
+    // Escape도 같은 게이트다: 카드를 펼쳐 둔 채 터미널에 있으면 vim의 Esc가 도크로 새면 안 된다.
+    // 검색어가 남으면 그때 selection이 지워졌으므로(숨은 identity를 선택된 채 두지 않는다) 다시 세운다.
+    session.agent_session_archive_search.clear();
+    session.rebuildAgentSessionArchiveFilter();
+    session.agent_session_archive_selected = 0;
+    session.mouse(1, dock_center.x, dock_center.y, 0, 0);
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
+    try std.testing.expect(session.agent_session_inline_detail != null);
+    session.mouse(1, @floatFromInt(term_rect.x + term_rect.w / 2), @floatFromInt(term_rect.y + term_rect.h / 2), 0, 0);
+    _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
+    try std.testing.expect(session.agent_session_inline_detail != null); // Esc는 터미널 것
+    // 대조군: 도크가 키보드를 가지면 같은 Esc가 expansion을 닫는다.
+    session.mouse(1, dock_center.x, dock_center.y, 0, 0);
+    _ = try session.handleKeyEvent(.{ .key = .escape, .modifiers = .{} });
+    try std.testing.expect(session.agent_session_inline_detail == null);
+
+    // 뷰를 떠났다 돌아와도 클릭 없이는 소유권이 되살아나지 않는다.
+    session.mouse(1, dock_center.x, dock_center.y, 0, 0);
+    try std.testing.expect(session.agentSessionDockOwnsKeys());
+    session.setDockView(.explorer);
+    session.setDockView(.agent_sessions);
+    try std.testing.expect(!session.agentSessionDockOwnsKeys());
+    _ = try session.tick();
+}
+
+// 적대적 검증 회귀: `⌘↵`/`⌘L`은 chord 모양만 맞으면 published ready expansion이 없어도 키를 삼켰다.
+// AppKit 메뉴 keyEquivalent가 있는 액션은 애초에 여기 오지 않지만(그건 메뉴가 먼저 실행), 메뉴 항목이
+// 없는 액션 바인딩과 터미널 매크로(`keybind = Cmd+L = text:…`)는 이 블록에서 죽었다. 소비는 실행의
+// 결과여야 한다 — 실행할 게 없으면 keybind resolver로 흘려보낸다.
+test "도크 ⌘ 단축키는 실제로 실행할 때만 키를 소비한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initDockedRoutingSession(allocator, .right);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    // 사용자 keybind 주입: 도크 단축키와 같은 chord에 앱 액션을 묶는다(빈 resolver였다면 Cmd는 ignored).
+    var user_binds = [_]config_mod.AppBinding{
+        .{ .chord = try config_mod.KeyChord.parse("Cmd+L"), .action = .new_term },
+    };
+    session.loaded_config.keybindings = &user_binds;
+
+    // 펼친 카드가 없다 = 도크가 실행할 것이 없다 → 사용자 바인딩이 살아 있어야 한다.
+    try std.testing.expect(session.agent_session_inline_detail == null);
+    const before = session.activePane().terms.items.len;
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'l' }, .modifiers = .{ .command = true } });
+    try std.testing.expectEqual(before + 1, session.activePane().terms.items.len);
+
+    // 대조군: ready expansion이 있으면 도크가 먼저 가져간다(문서화된 `⌘L` = 로그 보기). 이때는 사용자
+    // 바인딩이 실행되지 않아야 한다 — 게이트가 vacuous하지 않다는 뜻이다.
+    try appendFixtureArchiveRecord(session, allocator);
+    session.agent_session_archive_selected = 0;
+    const dock_center = dockContentCenter(session);
+    session.mouse(1, dock_center.x, dock_center.y, 0, 0);
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
+    try std.testing.expect(session.agent_session_inline_detail != null);
+    // loading 상태는 아직 ready가 아니므로 이 시점의 ⌘L도 여전히 사용자 바인딩으로 흘러야 한다.
+    try std.testing.expect(session.agent_session_inline_detail.?.state != .ready);
+    const before_loading = session.activePane().terms.items.len;
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 'l' }, .modifiers = .{ .command = true } });
+    try std.testing.expectEqual(before_loading + 1, session.activePane().terms.items.len);
+    _ = try session.tick();
+}
+
 test "라이브 사이드바 카드 드래그는 도크 위를 지나도 소유권을 지키고 up에서 풀린다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -65714,7 +65939,14 @@ test "Session Dock 검색은 사이드바 검색과 같은 입력 소유 판정�
     try std.testing.expect(!session.terminalOwnsInput());
     try std.testing.expectEqual(AppSession.InputFocus.terminal, session.inputFocus());
 
-    // 제품 경로로 연다 — `/`가 도크 검색을 활성화한다(필드 클릭과 같은 상태로 들어간다).
+    // 도크가 키보드를 갖기 전의 `/`는 터미널 입력이다 — 도크 검색을 열지 않는다(경로·정규식 타이핑 보호).
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = '/' }, .modifiers = .{} });
+    try std.testing.expect(!session.agent_session_archive_search_active);
+    try std.testing.expect(!session.terminalOwnsInput());
+
+    // 제품에서는 도크 안 primary down이 이 소유권을 준다(`takeAgentSessionDockKeyFocus`). 이 테스트는
+    // 입력 소유 판정만 보므로 그 결과 상태만 세우고 같은 `/` 제품 키 경로로 검색을 연다.
+    session.agent_session_dock_key_focus = true;
     _ = try session.handleKeyEvent(.{ .key = .{ .char = '/' }, .modifiers = .{} });
     try std.testing.expect(session.agent_session_archive_search_active);
     try std.testing.expect(session.terminalOwnsInput());
@@ -65737,7 +65969,8 @@ test "Session Dock 검색은 사이드바 검색과 같은 입력 소유 판정�
     session.sidebar_search_active = false;
     try std.testing.expect(!session.terminalOwnsInput());
 
-    // 게이트: 플래그가 남아 있어도 도크가 안 보이거나 다른 뷰면 입력을 요구하지 않는다.
+    // 게이트: 플래그가 남아 있어도 도크가 안 보이거나 다른 뷰면 입력을 요구하지 않는다. 이 방어는
+    // 아래 blur가 플래그를 실제로 지우게 된 뒤에도 유지한다(두 겹 — 상태와 게이트).
     session.agent_session_archive_search_active = true;
     session.dock.collapsed = true;
     try std.testing.expect(!session.dockVisible());
@@ -65747,8 +65980,12 @@ test "Session Dock 검색은 사이드바 검색과 같은 입력 소유 판정�
     session.dock.collapsed = false;
     session.setDockView(.explorer);
     try std.testing.expect(!session.terminalOwnsInput());
+    // view 전환은 도크 검색을 blur한다 — 돌아왔을 때 클릭 없이 키를 삼키지 않게(사이드바와 같은 규율).
+    try std.testing.expect(!session.agent_session_archive_search_active);
 
     session.setDockView(.agent_sessions);
+    try std.testing.expect(!session.terminalOwnsInput());
+    session.agent_session_archive_search_active = true;
     try std.testing.expect(session.terminalOwnsInput());
     _ = try session.tick();
 }

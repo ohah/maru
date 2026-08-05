@@ -14,6 +14,7 @@ const continuous_drag = @import("chrome/ui/continuous_drag.zig");
 const paint_style = @import("chrome/ui/paint_style.zig");
 const paint = @import("chrome/ui/paint.zig");
 const divider = @import("chrome/components/divider.zig");
+const file_tree_scrollbar = @import("chrome/components/file_tree_scrollbar.zig");
 const session_dock = @import("chrome/components/session_dock.zig");
 const archive_detail = @import("chrome/components/archive_detail.zig");
 
@@ -29,6 +30,7 @@ test {
     testing.refAllDecls(intent_table);
     testing.refAllDecls(continuous_drag);
     testing.refAllDecls(divider);
+    testing.refAllDecls(file_tree_scrollbar);
     testing.refAllDecls(paint_style);
     testing.refAllDecls(paint);
     testing.refAllDecls(session_dock);

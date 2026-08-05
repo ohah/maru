@@ -14,6 +14,10 @@
 //!
 //! 캡처가 없으면 skip한다. 이 게이트는 스모크를 먼저 돌린 환경에서만 의미가 있고, 캡처 부재를 실패로
 //! 만들면 스모크와 무관한 변경까지 막는다.
+//!
+//! 단 **CI처럼 스모크를 먼저 돌리도록 배선한 곳에서는 skip이 곧 무력화**다: 창 생성이나 캡처가 실패해도
+//! 초록으로 지나가고, 로그를 아무도 안 보면 "게이트가 있다"는 착각만 남는다. `MARU_REQUIRE_GOLDEN=1`이면
+//! 캡처 부재를 실패로 만든다 — `mise run macos-dock-visual-golden`이 그 값을 켠다.
 
 const std = @import("std");
 const ppm = @import("ppm");
@@ -123,5 +127,8 @@ test "session dock visual golden" {
     if (checked == 0) {
         // 캡처가 하나도 없으면 조용히 통과하지 않는다 — "게이트가 돌았다"는 착각이 가장 위험하다.
         std.debug.print("dock 시각 골든: 캡처가 없어 건너뛴다(먼저 `zig build macos-agent-session-archive-smoke`)\n", .{});
+        // 스모크를 먼저 돌리도록 배선한 곳(CI)에서는 캡처 부재 자체가 결함이다. 창 생성이나 캡처가
+        // 실패했는데 게이트가 초록이면 그 실패를 영원히 못 본다.
+        if (std.c.getenv("MARU_REQUIRE_GOLDEN") != null) return error.VisualGoldenCapturesMissing;
     }
 }

@@ -97,7 +97,9 @@ identity는 바꾸지 않으며, `SessionDock`의 같은 completed `UiRectTree`�
   measured placeholder/query/preedit/caret을 둔다. icon·텍스트는 terminal cell baseline을 공유하지 않고
   각각의 logical rect 중앙에 lower한다.
 - group은 위아래 rule과 20pt disclosure slot·8pt label gap·workspace name·count pill을 갖는 독립
-  header다. 기본 session row는
+  header다. count pill의 치수·자리(최소 폭 44pt, 최대 높이 32pt, 반지름 = 높이/2, 행 세로 중앙,
+  라벨 상자 중앙, 안 들어가면 안 그림)는 `chrome/ui/badge.zig`가 소유한다 — 컴포넌트 view가 그
+  산수를 다시 풀면 갈린다(pill이 행 밖으로 내려가 아래 카드에 걸친 회귀가 그 산수였다). 기본 session row는
   반복된 외곽 card 대신 full-width divider 목록이고, title은 bold, summary는 muted, provider와
   metadata는 마지막 baseline의 두 slot으로 분리한다. 각 row는 최소 6행을 써 title과 summary,
   metadata가 붙어 보이지 않게 한다. divider는 interactive active 색이 아니라 panel background에서

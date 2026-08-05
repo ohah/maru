@@ -4,6 +4,7 @@
 //! It never asks a platform for glyph positions, so the backend remains a one-way ChromeDraw lowerer.
 
 const std = @import("std");
+const badge = @import("../../ui/badge.zig");
 const draw = @import("../../draw.zig");
 const tokens = @import("../../tokens.zig");
 const text_layout = @import("../../text_layout.zig");
@@ -355,30 +356,15 @@ const Writer = struct {
         var count_buf: [16]u8 = undefined;
         const count = std.fmt.bufPrint(&count_buf, "{d}", .{group.count}) catch return;
         const horizontal_inset = metrics.group_disclosure_inset_x;
-        const pill_pad = spacing.px(.xs, scale);
         const count_cols = @max(plannedCols(count, 4), 1);
-        // A one-digit count remains a horizontal count pill at every terminal font size; the
-        // cell estimate only reserves enough room for a longer measured label.
-        const pill_width = @max(spacing.pointsPx(44, scale), @as(u32, count_cols) * cw + pill_pad * 2);
         const icon_slot = metrics.group_disclosure_extent + metrics.group_disclosure_label_gap;
-        if (rect.rect.width < @as(f32, @floatFromInt(horizontal_inset * 2 + pill_width + icon_slot))) return;
-
-        const pill_h = @min(spacing.pointsPx(32, scale), @as(u32, @intFromFloat(@floor(rect.rect.height))));
-        if (pill_h == 0) return;
-        const pill_x: f32 = rect.rect.x + rect.rect.width - @as(f32, @floatFromInt(horizontal_inset + pill_width));
-        // 세로 중앙은 `(행 높이 - pill 높이) / 2`다. 괄호가 하나 밀려 `행 높이 - pill/2`가 되면 pill이
-        // 행 바닥 밖으로 내려가 아래 카드에 걸친다(사용자 보고).
-        const pill_y: f32 = rect.rect.y + (rect.rect.height - @as(f32, @floatFromInt(pill_h))) / 2;
-        const pill_radius: u16 = @intCast(@min(pill_h / 2, @as(u32, std.math.maxInt(u16))));
+        // 치수·자리·"안 들어가면 안 그린다"는 badge 프리미티브가 소유한다. 여기서 다시 풀면
+        // 그 산수가 컴포넌트마다 갈린다(pill이 행 밖으로 내려간 회귀가 그 산수였다).
+        const pill = badge.countPill(rect.rect, horizontal_inset, count_cols, cw, scale, icon_slot) orelse return;
         try self.appendQuadClippedBy(rect, .{
-            .rect = .{
-                .x = @intFromFloat(@floor(pill_x)),
-                .y = @intFromFloat(@floor(pill_y)),
-                .w = pill_width,
-                .h = pill_h,
-            },
+            .rect = pill.box,
             .fill_role = .inset_bg,
-            .corner_radii = .{ pill_radius, pill_radius, pill_radius, pill_radius },
+            .corner_radii = .{ pill.radius_px, pill.radius_px, pill.radius_px, pill.radius_px },
             .border_widths = .{ 1, 1, 1, 1 },
             .border_role = .divider,
         });
@@ -393,7 +379,7 @@ const Writer = struct {
         try self.iconInRect(disclosure, disclosure_source, std.unicode.utf8Decode(disclosure_source) catch return, @intCast(metrics.header_host_icon_extent), .surface_fg);
 
         const label_x = rect.rect.x + @as(f32, @floatFromInt(horizontal_inset + icon_slot));
-        const label_end = pill_x - @as(f32, @floatFromInt(spacing.px(.xs, scale)));
+        const label_end = @as(f32, @floatFromInt(pill.box.x)) - @as(f32, @floatFromInt(spacing.px(.xs, scale)));
         if (label_end > label_x) {
             const max_cols: u16 = @intFromFloat(@floor((label_end - label_x) / @as(f32, @floatFromInt(cw))));
             const group_heading_h: f32 = @floatFromInt(typography.lineHeightPx(.group_heading, scale));
@@ -401,18 +387,9 @@ const Writer = struct {
                 try self.emit(label_x, rect.rect.y + (rect.rect.height - group_heading_h) / 2, group.label, max_cols, .head, .surface_fg, .group_heading, false, true);
         }
 
-        const count_width: f32 = @min(
-            @as(f32, @floatFromInt(@as(u32, count_cols) * cw)),
-            @as(f32, @floatFromInt(pill_width -| pill_pad * 2)),
-        );
-        const count_x = pill_x + (@as(f32, @floatFromInt(pill_width)) - count_width) / 2;
-        // The group row and its count pill intentionally have different heights.  Centre the
-        // count in the pill's own rect; using the row baseline lifted it above the dark pill in
-        // real Metal captures even though the horizontal slot was correct.
-        const count_line_h: f32 = @floatFromInt(typography.lineHeightPx(.control, scale));
-        if (@as(f32, @floatFromInt(pill_h)) < count_line_h) return;
-        const count_y = pill_y + (@as(f32, @floatFromInt(pill_h)) - count_line_h) / 2;
-        try self.emit(count_x, count_y, count, count_cols, .head, .surface_fg, .control, false, true);
+        // 라벨이 상자보다 높으면 숫자만 생략한다 — pill·chevron·이름은 그대로 둔다.
+        if (pill.label_fits)
+            try self.emit(pill.label_x, pill.label_y, count, count_cols, .head, .surface_fg, .control, false, true);
     }
 
     fn appendQuad(self: *Writer, quad: draw.Op.Quad) ViewError!void {

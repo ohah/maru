@@ -13,6 +13,7 @@ const std = @import("std");
 const draw = @import("../draw.zig");
 const tokens = @import("../tokens.zig");
 const props = @import("../props.zig");
+const ui_badge = @import("../ui/badge.zig");
 const overlay_input = @import("overlay_input.zig"); // displayCols(EAW 표시폭)
 
 /// 이 컴포넌트가 그리는 레이어(최상위 오버레이 — 시각만, 입력 라우팅엔 없다).
@@ -40,17 +41,12 @@ pub fn view(
     const cw = @max(p.metrics.cell_width_px, 1);
     const ch = @max(p.metrics.cell_height_px, 1);
     for (badges) |b| {
-        const cols = overlay_input.displayCols(b.chord);
-        if (cols == 0) continue;
-        const w = cols * cw;
-        // 우상단: 요소 우단에서 배지 폭만큼 왼쪽, 요소 상단. 요소보다 넓으면 좌단으로 clamp(밖으로 안 나가게).
-        const right = b.rect.x + @as(i32, @intCast(b.rect.w));
-        const bx = @max(right - @as(i32, @intCast(w)), b.rect.x);
-        const by = b.rect.y;
-        try out.append(arena, .{ .fill = .{ .rect = .{ .x = bx, .y = by, .w = w, .h = ch }, .role = .keycap_bg } });
+        // 자리·크기(우상단 정렬, 요소보다 넓으면 좌단 clamp)는 badge 프리미티브가 소유한다.
+        const key = ui_badge.keycap(b.rect, overlay_input.displayCols(b.chord), cw, ch) orelse continue;
+        try out.append(arena, .{ .fill = .{ .rect = key.box, .role = .keycap_bg } });
         const runs = try arena.alloc(draw.Run, 1);
         runs[0] = .{ .text = b.chord };
-        try out.append(arena, .{ .text = .{ .origin = .{ .x = bx, .y = by }, .runs = runs, .role = .surface_fg } });
+        try out.append(arena, .{ .text = .{ .origin = .{ .x = key.box.x, .y = key.box.y }, .runs = runs, .role = .surface_fg } });
     }
 }
 

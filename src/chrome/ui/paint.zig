@@ -52,8 +52,7 @@ pub fn paint(
             .none => if (entry.kind != .container) return error.InvalidSnapshot,
             .card => |visual| {
                 if (entry.kind != .card) return error.InvalidSnapshot;
-                const clipped = if (entry.effective_clip) |clip| layout.intersectRect(clip, entry.rect) else entry.rect;
-                const rect = try snapRect(clipped);
+                const rect = try snapRect(entry.rect);
                 if (rect.w == 0 or rect.h == 0) continue;
                 if (count == buffers.ops.len) return error.InsufficientBuffer;
                 const style = paint_style.resolveCard(entry.id, visual, entry.action, state, tk);
@@ -64,13 +63,13 @@ pub fn paint(
                     .border_widths = style.border_widths_px,
                     .border_role = style.border,
                     .alpha = style.opacity,
+                    .clip = clipRectOf(entry),
                 } };
                 count += 1;
             },
             .button => |visual| {
                 if (entry.kind != .button) return error.InvalidSnapshot;
-                const clipped = if (entry.effective_clip) |clip| layout.intersectRect(clip, entry.rect) else entry.rect;
-                const rect = try snapRect(clipped);
+                const rect = try snapRect(entry.rect);
                 if (rect.w == 0 or rect.h == 0) continue;
                 if (count == buffers.ops.len) return error.InsufficientBuffer;
                 const style = paint_style.resolveButton(entry.id, visual, entry.action, state, tk);
@@ -81,6 +80,7 @@ pub fn paint(
                     .border_widths = style.border_widths_px,
                     .border_role = style.border,
                     .alpha = style.opacity,
+                    .clip = clipRectOf(entry),
                 } };
                 count += 1;
             },
@@ -91,6 +91,21 @@ pub fn paint(
         }
     }
     return .{ .layer = layer, .ops = buffers.ops[0..count] };
+}
+
+/// published clip을 semantic quad에 **그대로** 싣는다. 여기서 rect를 미리 자르지 않는 것이 핵심이다 —
+/// backend shader가 corner radius와 변별 border를 rect 기하에서 유도하므로, 잘린 rect를 주면 클립 경계에
+/// 없어야 할 곡률과 stroke가 생긴다. 원본 모양을 그린 뒤 뷰포트 밖 fragment만 버리는 것이 정확하다.
+fn clipRectOf(entry: ui_tree.RectEntry) ?draw.Rect {
+    const clip = entry.effective_clip orelse return null;
+    if (!std.math.isFinite(clip.x) or !std.math.isFinite(clip.y) or
+        !std.math.isFinite(clip.width) or !std.math.isFinite(clip.height)) return null;
+    return .{
+        .x = @intFromFloat(@ceil(clip.x)),
+        .y = @intFromFloat(@ceil(clip.y)),
+        .w = @intFromFloat(@max(@floor(clip.width), 0)),
+        .h = @intFromFloat(@max(@floor(clip.height), 0)),
+    };
 }
 
 /// Layout may produce fractional rects for percent/fill. Painting snaps once at the last neutral
@@ -293,7 +308,9 @@ test "paint emits preordered snapped card quads and ignores text until shaping e
     try std.testing.expectEqual(tokens.ColorRole.tab_active_bg, out.ops[1].quad.fill_role);
 }
 
-test "paint intersects a card with its completed tree clip" {
+// clip은 이제 **자르지 않고 싣는다**. backend shader가 원본 rect로 모양(corner radius·변별 border)을 그린
+// 뒤 뷰포트 밖 fragment만 버리므로, 여기서 rect를 미리 자르면 클립 경계에 없어야 할 곡률과 stroke가 생긴다.
+test "paint carries the completed tree clip on the quad instead of cutting its rect" {
     const tk = testTokens();
     const entries = [_]ui_tree.RectEntry{.{
         .id = 1,
@@ -307,8 +324,12 @@ test "paint intersects a card with its completed tree clip" {
     var ops: [1]draw.Op = undefined;
     const out = try paint(.{ .entries = &entries }, .{}, &tk, .sidebar, .{ .ops = &ops });
     try std.testing.expectEqual(@as(usize, 1), out.ops.len);
-    try std.testing.expectEqual(@as(i32, 0), out.ops[0].quad.rect.y);
-    try std.testing.expectEqual(@as(u32, 12), out.ops[0].quad.rect.h);
+    // rect는 원본 그대로다.
+    try std.testing.expectEqual(@as(i32, -8), out.ops[0].quad.rect.y);
+    // 대신 published clip이 실려 backend가 그 사각형 밖을 버린다.
+    const clip = out.ops[0].quad.clip orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(i32, 0), clip.y);
+    try std.testing.expectEqual(@as(u32, 12), clip.h);
 }
 
 test "paint fails closed for bad snapshots and fixed-capacity overflow" {

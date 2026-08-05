@@ -83,12 +83,13 @@ typedef struct {
     float fill1[4];        // rgba — gradient 끝색
     float border_color[4]; // rgba
     float gradient_kind;   // 0=solid, 1=vertical, 2=horizontal, 3=위 삼각형(말풍선 caret — fill0 단색+edge AA)
+    float clip[4];         // 좌상단 원점 backing-pixel 뷰포트 (x, y, w, h). w==0이면 클리핑 없음
 } MaruRendererQuadVertex;
 
 // 셰이더 QuadIn(maru_metal_shader.h)이 이 정점을 buffer(0)로 raw 재해석하므로 레이아웃이 1:1이어야 한다.
-// packed_float2×3(24) + packed_float4×5(80) + float(4) = 108B tight-pack. 한쪽만 필드를 바꾸면 GPU가
+// packed_float2×3(24) + packed_float4×6(96) + float(4) = 124B tight-pack. 한쪽만 필드를 바꾸면 GPU가
 // 엉뚱한 offset을 읽어 조용히 깨지므로(컴파일·테스트 무경고) 크기를 정적 단언으로 못박는다(GpuQuad ABI와 동형 가드).
-_Static_assert(sizeof(MaruRendererQuadVertex) == 108, "MaruRendererQuadVertex must match MSL QuadIn (108B tight-pack)");
+_Static_assert(sizeof(MaruRendererQuadVertex) == 124, "MaruRendererQuadVertex must match MSL QuadIn (124B tight-pack)");
 
 // C4b: shadow 정점. 셰이더 ShadowIn(packed_float2×3 + packed_float4 + float + packed_float4 = 15 float,
 // 60B tight-pack)과 1:1. host가 GpuShadow를 blur만큼 확장된 rect로 quad당 6정점 생성한다(fill은 모달-3b-1b).
@@ -603,6 +604,12 @@ static void maru_fill_quad_instance(
     base.border_color[2] = (float)(quad.border_color & 0xff) / 255.0f;
     base.border_color[3] = (float)((quad.border_color >> 24) & 0xff) / 255.0f;
     base.gradient_kind = (float)quad.gradient_kind;
+    // 클리핑은 rect를 미리 자르지 않는다 — shader가 원본 모양(corner radius·변별 border)을 그린 뒤 이
+    // 사각형 밖 fragment만 버린다. CPU가 rect를 먼저 자르면 잘린 변에 없어야 할 곡률과 stroke가 생긴다.
+    base.clip[0] = quad.clip_x;
+    base.clip[1] = quad.clip_y;
+    base.clip[2] = quad.clip_w;
+    base.clip[3] = quad.clip_h;
     // 모서리 4개의 (NDC pos, local px): tl, tr, br, bl.
     const float cx[4] = {left, right, right, left};
     const float cy[4] = {top, top, bottom, bottom};

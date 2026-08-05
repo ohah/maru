@@ -203,7 +203,7 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 163;
+pub const abi_version: u32 = 164;
 // 162: AS4-f fixture reads only published SessionDock control/action border rects so four
 // font/scale cold AppKit runs can compare geometry without reconstructing layout in Swift.
 // 161: AS3-c fixture adds one read-only expanded-card raw-rect target and published tree
@@ -5528,26 +5528,62 @@ pub const AppSession = struct {
         capture_active: bool = false,
         move_events: u64 = 0,
         resize_applications: u64 = 0,
+        /// fixture 진단: 이 실행이 실제로 쓰는 window padding(backing px)과 웹뷰가 덮은 divider 수.
+        /// config가 먹었는지, 먹었는데도 교차가 없는지를 요약만 보고 가를 수 있어야 한다.
+        padding_left_px: u32 = 0,
+        padding_right_px: u32 = 0,
+        web_covered_dividers: u32 = 0,
     };
 
     /// 활성 탭의 **첫** divider를 발행 경로 그대로 읽는다(`publishDividerTree`와 같은 출처).
     pub fn dividerSmokeProbe(self: *AppSession) DividerSmokeProbe {
         var probe = DividerSmokeProbe{
+            .padding_left_px = self.window_padding_px.left,
+            .padding_right_px = self.window_padding_px.right,
             .capture_active = self.dividerCaptureActive(),
             .move_events = self.divider_move_events,
             .resize_applications = self.divider_resize_applications,
         };
         const published = self.publishDividerTree() orelse return probe;
         if (published.entries.len == 0) return probe;
-        // publish는 역순이라 seg 0은 마지막 entry다. identity로 되찾아 순서 규칙에 기대지 않는다.
+
+        // 웹 패널이 **덮고 있는** divider를 우선 고른다. seam pass-through는 그 지점에서만 시험되고,
+        // seg 0을 무조건 쓰면 split이 둘 이상일 때 엉뚱한 divider를 겨냥한다.
+        var wanted: usize = 0;
+        var web: std.ArrayList(web_panel_layout.SurfaceLayout) = .empty;
+        defer web.deinit(self.allocator);
+        if (self.collectWebSurfaces(&web)) |_| {
+            outer: for (web.items) |surface| {
+                if (surface.seam_edges == 0) continue;
+                const cr = surface.content_rect;
+                if (cr.w == 0 or cr.h == 0) continue;
+                for (published.entries) |entry| {
+                    const index = chrome.components.divider.segIndexOf(entry.id, self.divider_split_scratch.items.len) orelse continue;
+                    const bx0: f64 = entry.rect.x;
+                    const bx1: f64 = bx0 + entry.rect.width;
+                    const by0: f64 = entry.rect.y;
+                    const by1: f64 = by0 + entry.rect.height;
+                    const cx0: f64 = @floatFromInt(cr.x);
+                    const cx1: f64 = @floatFromInt(cr.x + cr.w);
+                    const cy0: f64 = @floatFromInt(cr.y);
+                    const cy1: f64 = @floatFromInt(cr.y + cr.h);
+                    if (bx0 < cx1 and cx0 < bx1 and by0 < cy1 and cy0 < by1) {
+                        wanted = index;
+                        probe.web_covered_dividers +|= 1;
+                        break :outer;
+                    }
+                }
+            }
+        } else |_| {}
+
         for (published.entries) |entry| {
-            if (chrome.components.divider.segIndexOf(entry.id, self.divider_split_scratch.items.len) != 0) continue;
+            if (chrome.components.divider.segIndexOf(entry.id, self.divider_split_scratch.items.len) != wanted) continue;
             probe.present = true;
             probe.x_px = @intFromFloat(entry.rect.x);
             probe.y_px = @intFromFloat(entry.rect.y);
             probe.width_px = @intFromFloat(@max(entry.rect.width, 0));
             probe.height_px = @intFromFloat(@max(entry.rect.height, 0));
-            probe.ratio_milli = @intFromFloat(@max(self.divider_split_scratch.items[0].ratio, 0) * 1000);
+            probe.ratio_milli = @intFromFloat(@max(self.divider_split_scratch.items[wanted].ratio, 0) * 1000);
             break;
         }
         return probe;
@@ -54196,6 +54232,75 @@ fn checkWebSeamInsets(session: *AppSession, seam: u32, allocator: std.mem.Alloca
 // [4e review 0 재수정] collectWebSurfaces: split에서 각 web 본문 rect는 seam 가장자리를 `dt + 클릭여유`만큼 들여 WKWebView가
 // divider를 덮지 않게 한다(예전 `dt/2`는 기본 dt=1에서 0이라 무효과 — 세로·가로 divider가 안 잡히던 회귀). 세로 divider
 // (split_horizontal=좌우)와 **가로 divider(split_vertical=상하, 원래 테스트가 놓친 bottom seam)** 둘 다 헤드리스 검증.
+test "웹 패널 옆 divider는 padding이 노출하든 webview가 통과시키든 반드시 잡힌다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+
+    // (scale, window padding) 두 축을 함께 돈다. 기존 seam 검증은 padding 0 · 1x에서만 돌아
+    // `half > padding` 구성과 Retina를 한 번도 밟지 않았다.
+    const Case = struct { scale: u32, pad: u32, expect_band: bool };
+    for ([_]Case{
+        // 제품 기본: padding(2x에서 16px)이 grab 반폭(10.5px)보다 커서 divider가 padding 틈에
+        // 그대로 드러난다 → 통과시킬 것이 없고 밴드는 0이 맞다.
+        .{ .scale = 2000, .pad = 8, .expect_band = false },
+        // padding 0: 웹뷰가 seam까지 차올라 grab 밴드를 덮는다 → 이때만 pass-through가 일한다.
+        .{ .scale = 2000, .pad = 0, .expect_band = true },
+    }) |case| {
+        const session = try allocator.create(AppSession);
+        defer allocator.destroy(session);
+        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+            .abi_version = abi_version,
+            .cols = 20,
+            .rows = 5,
+            .queue_capacity = 16,
+            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        });
+        defer session.deinit();
+        _ = try session.resize(session.sidebar_width_px + 1600, 1200, case.scale);
+        session.window_padding_px = .{ .left = case.pad, .right = case.pad, .top = case.pad, .bottom = case.pad };
+        session.dispatchAppAction(.split_horizontal);
+        session.dispatchAppAction(.new_web_tab);
+
+        var segs: std.ArrayList(PaneTree.DividerSeg) = .empty;
+        defer segs.deinit(allocator);
+        try session.layoutActiveTabDividers(&segs);
+        try std.testing.expect(segs.items.len > 0);
+        const seg = segs.items[0];
+        const div_x: f64 = @floatFromInt(seg.pos);
+        const div_y: f64 = @floatFromInt(seg.bounds.y + seg.bounds.h / 2);
+
+        var cur: std.ArrayList(web_panel_layout.SurfaceLayout) = .empty;
+        defer cur.deinit(allocator);
+        try session.collectWebSurfaces(&cur);
+        var seam_surface: ?web_panel_layout.SurfaceLayout = null;
+        for (cur.items) |s| {
+            if (s.seam_edges != 0) seam_surface = s;
+        }
+        const web = seam_surface orelse return error.TestExpectedSeamSurface;
+
+        // ① 밴드 유무는 구성의 결과지 계약이 아니다. padding이 grab 반폭보다 크면 0이 맞다.
+        const has_band = web.divider_grab_bands_pt.left > 0 or web.divider_grab_bands_pt.right > 0 or
+            web.divider_grab_bands_pt.bottom > 0;
+        try std.testing.expectEqual(case.expect_band, has_band);
+
+        // ② 밴드가 0인 구성에서는 divider 선이 웹뷰 **밖**에 있어야 한다 — 그래야 클릭이 웹뷰를
+        //    거치지 않고 아래 터미널 뷰에 닿는다. 이 둘 중 하나는 반드시 성립해야 하며, 둘 다
+        //    아니면 그 divider는 사용자가 영영 잡을 수 없다.
+        const cr = web.content_rect;
+        const inside_web = div_x >= @as(f64, @floatFromInt(cr.x)) and
+            div_x < @as(f64, @floatFromInt(cr.x + cr.w)) and
+            div_y >= @as(f64, @floatFromInt(cr.y)) and
+            div_y < @as(f64, @floatFromInt(cr.y + cr.h));
+        try std.testing.expect(has_band or !inside_web);
+
+        // ③ 그리고 실제로 잡힌다. 이것이 사용자가 겪는 결과이고, 위 두 경로 중 어느 쪽으로
+        //    성립하든 답은 같아야 한다.
+        session.mouse(1, div_x, div_y, 0, 0);
+        try std.testing.expect(session.dividerCaptureActive());
+        session.mouse(3, div_x, div_y, 0, 0);
+    }
+}
+
 test "collectWebSurfaces: split seam(세로·가로 divider 둘 다)은 dt+클릭여유 inset, 바깥 경계 0" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

@@ -1254,16 +1254,27 @@ pub fn build(b: *std.Build) void {
         const macos_divider_smoke_fixture = b.addSystemCommand(&.{
             "sh", "-eu", "-c",
             "mkdir -p zig-out/maru-macos-app; " ++
-                "rm -rf zig-out/maru-macos-app/divider-home; mkdir -p zig-out/maru-macos-app/divider-home",
+                "rm -rf zig-out/maru-macos-app/divider-home; " ++
+                "mkdir -p zig-out/maru-macos-app/divider-home/.config/maru; " ++
+                // padding 0 — 이 값이라야 WKWebView가 seam까지 차올라 divider를 덮고 seam
+                // pass-through가 실제로 시험된다. 기본 padding에서는 divider가 padding 틈에
+                // 노출돼 웹뷰가 그 자리에 없으므로 통과 경로를 밟지 못한다.
+                "printf 'window.padding-left = 0\\nwindow.padding-right = 0\\nwindow.padding-top = 0\\nwindow.padding-bottom = 0\\n' " ++
+                "> zig-out/maru-macos-app/divider-home/.config/maru/config",
         });
         macos_divider_smoke_fixture.setCwd(b.path("."));
         const macos_divider_smoke = b.addSystemCommand(&.{"./zig-out/Maru.app/Contents/MacOS/maru-macos-app"});
         macos_divider_smoke.setCwd(b.path("."));
-        macos_divider_smoke.setEnvironmentVariable("MARU_MACOS_APP_SMOKE_MS", "8000");
+        macos_divider_smoke.setEnvironmentVariable("MARU_MACOS_APP_SMOKE_MS", "15000");
         macos_divider_smoke.setEnvironmentVariable("MARU_DIVIDER_SMOKE", "1");
+        // 웹 패널을 여는 fixture가 필요하다 — seam pass-through는 WKWebView가 실제로 divider에
+        // 맞닿아 있을 때만 판정할 수 있다.
+        macos_divider_smoke.setEnvironmentVariable("MARU_WEB_PANEL", "1");
+        macos_divider_smoke.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("web/dist"));
         macos_divider_smoke.setEnvironmentVariable("HOME", b.pathFromRoot("zig-out/maru-macos-app/divider-home"));
         macos_divider_smoke.setEnvironmentVariable("CFFIXED_USER_HOME", b.pathFromRoot("zig-out/maru-macos-app/divider-home"));
         macos_divider_smoke.step.dependOn(&macos_app_bundle.step);
+        macos_divider_smoke.step.dependOn(&file_panel_web_build.step);
         macos_divider_smoke.step.dependOn(&macos_divider_smoke_fixture.step);
         const macos_divider_smoke_assert = b.addSystemCommand(&.{
             "sh", "-eu", "-c",
@@ -1280,7 +1291,21 @@ pub fn build(b: *std.Build) void {
                 // 계약 §4.3: 상한은 move 수가 아니라 tick 수다. 제품 AppKit 경로에서 그 둘이 다르다.
                 "moves=$(/usr/bin/sed -n 's/^divider_move_events=//p' \"$summary\"); " ++
                 "applies=$(/usr/bin/sed -n 's/^divider_resize_applications=//p' \"$summary\"); " ++
-                "test \"$moves\" -gt \"$applies\"",
+                "test \"$moves\" -gt \"$applies\"; " ++
+                // CIM2d: 웹 패널이 divider에 맞닿은 배치가 실제로 만들어졌는지까지만 강제한다. seam
+                // pass-through 자체는 **아직 단언하지 않는다** — 이 fixture가 제품 실행에서 grab 밴드
+                // 폭 0을 관측했고(아래 web_divider_* 필드), 그 원인을 규명하기 전에 통과를 요구하면
+                // 초록이 거짓이 되거나 빨강이 상주한다. 관측치는 요약에 남아 다음 슬라이스의 입력이 된다.
+                "/usr/bin/grep -Eq '^web_divider_panel_present=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^web_divider_seam_edges=[1-9]' \"$summary\"; " ++
+                // 웹뷰가 **실제로 덮고 있는** divider 지점(over_panel)에서, 그 클릭이 웹 계층에
+                // 먹히지 않고(passthrough) divider capture를 만든다. 셋이 함께여야 seam
+                // pass-through를 증명한다 — 하나라도 빠지면 다른 이유로 잡힌 것일 수 있다.
+                "/usr/bin/grep -Eq '^web_divider_padding=l=0 r=0$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^web_divider_covered=[1-9]' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^web_divider_point_over_panel=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^web_divider_hittest_passthrough=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^web_divider_capture_after_down=true$' \"$summary\"",
         });
         macos_divider_smoke_assert.setCwd(b.path("."));
         macos_divider_smoke_assert.step.dependOn(&macos_divider_smoke.step);

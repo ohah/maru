@@ -514,6 +514,18 @@ component를 거쳐 card/scope/header/search와 semantic text op를 만들고, �
 480×720 fixed dark PNG/JSON에는 `text_rasterized=true`, glyph cell 수와 readback 성공을 함께 남긴다. 이 artifact는
 회색 quad만 있는 fixture가 아니라 카드와 텍스트가 함께 합성된 visual renderer evidence다.
 
+여기에는 따라오는 한계가 있다. Lab은 Chrome 텍스트를 terminal cell로 되돌리지 않고 제품과 같은 final-pixel
+artifact 경로를 타지만, **그 artifact가 제품 Session Dock과 다르다** — Lab은 `chrome_draw_lowering.RichTextArtifact`,
+제품 도크는 `system_text.Artifact`다. 전자의 최종 좌표는 `origin + glyph.run.col * cell_width + offset`이라
+**셀 격자에 오프셋을 더한 값**이고 뷰포트 clip 파라미터가 없다. 그래서 Lab capture에서는 텍스트가 셀 격자로
+스냅돼 픽셀 정확한 GPU quad와 상대 위치가 제품과 다르고, 스크롤 클리핑으로 잘리지도 않는다.
+
+그러므로 Lab capture는 레이아웃·구조(높이·간격·라벨 존재·배경 quad 클리핑)의 증거이지 **텍스트의 픽셀 정렬과
+텍스트 클리핑의 증거가 아니다**. 시각 골든(`test-dock-visual-golden`)도 같은 선을 지킨다. `RichTextArtifact`의
+소비자는 Lab 하나뿐이므로 Lab을 `system_text.Artifact`로 옮기면 이 간극이 사라진다(동기 `shapeOps`와 CoreText
+링크가 이미 있다). 그 이관은 별도 작업이며, `richGlyphsMatchArtifact`가 지키던 대조의 의미가 어떻게 바뀌는지를
+함께 정해야 한다.
+
 다만 Lab 입력은 redacted fixture이고 `AppSession`의 실제 archive worker/snapshot publish를 만들지는 않는다. 그러므로
 active `agent_sessions` host screenshot E2E와 precise scroll gesture, refresh 중 selection·scroll 보존은
 여전히 별도 gate다. component text/ellipsis와 scope width는 pure test로, primary card click은 published tree/action

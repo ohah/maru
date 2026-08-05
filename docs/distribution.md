@@ -65,7 +65,7 @@ Maru를 어떤 채널로 배포하고 어떻게 업데이트하는지의 단일 
 
 `.dmg` 경로(채널 2)에만 해당한다. formula 소스 빌드(채널 1)는 서명·공증이 없다.
 
-- **서명**: `Developer ID Application: Payhere Inc. (2MS57VWFU8)` 인증서로 codesign
+- **서명**: `Developer ID Application: <조직명> (<TEAM_ID>)` 인증서로 codesign(실제 값은 저장소에 두지 않고 `MARU_SIGN_IDENTITY`/`-Dmacos-sign-identity=`로 주입)
   (`--options runtime` hardened + `--timestamp`). 실행파일과 `.app` 번들을 서명한다. Mermaid helper 도입 이후 `Contents/Helpers/MaruMermaidRenderer.app`도 nested code이므로 App Sandbox entitlement로 main app보다 먼저 inside-out 서명하고 `codesign --verify --strict --deep`과 공증 smoke에서 누락을 실패시킨다.
 - **개발/CI helper 서명(FP10c1부터, FP10c2 sandbox 강화)**: 인증서 없는 `macos-app-bundle`도 release와 같은 `Contents/Helpers/MaruMermaidRenderer.app` layout을 만들고 helper app→main executable→app 순서로 ad-hoc 서명한다. helper admission은 App Sandbox와 WebContent 기동용 `network.client`를 요구하고 사용자 파일·Downloads·network server entitlement는 거부한다. runtime bundle containment·regular/non-symlink·code validity 검사는 생략하지 않으며, Developer ID 채널에서는 main/helper Team ID 일치도 확인한다. `mise run macos-mermaid-helper-smoke`가 실제 ad-hoc helper app에서 entitlement, helper/path ABA, resource digest·symlink, protocol·lifecycle을 검증하고 `zig-out/maru-macos-mermaid-helper-smoke/mermaid-helper.summary.json`을 남긴다.
 - **universal helper 결합**: `tools/build-macos-universal-dmg.sh`는 arm64/x86_64 nested helper의 `Info.plist`와 exact `mermaid-helper.js` bytes가 같은지 먼저 비교하고, `Contents/MacOS/maru-mermaid-renderer` 실행파일만 `lipo`한다. main·CLI·helper가 각각 정확히 두 architecture인지, 옛 flat helper와 main resource의 helper runtime이 없는지 확인한 뒤 nested helper를 entitlement 포함 inside-out 재서명하고 최종 `.app`을 `codesign --verify --strict --deep`으로 검증한다.

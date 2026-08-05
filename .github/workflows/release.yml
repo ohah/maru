@@ -10,7 +10,7 @@ name: Release
 #   MACOS_CERT_PASSWORD         위 .p12 의 비밀번호
 #   KEYCHAIN_PASSWORD           CI 임시 키체인 잠금 비번(아무 값, 이 잡에서만 씀)
 #   APPLE_ID                    공증용 Apple 계정 이메일
-#   APPLE_TEAM_ID               팀 ID (예: 2MS57VWFU8)
+#   APPLE_TEAM_ID               팀 ID (10자 영숫자)
 #   APPLE_APP_SPECIFIC_PASSWORD 공증용 앱 전용 암호
 # 비밀값은 리포에 두지 않는다 — 모두 Secret으로 주입한다(distribution.md "서명·공증").
 

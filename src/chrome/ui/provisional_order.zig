@@ -1,15 +1,20 @@
 //! Provisional live reorder — CIM4.
 //!
-//! 탭 drag는 인접 탭의 자리를 **즉시 바꿔 보인다**. 지금 제품은 그 preview를 model을 직접 회전해
-//! 만들고(`app_session.moveTab`이 `tabs`·`surface_ptrs`·`active_tab`을 매 move마다 바꾼다), 그래서
-//! 취소할 자리가 없다 — 중간에 Escape를 눌러도 되돌릴 시작 순서를 아무도 들고 있지 않다.
+//! 탭 drag는 인접 탭의 자리를 **즉시 바꿔 보인다**. 그 preview를 model을 직접 회전해 만들면 취소할
+//! 자리가 없다 — 중간에 Escape를 눌러도 되돌릴 시작 순서를 아무도 들고 있지 않다.
 //!
 //! 이 모듈은 그 preview를 model 밖으로 꺼낸다. 시작 순서를 transaction으로 보관하고, drag 중
 //! 보이는 순서는 여기서 파생한 배열이며, model commit은 up 한 번뿐이다(이관 계약 §4.4).
 //!
+//! **소비자**: terminal tab drag(`app_session.dragTabTo`/`commitTabDragOrder` — `pane.terms`).
+//! 사이드바 워크스페이스 카드(`app_session.moveTab`이 `tabs`·`surface_ptrs`·`active_tab`을 매 move마다
+//! 바꾸는 쪽)는 아직 영구 live reorder이며 CIM5가 이관한다.
+//!
 //! **clamp는 주입받는다.** pin 그룹 경계 같은 제약은 domain 상수라 host가 소유한다
 //! (`app_session.clampMoveToGroup`). 그것을 모르면 preview가 commit할 수 없는 자리를 보여주고,
 //! 손을 떼는 순간 탭이 튄다. `chrome/ui/button.zig`의 icon 등록 predicate와 같은 주입 선례다.
+//! 다만 pin은 **워크스페이스 카드 축 전용**이라 terminal tab 소비자는 clamp를 주입하지 않는다
+//! (`pane.terms`에는 고정 리전이 없고, 목적지 범위는 `tabbar.Metrics.tabIndex`가 이미 가둔다).
 
 const std = @import("std");
 

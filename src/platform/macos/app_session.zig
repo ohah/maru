@@ -2782,6 +2782,15 @@ pub const AppSession = struct {
     // Pointer gesture의 배타적 owner. 아래 legacy payload fields는 variant별 좌표/포인터 저장소일 뿐,
     // 새 gesture admission과 drag/up 라우팅은 이 tagged union의 active tag가 단일 출처다.
     pointer_gesture_owner: PointerGestureOwner = .none,
+    // CIM4b(§4.4 provisional live reorder): Term 탭 드래그가 보여 주는 순서는 model이 아니라 아래 세 버퍼다.
+    // start=드래그 시작 순서(복원의 유일한 근거), preview=지금 보이는 순서(provisional_order.Transaction이 회전),
+    // order=preview에서 파생한 *Term 뷰(paint·hit-test가 함께 읽는다 — 둘이 갈리면 보이는 자리와 놓이는 자리가
+    // 달라진다). identity는 @intFromPtr(*Term)이다. **유효성의 단일 출처는 pointer_gesture_owner의 active tag**이며
+    // 이 버퍼들이 아니다 — divider/scrollbar capture 진입이 union을 직접 비우고(`= .none`) finishPointerGesture를
+    // 우회하므로, 버퍼가 남아 있어도 태그가 .terminal_tab이 아니면 접근자가 model을 돌려줘 stale preview가 안 샌다.
+    tab_drag_start: std.ArrayList(u64) = .empty,
+    tab_drag_preview: std.ArrayList(u64) = .empty,
+    tab_drag_order: std.ArrayList(*Term) = .empty,
     // 이번 드래그 시작(down) 시점의 폭(pt). up에서 이 값과 비교해 "실제로 폭이 바뀐 드래그"에서만 config write-back을
     // 한다. config 미러와 비교하지 않는 이유: init seed 직후 refreshCellMetrics가 동적 하한(sidebarMinPt)으로 clamp하면
     // 런타임 폭이 config 미러와 달라질 수 있어(예: 파일 130 < 큰 폰트 하한 200), 그 비교로는 경계를 눌렀다 안 움직이고
@@ -4899,7 +4908,9 @@ pub const AppSession = struct {
         defer leaf_rects.deinit(self.allocator);
         self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return null;
         for (leaf_rects.items) |lr| {
-            for (lr.leaf.terms.items, 0..) |t, ti| {
+            // 보이는 순서(드래그 중이면 preview)로 찾는다 — 이 위치는 탭 세그먼트 기하의 근거라 paint와 같은
+            // 순서를 써야 한다(§4.4).
+            for (self.paneTermOrder(lr.leaf), 0..) |t, ti| {
                 if (t == term) {
                     const pb = self.paneBar(lr.rect, lr.leaf) orelse return null;
                     return .{ .pb = pb, .tab_index = ti, .count = lr.leaf.terms.items.len, .scroll = lr.leaf.tab_scroll_cols };
@@ -5952,17 +5963,81 @@ pub const AppSession = struct {
         self.focusPane(@intCast(next));
     }
 
+    /// CIM4b(§4.4): 탭 드래그 시작 순서를 transaction 버퍼에 보관한다. 실패(OOM)하면 false — 호출자는 드래그를
+    /// arm하지 않는다(preview 없이 드래그를 시작하면 재정렬이 조용히 무동작이 되므로 fail-close).
+    fn beginTabDragOrder(self: *AppSession, pane: *Pane, index: usize) bool {
+        if (index >= pane.terms.items.len) return false;
+        self.tab_drag_start.clearRetainingCapacity();
+        self.tab_drag_preview.clearRetainingCapacity();
+        self.tab_drag_start.ensureTotalCapacity(self.allocator, pane.terms.items.len) catch return false;
+        self.tab_drag_preview.ensureTotalCapacity(self.allocator, pane.terms.items.len) catch return false;
+        for (pane.terms.items) |t| {
+            self.tab_drag_start.appendAssumeCapacity(@intFromPtr(t));
+            self.tab_drag_preview.appendAssumeCapacity(@intFromPtr(t));
+        }
+        return self.syncTabDragOrder();
+    }
+
+    /// preview(identity)에서 `*Term` 뷰를 다시 만든다. paint·hit-test가 이 뷰 하나만 읽으므로 preview를 바꾼
+    /// 모든 자리가 이것을 뒤따라 불러야 한다. 실패(OOM)면 false — 호출자가 뷰를 비워 model 순서로 되돌린다.
+    fn syncTabDragOrder(self: *AppSession) bool {
+        self.tab_drag_order.clearRetainingCapacity();
+        self.tab_drag_order.ensureTotalCapacity(self.allocator, self.tab_drag_preview.items.len) catch return false;
+        for (self.tab_drag_preview.items) |id| self.tab_drag_order.appendAssumeCapacity(@ptrFromInt(id));
+        return true;
+    }
+
+    /// 지금 이 pane에 유효한 transaction. `pane.terms`와 길이가 어긋나면(드래그 중 외부 mutation) null —
+    /// 그 경우 접근자들이 model 순서로 되돌아가고 preview는 commit되지 않는다.
+    /// clamp는 주입하지 않는다: pin 그룹은 워크스페이스(`self.tabs`) 축 전용이고 `pane.terms`에는 없으며,
+    /// 목적지 범위 clamp는 `Metrics.tabIndex`가 이미 [0,len)으로 한다.
+    fn tabDragTransaction(self: *AppSession, pane: *Pane) ?chrome.ui.provisional_order.Transaction {
+        if (!self.pointerGestureIs(.terminal_tab)) return null;
+        const drag = self.pointer_gesture_owner.terminal_tab;
+        if (drag.pane != pane) return null;
+        if (drag.index >= pane.terms.items.len) return null;
+        if (self.tab_drag_start.items.len != pane.terms.items.len) return null;
+        if (self.tab_drag_preview.items.len != pane.terms.items.len) return null;
+        return .{
+            .start = self.tab_drag_start.items,
+            .preview = self.tab_drag_preview.items,
+            .source = @intFromPtr(pane.terms.items[drag.index]),
+        };
+    }
+
+    /// drag 중이면 preview 순서, 아니면 model 순서. **paint와 hit-test가 함께 이것을 읽는다**(§4.4) — 갈리면
+    /// 보이는 자리와 놓이는 자리가 달라진다.
+    fn paneTermOrder(self: *AppSession, pane: *Pane) []const *Term {
+        if (self.tabDragTransaction(pane) == null) return pane.terms.items;
+        if (self.tab_drag_order.items.len != pane.terms.items.len) return pane.terms.items;
+        return self.tab_drag_order.items;
+    }
+
+    /// 활성 탭의 **보이는** 위치. `pane.active_term`은 model 인덱스라 preview와 순서가 다르면 두 해석이 갈린다 —
+    /// preview를 그대로 쓰는 게 아니라 model이 가리키는 `*Term`을 preview에서 되찾는다.
+    fn paneActiveTermIndex(self: *AppSession, pane: *Pane) usize {
+        const order = self.paneTermOrder(pane);
+        if (order.ptr == pane.terms.items.ptr) return pane.active_term;
+        if (pane.active_term >= pane.terms.items.len) return pane.active_term;
+        const active = pane.terms.items[pane.active_term];
+        for (order, 0..) |t, i| if (t == active) return i;
+        return pane.active_term;
+    }
+
     /// 드래그 중인 Term 탭을 현재 마우스 x에 따라 소스 pane 바 안에서 재정렬한다(PR-E1: pane 내). 소스 pane의
-    /// 바를 찾아 x→타겟 탭(tabIndexInBar, x clamp)을 잡고, 현재 인덱스와 다르면 pane.terms를 rotateMove하고
-    /// active_term·drag_index를 타겟으로 옮긴다(드래그 탭이 활성으로 따라간다 — 같은 Term이라 대표 surface는
-    /// 안 바뀜). 탭 1개거나 소스 pane을 못 찾으면(레이아웃 실패) 무동작. mouse가 drag(kind 2)에서 호출.
+    /// 바를 찾아 x→타겟 탭(tabIndexInBar, x clamp)을 잡고 **preview만** 회전한다 — model(`pane.terms`·
+    /// `active_term`)은 up까지 그대로다(§4.4 provisional live reorder). 보이는 순서가 따라가는 것은 paint·
+    /// hit-test가 `paneTermOrder`/`paneActiveTermIndex`로 preview를 읽기 때문이다. `drag.index`는 **시작 model
+    /// 인덱스로 고정**한다 — dropTabAt(moveTermToPane·moveTermToNewSplit)과 floating 미리보기 라벨이 그 해석을
+    /// 쓴다. 탭 1개거나 소스 pane을 못 찾으면(레이아웃 실패) 무동작. mouse가 drag(kind 2)에서 호출.
     fn dragTabTo(self: *AppSession, x_px: f64) void {
         const drag = switch (self.pointer_gesture_owner) {
-            .terminal_tab => |*drag| drag,
+            .terminal_tab => |drag| drag,
             else => return,
         };
         const pane = drag.pane;
         if (pane.terms.items.len <= 1) return;
+        var txn = self.tabDragTransaction(pane) orelse return;
         var leaf_rects: std.ArrayList(PaneTree.LeafRect) = .empty;
         defer leaf_rects.deinit(self.allocator);
         self.activeTabLeafRects(self.allocator, self.termRect(), &leaf_rects) catch return;
@@ -5971,18 +6046,34 @@ pub const AppSession = struct {
             const pb = self.paneBar(lr.rect, pane) orelse return;
             const m = barMetrics(pb.tabs, self.cell_width_px, pane.terms.items.len, self.buildChromeTokens().space.tab_width_cols, pane.tab_scroll_cols) orelse return;
             const target = m.tabIndex(pane.terms.items.len, x_px);
-            if (target != drag.index) {
-                rotateMove(*Term, pane.terms.items, drag.index, target);
-                pane.active_term = target; // 드래그한 탭(활성)이 새 위치로 따라간다
-                drag.index = target;
+            const before = txn.destination();
+            txn.moveTo(target);
+            if (txn.destination() != before) {
+                if (!self.syncTabDragOrder()) self.tab_drag_order.clearRetainingCapacity(); // 뷰 실패 시 model 순서로 폴백
                 self.metal_dirty = true;
             }
             return;
         }
     }
 
+    /// up에서 preview를 model에 한 번 반영한다(§4.4 "up에서만 commit"). preview가 시작과 같으면 effect 0 —
+    /// model도 active_term도 안 건드린다. 같은 pane 안 재정렬 전용이며, 다른 pane으로의 이동/split은 preview를
+    /// 버리고(=시작 순서 유지) moveTermToPane·moveTermToNewSplit이 model 인덱스로 처리한다.
+    fn commitTabDragOrder(self: *AppSession, pane: *Pane) void {
+        const txn = self.tabDragTransaction(pane) orelse return;
+        if (!txn.changed()) return;
+        const drag = self.pointer_gesture_owner.terminal_tab;
+        const to = txn.destination() orelse return;
+        if (to == drag.index) return;
+        rotateMove(*Term, pane.terms.items, drag.index, to);
+        pane.active_term = adjustActiveForMove(pane.active_term, drag.index, to);
+        self.metal_dirty = true;
+    }
+
     /// 탭 드래그 up(drop) 시 마우스가 '소스가 아닌 다른 pane'의 바 위면 그 pane으로 Term을 옮긴다(cross-pane,
-    /// PR-E2). 같은 pane이거나 바 밖이면 무동작(pane 내 재정렬은 drag(2)가 이미 live로 처리했다). 드롭 위치
+    /// PR-E2). **같은 pane의 바 위면 preview를 model에 commit한다**(§4.4 — up이 유일한 commit 지점). 어느 바도
+    /// 아니고 drop-zone도 아니면 commit 없이 끝나 시작 순서가 남는다(§4.4 "유효한 destination을 못 짚으면
+    /// commit 없이 시작 순서 복원" — model을 안 건드렸으므로 복원은 아무 일도 안 하는 것과 같다). 드롭 위치
     /// (x)로 dst 안 삽입 인덱스를 잡는다. mouse가 up(kind 3)에서 호출.
     fn dropTabAt(self: *AppSession, x_px: f64, y_px: f64) void {
         const drag = switch (self.pointer_gesture_owner) {
@@ -5996,7 +6087,10 @@ pub const AppSession = struct {
         for (leaf_rects.items) |lr| {
             const pb = self.paneBar(lr.rect, lr.leaf) orelse continue;
             if (layout_math.pointInRect(x_px, y_px, pb.full)) { // 클릭 판정은 전체 바(라벨 포함)
-                if (lr.leaf == src) return; // 같은 pane — 재정렬은 이미 됨
+                if (lr.leaf == src) { // 같은 pane — 여기가 preview의 유일한 commit 지점(§4.4)
+                    self.commitTabDragOrder(src);
+                    return;
+                }
                 const dst_count = lr.leaf.terms.items.len; // dst pane은 항상 Term ≥1(빈 pane은 collapse됨)
                 const m = barMetrics(pb.tabs, self.cell_width_px, dst_count, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols) orelse return;
                 self.moveTermToPane(src, drag.index, lr.leaf, m.tabIndex(dst_count, x_px));
@@ -20068,7 +20162,10 @@ pub const AppSession = struct {
             if (m.inScrollLeftZone(x_px) or m.inScrollRightZone(x_px) or m.inPlusZone(x_px)) return null; // ‹›/+ 은 대상 아님
             const tab = m.tabIndex(count, x_px);
             if (m.inCloseZone(tab, x_px)) return null; // 탭 우측 ✕(close) zone은 rename 대상 아님
-            if (tab < count) return .{ .term = lr.leaf.terms.items[tab] };
+            // 보이는 순서에서 고른다 — 드래그 중이면 사용자가 본 자리가 preview이고, rename은 그 제스처를
+            // 취소하지 않으므로 model 순서로 고르면 눌린 것과 다른 탭이 대상이 된다(§4.4 "paint와 hit-test가 함께").
+            const order = self.paneTermOrder(lr.leaf);
+            if (tab < order.len) return .{ .term = order[tab] };
             return null;
         }
         return null;
@@ -23184,6 +23281,9 @@ pub const AppSession = struct {
                         } else {
                             // ✕가 아니면 탭 드래그를 arm한다(이어지는 drag(2)가 pane 내 재정렬). 안 끌면 그냥 전환.
                             self.beginPointerGesture(.{ .terminal_tab = .{ .pane = lr.leaf, .index = tab, .x = x_px, .y = y_px } });
+                            // §4.4: 시작 순서를 transaction에 보관한다(begin 뒤에 — beginPointerGesture가 앞선 제스처를
+                            // 취소하며 union을 갈아끼운다). 실패하면 preview 없이 끄는 무동작 드래그가 되므로 arm을 되돌린다.
+                            if (!self.beginTabDragOrder(lr.leaf, tab)) self.finishPointerGesture();
                         }
                         self.drag_autoscroll = 0;
                         self.mouse_drag_selecting = false;
@@ -29192,7 +29292,7 @@ pub const AppSession = struct {
                     // 하는 systemic 변경(사이드바 이중레이어 한계와 동류, 보류). 현 반투명 cutout이 두 근사 중 본문에 더 가깝다.
                     const tab_cutout_bg = self.chromeQuadBg(packOpaqueRgb(self.appearance.theme.background));
                     const ub_accent = if (lr.leaf == active_pane) tab_accent else packOpaqueRgb(tk.palette.get(.muted_fg)); // 언더바=focus indicator(배경 아님) — 불투명 유지
-                    if (m_opt) |m| self.appendActiveTabHighlight(m, lr.leaf.active_term, tab_cutout_bg, self.chromeQuadBg(hl_bg), ub_accent, tk_space, tk.border);
+                    if (m_opt) |m| self.appendActiveTabHighlight(m, self.paneActiveTermIndex(lr.leaf), tab_cutout_bg, self.chromeQuadBg(hl_bg), ub_accent, tk_space, tk.border);
                     if (m_opt) |m| if (m.has_scroll) { // #5a/#5b: 우측 ‹·› 사각형 버튼 — hover면 밝게(sidebarActiveBg)로 클릭 가능 표시
                         const lh = if (self.hovered_scroll) |hs| (hs.pane == lr.leaf and !hs.right) else false;
                         const rh = if (self.hovered_scroll) |hs| (hs.pane == lr.leaf and hs.right) else false;
@@ -29203,7 +29303,7 @@ pub const AppSession = struct {
                     // tui: 직각 셀 — 바 배경 후 활성 탭 밴드(셀-셀 append 순서로 밴드가 위). window.opacity는 셀 경로라 premultiply.
                     if (paneBarBgCell(bar, self.cell_width_px, self.chromeCellBg(self.sidebarBg()))) |cell| pane_chrome.append(self.allocator, cell) catch {};
                     if (m_opt) |m| {
-                        if (tabbarHighlightCell(m, lr.leaf.active_term, self.chromeCellBg(hl_bg))) |cell| pane_chrome.append(self.allocator, cell) catch {};
+                        if (tabbarHighlightCell(m, self.paneActiveTermIndex(lr.leaf), self.chromeCellBg(hl_bg))) |cell| pane_chrome.append(self.allocator, cell) catch {};
                     }
                 }
                 // 활성 pane 강조는 활성 탭 하단 앰버 언더바(appendActiveTabHighlight)로 일원화한다(사용자 요청) — 옛
@@ -29416,7 +29516,9 @@ pub const AppSession = struct {
                     }
                     // rename 중인 Term 탭 인덱스(있으면) — 그 탭만 tail 앵커로 그려 편집 텍스트의 caret(문자열 끝)를 세그먼트 안에 유지한다.
                     var editing_tab: ?usize = null;
-                    for (lr.leaf.terms.items) |term| {
+                    // 보이는 순서(드래그 중이면 preview)로 제목을 싣는다 — 이 순서가 §4.4 provisional live reorder가
+                    // 실제로 화면에 보이는 자리다. model(`terms.items`)은 up commit까지 그대로다.
+                    for (self.paneTermOrder(lr.leaf)) |term| {
                         // Term 탭 라벨 = surface.custom_name(rename) 우선, 없으면 자동 제목(번호 prefix 없음 — 모던 탭은
                         // 브라우저/VSCode/Warp처럼 제목만; Term 번호는 단축키에 매핑되지 않아 시각 군더더기였다, U-tab2).
                         // 이 Term을 rename 중이면 그 탭에 편집 텍스트(+caret)를 그려 탭에서 바로 편집되게 한다.
@@ -29441,7 +29543,7 @@ pub const AppSession = struct {
                     // ✕는 **모든 Term 탭에 고정 표시**한다(호버 전용 폐기 — 사용자 요청). 어디를 눌러야 닫히는지
                     // 마우스를 올려보기 전에 알 수 있어야 한다는 같은 이유로 사이드바 카드·에이전트 행도 고정이다.
                     const close_tab = true;
-                    const dl = coretext_frame_builder.buildPaneTabBarDrawList(self.allocator, titles.items, @intCast(bar_cols), tab_fg, close_tab, lr.leaf.active_term, active_tab_fg, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols, editing_tab) catch continue;
+                    const dl = coretext_frame_builder.buildPaneTabBarDrawList(self.allocator, titles.items, @intCast(bar_cols), tab_fg, close_tab, self.paneActiveTermIndex(lr.leaf), active_tab_fg, self.buildChromeTokens().space.tab_width_cols, lr.leaf.tab_scroll_cols, editing_tab) catch continue;
                     // running Term 탭 플래그 ● → 브랜드색(pane 대표 kind). 탭마다 종류가 다를 수 있으나 혼재는 드물어 pane 대표색으로 통일.
                     if (paneHasRunningAgent(lr.leaf)) recolorAgentFlagCells(dl.cells, paneAgentKind(lr.leaf));
                     self.collectShaped(&collected, dl, pane_frame_builder, .{ .pane = .{ .origin_x = pb.tabs.x, .origin_y = text_origin_y, .colors = tabbar_colors } });
@@ -34178,6 +34280,9 @@ pub const AppSession = struct {
         self.divider_seg_scratch.deinit(self.allocator);
         self.divider_entry_scratch.deinit(self.allocator);
         self.divider_split_scratch.deinit(self.allocator);
+        self.tab_drag_start.deinit(self.allocator); // CIM4b: 탭 드래그 provisional 순서 버퍼(드래그 수명 동안만 의미)
+        self.tab_drag_preview.deinit(self.allocator);
+        self.tab_drag_order.deinit(self.allocator);
         // 1) 각 탭의 각 panel의 각 Term routing detach — closeAndDetach가 **앱 전역 라우팅**(app_runtime.routing)에서 이
         //    창의 링크만 뺀다(surface_id 키드 — 다른 창 링크는 안 건드림, M3b 창 격리 불변식). M3a: 번들 slot의 소유 해제
         //    (registry.remove=번들 deinit=reader join + surface.deinit)는 **아래 2)로 미룬다** — 번들 remove가 surface까지
@@ -56377,6 +56482,166 @@ test "hovering the '+' button does not mark the last tab for close" {
     try std.testing.expect(m.inPlusZone(plus_x));
     _ = session.hoverCursor(plus_x, bar_y, 0);
     try std.testing.expect(session.hovered_tab == null);
+}
+
+// CIM4b(§4.4 provisional live reorder). Term 3개 pane에서 탭 0을 탭 2 자리로 끄는 **한 드래그 수명**을
+// 세 단계로 고정한다: (1) drag 중 model(`terms`·`active_term`)은 시작 그대로이고 **보이는** 순서만 회전하며,
+// (2) `drag.index`는 시작 model 인덱스로 고정돼 floating 미리보기·cross-pane 이동이 같은 해석을 쓰고,
+// (3) 소스 바 위 up **한 번**이 model을 preview와 일치시킨다. 실 init/spawn이라 macOS 게이트.
+test "CIM4b: 탭 드래그는 model을 안 건드리고 보이는 순서만 바꾼다 — commit은 up 한 번" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
+    const pane = session.activePane();
+    try std.testing.expectEqual(@as(usize, 3), pane.terms.items.len);
+    const t0 = pane.terms.items[0];
+    const t1 = pane.terms.items[1];
+    const t2 = pane.terms.items[2];
+
+    var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer lr.deinit(allocator);
+    try session.activeTabLeafRects(allocator, session.termRect(), &lr);
+    const pb = session.paneBar(lr.items[0].rect, lr.items[0].leaf).?;
+    const m = barMetrics(pb.tabs, session.cell_width_px, 3, 0, 0).?;
+    const tab0_x: f64 = @floatFromInt(pb.tabs.x + (0 * m.tab_w + 1) * session.cell_width_px);
+    const tab2_x: f64 = @floatFromInt(pb.tabs.x + (2 * m.tab_w + 1) * session.cell_width_px);
+    const bar_y: f64 = @floatFromInt(pb.full.y + 1);
+
+    session.mouse(1, tab0_x, bar_y, 0, 0);
+    try std.testing.expect(session.pointerGestureIs(.terminal_tab));
+    session.mouse(2, tab2_x, bar_y, 0, 0); // 탭 2 자리까지 끌었다 — 아직 손을 떼지 않았다
+
+    // (1) model 불변: 순서도 활성 인덱스도 down 시점 그대로다. 여기가 옛 영구 live reorder와 갈리는 지점 —
+    //     예전에는 이 시점에 이미 `terms`가 회전해 있어 취소할 자리가 없었다.
+    try std.testing.expectEqual(t0, pane.terms.items[0]);
+    try std.testing.expectEqual(t1, pane.terms.items[1]);
+    try std.testing.expectEqual(t2, pane.terms.items[2]);
+    try std.testing.expectEqual(@as(usize, 0), pane.active_term);
+
+    // 보이는 순서(paint·hit-test 공용)만 [T1,T2,T0]으로 회전했고, 활성 표시도 끌리는 탭을 따라간다.
+    // `active_term`은 model 인덱스라 preview를 그대로 쓰면 안 되고 그 Term의 preview 내 위치여야 한다.
+    const order = session.paneTermOrder(pane);
+    try std.testing.expectEqual(t1, order[0]);
+    try std.testing.expectEqual(t2, order[1]);
+    try std.testing.expectEqual(t0, order[2]);
+    try std.testing.expectEqual(@as(usize, 2), session.paneActiveTermIndex(pane));
+
+    // (2) drag.index는 시작 model 인덱스로 고정 — floating 미리보기 라벨(`terms.items[drag.index]`)과
+    //     cross-pane 이동(moveTermToPane)이 이 해석을 쓴다. preview 위치로 덮으면 둘 다 엉뚱한 Term을 짚는다.
+    try std.testing.expectEqual(@as(usize, 0), session.pointer_gesture_owner.terminal_tab.index);
+    try std.testing.expectEqual(t0, pane.terms.items[session.pointer_gesture_owner.terminal_tab.index]);
+
+    // (3) 소스 바 위 up = 유일한 commit. model이 그제서야 preview와 같아지고 활성도 따라온다.
+    session.mouse(3, tab2_x, bar_y, 0, 0);
+    try std.testing.expect(!session.pointerGestureIs(.terminal_tab));
+    try std.testing.expectEqual(t1, pane.terms.items[0]);
+    try std.testing.expectEqual(t2, pane.terms.items[1]);
+    try std.testing.expectEqual(t0, pane.terms.items[2]);
+    try std.testing.expectEqual(@as(usize, 2), pane.active_term);
+    // 드래그가 끝나면 접근자는 다시 model을 돌려준다(preview 잔재가 안 샌다).
+    try std.testing.expectEqual(pane.terms.items.ptr, session.paneTermOrder(pane).ptr);
+}
+
+// §4.4: "commit destination의 권위는 up 좌표의 재hit-test이고, 유효한 destination을 못 짚으면 commit 없이
+// 시작 순서를 복원한다." 탭 바도 pane 본문 drop-zone도 아닌 곳(사이드바)에서 손을 떼면 preview가 통째로
+// 버려져 시작 순서가 남는지 — model을 안 건드렸으므로 복원은 "아무 일도 안 하는 것"과 같다.
+test "CIM4b: 바 밖에서 뗀 드래그는 commit 없이 시작 순서로 남는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
+    const pane = session.activePane();
+    const t0 = pane.terms.items[0];
+    const t1 = pane.terms.items[1];
+    const t2 = pane.terms.items[2];
+
+    var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer lr.deinit(allocator);
+    try session.activeTabLeafRects(allocator, session.termRect(), &lr);
+    const pb = session.paneBar(lr.items[0].rect, lr.items[0].leaf).?;
+    const m = barMetrics(pb.tabs, session.cell_width_px, 3, 0, 0).?;
+    const tab0_x: f64 = @floatFromInt(pb.tabs.x + (0 * m.tab_w + 1) * session.cell_width_px);
+    const tab2_x: f64 = @floatFromInt(pb.tabs.x + (2 * m.tab_w + 1) * session.cell_width_px);
+    const bar_y: f64 = @floatFromInt(pb.full.y + 1);
+
+    session.mouse(1, tab0_x, bar_y, 0, 0);
+    session.mouse(2, tab2_x, bar_y, 0, 0);
+    try std.testing.expectEqual(t0, session.paneTermOrder(pane)[2]); // preview는 끝자리로 옮겨져 있다
+
+    // 사이드바 위(어느 leaf rect도 아니고 drop-zone도 아님)에서 up.
+    session.mouse(3, 2, bar_y, 0, 0);
+    try std.testing.expect(!session.pointerGestureIs(.terminal_tab));
+    try std.testing.expectEqual(t0, pane.terms.items[0]);
+    try std.testing.expectEqual(t1, pane.terms.items[1]);
+    try std.testing.expectEqual(t2, pane.terms.items[2]);
+    try std.testing.expectEqual(@as(usize, 0), pane.active_term);
+}
+
+// §4.4 "같은 순서면 up에서도 model을 건드리지 않는다(effect 0)". 눌렀다 그 자리에서 떼는 클릭성 드래그가
+// rotateMove·active_term 재대입을 한 번도 하지 않는지 — metal_dirty로 effect 유무를 관측한다.
+test "CIM4b: 제자리 드롭은 effect 0(model도 metal_dirty도 안 건드린다)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
+    _ = try session.handleKeyEvent(.{ .key = .{ .char = 't' }, .modifiers = .{ .command = true } });
+    const pane = session.activePane();
+    const t0 = pane.terms.items[0];
+
+    var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer lr.deinit(allocator);
+    try session.activeTabLeafRects(allocator, session.termRect(), &lr);
+    const pb = session.paneBar(lr.items[0].rect, lr.items[0].leaf).?;
+    const m = barMetrics(pb.tabs, session.cell_width_px, 3, 0, 0).?;
+    const tab0_x: f64 = @floatFromInt(pb.tabs.x + (0 * m.tab_w + 1) * session.cell_width_px);
+    const bar_y: f64 = @floatFromInt(pb.full.y + 1);
+
+    session.mouse(1, tab0_x, bar_y, 0, 0);
+    session.mouse(2, tab0_x, bar_y, 0, 0); // 같은 탭 세그먼트 안에서만 움직였다
+    session.metal_dirty = false; // 여기까지의 dirty(드롭 타겟 하이라이트 등)는 걷어내고 up의 effect만 본다
+    session.mouse(3, tab0_x, bar_y, 0, 0);
+    try std.testing.expect(!session.metal_dirty); // commit이 아무 일도 안 했다
+    try std.testing.expectEqual(t0, pane.terms.items[0]);
+    try std.testing.expectEqual(@as(usize, 0), pane.active_term);
 }
 
 // 탭을 드래그하면 pane 안에서 순서가 바뀌는지(PR-E1) — 실 init/spawn이라 macOS 게이트. ⌘T로 Term 3개를

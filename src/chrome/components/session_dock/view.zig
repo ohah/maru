@@ -364,7 +364,7 @@ const Writer = struct {
         // 행 바닥 밖으로 내려가 아래 카드에 걸친다(사용자 보고).
         const pill_y: f32 = rect.rect.y + (rect.rect.height - @as(f32, @floatFromInt(pill_h))) / 2;
         const pill_radius: u16 = @intCast(@min(pill_h / 2, @as(u32, std.math.maxInt(u16))));
-        try self.appendClippedQuad(rect, .{
+        try self.appendQuadClippedBy(rect, .{
             .rect = .{
                 .x = @intFromFloat(@floor(pill_x)),
                 .y = @intFromFloat(@floor(pill_y)),
@@ -415,38 +415,17 @@ const Writer = struct {
         self.op_count += 1;
     }
 
-    /// `ui_paint`가 만드는 카드/버튼 배경은 이미 published clip으로 잘려 나온다. component가 직접 내는
-    /// 장식 quad(그룹 count pill 등)도 같은 규율을 따라야 스크롤로 목록 위로 나간 조각이 고정 chrome
-    /// 위에 남지 않는다.
-    fn appendClippedQuad(self: *Writer, rect: tree.RectEntry, quad: draw.Op.Quad) ViewError!void {
-        const clip = rect.effective_clip orelse return self.appendQuad(quad);
-        const left: i32 = @intFromFloat(@ceil(clip.x));
-        const top: i32 = @intFromFloat(@ceil(clip.y));
-        const right: i32 = @intFromFloat(@floor(clip.x + clip.width));
-        const bottom: i32 = @intFromFloat(@floor(clip.y + clip.height));
-        const x0 = @max(quad.rect.x, left);
-        const y0 = @max(quad.rect.y, top);
-        const x1 = @min(quad.rect.x + @as(i32, @intCast(quad.rect.w)), right);
-        const y1 = @min(quad.rect.y + @as(i32, @intCast(quad.rect.h)), bottom);
-        if (x1 <= x0 or y1 <= y0) return;
+    /// 장식 quad에 자기 published clip을 **실어서** 낸다. 교차를 여기서 계산하지 않는 것이 핵심이다 —
+    /// 자르는 일은 backend 몫이라야 잘린 변의 radius/border 보정 같은 세부를 컴포넌트마다 반복하지 않고,
+    /// 나중에 그 구현을 GPU로 옮길 때도 컴포넌트가 영향을 받지 않는다.
+    fn appendQuadClippedBy(self: *Writer, rect: tree.RectEntry, quad: draw.Op.Quad) ViewError!void {
         var owned = quad;
-        owned.rect = .{ .x = x0, .y = y0, .w = @intCast(x1 - x0), .h = @intCast(y1 - y0) };
-        // 잘린 변은 원래 모양의 **내부**다. 거기에 radius와 테두리를 그대로 남기면 shader가 줄어든 rect의
-        // 네 모서리를 다시 둥글리고 잘린 선을 따라 stroke를 그어, 클립 경계에 없어야 할 곡률과 1px 선이
-        // 생긴다. 잘린 변만 각지게 만들고 그 변의 테두리를 뗀다(반대 변은 원래 모양이므로 유지).
-        const cut_left = x0 > quad.rect.x;
-        const cut_top = y0 > quad.rect.y;
-        const cut_right = x1 < quad.rect.x + @as(i32, @intCast(quad.rect.w));
-        const cut_bottom = y1 < quad.rect.y + @as(i32, @intCast(quad.rect.h));
-        // corner_radii = [tl, tr, br, bl], border_widths = [top, right, bottom, left].
-        if (cut_top or cut_left) owned.corner_radii[0] = 0;
-        if (cut_top or cut_right) owned.corner_radii[1] = 0;
-        if (cut_bottom or cut_right) owned.corner_radii[2] = 0;
-        if (cut_bottom or cut_left) owned.corner_radii[3] = 0;
-        if (cut_top) owned.border_widths[0] = 0;
-        if (cut_right) owned.border_widths[1] = 0;
-        if (cut_bottom) owned.border_widths[2] = 0;
-        if (cut_left) owned.border_widths[3] = 0;
+        if (rect.effective_clip) |clip| owned.clip = .{
+            .x = @intFromFloat(@ceil(clip.x)),
+            .y = @intFromFloat(@ceil(clip.y)),
+            .w = @intFromFloat(@max(@floor(clip.width), 0)),
+            .h = @intFromFloat(@max(@floor(clip.height), 0)),
+        };
         return self.appendQuad(owned);
     }
 
@@ -1195,19 +1174,22 @@ test "SessionDock group header runs are scroll clipped and its pill stays inside
     try std.testing.expectEqual(@as(?bool, true), label_scroll_clipped);
     // 뒤따르는 카드는 여전히 보여야 한다 — over-clipping도 결함이다.
     try std.testing.expect(saw_next);
-    // component가 직접 만드는 pill quad는 published clip 밖으로 나가지 않는다.
-    var saw_pill = false;
+    // component가 직접 만드는 pill quad는 **자기 published clip을 실어서** 낸다. 자르는 일은 backend
+    // 몫이므로 여기서 rect가 잘려 있기를 기대하지 않는다 — 그걸 기대하면 컴포넌트마다 교차와 잘린 변
+    // 모양 보정을 반복해야 하고, 새 스크롤 컴포넌트가 그 규칙을 모르면 조용히 같은 결함이 재발한다.
+    var pill_clip: ?draw.Rect = null;
     for (out.ops) |op| switch (op) {
         .quad => |quad| if (quad.fill_role == .inset_bg) {
-            saw_pill = true;
-            const top: f32 = @floatFromInt(quad.rect.y);
-            const bottom = top + @as(f32, @floatFromInt(quad.rect.h));
-            try std.testing.expect(top >= clip_top);
-            try std.testing.expect(bottom <= clip_bottom);
+            pill_clip = quad.clip;
         },
         else => {},
     };
-    try std.testing.expect(saw_pill);
+    // 실린 clip은 그룹 행의 published clip(= content 뷰포트 ∩ 행 rect)이므로, content 안에 들어 있고
+    // 행이 위로 잘린 만큼 상단이 content 경계에 붙는다.
+    const clip = pill_clip orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(i32, @intFromFloat(@ceil(clip_top))), clip.y);
+    try std.testing.expect(clip.y + @as(i32, @intCast(clip.h)) <= @as(i32, @intFromFloat(@floor(clip_bottom))));
+    try std.testing.expect(clip.h > 0);
 }
 
 // 사용자 보고 회귀: 그룹의 count pill이 행 아래로 밀려 카드 위에 걸쳐 보였다. 원인은 세로 중앙 계산의

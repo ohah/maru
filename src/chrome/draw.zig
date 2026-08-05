@@ -145,6 +145,14 @@ pub const Op = union(enum) {
         fill_role_end: ?tokens.ColorRole = null, // gradient 끝 색(null=solid)
         gradient: GradientKind = .solid,
         alpha: u8 = 0xFF,
+        /// 이 quad를 잘라야 할 뷰포트(published tree의 `effective_clip`을 **그대로** 전달한 값).
+        /// 컴포넌트는 교차를 계산하지 않는다 — 자르는 일은 backend 몫이고, 그래야 잘린 변의 radius/border
+        /// 보정 같은 세부를 컴포넌트마다 반복하지 않는다. `null`이면 클리핑 없음.
+        ///
+        /// 텍스트(`Text.scroll_clipped`)가 rect가 아니라 소속 bool을 싣는 것과 대비된다: 텍스트는 shaping
+        /// 결과를 캐시하므로 rect를 실으면 스크롤 1px마다 캐시 키가 바뀐다. quad는 매 프레임 새로 만들어
+        /// 캐시가 없으므로 rect를 직접 실는 쪽이 단순하다.
+        clip: ?Rect = null,
     };
     pub const GradientKind = enum(u8) { solid = 0, vertical = 1, horizontal = 2 };
 };

@@ -92,8 +92,8 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
                 // Card y offsets are DockMetrics values, not 1/3/5 terminal rows. This keeps
                 // its three-line density and the disclosure hit rect stable across terminal
                 // font zoom while the worker still owns actual glyph shaping and ellipsis.
-                try writer.textAtY(card_rect, dock_metrics.card_inset_x, dock_metrics.card_title_y, card.title, .surface_fg, .card_heading, false);
-                try writer.textAtY(card_rect, dock_metrics.card_inset_x, dock_metrics.card_summary_y, card.summary, .muted_fg, .body, false);
+                try writer.textAtY(card_rect, dock_metrics.card_inset_x, dock_metrics.card_title_y, card.title, .surface_fg, .card_heading, false, dock_metrics.cardDisclosureReserve());
+                try writer.textAtY(card_rect, dock_metrics.card_inset_x, dock_metrics.card_summary_y, card.summary, .muted_fg, .body, false, dock_metrics.cardDisclosureReserve());
                 try writer.cardMetadataAtY(card_rect, dock_metrics, card.provider.label(), card.metadata);
                 // The whole title card remains one disclosure action, but its trailing chevron
                 // makes that interaction discoverable and shares the exact card rect used by
@@ -202,10 +202,12 @@ const Writer = struct {
     /// 목록 위를 벗어나면 chevron만 고정 chrome 위에 그려졌다. 다른 affordance(refresh·search·group
     /// chevron)와 같은 경로로 합류시켜 clip을 함께 받는다.
     fn cardDisclosure(self: *Writer, rect: tree.RectEntry, metrics: types.DockMetrics) ViewError!void {
-        const cw = self.props.cell_width_px;
-        if (cw == 0) return;
         const extent = metrics.group_disclosure_extent;
-        const inset: f32 = @floatFromInt(cw);
+        // 우측 inset은 카드가 이미 소유한 logical content inset이다. 예전에는 terminal cell 폭을 썼는데,
+        // 그러면 터미널 폰트를 바꾸는 것만으로 chevron이 좌우로 움직여 docs/agent-session-list.md §2.1.1의
+        // "도크 기하는 terminal cell에서 결정하지 않는다"를 어긴다. 좌측 텍스트 inset과 같은 값을 써서
+        // chevron의 우측 여백이 카드 좌측 여백과 시각적으로 맞도록 한다.
+        const inset: f32 = @floatFromInt(metrics.card_inset_x);
         if (rect.rect.width <= inset + @as(f32, @floatFromInt(extent))) return;
         if (rect.rect.height < @as(f32, @floatFromInt(extent))) return;
         const slot = draw.Rect{
@@ -308,13 +310,17 @@ const Writer = struct {
     /// A fixed Chrome component can use terminal columns only as a conservative horizontal
     /// truncation budget. Its vertical hierarchy must come from the published DockMetrics
     /// snapshot, otherwise terminal zoom moves text inside a stable card/hit rect.
-    fn textAtY(self: *Writer, rect: tree.RectEntry, inset_x: u32, offset_y: u32, source: []const u8, role: tokens.ColorRole, text_role: typography.ChromeTextRole, bold: bool) ViewError!void {
+    ///
+    /// `trailing_reserve_px`는 이 줄이 절대 침범하면 안 되는 우측 영역(카드의 disclosure slot 등)이다.
+    /// 최종 ellipsis는 worker가 measured advance로 정하지만, 그 예산에서 이 폭을 미리 빼 두지 않으면
+    /// 잘린 텍스트가 우측 affordance에 그대로 맞닿는다.
+    fn textAtY(self: *Writer, rect: tree.RectEntry, inset_x: u32, offset_y: u32, source: []const u8, role: tokens.ColorRole, text_role: typography.ChromeTextRole, bold: bool, trailing_reserve_px: u32) ViewError!void {
         const cw = self.props.cell_width_px;
         const ch = self.props.cell_height_px;
         if (cw == 0 or ch == 0) return;
         const x = rect.rect.x + @as(f32, @floatFromInt(inset_x));
         const y = rect.rect.y + @as(f32, @floatFromInt(offset_y));
-        const available_px = rect.rect.width - @as(f32, @floatFromInt(inset_x + cw));
+        const available_px = rect.rect.width - @as(f32, @floatFromInt(inset_x + cw + trailing_reserve_px));
         if (available_px <= 0) return;
         const max_cols: u16 = @intFromFloat(@min(
             @floor(available_px / @as(f32, @floatFromInt(cw))),
@@ -324,7 +330,7 @@ const Writer = struct {
     }
 
     fn cardMetadataAtY(self: *Writer, rect: tree.RectEntry, metrics: types.DockMetrics, provider: []const u8, metadata: []const u8) ViewError!void {
-        try self.textAtY(rect, metrics.card_inset_x, metrics.card_metadata_y, provider, .surface_fg, .metadata, false);
+        try self.textAtY(rect, metrics.card_inset_x, metrics.card_metadata_y, provider, .surface_fg, .metadata, false, metrics.cardDisclosureReserve());
         const cw = self.props.cell_width_px;
         const ch = self.props.cell_height_px;
         if (cw == 0 or ch == 0) return;
@@ -333,7 +339,9 @@ const Writer = struct {
         const metadata_inset = metrics.card_inset_x + provider_width + spacing.px(.xs, effectiveScale(self.props.scale_milli));
         const x = rect.rect.x + @as(f32, @floatFromInt(metadata_inset));
         const y = rect.rect.y + @as(f32, @floatFromInt(metrics.card_metadata_y));
-        const available_px = rect.rect.width - @as(f32, @floatFromInt(metadata_inset + cw));
+        // metadata는 카드에서 가장 오른쪽까지 뻗는 줄이라 chevron과 부딪히기 가장 쉽다. 제목·요약과
+        // 정확히 같은 예약을 쓴다.
+        const available_px = rect.rect.width - @as(f32, @floatFromInt(metadata_inset + cw + metrics.cardDisclosureReserve()));
         if (available_px <= 0) return;
         const max_cols: u16 = @intFromFloat(@min(
             @floor(available_px / @as(f32, @floatFromInt(cw))),
@@ -415,27 +423,27 @@ const Writer = struct {
             .ready => "최근 대화",
             .stale => "세션 원본이 변경되었습니다",
             .unavailable => "세션을 열 수 없습니다",
-        }, .surface_fg, .body, false);
+        }, .surface_fg, .body, false, 0);
         switch (expanded_props.state) {
             .ready => {
                 if (expanded_props.action_record_count > 0) {
                     var count: [80]u8 = undefined;
                     const label = std.fmt.bufPrint(&count, "도구/권한 관련 기록 {d}건", .{expanded_props.action_record_count}) catch "도구/권한 관련 기록";
-                    try self.textAtY(detail, metrics.detail_inset_x, metrics.detail_record_y, label, .muted_fg, .metadata, false);
+                    try self.textAtY(detail, metrics.detail_inset_x, metrics.detail_record_y, label, .muted_fg, .metadata, false, 0);
                 }
                 for (expanded_props.turns, 0..) |turn, turn_index| {
                     const turn_y = metrics.detail_turn_y + @as(u32, @intCast(turn_index)) * metrics.detail_turn_step;
                     try self.textAtY(detail, metrics.detail_inset_x, turn_y, switch (turn.role) {
                         .user => "사용자",
                         .assistant => "에이전트",
-                    }, .muted_fg, .overline, false);
+                    }, .muted_fg, .overline, false, 0);
                     const body_y = turn_y + typography.lineHeightPx(.overline, effectiveScale(self.props.scale_milli)) + spacing.px(.xxs, effectiveScale(self.props.scale_milli));
-                    try self.textAtY(detail, metrics.detail_inset_x, body_y, turn.text, .surface_fg, .body, false);
+                    try self.textAtY(detail, metrics.detail_inset_x, body_y, turn.text, .surface_fg, .body, false, 0);
                 }
             },
             .loading => try self.skeletons(detail),
-            .stale => try self.textAtY(detail, metrics.detail_inset_x, metrics.detail_turn_y, "안전하게 재개하거나 로그를 열 수 없습니다.", .muted_fg, .body, false),
-            .unavailable => try self.textAtY(detail, metrics.detail_inset_x, metrics.detail_turn_y, "원본을 읽을 수 없습니다.", .muted_fg, .body, false),
+            .stale => try self.textAtY(detail, metrics.detail_inset_x, metrics.detail_turn_y, "안전하게 재개하거나 로그를 열 수 없습니다.", .muted_fg, .body, false, 0),
+            .unavailable => try self.textAtY(detail, metrics.detail_inset_x, metrics.detail_turn_y, "원본을 읽을 수 없습니다.", .muted_fg, .body, false, 0),
         }
         try self.action(find(snapshot, build.NodeIds.resumeAction(index)) orelse return error.MissingRect, resume_icon, "터미널에서 이어하기");
         try self.action(find(snapshot, build.NodeIds.reveal(index)) orelse return error.MissingRect, reveal_icon, "로그 보기");
@@ -1442,4 +1450,106 @@ test "SessionDock initial loading paints inert three-line skeleton cards" {
         else => {},
     };
     try std.testing.expectEqual(@as(usize, 9), skeleton_lines);
+}
+
+// 이 테스트가 증명하는 것: 카드의 제목·요약·metadata 폭 예산이 disclosure chevron slot과 겹치지 않는다.
+//
+// 왜 중요한가 — 최종 ellipsis는 platform worker가 measured advance로 정하지만, 그 worker에게 넘기는
+// **폭 예산**은 component가 정한다. 예산이 chevron slot까지 덮고 있으면 잘린 텍스트의 말줄임표가
+// 아이콘에 그대로 맞닿거나 그 아래로 흘러들어 둘이 한 덩어리로 보인다(사용자 보고 스크린샷).
+// slot 위치와 텍스트 예산이 같은 `DockMetrics` 항에서 나오는지를 published op으로 직접 확인한다.
+test "SessionDock card text budget never reaches the disclosure chevron slot" {
+    const props = types.Props{
+        .viewport_px = .{ .width = 640, .height = 480 },
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .scale_milli = 1000,
+        .snapshot_generation = 31,
+        .displayed_count = 1,
+        .items = &.{
+            .{
+                .card = .{
+                    .identity = 2,
+                    .provider = .claude,
+                    // 세 줄 모두 카드 폭을 넘겨 truncation 경로를 타게 한다 — 짧은 문자열은 예산을 다 쓰지
+                    // 않으므로 이 회귀를 못 잡는다.
+                    .title = "tool_use-id 처럼 아주 긴 제목이 카드 폭을 확실히 넘어가도록 충분히 길게 적는다",
+                    .summary = "The messages below were generated by the user while running local commands",
+                    .metadata = "메시지 4212개 · 방금 · claude-opus-4-1-20250805 (with 1M context) (default)",
+                },
+            },
+        },
+    };
+    var nodes: [9]tree.UiNode = undefined;
+    var entries: [10]tree.RectEntry = undefined;
+    var layout_items: [10]@import("../../ui/layout.zig").Item = undefined;
+    var flex_scratch: [10]@import("../../ui/layout.zig").FlexScratch = undefined;
+    var child_rects: [10]@import("../../ui/layout.zig").UiRect = undefined;
+    var actions: [8]@import("ids.zig").Entry = undefined;
+    const frame = try build.build(props, .{
+        .nodes = &nodes,
+        .entries = &entries,
+        .layout_items = &layout_items,
+        .flex_scratch = &flex_scratch,
+        .child_rects = &child_rects,
+        .actions = &actions,
+    });
+    const tk = tokens.Tokens.rich(.{
+        .foreground = .{ .r = 240, .g = 240, .b = 240 },
+        .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
+        .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
+        .sidebar_active = .{ .r = 80, .g = 80, .b = 80 },
+        .search_match = .{ .r = 1, .g = 2, .b = 3 },
+        .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
+        .selection = .{ .r = 7, .g = 8, .b = 9 },
+        .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .accent = .{ .r = 13, .g = 14, .b = 15 },
+    });
+    var ops: [48]draw.Op = undefined;
+    var runs: [48]draw.Run = undefined;
+    var text_bytes: [4096]u8 = undefined;
+    const out = try view(props, frame, .{}, &tk, .{ .ops = &ops, .runs = &runs, .text_bytes = &text_bytes });
+
+    const card = frame.tree.entries[frame.tree.find(build.NodeIds.item(0)).?];
+    const metrics = types.DockMetrics.resolve(props.scale_milli);
+
+    // chevron slot을 published op에서 그대로 읽는다 — 테스트가 좌표를 스스로 재구성하면 component가
+    // slot을 옮긴 뒤에도 통과해 버린다. disclosure는 카드 텍스트보다 뒤에 emit되므로 먼저 한 번 훑는다.
+    var chevron: ?draw.Rect = null;
+    for (out.ops) |op| switch (op) {
+        .text => |text| switch (text.placement) {
+            .icon_in_rect => |icon| {
+                if (icon.icon_codepoint == 0xF0023 and chevron == null) chevron = icon.content_rect;
+            },
+            else => {},
+        },
+        else => {},
+    };
+    const slot = chevron orelse return error.TestUnexpectedResult;
+
+    // chevron은 카드 우측 content inset 안에 놓인다 — 기준이 터미널 cell 폭이 아니라 logical inset이다.
+    try std.testing.expectEqual(
+        @as(i32, @intFromFloat(card.rect.x + card.rect.width)) - @as(i32, @intCast(metrics.card_inset_x + metrics.group_disclosure_extent)),
+        slot.x,
+    );
+
+    var checked_lines: usize = 0;
+    for (out.ops) |op| switch (op) {
+        .text => |text| switch (text.placement) {
+            .origin => {
+                // 카드 본문 줄만 본다(고정 chrome은 카드 rect 밖이다).
+                const y: f32 = @floatFromInt(text.origin.y);
+                if (y < card.rect.y or y >= card.rect.y + card.rect.height) continue;
+                // worker에 넘어가는 실제 폭 예산은 `max_cols * cell_width`다(`opMaxWidthPx`의 fallback).
+                const budget_px = @as(u32, text.max_cols) * props.cell_width_px;
+                const right = @as(f32, @floatFromInt(text.origin.x)) + @as(f32, @floatFromInt(budget_px));
+                if (right > @as(f32, @floatFromInt(slot.x))) return error.CardTextReachesDisclosureSlot;
+                checked_lines += 1;
+            },
+            else => {},
+        },
+        else => {},
+    };
+    // title·summary·provider·metadata 네 줄이 모두 검사됐다.
+    try std.testing.expectEqual(@as(usize, 4), checked_lines);
 }

@@ -137,6 +137,10 @@ pub const DockMetrics = struct {
     group_disclosure_extent: u32,
     group_disclosure_label_gap: u32,
     card_inset_x: u32,
+    /// 카드 우측 disclosure chevron과 그 왼쪽 텍스트 사이의 최소 여백. 제목·요약·metadata의 폭 예산은
+    /// 이 값과 disclosure slot을 함께 뺀 뒤 계산한다 — 그러지 않으면 measured ellipsis가 chevron 바로
+    /// 옆까지(심하면 그 아래까지) 밀려 두 요소가 한 덩어리로 보인다(사용자 보고).
+    card_disclosure_gap: u32,
     card_title_y: u32,
     card_summary_y: u32,
     card_metadata_y: u32,
@@ -145,6 +149,13 @@ pub const DockMetrics = struct {
     detail_record_y: u32,
     detail_turn_y: u32,
     detail_turn_step: u32,
+
+    /// 카드 본문 텍스트가 침범하면 안 되는 우측 폭. disclosure slot 자체와 그 바깥 inset, 그리고 둘
+    /// 사이의 최소 여백을 합친다. `cardDisclosure`가 slot을 놓는 식과 같은 항을 쓰므로, 한쪽만 바뀌어
+    /// 텍스트가 chevron 아래로 흘러드는 상태가 생길 수 없다.
+    pub fn cardDisclosureReserve(self: DockMetrics) u32 {
+        return self.card_inset_x + self.group_disclosure_extent + self.card_disclosure_gap;
+    }
 
     pub fn resolve(scale_milli: u32) DockMetrics {
         const scale = effectiveScale(scale_milli);
@@ -194,6 +205,7 @@ pub const DockMetrics = struct {
             .group_disclosure_extent = geometryPx(spacing.pointsPx(20, scale)),
             .group_disclosure_label_gap = geometryPx(spacing.px(.xs, scale)),
             .card_inset_x = geometryPx(card_inset),
+            .card_disclosure_gap = geometryPx(spacing.px(.sm, scale)),
             .card_title_y = geometryPx(card_title_y),
             .card_summary_y = geometryPx(card_summary_y),
             .card_metadata_y = geometryPx(card_metadata_y),

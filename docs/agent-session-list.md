@@ -107,6 +107,10 @@ identity는 바꾸지 않으며, `SessionDock`의 같은 completed `UiRectTree`�
   정확히 같은 RGB가 될 수 없고, 1px rule은 panel의 각 RGB channel에서 최소 24 step 차이를 가져
   축소된 PNG에서도 scope/search 외곽과 group/row rule이 읽혀야 한다. row는 card별 외곽선을 추가하지
   않지만, group 상·하단과 각 row bottom rule을 생략해서는 안 된다.
+- row의 trailing disclosure chevron은 카드의 **logical content inset** 안에 놓이며(터미널 cell 폭이
+  아니다), title·summary·provider·metadata의 폭 예산은 그 slot과 최소 gap을 함께 뺀 값이다. 최종
+  ellipsis는 measured advance가 정하지만 예산 자체가 slot을 덮고 있으면 잘린 텍스트가 아이콘에 그대로
+  맞닿아 둘이 한 덩어리로 읽힌다. slot 위치와 텍스트 예산은 `DockMetrics`의 같은 항에서 나와야 한다.
 - 선택/expanded session은 card header와 dark raised detail surface를 한 disclosure 안에 묶는다.
   detail은 outer padding을 가진 inset surface, recent-turn은 role/body 사이 여백, action은 최소
   3행 높이의 같은 baseline 버튼으로 보인다. sibling action에는 최소 `0.5ch` gap을 두고, 각 button은

@@ -350,6 +350,10 @@ const Writer = struct {
     fn groupHeader(self: *Writer, rect: tree.RectEntry, group: types.Group) ViewError!void {
         const cw = self.props.cell_width_px;
         if (cw == 0) return;
+        // 그룹 행도 카드와 같은 published clip을 소비한다. 이 검사가 없으면 스크롤로 목록 위로 나간
+        // 그룹의 이름·chevron·count pill이 고정 chrome(헤더/scope/검색) 위에 그려진다. 다른 텍스트
+        // 경로(textAtY/cardMetadataAtY)는 이미 같은 게이트를 지난다.
+        if (!rowFitsClip(rect)) return;
         const metrics = types.DockMetrics.resolve(self.props.scale_milli);
         const scale = effectiveScale(self.props.scale_milli);
 
@@ -367,7 +371,9 @@ const Writer = struct {
         const pill_h = @min(spacing.pointsPx(32, scale), @as(u32, @intFromFloat(@floor(rect.rect.height))));
         if (pill_h == 0) return;
         const pill_x: f32 = rect.rect.x + rect.rect.width - @as(f32, @floatFromInt(horizontal_inset + pill_width));
-        const pill_y: f32 = rect.rect.y + (rect.rect.height - @as(f32, @floatFromInt(pill_h)) / 2);
+        // 세로 중앙은 `(행 높이 - pill 높이) / 2`다. 괄호가 하나 밀려 `행 높이 - pill/2`가 되면 pill이
+        // 행 바닥 밖으로 내려가 아래 카드에 걸친다(사용자 보고).
+        const pill_y: f32 = rect.rect.y + (rect.rect.height - @as(f32, @floatFromInt(pill_h))) / 2;
         const pill_radius: u16 = @intCast(@min(pill_h / 2, @as(u32, std.math.maxInt(u16))));
         try self.appendQuad(.{
             .rect = .{
@@ -629,6 +635,15 @@ const Writer = struct {
 /// rasterization. A partial item therefore cannot use the unquantized origin as a clip test: a
 /// nominally in-clip origin can lower to the preceding, out-of-clip glyph cell. We intentionally
 /// omit that whole cell rather than add an unrelated glyph scissor path just for scrolling.
+/// 행 전체가 published clip 안에 있는지. 카드는 줄 단위로 `loweredTextCellFitsClip`을 쓰지만, 그룹
+/// 행은 이름·chevron·count pill이 한 덩어리라 행 단위로 판정한다. 부분적으로 걸친 그룹을 통째로 숨기는
+/// 쪽이 고정 chrome 위로 새는 것보다 낫고, 그룹 행은 카드보다 훨씬 낮아 손실도 작다.
+fn rowFitsClip(rect: tree.RectEntry) bool {
+    const clip = rect.effective_clip orelse return true;
+    if (clip.height <= 0) return false;
+    return rect.rect.y >= clip.y and rect.rect.y + rect.rect.height <= clip.y + clip.height;
+}
+
 fn loweredTextCellFitsClip(rect: tree.RectEntry, origin_y: f32, cell_height_px: u32) bool {
     const clip = rect.effective_clip orelse return true;
     if (cell_height_px == 0) return false;
@@ -948,7 +963,10 @@ test "SessionDock partial card never emits a CoreText cell that crosses its publ
 test "SessionDock scrolling moves every emitted run by the same virtualization offset" {
     const shift: i32 = -140;
     var props = types.Props{
-        .viewport_px = .{ .width = 320, .height = 640 },
+        // 목록 아이템은 더 이상 viewport에 맞춰 축소되지 않는다. 이 테스트가 보려는 것은 평행이동의
+        // 균일성이므로, 확장 카드와 이웃 카드가 **둘 다 실제로 보이는** viewport를 준다. 예전 640은
+        // 축소 덕분에만 둘 다 들어갔고, 그 축소가 바로 이 PR이 없앤 결함이다.
+        .viewport_px = .{ .width = 320, .height = 960 },
         .cell_width_px = 8,
         .cell_height_px = 16,
         .snapshot_generation = 7,
@@ -1049,6 +1067,196 @@ test "SessionDock scrolling moves every emitted run by the same virtualization o
     try std.testing.expect(matched_detail);
     try std.testing.expect(originYFor(rested.ops, "neighbour-card-title") != null);
     try std.testing.expect(originYFor(scrolled.ops, "neighbour-card-title") != null);
+}
+
+// 사용자 보고 회귀: 펼친 카드의 액션이 라벨도 아이콘도 없는 빈 상자로 보였다. `action`은 button
+// content 높이가 label line box보다 작으면 **조용히** 아무 op도 내지 않는데, 그 조용한 drop이
+// 도달 가능하다는 것이 결함이다. 라벨과 아이콘은 legacy cell 경로가 아니라 measured 경로에만 있으므로
+// 이 drop은 곧 "활성처럼 보이는 빈 버튼"이다 — 문서가 금지한 상태다(§2.1.2: label이 비면 icon-only
+// action을 추측해 활성화하지 않는다). 목록이 viewport를 넘겨 layout이 압축을 시도하는 바로 그 상황에서
+// 단언한다.
+test "SessionDock keeps its action label when the expansion cannot fit the viewport" {
+    const props = types.Props{
+        .viewport_px = .{ .width = 640, .height = 640 },
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .snapshot_generation = 3,
+        .displayed_count = 2,
+        .expanded_identity = 1,
+        .items = &.{
+            .{ .card = .{
+                .identity = 1,
+                .provider = .claude,
+                .title = "expanded-title",
+                .summary = "expanded-summary",
+                .metadata = "expanded-meta",
+                .expanded = .{
+                    .state = .ready,
+                    .resume_enabled = true,
+                    .reveal_enabled = true,
+                    .turns = &.{.{ .role = .user, .text = "turn-text" }},
+                },
+            } },
+            .{ .card = .{ .identity = 2, .provider = .codex, .title = "next-title", .summary = "next-summary", .metadata = "next-meta" } },
+        },
+    };
+    var nodes: [16]tree.UiNode = undefined;
+    var entries: [17]tree.RectEntry = undefined;
+    var layout_items: [17]@import("../../ui/layout.zig").Item = undefined;
+    var flex_scratch: [17]@import("../../ui/layout.zig").FlexScratch = undefined;
+    var child_rects: [17]@import("../../ui/layout.zig").UiRect = undefined;
+    var actions: [12]@import("ids.zig").Entry = undefined;
+    const frame = try build.build(props, .{
+        .nodes = &nodes,
+        .entries = &entries,
+        .layout_items = &layout_items,
+        .flex_scratch = &flex_scratch,
+        .child_rects = &child_rects,
+        .actions = &actions,
+    });
+    const tk = fixtureTokens();
+    var ops: [96]draw.Op = undefined;
+    var runs: [96]draw.Run = undefined;
+    var text_bytes: [4096]u8 = undefined;
+    const out = try view(props, frame, .{}, &tk, .{ .ops = &ops, .runs = &runs, .text_bytes = &text_bytes });
+    var resume_label: ?draw.TextPlacement = null;
+    var reveal_label = false;
+    for (out.ops) |op| switch (op) {
+        .text => |text| for (text.runs) |run| {
+            if (std.mem.eql(u8, run.text, "터미널에서 이어하기")) resume_label = text.placement;
+            reveal_label = reveal_label or std.mem.eql(u8, run.text, "로그 보기");
+        },
+        else => {},
+    };
+    // 배경 quad만 남고 label/icon이 사라지는 것이 사용자가 본 빈 버튼이다.
+    try std.testing.expect(resume_label != null);
+    try std.testing.expect(reveal_label);
+    switch (resume_label.?) {
+        .leading_icon_group => |group| try std.testing.expectEqual(@as(u21, 0xF000C), group.icon_codepoint),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+// 사용자 보고 회귀: 목록을 스크롤하면 그룹 이름이 고정 chrome(검색 필드) 위에 그려졌다. 카드 텍스트는
+// `loweredTextCellFitsClip`을 지나지만 `groupHeader`만 그 검사를 하지 않아서다. clip은 published tree가
+// 이미 갖고 있으므로(§2.1.1 평행이동 후 부모 clip과 재교차) 이 결함은 "계약이 없어서"가 아니라 emit
+// 지점이 그 계약을 소비하지 않아서 생긴다.
+test "SessionDock group header does not paint above the scroll content clip" {
+    const metrics = types.DockMetrics.resolve(1000);
+    const props = types.Props{
+        .viewport_px = .{ .width = 640, .height = 480 },
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .snapshot_generation = 1,
+        .displayed_count = 1,
+        // 그룹 행을 1px만 남기고 content clip 위로 밀어 올린다.
+        .content_first_item_origin_y_px = -@as(i32, @intCast(metrics.group_h - 1)),
+        .items = &.{
+            .{ .group = .{ .identity = 1, .label = "OVERFLOWGROUP", .count = 7 } },
+            .{ .card = .{ .identity = 2, .provider = .claude, .title = "next-title", .summary = "next-summary", .metadata = "next-meta" } },
+        },
+    };
+    var nodes: [10]tree.UiNode = undefined;
+    var entries: [11]tree.RectEntry = undefined;
+    var layout_items: [11]@import("../../ui/layout.zig").Item = undefined;
+    var flex_scratch: [11]@import("../../ui/layout.zig").FlexScratch = undefined;
+    var child_rects: [11]@import("../../ui/layout.zig").UiRect = undefined;
+    var actions: [10]@import("ids.zig").Entry = undefined;
+    const frame = try build.build(props, .{
+        .nodes = &nodes,
+        .entries = &entries,
+        .layout_items = &layout_items,
+        .flex_scratch = &flex_scratch,
+        .child_rects = &child_rects,
+        .actions = &actions,
+    });
+    const tk = fixtureTokens();
+    var ops: [64]draw.Op = undefined;
+    var runs: [64]draw.Run = undefined;
+    var text_bytes: [2048]u8 = undefined;
+    const out = try view(props, frame, .{}, &tk, .{ .ops = &ops, .runs = &runs, .text_bytes = &text_bytes });
+    const content = find(frame.tree, build.NodeIds.content) orelse return error.TestUnexpectedResult;
+    const clip_top: i32 = @intFromFloat(@ceil(content.rect.y));
+    for (out.ops) |op| switch (op) {
+        .text => |text| for (text.runs) |run| {
+            if (std.mem.indexOf(u8, run.text, "OVERFLOWGROUP") == null) continue;
+            // clip 위로 나간 그룹은 라벨을 내지 않거나, 내더라도 clip 안이어야 한다.
+            try std.testing.expect(text.origin.y >= clip_top);
+        },
+        else => {},
+    };
+    // 뒤따르는 카드는 여전히 보여야 한다 — over-clipping도 결함이다.
+    var saw_next = false;
+    for (out.ops) |op| switch (op) {
+        .text => |text| for (text.runs) |run| {
+            saw_next = saw_next or std.mem.indexOf(u8, run.text, "next-title") != null;
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_next);
+}
+
+// 사용자 보고 회귀: 그룹의 count pill이 행 아래로 밀려 카드 위에 걸쳐 보였다. 원인은 세로 중앙 계산의
+// 괄호다 — `y + (h - pill/2)`는 중앙이 아니라 거의 바닥이다. 정답은 `y + (h - pill)/2`.
+test "SessionDock group count pill is vertically centred in its row" {
+    const props = types.Props{
+        .viewport_px = .{ .width = 640, .height = 480 },
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .snapshot_generation = 1,
+        .displayed_count = 1,
+        .items = &.{.{ .group = .{ .identity = 1, .label = "workspace", .count = 11 } }},
+    };
+    var nodes: [9]tree.UiNode = undefined;
+    var entries: [10]tree.RectEntry = undefined;
+    var layout_items: [10]@import("../../ui/layout.zig").Item = undefined;
+    var flex_scratch: [10]@import("../../ui/layout.zig").FlexScratch = undefined;
+    var child_rects: [10]@import("../../ui/layout.zig").UiRect = undefined;
+    var actions: [8]@import("ids.zig").Entry = undefined;
+    const frame = try build.build(props, .{
+        .nodes = &nodes,
+        .entries = &entries,
+        .layout_items = &layout_items,
+        .flex_scratch = &flex_scratch,
+        .child_rects = &child_rects,
+        .actions = &actions,
+    });
+    const tk = fixtureTokens();
+    var ops: [64]draw.Op = undefined;
+    var runs: [64]draw.Run = undefined;
+    var text_bytes: [2048]u8 = undefined;
+    const out = try view(props, frame, .{}, &tk, .{ .ops = &ops, .runs = &runs, .text_bytes = &text_bytes });
+    const row = find(frame.tree, build.NodeIds.item(0)) orelse return error.TestUnexpectedResult;
+    var pill: ?draw.Op.Quad = null;
+    for (out.ops) |op| switch (op) {
+        .quad => |quad| if (quad.fill_role == .inset_bg) {
+            pill = quad;
+        },
+        else => {},
+    };
+    const found = pill orelse return error.TestUnexpectedResult;
+    const row_top: f32 = row.rect.y;
+    const row_bottom: f32 = row.rect.y + row.rect.height;
+    const pill_top: f32 = @floatFromInt(found.rect.y);
+    const pill_bottom: f32 = pill_top + @as(f32, @floatFromInt(found.rect.h));
+    // pill 전체가 행 안에 있고, 위아래 여백이 1px 이내로 같아야 중앙이다.
+    try std.testing.expect(pill_top >= row_top);
+    try std.testing.expect(pill_bottom <= row_bottom);
+    try std.testing.expect(@abs((pill_top - row_top) - (row_bottom - pill_bottom)) <= 1);
+}
+
+fn fixtureTokens() tokens.Tokens {
+    return tokens.Tokens.rich(.{
+        .foreground = .{ .r = 240, .g = 240, .b = 240 },
+        .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
+        .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
+        .sidebar_active = .{ .r = 80, .g = 80, .b = 80 },
+        .search_match = .{ .r = 1, .g = 2, .b = 3 },
+        .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
+        .selection = .{ .r = 7, .g = 8, .b = 9 },
+        .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .accent = .{ .r = 13, .g = 14, .b = 15 },
+    });
 }
 
 fn originYFor(ops: []const draw.Op, needle: []const u8) ?i32 {

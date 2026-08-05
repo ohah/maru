@@ -103,7 +103,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
                 const action = table.append(props.snapshot_generation, .{ .toggle_group = group.identity }, true) catch return error.InsufficientActionBuffer;
                 node.* = tree.card(.{
                     .id = NodeIds.item(index),
-                    .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(m.group_h) }, .margin = .{ .bottom = @floatFromInt(m.item_gap) } },
+                    .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(m.group_h) }, .margin = .{ .bottom = @floatFromInt(m.item_gap) }, .flex = list_item_flex },
                     .variant = .surface,
                     .paint = dividedRowPaint(),
                     .action = action,
@@ -144,7 +144,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
                     }, action_nodes);
                     node.* = tree.container(.{
                         .id = NodeIds.item(index),
-                        .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(m.card_h + m.expanded_detail_h + m.expanded_actions_h) }, .margin = .{ .bottom = @floatFromInt(m.item_gap) } },
+                        .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(m.card_h + m.expanded_detail_h + m.expanded_actions_h) }, .margin = .{ .bottom = @floatFromInt(m.item_gap) }, .flex = list_item_flex },
                         .overflow = .clip,
                     }, nested[0..3]);
                 } else {
@@ -259,7 +259,16 @@ fn intersect(a: layout.UiRect, b: layout.UiRect) layout.UiRect {
     const top = @max(a.y, b.y);
     const right = @min(a.x + a.width, b.x + b.width);
     const bottom = @min(a.y + a.height, b.y + b.height);
-    return .{ .x = left, .y = top, .width = @max(right - left, 0), .height = @max(bottom - top, 0) };
+    // 목록 아이템이 더 이상 viewport에 맞춰 축소되지 않으므로, 완전히 벗어난 아이템의 교집합은 실제로
+    // 빈 사각형이 된다. 그때 origin을 그대로 두면 "clip은 부모 clip 안"이라는 불변식이 면적 0짜리
+    // rect 때문에 깨져 보인다. 빈 교집합은 위치에 의미가 없으니 부모 경계로 접어 그 불변식을 지킨다.
+    if (right <= left or bottom <= top) return .{
+        .x = @min(@max(left, a.x), a.x + a.width),
+        .y = @min(@max(top, a.y), a.y + a.height),
+        .width = 0,
+        .height = 0,
+    };
+    return .{ .x = left, .y = top, .width = right - left, .height = bottom - top };
 }
 
 fn scopeNode(id: u64, action: tree.UiAction, enabled: bool, selected: bool) tree.UiNode {
@@ -277,10 +286,17 @@ fn scopeNode(id: u64, action: tree.UiAction, enabled: bool, selected: bool) tree
     }, &.{});
 }
 
+/// 스크롤 목록의 아이템은 **줄어들지 않는다**. `content`는 `fill` 컨테이너라 자식 총합이 viewport를
+/// 넘으면 `layout.distributeFlex`가 기본 shrink=1로 전부 균등 축소하는데, 가상화는 마지막 아이템이 항상
+/// viewport를 넘도록 창을 잡으므로 그 축소가 상시 상태가 된다. 그러면 published rect와, 같은 값을 읽어야
+/// 하는 scroll projection·view의 텍스트 offset(둘 다 축소 전 `DockMetrics`)이 갈라진다. 목록은 넘치면
+/// 잘려야 하고(`content`의 overflow=clip), 줄어들어서는 안 된다.
+const list_item_flex: layout.FlexStyle = .{ .shrink = 0 };
+
 fn sessionCardNode(id: u64, action: tree.UiAction, selected: bool, height: u32) tree.UiNode {
     return tree.card(.{
         .id = id,
-        .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(height) } },
+        .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(height) }, .flex = list_item_flex },
         .variant = if (selected) .selected else .surface,
         .paint = dividedRowPaint(),
         .action = action,
@@ -509,12 +525,79 @@ test "SessionDock partial item keeps one content clip for paint and hit testing"
     try @import("std").testing.expect(clip.height <= content.rect.height);
 }
 
+// 사용자 보고 회귀: 목록을 스크롤하면 카드 글자가 자기 카드 밖으로 새고 펼친 카드의 버튼이 빈 상자가
+// 됐다. 루트 코즈는 렌더가 아니라 layout이다 — `content`는 `fill` 컨테이너이고 목록 아이템은 그 flex
+// 자식이라, 아이템 총합이 viewport를 넘으면 `distributeFlex`가 **모두 균등 축소**한다. 가상화는 마지막
+// 아이템이 항상 viewport를 넘도록 창을 잡으므로(scroll.project) 이 축소는 예외가 아니라 상시 상태다.
+//
+// 그런데 scroll projection·view의 텍스트 offset은 축소 전 `DockMetrics`를 읽는다. 즉 published rect와
+// 스크롤/그리기 좌표가 서로 다른 높이를 쓰게 되고, 이는 문서가 명시적으로 금지한 상태다
+// (docs/agent-session-list.md: "scroll projection·paint·clip·hit-test는 같은 DockMetrics를 읽으므로
+// 밀도 변경 뒤에도 보이는 위치와 눌리는 위치가 갈라지지 않는다").
+//
+// 스크롤 목록은 넘치면 **잘려야** 하고 줄어들어서는 안 된다. 그래서 아이템은 shrink 대상이 아니다.
+test "SessionDock list items keep their DockMetrics height instead of shrinking to the viewport" {
+    const std = @import("std");
+    // 확장 카드(112+256+48=416) + 카드(112) = 528이 스크롤 영역보다 확실히 크도록 잡는다.
+    const props = types.Props{
+        .viewport_px = .{ .width = 640, .height = 640 },
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .snapshot_generation = 3,
+        .displayed_count = 2,
+        .expanded_identity = 1,
+        .items = &.{
+            .{ .card = .{
+                .identity = 1,
+                .provider = .claude,
+                .title = "expanded",
+                .summary = "summary",
+                .metadata = "meta",
+                .expanded = .{ .state = .ready, .resume_enabled = true, .reveal_enabled = true, .turns = &.{.{ .role = .user, .text = "turn" }} },
+            } },
+            .{ .card = .{ .identity = 2, .provider = .codex, .title = "next", .summary = "summary", .metadata = "meta" } },
+        },
+    };
+    var nodes: [16]tree.UiNode = undefined;
+    var entries: [17]tree.RectEntry = undefined;
+    var layout_items: [17]layout.Item = undefined;
+    var flex_scratch: [17]layout.FlexScratch = undefined;
+    var child_rects: [17]layout.UiRect = undefined;
+    var actions: [12]ids.Entry = undefined;
+    const frame = try build(props, .{
+        .nodes = &nodes,
+        .entries = &entries,
+        .layout_items = &layout_items,
+        .flex_scratch = &flex_scratch,
+        .child_rects = &child_rects,
+        .actions = &actions,
+    });
+    const m = types.DockMetrics.resolve(props.scale_milli);
+    const content = frame.tree.entries[frame.tree.find(NodeIds.content).?];
+    // 전제가 살아 있는지부터 본다 — 목록이 스크롤 영역보다 실제로 커야 이 테스트가 축소를 잡는다.
+    const total_h: f32 = @floatFromInt(m.card_h + m.expanded_detail_h + m.expanded_actions_h + m.card_h);
+    try std.testing.expect(total_h > content.rect.height);
+
+    const header = frame.tree.entries[frame.tree.find(NodeIds.cardHeader(0)).?];
+    const detail = frame.tree.entries[frame.tree.find(NodeIds.expandedDetail(0)).?];
+    const action_row = frame.tree.entries[frame.tree.find(NodeIds.expandedActions(0)).?];
+    const resume_action = frame.tree.entries[frame.tree.find(NodeIds.resumeAction(0)).?];
+    const next_card = frame.tree.entries[frame.tree.find(NodeIds.item(1)).?];
+    try std.testing.expectEqual(@as(f32, @floatFromInt(m.card_h)), header.rect.height);
+    try std.testing.expectEqual(@as(f32, @floatFromInt(m.expanded_detail_h)), detail.rect.height);
+    try std.testing.expectEqual(@as(f32, @floatFromInt(m.expanded_actions_h)), action_row.rect.height);
+    try std.testing.expectEqual(@as(f32, @floatFromInt(m.expanded_actions_h)), resume_action.rect.height);
+    try std.testing.expectEqual(@as(f32, @floatFromInt(m.card_h)), next_card.rect.height);
+}
+
 test "SessionDock virtualization translates an expanded card's whole subtree" {
     // Scrolling publishes a negative first-item origin. An expanded card owns nested detail and
     // action rects, so translating only the direct content children would leave that inline
     // detail painted at its unscrolled y — visibly overlapping the cards that scrolled past it.
     const props = types.Props{
-        .viewport_px = .{ .width = 320, .height = 480 },
+        // 목록 아이템이 더 이상 축소되지 않으므로, 확장 카드(112+256+48)와 이웃 카드가 모두 실제로
+        // 스크롤 영역 안에 들어가는 viewport를 준다. 예전 480은 축소 덕분에만 전부 들어갔다.
+        .viewport_px = .{ .width = 320, .height = 960 },
         .cell_width_px = 8,
         .cell_height_px = 16,
         .snapshot_generation = 5,

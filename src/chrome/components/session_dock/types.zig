@@ -165,7 +165,11 @@ pub const DockMetrics = struct {
             .scope_h = geometryPx(@max(button.minimum_height_px, saturatedAdd(typography.lineHeightPx(.control, scale), saturatedMul(spacing.px(.sm, scale), 2)))),
             .search_h = geometryPx(@max(button.minimum_height_px, saturatedAdd(typography.lineHeightPx(.control, scale), saturatedMul(spacing.px(.sm, scale), 2)))),
             .group_h = geometryPx(@max(spacing.pointsPx(48, scale), saturatedAdd(typography.lineHeightPx(.group_heading, scale), saturatedMul(spacing.px(.sm, scale), 2)))),
-            .card_h = geometryPx(@max(spacing.pointsPx(112, scale), saturatedAdd(saturatedAdd(card_metadata_y, typography.lineHeightPx(.metadata, scale)), spacing.px(.sm, scale)))),
+            // 하한은 "role line box 합이 지나치게 작아졌을 때의 바닥"이지 목표 높이가 아니다. typography를
+            // 낮춘 뒤에도 112pt가 계산값(98px @1x)을 이겨 카드 안에 14px이 빈 여백으로 남았다 — 글자만 작아지고
+            // 밀도는 그대로여서 어색했다. 계산값이 이기도록 낮춰 타이포 변화가 밀도에 그대로 반영되게 한다.
+            // 그룹 행의 48pt 하한은 성격이 다르다(포인터 타깃 최소 크기)라서 건드리지 않는다.
+            .card_h = geometryPx(@max(spacing.pointsPx(96, scale), saturatedAdd(saturatedAdd(card_metadata_y, typography.lineHeightPx(.metadata, scale)), spacing.px(.sm, scale)))),
             .expanded_detail_h = geometryPx(@max(spacing.pointsPx(256, scale), saturatedAdd(saturatedSub(saturatedAdd(detail_turn_y, saturatedMul(detail_turn_step, 3)), spacing.px(.sm, scale)), detail_inset))),
             .expanded_actions_h = button.minimum_height_px,
             .control_gap = geometryPx(spacing.px(.sm, scale)),
@@ -264,7 +268,9 @@ test "DockMetrics fixes all Session Dock geometry independently of terminal cell
     try std.testing.expectEqual(@as(u32, 48), m.scope_h);
     try std.testing.expectEqual(@as(u32, 48), m.search_h);
     try std.testing.expectEqual(@as(u32, 48), m.group_h);
-    try std.testing.expectEqual(@as(u32, 112), m.card_h);
+    // 카드 높이는 이제 하한이 아니라 role line box 합이 정한다(96pt 하한 < 98px 계산값). 그래서 이 값은
+    // typography를 바꾸면 함께 움직이는 것이 정상이고, 그때 이 단언도 같이 갱신한다.
+    try std.testing.expectEqual(@as(u32, 98), m.card_h);
     try std.testing.expectEqual(@as(u32, 256), m.expanded_detail_h);
     try std.testing.expectEqual(@as(u32, 48), m.expanded_actions_h);
     try std.testing.expectEqual(@as(u32, 12), m.control_gap);

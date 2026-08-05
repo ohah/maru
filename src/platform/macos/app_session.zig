@@ -5812,7 +5812,6 @@ pub const AppSession = struct {
             .dropped => |update| {
                 self.divider_coalescer.absorb(update.x_px, update.y_px);
                 self.applyPendingDividerResize();
-                self.applyPendingScrollbarScroll();
                 self.endDividerCapture();
             },
             .cancelled => self.endDividerCapture(),
@@ -29003,10 +29002,15 @@ pub const AppSession = struct {
         // (reader join/child reap)을 건너뛰지 않게 한다.
         // [계측: 프레임 타이밍] tick 단계별 wall-clock을 잰다(MARU_DEBUG 전용). defer가 단일 exit(단일 return)에서 로깅.
         // 마크는 아래 각 단계 경계에서 세팅한다(ft_on 아니면 clock read 자체를 안 함 = release 비용 0).
-        // 이 tick의 divider resize를 여기서 한 번 적용한다 — move가 몇 번 왔든 최종 좌표 하나이고,
-        // clamp 결과가 직전과 같으면 effect가 없다(계약 §4.3). frame 계측이 시작되기 전에 두어
-        // geometry가 확정된 상태로 아래 build/투영이 돌게 한다.
+        // 이 tick의 divider resize와 scrollbar scroll을 여기서 한 번씩 적용한다 — move가 몇 번 왔든 최종
+        // 좌표 하나이고, clamp 결과가 직전과 같으면 effect가 없다(계약 §4.3). frame 계측이 시작되기 전에
+        // 두어 geometry가 확정된 상태로 아래 build/투영이 돌게 한다.
+        //
+        // **둘 다 여기 있어야 한다.** scrollbar 쪽이 빠져 있어서 thumb을 끄는 동안에는 좌표만 쌓이고
+        // 손을 뗄 때(`dropped`) 한 번에 적용됐다 — 같은 coalescing을 쓰는 divider는 매 tick 반영되는데
+        // 스크롤만 "놓아야 움직이는" 것으로 보였다(제보).
         self.applyPendingDividerResize();
+        self.applyPendingScrollbarScroll();
         // §4.4: 드래그가 살아 있는 동안 다른 경로가 tab 집합을 바꾸면(⌘T·단축키 close·원격 관측의 Term 소멸)
         // provisional 배열을 새 집합에 재봉합하지 않고 폐기한다. 폐기하지 않으면 transaction이 영구히 무효라
         // 나머지 드래그가 조용한 무동작이 되고 floating 고스트만 커서를 따라다닌다.
@@ -50116,6 +50120,45 @@ test "두 세대가 그대로여도 track/thumb 기하가 바뀌면 스크롤 �
 
     _ = session.routeScrollbarCapture(2, geometry.track_y + geometry.track_h - 1);
     try std.testing.expect(!session.scrollbarCaptureActive());
+}
+
+// 계약 §4.3의 coalescing은 "move를 모아 **tick이** 적용한다"이지 "up에서 한 번 적용한다"가 아니다.
+// `tick`이 scrollbar coalescer를 소비하지 않아, thumb을 끄는 동안에는 화면이 그대로이고 손을 떼야
+// 한 번에 움직였다(제보) — 같은 패턴을 쓰는 divider는 매 tick 반영되는데 스크롤만 달랐다.
+// 이 fixture는 `applyPendingScrollbarScroll`을 **손으로 부르지 않는다**. 그 호출이 기존 테스트를
+// 통과시키면서 제품 경로의 누락을 가리고 있었다 — tick만 돌려 제품이 실제로 소비하는지를 본다.
+test "파일 트리 스크롤바 드래그는 손을 떼기 전에 tick이 적용한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.activateFilePanelDockControl();
+
+    session.file_tree_rows.clearRetainingCapacity();
+    try session.file_tree_rows.ensureTotalCapacity(allocator, 512);
+    for (0..512) |_| session.file_tree_rows.appendAssumeCapacity(.empty);
+    session.refreshFileTreeScrollbarGeometry();
+    const top = session.fileTreeScrollbarGeometry().?;
+
+    // 트랙 하단을 눌러 아래로 스크롤한 상태에서 드래그를 시작한다(down 자체는 즉시 적용).
+    try std.testing.expect(session.beginFileTreeScrollbarGesture(
+        top.track_x + top.track_w / 2,
+        top.track_y + top.track_h - 1,
+    ));
+    try std.testing.expect(session.scrollbarCaptureActive());
+    try std.testing.expect(session.fileTreeEffectiveScroll() > 0);
+
+    // thumb을 맨 위로 끈다. move는 좌표만 모으므로 이 시점엔 아직 그대로다.
+    _ = session.routeScrollbarCapture(2, top.track_y);
+    try std.testing.expect(session.fileTreeEffectiveScroll() > 0);
+
+    // **손을 떼지 않은 채**(up=kind 3을 보내지 않고) tick 한 번 — 여기서 적용돼야 한다. 이 fixture의 축은
+    // "up 없이도 적용되는가"이지 capture 수명이 아니다(그쪽은 stale-snapshot cancel 테스트가 소유한다).
+    _ = try session.tick();
+    try std.testing.expectEqual(@as(usize, 0), session.fileTreeEffectiveScroll());
+    session.endScrollbarCapture();
 }
 
 test "file tree scrollbar is overflow-only and stale drag snapshots cancel" {

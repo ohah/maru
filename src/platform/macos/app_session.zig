@@ -49550,6 +49550,60 @@ test "file tree header and populated blank left click are inert while right clic
     session.closeContextMenu();
 }
 
+test "wheel·track click·keyboard가 같은 스크롤 상태를 움직이고 anchor가 선택을 따라간다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.activateFilePanelDockControl();
+    session.file_tree_rows.clearRetainingCapacity();
+    try session.file_tree_rows.ensureTotalCapacity(allocator, 512);
+    for (0..512) |_| session.file_tree_rows.appendAssumeCapacity(.empty);
+    session.refreshFileTreeScrollbarGeometry();
+    const geometry = session.fileTreeScrollbarGeometry() orelse return error.SkipZigTest;
+    if (geometry.max_scroll == 0) return error.SkipZigTest;
+    const content = session.dockGeometry().tree_content;
+    const inside_x: f64 = @floatFromInt(content.x + content.w / 2);
+    const inside_y: f64 = @floatFromInt(content.y + content.h / 2);
+
+    // ① wheel — 트리 위에서 굴리면 스크롤 상태가 움직인다. 이 셋은 서로 다른 입구지만 **같은
+    //    상태**를 움직여야 한다. 각자 자기 스크롤 위치를 들면 thumb과 내용이 어긋난다.
+    try std.testing.expectEqual(@as(usize, 0), session.fileTreeEffectiveScroll());
+    session.scrollWheel(-5, 0, false, inside_x, inside_y);
+    const after_wheel = session.fileTreeEffectiveScroll();
+    try std.testing.expect(after_wheel > 0);
+
+    // ② track click — thumb **밖**을 누르면 그 지점으로 점프한다(드래그가 아니다).
+    const track_bottom = geometry.track_y + geometry.track_h - 1;
+    try std.testing.expect(session.beginFileTreeScrollbarGesture(
+        geometry.track_x + geometry.track_w / 2,
+        track_bottom,
+    ));
+    const after_track = session.fileTreeEffectiveScroll();
+    try std.testing.expect(after_track > after_wheel);
+    session.endScrollbarCapture();
+
+    // ③ keyboard — 선택이 화면 밖으로 나가면 anchor가 그것을 따라 들어온다. 위로 크게 움직여
+    //    스크롤이 실제로 되돌아오는지 본다.
+    session.scrollFileTreeSelectionIntoView(0);
+    try std.testing.expectEqual(@as(usize, 0), session.fileTreeEffectiveScroll());
+    session.scrollFileTreeSelectionIntoView(500);
+    const after_anchor = session.fileTreeEffectiveScroll();
+    try std.testing.expect(after_anchor > 0);
+
+    // ④ 그리고 그 상태가 곧 thumb 위치다 — 발행된 tree가 같은 값에서 나온다.
+    session.refreshFileTreeScrollbarGeometry();
+    const moved = session.fileTreeScrollbarGeometry().?;
+    try std.testing.expectEqual(after_anchor, moved.scroll_rows);
+    var storage: [2]chrome.ui.tree.RectEntry = undefined;
+    const published = try file_tree_scrollbar.publish(moved, 1, &storage);
+    try std.testing.expectEqual(@as(usize, 2), published.entries.len);
+    // thumb이 track 시작보다 아래에 있다 — 스크롤 상태가 발행에 반영됐다는 뜻이다.
+    try std.testing.expect(published.entries[1].rect.y > moved.track_y);
+}
+
 test "두 세대가 그대로여도 track/thumb 기하가 바뀌면 스크롤 드래그를 놓는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

@@ -74,7 +74,7 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     // CIM2가 divider capture 헬퍼(publish·carry key·tick 소비)와 AppKit E2E probe를 더하면서 digest가
     // 바뀐다. reflection
     // 수는 그대로 4다 — 새 코드는 필드를 이름으로 읽지 않고 live split 포인터만 비교한다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "809d2c11af98aca0294ec97a16d4a27928661d4fe600f9a7b23b2c7b881bd95c" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "02f2df156f24aafb4965c511a90eade19ab7d41a52921f2d1d76132f11c1127b" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

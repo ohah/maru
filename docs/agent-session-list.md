@@ -425,13 +425,26 @@ Codex의 과거 파일에는 `thread_source`가 없을 수 있다. 이 경우 us
 
 `SessionArchiveScanner`는 worker에서만 directory enumerate·open·stat·JSONL parse를 하고, main actor에는 immutable `SessionArchiveSnapshot` **완료본 하나**만 건넨다. main actor는 마지막 snapshot을 메모리에 보존해 재진입 즉시 렌더하며, file I/O·JSON parse·정렬·worker wait를 하지 않는다. 대기 중 refresh는 하나로 coalesce하며 old worker completion은 request generation이 맞을 때만 publish한다. dock을 닫거나 앱을 종료하면 cancel을 요청하고, 이미 열린 fd와 staged allocation은 worker가 회수한다.
 
-`SessionDock`의 비례 system-UI text도 같은 frame-path 규율을 따른다. semantic draw op이 바뀌어 rich-text
-artifact cache가 miss하더라도 render tick은 `CTLine`/`CTRun`을 만들거나 worker를 기다리지 않는다. host는
-`{ fingerprint, scale, text role, origin, max-width, foreground, UTF-8 bytes }`를 deep-copy한 불변 request 하나만
-제출한다. 같은 fingerprint의 cache는 계속 paint한다. 새 fingerprint가 필요한 경우에도 목록의 카드·선택·scroll
-상태는 유지하되, 다른 geometry/content의 이전 text artifact를 새 frame에 재사용하지 않는다. 아직 artifact가 없는
-그 짧은 구간에는 목록의 기존 loading/skeleton 상태만 보인다. request는 하나만 inflight로 coalesce하며, 이후 layout·font scale·theme·snapshot이
-다시 바뀌면 결과의 fingerprint가 현재 semantic draw fingerprint와 정확히 일치할 때만 publish한다.
+`SessionDock`의 비례 system-UI text는 이와 **다른** 규율을 따른다. provider JSONL은 worker의 일이지만
+텍스트 셰이핑은 아니다. render tick은 rich-text artifact cache가 miss하면 **그 자리에서 CoreText로 셰이핑해
+이번 frame에 그린다**. host는 `{ fingerprint, scale, text role, origin, max-width, foreground, UTF-8 bytes }`를
+deep-copy한 불변 request 하나를 만들어 같은 tick 안에서 소비하며, 결과를 fingerprint와 함께 cache한다. 즉
+cache는 CoreText 호출을 건너뛰기 위한 **순수 최적화**이지, 텍스트 없는 frame을 정당화하는 장치가 아니다.
+다른 geometry/content의 이전 artifact를 새 frame에 재사용하지 않는 것은 그대로다.
+
+이 결정에는 근거가 있다. 도크의 **모든** 텍스트와 등록 SVG 아이콘이 이 artifact 하나에 실리므로
+(`shapesTextOp`가 `wide_icons`가 아닌 op 전부를 담는다), 셰이핑을 다음 tick으로 미루면 그 frame의 도크는
+카드 배경만 남은 빈 상자가 된다. 게다가 detached worker 시절에는 in-flight가 하나로 coalesce돼 있어, 스크롤처럼
+매 frame 내용이 바뀌는 동안에는 도착한 결과가 계속 fingerprint 불일치로 폐기되어 한 frame 깜빡임이 아니라
+**스크롤하는 내내** 빈 상태가 유지됐다. 비동기의 근거였던 "render tick에서 `CTLine`을 만들지 않는다"는 이
+코드베이스에서 성립하지 않는다 — 같은 tick의 터미널 본문 셰이핑이 이미 **셀마다** `CTLine`을 하나씩 만든다.
+사이드바·탭바도 `CoreTextFrameBuilder.shapeOnly`로 같은 tick에 CoreText를 부른다.
+
+동기 셰이핑이 frame 예산 안에 있으려면 브리지가 **face를 run마다 다시 만들지 않아야 한다**. chrome 텍스트의
+role은 아홉 종뿐이고 그 (point size, weight) 조합은 frame마다 반복되므로, native bridge가 그 face와 PostScript
+이름을 잡아 두고 재사용한다(터미널 draw list가 style별 face를 재사용하는 것과 같은 규율). 이 재사용이 없으면
+같은 frame이 3배 이상 비싸진다. 그 비용 구조는 [성능 예산](performance-budget.md)의 도크 절이 소유한다.
+이 face cache는 lock이 없으므로 chrome 텍스트 셰이핑은 **main actor 전용**이다.
 
 **단, 스크롤은 이 무효화의 대상이 아니다.** CoreText 셰이핑 결과(글리프 id·advance·선택된 face)는 위치의
 함수가 아니므로, 목록이 통째로 위아래로 움직인 프레임은 **같은 artifact를 그대로 재사용해야 한다**. 이것은 위

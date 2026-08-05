@@ -1311,6 +1311,47 @@ pub fn build(b: *std.Build) void {
         macos_divider_smoke_assert.step.dependOn(&macos_divider_smoke.step);
         macos_divider_smoke_step.dependOn(&macos_divider_smoke_assert.step);
 
+        // CIM3 scrollbar AppKit E2E. divider 스모크와 **별도 실행**이다 — 파일 탐색기 도크를 여는
+        // 키가 창 상태를 바꿔 그쪽 단언을 깨뜨린다(실제로 한 번 뒤집혔다).
+        const macos_scrollbar_smoke_step = b.step("macos-scrollbar-smoke", "Run the macOS file tree scrollbar drag AppKit E2E");
+        const macos_scrollbar_smoke_fixture = b.addSystemCommand(&.{
+            "sh", "-eu", "-c",
+            "mkdir -p zig-out/maru-macos-app; " ++
+                "rm -rf zig-out/maru-macos-app/scroll-home; mkdir -p zig-out/maru-macos-app/scroll-home; " ++
+                "cp tests/fixtures/file-panel/fp4-viewer.md zig-out/maru-macos-app/scroll-fixture.md",
+        });
+        macos_scrollbar_smoke_fixture.setCwd(b.path("."));
+        const macos_scrollbar_smoke = b.addSystemCommand(&.{"./zig-out/Maru.app/Contents/MacOS/maru-macos-app"});
+        macos_scrollbar_smoke.setCwd(b.path("."));
+        macos_scrollbar_smoke.setEnvironmentVariable("MARU_MACOS_APP_SMOKE_MS", "20000");
+        macos_scrollbar_smoke.setEnvironmentVariable("MARU_SCROLLBAR_SMOKE", "1");
+        // 도크가 present돼야 탐색기가 열린다. 그 훅이 파일 패널 경로다.
+        macos_scrollbar_smoke.setEnvironmentVariable("MARU_FILE_PANEL", b.pathFromRoot("zig-out/maru-macos-app/scroll-fixture.md"));
+        macos_scrollbar_smoke.setEnvironmentVariable("HOME", b.pathFromRoot("zig-out/maru-macos-app/scroll-home"));
+        macos_scrollbar_smoke.setEnvironmentVariable("CFFIXED_USER_HOME", b.pathFromRoot("zig-out/maru-macos-app/scroll-home"));
+        macos_scrollbar_smoke.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("web/dist"));
+        macos_scrollbar_smoke.step.dependOn(&macos_app_bundle.step);
+        macos_scrollbar_smoke.step.dependOn(&file_panel_web_build.step);
+        macos_scrollbar_smoke.step.dependOn(&macos_scrollbar_smoke_fixture.step);
+        const macos_scrollbar_smoke_assert = b.addSystemCommand(&.{
+            "sh", "-eu", "-c",
+            "summary=zig-out/maru-macos-app/app.summary.txt; " ++
+                "test -f \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^scroll_thumb_present=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^scroll_capture_during_drag=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^scroll_capture_after_up=false$' \"$summary\"; " ++
+                "before=$(/usr/bin/sed -n 's/^scroll_rows_before=//p' \"$summary\"); " ++
+                "after=$(/usr/bin/sed -n 's/^scroll_rows_after=//p' \"$summary\"); " ++
+                "test \"$before\" != \"$after\"; " ++
+                // 계약 §4.3: 상한은 move 수가 아니라 tick 수다.
+                "moves=$(/usr/bin/sed -n 's/^scroll_move_events=//p' \"$summary\"); " ++
+                "applies=$(/usr/bin/sed -n 's/^scroll_applications=//p' \"$summary\"); " ++
+                "test \"$moves\" -gt \"$applies\"",
+        });
+        macos_scrollbar_smoke_assert.setCwd(b.path("."));
+        macos_scrollbar_smoke_assert.step.dependOn(&macos_scrollbar_smoke.step);
+        macos_scrollbar_smoke_step.dependOn(&macos_scrollbar_smoke_assert.step);
+
         const macos_app_smoke_step = b.step("macos-app-smoke", "Run the macOS Swift app host app shell smoke");
         const macos_app_smoke_fixture = b.addSystemCommand(&.{
             "sh", "-eu", "-c",

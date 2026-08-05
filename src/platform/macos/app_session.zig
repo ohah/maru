@@ -203,7 +203,7 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 164;
+pub const abi_version: u32 = 165;
 // 162: AS4-f fixture reads only published SessionDock control/action border rects so four
 // font/scale cold AppKit runs can compare geometry without reconstructing layout in Swift.
 // 161: AS3-c fixture adds one read-only expanded-card raw-rect target and published tree
@@ -3392,6 +3392,11 @@ pub const AppSession = struct {
     } = null,
     // move는 좌표만 모으고 tick이 최종 하나를 적용한다(계약 §4.3). 같은 행으로 clamp되면 무동작.
     scrollbar_coalescer: chrome.ui.continuous_drag.Coalescer(usize) = .{},
+    // AppKit E2E 전용 계측 — 흡수한 move 수와 실제로 재투영한 횟수. 계약 §4.3의 상한이 move 수가
+    // 아니라 tick 수임을 제품 경로에서 보이려면 그 둘이 달라야 하고, 행 값만 보는 fixture는
+    // 한 프레임에 몇 번 적용됐는지를 구분하지 못한다.
+    scrollbar_move_events: u64 = 0,
+    scrollbar_scroll_applications: u64 = 0,
     // AppKit E2E 전용 계측 — 이 drag에서 흡수한 move 수와 실제로 resize를 팬아웃한 횟수. 계약 §4.3의
     // "상한은 move 수가 아니라 tick 수와 실제 geometry 변화"를 제품 경로에서 증명하려면 그 둘이
     // **달라야** 하고, headless fixture는 ratio 값만 보므로 이 비교를 못 한다.
@@ -5541,6 +5546,16 @@ pub const AppSession = struct {
         padding_left_px: u32 = 0,
         padding_right_px: u32 = 0,
         web_covered_dividers: u32 = 0,
+        /// CIM3 AppKit E2E: file tree scrollbar thumb의 발행 rect와 이 drag의 계측.
+        scrollbar_present: bool = false,
+        scrollbar_thumb_x_px: i32 = 0,
+        scrollbar_thumb_y_px: i32 = 0,
+        scrollbar_thumb_w_px: u32 = 0,
+        scrollbar_thumb_h_px: u32 = 0,
+        scrollbar_rows: u64 = 0,
+        scrollbar_capture_active: bool = false,
+        scrollbar_move_events: u64 = 0,
+        scrollbar_scroll_applications: u64 = 0,
     };
 
     /// 활성 탭의 **첫** divider를 발행 경로 그대로 읽는다(`publishDividerTree`와 같은 출처).
@@ -5549,9 +5564,26 @@ pub const AppSession = struct {
             .padding_left_px = self.window_padding_px.left,
             .padding_right_px = self.window_padding_px.right,
             .capture_active = self.dividerCaptureActive(),
+            .scrollbar_capture_active = self.scrollbarCaptureActive(),
+            .scrollbar_move_events = self.scrollbar_move_events,
+            .scrollbar_scroll_applications = self.scrollbar_scroll_applications,
+            .scrollbar_rows = self.fileTreeEffectiveScroll(),
             .move_events = self.divider_move_events,
             .resize_applications = self.divider_resize_applications,
         };
+        if (self.fileTreeScrollbarGeometry()) |bar| {
+            var storage: [2]chrome.ui.tree.RectEntry = undefined;
+            if (file_tree_scrollbar.publish(bar, 1, &storage)) |bar_tree| {
+                if (bar_tree.entries.len == 2) {
+                    const thumb = bar_tree.entries[1].rect;
+                    probe.scrollbar_present = true;
+                    probe.scrollbar_thumb_x_px = @intFromFloat(thumb.x);
+                    probe.scrollbar_thumb_y_px = @intFromFloat(thumb.y);
+                    probe.scrollbar_thumb_w_px = @intFromFloat(@max(thumb.width, 0));
+                    probe.scrollbar_thumb_h_px = @intFromFloat(@max(thumb.height, 0));
+                }
+            } else |_| {}
+        }
         const published = self.publishDividerTree() orelse return probe;
         if (published.entries.len == 0) return probe;
 
@@ -14080,7 +14112,10 @@ pub const AppSession = struct {
             return true;
         };
         if (dispatched.drag) |event| switch (event) {
-            .began, .moved => |update| self.scrollbar_coalescer.absorb(update.x_px, update.y_px),
+            .began, .moved => |update| {
+                self.scrollbar_coalescer.absorb(update.x_px, update.y_px);
+                self.scrollbar_move_events +|= 1;
+            },
             .dropped => |update| {
                 self.scrollbar_coalescer.absorb(update.x_px, update.y_px);
                 self.applyPendingScrollbarScroll();
@@ -14099,6 +14134,7 @@ pub const AppSession = struct {
         const drag = self.scrollbar_capture orelse return;
         const rows = file_tree_scrollbar.scrollForPointer(drag.geometry, point.y_px, drag.grab_y);
         if (!self.scrollbar_coalescer.commitIfChanged(rows)) return;
+        self.scrollbar_scroll_applications +|= 1;
         self.setFileTreeScrollRows(rows);
     }
 

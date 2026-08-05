@@ -3949,6 +3949,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var webDividerCaptureAfterDown = false
     private var webDividerPadding = ""
     private var webDividerCovered: UInt32 = 0
+    // CIM3d: file tree scrollbar thumb을 실제 NSEvent로 끌어 tick coalescing을 제품 경로에서 본다.
+    private var scrollSmokeStage = 0
+    private var scrollSmokeRowsBefore: UInt64 = 0
+    private var scrollSmokeRowsAfter: UInt64 = 0
+    private var scrollSmokeMoveEvents: UInt64 = 0
+    private var scrollSmokeApplications: UInt64 = 0
+    private var scrollSmokeCaptureDuringDrag = false
+    private var scrollSmokeCaptureAfterUp = true
+    private var scrollSmokeThumbPresent = false
+    private var scrollSmokeOpenRetries = 0
     private var webDividerBands = ""
     private var webDividerFrame = ""
 
@@ -5623,6 +5633,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         for surface in toClose { closeWindowOrQuit(surface) }
         maybeRunAgentSessionArchiveSmoke()
         maybeRunDividerSmoke()
+        maybeRunScrollbarSmokeEntry()
         // quick terminal — 보일 때만 tick. 그 셸이 종료/fault면 quick만 정리한다(앱은 계속 산다).
         if let quick, quick.window?.isVisible == true {
             explicitSurface = quick
@@ -8239,6 +8250,99 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
     }
 
+
+    /// 스크롤 E2E는 divider 모드와 독립이다 — 자기 env 게이트로만 돈다.
+    private func maybeRunScrollbarSmokeEntry() {
+        guard isScrollbarSmokeMode, let surface = primary, let session = surface.appSession,
+              let view = surface.view, let window = surface.window else { return }
+        withSurface(surface) {
+            maybeRunScrollbarSmoke(session: session, view: view, window: window)
+        }
+    }
+
+    private var isScrollbarSmokeMode: Bool {
+        smokeMode && ProcessInfo.processInfo.environment["MARU_SCROLLBAR_SMOKE"] == "1"
+    }
+
+    /// CIM3d — file tree scrollbar thumb을 `MaruMetalTerminalView`로 끌어 스크롤이 **tick당 1회**
+    /// 적용되는지 제품 경로에서 본다. 행 값만 보는 headless fixture는 한 프레임에 몇 번 적용됐는지를
+    /// 구분하지 못하므로, move 수와 재투영 수를 함께 읽는다.
+    private func maybeRunScrollbarSmoke(session: OpaquePointer, view: MaruMetalTerminalView, window: NSWindow) {
+        // divider/web E2E와 **같은 실행에서 돌리지 않는다**. 파일 탐색기 도크를 여는 키가 창
+        // 상태를 바꿔 그쪽 단언을 깨뜨린다(실제로 `capture_after_down`이 false로 뒤집혔다) —
+        // 파일 패널 스모크를 divider 스모크에서 떼어낸 것과 같은 이유다.
+        guard ProcessInfo.processInfo.environment["MARU_SCROLLBAR_SMOKE"] == "1" else { return }
+        guard scrollSmokeStage < 2 else { return }
+        func probe() -> MaruAppHostDividerSmokeProbe? {
+            var out = MaruAppHostDividerSmokeProbe()
+            return maru_macos_app_session_divider_smoke_probe(session, &out) == Self.statusOK ? out : nil
+        }
+        guard let current = probe(), current.scrollbar_present != 0, current.scrollbar_thumb_h_px > 0 else {
+            // 파일 탐색기 도크가 열려 있어야 scrollbar가 발행된다. ⌘⇧E로 열되, 첫 키는 surface가
+            // 준비되기 전이라 삼켜질 수 있으므로 정해진 횟수만 다시 보낸다.
+            scrollSmokeOpenRetries += 1
+            if scrollSmokeOpenRetries % 30 == 1 && scrollSmokeOpenRetries <= 300, let surface = primary {
+                withSurface(surface) {
+                    sendKeyEvent(MaruAppHostKeyEvent(
+                        codepoint: UInt32(UnicodeScalar("e").value),
+                        base_codepoint: UInt32(UnicodeScalar("e").value),
+                        key_code: UInt32(MaruAppHostKeyCodeUnknown.rawValue),
+                        modifier_shift: 1,
+                        modifier_control: 0,
+                        modifier_option: 0,
+                        modifier_command: 1,
+                        is_repeat: 0,
+                        raw_key_code: 14
+                    ))
+                }
+            }
+            return
+        }
+        scrollSmokeThumbPresent = true
+        let scale = window.backingScaleFactor
+        guard scale > 0 else { return }
+
+        scrollSmokeRowsBefore = current.scrollbar_rows
+        let x = CGFloat(current.scrollbar_thumb_x_px) + CGFloat(current.scrollbar_thumb_w_px) / 2
+        let startY = CGFloat(current.scrollbar_thumb_y_px) + CGFloat(current.scrollbar_thumb_h_px) / 2
+
+        func event(_ type: NSEvent.EventType, _ backingY: CGFloat) -> NSEvent? {
+            let local = NSPoint(x: x / scale, y: view.bounds.height - (backingY / scale))
+            return NSEvent.mouseEvent(
+                with: type,
+                location: view.convert(local, to: nil),
+                modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber,
+                context: nil,
+                eventNumber: 0,
+                clickCount: 1,
+                pressure: 1
+            )
+        }
+
+        guard let down = event(.leftMouseDown, startY) else { return }
+        view.mouseDown(with: down)
+        // 한 tick 안에서 여러 move를 흘린다. 그 수와 실제 재투영 수가 달라야 §4.3이 지켜진 것이다.
+        for step in 1...4 {
+            guard let dragged = event(.leftMouseDragged, startY + CGFloat(step) * 20) else { continue }
+            view.mouseDragged(with: dragged)
+        }
+        if let during = probe() {
+            scrollSmokeCaptureDuringDrag = during.scrollbar_capture_active != 0
+            scrollSmokeMoveEvents = during.scrollbar_move_events
+        }
+        guard let up = event(.leftMouseUp, startY + 80) else { return }
+        view.mouseUp(with: up)
+
+        if let after = probe() {
+            scrollSmokeRowsAfter = after.scrollbar_rows
+            scrollSmokeApplications = after.scrollbar_scroll_applications
+            scrollSmokeCaptureAfterUp = after.scrollbar_capture_active != 0
+        }
+        scrollSmokeStage = 2
+    }
+
     /// CIM2d — 웹 패널이 divider에 맞닿은 배치에서 seam 밴드 클릭이 **아래 터미널 뷰로 통과**하는지.
     /// WKWebView는 native라 자기 frame 클릭을 삼키므로, 이 통과가 없으면 divider를 잡을 수 없다.
     /// 통과 판정은 `hitTest` 조회 결과로 하고, 그 뒤 같은 좌표의 실제 down이 capture를 만드는지 본다.
@@ -9840,6 +9944,19 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             web_role_scheme_render_shell_csp=\(roleSmoke.renderShellCSP)
             web_role_scheme_render_document_status=\(roleSmoke.renderDocumentStatus)
             web_role_scheme_render_document_none=\(roleSmoke.renderDocumentCSP.contains("worker-src 'none'"))
+
+            """
+        }
+
+        if isScrollbarSmokeMode {
+            summary += """
+            scroll_thumb_present=\(scrollSmokeThumbPresent)
+            scroll_capture_during_drag=\(scrollSmokeCaptureDuringDrag)
+            scroll_capture_after_up=\(scrollSmokeCaptureAfterUp)
+            scroll_rows_before=\(scrollSmokeRowsBefore)
+            scroll_rows_after=\(scrollSmokeRowsAfter)
+            scroll_move_events=\(scrollSmokeMoveEvents)
+            scroll_applications=\(scrollSmokeApplications)
 
             """
         }

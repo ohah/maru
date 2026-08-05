@@ -8,7 +8,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 165u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 166u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -605,6 +605,18 @@ typedef struct MaruAppHostDividerSmokeProbe {
     uint64_t scrollbar_rows;
     uint64_t scrollbar_move_events;
     uint64_t scrollbar_scroll_applications;
+    /* CIM4b: 활성 pane 탭 바의 발행 세그먼트 기하와 provisional preview 관측치(보이는 첫 탭 vs model 첫 탭).
+       끝에 덧붙여 기존 필드 offset은 불변이지만 레코드가 커지므로 ABI 버전을 올린다(v166) — Swift가 이
+       구조체를 자기 스택에 잡고 Zig가 채우는 out-param이라, 버전이 그대로면 낡은 Swift가 새 Zig와 짝지어져도
+       가드를 통과해 호출자 스택을 넘어 쓴다. */
+    uint32_t tab_bar_present;
+    uint32_t tab_count;
+    int32_t tab_first_x_px;
+    uint32_t tab_slot_w_px;
+    int32_t tab_bar_y_px;
+    uint32_t tab_drag_active;
+    uint64_t tab_visible_first_id;
+    uint64_t tab_model_first_id;
 } MaruAppHostDividerSmokeProbe;
 int32_t maru_macos_app_session_divider_smoke_probe(
     MaruAppHostSession *session,

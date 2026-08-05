@@ -1384,6 +1384,53 @@ pub fn build(b: *std.Build) void {
         macos_scrollbar_smoke_assert.step.dependOn(&macos_scrollbar_smoke.step);
         macos_scrollbar_smoke_step.dependOn(&macos_scrollbar_smoke_assert.step);
 
+        // CIM4b 탭 드래그 AppKit E2E. divider·scrollbar 스모크와 **별도 실행**이다 — 그쪽은 split을 만들고
+        // 도크를 열어 창 상태를 바꾸는데, 이 fixture는 그 상태에서 탭 바 세그먼트 좌표를 읽는다.
+        const macos_tab_drag_smoke_step = b.step("macos-tab-drag-smoke", "Run the macOS terminal tab drag AppKit E2E");
+        const macos_tab_drag_smoke_fixture = b.addSystemCommand(&.{
+            "sh", "-eu", "-c",
+            "mkdir -p zig-out/maru-macos-app; " ++
+                "rm -rf zig-out/maru-macos-app/tab-drag-home; mkdir -p zig-out/maru-macos-app/tab-drag-home",
+        });
+        macos_tab_drag_smoke_fixture.setCwd(b.path("."));
+        const macos_tab_drag_smoke = b.addSystemCommand(&.{"./zig-out/Maru.app/Contents/MacOS/maru-macos-app"});
+        macos_tab_drag_smoke.setCwd(b.path("."));
+        macos_tab_drag_smoke.setEnvironmentVariable("MARU_MACOS_APP_SMOKE_MS", "20000");
+        macos_tab_drag_smoke.setEnvironmentVariable("MARU_TAB_DRAG_SMOKE", "1");
+        macos_tab_drag_smoke.setEnvironmentVariable("HOME", b.pathFromRoot("zig-out/maru-macos-app/tab-drag-home"));
+        macos_tab_drag_smoke.setEnvironmentVariable("CFFIXED_USER_HOME", b.pathFromRoot("zig-out/maru-macos-app/tab-drag-home"));
+        macos_tab_drag_smoke.setEnvironmentVariable("MARU_WEB_APP_ROOT", b.pathFromRoot("web/dist"));
+        macos_tab_drag_smoke.step.dependOn(&macos_app_bundle.step);
+        macos_tab_drag_smoke.step.dependOn(&file_panel_web_build.step);
+        macos_tab_drag_smoke.step.dependOn(&macos_tab_drag_smoke_fixture.step);
+        const macos_tab_drag_smoke_assert = b.addSystemCommand(&.{
+            "sh", "-eu", "-c",
+            "summary=zig-out/maru-macos-app/app.summary.txt; " ++
+                "test -f \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^tab_drag_stage=2$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^tab_drag_bar_present=true$' \"$summary\"; " ++
+                // down~up 사이에만 드래그가 살아 있다.
+                "/usr/bin/grep -Eq '^tab_drag_capture_during_drag=true$' \"$summary\"; " ++
+                "/usr/bin/grep -Eq '^tab_drag_capture_after_up=false$' \"$summary\"; " ++
+                // §4.4의 핵심: 끄는 동안 보이는 순서는 움직였는데 model은 시작 그대로다(둘이 갈린다).
+                "/usr/bin/grep -Eq '^tab_drag_preview_diverged=true$' \"$summary\"; " ++
+                "before=$(/usr/bin/sed -n 's/^tab_drag_model_first_before=//p' \"$summary\"); " ++
+                "during=$(/usr/bin/sed -n 's/^tab_drag_model_first_during=//p' \"$summary\"); " ++
+                "test \"$before\" = \"$during\"; " ++
+                // 손을 떼면 그제서야 model이 따라온다(commit 1회).
+                "committed=$(/usr/bin/sed -n 's/^tab_drag_model_first_after_commit=//p' \"$summary\"); " ++
+                "test \"$before\" != \"$committed\"; " ++
+                // Escape는 두 번째 드래그를 끊고 model을 그 자리에 둔다(effect 0) — 보이는 순서도 model로 돌아온다.
+                "/usr/bin/grep -Eq '^tab_drag_escape_capture_cleared=true$' \"$summary\"; " ++
+                "escaped=$(/usr/bin/sed -n 's/^tab_drag_escape_model_first=//p' \"$summary\"); " ++
+                "escaped_visible=$(/usr/bin/sed -n 's/^tab_drag_escape_visible_first=//p' \"$summary\"); " ++
+                "test \"$escaped\" = \"$committed\"; " ++
+                "test \"$escaped_visible\" = \"$committed\"",
+        });
+        macos_tab_drag_smoke_assert.setCwd(b.path("."));
+        macos_tab_drag_smoke_assert.step.dependOn(&macos_tab_drag_smoke.step);
+        macos_tab_drag_smoke_step.dependOn(&macos_tab_drag_smoke_assert.step);
+
         const macos_app_smoke_step = b.step("macos-app-smoke", "Run the macOS Swift app host app shell smoke");
         const macos_app_smoke_fixture = b.addSystemCommand(&.{
             "sh", "-eu", "-c",

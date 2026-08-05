@@ -1548,6 +1548,43 @@ pub fn build(b: *std.Build) void {
     });
     const run_chrome_ui_tests = b.addRunArtifact(chrome_ui_tests);
     test_step.dependOn(&run_chrome_ui_tests.step);
+    // 시각 골든 비교의 순수 코어. 스모크 캡처(PPM)를 관심 영역만 잘라 골든과 비교한다 — chrome/renderer의
+    // 시각 결과를 지금까지 사람이 눈으로 확인해 왔고, 그 방식이 실제로 놓친 회귀가 있었다(부분적으로 보이는
+    // 행이 "잘린" 것과 "세로로 눌린" 것을 구분하지 못했다). 코어는 순수 Zig라 어느 플랫폼에서도 돈다.
+    const ppm_golden_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/support/ppm.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_ppm_golden_tests = b.addRunArtifact(ppm_golden_tests);
+    test_step.dependOn(&run_ppm_golden_tests.step);
+    const ppm_golden_step = b.step("test-ppm-golden", "Run the visual golden image comparison core tests");
+    ppm_golden_step.dependOn(&run_ppm_golden_tests.step);
+
+    // 실제 AppKit+Metal 캡처의 관심 영역을 커밋된 골든과 비교한다. 캡처가 없으면 skip하므로 스모크를
+    // 돌리지 않은 환경/플랫폼에서도 무해하다(그 사실을 출력해 "게이트가 돌았다"는 착각을 막는다).
+    const ppm_mod = b.addModule("ppm", .{
+        .root_source_file = b.path("tests/support/ppm.zig"),
+        .target = target,
+    });
+    const dock_visual_golden_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/golden/dock_visual.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "ppm", .module = ppm_mod }},
+        }),
+    });
+    const run_dock_visual_golden = b.addRunArtifact(dock_visual_golden_tests);
+    run_dock_visual_golden.setCwd(b.path("."));
+    // 캡처는 스모크가 만들고 골든 갱신은 파일을 쓴다 — 캐시된 성공을 재사용하면 stale 판정이 된다.
+    run_dock_visual_golden.has_side_effects = true;
+    const dock_visual_golden_step = b.step("test-dock-visual-golden", "Compare Session Dock smoke captures against committed golden images");
+    dock_visual_golden_step.dependOn(&run_dock_visual_golden.step);
+
     const chrome_ui_test_step = b.step("test-chrome-ui", "Run the focused typed Chrome UI tree, interaction, and paint tests");
     chrome_ui_test_step.dependOn(&run_chrome_ui_tests.step);
     // update_check.zig는 std만 의존하는 순수 로직(tag 파싱·semver 비교)이라 macOS smoke가 아니라

@@ -114,6 +114,19 @@ jobs:
       # 계약 테스트가 전부 통과하고 앱을 띄워야만 드러난다. 수 초짜리 컴파일 스모크로 그 사각지대를 닫는다.
       - name: Compile product Metal shaders
         run: mise run macos-shader-compile-smoke
+      # Session Dock의 시각 계약(스크롤 클리핑·액션 라벨·카드 밀도)은 지금까지 사람이 캡처를 눈으로
+      # 확인해 왔고, 그 방식이 실제로 회귀를 놓쳤다(부분적으로 보이는 행이 "잘린" 것과 "눌린" 것을
+      # 구분하지 못했다). 스모크로 실제 Metal 캡처를 만들고 커밋된 골든과 픽셀 비교한다.
+      - name: Gate Session Dock visuals against golden images
+        run: mise run macos-dock-visual-golden
+      - name: Upload dock visual captures
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: maru-dock-visual-captures
+          path: zig-out/maru-agent-session-archive-smoke/captures
+          if-no-files-found: warn
+          retention-days: 14
       - name: Verify provider continuity removal
         run: mise run test-provider-session-removal
       - run: mise run macos-file-explorer-perf

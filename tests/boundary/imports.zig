@@ -81,7 +81,7 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     // CIM4b가 탭 드래그 preview를 model 밖 transaction으로 옮기며 또 바뀐다. count는 여전히 4다 —
     // 새 코드(`paneTermOrder`·`paneActiveTermIndex`·`commitTabDragOrder`)는 필드를 이름으로 읽지 않고
     // `*Term` 포인터와 인덱스만 다룬다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "PENDING" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "2f02eb53a4f4ef6bde670b22112e06c791e7f42f0dc2372e68a5dcc959ddad70" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

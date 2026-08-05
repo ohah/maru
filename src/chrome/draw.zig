@@ -125,6 +125,11 @@ pub const Op = union(enum) {
         /// rect instead of rounding its available width down to terminal cells.
         max_width_px: ?u32 = null,
         placement: TextPlacement = .origin,
+        /// 이 op이 컴포넌트의 **스크롤 영역**에 속하는지. 스크롤 뷰포트 사각형 자체는 backend가 프레임마다
+        /// 알고 있으므로 여기 싣지 않는다 — 그러면 스크롤할 때마다 semantic op이 달라져 shaping 캐시가
+        /// 통째로 무효화된다. 소속은 스크롤해도 바뀌지 않는 사실이라 캐시 키에 안전하게 들어간다.
+        /// backend는 이 표시가 있는 glyph만 뷰포트로 잘라, 반쯤 걸친 행도 픽셀 단위로 정확히 보인다.
+        scroll_clipped: bool = false,
     };
 
     /// C4b rich 박스 — 둥근 모서리·변별 테두리·solid/gradient 채움. tui 백엔드는 corner/border가 0이면
@@ -140,6 +145,8 @@ pub const Op = union(enum) {
         fill_role_end: ?tokens.ColorRole = null, // gradient 끝 색(null=solid)
         gradient: GradientKind = .solid,
         alpha: u8 = 0xFF,
+        /// Text.scroll_clipped와 같은 의미다 — 스크롤 영역에 속한 배경/pill은 뷰포트 밖으로 새면 안 된다.
+        scroll_clipped: bool = false,
     };
     pub const GradientKind = enum(u8) { solid = 0, vertical = 1, horizontal = 2 };
 };

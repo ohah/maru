@@ -138,6 +138,13 @@ pub fn placementFor(placements: []const RichTextArtifact.Placement, row: u16, co
 /// Cache key for a placement-only artifact. Font rasterization remains owned by the existing
 /// shared CoreText/atlas path; this key invalidates the immutable component placement whenever
 /// text, semantic color, rect, icon width policy, or grid metrics change.
+/// CoreText 셰이핑 결과(글리프 id·advance·선택된 face)는 **위치의 함수가 아니다**. 그래서 스크롤로 목록이
+/// 통째로 위아래로 움직인 프레임은 같은 아티팩트를 다시 쓸 수 있어야 한다. `scroll_origin_y_px`(현재
+/// 스크롤 영역의 첫 아이템 origin)를 스크롤 소속 op의 y에서 빼서, **평행이동에 불변인** 키를 만든다.
+///
+/// 이걸 안 하면 스크롤 1px마다 키가 바뀌고, 캐시 miss 프레임은 텍스트를 아예 그리지 않으므로(host의
+/// all-or-cell-fallback) 스크롤 내내 글자가 사라진다 — 사용자가 보고한 플리커의 직접 원인이다.
+/// 고정 chrome은 스크롤해도 제자리이므로 절대 y를 그대로 섞는다.
 pub fn richTextFingerprint(
     ops: []const chrome.draw.Op,
     tk: *const chrome.Tokens,
@@ -145,6 +152,7 @@ pub fn richTextFingerprint(
     cell_height_px: u32,
     cols: u16,
     rows: u16,
+    scroll_origin_y_px: i32,
 ) u64 {
     var state: u64 = 0xcbf29ce484222325;
     fingerprintMixValue(&state, cell_width_px);
@@ -159,12 +167,13 @@ pub fn richTextFingerprint(
             if (text.wide_icons) continue;
             fingerprintMixValue(&state, 0x54);
             fingerprintMixValue(&state, @as(u32, @bitCast(text.origin.x)));
-            fingerprintMixValue(&state, @as(u32, @bitCast(text.origin.y)));
+            fingerprintMixValue(&state, @as(u32, @bitCast(scrollRelativeY(text.origin.y, text.scroll_clipped, scroll_origin_y_px))));
             fingerprintMixValue(&state, packRgb(tk.get(text.role)));
             fingerprintMixValue(&state, @intFromEnum(text.text_role));
             fingerprintMixValue(&state, @intFromBool(text.wide_icons));
+            fingerprintMixValue(&state, @intFromBool(text.scroll_clipped));
             fingerprintMixValue(&state, text.max_width_px orelse 0);
-            fingerprintMixTextPlacement(&state, text.placement);
+            fingerprintMixTextPlacement(&state, text.placement, text.scroll_clipped, scroll_origin_y_px);
             for (text.runs) |run| {
                 fingerprintMixValue(&state, run.text.len);
                 fingerprintMixValue(&state, @intFromBool(run.bold));
@@ -176,20 +185,27 @@ pub fn richTextFingerprint(
     return state;
 }
 
-fn fingerprintMixTextPlacement(state: *u64, placement: chrome.draw.TextPlacement) void {
+/// 스크롤 목록에 속한 op의 y를 스크롤 기준 상대값으로 바꾼다. 목록 전체가 같은 양만큼 움직이므로 이
+/// 값은 스크롤에 불변이고, 아이템이 실제로 교체되면 텍스트 바이트가 달라져 키가 정상적으로 바뀐다.
+fn scrollRelativeY(y: i32, scroll_clipped: bool, scroll_origin_y_px: i32) i32 {
+    if (!scroll_clipped) return y;
+    return y -% scroll_origin_y_px;
+}
+
+fn fingerprintMixTextPlacement(state: *u64, placement: chrome.draw.TextPlacement, scroll_clipped: bool, scroll_origin_y_px: i32) void {
     switch (placement) {
         .origin => fingerprintMixValue(state, @as(u8, 0)),
         .center_in_rect => |rect| {
             fingerprintMixValue(state, @as(u8, 1));
             fingerprintMixValue(state, @as(u32, @bitCast(rect.x)));
-            fingerprintMixValue(state, @as(u32, @bitCast(rect.y)));
+            fingerprintMixValue(state, @as(u32, @bitCast(scrollRelativeY(rect.y, scroll_clipped, scroll_origin_y_px))));
             fingerprintMixValue(state, rect.w);
             fingerprintMixValue(state, rect.h);
         },
         .icon_in_rect => |icon| {
             fingerprintMixValue(state, @as(u8, 2));
             fingerprintMixValue(state, @as(u32, @bitCast(icon.content_rect.x)));
-            fingerprintMixValue(state, @as(u32, @bitCast(icon.content_rect.y)));
+            fingerprintMixValue(state, @as(u32, @bitCast(scrollRelativeY(icon.content_rect.y, scroll_clipped, scroll_origin_y_px))));
             fingerprintMixValue(state, icon.content_rect.w);
             fingerprintMixValue(state, icon.content_rect.h);
             fingerprintMixValue(state, icon.icon_codepoint);
@@ -198,7 +214,7 @@ fn fingerprintMixTextPlacement(state: *u64, placement: chrome.draw.TextPlacement
         .leading_icon_group => |group| {
             fingerprintMixValue(state, @as(u8, 3));
             fingerprintMixValue(state, @as(u32, @bitCast(group.content_rect.x)));
-            fingerprintMixValue(state, @as(u32, @bitCast(group.content_rect.y)));
+            fingerprintMixValue(state, @as(u32, @bitCast(scrollRelativeY(group.content_rect.y, scroll_clipped, scroll_origin_y_px))));
             fingerprintMixValue(state, group.content_rect.w);
             fingerprintMixValue(state, group.content_rect.h);
             fingerprintMixValue(state, group.icon_codepoint);
@@ -533,13 +549,70 @@ test "rich text fingerprint changes for placement semantic color and typography 
     });
     const runs = [_]chrome.draw.Run{.{ .text = "가A" }};
     var ops = [_]chrome.draw.Op{.{ .text = .{ .origin = .{ .x = 5, .y = 7 }, .runs = &runs, .role = .accent_bar } }};
-    const base = richTextFingerprint(&ops, &tk, 8, 16, 20, 10);
-    try std.testing.expect(base != richTextFingerprint(&ops, &tk, 9, 16, 20, 10));
+    const base = richTextFingerprint(&ops, &tk, 8, 16, 20, 10, 0);
+    try std.testing.expect(base != richTextFingerprint(&ops, &tk, 9, 16, 20, 10, 0));
     tk.palette.set(.accent_bar, .{ .r = 99, .g = 26, .b = 27 });
-    try std.testing.expect(base != richTextFingerprint(&ops, &tk, 8, 16, 20, 10));
+    try std.testing.expect(base != richTextFingerprint(&ops, &tk, 8, 16, 20, 10, 0));
     tk.palette.set(.accent_bar, .{ .r = 25, .g = 26, .b = 27 });
     ops[0].text.text_role = .card_heading;
-    try std.testing.expect(base != richTextFingerprint(&ops, &tk, 8, 16, 20, 10));
+    try std.testing.expect(base != richTextFingerprint(&ops, &tk, 8, 16, 20, 10, 0));
+}
+
+// 사용자 보고 회귀: 목록을 스크롤하거나 새로 고치면 도크 글자가 사라졌다 나타났다 했다. 원인은 이 키가
+// 텍스트의 **절대 픽셀 y**를 물고 있었던 것이다. 스크롤은 1px 단위라 매 프레임 키가 바뀌고, 캐시가
+// 빗나간 프레임에는 host가 measured 텍스트를 통째로 안 그린다(all-or-cell-fallback). 스크롤이 이어지는
+// 동안 늦게 도착한 worker 결과도 계속 stale이라, 멈출 때까지 글자가 돌아오지 않는다.
+//
+// CoreText 셰이핑 결과는 위치의 함수가 아니므로, 스크롤로 목록이 통째로 움직인 프레임은 **같은 키**여야
+// 한다. 고정 chrome은 스크롤해도 제자리이므로 절대 y를 유지해야 하고, 아이템이 실제로 교체되면 텍스트가
+// 달라져 키가 정상적으로 바뀌어야 한다.
+test "rich text fingerprint is invariant to pure scroll translation" {
+    const tk = chrome.Tokens.rich(.{
+        .foreground = .{ .r = 240, .g = 240, .b = 240 },
+        .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
+        .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
+        .sidebar_active = .{ .r = 80, .g = 80, .b = 80 },
+        .search_match = .{ .r = 1, .g = 2, .b = 3 },
+        .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
+        .selection = .{ .r = 7, .g = 8, .b = 9 },
+        .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .accent = .{ .r = 13, .g = 14, .b = 15 },
+    });
+    const header_runs = [_]chrome.draw.Run{.{ .text = "Agent 세션 기록" }};
+    const card_runs = [_]chrome.draw.Run{.{ .text = "카드 제목" }};
+    const other_runs = [_]chrome.draw.Run{.{ .text = "다른 카드" }};
+    // 고정 chrome 하나 + 스크롤 목록 하나. 스크롤은 목록 op의 y와 scroll origin을 같은 양만큼 옮긴다.
+    const rested = [_]chrome.draw.Op{
+        .{ .text = .{ .origin = .{ .x = 20, .y = 30 }, .runs = &header_runs, .role = .surface_fg, .text_role = .dock_heading } },
+        .{ .text = .{ .origin = .{ .x = 20, .y = 300 }, .runs = &card_runs, .role = .surface_fg, .text_role = .card_heading, .scroll_clipped = true } },
+    };
+    const scrolled = [_]chrome.draw.Op{
+        rested[0],
+        .{ .text = .{ .origin = .{ .x = 20, .y = 259 }, .runs = &card_runs, .role = .surface_fg, .text_role = .card_heading, .scroll_clipped = true } },
+    };
+    const base = richTextFingerprint(&rested, &tk, 8, 16, 20, 10, 0);
+    try std.testing.expectEqual(base, richTextFingerprint(&scrolled, &tk, 8, 16, 20, 10, -41));
+
+    // 고정 chrome이 움직였다면 그건 스크롤이 아니라 레이아웃 변화다 — 키가 바뀌어야 한다.
+    const moved_chrome = [_]chrome.draw.Op{
+        .{ .text = .{ .origin = .{ .x = 20, .y = 31 }, .runs = &header_runs, .role = .surface_fg, .text_role = .dock_heading } },
+        scrolled[1],
+    };
+    try std.testing.expect(base != richTextFingerprint(&moved_chrome, &tk, 8, 16, 20, 10, -41));
+
+    // 가상화로 카드가 교체되면 텍스트가 달라지므로 키도 달라져야 한다(캐시 재사용 금지).
+    const replaced = [_]chrome.draw.Op{
+        rested[0],
+        .{ .text = .{ .origin = .{ .x = 20, .y = 259 }, .runs = &other_runs, .role = .surface_fg, .text_role = .card_heading, .scroll_clipped = true } },
+    };
+    try std.testing.expect(base != richTextFingerprint(&replaced, &tk, 8, 16, 20, 10, -41));
+
+    // 같은 y라도 스크롤 소속이 다르면 다른 op이다(평행이동 대상이 달라진다).
+    const not_scrolled = [_]chrome.draw.Op{
+        rested[0],
+        .{ .text = .{ .origin = .{ .x = 20, .y = 300 }, .runs = &card_runs, .role = .surface_fg, .text_role = .card_heading } },
+    };
+    try std.testing.expect(base != richTextFingerprint(&not_scrolled, &tk, 8, 16, 20, 10, 0));
 }
 
 test "rich text fingerprint ignores animated wide icon-only ops" {
@@ -565,5 +638,5 @@ test "rich text fingerprint ignores animated wide icon-only ops" {
         baseline[0],
         .{ .text = .{ .origin = .{ .x = 30, .y = 7 }, .runs = &spinner_b, .role = .accent_bar, .wide_icons = true } },
     };
-    try std.testing.expectEqual(richTextFingerprint(&baseline, &tk, 8, 16, 20, 10), richTextFingerprint(&next, &tk, 8, 16, 20, 10));
+    try std.testing.expectEqual(richTextFingerprint(&baseline, &tk, 8, 16, 20, 10, 0), richTextFingerprint(&next, &tk, 8, 16, 20, 10, 0));
 }

@@ -69,9 +69,12 @@ root picker callback은 path를 소유한 bounded backend request만 제출한�
 
 - **제목 행은 없다.** 뷰 바가 지금 보는 뷰를 이미 알려 주므로 `탐색기` 같은 제목을 글자로 한 번 더 적지 않는다(옛
   `Geometry.tree_header`는 제거했다). 그 자리는 아이콘 영역이 가져갔다.
-- **바 높이 = pane 탭 바 높이.** 왼쪽 터미널 탭 바와 아래 경계선이 한 줄로 맞아야 한다. 탭 바 높이는 `cell_height + 2*pad`라
-  **chrome 행의 배수가 아니므로** 도크가 자체적으로 파생하지 않고 그 단일 출처(`paneBarHeightPx`)를 `dock_layout.Input.view_bar_px`로
-  **그대로 받는다**. 도크가 그 높이를 넣으면 본문이 사라질 만큼 낮으면 바를 접는다 — 스위처가 콘텐츠를 굶기지 않는다.
+- **바 높이 = 도크의 Chrome logical metric(40pt)이며 뷰와 무관하다.** 예전에는 탐색기·소스 컨트롤만 왼쪽 터미널 탭 바와
+  높이를 맞추려고 `paneBarHeightPx`(= `cell_height + 2*pad`)를 그대로 받았다. 그러면 **같은 아이콘 세 개가 뷰를 바꿀 때마다
+  오르내리고**(실측 53px ↔ 80px, 사용자 보고) 터미널 폰트 크기가 도크 기하를 정하게 된다. view bar는 도크가 소유한 chrome이므로
+  모든 뷰가 `DockMetrics.view_switcher_h` 하나를 쓰고, 도크 시작선도 같은 이유로 뷰와 무관한 28pt safety band다. 그 대가로 터미널
+  탭 바와의 한 줄 정렬은 포기한다(단일 출처는 [agent-session-list.md](agent-session-list.md) §2.1.3). 도크가 그 높이를 넣으면
+  본문이 사라질 만큼 낮으면 바를 접는다 — 스위처가 콘텐츠를 굶기지 않는다.
 - **아이콘은 2셀**(`DrawCell.width = 2`). 합성 아이콘은 슬롯 크기에 맞춰 스케일되므로(`icon_glyph.fillCoverage`의
   `side = min(w, h)`) 2칸이면 1칸보다 크고 또렷하다 — 사이드바 에이전트 아이콘이 같은 이유로 이미 2칸이다. 슬롯은 4셀
   (여백 1 + 아이콘 2 + 여백 1)이고, 아이콘은 셀 한 줄을 패딩만큼 내려 그려 바 안에서 세로 중앙에 온다.

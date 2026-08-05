@@ -69,8 +69,13 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
     const search = find(frame.tree, build.NodeIds.search) orelse return error.MissingRect;
     try writer.searchField(search);
 
+    // 목록 본문은 여기서부터다. scroll-area의 clip을 열어 두면 그 안에서 나온 장식 quad는 호출처가
+    // 기억하지 않아도 전부 잘린다.
+    const content_entry = find(frame.tree, build.NodeIds.content) orelse return error.MissingRect;
+    writer.container_clip = clipRectOf(content_entry);
+
     if (props.loading and props.items.len == 0) {
-        try writer.skeletons(find(frame.tree, build.NodeIds.content) orelse return error.MissingRect);
+        try writer.skeletons(content_entry);
     }
 
     // 여기부터가 스크롤 목록이다. 고정 chrome은 위에서 이미 emit됐다.
@@ -122,9 +127,13 @@ const Writer = struct {
     /// 지금 emit 중인 op이 스크롤 목록에 속하는지. 고정 chrome(헤더·scope·검색)은 스크롤해도 제자리이므로
     /// 이 구분이 없으면 backend가 "스크롤은 순수 평행이동"이라는 사실을 쓸 수 없다.
     scroll_clipped: bool = false,
-    /// 지금 emit 중인 행의 published clip. 셀 격자로 lowering하는 backend(Lab·모달)는 뷰포트를 모르므로
+    /// 지금 emit 중인 **행**의 published clip. 셀 격자로 lowering하는 backend(Lab·모달)는 뷰포트를 모르므로
     /// 이 rect로 자른다. measured 경로는 무시한다(위 bool과 backend 뷰포트를 쓴다).
     active_clip: ?draw.Rect = null,
+    /// 지금 열려 있는 **컨테이너**(스크롤 영역, 펼친 카드의 detail surface)의 clip. 축이 `active_clip`과
+    /// 다르다 — 저쪽은 행 하나이고 이쪽은 그 행들을 담는 상자다. 어느 행에도 속하지 않는 장식 quad
+    /// (로딩 스켈레톤 등)가 이 값을 기본값으로 받는다. null은 "자를 컨테이너 없음"(고정 chrome)이다.
+    container_clip: ?draw.Rect = null,
 
     fn text(self: *Writer, rect: tree.RectEntry, line: u32, source: []const u8, role: tokens.ColorRole, text_role: typography.ChromeTextRole, line_count: u32, wide_icons: bool, centered: bool) ViewError!void {
         return self.textStyled(rect, line, source, role, text_role, line_count, wide_icons, centered, false);
@@ -400,9 +409,16 @@ const Writer = struct {
             try self.emit(pill.label_x, pill.label_y, count, count_cols, .head, .surface_fg, .control, false, true);
     }
 
+    /// **모든** 장식 quad는 이 한 곳을 지난다. clip을 명시하지 않은 quad에는 지금 열려 있는 컨테이너의
+    /// clip을 자동으로 싣는다 — clip을 "그리는 쪽이 매번 기억해야 하는 opt-in"으로 두면 한 군데만 빠뜨려도
+    /// 그 quad가 스크롤 영역 밖으로 새어 고정 chrome 위에 그려진다(사용자 보고: 로딩 스켈레톤 막대가
+    /// 목록 밖까지 그려짐 — `skeletonLine`이 clip을 안 실었다). CSS로 치면 스크롤 컨테이너의
+    /// `overflow: hidden`이 자식에게 자동으로 적용되는 것과 같은 자리다.
     fn appendQuad(self: *Writer, quad: draw.Op.Quad) ViewError!void {
         if (self.op_count == self.ops.len) return error.InsufficientTextBuffer;
-        self.ops[self.op_count] = .{ .quad = quad };
+        var owned = quad;
+        if (owned.clip == null) owned.clip = self.container_clip;
+        self.ops[self.op_count] = .{ .quad = owned };
         self.op_count += 1;
     }
 
@@ -411,7 +427,7 @@ const Writer = struct {
     /// 나중에 그 구현을 GPU로 옮길 때도 컴포넌트가 영향을 받지 않는다.
     fn appendQuadClippedBy(self: *Writer, rect: tree.RectEntry, quad: draw.Op.Quad) ViewError!void {
         var owned = quad;
-        owned.clip = clipRectOf(rect);
+        owned.clip = clipRectOf(rect) orelse self.container_clip;
         return self.appendQuad(owned);
     }
 
@@ -590,7 +606,13 @@ const Writer = struct {
     /// placeholders instead of pretending an empty archive is a completed result. These quads
     /// deliberately do not enter the rect tree or action table, so an impatient click cannot
     /// resolve to a stale/fictional session action.
+    /// `content`는 스크롤 영역일 수도, 펼친 카드의 detail surface일 수도 있다. 어느 쪽이든 그 rect가
+    /// 스켈레톤의 경계이므로 emit 동안 그 clip을 연다 — 바깥 clip(스크롤 영역)만 쓰면 detail 안의 막대가
+    /// 이웃 카드 위로 넘칠 수 있다(막대 배치는 카드 높이 배수라 detail 바닥을 실제로 넘긴다).
     fn skeletons(self: *Writer, content: tree.RectEntry) ViewError!void {
+        const outer_clip = self.container_clip;
+        defer self.container_clip = outer_clip;
+        self.container_clip = clipRectOf(content) orelse outer_clip;
         const metrics = types.DockMetrics.resolve(self.props.scale_milli);
         const left = content.rect.x + @as(f32, @floatFromInt(metrics.card_inset_x));
         const available = content.rect.width - @as(f32, @floatFromInt(metrics.card_inset_x * 2));
@@ -606,10 +628,15 @@ const Writer = struct {
         }
     }
 
+    /// **`ops` 배열에 직접 쓰지 않는다.** 예전에는 여기서 직접 썼는데, 그러면 clip을 실어 주는 유일한
+    /// 지점(`appendQuad`)을 우회해 스켈레톤 막대가 스크롤 영역 밖까지 그려졌다(사용자 보고). 장식 quad는
+    /// 예외 없이 `appendQuad`를 지난다.
+    /// **`ops`에 직접 쓰지 않는다.** 예전에는 여기서 직접 썼고, 그래서 clip을 실어 주는 유일한 지점을
+    /// 통째로 우회해 로딩 스켈레톤 막대가 스크롤 영역 밖까지 그려졌다(사용자 보고). 장식 quad는 예외 없이
+    /// `appendQuad`를 지난다 — 그 규율이 이 결함의 재발을 막는 유일한 장치다.
     fn skeletonLine(self: *Writer, x: f32, y: f32, width: f32, height: u32) ViewError!void {
         if (width <= 0 or height == 0) return;
-        if (self.op_count == self.ops.len) return error.InsufficientTextBuffer;
-        self.ops[self.op_count] = .{ .quad = .{
+        try self.appendQuad(.{
             .rect = .{
                 .x = @intFromFloat(@floor(x)),
                 .y = @intFromFloat(@floor(y)),
@@ -619,8 +646,7 @@ const Writer = struct {
             .fill_role = .divider,
             .corner_radii = .{ self.corner_radius_px, self.corner_radius_px, self.corner_radius_px, self.corner_radius_px },
             .alpha = 0x90,
-        } };
-        self.op_count += 1;
+        });
     }
 };
 
@@ -1552,4 +1578,70 @@ test "SessionDock card text budget never reaches the disclosure chevron slot" {
     };
     // title·summary·provider·metadata 네 줄이 모두 검사됐다.
     try std.testing.expectEqual(@as(usize, 4), checked_lines);
+}
+
+// 이 테스트가 증명하는 것: 스크롤 목록 안에서 나온 장식 quad가 **호출처가 기억하지 않아도** clip을 싣는다.
+//
+// 왜 중요한가 — clip 없는 quad는 backend가 자르지 않으므로 고정 header/scope/search 위, 심하면 도크 밖까지
+// 그려진다. 실제로 `skeletonLine`이 clip을 안 실어 로딩 중 스켈레톤 막대가 목록 밖으로 새어 나갔다
+// (사용자 보고). clip을 그리는 쪽의 opt-in으로 두면 새 장식 quad가 추가될 때마다 같은 결함이 재발하므로,
+// 여기서 고정하는 것은 "스켈레톤이 잘린다"가 아니라 **컨테이너가 clip을 소유한다**는 계약이다.
+test "SessionDock scroll-area decoration quads inherit the container clip" {
+    const props = types.Props{
+        .viewport_px = .{ .width = 480, .height = 360 },
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .snapshot_generation = 12,
+        .displayed_count = 0,
+        // 첫 스캔 상태 = skeleton. 이 경로가 clip 없는 quad를 내던 그 경로다.
+        .loading = true,
+        .items = &.{},
+    };
+    var nodes: [8]tree.UiNode = undefined;
+    var entries: [12]tree.RectEntry = undefined;
+    var layout_items: [12]@import("../../ui/layout.zig").Item = undefined;
+    var flex_scratch: [12]@import("../../ui/layout.zig").FlexScratch = undefined;
+    var child_rects: [12]@import("../../ui/layout.zig").UiRect = undefined;
+    var actions: [8]@import("ids.zig").Entry = undefined;
+    const frame = try build.build(props, .{
+        .nodes = &nodes,
+        .entries = &entries,
+        .layout_items = &layout_items,
+        .flex_scratch = &flex_scratch,
+        .child_rects = &child_rects,
+        .actions = &actions,
+    });
+    const tk = tokens.Tokens.rich(.{
+        .foreground = .{ .r = 240, .g = 240, .b = 240 },
+        .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
+        .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
+        .sidebar_active = .{ .r = 80, .g = 80, .b = 80 },
+        .search_match = .{ .r = 1, .g = 2, .b = 3 },
+        .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
+        .selection = .{ .r = 7, .g = 8, .b = 9 },
+        .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .accent = .{ .r = 13, .g = 14, .b = 15 },
+    });
+    var ops: [64]draw.Op = undefined;
+    var runs: [64]draw.Run = undefined;
+    var text_bytes: [2048]u8 = undefined;
+    const out = try view(props, frame, .{}, &tk, .{ .ops = &ops, .runs = &runs, .text_bytes = &text_bytes });
+
+    const content = frame.tree.entries[frame.tree.find(build.NodeIds.content).?];
+    const expected = clipRectOf(content) orelse return error.TestUnexpectedResult;
+
+    // skeleton 막대는 `divider` 색 + 0x90 alpha라는 고유 서명을 갖는다. 이 서명으로 골라야 fixed chrome의
+    // paint quad(자기 rect 안에 있고 clip이 없는 것이 정상)와 섞이지 않는다.
+    var skeletons: usize = 0;
+    for (out.ops) |op| switch (op) {
+        .quad => |quad| {
+            if (quad.fill_role != .divider or quad.alpha != 0x90) continue;
+            skeletons += 1;
+            const clip = quad.clip orelse return error.SkeletonQuadHasNoClip;
+            try std.testing.expectEqual(expected, clip);
+        },
+        else => {},
+    };
+    // 전제가 살아 있는지 확인한다 — skeleton이 하나도 안 나왔다면 위 단언이 공허하다.
+    try std.testing.expect(skeletons >= 3);
 }

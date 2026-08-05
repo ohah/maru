@@ -4450,27 +4450,26 @@ pub const AppSession = struct {
     }
 
     fn dockGeometry(self: *const AppSession) dock_layout.Geometry {
-        const agent_session_view = self.dock_initialized and self.dock.view == .agent_sessions;
         return dock_layout.compute(.{
             .backing_width_px = self.backing_width_px,
             .backing_height_px = self.backing_height_px,
             .sidebar_width_px = self.sidebar_width_px,
             .titlebar_height_px = self.titlebar_strip_px,
-            // Session Dock은 terminal font의 cell/titlebar metric을 Chrome layout input으로
-            // 삼지 않는다. 28pt native-title safety band는 고정하고, component-owned switcher만
-            // bounded Dock UI zoom과 함께 같은 completed tree에서 확대/축소한다.
-            .dock_top_px = if (agent_session_view) layout_math.ptToPx(titlebar_strip_min_pt, self.scale_milli) else 0,
+            // 도크의 시작선도 terminal font의 cell/titlebar metric을 입력으로 삼지 않는다. 예전에는
+            // explorer만 `titlebar_height_px`(= max(셀 높이, 28pt))로 떨어져, 폰트를 키우면 도크 시작선이
+            // 따라 내려가고 AI 세션과 2px씩 어긋났다. 기본 폰트에서 두 값이 우연히 같아 안 보였을 뿐이다.
+            // 모든 뷰가 같은 28pt native-title safety band에서 시작한다.
+            .dock_top_px = layout_math.ptToPx(titlebar_strip_min_pt, self.scale_milli),
             .cell_width_px = self.cell_width_px,
             .cell_height_px = self.cell_height_px,
             .scale_milli = self.scale_milli,
             .divider_px = self.dividerThicknessPx(),
-            // Explorer/source-control은 pane tab bar와 같은 높이를 유지한다. Session Dock만
-            // terminal family/line-spacing에 독립된 component metric을 쓰되, explicit bounded UI zoom은
-            // switcher와 동일 tree 전체에 반영한다.
-            .view_bar_px = if (agent_session_view)
-                chrome.components.session_dock.types.DockMetrics.resolve(self.agentSessionDockScaleMilli()).view_switcher_h
-            else
-                self.paneBarHeightPx(),
+            // view bar는 **도크의 chrome**이지 터미널의 chrome이 아니다. 예전에는 explorer/source-control만
+            // pane tab bar와 높이를 맞췄는데(terminal cell 높이 + padding), 그러면 같은 아이콘 줄이 뷰를
+            // 바꿀 때마다 오르내리고(사용자 보고: 실측 53px ↔ 80px) 터미널 폰트 크기가 도크 기하를 정하게
+            // 된다 — layering-and-portability가 금지하는 방향이다. 모든 뷰가 같은 Chrome logical metric을
+            // 쓰므로 뷰 전환이 아이콘 위치를 움직이지 않는다.
+            .view_bar_px = chrome.components.session_dock.types.DockMetrics.resolve(self.agentSessionDockScaleMilli()).view_switcher_h,
             .side = if (self.dock_initialized) self.dock.side else .right,
             .size_pt = if (self.dock_initialized) self.dock.size else 0,
             .visible = self.dockVisible(),
@@ -32518,8 +32517,46 @@ pub const AppSession = struct {
         self.agent_session_dock_entries.ensureTotalCapacity(self.allocator, frame.tree.entries.len) catch return;
         self.agent_session_dock_actions.ensureTotalCapacity(self.allocator, frame.actions.len) catch return;
         const old_tree = chrome.ui.tree.UiRectTree{ .entries = self.agent_session_dock_entries.items };
-        if (self.agent_session_dock_entries.items.len > 0)
-            _ = chrome.ui.interaction.reconcile(&self.agent_session_dock_interaction, old_tree, frame.tree) catch return;
+        if (self.agent_session_dock_entries.items.len > 0) {
+            // 기본 `reconcile`은 언제나 capture를 취소한다. 그것이 click의 안전한 기본값이지만
+            // **scrollbar drag에는 치명적**이다 — thumb을 끌면 thumb rect가 바뀌어 매 프레임 tree가
+            // 새로 발행되므로, 기본 경로에서는 드래그가 첫 move에 죽는다(사용자 보고: "스크롤바를
+            // 눌러도 드래그가 안 된다"). 그래서 scrollbar drag만 좁은 carry 문을 태운다. carry 조건은
+            // 그 모듈이 소유한다: 같은 identity가 새 tree에 정확히 하나, 여전히 닿을 수 있고 enabled,
+            // 그리고 host가 준 compatibility key가 같을 때만이다.
+            const scroll_payload = chrome.components.session_dock.build.scroll_drag_payload;
+            const dragging_scrollbar = if (self.agent_session_dock_interaction.capture) |capture|
+                if (capture.drag) |declared| declared.payload == scroll_payload else false
+            else
+                false;
+            if (dragging_scrollbar) {
+                // archive snapshot이 드래그 도중 교체되면 목록 길이 자체가 달라지므로 이어갈 근거가
+                // 없다. 그 판정을 generation 비교 하나로 위임한다.
+                const previous = chrome.ui.interaction.GestureCompatibility{
+                    .kind = scroll_payload,
+                    .enabled = true,
+                    .owner_epoch = self.agent_session_dock_snapshot_generation,
+                    .domain_identity = 0,
+                };
+                const current = chrome.ui.interaction.GestureCompatibility{
+                    .kind = scroll_payload,
+                    .enabled = true,
+                    .owner_epoch = generation,
+                    .domain_identity = 0,
+                };
+                _ = chrome.ui.interaction.reconcileCarryingCapture(
+                    &self.agent_session_dock_interaction,
+                    frame.tree,
+                    previous,
+                    current,
+                ) catch return;
+                // carry하지 못했으면 capture는 이미 비워졌다. host 쪽 drag 상태도 함께 끝내야
+                // 다음 down이 자기 grab 지점을 새로 잡는다.
+                if (self.agent_session_dock_interaction.capture == null) self.endAgentSessionDockScrollDrag();
+            } else {
+                _ = chrome.ui.interaction.reconcile(&self.agent_session_dock_interaction, old_tree, frame.tree) catch return;
+            }
+        }
         self.agent_session_dock_entries.clearRetainingCapacity();
         self.agent_session_dock_actions.clearRetainingCapacity();
         self.agent_session_dock_entries.appendSliceAssumeCapacity(frame.tree.entries);
@@ -49767,7 +49804,10 @@ test "file tree ET-CWD follows the active pane observation and keeps an old reve
     // root+자식 둘뿐이므로 실제 도크 높이를 그대로 쓰면 raw scroll이 먼저 0으로 clamp되어 offscreen
     // 전제가 성립하지 않는다. 이 구간만 한 행 viewport로 고정해 제품의 clamp→follow 순서를 검증한다.
     const saved_backing_height_px = session.backing_height_px;
-    session.backing_height_px = session.titlebar_strip_px + session.paneBarHeightPx() + session.cell_height_px;
+    // 고정 chrome 높이를 공식으로 다시 쓰지 않고 **실제 기하에서 읽는다**. 예전에는
+    // `titlebar_strip_px + paneBarHeightPx()`로 적어 뒀는데, 그 둘은 도크 기하의 입력이 아니게 됐다
+    // (도크 시작선과 view bar는 이제 terminal cell이 아니라 Chrome metric에서 나온다).
+    session.backing_height_px = session.dockGeometry().tree.y + session.cell_height_px;
     try std.testing.expectEqual(session.cell_height_px, session.dockGeometry().tree_content.h);
     session.file_tree_scroll_rows = 6;
     try testWriteActiveTermCwd(session, one);
@@ -67338,4 +67378,148 @@ test "세션 도크 스크롤바 드래그는 move 수가 아니라 tick 수만�
     try std.testing.expect(session.agent_session_dock_scroll_drag == null);
     session.applyAgentSessionDockScrollDrag();
     try std.testing.expectEqual(at_end, session.agent_session_archive_scroll.offset_y_px);
+}
+
+// 이 테스트가 증명하는 것: 스크롤바 thumb을 끄는 동안 도크 tree가 매 프레임 새로 발행돼도 capture가
+// 살아남고, 반대로 archive snapshot이 교체되면 끊긴다.
+//
+// 왜 중요한가 — thumb을 끌면 thumb rect가 바뀌므로 tree는 **반드시** 매 프레임 새로 발행된다. 도크의
+// 기본 `reconcile`은 tree 교체에서 언제나 capture를 취소하므로(그것이 click의 안전한 기본값이다),
+// 그 경로 위에서는 드래그가 첫 move에 죽어 "눌러도 끌리지 않는" 스크롤바가 된다(사용자 보고).
+test "세션 도크 스크롤바 드래그는 매 프레임 tree 재발행을 견딘다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    const dock_build = chrome.components.session_dock.build;
+    const Ids = chrome.components.session_dock.ids;
+
+    // thumb 하나만 있는 최소 tree. 이 테스트가 고정하려는 것은 carry 판정이지 도크 layout이 아니다.
+    const thumb_action_id: u64 = 1;
+    var actions: [1]Ids.Entry = undefined;
+    var table = Ids.Table.init(&actions);
+    const published_action = try table.append(7, .scroll_thumb, true);
+
+    const thumbEntry = struct {
+        fn make(action: chrome.ui.tree.UiAction, y: f32) chrome.ui.tree.RectEntry {
+            return .{
+                .id = dock_build.NodeIds.scroll_thumb,
+                .parent_index = null,
+                .kind = .card,
+                .rect = .{ .x = 100, .y = y, .width = 16, .height = 40 },
+                .effective_clip = null,
+                .action = action,
+                .drag = .{ .payload = dock_build.scroll_drag_payload, .axis = .vertical, .threshold_px = 0 },
+                .visual = .{ .card = .{ .variant = .surface, .paint = .{} } },
+            };
+        }
+    }.make;
+    _ = thumb_action_id;
+
+    var first = [_]chrome.ui.tree.RectEntry{thumbEntry(published_action, 0)};
+    session.publishAgentSessionDockFrame(.{ .tree = .{ .entries = &first }, .actions = table.slice() }, 7);
+    try std.testing.expectEqual(@as(usize, 1), session.agent_session_dock_entries.items.len);
+
+    // thumb을 누른 상태를 만든다(실제 경로에서는 pointer down이 세운다).
+    session.agent_session_dock_interaction.capture = .{
+        .id = dock_build.NodeIds.scroll_thumb,
+        .action_id = published_action.id,
+        .drag = .{
+            .payload = dock_build.scroll_drag_payload,
+            .axis = .vertical,
+            .threshold_px = 0,
+            .origin_x_px = 100,
+            .origin_y_px = 10,
+            .last_x_px = 100,
+            .last_y_px = 10,
+            .started = true,
+        },
+    };
+
+    // 끌면 thumb이 내려간다 = 새 tree. 같은 generation이면 capture가 살아남아야 한다.
+    var moved = [_]chrome.ui.tree.RectEntry{thumbEntry(published_action, 120)};
+    session.publishAgentSessionDockFrame(.{ .tree = .{ .entries = &moved }, .actions = table.slice() }, 7);
+    try std.testing.expect(session.agent_session_dock_interaction.capture != null);
+    try std.testing.expectEqual(@as(f32, 120), session.agent_session_dock_entries.items[0].rect.y);
+
+    // archive snapshot이 교체되면(generation 변경) 목록 길이 자체가 달라지므로 이어갈 근거가 없다.
+    // 이때는 capture를 끊고 host의 drag 상태도 함께 정리해야 다음 down이 grab 지점을 새로 잡는다.
+    session.agent_session_dock_scroll_drag = .{
+        .grab_dy = 10,
+        .geometry = .{ .track_x = 100, .track_y = 0, .track_w = 16, .track_h = 400, .thumb_y = 120, .thumb_h = 40, .max_offset_px = 500 },
+    };
+    var replaced = [_]chrome.ui.tree.RectEntry{thumbEntry(published_action, 200)};
+    session.publishAgentSessionDockFrame(.{ .tree = .{ .entries = &replaced }, .actions = table.slice() }, 8);
+    try std.testing.expect(session.agent_session_dock_interaction.capture == null);
+    try std.testing.expect(session.agent_session_dock_scroll_drag == null);
+}
+
+// 이 테스트가 증명하는 것: 도크 view bar의 높이와 그 아래 content 시작선이 **도크 뷰와 터미널 폰트에
+// 모두 무관**하다.
+//
+// 왜 터미널에서 중요한가 — view bar는 도크가 소유한 chrome이다. 예전에는 explorer/source-control만
+// terminal pane tab bar와 높이를 맞췄고(셀 높이 + padding), 그 결과 같은 아이콘 세 개가 AI 세션으로
+// 바꿀 때마다 위아래로 뛰었다(사용자 보고: 실측 53px ↔ 80px). 더 나쁜 것은 그 식에 terminal cell이
+// 들어 있어 **폰트 크기를 바꾸면 도크 아이콘 줄이 따라 움직였다**는 점이다 —
+// docs/layering-and-portability.md가 막으려는 방향이다.
+test "도크 view bar와 시작선은 뷰와 무관하고 터미널 셀에서 나오지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1920, 1200, 2000);
+    session.dock_initialized = true;
+    session.dock.presented = true;
+
+    const expected_h = chrome.components.session_dock.types.DockMetrics.resolve(session.agentSessionDockScaleMilli()).view_switcher_h;
+
+    session.dock.view = .explorer;
+    const explorer = session.dockGeometry();
+    session.dock.view = .agent_sessions;
+    const agent = session.dockGeometry();
+
+    try std.testing.expect(expected_h > 0);
+    try std.testing.expectEqual(expected_h, explorer.view_bar.h);
+    try std.testing.expectEqual(expected_h, agent.view_bar.h);
+    // 아이콘 줄과 그 아래 본문 시작선이 뷰 전환에서 한 픽셀도 움직이지 않는다.
+    try std.testing.expectEqual(explorer.view_bar.y, agent.view_bar.y);
+    try std.testing.expectEqual(explorer.view_bar.h, agent.view_bar.h);
+    try std.testing.expectEqual(explorer.tree.y, agent.tree.y);
+
+    // 그리고 그 값은 terminal pane tab bar가 아니다 — 옛 explorer 경로가 쓰던 식이 살아 있으면 여기서
+    // 걸린다(기본 설정에서 80px vs 53px).
+    try std.testing.expect(expected_h != session.paneBarHeightPx());
+
+    // `Cmd`+`+`/`-`의 명시적 zoom은 **의도적으로** 도크 전체를 함께 확대한다(docs/agent-session-list.md
+    // §2.1.1의 `SessionDockUiZoom`). 그러므로 여기서 고정할 것은 "안 변한다"가 아니라 **두 뷰가 같은
+    // Chrome metric을 계속 따라간다**는 쪽이다.
+    const cell_before = session.cell_height_px;
+    session.setFontSize(session.appearance.font.size + 8);
+    try std.testing.expect(session.cell_height_px != cell_before);
+    const zoomed_h = chrome.components.session_dock.types.DockMetrics.resolve(session.agentSessionDockScaleMilli()).view_switcher_h;
+    try std.testing.expect(zoomed_h != expected_h); // zoom이 실제로 걸렸다(단언이 공허하지 않다)
+    session.dock.view = .explorer;
+    const zoomed_explorer = session.dockGeometry();
+    session.dock.view = .agent_sessions;
+    const zoomed_agent = session.dockGeometry();
+    try std.testing.expectEqual(zoomed_h, zoomed_explorer.view_bar.h);
+    try std.testing.expectEqual(zoomed_h, zoomed_agent.view_bar.h);
+    try std.testing.expectEqual(zoomed_explorer.tree.y, zoomed_agent.tree.y);
 }

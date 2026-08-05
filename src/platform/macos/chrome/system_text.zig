@@ -789,7 +789,7 @@ test "chrome text shaping reuses one face across roles instead of rebuilding it 
     const Shape = struct {
         const run_count = 55;
 
-        fn medianNs(gpa: std.mem.Allocator, clock_io: std.Io, varied_roles: bool, role_table: []const chrome.ui.typography.ChromeTextRole) !u64 {
+        fn medianNs(gpa: std.mem.Allocator, clock_io: std.Io, varied_roles: bool, role_table: []const chrome.ui.typography.ChromeTextRole, scale_milli: u32) !u64 {
             const runs = try gpa.alloc(Request.Run, run_count);
             for (runs, 0..) |*run, index| run.* = .{
                 .text = try gpa.dupe(u8, "세션 기록 도크 스크롤 측정"),
@@ -803,13 +803,13 @@ test "chrome text shaping reuses one face across roles instead of rebuilding it 
             defer request.deinit(gpa);
 
             // face 캐시를 채우는 첫 호출은 정상 상태 비용이 아니다.
-            var warm = try shapeRequest(gpa, &request, 2000);
+            var warm = try shapeRequest(gpa, &request, scale_milli);
             warm.deinit(gpa);
 
             var samples: [21]u64 = undefined;
             for (&samples) |*sample| {
                 const start = std.Io.Clock.awake.now(clock_io).nanoseconds;
-                var artifact = try shapeRequest(gpa, &request, 2000);
+                var artifact = try shapeRequest(gpa, &request, scale_milli);
                 sample.* = @intCast(std.Io.Clock.awake.now(clock_io).nanoseconds - start);
                 artifact.deinit(gpa);
             }
@@ -818,8 +818,8 @@ test "chrome text shaping reuses one face across roles instead of rebuilding it 
         }
     };
 
-    const same_role_ns = try Shape.medianNs(allocator, io, false, &roles);
-    const varied_role_ns = try Shape.medianNs(allocator, io, true, &roles);
+    const same_role_ns = try Shape.medianNs(allocator, io, false, &roles, 2000);
+    const varied_role_ns = try Shape.medianNs(allocator, io, true, &roles, 2000);
     if (same_role_ns == 0) return error.SkipZigTest; // 시계 해상도가 이 판정을 못 받치는 환경
 
     // 측정 시점 기준값: face 재사용 전 3.07배, 후 1.00배. 2배는 러너 노이즈를 흡수하면서도 회귀를 잡는다.
@@ -834,5 +834,31 @@ test "chrome text shaping reuses one face across roles instead of rebuilding it 
             },
         );
         return error.ChromeTextFaceNotReused;
+    }
+
+    // 상한만 두고 축출을 안 하면 캐시는 `Cmd`+`+`/`-` 몇 번에 가득 찬다(dock scale이 폰트 크기를 따라가므로
+    // 크기마다 role 9개가 새 항목이다). 그 뒤로는 매 run이 폰트를 다시 만드는 옛 경로로 **조용히** 되돌아가고
+    // 그 상태가 영구히 남는다. 위 ratio는 이걸 못 잡는다 — 캐시가 막히면 두 측정이 **함께** 느려져 비율이
+    // 그대로이기 때문이다. 그래서 용량을 넘길 만큼 여러 scale을 흘려보낸 뒤 같은 측정을 다시 한다.
+    // 축출이 있으면 첫 iteration이 그 scale의 face를 다시 채워 이후가 hit이므로 median이 유지된다.
+    var overflow_scale: u32 = 1100;
+    while (overflow_scale <= 1900) : (overflow_scale += 100) {
+        _ = try Shape.medianNs(allocator, io, true, &roles, overflow_scale);
+    }
+    // 측정 scale은 **한 번도 캐시된 적 없는** 값이어야 한다. 이미 들어갔던 scale로 재면 축출이 없어도
+    // 초기 항목이 살아남아 hit이 나므로 판별이 안 된다(실제로 그렇게 통과했다).
+    const after_overflow_ns = try Shape.medianNs(allocator, io, true, &roles, 2100);
+    const overflow_ratio = @as(f64, @floatFromInt(after_overflow_ns)) / @as(f64, @floatFromInt(varied_role_ns));
+    // 실측: 축출 있음 ≈1.0배, 없음 ≈2.0배. 1.6은 두 값 사이를 가르면서 러너 노이즈를 흡수한다.
+    if (overflow_ratio > 1.6) {
+        std.debug.print(
+            "chrome text: face 캐시가 가득 찬 뒤 다시 채우지 않는다(축출 없음) — before={d:.3}ms after={d:.3}ms (ratio {d:.2})\n",
+            .{
+                @as(f64, @floatFromInt(varied_role_ns)) / 1_000_000.0,
+                @as(f64, @floatFromInt(after_overflow_ns)) / 1_000_000.0,
+                overflow_ratio,
+            },
+        );
+        return error.ChromeTextFaceCacheNotEvicting;
     }
 }

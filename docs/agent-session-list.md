@@ -179,12 +179,19 @@ capture 판정은
 [Metal UI 레이아웃·컴포넌트 시스템](metal-ui-layout.md#logical-spacing과-component-metric)이 소유한다.
 이 visual slice는 실제 사용자 Claude/Codex resume을 자동 실행하지 않는다.
 
-이 독립성은 카드 내부에만 한정하지 않는다. Session Dock을 고르는 상단 switcher는 `DockMetrics`의
+이 독립성은 카드 내부에만 한정하지 않는다. 도크를 고르는 상단 switcher는 `DockMetrics`의
 40pt이고, right dock의 시작선은 terminal title strip이 아니라 28pt native-title safety band다.
 따라서 terminal font family/line spacing은 terminal grid/title icon에는 영향을 줄 수 있어도 Session Dock의
 header, scope, search, card, expanded card, resume/reveal border rect의 backing 좌표를 바꾸지 않는다. 반면
 명시적 `Cmd` font-size zoom은 동일한 Dock tree 전체를 함께 확대·축소한다.
-Explorer/source-control은 pane tab bar와 정렬해야 하므로 이 예외를 적용하지 않는다.
+
+**이 둘은 `agent_sessions`만의 예외가 아니라 도크 전체의 규칙이다.** view bar와 도크 시작선은 도크가
+소유한 chrome이므로 `explorer`·`source_control`도 같은 값을 쓴다. 예전에는 그 둘만 pane tab bar와
+높이를 맞췄는데(`terminal cell 높이 + padding`, 시작선은 `max(cell 높이, 28pt)`), 그러면 같은 아이콘
+세 개가 뷰를 바꿀 때마다 오르내리고(실측 53px ↔ 80px) terminal font 크기가 도크 기하를 정하게 된다 —
+[레이어링과 이식성](layering-and-portability.md)이 막으려는 방향이다. 그 대가로 도크 view bar와 terminal
+tab bar의 높이는 더 이상 일치하지 않는다. 이것은 의도된 선택이며, 정렬이 필요하면 terminal 쪽이 아니라
+두 chrome이 공유하는 logical token을 새로 만든다.
 
 #### 2.1.4 B1-button 이관 순서
 

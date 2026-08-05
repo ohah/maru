@@ -1328,9 +1328,14 @@ static bool maru_font_is_color(CTFontRef font) {
 // 여섯 바퀴 반복하는데도 안 싸지므로 CoreText의 내부 캐시에 기댈 수 없다. 터미널 draw list 경로가
 // `styled_fonts[]`로 style별 face를 재사용하는 것과 같은 규율을 chrome 경로에도 준다.
 //
-// 이 캐시는 프로세스 수명 동안 face를 잡아 둔다(시스템 UI 폰트는 런타임에 바뀌지 않는다). Chrome text
-// 셰이핑은 main actor 전용이므로 lock을 두지 않는다 — 다른 스레드에서 부르면 이 전제가 깨진다.
-#define MARU_CHROME_FONT_CACHE_CAPACITY 16
+// Chrome text 셰이핑은 main actor 전용이므로 lock을 두지 않는다 — 다른 스레드에서 부르면 이 전제가 깨진다.
+//
+// 용량은 role 수(9)의 배수로 잡고 **가득 차면 라운드로빈으로 축출한다**. 상한만 두고 축출을 안 하면
+// `Cmd`+`+`/`-` 두 번이면 캐시가 차 버린다 — dock scale이 폰트 크기를 따라가므로 크기마다 role 9개가
+// 새 항목이기 때문이다. 그 뒤에는 매 run이 폰트를 다시 만드는 옛 경로로 조용히 되돌아가고, 그 상태가
+// 영구히 남는다(측정상 프레임 비용 1.4ms → 6.3ms). 어느 순간 살아 있는 조합은 한 scale의 9개뿐이라
+// 라운드로빈으로 충분하다.
+#define MARU_CHROME_FONT_CACHE_CAPACITY 36
 
 typedef struct {
     double size;
@@ -1341,12 +1346,12 @@ typedef struct {
 
 static MaruChromeFontCacheEntry maru_chrome_font_cache[MARU_CHROME_FONT_CACHE_CAPACITY];
 static size_t maru_chrome_font_cache_count = 0;
+static size_t maru_chrome_font_cache_cursor = 0;
 
-/// (size, weight)에 해당하는 system UI face와 그 PostScript 이름을 돌려준다. 반환값은 캐시 소유이므로
-/// 호출자가 release하지 않는다. 캐시가 가득 차면(role 종류보다 훨씬 큰 상한) 새로 만들어 캐시에 넣지
-/// 않고 호출자에게 소유권을 넘긴다 — `*out_owned`가 그 사실을 알린다.
-static CTFontRef maru_chrome_font_for(double size, uint32_t weight, CFStringRef *out_name, bool *out_owned) {
-    *out_owned = false;
+/// (size, weight)에 해당하는 system UI face와 그 PostScript 이름을 돌려준다. 반환값은 **항상 캐시 소유**라
+/// 호출자가 release하지 않는다. 가득 차면 가장 오래된 항목을 축출한다 — 상한만 두고 축출을 안 하면
+/// 폰트 zoom 몇 번에 캐시가 막힌다.
+static CTFontRef maru_chrome_font_for(double size, uint32_t weight, CFStringRef *out_name) {
     for (size_t i = 0; i < maru_chrome_font_cache_count; i++) {
         if (maru_chrome_font_cache[i].size == size && maru_chrome_font_cache[i].weight == weight) {
             *out_name = maru_chrome_font_cache[i].postscript_name;
@@ -1362,15 +1367,20 @@ static CTFontRef maru_chrome_font_for(double size, uint32_t weight, CFStringRef 
         if (emphasized != NULL) { CFRelease(font); font = emphasized; }
     }
     CFStringRef name = CTFontCopyPostScriptName(font);
-    if (maru_chrome_font_cache_count == MARU_CHROME_FONT_CACHE_CAPACITY) {
-        *out_name = name;
-        *out_owned = true;
-        return font;
+    if (maru_chrome_font_cache_count < MARU_CHROME_FONT_CACHE_CAPACITY) {
+        maru_chrome_font_cache_count += 1;
+    } else {
+        // 축출 대상은 이번 호출이 끝난 뒤에도 아무도 안 든다 — 반환한 face는 호출자가 같은 호출 안에서만
+        // 쓰고 보관하지 않는다.
+        CFRelease(maru_chrome_font_cache[maru_chrome_font_cache_cursor].font);
+        if (maru_chrome_font_cache[maru_chrome_font_cache_cursor].postscript_name) {
+            CFRelease(maru_chrome_font_cache[maru_chrome_font_cache_cursor].postscript_name);
+        }
     }
-    maru_chrome_font_cache[maru_chrome_font_cache_count] = (MaruChromeFontCacheEntry){
+    maru_chrome_font_cache[maru_chrome_font_cache_cursor] = (MaruChromeFontCacheEntry){
         .size = size, .weight = weight, .font = font, .postscript_name = name,
     };
-    maru_chrome_font_cache_count += 1;
+    maru_chrome_font_cache_cursor = (maru_chrome_font_cache_cursor + 1) % MARU_CHROME_FONT_CACHE_CAPACITY;
     *out_name = name;
     return font;
 }
@@ -1402,8 +1412,7 @@ void maru_macos_coretext_shape_chrome_text(
         CFStringRef string = CFStringCreateWithBytes(kCFAllocatorDefault, utf8, (CFIndex)utf8_len, kCFStringEncodingUTF8, false);
         if (string == NULL) { result->status = 2; return; }
         CFStringRef primary_name = NULL;
-        bool owns_primary = false;
-        CTFontRef primary = maru_chrome_font_for(font_size_px, weight, &primary_name, &owns_primary);
+        CTFontRef primary = maru_chrome_font_for(font_size_px, weight, &primary_name);
         if (primary == NULL) { CFRelease(string); result->status = 3; return; }
         result->primary_font_found = 1;
         const void *keys[] = { kCTFontAttributeName };
@@ -1416,7 +1425,6 @@ void maru_macos_coretext_shape_chrome_text(
         if (line == NULL) {
             if (attributed) CFRelease(attributed);
             if (attributes) CFRelease(attributes);
-            if (owns_primary) { CFRelease(primary); if (primary_name) CFRelease(primary_name); }
             CFRelease(string); result->status = 4; return;
         }
         CTLineRef draw_line = line;
@@ -1463,7 +1471,6 @@ void maru_macos_coretext_shape_chrome_text(
             if (result->glyph_record_overflow) break;
         }
         result->glyph_record_count = (uint32_t)out;
-        if (owns_primary) { CFRelease(primary); if (primary_name) CFRelease(primary_name); }
         if (draw_line != line) CFRelease(draw_line);
         CFRelease(line); CFRelease(attributed); CFRelease(attributes); CFRelease(string);
         result->status = result->glyph_record_overflow ? 5 : 0;

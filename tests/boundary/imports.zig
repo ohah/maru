@@ -76,7 +76,9 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     // 수는 그대로 4다 — 새 코드는 필드를 이름으로 읽지 않고 live split 포인터만 비교한다.
     // 이어서 Session Dock 키보드 소유권을 `agent_session_dock_key_focus`로 옮기며 다시 바뀐다.
     // 여기서도 count는 4 그대로다 — 새 reflection 없이 제품 토큰만 달라졌다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "8e896d2fe3bd2015c5a3be32a3afc5bfd80290928f4f5463cab895109aedf92a" },
+    // Session Dock 스크롤 회귀 수정(셰이핑 캐시의 스크롤 기준·뷰포트 clip 전달·submit 시점 origin 배선)으로
+    // 다시 digest가 바뀐다. count는 여전히 4다 — 새 코드는 필드를 이름으로 읽지 않고 값만 넘긴다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "fab0bf46e164a1825b46c89b1c9b4a6453e6add2b2bff9e95d3bf0d862c6273b" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

@@ -11,6 +11,7 @@ const ui_button = @import("chrome/ui/button.zig");
 const interaction = @import("chrome/ui/interaction.zig");
 const intent_table = @import("chrome/ui/intent_table.zig");
 const continuous_drag = @import("chrome/ui/continuous_drag.zig");
+const provisional_order = @import("chrome/ui/provisional_order.zig");
 const paint_style = @import("chrome/ui/paint_style.zig");
 const paint = @import("chrome/ui/paint.zig");
 const divider = @import("chrome/components/divider.zig");
@@ -29,6 +30,7 @@ test {
     testing.refAllDecls(interaction);
     testing.refAllDecls(intent_table);
     testing.refAllDecls(continuous_drag);
+    testing.refAllDecls(provisional_order);
     testing.refAllDecls(divider);
     testing.refAllDecls(file_tree_scrollbar);
     testing.refAllDecls(paint_style);

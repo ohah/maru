@@ -118,6 +118,9 @@ pub const Artifact = struct {
             const placement = self.placements[placement_index];
             const uv = try renderer.glyph_quads.uvRectForSlot(glyph.slot, texture);
             const scrolled_y = placement.y_px + if (placement.scroll_clipped) scroll_delta_y_px else 0;
+            // 뷰포트로 자르는 것은 스크롤 목록뿐이다. 고정 chrome은 그 사각형 밖(위)에 있으므로 같은
+            // clip을 적용하면 헤더·scope·검색이 통째로 사라진다.
+            const glyph_clip: ?metal_frame.ClipPx = if (placement.scroll_clipped) clip else null;
             const quad = clipGlyphQuad(.{
                 .x = @as(f32, @floatFromInt(origin_x_px)) + placement.x_px,
                 .y = @as(f32, @floatFromInt(origin_y_px)) + scrolled_y,
@@ -127,7 +130,7 @@ pub const Artifact = struct {
                 .v0 = uv.v0,
                 .u1 = uv.u1,
                 .v1 = uv.v1,
-            }, clip) orelse continue;
+            }, glyph_clip) orelse continue;
             try out.append(allocator, .{
                 .x = quad.x,
                 .y = quad.y,

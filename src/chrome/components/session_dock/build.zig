@@ -216,24 +216,42 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
         .flex_scratch = buffers.flex_scratch,
         .child_rects = buffers.child_rects,
     });
-    // Virtualization starts at the first partially-visible item. Shift only those direct content
-    // children after the generic tree has established the one shared content clip; this avoids a
-    // parallel host-only y calculation for paint or hit testing.
+    // Virtualization starts at the first partially-visible item. Shift the whole content subtree
+    // after the generic tree has established the one shared content clip; this avoids a parallel
+    // host-only y calculation for paint or hit testing. An expanded card is a container, so its
+    // nested detail/action rects must travel with it — translating only the direct children left
+    // an open disclosure painted at its unscrolled y, visibly overlapping the cards around it.
     if (props.content_first_item_origin_y_px != 0) {
         const content_index = built.find(NodeIds.content) orelse return error.InsufficientNodeBuffer;
         const origin: f32 = @floatFromInt(props.content_first_item_origin_y_px);
-        const content_clip = buffers.entries[content_index].effective_clip orelse buffers.entries[content_index].rect;
-        for (buffers.entries[0..built.entries.len]) |*entry| {
-            if (entry.parent_index != null and entry.parent_index.? == content_index) {
-                entry.rect.y += origin;
-                // `tree.build` calculated this child's clip before the virtualization translation.
-                // Re-intersect against the immutable content clip here so card paint and hit test
-                // observe the exact same visible partial rectangle.
-                entry.effective_clip = intersect(entry.rect, content_clip);
-            }
+        const entries = buffers.entries[0..built.entries.len];
+        // Entries are preorder, so a parent is always translated before its children and each
+        // clip below re-folds an already-translated ancestor chain.
+        for (entries, 0..) |*entry, index| {
+            if (!descendsFrom(entries, index, content_index)) continue;
+            entry.rect.y += origin;
+            if (entry.own_clip) |*clip| clip.y += origin;
+            // `tree.build` folded this clip before the virtualization translation. Re-intersect
+            // the translated own clip with the translated parent so card paint and hit test
+            // observe the exact same visible partial rectangle.
+            entry.effective_clip = intersectClip(entries[entry.parent_index.?].effective_clip, entry.own_clip);
         }
     }
     return .{ .tree = .{ .entries = buffers.entries[0..built.entries.len] }, .actions = table.slice() };
+}
+
+fn descendsFrom(entries: []const tree.RectEntry, index: usize, ancestor: usize) bool {
+    var cursor = entries[index].parent_index;
+    while (cursor) |parent| : (cursor = entries[parent].parent_index) {
+        if (parent == ancestor) return true;
+    }
+    return false;
+}
+
+fn intersectClip(parent: ?layout.UiRect, own: ?layout.UiRect) ?layout.UiRect {
+    const a = parent orelse return own;
+    const b = own orelse return parent;
+    return intersect(a, b);
 }
 
 fn intersect(a: layout.UiRect, b: layout.UiRect) layout.UiRect {
@@ -489,6 +507,106 @@ test "SessionDock partial item keeps one content clip for paint and hit testing"
     const clip = first.effective_clip.?;
     try @import("std").testing.expectEqual(content.rect.y, clip.y);
     try @import("std").testing.expect(clip.height <= content.rect.height);
+}
+
+test "SessionDock virtualization translates an expanded card's whole subtree" {
+    // Scrolling publishes a negative first-item origin. An expanded card owns nested detail and
+    // action rects, so translating only the direct content children would leave that inline
+    // detail painted at its unscrolled y — visibly overlapping the cards that scrolled past it.
+    const props = types.Props{
+        .viewport_px = .{ .width = 320, .height = 480 },
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .snapshot_generation = 5,
+        .displayed_count = 2,
+        .expanded_identity = 12,
+        .items = &.{
+            .{ .card = .{ .identity = 12, .provider = .claude, .title = "expanded", .summary = "summary", .metadata = "meta", .expanded = .{ .state = .ready, .resume_enabled = true, .reveal_enabled = true } } },
+            .{ .card = .{ .identity = 13, .provider = .claude, .title = "next", .summary = "summary", .metadata = "meta" } },
+        },
+    };
+    var scrolled_props = props;
+    scrolled_props.content_first_item_origin_y_px = -37;
+
+    var nodes_a: [16]tree.UiNode = undefined;
+    var entries_a: [17]tree.RectEntry = undefined;
+    var layout_items_a: [17]layout.Item = undefined;
+    var flex_scratch_a: [17]layout.FlexScratch = undefined;
+    var child_rects_a: [17]layout.UiRect = undefined;
+    var actions_a: [12]ids.Entry = undefined;
+    const rested = try build(props, .{
+        .nodes = &nodes_a,
+        .entries = &entries_a,
+        .layout_items = &layout_items_a,
+        .flex_scratch = &flex_scratch_a,
+        .child_rects = &child_rects_a,
+        .actions = &actions_a,
+    });
+    var nodes_b: [16]tree.UiNode = undefined;
+    var entries_b: [17]tree.RectEntry = undefined;
+    var layout_items_b: [17]layout.Item = undefined;
+    var flex_scratch_b: [17]layout.FlexScratch = undefined;
+    var child_rects_b: [17]layout.UiRect = undefined;
+    var actions_b: [12]ids.Entry = undefined;
+    const scrolled = try build(scrolled_props, .{
+        .nodes = &nodes_b,
+        .entries = &entries_b,
+        .layout_items = &layout_items_b,
+        .flex_scratch = &flex_scratch_b,
+        .child_rects = &child_rects_b,
+        .actions = &actions_b,
+    });
+
+    const content_index = scrolled.tree.find(NodeIds.content).?;
+    const content = scrolled.tree.entries[content_index];
+    inline for (.{
+        NodeIds.item(0),
+        NodeIds.cardHeader(0),
+        NodeIds.expandedDetail(0),
+        NodeIds.expandedActions(0),
+        NodeIds.resumeAction(0),
+        NodeIds.reveal(0),
+        NodeIds.item(1),
+    }) |id| {
+        const before = rested.tree.entries[rested.tree.find(id).?];
+        const after = scrolled.tree.entries[scrolled.tree.find(id).?];
+        try @import("std").testing.expectEqual(before.rect.y - 37, after.rect.y);
+        try @import("std").testing.expectEqual(before.rect.x, after.rect.x);
+        // Every translated descendant keeps the one content clip that paint and hit testing share.
+        const clip = after.effective_clip orelse return error.TestUnexpectedResult;
+        try @import("std").testing.expect(clip.y >= content.rect.y);
+        try @import("std").testing.expect(clip.y + clip.height <= content.rect.y + content.rect.height);
+    }
+    // The detail's own rect still bounds its clip, so a partially scrolled disclosure cannot paint
+    // its turns over the card that follows it.
+    const detail = scrolled.tree.entries[scrolled.tree.find(NodeIds.expandedDetail(0)).?];
+    const detail_clip = detail.effective_clip.?;
+    try @import("std").testing.expect(detail_clip.y >= detail.rect.y);
+    try @import("std").testing.expect(detail_clip.y + detail_clip.height <= detail.rect.y + detail.rect.height);
+
+    // The real defect was containment, not a wrong delta: the nested rects stayed behind and left
+    // their own item, so they painted over neighbouring cards. Assert the structural invariant.
+    const outer = scrolled.tree.entries[scrolled.tree.find(NodeIds.item(0)).?];
+    const next = scrolled.tree.entries[scrolled.tree.find(NodeIds.item(1)).?];
+    inline for (.{ NodeIds.cardHeader(0), NodeIds.expandedDetail(0), NodeIds.expandedActions(0) }) |id| {
+        const nested = scrolled.tree.entries[scrolled.tree.find(id).?];
+        try @import("std").testing.expect(nested.rect.y >= outer.rect.y);
+        try @import("std").testing.expect(nested.rect.y + nested.rect.height <= outer.rect.y + outer.rect.height);
+        try @import("std").testing.expect(nested.rect.y + nested.rect.height <= next.rect.y);
+    }
+    // Over-clipping would be just as wrong as no clipping. Every translated entry's clip is exactly
+    // its own translated rect intersected with the content viewport: the first card loses only the
+    // 37px scrolled above the top, and the rects fully inside stay fully paintable.
+    inline for (.{ NodeIds.item(0), NodeIds.cardHeader(0), NodeIds.expandedDetail(0), NodeIds.resumeAction(0) }) |id| {
+        const entry = scrolled.tree.entries[scrolled.tree.find(id).?];
+        const clip = entry.effective_clip.?;
+        try @import("std").testing.expectEqual(@max(entry.rect.y, content.rect.y), clip.y);
+        try @import("std").testing.expectEqual(
+            @min(entry.rect.y + entry.rect.height, content.rect.y + content.rect.height),
+            clip.y + clip.height,
+        );
+        try @import("std").testing.expect(clip.height > 0);
+    }
 }
 
 test "SessionDock expanded card keeps detail actions in the same published tree" {

@@ -212,6 +212,10 @@ Explorer/source-control은 pane tab bar와 정렬해야 하므로 이 예외를 
   공유하고, group disclosure만 그 안의 8pt local slot을 쓴다. 그러므로 `tmp` 같은 workspace group의
   chevron은 root padding을 다시 더한 위치가 아니라 shared content edge 기준 local slot의 가운데에 놓이고,
   header의 `로컬`/refresh utility와도 서로 다른 baseline·hit rect를 공유하지 않는다.
+- virtualization의 세로 평행이동은 scroll-area **subtree 전체**에 적용한다. expanded card는 header/detail/action을
+  가진 container이므로, 직계 자식만 옮기면 펼쳐진 detail이 스크롤 전 y에 남아 지나간 카드 위에 겹쳐 그려지고
+  그 action의 hit rect도 보이는 곳과 어긋난다. 각 entry는 평행이동한 자기 clip을 이미 평행이동한 부모 clip과
+  다시 교차해, paint·clip·hit-test가 계속 같은 completed tree 하나만 소비하게 한다.
 - `SessionDockHeader`는 title, displayed/recent count, host SVG와 `로컬`
   provenance, refresh affordance만 소유한다. host+label은 72pt box 안에서 실제 glyph advance로
   함께 중앙 정렬하고, refresh는 그 오른쪽 12pt gap 뒤의 24pt trailing slot에 둔다. refresh가 실행 중이면 같은 위치의
@@ -368,6 +372,23 @@ inline disclosure다. card click/Enter는 새 archive tab이나 terminal surface
 - `터미널에서 이어하기`는 사용자가 그 명시 버튼을 누르는 즉시 새 local Term 탭을 만들고 활성화한다(추가 확인 dialog 없음). shell 없이 정확한 argv로 실행한다: Claude는 `claude --resume <session-id>`, Codex는 `codex resume <session-id>`. 실행 cwd는 archive record의 canonical local cwd가 아직 directory일 때만 쓰며, 아니면 새 Term의 기본 cwd와 함께 "원래 cwd를 찾지 못함"을 보여 준다. 기존 Term에 키를 주입하지 않는다. 이 action은 worktree를 생성·선택·변경하지 않는다.
 - open live Term과 provider+session id가 정확히 일치하면 expansion에 **부가 동작**으로 `열린 세션으로 이동`을 제공한다. 이것은 archive 후보 선정·정렬·표시를 바꾸지 않으며, 일치하지 않는 과거 세션도 완전히 같은 행으로 보인다. mapping은 live session identity가 다시 검증된 경우만 만들며 path/mtime 유사성으로 추정하지 않는다.
 - 새 focus owner `agent_session_list`가 선택 identity `{ provider, session_id, source_file_identity }`를 소유한다. Up/Down, PageUp/PageDown, Home/End는 보이는 카드를 움직이고, Right/Left는 그룹을 펼치고 접으며, Enter는 selected card expansion을 toggle한다. Escape는 search focus를 먼저 해제하고 그 다음 expansion을 닫는다. 도크를 떠나거나 snapshot 교체 뒤 identity가 사라지면 선택과 expansion을 해제한다. `⌘⇧E`는 기존대로 탐색기로 돌아간다.
+  이 키들은 **도크가 실제로 키보드를 갖고 있을 때만** 도크 동작이다. 소유권은 도크 안 primary down이 주고,
+  도크 밖 primary click·view 전환·도크 접기/펴기가 놓는다(선택·expansion·scroll 위치는 유지). 도크가 보이는
+  것만으로는 부족하다 — 선택된 카드가 남아 있다는 이유로 터미널에서 친 Enter를 도크가 가져가면 셸의 명령
+  실행이 조용히 사라진다. 수식키 없는 `/`(도크 검색 열기)와 `Escape`(expansion 닫기)도 같은 게이트를 쓴다 —
+  전자는 경로·정규식 타이핑의 첫 글자를, 후자는 vim의 Esc를 삼킨다. 반면 `⌘↵`/`⌘L`은 어떤 경우에도 PTY
+  바이트가 아니라 앱 명령이므로 이 focus 게이트를 쓰지 않는다. 대신 **소비는 실행의 결과여야 한다**:
+  published ready expansion이 없어 실행할 것이 없으면 키를 삼키지 않고 keybind resolver로 흘려보낸다.
+  삼키면 메뉴 항목이 없는 액션 바인딩과 터미널 매크로(`keybind = Cmd+L = text:…`)가 조용히 죽는다
+  (메뉴 항목이 있는 액션은 AppKit keyEquivalent가 먼저 가져가 이 경로에 오지 않는다).
+  도크 검색은 **소유권을 놓을 때 함께 blur**한다(사이드바 검색의 blur와 같은 규율 — 비활성만 하고 검색어는
+  보존, 조합 중이던 IME preedit는 확정). 검색은 활성인 동안 모든 키를 소비하므로, blur가 없으면 터미널로
+  돌아온 뒤의 타이핑 **전체**가 도크 검색으로 들어간다. 완전히 비우는 것은 Esc의 몫으로 남는다.
+  이 소유권은 **session-level 상태**여야 한다. 도크의 component-local `InteractionState.focused`는 published
+  node id라, 카드를 여는 바로 그 클릭이 snapshot을 무효화하면서(그리고 action이 `item` → `card_header`로
+  옮겨가면서) 지워진다 — 그 값으로 판정하면 카드를 연 직후 Enter로 다시 접을 수 없다.
+  view bar로 `AI 세션`을 켜는 것은 소유권을 주지 않는다(도크 **내용**을 누른 게 아니다). 따라서 도크를 막
+  연 뒤의 `/`는 터미널 입력이며, 도크 검색은 한 번 클릭한 뒤에 연다.
 
 ## 3. provider 입력과 신뢰 등급
 

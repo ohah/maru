@@ -938,6 +938,129 @@ test "SessionDock partial card never emits a CoreText cell that crosses its publ
     try std.testing.expect(saw_next_title);
 }
 
+// 사용자 보고 회귀: 목록을 스크롤하면 펼친 카드의 내용이 다른 카드 위에 겹쳐 보였다. rect tree 단언만으로는
+// 부족하다 — 사용자가 보는 것은 여기서 나가는 text op의 origin이다.
+//
+// **한 tree 안에서의 단언은 이 결함을 못 잡는다**: 평행이동이 빠진 detail은 자기 rect도 함께 안 옮겨져
+// "detail 글자는 detail rect 안"이 여전히 참이다(실제로 그 단언은 버그 코드에서도 통과했다). 그래서 같은
+// 목록을 스크롤 전/후로 두 번 렌더해 **모든 run이 정확히 같은 양만큼 움직였는지**를 본다. 겹침은 곧
+// "어떤 글자만 안 움직였다"이므로, 이 차분이 증상 그 자체를 고정한다.
+test "SessionDock scrolling moves every emitted run by the same virtualization offset" {
+    const shift: i32 = -140;
+    var props = types.Props{
+        .viewport_px = .{ .width = 320, .height = 640 },
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .snapshot_generation = 7,
+        .displayed_count = 2,
+        .expanded_identity = 1,
+        .items = &.{
+            .{ .card = .{
+                .identity = 1,
+                .provider = .claude,
+                .title = "expanded-card-title",
+                .summary = "expanded-summary",
+                .metadata = "expanded-meta",
+                .expanded = .{
+                    .state = .ready,
+                    .resume_enabled = true,
+                    .reveal_enabled = true,
+                    .action_record_count = 61,
+                    .turns = &.{.{ .role = .user, .text = "detail-turn-text" }},
+                },
+            } },
+            .{ .card = .{ .identity = 2, .provider = .codex, .title = "neighbour-card-title", .summary = "neighbour-summary", .metadata = "neighbour-meta" } },
+        },
+    };
+    const tk = tokens.Tokens.rich(.{
+        .foreground = .{ .r = 240, .g = 240, .b = 240 },
+        .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
+        .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
+        .sidebar_active = .{ .r = 80, .g = 80, .b = 80 },
+        .search_match = .{ .r = 1, .g = 2, .b = 3 },
+        .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
+        .selection = .{ .r = 7, .g = 8, .b = 9 },
+        .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .accent = .{ .r = 13, .g = 14, .b = 15 },
+    });
+
+    var nodes_a: [16]tree.UiNode = undefined;
+    var entries_a: [17]tree.RectEntry = undefined;
+    var layout_items_a: [17]@import("../../ui/layout.zig").Item = undefined;
+    var flex_scratch_a: [17]@import("../../ui/layout.zig").FlexScratch = undefined;
+    var child_rects_a: [17]@import("../../ui/layout.zig").UiRect = undefined;
+    var actions_a: [12]@import("ids.zig").Entry = undefined;
+    var ops_a: [64]draw.Op = undefined;
+    var runs_a: [64]draw.Run = undefined;
+    var text_bytes_a: [2048]u8 = undefined;
+    const rested = try view(props, try build.build(props, .{
+        .nodes = &nodes_a,
+        .entries = &entries_a,
+        .layout_items = &layout_items_a,
+        .flex_scratch = &flex_scratch_a,
+        .child_rects = &child_rects_a,
+        .actions = &actions_a,
+    }), .{}, &tk, .{ .ops = &ops_a, .runs = &runs_a, .text_bytes = &text_bytes_a });
+
+    props.content_first_item_origin_y_px = shift;
+    var nodes_b: [16]tree.UiNode = undefined;
+    var entries_b: [17]tree.RectEntry = undefined;
+    var layout_items_b: [17]@import("../../ui/layout.zig").Item = undefined;
+    var flex_scratch_b: [17]@import("../../ui/layout.zig").FlexScratch = undefined;
+    var child_rects_b: [17]@import("../../ui/layout.zig").UiRect = undefined;
+    var actions_b: [12]@import("ids.zig").Entry = undefined;
+    var ops_b: [64]draw.Op = undefined;
+    var runs_b: [64]draw.Run = undefined;
+    var text_bytes_b: [2048]u8 = undefined;
+    const scrolled = try view(props, try build.build(props, .{
+        .nodes = &nodes_b,
+        .entries = &entries_b,
+        .layout_items = &layout_items_b,
+        .flex_scratch = &flex_scratch_b,
+        .child_rects = &child_rects_b,
+        .actions = &actions_b,
+    }), .{}, &tk, .{ .ops = &ops_b, .runs = &runs_b, .text_bytes = &text_bytes_b });
+
+    // 목록에 속한 run만 본다. 고정 chrome(헤더·scope·검색)은 스크롤해도 제자리다.
+    const list_texts = [_][]const u8{
+        "expanded-card-title",  "expanded-summary",  "expanded-meta",
+        "최근 대화",
+        "61건",
+        "detail-turn-text",
+        "터미널에서 이어하기",
+        "로그 보기",
+        "neighbour-card-title", "neighbour-summary", "neighbour-meta",
+    };
+    var matched: usize = 0;
+    for (list_texts) |needle| {
+        const before = originYFor(rested.ops, needle) orelse continue;
+        // 스크롤로 clip 밖에 나간 run은 아예 emit되지 않는다 — 그건 올바른 결과다.
+        const after = originYFor(scrolled.ops, needle) orelse continue;
+        matched += 1;
+        try std.testing.expectEqual(before + shift, after);
+    }
+    // 단언이 비지 않았는가 — 겹침 그 자체인 조합(펼친 detail의 글자 + 뒤따르는 이웃 카드)이 실제로
+    // 두 프레임 모두에 있어야 이 비교가 결함을 잡는다.
+    try std.testing.expect(matched >= 3);
+    var matched_detail = false;
+    inline for (.{ "최근 대화", "61건", "detail-turn-text" }) |needle| {
+        if (originYFor(rested.ops, needle) != null and originYFor(scrolled.ops, needle) != null) matched_detail = true;
+    }
+    try std.testing.expect(matched_detail);
+    try std.testing.expect(originYFor(rested.ops, "neighbour-card-title") != null);
+    try std.testing.expect(originYFor(scrolled.ops, "neighbour-card-title") != null);
+}
+
+fn originYFor(ops: []const draw.Op, needle: []const u8) ?i32 {
+    for (ops) |op| switch (op) {
+        .text => |text| for (text.runs) |run| {
+            if (std.mem.indexOf(u8, run.text, needle) != null) return text.origin.y;
+        },
+        else => {},
+    };
+    return null;
+}
+
 test "SessionDock Retina controls centre measured line boxes instead of terminal cells" {
     const props = types.Props{
         .viewport_px = .{ .width = 640, .height = 960 },

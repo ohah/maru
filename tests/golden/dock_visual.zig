@@ -12,23 +12,18 @@
 //! 골든 갱신: `MARU_UPDATE_GOLDEN=1 zig build test-dock-visual-golden` (기존 replay 골든과 같은 관례).
 //! 갱신 후에는 **반드시 눈으로 확인**하고 커밋한다 — 자동 갱신은 회귀를 골든으로 굳힐 수 있다.
 //!
-//! **이 게이트가 신뢰할 수 있는 범위**: Lab과 제품 Session Dock은 **서로 다른 text artifact**를 쓴다.
-//! 제품은 `system_text.Artifact`(순수 픽셀 placement + 뷰포트 clip)이고, Lab은
-//! `chrome_draw_lowering.RichTextArtifact`다. 후자의 최종 좌표는
-//! `origin + glyph.run.col * cell_width + offset`, 즉 **셀 격자에 오프셋을 더한 값**이고 clip 파라미터가
-//! 없다. 그래서 Lab 캡처에서는 (a) 텍스트가 셀 격자로 스냅돼 픽셀 정확한 GPU quad와 **상대 위치가
-//! 제품과 다르고**, (b) 스크롤 뷰포트로 **잘리지 않는다**.
+//! **이 게이트가 신뢰할 수 있는 범위**: Lab은 제품 Session Dock과 **같은 두 텍스트 경로**를 탄다 —
+//! 등록 SVG/PUA 아이콘은 셀 draw list(`buildIconTextDrawList`), 나머지 라벨은
+//! `system_text.Artifact`(순수 픽셀 placement + 뷰포트 clip). 스크롤 뷰포트도 제품과 같은 출처
+//! (published tree의 `content` 사각형)에서 가져와 넘긴다.
 //!
-//! 따라서 여기 골든으로 고정해도 되는 것과 아닌 것이 갈린다:
-//!   - **고정해도 되는 것**: 레이아웃·구조 회귀 — 카드/행 높이와 간격, 라벨·아이콘의 존재 여부, 그룹
-//!     헤더 구성, 배경 quad가 클리핑으로 어떻게 잘리는가.
-//!   - **고정하면 안 되는 것**: 텍스트의 픽셀 정확한 정렬과 텍스트 클리핑 — 배경 도형과 그 안 글자의
-//!     상대 위치, 잘린 행에서 글자가 어떻게 되는가. 그건 Lab artifact의 성질이지 제품 동작이 아니다.
-//!     굳히면 나중에 Lab을 제품과 맞출 때 오히려 골든이 막는다. 실제로 그런 case
-//!     (`group-pill-clipped-edge` — 잘린 pill 안 숫자)를 넣었다가 제거했다.
+//! 그래서 텍스트의 픽셀 정렬과 **텍스트 클리핑까지** 골든으로 고정할 수 있다. 예전에는 Lab이
+//! `chrome_draw_lowering.RichTextArtifact`(셀 격자 + 오프셋, clip 파라미터 없음)를 써서 글자가 격자로
+//! 스냅되고 잘리지도 않았고, 그 때문에 정렬·클리핑 case는 "고정하면 안 되는 것"으로 빼 뒀다
+//! (`group-pill-clipped-edge`를 넣었다가 제거한 적이 있다). 이관 후 그 case가 돌아왔다.
 //!
-//! `RichTextArtifact`의 소비자는 Lab 하나뿐이므로, Lab을 `system_text.Artifact`로 옮기면 이 간극이
-//! 사라진다(동기 `shapeOps`와 CoreText 링크가 이미 있다). 그건 별도 작업이다.
+//! 남는 간극: Lab은 dock을 프레임 원점에 단독으로 그리므로 pane 합성(터미널과의 레이어 순서,
+//! pane 오프셋)은 보지 않는다. 그건 실제 앱을 띄우는 archive 스모크의 몫이다.
 //!
 //! 왜 archive 스모크가 아니라 Lab인가: archive 스모크는 실제 앱을 띄우는 visible AppKit 픽스처라
 //! `Maru.app` 번들(Swift host + web 번들 + 코드사인)을 통째로 요구한다. 시각 계약을 지키는 데 그 비용은
@@ -74,6 +69,15 @@ const cases = [_]Case{
         .capture = "retained-list.ppm",
         .contract = "그룹 헤더의 이름·chevron·count pill이 행 안 제자리에 있다(pill이 아래로 새지 않는다)",
         .rect = .{ .x = 0, .y = 225, .w = 480, .h = 60 },
+    },
+    .{
+        // GPU per-quad clip(#1885)의 핵심 계약: CPU가 rect를 미리 자르면 shader가 줄어든 rect를
+        // 원본으로 착각해 **잘린 변에도 곡률과 border stroke**를 그린다. radius가 높이의 절반인
+        // count pill이 스크롤 상단에 걸린 이 상태가 그 차이를 유일하게 드러낸다.
+        .name = "group-pill-clipped-edge",
+        .capture = "partial-group-scroll.ppm",
+        .contract = "스크롤 상단에 걸린 그룹 count pill의 잘린 변이 직선이다(곡률·stroke가 생기지 않는다)",
+        .rect = .{ .x = 396, .y = 220, .w = 84, .h = 32 },
     },
     .{
         .name = "expanded-actions",

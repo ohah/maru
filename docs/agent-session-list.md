@@ -514,17 +514,24 @@ component를 거쳐 card/scope/header/search와 semantic text op를 만들고, �
 480×720 fixed dark PNG/JSON에는 `text_rasterized=true`, glyph cell 수와 readback 성공을 함께 남긴다. 이 artifact는
 회색 quad만 있는 fixture가 아니라 카드와 텍스트가 함께 합성된 visual renderer evidence다.
 
-여기에는 따라오는 한계가 있다. Lab은 Chrome 텍스트를 terminal cell로 되돌리지 않고 제품과 같은 final-pixel
-artifact 경로를 타지만, **그 artifact가 제품 Session Dock과 다르다** — Lab은 `chrome_draw_lowering.RichTextArtifact`,
-제품 도크는 `system_text.Artifact`다. 전자의 최종 좌표는 `origin + glyph.run.col * cell_width + offset`이라
-**셀 격자에 오프셋을 더한 값**이고 뷰포트 clip 파라미터가 없다. 그래서 Lab capture에서는 텍스트가 셀 격자로
-스냅돼 픽셀 정확한 GPU quad와 상대 위치가 제품과 다르고, 스크롤 클리핑으로 잘리지도 않는다.
+Lab은 제품 Session Dock과 **같은 두 텍스트 경로**를 탄다(2026-08-06 이관). 제품 `AppSession`이 그렇듯
+등록 SVG/PUA 아이콘은 셀 draw list(`chrome_draw_lowering.buildIconTextDrawList`)로, 나머지 라벨은
+`system_text.Artifact`(`shapeOps` → `shapeFromRecords` → `appendGpuGlyphs`)로 내린다. 두 필터는
+`shapesTextOp`(= `!wide_icons`)와 `only_wide_icons = true`로 정확히 상보라 어떤 op도 두 번 그려지거나
+빠지지 않는다. 스크롤 뷰포트도 제품과 같은 출처(published tree의 `content` 사각형)를 넘긴다.
 
-그러므로 Lab capture는 레이아웃·구조(높이·간격·라벨 존재·배경 quad 클리핑)의 증거이지 **텍스트의 픽셀 정렬과
-텍스트 클리핑의 증거가 아니다**. 시각 골든(`test-dock-visual-golden`)도 같은 선을 지킨다. `RichTextArtifact`의
-소비자는 Lab 하나뿐이므로 Lab을 `system_text.Artifact`로 옮기면 이 간극이 사라진다(동기 `shapeOps`와 CoreText
-링크가 이미 있다). 그 이관은 별도 작업이며, `richGlyphsMatchArtifact`가 지키던 대조의 의미가 어떻게 바뀌는지를
-함께 정해야 한다.
+그래서 Lab capture는 이제 텍스트의 픽셀 정렬과 **텍스트 클리핑**까지 증거가 된다 — 반쯤 걸친 카드의 글자가
+잘린 그대로 캡처된다. 시각 골든(`test-dock-visual-golden`)이 그 계약을 `group-pill-clipped-edge`로 고정한다
+(예전에는 Lab이 `chrome_draw_lowering.RichTextArtifact`(셀 격자 + 오프셋, clip 없음)를 써서 글자가 격자로
+스냅되고 잘리지도 않았고, 그 때문에 이 case를 넣었다가 제거해야 했다).
+
+이관에서 바뀐 대조의 의미: `richGlyphsMatchArtifact`는 **클리핑 전** 좌표로 본다. `appendGpuGlyphs`가 부분
+가시 glyph의 좌표·크기를 잘라내고 완전히 밖인 glyph는 버리므로 캡처용 목록과 placement를 1:1로 맞출 수 없는데,
+이 대조가 지키려는 계약("placement가 GPU 좌표로 그대로 옮겨졌는가")은 클립과 직교하기 때문이다. 클립 경로는
+골든이 본다.
+
+남는 한계는 pane 합성이다. Lab은 dock을 프레임 원점에 단독으로 그리므로 터미널과의 레이어 순서·pane 오프셋은
+보지 않는다.
 
 다만 Lab 입력은 redacted fixture이고 `AppSession`의 실제 archive worker/snapshot publish를 만들지는 않는다. 그러므로
 active `agent_sessions` host screenshot E2E와 precise scroll gesture, refresh 중 selection·scroll 보존은

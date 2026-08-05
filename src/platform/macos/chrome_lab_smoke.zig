@@ -142,30 +142,6 @@ pub fn main(init: std.process.Init) !void {
     chrome_draw_lowering.appendBackgroundQuads(allocator, &.{frame.draws}, &tokens, 0, 0, &gpu_quads);
     const cols: u16 = @intFromFloat(viewport.width / @as(f32, @floatFromInt(cell_width_px)));
     const rows: u16 = @intFromFloat(viewport.height / @as(f32, @floatFromInt(cell_height_px)));
-    const text_draw_list = try chrome_draw_lowering.buildTextDrawList(
-        allocator,
-        frame.draws.ops,
-        &tokens,
-        cell_width_px,
-        cell_height_px,
-        cols,
-        rows,
-    );
-    // Keep the Lab on the identical final-pixel lowering path as AppSession.  A previous
-    // fixture rebuilt every glyph position from `row * cell_height + 0.5`, which discarded
-    // RichTextArtifact's sub-cell origin.  That made semantically centred header/search text
-    // look top-aligned only in the PR capture, so the capture could not verify the UI it
-    // purported to show.
-    var rich_text = try chrome_draw_lowering.buildRichTextArtifact(
-        allocator,
-        frame.draws.ops,
-        &tokens,
-        cell_width_px,
-        cell_height_px,
-        cols,
-        rows,
-    );
-    defer rich_text.deinit(allocator);
     var lab_config: config.Config = .{};
     lab_config.font.family = font_variant.family();
     const appearance = try config.resolveAppearance(lab_config);
@@ -179,10 +155,56 @@ pub fn main(init: std.process.Init) !void {
         .glyph_cell_width_px = cell_width_px,
         .cell_height_px = cell_height_px,
     };
-    var render_frame = try builder.buildFromDrawList(allocator, text_draw_list, &renderer_state);
+    // 제품 Session Dock과 **같은** artifact를 쓴다. 예전에는 `RichTextArtifact`(셀 격자 + 오프셋, clip
+    // 파라미터 없음)를 썼는데, 그러면 Lab 캡처의 텍스트가 제품과 다른 위치에 놓이고 스크롤 뷰포트로
+    // 잘리지도 않아, 시각 골든이 정렬·클리핑을 검증할 수 없었다(docs/agent-session-list.md의 Lab 계약).
+    var measured = try system_text.shapeOps(
+        allocator,
+        &renderer_state.font_registry,
+        frame.draws.ops,
+        &tokens,
+        cell_width_px,
+        // Lab fixture는 1× 논리 스케일로 고정한다(viewport·cell 크기가 그 전제로 잡혀 있다).
+        1000,
+    );
+    defer measured.deinit(allocator);
+    // 제품(app_session.collectMeasuredTextFromCache)과 같은 순서다: artifact가 이미 가진 shaped
+    // record로 프레임을 만든다 — CoreText를 다시 부르지 않고, glyph run의 row/col이 artifact
+    // placement 인덱스(`row * 256 + col`)와 같은 도메인에 놓인다. 셀 DrawList로 만들면 run 좌표가
+    // 셀 격자라 placement를 못 찾는다(MeasuredGlyphPlacementMissing).
+    var render_frame = try buildFrameFromRecords(allocator, builder, &renderer_state, measured.records);
     defer render_frame.deinit(allocator);
     const font_usage = inspectFontUsage(render_frame, renderer_state.font_registry.count());
+
+    // 제품은 Chrome 텍스트를 **두 패스**로 그린다(app_session): 등록 SVG/PUA 아이콘은 셀 draw
+    // list(`buildIconTextDrawList`)로, 나머지 라벨은 measured artifact로. `shapesTextOp`가
+    // wide_icons op를 셰이핑에서 빼기 때문에, 아이콘 패스를 같이 돌리지 않으면 액션 버튼이
+    // **빈 상자**가 된다(골든 `expanded-actions`가 지키는 계약이 바로 그것이다).
+    const icon_draw_list = try chrome_draw_lowering.buildIconTextDrawList(
+        allocator,
+        frame.draws.ops,
+        &tokens,
+        cell_width_px,
+        cell_height_px,
+        cols,
+        rows,
+    );
+    var icon_frame = try builder.buildFromDrawList(allocator, icon_draw_list, &renderer_state);
+    defer icon_frame.deinit(allocator);
+
+    // 아이콘은 제품과 같이 native **셀** 경로로 넘긴다(아래 bridge 호출의 cells 인자).
     var metal_fixture = try metal_smoke.buildSmokeFixtureFromRenderFrame(
+        allocator,
+        icon_frame,
+        renderer_state.atlas.config,
+        renderer_state.atlas.entryCount(),
+        true,
+        "chrome-session-dock",
+        coretext_shaper.CoreTextDrawListShaper.name,
+        coretext_raster.CoreTextGlyphRasterizer.name,
+    );
+    defer metal_fixture.deinit(allocator);
+    var text_fixture = try metal_smoke.buildSmokeFixtureFromRenderFrame(
         allocator,
         render_frame,
         renderer_state.atlas.config,
@@ -192,30 +214,66 @@ pub fn main(init: std.process.Init) !void {
         coretext_shaper.CoreTextDrawListShaper.name,
         coretext_raster.CoreTextGlyphRasterizer.name,
     );
-    defer metal_fixture.deinit(allocator);
+    defer text_fixture.deinit(allocator);
+
+    // 두 프레임의 atlas 업로드를 합친다. `glyph_raster_frame`은 **그 프레임에서 새로 래스터한
+    // slot만** 담으므로 한쪽만 넘기면 다른 쪽 glyph가 빈 텍스처로 그려진다. 두 번째 묶음의
+    // `bytes_offset`은 이어붙인 픽셀 버퍼 기준으로 다시 잡는다.
+    var raster_uploads: std.ArrayList(renderer.metal_frame.NativeMetalRasterUpload) = .empty;
+    defer raster_uploads.deinit(allocator);
+    var raster_pixels: std.ArrayList(u8) = .empty;
+    defer raster_pixels.deinit(allocator);
+    try raster_pixels.appendSlice(allocator, metal_fixture.raster_pixels);
+    try raster_uploads.appendSlice(allocator, metal_fixture.raster_uploads);
+    const text_pixels_base = raster_pixels.items.len;
+    try raster_pixels.appendSlice(allocator, text_fixture.raster_pixels);
+    for (text_fixture.raster_uploads) |upload| {
+        var rebased = upload;
+        rebased.bytes_offset += text_pixels_base;
+        try raster_uploads.append(allocator, rebased);
+    }
 
     // B1 lowerer proof: the Lab intentionally consumes the same final-pixel artifact as the
     // product host rather than handing Chrome text back as terminal cells. Atlas uploads stay
     // shared; only the completed semantic placement changes.
     var rich_glyphs: std.ArrayList(renderer.metal_frame.GpuGlyph) = .empty;
     defer rich_glyphs.deinit(allocator);
-    try rich_text.appendGpuGlyphs(
+    // 제품(app_session)과 같은 스크롤 뷰포트를 넘긴다: published tree의 `content` 사각형이다.
+    // 이게 있어야 반쯤 걸친 카드의 글자가 **잘린 그대로** 캡처돼, 골든이 클리핑 계약까지 본다.
+    // Lab은 dock을 프레임 원점에 그리므로 pane 오프셋 없이 그 사각형이 곧 backing 좌표다.
+    const scroll_clip: ?renderer.metal_frame.ClipPx = blk: {
+        const index = frame.tree.find(chrome.components.session_dock.build.NodeIds.content) orelse break :blk null;
+        const rect = frame.tree.entries[index].rect;
+        if (rect.width <= 0 or rect.height <= 0) break :blk null;
+        break :blk .{
+            .x = @intFromFloat(@max(rect.x, 0)),
+            .y = @intFromFloat(@max(rect.y, 0)),
+            .w = @intFromFloat(@max(rect.width, 0)),
+            .h = @intFromFloat(@max(rect.height, 0)),
+        };
+    };
+    try measured.appendGpuGlyphs(
         allocator,
         render_frame,
         renderer_state.atlas.config,
-        cell_width_px,
-        cell_height_px,
         0,
+        0,
+        scroll_clip,
+        // artifact를 이번 프레임의 스크롤 위치에서 바로 셰이핑했으므로 차이가 없다(제품은 캐시
+        // 재사용 시에만 0이 아니다).
         0,
         &rich_glyphs,
     );
-    const rich_text_matches_artifact = richGlyphsMatchArtifact(
-        rich_text,
-        render_frame,
-        cell_width_px,
-        cell_height_px,
-        rich_glyphs.items,
-    );
+    // 대조는 **클리핑 전** 좌표로 한다. `appendGpuGlyphs`는 부분 가시 glyph의 x/y/크기를 잘라내고
+    // 완전히 밖인 glyph는 버리므로, 캡처용 목록과 placement를 1:1로 맞출 수 없다. 여기서 지키려는
+    // 계약은 "placement가 GPU 좌표로 그대로 옮겨졌는가"라 클립과 직교한다 — clip=null로 한 번 더
+    // 만들어 그것만 본다(CoreText 재호출 없음).
+    var unclipped_glyphs: std.ArrayList(renderer.metal_frame.GpuGlyph) = .empty;
+    defer unclipped_glyphs.deinit(allocator);
+    try measured.appendGpuGlyphs(allocator, render_frame, renderer_state.atlas.config, 0, 0, null, 0, &unclipped_glyphs);
+    const rich_text_matches_artifact = richGlyphsMatchArtifact(measured, render_frame, unclipped_glyphs.items) and
+        // 클리핑은 glyph를 늘릴 수 없다.
+        rich_glyphs.items.len <= unclipped_glyphs.items.len;
 
     var native: bridge.NativeResult = .{
         .status = -1,
@@ -230,18 +288,20 @@ pub fn main(init: std.process.Init) !void {
         viewport.height,
         ppm_path,
         png_path,
-        metal_fixture.size.cols,
-        metal_fixture.size.rows,
+        // 격자는 아이콘 셀 목록의 격자다(뷰포트에서 파생). measured 프레임의 size는 placement
+        // 인덱싱용 합성 격자(256열)라 캡처 기하와 무관해서 쓰지 않는다.
+        cols,
+        rows,
         cell_width_px,
         cell_height_px,
-        null,
-        0,
+        if (metal_fixture.cells.len > 0) metal_fixture.cells.ptr else null,
+        metal_fixture.cells.len,
         metal_fixture.atlas_width_px,
         metal_fixture.atlas_height_px,
-        if (metal_fixture.raster_uploads.len > 0) metal_fixture.raster_uploads.ptr else null,
-        metal_fixture.raster_uploads.len,
-        if (metal_fixture.raster_pixels.len > 0) metal_fixture.raster_pixels.ptr else null,
-        metal_fixture.raster_pixels.len,
+        if (raster_uploads.items.len > 0) raster_uploads.items.ptr else null,
+        raster_uploads.items.len,
+        if (raster_pixels.items.len > 0) raster_pixels.items.ptr else null,
+        raster_pixels.items.len,
         if (gpu_quads.items.len > 0) gpu_quads.items.ptr else null,
         gpu_quads.items.len,
         null,
@@ -263,13 +323,15 @@ pub fn main(init: std.process.Init) !void {
     const native_ok = native.status == 0 and native.renderer_created != 0 and native.atlas_ready != 0 and
         native.draw_submitted != 0 and native.ppm_written != 0 and native.png_written != 0;
     const pixel_ok = ppm.width == viewport.width and ppm.height == viewport.height and ppm.non_background_pixels > 0;
-    const text_rasterized = metal_fixture.cells.len > 0 and metal_fixture.raster_uploads.len > 0;
+    // measured 경로에는 셀이 없다. "텍스트가 있었나"는 artifact의 shaped record가 권위다.
+    const has_text = measured.records.len > 0;
+    const text_rasterized = has_text and raster_uploads.items.len > 0;
     // The lab intentionally routes component glyphs through the product pixel-placement pass
     // (not its legacy cell list), so a green artifact proves that this ABI/Metal path received
     // text in addition to the existing atlas uploads.
     // A text-free scenario is valid (the empty fixture deliberately has no glyphs). Whenever
     // the lowered fixture has text, however, the rich pass must receive at least one glyph.
-    const rich_text_rasterized = metal_fixture.cells.len == 0 or rich_glyphs.items.len > 0;
+    const rich_text_rasterized = !has_text or rich_glyphs.items.len > 0;
     const success = native_ok and pixel_ok and valid_png and text_rasterized and rich_text_rasterized and rich_text_matches_artifact;
     const summary = try renderSummary(allocator, scenario_name, font_variant, font_postscript_name, ppm_path, png_path, native, ppm, valid_png, gpu_quads.items.len, metal_fixture.cells.len, text_rasterized, rich_glyphs.items.len, rich_text_rasterized, rich_text_matches_artifact, font_usage, success);
     defer allocator.free(summary);
@@ -486,21 +548,45 @@ fn inspectFontUsage(frame: renderer.RenderFrame, distinct_font_faces: usize) Fon
 /// This guard deliberately recomputes only the documented artifact-to-GPU projection.  It does
 /// not inspect the cell fixture: if a future Lab path substitutes `row * cell_height` or a
 /// fixture nudge, at least one sub-cell semantic origin differs and the product smoke closes.
+/// `builder.buildFromDrawList`의 record 버전 — shape 단계만 `shapeFromRecords`로 바꾼 같은 파이프라인
+/// (shape → placeMultiPane → finishPane)이다. 제품은 이 세 단계를 멀티 페인 수집기가 나눠 밟지만,
+/// Lab은 페인이 하나라 여기서 붙인다.
+fn buildFrameFromRecords(
+    allocator: std.mem.Allocator,
+    builder: coretext_frame_builder.CoreTextFrameBuilder,
+    renderer_state: *renderer.RendererState,
+    records: []const renderer.ShapedGlyphRecord,
+) !renderer.RenderFrame {
+    const list = try system_text.emptyDrawList(allocator, records.len);
+    var pane = try builder.shapeFromRecords(allocator, list, records);
+    const frames = renderer_state.placeMultiPane(allocator, &.{pane.shaped.runs}) catch |e| {
+        pane.deinit(allocator);
+        return e;
+    };
+    defer allocator.free(frames);
+    return builder.finishPane(allocator, &pane, frames[0], renderer_state) catch |e| {
+        pane.deinit(allocator);
+        return e;
+    };
+}
+
+/// GPU에 넘긴 glyph 좌표가 artifact의 placement와 정확히 같은지 — 변환이 좌표를 왜곡하지 않았다는 증거다.
+///
+/// measured artifact로 옮기면서 기대식이 단순해졌다. 예전 `RichTextArtifact`는 `col * cell_width + offset`
+/// 이라 셀 격자를 되짚어야 했지만, `system_text.Artifact`의 placement는 **이미 최종 픽셀**이다. 그래서
+/// 이 대조는 "placement를 그대로 실었는가"만 본다.
 fn richGlyphsMatchArtifact(
-    artifact: chrome_draw_lowering.RichTextArtifact,
+    artifact: system_text.Artifact,
     frame: renderer.RenderFrame,
-    cell_width: u32,
-    cell_height: u32,
     glyphs: []const renderer.metal_frame.GpuGlyph,
 ) bool {
-    if (cell_width == 0 or cell_height == 0) return glyphs.len == 0;
     var found: usize = 0;
     for (frame.glyph_quad_frame.glyphs) |glyph| {
-        const placement = chrome_draw_lowering.placementFor(artifact.placements, glyph.run.row, glyph.run.col) orelse continue;
+        const index = @as(usize, glyph.run.row) * 256 + glyph.run.col;
+        if (index >= artifact.placements.len) return false;
+        const placement = artifact.placements[index];
         if (found == glyphs.len) return false;
-        const expected_x = @as(f32, @floatFromInt(glyph.run.col)) * @as(f32, @floatFromInt(cell_width)) + placement.offset_x_px;
-        const expected_y = @as(f32, @floatFromInt(glyph.run.row)) * @as(f32, @floatFromInt(cell_height)) + placement.offset_y_px;
-        if (@abs(glyphs[found].x - expected_x) > 0.001 or @abs(glyphs[found].y - expected_y) > 0.001) return false;
+        if (@abs(glyphs[found].x - placement.x_px) > 0.001 or @abs(glyphs[found].y - placement.y_px) > 0.001) return false;
         found += 1;
     }
     return found == glyphs.len;

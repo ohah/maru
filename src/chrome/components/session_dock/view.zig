@@ -961,11 +961,19 @@ test "SessionDock marks partial card runs as scroll clipped instead of dropping 
     var partial_title_scroll_clipped: ?bool = null;
     var next_title_scroll_clipped: ?bool = null;
     var header_scroll_clipped: ?bool = null;
+    var partial_title_clip: ??draw.Rect = null;
+    var header_clip: ??draw.Rect = null;
     for (out.ops) |op| switch (op) {
         .text => |text| for (text.runs) |run| {
-            if (std.mem.indexOf(u8, run.text, "partial-card-title") != null) partial_title_scroll_clipped = text.scroll_clipped;
+            if (std.mem.indexOf(u8, run.text, "partial-card-title") != null) {
+                partial_title_scroll_clipped = text.scroll_clipped;
+                partial_title_clip = text.clip;
+            }
             if (std.mem.indexOf(u8, run.text, "next-card-title") != null) next_title_scroll_clipped = text.scroll_clipped;
-            if (std.mem.indexOf(u8, run.text, "Agent 세션 기록") != null) header_scroll_clipped = text.scroll_clipped;
+            if (std.mem.indexOf(u8, run.text, "Agent 세션 기록") != null) {
+                header_scroll_clipped = text.scroll_clipped;
+                header_clip = text.clip;
+            }
         },
         else => {},
     };
@@ -974,6 +982,27 @@ test "SessionDock marks partial card runs as scroll clipped instead of dropping 
     try std.testing.expectEqual(@as(?bool, true), next_title_scroll_clipped);
     // 고정 chrome은 스크롤 대상이 아니다. 여기에 같은 표시가 붙으면 backend가 헤더까지 잘라 버린다.
     try std.testing.expectEqual(@as(?bool, false), header_scroll_clipped);
+
+    // `scroll_clipped`는 **소속**만 말한다(캐시 키에 안전한 사실). 실제로 어디까지 보이는지는
+    // `clip` rect가 나른다 — 셀 격자로 내리는 경로(Chrome Lab·모달)는 그 배선이 없어 이 값으로
+    // 자르기 때문이다(draw.zig의 계약). 지금까지 판정자는 플래그만 봤고, 이 rect는 통째로 비워도
+    // 단위 테스트도 골든도 통과했다.
+    //
+    // 계약은 "published `effective_clip`을 **그대로** 전달한다"이므로 그 tree 값과 대조한다.
+    const partial_entry = frame.tree.entries[frame.tree.find(build.NodeIds.item(0)).?];
+    const expected_clip = partial_entry.effective_clip orelse return error.TestUnexpectedResult;
+    const actual_clip = (partial_title_clip orelse return error.TestUnexpectedResult) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(i32, @intFromFloat(@ceil(expected_clip.x))), actual_clip.x);
+    try std.testing.expectEqual(@as(i32, @intFromFloat(@ceil(expected_clip.y))), actual_clip.y);
+    try std.testing.expectEqual(@as(u32, @intFromFloat(@max(@floor(expected_clip.width), 0))), actual_clip.w);
+    try std.testing.expectEqual(@as(u32, @intFromFloat(@max(@floor(expected_clip.height), 0))), actual_clip.h);
+    // 이 카드는 1px만 보이므로 clip이 카드 높이보다 훨씬 작아야 한다 — 카드 전체가 그대로 들어오면
+    // 자를 것이 없다는 뜻이고 위 대조가 통과해도 무의미하다.
+    try std.testing.expect(actual_clip.h < metrics.card_h);
+
+    // 고정 chrome은 스크롤 clip을 받지 않는다. 여기에 스크롤 영역 rect가 실리면 헤더 글자가 잘린다.
+    try std.testing.expectEqual(@as(??draw.Rect, @as(?draw.Rect, null)), header_clip);
 }
 
 // 사용자 보고 회귀: 목록을 스크롤하면 펼친 카드의 내용이 다른 카드 위에 겹쳐 보였다. rect tree 단언만으로는

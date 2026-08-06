@@ -32315,33 +32315,25 @@ pub const AppSession = struct {
         const items = self.buildAgentSessionDockItems(arena, scroll_projection) catch return;
         const dock_scale_milli = self.agentSessionDockScaleMilli();
         const props = self.agentSessionDockProps(content, scroll_projection, items);
-        var expansion_nodes: usize = 0;
         var expansion_actions: usize = 0;
         var expansion_turns: usize = 0;
         for (items) |item| switch (item) {
             .group => {},
             .card => |card| if (card.expanded) |expanded| {
-                expansion_nodes += 5 + @as(usize, @intFromBool(expanded.focus_live_enabled));
                 expansion_actions += 2 + @as(usize, @intFromBool(expanded.focus_live_enabled));
                 expansion_turns += expanded.turns.len;
             },
         };
-        const node_count = items.len + expansion_nodes + 7;
-        const nodes = arena.alloc(chrome.ui.tree.UiNode, node_count) catch return;
-        // +1은 root, +2는 build가 tree 뒤에 붙이는 scrollbar track/thumb다.
-        const entries = arena.alloc(chrome.ui.tree.RectEntry, node_count + 3) catch return;
-        const layout_items = arena.alloc(chrome.ui.layout.Item, node_count + 1) catch return;
-        const flex_scratch = arena.alloc(chrome.ui.layout.FlexScratch, node_count + 1) catch return;
-        const child_rects = arena.alloc(chrome.ui.layout.UiRect, node_count + 1) catch return;
-        // +2는 scrollbar track/thumb action이다.
-        const actions = arena.alloc(chrome.components.session_dock.ids.Entry, items.len + 7 + expansion_actions) catch return;
+        // 버퍼 크기는 **build가 소유한다**. 여기서 같은 산술을 다시 쓰면 둘이 갈리는 날 build가
+        // `InsufficientNodeBuffer`로 실패하고, 아래 `catch return`이 그것을 삼켜 도크가 통째로 멈춘다.
+        const sizes = chrome.components.session_dock.build.bufferSizes(items);
         const frame = chrome.components.session_dock.build.build(props, .{
-            .nodes = nodes,
-            .entries = entries,
-            .layout_items = layout_items,
-            .flex_scratch = flex_scratch,
-            .child_rects = child_rects,
-            .actions = actions,
+            .nodes = arena.alloc(chrome.ui.tree.UiNode, sizes.nodes) catch return,
+            .entries = arena.alloc(chrome.ui.tree.RectEntry, sizes.entries) catch return,
+            .layout_items = arena.alloc(chrome.ui.layout.Item, sizes.layout_items) catch return,
+            .flex_scratch = arena.alloc(chrome.ui.layout.FlexScratch, sizes.flex_scratch) catch return,
+            .child_rects = arena.alloc(chrome.ui.layout.UiRect, sizes.child_rects) catch return,
+            .actions = arena.alloc(chrome.components.session_dock.ids.Entry, sizes.actions) catch return,
         }) catch return;
 
         // Card quad + text op capacity: fixed header/scope/search cards plus either one item
@@ -66926,26 +66918,17 @@ fn dockTreeItemRects(
     const arena = arena_state.allocator();
 
     const dock_items = try session.buildAgentSessionDockItems(arena, projection);
-    var expansion_nodes: usize = 0;
-    var expansion_actions: usize = 0;
-    for (dock_items) |item| switch (item) {
-        .group => {},
-        .card => |card| if (card.expanded) |expanded| {
-            expansion_nodes += 5 + @as(usize, @intFromBool(expanded.focus_live_enabled));
-            expansion_actions += 2 + @as(usize, @intFromBool(expanded.focus_live_enabled));
-        },
-    };
-    const node_count = dock_items.len + expansion_nodes + 7;
+    const sizes = chrome.components.session_dock.build.bufferSizes(dock_items);
     const content = session.dockGeometry().tree_content;
     // **제품이 쓰는 그 함수**로 props를 만든다. 여기서 리터럴을 다시 쓰면 host의 구성이 틀려도
     // 테스트는 자기 복제본만 보게 된다.
     const frame = try chrome.components.session_dock.build.build(session.agentSessionDockProps(content, projection, dock_items), .{
-        .nodes = try arena.alloc(chrome.ui.tree.UiNode, node_count),
-        .entries = try arena.alloc(chrome.ui.tree.RectEntry, node_count + 3),
-        .layout_items = try arena.alloc(chrome.ui.layout.Item, node_count + 1),
-        .flex_scratch = try arena.alloc(chrome.ui.layout.FlexScratch, node_count + 1),
-        .child_rects = try arena.alloc(chrome.ui.layout.UiRect, node_count + 1),
-        .actions = try arena.alloc(chrome.components.session_dock.ids.Entry, dock_items.len + 7 + expansion_actions),
+        .nodes = try arena.alloc(chrome.ui.tree.UiNode, sizes.nodes),
+        .entries = try arena.alloc(chrome.ui.tree.RectEntry, sizes.entries),
+        .layout_items = try arena.alloc(chrome.ui.layout.Item, sizes.layout_items),
+        .flex_scratch = try arena.alloc(chrome.ui.layout.FlexScratch, sizes.flex_scratch),
+        .child_rects = try arena.alloc(chrome.ui.layout.UiRect, sizes.child_rects),
+        .actions = try arena.alloc(chrome.components.session_dock.ids.Entry, sizes.actions),
     });
 
     // scroll-area의 published rect를 기준으로 삼는다. 도크 위치가 바뀌어도 상대 좌표는 계약이다.

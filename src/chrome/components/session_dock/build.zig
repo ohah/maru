@@ -73,22 +73,57 @@ pub const Frame = struct {
     actions: []const ids.Entry,
 };
 
+/// `build`가 이 items로 성공하는 데 필요한 최소 버퍼 크기다.
+///
+/// 이 산술은 build가 하는 것과 **같은 것**이므로 호출처가 복제하면 안 된다. 작게 잡으면 build가
+/// `InsufficientNodeBuffer`로 실패하고, 호출처가 그 실패를 삼키면 도크가 통째로 멈춘다(실제로
+/// 스크롤바를 추가하다 겪었다). 크게 잡으면 그 실패 조건을 테스트가 영영 못 본다.
+pub const BufferSizes = struct {
+    nodes: usize,
+    entries: usize,
+    layout_items: usize,
+    flex_scratch: usize,
+    child_rects: usize,
+    actions: usize,
+};
+
+pub fn bufferSizes(items: []const types.Item) BufferSizes {
+    var expanded_nodes: usize = 0;
+    var expanded_actions: usize = 0;
+    for (items) |item| switch (item) {
+        .group => {},
+        .card => |card| if (card.expanded) |expanded| {
+            expanded_nodes += 5 + @as(usize, @intFromBool(expanded.focus_live_enabled));
+            expanded_actions += 2 + @as(usize, @intFromBool(expanded.focus_live_enabled));
+        },
+    };
+    const node_count = items.len + expanded_nodes + 7;
+    return .{
+        .nodes = node_count,
+        // +1은 root, +2는 목록이 넘칠 때 tree 뒤에 붙는 scrollbar track/thumb다.
+        .entries = node_count + 3,
+        .layout_items = node_count + 1,
+        .flex_scratch = node_count + 1,
+        .child_rects = node_count + 1,
+        // +2는 scrollbar track/thumb action이다.
+        .actions = items.len + 7 + expanded_actions,
+    };
+}
+
 pub const BuildError = tree.BuildError || error{ InsufficientNodeBuffer, InsufficientActionBuffer, TooManyTurns };
 
 /// Builds a column whose text is emitted later from the resulting rect tree. Every interactive
 /// rectangle belongs to this one candidate tree: no platform y-row arithmetic is allowed to make
 /// a second hit region for scopes/groups/cards.
 pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
-    var expanded_extra_nodes: usize = 0;
     for (props.items) |item| switch (item) {
         .group => {},
-        .card => |card| if (card.expanded != null) {
-            if (card.expanded.?.turns.len > 3) return error.TooManyTurns;
-            // header + detail + action-row + resume/reveal, plus optional focus-live
-            expanded_extra_nodes += 5 + @as(usize, @intFromBool(card.expanded.?.focus_live_enabled));
+        .card => |card| if (card.expanded) |expanded| {
+            if (expanded.turns.len > 3) return error.TooManyTurns;
         },
     };
-    const needed_nodes = props.items.len + expanded_extra_nodes + 7; // item roots + nested expansion + 3 scopes + header/scope-row/search/content
+    // item roots + nested expansion + 3 scopes + header/scope-row/search/content.
+    const needed_nodes = bufferSizes(props.items).nodes;
     if (buffers.nodes.len < needed_nodes) return error.InsufficientNodeBuffer;
 
     const m = types.DockMetrics.resolve(props.scale_milli);
@@ -930,6 +965,68 @@ test "SessionDock publishes a scrollbar that stays put while the list scrolls" {
 
 // 넘치지 않는 목록에는 scrollbar가 없다. 있는 척하면 사용자에게 없는 여백을 있다고 말하는 셈이고,
 // 잡을 수 없는 track이 카드 우측 클릭을 가로챈다.
+test "bufferSizes는 build가 성공하는 최소치이고 한 칸만 줄여도 실패한다" {
+    const std = @import("std");
+    const items = [_]types.Item{
+        .{ .group = .{ .identity = 1, .label = "g", .count = 2 } },
+        .{ .card = .{ .identity = 1, .provider = .claude, .title = "a", .summary = "b", .metadata = "c" } },
+        .{ .card = .{
+            .identity = 2,
+            .provider = .claude,
+            .title = "d",
+            .summary = "e",
+            .metadata = "f",
+            .expanded = .{ .state = .ready, .turns = &.{}, .action_record_count = 0, .focus_live_enabled = true },
+        } },
+    };
+    const props = types.Props{
+        .viewport_px = .{ .width = 480, .height = 720 },
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .snapshot_generation = 5,
+        .displayed_count = items.len,
+        .items = &items,
+        .scroll_content_height_px = 4000,
+        .scroll_offset_px = 500,
+    };
+    const sizes = bufferSizes(&items);
+
+    var nodes: [64]tree.UiNode = undefined;
+    var entries: [64]tree.RectEntry = undefined;
+    var layout_items: [64]layout.Item = undefined;
+    var flex_scratch: [64]layout.FlexScratch = undefined;
+    var child_rects: [64]layout.UiRect = undefined;
+    var actions: [64]ids.Entry = undefined;
+    const Run = struct {
+        fn go(p: types.Props, z: BufferSizes, n: []tree.UiNode, e: []tree.RectEntry, li: []layout.Item, fs: []layout.FlexScratch, cr: []layout.UiRect, a: []ids.Entry) BuildError!Frame {
+            return build(p, .{
+                .nodes = n[0..z.nodes],
+                .entries = e[0..z.entries],
+                .layout_items = li[0..z.layout_items],
+                .flex_scratch = fs[0..z.flex_scratch],
+                .child_rects = cr[0..z.child_rects],
+                .actions = a[0..z.actions],
+            });
+        }
+    };
+
+    // 보고한 크기로는 스크롤바까지 포함해 성공한다.
+    const frame = try Run.go(props, sizes, &nodes, &entries, &layout_items, &flex_scratch, &child_rects, &actions);
+    try std.testing.expect(frame.tree.find(NodeIds.scroll_thumb) != null);
+
+    // 어느 하나라도 한 칸 모자라면 실패한다 — 넉넉히 보고하면 호출처가 실패 조건을 영영 못 본다.
+    inline for (@typeInfo(BufferSizes).@"struct".fields) |field| {
+        var tight = sizes;
+        @field(tight, field.name) -= 1;
+        // 어떤 종류의 부족인지는 버퍼마다 다르다(node/action/entry/depth). 중요한 것은 그 크기로는
+        // **성공하지 않는다**는 것이다 — 성공하면 보고한 값이 최소치가 아니라 넉넉한 값이라는 뜻이다.
+        if (Run.go(props, tight, &nodes, &entries, &layout_items, &flex_scratch, &child_rects, &actions)) |_| {
+            std.debug.print("bufferSizes.{s}를 한 칸 줄여도 build가 성공했다 — 최소치가 아니다\n", .{field.name});
+            return error.TestUnexpectedResult;
+        } else |_| {}
+    }
+}
+
 test "SessionDock publishes no scrollbar when the list fits" {
     const std = @import("std");
     const items = [_]types.Item{

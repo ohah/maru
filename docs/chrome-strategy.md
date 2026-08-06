@@ -341,10 +341,12 @@ pill은 기존 GPU quad 프리미티브(`GpuQuad.corner_radii`+`border_widths`/`
    - **SVG의 어떤 속성이 언제 결정되는가(핵심 구분)**: coverage 마스터는 **alpha 한 채널**이다(`rsvg-convert`로 48px 래스터 → PIL alpha 추출). 그래서
      - *빌드타임에 굽는 것* = 모양·**stroke 굵기**·여백(viewBox)·불투명도 그라디언트. 런타임에 못 바꾼다.
      - *런타임 토큰으로 주는 것* = **색**(셰이더가 coverage×전경색 → `ColorRole`로 테마 자동), **슬롯 크기**(정사각 마스터를 슬롯에 area-average 다운스케일), **셀 span**(1칸/2칸).
-     - 따라서 **다색 아이콘·런타임 stroke 변경·애니메이션은 이 파이프라인의 비목표**다(필요해지면 별도 결정). 무게(굵기)는 런타임 속성이 될 수 없으므로 **자산을 하나 더 굽고 이름이 아니라 축으로 고른다**.
-   - **`Weight` 축(빌드타임 자산 선택)**: `Icon` × `Weight{regular, bold}` → codepoint. `session_dock_*` 5종은 새 아이콘이 아니라 `(chevron_down, .bold)` 같은 무게 변형으로 흡수한다. 자산이 실제로 다른 그림이라 **시각 회귀 표면**이 있으므로 스크린샷으로 확인한다.
+     - 따라서 **다색 아이콘·런타임 stroke 변경·애니메이션은 이 파이프라인의 비목표**다(필요해지면 별도 결정). 여백·stroke는 런타임 속성이 될 수 없으므로 **자산을 하나 더 굽고 이름이 아니라 축으로 고른다**.
+   - **`Fit` 축(빌드타임 자산 선택)**: `Icon` × `Fit{standard, tight}` → codepoint(`icons.codepointFit`/`utf8Fit`, 없는 조합은 기본 fit으로 폴백). `session_dock_*` 5종은 새 아이콘이 아니라 이 축의 변형으로 흡수했다 — `session_dock_chevron_down` = `(chevron_down, .tight)`, `session_dock_search` = `(search, .tight)`, `session_dock_refresh`·`session_dock_host` = 변형이 없는 `refresh`·`host`. **codepoint·coverage·SVG는 그대로**라 렌더 결과는 불변이다(도크는 계속 tight를 쓴다).
+
+     축 이름이 "무게(weight)"가 아닌 이유는 자산 실측이다: `session-dock-search.svg`는 `search.svg`와 **path가 완전히 동일**하고 `viewBox`만 `0 0 16 16` → `1.5 1.5 14 14`로 조여져 있다. 즉 이 변형의 본질은 **슬롯 대비 여백**(활자의 optical size와 같은 개념)이고, chevron이 stroke를 `.75 → 1`로 올린 것은 조인 뒤에도 형태가 버티게 하는 **부수 조정**이다. 굵기로 이름 붙이면 search 변형을 설명하지 못한다.
    - **`Size` 토큰(런타임)**: 지금 소비처마다 흩어진 배율(헤더 1.7× 직접 래스터·`header_host_icon_extent`·`wide_icons` 2셀·`bell` EAW 특례)을 `chrome/ui/icon.zig`의 `Size{sm, md, lg}` + `cellSpan(icon)` 데이터로 모은다.
-   - **단계**: IC1(이름 registry + 동기 가드) → IC2(소비처 리터럴 제거) → IC3(`Weight` 축으로 `session_dock_*` 흡수) → IC4(`Size` 토큰 + `ui/button`·`ui/badge` 연결).
+   - **단계**: IC1 ✅(이름 registry + 3-생성물 동기 가드) → IC2 ✅(소비처 리터럴 제거 + `tests/boundary/icon_literals.zig` 재발 가드) → IC3 ✅(`Fit` 축으로 `session_dock_*` 흡수) → IC4(`Size` 토큰 + `ui/button`·`ui/badge` 연결, `.m` 렌더의 per-icon 배율 특례 흡수).
 
 ## 10. 리스크 & 미해결
 

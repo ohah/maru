@@ -100,11 +100,12 @@ pub fn bufferSizes(items: []const types.Item) BufferSizes {
     const node_count = items.len + expanded_nodes + 7;
     return .{
         .nodes = node_count,
-        // +1은 root, +2는 목록이 넘칠 때 tree 뒤에 붙는 scrollbar track/thumb다.
+        // +1은 root, +2는 목록이 넘칠 때 `scrollArea`가 preorder 안에서 내는 track/thumb다.
+        // scratch 셋도 같은 상한을 쓴다 — `tree.build`가 `max_entries` 이상을 요구한다.
         .entries = node_count + 3,
-        .layout_items = node_count + 1,
-        .flex_scratch = node_count + 1,
-        .child_rects = node_count + 1,
+        .layout_items = node_count + 3,
+        .flex_scratch = node_count + 3,
+        .child_rects = node_count + 3,
         // +2는 scrollbar track/thumb action이다.
         .actions = items.len + 7 + expanded_actions,
     };
@@ -144,7 +145,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
                 const action = table.append(props.snapshot_generation, .{ .toggle_group = group.identity }, true) catch return error.InsufficientActionBuffer;
                 node.* = tree.card(.{
                     .id = NodeIds.item(index),
-                    .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(m.group_h) }, .margin = .{ .bottom = @floatFromInt(m.item_gap) }, .flex = list_item_flex },
+                    .style = .{ .height = .{ .px = @floatFromInt(m.group_h) }, .margin = .{ .bottom = @floatFromInt(m.item_gap) }, .flex = list_item_flex },
                     .variant = .surface,
                     .paint = dividedRowPaint(),
                     .action = action,
@@ -160,7 +161,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
                     nested[0] = sessionCardNode(NodeIds.cardHeader(index), select, card.selected, m.card_h);
                     nested[1] = tree.card(.{
                         .id = NodeIds.expandedDetail(index),
-                        .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(m.expanded_detail_h) } },
+                        .style = .{ .height = .{ .px = @floatFromInt(m.expanded_detail_h) } },
                         .variant = .raised,
                         .paint = .{},
                         .overflow = .clip,
@@ -179,13 +180,13 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
                         .id = NodeIds.expandedActions(index),
                         // Buttons divide the remaining main-axis width after this explicit gap;
                         // percentage widths would add the gap on top and overflow the published clip.
-                        .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(m.expanded_actions_h) }, .gap = @floatFromInt(m.action_gap) },
+                        .style = .{ .height = .{ .px = @floatFromInt(m.expanded_actions_h) }, .gap = @floatFromInt(m.action_gap) },
                         .direction = .row,
                         .overflow = .clip,
                     }, action_nodes);
                     node.* = tree.container(.{
                         .id = NodeIds.item(index),
-                        .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(m.card_h + m.expanded_detail_h + m.expanded_actions_h) }, .margin = .{ .bottom = @floatFromInt(m.item_gap) }, .flex = list_item_flex },
+                        .style = .{ .height = .{ .px = @floatFromInt(m.card_h + m.expanded_detail_h + m.expanded_actions_h) }, .margin = .{ .bottom = @floatFromInt(m.item_gap) }, .flex = list_item_flex },
                         .overflow = .clip,
                     }, nested[0..3]);
                 } else {
@@ -203,7 +204,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
     const top = buffers.nodes[nested_cursor + 3 ..][0..4];
     top[0] = tree.card(.{
         .id = NodeIds.header,
-        .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(m.header_h) }, .margin = .{ .bottom = @floatFromInt(m.control_gap) } },
+        .style = .{ .height = .{ .px = @floatFromInt(m.header_h) }, .margin = .{ .bottom = @floatFromInt(m.control_gap), .right = @floatFromInt(m.root_inset) } },
         // Header text has no enclosing card in the dock reference. It remains a Card only so
         // refresh retains one completed action rect.  Its bottom rule is deliberately explicit:
         // a borderless header must not make the fixed chrome merge into the control/list area.
@@ -214,7 +215,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
     }, &.{});
     top[1] = tree.card(.{
         .id = NodeIds.scope_row,
-        .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(m.scope_h) }, .margin = .{ .bottom = @floatFromInt(m.control_gap) }, .gap = @floatFromInt(m.item_gap) },
+        .style = .{ .height = .{ .px = @floatFromInt(m.scope_h) }, .margin = .{ .bottom = @floatFromInt(m.control_gap), .right = @floatFromInt(m.root_inset) }, .gap = @floatFromInt(m.item_gap) },
         .direction = .row,
         .variant = .surface,
         // The segmented control is one outlined surface. Child scope cards paint only their
@@ -224,16 +225,39 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
     }, scope_nodes);
     top[2] = tree.card(.{
         .id = NodeIds.search,
-        .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(m.search_h) }, .margin = .{ .bottom = @floatFromInt(m.control_gap) } },
+        .style = .{ .height = .{ .px = @floatFromInt(m.search_h) }, .margin = .{ .bottom = @floatFromInt(m.control_gap), .right = @floatFromInt(m.root_inset) } },
         .variant = if (props.search_focused) .selected else .surface,
         .paint = .{},
         .action = search,
         .overflow = .clip,
     }, &.{});
-    top[3] = tree.container(.{
+    // 스크롤바 action은 발행 여부와 무관하게 미리 만든다 — 발행할지는 `build`가 기하를 보고 정하고,
+    // 그때는 action table을 만들 수 없다. 안 쓰이면 table에 남기만 한다(hit-test는 published entry만 본다).
+    const scroll_track = table.append(props.snapshot_generation, .scroll_track, true) catch return error.InsufficientActionBuffer;
+    const scroll_thumb = table.append(props.snapshot_generation, .scroll_thumb, true) catch return error.InsufficientActionBuffer;
+    // 선언 하나다. 자식 평행이동·viewport clip·track/thumb 발행은 `tree.build`가 한다
+    // (docs/scroll-area.md §4.1). 이 컴포넌트가 손으로 하던 세 단계가 여기서 사라졌다.
+    top[3] = tree.scrollArea(.{
         .id = NodeIds.content,
-        .style = .{ .width = .{ .percent = 1 }, .height = .{ .fill = 1 } },
-        .overflow = .clip,
+        .style = .{ .height = .{ .fill = 1 } },
+        .scroll = .{
+            .offset_px = props.scroll_offset_px,
+            .content_h_px = props.scroll_content_height_px,
+            .first_item_origin_y_px = props.content_first_item_origin_y_px,
+            // scroll-area 오른쪽에 남은 도크 padding. root가 소유한 여백이라 카드/버튼이 절대 침범하지
+            // 않는 유일한 자리이고, 여기 놓으면 스크롤바가 나타나고 사라져도 목록 폭이 reflow하지 않는다.
+            .gutter_px = @floatFromInt(m.root_inset),
+            .metrics = m.scrollbarMetrics(),
+            .track = .{ .id = NodeIds.scroll_track, .action = scroll_track, .paint = scrollbarPaint(m, .inset_bg) },
+            .thumb = .{ .id = NodeIds.scroll_thumb, .action = scroll_thumb, .paint = scrollbarPaint(m, .muted_fg) },
+            .drag = .{
+                // thumb을 누른 것 자체가 스크롤 의사이고 그 지점에 경쟁할 click이 없으므로 threshold는 0이다.
+                // track도 같은 payload를 선언한다 — 눌러 점프한 뒤 손을 떼지 않고 이어 끌 수 있어야 한다.
+                .payload = scroll_drag_payload,
+                .axis = .vertical,
+                .threshold_px = 0,
+            },
+        },
     }, item_nodes);
 
     const root = tree.container(.{
@@ -241,12 +265,18 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
         // All dock layers share this bounded content rect. Keeping the clipping boundary here
         // prevents a fixed chrome width from overflowing after margins are applied and keeps
         // list dividers on the same logical edge as the header/search controls.
-        .style = .{ .padding = .{ .top = @floatFromInt(m.root_inset), .right = @floatFromInt(m.root_inset), .bottom = @floatFromInt(m.root_inset), .left = @floatFromInt(m.root_inset) } },
+        // 오른쪽 여백은 root가 아니라 scroll-area의 gutter가 소유한다 — 스크롤바가 그 안에 놓여야 자기
+        // 컨테이너의 clip에 안 잘린다(CSS `scrollbar-gutter`와 같은 자리). 고정 chrome은 각자
+        // `margin.right`로 같은 여백을 가지며, 그 margin이 먹으려면 폭이 stretch여야 한다(percent는
+        // border box 전체 크기라 margin을 무시한다 — CSS `width: 100%`가 넘치는 것과 같다).
+        .style = .{ .padding = .{ .top = @floatFromInt(m.root_inset), .bottom = @floatFromInt(m.root_inset), .left = @floatFromInt(m.root_inset) } },
         .overflow = .clip,
     }, top);
     const built = try tree.build(root, .{
         .root_size = props.viewport_px,
-        .max_entries = needed_nodes + 1,
+        // root + 목록이 넘칠 때 `scrollArea`가 내는 track/thumb. 이 둘은 이제 build의 preorder 안에서
+        // 나오므로 상한에 함께 들어간다(예전에는 tree 밖에서 배열 끝에 붙였다).
+        .max_entries = needed_nodes + 3,
         // ExpandedSessionCard adds `root → content → expanded item → action row → action`.
         // Keep this explicit so a later accidental wrapper cannot silently grow the published
         // interaction tree without a bounded-cap review.
@@ -257,132 +287,23 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
         .flex_scratch = buffers.flex_scratch,
         .child_rects = buffers.child_rects,
     });
-    // Virtualization starts at the first partially-visible item. Shift the whole content subtree
-    // after the generic tree has established the one shared content clip; this avoids a parallel
-    // host-only y calculation for paint or hit testing. An expanded card is a container, so its
-    // nested detail/action rects must travel with it — translating only the direct children left
-    // an open disclosure painted at its unscrolled y, visibly overlapping the cards around it.
-    if (props.content_first_item_origin_y_px != 0) {
-        const content_index = built.find(NodeIds.content) orelse return error.InsufficientNodeBuffer;
-        const origin: f32 = @floatFromInt(props.content_first_item_origin_y_px);
-        const entries = buffers.entries[0..built.entries.len];
-        // Entries are preorder, so a parent is always translated before its children and each
-        // clip below re-folds an already-translated ancestor chain.
-        for (entries, 0..) |*entry, index| {
-            if (!descendsFrom(entries, index, content_index)) continue;
-            entry.rect.y += origin;
-            if (entry.own_clip) |*clip| clip.y += origin;
-            // `tree.build` folded this clip before the virtualization translation. Re-intersect
-            // the translated own clip with the translated parent so card paint and hit test
-            // observe the exact same visible partial rectangle.
-            entry.effective_clip = intersectClip(entries[entry.parent_index.?].effective_clip, entry.own_clip);
-        }
-    }
-    // Scrollbar는 목록이 넘칠 때만, 그리고 **평행이동이 끝난 뒤에** 붙인다. 스크롤 목록의 자식이 아니라
-    // 뷰포트에 고정된 chrome이므로 virtualization origin을 함께 받으면 스크롤할 때 같이 흘러내린다.
-    // 그렇다고 별도 tree로 빼지도 않는다 — docs/agent-session-list.md §2.2가 scrollbar를
-    // `SessionDockLayout`의 소유로 두었고, 같은 completed tree여야 paint·hit-test·clip이 갈라지지 않는다.
-    var entry_count = built.entries.len;
-    if (scrollbarFor(props, m, buffers.entries[0..entry_count])) |bar| {
-        if (entry_count + 2 > buffers.entries.len) return error.InsufficientNodeBuffer;
-        const track_action = table.append(props.snapshot_generation, .scroll_track, true) catch return error.InsufficientActionBuffer;
-        const thumb_action = table.append(props.snapshot_generation, .scroll_thumb, true) catch return error.InsufficientActionBuffer;
-        // track이 앞, thumb이 뒤다. `interaction.hitAction`은 reverse z-order라 마지막 entry가 이기고,
-        // 순서가 뒤집히면 thumb 위 down이 track click으로 판정돼 드래그 대신 점프가 일어난다.
-        buffers.entries[entry_count] = scrollbarEntry(NodeIds.scroll_track, track_action, .{
-            .x = bar.track_x,
-            .y = bar.track_y,
-            .width = bar.track_w,
-            .height = bar.track_h,
-        }, .inset_bg, .{
-            // track도 drag를 선언한다. 그러지 않으면 track을 눌러 점프한 뒤 그대로 끌 때 move가
-            // 오지 않아 손을 뗐다 다시 잡아야 한다 — 실제 스크롤바는 그렇게 동작하지 않는다.
-            .payload = scroll_drag_payload,
-            .axis = .vertical,
-            .threshold_px = 0,
-        });
-        buffers.entries[entry_count + 1] = scrollbarEntry(NodeIds.scroll_thumb, thumb_action, .{
-            .x = bar.track_x,
-            .y = bar.thumb_y,
-            .width = bar.track_w,
-            .height = bar.thumb_h,
-        }, .muted_fg, .{
-            // thumb을 누른 것 자체가 스크롤 의사이고 그 지점에 경쟁할 click이 없으므로 threshold는 0이다
-            // (file explorer scrollbar와 같은 판단).
-            .payload = scroll_drag_payload,
-            .axis = .vertical,
-            .threshold_px = 0,
-        });
-        entry_count += 2;
-    }
-    return .{ .tree = .{ .entries = buffers.entries[0..entry_count] }, .actions = table.slice() };
+    return .{ .tree = built, .actions = table.slice() };
 }
 
 /// thumb drag가 싣는 opaque payload. tree/interaction은 이 값의 의미를 모르고, host의 intent 해석만 안다.
 pub const scroll_drag_payload: u64 = 0x5344_5342;
 
-/// 완성된 tree의 `content` rect에서 scrollbar 기하를 만든다. rect를 여기서 다시 계산하지 않고 published
-/// 값을 읽는 것이 핵심이다 — 그래야 scroll-area가 움직여도 스크롤바가 따라간다.
-fn scrollbarFor(props: types.Props, m: types.DockMetrics, entries: []const tree.RectEntry) ?scroll_area.ScrollbarGeometry {
-    for (entries) |entry| {
-        if (entry.id != NodeIds.content) continue;
-        return scroll_area.scrollbarGeometry(.{
-            .x = entry.rect.x,
-            .y = entry.rect.y,
-            .w = entry.rect.width,
-            .h = entry.rect.height,
-            // scroll-area 오른쪽에 남은 도크 padding. root가 소유한 여백이라 카드/버튼이 절대 침범하지
-            // 않는 유일한 자리이고, 여기 놓으면 스크롤바가 나타나고 사라져도 목록 폭이 reflow하지 않는다.
-            .gutter_w = @floatFromInt(m.root_inset),
-        }, props.scroll_content_height_px, props.scroll_offset_px, m.scrollbarMetrics());
-    }
-    return null;
-}
-
-/// scrollbar entry는 generic paint가 그대로 칠하는 card다. thumb의 기본색은 `muted_fg`(패널보다 확실히
-/// 밝은 중간 회색)이고 track은 `inset_bg`의 옅은 홈이다 — 둘의 명암 차가 작으면 스크롤바가 있어도 안 보인다.
-/// hover/drag에서는 `paint_style.resolveCard`가 상태 배경을 얹으므로 컴포넌트가 상태 색을 따로 두지 않는다.
-fn scrollbarEntry(
-    id: u64,
-    action: tree.UiAction,
-    rect: layout.UiRect,
-    background: @import("../../tokens.zig").ColorRole,
-    drag: ?tree.DragDeclaration,
-) tree.RectEntry {
-    const radius: u16 = @intFromFloat(@max(rect.width / 2, 0));
+/// 스크롤바 조각의 paint. thumb의 기본색은 `muted_fg`(패널보다 확실히 밝은 중간 회색)이고 track은
+/// `inset_bg`의 옅은 홈이다 — 둘의 명암 차가 작으면 스크롤바가 있어도 안 보인다. hover/drag에서는
+/// `paint_style.resolveCard`가 상태 배경을 얹으므로 컴포넌트가 상태 색을 따로 두지 않는다.
+fn scrollbarPaint(m: types.DockMetrics, background: @import("../../tokens.zig").ColorRole) tree.PaintStyle {
+    const radius: u16 = @intCast(m.scrollbar_width / 2);
     return .{
-        .id = id,
-        .parent_index = null,
-        .kind = .card,
-        .rect = rect,
-        // 뷰포트에 고정된 chrome이므로 스크롤 clip을 받지 않는다.
-        .effective_clip = null,
-        .action = action,
-        .drag = drag,
-        .visual = .{ .card = .{
-            .variant = .surface,
-            .paint = .{
-                .background = background,
-                .corner_radii_px = .{ radius, radius, radius, radius },
-                .border_widths_px = .{ 0, 0, 0, 0 },
-                .shadow = .none,
-            },
-        } },
+        .background = background,
+        .corner_radii_px = .{ radius, radius, radius, radius },
+        .border_widths_px = .{ 0, 0, 0, 0 },
+        .shadow = .none,
     };
-}
-
-fn descendsFrom(entries: []const tree.RectEntry, index: usize, ancestor: usize) bool {
-    var cursor = entries[index].parent_index;
-    while (cursor) |parent| : (cursor = entries[parent].parent_index) {
-        if (parent == ancestor) return true;
-    }
-    return false;
-}
-
-fn intersectClip(parent: ?layout.UiRect, own: ?layout.UiRect) ?layout.UiRect {
-    const a = parent orelse return own;
-    const b = own orelse return parent;
-    return layout.intersectRect(a, b);
 }
 
 fn scopeNode(id: u64, action: tree.UiAction, enabled: bool, selected: bool) tree.UiNode {
@@ -410,7 +331,7 @@ const list_item_flex: layout.FlexStyle = .{ .shrink = 0 };
 fn sessionCardNode(id: u64, action: tree.UiAction, selected: bool, height: u32) tree.UiNode {
     return tree.card(.{
         .id = id,
-        .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(height) }, .flex = list_item_flex },
+        .style = .{ .height = .{ .px = @floatFromInt(height) }, .flex = list_item_flex },
         .variant = if (selected) .selected else .surface,
         .paint = dividedRowPaint(),
         .action = action,
@@ -469,12 +390,12 @@ test "SessionDock build shares action rects with the completed tree" {
             .{ .card = .{ .identity = 12, .provider = .codex, .title = "title", .summary = "summary", .metadata = "meta", .selected = true } },
         },
     };
-    var nodes: [9]tree.UiNode = undefined;
-    var entries: [10]tree.RectEntry = undefined;
-    var layout_items: [10]layout.Item = undefined;
-    var flex_scratch: [10]layout.FlexScratch = undefined;
-    var child_rects: [10]layout.UiRect = undefined;
-    var actions: [8]ids.Entry = undefined;
+    var nodes: [32]tree.UiNode = undefined;
+    var entries: [32]tree.RectEntry = undefined;
+    var layout_items: [32]layout.Item = undefined;
+    var flex_scratch: [32]layout.FlexScratch = undefined;
+    var child_rects: [32]layout.UiRect = undefined;
+    var actions: [32]ids.Entry = undefined;
     const frame = try build(props, .{
         .nodes = &nodes,
         .entries = &entries,
@@ -519,12 +440,12 @@ test "SessionDock shares one bounded content rect while group disclosure avoids 
         .displayed_count = 1,
         .items = &.{.{ .group = .{ .identity = 11, .label = "tmp", .count = 1 } }},
     };
-    var nodes: [8]tree.UiNode = undefined;
-    var entries: [9]tree.RectEntry = undefined;
-    var layout_items: [9]layout.Item = undefined;
-    var flex_scratch: [9]layout.FlexScratch = undefined;
-    var child_rects: [9]layout.UiRect = undefined;
-    var actions: [8]ids.Entry = undefined;
+    var nodes: [32]tree.UiNode = undefined;
+    var entries: [32]tree.RectEntry = undefined;
+    var layout_items: [32]layout.Item = undefined;
+    var flex_scratch: [32]layout.FlexScratch = undefined;
+    var child_rects: [32]layout.UiRect = undefined;
+    var actions: [32]ids.Entry = undefined;
     const frame = try build(props, .{
         .nodes = &nodes,
         .entries = &entries,
@@ -547,6 +468,10 @@ test "SessionDock shares one bounded content rect while group disclosure avoids 
     try @import("std").testing.expectEqual(header.rect.width, search.rect.width);
     try @import("std").testing.expectEqual(header.rect.x, content.rect.x);
     try @import("std").testing.expectEqual(content.rect.x, group.rect.x);
+    // 고정 chrome은 오른쪽 여백을 자기 margin으로 갖고, scroll-area는 같은 폭을 gutter로 갖는다.
+    // 그래서 scroll-area rect는 그만큼 넓지만 **목록 항목은 고정 chrome과 같은 폭**이다 — 스크롤바가
+    // 그 옆 gutter를 차지하고, 나타나고 사라져도 목록 폭이 reflow하지 않는다.
+    try @import("std").testing.expectEqual(header.rect.width + @as(f32, @floatFromInt(m.root_inset)), content.rect.width);
     try @import("std").testing.expectEqual(header.rect.width, group.rect.width);
 }
 
@@ -567,12 +492,12 @@ test "SessionDock published geometry ignores terminal cell dimensions" {
     large_font_props.cell_width_px = 21;
     large_font_props.cell_height_px = 37;
 
-    var nodes_a: [15]tree.UiNode = undefined;
-    var entries_a: [16]tree.RectEntry = undefined;
-    var layout_items_a: [16]layout.Item = undefined;
-    var flex_scratch_a: [16]layout.FlexScratch = undefined;
-    var child_rects_a: [16]layout.UiRect = undefined;
-    var actions_a: [12]ids.Entry = undefined;
+    var nodes_a: [32]tree.UiNode = undefined;
+    var entries_a: [32]tree.RectEntry = undefined;
+    var layout_items_a: [32]layout.Item = undefined;
+    var flex_scratch_a: [32]layout.FlexScratch = undefined;
+    var child_rects_a: [32]layout.UiRect = undefined;
+    var actions_a: [32]ids.Entry = undefined;
     const frame_a = try build(base_props, .{
         .nodes = &nodes_a,
         .entries = &entries_a,
@@ -581,12 +506,12 @@ test "SessionDock published geometry ignores terminal cell dimensions" {
         .child_rects = &child_rects_a,
         .actions = &actions_a,
     });
-    var nodes_b: [15]tree.UiNode = undefined;
-    var entries_b: [16]tree.RectEntry = undefined;
-    var layout_items_b: [16]layout.Item = undefined;
-    var flex_scratch_b: [16]layout.FlexScratch = undefined;
-    var child_rects_b: [16]layout.UiRect = undefined;
-    var actions_b: [12]ids.Entry = undefined;
+    var nodes_b: [32]tree.UiNode = undefined;
+    var entries_b: [32]tree.RectEntry = undefined;
+    var layout_items_b: [32]layout.Item = undefined;
+    var flex_scratch_b: [32]layout.FlexScratch = undefined;
+    var child_rects_b: [32]layout.UiRect = undefined;
+    var actions_b: [32]ids.Entry = undefined;
     const frame_b = try build(large_font_props, .{
         .nodes = &nodes_b,
         .entries = &entries_b,
@@ -616,12 +541,12 @@ test "SessionDock partial item keeps one content clip for paint and hit testing"
             .{ .card = .{ .identity = 13, .provider = .claude, .title = "next", .summary = "summary", .metadata = "meta" } },
         },
     };
-    var nodes: [9]tree.UiNode = undefined;
-    var entries: [10]tree.RectEntry = undefined;
-    var layout_items: [10]layout.Item = undefined;
-    var flex_scratch: [10]layout.FlexScratch = undefined;
-    var child_rects: [10]layout.UiRect = undefined;
-    var actions: [8]ids.Entry = undefined;
+    var nodes: [32]tree.UiNode = undefined;
+    var entries: [32]tree.RectEntry = undefined;
+    var layout_items: [32]layout.Item = undefined;
+    var flex_scratch: [32]layout.FlexScratch = undefined;
+    var child_rects: [32]layout.UiRect = undefined;
+    var actions: [32]ids.Entry = undefined;
     const frame = try build(props, .{
         .nodes = &nodes,
         .entries = &entries,
@@ -672,12 +597,12 @@ test "SessionDock list items keep their DockMetrics height instead of shrinking 
             .{ .card = .{ .identity = 2, .provider = .codex, .title = "next", .summary = "summary", .metadata = "meta" } },
         },
     };
-    var nodes: [16]tree.UiNode = undefined;
-    var entries: [17]tree.RectEntry = undefined;
-    var layout_items: [17]layout.Item = undefined;
-    var flex_scratch: [17]layout.FlexScratch = undefined;
-    var child_rects: [17]layout.UiRect = undefined;
-    var actions: [12]ids.Entry = undefined;
+    var nodes: [32]tree.UiNode = undefined;
+    var entries: [32]tree.RectEntry = undefined;
+    var layout_items: [32]layout.Item = undefined;
+    var flex_scratch: [32]layout.FlexScratch = undefined;
+    var child_rects: [32]layout.UiRect = undefined;
+    var actions: [32]ids.Entry = undefined;
     const frame = try build(props, .{
         .nodes = &nodes,
         .entries = &entries,
@@ -725,12 +650,12 @@ test "SessionDock virtualization translates an expanded card's whole subtree" {
     var scrolled_props = props;
     scrolled_props.content_first_item_origin_y_px = -37;
 
-    var nodes_a: [16]tree.UiNode = undefined;
-    var entries_a: [17]tree.RectEntry = undefined;
-    var layout_items_a: [17]layout.Item = undefined;
-    var flex_scratch_a: [17]layout.FlexScratch = undefined;
-    var child_rects_a: [17]layout.UiRect = undefined;
-    var actions_a: [12]ids.Entry = undefined;
+    var nodes_a: [32]tree.UiNode = undefined;
+    var entries_a: [32]tree.RectEntry = undefined;
+    var layout_items_a: [32]layout.Item = undefined;
+    var flex_scratch_a: [32]layout.FlexScratch = undefined;
+    var child_rects_a: [32]layout.UiRect = undefined;
+    var actions_a: [32]ids.Entry = undefined;
     const rested = try build(props, .{
         .nodes = &nodes_a,
         .entries = &entries_a,
@@ -739,12 +664,12 @@ test "SessionDock virtualization translates an expanded card's whole subtree" {
         .child_rects = &child_rects_a,
         .actions = &actions_a,
     });
-    var nodes_b: [16]tree.UiNode = undefined;
-    var entries_b: [17]tree.RectEntry = undefined;
-    var layout_items_b: [17]layout.Item = undefined;
-    var flex_scratch_b: [17]layout.FlexScratch = undefined;
-    var child_rects_b: [17]layout.UiRect = undefined;
-    var actions_b: [12]ids.Entry = undefined;
+    var nodes_b: [32]tree.UiNode = undefined;
+    var entries_b: [32]tree.RectEntry = undefined;
+    var layout_items_b: [32]layout.Item = undefined;
+    var flex_scratch_b: [32]layout.FlexScratch = undefined;
+    var child_rects_b: [32]layout.UiRect = undefined;
+    var actions_b: [32]ids.Entry = undefined;
     const scrolled = try build(scrolled_props, .{
         .nodes = &nodes_b,
         .entries = &entries_b,
@@ -824,12 +749,12 @@ test "SessionDock expanded card keeps detail actions in the same published tree"
             .expanded = .{ .state = .ready, .resume_enabled = true, .reveal_enabled = true },
         } }},
     };
-    var nodes: [13]tree.UiNode = undefined;
-    var entries: [14]tree.RectEntry = undefined;
-    var layout_items: [14]layout.Item = undefined;
-    var flex_scratch: [14]layout.FlexScratch = undefined;
-    var child_rects: [14]layout.UiRect = undefined;
-    var actions: [8]ids.Entry = undefined;
+    var nodes: [32]tree.UiNode = undefined;
+    var entries: [32]tree.RectEntry = undefined;
+    var layout_items: [32]layout.Item = undefined;
+    var flex_scratch: [32]layout.FlexScratch = undefined;
+    var child_rects: [32]layout.UiRect = undefined;
+    var actions: [32]ids.Entry = undefined;
     const frame = try build(props, .{
         .nodes = &nodes,
         .entries = &entries,
@@ -931,9 +856,10 @@ test "SessionDock publishes a scrollbar that stays put while the list scrolls" {
     const content = rested.tree.entries[rested.tree.find(NodeIds.content).?];
     try std.testing.expectEqual(content.rect.y, track.rect.y);
     try std.testing.expectEqual(content.rect.height, track.rect.height);
-    // content **오른쪽 여백** 안에 있다 — content 안이면 카드·버튼 위에 겹친다(사용자 보고).
-    try std.testing.expect(track.rect.x >= content.rect.x + content.rect.width);
-    try std.testing.expect(track.rect.x + track.rect.width <= base.viewport_px.width);
+    // scroll-area가 자기 폭에서 떼어 놓은 gutter 안에 있다 — 항목 오른쪽이고 그 위에 겹치지 않는다.
+    const item = rested.tree.entries[rested.tree.find(NodeIds.item(0)).?];
+    try std.testing.expect(track.rect.x >= item.rect.x + item.rect.width);
+    try std.testing.expect(track.rect.x + track.rect.width <= content.rect.x + content.rect.width);
 
     // thumb만 drag를 선언하지 않는다 — track도 선언한다. track을 눌러 점프한 뒤 그대로 끌 수 있어야 한다.
     try std.testing.expectEqual(tree.DragAxis.vertical, thumb.drag.?.axis);
@@ -991,12 +917,12 @@ test "bufferSizes는 build가 성공하는 최소치이고 한 칸만 줄여도 
     };
     const sizes = bufferSizes(&items);
 
-    var nodes: [64]tree.UiNode = undefined;
-    var entries: [64]tree.RectEntry = undefined;
-    var layout_items: [64]layout.Item = undefined;
-    var flex_scratch: [64]layout.FlexScratch = undefined;
-    var child_rects: [64]layout.UiRect = undefined;
-    var actions: [64]ids.Entry = undefined;
+    var nodes: [78]tree.UiNode = undefined;
+    var entries: [78]tree.RectEntry = undefined;
+    var layout_items: [78]layout.Item = undefined;
+    var flex_scratch: [78]layout.FlexScratch = undefined;
+    var child_rects: [78]layout.UiRect = undefined;
+    var actions: [78]ids.Entry = undefined;
     const Run = struct {
         fn go(p: types.Props, z: BufferSizes, n: []tree.UiNode, e: []tree.RectEntry, li: []layout.Item, fs: []layout.FlexScratch, cr: []layout.UiRect, a: []ids.Entry) BuildError!Frame {
             return build(p, .{
@@ -1041,12 +967,12 @@ test "SessionDock publishes no scrollbar when the list fits" {
         .items = &items,
         .scroll_content_height_px = 100,
     };
-    var nodes: [10]tree.UiNode = undefined;
-    var entries: [14]tree.RectEntry = undefined;
-    var layout_items: [14]layout.Item = undefined;
-    var flex_scratch: [14]layout.FlexScratch = undefined;
-    var child_rects: [14]layout.UiRect = undefined;
-    var actions: [14]ids.Entry = undefined;
+    var nodes: [32]tree.UiNode = undefined;
+    var entries: [32]tree.RectEntry = undefined;
+    var layout_items: [32]layout.Item = undefined;
+    var flex_scratch: [32]layout.FlexScratch = undefined;
+    var child_rects: [32]layout.UiRect = undefined;
+    var actions: [32]ids.Entry = undefined;
     const frame = try build(props, .{
         .nodes = &nodes,
         .entries = &entries,

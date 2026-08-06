@@ -706,12 +706,12 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
             .{ .card = .{ .identity = 2, .provider = .claude, .title = "a title that intentionally exceeds a narrow card", .summary = "summary", .metadata = "Claude · 메시지 1개 · claude-fixture", .selected = true } },
         },
     };
-    var nodes: [9]tree.UiNode = undefined;
-    var entries: [10]tree.RectEntry = undefined;
-    var layout_items: [10]@import("../../ui/layout.zig").Item = undefined;
-    var flex_scratch: [10]@import("../../ui/layout.zig").FlexScratch = undefined;
-    var child_rects: [10]@import("../../ui/layout.zig").UiRect = undefined;
-    var actions: [8]@import("ids.zig").Entry = undefined;
+    var nodes: [32]tree.UiNode = undefined;
+    var entries: [32]tree.RectEntry = undefined;
+    var layout_items: [32]@import("../../ui/layout.zig").Item = undefined;
+    var flex_scratch: [32]@import("../../ui/layout.zig").FlexScratch = undefined;
+    var child_rects: [32]@import("../../ui/layout.zig").UiRect = undefined;
+    var actions: [32]@import("ids.zig").Entry = undefined;
     const frame = try build.build(props, .{
         .nodes = &nodes,
         .entries = &entries,
@@ -929,12 +929,12 @@ test "SessionDock marks partial card runs as scroll clipped instead of dropping 
             .{ .card = .{ .identity = 2, .provider = .codex, .title = "next-card-title", .summary = "next-summary", .metadata = "next-meta" } },
         },
     };
-    var nodes: [9]tree.UiNode = undefined;
-    var entries: [10]tree.RectEntry = undefined;
-    var layout_items: [10]@import("../../ui/layout.zig").Item = undefined;
-    var flex_scratch: [10]@import("../../ui/layout.zig").FlexScratch = undefined;
-    var child_rects: [10]@import("../../ui/layout.zig").UiRect = undefined;
-    var actions: [8]@import("ids.zig").Entry = undefined;
+    var nodes: [32]tree.UiNode = undefined;
+    var entries: [32]tree.RectEntry = undefined;
+    var layout_items: [32]@import("../../ui/layout.zig").Item = undefined;
+    var flex_scratch: [32]@import("../../ui/layout.zig").FlexScratch = undefined;
+    var child_rects: [32]@import("../../ui/layout.zig").UiRect = undefined;
+    var actions: [32]@import("ids.zig").Entry = undefined;
     const frame = try build.build(props, .{
         .nodes = &nodes,
         .entries = &entries,
@@ -1152,12 +1152,12 @@ test "SessionDock keeps its action label when the expansion cannot fit the viewp
             .{ .card = .{ .identity = 2, .provider = .codex, .title = "next-title", .summary = "next-summary", .metadata = "next-meta" } },
         },
     };
-    var nodes: [16]tree.UiNode = undefined;
-    var entries: [17]tree.RectEntry = undefined;
-    var layout_items: [17]@import("../../ui/layout.zig").Item = undefined;
-    var flex_scratch: [17]@import("../../ui/layout.zig").FlexScratch = undefined;
-    var child_rects: [17]@import("../../ui/layout.zig").UiRect = undefined;
-    var actions: [12]@import("ids.zig").Entry = undefined;
+    var nodes: [32]tree.UiNode = undefined;
+    var entries: [32]tree.RectEntry = undefined;
+    var layout_items: [32]@import("../../ui/layout.zig").Item = undefined;
+    var flex_scratch: [32]@import("../../ui/layout.zig").FlexScratch = undefined;
+    var child_rects: [32]@import("../../ui/layout.zig").UiRect = undefined;
+    var actions: [32]@import("ids.zig").Entry = undefined;
     const frame = try build.build(props, .{
         .nodes = &nodes,
         .entries = &entries,
@@ -1209,12 +1209,12 @@ test "SessionDock group header runs are scroll clipped and its pill stays inside
             .{ .card = .{ .identity = 2, .provider = .claude, .title = "next-title", .summary = "next-summary", .metadata = "next-meta" } },
         },
     };
-    var nodes: [10]tree.UiNode = undefined;
-    var entries: [11]tree.RectEntry = undefined;
-    var layout_items: [11]@import("../../ui/layout.zig").Item = undefined;
-    var flex_scratch: [11]@import("../../ui/layout.zig").FlexScratch = undefined;
-    var child_rects: [11]@import("../../ui/layout.zig").UiRect = undefined;
-    var actions: [10]@import("ids.zig").Entry = undefined;
+    var nodes: [32]tree.UiNode = undefined;
+    var entries: [32]tree.RectEntry = undefined;
+    var layout_items: [32]@import("../../ui/layout.zig").Item = undefined;
+    var flex_scratch: [32]@import("../../ui/layout.zig").FlexScratch = undefined;
+    var child_rects: [32]@import("../../ui/layout.zig").UiRect = undefined;
+    var actions: [32]@import("ids.zig").Entry = undefined;
     const frame = try build.build(props, .{
         .nodes = &nodes,
         .entries = &entries,
@@ -1273,12 +1273,12 @@ test "SessionDock group count pill is vertically centred in its row" {
         .displayed_count = 1,
         .items = &.{.{ .group = .{ .identity = 1, .label = "workspace", .count = 11 } }},
     };
-    var nodes: [9]tree.UiNode = undefined;
-    var entries: [10]tree.RectEntry = undefined;
-    var layout_items: [10]@import("../../ui/layout.zig").Item = undefined;
-    var flex_scratch: [10]@import("../../ui/layout.zig").FlexScratch = undefined;
-    var child_rects: [10]@import("../../ui/layout.zig").UiRect = undefined;
-    var actions: [8]@import("ids.zig").Entry = undefined;
+    var nodes: [32]tree.UiNode = undefined;
+    var entries: [32]tree.RectEntry = undefined;
+    var layout_items: [32]@import("../../ui/layout.zig").Item = undefined;
+    var flex_scratch: [32]@import("../../ui/layout.zig").FlexScratch = undefined;
+    var child_rects: [32]@import("../../ui/layout.zig").UiRect = undefined;
+    var actions: [32]@import("ids.zig").Entry = undefined;
     const frame = try build.build(props, .{
         .nodes = &nodes,
         .entries = &entries,
@@ -1347,12 +1347,12 @@ test "SessionDock Retina controls centre measured line boxes instead of terminal
             .{ .group = .{ .identity = 1, .label = "workspace", .count = 12 } },
         },
     };
-    var nodes: [8]tree.UiNode = undefined;
-    var entries: [9]tree.RectEntry = undefined;
-    var layout_items: [9]@import("../../ui/layout.zig").Item = undefined;
-    var flex_scratch: [9]@import("../../ui/layout.zig").FlexScratch = undefined;
-    var child_rects: [9]@import("../../ui/layout.zig").UiRect = undefined;
-    var actions: [6]@import("ids.zig").Entry = undefined;
+    var nodes: [32]tree.UiNode = undefined;
+    var entries: [32]tree.RectEntry = undefined;
+    var layout_items: [32]@import("../../ui/layout.zig").Item = undefined;
+    var flex_scratch: [32]@import("../../ui/layout.zig").FlexScratch = undefined;
+    var child_rects: [32]@import("../../ui/layout.zig").UiRect = undefined;
+    var actions: [32]@import("ids.zig").Entry = undefined;
     const frame = try build.build(props, .{
         .nodes = &nodes,
         .entries = &entries,
@@ -1413,12 +1413,12 @@ test "SessionDock action declares one worker-measured SVG icon and Korean label 
             .expanded = .{ .state = .ready, .resume_enabled = true, .reveal_enabled = true },
         } }},
     };
-    var nodes: [16]tree.UiNode = undefined;
-    var entries: [17]tree.RectEntry = undefined;
-    var layout_items: [17]@import("../../ui/layout.zig").Item = undefined;
-    var flex_scratch: [17]@import("../../ui/layout.zig").FlexScratch = undefined;
-    var child_rects: [17]@import("../../ui/layout.zig").UiRect = undefined;
-    var actions: [8]@import("ids.zig").Entry = undefined;
+    var nodes: [32]tree.UiNode = undefined;
+    var entries: [32]tree.RectEntry = undefined;
+    var layout_items: [32]@import("../../ui/layout.zig").Item = undefined;
+    var flex_scratch: [32]@import("../../ui/layout.zig").FlexScratch = undefined;
+    var child_rects: [32]@import("../../ui/layout.zig").UiRect = undefined;
+    var actions: [32]@import("ids.zig").Entry = undefined;
     const frame = try build.build(props, .{
         .nodes = &nodes,
         .entries = &entries,
@@ -1484,12 +1484,12 @@ test "SessionDock initial loading paints inert three-line skeleton cards" {
         .displayed_count = 0,
         .loading = true,
     };
-    var nodes: [8]tree.UiNode = undefined;
-    var entries: [8]tree.RectEntry = undefined;
-    var layout_items: [8]@import("../../ui/layout.zig").Item = undefined;
-    var flex_scratch: [8]@import("../../ui/layout.zig").FlexScratch = undefined;
-    var child_rects: [8]@import("../../ui/layout.zig").UiRect = undefined;
-    var actions: [5]@import("ids.zig").Entry = undefined;
+    var nodes: [32]tree.UiNode = undefined;
+    var entries: [32]tree.RectEntry = undefined;
+    var layout_items: [32]@import("../../ui/layout.zig").Item = undefined;
+    var flex_scratch: [32]@import("../../ui/layout.zig").FlexScratch = undefined;
+    var child_rects: [32]@import("../../ui/layout.zig").UiRect = undefined;
+    var actions: [32]@import("ids.zig").Entry = undefined;
     const frame = try build.build(props, .{
         .nodes = &nodes,
         .entries = &entries,
@@ -1551,12 +1551,12 @@ test "SessionDock card text budget never reaches the disclosure chevron slot" {
             },
         },
     };
-    var nodes: [9]tree.UiNode = undefined;
-    var entries: [10]tree.RectEntry = undefined;
-    var layout_items: [10]@import("../../ui/layout.zig").Item = undefined;
-    var flex_scratch: [10]@import("../../ui/layout.zig").FlexScratch = undefined;
-    var child_rects: [10]@import("../../ui/layout.zig").UiRect = undefined;
-    var actions: [8]@import("ids.zig").Entry = undefined;
+    var nodes: [32]tree.UiNode = undefined;
+    var entries: [32]tree.RectEntry = undefined;
+    var layout_items: [32]@import("../../ui/layout.zig").Item = undefined;
+    var flex_scratch: [32]@import("../../ui/layout.zig").FlexScratch = undefined;
+    var child_rects: [32]@import("../../ui/layout.zig").UiRect = undefined;
+    var actions: [32]@import("ids.zig").Entry = undefined;
     const frame = try build.build(props, .{
         .nodes = &nodes,
         .entries = &entries,
@@ -1642,12 +1642,12 @@ test "SessionDock scroll-area decoration quads inherit the container clip" {
         .loading = true,
         .items = &.{},
     };
-    var nodes: [8]tree.UiNode = undefined;
-    var entries: [12]tree.RectEntry = undefined;
-    var layout_items: [12]@import("../../ui/layout.zig").Item = undefined;
-    var flex_scratch: [12]@import("../../ui/layout.zig").FlexScratch = undefined;
-    var child_rects: [12]@import("../../ui/layout.zig").UiRect = undefined;
-    var actions: [8]@import("ids.zig").Entry = undefined;
+    var nodes: [32]tree.UiNode = undefined;
+    var entries: [32]tree.RectEntry = undefined;
+    var layout_items: [32]@import("../../ui/layout.zig").Item = undefined;
+    var flex_scratch: [32]@import("../../ui/layout.zig").FlexScratch = undefined;
+    var child_rects: [32]@import("../../ui/layout.zig").UiRect = undefined;
+    var actions: [32]@import("ids.zig").Entry = undefined;
     const frame = try build.build(props, .{
         .nodes = &nodes,
         .entries = &entries,

@@ -99,16 +99,10 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     // 렌더 낡음·깜빡임 수선(force_reproject·도크 caret blink·quad 수명/순서·chrome 기하 스탬프·
     // 스크롤바/hit-test lock 계약·placement 실패 가드)으로 또 바뀐다. count는 4 그대로다 —
     // 더한 어느 코드도 필드를 이름으로 읽지 않는다.
-    // 렌더 낡음·깜빡임 수선(force_reproject·도크 caret blink·quad 수명/순서·chrome 기하 스탬프·
-    // 스크롤바/hit-test lock 계약·placement 실패 가드)으로 또 바뀐다. count는 4 그대로다 —
-    // 더한 어느 코드도 필드를 이름으로 읽지 않는다.
-    // 렌더 낡음·깜빡임 수선(force_reproject·도크 caret blink·quad 수명/순서·chrome 기하 스탬프·
-    // 스크롤바/hit-test lock 계약·placement 실패 가드)으로 또 바뀐다. count는 4 그대로다 —
-    // 더한 어느 코드도 필드를 이름으로 읽지 않는다.
-    // 렌더 낡음·깜빡임 수선(force_reproject·도크 caret blink·quad 수명/순서·chrome 기하 스탬프·
-    // 스크롤바/hit-test lock 계약·placement 실패 가드)으로 또 바뀐다. count는 4 그대로다 —
-    // 더한 어느 코드도 필드를 이름으로 읽지 않는다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "9cab8bbc36269c49728267d5f31f8fd063c70204b08644e8f8f80d25505025d4" },
+    // SV1c가 뷰포트 예측식을 측정 pass로 바꾸고 drag·휠 잔여를 `scroll_area`로 옮기며 또 바뀐다.
+    // count는 4 그대로다 — host에서 사라진 것은 값 산술이고, 새로 부르는 `Drag`·`State`도 필드를
+    // 이름으로 읽지 않는다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "334dbf659ec18a479f39086a9f0e9ef03d21de925c9445a4e03f8705edbd4a33" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

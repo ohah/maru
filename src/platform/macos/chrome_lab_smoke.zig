@@ -105,13 +105,15 @@ pub fn main(init: std.process.Init) !void {
     try resetArtifacts(io, ppm_path, png_path, json_path);
 
     const tokens = labTokens();
-    var entries: [16]chrome.ui.tree.RectEntry = undefined;
-    var items: [16]chrome.ui.layout.Item = undefined;
-    var flex_scratch: [16]chrome.ui.layout.FlexScratch = undefined;
-    var child_rects: [16]chrome.ui.layout.UiRect = undefined;
+    // sticky 시나리오는 그룹 둘 + 카드 넷이라 항목이 가장 많다(6). 여기 상한은 `bufferSizes`가
+    // 보고하는 값 이상이어야 하고, 모자라면 캡처가 조용히 비는 대신 fail-close 한다.
+    var entries: [24]chrome.ui.tree.RectEntry = undefined;
+    var items: [24]chrome.ui.layout.Item = undefined;
+    var flex_scratch: [24]chrome.ui.layout.FlexScratch = undefined;
+    var child_rects: [24]chrome.ui.layout.UiRect = undefined;
     var ops: [lab.frame_op_capacity]chrome.draw.Op = undefined;
-    var dock_nodes: [16]chrome.ui.tree.UiNode = undefined;
-    var dock_actions: [12]chrome.components.session_dock.ids.Entry = undefined;
+    var dock_nodes: [24]chrome.ui.tree.UiNode = undefined;
+    var dock_actions: [20]chrome.components.session_dock.ids.Entry = undefined;
     // Button이 label을 자식으로 들면서 action마다 node가 둘이다(Button + label).
     var detail_nodes: [20]chrome.ui.tree.UiNode = undefined;
     var detail_actions: [3]chrome.components.archive_detail.ids.Entry = undefined;
@@ -269,9 +271,7 @@ pub fn main(init: std.process.Init) !void {
     // 이게 있어야 반쯤 걸친 카드의 글자가 **잘린 그대로** 캡처돼, 골든이 클리핑 계약까지 본다.
     // Lab은 dock을 프레임 원점에 그리므로 pane 오프셋 없이 그 사각형이 곧 backing 좌표다.
     const scroll_clip: ?renderer.metal_frame.ClipPx = blk: {
-        const index = frame.tree.find(chrome.components.session_dock.build.NodeIds.content) orelse break :blk null;
-        const rect = frame.tree.entries[index].rect;
-        if (rect.width <= 0 or rect.height <= 0) break :blk null;
+        const rect = chrome.components.session_dock.build.scrollTextViewport(frame.tree) orelse break :blk null;
         break :blk .{
             .x = @intFromFloat(@max(rect.x, 0)),
             .y = @intFromFloat(@max(rect.y, 0)),
@@ -417,6 +417,9 @@ fn scenarioFromEnvValue(raw: []const u8) ?lab.ScenarioId {
     if (std.mem.eql(u8, raw, "partial-scroll")) return .partial_scroll;
     if (std.mem.eql(u8, raw, "partial-group-scroll")) return .partial_group_scroll;
     if (std.mem.eql(u8, raw, "scrollbar")) return .scrollbar;
+    if (std.mem.eql(u8, raw, "sticky-at-rest")) return .sticky_at_rest;
+    if (std.mem.eql(u8, raw, "sticky-pinned")) return .sticky_pinned;
+    if (std.mem.eql(u8, raw, "sticky-pushed")) return .sticky_pushed;
     if (std.mem.eql(u8, raw, "detail-loading")) return .detail_loading;
     if (std.mem.eql(u8, raw, "detail-ready")) return .detail_ready;
     if (std.mem.eql(u8, raw, "detail-stale")) return .detail_stale;
@@ -433,6 +436,9 @@ fn artifactName(id: lab.ScenarioId) []const u8 {
         .partial_scroll => "partial-scroll",
         .partial_group_scroll => "partial-group-scroll",
         .scrollbar => "scrollbar",
+        .sticky_at_rest => "sticky-at-rest",
+        .sticky_pinned => "sticky-pinned",
+        .sticky_pushed => "sticky-pushed",
         .detail_loading => "detail-loading",
         .detail_ready => "detail-ready",
         .detail_stale => "detail-stale",

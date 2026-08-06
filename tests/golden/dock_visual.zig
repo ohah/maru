@@ -106,6 +106,29 @@ const cases = [_]Case{
         .contract = "넘치는 목록에 track과 thumb이 gutter 안에 있다(발행되고, content를 침범하지 않는다)",
         .rect = .{ .x = 452, .y = 200, .w = 28, .h = 400 },
     },
+    // sticky의 세 상태는 clamp **한 줄**에서 나온다. 하나만 캡처하면 나머지 둘이 무판정으로 남고,
+    // 그 상태로는 `next_y - h` 항을 빼도(=두 헤더가 겹쳐도) 게이트가 통과한다.
+    //
+    // crop은 목록 상단 밴드를 잡는다. 여기가 헤더와 지나가는 카드가 만나는 유일한 자리이고,
+    // quad·text가 서로 다른 레이어라 **글자가 헤더를 뚫고 나오는** 회귀가 픽셀로만 판정된다.
+    .{
+        .name = "sticky-head-at-rest",
+        .capture = "sticky-at-rest.ppm",
+        .contract = "첫 그룹에 닿은 상태의 헤더가 흐름 그대로 있다(고정 때문에 자리가 튀지 않는다)",
+        .rect = .{ .x = 0, .y = 200, .w = 480, .h = 120 },
+    },
+    .{
+        .name = "sticky-head-pinned",
+        .capture = "sticky-pinned.ppm",
+        .contract = "지나간 카드가 고정 헤더 **밑으로** 지나간다(헤더를 뚫고 글자가 보이지 않는다)",
+        .rect = .{ .x = 0, .y = 200, .w = 480, .h = 120 },
+    },
+    .{
+        .name = "sticky-head-pushed",
+        .capture = "sticky-pushed.ppm",
+        .contract = "다음 그룹 헤더가 앞 헤더를 밀어낸다(둘이 같은 자리에 겹치지 않는다)",
+        .rect = .{ .x = 0, .y = 200, .w = 480, .h = 120 },
+    },
 };
 
 test "session dock visual golden" {

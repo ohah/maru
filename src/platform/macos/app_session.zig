@@ -595,6 +595,36 @@ const ArchiveScrollItems = struct {
     }
 };
 
+/// content-space에서 지금 목록 상단에 걸리는 그룹과, 그것을 밀어낼 다음 그룹의 자리.
+const ArchiveStickyGroup = struct {
+    /// 전체 목록에서의 index다. **가상화 창 밖일 수 있다** — 그래서 component가 이걸 못 구한다.
+    index: usize,
+    top_px: u32,
+    next_top_px: ?u32,
+};
+
+/// 첫 그룹에 닿기 전이면 null이다. 그때는 흐름 위의 행이 그대로 보이고, 고정할 것이 없다.
+///
+/// "걸린 그룹"은 top이 offset **이하**인 마지막 그룹이다. 그 그룹의 행은 이미 뷰포트 위로 나갔거나
+/// 막 상단에 닿았고, 고정 헤더가 같은 rect를 덮으므로 두 번 그려 보이지 않는다.
+fn archiveStickyGroupFor(items: ArchiveScrollItems, offset_px: u32) ?ArchiveStickyGroup {
+    var top: u32 = 0;
+    var found: ?ArchiveStickyGroup = null;
+    for (items.entries, 0..) |entry, index| {
+        if (entry == .group) {
+            if (top <= offset_px) {
+                found = .{ .index = index, .top_px = top, .next_top_px = null };
+            } else if (found != null) {
+                found.?.next_top_px = top;
+                return found;
+            }
+        }
+        top +|= items.heightPx(index);
+        if (index + 1 < items.entries.len) top +|= items.gap_px;
+    }
+    return found;
+}
+
 fn archiveScrollAnchorFor(
     records: []const agent_session_archive_backend.Record,
     projection: chrome.ui.scroll_area.Projection,
@@ -729,6 +759,42 @@ test "archive scroll identity rejects same path or mtime when the exact source i
     changed = record;
     changed.parsed.session_id = @constCast("session-b");
     try std.testing.expect(!identity.eqlRecord(&changed));
+}
+
+// 걸린 그룹은 host만 구할 수 있다 — 가상화 창 밖일 수 있어서다. 골든은 이 산술을 못 본다(Lab이
+// props를 손으로 채운다). 그래서 여기 단위 판정자를 둔다.
+test "sticky group is the last one at or above the offset, with the next one as its pusher" {
+    // group(20) card(50) card(50) group(20) card(50), gap 10 → tops = 0, 30, 90, 150, 180.
+    const entries = [_]agent_session_archive_view.Entry{
+        .{ .group = 0 }, .{ .card = 0 }, .{ .card = 1 }, .{ .group = 1 }, .{ .card = 2 },
+    };
+    const items = ArchiveScrollItems{ .entries = &entries, .group_h_px = 20, .card_h_px = 50, .gap_px = 10 };
+
+    // 첫 그룹에 닿기 전은 없다 — 첫 그룹의 top이 0이라 offset 0부터 이미 걸려 있다.
+    const at_top = archiveStickyGroupFor(items, 0).?;
+    try std.testing.expectEqual(@as(usize, 0), at_top.index);
+    try std.testing.expectEqual(@as(u32, 0), at_top.top_px);
+    try std.testing.expectEqual(@as(?u32, 150), at_top.next_top_px);
+
+    // 두 번째 그룹 직전까지는 여전히 첫 그룹이 걸려 있다.
+    const before_second = archiveStickyGroupFor(items, 149).?;
+    try std.testing.expectEqual(@as(usize, 0), before_second.index);
+
+    // top과 정확히 같은 offset부터 두 번째 그룹으로 넘어간다. 마지막이므로 밀어내는 것이 없다.
+    const second = archiveStickyGroupFor(items, 150).?;
+    try std.testing.expectEqual(@as(usize, 3), second.index);
+    try std.testing.expectEqual(@as(u32, 150), second.top_px);
+    try std.testing.expectEqual(@as(?u32, null), second.next_top_px);
+
+    // 그룹이 하나도 없으면 고정할 것이 없다.
+    const cards_only = [_]agent_session_archive_view.Entry{ .{ .card = 0 }, .{ .card = 1 } };
+    try std.testing.expect(archiveStickyGroupFor(.{ .entries = &cards_only, .group_h_px = 20, .card_h_px = 50, .gap_px = 10 }, 40) == null);
+
+    // 첫 항목이 카드면 그 위에는 그룹이 없다 — offset이 첫 그룹 top보다 작으면 null이다.
+    const card_first = [_]agent_session_archive_view.Entry{ .{ .card = 0 }, .{ .group = 0 }, .{ .card = 1 } };
+    const late = ArchiveScrollItems{ .entries = &card_first, .group_h_px = 20, .card_h_px = 50, .gap_px = 10 };
+    try std.testing.expect(archiveStickyGroupFor(late, 59) == null);
+    try std.testing.expectEqual(@as(usize, 1), archiveStickyGroupFor(late, 60).?.index);
 }
 
 test "archive scroll anchor restores only the exact materialized card after reorder" {
@@ -32380,6 +32446,30 @@ pub const AppSession = struct {
         return chrome.components.session_dock.types.DockMetrics.resolve(self.agentSessionDockScaleMilli()).scrollbar_min_thumb;
     }
 
+    /// 그룹 하나를 component DTO로 옮기는 **유일한** 자리다. 흐름 위의 행과 상단 고정 헤더가 같은
+    /// 값을 봐야 한다 — 라벨이나 개수가 갈리면 스크롤 도중 같은 그룹이 두 물건으로 보인다.
+    fn agentSessionDockGroupItem(self: *const AppSession, group_index: usize) ?chrome.components.session_dock.types.Group {
+        if (group_index >= self.agent_session_archive_projection.groups.items.len) return null;
+        const group = self.agent_session_archive_projection.groups.items[group_index];
+        return .{
+            .identity = @intCast(group_index),
+            .label = group.label,
+            .count = @intCast(@min(group.count, std.math.maxInt(u16))),
+            .collapsed = group.collapsed,
+        };
+    }
+
+    /// 상단에 걸린 그룹. **가상화 창 밖일 수 있으므로** component가 아니라 여기서 구한다.
+    fn agentSessionDockStickyGroup(self: *const AppSession, offset_px: u32) ?chrome.components.session_dock.types.StickyGroup {
+        const head = archiveStickyGroupFor(self.agentSessionDockScrollItems(), offset_px) orelse return null;
+        const entry = self.agent_session_archive_projection.entries.items[head.index];
+        const group = self.agentSessionDockGroupItem(switch (entry) {
+            .group => |group_index| group_index,
+            .card => return null,
+        }) orelse return null;
+        return .{ .group = group, .top_px = head.top_px, .next_top_px = head.next_top_px };
+    }
+
     fn agentSessionDockProps(
         self: *const AppSession,
         content: @FieldType(dock_layout.Geometry, "tree_content"),
@@ -32423,6 +32513,7 @@ pub const AppSession = struct {
             else
                 null,
             .items = items,
+            .sticky_group = self.agentSessionDockStickyGroup(scroll_projection.offset_y_px),
         };
     }
 
@@ -32513,9 +32604,7 @@ pub const AppSession = struct {
         // 넘긴다. 이게 있으면 component가 "이 줄이 clip 안에 통째로 들어가는가"를 미리 판정할 필요가
         // 없다 — 반쯤 걸친 카드/그룹도 픽셀 단위로 잘려 보인다.
         const scroll_clip: ?metal_frame.ClipPx = blk: {
-            const index = frame.tree.find(chrome.components.session_dock.build.NodeIds.content) orelse break :blk null;
-            const rect = frame.tree.entries[index].rect;
-            if (rect.width <= 0 or rect.height <= 0) break :blk null;
+            const rect = chrome.components.session_dock.build.scrollTextViewport(frame.tree) orelse break :blk null;
             break :blk .{
                 .x = content.x +| @as(u32, @intFromFloat(@max(rect.x, 0))),
                 .y = content.y +| @as(u32, @intFromFloat(@max(rect.y, 0))),
@@ -32581,14 +32670,8 @@ pub const AppSession = struct {
             const entry = self.agent_session_archive_projection.entries.items[entry_index];
             switch (entry) {
                 .group => |group_index| {
-                    if (group_index >= self.agent_session_archive_projection.groups.items.len) continue;
-                    const group = self.agent_session_archive_projection.groups.items[group_index];
-                    try out.append(allocator, .{ .group = .{
-                        .identity = @intCast(group_index),
-                        .label = group.label,
-                        .count = @intCast(@min(group.count, std.math.maxInt(u16))),
-                        .collapsed = group.collapsed,
-                    } });
+                    const group = self.agentSessionDockGroupItem(group_index) orelse continue;
+                    try out.append(allocator, .{ .group = group });
                 },
                 .card => |record_index| {
                     if (record_index >= self.agent_session_archive_records.items.len) continue;

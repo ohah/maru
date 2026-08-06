@@ -87,7 +87,22 @@ pub const ScrollbarPart = struct {
     paint: PaintStyle,
 };
 
-/// `scrollView` 선언에 실리는 스크롤 상태. 이 값들이 있어야 `build`가 가상화 평행이동과 track/thumb
+/// 스크롤해도 컨테이너 상단에 남는 노드(§4.7). **무엇이** sticky인지는 소비처가 정하고, 여기서는 그
+/// 위치를 clamp하기만 한다 — 가상화 때문에 그 헤더는 창 밖일 수 있고, 창 밖 항목이 어느 그룹인지는
+/// domain만 안다.
+pub const StickyDeclaration = struct {
+    id: UiId,
+    action: ?UiAction = null,
+    paint: PaintStyle = .{},
+    height_px: f32,
+    /// content-space top(스크롤 offset을 빼기 전). 소비처가 자기 좌표계에서 계산해 준다.
+    top_px: f32,
+    /// **다음** sticky 후보의 content-space top. 그것이 올라오면 이 헤더를 밀어낸다. 마지막이면
+    /// 기본값(무한대)이라 밀어내는 것이 없다.
+    next_top_px: f32 = std.math.floatMax(f32),
+};
+
+/// `scrollArea` 선언에 실리는 스크롤 상태. 이 값들이 있어야 `build`가 가상화 평행이동과 track/thumb
 /// 발행을 **소비처 대신** 할 수 있다(docs/scroll-area.md §4.1).
 pub const ScrollDeclaration = struct {
     /// 지금 스크롤 위치. 스크롤바 thumb의 자리를 정한다.
@@ -104,6 +119,9 @@ pub const ScrollDeclaration = struct {
     thumb: ?ScrollbarPart = null,
     /// track/thumb이 함께 선언하는 drag payload. tree는 이 값의 의미를 모른다.
     drag: ?DragDeclaration = null,
+    /// 상단에 고정할 노드(§4.7). 자식 슬롯이 아닌 이유는 `build`가 자식을 전부 평행이동하기 때문이다 —
+    /// 자식으로 선언하면 목록과 함께 흘러내린다.
+    sticky: ?StickyDeclaration = null,
 };
 
 pub const ScrollAreaOptions = struct {
@@ -449,6 +467,15 @@ const BuildState = struct {
             try self.appendSubtree(child, own_index, try offsetRect(child_rect, rect.x, child_origin_y), effective_clip, depth + 1, rect_stack_start + child_count);
         }
 
+        // sticky 헤더는 자식들보다 뒤(위)이고 스크롤바보다 앞(아래)이다(§4.7). z는 emit 순서이고
+        // `hitAction`은 reverse z라, 카드는 헤더 밑으로 지나가고 gutter 클릭은 헤더로 새지 않는다.
+        if (node.props == .scroll_area) try self.appendSticky(
+            node.props.scroll_area.scroll,
+            own_index,
+            try offsetRect(result.content_rect, rect.x, rect.y),
+            effective_clip,
+        );
+
         // 스크롤바는 **자식들을 낸 뒤, 부모로 돌아가기 전**에 낸다(§4). 배열 끝에 붙이면 preorder와
         // subtree-range 불변식이 깨지고 root가 여럿이 된다. 여기서 내면 `parent_index`가 이 컨테이너라
         // 두 불변식이 유지되고 z도 저절로 맞는다 — 자식들보다 뒤(위)이고 다음 sibling보다 앞(아래)이다.
@@ -459,6 +486,48 @@ const BuildState = struct {
             try offsetRect(result.content_rect, rect.x, rect.y),
             effective_clip,
         );
+    }
+
+    /// sticky entry. 세 상태가 clamp 한 줄에서 나온다(§4.7) — 헤더 앞이면 흐름 그대로, 지나쳤으면
+    /// 상단 고정, 다음 헤더가 올라오면 밀려 나간다. 높이는 스크롤 좌표계에서 그대로 자리를 차지하고
+    /// 여기서는 **그리는 y만** 옮기므로 `project`의 창 계산과 anchor 규칙이 바뀌지 않는다.
+    fn appendSticky(
+        self: *BuildState,
+        scroll: ScrollDeclaration,
+        container_index: usize,
+        content_rect: layout.UiRect,
+        container_clip: ?layout.UiRect,
+    ) BuildError!void {
+        const head = scroll.sticky orelse return;
+        if (self.entry_count == self.options.max_entries) return error.MaxEntriesExceeded;
+
+        const offset: f32 = @floatFromInt(scroll.offset_px);
+        const natural_y = head.top_px - offset;
+        const next_y = head.next_top_px - offset;
+        const local_y = @min(@max(natural_y, 0), next_y - head.height_px);
+
+        const rect: layout.UiRect = .{
+            .x = content_rect.x,
+            .y = content_rect.y + local_y,
+            .width = content_rect.width,
+            .height = head.height_px,
+        };
+        // 헤더는 흐름 위의 그룹 행과 같은 규율을 따른다(`overflow = .clip`) — 밀려 나가는 동안 컨테이너
+        // clip이 위를 자르고, 자기 rect가 아래를 자른다. 그래야 소비처가 `clipRectOf`로 같은 값을 얻는다.
+        const clip = if (container_clip) |outer| layout.intersectRect(rect, outer) else rect;
+
+        self.buffers.entries[self.entry_count] = .{
+            .id = head.id,
+            .parent_index = container_index,
+            .kind = .card,
+            .rect = rect,
+            .effective_clip = clip,
+            .own_clip = clip,
+            .action = head.action,
+            .drag = null,
+            .visual = .{ .card = .{ .variant = .surface, .paint = head.paint } },
+        };
+        self.entry_count += 1;
     }
 
     /// track/thumb entry. `content_rect`는 자식이 놓인 영역이고 그 오른쪽 `gutter_px`가 스크롤바
@@ -933,7 +1002,7 @@ const ScrollStorage = struct {
     child_rects: [16]layout.UiRect = undefined,
 };
 
-test "scrollView emits its scrollbar inside preorder, not appended at the array end" {
+test "scrollArea emits its scrollbar inside preorder, not appended at the array end" {
     const children = [_]UiNode{
         container(.{ .id = 0x201, .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = 60 }, .flex = .{ .shrink = 0 } } }, &.{}),
         container(.{ .id = 0x202, .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = 60 }, .flex = .{ .shrink = 0 } } }, &.{}),
@@ -1004,7 +1073,7 @@ test "scrollArea reserves the gutter inside itself and its scrollbar survives it
     try std.testing.expect(child_clip.x + child_clip.width <= own.x + own.width);
 }
 
-test "scrollView translates its subtree and refolds each clip at the moved position" {
+test "scrollArea translates its subtree and refolds each clip at the moved position" {
     const nested = [_]UiNode{
         container(.{ .id = 0x301, .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = 30 } } }, &.{}),
     };
@@ -1045,7 +1114,110 @@ test "scrollView translates its subtree and refolds each clip at the moved posit
     try std.testing.expect(thumb.rect.y > flat.entries[flat.find(scroll_fixture.thumb_id).?].rect.y);
 }
 
-test "scrollView publishes no scrollbar when nothing overflows or the gutter is too narrow" {
+test "sticky head clamps through its three states and never leaves the container" {
+    // clamp가 한 줄이라 세 상태가 같은 식에서 나온다(§4.7). 하나만 보면 나머지 둘이 무판정으로 남는다.
+    const sticky_id: UiId = 0x6000;
+    const head_h: f32 = 40;
+    const children = [_]UiNode{
+        container(.{ .id = 0x201, .style = .{ .height = .{ .px = 500 }, .flex = .{ .shrink = 0 } } }, &.{}),
+    };
+
+    const Case = struct { name: []const u8, offset: u32, want: f32 };
+    // 헤더는 content-space 100에 있고 다음 헤더는 400에 있다.
+    for ([_]Case{
+        // ① 아직 안 지남 — 흐름 그대로(100 - 60 = 40).
+        .{ .name = "at rest", .offset = 60, .want = 40 },
+        // ② 지나침 — 상단 고정. next는 400-200=200이라 아직 안 밀어낸다.
+        .{ .name = "pinned", .offset = 200, .want = 0 },
+        // ③ 다음 헤더가 올라옴 — 밀려 나간다(400-380=20, 20-40=-20).
+        .{ .name = "pushed", .offset = 380, .want = -20 },
+    }) |case| {
+        var storage = ScrollStorage{};
+        var node = scroll_fixture.node(&children, 0, case.offset);
+        node.props.scroll_area.scroll.sticky = .{
+            .id = sticky_id,
+            .height_px = head_h,
+            .top_px = 100,
+            .next_top_px = 400,
+        };
+        // root에 padding을 준다 — content 원점이 0이면 "원점을 무시한다"는 변이가 판정되지 않는다.
+        const tree = try scroll_fixture.run(container(.{ .id = 1, .style = .{ .padding = .{ .left = 12, .top = 6 } } }, &.{node}), &storage);
+
+        const view = tree.entries[tree.find(0x100).?];
+        const head = tree.entries[tree.find(sticky_id) orelse return error.TestUnexpectedResult];
+        const own = view.own_clip orelse return error.TestUnexpectedResult;
+        // 컨테이너 content 원점 기준 local y.
+        try std.testing.expectApproxEqAbs(case.want, head.rect.y - own.y, 0.01);
+
+        // 어느 상태에서도 자기 컨테이너 clip 안이고 폭은 자식 영역과 같다.
+        try std.testing.expectEqual(own.x, head.rect.x);
+        try std.testing.expectEqual(@as(?usize, tree.find(0x100).?), head.parent_index);
+        const clip = head.effective_clip orelse return error.TestUnexpectedResult;
+        try std.testing.expect(head.rect.x >= clip.x);
+        try std.testing.expect(head.rect.x + head.rect.width <= clip.x + clip.width);
+    }
+}
+
+test "sticky head sits above the list and below the scrollbar" {
+    const sticky_id: UiId = 0x6000;
+    const children = [_]UiNode{
+        container(.{ .id = 0x201, .style = .{ .height = .{ .px = 500 }, .flex = .{ .shrink = 0 } } }, &.{}),
+    };
+    var storage = ScrollStorage{};
+    var node = scroll_fixture.node(&children, 0, 200);
+    // 높이는 40이 **아니어야** 한다 — clamp 테스트가 전부 40이라, 여기서도 40이면 "높이를 상수로
+    // 박는다"는 회귀가 아무 데서도 안 잡힌다.
+    node.props.scroll_area.scroll.sticky = .{ .id = sticky_id, .height_px = 44, .top_px = 100, .next_top_px = 400 };
+    const tree = try scroll_fixture.run(container(.{ .id = 1, .style = .{ .padding = .{ .left = 12, .top = 6 } } }, &.{node}), &storage);
+
+    const child_index = tree.find(0x201) orelse return error.TestUnexpectedResult;
+    const head_index = tree.find(sticky_id) orelse return error.TestUnexpectedResult;
+    const track_index = tree.find(scroll_fixture.track_id) orelse return error.TestUnexpectedResult;
+
+    // z는 emit 순서이고 `hitAction`은 reverse z라 뒤가 이긴다. 카드는 헤더 밑으로 지나가야 하고,
+    // gutter 클릭은 헤더로 새지 않아야 한다.
+    try std.testing.expect(child_index < head_index);
+    try std.testing.expect(head_index < track_index);
+
+    // 순서만으로는 부족하다 — 컨테이너 clip은 gutter를 되돌려 포함하므로(§4) 헤더가 gutter까지
+    // 넓어져도 clip 단언은 통과한다. 헤더는 자식과 같은 content 폭에서 멈춰야 스크롤바를 안 덮는다.
+    try std.testing.expect(tree.entries[head_index].rect.x + tree.entries[head_index].rect.width <=
+        tree.entries[track_index].rect.x);
+    try std.testing.expectEqual(tree.entries[child_index].rect.width, tree.entries[head_index].rect.width);
+    try std.testing.expectEqual(@as(f32, 44), tree.entries[head_index].rect.height);
+}
+
+test "sticky counts against the entry cap instead of writing past the buffer" {
+    // root + scrollArea + 자식 = 3. sticky는 네 번째라 상한을 넘겨야 하고, 넘기면 **버퍼 밖으로
+    // 쓰는 대신** fail-close 해야 한다.
+    const children = [_]UiNode{
+        container(.{ .id = 0x201, .style = .{ .height = .{ .px = 500 }, .flex = .{ .shrink = 0 } } }, &.{}),
+    };
+    var node = scroll_fixture.node(&children, 0, 200);
+    node.props.scroll_area.scroll.sticky = .{ .id = 0x6000, .height_px = 40, .top_px = 100, .next_top_px = 400 };
+
+    var entries: [3]RectEntry = undefined;
+    var items: [3]layout.Item = undefined;
+    var scratch: [3]layout.FlexScratch = undefined;
+    var child_rects: [3]layout.UiRect = undefined;
+    try std.testing.expectError(error.MaxEntriesExceeded, build(
+        container(.{ .id = 1 }, &.{node}),
+        .{ .root_size = .{ .width = 200, .height = 300 }, .max_entries = 3, .max_depth = 4 },
+        .{ .entries = &entries, .items = &items, .flex_scratch = &scratch, .child_rects = &child_rects },
+    ));
+    for (entries) |entry| try std.testing.expectEqual(emptyRectEntry(), entry);
+}
+
+test "no sticky declaration means no sticky entry" {
+    const children = [_]UiNode{
+        container(.{ .id = 0x201, .style = .{ .height = .{ .px = 500 }, .flex = .{ .shrink = 0 } } }, &.{}),
+    };
+    var storage = ScrollStorage{};
+    const tree = try scroll_fixture.run(container(.{ .id = 1 }, &.{scroll_fixture.node(&children, 0, 200)}), &storage);
+    try std.testing.expect(tree.find(0x6000) == null);
+}
+
+test "scrollArea publishes no scrollbar when nothing overflows or the gutter is too narrow" {
     const children = [_]UiNode{
         container(.{ .id = 0x201, .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = 60 }, .flex = .{ .shrink = 0 } } }, &.{}),
     };

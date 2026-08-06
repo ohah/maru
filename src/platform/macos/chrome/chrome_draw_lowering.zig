@@ -186,6 +186,17 @@ pub fn richTextFingerprint(
             fingerprintMixValue(&state, @intFromEnum(text.text_role));
             fingerprintMixValue(&state, @intFromBool(text.wide_icons));
             fingerprintMixValue(&state, @intFromBool(text.scroll_clipped));
+            // 떠 있는 op은 절대 y와 자기 clip으로 그려진다. 둘 다 키에 있어야 밀려 나가는 동안
+            // 셰이핑이 옛 자리에 고정되지 않는다.
+            //
+            // `above_scroll` 자체는 섞지 않는다 — 이 분기가 이미 그 사실을 키에 남기고, 따로 섞으면
+            // 어떤 변이로도 관측되지 않는 항이 된다(변이 검증에서 확인).
+            if (text.above_scroll) if (text.clip) |clip| {
+                fingerprintMixValue(&state, @as(u32, @bitCast(clip.x)));
+                fingerprintMixValue(&state, @as(u32, @bitCast(clip.y)));
+                fingerprintMixValue(&state, clip.w);
+                fingerprintMixValue(&state, clip.h);
+            };
             fingerprintMixValue(&state, text.max_width_px orelse 0);
             fingerprintMixTextPlacement(&state, text.placement, text.scroll_clipped, scroll_origin_y_px);
             for (text.runs) |run| {
@@ -643,6 +654,57 @@ test "rich text fingerprint is invariant to pure scroll translation" {
 // 드롭이 그 갈라짐의 한 사례였고(키는 그 run을 세는데 request는 버려서, 스크롤 불변 키가 그 artifact를
 // 그 줄이 보여야 할 위치에 재사용 → 영구 빈 줄), 같은 형태가 `max_width == 0`과 빈 run에도 남아 있었다.
 // 이제 둘 다 `system_text`의 판정을 쓰므로, 셰이핑되지 않는 op은 키에도 흔적을 남기지 않아야 한다.
+// 고정 헤더는 스크롤 평행이동의 **예외**다. 목록은 offset이 변해도 셰이핑을 재사용해야 하지만,
+// 헤더는 밀려 나가는 동안 자기 y와 clip이 실제로 달라진다. 이 사실이 키에 없으면 옛 자리에 고정된
+// 채로 재사용되고, Lab 골든은 이것을 못 본다(그 경로는 delta가 늘 0이라 캐시 재사용이 없다).
+test "rich text fingerprint pins a floating sticky head instead of translating it" {
+    const tk = chrome.Tokens.rich(.{
+        .foreground = .{ .r = 240, .g = 240, .b = 240 },
+        .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
+        .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
+        .sidebar_active = .{ .r = 80, .g = 80, .b = 80 },
+        .search_match = .{ .r = 1, .g = 2, .b = 3 },
+        .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
+        .selection = .{ .r = 7, .g = 8, .b = 9 },
+        .cursor = .{ .r = 10, .g = 11, .b = 12 },
+        .accent = .{ .r = 13, .g = 14, .b = 15 },
+    });
+    const head_runs = [_]chrome.draw.Run{.{ .text = "sample-workspace" }};
+    const card_runs = [_]chrome.draw.Run{.{ .text = "카드 제목" }};
+    const head = chrome.draw.Op{ .text = .{
+        .origin = .{ .x = 20, .y = 200 },
+        .runs = &head_runs,
+        .role = .surface_fg,
+        .text_role = .group_heading,
+        .above_scroll = true,
+        .clip = .{ .x = 0, .y = 200, .w = 400, .h = 40 },
+    } };
+    const rested = [_]chrome.draw.Op{
+        head,
+        .{ .text = .{ .origin = .{ .x = 20, .y = 300 }, .runs = &card_runs, .role = .surface_fg, .text_role = .card_heading, .scroll_clipped = true } },
+    };
+    // 목록만 41px 올라간 프레임. 헤더는 상단에 고정돼 그대로다.
+    const scrolled = [_]chrome.draw.Op{
+        head,
+        .{ .text = .{ .origin = .{ .x = 20, .y = 259 }, .runs = &card_runs, .role = .surface_fg, .text_role = .card_heading, .scroll_clipped = true } },
+    };
+    const base = richTextFingerprint(&rested, &tk, 8, 16, 20, 10, 0);
+    try std.testing.expectEqual(base, richTextFingerprint(&scrolled, &tk, 8, 16, 20, 10, -41));
+
+    // 헤더가 밀려 나가기 시작하면 y가 실제로 바뀐다 — 목록이 같은 양만큼 움직였어도 키가 달라야 한다.
+    // `scrollRelativeY`가 이 op에도 적용되면 이 두 키가 같아져 헤더가 옛 자리에 얼어붙는다.
+    var pushed_head = head;
+    pushed_head.text.origin.y = 200 - 41;
+    const pushed = [_]chrome.draw.Op{ pushed_head, scrolled[1] };
+    try std.testing.expect(base != richTextFingerprint(&pushed, &tk, 8, 16, 20, 10, -41));
+
+    // clip만 줄어드는 구간(밀려 나가며 위가 잘린다)도 다시 셰이핑해야 한다.
+    var clipped_head = head;
+    clipped_head.text.clip = .{ .x = 0, .y = 200, .w = 400, .h = 20 };
+    const clipped = [_]chrome.draw.Op{ clipped_head, scrolled[1] };
+    try std.testing.expect(base != richTextFingerprint(&clipped, &tk, 8, 16, 20, 10, -41));
+}
+
 test "rich text fingerprint and the shaping request share one filter" {
     const allocator = std.testing.allocator;
     const tk = chrome.Tokens.rich(.{

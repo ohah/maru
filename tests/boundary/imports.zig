@@ -88,7 +88,9 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     // IC2(아이콘 이름 registry 이관)가 헤더·카드·에이전트 아이콘의 codepoint 리터럴을 `icons.codepoint(...)`/
     // `icons.utf8(...)` 호출로 바꾸며 다시 바뀐다. count는 여전히 4다 — 이름 registry는 생성된 enum 상수라
     // 필드를 이름으로 읽는 reflection이 아니다(`@field` 없음, comptime switch 한 번).
-    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "3812ffbcdb955c2aaf4161bbcc31a088395aad3c04c99626b49b21c272e54745" },
+    // IC4(아이콘 크기 토큰)가 헤더 아이콘 배율 상수를 `chrome.ui.icon`으로 옮기며 또 바뀐다. count는 4 그대로다 —
+    // 토큰 호출은 값 계산일 뿐 필드를 이름으로 읽지 않는다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "18f091cc21036f481f0102b99157a40cc2d8abc08cc8c238f6cb6db9430e9366" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

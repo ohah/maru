@@ -200,7 +200,10 @@ fn placeText(cp: []u21, fg: []terminal.Color, cwid: []u2, cols: u16, rows: u16, 
         while (it.nextCodepoint()) |codepoint| {
             // wide 문자는 한 DrawCell의 width=2로 남기고 continuation cell은 emit하지 않는다. 그렇지 않으면
             // continuation의 배경 quad가 CoreText glyph의 오른쪽 절반을 덮어 한글/CJK가 잘린다.
-            const width: u2 = if (t.wide_icons and renderer.icon_glyph.isRegisteredIcon(codepoint)) 2 else @max(1, terminal.width.cellWidth(codepoint));
+            const width: u2 = if (t.wide_icons and renderer.icon_glyph.isRegisteredIcon(codepoint))
+                chrome.ui.icon.chrome_run_span
+            else
+                @max(1, terminal.width.cellWidth(codepoint));
             if (col_i >= 0 and col_i < cols) {
                 const idx = row * @as(usize, cols) + @as(usize, @intCast(col_i));
                 cp[idx] = codepoint;

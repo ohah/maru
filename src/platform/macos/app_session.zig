@@ -770,8 +770,9 @@ const sidebar_header_row_h_ratio_milli: u32 = 3000;
 // 사이드바 접기/펼치기 토글 아이콘 코드포인트(◧ U+25E7 — 좌측 절반 채운 사각형 = 왼쪽 패널). 헤더 아이콘 줄(펼침)·
 // 접힘 시 좌상단 버튼·.m 확대 분기가 공유하는 단일 출처.
 const sidebar_toggle_codepoint: u21 = icons.codepoint(.sidebar); // maru 아이콘 PUA(icon_glyph): sidebar-collapse(◧ 대체). 헤더·접힘 토글 공유.
-const header_icon_scale_numerator: u32 = 17;
-const header_icon_scale_denominator: u32 = 10;
+// 헤더 아이콘을 셀보다 크게 굽는 배율은 chrome 크기 토큰(`chrome.ui.icon`)이 소유한다 — 같은 1.7이
+// 렌더러 quad(.m)에도 있어, 여기에 또 상수를 두면 세 곳이 어긋날 수 있다.
+const header_icon_scale = chrome.ui.icon;
 
 /// titlebar 안에 중앙 배치한 한 셀 glyph를 header_icon_scale만큼 확대한 뒤 화면에 보이는 아래쪽 경계.
 /// filePanelDockControlRect의 hit/hover 높이와 collectShaped raster 크기가 같은 scale 계약을 소비한다.
@@ -784,7 +785,7 @@ fn dockToggleVisualBottomPx(cell_height_px: u32, titlebar_strip_px: u32) u32 {
 }
 
 fn headerIconRasterExtentPx(cell_extent_px: u32) u32 {
-    return @min(cell_extent_px * header_icon_scale_numerator / header_icon_scale_denominator, std.math.maxInt(u16));
+    return header_icon_scale.cellRasterExtentPx(cell_extent_px);
 }
 // 검색 줄 레이아웃 — 렌더(buildSidebarHeaderDrawList)·caret(sidebarSearchCaretRect)가 공유하는 단일 출처. 🔍를 왼쪽
 // 끝(col 0)에 붙이지 않고 좌측 패딩 1칸을 둔다(사용자 피드백: 너무 붙음). 입력/placeholder/caret은 🔍(2칸)+공백(1) 뒤.

@@ -22,6 +22,7 @@ pub const ui = struct {
     pub const provisional_order = @import("chrome/ui/provisional_order.zig");
     pub const paint_style = @import("chrome/ui/paint_style.zig");
     pub const paint = @import("chrome/ui/paint.zig");
+    pub const icon = @import("chrome/ui/icon.zig"); // 아이콘 크기 토큰(슬롯 pt·셀 래스터 배율·run 셀 수) 단일 출처
 };
 pub const state = @import("chrome/state.zig");
 pub const host = @import("chrome/host.zig");

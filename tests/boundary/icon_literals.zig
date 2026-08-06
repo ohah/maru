@@ -119,6 +119,39 @@ test "아이콘은 이름 registry로만 부른다 — codepoint 리터럴 금�
     }
 }
 
+// 셀 그리드 chrome의 아이콘 배율은 **두 언어에 걸쳐 있다**: Zig가 그 배율로 텍스처를 굽고(`collectShaped`가
+// `raster_*_px`를 주입), Objective-C 렌더러가 같은 배율로 quad를 키운다. 둘이 어긋나면 1.7× 텍스처가 1.0× quad에
+// 들어가(또는 그 반대) 아이콘이 잘리거나 흐려진다 — 컴파일러도 타입도 못 잡고, 헤드리스 테스트는 quad 크기만
+// 보므로 조용히 지나간다. 그래서 토큰 값이 .m 소스에 그대로 있는지 문자열로 확인한다(C 게이트 헤더를 생성해
+// 맞추는 `icon_codepoints.h`와 같은 결의 미러 가드다).
+const scale_token_file = "src/chrome/ui/icon.zig";
+const scale_mirror_file = "src/platform/macos/maru_metal_renderer.m";
+
+test "아이콘 셀 래스터 배율은 Zig 토큰과 Objective-C 미러가 같다" {
+    const allocator = std.testing.allocator;
+    const token_source = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, scale_token_file, allocator, .limited(64 * 1024));
+    defer allocator.free(token_source);
+
+    // `pub const cell_raster_scale_milli: u32 = 1700;` → 1700 → "1.7f"
+    const needle = "cell_raster_scale_milli: u32 = ";
+    const start = (std.mem.indexOf(u8, token_source, needle) orelse return error.TestUnexpectedResult) + needle.len;
+    const end = std.mem.indexOfScalarPos(u8, token_source, start, ';') orelse return error.TestUnexpectedResult;
+    const milli = try std.fmt.parseInt(u32, token_source[start..end], 10);
+    try std.testing.expectEqual(@as(u32, 0), milli % 100); // 아래 소수 표기가 두 자리면 충분하다는 전제
+    var expected_buf: [16]u8 = undefined;
+    const expected = try std.fmt.bufPrint(&expected_buf, "{d}.{d}f", .{ milli / 1000, (milli % 1000) / 100 });
+
+    const mirror = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, scale_mirror_file, allocator, .limited(4 * 1024 * 1024));
+    defer allocator.free(mirror);
+    if (std.mem.indexOf(u8, mirror, expected) == null) {
+        std.debug.print(
+            "\n아이콘 배율 미러 불일치: {s}의 토큰({d} milli = `{s}`)이 {s}에 없습니다.\n",
+            .{ scale_token_file, milli, expected, scale_mirror_file },
+        );
+        return error.IconScaleMirrorDrift;
+    }
+}
+
 test "scanLine: 등록 리터럴은 잡고 주석·미등록 sentinel·무관한 hex는 통과시킨다" {
     try std.testing.expect(scanLine("    .codepoint = 0xF0023,") != null);
     try std.testing.expect(scanLine("const a = \"\\u{F000C}\";") != null);

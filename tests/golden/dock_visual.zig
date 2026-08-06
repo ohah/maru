@@ -91,9 +91,16 @@ const cases = [_]Case{
         // 않았고, 그래서 스크롤바를 통째로 지워도 골든 네 장이 전부 통과했다. 게이트가 있다는 것과
         // 그 게이트가 이것을 본다는 것은 다르다.
         //
+        // 이 case가 더하는 것은 geometry 계산이 아니라 **그 계산이 GPU 픽셀까지 도달한다**는 것이다.
+        // `scrollbarGeometry`의 산술은 build.zig 단위 테스트가 이미 본다. 그 사이 구간 — entry 발행,
+        // clip, layer 순서, Metal lowering — 은 픽셀로만 판정된다.
+        //
         // crop은 도크 우측 gutter와 그 왼쪽 content 가장자리를 함께 잡는다. 세로로는 track 위쪽 빈
         // 구간·thumb·아래쪽 빈 구간이 모두 들어가므로, thumb의 위치와 높이, track의 범위, 그리고
         // 스크롤바가 content 위로 넘어오는 회귀까지 한 사각형이 판정한다.
+        //
+        // 시나리오는 스크롤 입력만 주입한다 — 이 두 필드는 `scrollbarFor`만 읽고 가상화에는 관여하지
+        // 않으므로, 카드가 offset만큼 밀렸는지는 이 case의 계약이 아니다(그건 `project`의 몫이다).
         .name = "scrollbar-track-and-thumb",
         .capture = "scrollbar.ppm",
         .contract = "넘치는 목록에 track과 thumb이 gutter 안에 있다(발행되고, content를 침범하지 않는다)",

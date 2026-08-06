@@ -153,20 +153,24 @@ completed tree**에 track과 thumb을 함께 싣는다.
 "자식들을 낸 뒤, 부모로 돌아가기 전"에 낸다. `parent_index`는 그 스크롤 컨테이너이고, 그러면 두 불변식이
 그대로 유지되면서 z도 저절로 맞는다 — 자식들보다 뒤(위)이고, 컨테이너의 다음 sibling보다는 앞(아래)이다.
 
-**그러나 clip은 부모에게서 물려받지 않는다.** 스크롤바는 gutter에 있고 gutter는 컨테이너 rect의
-**오른쪽 바깥**이다(`track_x = content_x + content_w + …`). 컨테이너의 overflow clip은 그 padding box이므로,
-보통 자식처럼 `effective_clip = 부모의 clip ∩ 자기`로 접으면 스크롤바는 **통째로 잘려 사라진다.**
+**clip에는 예외가 없다.** 스크롤바는 자기 컨테이너의 clip을 그대로 받는다. gutter를 **컨테이너가 자기
+폭에서** 예약하기 때문이다 — `overflow`가 자르는 컨테이너는 자식이 놓일 영역을 gutter만큼 안쪽으로
+밀고, 스크롤바는 그렇게 비운 자리에 놓인다. CSS `scrollbar-gutter`와 taffy의
+`content_box_inset.right += scrollbar_gutter`가 같은 일을 한다.
 
-그래서 스크롤바 entry의 clip은 **컨테이너 자신이 잘리던 clip**(= 조상 clip)이지 컨테이너의 overflow clip이
-아니다. 배열 안에서는 자식이지만 기하적으로는 형제 옆자리라고 읽는 편이 정확하다. 중첩에서 안쪽
-스크롤바가 바깥 뷰포트로 잘리는 것도 같은 규칙에서 자동으로 나온다 — 안쪽 컨테이너의 조상 clip이 곧
-바깥 뷰포트이기 때문이다.
+여기서 한 가지를 손으로 맞춰야 한다. `layoutFlex`의 clip은 padding을 **제외한** content box라
+(CSS의 padding box와 다르다) 방금 예약한 gutter까지 잘라 낸다. 그래서 `build`가 그 폭만큼 clip을
+되돌린다 — CSS에서 스크롤바가 padding box 안이라 자기 컨테이너에 잘리지 않는 것과 같은 자리를
+만드는 한 줄이다. 그 뒤로는 보통 자식과 규칙이 같고, 중첩에서 안쪽 스크롤바가 바깥 뷰포트에 잘리는
+것도 자동으로 나온다.
+
+> **조상의 여백을 빌리지 않는다.** 이전 도크 구현은 스크롤바를 root의 padding 영역에 놓았고, 그러면
+> 컨테이너 clip 밖이라 "조상 clip을 쓴다"는 예외가 필요했다. 그 규칙은 padding이 없는 소비처(파일
+> 탐색기)에서 곧바로 무너진다 — 빌릴 여백이 없다. gutter가 컨테이너 소유이면 조상이 어떻게 생겼든
+> 같게 동작한다.
 
 track이 먼저, thumb이 나중이다 — `interaction.hitAction`이 reverse z-order라 마지막 entry가 이기고,
 순서가 뒤집히면 thumb 위 down이 track click으로 판정돼 드래그 대신 점프가 일어난다.
-
-> 지금 Session Dock 구현은 이 규칙을 어긴다(배열 끝에 `parent_index = null`로 append한다). 소비하는 쪽이
-> preorder를 가정하지 않아 아직 드러나지 않았을 뿐이며, SV1이 고칠 항목이다.
 
 스크롤바는 **목록 위에 겹치지 않는다.** 컨테이너가 자기 오른쪽에 확보한 gutter 안에 놓이며, 나타나고
 사라져도 목록 폭을 reflow하지 않는다. gutter가 track 폭을 못 담으면 스크롤바를 아예 그리지 않는다 —
@@ -185,15 +189,24 @@ flex 엔진에는 **절대 위치가 없다**(`UiStyle`은 축의 크기·여백
 ```zig
 tree.scrollArea(.{
     .id = NodeIds.content,
-    .style = .{ .width = .{ .percent = 1 }, .height = .{ .fill = 1 } },
+    // 폭을 지정하지 않는다 — `align_items = .stretch`가 margin을 빼고 채운다. `percent = 1`은
+    // border box 전체 크기라 margin을 무시한다(CSS `width: 100%`가 넘치는 것과 같다).
+    .style = .{ .height = .{ .fill = 1 } },
     .scroll = .{
         .offset_px = state.offset_px,
         .content_h_px = window.content_height_px,
         .first_item_origin_y_px = window.first_origin_y_px, // 가상화 평행이동
-        .gutter_px = m.root_inset,                          // 목록 위에 겹치지 않는다
+        .gutter_px = m.root_inset,                          // 자기 폭에서 떼어 놓는다
+        .metrics = m.scrollbarMetrics(),
+        .track = .{ .id = ..., .action = ..., .paint = ... },
+        .thumb = .{ .id = ..., .action = ..., .paint = ... },
+        .drag = .{ .payload = ..., .axis = .vertical, .threshold_px = 0 },
     },
 }, item_nodes)
 ```
+
+`track`/`thumb`은 선택이다 — 없으면 가상화 평행이동만 하고 스크롤바를 내지 않는다(휠 전용 목록).
+있으면 발행 여부는 `build`가 기하를 보고 정하므로, 소비처는 action을 미리 만들어 둔다.
 
 이 한 선언에서 `build`가 만드는 것은 셋이다: `overflow: clip` 컨테이너 rect, 그 자식들의 평행이동,
 그리고 뷰포트에 고정된 track/thumb entry. 소비처는 `publish`를 따로 부르지 않는다.

@@ -520,8 +520,9 @@ typedef struct MaruAppHostMetalFrame {
     size_t gpu_glyph_count;
     /* SB1: 창 바닥 상태표시줄이 예약한 높이(backing px). 렌더러는 사이드바 배경 strip을 이만큼 위에서 끝낸다
        — strip은 renderer가 높이를 직접 정하는 승인 예외 표면이라(docs/metal-ui-layout.md §5) Zig가 값을 실어
-       주는 것 말고는 바닥을 옮길 방법이 없다. 상태바 자신의 배경·글자는 GpuQuad/GpuGlyph로 온다(이 필드는
-       strip 클리핑 전용). 0=기존 동작(창 바닥까지). 끝에 추가해 기존 offset 불변(ABI v167). */
+       주는 것 말고는 바닥을 옮길 방법이 없다. 상태바 자신의 배경·글자는 GpuQuad/GpuGlyph로 온다 — 이 필드는
+       renderer가 소유한 표면을 상태바 위에서 끊는 용도다(지금은 strip, S2b에서 사이드바 셀 scissor도 같은 값).
+       0=기존 동작(창 바닥까지). 끝에 추가해 기존 offset 불변(ABI v167). */
     uint32_t status_bar_height_px;
 } MaruAppHostMetalFrame;
 

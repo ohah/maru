@@ -1194,8 +1194,9 @@ pub const MetalFrame = extern struct {
     // SB1: 창 바닥 상태표시줄이 예약한 높이(backing px). 렌더러는 **사이드바 배경 strip을 이만큼 위에서
     // 끝낸다** — strip은 `.m`이 높이를 직접 정하는 몇 안 되는 표면이라(docs/metal-ui-layout.md §5 승인 예외)
     // Zig가 값을 실어 알려 주는 것 말고는 그 바닥을 옮길 방법이 없다. 상태바 자신의 배경·글자는 GpuQuad·
-    // GpuGlyph로 host가 그리므로 이 필드는 **strip 클리핑 전용**이다. 0이면 기존 동작(창 바닥까지).
-    // 끝에 추가해 기존 offset 불변(ABI v167).
+    // GpuGlyph로 host가 그리므로 이 필드는 **렌더러가 소유한 표면을 상태바 위에서 끊는 용도**다 — 지금은
+    // strip 하나뿐이고, 사이드바 셀 scissor(`[header_h, drawable_h]`)도 S2b에서 같은 값을 쓴다.
+    // 0이면 기존 동작(창 바닥까지). 끝에 추가해 기존 offset 불변(ABI v167).
     status_bar_height_px: u32 = 0,
 };
 
@@ -3166,4 +3167,28 @@ test "SB1-S2a: status_bar_height_px는 스탬프를 타고 나가고, 0이면 �
     // 같은 스탬프의 다른 필드가 훼손되지 않는다(끝에 추가한 필드라 기존 의미 불변).
     try std.testing.expectEqual(@as(u32, 240), buffer.view().terminal_origin_x_px);
     try std.testing.expectEqual(@as(u32, 30), buffer.view().titlebar_strip_px);
+}
+
+// **`ChromeGeometry`의 모든 필드가 `view()`로 나가야 한다.** 매핑이 손-미러라(필드마다 한 줄) 새 필드를
+// 더하면서 `view()`를 잊으면 컴파일러가 안 잡아 주고, 렌더러는 그 값을 **0으로 받는다** — 화면에서만
+// 드러나는 조용한 유실이다(이 스택이 방금 상태바 필드를 더하며 지나온 자리). comptime으로 필드를 세어
+// 강제한다: 이름이 다른 상대가 없으면 컴파일 에러, 값이 안 실리면 런타임 실패.
+test "ChromeGeometry의 모든 필드가 view()로 나간다 (comptime 커버리지)" {
+    var buffer: MetalFrameBuffer = .{};
+    defer buffer.deinit(std.testing.allocator);
+
+    // 필드마다 서로 다른 값을 넣어야 "옆 필드를 실었는데 우연히 통과"를 배제할 수 있다.
+    var geometry: ChromeGeometry = .{};
+    inline for (@typeInfo(ChromeGeometry).@"struct".fields, 0..) |field, i| {
+        if (!@hasField(MetalFrame, field.name)) {
+            @compileError("ChromeGeometry." ++ field.name ++ "에 대응하는 MetalFrame 필드가 없다 — view()가 실을 수 없다");
+        }
+        @field(geometry, field.name) = @as(u32, @intCast((i + 1) * 7));
+    }
+    buffer.stampChromeGeometry(geometry);
+
+    const frame = buffer.view();
+    inline for (@typeInfo(ChromeGeometry).@"struct".fields) |field| {
+        try std.testing.expectEqual(@field(geometry, field.name), @field(frame, field.name));
+    }
 }

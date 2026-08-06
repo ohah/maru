@@ -4,6 +4,7 @@
 //! It never asks a platform for glyph positions, so the backend remains a one-way ChromeDraw lowerer.
 
 const std = @import("std");
+const icons = @import("../../../icons.zig");
 const badge = @import("../../ui/badge.zig");
 const draw = @import("../../draw.zig");
 const tokens = @import("../../tokens.zig");
@@ -21,13 +22,13 @@ const types = @import("types.zig");
 // cannot promise the size or optical centre of a Chrome header affordance.
 // Dock controls use component-specific coverage glyphs: all occupy the standard two-cell
 // icon slot, while their tighter SVG view boxes keep their optical size consistent with cards.
-const refresh_icon = "\u{F0021}";
-const search_icon = "\u{F0022}";
-const chevron_down_icon = "\u{F0023}";
-const chevron_right_icon = "\u{F0024}";
-const host_icon = "\u{F0025}";
-const resume_icon = "\u{F000C}";
-const reveal_icon = "\u{F0011}";
+const refresh_icon = icons.utf8(.session_dock_refresh);
+const search_icon = icons.utf8(.session_dock_search);
+const chevron_down_icon = icons.utf8(.session_dock_chevron_down);
+const chevron_right_icon = icons.utf8(.session_dock_chevron_right);
+const host_icon = icons.utf8(.session_dock_host);
+const resume_icon = icons.utf8(.recent);
+const reveal_icon = icons.utf8(.document);
 const host_label = "로컬";
 
 pub const Buffers = struct {
@@ -666,8 +667,16 @@ fn effectiveScale(scale_milli: u32) u32 {
 }
 
 fn isSessionDockIcon(codepoint: u21) bool {
-    return switch (codepoint) {
-        0xF000C, 0xF0011, 0xF0021, 0xF0022, 0xF0023, 0xF0024, 0xF0025 => true,
+    const icon = icons.fromCodepoint(codepoint) orelse return false;
+    return switch (icon) {
+        .recent,
+        .document,
+        .session_dock_refresh,
+        .session_dock_search,
+        .session_dock_chevron_down,
+        .session_dock_chevron_right,
+        .session_dock_host,
+        => true,
         else => false,
     };
 }
@@ -759,11 +768,11 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
             switch (text.placement) {
                 .icon_in_rect => |icon| {
                     try std.testing.expectEqual(@as(?u32, icon.content_rect.w), text.max_width_px);
-                    if (icon.icon_codepoint == 0xF0021) refresh_placement = text.placement;
-                    if (icon.icon_codepoint == 0xF0022) search_placement = text.placement;
+                    if (icon.icon_codepoint == icons.codepoint(.session_dock_refresh)) refresh_placement = text.placement;
+                    if (icon.icon_codepoint == icons.codepoint(.session_dock_search)) search_placement = text.placement;
                     // 카드의 disclosure도 같은 chevron codepoint를 같은 `icon_in_rect` 경로로 낸다.
                     // 목록에서 group이 먼저 나오므로 첫 매칭만 잡아 그룹 것을 본다.
-                    if (icon.icon_codepoint == 0xF0023 and group_chevron_placement == null) {
+                    if (icon.icon_codepoint == icons.codepoint(.session_dock_chevron_down) and group_chevron_placement == null) {
                         saw_group_chevron = true;
                         group_chevron_placement = text.placement;
                     }
@@ -802,7 +811,7 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
             saw_search_icon = true;
             const search_rect = find(frame.tree, build.NodeIds.search) orelse return error.TestUnexpectedResult;
             const button = types.ButtonMetrics.resolve(props.scale_milli);
-            try std.testing.expectEqual(@as(u21, 0xF0022), icon.icon_codepoint);
+            try std.testing.expectEqual(icons.codepoint(.session_dock_search), icon.icon_codepoint);
             try std.testing.expectEqual(button.leading_icon_extent_px, icon.content_rect.w);
             try std.testing.expectEqual(
                 @as(i32, @intFromFloat(@floor(search_rect.rect.x + @as(f32, @floatFromInt(button.content_inset_x_px))))),
@@ -829,7 +838,7 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
     const metrics = types.DockMetrics.resolve(props.scale_milli);
     switch (host_label_placement orelse return error.TestUnexpectedResult) {
         .leading_icon_group => |group| {
-            try std.testing.expectEqual(@as(u21, 0xF0025), group.icon_codepoint);
+            try std.testing.expectEqual(icons.codepoint(.session_dock_host), group.icon_codepoint);
             try std.testing.expectEqual(@as(u16, @intCast(metrics.header_host_icon_extent)), group.icon_extent_px);
             try std.testing.expectEqual(@as(u16, @intCast(metrics.header_host_icon_gap)), group.gap_px);
             try std.testing.expectEqual(metrics.header_host_label_w, group.content_rect.w);
@@ -845,7 +854,7 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
     const header = find(frame.tree, build.NodeIds.header) orelse return error.TestUnexpectedResult;
     switch (refresh_placement orelse return error.TestUnexpectedResult) {
         .icon_in_rect => |icon| {
-            try std.testing.expectEqual(@as(u21, 0xF0021), icon.icon_codepoint);
+            try std.testing.expectEqual(icons.codepoint(.session_dock_refresh), icon.icon_codepoint);
             try std.testing.expectEqual(metrics.header_refresh_extent, icon.content_rect.w);
             const expected_refresh_x: i32 = @intFromFloat(@floor(header.rect.x + header.rect.width - @as(f32, @floatFromInt(metrics.header_trailing_inset + metrics.header_refresh_extent))));
             try std.testing.expectEqual(expected_refresh_x, icon.content_rect.x);
@@ -877,7 +886,7 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
     for (loading_out.ops) |op| switch (op) {
         .text => |text| switch (text.placement) {
             .icon_in_rect => |icon| {
-                if (icon.icon_codepoint == 0xF0021) loading_refresh = text.placement;
+                if (icon.icon_codepoint == icons.codepoint(.session_dock_refresh)) loading_refresh = text.placement;
             },
             else => {},
         },
@@ -1139,7 +1148,7 @@ test "SessionDock keeps its action label when the expansion cannot fit the viewp
     try std.testing.expect(resume_label != null);
     try std.testing.expect(reveal_label);
     switch (resume_label.?) {
-        .leading_icon_group => |group| try std.testing.expectEqual(@as(u21, 0xF000C), group.icon_codepoint),
+        .leading_icon_group => |group| try std.testing.expectEqual(icons.codepoint(.recent), group.icon_codepoint),
         else => return error.TestUnexpectedResult,
     }
 }
@@ -1420,7 +1429,7 @@ test "SessionDock action declares one worker-measured SVG icon and Korean label 
     try std.testing.expectEqual(expected_content_width - button.leading_icon_extent_px - button.leading_icon_gap_px, label_max_width orelse return error.TestUnexpectedResult);
     switch (label_placement orelse return error.TestUnexpectedResult) {
         .leading_icon_group => |group| {
-            try std.testing.expectEqual(@as(u21, 0xF000C), group.icon_codepoint);
+            try std.testing.expectEqual(icons.codepoint(.recent), group.icon_codepoint);
             try std.testing.expectEqual(@as(u16, @intCast(button.leading_icon_extent_px)), group.icon_extent_px);
             try std.testing.expectEqual(@as(u16, @intCast(button.leading_icon_gap_px)), group.gap_px);
             try std.testing.expectEqual(expected_content_width, group.content_rect.w);
@@ -1545,7 +1554,7 @@ test "SessionDock card text budget never reaches the disclosure chevron slot" {
     for (out.ops) |op| switch (op) {
         .text => |text| switch (text.placement) {
             .icon_in_rect => |icon| {
-                if (icon.icon_codepoint == 0xF0023 and chevron == null) chevron = icon.content_rect;
+                if (icon.icon_codepoint == icons.codepoint(.session_dock_chevron_down) and chevron == null) chevron = icon.content_rect;
             },
             else => {},
         },

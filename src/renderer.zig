@@ -141,6 +141,7 @@ pub fn synthesizeGlyph(cp: u32, width_px: u32, height_px: u32, bytes_per_row: us
 
 test "isSynthesizedCodepoint: 각 합성 범위 대표 + 비합성 대조" {
     const std = @import("std");
+    const icons = @import("icons.zig");
     // 각 모듈 범위에서 하나씩(C 게이트 maru_is_synthesized_glyph와 같은 집합이어야 한다).
     for ([_]u32{
         0x2588, // block █
@@ -153,8 +154,10 @@ test "isSynthesizedCodepoint: 각 합성 범위 대표 + 비합성 대조" {
         0x1FB3C, 0x1FB67, // smooth mosaic
         0x1FB68, 0x1FB6F, 0x1FB9A, 0x1FB9B, // wedge·bowtie
         0x25E2, 0x1FB9C, // corner 삼각형·음영
-        0x1FB98, 0x1FBA0, 0x1FBAE, 0x1FBD0, 0x1FBDF, // 대각 hatch·stroke
-        0xF0001, 0xF0009, 0xF000A, // 등록 maru 아이콘(git_branch·octocat·folder) — 합성
+        0x1FB98,                      0x1FBA0,                       0x1FBAE,                  0x1FBD0, 0x1FBDF, // 대각 hatch·stroke
+        // 등록 maru 아이콘(git_branch·octocat·folder) — 합성. 이름 registry(src/icons.zig)에서 가져와
+        // 자산이 재배치돼도 이 회귀 테스트가 실제 등록 cp를 본다.
+        icons.codepoint(.git_branch), icons.codepoint(.mark_github), icons.codepoint(.folder),
     }) |cp| {
         try std.testing.expect(isSynthesizedCodepoint(cp));
     }

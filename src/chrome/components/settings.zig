@@ -11,6 +11,7 @@
 //! 으로 필터해 폼 주입) + 우측 폼(선택 섹션 필드, 길면 스크롤 윈도잉) — config-gui §4·§6.5. 폼 검색은 후속.
 
 const std = @import("std");
+const icons = @import("../../icons.zig");
 const draw = @import("../draw.zig");
 const tokens = @import("../tokens.zig");
 const props = @import("../props.zig");
@@ -549,8 +550,8 @@ const title_text = "Settings";
 /// **codepoint(u21)**: platform `placeText`가 chrome 오버레이 텍스트에서 **이 cp만** width-2(~16px)로 넓힌다 —
 /// 등록 아이콘 전체(git_branch 등 Nerd Fonts MDI 겹침 범위)를 넓히면 사용자 config 값에 그런 PUA가 들어올 때
 /// displayCols(=1칸)와 어긋나 caret/truncate가 오정렬되므로, 리셋 어포던스 cp 하나로 한정한다(리뷰).
-pub const reset_glyph_cp: u21 = 0xF000B;
-pub const reset_glyph = "\u{F000B}"; // reset_glyph_cp의 UTF-8(폼 행 ↺·네비 "초기화" 라벨 공용)
+pub const reset_glyph_cp: u21 = icons.codepoint(.reset);
+pub const reset_glyph = icons.utf8(.reset); // reset_glyph_cp의 UTF-8(폼 행 ↺·네비 "초기화" 라벨 공용)
 comptime {
     // reset_glyph 문자열이 reset_glyph_cp와 같은 코드포인트인지 못박는다(어긋나면 placeText가 안 넓힘).
     std.debug.assert((std.unicode.utf8Decode(reset_glyph) catch 0) == reset_glyph_cp);

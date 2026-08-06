@@ -1897,9 +1897,22 @@ pub fn build(b: *std.Build) void {
     const run_chrome_text_boundary_tests = b.addRunArtifact(chrome_text_boundary_tests);
     run_chrome_text_boundary_tests.setCwd(b.path("."));
 
+    // 아이콘 이름 규율(IC2) — 등록 아이콘을 codepoint 리터럴(`0xF0023`·`"\u{F0023}"`)로 부르면 어느 그림인지
+    // 안 읽히고 자산 재배치 때 조용히 폰트 폴백으로 빠진다(docs/chrome-strategy.md §9.7). 같은 결의 소스 스캔.
+    const icon_literal_boundary_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/boundary/icon_literals.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_icon_literal_boundary_tests = b.addRunArtifact(icon_literal_boundary_tests);
+    run_icon_literal_boundary_tests.setCwd(b.path("."));
+
     const boundary_step = b.step("check-boundaries", "Check facade import boundaries");
     boundary_step.dependOn(&run_boundary_tests.step);
     boundary_step.dependOn(&run_chrome_text_boundary_tests.step);
+    boundary_step.dependOn(&run_icon_literal_boundary_tests.step);
 
     // config 문서 → 실제 키 드리프트 가드. schema.zig의 doc-drift 가드가 "스키마 키가 표에 있는가"(정방향)를 막는 반면,
     // 이쪽은 "문서가 광고하는 키가 실재하는가"(역방향)를 막는다 — 문서만 보고 config에 적었는데 조용히 무시되던

@@ -2,6 +2,7 @@ const std = @import("std");
 const maru = @import("maru");
 const app = maru.app;
 const config = maru.config;
+const icons = maru.icons; // 등록 chrome 아이콘 이름↔PUA codepoint(생성물) — codepoint 리터럴 대신 이름으로 고른다
 const renderer = maru.renderer;
 const terminal = maru.terminal;
 const tabbar = maru.chrome.components.tabbar; // C4b-4: 탭 셀 경계 단일 소스(제목·✕가 hit-test·밴드와 같은 분할)
@@ -999,7 +1000,7 @@ pub fn buildDockScmDrawList(
 
     // ── 브랜치 헤더. 아이콘 + 브랜치 이름 + (upstream 대비) ahead/behind. upstream이 없으면 그 자리를 비운다.
     if (rows > 0 and cols > inset + 2) {
-        try cells.append(allocator, .{ .row = 0, .col = inset, .codepoint = 0xF0001, .width = 2, .style = .{ .foreground = muted } });
+        try cells.append(allocator, .{ .row = 0, .col = inset, .codepoint = icons.codepoint(.git_branch), .width = 2, .style = .{ .foreground = muted } });
         var tail_buf: [32]u8 = undefined;
         var tail: []const u8 = "";
         if (head.has_ab) {
@@ -1213,7 +1214,7 @@ pub fn buildFileTreeDrawList(
 pub fn buildFileDockToggleDrawList(allocator: std.mem.Allocator, fg: terminal.Color) !renderer.DrawList {
     const cells = try allocator.alloc(renderer.DrawCell, 1);
     errdefer allocator.free(cells);
-    cells[0] = .{ .row = 0, .col = 0, .codepoint = 0xF0006, .width = 1, .style = .{ .foreground = fg } }; // maru PUA 아이콘(sidebar-collapse ◧) — 렌더러가 이 codepoint를 1.7× 확대(app_session §20073, dest=.dock_toggle 게이트). 작은 Unicode 0x25E7 대신 써 왼쪽 헤더 아이콘과 동일 크기. col 0 단일 셀 — 호출부가 origin_x 반칸 밀어 rect 중앙 정렬.
+    cells[0] = .{ .row = 0, .col = 0, .codepoint = icons.codepoint(.sidebar), .width = 1, .style = .{ .foreground = fg } }; // maru PUA 아이콘(sidebar-collapse ◧) — 렌더러가 이 codepoint를 1.7× 확대(app_session §20073, dest=.dock_toggle 게이트). 작은 Unicode 0x25E7 대신 써 왼쪽 헤더 아이콘과 동일 크기. col 0 단일 셀 — 호출부가 origin_x 반칸 밀어 rect 중앙 정렬.
     return .{
         .size = .{ .cols = 1, .rows = 1 },
         .cursor = .{ .row = 0, .col = 0, .visible = false },
@@ -1773,14 +1774,14 @@ test "buildSidebarDrawList agent icon: centered at col 0 independent of lines; t
     const names = [_][]const u8{"maru"};
     const branches = [_][]const u8{"\u{251C} main"};
     const paths = [_][]const u8{"~/dev/maru"};
-    const agents = [_]u21{0xF0007}; // claude ✶
+    const agents = [_]u21{icons.codepoint(.sparkle)}; // claude ✶
     var dl = try buildSidebarDrawList(allocator, &names, &branches, &paths, &[_][]const u8{}, &agents, &[_]bool{}, 30, .default, &.{}, &.{}, null, null, .default, null);
     defer dl.deinit(allocator);
 
     // 아이콘 ✶: 슬롯 세로 중앙(count=1, idx0) col 0·width 2 — 3줄 블록(count=3)과 무관한 독립 위치.
     var icon_centered = false;
     for (dl.cells) |c| {
-        if (c.codepoint == 0xF0007) {
+        if (c.codepoint == icons.codepoint(.sparkle)) {
             try std.testing.expectEqual(sidebarGlyphRow(0, 0, 1), c.row);
             try std.testing.expectEqual(@as(u16, 0), c.col);
             try std.testing.expect(c.width == 2); // 2칸 아이콘(또렷) — 회귀 방지
@@ -1805,8 +1806,8 @@ test "buildSidebarDrawList agent icon: centered at col 0 independent of lines; t
 test "buildSidebarDrawList inline icons (octocat·folder PUA) render width 2 and offset following text" {
     const allocator = std.testing.allocator;
     const names = [_][]const u8{"maru"};
-    const branches = [_][]const u8{"\u{F0009} main"}; // octocat + 공백 + 브랜치
-    const paths = [_][]const u8{"\u{F000A} ~/dev"}; // folder + 공백 + 경로
+    const branches = [_][]const u8{comptime icons.utf8(.mark_github) ++ " main"}; // octocat + 공백 + 브랜치
+    const paths = [_][]const u8{comptime icons.utf8(.folder) ++ " ~/dev"}; // folder + 공백 + 경로
     var dl = try buildSidebarDrawList(allocator, &names, &branches, &paths, &[_][]const u8{}, &[_]u21{}, &[_]bool{}, 20, .default, &.{}, &.{}, null, null, .default, null);
     defer dl.deinit(allocator);
 
@@ -1816,12 +1817,12 @@ test "buildSidebarDrawList inline icons (octocat·folder PUA) render width 2 and
     var branch_text_at3 = false;
     var path_text_at3 = false;
     for (dl.cells) |c| {
-        if (c.codepoint == 0xF0009 and c.row == sidebarGlyphRow(0, 1, 3)) {
+        if (c.codepoint == icons.codepoint(.mark_github) and c.row == sidebarGlyphRow(0, 1, 3)) {
             try std.testing.expectEqual(@as(u16, 0), c.col);
             try std.testing.expectEqual(@as(u2, 2), c.width);
             octocat_w2 = true;
         }
-        if (c.codepoint == 0xF000A and c.row == sidebarGlyphRow(0, 2, 3)) {
+        if (c.codepoint == icons.codepoint(.folder) and c.row == sidebarGlyphRow(0, 2, 3)) {
             try std.testing.expectEqual(@as(u16, 0), c.col);
             try std.testing.expectEqual(@as(u2, 2), c.width);
             folder_w2 = true;
@@ -1845,14 +1846,14 @@ test "buildSidebarDrawList inline icons (octocat·folder PUA) render width 2 and
 // 미등록 범위 codepoint(Nerd Fonts v3가 Plane-15 PUA로 옮긴 MDI 등)는 신뢰 불가 OSC 0/2 제목에 와도 1칸 유지.
 test "wideIconPredicate widens only registered maru icon PUA to width 2" {
     // widen=true(카드 보조줄): 등록 아이콘 2칸.
-    try std.testing.expectEqual(@as(usize, 2), text_layout.displayCols("\u{F0009}", wideIconPredicate(true))); // octocat(등록)
-    try std.testing.expectEqual(@as(usize, 2), text_layout.displayCols("\u{F000A}", wideIconPredicate(true))); // folder(등록)
+    try std.testing.expectEqual(@as(usize, 2), text_layout.displayCols(icons.utf8(.mark_github), wideIconPredicate(true))); // octocat(등록)
+    try std.testing.expectEqual(@as(usize, 2), text_layout.displayCols(icons.utf8(.folder), wideIconPredicate(true))); // folder(등록)
     try std.testing.expectEqual(@as(usize, 1), text_layout.displayCols("\u{F0050}", wideIconPredicate(true))); // 미등록 범위 — 1칸(registered-only)
-    try std.testing.expectEqual(@as(usize, 6), text_layout.displayCols("\u{F0009} abc", wideIconPredicate(true))); // 2 + 공백 + abc(3)
+    try std.testing.expectEqual(@as(usize, 6), text_layout.displayCols(comptime icons.utf8(.mark_github) ++ " abc", wideIconPredicate(true))); // 2 + 공백 + abc(3)
     try std.testing.expectEqual(@as(usize, 3), text_layout.displayCols("abc", wideIconPredicate(true))); // 일반 텍스트 회귀
     // widen=false(탭·OSC·라벨 제목): 등록 아이콘도 1칸 — 터미널 제목이 Nerd Fonts MDI와 겹쳐도 안 어긋남.
-    try std.testing.expectEqual(@as(usize, 1), text_layout.displayCols("\u{F0009}", null)); // octocat이지만 1칸
-    try std.testing.expectEqual(@as(usize, 5), text_layout.displayCols("\u{F0009} abc", null)); // 1 + 공백 + abc(3)
+    try std.testing.expectEqual(@as(usize, 1), text_layout.displayCols(icons.utf8(.mark_github), null)); // octocat이지만 1칸
+    try std.testing.expectEqual(@as(usize, 5), text_layout.displayCols(comptime icons.utf8(.mark_github) ++ " abc", null)); // 1 + 공백 + abc(3)
 }
 
 // 두 생성물 동기 가드: C 셰이핑 게이트 icon_codepoints.h(maru_is_registered_icon_cp)와 Zig 등록 집합
@@ -2667,7 +2668,7 @@ test "file tree icons occupy one cell between disclosure and label without state
     for (dl.cells) |cell| {
         try std.testing.expect(cell.col < 16);
         try std.testing.expectEqual(selected_fg, cell.style.foreground);
-        if (cell.codepoint == 0xF0011) {
+        if (cell.codepoint == icons.codepoint(.document)) {
             saw_icon = true;
             try std.testing.expectEqual(@as(u16, 5), cell.col);
         }
@@ -3058,7 +3059,7 @@ test "buildDockScmDrawList: 브랜치 헤더가 첫 줄이고 접힌 섹션은 �
     defer dl.deinit(allocator);
 
     // 0행: git 아이콘 + 브랜치 이름 + ahead/behind.
-    try std.testing.expect(hasCell(dl.cells, 0, 0xF0001));
+    try std.testing.expect(hasCell(dl.cells, 0, icons.codepoint(.git_branch)));
     try std.testing.expect(hasCell(dl.cells, 0, 'f')); // feat/x
     try std.testing.expect(hasCell(dl.cells, 0, '2')); // ↑2
     // 1행: 섹션 헤더(펼침 표시 v) — 2행: 파일 행(아이콘 + 상태 문자 M).

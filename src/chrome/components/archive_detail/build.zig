@@ -1,5 +1,6 @@
 //! Bounded geometry and opaque action projection for ArchiveSessionDetailPanel.
 
+const icons = @import("../../../icons.zig");
 const tree = @import("../../ui/tree.zig");
 const ui_button = @import("../../ui/button.zig");
 const layout = @import("../../ui/layout.zig");
@@ -35,8 +36,8 @@ pub const NodeIds = struct {
 pub const labels = struct {
     // 두 아이콘은 등록된 Chrome SVG glyph다(recent.svg / document.svg). 지금은 label 문자열의
     // 일부로 그려지며, `leading_icon` 슬롯으로 옮기는 것은 registry 주입 경로가 생기는 후속이다.
-    pub const resume_session = "\u{F000C} 터미널에서 이어하기  ⌘↵";
-    pub const reveal = "\u{F0011} 로그 보기  ⌘L";
+    pub const resume_session = icons.utf8(.recent) ++ " 터미널에서 이어하기  ⌘↵";
+    pub const reveal = icons.utf8(.document) ++ " 로그 보기  ⌘L";
     pub const focus_live = "열린 세션으로 이동";
 };
 

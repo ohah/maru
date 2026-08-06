@@ -4,6 +4,7 @@ const maru = @import("maru");
 
 const app = maru.app;
 const chrome = maru.chrome;
+const icons = maru.icons; // 등록 chrome 아이콘 이름↔PUA codepoint(생성물) — 카드 줄의 브랜치·폴더 glyph
 const config_mod = maru.config;
 const renderer = maru.renderer;
 const terminal = maru.terminal;
@@ -768,7 +769,7 @@ const sidebar_header_height_ratio_milli: u32 = 3000;
 const sidebar_header_row_h_ratio_milli: u32 = 3000;
 // 사이드바 접기/펼치기 토글 아이콘 코드포인트(◧ U+25E7 — 좌측 절반 채운 사각형 = 왼쪽 패널). 헤더 아이콘 줄(펼침)·
 // 접힘 시 좌상단 버튼·.m 확대 분기가 공유하는 단일 출처.
-const sidebar_toggle_codepoint: u21 = 0xF0006; // maru 아이콘 PUA(icon_glyph): sidebar-collapse(◧ 대체). 헤더·접힘 토글 공유.
+const sidebar_toggle_codepoint: u21 = icons.codepoint(.sidebar); // maru 아이콘 PUA(icon_glyph): sidebar-collapse(◧ 대체). 헤더·접힘 토글 공유.
 const header_icon_scale_numerator: u32 = 17;
 const header_icon_scale_denominator: u32 = 10;
 
@@ -1113,7 +1114,7 @@ fn sidebarFolderLine(allocator: std.mem.Allocator, term: *Term) ![]const u8 {
     const path = try sidebarCwdPath(allocator, term);
     defer allocator.free(path);
     if (path.len == 0) return allocator.dupe(u8, "");
-    return std.fmt.allocPrint(allocator, "\u{F000A} {s}", .{path});
+    return std.fmt.allocPrint(allocator, icons.utf8(.folder) ++ " {s}", .{path});
 }
 
 // 순수 레이아웃 기하(layout_math.PaddingPx·gridFromBacking·gridFromRectPx·ptToPx)는 session/layout_math.zig로 이동(b1).
@@ -1879,8 +1880,8 @@ fn agentSymbolCodepoint(kind: AgentKind) u21 {
 fn agentIconCodepoint(kind: AgentKind) u21 {
     return switch (kind) {
         .none => 0,
-        .claude => 0xF0007, // sparkle(✶)
-        .codex => 0xF0008, // diamond(◆)
+        .claude => icons.codepoint(.sparkle), // sparkle(✶)
+        .codex => icons.codepoint(.diamond), // diamond(◆)
     };
 }
 
@@ -32071,14 +32072,14 @@ pub const AppSession = struct {
         if (path.len == 0) return self.allocator.dupe(u8, "");
         const leaf = std.fs.path.basename(path);
         const folder: []const u8 = if (leaf.len > 0) leaf else path;
-        return std.fmt.allocPrint(self.allocator, "{s}  \u{F000A} {s}", .{ indent, folder });
+        return std.fmt.allocPrint(self.allocator, "{s}  " ++ icons.utf8(.folder) ++ " {s}", .{ indent, folder });
     }
 
     /// 에이전트 행 **브랜치 줄**(owned) — git repo 안일 때만(카드 보조줄과 같은 규칙). **폴더와 같은 줄에 합치지
     /// 않는다**: 사이드바 폭에서 둘을 한 줄에 넣으면 브랜치가 잘린다(사용자 실측 피드백 — 설계의 "이어 붙인다"를 정정).
     fn agentRowBranchOwned(self: *AppSession, term: *Term, indent: []const u8) ![]const u8 {
         const branch = self.termGitBranch(term) orelse return self.allocator.dupe(u8, "");
-        return std.fmt.allocPrint(self.allocator, "{s}  \u{F0009} {s}", .{ indent, branch });
+        return std.fmt.allocPrint(self.allocator, "{s}  " ++ icons.utf8(.mark_github) ++ " {s}", .{ indent, branch });
     }
 
     fn agentStatusLine(self: *AppSession, term: *Term) ![]const u8 {
@@ -32178,7 +32179,9 @@ pub const AppSession = struct {
                 // 경로를 이미 타므로, slot만 1.7×로 키우면 1.7× quad에 1:1로 들어가 선명해진다. '+'(U+002B)는
                 // 터미널 콘텐츠에도 흔해 center_symbol에 넣으면 전역 '+'가 슬롯을 꽉 채워 굵어지는 회귀라,
                 // 헤더 전용 cover-fit 신호가 필요한 별도 작업으로 둔다.
-                if (g.codepoint == 0xF0002 or g.codepoint == 0xF0003 or g.codepoint == 0xF0005 or g.codepoint == 0xF0006) {
+                if (g.codepoint == icons.codepoint(.gear) or g.codepoint == icons.codepoint(.plus) or
+                    g.codepoint == icons.codepoint(.bell) or g.codepoint == icons.codepoint(.sidebar))
+                {
                     g.cache_key.raster_width_px = rw;
                     g.cache_key.raster_height_px = rh;
                 }
@@ -33553,7 +33556,7 @@ pub const AppSession = struct {
                 // 폭은 wideIconPredicate가 PUA를 **2칸(~16px)** 렌더해 width-1(~8px)일 때 동그란 링처럼 뭉개지던 걸 키웠다 —
                 // 폴더줄(0xF000A)·에이전트 gutter 아이콘과 같은 크기로 통일(사용자 피드백 "깃 아이콘이 너무 작다").
                 // 각 보조줄은 **비어있지 않을 때만** indent를 붙인다(빈 줄은 그대로 "" — 카드 줄 수 계산 정합).
-                try branch_lines.append(self.allocator, if (show_branch) (if (branch) |b| try std.fmt.allocPrint(self.allocator, "{s}\u{F0009} {s}", .{ indent, b }) else try self.allocator.dupe(u8, "")) else try self.allocator.dupe(u8, ""));
+                try branch_lines.append(self.allocator, if (show_branch) (if (branch) |b| try std.fmt.allocPrint(self.allocator, "{s}" ++ icons.utf8(.mark_github) ++ " {s}", .{ indent, b }) else try self.allocator.dupe(u8, "")) else try self.allocator.dupe(u8, ""));
                 try path_lines.append(self.allocator, if (show_folder and branch != null) blk: {
                     const fl = try sidebarFolderLine(self.allocator, term);
                     if (indent.len == 0 or fl.len == 0) break :blk fl; // depth 0 or 빈 줄 — 그대로(빈 줄에 공백 붙이면 4번째 줄이 생긴다)
@@ -33585,7 +33588,7 @@ pub const AppSession = struct {
         // 슬롯(탭)별 kind·running은 위 조립 루프가 카드당 1회 스캔해 담은 `card_kinds`/`card_running`을 **그대로 재사용**한다
         // (표시 슬롯 = 배열 인덱스) — 셀·슬롯마다 tabAgentKind/tabHasRunningAgent(O(panes×terms))를 다시 안 돌린다(code-review high).
         for (draw_list.cells) |*c| {
-            const is_icon = c.col == 0 and (c.codepoint == 0xF0007 or c.codepoint == 0xF0008); // ✶ claude / ◆ codex
+            const is_icon = c.col == 0 and (c.codepoint == icons.codepoint(.sparkle) or c.codepoint == icons.codepoint(.diamond)); // ✶ claude / ◆ codex
             // 셀 row에서 표시 슬롯 인덱스를 디코드(row=slot*sidebar_line_base+줄offset, 줄offset<base라 아이콘/스피너 같은 슬롯).
             const slot = c.row / coretext_frame_builder.sidebar_line_base; // = card_kinds/card_running 인덱스(조립 순서와 동일)
             if (slot >= card_kinds.items.len) continue;
@@ -33719,7 +33722,7 @@ pub const AppSession = struct {
     /// "9+" 2칸(`bell_col-2`·`bell_col-1`). 종 색은 fg(sidebar_foreground), 배지는 coral. 호출처가 폭을 보장해
     /// (펼침 cols≥13 → bell_col=cols-11≥2, 접힘 bell_col≥5) `bell_col-2` saturating은 실제로 안 닿는다(방어).
     fn appendBellAndBadge(self: *AppSession, cells: *std.ArrayList(renderer.DrawCell), bell_col: u16, fg: terminal.Color, round_badge: bool) !void {
-        try cells.append(self.allocator, .{ .row = 0, .col = bell_col, .codepoint = 0xF0005, .width = 2, .style = .{ .foreground = fg } });
+        try cells.append(self.allocator, .{ .row = 0, .col = bell_col, .codepoint = icons.codepoint(.bell), .width = 2, .style = .{ .foreground = fg } });
         if (self.notification_unread == 0) return;
         if (round_badge) {
             // 펼침 헤더: 종 **우상단** 빨강 원형 배지(iOS/macOS식). 빨강 원은 GPU quad(appendNotificationBadge, layer 4 —
@@ -33826,12 +33829,12 @@ pub const AppSession = struct {
         const sb_icon = chrome.components.sidebar;
         try self.appendBellAndBadge(&cells, cols - 12, fg, true); // 펼침: 종(cols-12) 우상단 원형 배지(흰 숫자 cols-10 + 빨강 원 quad)
         try cells.append(self.allocator, .{ .row = 0, .col = @intCast(sb_icon.headerIconCol(.toggle_sidebar, cols)), .codepoint = sidebar_toggle_codepoint, .style = .{ .foreground = fg } });
-        try cells.append(self.allocator, .{ .row = 0, .col = @intCast(sb_icon.headerIconCol(.view_options, cols)), .codepoint = 0xF0002, .style = .{ .foreground = fg } });
-        try cells.append(self.allocator, .{ .row = 0, .col = @intCast(sb_icon.headerIconCol(.new_workspace, cols)), .codepoint = 0xF0003, .style = .{ .foreground = fg } });
+        try cells.append(self.allocator, .{ .row = 0, .col = @intCast(sb_icon.headerIconCol(.view_options, cols)), .codepoint = icons.codepoint(.gear), .style = .{ .foreground = fg } });
+        try cells.append(self.allocator, .{ .row = 0, .col = @intCast(sb_icon.headerIconCol(.new_workspace, cols)), .codepoint = icons.codepoint(.plus), .style = .{ .foreground = fg } });
         // 검색 줄: 🔍(EAW 2칸) + 입력 텍스트(query+preedit, EAW 한글 2칸), 비면 placeholder "Search"(muted).
         // 검색어는 blur(비활성)돼도 보존해 그대로 그린다 — 다시 클릭해 이어서 편집·필터(초안 보존). preedit은 활성일
         // 때만 존재. caret/IME 후보창은 sidebarSearchCaretRect가 잡는다(활성일 때만).
-        try cells.append(self.allocator, .{ .row = search_row, .col = sidebar_search_icon_col, .codepoint = 0xF0004, .width = 2, .style = .{ .foreground = muted } });
+        try cells.append(self.allocator, .{ .row = search_row, .col = sidebar_search_icon_col, .codepoint = icons.codepoint(.search), .width = 2, .style = .{ .foreground = muted } });
         const max_col = cols -| 4; // 우측 아이콘 영역 침범 방지
         const has_text = self.sidebar_search_input.query.items.len > 0 or self.sidebar_search_input.preedit.items.len > 0;
         var caret_col: u16 = sidebar_search_text_col; // 빈 검색이면 입력 시작점에 caret
@@ -35778,8 +35781,8 @@ test "classifyAgent: claude/codex 부분일치(대소문자 무시), 그 외·nu
     try std.testing.expectEqual(@as(u21, 0), agentSymbolCodepoint(.none));
     try std.testing.expectEqual(@as(u21, 0x2736), agentSymbolCodepoint(.claude)); // 알림용 실제 ✶
     try std.testing.expectEqual(@as(u21, 0x25C6), agentSymbolCodepoint(.codex)); // 알림용 실제 ◆
-    try std.testing.expectEqual(@as(u21, 0xF0007), agentIconCodepoint(.claude)); // 사이드바 PUA sparkle
-    try std.testing.expectEqual(@as(u21, 0xF0008), agentIconCodepoint(.codex)); // 사이드바 PUA diamond
+    try std.testing.expectEqual(icons.codepoint(.sparkle), agentIconCodepoint(.claude)); // 사이드바 PUA sparkle
+    try std.testing.expectEqual(icons.codepoint(.diamond), agentIconCodepoint(.codex)); // 사이드바 PUA diamond
 }
 
 test "classifyAgentProcesses: login/shell leader를 건너뛰고 같은 foreground group의 agent를 찾는다" {
@@ -46902,7 +46905,7 @@ test "buildSidebarTitleFrame: 에이전트 심볼(✶/◆) prefix여도 프레�
     // 사이드바 텍스트 전부 사라짐). 시프트 후 size.cols를 full_cols로 넓혀 수용하는지 고정 — 실 앱에서 못 봤던 버그.
     {
         const names = [_][]const u8{"\u{2733} maru"};
-        const branches = [_][]const u8{"\u{F0009} main"};
+        const branches = [_][]const u8{comptime icons.utf8(.mark_github) ++ " main"};
         const paths = [_][]const u8{"~/documents/workspace/maru"}; // 길어 좁은 폭을 꽉 채움 → 시프트 시 overflow
         const muted: terminal.Color = .{ .rgb = session.appearance.theme.sidebar_foreground };
         const sidebar_cols: u16 = 12;
@@ -49662,7 +49665,7 @@ test "empty file dock launcher presents explorer and empty content requests the 
     _ = try session.tick();
     var saw_launcher = false;
     for (session.metal_buffer.cells) |cell| {
-        if (cell.codepoint == 0xF0006 and cell.reserved == metal_frame.native_cell_role_dock_toggle and
+        if (cell.codepoint == icons.codepoint(.sidebar) and cell.reserved == metal_frame.native_cell_role_dock_toggle and
             cell.origin_x >= launcher.x and cell.origin_x < launcher.x + launcher.w and
             cell.origin_y < session.titlebar_strip_px)
         {
@@ -51426,7 +51429,7 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     const dock_toggle = session.filePanelDockControlRect().?; // 팽창 상태에도 표시(일원화).
     for (session.metal_buffer.cells) |cell| {
         // 파일 도크 컨트롤 ◧(maru PUA 0xF0006, 렌더러가 1.7× 확대)는 탭바가 아니라 titlebar 띠 우측 끝(filePanelDockControlRect)에 세로 중앙 렌더된다.
-        if (cell.codepoint == 0xF0006 and
+        if (cell.codepoint == icons.codepoint(.sidebar) and
             cell.origin_x >= dock_toggle.x and cell.origin_x < dock_toggle.x + dock_toggle.w and
             cell.origin_y < session.titlebar_strip_px)
         {

@@ -5,6 +5,7 @@
 //! session. The later host slice is solely responsible for resolving the opaque actions.
 
 const std = @import("std");
+const icons = @import("../../../icons.zig");
 const draw = @import("../../draw.zig");
 const tokens = @import("../../tokens.zig");
 const text_layout = @import("../../text_layout.zig");
@@ -29,7 +30,7 @@ const types = @import("types.zig");
 // 필요하지 않다. 지금 미리 실으면 소비자 없는 필드가 하나 더 늘 뿐이라(같은 이유로 `leading_icon`이
 // 한동안 `visualFor`에서 누락된 채 지나갔다), **첫 accessibility descriptor 소비자가 생기는 PR**이
 // 그 이동을 함께 가져온다(§9의 consumer 완료 조건).
-const resume_icon = "\u{F000C}"; // recent.svg: continue an existing conversation
+const resume_icon = icons.utf8(.recent); // recent.svg: continue an existing conversation
 
 pub const Buffers = struct {
     ops: []draw.Op,
@@ -233,7 +234,7 @@ const Writer = struct {
 /// truncation, centering and lowering. The platform renderer independently rejects unregistered
 /// PUA codepoints before rasterization.
 fn isDetailIcon(codepoint: u21) bool {
-    return codepoint == 0xF000C or codepoint == 0xF0011;
+    return codepoint == icons.codepoint(.recent) or codepoint == icons.codepoint(.document);
 }
 
 fn find(snapshot: tree.UiRectTree, id: tree.UiId) ?tree.RectEntry {
@@ -287,7 +288,7 @@ test "archive detail view renders only redacted turn DTOs and exact action label
         .provider = .claude,
         .title = "문서 확인",
         .metadata = "메시지 3개 · 방금 전",
-        .turns = &.{ .{ .role = .user, .text = "문서에 남은 작업을 알려주세요 \u{F000C}" }, .{ .role = .assistant, .text = "요약된 안전한 최근 대화입니다" } },
+        .turns = &.{ .{ .role = .user, .text = comptime "문서에 남은 작업을 알려주세요 " ++ icons.utf8(.recent) }, .{ .role = .assistant, .text = "요약된 안전한 최근 대화입니다" } },
         .action_record_count = 2,
         .resume_enabled = true,
         .reveal_enabled = true,

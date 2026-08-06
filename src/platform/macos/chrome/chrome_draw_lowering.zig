@@ -8,6 +8,7 @@
 const std = @import("std");
 const maru = @import("maru");
 const chrome = maru.chrome;
+const icons = maru.icons; // 등록 chrome 아이콘 이름↔PUA codepoint(생성물)
 const renderer = maru.renderer;
 const terminal = maru.terminal;
 const metal_frame = renderer.metal_frame;
@@ -471,7 +472,7 @@ test "Chrome draw lowering widens only explicitly owned registered SVG icons" {
         .cursor = .{ .r = 22, .g = 23, .b = 24 },
         .accent = .{ .r = 25, .g = 26, .b = 27 },
     });
-    const runs = [_]chrome.draw.Run{.{ .text = "\u{F000C}" }};
+    const runs = [_]chrome.draw.Run{.{ .text = icons.utf8(.recent) }};
     const wide_ops = [_]chrome.draw.Op{.{ .text = .{ .origin = .{ .x = 0, .y = 0 }, .runs = &runs, .role = .surface_fg, .wide_icons = true } }};
     var wide = try buildTextDrawList(std.testing.allocator, &wide_ops, &tk, 8, 16, 4, 1);
     defer wide.deinit(std.testing.allocator);
@@ -499,12 +500,12 @@ test "icon-only lowering excludes ordinary Session Dock text" {
     });
     const ops = [_]chrome.draw.Op{
         .{ .text = .{ .origin = .{ .x = 0, .y = 0 }, .runs = &.{.{ .text = "ordinary" }}, .role = .surface_fg } },
-        .{ .text = .{ .origin = .{ .x = 8, .y = 0 }, .runs = &.{.{ .text = "\u{F000C}" }}, .role = .surface_fg, .wide_icons = true } },
+        .{ .text = .{ .origin = .{ .x = 8, .y = 0 }, .runs = &.{.{ .text = icons.utf8(.recent) }}, .role = .surface_fg, .wide_icons = true } },
     };
     var list = try buildIconTextDrawList(std.testing.allocator, &ops, &tk, 8, 16, 20, 1);
     defer list.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), list.cells.len);
-    try std.testing.expectEqual(@as(u21, 0xF000C), list.cells[0].codepoint);
+    try std.testing.expectEqual(icons.codepoint(.recent), list.cells[0].codepoint);
 }
 
 test "rich text artifact preserves fractional pixel origin instead of coercing it to a cell row" {
@@ -693,8 +694,8 @@ test "rich text fingerprint ignores animated wide icon-only ops" {
         .accent = .{ .r = 25, .g = 26, .b = 27 },
     });
     const text_runs = [_]chrome.draw.Run{.{ .text = "Stable label" }};
-    const spinner_a = [_]chrome.draw.Run{.{ .text = "\u{f0002}" }};
-    const spinner_b = [_]chrome.draw.Run{.{ .text = "\u{f0003}" }};
+    const spinner_a = [_]chrome.draw.Run{.{ .text = icons.utf8(.gear) }};
+    const spinner_b = [_]chrome.draw.Run{.{ .text = icons.utf8(.plus) }};
     const baseline = [_]chrome.draw.Op{
         .{ .text = .{ .origin = .{ .x = 5, .y = 7 }, .runs = &text_runs, .role = .accent_bar } },
         .{ .text = .{ .origin = .{ .x = 30, .y = 7 }, .runs = &spinner_a, .role = .accent_bar, .wide_icons = true } },

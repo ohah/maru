@@ -8,7 +8,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 166u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 167u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -518,6 +518,11 @@ typedef struct MaruAppHostMetalFrame {
     /* B1: final pixel glyph placements for rich Chrome text. NULL/0 keeps old cell-only draw. */
     const MaruAppHostGpuGlyph *gpu_glyphs;
     size_t gpu_glyph_count;
+    /* SB1: 창 바닥 상태표시줄이 예약한 높이(backing px). 렌더러는 사이드바 배경 strip을 이만큼 위에서 끝낸다
+       — strip은 renderer가 높이를 직접 정하는 승인 예외 표면이라(docs/metal-ui-layout.md §5) Zig가 값을 실어
+       주는 것 말고는 바닥을 옮길 방법이 없다. 상태바 자신의 배경·글자는 GpuQuad/GpuGlyph로 온다(이 필드는
+       strip 클리핑 전용). 0=기존 동작(창 바닥까지). 끝에 추가해 기존 offset 불변(ABI v167). */
+    uint32_t status_bar_height_px;
 } MaruAppHostMetalFrame;
 
 uint32_t maru_macos_app_host_abi_version(void);

@@ -153,7 +153,10 @@ bool maru_metal_renderer_draw(
     /* B1 rich Chrome text: pre-shaped/pre-rasterized atlas glyphs at final backing-pixel rects.
        NULL/0 preserves the existing terminal cell path. */
     const MaruAppHostGpuGlyph *gpu_glyphs,
-    size_t gpu_glyph_count
+    size_t gpu_glyph_count,
+    /* SB1: 창 바닥 상태표시줄이 예약한 높이(backing px). 사이드바 배경 strip을 이만큼 위에서 끝낸다.
+       0=기존 동작(창 바닥까지). 끝에 추가해 인자 순서 불변(ABI v167). */
+    uint32_t status_bar_height_px
 );
 
 void maru_metal_renderer_destroy(MaruMetalRenderer *renderer);

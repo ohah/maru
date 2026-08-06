@@ -203,7 +203,7 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 166;
+pub const abi_version: u32 = 167;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -34572,6 +34572,9 @@ pub const AppSession = struct {
             .sidebar_scroll_offset_px = self.sidebar_scroll_offset_px,
             .titlebar_strip_px = self.titlebar_strip_px,
             .divider_thickness_px = self.dividerThicknessPx(),
+            // 상태바 높이는 `dock_layout`이 유일 권위다(S1이 낸 seam) — 여기서 따로 계산하면 작업영역을
+            // 깎은 값과 strip을 자르는 값이 갈릴 수 있다. 지금은 입력이 0이라 항상 0이다(S2b가 뒤집는다).
+            .status_bar_height_px = self.dockGeometry().status_bar.h,
         };
     }
 
@@ -61737,6 +61740,29 @@ test "gpu quad 수명: drop은 자기 레이어만·순서 보존, rebuildSideba
     }
     try std.testing.expect(survived_2);
     try std.testing.expect(survived_3);
+}
+
+// SB1-S2a: 상태바 높이의 **단일 권위는 `dock_layout`**이다. ABI로 나가는 값(사이드바 strip을 자르는 값)과
+// 작업영역을 깎은 값이 갈리면 strip이 상태바를 덮거나 그 위에 틈이 생긴다 — 그래서 스탬프가 `dockGeometry()`
+// 에서 직접 가져온다. 이 조각은 입력이 0이라 결과도 0이지만, 계약은 지금 고정해 둔다.
+test "SB1-S2a: metalFrame의 상태바 높이는 dock_layout 권위와 같다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1000, 700, 1000);
+    _ = try session.tick(); // 기하는 투영 스탬프라 한 번 돌려 확정한다
+
+    try std.testing.expectEqual(session.dockGeometry().status_bar.h, session.metalFrame().status_bar_height_px);
+    try std.testing.expectEqual(@as(u32, 0), session.metalFrame().status_bar_height_px); // S2b가 뒤집는다
 }
 
 // `placement_failed`는 **이번 배치의 결과만** 뜻해야 한다. 부분 투영(chrome-only) 경로도 `placeAndDistribute`를

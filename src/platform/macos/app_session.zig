@@ -32245,23 +32245,21 @@ pub const AppSession = struct {
     /// 투영하고, component가 만든 같은 rect tree를 semantic paint/CoreText/Metal에 함께
     /// 전달한다. 이 함수는 scanner·provider를 호출하지 않으며 매 frame에는 이미 publish된
     /// snapshot만 읽는다. 따라서 느린 JSONL 분석이 메인 render tick을 막지 않는다.
-    fn collectAgentSessionDock(
-        self: *AppSession,
-        collected: *std.ArrayList(CollectedPane),
-        builder: coretext_frame_builder.CoreTextFrameBuilder,
-        colors: metal_frame.CellColors,
-    ) void {
-        if (self.cell_width_px == 0 or self.cell_height_px == 0) return;
-        const content = self.dockGeometry().tree_content;
-        if (content.w == 0 or content.h == 0) return;
+    /// 도크 컴포넌트에 넘길 props를 만드는 **유일한** 자리다. 렌더 경로 안에 리터럴로 두면 테스트가
+    /// 그 구성을 복제하게 되고, 복제본은 host를 판정하지 못한다 — 실제로 가상화 원점을 0으로 바꾸는
+    /// 변이가 복제 기반 테스트를 통과했다.
+    fn agentSessionDockScrollbarMinThumbPx(self: *const AppSession) u32 {
+        return chrome.components.session_dock.types.DockMetrics.resolve(self.agentSessionDockScaleMilli()).scrollbar_min_thumb;
+    }
 
-        var arena_state = std.heap.ArenaAllocator.init(self.allocator);
-        defer arena_state.deinit();
-        const arena = arena_state.allocator();
-        const scroll_projection = self.agentSessionDockScrollProjection();
-        const items = self.buildAgentSessionDockItems(arena, scroll_projection) catch return;
+    fn agentSessionDockProps(
+        self: *const AppSession,
+        content: @FieldType(dock_layout.Geometry, "tree_content"),
+        scroll_projection: chrome.ui.scroll_view.Projection,
+        items: []const chrome.components.session_dock.types.Item,
+    ) chrome.components.session_dock.types.Props {
         const dock_scale_milli = self.agentSessionDockScaleMilli();
-        const props = chrome.components.session_dock.types.Props{
+        return .{
             .viewport_px = .{ .width = @floatFromInt(content.w), .height = @floatFromInt(content.h) },
             .cell_width_px = self.cell_width_px,
             .cell_height_px = self.cell_height_px,
@@ -32298,6 +32296,25 @@ pub const AppSession = struct {
                 null,
             .items = items,
         };
+    }
+
+    fn collectAgentSessionDock(
+        self: *AppSession,
+        collected: *std.ArrayList(CollectedPane),
+        builder: coretext_frame_builder.CoreTextFrameBuilder,
+        colors: metal_frame.CellColors,
+    ) void {
+        if (self.cell_width_px == 0 or self.cell_height_px == 0) return;
+        const content = self.dockGeometry().tree_content;
+        if (content.w == 0 or content.h == 0) return;
+
+        var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        const scroll_projection = self.agentSessionDockScrollProjection();
+        const items = self.buildAgentSessionDockItems(arena, scroll_projection) catch return;
+        const dock_scale_milli = self.agentSessionDockScaleMilli();
+        const props = self.agentSessionDockProps(content, scroll_projection, items);
         var expansion_nodes: usize = 0;
         var expansion_actions: usize = 0;
         var expansion_turns: usize = 0;
@@ -66896,11 +66913,13 @@ test "도크가 스크롤 모듈에 넘기는 항목 높이·간격·개수가 �
 /// 스크롤 좌표가 예약한 높이와 **컴포넌트가 실제로 그린 rect**를 대조한다. 앞의 테스트는 host가
 /// metrics에서 값을 옳게 옮겼는지만 보는데, 그것만으로는 두 출처가 같은 답을 낸다는 보장이 없다 —
 /// 스크롤이 카드 하나를 72px로 예약해도 발행 tree가 80px로 그리면 목록 끝에서 어긋난다.
-fn dockTreeItemHeights(
+const DockTreeItemRect = struct { y: f32, height: u32 };
+
+fn dockTreeItemRects(
     session: *AppSession,
     allocator: std.mem.Allocator,
     projection: chrome.ui.scroll_view.Projection,
-    out: *std.ArrayList(u32),
+    out: *std.ArrayList(DockTreeItemRect),
 ) !void {
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
@@ -66918,18 +66937,9 @@ fn dockTreeItemHeights(
     };
     const node_count = dock_items.len + expansion_nodes + 7;
     const content = session.dockGeometry().tree_content;
-    const frame = try chrome.components.session_dock.build.build(.{
-        .viewport_px = .{ .width = @floatFromInt(content.w), .height = @floatFromInt(content.h) },
-        .cell_width_px = session.cell_width_px,
-        .cell_height_px = session.cell_height_px,
-        .scale_milli = session.agentSessionDockScaleMilli(),
-        .snapshot_generation = session.agent_session_dock_snapshot_generation,
-        .displayed_count = @intCast(dock_items.len),
-        .content_first_item_origin_y_px = projection.first_origin_y_px,
-        .scroll_content_height_px = projection.content_height_px,
-        .scroll_offset_px = projection.offset_y_px,
-        .items = dock_items,
-    }, .{
+    // **제품이 쓰는 그 함수**로 props를 만든다. 여기서 리터럴을 다시 쓰면 host의 구성이 틀려도
+    // 테스트는 자기 복제본만 보게 된다.
+    const frame = try chrome.components.session_dock.build.build(session.agentSessionDockProps(content, projection, dock_items), .{
         .nodes = try arena.alloc(chrome.ui.tree.UiNode, node_count),
         .entries = try arena.alloc(chrome.ui.tree.RectEntry, node_count + 3),
         .layout_items = try arena.alloc(chrome.ui.layout.Item, node_count + 1),
@@ -66938,11 +66948,32 @@ fn dockTreeItemHeights(
         .actions = try arena.alloc(chrome.components.session_dock.ids.Entry, dock_items.len + 7 + expansion_actions),
     });
 
+    // scroll-area의 published rect를 기준으로 삼는다. 도크 위치가 바뀌어도 상대 좌표는 계약이다.
+    const content_index = frame.tree.find(chrome.components.session_dock.build.NodeIds.content) orelse
+        return error.TestUnexpectedResult;
+    const content_y = frame.tree.entries[content_index].rect.y;
+
+    // thumb 길이는 "보이는 비율"이다. host가 스크롤바에 넘기는 목록 전체 높이가 틀리면 이 비율만
+    // 어긋나고 카드 rect는 멀쩡하므로, 항목 대조만으로는 잡히지 않는다(실제로 그 변이가 통과했다).
+    if (frame.tree.find(chrome.components.session_dock.build.NodeIds.scroll_thumb)) |thumb_index| {
+        const track_index = frame.tree.find(chrome.components.session_dock.build.NodeIds.scroll_track).?;
+        const track_h = frame.tree.entries[track_index].rect.height;
+        const thumb_h = frame.tree.entries[thumb_index].rect.height;
+        const visible_ratio = track_h / @as(f32, @floatFromInt(projection.content_height_px));
+        // 최소 두께에 걸리지 않는 목록에서만 비율이 그대로 드러난다.
+        if (thumb_h > @as(f32, @floatFromInt(session.agentSessionDockScrollbarMinThumbPx())))
+            try std.testing.expectApproxEqAbs(visible_ratio, thumb_h / track_h, 0.01);
+    }
+
     out.clearRetainingCapacity();
     for (0..dock_items.len) |index| {
         const node_id = chrome.components.session_dock.build.NodeIds.item(index);
         const entry_index = frame.tree.find(node_id) orelse return error.TestUnexpectedResult;
-        try out.append(allocator, @intFromFloat(@round(frame.tree.entries[entry_index].rect.height)));
+        const rect = frame.tree.entries[entry_index].rect;
+        try out.append(allocator, .{
+            .y = rect.y - content_y,
+            .height = @intFromFloat(@round(rect.height)),
+        });
     }
 }
 
@@ -66953,44 +66984,71 @@ test "스크롤이 예약한 높이가 발행 tree의 카드 rect와 정확히 �
     defer allocator.destroy(session);
     defer session.deinit();
 
-    for (0..3) |index| try appendFixtureArchiveRecordN(session, allocator, index);
-    try appendFixtureArchiveGroup(session, allocator, 3);
+    // 스크롤이 성립해야 "부분적으로 보이는 첫 항목"을 만들 수 있다. 어떤 도크 높이에서도 넘치도록
+    // 넉넉히 넣는다.
+    const card_count = 20;
+    for (0..card_count) |index| try appendFixtureArchiveRecordN(session, allocator, index);
+    try appendFixtureArchiveGroup(session, allocator, card_count);
     try session.agent_session_archive_projection.entries.append(allocator, .{ .group = 0 });
-    for (0..3) |index| try session.agent_session_archive_projection.entries.append(allocator, .{ .card = index });
+    for (0..card_count) |index| try session.agent_session_archive_projection.entries.append(allocator, .{ .card = index });
 
-    var heights: std.ArrayList(u32) = .empty;
-    defer heights.deinit(allocator);
+    var rects: std.ArrayList(DockTreeItemRect) = .empty;
+    defer rects.deinit(allocator);
 
+    // 맨 위에서는 첫 항목이 scroll-area 꼭대기에 정확히 붙는다.
+    try expectDockTreeMatchesScroll(session, allocator, &rects);
+    try std.testing.expectEqual(@as(f32, 0), rects.items[0].y);
+
+    // 목록을 반쯤 스크롤해 첫 항목이 **잘린** 상태를 만든다. 이때 그 항목은 음수 y에서 시작해야
+    // 한다 — 0이면 부분적으로 보여야 할 카드가 통째로 위에 붙어, 스크롤해도 첫 줄이 안 잘린다.
+    const half = session.agentSessionDockScrollProjection().max_offset_px / 2;
+    try std.testing.expect(half > 0);
+    _ = session.agent_session_archive_scroll.setOffsetPx(@intCast(half), std.math.maxInt(u32));
     {
         const projection = session.agentSessionDockScrollProjection();
-        const items = session.agentSessionDockScrollItems();
-        try dockTreeItemHeights(session, allocator, projection, &heights);
-        try std.testing.expect(heights.items.len > 0);
-        // 두 출처가 항목마다 같은 답을 내야 한다. 갈리면 스크롤 끝에서 빈 공간이 남거나 마지막
-        // 카드가 잘린다.
-        for (heights.items, 0..) |drawn, offset| {
-            try std.testing.expectEqual(items.heightPx(projection.first_index + offset), drawn);
-        }
+        try std.testing.expect(projection.first_origin_y_px < 0);
+        try expectDockTreeMatchesScroll(session, allocator, &rects);
+        try std.testing.expectEqual(@as(f32, @floatFromInt(projection.first_origin_y_px)), rects.items[0].y);
     }
+    session.agent_session_archive_scroll.reset();
 
     // 펼침도 같은 대조를 통과해야 한다. 예약과 그림이 갈리는 것이 사용자가 보고한 "펼침메뉴 누르면
     // 뒤로 보인다"의 정확한 형태다(예약은 카드 높이인데 그림은 detail+action까지 차지한다).
     try session.openAgentSessionInlineDetail(&session.agent_session_archive_records.items[0]);
     session.agent_session_archive_selected = 0;
     {
-        const projection = session.agentSessionDockScrollProjection();
         const items = session.agentSessionDockScrollItems();
         try std.testing.expect(items.expanded_index != null);
-        try dockTreeItemHeights(session, allocator, projection, &heights);
-        for (heights.items, 0..) |drawn, offset| {
-            try std.testing.expectEqual(items.heightPx(projection.first_index + offset), drawn);
-        }
+        try expectDockTreeMatchesScroll(session, allocator, &rects);
         // 펼친 항목은 실제로 다른 항목보다 크다 — 전부 같은 높이면 위 비교가 통과해도 무의미하다.
-        const expanded_offset = items.expanded_index.? - projection.first_index;
-        for (heights.items, 0..) |drawn, offset| {
+        const expanded_offset = items.expanded_index.? - session.agentSessionDockScrollProjection().first_index;
+        for (rects.items, 0..) |rect, offset| {
             if (offset == expanded_offset) continue;
-            try std.testing.expect(drawn < heights.items[expanded_offset]);
+            try std.testing.expect(rect.height < rects.items[expanded_offset].height);
         }
+    }
+}
+
+/// 스크롤 좌표계가 예약한 것과 발행 tree가 그린 것을 항목마다 대조한다. 높이뿐 아니라 **시작 y**도
+/// 본다 — 높이만 보면 첫 항목의 음수 원점(부분적으로 보이는 카드)이 사라져도 통과한다.
+fn expectDockTreeMatchesScroll(
+    session: *AppSession,
+    allocator: std.mem.Allocator,
+    rects: *std.ArrayList(DockTreeItemRect),
+) !void {
+    const projection = session.agentSessionDockScrollProjection();
+    const items = session.agentSessionDockScrollItems();
+    try dockTreeItemRects(session, allocator, projection, rects);
+    try std.testing.expect(rects.items.len > 0);
+
+    var expected_y: f32 = @floatFromInt(projection.first_origin_y_px);
+    for (rects.items, 0..) |rect, offset| {
+        const reserved = items.heightPx(projection.first_index + offset);
+        try std.testing.expectEqual(reserved, rect.height);
+        // 예약 높이를 누적한 자리에 그 항목이 실제로 놓여야 한다. 하나라도 어긋나면 그 아래 전부가
+        // 밀린다 — 카드가 겹치거나 목록 끝에 빈 띠가 생기는 것이 그 결과다.
+        try std.testing.expectEqual(expected_y, rect.y);
+        expected_y += @floatFromInt(reserved + items.gap_px);
     }
 }
 

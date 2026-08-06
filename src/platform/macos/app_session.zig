@@ -66877,6 +66877,124 @@ fn dockWheelFixture(allocator: std.mem.Allocator) !*AppSession {
     return session;
 }
 
+/// 실제 발행 경로로 도크 tree를 publish해 스크롤바 기하가 생기게 한다. 기존 드래그 테스트는
+/// `agent_session_dock_scroll_drag`를 직접 세팅해 `beginAgentSessionDockScrollDrag`를 건너뛰었고,
+/// 그래서 down 시점의 계약(track 안인가·thumb인가·잡은 지점·점프 뒤 기하)이 전부 무판정이었다.
+fn publishDockFrameForDrag(session: *AppSession, allocator: std.mem.Allocator) !void {
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const projection = session.agentSessionDockScrollProjection();
+    const items = try session.buildAgentSessionDockItems(arena, projection);
+    const sizes = chrome.components.session_dock.build.bufferSizes(items);
+    const content = session.dockGeometry().tree_content;
+    const frame = try chrome.components.session_dock.build.build(session.agentSessionDockProps(content, projection, items), .{
+        .nodes = try arena.alloc(chrome.ui.tree.UiNode, sizes.nodes),
+        .entries = try arena.alloc(chrome.ui.tree.RectEntry, sizes.entries),
+        .layout_items = try arena.alloc(chrome.ui.layout.Item, sizes.layout_items),
+        .flex_scratch = try arena.alloc(chrome.ui.layout.FlexScratch, sizes.flex_scratch),
+        .child_rects = try arena.alloc(chrome.ui.layout.UiRect, sizes.child_rects),
+        .actions = try arena.alloc(chrome.components.session_dock.ids.Entry, sizes.actions),
+    });
+    session.publishAgentSessionDockFrame(frame, session.agent_session_dock_snapshot_generation);
+}
+
+test "스크롤바 down은 track 안에서만, thumb을 잡은 지점을 유지한 채 시작한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try dockWheelFixture(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    try publishDockFrameForDrag(session, allocator);
+    const bar = session.agentSessionDockScrollbarGeometry() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(bar.max_offset_px > 0);
+    try std.testing.expect(bar.thumb_h < bar.track_h);
+
+    // ① track **밖** down은 드래그가 아니다. 이 판정이 없으면 gutter 바깥 클릭이 스크롤로 샌다.
+    session.beginAgentSessionDockScrollDrag(@as(f64, bar.track_x) - 20, @as(f64, bar.track_y) + 10);
+    try std.testing.expect(session.agent_session_dock_scroll_drag == null);
+
+    // ② thumb 위 down은 **잡기**다 — 점프가 아니다. 목록이 그 자리에서 움직이면 안 되고, 잡은
+    //    지점(grab_dy)이 유지돼야 thumb이 커서로 튀지 않는다.
+    //    thumb **중앙**을 누르면 잡기와 점프가 같은 답을 내므로(중앙에 중앙을 놓는 것) 구분이 안 된다.
+    //    가장자리를 눌러야 둘이 갈린다 — 잡기는 grab_dy가 거의 0이고 목록이 그대로지만, 점프면
+    //    grab_dy가 thumb 절반이고 목록이 그 지점으로 옮겨간다.
+    const before = session.agent_session_archive_scroll.offset_y_px;
+    const grab_y = @as(f64, bar.thumb_y) + 1;
+    session.beginAgentSessionDockScrollDrag(@as(f64, bar.track_x) + 1, grab_y);
+    const thumb_drag = session.agent_session_dock_scroll_drag orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(before, session.agent_session_archive_scroll.offset_y_px);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), thumb_drag.grab_dy, 0.01);
+    try std.testing.expect(thumb_drag.grab_dy < bar.thumb_h / 4);
+    session.endAgentSessionDockScrollDrag();
+
+    // ③ thumb **바깥** track down은 그 자리로 점프하고, 이어지는 드래그는 옮긴 뒤의 기하를 쓴다.
+    //    옛 기하를 그대로 들면 손을 떼지 않고 끌기 시작하는 순간 thumb이 한 번 튄다.
+    const far_y = @as(f64, bar.track_y) + @as(f64, bar.track_h) - 2;
+    session.beginAgentSessionDockScrollDrag(@as(f64, bar.track_x) + 1, far_y);
+    const track_drag = session.agent_session_dock_scroll_drag orelse return error.TestUnexpectedResult;
+    try std.testing.expect(session.agent_session_archive_scroll.offset_y_px > before);
+    const expected = bar.withOffset(session.agent_session_archive_scroll.offset_y_px);
+    try std.testing.expectApproxEqAbs(expected.thumb_y, track_drag.geometry.thumb_y, 0.01);
+    // 점프한 경우 thumb 중앙을 잡은 것으로 둔다 — 그래야 이어지는 이동이 커서를 그대로 따라간다.
+    try std.testing.expectApproxEqAbs(bar.thumb_h / 2, track_drag.grab_dy, 0.01);
+    session.endAgentSessionDockScrollDrag();
+}
+
+test "스크롤바 드래그는 자기 payload만 먹고 놓기 직전 좌표를 잃지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try dockWheelFixture(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    try publishDockFrameForDrag(session, allocator);
+    const bar = session.agentSessionDockScrollbarGeometry() orelse return error.TestUnexpectedResult;
+    const payload = chrome.components.session_dock.build.scroll_drag_payload;
+
+    session.beginAgentSessionDockScrollDrag(@as(f64, bar.track_x) + 1, @as(f64, bar.thumb_y) + 1);
+    try std.testing.expect(session.agent_session_dock_scroll_drag != null);
+    const start = session.agent_session_archive_scroll.offset_y_px;
+
+    // ① 다른 제스처(탭 드래그 등)의 좌표를 스크롤로 먹으면 안 된다.
+    session.absorbAgentSessionDockScrollDrag(.{ .moved = .{
+        .payload = payload +% 1,
+        .x_px = @as(f64, bar.track_x),
+        .y_px = @as(f64, bar.track_y) + @as(f64, bar.track_h),
+    } });
+    session.applyAgentSessionDockScrollDrag();
+    try std.testing.expectEqual(start, session.agent_session_archive_scroll.offset_y_px);
+
+    // ② 자기 payload는 흡수하되 **적용은 tick이 한다**. move만으로 움직이면 한 프레임에 같은 일을
+    //    여러 번 하게 된다.
+    const bottom_y = @as(f64, bar.track_y) + @as(f64, bar.track_h) - 1;
+    session.absorbAgentSessionDockScrollDrag(.{ .moved = .{ .payload = payload, .x_px = @as(f64, bar.track_x), .y_px = bottom_y } });
+    try std.testing.expectEqual(start, session.agent_session_archive_scroll.offset_y_px);
+    session.applyAgentSessionDockScrollDrag();
+    const after_move = session.agent_session_archive_scroll.offset_y_px;
+    try std.testing.expect(after_move > start);
+
+    // ③ 같은 좌표를 다시 흡수해도 값이 그대로면 아무 일도 하지 않는다(track 끝에 닿은 채 미는 동안).
+    session.agent_session_archive_wheel_residue_px = 7;
+    session.absorbAgentSessionDockScrollDrag(.{ .moved = .{ .payload = payload, .x_px = @as(f64, bar.track_x), .y_px = bottom_y } });
+    session.applyAgentSessionDockScrollDrag();
+    try std.testing.expectEqual(after_move, session.agent_session_archive_scroll.offset_y_px);
+    // 위치가 안 바뀌었으므로 다른 상태도 건드리지 않았다.
+    try std.testing.expectEqual(@as(f64, 7), session.agent_session_archive_wheel_residue_px);
+
+    // ④ 위치가 **실제로 바뀌면** 휠 잔여는 버린다. 잔여는 그 위치로 가는 도중의 상태라, 다른 입구가
+    //    위치를 확정한 뒤에는 의미가 없다(남기면 다음 휠 틱이 엉뚱한 곳에서 시작한다).
+    session.agent_session_archive_wheel_residue_px = 5;
+    const up_y = @as(f64, bar.track_y) + 1;
+    session.absorbAgentSessionDockScrollDrag(.{ .dropped = .{ .payload = payload, .x_px = @as(f64, bar.track_x), .y_px = up_y } });
+    try std.testing.expect(session.agent_session_archive_scroll.offset_y_px < after_move);
+    try std.testing.expectEqual(@as(f64, 0), session.agent_session_archive_wheel_residue_px);
+    // drop이 드래그를 끝낸다.
+    try std.testing.expect(session.agent_session_dock_scroll_drag == null);
+}
+
 test "도크 휠은 포인터가 도크 위일 때만, 목록 방향으로, 상한 안에서 움직인다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

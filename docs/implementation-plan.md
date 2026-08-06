@@ -1221,10 +1221,13 @@ tree 교체에서 capture carry 누락(드래그가 첫 move에 죽음)·스크�
     (`metal_lowering.placeText` — 모달)용이라 **도크에는 타지 않는다**(SV1a에서 그 판정을 통째로 막아도
     Lab 캡처가 픽셀 하나 안 바뀌는 것을 확인했다). 그래서 도크의 잘림 픽셀은 골든이 이미 보고 있고,
     SV1b가 지켜야 할 것은 `scroll_clipped` 소속 판정과 그 clip 사각형의 출처다.
-  - **SV1c — 측정 pass와 drag 헬퍼.** **뷰포트 높이 복제를 없앤다**: 지금 host가
-    `content.h - fixedChromeHeight()`로 flex 결과를 손으로 예측하는데(같은 수의 출처가 둘), 측정 pass로
-    layout이 알려 주게 하면 그 식이 사라진다. host의 drag 세 지점(begin/absorb/apply)과 분수 휠
-    residue도 `scroll_area`가 제공하는 형태로 모은다.
+  - **SV1c — 측정 pass와 drag 헬퍼(완료).** 뷰포트 높이 복제를 없앴다 — 자식 없는 scroll-area로
+    layout을 한 번 돌려 그 값을 layout에게 묻고, `fixedChromeHeight`는 소비처가 사라져 지웠다.
+    host의 drag 세 지점은 `scroll_area.Drag`로, 분수 휠 잔여와 그 산술(방향 전환 폐기·정수부 소비·
+    overflow 가드)은 `State.scrollByWheel`로 모았다. `Drag`가 `interaction`을 import하지 않는 것이
+    계약이다 — 그쪽이 `tree`를 쓰고 `tree`가 `scroll_area`를 쓰므로 순환이 된다. 그래서 이벤트가
+    아니라 좌표만 받고 payload 판정은 소비처가 한다.
+    **남은 것**: 스크롤 자식의 `shrink = 0` 소유 이관(§4.3), selection follow(§4.5).
 - **SV1d — 그룹 헤더 sticky.** 지금은 스크롤하면 그룹 헤더가 밀려 올라가 글자가 반쯤 잘리고 "어느
   그룹인가"가 사라진다. [ScrollArea](scroll-area.md) §4.7이 계약이다 — clamp 산술은 ScrollArea가, 무엇을
   붙일지는 소비처가 정한다(가상화 때문에 그 헤더는 창 밖일 수 있고, 창 밖 항목이 어느 그룹인지는

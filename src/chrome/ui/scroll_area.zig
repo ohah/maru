@@ -7,10 +7,10 @@
 //! 자식을 다 만든 뒤 넘치는 부분을 자르지만, 여기서는 보이지 않는 항목의 노드도 텍스트도 만들지 않는다.
 //! 그래서 창(window)을 정하는 것이 자르는 것보다 앞선다.
 //!
-//! 지금 여기 있는 것은 **좌표계뿐이다.** §2가 ScrollArea 소유라고 적은 것 중 스크롤바 entry 발행과
-//! viewport clip은 아직 `session_dock/build.zig`가, 분수 휠 residue와 selection follow는 아직 host가
-//! 들고 있다. 파일 이름은 목적지를 가리키고, 그 나머지는 SV1b·SV1c가 옮긴다(docs/implementation-plan.md).
-//! 이 주석은 다음 사람이 "여기 없으면 아무 데도 없다"고 오해하지 않게 하기 위한 것이다.
+//! §2가 ScrollArea 소유라고 적은 것은 여기 또는 `ui/tree.zig`에 있다 — 좌표계·투영·스크롤바 기하와
+//! 드래그 수명·분수 휠 잔여는 이 파일이, entry 발행과 viewport clip은 `tree.build`가 그 선언을 보고
+//! 한다. 남은 것은 selection follow(§4.5) 하나이고, 그것은 "무엇이 같은 항목인가"를 domain이 알아야
+//! 해서 seam만 제공한다.
 
 const std = @import("std");
 const continuous_drag = @import("continuous_drag.zig");

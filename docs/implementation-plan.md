@@ -1197,14 +1197,23 @@ tree 교체에서 capture carry 누락(드래그가 첫 move에 죽음)·스크�
   실패하는 것을 확인했다. 캡처가 한 장만 없을 때 그 case를 건너뛰던 게이트 구멍도 `MARU_REQUIRE_GOLDEN`
   에서 실패하도록 함께 닫았다.
 - **SV1 — Session Dock에서 추출.** 가상화·픽셀 offset·스크롤바·드래그·키보드 스크롤을 모두 쓰는
-  유일한 소비처라 여기서 뽑으면 계약이 처음부터 전부 드러난다. 실질은 지금 도크가 손으로 하는 세 단계
-  (컨테이너 build → 자식 평행이동 → 스크롤바 append)를 `tree.scrollView` 선언 하나로 접고 그 처리를
-  `tree.build`로 옮기는 것이다. **함께 고치는 것**: 지금 도크는 스크롤바를 배열 끝에 `parent_index = null`로
-  붙여 `UiRectTree`의 preorder·subtree-range 불변식을 어기고 root를 여럿으로 만든다. build의 preorder emit
-  안으로 옮기면 사라진다. **뷰포트 높이 복제도 함께 없앤다**: 지금 host가 `content.h - fixedChromeHeight()`로
-  flex 결과를 손으로 예측하는데(같은 수의 출처가 둘), 측정 pass로 layout이 알려 주게 하면 그 식이 사라진다.
-  스크롤 자식의 `shrink = 0`도 소비처가 아니라 컨테이너가 소유하게 옮긴다. 시각·동작 무변경이 완료
-  기준이고, **SV0가 추가한 스크롤바 골든**이 그 판정이다(기존 네 장만으로는 판정되지 않는다).
+  유일한 소비처라 여기서 뽑으면 계약이 처음부터 전부 드러난다. 한 PR로 리뷰하기에 너무 커서 셋으로
+  나눈다. 시각·동작 무변경이 셋 모두의 완료 기준이고, **SV0가 추가한 스크롤바 골든**이 그 판정이다
+  (기존 네 장만으로는 판정되지 않는다).
+  - **SV1a — 좌표계 추출(완료).** `session_dock/scroll.zig`를 `chrome/ui/scroll_view.zig`로 옮기고 도크
+    전용 파일은 지운다(shim 없음). `project`가 도크의 `Kind`/`Metrics` 대신 comptime 높이 함수를 받아,
+    그룹 헤더·카드·펼친 카드라는 예외가 host의 `ArchiveScrollItems` 한 자리로 모인다. 변이 검증에서
+    드러난 무판정 구간(`withOffset`·`clamp`·무변화 반환값·host가 넘기는 높이/간격/개수/펼침 예약)을
+    함께 닫았다.
+  - **SV1b — 발행과 clip을 `build`로.** 지금 도크가 손으로 하는 세 단계(컨테이너 build → 자식
+    평행이동 → 스크롤바 append)를 `tree.scrollView` 선언 하나로 접고 그 처리를 `tree.build`로 옮긴다.
+    **함께 고치는 것**: 지금 도크는 스크롤바를 배열 끝에 `parent_index = null`로 붙여 `UiRectTree`의
+    preorder·subtree-range 불변식을 어기고 root를 여럿으로 만든다. build의 preorder emit 안으로 옮기면
+    사라진다. 스크롤 자식의 `shrink = 0`도 소비처가 아니라 컨테이너가 소유하게 옮긴다.
+  - **SV1c — 측정 pass와 drag 헬퍼.** **뷰포트 높이 복제를 없앤다**: 지금 host가
+    `content.h - fixedChromeHeight()`로 flex 결과를 손으로 예측하는데(같은 수의 출처가 둘), 측정 pass로
+    layout이 알려 주게 하면 그 식이 사라진다. host의 drag 세 지점(begin/absorb/apply)과 분수 휠
+    residue도 `scroll_view`가 제공하는 형태로 모은다.
 - **SV2 — 파일 탐색기 이관.** 행 단위 좌표를 backing pixel로 옮기는 것이 실제 변경이다. 부분적으로
   보이는 행이 생기므로 행 기반 hit-test·reveal·follow가 픽셀 좌표를 읽도록 함께 바뀐다. 별도 스크롤바
   tree(`file_tree_scrollbar.publish`)와 전용 capture 경로는 이 단계에서 제거한다.

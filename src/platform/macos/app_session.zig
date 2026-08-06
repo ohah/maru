@@ -66810,12 +66810,33 @@ test "라이브 pane 드래그는 도크 위를 지나도 좌표를 계속 받�
     _ = try session.tick();
 }
 
+/// 픽스처 그룹 한 건. `entries`에 `.group`만 넣고 이 배열을 비워 두면 `buildAgentSessionDockItems`가
+/// 그 항목을 건너뛰어 스크롤 좌표(그룹을 예약)와 발행 tree(그리지 않음)의 index가 어긋난다. 제품
+/// 경로는 둘을 같은 재투영에서 함께 만들지만, 테스트가 한쪽만 채우면 없는 결함을 만들어 낸다.
+fn appendFixtureArchiveGroup(session: *AppSession, allocator: std.mem.Allocator, count: usize) !void {
+    const key = try allocator.dupe(u8, "/workspace/fixture");
+    errdefer allocator.free(key);
+    try session.agent_session_archive_projection.groups.append(allocator, .{
+        .key = key,
+        .label = key,
+        .count = count,
+        .collapsed = false,
+    });
+}
+
 /// 픽스처 archive record 한 건 — 문자열은 session이 소유(deinit이 해제)한다.
 fn appendFixtureArchiveRecord(session: *AppSession, allocator: std.mem.Allocator) !void {
+    try appendFixtureArchiveRecordN(session, allocator, 0);
+}
+
+/// 서로 다른 신원의 픽스처 record. 도크의 펼침은 `{provider, session_id, device, inode}` 신원으로
+/// 매칭되므로, 같은 record를 두 항목이 가리키면 발행 tree가 **둘 다** 펼쳐 그린다. 실제 재투영은
+/// record 하나를 한 번만 내보내니, 신원을 index로 갈라 두어야 테스트가 없는 상태를 만들지 않는다.
+fn appendFixtureArchiveRecordN(session: *AppSession, allocator: std.mem.Allocator, index: usize) !void {
     try session.agent_session_archive_records.append(allocator, .{
         .parsed = .{
             .provider = .claude,
-            .session_id = try allocator.dupe(u8, "fixture-session"),
+            .session_id = try std.fmt.allocPrint(allocator, "fixture-session-{d}", .{index}),
             .title = try allocator.dupe(u8, "fixture"),
             .summary = try allocator.dupe(u8, "summary"),
             .cwd = try allocator.dupe(u8, "/tmp"),
@@ -66824,11 +66845,182 @@ fn appendFixtureArchiveRecord(session: *AppSession, allocator: std.mem.Allocator
             .message_count = 1,
             .verified_user = true,
         },
-        .source_path = try allocator.dupe(u8, "/tmp/maru-archive-fixture-does-not-exist.jsonl"),
+        .source_path = try std.fmt.allocPrint(allocator, "/tmp/maru-archive-fixture-{d}-does-not-exist.jsonl", .{index}),
         .mtime_ns = 0,
-        .inode = 1,
+        .inode = 1 + index,
         .device = 1,
     });
+}
+
+// 스크롤 좌표계를 `chrome/ui/scroll_view.zig`로 옮긴 뒤, 그 모듈은 촘촘한데 **도크가 그 모듈에 넘기는
+// 값**에는 판정자가 거의 없다는 것이 변이 검증에서 드러났다. `ArchiveScrollItems`의 다섯 가지를 하나씩
+// 틀리게 만들어도(펼침 예약 없음, gap 0, 항목 수 -1, 펼침 index null, 카드 높이에 펼침 높이) 전체
+// 스위트가 초록이었다. 모듈이 옳아도 입력이 틀리면 결과는 같이 틀린다.
+test "도크가 스크롤 모듈에 넘기는 항목 높이·간격·개수가 도크 metrics와 일치한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initDockedRoutingSession(allocator, .right);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    const m = chrome.components.session_dock.types.DockMetrics.resolve(session.agentSessionDockScaleMilli());
+    try appendFixtureArchiveGroup(session, allocator, 3);
+    try session.agent_session_archive_projection.entries.append(allocator, .{ .group = 0 });
+    for (0..3) |index| try session.agent_session_archive_projection.entries.append(allocator, .{ .card = index });
+
+    const items = session.agentSessionDockScrollItems();
+    // 높이는 도크가 그리는 것과 같은 값이어야 한다. 카드 높이에 펼침 detail이 섞이면 스크롤 좌표가
+    // 실제 그림보다 길어져, 목록 끝에서 빈 공간이 남는다.
+    try std.testing.expectEqual(m.card_h, items.card_h_px);
+    try std.testing.expectEqual(m.group_h, items.group_h_px);
+    try std.testing.expectEqual(m.item_gap, items.gap_px);
+    // 그룹 헤더와 카드는 높이가 다르다 — 같아지면 §3의 walk가 의미를 잃는다.
+    try std.testing.expect(items.group_h_px != items.card_h_px);
+    try std.testing.expectEqual(m.group_h, items.heightPx(0));
+    try std.testing.expectEqual(m.card_h, items.heightPx(1));
+
+    // 창을 정하는 extent가 항목을 하나라도 빠뜨리면 마지막 카드가 아예 안 그려진다.
+    const extent = items.extent(400);
+    try std.testing.expectEqual(session.agent_session_archive_projection.entries.items.len, extent.count);
+    try std.testing.expectEqual(@as(u32, 400), extent.viewport_h_px);
+    // 도크는 카드 사이를 여백이 아니라 divider로 구분하므로 gap이 0이다. 이 값을 `m.item_gap`과
+    // 비교하면 양쪽이 0이라 아무것도 판정하지 못한다(실제로 gap을 0으로 바꾸는 변이가 그 단언을
+    // 통과했다). 그래서 0임을 직접 못박고, gap 산술 자체는 `scroll_view`의 단위 테스트가 본다.
+    try std.testing.expectEqual(@as(u32, 0), extent.gap_px);
+
+    // 전체 content 높이는 항목 높이의 합이다(gap이 0이므로 사이 여백이 더해지지 않는다).
+    const projection = session.agentSessionDockScrollProjection();
+    try std.testing.expectEqual(m.group_h + m.card_h * 3, projection.content_height_px);
+}
+
+/// 스크롤 좌표가 예약한 높이와 **컴포넌트가 실제로 그린 rect**를 대조한다. 앞의 테스트는 host가
+/// metrics에서 값을 옳게 옮겼는지만 보는데, 그것만으로는 두 출처가 같은 답을 낸다는 보장이 없다 —
+/// 스크롤이 카드 하나를 72px로 예약해도 발행 tree가 80px로 그리면 목록 끝에서 어긋난다.
+fn dockTreeItemHeights(
+    session: *AppSession,
+    allocator: std.mem.Allocator,
+    projection: chrome.ui.scroll_view.Projection,
+    out: *std.ArrayList(u32),
+) !void {
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const dock_items = try session.buildAgentSessionDockItems(arena, projection);
+    var expansion_nodes: usize = 0;
+    var expansion_actions: usize = 0;
+    for (dock_items) |item| switch (item) {
+        .group => {},
+        .card => |card| if (card.expanded) |expanded| {
+            expansion_nodes += 5 + @as(usize, @intFromBool(expanded.focus_live_enabled));
+            expansion_actions += 2 + @as(usize, @intFromBool(expanded.focus_live_enabled));
+        },
+    };
+    const node_count = dock_items.len + expansion_nodes + 7;
+    const content = session.dockGeometry().tree_content;
+    const frame = try chrome.components.session_dock.build.build(.{
+        .viewport_px = .{ .width = @floatFromInt(content.w), .height = @floatFromInt(content.h) },
+        .cell_width_px = session.cell_width_px,
+        .cell_height_px = session.cell_height_px,
+        .scale_milli = session.agentSessionDockScaleMilli(),
+        .snapshot_generation = session.agent_session_dock_snapshot_generation,
+        .displayed_count = @intCast(dock_items.len),
+        .content_first_item_origin_y_px = projection.first_origin_y_px,
+        .scroll_content_height_px = projection.content_height_px,
+        .scroll_offset_px = projection.offset_y_px,
+        .items = dock_items,
+    }, .{
+        .nodes = try arena.alloc(chrome.ui.tree.UiNode, node_count),
+        .entries = try arena.alloc(chrome.ui.tree.RectEntry, node_count + 3),
+        .layout_items = try arena.alloc(chrome.ui.layout.Item, node_count + 1),
+        .flex_scratch = try arena.alloc(chrome.ui.layout.FlexScratch, node_count + 1),
+        .child_rects = try arena.alloc(chrome.ui.layout.UiRect, node_count + 1),
+        .actions = try arena.alloc(chrome.components.session_dock.ids.Entry, dock_items.len + 7 + expansion_actions),
+    });
+
+    out.clearRetainingCapacity();
+    for (0..dock_items.len) |index| {
+        const node_id = chrome.components.session_dock.build.NodeIds.item(index);
+        const entry_index = frame.tree.find(node_id) orelse return error.TestUnexpectedResult;
+        try out.append(allocator, @intFromFloat(@round(frame.tree.entries[entry_index].rect.height)));
+    }
+}
+
+test "스크롤이 예약한 높이가 발행 tree의 카드 rect와 정확히 같다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initDockedRoutingSession(allocator, .right);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    for (0..3) |index| try appendFixtureArchiveRecordN(session, allocator, index);
+    try appendFixtureArchiveGroup(session, allocator, 3);
+    try session.agent_session_archive_projection.entries.append(allocator, .{ .group = 0 });
+    for (0..3) |index| try session.agent_session_archive_projection.entries.append(allocator, .{ .card = index });
+
+    var heights: std.ArrayList(u32) = .empty;
+    defer heights.deinit(allocator);
+
+    {
+        const projection = session.agentSessionDockScrollProjection();
+        const items = session.agentSessionDockScrollItems();
+        try dockTreeItemHeights(session, allocator, projection, &heights);
+        try std.testing.expect(heights.items.len > 0);
+        // 두 출처가 항목마다 같은 답을 내야 한다. 갈리면 스크롤 끝에서 빈 공간이 남거나 마지막
+        // 카드가 잘린다.
+        for (heights.items, 0..) |drawn, offset| {
+            try std.testing.expectEqual(items.heightPx(projection.first_index + offset), drawn);
+        }
+    }
+
+    // 펼침도 같은 대조를 통과해야 한다. 예약과 그림이 갈리는 것이 사용자가 보고한 "펼침메뉴 누르면
+    // 뒤로 보인다"의 정확한 형태다(예약은 카드 높이인데 그림은 detail+action까지 차지한다).
+    try session.openAgentSessionInlineDetail(&session.agent_session_archive_records.items[0]);
+    session.agent_session_archive_selected = 0;
+    {
+        const projection = session.agentSessionDockScrollProjection();
+        const items = session.agentSessionDockScrollItems();
+        try std.testing.expect(items.expanded_index != null);
+        try dockTreeItemHeights(session, allocator, projection, &heights);
+        for (heights.items, 0..) |drawn, offset| {
+            try std.testing.expectEqual(items.heightPx(projection.first_index + offset), drawn);
+        }
+        // 펼친 항목은 실제로 다른 항목보다 크다 — 전부 같은 높이면 위 비교가 통과해도 무의미하다.
+        const expanded_offset = items.expanded_index.? - projection.first_index;
+        for (heights.items, 0..) |drawn, offset| {
+            if (offset == expanded_offset) continue;
+            try std.testing.expect(drawn < heights.items[expanded_offset]);
+        }
+    }
+}
+
+test "펼친 카드는 스크롤 좌표에서도 펼친 높이를 예약한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initDockedRoutingSession(allocator, .right);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    try appendFixtureArchiveRecordN(session, allocator, 0);
+    try appendFixtureArchiveRecordN(session, allocator, 1);
+    try session.agent_session_archive_projection.entries.append(allocator, .{ .card = 0 });
+    try session.agent_session_archive_projection.entries.append(allocator, .{ .card = 1 });
+
+    const collapsed = session.agentSessionDockScrollProjection().content_height_px;
+    try std.testing.expect(session.agentSessionDockScrollItems().expanded_index == null);
+
+    // 펼침을 열면 그 항목만 detail+action 높이를 더 쓴다. 이 예약이 빠지면 아래 카드들이 펼친 카드
+    // 위로 겹쳐 그려진다 — 사용자가 "펼침메뉴 누르면 뒤로 보인다"고 보고했던 바로 그 상태다.
+    try session.openAgentSessionInlineDetail(&session.agent_session_archive_records.items[0]);
+    const items = session.agentSessionDockScrollItems();
+    try std.testing.expectEqual(@as(?usize, 0), items.expanded_index);
+
+    const m = chrome.components.session_dock.types.DockMetrics.resolve(session.agentSessionDockScaleMilli());
+    const reserved = m.card_h + m.expanded_detail_h + m.expanded_actions_h;
+    try std.testing.expectEqual(reserved, items.heightPx(0));
+    // 다른 record를 가리키는 두 번째 항목은 펼쳐지지 않았다(펼침은 하나다).
+    try std.testing.expectEqual(m.card_h, items.heightPx(1));
+    try std.testing.expectEqual(collapsed + reserved - m.card_h, session.agentSessionDockScrollProjection().content_height_px);
 }
 
 // 사용자 보고 회귀: "Agent 세션 기록 탭이 열려 있으면 Enter가 오른쪽 도크 동작을 할 때가 있다".

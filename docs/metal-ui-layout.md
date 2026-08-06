@@ -706,20 +706,21 @@ solver를 분리해야 한다는 Maru의 근거다. Maru는 Rust crate나 WASM/F
 
 1. **방향**: `.m` → Zig(**측정**)는 허용한다. 폰트 metric에서 셀 크기·ascent/descent를 재 Zig로 돌려주는 경로가 그것이고, 그 값이 있어야 Zig가 rect를 만들 수 있다. 규칙이 적용되는 것은 Zig → `.m`(**배치 결정**) 방향뿐이다. 주의: `coretext_smoke.m`은 측정만 하는 파일이 아니다 — 같은 파일이 래스터 슬롯 **안쪽 배치**도 소유한다(아래 예외 표 마지막 행).
 2. **값이냐 합성 규칙이냐**: `.m`이 받은 값을 그대로 소비하면 계약이다. `.m`이 **오프셋을 더하거나 중앙정렬·clamp·확장 규칙을 소유**하면 예외다 — 그 규칙을 Zig가 바꾸려면 두 언어를 함께 고쳐야 하기 때문이다.
+3. **의존이냐**: 위 둘로 계약이어도, 그 rect가 **`.m`이 소유한 합성 규칙의 결과에 의존**하면 예외와 같은 유지보수 비용을 진다. 알림 배지가 그 예다 — quad 자체는 Zig가 rect·색·layer를 다 정하는 순수 계약인데, 그 좌표는 `.m`의 1.7× 확대·`0.30ch` nudge·벨 `+0.5cw` 이동을 **역산해 굳힌 상수**다(실제로 그 미러 중 하나는 이미 반 칸 드리프트했다). 새 표면은 **`.m`이 확대·이동하는 글리프에 앵커하지 않는다** — 앵커가 필요하면 그 글리프의 배치부터 Zig로 옮긴다.
 
 **현재 예외.** 제품 `.m` 두 파일(`maru_metal_renderer.m`·`coretext_smoke.m`)을 훑어 확인한 목록이며 전수를 주장하지 않는다. 새로 늘리지 않고, 손댈 일이 생기면 그때 이관한다.
 
 | 예외 | 위치 | `.m`이 소유한 규칙 | 상태 |
 |---|---|---|---|
 | 사이드바 배경 quad 높이 | `maru_metal_renderer.m` `sb = -1.0f` | 창 최하단까지(NDC 하드코딩) | GPU quad 경로가 생기기 전 자리. 이관 방법은 아래 |
-| 사이드바 셀 배치 합성 | 같은 파일, 사이드바 셀 루프 | `py_top = origin_y + header − scroll`, `cell_h = atlas_height_px ?: slot_h`, 좌측 여백 `cw*0.5` | **Zig에 같은 합성이 따로 있다**(`app_session`의 사이드바 quad 경로) — 가드 없는 미러 |
-| tui 사이드바 활성 밴드 | `app_session.sidebarBandCell` + 같은 루프 | Zig가 높이를 `atlas_height_px`에 실어 보내고 rect는 `.m`이 조립 | rich는 `GpuQuad`라 무관. tui 경로만 해당 |
+| 사이드바 셀 배치 합성 | 같은 파일, 사이드바 셀 루프 | `py_top = origin_y + header − scroll`(**이 항 자체는 아래 선 기준 계약**), `cell_h = atlas_height_px ?: slot_h`(폴백=조건 분기), 좌측 여백 `cw*0.5` | **Zig에 같은 합성이 따로 있다**(`app_session`의 사이드바 quad 경로) — 가드 없는 미러 |
+| tui 사이드바 활성 밴드 | `app_session.sidebarBandCell` + 같은 루프 | Zig가 rowTop·행 높이·칸수를 다 실어 보내고 `.m`은 헤더·스크롤 평행이동 + `atlas_height_px == 0 → slot_h` 폴백만 한다 | **선 위에 걸친 행** — 남은 예외분이 폴백 하나뿐이라 이관 비용이 가장 작다. rich는 `GpuQuad`라 무관 |
 | 접힘 헤더 세로 중앙 | 같은 파일, 접힘 토글 분기 | `(titlebar_strip_px − ch) * 0.5` | 규칙이 명시한 "띠 높이에서 유도"의 실제 사례 |
 | 아이콘 배율·세로 보정·벨 가로 재배치 | 같은 파일 | `1.7×`·`ch*0.30` nudge·에이전트 `1.1×`·벨 `width=1` + `cw*0.5` 이동 | **결합이 양방향**이다 — Zig의 hover quad·배지 좌표가 이 값들을 전제로 계산된다 |
 | 그림자 blur 확장 | 같은 파일, shadow 분기 | Zig가 준 rect 밖으로 blur만큼 확장한 rect를 만든다 | `GpuShadow`는 `GpuQuad`와 **별도 채널**이다 |
 | OSC 133 거터 좌단 clamp | 같은 파일, reserved 8 분기 | `max(px_left, 0)` — 주석이 "사이드바 폭은 `.m`이 모르니 0 하한만" | 폭을 넘기면 사라진다 |
-| `reserved` 부분사각형 두께·여백 | 같은 파일 `maru_fill_cell_quad` 계열 | 커서 바/underline·SGR 장식선 두께를 셀 높이 15%·7.5%로(가로 변인 커서 바·hollow 우측은 `cw`의 15%), 거터 gap을 `cw*0.12`로 계산한다. 전부 `max(2px)`·`max(1px)` 하한이 붙어 **작은 셀에선 비율이 아니라 하한이 값을 정한다** | **의도된 근사** — 폰트 metric(underline thickness)을 `.m`에 안 넘겨서다(그 근거가 해당 주석에 있다) |
-| 래스터 슬롯 안쪽 배치 | `coretext_smoke.m` | cover-fit 스케일, ink 측정 후 세로 재중심(`maru_center_ink_vertically`), baseline `descent + (avail_h − line_height)/2`, advance 가로 중앙, 그리고 **어느 글리프를 ink-center할지 codepoint로 판정**(`0x25E7`·`0x2699` 하드코딩). `width.zig`의 wide-render-symbol 목록을 주석-동기로 **미러**한다(가드 없음) | [glyph-role-render-model.md](glyph-role-render-model.md)가 역할별로 승인한 설계다 — 이관 대상이 아니라 **명시적 승인 예외**로 둔다 |
+| `reserved` 부분사각형 두께·여백 | 같은 파일 `maru_fill_cell_quad` 계열 | 커서 바/underline·SGR 장식선 두께를 셀 높이 15%·7.5%로(가로 변인 커서 바·hollow 우측은 `cw`의 15%), 거터 gap을 `cw*0.12`로 계산한다. 전부(divider 제외 — 그쪽 하한은 Zig가 갖는다) `max(2px)`·`max(1px)` 하한이 붙어 **작은 셀에선 비율이 아니라 하한이 값을 정한다** | **의도된 근사** — 폰트 metric(underline thickness)을 `.m`에 안 넘겨서다(그 근거가 해당 주석에 있다) |
+| 래스터 슬롯 안쪽 배치 | `coretext_smoke.m` | cover-fit 스케일, ink 측정 후 세로 재중심(`maru_center_ink_vertically`), baseline `descent + (avail_h − line_height)/2`, advance 가로 중앙, 그리고 **어느 글리프를 ink-center할지 codepoint로 판정**(`0x25E7`·`0x2699` 하드코딩). `width.zig`의 wide-render-symbol 목록을 주석-동기로 **미러**한다(가드 없음) | [glyph-role-render-model.md](glyph-role-render-model.md)가 **역할→배치 매핑 정책**을 승인한 자리다. 단 `width.zig` 미러는 그 문서가 "**지금은** smoke 모듈성·저위험을 위해 유지, 백엔드가 늘면 `width.glyphRole`을 C-ABI로 export하거나 역할을 `reserved`에 실어 plumbing"이라 적은 **유예된 이관 대상**이다 — 승인된 것은 배치 정책이고 미러는 기한부다 |
 
 주의할 점 셋:
 
@@ -733,10 +734,33 @@ solver를 분리해야 한다는 Maru의 근거다. Maru는 Rust crate나 WASM/F
 
 - **`layer = bottom`이다.** 지금 배경 strip은 터미널 셀 **앞**에 그려져 사이드바 헤더 glyph(터미널 셀 패스)가 그 위에 보인다. `under`로 옮기면 터미널 셀 **뒤**가 돼 배경이 헤더 아이콘을 덮는 회귀가 재발한다(그 회귀를 고친 기록이 draw 순서 주석에 있다).
 - **색 규약이 다르다.** 셀 경로는 premultiplied(`chromeCellBg`), `GpuQuad`는 straight-alpha(`chromeQuadBg` — 셰이더가 `rgb*=a`). 그대로 옮기면 `window.opacity < 1`에서 이중 premultiply로 어두워진다.
+- **셀 strip은 타이틀바 띠까지 칠하는 유일한 페인트다.** 그 strip은 `y=0`부터 그려지는데 `Geometry` 유래 rect는 `titlebar_height_px`에서 시작한다 — 그대로 옮기면 신호등·헤더 아이콘 줄 뒤가 clear color로 드러난다.
+- **`GpuQuad`는 SDF라 가장자리에 AA가 붙는다**(경계 프래그먼트 coverage ≈0.84 — 코드 주석에 실측이 있다). 하드 엣지인 셀 패스에서 큰 배경면을 quad로 옮기면 경계에 1px 반투명 seam이 생긴다. premultiply 규약과는 별개 문제다.
 - **클리핑 인프라는 이미 있다(빠뜨리지만 말 것).** `GpuQuad`는 픽셀 단위 `clip_x/y/w/h`를 갖고, Zig는 `backing_height_px`로 전창 높이를 알며 이미 그 값으로 전창 quad를 낸다(시각 벨). 배경 strip 자체는 스크롤·scissor 대상이 아니다 — 다만 **스크롤되는 목록**(카드·밴드)을 quad로 옮길 때는 같은 스크롤 오프셋과 헤더 경계 clip을 함께 실어야 [tabs-splits-layout.md](tabs-splits-layout.md)의 "셀(`.m`)과 quad(Zig)가 같은 오프셋" 단일 출처가 유지된다.
 - `reserved`는 부분사각형 kind(2~31)와 role(32~)을 겸한다. role을 새로 실으면 `.m`의 `reserved != 0` 분기도 함께 손봐야 한다.
 
 **이미 승인된 예외적 배선과의 관계.** [layering-and-portability.md](layering-and-portability.md)는 `sidebar_header_height_px` 같은 좌표 시프트를 "L1 DTO로 L4에 전달해 GPU 백엔드가 적용"으로, [tabs-splits-layout.md](tabs-splits-layout.md)는 `.m` scissor와 Zig quad clip이 같은 오프셋을 쓰는 것을 "단일 출처"로 적었다. ML-GEO는 그 배선을 부정하지 않는다 — 다만 **"적용"과 "합성"의 경계는 그 문서들이 긋지 않았다**. `sidebar_header_height_px`를 적용하는 유일한 방법이 `origin_y + header − scroll`이고, 그게 위 예외 표의 사이드바 셀 배치 행이다. 그래서 여기서 선을 긋는다: **한 축의 평행이동까지가 계약**이고, 거기에 **높이·폭 결정, clamp, 확장, 조건 분기가 붙으면 예외**다. 이미 승인된 배선은 그 선에 걸쳐 있으므로 "새로 만들지 않는다"의 대상이고, 새 표면은 선 아래(순수 값 소비)로만 만든다. [sidebar-groups.md](sidebar-groups.md)는 이미 같은 처방(`.m` 기하를 없앤다)을 결정해 두었다.
+
+**`GpuQuad`의 `layer`는 z축이자 수명축이다.** 이걸 모르면 배경이 첫 프레임만 보이고 사라진다.
+
+| layer | z(그리는 순서) | 수명 |
+|---|---|---|
+| 2 = bottom | 가장 먼저(탭 밴드·도크 패널 배경) | **per-frame** — `dropQuadsByLayer(2)` 후 그 프레임의 build가 재충전 |
+| 0 = under | 터미널 셀 뒤(사이드바 밴드·accent) | **retained** — `rebuildSidebar`가 소유 |
+| 4 = header | 사이드바 strip 뒤·터미널 셀 앞(알림 배지) | per-frame |
+| 3·그 밖 | over 패스(스크롤바·모달) | per-frame |
+
+`metal_frame.zig`의 `layer` 주석은 0/1/2만 적어 stale이다(3·4가 실제로 쓰인다). 그리고 `dropQuadsByLayer`는 `swapRemove`라 **같은 레이어 안의 상대 순서를 보존하지 않는다** — `.m`은 레이어 내부 배열 순서를 painter 순서로 쓰므로(사이드바 tint↔accent 막대), 순서에 의존하는 quad를 더할 때 주의한다.
+
+**`Geometry`는 창 좌표계가 아니다.** `dock_layout.compute`의 `available`은 **사이드바와 타이틀바를 이미 뺀 작업영역**이고(`available.x = sidebar_width_px`, `available.y = titlebar_height_px`), `Geometry`는 `backing_*_px`를 보관하지 않는다. 그래서 **창 전폭·창 전체높이 표면**(사이드바 strip, 하단 상태표시줄, 시각 벨)은 `Geometry`에서 파생할 수 없고 `backing_*_px`를 직접 쓴다 — 예외가 아니라 `Geometry`의 정의다. 아래 "새 표면" 지침의 "`Geometry`에서 파생"은 **작업영역 안에 사는 표면**에 한한 말이고, pane·탭 바 안의 표면은 `chrome.components.tabbar.Metrics`(§5.4)가 단일 출처다.
+
+**rect를 더하는 것과 자리를 예약하는 것은 다르다.** `Geometry`에 필드를 넣어도 공간은 안 생긴다 — `compute`의 `available.h`(그리고 우측 도크가 쓰는 `dock_available.h`)를 깎아야 하고, `compute`에는 **조기 반환이 셋** 있다(도크 숨김·폭 0·높이 0). 새 필드에 기본값을 주면 컴파일러가 그 셋을 안 잡아 주므로, 가장 흔한 상태에서만 조용히 빈 rect가 나간다.
+
+**창 높이를 소비하는 출처는 `Geometry` 하나가 아니다.** 새 표면이 높이를 먹으면 다음도 함께 고친다 — `gridPadding()`(spawn grid: `layout_math.gridFromBacking`), `sidebarMaxScrollPx`(사이드바 목록 뷰포트), 사이드바 스크롤바 thumb의 `viewport_h`. 셋 다 `backing_height_px`를 직접 읽는다.
+
+**표면은 rect 하나가 아니라 세 경로에 동시에 들어간다** — 렌더(quad/셀), **hit-test**(`dockGeometry()`가 40+개 포인터 라우팅의 권위다), 그리고 웹 패널이면 네이티브 frame. 렌더만 맞추면 클릭이 엉뚱한 표면으로 간다.
+
+**ABI 필드의 의미를 바꾸면 다섯 곳을 함께 고친다** — `metal_frame.zig` 주석, `app_host_abi.h`, `maru_metal_renderer.h`, Swift 호스트, 그리고 `app_session.zig`의 ABI 버전 원장(vNN).
 
 **새 표면(예: 하단 상태표시줄)은 예외를 만들지 않는다.** 기하가 필요하면 `session/dock_layout.zig`의 `Geometry`에서 파생해 `GpuQuad`로 내고, `.m`에 새 인자를 더해 그쪽이 rect를 계산하게 하지 않는다. ABI 인자 추가가 더 작아 보여도, 그건 "배치를 아는 곳"을 하나 더 만드는 선택이다.
 

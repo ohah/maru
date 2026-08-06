@@ -22,7 +22,8 @@ const types = @import("types.zig");
 // cannot promise the size or optical centre of a Chrome header affordance.
 // Dock controls select shared semantic icons with `Fit.tight` rather than dock-specific names: all
 // lower through `iconInRect`/`leading_icon_group` into the same 18pt logical slot (never a terminal
-// cell — §2.1.1), and the tight assets fill that slot more (`search`/`reset` tighten the view box,
+// cell — agent-session-list.md §2.1.1; `headerRefresh`'s `!wide_icon` fallback is the one dormant cell
+// path and its only caller passes `true`), and the tight assets fill that slot more (`search`/`reset` tighten the view box,
 // the chevrons keep it and thicken the stroke) so their optical size stays consistent with cards.
 //
 // 헤더·카드 affordance는 fit을 **전부 명시**한다. `reset`·`search`·`chevron_*`는 변형이 실재하므로 fit을 빼면

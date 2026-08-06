@@ -1,0 +1,505 @@
+# ScrollView — 스크롤 컨테이너 컴포넌트
+
+스크롤되는 chrome 목록의 **단일 출처**다. viewport, content 높이, offset, 가상화 창, 스크롤바, 드래그,
+clip, 그리고 선택 따라가기·키보드 스크롤을 한 컴포넌트가 함께 소유한다. 진행·검증 상태는 [실제 구현 계획](implementation-plan.md)과
+[검증 매트릭스](verification-matrix.md)가 소유하고, 이 문서는 계약만 서술한다.
+
+레이아웃 primitive와 typed style은 [Metal UI 레이아웃·컴포넌트 시스템](metal-ui-layout.md)이,
+pointer capture·drag 수명은 [Chrome 상호작용 이관](chrome-interaction-migration.md)이 계속 소유한다.
+이 문서는 그 둘 위에 "스크롤"이라는 한 책임을 얹는다.
+
+## 1. 왜 필요한가 — 같은 문제를 여러 번 풀고 매번 다르게 틀렸다
+
+스크롤하는 곳은 일곱이고, 좌표 단위·발행 경로·affordance가 모두 다르다.
+
+| | 스크롤 단위 | 가상화 | 스크롤바 발행 | 드래그 | tick 소비 |
+| --- | --- | --- | --- | --- | --- |
+| Session Dock | backing px | `session_dock/scroll.zig`의 item window | 도크 published tree | dock interaction capture | 있음 |
+| 파일 탐색기 | **행(row)** | 없음(행 슬라이스) | **별도 tree**(`file_tree_scrollbar.publish`) | 전용 `scrollbar_interaction` | 있음 |
+| 소스 컨트롤 | **행(row)** | 없음 | **없음** | 없음(휠만) | 해당 없음 |
+| 사이드바 | backing px | 없음 | **host가 GPU quad 직접** | 없음(휠만) | 해당 없음 |
+| 알림 패널 | **item index** | 없음 | 컴포넌트가 직접 | 없음(휠·키만) | 해당 없음 |
+| 팔레트·세팅 | **item index** | 없음 | 없음 | 없음(선택 이동만) | 해당 없음 |
+| 탭 바 | **컬럼(가로)** | 없음 | ‹› 버튼 | 없음 | 해당 없음 |
+
+**공유가 아주 없지는 않다.** 알림·팔레트·세팅은 이미 `overlay_input.windowStart`라는 공용 item-window
+헬퍼를 쓴다. 그 헬퍼가 푸는 것은 "선택된 항목이 보이도록 창을 최소로 움직이되 이전 위치를 존중한다"
+하나이며, 픽셀 좌표·스크롤바·드래그·가상화는 다루지 않는다. ScrollView는 그것을 대체하는 것이 아니라
+**그 위의 층**이고, `windowStart`가 이미 맞게 푼 selection-follow 규칙은 그대로 흡수한다.
+
+각 구현이 풀어야 했던 것은 동일하다: offset clamp, max offset, thumb 비율과 최소 높이, grab 지점을
+유지하는 drag 매핑, tick coalescing, tree 교체를 견디는 capture, 분수 휠 residue, thumb fade,
+선택 항목 따라가기, 목록 교체 뒤 위치 복원. 그런데 **매번 다른 곳을 빠뜨렸고, 그 누락이 전부 사용자
+보고로 돌아왔다.**
+
+- 파일 탐색기 스크롤바는 tick이 좌표를 소비하지 않아 **손을 떼야 목록이 움직였다.**
+- Session Dock 스크롤바는 tree 교체에서 capture를 carry하지 않아 **드래그가 첫 move에 죽었다.**
+  thumb을 끌면 thumb rect가 바뀌어 tree가 매 프레임 새로 발행되므로 기본 `reconcile`이 매번 취소했다.
+- Session Dock 스크롤바를 content rect **안쪽**에 놓아 카드·버튼 위에 겹쳤다.
+- Session Dock의 로딩 스켈레톤 quad가 clip을 안 실어 스크롤 영역 밖까지 그려졌다.
+
+넷 다 "스크롤 컨테이너라면 당연히 지켜야 하는 것"인데, 소유자가 없어서 소비처마다 다시 발견해야 했다.
+`ScrollView`는 그 규율을 **한 번만** 맞게 구현해 두는 자리다.
+
+## 2. 경계 — ScrollView가 소유하는 것과 소유하지 않는 것
+
+**소유한다**
+
+- 스크롤 좌표: offset과 그 legal range, clamp, 분수 휠 입력의 residue.
+- content 높이와 max offset의 산출.
+- 가상화: 지금 그려야 하는 item 창(`first_index`, `end_exclusive`)과 첫 item의 local origin.
+- 스크롤바 track/thumb의 기하·발행·drag 선언, 그리고 pointer 좌표 → offset 매핑.
+- 자기 viewport의 clip. 그 안의 **장식 op**은 호출처가 기억하지 않아도 이 clip을 받는다(§5).
+  단 스크롤바는 gutter에 있어 규칙이 다르다 — 조상 clip을 받는다(§4).
+- 자식이 축소되지 않는다는 것(§4.3). 목록은 넘치면 잘려야 하고 줄어들어서는 안 된다.
+- selection follow와 키보드 스크롤(§4.5). 선택이 창 밖으로 나가면 최소로 움직이고, PageUp/Home 등이
+  같은 offset을 움직인다.
+- **viewport 높이를 소비처가 예측하지 않아도 되게 하는 것**(§4.2). 그 값은 layout이 알려 준다.
+
+**소유하지 않는다**
+
+- item의 내용·높이 정책. 높이는 소비처가 준 metric snapshot이 정한다(도크는 `DockMetrics`,
+  탐색기는 행 높이). ScrollView는 그 값을 읽을 뿐 만들지 않는다.
+- domain 상태. archive record, 파일 트리 노드, 워크스페이스 카드를 모른다.
+- effect 실행 시점. drag 좌표를 언제 소비할지는 host의 tick이 정하고, ScrollView는 그 소비 함수를 제공한다.
+- **목록 교체 뒤 위치 복원**(§4.5). 무엇이 "같은 항목"인지는 domain이 알므로 seam만 제공한다.
+- 휠 소유자 판정(§4.6). 포인터가 어느 스크롤 영역 위인지는 host의 rect 라우팅이 정한다.
+- 가로 스크롤. v1은 세로 전용이다. **"가로 소비처가 없어서"가 아니다** — 탭 바가 컬럼 단위로 이미
+  가로 스크롤한다. 다만 탭 바는 좌표 단위(컬럼)도, affordance(스크롤바가 아니라 ‹› 버튼)도, 소유자
+  (`Pane.tab_scroll_cols`)도 다르다. 세로 목록 여섯을 먼저 하나로 모으는 것과 가로 축을 함께 여는 것은
+  별개의 결정이며, 후자는 탭 바를 실제로 이관할 때 그 요구를 보고 연다.
+
+### 2.1 "그냥 `div { overflow-y: auto }` 아닌가"
+
+개념은 그렇다. 자르는 상자 + 스크롤 위치 + 스크롤바다. 하지만 여기서 그것이 **스타일 플래그 하나가 될
+수 없는** 이유가 셋 있고, 그 셋이 이 문서가 존재하는 이유다.
+
+`overflow: clip`은 **이미 노드 속성으로 있다.** 그게 주는 것은 자르기 하나뿐이다. ScrollView가 더하는 것은
+offset 상태, 가상화 창, 스크롤바 발행, drag 수명 — 넷이다.
+
+1. **스크롤바를 자식으로 놓을 수 없다.** 브라우저는 절대 위치와 UA paint 순서가 있어서 스크롤바를 상자의
+   gutter에 그린다. 우리 flex 엔진에는 절대 위치가 없다. 선언은 한 줄로 유지하되 그 처리는 `build` 안에
+   있어야 하는 이유가 이것이다(§4.1).
+2. **가상화가 자동이 아니다.** div는 자식을 전부 들고 브라우저가 paint 때 컬링한다. 여기서는 컴포넌트가
+   **보일 수 있는 item만** 받으므로, 스크롤 컨테이너가 "무엇을 그릴지"를 빌더에게 **먼저 알려 줘야** 한다.
+   방향이 반대다 — div는 만들어진 자식을 자르지만, ScrollView는 자식을 만들기 전에 창을 정한다.
+3. **스크롤 위치가 UA 상태가 아니다.** 브라우저에서는 스크롤 위치가 layout을 넘어 알아서 유지된다.
+   여기서는 host 상태이고, 목록이 통째로 교체될 때 무엇을 기준으로 되돌릴지 누군가 정해야 한다(§4.5).
+   clamp·tick coalescing·capture carry도 같은 이유로 명시적이다.
+
+그리고 div가 주는 것 중 **v1이 주지 않는 것**도 분명히 해 둔다: momentum/rubber-band 스크롤, 중첩의 가변 높이와 그 스크롤
+체이닝(안쪽이 끝에 닿으면 바깥으로 넘기기), `scroll-behavior: smooth`, `overflow: auto`와 `scroll`의 구분
+(우리는 넘칠 때만 발행하므로 `auto` 하나다). 필요해지면 그때 각각을 이 문서에 근거와 함께 연다.
+
+### 2.2 이름과 범위 — `ScrollArea`/`Scrollbar` 둘이 아니라 `ScrollView` 하나다
+
+[Chrome 상호작용 이관](chrome-interaction-migration.md)은 공개 component 후보로 `ScrollArea`와
+`Scrollbar`를 **둘로** 나열해 왔다. 이 문서는 그것을 **하나**로 합친다. 이름 취향이 아니라 §4.1의 결론
+때문이다 — 스크롤바는 flex로 배치할 수 없어 독립적으로 선언 가능한 component가 될 수 없다. 별도 public
+`Scrollbar`를 두면 소비처가 그것을 어딘가에 놓아야 하는데 놓을 방법이 없고, 결국 지금처럼 컨테이너 밖에서
+손으로 붙이게 된다. 스크롤바는 스크롤 컨테이너의 **일부**이고, 그래서 선언도 하나다.
+
+**터미널 스크롤바는 이 문서의 범위 밖이다.** 그것은 chrome 목록이 아니라 terminal viewport의 스크롤백을
+움직이며, 입력 우선순위도 terminal의 selection·mouse reporting 모드와 얽힌다(같은 문서의 inventory가 그
+보존 조건을 이미 소유한다). 세로 목록 여섯을 하나로 모은 뒤에도 터미널은 별도 판단으로 남는다.
+
+## 3. 좌표계 — backing pixel 하나로 통일한다
+
+좌표 단위가 셋으로 갈라져 있다 — 픽셀(도크·사이드바), **행**(파일 탐색기·소스 컨트롤), **item index**
+(알림·팔레트·세팅). 행과 item index는 부분 스크롤을 표현하지 못하므로 픽셀 정밀 스크롤·부분적으로 보이는
+행·정확한 thumb 위치를 만들 수 없다. 반대로 픽셀 좌표에서 행 인덱스와 item 창은 언제든 파생된다.
+
+그래서 ScrollView의 좌표는 **backing pixel**이고, 행이나 item 창은 그 좌표에서 파생된다. **나눗셈으로는
+아니다** — item 높이는 균일하지 않다(그룹 행, 카드, 펼친 카드가 각각 다르다). 파생은 `project`가 이미
+하는 누적 walk의 결과(`first_index`·첫 item의 local origin)이고, 소비처는 그 값을 읽는다. 높이가 균일한
+목록에서만 나눗셈이 같은 답을 준다.
+분수 값은 offset에 넣지 않는다 — tree rect와 GPU draw rect가 정수로 유지되어야 하므로, 트랙패드의 분수
+delta는 residue로 따로 누적하고 정수 픽셀만 offset에 반영한다(현재 도크 구현과 같은 규율).
+
+## 4. 발행 모델 — 같은 completed tree 안, 그러나 스크롤 자식이 아니다
+
+스크롤바는 도크·탐색기가 서로 다르게 처리했다(도크는 같은 tree, 탐색기는 별도 tree). 별도 tree는 paint와
+hit-test가 다른 출처를 읽게 하므로 "보이는 곳과 눌리는 곳"이 갈라질 여지를 만든다. ScrollView는 **하나의
+completed tree**에 track과 thumb을 함께 싣는다.
+
+동시에 스크롤바는 **스크롤되는 자식이 아니다.** flex 자식이면 가상화의 세로 평행이동을 함께 받아
+스크롤할 때 목록과 같이 흘러내린다. 그래서 flex layout의 대상이 아니라, 그 컨테이너의 **자식 entry들이
+나온 직후**에 이어서 나오는 viewport 고정 entry다.
+
+**맨 뒤에 append하지 않는다.** `UiRectTree`는 두 불변식을 문서화한다 — entries는 preorder이고(parent가
+항상 child보다 먼저), subtree는 다음 sibling boundary까지의 range다. 스크롤바를 배열 끝에
+`parent_index = null`로 붙이면 둘 다 깨지고 root가 여럿이 된다. 대신 build의 preorder emit 안에서
+"자식들을 낸 뒤, 부모로 돌아가기 전"에 낸다. `parent_index`는 그 스크롤 컨테이너이고, 그러면 두 불변식이
+그대로 유지되면서 z도 저절로 맞는다 — 자식들보다 뒤(위)이고, 컨테이너의 다음 sibling보다는 앞(아래)이다.
+
+**그러나 clip은 부모에게서 물려받지 않는다.** 스크롤바는 gutter에 있고 gutter는 컨테이너 rect의
+**오른쪽 바깥**이다(`track_x = content_x + content_w + …`). 컨테이너의 overflow clip은 그 padding box이므로,
+보통 자식처럼 `effective_clip = 부모의 clip ∩ 자기`로 접으면 스크롤바는 **통째로 잘려 사라진다.**
+
+그래서 스크롤바 entry의 clip은 **컨테이너 자신이 잘리던 clip**(= 조상 clip)이지 컨테이너의 overflow clip이
+아니다. 배열 안에서는 자식이지만 기하적으로는 형제 옆자리라고 읽는 편이 정확하다. 중첩에서 안쪽
+스크롤바가 바깥 뷰포트로 잘리는 것도 같은 규칙에서 자동으로 나온다 — 안쪽 컨테이너의 조상 clip이 곧
+바깥 뷰포트이기 때문이다.
+
+track이 먼저, thumb이 나중이다 — `interaction.hitAction`이 reverse z-order라 마지막 entry가 이기고,
+순서가 뒤집히면 thumb 위 down이 track click으로 판정돼 드래그 대신 점프가 일어난다.
+
+> 지금 Session Dock 구현은 이 규칙을 어긴다(배열 끝에 `parent_index = null`로 append한다). 소비하는 쪽이
+> preorder를 가정하지 않아 아직 드러나지 않았을 뿐이며, SV1이 고칠 항목이다.
+
+스크롤바는 **목록 위에 겹치지 않는다.** 컨테이너가 자기 오른쪽에 확보한 gutter 안에 놓이며, 나타나고
+사라져도 목록 폭을 reflow하지 않는다. gutter가 track 폭을 못 담으면 스크롤바를 아예 그리지 않는다 —
+목록 위에 겹쳐 그리는 대안은 두지 않는다.
+
+### 4.1 선언은 한 줄, 두 번째 조각은 `build` 안에 있다
+
+flex 엔진에는 **절대 위치가 없다**(`UiStyle`은 축의 크기·여백·gap만 가진다). 그래서 스크롤바는 목록의
+형제 자식이 될 수 없다 — 겹쳐야 하는데 flex는 그것을 표현하지 못한다. 여기까지는 엔진의 사실이다.
+
+그러나 그 사실이 **소비처에게 두 번 호출하게 만들 이유는 아니다.** 스크롤 컨테이너를 tree 노드로
+선언하면, 나머지(가상화 평행이동과 track/thumb entry 추가)는 `tree.build`가 그 선언을 보고 한다.
+`build`는 이미 노드 props를 entry로 옮기는 자리이며(`visualFor`·`actionFor`), rect와 `effective_clip`을
+그 시점에 갖고 있다. 필요한 나머지 입력(offset, content 높이, gutter)은 선언에 실린다.
+
+```zig
+tree.scrollView(.{
+    .id = NodeIds.content,
+    .style = .{ .width = .{ .percent = 1 }, .height = .{ .fill = 1 } },
+    .scroll = .{
+        .offset_px = state.offset_px,
+        .content_h_px = window.content_height_px,
+        .first_item_origin_y_px = window.first_origin_y_px, // 가상화 평행이동
+        .gutter_px = m.root_inset,                          // 목록 위에 겹치지 않는다
+    },
+}, item_nodes)
+```
+
+이 한 선언에서 `build`가 만드는 것은 셋이다: `overflow: clip` 컨테이너 rect, 그 자식들의 평행이동,
+그리고 뷰포트에 고정된 track/thumb entry. 소비처는 `publish`를 따로 부르지 않는다.
+
+`build` 안에서의 순서가 계약이다: **자식 layout → 자식 entry emit → 그 범위만 평행이동 → 스크롤바 emit.**
+스크롤바를 평행이동 뒤에 내야 그 이동을 받지 않고, preorder 안에서 내야 §4의 불변식이 유지된다.
+
+세 가지가 이 선언에 함께 따라온다.
+
+- **buffer 상한**이 커진다. `max_entries`는 노드 수 + 1이 아니라 **+ 2 × 스크롤 컨테이너 수**다. 소비처의
+  버퍼 산정식이 바뀌므로 이관 시 함께 고친다.
+- **스크롤바의 색은 선언이 든다.** `tree.build`는 레이아웃 모듈이므로 track/thumb의 color role을 그 안에
+  하드코딩하지 않는다. 기본값은 있되 선언이 덮을 수 있어야 한다.
+- **fade 정책**도 같은 자리에 실린다(§7).
+
+지금 Session Dock이 하는 방식 — 컨테이너를 만들고, `build` 뒤에 자식을 손으로 평행이동하고, 그 뒤에
+스크롤바를 append하는 것 — 은 **이 계약이 없어서 소비처가 대신 하고 있는 것**이다. 이관의 실질은 그
+세 단계를 선언 하나로 접는 일이다.
+
+### 4.2 뷰포트 높이는 예측하지 않는다 — layout이 알려 준다
+
+창(`project`)의 입력에는 뷰포트 높이가 있고, 그 출력이 무엇을 build할지 정한다. 그래서 "layout 전에
+뷰포트를 알아야 한다"는 순서 문제가 생긴다. 지금 Session Dock은 그것을 **예측**으로 푼다.
+
+```zig
+// host: flex가 할 일을 손으로 베낀 식
+return content.h -| m.fixedChromeHeight();
+// fixedChromeHeight = root_inset*2 + header_h + scope_h + search_h + control_gap*3
+```
+
+한편 tree는 같은 영역을 `height = .fill`로 선언하고 flex solver가 **같은 값을 독립적으로** 구한다.
+**한 값의 출처가 둘**이라는 뜻이고, 고정 chrome 노드가 하나 늘거나 margin·root padding이 바뀌면 조용히
+어긋난다. 어긋나면 창이 실제 뷰포트와 다른 높이로 계산되어 마지막 행이 잘리거나 빈 띠가 남는다.
+이것은 이 저장소가 이미 여러 번 겪은 "같은 수를 두 곳에서 구한다" 결함이다.
+
+ScrollView는 이 예측을 **요구하지 않는다.** 대신 layout을 두 번 돈다.
+
+1. **측정 pass** — 고정 chrome과 자식 없는 스크롤 컨테이너만으로 layout한다. 이때 각 스크롤 컨테이너의
+   viewport rect가 확정된다. item 노드를 만들지 않으므로 비싸지 않다.
+2. **본 pass** — 그 viewport로 `project`해 창을 정하고, 그 창의 item만 만들어 최종 layout한다.
+
+두 pass의 비용은 작은 tree 하나를 flex로 한 번 더 푸는 것뿐이다(도크는 노드 수십 개). 그 대가로
+"뷰포트를 손으로 예측하는 식"이 사라지고, `fixedChromeHeight` 같은 복제 계산도 함께 없어진다.
+
+이 순서는 **중첩 제약도 완화한다.** 측정 pass가 layout을 한 번 돌기 때문에 바깥에 있든 안쪽에 있든
+고정 chrome 안의 스크롤 컨테이너는 viewport를 얻는다. 남는 어려운 경우는 하나다 — **가상화된 item 안에
+들어 있는 스크롤 컨테이너**. 그 컨테이너는 어떤 item이 존재하는지가 정해져야 layout되고, 그것은 바깥의
+`project` 결과에 달렸다. 이 경우만 안쪽을 고정 높이로 두거나 pass를 한 번 더 돈다.
+
+### 4.3 스크롤 자식은 축소되지 않는다
+
+flex 컨테이너가 `fill`이고 자식 총합이 컨테이너를 넘으면 solver는 기본 `shrink = 1`로 **자식을 균등
+축소**한다. 그런데 가상화는 마지막 item이 항상 뷰포트를 넘도록 창을 잡으므로, 그 축소는 예외가 아니라
+**상시 상태**가 된다.
+
+축소되면 published rect가 `project`·paint·hit-test가 읽는 metric과 갈라진다. 실제로 이 결함은 사용자
+보고로 돌아왔다 — 카드 글자가 자기 카드 밖으로 새고, 펼친 카드의 버튼이 label이 들어가지 못해 배경만
+남은 빈 상자가 됐다. 지금은 도크가 자기 item에 `shrink = 0`을 손으로 붙여 막고 있다.
+
+**그 규율은 소비처가 아니라 ScrollView가 소유한다.** 스크롤 컨테이너의 자식은 축소 대상이 아니다 —
+목록은 넘치면 **잘려야** 하고 줄어들어서는 안 된다. 소비처가 매번 `shrink = 0`을 기억해야 한다면 새
+소비처마다 같은 결함을 다시 발견하게 된다.
+
+### 4.4 중첩
+
+위처럼 선언이 tree 안에 있으면 **중첩은 대부분 저절로 된다.** `build`는 스크롤 컨테이너를 몇 개 만나든
+같은 일을 반복할 뿐이고, drag payload의 identity는 그 노드의 `UiId`다. 목록 자식의 자르기는 이미 중첩된다
+(`effective_clip = 부모 ∩ 자기`).
+
+스크롤바의 clip만 규칙이 다르고, 그 다른 규칙이 중첩을 **자동으로** 맞춘다 — §4가 정한 대로 스크롤바는
+컨테이너의 overflow clip이 아니라 **컨테이너 자신이 잘리던 조상 clip**을 받는다. 안쪽 컨테이너의 조상
+clip이 곧 바깥 뷰포트이므로, 안쪽 스크롤바는 바깥이 스크롤될 때 그 뷰포트로 정확히 잘린다.
+
+`Writer`의 컨테이너 clip은 단일 값이 아니라 **스택**이어야 한다. 지금도 펼친 카드의 detail surface를
+그리는 동안 clip을 좁혔다 되돌리는 1단 스택을 쓰므로, 중첩은 그 깊이가 늘어난 것뿐이다.
+
+남는 것은 둘인데 성격이 다르다 — 하나는 순서에서 오는 구조적 제약이고, 하나는 정해야 할 정책이다.
+
+1. **가상화된 item 안의 중첩만 어렵다.** §4.2의 측정 pass가 layout을 한 번 돌므로 고정 chrome 안의
+   스크롤 컨테이너는 안쪽이든 바깥이든 viewport를 얻는다. 남는 경우는 **바깥의 창 결과에 따라 존재
+   여부가 달라지는 item 안에 스크롤 컨테이너가 있는** 경우뿐이다. 그때만 안쪽을 고정 높이로 두거나
+   pass를 한 번 더 돈다.
+2. **휠 chaining을 정해야 한다.** 안쪽이 끝에 닿은 뒤 바깥으로 넘길 것인가. 브라우저는 넘긴다. 넘기지
+   않으면 안쪽이 휠을 가둬 바깥이 멈춘 것처럼 보인다. 이건 ScrollView 혼자 정할 수 없고 host의 소유자
+   판정(§4.6)과 함께 정한다.
+
+**지금 중첩이 필요한 소비처는 없다**(도크의 펼친 카드 detail은 고정 높이라 스크롤하지 않는다). 그래서
+v1은 한 겹으로 시작하되, 선언을 tree에 두는 형태를 처음부터 택해 나중에 중첩을 열 때 **발행 경로를 다시
+쓰지 않아도 되게** 한다.
+
+### 4.5 selection follow와 위치 복원
+
+목록은 포인터로만 움직이지 않는다. 키보드 내비게이션이 선택을 옮기면 뷰포트가 따라가야 하고, 목록이
+통째로 교체되면 보던 위치를 되찾아야 한다. 지금 이 둘은 서로 다른 두 곳에 있다 —
+`overlay_input.windowStart`(선택이 창 밖으로 나가면 최소로 이동, 이전 위치 존중)와 Session Dock의
+identity anchor 복원이다.
+
+ScrollView는 **전자를 흡수하고 후자에는 seam만 준다.**
+
+- **selection follow**는 ScrollView가 소유한다. 입력은 선택 index와 item 높이 metric이고, 출력은 새
+  offset이다. `windowStart`의 규칙(선택이 창 안이면 움직이지 않는다, 밖이면 최소로 민다, 이전 위치를
+  최대한 존중한다)을 픽셀 좌표로 옮긴 것이다.
+- **목록 교체 뒤 복원**은 소유하지 않는다. 무엇이 "같은 항목"인지는 domain이 안다(도크는
+  `{provider, session_id, device, inode}`). ScrollView는 "이 item의 content-space top"과 "그 안에서의
+  intra-item offset"을 주고받는 자리만 제공하고, 어떤 item으로 되돌릴지는 소비처가 정한다. 되돌릴
+  item이 없으면 기존 숫자 offset을 새 상한으로 clamp한다.
+
+키보드 스크롤(PageUp/PageDown/Home/End)도 같은 offset을 움직이는 동작이므로 ScrollView가 제공한다.
+지금은 Session Dock에만 있고, 이관하면 탐색기·소스 컨트롤·사이드바가 함께 얻는다 — **동작이 늘어나는
+변경**이므로 각 이관 단계에서 그 사실을 적는다.
+
+### 4.6 소유자 판정은 ScrollView 밖이다
+
+포인터가 어느 스크롤 영역 위인지, 그래서 휠을 누가 먹는지는 host의 rect 라우팅이 정한다. ScrollView는
+"내 offset을 이만큼 움직여라"만 받는다. 한 pointer stream에 capture owner가 하나라는 규칙은
+[Chrome 상호작용 이관](chrome-interaction-migration.md) §4.2가 계속 소유한다.
+
+## 5. clip은 컨테이너의 속성이지 그리는 쪽의 기억이 아니다
+
+`overflow: clip`은 이미 tree 노드의 속성이고 `tree.build`가 `own_clip` → `effective_clip`으로 접는다.
+빠져 있던 것은 **강제**다: generic paint는 노드마다 clip을 실어 주지만, 컴포넌트가 직접 만드는 장식 quad는
+그리는 쪽이 매번 clip을 기억해야 했다. 한 곳만 빠뜨려도 새고, 실제로 그렇게 샜다.
+
+이 절이 다루는 것은 **컴포넌트가 직접 만드는 장식 op**(로딩 스켈레톤, 그룹 count pill 같은 것)이다.
+그런 op은 **예외 없이 한 출구를 지나고**, 그 출구가 지금 열려 있는 컨테이너의 clip을 기본값으로 싣는다.
+CSS에서 `overflow: hidden`이 자손에게 적용되는 자리와 같다. 더 좁은 clip이 필요한 중첩 컨테이너(펼친
+카드의 detail surface 등)는 그 구간 동안 clip을 좁혔다 되돌린다.
+
+**스크롤바는 이 규칙의 대상이 아니다.** 스크롤바는 컴포넌트가 만드는 장식 op이 아니라 `build`가 내는
+published entry이고, 그 clip은 §4가 정한 대로 컨테이너의 overflow clip이 아니라 조상 clip이다. 여기 규칙을
+스크롤바에 적용하면 gutter에 있는 스크롤바가 통째로 잘린다.
+
+이 규율의 검증은 "스켈레톤이 잘린다"가 아니라 **"컨테이너 안에서 나온 quad에 clip이 없을 수 없다"** 를
+고정하는 쪽이어야 한다. 전자는 그 한 컴포넌트만 지키고, 후자는 앞으로 추가될 장식 quad까지 지킨다.
+
+## 6. drag 수명 — tick이 소비하고, tree 교체를 견딘다
+
+pointer move는 tick보다 훨씬 자주 온다. 매 move마다 offset을 적용하면 한 프레임 안에서 같은 재투영을
+여러 번 하고, 반대로 tick에서 소비하지 않으면 손을 뗄 때까지 목록이 안 움직인다. 두 실패가 각각 실제로
+있었다. ScrollView의 drag는 좌표를 흡수만 하고 **소비 지점은 tick 하나**다
+([Chrome 상호작용 이관](chrome-interaction-migration.md) §4.3의 continuous drag 계약).
+
+thumb을 끌면 thumb rect가 바뀌므로 tree는 **반드시** 매 프레임 새로 발행된다. 기본 `reconcile`은 tree
+교체에서 언제나 capture를 취소하므로(click의 안전한 기본값), 그 위에서는 드래그가 첫 move에 죽는다.
+스크롤바 drag는 `reconcileCarryingCapture`의 좁은 문을 쓴다 — 같은 identity가 새 tree에 정확히 하나,
+여전히 닿을 수 있고 enabled, host가 준 compatibility key가 같을 때만 이어간다. 목록 자체가 교체되면
+(snapshot generation 변경) 이어갈 근거가 없으므로 끊는다.
+
+기하는 **down 시점 값을 고정**한다. 드래그 도중 thumb이 움직이는데 매 move마다 새 기하로 다시 계산하면
+손가락이 잡은 지점이 미끄러진다. track의 빈 곳을 누르면 그 지점으로 먼저 점프하고 thumb 중앙을 잡은
+것으로 이어간다 — 그래서 눌렀다 그대로 끌 때 위치가 튀지 않는다. track도 thumb과 같은 drag를 선언한다.
+선언하지 않으면 점프 뒤 move가 오지 않아 손을 뗐다 다시 잡아야 한다.
+
+## 7. 시각 계약
+
+- thumb 높이는 보이는 비율에 비례하되, 집을 수 있는 최소 높이 아래로 내려가지 않는다. 아주 긴 목록에서
+  0.04px짜리 thumb은 affordance가 아니다.
+- thumb의 기본색은 track보다 **확실히 밝아야** 한다. 둘의 명암이 비슷하면 스크롤바가 있어도 안 보인다
+  (실제로 그렇게 만들었다가 캡처에서 분간되지 않았다).
+- 목록이 **실제로 넘칠 때만** 발행한다. 넘치지 않는 목록에 스크롤바를 그리면 없는 여백을 있다고 말하는
+  셈이고, 잡을 수 없는 track이 그 아래 콘텐츠의 클릭을 가로챈다.
+- 치수는 logical spacing token과 backing scale에서만 나온다. terminal cell 폭/높이는 입력이 아니다
+  (도크 chevron이 셀 폭에 묶여 있어 폰트만 바꿔도 움직이던 결함과 같은 부류다).
+- **hover/press 상태 색이 기본색을 어둡게 만들면 안 된다.** generic card paint는 hover에 배경 role을
+  덮어쓰는데, thumb의 기본색이 그 role보다 밝으면 **마우스를 올렸을 때 thumb이 흐려진다**. 스크롤바는
+  정보 표면이 아니라 command target에 가까우므로 상태 색을 card 규칙에서 그대로 물려받지 않는다.
+- fade는 소비처마다 다르다 — pane·사이드바·파일 탐색기 스크롤바는 idle tick으로 흐려지지만 Session Dock
+  스크롤바는 항상 보인다. ScrollView는 이 축을 **1일차부터** 갖는다(SV1은 no-fade만 쓰지만, 축이 없으면
+  SV2가 발행 경로를 다시 써야 한다).
+- **그리고 fade alpha는 published tree에 넣지 않는다.** 스크롤바 entry의 paint에 매 프레임 바뀌는 alpha를
+  실으면 tree가 프레임마다 달라져 frame 동등 비교가 매번 실패한다. 그러면 fade가 도는 내내 entry·action
+  배열을 다시 복사하고 reconcile을 다시 돈다. **드래그가 죽지는 않는다** — carry의 compatibility key는
+  snapshot generation이고 fade는 그 값을 바꾸지 않는다. 즉 이것은 정확성 문제가 아니라 churn이며, 동시에
+  carry 조건이 나중에 조금이라도 좁아지면 곧바로 정확성 문제가 되는 자리다. alpha는 tree 값이 아니라
+  **paint 시점에 얹는 값**으로 두고 tree는 fade 동안 불변으로 유지한다.
+
+## 8. z 축 — 이미 ad hoc으로 자라고 있다
+
+현재 z는 두 축으로 결정된다. renderer의 `GpuQuad.layer`와, 같은 layer 안에서의 **append 순서**다.
+
+`layer`는 닫힌 enum이 아니라 **이미 ad hoc으로 늘어나고 있다.** 지금 0(under)·1(모달 over)·2(bottom)에
+더해 **3이 스크롤바 전용으로 추가돼 있다**(pane·사이드바·파일 탐색기 스크롤바가 쓰고
+`dropQuadsByLayer(3)`가 프레임마다 비운다). 즉 "스크롤바가 문서 순서를 벗어나야 한다"는 요구는 이미
+있었고, 그 답이 새 layer 상수였다. 층이 필요할 때마다 enum에 값을 더하는 방식은 순서 규칙이 두 군데
+(layer 상수 + append 순서)로 갈라진 채 계속 자란다.
+
+Session Dock 스크롤바는 generic paint를 타므로 layer 2에 나온다 — **다른 스크롤바와 다른 층**이다.
+지금은 도크 위에 layer 3이 겹치지 않아 드러나지 않지만, 같은 역할이 두 층에 흩어져 있다는 사실 자체가
+이 축이 정리되지 않았다는 증거다.
+
+그래서 z 축 정리는 "필요해지면"이 아니라 **ScrollView 이관 중에 판단한다.** 판단 기준은 소비처 수가
+아니라 이것이다: 스크롤바 층을 layer 상수로 계속 표현할 것인가, 아니면 `(layer, z, order)` 정렬로 옮기고
+layer는 "합성 패스"의 의미만 남길 것인가. 후자를 택하면 도크 스크롤바의 층 불일치도 함께 사라진다.
+
+**단, 판단과 변경을 같은 슬라이스에 묶지 않는다.** 정렬 축을 바꾸는 것은 lowering을 지나는 **모든 quad
+소비자**에 영향을 준다. 그 변경을 "시각 무변경"이 완료 기준인 이관 단계와 한 PR에 넣으면 무엇이 무엇을
+깨뜨렸는지 가릴 수 없다. 그러므로 z 축 정리는 자기 슬라이스와 자기 게이트를 갖는다(모달·툴팁·스크롤바가
+겹치는 화면의 골든이 그 게이트다). 비용도 "정렬 한 번이라 작다"고 단정하지 않는다 — 정렬 대상 수와 프레임
+비용은 그 슬라이스가 **측정해서** 보인다.
+
+## 9. 이관 순서와 그 근거
+
+한 번에 옮기지 않는다. 각 소비처가 ScrollView에 없는 요구를 하나씩 갖고 있어, 순서가 곧 계약을 넓히는
+순서다.
+
+- **SV0 — 판정자를 먼저 만든다.** 지금 도크 골든 네 장에는 **스크롤바 픽셀이 하나도 없다.** Lab fixture가
+  `scroll_content_height_px`를 아예 채우지 않아(기본값 0) `scrollbarGeometry`가 `null`을 내기 때문이다 —
+  항목 수와 무관하며, 100개여도 나오지 않는다. 골든 우측 40px의 최장 세로 런은 3px(chevron 획)이고,
+  thumb이면 수십 px여야 한다. 즉 **SV1이 스크롤바를 통째로 망가뜨려도 골든 네 장은 전부 통과한다.**
+  그러므로 SV1 **전에** 목록이 실제로 넘치는 Lab 시나리오와 gutter를 포함한 골든 case를 추가한다.
+  Lab 스모크는 이미 `appendBackgroundQuads`로 배경 quad를 제품 Metal 경로에 넘기므로, 막힌 것은 캡처
+  능력이 아니라 fixture가 스크롤 입력을 안 채우는 것뿐이다. "게이트가 있다"와 "그 게이트가 이것을 본다"는
+  다르다.
+- **SV1 — Session Dock.** 가상화·픽셀 offset·스크롤바·드래그·키보드 스크롤을 모두 쓰는 유일한 소비처다.
+  여기서 ScrollView를 추출하면 계약이 처음부터 전부 드러난다. 이관이 끝나도 도크의 시각·동작은 바뀌지
+  않아야 하며, **0단계가 추가한 스크롤바 골든**이 그 판정이다(기존 네 장만으로는 판정되지 않는다).
+- **SV2 — 파일 탐색기.** 행 단위 좌표를 픽셀로 옮기는 것이 실제 변경이다. 부분적으로 보이는 행이 생기므로
+  행 기반 hit-test·reveal·follow 로직이 픽셀 좌표를 읽도록 함께 바뀐다. 별도 스크롤바 tree와 전용
+  capture 경로는 이 단계에서 **제거**한다.
+- **SV3 — 소스 컨트롤.** 탐색기와 같은 행 좌표를 쓰고 스크롤바가 아예 없다. 탐색기 이관이 만든 픽셀 경로를
+  그대로 쓰므로 비용이 가장 작고, 없던 스크롤바가 생기는 것이 사용자에게 보이는 변화다.
+- **SV4 — 사이드바.** 스크롤바가 host의 GPU quad라 발행 경로가 없다. ScrollView로 옮기면 사이드바도
+  드래그 가능한 스크롤바를 얻는다(지금은 휠 전용이다).
+- **SV5 — 알림 패널·팔레트·세팅.** `overlay_input.windowStart`의 item-index windowing을 ScrollView의
+  selection follow로 흡수한다. 이 셋은 픽셀 스크롤이 필요 없을 수도 있다 — 흡수가 이득인지 아니면
+  `windowStart`를 그대로 두는 것이 옳은지는 앞 네 단계를 마친 뒤 실제 계약을 보고 판단한다.
+  **지금 결론을 적지 않는다.**
+
+탭 바(가로)는 이 순서에 넣지 않는다 — §2의 이유로 축 자체가 다른 결정이다.
+
+각 단계는 앞 단계의 계약을 넓히기만 하고 바꾸지 않는다. 넓혀야 한다면 그 이유를 이 문서에 먼저 적는다.
+**동작이 늘어나는 단계**(키보드 스크롤이 생기는 곳, 없던 스크롤바가 생기는 곳)는 그 사실을 이관 PR에
+명시한다 — 순수 refactor가 아니다.
+
+## 10. 검증
+
+- **컴포넌트 단위**
+  - 기하: 넘칠 때만 발행, 최소 thumb, 양 끝 도달, pointer↔offset round-trip.
+  - 발행 위치: track/thumb이 스크롤 컨테이너의 자식 **직후**에 나오고 `parent_index`가 그 컨테이너다
+    (배열 끝 append가 아니다 — preorder와 subtree range가 유지되는지).
+  - clip: 컨테이너 안의 장식 quad에는 clip이 **없을 수 없고**(§5), 반대로 gutter의 스크롤바는 컨테이너의
+    overflow clip이 아니라 조상 clip을 받아 **살아남는다**(§4). 둘은 서로 다른 규칙이므로 각각 고정한다.
+  - 가상화 평행이동이 스크롤바에 닿지 않음.
+  - 자식이 축소되지 않음(§4.3): 넘치는 목록에서 published rect가 metric 높이와 같은지.
+  - selection follow(§4.5): 선택이 창 안이면 offset 불변, 밖이면 최소 이동.
+- **host 단위**: tick이 소비 지점임(move 수가 아니라 tick 수만큼 스크롤한다), tree 재발행에서 capture가
+  살아남고 snapshot 교체에서는 끊김, 그리고 측정 pass의 viewport와 최종 layout의 viewport가 **같음**
+  (§4.2 — 예측식이 되살아나면 여기서 갈라진다).
+- **시각**: SV0가 추가한 **스크롤바가 실제로 보이는** 골든이 이관 전후 불변임을 보인다. 기존 네 장은
+  스크롤바 픽셀이 없어 이 판정을 하지 못한다. 시각이 바뀌어야 하는 변경이면 캡처를 눈으로 대조하고
+  무엇이 왜 달라졌는지를 남긴다([파일 탐색기](file-explorer.md)·[에이전트 세션 기록 도크](agent-session-list.md)의
+  해당 절과 같은 규율).
+- 각 회귀 테스트는 **그 수정을 되돌리면 실패해야** 한다. 통과만 확인한 테스트는 무엇도 고정하지 않는다.
+- **"게이트가 있다"와 "그 게이트가 이것을 본다"는 다르다.** 도크 골든이 좋은 예다 — 네 장이 존재하지만
+  Lab이 스크롤 입력을 채우지 않아 **스크롤바 픽셀이 하나도 없다**. 스크롤바를 통째로 지워도 전부
+  통과한다. 새 계약을 세울 때는 그 계약이 깨진 상태를 **실제로 만들어** 게이트가 빨개지는지 확인한다.
+
+## 11. API 스케치
+
+아래는 **아직 존재하지 않는 코드**다. 계약이 실제 호출부에서 어떤 모양이 되는지 보이기 위한 것이고,
+구현이 이 시그니처를 그대로 따라야 한다는 뜻은 아니다. 지금 도크가 하는 일을 ScrollView로 옮겼을 때의
+흐름이다.
+
+```zig
+// 상태는 소비처가 소유한다. ScrollView는 그 값의 legal range와 전이만 정한다.
+scroll: chrome.ui.scroll_view.State = .{},
+
+// ── 1. 측정 pass — 고정 chrome과 **자식 없는** 스크롤 컨테이너만 layout해 viewport를 확정한다.
+//      뷰포트 높이를 손으로 예측하지 않는다(§4.2).
+const measured = try tree.build(self.chromeRoot(&.{}), options, measure_buffers);
+const viewport_h_px = measured.rectOf(NodeIds.content).height;
+
+// ── 2. 그 viewport로 창을 정한다. 무엇을 build할지가 여기서 나온다(div와 반대 방향, §2.1).
+const window = chrome.ui.scroll_view.project(entries, entryKind, .{
+    .item_h_px = m.card_h,
+    .gap_px = m.item_gap,
+    // 펼친 카드처럼 한 항목만 높이가 다르면 그 예외를 metrics가 든다.
+    .expanded_index = expanded_index,
+    .expanded_h_px = m.card_h + m.expanded_detail_h + m.expanded_actions_h,
+}, viewport_h_px, self.scroll.offset_px);
+
+// ── 3. 그 창의 item만 만든다. 보이지 않는 행은 노드도 텍스트도 만들지 않는다.
+const items = try self.buildItems(arena, window.first_index, window.end_exclusive);
+
+// ── 4. 선언은 한 줄이다. clip·자식 shrink 금지·가상화 평행이동·track/thumb 발행은 `build`가 한다.
+top[3] = tree.scrollView(.{
+    .id = NodeIds.content,
+    .style = .{ .width = .{ .percent = 1 }, .height = .{ .fill = 1 } },
+    .scroll = .{
+        .offset_px = window.offset_px,
+        .content_h_px = window.content_height_px,
+        .first_item_origin_y_px = window.first_origin_y_px,
+        .gutter_px = m.root_inset,
+        .metrics = m.scrollbarMetrics(),
+    },
+}, item_nodes);
+
+const built = try tree.build(root, options, buffers);
+```
+
+host 쪽은 세 지점뿐이고, 그 셋이 §6의 drag 계약을 그대로 만든다.
+
+```zig
+// down이 스크롤바 위면 grab 지점을 확정한다(track이면 먼저 점프하고 thumb 중앙을 잡는다).
+// 기하는 **published tree에서 읽는다** — 두 번째 기하 출처를 만들지 않는다(§4).
+if (phase == .down) scroll_view.beginDrag(&self.scroll_drag, built, NodeIds.content, local_x, local_y);
+
+// dispatch가 낸 drag는 **좌표만 흡수**한다. 여기서 offset을 적용하지 않는다.
+if (dispatched.drag) |event| scroll_view.absorb(&self.scroll_drag, event);
+
+// tick 하나가 소비한다 — move 수가 아니라 tick 수가 상한이다.
+scroll_view.applyPending(&self.scroll_drag, &self.scroll);
+```
+
+tree를 다시 발행할 때는 스크롤바 drag만 좁은 carry 문을 태운다(§6).
+
+```zig
+if (scroll_view.isDraggingScrollbar(interaction)) {
+    _ = try interaction_mod.reconcileCarryingCapture(&interaction, new_tree, previous_key, current_key);
+    if (interaction.capture == null) scroll_view.endDrag(&self.scroll_drag);
+} else {
+    _ = try interaction_mod.reconcile(&interaction, old_tree, new_tree);
+}
+```
+
+이 스케치가 드러내는 것 셋. 첫째, **`project`가 build보다 먼저 온다** — ScrollView는 "자식을 자르는 상자"가
+아니라 "자식을 만들기 전에 창을 정하는 것"이고, 그 순서가 §2.1에서 div와 갈라지는 지점이다. 둘째, **소비처
+코드에 발행 단계가 보이지 않는다** — 선언 하나이고 나머지는 `build`가 한다. 그래서 중첩이 늘어도 호출부는
+변하지 않는다. 셋째, **뷰포트 높이가 코드에 상수식으로 나타나지 않는다** — 측정 pass가 알려 주므로
+`fixedChromeHeight` 같은 복제 계산이 생길 자리가 없다.

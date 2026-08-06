@@ -769,7 +769,7 @@ const sidebar_header_height_ratio_milli: u32 = 3000;
 const sidebar_header_row_h_ratio_milli: u32 = 3000;
 // 사이드바 접기/펼치기 토글 아이콘 코드포인트(◧ U+25E7 — 좌측 절반 채운 사각형 = 왼쪽 패널). 헤더 아이콘 줄(펼침)·
 // 접힘 시 좌상단 버튼·.m 확대 분기가 공유하는 단일 출처.
-const sidebar_toggle_codepoint: u21 = icons.codepoint(.sidebar); // maru 아이콘 PUA(icon_glyph): sidebar-collapse(◧ 대체). 헤더·접힘 토글 공유.
+const sidebar_toggle_codepoint: u21 = icons.codepoint(.sidebar_collapse); // maru 아이콘 PUA(icon_glyph): sidebar-collapse(◧ 대체). 헤더·접힘 토글 공유.
 // 헤더 아이콘을 셀보다 크게 굽는 배율은 chrome 크기 토큰(`chrome.ui.icon`)이 소유한다 — 같은 1.7이
 // 렌더러 quad(.m)에도 있어, 여기에 또 상수를 두면 세 곳이 어긋날 수 있다.
 const header_icon_scale = chrome.ui.icon;
@@ -32181,7 +32181,7 @@ pub const AppSession = struct {
                 // 터미널 콘텐츠에도 흔해 center_symbol에 넣으면 전역 '+'가 슬롯을 꽉 채워 굵어지는 회귀라,
                 // 헤더 전용 cover-fit 신호가 필요한 별도 작업으로 둔다.
                 if (g.codepoint == icons.codepoint(.gear) or g.codepoint == icons.codepoint(.plus) or
-                    g.codepoint == icons.codepoint(.bell) or g.codepoint == icons.codepoint(.sidebar))
+                    g.codepoint == icons.codepoint(.bell) or g.codepoint == icons.codepoint(.sidebar_collapse))
                 {
                     g.cache_key.raster_width_px = rw;
                     g.cache_key.raster_height_px = rh;
@@ -49666,7 +49666,7 @@ test "empty file dock launcher presents explorer and empty content requests the 
     _ = try session.tick();
     var saw_launcher = false;
     for (session.metal_buffer.cells) |cell| {
-        if (cell.codepoint == icons.codepoint(.sidebar) and cell.reserved == metal_frame.native_cell_role_dock_toggle and
+        if (cell.codepoint == icons.codepoint(.sidebar_collapse) and cell.reserved == metal_frame.native_cell_role_dock_toggle and
             cell.origin_x >= launcher.x and cell.origin_x < launcher.x + launcher.w and
             cell.origin_y < session.titlebar_strip_px)
         {
@@ -51430,7 +51430,7 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     const dock_toggle = session.filePanelDockControlRect().?; // 팽창 상태에도 표시(일원화).
     for (session.metal_buffer.cells) |cell| {
         // 파일 도크 컨트롤 ◧(maru PUA 0xF0006, 렌더러가 1.7× 확대)는 탭바가 아니라 titlebar 띠 우측 끝(filePanelDockControlRect)에 세로 중앙 렌더된다.
-        if (cell.codepoint == icons.codepoint(.sidebar) and
+        if (cell.codepoint == icons.codepoint(.sidebar_collapse) and
             cell.origin_x >= dock_toggle.x and cell.origin_x < dock_toggle.x + dock_toggle.w and
             cell.origin_y < session.titlebar_strip_px)
         {

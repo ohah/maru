@@ -29,12 +29,12 @@ pub const Icon = enum(u21) {
     /// standard: assets/icons/plus.svg (0xF0003)
     plus = 0xF0003,
     /// standard: assets/icons/search.svg (0xF0004)
-    /// tight: assets/icons/session-dock-search.svg (0xF0022)
+    /// tight: assets/icons/search-tight.svg (0xF0022)
     search = 0xF0004,
     /// standard: assets/icons/bell.svg (0xF0005)
     bell = 0xF0005,
     /// standard: assets/icons/sidebar-collapse.svg (0xF0006)
-    sidebar = 0xF0006,
+    sidebar_collapse = 0xF0006,
     /// standard: assets/icons/sparkle.svg (0xF0007)
     sparkle = 0xF0007,
     /// standard: assets/icons/diamond.svg (0xF0008)
@@ -44,6 +44,7 @@ pub const Icon = enum(u21) {
     /// standard: assets/icons/folder.svg (0xF000A)
     folder = 0xF000A,
     /// standard: assets/icons/reset.svg (0xF000B)
+    /// tight: assets/icons/reset-tight.svg (0xF0021)
     reset = 0xF000B,
     /// standard: assets/icons/recent.svg (0xF000C)
     recent = 0xF000C,
@@ -53,8 +54,6 @@ pub const Icon = enum(u21) {
     file = 0xF000E,
     /// standard: assets/icons/file-code.svg (0xF000F)
     file_code = 0xF000F,
-    /// standard: assets/icons/test.svg (0xF0010)
-    test_icon = 0xF0010,
     /// standard: assets/icons/document.svg (0xF0011)
     document = 0xF0011,
     /// standard: assets/icons/image.svg (0xF0012)
@@ -84,16 +83,54 @@ pub const Icon = enum(u21) {
     /// standard: assets/icons/folder-output.svg (0xF001E)
     folder_output = 0xF001E,
     /// standard: assets/icons/chevron-down.svg (0xF001F)
-    /// tight: assets/icons/session-dock-chevron-down.svg (0xF0023)
+    /// tight: assets/icons/chevron-down-tight.svg (0xF0023)
     chevron_down = 0xF001F,
     /// standard: assets/icons/chevron-right.svg (0xF0020)
-    /// tight: assets/icons/session-dock-chevron-right.svg (0xF0024)
+    /// tight: assets/icons/chevron-right-tight.svg (0xF0024)
     chevron_right = 0xF0020,
-    /// tight: assets/icons/session-dock-refresh.svg (0xF0021)
-    refresh = 0xF0021,
-    /// standard: assets/icons/session-dock-host.svg (0xF0025)
+    /// standard: assets/icons/host.svg (0xF0025)
     host = 0xF0025,
 };
+
+/// 이 아이콘에 그 fit의 **자산이 실재하는가**. `codepointFit`은 없는 조합을 기본으로 폴백하므로,
+/// "요청한 fit을 실제로 받았는가"를 알려면 이걸 봐야 한다 — 폴백이 조용한 거짓말이 되지 않게 하는
+/// 유일한 수단이다 — 없는 조합을 물으면 조용히 기본 자산이 오므로, 변형이 필요한 자리는 이걸로 확인한다.
+pub fn hasFit(icon: Icon, fit: Fit) bool {
+    return switch (icon) {
+        .git_branch => fit == .standard,
+        .gear => fit == .standard,
+        .plus => fit == .standard,
+        .search => fit == .standard or fit == .tight,
+        .bell => fit == .standard,
+        .sidebar_collapse => fit == .standard,
+        .sparkle => fit == .standard,
+        .diamond => fit == .standard,
+        .mark_github => fit == .standard,
+        .folder => fit == .standard,
+        .reset => fit == .standard or fit == .tight,
+        .recent => fit == .standard,
+        .folder_open => fit == .standard,
+        .file => fit == .standard,
+        .file_code => fit == .standard,
+        .document => fit == .standard,
+        .image => fit == .standard,
+        .file_config => fit == .standard,
+        .archive => fit == .standard,
+        .package => fit == .standard,
+        .web => fit == .standard,
+        .data => fit == .standard,
+        .folder_source => fit == .standard,
+        .folder_test => fit == .standard,
+        .folder_docs => fit == .standard,
+        .folder_assets => fit == .standard,
+        .folder_config => fit == .standard,
+        .folder_dependency => fit == .standard,
+        .folder_output => fit == .standard,
+        .chevron_down => fit == .standard or fit == .tight,
+        .chevron_right => fit == .standard or fit == .tight,
+        .host => fit == .standard,
+    };
+}
 
 /// 이 아이콘의 **기본 fit** codepoint. fit을 고르려면 `codepointFit`을 쓴다.
 pub fn codepoint(icon: Icon) u21 {
@@ -107,6 +144,7 @@ pub fn codepointFit(icon: Icon, fit: Fit) u21 {
         .standard => codepoint(icon),
         .tight => switch (icon) {
             .search => 0xF0022,
+            .reset => 0xF0021,
             .chevron_down => 0xF0023,
             .chevron_right => 0xF0024,
             else => codepoint(icon),
@@ -123,7 +161,7 @@ pub fn utf8(icon: Icon) []const u8 {
         .plus => "\u{F0003}",
         .search => "\u{F0004}",
         .bell => "\u{F0005}",
-        .sidebar => "\u{F0006}",
+        .sidebar_collapse => "\u{F0006}",
         .sparkle => "\u{F0007}",
         .diamond => "\u{F0008}",
         .mark_github => "\u{F0009}",
@@ -133,7 +171,6 @@ pub fn utf8(icon: Icon) []const u8 {
         .folder_open => "\u{F000D}",
         .file => "\u{F000E}",
         .file_code => "\u{F000F}",
-        .test_icon => "\u{F0010}",
         .document => "\u{F0011}",
         .image => "\u{F0012}",
         .file_config => "\u{F0013}",
@@ -150,7 +187,6 @@ pub fn utf8(icon: Icon) []const u8 {
         .folder_output => "\u{F001E}",
         .chevron_down => "\u{F001F}",
         .chevron_right => "\u{F0020}",
-        .refresh => "\u{F0021}",
         .host => "\u{F0025}",
     };
 }
@@ -161,6 +197,7 @@ pub fn utf8Fit(icon: Icon, fit: Fit) []const u8 {
         .standard => utf8(icon),
         .tight => switch (icon) {
             .search => "\u{F0022}",
+            .reset => "\u{F0021}",
             .chevron_down => "\u{F0023}",
             .chevron_right => "\u{F0024}",
             else => utf8(icon),
@@ -180,17 +217,17 @@ pub fn fromCodepoint(cp: u21) ?Resolved {
         0xF0004 => .{ .icon = .search, .fit = .standard },
         0xF0022 => .{ .icon = .search, .fit = .tight },
         0xF0005 => .{ .icon = .bell, .fit = .standard },
-        0xF0006 => .{ .icon = .sidebar, .fit = .standard },
+        0xF0006 => .{ .icon = .sidebar_collapse, .fit = .standard },
         0xF0007 => .{ .icon = .sparkle, .fit = .standard },
         0xF0008 => .{ .icon = .diamond, .fit = .standard },
         0xF0009 => .{ .icon = .mark_github, .fit = .standard },
         0xF000A => .{ .icon = .folder, .fit = .standard },
         0xF000B => .{ .icon = .reset, .fit = .standard },
+        0xF0021 => .{ .icon = .reset, .fit = .tight },
         0xF000C => .{ .icon = .recent, .fit = .standard },
         0xF000D => .{ .icon = .folder_open, .fit = .standard },
         0xF000E => .{ .icon = .file, .fit = .standard },
         0xF000F => .{ .icon = .file_code, .fit = .standard },
-        0xF0010 => .{ .icon = .test_icon, .fit = .standard },
         0xF0011 => .{ .icon = .document, .fit = .standard },
         0xF0012 => .{ .icon = .image, .fit = .standard },
         0xF0013 => .{ .icon = .file_config, .fit = .standard },
@@ -209,7 +246,6 @@ pub fn fromCodepoint(cp: u21) ?Resolved {
         0xF0023 => .{ .icon = .chevron_down, .fit = .tight },
         0xF0020 => .{ .icon = .chevron_right, .fit = .standard },
         0xF0024 => .{ .icon = .chevron_right, .fit = .tight },
-        0xF0021 => .{ .icon = .refresh, .fit = .tight },
         0xF0025 => .{ .icon = .host, .fit = .standard },
         else => null,
     };
@@ -227,6 +263,14 @@ test "icons: 이름·fit·codepoint·UTF-8·역참조가 서로 일치한다" {
             const cp = codepointFit(icon, fit);
             const resolved = fromCodepoint(cp) orelse return error.TestUnexpectedResult;
             try std.testing.expectEqual(icon, resolved.icon); // 폴백해도 같은 아이콘이다
+            // **fit 계약**: 자산이 있으면 그 fit을 그대로 받고, 없으면 기본 fit으로 떨어진다. 이걸 안 보면
+            // `.standard`를 요청했는데 tight 자산을 받는 침묵이 어떤 테스트에도 안 걸린다(적대적 검증 지적).
+            if (hasFit(icon, fit)) {
+                try std.testing.expectEqual(fit, resolved.fit);
+            } else {
+                try std.testing.expectEqual(codepoint(icon), cp);
+                try std.testing.expect(hasFit(icon, resolved.fit));
+            }
             var buf: [4]u8 = undefined;
             const len = try std.unicode.utf8Encode(cp, &buf);
             try std.testing.expectEqualStrings(buf[0..len], utf8Fit(icon, fit));
@@ -243,10 +287,14 @@ test "icons: 변형이 등록된 아이콘은 기본과 다른 codepoint를 주�
     try std.testing.expectEqual(codepoint(.gear), codepointFit(.gear, .tight));
 }
 
-test "icons: 기본 fit이 standard가 아닌 아이콘은 fit-less 접근자가 그 변형을 준다(재지정 감시)" {
+test "icons: 모든 아이콘이 standard 자산을 갖는다(기본 fit 뒤집힘 방지)" {
     const std = @import("std");
-    // `refresh`는 standard 자산이 없어 기본 fit이 tight다. 나중에 standard refresh를 매니페스트에
-    // 추가하면 기본이 뒤집혀 **fit 없이 부르던 소비처가 조용히 다른 그림을 그린다** — 그 순간 이 단언이
-    // 깨져 호출부를 `.tight` 명시로 바꾸라고 알린다(적대적 검증이 짚은 default_fit flip).
-    try std.testing.expectEqual(codepointFit(.refresh, .tight), codepoint(.refresh));
+    // standard 자산이 없는 아이콘은 **변형이 기본이 된다**. 그 상태에서 나중에 standard를 추가하면
+    // 기본이 뒤집혀 fit 없이 부르던 소비처가 조용히 다른 그림을 그린다(적대적 검증이 짚은 default flip).
+    // 지금은 그런 아이콘이 없다 — 새로 만들려면 의도적 결정이어야 하므로, 그때 이 단언이 깨져
+    // 소비처가 fit을 명시했는지 확인하게 한다.
+    inline for (@typeInfo(Icon).@"enum".fields) |field| {
+        const icon: Icon = @enumFromInt(field.value);
+        try std.testing.expect(hasFit(icon, .standard));
+    }
 }

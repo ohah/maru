@@ -3,13 +3,17 @@ The following icons in this directory are derived from GitHub Octicons
 
   bell.svg, chevron-down.svg, chevron-right.svg, folder.svg, gear.svg,
   git-branch.svg, mark-github.svg, plus.svg, reset.svg, search.svg,
-  session-dock-chevron-down.svg, session-dock-chevron-right.svg,
-  session-dock-refresh.svg, session-dock-search.svg,
   sidebar-collapse.svg
+
+and their tight variants (same drawing, tighter view box or heavier stroke so
+it fills a small slot; chosen in code as icons.Fit.tight, not as separate names):
+
+  chevron-down-tight.svg, chevron-right-tight.svg, reset-tight.svg,
+  search-tight.svg
 
 (reset.svg is derived from the Octicons "sync" icon.)
 
-(sparkle.svg, diamond.svg, and session-dock-host.svg are original Maru artwork
+(sparkle.svg, diamond.svg, and host.svg are original Maru artwork
 and are covered by the Maru project license, not this notice.)
 
 Note: the GitHub logo mark (mark-github.svg) is a trademark of GitHub, Inc.

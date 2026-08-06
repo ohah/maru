@@ -20,24 +20,28 @@ Maru 자체는 MIT 라이선스다([LICENSE](../LICENSE)). 이 문서는 Maru가
 
 ## 번들 아이콘 (GitHub Octicons)
 
-`assets/icons/`의 SVG 중 아래 8종은 **GitHub Octicons**(primer/octicons, MIT) 유래다. 빌드 준비 단계에서 `tools/svg_to_coverage.py`가 coverage 마스터로 변환해 커밋된 `src/renderer/icon_coverage_data.zig`(+ `src/platform/macos/icon_codepoints.h`)에 들어가고, 앱이 이 데이터를 렌더하므로 **파생 형태(coverage 데이터)로 배포물에 포함**된다. SVG 파일 자체는 번들에 복사되지 않는다.
+`assets/icons/`의 SVG 중 아래 15종은 **GitHub Octicons**(primer/octicons, MIT) 유래다. 빌드 준비 단계에서 `tools/svg_to_coverage.py`가 coverage 마스터로 변환해 커밋된 `src/renderer/icon_coverage_data.zig`(+ `src/platform/macos/icon_codepoints.h`)에 들어가고, 앱이 이 데이터를 렌더하므로 **파생 형태(coverage 데이터)로 배포물에 포함**된다. SVG 파일 자체는 번들에 복사되지 않는다.
 
 | 아이콘 | 파일 | 라이선스 | 저작권 | 출처 |
 | --- | --- | --- | --- | --- |
 | bell · folder · gear · git-branch · mark-github · plus · search · sidebar-collapse | `assets/icons/<이름>.svg` | MIT | © GitHub, Inc. | <https://github.com/primer/octicons> |
+| chevron-down · chevron-right | `assets/icons/<이름>.svg` | MIT | © GitHub, Inc. | 〃 |
+| reset(Octicons `sync` 파생) | `assets/icons/reset.svg` | MIT | © GitHub, Inc. | 〃 |
+| tight 변형: chevron-down-tight · chevron-right-tight · reset-tight · search-tight | `assets/icons/<이름>.svg` | MIT | © GitHub, Inc. | 〃 |
 
-- 라이선스 전문은 `assets/icons/LICENSE-octicons.txt`에 둔다(MIT — 저작권·허가 고지 유지 의무).
-- `sparkle.svg`·`diamond.svg`·`session-dock-host.svg`는 Maru 자작(파일 헤더 주석 참조)이라 이 표 대상이 아니다(Maru 본체 MIT).
+- **tight 변형도 같은 유래다.** 이들은 새 그림이 아니라 위 Octicon을 슬롯에 더 채우도록 조정한 변형이고(`search-tight.svg`는 path가 `search.svg`와 완전히 동일, `reset-tight.svg`는 `reset.svg`와 동일), 코드에서는 별도 이름이 아니라 `icons.Fit.tight`로 고른다([chrome-strategy.md](chrome-strategy.md) §9.7). 파생물도 MIT 고지 대상이므로 여기 함께 적는다.
+- 라이선스 전문은 `assets/icons/LICENSE-octicons.txt`에 둔다(MIT — 저작권·허가 고지 유지 의무). **그 파일이 실제 번들 고지의 단일 출처이고, 이 표는 그것을 문서에 비추는 사본이다** — 자산을 추가·변형하면 둘 다 갱신한다.
+- `sparkle.svg`·`diamond.svg`·`host.svg`는 Maru 자작(파일 헤더 주석 참조)이라 이 표 대상이 아니다(Maru 본체 MIT).
 - **상표 주의**: `mark-github.svg`는 GitHub 로고 마크다. 라이선스(MIT)와 별개로 GitHub 상표이므로, GitHub(리포·프로필)로 연결하는 표시 용도로만 쓴다(<https://github.com/logos> 가이드라인). 현재 용도(사이드바 카드의 GitHub 리포 표시)는 이 범위 안이다.
 - 배포물 내 고지 노출은 아래 "About 화면 attribution"과 같은 후속으로 묶는다(현재는 리포 내 라이선스 파일 + 이 문서로 기록).
 
 ### Maru 자작 Explorer 아이콘
 
-아래 19종은 이 Explorer scrollbar/icon 작업에서 처음 만든 **Maru 원본 자산**이며 외부 SVG를 복사·변형하지 않았다. 자산 세트 이름/버전은 `Maru Explorer Icons v1`, source는 이 저장소의 해당 파일, 라이선스는 Maru 본체와 같은 MIT([LICENSE](../LICENSE)), 저작권자는 Maru contributors다. 따라서 third-party 고지 대상은 아니지만 provenance가 모호해지지 않도록 여기에 고정한다.
+아래 18종은 이 Explorer scrollbar/icon 작업에서 처음 만든 **Maru 원본 자산**이며 외부 SVG를 복사·변형하지 않았다. 자산 세트 이름/버전은 `Maru Explorer Icons v1`, source는 이 저장소의 해당 파일, 라이선스는 Maru 본체와 같은 MIT([LICENSE](../LICENSE)), 저작권자는 Maru contributors다. 따라서 third-party 고지 대상은 아니지만 provenance가 모호해지지 않도록 여기에 고정한다.
 
 | 분류 | 파일 |
 | --- | --- |
-| 공통/파일 형식 | `recent.svg`, `folder-open.svg`, `file.svg`, `file-code.svg`, `test.svg`, `document.svg`, `image.svg`, `file-config.svg`, `archive.svg`, `package.svg`, `web.svg`, `data.svg` |
+| 공통/파일 형식 | `recent.svg`, `folder-open.svg`, `file.svg`, `file-code.svg`, `document.svg`, `image.svg`, `file-config.svg`, `archive.svg`, `package.svg`, `web.svg`, `data.svg` |
 | 의미 폴더 | `folder-source.svg`, `folder-test.svg`, `folder-docs.svg`, `folder-assets.svg`, `folder-config.svg`, `folder-dependency.svg`, `folder-output.svg` |
 
 `tools/svg_to_coverage.py`의 manifest는 각 exact path/codepoint/SHA-256을 커밋된 Zig 데이터에 기록한다. 기본 Zig test는 외부 도구 없이 실제 SVG SHA-256과 C/Zig registry를 검증하고, `mise run icons:check`는 `rsvg-convert`/Pillow가 있는 개발 환경에서 SVG→coverage 재생성 drift까지 확인하는 opt-in gate다.

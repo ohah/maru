@@ -2920,7 +2920,7 @@ test "PaneFrameRole lowers dock toggle provenance without classifying the same P
             .row = 0,
             .col = 0,
             .width = 1,
-            .codepoint = icons.codepoint(.sidebar),
+            .codepoint = icons.codepoint(.sidebar_collapse),
             .slot_id = 1,
             .atlas_x_px = 0,
             .atlas_y_px = 0,

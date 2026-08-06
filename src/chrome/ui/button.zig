@@ -218,7 +218,7 @@ test "size floor raises the caller minimum and rejects a smaller max" {
 }
 
 const TestRegistry = struct {
-    const registered: u21 = icons.codepoint(.refresh);
+    const registered: u21 = icons.codepointFit(.reset, .tight);
 
     fn isRegistered(_: *const anyopaque, codepoint: u21) bool {
         return codepoint == registered;

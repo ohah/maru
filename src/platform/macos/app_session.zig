@@ -565,8 +565,8 @@ const ArchiveScrollAnchor = struct {
     intra_card_y_px: u32,
 };
 
-/// 아카이브 목록의 항목 높이 규칙이다. `chrome.ui.scroll_view`는 높이가 균일하다고 가정하지 않고
-/// comptime 함수로 물어보므로(docs/scroll-view.md §3), 그룹 헤더·카드·펼친 카드라는 이 도크만의
+/// 아카이브 목록의 항목 높이 규칙이다. `chrome.ui.scroll_area`는 높이가 균일하다고 가정하지 않고
+/// comptime 함수로 물어보므로(docs/scroll-area.md §3), 그룹 헤더·카드·펼친 카드라는 이 도크만의
 /// 예외가 전부 여기 한 자리에 모인다. 스크롤 투영·anchor 복원·페이지 키가 같은 값을 본다.
 const ArchiveScrollItems = struct {
     /// **살아 있는 투영을 빌린 슬라이스**다. 스냅샷 교체·필터 재계산을 건너 붙들면 dangling이 되므로
@@ -590,14 +590,14 @@ const ArchiveScrollItems = struct {
         };
     }
 
-    fn extent(self: ArchiveScrollItems, viewport_h_px: u32) chrome.ui.scroll_view.Extent {
+    fn extent(self: ArchiveScrollItems, viewport_h_px: u32) chrome.ui.scroll_area.Extent {
         return .{ .count = self.entries.len, .gap_px = self.gap_px, .viewport_h_px = viewport_h_px };
     }
 };
 
 fn archiveScrollAnchorFor(
     records: []const agent_session_archive_backend.Record,
-    projection: chrome.ui.scroll_view.Projection,
+    projection: chrome.ui.scroll_area.Projection,
     items: ArchiveScrollItems,
 ) ?ArchiveScrollAnchor {
     var y: i64 = projection.first_origin_y_px;
@@ -631,7 +631,7 @@ fn archiveScrollAnchorOffsetFor(
         if (entry == .card) {
             const record_index = entry.card;
             if (record_index < records.len and saved.identity.eqlRecord(&records[record_index]))
-                return chrome.ui.scroll_view.anchorOffsetPx(top, saved.intra_card_y_px, max_offset_px);
+                return chrome.ui.scroll_area.anchorOffsetPx(top, saved.intra_card_y_px, max_offset_px);
         }
         top +|= h;
         if (index + 1 < items.entries.len) top +|= items.gap_px;
@@ -2528,7 +2528,7 @@ pub const SessionCollection = struct {
 /// 드래그 내내 유지되고, `geometry`는 down 시점의 track/thumb 치수다.
 const AgentSessionDockScrollDrag = struct {
     grab_dy: f32,
-    geometry: chrome.ui.scroll_view.ScrollbarGeometry,
+    geometry: chrome.ui.scroll_area.ScrollbarGeometry,
 };
 
 const AgentSessionDockRichTextCache = struct {
@@ -3251,7 +3251,7 @@ pub const AppSession = struct {
     agent_session_archive_partial: bool = false,
     /// Session Dock keeps the retained position in backing pixels so its paint and published
     /// pointer tree agree even when the first card is only partly visible.
-    agent_session_archive_scroll: chrome.ui.scroll_view.State = .{},
+    agent_session_archive_scroll: chrome.ui.scroll_area.State = .{},
     /// Precise AppKit wheel input is fractional in points. This residue belongs only to the dock;
     /// sharing terminal `wheel_accum` would make one surface steal another's first pixel.
     agent_session_archive_wheel_residue_px: f64 = 0,
@@ -14064,9 +14064,9 @@ pub const AppSession = struct {
 
     /// This is the sole translation from archive entries to fixed chrome pixel metrics. It is pure
     /// and bounded (records are capped at 500), and therefore safe on the render/input path.
-    fn agentSessionDockScrollProjection(self: *const AppSession) chrome.ui.scroll_view.Projection {
+    fn agentSessionDockScrollProjection(self: *const AppSession) chrome.ui.scroll_area.Projection {
         const items = self.agentSessionDockScrollItems();
-        return chrome.ui.scroll_view.project(
+        return chrome.ui.scroll_area.project(
             items,
             ArchiveScrollItems.heightPx,
             items.extent(self.agentSessionDockContentViewportHeightPx()),
@@ -14173,11 +14173,11 @@ pub const AppSession = struct {
         const card_h_px = self.agentSessionDockScrollItems().card_h_px;
         const changed = switch (event.key) {
             .page_up => self.agent_session_archive_scroll.scrollByPx(
-                -@as(i64, chrome.ui.scroll_view.pageStepPx(self.agentSessionDockContentViewportHeightPx(), card_h_px)),
+                -@as(i64, chrome.ui.scroll_area.pageStepPx(self.agentSessionDockContentViewportHeightPx(), card_h_px)),
                 projection.max_offset_px,
             ),
             .page_down => self.agent_session_archive_scroll.scrollByPx(
-                @as(i64, chrome.ui.scroll_view.pageStepPx(self.agentSessionDockContentViewportHeightPx(), card_h_px)),
+                @as(i64, chrome.ui.scroll_area.pageStepPx(self.agentSessionDockContentViewportHeightPx(), card_h_px)),
                 projection.max_offset_px,
             ),
             .home => self.agent_session_archive_scroll.setOffsetPx(0, projection.max_offset_px),
@@ -32291,7 +32291,7 @@ pub const AppSession = struct {
     fn agentSessionDockProps(
         self: *const AppSession,
         content: @FieldType(dock_layout.Geometry, "tree_content"),
-        scroll_projection: chrome.ui.scroll_view.Projection,
+        scroll_projection: chrome.ui.scroll_area.Projection,
         items: []const chrome.components.session_dock.types.Item,
     ) chrome.components.session_dock.types.Props {
         const dock_scale_milli = self.agentSessionDockScaleMilli();
@@ -32479,7 +32479,7 @@ pub const AppSession = struct {
     fn buildAgentSessionDockItems(
         self: *const AppSession,
         allocator: std.mem.Allocator,
-        scroll_projection: chrome.ui.scroll_view.Projection,
+        scroll_projection: chrome.ui.scroll_area.Projection,
     ) ![]chrome.components.session_dock.types.Item {
         var out: std.ArrayList(chrome.components.session_dock.types.Item) = .empty;
         if (scroll_projection.first_index == scroll_projection.end_exclusive) return try out.toOwnedSlice(allocator);
@@ -33003,7 +33003,7 @@ pub const AppSession = struct {
 
     /// published tree가 발행한 track/thumb rect에서 현재 scrollbar 기하를 되읽는다. 여기서 다시 계산하면
     /// 보이는 것과 다른 두 번째 출처가 생긴다 — 그 갈라짐이 정확히 "보이는 곳과 눌리는 곳이 다른" 결함이다.
-    fn agentSessionDockScrollbarGeometry(self: *const AppSession) ?chrome.ui.scroll_view.ScrollbarGeometry {
+    fn agentSessionDockScrollbarGeometry(self: *const AppSession) ?chrome.ui.scroll_area.ScrollbarGeometry {
         const build_ids = chrome.components.session_dock.build.NodeIds;
         var track: ?chrome.ui.layout.UiRect = null;
         var thumb: ?chrome.ui.layout.UiRect = null;
@@ -66899,7 +66899,7 @@ fn appendFixtureArchiveRecordN(session: *AppSession, allocator: std.mem.Allocato
 
 // 도크 휠 경로에는 판정자가 하나도 없었다. 방향을 뒤집어도, 포인터가 터미널 위인데 도크가 먹어도,
 // 분수 residue를 소비하고도 안 빼서 같은 픽셀을 반복해도 전체 스위트가 초록이었다(이름에 "wheel"이
-// 든 기존 테스트는 파일 트리 것이다). §2가 residue를 ScrollView 소유로 적었으므로 SV1c가 이 코드를
+// 든 기존 테스트는 파일 트리 것이다). §2가 residue를 ScrollArea 소유로 적었으므로 SV1c가 이 코드를
 // 옮기는데, 판정자 없이 옮기면 옮기다 깨져도 아무도 모른다.
 fn dockWheelFixture(allocator: std.mem.Allocator) !*AppSession {
     const session = try initDockedRoutingSession(allocator, .right);
@@ -67163,7 +67163,7 @@ test "도크 휠의 분수 잔여는 한 번만 소비되고 방향이 바뀌면
     try std.testing.expect(session.agent_session_archive_wheel_residue_px > 0);
 }
 
-// 스크롤 좌표계를 `chrome/ui/scroll_view.zig`로 옮긴 뒤, 그 모듈은 촘촘한데 **도크가 그 모듈에 넘기는
+// 스크롤 좌표계를 `chrome/ui/scroll_area.zig`로 옮긴 뒤, 그 모듈은 촘촘한데 **도크가 그 모듈에 넘기는
 // 값**에는 판정자가 거의 없다는 것이 변이 검증에서 드러났다. `ArchiveScrollItems`의 다섯 가지를 하나씩
 // 틀리게 만들어도(펼침 예약 없음, gap 0, 항목 수 -1, 펼침 index null, 카드 높이에 펼침 높이) 전체
 // 스위트가 초록이었다. 모듈이 옳아도 입력이 틀리면 결과는 같이 틀린다.
@@ -67196,7 +67196,7 @@ test "도크가 스크롤 모듈에 넘기는 항목 높이·간격·개수가 �
     try std.testing.expectEqual(@as(u32, 400), extent.viewport_h_px);
     // 도크는 카드 사이를 여백이 아니라 divider로 구분하므로 gap이 0이다. 이 값을 `m.item_gap`과
     // 비교하면 양쪽이 0이라 아무것도 판정하지 못한다(실제로 gap을 0으로 바꾸는 변이가 그 단언을
-    // 통과했다). 그래서 0임을 직접 못박고, gap 산술 자체는 `scroll_view`의 단위 테스트가 본다.
+    // 통과했다). 그래서 0임을 직접 못박고, gap 산술 자체는 `scroll_area`의 단위 테스트가 본다.
     try std.testing.expectEqual(@as(u32, 0), extent.gap_px);
 
     // 전체 content 높이는 항목 높이의 합이다(gap이 0이므로 사이 여백이 더해지지 않는다).
@@ -67212,7 +67212,7 @@ const DockTreeItemRect = struct { y: f32, height: u32 };
 fn dockTreeItemRects(
     session: *AppSession,
     allocator: std.mem.Allocator,
-    projection: chrome.ui.scroll_view.Projection,
+    projection: chrome.ui.scroll_area.Projection,
     out: *std.ArrayList(DockTreeItemRect),
 ) !void {
     var arena_state = std.heap.ArenaAllocator.init(allocator);
@@ -67240,7 +67240,7 @@ fn dockTreeItemRects(
 
     // host는 스크롤 영역 높이를 `content.h - fixedChromeHeight()`로 **예측**하고 build는 flex로 **실제**
     // 값을 만든다. 같은 수의 출처가 둘이라 갈릴 수 있는데, 갈리면 창 계산과 clip 경계가 어긋난다.
-    // docs/scroll-view.md §4.2가 SV1c에서 이 예측식을 없애겠다고 한 자리이므로, 없앤 뒤에도 같은 값인지
+    // docs/scroll-area.md §4.2가 SV1c에서 이 예측식을 없애겠다고 한 자리이므로, 없앤 뒤에도 같은 값인지
     // 이 단언이 지킨다(예측식이 되살아나도 여기서 갈라진다).
     try std.testing.expectEqual(
         session.agentSessionDockContentViewportHeightPx(),
@@ -67896,7 +67896,7 @@ test "세션 도크 스크롤바 드래그는 move 수가 아니라 tick 수만�
 
     // down 시점의 기하를 직접 만든다. 실제 경로에서는 published tree에서 되읽지만, 이 테스트가 고정하려는
     // 것은 그 기하가 아니라 **소비 지점**이다.
-    const geometry = chrome.ui.scroll_view.ScrollbarGeometry{
+    const geometry = chrome.ui.scroll_area.ScrollbarGeometry{
         .track_x = 100,
         .track_y = 0,
         .track_w = 16,

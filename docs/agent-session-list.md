@@ -287,7 +287,7 @@ tab bar의 높이는 더 이상 일치하지 않는다. 이것은 의도된 선�
   scope가 아니라 각 group의 collapse state만 바꾼다.
 - scroll-area는 목록이 **실제로 넘칠 때만** 우측에 scrollbar를 낸다. 스크롤 컨테이너의 일반 계약
   (발행 위치와 clip, thumb 비율·최소 높이·색, track/thumb의 drag 선언, tick이 소비 지점이라는 것)은
-  [ScrollView](scroll-view.md)가 단일 출처다. 도크에 고유한 것은 둘뿐이다: 스크롤바는 도크의 20pt
+  [ScrollArea](scroll-area.md)가 단일 출처다. 도크에 고유한 것은 둘뿐이다: 스크롤바는 도크의 20pt
   root inset **여백 안**에 놓여 카드·버튼과 겹치지 않으며(나타나고 사라져도 목록 폭이 reflow하지 않는다),
   그 기하는 published `content` rect에서 유도해 두 번째 기하 출처를 만들지 않는다.
 - 우측 도크는 하나이며 outer divider의 수동 폭도 모든 뷰가 공유한다. 다만 workspace에
@@ -604,7 +604,7 @@ trunc한 integral px만 offset에 적용한 뒤 residue만 남긴다. paint/hit-
 publish한다. 이 규칙은 2x Retina에서 0.5pt 입력도 1px 단위로 누적되어 보이되, draw와 hit-test의 subpixel/rounding 결과가
 갈라지는 것을 막는다.
 
-`src/chrome/ui/scroll_view.zig`의 pure `project`가 항목 높이 함수(도크는 그룹 헤더·카드·펼친 카드를 구분한다)와 viewport, offset을 받아
+`src/chrome/ui/scroll_area.zig`의 pure `project`가 항목 높이 함수(도크는 그룹 헤더·카드·펼친 카드를 구분한다)와 viewport, offset을 받아
 다음을 **한 번에** 산출한다: total content height, clamped offset, 첫 partially-visible item index, 그 item의 negative local
 origin, visible item range, 각 item의 rect와 content clip. host는 이 결과가 가리키는 item만 `build.zig`에 전달하며 별도의
 visual-row→entry, cell-row, fixed-header y 산술을 하지 않는다. `view.zig`, `chrome_draw_lowering`, published

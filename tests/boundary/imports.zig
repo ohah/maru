@@ -91,7 +91,7 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     // IC4(아이콘 크기 토큰)가 헤더 아이콘 배율 상수를 `chrome.ui.icon`으로 옮기며 또 바뀐다. count는 4 그대로다 —
     // 토큰 호출은 값 계산일 뿐 필드를 이름으로 읽지 않는다.
     // 적대적 검증 수선이 `sidebar` → `sidebar_collapse`(그림 이름)로 바꾸며 또 바뀐다. count는 4 그대로다.
-    // SV1a(스크롤 좌표계를 `chrome/ui/scroll_view.zig`로 이관)가 props·버퍼 크기 단일 출처 추출과 스크롤
+    // SV1a(스크롤 좌표계를 `chrome/ui/scroll_area.zig`로 이관)가 props·버퍼 크기 단일 출처 추출과 스크롤
     // 판정자 추가로 또 바꾼다. count는 4 그대로다 — 옮긴 것은 값 계산(높이·offset·버퍼 크기)이고,
     // `ArchiveScrollItems`·`agentSessionDockProps`·`bufferSizes` 어느 것도 필드를 이름으로 읽지 않는다.
     .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "8610a4fe4fc6ce2daaaa757df0cec261d2f7b8790bade3b2877f7706d30b62ed" },

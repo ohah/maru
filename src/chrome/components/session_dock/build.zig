@@ -6,7 +6,7 @@
 const tree = @import("../../ui/tree.zig");
 const layout = @import("../../ui/layout.zig");
 const ids = @import("ids.zig");
-const scroll_view = @import("../../ui/scroll_view.zig");
+const scroll_area = @import("../../ui/scroll_area.zig");
 const types = @import("types.zig");
 
 pub const NodeIds = struct {
@@ -323,10 +323,10 @@ pub const scroll_drag_payload: u64 = 0x5344_5342;
 
 /// 완성된 tree의 `content` rect에서 scrollbar 기하를 만든다. rect를 여기서 다시 계산하지 않고 published
 /// 값을 읽는 것이 핵심이다 — 그래야 scroll-area가 움직여도 스크롤바가 따라간다.
-fn scrollbarFor(props: types.Props, m: types.DockMetrics, entries: []const tree.RectEntry) ?scroll_view.ScrollbarGeometry {
+fn scrollbarFor(props: types.Props, m: types.DockMetrics, entries: []const tree.RectEntry) ?scroll_area.ScrollbarGeometry {
     for (entries) |entry| {
         if (entry.id != NodeIds.content) continue;
-        return scroll_view.scrollbarGeometry(.{
+        return scroll_area.scrollbarGeometry(.{
             .x = entry.rect.x,
             .y = entry.rect.y,
             .w = entry.rect.width,
@@ -642,7 +642,7 @@ test "SessionDock partial item keeps one content clip for paint and hit testing"
 // 사용자 보고 회귀: 목록을 스크롤하면 카드 글자가 자기 카드 밖으로 새고 펼친 카드의 버튼이 빈 상자가
 // 됐다. 루트 코즈는 렌더가 아니라 layout이다 — `content`는 `fill` 컨테이너이고 목록 아이템은 그 flex
 // 자식이라, 아이템 총합이 viewport를 넘으면 `distributeFlex`가 **모두 균등 축소**한다. 가상화는 마지막
-// 아이템이 항상 viewport를 넘도록 창을 잡으므로(scroll_view.project) 이 축소는 예외가 아니라 상시 상태다.
+// 아이템이 항상 viewport를 넘도록 창을 잡으므로(scroll_area.project) 이 축소는 예외가 아니라 상시 상태다.
 //
 // 그런데 scroll projection·view의 텍스트 offset은 축소 전 `DockMetrics`를 읽는다. 즉 published rect와
 // 스크롤/그리기 좌표가 서로 다른 높이를 쓰게 되고, 이는 문서가 명시적으로 금지한 상태다

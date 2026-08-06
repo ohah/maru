@@ -8,6 +8,7 @@
 const std = @import("std");
 const layout = @import("layout.zig");
 const ui_style = @import("style.zig");
+const scroll_area = @import("scroll_area.zig");
 
 pub const UiId = u64;
 pub const UiActionId = u64;
@@ -78,6 +79,42 @@ pub const ButtonOptions = struct {
     leading_icon: ?LeadingIconProps = null,
 };
 
+/// 스크롤바 한 조각(track 또는 thumb)이 발행될 때 실릴 것들. tree는 색·의미를 모르므로 소비처가
+/// 준 값을 그대로 옮긴다.
+pub const ScrollbarPart = struct {
+    id: UiId,
+    action: UiAction,
+    paint: PaintStyle,
+};
+
+/// `scrollView` 선언에 실리는 스크롤 상태. 이 값들이 있어야 `build`가 가상화 평행이동과 track/thumb
+/// 발행을 **소비처 대신** 할 수 있다(docs/scroll-area.md §4.1).
+pub const ScrollDeclaration = struct {
+    /// 지금 스크롤 위치. 스크롤바 thumb의 자리를 정한다.
+    offset_px: u32 = 0,
+    /// 가상화 때문에 자식은 보이는 창뿐이므로, 전체가 얼마나 긴지는 이 값으로만 알 수 있다.
+    content_h_px: u32 = 0,
+    /// 창의 첫 자식이 시작하는 local y(0이거나 음수). 자식 subtree 전체가 이만큼 평행이동한다.
+    first_item_origin_y_px: i32 = 0,
+    /// 컨테이너 오른쪽에 확보된 여백. 스크롤바는 **그 안에** 놓여 목록 위에 겹치지 않는다.
+    gutter_px: f32 = 0,
+    metrics: scroll_area.ScrollbarMetrics = .{ .width_px = 0, .inset_x_px = 0, .min_thumb_px = 0 },
+    /// 둘 다 있어야 스크롤바를 발행한다. 없으면 가상화 평행이동만 한다.
+    track: ?ScrollbarPart = null,
+    thumb: ?ScrollbarPart = null,
+    /// track/thumb이 함께 선언하는 drag payload. tree는 이 값의 의미를 모른다.
+    drag: ?DragDeclaration = null,
+};
+
+pub const ScrollAreaOptions = struct {
+    id: UiId,
+    style: layout.UiStyle = .{},
+    direction: layout.Direction = .column,
+    justify: layout.Justify = .start,
+    align_items: layout.Align = .stretch,
+    scroll: ScrollDeclaration = .{},
+};
+
 pub const NodeProps = union(enum) {
     container: struct {
         direction: layout.Direction,
@@ -113,9 +150,17 @@ pub const NodeProps = union(enum) {
         measure_context: ?*const anyopaque,
         measure: ?layout.MeasureFn,
     },
+    /// 스크롤 컨테이너. `container`와 같은 flex 자식 배치를 하되 `overflow`가 **항상** clip이고,
+    /// 자식 subtree를 가상화 origin만큼 평행이동하며, 자식들 직후에 스크롤바 entry를 낸다.
+    scroll_area: struct {
+        direction: layout.Direction,
+        justify: layout.Justify,
+        align_items: layout.Align,
+        scroll: ScrollDeclaration,
+    },
 };
 
-pub const NodeKind = enum { container, card, button, text };
+pub const NodeKind = enum { container, card, button, text, scroll_area };
 
 /// children slice의 수명과 순서는 builder caller가 소유한다. node address나 형제 index는
 /// identity가 아니며, 한 build 안에 같은 `id`가 있으면 `DuplicateIdentity`로 끝난다.
@@ -131,6 +176,7 @@ pub const UiNode = struct {
             .card => .card,
             .button => .button,
             .text => .text,
+            .scroll_area => .scroll_area,
         };
     }
 };
@@ -146,6 +192,23 @@ pub fn container(options: ContainerOptions, children: []const UiNode) UiNode {
             .justify = options.justify,
             .align_items = options.align_items,
             .overflow = options.overflow,
+        } },
+        .children = children,
+    };
+}
+
+/// 스크롤 컨테이너 선언. 소비처는 이것 하나만 부르고, 평행이동·clip·track/thumb 발행은 `build`가
+/// 한다(docs/scroll-area.md §4.1). `overflow`를 받지 않는 것은 의도다 — 스크롤 컨테이너가 자기 자식을
+/// 안 자르면 목록이 고정 chrome 위로 새어 나간다.
+pub fn scrollArea(options: ScrollAreaOptions, children: []const UiNode) UiNode {
+    return .{
+        .id = options.id,
+        .style = options.style,
+        .props = .{ .scroll_area = .{
+            .direction = options.direction,
+            .justify = options.justify,
+            .align_items = options.align_items,
+            .scroll = options.scroll,
         } },
         .children = children,
     };
@@ -369,9 +432,80 @@ const BuildState = struct {
         };
         self.entry_count += 1;
 
+        // 가상화 평행이동은 **자식 rect를 만들 때** 적용한다. 사후에 완성된 entry를 옮기면 그때마다
+        // clip을 손으로 다시 접어야 하는데(도크가 그렇게 하고 있었다), 여기서 더하면 자식의 own_clip이
+        // 옮겨진 rect에서 나오고 `effective_clip`도 그 자리에서 정확히 접힌다.
+        const child_origin_y = rect.y + switch (node.props) {
+            .scroll_area => |value| @as(f32, @floatFromInt(value.scroll.first_item_origin_y_px)),
+            else => 0,
+        };
         for (node.children, child_rects) |child, child_rect| {
-            try self.appendSubtree(child, own_index, try offsetRect(child_rect, rect.x, rect.y), effective_clip, depth + 1, rect_stack_start + child_count);
+            try self.appendSubtree(child, own_index, try offsetRect(child_rect, rect.x, child_origin_y), effective_clip, depth + 1, rect_stack_start + child_count);
         }
+
+        // 스크롤바는 **자식들을 낸 뒤, 부모로 돌아가기 전**에 낸다(§4). 배열 끝에 붙이면 preorder와
+        // subtree-range 불변식이 깨지고 root가 여럿이 된다. 여기서 내면 `parent_index`가 이 컨테이너라
+        // 두 불변식이 유지되고 z도 저절로 맞는다 — 자식들보다 뒤(위)이고 다음 sibling보다 앞(아래)이다.
+        if (node.props == .scroll_area) try self.appendScrollbar(node.props.scroll_area.scroll, own_index, rect, parent_clip);
+    }
+
+    /// track/thumb entry. clip이 `parent_clip`인 것이 핵심이다 — 스크롤바는 gutter(컨테이너 rect의
+    /// **오른쪽 바깥**)에 있어서 컨테이너의 overflow clip으로 접으면 통째로 잘려 사라진다. 배열 안에서는
+    /// 자식이지만 기하적으로는 형제 옆자리다(§4).
+    fn appendScrollbar(
+        self: *BuildState,
+        scroll: ScrollDeclaration,
+        container_index: usize,
+        container_rect: layout.UiRect,
+        ancestor_clip: ?layout.UiRect,
+    ) BuildError!void {
+        const track_part = scroll.track orelse return;
+        const thumb_part = scroll.thumb orelse return;
+        const bar = scroll_area.scrollbarGeometry(.{
+            .x = container_rect.x,
+            .y = container_rect.y,
+            .w = container_rect.width,
+            .h = container_rect.height,
+            .gutter_w = scroll.gutter_px,
+        }, scroll.content_h_px, scroll.offset_px, scroll.metrics) orelse return;
+
+        if (self.entry_count + 2 > self.options.max_entries) return error.MaxEntriesExceeded;
+        // track이 먼저, thumb이 나중이다 — `hitAction`이 reverse z-order라 마지막 entry가 이기고,
+        // 순서가 뒤집히면 thumb 위 down이 track click으로 판정돼 드래그 대신 점프가 일어난다.
+        self.appendScrollbarPart(track_part, container_index, ancestor_clip, scroll.drag, .{
+            .x = bar.track_x,
+            .y = bar.track_y,
+            .width = bar.track_w,
+            .height = bar.track_h,
+        });
+        self.appendScrollbarPart(thumb_part, container_index, ancestor_clip, scroll.drag, .{
+            .x = bar.track_x,
+            .y = bar.thumb_y,
+            .width = bar.track_w,
+            .height = bar.thumb_h,
+        });
+    }
+
+    fn appendScrollbarPart(
+        self: *BuildState,
+        part: ScrollbarPart,
+        container_index: usize,
+        ancestor_clip: ?layout.UiRect,
+        drag: ?DragDeclaration,
+        rect: layout.UiRect,
+    ) void {
+        self.buffers.entries[self.entry_count] = .{
+            .id = part.id,
+            .parent_index = container_index,
+            .kind = .card,
+            .rect = rect,
+            .effective_clip = ancestor_clip,
+            .own_clip = null,
+            .action = part.action,
+            .drag = drag,
+            .visual = .{ .card = .{ .variant = .surface, .paint = part.paint } },
+        };
+        self.entry_count += 1;
     }
 };
 
@@ -411,6 +545,16 @@ fn containerFor(node: UiNode, rect: layout.UiRect) BuildError!layout.FlexContain
             .justify = value.justify,
             .align_items = value.align_items,
             .overflow = value.overflow,
+        },
+        .scroll_area => |value| .{
+            .style = node.style,
+            .size = .{ .width = rect.width, .height = rect.height },
+            .direction = value.direction,
+            .justify = value.justify,
+            .align_items = value.align_items,
+            // 스크롤 컨테이너는 언제나 자른다. 선택지로 두면 소비처가 잊는 날 목록이 고정 chrome
+            // 위로 새어 나간다.
+            .overflow = .clip,
         },
         .card => |value| .{
             .style = node.style,
@@ -457,7 +601,7 @@ fn actionFor(node: UiNode) ?UiAction {
 
 fn visualFor(node: UiNode) VisualProps {
     return switch (node.props) {
-        .container => .none,
+        .container, .scroll_area => .none,
         .card => |value| .{ .card = .{ .variant = value.variant, .paint = value.paint } },
         // `leading_icon`도 함께 실어야 한다. 빠뜨리면 builder가 검증·계산한 슬롯이 published entry에
         // 도달하지 못해, paint/lowering이 placement를 만들 길이 없다(화면에 영원히 안 나온다).
@@ -721,6 +865,162 @@ test "nested rect offset overflow fails closed instead of publishing infinity" {
         .child_rects = &child_rects,
     }));
     for (entries) |entry| try std.testing.expectEqual(emptyRectEntry(), entry);
+}
+
+const scroll_fixture = struct {
+    const track_id: UiId = 0x5000;
+    const thumb_id: UiId = 0x5001;
+    const payload: u64 = 0x5342;
+
+    fn node(children: []const UiNode, origin_y: i32, offset_px: u32) UiNode {
+        return scrollArea(.{
+            .id = 0x100,
+            .style = .{ .width = .{ .percent = 1 }, .height = .{ .fill = 1 } },
+            .scroll = .{
+                .offset_px = offset_px,
+                .content_h_px = 4000,
+                .first_item_origin_y_px = origin_y,
+                .gutter_px = 20,
+                .metrics = .{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 },
+                .track = .{ .id = track_id, .action = .{ .id = 71 }, .paint = .{} },
+                .thumb = .{ .id = thumb_id, .action = .{ .id = 72 }, .paint = .{} },
+                .drag = .{ .payload = payload, .axis = .vertical, .threshold_px = 0 },
+            },
+        }, children);
+    }
+
+    fn run(root: UiNode, storage: anytype) BuildError!UiRectTree {
+        return build(root, .{
+            .root_size = .{ .width = 200, .height = 300 },
+            .max_entries = 16,
+            .max_depth = 4,
+        }, .{
+            .entries = &storage.entries,
+            .items = &storage.items,
+            .flex_scratch = &storage.flex_scratch,
+            .child_rects = &storage.child_rects,
+        });
+    }
+};
+
+const ScrollStorage = struct {
+    entries: [16]RectEntry = undefined,
+    items: [16]layout.Item = undefined,
+    flex_scratch: [16]layout.FlexScratch = undefined,
+    child_rects: [16]layout.UiRect = undefined,
+};
+
+test "scrollView emits its scrollbar inside preorder, not appended at the array end" {
+    const children = [_]UiNode{
+        container(.{ .id = 0x201, .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = 60 }, .flex = .{ .shrink = 0 } } }, &.{}),
+        container(.{ .id = 0x202, .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = 60 }, .flex = .{ .shrink = 0 } } }, &.{}),
+    };
+    var storage = ScrollStorage{};
+    const root = container(.{ .id = 1 }, &.{scroll_fixture.node(&children, 0, 0)});
+    const tree = try scroll_fixture.run(root, &storage);
+
+    const view_index = tree.find(0x100) orelse return error.TestUnexpectedResult;
+    const track_index = tree.find(scroll_fixture.track_id) orelse return error.TestUnexpectedResult;
+    const thumb_index = tree.find(scroll_fixture.thumb_id) orelse return error.TestUnexpectedResult;
+
+    // `parent_index`가 스크롤 컨테이너다. `null`로 배열 끝에 붙이면 root가 여럿이 되어 preorder와
+    // subtree-range 불변식이 함께 깨진다(도크가 SV1b 전에 그렇게 하고 있었다).
+    try std.testing.expectEqual(@as(?usize, view_index), tree.entries[track_index].parent_index);
+    try std.testing.expectEqual(@as(?usize, view_index), tree.entries[thumb_index].parent_index);
+    // 자식들 **뒤**, 그리고 preorder가 유지된다(부모가 항상 먼저).
+    try std.testing.expect(track_index > tree.find(0x202).?);
+    try std.testing.expect(view_index < track_index);
+    // track이 먼저, thumb이 나중 — `hitAction`은 reverse z-order라 마지막이 이긴다.
+    try std.testing.expectEqual(track_index + 1, thumb_index);
+    // 이 tree의 root는 하나뿐이다.
+    var roots: usize = 0;
+    for (tree.entries) |entry| {
+        if (entry.parent_index == null) roots += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), roots);
+
+    // drag 선언이 두 조각 모두에 실린다 — track을 눌러 점프한 뒤 그대로 끌 수 있어야 한다.
+    try std.testing.expectEqual(scroll_fixture.payload, tree.entries[track_index].drag.?.payload);
+    try std.testing.expectEqual(scroll_fixture.payload, tree.entries[thumb_index].drag.?.payload);
+}
+
+test "scrollView scrollbar keeps the ancestor clip so the gutter does not clip it away" {
+    const children = [_]UiNode{
+        container(.{ .id = 0x201, .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = 60 }, .flex = .{ .shrink = 0 } } }, &.{}),
+    };
+    var storage = ScrollStorage{};
+    const root = container(.{ .id = 1 }, &.{scroll_fixture.node(&children, 0, 0)});
+    const tree = try scroll_fixture.run(root, &storage);
+
+    const view = tree.entries[tree.find(0x100).?];
+    const track = tree.entries[tree.find(scroll_fixture.track_id).?];
+
+    // 스크롤바는 컨테이너 rect의 **오른쪽 바깥**(gutter)에 있다.
+    try std.testing.expect(track.rect.x >= view.rect.x + view.rect.width);
+    // 그래서 컨테이너의 overflow clip으로 접으면 통째로 사라진다. 조상 clip을 받아야 살아남는다.
+    const own = view.own_clip orelse return error.TestUnexpectedResult;
+    try std.testing.expect(track.rect.x >= own.x + own.width);
+    const clip = track.effective_clip;
+    if (clip) |c| try std.testing.expect(track.rect.x < c.x + c.width);
+}
+
+test "scrollView translates its subtree and refolds each clip at the moved position" {
+    const nested = [_]UiNode{
+        container(.{ .id = 0x301, .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = 30 } } }, &.{}),
+    };
+    const children = [_]UiNode{
+        container(.{
+            .id = 0x201,
+            .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = 60 }, .flex = .{ .shrink = 0 } },
+            .overflow = .clip,
+        }, &nested),
+    };
+    var storage = ScrollStorage{};
+    const flat = try scroll_fixture.run(container(.{ .id = 1 }, &.{scroll_fixture.node(&children, 0, 0)}), &storage);
+    const flat_child_y = flat.entries[flat.find(0x201).?].rect.y;
+    const flat_nested_y = flat.entries[flat.find(0x301).?].rect.y;
+    const flat_track_y = flat.entries[flat.find(scroll_fixture.track_id).?].rect.y;
+
+    var scrolled_storage = ScrollStorage{};
+    const scrolled = try scroll_fixture.run(container(.{ .id = 1 }, &.{scroll_fixture.node(&children, -25, 900)}), &scrolled_storage);
+
+    // 자식과 **그 자손**이 함께 움직인다. 직계 자식만 옮기면 펼친 카드의 detail이 제자리에 남아
+    // 이웃 카드 위에 겹쳐 그려진다(사용자 보고 회귀).
+    const child = scrolled.entries[scrolled.find(0x201).?];
+    const nested_entry = scrolled.entries[scrolled.find(0x301).?];
+    try std.testing.expectEqual(flat_child_y - 25, child.rect.y);
+    try std.testing.expectEqual(flat_nested_y - 25, nested_entry.rect.y);
+
+    // clip도 옮겨진 자리에서 다시 접힌다 — 반쯤 걸친 자식은 그 보이는 부분만 남는다.
+    const view = scrolled.entries[scrolled.find(0x100).?];
+    const child_clip = child.effective_clip orelse return error.TestUnexpectedResult;
+    const view_clip = view.own_clip orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(view_clip.y, child_clip.y);
+    try std.testing.expect(child_clip.height < child.rect.height);
+
+    // 스크롤바는 평행이동을 받지 않는다 — 받으면 스크롤할 때 목록과 같이 흘러내린다.
+    try std.testing.expectEqual(flat_track_y, scrolled.entries[scrolled.find(scroll_fixture.track_id).?].rect.y);
+    // 그러나 thumb은 offset을 따라 내려간다.
+    const thumb = scrolled.entries[scrolled.find(scroll_fixture.thumb_id).?];
+    try std.testing.expect(thumb.rect.y > flat.entries[flat.find(scroll_fixture.thumb_id).?].rect.y);
+}
+
+test "scrollView publishes no scrollbar when nothing overflows or the gutter is too narrow" {
+    const children = [_]UiNode{
+        container(.{ .id = 0x201, .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = 60 }, .flex = .{ .shrink = 0 } } }, &.{}),
+    };
+    var storage = ScrollStorage{};
+    var fits = scroll_fixture.node(&children, 0, 0);
+    fits.props.scroll_area.scroll.content_h_px = 10; // viewport보다 짧다
+    const fits_tree = try scroll_fixture.run(container(.{ .id = 1 }, &.{fits}), &storage);
+    try std.testing.expect(fits_tree.find(scroll_fixture.track_id) == null);
+
+    var narrow_storage = ScrollStorage{};
+    var narrow = scroll_fixture.node(&children, 0, 0);
+    narrow.props.scroll_area.scroll.gutter_px = 2; // track 폭(8)을 못 담는다
+    const narrow_tree = try scroll_fixture.run(container(.{ .id = 1 }, &.{narrow}), &narrow_storage);
+    // 목록 위에 겹쳐 그리는 대안은 두지 않는다 — 아예 안 그린다.
+    try std.testing.expect(narrow_tree.find(scroll_fixture.track_id) == null);
 }
 
 test "rebuild counter advances only after completed tree build" {

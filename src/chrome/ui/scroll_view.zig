@@ -389,6 +389,41 @@ test "scrollbar drag round trips every reachable offset and clamps beyond the tr
     try std.testing.expectEqual(@as(u32, 0), geometry.offsetForPointer(std.math.nan(f64), 0));
 }
 
+test "withOffset predicts exactly what the next published geometry will be" {
+    // 이 함수는 track click이 목록을 옮긴 **직후**, 아직 새 tree가 발행되기 전에 이어지는 드래그의
+    // grab 기준점을 만든다. 그러므로 계약은 "그럴듯한 thumb 위치"가 아니라 **다음 프레임이 발행할
+    // 바로 그 값**이다. 두 경로가 갈리면 손을 뗐다 잡을 때마다 thumb이 눈에 띄게 튄다.
+    //
+    // 이 계약을 보는 판정자가 없었다: `withOffset`의 비율을 절반으로 바꿔도 전체 스위트가 초록이었다.
+    const m = ScrollbarMetrics{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 };
+    const content = ContentRect{ .x = 10, .y = 20, .w = 200, .h = 400, .gutter_w = 40 };
+    const at_top = scrollbarGeometry(content, 1600, 0, m).?;
+    for ([_]u32{ 0, 1, 250, 600, 1199, 1200, 99_999 }) |offset| {
+        const published = scrollbarGeometry(content, 1600, offset, m).?;
+        try std.testing.expectApproxEqAbs(published.thumb_y, at_top.withOffset(offset).thumb_y, 0.01);
+    }
+    // 스크롤할 것이 없으면 옮길 곳도 없다.
+    const fixed = ScrollbarGeometry{ .track_x = 0, .track_y = 0, .track_w = 8, .track_h = 100, .thumb_y = 0, .thumb_h = 100, .max_offset_px = 0 };
+    try std.testing.expectEqual(@as(f32, 0), fixed.withOffset(50).thumb_y);
+}
+
+test "thumb and track containment use half-open bounds so adjacent pixels never both hit" {
+    const geometry = ScrollbarGeometry{ .track_x = 100, .track_y = 20, .track_w = 8, .track_h = 400, .thumb_y = 60, .thumb_h = 40, .max_offset_px = 1200 };
+    // thumb의 위 경계는 포함, 아래 경계는 제외다. 닫힌 구간이면 thumb 바로 아래 1px이 thumb이자
+    // track이라 같은 down이 드래그와 점프 둘 다로 읽힌다.
+    try std.testing.expect(geometry.thumbContains(60));
+    try std.testing.expect(geometry.thumbContains(99.9));
+    try std.testing.expect(!geometry.thumbContains(100));
+    try std.testing.expect(!geometry.thumbContains(59.9));
+    // track은 x도 본다 — gutter 밖 클릭이 스크롤로 새면 안 된다.
+    try std.testing.expect(geometry.trackContains(100, 20));
+    try std.testing.expect(geometry.trackContains(107.9, 419.9));
+    try std.testing.expect(!geometry.trackContains(108, 200));
+    try std.testing.expect(!geometry.trackContains(99.9, 200));
+    try std.testing.expect(!geometry.trackContains(104, 420));
+    try std.testing.expect(!geometry.trackContains(104, 19.9));
+}
+
 test "track click centers the thumb at the pointer" {
     const m = ScrollbarMetrics{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 };
     const geometry = scrollbarGeometry(.{ .x = 0, .y = 0, .w = 180, .h = 400, .gutter_w = 40 }, 1200, 0, m).?;

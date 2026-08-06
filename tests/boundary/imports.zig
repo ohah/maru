@@ -104,7 +104,10 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     // 이름으로 읽지 않는다.
     // SB1-S2a(상태바 ABI seam)로 또 바뀐다. count는 4 그대로다 — 새 값은 `dock_layout` 권위에서
     // 읽어 스탬프에 싣는 것뿐이고, 필드를 이름으로 읽지 않는다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "0fbb4890071fa8dc48fb4a92915b05da282268708dd8bf944cf3a4ca4f4a11e6" },
+    // SV1d(도크 그룹 헤더 sticky)가 걸린 그룹 산출·그룹 DTO 단일 출처·스크롤 텍스트 뷰포트 배선으로
+    // 또 바뀐다. count는 4 그대로다 — `archiveStickyGroupFor`는 entry union을 switch로 보고,
+    // `agentSessionDockGroupItem`은 필드를 이름이 아니라 값으로 옮긴다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "6ca736a0b97198e34d63b4573adbdcae578e59cd1102f88d670c3744a7b9c028" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

@@ -94,7 +94,9 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     // SV1a(스크롤 좌표계를 `chrome/ui/scroll_area.zig`로 이관)가 props·버퍼 크기 단일 출처 추출과 스크롤
     // 판정자 추가로 또 바꾼다. count는 4 그대로다 — 옮긴 것은 값 계산(높이·offset·버퍼 크기)이고,
     // `ArchiveScrollItems`·`agentSessionDockProps`·`bufferSizes` 어느 것도 필드를 이름으로 읽지 않는다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "8610a4fe4fc6ce2daaaa757df0cec261d2f7b8790bade3b2877f7706d30b62ed" },
+    // SV1b의 `ScrollView` → `ScrollArea` 리네이밍이 같은 파일의 타입 참조를 바꾸며 또 바뀐다.
+    // count는 4 그대로다 — 이름만 달라졌고 읽는 방식은 그대로다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "1e6a0fffef74794c1de7b0db2d9ae8782a53ed5bffa0cf2aa05c685b5784daee" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

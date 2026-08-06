@@ -3253,7 +3253,6 @@ pub const AppSession = struct {
     agent_session_archive_scroll: chrome.ui.scroll_area.State = .{},
     /// Precise AppKit wheel input is fractional in points. This residue belongs only to the dock;
     /// sharing terminal `wheel_accum` would make one surface steal another's first pixel.
-    agent_session_archive_wheel_residue_px: f64 = 0,
     /// Session Dock scrollbar를 잡고 있는 동안의 상태. `null`이면 잡고 있지 않다. 기하를 down 시점에
     /// 고정하는 이유는 file explorer scrollbar와 같다 — 드래그 도중 thumb이 움직이는데 매 move마다
     /// 새 기하로 다시 계산하면 손가락이 잡은 지점이 미끄러진다.
@@ -4052,7 +4051,7 @@ pub const AppSession = struct {
         self.restoreAgentSessionDockScrollAnchor(prior_scroll_anchor, prior_scroll_offset);
         for (old_records.items) |*record| record.deinit(self.allocator);
         old_records.deinit(self.allocator);
-        self.agent_session_archive_wheel_residue_px = 0;
+        self.agent_session_archive_scroll.dropWheelResidue();
         if (result.complete) {
             self.agent_session_archive_loading = false;
             self.agent_session_archive_completed_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
@@ -14222,14 +14221,14 @@ pub const AppSession = struct {
             .end => self.agent_session_archive_scroll.setOffsetPx(projection.max_offset_px, projection.max_offset_px),
             else => return false,
         };
-        self.agent_session_archive_wheel_residue_px = 0;
+        self.agent_session_archive_scroll.dropWheelResidue();
         if (changed) self.metal_dirty = true;
         return true;
     }
 
     fn resetAgentSessionDockScroll(self: *AppSession) void {
         self.agent_session_archive_scroll.reset();
-        self.agent_session_archive_wheel_residue_px = 0;
+        self.agent_session_archive_scroll.dropWheelResidue();
     }
 
     fn rebuildAgentSessionArchiveFilter(self: *AppSession) void {
@@ -14298,7 +14297,7 @@ pub const AppSession = struct {
         self.closeAgentSessionInlineDetail();
         self.rebuildAgentSessionArchiveProjection();
         self.agent_session_archive_scroll.clamp(self.agentSessionDockScrollProjection().max_offset_px);
-        self.agent_session_archive_wheel_residue_px = 0;
+        self.agent_session_archive_scroll.dropWheelResidue();
         self.metal_dirty = true;
     }
 
@@ -22377,30 +22376,25 @@ pub const AppSession = struct {
             layout_math.pointInRect(x_px, y_px, self.dockGeometry().tree_content);
         // Do not carry a sub-pixel trackpad remainder from the dock into a later re-entry. The
         // next dock gesture must start from its own physical direction and owner.
-        if (!session_dock_wheel_target) self.agent_session_archive_wheel_residue_px = 0;
+        // 도크를 떠났으면 분수 잔여를 남기지 않는다 — 다시 들어왔을 때 첫 틱이 엉뚱하게 튄다.
+        if (!session_dock_wheel_target) self.agent_session_archive_scroll.dropWheelResidue();
         if (session_dock_wheel_target) {
-            // The dock consumes its own wheel event even at either clamp boundary. Otherwise a
-            // trackpad gesture that reaches the list end leaks into the terminal/PTy behind it.
-            if (!std.math.isFinite(delta_y)) return;
-            if (delta_y * self.agent_session_archive_wheel_residue_px < 0)
-                self.agent_session_archive_wheel_residue_px = 0;
+            // 도크는 양쪽 clamp 경계에서도 자기 휠 이벤트를 소비한다. 안 그러면 목록 끝에 닿은
+            // 트랙패드 제스처가 뒤 터미널/PTY로 샌다.
             const dock_scale_milli = self.agentSessionDockScaleMilli();
             const m = chrome.components.session_dock.types.DockMetrics.resolve(dock_scale_milli);
+            // precise(트랙패드)는 논리 픽셀, 아니면 카드 한 장이 한 틱이다.
             const unit: f64 = if (precise)
                 @as(f64, @floatFromInt(dock_scale_milli)) / 1000.0
             else
                 @as(f64, @floatFromInt(m.card_h));
-            const next_residue = self.agent_session_archive_wheel_residue_px + delta_y * unit * @as(f64, self.appearance.scroll_multiplier);
-            // A finite NSEvent delta can still overflow after scaling. Clamp before conversion so
-            // malformed/automated input cannot trap the main thread at `@intFromFloat`.
-            if (!std.math.isFinite(next_residue)) return;
-            const safe_limit: f64 = @floatFromInt(std.math.maxInt(i64) - 1);
-            self.agent_session_archive_wheel_residue_px = std.math.clamp(next_residue, -safe_limit, safe_limit);
-            const whole: i64 = @intFromFloat(std.math.trunc(self.agent_session_archive_wheel_residue_px));
-            self.agent_session_archive_wheel_residue_px -= @as(f64, @floatFromInt(whole));
+            // 잔여 축적·방향 전환·정수부 소비·overflow 가드는 `State`가 소유한다.
             const projection = self.agentSessionDockScrollProjection();
-            if (whole != 0 and self.agent_session_archive_scroll.scrollByPx(-whole, projection.max_offset_px))
-                self.metal_dirty = true;
+            if (self.agent_session_archive_scroll.scrollByWheel(
+                delta_y * @as(f64, self.appearance.scroll_multiplier),
+                unit,
+                projection.max_offset_px,
+            )) self.metal_dirty = true;
             return;
         }
         // 방향이 뒤집히면 1줄 미만 잔여를 버린다 — 이전 방향의 residue가 첫 반대 틱을 상쇄해
@@ -33170,7 +33164,7 @@ pub const AppSession = struct {
         if (!self.agent_session_archive_scroll.setOffsetPx(offset_px, projection.max_offset_px)) return;
         // 휠 잔여분은 스크롤 위치의 함수가 아니라 그 위치로 가는 도중의 상태다. 다른 경로가 위치를
         // 확정했으면 남은 잔여분은 의미가 없다(키보드 스크롤과 같은 규율).
-        self.agent_session_archive_wheel_residue_px = 0;
+        self.agent_session_archive_scroll.dropWheelResidue();
         self.metal_dirty = true;
     }
 
@@ -67288,9 +67282,9 @@ test "도크 키보드 스크롤은 한 항목을 남기고, 끝으로 가고, �
     try std.testing.expectEqual(@as(u32, 0), session.agent_session_archive_scroll.offset_y_px);
 
     // 키가 위치를 확정했으므로 휠 잔여는 버린다 — 남기면 다음 휠 틱이 옛 방향에서 시작한다.
-    session.agent_session_archive_wheel_residue_px = 3;
+    session.agent_session_archive_scroll.wheel_residue_px = 3;
     try std.testing.expect(session.handleAgentSessionDockScrollKey(.{ .key = .page_down, .modifiers = .{} }));
-    try std.testing.expectEqual(@as(f64, 0), session.agent_session_archive_wheel_residue_px);
+    try std.testing.expectEqual(@as(f64, 0), session.agent_session_archive_scroll.wheel_residue_px);
 
     // 도크가 키보드를 놓으면 같은 키가 더 이상 도크 것이 아니다.
     session.agent_session_dock_key_focus = false;
@@ -67352,20 +67346,20 @@ test "스크롤바 드래그는 자기 payload만 먹고 놓기 직전 좌표를
     try std.testing.expect(after_move > start);
 
     // ③ 같은 좌표를 다시 흡수해도 값이 그대로면 아무 일도 하지 않는다(track 끝에 닿은 채 미는 동안).
-    session.agent_session_archive_wheel_residue_px = 7;
+    session.agent_session_archive_scroll.wheel_residue_px = 7;
     session.absorbAgentSessionDockScrollDrag(.{ .moved = .{ .payload = payload, .x_px = @as(f64, bar.track_x), .y_px = bottom_y } });
     session.applyAgentSessionDockScrollDrag();
     try std.testing.expectEqual(after_move, session.agent_session_archive_scroll.offset_y_px);
     // 위치가 안 바뀌었으므로 다른 상태도 건드리지 않았다.
-    try std.testing.expectEqual(@as(f64, 7), session.agent_session_archive_wheel_residue_px);
+    try std.testing.expectEqual(@as(f64, 7), session.agent_session_archive_scroll.wheel_residue_px);
 
     // ④ 위치가 **실제로 바뀌면** 휠 잔여는 버린다. 잔여는 그 위치로 가는 도중의 상태라, 다른 입구가
     //    위치를 확정한 뒤에는 의미가 없다(남기면 다음 휠 틱이 엉뚱한 곳에서 시작한다).
-    session.agent_session_archive_wheel_residue_px = 5;
+    session.agent_session_archive_scroll.wheel_residue_px = 5;
     const up_y = @as(f64, bar.track_y) + 1;
     session.absorbAgentSessionDockScrollDrag(.{ .dropped = .{ .payload = payload, .x_px = @as(f64, bar.track_x), .y_px = up_y } });
     try std.testing.expect(session.agent_session_archive_scroll.offset_y_px < after_move);
-    try std.testing.expectEqual(@as(f64, 0), session.agent_session_archive_wheel_residue_px);
+    try std.testing.expectEqual(@as(f64, 0), session.agent_session_archive_scroll.wheel_residue_px);
     // drop이 드래그를 끝낸다.
     try std.testing.expect(!session.agent_session_dock_scroll_drag.active);
 }
@@ -67393,14 +67387,14 @@ test "도크 휠은 포인터가 도크 위일 때만, 목록 방향으로, 상�
     // 잔여가 **실제로 남아 있는 상태**에서 나가야 그것이 지워지는지 볼 수 있다. non-precise 델타는
     // 카드 높이 단위라 잔여를 남기지 않으므로, precise 틱으로 1픽셀 미만을 먼저 쌓는다.
     session.scrollWheel(-0.3, 0, true, inside_x, inside_y);
-    try std.testing.expect(session.agent_session_archive_wheel_residue_px != 0);
+    try std.testing.expect(session.agent_session_archive_scroll.wheel_residue_px != 0);
     const before_outside = session.agent_session_archive_scroll.offset_y_px;
 
     const outside_x: f64 = @floatFromInt(content.x / 2);
     session.scrollWheel(-3, 0, false, outside_x, inside_y);
     try std.testing.expectEqual(before_outside, session.agent_session_archive_scroll.offset_y_px);
     // 도크를 떠났으므로 분수 잔여도 남기지 않는다 — 남기면 다시 들어왔을 때 첫 틱이 엉뚱하게 튄다.
-    try std.testing.expectEqual(@as(f64, 0), session.agent_session_archive_wheel_residue_px);
+    try std.testing.expectEqual(@as(f64, 0), session.agent_session_archive_scroll.wheel_residue_px);
 
     // ③ 위로 되돌리면 원래 자리로 돌아온다(②에서 쌓은 1픽셀 미만은 offset을 안 움직였다).
     try std.testing.expectEqual(after_down, before_outside);
@@ -67427,7 +67421,7 @@ test "도크 휠의 분수 잔여는 한 번만 소비되고 방향이 바뀌면
     // 잔여로만 쌓인다 — 그러지 않으면 미세한 손가락 움직임이 한 픽셀씩 튄다.
     session.scrollWheel(-0.6, 0, true, inside_x, inside_y);
     try std.testing.expectEqual(@as(u32, 0), session.agent_session_archive_scroll.offset_y_px);
-    try std.testing.expect(session.agent_session_archive_wheel_residue_px != 0);
+    try std.testing.expect(session.agent_session_archive_scroll.wheel_residue_px != 0);
 
     // 두 번째로 1픽셀을 넘긴다(0.6 + 0.6 = 1.2).
     session.scrollWheel(-0.6, 0, true, inside_x, inside_y);
@@ -67435,11 +67429,11 @@ test "도크 휠의 분수 잔여는 한 번만 소비되고 방향이 바뀌면
     // 두 번 합쳐 1픽셀을 넘겼으니 이제 움직인다.
     try std.testing.expect(moved > 0);
     // **소비한 정수부는 잔여에서 빠져야 한다.** 안 빼면 같은 픽셀을 계속 다시 쓰면서 가속한다.
-    try std.testing.expect(@abs(session.agent_session_archive_wheel_residue_px) < 1);
+    try std.testing.expect(@abs(session.agent_session_archive_scroll.wheel_residue_px) < 1);
 
     // 방향을 뒤집으면 이전 방향의 잔여를 버린다 — 남겨 두면 첫 반대 틱이 상쇄돼 굼뜨게 느껴진다.
     session.scrollWheel(0.1, 0, true, inside_x, inside_y);
-    try std.testing.expect(session.agent_session_archive_wheel_residue_px > 0);
+    try std.testing.expect(session.agent_session_archive_scroll.wheel_residue_px > 0);
 }
 
 // 스크롤 좌표계를 `chrome/ui/scroll_area.zig`로 옮긴 뒤, 그 모듈은 촘촘한데 **도크가 그 모듈에 넘기는

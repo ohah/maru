@@ -15,10 +15,14 @@
 const std = @import("std");
 const continuous_drag = @import("continuous_drag.zig");
 
-/// 소비처가 소유하는 상태다. 이 모듈은 legal range와 전이만 정한다. 분수 wheel 입력은 일부러 밖에
-/// 남긴다 — tree rect와 GPU draw rect가 정수여야 셀 경계에서 흔들리지 않는다.
+/// 소비처가 소유하는 상태다. 이 모듈은 legal range와 전이만 정한다.
 pub const State = struct {
+    /// 발행되는 값은 언제나 정수 backing pixel이다 — tree rect와 GPU draw rect가 정수여야 셀 경계에서
+    /// 흔들리지 않는다.
     offset_y_px: u32 = 0,
+    /// 아직 1픽셀을 못 채운 분수 wheel 입력. 여기 남아 있다가 다음 틱과 합쳐져 정수가 되면 소비된다.
+    /// **이 값은 밖으로 나가지 않는다** — 발행·hit-test는 `offset_y_px`만 본다.
+    wheel_residue_px: f64 = 0,
 
     pub fn scrollByPx(self: *State, delta_px: i64, max_offset_px: u32) bool {
         const current: u64 = self.offset_y_px;
@@ -43,11 +47,40 @@ pub const State = struct {
         const clamped: u32 = @intCast(std.math.clamp(requested_offset_px, @as(i64, 0), @as(i64, max_offset_px)));
         if (clamped == self.offset_y_px) return false;
         self.offset_y_px = clamped;
+        // 다른 입구가 위치를 확정했다 — 가는 도중의 잔여는 의미가 없다.
+        self.wheel_residue_px = 0;
         return true;
     }
 
     pub fn reset(self: *State) void {
-        self.offset_y_px = 0;
+        self.* = .{};
+    }
+
+    /// 분수 wheel 델타를 흡수해 정수 픽셀이 찰 때마다 offset을 옮긴다.
+    ///
+    /// 세 가지가 여기 모여 있다. **방향이 뒤집히면 이전 잔여를 버린다** — 남겨 두면 첫 반대 틱이
+    /// 상쇄돼 방향 전환이 굼뜨게 느껴진다. **소비한 정수부는 잔여에서 뺀다** — 안 빼면 같은 픽셀을
+    /// 반복해 쓰면서 가속한다. 그리고 유한하지 않거나 넘치는 입력은 흘려보내지 않는다 — 자동화된
+    /// 입력이 `@intFromFloat`에서 main thread를 트랩시킬 수 있다.
+    ///
+    /// 반환값은 offset이 실제로 움직였는지다(리페인트 신호).
+    pub fn scrollByWheel(self: *State, delta: f64, unit_px: f64, max_offset_px: u32) bool {
+        if (!std.math.isFinite(delta) or !std.math.isFinite(unit_px)) return false;
+        if (delta * self.wheel_residue_px < 0) self.wheel_residue_px = 0;
+        const next = self.wheel_residue_px + delta * unit_px;
+        if (!std.math.isFinite(next)) return false;
+        const safe_limit: f64 = @floatFromInt(std.math.maxInt(i64) - 1);
+        self.wheel_residue_px = std.math.clamp(next, -safe_limit, safe_limit);
+        const whole: i64 = @intFromFloat(std.math.trunc(self.wheel_residue_px));
+        self.wheel_residue_px -= @as(f64, @floatFromInt(whole));
+        if (whole == 0) return false;
+        return self.scrollByPx(-whole, max_offset_px);
+    }
+
+    /// 잔여만 버린다. 포인터가 이 스크롤 영역을 떠났거나 다른 입구(키보드·드래그)가 위치를 확정했을
+    /// 때 부른다 — 잔여는 그 위치로 **가는 도중**의 상태라, 위치가 확정되면 의미가 없다.
+    pub fn dropWheelResidue(self: *State) void {
+        self.wheel_residue_px = 0;
     }
 };
 

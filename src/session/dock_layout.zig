@@ -660,6 +660,16 @@ test "SB1-S1: status_bar_px는 작업영역·도크·divider를 그만큼 짧게
     // bottom 도크도 함께 올라와 상태바를 침범하지 않는다.
     try std.testing.expect(bar.dock.y + bar.dock.h <= bar.status_bar.y);
     try std.testing.expect(bar.divider.y + bar.divider.h <= bar.status_bar.y);
+
+    // **right 도크도 같은 계약을 진다.** bottom만 보면 "세로로 자르는 쪽만 맞다"에 그친다 — right는 폭을
+    // 나누지만 높이는 `dock_available`에서 오므로 상태바를 침범할 수 있는 경로가 따로 있다.
+    var right_in = base;
+    right_in.side = .right;
+    right_in.status_bar_px = 24;
+    const right = compute(right_in);
+    try std.testing.expect(right.dock.h > 0); // 계약이 공허하지 않은지(도크가 실제로 섰는지) 먼저 본다
+    try std.testing.expect(right.dock.y + right.dock.h <= right.status_bar.y);
+    try std.testing.expect(right.terminal.y + right.terminal.h <= right.status_bar.y);
 }
 
 // 조기 반환 셋(`!visible`·`dock_w==0`·`dock_h==0`)도 상태바를 날라야 한다. `Geometry.status_bar`에 기본값을

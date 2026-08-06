@@ -432,32 +432,35 @@ layer는 "합성 패스"의 의미만 남길 것인가. 후자를 택하면 도�
 
 ## 11. API 스케치
 
-아래는 **아직 존재하지 않는 코드**다. 계약이 실제 호출부에서 어떤 모양이 되는지 보이기 위한 것이고,
-구현이 이 시그니처를 그대로 따라야 한다는 뜻은 아니다. 지금 도크가 하는 일을 ScrollView로 옮겼을 때의
-흐름이다.
+아래 흐름에서 **상태와 투영은 이미 존재하고**(`chrome/ui/scroll_view.zig`), 측정 pass·`scrollView` 노드·
+drag 헬퍼는 아직 없다. 각 조각에 어느 쪽인지 적었다. 없는 부분은 계약이 실제 호출부에서 어떤 모양이
+되는지 보이기 위한 것이고, 구현이 그 시그니처를 그대로 따라야 한다는 뜻은 아니다.
 
 ```zig
-// 상태는 소비처가 소유한다. ScrollView는 그 값의 legal range와 전이만 정한다.
+// [있음] 상태는 소비처가 소유한다. ScrollView는 그 값의 legal range와 전이만 정한다.
 scroll: chrome.ui.scroll_view.State = .{},
 
-// ── 1. 측정 pass — 고정 chrome과 **자식 없는** 스크롤 컨테이너만 layout해 viewport를 확정한다.
-//      뷰포트 높이를 손으로 예측하지 않는다(§4.2).
+// ── 1. [없음 — SV1c] 측정 pass. 고정 chrome과 **자식 없는** 스크롤 컨테이너만 layout해 viewport를
+//      확정한다. 뷰포트 높이를 손으로 예측하지 않는다(§4.2).
 const measured = try tree.build(self.chromeRoot(&.{}), options, measure_buffers);
 const viewport_h_px = measured.rectOf(NodeIds.content).height;
 
-// ── 2. 그 viewport로 창을 정한다. 무엇을 build할지가 여기서 나온다(div와 반대 방향, §2.1).
-const window = chrome.ui.scroll_view.project(entries, entryKind, .{
-    .item_h_px = m.card_h,
-    .gap_px = m.item_gap,
-    // 펼친 카드처럼 한 항목만 높이가 다르면 그 예외를 metrics가 든다.
-    .expanded_index = expanded_index,
-    .expanded_h_px = m.card_h + m.expanded_detail_h + m.expanded_actions_h,
-}, viewport_h_px, self.scroll.offset_px);
+// ── 2. [있음] 그 viewport로 창을 정한다. 무엇을 build할지가 여기서 나온다(div와 반대 방향, §2.1).
+//      항목 높이는 **함수로** 묻는다 — 균일 높이를 전제하면 §3의 walk 계약이 깨진다. 도크는 그룹
+//      헤더·카드·펼친 카드가 각각 다르므로, 그 예외 전부가 `items` 한 자리에 모인다.
+const items = self.dockScrollItems(); // entries + 높이 규칙
+const window = chrome.ui.scroll_view.project(
+    items,
+    @TypeOf(items).heightPx,
+    items.extent(viewport_h_px),
+    self.scroll.offset_y_px,
+);
 
-// ── 3. 그 창의 item만 만든다. 보이지 않는 행은 노드도 텍스트도 만들지 않는다.
-const items = try self.buildItems(arena, window.first_index, window.end_exclusive);
+// ── 3. [있음 — 도크가 이미 이렇게 한다] 그 창의 item만 만든다. 보이지 않는 행은 노드도 텍스트도
+//      만들지 않는다.
+const item_nodes = try self.buildItems(arena, window.first_index, window.end_exclusive);
 
-// ── 4. 선언은 한 줄이다. clip·자식 shrink 금지·가상화 평행이동·track/thumb 발행은 `build`가 한다.
+// ── 4. [없음 — SV1b] 선언은 한 줄이다. clip·자식 shrink 금지·가상화 평행이동·track/thumb 발행은 `build`가 한다.
 top[3] = tree.scrollView(.{
     .id = NodeIds.content,
     .style = .{ .width = .{ .percent = 1 }, .height = .{ .fill = 1 } },
@@ -473,7 +476,9 @@ top[3] = tree.scrollView(.{
 const built = try tree.build(root, options, buffers);
 ```
 
-host 쪽은 세 지점뿐이고, 그 셋이 §6의 drag 계약을 그대로 만든다.
+host 쪽은 세 지점뿐이고, 그 셋이 §6의 drag 계약을 그대로 만든다. 지금 도크는 같은 일을 host 안에
+손으로 쓴 세 함수(`beginAgentSessionDockScrollDrag`·`absorb…`·`apply…`)로 하고 있으며, SV1c가 이 모양으로
+모은다.
 
 ```zig
 // down이 스크롤바 위면 grab 지점을 확정한다(track이면 먼저 점프하고 thumb 중앙을 잡는다).

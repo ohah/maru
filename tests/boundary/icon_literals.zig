@@ -26,7 +26,7 @@ const std = @import("std");
 // 리터럴로 되돌아가는 것을 막는 가드는 없다). 또 `loadRegistered`가 생성물을 **doc comment까지 포함해** 훑으므로,
 // 생성기의 자유 텍스트(주석·`FIT_DOCS`)에 미등록 PUA를 적으면 등록 집합이 오염돼 이 가드가 오탐한다.
 
-/// 리터럴을 그대로 둬야 하는 파일. 생성물 자신뿐이다.
+/// 리터럴을 그대로 둬야 하는 파일 — 생성물 3종과 이 가드 자신.
 const exempt_files = [_][]const u8{
     "icons.zig", // 생성물 — 이름↔codepoint 대응 그 자체다.
     "renderer/icon_coverage_data.zig", // 생성물 — coverage 데이터 + 매니페스트.
@@ -483,7 +483,7 @@ test "loadRegistered: 생성물에서 등록 cp 집합을 읽는다" {
     const allocator = std.testing.allocator;
     var buf: [max_registered]u32 = undefined;
     const len = try loadRegistered(allocator, &buf);
-    try std.testing.expect(len >= 30); // 현재 37종 — 파싱이 무너지면 여기서 드러난다
+    try std.testing.expect(len >= 30); // 현재 36종 — 파싱이 무너지면 여기서 드러난다
     try std.testing.expect(isRegistered(buf[0..len], 0xF0001)); // git_branch
     try std.testing.expect(isRegistered(buf[0..len], 0xF0023)); // chevron_down/tight
     try std.testing.expect(!isRegistered(buf[0..len], 0xF0050)); // 의도적으로 미등록

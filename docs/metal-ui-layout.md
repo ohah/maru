@@ -698,6 +698,47 @@ solver를 분리해야 한다는 Maru의 근거다. Maru는 Rust crate나 WASM/F
 - UI frame path는 I/O, JSON parse, worker wait, blocking lock을 하지 않는다. dirty
   props/style/size가 바뀔 때만 layout과 draw artifact를 다시 만든다.
 
+### 화면 배치는 Zig가 정한다 — `.m`은 명령 실행 (ML-GEO)
+
+**규칙**: 무엇을 어디에 얼마만큼 그릴지는 **Zig가 픽셀 rect로 정해 넘긴다**. Objective-C 렌더러는 그 rect를 Metal 명령으로 옮기고, 창 크기·사이드바 폭·띠 높이 같은 화면 구조에서 **배치를 스스로 유도하지 않는다**. GPU로 그린다는 것과 "무엇을 그릴지 GPU 쪽 코드가 정한다"는 다른 말이다 — 후자를 허용하면 같은 값이 두 언어에 손으로 미러되고, 컴파일러도 타입도 그 어긋남을 못 잡는다. 이 방향은 [macos-app-host-boundary.md](macos-app-host-boundary.md) "수치 계산·상태 결정은 네이티브에 두지 않는다"와 [layering-and-portability.md](layering-and-portability.md)의 L4 어댑터 규정을 화면 기하에 좁혀 적은 것이다.
+
+**두 축으로 가른다**(단순 이분법으로는 회색지대가 갈리지 않는다 — 아래 예외 대부분이 셀 *바깥*을 그린다).
+
+1. **방향**: `.m` → Zig(**측정**)는 허용한다. 폰트 metric에서 셀 크기·ascent/descent를 재 Zig로 돌려주는 경로(`coretext_smoke.m`)가 그것이고, 그 값이 있어야 Zig가 rect를 만들 수 있다. 규칙이 적용되는 것은 Zig → `.m`(**배치 결정**) 방향뿐이다.
+2. **값이냐 합성 규칙이냐**: `.m`이 받은 값을 그대로 소비하면 계약이다. `.m`이 **오프셋을 더하거나 중앙정렬·clamp·확장 규칙을 소유**하면 예외다 — 그 규칙을 Zig가 바꾸려면 두 언어를 함께 고쳐야 하기 때문이다.
+
+**현재 예외.** 제품 `.m` 두 파일(`maru_metal_renderer.m`·`coretext_smoke.m`)을 훑어 확인한 목록이며 전수를 주장하지 않는다. 새로 늘리지 않고, 손댈 일이 생기면 그때 이관한다.
+
+| 예외 | 위치 | `.m`이 소유한 규칙 | 상태 |
+|---|---|---|---|
+| 사이드바 배경 quad 높이 | `maru_metal_renderer.m` `sb = -1.0f` | 창 최하단까지(NDC 하드코딩) | GPU quad 경로가 생기기 전 자리. 이관 방법은 아래 |
+| 사이드바 셀 배치 합성 | 같은 파일, 사이드바 셀 루프 | `py_top = origin_y + header − scroll`, `cell_h = atlas_height_px ?: slot_h`, 좌측 여백 `cw*0.5` | **Zig에 같은 합성이 따로 있다**(`app_session`의 사이드바 quad 경로) — 가드 없는 미러 |
+| tui 사이드바 활성 밴드 | `app_session.sidebarBandCell` + 같은 루프 | Zig가 높이를 `atlas_height_px`에 실어 보내고 rect는 `.m`이 조립 | rich는 `GpuQuad`라 무관. tui 경로만 해당 |
+| 접힘 헤더 세로 중앙 | 같은 파일, 접힘 토글 분기 | `(titlebar_strip_px − ch) * 0.5` | 규칙이 명시한 "띠 높이에서 유도"의 실제 사례 |
+| 아이콘 배율·세로 보정·벨 가로 재배치 | 같은 파일 | `1.7×`·`ch*0.30` nudge·에이전트 `1.1×`·벨 `width=1` + `cw*0.5` 이동 | **결합이 양방향**이다 — Zig의 hover quad·배지 좌표가 이 값들을 전제로 계산된다 |
+| 그림자 blur 확장 | 같은 파일, shadow 분기 | Zig가 준 rect 밖으로 blur만큼 확장한 rect를 만든다 | `GpuShadow`는 `GpuQuad`와 **별도 채널**이다 |
+| OSC 133 거터 좌단 clamp | 같은 파일, reserved 8 분기 | `max(px_left, 0)` — 주석이 "사이드바 폭은 `.m`이 모르니 0 하한만" | 폭을 넘기면 사라진다 |
+| `reserved` 부분사각형 두께·여백 | 같은 파일 `maru_fill_cell_quad` 계열 | 커서 바/underline·SGR 장식선 두께를 `cell_h*0.15`·`cell_h*0.075`, 거터 gap을 `cw*0.12`로 계산 | **의도된 근사** — 폰트 metric(underline thickness)을 `.m`에 안 넘겨서다(그 근거가 해당 주석에 있다) |
+
+주의할 점 셋:
+
+- **divider 두께는 예외가 아니다.** config `split.divider-thickness`를 Zig가 device px로 환산해 ABI로 넘기고 `.m`은 seam 중앙정렬·셀 clamp만 한다.
+- **chrome hairline(`tokens.border.line_thickness_px`)과 터미널 셀 장식선은 별개 개념이다.** 앞은 탭바 하이라인·focus 테두리·pill 테두리(전부 `GpuQuad`), 뒤는 커서 바·SGR 밑줄이다. 코드가 의도적으로 분리했으므로 섞어서 "두 출처"라고 부르지 않는다.
+- **미러 가드가 덮는 범위는 좁다.** `tests/boundary/icon_literals.zig`는 아이콘 **배율(1.7) 두 표현식**만 강제한다. `ch*0.30` nudge·에이전트 `1.1×`·벨 `+cw*0.5`는 가드 밖이다([chrome-strategy.md](chrome-strategy.md) §9.7).
+
+**규칙을 이미 따르는 표면**(전부 Zig가 rect를 정해 `GpuQuad`로 낸다): 도크 패널 배경(`appendBarBgQuad`)·도크 카드/버튼 배경(`chrome_draw_lowering.appendBackgroundQuads`), 모달 배경·테두리, 탭 밴드와 활성 탭 cutout, **rich** 사이드바 활성 밴드, 스크롤바 thumb, 시각 벨 플래시. 모달 **그림자**만 `GpuShadow` 별도 채널이고 blur 확장을 `.m`이 한다(위 표).
+
+**이관할 때의 함정**(사이드바 배경을 옮기는 경우 — 첫 예외):
+
+- **`layer = bottom`이다.** 지금 배경 strip은 터미널 셀 **앞**에 그려져 사이드바 헤더 glyph(터미널 셀 패스)가 그 위에 보인다. `under`로 옮기면 터미널 셀 **뒤**가 돼 배경이 헤더 아이콘을 덮는 회귀가 재발한다(그 회귀를 고친 기록이 draw 순서 주석에 있다).
+- **색 규약이 다르다.** 셀 경로는 premultiplied(`chromeCellBg`), `GpuQuad`는 straight-alpha(`chromeQuadBg` — 셰이더가 `rgb*=a`). 그대로 옮기면 `window.opacity < 1`에서 이중 premultiply로 어두워진다.
+- **바닥 클리핑이 셀 경계 단위가 된다.** 지금 `.m` scissor는 픽셀 단위다. [tabs-splits-layout.md](tabs-splits-layout.md)가 약속한 픽셀 단위 스무스 스크롤과 충돌하므로, 스크롤 목록을 자를 때는 clip을 함께 넘겨야 한다.
+- `reserved`는 부분사각형 kind(2~31)와 role(32~)을 겸한다. role을 새로 실으면 `.m`의 `reserved != 0` 분기도 함께 손봐야 한다.
+
+**이미 승인된 예외적 배선과의 관계.** [layering-and-portability.md](layering-and-portability.md)는 `sidebar_header_height_px` 같은 좌표 시프트를 "L1 DTO로 L4에 전달해 GPU 백엔드가 적용"으로, [tabs-splits-layout.md](tabs-splits-layout.md)는 `.m` scissor와 Zig quad clip이 같은 오프셋을 쓰는 것을 "단일 출처"로 적었다. ML-GEO는 그 배선을 부정하지 않는다 — **값을 넘겨 `.m`이 적용하는 것**은 계약이고, `.m`이 그 값에서 **새 rect를 합성**하면 예외다. [sidebar-groups.md](sidebar-groups.md)는 이미 같은 처방(`.m` 기하를 없앤다)을 결정해 두었다.
+
+**새 표면(예: 하단 상태표시줄)은 예외를 만들지 않는다.** 기하가 필요하면 `session/dock_layout.zig`의 `Geometry`에서 파생해 `GpuQuad`로 내고, `.m`에 새 인자를 더해 그쪽이 rect를 계산하게 하지 않는다. ABI 인자 추가가 더 작아 보여도, 그건 "배치를 아는 곳"을 하나 더 만드는 선택이다.
+
 ### 입력 dispatch와 interaction state
 
 모든 화면 상태를 props로 왕복하지 않는다. immutable props는 domain data, stable

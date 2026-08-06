@@ -8,13 +8,13 @@ rsvg-convert(투명 배경 PNG) → PIL alpha 추출 → MASTER×MASTER u8 배�
 않고 커밋된 Zig 데이터만 쓴다. 외부 dev/test 의존성은 프로젝트 규칙에 따라 opt-in이며 기본 CI는
 Zig test로 SVG SHA-256 manifest와 C/Zig registry를 검증한다. `--check`는 로컬 재생성 drift 확인용이다.
 
-**세 산출물을 만든다(같은 ICONS 소스):** (1) Zig coverage 데이터를 stdout으로, (2) 등록 codepoint
+**세 산출물을 만든다(같은 ICONS 소스):** (1) Zig coverage 데이터를 `src/renderer/icon_coverage_data.zig`로, (2) 등록 codepoint
 집합을 C 헤더 `src/platform/macos/icon_codepoints.h`로, (3) semantic 이름 registry를 중립 leaf
 `src/icons.zig`로 파일 쓰기. C 셰이핑 게이트
 (coretext_smoke.m `maru_is_synthesized_glyph`)와 Zig 래스터(`icon_glyph.isRegisteredIcon`)가
 **같은 등록 집합**을 봐야 일치하므로(미등록 in-range는 폰트로 폴백 — Nerd Fonts v3 MDI 겹침), 둘을
 한 소스에서 생성한다. (3)은 소비처가 `"\\u{F0023}"`·`0xF0023` 같은 codepoint 리터럴 대신 이름
-(`icons.Icon.session_dock_chevron_down`)을 쓰게 해, 어느 SVG인지 코드에서 읽히고 자산이 재배치돼도
+(`icons.utf8Fit(.chevron_down, .tight)`)을 쓰게 해, 어느 SVG인지 코드에서 읽히고 자산이 재배치돼도
 조용히 어긋나지 않게 한다(docs/chrome-strategy.md §9.7).
 
 사용: python3 tools/svg_to_coverage.py
@@ -106,7 +106,7 @@ ICONS = [
     ("chevron_right", FIT_STANDARD, 0xF0020, "assets/icons/chevron-right.svg"),
     # 아래 다섯은 세션 도크가 쓰던 자산이다. 이름이 소비처를 가리키던 것을 semantic 이름 + fit으로 바꿨다 —
     # 그림·codepoint·coverage는 그대로라 **렌더 결과는 불변**이다(도크는 계속 tight를 쓴다).
-    # session-dock-refresh.svg는 reset.svg와 **path가 완전히 동일**하고 viewBox만 `0 0 16 16` → `1 1 14 14`로
+    # reset-tight.svg는 reset.svg와 **path가 완전히 동일**하고 viewBox만 `0 0 16 16` → `1 1 14 14`로
     # 조여져 있다(실측) — search 쌍과 같은 형태다. 그래서 새 이름이 아니라 `reset`의 tight 변형이다.
     # 도크는 이 그림을 "새로고침", 설정은 "되돌리기"로 쓰지만 **이름은 그림을 가리킨다**(용도가 아니라).
     ("reset", FIT_TIGHT, 0xF0021, "assets/icons/reset-tight.svg"),
@@ -174,7 +174,7 @@ def c_header(entries):
 
 # Zig 키워드 — semantic 이름이 이걸 밟으면 생성물이 컴파일되지 않는다. `zig fmt`가 뱉는 진단은 파이썬
 # 트레이스백에 묻혀 원인이 안 보이므로(적대적 검증에서 실측), 매니페스트 단계에서 이름으로 막는다.
-# 매니페스트에 이미 `test_icon`(assets/icons/test.svg)이 있는 것이 이 함정을 손으로 피해 간 흔적이다.
+# (`test`가 Zig 키워드라 한때 `test_icon`이라는 우회 이름을 손으로 골랐었다 — 그 자산은 소비처가 없어 삭제됐다.)
 ZIG_KEYWORDS = frozenset("""
 addrspace align allowzero and anyframe anytype asm async await break callconv catch comptime const
 continue defer else enum errdefer error export extern fn for if inline linksection noalias noinline

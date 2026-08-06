@@ -61726,6 +61726,43 @@ test "gpu quad 수명: drop은 자기 레이어만·순서 보존, rebuildSideba
     try std.testing.expect(survived_3);
 }
 
+// `placement_failed`는 **이번 배치의 결과만** 뜻해야 한다. 부분 투영(chrome-only) 경로도 `placeAndDistribute`를
+// 부르는데 그 분기는 플래그를 읽지도 지우지도 않는다 — 진입에서 지우지 않으면 그때의 실패가 다음 full tick까지
+// 살아남아 **멀쩡한 프레임을 한 번 버린다**(가드가 "배치 실패"로 오판). 실제 할당 실패는 주입 경로가 없어
+// 자동 재현이 안 되므로, 계약의 절반인 "진입 clear"를 여기서 못박는다.
+test "placement_failed: 배치 진입에서 지워진다 — 부분 투영의 옛 실패가 다음 프레임을 죽이지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    var collected: std.ArrayList(AppSession.CollectedPane) = .empty;
+    defer collected.deinit(allocator);
+    var pane_frames: std.ArrayList(metal_frame.PaneFrame) = .empty;
+    defer pane_frames.deinit(allocator);
+    var built_frames: std.ArrayList(renderer.RenderFrame) = .empty;
+    defer built_frames.deinit(allocator);
+    var sidebar_frame: ?renderer.RenderFrame = null;
+    var sidebar_header_frame: ?renderer.RenderFrame = null;
+    var overlay_frame: ?metal_frame.PaneFrame = null;
+    var floating_pf: ?metal_frame.PaneFrame = null;
+    var sticky_pf: ?metal_frame.PaneFrame = null;
+    var active_result: ?AppSession.ActiveResult = null;
+
+    // 직전(부분 투영) 배치가 실패했다고 가정 — 그 신호가 다음 배치까지 살아남으면 안 된다.
+    session.placement_failed = true;
+    session.placeAndDistribute(&collected, &pane_frames, &built_frames, &sidebar_frame, &sidebar_header_frame, &overlay_frame, &floating_pf, &sticky_pf, &active_result);
+    try std.testing.expect(!session.placement_failed);
+}
+
 // 접힘 펼치기 토글(◧) 폴리시: (1) hoverCursor가 토글 위에서 호버 배경 quad를 켜고 밖에서 끈다(접힘 시 사이드바
 // 폭 0이라 헤더 호버 경로가 안 타므로 별도 추적), (2) metalFrame이 titlebar_strip_px를 실어 렌더러가 ◧를 띠 안
 // 세로 중앙에 정렬(신호등 정렬)할 수 있게 한다. 호버 quad는 distinctive한 fg-반투명 색(packRgbAlpha 0x40)으로 식별.

@@ -246,7 +246,7 @@ description = "Check facade import boundaries"
 run = "zig build check-boundaries"
 
 [tasks."icons:check"]
-description = "Regenerate explorer icon coverage in memory and fail on SVG/hash/C/Zig registry drift"
+description = "Regenerate explorer icon coverage in memory and fail on SVG/hash/C/Zig registry or name-registry(src/icons.zig) drift"
 run = "python3 tools/svg_to_coverage.py --check"
 
 [tasks.check-config-docs]

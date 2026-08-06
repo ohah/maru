@@ -113,6 +113,24 @@ test "icon_glyph: 미등록 PUA는 null(폰트 경로로 폴백)" {
     try std.testing.expectEqual(@as(?u32, null), fillCoverage(0xF0050, w, h, bpr, &pixels));
 }
 
+// 세 생성물 동기 가드(3/3): coverage 데이터(이 파일이 소비)·C 셰이핑 게이트(icon_codepoints.h — coretext_frame_builder가
+// 가드)·**semantic 이름 registry**(src/icons.zig)가 모두 svg_to_coverage.py의 같은 ICONS에서 나온다. 이름 registry가
+// 어긋나면 소비처가 이름으로 고른 아이콘이 미등록 cp로 lower돼 **폰트 폴백(빈 칸 또는 엉뚱한 Nerd Fonts 글리프)**이
+// 되므로, 외부 도구 없이 CI가 잡게 여기서 못박는다. `--check`(로컬, rsvg 필요)와 달리 이 테스트는 Zig만 쓴다.
+test "icon_glyph: 생성된 이름 registry가 coverage 등록 집합과 정확히 같다" {
+    const icons = @import("../icons.zig");
+    const fields = @typeInfo(icons.Icon).@"enum".fields;
+    // 개수가 같고(둘 다 ICONS 길이) 각 이름이 같은 cp를 가리키면 두 집합은 동일하다.
+    try std.testing.expectEqual(data.asset_manifest.len, fields.len);
+    inline for (fields, 0..) |field, index| {
+        const icon: icons.Icon = @enumFromInt(field.value);
+        const asset = data.asset_manifest[index];
+        try std.testing.expectEqualStrings(asset.name, field.name); // 순서·이름까지 같은 소스에서 나왔다
+        try std.testing.expectEqual(@as(u21, @intCast(asset.cp)), icons.codepoint(icon));
+        try std.testing.expect(isRegisteredIcon(icons.codepoint(icon))); // 이름으로 고른 아이콘은 반드시 합성된다
+    }
+}
+
 test "icon_glyph: committed SVG assets match the generated manifest without external tools" {
     try std.testing.expectEqual(data.icons.len, data.asset_manifest.len);
     for (data.asset_manifest, 0..) |asset, index| {

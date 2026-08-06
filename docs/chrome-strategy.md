@@ -335,6 +335,17 @@ pill은 기존 GPU quad 프리미티브(`GpuQuad.corner_radii`+`border_widths`/`
 5. **터미널 콘텐츠는 별도 경로 유지.** chrome만 이 시스템. 둘은 `replace()`에서 합성.
 6. **(§9.6) 헤더·git·Explorer chrome 아이콘 = 빌드타임 SVG→coverage 합성.** 폰트에 없는 단색 아이콘(설정·검색·알림·새 워크스페이스·접기·GitHub/폴더 카드와 Explorer semantic file/folder glyph)을 SVG→coverage 마스터로 만들고(개발 시 `tools/svg_to_coverage.py` + `rsvg-convert`[librsvg] → PIL alpha → `src/renderer/icon_coverage_data.zig`로 **커밋**), `renderer/icon_glyph.zig`가 `synthesizeGlyph` 경로(box/braille 합성과 동형)로 슬롯 크기에 area-average 다운스케일해 그린다. codepoint는 **Plane 15 PUA(0xF0000~)**이며 현재 generator registry는 `0xF0001~0xF0024` 안의 명시된 36종만 등록한다. 합성 게이트는 **등록된 codepoint만** 본다 — Zig `icon_glyph.isRegisteredIcon`과 CoreText C 게이트가 같은 `ICONS` 소스에서 생성된 Zig/C registry를 보고, 모든 `IconKind→codepoint`도 자동 테스트가 coverage 등록을 확인한다. 단색이라 셰이더가 coverage×전경색으로 칠해 테마색이 자동 적용되고 런타임 의존성은 0이다. **주의(Nerd Fonts v3 겹침)**: Nerd Fonts v3의 Plane-15 MDI 영역과 겹치므로 미등록 in-range는 반드시 폰트로 폴백한다. 정확한 SVG provenance/license와 Maru 자작 Explorer v1 목록은 [third-party-licenses.md](third-party-licenses.md#maru-자작-explorer-아이콘)가 소유한다. 기본 Zig test는 SVG SHA-256 manifest와 C/Zig registry를 외부 도구 없이 검증하고, coverage 재생성 drift는 opt-in `mise run icons:check`가 맡는다. 컴포넌트가 직접 소유한 아이콘 text op만 `wide_icons=true`로 선언하면 component plan과 backend lowering이 같은 등록 predicate로 width-2를 쓰며, 사용자/세션 문자열은 false라 우연한 PUA가 폭을 바꾸지 않는다. Explorer glyph는 한 row에 한 셀만 쓴다.
 
+7. **(§9.7) 아이콘은 "이름"이 단일 출처 — codepoint 리터럴 금지, 무게·크기는 직교 축.** §9.6이 정한 SVG→coverage 파이프라인 **위에** 디자인 시스템 레이어를 얹는다. 아이콘을 소비처가 `"\u{F0023}"`·`0xF0023`로 부르면 (a) 어느 그림인지 코드에서 안 읽히고 (b) 같은 의미의 아이콘이 서브시스템마다 새 이름으로 등록된다(실제로 `chevron_down`과 `session_dock_chevron_down`이 굵기만 다른 별개 자산으로 등록됐다 — 이름으로 무게를 고르는 형태). §7.1이 탭 스타일에 적용한 **직교 축** 원칙을 아이콘에도 적용한다.
+
+   - **이름 registry(생성물 3번째)**: `tools/svg_to_coverage.py`가 같은 `ICONS` 소스에서 coverage 데이터·C 셰이핑 게이트에 더해 **`src/icons.zig`**(`Icon` enum + `codepoint`/`utf8`/`fromCodepoint`)를 생성한다. `Icon` 태그 값 = PUA codepoint. **레이어 중립 leaf**(`color.zig`·`width.zig`와 같은 자리)라 chrome(L3)이 renderer(L1)를 import하지 못하는 경계를 지키면서 양쪽이 같은 이름을 쓴다. 세 생성물이 어긋나면 이름으로 고른 아이콘이 미등록 cp로 lower돼 **폰트 폴백(빈 칸/엉뚱한 Nerd Fonts 글리프)**이 되므로, 외부 도구 없이 도는 Zig 테스트가 세 집합의 동일성을 못박는다(`icon_glyph.zig`).
+   - **SVG의 어떤 속성이 언제 결정되는가(핵심 구분)**: coverage 마스터는 **alpha 한 채널**이다(`rsvg-convert`로 48px 래스터 → PIL alpha 추출). 그래서
+     - *빌드타임에 굽는 것* = 모양·**stroke 굵기**·여백(viewBox)·불투명도 그라디언트. 런타임에 못 바꾼다.
+     - *런타임 토큰으로 주는 것* = **색**(셰이더가 coverage×전경색 → `ColorRole`로 테마 자동), **슬롯 크기**(정사각 마스터를 슬롯에 area-average 다운스케일), **셀 span**(1칸/2칸).
+     - 따라서 **다색 아이콘·런타임 stroke 변경·애니메이션은 이 파이프라인의 비목표**다(필요해지면 별도 결정). 무게(굵기)는 런타임 속성이 될 수 없으므로 **자산을 하나 더 굽고 이름이 아니라 축으로 고른다**.
+   - **`Weight` 축(빌드타임 자산 선택)**: `Icon` × `Weight{regular, bold}` → codepoint. `session_dock_*` 5종은 새 아이콘이 아니라 `(chevron_down, .bold)` 같은 무게 변형으로 흡수한다. 자산이 실제로 다른 그림이라 **시각 회귀 표면**이 있으므로 스크린샷으로 확인한다.
+   - **`Size` 토큰(런타임)**: 지금 소비처마다 흩어진 배율(헤더 1.7× 직접 래스터·`header_host_icon_extent`·`wide_icons` 2셀·`bell` EAW 특례)을 `chrome/ui/icon.zig`의 `Size{sm, md, lg}` + `cellSpan(icon)` 데이터로 모은다.
+   - **단계**: IC1(이름 registry + 동기 가드) → IC2(소비처 리터럴 제거) → IC3(`Weight` 축으로 `session_dock_*` 흡수) → IC4(`Size` 토큰 + `ui/button`·`ui/badge` 연결).
+
 ## 10. 리스크 & 미해결
 
 - **(높음) ChromeState 포인터 수명 — 경계를 넘는 UAF**: `*Split`/`*Pane`이 라이브 세션 트리를 가리킨다. 15필드를 ChromeState로 **옮겨도 결합은 안 옮겨진다** — S1의 구조-무효화 계약(트리 변형 시 단일 콜백으로 무효화)이 없으면 C3가 use-after-free다. 스냅샷 가드는 시각 회귀만 잡고 UAF는 못 잡으니([[devsession-undefined-test-field-trap]]), 명시적 null화 계약을 C2 전에 형식화.

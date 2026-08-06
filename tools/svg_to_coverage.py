@@ -8,14 +8,17 @@ rsvg-convert(투명 배경 PNG) → PIL alpha 추출 → MASTER×MASTER u8 배�
 않고 커밋된 Zig 데이터만 쓴다. 외부 dev/test 의존성은 프로젝트 규칙에 따라 opt-in이며 기본 CI는
 Zig test로 SVG SHA-256 manifest와 C/Zig registry를 검증한다. `--check`는 로컬 재생성 drift 확인용이다.
 
-**두 산출물을 만든다(같은 ICONS 소스):** (1) Zig coverage 데이터를 stdout으로, (2) 등록 codepoint
-집합을 C 헤더 `src/platform/macos/icon_codepoints.h`로 파일 쓰기. C 셰이핑 게이트
+**세 산출물을 만든다(같은 ICONS 소스):** (1) Zig coverage 데이터를 stdout으로, (2) 등록 codepoint
+집합을 C 헤더 `src/platform/macos/icon_codepoints.h`로, (3) semantic 이름 registry를 중립 leaf
+`src/icons.zig`로 파일 쓰기. C 셰이핑 게이트
 (coretext_smoke.m `maru_is_synthesized_glyph`)와 Zig 래스터(`icon_glyph.isRegisteredIcon`)가
 **같은 등록 집합**을 봐야 일치하므로(미등록 in-range는 폰트로 폴백 — Nerd Fonts v3 MDI 겹침), 둘을
-한 소스에서 생성한다.
+한 소스에서 생성한다. (3)은 소비처가 `"\\u{F0023}"`·`0xF0023` 같은 codepoint 리터럴 대신 이름
+(`icons.Icon.session_dock_chevron_down`)을 쓰게 해, 어느 SVG인지 코드에서 읽히고 자산이 재배치돼도
+조용히 어긋나지 않게 한다(docs/chrome-strategy.md §9.7).
 
 사용: python3 tools/svg_to_coverage.py > src/renderer/icon_coverage_data.zig && zig fmt src/renderer/icon_coverage_data.zig
-  (icon_codepoints.h는 같은 실행에서 파일로 갱신된다)
+  (icon_codepoints.h와 src/icons.zig는 같은 실행에서 파일로 갱신된다)
 검사: python3 tools/svg_to_coverage.py --check
 사전: brew install librsvg  (rsvg-convert), python3 -m pip install Pillow
 """
@@ -34,6 +37,11 @@ MASTER = 48
 
 # 등록 아이콘 → C 헤더(아래)에 codepoint 집합으로 emit되는 경로.
 C_HEADER_PATH = "src/platform/macos/icon_codepoints.h"
+
+# 등록 아이콘 → semantic 이름 registry(Zig enum)로 emit되는 경로. 레이어 중립 leaf라 chrome(L3)·
+# renderer(L1)·platform이 함께 import한다(color.zig·width.zig와 같은 자리 — chrome은 renderer를
+# import할 수 없다, tests/boundary/imports.zig).
+ICONS_ZIG_PATH = "src/icons.zig"
 
 # (zig_이름, codepoint, svg경로). codepoint는 Plane 15 PUA(0xF0000~). **주의**: Nerd Fonts v3가 Material
 # Design Icons를 Plane-15 PUA(U+F0001~)로 옮겨 이 범위와 겹친다 — 그래서 합성 게이트는 **등록된 cp만**
@@ -127,6 +135,78 @@ def c_header(entries):
     return "\n".join(lines) + "\n"
 
 
+def icons_zig():
+    """semantic 이름 registry를 중립 leaf Zig 모듈로 쓴다 — 소비처가 codepoint 리터럴 대신 이름을 쓰게 한다.
+
+    래스터가 필요 없으므로 ICONS 목록만으로 만든다(rsvg-convert·PIL 불필요)."""
+    lines = [
+        "//! 생성된 파일 — tools/svg_to_coverage.py가 ICONS 목록에서 만든다. 직접 수정 말 것(스크립트 재실행으로 갱신).",
+        "//!",
+        "//! **아이콘의 semantic 이름이 단일 출처다.** 소비처는 `\"\\u{F0023}\"`·`0xF0023` 같은 codepoint 리터럴 대신",
+        "//! 이 enum을 쓴다 — 리터럴은 어느 그림인지 코드에서 읽히지 않고, 자산이 재배치되면 조용히 어긋난다",
+        "//! (같은 의미의 아이콘이 서브시스템마다 새 이름으로 등록되던 문제 — docs/chrome-strategy.md §9.7).",
+        "//!",
+        "//! **레이어 중립 leaf다.** chrome(L3)은 renderer(L1)를 import할 수 없으므로(tests/boundary/imports.zig)",
+        "//! 이름↔codepoint 대응은 color.zig·width.zig처럼 최상위에 둔다. 등록 집합의 **렌더 계약**(합성 게이트·",
+        "//! 폰트 폴백·다운스케일)은 renderer/icon_glyph.zig가 계속 소유하고, 이 파일은 대응 표만 갖는다.",
+        "",
+        "/// 등록된 maru chrome 아이콘. 태그 값 = Plane 15 PUA codepoint(0xF0000~)라 `@intFromEnum`이 곧 codepoint다.",
+        "pub const Icon = enum(u21) {",
+    ]
+    for name, cp, path in ICONS:
+        lines.append(f"    /// {path}")
+        lines.append(f"    {name} = 0x{cp:X},")
+    lines.extend([
+        "};",
+        "",
+        "/// 이 아이콘의 Plane-15 PUA codepoint.",
+        "pub fn codepoint(icon: Icon) u21 {",
+        "    return @intFromEnum(icon);",
+        "}",
+        "",
+        "/// 셀 텍스트(ChromeDraw.Run·제목 문자열)에 그대로 넣는 UTF-8 인코딩 — 소비처가 escape 리터럴을 손으로",
+        "/// 적지 않게 한다. 반환은 정적 문자열이라 수명 걱정이 없다.",
+        "pub fn utf8(icon: Icon) []const u8 {",
+        "    return switch (icon) {",
+    ])
+    for name, cp, _ in ICONS:
+        lines.append(f"        .{name} => \"\\u{{{cp:X}}}\",")
+    lines.extend([
+        "    };",
+        "}",
+        "",
+        "/// codepoint가 등록 아이콘이면 그 이름. **렌더 게이트가 아니다** — 합성 여부 판정은",
+        "/// `renderer.icon_glyph.isRegisteredIcon`이 단일 출처이고, 이건 lower된 cp를 다시 이름으로 읽을 때 쓴다",
+        "/// (예: 도크 view가 낸 draw op이 어느 아이콘인지 테스트가 확인).",
+        "pub fn fromCodepoint(cp: u21) ?Icon {",
+        "    return switch (cp) {",
+    ])
+    for name, cp, _ in ICONS:
+        lines.append(f"        0x{cp:X} => .{name},")
+    lines.extend([
+        "        else => null,",
+        "    };",
+        "}",
+        "",
+        "test \"icons: 이름·codepoint·UTF-8·역참조가 서로 일치한다\" {",
+        "    const std = @import(\"std\");",
+        "    inline for (@typeInfo(Icon).@\"enum\".fields) |field| {",
+        "        const icon: Icon = @enumFromInt(field.value);",
+        "        const cp = codepoint(icon);",
+        "        try std.testing.expectEqual(@as(u21, field.value), cp);",
+        "        try std.testing.expectEqual(@as(?Icon, icon), fromCodepoint(cp));",
+        "        var buf: [4]u8 = undefined;",
+        "        const len = try std.unicode.utf8Encode(cp, &buf);",
+        "        try std.testing.expectEqualStrings(buf[0..len], utf8(icon));",
+        "    }",
+        "}",
+    ])
+    raw_zig = "\n".join(lines) + "\n"
+    return subprocess.run(
+        ["zig", "fmt", "--stdin"], input=raw_zig, text=True, capture_output=True, check=True
+    ).stdout
+
+
 def generate():
     lines = [
         "//! 생성된 파일 — tools/svg_to_coverage.py가 assets/icons/*.svg를 coverage(alpha)로 변환해 만든다.",
@@ -165,7 +245,7 @@ def generate():
     formatted = subprocess.run(
         ["zig", "fmt", "--stdin"], input=raw_zig, text=True, capture_output=True, check=True
     ).stdout
-    return formatted, c_header(entries)
+    return formatted, c_header(entries), icons_zig()
 
 
 def main():
@@ -173,14 +253,15 @@ def main():
     parser.add_argument(
         "--check",
         action="store_true",
-        help="fail when committed Zig coverage, C registry, asset manifest, or hashes drift",
+        help="fail when committed Zig coverage, C registry, name registry, asset manifest, or hashes drift",
     )
     args = parser.parse_args()
-    zig_source, header = generate()
+    zig_source, header, ids_source = generate()
     if args.check:
         targets = (
             ("src/renderer/icon_coverage_data.zig", zig_source),
             (C_HEADER_PATH, header),
+            (ICONS_ZIG_PATH, ids_source),
         )
         drift = False
         for path, expected in targets:
@@ -197,6 +278,8 @@ def main():
         return
     with open(C_HEADER_PATH, "w") as output:
         output.write(header)
+    with open(ICONS_ZIG_PATH, "w") as output:
+        output.write(ids_source)
     sys.stdout.write(zig_source)
 
 

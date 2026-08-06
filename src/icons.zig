@@ -8,13 +8,15 @@
 //! 이름↔codepoint 대응은 color.zig·width.zig처럼 최상위에 둔다. 등록 집합의 **렌더 계약**(합성 게이트·
 //! 폰트 폴백·다운스케일)은 renderer/icon_glyph.zig가 계속 소유하고, 이 파일은 대응 표만 갖는다.
 
-/// 같은 그림의 optical 변형 축(docs/chrome-strategy.md §9.7). coverage 마스터는 alpha 한 채널이라 여백·stroke는
-/// **빌드타임에 굽는 값**이고 런타임에 못 바꾼다 — 그래서 변형은 자산을 하나 더 굽고 이 축으로 고른다
-/// (소비처마다 새 이름으로 등록하던 `session_dock_*`를 대체한다).
+/// 같은 그림이 슬롯을 **얼마나 채우는가** 축(docs/chrome-strategy.md §9.7). coverage 마스터는 alpha 한
+/// 채널이라 여백·stroke가 **빌드타임에 굳고** 런타임에 못 바꾼다 — 그래서 변형은 자산을 하나 더 굽고
+/// 이 축으로 고른다(소비처마다 새 이름으로 등록하던 `session_dock_*`를 대체한다).
 pub const Fit = enum {
-    /// Octicon 기본 여백(viewBox 0 0 16 16).
+    /// 자산이 준 기본 비율(대개 Octicon viewBox 0 0 16 16).
     standard,
-    /// 여백을 조여 같은 슬롯을 더 채운다(축소돼도 형태가 버티도록 stroke를 올린 자산도 있다).
+    /// 같은 슬롯을 더 채우는 변형. **수단은 자산마다 다르다** — `search`는 viewBox를 조였고(path 동일),
+    /// `chevron_*`는 viewBox가 같은 대신 path를 굵고 크게 다시 그렸다(stroke .75 → 1). 이 축이 약속하는
+    /// 것은 "슬롯을 더 채운다"이지 특정 수단이 아니다.
     tight,
 };
 
@@ -218,7 +220,10 @@ test "icons: 이름·fit·codepoint·UTF-8·역참조가 서로 일치한다" {
     inline for (@typeInfo(Icon).@"enum".fields) |field| {
         const icon: Icon = @enumFromInt(field.value);
         try std.testing.expectEqual(@as(u21, field.value), codepoint(icon));
-        for ([_]Fit{ .standard, .tight }) |fit| {
+        // fit도 **comptime 전수**한다 — 배열에 손으로 적으면 새 fit이 조용히 검증 밖에 남는다
+        // (적대적 검증 실측: 세 번째 fit이 미등록 cp를 가리켜도 전부 통과했다).
+        inline for (@typeInfo(Fit).@"enum".fields) |fit_field| {
+            const fit: Fit = @enumFromInt(fit_field.value);
             const cp = codepointFit(icon, fit);
             const resolved = fromCodepoint(cp) orelse return error.TestUnexpectedResult;
             try std.testing.expectEqual(icon, resolved.icon); // 폴백해도 같은 아이콘이다
@@ -229,11 +234,19 @@ test "icons: 이름·fit·codepoint·UTF-8·역참조가 서로 일치한다" {
     }
 }
 
-test "icons: tight 변형이 있으면 기본과 다른 codepoint이고, 없으면 기본으로 폴백한다" {
+test "icons: 변형이 등록된 아이콘은 기본과 다른 codepoint를 주고, 없으면 기본으로 폴백한다" {
     const std = @import("std");
-    // 도크가 쓰는 tight 변형(같은 그림, 조인 여백) — 기본과 달라야 변형이 실제로 등록된 것이다.
+    // 도크가 쓰는 tight 변형 — 기본과 달라야 변형이 실제로 등록된 것이다.
     try std.testing.expect(codepointFit(.chevron_down, .tight) != codepoint(.chevron_down));
     try std.testing.expect(codepointFit(.search, .tight) != codepoint(.search));
     // 변형이 없는 아이콘은 기본으로 떨어진다(소비처가 조합마다 분기하지 않게).
     try std.testing.expectEqual(codepoint(.gear), codepointFit(.gear, .tight));
+}
+
+test "icons: 기본 fit이 standard가 아닌 아이콘은 fit-less 접근자가 그 변형을 준다(재지정 감시)" {
+    const std = @import("std");
+    // `refresh`는 standard 자산이 없어 기본 fit이 tight다. 나중에 standard refresh를 매니페스트에
+    // 추가하면 기본이 뒤집혀 **fit 없이 부르던 소비처가 조용히 다른 그림을 그린다** — 그 순간 이 단언이
+    // 깨져 호출부를 `.tight` 명시로 바꾸라고 알린다(적대적 검증이 짚은 default_fit flip).
+    try std.testing.expectEqual(codepointFit(.refresh, .tight), codepoint(.refresh));
 }

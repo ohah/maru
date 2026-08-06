@@ -13,6 +13,7 @@
 //! (`renderer.icon_glyph.isRegisteredIcon`)을 predicate로 받는다. 나머지 폭 정책은 여기가 가진다.
 
 const std = @import("std");
+const icons = @import("../icons.zig"); // 등록 아이콘 이름↔codepoint(테스트 stub이 실제 등록 cp를 쓰게)
 const width = @import("../width.zig"); // Unicode 셀 폭(EAW) — 한글/CJK=2칸
 const grapheme = @import("../grapheme.zig"); // UAX#29 cluster 경계(GB6/7/8 한글 + GB9 결합 문자)
 
@@ -195,7 +196,7 @@ pub fn plan(
 // ── 테스트 (OS-중립이라 Linux CI에서도 닫힌다 — 이 추출의 이득 중 하나) ──────────────────────
 
 fn wideIconStub(cp: u21) bool {
-    return cp == 0xF0009; // 등록 아이콘 하나를 흉내 낸 stub(실제 판정은 renderer가 소유)
+    return cp == icons.codepoint(.mark_github); // 등록 아이콘 하나를 흉내 낸 stub(실제 판정은 renderer가 소유)
 }
 
 test "text_layout: NFD 한글은 cluster 하나 = 셀 하나(중성·종성은 셀을 차지하지 않는다)" {
@@ -251,7 +252,7 @@ test "text_layout: head 앵커는 마지막 칸을 말줄임에 남기고 tail �
 }
 
 test "text_layout: 아이콘 폭은 주입된 predicate로만 2칸이 된다(chrome은 renderer를 모른다)" {
-    const icon = "\u{F0009}x";
+    const icon = comptime icons.utf8(.mark_github) ++ "x";
     try std.testing.expectEqual(@as(usize, 2), displayCols(icon, null)); // 확대 없음: 1+1
     try std.testing.expectEqual(@as(usize, 3), displayCols(icon, wideIconStub)); // 확대: 2+1
     var p = plan(icon, 0, 10, .head, wideIconStub);

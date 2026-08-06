@@ -86,10 +86,11 @@ pub fn fillCoverage(cp: u32, width_px: u32, height_px: u32, bytes_per_row: usize
 }
 
 test "icon_glyph: isRegisteredIcon은 coverage 있는 cp만 true(범위 내 미등록은 false)" {
-    try std.testing.expect(isRegisteredIcon(0xF0001)); // git_branch(등록)
-    try std.testing.expect(isRegisteredIcon(0xF0009)); // mark_github(등록)
-    try std.testing.expect(isRegisteredIcon(0xF000A)); // folder(등록)
-    try std.testing.expect(isRegisteredIcon(0xF001E)); // explorer folder-output(등록)
+    const icons = @import("../icons.zig");
+    try std.testing.expect(isRegisteredIcon(icons.codepoint(.git_branch)));
+    try std.testing.expect(isRegisteredIcon(icons.codepoint(.mark_github)));
+    try std.testing.expect(isRegisteredIcon(icons.codepoint(.folder)));
+    try std.testing.expect(isRegisteredIcon(icons.codepoint(.folder_output))); // explorer 아이콘
     try std.testing.expect(!isRegisteredIcon(0xF0050)); // 범위 내 미등록(Nerd Fonts MDI 등) — false
     try std.testing.expect(!isRegisteredIcon(0x251C)); // 범위 밖
 }
@@ -99,7 +100,8 @@ test "icon_glyph: fillCoverage가 등록 아이콘을 슬롯 안에 그린다(no
     const h: u32 = 36;
     const bpr: usize = w * 4;
     var pixels: [36 * 18 * 4]u8 = undefined;
-    const count = fillCoverage(0xF0001, w, h, bpr, &pixels) orelse unreachable; // git_branch(등록) → non-null
+    const icons = @import("../icons.zig");
+    const count = fillCoverage(icons.codepoint(.git_branch), w, h, bpr, &pixels) orelse unreachable; // 등록 → non-null
     try std.testing.expect(count > 0); // ink가 있다
     try std.testing.expect(count <= w * h); // 슬롯 안
 }

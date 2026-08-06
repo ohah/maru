@@ -66943,6 +66943,27 @@ test "스크롤바 down은 track 안에서만, thumb을 잡은 지점을 유지�
     session.endAgentSessionDockScrollDrag();
 }
 
+test "재투영은 스냅샷 세대를 올려 진행 중인 스크롤바 드래그를 놓게 한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try dockWheelFixture(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    // 이 세대가 carry 판정의 **유일한** 근거다. 목록이 새로 스캔돼 길이 자체가 달라졌는데 세대가
+    // 그대로면, 진행 중인 드래그가 없어진 목록 기준으로 계속 스크롤한다. 그 판정을 generation
+    // 비교 하나에 위임했으므로 "재투영은 세대를 올린다"가 지켜져야 나머지가 성립한다.
+    const before = session.agent_session_dock_snapshot_generation;
+    session.rebuildAgentSessionArchiveProjection();
+    try std.testing.expect(session.agent_session_dock_snapshot_generation != before);
+
+    // 0은 "세대를 쓰지 않는 소비자"라는 뜻이라 wrap 시에도 건너뛴다 — 안 그러면 그 프레임만
+    // 세대 검사가 통째로 꺼진다.
+    session.agent_session_dock_snapshot_generation = std.math.maxInt(u64);
+    session.rebuildAgentSessionArchiveProjection();
+    try std.testing.expect(session.agent_session_dock_snapshot_generation != 0);
+}
+
 test "스크롤바 드래그는 자기 payload만 먹고 놓기 직전 좌표를 잃지 않는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

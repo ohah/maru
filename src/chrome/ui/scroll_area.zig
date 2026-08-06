@@ -13,6 +13,7 @@
 //! 이 주석은 다음 사람이 "여기 없으면 아무 데도 없다"고 오해하지 않게 하기 위한 것이다.
 
 const std = @import("std");
+const continuous_drag = @import("continuous_drag.zig");
 
 /// 소비처가 소유하는 상태다. 이 모듈은 legal range와 전이만 정한다. 분수 wheel 입력은 일부러 밖에
 /// 남긴다 — tree rect와 GPU draw rect가 정수여야 셀 경계에서 흔들리지 않는다.
@@ -145,6 +146,69 @@ pub const ScrollbarGeometry = struct {
         const ratio = @as(f32, @floatFromInt(@min(offset_px, self.max_offset_px))) / @as(f32, @floatFromInt(self.max_offset_px));
         next.thumb_y = self.track_y + travel * ratio;
         return next;
+    }
+};
+
+/// 스크롤바 드래그의 수명. 좌표를 흡수만 하고 **소비 지점은 tick 하나**다(§6) — pointer move는 tick보다
+/// 훨씬 자주 오므로 매 move마다 적용하면 한 프레임에 같은 재투영을 여러 번 하고, tick에서 소비하지
+/// 않으면 손을 뗄 때까지 목록이 안 움직인다. 두 실패가 각각 실제로 있었다.
+///
+/// `interaction`을 import하지 않는다 — 그쪽이 `tree`를 쓰고 `tree`가 이 모듈을 쓰므로 순환이 된다.
+/// 그래서 이벤트가 아니라 **좌표만** 받고, payload 판정은 소비처가 한다.
+pub const Drag = struct {
+    /// 잡은 지점(누른 y − thumb top). 드래그 도중 기하가 바뀌어도 이 값을 유지해야 손가락이 잡은
+    /// 자리가 미끄러지지 않는다.
+    grab_dy: f32 = 0,
+    /// **down 시점**의 기하를 고정한다. 매 move마다 새 기하로 다시 계산하면 thumb이 손가락 아래에서
+    /// 미끄러진다.
+    geometry: ScrollbarGeometry = .{
+        .track_x = 0,
+        .track_y = 0,
+        .track_w = 0,
+        .track_h = 0,
+        .thumb_y = 0,
+        .thumb_h = 0,
+        .max_offset_px = 0,
+    },
+    coalescer: continuous_drag.Coalescer(u32) = .{},
+    active: bool = false,
+
+    /// down이 스크롤바 위인지 판정하고 드래그를 연다. track의 빈 곳이면 그 지점으로 **먼저 점프**할
+    /// offset을 돌려주고, 이어지는 드래그는 옮긴 뒤의 기하를 쓴다 — 그래서 눌렀다 그대로 끌 때 위치가
+    /// 튀지 않는다. thumb 위면 null을 돌려주고(목록은 그 자리) 잡은 지점만 기억한다.
+    /// 스크롤바 밖이면 드래그를 열지 않고 `active`가 false로 남는다.
+    pub fn begin(self: *Drag, bar: ScrollbarGeometry, x: f64, y: f64) ?u32 {
+        if (!bar.trackContains(x, y)) return null;
+        self.coalescer.reset();
+        if (bar.thumbContains(y)) {
+            self.* = .{ .grab_dy = @floatCast(y - @as(f64, bar.thumb_y)), .geometry = bar, .active = true };
+            return null;
+        }
+        const jumped = bar.offsetForTrackClick(y);
+        const moved = bar.withOffset(jumped);
+        self.* = .{ .grab_dy = moved.thumb_h / 2, .geometry = moved, .active = true };
+        return jumped;
+    }
+
+    /// move/drop 좌표를 흡수만 한다. 적용은 tick의 `takeOffset`이 한 번 한다.
+    pub fn absorb(self: *Drag, x_px: f64, y_px: f64) void {
+        if (!self.active) return;
+        self.coalescer.absorb(x_px, y_px);
+    }
+
+    /// tick이 부르는 소비 지점. 이 프레임에 쌓인 마지막 좌표 하나만 offset으로 바꾼다. 값이 직전과
+    /// 같으면 null이다 — track 끝에 닿은 채 계속 미는 동안 같은 effect를 반복하지 않는다.
+    pub fn takeOffset(self: *Drag) ?u32 {
+        if (!self.active) return null;
+        const point = self.coalescer.take() orelse return null;
+        const offset = self.geometry.offsetForPointer(point.y_px, self.grab_dy);
+        if (!self.coalescer.commitIfChanged(offset)) return null;
+        return offset;
+    }
+
+    /// up·cancel·carry 실패. 다음 down이 자기 grab 지점을 새로 잡도록 흡수분까지 비운다.
+    pub fn end(self: *Drag) void {
+        self.* = .{};
     }
 };
 

@@ -858,6 +858,7 @@ typedef struct {
     // 사이드바 스크롤 scissor 판정용.
     size_t sidebar_cells_n;
     uint32_t sidebar_scroll_offset_px;
+    uint32_t status_bar_height_px; // SB1: 사이드바 셀 scissor 하단(창 바닥 상태표시줄)
     uint32_t sidebar_header_height_px;
 } MaruDrawPass;
 
@@ -924,16 +925,26 @@ static void maru_draw_terminal_layer(const MaruDrawPass *c) {
     //    픽셀 좌표, y가 아래로 증가). 정점 셰이더가 py_top(좌상단 px)→NDC로 매핑해 framebuffer가 표준 방향이라, 상단
     //    헤더를 자르려면 y=header_h부터 남긴다. 헤더 glyph는 터미널 셀 패스(위)라 이 scissor에 안 걸려 고정된다. 바로
     //    뒤 패스(그림자·모달)를 위해 full drawable로 복원한다. offset==0이면 기존 동작(scissor 없음).
+    //    SB1: 상태바가 서면 **스크롤 여부와 무관하게** 아래도 자른다. 사이드바 셀은 세로 경계 없이 발행되므로
+    //    (`sidebarBandCell`은 폭·칸수만 본다) 스크롤이 0이어도 맨 아래 카드가 상태바 띠 안까지 그려진다. 지금까지는
+    //    drawable 가장자리가 대신 잘라 줘서 드러나지 않았을 뿐이다. 상태바 배경이 그 위를 덮지만 `window.opacity<1`
+    //    이면 글자가 비쳐 보인다 — 사이드바 배경 strip을 상태바 위에서 끊은 것과 같은 이유·같은 값이다.
+    const NSUInteger sb_h = (NSUInteger)c->status_bar_height_px;
+    const bool sidebar_bottom_clip = (c->sidebar_cells_n > 0 && sb_h > 0u);
     const bool sidebar_scroll_clip = (c->sidebar_cells_n > 0 && c->sidebar_scroll_offset_px > 0u &&
                                       (float)c->sidebar_header_height_px < (float)c->drawable_size.height);
-    if (sidebar_scroll_clip) {
+    const bool sidebar_clip = sidebar_scroll_clip || sidebar_bottom_clip;
+    if (sidebar_clip) {
         const NSUInteger dw = (NSUInteger)c->drawable_size.width;
         const NSUInteger dh = (NSUInteger)c->drawable_size.height;
-        const NSUInteger header_h = (NSUInteger)c->sidebar_header_height_px; // 좌상단 원점 → 상단 header_h를 잘라내고 [header_h, dh] 유지
-        [c->encoder setScissorRect:(MTLScissorRect){ .x = 0, .y = header_h, .width = dw, .height = dh - header_h }];
+        // 스크롤이 0이면 헤더는 자를 필요가 없다(카드가 헤더 위로 새지 않는다) — 기존 동작을 보존한다.
+        const NSUInteger header_h = sidebar_scroll_clip ? (NSUInteger)c->sidebar_header_height_px : 0u;
+        const NSUInteger bottom = (sb_h < dh) ? (dh - sb_h) : 0u; // 상태바가 창을 다 먹으면 높이 0(그리지 않음)
+        const NSUInteger height = (bottom > header_h) ? (bottom - header_h) : 0u;
+        [c->encoder setScissorRect:(MTLScissorRect){ .x = 0, .y = header_h, .width = dw, .height = height }];
     }
     if (c->vertex_buffer != nil) MARU_DRAW_CELLS(c->pre_sidebar_vertices, c->total_vertices - c->pre_sidebar_vertices, 1.0f); // 사이드바 cells(제목)
-    if (sidebar_scroll_clip) {
+    if (sidebar_clip) {
         const NSUInteger dw = (NSUInteger)c->drawable_size.width;
         const NSUInteger dh = (NSUInteger)c->drawable_size.height;
         [c->encoder setScissorRect:(MTLScissorRect){ .x = 0, .y = 0, .width = dw, .height = dh }]; // full 복원(다음 패스용)
@@ -1507,6 +1518,7 @@ bool maru_metal_renderer_draw(
         .modal_clip_h_px = modal_clip_h_px,
         .sidebar_cells_n = sidebar_cells_n,
         .sidebar_scroll_offset_px = sidebar_scroll_offset_px,
+        .status_bar_height_px = status_bar_height_px,
         .sidebar_header_height_px = sidebar_header_height_px,
     };
 

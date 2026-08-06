@@ -930,6 +930,11 @@ const collapsed_titlebar_min_pt: u32 = 30;
 // 펼침 시 상단 타이틀바 띠의 최소 높이(논리 pt). 한 줄(cell_height ~17pt)만 띠로 두면 네이티브 macOS 타이틀바
 // (~28pt)보다 낮아 상단 드래그 영역이 좁게 느껴진다(사용자 피드백). 네이티브 높이를 바닥으로 잡아 드래그 영역을 맞춘다.
 const titlebar_strip_min_pt: u32 = 28;
+// 창 바닥 상태표시줄 높이(논리 pt, SB1). VSCode(22px)·Zed와 같은 급이고, 상단 타이틀바 띠(28pt)보다 낮게 둬
+// 상/하단 chrome의 위계를 유지한다. **터미널 폰트에서 파생하지 않는다** — 도크 view bar가 그렇게 했다가
+// 폰트를 키우면 같은 아이콘 줄이 오르내리는 회귀가 났고(실측 53px↔80px) 폰트 독립 pt로 옮겼다. 상태바는
+// 창 전폭 chrome이라 같은 이유가 더 강하게 적용된다.
+const status_bar_height_pt: u32 = 22;
 
 // 런타임 폰트 크기 조절(⌘+/⌘-/⌘0). step = ⌘+/⌘- 한 번에 1pt(Ghostty 기본과 동일). 클램프 범위는 보수적으로
 // [6, 72]pt — appearance resolver는 [1,512]를 허용하지만 6pt 미만은 글자가 안 읽히고 72pt 초과는 grid가
@@ -4571,6 +4576,13 @@ pub const AppSession = struct {
         }
     }
 
+    /// 창 바닥 상태표시줄의 backing px 높이. `dock_layout`이 이 값으로 작업영역을 깎고(S1 seam), 렌더러가
+    /// 같은 값으로 사이드바 배경 strip·셀 scissor를 끊는다(S2a ABI). 접힘·도크 상태와 무관하게 항상 선다 —
+    /// 조건부로 만들면 바 높이가 프레임마다 달라져 터미널 grid가 출렁인다.
+    fn statusBarHeightPx(self: *const AppSession) u32 {
+        return layout_math.ptToPx(status_bar_height_pt, self.scale_milli);
+    }
+
     fn dockGeometry(self: *const AppSession) dock_layout.Geometry {
         return dock_layout.compute(.{
             .backing_width_px = self.backing_width_px,
@@ -4582,6 +4594,7 @@ pub const AppSession = struct {
             // 따라 내려가고 AI 세션과 2px씩 어긋났다. 기본 폰트에서 두 값이 우연히 같아 안 보였을 뿐이다.
             // 모든 뷰가 같은 28pt native-title safety band에서 시작한다.
             .dock_top_px = layout_math.ptToPx(titlebar_strip_min_pt, self.scale_milli),
+            .status_bar_px = self.statusBarHeightPx(),
             .cell_width_px = self.cell_width_px,
             .cell_height_px = self.cell_height_px,
             .scale_milli = self.scale_milli,
@@ -4875,6 +4888,10 @@ pub const AppSession = struct {
     fn gridPadding(self: *const AppSession) layout_math.PaddingPx {
         var p = self.window_padding_px;
         p.top +|= self.titlebar_strip_px;
+        // 상태바도 창 높이를 먹으므로 bottom으로 흡수한다 — 여기서 더하면 `gridFromBacking` 호출부 셋(spawn
+        // config·메트릭 재계산·resize)이 한 번에 정합한다. 각 호출부에서 따로 빼면 하나만 빠뜨려도 spawn grid와
+        // 실제 pane grid가 어긋난다(그 정합이 이 함수의 존재 이유다).
+        p.bottom +|= self.statusBarHeightPx();
         const g = self.dockGeometry();
         if (g.dock.w > 0) switch (self.dock.side) {
             .right => p.right +|= g.divider.w + g.dock.w,
@@ -22413,6 +22430,10 @@ pub const AppSession = struct {
         // 닫기 확인 모달은 결정 게이트라 마우스 클릭(mouse())뿐 아니라 휠도 막는다 — 안 막으면 모달 뒤 터미널/스크롤백이
         // 사용자 결정 중에 움직이거나(스크롤) 트래킹 앱에 휠이 리포트된다(모달 의도 위배).
         if (self.chrome_host.confirm.open) return;
+        // 상태바 위 휠은 **삼킨다**. 아래 라우팅은 "어느 pane에도 안 맞으면 활성 surface로 fallback"이라,
+        // 안 막으면 상태바를 굴리는 동작이 터미널 스크롤백을 움직인다. 사이드바 판정보다 먼저 둔다 —
+        // 상태바는 창 전폭이라 사이드바 아래 구간도 지나가고, 뒤에 두면 그 구간이 사이드바 스크롤로 샌다.
+        if (self.pointInStatusBar(x_px, y_px)) return;
         // notice 토스트(비-인터랙티브 정보, 자동 닫힘 타이머 없음)는 **휠로도 닫는다** — 키(notice.handle)·클릭(mouse())과
         // 같은 "아무 입력으로나 닫힘" 규율을 휠까지 확장한다(옛날엔 아래 anyOverlayOpen이 휠을 삼키기만 해 토스트가 떠 있는
         // 동안 스크롤이 막힌 채 닫히지도 않았다). 휠은 소비한다(닫되 스크롤은 안 함 — 토스트 확인 제스처). notifications와
@@ -22910,6 +22931,11 @@ pub const AppSession = struct {
     /// backing 픽셀 — 셀 변환은 권위 있는 cell 메트릭을 가진 여기서 한다.
     pub fn mouse(self: *AppSession, kind: i32, x_px: f64, y_px: f64, button: i32, mods: i32) void {
         if (!self.surface_initialized) return;
+        // 상태바 위 클릭은 **삼킨다**(S3가 항목을 올리기 전까지 눌러도 아무 일도 없는 게 맞다). 안 막으면 아래
+        // 사이드바·탭 바 hit-test가 상태바 좌표를 자기 것으로 받거나(상태바는 창 전폭이라 사이드바 아래를 지난다)
+        // 터미널 선택 드래그가 시작된다. 드래그 중(kind != 1)은 통과시킨다 — 터미널에서 시작한 선택이 상태바
+        // 위로 지나갈 때 끊기면 안 된다(capture 소유자가 계속 받아야 한다).
+        if (kind == 1 and self.pointInStatusBar(x_px, y_px)) return;
         // 새 primary down은 이전 capture의 mouse-up이 유실됐더라도 먼저 단일 owner를 exhaustive 취소한다.
         // 이후 실제 hit target만 새 owner를 arm하므로 terminal/dock/sidebar/divider가 동시에 살아남지 않는다.
         // **취소 직전의 "보이던 탭 순서"는 기억해 둔다** — 이 down이 겨냥한 것은 화면에 그려져 있던 preview
@@ -29634,6 +29660,10 @@ pub const AppSession = struct {
             self.dropQuadsByLayer(2); // C4b-5: 탭 밴드 quad(layer2)도 per-frame — 매 프레임 비우고 탭 바 build가 재채운다(미연결 시 no-op).
             self.dropQuadsByLayer(3); // 스크롤바(layer3 over)도 per-frame — drop과 append를 짝지어 깜빡임/누적 방지.
             self.dropQuadsByLayer(4); // 알림 종 배지(layer4 header)도 per-frame — 헤더 frame(흰 숫자)과 같은 주기로 갱신.
+            self.dropQuadsByLayer(status_bar_layer); // 상태바 배경(over)도 per-frame — drop과 append를 짝짓는다.
+            // **스크롤바·모달보다 먼저** 넣는다. 셋 다 같은 over 버킷이고 버킷 안에서는 배열 순서가 painter
+            // 순서라, 먼저 넣은 상태바가 아래에 깔린다(모달이 상태바를 덮는 게 옳다).
+            self.appendStatusBarBackground();
             self.appendNotificationBadge(); // 종 우상단 빨강 원형 배지(안 읽음 있을 때만, 펼침 헤더)
             self.appendPaneScrollbars(); // 모든 pane 우측 thumb(스크롤백 있을 때만) — 활성=fade/hover, 비활성=faint
             self.appendSidebarScrollbar(); // 사이드바 우측 thumb(워크스페이스 카드가 뷰포트 넘칠 때만) — 단일 트랙 fade
@@ -30743,7 +30773,8 @@ pub const AppSession = struct {
         // 보다 길어지는데, 짧은 sidebar_rows로 content 높이를 재면 스크롤이 안 되고(max=0) thumb가 과대해진다. 렌더가
         // 보는 rows와 같은 도메인으로 재야 정합. 비드래그면 preview=null이라 sidebar_rows와 동일(byte-identical).
         const content_h = chrome.components.sidebar.contentHeight(self.sidebarRenderRows(), self.sidebarMetrics());
-        return sidebarMaxScrollPx(content_h, self.backing_height_px, self.sidebar_header_height_px);
+        // 사이드바 뷰포트도 상태바 위에서 끝난다 — 안 빼면 마지막 카드가 상태바 뒤로 숨고 스크롤로 꺼낼 수 없다.
+        return sidebarMaxScrollPx(content_h, self.backing_height_px -| self.statusBarHeightPx(), self.sidebar_header_height_px);
     }
 
     /// 사이드바 스크롤 오프셋을 [0, sidebarMaxScroll]로 잡는다. 탭 추가/삭제·검색 필터·resize·휠로 콘텐츠/뷰포트가
@@ -31936,8 +31967,12 @@ pub const AppSession = struct {
         const slot_h = self.sidebarMetrics().line_h; // 렌더 전 degenerate 판정(카드 높이는 줄 기하에서 나온다)
         if (slot_h == 0) return;
         const header = self.sidebar_header_height_px;
-        if (self.backing_height_px <= header) return;
-        const viewport_h: u32 = self.backing_height_px - header;
+        // 가드도 상태바를 뺀 높이로 본다 — 안 그러면 헤더+상태바가 창을 다 먹은 창에서 viewport_h가 0이 되고,
+        // thumb이 0 높이로 계산돼 트랙만 남는다(크래시는 아니나 의미 없는 그림).
+        if (self.backing_height_px -| self.statusBarHeightPx() <= header) return;
+        // thumb 비율의 분모도 같은 뷰포트를 써야 한다(sidebarMaxScrollPx와 한 쌍) — 갈리면 thumb이 트랙
+        // 끝에 도달해도 스크롤이 남거나 그 반대가 된다.
+        const viewport_h: u32 = (self.backing_height_px -| self.statusBarHeightPx()) -| header;
         const max_scroll = self.sidebarMaxScroll();
         if (max_scroll == 0) return; // 안 넘침 — 스크롤바 없음
         const view_px: f32 = @floatFromInt(viewport_h);
@@ -33985,6 +34020,39 @@ pub const AppSession = struct {
     /// cell↔quad가 같은 col에서 만나 어긋나지 않는다. 안 읽은 알림이 없거나 헤더가 안 그려지는 폭/상태면 무동작.
     /// **접힘은 제외**한다(접힘 헤더는 터미널 위에 그려져 layer 4 quad가 터미널 셀에 가려 안 보임 — 접힘은 텍스트 배지 유지).
     /// per-frame: renderFrame이 dropQuadsByLayer(4) 직후 호출(헤더 frame의 흰 숫자와 같은 주기로 갱신).
+    /// 포인터가 창 바닥 상태표시줄 위인가. **렌더 rect와 같은 산술**을 쓴다(`appendStatusBarBackground`와 한 쌍) —
+    /// 갈리면 보이는 자리와 눌리는 자리가 어긋난다. 상태바는 창 전폭이라 사이드바 아래 구간도 포함한다.
+    fn pointInStatusBar(self: *const AppSession, x_px: f64, y_px: f64) bool {
+        const h = self.statusBarHeightPx();
+        if (h == 0 or self.backing_width_px == 0) return false;
+        const top: f64 = @floatFromInt(self.backing_height_px -| h);
+        return y_px >= top and y_px < @as(f64, @floatFromInt(self.backing_height_px)) and
+            x_px >= 0 and x_px < @as(f64, @floatFromInt(self.backing_width_px));
+    }
+
+    /// 상태바 배경 quad의 layer. `.m`의 버킷팅이 `2→bottom, 0→under, 4→header, 그 밖→over`라 이 값은 **over**로
+    /// 간다(ObjC 수정 없이). over는 사이드바 셀보다 **뒤에** 그려지는 유일한 버킷이다 — layer 4(header)는 배지 원을
+    /// 헤더 글리프 뒤에 끼우려고 만든 자리라 셀보다 먼저 그려지고, 거기 두면 사이드바 카드가 상태바를 덮는다.
+    const status_bar_layer: u32 = 5;
+
+    /// 창 바닥 상태표시줄 배경(창 전폭). **조건 없이 매 프레임 넣는다** — 도크·사이드바 상태와 무관하게 바가 늘
+    /// 서 있어야 `dock_layout`이 깎아 둔 자리와 화면이 일치한다(조건부로 만들면 깎인 자리에 아무것도 없는 프레임이
+    /// 생긴다). 항목(글자·아이콘)은 S3에서 이 배경 위에 올린다.
+    fn appendStatusBarBackground(self: *AppSession) void {
+        const h = self.statusBarHeightPx();
+        if (h == 0 or self.backing_width_px == 0 or self.backing_height_px == 0) return;
+        const y = self.backing_height_px -| h;
+        self.appendSolidQuad(
+            0,
+            @floatFromInt(y),
+            @floatFromInt(self.backing_width_px),
+            @floatFromInt(h),
+            // 사이드바와 같은 chrome 배경색을 쓰되 window.opacity를 반영한다(straight-alpha quad 경로).
+            self.chromeQuadBg(self.sidebarBg()),
+            status_bar_layer,
+        );
+    }
+
     fn appendNotificationBadge(self: *AppSession) void {
         if (self.notification_unread == 0 or self.sidebar_collapsed) return;
         const cw = self.cell_width_px;
@@ -34403,7 +34471,9 @@ pub const AppSession = struct {
         const sidebar = chrome.components.sidebar;
         if (!self.sidebar_collapsed and self.sidebar_width_px > 0 and self.sidebar_slot_height_px > 0) {
             const header_h: i64 = @intCast(self.sidebar_header_height_px);
-            const vp_bottom: i64 = @intCast(self.backing_height_px);
+            // 배지 뷰포트 하단도 상태바 위에서 끝난다 — 주석이 말하는 "render scissor와 정합"의 그 scissor가
+            // 이 스택에서 상태바만큼 짧아졌으므로(같은 값), 여기만 창 바닥이면 상태바 뒤 배지를 계속 그린다.
+            const vp_bottom: i64 = @intCast(self.backing_height_px -| self.statusBarHeightPx());
             // SG8d: 카드 드래그 중이면 배지도 고스트 레이아웃(preview_rows)을 따라간다 — 렌더 도메인 단일화(놓친 소비자 이주).
             const brows = self.sidebarRenderRows();
             for (brows, 0..) |row, s| {
@@ -37897,7 +37967,8 @@ test "그룹핀 리뷰 #7: 드래그 중 sidebarMaxScroll이 preview_rows(더 �
         }
     }.f;
     session.sidebar_rows.clearRetainingCapacity();
-    inline for (0..3) |i| try session.sidebar_rows.append(session.allocator, mkCard(i)); // 3행 = 120px <= 160 → 스크롤 없음
+    // 뷰포트 = backing(200) - 상태바 - 헤더(40). 상태바가 서기 전엔 160이었다(SB1-S2b로 짧아짐).
+    inline for (0..3) |i| try session.sidebar_rows.append(session.allocator, mkCard(i)); // 3행 = 120px <= 뷰포트 → 스크롤 없음
     session.sidebar_preview_rows.clearRetainingCapacity();
     inline for (0..6) |i| try session.sidebar_preview_rows.append(session.allocator, mkCard(i)); // 6행 = 240px > 160(force-emit)
 
@@ -37905,7 +37976,9 @@ test "그룹핀 리뷰 #7: 드래그 중 sidebarMaxScroll이 preview_rows(더 �
     try std.testing.expectEqual(@as(u32, 0), session.sidebarMaxScroll());
     // 드래그 프리뷰 활성 → sidebarRenderRows()=preview_rows(길음) 기준 → 스크롤 가능(240-160=80).
     session.sidebar_drag_preview = .{ .origin = 0, .origin_len = 1, .plan = .none, .cursor_y = 0, .ghost_lo = 0, .ghost_hi = 0 };
-    try std.testing.expectEqual(@as(u32, 80), session.sidebarMaxScroll()); // ★ 옛 버그면 sidebar_rows(3행)로 0 → 스크롤 불가
+    // 240(6행) - 뷰포트. 숫자를 박지 않고 식으로 둬 상태바 높이가 바뀌어도 의도가 유지되게 한다.
+    const sb_viewport: u32 = (200 - session.statusBarHeightPx()) - session.sidebar_header_height_px;
+    try std.testing.expectEqual(240 - sb_viewport, session.sidebarMaxScroll()); // ★ 옛 버그면 sidebar_rows(3행)로 0 → 스크롤 불가
     session.sidebar_drag_preview = null; // teardown(preview_rows는 deinit이 정리)
 }
 
@@ -43411,12 +43484,12 @@ test "window padding insets only the cell grid, not chrome (termRect/paneBarRect
     session.backing_width_px = session.sidebar_width_px + 800;
     session.backing_height_px = 600;
 
-    // termRect: 사이드바만 뺀다 — window padding 없음(chrome이 사이드바 경계/창 가장자리까지).
+    // termRect: 사이드바와 **창 바닥 상태표시줄**을 뺀다 — window padding 없음(chrome이 사이드바 경계/창 가장자리까지).
     const r = session.termRect();
     try std.testing.expectEqual(session.sidebar_width_px, r.x);
     try std.testing.expectEqual(@as(u32, 0), r.y);
     try std.testing.expectEqual(@as(u32, 800), r.w);
-    try std.testing.expectEqual(@as(u32, 600), r.h);
+    try std.testing.expectEqual(600 - session.statusBarHeightPx(), r.h);
 
     // 탭 바: leaf rect 상단·사이드바 경계에 붙는다(padding inset 없음 — chrome은 가장자리까지).
     const bar = session.paneBarRect(r).?;
@@ -43430,7 +43503,7 @@ test "window padding insets only the cell grid, not chrome (termRect/paneBarRect
     try std.testing.expectEqual(session.sidebar_width_px + 8, g.x); // 좌 = 사이드바 + pad_x
     try std.testing.expectEqual(bar_h + 4, g.y); // 상 = 탭 바 + pad_y
     try std.testing.expectEqual(@as(u32, 800 - 16), g.w); // 폭 = backing − 사이드바 − 2·pad_x
-    try std.testing.expectEqual(@as(u32, 600) -| bar_h -| 8, g.h); // 높이 = backing − 바 − 2·pad_y
+    try std.testing.expectEqual((600 - session.statusBarHeightPx()) -| bar_h -| 8, g.h); // 높이 = backing − 상태바 − 바 − 2·pad_y
 
     // padding 0이면 grid도 inset 없음(탭 바만 뺀 영역).
     session.window_padding_px = .{};
@@ -43438,7 +43511,7 @@ test "window padding insets only the cell grid, not chrome (termRect/paneBarRect
     try std.testing.expectEqual(session.sidebar_width_px, g0.x);
     try std.testing.expectEqual(bar_h, g0.y);
     try std.testing.expectEqual(@as(u32, 800), g0.w);
-    try std.testing.expectEqual(@as(u32, 600) -| bar_h, g0.h);
+    try std.testing.expectEqual((600 - session.statusBarHeightPx()) -| bar_h, g0.h); // padding 0이어도 상태바는 빠진다
 }
 
 // 비대칭 window padding(left≠right, top≠bottom) 회귀: paneTermRect가 좌상으로 left/top만큼만 들이고 폭/높이를
@@ -43472,7 +43545,7 @@ test "asymmetric window padding insets paneTermRect by left/top and grid by left
     try std.testing.expectEqual(bar_h + 4, g.y);
     // 폭은 left+right(30), 높이는 바 + top+bottom(12)만큼 줄어든다.
     try std.testing.expectEqual(@as(u32, 800 - 30), g.w);
-    try std.testing.expectEqual(@as(u32, 600) -| bar_h -| 12, g.h);
+    try std.testing.expectEqual((600 - session.statusBarHeightPx()) -| bar_h -| 12, g.h); // backing − 상태바 − 바 − (pad_top+pad_bottom)
 
     // gridFromBacking도 비대칭 합(left+right=30, top+bottom=12)을 grid에서 뺀다(좌우·상하 대칭 가정 없이).
     // 800px term 폭(사이드바 뺀) 기준 cell 8px: (800−30)/8=96 cols, (600−12)/18=32 rows.
@@ -50067,7 +50140,9 @@ test "file tree ET-CWD follows the active pane observation and keeps an old reve
     // 고정 chrome 높이를 공식으로 다시 쓰지 않고 **실제 기하에서 읽는다**. 예전에는
     // `titlebar_strip_px + paneBarHeightPx()`로 적어 뒀는데, 그 둘은 도크 기하의 입력이 아니게 됐다
     // (도크 시작선과 view bar는 이제 terminal cell이 아니라 Chrome metric에서 나온다).
-    session.backing_height_px = session.dockGeometry().tree.y + session.cell_height_px;
+    // 상태바가 창 바닥을 먹으므로 그만큼 더 줘야 **한 행 viewport**라는 이 셋업의 의도가 유지된다. 안 더하면
+    // 도크가 22px 짧아져 뷰 바가 접히고(낮은 도크 규칙) 본문이 오히려 커진다 — 전제가 뒤집힌다.
+    session.backing_height_px = session.dockGeometry().tree.y + session.cell_height_px + session.statusBarHeightPx();
     try std.testing.expectEqual(session.cell_height_px, session.dockGeometry().tree_content.h);
     session.file_tree_scroll_rows = 6;
     try testWriteActiveTermCwd(session, one);
@@ -51750,7 +51825,9 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     session.dock.side = .bottom;
     session.dock.size = 220;
     const bottom = session.dockGeometry();
-    try std.testing.expect(bottom.dock.h > 0 and bottom.terminal.h + bottom.divider.h + bottom.dock.h == 900 - session.titlebar_strip_px);
+    // 작업영역은 이제 창 바닥이 아니라 **상태바 윗변**에서 끝난다 — 세 조각의 합이 그만큼 줄어든다.
+    try std.testing.expect(bottom.dock.h > 0 and bottom.terminal.h + bottom.divider.h + bottom.dock.h ==
+        900 - session.titlebar_strip_px - bottom.status_bar.h);
     const chrome_workspace = chrome.props.workspaceRect(session.buildCellMetrics());
     try std.testing.expectEqual(bottom.workspace.x, chrome_workspace.x);
     try std.testing.expectEqual(bottom.workspace.y, chrome_workspace.y);
@@ -61825,6 +61902,52 @@ test "gpu quad 수명: drop은 자기 레이어만·순서 보존, rebuildSideba
     try std.testing.expect(survived_3);
 }
 
+// SB1-S2b: 상태바가 **실제로 그려지는지**를 quad 수준에서 못박는다. 도크 골든은 Chrome Lab 경로라
+// `status_bar_height_px=0`을 직접 넘겨 이 표면을 전혀 덮지 않는다 — 그래서 여기서 본다.
+// 레이어가 특히 중요하다: layer 4(header)는 사이드바 셀보다 **먼저** 그려져 카드가 상태바를 덮는다.
+// over 버킷(`.m`이 2/0/4 외를 전부 over로 보낸다)만이 사이드바 셀 뒤에 온다.
+test "SB1-S2b: 상태바 배경이 창 전폭으로 매 프레임 선다(over 버킷)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1000, 700, 1000);
+    _ = try session.tick();
+
+    const h = session.statusBarHeightPx();
+    try std.testing.expect(h > 0);
+
+    var found: ?metal_frame.GpuQuad = null;
+    for (session.gpu_quads.items) |q| {
+        if (q.layer == AppSession.status_bar_layer) found = q;
+    }
+    const bar = found orelse return error.StatusBarQuadMissing;
+    try std.testing.expectEqual(@as(f32, 0), bar.x); // 창 전폭 — 사이드바 아래까지 지나간다
+    try std.testing.expectEqual(@as(f32, @floatFromInt(session.backing_width_px)), bar.w);
+    try std.testing.expectEqual(@as(f32, @floatFromInt(session.backing_height_px - h)), bar.y);
+    try std.testing.expectEqual(@as(f32, @floatFromInt(h)), bar.h);
+    // over 버킷 판정: `.m`의 버킷팅은 2=bottom·0=under·4=header·그 밖=over다.
+    try std.testing.expect(bar.layer != 0 and bar.layer != 2 and bar.layer != 4);
+
+    // **조건 없이 매 프레임 선다** — 도크를 접거나 사이드바를 접어도 사라지면 dock_layout이 깎아 둔 자리에
+    // 아무것도 없는 프레임이 나온다.
+    session.toggleSidebarCollapsed();
+    _ = try session.tick();
+    var still = false;
+    for (session.gpu_quads.items) |q| {
+        if (q.layer == AppSession.status_bar_layer) still = true;
+    }
+    try std.testing.expect(still);
+}
+
 // SB1-S2a: 상태바 높이의 **단일 권위는 `dock_layout`**이다. ABI로 나가는 값(사이드바 strip을 자르는 값)과
 // 작업영역을 깎은 값이 갈리면 strip이 상태바를 덮거나 그 위에 틈이 생긴다 — 그래서 스탬프가 `dockGeometry()`
 // 에서 직접 가져온다. 이 조각은 입력이 0이라 결과도 0이지만, 계약은 지금 고정해 둔다.
@@ -61845,7 +61968,9 @@ test "SB1-S2a: metalFrame의 상태바 높이는 dock_layout 권위와 같다" {
     _ = try session.tick(); // 기하는 투영 스탬프라 한 번 돌려 확정한다
 
     try std.testing.expectEqual(session.dockGeometry().status_bar.h, session.metalFrame().status_bar_height_px);
-    try std.testing.expectEqual(@as(u32, 0), session.metalFrame().status_bar_height_px); // S2b가 뒤집는다
+    // S2b가 높이를 세웠다 — 이제 실제 값이 나가고, 위 단언이 그 값이 `dock_layout` 권위와 같음을 보장한다.
+    try std.testing.expectEqual(session.statusBarHeightPx(), session.metalFrame().status_bar_height_px);
+    try std.testing.expect(session.metalFrame().status_bar_height_px > 0);
 }
 
 // `placement_failed`는 **이번 배치의 결과만** 뜻해야 한다. 부분 투영(chrome-only) 경로도 `placeAndDistribute`를

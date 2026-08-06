@@ -50,7 +50,9 @@ pub fn paint(
 
     for (tree.entries) |entry| {
         switch (entry.visual) {
-            .none => if (entry.kind != .container) return error.InvalidSnapshot,
+            // 구조 노드는 그릴 것이 없다. `scroll_area`도 그중 하나다 — 자기 배경을 갖지 않고 clip과
+            // 자식 배치만 하며, 눈에 보이는 것은 그 자식들과 track/thumb(각각 card visual)이다.
+            .none => if (entry.kind != .container and entry.kind != .scroll_area) return error.InvalidSnapshot,
             .card => |visual| {
                 if (entry.kind != .card) return error.InvalidSnapshot;
                 const rect = try snapRect(entry.rect);

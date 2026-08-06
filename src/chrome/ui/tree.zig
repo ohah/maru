@@ -414,10 +414,16 @@ const BuildState = struct {
         for (node.children, child_items) |child, *item| item.* = itemFor(child);
         const result = try layout.layoutFlex(flex_container, child_items, child_scratch, child_rects);
 
-        const own_clip = if (result.clip_rect) |content_rect|
-            try offsetRect(content_rect, rect.x, rect.y)
-        else
-            null;
+        const own_clip = if (result.clip_rect) |content_rect| blk: {
+            var clip = try offsetRect(content_rect, rect.x, rect.y);
+            // `layoutFlex`의 clip은 padding을 **제외한** content box다(CSS의 padding box와 다르다).
+            // 스크롤바는 방금 예약한 gutter에 놓이므로 그 폭을 clip에 돌려준다 — CSS에서 스크롤바가
+            // padding box 안이라 자기 컨테이너에 잘리지 않는 것과 같은 자리를 여기서 만든다.
+            // 이 한 줄 덕분에 스크롤바에 **clip 예외가 없다**: 자기 컨테이너의 clip을 그대로 받고,
+            // 중첩에서는 바깥 뷰포트에 정확히 잘린다.
+            if (node.props == .scroll_area) clip.width += node.props.scroll_area.scroll.gutter_px;
+            break :blk clip;
+        } else null;
         const effective_clip = try intersectClip(parent_clip, own_clip);
         const own_index = self.entry_count;
         self.buffers.entries[own_index] = .{
@@ -446,39 +452,45 @@ const BuildState = struct {
         // 스크롤바는 **자식들을 낸 뒤, 부모로 돌아가기 전**에 낸다(§4). 배열 끝에 붙이면 preorder와
         // subtree-range 불변식이 깨지고 root가 여럿이 된다. 여기서 내면 `parent_index`가 이 컨테이너라
         // 두 불변식이 유지되고 z도 저절로 맞는다 — 자식들보다 뒤(위)이고 다음 sibling보다 앞(아래)이다.
-        if (node.props == .scroll_area) try self.appendScrollbar(node.props.scroll_area.scroll, own_index, rect, parent_clip);
+        if (node.props == .scroll_area) try self.appendScrollbar(
+            node.props.scroll_area.scroll,
+            own_index,
+            // 스크롤바 기하의 기준은 **자식이 놓인 영역**이다(gutter 제외). 그 오른쪽이 gutter다.
+            try offsetRect(result.content_rect, rect.x, rect.y),
+            effective_clip,
+        );
     }
 
-    /// track/thumb entry. clip이 `parent_clip`인 것이 핵심이다 — 스크롤바는 gutter(컨테이너 rect의
-    /// **오른쪽 바깥**)에 있어서 컨테이너의 overflow clip으로 접으면 통째로 잘려 사라진다. 배열 안에서는
-    /// 자식이지만 기하적으로는 형제 옆자리다(§4).
+    /// track/thumb entry. `content_rect`는 자식이 놓인 영역이고 그 오른쪽 `gutter_px`가 스크롤바
+    /// 자리다. clip은 이 컨테이너의 `effective_clip`이며 위에서 gutter를 되돌려 놓았으므로 스크롤바가
+    /// 그 안에 있다 — CSS에서 스크롤바가 padding box 안이라 자기 컨테이너에 안 잘리는 것과 같다(§4).
     fn appendScrollbar(
         self: *BuildState,
         scroll: ScrollDeclaration,
         container_index: usize,
-        container_rect: layout.UiRect,
-        ancestor_clip: ?layout.UiRect,
+        content_rect: layout.UiRect,
+        container_clip: ?layout.UiRect,
     ) BuildError!void {
         const track_part = scroll.track orelse return;
         const thumb_part = scroll.thumb orelse return;
         const bar = scroll_area.scrollbarGeometry(.{
-            .x = container_rect.x,
-            .y = container_rect.y,
-            .w = container_rect.width,
-            .h = container_rect.height,
+            .x = content_rect.x,
+            .y = content_rect.y,
+            .w = content_rect.width,
+            .h = content_rect.height,
             .gutter_w = scroll.gutter_px,
         }, scroll.content_h_px, scroll.offset_px, scroll.metrics) orelse return;
 
         if (self.entry_count + 2 > self.options.max_entries) return error.MaxEntriesExceeded;
         // track이 먼저, thumb이 나중이다 — `hitAction`이 reverse z-order라 마지막 entry가 이기고,
         // 순서가 뒤집히면 thumb 위 down이 track click으로 판정돼 드래그 대신 점프가 일어난다.
-        self.appendScrollbarPart(track_part, container_index, ancestor_clip, scroll.drag, .{
+        self.appendScrollbarPart(track_part, container_index, container_clip, scroll.drag, .{
             .x = bar.track_x,
             .y = bar.track_y,
             .width = bar.track_w,
             .height = bar.track_h,
         });
-        self.appendScrollbarPart(thumb_part, container_index, ancestor_clip, scroll.drag, .{
+        self.appendScrollbarPart(thumb_part, container_index, container_clip, scroll.drag, .{
             .x = bar.track_x,
             .y = bar.thumb_y,
             .width = bar.track_w,
@@ -490,7 +502,7 @@ const BuildState = struct {
         self: *BuildState,
         part: ScrollbarPart,
         container_index: usize,
-        ancestor_clip: ?layout.UiRect,
+        clip: ?layout.UiRect,
         drag: ?DragDeclaration,
         rect: layout.UiRect,
     ) void {
@@ -499,7 +511,7 @@ const BuildState = struct {
             .parent_index = container_index,
             .kind = .card,
             .rect = rect,
-            .effective_clip = ancestor_clip,
+            .effective_clip = clip,
             .own_clip = null,
             .action = part.action,
             .drag = drag,
@@ -536,6 +548,14 @@ fn isAuto(length: layout.UiLength) bool {
     };
 }
 
+/// 스크롤 컨테이너의 오른쪽 padding에 gutter를 더한 style. 원본을 바꾸지 않고 복사해 돌려준다.
+fn gutterInset(style: layout.UiStyle, gutter_px: f32) layout.UiStyle {
+    if (!(gutter_px > 0)) return style;
+    var inset = style;
+    inset.padding.right += gutter_px;
+    return inset;
+}
+
 fn containerFor(node: UiNode, rect: layout.UiRect) BuildError!layout.FlexContainer {
     const flex_container: layout.FlexContainer = switch (node.props) {
         .container => |value| .{
@@ -547,7 +567,10 @@ fn containerFor(node: UiNode, rect: layout.UiRect) BuildError!layout.FlexContain
             .overflow = value.overflow,
         },
         .scroll_area => |value| .{
-            .style = node.style,
+            // gutter는 padding과 같은 층이다 — 자식이 놓일 영역을 그만큼 안쪽으로 민다
+            // (CSS `scrollbar-gutter`, taffy `content_box_inset.right += scrollbar_gutter`).
+            // **컨테이너가 자기 폭에서** 떼어 놓으므로 조상에 padding이 있든 없든 같게 동작한다.
+            .style = gutterInset(node.style, value.scroll.gutter_px),
             .size = .{ .width = rect.width, .height = rect.height },
             .direction = value.direction,
             .justify = value.justify,
@@ -944,7 +967,7 @@ test "scrollView emits its scrollbar inside preorder, not appended at the array 
     try std.testing.expectEqual(scroll_fixture.payload, tree.entries[thumb_index].drag.?.payload);
 }
 
-test "scrollView scrollbar keeps the ancestor clip so the gutter does not clip it away" {
+test "scrollArea reserves the gutter inside itself and its scrollbar survives its own clip" {
     const children = [_]UiNode{
         container(.{ .id = 0x201, .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = 60 }, .flex = .{ .shrink = 0 } } }, &.{}),
     };
@@ -955,13 +978,20 @@ test "scrollView scrollbar keeps the ancestor clip so the gutter does not clip i
     const view = tree.entries[tree.find(0x100).?];
     const track = tree.entries[tree.find(scroll_fixture.track_id).?];
 
-    // 스크롤바는 컨테이너 rect의 **오른쪽 바깥**(gutter)에 있다.
-    try std.testing.expect(track.rect.x >= view.rect.x + view.rect.width);
-    // 그래서 컨테이너의 overflow clip으로 접으면 통째로 사라진다. 조상 clip을 받아야 살아남는다.
-    const own = view.own_clip orelse return error.TestUnexpectedResult;
-    try std.testing.expect(track.rect.x >= own.x + own.width);
-    const clip = track.effective_clip;
-    if (clip) |c| try std.testing.expect(track.rect.x < c.x + c.width);
+    // 스크롤바는 컨테이너 rect **안**이다 — gutter를 자기 폭에서 예약했기 때문이다(CSS
+    // `scrollbar-gutter`와 같은 자리). 밖에 두면 자기 clip에 잘려 사라진다.
+    try std.testing.expect(track.rect.x >= view.rect.x);
+    try std.testing.expect(track.rect.x + track.rect.width <= view.rect.x + view.rect.width);
+    // clip은 gutter를 포함하므로 스크롤바가 그 안에 살아남는다.
+    const clip = track.effective_clip orelse return error.TestUnexpectedResult;
+    try std.testing.expect(track.rect.x >= clip.x);
+    try std.testing.expect(track.rect.x + track.rect.width <= clip.x + clip.width);
+    // 그리고 자식은 gutter만큼 좁다 — 스크롤바가 목록 위에 겹치지 않는다.
+    const child = scrolled_child: {
+        const idx = tree.find(0x201) orelse return error.TestUnexpectedResult;
+        break :scrolled_child tree.entries[idx];
+    };
+    try std.testing.expect(child.rect.x + child.rect.width <= track.rect.x);
 }
 
 test "scrollView translates its subtree and refolds each clip at the moved position" {

@@ -132,10 +132,16 @@ pub const Op = union(enum) {
         scroll_clipped: bool = false,
         /// 이 텍스트를 자를 뷰포트(published tree의 `effective_clip`을 그대로 전달한 값).
         ///
-        /// measured(픽셀) 경로는 이 값을 쓰지 않는다 — `scroll_clipped`와 backend가 아는 뷰포트로 자르며,
-        /// 여기 rect를 실으면 스크롤 1px마다 shaping 캐시 키가 바뀐다. **셀 격자로 lowering하는 경로**
-        /// (Chrome Lab·모달)는 그 배선이 없으므로 이 rect로 자른다. 두 경로가 같은 clip을 못 보면 같은
-        /// 행의 배경 quad는 잘리는데 글자만 남는 어긋난 그림이 나온다.
+        /// measured(픽셀) 경로는 이 값을 쓰지 않는다 — `scroll_clipped`와 backend가 아는 뷰포트로
+        /// glyph마다 부분 잘림을 하며(`chrome/system_text.zig`의 `appendGpuGlyphs`), 여기 rect를 실으면
+        /// 스크롤 1px마다 shaping 캐시 키가 바뀐다. **셀 격자로 lowering하는 경로**(`metal_lowering`의
+        /// `placeText` — 모달)는 그 배선이 없으므로 이 rect로 자르되, 셀 단위라 부분 잘림이 불가능해
+        /// origin이 밖이면 통째로 버린다.
+        ///
+        /// Chrome Lab은 **measured 경로**다(제품 도크와 같은 `shapeOps`+`appendGpuGlyphs`를 탄다).
+        /// 예전 Lab 전용 셀 lowerer 시절의 서술이 여기 남아 있었는데, 그 상태로는 이 rect를 통째로
+        /// 비워도 Lab 캡처가 픽셀 하나 바뀌지 않는다(2026-08-06 확인). 도크 텍스트의 잘림을 보는 것은
+        /// `scroll_clipped`와 골든이다.
         clip: ?Rect = null,
     };
 

@@ -604,15 +604,15 @@ trunc한 integral px만 offset에 적용한 뒤 residue만 남긴다. paint/hit-
 publish한다. 이 규칙은 2x Retina에서 0.5pt 입력도 1px 단위로 누적되어 보이되, draw와 hit-test의 subpixel/rounding 결과가
 갈라지는 것을 막는다.
 
-`src/chrome/components/session_dock/scroll.zig`의 pure `project`가 `Item` kind와 `Metrics`, viewport, offset을 받아
+`src/chrome/ui/scroll_view.zig`의 pure `project`가 항목 높이 함수(도크는 그룹 헤더·카드·펼친 카드를 구분한다)와 viewport, offset을 받아
 다음을 **한 번에** 산출한다: total content height, clamped offset, 첫 partially-visible item index, 그 item의 negative local
 origin, visible item range, 각 item의 rect와 content clip. host는 이 결과가 가리키는 item만 `build.zig`에 전달하며 별도의
 visual-row→entry, cell-row, fixed-header y 산술을 하지 않는다. `view.zig`, `chrome_draw_lowering`, published
-`UiRectTree`, pointer hit-test, future scrollbar thumb는 이 same projection의 integer rect/clip을 소비한다. 따라서 카드가
+`UiRectTree`, pointer hit-test, scrollbar track/thumb는 이 same projection의 integer rect/clip을 소비한다. 따라서 카드가
 clip top에서 반쯤 보이면 그 보이는 반쪽만 draw/hit 가능하고, header 아래로 bleed하거나 다음 card의 action rect가 앞 card를
-가로채지 않는다. content height는 item 간 gap만 포함하고 마지막 item 뒤 trailing gap은 넣지 않는다. scroll thumb가
-필요한 경우에도 `project`의 total/viewport/clamped offset만 사용해 visual rect를 만들며, thumb drag는 이 slice의
-비목표다. 최대 500개 record와 그에 대응하는 bounded group header의 projection은 O(n) scan 하나이며 frame/hover에는
+가로채지 않는다. content height는 item 간 gap만 포함하고 마지막 item 뒤 trailing gap은 넣지 않는다. scrollbar도
+`project`의 total/viewport/clamped offset만으로 visual rect를 만들고, thumb drag는 그 rect를 역으로 읽어
+같은 offset 좌표계로 돌아온다 — 기하 출처가 둘로 갈리지 않는다. 최대 500개 record와 그에 대응하는 bounded group header의 projection은 O(n) scan 하나이며 frame/hover에는
 I/O, worker, JSON parse, allocation을 추가하지 않는다.
 
 Card background와 pointer rect만 clip에 맞추고 텍스트를 넘기면 partial card가 header/search 영역을 침범한다. 현재

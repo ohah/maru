@@ -565,21 +565,46 @@ const ArchiveScrollAnchor = struct {
     intra_card_y_px: u32,
 };
 
-fn archiveScrollAnchorFor(
+/// 아카이브 목록의 항목 높이 규칙이다. `chrome.ui.scroll_view`는 높이가 균일하다고 가정하지 않고
+/// comptime 함수로 물어보므로(docs/scroll-view.md §3), 그룹 헤더·카드·펼친 카드라는 이 도크만의
+/// 예외가 전부 여기 한 자리에 모인다. 스크롤 투영·anchor 복원·페이지 키가 같은 값을 본다.
+const ArchiveScrollItems = struct {
+    /// **살아 있는 투영을 빌린 슬라이스**다. 스냅샷 교체·필터 재계산을 건너 붙들면 dangling이 되므로
+    /// 호출자는 이 값을 저장하지 않고 같은 표현식 안에서 쓴다. 높이만 필요하면 필드를 복사한다.
     entries: []const agent_session_archive_view.Entry,
+    group_h_px: u32,
+    card_h_px: u32,
+    gap_px: u32,
+    /// 펼침은 최대 하나다. 그 index와 완전히 예약된 높이를 여기 함께 두어야 virtualization·clip·
+    /// hit-test가 같은 content-space 기하에 합의한다 — host가 detail 전용 y를 따로 더하지 않는다.
+    expanded_index: ?usize = null,
+    expanded_h_px: u32 = 0,
+
+    fn heightPx(self: ArchiveScrollItems, index: usize) u32 {
+        return switch (self.entries[index]) {
+            .group => self.group_h_px,
+            .card => if (self.expanded_index != null and self.expanded_index.? == index)
+                self.expanded_h_px
+            else
+                self.card_h_px,
+        };
+    }
+
+    fn extent(self: ArchiveScrollItems, viewport_h_px: u32) chrome.ui.scroll_view.Extent {
+        return .{ .count = self.entries.len, .gap_px = self.gap_px, .viewport_h_px = viewport_h_px };
+    }
+};
+
+fn archiveScrollAnchorFor(
     records: []const agent_session_archive_backend.Record,
-    projection: chrome.components.session_dock.scroll.Projection,
-    metrics: chrome.components.session_dock.scroll.Metrics,
+    projection: chrome.ui.scroll_view.Projection,
+    items: ArchiveScrollItems,
 ) ?ArchiveScrollAnchor {
     var y: i64 = projection.first_origin_y_px;
     var index = projection.first_index;
     while (index < projection.end_exclusive) : (index += 1) {
-        const entry = entries[index];
-        const kind: chrome.components.session_dock.scroll.Kind = switch (entry) {
-            .group => .group,
-            .card => .card,
-        };
-        const h: i64 = metrics.itemHeight(kind, index);
+        const entry = items.entries[index];
+        const h: i64 = items.heightPx(index);
         if (entry == .card and y <= 0 and y + h > 0) {
             const record_index = entry.card;
             if (record_index >= records.len) return null;
@@ -589,32 +614,27 @@ fn archiveScrollAnchorFor(
             };
         }
         y += h;
-        if (index + 1 < entries.len) y += metrics.gap_px;
+        if (index + 1 < items.entries.len) y += items.gap_px;
     }
     return null;
 }
 
 fn archiveScrollAnchorOffsetFor(
-    entries: []const agent_session_archive_view.Entry,
     records: []const agent_session_archive_backend.Record,
     saved: ArchiveScrollAnchor,
-    metrics: chrome.components.session_dock.scroll.Metrics,
+    items: ArchiveScrollItems,
     max_offset_px: u32,
 ) ?u32 {
     var top: u32 = 0;
-    for (entries, 0..) |entry, index| {
-        const kind: chrome.components.session_dock.scroll.Kind = switch (entry) {
-            .group => .group,
-            .card => .card,
-        };
-        const h = metrics.itemHeight(kind, index);
+    for (items.entries, 0..) |entry, index| {
+        const h = items.heightPx(index);
         if (entry == .card) {
             const record_index = entry.card;
             if (record_index < records.len and saved.identity.eqlRecord(&records[record_index]))
-                return chrome.components.session_dock.scroll.anchorOffsetPx(top, saved.intra_card_y_px, max_offset_px);
+                return chrome.ui.scroll_view.anchorOffsetPx(top, saved.intra_card_y_px, max_offset_px);
         }
         top +|= h;
-        if (index + 1 < entries.len) top +|= metrics.gap_px;
+        if (index + 1 < items.entries.len) top +|= items.gap_px;
     }
     return null;
 }
@@ -716,22 +736,22 @@ test "archive scroll anchor restores only the exact materialized card after reor
         .{ .parsed = .{ .provider = .codex, .session_id = @constCast("anchored"), .title = @constCast("title"), .summary = @constCast("summary"), .cwd = @constCast("/workspace/a"), .cwd_canonical = true, .model = @constCast("model"), .message_count = 1, .verified_user = true }, .source_path = @constCast("/archive/a.jsonl"), .mtime_ns = 1, .inode = 7, .device = 11 },
         .{ .parsed = .{ .provider = .codex, .session_id = @constCast("other"), .title = @constCast("title"), .summary = @constCast("summary"), .cwd = @constCast("/workspace/b"), .cwd_canonical = true, .model = @constCast("model"), .message_count = 1, .verified_user = true }, .source_path = @constCast("/archive/b.jsonl"), .mtime_ns = 1, .inode = 8, .device = 11 },
     };
-    const metrics = chrome.components.session_dock.scroll.Metrics{ .group_h_px = 20, .card_h_px = 50, .gap_px = 10 };
     const old_entries = [_]agent_session_archive_view.Entry{ .{ .group = 0 }, .{ .card = 0 }, .{ .card = 1 } };
-    const anchor = archiveScrollAnchorFor(&old_entries, &records, .{
+    const old_items = ArchiveScrollItems{ .entries = &old_entries, .group_h_px = 20, .card_h_px = 50, .gap_px = 10 };
+    const anchor = archiveScrollAnchorFor(&records, .{
         .content_height_px = 140,
         .max_offset_px = 80,
         .offset_y_px = 45,
         .first_index = 1,
         .first_origin_y_px = -15,
         .end_exclusive = 3,
-    }, metrics).?;
+    }, old_items).?;
     try std.testing.expectEqual(@as(u32, 15), anchor.intra_card_y_px);
 
     const reordered = [_]agent_session_archive_view.Entry{ .{ .group = 0 }, .{ .card = 1 }, .{ .card = 0 } };
-    try std.testing.expectEqual(@as(?u32, 105), archiveScrollAnchorOffsetFor(&reordered, &records, anchor, metrics, 300));
+    try std.testing.expectEqual(@as(?u32, 105), archiveScrollAnchorOffsetFor(&records, anchor, .{ .entries = &reordered, .group_h_px = 20, .card_h_px = 50, .gap_px = 10 }, 300));
     const collapsed = [_]agent_session_archive_view.Entry{.{ .group = 0 }};
-    try std.testing.expect(archiveScrollAnchorOffsetFor(&collapsed, &records, anchor, metrics, 300) == null);
+    try std.testing.expect(archiveScrollAnchorOffsetFor(&records, anchor, .{ .entries = &collapsed, .group_h_px = 20, .card_h_px = 50, .gap_px = 10 }, 300) == null);
 }
 
 test "archive scope refresh detects same-pane cwd changes but ignores repeated observations" {
@@ -2472,7 +2492,7 @@ pub const SessionCollection = struct {
 /// 드래그 내내 유지되고, `geometry`는 down 시점의 track/thumb 치수다.
 const AgentSessionDockScrollDrag = struct {
     grab_dy: f32,
-    geometry: chrome.components.session_dock.scroll.ScrollbarGeometry,
+    geometry: chrome.ui.scroll_view.ScrollbarGeometry,
 };
 
 const AgentSessionDockRichTextCache = struct {
@@ -3195,7 +3215,7 @@ pub const AppSession = struct {
     agent_session_archive_partial: bool = false,
     /// Session Dock keeps the retained position in backing pixels so its paint and published
     /// pointer tree agree even when the first card is only partly visible.
-    agent_session_archive_scroll: chrome.components.session_dock.scroll.SessionDockScrollState = .{},
+    agent_session_archive_scroll: chrome.ui.scroll_view.State = .{},
     /// Precise AppKit wheel input is fractional in points. This residue belongs only to the dock;
     /// sharing terminal `wheel_accum` would make one surface steal another's first pixel.
     agent_session_archive_wheel_residue_px: f64 = 0,
@@ -13991,13 +14011,6 @@ pub const AppSession = struct {
         };
     }
 
-    fn agentSessionDockProjectionKind(entries: []const agent_session_archive_view.Entry, index: usize) chrome.components.session_dock.scroll.Kind {
-        return switch (entries[index]) {
-            .group => .group,
-            .card => .card,
-        };
-    }
-
     /// Finds the one materialized projection entry whose source identity owns the inline
     /// disclosure.  The record index is not stable across snapshots, so the lookup compares the
     /// cloned `(provider, session id, device, inode)` identity rather than retaining an index.
@@ -14015,24 +14028,25 @@ pub const AppSession = struct {
 
     /// This is the sole translation from archive entries to fixed chrome pixel metrics. It is pure
     /// and bounded (records are capped at 500), and therefore safe on the render/input path.
-    fn agentSessionDockScrollProjection(self: *const AppSession) chrome.components.session_dock.scroll.Projection {
-        return chrome.components.session_dock.scroll.project(
-            self.agent_session_archive_projection.entries.items,
-            agentSessionDockProjectionKind,
-            self.agentSessionDockMetrics(),
-            self.agentSessionDockContentViewportHeightPx(),
+    fn agentSessionDockScrollProjection(self: *const AppSession) chrome.ui.scroll_view.Projection {
+        const items = self.agentSessionDockScrollItems();
+        return chrome.ui.scroll_view.project(
+            items,
+            ArchiveScrollItems.heightPx,
+            items.extent(self.agentSessionDockContentViewportHeightPx()),
             self.agent_session_archive_scroll.offset_y_px,
         );
     }
 
-    fn agentSessionDockMetrics(self: *const AppSession) chrome.components.session_dock.scroll.Metrics {
+    fn agentSessionDockScrollItems(self: *const AppSession) ArchiveScrollItems {
         const m = chrome.components.session_dock.types.DockMetrics.resolve(self.agentSessionDockScaleMilli());
         return .{
+            .entries = self.agent_session_archive_projection.entries.items,
             .group_h_px = m.group_h,
             .card_h_px = m.card_h,
             .gap_px = m.item_gap,
-            .expanded_card_index = self.agentSessionDockExpandedProjectionIndex(),
-            .expanded_card_h_px = m.card_h + m.expanded_detail_h + m.expanded_actions_h,
+            .expanded_index = self.agentSessionDockExpandedProjectionIndex(),
+            .expanded_h_px = m.card_h + m.expanded_detail_h + m.expanded_actions_h,
         };
     }
 
@@ -14042,10 +14056,9 @@ pub const AppSession = struct {
     fn captureAgentSessionDockScrollAnchor(self: *const AppSession) ?ArchiveScrollAnchor {
         const projection = self.agentSessionDockScrollProjection();
         return archiveScrollAnchorFor(
-            self.agent_session_archive_projection.entries.items,
             self.agent_session_archive_records.items,
             projection,
-            self.agentSessionDockMetrics(),
+            self.agentSessionDockScrollItems(),
         );
     }
 
@@ -14056,10 +14069,9 @@ pub const AppSession = struct {
         const projection = self.agentSessionDockScrollProjection();
         if (anchor) |saved| {
             if (archiveScrollAnchorOffsetFor(
-                self.agent_session_archive_projection.entries.items,
                 self.agent_session_archive_records.items,
                 saved,
-                self.agentSessionDockMetrics(),
+                self.agentSessionDockScrollItems(),
                 projection.max_offset_px,
             )) |offset| {
                 _ = self.agent_session_archive_scroll.setOffsetPx(offset, projection.max_offset_px);
@@ -14121,14 +14133,15 @@ pub const AppSession = struct {
             event.modifiers.command or event.modifiers.control or event.modifiers.option or event.modifiers.shift)
             return false;
         const projection = self.agentSessionDockScrollProjection();
-        const metrics = self.agentSessionDockMetrics();
+        // 카드 높이만 있으면 되므로 항목 열을 빌린 채로 두지 않는다(`ArchiveScrollItems.entries` 수명).
+        const card_h_px = self.agentSessionDockScrollItems().card_h_px;
         const changed = switch (event.key) {
             .page_up => self.agent_session_archive_scroll.scrollByPx(
-                -@as(i64, chrome.components.session_dock.scroll.pageStepPx(self.agentSessionDockContentViewportHeightPx(), metrics.card_h_px)),
+                -@as(i64, chrome.ui.scroll_view.pageStepPx(self.agentSessionDockContentViewportHeightPx(), card_h_px)),
                 projection.max_offset_px,
             ),
             .page_down => self.agent_session_archive_scroll.scrollByPx(
-                @as(i64, chrome.components.session_dock.scroll.pageStepPx(self.agentSessionDockContentViewportHeightPx(), metrics.card_h_px)),
+                @as(i64, chrome.ui.scroll_view.pageStepPx(self.agentSessionDockContentViewportHeightPx(), card_h_px)),
                 projection.max_offset_px,
             ),
             .home => self.agent_session_archive_scroll.setOffsetPx(0, projection.max_offset_px),
@@ -32421,7 +32434,7 @@ pub const AppSession = struct {
     fn buildAgentSessionDockItems(
         self: *const AppSession,
         allocator: std.mem.Allocator,
-        scroll_projection: chrome.components.session_dock.scroll.Projection,
+        scroll_projection: chrome.ui.scroll_view.Projection,
     ) ![]chrome.components.session_dock.types.Item {
         var out: std.ArrayList(chrome.components.session_dock.types.Item) = .empty;
         if (scroll_projection.first_index == scroll_projection.end_exclusive) return try out.toOwnedSlice(allocator);
@@ -32945,7 +32958,7 @@ pub const AppSession = struct {
 
     /// published tree가 발행한 track/thumb rect에서 현재 scrollbar 기하를 되읽는다. 여기서 다시 계산하면
     /// 보이는 것과 다른 두 번째 출처가 생긴다 — 그 갈라짐이 정확히 "보이는 곳과 눌리는 곳이 다른" 결함이다.
-    fn agentSessionDockScrollbarGeometry(self: *const AppSession) ?chrome.components.session_dock.scroll.ScrollbarGeometry {
+    fn agentSessionDockScrollbarGeometry(self: *const AppSession) ?chrome.ui.scroll_view.ScrollbarGeometry {
         const build_ids = chrome.components.session_dock.build.NodeIds;
         var track: ?chrome.ui.layout.UiRect = null;
         var thumb: ?chrome.ui.layout.UiRect = null;
@@ -49369,22 +49382,22 @@ test "Session Dock Cmd zoom grows and shrinks one resolved layout/text/scroll sc
     _ = try session.resize(1000, 700, 1000);
 
     const base_scale = session.agentSessionDockScaleMilli();
-    const base_metrics = session.agentSessionDockMetrics();
+    const base_card_h_px = session.agentSessionDockScrollItems().card_h_px;
     try std.testing.expectEqual(@as(u32, 1000), session.agentSessionDockUiZoomMilli());
     try std.testing.expectEqual(@as(u32, 1000), base_scale);
 
     session.dispatchAppAction(.increase_font_size);
     const larger_scale = session.agentSessionDockScaleMilli();
-    const larger_metrics = session.agentSessionDockMetrics();
+    const larger_card_h_px = session.agentSessionDockScrollItems().card_h_px;
     try std.testing.expect(larger_scale > base_scale);
-    try std.testing.expect(larger_metrics.card_h_px > base_metrics.card_h_px);
+    try std.testing.expect(larger_card_h_px > base_card_h_px);
 
     session.dispatchAppAction(.reset_font_size);
     session.dispatchAppAction(.decrease_font_size);
     const smaller_scale = session.agentSessionDockScaleMilli();
-    const smaller_metrics = session.agentSessionDockMetrics();
+    const smaller_card_h_px = session.agentSessionDockScrollItems().card_h_px;
     try std.testing.expect(smaller_scale < base_scale);
-    try std.testing.expect(smaller_metrics.card_h_px < base_metrics.card_h_px);
+    try std.testing.expect(smaller_card_h_px < base_card_h_px);
 
     session.setFontSize(font_size_min);
     try std.testing.expectEqual(session_dock_ui_zoom_min_milli, session.agentSessionDockUiZoomMilli());
@@ -67339,7 +67352,7 @@ test "세션 도크 스크롤바 드래그는 move 수가 아니라 tick 수만�
 
     // down 시점의 기하를 직접 만든다. 실제 경로에서는 published tree에서 되읽지만, 이 테스트가 고정하려는
     // 것은 그 기하가 아니라 **소비 지점**이다.
-    const geometry = chrome.components.session_dock.scroll.ScrollbarGeometry{
+    const geometry = chrome.ui.scroll_view.ScrollbarGeometry{
         .track_x = 100,
         .track_y = 0,
         .track_w = 16,

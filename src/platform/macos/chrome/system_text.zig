@@ -372,7 +372,7 @@ test "prepareRequest keeps a Korean button label and an icon-in-rect on the meas
             .max_width_px = 20,
             .placement = .{ .icon_in_rect = .{
                 .content_rect = .{ .x = 80, .y = 8, .w = 20, .h = 20 },
-                .icon_codepoint = icons.codepoint(.session_dock_refresh),
+                .icon_codepoint = icons.codepoint(.refresh),
                 .icon_extent_px = 18,
             } },
         } },
@@ -395,7 +395,7 @@ test "prepareRequest keeps a Korean button label and an icon-in-rect on the meas
     try std.testing.expectEqual(chrome.ui.typography.ChromeTextRole.button_label, request.runs[0].role);
     try std.testing.expectEqual(@as(u32, 18 * 8), request.runs[0].max_width_px);
     try std.testing.expectEqual(@as(usize, 0), request.runs[1].text.len);
-    try std.testing.expectEqual(icons.codepoint(.session_dock_refresh), request.runs[1].placement.icon_in_rect.icon_codepoint);
+    try std.testing.expectEqual(icons.codepoint(.refresh), request.runs[1].placement.icon_in_rect.icon_codepoint);
 }
 
 // 코드리뷰 회귀: 셰이핑 키가 스크롤 평행이동에 불변이 되면서, 같은 키가 "그 줄이 화면 위로 나가 있던
@@ -642,7 +642,7 @@ test "icon in rect resolves a registered SVG without a CoreText glyph" {
     const glyphs = try allocator.alloc(UnresolvedGlyph, 0);
     const layouts = try allocator.dupe(chrome.draw.TextPlacement, &.{.{ .icon_in_rect = .{
         .content_rect = .{ .x = 100, .y = 40, .w = 20, .h = 20 },
-        .icon_codepoint = icons.codepoint(.session_dock_refresh),
+        .icon_codepoint = icons.codepoint(.refresh),
         .icon_extent_px = 18,
     } }});
     const foregrounds = try allocator.dupe(u32, &.{0x123456});
@@ -654,7 +654,7 @@ test "icon in rect resolves a registered SVG without a CoreText glyph" {
     defer artifact.deinit(allocator);
 
     try std.testing.expectEqual(@as(usize, 1), artifact.records.len);
-    try std.testing.expectEqual(icons.codepoint(.session_dock_refresh), artifact.records[0].codepoint);
+    try std.testing.expectEqual(icons.codepoint(.refresh), artifact.records[0].codepoint);
     try std.testing.expectEqual(@as(u32, 0), artifact.records[0].glyph_id);
     try std.testing.expectEqual(@as(f32, 101), artifact.placements[0].x_px);
     try std.testing.expectEqual(@as(f32, 41), artifact.placements[0].y_px);

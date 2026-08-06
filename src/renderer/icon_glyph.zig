@@ -121,15 +121,21 @@ test "icon_glyph: 미등록 PUA는 null(폰트 경로로 폴백)" {
 // 되므로, 외부 도구 없이 CI가 잡게 여기서 못박는다. `--check`(로컬, rsvg 필요)와 달리 이 테스트는 Zig만 쓴다.
 test "icon_glyph: 생성된 이름 registry가 coverage 등록 집합과 정확히 같다" {
     const icons = @import("../icons.zig");
-    const fields = @typeInfo(icons.Icon).@"enum".fields;
-    // 개수가 같고(둘 다 ICONS 길이) 각 이름이 같은 cp를 가리키면 두 집합은 동일하다.
-    try std.testing.expectEqual(data.asset_manifest.len, fields.len);
-    inline for (fields, 0..) |field, index| {
+    // 두 방향을 모두 본다 — 한쪽만 보면 한 집합이 조용히 커져도 통과한다.
+    // (1) 등록된 모든 자산은 이름+fit으로 되읽히고, 그 조합이 다시 같은 cp를 준다.
+    for (data.asset_manifest) |asset| {
+        const cp: u21 = @intCast(asset.cp);
+        const resolved = icons.fromCodepoint(cp) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(cp, icons.codepointFit(resolved.icon, resolved.fit));
+        try std.testing.expect(isRegisteredIcon(cp));
+    }
+    // (2) 이름으로 고를 수 있는 모든 (아이콘, fit) 조합은 반드시 합성된다 — 아니면 그 자리가 폰트 폴백
+    //     (빈 칸 또는 엉뚱한 Nerd Fonts 글리프)이 된다. fit 폴백으로 겹치는 조합은 자연히 중복 확인된다.
+    inline for (@typeInfo(icons.Icon).@"enum".fields) |field| {
         const icon: icons.Icon = @enumFromInt(field.value);
-        const asset = data.asset_manifest[index];
-        try std.testing.expectEqualStrings(asset.name, field.name); // 순서·이름까지 같은 소스에서 나왔다
-        try std.testing.expectEqual(@as(u21, @intCast(asset.cp)), icons.codepoint(icon));
-        try std.testing.expect(isRegisteredIcon(icons.codepoint(icon))); // 이름으로 고른 아이콘은 반드시 합성된다
+        for ([_]icons.Fit{ .standard, .tight }) |fit| {
+            try std.testing.expect(isRegisteredIcon(icons.codepointFit(icon, fit)));
+        }
     }
 }
 

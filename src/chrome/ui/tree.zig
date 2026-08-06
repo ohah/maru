@@ -992,6 +992,16 @@ test "scrollArea reserves the gutter inside itself and its scrollbar survives it
         break :scrolled_child tree.entries[idx];
     };
     try std.testing.expect(child.rect.x + child.rect.width <= track.rect.x);
+
+    // gutter를 되돌린 clip이 **컨테이너를 넘지는 않는다.** clip은 "여기까지만 그린다"는 약속이라
+    // 넓히기만 하고 상한을 안 보면 그 약속이 깨진다 — `layout.zig`가 "자식 clip은 항상 부모 clip 안"
+    // 이라고 적은 불변식이 여기서 무너지고, 스크롤 자식이 컨테이너 밖으로 새어도 아무도 못 본다.
+    const own = view.own_clip orelse return error.TestUnexpectedResult;
+    try std.testing.expect(own.x >= view.rect.x);
+    try std.testing.expect(own.x + own.width <= view.rect.x + view.rect.width);
+    // 자식의 clip도 그 안이다(gutter 확장이 자식에게 새지 않는다).
+    const child_clip = child.effective_clip orelse return error.TestUnexpectedResult;
+    try std.testing.expect(child_clip.x + child_clip.width <= own.x + own.width);
 }
 
 test "scrollView translates its subtree and refolds each clip at the moved position" {

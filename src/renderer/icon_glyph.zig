@@ -7,7 +7,7 @@
 //! PUA(U+F0001~U+F1AF0)로 옮겨 이 영역과 겹친다(BMP PUA만 겹친다고 본 옛 가정은 틀렸다). 그래서 합성 게이트는
 //! **등록된 codepoint만**(`isRegisteredIcon`) 가로채고, 미등록 PUA는 폰트로 폴백한다 — 터미널 콘텐츠의 Nerd Fonts
 //! MDI 글리프가 blank가 되지 않게. C 셰이핑 게이트(coretext_smoke.m `maru_is_synthesized_glyph`)도 같은 등록 집합을
-//! 생성 헤더(`icon_codepoints.h` — svg_to_coverage.py)에서 받아 항상 일치한다(어긋나면 그 글리프가 blank). 등록된
+//! 생성 헤더(`icon_codepoints.h` — svg_to_coverage.py)에서 받아 항상 일치한다(어긋나면 그 글리프가 blank).
 //! 생성 manifest에 등록된 작은 집합만 Nerd Fonts MDI와 정확히 겹칠 때 maru 아이콘으로 가로채진다 — 아이콘 폰트
 //! 라우팅 인프라를 안 만든 대가를 registry membership으로 좁게 한정한다.
 

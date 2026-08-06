@@ -20,10 +20,13 @@ const types = @import("types.zig");
 
 // The dock owns this registered SVG icon. A text glyph such as `↻` varies by fallback font and
 // cannot promise the size or optical centre of a Chrome header affordance.
-// Dock controls use component-specific coverage glyphs: all occupy the standard two-cell
-// icon slot, while their tighter SVG view boxes keep their optical size consistent with cards.
-// fit을 **전부 명시**한다. `refresh`·`host`는 지금 변형이 하나뿐이라 fit 없는 접근자로도 같은 값이지만,
-// 나중에 다른 fit이 등록되면 기본이 뒤집혀 도크가 조용히 다른 그림을 그린다(적대적 검증이 짚은 default flip).
+// Dock controls select shared semantic icons with `Fit.tight` rather than dock-specific names: all
+// occupy the standard two-cell icon slot, and the tight assets fill it more (search tightens the view
+// box, the chevrons keep it and thicken the stroke) so their optical size stays consistent with cards.
+//
+// fit을 **전부 명시**한다. `reset`·`search`·`chevron_*`는 변형이 실재하므로 fit을 빼면 **지금 당장** 다른
+// 그림이 된다(`.tight`는 선택이 아니라 필수다). `host`는 지금 변형이 하나뿐이라 같은 값이지만, 나중에 다른
+// fit이 등록되면 기본이 뒤집혀 도크가 조용히 다른 그림을 그린다(적대적 검증이 짚은 default flip).
 const refresh_icon = icons.utf8Fit(.reset, .tight);
 const search_icon = icons.utf8Fit(.search, .tight);
 const chevron_down_icon = icons.utf8Fit(.chevron_down, .tight);

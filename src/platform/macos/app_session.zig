@@ -32167,7 +32167,7 @@ pub const AppSession = struct {
     /// 그 페인만 skip(기존 per-pane `catch continue/null`과 동형), append 실패면 pane.deinit.
     fn collectShaped(self: *AppSession, collected: *std.ArrayList(CollectedPane), dl: renderer.DrawList, builder: coretext_frame_builder.CoreTextFrameBuilder, dest: CollectDest) void {
         const pane = builder.shapeOnly(self.allocator, dl, &self.renderer_state.font_registry) catch return;
-        // 헤더 아이콘 ◧(U+25E7)는 .m이 hscale 1.7로 quad를 키워 셀보다 ~1.7칸 넓게 그린다. 셀 크기로 굽고 GPU에서
+        // 헤더 아이콘(gear·plus·bell·sidebar_collapse — 등록 PUA)은 .m이 hscale 1.7로 quad를 키워 셀보다 ~1.7칸 넓게 그린다. 셀 크기로 굽고 GPU에서
         // 확대하면 anti-alias가 번져 흐리므로(slot-stretch; partial-alpha 비율 ≈0.69 — coretext_smoke 측정 test), atlas
         // slot을 목표 px(셀×1.7)로 키워 그 크기로 직접 래스터한다 — 1.7× 텍스처가 1.7× quad에 1:1로 들어가 선명(≈0.33).
         // raster_*_px>0이면 estimateGlyphBitmapSize가 셀 배수 대신 이 크기로 slot을 잡는다(.m·레이아웃 불변). 터미널
@@ -32176,10 +32176,10 @@ pub const AppSession = struct {
             const rw: u16 = @intCast(headerIconRasterExtentPx(self.cell_width_px));
             const rh: u16 = @intCast(headerIconRasterExtentPx(self.cell_height_px));
             for (pane.shaped.runs.glyphs) |*g| {
-                // ◧(접기)·⚙(view options)는 헤더 전용 심볼이라 coretext_smoke.m의 cover-fit(center_symbol)
-                // 경로를 이미 타므로, slot만 1.7×로 키우면 1.7× quad에 1:1로 들어가 선명해진다. '+'(U+002B)는
-                // 터미널 콘텐츠에도 흔해 center_symbol에 넣으면 전역 '+'가 슬롯을 꽉 채워 굵어지는 회귀라,
-                // 헤더 전용 cover-fit 신호가 필요한 별도 작업으로 둔다.
+                // 헤더 아이콘은 등록 PUA라 coretext_smoke.m의 **합성 경로**(maru_is_synthesized_glyph)로 슬롯을
+                // 꽉 채워 그려진다 — 옛 Unicode ◧(U+25E7)·⚙(U+2699)가 타던 cover-fit(center_symbol) 게이트와는
+                // 무관하다(그 게이트는 이제 터미널 콘텐츠의 ◧·⚙만 탄다). 그래서 slot만 1.7×로 키우면 1.7× quad에
+                // 1:1로 들어가 선명해진다.
                 if (g.codepoint == icons.codepoint(.gear) or g.codepoint == icons.codepoint(.plus) or
                     g.codepoint == icons.codepoint(.bell) or g.codepoint == icons.codepoint(.sidebar_collapse))
                 {

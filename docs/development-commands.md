@@ -101,7 +101,7 @@ Maru 작업에서 사용하는 기본 명령이다.
 - 포맷 검사(변경 없이): `mise run fmt-check`
 - facade import 경계 검사: `mise run check-boundaries`
 - config 문서 ↔ 로더 키 대조: `mise run check-config-docs`(문서가 실재하지 않는 키를 광고하는지 — [config 스키마](config-schema.md#문서--키-양방향-게이트))
-- 탐색기 SVG→coverage 재생성 동기 검사(opt-in): `mise run icons:check` (로컬에 `rsvg-convert`와 Python Pillow 필요; 기본 `check`는 외부 도구 없이 SVG SHA-256 manifest와 C/Zig registry를 검사)
+- 아이콘 SVG→coverage 재생성 동기 검사(opt-in): `mise run icons:check` (로컬에 `rsvg-convert`와 Python Pillow 필요; 기본 `check`는 외부 도구 없이 SVG SHA-256 manifest와 C/Zig registry를 검사)
 - macOS AppSession 탐색기 성능 artifact gate: `mise run macos-file-explorer-perf` (전용 AppSession test 1개, 16,384 rows/1,000 events; Ubuntu에서는 skip되므로 별도 macOS PR CI job이 실행)
 - 전체 확인: `mise run check`
 - Zig 테스트 직접 실행: `zig build test`

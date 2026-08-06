@@ -49,6 +49,8 @@ pointer capture·drag 수명은 [Chrome 상호작용 이관](chrome-interaction-
 - content 높이와 max offset의 산출.
 - 가상화: 지금 그려야 하는 item 창(`first_index`, `end_exclusive`)과 첫 item의 local origin.
 - 스크롤바 track/thumb의 기하·발행·drag 선언, 그리고 pointer 좌표 → offset 매핑.
+- sticky 노드의 **위치 clamp**(§4.7). 원래 자리·상단 고정·다음 헤더가 밀어냄이라는 세 상태는 offset의
+  함수라 offset을 아는 쪽만 계산할 수 있다.
 - 자기 viewport의 clip. 그 안의 **장식 op**은 호출처가 기억하지 않아도 이 clip을 받는다(§5).
   단 스크롤바는 gutter에 있어 규칙이 다르다 — 조상 clip을 받는다(§4).
 - 자식이 축소되지 않는다는 것(§4.3). 목록은 넘치면 잘려야 하고 줄어들어서는 안 된다.
@@ -60,6 +62,8 @@ pointer capture·drag 수명은 [Chrome 상호작용 이관](chrome-interaction-
 
 - item의 내용·높이 정책. 높이는 소비처가 준 metric snapshot이 정한다(도크는 `DockMetrics`,
   탐색기는 행 높이). ScrollView는 그 값을 읽을 뿐 만들지 않는다.
+- **무엇이 sticky인지**(§4.7). 어느 항목이 어느 그룹에 속하는지는 domain 지식이고, 가상화 때문에 그
+  헤더는 창 밖에 있을 수도 있다. ScrollView는 받은 노드를 clamp할 뿐 그것을 고르지 않는다.
 - domain 상태. archive record, 파일 트리 노드, 워크스페이스 카드를 모른다.
 - effect 실행 시점. drag 좌표를 언제 소비할지는 host의 tick이 정하고, ScrollView는 그 소비 함수를 제공한다.
 - **목록 교체 뒤 위치 복원**(§4.5). 무엇이 "같은 항목"인지는 domain이 알므로 seam만 제공한다.
@@ -289,6 +293,60 @@ ScrollView는 **전자를 흡수하고 후자에는 seam만 준다.**
 포인터가 어느 스크롤 영역 위인지, 그래서 휠을 누가 먹는지는 host의 rect 라우팅이 정한다. ScrollView는
 "내 offset을 이만큼 움직여라"만 받는다. 한 pointer stream에 capture owner가 하나라는 규칙은
 [Chrome 상호작용 이관](chrome-interaction-migration.md) §4.2가 계속 소유한다.
+
+### 4.7 sticky — 스크롤해도 상단에 남는 노드
+
+목록을 스크롤하면 그룹 헤더가 위로 밀려 글자가 반쯤 잘리고, "지금 어느 그룹을 보고 있는가"가 사라진다.
+macOS 사이드바·iOS 목록은 그 헤더를 상단에 고정한다. 도크도 그렇게 한다(2026-08-06 결정 — 그 전까지는
+sticky를 한다/안 한다는 결정 자체가 없었다).
+
+**경계.** clamp 산술은 ScrollView가, 무엇을 붙일지는 소비처가 정한다. 가상화가 그 분리를 강제한다 —
+스크롤을 내리면 그 그룹의 헤더는 **창에서 빠져 있는데도** 상단에 있어야 하는데, 창 밖 항목이 어느
+그룹인지는 domain만 안다.
+
+```zig
+// 소비처: 창의 첫 항목이 속한 그룹을 찾아 슬롯에 넣고, 그 헤더는 일반 창에서 뺀다(두 번 그리지 않는다).
+const head = self.groupHeadFor(window.first_index);   // ?{ top_px, next_top_px, node }
+tree.scrollView(.{ .id = ..., .scroll = ..., .sticky_head = if (head) |h| h.node else null }, items);
+```
+
+**clamp는 한 줄이고 세 상태가 거기서 나온다.** 스크롤 영역 로컬 좌표(0 = viewport top)에서:
+
+```zig
+const natural_y = head.top_px - offset;            // 원래 자리
+const next_y    = head.next_top_px - offset;       // 다음 그룹 헤더 자리
+const sticky_y  = @min(@max(natural_y, 0), next_y - header_h);
+```
+
+| 스크롤 상태 | `natural_y` | 결과 |
+|---|---|---|
+| 아직 헤더를 안 지남 | 양수 | `natural_y` — 흐름 그대로 |
+| 헤더를 지나침 | 음수 | `0` — 상단 고정 |
+| 다음 헤더가 올라옴 | 음수 | `next_y - header_h` — 밀려 나감(두 헤더가 겹치지 않는다) |
+
+**높이는 그대로 자리를 차지한다.** sticky는 그리는 y만 clamp하고 스크롤 좌표계에서는 원래 높이를
+유지한다. 그래서 `project`의 content 높이·창 계산·anchor 규칙이 하나도 바뀌지 않는다 — 흐름에서 빼는
+방식을 골랐다면 그 셋을 전부 다시 정해야 했다.
+
+**발행은 스크롤바와 같고 clip은 다르다.** 가상화 평행이동을 받지 않는 것은 같지만(받으면 같이
+흘러내린다), 스크롤바는 gutter(컨테이너 **밖**)라 조상 clip을 받고 sticky 헤더는 컨테이너 **안** 상단이라
+컨테이너 clip을 그대로 받는다(좌우로 넘치면 잘려야 한다). z는 스크롤되는 자식보다 위다 — 카드가 헤더
+밑으로 지나가야 한다.
+
+**지금 하지 않는 것.**
+
+- **중첩 sticky.** 도크 그룹은 평면이라(`Entry`가 `group`/`card` 둘뿐) 상단에 남을 노드가 언제나
+  하나다. 계층 그룹이 생기면 `sticky_head` → `sticky_heads` 슬라이스로 넓힌다. 지금 만들면 실제 요구
+  없이 "쌓인 헤더가 서로 밀어내는 규칙"을 추측으로 정하게 된다.
+- **`relative`/`absolute`/`fixed` 일반화.** 지금 스크롤바가 `absolute`를, 모달이 `fixed`를 각자 손으로
+  하고 있어 개념은 이미 필요하다. 다만 SV1b가 스크롤바를 `build`의 preorder 안으로 넣을 때 "위치 지정
+  자식"의 실제 형태가 드러나므로, 그때 이름을 붙이는 것이 지금 추측보다 정확하다.
+- **투명 Fragment.** 슬롯에 조각 여럿을 넣어야 하면 `tree.container`로 묶는다. 그 container는 layout에
+  참여하는 실제 노드지만 `overflow = .visible` + 배경 없음이면 사실상 투명하다.
+
+**판정자.** 세 상태가 한 줄에서 나오므로 셋을 각각 본다 — 헤더 앞·지나침·다음 헤더 접근. 그룹이 둘
+이상인 Lab 시나리오를 offset 셋으로 캡처한다. `next_y - header_h` 항을 빼면 두 헤더가 겹치는데, 그것이
+빨개지지 않으면 판정자가 없는 것이다(§10.1).
 
 ## 5. clip은 컨테이너의 속성이지 그리는 쪽의 기억이 아니다
 

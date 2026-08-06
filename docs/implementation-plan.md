@@ -1219,6 +1219,13 @@ tree 교체에서 capture carry 누락(드래그가 첫 move에 죽음)·스크�
     `content.h - fixedChromeHeight()`로 flex 결과를 손으로 예측하는데(같은 수의 출처가 둘), 측정 pass로
     layout이 알려 주게 하면 그 식이 사라진다. host의 drag 세 지점(begin/absorb/apply)과 분수 휠
     residue도 `scroll_view`가 제공하는 형태로 모은다.
+- **SV1d — 그룹 헤더 sticky.** 지금은 스크롤하면 그룹 헤더가 밀려 올라가 글자가 반쯤 잘리고 "어느
+  그룹인가"가 사라진다. [ScrollView](scroll-view.md) §4.7이 계약이다 — clamp 산술은 ScrollView가, 무엇을
+  붙일지는 소비처가 정한다(가상화 때문에 그 헤더는 창 밖일 수 있고, 창 밖 항목이 어느 그룹인지는
+  domain만 안다). 높이는 그대로 자리를 차지하고 그리는 y만 clamp하므로 `project`의 content 높이·창
+  계산·anchor 규칙이 바뀌지 않는다. **SV1b 뒤에 한다** — 발행이 `build`로 옮겨간 뒤라야 sticky 노드를
+  preorder 안에서 낼 수 있고, 그 전에는 스크롤바처럼 배열 끝에 붙이는 임시 형태가 하나 더 생긴다.
+  판정자: 그룹 둘 이상인 Lab 시나리오를 offset 셋(헤더 앞·지나침·다음 헤더 접근)으로 캡처한 골든.
 - **SV2 — 파일 탐색기 이관.** 행 단위 좌표를 backing pixel로 옮기는 것이 실제 변경이다. 부분적으로
   보이는 행이 생기므로 행 기반 hit-test·reveal·follow가 픽셀 좌표를 읽도록 함께 바뀐다. 별도 스크롤바
   tree(`file_tree_scrollbar.publish`)와 전용 capture 경로는 이 단계에서 제거한다.

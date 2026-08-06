@@ -704,7 +704,7 @@ solver를 분리해야 한다는 Maru의 근거다. Maru는 Rust crate나 WASM/F
 
 **두 축으로 가른다**(단순 이분법으로는 회색지대가 갈리지 않는다 — 아래 예외 대부분이 셀 *바깥*을 그린다).
 
-1. **방향**: `.m` → Zig(**측정**)는 허용한다. 폰트 metric에서 셀 크기·ascent/descent를 재 Zig로 돌려주는 경로(`coretext_smoke.m`)가 그것이고, 그 값이 있어야 Zig가 rect를 만들 수 있다. 규칙이 적용되는 것은 Zig → `.m`(**배치 결정**) 방향뿐이다.
+1. **방향**: `.m` → Zig(**측정**)는 허용한다. 폰트 metric에서 셀 크기·ascent/descent를 재 Zig로 돌려주는 경로가 그것이고, 그 값이 있어야 Zig가 rect를 만들 수 있다. 규칙이 적용되는 것은 Zig → `.m`(**배치 결정**) 방향뿐이다. 주의: `coretext_smoke.m`은 측정만 하는 파일이 아니다 — 같은 파일이 래스터 슬롯 **안쪽 배치**도 소유한다(아래 예외 표 마지막 행).
 2. **값이냐 합성 규칙이냐**: `.m`이 받은 값을 그대로 소비하면 계약이다. `.m`이 **오프셋을 더하거나 중앙정렬·clamp·확장 규칙을 소유**하면 예외다 — 그 규칙을 Zig가 바꾸려면 두 언어를 함께 고쳐야 하기 때문이다.
 
 **현재 예외.** 제품 `.m` 두 파일(`maru_metal_renderer.m`·`coretext_smoke.m`)을 훑어 확인한 목록이며 전수를 주장하지 않는다. 새로 늘리지 않고, 손댈 일이 생기면 그때 이관한다.
@@ -718,24 +718,25 @@ solver를 분리해야 한다는 Maru의 근거다. Maru는 Rust crate나 WASM/F
 | 아이콘 배율·세로 보정·벨 가로 재배치 | 같은 파일 | `1.7×`·`ch*0.30` nudge·에이전트 `1.1×`·벨 `width=1` + `cw*0.5` 이동 | **결합이 양방향**이다 — Zig의 hover quad·배지 좌표가 이 값들을 전제로 계산된다 |
 | 그림자 blur 확장 | 같은 파일, shadow 분기 | Zig가 준 rect 밖으로 blur만큼 확장한 rect를 만든다 | `GpuShadow`는 `GpuQuad`와 **별도 채널**이다 |
 | OSC 133 거터 좌단 clamp | 같은 파일, reserved 8 분기 | `max(px_left, 0)` — 주석이 "사이드바 폭은 `.m`이 모르니 0 하한만" | 폭을 넘기면 사라진다 |
-| `reserved` 부분사각형 두께·여백 | 같은 파일 `maru_fill_cell_quad` 계열 | 커서 바/underline·SGR 장식선 두께를 `cell_h*0.15`·`cell_h*0.075`, 거터 gap을 `cw*0.12`로 계산 | **의도된 근사** — 폰트 metric(underline thickness)을 `.m`에 안 넘겨서다(그 근거가 해당 주석에 있다) |
+| `reserved` 부분사각형 두께·여백 | 같은 파일 `maru_fill_cell_quad` 계열 | 커서 바/underline·SGR 장식선 두께를 셀 높이 15%·7.5%로(가로 변인 커서 바·hollow 우측은 `cw`의 15%), 거터 gap을 `cw*0.12`로 계산한다. 전부 `max(2px)`·`max(1px)` 하한이 붙어 **작은 셀에선 비율이 아니라 하한이 값을 정한다** | **의도된 근사** — 폰트 metric(underline thickness)을 `.m`에 안 넘겨서다(그 근거가 해당 주석에 있다) |
+| 래스터 슬롯 안쪽 배치 | `coretext_smoke.m` | cover-fit 스케일, ink 측정 후 세로 재중심(`maru_center_ink_vertically`), baseline `descent + (avail_h − line_height)/2`, advance 가로 중앙, 그리고 **어느 글리프를 ink-center할지 codepoint로 판정**(`0x25E7`·`0x2699` 하드코딩). `width.zig`의 wide-render-symbol 목록을 주석-동기로 **미러**한다(가드 없음) | [glyph-role-render-model.md](glyph-role-render-model.md)가 역할별로 승인한 설계다 — 이관 대상이 아니라 **명시적 승인 예외**로 둔다 |
 
 주의할 점 셋:
 
-- **divider 두께는 예외가 아니다.** config `split.divider-thickness`를 Zig가 device px로 환산해 ABI로 넘기고 `.m`은 seam 중앙정렬·셀 clamp만 한다.
+- **divider는 값이 아니라 규칙 쪽이다.** 두께 자체는 config `split.divider-thickness` → Zig(pt × scale) → ABI라 값 계약이지만, 그 두께를 seam에 중앙정렬하고 셀폭으로 clamp하는 규칙은 `.m`이 갖는다 — 위 `reserved` 행과 **같은 함수·같은 성격**이다. 표에 따로 올리지 않은 것은 "두께는 Zig 소유"를 강조하려는 편의이고, 축 2 기준으로는 예외다.
 - **chrome hairline(`tokens.border.line_thickness_px`)과 터미널 셀 장식선은 별개 개념이다.** 앞은 탭바 하이라인·focus 테두리·pill 테두리(전부 `GpuQuad`), 뒤는 커서 바·SGR 밑줄이다. 코드가 의도적으로 분리했으므로 섞어서 "두 출처"라고 부르지 않는다.
 - **미러 가드가 덮는 범위는 좁다.** `tests/boundary/icon_literals.zig`는 아이콘 **배율(1.7) 두 표현식**만 강제한다. `ch*0.30` nudge·에이전트 `1.1×`·벨 `+cw*0.5`는 가드 밖이다([chrome-strategy.md](chrome-strategy.md) §9.7).
 
-**규칙을 이미 따르는 표면**(전부 Zig가 rect를 정해 `GpuQuad`로 낸다): 도크 패널 배경(`appendBarBgQuad`)·도크 카드/버튼 배경(`chrome_draw_lowering.appendBackgroundQuads`), 모달 배경·테두리, 탭 밴드와 활성 탭 cutout, **rich** 사이드바 활성 밴드, 스크롤바 thumb, 시각 벨 플래시. 모달 **그림자**만 `GpuShadow` 별도 채널이고 blur 확장을 `.m`이 한다(위 표).
+**규칙을 이미 따르는 표면**(전부 Zig가 rect를 정해 `GpuQuad`로 낸다): 도크 패널 배경(`appendBarBgQuad` — 탭 바 배경과 공용)·도크 카드/버튼 배경(`chrome_draw_lowering.appendBackgroundQuads`), 모달 배경·테두리, 탭 밴드와 활성 탭 cutout, **rich** 사이드바 활성 밴드, 스크롤바 thumb, 시각 벨 플래시. 모달 **그림자**만 `GpuShadow` 별도 채널이고 blur 확장을 `.m`이 한다(위 표).
 
 **이관할 때의 함정**(사이드바 배경을 옮기는 경우 — 첫 예외):
 
 - **`layer = bottom`이다.** 지금 배경 strip은 터미널 셀 **앞**에 그려져 사이드바 헤더 glyph(터미널 셀 패스)가 그 위에 보인다. `under`로 옮기면 터미널 셀 **뒤**가 돼 배경이 헤더 아이콘을 덮는 회귀가 재발한다(그 회귀를 고친 기록이 draw 순서 주석에 있다).
 - **색 규약이 다르다.** 셀 경로는 premultiplied(`chromeCellBg`), `GpuQuad`는 straight-alpha(`chromeQuadBg` — 셰이더가 `rgb*=a`). 그대로 옮기면 `window.opacity < 1`에서 이중 premultiply로 어두워진다.
-- **바닥 클리핑이 셀 경계 단위가 된다.** 지금 `.m` scissor는 픽셀 단위다. [tabs-splits-layout.md](tabs-splits-layout.md)가 약속한 픽셀 단위 스무스 스크롤과 충돌하므로, 스크롤 목록을 자를 때는 clip을 함께 넘겨야 한다.
+- **클리핑 인프라는 이미 있다(빠뜨리지만 말 것).** `GpuQuad`는 픽셀 단위 `clip_x/y/w/h`를 갖고, Zig는 `backing_height_px`로 전창 높이를 알며 이미 그 값으로 전창 quad를 낸다(시각 벨). 배경 strip 자체는 스크롤·scissor 대상이 아니다 — 다만 **스크롤되는 목록**(카드·밴드)을 quad로 옮길 때는 같은 스크롤 오프셋과 헤더 경계 clip을 함께 실어야 [tabs-splits-layout.md](tabs-splits-layout.md)의 "셀(`.m`)과 quad(Zig)가 같은 오프셋" 단일 출처가 유지된다.
 - `reserved`는 부분사각형 kind(2~31)와 role(32~)을 겸한다. role을 새로 실으면 `.m`의 `reserved != 0` 분기도 함께 손봐야 한다.
 
-**이미 승인된 예외적 배선과의 관계.** [layering-and-portability.md](layering-and-portability.md)는 `sidebar_header_height_px` 같은 좌표 시프트를 "L1 DTO로 L4에 전달해 GPU 백엔드가 적용"으로, [tabs-splits-layout.md](tabs-splits-layout.md)는 `.m` scissor와 Zig quad clip이 같은 오프셋을 쓰는 것을 "단일 출처"로 적었다. ML-GEO는 그 배선을 부정하지 않는다 — **값을 넘겨 `.m`이 적용하는 것**은 계약이고, `.m`이 그 값에서 **새 rect를 합성**하면 예외다. [sidebar-groups.md](sidebar-groups.md)는 이미 같은 처방(`.m` 기하를 없앤다)을 결정해 두었다.
+**이미 승인된 예외적 배선과의 관계.** [layering-and-portability.md](layering-and-portability.md)는 `sidebar_header_height_px` 같은 좌표 시프트를 "L1 DTO로 L4에 전달해 GPU 백엔드가 적용"으로, [tabs-splits-layout.md](tabs-splits-layout.md)는 `.m` scissor와 Zig quad clip이 같은 오프셋을 쓰는 것을 "단일 출처"로 적었다. ML-GEO는 그 배선을 부정하지 않는다 — 다만 **"적용"과 "합성"의 경계는 그 문서들이 긋지 않았다**. `sidebar_header_height_px`를 적용하는 유일한 방법이 `origin_y + header − scroll`이고, 그게 위 예외 표의 사이드바 셀 배치 행이다. 그래서 여기서 선을 긋는다: **한 축의 평행이동까지가 계약**이고, 거기에 **높이·폭 결정, clamp, 확장, 조건 분기가 붙으면 예외**다. 이미 승인된 배선은 그 선에 걸쳐 있으므로 "새로 만들지 않는다"의 대상이고, 새 표면은 선 아래(순수 값 소비)로만 만든다. [sidebar-groups.md](sidebar-groups.md)는 이미 같은 처방(`.m` 기하를 없앤다)을 결정해 두었다.
 
 **새 표면(예: 하단 상태표시줄)은 예외를 만들지 않는다.** 기하가 필요하면 `session/dock_layout.zig`의 `Geometry`에서 파생해 `GpuQuad`로 내고, `.m`에 새 인자를 더해 그쪽이 rect를 계산하게 하지 않는다. ABI 인자 추가가 더 작아 보여도, 그건 "배치를 아는 곳"을 하나 더 만드는 선택이다.
 

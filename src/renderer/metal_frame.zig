@@ -1303,9 +1303,6 @@ fn buildMergedUploadsN(
     return .{ .uploads = try uploads.toOwnedSlice(allocator), .pixels = try pixels.toOwnedSlice(allocator) };
 }
 
-/// RenderFrame을 투영해 retain하는 owned 버퍼. cells/sidebar_cells/uploads/pixels 배열의 소유권을
-/// 한 곳에서 관리해(replace는 build-then-swap, deinit은 단일 해제) 호출자가 free 시퀀스를
-/// 여러 곳에 복제하지 않게 한다.
 /// 한 번의 투영이 함께 확정하는 chrome 기하. 셀과 이 값이 **같은 프레임에서 나와야** 렌더러가
 /// 셀을 옳은 자리에 놓는다(예: 사이드바 셀 py_top = origin_y + header − scroll).
 pub const ChromeGeometry = struct {
@@ -1317,6 +1314,9 @@ pub const ChromeGeometry = struct {
     divider_thickness_px: u32 = 0,
 };
 
+/// RenderFrame을 투영해 retain하는 owned 버퍼. cells/sidebar_cells/uploads/pixels 배열의 소유권을
+/// 한 곳에서 관리해(replace는 build-then-swap, deinit은 단일 해제) 호출자가 free 시퀀스를
+/// 여러 곳에 복제하지 않게 한다.
 pub const MetalFrameBuffer = struct {
     cells: []NativeMetalCell = &.{},
     // 사이드바 셀(밴드 ++ 탭 제목 glyph) — replace가 밴드 cells와 사이드바 RenderFrame을 합쳐 만든다.

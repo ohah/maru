@@ -14,7 +14,7 @@ pointer capture·drag 수명은 [Chrome 상호작용 이관](chrome-interaction-
 
 | | 스크롤 단위 | 가상화 | 스크롤바 발행 | 드래그 | tick 소비 |
 | --- | --- | --- | --- | --- | --- |
-| Session Dock | backing px | `session_dock/scroll.zig`의 item window | 도크 published tree | dock interaction capture | 있음 |
+| Session Dock | backing px | `ui/scroll_view.zig`의 item window | 도크 published tree | dock interaction capture | 있음 |
 | 파일 탐색기 | **행(row)** | 없음(행 슬라이스) | **별도 tree**(`file_tree_scrollbar.publish`) | 전용 `scrollbar_interaction` | 있음 |
 | 소스 컨트롤 | **행(row)** | 없음 | **없음** | 없음(휠만) | 해당 없음 |
 | 사이드바 | backing px | 없음 | **host가 GPU quad 직접** | 없음(휠만) | 해당 없음 |

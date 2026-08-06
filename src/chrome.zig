@@ -19,6 +19,7 @@ pub const ui = struct {
     pub const interaction = @import("chrome/ui/interaction.zig");
     pub const intent_table = @import("chrome/ui/intent_table.zig");
     pub const continuous_drag = @import("chrome/ui/continuous_drag.zig");
+    pub const scroll_view = @import("chrome/ui/scroll_view.zig"); // 스크롤 컨테이너 좌표계 단일 출처 — docs/scroll-view.md
     pub const provisional_order = @import("chrome/ui/provisional_order.zig");
     pub const paint_style = @import("chrome/ui/paint_style.zig");
     pub const paint = @import("chrome/ui/paint.zig");

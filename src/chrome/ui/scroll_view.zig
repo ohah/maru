@@ -1,38 +1,25 @@
-//! Integer backing-pixel scroll projection for the Session Dock.
+//! 스크롤 컨테이너의 좌표계다 — backing pixel 하나가 단위이고, 이 모듈 밖으로 분수 좌표가 나가지 않는다.
 //!
-//! The dock deliberately keeps this arithmetic separate from its platform host: paint, pointer
-//! hit-testing, and future scrollbar code must all receive the same clipped item window.
+//! 단일 출처: docs/scroll-view.md. 소비처(도크·파일 탐색기·소스 컨트롤·...)는 상태를 자기가 소유하고
+//! 그 값의 legal range와 전이만 여기서 받는다. 이 모듈은 tree·paint·host를 읽지 않는다.
+//!
+//! **`project`가 build보다 먼저 온다**는 것이 CSS `overflow: auto`와 갈라지는 지점이다(§2.1). 브라우저는
+//! 자식을 다 만든 뒤 넘치는 부분을 자르지만, 여기서는 보이지 않는 항목의 노드도 텍스트도 만들지 않는다.
+//! 그래서 창(window)을 정하는 것이 자르는 것보다 앞선다.
+//!
+//! 지금 여기 있는 것은 **좌표계뿐이다.** §2가 ScrollView 소유라고 적은 것 중 스크롤바 entry 발행과
+//! viewport clip은 아직 `session_dock/build.zig`가, 분수 휠 residue와 selection follow는 아직 host가
+//! 들고 있다. 파일 이름은 목적지를 가리키고, 그 나머지는 SV1b·SV1c가 옮긴다(docs/implementation-plan.md).
+//! 이 주석은 다음 사람이 "여기 없으면 아무 데도 없다"고 오해하지 않게 하기 위한 것이다.
 
 const std = @import("std");
 
-pub const Kind = enum { group, card };
-
-pub const Metrics = struct {
-    group_h_px: u32,
-    card_h_px: u32,
-    gap_px: u32,
-    /// At most one disclosure is open.  Keeping its entry index and fully reserved height in
-    /// the projection metrics means virtualization, clipping and hit-testing all agree on the
-    /// same content-space geometry; the host never applies a second detail-only y offset.
-    expanded_card_index: ?usize = null,
-    expanded_card_h_px: u32 = 0,
-
-    pub fn itemHeight(self: Metrics, kind: Kind, index: usize) u32 {
-        if (kind == .card and self.expanded_card_index != null and self.expanded_card_index.? == index)
-            return self.expanded_card_h_px;
-        return switch (kind) {
-            .group => self.group_h_px,
-            .card => self.card_h_px,
-        };
-    }
-};
-
-/// The host owns this tiny state, but only this module decides its legal range.  Fractional wheel
-/// input is intentionally kept outside `offset_y_px`: tree rects and GPU draw rects stay integral.
-pub const SessionDockScrollState = struct {
+/// 소비처가 소유하는 상태다. 이 모듈은 legal range와 전이만 정한다. 분수 wheel 입력은 일부러 밖에
+/// 남긴다 — tree rect와 GPU draw rect가 정수여야 셀 경계에서 흔들리지 않는다.
+pub const State = struct {
     offset_y_px: u32 = 0,
 
-    pub fn scrollByPx(self: *SessionDockScrollState, delta_px: i64, max_offset_px: u32) bool {
+    pub fn scrollByPx(self: *State, delta_px: i64, max_offset_px: u32) bool {
         const current: u64 = self.offset_y_px;
         const maximum: u64 = max_offset_px;
         const next: u64 = if (delta_px >= 0)
@@ -45,21 +32,20 @@ pub const SessionDockScrollState = struct {
         return true;
     }
 
-    pub fn clamp(self: *SessionDockScrollState, max_offset_px: u32) void {
+    pub fn clamp(self: *State, max_offset_px: u32) void {
         self.offset_y_px = @min(self.offset_y_px, max_offset_px);
     }
 
-    /// Replaces the retained offset only through the same bounded coordinate system used by
-    /// wheel input.  A refresh/resize anchor may be negative before clamping when a card moved
-    /// below a newly inserted group header, so the public input is signed.
-    pub fn setOffsetPx(self: *SessionDockScrollState, requested_offset_px: i64, max_offset_px: u32) bool {
+    /// 유지 중인 offset을 wheel 입력과 **같은** 유계 좌표계로만 교체한다. refresh/resize anchor는
+    /// 새로 삽입된 그룹 헤더 밑으로 카드가 밀리면 clamp 전에 음수일 수 있으므로 입력이 부호 있는 값이다.
+    pub fn setOffsetPx(self: *State, requested_offset_px: i64, max_offset_px: u32) bool {
         const clamped: u32 = @intCast(std.math.clamp(requested_offset_px, @as(i64, 0), @as(i64, max_offset_px)));
         if (clamped == self.offset_y_px) return false;
         self.offset_y_px = clamped;
         return true;
     }
 
-    pub fn reset(self: *SessionDockScrollState) void {
+    pub fn reset(self: *State) void {
         self.offset_y_px = 0;
     }
 };
@@ -69,26 +55,37 @@ pub const Projection = struct {
     max_offset_px: u32,
     offset_y_px: u32,
     first_index: usize,
-    /// The first returned item starts at this local y. It is zero or negative, never fractional.
+    /// 반환된 첫 항목이 시작하는 local y다. 0이거나 음수이며, 분수가 아니다.
     first_origin_y_px: i32,
     end_exclusive: usize,
 };
 
-/// Page keys deliberately leave one full card in view.  A tiny/zero viewport has no meaningful
-/// page step and must not manufacture motion from the fixed chrome metrics.
-pub fn pageStepPx(viewport_h_px: u32, card_h_px: u32) u32 {
-    return viewport_h_px -| card_h_px;
+/// `project`의 비-항목 입력. 항목 높이는 소비처가 comptime 함수로 준다.
+pub const Extent = struct {
+    /// `itemHeightPx`가 `[0, count)`의 **모든** index에 답할 수 있어야 한다. 항목 열과 이 수는
+    /// 별개 인자라 어긋날 수 있으므로, 소비처는 둘을 한 자리에서 만든다 — 도크의
+    /// `ArchiveScrollItems.extent()`가 그 형태다. 여기서 범위를 다시 검사하지 않는 것은 검사를
+    /// 잊어서가 아니라, 항목 열을 소유한 쪽이 유일하게 그 답을 알기 때문이다.
+    count: usize,
+    gap_px: u32,
+    viewport_h_px: u32,
+};
+
+/// Page 키는 일부러 카드 하나를 화면에 남긴다. viewport가 0에 가까우면 page step이 의미가 없으므로
+/// 고정 chrome 치수에서 움직임을 만들어내지 않는다.
+pub fn pageStepPx(viewport_h_px: u32, item_h_px: u32) u32 {
+    return viewport_h_px -| item_h_px;
 }
 
-/// The host computes a card's content-space top and carries a non-negative intra-card displacement
-/// across an immutable snapshot replacement.  Keeping the saturating/clamping arithmetic here
-/// makes a reordered anchor unable to overflow the bounded scroll coordinate.
-pub fn anchorOffsetPx(card_top_px: u32, intra_card_y_px: u32, max_offset_px: u32) u32 {
-    const requested = @as(u64, card_top_px) + @as(u64, intra_card_y_px);
+/// 소비처가 항목의 content-space top과 그 안에서의 비음수 변위를 계산해 넘기면, 스냅샷이 통째로
+/// 교체되는 순간에도 같은 자리를 유지한다. 포화·clamp 산술을 여기 두어 재정렬된 anchor가 유계
+/// 좌표를 넘지 못하게 한다.
+pub fn anchorOffsetPx(item_top_px: u32, intra_item_y_px: u32, max_offset_px: u32) u32 {
+    const requested = @as(u64, item_top_px) + @as(u64, intra_item_y_px);
     return @intCast(@min(requested, @as(u64, max_offset_px)));
 }
 
-/// Scrollbar의 logical 치수. terminal cell이 아니라 `DockMetrics`가 backing scale에서 resolve한다.
+/// Scrollbar의 logical 치수. terminal cell이 아니라 소비처의 metrics가 backing scale에서 resolve한다.
 pub const ScrollbarMetrics = struct {
     width_px: u32,
     /// track의 오른쪽 끝과 scroll-area content edge 사이 여백.
@@ -98,7 +95,7 @@ pub const ScrollbarMetrics = struct {
 };
 
 /// track/thumb의 backing-pixel 기하. paint·hit-test·drag가 **같은 값 하나**를 소비한다. 이 struct는
-/// 상태가 없으므로 매 프레임 같은 입력에서 같은 결과가 나온다(file explorer scrollbar와 같은 규율).
+/// 상태가 없으므로 매 프레임 같은 입력에서 같은 결과가 나온다.
 pub const ScrollbarGeometry = struct {
     track_x: f32,
     track_y: f32,
@@ -151,76 +148,84 @@ pub const ScrollbarGeometry = struct {
     }
 };
 
-/// scroll-area content rect와 projection 결과에서 scrollbar 기하를 만든다. 스크롤할 것이 없거나
-/// 자리가 안 나오면 `null`이며, 그 경우 어떤 track/thumb도 발행하지 않는다 — 넘치지 않는 목록에
-/// 스크롤바를 그리면 사용자에게 없는 여백을 있다고 말하는 셈이다.
-pub fn scrollbarGeometry(
-    content_x: f32,
-    content_y: f32,
-    content_w: f32,
-    content_h: f32,
-    /// scroll-area 오른쪽에 남아 있는 도크 padding 폭. 스크롤바는 **그 여백 안에** 놓여 카드·버튼과
+/// scroll-area의 published content rect. scrollbar 기하를 여기서 다시 계산하지 않고 **완성된 tree가
+/// 발행한 값**을 읽는 것이 핵심이다 — 그래야 scroll-area가 움직여도 스크롤바가 따라간다(§4).
+pub const ContentRect = struct {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    /// scroll-area 오른쪽에 남아 있는 컨테이너 padding 폭. 스크롤바는 **그 여백 안에** 놓여 content와
     /// 겹치지 않는다. 여백이 모자라면 아예 그리지 않는다 — 목록 위에 겹쳐 그리는 대안은 사용자가
     /// "UI랑 겹쳐 보인다"고 보고한 바로 그 상태다.
     gutter_w: f32,
+};
+
+/// 스크롤할 것이 없거나 자리가 안 나오면 `null`이며, 그 경우 어떤 track/thumb도 발행하지 않는다 —
+/// 넘치지 않는 목록에 스크롤바를 그리면 사용자에게 없는 여백을 있다고 말하는 셈이다.
+pub fn scrollbarGeometry(
+    content: ContentRect,
     content_height_px: u32,
     offset_px: u32,
     m: ScrollbarMetrics,
 ) ?ScrollbarGeometry {
-    if (content_w <= 0 or content_h <= 0 or m.width_px == 0) return null;
-    const viewport_h_px: u32 = @intFromFloat(@max(content_h, 0));
+    if (content.w <= 0 or content.h <= 0 or m.width_px == 0) return null;
+    const viewport_h_px: u32 = @intFromFloat(@max(content.h, 0));
     const max_offset = content_height_px -| viewport_h_px;
     if (max_offset == 0) return null;
     const width: f32 = @floatFromInt(m.width_px);
-    if (gutter_w < width) return null;
+    if (content.gutter_w < width) return null;
 
-    const track_h = content_h;
-    const proportional = track_h * content_h / @as(f32, @floatFromInt(content_height_px));
+    const track_h = content.h;
+    const proportional = track_h * content.h / @as(f32, @floatFromInt(content_height_px));
     const thumb_h = @min(track_h, @max(@as(f32, @floatFromInt(m.min_thumb_px)), proportional));
     const travel = track_h - thumb_h;
     const clamped_offset = @min(offset_px, max_offset);
     const ratio = @as(f32, @floatFromInt(clamped_offset)) / @as(f32, @floatFromInt(max_offset));
     return .{
-        // 여백 안에서 가운데. 도크 바깥 edge에 붙이면 rounded clip에 닿아 잘려 보이고, content에
+        // 여백 안에서 가운데. 컨테이너 바깥 edge에 붙이면 rounded clip에 닿아 잘려 보이고, content에
         // 붙이면 다시 카드와 겹친다.
-        .track_x = content_x + content_w + (gutter_w - width) / 2,
-        .track_y = content_y,
-        .track_w = @floatFromInt(m.width_px),
+        .track_x = content.x + content.w + (content.gutter_w - width) / 2,
+        .track_y = content.y,
+        .track_w = width,
         .track_h = track_h,
-        .thumb_y = content_y + travel * ratio,
+        .thumb_y = content.y + travel * ratio,
         .thumb_h = thumb_h,
         .max_offset_px = max_offset,
     };
 }
 
-/// Projects a bounded item sequence without allocation. `itemAt` is comptime so the generic
-/// algorithm remains independent from archive/provider record types.
+/// 유계 항목 열을 allocation 없이 창으로 자른다.
+///
+/// 높이를 **나눗셈이 아니라 walk로** 구하는 것이 계약이다(§3). 항목 높이가 같다는 보장이 없기
+/// 때문이다 — 도크는 그룹 헤더와 카드가 다르고 펼친 카드는 또 다르다. `first_index * item_h`는
+/// 그 순간 틀린 답을 낸다. `itemHeightPx`가 comptime인 덕에 이 알고리즘은 소비처의 레코드 타입을
+/// 모른 채로 남는다.
 pub fn project(
-    items: anytype,
-    comptime itemAt: fn (@TypeOf(items), usize) Kind,
-    metrics: Metrics,
-    viewport_h_px: u32,
+    context: anytype,
+    comptime itemHeightPx: fn (@TypeOf(context), usize) u32,
+    extent: Extent,
     requested_offset_px: u32,
 ) Projection {
-    const count = items.len;
+    const count = extent.count;
     var content_height: u32 = 0;
     for (0..count) |index| {
-        content_height +|= metrics.itemHeight(itemAt(items, index), index);
-        if (index + 1 < count) content_height +|= metrics.gap_px;
+        content_height +|= itemHeightPx(context, index);
+        if (index + 1 < count) content_height +|= extent.gap_px;
     }
-    const max_offset = content_height -| viewport_h_px;
+    const max_offset = content_height -| extent.viewport_h_px;
     const offset = @min(requested_offset_px, max_offset);
 
     var cursor: u32 = 0;
     var first = count;
     for (0..count) |index| {
-        const h = metrics.itemHeight(itemAt(items, index), index);
+        const h = itemHeightPx(context, index);
         const end = cursor +| h;
         if (end > offset) {
             first = index;
             break;
         }
-        cursor = end +| if (index + 1 < count) metrics.gap_px else 0;
+        cursor = end +| if (index + 1 < count) extent.gap_px else 0;
     }
     if (first == count) return .{
         .content_height_px = content_height,
@@ -234,9 +239,9 @@ pub fn project(
     var end = first;
     const first_origin: i64 = @as(i64, cursor) - @as(i64, offset);
     var y = first_origin;
-    while (end < count and y < @as(i64, viewport_h_px)) : (end += 1) {
-        y += @as(i64, metrics.itemHeight(itemAt(items, end), end));
-        if (end + 1 < count) y += metrics.gap_px;
+    while (end < count and y < @as(i64, extent.viewport_h_px)) : (end += 1) {
+        y += @as(i64, itemHeightPx(context, end));
+        if (end + 1 < count) y += extent.gap_px;
     }
     return .{
         .content_height_px = content_height,
@@ -248,14 +253,29 @@ pub fn project(
     };
 }
 
-fn fixtureKind(items: []const Kind, index: usize) Kind {
-    return items[index];
+const FixtureKind = enum { group, card };
+
+const Fixture = struct {
+    kinds: []const FixtureKind,
+    group_h_px: u32,
+    card_h_px: u32,
+    expanded_index: ?usize = null,
+    expanded_h_px: u32 = 0,
+};
+
+fn fixtureHeight(fixture: Fixture, index: usize) u32 {
+    if (fixture.kinds[index] == .card and fixture.expanded_index != null and fixture.expanded_index.? == index)
+        return fixture.expanded_h_px;
+    return switch (fixture.kinds[index]) {
+        .group => fixture.group_h_px,
+        .card => fixture.card_h_px,
+    };
 }
 
 test "project clips partial first and last item without a trailing gap" {
-    const items = [_]Kind{ .group, .card, .card };
-    const slice: []const Kind = &items;
-    const result = project(slice, fixtureKind, .{ .group_h_px = 20, .card_h_px = 50, .gap_px = 10 }, 60, 35);
+    const kinds = [_]FixtureKind{ .group, .card, .card };
+    const fixture = Fixture{ .kinds = &kinds, .group_h_px = 20, .card_h_px = 50 };
+    const result = project(fixture, fixtureHeight, .{ .count = kinds.len, .gap_px = 10, .viewport_h_px = 60 }, 35);
     try std.testing.expectEqual(@as(u32, 140), result.content_height_px);
     try std.testing.expectEqual(@as(u32, 80), result.max_offset_px);
     try std.testing.expectEqual(@as(usize, 1), result.first_index);
@@ -263,18 +283,18 @@ test "project clips partial first and last item without a trailing gap" {
     try std.testing.expectEqual(@as(usize, 3), result.end_exclusive);
 }
 
-test "project reserves one expanded card in the same scroll coordinate" {
-    const items = [_]Kind{ .group, .card, .card };
-    const slice: []const Kind = &items;
-    const result = project(slice, fixtureKind, .{
+test "project reserves one expanded item in the same scroll coordinate" {
+    const kinds = [_]FixtureKind{ .group, .card, .card };
+    const fixture = Fixture{
+        .kinds = &kinds,
         .group_h_px = 20,
         .card_h_px = 50,
-        .gap_px = 0,
-        .expanded_card_index = 1,
-        .expanded_card_h_px = 170,
-    }, 100, 60);
-    // group 20 + expanded card 170 + ordinary card 50. The viewport starts inside the
-    // disclosure itself, so its origin and the following card must use that one 170px rect.
+        .expanded_index = 1,
+        .expanded_h_px = 170,
+    };
+    const result = project(fixture, fixtureHeight, .{ .count = kinds.len, .gap_px = 0, .viewport_h_px = 100 }, 60);
+    // group 20 + 펼친 카드 170 + 보통 카드 50. viewport가 펼침 안에서 시작하므로 그 원점과 다음
+    // 카드가 같은 170px 사각형을 써야 한다.
     try std.testing.expectEqual(@as(u32, 240), result.content_height_px);
     try std.testing.expectEqual(@as(u32, 140), result.max_offset_px);
     try std.testing.expectEqual(@as(usize, 1), result.first_index);
@@ -282,8 +302,19 @@ test "project reserves one expanded card in the same scroll coordinate" {
     try std.testing.expectEqual(@as(usize, 2), result.end_exclusive);
 }
 
+test "project walks heights instead of dividing by a uniform item height" {
+    // 높이가 섞이면 나눗셈 근사(`offset / item_h`)와 답이 갈린다. 이 case가 그 차이를 고정한다.
+    const kinds = [_]FixtureKind{ .group, .card, .group, .card };
+    const fixture = Fixture{ .kinds = &kinds, .group_h_px = 20, .card_h_px = 100 };
+    const result = project(fixture, fixtureHeight, .{ .count = kinds.len, .gap_px = 0, .viewport_h_px = 100 }, 130);
+    // 누적: group [0,20) card [20,120) group [120,140) card [140,240).
+    // offset 130은 세 번째 항목 안이다. 균일 높이 100으로 나눴다면 index 1이 나왔을 것이다.
+    try std.testing.expectEqual(@as(usize, 2), result.first_index);
+    try std.testing.expectEqual(@as(i32, -10), result.first_origin_y_px);
+}
+
 test "scroll state clamps each backing pixel boundary" {
-    var state = SessionDockScrollState{};
+    var state = State{};
     try std.testing.expect(state.scrollByPx(1, 9));
     try std.testing.expectEqual(@as(u32, 1), state.offset_y_px);
     _ = state.scrollByPx(100, 9);
@@ -312,15 +343,16 @@ test "page and anchor helpers preserve bounded pixel semantics" {
 test "scrollbar geometry only exists when the list actually overflows" {
     const m = ScrollbarMetrics{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 };
     // 넘치지 않으면 발행하지 않는다 — 없는 여백을 있다고 말하지 않기 위해서다.
-    try std.testing.expect(scrollbarGeometry(0, 0, 200, 400, 40, 400, 0, m) == null);
-    try std.testing.expect(scrollbarGeometry(0, 0, 200, 400, 40, 300, 0, m) == null);
-    // 도크 여백이 track 폭을 못 담으면 그리지 않는다 — 목록 위에 겹쳐 그리는 대안은 두지 않는다.
-    try std.testing.expect(scrollbarGeometry(0, 0, 200, 400, 4, 4000, 0, m) == null);
+    try std.testing.expect(scrollbarGeometry(.{ .x = 0, .y = 0, .w = 200, .h = 400, .gutter_w = 40 }, 400, 0, m) == null);
+    try std.testing.expect(scrollbarGeometry(.{ .x = 0, .y = 0, .w = 200, .h = 400, .gutter_w = 40 }, 300, 0, m) == null);
+    // 여백이 track 폭을 못 담으면 그리지 않는다 — 목록 위에 겹쳐 그리는 대안은 두지 않는다.
+    try std.testing.expect(scrollbarGeometry(.{ .x = 0, .y = 0, .w = 200, .h = 400, .gutter_w = 4 }, 4000, 0, m) == null);
 }
 
 test "scrollbar thumb spans the visible proportion and reaches both ends" {
     const m = ScrollbarMetrics{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 };
-    const top = scrollbarGeometry(10, 20, 200, 400, 40, 1600, 0, m).?;
+    const content = ContentRect{ .x = 10, .y = 20, .w = 200, .h = 400, .gutter_w = 40 };
+    const top = scrollbarGeometry(content, 1600, 0, m).?;
     try std.testing.expectEqual(@as(f32, 226), top.track_x); // 10 + 200 + (40 - 8) / 2
     try std.testing.expectEqual(@as(f32, 20), top.track_y);
     try std.testing.expectEqual(@as(u32, 1200), top.max_offset_px);
@@ -328,7 +360,7 @@ test "scrollbar thumb spans the visible proportion and reaches both ends" {
     try std.testing.expectEqual(@as(f32, 100), top.thumb_h);
     try std.testing.expectEqual(@as(f32, 20), top.thumb_y);
 
-    const bottom = scrollbarGeometry(10, 20, 200, 400, 40, 1600, 1200, m).?;
+    const bottom = scrollbarGeometry(content, 1600, 1200, m).?;
     // 맨 아래에서 thumb 밑변이 track 밑변과 정확히 맞는다.
     try std.testing.expectApproxEqAbs(bottom.track_y + bottom.track_h - bottom.thumb_h, bottom.thumb_y, 0.01);
 }
@@ -336,13 +368,13 @@ test "scrollbar thumb spans the visible proportion and reaches both ends" {
 test "scrollbar thumb never gets too thin to grab" {
     const m = ScrollbarMetrics{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 };
     // 아주 긴 목록: 비례 높이는 0.04px지만 최소 높이가 이긴다.
-    const geometry = scrollbarGeometry(0, 0, 200, 400, 40, 4_000_000, 0, m).?;
+    const geometry = scrollbarGeometry(.{ .x = 0, .y = 0, .w = 200, .h = 400, .gutter_w = 40 }, 4_000_000, 0, m).?;
     try std.testing.expectEqual(@as(f32, 24), geometry.thumb_h);
 }
 
 test "scrollbar drag round trips every reachable offset and clamps beyond the track" {
     const m = ScrollbarMetrics{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 };
-    const geometry = scrollbarGeometry(0, 5, 180, 400, 40, 1200, 0, m).?;
+    const geometry = scrollbarGeometry(.{ .x = 0, .y = 5, .w = 180, .h = 400, .gutter_w = 40 }, 1200, 0, m).?;
     const travel = geometry.track_h - geometry.thumb_h;
     // thumb top을 정확히 그 offset의 위치에 놓으면 같은 offset이 돌아온다.
     for ([_]u32{ 0, 1, 137, 400, 799, 800 }) |wanted| {
@@ -359,7 +391,7 @@ test "scrollbar drag round trips every reachable offset and clamps beyond the tr
 
 test "track click centers the thumb at the pointer" {
     const m = ScrollbarMetrics{ .width_px = 8, .inset_x_px = 4, .min_thumb_px = 24 };
-    const geometry = scrollbarGeometry(0, 0, 180, 400, 40, 1200, 0, m).?;
+    const geometry = scrollbarGeometry(.{ .x = 0, .y = 0, .w = 180, .h = 400, .gutter_w = 40 }, 1200, 0, m).?;
     // 트랙 정중앙을 누르면 thumb 중앙이 거기 오므로 offset도 대략 절반이다.
     const middle = geometry.offsetForTrackClick(geometry.track_y + geometry.track_h / 2);
     try std.testing.expect(middle > geometry.max_offset_px * 4 / 10);

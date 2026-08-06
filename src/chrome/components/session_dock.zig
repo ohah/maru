@@ -5,6 +5,5 @@
 
 pub const types = @import("session_dock/types.zig");
 pub const ids = @import("session_dock/ids.zig");
-pub const scroll = @import("session_dock/scroll.zig");
 pub const build = @import("session_dock/build.zig");
 pub const view = @import("session_dock/view.zig");

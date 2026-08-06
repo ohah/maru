@@ -5,7 +5,7 @@
 
 const std = @import("std");
 const layout = @import("../../ui/layout.zig");
-const scroll = @import("scroll.zig");
+const scroll_view = @import("../../ui/scroll_view.zig");
 const spacing = @import("../../ui/spacing.zig");
 const ui_icon = @import("../../ui/icon.zig"); // 아이콘 슬롯 크기 토큰 단일 출처(ui/button과 같은 값을 쓴다)
 const typography = @import("../../ui/typography.zig");
@@ -102,7 +102,7 @@ pub const Props = struct {
     content_first_item_origin_y_px: i32 = 0,
     /// 스크롤 목록 **전체**의 content 높이와 현재 offset(backing px). 가상화 때문에 component는 보이는
     /// 아이템만 받으므로, scrollbar가 얼마나 긴 목록의 어디를 보고 있는지는 이 두 값으로만 알 수 있다.
-    /// 둘 다 host의 `scroll.project` 결과이며, 0이면 scrollbar를 발행하지 않는다.
+    /// 둘 다 host의 `scroll_view.project` 결과이며, 0이면 scrollbar를 발행하지 않는다.
     scroll_content_height_px: u32 = 0,
     scroll_offset_px: u32 = 0,
     items: []const Item = &.{},
@@ -165,7 +165,7 @@ pub const DockMetrics = struct {
     /// 사이의 최소 여백을 합친다. `cardDisclosure`가 slot을 놓는 식과 같은 항을 쓰므로, 한쪽만 바뀌어
     /// 텍스트가 chevron 아래로 흘러드는 상태가 생길 수 없다.
     /// scrollbar 기하 모듈이 받는 형태. 치수의 단일 출처를 `DockMetrics` 하나로 유지한다.
-    pub fn scrollbarMetrics(self: DockMetrics) scroll.ScrollbarMetrics {
+    pub fn scrollbarMetrics(self: DockMetrics) scroll_view.ScrollbarMetrics {
         return .{
             .width_px = self.scrollbar_width,
             .inset_x_px = self.scrollbar_inset_x,

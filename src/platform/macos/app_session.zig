@@ -20945,7 +20945,14 @@ pub const AppSession = struct {
                     // 하이라이트가 남아 보이는 증상). 그 delta가 도착하는 tick은 output_events>0이라 여기로 다시 오므로
                     // 표시를 미루기만 하면 정합 상태로 수렴한다 — 별도 재시도 타이머나 dirty 재설정이 필요 없다
                     // (host가 실제로 스크롤했다면 scroll_state delta가 반드시 뒤따른다: screen_snapshot.computeDelta).
-                    if (!remoteFindSpansApplicable(res.voff, scrollStateOf(surface).view_offset)) return;
+                    // 화면 offset 읽기도 `scrollStateOf` 계약대로 락 아래에서 한다 — 원격이면 이 락이 곧
+                    // RemoteScreen mutex이고, 비교 대상이 바로 그 delta-apply가 옮기는 값이다.
+                    const client_voff = blk: {
+                        surface.lockCore(self.io);
+                        defer surface.unlockCore(self.io);
+                        break :blk scrollStateOf(surface).view_offset;
+                    };
+                    if (!remoteFindSpansApplicable(res.voff, client_voff)) return;
                     std.mem.swap(std.ArrayList(terminal.SelectionSpan), &self.remote_find_spans, &self.remote_find_pending);
                     self.remote_find_current = res.cur;
                     return;
@@ -31596,9 +31603,15 @@ pub const AppSession = struct {
     fn scrollbarGrabAt(self: *const AppSession, x_px: f64, y_px: f64) ?f32 {
         const rect = self.active_pane_rect;
         if (rect.w == 0 or self.cell_width_px == 0) return null;
-        // 호출자(hoverCursor·mouse)가 락 밖에서 부르는 hit-test다. 스칼라 두 개만 읽으므로 renderSnapshot의
-        // 스크롤 상태를 그대로 쓴다(로컬/원격 공통 — 원격은 host가 실어 준 값).
-        const scroll_state = scrollStateOf(@constCast(self).activeSurface());
+        // 호출자(hoverCursor·mouse)가 락 밖에서 부르는 hit-test라 **여기서 잡는다** — `scrollStateOf`의 계약이
+        // "호출자가 lockCore 보유"다. 옛 주석은 "스칼라 두 개뿐이라 괜찮다"고 적었지만 그 판단은 계약이 할 몫이고,
+        // 원격 backing이면 이 락이 곧 RemoteScreen mutex라 delta-apply와의 직렬화가 실제로 필요하다.
+        const grab_surface = @constCast(self).activeSurface();
+        const scroll_state = blk: {
+            grab_surface.lockCore(self.io);
+            defer grab_surface.unlockCore(self.io);
+            break :blk scrollStateOf(grab_surface);
+        };
         const geom = scrollbarThumbGeom(scroll_state.scrollback_len, scroll_state.view_offset, self.cell_height_px, rect.h) orelse return null;
         // thumb가 트랙을 꽉 채워 스크롤 여지가 없으면(track<=0, degenerate 작은 pane) 잡지 않는다 — 안 그러면
         // 클릭을 캡처하고도 dragScrollbarTo가 무동작이라 선택도 스크롤도 안 되는 dead zone이 된다.

@@ -23907,8 +23907,10 @@ pub const AppSession = struct {
         // 무관한 이벤트(마우스 이동·셸 출력)가 오는 순간 그때 위상으로 툭 바뀌었다. 더 나쁜 건 아래 early-return이라,
         // `cursor.blink=false`면 blink_visible이 true로 굳어 도크 caret이 **영구 표시**됐다(터미널 커서 설정이
         // 도크 caret을 좌우). 도크가 보이고 검색이 활성일 때만 — 안 보이면 재투영 낭비다.
-        const dock_search = self.agent_session_archive_search_active and self.dockVisible() and
-            self.dock.view == .agent_sessions;
+        // 게이트는 **`agentSessionSearchOwnsInput` 단일 출처**를 쓴다 — 그 함수의 계약이 "caret rect·inputFocus·
+        // terminalOwnsInput이 같은 게이트를 쓴다"이고, caret **blink**도 정확히 그 caret의 일부다. 조건을 여기
+        // 복제하면(플래그 + dockVisible + view) 셋 중 하나만 바뀌어도 blink만 조용히 어긋난다.
+        const dock_search = self.agentSessionSearchOwnsInput();
         // IME 조합 중에는 커서를 **고정**한다(깜빡이면 커서가 덮은 조합 글자가 깜빡 사라짐). 터미널은 cursor_blinks가
         // Surface preedit로 이미 막지만, 오버레이/rename/검색도 imeComposingActive 단일 출처로 함께 막는다.
         // 스피너는 이 조건에서 제외한다(advanceAgentSpinner가 별도로 진행) — 커서/텍스트/rename/검색 caret blink만 본다.
@@ -34549,11 +34551,13 @@ pub const AppSession = struct {
 
     pub fn metalFrame(self: *const AppSession) MetalFrame {
         var frame = self.metal_buffer.view();
-        // **아직 한 번도 투영되지 않았으면(generation 0) 셀이 비어 있어 정합시킬 상대가 없다** — live 기하를 쓴다.
+        // **아직 한 번도 스탬프되지 않았으면 셀이 비어 있어 정합시킬 상대가 없다** — live 기하를 쓴다.
         // 스탬프 기본값(전부 0)을 그대로 내보내면 기동 시 첫 draw(host가 drawableSize 설정으로 metalNeedsRedraw를
         // 세우면 generation 0에서도 그린다)가 사이드바 폭 0으로 그려 **배경 띠가 한 프레임 통째로 빠진다** —
-        // 이 스탬프가 없애려던 바로 그 깜빡임을 기동에서 새로 만드는 셈이다.
-        if (frame.generation == 0) {
+        // 이 스탬프가 없애려던 바로 그 깜빡임을 기동에서 새로 만드는 셈이다. 술어는 `generation`이 아니라
+        // 스탬프 유무다 — `setCursorFadeMilli`가 셀·기하와 무관하게 generation을 올리므로, 첫 투영 전에 blink
+        // tick 하나만 끼면 generation이 1이 되어 폴백이 조용히 꺼진다.
+        if (!self.metal_buffer.chrome_geometry_stamped) {
             const live = self.chromeGeometrySnapshot();
             frame.terminal_origin_x_px = live.terminal_origin_x_px;
             frame.sidebar_slot_height_px = live.sidebar_slot_height_px;
@@ -61609,12 +61613,19 @@ test "metalFrame chrome 기하는 투영 스탬프다 — live 메트릭이 셀�
     defer session.deinit();
     _ = try session.resize(1000, 700, 1000);
 
-    // 첫 투영 전(generation 0)엔 셀이 비어 정합 상대가 없다 — live 기하를 그대로 내보내야 한다. 스탬프
-    // 기본값 0을 내보내면 기동 첫 draw가 사이드바 폭 0으로 그려 배경 띠가 한 프레임 빠진다.
-    try std.testing.expectEqual(@as(u64, 0), session.metalFrame().generation);
+    // 첫 투영 전엔 셀이 비어 정합 상대가 없다 — live 기하를 그대로 내보내야 한다. 스탬프 기본값 0을
+    // 내보내면 기동 첫 draw가 사이드바 폭 0으로 그려 배경 띠가 한 프레임 빠진다.
+    try std.testing.expect(!session.metal_buffer.chrome_geometry_stamped);
     try std.testing.expect(session.sidebar_width_px > 0);
     try std.testing.expectEqual(session.sidebar_width_px, session.metalFrame().terminal_origin_x_px);
     try std.testing.expectEqual(session.titlebar_strip_px, session.metalFrame().titlebar_strip_px);
+
+    // 폴백 술어는 **스탬프 유무**여야 한다(generation 아님). `setCursorFadeMilli`는 셀도 기하도 안 바꾸면서
+    // generation을 올리므로, 첫 투영 전 blink tick 하나가 generation을 1로 만든다 — 그때도 폴백은 살아야 한다.
+    session.metal_buffer.setCursorFadeMilli(500);
+    try std.testing.expect(session.metalFrame().generation != 0);
+    try std.testing.expect(!session.metal_buffer.chrome_geometry_stamped);
+    try std.testing.expectEqual(session.sidebar_width_px, session.metalFrame().terminal_origin_x_px);
 
     _ = try session.tick(); // 첫 투영 — 셀과 기하가 함께 확정된다
 

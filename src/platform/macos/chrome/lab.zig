@@ -17,7 +17,7 @@ const archive_detail = chrome.components.archive_detail;
 pub const frame_op_capacity = 48;
 pub const frame_run_capacity = 48;
 
-pub const ScenarioId = enum { empty, loading, retained_list, font_specimen, partial_scroll, partial_group_scroll, detail_loading, detail_ready, detail_stale, detail_unavailable };
+pub const ScenarioId = enum { empty, loading, retained_list, font_specimen, partial_scroll, partial_group_scroll, scrollbar, detail_loading, detail_ready, detail_stale, detail_unavailable };
 
 pub const Scenario = struct {
     id: ScenarioId,
@@ -61,7 +61,7 @@ pub fn buildFrame(
 ) !Frame {
     return switch (scenario.id) {
         .detail_loading, .detail_ready, .detail_stale, .detail_unavailable => buildDetailFrame(scenario, tokens, buffers),
-        .empty, .loading, .retained_list, .font_specimen, .partial_scroll, .partial_group_scroll => buildDockFrame(scenario, tokens, buffers),
+        .empty, .loading, .retained_list, .font_specimen, .partial_scroll, .partial_group_scroll, .scrollbar => buildDockFrame(scenario, tokens, buffers),
     };
 }
 
@@ -101,6 +101,14 @@ fn buildDockFrame(
         .search = if (scenario.id == .empty) "" else "",
         // The partial fixture starts at the first card with an integer negative origin. It is the
         // same component geometry used by the host virtualization path, not a screenshot-only crop.
+        // 스크롤바는 목록이 실제로 넘칠 때만 발행된다. 그 입력은 **보이는 item 수가 아니라** 전체
+        // content 높이와 현재 offset이다(가상화 때문에 component는 보이는 창만 받는다). 그래서 이 둘을
+        // 채우지 않으면 item이 몇 개든 스크롤바가 나오지 않는다 — 기존 골든 네 장에 스크롤바 픽셀이
+        // 하나도 없던 이유가 이것이고, 그 상태에서는 스크롤바를 통째로 지워도 게이트가 통과한다.
+        .scroll_content_height_px = if (scenario.id == .scrollbar) 4000 else 0,
+        // 양 끝이 아닌 중간 위치라야 track과 thumb이 **둘 다** 픽셀로 남는다. 끝에 붙이면 한쪽 여백이
+        // 사라져 thumb 높이·위치 회귀를 골든이 못 본다.
+        .scroll_offset_px = if (scenario.id == .scrollbar) 1500 else 0,
         .content_first_item_origin_y_px = switch (scenario.id) {
             .partial_scroll => -28,
             // 그룹 행을 절반쯤 스크롤 영역 위로 밀어, **radius를 가진** count pill이 잘리는 상태를 만든다.
@@ -113,7 +121,7 @@ fn buildDockFrame(
             .retained_list => &retained,
             .font_specimen => &font_specimen,
             .partial_scroll => retained[1..],
-            .partial_group_scroll => &retained,
+            .partial_group_scroll, .scrollbar => &retained,
             .empty, .loading => &.{},
             .detail_loading, .detail_ready, .detail_stale, .detail_unavailable => unreachable,
         },

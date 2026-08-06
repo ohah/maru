@@ -1191,11 +1191,11 @@ restore 설정 alias, 과거 hook/mapping cleanup과 전용 환경변수 차단�
 tree 교체에서 capture carry 누락(드래그가 첫 move에 죽음)·스크롤바가 목록 위에 겹침·장식 quad clip 누락.
 넷 다 사용자 보고로 돌아왔다. ScrollView는 그 규율을 한 번만 맞게 두는 자리다.
 
-- **SV0 — 판정자 먼저.** 지금 도크 골든 네 장에는 스크롤바 픽셀이 하나도 없다 — Lab fixture가
-  `scroll_content_height_px`를 채우지 않아 `scrollbarGeometry`가 `null`을 낸다(항목 수 무관). 골든 우측
-  40px의 최장 세로 런이 3px(chevron 획)인 것으로 확인했다. 그래서 SV1이 스크롤바를 통째로 망가뜨려도
-  기존 골든은 전부 통과한다. 목록이 실제로 넘치는 Lab 시나리오와 gutter를 포함한 골든 case를 **SV1 전에**
-  추가한다.
+- **SV0 — 판정자 먼저(완료).** 도크 골든 어디에도 스크롤바 픽셀이 없었다 — Lab fixture가
+  `scroll_content_height_px`를 채우지 않아 `scrollbarGeometry`가 `null`을 냈다(항목 수 무관). `scrollbar`
+  Lab 시나리오와 `scrollbar-track-and-thumb` 골든 case로 닫았고, 스크롤바 발행을 막으면 2970픽셀 차이로
+  실패하는 것을 확인했다. 캡처가 한 장만 없을 때 그 case를 건너뛰던 게이트 구멍도 `MARU_REQUIRE_GOLDEN`
+  에서 실패하도록 함께 닫았다.
 - **SV1 — Session Dock에서 추출.** 가상화·픽셀 offset·스크롤바·드래그·키보드 스크롤을 모두 쓰는
   유일한 소비처라 여기서 뽑으면 계약이 처음부터 전부 드러난다. 실질은 지금 도크가 손으로 하는 세 단계
   (컨테이너 build → 자식 평행이동 → 스크롤바 append)를 `tree.scrollView` 선언 하나로 접고 그 처리를

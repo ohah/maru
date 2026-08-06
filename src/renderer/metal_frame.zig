@@ -1306,6 +1306,17 @@ fn buildMergedUploadsN(
 /// RenderFrame을 투영해 retain하는 owned 버퍼. cells/sidebar_cells/uploads/pixels 배열의 소유권을
 /// 한 곳에서 관리해(replace는 build-then-swap, deinit은 단일 해제) 호출자가 free 시퀀스를
 /// 여러 곳에 복제하지 않게 한다.
+/// 한 번의 투영이 함께 확정하는 chrome 기하. 셀과 이 값이 **같은 프레임에서 나와야** 렌더러가
+/// 셀을 옳은 자리에 놓는다(예: 사이드바 셀 py_top = origin_y + header − scroll).
+pub const ChromeGeometry = struct {
+    terminal_origin_x_px: u32 = 0,
+    sidebar_slot_height_px: u32 = 0,
+    sidebar_header_height_px: u32 = 0,
+    sidebar_scroll_offset_px: u32 = 0,
+    titlebar_strip_px: u32 = 0,
+    divider_thickness_px: u32 = 0,
+};
+
 pub const MetalFrameBuffer = struct {
     cells: []NativeMetalCell = &.{},
     // 사이드바 셀(밴드 ++ 탭 제목 glyph) — replace가 밴드 cells와 사이드바 RenderFrame을 합쳐 만든다.
@@ -1333,6 +1344,11 @@ pub const MetalFrameBuffer = struct {
     atlas_height_px: u32 = 0,
     cell_width_px: u32 = 0,
     cell_height_px: u32 = 0,
+    // **투영 시점의 chrome 기하**(사이드바 폭·슬롯/헤더 높이·스크롤·타이틀바 띠·divider 두께).
+    // `view()`가 이 값을 실어 보내므로 셀과 기하가 **한 프레임의 같은 상태**가 된다. 예전엔 호출자가
+    // 매 draw마다 live 값을 덮어써, 메트릭이 바뀌고 아직 재투영되지 않은 프레임(host가 generation 변화
+    // 없이도 다시 그리는 경로가 있다)에서 **옛 pitch 셀 + 새 헤더 높이**가 섞였다.
+    chrome_geometry: ChromeGeometry = .{},
     generation: u64 = 0,
     // 커서 overlay cell 수(buildNativeCellsSplit). view()가 아래 cursor_start와 함께 MetalFrame으로 넘겨 렌더러가
     // 커서 구간을 본문에서 분리해 cursor_fade_milli 불투명도로 별도 pass로 그린다 — blink 페이드가 frame rebuild
@@ -1577,6 +1593,12 @@ pub const MetalFrameBuffer = struct {
         self.generation += 1;
     }
 
+    /// 이번 투영의 chrome 기하를 스탬프한다. `replace`/`replaceSidebar` 직후에 호출해 셀과 같은 프레임의
+    /// 값으로 고정한다 — 호출자가 draw 시점의 live 값을 덮어쓰면 메트릭 변경 프레임에 셀과 기하가 갈린다.
+    pub fn stampChromeGeometry(self: *MetalFrameBuffer, geometry: ChromeGeometry) void {
+        self.chrome_geometry = geometry;
+    }
+
     /// 커서 blink 페이드 위상을 반영한다(rebuild 없음, milli는 0~1000으로 clamp). 바뀌면 generation을 올려
     /// Swift가 다시 그린다 — 같은 cells에서 커서 suffix pass의 불투명도만 달라진다(램프 중 매 tick 재present).
     pub fn setCursorFadeMilli(self: *MetalFrameBuffer, milli: u32) void {
@@ -1644,6 +1666,13 @@ pub const MetalFrameBuffer = struct {
             .rows = @intCast(self.size.rows),
             .atlas_width_px = self.atlas_width_px,
             .atlas_height_px = self.atlas_height_px,
+            // chrome 기하는 셀과 **같은 투영**에서 나온 스탬프를 쓴다(호출자의 live 값 덮어쓰기 금지).
+            .terminal_origin_x_px = self.chrome_geometry.terminal_origin_x_px,
+            .sidebar_slot_height_px = self.chrome_geometry.sidebar_slot_height_px,
+            .sidebar_header_height_px = self.chrome_geometry.sidebar_header_height_px,
+            .sidebar_scroll_offset_px = self.chrome_geometry.sidebar_scroll_offset_px,
+            .titlebar_strip_px = self.chrome_geometry.titlebar_strip_px,
+            .divider_thickness_px = self.chrome_geometry.divider_thickness_px,
             .cell_width_px = self.cell_width_px,
             .cell_height_px = self.cell_height_px,
             .generation = self.generation,

@@ -2971,6 +2971,10 @@ pub const AppSession = struct {
     // repack 좌표가 GPU 텍스처에 미반영된다. 이 플래그는 shouldProjectFrame이 sync hold를 우회해 다음 tick에 반드시
     // full 투영(atlas 정합)하도록 강제한다 — full replace 성공 시 해제. metal_dirty만으론 sync hold가 막아 부족하다.
     force_reproject: bool = false,
+    // 이번 tick의 배치(placeAndDistribute)가 할당 실패로 **아무 frame도 못 만든** 상태. 활성 Term이 터미널이면
+    // `active_failed`가 이미 replace를 막지만, web이면 그 가드가 비어 있어(터미널 frame이 원래 없다) 사이드바
+    // 제목·헤더 아이콘·탭 제목·도크 텍스트가 전부 사라진 프레임이 커밋됐다 — quad만 남아 한 프레임 깜빡였다.
+    placement_failed: bool = false,
     // 직전에 그린 활성 surface의 view_offset(스크롤백 탐색 위치). synchronized output(2026) hold가 스크롤
     // 리페인트를 막지 않게 하고(shouldProjectFrame), 스크롤이 reader 위임이라 metal_dirty가 누락돼도 view_offset
     // 변화만으로 투영을 강제하는 기준이다. 투영 경로마다 그 프레임이 실제로 그린 render-time offset으로 갱신(빌드
@@ -30221,7 +30225,12 @@ pub const AppSession = struct {
             // [4e-2, §6] 활성 web Term은 active_result==null이 **정상**(의도적 no-terminal-frame)이라 self-heal 대상이
             // 아니다 — activeTermIsTerminal로 좁혀 web일 때 active_failed=false로 두고 chrome+빈 본문을 정상 커밋한다.
             // web Term 없으면 activeTermIsTerminal=true라 조건이 옛것과 동일(byte-identical).
-            const active_failed = builtin.os.tag == .macos and self.surface_initialized and self.activeTermIsTerminal() and active_result == null;
+            // 배치가 통째로 실패했으면 활성 Term 종류와 무관하게 스킵한다 — web 활성일 때 `activeTermIsTerminal()`이
+            // false라 옛 가드가 비어 있었고, 그 프레임은 사이드바·탭·도크 텍스트가 전부 사라진 채 커밋됐다.
+            const placement_failed = self.placement_failed;
+            self.placement_failed = false; // 한 tick 신호(다음 tick이 재시도한다 — metal_dirty는 유지된다)
+            const active_failed = builtin.os.tag == .macos and self.surface_initialized and
+                (placement_failed or (self.activeTermIsTerminal() and active_result == null));
             if (builtin.os.tag == .macos and active_result != null) {
                 active_index = self.frame_loop.advanceFrameIndex();
             }
@@ -30350,6 +30359,7 @@ pub const AppSession = struct {
                     }
                 }
                 self.appendBellFlashQuad(); // 시각 벨(bell.visual): flash 중이면 전경색 반투명 full-screen quad를 맨 위에(F2-4)
+                self.metal_buffer.stampChromeGeometry(self.chromeGeometrySnapshot());
                 if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, sidebar_header_frame, self.sidebar_cells.items, sidebar_colors, pane_chrome.items, pane_overlay.items, overlay_frame, floating_pf, drag_overlay_cells.items, self.gpu_quads.items, self.gpu_shadows.items, self.gpu_glyphs.items, kg_images, kg_uploads, kg_pixels, kg_live_ids.items)) |_| {
                     self.applySidebarGlyphPyTop(); // 카드 glyph py_top을 rowTop 기반 origin_y로(가변 높이 정합 — SG3b-2-ii)
                     self.metal_dirty = false;
@@ -30426,6 +30436,7 @@ pub const AppSession = struct {
                     } else if (sidebar_frame) |_| {
                         const sidebar_colors: metal_frame.CellColors = .{ .default_fg = self.appearance.theme.foreground };
                         self.metal_buffer.replaceSidebar(self.allocator, self.sidebar_cells.items, sidebar_frame, sidebar_colors, self.renderer_state.atlas.config) catch {};
+                        self.metal_buffer.stampChromeGeometry(self.chromeGeometrySnapshot());
                         self.applySidebarGlyphPyTop(); // chrome-only 부분 경로도 카드 glyph py_top 정합(가변 높이 — SG3b-2-ii)
                         self.chrome_dirty = false;
                     }
@@ -31764,7 +31775,17 @@ pub const AppSession = struct {
     /// 메모리 'UI는 Zig+GPU 렌더러로' — 네이티브 NSScroller가 아니라 chrome GpuQuad 프리미티브. 좌표는 backing 픽셀.
     fn appendScrollbar(self: *AppSession, rect: maru.session.SplitRect, pane: *Pane, is_active: bool) void {
         if (rect.w == 0) return;
-        const scroll_state = scrollStateOf(pane.activeTerm().surface);
+        // 코어 읽기는 **락 아래**(§9.1) — `scrollStateOf`의 계약이 그렇다(snapshot이 소스 메모리를 alias).
+        // 옛 코드는 렌더 경로만 락 없이 읽어, 대량 출력 중 `scrollback_len`이 ms마다 늘면 fade 판정(락 아래
+        // 값)과 thumb 기하(락 밖 값)가 서로 다른 시점에서 나와 thumb이 미세하게 튀었다. host-backed surface면
+        // 이 락이 곧 RemoteScreen mutex라 계약이 더 강하다. 형제 경로(updateScrollbarFade·dragScrollbarTo)는
+        // 이미 락을 잡는다 — 렌더만 예외였다.
+        const surface = pane.activeTerm().surface;
+        const scroll_state = blk: {
+            surface.lockCore(self.io);
+            defer surface.unlockCore(self.io);
+            break :blk scrollStateOf(surface);
+        };
         const geom = scrollbarThumbGeom(scroll_state.scrollback_len, scroll_state.view_offset, self.cell_height_px, rect.h) orelse return;
         const thumb_y: f32 = @as(f32, @floatFromInt(rect.y)) + geom.y;
         const thumb_h: f32 = geom.h;
@@ -33232,6 +33253,7 @@ pub const AppSession = struct {
 
         const lists = self.allocator.alloc(renderer.glyph_layout.GlyphRunList, collected.items.len) catch {
             for (collected.items) |*c| c.deinit(self.allocator);
+            self.placement_failed = true; // 아래 replace 가드가 본다 — 텍스트 없는 프레임을 커밋하지 않게
             return;
         };
         defer self.allocator.free(lists);
@@ -33239,6 +33261,7 @@ pub const AppSession = struct {
 
         const frames = self.renderer_state.placeMultiPane(self.allocator, lists) catch {
             for (collected.items) |*c| c.deinit(self.allocator);
+            self.placement_failed = true; // 사이드바·헤더·오버레이·도크 frame이 **전부** null이 된다
             return;
         };
         defer self.allocator.free(frames);
@@ -34501,11 +34524,24 @@ pub const AppSession = struct {
         }
     }
 
+    /// 이번 투영이 확정하는 chrome 기하 — `metal_buffer`에 스탬프해 셀과 한 몸으로 만든다. draw 시점의 live
+    /// 값을 덮어쓰면 메트릭이 바뀌고 아직 재투영되지 않은 프레임(host는 generation 변화 없이도 다시 그릴 수 있다)
+    /// 에서 **옛 pitch 셀 + 새 헤더/슬롯 높이**가 섞인다.
+    fn chromeGeometrySnapshot(self: *const AppSession) metal_frame.ChromeGeometry {
+        return .{
+            .terminal_origin_x_px = self.sidebar_width_px,
+            .sidebar_slot_height_px = self.sidebar_slot_height_px,
+            .sidebar_header_height_px = self.sidebar_header_height_px,
+            .sidebar_scroll_offset_px = self.sidebar_scroll_offset_px,
+            .titlebar_strip_px = self.titlebar_strip_px,
+            .divider_thickness_px = self.dividerThicknessPx(),
+        };
+    }
+
     pub fn metalFrame(self: *const AppSession) MetalFrame {
         var frame = self.metal_buffer.view();
         // "surface→rect": 터미널을 사이드바 폭만큼 오른쪽에 그리고, 왼쪽 strip에 사이드바 배경을 칠한다.
         // 렌더러가 origin offset + 배경 quad를 처리한다. split(panel)도 같은 origin 방식을 확장한다.
-        frame.terminal_origin_x_px = self.sidebar_width_px;
         frame.sidebar_bg = self.chromeCellBg(self.sidebarBg()); // window.opacity 반영(strip=렌더러 premultiplied-over 셀 경로)
         // 화면 clear color(빈 영역/기본 배경 셀이 비치는 색): OSC 11(배경 set)이 있으면 그 색, 없으면
         // theme.background. DECSCNM(?5, G9) 화면 반전이면 전경색으로 스왑한다(빈 영역도 반전돼야 함). 활성
@@ -34523,21 +34559,16 @@ pub const AppSession = struct {
         // 사이드바 셀(밴드 ++ 제목 glyph)은 metal_buffer가 소유한다 — view()가 frame.sidebar_cells를
         // 세팅한다(self.sidebar_cells는 밴드 source라 replace에만 넘긴다). 여기선 슬롯 높이만 더한다:
         // 렌더러가 사이드바 셀을 cell 높이가 아니라 탭 슬롯 높이(≈2.5×)로 세로 배치하게.
-        frame.sidebar_slot_height_px = self.sidebar_slot_height_px;
         // 상단 헤더(검색바 + view options·새 워크스페이스 아이콘) 높이 — 렌더러가 사이드바 셀(밴드·카드 glyph)을
         // 이만큼 아래로 민다(밴드 view는 슬롯 상대 좌표라 .m이 시프트 단일 책임). 헤더 glyph는 절대 좌표 별도 frame.
-        frame.sidebar_header_height_px = self.sidebar_header_height_px;
         // 사이드바 세로 스크롤량 — 렌더러가 사이드바 셀(밴드·카드 glyph) py_top에서 빼고, scroll>0이면 헤더 아래로
         // scissor 클리핑한다(GPU quad 밴드·tint는 lowering이 이미 뺐다 — 같은 sidebar_scroll_offset_px 단일 출처).
-        frame.sidebar_scroll_offset_px = self.sidebar_scroll_offset_px;
         // 상단 타이틀바 띠 높이 — 렌더러가 접힘 펼치기 토글(◧) 글리프를 이 띠 안에 세로 중앙 배치해 신호등과
         // 정렬시키는 데만 쓴다(펼침 헤더 아이콘은 terminal_origin_x_px>0이라 0.3ch nudge 유지). hit-test
         // (collapsedToggleRect)는 이미 이 띠 전체 높이를 클릭 영역으로 쓴다.
-        frame.titlebar_strip_px = self.titlebar_strip_px;
         // 창 배경 투명도 → clear color alpha(렌더러가 /1000). opacity는 loader가 0~1로 검증하므로 *1000은 0~1000.
         frame.window_opacity_milli = @intFromFloat(@round(self.appearance.window_opacity * 1000.0));
         // pane divider(reserved 30/31) device px 두께 — config split.divider-thickness(논리 pt) 단일 출처.
-        frame.divider_thickness_px = self.dividerThicknessPx();
         return frame;
     }
 
@@ -61537,6 +61568,43 @@ test "sidebar collapse toggle: hides (width 0, pt preserved) and the top-left bu
     }
 }
 
+// chrome 기하는 **투영 시점에 스탬프**돼 셀과 한 프레임이어야 한다. host는 generation이 그대로여도 다시 그릴 수
+// 있으므로(drawableSize·backing-scale 변경 등 metalNeedsRedraw 경로), draw 시점의 live 값을 덮어쓰면 메트릭이 바뀌고
+// 아직 재투영되지 않은 프레임에서 **옛 pitch로 만든 셀 + 새 헤더/슬롯 높이**가 섞인다(⌘+ 직후 사이드바 글자와 밴드가
+// 어긋나던 부류). 폰트 크기를 바꾼 뒤 tick 없이 frame을 읽어 그 분리를 확인한다.
+test "metalFrame chrome 기하는 투영 스탬프다 — live 메트릭이 셀과 섞이지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1000, 700, 1000);
+    _ = try session.tick(); // 첫 투영 — 셀과 기하가 함께 확정된다
+
+    const stamped_slot = session.metalFrame().sidebar_slot_height_px;
+    const stamped_strip = session.metalFrame().titlebar_strip_px;
+    try std.testing.expectEqual(session.sidebar_slot_height_px, stamped_slot);
+
+    // 폰트를 키우면 live 메트릭이 즉시 바뀐다(슬롯/띠는 cell 높이 파생). 아직 재투영 전이므로 frame은 **옛 값**을
+    // 유지해야 한다 — 그래야 그 프레임의 셀과 정합한다.
+    session.dispatchAppAction(.increase_font_size);
+    try std.testing.expect(session.sidebar_slot_height_px != stamped_slot or session.titlebar_strip_px != stamped_strip);
+    try std.testing.expectEqual(stamped_slot, session.metalFrame().sidebar_slot_height_px);
+    try std.testing.expectEqual(stamped_strip, session.metalFrame().titlebar_strip_px);
+
+    // 재투영되면 둘이 함께 새 값으로 간다.
+    _ = try session.tick();
+    try std.testing.expectEqual(session.sidebar_slot_height_px, session.metalFrame().sidebar_slot_height_px);
+    try std.testing.expectEqual(session.titlebar_strip_px, session.metalFrame().titlebar_strip_px);
+}
+
 // quad 수명·순서 계약(S0): `dropQuadsByLayer`는 **자기 레이어만** 지우고 **나머지 순서를 보존**해야 하며,
 // `rebuildSidebar`는 **layer 0만** 비워야 한다. 둘 다 화면에 안 보이는 계약이라 눈으로는 못 잡는다 —
 // 어기면 (a) 사이드바 이벤트(hover·드래그·탭 전환) 직후 tick이 full 투영이 아닐 때 탭 밴드·스크롤바·배지가
@@ -61627,7 +61695,10 @@ test "collapsed toggle: hover emits a highlight quad and metalFrame carries titl
     try std.testing.expect(session.sidebar_collapsed);
 
     // metalFrame이 띠 높이를 실어 렌더러가 ◧를 띠 안 세로 중앙에 정렬할 수 있다(접힘 띠 = max(cell_h, 30pt) > 0).
+    // chrome 기하는 **투영 시점 스탬프**라(셀과 한 프레임) tick을 한 번 돌려 확정한 뒤 읽는다 — draw 시점의 live
+    // 값을 덮어쓰면 메트릭이 바뀐 프레임에서 옛 셀과 새 기하가 섞인다.
     try std.testing.expect(session.titlebar_strip_px > 0);
+    _ = try session.tick();
     try std.testing.expectEqual(session.titlebar_strip_px, session.metalFrame().titlebar_strip_px);
 
     // 호버 quad를 식별하는 distinctive 색 — 헤더 아이콘 호버와 같은 밝은 fg 반투명(straight-alpha).

@@ -1210,6 +1210,11 @@ tree 교체에서 capture carry 누락(드래그가 첫 move에 죽음)·스크�
     **함께 고치는 것**: 지금 도크는 스크롤바를 배열 끝에 `parent_index = null`로 붙여 `UiRectTree`의
     preorder·subtree-range 불변식을 어기고 root를 여럿으로 만든다. build의 preorder emit 안으로 옮기면
     사라진다. 스크롤 자식의 `shrink = 0`도 소비처가 아니라 컨테이너가 소유하게 옮긴다.
+    **먼저 세울 판정자**: 지금 텍스트가 나르는 clip에는 값 대조 판정자만 있고 **픽셀 게이트가 없다**.
+    SV1a에서 `text.clip`을 두 경로 모두 비워도 Lab 캡처가 픽셀 하나 안 바뀌는 것을 확인했다 —
+    `metal_lowering`은 origin이 clip 완전히 밖일 때 통째로 버릴 뿐이고, 실제 부분 잘림은 셀 격자가
+    한다. 그래서 "배경은 잘렸는데 글자만 남는" 어긋남을 볼 게이트가 없다. clip 밖에서 **시작하는**
+    텍스트가 있는 Lab 시나리오와 그 crop을 SV1b 전에 만든다(SV0가 스크롤바에 한 것과 같은 순서).
   - **SV1c — 측정 pass와 drag 헬퍼.** **뷰포트 높이 복제를 없앤다**: 지금 host가
     `content.h - fixedChromeHeight()`로 flex 결과를 손으로 예측하는데(같은 수의 출처가 둘), 측정 pass로
     layout이 알려 주게 하면 그 식이 사라진다. host의 drag 세 지점(begin/absorb/apply)과 분수 휠

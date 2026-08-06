@@ -30359,8 +30359,10 @@ pub const AppSession = struct {
                     }
                 }
                 self.appendBellFlashQuad(); // 시각 벨(bell.visual): flash 중이면 전경색 반투명 full-screen quad를 맨 위에(F2-4)
-                self.metal_buffer.stampChromeGeometry(self.chromeGeometrySnapshot());
                 if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, sidebar_header_frame, self.sidebar_cells.items, sidebar_colors, pane_chrome.items, pane_overlay.items, overlay_frame, floating_pf, drag_overlay_cells.items, self.gpu_quads.items, self.gpu_shadows.items, self.gpu_glyphs.items, kg_images, kg_uploads, kg_pixels, kg_live_ids.items)) |_| {
+                    // **스탬프는 replace 성공과 한 트랜잭션이다.** 실패(OOM)면 버퍼가 옛 셀을 그대로 들고 있으므로
+                    // 기하만 새 값으로 올리면 이 함수가 없애려는 바로 그 불일치(옛 pitch 셀 + 새 헤더 높이)를 만든다.
+                    self.metal_buffer.stampChromeGeometry(self.chromeGeometrySnapshot());
                     self.applySidebarGlyphPyTop(); // 카드 glyph py_top을 rowTop 기반 origin_y로(가변 높이 정합 — SG3b-2-ii)
                     self.metal_dirty = false;
                     self.force_reproject = false; // [A] full 투영이 atlas를 GPU에 정합했으므로 강제 재투영 요구 해제(code-review [0])
@@ -30435,8 +30437,11 @@ pub const AppSession = struct {
                         self.chrome_dirty = false;
                     } else if (sidebar_frame) |_| {
                         const sidebar_colors: metal_frame.CellColors = .{ .default_fg = self.appearance.theme.foreground };
-                        self.metal_buffer.replaceSidebar(self.allocator, self.sidebar_cells.items, sidebar_frame, sidebar_colors, self.renderer_state.atlas.config) catch {};
-                        self.metal_buffer.stampChromeGeometry(self.chromeGeometrySnapshot());
+                        // 스탬프는 **부분 swap이 실제로 성공했을 때만** 올린다(full 경로와 같은 트랜잭션 규칙) —
+                        // `catch {}`로 삼킨 실패에서 기하만 전진하면 옛 사이드바 셀과 새 헤더/슬롯 높이가 갈린다.
+                        if (self.metal_buffer.replaceSidebar(self.allocator, self.sidebar_cells.items, sidebar_frame, sidebar_colors, self.renderer_state.atlas.config)) |_| {
+                            self.metal_buffer.stampChromeGeometry(self.chromeGeometrySnapshot());
+                        } else |_| {}
                         self.applySidebarGlyphPyTop(); // chrome-only 부분 경로도 카드 glyph py_top 정합(가변 높이 — SG3b-2-ii)
                         self.chrome_dirty = false;
                     }
@@ -33248,6 +33253,10 @@ pub const AppSession = struct {
         sticky_pf: *?metal_frame.PaneFrame,
         active_out: *?ActiveResult,
     ) void {
+        // 플래그는 **이번 배치의 결과만** 뜻한다. 부분 투영 경로(chrome-only)도 이 함수를 부르는데 그 분기는
+        // 플래그를 읽지도 지우지도 않으므로, 여기서 안 지우면 그때의 실패가 다음 full tick까지 살아남아
+        // 멀쩡한 프레임을 한 번 버린다. 소비자(replace 가드)도 읽으면서 지운다 — set/clear를 배치에 붙인다.
+        self.placement_failed = false;
         defer collected.clearRetainingCapacity();
         if (collected.items.len == 0) return;
 
@@ -34540,6 +34549,19 @@ pub const AppSession = struct {
 
     pub fn metalFrame(self: *const AppSession) MetalFrame {
         var frame = self.metal_buffer.view();
+        // **아직 한 번도 투영되지 않았으면(generation 0) 셀이 비어 있어 정합시킬 상대가 없다** — live 기하를 쓴다.
+        // 스탬프 기본값(전부 0)을 그대로 내보내면 기동 시 첫 draw(host가 drawableSize 설정으로 metalNeedsRedraw를
+        // 세우면 generation 0에서도 그린다)가 사이드바 폭 0으로 그려 **배경 띠가 한 프레임 통째로 빠진다** —
+        // 이 스탬프가 없애려던 바로 그 깜빡임을 기동에서 새로 만드는 셈이다.
+        if (frame.generation == 0) {
+            const live = self.chromeGeometrySnapshot();
+            frame.terminal_origin_x_px = live.terminal_origin_x_px;
+            frame.sidebar_slot_height_px = live.sidebar_slot_height_px;
+            frame.sidebar_header_height_px = live.sidebar_header_height_px;
+            frame.sidebar_scroll_offset_px = live.sidebar_scroll_offset_px;
+            frame.titlebar_strip_px = live.titlebar_strip_px;
+            frame.divider_thickness_px = live.divider_thickness_px;
+        }
         // "surface→rect": 터미널을 사이드바 폭만큼 오른쪽에 그리고, 왼쪽 strip에 사이드바 배경을 칠한다.
         // 렌더러가 origin offset + 배경 quad를 처리한다. split(panel)도 같은 origin 방식을 확장한다.
         frame.sidebar_bg = self.chromeCellBg(self.sidebarBg()); // window.opacity 반영(strip=렌더러 premultiplied-over 셀 경로)
@@ -61586,6 +61608,14 @@ test "metalFrame chrome 기하는 투영 스탬프다 — live 메트릭이 셀�
     });
     defer session.deinit();
     _ = try session.resize(1000, 700, 1000);
+
+    // 첫 투영 전(generation 0)엔 셀이 비어 정합 상대가 없다 — live 기하를 그대로 내보내야 한다. 스탬프
+    // 기본값 0을 내보내면 기동 첫 draw가 사이드바 폭 0으로 그려 배경 띠가 한 프레임 빠진다.
+    try std.testing.expectEqual(@as(u64, 0), session.metalFrame().generation);
+    try std.testing.expect(session.sidebar_width_px > 0);
+    try std.testing.expectEqual(session.sidebar_width_px, session.metalFrame().terminal_origin_x_px);
+    try std.testing.expectEqual(session.titlebar_strip_px, session.metalFrame().titlebar_strip_px);
+
     _ = try session.tick(); // 첫 투영 — 셀과 기하가 함께 확정된다
 
     const stamped_slot = session.metalFrame().sidebar_slot_height_px;

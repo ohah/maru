@@ -85,19 +85,44 @@ const cases = [_]Case{
         .contract = "펼친 detail의 액션 버튼에 아이콘과 라벨이 있다(빈 상자가 아니다)",
         .rect = .{ .x = 0, .y = 660, .w = 480, .h = 60 },
     },
+    .{
+        // 이 case가 생기기 전까지 **어떤 골든도 스크롤바를 보지 않았다.** Lab이 스크롤 입력
+        // (`scroll_content_height_px`·`scroll_offset_px`)을 채우지 않아 스크롤바가 아예 발행되지
+        // 않았고, 그래서 스크롤바를 통째로 지워도 골든 네 장이 전부 통과했다. 게이트가 있다는 것과
+        // 그 게이트가 이것을 본다는 것은 다르다.
+        //
+        // crop은 도크 우측 gutter와 그 왼쪽 content 가장자리를 함께 잡는다. 세로로는 track 위쪽 빈
+        // 구간·thumb·아래쪽 빈 구간이 모두 들어가므로, thumb의 위치와 높이, track의 범위, 그리고
+        // 스크롤바가 content 위로 넘어오는 회귀까지 한 사각형이 판정한다.
+        .name = "scrollbar-track-and-thumb",
+        .capture = "scrollbar.ppm",
+        .contract = "넘치는 목록에 track과 thumb이 gutter 안에 있다(발행되고, content를 침범하지 않는다)",
+        .rect = .{ .x = 452, .y = 200, .w = 28, .h = 400 },
+    },
 };
 
 test "session dock visual golden" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     const update = std.c.getenv("MARU_UPDATE_GOLDEN") != null;
+    // 갱신 중에는 캡처가 아직 없을 수 있으므로 요구하지 않는다.
+    const require_captures = !update and std.c.getenv("MARU_REQUIRE_GOLDEN") != null;
 
     var checked: usize = 0;
     for (cases) |case| {
         var capture_path_buf: [256]u8 = undefined;
         const capture_path = try std.fmt.bufPrint(&capture_path_buf, "{s}/{s}", .{ capture_root, case.capture });
         const capture_bytes = std.Io.Dir.cwd().readFileAlloc(io, capture_path, allocator, .limited(64 * 1024 * 1024)) catch |err| switch (err) {
-            error.FileNotFound => continue, // 스모크를 안 돌린 환경 — 이 게이트는 그때 의미가 없다.
+            // 스모크를 안 돌린 환경에서는 이 게이트가 의미 없으므로 건너뛴다. 그러나 스모크를 먼저
+            // 배선한 곳(CI)에서는 **한 장만 없는 것도 결함**이다 — 나머지 case가 통과하면 `checked > 0`이라
+            // 아래 전체-부재 가드에 걸리지 않고, 그 시나리오의 렌더가 죽었다는 사실이 초록에 묻힌다.
+            error.FileNotFound => {
+                if (require_captures) {
+                    std.debug.print("골든 캡처가 없다: {s} (시나리오 렌더가 실패했는가?)\n", .{capture_path});
+                    return error.VisualGoldenCaptureMissing;
+                }
+                continue;
+            },
             else => return err,
         };
         defer allocator.free(capture_bytes);
@@ -155,6 +180,6 @@ test "session dock visual golden" {
         std.debug.print("dock 시각 골든: 캡처가 없어 건너뛴다(먼저 `zig build macos-chrome-lab-smoke`)\n", .{});
         // 스모크를 먼저 돌리도록 배선한 곳(CI)에서는 캡처 부재 자체가 결함이다. 창 생성이나 캡처가
         // 실패했는데 게이트가 초록이면 그 실패를 영원히 못 본다.
-        if (std.c.getenv("MARU_REQUIRE_GOLDEN") != null) return error.VisualGoldenCapturesMissing;
+        if (require_captures) return error.VisualGoldenCapturesMissing;
     }
 }

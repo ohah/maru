@@ -135,11 +135,40 @@ test "icon_glyph: 생성된 이름 registry가 coverage 등록 집합·자산 �
         // 매니페스트 심볼 규약: 기본 fit은 이름 그대로, 나머지는 `<이름>_<fit>`(svg_to_coverage.py symbol_name).
         var expected_buf: [64]u8 = undefined;
         const tag = @tagName(resolved.icon);
-        const expected = if (icons.codepoint(resolved.icon) == cp)
+        const is_default_fit = icons.codepoint(resolved.icon) == cp;
+        const expected = if (is_default_fit)
             tag
         else
             try std.fmt.bufPrint(&expected_buf, "{s}_{s}", .{ tag, @tagName(resolved.fit) });
         try std.testing.expectEqualStrings(expected, asset.name);
+
+        // (3) 자산 **경로**가 이름+fit에서 파생된다. 이름과 경로를 함께 맞바꾸는 편집은 세 생성물이 같은
+        //     소스에서 나오는 한 정의상 전부 통과하므로(적대적 검증에서 실증), 파생 규칙만이 이름을 그림에
+        //     묶는다: `<이름의 _를 ->[-<fit>].svg`.
+        var path_buf: [96]u8 = undefined;
+        var stem_buf: [64]u8 = undefined;
+        const stem = blk: {
+            @memcpy(stem_buf[0..tag.len], tag);
+            for (stem_buf[0..tag.len]) |*c| {
+                if (c.* == '_') c.* = '-';
+            }
+            break :blk stem_buf[0..tag.len];
+        };
+        const expected_path = if (is_default_fit)
+            try std.fmt.bufPrint(&path_buf, "assets/icons/{s}.svg", .{stem})
+        else
+            try std.fmt.bufPrint(&path_buf, "assets/icons/{s}-{s}.svg", .{ stem, @tagName(resolved.fit) });
+        try std.testing.expectEqualStrings(expected_path, asset.path);
+    }
+    // (4) codepoint가 **그 그림의 픽셀**을 가리킨다. 위 조건들은 이름·경로·집합만 보므로, 생성물에서
+    //     `.data = &gear`와 `&plus`를 맞바꾸는 한 줄 편집이 전부 통과했다(적대적 검증에서 실증).
+    //     매니페스트가 실은 coverage 해시와 실제 데이터를 대조해 그 고리를 닫는다.
+    for (data.asset_manifest, data.icons) |asset, entry| {
+        try std.testing.expectEqual(asset.cp, entry.cp); // 두 배열은 같은 순서다
+        var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(entry.data, &digest, .{});
+        const actual = std.fmt.bytesToHex(digest, .lower);
+        try std.testing.expectEqualStrings(asset.coverage_sha256, &actual);
     }
     // (3) 이름으로 고를 수 있는 모든 (아이콘, fit) 조합은 반드시 합성된다 — 아니면 그 자리가 폰트 폴백
     //     (빈 칸 또는 엉뚱한 Nerd Fonts 글리프)이 된다. **fit도 comptime 전수**한다: 배열에 손으로 적으면

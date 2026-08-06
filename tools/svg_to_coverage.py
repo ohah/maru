@@ -78,7 +78,7 @@ ICONS = [
     ("plus", FIT_STANDARD, 0xF0003, "assets/icons/plus.svg"),
     ("search", FIT_STANDARD, 0xF0004, "assets/icons/search.svg"),
     ("bell", FIT_STANDARD, 0xF0005, "assets/icons/bell.svg"),
-    ("sidebar", FIT_STANDARD, 0xF0006, "assets/icons/sidebar-collapse.svg"),
+    ("sidebar_collapse", FIT_STANDARD, 0xF0006, "assets/icons/sidebar-collapse.svg"),
     ("sparkle", FIT_STANDARD, 0xF0007, "assets/icons/sparkle.svg"),
     ("diamond", FIT_STANDARD, 0xF0008, "assets/icons/diamond.svg"),
     ("mark_github", FIT_STANDARD, 0xF0009, "assets/icons/mark-github.svg"),
@@ -88,7 +88,6 @@ ICONS = [
     ("folder_open", FIT_STANDARD, 0xF000D, "assets/icons/folder-open.svg"),
     ("file", FIT_STANDARD, 0xF000E, "assets/icons/file.svg"),
     ("file_code", FIT_STANDARD, 0xF000F, "assets/icons/file-code.svg"),
-    ("test_icon", FIT_STANDARD, 0xF0010, "assets/icons/test.svg"),
     ("document", FIT_STANDARD, 0xF0011, "assets/icons/document.svg"),
     ("image", FIT_STANDARD, 0xF0012, "assets/icons/image.svg"),
     ("file_config", FIT_STANDARD, 0xF0013, "assets/icons/file-config.svg"),
@@ -107,11 +106,14 @@ ICONS = [
     ("chevron_right", FIT_STANDARD, 0xF0020, "assets/icons/chevron-right.svg"),
     # 아래 다섯은 세션 도크가 쓰던 자산이다. 이름이 소비처를 가리키던 것을 semantic 이름 + fit으로 바꿨다 —
     # 그림·codepoint·coverage는 그대로라 **렌더 결과는 불변**이다(도크는 계속 tight를 쓴다).
-    ("refresh", FIT_TIGHT, 0xF0021, "assets/icons/session-dock-refresh.svg"),
-    ("search", FIT_TIGHT, 0xF0022, "assets/icons/session-dock-search.svg"),
-    ("chevron_down", FIT_TIGHT, 0xF0023, "assets/icons/session-dock-chevron-down.svg"),
-    ("chevron_right", FIT_TIGHT, 0xF0024, "assets/icons/session-dock-chevron-right.svg"),
-    ("host", FIT_STANDARD, 0xF0025, "assets/icons/session-dock-host.svg"),
+    # session-dock-refresh.svg는 reset.svg와 **path가 완전히 동일**하고 viewBox만 `0 0 16 16` → `1 1 14 14`로
+    # 조여져 있다(실측) — search 쌍과 같은 형태다. 그래서 새 이름이 아니라 `reset`의 tight 변형이다.
+    # 도크는 이 그림을 "새로고침", 설정은 "되돌리기"로 쓰지만 **이름은 그림을 가리킨다**(용도가 아니라).
+    ("reset", FIT_TIGHT, 0xF0021, "assets/icons/reset-tight.svg"),
+    ("search", FIT_TIGHT, 0xF0022, "assets/icons/search-tight.svg"),
+    ("chevron_down", FIT_TIGHT, 0xF0023, "assets/icons/chevron-down-tight.svg"),
+    ("chevron_right", FIT_TIGHT, 0xF0024, "assets/icons/chevron-right-tight.svg"),
+    ("host", FIT_STANDARD, 0xF0025, "assets/icons/host.svg"),
 ]
 
 
@@ -180,8 +182,31 @@ nosuspend opaque or orelse packed pub resume return struct suspend switch test t
 unreachable usingnamespace var volatile while
 """.split())
 
-# Zig primitive 타입 — 키워드는 아니지만 같은 이름의 const가 primitive를 가려 생성물 안에서 혼란을 만든다.
+# Zig primitive 타입 — 키워드는 아니지만 같은 이름의 const가 primitive를 가려 생성물이 컴파일되지 않는다.
+# `u8`류는 접두사+숫자로, 나머지는 목록으로 막는다(적대적 검증: `bool`·`usize`가 세 산출물을 다 쓴 뒤
+# "shadows primitive"로 깨져, 커밋 가능한 상태의 망가진 생성물이 남았다).
 ZIG_PRIMITIVE_PREFIXES = ("u", "i", "f", "c_")
+ZIG_PRIMITIVE_NAMES = frozenset(
+    """bool void type anyerror anytype noreturn comptime_int comptime_float isize usize
+    c_char c_short c_ushort c_int c_uint c_long c_ulong c_longlong c_ulonglong c_longdouble""".split()
+)
+
+# 등록 아이콘 codepoint가 있어야 하는 범위(Plane 15 PUA). 벗어나면 합성 게이트가 **터미널 콘텐츠**를
+# 가로챈다 — 적대적 검증에서 `0x2588`(█ FULL BLOCK)을 등록하자 터미널의 블록 문자가 gear로 합성됐다.
+PUA_MIN = 0xF0000
+PUA_MAX = 0xFFFFF
+
+
+def expected_asset_path(name, fit, fits):
+    """이름+fit에서 **파생되는** 자산 경로. 이게 이름↔그림을 잇는 유일한 ground truth다.
+
+    파생 규칙이 없으면 매니페스트의 이름과 경로를 함께 맞바꾸는 편집을 아무 가드도 못 잡는다(세 산출물이
+    같은 소스에서 나오므로 일관된 편집은 정의상 전부 통과 — 적대적 검증에서 실증). 규칙:
+    `<이름의 _를 ->[-<fit>].svg`, 기본 fit은 접미사 없음."""
+    stem = name.replace("_", "-")
+    if fit != default_fit(fits):
+        stem = f"{stem}-{fit}"
+    return f"assets/icons/{stem}.svg"
 
 
 def zig_fmt(source):
@@ -202,27 +227,44 @@ def validate_manifest():
     seen_symbol = {}
     variants = {}
     for name, fit, cp, path in ICONS:
-        if name in ZIG_KEYWORDS:
-            raise SystemExit(f"icon name is a Zig keyword: {name!r} ({path})")
-        if name.startswith(ZIG_PRIMITIVE_PREFIXES) and name[1:].isdigit():
-            raise SystemExit(f"icon name shadows a Zig primitive type: {name!r} ({path})")
-        if not name.replace("_", "").isalnum() or name[0].isdigit():
-            raise SystemExit(f"icon name is not a plain Zig identifier: {name!r} ({path})")
+        for label, value in (("icon name", name), ("fit", fit)):
+            if value in ZIG_KEYWORDS:
+                raise SystemExit(f"{label} is a Zig keyword: {value!r} ({path})")
+            if value in ZIG_PRIMITIVE_NAMES or (value.startswith(ZIG_PRIMITIVE_PREFIXES) and value[1:].isdigit()):
+                raise SystemExit(f"{label} shadows a Zig primitive type: {value!r} ({path})")
+            if not value.replace("_", "").isalnum() or value[0].isdigit():
+                raise SystemExit(f"{label} is not a plain Zig identifier: {value!r} ({path})")
         if fit in variants.get(name, {}):
             raise SystemExit(f"duplicate fit for icon: {name} {fit}")
         if cp in seen_cp:
             raise SystemExit(f"duplicate codepoint 0x{cp:X}: {seen_cp[cp]} and {name}/{fit}")
+        if not PUA_MIN <= cp <= PUA_MAX:
+            raise SystemExit(
+                f"codepoint 0x{cp:X} for {name}/{fit} is outside Plane-15 PUA "
+                f"(0x{PUA_MIN:X}~0x{PUA_MAX:X}) — 합성 게이트가 터미널 콘텐츠를 가로챈다"
+            )
         seen_cp[cp] = f"{name}/{fit}"
         variants.setdefault(name, {})[fit] = (cp, path)
     # 심볼 유일성은 (name, fit)이 유일해도 깨질 수 있다: semantic 이름 `search_tight`를 새로 등록하면
     # `search`의 tight 변형이 만드는 심볼과 같아진다. Zig는 중복 const로 잡지만 **C는 매크로 재정의를
     # 경고만 하고 나중 값이 이겨** 도크 아이콘이 조용히 엉뚱한 cp가 된다(적대적 검증에서 clang 실측).
     for name, fits in variants.items():
-        for fit in fits:
+        for fit, (_, path) in fits.items():
             symbol = symbol_name(name, fit, fits)
-            if symbol in seen_symbol:
-                raise SystemExit(f"symbol collision: {symbol!r} from {seen_symbol[symbol]} and {name}/{fit}")
-            seen_symbol[symbol] = f"{name}/{fit}"
+            # **대소문자를 무시해** 비교한다 — C 매크로는 대문자라 `gear`와 `Gear`가 같은 `MARU_ICON_GEAR`가
+            # 되고, clang은 재정의를 경고만 하며 나중 값이 이긴다(적대적 검증에서 실측). Zig만 보면 안 걸린다.
+            key = symbol.upper()
+            if key in seen_symbol:
+                raise SystemExit(f"symbol collision: {symbol!r} from {seen_symbol[key]} and {name}/{fit}")
+            seen_symbol[key] = f"{name}/{fit}"
+            # 경로는 이름+fit에서 파생돼야 한다 — 이름과 경로를 함께 맞바꾸는 편집을 막는 유일한 규칙이다.
+            expected = expected_asset_path(name, fit, fits)
+            if path != expected:
+                raise SystemExit(
+                    f"asset path for {name}/{fit} must be derived from its name: {expected!r} (got {path!r})"
+                )
+            if not os.path.exists(path):
+                raise SystemExit(f"asset does not exist: {path}")
     return variants
 
 
@@ -294,6 +336,19 @@ def icons_zig():
         lines.append(f"    {name} = 0x{cp:X},")
     lines.extend([
         "};",
+        "",
+        "/// 이 아이콘에 그 fit의 **자산이 실재하는가**. `codepointFit`은 없는 조합을 기본으로 폴백하므로,",
+        "/// \"요청한 fit을 실제로 받았는가\"를 알려면 이걸 봐야 한다 — 폴백이 조용한 거짓말이 되지 않게 하는",
+        "/// 유일한 수단이다 — 없는 조합을 물으면 조용히 기본 자산이 오므로, 변형이 필요한 자리는 이걸로 확인한다.",
+        "pub fn hasFit(icon: Icon, fit: Fit) bool {",
+        "    return switch (icon) {",
+    ])
+    for name, fits in variants.items():
+        present = " or ".join(f"fit == .{f}" for f in fits)
+        lines.append(f"        .{name} => {present},")
+    lines.extend([
+        "    };",
+        "}",
         "",
         "/// 이 아이콘의 **기본 fit** codepoint. fit을 고르려면 `codepointFit`을 쓴다.",
         "pub fn codepoint(icon: Icon) u21 {",
@@ -380,6 +435,14 @@ def icons_zig():
         "            const cp = codepointFit(icon, fit);",
         "            const resolved = fromCodepoint(cp) orelse return error.TestUnexpectedResult;",
         "            try std.testing.expectEqual(icon, resolved.icon); // 폴백해도 같은 아이콘이다",
+        "            // **fit 계약**: 자산이 있으면 그 fit을 그대로 받고, 없으면 기본 fit으로 떨어진다. 이걸 안 보면",
+        "            // `.standard`를 요청했는데 tight 자산을 받는 침묵이 어떤 테스트에도 안 걸린다(적대적 검증 지적).",
+        "            if (hasFit(icon, fit)) {",
+        "                try std.testing.expectEqual(fit, resolved.fit);",
+        "            } else {",
+        "                try std.testing.expectEqual(codepoint(icon), cp);",
+        "                try std.testing.expect(hasFit(icon, resolved.fit));",
+        "            }",
         "            var buf: [4]u8 = undefined;",
         "            const len = try std.unicode.utf8Encode(cp, &buf);",
         "            try std.testing.expectEqualStrings(buf[0..len], utf8Fit(icon, fit));",
@@ -396,12 +459,16 @@ def icons_zig():
         "    try std.testing.expectEqual(codepoint(.gear), codepointFit(.gear, .tight));",
         "}",
         "",
-        "test \"icons: 기본 fit이 standard가 아닌 아이콘은 fit-less 접근자가 그 변형을 준다(재지정 감시)\" {",
+        "test \"icons: 모든 아이콘이 standard 자산을 갖는다(기본 fit 뒤집힘 방지)\" {",
         "    const std = @import(\"std\");",
-        "    // `refresh`는 standard 자산이 없어 기본 fit이 tight다. 나중에 standard refresh를 매니페스트에",
-        "    // 추가하면 기본이 뒤집혀 **fit 없이 부르던 소비처가 조용히 다른 그림을 그린다** — 그 순간 이 단언이",
-        "    // 깨져 호출부를 `.tight` 명시로 바꾸라고 알린다(적대적 검증이 짚은 default_fit flip).",
-        "    try std.testing.expectEqual(codepointFit(.refresh, .tight), codepoint(.refresh));",
+        "    // standard 자산이 없는 아이콘은 **변형이 기본이 된다**. 그 상태에서 나중에 standard를 추가하면",
+        "    // 기본이 뒤집혀 fit 없이 부르던 소비처가 조용히 다른 그림을 그린다(적대적 검증이 짚은 default flip).",
+        "    // 지금은 그런 아이콘이 없다 — 새로 만들려면 의도적 결정이어야 하므로, 그때 이 단언이 깨져",
+        "    // 소비처가 fit을 명시했는지 확인하게 한다.",
+        "    inline for (@typeInfo(Icon).@\"enum\".fields) |field| {",
+        "        const icon: Icon = @enumFromInt(field.value);",
+        "        try std.testing.expect(hasFit(icon, .standard));",
+        "    }",
         "}",
     ])
     raw_zig = "\n".join(lines) + "\n"
@@ -429,7 +496,11 @@ def generate():
         lines.append(f"const {symbol}: [{MASTER * MASTER}]u8 = .{{ {arr} }};")
         entries.append((cp, symbol))
         with open(path, "rb") as asset:
-            manifest.append((symbol, cp, path, hashlib.sha256(asset.read()).hexdigest()))
+            svg_digest = hashlib.sha256(asset.read()).hexdigest()
+        # coverage 픽셀 자체의 해시도 싣는다. 이게 **cp ↔ 그림**을 잇는다 — 없으면 생성물에서
+        # `.data = &gear`와 `&plus`를 손으로 맞바꿔도 어떤 테스트도 못 잡는다(적대적 검증에서 실증).
+        coverage_digest = hashlib.sha256(bytes(cov)).hexdigest()
+        manifest.append((symbol, cp, path, svg_digest, coverage_digest))
     lines.append("")
     lines.append("pub const Entry = struct { cp: u32, data: []const u8 };")
     lines.append("")
@@ -439,12 +510,23 @@ def generate():
     lines.append("};")
     lines.extend([
         "",
-        "pub const Asset = struct { name: []const u8, cp: u32, path: []const u8, sha256: []const u8 };",
+        "/// `sha256`은 원본 SVG의 해시, `coverage_sha256`은 그 SVG에서 구운 alpha 마스터의 해시다.",
+        "/// 앞은 \"자산 파일이 안 바뀌었나\", 뒤는 \"이 codepoint가 그 그림을 가리키나\"를 증명한다.",
+        "pub const Asset = struct {",
+        "    name: []const u8,",
+        "    cp: u32,",
+        "    path: []const u8,",
+        "    sha256: []const u8,",
+        "    coverage_sha256: []const u8,",
+        "};",
         "",
         "pub const asset_manifest = [_]Asset{",
     ])
-    for name, cp, path, digest in manifest:
-        lines.append(f'    .{{ .name = "{name}", .cp = 0x{cp:X}, .path = "{path}", .sha256 = "{digest}" }},')
+    for name, cp, path, digest, coverage_digest in manifest:
+        lines.append(
+            f'    .{{ .name = "{name}", .cp = 0x{cp:X}, .path = "{path}", '
+            f'.sha256 = "{digest}", .coverage_sha256 = "{coverage_digest}" }},'
+        )
     lines.append("};")
     raw_zig = "\n".join(lines) + "\n"
     return zig_fmt(raw_zig), c_header(entries), icons_zig()

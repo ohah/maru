@@ -1214,7 +1214,7 @@ pub fn buildFileTreeDrawList(
 pub fn buildFileDockToggleDrawList(allocator: std.mem.Allocator, fg: terminal.Color) !renderer.DrawList {
     const cells = try allocator.alloc(renderer.DrawCell, 1);
     errdefer allocator.free(cells);
-    cells[0] = .{ .row = 0, .col = 0, .codepoint = icons.codepoint(.sidebar), .width = 1, .style = .{ .foreground = fg } }; // maru PUA 아이콘(sidebar-collapse ◧) — 렌더러가 이 codepoint를 1.7× 확대(app_session §20073, dest=.dock_toggle 게이트). 작은 Unicode 0x25E7 대신 써 왼쪽 헤더 아이콘과 동일 크기. col 0 단일 셀 — 호출부가 origin_x 반칸 밀어 rect 중앙 정렬.
+    cells[0] = .{ .row = 0, .col = 0, .codepoint = icons.codepoint(.sidebar_collapse), .width = 1, .style = .{ .foreground = fg } }; // maru PUA 아이콘(sidebar-collapse ◧) — 렌더러가 이 codepoint를 1.7× 확대(app_session §20073, dest=.dock_toggle 게이트). 작은 Unicode 0x25E7 대신 써 왼쪽 헤더 아이콘과 동일 크기. col 0 단일 셀 — 호출부가 origin_x 반칸 밀어 rect 중앙 정렬.
     return .{
         .size = .{ .cols = 1, .rows = 1 },
         .cursor = .{ .row = 0, .col = 0, .visible = false },

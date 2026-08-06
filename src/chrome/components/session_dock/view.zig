@@ -24,7 +24,7 @@ const types = @import("types.zig");
 // icon slot, while their tighter SVG view boxes keep their optical size consistent with cards.
 // fit을 **전부 명시**한다. `refresh`·`host`는 지금 변형이 하나뿐이라 fit 없는 접근자로도 같은 값이지만,
 // 나중에 다른 fit이 등록되면 기본이 뒤집혀 도크가 조용히 다른 그림을 그린다(적대적 검증이 짚은 default flip).
-const refresh_icon = icons.utf8Fit(.refresh, .tight);
+const refresh_icon = icons.utf8Fit(.reset, .tight);
 const search_icon = icons.utf8Fit(.search, .tight);
 const chevron_down_icon = icons.utf8Fit(.chevron_down, .tight);
 const chevron_right_icon = icons.utf8Fit(.chevron_right, .tight);
@@ -677,7 +677,7 @@ fn isSessionDockIcon(codepoint: u21) bool {
     const resolved = icons.fromCodepoint(codepoint) orelse return false;
     return switch (resolved.icon) {
         .recent, .document, .host => resolved.fit == .standard,
-        .refresh, .search, .chevron_down, .chevron_right => resolved.fit == .tight,
+        .reset, .search, .chevron_down, .chevron_right => resolved.fit == .tight,
         else => false,
     };
 }
@@ -769,7 +769,7 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
             switch (text.placement) {
                 .icon_in_rect => |icon| {
                     try std.testing.expectEqual(@as(?u32, icon.content_rect.w), text.max_width_px);
-                    if (icon.icon_codepoint == icons.codepoint(.refresh)) refresh_placement = text.placement;
+                    if (icon.icon_codepoint == icons.codepointFit(.reset, .tight)) refresh_placement = text.placement;
                     if (icon.icon_codepoint == icons.codepointFit(.search, .tight)) search_placement = text.placement;
                     // 카드의 disclosure도 같은 chevron codepoint를 같은 `icon_in_rect` 경로로 낸다.
                     // 목록에서 group이 먼저 나오므로 첫 매칭만 잡아 그룹 것을 본다.
@@ -855,7 +855,7 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
     const header = find(frame.tree, build.NodeIds.header) orelse return error.TestUnexpectedResult;
     switch (refresh_placement orelse return error.TestUnexpectedResult) {
         .icon_in_rect => |icon| {
-            try std.testing.expectEqual(icons.codepoint(.refresh), icon.icon_codepoint);
+            try std.testing.expectEqual(icons.codepointFit(.reset, .tight), icon.icon_codepoint);
             try std.testing.expectEqual(metrics.header_refresh_extent, icon.content_rect.w);
             const expected_refresh_x: i32 = @intFromFloat(@floor(header.rect.x + header.rect.width - @as(f32, @floatFromInt(metrics.header_trailing_inset + metrics.header_refresh_extent))));
             try std.testing.expectEqual(expected_refresh_x, icon.content_rect.x);
@@ -887,7 +887,7 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
     for (loading_out.ops) |op| switch (op) {
         .text => |text| switch (text.placement) {
             .icon_in_rect => |icon| {
-                if (icon.icon_codepoint == icons.codepoint(.refresh)) loading_refresh = text.placement;
+                if (icon.icon_codepoint == icons.codepointFit(.reset, .tight)) loading_refresh = text.placement;
             },
             else => {},
         },

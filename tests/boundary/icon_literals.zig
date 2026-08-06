@@ -20,17 +20,75 @@ const std = @import("std");
 //     빠져나갔다(적대적 검증에서 실행 확인).
 // 형제 가드 `tests/boundary/imports.zig`가 이미 쓰는 토크나이저 규율로 되돌리고, 정수 리터럴은 **값으로**
 // 파싱하며 문자열 리터럴은 escape·원시 바이트 양쪽을 디코드한다.
+//
+// **스캔 범위는 `src/**/*.zig`뿐이다**(생성물 2개 제외). 다음은 이 가드 밖이라 규율이 반만 강제된다 —
+// 넓힐 때까지 사실로 남긴다: `tests/**/*.zig`, 그리고 `.m`/`.h`(IC4가 `.m`을 `MARU_ICON_*` 매크로로 옮겼지만
+// 리터럴로 되돌아가는 것을 막는 가드는 없다). 또 `loadRegistered`가 생성물을 **doc comment까지 포함해** 훑으므로,
+// 생성기의 자유 텍스트(주석·`FIT_DOCS`)에 미등록 PUA를 적으면 등록 집합이 오염돼 이 가드가 오탐한다.
 
 /// 리터럴을 그대로 둬야 하는 파일. 생성물 자신뿐이다.
 const exempt_files = [_][]const u8{
     "icons.zig", // 생성물 — 이름↔codepoint 대응 그 자체다.
     "renderer/icon_coverage_data.zig", // 생성물 — coverage 데이터 + 매니페스트.
+    "platform/macos/icon_codepoints.h", // 생성물 — C 셰이핑 게이트 + 이름 매크로(대응은 별도 가드가 본다).
+    // 이 가드 자신. 규칙을 정의하는 파일이고, 그 fixture는 **일부러** 리터럴을 담는다(그게 없으면
+    // 스캐너가 무엇을 잡는지 증명할 수 없다).
+    "boundary/icon_literals.zig",
 };
 
 const registry_path = "src/icons.zig";
 const max_registered = 256;
 
+/// 훑는 트리. `tests/`와 ObjC/C까지 본다 — IC4가 `.m`을 이름 매크로로 옮겼는데 그 파일이 스캔 밖이면
+/// 규율이 반만 강제된다(적대적 검증 지적).
+const scan_roots = [_][]const u8{ "src", "tests" };
+
+const SourceKind = enum { zig, c };
+
+fn sourceKind(path: []const u8) ?SourceKind {
+    if (std.mem.endsWith(u8, path, ".zig")) return .zig;
+    if (std.mem.endsWith(u8, path, ".m") or std.mem.endsWith(u8, path, ".h") or
+        std.mem.endsWith(u8, path, ".c") or std.mem.endsWith(u8, path, ".metal")) return .c;
+    return null;
+}
+
+/// ObjC/C 소스에서 등록 아이콘 codepoint 리터럴을 찾는다. **생성 헤더의 `#define MARU_ICON_*`은 제외** —
+/// 그것이 이름↔cp 대응의 출처이고, 그 대응은 `coretext_frame_builder.zig`의 매크로 가드가 따로 검증한다.
+fn scanCSource(allocator: std.mem.Allocator, source: []const u8, registered: []const u32) !?Hit {
+    const stripped = try stripCComments(allocator, source);
+    defer allocator.free(stripped);
+    var line: usize = 1;
+    var i: usize = 0;
+    var line_start: usize = 0;
+    while (i < stripped.len) : (i += 1) {
+        if (stripped[i] == '\n') {
+            line += 1;
+            line_start = i + 1;
+            continue;
+        }
+        if (!std.mem.startsWith(u8, stripped[i..], "0x")) continue;
+        var end = i + 2;
+        while (end < stripped.len and std.ascii.isHex(stripped[end])) : (end += 1) {}
+        const value = std.fmt.parseInt(u32, stripped[i + 2 .. end], 16) catch {
+            i = end;
+            continue;
+        };
+        if (isRegistered(registered, value)) {
+            const rest = stripped[line_start..];
+            const line_end = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
+            if (std.mem.indexOf(u8, rest[0..line_end], "#define MARU_ICON_") == null) {
+                return .{ .line = line, .cp = value };
+            }
+        }
+        i = end;
+    }
+    return null;
+}
+
 const Violation = struct { text: []u8 };
+
+/// 위반 위치. 두 스캐너(Zig·C)가 같은 타입을 돌려줘야 호출부가 하나로 합쳐진다.
+const Hit = struct { line: usize, cp: u32 };
 
 fn isExempt(rel: []const u8) bool {
     for (exempt_files) |e| if (std.mem.eql(u8, rel, e)) return true;
@@ -91,10 +149,42 @@ fn integerLiteralValue(text: []const u8) ?u32 {
 /// 문자열/문자 리터럴 안에서 등록 아이콘 codepoint를 찾는다. `\u{F0023}` escape뿐 아니라 **원시 UTF-8**
 /// PUA 문자도 디코드한다 — `icons.utf8()`이 만드는 바이트열이 정확히 그것이라, 앱에서 복사해 붙인 글자가
 /// 가드를 통과하면 규율이 무의미해진다.
-fn scanQuoted(text: []const u8, registered: []const u32) ?u32 {
+fn scanQuoted(text: []const u8, registered: []const u32, allow_escapes: bool) ?u32 {
     var i: usize = 0;
+    var hex_run: [8]u8 = undefined;
+    var hex_len: usize = 0;
     while (i < text.len) {
-        if (text[i] == '\\' and i + 2 < text.len and text[i + 1] == 'u' and text[i + 2] == '{') {
+        // `"\xf3\xb0\x80\xa3"`는 `icons.utf8(.chevron_down, .tight)`가 만드는 바이트열과 **완전히 같다**.
+        // escape를 안 풀면 이 형태가 그대로 빠져나간다(적대적 검증 실측).
+        if (allow_escapes and text[i] == '\\' and i + 3 < text.len and text[i + 1] == 'x') {
+            const byte = std.fmt.parseInt(u8, text[i + 2 .. i + 4], 16) catch {
+                i += 2;
+                hex_len = 0;
+                continue;
+            };
+            // 첫 바이트가 정하는 **기대 길이**만큼 모은 뒤에 디코드한다. 부분 슬라이스를 그때그때 디코드하면
+            // 성공/실패 판정이 구현에 따라 갈려 run이 끊긴다(그래서 4바이트 시퀀스를 못 모았다).
+            if (hex_len == 0) {
+                _ = std.unicode.utf8ByteSequenceLength(byte) catch {
+                    i += 4;
+                    continue;
+                };
+            }
+            if (hex_len == hex_run.len) hex_len = 0;
+            hex_run[hex_len] = byte;
+            hex_len += 1;
+            const want = std.unicode.utf8ByteSequenceLength(hex_run[0]) catch 1;
+            if (hex_len == want) {
+                if (std.unicode.utf8Decode(hex_run[0..hex_len])) |cp| {
+                    if (isRegistered(registered, cp)) return cp;
+                } else |_| {}
+                hex_len = 0;
+            }
+            i += 4;
+            continue;
+        }
+        hex_len = 0;
+        if (allow_escapes and text[i] == '\\' and i + 2 < text.len and text[i + 1] == 'u' and text[i + 2] == '{') {
             const close = std.mem.indexOfScalarPos(u8, text, i + 3, '}') orelse return null;
             if (std.fmt.parseInt(u32, text[i + 3 .. close], 16)) |cp| {
                 if (isRegistered(registered, cp)) return cp;
@@ -117,7 +207,7 @@ fn scanQuoted(text: []const u8, registered: []const u32) ?u32 {
 
 /// 한 파일에서 첫 위반의 (줄 번호, cp)를 찾는다. 토크나이저가 주석을 아예 토큰으로 내지 않으므로 주석
 /// 안의 cp 표기(문서)는 자연히 제외되고, 문자열 안의 `//`도 더 이상 스캔을 끊지 않는다.
-fn scanSource(allocator: std.mem.Allocator, source: []const u8, registered: []const u32) !?struct { line: usize, cp: u32 } {
+fn scanSource(allocator: std.mem.Allocator, source: []const u8, registered: []const u32) !?Hit {
     const sentinel = try allocator.dupeZ(u8, source);
     defer allocator.free(sentinel);
     var tokenizer = std.zig.Tokenizer.init(sentinel);
@@ -130,7 +220,9 @@ fn scanSource(allocator: std.mem.Allocator, source: []const u8, registered: []co
                 const value = integerLiteralValue(text) orelse break :blk null;
                 break :blk if (isRegistered(registered, value)) value else null;
             },
-            .string_literal, .multiline_string_literal_line, .char_literal => scanQuoted(text, registered),
+            .string_literal, .char_literal => scanQuoted(text, registered, true),
+            // multiline 문자열엔 escape가 없다 — `\u{F0023}`는 그냥 글자다(문서 예시). 원시 바이트만 본다.
+            .multiline_string_literal_line => scanQuoted(text, registered, false),
             else => null,
         };
         if (found) |cp| {
@@ -157,25 +249,33 @@ test "아이콘은 이름 registry로만 부른다 — codepoint 리터럴 금�
         violations.deinit(allocator);
     }
 
-    var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
-    defer dir.close(std.testing.io);
-    var walker = try dir.walk(allocator);
-    defer walker.deinit();
-    while (try walker.next(std.testing.io)) |entry| {
-        if (entry.kind != .file) continue;
-        if (!std.mem.endsWith(u8, entry.path, ".zig")) continue;
-        if (isExempt(entry.path)) continue;
-        const full = try std.fmt.allocPrint(allocator, "src/{s}", .{entry.path});
-        defer allocator.free(full);
-        const source = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, full, allocator, .limited(8 * 1024 * 1024));
-        defer allocator.free(source);
+    for (scan_roots) |root| {
+        var dir = try std.Io.Dir.cwd().openDir(std.testing.io, root, .{ .iterate = true });
+        defer dir.close(std.testing.io);
+        var walker = try dir.walk(allocator);
+        defer walker.deinit();
+        while (try walker.next(std.testing.io)) |entry| {
+            if (entry.kind != .file) continue;
+            const kind = sourceKind(entry.path) orelse continue;
+            if (isExempt(entry.path)) continue;
+            const full = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ root, entry.path });
+            defer allocator.free(full);
+            const source = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, full, allocator, .limited(8 * 1024 * 1024));
+            defer allocator.free(source);
 
-        if (try scanSource(allocator, source, registered)) |hit| {
-            try violations.append(allocator, .{ .text = try std.fmt.allocPrint(
-                allocator,
-                "src/{s}:{d}: 등록 아이콘 codepoint(0x{X}) 리터럴 — `icons.codepoint(.name)`/`icons.utf8(.name)`을 쓰세요",
-                .{ entry.path, hit.line, hit.cp },
-            ) });
+            const hit = switch (kind) {
+                .zig => try scanSource(allocator, source, registered),
+                // ObjC/C는 Zig 토크나이저로 못 읽는다. 대신 주석을 지운 사본에서 정수 리터럴만 본다 —
+                // `.m`은 IC4에서 이름 매크로로 옮긴 파일이라, 리터럴로 되돌아가는 것을 여기서 막는다.
+                .c => try scanCSource(allocator, source, registered),
+            };
+            if (hit) |found| {
+                try violations.append(allocator, .{ .text = try std.fmt.allocPrint(
+                    allocator,
+                    "{s}/{s}:{d}: 등록 아이콘 codepoint(0x{X}) 리터럴 — 이름(Zig `icons.codepoint(.name)` / C `MARU_ICON_NAME`)을 쓰세요",
+                    .{ root, entry.path, found.line, found.cp },
+                ) });
+            }
         }
     }
 
@@ -197,11 +297,62 @@ test "아이콘은 이름 registry로만 부른다 — codepoint 리터럴 금�
 // **그 두 표현식을 직접 짚어** 개수와 값을 함께 단언한다.
 const scale_token_file = "src/chrome/ui/icon.zig";
 const scale_mirror_file = "src/platform/macos/maru_metal_renderer.m";
-/// `.m`에서 아이콘 배율이 실리는 자리. x/y 두 축이 같은 값을 써야 아이콘이 종횡비를 지킨다.
-const mirror_prefixes = [_][]const u8{
-    "const float glyph_scale_x = is_dock_toggle ? glyph_policy.scale_x : ((is_corner_icon || is_bell_icon) ? ",
-    "const float glyph_scale_y = is_dock_toggle ? glyph_policy.scale_y : ((is_corner_icon || is_bell_icon) ? ",
-};
+/// `.m`에서 아이콘 배율이 실리는 두 문장(x/y 축). **접두사 전체가 아니라 대입 대상만** 짚는다 — 첫 판은
+/// 100자짜리 C 표현식을 통째로 못박아, 공백 하나·줄바꿈·삼항 순서 변경에 거짓 실패했고(게다가 "값 드리프트"로
+/// 오진했다), 반대로 그 표현식을 인용한 주석을 위에 두면 진짜 코드가 바뀌어도 통과했다(적대적 검증에서 실측).
+const mirror_assignments = [_][]const u8{ "glyph_scale_x =", "glyph_scale_y =" };
+/// 아이콘이 **아닌** 글리프의 배율. 같은 삼항의 else 갈래라, 이걸 안 보면 전 글리프가 3배가 돼도 가드가 침묵한다.
+const mirror_neutral_scale = "1.0f";
+
+/// C 주석(`//`·`/* */`)을 공백으로 바꾼 사본. 주석에 남은 옛 값이 가드를 속이지 못하게 한다.
+fn stripCComments(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
+    const out = try allocator.dupe(u8, source);
+    var i: usize = 0;
+    while (i < out.len) {
+        if (i + 1 < out.len and out[i] == '/' and out[i + 1] == '/') {
+            while (i < out.len and out[i] != '\n') : (i += 1) out[i] = ' ';
+            continue;
+        }
+        if (i + 1 < out.len and out[i] == '/' and out[i + 1] == '*') {
+            while (i < out.len) : (i += 1) {
+                const at_end = i + 1 < out.len and out[i] == '*' and out[i + 1] == '/';
+                out[i] = ' ';
+                if (at_end) {
+                    out[i + 1] = ' ';
+                    i += 2;
+                    break;
+                }
+            }
+            continue;
+        }
+        i += 1;
+    }
+    return out;
+}
+
+/// 문장 안의 float 리터럴들(`1.7f`·`1.0f`)을 순서대로 모은다.
+fn collectFloatLiterals(statement: []const u8, out: [][]const u8) usize {
+    var count: usize = 0;
+    var i: usize = 0;
+    while (i < statement.len) : (i += 1) {
+        if (!std.ascii.isDigit(statement[i])) continue;
+        if (i > 0 and (std.ascii.isAlphanumeric(statement[i - 1]) or statement[i - 1] == '_' or statement[i - 1] == '.')) continue;
+        var end = i;
+        var saw_dot = false;
+        while (end < statement.len and (std.ascii.isDigit(statement[end]) or statement[end] == '.')) : (end += 1) {
+            if (statement[end] == '.') saw_dot = true;
+        }
+        if (!saw_dot or end >= statement.len or statement[end] != 'f') {
+            i = end;
+            continue;
+        }
+        if (count == out.len) return count;
+        out[count] = statement[i .. end + 1];
+        count += 1;
+        i = end;
+    }
+    return count;
+}
 
 test "아이콘 셀 래스터 배율은 Zig 토큰과 Objective-C 미러가 같다" {
     const allocator = std.testing.allocator;
@@ -224,27 +375,69 @@ test "아이콘 셀 래스터 배율은 Zig 토큰과 Objective-C 미러가 같�
     else
         try std.fmt.bufPrint(&expected_buf, "{d}.{d:0>3}f", .{ whole, frac });
 
-    const mirror = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, scale_mirror_file, allocator, .limited(4 * 1024 * 1024));
+    const raw_mirror = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, scale_mirror_file, allocator, .limited(4 * 1024 * 1024));
+    defer allocator.free(raw_mirror);
+    const mirror = try stripCComments(allocator, raw_mirror);
     defer allocator.free(mirror);
-    for (mirror_prefixes) |prefix| {
-        const at = std.mem.indexOf(u8, mirror, prefix) orelse {
+
+    for (mirror_assignments) |assignment| {
+        // 대입이 정확히 하나여야 한다 — 여러 개면 어느 것이 아이콘 배율인지 이 가드가 알 수 없다.
+        var occurrences: usize = 0;
+        var statement: []const u8 = &.{};
+        var search: usize = 0;
+        while (std.mem.indexOfPos(u8, mirror, search, assignment)) |at| {
+            const after = at + assignment.len;
+            // `glyph_scale_x ==`(비교)는 대입이 아니다 — 같은 파일에 그 비교가 실제로 있다.
+            if (after < mirror.len and mirror[after] == '=') {
+                search = after;
+                continue;
+            }
+            const stmt_end = std.mem.indexOfScalarPos(u8, mirror, at, ';') orelse mirror.len;
+            statement = mirror[at..stmt_end];
+            occurrences += 1;
+            search = stmt_end;
+        }
+        if (occurrences != 1) {
             std.debug.print(
-                "\n아이콘 배율 미러 지점을 못 찾았습니다: {s}에 `{s}…`가 없습니다.\n" ++
-                    "표현식을 바꿨다면 이 가드의 mirror_prefixes도 함께 고쳐야 합니다.\n",
-                .{ scale_mirror_file, prefix },
+                "\n아이콘 배율 미러 지점 이상: {s}에서 `{s}` 대입이 {d}개입니다(1개여야 함).\n" ++
+                    "표현식을 옮겼다면 이 가드의 mirror_assignments도 함께 고쳐야 합니다.\n",
+                .{ scale_mirror_file, assignment, occurrences },
             );
             return error.IconScaleMirrorSiteMissing;
-        };
-        const value_at = at + prefix.len;
-        if (!std.mem.startsWith(u8, mirror[value_at..], expected)) {
-            const tail = @min(mirror.len, value_at + 12);
+        }
+        // 아이콘 갈래인지 확인한 뒤(엉뚱한 대입을 짚지 않게), 그 문장의 float 리터럴 두 개가 각각
+        // "아이콘 배율"과 "그 외 배율"인지 본다. else 갈래를 안 보면 전 글리프 확대가 통과한다.
+        try std.testing.expect(std.mem.indexOf(u8, statement, "is_corner_icon") != null);
+        try std.testing.expect(std.mem.indexOf(u8, statement, "is_bell_icon") != null);
+        var literals: [8][]const u8 = undefined;
+        const count = collectFloatLiterals(statement, &literals);
+        if (count != 2 or !std.mem.eql(u8, literals[0], expected) or !std.mem.eql(u8, literals[1], mirror_neutral_scale)) {
             std.debug.print(
-                "\n아이콘 배율 미러 불일치: 토큰 {d} milli → `{s}` 인데 {s}에는 `{s}`가 있습니다.\n",
-                .{ milli, expected, scale_mirror_file, mirror[value_at..tail] },
+                "\n아이콘 배율 미러 불일치: 토큰 {d} milli → `{s}`(아이콘) + `{s}`(그 외)를 기대했는데\n" ++
+                    "  {s}의 `{s}` 문장에는 float 리터럴 {d}개가 있습니다: {s}\n",
+                .{ milli, expected, mirror_neutral_scale, scale_mirror_file, assignment, count, statement },
             );
             return error.IconScaleMirrorDrift;
         }
     }
+}
+
+test "collectFloatLiterals·stripCComments: 미러 가드의 파싱 조각" {
+    const allocator = std.testing.allocator;
+    var out: [8][]const u8 = undefined;
+    const stmt = "glyph_scale_x = is_dock_toggle ? p.scale_x : ((is_corner_icon || is_bell_icon) ? 1.7f : 1.0f)";
+    try std.testing.expectEqual(@as(usize, 2), collectFloatLiterals(stmt, &out));
+    try std.testing.expectEqualStrings("1.7f", out[0]);
+    try std.testing.expectEqualStrings("1.0f", out[1]);
+
+    // 주석 안의 옛 값은 사라져야 한다(디코이 방어).
+    const decoy = try stripCComments(allocator, "// glyph_scale_x = ... ? 1.7f : 1.0f\nreal = 2.0f;");
+    defer allocator.free(decoy);
+    try std.testing.expect(std.mem.indexOf(u8, decoy, "1.7f") == null);
+    try std.testing.expect(std.mem.indexOf(u8, decoy, "2.0f") != null);
+    const block = try stripCComments(allocator, "a /* 1.7f */ b");
+    defer allocator.free(block);
+    try std.testing.expect(std.mem.indexOf(u8, block, "1.7f") == null);
 }
 
 test "integerLiteralValue: 진법·숫자 구분자·선행 0을 값으로 흡수한다" {
@@ -270,6 +463,11 @@ test "scanSource: 주석·문자열 안 //·원시 PUA 문자를 정확히 가�
     try std.testing.expect((try scanSource(allocator, "const a = \"\u{F0023}\";", &registered)) != null);
     // 문자열 안에 `//`가 있어도 그 줄이 사각지대가 되지 않는다(옛 근사가 놓치던 형태).
     try std.testing.expect((try scanSource(allocator, "const u = \"https://x\"; const a = 0xF0023;", &registered)) != null);
+
+    // `\x` escape로 쓴 UTF-8도 같은 바이트열이다(적대적 검증이 찾은 우회).
+    try std.testing.expect((try scanSource(allocator, "const a = \"\\xf3\\xb0\\x80\\xa3\";", &registered)) != null);
+    // multiline 문자열엔 escape가 없다 — 그 안의 `\u{...}` 표기는 글자일 뿐이라 잡지 않는다.
+    try std.testing.expect((try scanSource(allocator, "const doc =\n    \\\\see \\u{F0023}\n;", &registered)) == null);
 
     // 주석은 문서다 — 토크나이저가 토큰으로 내지 않으므로 자연히 제외된다.
     try std.testing.expect((try scanSource(allocator, "// 헤더 아이콘(0xF0023)은 1.7×로 그린다", &registered)) == null);

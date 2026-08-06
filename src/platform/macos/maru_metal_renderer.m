@@ -1154,7 +1154,7 @@ bool maru_metal_renderer_draw(
             const bool is_dock_toggle = glyph_policy.is_dock_toggle != 0u;
             const bool is_corner_icon = tc.row == 0u &&
                 ((is_header && (tc.codepoint == MARU_ICON_GEAR || tc.codepoint == MARU_ICON_PLUS ||
-                                tc.codepoint == MARU_ICON_SIDEBAR)) ||
+                                tc.codepoint == MARU_ICON_SIDEBAR_COLLAPSE)) ||
                  is_dock_toggle); // gear·plus·sidebar(PUA icon_glyph), including the freely placed dock toggle
             // 알림 종(🔔)도 PUA 단색 합성 아이콘(0xF0005)이라 코너 아이콘(◧⚙+)과 같은 1.7×로 통일한다. 예전엔 컬러
             // 이모지(width=2, fallback)라 1.7×면 과대해 1.0×로 두고 maru_center_ink_vertically로 보이는 ink를 슬롯 중앙에

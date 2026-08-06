@@ -90,7 +90,8 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     // 필드를 이름으로 읽는 reflection이 아니다(`@field` 없음, comptime switch 한 번).
     // IC4(아이콘 크기 토큰)가 헤더 아이콘 배율 상수를 `chrome.ui.icon`으로 옮기며 또 바뀐다. count는 4 그대로다 —
     // 토큰 호출은 값 계산일 뿐 필드를 이름으로 읽지 않는다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "18f091cc21036f481f0102b99157a40cc2d8abc08cc8c238f6cb6db9430e9366" },
+    // 적대적 검증 수선이 `sidebar` → `sidebar_collapse`(그림 이름)로 바꾸며 또 바뀐다. count는 4 그대로다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "9bdd140df6eac39ab7eec03a5cbb3e80cf3d5992d4b30ff3475ab22011fa8c87" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

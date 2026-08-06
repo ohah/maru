@@ -260,7 +260,7 @@ fn wideIconGlyph(cp: u21) bool {
     return renderer.icon_glyph.isRegisteredIcon(cp);
 }
 
-/// 폭 판정 주입값. `widen_icons`=false(터미널·사용자 텍스트)면 확대 없음 — 등록 10개(0xF0001~A)가 Nerd Fonts v3
+/// 폭 판정 주입값. `widen_icons`=false(터미널·사용자 텍스트)면 확대 없음 — 등록 36개(0xF0001~0xF0025)가 Nerd Fonts v3
 /// MDI(Plane-15 PUA)와 겹쳐, 제목/이름에 우연히 그 글리프가 와도 2칸으로 키우면 탭 텍스트와 rename caret 예약이
 /// 틀어지기 때문이다. 그래서 maru가 아이콘을 직접 박는 카드 보조줄만 true.
 fn wideIconPredicate(widen_icons: bool) ?text_layout.WideIconFn {

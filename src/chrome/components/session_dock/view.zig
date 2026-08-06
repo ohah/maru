@@ -18,15 +18,17 @@ const typography = @import("../../ui/typography.zig");
 const build = @import("build.zig");
 const types = @import("types.zig");
 
-// The dock owns this registered SVG icon. A text glyph such as `↻` varies by fallback font and
+// The dock owns these registered SVG icons. A text glyph such as `↻` varies by fallback font and
 // cannot promise the size or optical centre of a Chrome header affordance.
 // Dock controls select shared semantic icons with `Fit.tight` rather than dock-specific names: all
-// occupy the standard two-cell icon slot, and the tight assets fill it more (search tightens the view
-// box, the chevrons keep it and thicken the stroke) so their optical size stays consistent with cards.
+// lower through `iconInRect`/`leading_icon_group` into the same 18pt logical slot (never a terminal
+// cell — §2.1.1), and the tight assets fill that slot more (`search`/`reset` tighten the view box,
+// the chevrons keep it and thicken the stroke) so their optical size stays consistent with cards.
 //
-// fit을 **전부 명시**한다. `reset`·`search`·`chevron_*`는 변형이 실재하므로 fit을 빼면 **지금 당장** 다른
-// 그림이 된다(`.tight`는 선택이 아니라 필수다). `host`는 지금 변형이 하나뿐이라 같은 값이지만, 나중에 다른
-// fit이 등록되면 기본이 뒤집혀 도크가 조용히 다른 그림을 그린다(적대적 검증이 짚은 default flip).
+// 헤더·카드 affordance는 fit을 **전부 명시**한다. `reset`·`search`·`chevron_*`는 변형이 실재하므로 fit을 빼면
+// **지금 당장** 다른 그림이 된다(`.tight`는 선택이 아니라 필수다). `host`는 변형이 하나뿐이라 같은 값이고,
+// action 아이콘(`recent`·`document`)은 아직 fit 없는 접근자를 쓴다 — 변형이 등록되는 순간 기본이 뒤집히므로
+// 그때 함께 명시해야 한다(적대적 검증이 짚은 default flip).
 const refresh_icon = icons.utf8Fit(.reset, .tight);
 const search_icon = icons.utf8Fit(.search, .tight);
 const chevron_down_icon = icons.utf8Fit(.chevron_down, .tight);

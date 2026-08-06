@@ -23,6 +23,9 @@ pub const Placement = struct {
     /// 스크롤 목록 소속이면 true. 캐시된 아티팩트를 다른 스크롤 위치에서 다시 쓸 때 backend가 이
     /// placement에만 y delta를 더한다 — 고정 chrome은 스크롤해도 제자리이므로 건드리면 안 된다.
     scroll_clipped: bool = false,
+    /// 스크롤 콘텐츠 **위에 뜬** 텍스트(상단 고정 헤더)의 clip 사각형. non-null이면 스크롤 평행이동을
+    /// 받지 않으면서 이 rect로 잘린다 — `scroll_clipped`가 뷰포트로 자르되 delta를 더하는 것과 대비된다.
+    above_clip: ?chrome.draw.Rect = null,
 };
 
 /// An owned, renderer-free description of the semantic text that CoreText must shape.  It can
@@ -40,6 +43,7 @@ pub const Request = struct {
         foreground: u32,
         placement: chrome.draw.TextPlacement = .origin,
         scroll_clipped: bool = false,
+        above_clip: ?chrome.draw.Rect = null,
     };
 
     pub fn deinit(self: *Request, allocator: std.mem.Allocator) void {
@@ -72,12 +76,14 @@ pub const UnresolvedArtifact = struct {
     placements: []chrome.draw.TextPlacement,
     foregrounds: []u32,
     scroll_flags: []bool,
+    above_clips: []?chrome.draw.Rect,
 
     pub fn deinit(self: *UnresolvedArtifact, allocator: std.mem.Allocator) void {
         allocator.free(self.glyphs);
         allocator.free(self.placements);
         allocator.free(self.foregrounds);
         allocator.free(self.scroll_flags);
+        allocator.free(self.above_clips);
         self.* = undefined;
     }
 };
@@ -121,7 +127,11 @@ pub const Artifact = struct {
             const scrolled_y = placement.y_px + if (placement.scroll_clipped) scroll_delta_y_px else 0;
             // 뷰포트로 자르는 것은 스크롤 목록뿐이다. 고정 chrome은 그 사각형 밖(위)에 있으므로 같은
             // clip을 적용하면 헤더·scope·검색이 통째로 사라진다.
-            const glyph_clip: ?metal_frame.ClipPx = if (placement.scroll_clipped) clip else null;
+            // 떠 있는 헤더는 자기 rect로 자른다 — 스크롤 뷰포트로 자르면 밀려 나가는 동안 살아남아
+            // 고정 chrome 위로 새고, 안 자르면 그대로 검색창을 덮는다.
+            // `clip == null`은 "이 pass는 자르지 않는다"이므로 떠 있는 헤더도 자르지 않는다. Lab 스모크가
+            // placement→GPU 좌표 대응을 볼 때 이 pass를 쓴다 — 여기서 헤더만 잘리면 그 대조가 깨진다.
+            const glyph_clip = glyphClipFor(placement, clip, origin_x_px, origin_y_px);
             const quad = clipGlyphQuad(.{
                 .x = @as(f32, @floatFromInt(origin_x_px)) + placement.x_px,
                 .y = @as(f32, @floatFromInt(origin_y_px)) + scrolled_y,
@@ -283,6 +293,59 @@ pub fn shapeOps(
 /// 답을 써야 한다.** 두 필터가 갈라지면 "키는 같은데 artifact에는 그 run이 없는" 상태가 만들어지고,
 /// 키가 스크롤 평행이동에 불변이므로 그 artifact가 그 줄이 보여야 할 위치에서 재사용되어 줄이 영구히 빈 채로
 /// 남는다(음수 origin 드롭이 실제로 그 결함을 냈다). 그래서 판정을 여기 한 곳에 둔다.
+/// glyph 하나를 자를 사각형. 세 갈래가 한 자리에 있어야 어느 것이 이기는지 헷갈리지 않는다.
+///
+/// - `viewport == null`: 이 pass는 자르지 않는다(Lab의 placement 대조용 무클립 pass).
+/// - 떠 있는 헤더: **자기 clip**으로 자른다. 이 rect는 컴포넌트 좌표라 glyph 위치와 **같은 pane 원점**을
+///   더해야 한다 — 안 더하면 도크가 화면 오른쪽에 있을 때 clip이 왼쪽 끝에 남아 헤더 글자가 통째로
+///   사라진다. Lab은 원점이 (0,0)이라 이 결함을 못 본다(제품 스모크 캡처로 발견).
+/// - 스크롤 목록: 뷰포트로 자른다. 고정 chrome은 그 사각형 밖(위)이라 자르지 않는다.
+fn glyphClipFor(
+    placement: Placement,
+    viewport: ?metal_frame.ClipPx,
+    origin_x_px: u32,
+    origin_y_px: u32,
+) ?metal_frame.ClipPx {
+    if (viewport == null) return null;
+    if (placement.above_clip) |above| return .{
+        .x = @intCast(@max(@as(i64, origin_x_px) + above.x, 0)),
+        .y = @intCast(@max(@as(i64, origin_y_px) + above.y, 0)),
+        .w = above.w,
+        .h = above.h,
+    };
+    return if (placement.scroll_clipped) viewport else null;
+}
+
+test "a floating head clips to its own rect moved by the pane origin, not the scroll viewport" {
+    const viewport = metal_frame.ClipPx{ .x = 1290, .y = 300, .w = 600, .h = 400 };
+    const head = Placement{
+        .x_px = 0,
+        .y_px = 0,
+        .advance_px = 10,
+        .line_height_px = 20,
+        .foreground = 0,
+        .above_clip = .{ .x = 20, .y = 10, .w = 100, .h = 30 },
+    };
+
+    // pane 원점을 더하지 않으면 도크가 오른쪽에 있을 때 clip이 화면 왼쪽에 남아 헤더가 사라진다.
+    const clipped = glyphClipFor(head, viewport, 1290, 40).?;
+    try std.testing.expectEqual(@as(u32, 1310), clipped.x);
+    try std.testing.expectEqual(@as(u32, 50), clipped.y);
+    try std.testing.expectEqual(@as(u32, 100), clipped.w);
+    try std.testing.expectEqual(@as(u32, 30), clipped.h);
+
+    // 목록은 뷰포트로 자른다 — 그쪽은 이미 backing 좌표라 원점을 더하지 않는다.
+    const listed = Placement{ .x_px = 0, .y_px = 0, .advance_px = 10, .line_height_px = 20, .foreground = 0, .scroll_clipped = true };
+    try std.testing.expectEqual(viewport, glyphClipFor(listed, viewport, 1290, 40).?);
+
+    // 고정 chrome은 자르지 않는다. 뷰포트를 적용하면 헤더·scope·검색이 통째로 사라진다.
+    const fixed = Placement{ .x_px = 0, .y_px = 0, .advance_px = 10, .line_height_px = 20, .foreground = 0 };
+    try std.testing.expect(glyphClipFor(fixed, viewport, 1290, 40) == null);
+
+    // 무클립 pass에서는 떠 있는 헤더도 자르지 않는다(placement 대조가 클립과 직교해야 한다).
+    try std.testing.expect(glyphClipFor(head, null, 1290, 40) == null);
+}
+
 pub fn shapesTextOp(text: chrome.draw.Op.Text) bool {
     // 등록 SVG/PUA 아이콘은 icon draw list가 그린다 — spinner phase가 매 프레임 바뀌므로 셰이핑 키에
     // 넣으면 모든 결과가 도착 전에 stale이 된다.
@@ -334,6 +397,7 @@ pub fn prepareRequest(
                     .foreground = packRgb(tk.get(text.role)),
                     .placement = text.placement,
                     .scroll_clipped = text.scroll_clipped,
+                    .above_clip = if (text.above_scroll) text.clip else null,
                 });
             }
         },
@@ -440,11 +504,14 @@ pub fn shapeRequest(allocator: std.mem.Allocator, request: *const Request, scale
     errdefer allocator.free(foregrounds);
     const scroll_flags = try allocator.alloc(bool, request.runs.len);
     errdefer allocator.free(scroll_flags);
+    const above_clips = try allocator.alloc(?chrome.draw.Rect, request.runs.len);
+    errdefer allocator.free(above_clips);
     for (request.runs, 0..) |run, index| {
         if (index > std.math.maxInt(u16)) return error.TooManySystemTextRuns;
         placements[index] = run.placement;
         foregrounds[index] = run.foreground;
         scroll_flags[index] = run.scroll_clipped;
+        above_clips[index] = run.above_clip;
         if (run.placement == .icon_in_rect) continue;
         const shaped = shapeUnresolvedRun(allocator, run, scale_milli) catch |err| switch (run.placement) {
             // A centred Button is all-or-nothing: publishing only its background or a lone
@@ -463,7 +530,7 @@ pub fn shapeRequest(allocator: std.mem.Allocator, request: *const Request, scale
             try glyphs.append(allocator, owned);
         }
     }
-    return .{ .glyphs = try glyphs.toOwnedSlice(allocator), .placements = placements, .foregrounds = foregrounds, .scroll_flags = scroll_flags };
+    return .{ .glyphs = try glyphs.toOwnedSlice(allocator), .placements = placements, .foregrounds = foregrounds, .scroll_flags = scroll_flags, .above_clips = above_clips };
 }
 
 /// Resolves a completed worker DTO on the main actor.  This bounded conversion is the sole
@@ -534,14 +601,15 @@ pub fn resolveArtifact(
             .line_height_px = glyph.line_height_px,
             .foreground = glyph.foreground,
             .scroll_clipped = unresolved.scroll_flags[run_index],
+            .above_clip = unresolved.above_clips[run_index],
         };
         record_index += 1;
     }
-    for (unresolved.placements, shaped, advances, line_heights, unresolved.foregrounds, unresolved.scroll_flags) |layout, has_glyph, advance, line_height, foreground, scroll_clipped| switch (layout) {
+    for (unresolved.placements, shaped, advances, line_heights, unresolved.foregrounds, unresolved.scroll_flags, unresolved.above_clips) |layout, has_glyph, advance, line_height, foreground, scroll_clipped, above_clip| switch (layout) {
         .icon_in_rect => |icon| {
             if (!renderer.icon_glyph.isRegisteredIcon(icon.icon_codepoint)) return error.UnregisteredChromeIcon;
             records[record_index] = .{ .row = @intCast(record_index / 256), .col = @intCast(record_index % 256), .cell_width = 1, .codepoint = icon.icon_codepoint, .font_id = 0, .glyph_id = 0, .color_glyph_kind = .monochrome, .raster_width_px = icon.icon_extent_px, .raster_height_px = icon.icon_extent_px };
-            placements[record_index] = .{ .x_px = @as(f32, @floatFromInt(icon.content_rect.x)) + (@as(f32, @floatFromInt(icon.content_rect.w)) - @as(f32, @floatFromInt(icon.icon_extent_px))) / 2, .y_px = @as(f32, @floatFromInt(icon.content_rect.y)) + (@as(f32, @floatFromInt(icon.content_rect.h)) - @as(f32, @floatFromInt(icon.icon_extent_px))) / 2, .advance_px = @floatFromInt(icon.icon_extent_px), .line_height_px = @floatFromInt(icon.icon_extent_px), .foreground = foreground, .scroll_clipped = scroll_clipped };
+            placements[record_index] = .{ .x_px = @as(f32, @floatFromInt(icon.content_rect.x)) + (@as(f32, @floatFromInt(icon.content_rect.w)) - @as(f32, @floatFromInt(icon.icon_extent_px))) / 2, .y_px = @as(f32, @floatFromInt(icon.content_rect.y)) + (@as(f32, @floatFromInt(icon.content_rect.h)) - @as(f32, @floatFromInt(icon.icon_extent_px))) / 2, .advance_px = @floatFromInt(icon.icon_extent_px), .line_height_px = @floatFromInt(icon.icon_extent_px), .foreground = foreground, .scroll_clipped = scroll_clipped, .above_clip = above_clip };
             record_index += 1;
         },
         .leading_icon_group => |group| {
@@ -571,6 +639,7 @@ pub fn resolveArtifact(
                 .line_height_px = if (line_height > 0) line_height else @floatFromInt(group.icon_extent_px),
                 .foreground = foreground,
                 .scroll_clipped = scroll_clipped,
+                .above_clip = above_clip,
             };
             record_index += 1;
         },
@@ -622,7 +691,7 @@ test "leading icon group resolves measured label and SVG to one final-pixel arti
         .gap_px = 10,
     } }});
     const foregrounds = try allocator.dupe(u32, &.{0xAABBCC});
-    var unresolved = UnresolvedArtifact{ .glyphs = glyphs, .placements = layouts, .foregrounds = foregrounds, .scroll_flags = try allocator.dupe(bool, &.{false}) };
+    var unresolved = UnresolvedArtifact{ .glyphs = glyphs, .placements = layouts, .foregrounds = foregrounds, .scroll_flags = try allocator.dupe(bool, &.{false}), .above_clips = try allocator.dupe(?chrome.draw.Rect, &.{null}) };
     defer unresolved.deinit(allocator);
     var registry = renderer.FontIdentityRegistry.init(allocator);
     defer registry.deinit();
@@ -646,7 +715,7 @@ test "icon in rect resolves a registered SVG without a CoreText glyph" {
         .icon_extent_px = 18,
     } }});
     const foregrounds = try allocator.dupe(u32, &.{0x123456});
-    var unresolved = UnresolvedArtifact{ .glyphs = glyphs, .placements = layouts, .foregrounds = foregrounds, .scroll_flags = try allocator.dupe(bool, &.{false}) };
+    var unresolved = UnresolvedArtifact{ .glyphs = glyphs, .placements = layouts, .foregrounds = foregrounds, .scroll_flags = try allocator.dupe(bool, &.{false}), .above_clips = try allocator.dupe(?chrome.draw.Rect, &.{null}) };
     defer unresolved.deinit(allocator);
     var registry = renderer.FontIdentityRegistry.init(allocator);
     defer registry.deinit();

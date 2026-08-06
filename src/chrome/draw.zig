@@ -130,6 +130,15 @@ pub const Op = union(enum) {
         /// 통째로 무효화된다. 소속은 스크롤해도 바뀌지 않는 사실이라 캐시 키에 안전하게 들어간다.
         /// backend는 이 표시가 있는 glyph만 뷰포트로 잘라, 반쯤 걸친 행도 픽셀 단위로 정확히 보인다.
         scroll_clipped: bool = false,
+        /// 이 텍스트가 스크롤 콘텐츠 **위에 떠 있는지**(상단 고정 헤더). `scroll_clipped`와 배타적이다:
+        /// 스크롤 평행이동을 받지 않으므로 y가 절대값이고(캐시 키에 그대로 들어간다), 그러면서도
+        /// 스크롤 뷰포트 밖으로 새면 안 되므로 잘리기는 한다 — 그 사각형은 아래 `clip`으로 싣는다.
+        /// 이 op의 y는 이미 키에 있으므로 rect를 함께 실어도 캐시가 더 무효화되지 않는다.
+        ///
+        /// 이 값이 필요한 이유는 quad와 text가 **서로 다른 레이어**이기 때문이다. 나중에 그린 헤더
+        /// 배경 quad가 앞서 그린 카드 글자를 덮지 못하므로, 헤더 밑을 지나는 글자는 backend가 잘라
+        /// 없애야 한다(그 반대편이 이 플래그다 — 헤더 자신은 그 밴드 안에서 살아남는다).
+        above_scroll: bool = false,
         /// 이 텍스트를 자를 뷰포트(published tree의 `effective_clip`을 그대로 전달한 값).
         ///
         /// measured(픽셀) 경로는 이 값을 쓰지 않는다 — `scroll_clipped`와 backend가 아는 뷰포트로
@@ -137,6 +146,8 @@ pub const Op = union(enum) {
         /// 스크롤 1px마다 shaping 캐시 키가 바뀐다. **셀 격자로 lowering하는 경로**(`metal_lowering`의
         /// `placeText` — 모달)는 그 배선이 없으므로 이 rect로 자르되, 셀 단위라 부분 잘림이 불가능해
         /// origin이 밖이면 통째로 버린다.
+        ///
+        /// `above_scroll`인 op만은 예외로 measured 경로도 이 rect를 쓴다(위 설명 참조).
         ///
         /// Chrome Lab은 **measured 경로**다(제품 도크와 같은 `shapeOps`+`appendGpuGlyphs`를 탄다).
         /// 예전 Lab 전용 셀 lowerer 시절의 서술이 여기 남아 있었는데, 그 상태로는 이 rect를 통째로

@@ -9,6 +9,9 @@ const ids = @import("ids.zig");
 const scroll_area = @import("../../ui/scroll_area.zig");
 const types = @import("types.zig");
 
+/// 마지막 그룹에는 밀어내는 것이 없다. `tree`의 clamp는 이 값을 그냥 상한으로 쓴다.
+const no_next_group = @import("std").math.floatMax(f32);
+
 pub const NodeIds = struct {
     pub const root: u64 = 0x5344_0000;
     pub const header: u64 = 0x5344_0001;
@@ -56,6 +59,10 @@ pub const NodeIds = struct {
     /// id를 쓴다. track이 먼저, thumb이 나중에 발행된다(`hitAction`이 reverse z-order라 thumb이 이긴다).
     pub const scroll_track: u64 = 0x5344_0008;
     pub const scroll_thumb: u64 = 0x5344_0009;
+
+    /// 상단에 고정된 그룹 헤더. 이것도 평행이동을 안 받으므로 item lane 밖이다. 이 헤더가 가리키는
+    /// 그룹은 virtualization 창 밖일 수 있어 `item(index)`로는 부를 수 없다.
+    pub const sticky_group: u64 = 0x5344_000A;
 };
 
 pub const Buffers = struct {
@@ -87,6 +94,34 @@ pub const BufferSizes = struct {
     actions: usize,
 };
 
+/// 스크롤 **텍스트**를 자를 뷰포트(published tree 좌표). 스크롤 영역에서 고정 헤더가 가리는 밴드를
+/// 뺀 것이다.
+///
+/// 밴드를 빼는 이유는 quad와 text가 서로 다른 레이어이기 때문이다 — 나중에 그린 헤더 배경이 앞서
+/// 그린 카드 글자를 덮지 못하므로, 헤더 밑을 지나는 글자는 아예 잘라 없애야 한다(draw.zig 참조).
+/// 헤더 자신은 `above_scroll`이라 자기 rect로 잘려 이 밴드 안에서 살아남는다.
+///
+/// 헤더는 항상 뷰포트 상단이거나 그 위다(걸린 그룹은 top ≤ offset이라 자연 y가 0 이하다). 그래서
+/// "위를 내린다" 하나로 세 상태가 전부 표현된다.
+///
+/// **host마다 다시 계산하지 않는다.** 제품 host와 Lab이 갈리면 골든이 제품과 다른 그림을 증명한다.
+pub fn scrollTextViewport(published: tree.UiRectTree) ?layout.UiRect {
+    const content_index = published.find(NodeIds.content) orelse return null;
+    const content_rect = published.entries[content_index].rect;
+    if (content_rect.width <= 0 or content_rect.height <= 0) return null;
+    const band_bottom = if (published.find(NodeIds.sticky_group)) |index| blk: {
+        const head = published.entries[index].rect;
+        break :blk head.y + head.height;
+    } else content_rect.y;
+    const top = @max(content_rect.y, band_bottom);
+    return .{
+        .x = content_rect.x,
+        .y = top,
+        .width = content_rect.width,
+        .height = @max(content_rect.y + content_rect.height - top, 0),
+    };
+}
+
 pub fn bufferSizes(items: []const types.Item) BufferSizes {
     var expanded_nodes: usize = 0;
     var expanded_actions: usize = 0;
@@ -100,14 +135,17 @@ pub fn bufferSizes(items: []const types.Item) BufferSizes {
     const node_count = items.len + expanded_nodes + 7;
     return .{
         .nodes = node_count,
-        // +1은 root, +2는 목록이 넘칠 때 `scrollArea`가 preorder 안에서 내는 track/thumb다.
+        // +1은 root, +2는 목록이 넘칠 때 `scrollArea`가 preorder 안에서 내는 track/thumb, +1은 sticky다.
         // scratch 셋도 같은 상한을 쓴다 — `tree.build`가 `max_entries` 이상을 요구한다.
-        .entries = node_count + 3,
-        .layout_items = node_count + 3,
-        .flex_scratch = node_count + 3,
-        .child_rects = node_count + 3,
-        // +2는 scrollbar track/thumb action이다.
-        .actions = items.len + 7 + expanded_actions,
+        // sticky 헤더는 `UiNode`가 아니라 `tree.build`가 내는 entry다 — 노드 버퍼는 안 늘고 여기만 는다.
+        // 스크롤바와 같은 규율로 **선언 여부와 무관하게** 예약한다. 자리를 선언에 따라 늘렸다 줄였다
+        // 하면 상한이 props를 따라 흔들려 host가 미리 잡아 둘 수 없다.
+        .entries = node_count + 4,
+        .layout_items = node_count + 4,
+        .flex_scratch = node_count + 4,
+        .child_rects = node_count + 4,
+        // +2는 scrollbar track/thumb action, +1은 고정 헤더의 toggle_group이다.
+        .actions = items.len + 8 + expanded_actions,
     };
 }
 
@@ -235,6 +273,18 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
     // 그때는 action table을 만들 수 없다. 안 쓰이면 table에 남기만 한다(hit-test는 published entry만 본다).
     const scroll_track = table.append(props.snapshot_generation, .scroll_track, true) catch return error.InsufficientActionBuffer;
     const scroll_thumb = table.append(props.snapshot_generation, .scroll_thumb, true) catch return error.InsufficientActionBuffer;
+    // 고정 헤더는 흐름 위의 그 그룹 행과 **같은 행위**를 해야 한다 — 눌러 접는 것이 목록 위치에 따라
+    // 달라지면 같은 헤더가 두 물건이 된다. 같은 `toggle_group` identity를 다시 등록한다.
+    const sticky: ?tree.StickyDeclaration = if (props.sticky_group) |head| .{
+        .id = NodeIds.sticky_group,
+        .action = table.append(props.snapshot_generation, .{ .toggle_group = head.group.identity }, true) catch return error.InsufficientActionBuffer,
+        .paint = dividedRowPaint(),
+        .height_px = @floatFromInt(m.group_h),
+        .top_px = @floatFromInt(head.top_px),
+        // 다음 그룹의 top에서 item gap을 뺀다 — 그 gap은 다음 헤더 **앞**의 빈 자리라, 밀어내기는
+        // 헤더가 아니라 그 빈 자리가 올라오는 순간부터 시작해야 목록이 튀지 않는다.
+        .next_top_px = if (head.next_top_px) |next| @floatFromInt(next -| m.item_gap) else no_next_group,
+    } else null;
     // 선언 하나다. 자식 평행이동·viewport clip·track/thumb 발행은 `tree.build`가 한다
     // (docs/scroll-area.md §4.1). 이 컴포넌트가 손으로 하던 세 단계가 여기서 사라졌다.
     top[3] = tree.scrollArea(.{
@@ -257,6 +307,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
                 .axis = .vertical,
                 .threshold_px = 0,
             },
+            .sticky = sticky,
         },
     }, item_nodes);
 
@@ -274,9 +325,9 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
     }, top);
     const built = try tree.build(root, .{
         .root_size = props.viewport_px,
-        // root + 목록이 넘칠 때 `scrollArea`가 내는 track/thumb. 이 둘은 이제 build의 preorder 안에서
-        // 나오므로 상한에 함께 들어간다(예전에는 tree 밖에서 배열 끝에 붙였다).
-        .max_entries = needed_nodes + 3,
+        // root + 목록이 넘칠 때 `scrollArea`가 내는 track/thumb + 고정 헤더. 셋 다 이제 build의 preorder
+        // 안에서 나오므로 상한에 함께 들어간다(예전에는 tree 밖에서 배열 끝에 붙였다).
+        .max_entries = needed_nodes + 4,
         // ExpandedSessionCard adds `root → content → expanded item → action row → action`.
         // Keep this explicit so a later accidental wrapper cannot silently grow the published
         // interaction tree without a bounded-cap review.
@@ -914,6 +965,9 @@ test "bufferSizes는 build가 성공하는 최소치이고 한 칸만 줄여도 
         .items = &items,
         .scroll_content_height_px = 4000,
         .scroll_offset_px = 500,
+        // 고정 헤더도 자리를 차지한다. 선언 없이 재면 sticky 몫이 늘 남아돌아, 정작 헤더가 붙은
+        // 스크롤 위치에서만 버퍼가 터지는 걸 이 테스트가 못 본다.
+        .sticky_group = .{ .group = .{ .identity = 1, .label = "g", .count = 2 }, .top_px = 0, .next_top_px = null },
     };
     const sizes = bufferSizes(&items);
 
@@ -939,6 +993,7 @@ test "bufferSizes는 build가 성공하는 최소치이고 한 칸만 줄여도 
     // 보고한 크기로는 스크롤바까지 포함해 성공한다.
     const frame = try Run.go(props, sizes, &nodes, &entries, &layout_items, &flex_scratch, &child_rects, &actions);
     try std.testing.expect(frame.tree.find(NodeIds.scroll_thumb) != null);
+    try std.testing.expect(frame.tree.find(NodeIds.sticky_group) != null);
 
     // 어느 하나라도 한 칸 모자라면 실패한다 — 넉넉히 보고하면 호출처가 실패 조건을 영영 못 본다.
     inline for (@typeInfo(BufferSizes).@"struct".fields) |field| {

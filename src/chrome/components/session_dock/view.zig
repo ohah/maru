@@ -89,11 +89,20 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
 
     // 여기부터가 스크롤 목록이다. 고정 chrome은 위에서 이미 emit됐다.
     writer.scroll_clipped = true;
+    // 고정 헤더의 바닥. 목록 글자는 이 선 위로 올라가지 못한다.
+    const sticky_rect: ?tree.RectEntry = if (props.sticky_group != null)
+        (find(frame.tree, build.NodeIds.sticky_group) orelse return error.MissingRect)
+    else
+        null;
+    const sticky_bottom: i32 = if (sticky_rect) |entry|
+        @intFromFloat(@floor(entry.rect.y + entry.rect.height))
+    else
+        std.math.minInt(i32);
     for (props.items, 0..) |item, index| {
         const rect = find(frame.tree, build.NodeIds.item(index)) orelse return error.MissingRect;
         // 이 행의 published clip을 op에 함께 싣는다. 배경 quad는 GPU가 픽셀 단위로 자르는데 셀 경로의
         // 글자만 그대로 남으면 배경 반쪽에 글자가 떠 있는 그림이 된다.
-        writer.active_clip = clipRectOf(rect);
+        writer.active_clip = clipBelow(clipRectOf(rect), sticky_bottom);
         switch (item) {
             .group => |group| {
                 try writer.groupHeader(rect, group);
@@ -117,6 +126,19 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
             },
         }
     }
+
+    // 고정 헤더는 목록 **뒤**에 그린다 — 지나간 카드가 그 밑으로 흘러야 한다. 스크롤바보다 앞이지만
+    // 그건 tree의 발행 순서가 정하는 것이고(§4.7), 여기서는 목록 위라는 것만 지킨다. 흐름 위의 그룹
+    // 행과 같은 `groupHeader`를 쓴다 — 같은 헤더가 위치에 따라 다르게 생기면 두 물건이 된다.
+    if (props.sticky_group) |head| {
+        const rect = sticky_rect.?;
+        // 헤더 자신은 스크롤 평행이동을 받지 않는다 — 그 y는 `tree.build`가 이번 offset에서 다시
+        // 계산한 절대값이다. 대신 자기 rect로 잘려, 밀려 나가는 동안 고정 chrome 위로 새지 않는다.
+        writer.scroll_clipped = false;
+        writer.above_scroll = true;
+        writer.active_clip = clipRectOf(rect);
+        try writer.groupHeader(rect, head.group);
+    }
     return .{ .layer = .sidebar, .ops = buffers.ops[0..writer.op_count] };
 }
 
@@ -136,6 +158,9 @@ const Writer = struct {
     /// 지금 emit 중인 op이 스크롤 목록에 속하는지. 고정 chrome(헤더·scope·검색)은 스크롤해도 제자리이므로
     /// 이 구분이 없으면 backend가 "스크롤은 순수 평행이동"이라는 사실을 쓸 수 없다.
     scroll_clipped: bool = false,
+    /// 지금 emit 중인 op이 스크롤 콘텐츠 **위에 뜬** 것인지(상단 고정 헤더). `scroll_clipped`와 배타적이다 —
+    /// 평행이동은 안 받되 잘리기는 한다. 자르는 rect는 `active_clip`이 그대로 싣는다.
+    above_scroll: bool = false,
     /// 지금 emit 중인 **행**의 published clip. 셀 격자로 lowering하는 backend(Lab·모달)는 뷰포트를 모르므로
     /// 이 rect로 자른다. measured 경로는 무시한다(위 bool과 backend 뷰포트를 쓴다).
     active_clip: ?draw.Rect = null,
@@ -564,6 +589,7 @@ const Writer = struct {
             .anchor = .head,
             .max_width_px = @intFromFloat(@floor(@as(f32, @floatFromInt(cols)) * @as(f32, @floatFromInt(self.props.cell_width_px)))),
             .scroll_clipped = self.scroll_clipped,
+            .above_scroll = self.above_scroll,
             .clip = self.active_clip,
         } };
         self.run_count += 1;
@@ -599,6 +625,7 @@ const Writer = struct {
             .max_width_px = max_width_px,
             .placement = placement,
             .scroll_clipped = self.scroll_clipped,
+            .above_scroll = self.above_scroll,
             .clip = self.active_clip,
         } };
         self.run_count += 1;
@@ -660,6 +687,17 @@ const Writer = struct {
 };
 
 /// published clip을 semantic op에 실을 수 있는 정수 rect로 옮긴다. 자르지 않고 **전달만** 한다.
+/// 고정 헤더 **아래**로만 남긴다. quad와 text는 서로 다른 레이어라, 나중에 그린 헤더 배경이 앞서
+/// 그린 카드 **글자**를 덮지 못한다(Lab 캡처로 확인). 진짜 스크롤 컨테이너가 그렇듯 헤더 밑을 지나는
+/// 글자 자체를 잘라 없앤다 — 밀려 나가는 동안 헤더 바닥이 올라가면 다음 헤더가 그만큼 드러난다.
+fn clipBelow(rect: ?draw.Rect, min_y: i32) ?draw.Rect {
+    const r = rect orelse return null;
+    if (r.y >= min_y) return r;
+    const trimmed = min_y - r.y;
+    if (trimmed >= @as(i32, @intCast(r.h))) return .{ .x = r.x, .y = min_y, .w = r.w, .h = 0 };
+    return .{ .x = r.x, .y = min_y, .w = r.w, .h = r.h - @as(u32, @intCast(trimmed)) };
+}
+
 fn clipRectOf(entry: tree.RectEntry) ?draw.Rect {
     const clip = entry.effective_clip orelse return null;
     return .{
@@ -1055,11 +1093,11 @@ test "SessionDock scrolling moves every emitted run by the same virtualization o
     });
 
     var nodes_a: [16]tree.UiNode = undefined;
-    var entries_a: [17]tree.RectEntry = undefined;
-    var layout_items_a: [17]@import("../../ui/layout.zig").Item = undefined;
-    var flex_scratch_a: [17]@import("../../ui/layout.zig").FlexScratch = undefined;
-    var child_rects_a: [17]@import("../../ui/layout.zig").UiRect = undefined;
-    var actions_a: [12]@import("ids.zig").Entry = undefined;
+    var entries_a: [18]tree.RectEntry = undefined;
+    var layout_items_a: [18]@import("../../ui/layout.zig").Item = undefined;
+    var flex_scratch_a: [18]@import("../../ui/layout.zig").FlexScratch = undefined;
+    var child_rects_a: [18]@import("../../ui/layout.zig").UiRect = undefined;
+    var actions_a: [13]@import("ids.zig").Entry = undefined;
     var ops_a: [64]draw.Op = undefined;
     var runs_a: [64]draw.Run = undefined;
     var text_bytes_a: [2048]u8 = undefined;
@@ -1074,11 +1112,11 @@ test "SessionDock scrolling moves every emitted run by the same virtualization o
 
     props.content_first_item_origin_y_px = shift;
     var nodes_b: [16]tree.UiNode = undefined;
-    var entries_b: [17]tree.RectEntry = undefined;
-    var layout_items_b: [17]@import("../../ui/layout.zig").Item = undefined;
-    var flex_scratch_b: [17]@import("../../ui/layout.zig").FlexScratch = undefined;
-    var child_rects_b: [17]@import("../../ui/layout.zig").UiRect = undefined;
-    var actions_b: [12]@import("ids.zig").Entry = undefined;
+    var entries_b: [18]tree.RectEntry = undefined;
+    var layout_items_b: [18]@import("../../ui/layout.zig").Item = undefined;
+    var flex_scratch_b: [18]@import("../../ui/layout.zig").FlexScratch = undefined;
+    var child_rects_b: [18]@import("../../ui/layout.zig").UiRect = undefined;
+    var actions_b: [13]@import("ids.zig").Entry = undefined;
     var ops_b: [64]draw.Op = undefined;
     var runs_b: [64]draw.Run = undefined;
     var text_bytes_b: [2048]u8 = undefined;

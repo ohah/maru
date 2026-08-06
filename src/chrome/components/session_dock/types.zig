@@ -70,6 +70,20 @@ pub const Item = union(enum) {
     card: Card,
 };
 
+/// 스크롤해도 목록 상단에 남는 그룹 헤더(docs/scroll-area.md §4.7).
+///
+/// **`items` 창 밖일 수 있으므로 그룹 값을 여기 따로 싣는다.** 가상화는 보이는 항목만 넘기는데,
+/// 상단에 걸린 그룹은 이미 위로 스크롤되어 나갔을 수 있다. 어느 그룹인지·그것이 content-space
+/// 어디인지는 전체 목록을 아는 host만 안다.
+pub const StickyGroup = struct {
+    group: Group,
+    /// content-space top(스크롤 offset을 빼기 전).
+    top_px: u32,
+    /// **다음** 그룹의 content-space top. 그것이 올라오면 이 헤더를 밀어낸다. 마지막 그룹이면 null이고
+    /// 밀어내는 것이 없다.
+    next_top_px: ?u32 = null,
+};
+
 pub const Props = struct {
     viewport_px: layout.UiSize,
     cell_width_px: u32,
@@ -106,6 +120,8 @@ pub const Props = struct {
     scroll_content_height_px: u32 = 0,
     scroll_offset_px: u32 = 0,
     items: []const Item = &.{},
+    /// null이면 상단에 걸린 그룹이 없다 — 첫 그룹에 닿기 전이라 흐름 위의 행이 그대로 보인다.
+    sticky_group: ?StickyGroup = null,
 };
 
 /// One immutable geometry snapshot for all Session Dock consumers. The host gets this same

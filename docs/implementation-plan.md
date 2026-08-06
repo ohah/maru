@@ -1181,3 +1181,48 @@ restore 설정 alias, 과거 hook/mapping cleanup과 전용 환경변수 차단�
 
    **AS4 snapshot-replace stale-up 정정(현재):** 위 단락의 “다음 slice” 및 “남은 … stale race” 표기는 과거 계획이다. 현재 fixture는 ordinary `refresh` pointer → detached scan gate → old ready `resume` `mouseDown` → same-directory atomic source replace → immutable snapshot publish → stale/old-capability unmaterialized → old backing rect `mouseUp`을 한 cold AppKit process에서 검증한다. old capture는 provider argv·external open·Term 생성/전환을 전혀 만들지 않으며, scan gate는 worker discovery 전에만 대기하므로 main actor의 retained-list paint를 막지 않는다. expanded-card scroll anchor와 terminal font 14pt/24pt × render scale 1×/2× dock/action rect JSON은 실제 AppKit E2E로 완료됐다. 후자는 published tree의 header/scope/search/first·expanded card/resume/reveal border rect가 font마다 동일하고 2× backing rect가 정확히 두 배인지 확인한다.
 7. **B1-text** — 제품 rich Chrome text는 `NativeMetalCell{row,col}`만 쓰지 않고 `GpuGlyph`의 final pixel rect를 별도 전달한다. `chrome_draw_lowering.RichTextArtifact`는 semantic text origin·clip-aware cell span·foreground를 보관하고, 완성된 CoreText/atlas `GlyphQuadFrame`을 shared atlas UV의 GPU glyph pass로 내린다. AppSession은 SessionDock text/style/rect/icon/grid key가 같으면 renderer-neutral shaped record와 placement를 재사용해 CoreText를 다시 호출하지 않으며, `ChromeTypography` token·platform primary/fallback generation·scale 파이프라인만 이 cache를 폐기한다. terminal `font.*` 변경은 Chrome cache 입력이 아니다. ABI v158의 atlas-pixel origin은 multi-pane atlas 성장 뒤에도 UV를 다시 정규화한다. `macos-chrome-lab-smoke`도 반드시 같은 artifact의 `appendGpuGlyphs` 결과만 product Metal readback에 넘긴다. Lab이 `row × cellHeight`로 GPU glyph 위치를 다시 만들거나 fixture용 nudge를 더하면 semantic origin의 sub-cell offset이 사라져 실제 화면과 다른 capture가 되므로 금지한다. readback은 `rich_text_rasterized=true`를 요구한다. **B1-doc은 `ChromeTextRole`의 UI primary-face 분리, 9개 type token, measured line-box alignment, system UI/Jetendard font-review와 AppKit capture gate까지 고정했다. B1-button 구조는 `UiNode.button`·primary/secondary/disabled visual·same-tree pointer/key action까지 구현됐다. B1-button-a는 archive action의 SVG icon과 한글 label을 별도 draw op로 내고 label만 measured artifact/CJK ellipsis로 이관했다. B1-button-b는 worker-owned `center-in-content`/`leading-icon-group` policy로 CJK ellipsis advance, line box, SVG icon optical box와 group centre를 하나의 immutable record+placement artifact에 넣고, cache hit는 `shapeFromRecords`만으로 shared atlas를 재사용한다.** 이 단계는 headline typography 전체 이관을 대신하지 않는다.
+
+## ScrollView 이관 (설계 완료 — 구현 미착수)
+
+계약 단일 출처는 [ScrollView](scroll-view.md)다. 이 절은 순서와 상태만 소유한다.
+
+지금 스크롤하는 곳이 일곱(Session Dock·파일 탐색기·소스 컨트롤·사이드바·알림 패널·팔레트/세팅·탭 바)인데
+좌표 단위와 발행 경로가 모두 다르고, 같은 규율을 각자 다시 발견하다 매번 다른 것을 빠뜨렸다 — 탐색기는 tick 소비 누락("놓아야 움직이는" 스크롤바), 도크는
+tree 교체에서 capture carry 누락(드래그가 첫 move에 죽음)·스크롤바가 목록 위에 겹침·장식 quad clip 누락.
+넷 다 사용자 보고로 돌아왔다. ScrollView는 그 규율을 한 번만 맞게 두는 자리다.
+
+- **SV0 — 판정자 먼저.** 지금 도크 골든 네 장에는 스크롤바 픽셀이 하나도 없다 — Lab fixture가
+  `scroll_content_height_px`를 채우지 않아 `scrollbarGeometry`가 `null`을 낸다(항목 수 무관). 골든 우측
+  40px의 최장 세로 런이 3px(chevron 획)인 것으로 확인했다. 그래서 SV1이 스크롤바를 통째로 망가뜨려도
+  기존 골든은 전부 통과한다. 목록이 실제로 넘치는 Lab 시나리오와 gutter를 포함한 골든 case를 **SV1 전에**
+  추가한다.
+- **SV1 — Session Dock에서 추출.** 가상화·픽셀 offset·스크롤바·드래그·키보드 스크롤을 모두 쓰는
+  유일한 소비처라 여기서 뽑으면 계약이 처음부터 전부 드러난다. 실질은 지금 도크가 손으로 하는 세 단계
+  (컨테이너 build → 자식 평행이동 → 스크롤바 append)를 `tree.scrollView` 선언 하나로 접고 그 처리를
+  `tree.build`로 옮기는 것이다. **함께 고치는 것**: 지금 도크는 스크롤바를 배열 끝에 `parent_index = null`로
+  붙여 `UiRectTree`의 preorder·subtree-range 불변식을 어기고 root를 여럿으로 만든다. build의 preorder emit
+  안으로 옮기면 사라진다. **뷰포트 높이 복제도 함께 없앤다**: 지금 host가 `content.h - fixedChromeHeight()`로
+  flex 결과를 손으로 예측하는데(같은 수의 출처가 둘), 측정 pass로 layout이 알려 주게 하면 그 식이 사라진다.
+  스크롤 자식의 `shrink = 0`도 소비처가 아니라 컨테이너가 소유하게 옮긴다. 시각·동작 무변경이 완료
+  기준이고, **SV0가 추가한 스크롤바 골든**이 그 판정이다(기존 네 장만으로는 판정되지 않는다).
+- **SV2 — 파일 탐색기 이관.** 행 단위 좌표를 backing pixel로 옮기는 것이 실제 변경이다. 부분적으로
+  보이는 행이 생기므로 행 기반 hit-test·reveal·follow가 픽셀 좌표를 읽도록 함께 바뀐다. 별도 스크롤바
+  tree(`file_tree_scrollbar.publish`)와 전용 capture 경로는 이 단계에서 제거한다.
+- **SV3 — 소스 컨트롤 이관.** 탐색기와 같은 행 좌표를 쓰고 스크롤바가 아예 없다. SV2가 만든 픽셀
+  경로를 그대로 쓰므로 비용이 가장 작고, 없던 스크롤바가 생기는 것이 사용자에게 보이는 변화다.
+- **SV4 — 사이드바 이관.** 스크롤바가 host의 GPU quad라 발행 경로가 없다. 이관하면 사이드바도
+  드래그 가능한 스크롤바를 얻는다(현재 휠 전용).
+- **SV5 — 알림·팔레트·세팅(판단 보류).** 셋은 이미 `overlay_input.windowStart`로 item-index windowing을
+  공유한다. 흡수가 이득인지 그대로 두는 것이 옳은지는 SV1~SV4를 마친 뒤 실제 계약을 보고 정한다.
+- **SV6 — z 축 정리(판단은 이관 중, 변경은 별도 슬라이스).** 정렬 축 변경은 lowering을 지나는 모든 quad
+  소비자에 영향을 주므로 "시각 무변경"이 완료 기준인 이관 단계와 같은 PR에 넣지 않는다. 자기 게이트
+  (모달·툴팁·스크롤바가 겹치는 화면의 골든)와 비용 측정을 함께 낸다. `GpuQuad.layer`는 닫힌 enum이 아니라 이미
+  스크롤바 전용 layer 3이 추가된 상태이고, Session Dock 스크롤바만 layer 2에 나와 같은 역할이 두 층에
+  흩어져 있다. 스크롤바 층을 layer 상수로 계속 표현할지, `(layer, z, order)` stable sort로 옮기고
+  layer는 합성 패스 의미만 남길지를 이관과 함께 정한다.
+
+**탭 바(가로 스크롤)는 이 순서에 없다.** 컬럼 좌표·‹› 버튼 affordance·`Pane.tab_scroll_cols` 소유자가
+모두 다르므로, 세로 목록을 모으는 것과 가로 축을 여는 것은 별개의 결정이다.
+
+각 단계는 앞 단계의 계약을 넓히기만 하고 바꾸지 않는다. 바꿔야 하면 [ScrollView](scroll-view.md)를
+먼저 고친다.

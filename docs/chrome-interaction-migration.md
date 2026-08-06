@@ -63,8 +63,8 @@ rewrite의 근거로 삼지 않는다.
 | sidebar group drag (`sidebar_group`) | `AppSession` armed→dragging 2-phase | `ReorderableList` capability | threshold 전 armed 상태의 click 보존, marker/slot 무결성 |
 | 주소창 selection drag (`address_selection`) | `AppSession` caret/selection | 이관하지 않는다 — [텍스트 필드 에디터](text-field-editor.md) 범위 | caret/selection 편집 모델, IME, first responder |
 | `components/sidebar.zig` | workspace/group/agent row geometry·hit-test·밴드 view·헤더 hit-test | `ReorderableList`를 쓰는 Sidebar composite | group collapse, reorder preview, pin/group invariants, 헤더 아이콘(◧/⚙/+/🔔) 영역, 검색 blur가 키 포커스를 터미널로 되돌리는 규율 |
-| `components/file_tree_scrollbar.zig` | scrollbar geometry/track/thumb math | `ScrollArea`/`Scrollbar` | thumb drag, track click, projection/root generation mismatch cancel |
-| terminal scrollbar | `AppSession` viewport mutation | `ScrollArea` adapter | terminal scrollback/selection/mouse mode와의 입력 우선순위 |
+| `components/file_tree_scrollbar.zig` | scrollbar geometry/track/thumb math | [`ScrollView`](scroll-view.md) | thumb drag, track click, projection/root generation mismatch cancel |
+| terminal scrollbar | `AppSession` viewport mutation | 별도 판단(터미널 viewport는 [`ScrollView`](scroll-view.md) 범위 밖) | terminal scrollback/selection/mouse mode와의 입력 우선순위 |
 | Session Dock | typed tree + action table + pixel scroll + 검색 필드(query·IME preedit 입력 owner) | 첫 modern consumer를 유지 | refresh anchor, stale action reject, read-only detail worker, `/`·필드 클릭 활성화와 Escape 해제, marked text가 필드·native 후보창에만 보이고 commit된 query만 목록을 필터하는 규율, 256 byte 절단, 검색 키·IME가 재스캔·stat·정렬을 일으키지 않고 terminal PTY로 새지 않음 |
 | palette/find/notice/modal/dropdown | 화면별 `State`/view/handle | `Input`/`Menu`/`Popover`/`Dialog` composite | AppKit first responder, IME, Escape/outside-dismiss, keyboard navigation |
 | settings/toggle/text field | 화면별 form state | `Input`/`Toggle`/`Select`/`FormRow` | schema ownership, config write, validation/error presentation |
@@ -76,7 +76,7 @@ interaction 결과를 기존 effect path로 변환하고, 각 consumer가 migrat
 해당 `PointerGestureOwner` variant를 줄인다. 위 표의 variant를 **전부** 소진해 union이 `none`만
 남기 전에는 interaction 이관을 완료로 표시하지 않는다.
 
-두 권위가 공존하는 동안 §4.3의 "한 pointer stream에 capture owner는 하나"는 다음 순서로 보장한다.
+두 권위가 공존하는 동안 §4.2의 "한 pointer stream에 capture owner는 하나"는 다음 순서로 보장한다.
 
 1. **진행 중인 capture가 최우선이다.** 어느 권위든 capture를 들고 있으면 그 stream의 남은
    move/up/cancel은 그 권위에만 간다. pointer가 다른 컴포넌트의 rect 위로 지나간다는 사실은
@@ -103,7 +103,7 @@ interaction 계약만 소유한다. 아래 목록을 실제 public API로 여는
 ```text
 Card, Text, Button, Input
 Tabs, TabList, Tab
-ScrollArea, Scrollbar
+ScrollView
 Menu, Popover, Dialog
 Toggle, Select, FormRow
 SurfaceSlot
@@ -175,7 +175,7 @@ modal or active native overlay
 sibling**만 뜻한다. tab bar·divider·scrollbar처럼 terminal body 밖의 Chrome rect는 terminal mouse
 reporting보다 먼저 처리할 수 있지만, terminal body 안의 보이지 않는/비-modal overlay가 입력을
 전역 소비해서는 안 된다. non-modal overlay는 자기 rect 밖에서 pass-through한다. terminal body의
-wheel/selection/mouse reporting은 기존 terminal input policy가 계속 결정하며, `ScrollArea`라는 이름만으로
+wheel/selection/mouse reporting은 기존 terminal input policy가 계속 결정하며, `ScrollView`라는 이름만으로
 Chrome scroll로 바꾸지 않는다. keyboard 소유 판정은 pointer routing의 대체 판정으로 재사용하지 않는다.
 
 keyboard 소유는 현재 **두 축**이 나눠 가진다. `terminalOwnsInput`은 host가 AppKit first responder를 어디에
@@ -321,7 +321,7 @@ clip, z-order, focus/input policy만 나타내는 `SurfaceSlot` leaf를 둔다.
 PaneSurface
 ├── TabList
 ├── SurfaceSlot (terminal | web | editor)
-├── ScrollArea or terminal scrollbar
+├── ScrollView or terminal scrollbar
 ├── SplitDivider
 └── selection/find/IME/drag-preview overlay
 ```
@@ -392,7 +392,7 @@ CIM1은 B1 이관 PR이 전부 merge된 뒤에 시작하고, 그 전에는 CIM0(
    그것을 고정하므로, 이 단계가 다시 만들지 않는다. 기존 `PointerGestureOwner` effect path도 유지한다.
 3. **CIM2 — SplitDivider**: 현 divider geometry를 재사용해 press/capture/cancel adapter 하나로
    옮긴다. split tree removal, resize clamp, WebView divider pass-through AppKit E2E를 포함한다.
-4. **CIM3 — ScrollArea/Scrollbar**: file tree와 Session Dock 중 하나를 first consumer로 삼는다.
+4. **CIM3 — [`ScrollView`](scroll-view.md)**: file tree와 Session Dock 중 하나를 first consumer로 삼는다.
    wheel/thumb/track click/keyboard, scroll anchor, stale projection cancel을 fixture와 capture로 고정한다.
 5. **CIM4 — TabList/Tab**: §4.4의 provisional live reorder를 구현해 terminal tab을 이관한다.
    select/close/overflow scroll/reorder/drop/split/detach와 terminal mouse routing을 분리 검증하고,

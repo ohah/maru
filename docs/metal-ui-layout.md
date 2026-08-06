@@ -689,7 +689,9 @@ solver를 분리해야 한다는 Maru의 근거다. Maru는 Rust crate나 WASM/F
   unit/clip/경계 fixture를 같은 slice에서 먼저 추가한다.
 - scroll viewport와 virtualization은 list child를 그리기 전에 같은 rect tree로
   visible range를 정한다. fixed header와 scroll body가 서로 다른 y origin을
-  재계산하면 안 된다.
+  재계산하면 안 된다. 그 규율을 한 컴포넌트로 묶은 계약은
+  [ScrollView](scroll-view.md)가 단일 출처다 — 스크롤 좌표·가상화 창·스크롤바·drag 수명·
+  viewport clip이 거기 함께 산다.
 - focus ring, hover, pressed, disabled는 layout 밖의 state지만 모두 같은 component
   rect에 paint한다. keyboard action과 pointer action은 stable item identity를
   공유한다.
@@ -797,8 +799,8 @@ pub const DirtySet = struct {
   다음 활성 surface가 재사용한 numeric id를 이전 surface의 hover/focus state로 오인하지 않는다.
 - `timestamp_ns`는 adapter에서 단조 clock으로만 만든다. ML2b는 시간·worker·lock을 읽지
   않으며, 이후 drag threshold가 필요할 때만 이 event의 시간과 최초 down 좌표를 사용한다.
-  `scroll`은 ML2b의 action/capture contract에 넣지 않는다. scroll owner/viewport는 ML3의
-  paint/virtualization seam과 함께 별도 slice에서 연다.
+  `scroll`은 ML2b의 action/capture contract에 넣지 않는다. scroll owner/viewport는
+  [ScrollView](scroll-view.md)가 소유한다.
 
 검증은 순수 `UiRectTree` fixture로 다음을 고정한다: clip 뒤의 action 무시, 겹친 card의
 z-order, hover A→B의 two-dirty, focus/pressed 전환이 관련 모든 rect를 dirty에 넣는지, outside
@@ -1020,9 +1022,9 @@ layout-affecting animation은 paint-only animation과 별도 정책/성능 gate�
    - **텍스트 모델 전환**: legacy 쪽은 셀 격자다(예: `notifications.zig`의 `card_rows = 2`(셀 2행),
      `text_indent_cols = 3`, 말줄임 `truncateToCols`(EAW 칸 추정)). typed 쪽은 measured 비례 텍스트
      (`ChromeTextRole` line box + `system_text.Artifact`)다. 두 모델은 좌표계가 달라 부분 이주가 안 된다.
-   - **없는 프리미티브 — 스크롤 목록/가상화**: 지금 `chrome/components/session_dock/scroll.zig`에
-     **컴포넌트 안에** 있다. 알림 패널·설정 목록·palette가 모두 같은 것을 필요로 하므로 `chrome/ui/`로
-     올려야 두 번째 소비자가 결정을 다시 내리지 않는다(`ui/button.zig`·`ui/badge.zig`가 세운 선례).
+   - **없는 프리미티브 — 스크롤 목록/가상화**: 계약과 이관 순서는 [ScrollView](scroll-view.md)가 소유한다.
+     (알림·palette·설정이 픽셀 스크롤을 실제로 원하는지는 그 문서가 열어 둔 질문이다 — 셋은 지금
+     `overlay_input.windowStart`의 item-index windowing을 쓴다.)
    - **없는 프리미티브 — sticky 헤더 밴드**: 알림 패널이 viewport 상단에 고정 헤더를 두고 그 아래만
      스크롤한다.
    - **부분 행 클리핑**: 픽셀 스크롤로 반쯤 걸친 행을 자르려면 `draw.Op.clip` 경로(ML3b의 scissor)가

@@ -1,6 +1,10 @@
 #import "maru_metal_renderer.h"
 #import "maru_metal_shader.h"
 #import "maru_ppm_writer.h"
+/* 아이콘 codepoint 이름 매크로(생성물 — tools/svg_to_coverage.py). 렌더 분기가 `0xF0002u` 같은 리터럴 대신
+   `MARU_ICON_GEAR`를 쓴다: 어느 그림인지 읽히고, 자산이 재배치돼도 이름이 새 cp를 가리킨다(Zig src/icons.zig와
+   같은 규율 — docs/chrome-strategy.md §9.7). */
+#include "icon_codepoints.h"
 #import <QuartzCore/QuartzCore.h>
 #include <dispatch/dispatch.h>
 #include <stdlib.h>
@@ -1149,12 +1153,13 @@ bool maru_metal_renderer_draw(
                 tc.reserved, tc.atlas_width_px, tc.atlas_height_px, cell_width_px, cell_height_px);
             const bool is_dock_toggle = glyph_policy.is_dock_toggle != 0u;
             const bool is_corner_icon = tc.row == 0u &&
-                ((is_header && (tc.codepoint == 0xF0002u || tc.codepoint == 0xF0003u || tc.codepoint == 0xF0006u)) ||
+                ((is_header && (tc.codepoint == MARU_ICON_GEAR || tc.codepoint == MARU_ICON_PLUS ||
+                                tc.codepoint == MARU_ICON_SIDEBAR)) ||
                  is_dock_toggle); // gear·plus·sidebar(PUA icon_glyph), including the freely placed dock toggle
             // 알림 종(🔔)도 PUA 단색 합성 아이콘(0xF0005)이라 코너 아이콘(◧⚙+)과 같은 1.7×로 통일한다. 예전엔 컬러
             // 이모지(width=2, fallback)라 1.7×면 과대해 1.0×로 두고 maru_center_ink_vertically로 보이는 ink를 슬롯 중앙에
             // 맞췄으나(폰트/DPI마다 틀어지는 근사), 단색 합성은 fillCoverage가 슬롯 중앙에 직접 그려 그 보정이 불필요하다.
-            const bool is_bell_icon = is_header && tc.row == 0u && tc.codepoint == 0xF0005u; // bell(PUA icon_glyph) — 단색 합성이라 코너 아이콘과 같은 1.7×로 통일
+            const bool is_bell_icon = is_header && tc.row == 0u && tc.codepoint == MARU_ICON_BELL; // 단색 합성이라 코너 아이콘과 같은 1.7×로 통일
             // 접힘(terminal_origin_x_px==0, 사이드바 폭 0)이면 헤더 줄0 글리프(◧ 펼치기 토글 + 알림 종 🔔 + 배지)가
             // 신호등 옆에 단독으로 떠 신호등과 수직 정렬돼야 한다 — 셋을 모두 타이틀바 띠 [0, titlebar_strip_px] 안에 세로
             // 중앙 배치한다(띠는 max(cell_h, 30pt)라 0.3ch nudge로는 위로 쏠렸다). 예전엔 ◧만 정렬했으나 접힘에도 알림 종을
@@ -1260,7 +1265,10 @@ bool maru_metal_renderer_draw(
             // 그려지므로 stretch는 보조만(1.1×). **gutter col 0 아이콘만** 확대한다 — col 가드가 없으면 워크스페이스
             // 이름/경로 텍스트에 같은 글리프가 들어가도 그 텍스트 셀(slot_id≠0·동일 codepoint)까지 1.1×로 안 늘어난다
             // (app_session.zig 색칠 루프의 col 0 가드와 짝). 색은 agent 브랜드색(claude 코랄·codex 청록)을 foreground로.
-            const float gscale = (sc.slot_id != 0u && sc.col == 0u && (sc.codepoint == 0xF0007u || sc.codepoint == 0xF0008u)) ? 1.1f : 1.0f;
+            const float gscale = (sc.slot_id != 0u && sc.col == 0u &&
+                                  (sc.codepoint == MARU_ICON_SPARKLE || sc.codepoint == MARU_ICON_DIAMOND))
+                                     ? 1.1f
+                                     : 1.0f;
             // A(자간 분리): 사이드바 카드 글리프(slot_id≠0)도 투명 bg·확대 없는 일반 글자면 자연폭으로 — 터미널과 동일
             // 이유(자간 squish 제거). 밴드(slot_id==0, sentinel UV)·에이전트 심볼(gscale 1.1)·불투명 bg는 combined 유지.
             MaruRendererVertex *sp = &vertices[(quad_index + i) * vertices_per_cell];

@@ -7,6 +7,7 @@ const std = @import("std");
 const layout = @import("../../ui/layout.zig");
 const scroll = @import("scroll.zig");
 const spacing = @import("../../ui/spacing.zig");
+const ui_icon = @import("../../ui/icon.zig"); // 아이콘 슬롯 크기 토큰 단일 출처(ui/button과 같은 값을 쓴다)
 const typography = @import("../../ui/typography.zig");
 
 pub const Scope = enum { workspace, project, all };
@@ -210,7 +211,7 @@ pub const DockMetrics = struct {
             // The provenance pair has enough room for its 18pt SVG, 8pt gap, and Korean label
             // without asking terminal-cell metrics where a Chrome header control should begin.
             .header_host_label_w = geometryPx(spacing.pointsPx(72, scale)),
-            .header_host_icon_extent = geometryPx(spacing.pointsPx(18, scale)),
+            .header_host_icon_extent = geometryPx(spacing.pointsPx(ui_icon.Size.default.extentPt(), scale)),
             .header_host_icon_gap = geometryPx(spacing.px(.xs, scale)),
             .header_utility_gap = geometryPx(spacing.px(.sm, scale)),
             // A 24pt target gives the 18pt registered refresh glyph three logical points of
@@ -270,7 +271,7 @@ pub const ButtonMetrics = struct {
         return .{
             .content_inset_x_px = geometryPx(spacing.px(.md, scale)),
             .content_inset_y_px = geometryPx(spacing.px(.sm, scale)),
-            .leading_icon_extent_px = geometryPx(spacing.pointsPx(18, scale)),
+            .leading_icon_extent_px = geometryPx(spacing.pointsPx(ui_icon.Size.default.extentPt(), scale)),
             .leading_icon_gap_px = geometryPx(spacing.px(.xs, scale)),
             .minimum_height_px = geometryPx(spacing.pointsPx(48, scale)),
         };

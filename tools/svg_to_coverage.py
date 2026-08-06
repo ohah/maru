@@ -133,9 +133,16 @@ def c_header(entries):
         "#include <stdbool.h>",
         "#include <stdint.h>",
         "",
+        "// 이름 매크로 — Objective-C 렌더 경로도 codepoint 리터럴 대신 이름으로 아이콘을 고른다(Zig의",
+        "// src/icons.zig와 같은 규율). 자산이 재배치되면 이름은 그대로 새 cp를 가리키므로 조용히 어긋나지 않는다.",
+    ]
+    for cp, symbol in entries:
+        lines.append(f"#define MARU_ICON_{symbol.upper()} 0x{cp:X}u")
+    lines.extend([
+        "",
         "static inline bool maru_is_registered_icon_cp(uint32_t cp) {",
         "    switch (cp) {",
-    ]
+    ])
     for cp, _ in entries:
         lines.append(f"        case 0x{cp:X}u:")
     lines.append("            return true;")

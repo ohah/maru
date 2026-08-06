@@ -23,6 +23,7 @@ const std = @import("std");
 const icons = @import("../../icons.zig"); // 등록 아이콘 이름↔codepoint(테스트 registry가 실제 등록 cp를 쓰게)
 const layout = @import("layout.zig");
 const spacing = @import("spacing.zig");
+const ui_icon = @import("icon.zig"); // 아이콘 슬롯 크기 토큰 단일 출처
 const tree = @import("tree.zig");
 const typography = @import("typography.zig");
 const ui_style = @import("style.zig");
@@ -62,10 +63,12 @@ pub const ButtonSize = enum {
     }
 
     /// 아이콘 슬롯의 한 변. label line box와 같은 축에 놓이므로 role line-height와 함께 쓴다.
+    /// 값은 `ui/icon.zig`의 크기 토큰이 소유한다 — 같은 18/14pt가 도크 metrics에도 있어 두 출처가 되면
+    /// 한쪽만 바뀔 때 버튼 안 아이콘과 그 옆 헤더 아이콘의 크기가 갈린다.
     fn iconExtentPt(self: ButtonSize) u16 {
         return switch (self) {
-            .default => 18,
-            .compact => 14,
+            .default => ui_icon.Size.default.extentPt(),
+            .compact => ui_icon.Size.compact.extentPt(),
         };
     }
 

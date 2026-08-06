@@ -1205,11 +1205,16 @@ tree 교체에서 capture carry 누락(드래그가 첫 move에 죽음)·스크�
     그룹 헤더·카드·펼친 카드라는 예외가 host의 `ArchiveScrollItems` 한 자리로 모인다. 변이 검증에서
     드러난 무판정 구간(`withOffset`·`clamp`·무변화 반환값·host가 넘기는 높이/간격/개수/펼침 예약)을
     함께 닫았다.
-  - **SV1b — 발행과 clip을 `build`로.** 지금 도크가 손으로 하는 세 단계(컨테이너 build → 자식
-    평행이동 → 스크롤바 append)를 `tree.scrollArea` 선언 하나로 접고 그 처리를 `tree.build`로 옮긴다.
-    **함께 고치는 것**: 지금 도크는 스크롤바를 배열 끝에 `parent_index = null`로 붙여 `UiRectTree`의
-    preorder·subtree-range 불변식을 어기고 root를 여럿으로 만든다. build의 preorder emit 안으로 옮기면
-    사라진다. 스크롤 자식의 `shrink = 0`도 소비처가 아니라 컨테이너가 소유하게 옮긴다.
+  - **SV1b — 발행과 clip을 `build`로(완료).** 도크가 손으로 하던 세 단계(컨테이너 build → 자식
+    평행이동 → 스크롤바 append)를 `tree.scrollArea` 선언 하나로 접고 그 처리를 `tree.build`로 옮겼다.
+    스크롤바가 배열 끝의 `parent_index = null`에서 preorder 안으로 들어와 `UiRectTree`의
+    preorder·subtree-range 불변식이 지켜지고 root가 하나로 돌아왔다.
+    **clip 예외가 사라졌다**: gutter를 컨테이너가 자기 폭에서 예약하므로(CSS `scrollbar-gutter`,
+    taffy `content_box_inset`) 스크롤바가 자기 컨테이너 clip 안이다. 조상 padding을 빌리던 옛 구조는
+    조상 clip 예외를 강요했고 그 규칙은 padding 없는 소비처(SV2)에서 무너진다.
+    시각은 불변이다 — 골든 다섯 장이 갱신되지 않았다. 고정 chrome이 오른쪽 여백을 `margin.right`로
+    직접 갖게 하면서 도크의 `width: percent 1` 아홉 곳을 걷어냈다(percent는 border box 전체 크기라
+    margin을 무시한다). 스크롤 자식의 `shrink = 0`을 컨테이너가 소유하는 것은 아직 남았다.
     **clip 경로가 둘이라는 것을 먼저 알고 들어간다.** 도크 텍스트의 실제 자르기는 measured 경로의
     `Artifact.appendGpuGlyphs`가 한다 — glyph마다 clip과 교차시켜 UV까지 줄이는 **부분 잘림**이고,
     적용 여부는 `placement.scroll_clipped`가 정한다. 반면 `Op.text.clip`은 셀 격자로 내리는 경로

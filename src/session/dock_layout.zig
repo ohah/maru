@@ -47,6 +47,14 @@ pub const Geometry = struct {
     /// 뷰 스위처가 지금 보는 뷰를 이미 알려 주므로 같은 말을 글자로 한 번 더 적을 이유가 없고, 그 자리를
     /// 아이콘 영역에 돌려줬다(사용자 요청 2026-07-31).
     tree_content: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
+    /// 창 바닥 상태표시줄(SB1). **창 전폭**이라 `workspace`(사이드바·titlebar 제외) 안에 살지 않는다 —
+    /// x=0이고 w=창 전체 폭이라, 사이드바 strip 아래까지 지나간다. 그래서 `compute`가 `available`을 만들기
+    /// **전에** 창 높이에서 먼저 깎는다: 그래야 terminal·dock·divider가 전부 한 번에 짧아진다.
+    ///
+    /// **기본값을 일부러 안 준다.** 기본값을 주면 아래 조기 반환 셋(`!visible`·`dock_w==0`·`dock_h==0`)이
+    /// 컴파일 에러 없이 빈 rect를 흘려, 가장 흔한 상태에서만 상태바가 조용히 사라진다
+    /// (docs/metal-ui-layout.md §5 "rect를 더하는 것과 자리를 예약하는 것은 다르다"). `terminal`과 같은 규칙이다.
+    status_bar: Rect,
     dock_size_px: u32 = 0,
 };
 
@@ -221,6 +229,9 @@ pub const Input = struct {
     /// (docs/file-explorer.md §3.5). 탭 바 높이는 `cell_height + 2*pad`라 chrome 행의 배수가 아니므로
     /// 여기서 파생하지 않고 호출자가 그 단일 출처(`paneBarHeightPx`)를 그대로 넘긴다. 0이면 바 없음.
     view_bar_px: u32 = 0,
+    /// 창 바닥 상태표시줄 높이(px, 창 전폭). 0이면 상태바 없음 — 그때 `compute`의 모든 출력은 이 필드가
+    /// 없던 때와 **같다**(S1은 0으로만 들어와 byte-identical, S2가 실제 높이로 뒤집는다).
+    status_bar_px: u32 = 0,
 };
 
 /// 하나의 도크를 유지하면서도 자동 상태만 consumer가 요구하는 가독성 폭을 고른다. 새 view를 추가하면
@@ -233,23 +244,30 @@ pub fn defaultRightPtForView(view: dock_panel.View) u32 {
 }
 
 pub fn compute(in: Input) Geometry {
+    // 상태바는 **창 전폭**(사이드바 아래까지)이라 `available` 밖에 산다. 그래서 창 높이에서 **먼저** 깎고,
+    // 아래 모든 기하가 그 짧아진 높이(`usable_h`)에서 파생되게 한다 — terminal·dock·divider·조기 반환이
+    // 전부 한 지점에서 정합한다. 창보다 크게 요청되면 창 높이로 clamp(작업영역 0은 허용, 음수는 없다).
+    const status_bar_h = @min(in.status_bar_px, in.backing_height_px);
+    const usable_h = in.backing_height_px -| status_bar_h;
+    const status_bar = Rect{ .x = 0, .y = usable_h, .w = in.backing_width_px, .h = status_bar_h };
     const available = Rect{
         .x = in.sidebar_width_px,
         .y = in.titlebar_height_px,
         .w = in.backing_width_px -| in.sidebar_width_px,
-        .h = in.backing_height_px -| in.titlebar_height_px,
+        .h = usable_h -| in.titlebar_height_px,
     };
-    if (!in.visible or available.w == 0 or available.h == 0) return .{ .workspace = available, .terminal = available };
+    if (!in.visible or available.w == 0 or available.h == 0) return .{ .workspace = available, .terminal = available, .status_bar = status_bar };
 
     // Terminal title strip은 큰 terminal font에서 커질 수 있다. right Session Dock은 그
     // implementation detail을 물려받지 않고 own Chrome point geometry에서 시작한다. bottom
     // dock은 terminal 아래에 붙는 surface라 기존 `available`을 계속 쓴다.
-    const dock_top = if (in.dock_top_px == 0) in.titlebar_height_px else @min(in.dock_top_px, in.backing_height_px);
+    // 상태바가 먹은 높이는 도크 기준선에도 그대로 반영한다 — `usable_h`가 단일 출처다.
+    const dock_top = if (in.dock_top_px == 0) in.titlebar_height_px else @min(in.dock_top_px, usable_h);
     const dock_available = Rect{
         .x = in.sidebar_width_px,
         .y = dock_top,
         .w = in.backing_width_px -| in.sidebar_width_px,
-        .h = in.backing_height_px -| dock_top,
+        .h = usable_h -| dock_top,
     };
 
     const scale = if (in.scale_milli == 0) 1000 else in.scale_milli;
@@ -270,7 +288,7 @@ pub fn compute(in: Input) Geometry {
             const min_terminal = @max(2 * in.cell_width_px, layout_math.ptToPx(320, scale));
             const max_dock = available.w -| divider -| min_terminal;
             const dock_w = @min(@max(requested_px, @min(min_dock, max_dock)), max_dock);
-            if (dock_w == 0) break :right .{ .workspace = available, .terminal = available };
+            if (dock_w == 0) break :right .{ .workspace = available, .terminal = available, .status_bar = status_bar };
             const term_w = available.w -| divider -| dock_w;
             const dock_x = available.x + term_w + divider;
             const dock = Rect{ .x = dock_x, .y = dock_available.y, .w = dock_w, .h = dock_available.h };
@@ -279,6 +297,7 @@ pub fn compute(in: Input) Geometry {
                 .{ .x = available.x, .y = available.y, .w = term_w, .h = available.h },
                 dock,
                 .{ .x = available.x + term_w, .y = dock_available.y, .w = divider, .h = dock_available.h },
+                status_bar,
                 chrome_h,
                 dock_w,
                 in.cell_width_px,
@@ -291,7 +310,7 @@ pub fn compute(in: Input) Geometry {
             const min_terminal = @max(2 * in.cell_height_px, layout_math.ptToPx(180, scale));
             const max_dock = available.h -| divider -| min_terminal;
             const dock_h = @min(@max(requested_px, @min(min_dock, max_dock)), max_dock);
-            if (dock_h == 0) break :bottom .{ .workspace = available, .terminal = available };
+            if (dock_h == 0) break :bottom .{ .workspace = available, .terminal = available, .status_bar = status_bar };
             const term_h = available.h -| divider -| dock_h;
             const dock_y = available.y + term_h + divider;
             const dock = Rect{ .x = available.x, .y = dock_y, .w = available.w, .h = dock_h };
@@ -300,6 +319,7 @@ pub fn compute(in: Input) Geometry {
                 .{ .x = available.x, .y = available.y, .w = available.w, .h = term_h },
                 dock,
                 .{ .x = available.x, .y = available.y + term_h, .w = available.w, .h = divider },
+                status_bar,
                 chrome_h,
                 dock_h,
                 in.cell_width_px,
@@ -310,7 +330,7 @@ pub fn compute(in: Input) Geometry {
     };
 }
 
-fn fromDock(workspace: Rect, terminal: Rect, dock: Rect, divider: Rect, chrome_h: u32, dock_size_px: u32, cell_width_px: u32, scale_milli: u32, view_bar_px: u32) Geometry {
+fn fromDock(workspace: Rect, terminal: Rect, dock: Rect, divider: Rect, status_bar: Rect, chrome_h: u32, dock_size_px: u32, cell_width_px: u32, scale_milli: u32, view_bar_px: u32) Geometry {
     _ = cell_width_px;
     _ = scale_milli;
     _ = chrome_h;
@@ -327,6 +347,7 @@ fn fromDock(workspace: Rect, terminal: Rect, dock: Rect, divider: Rect, chrome_h
         .terminal = terminal,
         .dock = dock,
         .divider = divider,
+        .status_bar = status_bar,
         .view_bar = .{ .x = dock.x, .y = dock.y, .w = dock.w, .h = view_bar_h },
         .tree = .{ .x = dock.x, .y = view_area_y, .w = dock.w, .h = view_area_h },
         .tree_content = .{ .x = dock.x, .y = view_area_y, .w = dock.w, .h = view_area_h },
@@ -408,13 +429,13 @@ test "낮은 도크에서는 뷰 바부터 접어 콘텐츠를 남긴다" {
     // chrome 한 행(cell_height_px)보다 낮은 도크를 직접 만들어 계약만 본다 — compute의 pt 클램프를 거치면
     // 이 경계를 재현하기 어렵다(하한이 먼저 걸린다).
     const dock = Rect{ .x = 0, .y = 100, .w = 300, .h = 12 };
-    const tiny = fromDock(.{ .x = 0, .y = 0, .w = 300, .h = 112 }, .{ .x = 0, .y = 0, .w = 300, .h = 100 }, dock, .{ .x = 0, .y = 96, .w = 300, .h = 4 }, 20, 12, 10, 1000, 24);
+    const tiny = fromDock(.{ .x = 0, .y = 0, .w = 300, .h = 112 }, .{ .x = 0, .y = 0, .w = 300, .h = 100 }, dock, .{ .x = 0, .y = 96, .w = 300, .h = 4 }, .{ .x = 0, .y = 112, .w = 300, .h = 0 }, 20, 12, 10, 1000, 24);
     try std.testing.expectEqual(@as(u32, 0), tiny.view_bar.h);
     try std.testing.expectEqual(dock.h, tiny.tree.h);
     try std.testing.expectEqual(dock.y, tiny.tree.y);
     // 한 행이 들어가면 바가 서고 그만큼 뷰 영역이 줄어든다.
     // 바 높이는 넘겨받은 값 그대로다(pane 탭 바와 같은 값 → 경계선 정렬).
-    const roomy = fromDock(.{ .x = 0, .y = 0, .w = 300, .h = 200 }, .{ .x = 0, .y = 0, .w = 300, .h = 100 }, .{ .x = 0, .y = 100, .w = 300, .h = 100 }, .{ .x = 0, .y = 96, .w = 300, .h = 4 }, 20, 100, 10, 1000, 24);
+    const roomy = fromDock(.{ .x = 0, .y = 0, .w = 300, .h = 200 }, .{ .x = 0, .y = 0, .w = 300, .h = 100 }, .{ .x = 0, .y = 100, .w = 300, .h = 100 }, .{ .x = 0, .y = 96, .w = 300, .h = 4 }, .{ .x = 0, .y = 200, .w = 300, .h = 0 }, 20, 100, 10, 1000, 24);
     try std.testing.expectEqual(@as(u32, 24), roomy.view_bar.h);
     try std.testing.expectEqual(@as(u32, 76), roomy.tree.h);
 }
@@ -577,6 +598,131 @@ test "헤더 mode 슬롯은 kind별로 나뉜다 (markdown thirds, svg halves) b
     // html·text는 mode 선택기가 없다.
     try std.testing.expectEqual(@as(usize, 0), modesForKind(.html).len);
     try std.testing.expectEqual(@as(usize, 0), modesForKind(.text).len);
+}
+
+// SB1-S1: 상태바 seam. 이 조각은 **자리만 내고 높이는 0**이라, `status_bar_px`를 안 넘기거나 0으로 넘기면
+// 나머지 기하가 seam 이전과 **완전히 같아야** 한다. 그래야 S2의 높이 flip이 유일한 시각 변화가 된다.
+test "SB1-S1: status_bar_px가 0이면 나머지 기하가 seam 이전과 같다" {
+    const base = Input{
+        .backing_width_px = 1600,
+        .backing_height_px = 1000,
+        .sidebar_width_px = 240,
+        .titlebar_height_px = 28,
+        .cell_width_px = 8,
+        .cell_height_px = 20,
+        .scale_milli = 1000,
+        .divider_px = 4,
+        .side = .right,
+        .size_pt = 300,
+        .visible = true,
+    };
+    const implicit = compute(base); // 필드를 아예 안 준 경우(기본값 0)
+    var explicit_in = base;
+    explicit_in.status_bar_px = 0;
+    const explicit = compute(explicit_in);
+    try std.testing.expectEqual(implicit, explicit);
+    // 높이 0이면 상태바는 창 바닥에 붙은 빈 띠다 — 폭은 **창 전폭**(사이드바를 안 뺀다)이다.
+    try std.testing.expectEqual(@as(u32, 0), implicit.status_bar.h);
+    try std.testing.expectEqual(@as(u32, 1600), implicit.status_bar.w);
+    try std.testing.expectEqual(@as(u32, 0), implicit.status_bar.x);
+    try std.testing.expectEqual(@as(u32, 1000), implicit.status_bar.y);
+    // 작업영역은 창 바닥까지 그대로다(깎인 것 없음).
+    try std.testing.expectEqual(@as(u32, 1000 - 28), implicit.workspace.h);
+}
+
+// 높이가 실제로 서면(S2가 할 일) 그 높이만큼 **작업영역이 짧아져야** 한다 — rect만 더하고 자리를 안 빼면
+// 상태바가 터미널 위에 겹쳐 그려진다(docs/metal-ui-layout.md §5). seam 단계에서 그 계약을 미리 고정한다.
+test "SB1-S1: status_bar_px는 작업영역·도크·divider를 그만큼 짧게 만든다" {
+    const base = Input{
+        .backing_width_px = 1600,
+        .backing_height_px = 1000,
+        .sidebar_width_px = 240,
+        .titlebar_height_px = 28,
+        .cell_width_px = 8,
+        .cell_height_px = 20,
+        .scale_milli = 1000,
+        .divider_px = 4,
+        .side = .bottom,
+        .size_pt = 300,
+        .visible = true,
+    };
+    var with_bar = base;
+    with_bar.status_bar_px = 24;
+    const zero = compute(base);
+    const bar = compute(with_bar);
+
+    try std.testing.expectEqual(@as(u32, 24), bar.status_bar.h);
+    try std.testing.expectEqual(@as(u32, 1000 - 24), bar.status_bar.y);
+    try std.testing.expectEqual(@as(u32, 1600), bar.status_bar.w); // 전폭 — 사이드바 아래까지
+    // 작업영역이 정확히 그만큼 줄고, 바닥이 상태바 윗변과 맞닿는다(겹침도 틈도 없다).
+    try std.testing.expectEqual(zero.workspace.h - 24, bar.workspace.h);
+    try std.testing.expectEqual(bar.status_bar.y, bar.workspace.y + bar.workspace.h);
+    // bottom 도크도 함께 올라와 상태바를 침범하지 않는다.
+    try std.testing.expect(bar.dock.y + bar.dock.h <= bar.status_bar.y);
+    try std.testing.expect(bar.divider.y + bar.divider.h <= bar.status_bar.y);
+}
+
+// 조기 반환 셋(`!visible`·`dock_w==0`·`dock_h==0`)도 상태바를 날라야 한다. `Geometry.status_bar`에 기본값을
+// 안 준 이유가 이것이다 — 기본값이 있으면 이 세 경로만 조용히 빈 rect를 흘린다(가장 흔한 상태가 도크 숨김이다).
+test "SB1-S1: 도크가 없거나 0폭·0높이여도 상태바 rect는 그대로 나온다" {
+    const base = Input{
+        .backing_width_px = 1600,
+        .backing_height_px = 1000,
+        .sidebar_width_px = 240,
+        .titlebar_height_px = 28,
+        .cell_width_px = 8,
+        .cell_height_px = 20,
+        .scale_milli = 1000,
+        .divider_px = 4,
+        .side = .right,
+        .size_pt = 300,
+        .visible = false, // 조기 반환 ①: 도크 숨김
+        .status_bar_px = 24,
+    };
+    const hidden = compute(base);
+    try std.testing.expectEqual(@as(u32, 24), hidden.status_bar.h);
+    try std.testing.expectEqual(@as(u32, 1000 - 24), hidden.status_bar.y);
+    try std.testing.expectEqual(hidden.status_bar.y, hidden.workspace.y + hidden.workspace.h);
+
+    // 조기 반환 ②: 폭 하한이 터미널 최소폭에 밀려 dock_w가 0이 되는 좁은 창.
+    var narrow = base;
+    narrow.visible = true;
+    narrow.backing_width_px = 260; // 사이드바 240을 빼면 20px — 도크가 설 자리가 없다
+    const squeezed = compute(narrow);
+    try std.testing.expectEqual(@as(u32, 0), squeezed.dock.w);
+    try std.testing.expectEqual(@as(u32, 24), squeezed.status_bar.h);
+    try std.testing.expectEqual(@as(u32, 260), squeezed.status_bar.w);
+
+    // 조기 반환 ③: bottom에서 높이 하한에 밀려 dock_h가 0이 되는 낮은 창.
+    var flat = base;
+    flat.visible = true;
+    flat.side = .bottom;
+    flat.backing_height_px = 90; // titlebar 28 + 상태바 24를 빼면 도크가 설 자리가 없다
+    const flattened = compute(flat);
+    try std.testing.expectEqual(@as(u32, 0), flattened.dock.h);
+    try std.testing.expectEqual(@as(u32, 24), flattened.status_bar.h);
+    try std.testing.expectEqual(@as(u32, 90 - 24), flattened.status_bar.y);
+}
+
+// 상태바가 창보다 크게 요청되면 창 높이로 clamp한다 — 작업영역 0은 허용하되 underflow는 없다.
+test "SB1-S1: 창보다 큰 상태바 요청은 창 높이로 clamp된다" {
+    const geometry = compute(.{
+        .backing_width_px = 800,
+        .backing_height_px = 100,
+        .sidebar_width_px = 0,
+        .titlebar_height_px = 28,
+        .cell_width_px = 8,
+        .cell_height_px = 20,
+        .scale_milli = 1000,
+        .divider_px = 4,
+        .side = .bottom,
+        .size_pt = 300,
+        .visible = true,
+        .status_bar_px = 5000,
+    });
+    try std.testing.expectEqual(@as(u32, 100), geometry.status_bar.h);
+    try std.testing.expectEqual(@as(u32, 0), geometry.status_bar.y);
+    try std.testing.expectEqual(@as(u32, 0), geometry.workspace.h);
 }
 
 test "dock divider grab band rounds logical points up at fractional backing scales" {

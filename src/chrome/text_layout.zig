@@ -57,7 +57,7 @@ pub fn decodeCodepoint(bytes: []const u8, i: usize) struct { cp: u21, advance: u
 /// 여러 셀이 같은 col에 겹쳐 쌓인다. 정상 텍스트에서는 이 clamp가 걸리지 않는다.
 ///
 /// 아이콘 확대가 **opt-in인 이유**: 이 폭은 pane 탭 제목·pane 라벨·OSC 0/2 터미널 제목·rename 편집기까지
-/// 공유하는데, 등록 아이콘(0xF0001~A)이 Nerd Fonts v3 MDI(Plane-15 PUA)와 겹쳐 — 그 제목/이름에 우연히 그
+/// 공유하는데, 등록 아이콘(0xF0001~0xF0025)이 Nerd Fonts v3 MDI(Plane-15 PUA)와 겹쳐 — 그 제목/이름에 우연히 그
 /// 글리프가 와도 2칸으로 키우면 탭 텍스트가 어긋나고 caret 예약과 틀어진다. 그래서 maru가 아이콘을 직접 박는
 /// 카드 보조줄만 predicate를 넘긴다.
 pub fn clusterCols(base: u21, wide_icon: ?WideIconFn) u16 {

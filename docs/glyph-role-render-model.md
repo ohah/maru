@@ -9,7 +9,7 @@
 - **텍스트**(letter/digit/punctuation, 모든 스크립트) → **자연 메트릭 + 공통 baseline**. 절대 스케일·세로 재정렬하지 않는다. ink가 advance를 미세하게 넘어도(타이트한 폰트의 `w`·`m`·`@` 등) 그대로 둔다(이웃 셀로의 미세 overflow는 모노스페이스 bearing의 정상 동작).
 - **wide-render-symbol**(폰트가 셀보다 넓게 그리는 기호 — Enclosed Alphanumerics ①②③ U+2460~24FF) → 셀에 안 들어가면 **cover-fit**(종횡비 유지 축소).
 - **emoji**(컬러 글리프) → cover-fit + **ink-center**(보이는 픽셀 세로중앙).
-- **header icon**(◧ U+25E7·⚙ U+2699) → ink-center(아이콘끼리 세로 정렬). 래스터의 `center_symbol`은 이 **두 codepoint만** 매칭한다.
+- **legacy centred symbol**(◧ U+25E7·⚙ U+2699 — **터미널 콘텐츠 전용**) → ink-center. 래스터의 `center_symbol`은 이 **두 codepoint만** 매칭한다. maru 헤더 아이콘은 2026-08 이후 등록 PUA라 이 역할이 아니라 합성(synthesized) 경로다.
 - **synthesized**(box/block/powerline/braille/legacy + **등록 chrome 아이콘**(maru PUA) — `glyph_id==0`) → zig 렌더러가 절차적으로 그린다(slot=셀폭, 타일링). 이 경로(rasterize-glyph) 자체에 **안 온다** — chrome 아이콘은 `maru_is_synthesized_glyph`로 분류돼 합성되므로 header-icon 게이트가 아니다.
 
 핵심: **텍스트는 어떤 폰트에서도 스케일/ink-center되지 않는다(correctness by construction).** 셀에 맞춤(fit) 또는 중앙정렬(center)은 역할로 명시된 비-텍스트 글리프에만 적용한다.
@@ -47,7 +47,7 @@ maru는 역할 분류 조각을 이미 갖고 있다. 버그는 분류 부재가
 | synthesized | `renderer/{box,block,powerline,braille,legacy,icon}_glyph.zig` ↔ `maru_is_synthesized_glyph`(등록 chrome PUA 아이콘 포함) | (이 경로 밖 — `glyph_id==0`) |
 | emoji | 폰트 컬러 테이블(sbix/COLR) | `maru_font_is_color(draw_font)` |
 | wide-render-symbol | **`width.isWideRenderSymbol`** (U+2460~24FF) | `is_wide_render_symbol`(미러) `&& ink>slot` |
-| header icon | `0x25E7`(◧)·`0x2699`(⚙) **두 codepoint만** | `center_symbol` |
+| legacy centred symbol(터미널 콘텐츠) | `0x25E7`(◧)·`0x2699`(⚙) **두 codepoint만** | `center_symbol` |
 | text | 위 어디에도 안 듦 | (셋 다 false → 자연+baseline) |
 
 cover-fit 게이트 = `is_emoji ‖ center_symbol ‖ (is_wide_render_symbol && ink>slot)`. 텍스트는 셋 다 거짓이라 자연 메트릭+baseline 경로로 간다.
@@ -68,4 +68,4 @@ cover-fit 게이트 = `is_emoji ‖ center_symbol ‖ (is_wide_render_symbol && 
 
 - 단위(`src/width.zig`): 역할 분류 테스트 — `w`/ASCII/CJK는 wide-render-symbol 아님(=cover-fit 제외), ①②③은 wide-render-symbol(=cover-fit 대상).
 - 헤드리스(`MARU_SCREENSHOT`): Hack `w` 무자간 — baseline 정렬(뜨지 않음), ① 좁은 셀에서 fit. **단 모달/커서/장식 경로는 첫-frame 캡처로 못 봐 라이브 수동 검증 병행**(→ [검증 매트릭스](verification-matrix.md)).
-- 라이브: Hack `workspace`의 `w`가 이웃 글자와 baseline 일치, ① 등 동그란 번호가 셀에 온전, 헤더 아이콘(◧⚙🔔) 세로 정렬 유지.
+- 라이브: Hack `workspace`의 `w`가 이웃 글자와 baseline 일치, ① 등 동그란 번호가 셀에 온전, 헤더 아이콘(gear·plus·bell·sidebar_collapse — 등록 PUA) 세로 정렬 유지.

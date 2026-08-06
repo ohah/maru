@@ -21,9 +21,10 @@ const std = @import("std");
 // 형제 가드 `tests/boundary/imports.zig`가 이미 쓰는 토크나이저 규율로 되돌리고, 정수 리터럴은 **값으로**
 // 파싱하며 문자열 리터럴은 escape·원시 바이트 양쪽을 디코드한다.
 //
-// **스캔 범위는 `src/**/*.zig`뿐이다**(생성물 2개 제외). 다음은 이 가드 밖이라 규율이 반만 강제된다 —
-// 넓힐 때까지 사실로 남긴다: `tests/**/*.zig`, 그리고 `.m`/`.h`(IC4가 `.m`을 `MARU_ICON_*` 매크로로 옮겼지만
-// 리터럴로 되돌아가는 것을 막는 가드는 없다). 또 `loadRegistered`가 생성물을 **doc comment까지 포함해** 훑으므로,
+// **스캔 범위는 `src`·`tests` 트리의 `.zig`와 `.m`/`.h`/`.c`/`.metal`이다**(생성물 3종 + 이 가드 자신 제외 —
+// `exempt_files`). IC4가 `.m`을 `MARU_ICON_*` 매크로로 옮긴 것이 리터럴로 되돌아가면 `scanCSource`가 잡는다.
+// 밖에 남은 것: `.swift`(`sourceKind` 미지원)와 `scan_roots` 밖의 `build.zig`·`tools/`·`web/`.
+// 또 `loadRegistered`가 생성물을 **doc comment까지 포함해** 훑으므로,
 // 생성기의 자유 텍스트(주석·`FIT_DOCS`)에 미등록 PUA를 적으면 등록 집합이 오염돼 이 가드가 오탐한다.
 
 /// 리터럴을 그대로 둬야 하는 파일 — 생성물 3종과 이 가드 자신.

@@ -346,7 +346,7 @@ pill은 기존 GPU quad 프리미티브(`GpuQuad.corner_radii`+`border_widths`/`
      - 따라서 **다색 아이콘·런타임 stroke 변경·애니메이션은 이 파이프라인의 비목표**다(필요해지면 별도 결정). 여백·stroke는 런타임 속성이 될 수 없으므로 **자산을 하나 더 굽고 이름이 아니라 축으로 고른다**.
    - **`Fit` 축(빌드타임 자산 선택)**: `Icon` × `Fit{standard, tight}` → codepoint(`icons.codepointFit`/`utf8Fit`, 없는 조합은 기본 fit으로 폴백). `session_dock_*` 5종은 새 아이콘이 아니라 이 축의 변형으로 흡수했다 — `session_dock_chevron_down` = `(chevron_down, .tight)`, `session_dock_chevron_right` = `(chevron_right, .tight)`, `session_dock_search` = `(search, .tight)`, `session_dock_refresh` = `(reset, .tight)`, `session_dock_host` = `host`(변형 없음). **codepoint·coverage·SVG는 그대로**라 렌더 결과는 불변이다.
 
-     **폴백은 조용하다** — 없는 조합을 물으면 기본 fit 자산을 준다. 그래서 "요청한 fit을 실제로 받았는가"는 `icons.hasFit(icon, fit)`이 답하고, 생성물 테스트가 그 계약(자산이 있으면 그 fit, 없으면 기본)을 comptime 전수로 못박는다. 또 **모든 아이콘이 standard 자산을 갖는다**를 단언한다 — standard가 없으면 변형이 기본이 되고, 나중에 standard가 추가되는 순간 기본이 뒤집혀 fit 없이 부르던 소비처가 조용히 다른 그림을 그린다. 소비처는 그와 별개로 fit을 **명시**한다(도크가 그 선례).
+     **폴백은 조용하다** — 없는 조합을 물으면 기본 fit 자산을 준다. 그래서 "요청한 fit을 실제로 받았는가"는 `icons.hasFit(icon, fit)`이 답하고, 생성물 테스트가 그 계약(자산이 있으면 그 fit, 없으면 기본)을 comptime 전수로 못박는다. 또 **모든 아이콘이 standard 자산을 갖는다**를 단언한다 — standard가 없으면 변형이 기본이 되고, 나중에 standard가 추가되는 순간 기본이 뒤집혀 fit 없이 부르던 소비처가 조용히 다른 그림을 그린다. 소비처는 그와 별개로 fit을 **명시**한다(도크 헤더·카드 affordance가 그 선례 — 단 도크의 action 아이콘 `recent`·`document`는 아직 fit 없는 접근자다).
 
      축 이름이 "무게(weight)"가 아닌 이유는 자산 실측이다: `search-tight.svg`는 `search.svg`와 **path가 완전히 동일**하고 `viewBox`만 `0 0 16 16` → `1.5 1.5 14 14`로 조여져 있다. 즉 이 변형의 본질은 **슬롯 대비 여백**(활자의 optical size와 같은 개념)이고, chevron이 stroke를 `.75 → 1`로 올린 것은 조인 뒤에도 형태가 버티게 하는 **부수 조정**이다. 굵기로 이름 붙이면 search 변형을 설명하지 못한다.
    - **크기 토큰(런타임) — `chrome/ui/icon.zig`**: 소비처마다 흩어져 있던 값(`ui/button`의 18/14pt, `session_dock/types`의 18pt 두 번, `app_session`의 셀×1.7, `metal_lowering`의 run 셀 수 2)을 여기로 모았다. **좌표계가 둘이라 하나의 enum으로 묶지 않는다** — UiNode 트리는 슬롯을 logical pt로 선언하고(`Size{default, compact}.extentPt()`), 셀 그리드 chrome은 셀 대비 배율로 굽는다(`cell_raster_scale_milli`/`cellRasterExtentPx`). 아이콘 run의 셀 수는 per-icon 표가 아니라 컴포넌트 선언 하나다(`chrome_run_span` — 등록 아이콘은 셀에 꽉 차게 합성되므로 `wide_icons=true`인 run만 2칸).
@@ -354,7 +354,7 @@ pill은 기존 GPU quad 프리미티브(`GpuQuad.corner_radii`+`border_widths`/`
    - **단계**: IC1 ✅(이름 registry + 3-생성물 동기 가드) → IC2 ✅(소비처 리터럴 제거 + `tests/boundary/icon_literals.zig` 재발 가드) → IC3 ✅(`Fit` 축으로 `session_dock_*` 흡수) → IC4 ✅(크기 토큰 + `.m` 이름 매크로 + 배율 미러 가드).
    - **가드가 덮지 않는 것(적대적 검증이 열거 — 잊지 않게 기록)**:
      - **그림 수준 검증이 없는 소비처**: 헤더 gear·plus·search·bell, 펼친 사이드바 ◧, archive detail의 `document`, 파일 탐색기 20종(등록 여부만 확인). 소비처가 `.gear` 대신 `.plus`를 부르도록 바뀌면 아무 테스트도 안 잡는다 — 생성물 3종 대응 가드는 registry 안쪽만 본다.
-     - **스캔 범위**: 리터럴 가드는 `src`·`tests` 트리의 `.zig`와 `.m`/`.h`/`.c`/`.metal`을 본다. 남은 사각지대는 생성물 자신(exempt)과 `assets/*.svg`뿐이다.
+     - **스캔 범위**: 리터럴 가드는 `src`·`tests` 트리의 `.zig`와 `.m`/`.h`/`.c`/`.metal`을 본다. 남은 사각지대는 생성물 자신(exempt), `.swift`(`sourceKind` 미지원), 그리고 `scan_roots` 밖인 `build.zig`·`tools/`·`web/`이다.
      - **생성기 파이썬에 자동 테스트가 0이고** `mise run icons:check`는 `check` 밖(opt-in, rsvg 필요)이다. 매니페스트 검증(키워드·중복 cp·심볼 충돌)도 그 안에 있어 CI가 안 돈다.
      - `.m`의 아이콘 세로 보정(`py_nudge` 0.30ch)은 토큰·미러 가드 밖이다(배율만 미러한다).
      - `chrome/file_tree_icon.IconKind`가 `icons.Icon`과 **다른 어휘**를 유지한다(`code`↔`file_code`, `config`↔`file_config`, `git`↔`git_branch`). 두 번째 이름 체계라 언제 합칠지 결정이 필요하다.

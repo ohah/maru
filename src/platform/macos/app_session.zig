@@ -767,7 +767,7 @@ const sidebar_header_height_ratio_milli: u32 = 3000;
 // 그룹 헤더 row 높이 = cell 높이 × 3.0(위아래 여백 넉넉히; 카드 슬롯 5.2×보다는 얇다). 가변 높이의 헤더
 // 높이(SG3b-2-ii, docs/sidebar-groups.md §5). 사용자 요청으로 1.5→3.0(위아래 높이 2배, 텍스트 크기는 불변 — glyph는 밴드 중앙).
 const sidebar_header_row_h_ratio_milli: u32 = 3000;
-// 사이드바 접기/펼치기 토글 아이콘 코드포인트(◧ U+25E7 — 좌측 절반 채운 사각형 = 왼쪽 패널). 헤더 아이콘 줄(펼침)·
+// 사이드바 접기/펼치기 토글 아이콘 코드포인트(등록 PUA `sidebar_collapse` — 좌측 절반 채운 사각형 = 왼쪽 패널, 옛 ◧ U+25E7 대체). 헤더 아이콘 줄(펼침)·
 // 접힘 시 좌상단 버튼·.m 확대 분기가 공유하는 단일 출처.
 const sidebar_toggle_codepoint: u21 = icons.codepoint(.sidebar_collapse); // maru 아이콘 PUA(icon_glyph): sidebar-collapse(◧ 대체). 헤더·접힘 토글 공유.
 // 헤더 아이콘을 셀보다 크게 굽는 배율은 chrome 크기 토큰(`chrome.ui.icon`)이 소유한다 — 같은 1.7이

@@ -31,7 +31,7 @@ Maru 자체는 MIT 라이선스다([LICENSE](../LICENSE)). 이 문서는 Maru가
 
 - **tight 변형도 같은 유래다.** 이들은 새 그림이 아니라 위 Octicon을 슬롯에 더 채우도록 조정한 변형이고(`search-tight.svg`는 path가 `search.svg`와 완전히 동일, `reset-tight.svg`는 `reset.svg`와 동일), 코드에서는 별도 이름이 아니라 `icons.Fit.tight`로 고른다([chrome-strategy.md](chrome-strategy.md) §9.7). 파생물도 MIT 고지 대상이므로 여기 함께 적는다.
 - 라이선스 전문은 `assets/icons/LICENSE-octicons.txt`에 둔다(MIT — 저작권·허가 고지 유지 의무). **그 파일이 실제 번들 고지의 단일 출처이고, 이 표는 그것을 문서에 비추는 사본이다** — 자산을 추가·변형하면 둘 다 갱신한다.
-- `sparkle.svg`·`diamond.svg`·`host.svg`는 Maru 자작이라 이 표 대상이 아니다(Maru 본체 MIT). `sparkle.svg`·`host.svg`는 파일 헤더 주석에, `diamond.svg`는 `assets/icons/LICENSE-octicons.txt`의 예외 문단에 provenance가 있다.
+- `sparkle.svg`·`diamond.svg`·`host.svg`는 Maru 자작이라 이 표 대상이 아니다(Maru 본체 MIT). `host.svg`는 파일 헤더 주석에, `sparkle.svg`·`diamond.svg`는 `assets/icons/LICENSE-octicons.txt`의 예외 문단에 provenance가 있다.
 - **상표 주의**: `mark-github.svg`는 GitHub 로고 마크다. 라이선스(MIT)와 별개로 GitHub 상표이므로, GitHub(리포·프로필)로 연결하는 표시 용도로만 쓴다(<https://github.com/logos> 가이드라인). 현재 용도(사이드바 카드의 GitHub 리포 표시)는 이 범위 안이다.
 - 배포물 내 고지 노출은 아래 "About 화면 attribution"과 같은 후속으로 묶는다(현재는 리포 내 라이선스 파일 + 이 문서로 기록).
 

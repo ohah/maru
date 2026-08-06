@@ -1608,7 +1608,7 @@ void maru_macos_coretext_smoke_rasterize_glyph(
 
         // 축소-맞춤(cover-fit: 종횡비 유지 축소)은 **역할(role)** 로 게이트한다 — 런타임 ink 측정을
         // **모든** 글리프에 적용하지 않는다(docs/glyph-role-render-model.md). 대상은 (1) 이모지(컬러
-        // 글리프) (2) 헤더 아이콘 심볼(◧⚙) (3) **wide-render-symbol**(width.isWideRenderSymbol —
+        // 글리프) (2) 터미널 콘텐츠의 ◧⚙(옛 헤더 아이콘 — 지금 헤더는 등록 PUA라 합성 경로) (3) **wide-render-symbol**(width.isWideRenderSymbol —
         // Enclosed Alphanumerics ①②③ U+2460대, 폰트가 셀보다 넓게 그리는 EAW Ambiguous 기호)이다.
         // overflow 분기는 (3)이 1칸에 욱여넣어져 오른쪽이 잘리던 것을 종횡비 축소로 온전히 그린다(폭은
         // UAX#11대로 width 1, 렌더만 셀에 맞춤 — Ghostty constraintWidth와 동일, renderer/cell.zig).
@@ -1624,7 +1624,7 @@ void maru_macos_coretext_smoke_rasterize_glyph(
         const bool is_emoji = maru_font_is_color(draw_font);
         const bool is_wide_render_symbol = maru_is_wide_render_symbol(codepoint);
         const bool overflows_slot = is_wide_render_symbol && (bounds.size.width > avail_w);
-        // 헤더 아이콘 심볼(◧ U+25E7·⚙ U+2699)은 글리프마다 baseline 대비 ink 위치가 달라, 공통-baseline
+        // ◧(U+25E7)·⚙(U+2699)은 글리프마다 baseline 대비 ink 위치가 달라, 공통-baseline
         // 정렬이면 같은 줄에 그려도 서로 세로로 어긋나 보인다(사용자 피드백 "3개 아이콘 수평이 안 맞음").
         // 심볼은 ink-center가 자연스럽고(baseline 흔들림 우려는 글자에만 해당 — 심볼은 텍스트 줄과 안 섞임)
         // 셀 중앙에 일관되게 앉아 서로 정렬된다. '+'(ASCII)는 math-axis라 이미 중앙 근처라 제외(텍스트 공유).

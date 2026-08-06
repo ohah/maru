@@ -17,8 +17,8 @@ Zig test로 SVG SHA-256 manifest와 C/Zig registry를 검증한다. `--check`는
 (`icons.Icon.session_dock_chevron_down`)을 쓰게 해, 어느 SVG인지 코드에서 읽히고 자산이 재배치돼도
 조용히 어긋나지 않게 한다(docs/chrome-strategy.md §9.7).
 
-사용: python3 tools/svg_to_coverage.py > src/renderer/icon_coverage_data.zig && zig fmt src/renderer/icon_coverage_data.zig
-  (icon_codepoints.h와 src/icons.zig는 같은 실행에서 파일로 갱신된다)
+사용: python3 tools/svg_to_coverage.py
+  (세 산출물을 모두 파일로 쓴다 — 생성이 **전부 성공한 뒤에만** 쓰므로 실패해도 커밋된 데이터가 안 깨진다)
 검사: python3 tools/svg_to_coverage.py --check
 사전: brew install librsvg  (rsvg-convert), python3 -m pip install Pillow
 """
@@ -35,7 +35,10 @@ from PIL import Image
 # 실제 렌더 슬롯보다 크게 둔다. 정사각 마스터를 런타임에 슬롯 종횡비로 맞춰 그린다(icon_glyph.zig).
 MASTER = 48
 
-# 등록 아이콘 → C 헤더(아래)에 codepoint 집합으로 emit되는 경로.
+# coverage(alpha) 마스터가 쓰이는 경로.
+COVERAGE_ZIG_PATH = "src/renderer/icon_coverage_data.zig"
+
+# 등록 아이콘 → C 헤더(아래)에 codepoint 집합·이름 매크로로 emit되는 경로.
 C_HEADER_PATH = "src/platform/macos/icon_codepoints.h"
 
 # 등록 아이콘 → semantic 이름 registry(Zig enum)로 emit되는 경로. 레이어 중립 leaf라 chrome(L3)·
@@ -57,6 +60,18 @@ ICONS_ZIG_PATH = "src/icons.zig"
 # fit이 하나뿐인 아이콘은 그것이 기본이고, 없는 fit을 물으면 기본으로 폴백한다(icons.zig `codepointFit`).
 FIT_STANDARD = "standard"
 FIT_TIGHT = "tight"
+
+# 각 fit이 **무엇을 약속하는가**. 생성물 enum의 독스트링이 되며, 설명 없는 fit은 생성기가 거부한다.
+# tight의 수단이 자산마다 다르다는 사실을 여기 못박는다 — 실측: search는 viewBox만 조였고(path 동일),
+# chevron_*는 viewBox가 standard와 같은 대신 path를 굵고 크게 다시 그렸다(stroke .75 → 1).
+FIT_DOCS = {
+    FIT_STANDARD: ["자산이 준 기본 비율(대개 Octicon viewBox 0 0 16 16)."],
+    FIT_TIGHT: [
+        "같은 슬롯을 더 채우는 변형. **수단은 자산마다 다르다** — `search`는 viewBox를 조였고(path 동일),",
+        "`chevron_*`는 viewBox가 같은 대신 path를 굵고 크게 다시 그렸다(stroke .75 → 1). 이 축이 약속하는",
+        "것은 \"슬롯을 더 채운다\"이지 특정 수단이 아니다.",
+    ],
+}
 ICONS = [
     ("git_branch", FIT_STANDARD, 0xF0001, "assets/icons/git-branch.svg"),
     ("gear", FIT_STANDARD, 0xF0002, "assets/icons/gear.svg"),
@@ -155,14 +170,75 @@ def c_header(entries):
     return "\n".join(lines) + "\n"
 
 
-def icon_variants():
-    """semantic 이름 → {fit: (cp, path)}. 선언 순서를 유지한다(생성물 순서 = ICONS 순서)."""
+# Zig 키워드 — semantic 이름이 이걸 밟으면 생성물이 컴파일되지 않는다. `zig fmt`가 뱉는 진단은 파이썬
+# 트레이스백에 묻혀 원인이 안 보이므로(적대적 검증에서 실측), 매니페스트 단계에서 이름으로 막는다.
+# 매니페스트에 이미 `test_icon`(assets/icons/test.svg)이 있는 것이 이 함정을 손으로 피해 간 흔적이다.
+ZIG_KEYWORDS = frozenset("""
+addrspace align allowzero and anyframe anytype asm async await break callconv catch comptime const
+continue defer else enum errdefer error export extern fn for if inline linksection noalias noinline
+nosuspend opaque or orelse packed pub resume return struct suspend switch test threadlocal try union
+unreachable usingnamespace var volatile while
+""".split())
+
+# Zig primitive 타입 — 키워드는 아니지만 같은 이름의 const가 primitive를 가려 생성물 안에서 혼란을 만든다.
+ZIG_PRIMITIVE_PREFIXES = ("u", "i", "f", "c_")
+
+
+def zig_fmt(source):
+    """생성한 Zig 소스를 포맷한다. **zig의 진단을 삼키지 않는다** — 예전엔 `capture_output=True`가 stderr를
+    통째로 버려, 이름 하나가 Zig 키워드일 때 파이썬 트레이스백만 남고 정작 원인(`expected '.', found '='`)이
+    사라졌다(적대적 검증 실측)."""
+    result = subprocess.run(["zig", "fmt", "--stdin"], input=source, text=True, capture_output=True)
+    if result.returncode != 0:
+        sys.stderr.write(result.stderr)
+        sys.exit(f"zig fmt failed ({result.returncode}) — 생성된 소스가 유효한 Zig가 아니다")
+    return result.stdout
+
+
+def validate_manifest():
+    """생성 전에 매니페스트 자체의 함정을 막는다. **여기서 죽는 편이 낫다** — 통과시키면 실패가 zig fmt
+    트레이스백(이름)·clang 경고(심볼 충돌)·런타임 오작동(cp 중복)으로 흩어져 원인이 안 보인다."""
+    seen_cp = {}
+    seen_symbol = {}
     variants = {}
     for name, fit, cp, path in ICONS:
+        if name in ZIG_KEYWORDS:
+            raise SystemExit(f"icon name is a Zig keyword: {name!r} ({path})")
+        if name.startswith(ZIG_PRIMITIVE_PREFIXES) and name[1:].isdigit():
+            raise SystemExit(f"icon name shadows a Zig primitive type: {name!r} ({path})")
+        if not name.replace("_", "").isalnum() or name[0].isdigit():
+            raise SystemExit(f"icon name is not a plain Zig identifier: {name!r} ({path})")
         if fit in variants.get(name, {}):
             raise SystemExit(f"duplicate fit for icon: {name} {fit}")
+        if cp in seen_cp:
+            raise SystemExit(f"duplicate codepoint 0x{cp:X}: {seen_cp[cp]} and {name}/{fit}")
+        seen_cp[cp] = f"{name}/{fit}"
         variants.setdefault(name, {})[fit] = (cp, path)
+    # 심볼 유일성은 (name, fit)이 유일해도 깨질 수 있다: semantic 이름 `search_tight`를 새로 등록하면
+    # `search`의 tight 변형이 만드는 심볼과 같아진다. Zig는 중복 const로 잡지만 **C는 매크로 재정의를
+    # 경고만 하고 나중 값이 이겨** 도크 아이콘이 조용히 엉뚱한 cp가 된다(적대적 검증에서 clang 실측).
+    for name, fits in variants.items():
+        for fit in fits:
+            symbol = symbol_name(name, fit, fits)
+            if symbol in seen_symbol:
+                raise SystemExit(f"symbol collision: {symbol!r} from {seen_symbol[symbol]} and {name}/{fit}")
+            seen_symbol[symbol] = f"{name}/{fit}"
     return variants
+
+
+def icon_variants():
+    """semantic 이름 → {fit: (cp, path)}. 선언 순서를 유지한다(생성물 순서 = ICONS 순서)."""
+    return validate_manifest()
+
+
+def fit_names():
+    """매니페스트에 실제로 등장하는 fit들(선언 순서). `Fit` enum과 lookup 갈래가 여기서 파생된다 —
+    하드코딩하면 새 fit이 enum에 없는 채 switch에만 나와 컴파일 에러가 매니페스트가 아닌 생성물을 가리킨다."""
+    ordered = []
+    for _, fit, _, _ in ICONS:
+        if fit not in ordered:
+            ordered.append(fit)
+    return ordered
 
 
 def default_fit(fits):
@@ -191,14 +267,20 @@ def icons_zig():
         "//! 이름↔codepoint 대응은 color.zig·width.zig처럼 최상위에 둔다. 등록 집합의 **렌더 계약**(합성 게이트·",
         "//! 폰트 폴백·다운스케일)은 renderer/icon_glyph.zig가 계속 소유하고, 이 파일은 대응 표만 갖는다.",
         "",
-        "/// 같은 그림의 optical 변형 축(docs/chrome-strategy.md §9.7). coverage 마스터는 alpha 한 채널이라 여백·stroke는",
-        "/// **빌드타임에 굽는 값**이고 런타임에 못 바꾼다 — 그래서 변형은 자산을 하나 더 굽고 이 축으로 고른다",
-        "/// (소비처마다 새 이름으로 등록하던 `session_dock_*`를 대체한다).",
+        "/// 같은 그림이 슬롯을 **얼마나 채우는가** 축(docs/chrome-strategy.md §9.7). coverage 마스터는 alpha 한",
+        "/// 채널이라 여백·stroke가 **빌드타임에 굳고** 런타임에 못 바꾼다 — 그래서 변형은 자산을 하나 더 굽고",
+        "/// 이 축으로 고른다(소비처마다 새 이름으로 등록하던 `session_dock_*`를 대체한다).",
         "pub const Fit = enum {",
-        "    /// Octicon 기본 여백(viewBox 0 0 16 16).",
-        "    standard,",
-        "    /// 여백을 조여 같은 슬롯을 더 채운다(축소돼도 형태가 버티도록 stroke를 올린 자산도 있다).",
-        "    tight,",
+    ]
+    for fit in fit_names():
+        doc = FIT_DOCS.get(fit)
+        if doc is None:
+            # 의미를 모르는 fit을 이름만 뱉으면 생성물이 "무엇을 고르는 축인지" 설명 없는 enum이 된다.
+            raise SystemExit(f"unknown fit {fit!r}: FIT_DOCS에 설명을 추가하라")
+        for line in doc:
+            lines.append(f"    /// {line}")
+        lines.append(f"    {fit},")
+    lines += [
         "};",
         "",
         "/// 등록된 maru chrome 아이콘의 semantic 이름. 태그 값 = **기본 fit**의 Plane 15 PUA codepoint다.",
@@ -222,15 +304,20 @@ def icons_zig():
         "/// 없는 조합마다 소비처가 분기하는 것보다 기본으로 떨어지는 편이 호출부를 단순하게 유지한다.",
         "pub fn codepointFit(icon: Icon, fit: Fit) u21 {",
         "    return switch (fit) {",
-        "        .standard => codepoint(icon),",
-        "        .tight => switch (icon) {",
     ])
-    for name, fits in variants.items():
-        if FIT_TIGHT in fits and default_fit(fits) != FIT_TIGHT:
-            lines.append(f"            .{name} => 0x{fits[FIT_TIGHT][0]:X},")
+    for fit in fit_names():
+        overrides = [
+            (name, fits[fit][0]) for name, fits in variants.items() if fit in fits and default_fit(fits) != fit
+        ]
+        if overrides.__len__() == 0:
+            lines.append(f"        .{fit} => codepoint(icon),")
+            continue
+        lines.append(f"        .{fit} => switch (icon) {{")
+        for name, cp in overrides:
+            lines.append(f"            .{name} => 0x{cp:X},")
+        lines.append("            else => codepoint(icon),")
+        lines.append("        },")
     lines.extend([
-        "            else => codepoint(icon),",
-        "        },",
         "    };",
         "}",
         "",
@@ -249,15 +336,20 @@ def icons_zig():
         "/// `codepointFit`의 UTF-8 판(같은 폴백 규칙).",
         "pub fn utf8Fit(icon: Icon, fit: Fit) []const u8 {",
         "    return switch (fit) {",
-        "        .standard => utf8(icon),",
-        "        .tight => switch (icon) {",
     ])
-    for name, fits in variants.items():
-        if FIT_TIGHT in fits and default_fit(fits) != FIT_TIGHT:
-            lines.append(f"            .{name} => \"\\u{{{fits[FIT_TIGHT][0]:X}}}\",")
+    for fit in fit_names():
+        overrides = [
+            (name, fits[fit][0]) for name, fits in variants.items() if fit in fits and default_fit(fits) != fit
+        ]
+        if overrides.__len__() == 0:
+            lines.append(f"        .{fit} => utf8(icon),")
+            continue
+        lines.append(f"        .{fit} => switch (icon) {{")
+        for name, cp in overrides:
+            lines.append(f"            .{name} => \"\\u{{{cp:X}}}\",")
+        lines.append("            else => utf8(icon),")
+        lines.append("        },")
     lines.extend([
-        "            else => utf8(icon),",
-        "        },",
         "    };",
         "}",
         "",
@@ -281,7 +373,10 @@ def icons_zig():
         "    inline for (@typeInfo(Icon).@\"enum\".fields) |field| {",
         "        const icon: Icon = @enumFromInt(field.value);",
         "        try std.testing.expectEqual(@as(u21, field.value), codepoint(icon));",
-        "        for ([_]Fit{ .standard, .tight }) |fit| {",
+        "        // fit도 **comptime 전수**한다 — 배열에 손으로 적으면 새 fit이 조용히 검증 밖에 남는다",
+        "        // (적대적 검증 실측: 세 번째 fit이 미등록 cp를 가리켜도 전부 통과했다).",
+        "        inline for (@typeInfo(Fit).@\"enum\".fields) |fit_field| {",
+        "            const fit: Fit = @enumFromInt(fit_field.value);",
         "            const cp = codepointFit(icon, fit);",
         "            const resolved = fromCodepoint(cp) orelse return error.TestUnexpectedResult;",
         "            try std.testing.expectEqual(icon, resolved.icon); // 폴백해도 같은 아이콘이다",
@@ -292,19 +387,25 @@ def icons_zig():
         "    }",
         "}",
         "",
-        "test \"icons: tight 변형이 있으면 기본과 다른 codepoint이고, 없으면 기본으로 폴백한다\" {",
+        "test \"icons: 변형이 등록된 아이콘은 기본과 다른 codepoint를 주고, 없으면 기본으로 폴백한다\" {",
         "    const std = @import(\"std\");",
-        "    // 도크가 쓰는 tight 변형(같은 그림, 조인 여백) — 기본과 달라야 변형이 실제로 등록된 것이다.",
+        "    // 도크가 쓰는 tight 변형 — 기본과 달라야 변형이 실제로 등록된 것이다.",
         "    try std.testing.expect(codepointFit(.chevron_down, .tight) != codepoint(.chevron_down));",
         "    try std.testing.expect(codepointFit(.search, .tight) != codepoint(.search));",
         "    // 변형이 없는 아이콘은 기본으로 떨어진다(소비처가 조합마다 분기하지 않게).",
         "    try std.testing.expectEqual(codepoint(.gear), codepointFit(.gear, .tight));",
         "}",
+        "",
+        "test \"icons: 기본 fit이 standard가 아닌 아이콘은 fit-less 접근자가 그 변형을 준다(재지정 감시)\" {",
+        "    const std = @import(\"std\");",
+        "    // `refresh`는 standard 자산이 없어 기본 fit이 tight다. 나중에 standard refresh를 매니페스트에",
+        "    // 추가하면 기본이 뒤집혀 **fit 없이 부르던 소비처가 조용히 다른 그림을 그린다** — 그 순간 이 단언이",
+        "    // 깨져 호출부를 `.tight` 명시로 바꾸라고 알린다(적대적 검증이 짚은 default_fit flip).",
+        "    try std.testing.expectEqual(codepointFit(.refresh, .tight), codepoint(.refresh));",
+        "}",
     ])
     raw_zig = "\n".join(lines) + "\n"
-    return subprocess.run(
-        ["zig", "fmt", "--stdin"], input=raw_zig, text=True, capture_output=True, check=True
-    ).stdout
+    return zig_fmt(raw_zig)
 
 
 def generate():
@@ -346,10 +447,7 @@ def generate():
         lines.append(f'    .{{ .name = "{name}", .cp = 0x{cp:X}, .path = "{path}", .sha256 = "{digest}" }},')
     lines.append("};")
     raw_zig = "\n".join(lines) + "\n"
-    formatted = subprocess.run(
-        ["zig", "fmt", "--stdin"], input=raw_zig, text=True, capture_output=True, check=True
-    ).stdout
-    return formatted, c_header(entries), icons_zig()
+    return zig_fmt(raw_zig), c_header(entries), icons_zig()
 
 
 def main():
@@ -361,12 +459,12 @@ def main():
     )
     args = parser.parse_args()
     zig_source, header, ids_source = generate()
+    targets = (
+        (COVERAGE_ZIG_PATH, zig_source),
+        (C_HEADER_PATH, header),
+        (ICONS_ZIG_PATH, ids_source),
+    )
     if args.check:
-        targets = (
-            ("src/renderer/icon_coverage_data.zig", zig_source),
-            (C_HEADER_PATH, header),
-            (ICONS_ZIG_PATH, ids_source),
-        )
         drift = False
         for path, expected in targets:
             try:
@@ -380,11 +478,13 @@ def main():
         if drift:
             sys.exit(1)
         return
-    with open(C_HEADER_PATH, "w") as output:
-        output.write(header)
-    with open(ICONS_ZIG_PATH, "w") as output:
-        output.write(ids_source)
-    sys.stdout.write(zig_source)
+    # **세 산출물 모두 직접 쓴다.** 예전엔 coverage만 stdout으로 내보내 `> src/renderer/icon_coverage_data.zig`로
+    # 받게 했는데, 셸이 파이썬 실행 **전에** 타깃을 비우므로 생성이 실패하면 커밋된 데이터가 0바이트로 남았다
+    # (적대적 검증에서 재현). 파일 쓰기는 생성이 전부 성공한 뒤에만 일어난다.
+    for path, source in targets:
+        with open(path, "w") as output:
+            output.write(source)
+        print(f"wrote {path}", file=sys.stderr)
 
 
 if __name__ == "__main__":

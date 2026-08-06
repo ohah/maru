@@ -1877,6 +1877,47 @@ test "icon_codepoints.h(C 게이트)와 Zig 등록 아이콘 집합이 일치한
     try std.testing.expectEqual(renderer.icon_glyph.registeredIconCount(), c_count); // 개수 동일 → set 동일
 }
 
+// 위 가드는 **집합**만 본다. `.m`이 이제 `MARU_ICON_GEAR` 같은 이름 매크로로 아이콘을 고르므로(IC4), 이름↔cp
+// **대응**이 어긋나면 1.7× 확대·bell 특례·에이전트 배율이 엉뚱한 글리프에 붙는다 — 값 집합은 그대로라 위
+// 테스트는 통과한다(적대적 검증이 짚은 구멍). 여기서 매크로를 파싱해 Zig 이름 registry와 1:1로 맞춘다.
+test "icon_codepoints.h의 MARU_ICON_* 매크로가 Zig 이름 registry와 같은 대응을 준다" {
+    const header = @embedFile("icon_codepoints.h");
+    var macro_count: usize = 0;
+    var i: usize = 0;
+    while (std.mem.indexOfPos(u8, header, i, "#define MARU_ICON_")) |pos| {
+        const name_start = pos + "#define MARU_ICON_".len;
+        var name_end = name_start;
+        while (name_end < header.len and header[name_end] != ' ' and header[name_end] != '\n') : (name_end += 1) {}
+        // include guard(`#define MARU_ICON_CODEPOINTS_H`)도 같은 접두사라 걸린다 — 값이 16진수인 것만 본다.
+        var value_start = name_end;
+        while (value_start < header.len and header[value_start] == ' ') : (value_start += 1) {}
+        if (!std.mem.startsWith(u8, header[value_start..], "0x")) {
+            i = name_end;
+            continue;
+        }
+        const hex_start = value_start + 2;
+        var hex_end = hex_start;
+        while (hex_end < header.len and std.ascii.isHex(header[hex_end])) : (hex_end += 1) {}
+        const cp: u21 = @intCast(try std.fmt.parseInt(u32, header[hex_start..hex_end], 16));
+
+        // 매크로 이름은 매니페스트 심볼의 대문자다: 기본 fit은 `<이름>`, 변형은 `<이름>_<FIT>`.
+        const resolved = icons.fromCodepoint(cp) orelse return error.TestUnexpectedResult;
+        var expected_buf: [64]u8 = undefined;
+        const tag = @tagName(resolved.icon);
+        const expected_lower = if (icons.codepoint(resolved.icon) == cp)
+            tag
+        else
+            try std.fmt.bufPrint(&expected_buf, "{s}_{s}", .{ tag, @tagName(resolved.fit) });
+        var upper_buf: [64]u8 = undefined;
+        const expected = std.ascii.upperString(upper_buf[0..expected_lower.len], expected_lower);
+        try std.testing.expectEqualStrings(expected, header[name_start..name_end]);
+
+        macro_count += 1;
+        i = hex_end;
+    }
+    try std.testing.expectEqual(renderer.icon_glyph.registeredIconCount(), macro_count); // 자산마다 하나씩
+}
+
 test "every semantic file tree icon lowers to a registered synthesized glyph" {
     inline for (std.meta.fields(file_tree_icon.IconKind)) |field| {
         const kind: file_tree_icon.IconKind = @enumFromInt(field.value);

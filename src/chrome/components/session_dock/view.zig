@@ -22,11 +22,13 @@ const types = @import("types.zig");
 // cannot promise the size or optical centre of a Chrome header affordance.
 // Dock controls use component-specific coverage glyphs: all occupy the standard two-cell
 // icon slot, while their tighter SVG view boxes keep their optical size consistent with cards.
-const refresh_icon = icons.utf8(.refresh);
+// fit을 **전부 명시**한다. `refresh`·`host`는 지금 변형이 하나뿐이라 fit 없는 접근자로도 같은 값이지만,
+// 나중에 다른 fit이 등록되면 기본이 뒤집혀 도크가 조용히 다른 그림을 그린다(적대적 검증이 짚은 default flip).
+const refresh_icon = icons.utf8Fit(.refresh, .tight);
 const search_icon = icons.utf8Fit(.search, .tight);
 const chevron_down_icon = icons.utf8Fit(.chevron_down, .tight);
 const chevron_right_icon = icons.utf8Fit(.chevron_right, .tight);
-const host_icon = icons.utf8(.host);
+const host_icon = icons.utf8Fit(.host, .standard);
 const resume_icon = icons.utf8(.recent);
 const reveal_icon = icons.utf8(.document);
 const host_label = "로컬";
@@ -666,13 +668,16 @@ fn effectiveScale(scale_milli: u32) u32 {
     return if (scale_milli == 0) 1000 else scale_milli;
 }
 
-/// 도크가 **자기 것으로 선언한** 아이콘인가. 도크 affordance는 tight fit(여백을 조인 변형)을 쓰고,
-/// 카드 안 라벨 아이콘(recent·document)은 기본 fit을 쓴다 — 둘 다 이 컴포넌트가 소유한다.
+/// 도크가 **자기 것으로 선언한** 아이콘인가 — 위 상수들이 실제로 고른 (아이콘, fit) 조합과 정확히 같은 집합이다.
+///
+/// fit까지 **전부** 본다. affordance는 tight를, 카드 라벨(recent·document)과 host는 standard를 쓰는데,
+/// fit을 안 보면 나중에 다른 변형이 등록되는 순간 이 집합이 조용히 넓어져 그 셀이 width-2로 벌어진다
+/// (적대적 검증 지적). 조합이 늘면 위 상수와 여기를 함께 고치는 것이 규약이다.
 fn isSessionDockIcon(codepoint: u21) bool {
     const resolved = icons.fromCodepoint(codepoint) orelse return false;
     return switch (resolved.icon) {
-        .recent, .document, .refresh, .host => true,
-        .search, .chevron_down, .chevron_right => resolved.fit == .tight,
+        .recent, .document, .host => resolved.fit == .standard,
+        .refresh, .search, .chevron_down, .chevron_right => resolved.fit == .tight,
         else => false,
     };
 }

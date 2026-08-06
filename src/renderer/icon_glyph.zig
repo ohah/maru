@@ -119,21 +119,35 @@ test "icon_glyph: 미등록 PUA는 null(폰트 경로로 폴백)" {
 // 가드)·**semantic 이름 registry**(src/icons.zig)가 모두 svg_to_coverage.py의 같은 ICONS에서 나온다. 이름 registry가
 // 어긋나면 소비처가 이름으로 고른 아이콘이 미등록 cp로 lower돼 **폰트 폴백(빈 칸 또는 엉뚱한 Nerd Fonts 글리프)**이
 // 되므로, 외부 도구 없이 CI가 잡게 여기서 못박는다. `--check`(로컬, rsvg 필요)와 달리 이 테스트는 Zig만 쓴다.
-test "icon_glyph: 생성된 이름 registry가 coverage 등록 집합과 정확히 같다" {
+test "icon_glyph: 생성된 이름 registry가 coverage 등록 집합·자산 이름과 정확히 같다" {
     const icons = @import("../icons.zig");
-    // 두 방향을 모두 본다 — 한쪽만 보면 한 집합이 조용히 커져도 통과한다.
+    // 세 방향을 본다. 앞의 둘만 보면 **cp 집합은 같은데 이름↔자산 대응이 통째로 뒤바뀐** 생성물이 통과한다
+    // (적대적 검증 실측: gear↔plus를 일관되게 맞바꿔도 전 테스트 통과 → 앱이 조용히 다른 그림을 그린다).
+    //
     // (1) 등록된 모든 자산은 이름+fit으로 되읽히고, 그 조합이 다시 같은 cp를 준다.
+    // (2) 그 이름이 **자산 매니페스트의 이름과 같다** — 대응(mapping)까지 못박는 조건이다.
     for (data.asset_manifest) |asset| {
         const cp: u21 = @intCast(asset.cp);
         const resolved = icons.fromCodepoint(cp) orelse return error.TestUnexpectedResult;
         try std.testing.expectEqual(cp, icons.codepointFit(resolved.icon, resolved.fit));
         try std.testing.expect(isRegisteredIcon(cp));
+
+        // 매니페스트 심볼 규약: 기본 fit은 이름 그대로, 나머지는 `<이름>_<fit>`(svg_to_coverage.py symbol_name).
+        var expected_buf: [64]u8 = undefined;
+        const tag = @tagName(resolved.icon);
+        const expected = if (icons.codepoint(resolved.icon) == cp)
+            tag
+        else
+            try std.fmt.bufPrint(&expected_buf, "{s}_{s}", .{ tag, @tagName(resolved.fit) });
+        try std.testing.expectEqualStrings(expected, asset.name);
     }
-    // (2) 이름으로 고를 수 있는 모든 (아이콘, fit) 조합은 반드시 합성된다 — 아니면 그 자리가 폰트 폴백
-    //     (빈 칸 또는 엉뚱한 Nerd Fonts 글리프)이 된다. fit 폴백으로 겹치는 조합은 자연히 중복 확인된다.
+    // (3) 이름으로 고를 수 있는 모든 (아이콘, fit) 조합은 반드시 합성된다 — 아니면 그 자리가 폰트 폴백
+    //     (빈 칸 또는 엉뚱한 Nerd Fonts 글리프)이 된다. **fit도 comptime 전수**한다: 배열에 손으로 적으면
+    //     새 fit이 미등록 cp를 가리켜도 조용히 통과했다(적대적 검증 실측).
     inline for (@typeInfo(icons.Icon).@"enum".fields) |field| {
         const icon: icons.Icon = @enumFromInt(field.value);
-        for ([_]icons.Fit{ .standard, .tight }) |fit| {
+        inline for (@typeInfo(icons.Fit).@"enum".fields) |fit_field| {
+            const fit: icons.Fit = @enumFromInt(fit_field.value);
             try std.testing.expect(isRegisteredIcon(icons.codepointFit(icon, fit)));
         }
     }

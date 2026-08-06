@@ -331,6 +331,21 @@ test "scroll state clamps each backing pixel boundary" {
     try std.testing.expectEqual(@as(u32, 0), state.offset_y_px);
 }
 
+test "a move that changes nothing reports false so it cannot force a repaint" {
+    // 이 bool은 세 호출부에서 전부 리페인트 신호다 — 휠은 `if (scrollByPx(...))`로 metal_dirty를
+    // 세우고, 드래그는 false면 조기 반환하며, 키보드는 changed로 같은 판단을 한다. 그래서 "안
+    // 움직였는데 true"는 무해한 값이 아니라, 끝에 닿은 채 휠을 굴리는 동안 매 이벤트마다 프레임을
+    // 다시 그리게 만드는 결함이다.
+    var state = State{};
+    try std.testing.expect(!state.scrollByPx(0, 100)); // 델타 0
+    try std.testing.expect(!state.scrollByPx(-5, 100)); // 이미 맨 위
+    try std.testing.expect(state.scrollByPx(100, 100)); // 맨 아래까지 이동
+    try std.testing.expect(!state.scrollByPx(1, 100)); // 이미 맨 아래
+    try std.testing.expect(!state.setOffsetPx(100, 100)); // 같은 값
+    try std.testing.expect(!state.setOffsetPx(999, 100)); // clamp 후 같은 값
+    try std.testing.expect(state.setOffsetPx(0, 100)); // 실제 이동
+}
+
 test "clamp and reset are the two ways an offset shrinks without pointer input" {
     // 그룹을 접으면 content가 짧아지고 max offset이 줄어든다. `clamp`가 그때 offset을 끌어내리는
     // 유일한 지점이라, 이것이 no-op이면 목록이 빈 공간에 스크롤된 채 남는다 — 이 계약을 보는

@@ -748,6 +748,42 @@ test "archive scroll anchor restores only the exact materialized card after reor
     }, old_items).?;
     try std.testing.expectEqual(@as(u32, 15), anchor.intra_card_y_px);
 
+    // 그룹 헤더가 뷰포트 위쪽 경계를 차지하면 anchor가 없다. 헤더는 세션 신원을 대신할 수 없어
+    // 그것으로 복원하면 "어느 세션을 보고 있었는가"가 아니라 "어느 그룹 근처였는가"로 바뀐다.
+    try std.testing.expect(archiveScrollAnchorFor(&records, .{
+        .content_height_px = 140,
+        .max_offset_px = 80,
+        .offset_y_px = 5,
+        .first_index = 0,
+        .first_origin_y_px = -5,
+        .end_exclusive = 3,
+    }, old_items) == null);
+
+    // 경계에 정확히 맞닿은 카드(원점 0)는 유효한 anchor다 — 그 지점이 사용자가 보고 있던 곳이다.
+    // 변위가 0이라는 것이 "anchor가 없다"는 뜻은 아니다.
+    const flush = archiveScrollAnchorFor(&records, .{
+        .content_height_px = 140,
+        .max_offset_px = 80,
+        .offset_y_px = 30,
+        .first_index = 1,
+        .first_origin_y_px = 0,
+        .end_exclusive = 3,
+    }, old_items).?;
+    try std.testing.expectEqual(@as(u32, 0), flush.intra_card_y_px);
+
+    // 창의 **첫** 항목만 후보다. 두 번째 카드는 경계 아래에 있으므로, 첫 항목이 그룹 헤더라 건너뛰면
+    // anchor는 없다(위 케이스). 아래처럼 첫 항목이 카드면 그 카드가 잡히고 다음 카드는 무시된다.
+    const first_wins = archiveScrollAnchorFor(&records, .{
+        .content_height_px = 140,
+        .max_offset_px = 80,
+        .offset_y_px = 45,
+        .first_index = 1,
+        .first_origin_y_px = -15,
+        .end_exclusive = 3,
+    }, old_items).?;
+    try std.testing.expectEqual(@as(u32, 15), first_wins.intra_card_y_px);
+    try std.testing.expect(first_wins.identity.eqlRecord(&records[0]));
+
     const reordered = [_]agent_session_archive_view.Entry{ .{ .group = 0 }, .{ .card = 1 }, .{ .card = 0 } };
     try std.testing.expectEqual(@as(?u32, 105), archiveScrollAnchorOffsetFor(&records, anchor, .{ .entries = &reordered, .group_h_px = 20, .card_h_px = 50, .gap_px = 10 }, 300));
     const collapsed = [_]agent_session_archive_view.Entry{.{ .group = 0 }};
@@ -66941,6 +66977,45 @@ test "스크롤바 down은 track 안에서만, thumb을 잡은 지점을 유지�
     // 점프한 경우 thumb 중앙을 잡은 것으로 둔다 — 그래야 이어지는 이동이 커서를 그대로 따라간다.
     try std.testing.expectApproxEqAbs(bar.thumb_h / 2, track_drag.grab_dy, 0.01);
     session.endAgentSessionDockScrollDrag();
+}
+
+test "도크 키보드 스크롤은 한 항목을 남기고, 끝으로 가고, 휠 잔여를 비운다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try dockWheelFixture(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    // 도크가 키보드를 가져야 이 키들이 도크 것이 된다(터미널에서 친 Page/Home이 새면 안 된다).
+    session.agent_session_dock_key_focus = true;
+    try std.testing.expect(session.agentSessionDockOwnsKeys());
+
+    const projection = session.agentSessionDockScrollProjection();
+    const viewport = session.agentSessionDockContentViewportHeightPx();
+    const card_h = session.agentSessionDockScrollItems().card_h_px;
+    try std.testing.expect(projection.max_offset_px > 0);
+    try std.testing.expect(viewport > card_h);
+
+    // PageDown은 **카드 하나를 화면에 남긴다** — 한 화면을 통째로 넘기면 읽던 맥락이 끊긴다.
+    try std.testing.expect(session.handleAgentSessionDockScrollKey(.{ .key = .page_down, .modifiers = .{} }));
+    try std.testing.expectEqual(viewport - card_h, session.agent_session_archive_scroll.offset_y_px);
+
+    // End는 정확히 상한이다(그 너머는 빈 공간이라 갈 곳이 없다).
+    try std.testing.expect(session.handleAgentSessionDockScrollKey(.{ .key = .end, .modifiers = .{} }));
+    try std.testing.expectEqual(projection.max_offset_px, session.agent_session_archive_scroll.offset_y_px);
+
+    // Home은 맨 위. PageUp도 같은 걸음으로 되돌아온다.
+    try std.testing.expect(session.handleAgentSessionDockScrollKey(.{ .key = .home, .modifiers = .{} }));
+    try std.testing.expectEqual(@as(u32, 0), session.agent_session_archive_scroll.offset_y_px);
+
+    // 키가 위치를 확정했으므로 휠 잔여는 버린다 — 남기면 다음 휠 틱이 옛 방향에서 시작한다.
+    session.agent_session_archive_wheel_residue_px = 3;
+    try std.testing.expect(session.handleAgentSessionDockScrollKey(.{ .key = .page_down, .modifiers = .{} }));
+    try std.testing.expectEqual(@as(f64, 0), session.agent_session_archive_wheel_residue_px);
+
+    // 도크가 키보드를 놓으면 같은 키가 더 이상 도크 것이 아니다.
+    session.agent_session_dock_key_focus = false;
+    try std.testing.expect(!session.handleAgentSessionDockScrollKey(.{ .key = .home, .modifiers = .{} }));
 }
 
 test "재투영은 스냅샷 세대를 올려 진행 중인 스크롤바 드래그를 놓게 한다" {

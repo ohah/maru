@@ -66861,6 +66861,94 @@ fn appendFixtureArchiveRecordN(session: *AppSession, allocator: std.mem.Allocato
     });
 }
 
+// 도크 휠 경로에는 판정자가 하나도 없었다. 방향을 뒤집어도, 포인터가 터미널 위인데 도크가 먹어도,
+// 분수 residue를 소비하고도 안 빼서 같은 픽셀을 반복해도 전체 스위트가 초록이었다(이름에 "wheel"이
+// 든 기존 테스트는 파일 트리 것이다). §2가 residue를 ScrollView 소유로 적었으므로 SV1c가 이 코드를
+// 옮기는데, 판정자 없이 옮기면 옮기다 깨져도 아무도 모른다.
+fn dockWheelFixture(allocator: std.mem.Allocator) !*AppSession {
+    const session = try initDockedRoutingSession(allocator, .right);
+    errdefer allocator.destroy(session);
+    errdefer session.deinit();
+    const card_count = 20;
+    for (0..card_count) |index| try appendFixtureArchiveRecordN(session, allocator, index);
+    try appendFixtureArchiveGroup(session, allocator, card_count);
+    try session.agent_session_archive_projection.entries.append(allocator, .{ .group = 0 });
+    for (0..card_count) |index| try session.agent_session_archive_projection.entries.append(allocator, .{ .card = index });
+    return session;
+}
+
+test "도크 휠은 포인터가 도크 위일 때만, 목록 방향으로, 상한 안에서 움직인다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try dockWheelFixture(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    const content = session.dockGeometry().tree_content;
+    const inside_x: f64 = @floatFromInt(content.x + content.w / 2);
+    const inside_y: f64 = @floatFromInt(content.y + content.h / 2);
+    const max_offset = session.agentSessionDockScrollProjection().max_offset_px;
+    try std.testing.expect(max_offset > 0);
+
+    // ① 아래로 굴리면 목록이 아래로 간다. 부호가 뒤집히면 맨 위에서 아무 일도 일어나지 않는다.
+    session.scrollWheel(-3, 0, false, inside_x, inside_y);
+    const after_down = session.agent_session_archive_scroll.offset_y_px;
+    try std.testing.expect(after_down > 0);
+
+    // ② 포인터가 도크 밖이면 도크는 움직이지 않는다. 이 판정이 빠지면 터미널 위에서 굴려도 도크가 먹는다.
+    //
+    // 잔여가 **실제로 남아 있는 상태**에서 나가야 그것이 지워지는지 볼 수 있다. non-precise 델타는
+    // 카드 높이 단위라 잔여를 남기지 않으므로, precise 틱으로 1픽셀 미만을 먼저 쌓는다.
+    session.scrollWheel(-0.3, 0, true, inside_x, inside_y);
+    try std.testing.expect(session.agent_session_archive_wheel_residue_px != 0);
+    const before_outside = session.agent_session_archive_scroll.offset_y_px;
+
+    const outside_x: f64 = @floatFromInt(content.x / 2);
+    session.scrollWheel(-3, 0, false, outside_x, inside_y);
+    try std.testing.expectEqual(before_outside, session.agent_session_archive_scroll.offset_y_px);
+    // 도크를 떠났으므로 분수 잔여도 남기지 않는다 — 남기면 다시 들어왔을 때 첫 틱이 엉뚱하게 튄다.
+    try std.testing.expectEqual(@as(f64, 0), session.agent_session_archive_wheel_residue_px);
+
+    // ③ 위로 되돌리면 원래 자리로 돌아온다(②에서 쌓은 1픽셀 미만은 offset을 안 움직였다).
+    try std.testing.expectEqual(after_down, before_outside);
+    session.scrollWheel(3, 0, false, inside_x, inside_y);
+    try std.testing.expectEqual(@as(u32, 0), session.agent_session_archive_scroll.offset_y_px);
+
+    // ④ 끝까지 굴려도 상한을 넘지 않는다.
+    for (0..200) |_| session.scrollWheel(-10, 0, false, inside_x, inside_y);
+    try std.testing.expectEqual(max_offset, session.agent_session_archive_scroll.offset_y_px);
+}
+
+test "도크 휠의 분수 잔여는 한 번만 소비되고 방향이 바뀌면 버려진다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try dockWheelFixture(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    const content = session.dockGeometry().tree_content;
+    const inside_x: f64 = @floatFromInt(content.x + content.w / 2);
+    const inside_y: f64 = @floatFromInt(content.y + content.h / 2);
+
+    // precise(트랙패드) 델타는 1픽셀보다 작을 수 있다. 정수 픽셀이 찰 때까지는 움직이지 않고
+    // 잔여로만 쌓인다 — 그러지 않으면 미세한 손가락 움직임이 한 픽셀씩 튄다.
+    session.scrollWheel(-0.6, 0, true, inside_x, inside_y);
+    try std.testing.expectEqual(@as(u32, 0), session.agent_session_archive_scroll.offset_y_px);
+    try std.testing.expect(session.agent_session_archive_wheel_residue_px != 0);
+
+    // 두 번째로 1픽셀을 넘긴다(0.6 + 0.6 = 1.2).
+    session.scrollWheel(-0.6, 0, true, inside_x, inside_y);
+    const moved = session.agent_session_archive_scroll.offset_y_px;
+    // 두 번 합쳐 1픽셀을 넘겼으니 이제 움직인다.
+    try std.testing.expect(moved > 0);
+    // **소비한 정수부는 잔여에서 빠져야 한다.** 안 빼면 같은 픽셀을 계속 다시 쓰면서 가속한다.
+    try std.testing.expect(@abs(session.agent_session_archive_wheel_residue_px) < 1);
+
+    // 방향을 뒤집으면 이전 방향의 잔여를 버린다 — 남겨 두면 첫 반대 틱이 상쇄돼 굼뜨게 느껴진다.
+    session.scrollWheel(0.1, 0, true, inside_x, inside_y);
+    try std.testing.expect(session.agent_session_archive_wheel_residue_px > 0);
+}
+
 // 스크롤 좌표계를 `chrome/ui/scroll_view.zig`로 옮긴 뒤, 그 모듈은 촘촘한데 **도크가 그 모듈에 넘기는
 // 값**에는 판정자가 거의 없다는 것이 변이 검증에서 드러났다. `ArchiveScrollItems`의 다섯 가지를 하나씩
 // 틀리게 만들어도(펼침 예약 없음, gap 0, 항목 수 -1, 펼침 index null, 카드 높이에 펼침 높이) 전체

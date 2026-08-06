@@ -331,6 +331,51 @@ test "scroll state clamps each backing pixel boundary" {
     try std.testing.expectEqual(@as(u32, 0), state.offset_y_px);
 }
 
+test "clamp and reset are the two ways an offset shrinks without pointer input" {
+    // 그룹을 접으면 content가 짧아지고 max offset이 줄어든다. `clamp`가 그때 offset을 끌어내리는
+    // 유일한 지점이라, 이것이 no-op이면 목록이 빈 공간에 스크롤된 채 남는다 — 이 계약을 보는
+    // 판정자가 없어서 clamp를 통째로 비워도 전체 스위트가 초록이었다.
+    var state = State{};
+    _ = state.setOffsetPx(400, 400);
+    state.clamp(400); // 상한이 그대로면 움직이지 않는다.
+    try std.testing.expectEqual(@as(u32, 400), state.offset_y_px);
+    state.clamp(120); // 짧아진 목록: 새 상한까지 끌어내린다.
+    try std.testing.expectEqual(@as(u32, 120), state.offset_y_px);
+    state.clamp(0); // 전부 접혀 스크롤할 것이 없어졌다.
+    try std.testing.expectEqual(@as(u32, 0), state.offset_y_px);
+
+    // reset은 상한과 무관하게 맨 위다(검색어 변경처럼 목록의 의미 자체가 바뀔 때).
+    _ = state.setOffsetPx(300, 400);
+    state.reset();
+    try std.testing.expectEqual(@as(u32, 0), state.offset_y_px);
+}
+
+test "project stays bounded when there is nothing to show or nowhere to show it" {
+    const kinds = [_]FixtureKind{ .card, .card };
+    const empty = Fixture{ .kinds = &kinds, .group_h_px = 20, .card_h_px = 50 };
+
+    // 검색 결과가 0개인 도크. 창은 비어야 하고 offset은 0으로 눌린다.
+    const none = project(empty, fixtureHeight, .{ .count = 0, .gap_px = 10, .viewport_h_px = 400 }, 999);
+    try std.testing.expectEqual(@as(u32, 0), none.content_height_px);
+    try std.testing.expectEqual(@as(u32, 0), none.max_offset_px);
+    try std.testing.expectEqual(@as(u32, 0), none.offset_y_px);
+    try std.testing.expectEqual(@as(usize, 0), none.first_index);
+    try std.testing.expectEqual(@as(usize, 0), none.end_exclusive);
+
+    // 도크를 끝까지 줄여 스크롤 영역 높이가 0인 상태. 그릴 항목이 없어야지, 전부여서는 안 된다.
+    const flat = project(empty, fixtureHeight, .{ .count = kinds.len, .gap_px = 10, .viewport_h_px = 0 }, 0);
+    try std.testing.expectEqual(@as(u32, 110), flat.content_height_px);
+    try std.testing.expectEqual(@as(usize, 0), flat.first_index);
+    try std.testing.expectEqual(@as(usize, 0), flat.end_exclusive);
+
+    // offset이 상한을 넘겨 들어와도 창은 마지막 항목 안에 머문다.
+    const past_end = project(empty, fixtureHeight, .{ .count = kinds.len, .gap_px = 10, .viewport_h_px = 50 }, 999);
+    try std.testing.expectEqual(@as(u32, 60), past_end.max_offset_px);
+    try std.testing.expectEqual(@as(u32, 60), past_end.offset_y_px);
+    try std.testing.expectEqual(@as(usize, 1), past_end.first_index);
+    try std.testing.expectEqual(@as(usize, 2), past_end.end_exclusive);
+}
+
 test "page and anchor helpers preserve bounded pixel semantics" {
     try std.testing.expectEqual(@as(u32, 0), pageStepPx(0, 72));
     try std.testing.expectEqual(@as(u32, 0), pageStepPx(72, 72));

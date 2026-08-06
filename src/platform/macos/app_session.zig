@@ -21181,6 +21181,13 @@ pub const AppSession = struct {
             self.last_resize_size = grid;
         }
         self.metal_dirty = true;
+        // **atlas를 통째로 비웠으므로 sync hold를 우회한 full 투영이 필요하다.** `metal_dirty`만 세우면 hold 중
+        // (DECSET 2026 BSU 후 ESU 지연)에는 `will_project=false`가 되고, 그때 `chrome_dirty`가 서 있으면 사이드바
+        // 전용 부분 투영이 커밋된다 — 유지된 `self.cells`의 UV는 비워진 atlas의 옛 좌표를 가리키므로 터미널 본문이
+        // **재사용된 슬롯의 글리프로 오염된다**(빈 화면이 아니라 다른 글자). 부분 투영 경로가 자기 repack을 감지해
+        // 세우는 그 플래그와 같은 이유·같은 처방이다(§30352) — 다만 그쪽은 tick 안에서 잡은 generation만 보므로
+        // **이전 tick의 무효화는 여기서 알려야** 한다. 지속 시간이 hold timeout(≈1초)이라 tearing보다 나쁘다.
+        self.force_reproject = true;
         // 폰트 크기가 바뀌었으니 열린 파일 패널 webview도 같은 크기로 따라오게 signal(§2.3). setFontSize(⌘+/−)·
         // applyAppearance(config)가 공유하는 초크포인트라 여기 한 곳에서 세운다. Swift가 tick마다 drain한다.
         self.file_panel_zoom_dirty = true;
@@ -23891,10 +23898,17 @@ pub const AppSession = struct {
         // 틱 전체 grid가 CoreText 재셰이프된다(idle 못 듦). (접힘은 toggleSidebarCollapsed가 search_active를 끄지만 방어적으로 포함.)
         const sidebar_search = self.sidebar_search_active and !self.sidebar_collapsed and
             self.cell_width_px > 0 and self.sidebar_width_px / self.cell_width_px >= 10;
+        // 세션 도크 검색 caret도 같은 부류다(도크 view가 `search_cursor_visible`=blink_visible로 '|'를 켜고 끈다).
+        // 사이드바 검색만 게이트에 있어 **도크 caret은 안 깜빡였다** — 위상은 돌지만 dirty가 안 서 재투영이 없고,
+        // 무관한 이벤트(마우스 이동·셸 출력)가 오는 순간 그때 위상으로 툭 바뀌었다. 더 나쁜 건 아래 early-return이라,
+        // `cursor.blink=false`면 blink_visible이 true로 굳어 도크 caret이 **영구 표시**됐다(터미널 커서 설정이
+        // 도크 caret을 좌우). 도크가 보이고 검색이 활성일 때만 — 안 보이면 재투영 낭비다.
+        const dock_search = self.agent_session_archive_search_active and self.dockVisible() and
+            self.dock.view == .agent_sessions;
         // IME 조합 중에는 커서를 **고정**한다(깜빡이면 커서가 덮은 조합 글자가 깜빡 사라짐). 터미널은 cursor_blinks가
         // Surface preedit로 이미 막지만, 오버레이/rename/검색도 imeComposingActive 단일 출처로 함께 막는다.
         // 스피너는 이 조건에서 제외한다(advanceAgentSpinner가 별도로 진행) — 커서/텍스트/rename/검색 caret blink만 본다.
-        if ((!cursor_blinks and !overlay_open and !text_blinks and !rename_active and !sidebar_search) or self.imeComposingActive()) {
+        if ((!cursor_blinks and !overlay_open and !text_blinks and !rename_active and !sidebar_search and !dock_search) or self.imeComposingActive()) {
             self.resetCursorBlink(); // 깜빡일 게 없거나 조합 중 — 보이는 위상 고정
             return;
         }
@@ -23915,7 +23929,7 @@ pub const AppSession = struct {
             // 텍스트 blink·rename caret·검색 caret은 blink_visible로 **하드 토글**되는 별도 glyph 셀이라 full rebuild가 필요하다
             // (커서 suffix 페이드로 못 숨김). 이들은 페이드 없이 위상 경계에서 즉각 on/off한다. 에이전트 스피너는 자기 위상(약
             // 133ms)에서 따로 dirty하므로 여기엔 안 넣는다(옛 펄스 폐기 후 500ms 재투영은 byte-identical 낭비, #3).
-            if (text_blinks or rename_active or sidebar_search) self.metal_dirty = true;
+            if (text_blinks or rename_active or sidebar_search or dock_search) self.metal_dirty = true;
         }
         // 반주기 안 위치(ms) — 아래 페이드 램프의 위상 입력. baseline을 위에서 전진시켰으므로 항상 [0, interval_ms).
         const into_ms: u32 = @intCast(@divFloor(now_ns - self.blink_phase_ns, std.time.ns_per_ms));
@@ -30995,7 +31009,12 @@ pub const AppSession = struct {
     /// 세션을 죽이지 않고 빈 사이드바로 degrade한다(호출부가 catch).
     fn rebuildSidebar(self: *AppSession) !void {
         self.sidebar_cells.clearRetainingCapacity();
-        self.gpu_quads.clearRetainingCapacity();
+        // **자기 레이어(0)만 비운다.** 옛 코드는 `gpu_quads`를 통째로 비웠는데, 이 함수는 hover·드래그·탭 전환 등
+        // 수십 개 이벤트 핸들러에서 **tick 사이에** 불린다. 그 직후 tick이 full 투영이 아니면(sync hold + chrome
+        // 애니메이션 없음 → idle 분기) per-frame 레이어(탭 밴드 2·스크롤바 3·배지 4)가 재충전되지 않아 **그 프레임에
+        // 통째로 사라진다** — 지금까지는 그 조합이 드물어 드러나지 않았을 뿐이고, per-frame 표면이 하나 늘 때마다
+        // 노출이 커진다. layer 0만 비우면 retained 계약(사이드바는 이 함수가 소유)과 정확히 일치한다.
+        self.dropQuadsByLayer(0);
         self.recomputeVisibleTabs(); // 검색 필터로 표시 카드(sidebar_rows) 갱신 — 아래는 전부 표시 슬롯 기준
         self.clampSidebarScroll(); // 표시 카드 수/뷰포트가 바뀌었을 수 있으니 stale 스크롤 정정 — 아래 quad가 이 오프셋을 쓴다
         if (self.tabs.items.len == 0) return;
@@ -31315,15 +31334,19 @@ pub const AppSession = struct {
     /// 순서 무관 — 렌더러가 layer로 재정렬). 리뷰가 지적한 sidebar/모달 clear-타이밍 충돌 해소.
     /// gpu_quads에서 주어진 layer의 quad를 모두 제거한다(per-frame 레이어 청소). 모달(layer 1)·탭 밴드(layer 2)는
     /// 매 프레임 재채워지므로 그 전에 비운다. 사이드바(layer 0)는 retained(rebuildSidebar 관리)라 대상이 아니다.
+    ///
+    /// **순서를 보존한다.** 옛 구현은 `swapRemove`(꼬리를 구멍에 당김)라 살아남은 quad의 상대 순서를 파괴했다.
+    /// 렌더러가 layer로 버킷팅하는 것은 맞지만 **버킷 안에서는 배열 순서를 painter 순서로 그대로 쓴다** — 그래서
+    /// 한 카드의 tint를 먼저·accent 막대를 뒤에 넣어 막대가 위에 오게 한 의도(사이드바)가 다른 레이어를 비우는
+    /// 것만으로 뒤집힐 수 있었다. compaction은 같은 1-pass라 비용도 같다.
     fn dropQuadsByLayer(self: *AppSession, layer: u32) void {
-        var i: usize = 0;
-        while (i < self.gpu_quads.items.len) {
-            if (self.gpu_quads.items[i].layer == layer) {
-                _ = self.gpu_quads.swapRemove(i);
-            } else {
-                i += 1;
-            }
+        var write: usize = 0;
+        for (self.gpu_quads.items) |quad| {
+            if (quad.layer == layer) continue;
+            self.gpu_quads.items[write] = quad;
+            write += 1;
         }
+        self.gpu_quads.shrinkRetainingCapacity(write);
     }
 
     /// 활성 탭 강조(rich) — **연결형 cutout**: 활성 탭을 터미널 본문색(bg=theme.background)으로 채워 아래 본문과
@@ -49377,6 +49400,12 @@ test "runtime font size: ⌘+/−/0 cell 메트릭·grid 재계산 + 하한·상
     const cols1 = session.activeSurface().core.snapshot().size.cols;
     try std.testing.expect(cols1 <= cols0);
 
+    // **atlas를 비웠으니 sync hold를 우회하는 강제 재투영이 예약돼야 한다.** 이게 없으면 hold 중(BSU 후 ESU 지연)에
+    // 사이드바 전용 부분 투영이 커밋되고, 유지된 셀의 UV가 비워진 atlas의 옛 좌표를 가리켜 본문이 다른 글리프로
+    // 오염된다(hold timeout ≈1초까지 지속). `shouldProjectFrame`이 이 플래그로 sync 게이트를 우회한다.
+    try std.testing.expect(session.force_reproject);
+    try std.testing.expect(shouldProjectFrame(false, true, 0, 60, 0, 0, false, session.force_reproject)); // hold여도 투영
+
     // 폰트가 바뀌면 파일 패널 줌 dirty가 서고(Swift tick이 drain해 webview 재적용), 배율은 (base+1)/base로 1.0 초과다.
     try std.testing.expect(session.file_panel_zoom_dirty);
     try std.testing.expect(session.takeFilePanelZoomDirty()); // 1회성: 읽으면 비워진다
@@ -61506,6 +61535,73 @@ test "sidebar collapse toggle: hides (width 0, pt preserved) and the top-left bu
         session.mouse(1, toggle_x, toggle_y, 0, 0);
         try std.testing.expect(session.sidebar_collapsed);
     }
+}
+
+// quad 수명·순서 계약(S0): `dropQuadsByLayer`는 **자기 레이어만** 지우고 **나머지 순서를 보존**해야 하며,
+// `rebuildSidebar`는 **layer 0만** 비워야 한다. 둘 다 화면에 안 보이는 계약이라 눈으로는 못 잡는다 —
+// 어기면 (a) 사이드바 이벤트(hover·드래그·탭 전환) 직후 tick이 full 투영이 아닐 때 탭 밴드·스크롤바·배지가
+// 한 프레임 사라지고, (b) 레이어 안 painter 순서(카드 tint 위에 accent 막대)가 뒤집힌다.
+test "gpu quad 수명: drop은 자기 레이어만·순서 보존, rebuildSidebar는 layer 0만 비운다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1000, 700, 1000);
+
+    // 레이어를 섞어 넣고, 같은 레이어 안에서 순서를 구분할 수 있게 x를 다르게 준다.
+    session.gpu_quads.clearRetainingCapacity();
+    const mk = struct {
+        fn q(x: f32, layer: u32) metal_frame.GpuQuad {
+            return .{
+                .x = x,
+                .y = 0,
+                .w = 1,
+                .h = 1,
+                .corner_radii = .{ 0, 0, 0, 0 },
+                .border_widths = .{ 0, 0, 0, 0 },
+                .fill_color0 = 0xFF000000,
+                .fill_color1 = 0xFF000000,
+                .border_color = 0,
+                .gradient_kind = 0,
+                .layer = layer,
+                .clip_x = 0,
+                .clip_y = 0,
+                .clip_w = 0,
+                .clip_h = 0,
+            };
+        }
+    };
+    try session.gpu_quads.append(allocator, mk.q(10, 2)); // A: per-frame
+    try session.gpu_quads.append(allocator, mk.q(20, 0)); // B: retained(사이드바 tint)
+    try session.gpu_quads.append(allocator, mk.q(30, 2)); // C: per-frame
+    try session.gpu_quads.append(allocator, mk.q(40, 0)); // D: retained(accent 막대 — B보다 뒤=위)
+
+    session.dropQuadsByLayer(2);
+    try std.testing.expectEqual(@as(usize, 2), session.gpu_quads.items.len);
+    // 순서 보존: B가 D보다 앞이어야 막대가 tint 위에 그려진다(swapRemove였다면 뒤집힐 수 있다).
+    try std.testing.expectEqual(@as(f32, 20), session.gpu_quads.items[0].x);
+    try std.testing.expectEqual(@as(f32, 40), session.gpu_quads.items[1].x);
+
+    // rebuildSidebar는 layer 0만 소유한다 — per-frame quad를 남겨야 그 프레임에 안 사라진다.
+    try session.gpu_quads.append(allocator, mk.q(50, 2)); // per-frame 탭 밴드
+    try session.gpu_quads.append(allocator, mk.q(60, 3)); // per-frame 스크롤바
+    try session.rebuildSidebar();
+    var survived_2: bool = false;
+    var survived_3: bool = false;
+    for (session.gpu_quads.items) |q| {
+        if (q.layer == 2 and q.x == 50) survived_2 = true;
+        if (q.layer == 3 and q.x == 60) survived_3 = true;
+    }
+    try std.testing.expect(survived_2);
+    try std.testing.expect(survived_3);
 }
 
 // 접힘 펼치기 토글(◧) 폴리시: (1) hoverCursor가 토글 위에서 호버 배경 quad를 켜고 밖에서 끈다(접힘 시 사이드바

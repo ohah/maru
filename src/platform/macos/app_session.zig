@@ -14011,10 +14011,49 @@ pub const AppSession = struct {
         return if (index < self.file_tree_rows.items.len) index else null;
     }
 
+    /// 스크롤 영역의 높이를 **layout에게 묻는다**(docs/scroll-area.md §4.2).
+    ///
+    /// 창(`project`)의 입력에 뷰포트 높이가 있고 그 출력이 무엇을 build할지 정하므로 "layout 전에
+    /// 뷰포트를 알아야 한다"는 순서 문제가 있다. 예전에는 `content.h - fixedChromeHeight()`로
+    /// **예측**해서 풀었는데, 그러면 같은 수의 출처가 둘이 되어 고정 chrome이 하나 늘거나 margin이
+    /// 바뀔 때 조용히 어긋난다(어긋나면 마지막 항목이 잘리거나 빈 띠가 남는다).
+    ///
+    /// 대신 **자식 없는** scroll-area로 layout을 한 번 돌린다. item 노드를 만들지 않으므로 비싸지
+    /// 않다 — 고정 chrome 넷과 빈 컨테이너뿐이다. 실패하면 0을 돌려주고, 그러면 창이 비어 이 프레임에
+    /// 목록이 그려지지 않는다(틀린 높이로 그리는 것보다 낫다).
     fn agentSessionDockContentViewportHeightPx(self: *const AppSession) u32 {
         const content = self.dockGeometry().tree_content;
-        const m = chrome.components.session_dock.types.DockMetrics.resolve(self.agentSessionDockScaleMilli());
-        return content.h -| m.fixedChromeHeight();
+        if (content.w == 0 or content.h == 0) return 0;
+
+        const sizes = chrome.components.session_dock.build.bufferSizes(&.{});
+        var nodes: [16]chrome.ui.tree.UiNode = undefined;
+        var entries: [16]chrome.ui.tree.RectEntry = undefined;
+        var layout_items: [16]chrome.ui.layout.Item = undefined;
+        var flex_scratch: [16]chrome.ui.layout.FlexScratch = undefined;
+        var child_rects: [16]chrome.ui.layout.UiRect = undefined;
+        var actions: [16]chrome.components.session_dock.ids.Entry = undefined;
+        if (sizes.entries > entries.len or sizes.actions > actions.len) return 0;
+
+        const frame = chrome.components.session_dock.build.build(
+            self.agentSessionDockProps(content, .{
+                .content_height_px = 0,
+                .max_offset_px = 0,
+                .offset_y_px = 0,
+                .first_index = 0,
+                .first_origin_y_px = 0,
+                .end_exclusive = 0,
+            }, &.{}),
+            .{
+                .nodes = nodes[0..sizes.nodes],
+                .entries = entries[0..sizes.entries],
+                .layout_items = layout_items[0..sizes.layout_items],
+                .flex_scratch = flex_scratch[0..sizes.flex_scratch],
+                .child_rects = child_rects[0..sizes.child_rects],
+                .actions = actions[0..sizes.actions],
+            },
+        ) catch return 0;
+        const index = frame.tree.find(chrome.components.session_dock.build.NodeIds.content) orelse return 0;
+        return @intFromFloat(@max(@round(frame.tree.entries[index].rect.height), 0));
     }
 
     /// Completed Session Dock geometry is the only coordinate source for the native IME

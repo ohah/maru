@@ -242,13 +242,6 @@ pub const DockMetrics = struct {
         };
     }
 
-    /// The host uses exactly this sum before projecting the virtualized content viewport.  It
-    /// intentionally lives beside the rect values so adding a fixed control cannot make build
-    /// and wheel/scroll disagree about where the first item starts.
-    pub fn fixedChromeHeight(self: DockMetrics) u32 {
-        return geometryPx(saturatedAdd(saturatedAdd(saturatedAdd(saturatedAdd(saturatedMul(self.root_inset, 2), self.header_h), self.scope_h), self.search_h), saturatedMul(self.control_gap, 3)));
-    }
-
     pub fn headerUtilityWidth(self: DockMetrics) u32 {
         return geometryPx(saturatedAdd(saturatedAdd(saturatedAdd(self.header_host_label_w, self.header_utility_gap), self.header_refresh_extent), self.header_trailing_inset));
     }
@@ -325,7 +318,6 @@ test "DockMetrics fixes all Session Dock geometry independently of terminal cell
     try std.testing.expectEqual(@as(u32, 20), m.group_disclosure_extent);
     try std.testing.expectEqual(@as(u32, 8), m.group_disclosure_label_gap);
     try std.testing.expectEqual(@as(u32, 128), m.headerUtilityWidth());
-    try std.testing.expectEqual(@as(u32, 248), m.fixedChromeHeight());
     try std.testing.expect(m.card_metadata_y < m.card_h);
     try std.testing.expect(m.detail_turn_y + m.detail_turn_step * 3 <= m.expanded_detail_h);
 }
@@ -344,7 +336,6 @@ test "DockMetrics fails closed at extreme backing scale without overflow" {
     inline for (std.meta.fields(DockMetrics)) |field| {
         try std.testing.expect(@field(m, field.name) <= @as(u32, std.math.maxInt(i32)));
     }
-    try std.testing.expect(m.fixedChromeHeight() <= @as(u32, std.math.maxInt(i32)));
 }
 
 test "ButtonMetrics is independent of terminal cell height and scales in backing pixels" {

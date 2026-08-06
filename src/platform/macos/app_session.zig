@@ -67238,6 +67238,15 @@ fn dockTreeItemRects(
         return error.TestUnexpectedResult;
     const content_y = frame.tree.entries[content_index].rect.y;
 
+    // host는 스크롤 영역 높이를 `content.h - fixedChromeHeight()`로 **예측**하고 build는 flex로 **실제**
+    // 값을 만든다. 같은 수의 출처가 둘이라 갈릴 수 있는데, 갈리면 창 계산과 clip 경계가 어긋난다.
+    // docs/scroll-view.md §4.2가 SV1c에서 이 예측식을 없애겠다고 한 자리이므로, 없앤 뒤에도 같은 값인지
+    // 이 단언이 지킨다(예측식이 되살아나도 여기서 갈라진다).
+    try std.testing.expectEqual(
+        session.agentSessionDockContentViewportHeightPx(),
+        @as(u32, @intFromFloat(@round(frame.tree.entries[content_index].rect.height))),
+    );
+
     // thumb 길이는 "보이는 비율"이다. host가 스크롤바에 넘기는 목록 전체 높이가 틀리면 이 비율만
     // 어긋나고 카드 rect는 멀쩡하므로, 항목 대조만으로는 잡히지 않는다(실제로 그 변이가 통과했다).
     if (frame.tree.find(chrome.components.session_dock.build.NodeIds.scroll_thumb)) |thumb_index| {

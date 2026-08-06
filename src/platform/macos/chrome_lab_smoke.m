@@ -159,7 +159,8 @@ void maru_macos_chrome_lab_smoke_render(
         0,
         0,
         glyphs,
-        glyph_count
+        glyph_count,
+        0 // SB1: status_bar_height_px — lab은 상태바를 안 세운다(strip은 창 바닥까지)
     );
     result->draw_submitted = drew ? 1 : 0;
     maru_metal_renderer_destroy(renderer);

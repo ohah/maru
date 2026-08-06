@@ -1039,7 +1039,8 @@ bool maru_metal_renderer_draw(
     /* 커서 구간 시작(ABI v146) — 근거는 헤더 주석 단일 출처. */
     size_t cursor_start_in,
     const MaruAppHostGpuGlyph *gpu_glyphs,
-    size_t gpu_glyph_count
+    size_t gpu_glyph_count,
+    uint32_t status_bar_height_px
 ) {
     if (renderer == NULL || terminal_layer == nil || cols == 0 || rows == 0) {
         return false;
@@ -1117,7 +1118,11 @@ bool maru_metal_renderer_draw(
             const float sl = -1.0f;                                  // x=0 → NDC 좌
             const float sr = (origin_x / drawable_w) * 2.0f - 1.0f;  // x=origin_x → NDC
             const float st = 1.0f;                                   // y=0 → NDC 상
-            const float sb = -1.0f;                                  // y=drawable_h → NDC 하
+            // SB1: 창 바닥 상태표시줄이 예약한 높이만큼 strip을 위에서 끝낸다. 0이면 y=drawable_h(-1.0)로
+            // 기존과 같다. 상태바보다 크게 들어와도 strip 상단을 넘지 않게 clamp한다(뒤집힌 quad 방지).
+            const float sb_px = (float)drawable_h - (float)status_bar_height_px;
+            const float sb_clamped = sb_px < 0.0f ? 0.0f : sb_px;
+            const float sb = 1.0f - (sb_clamped / drawable_h) * 2.0f; // y=sb_clamped → NDC
             const float sba = (float)((sidebar_bg >> 24) & 0xff) / 255.0f;
             const float sbr = (float)((sidebar_bg >> 16) & 0xff) / 255.0f;
             const float sbg = (float)((sidebar_bg >> 8) & 0xff) / 255.0f;

@@ -1191,6 +1191,12 @@ pub const MetalFrame = extern struct {
     // 소유해 다음 replace/deinit 전까지만 유효하다.
     gpu_glyphs: ?[*]const GpuGlyph = null,
     gpu_glyph_count: usize = 0,
+    // SB1: 창 바닥 상태표시줄이 예약한 높이(backing px). 렌더러는 **사이드바 배경 strip을 이만큼 위에서
+    // 끝낸다** — strip은 `.m`이 높이를 직접 정하는 몇 안 되는 표면이라(docs/metal-ui-layout.md §5 승인 예외)
+    // Zig가 값을 실어 알려 주는 것 말고는 그 바닥을 옮길 방법이 없다. 상태바 자신의 배경·글자는 GpuQuad·
+    // GpuGlyph로 host가 그리므로 이 필드는 **strip 클리핑 전용**이다. 0이면 기존 동작(창 바닥까지).
+    // 끝에 추가해 기존 offset 불변(ABI v167).
+    status_bar_height_px: u32 = 0,
 };
 
 /// 사이드바 셀 = 밴드(전달받은 sentinel-UV 하이라이트) ++ 탭 제목 glyph(사이드바 RenderFrame 투영).
@@ -1312,6 +1318,9 @@ pub const ChromeGeometry = struct {
     sidebar_scroll_offset_px: u32 = 0,
     titlebar_strip_px: u32 = 0,
     divider_thickness_px: u32 = 0,
+    /// SB1: 창 바닥 상태표시줄 높이. 사이드바 strip의 바닥을 정하므로 **셀과 같은 프레임**이어야 한다 —
+    /// 상태바가 서는 프레임과 strip이 짧아지는 프레임이 갈리면 한 프레임 겹치거나 틈이 생긴다.
+    status_bar_height_px: u32 = 0,
 };
 
 /// RenderFrame을 투영해 retain하는 owned 버퍼. cells/sidebar_cells/uploads/pixels 배열의 소유권을
@@ -1678,6 +1687,7 @@ pub const MetalFrameBuffer = struct {
             .sidebar_scroll_offset_px = self.chrome_geometry.sidebar_scroll_offset_px,
             .titlebar_strip_px = self.chrome_geometry.titlebar_strip_px,
             .divider_thickness_px = self.chrome_geometry.divider_thickness_px,
+            .status_bar_height_px = self.chrome_geometry.status_bar_height_px,
             .cell_width_px = self.cell_width_px,
             .cell_height_px = self.cell_height_px,
             .generation = self.generation,
@@ -3133,4 +3143,27 @@ test "replaceSidebar swaps only sidebar_cells and bumps generation, leaving grid
     // sidebar_cells는 새 band로 교체.
     try std.testing.expectEqual(@as(usize, 1), buf.sidebar_cells.len);
     try std.testing.expectEqual(@as(u32, 0xFF223344), buf.sidebar_cells[0].background);
+}
+
+// SB1-S2a: 상태바 높이는 **투영 스탬프**를 타고 ABI로 나간다. 렌더러는 이 값으로 사이드바 배경 strip의
+// 바닥을 정한다(strip은 `.m`이 높이를 직접 정하는 승인 예외라, Zig가 값을 실어 주는 것 말고 방법이 없다).
+// 이 조각은 값이 늘 0이라 `view()` 출력이 이전과 같아야 한다 — 그게 seam의 전부다.
+test "SB1-S2a: status_bar_height_px는 스탬프를 타고 나가고, 0이면 기존과 같다" {
+    var buffer: MetalFrameBuffer = .{};
+    defer buffer.deinit(std.testing.allocator);
+
+    // 스탬프 전(기본값) — 0이다.
+    try std.testing.expectEqual(@as(u32, 0), buffer.view().status_bar_height_px);
+
+    // 다른 chrome 기하만 찍고 상태바를 안 주면 여전히 0이다(기존 동작 보존).
+    buffer.stampChromeGeometry(.{ .terminal_origin_x_px = 240, .titlebar_strip_px = 30 });
+    try std.testing.expectEqual(@as(u32, 0), buffer.view().status_bar_height_px);
+    try std.testing.expectEqual(@as(u32, 240), buffer.view().terminal_origin_x_px);
+
+    // 값이 서면 그대로 실려 나간다 — 렌더러가 strip 바닥을 이만큼 올린다(S2b가 실제로 세운다).
+    buffer.stampChromeGeometry(.{ .terminal_origin_x_px = 240, .titlebar_strip_px = 30, .status_bar_height_px = 24 });
+    try std.testing.expectEqual(@as(u32, 24), buffer.view().status_bar_height_px);
+    // 같은 스탬프의 다른 필드가 훼손되지 않는다(끝에 추가한 필드라 기존 의미 불변).
+    try std.testing.expectEqual(@as(u32, 240), buffer.view().terminal_origin_x_px);
+    try std.testing.expectEqual(@as(u32, 30), buffer.view().titlebar_strip_px);
 }

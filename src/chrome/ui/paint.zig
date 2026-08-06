@@ -6,6 +6,7 @@
 //! and GPU shadow emission remain the ML3b boundary.
 
 const std = @import("std");
+const icons = @import("../../icons.zig"); // 등록 아이콘 이름↔codepoint(테스트가 실제 등록 cp를 쓰게)
 const draw = @import("../draw.zig");
 const interaction = @import("interaction.zig");
 const layout = @import("layout.zig");
@@ -356,7 +357,7 @@ test "leading icon slot survives projection into the published entry" {
     const node = ui_tree.buttonWithLabel(.{
         .id = 1,
         .action = .{ .id = 7 },
-        .leading_icon = .{ .codepoint = 0xF0021, .extent_px = 18, .gap_px = 8 },
+        .leading_icon = .{ .codepoint = icons.codepoint(.session_dock_refresh), .extent_px = 18, .gap_px = 8 },
     }, &label);
 
     var entries: [4]ui_tree.RectEntry = undefined;
@@ -371,7 +372,7 @@ test "leading icon slot survives projection into the published entry" {
 
     const entry = built.entries[built.find(1).?];
     const icon = entry.visual.button.leading_icon orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(u21, 0xF0021), icon.codepoint);
+    try std.testing.expectEqual(icons.codepoint(.session_dock_refresh), icon.codepoint);
     try std.testing.expectEqual(@as(u16, 18), icon.extent_px);
     try std.testing.expectEqual(@as(u16, 8), icon.gap_px);
 }

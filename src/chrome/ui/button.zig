@@ -20,6 +20,7 @@
 //! 집합과 동기화해야 할 두 번째 목록이 되기 때문이다.
 
 const std = @import("std");
+const icons = @import("../../icons.zig"); // 등록 아이콘 이름↔codepoint(테스트 registry가 실제 등록 cp를 쓰게)
 const layout = @import("layout.zig");
 const spacing = @import("spacing.zig");
 const tree = @import("tree.zig");
@@ -214,7 +215,7 @@ test "size floor raises the caller minimum and rejects a smaller max" {
 }
 
 const TestRegistry = struct {
-    const registered: u21 = 0xF0021;
+    const registered: u21 = icons.codepoint(.session_dock_refresh);
 
     fn isRegistered(_: *const anyopaque, codepoint: u21) bool {
         return codepoint == registered;

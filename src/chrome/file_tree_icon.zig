@@ -2,6 +2,7 @@
 //! beside the projected row; render and pointer paths only lower `IconKind` to a registered PUA.
 
 const std = @import("std");
+const icons = @import("../icons.zig");
 
 pub const IconKind = enum(u8) {
     none,
@@ -79,26 +80,26 @@ fn anyName(actual: []const u8, candidates: []const []const u8) bool {
 pub fn codepoint(kind: IconKind) ?u21 {
     return switch (kind) {
         .none => null,
-        .recent => 0xF000C,
-        .folder => 0xF000A,
-        .folder_open => 0xF000D,
-        .folder_source => 0xF0018,
-        .folder_test => 0xF0019,
-        .folder_docs => 0xF001A,
-        .folder_assets => 0xF001B,
-        .folder_config => 0xF001C,
-        .folder_dependency => 0xF001D,
-        .folder_output => 0xF001E,
-        .file => 0xF000E,
-        .code => 0xF000F,
-        .web => 0xF0016,
-        .data => 0xF0017,
-        .config => 0xF0013,
-        .git => 0xF0001,
-        .image => 0xF0012,
-        .document => 0xF0011,
-        .archive => 0xF0014,
-        .package => 0xF0015,
+        .recent => icons.codepoint(.recent),
+        .folder => icons.codepoint(.folder),
+        .folder_open => icons.codepoint(.folder_open),
+        .folder_source => icons.codepoint(.folder_source),
+        .folder_test => icons.codepoint(.folder_test),
+        .folder_docs => icons.codepoint(.folder_docs),
+        .folder_assets => icons.codepoint(.folder_assets),
+        .folder_config => icons.codepoint(.folder_config),
+        .folder_dependency => icons.codepoint(.folder_dependency),
+        .folder_output => icons.codepoint(.folder_output),
+        .file => icons.codepoint(.file),
+        .code => icons.codepoint(.file_code),
+        .web => icons.codepoint(.web),
+        .data => icons.codepoint(.data),
+        .config => icons.codepoint(.file_config),
+        .git => icons.codepoint(.git_branch),
+        .image => icons.codepoint(.image),
+        .document => icons.codepoint(.document),
+        .archive => icons.codepoint(.archive),
+        .package => icons.codepoint(.package),
     };
 }
 

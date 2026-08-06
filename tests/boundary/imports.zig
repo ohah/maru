@@ -85,7 +85,10 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     // 세션 도크 결함 묶음(텍스트 동기 셰이핑·스크롤바 발행/드래그·도크 view bar 기하)으로 다시 바뀐다.
     // count는 여전히 4다 — 새 코드는 필드를 이름으로 읽지 않는다. 셰이핑은 op 슬라이스와 fingerprint만,
     // 스크롤바는 published rect와 opaque drag payload만, view bar는 `DockMetrics` 값 하나만 다룬다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "05f4f9731a4a8964c658b5ce773aa841e25997c3ea17b4c562d76f73f697714e" },
+    // IC2(아이콘 이름 registry 이관)가 헤더·카드·에이전트 아이콘의 codepoint 리터럴을 `icons.codepoint(...)`/
+    // `icons.utf8(...)` 호출로 바꾸며 다시 바뀐다. count는 여전히 4다 — 이름 registry는 생성된 enum 상수라
+    // 필드를 이름으로 읽는 reflection이 아니다(`@field` 없음, comptime switch 한 번).
+    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "3812ffbcdb955c2aaf4161bbcc31a088395aad3c04c99626b49b21c272e54745" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

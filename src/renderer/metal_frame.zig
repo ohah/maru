@@ -11,6 +11,7 @@ const std = @import("std");
 const renderer = @import("../renderer.zig");
 const terminal = @import("../terminal.zig");
 const color = @import("../color.zig");
+const icons = @import("../icons.zig"); // 등록 chrome 아이콘 이름↔PUA codepoint(생성물)
 
 pub const NativeMetalCell = extern struct {
     row: u16,
@@ -2919,7 +2920,7 @@ test "PaneFrameRole lowers dock toggle provenance without classifying the same P
             .row = 0,
             .col = 0,
             .width = 1,
-            .codepoint = 0xF0006,
+            .codepoint = icons.codepoint(.sidebar),
             .slot_id = 1,
             .atlas_x_px = 0,
             .atlas_y_px = 0,

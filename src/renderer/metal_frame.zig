@@ -1349,6 +1349,10 @@ pub const MetalFrameBuffer = struct {
     // 매 draw마다 live 값을 덮어써, 메트릭이 바뀌고 아직 재투영되지 않은 프레임(host가 generation 변화
     // 없이도 다시 그리는 경로가 있다)에서 **옛 pitch 셀 + 새 헤더 높이**가 섞였다.
     chrome_geometry: ChromeGeometry = .{},
+    // 위 스탬프가 **한 번이라도 찍혔는가**. 호출자가 "아직 정합시킬 셀이 없다"를 판정하는 술어다 —
+    // `generation`으로는 못 한다: `setCursorFadeMilli`가 셀·기하와 무관하게 generation을 올리므로
+    // 첫 투영 전에 blink tick 하나만 끼어도 "투영됐다"로 오판해 기본값 0 기하가 나간다.
+    chrome_geometry_stamped: bool = false,
     generation: u64 = 0,
     // 커서 overlay cell 수(buildNativeCellsSplit). view()가 아래 cursor_start와 함께 MetalFrame으로 넘겨 렌더러가
     // 커서 구간을 본문에서 분리해 cursor_fade_milli 불투명도로 별도 pass로 그린다 — blink 페이드가 frame rebuild
@@ -1597,6 +1601,7 @@ pub const MetalFrameBuffer = struct {
     /// 값으로 고정한다 — 호출자가 draw 시점의 live 값을 덮어쓰면 메트릭 변경 프레임에 셀과 기하가 갈린다.
     pub fn stampChromeGeometry(self: *MetalFrameBuffer, geometry: ChromeGeometry) void {
         self.chrome_geometry = geometry;
+        self.chrome_geometry_stamped = true;
     }
 
     /// 커서 blink 페이드 위상을 반영한다(rebuild 없음, milli는 0~1000으로 clamp). 바뀌면 generation을 올려

@@ -1,13 +1,13 @@
 //! 스크롤 컨테이너의 좌표계다 — backing pixel 하나가 단위이고, 이 모듈 밖으로 분수 좌표가 나가지 않는다.
 //!
-//! 단일 출처: docs/scroll-view.md. 소비처(도크·파일 탐색기·소스 컨트롤·...)는 상태를 자기가 소유하고
+//! 단일 출처: docs/scroll-area.md. 소비처(도크·파일 탐색기·소스 컨트롤·...)는 상태를 자기가 소유하고
 //! 그 값의 legal range와 전이만 여기서 받는다. 이 모듈은 tree·paint·host를 읽지 않는다.
 //!
 //! **`project`가 build보다 먼저 온다**는 것이 CSS `overflow: auto`와 갈라지는 지점이다(§2.1). 브라우저는
 //! 자식을 다 만든 뒤 넘치는 부분을 자르지만, 여기서는 보이지 않는 항목의 노드도 텍스트도 만들지 않는다.
 //! 그래서 창(window)을 정하는 것이 자르는 것보다 앞선다.
 //!
-//! 지금 여기 있는 것은 **좌표계뿐이다.** §2가 ScrollView 소유라고 적은 것 중 스크롤바 entry 발행과
+//! 지금 여기 있는 것은 **좌표계뿐이다.** §2가 ScrollArea 소유라고 적은 것 중 스크롤바 entry 발행과
 //! viewport clip은 아직 `session_dock/build.zig`가, 분수 휠 residue와 selection follow는 아직 host가
 //! 들고 있다. 파일 이름은 목적지를 가리키고, 그 나머지는 SV1b·SV1c가 옮긴다(docs/implementation-plan.md).
 //! 이 주석은 다음 사람이 "여기 없으면 아무 데도 없다"고 오해하지 않게 하기 위한 것이다.

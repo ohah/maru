@@ -170,9 +170,25 @@ test "file tree scrollbar: reserved columns round up so the track never covers a
         const occupied = bar_width_px + edge_inset_px;
         try std.testing.expect(reservedColumns(200, cell_w) * cell_w >= occupied);
     }
+    // content 폭이 트랙보다 좁으면 트랙이 그 폭에 눌린다 — 예약이 폭을 넘어서면 안 된다.
+    try std.testing.expect(reservedColumns(5, 8) * 8 <= 5 + 8);
+    try std.testing.expect(reservedColumns(5, 1) <= 5);
     // 퇴화 입력은 0이다(0으로 나누지 않는다).
     try std.testing.expectEqual(@as(u32, 0), reservedColumns(0, 8));
     try std.testing.expectEqual(@as(u32, 0), reservedColumns(200, 0));
+}
+
+// `withScroll`과 `compute`는 둘 다 `max_scroll`로 나눈다. 0이면 0/0 = NaN이라 thumb 좌표가 화면 밖으로
+// 나가거나 사라진다. 지금 그 상태가 **도달 불가**한 이유는 `compute`가 `total_rows <= visible_rows`를
+// null로 걸러 `max_scroll >= 1`을 보장하기 때문이다 — 방어 코드를 더하는 대신 그 불변식을 고정한다.
+// 이 게이트가 사라지면(예: 넘치지 않아도 트랙을 그리도록 바꾸면) 여기서 먼저 빨개진다.
+test "file tree scrollbar: compute never publishes a zero scroll range" {
+    try std.testing.expect(compute(3, 3, 0, 0, 0, 100, 90) == null); // 딱 맞으면 없다
+    try std.testing.expect(compute(2, 3, 0, 0, 0, 100, 90) == null); // 모자라도 없다
+    const g = compute(4, 3, 0, 0, 0, 100, 90) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(g.max_scroll >= 1);
+    try std.testing.expect(std.math.isFinite(g.thumb_y));
+    try std.testing.expect(std.math.isFinite(g.withScroll(g.max_scroll).thumb_y));
 }
 
 test "file tree scrollbar: overflow only and endpoints" {

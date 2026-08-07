@@ -1238,6 +1238,39 @@ tree 교체에서 capture carry 누락(드래그가 첫 move에 죽음)·스크�
 - **SV2 — 파일 탐색기 이관.** 행 단위 좌표를 backing pixel로 옮기는 것이 실제 변경이다. 부분적으로
   보이는 행이 생기므로 행 기반 hit-test·reveal·follow가 픽셀 좌표를 읽도록 함께 바뀐다. 별도 스크롤바
   tree(`file_tree_scrollbar.publish`)와 전용 capture 경로는 이 단계에서 제거한다.
+
+  **코드를 읽고 확인한 것**(SV1d 직후 조사). 이 셋이 단계 나눔을 정한다.
+
+  1. **탐색기 행 텍스트는 셀 격자 draw list다**(`coretext_frame_builder.buildFileTreeDrawList` → `collectShaped`).
+     도크처럼 measured 경로가 아니다. 그런데 **옮길 필요가 없다** — `PanePlacement`는 이미 픽셀
+     `origin_y`와 `clip_rect`를 갖는다. 부분 행은 draw list를 `offset / cell_h` 행부터 만들고 pane 원점을
+     `offset % cell_h`만큼 올린 뒤 content rect로 자르면 나온다. 행 하이라이트 quad도 이미 픽셀 위치라
+     같은 편향만 받는다. 셀 텍스트를 measured로 옮기는 것은 SV2의 범위가 **아니다**.
+  2. **탐색기 콘텐츠는 어떤 `UiRectTree`에도 없다.** 스크롤바조차 tree로 그리지 않는다 — 실제 그림은
+     host의 GPU quad이고 `file_tree_scrollbar.publish`는 **스모크 probe 전용**이다(rect 두 개를 만들어
+     thumb 좌표를 실어 보낸다). 그래서 `tree.scrollArea`는 SV1c가 만든 **자식 없는 measure pass**
+     형태로 쓴다 — 컨테이너가 뷰포트와 gutter를 소유하고 track/thumb을 내되, 행은 그 content rect
+     안에서 셀 경로가 그린다.
+
+     이관하면 **idle fade가 함께 옮겨진다.** 지금 탐색기 스크롤바는 host가 `file_tree_scrollbar_idle_ticks`
+     로 흐리는데 도크 스크롤바에는 그 개념이 없다(§8). 둘 중 하나로 통일할지, ScrollArea가 fade를
+     소유할지는 SV2b가 정한다 — 지금 결론을 적지 않는다.
+  3. **탐색기에는 시각 골든이 없다.** Chrome Lab은 `session_dock`·`archive_detail`만 그리고, CI의
+     "file explorer macOS product path" 잡은 셰이더 스모크와 **도크** 골든을 돌린다. 즉 지금 탐색기
+     스크롤을 통째로 망가뜨려도 초록이다 — SV0 직전의 도크와 같은 상태다.
+
+  그래서 **SV2-0이 먼저다**(SV0와 같은 이유). 슬라이스:
+
+  - **SV2-0 — 판정자.** 탐색기 행·스크롤바를 실제로 보는 캡처 게이트를 만든다. Lab에 시나리오를 더할지
+     (그러려면 탐색기 draw list를 Lab이 부를 수 있어야 한다) 앱 스모크 캡처를 골든에 물릴지는 이 슬라이스가
+     정한다. 판정 기준은 하나다 — **부분 행 하나를 없애면 빨개져야 한다.**
+  - **SV2a — 픽셀 스크롤 상태.** `file_tree_scroll_rows: usize`를 `scroll_area.State`(픽셀)로 바꾸고
+     투영을 `scroll_area.project`로 옮긴다. 렌더는 위 ①의 원점 편향 + `clip_rect`. hit-test·reveal·
+     follow가 픽셀을 읽는다. 스크롤바는 아직 `file_tree_scrollbar` 그대로 둔다.
+  - **SV2b — 스크롤바 이관.** 자식 없는 `tree.scrollArea` 선언으로 track/thumb을 내고,
+     `file_tree_scrollbar.publish`와 전용 capture 경로를 지운다. `reservedColumns`(텍스트 **셀**을 통째로
+     빼 track 자리를 만드는 것)는 컨테이너가 소유하는 픽셀 gutter로 대체된다 — 행이 쓰는 칸 수가
+     달라지므로 **시각이 바뀔 수 있다**. 바뀌면 캡처를 눈으로 대조하고 무엇이 왜 달라졌는지 남긴다.
 - **SV3 — 소스 컨트롤 이관.** 탐색기와 같은 행 좌표를 쓰고 스크롤바가 아예 없다. SV2가 만든 픽셀
   경로를 그대로 쓰므로 비용이 가장 작고, 없던 스크롤바가 생기는 것이 사용자에게 보이는 변화다.
 - **SV4 — 사이드바 이관.** 스크롤바가 host의 GPU quad라 발행 경로가 없다. 이관하면 사이드바도

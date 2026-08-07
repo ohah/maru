@@ -111,7 +111,7 @@ pub const AgentSessionArchiveSmokeProbe = extern struct {
 };
 
 test "ABI v168 app instance lease result values match the C header" {
-    try std.testing.expectEqual(@as(u32, 168), abi_version);
+    try std.testing.expectEqual(@as(u32, 169), abi_version);
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_ACQUIRED), @intFromEnum(AppInstanceLeaseResult.acquired));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_HELD), @intFromEnum(AppInstanceLeaseResult.held));
     try std.testing.expectEqual(@as(u32, c.MARU_APP_INSTANCE_LEASE_UNSAFE), @intFromEnum(AppInstanceLeaseResult.unsafe));
@@ -5454,6 +5454,15 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostMetalFrame, "gpu_glyph_count"), @offsetOf(AppMetalFrame, "gpu_glyph_count"));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostMetalFrame, "modal_cells_start"), @offsetOf(AppMetalFrame, "modal_cells_start"));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostMetalFrame, "overlay_cells_present"), @offsetOf(AppMetalFrame, "overlay_cells_present"));
+    // v169: 셀이 clip 표의 항목을 index로 가리킨다. index는 셀 안의 u16 이웃들과 같은 폭이고 표 포인터/개수도
+    // 프레임의 다른 포인터/usize와 같은 폭이라 @sizeOf로는 어느 쪽도 reorder를 못 잡는다 — 자리까지 고정한다.
+    // 어긋나면 렌더러가 **다른 사각형으로** 자르므로 화면은 그럴듯한데 틀린 곳이 잘린다.
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostMetalCell, "clip_index"), @offsetOf(AppMetalCell, "clip_index"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostMetalFrame, "cell_clips"), @offsetOf(AppMetalFrame, "cell_clips"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostMetalFrame, "cell_clip_count"), @offsetOf(AppMetalFrame, "cell_clip_count"));
+    try std.testing.expectEqual(@sizeOf(c.MaruAppHostClipRect), @sizeOf(maru.renderer.metal_frame.ClipPx));
+    try std.testing.expectEqual(@alignOf(c.MaruAppHostClipRect), @alignOf(maru.renderer.metal_frame.ClipPx));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostClipRect, "h"), @offsetOf(maru.renderer.metal_frame.ClipPx, "h"));
     try std.testing.expectEqual(@sizeOf(c.MaruAppHostGpuQuad), @sizeOf(AppGpuQuad));
     try std.testing.expectEqual(@alignOf(c.MaruAppHostGpuQuad), @alignOf(AppGpuQuad));
     // 모든 필드가 4B라 @sizeOf만으론 필드 reorder(예: corner_radii↔border_widths)를 못 잡는다 — offset도 대조한다.

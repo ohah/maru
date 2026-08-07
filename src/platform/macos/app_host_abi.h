@@ -8,7 +8,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 168u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 169u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -305,7 +305,19 @@ typedef struct MaruAppHostMetalCell {
        사이드바 cell은 자체 위치 로직을 써 이 필드를 무시한다(0). */
     uint32_t origin_x;
     uint32_t origin_y;
+    /* 이 셀을 자를 사각형의 cell_clips index + 1(0 = 자르지 않음). ABI v169 — 자세한 근거는 아래
+       cell_clips 주석. */
+    uint16_t clip_index;
+    uint16_t _clip_pad;
 } MaruAppHostMetalCell;
+
+/* 셀이 clip_index로 가리키는 사각형(backing px, 좌상단 원점 — MTLScissorRect와 같은 규약). */
+typedef struct {
+    uint32_t x;
+    uint32_t y;
+    uint32_t w;
+    uint32_t h;
+} MaruAppHostClipRect;
 
 /* 한 glyph slot의 raster bytes를 atlas texture에 올리기 위한 업로드 기술자. bytes_offset/
    byte_count는 MaruAppHostMetalFrame.raster_pixels 버퍼 안의 범위다. */
@@ -483,14 +495,6 @@ typedef struct MaruAppHostMetalFrame {
        background-opacity 모델). host가 opacity<1이면 metal layer/NSWindow도 비불투명으로. float 대신 milli
        정수로 ABI를 정수 유지. 끝에 추가해 기존 offset 불변(ABI v70). */
     uint32_t window_opacity_milli;
-    /* C4b 모달 클리핑(인프라): 모달 오버레이 셀을 이 px 사각(backing, 좌상단)으로 클리핑한다 — chrome 컴포넌트가
-       draw.Op.clip을 내면 lowering이 채우고, renderer가 모달 셀 draw에 setScissorRect로 적용한다(MTLScissorRect도
-       좌상단 원점이라 y 변환 없음). w==0이면 클리핑 없음(기존 동작). 부분 카드 픽셀 스크롤(알림 패널 등)
-       재사용 인프라 — 컴포넌트 적용은 후속. 끝에 4필드 추가해 기존 offset 불변(ABI v84). */
-    uint32_t modal_clip_x_px;
-    uint32_t modal_clip_y_px;
-    uint32_t modal_clip_w_px;
-    uint32_t modal_clip_h_px;
     /* 사이드바 세로 스크롤량(backing px). renderer가 사이드바 셀(밴드·카드 glyph) py_top에서 빼 카드를 위로 밀고,
        >0이면 사이드바 셀 draw에 [header_h, drawable_h] scissor를 적용해 헤더 위로 샌 카드를 자른다(헤더 glyph는
        터미널 셀 패스라 영향 없음). GPU quad 밴드·tint는 host lowering이 같은 값으로 이미 빼 클립한다(단일 출처).
@@ -524,19 +528,23 @@ typedef struct MaruAppHostMetalFrame {
        renderer가 소유한 표면을 상태바 위에서 끊는 용도다(지금은 strip, S2b에서 사이드바 셀 scissor도 같은 값).
        0=기존 동작(창 바닥까지). 끝에 추가해 기존 offset 불변(ABI v167). */
     uint32_t status_bar_height_px;
-    /* SV2a(ABI v147): 셀 격자 본문 중 **한 구간**을 px 사각으로 자른다(좌상단, len==0=없음). 파일
-       탐색기의 부분 행 픽셀 스크롤이 첫 소비자다. index는 cells 기준(cursor_start와 같은 도메인).
-       끝에 추가해 기존 offset 불변. */
-    uint32_t pane_clip_cells_start;
-    uint32_t pane_clip_cells_len;
-    uint32_t pane_clip_x_px;
-    uint32_t pane_clip_y_px;
-    uint32_t pane_clip_w_px;
-    uint32_t pane_clip_h_px;
+    /* ABI v169: 셀이 `clip_index`로 가리키는 사각형 표(backing px, 좌상단). index 1이 cell_clips[0]이고
+       0은 "자르지 않음"이다. renderer는 셀을 훑으며 index가 바뀌는 경계에서 draw를 쪼개고 그 사각형으로
+       setScissorRect한다.
+
+       **왜 프레임 슬롯이 아니라 셀이 드는가**: v147·v84는 "이 구간을 이 사각형으로 자르라"를 프레임 단위
+       슬롯에 담았는데, 그 구간을 producer가 pane 구성에서 계산했다. 도크 목록 pane은 매 프레임 발행되지
+       않아서 그 pane이 없는 프레임이 슬롯을 지웠고, 렌더러는 scissor 분기에 **한 번도 진입하지 못했다**.
+       셀과 index가 같은 배열에 있으면 그 어긋남이 정의상 불가능하다 — GpuQuad.clip_*가 quad에서 이미
+       그렇게 한다. */
     /* 사이드바 셀 scissor 세로 구간 [top, bottom)(backing px). renderer는 **그대로** 쓴다 — 게이트와
        클램프는 Zig(sidebarScissorPx)가 갖는다. bottom <= top이면 scissor 없음. 끝에 추가(ABI v168). */
     uint32_t sidebar_scissor_top_px;
     uint32_t sidebar_scissor_bottom_px;
+    /* 셀이 clip_index로 가리키는 사각형 표. index 1이 cell_clips[0]이다(0 = 자르지 않음). 셀 배열과 같은
+       프레임에서 함께 만들어져 둘의 수명이 갈라지지 않는다. 끝에 추가(ABI v169). */
+    const MaruAppHostClipRect *cell_clips;
+    size_t cell_clip_count;
 } MaruAppHostMetalFrame;
 
 uint32_t maru_macos_app_host_abi_version(void);

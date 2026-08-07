@@ -96,12 +96,6 @@ bool maru_metal_renderer_draw(
     /* C4b overlay 셀이 cells에서 시작하는 순수 인덱스. 존재 여부는 마지막 overlay_cells_present가 명시하며,
        over quad(모달 배경)를 텍스트 셀 '앞'에 끼우는 분할점이다. */
     size_t modal_cells_start,
-    /* C4b 모달 클리핑(px, 좌상단, w==0=없음). 모달 셀 draw에 setScissorRect로 적용한다 — MTLScissorRect도
-       좌상단 원점이라 y를 뒤집지 않고 drawable 안으로 clamp만 한다. 부분 카드 픽셀 스크롤(알림 패널 등) 인프라. */
-    uint32_t modal_clip_x_px,
-    uint32_t modal_clip_y_px,
-    uint32_t modal_clip_w_px,
-    uint32_t modal_clip_h_px,
     /* C4b: chrome 그림자(GpuShadow). NULL/0이면 안 그림. quad·셀보다 아래(맨 처음) 그린다. */
     const MaruAppHostGpuShadow *gpu_shadows,
     size_t gpu_shadow_count,
@@ -157,19 +151,15 @@ bool maru_metal_renderer_draw(
     /* SB1: 창 바닥 상태표시줄이 예약한 높이(backing px). 사이드바 배경 strip을 이만큼 위에서 끝낸다.
        0=기존 동작(창 바닥까지). 끝에 추가해 인자 순서 불변(ABI v167). */
     uint32_t status_bar_height_px,
-    /* SV2a(ABI v147): 셀 격자 본문 중 **한 구간**을 px 사각으로 자른다(좌상단, len==0=없음). 렌더러는
-       본문 draw를 이 구간 앞/가운데/뒤로 나누고 가운데만 setScissorRect로 그린다. 파일 탐색기의 부분
-       행 픽셀 스크롤이 첫 소비자다. index는 cells 기준(cursor_start와 같은 도메인). */
-    uint32_t pane_clip_cells_start,
-    uint32_t pane_clip_cells_len,
-    uint32_t pane_clip_x_px,
-    uint32_t pane_clip_y_px,
-    uint32_t pane_clip_w_px,
-    uint32_t pane_clip_h_px,
     /* 사이드바 셀 scissor 세로 구간 [top, bottom)(backing px). 그대로 적용한다 — 게이트·클램프는
        호출자가 이미 했다. bottom <= top이면 scissor 없음. 끝에 추가해 인자 순서 불변(ABI v168). */
     uint32_t sidebar_scissor_top_px,
-    uint32_t sidebar_scissor_bottom_px
+    uint32_t sidebar_scissor_bottom_px,
+    /* 셀이 clip_index로 가리키는 사각형 표(ABI v169). 렌더러는 cells를 훑어 index가 같은 연속 run마다
+       draw를 쪼개고 그 사각형으로 scissor를 건다 — 어느 셀이 무엇인지는 알 필요가 없다. index 1이
+       cell_clips[0]이고 0은 "자르지 않음". NULL/0이면 모든 셀이 안 잘린다(기존 동작). */
+    const MaruAppHostClipRect *cell_clips,
+    size_t cell_clip_count
 );
 
 void maru_metal_renderer_destroy(MaruMetalRenderer *renderer);

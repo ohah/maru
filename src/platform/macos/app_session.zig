@@ -50950,7 +50950,34 @@ test "file tree row window is one arithmetic shared by follow, clamp, hit-test, 
         try std.testing.expect(saw_first_row_label);
     }
 
-    // ⑥ 행이 창보다 적으면 스크롤이 없다.
+    // ⑥ hit-test의 **경계**도 본다. 위 ③은 창 안쪽만 찍어 봐서, rect 밖·스크롤바 트랙 위·셀 높이 0을
+    //    아무도 판정하지 않았다(적대적 검증에서 셋 다 살아남았다). 셋 다 "행이 아닌 곳을 클릭했는데
+    //    행이 선택된다"는 같은 결함으로 이어진다.
+    session.file_tree_scroll_rows = 0;
+    {
+        // rect 위쪽 밖.
+        try std.testing.expect(session.fileTreeRowAt(x, @floatFromInt(tree.y -| 2)) == null);
+        // rect 왼쪽 밖.
+        try std.testing.expect(session.fileTreeRowAt(@floatFromInt(tree.x -| 2), inside_y) == null);
+        // 스크롤바 트랙 위 — 목록이 넘치므로 트랙이 있다.
+        const bar = session.fileTreeScrollbarGeometry() orelse return error.FileTreeFixtureHasNoScrollbar;
+        const track_x: f64 = bar.track_x + bar.track_w / 2;
+        const track_y: f64 = bar.track_y + bar.track_h / 2;
+        try std.testing.expect(bar.trackContains(track_x, track_y));
+        try std.testing.expect(session.fileTreeRowAt(track_x, track_y) == null);
+    }
+
+    // ⑦ 셀 높이가 0이면 창도 0이다. 0으로 나누면 패닉이고, 1로 눌러 계산하면 창이 뷰포트 높이만큼
+    //    커져 없는 행을 그리려 한다.
+    {
+        const saved = session.cell_height_px;
+        session.cell_height_px = 0;
+        try std.testing.expectEqual(@as(usize, 0), session.fileTreeVisibleRows());
+        try std.testing.expect(session.fileTreeRowAt(x, inside_y) == null);
+        session.cell_height_px = saved;
+    }
+
+    // ⑧ 행이 창보다 적으면 스크롤이 없다.
     session.file_tree_rows.shrinkRetainingCapacity(@min(visible, session.file_tree_rows.items.len));
     session.file_tree_scroll_rows = std.math.maxInt(usize);
     try std.testing.expectEqual(@as(usize, 0), session.fileTreeEffectiveScroll());

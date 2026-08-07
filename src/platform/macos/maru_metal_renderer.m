@@ -858,7 +858,9 @@ typedef struct {
     // 사이드바 스크롤 scissor 판정용.
     size_t sidebar_cells_n;
     uint32_t sidebar_scroll_offset_px;
-    uint32_t status_bar_height_px; // SB1: 창 바닥 상태표시줄 높이 — 사이드바 배경 strip 바닥과 셀 scissor 하단 **둘 다**에 쓴다
+    uint32_t status_bar_height_px; // SB1: 창 바닥 상태표시줄 높이 — 사이드바 배경 strip 바닥에 쓴다
+    uint32_t sidebar_scissor_top_px;    // 셀 scissor 구간 — 호출자가 게이트·클램프까지 끝낸 값이라 그대로 쓴다
+    uint32_t sidebar_scissor_bottom_px;
     uint32_t pane_clip_cells_start; // SV2a: 셀 본문 중 잘라야 할 구간(len==0=없음)
     uint32_t pane_clip_cells_len;
     uint32_t pane_clip_x_px;
@@ -955,23 +957,15 @@ static void maru_draw_terminal_layer(const MaruDrawPass *c) {
     //    픽셀 좌표, y가 아래로 증가). 정점 셰이더가 py_top(좌상단 px)→NDC로 매핑해 framebuffer가 표준 방향이라, 상단
     //    헤더를 자르려면 y=header_h부터 남긴다. 헤더 glyph는 터미널 셀 패스(위)라 이 scissor에 안 걸려 고정된다. 바로
     //    뒤 패스(그림자·모달)를 위해 full drawable로 복원한다. offset==0이면 기존 동작(scissor 없음).
-    //    SB1: 상태바가 서면 **스크롤 여부와 무관하게** 아래도 자른다. 사이드바 셀은 세로 경계 없이 발행되므로
-    //    (`sidebarBandCell`은 폭·칸수만 본다) 스크롤이 0이어도 맨 아래 카드가 상태바 띠 안까지 그려진다. 지금까지는
-    //    drawable 가장자리가 대신 잘라 줘서 드러나지 않았을 뿐이다. 상태바 배경이 그 위를 덮지만 `window.opacity<1`
-    //    이면 글자가 비쳐 보인다 — 사이드바 배경 strip을 상태바 위에서 끊은 것과 같은 이유·같은 값이다.
-    const NSUInteger sb_h = (NSUInteger)c->status_bar_height_px;
-    const bool sidebar_bottom_clip = (c->sidebar_cells_n > 0 && sb_h > 0u);
-    const bool sidebar_scroll_clip = (c->sidebar_cells_n > 0 && c->sidebar_scroll_offset_px > 0u &&
-                                      (float)c->sidebar_header_height_px < (float)c->drawable_size.height);
-    const bool sidebar_clip = sidebar_scroll_clip || sidebar_bottom_clip;
+    //    **자를 구간은 호스트가 정해 준다**(`sidebar_scissor_top/bottom_px`). 게이트("스크롤됐나", "상태바가
+    //    있나")와 클램프가 전부 Zig의 `sidebarScissorPx`에 있어 여기엔 산술이 없다 — 배치를 아는 곳을 하나로
+    //    두는 규율이다(docs/metal-ui-layout.md §5). bottom <= top이면 scissor 없음.
+    const NSUInteger scissor_top = (NSUInteger)c->sidebar_scissor_top_px;
+    const NSUInteger scissor_bottom = (NSUInteger)c->sidebar_scissor_bottom_px;
+    const bool sidebar_clip = (c->sidebar_cells_n > 0 && scissor_bottom > scissor_top);
     if (sidebar_clip) {
         const NSUInteger dw = (NSUInteger)c->drawable_size.width;
-        const NSUInteger dh = (NSUInteger)c->drawable_size.height;
-        // 스크롤이 0이면 헤더는 자를 필요가 없다(카드가 헤더 위로 새지 않는다) — 기존 동작을 보존한다.
-        const NSUInteger header_h = sidebar_scroll_clip ? (NSUInteger)c->sidebar_header_height_px : 0u;
-        const NSUInteger bottom = (sb_h < dh) ? (dh - sb_h) : 0u; // 상태바가 창을 다 먹으면 높이 0(그리지 않음)
-        const NSUInteger height = (bottom > header_h) ? (bottom - header_h) : 0u;
-        [c->encoder setScissorRect:(MTLScissorRect){ .x = 0, .y = header_h, .width = dw, .height = height }];
+        [c->encoder setScissorRect:(MTLScissorRect){ .x = 0, .y = scissor_top, .width = dw, .height = scissor_bottom - scissor_top }];
     }
     if (c->vertex_buffer != nil) MARU_DRAW_CELLS(c->pre_sidebar_vertices, c->total_vertices - c->pre_sidebar_vertices, 1.0f); // 사이드바 cells(제목)
     if (sidebar_clip) {
@@ -1088,7 +1082,9 @@ bool maru_metal_renderer_draw(
     uint32_t pane_clip_x_px,
     uint32_t pane_clip_y_px,
     uint32_t pane_clip_w_px,
-    uint32_t pane_clip_h_px
+    uint32_t pane_clip_h_px,
+    uint32_t sidebar_scissor_top_px,
+    uint32_t sidebar_scissor_bottom_px
 ) {
     if (renderer == NULL || terminal_layer == nil || cols == 0 || rows == 0) {
         return false;
@@ -1556,6 +1552,8 @@ bool maru_metal_renderer_draw(
         .sidebar_cells_n = sidebar_cells_n,
         .sidebar_scroll_offset_px = sidebar_scroll_offset_px,
         .status_bar_height_px = status_bar_height_px,
+        .sidebar_scissor_top_px = sidebar_scissor_top_px,
+        .sidebar_scissor_bottom_px = sidebar_scissor_bottom_px,
         .pane_clip_cells_start = pane_clip_cells_start,
         .pane_clip_cells_len = pane_clip_cells_len,
         .pane_clip_x_px = pane_clip_x_px,

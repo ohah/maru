@@ -203,7 +203,7 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.
-pub const abi_version: u32 = 167;
+pub const abi_version: u32 = 168;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -31691,6 +31691,40 @@ pub const AppSession = struct {
     /// 사이드바 세로 스크롤의 최대 오프셋(backing px) — 표시 카드 전체 높이가 헤더 아래 뷰포트를 넘는 양. 순수 함수라
     /// 헤드리스 단위 테스트 가능. content = 표시 탭 수 × 슬롯 높이, viewport = backing 높이 − 헤더(카드 아래 "+"는
     /// 헤더로 이동해 콘텐츠에 없음). content ≤ viewport(또는 슬롯 0)면 0(스크롤 불필요). u64로 계산해 곱셈 overflow 회피.
+    /// 사이드바 셀을 자를 세로 구간 `[top, bottom)`(backing px). **렌더러는 이 값을 그대로 쓴다** —
+    /// 게이트·클램프가 전부 여기 있어 `.m`에는 산술이 남지 않는다(docs/metal-ui-layout.md §5 "배치를 아는
+    /// 곳은 하나"). `bottom <= top`이면 scissor 없음(전체 그리기)이라는 뜻이다.
+    ///
+    /// 자르는 이유가 위아래 서로 다르다:
+    /// - **위**(header): 스크롤된 카드가 헤더 위로 새는 것을 막는다. 스크롤이 0이면 샐 것이 없으므로 안 자른다
+    ///   (기존 동작 보존 — 헤더를 늘 자르면 헤더 영역에 걸친 표면이 없는데도 scissor가 걸린다).
+    /// - **아래**(status bar): `sidebarBandCell`이 세로 경계를 안 보므로(폭·칸수만 본다) 스크롤이 0이어도
+    ///   맨 아래 카드가 상태바 띠 안까지 발행된다. 지금까진 drawable 가장자리가 대신 잘라 줬을 뿐이다.
+    const SidebarScissor = struct { top: u32, bottom: u32 };
+
+    fn sidebarScissorPx(
+        backing_height_px: u32,
+        sidebar_cells_present: bool,
+        header_height_px: u32,
+        scroll_offset_px: u32,
+        status_bar_height_px: u32,
+    ) SidebarScissor {
+        const none = SidebarScissor{ .top = 0, .bottom = 0 };
+        if (!sidebar_cells_present or backing_height_px == 0) return none;
+
+        const scroll_clip = scroll_offset_px > 0 and header_height_px < backing_height_px;
+        const bottom_clip = status_bar_height_px > 0;
+        if (!scroll_clip and !bottom_clip) return none;
+
+        const top: u32 = if (scroll_clip) header_height_px else 0;
+        const bottom: u32 = if (status_bar_height_px < backing_height_px)
+            backing_height_px - status_bar_height_px
+        else
+            0;
+        if (bottom <= top) return none; // 겹친 구간을 내느니 안 자른다(뒤집힌 rect 방지)
+        return .{ .top = top, .bottom = bottom };
+    }
+
     fn sidebarMaxScrollPx(content_height_px: u32, backing_height_px: u32, header_height_px: u32) u32 {
         const viewport: u64 = if (backing_height_px > header_height_px) backing_height_px - header_height_px else 0;
         if (content_height_px <= viewport) return 0;
@@ -34974,6 +35008,13 @@ pub const AppSession = struct {
     /// 값을 덮어쓰면 메트릭이 바뀌고 아직 재투영되지 않은 프레임(host는 generation 변화 없이도 다시 그릴 수 있다)
     /// 에서 **옛 pitch 셀 + 새 헤더/슬롯 높이**가 섞인다.
     fn chromeGeometrySnapshot(self: *const AppSession) metal_frame.ChromeGeometry {
+        const scissor = sidebarScissorPx(
+            self.backing_height_px,
+            self.sidebar_cells.items.len > 0,
+            self.sidebar_header_height_px,
+            self.sidebar_scroll_offset_px,
+            self.dockGeometry().status_bar.h,
+        );
         return .{
             .terminal_origin_x_px = self.sidebar_width_px,
             .sidebar_slot_height_px = self.sidebar_slot_height_px,
@@ -34984,6 +35025,10 @@ pub const AppSession = struct {
             // 상태바 높이는 `dock_layout`이 유일 권위다(S1이 낸 seam) — 여기서 따로 계산하면 작업영역을
             // 깎은 값과 strip을 자르는 값이 갈릴 수 있다. 지금은 입력이 0이라 항상 0이다(S2b가 뒤집는다).
             .status_bar_height_px = self.dockGeometry().status_bar.h,
+            // scissor 구간도 여기서 정해 스탬프에 싣는다 — 셀과 같은 프레임이어야 자르는 자리와 그린 자리가
+            // 맞는다. 렌더러엔 산술이 남지 않는다.
+            .sidebar_scissor_top_px = scissor.top,
+            .sidebar_scissor_bottom_px = scissor.bottom,
         };
     }
 
@@ -62428,6 +62473,68 @@ test "SB1-S3d: 상태바 배경은 bottom 버킷이어야 텍스트를 안 덮�
 // `status_bar_height_px=0`을 직접 넘겨 이 표면을 전혀 덮지 않는다 — 그래서 여기서 본다.
 // 레이어가 특히 중요하다: layer 4(header)는 사이드바 셀보다 **먼저** 그려져 카드가 상태바를 덮는다.
 // over 버킷(`.m`이 2/0/4 외를 전부 over로 보낸다)만이 사이드바 셀 뒤에 온다.
+// SB1 §5.3: 사이드바 셀 scissor. 이 계약은 `.m` 산술이라 **자동 가드가 없었다** — 문서 커버리지 표의
+// 마지막 ❌였다. 산술을 Zig로 옮겼으니 이제 순수 함수로 전부 덮인다.
+test "SB1: 사이드바 scissor는 스크롤과 상태바 각각을 이유로 자르고, 아니면 안 자른다" {
+    const S = AppSession.sidebarScissorPx;
+
+    // 아무 이유도 없으면 안 자른다(bottom <= top). 자를 이유가 없는데 scissor를 걸면 뒤 패스가 영향을 받는다.
+    const idle = S(960, true, 40, 0, 0);
+    try std.testing.expectEqual(@as(u32, 0), idle.top);
+    try std.testing.expectEqual(@as(u32, 0), idle.bottom);
+
+    // 셀이 없으면 자를 대상이 없다.
+    const no_cells = S(960, false, 40, 10, 22);
+    try std.testing.expectEqual(@as(u32, 0), no_cells.bottom);
+
+    // 스크롤만 — 위(헤더)만 자른다. 아래는 창 바닥까지.
+    const scrolled = S(960, true, 40, 10, 0);
+    try std.testing.expectEqual(@as(u32, 40), scrolled.top);
+    try std.testing.expectEqual(@as(u32, 960), scrolled.bottom);
+
+    // 상태바만 — **스크롤이 0이어도 아래를 자른다**(`sidebarBandCell`이 세로 경계를 안 보므로 맨 아래
+    // 카드가 띠 안까지 발행된다). 위는 안 자른다: 스크롤이 0이면 헤더 위로 샐 것이 없다(기존 동작 보존).
+    const bar_only = S(960, true, 40, 0, 22);
+    try std.testing.expectEqual(@as(u32, 0), bar_only.top);
+    try std.testing.expectEqual(@as(u32, 938), bar_only.bottom);
+
+    // 둘 다 — 위아래를 함께 자른다.
+    const both = S(960, true, 40, 10, 22);
+    try std.testing.expectEqual(@as(u32, 40), both.top);
+    try std.testing.expectEqual(@as(u32, 938), both.bottom);
+}
+
+// degenerate 창에서 **뒤집힌 rect를 내지 않는다.** MTLScissorRect에 top > bottom을 넣으면 정의되지 않은
+// 영역이 되고, 그리려던 것이 통째로 사라지거나 엉뚱한 데가 남는다.
+test "SB1: 사이드바 scissor는 겹치거나 뒤집힌 구간을 내느니 안 자른다" {
+    const S = AppSession.sidebarScissorPx;
+
+    // 상태바가 창을 다 먹으면 bottom이 0 → top 이하라 안 자른다.
+    const swallowed = S(20, true, 0, 0, 20);
+    try std.testing.expectEqual(@as(u32, 0), swallowed.bottom);
+
+    // 헤더가 남은 구간보다 아래면(헤더 40 + 상태바 22 > 창 50) top >= bottom이라 안 자른다.
+    const squeezed = S(50, true, 40, 10, 22);
+    try std.testing.expectEqual(@as(u32, 0), squeezed.top);
+    try std.testing.expectEqual(@as(u32, 0), squeezed.bottom);
+
+    // 창 높이 0.
+    const zero = S(0, true, 0, 5, 5);
+    try std.testing.expectEqual(@as(u32, 0), zero.bottom);
+
+    // 어떤 입력에서도 top < bottom이거나 둘 다 0이다(그 사이 상태는 없다).
+    for ([_]u32{ 0, 1, 20, 50, 960 }) |h| {
+        for ([_]u32{ 0, 40, 1000 }) |header| {
+            for ([_]u32{ 0, 10 }) |scroll| {
+                for ([_]u32{ 0, 22, 2000 }) |bar| {
+                    const r = S(h, true, header, scroll, bar);
+                    try std.testing.expect(r.bottom > r.top or (r.top == 0 and r.bottom == 0));
+                }
+            }
+        }
+    }
+}
+
 // SB1 §5.5: **눌리는 자리와 보이는 자리가 같아야 한다.** `pointInStatusBar`(휠·클릭을 삼키는 판정)와
 // `appendStatusBarBackground`(그리는 rect)가 각자 산술을 갖고 있어, 한쪽만 고치면 바가 보이는데 클릭이
 // 통과하거나(터미널이 선택을 시작) 반대로 바 밖이 먹히는 어긋남이 난다. 지금까지 주석으로만 묶여 있었다.

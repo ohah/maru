@@ -8,7 +8,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 167u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 168u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -533,6 +533,10 @@ typedef struct MaruAppHostMetalFrame {
     uint32_t pane_clip_y_px;
     uint32_t pane_clip_w_px;
     uint32_t pane_clip_h_px;
+    /* 사이드바 셀 scissor 세로 구간 [top, bottom)(backing px). renderer는 **그대로** 쓴다 — 게이트와
+       클램프는 Zig(sidebarScissorPx)가 갖는다. bottom <= top이면 scissor 없음. 끝에 추가(ABI v168). */
+    uint32_t sidebar_scissor_top_px;
+    uint32_t sidebar_scissor_bottom_px;
 } MaruAppHostMetalFrame;
 
 uint32_t maru_macos_app_host_abi_version(void);

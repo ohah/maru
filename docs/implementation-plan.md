@@ -1372,7 +1372,17 @@ tree 교체에서 capture carry 누락(드래그가 첫 move에 죽음)·스크�
 
      clip seam의 role을 `file_tree` → **`dock_list`** 로 일반화했다. 도크 뷰는 한 번에 하나만
      보이므로 프레임당 한 구간인 v147 seam을 탐색기와 소스 컨트롤이 공유한다.
-  - **SV3b — 스크롤바 신규.** SV2b가 만든 `scrollArea` 선언을 그대로 써서 없던 track/thumb을 낸다.
+  - **SV3b — 스크롤바 신규(완료).** SV2b가 만든 `scrollArea` 선언을 그대로 써서 없던 track/thumb을
+     낸다. 소스 컨트롤은 스크롤바가 **아예 없던** 뷰라, 사용자에게 보이는 변화는 "막대가 생긴 것"이다.
+
+     **두 뷰가 발행 저장소·드래그·interaction을 공유한다.** 도크 뷰는 한 번에 하나만 보이므로 상태를
+     뷰마다 두지 않고, `dockListScroll()`이 지금 보이는 목록의 사각형·좌표계·offset을 고른다. 그래서
+     이름도 `file_tree_scroll_*` → **`dock_list_scroll_*`** 로 옮겼다 — 두 소비처가 쓰는 상태에
+     한쪽 이름을 남겨 두면 다음 소비처(SV4)가 그것을 보고 오해한다.
+
+     **뷰별로 갈리는 것은 셋뿐이다**: 뷰포트 사각형(소스 컨트롤은 헤더 한 줄 아래에서 시작), extent,
+     그리고 offset을 적용할 setter. 그 라우팅이 갈리면 **보이지 않는 목록이 스크롤되므로** 판정자가
+     "thumb 드래그가 이 목록을 움직이고 탐색기 offset은 그대로"를 본다.
 - **SV4 — 사이드바 이관.** 스크롤바가 host의 GPU quad라 발행 경로가 없다. 이관하면 사이드바도
   드래그 가능한 스크롤바를 얻는다(현재 휠 전용).
 - **SV5 — 알림·팔레트·세팅(판단 보류).** 셋은 이미 `overlay_input.windowStart`로 item-index windowing을

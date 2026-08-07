@@ -129,24 +129,34 @@ pub const PublishError = error{InsufficientEntryBuffer};
 /// `ids`는 `compute`에 넘긴 폭 배열과 **같은 순서**여야 한다 — 슬롯의 `index`로 되짚기 때문이다.
 /// 자리를 못 얻은 항목은 tree에 없다(안 보이는 것은 눌리지도 않는다).
 pub fn publish(
+    m: Metrics,
     slots: []const Slot,
     ids: []const ItemId,
+    /// 항목 좌우로 넓힐 여백(px, 한쪽). 글자에 딱 붙은 호버 배경은 답답해 보인다 — 그런데 **판정 rect가
+    /// 곧 호버 rect**이므로 여기서 한 번 넓히면 보이는 자리와 눌리는 자리가 **구조적으로** 같이 넓어진다.
+    /// 배치(`compute`)는 건드리지 않는다: 항목 사이 간격(`gap_px`)이 이 여백보다 넓어야 서로 안 겹친다.
+    pad_px: u32,
     generation: u64,
     out: []tree.RectEntry,
 ) PublishError!tree.UiRectTree {
     if (out.len < slots.len) return error.InsufficientEntryBuffer;
+    const bar_left = m.bar_x;
+    const bar_right = m.bar_x +| m.bar_w;
     var count: usize = 0;
     for (slots) |slot| {
         if (slot.index >= ids.len) continue; // 호출자 실수 — 조용히 빼는 편이 잘못된 항목을 실행하는 것보다 낫다
         const id: u64 = @intFromEnum(ids[slot.index]);
+        // 바 밖으로는 못 나간다 — 첫/마지막 항목이 `edge_pad` 일부를 먹는 것은 의도지만 바를 넘으면 안 된다.
+        const left = @max(bar_left, slot.x -| pad_px);
+        const right = @min(bar_right, slot.x +| slot.w +| pad_px);
         out[count] = .{
             .id = id,
             .parent_index = null,
             .kind = .button, // 아이콘 + 텍스트 + 액션 = button 노드의 정의 그대로다
             .rect = .{
-                .x = @floatFromInt(slot.x),
+                .x = @floatFromInt(left),
                 .y = @floatFromInt(slot.y),
-                .width = @floatFromInt(slot.w),
+                .width = @floatFromInt(right -| left),
                 .height = @floatFromInt(slot.h),
             },
             .effective_clip = null,
@@ -253,7 +263,7 @@ test "SB1: publish는 슬롯을 button 노드로 내고 **의미**로 식별한�
     // 좌: 브랜치(100) + 경로(60). 둘 다 자리를 얻는다.
     const wide = compute(metrics(1000), &.{ 100, 60 }, &.{}, &lbuf, &rbuf);
     const ids = [_]ItemId{ .git_branch, .cwd };
-    const t1 = try publish(wide.left, &ids, 7, &entries);
+    const t1 = try publish(metrics(1000), wide.left, &ids, 0, 7, &entries); // pad 0 = 슬롯 그대로
     try testing.expectEqual(@as(usize, 2), t1.entries.len);
     try testing.expectEqual(@as(u64, 7), t1.generation);
     try testing.expectEqual(@intFromEnum(ItemId.git_branch), t1.entries[0].id);
@@ -278,7 +288,7 @@ test "SB1: 앞 항목이 사라져도 남은 항목의 id는 그대로다" {
     // 브랜치가 없는 상태 — 경로 하나만 넘긴다(호출자가 ids도 같이 줄인다).
     const only_cwd = compute(metrics(1000), &.{60}, &.{}, &lbuf, &rbuf);
     const ids = [_]ItemId{.cwd};
-    const t = try publish(only_cwd.left, &ids, 1, &entries);
+    const t = try publish(metrics(1000), only_cwd.left, &ids, 0, 1, &entries);
     try testing.expectEqual(@as(usize, 1), t.entries.len);
     try testing.expectEqual(@intFromEnum(ItemId.cwd), t.entries[0].id); // 1번(브랜치)이 아니다
 }
@@ -292,11 +302,44 @@ test "SB1: 자리를 못 얻은 항목은 tree에 없다(안 보이면 눌리지
     const narrow = compute(metrics(300), &.{ 100, 200 }, &.{120}, &lbuf, &rbuf);
     try testing.expectEqual(@as(usize, 1), narrow.left.len);
     const ids = [_]ItemId{ .git_branch, .cwd };
-    const t = try publish(narrow.left, &ids, 1, &entries);
+    const t = try publish(metrics(300), narrow.left, &ids, 0, 1, &entries);
     try testing.expectEqual(@as(usize, 1), t.entries.len);
     try testing.expectEqual(@intFromEnum(ItemId.git_branch), t.entries[0].id); // 살아남은 것만
 
     // 버퍼가 모자라면 조용히 자르지 않고 에러다.
     var tiny: [0]tree.RectEntry = undefined;
-    try testing.expectError(error.InsufficientEntryBuffer, publish(narrow.left, &ids, 1, &tiny));
+    try testing.expectError(error.InsufficientEntryBuffer, publish(metrics(300), narrow.left, &ids, 0, 1, &tiny));
+}
+
+// 호버 배경이 글자에 딱 붙으면 답답해 보인다. 좌우로 넓히되 **판정 rect가 곧 호버 rect**라 둘이 함께
+// 넓어진다 — 보이는 자리와 눌리는 자리가 갈릴 수 없다. 대신 두 가지를 지켜야 한다: 바 밖으로 안 나가고,
+// 이웃끼리 안 겹친다.
+test "SB1: publish의 좌우 여백은 바를 안 넘고 이웃과 안 겹친다" {
+    var lbuf: [4]Slot = undefined;
+    var rbuf: [4]Slot = undefined;
+    var entries: [8]tree.RectEntry = undefined;
+    const m = metrics(1000); // edge_pad 8, gap 12
+
+    const out = compute(m, &.{ 100, 60 }, &.{}, &lbuf, &rbuf);
+    const ids = [_]ItemId{ .git_branch, .cwd };
+    const t = try publish(m, out.left, &ids, 4, 1, &entries);
+    try testing.expectEqual(@as(usize, 2), t.entries.len);
+
+    // 좌우로 4px씩 넓어졌다(슬롯 100 → 108).
+    try testing.expectEqual(@as(f32, @floatFromInt(out.left[0].x - 4)), t.entries[0].rect.x);
+    try testing.expectEqual(@as(f32, @floatFromInt(out.left[0].w + 8)), t.entries[0].rect.width);
+
+    // 이웃과 안 겹친다 — gap(12)이 여백 둘(4+4)보다 넓어야 성립한다.
+    try testing.expect(t.entries[0].rect.x + t.entries[0].rect.width <= t.entries[1].rect.x);
+
+    // 바 밖으로 안 나간다. 첫 항목은 edge_pad(8) 일부를 먹지만 바 좌단(0) 아래로는 안 간다.
+    for (t.entries) |e| {
+        try testing.expect(e.rect.x >= 0);
+        try testing.expect(e.rect.x + e.rect.width <= 1000);
+    }
+
+    // 여백이 edge_pad보다 커도 바를 안 넘는다(clamp).
+    const huge = try publish(m, out.left, &ids, 999, 1, &entries);
+    try testing.expectEqual(@as(f32, 0), huge.entries[0].rect.x);
+    try testing.expect(huge.entries[0].rect.x + huge.entries[0].rect.width <= 1000);
 }

@@ -524,6 +524,15 @@ typedef struct MaruAppHostMetalFrame {
        renderer가 소유한 표면을 상태바 위에서 끊는 용도다(지금은 strip, S2b에서 사이드바 셀 scissor도 같은 값).
        0=기존 동작(창 바닥까지). 끝에 추가해 기존 offset 불변(ABI v167). */
     uint32_t status_bar_height_px;
+    /* SV2a(ABI v147): 셀 격자 본문 중 **한 구간**을 px 사각으로 자른다(좌상단, len==0=없음). 파일
+       탐색기의 부분 행 픽셀 스크롤이 첫 소비자다. index는 cells 기준(cursor_start와 같은 도메인).
+       끝에 추가해 기존 offset 불변. */
+    uint32_t pane_clip_cells_start;
+    uint32_t pane_clip_cells_len;
+    uint32_t pane_clip_x_px;
+    uint32_t pane_clip_y_px;
+    uint32_t pane_clip_w_px;
+    uint32_t pane_clip_h_px;
 } MaruAppHostMetalFrame;
 
 uint32_t maru_macos_app_host_abi_version(void);

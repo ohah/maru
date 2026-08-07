@@ -199,7 +199,7 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 92: take_notification_authorization_request(세팅 GUI에서 notifications.osc를 켤 때 macOS 데스크톱
 // 알림 권한 요청을 Swift에 맡기는 1회성 신호). 91: frame_rate_hz getter + render.frame-rate 설정(30~120Hz, 기본 60Hz).
 // Swift frame-loop NSTimer가 config를 읽어 cadence를 정한다.
-// 98: Phase 4b-2 — maru_metal_renderer_draw 시그니처에 overlay_layer(CAMetalLayer*) 2번째 인자 추가(모달을
+// 147: MetalFrame.pane_clip_cells_start/len + pane_clip_{x,y,w,h}_px + maru_metal_renderer_draw 마지막 6인자(셀 격자 본문 중 **한 구간**을 px 사각으로 scissor. 지금까지 PaneFrame.clip_rect는 오버레이 프레임에서만 scissor가 됐고 `.pane`이 실어 보내는 값은 조용히 버려졌다 — 파일 탐색기처럼 셀로 그리는 목록을 픽셀 단위로 스크롤하려면 그 구간만 잘라야 하는데 그 배선이 없었다. 렌더러는 본문 draw를 구간 앞/가운데/뒤로 나누고 가운데만 setScissorRect 후 full 복원한다 — 옆의 커서 분할(v146)·사이드바 스크롤 scissor와 같은 규약(좌상단 원점, y 안 뒤집음). len==0이면 세 draw가 기존 한 줄과 같아 동작 불변이고, 첫 소비자는 SV2a의 탐색기 부분 행이다. 끝에 6필드/6인자 추가해 기존 offset·인자 순서 불변). // 98: Phase 4b-2 — maru_metal_renderer_draw 시그니처에 overlay_layer(CAMetalLayer*) 2번째 인자 추가(모달을
 // 별도 물리 CAMetalLayer로 분리, 두 drawable을 한 command buffer에 present + 단일 commit으로 전이 원자성). host↔renderer
 // draw 계약 변경이라 버전을 올린다. **MetalFrame/세션 struct·export 시그니처는 불변**(overlay_layer는 Zig가 아니라
 // Swift가 소유한 CAMetalLayer라 struct offset·layout test는 그대로 green). 렌더러 분할·컨테이너 재편은 Swift/ObjC 레이어.

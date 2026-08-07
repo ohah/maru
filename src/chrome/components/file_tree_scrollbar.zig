@@ -182,6 +182,90 @@ test "file tree scrollbar: reserved columns round up so the track never covers a
 // 나가거나 사라진다. 지금 그 상태가 **도달 불가**한 이유는 `compute`가 `total_rows <= visible_rows`를
 // null로 걸러 `max_scroll >= 1`을 보장하기 때문이다 — 방어 코드를 더하는 대신 그 불변식을 고정한다.
 // 이 게이트가 사라지면(예: 넘치지 않아도 트랙을 그리도록 바꾸면) 여기서 먼저 빨개진다.
+// `sameSnapshot`은 드래그 중에 잡은 thumb을 **계속 잡고 있어도 되는가**를 정한다. 스크롤 위치
+// (`scroll_rows`·`thumb_y`)는 드래그가 **바꾸는 값**이라 비교에서 빠져야 하고, 그 밖의 것이 하나라도
+// 달라지면 그 캡처는 다른 목록·다른 기하를 가리키므로 끊어야 한다 — 안 끊으면 손을 떼지 않은 채
+// 목록이 바뀌었을 때 엉뚱한 위치로 점프한다.
+test "file tree scrollbar: a drag capture survives only its own snapshot" {
+    const base = Geometry{
+        .total_rows = 20,
+        .visible_rows = 5,
+        .max_scroll = 15,
+        .scroll_rows = 5,
+        .track_x = 100,
+        .track_y = 10,
+        .track_w = 8,
+        .track_h = 90,
+        .thumb_y = 40,
+        .thumb_h = 20,
+    };
+
+    // 스크롤만 움직인 것은 **같은** 스냅샷이다 — 그래야 드래그가 이어진다.
+    try std.testing.expect(base.sameSnapshot(base.withScroll(0)));
+    try std.testing.expect(base.sameSnapshot(base.withScroll(base.max_scroll)));
+
+    // 그 밖의 필드는 하나라도 달라지면 끊는다. 필드마다 따로 본다 — 뭉뚱그리면 한 필드를 비교에서
+    // 빼도 나머지가 통과시킨다(적대적 검증에서 셋 다 살아남았다).
+    const Case = struct { name: []const u8, mutate: *const fn (Geometry) Geometry };
+    const cases = [_]Case{
+        .{ .name = "total_rows", .mutate = &struct {
+            fn f(g: Geometry) Geometry {
+                var n = g;
+                n.total_rows += 1;
+                return n;
+            }
+        }.f },
+        .{ .name = "visible_rows", .mutate = &struct {
+            fn f(g: Geometry) Geometry {
+                var n = g;
+                n.visible_rows += 1;
+                return n;
+            }
+        }.f },
+        .{ .name = "track_x", .mutate = &struct {
+            fn f(g: Geometry) Geometry {
+                var n = g;
+                n.track_x += 1;
+                return n;
+            }
+        }.f },
+        .{ .name = "track_y", .mutate = &struct {
+            fn f(g: Geometry) Geometry {
+                var n = g;
+                n.track_y += 1;
+                return n;
+            }
+        }.f },
+        .{ .name = "track_w", .mutate = &struct {
+            fn f(g: Geometry) Geometry {
+                var n = g;
+                n.track_w += 1;
+                return n;
+            }
+        }.f },
+        .{ .name = "track_h", .mutate = &struct {
+            fn f(g: Geometry) Geometry {
+                var n = g;
+                n.track_h += 1;
+                return n;
+            }
+        }.f },
+        .{ .name = "thumb_h", .mutate = &struct {
+            fn f(g: Geometry) Geometry {
+                var n = g;
+                n.thumb_h += 1;
+                return n;
+            }
+        }.f },
+    };
+    for (cases) |case| {
+        if (base.sameSnapshot(case.mutate(base))) {
+            std.debug.print("sameSnapshot이 {s} 변화를 무시한다 — 그 캡처는 끊어야 한다\n", .{case.name});
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
 // `contains` 둘은 **반열린 구간**이다(시작 포함, 끝 제외). 그 규약이 없으면 트랙 오른쪽 바로 밖의
 // 픽셀이 잡혀 목록 클릭이 스크롤로 새거나, 트랙 첫 줄이 안 잡혀 맨 위 점프가 죽는다. 그리고 thumb은
 // **자기 세로 구간**만 봐야 한다 — 트랙 전체를 보면 트랙 클릭(점프)과 thumb 잡기가 구분되지 않는다.

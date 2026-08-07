@@ -4638,6 +4638,10 @@ pub const AppSession = struct {
     }
 
     fn statusBarHeightPx(self: *const AppSession) u32 {
+        // quick terminal은 chrome을 의도적으로 걷어낸 모드다 — `paneBarHeightPx`가 0을 돌려 탭 바를
+        // 통째로 끄는 것과 같은 규율. §2 "항상 선다"는 도크·사이드바 **토글**(프레임마다 바뀌어
+        // grid가 출렁이는 것)을 막는 규칙이고, 세션 생성 시 고정되는 이 모드는 그 대상이 아니다.
+        if (self.chrome_minimal) return 0;
         // **텍스트 행에 여백을 더한 높이와 고정 하한 중 큰 쪽.** 상단 타이틀바 띠(`computeTitlebarStripPx`)가
         // 쓰는 `@max(cell_height_px, 최소 pt)`와 같은 패턴이다.
         //
@@ -63258,6 +63262,36 @@ test "SB1: 사이드바 scissor는 겹치거나 뒤집힌 구간을 내느니 �
             }
         }
     }
+}
+
+// SB1: **quick terminal(chrome_minimal)에는 상태바가 서지 않는다.** 이 모드는 chrome을 의도적으로
+// 걷어낸다 — `paneBarHeightPx`가 0을 돌려 탭 바를 통째로 끄는 것과 같은 규율이다. §2의 "항상 선다"는
+// **도크·사이드바 토글**(프레임마다 바뀌어 grid가 출렁이는 것)을 막으려는 규칙이지, 세션 생성 시
+// 고정되는 모드까지 포함하지 않는다. 서면 바 높이만큼 행을 뺏기고, chrome 없는 창에 chrome이 남는다.
+test "SB1: quick terminal(chrome_minimal)에는 상태바가 서지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1000, 700, 1000);
+    _ = session.pushNotificationHistory("MARU", "t", 0);
+    _ = try session.tick();
+    try std.testing.expect(session.statusBarHeightPx() > 0); // 전제: 일반 창에는 선다
+
+    session.chrome_minimal = true;
+    session.metal_dirty = true;
+    _ = try session.tick();
+
+    try std.testing.expectEqual(@as(u32, 0), session.statusBarHeightPx());
+    try std.testing.expectEqual(@as(usize, 0), session.statusBarTree().entries.len);
 }
 
 // SB1: **상태바 높이는 spawn grid에 그대로 흡수돼야 한다.** 흡수는 `gridPadding()`의 bottom 한 곳에서만

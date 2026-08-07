@@ -1254,6 +1254,12 @@ pub const PaneFrame = struct {
     /// 이 frame의 glyph가 일반 pane인지 자유 배치 도크 토글인지 명시한다. Metal backend가
     /// codepoint·좌표로 역할을 재추론하지 않도록 replace가 NativeMetalCell.reserved에 lower한다.
     role: PaneFrameRole = .normal,
+    /// **오버레이 프레임에서만 동작한다.** 이 필드를 읽는 곳은 아래 `modal_clip = pf.clip_rect` 한
+    /// 줄뿐이고 그것은 `if (overlay_frame)` 안이다. `.pane`·`.floating`·`.sticky`도 값을 실어 오지만
+    /// 그 셀 draw에는 scissor가 걸리지 않아 **조용히 버려진다**(2026-08-07 변이로 확인 — pane 쪽을
+    /// null로 바꿔도 아무것도 안 깨진다). 셀 pane을 자르려면 그 구간에 scissor draw를 하나 더 두어야
+    /// 한다 — 사이드바 스크롤 scissor가 같은 형태다(docs/implementation-plan.md의 SV2a).
+    ///
     /// 모달 오버레이 클리핑(px, w==0=없음) — finishOverlayFrame이 OverlayRaster.clip_rect에서 채우고,
     /// MetalFrameBuffer.view가 MetalFrame.modal_clip_*로 흘려 renderer가 모달 셀 draw에 scissor. 인프라(적용 후속).
     clip_rect: ?ClipPx = null,

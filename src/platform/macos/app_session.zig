@@ -30312,11 +30312,18 @@ pub const AppSession = struct {
                                     dock_active_fg,
                                     file_tree_selection_paint,
                                 )) |tdl| {
-                                    self.collectShaped(&collected, tdl, pane_frame_builder, .{ .pane = .{
-                                        .origin_x = dg.tree_content.x,
-                                        .origin_y = dg.tree_content.y,
-                                        .colors = tabbar_colors,
-                                    } });
+                                    self.collectShaped(&collected, tdl, pane_frame_builder, .{
+                                        .pane = .{
+                                            .origin_x = dg.tree_content.x,
+                                            .origin_y = dg.tree_content.y,
+                                            .colors = tabbar_colors,
+                                            // 목록이 자기 content rect를 넘지 않게 자른다. 지금은 행 단위라
+                                            // 넘칠 것이 없어 시각이 그대로지만, 이걸로 v147 seam이 "한 번도
+                                            // 안 도는 분기"에서 매 프레임 도는 경로가 된다(SV2a-2).
+                                            .clip_rect = .{ .x = dg.tree_content.x, .y = dg.tree_content.y, .w = dg.tree_content.w, .h = dg.tree_content.h },
+                                        },
+                                    });
+                                    if (collected.items.len > 0) collected.items[collected.items.len - 1].pane_role_file_tree = true;
                                 } else |_| {}
                             }
                         }
@@ -32437,6 +32444,9 @@ pub const AppSession = struct {
         // B1 rich Chrome text borrows immutable cache-owned component placement until the shared
         // atlas assigns slots. It is then emitted as GpuGlyphs instead of NativeMetalCells.
         measured_text: ?chrome_system_text.Artifact = null,
+        /// 이 pane이 셀로 그리는 파일 탐색기 목록인가. 렌더러가 그 구간만 px로 자를 수 있게 role로
+        /// 실어 보낸다(ABI v147). `dest`로는 구분되지 않는다 — 탐색기도 일반 `.pane`이다.
+        pane_role_file_tree: bool = false,
 
         fn deinit(self: *CollectedPane, allocator: std.mem.Allocator) void {
             self.pane.deinit(allocator);
@@ -33548,7 +33558,14 @@ pub const AppSession = struct {
                             .origin_y = p.origin_y,
                             .colors = p.colors,
                             .clip_rect = p.clip_rect,
-                            .role = if (std.meta.activeTag(c.dest) == .dock_toggle) .dock_toggle else .normal,
+                            // `file_tree`는 셀로 그리는 탐색기 목록이다. 이 표시가 있어야 렌더러가 그
+                            // 구간만 px로 자를 수 있다(ABI v147) — 부분 행 픽셀 스크롤의 전제다.
+                            .role = if (std.meta.activeTag(c.dest) == .dock_toggle)
+                                .dock_toggle
+                            else if (c.pane_role_file_tree)
+                                .file_tree
+                            else
+                                .normal,
                             .rich_text_only = rich_text_only,
                         }) catch {
                             // `GpuGlyph` has no frame owner once it reaches the global Metal

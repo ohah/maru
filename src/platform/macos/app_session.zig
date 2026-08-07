@@ -13142,7 +13142,7 @@ pub const AppSession = struct {
             return;
         };
         if (self.cell_height_px == 0) return; // 렌더 전 — 다음 tick에 다시 본다(pending 유지)
-        const visible_rows: usize = self.dockGeometry().tree_content.h / self.cell_height_px;
+        const visible_rows: usize = self.fileTreeVisibleRows();
         if (visible_rows == 0) return;
         const row_index = blk: {
             for (self.file_tree_rows.items, 0..) |row, i| {
@@ -13370,7 +13370,7 @@ pub const AppSession = struct {
             try self.file_tree.buildRows(self.allocator, self.file_tree_open_states.items, &self.file_tree_rows);
             classifyFileTreeRows(self.file_tree_rows.items);
             self.reconcileFileTreeSelection();
-            const visible_rows = if (self.cell_height_px == 0) 0 else self.dockGeometry().tree_content.h / self.cell_height_px;
+            const visible_rows = self.fileTreeVisibleRows();
             self.file_tree_scroll_rows = @min(
                 self.file_tree_scroll_rows,
                 self.file_tree_rows.items.len -| @as(usize, visible_rows),
@@ -14095,7 +14095,7 @@ pub const AppSession = struct {
         if (self.fileTreeScrollbarGeometry()) |geometry| if (geometry.trackContains(x_px, y_px)) return null;
         const local: usize = @intFromFloat((y_px - @as(f64, @floatFromInt(tree_rect.y))) /
             @as(f64, @floatFromInt(self.cell_height_px)));
-        const visible_rows = tree_rect.h / self.cell_height_px;
+        const visible_rows = self.fileTreeVisibleRows();
         if (local >= visible_rows) return null; // renderer가 그리지 않는 bottom partial row는 hit-test에서도 제외한다.
         const index = self.fileTreeEffectiveScroll() + local;
         return if (index < self.file_tree_rows.items.len) index else null;
@@ -14439,8 +14439,7 @@ pub const AppSession = struct {
     }
 
     fn fileTreeEffectiveScroll(self: *const AppSession) usize {
-        const visible = if (self.cell_height_px == 0) 0 else self.dockGeometry().tree_content.h / self.cell_height_px;
-        return @min(self.file_tree_scroll_rows, self.file_tree_rows.items.len -| @as(usize, visible));
+        return @min(self.file_tree_scroll_rows, self.file_tree_rows.items.len -| self.fileTreeVisibleRows());
     }
 
     fn fileTreeScrollbarGeometry(self: *const AppSession) ?file_tree_scrollbar.Geometry {
@@ -14674,6 +14673,24 @@ pub const AppSession = struct {
         for (self.file_tree_rows.items, 0..) |row, index| if (file_tree.rowIdentity(row) != null) {
             _ = self.setFileTreeSelection(index);
             return;
+        };
+    }
+
+    /// 탐색기 목록이 지금 그리는 행 수. **이 함수는 있었는데 네 곳이 무시하고 각자 `h / cell_h`를
+    /// 계산하고 있었다** — follow·clamp·hit-test·render. SV2a가 이 산술을 픽셀 offset으로 바꿀 때
+    /// 한 곳만 고치면 나머지가 조용히 갈라지고, 그러면 클릭한 행과 보이는 행이 어긋난다.
+    ///
+    /// **지금은 내림이라 바닥의 부분 행이 통째로 빠진다.** 뷰포트 높이가 셀 높이의 배수가 아니면 그
+    /// 자리에 배경이 보이고, hit-test도 같은 이유로 그 줄을 안 받는다(`fileTreeRowAt`). 그것이 SV2가
+    /// 고칠 결함이며, 이 함수와 그 테스트가 바뀌는 것이 그 변경의 표시다
+    /// (docs/implementation-plan.md의 SV2 슬라이스).
+    /// 렌더가 draw list에 넘기는 창(시작 행·행 수). **호출부에 인라인으로 두면 테스트가 그 산술을
+    /// 복제하게 되고, 복제본은 호출부를 판정하지 못한다** — 실제로 호출부를 상수로 바꾸는 변이가
+    /// 복제 기반 단언을 통과했다(§10.1).
+    fn fileTreeDrawWindow(self: *const AppSession) struct { start: usize, count: u16 } {
+        return .{
+            .start = self.fileTreeEffectiveScroll(),
+            .count = @intCast(@min(self.fileTreeVisibleRows(), @as(usize, std.math.maxInt(u16)))),
         };
     }
 
@@ -30138,7 +30155,8 @@ pub const AppSession = struct {
                     if (dg.tree.w > 0 and self.cell_width_px > 0 and self.cell_height_px > 0) {
                         const tree_cols: u16 = @intCast(@min(dg.tree.w / self.cell_width_px, @as(u32, std.math.maxInt(u16))));
                         const tree_content_cols: u16 = @intCast(@min(dg.tree_content.w / self.cell_width_px, @as(u32, std.math.maxInt(u16))));
-                        const visible_rows: u16 = @intCast(@min(dg.tree_content.h / self.cell_height_px, @as(u32, std.math.maxInt(u16))));
+                        const draw_window = self.fileTreeDrawWindow();
+                        const visible_rows: u16 = draw_window.count;
                         const dock_fg: terminal.Color = .{ .rgb = self.mutedForeground() };
                         const dock_active_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
                         if (tree_cols > 0 and dg.view_bar.h > 0) {
@@ -30266,7 +30284,7 @@ pub const AppSession = struct {
                                     self.allocator,
                                     self.file_tree_rows.items,
                                     tree_edit,
-                                    self.fileTreeEffectiveScroll(),
+                                    draw_window.start,
                                     visible_rows,
                                     content_cols,
                                     dock_fg,
@@ -50799,6 +50817,143 @@ test "file tree scrollbar is overflow-only and stale drag snapshots cancel" {
     session.file_tree_rows.appendAssumeCapacity(.empty);
     session.refreshFileTreeScrollbarGeometry();
     try std.testing.expect(session.fileTreeScrollbarGeometry() == null);
+}
+
+// SV2-0 — 탐색기 스크롤의 판정자. 이 계약에는 **테스트가 하나도 없었다**: 그리는 행 창은 호출부에
+// 인라인이었고, 탐색기 골든도 없어(Lab은 도크·detail만 그린다) 스크롤을 통째로 망가뜨려도 CI가
+// 초록이었다. SV2a가 행 좌표를 픽셀로 바꾸기 **전에** 지금 계약을 박아, 그 변경이 리뷰에서 보이게 한다.
+test "file tree row window is one arithmetic shared by follow, clamp, hit-test, and render" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    session.activateFilePanelDockControl();
+
+    // **뷰포트가 셀 높이의 배수면 이 테스트는 아무것도 판정하지 못한다** — 부분 행 단언이 통째로
+    // 무의미해진다(§10.1 "단언이 판정할 수 있는 상태인지 본다"). 나머지가 0이 아닌 창 높이를 찾고,
+    // 못 찾으면 통과시키지 않는다.
+    var picked_remainder: u32 = 0;
+    for (0..64) |bump| {
+        _ = try session.resize(1400, 900 + @as(u32, @intCast(bump)), 1000);
+        if (session.cell_height_px == 0) continue;
+        const h = session.dockGeometry().tree_content.h;
+        picked_remainder = h % session.cell_height_px;
+        if (picked_remainder != 0) break;
+    }
+    if (picked_remainder == 0) return error.FileTreeFixtureCannotJudgePartialRow;
+
+    const tree = session.dockGeometry().tree_content;
+    const cell_h = session.cell_height_px;
+    const visible = session.fileTreeVisibleRows();
+    const remainder = picked_remainder;
+
+    // ① 내림이다. 이것이 바닥 부분 행이 빠지는 이유다.
+    try std.testing.expectEqual(tree.h / cell_h, visible);
+
+    // ② **바닥 부분 행은 지금 그려지지 않는다.** 그 자리에 배경이 보인다. SV2a가 고칠 것이
+    //    이것이므로 여기서 명시적으로 박는다 — 조용히 바뀌면 이 단언이 빨개진다.
+    try std.testing.expect(visible * cell_h < tree.h);
+    try std.testing.expect(tree.h - visible * cell_h == remainder);
+
+    // ③ hit-test와 렌더가 **같은** 창을 본다. 갈라지면 클릭한 행과 보이는 행이 어긋난다.
+    //    창을 넘치도록 행을 채우고, 마지막으로 보이는 행과 그 다음 행을 각각 찍어 본다.
+    session.file_tree_rows.clearRetainingCapacity();
+    for (0..visible + 8) |_| try session.file_tree_rows.append(allocator, .{ .file = .{
+        .path = "/repo/src/main.zig",
+        .label = "main.zig",
+        .depth = 1,
+        .supported = true,
+        .open = false,
+        .active = false,
+        .dirty = false,
+        .external_change = false,
+        .symlink = false,
+    } });
+    session.file_tree_scroll_rows = 0;
+    session.refreshFileTreeScrollbarGeometry();
+
+    const x: f64 = @floatFromInt(tree.x + 1);
+    const inside_y: f64 = @floatFromInt(tree.y + (visible - 1) * cell_h + cell_h / 2);
+    try std.testing.expectEqual(@as(?usize, visible - 1), session.fileTreeRowAt(x, inside_y));
+    // 그려지지 않는 그 줄은 hit도 되지 않아야 한다 — 안 그러면 배경을 클릭해 행이 선택된다.
+    const partial_y: f64 = @floatFromInt(tree.y + visible * cell_h + remainder / 2);
+    try std.testing.expect(session.fileTreeRowAt(x, partial_y) == null);
+
+    // ④ 스크롤은 마지막 창까지만 간다 — 끝을 넘겨도 마지막 행이 바닥에 붙는다.
+    session.file_tree_scroll_rows = std.math.maxInt(usize);
+    try std.testing.expectEqual(
+        session.file_tree_rows.items.len - visible,
+        session.fileTreeEffectiveScroll(),
+    );
+    // 그 상태에서 마지막 행이 창의 마지막 줄이다.
+    try std.testing.expectEqual(
+        @as(?usize, session.file_tree_rows.items.len - 1),
+        session.fileTreeRowAt(x, inside_y),
+    );
+
+    // ⑤ **렌더가 그 창을 실제로 쓴다.** 위 넷은 host 산술이라, 렌더가 다른 수를 쓰면 전부 통과하면서
+    //    화면만 어긋난다. draw list를 같은 입력으로 만들어 cell row 범위를 본다 — 렌더 호출부가
+    //    `fileTreeVisibleRows()`를 안 읽으면 여기서 갈라진다.
+    session.file_tree_scroll_rows = 3;
+    {
+        // 행마다 라벨을 다르게 준다 — 같으면 "어느 행을 그렸는지"를 판정할 수 없고 개수만 보게 된다.
+        var labels: std.ArrayList([]u8) = .empty;
+        defer {
+            for (labels.items) |owned| allocator.free(owned);
+            labels.deinit(allocator);
+        }
+        for (session.file_tree_rows.items, 0..) |*row, index| {
+            const owned = try std.fmt.allocPrint(allocator, "row{d}.zig", .{index});
+            try labels.append(allocator, owned);
+            row.file.label = owned;
+        }
+
+        const window = session.fileTreeDrawWindow();
+        try std.testing.expectEqual(session.fileTreeEffectiveScroll(), window.start);
+        try std.testing.expectEqual(@as(u16, @intCast(visible)), window.count);
+
+        const fg: terminal.Color = .{ .rgb = .{ .r = 200, .g = 200, .b = 200 } };
+        var dl = try coretext_frame_builder.buildFileTreeDrawList(
+            allocator,
+            session.file_tree_rows.items,
+            null,
+            window.start,
+            window.count,
+            40,
+            fg,
+            fg,
+            null,
+        );
+        defer dl.deinit(allocator);
+
+        // 마지막 cell row가 창의 마지막 줄이다. 하나 더 그리면 부분 행 자리를 침범하고, 하나 덜
+        // 그리면 뷰포트 바닥에 빈 줄이 남는다.
+        var max_row: u16 = 0;
+        for (dl.cells) |cell| max_row = @max(max_row, cell.row);
+        try std.testing.expectEqual(@as(u16, @intCast(visible - 1)), max_row);
+
+        // 화면 0행이 **창의 첫 행**이어야 한다. offset을 무시하면 개수는 같은 채로 다른 행이 그려진다.
+        // 라벨 "row{start}.zig"의 첫 글자가 그 판정이다.
+        const expect_digit: u21 = '0' + @as(u21, @intCast(window.start));
+        var saw_first_row_label = false;
+        for (dl.cells) |cell| {
+            if (cell.row != 0) continue;
+            if (cell.codepoint == 'r') {
+                // "row" 다음 글자가 인덱스 숫자다(창 시작이 한 자리인 fixture).
+                for (dl.cells) |next| {
+                    if (next.row == 0 and next.col == cell.col + 3 and next.codepoint == expect_digit)
+                        saw_first_row_label = true;
+                }
+            }
+        }
+        try std.testing.expect(saw_first_row_label);
+    }
+
+    // ⑥ 행이 창보다 적으면 스크롤이 없다.
+    session.file_tree_rows.shrinkRetainingCapacity(@min(visible, session.file_tree_rows.items.len));
+    session.file_tree_scroll_rows = std.math.maxInt(usize);
+    try std.testing.expectEqual(@as(usize, 0), session.fileTreeEffectiveScroll());
 }
 
 test "file tree production hot paths emit bounded counter artifact" {

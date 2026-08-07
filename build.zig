@@ -711,7 +711,12 @@ pub fn build(b: *std.Build) void {
     // 회귀나 flaky test가 탐색기 artifact의 신호를 가리므로 전용 step으로 분리한다.
     const macos_file_explorer_perf_tests = addProjectTest(b, .{
         .root_module = macos_app_host_abi_tests.root_module,
-        .filters = &.{"file tree production hot paths emit bounded counter artifact"},
+        .filters = &.{
+            "file tree production hot paths emit bounded counter artifact",
+            // SV2-0 판정자. 같은 스텝에 두는 이유는 같은 하네스(실제 `AppSession`)를 쓰고, 탐색기
+            // 신호가 무관한 socket/WebKit flaky에 묻히지 않아야 하기 때문이다(위 주석과 같은 이유).
+            "file tree row window is one arithmetic shared by follow, clamp, hit-test, and render",
+        },
     });
     const run_macos_file_explorer_perf_tests = b.addRunArtifact(macos_file_explorer_perf_tests);
     run_macos_file_explorer_perf_tests.setCwd(b.path("."));

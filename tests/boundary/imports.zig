@@ -111,7 +111,9 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     // 하나 더할 뿐이고, 필드를 이름으로 읽지 않는다.
     // SB1-S3b(상태바 브랜치 항목)로 또 바뀐다. count는 4 그대로다 — 항목 수집은 기존 collectShaped
     // 경로에 dest 하나를 더한 것뿐이고, 필드를 이름으로 읽지 않는다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "2307ca0b605ad64a5c89057e502b5bf72a1e2bb8fdbac35ab4298d634b0b48b5" },
+    // SV2-0(탐색기 스크롤 판정자)이 그리는 창을 `fileTreeDrawWindow`로, clamp를 `clampFileTreeScroll`로
+    // 꺼내며 또 바뀐다. count는 4 그대로다 — 둘 다 정수만 계산하고 필드를 이름으로 읽지 않는다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "0000000000000000000000000000000000000000000000000000000000000000" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

@@ -63210,6 +63210,46 @@ test "SB1: 사이드바 scissor는 겹치거나 뒤집힌 구간을 내느니 �
     }
 }
 
+// SB1: 이 기능의 **요점은 "안 보이는 곳"**이다 — 한 번에 터미널 하나만 보이므로, 다른 워크스페이스에서
+// 막힌 에이전트를 상태바가 알려 주는 것이 값어치다. 활성 Term만 세면 이미 화면에 보이는 것을 한 번 더
+// 말하는 셈이라 기능이 사실상 없는 것과 같다. 그 경로를 캡처로는 못 찍어(탭을 여럿 만들어야 한다) 여기서 본다.
+test "SB1: 에이전트 집계는 비활성 탭까지 센다(안 보이는 곳이 요점이다)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1000, 700, 1000);
+
+    // 첫 탭의 Term을 blocked로 세우고, **다른 탭으로 옮긴다**.
+    const first = session.activePane().activeTerm();
+    first.agent_state = .blocked;
+    first.agent_kind = .claude;
+    session.dispatchAppAction(.new_tab);
+    try std.testing.expect(session.tabs.items.len >= 2);
+    try std.testing.expect(session.activePane().activeTerm() != first); // 이제 다른 Term을 보고 있다
+
+    // 활성이 아닌데도 잡힌다 — 이게 없으면 기능이 요점을 잃는다.
+    const away = session.tallyAgents();
+    try std.testing.expectEqual(@as(usize, 1), away.blocked);
+    try std.testing.expectEqual(@as(usize, 0), away.running);
+
+    // running도 같은 방식으로 합산되고, 대표 kind는 running 쪽에서 온다(blocked가 kind를 가로채지 않는다).
+    session.activePane().activeTerm().agent_state = .running;
+    session.activePane().activeTerm().agent_kind = .codex;
+    const both = session.tallyAgents();
+    try std.testing.expectEqual(@as(usize, 1), both.blocked);
+    try std.testing.expectEqual(@as(usize, 1), both.running);
+    try std.testing.expectEqual(AgentKind.codex, both.running_kind);
+}
+
 // SB1 §5.5: **눌리는 자리와 보이는 자리가 같아야 한다.** `pointInStatusBar`(휠·클릭을 삼키는 판정)와
 // `appendStatusBarBackground`(그리는 rect)가 각자 산술을 갖고 있어, 한쪽만 고치면 바가 보이는데 클릭이
 // 통과하거나(터미널이 선택을 시작) 반대로 바 밖이 먹히는 어긋남이 난다. 지금까지 주석으로만 묶여 있었다.

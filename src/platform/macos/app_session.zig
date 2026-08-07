@@ -935,6 +935,9 @@ const titlebar_strip_min_pt: u32 = 28;
 // 폰트를 키우면 같은 아이콘 줄이 오르내리는 회귀가 났고(실측 53px↔80px) 폰트 독립 pt로 옮겼다. 상태바는
 // 창 전폭 chrome이라 같은 이유가 더 강하게 적용된다.
 const status_bar_height_pt: u32 = 22;
+/// 상태바 좌/우 가장자리 안쪽 여백·항목 간격(논리 pt). 높이와 같은 이유로 폰트 독립이다.
+const status_bar_edge_pad_pt: u32 = 8;
+const status_bar_gap_pt: u32 = 12;
 
 // 런타임 폰트 크기 조절(⌘+/⌘-/⌘0). step = ⌘+/⌘- 한 번에 1pt(Ghostty 기본과 동일). 클램프 범위는 보수적으로
 // [6, 72]pt — appearance resolver는 [1,512]를 허용하지만 6pt 미만은 글자가 안 읽히고 72pt 초과는 grid가
@@ -4579,6 +4582,16 @@ pub const AppSession = struct {
     /// 창 바닥 상태표시줄의 backing px 높이. `dock_layout`이 이 값으로 작업영역을 깎고(S1 seam), 렌더러가
     /// 같은 값으로 사이드바 배경 strip·셀 scissor를 끊는다(S2a ABI). 접힘·도크 상태와 무관하게 항상 선다 —
     /// 조건부로 만들면 바 높이가 프레임마다 달라져 터미널 grid가 출렁인다.
+    /// 상태바 좌/우 가장자리 안쪽 여백(px). 사이드바 카드 여백과 같은 급으로 두되 pt 독립이다.
+    fn statusBarEdgePadPx(self: *const AppSession) u32 {
+        return layout_math.ptToPx(status_bar_edge_pad_pt, self.scale_milli);
+    }
+
+    /// 상태바 항목 사이 간격(px). 아이콘+텍스트 묶음끼리 붙어 보이지 않을 만큼만 띄운다.
+    fn statusBarGapPx(self: *const AppSession) u32 {
+        return layout_math.ptToPx(status_bar_gap_pt, self.scale_milli);
+    }
+
     fn statusBarHeightPx(self: *const AppSession) u32 {
         return layout_math.ptToPx(status_bar_height_pt, self.scale_milli);
     }
@@ -29644,6 +29657,11 @@ pub const AppSession = struct {
             // 사이드바 상단 헤더 glyph(검색 placeholder + view options ⚙·새 워크스페이스 + 아이콘) — 절대 좌표라
             // 카드(sidebar_frame)와 별도 frame. replace가 origin(0,0) 기반 cells로 헤더 영역 [0,header)에 직접
             // 박는다(카드·밴드만 .m이 header_h 시프트). 실패는 무시(헤더 없이 정상). 같은 atlas라 slot 비충돌.
+            // 상태표시줄 항목(SB1-S3b) — 같은 통합 수집에 합류시켜 한 atlas 세대를 쓴다(사이드바·도크와 동형).
+            if (builtin.os.tag == .macos) {
+                const sb_colors: metal_frame.CellColors = .{ .default_fg = self.appearance.theme.foreground };
+                self.collectStatusBarItems(&collected, self.paneFrameBuilder(), sb_colors);
+            }
             var sidebar_header_frame: ?renderer.RenderFrame = null;
             defer if (sidebar_header_frame) |*hf| hf.deinit(self.allocator);
             if (builtin.os.tag == .macos) {
@@ -32359,6 +32377,9 @@ pub const AppSession = struct {
         pane: PanePlacement,
         // 도크 접기/펴기 토글(우상단) — 위치는 .pane처럼 자유(origin_x/y)지만 아이콘 1.7× 확대(raster slot 키움)는 .sidebar_header와 공유한다. collectShaped 게이트가 이 태그도 확대 대상으로 본다.
         dock_toggle: PanePlacement,
+        // 상태표시줄 항목(아이콘+텍스트) — 항목마다 자기 frame이고 px origin에 놓인다
+        // (`chrome.components.status_bar`가 origin을 정한다). 분배는 .pane과 같다.
+        status_bar: PanePlacement,
         floating: PanePlacement,
         // sticky command 배너(스크롤 시 명령줄 고정) — floating처럼 활성 터미널 '위'(맨 위 직전)에 한 frame.
         sticky: PanePlacement,
@@ -33434,7 +33455,7 @@ pub const AppSession = struct {
             var rich_glyph_start: ?usize = null;
             if (c.measured_text) |*artifact| {
                 const placement: ?PanePlacement = switch (c.dest) {
-                    .pane, .dock_toggle => |p| p,
+                    .pane, .dock_toggle, .status_bar => |p| p,
                     else => null,
                 };
                 if (placement) |p| {
@@ -33480,7 +33501,7 @@ pub const AppSession = struct {
                 .sidebar => sidebar_frame.* = rf,
                 .sidebar_header => sidebar_header_frame.* = rf,
                 .overlay => |p| overlay_frame.* = .{ .frame = rf, .origin_x = p.origin_x, .origin_y = p.origin_y, .colors = p.colors, .clip_rect = p.clip_rect },
-                .pane, .dock_toggle => |p| {
+                .pane, .dock_toggle, .status_bar => |p| {
                     if (built_frames.append(self.allocator, rf)) |_| {
                         pane_frames.append(self.allocator, .{
                             .frame = rf,
@@ -34020,6 +34041,63 @@ pub const AppSession = struct {
     /// cell↔quad가 같은 col에서 만나 어긋나지 않는다. 안 읽은 알림이 없거나 헤더가 안 그려지는 폭/상태면 무동작.
     /// **접힘은 제외**한다(접힘 헤더는 터미널 위에 그려져 layer 4 quad가 터미널 셀에 가려 안 보임 — 접힘은 텍스트 배지 유지).
     /// per-frame: renderFrame이 dropQuadsByLayer(4) 직후 호출(헤더 frame의 흰 숫자와 같은 주기로 갱신).
+    /// 상태표시줄 항목을 수집한다(SB1-S3b: 좌측 git 브랜치). 폭은 **셀로 재고 px로 넘긴다** —
+    /// `chrome.components.status_bar`가 px로 배치하고(우측 정렬이 셀 경계가 아니라 창 가장자리에 붙어야
+    /// 한다), 항목마다 자기 frame을 px origin에 놓는다. 실패는 무시한다(항목 없이 빈 바 — 세션을 안 죽인다).
+    fn collectStatusBarItems(self: *AppSession, collected: *std.ArrayList(CollectedPane), builder: coretext_frame_builder.CoreTextFrameBuilder, colors: metal_frame.CellColors) void {
+        const h = self.statusBarHeightPx();
+        if (h == 0 or self.cell_width_px == 0 or self.backing_width_px == 0) return;
+
+        // 좌: git 브랜치. repo 밖이면 항목 자체가 없다(사이드바 카드와 같은 전제 — maru는 repo 밖 줄을 안 그린다).
+        const branch = blk: {
+            const pane = self.activePane();
+            const term = pane.activeTerm();
+            break :blk self.termGitBranch(term) orelse return;
+        };
+        if (branch.len == 0) return;
+
+        // 아이콘 2칸 + 여백 1칸 + 텍스트. 텍스트는 바의 1/3을 넘지 않게 잘라 우측 항목 자리를 남긴다(S3c 이후).
+        const bar_cols: u16 = @intCast(@min(self.backing_width_px / self.cell_width_px, std.math.maxInt(u16)));
+        const max_text_cols: u16 = @max(1, bar_cols / 3);
+        const muted: terminal.Color = .{ .rgb = self.mutedForeground() }; // mutedForeground는 Rgb — 셀 style은 terminal.Color를 받는다
+        var dl = coretext_frame_builder.buildStatusBarItemDrawList(
+            self.allocator,
+            icons.codepoint(.git_branch),
+            branch,
+            max_text_cols,
+            .{ .rgb = self.appearance.theme.foreground },
+            muted,
+        ) catch return;
+        const item_w_px: u32 = @as(u32, dl.size.cols) * self.cell_width_px;
+
+        var left_buf: [1]chrome.components.status_bar.Slot = undefined;
+        var right_buf: [1]chrome.components.status_bar.Slot = undefined;
+        const layout = chrome.components.status_bar.compute(
+            .{
+                .bar_x = 0,
+                .bar_y = self.backing_height_px -| h,
+                .bar_w = self.backing_width_px,
+                .bar_h = h,
+                .edge_pad_px = self.statusBarEdgePadPx(),
+                .gap_px = self.statusBarGapPx(),
+            },
+            &.{item_w_px},
+            &.{},
+            &left_buf,
+            &right_buf,
+        );
+        if (layout.left.len == 0) { // 자리가 없으면 그리지 않는다(겹친 글자보다 낫다)
+            dl.deinit(self.allocator);
+            return;
+        }
+        const slot = layout.left[0];
+        // 세로 중앙: 바 높이에서 한 줄(cell_height)을 뺀 절반. 홀수 나머지는 위로 — 아래는 quad AA 가장자리가
+        // 한 행 어둡다(#1910 캡처에서 확인), 위쪽 여백이 한 픽셀 넓은 편이 시각적으로 안정적이다.
+        const text_h = self.cell_height_px;
+        const origin_y = slot.y + ((slot.h -| text_h) / 2);
+        self.collectShaped(collected, dl, builder, .{ .status_bar = .{ .origin_x = slot.x, .origin_y = origin_y, .colors = colors } });
+    }
+
     /// 포인터가 창 바닥 상태표시줄 위인가. **렌더 rect와 같은 산술**을 쓴다(`appendStatusBarBackground`와 한 쌍) —
     /// 갈리면 보이는 자리와 눌리는 자리가 어긋난다. 상태바는 창 전폭이라 사이드바 아래 구간도 포함한다.
     fn pointInStatusBar(self: *const AppSession, x_px: f64, y_px: f64) bool {

@@ -1211,6 +1211,55 @@ pub fn buildFileTreeDrawList(
     };
 }
 
+/// 상태표시줄 항목 하나(아이콘 + 텍스트) 한 줄짜리 DrawList. 항목마다 **자기 frame**을 만들고 호출자가
+/// px origin에 놓는다(`chrome.components.status_bar`가 그 origin을 정한다) — 상태바는 터미널 grid 밖이라
+/// grid 행/열로는 그릴 수 없고(`metal_frame`이 `row >= frame.size.rows`를 버린다), 우측 정렬도 셀 경계가
+/// 아니라 창 가장자리에 붙어야 하기 때문이다. 아이콘은 2칸(사이드바 브랜치 줄과 같은 폭 규약), 그 뒤 1칸을
+/// 띄고 텍스트가 온다. 텍스트가 `max_text_cols`를 넘으면 말줄임한다 — 배치는 글자를 자르지 않으므로
+/// (`status_bar` doc) 자르는 일은 여기서 한다.
+pub fn buildStatusBarItemDrawList(
+    allocator: std.mem.Allocator,
+    icon: ?u21,
+    text: []const u8,
+    max_text_cols: u16,
+    fg: terminal.Color,
+    icon_fg: terminal.Color,
+) !renderer.DrawList {
+    var cells: std.ArrayList(renderer.DrawCell) = .empty;
+    errdefer cells.deinit(allocator);
+    var pool: std.ArrayList(u32) = .empty;
+    errdefer pool.deinit(allocator);
+
+    var col: u16 = 0;
+    if (icon) |cp| {
+        try cells.append(allocator, .{ .row = 0, .col = col, .codepoint = cp, .width = 2, .style = .{ .foreground = icon_fg } });
+        col += 3; // 아이콘 2칸 + 1칸 여백
+    }
+    if (text.len > 0 and max_text_cols > 0) {
+        _ = try appendEllipsizedTitle(allocator, &cells, &pool, text, 0, col, col +| max_text_cols, .{ .foreground = fg }, false, .head);
+    }
+
+    // 실제로 쓴 마지막 칸 + 1 = 이 frame의 폭. 말줄임 뒤 폭이 줄 수 있으므로 셀에서 되읽는다.
+    var used: u16 = col;
+    for (cells.items) |c| {
+        const end = c.col +| @as(u16, c.width);
+        if (end > used) used = end;
+    }
+    // **cluster 풀을 반드시 함께 싣는다.** `appendEllipsizedTitle`이 NFD 음절 같은 다중 codepoint 클러스터를
+    // 이 풀에 담고 셀은 그 인덱스를 가리키므로, 풀을 버리면 셰이퍼가 base만 그려 한글 중성·종성이 사라진다
+    // (tests/boundary/chrome_text_clusters.zig CG1이 이 누락을 잡는다 — 실제로 이 함수에서 한 번 잡혔다).
+    const owned_pool = try pool.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_pool);
+    return .{
+        .size = .{ .cols = used, .rows = 1 },
+        .cursor = .{ .row = 0, .col = 0, .visible = false },
+        .dirty = .{ .start_row = 0, .end_row = 0 },
+        .cells = try cells.toOwnedSlice(allocator),
+        .grapheme_pool = owned_pool,
+        .overlays = try allocator.alloc(renderer.DrawOverlay, 0),
+    };
+}
+
 pub fn buildFileDockToggleDrawList(allocator: std.mem.Allocator, fg: terminal.Color) !renderer.DrawList {
     const cells = try allocator.alloc(renderer.DrawCell, 1);
     errdefer allocator.free(cells);
@@ -3118,4 +3167,73 @@ fn hasCell(cells: []const renderer.DrawCell, row: u16, codepoint: u32) bool {
         if (c.row == row and c.codepoint == codepoint) return true;
     }
     return false;
+}
+
+// SB1-S3b: 상태표시줄 항목 빌더. 배치(`chrome.components.status_bar`)는 px 폭을 받으므로 이 frame의 `cols`가
+// 곧 그 입력이다 — cols가 틀리면 항목이 겹치거나 자리가 남는다. 아이콘 폭 규약(2칸 + 1칸 여백)과 말줄임까지
+// 여기서 못박는다(배치는 글자를 자르지 않는다는 계약의 반대쪽).
+test "SB1-S3b: 항목 frame은 아이콘 2칸 + 여백 1칸 뒤에 텍스트를 놓고 cols를 실제 사용폭으로 낸다" {
+    const allocator = std.testing.allocator;
+    const fg: terminal.Color = .{ .rgb = .{ .r = 255, .g = 255, .b = 255 } };
+    const muted: terminal.Color = .{ .rgb = .{ .r = 128, .g = 128, .b = 128 } };
+
+    var dl = try buildStatusBarItemDrawList(allocator, icons.codepoint(.git_branch), "main", 40, fg, muted);
+    defer dl.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u16, 1), dl.size.rows);
+    // 아이콘은 col 0에 2칸.
+    try std.testing.expectEqual(@as(u16, 0), dl.cells[0].col);
+    try std.testing.expectEqual(@as(u8, 2), dl.cells[0].width);
+    try std.testing.expectEqual(icons.codepoint(.git_branch), dl.cells[0].codepoint);
+    // 텍스트는 col 3부터(2칸 + 여백 1칸).
+    try std.testing.expectEqual(@as(u16, 3), dl.cells[1].col);
+    // cols = 아이콘 3칸 + "main" 4칸.
+    try std.testing.expectEqual(@as(u16, 7), dl.size.cols);
+}
+
+test "SB1-S3b: 텍스트가 상한을 넘으면 말줄임하고 cols가 상한 안에 머문다" {
+    const allocator = std.testing.allocator;
+    const fg: terminal.Color = .{ .rgb = .{ .r = 255, .g = 255, .b = 255 } };
+
+    var dl = try buildStatusBarItemDrawList(allocator, icons.codepoint(.git_branch), "feature/very-long-branch-name-that-overflows", 10, fg, fg);
+    defer dl.deinit(allocator);
+
+    // 아이콘 3칸 + 텍스트 최대 10칸 = 13칸을 넘지 않는다. 넘으면 배치가 자리를 잘못 잡아 항목이 겹친다.
+    try std.testing.expect(dl.size.cols <= 13);
+    try std.testing.expect(dl.size.cols > 3); // 텍스트가 아예 사라지지도 않는다
+}
+
+test "SB1-S3b: 아이콘 없이도 서고, 빈 텍스트는 폭 0이라 배치가 버린다" {
+    const allocator = std.testing.allocator;
+    const fg: terminal.Color = .{ .rgb = .{ .r = 255, .g = 255, .b = 255 } };
+
+    var no_icon = try buildStatusBarItemDrawList(allocator, null, "abc", 40, fg, fg);
+    defer no_icon.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 0), no_icon.cells[0].col); // 아이콘이 없으면 텍스트가 col 0부터
+    try std.testing.expectEqual(@as(u16, 3), no_icon.size.cols);
+
+    var empty = try buildStatusBarItemDrawList(allocator, null, "", 40, fg, fg);
+    defer empty.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 0), empty.size.cols); // 폭 0 → status_bar.compute가 dropped로 센다
+}
+
+// cluster 풀 누락 회귀 가드. CG1(경계 테스트)이 "풀을 채우고 안 싣는" 정적 패턴을 잡지만, 여기서는 **실제
+// 다중 codepoint 클러스터**가 풀에 들어가고 셀이 그것을 가리키는지까지 본다 — 풀을 안 실으면 셰이퍼가 base만
+// 그려 한글 중성·종성이 사라진다(이 함수에서 실제로 한 번 났던 결함이다).
+test "SB1-S3b: NFD 한글 브랜치명도 cluster 풀을 싣고 나간다" {
+    const allocator = std.testing.allocator;
+    const fg: terminal.Color = .{ .rgb = .{ .r = 255, .g = 255, .b = 255 } };
+    // "한글" NFD(ᄒ+ᅡ+ᆫ, ᄀ+ᅳ+ᆯ) — 조합형이라 셀 하나가 codepoint 여럿을 가리킨다.
+    const nfd = "\u{1112}\u{1161}\u{11AB}\u{1100}\u{1173}\u{11AF}";
+
+    var dl = try buildStatusBarItemDrawList(allocator, icons.codepoint(.git_branch), nfd, 40, fg, fg);
+    defer dl.deinit(allocator);
+
+    try std.testing.expect(dl.grapheme_pool.len > 0); // 풀이 실렸다
+    // 텍스트 셀 중 최소 하나가 풀을 가리킨다(= 다중 codepoint 클러스터가 살아 있다).
+    var refs: usize = 0;
+    for (dl.cells) |c| {
+        if (c.grapheme_count > 0) refs += 1;
+    }
+    try std.testing.expect(refs > 0);
 }

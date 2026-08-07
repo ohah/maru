@@ -124,7 +124,8 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     // 사이드바 scissor 산술을 `.m`에서 Zig로 옮기며 또 바뀐다(ABI v168). count는 4 그대로다.
     // SV2a-3(탐색기 스크롤 상태를 행에서 픽셀로)으로 또 바뀐다. count는 4 그대로다 — 바뀐 것은 탐색기
     // 스크롤 좌표계와 그 소비처들이고, Client 구성이나 receiver 집합과는 무관하다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "6792d40d2a48cd9e04bc73957ec815f342a8091d20ffbc619bb8d40152fffd62" },
+    // 상태바를 typed tree 소비자로 만들며(hover·클릭) 또 바뀐다. count는 4 그대로다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "acc6d371296f1a0d43c7608c47e95e01f2bcc460053adbf27a70b4c377c5fc92" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

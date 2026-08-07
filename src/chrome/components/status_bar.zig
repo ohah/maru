@@ -7,6 +7,8 @@
 //! 셰이핑으로 잰 폭을 넘긴다(글꼴·CJK 폭을 여기서 추측하지 않는다).
 
 const std = @import("std");
+const tree = @import("../ui/tree.zig");
+const layout = @import("../ui/layout.zig");
 
 /// 배치가 쓰는 여백. 값은 호출자가 pt→px로 환산해 넘긴다(이 모듈은 스케일을 모른다).
 pub const Metrics = struct {
@@ -109,6 +111,52 @@ pub fn compute(
     return .{ .left = left_out[0..left_n], .right = right_out[0..right_n], .dropped = dropped };
 }
 
+/// 항목의 **의미**(무엇을 가리키는 항목인가). `publish`가 이것을 안정된 `UiId`로 쓴다 — 슬롯 인덱스를
+/// id로 쓰면 항목이 하나 사라질 때(브랜치가 없는 repo 밖 등) 남은 항목의 id가 밀려, 눌린 것과 실행된 것이
+/// 갈린다. 의미로 식별하면 목록이 바뀌어도 같은 항목은 같은 id다.
+pub const ItemId = enum(u64) {
+    git_branch = 1,
+    cwd = 2,
+    running_agents = 3,
+    notifications = 4,
+};
+
+pub const PublishError = error{InsufficientEntryBuffer};
+
+/// 배치된 슬롯을 상호작용 tree로 발행한다. **그리기는 하지 않는다** — 항목 렌더는 기존 lowering 경로가
+/// 그대로 하고, 이 tree는 hover/클릭 판정에만 쓴다(`chrome/components/divider.zig`와 같은 규율).
+///
+/// `ids`는 `compute`에 넘긴 폭 배열과 **같은 순서**여야 한다 — 슬롯의 `index`로 되짚기 때문이다.
+/// 자리를 못 얻은 항목은 tree에 없다(안 보이는 것은 눌리지도 않는다).
+pub fn publish(
+    slots: []const Slot,
+    ids: []const ItemId,
+    generation: u64,
+    out: []tree.RectEntry,
+) PublishError!tree.UiRectTree {
+    if (out.len < slots.len) return error.InsufficientEntryBuffer;
+    var count: usize = 0;
+    for (slots) |slot| {
+        if (slot.index >= ids.len) continue; // 호출자 실수 — 조용히 빼는 편이 잘못된 항목을 실행하는 것보다 낫다
+        const id: u64 = @intFromEnum(ids[slot.index]);
+        out[count] = .{
+            .id = id,
+            .parent_index = null,
+            .kind = .button, // 아이콘 + 텍스트 + 액션 = button 노드의 정의 그대로다
+            .rect = .{
+                .x = @floatFromInt(slot.x),
+                .y = @floatFromInt(slot.y),
+                .width = @floatFromInt(slot.w),
+                .height = @floatFromInt(slot.h),
+            },
+            .effective_clip = null,
+            .action = .{ .id = id },
+        };
+        count += 1;
+    }
+    return .{ .entries = out[0..count], .generation = generation };
+}
+
 const testing = std.testing;
 
 fn metrics(bar_w: u32) Metrics {
@@ -195,4 +243,60 @@ test "SB1-S3a: 폭 0 항목과 0폭 바는 조용히 사라지지 않고 dropped
     try testing.expectEqual(@as(usize, 0), tiny.left.len);
     try testing.expectEqual(@as(usize, 0), tiny.right.len);
     try testing.expectEqual(@as(usize, 2), tiny.dropped);
+}
+
+test "SB1: publish는 슬롯을 button 노드로 내고 **의미**로 식별한다" {
+    var lbuf: [4]Slot = undefined;
+    var rbuf: [4]Slot = undefined;
+    var entries: [8]tree.RectEntry = undefined;
+
+    // 좌: 브랜치(100) + 경로(60). 둘 다 자리를 얻는다.
+    const wide = compute(metrics(1000), &.{ 100, 60 }, &.{}, &lbuf, &rbuf);
+    const ids = [_]ItemId{ .git_branch, .cwd };
+    const t1 = try publish(wide.left, &ids, 7, &entries);
+    try testing.expectEqual(@as(usize, 2), t1.entries.len);
+    try testing.expectEqual(@as(u64, 7), t1.generation);
+    try testing.expectEqual(@intFromEnum(ItemId.git_branch), t1.entries[0].id);
+    try testing.expectEqual(@intFromEnum(ItemId.cwd), t1.entries[1].id);
+    for (t1.entries) |e| {
+        try testing.expectEqual(tree.NodeKind.button, e.kind); // 아이콘+텍스트+액션 = button
+        try testing.expect(e.action != null);
+        try testing.expectEqual(e.id, e.action.?.id);
+    }
+    // rect가 슬롯 그대로다 — 보이는 자리와 눌리는 자리가 같아야 한다.
+    try testing.expectEqual(@as(f32, @floatFromInt(wide.left[0].x)), t1.entries[0].rect.x);
+    try testing.expectEqual(@as(f32, @floatFromInt(wide.left[0].w)), t1.entries[0].rect.width);
+}
+
+// **id는 슬롯 순서가 아니라 의미다.** 브랜치가 사라지면(repo 밖) 경로가 첫 슬롯이 되는데, 그때 id가
+// 밀리면 "경로를 눌렀는데 브랜치 액션이 도는" 일이 난다. 이 테스트가 그 어긋남을 막는다.
+test "SB1: 앞 항목이 사라져도 남은 항목의 id는 그대로다" {
+    var lbuf: [4]Slot = undefined;
+    var rbuf: [4]Slot = undefined;
+    var entries: [8]tree.RectEntry = undefined;
+
+    // 브랜치가 없는 상태 — 경로 하나만 넘긴다(호출자가 ids도 같이 줄인다).
+    const only_cwd = compute(metrics(1000), &.{60}, &.{}, &lbuf, &rbuf);
+    const ids = [_]ItemId{.cwd};
+    const t = try publish(only_cwd.left, &ids, 1, &entries);
+    try testing.expectEqual(@as(usize, 1), t.entries.len);
+    try testing.expectEqual(@intFromEnum(ItemId.cwd), t.entries[0].id); // 1번(브랜치)이 아니다
+}
+
+test "SB1: 자리를 못 얻은 항목은 tree에 없다(안 보이면 눌리지도 않는다)" {
+    var lbuf: [4]Slot = undefined;
+    var rbuf: [4]Slot = undefined;
+    var entries: [8]tree.RectEntry = undefined;
+
+    // 좌측 둘째(200)가 자리를 못 얻는 좁은 바.
+    const narrow = compute(metrics(300), &.{ 100, 200 }, &.{120}, &lbuf, &rbuf);
+    try testing.expectEqual(@as(usize, 1), narrow.left.len);
+    const ids = [_]ItemId{ .git_branch, .cwd };
+    const t = try publish(narrow.left, &ids, 1, &entries);
+    try testing.expectEqual(@as(usize, 1), t.entries.len);
+    try testing.expectEqual(@intFromEnum(ItemId.git_branch), t.entries[0].id); // 살아남은 것만
+
+    // 버퍼가 모자라면 조용히 자르지 않고 에러다.
+    var tiny: [0]tree.RectEntry = undefined;
+    try testing.expectError(error.InsufficientEntryBuffer, publish(narrow.left, &ids, 1, &tiny));
 }

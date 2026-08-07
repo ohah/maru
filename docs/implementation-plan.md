@@ -1287,10 +1287,15 @@ tree 교체에서 capture carry 누락(드래그가 첫 move에 죽음)·스크�
      구간 `pre_sidebar_vertices`~`total_vertices`에 걸었다 full로 복원, **동작하는 코드**)와 모달
      clip(`modal_cells_start` + `modal_clip_*`, 아직 소비자가 없어 런타임 미검증). A는 그 셋째다.
 
-     **착수 전에 확인한 함정**: `cells_list`는 pane을 순서대로 쌓은 뒤 divider·사이드바 헤더를
-     `len - cursor_cells` 자리에 **끼워 넣는다.** 그래서 pane 구간 index를 먼저 기록해 두면 그
-     삽입에 밀려 어긋난다. 탐색기 구간은 삽입이 끝난 뒤에 확정하거나, 삽입 지점보다 뒤에 오도록
-     순서를 보장해야 한다 — `modal_cells_start`가 모든 삽입 **뒤**에 잡히는 것과 같은 이유다.
+     **앞서 이 자리에 적었던 "함정"은 틀렸다(2026-08-07 정정).** "pane 구간 index를 먼저 기록하면
+     divider·사이드바 헤더 삽입에 밀린다"고 썼는데, 코드를 읽어 보니 그 삽입은
+     `cells_list.items.len - cursor_cells` — **버퍼 끝의 커서 suffix 바로 앞**이다. pane 셀은 전부 그
+     앞에 있으므로 index가 밀리지 않는다. 확인 없이 `modal_cells_start`의 사정을 유추해 적은 것이었다.
+
+     구간을 **역할로** 찾는다. `PaneFrame`에는 이미 `role`(`.normal`/`.dock_toggle`)이 있으므로 탐색기
+     표시를 하나 더해, pane 루프가 그 role의 셀 구간을 기록하고 `view()`가 `pane_clip_cells_start/len`
+     으로 투영한다. index를 호출처들이 들고 다니지 않아, 나중에 삽입 순서가 실제로 바뀌어도 한 자리만
+     고치면 된다.
 
      선택지 셋:
 

@@ -50,7 +50,13 @@ pub const NativeMetalCell = extern struct {
 /// producer와 Metal backend가 각자 재정의하지 않도록 renderer DTO가 단일 출처로 소유한다.
 pub const native_cell_role_dock_toggle: u16 = 32;
 
-pub const PaneFrameRole = enum { normal, dock_toggle };
+/// `file_tree`는 셀로 그리는 파일 탐색기 목록이다. 그 pane의 셀 구간을 기록해 두면 렌더러가 그
+/// 구간만 px로 자를 수 있다(ABI v147 seam) — 부분 행 픽셀 스크롤의 전제다. **역할로 찾는 이유는
+/// index를 호출처들이 들고 다니지 않기 위해서다**(삽입 순서가 나중에 바뀌면 아래 한 자리만 고친다).
+/// 셀 버퍼 안의 한 구간과 그것을 자를 사각형. `role`로 찾은 pane의 위치를 담는다.
+pub const PaneClipRange = struct { start: usize, len: usize, rect: ClipPx };
+
+pub const PaneFrameRole = enum { normal, dock_toggle, file_tree };
 
 fn applyPaneFrameRole(cells: []NativeMetalCell, role: PaneFrameRole) void {
     if (role != .dock_toggle) return;
@@ -1402,6 +1408,8 @@ pub const MetalFrameBuffer = struct {
     overlay_cells_present: bool = false,
     // C4b 모달 클리핑: 모달 셀을 이 px 영역으로 scissor(없으면 null). view()가 MetalFrame.modal_clip_*로 투영.
     modal_clip: ?ClipPx = null,
+    /// 셀로 그리는 목록 하나(파일 탐색기)를 px로 자르는 구간(ABI v147). null이면 자르지 않는다.
+    pane_clip: ?PaneClipRange = null,
 
     /// N개 panel frame(`pane_frames`)과 사이드바 frame(선택)을 함께 투영해 교체한다. 각 panel 셀은 자기
     /// origin에 박혀(setCellsPaneOrigin) 렌더러가 origin_x+col*cw, origin_y+row*ch에 둔다 — N개 surface가
@@ -1467,12 +1475,23 @@ pub const MetalFrameBuffer = struct {
         errdefer cells_list.deinit(allocator);
         try cells_list.appendSlice(allocator, pane_chrome_cells);
         var cursor_cells: usize = 0;
+        // 셀로 그리는 목록 하나를 px로 자르는 구간(ABI v147). null이면 자르지 않는다(기존 동작).
+        var pane_clip: ?PaneClipRange = null;
         for (pane_frames, 0..) |pf, i| {
             if (pf.rich_text_only) continue;
             const built = try buildNativeCellsSplit(allocator, pf.frame.glyph_quad_frame, pf.frame.draw_list.cells, pf.colors);
             defer allocator.free(built.cells);
             setCellsPaneOrigin(built.cells, pf.origin_x, pf.origin_y);
             applyPaneFrameRole(built.cells, pf.role);
+            if (pf.role == .file_tree) if (pf.clip_rect) |clip| {
+                // 이 pane의 셀 구간과 자를 사각형. 뒤따르는 divider·사이드바 헤더 삽입은 **커서 suffix
+                // 바로 앞**(버퍼 끝)이라 여기 index를 밀지 않는다.
+                pane_clip = .{
+                    .start = cells_list.items.len,
+                    .len = built.cells.len,
+                    .rect = clip,
+                };
+            };
             try cells_list.appendSlice(allocator, built.cells);
             if (i == pane_frames.len - 1) cursor_cells = built.cursor_cells; // 활성(마지막) panel의 커서가 끝에
         }
@@ -1613,6 +1632,7 @@ pub const MetalFrameBuffer = struct {
         self.modal_cells_start = modal_cells_start;
         self.overlay_cells_present = has_overlay;
         self.modal_clip = modal_clip;
+        self.pane_clip = pane_clip;
         self.uploads = merged.uploads;
         self.pixels = merged.pixels;
         // cols/rows는 렌더러의 cols==0/rows==0 가드용 — 활성(마지막) panel의 grid를 쓴다(셀은 자기 row/col+
@@ -1738,6 +1758,12 @@ pub const MetalFrameBuffer = struct {
             // C4b 모달: show_cursor로 잘려도 modal_cells_start는 그대로(커서 suffix는 모달 텍스트 '뒤'라
             // 모달 셀 시작에 영향 없음). exposed가 modal_cells_start보다 작으면 모달 텍스트가 안 보이는
             // 경우인데, 그땐 draw가 over quad를 모달 없음과 같게 다룬다(렌더러 가드).
+            .pane_clip_cells_start = if (self.pane_clip) |c| @intCast(c.start) else 0,
+            .pane_clip_cells_len = if (self.pane_clip) |c| @intCast(c.len) else 0,
+            .pane_clip_x_px = if (self.pane_clip) |c| c.rect.x else 0,
+            .pane_clip_y_px = if (self.pane_clip) |c| c.rect.y else 0,
+            .pane_clip_w_px = if (self.pane_clip) |c| c.rect.w else 0,
+            .pane_clip_h_px = if (self.pane_clip) |c| c.rect.h else 0,
             .modal_cells_start = self.modal_cells_start,
             .overlay_cells_present = @intFromBool(self.overlay_cells_present),
             .modal_clip_x_px = if (self.modal_clip) |c| c.x else 0,

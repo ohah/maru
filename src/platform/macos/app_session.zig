@@ -26106,6 +26106,9 @@ pub const AppSession = struct {
                 self.metal_dirty = true;
             }
             if (next != null) return .link; // 누를 수 있다는 신호(Cmd+hover URL과 같은 손 모양)
+            // 항목 밖이어도 **바 안이면 chrome이다.** 그냥 흘려보내면 아래 터미널 분류가 iBeam을 주는데,
+            // 클릭은 삼켜지므로(바 위 down은 선택을 시작하지 않는다) "글자를 고를 수 있다"는 거짓 신호가 된다.
+            if (self.pointInStatusBar(x_px, y_px)) return .default;
         }
         // 파일 헤더 mode 선택기도 같은 자리에서 매 이동 갱신한다(밴드 밖으로 나가면 null이라 stale 강조가 안 남는다).
         self.setHoveredFileHeaderMode(self.fileHeaderModeHoverAt(x_px, y_px));
@@ -63250,6 +63253,35 @@ test "SB1: 사이드바 scissor는 겹치거나 뒤집힌 구간을 내느니 �
             }
         }
     }
+}
+
+// SB1: **빈 바 위에서 텍스트 커서(iBeam)가 뜨면 안 된다.** 상태바는 chrome이지 터미널이 아니다 —
+// iBeam은 "여기서 글자를 고를 수 있다"는 신호라, 클릭이 삼켜지는 자리에서 뜨면 거짓말이 된다.
+// 항목 위(손 모양)는 따로 보고, 여기서는 **항목이 없는 구간**을 본다.
+test "SB1: 항목이 없는 상태바 구간은 텍스트 커서를 주지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1000, 700, 1000);
+    _ = try session.tick();
+
+    // 바 한가운데 — 좌측 항목(브랜치·경로)도 우측 항목도 없는 구간이다.
+    const h = session.statusBarHeightPx();
+    const cx: f64 = @floatFromInt(session.backing_width_px / 2);
+    const cy: f64 = @floatFromInt(session.backing_height_px - h / 2);
+    try std.testing.expect(session.statusBarItemAt(cx, cy) == null); // 항목 없음을 먼저 확인
+
+    const cursor = session.hoverCursor(cx, cy, 0);
+    try std.testing.expect(cursor != .text);
 }
 
 // SB1: **도크를 여는 클릭은 레이아웃 후속까지 해야 한다.** 필드(`presented`·`collapsed`)만 세우면 도크는

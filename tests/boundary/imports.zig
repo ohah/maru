@@ -128,7 +128,7 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     // SV2b(탐색기 스크롤바를 공용 ScrollArea/paint 경로로 이관)로 또 바뀐다. count는 4 그대로다 —
     // 바뀐 것은 스크롤바의 발행·paint 경로이고 Client 구성이나 receiver 집합과는 무관하다.
     // SV3a(소스 컨트롤 목록을 픽셀 스크롤로, 헤더/목록 draw list 분리)로 또 바뀐다. count는 4 그대로다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "cb43a1232603329837f0527da127262600d9ee3c5e3a2f33000112cf3f370c61" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "98b4c7bd4027ed8812cf3906050815b31d25fa765797076af39e56260c17347d" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

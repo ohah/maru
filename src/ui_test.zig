@@ -16,7 +16,6 @@ const provisional_order = @import("chrome/ui/provisional_order.zig");
 const paint_style = @import("chrome/ui/paint_style.zig");
 const paint = @import("chrome/ui/paint.zig");
 const divider = @import("chrome/components/divider.zig");
-const file_tree_scrollbar = @import("chrome/components/file_tree_scrollbar.zig");
 const session_dock = @import("chrome/components/session_dock.zig");
 const archive_detail = @import("chrome/components/archive_detail.zig");
 
@@ -34,7 +33,6 @@ test {
     testing.refAllDecls(continuous_drag);
     testing.refAllDecls(provisional_order);
     testing.refAllDecls(divider);
-    testing.refAllDecls(file_tree_scrollbar);
     testing.refAllDecls(paint_style);
     testing.refAllDecls(paint);
     testing.refAllDecls(session_dock);

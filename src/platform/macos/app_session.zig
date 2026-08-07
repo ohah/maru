@@ -938,6 +938,9 @@ const status_bar_height_pt: u32 = 22;
 /// 상태바 좌/우 가장자리 안쪽 여백·항목 간격(논리 pt). 높이와 같은 이유로 폰트 독립이다.
 const status_bar_edge_pad_pt: u32 = 8;
 const status_bar_gap_pt: u32 = 12;
+/// 호버 배경이 항목 좌우로 넓어지는 여백(논리 pt, 한쪽). 글자에 딱 붙은 배경은 답답해 보인다.
+/// **항목 간격(gap)보다 두 배 이상 작아야** 이웃 호버끼리 겹치지 않는다(4×2 < 12).
+const status_bar_item_pad_pt: u32 = 4;
 /// 상태바 텍스트 위아래 여백(논리 pt, 한쪽). 바 높이가 이 값으로 텍스트 행에서 파생된다 — 아래 참고.
 const status_bar_v_pad_pt: u32 = 4;
 /// 상태바 좌측 항목 상한. 지금은 브랜치·경로 둘이고, 늘릴 때 이 값과 우선순위 순서를 함께 본다.
@@ -34397,15 +34400,17 @@ pub const AppSession = struct {
 
         var left_buf: [max_status_bar_left_items]chrome.components.status_bar.Slot = undefined;
         var right_buf: [max_status_bar_right_items]chrome.components.status_bar.Slot = undefined;
+        // 배치와 발행이 **같은 Metrics**를 봐야 한다 — 갈리면 그린 자리와 판정 자리가 어긋난다.
+        const bar_metrics: chrome.components.status_bar.Metrics = .{
+            .bar_x = 0,
+            .bar_y = self.backing_height_px -| h,
+            .bar_w = self.backing_width_px,
+            .bar_h = h,
+            .edge_pad_px = self.statusBarEdgePadPx(),
+            .gap_px = self.statusBarGapPx(),
+        };
         const layout = chrome.components.status_bar.compute(
-            .{
-                .bar_x = 0,
-                .bar_y = self.backing_height_px -| h,
-                .bar_w = self.backing_width_px,
-                .bar_h = h,
-                .edge_pad_px = self.statusBarEdgePadPx(),
-                .gap_px = self.statusBarGapPx(),
-            },
+            bar_metrics,
             widths[0..n],
             right_widths[0..rn],
             &left_buf,
@@ -34414,7 +34419,7 @@ pub const AppSession = struct {
 
         // **상호작용 tree 발행** — 배치가 정한 슬롯을 그대로 낸다. 보이는 자리와 눌리는 자리가 같아지고,
         // 자리를 못 얻은 항목은 tree에 없다(안 보이면 눌리지도 않는다).
-        self.publishStatusBarTree(layout, left_ids[0..n], right_ids[0..rn]);
+        self.publishStatusBarTree(bar_metrics, layout, left_ids[0..n], right_ids[0..rn]);
 
         // 세로 중앙: 홀수 나머지는 위로 — 바의 첫/마지막 행은 quad AA 가장자리라 한 행 어둡다(#1910 캡처).
         const origin_y = (self.backing_height_px -| h) + ((h -| self.cell_height_px) / 2);
@@ -34442,6 +34447,7 @@ pub const AppSession = struct {
     /// 눌리는 것보다 안 눌리는 편이 낫다.
     fn publishStatusBarTree(
         self: *AppSession,
+        bar_metrics: chrome.components.status_bar.Metrics,
         layout: chrome.components.status_bar.Layout,
         left_ids: []const chrome.components.status_bar.ItemId,
         right_ids: []const chrome.components.status_bar.ItemId,
@@ -34455,8 +34461,10 @@ pub const AppSession = struct {
             const ids = pair[1];
             if (written >= self.status_bar_entry_scratch.len) break;
             const t = chrome.components.status_bar.publish(
+                bar_metrics,
                 slots,
                 ids,
+                layout_math.ptToPx(status_bar_item_pad_pt, self.scale_milli),
                 self.status_bar_generation,
                 self.status_bar_entry_scratch[written..],
             ) catch {

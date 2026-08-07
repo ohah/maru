@@ -63260,6 +63260,41 @@ test "SB1: 사이드바 scissor는 겹치거나 뒤집힌 구간을 내느니 �
     }
 }
 
+// SB1: **상태바 높이는 spawn grid에 그대로 흡수돼야 한다.** 흡수는 `gridPadding()`의 bottom 한 곳에서만
+// 하게 돼 있다 — 호출부 셋(spawn config·메트릭 재계산·resize)이 그 함수를 공유하므로, 여기서 빠지면
+// PTY가 실제 pane보다 많은 행으로 떠 spawn-크기 레이스가 난다. 그런데 **그 줄을 지우는 뮤테이션에
+// 죽는 테스트가 하나도 없었다**(검증 공백). 바 높이는 셀 높이 파생이라 폰트를 키우면 같이 두꺼워지는데,
+// **그 증가분이 그대로 padding 증가분**이어야 한다는 것으로 못박는다.
+test "SB1: 상태바 높이 변화가 spawn grid padding에 그대로 흡수된다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1000, 700, 1000);
+    _ = try session.tick();
+
+    const bar0 = session.statusBarHeightPx();
+    const bottom0 = session.gridPadding().bottom;
+    try std.testing.expect(bottom0 >= bar0); // 애초에 흡수돼 있다
+
+    var i: usize = 0;
+    while (i < 8) : (i += 1) session.adjustFontSize(font_size_step);
+    _ = try session.tick();
+
+    const bar1 = session.statusBarHeightPx();
+    const bottom1 = session.gridPadding().bottom;
+    try std.testing.expect(bar1 > bar0); // 전제: 폰트를 키우면 바가 실제로 두꺼워진다
+    try std.testing.expectEqual(bar1 - bar0, bottom1 - bottom0); // 증가분이 그대로 흡수된다
+}
+
 // SB1: **창 크기가 바뀌면 상태바 호버는 비워야 한다.** 우측 항목은 오른쪽 끝에 붙어 있어 폭이 바뀌면
 // 포인터 아래에서 빠져나간다. 그런데 호버는 id로 기억하므로 강조가 **항목을 따라 이동**해, 포인터가
 // 없는 자리에 하이라이트가 남는다. 포인터가 가만히 있으면 mouseMoved도 안 와서 영구히 남는다.

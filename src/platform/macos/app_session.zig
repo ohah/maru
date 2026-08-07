@@ -13370,11 +13370,7 @@ pub const AppSession = struct {
             try self.file_tree.buildRows(self.allocator, self.file_tree_open_states.items, &self.file_tree_rows);
             classifyFileTreeRows(self.file_tree_rows.items);
             self.reconcileFileTreeSelection();
-            const visible_rows = self.fileTreeVisibleRows();
-            self.file_tree_scroll_rows = @min(
-                self.file_tree_scroll_rows,
-                self.file_tree_rows.items.len -| @as(usize, visible_rows),
-            );
+            self.clampFileTreeScroll();
             self.file_tree_hovered_row = null;
             self.scrollFileTreeToFollowedCwd(); // ET-CWD: 재투영된 행 기준으로 뷰포트 보정(file-explorer §1 정책 4)
             self.advanceFileTreeProjectionGeneration();
@@ -14687,6 +14683,16 @@ pub const AppSession = struct {
     /// 렌더가 draw list에 넘기는 창(시작 행·행 수). **호출부에 인라인으로 두면 테스트가 그 산술을
     /// 복제하게 되고, 복제본은 호출부를 판정하지 못한다** — 실제로 호출부를 상수로 바꾸는 변이가
     /// 복제 기반 단언을 통과했다(§10.1).
+    /// 목록이 짧아졌을 때 offset을 창 안으로 당긴다. **호출부에 인라인으로 두면 테스트가 이 산술을
+    /// 복제하게 되고, 복제본은 호출부를 판정하지 못한다** — 실제로 그랬다(적대적 검증에서 clamp 변이가
+    /// 복제 기반 단언을 통과했다).
+    fn clampFileTreeScroll(self: *AppSession) void {
+        self.file_tree_scroll_rows = @min(
+            self.file_tree_scroll_rows,
+            self.file_tree_rows.items.len -| self.fileTreeVisibleRows(),
+        );
+    }
+
     fn fileTreeDrawWindow(self: *const AppSession) struct { start: usize, count: u16 } {
         return .{
             .start = self.fileTreeEffectiveScroll(),
@@ -50977,7 +50983,35 @@ test "file tree row window is one arithmetic shared by follow, clamp, hit-test, 
         session.cell_height_px = saved;
     }
 
-    // ⑧ 행이 창보다 적으면 스크롤이 없다.
+    // ⑧ **follow가 같은 창을 본다.** 테스트 이름이 "follow, clamp, hit-test, and render"인데 앞의 것들은
+    //    뒤 둘만 태우고 있었다 — follow가 창 높이를 무시해도 전부 통과했다(적대적 검증). 창 아래에 있는
+    //    행을 따라가면 그 행이 **창의 마지막 줄**에 와야 한다(그 이상 스크롤하면 목록이 튄다).
+    session.file_tree_scroll_rows = 0;
+    {
+        const target_index = visible + 3;
+        // fixture의 행 경로가 전부 같으면 follow가 **첫 행**을 찾아 스크롤이 안 일어난다 — 그러면 이
+        // 단언이 무엇도 고정하지 못한다. 대상 행만 고유 경로로 만든다.
+        const followed = try allocator.dupe(u8, "/repo/src/follow-target.zig");
+        defer allocator.free(followed);
+        session.file_tree_rows.items[target_index].file.path = followed;
+        session.file_tree_followed_cwd = followed;
+        session.file_tree_follow_scroll_pending = true;
+        session.scrollFileTreeToFollowedCwd();
+        try std.testing.expectEqual(target_index + 1 - visible, session.file_tree_scroll_rows);
+        session.file_tree_followed_cwd = null;
+    }
+
+    // ⑨ **clamp가 같은 창을 본다.** 목록이 줄어 창보다 짧아지면 offset이 그만큼 당겨져야 한다. 창을
+    //    안 보면 끝까지 스크롤된 상태에서 목록이 빈 채로 남는다.
+    {
+        session.file_tree_scroll_rows = 12;
+        const shrunk = visible + 2;
+        session.file_tree_rows.shrinkRetainingCapacity(shrunk);
+        session.clampFileTreeScroll();
+        try std.testing.expectEqual(shrunk - visible, session.file_tree_scroll_rows);
+    }
+
+    // ⑩ 행이 창보다 적으면 스크롤이 없다.
     session.file_tree_rows.shrinkRetainingCapacity(@min(visible, session.file_tree_rows.items.len));
     session.file_tree_scroll_rows = std.math.maxInt(usize);
     try std.testing.expectEqual(@as(usize, 0), session.fileTreeEffectiveScroll());

@@ -57,6 +57,7 @@ pub const components = struct {
     pub const shortcut_hints = @import("chrome/components/shortcut_hints.zig"); // 모디파이어 홀드 단축키 힌트 HUD(패시브 — 입력 비소비, KH-1)
     pub const file_tree_scrollbar = @import("chrome/components/file_tree_scrollbar.zig"); // 탐색기 render/hit/track/drag 공용 순수 geometry
     pub const dock_view_bar = @import("chrome/components/dock_view_bar.zig"); // 도크 뷰 스위처 한 행 render/hit 공용 순수 geometry
+    pub const status_bar = @import("chrome/components/status_bar.zig"); // 창 바닥 상태표시줄 좌/우 슬롯 순수 배치(SB1-S3)
     pub const session_dock = @import("chrome/components/session_dock.zig"); // archive session dock typed layout/action/view facade
     pub const archive_detail = @import("chrome/components/archive_detail.zig"); // redacted archive detail typed layout/action/view facade
 };

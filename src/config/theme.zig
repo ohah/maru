@@ -716,8 +716,15 @@ pub const InputConfig = struct {
     /// 생략한다(단 본문에 종료 마커 ESC[201~가 섞이면 bracketed여도 항상 확인). false면 bracketed paste도 개행
     /// 검사를 거친다. 베이스: Ghostty `clipboard-paste-bracketed-safe`(기본 true).
     bracketed_paste_is_safe: bool = true,
+    /// 터미널에 타이핑하면 남아 있던 텍스트 선택(하이라이트)을 해제할지. 기본 true.
+    /// 베이스/결정: Ghostty `selection-clear-on-typing`(기본 true)을 그대로 따랐다. maru의 신규 키는 보통
+    /// "회귀 없음 opt-in"이지만 여기선 **현행이 결함**이라 예외다 — ⌘A(select_all) 선택을 지울 경로가 "이동 없는
+    /// 클릭"과 좌표 무효화(resize reflow·alt 화면 전환)뿐이어서, 마우스 트래킹을 켠 TUI(Claude Code·vim·tmux)
+    /// pane에선 클릭이 리포팅으로 빠져 하이라이트가 영구히 남았다. false로 두면 그 옛 동작이다.
+    /// Esc는 이 값과 무관하게 항상 해제한다(Ghostty와 동일 — "선택 취소"의 관용 키).
+    selection_clear_on_typing: bool = true,
 
-    pub const schema = .{ // 키: input.page-keys / input.shift-enter / input.ime-enter / input.url-click-modifier / input.mouse-hide-while-typing / input.option-as-meta / input.right-click / input.word-separators / input.link-detection / input.link-open-target / input.paste-protection / input.bracketed-paste-is-safe (필드명 dashed)
+    pub const schema = .{ // 키: input.page-keys / input.shift-enter / input.ime-enter / input.url-click-modifier / input.mouse-hide-while-typing / input.option-as-meta / input.right-click / input.word-separators / input.link-detection / input.link-open-target / input.paste-protection / input.bracketed-paste-is-safe / input.selection-clear-on-typing (필드명 dashed)
         .page_keys = Meta{ .doc = "메인 화면 PageUp/Down", .widget = .dropdown, .section = .input },
         .shift_enter = Meta{ .doc = "Shift+Enter 인코딩", .widget = .dropdown, .section = .input },
         .ime_enter = Meta{ .doc = "IME 조합 중 Enter", .widget = .dropdown, .section = .input },
@@ -730,6 +737,7 @@ pub const InputConfig = struct {
         .link_open_target = Meta{ .doc = "웹 링크 열기 대상", .widget = .dropdown, .section = .input },
         .paste_protection = Meta{ .doc = "위험한 붙여넣기 확인", .widget = .toggle, .section = .input },
         .bracketed_paste_is_safe = Meta{ .doc = "bracketed paste는 안전으로", .widget = .toggle, .section = .input },
+        .selection_clear_on_typing = Meta{ .doc = "타이핑하면 선택 해제", .widget = .toggle, .section = .input },
     };
 };
 

@@ -1351,6 +1351,19 @@ tree 교체에서 capture carry 누락(드래그가 첫 move에 죽음)·스크�
      남은 z 정리(layer 상수 vs `(layer, z, order)`)는 SV6가 pane·사이드바와 함께 본다.
 - **SV3 — 소스 컨트롤 이관.** 탐색기와 같은 행 좌표를 쓰고 스크롤바가 아예 없다. SV2가 만든 픽셀
   경로를 그대로 쓰므로 비용이 가장 작고, 없던 스크롤바가 생기는 것이 사용자에게 보이는 변화다.
+  탐색기와 같은 이유로 둘로 나눈다.
+
+  - **SV3a — 픽셀 스크롤 상태(완료).** `scm_scroll_rows: usize` → `scroll_area.State`(픽셀). 창은
+     탐색기와 같은 세 값(`start`·`count`·`origin_shift_px`)이고 hit-test·휠이 픽셀을 읽는다.
+
+     **탐색기와 다른 점 하나**: 첫 줄이 **브랜치 헤더**이고 스크롤에서 고정이다. 그래서 뷰포트는
+     `tree_content.h`에서 그 한 줄을 뺀 값이고, 헤더는 스크롤 좌표 **밖**이다. 헤더와 목록이 한
+     draw list였으므로(`buildDockScmDrawList`가 row 0에 헤더를 그렸다) `head`를 optional로 만들어
+     둘로 나눴다 — 그러지 않으면 목록의 픽셀 편향이 헤더까지 끌고 간다.
+
+     clip seam의 role을 `file_tree` → **`dock_list`** 로 일반화했다. 도크 뷰는 한 번에 하나만
+     보이므로 프레임당 한 구간인 v147 seam을 탐색기와 소스 컨트롤이 공유한다.
+  - **SV3b — 스크롤바 신규.** SV2b가 만든 `scrollArea` 선언을 그대로 써서 없던 track/thumb을 낸다.
 - **SV4 — 사이드바 이관.** 스크롤바가 host의 GPU quad라 발행 경로가 없다. 이관하면 사이드바도
   드래그 가능한 스크롤바를 얻는다(현재 휠 전용).
 - **SV5 — 알림·팔레트·세팅(판단 보류).** 셋은 이미 `overlay_input.windowStart`로 item-index windowing을

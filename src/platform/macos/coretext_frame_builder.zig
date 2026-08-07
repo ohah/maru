@@ -980,7 +980,9 @@ pub fn buildDockScmDrawList(
     allocator: std.mem.Allocator,
     cols: u16,
     rows: u16,
-    head: git_status.Head,
+    /// `null`이면 헤더를 그리지 않고 **목록을 row 0부터** 그린다. 헤더는 스크롤에서 고정이고 목록만
+    /// 픽셀 편향을 받으므로(SV3a), 둘을 같은 draw list에 담으면 그 편향이 헤더까지 끌고 간다.
+    head: ?git_status.Head,
     model_rows: []const scm_view.Row,
     collapsed: []const bool,
     /// 선택된 행(모델 인덱스). 그 행을 강조해 **지금 보고 있는 비교가 어느 것인지** 남긴다.
@@ -999,16 +1001,16 @@ pub fn buildDockScmDrawList(
     var r: u16 = 0;
 
     // ── 브랜치 헤더. 아이콘 + 브랜치 이름 + (upstream 대비) ahead/behind. upstream이 없으면 그 자리를 비운다.
-    if (rows > 0 and cols > inset + 2) {
+    if (head) |h| if (rows > 0 and cols > inset + 2) {
         try cells.append(allocator, .{ .row = 0, .col = inset, .codepoint = icons.codepoint(.git_branch), .width = 2, .style = .{ .foreground = muted } });
         var tail_buf: [32]u8 = undefined;
         var tail: []const u8 = "";
-        if (head.has_ab) {
-            tail = std.fmt.bufPrint(&tail_buf, "↑{d} ↓{d}", .{ head.ahead, head.behind }) catch "";
+        if (h.has_ab) {
+            tail = std.fmt.bufPrint(&tail_buf, "↑{d} ↓{d}", .{ h.ahead, h.behind }) catch "";
         }
         const tail_cols: u16 = @intCast(std.unicode.utf8CountCodepoints(tail) catch tail.len);
         const name_end = cols -| tail_cols -| 1;
-        const branch = if (head.detached) "(detached)" else (head.branch orelse "(브랜치 없음)");
+        const branch = if (h.detached) "(detached)" else (h.branch orelse "(브랜치 없음)");
         if (inset + 3 < name_end)
             _ = try appendEllipsizedTitle(allocator, &cells, &pool, branch, 0, inset + 3, name_end, .{ .foreground = fg, .bold = true }, false, .head);
         if (tail.len > 0 and tail_cols < cols) {
@@ -1019,7 +1021,7 @@ pub fn buildDockScmDrawList(
             }
         }
         r = 1;
-    }
+    };
 
     for (model_rows, 0..) |row, model_index| {
         if (r >= rows) break;

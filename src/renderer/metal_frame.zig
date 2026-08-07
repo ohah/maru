@@ -56,7 +56,7 @@ pub const native_cell_role_dock_toggle: u16 = 32;
 /// 셀 버퍼 안의 한 구간과 그것을 자를 사각형. `role`로 찾은 pane의 위치를 담는다.
 pub const PaneClipRange = struct { start: usize, len: usize, rect: ClipPx };
 
-pub const PaneFrameRole = enum { normal, dock_toggle, file_tree };
+pub const PaneFrameRole = enum { normal, dock_toggle, dock_list };
 
 fn applyPaneFrameRole(cells: []NativeMetalCell, role: PaneFrameRole) void {
     if (role != .dock_toggle) return;
@@ -1280,8 +1280,9 @@ pub const PaneFrame = struct {
     /// 이 frame의 glyph가 일반 pane인지 자유 배치 도크 토글인지 명시한다. Metal backend가
     /// codepoint·좌표로 역할을 재추론하지 않도록 replace가 NativeMetalCell.reserved에 lower한다.
     role: PaneFrameRole = .normal,
-    /// **오버레이 프레임과 `role == .file_tree`인 pane에서만 동작한다.** 오버레이에서는 아래
-    /// `modal_clip = pf.clip_rect`가 모달 셀 draw에 scissor를 걸고, 탐색기 pane에서는 그 pane의 셀
+    /// **오버레이 프레임과 `role == .dock_list`인 pane에서만 동작한다.** 오버레이에서는 아래
+    /// `modal_clip = pf.clip_rect`가 모달 셀 draw에 scissor를 걸고, 스크롤하는 도크 목록(탐색기·소스
+    /// 컨트롤) pane에서는 그 pane의 셀
     /// 구간이 `pane_clip_cells_start/len` + `pane_clip_*_px`로 실려 렌더러가 본문 draw를 셋으로 쪼갠
     /// 가운데에만 scissor를 건다(ABI v147). **그 밖의 dest는 여전히 값이 조용히 버려진다** —
     /// `.floating`·`.sticky`·`.normal` pane이 값을 실어 와도 그 셀 draw에는 scissor가 안 걸린다.
@@ -1490,7 +1491,7 @@ pub const MetalFrameBuffer = struct {
             defer allocator.free(built.cells);
             setCellsPaneOrigin(built.cells, pf.origin_x, pf.origin_y);
             applyPaneFrameRole(built.cells, pf.role);
-            if (pf.role == .file_tree) if (pf.clip_rect) |clip| {
+            if (pf.role == .dock_list) if (pf.clip_rect) |clip| {
                 // 이 pane의 셀 구간과 자를 사각형. 뒤따르는 divider·사이드바 헤더 삽입은 **커서 suffix
                 // 바로 앞**(버퍼 끝)이라 여기 index를 밀지 않는다.
                 pane_clip = .{
@@ -3181,7 +3182,7 @@ test "replace: caret 없는 오버레이 셀이 뒤에 붙어도 터미널 커�
 // 들어와 프로덕션에서 한 번도 안 돌았고(`modal_clip`이 오래 그랬던 것과 같다), SV2a-2가 통로를 이었으며,
 // 부분 행을 만드는 이 슬라이스가 첫 non-zero 소비자다. GPU가 실제로 자르는 것은 눈으로 봐야 하지만,
 // **무엇을 자르라고 실어 보내는지**는 여기서 고정한다 — 구간이 비면 렌더러는 조용히 안 자른다.
-test "replace: 탐색기 role의 pane이 자기 셀 구간과 clip rect를 seam에 싣는다(v147 첫 non-zero 소비자)" {
+test "replace: 도크 목록 role의 pane이 자기 셀 구간과 clip rect를 seam에 싣는다(v147 첫 non-zero 소비자)" {
     const allocator = std.testing.allocator;
     const atlas_config: renderer.GlyphAtlasConfig = .{ .atlas_width_px = 1024, .atlas_height_px = 1024 };
     const colors: CellColors = .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 }, .cursor = .{ .block = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF }, .text = .{ .r = 0, .g = 0, .b = 0 } } };
@@ -3194,7 +3195,7 @@ test "replace: 탐색기 role의 pane이 자기 셀 구간과 clip rect를 seam�
         // 창의 첫 행이 위로 밀린 만큼 원점이 올라간 상태 — clip.y보다 작다.
         .origin_y = 31,
         .colors = colors,
-        .role = .file_tree,
+        .role = .dock_list,
         .clip_rect = clip,
     };
     // 활성 터미널 pane은 뒤에 온다(커서 suffix 규약). 탐색기 구간이 그 앞이라는 것도 함께 본다.
@@ -3223,7 +3224,7 @@ test "replace: 탐색기 role의 pane이 자기 셀 구간과 clip rect를 seam�
 
 // role이 탐색기가 아니면 seam은 값 0으로 남는다 — 이 게이트가 없으면 아무 pane이나 clip을 실어 보내
 // 터미널 본문이 잘린다(그 필드는 오랫동안 조용히 버려지던 값이라 실어 보내는 곳이 여럿이다).
-test "replace: 탐색기 role이 아닌 pane의 clip_rect는 seam을 켜지 않는다" {
+test "replace: 도크 목록 role이 아닌 pane의 clip_rect는 seam을 켜지 않는다" {
     const allocator = std.testing.allocator;
     const atlas_config: renderer.GlyphAtlasConfig = .{ .atlas_width_px = 1024, .atlas_height_px = 1024 };
     const colors: CellColors = .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 }, .cursor = .{ .block = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF }, .text = .{ .r = 0, .g = 0, .b = 0 } } };

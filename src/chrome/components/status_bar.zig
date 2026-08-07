@@ -77,9 +77,12 @@ pub fn compute(
         const gap: u32 = if (right_n == 0) 0 else m.gap_px;
         // 이 항목을 놓으면 좌단이 `cursor - gap - w`가 된다. 그게 content_x보다 왼쪽이면 자리가 없다.
         // 포화 뺄셈을 두 번 하는 대신 더하기로 옮겨 쓴다(같은 부등식, underflow 걱정 없음).
+        // **자리를 못 얻으면 뒤 항목도 시도하지 않는다.** 배열 순서가 우선순위이므로(§3), 앞이 못 들어간
+        // 자리에 뒤가 들어가면 정체가 뒤바뀐다 — 폭이 넓은 앞 항목이 화면에서 사라지고 뒤 항목이 그
+        // 자리로 올라온다. 이 항목과 남은 항목을 한 번씩만 센다(폭 0으로 이미 센 앞 항목과 겹치지 않는다).
         if (cursor < gap +| w +| content_x) {
-            dropped += 1;
-            continue;
+            dropped += right_widths_px.len - i;
+            break;
         }
         cursor -|= gap;
         const x = cursor -| w;
@@ -99,9 +102,10 @@ pub fn compute(
         }
         const gap: u32 = if (left_n == 0) 0 else m.gap_px;
         const start = x +| gap;
+        // 우측과 같은 규율 — 앞이 못 들어가면 거기서 멈춘다(§3 "앞이 더 오래 살아남는다").
         if (start +| w > left_limit) {
-            dropped += 1;
-            continue;
+            dropped += left_widths_px.len - i;
+            break;
         }
         left_out[left_n] = .{ .index = i, .x = start, .y = m.bar_y, .w = w, .h = m.bar_h };
         left_n += 1;
@@ -345,4 +349,42 @@ test "SB1: publish의 좌우 여백은 바를 안 넘고 이웃과 안 겹친다
     const huge = try publish(m, out.left, &ids, 999, 1, &entries);
     try testing.expectEqual(@as(f32, 0), huge.entries[0].rect.x);
     try testing.expect(huge.entries[0].rect.x + huge.entries[0].rect.width <= 1000);
+}
+
+// 좌측 우선순위는 **배열 순서**다(§3: "앞이 더 왼쪽이자 더 오래 살아남고", "뒤쪽 항목부터 통째로 버린다").
+// 앞 항목이 자리를 못 얻었는데 뒤 항목이 그 자리를 차지하면 우선순위가 뒤집힌다 — 긴 브랜치명 + 짧은
+// 경로에서 실제로 일어난다(브랜치가 사라지고 경로가 그 자리로 올라온다). 이름 길이에 따라 **표시되는
+// 항목의 정체가 바뀌는** 것이 이 역전의 실제 해악이다.
+test "좌측은 앞 항목이 못 들어가면 뒤 항목도 넣지 않는다(우선순위 역전 금지)" {
+    var left: [2]Slot = undefined;
+    var right: [1]Slot = undefined;
+    const m: Metrics = .{
+        .bar_x = 0,
+        .bar_y = 0,
+        .bar_w = 60, // edge_pad 4+4를 빼면 52 — 앞(100)은 못 들어가고 뒤(20)만 들어갈 폭
+        .bar_h = 20,
+        .edge_pad_px = 4,
+        .gap_px = 8,
+    };
+    const lay = compute(m, &.{ 100, 20 }, &.{}, &left, &right);
+    try std.testing.expectEqual(@as(usize, 0), lay.left.len);
+    try std.testing.expectEqual(@as(usize, 2), lay.dropped);
+}
+
+// 우측도 같은 규율이다(§3: "배열 순서가 곧 우선순위다 ... 우측은 앞이 더 오른쪽"). 앞 항목이 자리를
+// 못 얻었는데 뒤 항목이 가장 오른쪽을 차지하면, 좌측과 똑같이 정체가 뒤바뀐다.
+test "우측도 앞 항목이 못 들어가면 뒤 항목을 넣지 않는다" {
+    var left: [1]Slot = undefined;
+    var right: [2]Slot = undefined;
+    const m: Metrics = .{
+        .bar_x = 0,
+        .bar_y = 0,
+        .bar_w = 60,
+        .bar_h = 20,
+        .edge_pad_px = 4,
+        .gap_px = 8,
+    };
+    const lay = compute(m, &.{}, &.{ 100, 20 }, &left, &right);
+    try std.testing.expectEqual(@as(usize, 0), lay.right.len);
+    try std.testing.expectEqual(@as(usize, 2), lay.dropped);
 }

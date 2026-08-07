@@ -597,7 +597,8 @@ pub const RemoteTermBackend = struct {
             // app_session.copyText가 이 span을 host로 보내 host의 extractSelection으로 한다(선택 의미론=host 단일 출처).
             // 콘텐츠 인지 경계(word/line)는 빈 placeholder에선 부정확하므로 후속(#6b-2, host 계산). scroll_and_extend(autoscroll
             // 드래그)도 후속. select_all은 placeholder 뷰포트 전체 선택 → 보이는 화면 복사(host가 스크롤백까지는 후속).
-            .select_start, .select_extend, .select_extend_or_collapse, .select_all => core_command.apply(&rr.surface.core, cmd),
+            // select_clear도 같은 분류다 — 하이라이트가 placeholder에 있으니 해제도 placeholder에서 한다(host 왕복 불요).
+            .select_start, .select_extend, .select_extend_or_collapse, .select_all, .select_clear => core_command.apply(&rr.surface.core, cmd),
             // §6b-2 단어/줄 선택: 콘텐츠 인지 경계는 빈 placeholder가 모르므로 **host가 계산해 span을 돌려준다**(selectContentAware).
             // 그 span을 placeholder에 적용해 하이라이트(렌더가 selectionViewportSpan을 읽음). 복사는 #6b-1이 그 span으로 host 추출.
             .select_word => |s| {

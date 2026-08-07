@@ -73,6 +73,11 @@ pub const CoreCommand = union(enum) {
     select_word: SelectWord, // selectWordAt(더블클릭) — config word-separators를 복사해 실음(F2-8)
     select_line: u16, // selectLineAt(트리플클릭, row)
     select_all,
+    /// 선택 해제(selectionClear). "선택을 만든 주체가 아닌 쪽"이 선택을 무효로 만드는 지점 전용이다 —
+    /// 마우스 리포팅 중 클릭·휠(앱이 마우스를 소유하므로 하이라이트만 남으면 유령), 타이핑·Esc
+    /// (input.selection-clear-on-typing). 이 명령이 없던 시절엔 ⌘A 선택을 지울 경로가 "이동 없는 클릭"과
+    /// 좌표 무효화(resize reflow·alt 전환)뿐이라, 트래킹 TUI pane에선 클릭조차 안 먹혀 선택이 영구히 남았다.
+    select_clear,
     jump_to_prompt: i8, // jumpToPrompt(dir) — OSC 133 프롬프트 블록 점프(Cmd+↑/↓), view_offset mutate
     /// 비파괴 입력 모드 리셋(Reset 메뉴 ⌘⇧R) — ssh 비정상 종료 등으로 남은 focus 1004·mouse·kitty keyboard 모드만
     /// 끈다. host-backed면 **실제 모드를 든 host core**에 적용돼야 하므로 명령으로 위임한다(client core는 빈
@@ -133,6 +138,7 @@ pub fn apply(core: *terminal.TerminalCore, cmd: CoreCommand) void {
         .select_word => |s| core.selectWordAt(s.row, s.col, s.separators[0..s.sep_len]),
         .select_line => |row| core.selectLineAt(row),
         .select_all => core.selectAll(),
+        .select_clear => core.selectionClear(),
         .reset_input_modes => core.resetInputModes(),
         .jump_to_prompt => |dir| _ = core.jumpToPrompt(dir), // bool 반환(스크롤됨)은 reader 렌더 트리거로 대체
     }
@@ -182,6 +188,13 @@ test "core_command.apply: 각 명령이 코어를 올바르게 mutate (위임 �
     apply(&core, .scroll_to_bottom); // 바닥에서 선택 좌표 일관
     apply(&core, .select_all);
     try std.testing.expect(core.selection_anchor != null);
+    // select_clear가 ⌘A 선택을 실제로 지운다 — 마우스 리포팅 pane/타이핑에서 하이라이트가 영구히 남던
+    // 결함의 유일한 해제 경로라 여기서 고정한다(선택 없을 때 재적용해도 no-op이어야 한다).
+    apply(&core, .select_clear);
+    try std.testing.expect(core.selection_anchor == null);
+    apply(&core, .select_clear);
+    try std.testing.expect(core.selection_anchor == null);
+    apply(&core, .select_all); // 이후 검증이 선택 있는 상태를 전제하므로 되돌린다
     apply(&core, .{ .jump_to_prompt = -1 }); // OSC 133 없으면 no-op — 무크래시 경로
     apply(&core, .{ .select_start = .{ .row = 0, .col = 0, .block = false } }); // 새 선택이 이전을 대체
     apply(&core, .{ .select_extend = .{ .row = 1, .col = 2 } });

@@ -22584,6 +22584,16 @@ pub const AppSession = struct {
                     self.find_matches.clearRetainingCapacity();
                     self.metal_dirty = true; // 현재-매치 하이라이트가 한 프레임 남지 않게(다른 clear 사이트와 일관)
                 }
+                // 타이핑하면 남은 텍스트 선택도 해제한다(`input.selection-clear-on-typing`, 기본 true).
+                // Esc는 그 값과 무관하게 항상 — "선택 취소"의 관용 키다. 베이스: Ghostty Surface.zig keyCallback
+                // (`selection_clear_on_typing or key == .escape`, modifier 단독 키는 제외). maru의 Key union엔
+                // modifier 단독 키가 없어(입력 union이 char/enter/escape/기능키만) 그 제외 조건은 자동 충족이고,
+                // 여기까지 왔다는 건 인코딩된 바이트가 실제 PTY로 갔다는 뜻이다. 대상은 host.handleKeyEvent가
+                // 쓴 것과 같은 활성 surface. **평범한 글자 타이핑은 이 경로가 아니라 IME 확정 경로**
+                // (routeCommittedText — macOS NSTextInputClient)로 오므로 거기에도 같은 해제가 있다.
+                if (self.loaded_config.config.input.selection_clear_on_typing or key_event.key == .escape) {
+                    self.clearSurfaceSelection(self.activeSurface().id);
+                }
             },
             .app_action => |action| {
                 self.total_app_key_events += 1;
@@ -22928,6 +22938,10 @@ pub const AppSession = struct {
             // 리포트는 target(커서 아래)으로, 좌표도 그 본문 rect 기준이라 pane↔좌표가 정합한다. 사이드바/밖(hit
             // null)이면 활성 pane으로 폴백(target/rect 한 쌍). lines>0=위(과거)=64, <0=아래=65, 앱이 휠을 소비한다.
             if (lines != 0) {
+                // 트래킹 앱이 휠을 소비하면 그 앱이 화면을 굴린다 — 남은 선택은 옛 좌표를 가리키는 유령이라
+                // 먼저 해제한다(Ghostty: 리포팅 중 스크롤이면 setSelection(null)). lines 반복 리포트와 달리
+                // 해제는 이벤트당 한 번이면 충분하다(lines만큼 반복할 이유가 없다).
+                self.clearSurfaceSelection(target.id);
                 if (self.pxToCellIn(target, rect, x_px, y_px)) |cell| {
                     const wb: u8 = if (lines > 0) 64 else 65;
                     var n: i32 = if (lines > 0) lines else -lines;
@@ -23143,6 +23157,19 @@ pub const AppSession = struct {
         return @enumFromInt(obs.mouse_tracking_mode);
     }
 
+    /// 남아 있는 텍스트 선택(하이라이트)을 해제한다 — 코어 mutate라 reader에 위임한다(docs/io-render-threading.md
+    /// §9 P3-4의 선택 위임 규율; host-backed면 명령이 host로 라우팅돼 **진짜 코어**에 적용된다).
+    /// 호출 지점은 "선택을 만든 주체가 아닌 쪽"이 그 선택을 무효로 만드는 곳들이다: 마우스 리포팅 중 버튼
+    /// 이벤트·휠(그 pane의 마우스는 앱이 소유하니 하이라이트만 남으면 유령), alt-scroll 화살표 변환,
+    /// 타이핑·Esc(`input.selection-clear-on-typing`). 이 경로들이 없으면 ⌘A(select_all) 선택을 지울 방법이
+    /// "이동 없는 클릭"과 좌표 무효화(resize reflow·alt 전환)뿐이라, 트래킹 TUI pane에서 하이라이트가 영구히
+    /// 남는다(클릭이 리포팅으로 빠져 선택을 손도 안 댄다). 베이스: Ghostty Surface.zig — 같은 세 지점에서
+    /// `setSelection(null)`. 선택이 없으면 코어의 `selectionClear`가 즉시 return하므로 반복 호출은 무해하다.
+    fn clearSurfaceSelection(self: *AppSession, surface_id: u64) void {
+        self.runtime.enqueueCoreCommand(surface_id, .select_clear, self.io) catch {};
+        self.metal_dirty = true; // 해제된 하이라이트가 한 프레임 더 남지 않게(다른 선택 사이트와 같은 규율)
+    }
+
     /// 줄 수만큼 스크롤한다. alt screen + alternate scroll(DECSET 1007)이면 화살표 키로 변환해
     /// 프로그램(less/vim)에 보낸다(iTerm2/Terminal.app 동작, DECCKM이면 SS3 형식). 휠과
     /// Shift+PageUp/Down이 같은 경로를 타 일관되게 동작한다.
@@ -23192,6 +23219,9 @@ pub const AppSession = struct {
             }
         }
         if (is_alt) {
+            // 휠을 화살표 키로 바꿔 프로그램에 보내는 순간 그 화면은 프로그램이 다시 그린다 — 남은 선택은
+            // 좌표가 어긋난 유령이 되므로 해제한다(Ghostty도 이 변환 경로에서 항상 setSelection(null)).
+            self.clearSurfaceSelection(surface.id);
             // alt screen + alternate scroll(DECSET 1007): 프로그램에 화살표 키를 보낸다(PTY write — core mutate 아님).
             // 시퀀스를 한 버퍼에 반복해 묶어 보낸다 — 줄마다 writeInput을 하면 빠른 플릭에서 PTY 버퍼가 차 나머지가 드랍.
             const bytes = key_buffer[0..alt_len];
@@ -24187,6 +24217,13 @@ pub const AppSession = struct {
         if (do_report) {
             self.drag_autoscroll = 0;
             self.mouse_drag_selecting = false;
+            // 버튼 이벤트(누름/뗌/더블/트리플)는 남은 선택을 해제한다 — 이 pane의 마우스는 앱이 소유하므로
+            // (스크롤·클릭을 앱이 제 방식대로 처리한다) 하이라이트만 남으면 지울 방법이 없는 유령이 된다.
+            // ⌘A 선택이 트래킹 TUI pane에서 영원히 안 지워지던 결함의 직접 수정 지점이다. 베이스: Ghostty
+            // Surface.zig mouseButtonCallback — "shift 없는 리포팅 버튼 이벤트면 setSelection(null)"과 동형
+            // (shift/option은 위 do_report 게이트가 이미 선택 override로 빼놨다). 드래그 motion(kind 2)은
+            // 버튼 이벤트가 아니라 제외한다(60~120Hz라 매번 큐에 넣을 일도 아니다 — Ghostty도 cursorPos에선 안 지운다).
+            if (kind != 2) self.clearSurfaceSelection(click_surface.id);
             self.runtime.enqueueCoreCommand(click_surface.id, .{
                 .report_mouse = .{
                     .button = @intCast(button),
@@ -25088,6 +25125,10 @@ pub const AppSession = struct {
         // handleKeyEvent를 우회하므로 terminal input 회계를 여기서 직접 한다(\n→\r는 1:1이라 byte 수 동일).
         self.total_terminal_input_events += 1;
         self.total_terminal_input_bytes += bytes.len;
+        // 선택 해제도 같은 이유로 여기가 사이트다 — macOS는 평범한 글자 입력을 IME 확정으로 커밋해
+        // handleKeyEvent를 우회하므로(mouse-hide-while-typing과 같은 사정), 키 경로에만 걸면 실제 타이핑에
+        // 반응하지 않는다. 바이트가 **실제로 큐에 수락된 뒤에만** 해제해 폐기된 확정이 하이라이트를 지우지 않게 한다.
+        if (self.loaded_config.config.input.selection_clear_on_typing) self.clearSurfaceSelection(target_id);
         return true;
     }
 
@@ -25138,6 +25179,8 @@ pub const AppSession = struct {
         if (!self.queueInputPair(target_id, text, true, replay)) return false;
         self.total_terminal_input_events += 2;
         self.total_terminal_input_bytes += text.len + replay.len;
+        // 확정+replay 쌍도 타이핑이다 — sendCommittedTextTo와 같은 규율로 수락 후에만 선택을 해제한다.
+        if (self.loaded_config.config.input.selection_clear_on_typing) self.clearSurfaceSelection(target_id);
         self.flushPendingPaste();
         return true;
     }
@@ -59435,6 +59478,64 @@ test "scroll.multiplier: 세로 휠 배수가 스크롤 줄 수를 키운다 (F1
     try std.testing.expect(surface.core.view_offset > off1);
 }
 
+// ⌘A(select_all)가 만든 선택을 **해제할 전이가 정의돼 있지 않아** 하이라이트가 영구히 남던 결함의 회귀 가드
+// (단일 출처: docs/key-input-and-shortcuts.md "텍스트 선택의 해제 경계"). 예전에 해제에 닿는 경로는 "이동 없는
+// 클릭"·새 선택·좌표 무효화(resize reflow)뿐이었고, 마우스 트래킹을 켠 TUI pane(vim·tmux·Claude Code)에서는
+// 클릭이 리포팅으로 빠져 그 하나마저 막혔다 — 그래서 트래킹 pane을 최악 조건으로 잡고 네 해제 지점을 고정한다.
+// config로 끌 수 있는 축(타이핑)과 끌 수 없는 축(리포팅 클릭·휠, Esc)도 함께 구분한다.
+test "선택 해제 전이: 리포팅 클릭·휠·타이핑·Esc가 ⌘A 선택을 푼다 (input.selection-clear-on-typing)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    const surface = session.activeSurface();
+    try surface.core.write("hello\r\n" ** 40); // 선택할 내용 + 스크롤백
+    const body = session.paneTermRect(session.active_pane_rect);
+    const cx: f64 = @floatFromInt(body.x + body.w / 2);
+    const cy: f64 = @floatFromInt(body.y + body.h / 2);
+    surface.core.mouse_tracking = .normal; // 트래킹 TUI pane 흉내 — 클릭·휠이 리포팅으로 빠진다
+
+    // ① 리포팅 중 클릭(누름): 예전엔 do_report가 report_mouse만 보내고 선택을 손도 안 댄 채 return이었다.
+    session.dispatchAppAction(.select_all);
+    try std.testing.expect(surface.core.selection_anchor != null);
+    session.mouse(1, cx, cy, 0, 0);
+    try std.testing.expect(surface.core.selection_anchor == null);
+
+    // ② 리포팅 중 휠: 앱이 휠을 소비해 화면을 굴리므로 남은 선택은 옛 좌표를 가리키는 유령이 된다.
+    session.dispatchAppAction(.select_all);
+    try std.testing.expect(surface.core.selection_anchor != null);
+    session.wheel_accum = 0;
+    session.scrollWheel(3, 0, false, cx, cy);
+    try std.testing.expect(surface.core.selection_anchor == null);
+
+    // ③ 타이핑: 평범한 글자는 macOS가 IME 확정으로 커밋해 handleKeyEvent를 우회하므로 **그 경로**가 사이트다.
+    //    키 경로에만 걸었다면 이 단언이 실패한다(회귀의 핵심 — mouse-hide-while-typing과 같은 사정).
+    session.dispatchAppAction(.select_all);
+    try std.testing.expect(surface.core.selection_anchor != null);
+    session.routeCommittedText("a");
+    try std.testing.expect(surface.core.selection_anchor == null);
+
+    // ④ config false면 타이핑은 선택을 남긴다(옛 동작으로 되돌리는 opt-out이 실제로 동작하는지).
+    session.loaded_config.config.input.selection_clear_on_typing = false;
+    session.dispatchAppAction(.select_all);
+    session.routeCommittedText("b");
+    try std.testing.expect(surface.core.selection_anchor != null);
+
+    // ⑤ Esc는 그 config와 무관하게 항상 해제한다 — "선택 취소"의 관용 키(Ghostty와 같은 예외).
+    _ = try session.handleKeyEvent(.{ .key = .escape });
+    try std.testing.expect(surface.core.selection_anchor == null);
+}
+
 // input.url-click-modifier(F1-5): URL hover 밑줄·클릭 열기의 수식키 판정을 Zig가 config로 한다. urlModifierHeld가
 // 마우스 mods 비트(xterm: shift=4·alt=8·ctrl=16·cmd=32)를 config 키와 비교한다. Swift는 NSEvent 수식키를 이 비트로
 // 변환만(네이티브 최소). undefined 테스트는 url_click_modifier만 읽으므로 그 필드만 초기화.
@@ -62555,7 +62656,7 @@ test "settings 검색 필터: 쿼리로 keybind/schema 행 필터 + 필터 후 �
     const cf2 = try session.currentSectionFields(scratch.allocator());
     try std.testing.expectEqual(command_catalog.entries.len, cf2.keybind_entries.len);
     try std.testing.expect(cf2.enums.len > 0); // input dropdown 복귀
-    try std.testing.expectEqual(@as(usize, 5), cf2.bools.len); // input 섹션 bool = mouse-hide-while-typing(F1-6) + option-as-meta(F2-2) + keyhint.enabled(KH-3) + paste-protection + bracketed-paste-is-safe 5개(split bool은 workspace라 검색 끝나 사라짐)
+    try std.testing.expectEqual(@as(usize, 6), cf2.bools.len); // input 섹션 bool = mouse-hide-while-typing(F1-6) + option-as-meta(F2-2) + keyhint.enabled(KH-3) + paste-protection + bracketed-paste-is-safe + selection-clear-on-typing 6개(split bool은 workspace라 검색 끝나 사라짐)
 }
 
 test "mouse-hide-while-typing: IME 확정(글자) 입력 시 takeMouseHide 신호(1회성), 한글·meta chord·config off 구분 (F1-6)" {

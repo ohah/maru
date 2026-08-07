@@ -372,6 +372,33 @@ PR3 패턴 — 코어 변경을 `core_mutex` 아래서 한다).
 `core_command` stream frame으로 host reader queue에 전달된다. client control barrier와 host input-byte fence가
 `기존 입력 → report_focus/CSI I·O → 새 입력` 순서를 보존하며 AppKit main thread는 RPC response를 기다리지 않는다.
 
+## 텍스트 선택의 해제 경계 (`⌘A` 이후)
+
+`⌘A`(`Action.select_all` → `TerminalCore.selectAll`)는 스크롤백을 포함한 전체를 선택한다. 문제는 **그 선택을
+언제 푸느냐**였다 — 해제 전이가 정의돼 있지 않으면 하이라이트가 영구히 남는다. 실제로 그런 결함이 있었다:
+해제에 닿는 경로가 ⑴ 트래킹이 꺼진 상태의 "이동 없는 클릭"(`select_extend_or_collapse`), ⑵ 새 선택 시작(앵커
+덮어쓰기), ⑶ 좌표가 무효가 되는 화면 재배치(`invalidateSelection` — resize reflow·alt 화면 전환·ED3)뿐이라,
+`selectAll`이 만든 선택은 사용자가 창 크기를 바꾸기 전까지 남았다. **마우스 트래킹을 켠 TUI**(vim·tmux·
+Claude Code 등 DECSET 1000~1003) pane에서는 클릭이 리포팅으로 빠져 ⑴마저 막히므로 지울 방법이 아예 없었다.
+
+그래서 "선택을 만든 주체가 아닌 쪽이 그 선택을 무효로 만드는" 지점을 명시적 전이로 둔다. 해제는 코어 mutate라
+`CoreCommand.select_clear`로 reader에 위임하고(선택 위임 규율 — [io-render-threading.md](io-render-threading.md)
+§9 P3-4), 호출은 `app_session.clearSurfaceSelection` 한 곳으로 모은다. host-backed에서는 하이라이트가 attachment
+placeholder에 있으므로 해제도 placeholder에 적용한다(host 왕복 없음).
+
+| 지점 | 해제 이유 | config |
+|---|---|---|
+| 마우스 리포팅 중 **버튼 이벤트**(누름/뗌/더블/트리플) | 그 pane의 마우스는 앱이 소유한다 — 클릭으로 지울 수 없는 선택은 유령이 된다. shift·option 클릭은 선택 override라 애초에 리포팅으로 안 간다. 드래그 motion은 버튼 이벤트가 아니라 제외 | 없음(항상) |
+| 마우스 리포팅 중 **휠** | 앱이 휠을 소비해 화면을 굴린다 — 선택 좌표가 어긋난다 | 없음(항상) |
+| alt 화면 + alternate scroll(1007)의 **휠→화살표 변환** | 프로그램이 화면을 다시 그린다 | 없음(항상) |
+| **타이핑** | 입력을 시작하면 선택은 관심 밖이다. 실제 글자는 macOS IME 확정 경로(`routeCommittedText`)로 오므로 키 경로와 확정 경로 **둘 다**에 건다 — 키 경로에만 걸면 평범한 타이핑에 반응하지 않는다(`mouse-hide-while-typing`과 같은 사정) | `input.selection-clear-on-typing`(기본 `true`) |
+| **Esc** | "선택 취소"의 관용 키 | 없음(항상 — config가 `false`여도) |
+
+**베이스/결정**: Ghostty가 같은 세 축(리포팅 버튼·리포팅 스크롤·타이핑/Esc)에서 `setSelection(null)`을 하는 것을
+동작 베이스로 삼았고, config 이름·기본값도 `selection-clear-on-typing`(기본 `true`)을 따랐다. maru의 신규 config
+키는 보통 "회귀 없음 opt-in"으로 두지만 여기선 **현행이 결함**이라 기본을 `true`로 두는 예외다(`false`로 두면
+옛 동작). 코드 표현은 옮기지 않았다(clean-room — 동작 비교만).
+
 ## 검증 계획
 
 - key chord parser test: modifier 중복, 알 수 없는 alias, key 누락, key 중복, F-key 범위 오류를 실패로 보고한다.

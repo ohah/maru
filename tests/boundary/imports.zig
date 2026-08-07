@@ -139,7 +139,10 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     // 상태바 blocked 항목·typed tree 상호작용으로 또 바뀐다. count는 4 그대로다.
     // 상태바 blocked 항목·typed tree 상호작용으로 또 바뀐다. count는 4 그대로다.
     // 상태바 blocked 항목·typed tree 상호작용으로 또 바뀐다. count는 4 그대로다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "cf76813e850d4027a7f865bebd15de182ff0ab48c0b5498061213bbf2f8fad9e" },
+    // 선택 해제 전이(⌘A 하이라이트가 트래킹 pane에서 안 지워지던 결함 — `clearSurfaceSelection`을 리포팅
+    // 클릭·휠·타이핑·Esc에 배선)로 또 바뀐다. count는 4 그대로다 — 더한 것은 `select_clear` 명령 enqueue
+    // 하나와 그 호출들뿐이고, Client 구성이나 receiver 집합과는 무관하다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "aadefc1dc0bab3674234406b7f67808c6416aaa26d27fc50745429b4b4961b50" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

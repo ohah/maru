@@ -50998,6 +50998,16 @@ test "file tree row window is one arithmetic shared by follow, clamp, hit-test, 
         session.file_tree_follow_scroll_pending = true;
         session.scrollFileTreeToFollowedCwd();
         try std.testing.expectEqual(target_index + 1 - visible, session.file_tree_scroll_rows);
+
+        // **위로도 따라간다.** 아래로 가는 분기만 보면 위 분기를 통째로 지워도 통과한다(적대적 검증).
+        // 창 **위**에 있는 행을 따라가면 그 행이 창 맨 위에 와야 한다.
+        // 대상이 창 **위**로 나가도록 offset을 대상보다 더 내린다. 대상과 같게 두면 이미 창 첫 줄이라
+        // 어느 분기도 안 타고, 그러면 위 분기를 지워도 통과한다.
+        session.file_tree_scroll_rows = target_index + 5;
+        session.file_tree_follow_scroll_pending = true;
+        session.scrollFileTreeToFollowedCwd();
+        try std.testing.expectEqual(target_index, session.file_tree_scroll_rows);
+
         session.file_tree_followed_cwd = null;
     }
 

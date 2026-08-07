@@ -158,6 +158,23 @@ pub fn scrollForTrackClick(geometry: Geometry, pointer_y: f64) usize {
     return scrollForPointer(geometry, pointer_y, geometry.thumb_h / 2);
 }
 
+// 예약이 **올림**이어야 하는 이유: track(8px) + 우측 inset(3px) = 11px가 셀 폭으로 나누어떨어지는
+// 일은 거의 없고, 내림하면 마지막 칸의 일부를 트랙이 덮는다. 그 반 칸이 글자를 자른다.
+test "file tree scrollbar: reserved columns round up so the track never covers a partial cell" {
+    // 11px를 7px 셀로: 1.57칸 → 2칸을 빼야 트랙이 글자를 안 덮는다.
+    try std.testing.expectEqual(@as(u32, 2), reservedColumns(200, 7));
+    // 나누어떨어지면 올림이 없다(11px를 11px 셀로 = 1칸).
+    try std.testing.expectEqual(@as(u32, 1), reservedColumns(200, 11));
+    // 예약한 칸 수 × 셀 폭이 항상 점유 픽셀 이상이다 — 이것이 계약의 본체다.
+    for ([_]u32{ 5, 6, 7, 8, 9, 10, 12, 16 }) |cell_w| {
+        const occupied = bar_width_px + edge_inset_px;
+        try std.testing.expect(reservedColumns(200, cell_w) * cell_w >= occupied);
+    }
+    // 퇴화 입력은 0이다(0으로 나누지 않는다).
+    try std.testing.expectEqual(@as(u32, 0), reservedColumns(0, 8));
+    try std.testing.expectEqual(@as(u32, 0), reservedColumns(200, 0));
+}
+
 test "file tree scrollbar: overflow only and endpoints" {
     try std.testing.expect(compute(10, 10, 0, 0, 0, 200, 200) == null);
     const top = compute(100, 10, 0, 10, 20, 200, 300).?;

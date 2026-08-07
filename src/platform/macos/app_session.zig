@@ -941,7 +941,7 @@ const status_bar_gap_pt: u32 = 12;
 /// 상태바 좌측 항목 상한. 지금은 브랜치·경로 둘이고, 늘릴 때 이 값과 우선순위 순서를 함께 본다.
 const max_status_bar_left_items: usize = 2;
 /// 상태바 우측 항목 상한. 지금은 알림 하나고, 에이전트 상태(S3e)가 붙으면 2가 된다.
-const max_status_bar_right_items: usize = 1;
+const max_status_bar_right_items: usize = 2;
 
 // 런타임 폰트 크기 조절(⌘+/⌘-/⌘0). step = ⌘+/⌘- 한 번에 1pt(Ghostty 기본과 동일). 클램프 범위는 보수적으로
 // [6, 72]pt — appearance resolver는 [1,512]를 허용하지만 6pt 미만은 글자가 안 읽히고 72pt 초과는 grid가
@@ -8695,6 +8695,35 @@ pub const AppSession = struct {
         return false;
     }
 
+    /// 창 전체에서 **지금 돌고 있는 에이전트 수**. `paneHasRunningAgent`와 같은 도메인(`agent_state == .running`)을
+    /// 쓰되 boolean이 아니라 개수를 센다 — 상태바가 더할 수 있는 고유한 값이 이것이다. 한 번에 터미널 하나만
+    /// 보이므로 "지금 안 보이는 곳에서 무엇이 돌고 있나"는 다른 UI가 답해 주지 않는다(사이드바를 접으면 더 그렇다).
+    /// Term 단위로 센다 — 한 pane에 에이전트 Term이 여럿일 수 있고, 사용자가 세고 싶은 것은 "돌고 있는 작업" 수다.
+    fn runningAgentCount(self: *const AppSession) usize {
+        var n: usize = 0;
+        for (self.tabs.items) |tab| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items) |t| {
+                    if (t.agent_state == .running) n += 1;
+                }
+            }
+        }
+        return n;
+    }
+
+    /// 위 개수와 함께 보여줄 에이전트 종류 심볼. 돌고 있는 것 중 **처음 만난 kind**를 쓴다 — 섞여 있을 때
+    /// 무엇을 대표로 삼을지는 의미 있는 규칙이 없고(둘 다 돌면 둘 다 중요하다), 개수가 이미 "여럿"을 말해 준다.
+    fn runningAgentKind(self: *const AppSession) AgentKind {
+        for (self.tabs.items) |tab| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items) |t| {
+                    if (t.agent_state == .running and t.agent_kind != .none) return t.agent_kind;
+                }
+            }
+        }
+        return .none;
+    }
+
     fn tabHasRunningAgent(tab: *Tab) bool {
         for (tab.panes.items) |p| if (paneHasRunningAgent(p)) return true;
         return false;
@@ -12141,6 +12170,14 @@ pub const AppSession = struct {
         // **좌우 충돌 규칙**(우측을 먼저 지키고 좌측을 뒤에서부터 버린다)을 헤드리스 스크린샷으로 검증한다
         // (self-verify debug-gate — MARU_FORCE_SPLIT과 같은 성격). 알림은 셸 관측과 무관해 첫 frame에 세울 수
         // 있다 — 브랜치·경로는 OSC 7이 아직 안 와 캡처로 못 보는 것과 대비된다.
+        // MARU_FORCE_AGENT=1 — 활성 Term의 에이전트 상태를 running으로 세워 상태바 우측 에이전트 항목과
+        // **우측 항목 순서**(에이전트가 더 오른쪽, 알림이 그 왼쪽)를 헤드리스로 검증한다. 실제 상태는 셸 화면을
+        // 관측해 정해지므로(pollAgentKinds) 첫 frame엔 절대 서지 않는다 — 그래서 훅이 필요하다.
+        if (std.c.getenv("MARU_FORCE_AGENT") != null) {
+            const t = self.activePane().activeTerm();
+            t.agent_state = .running;
+            t.agent_kind = .claude;
+        }
         if (std.c.getenv("MARU_FORCE_NOTIFICATIONS")) |raw| {
             const want = std.fmt.parseInt(usize, std.mem.span(raw), 10) catch 1;
             var i: usize = 0;
@@ -34152,7 +34189,22 @@ pub const AppSession = struct {
         defer for (right_frames[0..rn]) |*maybe| {
             if (maybe.*) |*dl| dl.deinit(self.allocator);
         };
-        if (self.notification_unread > 0) {
+        // 우측 배열은 **앞이 더 오른쪽**이다(compute가 오른쪽 끝에서 왼쪽으로 쌓는다). 에이전트를 앞에 둬
+        // 가장 오른쪽에 놓는다 — "지금 돌고 있다"가 누적 카운터인 알림보다 시급한 상태다.
+        if (self.runningAgentCount() > 0) {
+            const kind = self.runningAgentKind();
+            var agent_buf: [16]u8 = undefined;
+            const text = std.fmt.bufPrint(&agent_buf, "{d}", .{@min(self.runningAgentCount(), 99)}) catch "";
+            const icon = if (kind == .none) icons.codepoint(.sparkle) else agentIconCodepoint(kind);
+            if (text.len > 0 and rn < max_status_bar_right_items) {
+                if (self.buildStatusBarItem(icon, text, bar_cols, fg, icon_fg)) |dl| {
+                    right_frames[rn] = dl;
+                    right_widths[rn] = @as(u32, dl.size.cols) * self.cell_width_px;
+                    rn += 1;
+                }
+            }
+        }
+        if (self.notification_unread > 0 and rn < max_status_bar_right_items) {
             var count_buf: [16]u8 = undefined;
             const count = std.fmt.bufPrint(&count_buf, "{d}", .{self.notification_unread}) catch "";
             if (count.len > 0) {

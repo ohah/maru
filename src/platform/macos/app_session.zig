@@ -933,6 +933,9 @@ const titlebar_strip_min_pt: u32 = 28;
 // 상/하단 chrome의 위계를 유지한다. **터미널 폰트에서 파생하지 않는다** — 도크 view bar가 그렇게 했다가
 // 폰트를 키우면 같은 아이콘 줄이 오르내리는 회귀가 났고(실측 53px↔80px) 폰트 독립 pt로 옮겼다. 상태바는
 // 창 전폭 chrome이라 같은 이유가 더 강하게 적용된다.
+/// 소스 컨트롤 목록이 한 프레임에 다룰 수 있는 행 수. **스크롤 상한·렌더·hit-test가 같은 값을 써야**
+/// 그리지 못하는 행이 스크롤 범위에 들어가지 않는다(SV3a 적대적 검증).
+const scm_row_capacity: usize = 128;
 const status_bar_height_pt: u32 = 22;
 /// 상태바 좌/우 가장자리 안쪽 여백·항목 간격(논리 pt). 높이와 같은 이유로 폰트 독립이다.
 const status_bar_edge_pad_pt: u32 = 8;
@@ -4569,6 +4572,10 @@ pub const AppSession = struct {
             self.git_failed = false;
             if (self.git_result) |*old| old.deinit(self.allocator);
             self.git_result = result;
+            // 목록이 짧아졌으면 offset을 창 안으로 당긴다. 발행·렌더는 `scmEffectiveScrollPx`가 매번
+            // 유계화하지만 **raw 값은 그대로 남아**, 목록이 다시 길어질 때 그 자리로 튄다. 탐색기가
+            // `updateFileTree`에서 같은 일을 하는 것과 같은 자리다.
+            self.clampScmScroll();
             self.metal_dirty = true;
             // 진단은 **수치만** 남긴다 — 경로·브랜치명·상태 원문은 사용자 저장소 내용이라 로그에 넣지 않는다
             // (docs/editor-surface.md §8.3의 민감정보 경계와 같은 규율).
@@ -17475,8 +17482,12 @@ pub const AppSession = struct {
     }
 
     /// 목록 전체 행 수(스크롤 상한 계산용). 화면 크기와 무관하게 모델이 만들 수 있는 만큼 센다.
+    ///
+    /// **버퍼는 렌더·hit-test와 같은 크기여야 한다.** 이 값이 스크롤 content 높이의 출처이므로, 여기서만
+    /// 더 많이 세면 그리지 못하는 행까지 스크롤 범위에 들어가 목록 아래에 빈 곳이 생긴다(적대적 검증에서
+    /// 512 vs 128로 어긋나 있던 것을 맞췄다).
     fn scmTotalRows(self: *AppSession) usize {
-        var buf: [512]scm_view.Row = undefined;
+        var buf: [scm_row_capacity]scm_view.Row = undefined;
         var scratch: [std.fs.max_path_bytes]u8 = undefined;
         const result = self.git_result orelse return 0;
         const model = scm_view.build(
@@ -23778,7 +23789,7 @@ pub const AppSession = struct {
                 // 놓는 것과 모순된다. 도크 안이라는 사실만으로 클릭을 소비하는 건 아래 dock rect 분기가 한다.
                 if (self.dock.view == .source_control) {
                     // 행 클릭 = 그 비교 열기(§3.5 표). 섹션 헤더·여백은 아래 dock rect 분기가 소비만 한다.
-                    var rows_buf: [128]scm_view.Row = undefined;
+                    var rows_buf: [scm_row_capacity]scm_view.Row = undefined;
                     var row_scratch: [std.fs.max_path_bytes]u8 = undefined;
                     if (self.scmRowAt(x_px, y_px, &rows_buf, &row_scratch)) |row| switch (row) {
                         .file => |file| {
@@ -30517,7 +30528,7 @@ pub const AppSession = struct {
                             } else |_| {}
                         }
                         if (self.dock.view == .source_control and tree_content_cols > 0 and visible_rows > 0) {
-                            var rows_buf: [128]scm_view.Row = undefined;
+                            var rows_buf: [scm_row_capacity]scm_view.Row = undefined;
                             var scratch: [std.fs.max_path_bytes]u8 = undefined;
                             const result = self.git_result;
                             // 히트테스트(scmRowAt)와 **같은 입력·같은 상한**으로 만든다 — 그린 자리와 눌리는
@@ -67946,7 +67957,16 @@ test "scm list scrolls in pixels while the branch header stays fixed" {
     try std.testing.expect(after_wheel > 0);
     try std.testing.expect(after_wheel < cell_h); // 한 행을 통째로 건너뛰지 않았다
 
-    // ⑦ 다른 뷰에서 굴리면 이 목록은 움직이지 않는다(뷰별로 상태를 나눠 둔 이유).
+    // ⑦ **스크롤 상한이 실제로 그릴 수 있는 것을 넘지 않는다.** `scmTotalRows`가 렌더·hit-test보다
+    //    큰 버퍼를 쓰면(적대적 검증에서 512 vs 128로 어긋나 있었다) 그리지 못하는 행까지 스크롤 범위에
+    //    들어가 목록 아래에 빈 곳이 생긴다. 맨 아래로 굴렸을 때 마지막 픽셀이 **행이어야** 한다.
+    session.scm_scroll.offset_y_px = extent.max_offset_px;
+    {
+        const bottom_y: f64 = @floatFromInt(rect.y + rect.h - 1);
+        try std.testing.expect(session.scmRowAt(x, bottom_y, &rows_buf, &scratch) != null);
+    }
+
+    // ⑧ 다른 뷰에서 굴리면 이 목록은 움직이지 않는다(뷰별로 상태를 나눠 둔 이유).
     session.setDockView(.explorer);
     const before = session.scm_scroll.offset_y_px;
     session.scrollWheel(-600, 0, false, x, @floatFromInt(rect.y + cell_h + 1));

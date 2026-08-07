@@ -938,6 +938,8 @@ const status_bar_height_pt: u32 = 22;
 /// 상태바 좌/우 가장자리 안쪽 여백·항목 간격(논리 pt). 높이와 같은 이유로 폰트 독립이다.
 const status_bar_edge_pad_pt: u32 = 8;
 const status_bar_gap_pt: u32 = 12;
+/// 상태바 좌측 항목 상한. 지금은 브랜치·경로 둘이고, 늘릴 때 이 값과 우선순위 순서를 함께 본다.
+const max_status_bar_left_items: usize = 2;
 
 // 런타임 폰트 크기 조절(⌘+/⌘-/⌘0). step = ⌘+/⌘- 한 번에 1pt(Ghostty 기본과 동일). 클램프 범위는 보수적으로
 // [6, 72]pt — appearance resolver는 [1,512]를 허용하지만 6pt 미만은 글자가 안 읽히고 72pt 초과는 grid가
@@ -34072,29 +34074,48 @@ pub const AppSession = struct {
         const h = self.statusBarHeightPx();
         if (h == 0 or self.cell_width_px == 0 or self.backing_width_px == 0) return;
 
-        // 좌: git 브랜치. repo 밖이면 항목 자체가 없다(사이드바 카드와 같은 전제 — maru는 repo 밖 줄을 안 그린다).
-        const branch = blk: {
-            const pane = self.activePane();
-            const term = pane.activeTerm();
-            break :blk self.termGitBranch(term) orelse return;
-        };
-        if (branch.len == 0) return;
-
-        // 아이콘 2칸 + 여백 1칸 + 텍스트. 텍스트는 바의 1/3을 넘지 않게 잘라 우측 항목 자리를 남긴다(S3c 이후).
+        const term = self.activePane().activeTerm();
         const bar_cols: u16 = @intCast(@min(self.backing_width_px / self.cell_width_px, std.math.maxInt(u16)));
-        const max_text_cols: u16 = @max(1, bar_cols / 3);
-        const muted: terminal.Color = .{ .rgb = self.mutedForeground() }; // mutedForeground는 Rgb — 셀 style은 terminal.Color를 받는다
-        var dl = coretext_frame_builder.buildStatusBarItemDrawList(
-            self.allocator,
-            icons.codepoint(.git_branch),
-            branch,
-            max_text_cols,
-            .{ .rgb = self.appearance.theme.foreground },
-            muted,
-        ) catch return;
-        const item_w_px: u32 = @as(u32, dl.size.cols) * self.cell_width_px;
+        const fg: terminal.Color = .{ .rgb = self.appearance.theme.foreground };
+        const icon_fg: terminal.Color = .{ .rgb = self.mutedForeground() };
 
-        var left_buf: [1]chrome.components.status_bar.Slot = undefined;
+        // 좌측 항목을 **순서대로** 만든다. 폭이 모자라면 `status_bar.compute`가 **뒤쪽부터** 버리므로,
+        // 배열 순서가 곧 우선순위다 — 브랜치가 경로보다 짧고 자주 바뀌므로 앞에 둔다.
+        var frames: [max_status_bar_left_items]?renderer.DrawList = .{null} ** max_status_bar_left_items;
+        var widths: [max_status_bar_left_items]u32 = .{0} ** max_status_bar_left_items;
+        var n: usize = 0;
+        defer for (frames[0..n]) |*maybe| {
+            if (maybe.*) |*dl| dl.deinit(self.allocator);
+        };
+
+        // ① git 브랜치 — repo 안일 때만 존재한다.
+        if (self.termGitBranch(term)) |branch| {
+            if (branch.len > 0) {
+                if (self.buildStatusBarItem(icons.codepoint(.git_branch), branch, bar_cols, fg, icon_fg)) |dl| {
+                    frames[n] = dl;
+                    widths[n] = @as(u32, dl.size.cols) * self.cell_width_px;
+                    n += 1;
+                }
+            }
+        }
+
+        // ② 작업 경로 — **repo 밖에서도 그린다**. 사이드바 카드는 "repo 안일 때만 폴더줄"이지만(카드는 repo
+        // 맥락을 보여주는 자리다), 상태바는 "지금 어디에 있나"가 목적이라 repo 밖 cwd가 오히려 유용하다.
+        // 경로 파생은 `sidebarCwdPath`(HOME 경계를 정확히 지켜 `~`로 줄인다)를 재사용한다 — 다시 구현하지 않는다.
+        if (sidebarCwdPath(self.allocator, term)) |path| {
+            defer self.allocator.free(path);
+            if (path.len > 0 and n < max_status_bar_left_items) {
+                if (self.buildStatusBarItem(icons.codepoint(.folder), path, bar_cols, fg, icon_fg)) |dl| {
+                    frames[n] = dl;
+                    widths[n] = @as(u32, dl.size.cols) * self.cell_width_px;
+                    n += 1;
+                }
+            }
+        } else |_| {}
+
+        if (n == 0) return;
+
+        var left_buf: [max_status_bar_left_items]chrome.components.status_bar.Slot = undefined;
         var right_buf: [1]chrome.components.status_bar.Slot = undefined;
         const layout = chrome.components.status_bar.compute(
             .{
@@ -34105,21 +34126,26 @@ pub const AppSession = struct {
                 .edge_pad_px = self.statusBarEdgePadPx(),
                 .gap_px = self.statusBarGapPx(),
             },
-            &.{item_w_px},
+            widths[0..n],
             &.{},
             &left_buf,
             &right_buf,
         );
-        if (layout.left.len == 0) { // 자리가 없으면 그리지 않는다(겹친 글자보다 낫다)
-            dl.deinit(self.allocator);
-            return;
+
+        // 세로 중앙: 홀수 나머지는 위로 — 바의 첫/마지막 행은 quad AA 가장자리라 한 행 어둡다(#1910 캡처).
+        const origin_y = (self.backing_height_px -| h) + ((h -| self.cell_height_px) / 2);
+        for (layout.left) |slot| {
+            const dl = frames[slot.index] orelse continue;
+            frames[slot.index] = null; // 소유권을 collectShaped로 넘긴다(위 defer가 두 번 해제하지 않게)
+            self.collectShaped(collected, dl, builder, .{ .status_bar = .{ .origin_x = slot.x, .origin_y = origin_y, .colors = colors } });
         }
-        const slot = layout.left[0];
-        // 세로 중앙: 바 높이에서 한 줄(cell_height)을 뺀 절반. 홀수 나머지는 위로 — 아래는 quad AA 가장자리가
-        // 한 행 어둡다(#1910 캡처에서 확인), 위쪽 여백이 한 픽셀 넓은 편이 시각적으로 안정적이다.
-        const text_h = self.cell_height_px;
-        const origin_y = slot.y + ((slot.h -| text_h) / 2);
-        self.collectShaped(collected, dl, builder, .{ .status_bar = .{ .origin_x = slot.x, .origin_y = origin_y, .colors = colors } });
+    }
+
+    /// 항목 하나를 DrawList로. 텍스트 상한은 바 폭의 1/3 — 한 항목이 바를 독차지하지 않게 하고 우측 자리를
+    /// 남긴다(S3d 이후). 실패는 null(그 항목만 빠지고 나머지는 그대로 선다).
+    fn buildStatusBarItem(self: *AppSession, icon: u21, text: []const u8, bar_cols: u16, fg: terminal.Color, icon_fg: terminal.Color) ?renderer.DrawList {
+        const max_text_cols: u16 = @max(1, bar_cols / 3);
+        return coretext_frame_builder.buildStatusBarItemDrawList(self.allocator, icon, text, max_text_cols, fg, icon_fg) catch null;
     }
 
     /// 포인터가 창 바닥 상태표시줄 위인가. **렌더 rect와 같은 산술**을 쓴다(`appendStatusBarBackground`와 한 쌍) —

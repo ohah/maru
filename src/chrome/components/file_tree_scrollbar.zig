@@ -182,6 +182,39 @@ test "file tree scrollbar: reserved columns round up so the track never covers a
 // 나가거나 사라진다. 지금 그 상태가 **도달 불가**한 이유는 `compute`가 `total_rows <= visible_rows`를
 // null로 걸러 `max_scroll >= 1`을 보장하기 때문이다 — 방어 코드를 더하는 대신 그 불변식을 고정한다.
 // 이 게이트가 사라지면(예: 넘치지 않아도 트랙을 그리도록 바꾸면) 여기서 먼저 빨개진다.
+// `contains` 둘은 **반열린 구간**이다(시작 포함, 끝 제외). 그 규약이 없으면 트랙 오른쪽 바로 밖의
+// 픽셀이 잡혀 목록 클릭이 스크롤로 새거나, 트랙 첫 줄이 안 잡혀 맨 위 점프가 죽는다. 그리고 thumb은
+// **자기 세로 구간**만 봐야 한다 — 트랙 전체를 보면 트랙 클릭(점프)과 thumb 잡기가 구분되지 않는다.
+test "file tree scrollbar: hit regions are half-open and the thumb owns only its own band" {
+    const g = Geometry{
+        .total_rows = 20,
+        .visible_rows = 5,
+        .max_scroll = 15,
+        .scroll_rows = 5,
+        .track_x = 100,
+        .track_y = 10,
+        .track_w = 8,
+        .track_h = 90,
+        .thumb_y = 40,
+        .thumb_h = 20,
+    };
+
+    // 트랙: 시작 변은 포함, 끝 변은 제외.
+    try std.testing.expect(g.trackContains(100, 10));
+    try std.testing.expect(!g.trackContains(99.9, 10));
+    try std.testing.expect(!g.trackContains(108, 50)); // x 끝 변
+    try std.testing.expect(!g.trackContains(104, 100)); // y 끝 변
+    try std.testing.expect(g.trackContains(107.9, 99.9));
+
+    // thumb: 자기 밴드만. 위·아래 트랙은 thumb이 아니다(그 클릭은 점프여야 한다).
+    try std.testing.expect(g.thumbContains(104, 40));
+    try std.testing.expect(!g.thumbContains(104, 39.9));
+    try std.testing.expect(!g.thumbContains(104, 60)); // 끝 변 제외
+    try std.testing.expect(!g.thumbContains(104, 20)); // 위쪽 트랙
+    try std.testing.expect(!g.thumbContains(104, 80)); // 아래쪽 트랙
+    try std.testing.expect(!g.thumbContains(108, 50)); // x 끝 변
+}
+
 test "file tree scrollbar: compute never publishes a zero scroll range" {
     try std.testing.expect(compute(3, 3, 0, 0, 0, 100, 90) == null); // 딱 맞으면 없다
     try std.testing.expect(compute(2, 3, 0, 0, 0, 100, 90) == null); // 모자라도 없다

@@ -938,6 +938,8 @@ const status_bar_height_pt: u32 = 22;
 /// 상태바 좌/우 가장자리 안쪽 여백·항목 간격(논리 pt). 높이와 같은 이유로 폰트 독립이다.
 const status_bar_edge_pad_pt: u32 = 8;
 const status_bar_gap_pt: u32 = 12;
+/// 상태바 텍스트 위아래 여백(논리 pt, 한쪽). 바 높이가 이 값으로 텍스트 행에서 파생된다 — 아래 참고.
+const status_bar_v_pad_pt: u32 = 4;
 /// 상태바 좌측 항목 상한. 지금은 브랜치·경로 둘이고, 늘릴 때 이 값과 우선순위 순서를 함께 본다.
 const max_status_bar_left_items: usize = 2;
 /// 상태바 우측 항목 상한. 지금은 알림 하나고, 에이전트 상태(S3e)가 붙으면 2가 된다.
@@ -4597,7 +4599,18 @@ pub const AppSession = struct {
     }
 
     fn statusBarHeightPx(self: *const AppSession) u32 {
-        return layout_math.ptToPx(status_bar_height_pt, self.scale_milli);
+        // **텍스트 행에 여백을 더한 높이와 고정 하한 중 큰 쪽.** 상단 타이틀바 띠(`computeTitlebarStripPx`)가
+        // 쓰는 `@max(cell_height_px, 최소 pt)`와 같은 패턴이다.
+        //
+        // 고정 높이만 쓰면 두 가지가 깨진다: (1) 기본 폰트에서 22px 바에 18px 행이라 위아래 2px밖에 안 남아
+        // 빡빡하고(사용자 지적), (2) 폰트를 키워 셀이 바보다 커지면 `(h -| cell_height) / 2`가 0으로 포화돼
+        // **글자가 바 아래로 넘친다**(창 밖). 텍스트가 터미널 셀 높이를 쓰는 이상 바가 그걸 담아야 한다.
+        //
+        // 그래도 **하한은 폰트 독립**이라 작은 폰트에서 바가 실처럼 얇아지지 않는다 — 도크 view bar가 폰트
+        // 파생만으로 오르내리던 회귀(실측 53px↔80px)를 피한 이유가 그 하한이다.
+        const floor_px = layout_math.ptToPx(status_bar_height_pt, self.scale_milli);
+        const text_px = self.cell_height_px +| (2 * layout_math.ptToPx(status_bar_v_pad_pt, self.scale_milli));
+        return @max(floor_px, text_px);
     }
 
     fn dockGeometry(self: *const AppSession) dock_layout.Geometry {
@@ -62368,6 +62381,35 @@ test "gpu quad 수명: drop은 자기 레이어만·순서 보존, rebuildSideba
     }
     try std.testing.expect(survived_2);
     try std.testing.expect(survived_3);
+}
+
+// 상태바는 **텍스트 행을 담고 위아래 여백이 남아야** 한다. 고정 높이만 쓰면 (1) 기본 폰트에서 위아래
+// 2px밖에 안 남아 빡빡하고(사용자 지적), (2) 폰트를 키워 셀이 바보다 커지면 세로 중앙 계산이 0으로
+// 포화돼 **글자가 창 밖으로 넘친다**. 텍스트가 터미널 셀 높이를 쓰는 이상 바가 그걸 담아야 한다.
+test "SB1: 상태바 높이는 텍스트 행 + 여백을 담고, 하한은 폰트 독립이다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1000, 700, 1000);
+
+    const pad2 = 2 * layout_math.ptToPx(status_bar_v_pad_pt, session.scale_milli);
+    try std.testing.expect(session.statusBarHeightPx() >= session.cell_height_px + pad2);
+    try std.testing.expect(session.statusBarHeightPx() >= layout_math.ptToPx(status_bar_height_pt, session.scale_milli));
+
+    // 폰트를 키워 셀이 하한을 넘겨도 바가 따라 커진다 — 안 그러면 글자가 바 아래로 넘친다.
+    var i: usize = 0;
+    while (i < 12) : (i += 1) session.dispatchAppAction(.increase_font_size);
+    try std.testing.expect(session.cell_height_px > layout_math.ptToPx(status_bar_height_pt, session.scale_milli));
+    try std.testing.expect(session.statusBarHeightPx() >= session.cell_height_px + pad2);
 }
 
 // SB1-S3d: **상태바 배경은 터미널 레이어(bottom)여야 한다.** 항목 텍스트가 `pane_frames`를 타고 터미널

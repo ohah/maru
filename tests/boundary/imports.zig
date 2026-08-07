@@ -120,7 +120,8 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     // SV2a-2(탐색기 pane을 role로 표시하고 clip을 실어 v147 seam의 첫 소비자가 된다)로 또 바뀐다.
     // count는 4 그대로다 — 더한 것은 bool 하나와 rect 전달뿐이고 필드를 이름으로 읽지 않는다.
     // SB1-S3e(상태바 에이전트 항목 + 검증 훅)로 또 바뀐다. count는 4 그대로다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "e443a5575405b34b4151c6d39ca0abe7596c53bc9c534217f1a3b9dabd42f2cf" },
+    // 상태바 높이를 텍스트 행 + 여백에서 파생하며 또 바뀐다. count는 4 그대로다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "fd8d5a15ff021b05beeb1304050ec0c8049e74672ba558df6a09aadb2b76ff59" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

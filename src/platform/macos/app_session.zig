@@ -26046,18 +26046,6 @@ pub const AppSession = struct {
     }
 
     pub fn hoverCursor(self: *AppSession, x_px: f64, y_px: f64, mods: i32) CursorKind {
-        // 상태표시줄 항목 hover — 바뀔 때만 dirty를 세운다(매 이동 재투영은 낭비다).
-        {
-            const next: ?chrome.components.status_bar.ItemId = blk: {
-                const id = self.statusBarItemAt(x_px, y_px) orelse break :blk null;
-                break :blk if (statusBarItemClickable(id)) id else null;
-            };
-            if (next != self.status_bar_hovered) {
-                self.status_bar_hovered = next;
-                self.metal_dirty = true;
-            }
-            if (next != null) return .link; // 누를 수 있다는 신호(Cmd+hover URL과 같은 손 모양)
-        }
         if (!self.surface_initialized) return .text;
         // 닫기 확인 모달 중엔 호버 부수효과(사이드바/탭/◧ 호버 강조·스크롤바 hover·URL 밑줄)를 멈추고 화살표 커서만
         // 둔다 — 안 그러면 모달 뒤 버튼/슬롯이 호버에 반응해 강조되며(모달 위로 비침) UI가 깨져 보인다(모달 게이트).
@@ -26099,6 +26087,22 @@ pub const AppSession = struct {
         // 사이드바/탭 바로 나가면 밴드 밖이라 null이 되어 stale 하이라이트가 안 남는다). 밴드는 chrome 영역이라 어느
         // pane에도 안 걸리면 null. 커서 종류(.link) 판정은 아래 탭 바 검사 뒤에서 이 값을 읽는다(밴드=탭 바보다 뒤 우선순위).
         self.setHoveredNavButton(self.navButtonHoverAt(x_px, y_px));
+
+        // 상태표시줄 항목 hover — **위 "매 이동 항상" 갱신들 뒤에** 둔다. 앞에 두면 바로 들어오는 순간
+        // `return`이 스크롤바·탐색기 스크롤바·주소창 nav 버튼의 hover 해제를 건너뛰어 **그쪽 하이라이트가
+        // stale로 남는다**(그 주석들이 "early return 전에 항상"이라고 적어 둔 이유다). 바뀔 때만 dirty를
+        // 세운다 — 매 이동 재투영은 낭비다.
+        {
+            const next: ?chrome.components.status_bar.ItemId = blk: {
+                const id = self.statusBarItemAt(x_px, y_px) orelse break :blk null;
+                break :blk if (statusBarItemClickable(id)) id else null;
+            };
+            if (next != self.status_bar_hovered) {
+                self.status_bar_hovered = next;
+                self.metal_dirty = true;
+            }
+            if (next != null) return .link; // 누를 수 있다는 신호(Cmd+hover URL과 같은 손 모양)
+        }
         // 파일 헤더 mode 선택기도 같은 자리에서 매 이동 갱신한다(밴드 밖으로 나가면 null이라 stale 강조가 안 남는다).
         self.setHoveredFileHeaderMode(self.fileHeaderModeHoverAt(x_px, y_px));
         self.setHoveredFileTreeRow(if (self.dockVisible()) self.fileTreeRowAt(x_px, y_px) else null);
@@ -63237,6 +63241,44 @@ test "SB1: 사이드바 scissor는 겹치거나 뒤집힌 구간을 내느니 �
             }
         }
     }
+}
+
+// SB1: **상태바 hover가 다른 hover의 해제를 가로채면 안 된다.** `hoverCursor`에는 "어느 zone이든 early
+// return 전에 항상" 돌아야 하는 갱신이 셋 있다(스크롤바·탐색기 스크롤바·주소창 nav 버튼) — 그 주석들이
+// 그렇게 적어 둔 이유가 stale 하이라이트다. 상태바 hover 블록이 그보다 앞에서 `return`하면, 스크롤바를
+// 가리키다 상태바로 들어오는 순간 스크롤바 강조가 **남는다**.
+test "SB1: 상태바로 들어와도 다른 영역의 hover 해제가 먼저 돈다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1000, 700, 1000);
+
+    _ = session.pushNotificationHistory("MARU", "t", 0);
+    _ = try session.tick();
+    var target: ?chrome.ui.tree.RectEntry = null;
+    for (session.statusBarTree().entries) |e| {
+        if (e.id == @intFromEnum(chrome.components.status_bar.ItemId.notifications)) target = e;
+    }
+    const item = target orelse return error.NotificationItemMissing;
+    const cx: f64 = @floatCast(item.rect.x + item.rect.width / 2);
+    const cy: f64 = @floatCast(item.rect.y + item.rect.height / 2);
+
+    // 스크롤바를 가리키고 있었다고 두고, 상태바 항목으로 옮긴다.
+    session.scrollbar_hovered = true;
+    const cursor = session.hoverCursor(cx, cy, 0);
+
+    try std.testing.expect(!session.scrollbar_hovered); // 옛 강조가 해제됐다
+    try std.testing.expectEqual(CursorKind.link, cursor); // 그러고도 상태바 커서는 손 모양이다
+    try std.testing.expectEqual(@as(?chrome.components.status_bar.ItemId, .notifications), session.status_bar_hovered);
 }
 
 // SB1: **모달이 떠 있으면 상태바 클릭이 먹으면 안 된다.** 모달은 결정 게이트다 — 그 뒤에서 도크·패널이

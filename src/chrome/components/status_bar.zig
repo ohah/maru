@@ -119,6 +119,9 @@ pub const ItemId = enum(u64) {
     cwd = 2,
     running_agents = 3,
     notifications = 4,
+    /// 입력을 기다리며 멈춘 에이전트. running과 **별도 항목**이다 — 한 항목에 두 상태를 섞으면 개수가
+    /// 무엇의 개수인지 모호해진다.
+    blocked_agents = 5,
 };
 
 pub const PublishError = error{InsufficientEntryBuffer};

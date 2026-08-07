@@ -34794,19 +34794,24 @@ pub const AppSession = struct {
     fn activateStatusBarItem(self: *AppSession, id: chrome.components.status_bar.ItemId) void {
         switch (id) {
             .notifications => self.openNotificationPanel(),
-            .running_agents, .blocked_agents => {
-                if (!self.dock.presented) self.dock.presented = true;
-                self.dock.collapsed = false;
-                self.setDockView(.agent_sessions);
-            },
-            .cwd => {
-                if (!self.dock.presented) self.dock.presented = true;
-                self.dock.collapsed = false;
-                self.setDockView(.explorer);
-            },
+            .running_agents, .blocked_agents => self.openDockTo(.agent_sessions),
+            .cwd => self.openDockTo(.explorer),
             .git_branch => {}, // 열 대상 없음(§6 "항목 클릭 동작" 참고)
         }
         self.metal_dirty = true;
+    }
+
+    /// 도크를 열고 그 뷰로 바꾼다. **레이아웃 후속을 빠뜨리지 않는 것이 요점이다** — 필드만 세우면 도크는
+    /// 나타나는데 pane rect가 옛 폭 그대로라 다음 resize 전까지 어긋난다. 특히 이미 그 뷰였으면
+    /// `setDockView`가 조기 반환하므로 그쪽 resize 경로도 안 탄다. 기존 opener
+    /// (`activateFilePanelDockControl`)가 하는 후속과 같은 것을 한다.
+    fn openDockTo(self: *AppSession, view: dock_panel.View) void {
+        self.dock.presented = true;
+        self.dock.collapsed = false;
+        self.setDockView(view);
+        for (self.tabs.items) |tab| self.resizeTabPanes(tab);
+        self.recomputeActivePaneRect();
+        self.last_resize_size = null;
     }
 
     /// 클릭 가능한 항목인가. 열 대상이 없는 항목은 호버도 주지 않는다 — 눌리는 것처럼 보이는데 아무
@@ -63245,6 +63250,39 @@ test "SB1: 사이드바 scissor는 겹치거나 뒤집힌 구간을 내느니 �
             }
         }
     }
+}
+
+// SB1: **도크를 여는 클릭은 레이아웃 후속까지 해야 한다.** 필드(`presented`·`collapsed`)만 세우면 도크는
+// 나타나는데 pane rect가 옛 폭 그대로라 다음 resize 전까지 어긋난다. 특히 **이미 그 뷰였으면**
+// `setDockView`가 조기 반환하므로 그쪽 resize 경로도 안 탄다 — 그때가 가장 잘 드러난다.
+test "SB1: 상태바로 도크를 열면 pane 레이아웃도 함께 갱신된다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1000, 700, 1000);
+
+    // 도크는 닫혀 있고 **뷰는 이미 목적지**다 — `setDockView`가 조기 반환하는 최악의 경우.
+    session.dock.presented = false;
+    session.dock.view = .agent_sessions;
+    session.last_resize_size = .{ .cols = 1, .rows = 1 };
+    const before = session.active_pane_rect;
+
+    session.activateStatusBarItem(.running_agents);
+
+    try std.testing.expect(session.dock.presented);
+    try std.testing.expect(!session.dock.collapsed);
+    // 레이아웃 후속이 돌았다 — pane rect가 도크만큼 좁아지고 resize 캐시가 무효화된다.
+    try std.testing.expectEqual(@as(?terminal.Size, null), session.last_resize_size);
+    try std.testing.expect(session.active_pane_rect.w < before.w);
 }
 
 // SB1: **상태바 휠 가드가 notice 해제를 가로채면 안 된다.** notice 토스트는 "아무 입력으로나 닫힘"

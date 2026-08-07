@@ -752,7 +752,7 @@ solver를 분리해야 한다는 Maru의 근거다. Maru는 Rust crate나 WASM/F
 
 `metal_frame.zig`의 `layer` 주석은 0/1/2만 적어 stale이다(3·4가 실제로 쓰인다). 그리고 `dropQuadsByLayer`는 `swapRemove`라 **같은 레이어 안의 상대 순서를 보존하지 않는다** — `.m`은 레이어 내부 배열 순서를 painter 순서로 쓰므로(사이드바 tint↔accent 막대), 순서에 의존하는 quad를 더할 때 주의한다.
 
-**`Geometry`는 창 좌표계가 아니다.** `dock_layout.compute`의 `available`은 **사이드바와 타이틀바를 이미 뺀 작업영역**이고(`available.x = sidebar_width_px`, `available.y = titlebar_height_px`), `Geometry`는 `backing_*_px`를 보관하지 않는다. 그래서 **창 전폭·창 전체높이 표면**(사이드바 strip, 하단 상태표시줄, 시각 벨)은 `Geometry`에서 파생할 수 없고 `backing_*_px`를 직접 쓴다 — 예외가 아니라 `Geometry`의 정의다. 아래 "새 표면" 지침의 "`Geometry`에서 파생"은 **작업영역 안에 사는 표면**에 한한 말이고, pane·탭 바 안의 표면은 `chrome.components.tabbar.Metrics`(§5.4)가 단일 출처다.
+**`Geometry`는 창 좌표계가 아니다.** `dock_layout.compute`의 `available`은 **사이드바와 타이틀바를 이미 뺀 작업영역**이고(`available.x = sidebar_width_px`, `available.y = titlebar_height_px`), `Geometry`는 `backing_*_px`를 보관하지 않는다. 그래서 **창 전폭·창 전체높이 표면**(사이드바 strip, 시각 벨)은 `Geometry`의 기존 rect들에서 파생할 수 없다 — 예외가 아니라 `Geometry`의 정의다. 다만 그것이 곧 "`dock_layout` 밖에서 계산하라"는 뜻은 아니다: **하단 상태표시줄은 `compute`가 `backing_*_px` Input에서 직접 만들어 `Geometry.status_bar`로 내놓는다**([status-bar.md](status-bar.md) §1) — 창 높이를 먼저 깎아야 terminal·dock·divider가 한 지점에서 정합하기 때문이다. 즉 **작업영역 안 표면은 기존 rect에서 파생하고, 창 전체 표면은 `compute`가 Input에서 새로 만든다.** 어느 쪽이든 배치를 아는 곳은 `dock_layout` 하나다. 아래 "새 표면" 지침의 "`Geometry`에서 파생"은 **작업영역 안에 사는 표면**에 한한 말이고, pane·탭 바 안의 표면은 `chrome.components.tabbar.Metrics`(§5.4)가 단일 출처다.
 
 **rect를 더하는 것과 자리를 예약하는 것은 다르다.** `Geometry`에 필드를 넣어도 공간은 안 생긴다 — `compute`의 `available.h`(그리고 우측 도크가 쓰는 `dock_available.h`)를 깎아야 하고, `compute`에는 **조기 반환이 셋** 있다(도크 숨김·폭 0·높이 0). 새 필드에 기본값을 주면 컴파일러가 그 셋을 안 잡아 주므로, 가장 흔한 상태에서만 조용히 빈 rect가 나간다.
 
@@ -762,7 +762,9 @@ solver를 분리해야 한다는 Maru의 근거다. Maru는 Rust crate나 WASM/F
 
 **ABI 필드의 의미를 바꾸면 다섯 곳을 함께 고친다** — `metal_frame.zig` 주석, `app_host_abi.h`, `maru_metal_renderer.h`, Swift 호스트, 그리고 `app_session.zig`의 ABI 버전 원장(vNN).
 
-**새 표면(예: 하단 상태표시줄)은 예외를 만들지 않는다.** 기하가 필요하면 `session/dock_layout.zig`의 `Geometry`에서 파생해 `GpuQuad`로 내고, `.m`에 새 인자를 더해 그쪽이 rect를 계산하게 하지 않는다. ABI 인자 추가가 더 작아 보여도, 그건 "배치를 아는 곳"을 하나 더 만드는 선택이다.
+**새 표면은 예외를 만들지 않는다.** 기하가 필요하면 `session/dock_layout.zig`가 정하고 `GpuQuad`로 내며, `.m`에 새 인자를 더해 **그쪽이 rect를 계산하게** 하지 않는다. ABI 인자 추가가 더 작아 보여도, 그건 "배치를 아는 곳"을 하나 더 만드는 선택이다.
+
+**단 `.m`이 이미 소유한 표면을 새 표면에 맞춰 끊는 것은 다른 문제다.** 하단 상태표시줄이 실제로 그랬다: 바 자체는 Zig가 `GpuQuad`로 그리지만, 사이드바 배경 strip과 셀 scissor는 `.m`이 바닥을 직접 정하는 승인 예외(위 표)라 **Zig가 값을 실어 주는 것 말고는 그 바닥을 옮길 방법이 없다**. 그래서 `MetalFrame.status_bar_height_px`(ABI v167)를 냈다 — `.m`은 그 값으로 **자기 표면을 자르기만** 하고 상태바의 rect는 계산하지 않는다([status-bar.md](status-bar.md) §5.2·§5.3). 판단 기준은 "인자를 더하느냐"가 아니라 **"배치를 아는 곳이 늘어나느냐"**다.
 
 ### 입력 dispatch와 interaction state
 

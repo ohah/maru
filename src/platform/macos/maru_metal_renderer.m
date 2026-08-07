@@ -858,7 +858,7 @@ typedef struct {
     // 사이드바 스크롤 scissor 판정용.
     size_t sidebar_cells_n;
     uint32_t sidebar_scroll_offset_px;
-    uint32_t status_bar_height_px; // SB1: 사이드바 셀 scissor 하단(창 바닥 상태표시줄)
+    uint32_t status_bar_height_px; // SB1: 창 바닥 상태표시줄 높이 — 사이드바 배경 strip 바닥과 셀 scissor 하단 **둘 다**에 쓴다
     uint32_t pane_clip_cells_start; // SV2a: 셀 본문 중 잘라야 할 구간(len==0=없음)
     uint32_t pane_clip_cells_len;
     uint32_t pane_clip_x_px;

@@ -3075,8 +3075,9 @@ pub const AppSession = struct {
     placement_failed: bool = false,
     // 상태표시줄 상호작용(typed tree). 렌더는 기존 lowering이 그대로 하고, 이 tree는 hover/클릭 판정에만
     // 쓴다(`chrome/components/divider.zig`와 같은 규율 — 이관 문서 §2의 "그리기와 상호작용 분리").
-    status_bar_entry_scratch: [8]chrome.ui.tree.RectEntry = undefined,
-    status_bar_id_scratch: [8]chrome.components.status_bar.ItemId = undefined,
+    // 크기를 **상수에서 파생**한다. 매직 넘버로 두면 항목 상한을 올렸을 때 발행이 조용히 실패해
+    // (버퍼 부족 → tree 비움) 그리기는 되는데 아무것도 안 눌리는 상태가 된다.
+    status_bar_entry_scratch: [max_status_bar_left_items + max_status_bar_right_items]chrome.ui.tree.RectEntry = undefined,
     status_bar_entry_count: usize = 0,
     status_bar_generation: u64 = 0,
     /// 지금 포인터가 얹힌 항목. 없으면 null. hover 배경 quad와 클릭 대상이 이 하나를 공유한다.

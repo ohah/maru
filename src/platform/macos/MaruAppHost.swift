@@ -4997,6 +4997,19 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // app session이 노출한 최신 Metal frame을 창의 CAMetalLayer에 그린다. generation이 바뀐
     // frame(새 output/resize)에서만 atlas를 갱신하고 다시 그린다. idle tick은 마지막으로
     // present한 frame을 그대로 둔다.
+    /// 지연 스크린샷(`MARU_SCREENSHOT` + `MARU_SCREENSHOT_DELAY_MS`)이 아직 안 찍힌 상태인가.
+    /// true면 위 tick 루프가 generation 변화 없이도 draw를 계속 요구해, renderer가 마감이 지난 draw에서
+    /// 캡처할 기회를 얻는다. 캡처 직후 renderer가 프로세스를 끝내므로(하니스 계약) 이 플래그를 내릴 필요는 없다.
+    /// env가 없으면 항상 false — 일반 실행에는 비용이 없다(값 한 번만 읽어 캐시).
+    private static let screenshotDelayArmed: Bool = {
+        guard ProcessInfo.processInfo.environment["MARU_SCREENSHOT"] != nil else { return false }
+        guard let raw = ProcessInfo.processInfo.environment["MARU_SCREENSHOT_DELAY_MS"],
+              let ms = Double(raw), ms > 0 else { return false }
+        return true
+    }()
+
+    private var screenshotDelayPending: Bool { Self.screenshotDelayArmed }
+
     private func drawMetalFrame() {
         // Phase 4b-2: 컨테이너의 터미널 layer(맨 아래) + 오버레이 layer(맨 위, 투명)를 함께 렌더러에 넘긴다.
         guard let appSession, let renderer = metalRenderer,
@@ -5033,7 +5046,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 무효화돼 다시 칠해야 할 때(metalNeedsRedraw)도 그린다. generation만 보면 한가한 셸이
         // 리사이즈/디스플레이 전환 후 stale/blank로 남는다.
         let newFrame = frame.generation != lastDrawnGeneration
-        if !newFrame && !metalNeedsRedraw {
+        // 지연 스크린샷이 걸려 있으면 generation이 그대로여도 그린다 — 캡처는 renderer draw 안에서
+        // 일어나므로(MARU_SCREENSHOT_DELAY_MS 게이트) 여기서 끊으면 마감이 지나도 찍을 기회가 없다.
+        // **바깥 tick 게이트만 넓히면 부족하다**: 이 조기 반환이 두 번째 관문이다(실측: 그것만 고쳤을 때
+        // metal_frames_drawn=1로 멈췄다).
+        if !newFrame && !metalNeedsRedraw && !screenshotDelayPending {
             return
         }
         // atlas slot은 누적된다(같은 크기면 새 glyph delta만 올린다). 새 generation일 때만
@@ -6243,7 +6260,11 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         if status == Self.statusOK {
             latestFrameSummary = summary
             // metal frame이 바뀌었거나(generation) surface 재칠이 필요할 때만 그린다.
-            if summary.metal_generation != lastSeenMetalGeneration || metalNeedsRedraw {
+            // **지연 스크린샷이 걸려 있으면 매 tick 그린다.** 캡처는 renderer의 draw 안에서 일어나는데
+            // (MARU_SCREENSHOT_DELAY_MS 게이트), 유휴 셸은 generation이 안 바뀌어 여기서 draw가 끊긴다 —
+            // 그러면 마감이 지나도 찍을 기회 자체가 없어 프로세스가 영영 안 끝난다(실측: 2500ms 지연에
+            // 5분 뒤에도 artifact 없음). 하니스 전용 경로이므로 env 미설정 일반 실행에는 분기가 없다.
+            if summary.metal_generation != lastSeenMetalGeneration || metalNeedsRedraw || screenshotDelayPending {
                 lastSeenMetalGeneration = summary.metal_generation
                 drawMetalFrame()
             }

@@ -34686,7 +34686,7 @@ pub const AppSession = struct {
         // ① git 브랜치 — repo 안일 때만 존재한다.
         if (self.termGitBranch(term)) |branch| {
             if (branch.len > 0) {
-                if (self.buildStatusBarItem(icons.codepoint(.git_branch), branch, bar_cols, fg, icon_fg)) |dl| {
+                if (self.buildStatusBarItem(icons.codepoint(.git_branch), branch, bar_cols, fg, icon_fg, .plain)) |dl| {
                     frames[n] = dl;
                     widths[n] = @as(u32, dl.size.cols) * self.cell_width_px;
                     left_ids[n] = .git_branch;
@@ -34701,7 +34701,7 @@ pub const AppSession = struct {
         if (sidebarCwdPath(self.allocator, term)) |path| {
             defer self.allocator.free(path);
             if (path.len > 0 and n < max_status_bar_left_items) {
-                if (self.buildStatusBarItem(icons.codepoint(.folder), path, bar_cols, fg, icon_fg)) |dl| {
+                if (self.buildStatusBarItem(icons.codepoint(.folder), path, bar_cols, fg, icon_fg, .path)) |dl| {
                     frames[n] = dl;
                     widths[n] = @as(u32, dl.size.cols) * self.cell_width_px;
                     left_ids[n] = .cwd;
@@ -34732,7 +34732,7 @@ pub const AppSession = struct {
             // 테마 accent(브랜드 강조) — danger는 파괴적 동작용이라 과하다. 새 색 역할을 만들지 않는다.
             const accent: terminal.Color = .{ .rgb = self.appearance.theme.accent };
             if (text.len > 0) {
-                if (self.buildStatusBarItem(icons.codepoint(.hourglass), text, bar_cols, accent, accent)) |dl| {
+                if (self.buildStatusBarItem(icons.codepoint(.hourglass), text, bar_cols, accent, accent, .plain)) |dl| {
                     right_frames[rn] = dl;
                     right_widths[rn] = @as(u32, dl.size.cols) * self.cell_width_px;
                     right_ids[rn] = .blocked_agents;
@@ -34746,7 +34746,7 @@ pub const AppSession = struct {
             const text = std.fmt.bufPrint(&agent_buf, "{d}", .{@min(agents.running, 99)}) catch "";
             const icon = if (kind == .none) icons.codepoint(.sparkle) else agentIconCodepoint(kind);
             if (text.len > 0 and rn < max_status_bar_right_items) {
-                if (self.buildStatusBarItem(icon, text, bar_cols, fg, icon_fg)) |dl| {
+                if (self.buildStatusBarItem(icon, text, bar_cols, fg, icon_fg, .plain)) |dl| {
                     right_frames[rn] = dl;
                     right_widths[rn] = @as(u32, dl.size.cols) * self.cell_width_px;
                     right_ids[rn] = .running_agents;
@@ -34758,7 +34758,7 @@ pub const AppSession = struct {
             var count_buf: [16]u8 = undefined;
             const count = std.fmt.bufPrint(&count_buf, "{d}", .{self.notification_unread}) catch "";
             if (count.len > 0) {
-                if (self.buildStatusBarItem(icons.codepoint(.bell), count, bar_cols, fg, icon_fg)) |dl| {
+                if (self.buildStatusBarItem(icons.codepoint(.bell), count, bar_cols, fg, icon_fg, .plain)) |dl| {
                     right_frames[rn] = dl;
                     right_widths[rn] = @as(u32, dl.size.cols) * self.cell_width_px;
                     right_ids[rn] = .notifications;
@@ -34811,9 +34811,25 @@ pub const AppSession = struct {
 
     /// 항목 하나를 DrawList로. 텍스트 상한은 바 폭의 1/3 — 한 항목이 바를 독차지하지 않게 하고 우측 자리를
     /// 남긴다(S3d 이후). 실패는 null(그 항목만 빠지고 나머지는 그대로 선다).
-    fn buildStatusBarItem(self: *AppSession, icon: u21, text: []const u8, bar_cols: u16, fg: terminal.Color, icon_fg: terminal.Color) ?renderer.DrawList {
+    /// 항목 텍스트의 성격. **기본값을 두지 않는다** — 새 항목을 더할 때 잘리는 방식을 고르게 강제한다.
+    const StatusBarItemKind = enum {
+        /// 이름·개수 등. 넘치면 끝을 "…"로 자른다(선두가 곧 식별자다).
+        plain,
+        /// 경로. 끝을 자르면 **잎(현재 디렉터리)이 먼저 사라져** "지금 어디에 있나"라는 목적을 잃는다.
+        path,
+    };
+
+    fn buildStatusBarItem(self: *AppSession, icon: u21, text: []const u8, bar_cols: u16, fg: terminal.Color, icon_fg: terminal.Color, kind: StatusBarItemKind) ?renderer.DrawList {
         const max_text_cols: u16 = @max(1, bar_cols / 3);
-        return coretext_frame_builder.buildStatusBarItemDrawList(self.allocator, icon, text, max_text_cols, fg, icon_fg) catch null;
+        // 경로는 컴포넌트 단위로 먼저 줄인다. 예산을 아는 곳이 여기뿐이라 여기서 한다 — 호출부가 따로
+        // 계산하면 줄인 폭과 그리는 폭이 갈린다. wide_icon predicate는 null이다(경로에 등록 아이콘이 올 수
+        // 없고, pane 라벨 폭 계산도 같은 선례를 쓴다).
+        var path_buf: [1024]u8 = undefined;
+        const shown = switch (kind) {
+            .plain => text,
+            .path => chrome.text_layout.elidePathMiddle(text, max_text_cols, null, &path_buf),
+        };
+        return coretext_frame_builder.buildStatusBarItemDrawList(self.allocator, icon, shown, max_text_cols, fg, icon_fg) catch null;
     }
 
     /// 배치된 슬롯을 상호작용 tree로 발행한다. 좌/우를 한 tree에 담는다 — 판정은 "어느 항목인가" 하나라
@@ -63420,6 +63436,71 @@ test "SB1: 사이드바 scissor는 겹치거나 뒤집힌 구간을 내느니 �
             }
         }
     }
+}
+
+// SB1: **긴 경로는 잎이 남아야 한다.** 순수 함수(`text_layout.elidePathMiddle`)만 통과하고 배선이 빠지면
+// 화면은 그대로 끝이 잘린다 — 그래서 실제 항목 DrawList에 잎(마지막 디렉터리)이 실렸는지로 본다.
+test "SB1: 상태바 경로 항목은 끝이 아니라 중간을 생략한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1000, 700, 1000);
+    _ = try session.tick();
+
+    const long_path = "/tmp/aaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbb/cccccccccccccccc/dddddddddddddddd/leafdir";
+    const black: terminal.Color = .{ .rgb = .{ .r = 0, .g = 0, .b = 0 } };
+    const term = session.activePane().activeTerm();
+    term.rt.observation.availability = .current;
+    term.rt.observation.cwd.clearRetainingCapacity();
+    try term.rt.observation.cwd.appendSlice(allocator, long_path);
+    session.metal_dirty = true;
+    _ = try session.tick();
+
+    // 경로가 실제로 바까지 흐른다(항목이 tree에 선다).
+    var cwd_entry: ?chrome.ui.tree.RectEntry = null;
+    for (session.statusBarTree().entries) |e| {
+        if (e.id == @intFromEnum(chrome.components.status_bar.ItemId.cwd)) cwd_entry = e;
+    }
+    const entry = cwd_entry orelse return error.CwdItemMissing;
+
+    const bar_cols: u16 = @intCast(session.backing_width_px / session.cell_width_px);
+    // 전제: 이 경로는 항목 예산(bar_cols/3)을 넘는다. 안 넘으면 생략이 안 일어나 검증이 비어 버린다.
+    try std.testing.expect(chrome.text_layout.displayCols(long_path, null) > @max(1, bar_cols / 3));
+
+    var dl = session.buildStatusBarItem(icons.codepoint(.folder), long_path, bar_cols, black, black, .path) orelse return error.ItemMissing;
+    defer dl.deinit(allocator);
+
+    // 셀 codepoint를 이어 붙여 실제로 그려질 글자를 읽는다.
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(allocator);
+    for (dl.cells) |c| {
+        if (c.codepoint == 0) continue;
+        var b: [4]u8 = undefined;
+        const len = std.unicode.utf8Encode(@intCast(c.codepoint), &b) catch continue;
+        try text.appendSlice(allocator, b[0..len]);
+    }
+
+    try std.testing.expect(std.mem.indexOf(u8, text.items, "leafdir") != null); // 잎이 살아 있다
+    try std.testing.expect(std.mem.indexOf(u8, text.items, "…") != null); // 생략 표시가 있다
+
+    // **호출부가 실제로 .path를 넘기는지**까지 본다. 위 단언은 `.path`로 직접 부른 결과라, 호출부가
+    // `.plain`으로 되돌아가도 안 죽는다(뮤테이션으로 확인했다). 발행된 rect 폭으로 대조한다 —
+    // 끝을 자르면 예산을 꽉 채우고, 컴포넌트로 줄이면 경계에서 끊겨 그보다 좁다.
+    var plain = session.buildStatusBarItem(icons.codepoint(.folder), long_path, bar_cols, black, black, .plain) orelse return error.ItemMissing;
+    defer plain.deinit(allocator);
+    const plain_w: u32 = @as(u32, plain.size.cols) * session.cell_width_px;
+    const pad = layout_math.ptToPx(status_bar_item_pad_pt, session.scale_milli);
+    const published_w: u32 = @as(u32, @intFromFloat(entry.rect.width)) -| (2 * pad);
+    try std.testing.expect(published_w < plain_w);
 }
 
 // SB1: **quick terminal(chrome_minimal)에는 상태바가 서지 않는다.** 이 모드는 chrome을 의도적으로

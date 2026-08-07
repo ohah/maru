@@ -83,6 +83,55 @@ fn clusterEndAfter(text: []const u8, i: usize, base_advance: usize) usize {
     return @max(grapheme.clusterEnd(text, i), i + base_advance);
 }
 
+/// 경로를 **컴포넌트 단위로** 줄인다: `~/a/b/c/d` → `~/a/…/d`.
+///
+/// **왜 글자 단위가 아닌가.** 일반 말줄임(`plan`의 `.head`)은 선두를 고정하고 끝을 자르므로 경로에 쓰면
+/// `~/Documents/works…`처럼 **마지막 디렉터리가 먼저 사라진다** — "지금 어디에 있나"가 목적인 자리에서
+/// 정작 그 정보를 버리는 셈이다. 컴포넌트 단위로 줄이면 뿌리(`~`)와 잎(현재 디렉터리)을 둘 다 남긴다.
+///
+/// 남기는 꼬리는 **들어가는 것 중 가장 긴 것**을 고른다(경로는 뒤로 갈수록 구체적이다). `out`은 결과를 담을
+/// 버퍼이고, 모자라면 줄이지 않은 원본을 돌려준다 — 호출자의 기존 말줄임이 받는다(조용히 깨지지 않는다).
+///
+/// 줄일 중간이 없거나(컴포넌트 2개 이하) 이미 들어가면 원본을 그대로 돌려준다.
+pub fn elidePathMiddle(path: []const u8, max_cols: usize, wide_icon: ?WideIconFn, out: []u8) []const u8 {
+    if (path.len == 0 or max_cols == 0) return path;
+    if (displayCols(path, wide_icon) <= max_cols) return path;
+
+    // 컴포넌트 시작 오프셋. 맨 앞은 항상 컴포넌트 시작이고, 그 뒤로는 '/' 다음 자리다.
+    // 끝의 '/'는 새 컴포넌트를 열지 않는다(`~/a/`는 컴포넌트 둘).
+    var starts: [64]usize = undefined;
+    starts[0] = 0;
+    var n: usize = 1;
+    var i: usize = 0;
+    while (i < path.len and n < starts.len) : (i += 1) {
+        if (path[i] == '/' and i + 1 < path.len) {
+            starts[n] = i + 1;
+            n += 1;
+        }
+    }
+    if (n < 3) return path; // 머리와 잎뿐이면 버릴 중간이 없다
+
+    const head = path[0 .. starts[1] - 1]; // 첫 컴포넌트(구분자 앞까지). 절대경로면 빈 문자열이다.
+    const head_cols = displayCols(head, wide_icon);
+    const joint_cols = displayCols("/…/", wide_icon);
+
+    // k를 키울수록 꼬리가 짧아진다 — 먼저 맞는 것이 가장 긴 꼬리다.
+    var k: usize = 1;
+    while (k < n) : (k += 1) {
+        const tail = path[starts[k]..];
+        if (head_cols + joint_cols + displayCols(tail, wide_icon) > max_cols) continue;
+        const need = head.len + "/…/".len + tail.len;
+        if (need > out.len) return path; // 버퍼 부족 — 원본을 넘겨 기존 말줄임이 처리하게 둔다
+        @memcpy(out[0..head.len], head);
+        @memcpy(out[head.len..][0.."/…/".len], "/…/");
+        @memcpy(out[head.len + "/…/".len ..][0..tail.len], tail);
+        return out[0..need];
+    }
+
+    // 머리를 붙이면 어떤 꼬리도 안 들어간다 — 잎만 남긴다(그마저 길면 호출자 말줄임이 자른다).
+    return path[starts[n - 1]..];
+}
+
 /// `[start_col, end_col)` 칸에 `text`를 놓는 계획. `next()`가 배치 항목을 순서대로 낸다(할당 없음 — 상태는 이
 /// 구조체가 든다). 소진 뒤 `endCol()`이 **다음 빈 열**을 준다(호출자가 그 뒤를 배경으로 채우는 식으로 이어 그린다).
 pub const Plan = struct {
@@ -276,4 +325,47 @@ test "text_layout: end_col <= start_col이면 빈 계획이다" {
     var p = plan("abc", 5, 5, .head, null);
     try std.testing.expect(p.next() == null);
     try std.testing.expectEqual(@as(u16, 5), p.endCol());
+}
+
+test "경로 중간 생략: 들어가면 그대로, 넘치면 뿌리와 잎을 남긴다" {
+    var buf: [256]u8 = undefined;
+
+    // 들어가면 손대지 않는다.
+    try std.testing.expectEqualStrings("~/a/b", elidePathMiddle("~/a/b", 20, null, &buf));
+
+    // 넘치면 머리 + "/…/" + 들어가는 가장 긴 꼬리.
+    try std.testing.expectEqualStrings("~/…/d/e", elidePathMiddle("~/a/b/c/d/e", 8, null, &buf));
+
+    // 더 좁으면 꼬리가 더 짧아진다.
+    try std.testing.expectEqualStrings("~/…/e", elidePathMiddle("~/a/b/c/d/e", 6, null, &buf));
+
+    // 결과는 예산 안이다.
+    try std.testing.expect(displayCols(elidePathMiddle("~/a/b/c/d/e", 6, null, &buf), null) <= 6);
+}
+
+test "경로 중간 생략: 줄일 중간이 없으면 원본을 준다" {
+    var buf: [256]u8 = undefined;
+    // 컴포넌트 둘 — 버릴 중간이 없다. 자르는 것은 호출자의 말줄임 몫이다.
+    try std.testing.expectEqualStrings("~/verylongdirectory", elidePathMiddle("~/verylongdirectory", 5, null, &buf));
+    // 컴포넌트 하나도 마찬가지.
+    try std.testing.expectEqualStrings("verylongdirectory", elidePathMiddle("verylongdirectory", 5, null, &buf));
+    // 빈 경로·0 예산은 무동작.
+    try std.testing.expectEqualStrings("", elidePathMiddle("", 10, null, &buf));
+    try std.testing.expectEqualStrings("~/a/b/c", elidePathMiddle("~/a/b/c", 0, null, &buf));
+}
+
+test "경로 중간 생략: 절대경로와 버퍼 부족" {
+    var buf: [256]u8 = undefined;
+    // 절대경로는 머리가 빈 문자열이라 "/…/"로 시작한다.
+    try std.testing.expectEqualStrings("/…/e", elidePathMiddle("/a/b/c/d/e", 5, null, &buf));
+
+    // 버퍼가 모자라면 조용히 자르지 않고 원본을 준다.
+    var tiny: [4]u8 = undefined;
+    try std.testing.expectEqualStrings("~/a/b/c/d/e", elidePathMiddle("~/a/b/c/d/e", 8, null, &tiny));
+}
+
+test "경로 중간 생략: 잎만 남는 경우" {
+    var buf: [256]u8 = undefined;
+    // 머리가 길어 머리+구분자만으로 예산을 넘으면 잎만 남긴다.
+    try std.testing.expectEqualStrings("leaf", elidePathMiddle("~verylonghead/a/b/leaf", 6, null, &buf));
 }

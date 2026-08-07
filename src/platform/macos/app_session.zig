@@ -67828,6 +67828,32 @@ test "소스 컨트롤: 저장소의 .git을 감시 목록에 올리고 그 이�
 // SV3a — 소스 컨트롤 목록의 스크롤 좌표가 픽셀이 됐다. 탐색기(SV2a)와 같은 계약이되 **브랜치 헤더
 // 한 줄이 그 좌표 밖**이라는 점이 다르다: 헤더는 스크롤에서 고정이고 목록만 움직인다. 그 한 줄을
 // 어디서 빼는지가 갈리면 클릭한 행과 보이는 행이 정확히 한 줄씩 어긋난다.
+// 도크 목록은 상태표시줄을 **침범하지 않는다.** 둘은 겹치는 층이 아니라 맞닿은 띠다 —
+// `dock_layout.compute`가 창 높이에서 상태바를 **먼저** 깎고(`usable_h`) 나머지 기하가 전부 거기서
+// 파생되기 때문이다. SV2a가 바닥 부분 행을 그리기 시작하면서 "목록이 상태바까지 내려온 것 아니냐"는
+// 의심이 실제로 나왔고(2026-08-07 사용자 보고), 실측은 정확히 맞닿은 상태였다. 이 단언이 그 경계를
+// 고정한다 — 어긋나면 목록 마지막 행이 상태바 글자와 겹쳐 보인다.
+test "dock list viewport ends exactly where the status bar begins" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    session.activateFilePanelDockControl();
+
+    // 창 높이를 여러 개로 바꿔 본다 — 한 크기에서만 맞는 것은 우연일 수 있다.
+    for ([_]u32{ 700, 813, 900, 1041 }) |h| {
+        _ = try session.resize(1400, h, 1000);
+        const g = session.dockGeometry();
+        if (g.tree_content.h == 0) continue;
+        try std.testing.expect(session.statusBarHeightPx() > 0);
+        // 목록 바닥이 상태바 시작과 같다: 겹치지도, 사이에 빈 띠를 남기지도 않는다.
+        try std.testing.expectEqual(g.status_bar.y, g.tree_content.y + g.tree_content.h);
+        // 그리고 상태바는 창 바닥까지다.
+        try std.testing.expectEqual(h, g.status_bar.y + g.status_bar.h);
+    }
+}
+
 test "scm list scrolls in pixels while the branch header stays fixed" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

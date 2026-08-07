@@ -129,7 +129,8 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     // 바뀐 것은 스크롤바의 발행·paint 경로이고 Client 구성이나 receiver 집합과는 무관하다.
     // SV3a(소스 컨트롤 목록을 픽셀 스크롤로, 헤더/목록 draw list 분리)로 또 바뀐다. count는 4 그대로다.
     // 상태바 blocked 항목·typed tree 상호작용으로 또 바뀐다. count는 4 그대로다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "7206f297cf49753be18f224620840d2f43becbb7a1905cf182fa1bb7f34571cf" },
+    // 상태바 blocked 항목·typed tree 상호작용으로 또 바뀐다. count는 4 그대로다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "2153f77f2be8a13fe7c9d631f483c3f0113e11508cf6929aaf8f25a57e83f2b8" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

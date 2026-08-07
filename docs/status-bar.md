@@ -35,6 +35,8 @@ backing_height_px
 
 **항상 선다.** 도크·사이드바 상태와 무관하다 — 조건부로 만들면 바 높이가 프레임마다 달라져 터미널 grid가 출렁인다.
 
+**예외는 quick terminal(`chrome_minimal`) 하나다.** 그 모드는 chrome을 통째로 걷어낸다(`paneBarHeightPx`도 0을 돌려 탭 바를 끈다). 위 규칙이 막으려는 것은 **토글되는 상태**이지 세션 생성 시 고정되는 모드가 아니다 — 고정 모드는 프레임마다 바뀌지 않으니 grid가 출렁이지 않는다.
+
 ## 3. 배치 규칙 (`chrome/components/status_bar.zig`)
 
 순수 모듈이다(AppKit/renderer/PTY 의존 0, 할당 0 — 호출자가 버퍼를 준다).

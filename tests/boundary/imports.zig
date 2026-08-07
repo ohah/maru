@@ -137,7 +137,8 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     // 상태바 blocked 항목·typed tree 상호작용으로 또 바뀐다. count는 4 그대로다.
     // 상태바 blocked 항목·typed tree 상호작용으로 또 바뀐다. count는 4 그대로다.
     // 상태바 blocked 항목·typed tree 상호작용으로 또 바뀐다. count는 4 그대로다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "68e57682df474bfc0445ef18664949e6ee4cbef15cc9df51d24fe07d9d18f433" },
+    // 상태바 blocked 항목·typed tree 상호작용으로 또 바뀐다. count는 4 그대로다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "25c2a406fc24d05f2c02ce80d9d9fca69526d24b1506dcfe2266461fa112bcd3" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

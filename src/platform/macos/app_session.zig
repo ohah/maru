@@ -28584,6 +28584,10 @@ pub const AppSession = struct {
         // 그대로이므로 gesture를 유지하고, 실변화만 즉시 취소한다.
         // dedup을 통과한(실제 size/scale 변화가 있는) resize만 센다.
         self.total_resize_events += 1;
+        // 같은 이유로 상태바 호버도 버린다. 우측 항목은 오른쪽 끝에 붙어 있어 폭이 바뀌면 포인터 밑에서
+        // 빠져나가는데, 호버는 id로 기억하므로 강조가 **항목을 따라 옮겨가** 포인터 없는 자리에 남는다.
+        // 포인터가 멈춰 있으면 mouseMoved도 안 와 영구히 남는다 — 보수적으로 비우고 다음 이동이 재설정한다.
+        self.status_bar_hovered = null;
         // 종료된 세션의 resize도 live surface가 없어 실패한다. 닫히는 창의 late resize는
         // 치명적 오류가 아니므로 무시하고 정상으로 닫는다(key와 같은 정책).
         if (self.ended_seen) {
@@ -30052,9 +30056,10 @@ pub const AppSession = struct {
             self.dropQuadsByLayer(2); // C4b-5: 탭 밴드 quad(layer2)도 per-frame — 매 프레임 비우고 탭 바 build가 재채운다(미연결 시 no-op).
             self.dropQuadsByLayer(3); // 스크롤바(layer3 over)도 per-frame — drop과 append를 짝지어 깜빡임/누적 방지.
             self.dropQuadsByLayer(4); // 알림 종 배지(layer4 header)도 per-frame — 헤더 frame(흰 숫자)과 같은 주기로 갱신.
-            self.dropQuadsByLayer(status_bar_layer); // 상태바 배경(over)도 per-frame — drop과 append를 짝짓는다.
-            // **스크롤바·모달보다 먼저** 넣는다. 셋 다 같은 over 버킷이고 버킷 안에서는 배열 순서가 painter
-            // 순서라, 먼저 넣은 상태바가 아래에 깔린다(모달이 상태바를 덮는 게 옳다).
+            self.dropQuadsByLayer(status_bar_layer); // 상태바 배경(bottom)도 per-frame — drop과 append를 짝짓는다.
+            // 위 layer2 drop과 값이 같아 지금은 중복이지만, status_bar_layer가 바뀌어도 짝이 남도록 둔다.
+            // 모달·스크롤바가 상태바를 덮는 것은 **버킷이 정한다**(bottom이 over 아래) — 배열 순서가 아니다.
+            // 배열 순서가 painter 순서인 것은 **같은 버킷 안**(탭 밴드·상태바 배경·호버)에서만이다.
             self.appendStatusBarBackground();
             self.appendStatusBarHover(); // 클릭 가능한 항목 위 호버 배경(배경 바로 뒤 = 같은 bottom 버킷 안에서 위)
             self.appendNotificationBadge(); // 종 우상단 빨강 원형 배지(안 읽음 있을 때만, 펼침 헤더)
@@ -63253,6 +63258,46 @@ test "SB1: 사이드바 scissor는 겹치거나 뒤집힌 구간을 내느니 �
             }
         }
     }
+}
+
+// SB1: **창 크기가 바뀌면 상태바 호버는 비워야 한다.** 우측 항목은 오른쪽 끝에 붙어 있어 폭이 바뀌면
+// 포인터 아래에서 빠져나간다. 그런데 호버는 id로 기억하므로 강조가 **항목을 따라 이동**해, 포인터가
+// 없는 자리에 하이라이트가 남는다. 포인터가 가만히 있으면 mouseMoved도 안 와서 영구히 남는다.
+// 저장소 규율(hovered_nav_button "stale 하이라이트 방지 — 보수적으로 비운다, 다음 이동이 재설정")을 따른다.
+test "SB1: 실제 크기 변화가 있는 resize는 상태바 호버를 비운다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1200, 700, 1000);
+    _ = session.pushNotificationHistory("MARU", "t", 0);
+    _ = try session.tick();
+
+    var target: ?chrome.ui.tree.RectEntry = null;
+    for (session.statusBarTree().entries) |e| {
+        if (e.id == @intFromEnum(chrome.components.status_bar.ItemId.notifications)) target = e;
+    }
+    const item = target orelse return error.NotificationItemMissing;
+    const cx: f64 = @floatCast(item.rect.x + item.rect.width / 2);
+    const cy: f64 = @floatCast(item.rect.y + item.rect.height / 2);
+    _ = session.hoverCursor(cx, cy, 0);
+    try std.testing.expectEqual(@as(?chrome.components.status_bar.ItemId, .notifications), session.status_bar_hovered);
+
+    // dedup되는 resize(같은 크기)는 제스처를 유지해야 하므로 호버도 그대로다.
+    _ = try session.resize(1200, 700, 1000);
+    try std.testing.expectEqual(@as(?chrome.components.status_bar.ItemId, .notifications), session.status_bar_hovered);
+
+    // 실제 폭 변화 — 우측 항목이 포인터 밑에서 빠져나간다.
+    _ = try session.resize(700, 700, 1000);
+    try std.testing.expectEqual(@as(?chrome.components.status_bar.ItemId, null), session.status_bar_hovered);
 }
 
 // SB1: **빈 바 위에서 텍스트 커서(iBeam)가 뜨면 안 된다.** 상태바는 chrome이지 터미널이 아니다 —

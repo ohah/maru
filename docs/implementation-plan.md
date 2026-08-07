@@ -1261,9 +1261,26 @@ tree 교체에서 capture carry 누락(드래그가 첫 move에 죽음)·스크�
 
   그래서 **SV2-0이 먼저다**(SV0와 같은 이유). 슬라이스:
 
-  - **SV2-0 — 판정자.** 탐색기 행·스크롤바를 실제로 보는 캡처 게이트를 만든다. Lab에 시나리오를 더할지
-     (그러려면 탐색기 draw list를 Lab이 부를 수 있어야 한다) 앱 스모크 캡처를 골든에 물릴지는 이 슬라이스가
-     정한다. 판정 기준은 하나다 — **부분 행 하나를 없애면 빨개져야 한다.**
+  - **SV2-0 — 판정자.** 탐색기 행·스크롤바를 실제로 보는 게이트를 만든다. 판정 기준은 하나다 —
+     **부분 행 하나를 없애면 빨개져야 한다.**
+
+     **Lab은 이 소비처의 게이트가 될 수 없다.** 도크에서 Lab이 판정자인 이유는 도크의 기하·페인트가
+     `session_dock.build`/`view`라는 **제품 컴포넌트**에 있어서다. 탐색기는 그 로직이 `app_session`에
+     있고(행 하이라이트 quad, 스크롤바 quad, fade, reserved 칸 수), Lab이 그것을 다시 쓰면 골든은
+     제품이 아니라 그 복제본을 판정한다 — 이미 한 번 밟은 함정이다([ScrollArea](scroll-area.md) §10.1
+     "테스트가 제품 경로를 태우는지 본다").
+
+     그래서 **`test-macos-file-explorer-perf`가 쓰는 하네스를 쓴다.** 그 스텝은 `app_host_abi` 모듈에서
+     실제 `AppSession`을 헤드리스로 만들어 탐색기 hot path를 돌린다 — 제품 경로 그대로다. 여기에
+     기하 판정을 더한다: 주어진 픽셀 offset에서 draw list의 **시작 행**, 만드는 **행 수**(부분 행 몫
+     +1), pane **원점 편향**(`offset % cell_h`), **clip rect**. 넷 중 하나만 틀어져도 부분 행이 사라지거나
+     겹친다.
+
+     **픽셀 한 번은 손으로 본다.** 셀 pane을 `clip_rect` scissor로 자르는 것은 이 저장소에서 처음이고
+     (도크는 measured 경로의 per-glyph clip이다), 그것이 GPU에서 실제로 잘리는지는 기하 단언이 말해
+     주지 않는다. SV2a에서 앱을 띄워 캡처를 눈으로 확인하고 그 근거를 PR에 남긴다. 자동 픽셀 게이트가
+     필요할 만큼 이 경로가 자주 바뀌면 그때 앱 스모크 캡처를 골든에 물린다 — 지금 만들면 쓰지 않을
+     하네스를 먼저 짓는 것이다.
   - **SV2a — 픽셀 스크롤 상태.** `file_tree_scroll_rows: usize`를 `scroll_area.State`(픽셀)로 바꾸고
      투영을 `scroll_area.project`로 옮긴다. 렌더는 위 ①의 원점 편향 + `clip_rect`. hit-test·reveal·
      follow가 픽셀을 읽는다. 스크롤바는 아직 `file_tree_scrollbar` 그대로 둔다.

@@ -62428,6 +62428,61 @@ test "SB1-S3d: 상태바 배경은 bottom 버킷이어야 텍스트를 안 덮�
 // `status_bar_height_px=0`을 직접 넘겨 이 표면을 전혀 덮지 않는다 — 그래서 여기서 본다.
 // 레이어가 특히 중요하다: layer 4(header)는 사이드바 셀보다 **먼저** 그려져 카드가 상태바를 덮는다.
 // over 버킷(`.m`이 2/0/4 외를 전부 over로 보낸다)만이 사이드바 셀 뒤에 온다.
+// SB1 §5.5: **눌리는 자리와 보이는 자리가 같아야 한다.** `pointInStatusBar`(휠·클릭을 삼키는 판정)와
+// `appendStatusBarBackground`(그리는 rect)가 각자 산술을 갖고 있어, 한쪽만 고치면 바가 보이는데 클릭이
+// 통과하거나(터미널이 선택을 시작) 반대로 바 밖이 먹히는 어긋남이 난다. 지금까지 주석으로만 묶여 있었다.
+//
+// 그래서 **그려진 quad에서 rect를 읽어** 판정을 대조한다 — 판정식을 테스트에 다시 쓰면 같은 실수를 두 번
+// 적는 것일 뿐이라 드리프트를 못 잡는다.
+test "SB1: 상태바 hit-test는 그려진 rect와 같은 자리를 가리킨다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1000, 700, 1000);
+
+    // 폰트를 바꿔 바 높이가 달라져도 둘이 함께 가는지 본다 — 한쪽만 갱신되는 드리프트가 여기서 잡힌다.
+    var round: usize = 0;
+    while (round < 3) : (round += 1) {
+        if (round > 0) session.dispatchAppAction(.increase_font_size);
+        _ = try session.tick();
+
+        // 그려진 바 quad를 기하로 찾는다(bottom 버킷은 탭 밴드와 공유하므로 레이어로는 특정 못 한다).
+        const full_w: f32 = @floatFromInt(session.backing_width_px);
+        var bar: ?metal_frame.GpuQuad = null;
+        for (session.gpu_quads.items) |q| {
+            if (q.w == full_w and q.h == @as(f32, @floatFromInt(session.statusBarHeightPx()))) bar = q;
+        }
+        const q = bar orelse return error.StatusBarQuadMissing;
+
+        const left: f64 = @floatCast(q.x);
+        const top: f64 = @floatCast(q.y);
+        const right: f64 = left + @as(f64, @floatCast(q.w));
+        const bottom: f64 = top + @as(f64, @floatCast(q.h));
+
+        // 안쪽 — 위/아래 경계 행과 좌/우 끝까지 전부 바로 친다.
+        try std.testing.expect(session.pointInStatusBar(left, top));
+        try std.testing.expect(session.pointInStatusBar(right - 1, bottom - 1));
+        try std.testing.expect(session.pointInStatusBar((left + right) / 2, (top + bottom) / 2));
+        // **사이드바 아래 구간도 바다**(전폭) — 휠 가드를 사이드바 판정보다 먼저 둔 이유가 이것이다.
+        if (session.sidebar_width_px > 2) {
+            try std.testing.expect(session.pointInStatusBar(@floatFromInt(session.sidebar_width_px / 2), top + 1));
+        }
+
+        // 바깥 — 바로 위 한 행과 우측 밖. 여기까지 삼키면 터미널·사이드바 입력을 먹는다.
+        try std.testing.expect(!session.pointInStatusBar((left + right) / 2, top - 1));
+        try std.testing.expect(!session.pointInStatusBar(right, top + 1));
+    }
+}
+
 test "SB1-S2b: 상태바 배경이 창 전폭으로 매 프레임 선다(bottom 버킷)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

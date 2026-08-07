@@ -1204,6 +1204,11 @@ pub const MetalFrame = extern struct {
     // strip 하나뿐이고, 사이드바 셀 scissor(`[header_h, drawable_h]`)도 S2b에서 같은 값을 쓴다.
     // 0이면 기존 동작(창 바닥까지). 끝에 추가해 기존 offset 불변(ABI v167).
     status_bar_height_px: u32 = 0,
+    // 사이드바 셀 scissor 세로 구간 [top, bottom)(backing px). 렌더러는 **그대로** 쓴다 — 게이트("스크롤됐나",
+    // "상태바가 있나")와 클램프는 전부 Zig(`sidebarScissorPx`)가 갖는다. bottom <= top이면 scissor 없음.
+    // 끝에 추가해 기존 offset 불변(ABI v168).
+    sidebar_scissor_top_px: u32 = 0,
+    sidebar_scissor_bottom_px: u32 = 0,
     // SV2a seam(값 0 = 기존 동작): 셀 격자로 그리는 **본문 구간 하나**를 px 사각으로 자른다.
     //
     // `PaneFrame.clip_rect`는 오버레이 프레임에서만 scissor가 된다(그 필드 주석). 파일 탐색기처럼 셀로
@@ -1349,6 +1354,10 @@ pub const ChromeGeometry = struct {
     /// SB1: 창 바닥 상태표시줄 높이. 사이드바 strip의 바닥을 정하므로 **셀과 같은 프레임**이어야 한다 —
     /// 상태바가 서는 프레임과 strip이 짧아지는 프레임이 갈리면 한 프레임 겹치거나 틈이 생긴다.
     status_bar_height_px: u32 = 0,
+    /// 사이드바 셀 scissor 세로 구간 `[top, bottom)`(backing px). 게이트·클램프는 호스트의
+    /// `sidebarScissorPx`가 갖고 렌더러는 **그대로** 쓴다. `bottom <= top`이면 scissor 없음.
+    sidebar_scissor_top_px: u32 = 0,
+    sidebar_scissor_bottom_px: u32 = 0,
 };
 
 /// RenderFrame을 투영해 retain하는 owned 버퍼. cells/sidebar_cells/uploads/pixels 배열의 소유권을
@@ -1730,6 +1739,8 @@ pub const MetalFrameBuffer = struct {
             .titlebar_strip_px = self.chrome_geometry.titlebar_strip_px,
             .divider_thickness_px = self.chrome_geometry.divider_thickness_px,
             .status_bar_height_px = self.chrome_geometry.status_bar_height_px,
+            .sidebar_scissor_top_px = self.chrome_geometry.sidebar_scissor_top_px,
+            .sidebar_scissor_bottom_px = self.chrome_geometry.sidebar_scissor_bottom_px,
             .cell_width_px = self.cell_width_px,
             .cell_height_px = self.cell_height_px,
             .generation = self.generation,

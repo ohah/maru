@@ -5124,7 +5124,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             frame.pane_clip_x_px,
             frame.pane_clip_y_px,
             frame.pane_clip_w_px,
-            frame.pane_clip_h_px
+            frame.pane_clip_h_px,
+            frame.sidebar_scissor_top_px,   // 셀 scissor 구간 — Zig가 게이트·클램프까지 끝낸 값(v168)
+            frame.sidebar_scissor_bottom_px
         )
         if drew {
             lastDrawnGeneration = frame.generation

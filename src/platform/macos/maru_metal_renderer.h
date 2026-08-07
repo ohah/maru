@@ -165,7 +165,11 @@ bool maru_metal_renderer_draw(
     uint32_t pane_clip_x_px,
     uint32_t pane_clip_y_px,
     uint32_t pane_clip_w_px,
-    uint32_t pane_clip_h_px
+    uint32_t pane_clip_h_px,
+    /* 사이드바 셀 scissor 세로 구간 [top, bottom)(backing px). 그대로 적용한다 — 게이트·클램프는
+       호출자가 이미 했다. bottom <= top이면 scissor 없음. 끝에 추가해 인자 순서 불변(ABI v168). */
+    uint32_t sidebar_scissor_top_px,
+    uint32_t sidebar_scissor_bottom_px
 );
 
 void maru_metal_renderer_destroy(MaruMetalRenderer *renderer);

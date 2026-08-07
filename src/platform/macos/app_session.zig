@@ -50965,6 +50965,9 @@ test "file tree row window is one arithmetic shared by follow, clamp, hit-test, 
         try std.testing.expect(session.fileTreeRowAt(x, @floatFromInt(tree.y -| 2)) == null);
         // rect 왼쪽 밖.
         try std.testing.expect(session.fileTreeRowAt(@floatFromInt(tree.x -| 2), inside_y) == null);
+        // rect 오른쪽/아래 밖. 위·왼쪽만 보면 `pointInRect`를 반쪽만 써도 통과한다(적대적 검증).
+        try std.testing.expect(session.fileTreeRowAt(@floatFromInt(tree.x + tree.w + 2), inside_y) == null);
+        try std.testing.expect(session.fileTreeRowAt(x, @floatFromInt(tree.y + tree.h + 2)) == null);
         // 스크롤바 트랙 위 — 목록이 넘치므로 트랙이 있다.
         const bar = session.fileTreeScrollbarGeometry() orelse return error.FileTreeFixtureHasNoScrollbar;
         const track_x: f64 = bar.track_x + bar.track_w / 2;
@@ -51021,7 +51024,27 @@ test "file tree row window is one arithmetic shared by follow, clamp, hit-test, 
         try std.testing.expectEqual(shrunk - visible, session.file_tree_scroll_rows);
     }
 
-    // ⑩ 행이 창보다 적으면 스크롤이 없다.
+    // ⑩ **빈 목록에서는 어떤 좌표도 행이 아니다.** 창 안이라는 이유만으로 index를 내면 없는 행을
+    //    선택해 뒤에서 범위 밖 접근이 된다.
+    {
+        session.file_tree_rows.clearRetainingCapacity();
+        session.file_tree_scroll_rows = 0;
+        try std.testing.expect(session.fileTreeRowAt(x, inside_y) == null);
+        // 아래 ⑪이 판정하려면 행이 다시 있어야 한다 — 빈 채로 두면 그 단언이 무의미해진다.
+        for (0..visible) |_| try session.file_tree_rows.append(allocator, .{ .file = .{
+            .path = "/repo/src/main.zig",
+            .label = "main.zig",
+            .depth = 1,
+            .supported = true,
+            .open = false,
+            .active = false,
+            .dirty = false,
+            .external_change = false,
+            .symlink = false,
+        } });
+    }
+
+    // ⑪ 행이 창보다 적으면 스크롤이 없다.
     session.file_tree_rows.shrinkRetainingCapacity(@min(visible, session.file_tree_rows.items.len));
     session.file_tree_scroll_rows = std.math.maxInt(usize);
     try std.testing.expectEqual(@as(usize, 0), session.fileTreeEffectiveScroll());

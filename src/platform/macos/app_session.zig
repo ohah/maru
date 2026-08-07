@@ -23289,7 +23289,10 @@ pub const AppSession = struct {
         // 사이드바·탭 바 hit-test가 상태바 좌표를 자기 것으로 받거나(상태바는 창 전폭이라 사이드바 아래를 지난다)
         // 터미널 선택 드래그가 시작된다. 드래그 중(kind != 1)은 통과시킨다 — 터미널에서 시작한 선택이 상태바
         // 위로 지나갈 때 끊기면 안 된다(capture 소유자가 계속 받아야 한다).
-        if (kind == 1 and self.pointInStatusBar(x_px, y_px)) {
+        // **오버레이가 열려 있으면 이 가드를 타지 않는다.** 모달은 결정 게이트라(아래 confirm/notice 처리가
+        // 그 계약을 갖는다) 상태바 항목이 그 뒤에서 도크·패널을 여는 것은 단일-오버레이 불변식 위반이다.
+        // 이 가드가 그 처리보다 **앞에** 있으므로 여기서 직접 비켜 줘야 한다(scrollWheel은 모달 검사 뒤라 무관).
+        if (kind == 1 and !self.anyOverlayOpen() and self.pointInStatusBar(x_px, y_px)) {
             // 바 위 down은 여전히 삼킨다(터미널 선택이 시작되면 안 된다). 다만 클릭 가능한 항목 위라면
             // 삼키기 **전에** 실행한다 — 상태바가 조작 지점이 되는 지점이다.
             if (self.statusBarItemAt(x_px, y_px)) |id| {
@@ -63234,6 +63237,47 @@ test "SB1: 사이드바 scissor는 겹치거나 뒤집힌 구간을 내느니 �
             }
         }
     }
+}
+
+// SB1: **모달이 떠 있으면 상태바 클릭이 먹으면 안 된다.** 모달은 결정 게이트다 — 그 뒤에서 도크·패널이
+// 열리면 단일-오버레이 불변식이 깨지고, 사용자는 자기가 답하던 질문 뒤에 뭔가 열린 것을 나중에 발견한다.
+// 상태바 가드가 `mouse()`의 **맨 앞**에 있어(터미널 선택을 막으려면 그래야 한다) 기존 모달 처리보다
+// 먼저 돌기 때문에, 여기서 직접 비켜 주지 않으면 그 처리에 닿지도 않는다.
+test "SB1: 확인 모달이 열려 있으면 상태바 클릭이 항목을 실행하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1000, 700, 1000);
+
+    // 알림 항목을 세우고 그 위 좌표를 잡는다.
+    _ = session.pushNotificationHistory("MARU", "t", 0);
+    _ = try session.tick();
+    var target: ?chrome.ui.tree.RectEntry = null;
+    for (session.statusBarTree().entries) |e| {
+        if (e.id == @intFromEnum(chrome.components.status_bar.ItemId.notifications)) target = e;
+    }
+    const item = target orelse return error.NotificationItemMissing;
+    const cx: f64 = @floatCast(item.rect.x + item.rect.width / 2);
+    const cy: f64 = @floatCast(item.rect.y + item.rect.height / 2);
+
+    // 모달이 열린 상태에서 그 자리를 눌러도 알림 패널이 열리면 안 된다.
+    session.chrome_host.confirm.open = true;
+    session.mouse(1, cx, cy, 0, 0);
+    try std.testing.expect(!session.chrome_host.notifications.open);
+
+    // 모달을 닫으면 같은 클릭이 먹는다 — 가드가 항목을 영영 죽인 게 아니라 모달일 때만 비켜 준다.
+    session.chrome_host.confirm.open = false;
+    session.mouse(1, cx, cy, 0, 0);
+    try std.testing.expect(session.chrome_host.notifications.open);
 }
 
 // SB1: **사라진 항목의 호버는 남으면 안 된다.** 알림을 다 읽어 항목이 없어졌다가 새 알림이 와서 다시

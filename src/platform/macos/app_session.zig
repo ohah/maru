@@ -940,6 +940,8 @@ const status_bar_edge_pad_pt: u32 = 8;
 const status_bar_gap_pt: u32 = 12;
 /// 상태바 좌측 항목 상한. 지금은 브랜치·경로 둘이고, 늘릴 때 이 값과 우선순위 순서를 함께 본다.
 const max_status_bar_left_items: usize = 2;
+/// 상태바 우측 항목 상한. 지금은 알림 하나고, 에이전트 상태(S3e)가 붙으면 2가 된다.
+const max_status_bar_right_items: usize = 1;
 
 // 런타임 폰트 크기 조절(⌘+/⌘-/⌘0). step = ⌘+/⌘- 한 번에 1pt(Ghostty 기본과 동일). 클램프 범위는 보수적으로
 // [6, 72]pt — appearance resolver는 [1,512]를 허용하지만 6pt 미만은 글자가 안 읽히고 72pt 초과는 grid가
@@ -12135,6 +12137,17 @@ pub const AppSession = struct {
         // F2-7)을 헤드리스 스크린샷으로 캡처(self-verify debug-gate). 분할 후 활성은 새 pane이라 반대쪽이 비활성=디밍 대상.
         // 빈 셸은 첫 content frame까지 프롬프트가 안 와 디밍할 글자가 없으므로, 양쪽 pane core에 같은 SGR 샘플 줄을
         // 직접 써 넣어(리더와 경합하니 락 아래) 활성(풀 밝기) vs 비활성(디밍)을 한 화면에서 대비시킨다.
+        // MARU_FORCE_NOTIFICATIONS=<n> — 안 읽은 알림 n개를 첫 frame에 넣어 상태바 우측 항목(종 + 개수)과
+        // **좌우 충돌 규칙**(우측을 먼저 지키고 좌측을 뒤에서부터 버린다)을 헤드리스 스크린샷으로 검증한다
+        // (self-verify debug-gate — MARU_FORCE_SPLIT과 같은 성격). 알림은 셸 관측과 무관해 첫 frame에 세울 수
+        // 있다 — 브랜치·경로는 OSC 7이 아직 안 와 캡처로 못 보는 것과 대비된다.
+        if (std.c.getenv("MARU_FORCE_NOTIFICATIONS")) |raw| {
+            const want = std.fmt.parseInt(usize, std.mem.span(raw), 10) catch 1;
+            var i: usize = 0;
+            while (i < @min(want, 99)) : (i += 1) {
+                _ = self.pushNotificationHistory("MARU", "self-verify", 0);
+            }
+        }
         if (std.c.getenv("MARU_FORCE_SPLIT") != null) {
             self.splitActivePane(.horizontal) catch {};
             for (self.activeTab().panes.items) |pane| {
@@ -34113,10 +34126,31 @@ pub const AppSession = struct {
             }
         } else |_| {}
 
-        if (n == 0) return;
+        // 우측 — 안 읽은 알림 수. 0이면 항목 자체가 없다(사이드바 종 배지와 같은 전제).
+        // 좌측과 **독립 배열**이다: `status_bar.compute`가 우측을 먼저 배치하고 좌측이 그 좌단을 넘지 않게
+        // 자른다(S3a "부딪히면 우측을 먼저 지킨다"). 이 항목이 붙는 순간 그 규칙이 처음으로 실제로 작동한다.
+        var right_frames: [max_status_bar_right_items]?renderer.DrawList = .{null} ** max_status_bar_right_items;
+        var right_widths: [max_status_bar_right_items]u32 = .{0} ** max_status_bar_right_items;
+        var rn: usize = 0;
+        defer for (right_frames[0..rn]) |*maybe| {
+            if (maybe.*) |*dl| dl.deinit(self.allocator);
+        };
+        if (self.notification_unread > 0) {
+            var count_buf: [16]u8 = undefined;
+            const count = std.fmt.bufPrint(&count_buf, "{d}", .{self.notification_unread}) catch "";
+            if (count.len > 0) {
+                if (self.buildStatusBarItem(icons.codepoint(.bell), count, bar_cols, fg, icon_fg)) |dl| {
+                    right_frames[rn] = dl;
+                    right_widths[rn] = @as(u32, dl.size.cols) * self.cell_width_px;
+                    rn += 1;
+                }
+            }
+        }
+
+        if (n == 0 and rn == 0) return;
 
         var left_buf: [max_status_bar_left_items]chrome.components.status_bar.Slot = undefined;
-        var right_buf: [1]chrome.components.status_bar.Slot = undefined;
+        var right_buf: [max_status_bar_right_items]chrome.components.status_bar.Slot = undefined;
         const layout = chrome.components.status_bar.compute(
             .{
                 .bar_x = 0,
@@ -34127,7 +34161,7 @@ pub const AppSession = struct {
                 .gap_px = self.statusBarGapPx(),
             },
             widths[0..n],
-            &.{},
+            right_widths[0..rn],
             &left_buf,
             &right_buf,
         );
@@ -34137,6 +34171,11 @@ pub const AppSession = struct {
         for (layout.left) |slot| {
             const dl = frames[slot.index] orelse continue;
             frames[slot.index] = null; // 소유권을 collectShaped로 넘긴다(위 defer가 두 번 해제하지 않게)
+            self.collectShaped(collected, dl, builder, .{ .status_bar = .{ .origin_x = slot.x, .origin_y = origin_y, .colors = colors } });
+        }
+        for (layout.right) |slot| {
+            const dl = right_frames[slot.index] orelse continue;
+            right_frames[slot.index] = null;
             self.collectShaped(collected, dl, builder, .{ .status_bar = .{ .origin_x = slot.x, .origin_y = origin_y, .colors = colors } });
         }
     }
@@ -34158,10 +34197,17 @@ pub const AppSession = struct {
             x_px >= 0 and x_px < @as(f64, @floatFromInt(self.backing_width_px));
     }
 
-    /// 상태바 배경 quad의 layer. `.m`의 버킷팅이 `2→bottom, 0→under, 4→header, 그 밖→over`라 이 값은 **over**로
-    /// 간다(ObjC 수정 없이). over는 사이드바 셀보다 **뒤에** 그려지는 유일한 버킷이다 — layer 4(header)는 배지 원을
-    /// 헤더 글리프 뒤에 끼우려고 만든 자리라 셀보다 먼저 그려지고, 거기 두면 사이드바 카드가 상태바를 덮는다.
-    const status_bar_layer: u32 = 5;
+    /// 상태바 배경 quad의 layer = **2(bottom)**. `.m`의 버킷팅은 `2→bottom, 0→under, 4→header, 그 밖→over`다.
+    ///
+    /// 처음엔 over(5)로 뒀다가 **텍스트가 안 보이는 결함**을 냈다. 상태바 **항목 텍스트는 `pane_frames`를 타고
+    /// 터미널 레이어의 셀 패스로 그려지는데**, over 버킷은 별도 오버레이 CAMetalLayer(모달 pass)라 터미널
+    /// 레이어 **전체 위에** 합성된다 — 배경이 자기 텍스트를 덮었다. "사이드바 셀 뒤에 오는 유일한 버킷"이라는
+    /// 판단은 맞았지만, 정작 덮이는 게 사이드바가 아니라 **내 텍스트**라는 걸 놓쳤다.
+    ///
+    /// bottom은 터미널 레이어 맨 처음이라 그 뒤의 모든 것(strip·터미널 셀·항목 텍스트·사이드바 셀)이 위에
+    /// 그려진다. 상태바 띠를 침범할 수 있는 것들은 이미 막혀 있다: 터미널 grid는 S2b가 짧게 만들었고,
+    /// 사이드바 strip은 S2a가 띠 위에서 끊고, 사이드바 셀은 S2b가 scissor로 자른다. 그래서 bottom이 옳다.
+    const status_bar_layer: u32 = 2;
 
     /// 창 바닥 상태표시줄 배경(창 전폭). **조건 없이 매 프레임 넣는다** — 도크·사이드바 상태와 무관하게 바가 늘
     /// 서 있어야 `dock_layout`이 깎아 둔 자리와 화면이 일치한다(조건부로 만들면 깎인 자리에 아무것도 없는 프레임이
@@ -62255,11 +62301,23 @@ test "gpu quad 수명: drop은 자기 레이어만·순서 보존, rebuildSideba
     try std.testing.expect(survived_3);
 }
 
+// SB1-S3d: **상태바 배경은 터미널 레이어(bottom)여야 한다.** 항목 텍스트가 `pane_frames`를 타고 터미널
+// 레이어 셀 패스로 그려지므로, 배경을 over 버킷에 두면 별도 오버레이 CAMetalLayer가 터미널 레이어 전체
+// 위에 합성돼 **자기 텍스트를 덮는다**(실제로 S3b·S3c가 그 상태로 머지됐고, 알림 항목을 헤드리스로 찍어
+// 처음 드러났다). 눈에 안 보이는 계약이라 값으로 못박는다 — `.m` 버킷팅이 2=bottom·0=under·4=header·그 밖=over다.
+test "SB1-S3d: 상태바 배경은 bottom 버킷이어야 텍스트를 안 덮는다" {
+    try std.testing.expectEqual(@as(u32, 2), AppSession.status_bar_layer);
+    // over 버킷(그 밖)이나 header/under면 텍스트가 가려지거나 순서가 뒤집힌다.
+    try std.testing.expect(AppSession.status_bar_layer != 0);
+    try std.testing.expect(AppSession.status_bar_layer != 4);
+    try std.testing.expect(AppSession.status_bar_layer != 1 and AppSession.status_bar_layer != 3 and AppSession.status_bar_layer != 5);
+}
+
 // SB1-S2b: 상태바가 **실제로 그려지는지**를 quad 수준에서 못박는다. 도크 골든은 Chrome Lab 경로라
 // `status_bar_height_px=0`을 직접 넘겨 이 표면을 전혀 덮지 않는다 — 그래서 여기서 본다.
 // 레이어가 특히 중요하다: layer 4(header)는 사이드바 셀보다 **먼저** 그려져 카드가 상태바를 덮는다.
 // over 버킷(`.m`이 2/0/4 외를 전부 over로 보낸다)만이 사이드바 셀 뒤에 온다.
-test "SB1-S2b: 상태바 배경이 창 전폭으로 매 프레임 선다(over 버킷)" {
+test "SB1-S2b: 상태바 배경이 창 전폭으로 매 프레임 선다(bottom 버킷)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -62278,25 +62336,31 @@ test "SB1-S2b: 상태바 배경이 창 전폭으로 매 프레임 선다(over �
     const h = session.statusBarHeightPx();
     try std.testing.expect(h > 0);
 
+    // **기하로 찾는다.** bottom 버킷은 값 2 하나뿐이라 탭 밴드와 레이어를 공유한다 — 레이어만으로는
+    // 상태바를 특정할 수 없다(옛 테스트가 탭 밴드 quad를 잡아 오해를 낳았다).
+    const bar_y: f32 = @floatFromInt(session.backing_height_px - h);
     var found: ?metal_frame.GpuQuad = null;
     for (session.gpu_quads.items) |q| {
-        if (q.layer == AppSession.status_bar_layer) found = q;
+        if (q.y == bar_y and q.w == @as(f32, @floatFromInt(session.backing_width_px))) found = q;
     }
     const bar = found orelse return error.StatusBarQuadMissing;
     try std.testing.expectEqual(@as(f32, 0), bar.x); // 창 전폭 — 사이드바 아래까지 지나간다
     try std.testing.expectEqual(@as(f32, @floatFromInt(session.backing_width_px)), bar.w);
     try std.testing.expectEqual(@as(f32, @floatFromInt(session.backing_height_px - h)), bar.y);
     try std.testing.expectEqual(@as(f32, @floatFromInt(h)), bar.h);
-    // over 버킷 판정: `.m`의 버킷팅은 2=bottom·0=under·4=header·그 밖=over다.
-    try std.testing.expect(bar.layer != 0 and bar.layer != 2 and bar.layer != 4);
+    // 버킷 판정: `.m`의 버킷팅은 2=bottom·0=under·4=header·그 밖=over다. **bottom이어야 한다** —
+    // S2b는 over로 잡았는데(사이드바 셀 뒤에 오는 유일한 버킷이라는 이유로) 그러면 별도 오버레이 레이어가
+    // 터미널 레이어 위에 합성돼 **상태바 자신의 항목 텍스트를 덮는다**(S3d에서 헤드리스 캡처로 드러났다).
+    try std.testing.expectEqual(@as(u32, 2), bar.layer);
 
     // **조건 없이 매 프레임 선다** — 도크를 접거나 사이드바를 접어도 사라지면 dock_layout이 깎아 둔 자리에
     // 아무것도 없는 프레임이 나온다.
     session.toggleSidebarCollapsed();
     _ = try session.tick();
     var still = false;
+    const bar_y2: f32 = @floatFromInt(session.backing_height_px - h);
     for (session.gpu_quads.items) |q| {
-        if (q.layer == AppSession.status_bar_layer) still = true;
+        if (q.y == bar_y2 and q.w == @as(f32, @floatFromInt(session.backing_width_px))) still = true;
     }
     try std.testing.expect(still);
 }

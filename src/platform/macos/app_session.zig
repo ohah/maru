@@ -3050,6 +3050,14 @@ pub const AppSession = struct {
     // `active_failed`가 이미 replace를 막지만, web이면 그 가드가 비어 있어(터미널 frame이 원래 없다) 사이드바
     // 제목·헤더 아이콘·탭 제목·도크 텍스트가 전부 사라진 프레임이 커밋됐다 — quad만 남아 한 프레임 깜빡였다.
     placement_failed: bool = false,
+    // 상태표시줄 상호작용(typed tree). 렌더는 기존 lowering이 그대로 하고, 이 tree는 hover/클릭 판정에만
+    // 쓴다(`chrome/components/divider.zig`와 같은 규율 — 이관 문서 §2의 "그리기와 상호작용 분리").
+    status_bar_entry_scratch: [8]chrome.ui.tree.RectEntry = undefined,
+    status_bar_id_scratch: [8]chrome.components.status_bar.ItemId = undefined,
+    status_bar_entry_count: usize = 0,
+    status_bar_generation: u64 = 0,
+    /// 지금 포인터가 얹힌 항목. 없으면 null. hover 배경 quad와 클릭 대상이 이 하나를 공유한다.
+    status_bar_hovered: ?chrome.components.status_bar.ItemId = null,
     // 직전에 그린 활성 surface의 view_offset(스크롤백 탐색 위치). synchronized output(2026) hold가 스크롤
     // 리페인트를 막지 않게 하고(shouldProjectFrame), 스크롤이 reader 위임이라 metal_dirty가 누락돼도 view_offset
     // 변화만으로 투영을 강제하는 기준이다. 투영 경로마다 그 프레임이 실제로 그린 render-time offset으로 갱신(빌드
@@ -12190,6 +12198,19 @@ pub const AppSession = struct {
         // MARU_FORCE_AGENT=1 — 활성 Term의 에이전트 상태를 running으로 세워 상태바 우측 에이전트 항목과
         // **우측 항목 순서**(에이전트가 더 오른쪽, 알림이 그 왼쪽)를 헤드리스로 검증한다. 실제 상태는 셸 화면을
         // 관측해 정해지므로(pollAgentKinds) 첫 frame엔 절대 서지 않는다 — 그래서 훅이 필요하다.
+        // MARU_FORCE_STATUS_HOVER=<항목> — 그 항목에 포인터가 얹힌 것처럼 호버를 세워 헤드리스로 찍는다
+        // (self-verify debug-gate). 실제 호버는 마우스 이동이 필요해 스크린샷으로는 못 만든다.
+        if (std.c.getenv("MARU_FORCE_STATUS_HOVER")) |raw| {
+            const name = std.mem.span(raw);
+            self.status_bar_hovered = if (std.mem.eql(u8, name, "notifications"))
+                .notifications
+            else if (std.mem.eql(u8, name, "agents"))
+                .running_agents
+            else if (std.mem.eql(u8, name, "cwd"))
+                .cwd
+            else
+                null;
+        }
         if (std.c.getenv("MARU_FORCE_AGENT") != null) {
             const t = self.activePane().activeTerm();
             t.agent_state = .running;
@@ -23087,7 +23108,14 @@ pub const AppSession = struct {
         // 사이드바·탭 바 hit-test가 상태바 좌표를 자기 것으로 받거나(상태바는 창 전폭이라 사이드바 아래를 지난다)
         // 터미널 선택 드래그가 시작된다. 드래그 중(kind != 1)은 통과시킨다 — 터미널에서 시작한 선택이 상태바
         // 위로 지나갈 때 끊기면 안 된다(capture 소유자가 계속 받아야 한다).
-        if (kind == 1 and self.pointInStatusBar(x_px, y_px)) return;
+        if (kind == 1 and self.pointInStatusBar(x_px, y_px)) {
+            // 바 위 down은 여전히 삼킨다(터미널 선택이 시작되면 안 된다). 다만 클릭 가능한 항목 위라면
+            // 삼키기 **전에** 실행한다 — 상태바가 조작 지점이 되는 지점이다.
+            if (self.statusBarItemAt(x_px, y_px)) |id| {
+                if (statusBarItemClickable(id)) self.activateStatusBarItem(id);
+            }
+            return;
+        }
         // 새 primary down은 이전 capture의 mouse-up이 유실됐더라도 먼저 단일 owner를 exhaustive 취소한다.
         // 이후 실제 hit target만 새 owner를 arm하므로 terminal/dock/sidebar/divider가 동시에 살아남지 않는다.
         // **취소 직전의 "보이던 탭 순서"는 기억해 둔다** — 이 down이 겨냥한 것은 화면에 그려져 있던 preview
@@ -25834,6 +25862,18 @@ pub const AppSession = struct {
     }
 
     pub fn hoverCursor(self: *AppSession, x_px: f64, y_px: f64, mods: i32) CursorKind {
+        // 상태표시줄 항목 hover — 바뀔 때만 dirty를 세운다(매 이동 재투영은 낭비다).
+        {
+            const next: ?chrome.components.status_bar.ItemId = blk: {
+                const id = self.statusBarItemAt(x_px, y_px) orelse break :blk null;
+                break :blk if (statusBarItemClickable(id)) id else null;
+            };
+            if (next != self.status_bar_hovered) {
+                self.status_bar_hovered = next;
+                self.metal_dirty = true;
+            }
+            if (next != null) return .link; // 누를 수 있다는 신호(Cmd+hover URL과 같은 손 모양)
+        }
         if (!self.surface_initialized) return .text;
         // 닫기 확인 모달 중엔 호버 부수효과(사이드바/탭/◧ 호버 강조·스크롤바 hover·URL 밑줄)를 멈추고 화살표 커서만
         // 둔다 — 안 그러면 모달 뒤 버튼/슬롯이 호버에 반응해 강조되며(모달 위로 비침) UI가 깨져 보인다(모달 게이트).
@@ -29821,6 +29861,7 @@ pub const AppSession = struct {
             // **스크롤바·모달보다 먼저** 넣는다. 셋 다 같은 over 버킷이고 버킷 안에서는 배열 순서가 painter
             // 순서라, 먼저 넣은 상태바가 아래에 깔린다(모달이 상태바를 덮는 게 옳다).
             self.appendStatusBarBackground();
+            self.appendStatusBarHover(); // 클릭 가능한 항목 위 호버 배경(배경 바로 뒤 = 같은 bottom 버킷 안에서 위)
             self.appendNotificationBadge(); // 종 우상단 빨강 원형 배지(안 읽음 있을 때만, 펼침 헤더)
             self.appendPaneScrollbars(); // 모든 pane 우측 thumb(스크롤백 있을 때만) — 활성=fade/hover, 비활성=faint
             self.appendSidebarScrollbar(); // 사이드바 우측 thumb(워크스페이스 카드가 뷰포트 넘칠 때만) — 단일 트랙 fade
@@ -34278,6 +34319,9 @@ pub const AppSession = struct {
         // 배열 순서가 곧 우선순위다 — 브랜치가 경로보다 짧고 자주 바뀌므로 앞에 둔다.
         var frames: [max_status_bar_left_items]?renderer.DrawList = .{null} ** max_status_bar_left_items;
         var widths: [max_status_bar_left_items]u32 = .{0} ** max_status_bar_left_items;
+        // 폭 배열과 **같은 순서**의 의미 id. 슬롯의 `index`로 되짚어 발행한다 — 인덱스를 id로 쓰면 항목이
+        // 하나 빠질 때 남은 것의 id가 밀려 "누른 것과 실행된 것"이 갈린다.
+        var left_ids: [max_status_bar_left_items]chrome.components.status_bar.ItemId = undefined;
         var n: usize = 0;
         defer for (frames[0..n]) |*maybe| {
             if (maybe.*) |*dl| dl.deinit(self.allocator);
@@ -34289,6 +34333,7 @@ pub const AppSession = struct {
                 if (self.buildStatusBarItem(icons.codepoint(.git_branch), branch, bar_cols, fg, icon_fg)) |dl| {
                     frames[n] = dl;
                     widths[n] = @as(u32, dl.size.cols) * self.cell_width_px;
+                    left_ids[n] = .git_branch;
                     n += 1;
                 }
             }
@@ -34303,6 +34348,7 @@ pub const AppSession = struct {
                 if (self.buildStatusBarItem(icons.codepoint(.folder), path, bar_cols, fg, icon_fg)) |dl| {
                     frames[n] = dl;
                     widths[n] = @as(u32, dl.size.cols) * self.cell_width_px;
+                    left_ids[n] = .cwd;
                     n += 1;
                 }
             }
@@ -34313,6 +34359,7 @@ pub const AppSession = struct {
         // 자른다(S3a "부딪히면 우측을 먼저 지킨다"). 이 항목이 붙는 순간 그 규칙이 처음으로 실제로 작동한다.
         var right_frames: [max_status_bar_right_items]?renderer.DrawList = .{null} ** max_status_bar_right_items;
         var right_widths: [max_status_bar_right_items]u32 = .{0} ** max_status_bar_right_items;
+        var right_ids: [max_status_bar_right_items]chrome.components.status_bar.ItemId = undefined;
         var rn: usize = 0;
         defer for (right_frames[0..rn]) |*maybe| {
             if (maybe.*) |*dl| dl.deinit(self.allocator);
@@ -34328,6 +34375,7 @@ pub const AppSession = struct {
                 if (self.buildStatusBarItem(icon, text, bar_cols, fg, icon_fg)) |dl| {
                     right_frames[rn] = dl;
                     right_widths[rn] = @as(u32, dl.size.cols) * self.cell_width_px;
+                    right_ids[rn] = .running_agents;
                     rn += 1;
                 }
             }
@@ -34339,6 +34387,7 @@ pub const AppSession = struct {
                 if (self.buildStatusBarItem(icons.codepoint(.bell), count, bar_cols, fg, icon_fg)) |dl| {
                     right_frames[rn] = dl;
                     right_widths[rn] = @as(u32, dl.size.cols) * self.cell_width_px;
+                    right_ids[rn] = .notifications;
                     rn += 1;
                 }
             }
@@ -34363,6 +34412,10 @@ pub const AppSession = struct {
             &right_buf,
         );
 
+        // **상호작용 tree 발행** — 배치가 정한 슬롯을 그대로 낸다. 보이는 자리와 눌리는 자리가 같아지고,
+        // 자리를 못 얻은 항목은 tree에 없다(안 보이면 눌리지도 않는다).
+        self.publishStatusBarTree(layout, left_ids[0..n], right_ids[0..rn]);
+
         // 세로 중앙: 홀수 나머지는 위로 — 바의 첫/마지막 행은 quad AA 가장자리라 한 행 어둡다(#1910 캡처).
         const origin_y = (self.backing_height_px -| h) + ((h -| self.cell_height_px) / 2);
         for (layout.left) |slot| {
@@ -34382,6 +34435,105 @@ pub const AppSession = struct {
     fn buildStatusBarItem(self: *AppSession, icon: u21, text: []const u8, bar_cols: u16, fg: terminal.Color, icon_fg: terminal.Color) ?renderer.DrawList {
         const max_text_cols: u16 = @max(1, bar_cols / 3);
         return coretext_frame_builder.buildStatusBarItemDrawList(self.allocator, icon, text, max_text_cols, fg, icon_fg) catch null;
+    }
+
+    /// 배치된 슬롯을 상호작용 tree로 발행한다. 좌/우를 한 tree에 담는다 — 판정은 "어느 항목인가" 하나라
+    /// 나눌 이유가 없다. 발행 실패(버퍼 부족)는 tree를 비워 **아무것도 안 눌리게** 한다: 잘못된 항목이
+    /// 눌리는 것보다 안 눌리는 편이 낫다.
+    fn publishStatusBarTree(
+        self: *AppSession,
+        layout: chrome.components.status_bar.Layout,
+        left_ids: []const chrome.components.status_bar.ItemId,
+        right_ids: []const chrome.components.status_bar.ItemId,
+    ) void {
+        self.status_bar_entry_count = 0;
+        self.status_bar_generation +|= 1;
+
+        var written: usize = 0;
+        inline for (.{ .{ layout.left, left_ids }, .{ layout.right, right_ids } }) |pair| {
+            const slots = pair[0];
+            const ids = pair[1];
+            if (written >= self.status_bar_entry_scratch.len) break;
+            const t = chrome.components.status_bar.publish(
+                slots,
+                ids,
+                self.status_bar_generation,
+                self.status_bar_entry_scratch[written..],
+            ) catch {
+                self.status_bar_entry_count = 0;
+                return;
+            };
+            written += t.entries.len;
+        }
+        self.status_bar_entry_count = written;
+    }
+
+    /// 발행된 tree(슬라이스 view). 호출자가 hit-test·hover에 쓴다.
+    fn statusBarTree(self: *const AppSession) chrome.ui.tree.UiRectTree {
+        return .{
+            .entries = self.status_bar_entry_scratch[0..self.status_bar_entry_count],
+            .generation = self.status_bar_generation,
+        };
+    }
+
+    /// 포인터 아래 상태표시줄 항목. 없으면 null. **rect는 배치가 정한 그대로**라 보이는 자리와 눌리는
+    /// 자리가 같다(#1925가 바 전체에 대해 보장하는 것을 항목 단위로 좁힌 것).
+    fn statusBarItemAt(self: *const AppSession, x_px: f64, y_px: f64) ?chrome.components.status_bar.ItemId {
+        for (self.statusBarTree().entries) |entry| {
+            const r = entry.rect;
+            if (x_px >= r.x and x_px < r.x + r.width and y_px >= r.y and y_px < r.y + r.height) {
+                return @enumFromInt(entry.id);
+            }
+        }
+        return null;
+    }
+
+    /// 호버 중인 항목의 배경. 배경 quad **바로 뒤**에 넣어 같은 bottom 버킷 안에서 위에 오게 한다
+    /// (버킷 안 순서 = painter 순서). 없으면 무동작이라 호버가 없을 때는 quad가 하나도 안 는다.
+    fn appendStatusBarHover(self: *AppSession) void {
+        const id = self.status_bar_hovered orelse return;
+        for (self.statusBarTree().entries) |entry| {
+            if (entry.id != @intFromEnum(id)) continue;
+            self.appendSolidQuad(
+                entry.rect.x,
+                entry.rect.y,
+                entry.rect.width,
+                entry.rect.height,
+                // 사이드바 행 호버와 같은 톤 — 상태바만의 색을 새로 만들지 않는다.
+                self.chromeQuadBg(self.sidebarRowHoverBg()),
+                status_bar_layer,
+            );
+            return;
+        }
+    }
+
+    /// 항목 클릭 — **이미 있는 표면을 여는 것만** 한다. 새 UI를 지어내지 않는다.
+    /// 브랜치는 열 대상이 아직 없어(브랜치 목록 UI 부재) 클릭해도 아무 일도 하지 않는다 — 호버도 안 준다.
+    fn activateStatusBarItem(self: *AppSession, id: chrome.components.status_bar.ItemId) void {
+        switch (id) {
+            .notifications => self.openNotificationPanel(),
+            .running_agents => {
+                if (!self.dock.presented) self.dock.presented = true;
+                self.dock.collapsed = false;
+                self.setDockView(.agent_sessions);
+            },
+            .cwd => {
+                if (!self.dock.presented) self.dock.presented = true;
+                self.dock.collapsed = false;
+                self.setDockView(.explorer);
+            },
+            .git_branch => {}, // 열 대상 없음(§6 "항목 클릭 동작" 참고)
+        }
+        self.metal_dirty = true;
+    }
+
+    /// 클릭 가능한 항목인가. 열 대상이 없는 항목은 호버도 주지 않는다 — 눌리는 것처럼 보이는데 아무
+    /// 일도 안 일어나는 편이 아무 표시도 없는 것보다 나쁘다.
+    fn statusBarItemClickable(id: chrome.components.status_bar.ItemId) bool {
+        return switch (id) {
+            .notifications, .running_agents, .cwd => true,
+            .git_branch => false,
+        };
     }
 
     /// 포인터가 창 바닥 상태표시줄 위인가. **렌더 rect와 같은 산술**을 쓴다(`appendStatusBarBackground`와 한 쌍) —

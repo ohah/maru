@@ -115,7 +115,9 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     // 꺼내며 또 바뀐다. count는 4 그대로다 — 둘 다 정수만 계산하고 필드를 이름으로 읽지 않는다.
     // SB1-S3c(상태바 cwd 항목)로 또 바뀐다. count는 4 그대로다 — 항목을 배열로 모으고 배치에
     // 넘기는 것뿐이고, 필드를 이름으로 읽지 않는다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "75f4c7f17bef5bf5d200da3a23781d176dce9d57eb89077d309a5b560cc7e2fb" },
+    // SB1-S3d(상태바 알림 항목 + 헤드리스 검증 훅)로 또 바뀐다. count는 4 그대로다 — 우측 배열을
+    // 하나 더 넘기는 것뿐이고, 필드를 이름으로 읽지 않는다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "b7219172fec6705dd7f24bdfc6357f8c69f66c2e4da0c28c1469301084f2aa5a" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

@@ -63,7 +63,7 @@ rewrite의 근거로 삼지 않는다.
 | sidebar group drag (`sidebar_group`) | `AppSession` armed→dragging 2-phase | `ReorderableList` capability | threshold 전 armed 상태의 click 보존, marker/slot 무결성 |
 | 주소창 selection drag (`address_selection`) | `AppSession` caret/selection | 이관하지 않는다 — [텍스트 필드 에디터](text-field-editor.md) 범위 | caret/selection 편집 모델, IME, first responder |
 | `components/sidebar.zig` | workspace/group/agent row geometry·hit-test·밴드 view·헤더 hit-test | `ReorderableList`를 쓰는 Sidebar composite | group collapse, reorder preview, pin/group invariants, 헤더 아이콘(◧/⚙/+/🔔) 영역, 검색 blur가 키 포커스를 터미널로 되돌리는 규율 |
-| `components/file_tree_scrollbar.zig` | scrollbar geometry/track/thumb math | [`ScrollArea`](scroll-area.md) | thumb drag, track click, projection/root generation mismatch cancel |
+| ~~`components/file_tree_scrollbar.zig`~~ (SV2b에서 삭제) | scrollbar geometry/track/thumb math | [`ScrollArea`](scroll-area.md) — 이관 완료 | thumb drag, track click, projection/root generation mismatch cancel |
 | terminal scrollbar | `AppSession` viewport mutation | 별도 판단(터미널 viewport는 [`ScrollArea`](scroll-area.md) 범위 밖) | terminal scrollback/selection/mouse mode와의 입력 우선순위 |
 | Session Dock | typed tree + action table + pixel scroll + 검색 필드(query·IME preedit 입력 owner) | 첫 modern consumer를 유지 | refresh anchor, stale action reject, read-only detail worker, `/`·필드 클릭 활성화와 Escape 해제, marked text가 필드·native 후보창에만 보이고 commit된 query만 목록을 필터하는 규율, 256 byte 절단, 검색 키·IME가 재스캔·stat·정렬을 일으키지 않고 terminal PTY로 새지 않음 |
 | palette/find/notice/modal/dropdown | 화면별 `State`/view/handle | `Input`/`Menu`/`Popover`/`Dialog` composite | AppKit first responder, IME, Escape/outside-dismiss, keyboard navigation |

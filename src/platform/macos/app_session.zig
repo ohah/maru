@@ -16,7 +16,6 @@ const file_tree = maru.session.file_tree;
 const file_tree_navigation = maru.session.file_tree_navigation;
 const file_tree_mutation = maru.session.file_tree_mutation;
 const file_tree_icon = chrome.file_tree_icon;
-const file_tree_scrollbar = chrome.components.file_tree_scrollbar;
 const dock_view_bar = chrome.components.dock_view_bar;
 const git_backend_mod = @import("git_backend.zig");
 const scm_view = maru.session.scm_view;
@@ -1034,6 +1033,24 @@ fn clampFrameRateHz(hz: u32) u32 {
 
 const default_scrollbar_visible_ticks: u32 = ticksForMsAtRate(scrollbar_visible_ms, config_mod.theme.render_frame_rate_default);
 const default_scrollbar_fade_ticks: u32 = ticksForMsAtRate(scrollbar_fade_ms, config_mod.theme.render_frame_rate_default);
+
+/// 탐색기 스크롤바 치수(SV2b). 옛 `components/file_tree_scrollbar.zig`가 들고 있던 값을 그대로 옮겼다 —
+/// 그 모듈은 기능이 전부 `chrome/ui/scroll_area.zig`에 있어 이 슬라이스에서 지웠다.
+const file_tree_scrollbar_width_px: u32 = 8;
+const file_tree_scrollbar_inset_px: u32 = 3;
+const file_tree_scrollbar_min_thumb_px: u32 = 24;
+
+/// 탐색기가 내는 tree의 노드 id. `scrollArea`가 track/thumb을 **자기 preorder 안에서** 내므로
+/// root(=scrollArea) 하나에 둘이 딸린다.
+const file_tree_scroll_ids = struct {
+    const area: chrome.ui.tree.UiId = 0x4654_0001;
+    const track: chrome.ui.tree.UiId = 0x4654_0002;
+    const thumb: chrome.ui.tree.UiId = 0x4654_0003;
+};
+/// track과 thumb이 함께 선언하는 drag payload. tree는 이 값의 의미를 모른다.
+const file_tree_scroll_drag_payload: u64 = 1;
+/// scrollArea 자신 + track + thumb. 자식이 없으므로 이보다 커질 수 없다.
+const file_tree_scroll_max_entries: usize = 3;
 
 /// 이번 tick에 활성 surface frame을 (재)투영할지 결정한다 — 순수 함수라 게이트 규칙을 헤드리스로 고정한다.
 /// 베이스/결정(docs/io-render-threading.md): synchronized output(DECSET 2026)은 **라이브 화면**이 half-drawn
@@ -3369,7 +3386,6 @@ pub const AppSession = struct {
     file_tree_scrollbar_idle_ticks: u32 = default_scrollbar_visible_ticks + default_scrollbar_fade_ticks,
     file_tree_scrollbar_last_offset_px: u32 = 0,
     file_tree_scrollbar_hovered: bool = false,
-    file_tree_scrollbar_geometry: ?file_tree_scrollbar.Geometry = null,
     file_tree_projection_generation: u64 = 1,
     file_tree_perf_counters: ?*FileTreePerfCounters = null,
     // path+row-kind가 selection SSOT다. index는 rebuild에서 fallback/scroll 보정에만 쓰는 힌트이며 영속하지 않는다.
@@ -3572,19 +3588,19 @@ pub const AppSession = struct {
     // move는 좌표를 덮어쓰기만 하고 tick이 최종 하나를 적용한다(계약 §4.3). clamp 결과가 같으면
     // effect 자체가 없다 — 경계에 닿은 채 미는 동안 resize 팬아웃이 반복되지 않는다.
     divider_coalescer: chrome.ui.continuous_drag.Coalescer(f32) = .{},
-    // file tree scrollbar thumb의 capture 수명 — CIM3. 옛 `PointerGestureOwner.file_tree_scrollbar`를
-    // 대체한다. divider와 같은 구조이며, 아래 세 필드가 down 시점 스냅샷이다.
+    // 탐색기 스크롤바의 capture 수명 — CIM3. 옛 `PointerGestureOwner.file_tree_scrollbar`를 대체한다.
     scrollbar_interaction: chrome.ui.interaction.InteractionState = .{},
-    scrollbar_entry_scratch: [2]chrome.ui.tree.RectEntry = undefined,
-    scrollbar_snapshot_generation: u64 = 0,
-    scrollbar_capture: ?struct {
-        geometry: file_tree_scrollbar.Geometry,
-        grab_y: f32,
-        root_generation: u64,
-        projection_generation: u64,
-    } = null,
-    // move는 좌표만 모으고 tick이 최종 하나를 적용한다(계약 §4.3). 같은 행으로 clamp되면 무동작.
-    scrollbar_coalescer: chrome.ui.continuous_drag.Coalescer(u32) = .{},
+    /// 탐색기가 발행하는 tree(SV2b). root + scrollArea + track + thumb 넷이 상한이고, 자식은 없다 —
+    /// 행은 셀 격자라 tree 노드가 아니며(ML6의 텍스트 모델 블로커), 스크롤바만 프리미티브로 낸다.
+    /// 이 배열이 **published snapshot**이라 build 스크래치와 공유하지 않는다.
+    file_tree_scroll_entries: [file_tree_scroll_max_entries]chrome.ui.tree.RectEntry = undefined,
+    file_tree_scroll_entry_count: usize = 0,
+    file_tree_scroll_generation: u64 = 0,
+    /// 잡은 지점·down 시점 기하·coalescing을 함께 소유한다(도크와 같은 타입). 예전에는 host가 세
+    /// 필드로 나눠 들고 coalescer를 따로 뒀는데, 그 셋이 한 제스처의 상태라 갈라 둘 이유가 없었다.
+    file_tree_scroll_drag: chrome.ui.scroll_area.Drag = .{},
+    /// carry 판정에 쓰는 down 시점 domain 신원. 기하는 `file_tree_scroll_drag`가 든다.
+    file_tree_scroll_drag_owner: ?struct { root_generation: u64, projection_generation: u64 } = null,
     // AppKit E2E 전용 계측 — 흡수한 move 수와 실제로 재투영한 횟수. 계약 §4.3의 상한이 move 수가
     // 아니라 tick 수임을 제품 경로에서 보이려면 그 둘이 달라야 하고, 행 값만 보는 fixture는
     // 한 프레임에 몇 번 적용됐는지를 구분하지 못한다.
@@ -5858,18 +5874,15 @@ pub const AppSession = struct {
             .resize_applications = self.divider_resize_applications,
         };
         self.fillTabDragSmokeProbe(&probe);
-        if (self.fileTreeScrollbarGeometry()) |bar| {
-            var storage: [2]chrome.ui.tree.RectEntry = undefined;
-            if (file_tree_scrollbar.publish(bar, 1, &storage)) |bar_tree| {
-                if (bar_tree.entries.len == 2) {
-                    const thumb = bar_tree.entries[1].rect;
-                    probe.scrollbar_present = true;
-                    probe.scrollbar_thumb_x_px = @intFromFloat(thumb.x);
-                    probe.scrollbar_thumb_y_px = @intFromFloat(thumb.y);
-                    probe.scrollbar_thumb_w_px = @intFromFloat(@max(thumb.width, 0));
-                    probe.scrollbar_thumb_h_px = @intFromFloat(@max(thumb.height, 0));
-                }
-            } else |_| {}
+        // 스모크가 겨냥할 좌표는 **발행된 tree**에서 그대로 온다. 예전에는 probe가 기하를 다시 발행해
+        // 두 번째 출처를 만들었다 — 겨냥한 지점과 제품이 잡는 지점이 갈릴 자리였다.
+        for (self.file_tree_scroll_entries[0..self.file_tree_scroll_entry_count]) |entry| {
+            if (entry.id != file_tree_scroll_ids.thumb) continue;
+            probe.scrollbar_present = true;
+            probe.scrollbar_thumb_x_px = @intFromFloat(entry.rect.x);
+            probe.scrollbar_thumb_y_px = @intFromFloat(entry.rect.y);
+            probe.scrollbar_thumb_w_px = @intFromFloat(@max(entry.rect.width, 0));
+            probe.scrollbar_thumb_h_px = @intFromFloat(@max(entry.rect.height, 0));
         }
         const published = self.publishDividerTree() orelse return probe;
         if (published.entries.len == 0) return probe;
@@ -14544,41 +14557,140 @@ pub const AppSession = struct {
         return @min(self.file_tree_scroll.offset_y_px, self.fileTreeScrollExtent().max_offset_px);
     }
 
-    fn fileTreeScrollbarGeometry(self: *const AppSession) ?file_tree_scrollbar.Geometry {
-        return self.file_tree_scrollbar_geometry;
+    /// published tree가 발행한 track/thumb rect에서 스크롤바 기하를 **되읽는다**. 여기서 다시 계산하면
+    /// 보이는 것과 다른 두 번째 출처가 생긴다 — 그 갈라짐이 정확히 "보이는 곳과 눌리는 곳이 다른"
+    /// 결함이고, 도크가 같은 이유로 같은 함수를 갖는다(SV2b).
+    fn fileTreeScrollbarGeometry(self: *const AppSession) ?chrome.ui.scroll_area.ScrollbarGeometry {
+        var track: ?chrome.ui.layout.UiRect = null;
+        var thumb: ?chrome.ui.layout.UiRect = null;
+        for (self.file_tree_scroll_entries[0..self.file_tree_scroll_entry_count]) |entry| {
+            if (entry.id == file_tree_scroll_ids.track) track = entry.rect;
+            if (entry.id == file_tree_scroll_ids.thumb) thumb = entry.rect;
+        }
+        const t = track orelse return null;
+        const h = thumb orelse return null;
+        return .{
+            .track_x = t.x,
+            .track_y = t.y,
+            .track_w = t.width,
+            .track_h = t.height,
+            .thumb_y = h.y,
+            .thumb_h = h.height,
+            .max_offset_px = self.fileTreeScrollExtent().max_offset_px,
+        };
     }
 
+    /// 스크롤바가 놓일 여백(backing px). 컨테이너가 **자기 폭에서** 떼어 놓으므로 행 텍스트도 밴드도
+    /// 이 안으로 들어오지 않는다(docs/scroll-area.md §4). 예전에는 텍스트 **셀**을 통째로 빼서
+    /// (`reservedColumns`) 셀 폭에 따라 예약량이 들쭉날쭉했다.
+    fn fileTreeScrollGutterPx(self: *const AppSession) u32 {
+        const m = self.fileTreeScrollbarMetrics();
+        return m.width_px + m.inset_x_px;
+    }
+
+    /// 행 텍스트와 하이라이트 밴드가 쓸 수 있는 폭. 컨테이너가 gutter를 **상시** 떼어 놓으므로
+    /// 스크롤바가 나타나고 사라져도 이 값이 변하지 않는다 — 목록이 reflow하지 않는다는 뜻이다.
+    /// 스크롤바가 layer 2(텍스트 **아래**)로 내려왔으므로, 밴드가 이 폭을 넘으면 스크롤바를 덮는다.
+    fn fileTreeTextWidthPx(self: *const AppSession) u32 {
+        return self.dockGeometry().tree_content.w -| self.fileTreeScrollGutterPx();
+    }
+
+    fn fileTreeScrollbarMetrics(self: *const AppSession) chrome.ui.scroll_area.ScrollbarMetrics {
+        _ = self;
+        return .{
+            .width_px = file_tree_scrollbar_width_px,
+            .inset_x_px = file_tree_scrollbar_inset_px,
+            .min_thumb_px = file_tree_scrollbar_min_thumb_px,
+        };
+    }
+
+    /// 탐색기가 매 프레임 내는 tree. **자식이 없다** — 행은 셀 격자라 tree 노드가 아니고(ML6의 텍스트
+    /// 모델 블로커), 이 선언이 사는 이유는 track/thumb을 공용 경로로 내기 위해서다. 가상화 평행이동도
+    /// 여기서 쓰지 않는다(셀 경로가 자기 원점 편향으로 한다 — SV2a).
+    fn buildFileTreeScrollTree(self: *AppSession) void {
+        self.file_tree_scroll_entry_count = 0;
+        // 탐색기 목록으로 만든 스크롤바다 — 다른 뷰에 발행하면 목록과 무관한 막대가 뜨고 드래그도 먹는다.
+        if (self.dock.view != .explorer) return;
+        if (!self.dockVisible() or self.cell_height_px == 0) return;
+        const rect = self.dockGeometry().tree_content;
+        if (rect.w == 0 or rect.h == 0) return;
+        const extent = self.fileTreeScrollExtent();
+
+        var entries: [file_tree_scroll_max_entries]chrome.ui.tree.RectEntry = undefined;
+        var items: [file_tree_scroll_max_entries]chrome.ui.layout.Item = undefined;
+        var flex: [file_tree_scroll_max_entries]chrome.ui.layout.FlexScratch = undefined;
+        var child_rects: [file_tree_scroll_max_entries]chrome.ui.layout.UiRect = undefined;
+
+        // **root에는 outer style을 주지 않는다**(`error.RootOuterStyle`). 도크는 이 노드가 컨테이너의
+        // 자식이라 `height: fill`로 남은 높이를 먹지만, 탐색기는 스크롤 컨테이너 자체가 root라 크기가
+        // `root_size`로 이미 정해져 있다.
+        const node = chrome.ui.tree.scrollArea(.{
+            .id = file_tree_scroll_ids.area,
+            .scroll = .{
+                .offset_px = self.fileTreeEffectiveScrollPx(),
+                .content_h_px = extent.content_h_px,
+                .gutter_px = @floatFromInt(self.fileTreeScrollGutterPx()),
+                .metrics = self.fileTreeScrollbarMetrics(),
+                // paint는 **불변**이다. fade alpha를 여기 실으면 tree가 매 프레임 달라져 entry·action
+                // 배열을 다시 복사하고 reconcile을 다시 돈다(docs/scroll-area.md §7). alpha는 아래
+                // `collectFileTreeScrollbar`가 paint 시점에 얹는다.
+                .track = .{ .id = file_tree_scroll_ids.track, .action = .{ .id = file_tree_scroll_ids.track }, .paint = .{ .background = .surface_bg } },
+                .thumb = .{ .id = file_tree_scroll_ids.thumb, .action = .{ .id = file_tree_scroll_ids.thumb }, .paint = .{ .background = .muted_fg, .corner_radii_px = .{ file_tree_scrollbar_width_px / 2, file_tree_scrollbar_width_px / 2, file_tree_scrollbar_width_px / 2, file_tree_scrollbar_width_px / 2 } } },
+                // thumb을 누른 것 자체가 스크롤 의사이고 그 지점에 경쟁할 click이 없으므로 threshold는 0이다.
+                // track도 같은 payload를 선언한다 — 눌러 점프한 뒤 손을 떼지 않고 이어 끌 수 있어야 한다.
+                .drag = .{ .payload = file_tree_scroll_drag_payload, .axis = .vertical, .threshold_px = 0 },
+            },
+        }, &.{});
+
+        const built = chrome.ui.tree.build(node, .{
+            .root_size = .{ .width = @floatFromInt(rect.w), .height = @floatFromInt(rect.h) },
+            .max_entries = file_tree_scroll_max_entries,
+            .max_depth = 2,
+        }, .{
+            .entries = &entries,
+            .items = &items,
+            .flex_scratch = &flex,
+            .child_rects = &child_rects,
+        }) catch return;
+
+        // tree는 컨테이너 로컬 좌표다. 발행 전에 backing 좌표로 옮겨 hit-test·paint가 같은 값을 본다.
+        self.file_tree_scroll_generation +|= 1;
+        for (built.entries, 0..) |entry, i| {
+            var moved = entry;
+            moved.rect.x += @floatFromInt(rect.x);
+            moved.rect.y += @floatFromInt(rect.y);
+            if (moved.effective_clip) |*clip| {
+                clip.x += @floatFromInt(rect.x);
+                clip.y += @floatFromInt(rect.y);
+            }
+            self.file_tree_scroll_entries[i] = moved;
+        }
+        self.file_tree_scroll_entry_count = built.entries.len;
+    }
+
+    fn fileTreeScrollTree(self: *const AppSession) chrome.ui.tree.UiRectTree {
+        return .{
+            .entries = self.file_tree_scroll_entries[0..self.file_tree_scroll_entry_count],
+            .generation = self.file_tree_scroll_generation,
+        };
+    }
+
+    /// 재투영 지점. 계측은 여기 있다 — `buildFileTreeScrollTree`는 down/move에서도 불리므로 그것까지
+    /// 세면 "프레임당 몇 번 투영했는가"라는 예산의 의미가 달라진다.
     fn refreshFileTreeScrollbarGeometry(self: *AppSession) void {
         if (self.file_tree_perf_counters) |counters| {
             counters.projected_frames += 1;
             counters.geometry_builds += 1;
         }
-        self.file_tree_scrollbar_geometry = self.computeFileTreeScrollbarGeometry();
+        self.buildFileTreeScrollTree();
     }
 
     fn advanceFileTreeProjectionGeneration(self: *AppSession) void {
         self.file_tree_projection_generation +%= 1;
         if (self.file_tree_projection_generation == 0) self.file_tree_projection_generation = 1;
-        self.file_tree_scrollbar_geometry = null;
+        self.file_tree_scroll_entry_count = 0;
         self.file_tree_scrollbar_hovered = false;
         if (self.scrollbarCaptureActive()) self.endScrollbarCapture();
-    }
-
-    fn computeFileTreeScrollbarGeometry(self: *const AppSession) ?file_tree_scrollbar.Geometry {
-        // 탐색기 목록으로 계산한 스크롤바다 — 다른 뷰에 그리면 목록과 무관한 막대가 뜨고 드래그도 먹는다.
-        if (self.dock.view != .explorer) return null;
-        if (!self.dockVisible() or self.cell_height_px == 0) return null;
-        const rect = self.dockGeometry().tree_content;
-        const extent = self.fileTreeScrollExtent();
-        return file_tree_scrollbar.compute(
-            extent.content_h_px,
-            extent.viewport_h_px,
-            self.fileTreeEffectiveScrollPx(),
-            rect.x,
-            rect.y,
-            rect.w,
-            rect.h,
-        );
     }
 
     fn setFileTreeScrollbarHovered(self: *AppSession, hovered: bool) void {
@@ -14594,9 +14706,9 @@ pub const AppSession = struct {
     fn setFileTreeScrollOffsetPx(self: *AppSession, offset_px: i64) void {
         const extent = self.fileTreeScrollExtent();
         if (!self.file_tree_scroll.setOffsetPx(offset_px, extent.max_offset_px)) return;
-        // 옮긴 **직후**의 thumb을 지금 알아야 이어지는 드래그의 grab 기준점이 튀지 않는다.
-        if (self.file_tree_scrollbar_geometry) |geometry|
-            self.file_tree_scrollbar_geometry = geometry.withOffset(self.file_tree_scroll.offset_y_px);
+        // 옮긴 **직후**의 thumb을 지금 알아야 이어지는 드래그의 grab 기준점이 튀지 않는다. tree를 다시
+        // 내면 track/thumb rect가 새 offset을 반영한다 — 기하를 두 번째로 만들지 않는다.
+        self.buildFileTreeScrollTree();
         self.file_tree_hovered_row = null;
         self.file_tree_scrollbar_idle_ticks = 0;
         self.file_tree_scrollbar_last_offset_px = self.file_tree_scroll.offset_y_px;
@@ -14605,48 +14717,43 @@ pub const AppSession = struct {
 
     /// scrollbar를 capture가 볼 수 있는 tree로 다시 발행한다. thumb이 스크롤에 따라 움직이므로 매
     /// move마다 재발행하고 세대를 올린다 — capture를 넘길지는 §5 carry verdict가 판정한다.
-    fn publishScrollbarTree(self: *AppSession) ?chrome.ui.tree.UiRectTree {
-        const geometry = self.fileTreeScrollbarGeometry() orelse return null;
-        self.scrollbar_snapshot_generation +|= 1;
-        return file_tree_scrollbar.publish(
-            geometry,
-            self.scrollbar_snapshot_generation,
-            &self.scrollbar_entry_scratch,
-        ) catch null;
-    }
-
     fn scrollbarCaptureActive(self: *const AppSession) bool {
         return self.scrollbar_interaction.capture != null;
     }
 
     fn endScrollbarCapture(self: *AppSession) void {
         self.scrollbar_interaction.capture = null;
-        self.scrollbar_capture = null;
-        self.scrollbar_coalescer.reset();
+        self.file_tree_scroll_drag.end();
+        self.file_tree_scroll_drag_owner = null;
     }
 
     /// capture가 살아 있는 동안의 move/up. 소비했으면 true.
     fn routeScrollbarCapture(self: *AppSession, kind: i32, y_px: f64) bool {
-        const drag = self.scrollbar_capture orelse return false;
+        const owner = self.file_tree_scroll_drag_owner orelse return false;
         if (self.file_tree_perf_counters) |counters| counters.pointer_events += 1;
 
         const key = chrome.ui.interaction.GestureCompatibility{
-            .kind = file_tree_scrollbar.drag_payload,
+            .kind = file_tree_scroll_drag_payload,
             .enabled = true,
-            .owner_epoch = drag.root_generation,
-            .domain_identity = drag.projection_generation,
+            .owner_epoch = owner.root_generation,
+            .domain_identity = owner.projection_generation,
         };
         const current_key = chrome.ui.interaction.GestureCompatibility{
-            .kind = file_tree_scrollbar.drag_payload,
+            .kind = file_tree_scroll_drag_payload,
             .enabled = true,
             .owner_epoch = self.file_tree.rootGeneration(),
             .domain_identity = self.file_tree_projection_generation,
         };
 
-        const snapshot = self.publishScrollbarTree() orelse {
+        // thumb이 스크롤에 따라 움직이므로 매 move마다 다시 발행한다 — capture를 넘길지는 §5 carry
+        // verdict가 판정한다. 예전에는 전용 `publish`가 rect 두 개를 손으로 만들었고, 지금은 같은
+        // `scrollArea` 선언이 낸 tree를 그대로 쓴다.
+        self.buildFileTreeScrollTree();
+        const snapshot = self.fileTreeScrollTree();
+        if (snapshot.entries.len == 0) {
             self.endScrollbarCapture();
             return true;
-        };
+        }
         _ = chrome.ui.interaction.reconcileCarryingCapture(
             &self.scrollbar_interaction,
             snapshot,
@@ -14668,14 +14775,14 @@ pub const AppSession = struct {
             self.endScrollbarCapture();
             return true;
         };
-        if (!drag.geometry.sameSnapshot(live)) {
+        if (!fileTreeScrollbarSameSnapshot(self.file_tree_scroll_drag.geometry, live)) {
             self.endScrollbarCapture();
             return true;
         }
 
         const dispatched = chrome.ui.interaction.dispatch(&self.scrollbar_interaction, snapshot, .{
             .phase = if (kind == 2) .move else .up,
-            .x_px = @as(f64, drag.geometry.track_x) + @as(f64, drag.geometry.track_w) / 2,
+            .x_px = @as(f64, self.file_tree_scroll_drag.geometry.track_x) + @as(f64, self.file_tree_scroll_drag.geometry.track_w) / 2,
             .y_px = y_px,
             .timestamp_ns = 0,
             .button = .left,
@@ -14686,11 +14793,11 @@ pub const AppSession = struct {
         };
         if (dispatched.drag) |event| switch (event) {
             .began, .moved => |update| {
-                self.scrollbar_coalescer.absorb(update.x_px, update.y_px);
+                self.file_tree_scroll_drag.absorb(update.x_px, update.y_px);
                 self.scrollbar_move_events +|= 1;
             },
             .dropped => |update| {
-                self.scrollbar_coalescer.absorb(update.x_px, update.y_px);
+                self.file_tree_scroll_drag.absorb(update.x_px, update.y_px);
                 self.applyPendingScrollbarScroll();
                 self.endScrollbarCapture();
             },
@@ -14701,24 +14808,33 @@ pub const AppSession = struct {
     }
 
     /// tick이 부르는 소비 지점. move가 몇 번 왔든 최종 좌표 하나만 적용하고, 같은 offset으로 clamp되면
-    /// 재투영하지 않는다.
+    /// 재투영하지 않는다. 흡수·소비·중복 억제는 `scroll_area.Drag`가 소유한다(도크와 같은 타입).
     fn applyPendingScrollbarScroll(self: *AppSession) void {
-        const point = self.scrollbar_coalescer.take() orelse return;
-        const drag = self.scrollbar_capture orelse return;
-        const offset_px = file_tree_scrollbar.offsetForPointer(drag.geometry, point.y_px, drag.grab_y);
-        if (!self.scrollbar_coalescer.commitIfChanged(offset_px)) return;
+        const offset_px = self.file_tree_scroll_drag.takeOffset() orelse return;
         self.scrollbar_scroll_applications +|= 1;
         self.setFileTreeScrollOffsetPx(offset_px);
     }
 
+    /// 드래그 중에 잡은 thumb을 **계속 잡고 있어도 되는가**. 스크롤 위치(`thumb_y`)는 드래그가 바꾸는
+    /// 값이라 비교에서 빠지고, 그 밖의 것이 하나라도 달라지면 다른 목록·다른 기하를 가리키므로 끊는다.
+    fn fileTreeScrollbarSameSnapshot(
+        a: chrome.ui.scroll_area.ScrollbarGeometry,
+        b: chrome.ui.scroll_area.ScrollbarGeometry,
+    ) bool {
+        return a.track_x == b.track_x and a.track_y == b.track_y and
+            a.track_w == b.track_w and a.track_h == b.track_h and
+            a.thumb_h == b.thumb_h and a.max_offset_px == b.max_offset_px;
+    }
+
     fn beginFileTreeScrollbarGesture(self: *AppSession, x_px: f64, y_px: f64) bool {
+        self.buildFileTreeScrollTree();
         const geometry = self.fileTreeScrollbarGeometry() orelse return false;
         if (!geometry.trackContains(x_px, y_px)) return false;
-        const on_thumb = geometry.thumbContains(x_px, y_px);
-        const grab_y = if (on_thumb) @as(f32, @floatCast(y_px)) - geometry.thumb_y else geometry.thumb_h / 2;
-        if (!on_thumb) self.setFileTreeScrollOffsetPx(file_tree_scrollbar.offsetForTrackClick(geometry, y_px));
-        const current = self.fileTreeScrollbarGeometry() orelse return false;
-        const snapshot = self.publishScrollbarTree() orelse return false;
+        // down이 thumb인지 track 빈 곳인지, 잡은 지점을 어떻게 기억하는지, 점프 후 기하가 어떻게 되는지는
+        // `scroll_area.Drag`가 안다. host는 published 기하를 건네고 점프 결과만 적용한다.
+        if (self.file_tree_scroll_drag.begin(geometry, x_px, y_px)) |jumped| self.setFileTreeScrollOffsetPx(jumped);
+        const snapshot = self.fileTreeScrollTree();
+        if (snapshot.entries.len == 0) return false;
         _ = chrome.ui.interaction.dispatch(&self.scrollbar_interaction, snapshot, .{
             .phase = .down,
             .x_px = x_px,
@@ -14726,17 +14842,17 @@ pub const AppSession = struct {
             .timestamp_ns = 0,
             .generation = snapshot.generation,
         }) catch return false;
-        if (self.scrollbar_interaction.capture == null) return false;
+        if (self.scrollbar_interaction.capture == null) {
+            self.file_tree_scroll_drag.end();
+            return false;
+        }
         // 옛 경로는 `beginPointerGesture`가 앞선 gesture를 취소했다. 축이 갈렸어도 규율은 같다.
         self.clearSidebarDragPreview();
         self.pointer_gesture_owner = .none;
-        self.scrollbar_capture = .{
-            .geometry = current,
-            .grab_y = grab_y,
+        self.file_tree_scroll_drag_owner = .{
             .root_generation = self.file_tree.rootGeneration(),
             .projection_generation = self.file_tree_projection_generation,
         };
-        self.scrollbar_coalescer.reset();
         self.file_tree_scrollbar_idle_ticks = 0;
         self.metal_dirty = true;
         return true;
@@ -22665,8 +22781,7 @@ pub const AppSession = struct {
                 unit,
                 extent.max_offset_px,
             )) {
-                if (self.file_tree_scrollbar_geometry) |geometry|
-                    self.file_tree_scrollbar_geometry = geometry.withOffset(self.file_tree_scroll.offset_y_px);
+                self.buildFileTreeScrollTree();
                 self.file_tree_scrollbar_idle_ticks = 0;
                 self.metal_dirty = true;
                 self.setHoveredFileTreeRow(self.fileTreeRowAt(x_px, y_px));
@@ -29868,7 +29983,6 @@ pub const AppSession = struct {
             self.appendNotificationBadge(); // 종 우상단 빨강 원형 배지(안 읽음 있을 때만, 펼침 헤더)
             self.appendPaneScrollbars(); // 모든 pane 우측 thumb(스크롤백 있을 때만) — 활성=fade/hover, 비활성=faint
             self.appendSidebarScrollbar(); // 사이드바 우측 thumb(워크스페이스 카드가 뷰포트 넘칠 때만) — 단일 트랙 fade
-            self.appendFileTreeScrollbar(); // 탐색기 overflow-only thumb — render/hit/drag 공용 geometry
             self.gpu_shadows.clearRetainingCapacity(); // C4b 모달: 그림자도 per-frame — 매 프레임 비우고 lowering이 재채움.
             self.gpu_glyphs.clearRetainingCapacity(); // B1: final pixel text도 completed frame 단위로만 보관한다.
             var overlay_frame: ?metal_frame.PaneFrame = null;
@@ -30018,7 +30132,9 @@ pub const AppSession = struct {
                         self.appendClippedBarBgQuad(.{
                             .x = dg.tree_content.x,
                             .y = band_top + @as(u32, @intCast(index - start)) * self.cell_height_px,
-                            .w = dg.tree_content.w,
+                            // gutter를 뺀 폭이다. 스크롤바가 layer 2(밴드와 같은 층)로 내려왔으므로 밴드가
+                            // 전폭이면 append 순서에 따라 스크롤바를 덮는다(SV2b).
+                            .w = self.fileTreeTextWidthPx(),
                             .h = self.cell_height_px,
                         }, if (selected and self.fileTreeFocused())
                             packOpaqueRgb(self.appearance.theme.accent)
@@ -30029,6 +30145,10 @@ pub const AppSession = struct {
                     }
                 }
                 self.appendBarBgQuad(dg.divider, self.dividerColor());
+                // **밴드보다 뒤에** 넣는다(SV2b). 스크롤바가 layer 2로 내려와 행 하이라이트 밴드와 같은
+                // 버킷이 됐고, 그 안에서는 배열 순서가 painter 순서다. 밴드 폭은 gutter 앞에서 끝나므로
+                // 지금은 겹치지 않지만, 순서까지 맞춰야 밴드 폭이 나중에 넓어져도 thumb이 안 가려진다.
+                self.appendFileTreeScrollbar();
             }
             // 접기/펴기 토글 배경 — 평소 투명(배경색과 동일), 호버 시에만 하이라이트(왼쪽 헤더 아이콘 동형). 사용자 피드백.
             if (self.dock_toggle_hovered) if (self.filePanelDockControlRect()) |r| {
@@ -30429,14 +30549,14 @@ pub const AppSession = struct {
                             self.collectAgentSessionDock(&collected, pane_frame_builder, tabbar_colors);
                         }
                         if (self.dock.view == .explorer and tree_content_cols > 0 and draw_window.count > 0) {
-                            const reserved_cols: u16 = if (self.fileTreeScrollbarGeometry() != null)
-                                @intCast(@min(
-                                    file_tree_scrollbar.reservedColumns(dg.tree_content.w, self.cell_width_px),
-                                    @as(u32, std.math.maxInt(u16)),
-                                ))
-                            else
-                                0;
-                            const content_cols = tree_content_cols -| reserved_cols;
+                            // 텍스트가 쓸 수 있는 칸 수는 **gutter를 뺀 폭**에서 나온다(SV2b). 예전에는
+                            // 칸을 통째로 예약해(`reservedColumns`) 셀 폭에 따라 예약량이 들쭉날쭉했고,
+                            // 스크롤바가 없으면 0칸이라 목록 폭이 나타났다 사라졌다 했다. gutter는 컨테이너가
+                            // 상시 소유하므로 스크롤바 유무로 행이 reflow하지 않는다.
+                            const content_cols: u16 = @intCast(@min(
+                                self.fileTreeTextWidthPx() / self.cell_width_px,
+                                @as(u32, std.math.maxInt(u16)),
+                            ));
                             file_tree_rows: {
                                 // If an externally damaged/tiny layout cannot fit one full content cell beside the
                                 // scrollbar, draw no row glyphs instead of letting the track cover the only cell.
@@ -32253,29 +32373,33 @@ pub const AppSession = struct {
         }) catch {};
     }
 
+    /// 탐색기 스크롤바를 **공용 paint 경로**로 그린다(SV2b). 발행된 tree를 `ui_paint`가 quad op으로
+    /// 옮기고 `chrome_draw_lowering`이 GpuQuad로 내린다 — 도크와 같은 경로이며, 모양·색·radius를 host가
+    /// 손으로 다시 만들지 않는다.
+    ///
+    /// **fade alpha만 여기서 얹는다.** tree에 실으면 매 프레임 달라져 entry·action 배열을 다시 복사하고
+    /// reconcile을 다시 돈다(docs/scroll-area.md §7). 그래서 선언은 불변으로 두고, paint가 만든 op의
+    /// alpha를 이 자리에서 덮는다.
     fn appendFileTreeScrollbar(self: *AppSession) void {
-        const geometry = self.fileTreeScrollbarGeometry() orelse return;
+        const snapshot = self.fileTreeScrollTree();
+        if (snapshot.entries.len == 0) return;
         const emphasized = self.file_tree_scrollbar_hovered or self.scrollbarCaptureActive();
         const alpha: u8 = if (emphasized) scrollbar_alpha_full else self.scrollbarAlpha(self.file_tree_scrollbar_idle_ticks);
-        const color = packRgbAlpha(self.mutedForeground(), alpha);
-        const radius = geometry.track_w * 0.5;
-        self.gpu_quads.append(self.allocator, .{
-            .x = geometry.track_x,
-            .y = geometry.thumb_y,
-            .w = geometry.track_w,
-            .h = geometry.thumb_h,
-            .corner_radii = .{ radius, radius, radius, radius },
-            .border_widths = .{ 0, 0, 0, 0 },
-            .fill_color0 = color,
-            .fill_color1 = color,
-            .border_color = 0,
-            .gradient_kind = 0,
-            .layer = 3,
-        }) catch {
+
+        var ops: [file_tree_scroll_max_entries]chrome.draw.Op = undefined;
+        const tokens = self.buildChromeTokens();
+        const draws = chrome.ui.paint.paint(snapshot, self.scrollbar_interaction, &tokens, .sidebar, .{ .ops = &ops }) catch {
             if (self.file_tree_perf_counters) |counters| counters.allocator_calls += 1;
             return;
         };
-        if (self.file_tree_perf_counters) |counters| counters.thumb_quads += 1;
+        for (ops[0..draws.ops.len]) |*op| switch (op.*) {
+            .quad => |*q| q.alpha = alpha,
+            else => {},
+        };
+        const before = self.gpu_quads.items.len;
+        // rect는 이미 backing 좌표다(`buildFileTreeScrollTree`가 옮겼다) — origin을 다시 더하지 않는다.
+        chrome_draw_lowering.appendBackgroundQuads(self.allocator, &.{draws}, &tokens, 0, 0, &self.gpu_quads);
+        if (self.file_tree_perf_counters) |counters| counters.thumb_quads += @intCast(self.gpu_quads.items.len - before);
     }
 
     /// C4b-5: rich 탭 바 배경(직각)을 layer 2 GpuQuad로 그린다 — 활성 탭 밴드 quad(같은 layer, 뒤에 append되어 위로)가
@@ -43131,9 +43255,10 @@ test "R1: 터미널 tracking + Cmd 마우스 → report_mouse.mods에 32 없음(
     session.divider_split_scratch = .empty;
     session.divider_snapshot_generation = 0;
     session.scrollbar_interaction = .{};
-    session.scrollbar_capture = null;
-    session.scrollbar_coalescer = .{};
-    session.scrollbar_snapshot_generation = 0;
+    session.file_tree_scroll_drag = .{};
+    session.file_tree_scroll_drag_owner = null;
+    session.file_tree_scroll_entry_count = 0;
+    session.file_tree_scroll_generation = 0;
     session.allocator = std.testing.allocator;
     session.io = std.Io.Threaded.global_single_threaded.io();
     var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 8, .rows = 4 });
@@ -47049,9 +47174,10 @@ test "mouse reporting 진입은 진행 중이던 드래그 autoscroll을 멈춘�
     session.divider_split_scratch = .empty;
     session.divider_snapshot_generation = 0;
     session.scrollbar_interaction = .{};
-    session.scrollbar_capture = null;
-    session.scrollbar_coalescer = .{};
-    session.scrollbar_snapshot_generation = 0;
+    session.file_tree_scroll_drag = .{};
+    session.file_tree_scroll_drag_owner = null;
+    session.file_tree_scroll_entry_count = 0;
+    session.file_tree_scroll_generation = 0;
     session.allocator = std.testing.allocator;
     session.io = std.Io.Threaded.global_single_threaded.io(); // updateCursorBlink→readActiveSnapshot이 lockCore(self.io)
     var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
@@ -47076,9 +47202,10 @@ test "mouse reporting 진입은 진행 중이던 드래그 autoscroll을 멈춘�
     session.divider_split_scratch = .empty;
     session.divider_snapshot_generation = 0;
     session.scrollbar_interaction = .{};
-    session.scrollbar_capture = null;
-    session.scrollbar_coalescer = .{};
-    session.scrollbar_snapshot_generation = 0;
+    session.file_tree_scroll_drag = .{};
+    session.file_tree_scroll_drag_owner = null;
+    session.file_tree_scroll_entry_count = 0;
+    session.file_tree_scroll_generation = 0;
     session.cell_width_px = 8;
     session.cell_height_px = 16;
     session.scale_milli = 1000;
@@ -47113,9 +47240,10 @@ test "drag autoscroll scrolls one line per tick and extends the selection to the
     session.divider_split_scratch = .empty;
     session.divider_snapshot_generation = 0;
     session.scrollbar_interaction = .{};
-    session.scrollbar_capture = null;
-    session.scrollbar_coalescer = .{};
-    session.scrollbar_snapshot_generation = 0;
+    session.file_tree_scroll_drag = .{};
+    session.file_tree_scroll_drag_owner = null;
+    session.file_tree_scroll_entry_count = 0;
+    session.file_tree_scroll_generation = 0;
     session.allocator = std.testing.allocator;
     session.io = std.Io.Threaded.global_single_threaded.io(); // updateCursorBlink→readActiveSnapshot이 lockCore(self.io)
     var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
@@ -47141,9 +47269,10 @@ test "drag autoscroll scrolls one line per tick and extends the selection to the
     session.divider_split_scratch = .empty;
     session.divider_snapshot_generation = 0;
     session.scrollbar_interaction = .{};
-    session.scrollbar_capture = null;
-    session.scrollbar_coalescer = .{};
-    session.scrollbar_snapshot_generation = 0;
+    session.file_tree_scroll_drag = .{};
+    session.file_tree_scroll_drag_owner = null;
+    session.file_tree_scroll_entry_count = 0;
+    session.file_tree_scroll_generation = 0;
     // 자동 스크롤은 frame rate 무관 ≈30줄/s(경과 ms 게이트). frame_loop_rate_hz=30이면 msPerTick=33=step_ms라 tick
     // 마다 한 줄 — 이 테스트의 "tick당 한 줄" 가정과 맞는 cadence를 명시한다(undefined frame_loop_rate_hz 트랩도 회피).
     session.frame_loop_rate_hz = 30;
@@ -47195,9 +47324,10 @@ test "drag autoscroll 속도는 frame rate에 비례하지 않는다 (경과 ms 
     session.divider_split_scratch = .empty;
     session.divider_snapshot_generation = 0;
     session.scrollbar_interaction = .{};
-    session.scrollbar_capture = null;
-    session.scrollbar_coalescer = .{};
-    session.scrollbar_snapshot_generation = 0;
+    session.file_tree_scroll_drag = .{};
+    session.file_tree_scroll_drag_owner = null;
+    session.file_tree_scroll_entry_count = 0;
+    session.file_tree_scroll_generation = 0;
     session.allocator = std.testing.allocator;
     session.io = std.Io.Threaded.global_single_threaded.io(); // updateCursorBlink→readActiveSnapshot이 lockCore(self.io)
     var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
@@ -51131,15 +51261,18 @@ test "wheel·track click·keyboard가 하나의 스크롤 상태를 이어받고
     const after_anchor = session.fileTreeEffectiveScrollPx();
     try std.testing.expect(after_anchor > 0);
 
-    // ⑤ 그리고 그 상태가 곧 thumb 위치다 — 발행된 tree가 같은 값에서 나온다.
+    // ⑤ 그리고 그 상태가 곧 thumb 위치다 — **발행된 tree**가 같은 값에서 나온다(SV2b: 기하를 다시
+    //    계산하지 않고 track/thumb entry를 되읽는다).
     session.refreshFileTreeScrollbarGeometry();
     const moved = session.fileTreeScrollbarGeometry().?;
-    try std.testing.expectEqual(after_anchor, moved.offset_px);
-    var storage: [2]chrome.ui.tree.RectEntry = undefined;
-    const published = try file_tree_scrollbar.publish(moved, 1, &storage);
-    try std.testing.expectEqual(@as(usize, 2), published.entries.len);
+    // scrollArea가 track과 thumb을 자기 preorder 안에서 낸다 — 컨테이너까지 셋이다.
+    try std.testing.expectEqual(@as(usize, 3), session.file_tree_scroll_entry_count);
     // thumb이 track 시작보다 아래에 있다 — 스크롤 상태가 발행에 반영됐다는 뜻이다.
-    try std.testing.expect(published.entries[1].rect.y > moved.track_y);
+    try std.testing.expect(moved.thumb_y > moved.track_y);
+    // 그리고 그 위치는 offset의 함수다: 맨 위로 되돌리면 thumb도 track 상단으로 붙는다.
+    session.setFileTreeScrollOffsetPx(0);
+    const at_top = session.fileTreeScrollbarGeometry().?;
+    try std.testing.expectApproxEqAbs(at_top.track_y, at_top.thumb_y, 0.01);
 }
 
 test "두 세대가 그대로여도 track/thumb 기하가 바뀌면 스크롤 드래그를 놓는다" {
@@ -51166,8 +51299,8 @@ test "두 세대가 그대로여도 track/thumb 기하가 바뀌면 스크롤 �
     // domain 검증이 놓아야 한다.
     const root_before = session.file_tree.rootGeneration();
     const projection_before = session.file_tree_projection_generation;
-    session.scrollbar_capture.?.geometry.track_h += 40;
-    session.scrollbar_capture.?.geometry.thumb_h += 8;
+    session.file_tree_scroll_drag.geometry.track_h += 40;
+    session.file_tree_scroll_drag.geometry.thumb_h += 8;
     try std.testing.expectEqual(root_before, session.file_tree.rootGeneration());
     try std.testing.expectEqual(projection_before, session.file_tree_projection_generation);
 
@@ -51214,6 +51347,108 @@ test "파일 트리 스크롤바 드래그는 손을 떼기 전에 tick이 적�
     session.endScrollbarCapture();
 }
 
+// SV2b — 탐색기 스크롤바가 공용 ScrollArea 경로로 넘어간 것을 고정한다. 옛 구조는 **별도 tree**
+// (`file_tree_scrollbar.publish`)가 hit을 내고 host가 quad를 손으로 만들었다. 그 둘이 갈리면 "보이는
+// 곳과 눌리는 곳이 다른" 결함이 되고, 그것이 이 이관의 이유다.
+test "file tree scrollbar publishes one tree that paint and hit-test both read" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.activateFilePanelDockControl();
+    session.file_tree_rows.clearRetainingCapacity();
+    try session.file_tree_rows.ensureTotalCapacity(allocator, 512);
+    for (0..512) |_| session.file_tree_rows.appendAssumeCapacity(.empty);
+    session.refreshFileTreeScrollbarGeometry();
+
+    // ① 발행은 `scrollArea` 하나에서 나온다 — 컨테이너 + track + thumb.
+    try std.testing.expectEqual(@as(usize, 3), session.file_tree_scroll_entry_count);
+    const geometry = session.fileTreeScrollbarGeometry() orelse return error.FileTreeFixtureHasNoScrollbar;
+
+    // ② **track이 thumb보다 먼저다.** `interaction.hitAction`이 reverse z-order라, 뒤집히면 thumb 위
+    //    down이 track click으로 판정돼 드래그 대신 점프가 일어난다.
+    var track_index: ?usize = null;
+    var thumb_index: ?usize = null;
+    for (session.file_tree_scroll_entries[0..session.file_tree_scroll_entry_count], 0..) |entry, i| {
+        if (entry.id == file_tree_scroll_ids.track) track_index = i;
+        if (entry.id == file_tree_scroll_ids.thumb) thumb_index = i;
+    }
+    try std.testing.expect(track_index.? < thumb_index.?);
+
+    // ③ 그 rect가 **backing 좌표**다 — 컨테이너 로컬로 두면 hit이 도크 왼쪽 위로 밀린다.
+    const content = session.dockGeometry().tree_content;
+    try std.testing.expect(geometry.track_x >= @as(f32, @floatFromInt(content.x)));
+    try std.testing.expectApproxEqAbs(@as(f32, @floatFromInt(content.y)), geometry.track_y, 0.01);
+
+    // ④ gutter가 트랙을 **자기 폭 안에** 담는다: 트랙 오른쪽 변이 컨테이너를 넘지 않는다.
+    try std.testing.expect(geometry.track_x + geometry.track_w <= @as(f32, @floatFromInt(content.x + content.w)));
+    // 그리고 텍스트 폭은 gutter만큼 줄어 있다 — 그 둘이 겹치지 않는다는 뜻이다.
+    try std.testing.expectEqual(content.w - session.fileTreeScrollGutterPx(), session.fileTreeTextWidthPx());
+    try std.testing.expect(@as(f32, @floatFromInt(content.x + session.fileTreeTextWidthPx())) <= geometry.track_x);
+
+    // ⑤ **paint가 그 tree에서 나온다.** host가 기하를 다시 만들면 이 단언은 통과하면서 화면만 어긋난다.
+    session.gpu_quads.clearRetainingCapacity();
+    session.appendFileTreeScrollbar();
+    try std.testing.expectEqual(@as(usize, 2), session.gpu_quads.items.len); // track + thumb
+    var saw_thumb = false;
+    for (session.gpu_quads.items) |quad| {
+        // 스크롤바는 밴드와 같은 버킷(layer 2)이다 — 이 값이 바뀌면 z 규칙이 통째로 달라진다.
+        try std.testing.expectEqual(@as(u32, 2), quad.layer);
+        // `ui_paint`가 rect를 정수 픽셀로 스냅하므로 1px 안쪽에서 만난다(원본 track_x는 gutter 중앙이라 .5).
+        try std.testing.expectApproxEqAbs(geometry.track_x, quad.x, 1.0);
+        // 스냅 오차 1px 안에서 thumb을 알아본다 — track은 뷰포트 전체 높이라 두 quad가 섞이지 않는다.
+        if (@abs(quad.y - geometry.thumb_y) <= 1.0 and @abs(quad.h - geometry.thumb_h) <= 1.0) saw_thumb = true;
+    }
+    try std.testing.expect(saw_thumb);
+}
+
+// 스크롤바가 layer 2로 내려오면서 행 하이라이트 밴드와 **같은 버킷**이 됐다. 그 안에서는 배열 순서가
+// painter 순서이므로, 밴드가 뒤에 오면 밴드가 thumb을 덮는다. 폭을 gutter 앞에서 끊은 것과 순서를
+// 뒤로 둔 것 둘 다 필요하다 — 하나만으로는 나중에 다른 쪽이 바뀔 때 조용히 가려진다.
+test "file tree scrollbar is painted after the row band and never under it" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    session.activateFilePanelDockControl();
+    session.file_tree_rows.clearRetainingCapacity();
+    for (0..512) |_| try session.file_tree_rows.append(allocator, .{ .file = .{
+        .path = "/repo/src/main.zig",
+        .label = "main.zig",
+        .depth = 1,
+        .supported = true,
+        .open = false,
+        .active = false,
+        .dirty = false,
+        .external_change = false,
+        .symlink = false,
+    } });
+    _ = session.setFileTreeSelection(0); // 밴드가 나오도록 한 행을 선택한다
+    session.refreshFileTreeScrollbarGeometry();
+    const geometry = session.fileTreeScrollbarGeometry() orelse return error.FileTreeFixtureHasNoScrollbar;
+    const content = session.dockGeometry().tree_content;
+
+    // 밴드는 gutter **앞에서** 끝난다 — 트랙 위로 넘어오지 않는다.
+    session.gpu_quads.clearRetainingCapacity();
+    session.appendClippedBarBgQuad(.{
+        .x = content.x,
+        .y = content.y,
+        .w = session.fileTreeTextWidthPx(),
+        .h = session.cell_height_px,
+    }, 0xFF00FF00, content);
+    const band_end = session.gpu_quads.items[0].x + session.gpu_quads.items[0].w;
+    try std.testing.expect(band_end <= geometry.track_x);
+
+    // 그리고 스크롤바가 **그 뒤에** 온다(같은 버킷에서 나중이 위다).
+    session.appendFileTreeScrollbar();
+    try std.testing.expect(session.gpu_quads.items.len > 1);
+    for (session.gpu_quads.items[1..]) |quad| try std.testing.expectEqual(@as(u32, 2), quad.layer);
+}
+
 test "file tree scrollbar is overflow-only and stale drag snapshots cancel" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -51228,11 +51463,12 @@ test "file tree scrollbar is overflow-only and stale drag snapshots cancel" {
     for (0..512) |_| session.file_tree_rows.appendAssumeCapacity(.empty);
     session.refreshFileTreeScrollbarGeometry();
     const top = session.fileTreeScrollbarGeometry().?;
-    try std.testing.expectEqual(@as(u32, 0), top.offset_px);
+    try std.testing.expectApproxEqAbs(top.track_y, top.thumb_y, 0.01); // 맨 위
     const tree_content = session.dockGeometry().tree_content;
-    const total_cols = tree_content.w / session.cell_width_px;
-    const reserved_cols = file_tree_scrollbar.reservedColumns(tree_content.w, session.cell_width_px);
-    const last_content_right = tree_content.x + (total_cols -| reserved_cols) * session.cell_width_px;
+    // gutter가 트랙 자리를 상시 비워 둔다(SV2b) — 마지막 텍스트 칸의 오른쪽 끝이 트랙 왼쪽 변을
+    // 넘지 않는다. 예전에는 `reservedColumns`가 **셀 단위로** 빼서 셀 폭에 따라 예약량이 달라졌다.
+    const content_cols = session.fileTreeTextWidthPx() / session.cell_width_px;
+    const last_content_right = tree_content.x + content_cols * session.cell_width_px;
     try std.testing.expect(@as(f32, @floatFromInt(last_content_right)) <= top.track_x);
     try std.testing.expect(session.beginFileTreeScrollbarGesture(
         top.track_x + top.track_w / 2,
@@ -51605,7 +51841,8 @@ test "file tree production hot paths emit bounded counter artifact" {
     session.endScrollbarCapture();
 
     for (0..1000) |_| {
-        session.dropQuadsByLayer(3);
+        // 스크롤바는 SV2b에서 layer 2(밴드와 같은 버킷)로 내려왔다 — drop과 append를 짝짓는 층도 그것이다.
+        session.dropQuadsByLayer(2);
         session.refreshFileTreeScrollbarGeometry();
         session.appendFileTreeScrollbar();
     }
@@ -51616,7 +51853,8 @@ test "file tree production hot paths emit bounded counter artifact" {
     try std.testing.expectEqual(@as(usize, 1000), counters.pointer_events);
     try std.testing.expectEqual(@as(usize, 1000), counters.projected_frames);
     try std.testing.expectEqual(counters.projected_frames, counters.geometry_builds);
-    try std.testing.expectEqual(counters.projected_frames, counters.thumb_quads);
+    // 프레임당 track + thumb 둘이다(SV2b: 공용 paint가 track도 그린다 — 도크와 같은 모습).
+    try std.testing.expectEqual(counters.projected_frames * 2, counters.thumb_quads);
     try std.testing.expectEqual(@as(usize, 0), counters.allocator_calls);
 
     const report = try std.fmt.allocPrint(allocator,
@@ -52629,9 +52867,10 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
     session.divider_split_scratch = .empty;
     session.divider_snapshot_generation = 0;
     session.scrollbar_interaction = .{};
-    session.scrollbar_capture = null;
-    session.scrollbar_coalescer = .{};
-    session.scrollbar_snapshot_generation = 0;
+    session.file_tree_scroll_drag = .{};
+    session.file_tree_scroll_drag_owner = null;
+    session.file_tree_scroll_entry_count = 0;
+    session.file_tree_scroll_generation = 0;
 
     // 확장 grab band 안쪽에서 시작해도 첫 drag가 경계를 클릭점으로 순간 이동시키지 않고 pointer delta만 반영한다.
     // 수정 전에는 divider 선 우선순위 문제를 고친 뒤에도 sizePtForPointer가 포인터를 경계로 간주해 최대 band 폭만큼 점프했다.
@@ -54391,9 +54630,10 @@ test "code-review #8: 리스트 아래(past-end) 새-워크스페이스 드롭 �
     session.divider_split_scratch = .empty;
     session.divider_snapshot_generation = 0;
     session.scrollbar_interaction = .{};
-    session.scrollbar_capture = null;
-    session.scrollbar_coalescer = .{};
-    session.scrollbar_snapshot_generation = 0;
+    session.file_tree_scroll_drag = .{};
+    session.file_tree_scroll_drag_owner = null;
+    session.file_tree_scroll_entry_count = 0;
+    session.file_tree_scroll_generation = 0;
 }
 
 // 활성 탭이 단일 leaf SplitTree로 만들어지고, activeTabLeafRects가 그 leaf를 터미널 영역 전체에 펴는지
@@ -63534,9 +63774,10 @@ test "drag autoscroll works after a double-click word selection and skips redraw
     session.divider_split_scratch = .empty;
     session.divider_snapshot_generation = 0;
     session.scrollbar_interaction = .{};
-    session.scrollbar_capture = null;
-    session.scrollbar_coalescer = .{};
-    session.scrollbar_snapshot_generation = 0;
+    session.file_tree_scroll_drag = .{};
+    session.file_tree_scroll_drag_owner = null;
+    session.file_tree_scroll_entry_count = 0;
+    session.file_tree_scroll_generation = 0;
     session.allocator = std.testing.allocator;
     session.io = std.Io.Threaded.global_single_threaded.io(); // updateCursorBlink→readActiveSnapshot이 lockCore(self.io)
     var tab_surface = try maru.session.Surface.init(std.testing.allocator, 1, .{ .cols = 4, .rows = 2 });
@@ -63563,9 +63804,10 @@ test "drag autoscroll works after a double-click word selection and skips redraw
     session.divider_split_scratch = .empty;
     session.divider_snapshot_generation = 0;
     session.scrollbar_interaction = .{};
-    session.scrollbar_capture = null;
-    session.scrollbar_coalescer = .{};
-    session.scrollbar_snapshot_generation = 0;
+    session.file_tree_scroll_drag = .{};
+    session.file_tree_scroll_drag_owner = null;
+    session.file_tree_scroll_entry_count = 0;
+    session.file_tree_scroll_generation = 0;
     session.frame_loop_rate_hz = 30; // msPerTick=33=step_ms → 호출(tick)마다 한 줄(아래 "한 줄/호출" 가정과 맞춤)
     session.drag_autoscroll = 0;
     session.drag_autoscroll_accum_ms = 0;
@@ -67416,7 +67658,7 @@ test "도크 뷰: 탐색기 아닌 뷰의 클릭은 폴더 선택·트리 포커
     session.scrollWheel(-600, 0, false, x, y);
     try std.testing.expectEqual(@as(u32, 0), session.file_tree_scroll.offset_y_px);
     // 탐색기 행 수로 만든 스크롤바도 다른 뷰에는 없다(그리기·드래그 양쪽).
-    try std.testing.expect(session.computeFileTreeScrollbarGeometry() == null);
+    try std.testing.expect(session.fileTreeScrollbarGeometry() == null);
 
     // 같은 좌표라도 탐색기로 돌아오면 원래 동작이 그대로다(게이트가 기능을 죽인 게 아니라 뷰로 가른 것).
     session.setDockView(.explorer);

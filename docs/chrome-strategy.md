@@ -20,7 +20,7 @@ legacy component의 계약이다. 새 `UiNode` tree component는 그것을 복�
 
 ⚠️ **이 컨벤션은 유지 대상이 아니라 전환기 형태다.** 지금 chrome 컴포넌트는 두 갈래로 나뉘어 있다 —
 `UiNode` 트리를 짓고 published rect에서 히트테스트를 파생하는 쪽(`session_dock`·`archive_detail`,
-프리미티브 `divider`·`file_tree_scrollbar`)과, rect를 직접 계산해 ops를 내고 `hitTest`를 **따로** 유지하는
+프리미티브 `divider`)과, rect를 직접 계산해 ops를 내고 `hitTest`를 **따로** 유지하는
 쪽(`notifications`·`palette`·`find`·`notice`·`context_menu`·`settings`·`sidebar`·`tabbar`). 후자는 "보이는
 것 == 눌리는 것"을 자료구조가 아니라 **규약**(같은 헬퍼를 view·hitTest가 함께 부른다)으로 지키므로 한쪽만
 고치면 어긋난다. 목표는 전자이며, 새 컴포넌트는 후자를 새로 만들지 않는다. 이주 단계와 블로커는

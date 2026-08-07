@@ -15,7 +15,7 @@ pointer capture·drag 수명은 [Chrome 상호작용 이관](chrome-interaction-
 | | 스크롤 단위 | 가상화 | 스크롤바 발행 | 드래그 | tick 소비 |
 | --- | --- | --- | --- | --- | --- |
 | Session Dock | backing px | `ui/scroll_area.zig`의 item window | 도크 published tree | dock interaction capture | 있음 |
-| 파일 탐색기 | backing px | 없음(행 슬라이스) | **별도 tree**(`file_tree_scrollbar.publish`) | 전용 `scrollbar_interaction` | 있음 |
+| 파일 탐색기 | backing px | 없음(행 슬라이스) | 같은 tree(`scrollArea` 선언) | `scroll_area.Drag` | 있음 |
 | 소스 컨트롤 | **행(row)** | 없음 | **없음** | 없음(휠만) | 해당 없음 |
 | 사이드바 | backing px | 없음 | **host가 GPU quad 직접** | 없음(휠만) | 해당 없음 |
 | 알림 패널 | **item index** | 없음 | 컴포넌트가 직접 | 없음(휠·키만) | 해당 없음 |
@@ -491,9 +491,14 @@ thumb을 끌면 thumb rect가 바뀌므로 tree는 **반드시** 매 프레임 �
 있었고, 그 답이 새 layer 상수였다. 층이 필요할 때마다 enum에 값을 더하는 방식은 순서 규칙이 두 군데
 (layer 상수 + append 순서)로 갈라진 채 계속 자란다.
 
-Session Dock 스크롤바는 generic paint를 타므로 layer 2에 나온다 — **다른 스크롤바와 다른 층**이다.
-지금은 도크 위에 layer 3이 겹치지 않아 드러나지 않지만, 같은 역할이 두 층에 흩어져 있다는 사실 자체가
-이 축이 정리되지 않았다는 증거다.
+Session Dock과 파일 탐색기 스크롤바는 generic paint를 타므로 layer 2에 나오고, pane·사이드바
+스크롤바는 layer 3이다 — **같은 역할이 두 층에 흩어져 있다.**
+
+그 두 값의 의미도 대칭이 아니다. 렌더러는 layer를 네 버킷으로만 가른다(`maru_metal_renderer.m`):
+2=bottom(셀·텍스트 **아래**), 0=under, 4=header, **그 밖의 값은 전부 over**(최상위). 즉 layer 3은
+독립된 층이 아니라 모달(layer 1)과 같은 over 버킷이고, 버킷 안에서는 배열 append 순서가 z를 정한다.
+그래서 "layer 3 → 2"는 한 칸 내려가는 것이 아니라 **텍스트 위에서 텍스트 아래로 건너가는 것**이며,
+그 순간 같은 버킷의 다른 quad(행 하이라이트 밴드 등)와 순서를 다퉈야 한다.
 
 그래서 z 축 정리는 "필요해지면"이 아니라 **ScrollArea 이관 중에 판단한다.** 판단 기준은 소비처 수가
 아니라 이것이다: 스크롤바 층을 layer 상수로 계속 표현할 것인가, 아니면 `(layer, z, order)` 정렬로 옮기고

@@ -1332,10 +1332,23 @@ tree 교체에서 capture carry 누락(드래그가 첫 move에 죽음)·스크�
      **사용자에게 보이는 변화 둘.** 트랙패드 스크롤이 행 단위 점프에서 픽셀 스무스로 바뀌고(도크와
      같은 `State.scrollByWheel` 경로), 뷰포트 바닥의 부분 행이 잘린 채로 보인다(예전에는 그 자리에
      배경이 남았다).
-  - **SV2b — 스크롤바 이관.** 자식 없는 `tree.scrollArea` 선언으로 track/thumb을 내고,
-     `file_tree_scrollbar.publish`와 전용 capture 경로를 지운다. `reservedColumns`(텍스트 **셀**을 통째로
-     빼 track 자리를 만드는 것)는 컨테이너가 소유하는 픽셀 gutter로 대체된다 — 행이 쓰는 칸 수가
-     달라지므로 **시각이 바뀔 수 있다**. 바뀌면 캡처를 눈으로 대조하고 무엇이 왜 달라졌는지 남긴다.
+  - **SV2b — 스크롤바 이관(완료).** 자식 없는 `tree.scrollArea` 선언이 track/thumb을 내고, 그리기는
+     공용 `ui_paint` → `chrome_draw_lowering`이 한다(도크와 같은 경로). `file_tree_scrollbar.publish`와
+     전용 capture 경로는 지웠고, **`components/file_tree_scrollbar.zig` 모듈 자체가 사라졌다** — 기하·
+     drag·hit 판정이 전부 `ui/scroll_area.zig`에 이미 있었기 때문이다(SV2a-3에서 픽셀 도메인으로 옮겨
+     둔 덕에 1:1 대응이었다). 드래그 수명도 host가 들던 세 필드에서 `scroll_area.Drag` 하나로 접혔다.
+
+     `reservedColumns`(텍스트 **셀**을 통째로 빼 track 자리를 만드는 것)는 컨테이너가 소유하는 픽셀
+     gutter로 대체됐다. gutter는 스크롤바 유무와 무관하게 상시 예약되므로 목록이 reflow하지 않는다.
+
+     **사용자에게 보이는 변화 둘.** ① track(홈)이 새로 보인다 — 공용 paint가 track도 그리므로 도크와
+     같은 모습이 된다. ② 행 오른쪽 여백이 셀 단위 예약에서 픽셀 gutter로 바뀌어 글자가 끝나는 자리가
+     달라진다.
+
+     **z가 실제로 움직인 슬라이스다.** 스크롤바가 layer 3(over — 텍스트 **위**)에서 layer 2(bottom —
+     텍스트 **아래**)로 건너갔다(§8). 그래서 행 하이라이트 밴드와 같은 버킷이 되고, 밴드 폭을 gutter
+     앞에서 끊고 스크롤바를 밴드 **뒤에** append하는 것 둘 다 필요하다 — 판정자가 그 둘을 고정한다.
+     남은 z 정리(layer 상수 vs `(layer, z, order)`)는 SV6가 pane·사이드바와 함께 본다.
 - **SV3 — 소스 컨트롤 이관.** 탐색기와 같은 행 좌표를 쓰고 스크롤바가 아예 없다. SV2가 만든 픽셀
   경로를 그대로 쓰므로 비용이 가장 작고, 없던 스크롤바가 생기는 것이 사용자에게 보이는 변화다.
 - **SV4 — 사이드바 이관.** 스크롤바가 host의 GPU quad라 발행 경로가 없다. 이관하면 사이드바도

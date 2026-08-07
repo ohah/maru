@@ -34528,9 +34528,20 @@ pub const AppSession = struct {
     /// 상태표시줄 항목을 수집한다(SB1-S3b: 좌측 git 브랜치). 폭은 **셀로 재고 px로 넘긴다** —
     /// `chrome.components.status_bar`가 px로 배치하고(우측 정렬이 셀 경계가 아니라 창 가장자리에 붙어야
     /// 한다), 항목마다 자기 frame을 px origin에 놓는다. 실패는 무시한다(항목 없이 빈 바 — 세션을 안 죽인다).
+    /// 발행된 tree를 비운다(항목이 하나도 없을 때). **조기 반환 경로가 이걸 안 하면 옛 tree가 남아,
+    /// 항목이 사라진 뒤에도 그 자리를 누르면 없어진 항목의 액션이 돈다** — 보이지 않는 것이 눌리는 셈이다.
+    /// 호버도 함께 지운다(가리키는 항목이 없다).
+    fn clearStatusBarTree(self: *AppSession) void {
+        self.status_bar_entry_count = 0;
+        self.status_bar_hovered = null;
+    }
+
     fn collectStatusBarItems(self: *AppSession, collected: *std.ArrayList(CollectedPane), builder: coretext_frame_builder.CoreTextFrameBuilder, colors: metal_frame.CellColors) void {
         const h = self.statusBarHeightPx();
-        if (h == 0 or self.cell_width_px == 0 or self.backing_width_px == 0) return;
+        if (h == 0 or self.cell_width_px == 0 or self.backing_width_px == 0) {
+            self.clearStatusBarTree();
+            return;
+        }
 
         const term = self.activePane().activeTerm();
         const bar_cols: u16 = @intCast(@min(self.backing_width_px / self.cell_width_px, std.math.maxInt(u16)));
@@ -34633,7 +34644,10 @@ pub const AppSession = struct {
             }
         }
 
-        if (n == 0 and rn == 0) return;
+        if (n == 0 and rn == 0) {
+            self.clearStatusBarTree();
+            return;
+        }
 
         var left_buf: [max_status_bar_left_items]chrome.components.status_bar.Slot = undefined;
         var right_buf: [max_status_bar_right_items]chrome.components.status_bar.Slot = undefined;
@@ -34711,6 +34725,18 @@ pub const AppSession = struct {
             written += t.entries.len;
         }
         self.status_bar_entry_count = written;
+
+        // **새 tree에 없는 hover는 지운다.** `chrome/ui/interaction.zig`의 `reconcile`이 하는 일과 같다 —
+        // 안 하면 항목이 사라졌다 다시 나타날 때(알림을 읽어 0이 됐다가 새 알림이 오는 경우) 포인터가
+        // 그 자리에 없는데도 호버가 칠해진다. 포인터가 창 밖으로 나가 `hoverCursor`가 더는 안 불리는
+        // 경우도 같은 부류다.
+        if (self.status_bar_hovered) |id| {
+            var still_there = false;
+            for (self.statusBarTree().entries) |entry| {
+                if (entry.id == @intFromEnum(id)) still_there = true;
+            }
+            if (!still_there) self.status_bar_hovered = null;
+        }
     }
 
     /// 발행된 tree(슬라이스 view). 호출자가 hit-test·hover에 쓴다.
@@ -63208,6 +63234,39 @@ test "SB1: 사이드바 scissor는 겹치거나 뒤집힌 구간을 내느니 �
             }
         }
     }
+}
+
+// SB1: **사라진 항목의 호버는 남으면 안 된다.** 알림을 다 읽어 항목이 없어졌다가 새 알림이 와서 다시
+// 나타나면, 포인터가 그 자리에 없는데도 호버가 칠해진다(포인터가 창 밖으로 나가 `hoverCursor`가 더는
+// 안 불리는 경우도 같다). `chrome/ui/interaction.zig`의 `reconcile`이 tree 재발행 때 하는 일을 그대로
+// 한다 — 손으로 만든 호버라 그 정리를 빠뜨리기 쉬웠고, 실제로 빠뜨렸었다.
+test "SB1: 항목이 tree에서 사라지면 호버도 지워진다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1000, 700, 1000);
+
+    // 알림 항목이 있는 tree를 만들고 그 위에 호버가 있다고 둔다.
+    _ = session.pushNotificationHistory("MARU", "t", 0);
+    _ = try session.tick();
+    session.status_bar_hovered = .notifications;
+
+    // 알림이 0이 되면 항목이 사라진다 — 다음 **발행**에서 호버도 함께 지워져야 한다. 실제 경로에서는
+    // 알림 변화가 dirty를 세우지만 여기선 필드를 직접 바꾸므로 재투영을 명시로 요구한다(안 그러면 수집기
+    // 자체가 안 돌아 tree가 그대로다 — 그건 이 테스트가 볼 대상이 아니다).
+    session.notification_unread = 0;
+    session.metal_dirty = true;
+    _ = try session.tick();
+    try std.testing.expectEqual(@as(?chrome.components.status_bar.ItemId, null), session.status_bar_hovered);
 }
 
 // SB1: 이 기능의 **요점은 "안 보이는 곳"**이다 — 한 번에 터미널 하나만 보이므로, 다른 워크스페이스에서

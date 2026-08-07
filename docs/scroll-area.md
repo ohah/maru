@@ -15,7 +15,7 @@ pointer capture·drag 수명은 [Chrome 상호작용 이관](chrome-interaction-
 | | 스크롤 단위 | 가상화 | 스크롤바 발행 | 드래그 | tick 소비 |
 | --- | --- | --- | --- | --- | --- |
 | Session Dock | backing px | `ui/scroll_area.zig`의 item window | 도크 published tree | dock interaction capture | 있음 |
-| 파일 탐색기 | **행(row)** | 없음(행 슬라이스) | **별도 tree**(`file_tree_scrollbar.publish`) | 전용 `scrollbar_interaction` | 있음 |
+| 파일 탐색기 | backing px | 없음(행 슬라이스) | **별도 tree**(`file_tree_scrollbar.publish`) | 전용 `scrollbar_interaction` | 있음 |
 | 소스 컨트롤 | **행(row)** | 없음 | **없음** | 없음(휠만) | 해당 없음 |
 | 사이드바 | backing px | 없음 | **host가 GPU quad 직접** | 없음(휠만) | 해당 없음 |
 | 알림 패널 | **item index** | 없음 | 컴포넌트가 직접 | 없음(휠·키만) | 해당 없음 |
@@ -137,6 +137,11 @@ gutter에 두는 영역이다. `ScrollView`는 뷰가 뷰를 감싸는 모델(Sw
 아니다** — item 높이는 균일하지 않다(그룹 행, 카드, 펼친 카드가 각각 다르다). 파생은 `project`가 이미
 하는 누적 walk의 결과(`first_index`·첫 item의 local origin)이고, 소비처는 그 값을 읽는다. 높이가 균일한
 목록에서만 나눗셈이 같은 답을 준다.
+
+**균일한 목록은 나눗셈을 쓴다 — 단, 같은 답이라는 것을 판정으로 고정한 채로.** 파일 탐색기가 그 경우다
+(행 높이 = 셀 높이). 행이 수천 개가 될 수 있어 매 프레임 walk를 도는 것은 비용이고, `offset / cell_h`가
+정확히 같은 창을 낸다. 그 등가는 말로 두지 않고 `project`와 대조하는 판정자가 지킨다 — 갈라지면 두
+소비처가 다른 스크롤 의미를 갖게 되고, 그것은 이 문서가 없애려는 상태 그 자체다.
 분수 값은 offset에 넣지 않는다 — tree rect와 GPU draw rect가 정수로 유지되어야 하므로, 트랙패드의 분수
 delta는 residue로 따로 누적하고 정수 픽셀만 offset에 반영한다(현재 도크 구현과 같은 규율).
 

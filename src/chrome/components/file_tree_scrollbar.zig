@@ -1,5 +1,11 @@
 //! File explorer vertical scrollbar geometry. This module is deliberately state-free: render,
 //! hover, track clicks, and drag all consume the same `Geometry` value.
+//!
+//! 좌표는 **backing pixel**이다(SV2a). 예전에는 행 index였는데, 탐색기 스크롤 상태가
+//! `chrome.ui.scroll_area.State`(픽셀)로 바뀌면서 그 도메인을 그대로 받는다 — 두 도메인이 섞이면
+//! thumb이 셀 경계로 스냅해 목록의 부분 행과 어긋난다. 비율 산술이라 rows→px 치환은 수식을 바꾸지
+//! 않고 이름만 정직해진다. SV2b에서 이 모듈은 `scroll_area.scrollbarGeometry`로 대체되며, 그때
+//! 필드가 1:1로 대응한다.
 
 const std = @import("std");
 const layout = @import("../ui/layout.zig");
@@ -21,10 +27,10 @@ pub fn reservedColumns(content_w: u32, cell_w: u32) u32 {
 }
 
 pub const Geometry = struct {
-    total_rows: usize,
-    visible_rows: usize,
-    max_scroll: usize,
-    scroll_rows: usize,
+    content_h_px: u32,
+    viewport_h_px: u32,
+    max_offset_px: u32,
+    offset_px: u32,
     track_x: f32,
     track_y: f32,
     track_w: f32,
@@ -43,17 +49,17 @@ pub const Geometry = struct {
     }
 
     pub fn sameSnapshot(self: Geometry, other: Geometry) bool {
-        return self.total_rows == other.total_rows and self.visible_rows == other.visible_rows and
+        return self.content_h_px == other.content_h_px and self.viewport_h_px == other.viewport_h_px and
             self.track_x == other.track_x and self.track_y == other.track_y and
             self.track_w == other.track_w and self.track_h == other.track_h and
             self.thumb_h == other.thumb_h;
     }
 
-    pub fn withScroll(self: Geometry, scroll_rows: usize) Geometry {
+    pub fn withOffset(self: Geometry, offset_px: u32) Geometry {
         var next = self;
-        next.scroll_rows = @min(scroll_rows, self.max_scroll);
+        next.offset_px = @min(offset_px, self.max_offset_px);
         const travel = self.track_h - self.thumb_h;
-        const ratio = @as(f32, @floatFromInt(next.scroll_rows)) / @as(f32, @floatFromInt(self.max_scroll));
+        const ratio = @as(f32, @floatFromInt(next.offset_px)) / @as(f32, @floatFromInt(self.max_offset_px));
         next.thumb_y = self.track_y + travel * ratio;
         return next;
     }
@@ -82,7 +88,7 @@ pub fn publish(
 ) PublishError!tree.UiRectTree {
     if (out.len < 2) return error.InsufficientEntryBuffer;
     // 스크롤할 것이 없으면 잡을 것도 없다. 빈 tree는 실패가 아니라 "대상 없음"이다.
-    if (geometry.max_scroll == 0 or geometry.track_w <= 0 or geometry.track_h <= 0) {
+    if (geometry.max_offset_px == 0 or geometry.track_w <= 0 or geometry.track_h <= 0) {
         return .{ .entries = out[0..0], .generation = generation };
     }
     out[0] = .{
@@ -106,29 +112,29 @@ pub fn publish(
 }
 
 pub fn compute(
-    total_rows: usize,
-    visible_rows: usize,
-    scroll_rows: usize,
+    content_h_px: u32,
+    viewport_h_px: u32,
+    offset_px: u32,
     content_x: u32,
     content_y: u32,
     content_w: u32,
     content_h: u32,
 ) ?Geometry {
-    if (visible_rows == 0 or total_rows <= visible_rows or content_w == 0 or content_h == 0) return null;
-    const max_scroll = total_rows - visible_rows;
+    if (viewport_h_px == 0 or content_h_px <= viewport_h_px or content_w == 0 or content_h == 0) return null;
+    const max_offset_px = content_h_px - viewport_h_px;
     const track_h: f32 = @floatFromInt(content_h);
-    const proportional = track_h * @as(f32, @floatFromInt(visible_rows)) / @as(f32, @floatFromInt(total_rows));
+    const proportional = track_h * @as(f32, @floatFromInt(viewport_h_px)) / @as(f32, @floatFromInt(content_h_px));
     const thumb_h = @min(track_h, @max(min_thumb_px, proportional));
     const travel = track_h - thumb_h;
-    const clamped_scroll = @min(scroll_rows, max_scroll);
-    const ratio = @as(f32, @floatFromInt(clamped_scroll)) / @as(f32, @floatFromInt(max_scroll));
+    const clamped_offset = @min(offset_px, max_offset_px);
+    const ratio = @as(f32, @floatFromInt(clamped_offset)) / @as(f32, @floatFromInt(max_offset_px));
     const width = @min(bar_width_px, content_w);
     const inset = @min(edge_inset_px, content_w - width);
     return .{
-        .total_rows = total_rows,
-        .visible_rows = visible_rows,
-        .max_scroll = max_scroll,
-        .scroll_rows = clamped_scroll,
+        .content_h_px = content_h_px,
+        .viewport_h_px = viewport_h_px,
+        .max_offset_px = max_offset_px,
+        .offset_px = clamped_offset,
         .track_x = @floatFromInt(content_x + content_w - width - inset),
         .track_y = @floatFromInt(content_y),
         .track_w = @floatFromInt(width),
@@ -138,11 +144,11 @@ pub fn compute(
     };
 }
 
-/// Maps an absolute pointer y to scroll rows while keeping the captured point inside the thumb.
-pub fn scrollForPointer(geometry: Geometry, pointer_y: f64, grab_y: f32) usize {
-    if (!std.math.isFinite(pointer_y) or !std.math.isFinite(grab_y)) return geometry.scroll_rows;
+/// Maps an absolute pointer y to a scroll offset while keeping the captured point inside the thumb.
+pub fn offsetForPointer(geometry: Geometry, pointer_y: f64, grab_y: f32) u32 {
+    if (!std.math.isFinite(pointer_y) or !std.math.isFinite(grab_y)) return geometry.offset_px;
     const travel = geometry.track_h - geometry.thumb_h;
-    if (travel <= 0 or geometry.max_scroll == 0) return 0;
+    if (travel <= 0 or geometry.max_offset_px == 0) return 0;
     const thumb_top_f64 = std.math.clamp(
         pointer_y - @as(f64, grab_y),
         @as(f64, geometry.track_y),
@@ -150,12 +156,12 @@ pub fn scrollForPointer(geometry: Geometry, pointer_y: f64, grab_y: f32) usize {
     );
     const thumb_top: f32 = @floatCast(thumb_top_f64);
     const ratio = (thumb_top - geometry.track_y) / travel;
-    return @intFromFloat(@round(ratio * @as(f32, @floatFromInt(geometry.max_scroll))));
+    return @intFromFloat(@round(ratio * @as(f32, @floatFromInt(geometry.max_offset_px))));
 }
 
 /// Track clicks center the thumb at the click and use the same drag mapping thereafter.
-pub fn scrollForTrackClick(geometry: Geometry, pointer_y: f64) usize {
-    return scrollForPointer(geometry, pointer_y, geometry.thumb_h / 2);
+pub fn offsetForTrackClick(geometry: Geometry, pointer_y: f64) u32 {
+    return offsetForPointer(geometry, pointer_y, geometry.thumb_h / 2);
 }
 
 // 예약이 **올림**이어야 하는 이유: track(8px) + 우측 inset(3px) = 11px가 셀 폭으로 나누어떨어지는
@@ -178,20 +184,20 @@ test "file tree scrollbar: reserved columns round up so the track never covers a
     try std.testing.expectEqual(@as(u32, 0), reservedColumns(200, 0));
 }
 
-// `withScroll`과 `compute`는 둘 다 `max_scroll`로 나눈다. 0이면 0/0 = NaN이라 thumb 좌표가 화면 밖으로
-// 나가거나 사라진다. 지금 그 상태가 **도달 불가**한 이유는 `compute`가 `total_rows <= visible_rows`를
-// null로 걸러 `max_scroll >= 1`을 보장하기 때문이다 — 방어 코드를 더하는 대신 그 불변식을 고정한다.
+// `withOffset`과 `compute`는 둘 다 `max_offset_px`로 나눈다. 0이면 0/0 = NaN이라 thumb 좌표가 화면 밖으로
+// 나가거나 사라진다. 지금 그 상태가 **도달 불가**한 이유는 `compute`가 `content_h_px <= viewport_h_px`를
+// null로 걸러 `max_offset_px >= 1`을 보장하기 때문이다 — 방어 코드를 더하는 대신 그 불변식을 고정한다.
 // 이 게이트가 사라지면(예: 넘치지 않아도 트랙을 그리도록 바꾸면) 여기서 먼저 빨개진다.
 // `sameSnapshot`은 드래그 중에 잡은 thumb을 **계속 잡고 있어도 되는가**를 정한다. 스크롤 위치
-// (`scroll_rows`·`thumb_y`)는 드래그가 **바꾸는 값**이라 비교에서 빠져야 하고, 그 밖의 것이 하나라도
+// (`offset_px`·`thumb_y`)는 드래그가 **바꾸는 값**이라 비교에서 빠져야 하고, 그 밖의 것이 하나라도
 // 달라지면 그 캡처는 다른 목록·다른 기하를 가리키므로 끊어야 한다 — 안 끊으면 손을 떼지 않은 채
 // 목록이 바뀌었을 때 엉뚱한 위치로 점프한다.
 test "file tree scrollbar: a drag capture survives only its own snapshot" {
     const base = Geometry{
-        .total_rows = 20,
-        .visible_rows = 5,
-        .max_scroll = 15,
-        .scroll_rows = 5,
+        .content_h_px = 20,
+        .viewport_h_px = 5,
+        .max_offset_px = 15,
+        .offset_px = 5,
         .track_x = 100,
         .track_y = 10,
         .track_w = 8,
@@ -201,24 +207,24 @@ test "file tree scrollbar: a drag capture survives only its own snapshot" {
     };
 
     // 스크롤만 움직인 것은 **같은** 스냅샷이다 — 그래야 드래그가 이어진다.
-    try std.testing.expect(base.sameSnapshot(base.withScroll(0)));
-    try std.testing.expect(base.sameSnapshot(base.withScroll(base.max_scroll)));
+    try std.testing.expect(base.sameSnapshot(base.withOffset(0)));
+    try std.testing.expect(base.sameSnapshot(base.withOffset(base.max_offset_px)));
 
     // 그 밖의 필드는 하나라도 달라지면 끊는다. 필드마다 따로 본다 — 뭉뚱그리면 한 필드를 비교에서
     // 빼도 나머지가 통과시킨다(적대적 검증에서 셋 다 살아남았다).
     const Case = struct { name: []const u8, mutate: *const fn (Geometry) Geometry };
     const cases = [_]Case{
-        .{ .name = "total_rows", .mutate = &struct {
+        .{ .name = "content_h_px", .mutate = &struct {
             fn f(g: Geometry) Geometry {
                 var n = g;
-                n.total_rows += 1;
+                n.content_h_px += 1;
                 return n;
             }
         }.f },
-        .{ .name = "visible_rows", .mutate = &struct {
+        .{ .name = "viewport_h_px", .mutate = &struct {
             fn f(g: Geometry) Geometry {
                 var n = g;
-                n.visible_rows += 1;
+                n.viewport_h_px += 1;
                 return n;
             }
         }.f },
@@ -271,10 +277,10 @@ test "file tree scrollbar: a drag capture survives only its own snapshot" {
 // **자기 세로 구간**만 봐야 한다 — 트랙 전체를 보면 트랙 클릭(점프)과 thumb 잡기가 구분되지 않는다.
 test "file tree scrollbar: hit regions are half-open and the thumb owns only its own band" {
     const g = Geometry{
-        .total_rows = 20,
-        .visible_rows = 5,
-        .max_scroll = 15,
-        .scroll_rows = 5,
+        .content_h_px = 20,
+        .viewport_h_px = 5,
+        .max_offset_px = 15,
+        .offset_px = 5,
         .track_x = 100,
         .track_y = 10,
         .track_w = 8,
@@ -303,9 +309,9 @@ test "file tree scrollbar: compute never publishes a zero scroll range" {
     try std.testing.expect(compute(3, 3, 0, 0, 0, 100, 90) == null); // 딱 맞으면 없다
     try std.testing.expect(compute(2, 3, 0, 0, 0, 100, 90) == null); // 모자라도 없다
     const g = compute(4, 3, 0, 0, 0, 100, 90) orelse return error.TestUnexpectedResult;
-    try std.testing.expect(g.max_scroll >= 1);
+    try std.testing.expect(g.max_offset_px >= 1);
     try std.testing.expect(std.math.isFinite(g.thumb_y));
-    try std.testing.expect(std.math.isFinite(g.withScroll(g.max_scroll).thumb_y));
+    try std.testing.expect(std.math.isFinite(g.withOffset(g.max_offset_px).thumb_y));
 }
 
 test "file tree scrollbar: overflow only and endpoints" {
@@ -314,27 +320,28 @@ test "file tree scrollbar: overflow only and endpoints" {
     const bottom = compute(100, 10, 90, 10, 20, 200, 300).?;
     try std.testing.expectEqual(@as(f32, 20), top.thumb_y);
     try std.testing.expectApproxEqAbs(top.track_y + top.track_h - top.thumb_h, bottom.thumb_y, 0.01);
-    try std.testing.expectEqual(@as(usize, 0), scrollForTrackClick(top, -100));
-    try std.testing.expectEqual(@as(usize, 90), scrollForTrackClick(top, 1000));
+    try std.testing.expectEqual(@as(u32, 0), offsetForTrackClick(top, -100));
+    try std.testing.expectEqual(@as(u32, 90), offsetForTrackClick(top, 1000));
 }
 
-test "file tree scrollbar: drag round trips every row" {
+test "file tree scrollbar: drag round trips every reachable pixel offset" {
     const geometry = compute(257, 17, 0, 0, 5, 180, 400).?;
     const travel = geometry.track_h - geometry.thumb_h;
-    for (0..geometry.max_scroll + 1) |wanted| {
+    for (0..geometry.max_offset_px + 1) |wanted_usize| {
+        const wanted: u32 = @intCast(wanted_usize);
         const y = geometry.track_y + travel * @as(f32, @floatFromInt(wanted)) /
-            @as(f32, @floatFromInt(geometry.max_scroll));
-        try std.testing.expectEqual(wanted, scrollForPointer(geometry, y, 0));
+            @as(f32, @floatFromInt(geometry.max_offset_px));
+        try std.testing.expectEqual(wanted, offsetForPointer(geometry, y, 0));
     }
 }
 
 test "file tree scrollbar: non-finite drag preserves scroll and huge finite values clamp" {
     const geometry = compute(100, 10, 35, 0, 0, 200, 300).?;
-    try std.testing.expectEqual(@as(usize, 35), scrollForPointer(geometry, std.math.nan(f64), 0));
-    try std.testing.expectEqual(@as(usize, 35), scrollForPointer(geometry, std.math.inf(f64), 0));
-    try std.testing.expectEqual(@as(usize, 35), scrollForPointer(geometry, -std.math.inf(f64), 0));
-    try std.testing.expectEqual(@as(usize, 90), scrollForPointer(geometry, std.math.floatMax(f64), 0));
-    try std.testing.expectEqual(@as(usize, 0), scrollForPointer(geometry, -std.math.floatMax(f64), 0));
+    try std.testing.expectEqual(@as(u32, 35), offsetForPointer(geometry, std.math.nan(f64), 0));
+    try std.testing.expectEqual(@as(u32, 35), offsetForPointer(geometry, std.math.inf(f64), 0));
+    try std.testing.expectEqual(@as(u32, 35), offsetForPointer(geometry, -std.math.inf(f64), 0));
+    try std.testing.expectEqual(@as(u32, 90), offsetForPointer(geometry, std.math.floatMax(f64), 0));
+    try std.testing.expectEqual(@as(u32, 0), offsetForPointer(geometry, -std.math.floatMax(f64), 0));
 }
 
 test "file tree scrollbar: pixel reservation never overlaps the last content cell" {
@@ -356,10 +363,10 @@ test "file tree scrollbar: pixel reservation never overlaps the last content cel
 
 test "published scrollbar rects agree with the geometry both hit paths already use" {
     const geometry = Geometry{
-        .total_rows = 100,
-        .visible_rows = 10,
-        .max_scroll = 90,
-        .scroll_rows = 0,
+        .content_h_px = 100,
+        .viewport_h_px = 10,
+        .max_offset_px = 90,
+        .offset_px = 0,
         .track_x = 200,
         .track_y = 0,
         .track_w = 8,
@@ -391,10 +398,10 @@ test "published scrollbar rects agree with the geometry both hit paths already u
 
 test "a scrollbar with nothing to scroll publishes no capture target" {
     const geometry = Geometry{
-        .total_rows = 5,
-        .visible_rows = 10,
-        .max_scroll = 0,
-        .scroll_rows = 0,
+        .content_h_px = 5,
+        .viewport_h_px = 10,
+        .max_offset_px = 0,
+        .offset_px = 0,
         .track_x = 200,
         .track_y = 0,
         .track_w = 8,

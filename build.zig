@@ -1395,8 +1395,8 @@ pub fn build(b: *std.Build) void {
                 "/usr/bin/grep -Eq '^scroll_thumb_present=true$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^scroll_capture_during_drag=true$' \"$summary\"; " ++
                 "/usr/bin/grep -Eq '^scroll_capture_after_up=false$' \"$summary\"; " ++
-                "before=$(/usr/bin/sed -n 's/^scroll_rows_before=//p' \"$summary\"); " ++
-                "after=$(/usr/bin/sed -n 's/^scroll_rows_after=//p' \"$summary\"); " ++
+                "before=$(/usr/bin/sed -n 's/^scroll_offset_before=//p' \"$summary\"); " ++
+                "after=$(/usr/bin/sed -n 's/^scroll_offset_after=//p' \"$summary\"); " ++
                 "test \"$before\" != \"$after\"; " ++
                 // 계약 §4.3: 상한은 move 수가 아니라 tick 수다.
                 "moves=$(/usr/bin/sed -n 's/^scroll_move_events=//p' \"$summary\"); " ++

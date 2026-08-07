@@ -1313,9 +1313,25 @@ tree 교체에서 capture carry 누락(드래그가 첫 move에 죽음)·스크�
      주지 않는다. SV2a에서 앱을 띄워 캡처를 눈으로 확인하고 그 근거를 PR에 남긴다. 자동 픽셀 게이트가
      필요할 만큼 이 경로가 자주 바뀌면 그때 앱 스모크 캡처를 골든에 물린다 — 지금 만들면 쓰지 않을
      하네스를 먼저 짓는 것이다.
-  - **SV2a — 픽셀 스크롤 상태.** `file_tree_scroll_rows: usize`를 `scroll_area.State`(픽셀)로 바꾸고
-     투영을 `scroll_area.project`로 옮긴다. 렌더는 위 ①의 원점 편향 + `clip_rect`. hit-test·reveal·
-     follow가 픽셀을 읽는다. 스크롤바는 아직 `file_tree_scrollbar` 그대로 둔다.
+  - **SV2a — 픽셀 스크롤 상태(완료).** 셋으로 나눠 들어갔다. **SV2a-1**: 셀 격자 본문 한 구간을 px
+     사각으로 자르는 ABI v147 seam(값 0 = 기존 동작). **SV2a-2**: 탐색기 pane이 `PaneFrameRole.file_tree`로
+     자기 셀 구간을 표시해 그 seam의 첫 소비자가 된다(clip은 아직 content rect 전체라 시각 무변경).
+     **SV2a-3**: `file_tree_scroll_rows: usize` → `scroll_area.State`(픽셀). 렌더는 위 ①의 원점 편향
+     + `clip_rect`이고, hit-test·reveal·follow·휠이 픽셀을 읽는다.
+
+     **투영은 `scroll_area.project`가 아니라 나눗셈이다**(계획 정정). 탐색기 행은 높이가 균일해
+     `offset / cell_h`가 walk와 같은 답을 내고, 행이 수천 개가 될 수 있어 매 프레임 O(n) walk를
+     돌릴 이유가 없다. 그 둘이 같은 답이라는 것은 판정자가 `project`와 대조해 고정한다 — 도크는
+     카드 높이가 가변이라 walk가 필수이고, 이것은 같은 좌표계의 특수화다.
+
+     **`file_tree_scrollbar`의 도메인도 rows에서 px로 바꿨다.** 상태가 픽셀인데 스크롤바만 행이면
+     thumb이 셀 경계로 스냅해 목록과 어긋난다. 비율 산술이라 수식은 그대로이고 이름만 정직해지며,
+     SV2b가 `scroll_area.scrollbarGeometry`로 대체할 때 필드가 1:1로 대응한다. 발행·capture 경로는
+     아직 `file_tree_scrollbar` 그대로다.
+
+     **사용자에게 보이는 변화 둘.** 트랙패드 스크롤이 행 단위 점프에서 픽셀 스무스로 바뀌고(도크와
+     같은 `State.scrollByWheel` 경로), 뷰포트 바닥의 부분 행이 잘린 채로 보인다(예전에는 그 자리에
+     배경이 남았다).
   - **SV2b — 스크롤바 이관.** 자식 없는 `tree.scrollArea` 선언으로 track/thumb을 내고,
      `file_tree_scrollbar.publish`와 전용 capture 경로를 지운다. `reservedColumns`(텍스트 **셀**을 통째로
      빼 track 자리를 만드는 것)는 컨테이너가 소유하는 픽셀 gutter로 대체된다 — 행이 쓰는 칸 수가

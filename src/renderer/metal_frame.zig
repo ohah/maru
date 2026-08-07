@@ -1280,14 +1280,12 @@ pub const PaneFrame = struct {
     /// 이 frame의 glyph가 일반 pane인지 자유 배치 도크 토글인지 명시한다. Metal backend가
     /// codepoint·좌표로 역할을 재추론하지 않도록 replace가 NativeMetalCell.reserved에 lower한다.
     role: PaneFrameRole = .normal,
-    /// **오버레이 프레임에서만 동작한다.** 이 필드를 읽는 곳은 아래 `modal_clip = pf.clip_rect` 한
-    /// 줄뿐이고 그것은 `if (overlay_frame)` 안이다. `.pane`·`.floating`·`.sticky`도 값을 실어 오지만
-    /// 그 셀 draw에는 scissor가 걸리지 않아 **조용히 버려진다**(2026-08-07 변이로 확인 — pane 쪽을
-    /// null로 바꿔도 아무것도 안 깨진다). 셀 pane을 자르려면 그 구간에 scissor draw를 하나 더 두어야
-    /// 한다 — 사이드바 스크롤 scissor가 같은 형태다(docs/implementation-plan.md의 SV2a).
-    ///
-    /// 모달 오버레이 클리핑(px, w==0=없음) — finishOverlayFrame이 OverlayRaster.clip_rect에서 채우고,
-    /// MetalFrameBuffer.view가 MetalFrame.modal_clip_*로 흘려 renderer가 모달 셀 draw에 scissor. 인프라(적용 후속).
+    /// **오버레이 프레임과 `role == .file_tree`인 pane에서만 동작한다.** 오버레이에서는 아래
+    /// `modal_clip = pf.clip_rect`가 모달 셀 draw에 scissor를 걸고, 탐색기 pane에서는 그 pane의 셀
+    /// 구간이 `pane_clip_cells_start/len` + `pane_clip_*_px`로 실려 렌더러가 본문 draw를 셋으로 쪼갠
+    /// 가운데에만 scissor를 건다(ABI v147). **그 밖의 dest는 여전히 값이 조용히 버려진다** —
+    /// `.floating`·`.sticky`·`.normal` pane이 값을 실어 와도 그 셀 draw에는 scissor가 안 걸린다.
+    /// 셋째 소비자가 생기면 그때 셀 경로를 per-primitive clip으로 일반화한다(아래 `ClipPx` 주석).
     clip_rect: ?ClipPx = null,
     /// B1 rich Chrome text frame. Its glyph slots/raster uploads still join the shared atlas, but
     /// its visible glyphs are emitted through `GpuGlyph` at final pixel positions rather than
@@ -3177,6 +3175,75 @@ test "replace: caret 없는 오버레이 셀이 뒤에 붙어도 터미널 커�
     try std.testing.expectEqual(buf.cursor_start, v.cursor_start);
     try std.testing.expectEqual(buf.cursor_cells, v.cursor_cells);
     try std.testing.expect(v.cursor_start + v.cursor_cells <= v.cell_count);
+}
+
+// SV2a: 탐색기 pane이 자기 셀 구간을 **non-zero** clip과 함께 싣는지 본다. SV2a-1이 낸 seam은 값 0으로
+// 들어와 프로덕션에서 한 번도 안 돌았고(`modal_clip`이 오래 그랬던 것과 같다), SV2a-2가 통로를 이었으며,
+// 부분 행을 만드는 이 슬라이스가 첫 non-zero 소비자다. GPU가 실제로 자르는 것은 눈으로 봐야 하지만,
+// **무엇을 자르라고 실어 보내는지**는 여기서 고정한다 — 구간이 비면 렌더러는 조용히 안 자른다.
+test "replace: 탐색기 role의 pane이 자기 셀 구간과 clip rect를 seam에 싣는다(v147 첫 non-zero 소비자)" {
+    const allocator = std.testing.allocator;
+    const atlas_config: renderer.GlyphAtlasConfig = .{ .atlas_width_px = 1024, .atlas_height_px = 1024 };
+    const colors: CellColors = .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 }, .cursor = .{ .block = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF }, .text = .{ .r = 0, .g = 0, .b = 0 } } };
+    var tree_ov = [_]renderer.DrawOverlay{.{ .cursor = .{ .row = 0, .col = 0 } }};
+    var term_ov = [_]renderer.DrawOverlay{.{ .cursor = .{ .row = 0, .col = 0 } }};
+    const clip: ClipPx = .{ .x = 10, .y = 40, .w = 300, .h = 811 };
+    const tree_pf: PaneFrame = .{
+        .frame = fakeCursorFrame(&tree_ov),
+        .origin_x = 10,
+        // 창의 첫 행이 위로 밀린 만큼 원점이 올라간 상태 — clip.y보다 작다.
+        .origin_y = 31,
+        .colors = colors,
+        .role = .file_tree,
+        .clip_rect = clip,
+    };
+    // 활성 터미널 pane은 뒤에 온다(커서 suffix 규약). 탐색기 구간이 그 앞이라는 것도 함께 본다.
+    const term_pf: PaneFrame = .{ .frame = fakeCursorFrame(&term_ov), .origin_x = 400, .origin_y = 40, .colors = colors };
+    var panes = [_]PaneFrame{ tree_pf, term_pf };
+
+    var buf: MetalFrameBuffer = .{};
+    defer buf.deinit(allocator);
+    try buf.replace(allocator, &panes, atlas_config, 8, 16, null, null, &.{}, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, null, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
+
+    const v = buf.view();
+    // 구간이 비어 있으면 렌더러의 세 draw가 기존 한 줄과 같아져 **아무것도 안 잘린다**.
+    try std.testing.expect(v.pane_clip_cells_len > 0);
+    try std.testing.expectEqual(clip.x, v.pane_clip_x_px);
+    try std.testing.expectEqual(clip.y, v.pane_clip_y_px);
+    try std.testing.expectEqual(clip.w, v.pane_clip_w_px);
+    try std.testing.expectEqual(clip.h, v.pane_clip_h_px);
+    // 그 구간이 실제로 탐색기 셀이다(origin으로 구별) — 엉뚱한 구간을 자르면 터미널이 잘린다.
+    try std.testing.expect(v.pane_clip_cells_start + v.pane_clip_cells_len <= v.cell_count);
+    for (buf.cells[v.pane_clip_cells_start..][0..v.pane_clip_cells_len]) |cell| {
+        try std.testing.expectEqual(@as(u32, 10), cell.origin_x);
+    }
+    // 커서 suffix는 활성(마지막) pane 것이라 탐색기 구간 **뒤**에 있다.
+    try std.testing.expect(buf.cursor_start >= v.pane_clip_cells_start + v.pane_clip_cells_len);
+}
+
+// role이 탐색기가 아니면 seam은 값 0으로 남는다 — 이 게이트가 없으면 아무 pane이나 clip을 실어 보내
+// 터미널 본문이 잘린다(그 필드는 오랫동안 조용히 버려지던 값이라 실어 보내는 곳이 여럿이다).
+test "replace: 탐색기 role이 아닌 pane의 clip_rect는 seam을 켜지 않는다" {
+    const allocator = std.testing.allocator;
+    const atlas_config: renderer.GlyphAtlasConfig = .{ .atlas_width_px = 1024, .atlas_height_px = 1024 };
+    const colors: CellColors = .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 }, .cursor = .{ .block = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF }, .text = .{ .r = 0, .g = 0, .b = 0 } } };
+    var ov = [_]renderer.DrawOverlay{.{ .cursor = .{ .row = 0, .col = 0 } }};
+    const pf: PaneFrame = .{
+        .frame = fakeCursorFrame(&ov),
+        .origin_x = 0,
+        .origin_y = 0,
+        .colors = colors,
+        .clip_rect = .{ .x = 1, .y = 2, .w = 3, .h = 4 },
+    };
+    var panes = [_]PaneFrame{pf};
+
+    var buf: MetalFrameBuffer = .{};
+    defer buf.deinit(allocator);
+    try buf.replace(allocator, &panes, atlas_config, 8, 16, null, null, &.{}, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, null, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
+
+    const v = buf.view();
+    try std.testing.expectEqual(@as(u32, 0), v.pane_clip_cells_len);
+    try std.testing.expectEqual(@as(u32, 0), v.pane_clip_w_px);
 }
 
 test "replaceSidebar swaps only sidebar_cells and bumps generation, leaving grid cells untouched (A)" {

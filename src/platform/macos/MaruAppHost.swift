@@ -3951,8 +3951,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private var webDividerCovered: UInt32 = 0
     // CIM3d: file tree scrollbar thumb을 실제 NSEvent로 끌어 tick coalescing을 제품 경로에서 본다.
     private var scrollSmokeStage = 0
-    private var scrollSmokeRowsBefore: UInt64 = 0
-    private var scrollSmokeRowsAfter: UInt64 = 0
+    private var scrollSmokeOffsetBefore: UInt64 = 0
+    private var scrollSmokeOffsetAfter: UInt64 = 0
     private var scrollSmokeMoveEvents: UInt64 = 0
     private var scrollSmokeApplications: UInt64 = 0
     private var scrollSmokeCaptureDuringDrag = false
@@ -8350,7 +8350,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         let scale = window.backingScaleFactor
         guard scale > 0 else { return }
 
-        scrollSmokeRowsBefore = current.scrollbar_rows
+        scrollSmokeOffsetBefore = current.scrollbar_offset_px
         let x = CGFloat(current.scrollbar_thumb_x_px) + CGFloat(current.scrollbar_thumb_w_px) / 2
         let startY = CGFloat(current.scrollbar_thumb_y_px) + CGFloat(current.scrollbar_thumb_h_px) / 2
 
@@ -8384,7 +8384,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         view.mouseUp(with: up)
 
         if let after = probe() {
-            scrollSmokeRowsAfter = after.scrollbar_rows
+            scrollSmokeOffsetAfter = after.scrollbar_offset_px
             scrollSmokeApplications = after.scrollbar_scroll_applications
             scrollSmokeCaptureAfterUp = after.scrollbar_capture_active != 0
         }
@@ -10167,8 +10167,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             scroll_thumb_present=\(scrollSmokeThumbPresent)
             scroll_capture_during_drag=\(scrollSmokeCaptureDuringDrag)
             scroll_capture_after_up=\(scrollSmokeCaptureAfterUp)
-            scroll_rows_before=\(scrollSmokeRowsBefore)
-            scroll_rows_after=\(scrollSmokeRowsAfter)
+            scroll_offset_before=\(scrollSmokeOffsetBefore)
+            scroll_offset_after=\(scrollSmokeOffsetAfter)
             scroll_move_events=\(scrollSmokeMoveEvents)
             scroll_applications=\(scrollSmokeApplications)
 

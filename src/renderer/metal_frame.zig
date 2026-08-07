@@ -1198,6 +1198,21 @@ pub const MetalFrame = extern struct {
     // strip 하나뿐이고, 사이드바 셀 scissor(`[header_h, drawable_h]`)도 S2b에서 같은 값을 쓴다.
     // 0이면 기존 동작(창 바닥까지). 끝에 추가해 기존 offset 불변(ABI v167).
     status_bar_height_px: u32 = 0,
+    // SV2a seam(값 0 = 기존 동작): 셀 격자로 그리는 **본문 구간 하나**를 px 사각으로 자른다.
+    //
+    // `PaneFrame.clip_rect`는 오버레이 프레임에서만 scissor가 된다(그 필드 주석). 파일 탐색기처럼 셀로
+    // 그리는 목록을 픽셀 단위로 스크롤하려면 그 목록 구간만 잘라야 하는데 그 배선이 없었다. 렌더러에
+    // 같은 형태가 이미 둘 있다 — 커서를 피해 본문을 쪼개는 `cursor_start` 분할과 사이드바 스크롤
+    // scissor. 이것이 셋째다.
+    //
+    // `pane_clip_cells_len == 0`이면 아무 일도 없다(기존 동작). index는 **cells 기준**으로
+    // `cursor_start`와 같은 도메인이다. 끝에 추가해 기존 offset 불변(ABI v147).
+    pane_clip_cells_start: u32 = 0,
+    pane_clip_cells_len: u32 = 0,
+    pane_clip_x_px: u32 = 0,
+    pane_clip_y_px: u32 = 0,
+    pane_clip_w_px: u32 = 0,
+    pane_clip_h_px: u32 = 0,
 };
 
 /// 사이드바 셀 = 밴드(전달받은 sentinel-UV 하이라이트) ++ 탭 제목 glyph(사이드바 RenderFrame 투영).

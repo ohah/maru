@@ -156,7 +156,16 @@ bool maru_metal_renderer_draw(
     size_t gpu_glyph_count,
     /* SB1: 창 바닥 상태표시줄이 예약한 높이(backing px). 사이드바 배경 strip을 이만큼 위에서 끝낸다.
        0=기존 동작(창 바닥까지). 끝에 추가해 인자 순서 불변(ABI v167). */
-    uint32_t status_bar_height_px
+    uint32_t status_bar_height_px,
+    /* SV2a(ABI v147): 셀 격자 본문 중 **한 구간**을 px 사각으로 자른다(좌상단, len==0=없음). 렌더러는
+       본문 draw를 이 구간 앞/가운데/뒤로 나누고 가운데만 setScissorRect로 그린다. 파일 탐색기의 부분
+       행 픽셀 스크롤이 첫 소비자다. index는 cells 기준(cursor_start와 같은 도메인). */
+    uint32_t pane_clip_cells_start,
+    uint32_t pane_clip_cells_len,
+    uint32_t pane_clip_x_px,
+    uint32_t pane_clip_y_px,
+    uint32_t pane_clip_w_px,
+    uint32_t pane_clip_h_px
 );
 
 void maru_metal_renderer_destroy(MaruMetalRenderer *renderer);

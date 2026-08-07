@@ -859,6 +859,12 @@ typedef struct {
     size_t sidebar_cells_n;
     uint32_t sidebar_scroll_offset_px;
     uint32_t status_bar_height_px; // SB1: 사이드바 셀 scissor 하단(창 바닥 상태표시줄)
+    uint32_t pane_clip_cells_start; // SV2a: 셀 본문 중 잘라야 할 구간(len==0=없음)
+    uint32_t pane_clip_cells_len;
+    uint32_t pane_clip_x_px;
+    uint32_t pane_clip_y_px;
+    uint32_t pane_clip_w_px;
+    uint32_t pane_clip_h_px;
     uint32_t sidebar_header_height_px;
 } MaruDrawPass;
 
@@ -911,7 +917,31 @@ static void maru_draw_terminal_layer(const MaruDrawPass *c) {
     if (c->quad_vertex_buffer != nil) MARU_DRAW_QUADS(c->bottom_vertex_count + c->under_vertex_count, c->header_vertex_count);
     // 1b. 터미널(모달 제외, 탭 제목 포함) — cells는 bg quad 다음(cells_base_v)부터. opacity 1.0. 커서가 이 레이어에
     //     있으면 그 구간을 빼고 앞[0,커서)·뒤(커서,끝) 두 번 그린다(v146 — 커서는 아래 페이드 pass가 따로 그린다).
-    if (c->vertex_buffer != nil) MARU_DRAW_CELLS(c->cells_base_v, c->terminal_end_v, 1.0f);
+    //     SV2a: 셀로 그리는 목록 하나(파일 탐색기)를 px로 자를 수 있다. 그 구간만 scissor를 걸고
+    //     앞/뒤는 그대로 그린 뒤 full로 복원한다 — 946행 사이드바 scissor와 같은 규약(좌상단 원점,
+    //     y 뒤집지 않음)이고, 위 커서 분할과 같은 형태다. len==0이면 아래 세 draw가 기존 한 줄과 같다.
+    if (c->vertex_buffer != nil) {
+        const size_t clip_a = (size_t)c->pane_clip_cells_start * 12;
+        const size_t clip_n = (size_t)c->pane_clip_cells_len * 12;
+        const bool clip_on = c->pane_clip_cells_len > 0 && c->pane_clip_w_px > 0 &&
+                             clip_a + clip_n <= c->terminal_end_v;
+        if (!clip_on) {
+            MARU_DRAW_CELLS(c->cells_base_v, c->terminal_end_v, 1.0f);
+        } else {
+            if (clip_a > 0) MARU_DRAW_CELLS(c->cells_base_v, clip_a, 1.0f);
+            const NSUInteger dw = (NSUInteger)c->drawable_size.width;
+            const NSUInteger dh = (NSUInteger)c->drawable_size.height;
+            const NSUInteger cx = ((NSUInteger)c->pane_clip_x_px < dw) ? (NSUInteger)c->pane_clip_x_px : 0;
+            const NSUInteger cw2 = ((NSUInteger)c->pane_clip_x_px + (NSUInteger)c->pane_clip_w_px <= dw) ? (NSUInteger)c->pane_clip_w_px : (dw - cx);
+            const NSUInteger cy = ((NSUInteger)c->pane_clip_y_px < dh) ? (NSUInteger)c->pane_clip_y_px : 0;
+            const NSUInteger ch2 = ((NSUInteger)c->pane_clip_y_px + (NSUInteger)c->pane_clip_h_px <= dh) ? (NSUInteger)c->pane_clip_h_px : (dh - cy);
+            [c->encoder setScissorRect:(MTLScissorRect){ .x = cx, .y = cy, .width = cw2, .height = ch2 }];
+            MARU_DRAW_CELLS(c->cells_base_v + clip_a, clip_n, 1.0f);
+            [c->encoder setScissorRect:(MTLScissorRect){ .x = 0, .y = 0, .width = dw, .height = dh }];
+            if (clip_a + clip_n < c->terminal_end_v)
+                MARU_DRAW_CELLS(c->cells_base_v + clip_a + clip_n, c->terminal_end_v - clip_a - clip_n, 1.0f);
+        }
+    }
     if (c->vertex_buffer != nil && c->term_b_len > 0)
         MARU_DRAW_CELLS(c->cells_base_v + c->term_b_start * 12, c->term_b_len * 12, 1.0f);
     // 1b+. 터미널 커서 페이드 pass(커서가 터미널 레이어에 있을 때). 본문 '뒤'·kitty 텍스트-앞 이미지 '앞'에 그려 기존
@@ -1051,7 +1081,14 @@ bool maru_metal_renderer_draw(
     size_t cursor_start_in,
     const MaruAppHostGpuGlyph *gpu_glyphs,
     size_t gpu_glyph_count,
-    uint32_t status_bar_height_px
+    uint32_t status_bar_height_px,
+    /* SV2a(ABI v147) — 근거는 헤더 주석 단일 출처. */
+    uint32_t pane_clip_cells_start,
+    uint32_t pane_clip_cells_len,
+    uint32_t pane_clip_x_px,
+    uint32_t pane_clip_y_px,
+    uint32_t pane_clip_w_px,
+    uint32_t pane_clip_h_px
 ) {
     if (renderer == NULL || terminal_layer == nil || cols == 0 || rows == 0) {
         return false;
@@ -1519,6 +1556,12 @@ bool maru_metal_renderer_draw(
         .sidebar_cells_n = sidebar_cells_n,
         .sidebar_scroll_offset_px = sidebar_scroll_offset_px,
         .status_bar_height_px = status_bar_height_px,
+        .pane_clip_cells_start = pane_clip_cells_start,
+        .pane_clip_cells_len = pane_clip_cells_len,
+        .pane_clip_x_px = pane_clip_x_px,
+        .pane_clip_y_px = pane_clip_y_px,
+        .pane_clip_w_px = pane_clip_w_px,
+        .pane_clip_h_px = pane_clip_h_px,
         .sidebar_header_height_px = sidebar_header_height_px,
     };
 

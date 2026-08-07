@@ -5101,7 +5101,13 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             frame.cursor_start,           // ABI v146: 커서 구간 시작 index — 커서가 버퍼 중간이어도 페이드(패스스루)
             frame.gpu_glyphs,             // B1: rich Chrome final pixel glyph placement(셀 grid와 분리)
             frame.gpu_glyph_count,
-            frame.status_bar_height_px // SB1: 사이드바 배경 strip을 상태바 위에서 끝낸다(strip 클리핑 전용)
+            frame.status_bar_height_px, // SB1: 사이드바 배경 strip을 상태바 위에서 끝낸다(strip 클리핑 전용)
+            frame.pane_clip_cells_start, // SV2a: 셀 본문 중 잘라야 할 구간(패스스루 — 정책은 Zig가 소유)
+            frame.pane_clip_cells_len,
+            frame.pane_clip_x_px,
+            frame.pane_clip_y_px,
+            frame.pane_clip_w_px,
+            frame.pane_clip_h_px
         )
         if drew {
             lastDrawnGeneration = frame.generation

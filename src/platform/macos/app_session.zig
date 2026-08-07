@@ -22772,7 +22772,11 @@ pub const AppSession = struct {
         // 상태바 위 휠은 **삼킨다**. 아래 라우팅은 "어느 pane에도 안 맞으면 활성 surface로 fallback"이라,
         // 안 막으면 상태바를 굴리는 동작이 터미널 스크롤백을 움직인다. 사이드바 판정보다 먼저 둔다 —
         // 상태바는 창 전폭이라 사이드바 아래 구간도 지나가고, 뒤에 두면 그 구간이 사이드바 스크롤로 샌다.
-        if (self.pointInStatusBar(x_px, y_px)) return;
+        //
+        // **오버레이가 열려 있으면 이 가드를 타지 않는다.** 아래 notice 처리는 "아무 입력으로나 닫힘"
+        // 규율이라 휠도 토스트를 닫아야 하는데(그 주석이 옛 회귀를 적어 뒀다), 여기서 삼키면 토스트가
+        // 뜬 채로 스크롤도 막히고 닫히지도 않는다. 알림 패널 휠 처리도 아래에 있다. `mouse()`와 같은 게이트다.
+        if (!self.anyOverlayOpen() and self.pointInStatusBar(x_px, y_px)) return;
         // notice 토스트(비-인터랙티브 정보, 자동 닫힘 타이머 없음)는 **휠로도 닫는다** — 키(notice.handle)·클릭(mouse())과
         // 같은 "아무 입력으로나 닫힘" 규율을 휠까지 확장한다(옛날엔 아래 anyOverlayOpen이 휠을 삼키기만 해 토스트가 떠 있는
         // 동안 스크롤이 막힌 채 닫히지도 않았다). 휠은 소비한다(닫되 스크롤은 안 함 — 토스트 확인 제스처). notifications와
@@ -63241,6 +63245,36 @@ test "SB1: 사이드바 scissor는 겹치거나 뒤집힌 구간을 내느니 �
             }
         }
     }
+}
+
+// SB1: **상태바 휠 가드가 notice 해제를 가로채면 안 된다.** notice 토스트는 "아무 입력으로나 닫힘"
+// 규율이라 휠도 닫아야 하고, 그 처리는 상태바 가드 **뒤에** 있다. 앞에서 삼키면 토스트가 뜬 채로
+// 스크롤도 막히고 닫히지도 않는다 — 코드 주석이 옛 회귀로 적어 둔 바로 그 상태다.
+test "SB1: notice가 떠 있으면 상태바 휠이 그것을 닫는 처리를 가로채지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1000, 700, 1000);
+    _ = try session.tick();
+
+    // 바 한가운데 좌표(항목이 없어도 바 안이면 가드 대상이다).
+    const h = session.statusBarHeightPx();
+    const cx: f64 = @floatFromInt(session.backing_width_px / 2);
+    const cy: f64 = @floatFromInt(session.backing_height_px - h / 2);
+
+    session.showNotice("test");
+    try std.testing.expect(session.chrome_host.notice.open);
+    session.scrollWheel(-1, 0, false, cx, cy);
+    try std.testing.expect(!session.chrome_host.notice.open); // 휠이 토스트를 닫았다
 }
 
 // SB1: **상태바 hover가 다른 hover의 해제를 가로채면 안 된다.** `hoverCursor`에는 "어느 zone이든 early

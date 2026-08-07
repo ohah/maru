@@ -16,7 +16,7 @@ pointer capture·drag 수명은 [Chrome 상호작용 이관](chrome-interaction-
 | --- | --- | --- | --- | --- | --- |
 | Session Dock | backing px | `ui/scroll_area.zig`의 item window | 도크 published tree | dock interaction capture | 있음 |
 | 파일 탐색기 | backing px | 없음(행 슬라이스) | 같은 tree(`scrollArea` 선언) | `scroll_area.Drag` | 있음 |
-| 소스 컨트롤 | **행(row)** | 없음 | **없음** | 없음(휠만) | 해당 없음 |
+| 소스 컨트롤 | backing px | 없음 | **없음**(SV3b가 낸다) | 없음(휠만) | 해당 없음 |
 | 사이드바 | backing px | 없음 | **host가 GPU quad 직접** | 없음(휠만) | 해당 없음 |
 | 알림 패널 | **item index** | 없음 | 컴포넌트가 직접 | 없음(휠·키만) | 해당 없음 |
 | 팔레트·세팅 | **item index** | 없음 | 없음 | 없음(선택 이동만) | 해당 없음 |
@@ -129,7 +129,7 @@ gutter에 두는 영역이다. `ScrollView`는 뷰가 뷰를 감싸는 모델(Sw
 
 ## 3. 좌표계 — backing pixel 하나로 통일한다
 
-좌표 단위가 셋으로 갈라져 있다 — 픽셀(도크·사이드바), **행**(파일 탐색기·소스 컨트롤), **item index**
+좌표 단위가 셋으로 갈라져 있었다 — 픽셀(도크·사이드바), **행**(파일 탐색기·소스 컨트롤 — 둘 다 SV2a·SV3a에서 픽셀로 옮겼다), **item index**
 (알림·팔레트·세팅). 행과 item index는 부분 스크롤을 표현하지 못하므로 픽셀 정밀 스크롤·부분적으로 보이는
 행·정확한 thumb 위치를 만들 수 없다. 반대로 픽셀 좌표에서 행 인덱스와 item 창은 언제든 파생된다.
 

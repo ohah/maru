@@ -8746,47 +8746,31 @@ pub const AppSession = struct {
         return false;
     }
 
-    /// 창 전체에서 **지금 돌고 있는 에이전트 수**. `paneHasRunningAgent`와 같은 도메인(`agent_state == .running`)을
-    /// 쓰되 boolean이 아니라 개수를 센다 — 상태바가 더할 수 있는 고유한 값이 이것이다. 한 번에 터미널 하나만
-    /// 보이므로 "지금 안 보이는 곳에서 무엇이 돌고 있나"는 다른 UI가 답해 주지 않는다(사이드바를 접으면 더 그렇다).
-    /// Term 단위로 센다 — 한 pane에 에이전트 Term이 여럿일 수 있고, 사용자가 세고 싶은 것은 "돌고 있는 작업" 수다.
-    fn runningAgentCount(self: *const AppSession) usize {
-        var n: usize = 0;
-        for (self.tabs.items) |tab| {
-            for (tab.panes.items) |pane| {
-                for (pane.terms.items) |t| {
-                    if (t.agent_state == .running) n += 1;
-                }
-            }
-        }
-        return n;
-    }
-
     /// 위 개수와 함께 보여줄 에이전트 종류 심볼. 돌고 있는 것 중 **처음 만난 kind**를 쓴다 — 섞여 있을 때
     /// 무엇을 대표로 삼을지는 의미 있는 규칙이 없고(둘 다 돌면 둘 다 중요하다), 개수가 이미 "여럿"을 말해 준다.
-    /// 창 전체에서 **입력을 기다리며 멈춘** 에이전트 수. running보다 시급하다 — running은 알아서 굴러가지만
-    /// blocked는 **사람이 손을 대야** 풀린다. 그런데 지금 보고 있는 터미널이 아니면 알 방법이 없다.
-    fn blockedAgentCount(self: *const AppSession) usize {
-        var n: usize = 0;
-        for (self.tabs.items) |tab| {
-            for (tab.panes.items) |pane| {
-                for (pane.terms.items) |t| {
-                    if (t.agent_state == .blocked) n += 1;
-                }
-            }
-        }
-        return n;
-    }
+    /// 창 전체 에이전트 상태를 **한 번 순회로** 모은다. 예전엔 개수·kind를 각각 세어 매 프레임 5회
+    /// 순회했다(같은 값을 가드와 본문에서 두 번씩). 값이 늘 때마다 순회가 늘어나는 구조라 한 곳으로 모은다.
+    const AgentTally = struct { running: usize = 0, blocked: usize = 0, running_kind: AgentKind = .none };
 
-    fn runningAgentKind(self: *const AppSession) AgentKind {
+    fn tallyAgents(self: *const AppSession) AgentTally {
+        var t: AgentTally = .{};
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
-                for (pane.terms.items) |t| {
-                    if (t.agent_state == .running and t.agent_kind != .none) return t.agent_kind;
+                for (pane.terms.items) |term| {
+                    switch (term.agent_state) {
+                        .running => {
+                            t.running += 1;
+                            // 대표 kind는 **처음 만난 것**이다 — 섞여 있을 때 무엇을 대표로 삼을지 의미 있는
+                            // 규칙이 없고, 개수가 이미 "여럿"을 말해 준다.
+                            if (t.running_kind == .none and term.agent_kind != .none) t.running_kind = term.agent_kind;
+                        },
+                        .blocked => t.blocked += 1,
+                        .unknown, .idle => {},
+                    }
                 }
             }
         }
-        return .none;
+        return t;
     }
 
     fn tabHasRunningAgent(tab: *Tab) bool {
@@ -34607,9 +34591,10 @@ pub const AppSession = struct {
         //
         // blocked는 **모양으로** 구분한다(모래시계 + 강조색). 색만 다르면 "저 강조색이 무슨 뜻인지"를 배워야
         // 하고, running과 같은 아이콘을 쓰면 개수가 무엇의 개수인지 모호해진다.
-        if (self.blockedAgentCount() > 0) {
+        const agents = self.tallyAgents();
+        if (agents.blocked > 0) {
             var blocked_buf: [16]u8 = undefined;
-            const text = std.fmt.bufPrint(&blocked_buf, "{d}", .{@min(self.blockedAgentCount(), 99)}) catch "";
+            const text = std.fmt.bufPrint(&blocked_buf, "{d}", .{@min(agents.blocked, 99)}) catch "";
             // 테마 accent(브랜드 강조) — danger는 파괴적 동작용이라 과하다. 새 색 역할을 만들지 않는다.
             const accent: terminal.Color = .{ .rgb = self.appearance.theme.accent };
             if (text.len > 0) {
@@ -34621,10 +34606,10 @@ pub const AppSession = struct {
                 }
             }
         }
-        if (self.runningAgentCount() > 0 and rn < max_status_bar_right_items) {
-            const kind = self.runningAgentKind();
+        if (agents.running > 0 and rn < max_status_bar_right_items) {
+            const kind = agents.running_kind;
             var agent_buf: [16]u8 = undefined;
-            const text = std.fmt.bufPrint(&agent_buf, "{d}", .{@min(self.runningAgentCount(), 99)}) catch "";
+            const text = std.fmt.bufPrint(&agent_buf, "{d}", .{@min(agents.running, 99)}) catch "";
             const icon = if (kind == .none) icons.codepoint(.sparkle) else agentIconCodepoint(kind);
             if (text.len > 0 and rn < max_status_bar_right_items) {
                 if (self.buildStatusBarItem(icon, text, bar_cols, fg, icon_fg)) |dl| {

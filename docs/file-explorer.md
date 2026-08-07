@@ -28,7 +28,7 @@ reveal은 이 다섯을 전부 피한다: root·접힘·watcher·영속을 **하
 1. **어느 cwd인가** — 활성 워크스페이스 → 활성 pane → 활성 Term의 관측 cwd. 그 Term이 파일·브라우저라 cwd가 없으면 **직전 값을 유지**한다(비우지 않는다 — 문서를 보다 터미널로 돌아왔을 때 트리가 리셋되면 안 된다).
 2. **언제 reveal하나** — cwd가 **변할 때만**, 그리고 도크가 보일 때만. 같은 값이 다시 관측되면 무동작이다(관측은 폴링이라 매 tick 같은 값이 온다).
 3. **root 밖이면 아무것도 하지 않는다** — 자동으로 root를 추가하지 않는다(위 표의 "원치 않은 스캔"·"영속 충돌"이 그대로 돌아온다). 사용자가 명시적으로 폴더를 열면 기존 `inferred` 경로가 root를 잡는다.
-4. **스크롤은 필요할 때만 뺏는다** — 대상 행이 이미 보이면 스크롤을 건드리지 않는다. 뷰포트 밖일 때만 그 행이 보이도록 최소한으로 맞춘다.
+4. **스크롤은 필요할 때만 뺏는다** — 대상 행이 이미 **온전히** 보이면 스크롤을 건드리지 않는다. 뷰포트 밖이거나 부분적으로만 걸쳐 있을 때만 그 행이 보이도록 최소한으로 맞춘다(좌표가 픽셀이라 "보인다"의 기준이 행 경계가 아니다 — §3.1).
 
 **메커니즘은 새로 만들지 않는다.** 트리에는 이미 Zed형 auto-reveal(`reveal_path` + `continueReveal`)이 있고 파일을 열 때 그 경로를 쓴다 — 보이는 ancestor를 순서대로 펼치며 안 읽은 폴더만 lazy scan하고, 대상에 도달하거나 없으면 intent를 끝내 무한 재시도를 막는다. cwd 따라가기는 **그 intent에 디렉터리 경로를 넣는 것**이 전부다(디렉터리가 대상이면 그 폴더 자체까지 펼친다).
 
@@ -48,7 +48,25 @@ root picker callback은 path를 소유한 bounded backend request만 제출한�
 
 ## 3. 렌더 — 스크롤바·아이콘
 
-**스크롤바·아이콘(같은 tree snapshot 소비)**: rows가 viewport를 넘을 때만 tree content 우측에 GPU thumb를 표시한다. 중립 `src/chrome/components/file_tree_scrollbar.zig`의 total/visible/effective-scroll 공용 geometry를 render·hover·track click·drag가 함께 쓰고, L4 `AppSession`은 `PointerGestureOwner.file_tree_scrollbar`와 fade timer만 소유한다. resize/root 교체/rebuild가 generation 또는 geometry를 무효화하면 drag를 취소한다. row renderer는 track 폭+우측 inset의 실제 px를 cell 폭으로 올림한 열 수를 예약하며, 손상된 초협폭에서 콘텐츠 셀이 남지 않으면 track 아래에 glyph를 겹쳐 그리지 않는다. 중립 `src/chrome/file_tree_icon.zig`은 row projection 때 각 materialized row당 최대 한 번, filesystem/MIME 조회 없이 basename/extension을 ASCII-insensitive semantic `IconKind`로 분류하고 renderer/platform은 저장된 kind를 coverage PUA로만 lower한다. 폴더 open/closed와 source/test/docs/assets/config/dependency/output 이름군, 주요 개발 언어·web·data/config·git·image/document/archive/package 파일군, generic fallback을 제공한다. 아이콘은 모두 theme foreground 단색이고 focused selection에서는 contrast foreground를 쓴다. disclosure/icon/label 열과 우측 dirty/conflict slot은 겹치지 않는다. 제품-path artifact는 row projection 방문≤16,384, row당 classify≤1, pointer/frame당 geometry build≤1, allocation과 dock layout rebuild 0, thumb quad≤1을 실제 counter로 검증한다. filesystem/MIME·worker·lock·CoreText 부재는 숫자 0인 척하는 sentinel을 두지 않고 중립 모듈 import 경계와 코드 검토 대상으로 명시한다. 상세 hard gate는 [performance-budget.md](performance-budget.md#파일-탐색기-scrollbaricon-예산)가 소유한다. 기존 Octicons 자산으로 표현할 수 없는 SVG를 추가하면 exact name/version/source/license를 `third-party-licenses.md`에 기록하고 generator의 manifest/hash/`--check`가 coverage/C/Zig registry drift를 실패시킨 뒤에만 포함한다.
+### 3.1 스크롤 좌표는 backing pixel이다
+
+목록의 세로 스크롤 상태는 `chrome.ui.scroll_area.State`(픽셀)이고, 행 index는 그 좌표에서 파생된다
+([ScrollArea](scroll-area.md) §3). 행 높이가 셀 높이로 균일하므로 파생은 나눗셈이다 — 창의 시작 행은
+`offset / cell_h`, 첫 행이 뷰포트 위로 밀린 양은 `offset % cell_h`, 그릴 행 수는 그 밀린 양까지 포함해
+뷰포트를 덮는 **올림**이다. 렌더는 pane 원점을 밀린 양만큼 올리고, 위·아래로 삐져나온 부분 행은 pane
+clip(ABI v147 셀 격자 scissor)이 자른다. 행 하이라이트 quad는 셀 경로가 아니므로 자기 clip을 들고 간다
+(`GpuQuad.clip_*`).
+
+그래서 **뷰포트 바닥의 부분 행이 잘린 채 보인다** — 행 좌표였을 때 그 자리에 남던 배경 띠가 없다. 휠은
+트랙패드에서 논리 픽셀 단위(스무스), 그 외에는 한 행이 한 틱이다. hit-test는 같은 좌표계를 역으로 읽어
+보이는 부분 행도 클릭 대상이 되며, 키보드 Page 이동만은 **온전히 보이는 행 수**를 단위로 쓴다(반쯤
+걸친 행을 한 페이지로 세면 그 행을 건너뛴다).
+
+스크롤바 기하(`file_tree_scrollbar`)도 같은 픽셀 도메인을 소비한다. 상태가 픽셀인데 스크롤바만 행이면
+thumb이 셀 경계로 스냅해 목록과 어긋난다.
+
+
+**스크롤바·아이콘(같은 tree snapshot 소비)**: rows가 viewport를 넘을 때만 tree content 우측에 GPU thumb를 표시한다. 중립 `src/chrome/components/file_tree_scrollbar.zig`의 content/viewport/offset(px) 공용 geometry를 render·hover·track click·drag가 함께 쓰고, L4 `AppSession`은 `PointerGestureOwner.file_tree_scrollbar`와 fade timer만 소유한다. resize/root 교체/rebuild가 generation 또는 geometry를 무효화하면 drag를 취소한다. row renderer는 track 폭+우측 inset의 실제 px를 cell 폭으로 올림한 열 수를 예약하며, 손상된 초협폭에서 콘텐츠 셀이 남지 않으면 track 아래에 glyph를 겹쳐 그리지 않는다. 중립 `src/chrome/file_tree_icon.zig`은 row projection 때 각 materialized row당 최대 한 번, filesystem/MIME 조회 없이 basename/extension을 ASCII-insensitive semantic `IconKind`로 분류하고 renderer/platform은 저장된 kind를 coverage PUA로만 lower한다. 폴더 open/closed와 source/test/docs/assets/config/dependency/output 이름군, 주요 개발 언어·web·data/config·git·image/document/archive/package 파일군, generic fallback을 제공한다. 아이콘은 모두 theme foreground 단색이고 focused selection에서는 contrast foreground를 쓴다. disclosure/icon/label 열과 우측 dirty/conflict slot은 겹치지 않는다. 제품-path artifact는 row projection 방문≤16,384, row당 classify≤1, pointer/frame당 geometry build≤1, allocation과 dock layout rebuild 0, thumb quad≤1을 실제 counter로 검증한다. filesystem/MIME·worker·lock·CoreText 부재는 숫자 0인 척하는 sentinel을 두지 않고 중립 모듈 import 경계와 코드 검토 대상으로 명시한다. 상세 hard gate는 [performance-budget.md](performance-budget.md#파일-탐색기-scrollbaricon-예산)가 소유한다. 기존 Octicons 자산으로 표현할 수 없는 SVG를 추가하면 exact name/version/source/license를 `third-party-licenses.md`에 기록하고 generator의 manifest/hash/`--check`가 coverage/C/Zig registry drift를 실패시킨 뒤에만 포함한다.
 
 ## 3.5 도크 뷰 스위처 (여러 뷰를 담는 하나의 도크)
 

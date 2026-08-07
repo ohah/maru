@@ -512,7 +512,7 @@ pub const DividerSmokeProbe = extern struct {
     scrollbar_thumb_w_px: u32,
     scrollbar_thumb_h_px: u32,
     scrollbar_capture_active: u32,
-    scrollbar_rows: u64,
+    scrollbar_offset_px: u64,
     scrollbar_move_events: u64,
     scrollbar_scroll_applications: u64,
     // CIM4b: 탭 바 발행 기하 + provisional preview 관측치. 끝에 덧붙여 기존 필드 offset을 그대로 둔다.
@@ -555,7 +555,7 @@ pub export fn maru_macos_app_session_divider_smoke_probe(
         .scrollbar_thumb_w_px = probe.scrollbar_thumb_w_px,
         .scrollbar_thumb_h_px = probe.scrollbar_thumb_h_px,
         .scrollbar_capture_active = @intFromBool(probe.scrollbar_capture_active),
-        .scrollbar_rows = probe.scrollbar_rows,
+        .scrollbar_offset_px = probe.scrollbar_offset_px,
         .scrollbar_move_events = probe.scrollbar_move_events,
         .scrollbar_scroll_applications = probe.scrollbar_scroll_applications,
         .tab_bar_present = @intFromBool(probe.tab_bar_present),

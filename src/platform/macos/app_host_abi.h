@@ -621,7 +621,7 @@ typedef struct MaruAppHostDividerSmokeProbe {
     uint32_t scrollbar_thumb_w_px;
     uint32_t scrollbar_thumb_h_px;
     uint32_t scrollbar_capture_active;
-    uint64_t scrollbar_rows;
+    uint64_t scrollbar_offset_px;
     uint64_t scrollbar_move_events;
     uint64_t scrollbar_scroll_applications;
     /* CIM4b: 활성 pane 탭 바의 발행 세그먼트 기하와 provisional preview 관측치(보이는 첫 탭 vs model 첫 탭).

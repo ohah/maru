@@ -47,6 +47,7 @@
 #define MARU_ICON_CHEVRON_DOWN_TIGHT 0xF0023u
 #define MARU_ICON_CHEVRON_RIGHT_TIGHT 0xF0024u
 #define MARU_ICON_HOST 0xF0025u
+#define MARU_ICON_HOURGLASS 0xF0026u
 
 static inline bool maru_is_registered_icon_cp(uint32_t cp) {
     switch (cp) {
@@ -86,6 +87,7 @@ static inline bool maru_is_registered_icon_cp(uint32_t cp) {
         case 0xF0023u:
         case 0xF0024u:
         case 0xF0025u:
+        case 0xF0026u:
             return true;
         default:
             return false;

@@ -114,6 +114,7 @@ ICONS = [
     ("chevron_down", FIT_TIGHT, 0xF0023, "assets/icons/chevron-down-tight.svg"),
     ("chevron_right", FIT_TIGHT, 0xF0024, "assets/icons/chevron-right-tight.svg"),
     ("host", FIT_STANDARD, 0xF0025, "assets/icons/host.svg"),
+    ("hourglass", FIT_STANDARD, 0xF0026, "assets/icons/hourglass.svg"),
 ]
 
 

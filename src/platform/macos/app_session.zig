@@ -948,7 +948,7 @@ const status_bar_v_pad_pt: u32 = 4;
 /// 상태바 좌측 항목 상한. 지금은 브랜치·경로 둘이고, 늘릴 때 이 값과 우선순위 순서를 함께 본다.
 const max_status_bar_left_items: usize = 2;
 /// 상태바 우측 항목 상한. 지금은 알림 하나고, 에이전트 상태(S3e)가 붙으면 2가 된다.
-const max_status_bar_right_items: usize = 2;
+const max_status_bar_right_items: usize = 3;
 
 // 런타임 폰트 크기 조절(⌘+/⌘-/⌘0). step = ⌘+/⌘- 한 번에 1pt(Ghostty 기본과 동일). 클램프 범위는 보수적으로
 // [6, 72]pt — appearance resolver는 [1,512]를 허용하지만 6pt 미만은 글자가 안 읽히고 72pt 초과는 grid가
@@ -8763,6 +8763,20 @@ pub const AppSession = struct {
 
     /// 위 개수와 함께 보여줄 에이전트 종류 심볼. 돌고 있는 것 중 **처음 만난 kind**를 쓴다 — 섞여 있을 때
     /// 무엇을 대표로 삼을지는 의미 있는 규칙이 없고(둘 다 돌면 둘 다 중요하다), 개수가 이미 "여럿"을 말해 준다.
+    /// 창 전체에서 **입력을 기다리며 멈춘** 에이전트 수. running보다 시급하다 — running은 알아서 굴러가지만
+    /// blocked는 **사람이 손을 대야** 풀린다. 그런데 지금 보고 있는 터미널이 아니면 알 방법이 없다.
+    fn blockedAgentCount(self: *const AppSession) usize {
+        var n: usize = 0;
+        for (self.tabs.items) |tab| {
+            for (tab.panes.items) |pane| {
+                for (pane.terms.items) |t| {
+                    if (t.agent_state == .blocked) n += 1;
+                }
+            }
+        }
+        return n;
+    }
+
     fn runningAgentKind(self: *const AppSession) AgentKind {
         for (self.tabs.items) |tab| {
             for (tab.panes.items) |pane| {
@@ -12231,10 +12245,18 @@ pub const AppSession = struct {
                 .notifications
             else if (std.mem.eql(u8, name, "agents"))
                 .running_agents
+            else if (std.mem.eql(u8, name, "blocked"))
+                .blocked_agents
             else if (std.mem.eql(u8, name, "cwd"))
                 .cwd
             else
                 null;
+        }
+        // MARU_FORCE_BLOCKED=1 — 활성 Term을 blocked로 세워 상태바 blocked 항목을 헤드리스로 찍는다.
+        if (std.c.getenv("MARU_FORCE_BLOCKED") != null) {
+            const t = self.activePane().activeTerm();
+            t.agent_state = .blocked;
+            t.agent_kind = .claude;
         }
         if (std.c.getenv("MARU_FORCE_AGENT") != null) {
             const t = self.activePane().activeTerm();
@@ -34579,9 +34601,26 @@ pub const AppSession = struct {
         defer for (right_frames[0..rn]) |*maybe| {
             if (maybe.*) |*dl| dl.deinit(self.allocator);
         };
-        // 우측 배열은 **앞이 더 오른쪽**이다(compute가 오른쪽 끝에서 왼쪽으로 쌓는다). 에이전트를 앞에 둬
-        // 가장 오른쪽에 놓는다 — "지금 돌고 있다"가 누적 카운터인 알림보다 시급한 상태다.
-        if (self.runningAgentCount() > 0) {
+        // 우측 배열은 **앞이 더 오른쪽**이다(compute가 오른쪽 끝에서 왼쪽으로 쌓는다). 시급한 순서로 놓는다:
+        // blocked(사람을 기다림) → running(알아서 굴러감) → 알림(누적 카운터).
+        //
+        // blocked는 **모양으로** 구분한다(모래시계 + 강조색). 색만 다르면 "저 강조색이 무슨 뜻인지"를 배워야
+        // 하고, running과 같은 아이콘을 쓰면 개수가 무엇의 개수인지 모호해진다.
+        if (self.blockedAgentCount() > 0) {
+            var blocked_buf: [16]u8 = undefined;
+            const text = std.fmt.bufPrint(&blocked_buf, "{d}", .{@min(self.blockedAgentCount(), 99)}) catch "";
+            // 테마 accent(브랜드 강조) — danger는 파괴적 동작용이라 과하다. 새 색 역할을 만들지 않는다.
+            const accent: terminal.Color = .{ .rgb = self.appearance.theme.accent };
+            if (text.len > 0) {
+                if (self.buildStatusBarItem(icons.codepoint(.hourglass), text, bar_cols, accent, accent)) |dl| {
+                    right_frames[rn] = dl;
+                    right_widths[rn] = @as(u32, dl.size.cols) * self.cell_width_px;
+                    right_ids[rn] = .blocked_agents;
+                    rn += 1;
+                }
+            }
+        }
+        if (self.runningAgentCount() > 0 and rn < max_status_bar_right_items) {
             const kind = self.runningAgentKind();
             var agent_buf: [16]u8 = undefined;
             const text = std.fmt.bufPrint(&agent_buf, "{d}", .{@min(self.runningAgentCount(), 99)}) catch "";
@@ -34732,7 +34771,7 @@ pub const AppSession = struct {
     fn activateStatusBarItem(self: *AppSession, id: chrome.components.status_bar.ItemId) void {
         switch (id) {
             .notifications => self.openNotificationPanel(),
-            .running_agents => {
+            .running_agents, .blocked_agents => {
                 if (!self.dock.presented) self.dock.presented = true;
                 self.dock.collapsed = false;
                 self.setDockView(.agent_sessions);
@@ -34751,7 +34790,7 @@ pub const AppSession = struct {
     /// 일도 안 일어나는 편이 아무 표시도 없는 것보다 나쁘다.
     fn statusBarItemClickable(id: chrome.components.status_bar.ItemId) bool {
         return switch (id) {
-            .notifications, .running_agents, .cwd => true,
+            .notifications, .running_agents, .blocked_agents, .cwd => true,
             .git_branch => false,
         };
     }

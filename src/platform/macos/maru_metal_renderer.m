@@ -849,24 +849,19 @@ typedef struct {
     bool cursor_in_terminal;
     bool cursor_in_modal;
     bool has_modal;
-    // 모달 오버레이: 셀 시작 인덱스와 클리핑 px(w==0=없음).
+    // 모달 오버레이 셀 시작 인덱스.
     size_t modal_cells_start;
-    uint32_t modal_clip_x_px;
-    uint32_t modal_clip_y_px;
-    uint32_t modal_clip_w_px;
-    uint32_t modal_clip_h_px;
+    // 셀이 자기 clip을 든다(ABI v169): cells[i].clip_index가 0이면 안 자르고, n이면 cell_clips[n-1]로 자른다.
+    // 렌더러는 index가 바뀌는 경계에서 draw를 쪼개고 scissor만 바꾼다 — "어디를 자를지"는 전부 호출자가 정한다.
+    const MaruAppHostMetalCell *cells;
+    const MaruAppHostClipRect *cell_clips;
+    size_t cell_clip_count;
     // 사이드바 스크롤 scissor 판정용.
     size_t sidebar_cells_n;
     uint32_t sidebar_scroll_offset_px;
     uint32_t status_bar_height_px; // SB1: 창 바닥 상태표시줄 높이 — 사이드바 배경 strip 바닥에 쓴다
     uint32_t sidebar_scissor_top_px;    // 셀 scissor 구간 — 호출자가 게이트·클램프까지 끝낸 값이라 그대로 쓴다
     uint32_t sidebar_scissor_bottom_px;
-    uint32_t pane_clip_cells_start; // SV2a: 셀 본문 중 잘라야 할 구간(len==0=없음)
-    uint32_t pane_clip_cells_len;
-    uint32_t pane_clip_x_px;
-    uint32_t pane_clip_y_px;
-    uint32_t pane_clip_w_px;
-    uint32_t pane_clip_h_px;
     uint32_t sidebar_header_height_px;
 } MaruDrawPass;
 
@@ -905,6 +900,55 @@ typedef struct {
         }                                                                 \
     } while (0)
 
+/* 셀 구간 [cell_start, cell_start+cell_len)을 그리되, `clip_index`가 같은 연속 run마다 draw를 쪼개고
+   그 run의 사각형으로 scissor를 건다(ABI v169). 좌표는 **좌상단 원점** — MTLScissorRect가 렌더 타깃
+   좌표계라 그렇고, 아래 사이드바 scissor와 같은 규약이다(y를 뒤집지 않는다).
+
+   이 형태가 옛 프레임 단위 슬롯을 대체한다. 옛 설계는 "이 구간을 이 사각형으로 자르라"를 프레임에 담고
+   구간을 producer가 pane 구성에서 계산했는데, 그 구성이 프레임마다 달라지면 사각형만 남고 구간이 어긋났다.
+   index가 셀 안에 있으면 그 어긋남이 정의상 불가능하다.
+
+   run이 끝나면 full drawable로 복원해 다음 pass가 영향을 안 받는다. 잘린 결과가 빈 사각형이면(화면 밖으로
+   완전히 나간 clip) 그 run은 아무것도 그리지 않는다 — 폭 0 scissor를 Metal에 넘기지 않는다. */
+static void maru_draw_cells_clipped(const MaruDrawPass *c, size_t cell_start, size_t cell_len, float opacity) {
+    if (cell_len == 0 || c->vertex_buffer == nil) return;
+    if (c->cells == NULL || c->cell_clips == NULL || c->cell_clip_count == 0) {
+        MARU_DRAW_CELLS(c->cells_base_v + cell_start * 12, cell_len * 12, opacity);
+        return;
+    }
+    const NSUInteger dw = (NSUInteger)c->drawable_size.width;
+    const NSUInteger dh = (NSUInteger)c->drawable_size.height;
+    bool scissored = false;
+    size_t i = 0;
+    while (i < cell_len) {
+        const uint16_t idx = c->cells[cell_start + i].clip_index;
+        size_t j = i + 1;
+        while (j < cell_len && c->cells[cell_start + j].clip_index == idx) j++;
+        bool skip = false;
+        if (idx > 0 && (size_t)idx <= c->cell_clip_count) {
+            const MaruAppHostClipRect r = c->cell_clips[idx - 1];
+            const NSUInteger cx = ((NSUInteger)r.x < dw) ? (NSUInteger)r.x : dw;
+            const NSUInteger cy = ((NSUInteger)r.y < dh) ? (NSUInteger)r.y : dh;
+            NSUInteger cw = (NSUInteger)r.w;
+            NSUInteger chh = (NSUInteger)r.h;
+            if (cx + cw > dw) cw = dw - cx;
+            if (cy + chh > dh) chh = dh - cy;
+            if (cw == 0 || chh == 0) {
+                skip = true;
+            } else {
+                [c->encoder setScissorRect:(MTLScissorRect){ .x = cx, .y = cy, .width = cw, .height = chh }];
+                scissored = true;
+            }
+        } else if (scissored) {
+            [c->encoder setScissorRect:(MTLScissorRect){ .x = 0, .y = 0, .width = dw, .height = dh }];
+            scissored = false;
+        }
+        if (!skip) MARU_DRAW_CELLS(c->cells_base_v + (cell_start + i) * 12, (j - i) * 12, opacity);
+        i = j;
+    }
+    if (scissored) [c->encoder setScissorRect:(MTLScissorRect){ .x = 0, .y = 0, .width = dw, .height = dh }];
+}
+
 /* 터미널 레이어 pass(맨 아래): 탭 밴드 quad → kitty(텍스트 뒤) → 사이드바 bg strip → 헤더 배지 quad →
    터미널 본문 셀 → 터미널 커서 페이드(모달 없을 때) → kitty(텍스트 앞) → 사이드바 밴드 quad → 사이드바 셀.
    b2에서 이 함수가 터미널 CAMetalLayer의 drawable/encoder를 받는다. */
@@ -919,37 +963,14 @@ static void maru_draw_terminal_layer(const MaruDrawPass *c) {
     if (c->quad_vertex_buffer != nil) MARU_DRAW_QUADS(c->bottom_vertex_count + c->under_vertex_count, c->header_vertex_count);
     // 1b. 터미널(모달 제외, 탭 제목 포함) — cells는 bg quad 다음(cells_base_v)부터. opacity 1.0. 커서가 이 레이어에
     //     있으면 그 구간을 빼고 앞[0,커서)·뒤(커서,끝) 두 번 그린다(v146 — 커서는 아래 페이드 pass가 따로 그린다).
-    //     SV2a: 셀로 그리는 목록 하나(파일 탐색기)를 px로 자를 수 있다. 그 구간만 scissor를 걸고
-    //     앞/뒤는 그대로 그린 뒤 full로 복원한다 — 946행 사이드바 scissor와 같은 규약(좌상단 원점,
-    //     y 뒤집지 않음)이고, 위 커서 분할과 같은 형태다. len==0이면 아래 세 draw가 기존 한 줄과 같다.
-    if (c->vertex_buffer != nil) {
-        const size_t clip_a = (size_t)c->pane_clip_cells_start * 12;
-        const size_t clip_n = (size_t)c->pane_clip_cells_len * 12;
-        const bool clip_on = c->pane_clip_cells_len > 0 && c->pane_clip_w_px > 0 &&
-                             clip_a + clip_n <= c->terminal_end_v;
-        if (!clip_on) {
-            MARU_DRAW_CELLS(c->cells_base_v, c->terminal_end_v, 1.0f);
-        } else {
-            if (clip_a > 0) MARU_DRAW_CELLS(c->cells_base_v, clip_a, 1.0f);
-            const NSUInteger dw = (NSUInteger)c->drawable_size.width;
-            const NSUInteger dh = (NSUInteger)c->drawable_size.height;
-            const NSUInteger cx = ((NSUInteger)c->pane_clip_x_px < dw) ? (NSUInteger)c->pane_clip_x_px : 0;
-            const NSUInteger cw2 = ((NSUInteger)c->pane_clip_x_px + (NSUInteger)c->pane_clip_w_px <= dw) ? (NSUInteger)c->pane_clip_w_px : (dw - cx);
-            const NSUInteger cy = ((NSUInteger)c->pane_clip_y_px < dh) ? (NSUInteger)c->pane_clip_y_px : 0;
-            const NSUInteger ch2 = ((NSUInteger)c->pane_clip_y_px + (NSUInteger)c->pane_clip_h_px <= dh) ? (NSUInteger)c->pane_clip_h_px : (dh - cy);
-            [c->encoder setScissorRect:(MTLScissorRect){ .x = cx, .y = cy, .width = cw2, .height = ch2 }];
-            MARU_DRAW_CELLS(c->cells_base_v + clip_a, clip_n, 1.0f);
-            [c->encoder setScissorRect:(MTLScissorRect){ .x = 0, .y = 0, .width = dw, .height = dh }];
-            if (clip_a + clip_n < c->terminal_end_v)
-                MARU_DRAW_CELLS(c->cells_base_v + clip_a + clip_n, c->terminal_end_v - clip_a - clip_n, 1.0f);
-        }
-    }
-    if (c->vertex_buffer != nil && c->term_b_len > 0)
-        MARU_DRAW_CELLS(c->cells_base_v + c->term_b_start * 12, c->term_b_len * 12, 1.0f);
+    //     자를 목록(파일 탐색기·소스 컨트롤)이 있으면 셀이 들고 온 clip_index run마다 draw가 쪼개진다
+    //     (maru_draw_cells_clipped) — 렌더러는 어느 셀이 목록인지 몰라도 된다.
+    maru_draw_cells_clipped(c, 0, c->terminal_end_v / 12, 1.0f);
+    if (c->term_b_len > 0) maru_draw_cells_clipped(c, c->term_b_start, c->term_b_len, 1.0f);
     // 1b+. 터미널 커서 페이드 pass(커서가 터미널 레이어에 있을 때). 본문 '뒤'·kitty 텍스트-앞 이미지 '앞'에 그려 기존
     //      커서 레이어를 보존한다. cursor_fade_milli<1이면 반투명으로 아래 본문 셀에 합성돼 blink가 페이드.
-    if (c->vertex_buffer != nil && c->draw_cursor && c->cursor_in_terminal)
-        MARU_DRAW_CELLS(c->cells_base_v + c->cursor_start * 12, c->cursor_cells * 12, c->cursor_opacity);
+    if (c->draw_cursor && c->cursor_in_terminal)
+        maru_draw_cells_clipped(c, c->cursor_start, c->cursor_cells, c->cursor_opacity);
     MARU_DRAW_IMAGES(c->image_above_start, c->gpu_image_n);                        // 1.5 kitty 이미지(텍스트 앞)
     if (c->quad_vertex_buffer != nil) MARU_DRAW_QUADS(c->bottom_vertex_count, c->under_vertex_count); // 3. under quad(사이드바 밴드)
     // 4. 사이드바 cells(밴드·제목). 스크롤됐으면(offset>0) 헤더 위로 샌 카드를 자르도록 헤더 영역 [0, header_h)를
@@ -988,35 +1009,19 @@ static void maru_draw_overlay_layer(const MaruDrawPass *c) {
         [c->encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:c->shadow_vertex_total];
     }
     if (c->quad_vertex_buffer != nil) MARU_DRAW_QUADS(c->bottom_vertex_count + c->under_vertex_count + c->header_vertex_count, c->quad_vertex_total - c->bottom_vertex_count - c->under_vertex_count - c->header_vertex_count); // 5. over quad(모달 배경)
-    // 6. 모달 텍스트(cells_base_v 오프셋) — clip 영역이 있으면 모달 셀만 scissor로 자른다(부분 카드 픽셀 스크롤
-    //    인프라). w==0이면 클리핑 없음(기존 동작). 모달 셀이 이 encoder의 마지막 본문 draw다.
-    //    좌표는 **좌상단 원점**이다 — `modal_clip_*`가 그렇게 오고(chrome draw.Op.clip은 backing 좌상단),
-    //    MTLScissorRect도 렌더 타깃 좌표계라 그렇다. 그래서 y를 뒤집지 않고 그대로 쓰며, 위 사이드바 스크롤
-    //    scissor(`.y = header_h`로 상단을 잘라내는, 실제로 동작하는 코드)와 같은 규약이다.
-    //    ⚠️ 이 경로는 아직 `draw.Op.clip`을 내는 컴포넌트가 없어(알림 패널 픽셀 스크롤이 첫 소비자 예정,
-    //    notifications.zig "부분 카드 클리핑 인프라가 없어") **런타임 검증 경로가 없다**. 예전엔 `dh - (y+h)`로
-    //    뒤집고 있었고, 그건 위 사이드바 scissor와 정반대라 둘 중 하나가 틀린 상태였다. 첫 소비자를 붙이는
-    //    사람이 자기 컴포넌트를 의심하며 렌더러를 디버깅하지 않도록 먼저 정정해 둔다 — 근거는 그 형제 코드다.
-    if (c->vertex_buffer != nil && c->has_modal) {
-        if (c->modal_clip_w_px > 0) {
-            const NSUInteger dw = (NSUInteger)c->drawable_size.width;
-            const NSUInteger dh = (NSUInteger)c->drawable_size.height;
-            const NSUInteger cx = ((NSUInteger)c->modal_clip_x_px < dw) ? (NSUInteger)c->modal_clip_x_px : 0;
-            const NSUInteger cw2 = ((NSUInteger)c->modal_clip_x_px + (NSUInteger)c->modal_clip_w_px <= dw) ? (NSUInteger)c->modal_clip_w_px : (dw - cx);
-            const NSUInteger cy = ((NSUInteger)c->modal_clip_y_px < dh) ? (NSUInteger)c->modal_clip_y_px : 0;
-            const NSUInteger ch2 = ((NSUInteger)c->modal_clip_y_px + (NSUInteger)c->modal_clip_h_px <= dh) ? (NSUInteger)c->modal_clip_h_px : (dh - cy);
-            [c->encoder setScissorRect:(MTLScissorRect){ .x = cx, .y = cy, .width = cw2, .height = ch2 }];
-        }
-        // 모달 본문. 모달이 caret을 내면(find·palette) 그 구간을 빼고 앞/뒤로 나눠 그리고, 안 내면(notice·드래그
-        // 고스트·drop 하이라이트·포커스 테두리) 오버레이 영역 전체를 한 번에 그린다 — 그 경우 커서는 터미널 레이어에
-        // 남아 위 1b+가 페이드한다(v146: 옛 코드는 여기서 커서를 통째로 잃어 blink가 죽었다).
-        MARU_DRAW_CELLS(c->cells_base_v + c->modal_cells_start * 12, c->modal_a_len * 12, 1.0f); // 셀당 2 quad — ×12
-        if (c->modal_b_len > 0) MARU_DRAW_CELLS(c->cells_base_v + c->modal_b_start * 12, c->modal_b_len * 12, 1.0f);
+    // 6. 모달 텍스트(cells_base_v 오프셋). 모달이 자기 셀에 clip_index를 실어 보내면 그 run만 잘린다 —
+    //    터미널 본문과 **같은 헬퍼**를 쓴다(옛 코드는 모달 전용 프레임 슬롯이 따로 있었다).
+    //    모달이 caret을 내면(find·palette) 그 구간을 빼고 앞/뒤로 나눠 그리고, 안 내면(notice·드래그 고스트·
+    //    drop 하이라이트·포커스 테두리) 오버레이 영역 전체를 한 번에 그린다 — 그 경우 커서는 터미널 레이어에
+    //    남아 위 1b+가 페이드한다(v146: 옛 코드는 여기서 커서를 통째로 잃어 blink가 죽었다).
+    if (c->has_modal) {
+        maru_draw_cells_clipped(c, c->modal_cells_start, c->modal_a_len, 1.0f);
+        if (c->modal_b_len > 0) maru_draw_cells_clipped(c, c->modal_b_start, c->modal_b_len, 1.0f);
     }
     // 6+. 오버레이 caret 페이드 pass(모달 열림 — 커서=모달 뒤 suffix). 모달 텍스트 '위'(마지막 draw)에 opacity로 그린다.
-    //     modal_clip scissor가 위에서 걸렸으면 그대로 이어져 caret도 같은 영역에 클립된다(모달 셀의 일부라 의도된 동작).
-    if (c->vertex_buffer != nil && c->draw_cursor && c->cursor_in_modal)
-        MARU_DRAW_CELLS(c->cells_base_v + c->cursor_start * 12, c->cursor_cells * 12, c->cursor_opacity);
+    //     caret 셀이 모달과 같은 clip_index를 들고 있으면 같은 영역에 클립된다(모달 셀의 일부라 의도된 동작).
+    if (c->draw_cursor && c->cursor_in_modal)
+        maru_draw_cells_clipped(c, c->cursor_start, c->cursor_cells, c->cursor_opacity);
 }
 #undef MARU_DRAW_CELLS
 #undef MARU_DRAW_QUADS
@@ -1043,11 +1048,6 @@ bool maru_metal_renderer_draw(
     const MaruAppHostGpuQuad *gpu_quads,
     size_t gpu_quad_count,
     size_t modal_cells_start,
-    /* C4b 모달 클리핑(px, 좌상단, w==0=없음). 모달 셀 draw에 setScissorRect로 그대로 적용(둘 다 좌상단 원점). */
-    uint32_t modal_clip_x_px,
-    uint32_t modal_clip_y_px,
-    uint32_t modal_clip_w_px,
-    uint32_t modal_clip_h_px,
     /* C4b: chrome 그림자(GpuShadow). NULL/0이면 안 그림. quad·셀보다 아래(맨 처음) 그린다. */
     const MaruAppHostGpuShadow *gpu_shadows,
     size_t gpu_shadow_count,
@@ -1076,15 +1076,11 @@ bool maru_metal_renderer_draw(
     const MaruAppHostGpuGlyph *gpu_glyphs,
     size_t gpu_glyph_count,
     uint32_t status_bar_height_px,
-    /* SV2a(ABI v147) — 근거는 헤더 주석 단일 출처. */
-    uint32_t pane_clip_cells_start,
-    uint32_t pane_clip_cells_len,
-    uint32_t pane_clip_x_px,
-    uint32_t pane_clip_y_px,
-    uint32_t pane_clip_w_px,
-    uint32_t pane_clip_h_px,
     uint32_t sidebar_scissor_top_px,
-    uint32_t sidebar_scissor_bottom_px
+    uint32_t sidebar_scissor_bottom_px,
+    /* 셀 clip 표(ABI v169) — cells[i].clip_index가 가리킨다. NULL/0이면 아무 셀도 안 잘린다. */
+    const MaruAppHostClipRect *cell_clips,
+    size_t cell_clip_count
 ) {
     if (renderer == NULL || terminal_layer == nil || cols == 0 || rows == 0) {
         return false;
@@ -1545,21 +1541,14 @@ bool maru_metal_renderer_draw(
         .cursor_in_modal = cursor_in_modal,
         .has_modal = has_modal,
         .modal_cells_start = modal_cells_start,
-        .modal_clip_x_px = modal_clip_x_px,
-        .modal_clip_y_px = modal_clip_y_px,
-        .modal_clip_w_px = modal_clip_w_px,
-        .modal_clip_h_px = modal_clip_h_px,
+        .cells = cells,
+        .cell_clips = cell_clips,
+        .cell_clip_count = cell_clip_count,
         .sidebar_cells_n = sidebar_cells_n,
         .sidebar_scroll_offset_px = sidebar_scroll_offset_px,
         .status_bar_height_px = status_bar_height_px,
         .sidebar_scissor_top_px = sidebar_scissor_top_px,
         .sidebar_scissor_bottom_px = sidebar_scissor_bottom_px,
-        .pane_clip_cells_start = pane_clip_cells_start,
-        .pane_clip_cells_len = pane_clip_cells_len,
-        .pane_clip_x_px = pane_clip_x_px,
-        .pane_clip_y_px = pane_clip_y_px,
-        .pane_clip_w_px = pane_clip_w_px,
-        .pane_clip_h_px = pane_clip_h_px,
         .sidebar_header_height_px = sidebar_header_height_px,
     };
 

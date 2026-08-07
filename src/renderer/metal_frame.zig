@@ -44,6 +44,15 @@ pub const NativeMetalCell = extern struct {
     // cell은 자체 위치 로직(origin 0/슬롯 높이)을 쓰므로 이 필드를 무시한다(0).
     origin_x: u32 = 0,
     origin_y: u32 = 0,
+    /// 이 셀을 자를 사각형의 **프레임 clip 테이블 index + 1**(0 = 자르지 않음).
+    ///
+    /// **clip을 프레임 슬롯이 아니라 셀이 들고 다니는 이유**: 슬롯에 두면 그리는 대상(셀)과 수명이
+    /// 갈라진다. 실제로 그 결함이 있었다 — `replace`가 pane 구성에서 clip 구간을 계산했는데 도크 목록
+    /// pane이 매 프레임 발행되지 않아, 그 pane이 없는 프레임의 `replace`가 구간을 지웠고 렌더러는
+    /// scissor 분기에 **한 번도 진입하지 못했다**(v147이 죽은 채로 있었다). 셀과 index가 같은 배열에
+    /// 있으면 그 어긋남이 정의상 불가능하다 — `GpuQuad.clip_*`가 quad에서 이미 그렇게 한다.
+    clip_index: u16 = 0,
+    _clip_pad: u16 = 0,
 };
 
 /// NativeMetalCell.reserved의 glyph semantic 값. 커서·선 장식과 같은 기존 ABI 필드를 쓰되, 숫자를
@@ -56,7 +65,7 @@ pub const native_cell_role_dock_toggle: u16 = 32;
 /// 셀 버퍼 안의 한 구간과 그것을 자를 사각형. `role`로 찾은 pane의 위치를 담는다.
 pub const PaneClipRange = struct { start: usize, len: usize, rect: ClipPx };
 
-pub const PaneFrameRole = enum { normal, dock_toggle, dock_list };
+pub const PaneFrameRole = enum { normal, dock_toggle };
 
 fn applyPaneFrameRole(cells: []NativeMetalCell, role: PaneFrameRole) void {
     if (role != .dock_toggle) return;
@@ -1155,14 +1164,6 @@ pub const MetalFrame = extern struct {
     // 주석 단일 출처). float 대신 milli u32로 실어 extern ABI를 정수로 유지(SessionConfig.scale_milli 선례). 끝에
     // 추가해 기존 offset 불변(ABI v70). app이 ResolvedAppearance.window_opacity에서 채운다.
     window_opacity_milli: u32 = 1000,
-    // C4b 모달 클리핑(인프라): 모달 오버레이 셀을 이 px 사각(backing, 좌상단)으로 클리핑한다 — chrome 컴포넌트가
-    // draw.Op.clip을 내면 lowering이 채우고, 렌더러가 모달 셀 draw에 setScissorRect로 적용한다(MTLScissorRect도
-    // 좌상단 원점이라 y 변환 없음). w==0이면 클리핑 없음(기존 동작 그대로). 부분 카드 픽셀 스크롤(알림 패널 등) 재사용 인프라 —
-    // 컴포넌트 적용은 후속. 끝에 추가해 기존 필드 offset 불변(ABI v84).
-    modal_clip_x_px: u32 = 0,
-    modal_clip_y_px: u32 = 0,
-    modal_clip_w_px: u32 = 0,
-    modal_clip_h_px: u32 = 0,
     // 사이드바 세로 스크롤량(backing px). 렌더러가 사이드바 셀(밴드·카드 glyph)의 py_top에서 이만큼 빼 카드를 위로
     // 밀고, >0이면 사이드바 셀 draw에 헤더 아래[header_h, drawable_h] scissor를 적용해 헤더 위로 샌 카드를 자른다
     // (헤더 glyph는 터미널 셀 패스라 영향 없음). GPU quad 밴드·tint는 host lowering이 같은 값으로 이미 빼 헤더 위를
@@ -1209,21 +1210,10 @@ pub const MetalFrame = extern struct {
     // 끝에 추가해 기존 offset 불변(ABI v168).
     sidebar_scissor_top_px: u32 = 0,
     sidebar_scissor_bottom_px: u32 = 0,
-    // SV2a seam(값 0 = 기존 동작): 셀 격자로 그리는 **본문 구간 하나**를 px 사각으로 자른다.
-    //
-    // `PaneFrame.clip_rect`는 오버레이 프레임에서만 scissor가 된다(그 필드 주석). 파일 탐색기처럼 셀로
-    // 그리는 목록을 픽셀 단위로 스크롤하려면 그 목록 구간만 잘라야 하는데 그 배선이 없었다. 렌더러에
-    // 같은 형태가 이미 둘 있다 — 커서를 피해 본문을 쪼개는 `cursor_start` 분할과 사이드바 스크롤
-    // scissor. 이것이 셋째다.
-    //
-    // `pane_clip_cells_len == 0`이면 아무 일도 없다(기존 동작). index는 **cells 기준**으로
-    // `cursor_start`와 같은 도메인이다. 끝에 추가해 기존 offset 불변(ABI v147).
-    pane_clip_cells_start: u32 = 0,
-    pane_clip_cells_len: u32 = 0,
-    pane_clip_x_px: u32 = 0,
-    pane_clip_y_px: u32 = 0,
-    pane_clip_w_px: u32 = 0,
-    pane_clip_h_px: u32 = 0,
+    /// 셀이 `clip_index`로 가리키는 사각형 표. index 1이 `cell_clips[0]`이다(0은 "자르지 않음").
+    /// 셀 배열과 **같은 프레임에서 함께** 만들어지므로 둘의 수명이 갈라지지 않는다(ABI v169).
+    cell_clips: ?[*]const ClipPx = null,
+    cell_clip_count: usize = 0,
 };
 
 /// 사이드바 셀 = 밴드(전달받은 sentinel-UV 하이라이트) ++ 탭 제목 glyph(사이드바 RenderFrame 투영).
@@ -1232,6 +1222,24 @@ pub const MetalFrame = extern struct {
 /// 터미널 panel cell들에 그 panel의 픽셀 origin을 박는다 — 렌더러가 cell을 origin_x + col*cw,
 /// origin_y + row*ch에 둔다(per-cell origin이라 cursor suffix 길이 변화에도 각 cell이 자기 위치를
 /// 안다). 단일 panel이면 전체가 같은 origin. 사이드바 cell엔 안 쓴다(자체 위치 로직 origin 0/슬롯 높이).
+/// 같은 사각형은 한 번만 표에 넣는다 — pane마다 새 항목을 만들면 표가 프레임마다 자라고, 렌더러가
+/// 쪼개는 draw 수도 함께 는다. 반환은 셀에 새길 **index + 1**(0은 "자르지 않음"이라 비워 둔다).
+fn clipIndexFor(allocator: std.mem.Allocator, table: *std.ArrayList(ClipPx), rect: ClipPx) !u16 {
+    for (table.items, 0..) |existing, i| {
+        if (existing.x == rect.x and existing.y == rect.y and existing.w == rect.w and existing.h == rect.h)
+            return @intCast(i + 1);
+    }
+    // u16 index라 표는 65535개까지다. 그보다 많은 서로 다른 clip이 한 프레임에 생기는 구성은 없다 —
+    // 넘으면 자르지 않는 쪽으로 떨어뜨린다(그리는 것을 잃는 것보다 낫다).
+    if (table.items.len >= std.math.maxInt(u16)) return 0;
+    try table.append(allocator, rect);
+    return @intCast(table.items.len);
+}
+
+fn setCellsClipIndex(cells: []NativeMetalCell, index: u16) void {
+    for (cells) |*c| c.clip_index = index;
+}
+
 fn setCellsPaneOrigin(cells: []NativeMetalCell, origin_x: u32, origin_y: u32) void {
     for (cells) |*c| {
         c.origin_x = origin_x;
@@ -1270,7 +1278,9 @@ fn buildMergedSidebarCells(
 /// **일반화 트리거**: 지금 프레임 단위 clip 필드는 modal(오버레이 셀)과 이 타입 두 곳이고, chrome quad는
 /// per-quad clip(`GpuQuad.clip_*`)을 쓴다. 여기에 **세 번째** 프레임 단위 clip 소비자가 생기면 셀 경로도
 /// per-primitive clip으로 일반화할 때다 — 그때까지 필드를 늘리는 편이 draw call 분리보다 싸다.
-pub const ClipPx = struct { x: u32, y: u32, w: u32, h: u32 };
+/// 셀·quad를 자를 사각형(backing px, 좌상단 원점 — MTLScissorRect와 같은 규약).
+/// ABI에 프레임 clip 표로 실리므로 **extern**이다: layout이 C 헤더(MaruAppHostClipRect)와 같아야 한다.
+pub const ClipPx = extern struct { x: u32, y: u32, w: u32, h: u32 };
 
 pub const PaneFrame = struct {
     frame: renderer.RenderFrame,
@@ -1280,13 +1290,11 @@ pub const PaneFrame = struct {
     /// 이 frame의 glyph가 일반 pane인지 자유 배치 도크 토글인지 명시한다. Metal backend가
     /// codepoint·좌표로 역할을 재추론하지 않도록 replace가 NativeMetalCell.reserved에 lower한다.
     role: PaneFrameRole = .normal,
-    /// **오버레이 프레임과 `role == .dock_list`인 pane에서만 동작한다.** 오버레이에서는 아래
-    /// `modal_clip = pf.clip_rect`가 모달 셀 draw에 scissor를 걸고, 스크롤하는 도크 목록(탐색기·소스
-    /// 컨트롤) pane에서는 그 pane의 셀
-    /// 구간이 `pane_clip_cells_start/len` + `pane_clip_*_px`로 실려 렌더러가 본문 draw를 셋으로 쪼갠
-    /// 가운데에만 scissor를 건다(ABI v147). **그 밖의 dest는 여전히 값이 조용히 버려진다** —
-    /// `.floating`·`.sticky`·`.normal` pane이 값을 실어 와도 그 셀 draw에는 scissor가 안 걸린다.
-    /// 셋째 소비자가 생기면 그때 셀 경로를 per-primitive clip으로 일반화한다(아래 `ClipPx` 주석).
+    /// 이 frame의 셀을 자를 사각형. 값이 있으면 그 셀들이 `clip_index`를 달고 나가 렌더러가 그 구간에만
+    /// scissor를 건다 — **dest·role과 무관하게** 동작한다(ABI v169). 옛 v84/v147은 이 값을 프레임 단위
+    /// 슬롯에 옮겨 담고 자를 구간은 producer가 pane 구성에서 따로 계산했는데, 도크 목록 pane이 매 프레임
+    /// 발행되지 않아 그 pane이 없는 프레임이 슬롯을 지웠고 렌더러는 scissor 분기에 한 번도 들어가지
+    /// 못했다(실측). 사각형과 대상이 같은 배열에 실리면 그 어긋남이 정의상 불가능하다.
     clip_rect: ?ClipPx = null,
     /// B1 rich Chrome text frame. Its glyph slots/raster uploads still join the shared atlas, but
     /// its visible glyphs are emitted through `GpuGlyph` at final pixel positions rather than
@@ -1414,10 +1422,10 @@ pub const MetalFrameBuffer = struct {
     // '앞'에 끼워 모달 텍스트 셀 아래·터미널 위에 둔다. 0 = 모달 없음(분할 안 함).
     modal_cells_start: usize = 0,
     overlay_cells_present: bool = false,
-    // C4b 모달 클리핑: 모달 셀을 이 px 영역으로 scissor(없으면 null). view()가 MetalFrame.modal_clip_*로 투영.
-    modal_clip: ?ClipPx = null,
-    /// 셀로 그리는 목록 하나(파일 탐색기)를 px로 자르는 구간(ABI v147). null이면 자르지 않는다.
-    pane_clip: ?PaneClipRange = null,
+    /// 셀이 `clip_index`로 가리키는 사각형 표. 셀 배열과 같은 `replace`에서 함께 만들어져 수명이
+    /// 일치한다 — 옛 프레임 단위 슬롯(`pane_clip`)은 그 수명이 갈라져 렌더러에 한 번도 도달하지
+    /// 못했다(ABI v169가 그것을 대체했다).
+    cell_clips: []ClipPx = &.{},
 
     /// N개 panel frame(`pane_frames`)과 사이드바 frame(선택)을 함께 투영해 교체한다. 각 panel 셀은 자기
     /// origin에 박혀(setCellsPaneOrigin) 렌더러가 origin_x+col*cw, origin_y+row*ch에 둔다 — N개 surface가
@@ -1483,23 +1491,19 @@ pub const MetalFrameBuffer = struct {
         errdefer cells_list.deinit(allocator);
         try cells_list.appendSlice(allocator, pane_chrome_cells);
         var cursor_cells: usize = 0;
-        // 셀로 그리는 목록 하나를 px로 자르는 구간(ABI v147). null이면 자르지 않는다(기존 동작).
-        var pane_clip: ?PaneClipRange = null;
+        // 셀이 자기 clip을 들고 간다(ABI v169). 표는 이 프레임의 셀과 **함께** 만들어지므로 둘의 수명이
+        // 갈라지지 않는다 — 옛 프레임 슬롯은 pane 구성에 묶여 있어 목록 pane이 없는 프레임이 그것을
+        // 지웠고, 그래서 렌더러가 scissor에 한 번도 진입하지 못했다.
+        var clip_table: std.ArrayList(ClipPx) = .empty;
+        errdefer clip_table.deinit(allocator);
         for (pane_frames, 0..) |pf, i| {
             if (pf.rich_text_only) continue;
             const built = try buildNativeCellsSplit(allocator, pf.frame.glyph_quad_frame, pf.frame.draw_list.cells, pf.colors);
             defer allocator.free(built.cells);
             setCellsPaneOrigin(built.cells, pf.origin_x, pf.origin_y);
             applyPaneFrameRole(built.cells, pf.role);
-            if (pf.role == .dock_list) if (pf.clip_rect) |clip| {
-                // 이 pane의 셀 구간과 자를 사각형. 뒤따르는 divider·사이드바 헤더 삽입은 **커서 suffix
-                // 바로 앞**(버퍼 끝)이라 여기 index를 밀지 않는다.
-                pane_clip = .{
-                    .start = cells_list.items.len,
-                    .len = built.cells.len,
-                    .rect = clip,
-                };
-            };
+            // **role이 아니라 clip_rect의 유무**가 자를지를 정한다. role은 이제 glyph semantic 전용이다.
+            if (pf.clip_rect) |clip| setCellsClipIndex(built.cells, try clipIndexFor(allocator, &clip_table, clip));
             try cells_list.appendSlice(allocator, built.cells);
             if (i == pane_frames.len - 1) cursor_cells = built.cursor_cells; // 활성(마지막) panel의 커서가 끝에
         }
@@ -1535,7 +1539,6 @@ pub const MetalFrameBuffer = struct {
         // ABI v131 explicit presence gate가 "없음"과 "index 0에서 시작"을 구분하므로 base cell이 없는 rich/web 조합도
         // 같은 overlay pass를 탄다.
         var modal_cells_start: usize = 0;
-        var modal_clip: ?ClipPx = null; // 모달 오버레이 클리핑(px) — overlay PaneFrame에서 흘러와 renderer scissor
         // 오버레이 영역이 존재하는가(모달 또는 드래그). 하나라도 있으면 modal_cells_start를 이 영역 시작으로 잡는다.
         const has_overlay = overlay_frame != null or drag_overlay_frame != null or drag_overlay_cells.len > 0;
         if (has_overlay) {
@@ -1559,13 +1562,17 @@ pub const MetalFrameBuffer = struct {
                 const built = try buildNativeCellsSplit(allocator, pf.frame.glyph_quad_frame, pf.frame.draw_list.cells, pf.colors);
                 defer allocator.free(built.cells);
                 setCellsPaneOrigin(built.cells, pf.origin_x, pf.origin_y);
+                // 모달도 **같은 경로**를 쓴다 — 셀이 자기 clip index를 들고 간다(v169). 예전에는 모달만
+                // 프레임 슬롯 하나를 따로 갖고 있었고, 그 비대칭이 셀 clip을 두 벌로 만들었다.
+                if (pf.clip_rect) |clip| setCellsClipIndex(built.cells, try clipIndexFor(allocator, &clip_table, clip));
                 try cells_list.appendSlice(allocator, built.cells);
                 overlay_cursor_cells = built.cursor_cells; // 모달 caret이 버퍼 맨 끝 — blink suffix
-                modal_clip = pf.clip_rect; // 모달 셀 draw에 scissor로 적용(renderer)
             }
         }
         const new_cells = try cells_list.toOwnedSlice(allocator);
         errdefer allocator.free(new_cells);
+        const new_clips = try clip_table.toOwnedSlice(allocator);
+        errdefer allocator.free(new_clips);
 
         const new_sidebar_cells = try buildMergedSidebarCells(allocator, sidebar_band_cells, sidebar_frame, sidebar_colors);
         errdefer allocator.free(new_sidebar_cells);
@@ -1602,6 +1609,7 @@ pub const MetalFrameBuffer = struct {
         }
 
         allocator.free(self.cells);
+        allocator.free(self.cell_clips);
         allocator.free(self.sidebar_cells);
         allocator.free(self.gpu_quads);
         allocator.free(self.gpu_shadows);
@@ -1613,6 +1621,7 @@ pub const MetalFrameBuffer = struct {
         allocator.free(self.uploads);
         allocator.free(self.pixels);
         self.cells = new_cells;
+        self.cell_clips = new_clips;
         self.sidebar_cells = new_sidebar_cells;
         self.gpu_quads = new_gpu_quads;
         self.gpu_shadows = new_gpu_shadows;
@@ -1639,8 +1648,6 @@ pub const MetalFrameBuffer = struct {
         }
         self.modal_cells_start = modal_cells_start;
         self.overlay_cells_present = has_overlay;
-        self.modal_clip = modal_clip;
-        self.pane_clip = pane_clip;
         self.uploads = merged.uploads;
         self.pixels = merged.pixels;
         // cols/rows는 렌더러의 cols==0/rows==0 가드용 — 활성(마지막) panel의 grid를 쓴다(셀은 자기 row/col+
@@ -1768,18 +1775,11 @@ pub const MetalFrameBuffer = struct {
             // C4b 모달: show_cursor로 잘려도 modal_cells_start는 그대로(커서 suffix는 모달 텍스트 '뒤'라
             // 모달 셀 시작에 영향 없음). exposed가 modal_cells_start보다 작으면 모달 텍스트가 안 보이는
             // 경우인데, 그땐 draw가 over quad를 모달 없음과 같게 다룬다(렌더러 가드).
-            .pane_clip_cells_start = if (self.pane_clip) |c| @intCast(c.start) else 0,
-            .pane_clip_cells_len = if (self.pane_clip) |c| @intCast(c.len) else 0,
-            .pane_clip_x_px = if (self.pane_clip) |c| c.rect.x else 0,
-            .pane_clip_y_px = if (self.pane_clip) |c| c.rect.y else 0,
-            .pane_clip_w_px = if (self.pane_clip) |c| c.rect.w else 0,
-            .pane_clip_h_px = if (self.pane_clip) |c| c.rect.h else 0,
+            .cell_clips = if (self.cell_clips.len > 0) self.cell_clips.ptr else null,
+            .cell_clip_count = self.cell_clips.len,
             .modal_cells_start = self.modal_cells_start,
             .overlay_cells_present = @intFromBool(self.overlay_cells_present),
-            .modal_clip_x_px = if (self.modal_clip) |c| c.x else 0,
-            .modal_clip_y_px = if (self.modal_clip) |c| c.y else 0,
-            .modal_clip_w_px = if (self.modal_clip) |c| c.w else 0,
-            .modal_clip_h_px = if (self.modal_clip) |c| c.h else 0,
+
             // kitty graphics(K2): 이미지 드로우 프리미티브 + 업로드 채널. 비면 null로 둬 렌더러가 건너뛴다.
             .gpu_images = if (self.gpu_images.len > 0) self.gpu_images.ptr else null,
             .gpu_image_count = self.gpu_images.len,
@@ -1795,6 +1795,7 @@ pub const MetalFrameBuffer = struct {
 
     pub fn deinit(self: *MetalFrameBuffer, allocator: std.mem.Allocator) void {
         allocator.free(self.cells);
+        allocator.free(self.cell_clips);
         allocator.free(self.sidebar_cells);
         allocator.free(self.gpu_quads);
         allocator.free(self.gpu_shadows);
@@ -3178,73 +3179,104 @@ test "replace: caret 없는 오버레이 셀이 뒤에 붙어도 터미널 커�
     try std.testing.expect(v.cursor_start + v.cursor_cells <= v.cell_count);
 }
 
-// SV2a: 탐색기 pane이 자기 셀 구간을 **non-zero** clip과 함께 싣는지 본다. SV2a-1이 낸 seam은 값 0으로
-// 들어와 프로덕션에서 한 번도 안 돌았고(`modal_clip`이 오래 그랬던 것과 같다), SV2a-2가 통로를 이었으며,
-// 부분 행을 만드는 이 슬라이스가 첫 non-zero 소비자다. GPU가 실제로 자르는 것은 눈으로 봐야 하지만,
-// **무엇을 자르라고 실어 보내는지**는 여기서 고정한다 — 구간이 비면 렌더러는 조용히 안 자른다.
-test "replace: 도크 목록 role의 pane이 자기 셀 구간과 clip rect를 seam에 싣는다(v147 첫 non-zero 소비자)" {
+// v169 — 셀이 **자기** clip을 들고 간다. 옛 설계는 프레임 슬롯 하나에 "이 구간을 이 사각형으로
+// 자르라"를 담았고, 그 구간을 `replace`가 pane 구성에서 계산했다. 그런데 도크 목록 pane은 매 프레임
+// 발행되지 않아서, 그 pane이 없는 프레임의 `replace`가 슬롯을 지웠다 — 렌더러는 scissor 분기에 **한
+// 번도 진입하지 못했다**. 셀과 index가 같은 배열에 있으면 그 어긋남이 정의상 불가능하다.
+test "replace: 셀이 자기 clip index를 들고 가고 표가 그 사각형을 담는다" {
     const allocator = std.testing.allocator;
     const atlas_config: renderer.GlyphAtlasConfig = .{ .atlas_width_px = 1024, .atlas_height_px = 1024 };
     const colors: CellColors = .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 }, .cursor = .{ .block = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF }, .text = .{ .r = 0, .g = 0, .b = 0 } } };
-    var tree_ov = [_]renderer.DrawOverlay{.{ .cursor = .{ .row = 0, .col = 0 } }};
-    var term_ov = [_]renderer.DrawOverlay{.{ .cursor = .{ .row = 0, .col = 0 } }};
-    const clip: ClipPx = .{ .x = 10, .y = 40, .w = 300, .h = 811 };
-    const tree_pf: PaneFrame = .{
-        .frame = fakeCursorFrame(&tree_ov),
-        .origin_x = 10,
-        // 창의 첫 행이 위로 밀린 만큼 원점이 올라간 상태 — clip.y보다 작다.
-        .origin_y = 31,
-        .colors = colors,
-        .role = .dock_list,
-        .clip_rect = clip,
-    };
-    // 활성 터미널 pane은 뒤에 온다(커서 suffix 규약). 탐색기 구간이 그 앞이라는 것도 함께 본다.
-    const term_pf: PaneFrame = .{ .frame = fakeCursorFrame(&term_ov), .origin_x = 400, .origin_y = 40, .colors = colors };
-    var panes = [_]PaneFrame{ tree_pf, term_pf };
+    var head_ov = [_]renderer.DrawOverlay{.{ .cursor = .{ .row = 0, .col = 0 } }};
+    var list_ov = [_]renderer.DrawOverlay{.{ .cursor = .{ .row = 0, .col = 0 } }};
+    const clip: ClipPx = .{ .x = 10, .y = 86, .w = 300, .h = 146 };
+    // 고정 헤더 — clip 없음. 스크롤 목록 — clip 있음.
+    const head_pf: PaneFrame = .{ .frame = fakeCursorFrame(&head_ov), .origin_x = 10, .origin_y = 68, .colors = colors };
+    const list_pf: PaneFrame = .{ .frame = fakeCursorFrame(&list_ov), .origin_x = 10, .origin_y = 70, .colors = colors, .clip_rect = clip };
+    var panes = [_]PaneFrame{ head_pf, list_pf };
 
     var buf: MetalFrameBuffer = .{};
     defer buf.deinit(allocator);
     try buf.replace(allocator, &panes, atlas_config, 8, 16, null, null, &.{}, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, null, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
 
     const v = buf.view();
-    // 구간이 비어 있으면 렌더러의 세 draw가 기존 한 줄과 같아져 **아무것도 안 잘린다**.
-    try std.testing.expect(v.pane_clip_cells_len > 0);
-    try std.testing.expectEqual(clip.x, v.pane_clip_x_px);
-    try std.testing.expectEqual(clip.y, v.pane_clip_y_px);
-    try std.testing.expectEqual(clip.w, v.pane_clip_w_px);
-    try std.testing.expectEqual(clip.h, v.pane_clip_h_px);
-    // 그 구간이 실제로 탐색기 셀이다(origin으로 구별) — 엉뚱한 구간을 자르면 터미널이 잘린다.
-    try std.testing.expect(v.pane_clip_cells_start + v.pane_clip_cells_len <= v.cell_count);
-    for (buf.cells[v.pane_clip_cells_start..][0..v.pane_clip_cells_len]) |cell| {
-        try std.testing.expectEqual(@as(u32, 10), cell.origin_x);
+    try std.testing.expectEqual(@as(usize, 1), v.cell_clip_count);
+    const table = v.cell_clips.?;
+    try std.testing.expectEqual(clip.y, table[0].y);
+    try std.testing.expectEqual(clip.h, table[0].h);
+
+    // 목록 셀만 index를 든다. 헤더 셀은 0(자르지 않음)이라 고정 헤더가 잘리지 않는다.
+    var saw_clipped = false;
+    var saw_unclipped = false;
+    for (buf.cells) |cell| {
+        if (cell.origin_y == 70) {
+            try std.testing.expectEqual(@as(u16, 1), cell.clip_index);
+            saw_clipped = true;
+        }
+        if (cell.origin_y == 68) {
+            try std.testing.expectEqual(@as(u16, 0), cell.clip_index);
+            saw_unclipped = true;
+        }
     }
-    // 커서 suffix는 활성(마지막) pane 것이라 탐색기 구간 **뒤**에 있다.
-    try std.testing.expect(buf.cursor_start >= v.pane_clip_cells_start + v.pane_clip_cells_len);
+    try std.testing.expect(saw_clipped);
+    try std.testing.expect(saw_unclipped);
 }
 
-// role이 탐색기가 아니면 seam은 값 0으로 남는다 — 이 게이트가 없으면 아무 pane이나 clip을 실어 보내
-// 터미널 본문이 잘린다(그 필드는 오랫동안 조용히 버려지던 값이라 실어 보내는 곳이 여럿이다).
-test "replace: 도크 목록 role이 아닌 pane의 clip_rect는 seam을 켜지 않는다" {
+// **이 판정자가 옛 설계에서는 빨간색이었다.** 목록 pane이 없는 프레임을 한 번 섞으면 옛 슬롯은
+// 지워졌고, 그 뒤 목록 pane이 돌아와도 같은 프레임이 아니면 clip이 살아나지 않았다. 셀이 index를
+// 들고 있으면 각 프레임이 자기 clip을 온전히 갖는다.
+test "replace: 목록 pane이 없는 프레임을 지나도 다음 프레임의 clip이 온전하다" {
     const allocator = std.testing.allocator;
     const atlas_config: renderer.GlyphAtlasConfig = .{ .atlas_width_px = 1024, .atlas_height_px = 1024 };
     const colors: CellColors = .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 }, .cursor = .{ .block = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF }, .text = .{ .r = 0, .g = 0, .b = 0 } } };
     var ov = [_]renderer.DrawOverlay{.{ .cursor = .{ .row = 0, .col = 0 } }};
-    const pf: PaneFrame = .{
-        .frame = fakeCursorFrame(&ov),
-        .origin_x = 0,
-        .origin_y = 0,
-        .colors = colors,
-        .clip_rect = .{ .x = 1, .y = 2, .w = 3, .h = 4 },
+    const clip: ClipPx = .{ .x = 0, .y = 40, .w = 200, .h = 100 };
+    const plain: PaneFrame = .{ .frame = fakeCursorFrame(&ov), .origin_x = 0, .origin_y = 0, .colors = colors };
+    const listed: PaneFrame = .{ .frame = fakeCursorFrame(&ov), .origin_x = 0, .origin_y = 20, .colors = colors, .clip_rect = clip };
+
+    var buf: MetalFrameBuffer = .{};
+    defer buf.deinit(allocator);
+
+    var with_list = [_]PaneFrame{listed};
+    try buf.replace(allocator, &with_list, atlas_config, 8, 16, null, null, &.{}, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, null, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
+    try std.testing.expectEqual(@as(usize, 1), buf.view().cell_clip_count);
+
+    // 목록이 빠진 프레임 — 자를 셀이 없으니 표도 비어야 한다(그 프레임엔 목록 셀도 없다).
+    var without_list = [_]PaneFrame{plain};
+    try buf.replace(allocator, &without_list, atlas_config, 8, 16, null, null, &.{}, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, null, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
+    try std.testing.expectEqual(@as(usize, 0), buf.view().cell_clip_count);
+    for (buf.cells) |cell| try std.testing.expectEqual(@as(u16, 0), cell.clip_index);
+
+    // 다시 목록이 있는 프레임 — clip이 온전히 돌아온다.
+    try buf.replace(allocator, &with_list, atlas_config, 8, 16, null, null, &.{}, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, null, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
+    const v = buf.view();
+    try std.testing.expectEqual(@as(usize, 1), v.cell_clip_count);
+    try std.testing.expectEqual(clip.y, v.cell_clips.?[0].y);
+    var any: bool = false;
+    for (buf.cells) |cell| if (cell.clip_index == 1) {
+        any = true;
     };
-    var panes = [_]PaneFrame{pf};
+    try std.testing.expect(any);
+}
+
+// 같은 사각형을 여러 pane이 쓰면 표에 한 번만 들어간다 — 렌더러가 쪼개는 draw 수가 pane 수만큼
+// 늘어나지 않게 하는 것이 이 dedupe의 목적이다.
+test "replace: 같은 clip을 쓰는 pane들이 표 항목 하나를 공유한다" {
+    const allocator = std.testing.allocator;
+    const atlas_config: renderer.GlyphAtlasConfig = .{ .atlas_width_px = 1024, .atlas_height_px = 1024 };
+    const colors: CellColors = .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 }, .cursor = .{ .block = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF }, .text = .{ .r = 0, .g = 0, .b = 0 } } };
+    var ov = [_]renderer.DrawOverlay{.{ .cursor = .{ .row = 0, .col = 0 } }};
+    const clip: ClipPx = .{ .x = 1, .y = 2, .w = 3, .h = 4 };
+    const a: PaneFrame = .{ .frame = fakeCursorFrame(&ov), .origin_x = 0, .origin_y = 10, .colors = colors, .clip_rect = clip };
+    const b: PaneFrame = .{ .frame = fakeCursorFrame(&ov), .origin_x = 0, .origin_y = 20, .colors = colors, .clip_rect = clip };
+    var panes = [_]PaneFrame{ a, b };
 
     var buf: MetalFrameBuffer = .{};
     defer buf.deinit(allocator);
     try buf.replace(allocator, &panes, atlas_config, 8, 16, null, null, &.{}, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, null, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
 
-    const v = buf.view();
-    try std.testing.expectEqual(@as(u32, 0), v.pane_clip_cells_len);
-    try std.testing.expectEqual(@as(u32, 0), v.pane_clip_w_px);
+    try std.testing.expectEqual(@as(usize, 1), buf.view().cell_clip_count);
+    for (buf.cells) |cell| try std.testing.expectEqual(@as(u16, 1), cell.clip_index);
 }
 
 test "replaceSidebar swaps only sidebar_cells and bumps generation, leaving grid cells untouched (A)" {

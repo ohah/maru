@@ -5093,10 +5093,6 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             frame.gpu_quads,              // C4b: chrome rich 둥근 사각형(tui면 NULL — Swift는 패스스루만)
             frame.gpu_quad_count,
             frame.modal_cells_start,      // C4b 모달: over quad를 모달 텍스트 앞에 끼우는 분할점(패스스루)
-            frame.modal_clip_x_px,        // C4b 모달 클리핑(px, w==0=없음 — renderer가 모달 셀 draw에 scissor; 패스스루)
-            frame.modal_clip_y_px,
-            frame.modal_clip_w_px,
-            frame.modal_clip_h_px,
             frame.gpu_shadows,            // C4b: chrome 그림자(tui/모달 닫힘이면 NULL — 패스스루만)
             frame.gpu_shadow_count,
             frame.gpu_images,             // kitty graphics(K2): 이미지 placement(없으면 NULL — 패스스루만)
@@ -5119,14 +5115,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             frame.gpu_glyphs,             // B1: rich Chrome final pixel glyph placement(셀 grid와 분리)
             frame.gpu_glyph_count,
             frame.status_bar_height_px, // SB1: 사이드바 배경 strip을 상태바 위에서 끝낸다(strip 클리핑 전용)
-            frame.pane_clip_cells_start, // SV2a: 셀 본문 중 잘라야 할 구간(패스스루 — 정책은 Zig가 소유)
-            frame.pane_clip_cells_len,
-            frame.pane_clip_x_px,
-            frame.pane_clip_y_px,
-            frame.pane_clip_w_px,
-            frame.pane_clip_h_px,
             frame.sidebar_scissor_top_px,   // 셀 scissor 구간 — Zig가 게이트·클램프까지 끝낸 값(v168)
-            frame.sidebar_scissor_bottom_px
+            frame.sidebar_scissor_bottom_px,
+            frame.cell_clips,             // v169: 셀이 clip_index로 가리키는 사각형 표(패스스루 — 정책은 Zig가 소유)
+            frame.cell_clip_count
         )
         if drew {
             lastDrawnGeneration = frame.generation

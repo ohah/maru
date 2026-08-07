@@ -281,8 +281,8 @@ PausedPaste는 session-host 문서의 1 MiB/item·runtime 1개·app 8 MiB·10분
 핵심 알림 기능(클릭→활성화·인앱 센터·읽음/지우기·config·배너↔센터 읽음 동기화·배지 9+·카드 단위 스크롤)은
 완결됐다. 추가 알림 채널(OSC 99 등)이나 알림 그룹화는 필요해지면 후속으로 둔다.
 
-**알림 패널 행 단위/픽셀 스크롤(백로그·보류)**: 현재 스크롤은 **카드 단위**(`card_rows`=2행을 통째로 넘긴다). 모달
-px 클리핑 인프라(`MetalFrame.modal_clip`, ABI v84 — `docs/layering-and-portability.md` §7)는 머지됐으나 **알림 적용은
+**알림 패널 행 단위/픽셀 스크롤(백로그·보류)**: 현재 스크롤은 **카드 단위**(`card_rows`=2행을 통째로 넘긴다). 셀
+클리핑(`NativeMetalCell.clip_index`, ABI v169 — `docs/layering-and-portability.md` §7)은 동작하지만 **알림 적용은
 보류**한다. 이유: 오버레이 텍스트는 `placeText`가 `@divTrunc`로 셀 행에 스냅하고 viewport(`rows`) 밖이면 자동
 skip하므로, 진짜 픽셀-부드러운 스크롤이 텍스트엔 불가하다(셀 그리드 제약). clip의 실익은 배경 quad와 행 단위 부분
 카드 정리 정도라 card-unit 대비 이득(마지막 카드 반쯤 보임)이 작고 재작성 복잡도가 크다 — 지금은 card-unit으로 충분.

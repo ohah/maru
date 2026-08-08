@@ -147,7 +147,7 @@ struct MermaidHelperSmoke {
             var snapshot = MaruMermaidCoordinatorSnapshot()
             maru_macos_mermaid_snapshot(&snapshot)
             return snapshot.accepted_results == 1
-        }, timeout: 4.0)
+        }, timeout: 7.0)
         var postProbeAccepted = MaruMermaidAcceptedResult()
         var postProbeSvg = [UInt8](repeating: 0, count: Int(MARU_MERMAID_PROTOCOL_MAX_SVG_BYTES))
         let postProbeTakeStatus = postProbeSvg.withUnsafeMutableBufferPointer {
@@ -300,7 +300,7 @@ struct MermaidHelperSmoke {
             var snapshot = MaruMermaidCoordinatorSnapshot()
             maru_macos_mermaid_snapshot(&snapshot)
             return snapshot.disabled != 0 && snapshot.termination_in_progress == 0
-        }, timeout: 3.0)
+        }, timeout: 7.0)
         var abaSnapshot = MaruMermaidCoordinatorSnapshot()
         maru_macos_mermaid_snapshot(&abaSnapshot)
         checks["path_aba_integrity_latched"] = abaSnapshot.disabled != 0
@@ -339,7 +339,7 @@ struct MermaidHelperSmoke {
             var snapshot = MaruMermaidCoordinatorSnapshot()
             maru_macos_mermaid_snapshot(&snapshot)
             return snapshot.disabled != 0
-        }, timeout: 2.0)
+        }, timeout: 7.0)
         var tamperedSnapshot = MaruMermaidCoordinatorSnapshot()
         maru_macos_mermaid_snapshot(&tamperedSnapshot)
         checks["tampered_bundle_seal_rejected_before_spawn"] = tamperedSnapshot.disabled != 0 &&
@@ -359,7 +359,7 @@ struct MermaidHelperSmoke {
             var snapshot = MaruMermaidCoordinatorSnapshot()
             maru_macos_mermaid_snapshot(&snapshot)
             return snapshot.disabled != 0
-        }, timeout: 3.0)
+        }, timeout: 7.0)
         var mismatchSnapshot = MaruMermaidCoordinatorSnapshot()
         maru_macos_mermaid_snapshot(&mismatchSnapshot)
         checks["digest_mismatch_permanent_after_one_start"] = mismatchSnapshot.disabled != 0 &&
@@ -395,7 +395,7 @@ struct MermaidHelperSmoke {
             var snapshot = MaruMermaidCoordinatorSnapshot()
             maru_macos_mermaid_snapshot(&snapshot)
             return snapshot.termination_in_progress == 0 && snapshot.action_handoff_pending == 0
-        }, timeout: 1.0)
+        }, timeout: 7.0)
         var final = MaruMermaidCoordinatorSnapshot()
         maru_macos_mermaid_snapshot(&final)
         checks["hundred_hangs_submitted"] = admitted == Int(MARU_MERMAID_MAX_PENDING_JOBS)
@@ -993,7 +993,21 @@ struct MermaidHelperSmoke {
         writeSummary(checks)
         writePerformance(performance)
         if !passed {
-            fail("Mermaid helper smoke checks failed: \(failedChecks.joined(separator: ", "))")
+            // **이름만 찍으면 재실행 도박밖에 못 한다.** 이 스모크는 헤드리스 WebKit·프로세스 스폰에 의존해
+            // 느린 러너에서 간헐 실패하는데, 그때 로그에 남는 게 체크 이름뿐이라 "타임아웃인지 진짜 거부인지"를
+            // 구별할 수 없었다(실측: 같은 job이 하루 세 번 빨갛고 세 번 다 재실행으로 통과했다).
+            // 실패한 체크의 **값**과 진단 항목(stderr tail·카운터)을 함께 남긴다 — summary.json은 아티팩트라
+            // job 로그에 안 뜨므로 stderr로 직접 낸다.
+            var lines: [String] = ["Mermaid helper smoke checks failed: \(failedChecks.joined(separator: ", "))"]
+            lines.append("--- 실패한 체크의 값 ---")
+            for name in failedChecks {
+                lines.append("  \(name) = \(checks[name].map { String(describing: $0) } ?? "<없음>")")
+            }
+            lines.append("--- 진단(불리언이 아닌 관측값) ---")
+            for key in checks.keys.sorted() where !(checks[key] is Bool) {
+                lines.append("  \(key) = \(String(describing: checks[key]!))")
+            }
+            fail(lines.joined(separator: "\n"))
         }
     }
 
@@ -1064,6 +1078,9 @@ struct MermaidHelperSmoke {
         }
     }
 
+    /// 조건이 충족되면 **즉시** 반환한다 — 그래서 timeout을 넉넉히 잡아도 정상 실행은 느려지지 않는다.
+    /// 값이 곧 "느린 러너를 얼마나 봐줄 것인가"이고, 짧게 잡을 이유가 없어 전부 같은 값으로 맞췄다
+    /// (실측: CI에서 3초 만료로 `path_aba_*`가 간헐 실패했다).
     private static func pump(
         _ coordinator: MermaidRenderCoordinator,
         until done: () -> Bool,

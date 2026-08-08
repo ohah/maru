@@ -1139,6 +1139,51 @@ test "appendCandidateFile: 어느 할당이 실패해도 요약이 새지 않는
     }
 }
 
+// 정렬 키가 목록 순서를 정한다. 폴백 규칙이 깨지면 timestamp 없는 파일만 조용히 목록 끝으로 밀리거나
+// (키 0) 엉뚱한 자리에 앉는다 — 눈으로 잡기 어려운 종류라 규칙을 그대로 고정한다.
+test "정렬 키는 활동 시각을 쓰고, 없을 때만 mtime으로 폴백한다" {
+    // 문자열 필드는 읽히지 않는다. deinit하지 않으므로 정적 리터럴로 채운다.
+    const blank = archive.Parsed{
+        .provider = .claude,
+        .session_id = @constCast(""),
+        .title = @constCast(""),
+        .summary = @constCast(""),
+        .cwd = @constCast(""),
+        .model = @constCast(""),
+        .message_count = 0,
+        .verified_user = true,
+    };
+    const make = struct {
+        fn record(base: archive.Parsed, activity_ns: i96, mtime_ns: i96) Record {
+            var parsed = base;
+            parsed.last_activity_ns = activity_ns;
+            return .{ .parsed = parsed, .source_path = @constCast(""), .mtime_ns = mtime_ns, .inode = 0, .device = 0 };
+        }
+    };
+
+    // 활동 시각이 있으면 mtime을 무시한다. mtime이 훨씬 최신이어도 그렇다 — 실측에서 mtime이 실제
+    // 마지막 활동보다 144시간 앞선 파일이 있었다.
+    const activity_wins = make.record(blank, 100, 999_999);
+    try std.testing.expectEqual(@as(i96, 100), lastActivityNs(activity_wins));
+
+    // 못 읽었을 때만 mtime을 쓴다.
+    const fallback = make.record(blank, 0, 42);
+    try std.testing.expectEqual(@as(i96, 42), lastActivityNs(fallback));
+
+    // 두 종류가 섞여도 하나의 눈금으로 비교된다(둘 다 Unix epoch 나노초다).
+    var records = [_]Record{
+        make.record(blank, 0, 200), // 폴백만 있는 오래된 것
+        make.record(blank, 500, 1), // 활동 시각이 가장 늦은 것
+        make.record(blank, 0, 400), // 폴백만 있는 중간 것
+        make.record(blank, 300, 999_999), // mtime은 최신이지만 활동은 세 번째
+    };
+    std.mem.sort(Record, &records, {}, newestFirst);
+    try std.testing.expectEqual(@as(i96, 500), lastActivityNs(records[0]));
+    try std.testing.expectEqual(@as(i96, 400), lastActivityNs(records[1]));
+    try std.testing.expectEqual(@as(i96, 300), lastActivityNs(records[2]));
+    try std.testing.expectEqual(@as(i96, 200), lastActivityNs(records[3]));
+}
+
 test "archive scanner refuses a symlinked history directory" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const io = std.testing.io;

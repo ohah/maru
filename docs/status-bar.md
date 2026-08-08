@@ -87,6 +87,12 @@ backing_height_px
 `git_read` grant 밖이고, hook 실행·index 쓰기를 우리가 하지 않겠다고 정해 둔 것이다. 실행 주체가 셸이면
 dirty tree·충돌·hook 출력이 **평소처럼 사용자에게 보인다**는 이점도 같이 온다.
 
+> ⚠️ **메뉴는 `ui/` 상호작용 계층을 쓰지 않는다.** 재사용한 `components/context_menu.zig`는 색 토큰과 `draw`
+> 계약은 따르지만 hit-test를 자기 손으로 한다(`menuRect`/`itemAt`). 그래서 이 기능 안에 규약이 둘이다 —
+> **항목 클릭까지는 typed tree**(§5.6), **그 뒤 메뉴는 hand-rolled**다. 브랜치 메뉴만 따로 typed tree로 만들면
+> 메뉴 구현이 둘이 되므로 하지 않았고, 공유 컴포넌트를 통째로 옮길 때 함께 간다
+> ([이관 후보로 기록](chrome-interaction-migration.md#2-기존-구현-inventory)).
+
 - 목록 읽기는 백엔드 스레드다(`submitBranches`) — 클릭이 UI를 멈추지 않는다. 연타는 `branch_menu_pending`이 막는다.
 - 명령 문자열은 순수 함수가 만든다(`git_command.branchSwitchCommand`): **개행을 붙이지 않고**(붙이면 그 순간
   실행된다) 셸 메타문자·공백이 든 이름은 거절한다(손상된 목록이 셸로 흘러들지 않게).

@@ -66,6 +66,8 @@ rewrite의 근거로 삼지 않는다.
 | ~~`components/file_tree_scrollbar.zig`~~ (SV2b에서 삭제) | scrollbar geometry/track/thumb math | [`ScrollArea`](scroll-area.md) — 이관 완료 | thumb drag, track click, projection/root generation mismatch cancel |
 | terminal scrollbar | `AppSession` viewport mutation | 별도 판단(터미널 viewport는 [`ScrollArea`](scroll-area.md) 범위 밖) | terminal scrollback/selection/mouse mode와의 입력 우선순위 |
 | Session Dock | typed tree + action table + pixel scroll + 검색 필드(query·IME preedit 입력 owner) | 첫 modern consumer를 유지 | refresh anchor, stale action reject, read-only detail worker, `/`·필드 클릭 활성화와 Escape 해제, marked text가 필드·native 후보창에만 보이고 commit된 query만 목록을 필터하는 규율, 256 byte 절단, 검색 키·IME가 재스캔·stat·정렬을 일으키지 않고 terminal PTY로 새지 않음 |
+| `components/context_menu.zig` | anchor clamp·행 geometry·hit-test(`menuRect`/`itemAt`)를 컴포넌트가 직접 계산. 색은 tokens, 그리기는 `draw` 계약을 쓰지만 **`ui/` 계층은 안 쓴다**(tree·interaction·paint 미사용) | `Menu` composite(위 dropdown 행과 같은 목적지) | 항목 라벨을 platform이 주입하고 실행도 platform이 하는 분리, backing 안으로의 anchor clamp(특히 **하단 클램프** — 상태바 위 앵커가 여기 의존한다), 우클릭 소비자 전부(워크스페이스 카드·파일 트리·터미널 본문·view options)의 인덱스 기반 분기 |
+| | ⚠️ **소비자가 여럿인 공유 컴포넌트다.** 상태바 브랜치 메뉴(§상태바)가 여기 얹히면서 한 기능 안에 두 규약이 섞였다 — 항목 클릭까지는 typed tree(`ui/tree`), 그 뒤 메뉴는 hand-rolled hit-test다. 브랜치 메뉴만 따로 typed tree로 만들면 **메뉴 구현이 둘**이 되므로 하지 않았다. 이관은 이 컴포넌트를 통째로 옮길 때 함께 한다 | | |
 | palette/find/notice/modal/dropdown | 화면별 `State`/view/handle | `Input`/`Menu`/`Popover`/`Dialog` composite | AppKit first responder, IME, Escape/outside-dismiss, keyboard navigation |
 | settings/toggle/text field | 화면별 form state | `Input`/`Toggle`/`Select`/`FormRow` | schema ownership, config write, validation/error presentation |
 

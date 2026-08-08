@@ -82,6 +82,10 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
     // own SVG rotation, a muted registered refresh glyph is the truthful busy affordance.
     try writer.headerRefresh(header, refresh_icon, if (props.loading or props.refreshing) .muted_fg else .surface_fg, true);
 
+    // 정렬 토글. published 자식 rect 안에 label을 중앙 정렬해 그린다 — 방향이 바뀌어도 slot 폭이
+    // 고정이라 옆의 `로컬`과 refresh가 움직이지 않는다.
+    try writer.text(find(frame.tree, build.NodeIds.sort_toggle) orelse return error.MissingRect, 0, props.sort_order.label(), .surface_fg, .control, 4, false, true);
+
     try writer.text(find(frame.tree, build.NodeIds.scope_workspace) orelse return error.MissingRect, 0, "작업공간", .surface_fg, .control, 1, false, true);
     try writer.text(find(frame.tree, build.NodeIds.scope_project) orelse return error.MissingRect, 0, "프로젝트", .surface_fg, .control, 1, false, true);
     try writer.text(find(frame.tree, build.NodeIds.scope_all) orelse return error.MissingRect, 0, "전체", .surface_fg, .control, 1, false, true);
@@ -281,7 +285,10 @@ const Writer = struct {
         const metrics = types.DockMetrics.resolve(self.props.scale_milli);
         const utility_width = metrics.headerUtilityWidth();
         if (rect.rect.width < @as(f32, @floatFromInt(metrics.header_content_inset_x + utility_width))) return;
-        const x = rect.rect.x + rect.rect.width - @as(f32, @floatFromInt(metrics.header_trailing_inset + metrics.header_refresh_extent + metrics.header_utility_gap + metrics.header_host_label_w));
+        // 오른쪽에서부터: trailing inset · refresh · gap · 정렬 토글 · gap · host label.
+        const from_right = metrics.header_trailing_inset + metrics.header_refresh_extent + metrics.header_utility_gap +
+            metrics.header_sort_extent + metrics.header_utility_gap + metrics.header_host_label_w;
+        const x = rect.rect.x + rect.rect.width - @as(f32, @floatFromInt(from_right));
         const control_h = typography.lineHeightPx(.control, effectiveScale(self.props.scale_milli));
         if (rect.rect.height < @as(f32, @floatFromInt(control_h))) return;
         const content = draw.Rect{
@@ -851,8 +858,8 @@ test "SessionDock view emits card paint and ellipsized semantic text from one tr
         .cursor = .{ .r = 10, .g = 11, .b = 12 },
         .accent = .{ .r = 13, .g = 14, .b = 15 },
     });
-    var ops: [32]draw.Op = undefined;
-    var runs: [32]draw.Run = undefined;
+    var ops: [40]draw.Op = undefined;
+    var runs: [40]draw.Run = undefined;
     var text_bytes: [1024]u8 = undefined;
     const out = try view(props, frame, .{}, &tk, .{ .ops = &ops, .runs = &runs, .text_bytes = &text_bytes });
     try std.testing.expect(out.ops.len > 8);
@@ -1074,8 +1081,8 @@ test "SessionDock marks partial card runs as scroll clipped instead of dropping 
         .cursor = .{ .r = 10, .g = 11, .b = 12 },
         .accent = .{ .r = 13, .g = 14, .b = 15 },
     });
-    var ops: [32]draw.Op = undefined;
-    var runs: [32]draw.Run = undefined;
+    var ops: [40]draw.Op = undefined;
+    var runs: [40]draw.Run = undefined;
     var text_bytes: [1024]u8 = undefined;
     const out = try view(props, frame, .{}, &tk, .{ .ops = &ops, .runs = &runs, .text_bytes = &text_bytes });
     var partial_title_scroll_clipped: ?bool = null;
@@ -1174,14 +1181,14 @@ test "SessionDock scrolling moves every emitted run by the same virtualization o
         .accent = .{ .r = 13, .g = 14, .b = 15 },
     });
 
-    var nodes_a: [16]tree.UiNode = undefined;
-    var entries_a: [18]tree.RectEntry = undefined;
-    var layout_items_a: [18]@import("../../ui/layout.zig").Item = undefined;
-    var flex_scratch_a: [18]@import("../../ui/layout.zig").FlexScratch = undefined;
-    var child_rects_a: [18]@import("../../ui/layout.zig").UiRect = undefined;
-    var actions_a: [13]@import("ids.zig").Entry = undefined;
-    var ops_a: [64]draw.Op = undefined;
-    var runs_a: [64]draw.Run = undefined;
+    var nodes_a: [18]tree.UiNode = undefined;
+    var entries_a: [22]tree.RectEntry = undefined;
+    var layout_items_a: [20]@import("../../ui/layout.zig").Item = undefined;
+    var flex_scratch_a: [20]@import("../../ui/layout.zig").FlexScratch = undefined;
+    var child_rects_a: [20]@import("../../ui/layout.zig").UiRect = undefined;
+    var actions_a: [15]@import("ids.zig").Entry = undefined;
+    var ops_a: [80]draw.Op = undefined;
+    var runs_a: [80]draw.Run = undefined;
     var text_bytes_a: [2048]u8 = undefined;
     const rested = try view(props, try build.build(props, .{
         .nodes = &nodes_a,
@@ -1193,14 +1200,14 @@ test "SessionDock scrolling moves every emitted run by the same virtualization o
     }), .{}, &tk, .{ .ops = &ops_a, .runs = &runs_a, .text_bytes = &text_bytes_a });
 
     props.content_first_item_origin_y_px = shift;
-    var nodes_b: [16]tree.UiNode = undefined;
-    var entries_b: [18]tree.RectEntry = undefined;
-    var layout_items_b: [18]@import("../../ui/layout.zig").Item = undefined;
-    var flex_scratch_b: [18]@import("../../ui/layout.zig").FlexScratch = undefined;
-    var child_rects_b: [18]@import("../../ui/layout.zig").UiRect = undefined;
-    var actions_b: [13]@import("ids.zig").Entry = undefined;
-    var ops_b: [64]draw.Op = undefined;
-    var runs_b: [64]draw.Run = undefined;
+    var nodes_b: [18]tree.UiNode = undefined;
+    var entries_b: [22]tree.RectEntry = undefined;
+    var layout_items_b: [20]@import("../../ui/layout.zig").Item = undefined;
+    var flex_scratch_b: [20]@import("../../ui/layout.zig").FlexScratch = undefined;
+    var child_rects_b: [20]@import("../../ui/layout.zig").UiRect = undefined;
+    var actions_b: [15]@import("ids.zig").Entry = undefined;
+    var ops_b: [80]draw.Op = undefined;
+    var runs_b: [80]draw.Run = undefined;
     var text_bytes_b: [2048]u8 = undefined;
     const scrolled = try view(props, try build.build(props, .{
         .nodes = &nodes_b,
@@ -1287,8 +1294,8 @@ test "SessionDock keeps its action label when the expansion cannot fit the viewp
         .actions = &actions,
     });
     const tk = fixtureTokens();
-    var ops: [96]draw.Op = undefined;
-    var runs: [96]draw.Run = undefined;
+    var ops: [112]draw.Op = undefined;
+    var runs: [112]draw.Run = undefined;
     var text_bytes: [4096]u8 = undefined;
     const out = try view(props, frame, .{}, &tk, .{ .ops = &ops, .runs = &runs, .text_bytes = &text_bytes });
     var resume_label: ?draw.TextPlacement = null;
@@ -1629,8 +1636,8 @@ test "SessionDock initial loading paints inert three-line skeleton cards" {
         .cursor = .{ .r = 10, .g = 11, .b = 12 },
         .accent = .{ .r = 13, .g = 14, .b = 15 },
     });
-    var ops: [24]draw.Op = undefined;
-    var runs: [9]draw.Run = undefined;
+    var ops: [32]draw.Op = undefined;
+    var runs: [10]draw.Run = undefined;
     var text_bytes: [256]u8 = undefined;
     const out = try view(props, frame, .{}, &tk, .{ .ops = &ops, .runs = &runs, .text_bytes = &text_bytes });
     var skeleton_lines: usize = 0;

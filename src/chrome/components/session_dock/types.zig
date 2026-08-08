@@ -12,6 +12,28 @@ const typography = @import("../../ui/typography.zig");
 
 pub const Scope = enum { workspace, project, all };
 
+/// 목록 정렬 방향. 키는 항상 transcript의 마지막 활동 시각이고(docs/agent-session-list.md §2.3), 이
+/// 값은 **방향만** 정한다. 스캔 순서는 방향과 무관하게 늘 최신 우선이다 — 부분 publish가 최신부터
+/// 차오르는 것과 같은 근거다.
+pub const SortOrder = enum {
+    newest_first,
+    oldest_first,
+
+    pub fn label(self: SortOrder) []const u8 {
+        return switch (self) {
+            .newest_first => "최신순",
+            .oldest_first => "오래된순",
+        };
+    }
+
+    pub fn toggled(self: SortOrder) SortOrder {
+        return switch (self) {
+            .newest_first => .oldest_first,
+            .oldest_first => .newest_first,
+        };
+    }
+};
+
 pub const Provider = enum {
     codex,
     claude,
@@ -96,6 +118,7 @@ pub const Props = struct {
     displayed_count: u16,
     recent_limit: u16 = 500,
     scope: Scope = .all,
+    sort_order: SortOrder = .newest_first,
     workspace_scope_enabled: bool = true,
     project_scope_enabled: bool = true,
     search: []const u8 = "",
@@ -161,6 +184,10 @@ pub const DockMetrics = struct {
     header_host_icon_gap: u32,
     header_utility_gap: u32,
     header_refresh_extent: u32,
+    /// 정렬 토글의 고정 slot 폭. 가장 긴 label(`오래된순`, 한글 4자)과 좌우 여백이 들어가는 값으로
+    /// 고정한다 — label 길이에 따라 slot이 늘었다 줄면 그 옆의 `로컬`과 refresh가 방향을 바꿀 때마다
+    /// 움직인다.
+    header_sort_extent: u32,
     header_trailing_inset: u32,
     group_disclosure_inset_x: u32,
     group_disclosure_extent: u32,
@@ -239,6 +266,7 @@ pub const DockMetrics = struct {
             // optical breathing room on every side.  The 20pt trailing inset matches the
             // shared dock content edge, so neither the SVG nor the spinner reads as clipped.
             .header_refresh_extent = geometryPx(spacing.pointsPx(24, scale)),
+            .header_sort_extent = geometryPx(spacing.pointsPx(72, scale)),
             .header_trailing_inset = geometryPx(spacing.px(.lg, scale)),
             // The root already contributes the dock's 20pt content inset. The disclosure gets
             // only its local 8pt slot, preventing the chevron from inheriting a second 20pt.
@@ -264,7 +292,13 @@ pub const DockMetrics = struct {
     }
 
     pub fn headerUtilityWidth(self: DockMetrics) u32 {
-        return geometryPx(saturatedAdd(saturatedAdd(saturatedAdd(self.header_host_label_w, self.header_utility_gap), self.header_refresh_extent), self.header_trailing_inset));
+        // host label · gap · 정렬 토글 · gap · refresh · trailing inset. heading stack이 이 폭만큼
+        // 자리를 비워야 제목이 utility control 밑으로 들어가지 않는다.
+        var total = saturatedAdd(self.header_host_label_w, self.header_utility_gap);
+        total = saturatedAdd(total, self.header_sort_extent);
+        total = saturatedAdd(total, self.header_utility_gap);
+        total = saturatedAdd(total, self.header_refresh_extent);
+        return geometryPx(saturatedAdd(total, self.header_trailing_inset));
     }
 };
 
@@ -333,11 +367,13 @@ test "DockMetrics fixes all Session Dock geometry independently of terminal cell
     try std.testing.expectEqual(@as(u32, 8), m.header_host_icon_gap);
     try std.testing.expectEqual(@as(u32, 12), m.header_utility_gap);
     try std.testing.expectEqual(@as(u32, 24), m.header_refresh_extent);
+    try std.testing.expectEqual(@as(u32, 72), m.header_sort_extent);
     try std.testing.expectEqual(@as(u32, 20), m.header_trailing_inset);
     try std.testing.expectEqual(@as(u32, 8), m.group_disclosure_inset_x);
     try std.testing.expectEqual(@as(u32, 20), m.group_disclosure_extent);
     try std.testing.expectEqual(@as(u32, 8), m.group_disclosure_label_gap);
-    try std.testing.expectEqual(@as(u32, 128), m.headerUtilityWidth());
+    // host label 72 + gap 12 + 정렬 토글 72 + gap 12 + refresh 24 + trailing inset 20.
+    try std.testing.expectEqual(@as(u32, 212), m.headerUtilityWidth());
     try std.testing.expect(m.card_metadata_y < m.card_h);
     try std.testing.expect(m.detail_turn_y + m.detail_turn_step * 3 <= m.expanded_detail_h);
 }

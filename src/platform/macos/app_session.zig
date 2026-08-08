@@ -718,6 +718,16 @@ test "archive scope admits only canonical cwd beneath the exact root boundary" {
     try std.testing.expect(!agentSessionArchiveWithinRoot(unresolved, "/workspace/project"));
 }
 
+// 방향 토글은 표시 계층에만 있다. 스캔 순서와 정렬 키는 건드리지 않으므로 `SortOrder`가 두 label과
+// 왕복 하나만 책임진다 — 이게 깨지면 버튼을 눌러도 같은 방향으로 되돌아온다.
+test "정렬 방향 토글은 두 상태를 왕복한다" {
+    const SortOrder = chrome.components.session_dock.types.SortOrder;
+    try std.testing.expectEqual(SortOrder.oldest_first, SortOrder.newest_first.toggled());
+    try std.testing.expectEqual(SortOrder.newest_first, SortOrder.oldest_first.toggled());
+    try std.testing.expectEqualStrings("최신순", SortOrder.newest_first.label());
+    try std.testing.expectEqualStrings("오래된순", SortOrder.oldest_first.label());
+}
+
 // 점진 발행은 빈 화면을 피하려는 것이므로, 보여 줄 목록이 이미 있으면 켜지 않는다. 특히 이전 스캔이
 // 부분만 받고 취소된 뒤 재진입하는 경우 — 여기서 점진 경로를 타면 화면의 목록이 첫 부분 발행(12개)으로
 // 덮여 **줄었다가 다시 차오른다**.
@@ -3386,6 +3396,9 @@ pub const AppSession = struct {
     agent_session_archive_search: chrome.components.overlay_input.OverlayInput = .{},
     agent_session_archive_search_active: bool = false,
     agent_session_archive_scope: AgentSessionArchiveScope = .all,
+    /// 목록 정렬 방향. 키는 늘 마지막 활동 시각이고 이 값은 **방향만** 정한다
+    /// (docs/agent-session-list.md §2.3). 앱 실행 중에만 유지하며 디스크에 쓰지 않는다.
+    agent_session_archive_sort: chrome.components.session_dock.types.SortOrder = .newest_first,
     /// These are copied only when the archive dock opens or the user changes
     /// scope.  Search and per-frame publication consume this snapshot without
     /// looking at the file tree or filesystem again.
@@ -14697,6 +14710,11 @@ pub const AppSession = struct {
             if (scope_matches and agentSessionArchiveMatches(record, self.agent_session_archive_search.query.items))
                 self.agent_session_archive_filtered_indices.append(self.allocator, index) catch break;
         }
+        // records는 worker가 마지막 활동 시각 내림차순으로 발행한다. 오래된순은 그 목록을 **뒤집기만**
+        // 하면 된다 — 여기서 다시 정렬하면 정렬 키가 두 곳에 생겨 서로 어긋날 수 있다. 그룹은 이 순서를
+        // 따라 projection이 다시 만들므로 그룹 순서와 그룹 안 순서가 함께 뒤집힌다.
+        if (self.agent_session_archive_sort == .oldest_first)
+            std.mem.reverse(usize, self.agent_session_archive_filtered_indices.items);
         self.rebuildAgentSessionArchiveProjection();
     }
 
@@ -14719,6 +14737,17 @@ pub const AppSession = struct {
         self.agent_session_archive_projection = staged;
         self.agent_session_dock_snapshot_generation +%= 1;
         if (self.agent_session_dock_snapshot_generation == 0) self.agent_session_dock_snapshot_generation = 1;
+    }
+
+    /// 정렬 방향을 뒤집는다. 목록 순서가 통째로 바뀌므로 scroll anchor를 복원하지 않고 맨 위로 보낸다 —
+    /// 뒤집힌 목록의 "같은 자리"는 사용자가 보던 자리가 아니다. 열린 카드는 identity로 유지된다.
+    fn toggleAgentSessionArchiveSort(self: *AppSession) void {
+        self.agent_session_archive_sort = self.agent_session_archive_sort.toggled();
+        self.rebuildAgentSessionArchiveFilter();
+        self.agent_session_archive_scroll.offset_y_px = 0;
+        self.agent_session_archive_scroll.clamp(self.agentSessionDockScrollProjection().max_offset_px);
+        self.agent_session_archive_scroll.dropWheelResidue();
+        self.metal_dirty = true;
     }
 
     fn toggleAgentSessionArchiveGroup(self: *AppSession, group_index: usize) void {
@@ -33854,6 +33883,7 @@ pub const AppSession = struct {
                 .project => .project,
                 .all => .all,
             },
+            .sort_order = self.agent_session_archive_sort,
             .workspace_scope_enabled = self.agent_session_archive_workspace_root != null,
             .project_scope_enabled = self.agent_session_archive_project_root != null,
             .search = self.agent_session_archive_search.query.items,
@@ -33930,9 +33960,10 @@ pub const AppSession = struct {
         // 정지**다 — `view`가 실패하면 아래 `publishAgentSessionDockFrame`까지 못 가서 hit tree가
         // 이전 프레임에 멈춘다(scrollbar를 추가하다 실제로 겪었다). 그래서 entry 수에서 유도한다.
         const paint_quad_budget = frame.tree.entries.len;
-        const text_op_budget = 21 + items.len * 6 + expansion_actions * 2 + expansion_turns * 2 + 4;
+        // +1은 header의 정렬 토글 label이다.
+        const text_op_budget = 22 + items.len * 6 + expansion_actions * 2 + expansion_turns * 2 + 4;
         const ops = arena.alloc(chrome.draw.Op, paint_quad_budget + text_op_budget) catch return;
-        const runs = arena.alloc(chrome.draw.Run, 9 + items.len * 5 + expansion_actions * 2 + expansion_turns * 2 + 4) catch return;
+        const runs = arena.alloc(chrome.draw.Run, 10 + items.len * 5 + expansion_actions * 2 + expansion_turns * 2 + 4) catch return;
         const text_bytes = arena.alloc(u8, 1024 + items.len * 1024 + expansion_turns * 1024) catch return;
         const tokens = self.buildChromeTokens();
         const draws = chrome.components.session_dock.view.view(props, frame, self.agent_session_dock_interaction, &tokens, .{
@@ -34630,6 +34661,7 @@ pub const AppSession = struct {
                 .project => .project,
                 .all => .all,
             }),
+            .toggle_sort => self.toggleAgentSessionArchiveSort(),
             .focus_search => {
                 self.agent_session_archive_search_active = true;
                 self.resetCursorBlink();

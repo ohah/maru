@@ -9,6 +9,9 @@ const types = @import("types.zig");
 pub const Intent = union(enum) {
     refresh,
     scope: types.Scope,
+    /// 정렬 방향을 뒤집는다. 어느 방향으로 갈지는 intent가 아니라 host의 현재 상태가 정한다 — 두 곳이
+    /// 방향을 알면 published tree와 host 상태가 어긋날 수 있다.
+    toggle_sort,
     focus_search,
     toggle_group: u64,
     select_card: u64,

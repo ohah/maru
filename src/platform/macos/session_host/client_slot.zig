@@ -464,6 +464,19 @@ test "B3-4/5 RPC free evidence terminal record is absorbing and cannot retire" {
     }
 }
 
+test "B3-4/5 RPC free evidence blocks ClientSlot teardown until exact retire" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try ClientSlot.initializeProcessRuntime();
+    var source = fixtureClient(std.testing.allocator, 0xB3458);
+    var slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&slot, std.testing.allocator, &source, 0xB3458);
+    const evidence = rpcFreeEvidenceFixture(0xB3459);
+    try std.testing.expect(slot.current.rpc_free_evidence.commitFreeCall(1, evidence));
+    try std.testing.expectEqual(DeinitOutcome.busy, slot.tryDeinit());
+    try std.testing.expect(slot.current.rpc_free_evidence.retireFreeCall(1, evidence));
+    try std.testing.expectEqual(DeinitOutcome.cleaned, slot.tryDeinit());
+}
+
 pub const StreamOperationKind = enum(u8) {
     none,
     initial_snapshot,
@@ -3374,6 +3387,7 @@ fn executePreparedRpcPrivate(
             request,
             admission.operation,
             identity,
+            bound_stream_id,
             node,
             destination,
             &txn,
@@ -3396,6 +3410,7 @@ fn publishPreparedRpcResponse(
     request: GenerationRequestAbort,
     operation: RegisteredNodeOperation,
     identity: contract.BindingIdentity,
+    bound_stream_id: u64,
     node: *ClientNode,
     destination: *RpcExecutedResponse,
     txn: *PreparedRpcExecutionTxn,
@@ -3417,6 +3432,37 @@ fn publishPreparedRpcResponse(
         .promoted => |receipt| receipt,
         .fail_stop_required => |reason| failStopResponsePayloadProvenance(reason),
     };
+    const executing_admission = node.cleanup_registry.executingRpcAdmission(
+        request.reservation.cleanup,
+        identity,
+        request.transport_addr,
+        request.transport_incarnation,
+        request.receipt,
+        bound_stream_id,
+    ) catch |err| {
+        publication.ledger.releasePromotedResponse(payload_receipt) catch
+            failStopResponsePayloadTransfer(.ledger_drift);
+        node.client.poisonPreparedRequestExecution(lease, .local_invariant_violation) catch
+            failStopResponsePayloadTransfer(.ledger_drift);
+        return err;
+    };
+    node.client.revalidatePreparedResponsePublication(lease, response_allocator) catch {
+        publication.ledger.releasePromotedResponse(payload_receipt) catch
+            failStopResponsePayloadTransfer(.ledger_drift);
+        node.client.poisonPreparedRequestExecution(lease, .local_invariant_violation) catch
+            failStopResponsePayloadTransfer(.ledger_drift);
+        return error.InvalidOwner;
+    };
+    if (!publication.liveExact(node) or !txn.responseDestinationStillPristine() or
+        txn.request.postExecuteReady(operation) == null or executing_admission.decision != .allowed or
+        !std.meta.eql(executing_admission.canonical, txn.request.canonical_prepared))
+    {
+        publication.ledger.releasePromotedResponse(payload_receipt) catch
+            failStopResponsePayloadTransfer(.ledger_drift);
+        node.client.poisonPreparedRequestExecution(lease, .local_invariant_violation) catch
+            failStopResponsePayloadTransfer(.ledger_drift);
+        return error.InvalidOwner;
+    }
     node.cleanup_registry.prepareRpcResponsePublished(
         request.reservation.cleanup,
         identity,
@@ -9278,6 +9324,10 @@ test "B3-4/5 product publishes borrows and finishes 64 sequential correlated RPC
     };
     var peer_ok = false;
     const peer = try std.Thread.spawn(.{}, Peer.run, .{ wire_fds[1], &peer_ok });
+    const rpc_busy_evidence = rpcFreeEvidenceFixture(0xB3456);
+    try std.testing.expect(slot.current.rpc_free_evidence.commitFreeCall(1, rpc_busy_evidence));
+    try std.testing.expectError(error.Busy, beginGenerationRequestOwner(request, false));
+    try std.testing.expect(slot.current.rpc_free_evidence.retireFreeCall(1, rpc_busy_evidence));
     try executePreparedRpcCorrelatedResponseForTest(request, 91, &owner.response);
     try std.testing.expectEqual(rpc_executed_response.ByteSettlement.live, owner.response.settlement);
     var borrow: rpc_executed_response.RpcResponseBorrow = .{};
@@ -9346,6 +9396,13 @@ test "B3-4/5 product publishes borrows and finishes 64 sequential correlated RPC
             identity,
         ),
     );
+    const drop_busy_evidence = rpcFreeEvidenceFixture(0xB3457);
+    try std.testing.expect(slot.current.rpc_free_evidence.commitFreeCall(2, drop_busy_evidence));
+    try std.testing.expectError(
+        error.AdminBusy,
+        slot.beginAttachmentDrop(&owner.binding, reservation, &owner.lease),
+    );
+    try std.testing.expect(slot.current.rpc_free_evidence.retireFreeCall(2, drop_busy_evidence));
     try slot.beginAttachmentDrop(&owner.binding, reservation, &owner.lease);
     try transport_owner_seal.terminalize(transport_incarnation);
     slot.finishActiveAttachmentDrop(&owner.binding, reservation, &owner.lease);

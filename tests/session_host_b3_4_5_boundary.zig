@@ -144,6 +144,7 @@ test "B3-4/5 transition permits remain leaf-owned and registry-mediated" {
     inline for (.{
         ".readPreparedResponseUnderExecutionLease(",
         ".classifyResponsePayloadProvenance(",
+        ".revalidatePreparedResponsePublication(",
         ".prepareRpcResponsePublished(",
         ".transferPromotedRpcResponse(",
         ".commitRpcResponsePublished(",
@@ -151,6 +152,7 @@ test "B3-4/5 transition permits remain leaf-owned and registry-mediated" {
     try expectOrdered(publication, &.{
         ".readPreparedResponseUnderExecutionLease(",
         ".classifyResponsePayloadProvenance(",
+        ".revalidatePreparedResponsePublication(",
         ".prepareRpcResponsePublished(",
         ".transferPromotedRpcResponse(",
         ".commitRpcResponsePublished(",

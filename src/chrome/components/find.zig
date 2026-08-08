@@ -20,9 +20,22 @@ const prompt_cols: u32 = 6;
 /// 우측 정렬 카운터 "cur/total"의 표시 폭(칸) — ASCII 숫자/슬래시. view의 `counter.len`과 같은 값을 **무 arena**로
 /// 구해(caretRect도 씀) 입력 텍스트 영역이 카운터를 침범하지 않게 예약한다(긴 검색어의 caret이 카운터에 안 가려짐).
 fn counterCols(state: *const State) u32 {
+    if (state.target == .page) return pageIndicatorCols(state);
     const total = state.match_count;
     const cur: usize = if (total == 0) 0 else state.current + 1;
     return numDigits(cur) + 1 + numDigits(total); // "cur" + "/" + "total"
+}
+
+/// 페이지 검색은 **매치 수를 알 수 없다** — `WKFindResult`가 `matchFound`만 준다(docs/web-panel.md §8).
+/// 그래서 "cur/total" 자리에 찾음/없음만 낸다. 그 자리에 "0/0"을 그리면 WebKit이 노랗게 하이라이트한 화면과
+/// 정면으로 모순된다("매치 0개"로 읽힌다). 결과가 아직 없으면(제출 전·응답 대기) 아무것도 그리지 않는다.
+fn pageIndicator(state: *const State) ?[]const u8 {
+    const found = state.page_found orelse return null;
+    return if (found) "찾음" else "없음";
+}
+/// 표시 폭(칸). 한글 2자 = EAW wide 2칸씩 = 4칸(무 arena — caretRect가 예약에 쓴다).
+fn pageIndicatorCols(state: *const State) u32 {
+    return if (pageIndicator(state) == null) 0 else 4;
 }
 fn numDigits(n: usize) u32 {
     var d: u32 = 1;
@@ -41,11 +54,22 @@ fn textCols(state: *const State, panel_cols: u32) u32 {
 /// 순수 UI 상태. input=검색어 query·IME 조합 preedit(overlay_input 공유 모델), current=네비게이션 인덱스,
 /// match_count=session이 setMatchCount로 동기화하는 전체 매치 수(next/prev wrap·카운터에 필요 — 매치 리스트 자체는
 /// session 소유). input의 query·preedit는 ArrayList라 host가 deinit한다. 조합 중 글자는 query 뒤 preedit으로 보인다.
+/// 이 오버레이가 지금 **무엇을 검색하는지**. 활성 탭이 웹이면 페이지, 아니면 스크롤백이다(session이 tick마다
+/// 동기화 — docs/web-panel.md §8). 카운터 표시가 이 값에 따라 갈린다.
+pub const Target = enum { scrollback, page };
+
 pub const State = struct {
     open: bool = false,
     input: overlay_input.OverlayInput = .{},
     current: usize = 0,
     match_count: usize = 0,
+    target: Target = .scrollback,
+    /// 마지막 네비게이션 방향(Enter/↓=앞, Shift+Enter/↑=뒤). 페이지 검색은 매치 리스트가 없어 `current`가
+    /// 안 움직이므로(match_count=0) 방향을 여기서만 알 수 있다 — host가 `.find_navigated`를 받아 어느 쪽으로
+    /// 보낼지 정할 때 읽는다. 스크롤백에선 안 쓴다(current가 이미 방향을 담는다).
+    nav_forward: bool = true,
+    /// 페이지 검색의 마지막 결과. null=아직 모름(제출 전·응답 대기). scrollback일 땐 안 본다.
+    page_found: ?bool = null,
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
         self.input.deinit(allocator);
@@ -56,6 +80,7 @@ pub const State = struct {
         self.input.clear();
         self.current = 0;
         self.match_count = 0;
+        self.page_found = null; // 지난 검색의 찾음/없음이 새로 연 창에 남지 않게(target은 session이 tick에 세운다)
         self.open = true;
     }
 
@@ -100,14 +125,17 @@ pub fn handle(allocator: std.mem.Allocator, k: input.InputEvent.KeyEvent, state:
             return .close;
         },
         .enter => {
+            state.nav_forward = !k.mods.shift;
             if (k.mods.shift) state.prev() else state.next();
             return .navigated;
         },
         .up => {
+            state.nav_forward = false;
             state.prev();
             return .navigated;
         },
         .down => {
+            state.nav_forward = true;
             state.next();
             return .navigated;
         },
@@ -179,16 +207,21 @@ pub fn view(
     const prompt_runs = try overlay_input.promptRuns(arena, "Find: ", line); // 프롬프트+(…?)+query+preedit run 조립(palette와 공유)
     try out.append(arena, .{ .text = .{ .origin = .{ .x = x, .y = y }, .runs = prompt_runs, .role = .surface_fg } });
 
-    // 우측 정렬 카운터 "cur/total"(매치 없으면 "0/0", 1-based 현재). 패널에 안 들어가면(좁음) 생략.
-    const total = state.match_count;
-    const cur: usize = if (total == 0) 0 else state.current + 1;
-    const counter = try std.fmt.allocPrint(arena, "{d}/{d}", .{ cur, total });
-    const counter_cols: u32 = @intCast(counter.len); // ASCII 숫자/슬래시
-    if (counter_cols + 2 < lay.panel_cols) {
-        const counter_runs = try arena.alloc(draw.Run, 1);
-        counter_runs[0] = .{ .text = counter };
-        const cx = x + @as(i32, @intCast((lay.panel_cols - counter_cols - 1) * cw));
-        try out.append(arena, .{ .text = .{ .origin = .{ .x = cx, .y = y }, .runs = counter_runs, .role = .surface_fg } });
+    // 우측 정렬 카운터. 스크롤백은 "cur/total"(매치 없으면 "0/0", 1-based 현재), 페이지는 찾음/없음(매치 수를
+    // 알 수 없다). 패널에 안 들어가면(좁음) 생략. counter_cols는 textCols가 예약한 폭과 같아야 한다(입력 침범 방지).
+    const counter: ?[]const u8 = if (state.target == .page) pageIndicator(state) else blk: {
+        const total = state.match_count;
+        const cur: usize = if (total == 0) 0 else state.current + 1;
+        break :blk try std.fmt.allocPrint(arena, "{d}/{d}", .{ cur, total });
+    };
+    if (counter) |counter_text| {
+        const counter_cols: u32 = counterCols(state);
+        if (counter_cols + 2 < lay.panel_cols) {
+            const counter_runs = try arena.alloc(draw.Run, 1);
+            counter_runs[0] = .{ .text = counter_text };
+            const cx = x + @as(i32, @intCast((lay.panel_cols - counter_cols - 1) * cw));
+            try out.append(arena, .{ .text = .{ .origin = .{ .x = cx, .y = y }, .runs = counter_runs, .role = .surface_fg } });
+        }
     }
 
     // 입력 커서: 검색어+조합 끝(다음 입력 위치)에 cursor role fill 1칸(caretRect 단일 출처). platform rasterizer가

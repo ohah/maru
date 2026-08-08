@@ -165,6 +165,8 @@ pub const ExternalLinkAction = struct {
 
 /// resolveNavUrl 결과(https:// 프리픽스 포함)를 담는 navigate pending 버퍼 크기 — 편집 버퍼(cap) + "https://"(8) 여유.
 const addr_nav_url_cap: usize = 4096;
+/// 웹 페이지 찾기 질의 상한(§8). 찾기 문자열이 이보다 길 일은 없고, 넘으면 제출하지 않는다.
+const web_find_query_cap = 512;
 
 /// Phase 7e-3: browser 주소창 nav 버튼(back/forward/reload) 존 기하 — **렌더와 hit-test가 공유하는 단일 소스**
 /// (NavBarMetrics). 밴드 좌측 [0, nav_button_count*nav_button_w) 셀을 버튼 존으로 쓴다(버튼당 `nav_button_w` 칸):
@@ -3295,6 +3297,24 @@ pub const AppSession = struct {
     branch_menu_len: usize = 0,
     /// 브랜치 목록을 요청해 두고 결과를 기다리는 중인지. 클릭 연타로 요청이 쌓이지 않게 한다.
     branch_menu_pending: bool = false,
+    /// 웹 탭 페이지 내 찾기(§8 슬라이스 ②). Swift가 `WKWebView.find`를 부르고 결과를 되돌린다.
+    /// **request id로 늦은 회신을 버린다** — find는 completion handler라 결과가 오기 전에 탭이 바뀌거나
+    /// 오버레이가 닫힐 수 있고, 그대로 반영하면 "누른 적 없는 상태"가 뜬다(상태바 브랜치 메뉴에서 실제로 났다).
+    web_find_seq: u64 = 0,
+    /// Swift가 걷어 갈 질의. 0이면 없음. surface_id는 그 시점의 활성 web 탭이다.
+    web_find_pending: ?struct { seq: u64, surface_id: u64, backwards: bool } = null,
+    /// 제출 시점의 검색어 **사본**. 오버레이의 ArrayList를 그대로 빌리지 않는 이유: Swift가 걷어 가는 것은
+    /// 같은 tick이 아니라 **다음 drain**이고, 그 사이 타이핑이 계속되면 슬라이스가 재할당으로 흔들린다
+    /// (`addr_navigate_url_buf`와 같은 이유·같은 모양). cap을 넘는 질의는 보내지 않는다 — 잘린 질의로
+    /// 엉뚱한 곳을 하이라이트하느니 아무것도 안 하는 편이 낫다.
+    web_find_query_buf: [web_find_query_cap]u8 = undefined,
+    web_find_query_len: usize = 0,
+    /// 마지막으로 **제출한** 대상 surface(0=없음). 재제출 판정의 단일 출처다 — "결과가 왔는가"로 판정하면
+    /// 웹 탭 A에서 한 번 찾은 뒤 웹 탭 B로 옮겼을 때 B는 영영 검색되지 않는다(실측 결함). 올바른 질문은
+    /// "**지금 이 탭에, 지금 이 검색어를** 이미 보냈는가"다.
+    web_find_last_surface: u64 = 0,
+    /// 마지막으로 **반영된** 결과. seq가 현재와 다르면 stale이라 안 쓴다.
+    web_find_result: ?struct { seq: u64, found: bool } = null,
     /// 지금 열린 컨텍스트 메뉴가 **브랜치 목록**인지. 선택 처리 분기의 단일 출처다.
     branch_menu_open: bool = false,
     // 메뉴에서 고른 항목 중 **web이 실행할 것**의 1회성 신호. 선택은 문서 안에 있어 native가 범위를 모른다.
@@ -12411,25 +12431,21 @@ pub const AppSession = struct {
             .toggle_command_palette => self.togglePalette(),
             .toggle_settings => self.toggleSettings(),
             .install_cli => self.installCli(), // maru CLI를 PATH에 symlink(결과 notice)
-            // 스크롤백 Find 토글(⌘F). 열려 있으면 닫고, 아니면 연다(상태머신은 FindState, 검색은 코어).
-            // **웹 탭에서는 스크롤백 find를 열지 않는다.** 이 오버레이는 터미널 스크롤백만 검색하므로,
-            // 마크다운 뷰어·browser 탭에서 열리면 우상단에 검색창이 뜨는데 페이지는 검색되지 않는다(사용자 제보).
+            // Find 토글(⌘F). 열려 있으면 닫고, 아니면 연다(상태머신은 FindState). **여는 UI는 하나이고, 질의가
+            // 가는 곳만 갈린다** — 활성 탭이 터미널이면 스크롤백, 웹(마크다운 뷰어·browser)이면 그 페이지다
+            // (docs/web-panel.md §8). 예전에는 웹 탭에서도 스크롤백 find가 열려, 우상단에 검색창이 뜨는데 페이지는
+            // 검색되지 않았다(사용자 제보).
             //
             // 판정은 **포커스가 아니라 활성 pane의 web 탭**이다(`activeWebSurfaceIdAnyKind`) — §7e-4가 ⌘R에서
             // 같은 함정을 겪었다(포커스로 게이트하면 "탭 열어 보기만 하면 안 됨"). browser 전용
-            // `activeWebSurfaceId`도 아니다 — 마크다운이 빠져 제보된 버그가 그대로 남는다(docs/web-panel.md §8).
+            // `activeWebSurfaceId`도 아니다 — 마크다운이 빠져 제보된 버그가 그대로 남는다.
             //
-            // 게이트를 `toggleFind`가 아니라 **여기(사용자 액션 경로)** 에 둔다: 막으려는 것은 "⌘F라는 행위의
-            // 라우팅"이지 토글 원시연산이 아니고, `toggleFind`에 두면 pane 접근이 생겨 경량 세션 테스트가 깨진다.
-            //
-            // 페이지 내 find(WebKit `findString`)는 후속 슬라이스다(docs/web-panel.md §8 ②③).
-            .toggle_find => if (self.activeWebSurfaceIdAnyKind() != 0)
-                self.showNotice("이 탭에서는 페이지 내 찾기가 아직 지원되지 않습니다")
-            else
-                self.toggleFind(),
-            // Find 다음/이전 매치(⌘G/⌘⇧G) — 오버레이 닫힌 채도 동작(보존된 검색어로 네비).
-            .find_next => self.findNavigate(true),
-            .find_previous => self.findNavigate(false),
+            // 대상 자체는 여기서 정하지 않는다 — tick이 매 프레임 동기화한다(전환 경로마다 세우면 새는 문이 남는다).
+            .toggle_find => self.toggleFind(),
+            // Find 다음/이전 매치(⌘G/⌘⇧G) — 오버레이 닫힌 채도 동작(보존된 검색어로 네비). 웹 탭이면 같은
+            // 검색어를 페이지의 다음/이전 매치로 보낸다(WebKit이 스크롤·하이라이트).
+            .find_next => if (self.activeWebSurfaceIdAnyKind() != 0) self.submitWebFind(false) else self.findNavigate(true),
+            .find_previous => if (self.activeWebSurfaceIdAnyKind() != 0) self.submitWebFind(true) else self.findNavigate(false),
             // 런타임 폰트 크기(⌘+/⌘-/⌘0) — cell 메트릭·grid 재계산(setFontSize). 콘텐츠 reflow 없음.
             // 보폭은 고정 1pt(font_size_step 상수). ⌘0 reset은 보폭과 무관하게 base_font_size로 복귀.
             .increase_font_size => self.adjustFontSize(font_size_step),
@@ -21812,8 +21828,17 @@ pub const AppSession = struct {
         switch (action) {
             .none => {}, // notice dismiss 등 — session 부수효과 없음(컴포넌트가 닫음)
             .find_close => self.find_matches.clearRetainingCapacity(), // find.hide는 컴포넌트가 이미 — 하이라이트만 정리
-            .find_navigated => self.scrollToCurrentMatch(),
-            .find_query_changed => self.recomputeFind(),
+            // 웹 탭이면 페이지의 다음/이전 매치로(같은 조작, 다른 대상). 방향은 컴포넌트가 기록한 nav_forward —
+            // 페이지 모드는 매치 리스트가 없어 `current`가 안 움직이므로 그것으로는 방향을 알 수 없다.
+            .find_navigated => if (self.activeWebSurfaceIdAnyKind() != 0)
+                self.submitWebFind(!self.chrome_host.find.nav_forward)
+            else
+                self.scrollToCurrentMatch(),
+            // 웹 탭이면 스크롤백을 다시 훑지 않고 페이지 검색을 낸다(같은 입력, 다른 대상).
+            .find_query_changed => if (self.activeWebSurfaceIdAnyKind() != 0)
+                self.submitWebFind(false)
+            else
+                self.recomputeFind(),
             .palette_close => {}, // palette.hide는 컴포넌트가 이미 — platform 부수효과 없음
             .palette_query_changed => self.recomputePalette(), // 재필터 + result_count 동기화
             // 창 갱신은 여기서 하지 않는다 — 선택은 이 액션 말고도 **쿼리 필터**(recomputePalette가
@@ -27606,6 +27631,77 @@ pub const AppSession = struct {
 
     /// 세팅 window.background-image 행 활성으로 파일 선택창 요청이 대기 중인지 — 1회성 drain(Swift가 매 tick 호출,
     /// 1이면 NSOpenPanel을 연다). take_bell과 같은 패턴. (배경 이미지 파일 선택 — 사용자 요청)
+    /// 웹 탭 페이지 내 찾기 질의를 낸다(§8 슬라이스 ②). 활성 web 탭이 없으면 무동작.
+    /// 매 호출이 새 `seq`를 달아 **늦게 오는 이전 회신을 무효로** 만든다.
+    fn submitWebFind(self: *AppSession, backwards: bool) void {
+        const sid = self.activeWebSurfaceIdAnyKind();
+        if (sid == 0) return;
+        if (self.chrome_host.find.input.query.items.len == 0) {
+            // 빈 질의는 보내지 않는다 — WebKit이 뭘 찾을지 정의되지 않고, 하이라이트만 흔든다.
+            self.web_find_pending = null;
+            self.web_find_result = null;
+            self.web_find_last_surface = 0;
+            self.chrome_host.find.page_found = null; // 검색한 것이 없으니 찾음/없음도 없다
+            return;
+        }
+        const q = self.chrome_host.find.input.query.items;
+        if (q.len > self.web_find_query_buf.len) return; // 상한 초과는 제출하지 않는다(잘라 보내지 않는다)
+        @memcpy(self.web_find_query_buf[0..q.len], q);
+        self.web_find_query_len = q.len;
+        self.web_find_seq +%= 1;
+        self.web_find_last_surface = sid;
+        self.web_find_pending = .{ .seq = self.web_find_seq, .surface_id = sid, .backwards = backwards };
+        self.metal_dirty = true;
+    }
+
+    /// Swift가 걷어 간다(1회성). 없으면 null. 질의는 세션 소유 버퍼 슬라이스라 다음 제출 전까지 유효하다
+    /// (ABI getter가 즉시 out으로 복사한다 — `takeWebAddrNavigate`와 같은 계약).
+    pub const WebFindRequest = struct { seq: u64, surface_id: u64, backwards: bool, query: []const u8 };
+
+    /// 소비하지 않고 길이만 본다 — ABI가 out 용량을 **소비 전에** 검사하려고 쓴다(못 담을 질의를 삼키면
+    /// 검색이 조용히 죽는다).
+    pub fn peekWebFindQueryLen(self: *const AppSession) ?usize {
+        if (self.web_find_pending == null) return null;
+        return self.web_find_query_len;
+    }
+
+    pub fn takeWebFindQuery(self: *AppSession) ?WebFindRequest {
+        const p = self.web_find_pending orelse return null;
+        self.web_find_pending = null;
+        return .{
+            .seq = p.seq,
+            .surface_id = p.surface_id,
+            .backwards = p.backwards,
+            .query = self.web_find_query_buf[0..self.web_find_query_len],
+        };
+    }
+
+    /// Swift가 `WKWebView.find` 결과를 돌려준다.
+    ///
+    /// **늦은 회신은 버린다**: seq가 현재 것과 다르면 그 사이 새 질의가 나갔다는 뜻이고, 오버레이가 닫혔거나
+    /// 활성 탭이 웹이 아니면 반영할 화면 자체가 없다(docs/web-panel.md §8 "비동기 수명").
+    /// Swift가 **전달하지 못했다**고 신고한다(그 surface의 WKWebView가 아직 없음). 걷어 간 질의를 그냥 버리면
+    /// `web_find_last_surface`가 "보냈다"로 남아 tick이 영영 재시도하지 않는다 — 검색이 조용히 죽는 경로다.
+    /// 마커만 지우면 다음 tick이 같은 조건에서 다시 제출한다(패널은 한두 프레임 안에 생긴다 —
+    /// `takeWebAddrNavigate`가 "아직 WKWebView가 없는 Term은 다음 tick에 다시 본다"로 푸는 것과 같은 문제·같은 답).
+    pub fn reportWebFindUndeliverable(self: *AppSession, seq: u64) void {
+        if (seq == 0 or seq != self.web_find_seq) return; // 늦은 신고는 무시(그 사이 새 질의가 나갔다)
+        self.web_find_last_surface = 0;
+    }
+
+    pub fn provideWebFindResult(self: *AppSession, seq: u64, found: bool) void {
+        if (seq == 0 or seq != self.web_find_seq) return;
+        if (!self.chrome_host.find.open) return;
+        // **seq만으로는 부족하다**: A에서 제출한 뒤 결과가 오기 전에 B로 옮기면 seq는 아직 유효하지만 그 답은
+        // A의 것이다. 그대로 붙이면 B 화면이 A의 찾음/없음을 말한다(실측). 제출 대상과 지금 보이는 탭이 같을
+        // 때만 반영한다 — 다르면 어차피 tick이 B로 재제출한다.
+        const active = self.activeWebSurfaceIdAnyKind();
+        if (active == 0 or active != self.web_find_last_surface) return;
+        self.web_find_result = .{ .seq = seq, .found = found };
+        self.chrome_host.find.page_found = found; // 오버레이 카운터 자리에 찾음/없음으로 나간다
+        self.metal_dirty = true;
+    }
+
     pub fn takeFilePickRequest(self: *AppSession) bool {
         const pending = self.file_pick_pending;
         self.file_pick_pending = false;
@@ -30320,15 +30416,51 @@ pub const AppSession = struct {
         self.updateFileTree() catch {}; // FP7: background scan 결과만 적용 + 다음 요청 제출(FS I/O는 worker 전용)
         self.updateFileTreeMutations(); // mutation completion memory queue only; at most one result per frame // path-pinned rename recreation is bounded to one visible WebView per frame
         self.drainGitStatus(); // 완료된 git 읽기를 싣는다(syscall 없음 — 큐에서 꺼내기만)
-        // **웹이 활성이면 스크롤백 find는 떠 있을 수 없다**(불변식). ⌘F 게이트는 "여는 순간"만 보는데
-        // 활성 서페이스는 탭 전환·pane 전환·창 전환·탭 닫기로도 바뀐다 — 경로마다 막으면 반드시 새는 문이
-        // 남는다(실측: focusTerm만 막았더니 pane 전환으로 샜다). 렌더 전에 한 번 정리해 그 부류를 통째로 없앤다.
-        // 오버레이가 웹 콘텐츠 위에 남으면 타이핑이 **보이지도 않는** 스크롤백을 검색한다(docs/web-panel.md §8).
+        // **웹이 활성인 동안 스크롤백 매치가 살아 있으면 안 된다**(불변식). 슬라이스 ①에서는 오버레이를 통째로
+        // 닫았지만, ②가 웹 탭에도 find를 주므로 이제 **닫지 않고 대상만 바꾼다** — 남겨야 할 것은 오버레이가
+        // 아니라 "보이지도 않는 스크롤백을 검색하지 않는다"는 원래 의도다.
+        //
+        // 게이트를 여는 순간에만 두면 안 되는 이유는 그대로다: 활성 서페이스는 탭·pane·창 전환과 탭 닫기로도
+        // 바뀌고, 경로마다 막으면 반드시 새는 문이 남는다(실측: `focusTerm`만 막았더니 pane 전환으로 샜다).
+        {
+            // 카운터 표시의 단일 출처 — 활성 탭이 웹이면 "찾음/없음", 아니면 "cur/total". **매 tick 동기화**한다:
+            // 전환 경로마다 세우면 반드시 빠뜨리는 문이 남는다(이 불변식이 존재하는 이유와 같다).
+            //
+            // **열림 여부로 게이트하지 않는다**: 닫힌 동안 탭이 바뀌면 대상이 굳어, 다시 열자마자 그리는 첫
+            // 프레임이 지난 탭의 모드로 나간다(R6 실측 — 터미널인데 카운터가 통째로 비었다).
+            const web_target = self.activeWebSurfaceIdAnyKind() != 0;
+            const want: chrome.components.find.Target = if (web_target) .page else .scrollback;
+            if (self.chrome_host.find.target != want) {
+                self.chrome_host.find.target = want;
+                self.chrome_host.find.page_found = null; // 대상이 바뀌면 지난 답은 이 화면 것이 아니다
+                // 터미널로 **돌아올 때는 다시 찾는다**. 웹 활성 동안 매치를 버렸으므로(그 화면 것이 아니다)
+                // 아무도 다시 계산하지 않으면 검색어만 남고 하이라이트·카운터가 죽는다(R5 실측). 재검색을
+                // 부르는 곳은 여기 한 곳 — 전환 경로마다 부르면 반드시 빠뜨리는 문이 남는다.
+                // 단, **하이라이트를 실제로 그리는 상태**에서만 재검색한다. `recomputeFind`는 `scrollToCurrentMatch`
+                // 까지 부르므로, 닫아 둔 find(=하이라이트도 안 그린다, find_active 게이트)에서 이걸 돌리면 탭
+                // 복귀만으로 화면이 첫 매치로 점프한다(R7 실측). 닫힌 동안에는 되살릴 하이라이트도 없다.
+                if (want == .scrollback and (self.chrome_host.find.open or self.find_nav)) self.recomputeFind();
+                self.metal_dirty = true;
+            }
+        }
         if (self.chrome_host.find.open and self.activeWebSurfaceIdAnyKind() != 0) {
-            self.chrome_host.find.hide();
-            self.find_matches.clearRetainingCapacity();
-            self.find_nav = false;
-            self.metal_dirty = true;
+            if (self.find_matches.items.len > 0) {
+                // 터미널에서 넘어온 매치·카운트는 이 화면과 무관하다 — 남기면 웹 위에서 남의 숫자를 보여 준다.
+                self.find_matches.clearRetainingCapacity();
+                self.chrome_host.find.setMatchCount(0);
+                self.find_nav = false;
+                self.metal_dirty = true;
+            }
+            // 검색어가 있으면 그대로 페이지 검색으로 이어 준다(사용자가 다시 칠 필요 없음).
+            //
+            // 재제출 판정은 **대상 탭 + 검색어**다. "결과를 아직 못 받았는가"로 게이트하면 같은 검색어로 다른
+            // 웹 탭에 갔을 때 그 탭은 검색되지 않는다(R2 실측). 반대로 조건이 없으면 tick마다 재제출해
+            // WebKit 하이라이트가 매 프레임 처음으로 튄다 — 그래서 "이미 이 조합을 보냈으면 안 보낸다".
+            const q = self.chrome_host.find.input.query.items;
+            const already = self.web_find_last_surface == self.activeWebSurfaceIdAnyKind() and
+                std.mem.eql(u8, q, self.web_find_query_buf[0..self.web_find_query_len]);
+            if (self.web_find_pending == null and !already and q.len > 0)
+                self.submitWebFind(false);
         }
         // MARU_FORCE_BRANCH_MENU=1 — 상태바 브랜치 항목을 누른 것처럼 목록을 요청해 헤드리스로 찍는다.
         // **열릴 때까지 재시도한다**: 저장소 판정이 cwd 관측(OSC 7)에 달려 있어 첫 tick에는 아직 없다.
@@ -65021,23 +65153,22 @@ test "WP-F1: 불변식이 터미널 활성 시 find를 건드리지 않고, 돌�
     try std.testing.expect(session.chrome_host.find.open);
     try std.testing.expectEqualStrings("x", session.chrome_host.find.input.query.items);
 
-    // 웹 탭에 갔다가
+    // 웹 탭에 갔다 와도 오버레이와 검색어가 살아 있다(대상만 갈린다).
     session.focusTerm(pane.terms.items.len - 1);
     _ = try session.tick();
-    try std.testing.expect(!session.chrome_host.find.open);
+    try std.testing.expect(session.chrome_host.find.open);
+    try std.testing.expectEqualStrings("x", session.chrome_host.find.input.query.items);
 
-    // ⑴ 터미널로 돌아오면 다시 열린다(영구 차단이 아니다).
-    session.chrome_host.notice.dismiss();
+    // ⑴ 터미널로 돌아와도 그대로 쓸 수 있다(영구 차단이 아니다).
     session.focusTerm(0);
     _ = try session.tick();
-    session.dispatchAppAction(.toggle_find);
     try std.testing.expect(session.chrome_host.find.open);
 }
 
 // WP-F1 적대적 4R: **탭 전환만 막으면 새는 곳이 남는다.** 활성 서페이스는 pane 전환·탭(창) 전환으로도
 // 바뀐다. `focusTerm` 한 곳만 닫으면 그 경로들로 오버레이가 웹 위에 남는다 — 3라운드와 같은 결함이
 // 다른 문으로 들어오는 것이다. 그래서 **경로마다 막지 않고 tick 불변식으로** 잡는지 확인한다.
-test "WP-F1: pane 전환으로 웹이 활성이 돼도 find가 남지 않는다" {
+test "WP-F1: pane 전환으로 웹이 활성이 돼도 스크롤백 매치가 남지 않는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -65069,13 +65200,15 @@ test "WP-F1: pane 전환으로 웹이 활성이 돼도 find가 남지 않는다"
     // pane을 웹 쪽으로 옮긴다 — 여기서도 닫혀야 한다.
     _ = session.focusPaneByPtr(web_pane);
     _ = try session.tick();
-    try std.testing.expect(!session.chrome_host.find.open);
+    // 경로가 달라도 결론은 같다 — 열린 채, 터미널 매치는 버린다.
+    try std.testing.expect(session.chrome_host.find.open);
+    try std.testing.expectEqual(@as(usize, 0), session.find_matches.items.len);
 }
 
 // WP-F1 적대적: **열어 둔 채 웹 탭으로 옮기면?** 게이트는 "여는 순간"만 본다. 터미널에서 find를 연 뒤
 // 웹 탭으로 전환하면 오버레이가 **웹 콘텐츠 위에 뜬 채 남고**, 그 상태로 타이핑하면 보이지도 않는
 // 터미널 스크롤백을 검색한다 — 처음 제보와 같은 혼란이다.
-test "WP-F1: find를 연 채 웹 탭으로 전환하면 오버레이가 남지 않는다" {
+test "WP-F1: find를 연 채 웹 탭으로 전환하면 대상이 페이지로 바뀐다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -65097,15 +65230,467 @@ test "WP-F1: find를 연 채 웹 탭으로 전환하면 오버레이가 남지 �
     const md = try session.createWebTerm(.markdown);
     try pane.terms.append(allocator, md);
     session.focusTerm(pane.terms.items.len - 1); // 웹 탭으로 전환
-    _ = try session.tick(); // 불변식은 렌더 전에 돈다 — 한 프레임도 웹 위에 그려지지 않는다
+    _ = try session.tick(); // 불변식은 렌더 전에 돈다
 
+    // 슬라이스 ② 이후: 오버레이는 **열린 채로 두고 대상만 페이지로 바꾼다**(닫지 않는다).
+    // 지켜야 하는 것은 "보이지도 않는 스크롤백을 검색하지 않는다"이지 "오버레이를 없앤다"가 아니다.
+    try std.testing.expect(session.chrome_host.find.open);
+    try std.testing.expectEqual(@as(usize, 0), session.find_matches.items.len); // 터미널 매치는 버린다
+}
+
+// WP-F1 적대적 R9: **찾음/없음이 draw op에서 끝나지 않고 셀까지 도착하는지** 확인한다(R1은 op 수준까지만 본다).
+// 긴 검색어로 패널을 꽉 채운 상태에서 본다 — 표시기와 검색어 꼬리가 함께 살아 있어야 한다.
+//
+// 원래는 "한글 예약 폭이 틀리면 잘리거나 덮인다"를 겨눴는데 **그 가설은 뮤테이션으로 반증됐다**: 폭을
+// 코드포인트 수(2칸)로 재도 이 레이아웃은 깨지지 않는다(우측 클리핑이 없고 예약이 1칸 여유를 둔다). 그래서
+// 이 테스트가 실제로 지키는 계약만 남겼다 — 표시기가 셀에 도달한다(표시기를 없애는 뮤테이션이 죽인다).
+test "WP-F1 R9: 찾음/없음 표시기가 셀까지 도달한다(긴 검색어와 공존)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    const pane = session.activePane();
+    const md = try session.createWebTerm(.markdown);
+    try pane.terms.append(allocator, md);
+    session.focusTerm(pane.terms.items.len - 1);
+
+    session.dispatchAppAction(.toggle_find);
+    _ = try session.tick(); // 실사용 순서 — 여는 프레임의 tick이 대상을 페이지로 정한다
+    // 패널을 꽉 채우는 긴 검색어 — 꼬리가 오른쪽 끝(카운터 자리)까지 밀려온다. 마지막 글자는 유니크 'Z'로
+    // 둬서, 예약이 모자라 카운터가 그 위에 겹쳐 그려지면 셀에서 사라지게 한다.
+    for (0..200) |_| _ = chrome.components.find.handle(allocator, .{ .key = .char, .codepoint = 'a' }, &session.chrome_host.find);
+    _ = chrome.components.find.handle(allocator, .{ .key = .char, .codepoint = 'Z' }, &session.chrome_host.find);
+    session.dispatchChromeAction(.find_query_changed);
+    const req = session.takeWebFindQuery() orelse return error.TestExpectedWebFindRequest;
+    session.provideWebFindResult(req.seq, true);
+    try std.testing.expectEqual(chrome.components.find.Target.page, session.chrome_host.find.target); // 전제
+
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const tk = session.buildChromeTokens();
+    const props = session.buildChromeProps();
+    var draws: std.ArrayList(chrome.ChromeDraw) = .empty;
+    try session.chrome_host.collectDraws(props, &tk, arena, &draws);
+
+    var raster = try AppSession.rasterizeOverlayCells(allocator, draws.items, &tk, session.cell_width_px, session.cell_height_px, false);
+    defer {
+        raster.cells.deinit(allocator);
+        raster.gpu_quads.deinit(allocator);
+        raster.gpu_shadows.deinit(allocator);
+    }
+
+    // vacuity 가드부터: 오버레이 자체가 그려졌는지(프롬프트 'F') 먼저 본다.
+    var has_prompt = false;
+    for (raster.cells.items) |c| {
+        if (c.codepoint == 'F') has_prompt = true;
+    }
+    try std.testing.expect(has_prompt);
+    // 카운터("찾음")도, 방금 친 마지막 글자('Z')도 살아 있어야 한다 — 예약이 맞으면 둘은 겹치지 않는다.
+    var it = (std.unicode.Utf8View.init("찾음Z") catch unreachable).iterator();
+    while (it.nextCodepoint()) |cp| {
+        var found = false;
+        for (raster.cells.items) |c| {
+            if (c.codepoint == cp) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            std.debug.print("\n코드포인트 U+{X}가 셀에 없다(표시기·검색어 꼬리 중 하나가 유실 — 총 {d}칸)\n", .{ cp, raster.cells.items.len });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+// WP-F1 적대적 R8 프로브: **오버레이의 Enter/Shift+Enter가 웹 탭에서도 다음/이전 매치로 가야 한다.** ⌘G만
+// 라우팅하고 Enter를 두면, 검색창 안에서 가장 흔한 조작이 웹 탭에서만 죽는다(터미널 스크롤만 시도하고 끝난다).
+test "WP-F1 R8 프로브: 웹 탭에서 Enter/Shift+Enter가 페이지 다음·이전으로 나간다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    const pane = session.activePane();
+    const md = try session.createWebTerm(.markdown);
+    try pane.terms.append(allocator, md);
+    session.focusTerm(pane.terms.items.len - 1);
+
+    session.dispatchAppAction(.toggle_find);
+    for ("ab") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    _ = session.takeWebFindQuery(); // 타이핑이 낸 질의는 걷어 낸다
+
+    // Enter = 다음 매치.
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{} });
+    const next = session.takeWebFindQuery() orelse return error.TestExpectedWebFindRequest;
+    try std.testing.expectEqualStrings("ab", next.query);
+    try std.testing.expect(!next.backwards);
+
+    // Shift+Enter = 이전 매치.
+    _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{ .shift = true } });
+    const prev = session.takeWebFindQuery() orelse return error.TestExpectedWebFindRequest;
+    try std.testing.expect(prev.backwards);
+}
+
+// WP-F1 적대적 R7 프로브: **닫아 둔 find가 화면을 움직이면 안 된다.** 대상 동기화를 열림 게이트 밖으로 뺀 뒤
+// (R6), 터미널 복귀 재검색이 닫힌 상태에서도 돌면 `recomputeFind`가 `scrollToCurrentMatch`까지 부른다 — 사용자는
+// 검색창을 닫아 놨는데 탭만 돌아와도 화면이 첫 매치로 점프한다.
+test "WP-F1 R7 프로브: 닫아 둔 find는 탭 복귀로 화면을 스크롤하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 6,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    // 스크롤백을 만들고(뷰포트보다 길게) 맨 위쪽에 검색어를 둔다 — 스크롤이 일어나면 view_offset이 변한다.
+    try session.activeSurface().core.write("MARUFIND top\r\n");
+    for (0..60) |_| try session.activeSurface().core.write("filler line\r\n");
+
+    session.dispatchAppAction(.toggle_find);
+    for ("MARUFIND") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    session.dispatchAppAction(.toggle_find); // 닫는다
     try std.testing.expect(!session.chrome_host.find.open);
+
+    // 닫은 뒤 사용자가 스크롤 위치를 정해 둔다(맨 아래).
+    session.activeSurface().core.scrollToBottom();
+    const offset_before = session.activeSurface().core.viewOffset();
+
+    // 마크다운 탭에 들렀다 돌아온다 — 닫혀 있으므로 화면은 그대로여야 한다.
+    const pane = session.activePane();
+    const md = try session.createWebTerm(.markdown);
+    try pane.terms.append(allocator, md);
+    session.focusTerm(pane.terms.items.len - 1);
+    _ = try session.tick();
+    session.focusTerm(0);
+    _ = try session.tick();
+
+    try std.testing.expectEqual(offset_before, session.activeSurface().core.viewOffset());
+}
+
+// WP-F1 적대적 R6 프로브: **닫힌 동안 탭이 바뀌어도 대상이 굳으면 안 된다.** 대상 동기화가 "열려 있을 때"에만
+// 돌면, 웹 탭에서 닫고 터미널로 옮긴 뒤 다시 열었을 때 첫 프레임이 페이지 모드로 그려진다(카운터가 통째로 빈다).
+test "WP-F1 R6 프로브: 닫힌 동안 탭이 바뀌어도 대상이 따라온다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    const pane = session.activePane();
+    const md = try session.createWebTerm(.markdown);
+    try pane.terms.append(allocator, md);
+    session.focusTerm(pane.terms.items.len - 1);
+
+    session.dispatchAppAction(.toggle_find);
+    _ = try session.tick();
+    try std.testing.expectEqual(chrome.components.find.Target.page, session.chrome_host.find.target);
+
+    // 닫고 터미널로 옮긴다.
+    session.dispatchAppAction(.toggle_find);
+    try std.testing.expect(!session.chrome_host.find.open);
+    session.focusTerm(0);
+    _ = try session.tick();
+
+    // 다시 열자마자 그리면 — 페이지 모드로 굳어 있으면 카운터가 없다.
+    session.dispatchAppAction(.toggle_find);
+    try std.testing.expect(try findOverlayHasText(allocator, session, "0/0"));
+}
+
+// WP-F1 적대적 R5 프로브: 웹 탭에 잠깐 들렀다 **터미널로 돌아오면 스크롤백 검색이 살아 있어야** 한다.
+// 웹 활성 동안 매치를 버리므로(그 화면 것이 아니다), 돌아왔을 때 아무도 다시 계산해 주지 않으면 검색어는
+// 남았는데 하이라이트도 카운터도 죽은 상태가 된다.
+test "WP-F1 R5 프로브: 웹에 들렀다 터미널로 돌아오면 스크롤백 매치가 되살아난다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    // 터미널 화면에 찾을 글자를 심는다(유니크 토큰 — 셸 출력과 충돌 없게).
+    const pane = session.activePane();
+    try session.activeSurface().core.write("MARUFIND one\r\ntwo MARUFIND three");
+    session.dispatchAppAction(.toggle_find);
+    for ("MARUFIND") |c| _ = try session.handleKeyEvent(.{ .key = .{ .char = c }, .modifiers = .{} });
+    const before = session.find_matches.items.len;
+    try std.testing.expectEqual(@as(usize, 2), before); // 전제 — 스크롤백에서 찾았다
+
+    // 마크다운 탭에 들렀다가
+    const md = try session.createWebTerm(.markdown);
+    try pane.terms.append(allocator, md);
+    session.focusTerm(pane.terms.items.len - 1);
+    _ = try session.tick();
+    try std.testing.expectEqual(@as(usize, 0), session.find_matches.items.len); // 웹 화면엔 남기지 않는다
+
+    // 돌아온다 — 같은 검색어로 다시 찾아져 있어야 한다.
+    session.focusTerm(0);
+    _ = try session.tick();
+    try std.testing.expectEqual(before, session.find_matches.items.len);
+}
+
+// WP-F1 적대적 R4 프로브: (a) 늦은 결과가 **남의 탭 카운터**에 붙으면 안 된다. (b) ⌘⇧G의 역방향이 실제로 나가야 한다.
+test "WP-F1 R4 프로브: 결과는 제출한 탭에만 붙고, 역방향이 전달된다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    const pane = session.activePane();
+    const a = try session.createWebTerm(.markdown);
+    try pane.terms.append(allocator, a);
+    const a_idx = pane.terms.items.len - 1;
+    const b = try session.createWebTerm(.markdown);
+    try pane.terms.append(allocator, b);
+    const b_idx = pane.terms.items.len - 1;
+
+    // (b) 역방향: ⌘⇧G가 backwards=true로 나간다.
+    session.focusTerm(a_idx);
+    session.dispatchAppAction(.toggle_find);
+    _ = chrome.components.find.handle(allocator, .{ .key = .char, .codepoint = 'a' }, &session.chrome_host.find);
+    session.dispatchChromeAction(.find_query_changed);
+    const fwd = session.takeWebFindQuery() orelse return error.TestExpectedWebFindRequest;
+    try std.testing.expect(!fwd.backwards);
+    session.dispatchAppAction(.find_previous);
+    const back = session.takeWebFindQuery() orelse return error.TestExpectedWebFindRequest;
+    try std.testing.expect(back.backwards);
+
+    // (a) A의 결과가 오기 전에 B로 전환한다. 그 뒤 도착한 **A의 답**을 B 화면에 붙이면 안 된다.
+    session.focusTerm(b_idx);
+    session.provideWebFindResult(back.seq, true); // seq는 아직 유효(B 재제출 전) — 그래도 A의 답이다
+    try std.testing.expect(session.chrome_host.find.page_found == null);
+}
+
+// WP-F1 적대적 R3: **Swift가 전달하지 못한 질의는 되살아나야 한다.** 방금 만든 웹 탭은 WKWebView가 아직
+// 없어 drain이 질의를 걸지 못한다. 그때 그냥 버리면 Zig의 제출 마커가 "보냈다"로 남아 tick이 재시도하지
+// 않고, 그 탭의 검색은 **영영 나가지 않는다**(조용한 죽음). 미전달 신고가 마커를 지워 다음 tick이 다시 낸다.
+test "WP-F1: 전달 실패를 신고하면 다음 tick이 다시 낸다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    const pane = session.activePane();
+    const md = try session.createWebTerm(.markdown);
+    try pane.terms.append(allocator, md);
+    session.focusTerm(pane.terms.items.len - 1);
+
+    session.dispatchAppAction(.toggle_find);
+    _ = chrome.components.find.handle(allocator, .{ .key = .char, .codepoint = 'a' }, &session.chrome_host.find);
+    session.dispatchChromeAction(.find_query_changed);
+    const first = session.takeWebFindQuery() orelse return error.TestExpectedWebFindRequest;
+
+    // Swift가 못 걸었다 — 신고 없이는 다음 tick이 조용하다(이 대비가 이 테스트의 요점이다).
+    _ = try session.tick();
+    try std.testing.expect(session.takeWebFindQuery() == null);
+
+    session.reportWebFindUndeliverable(first.seq);
+    _ = try session.tick();
+    const again = session.takeWebFindQuery() orelse return error.TestExpectedWebFindRequest;
+    try std.testing.expectEqualStrings("a", again.query);
+    try std.testing.expectEqual(first.surface_id, again.surface_id);
+
+    // 늦은 신고(그 사이 새 질의가 나갔다)는 무시한다 — 아니면 이미 유효한 제출을 되돌려 무한 재제출이 된다.
+    session.reportWebFindUndeliverable(first.seq);
+    _ = try session.tick();
+    try std.testing.expect(session.takeWebFindQuery() == null);
+}
+
+// WP-F1 적대적 R2 프로브: 웹 탭 A에서 찾은 뒤 **웹 탭 B로 옮기면** B도 검색돼야 한다.
+test "WP-F1 R2 프로브: 다른 웹 탭으로 옮기면 그 탭에도 질의가 나간다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    const pane = session.activePane();
+    const a = try session.createWebTerm(.markdown);
+    try pane.terms.append(allocator, a);
+    const a_idx = pane.terms.items.len - 1;
+    const b = try session.createWebTerm(.markdown);
+    try pane.terms.append(allocator, b);
+    const b_idx = pane.terms.items.len - 1;
+
+    session.focusTerm(a_idx);
+    session.dispatchAppAction(.toggle_find);
+    _ = chrome.components.find.handle(allocator, .{ .key = .char, .codepoint = 'a' }, &session.chrome_host.find);
+    session.dispatchChromeAction(.find_query_changed);
+    const ra = session.takeWebFindQuery() orelse return error.TestExpectedWebFindRequest;
+    const sid_a = ra.surface_id;
+    session.provideWebFindResult(ra.seq, true); // A는 찾음 — 여기서 web_find_result가 채워진다
+
+    // B로 전환. 같은 검색어를 그 탭에서도 찾아야 한다.
+    session.focusTerm(b_idx);
+    _ = try session.tick();
+    const rb = session.takeWebFindQuery() orelse return error.TestExpectedWebFindRequest;
+    try std.testing.expect(rb.surface_id != sid_a); // A가 아니라 B로 간다
+    try std.testing.expectEqualStrings("a", rb.query);
+
+    // 반대편도 지켜야 한다: **같은 탭·같은 검색어면 다시 보내지 않는다.** 매 tick 재제출하면 WebKit
+    // 하이라이트가 프레임마다 첫 매치로 튄다(조건을 없애는 것은 고침이 아니다).
+    session.provideWebFindResult(rb.seq, true);
+    _ = try session.tick();
+    _ = try session.tick();
+    try std.testing.expect(session.takeWebFindQuery() == null);
+
+    // 그리고 검색어가 바뀌면 같은 탭이라도 다시 보낸다.
+    _ = chrome.components.find.handle(allocator, .{ .key = .char, .codepoint = 'b' }, &session.chrome_host.find);
+    _ = try session.tick();
+    const rc = session.takeWebFindQuery() orelse return error.TestExpectedWebFindRequest;
+    try std.testing.expectEqualStrings("ab", rc.query);
+}
+
+// WP-F1 적대적 R1: **오버레이가 거짓말을 하면 안 된다.** WebKit이 페이지를 노랗게 하이라이트했는데 카운터가
+// "0/0"이면 사용자는 "못 찾았다"로 읽는다 — 화면과 정면으로 모순된다. `WKFindResult`는 개수를 안 주므로
+// (§8) 그 자리에 **찾음/없음**을 낸다. 결과가 오기 전에는 아무것도 안 낸다(빈 자리 < 틀린 숫자).
+test "WP-F1: 웹 탭 카운터는 0/0이 아니라 찾음/없음이다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+
+    const pane = session.activePane();
+    const md = try session.createWebTerm(.markdown);
+    try pane.terms.append(allocator, md);
+    session.focusTerm(pane.terms.items.len - 1);
+
+    session.dispatchAppAction(.toggle_find);
+    _ = try session.tick();
+    try std.testing.expectEqual(chrome.components.find.Target.page, session.chrome_host.find.target);
+
+    // 결과 전 — 그릴 것이 없다(빈 자리). 그림 자체로 확인한다: 카운터 op가 없어야 한다.
+    try std.testing.expect(session.chrome_host.find.page_found == null);
+    try std.testing.expect(!(try findOverlayHasText(allocator, session, "0/0")));
+
+    // 찾음/없음이 실제로 **그려진다**(상태만 보면 view가 무시해도 통과한다).
+    _ = chrome.components.find.handle(allocator, .{ .key = .char, .codepoint = 'a' }, &session.chrome_host.find);
+    session.dispatchChromeAction(.find_query_changed);
+    const req = session.takeWebFindQuery() orelse return error.TestExpectedWebFindRequest;
+    session.provideWebFindResult(req.seq, true);
+    try std.testing.expect(try findOverlayHasText(allocator, session, "찾음"));
+    try std.testing.expect(!(try findOverlayHasText(allocator, session, "0/0")));
+
+    session.provideWebFindResult(req.seq, false);
+    try std.testing.expect(try findOverlayHasText(allocator, session, "없음"));
+
+    // 터미널로 돌아오면 다시 숫자 카운터다(페이지 답이 남지 않는다).
+    session.focusTerm(0);
+    _ = try session.tick();
+    try std.testing.expectEqual(chrome.components.find.Target.scrollback, session.chrome_host.find.target);
+    try std.testing.expect(session.chrome_host.find.page_found == null);
+    // 숫자 카운터로 돌아온다("/"는 이 오버레이에서 카운터에만 나온다 — 프롬프트는 "Find: ", 검색어는 "a").
+    // 정확한 숫자는 단언하지 않는다: 돌아오면서 **실제로 재검색**하므로(R5) 셸 출력에 'a'가 있으면 0이 아니다.
+    try std.testing.expect(try findOverlayHasText(allocator, session, "/"));
+    try std.testing.expect(!(try findOverlayHasText(allocator, session, "찾음")));
+    try std.testing.expect(!(try findOverlayHasText(allocator, session, "없음")));
+}
+
+/// 오버레이를 **실제 렌더 경로**(buildChromeOverlayFrame과 같은 collectDraws)로 그려 `needle` 텍스트가 나오는지
+/// 본다 — 상태만 단언하면 view가 그 상태를 무시해도 통과하므로(그리는 것이 계약이다) 그림을 본다.
+fn findOverlayHasText(allocator: std.mem.Allocator, session: *AppSession, needle: []const u8) !bool {
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const tk = session.buildChromeTokens();
+    const props = session.buildChromeProps();
+    var draws: std.ArrayList(chrome.ChromeDraw) = .empty;
+    try session.chrome_host.collectDraws(props, &tk, arena, &draws);
+    for (draws.items) |d| {
+        for (d.ops) |op| {
+            const t = switch (op) {
+                .text => |tx| tx,
+                else => continue,
+            };
+            for (t.runs) |run| {
+                if (std.mem.indexOf(u8, run.text, needle) != null) return true;
+            }
+        }
+    }
+    return false;
 }
 
 // WP-F1 적대적: **게이트가 종류를 빠뜨리거나 남의 탭을 보면 안 된다.** 판정이 `activeWebSurfaceIdAnyKind`라
 // browser도 막혀야 하고(제보는 마크다운이었지만 같은 문제다), **웹 탭이 열려 있어도 활성이 터미널이면**
 // 평소처럼 열려야 한다 — 후자를 놓치면 "웹 탭 하나 열어 두면 터미널에서 ⌘F가 죽는" 더 나쁜 회귀가 된다.
-test "WP-F1: browser 탭도 막고, 활성이 터미널이면 웹 탭이 있어도 연다" {
+test "WP-F1: browser도 페이지 검색으로 가고, 활성이 터미널이면 스크롤백 검색이다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -65126,15 +65711,23 @@ test "WP-F1: browser 탭도 막고, 활성이 터미널이면 웹 탭이 있어�
     session.focusTerm(pane.terms.items.len - 1);
 
     session.dispatchAppAction(.toggle_find);
-    try std.testing.expect(!session.chrome_host.find.open); // browser도 막힌다
+    // 슬라이스 ② 이후: browser에서도 **열린다** — 다만 대상이 페이지다. 열린 뒤 tick이 돌면
+    // 터미널 매치는 비고 질의는 Swift로 넘어간다.
+    try std.testing.expect(session.chrome_host.find.open);
+    _ = try session.tick();
+    try std.testing.expectEqual(@as(usize, 0), session.find_matches.items.len);
 
     // 웹 탭은 그대로 두고 활성만 터미널(0번)로 되돌린다.
-    session.chrome_host.notice.dismiss();
     session.focusTerm(0);
     try std.testing.expectEqual(@as(u64, 0), session.activeWebSurfaceIdAnyKind()); // 전제
 
+    // 전환만으로 닫히지 않는다 — 같은 오버레이가 이제 스크롤백을 본다.
+    try std.testing.expect(session.chrome_host.find.open);
+    session.dispatchAppAction(.toggle_find);
+    try std.testing.expect(!session.chrome_host.find.open); // 토글은 여전히 토글이다
     session.dispatchAppAction(.toggle_find);
     try std.testing.expect(session.chrome_host.find.open); // 터미널에서는 평소대로 열린다
+    try std.testing.expect(session.takeWebFindQuery() == null); // 터미널 활성이면 페이지로 안 나간다
 }
 
 // WP-F1 적대적: **⌘G(find_next)는 게이트가 없다.** ⌘F만 막고 ⌘G를 두면, 터미널에서 검색어를 남긴 뒤
@@ -65175,7 +65768,7 @@ test "WP-F1: 웹 탭에서 ⌘G는 터미널 검색어로 엉뚱한 동작을 �
 // 마크다운 뷰어에서 열리면 우상단에 검색창이 뜨는데 페이지는 검색되지 않는다(사용자 제보).
 // 판정 기준이 `activeWebSurfaceIdAnyKind`인 것이 핵심이다 — browser 전용 함수를 쓰면 **마크다운이 빠져**
 // 제보된 그 버그가 그대로 남는다(docs/web-panel.md §8).
-test "WP-F1: 마크다운 웹 탭에서 ⌘F는 스크롤백 find를 열지 않는다" {
+test "WP-F1: 마크다운 웹 탭에서 ⌘F 검색어가 그 탭의 페이지로 나간다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -65196,16 +65789,33 @@ test "WP-F1: 마크다운 웹 탭에서 ⌘F는 스크롤백 find를 열지 않�
     session.dispatchAppAction(.toggle_find);
     try std.testing.expect(!session.chrome_host.find.open);
 
-    // 마크다운 웹 탭으로 옮기면 열리지 않고 안내가 뜬다.
+    // 마크다운 웹 탭으로 옮기면 **열리고, 검색어가 페이지로 나간다**(제보된 버그의 회귀 테스트).
     const pane = session.activePane();
     const md = try session.createWebTerm(.markdown);
     try pane.terms.append(allocator, md);
     session.focusTerm(pane.terms.items.len - 1);
-    try std.testing.expect(session.activeWebSurfaceIdAnyKind() != 0); // 전제
+    const sid = session.activeWebSurfaceIdAnyKind();
+    try std.testing.expect(sid != 0); // 전제
 
     session.dispatchAppAction(.toggle_find);
-    try std.testing.expect(!session.chrome_host.find.open);
-    try std.testing.expect(session.chrome_host.notice.open); // 조용히 무시하지 않는다
+    try std.testing.expect(session.chrome_host.find.open);
+
+    // 타이핑 한 글자 = find_query_changed → 페이지 질의 제출.
+    _ = chrome.components.find.handle(allocator, .{ .key = .char, .codepoint = 'a' }, &session.chrome_host.find);
+    session.dispatchChromeAction(.find_query_changed);
+
+    // peek은 **소비하지 않는다** — ABI 래퍼가 out 용량을 소비 전에 검사할 때 쓰는 계약이다(용량이 모자라
+    // 0으로 빠져도 질의는 살아 있어야 한다. 삼키면 그 검색은 영영 안 나간다).
+    try std.testing.expectEqual(@as(usize, 1), session.peekWebFindQueryLen().?);
+    try std.testing.expectEqual(@as(usize, 1), session.peekWebFindQueryLen().?);
+
+    const req = session.takeWebFindQuery() orelse return error.TestExpectedWebFindRequest;
+    try std.testing.expectEqualStrings("a", req.query);
+    try std.testing.expectEqual(sid, req.surface_id); // 활성 웹 탭으로 간다
+    try std.testing.expect(!req.backwards);
+    try std.testing.expect(session.takeWebFindQuery() == null); // 1회성
+    // 스크롤백은 검색하지 않는다.
+    try std.testing.expectEqual(@as(usize, 0), session.find_matches.items.len);
 }
 
 // SB1: **요청 중에 상태바가 사라지면 메뉴를 띄우면 안 된다.** 목록 읽기는 비동기라, 그 사이 사용자가

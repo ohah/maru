@@ -2249,6 +2249,51 @@ pub export fn maru_macos_app_session_browser_nav(session: ?*AppSession, surface_
     return 1;
 }
 
+// §8 슬라이스 ②: 웹 탭 페이지 찾기(⌘F). 두 방향 배관이다.
+//
+// (1) take: Zig가 세운 1회성 질의를 걷어 간다 — query를 out에 쓰고 surface_id·backwards를 out-ptr에 실어 **seq**를
+//     돌려준다(0=없음). Swift가 webPanels[surface_id].webView에 WKWebView.find(query)를 걸고, completion에서 seq를
+//     그대로 (2)로 돌려준다. null 인자/용량 부족은 pending을 **소비하기 전에** 0으로 빠진다(신호 유실 방지 —
+//     take_web_addr_navigate와 같은 계약). query 길이는 out-ptr로 준다(seq는 반환값이라 자리가 없다).
+pub export fn maru_macos_app_session_take_web_find_query(
+    session: ?*AppSession,
+    query_out: ?[*]u8,
+    query_cap: usize,
+    query_len_out: ?*usize,
+    surface_id_out: ?*u64,
+    backwards_out: ?*u32,
+) u64 {
+    const app_session = session orelse return 0;
+    const qo = query_out orelse return 0;
+    const qlo = query_len_out orelse return 0;
+    const so = surface_id_out orelse return 0;
+    const bo = backwards_out orelse return 0;
+    // 용량 검사는 소비 전에 — 못 담을 질의를 삼켜 버리면 검색이 조용히 죽는다.
+    if (app_session.peekWebFindQueryLen()) |len| {
+        if (len > query_cap) return 0;
+    } else return 0;
+    const req = app_session.takeWebFindQuery() orelse return 0;
+    @memcpy(qo[0..req.query.len], req.query);
+    qlo.* = req.query.len;
+    so.* = req.surface_id;
+    bo.* = if (req.backwards) 1 else 0;
+    return req.seq;
+}
+
+// (2) provide: WKWebView.find completion 결과를 seq와 함께 되돌린다. 늦은 회신(그 사이 새 질의·오버레이 닫힘·
+//     활성 탭 변경)은 Zig가 버린다 — Swift는 판단하지 않고 그대로 넘긴다.
+pub export fn maru_macos_app_session_provide_web_find_result(session: ?*AppSession, seq: u64, found: u32) void {
+    const app_session = session orelse return;
+    app_session.provideWebFindResult(seq, found != 0);
+}
+
+// (3) undeliverable: 그 surface의 WKWebView가 아직 없어 find를 걸지 못했다고 신고한다. Zig가 제출 마커를 지워
+//     다음 tick이 재시도한다(신고하지 않으면 그 검색은 영영 나가지 않는다).
+pub export fn maru_macos_app_session_web_find_undeliverable(session: ?*AppSession, seq: u64) void {
+    const app_session = session orelse return;
+    app_session.reportWebFindUndeliverable(seq);
+}
+
 // Phase 7e-4 후속: 활성 pane의 활성 term이 browser web이면 그 surface_id, 아니면 0(browser 아님/null session). Swift
 // performKeyEquivalent가 browser nav 단축키(⌘←/→/R)를 이 값 == 이 패널 surface_id일 때만 처리해, WKWebView 키보드
 // 포커스 유무와 무관하게 "지금 활성 탭이 browser면" 동작하게 한다(탭만 열어 봐도 되게). split의 비활성 pane 브라우저는
@@ -6861,6 +6906,26 @@ test "5f-5b glue: running revoke는 client terminal 뒤 late backend terminal까
     try std.testing.expectEqual(@as(usize, 32), active_browser_executions.budget.usedBytes());
     try std.testing.expect(active_browser_executions.finish(id));
     try std.testing.expectEqual(@as(usize, 0), active_browser_executions.budget.usedBytes());
+}
+
+// WP-F1 적대적 R10: **ABI 래퍼는 Swift만 부르므로 여기서 안 보면 영영 안 본다.** 여기서 지키는 것은
+// **null 안전**이다 — Swift teardown 중(창이 닫히는 프레임) 세션이 이미 없는 채로 불릴 수 있고, 그때
+// 크래시하면 앱이 죽는다. 세 export 모두 null에 무해해야 한다.
+//
+// 한계: "용량 부족·out-ptr null이면 pending을 소비하지 않는다"는 계약은 여기서 못 태운다 — pending을
+// 세우려면 웹 탭이 활성이어야 하고, 그 설정은 `activePane`/`createWebTerm` 같은 **비-pub 내부 헬퍼**를
+// 만져야 한다(경계를 뚫느니 안 태운다). 그 계약은 app_session.zig의 WP-F1 테스트들이 `peekWebFindQueryLen`
+// (래퍼가 소비 전에 쓰는 바로 그 함수)로 덮는다.
+test "WP-F1 ABI: web find export 3종이 null session에 무해하다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var buf: [64]u8 = undefined;
+    var qlen: usize = 0;
+    var sid: u64 = 0;
+    var backwards: u32 = 0;
+
+    try std.testing.expectEqual(@as(u64, 0), maru_macos_app_session_take_web_find_query(null, &buf, buf.len, &qlen, &sid, &backwards));
+    maru_macos_app_session_provide_web_find_result(null, 1, 1);
+    maru_macos_app_session_web_find_undeliverable(null, 1);
 }
 
 test "grant scope wire round-trip: browser=0·browser_storage=1, 그 외 from-wire는 null" {

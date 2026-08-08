@@ -1996,6 +1996,10 @@ pub fn build(b: *std.Build) void {
         "test-session-host-b3-6",
         "B3-6 internal RPC substrate strict completion Debug and ReleaseFast gates",
     );
+    const session_host_2c3c_c1_step = b.step(
+        "test-session-host-2c3c-c1",
+        "2c3c C1 typed control facade Debug and ReleaseFast gates",
+    );
     const b3_1_boundary_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/session_host_b3_1_boundary.zig"),
@@ -2049,6 +2053,37 @@ pub fn build(b: *std.Build) void {
     session_host_b3_4_5_step.dependOn(&run_b3_4_5_boundary_tests.step);
     boundary_step.dependOn(&run_b3_4_5_boundary_tests.step);
     inline for (b3_debug_release_modes) |b3_optimize| {
+        const control_c1_runtime_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/generation_transport.zig",
+                ),
+                .target = target,
+                .optimize = b3_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"CR3a-2c3c"},
+        });
+        const run_control_c1_runtime_tests = b.addRunArtifact(control_c1_runtime_tests);
+        run_control_c1_runtime_tests.addArg("--maru-expect-tests=7");
+        run_control_c1_runtime_tests.setCwd(b.path("."));
+        session_host_2c3c_c1_step.dependOn(&run_control_c1_runtime_tests.step);
+
+        const control_c1_boundary_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/session_host_2c3c_c1_boundary.zig"),
+                .target = target,
+                .optimize = b3_optimize,
+            }),
+            .filters = &.{"CR3a-2c3c C1 control facade"},
+        });
+        const run_control_c1_boundary_tests = b.addRunArtifact(control_c1_boundary_tests);
+        run_control_c1_boundary_tests.addArg("--maru-expect-tests=1");
+        run_control_c1_boundary_tests.setCwd(b.path("."));
+        session_host_2c3c_c1_step.dependOn(&run_control_c1_boundary_tests.step);
+        boundary_step.dependOn(&run_control_c1_boundary_tests.step);
+
         const b3_6_runtime_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path(

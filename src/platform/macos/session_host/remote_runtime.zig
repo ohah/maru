@@ -621,6 +621,7 @@ pub const RemoteRuntime = struct {
 
         // 3. 첫 snapshot을 읽어 원격 화면을 조립한다.
         var generation_snapshot: initial_snapshot_owner_mod.InitialSnapshotOwner = .{};
+        var generation_snapshot_live = false;
         var legacy_snapshot: ?[]u8 = null;
         const snap: []const u8 = switch (self.attachment) {
             .legacy => blk: {
@@ -630,12 +631,13 @@ pub const RemoteRuntime = struct {
             },
             .generation => |*value| blk: {
                 try value.readInitialSnapshot(&generation_snapshot);
+                generation_snapshot_live = true;
                 break :blk try generation_snapshot.borrow();
             },
         };
         defer if (legacy_snapshot) |bytes|
             self.allocator.free(bytes)
-        else
+        else if (generation_snapshot_live)
             generation_snapshot.deinit() catch
                 @panic("generation initial snapshot cleanup lost final owner");
         try self.attachment.initScreen(self.client.screen_codec_version);
@@ -646,9 +648,17 @@ pub const RemoteRuntime = struct {
         self.attachment.screenPtr().?.applySnapshot(snap, self.io) catch |err| {
             switch (self.attachment) {
                 .legacy => {},
-                .generation => |*value| value.poisonInitialSnapshotApply(
-                    err == error.OutOfMemory,
-                ) catch @panic("generation snapshot apply failure lost its sealed transport"),
+                .generation => |*value| {
+                    // The snapshot owner holds the node's initial-snapshot permit. Release that
+                    // exact owner before fail-closing the transport; the public poison path must
+                    // continue to reject unrelated mutation while any operation permit is live.
+                    generation_snapshot.deinit() catch
+                        @panic("generation initial snapshot cleanup lost final owner");
+                    generation_snapshot_live = false;
+                    value.poisonInitialSnapshotApply(
+                        err == error.OutOfMemory,
+                    ) catch @panic("generation snapshot apply failure lost its sealed transport");
+                },
             }
             return err;
         };
@@ -3080,6 +3090,10 @@ test "CR3a-2c1 malformed generation snapshot poisons before exact attachment rol
     );
     peer.join();
     try std.testing.expect(adapter.logicalClient().unusable);
+    try std.testing.expectEqual(
+        client_poison.ConnectionReason.peer_contract_violation,
+        adapter.logicalClient().firstPoisonReason().?,
+    );
     try std.testing.expectEqual(
         @as(usize, 0),
         try adapter.slot.current.cleanup_registry.count(),

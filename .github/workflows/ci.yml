@@ -166,8 +166,32 @@ jobs:
         with:
           version: 2026.2.7
           sha256: f8becf318705e1bd91227ed0efee4f9fd988d1d5c66bb48e996f030792a0d3b7 # macos-arm64 binary
+      # Zig 빌드 캐시. **실측**(로컬, session host Debug): 콜드 243초 → 웜 156초(-36%),
+      # 캐시 크기 local 607MB + global 48MB. 그 절감분을 655MB 전송이 먹을 수 있어 **가장 무거운 두 잡에만**
+      # 먼저 넣고 실제 효과를 본 뒤 확대한다(무작정 5개 잡에 붙이면 저장소 10GB 한도에서 서로 밀어낸다).
+      #
+      # **복원은 항상, 저장은 main push에서만** 한다. PR마다 저장하면 캐시가 churn해 적중률이 오히려 떨어진다 —
+      # PR은 main이 남긴 캐시로 시작하고 쓰지는 않는다.
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        id: zig-cache
+        with:
+          path: |
+            .zig-cache
+            ~/.cache/zig
+          key: zig-${{ runner.os }}-sessionhost-debug-${{ hashFiles('build.zig', 'build.zig.zon') }}-${{ github.sha }}
+          restore-keys: |
+            zig-${{ runner.os }}-sessionhost-debug-${{ hashFiles('build.zig', 'build.zig.zon') }}-
+            zig-${{ runner.os }}-sessionhost-debug-
       - name: Verify session host and live-upgrade fixtures
         run: zig build test-session-host -Doptimize=Debug
+      - name: Save Zig cache (main만 — PR은 읽기만 한다)
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .zig-cache
+            ~/.cache/zig
+          key: zig-${{ runner.os }}-sessionhost-debug-${{ hashFiles('build.zig', 'build.zig.zon') }}-${{ github.sha }}
 
   session-host-macos-releasefast:
     name: session host macOS (ReleaseFast)
@@ -183,8 +207,32 @@ jobs:
         with:
           version: 2026.2.7
           sha256: f8becf318705e1bd91227ed0efee4f9fd988d1d5c66bb48e996f030792a0d3b7 # macos-arm64 binary
+      # Zig 빌드 캐시. **실측**(로컬, session host Debug): 콜드 243초 → 웜 156초(-36%),
+      # 캐시 크기 local 607MB + global 48MB. 그 절감분을 655MB 전송이 먹을 수 있어 **가장 무거운 두 잡에만**
+      # 먼저 넣고 실제 효과를 본 뒤 확대한다(무작정 5개 잡에 붙이면 저장소 10GB 한도에서 서로 밀어낸다).
+      #
+      # **복원은 항상, 저장은 main push에서만** 한다. PR마다 저장하면 캐시가 churn해 적중률이 오히려 떨어진다 —
+      # PR은 main이 남긴 캐시로 시작하고 쓰지는 않는다.
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        id: zig-cache
+        with:
+          path: |
+            .zig-cache
+            ~/.cache/zig
+          key: zig-${{ runner.os }}-sessionhost-releasefast-${{ hashFiles('build.zig', 'build.zig.zon') }}-${{ github.sha }}
+          restore-keys: |
+            zig-${{ runner.os }}-sessionhost-releasefast-${{ hashFiles('build.zig', 'build.zig.zon') }}-
+            zig-${{ runner.os }}-sessionhost-releasefast-
       - name: Verify session host and live-upgrade fixtures
         run: zig build test-session-host -Doptimize=ReleaseFast
+      - name: Save Zig cache (main만 — PR은 읽기만 한다)
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .zig-cache
+            ~/.cache/zig
+          key: zig-${{ runner.os }}-sessionhost-releasefast-${{ hashFiles('build.zig', 'build.zig.zon') }}-${{ github.sha }}
 
   # Mermaid 제품 pump는 macOS helper/WKWebView와 native tick adapter가 모두 필요하다.
   # 1,000 tick artifact가 process/pipe/wait 0과 completion drain 상한을 어기면 merge하지 않는다.

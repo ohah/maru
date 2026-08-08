@@ -1033,9 +1033,8 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    registry-resolved canonical node operation pin 아래 exact `GenerationCapabilities` value projection을 구현했다. untrusted slot 주소는
    registry 비교 전 역참조하지 않고 owner-seal/capability enum의 invalid raw byte를 fail-close하며, facade production callsite 0과
    shared `RemoteRuntime` architecture raw-read exact baseline을 boundary gate로 고정했다.
-   **2c3b-2 request-side canonical authority와 2c3b-3의 B3-4/5 private response-side
-   execution/ownership+single-slot reusable-finish correction은 구현·검증 완료했고, B3-6 internal aggregate strict completion 전이라 전체 구현 중**이며
-   두 merge gate를 섞지 않는다.
+   **2c3b-2 request-side canonical authority와 2c3b-3의 B3-0a~B3-6 internal aggregate strict completion은
+   구현·검증 완료**했으며, public decoder와 legacy/generation observable parity는 2c3e 후속이다. 다음 gate는 2c3c control facade다.
    2c3b-2는 `RuntimeRequestTag -> RequestFamily -> role/phase -> method` 전수표와 닫힌 prepare/abort error,
    같은 binding entry의 node-sealed `PreparedRequestAuthority`가 opaque `PreparedBlockingRpcStorage`의 frame descriptor·allocator
    provenance·incarnation·tag/id/digest를 한 transaction으로 pair-seal하는 경로까지 구현했다. 기존 attach-compatible execute도 이
@@ -1065,9 +1064,9 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    digest/epoch splice, pre-wire typed reject 뒤 재사용, uncertain·accepted 미소비 뒤 terminal, allocator drift·alias·free callback 재진입,
    node-sealed authority/whole-transport restore, exact safe-free와 ambiguous no-free product fail-stop, epoch 소진,
    teardown busy/fail-close를 production type·subprocess·Darwin socketpair로 고정한다.
-   이 aggregate gate는 내부 TDD slice `B3-0a`~`B3-6`을 순서대로 병합하되 마지막 slice 전까지 상태를
-   `2c3b-3 구현 중`으로 유지한다. 내부 slice는 공개 RPC surface를 부분 완료로 노출하지 않으며 generation 제품 callsite와 정상
-   observable wire/product behavior는 0이다.
+   이 aggregate gate는 내부 TDD slice `B3-0a`~`B3-6`을 순서대로 병합했고, 마지막 slice 전까지 상태를
+   `2c3b-3 구현 중`으로 유지한 뒤 B3-6 merge로 완료했다. 내부 slice는 공개 RPC surface를 부분 완료로 노출하지 않았으며 generation 제품
+   callsite와 정상 observable wire/product behavior는 0이다.
 
    1. **B3-0a attach ambiguous-free remediation:** 현재 attach accepted tail의 exact-owned safe-free와 owner/allocator/range가
       불명확한 no-free를 먼저 분리한다. alias·overflow·allocator drift는 forged payload를 read/hash/free하지 않고 terminal evidence를
@@ -1308,6 +1307,7 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       second free 0이고 local seal/allocator/authority/rearm drift만 abnormal exit다. parent-minted stage sentinel은 free exact once,
       authority idle, evidence retire, rearm precondition을 구분하며 reset 전 fail-stop과 rearm 뒤 operation release 외 동작 0을 증명한다.
       bounded nonempty correct-id payload의 JSON/application semantic 오류는 2c3e decoder가 소유한다.
+
       여기서 `empty`는 response header를 한 byte도 받기 전의 zero-byte EOF다. correct-id response의 payload 길이 0도 canonical
       accepted owner가 아니므로 process-alive protocol terminal로 정산하며 permanent tombstone, semantic read 0, rearm 0이다. peer 행렬은 bad magic, wrong major, invalid kind, wrong request id,
       header cap+1, header truncation, payload truncation, zero-byte EOF, allocation fail-index와 correct-id empty payload를 exact case로
@@ -1323,6 +1323,22 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       `authority_idle -> evidence_retired -> rearm_precondition` 뒤에만 주입한다. exec 126/127, capability/nonce mismatch, generic panic, stage
       누락·중복·역전은 실패다. parent는 stderr와 stage pipe를 child 종료 전 nonblocking으로 함께 drain하고 capture cap 뒤에도 EOF까지
       discard-drain하며 truncation은 실패 처리한다. absolute timeout은 kill 뒤 waitpid exact once로 닫는다.
+   8. **2c3c control facade (미착수):** C1은 별도 raw-discriminator-safe `RuntimeControl` DTO와 exact
+      `ValidatedRuntimeControl=scroll_to_bottom|core_command`를 두고 `sendControl|sendControlNonBlocking` substrate를
+      `ClientSlot` canonical operation 아래 추가한다. unsupported capability는
+      `ControlError.Unsupported`, nonblocking `false`는 backpressure만 뜻하며 raw method/JSON/stream ID escape는 0이다. C2는 기존
+      `PendingControl.barrier` queue의 generation nonblocking scroll/core 호출을 facade로 전환하고, C3는 blocking flush를 전환한다.
+      C2의 encode OOM은 typed queue dequeue와 새 control owner/wire를 0으로 유지하되 prior pending progress만 허용하고 duplicate 없이
+      재시도한다. C3 queue flush는 response 없는 stream frame만 써서
+      `RuntimeRequest.core_command`로 fallback하지 않는다. outer scroll은 dedicated scroll capability/frame, nested
+      `core_command(.scroll_to_bottom)`은 core capability/frame을 유지하며 unsupported wire-kind fallback은 `RemoteRuntime`만 결정한다.
+      C3 encode OOM은 prior pending progress만 허용하고 새 control wire 0·queue retain·재시도 duplicate 0을 고정한다.
+      facade `Unsupported`는 generation adapter 한 곳에서 consumed no-op으로 normalize해 기존 사용자 가시 동작을 보존하고,
+      backpressure만 queue를 유지한다. public raw DTO는 zero-init outer tag+module-private shared `RawCoreCommand` representation을 쓰며
+      decode가 검증한 active member만 semantic authority로 삼는다.
+      queue·registry authority는 새로 만들지 않고 legacy arm과 recovery-owned resync는 유지한다. 각 slice는 Debug·ReleaseFast focused
+      test와 boundary oracle을 통과하며 C3 종료 시 generation scroll/core direct Client callsite 0과 recovery resync baseline 1을 고정한다. event는 2c3d,
+      response-bearing RPC decoder와 실제 socket parity는 2c3e, `RemoteRuntime.client` 필드 제거는 2c4가 소유한다.
    제품 gate는 RPC family별 legacy/generation decode parity와 input→RPC/revoke ordering을 포함한다. decode와 ordered input policy는
    `RemoteRuntime` 하나만 소유한다. **2c4**는
    `RuntimeConnection` union을 mode SSOT로 전환해 `RemoteRuntime.client`와 `generation_adapter` 병렬 필드를 제거하고 exact

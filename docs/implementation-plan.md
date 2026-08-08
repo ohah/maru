@@ -1072,10 +1072,64 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       reuse, observer 밖 parser/pending backing resize/remap parity, ledger heap backing allocate/grow/free 0과 callback 전후 in-place semantic seal,
       sealed forbidden inventory 기반 payload disjoint 검증, zero-length와
       generation wrap을 함께 닫는다.
-   2. **B3-0 attach execution transaction seam:** request backing과 `PreparedRequestAuthority`만 함께 정산하는 private final-address
+   2. **B3-0 attach execution transaction seam (완료):** request backing과 `PreparedRequestAuthority`만 함께 정산하는 private final-address
       `PreparedExecutionTxn`의 상태·결정표를 characterization gate로 고정한 뒤 현재 attach-only 실행을 이 owner로 옮긴다. attach
       response owner·payload와 미래 RPC authority는 transaction에 넣지 않는다. 공개 signature, registry layout, frame schema와 정상
-      response bytes는 바꾸지 않는다.
+      response bytes는 바꾸지 않는다. 내부 순서는 **B3-0.1(완료)** 현재 attach 종료 행의 반환값·storage settlement·exact
+      authority lifecycle·최초 poison·canonical guarded-wrapper 진입과 parent physical free golden,
+      **B3-0.2(완료)** final-address transaction pure lifecycle/copy·move·duplicate·scope hostile tests. bounded live operation receipt,
+      raw-safe phase/settlement, callback 전 canonical snapshot과 descriptor-splice 무역참조, fork child의 inherited mutex 선차단,
+      fixed free-stack O(1)과 live receipt를 보유한 동안의 sibling teardown 강제 중첩을 Debug/ReleaseFast 및 boundary oracle로 닫았다.
+      **B3-0.3(완료)**은 `executeGenerationRequest`가 valid backing을 확인한 직후 stack final-address transaction을 만들고,
+      registry begin·pre-wire rollback·issuer exhaustion·post-execute reusable/terminal 정산을 모두 transaction method로만 수행하게
+      이관한다. 공개 response destination은 pointer materialization 전에 두 단계로 검증한다. registry admission 전 caller scalar owner의
+      overflow/full-containment를 비역참조 prefilter로 거르고, admission 뒤에는 그 owner가 registry의 canonical owner와 exact-match하는지와
+      canonical owner 안 full-containment를 다시 증명한 뒤에만 pointer를 만든다. guard 이후 final-address cleanup coordinator가
+      ledger→allocator→guard를 exact once로 닫고, transaction/cleanup 자체 stack authority도 allocator payload alias 금지 inventory에
+      포함한다. 별도 보호된 caller-local expected stage가 cleanup transcript drift와 무관하게 실제 획득한 resource suffix를 결정하며,
+      caller-local completion byte만 defer의 idempotent no-op를 허가한다. `.settled`/`.finishing` lifecycle 값만으로 완료나 reentry를
+      주장할 수 없고, address-bound thread-local active finisher가 일치하는 실제 same-thread reentry만 outer finisher가 남은 suffix를
+      닫을 때까지 failure로 latch한다. 각 callback 뒤 final-address transcript를 재검증한다.
+      모든 transaction settlement는 cleanup의 typed 결과 뒤에만 authority를 게시하며, cleanup 실패는 reusable publication 없이
+      request authority를 terminal fail-stop으로 정산한 뒤 process를 중단한다. 네 settlement method의 공통 precondition은 exact live
+      operation/final-address owner를 먼저 mutation 0으로 인증하고 그 뒤 operation guard가 닫혔음을 검사한다. copy/move/foreign
+      operation은 canonical guard를 읽거나 바꾸지 않는 typed `ProtocolError`이고, exact owner의 열린 guard만 cleanup 누락 terminal
+      fail-stop이다. guard 이후 ordinary exit는 단일 `settleExecutionAfterCleanup` seam만 사용하며 그 함수가
+      cleanup→closed intent settlement→transaction finish 순서를 소유한다. 따라서 새 exit가 coordinator 호출을 빠뜨려도
+      reusable/terminal publication으로 진행하지 못하고, exit별 복제 순서가 서로 drift하지 않는다. 기존 `ExecuteDisposition`,
+      `rollbackExecutingRequest`, `terminalizeExecutingRequest`,
+      `terminalizeExecutingRequestWithStorageCleanup`의 product identifier/callsite/declaration은 0이어야 하며 정상 wire/result/최초 poison은
+      바뀌지 않는다. issuer exhaustion의 backing abort가 reusable이면 기존 `IdentityExhausted`, 이미 terminal이면 정산 후
+      `ProtocolError`라는 기존 error mapping도 transaction method가 보존한다. **B3-0.4/B3-0(완료)**는 test-private
+      `B3ExecutionHarness`와 closed 13-row `B3Scenario`/`B3Expected` 표를 단일 출처로 두는 actual socket·fail-index·strict cleanup
+      aggregate gate다. Darwin socketpair에서 accepted payload, request 전체 수신 뒤 EOF, partial response 뒤 EOF를 public
+      `prepareRequest→executePreparedRequest`로 실행하고 0-byte EOF는 `connection_eof`, partial frame EOF는 `frame_malformed`로
+      구분한다. request bytes, result/error, storage settlement, authority idle/terminal,
+      first poison, response transcript/bytes와 request/payload alloc/free를 비교한다. request prepare와 execute/response allocation은
+      서로 다른 ordinal sweep으로 0부터 최초 성공까지 전수한다. request-prepare OOM은 wire 0/reusable, execute-side OOM은 request
+      전체 전송 뒤 terminal uncertain이라는 phase 경계를 고정하며 success sentinel과 guard/allocator scope/ledger/registered operation
+      final-zero를 요구한다. txn/cleanup/expected-stage/completion alias와 cleanup transcript·allocator restore·guard-end drift는
+      compile-filtered `/usr/bin/env -i` subprocess에서 terminal authority publication-before-SIGABRT와 ambiguous free 0을 증명한다.
+      focused B3-0.4 artifact는 exact expected test count와 process-local category sentinel로 zero-test/skip green을 막고 같은 gate를
+      Debug·ReleaseFast에서 실행한다. public declaration/callsite/frame/registry layout delta는 0이다.
+      현재 `B3ExecutionHarness`는 final-address allocator chain·ClientSlot/binding/transport·actual peer join·response/authority teardown을
+      소유하며 actual EOF/partial-frame와 execute alloc/resize sweep이 이 harness를 함께 쓴다. request-prepare ordinal은 같은 focused
+      artifact에 포함되고 alloc/resize는 실패가 실제 주입되지 않은 첫 성공 전까지 독립 전수한다. closed 표는 exact error 계열·최초
+      poison·response lifecycle·request/payload free·final-zero 필드를 포함하며 admission/local-preflight/pending-flush terminal/uncertain/
+      accepted/accepted-alias를 포함한 13행 모두가 제품 실행 또는 strict child와 연결됐다. focused root는 무관한 barrel test 없이
+      B3 8개, strict root는 2개를 각 optimize mode에서 exact-count하며 issuer clean/content-drift 4행의 전용 product fixture 1개도
+      양 모드 dependency다. strict root는 response owner alias와 cleanup descriptor/stage·ledger end·allocator restore·guard end의
+      여섯 격리 실행을 각각 통과해야 focused runner가 시작된다.
+      content drift는 exact descriptor free 뒤 `ProtocolError`·terminal authority·local invariant poison이라는 현재 제품 결과를 표에 고정한다.
+      fail-index는 호출 ordinal마다 전진해 target 한 번만 실패하며, harness teardown은 ReleaseFast에서도 allocator outstanding byte 0과
+      operation-registry의 bounded begin/end receipt transcript가 모든 순차 operation을 exact once로 반환하고 allocator outstanding byte가
+      0인지 ReleaseFast에서도 fail-stop으로 강제한다. txn/cleanup/expected-stage/completion exact·left/right partial·overflow alias 행렬도
+      focused 제품 모듈에서 실행한다. 10개 일반 행은 실제 call result/error·authority query·response payload free receipt·cleanup 이후
+      final-zero로 만든 `B3Observed` 전체를 표와 비교한다. issuer 4-case 제품 fixture와 두 aggregate 행은 중립
+      `b3_issuer_oracle`을 공유하며 socket wire byte 0, payload 미관측, cleanup·operation receipt·allocator final-zero를 비교한다.
+      response-alias child는 실제 exact request peer와 제품 상태에서 낸 transcript를 표로부터 생성한 문자열과 비교한다. 여섯 strict
+      child는 canonical request free exact 1, noncanonical backing free 0, response payload free 0을 독립 marker로 고정하고 cleanup
+      5개는 terminal publication marker가 panic보다 앞서는지 검증한다. 이 증거로 B3-0.4와 B3-0을 완료했으며 다음 단계는 B3-1이다.
    3. **B3-1 inert RPC authority:** production execute callsite 0인 node-local authority leaf와 registry idle field를 넣고 lifecycle,
       epoch, copy·ABA·splice와 teardown 상태를 pure leaf/production-type unit으로 닫는다.
    4. **B3-2 private destination admission:** public wrapper는 attach signature를 유지한 채 내부 `.attach`로 투영하고 test-private

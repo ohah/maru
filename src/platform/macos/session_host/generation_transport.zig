@@ -12,6 +12,7 @@ const executed_response_mod = @import("executed_response.zig");
 const initial_snapshot_owner_mod = @import("initial_snapshot_owner.zig");
 const client_poison = @import("client_poison.zig");
 const framing = @import("framing.zig");
+const protocol = @import("protocol.zig");
 const socket_server = @import("socket_server.zig");
 const builtin = @import("builtin");
 const posix = std.posix;
@@ -19,6 +20,7 @@ const posix = std.posix;
 const c = std.c;
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+extern "c" fn getdtablesize() c_int;
 
 var response_alias_fail_stop_completed = false;
 
@@ -1679,14 +1681,15 @@ test "CR3a-2c3a input facade maps allocation and socket failure without authorit
     binding.lifecycle = .terminal;
 }
 
-test "CR3a-2a response destination cannot splice binding storage before wire" {
+test "B3-0.1 response destination rejection settles request reusable without poison" {
     try client_slot_mod.ClientSlot.initializeProcessRuntime();
     const allocator = std.testing.allocator;
+    var request_free = RequestBackingFreeProbe{ .parent = allocator };
     var client: client_mod.Client = .{
-        .allocator = allocator,
+        .allocator = request_free.allocator(),
         .fd = -1,
         .host_id = 0xBC,
-        .parser = framing.FrameParser.init(allocator),
+        .parser = framing.FrameParser.init(request_free.allocator()),
     };
     var slot: client_slot_mod.ClientSlot = undefined;
     try client_slot_mod.ClientSlot.initInPlace(&slot, allocator, &client, 0xBC);
@@ -1695,47 +1698,101 @@ test "CR3a-2a response destination cannot splice binding storage before wire" {
         binding: contract.PreparedAttachmentBinding,
         response: executed_response_mod.ExecutedResponse,
     };
-    var shared: Shared = .{ .binding = .{} };
-    const binding: *contract.PreparedAttachmentBinding = @ptrCast(&shared);
-    const response: *executed_response_mod.ExecutedResponse = @ptrCast(&shared);
+    const Owner = struct {
+        transport: GenerationTransport = .{},
+        shared: Shared = .{ .binding = .{} },
+    };
+    var owner: Owner = .{};
+    const binding: *contract.PreparedAttachmentBinding = @ptrCast(&owner.shared);
+    const response: *executed_response_mod.ExecutedResponse = @ptrCast(&owner.shared);
     var lease: @import("connection_lease.zig").ConnectionLease = .{};
-    var transport: GenerationTransport = .{};
-    const reservation = try slot.reserveAttachmentBindingForTest(binding, &lease, @intFromPtr(&transport));
-    try mintInPlace(&transport, &slot, @intFromPtr(&transport), @sizeOf(GenerationTransport), reservation);
-    const receipt = try transport.prepareRequest(contract.RuntimeRequest.attachController());
+    const reservation = try slot.reserveAttachmentBindingForTest(binding, &lease, @intFromPtr(&owner.transport));
+    try mintInPlace(&owner.transport, &slot, @intFromPtr(&owner), @sizeOf(Owner), reservation);
+    const receipt = try owner.transport.prepareRequest(contract.RuntimeRequest.attachController());
+    const canonical = (try slot.current.cleanup_registry.preparedRequestForReceipt(
+        reservation.cleanup,
+        reservation.identity,
+        @intFromPtr(&owner.transport),
+        owner.transport.transport_incarnation,
+        receipt,
+    )).?;
+    request_free.arm(
+        &slot,
+        reservation,
+        canonical,
+    );
     try std.testing.expectError(
         error.InvalidResponseDestination,
-        transport.executePreparedRequest(receipt, response),
+        owner.transport.executePreparedRequest(receipt, response),
     );
+    try std.testing.expect(client_mod.Client.preparedBlockingRpcStorageSettled(
+        &owner.transport.prepared_storage,
+    ));
+    try std.testing.expectEqual(
+        @import("prepared_request_authority.zig").SettlementReadiness.settled,
+        try slot.current.cleanup_registry.preparedRequestSettlementReadiness(
+            reservation.cleanup,
+            reservation.identity,
+        ),
+    );
+    try slot.current.cleanup_registry.publishPreparedRequest(
+        reservation.cleanup,
+        reservation.identity,
+        canonical,
+    );
+    try slot.current.cleanup_registry.settlePreparedRequest(
+        reservation.cleanup,
+        reservation.identity,
+        canonical,
+        false,
+    );
+    try std.testing.expect(slot.logicalClient().firstPoisonReason() == null);
+    try request_free.expectExactOnceBeforeAuthoritySettlement();
     try std.testing.expectError(
         error.InvalidReceipt,
-        transport.abortPreparedRequest(receipt),
+        owner.transport.abortPreparedRequest(receipt),
     );
     try std.testing.expect(binding.validAtFinalAddress());
-    try terminalizeOwned(&transport, @intFromPtr(&transport));
+    try terminalizeOwned(&owner.transport, @intFromPtr(&owner.transport));
     try slot.abortAttachmentBinding(binding, reservation);
 }
 
-test "CR3a-2a execute failure settles prepared backing and publishes uncertain response" {
+test "B3-0.1 uncertain execute settles request terminal and preserves first poison" {
     try client_slot_mod.ClientSlot.initializeProcessRuntime();
     const allocator = std.testing.allocator;
+    var request_free = RequestBackingFreeProbe{ .parent = allocator };
     var client: client_mod.Client = .{
-        .allocator = allocator,
+        .allocator = request_free.allocator(),
         .fd = -1,
         .host_id = 0xCC,
-        .parser = framing.FrameParser.init(allocator),
+        .parser = framing.FrameParser.init(request_free.allocator()),
     };
     var slot: client_slot_mod.ClientSlot = undefined;
     try client_slot_mod.ClientSlot.initInPlace(&slot, allocator, &client, 0xCC);
     defer slot.deinit();
-    var transport: GenerationTransport = .{};
+    const Owner = struct {
+        transport: GenerationTransport = .{},
+        response: executed_response_mod.ExecutedResponse = .{},
+    };
+    var owner: Owner = .{};
     var binding: contract.PreparedAttachmentBinding = .{};
     var lease: @import("connection_lease.zig").ConnectionLease = .{};
-    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, @intFromPtr(&transport));
-    try mintInPlace(&transport, &slot, @intFromPtr(&transport), @sizeOf(GenerationTransport), reservation);
-    const receipt = try transport.prepareRequest(contract.RuntimeRequest.attachController());
-    var response: executed_response_mod.ExecutedResponse = .{};
-    const result = try transport.executePreparedRequest(receipt, &response);
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, @intFromPtr(&owner.transport));
+    try mintInPlace(&owner.transport, &slot, @intFromPtr(&owner), @sizeOf(Owner), reservation);
+    const receipt = try owner.transport.prepareRequest(contract.RuntimeRequest.attachController());
+    const canonical = (try slot.current.cleanup_registry.preparedRequestForReceipt(
+        reservation.cleanup,
+        reservation.identity,
+        @intFromPtr(&owner.transport),
+        owner.transport.transport_incarnation,
+        receipt,
+    )).?;
+    request_free.arm(
+        &slot,
+        reservation,
+        canonical,
+    );
+    const result = try owner.transport.executePreparedRequest(receipt, &owner.response);
     switch (result) {
         .uncertain_or_connection_failure => |executed| try std.testing.expect(
             executed.matchesPrepared(receipt),
@@ -1743,17 +1800,37 @@ test "CR3a-2a execute failure settles prepared backing and publishes uncertain r
         else => return error.TestUnexpectedResult,
     }
     try std.testing.expect(client_mod.Client.preparedBlockingRpcStorageSettled(
-        &transport.prepared_storage,
+        &owner.transport.prepared_storage,
     ));
     try std.testing.expectEqual(
-        executed_response_mod.DeinitOutcome.cleaned,
-        response.deinit(try slot.responseOwnerSeal(reservation)),
+        @import("prepared_request_authority.zig").SettlementReadiness.settled,
+        try slot.current.cleanup_registry.preparedRequestSettlementReadiness(
+            reservation.cleanup,
+            reservation.identity,
+        ),
     );
-    try terminalizeOwned(&transport, @intFromPtr(&transport));
+    try std.testing.expectError(
+        error.InvalidState,
+        slot.current.cleanup_registry.publishPreparedRequest(
+            reservation.cleanup,
+            reservation.identity,
+            canonical,
+        ),
+    );
+    try std.testing.expectEqual(
+        client_poison.ConnectionReason.outbound_write_ambiguous,
+        slot.logicalClient().firstPoisonReason().?,
+    );
+    try request_free.expectExactOnceBeforeAuthoritySettlement();
+    try std.testing.expectEqual(
+        executed_response_mod.DeinitOutcome.cleaned,
+        owner.response.deinit(try slot.responseOwnerSeal(reservation)),
+    );
+    try terminalizeOwned(&owner.transport, @intFromPtr(&owner.transport));
     try slot.abortAttachmentBinding(&binding, reservation);
 }
 
-test "CR3a-2a response publication failure poisons before payload free reentry" {
+test "B3-0.4 response publication failure poisons before exact payload free reentry" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     try client_slot_mod.ClientSlot.initializeProcessRuntime();
     const allocator = std.testing.allocator;
@@ -1792,24 +1869,28 @@ test "CR3a-2a response publication failure poisons before payload free reentry" 
     defer slot.deinit();
     var binding: contract.PreparedAttachmentBinding = .{};
     var lease: @import("connection_lease.zig").ConnectionLease = .{};
-    var transport: GenerationTransport = .{};
-    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, @intFromPtr(&transport));
-    try mintInPlace(&transport, &slot, @intFromPtr(&transport), @sizeOf(GenerationTransport), reservation);
-    const receipt = try transport.prepareRequest(contract.RuntimeRequest.attachController());
-    var response: executed_response_mod.ExecutedResponse = .{};
-    probe.response = &response;
+    const Owner = struct {
+        transport: GenerationTransport = .{},
+        response: executed_response_mod.ExecutedResponse = .{},
+    };
+    var owner: Owner = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, @intFromPtr(&owner.transport));
+    try mintInPlace(&owner.transport, &slot, @intFromPtr(&owner), @sizeOf(Owner), reservation);
+    const receipt = try owner.transport.prepareRequest(contract.RuntimeRequest.attachController());
+    probe.response = &owner.response;
     probe.armed = true;
     try std.testing.expectError(
         error.InvalidResponseDestination,
-        transport.executePreparedRequest(receipt, &response),
+        owner.transport.executePreparedRequest(receipt, &owner.response),
     );
     probe.armed = false;
     try std.testing.expect(probe.mutated_after_preflight);
     try std.testing.expect(probe.saw_poison_before_free);
     try std.testing.expect(probe.reentry_rejected);
+    try std.testing.expectEqual(@as(usize, 1), probe.payload_free_count);
     try std.testing.expect(slot.logicalClient().unusable);
-    response = .{};
-    try terminalizeOwned(&transport, @intFromPtr(&transport));
+    owner.response = .{};
+    try terminalizeOwned(&owner.transport, @intFromPtr(&owner.transport));
     try slot.abortAttachmentBinding(&binding, reservation);
 }
 
@@ -1851,7 +1932,7 @@ test "CR3a-2c3b request allocation alias is rejected before canonical owner writ
     try slot.abortAttachmentBinding(&binding, reservation);
 }
 
-test "CR3a-2c3b request prepare sweeps every allocation failure before first success" {
+test "B3-0.4 request prepare sweeps every allocation failure before first success" {
     var reached_success = false;
     for (0..32) |fail_offset| {
         const identity_offset: u128 = fail_offset;
@@ -1926,7 +2007,11 @@ test "CR3a-2c3b prepared request rejects a live cross-binding transport splice" 
     var lease_a: @import("connection_lease.zig").ConnectionLease = .{};
     var lease_b: @import("connection_lease.zig").ConnectionLease = .{};
     var transport_a: GenerationTransport = .{};
-    var transport_b: GenerationTransport = .{};
+    const OwnerB = struct {
+        transport: GenerationTransport = .{},
+        response: executed_response_mod.ExecutedResponse = .{},
+    };
+    var owner_b: OwnerB = .{};
     const reservation_a = try slot.reserveAttachmentBindingForTest(
         &binding_a,
         &lease_a,
@@ -1935,7 +2020,7 @@ test "CR3a-2c3b prepared request rejects a live cross-binding transport splice" 
     const reservation_b = try slot.reserveAttachmentBindingForTest(
         &binding_b,
         &lease_b,
-        @intFromPtr(&transport_b),
+        @intFromPtr(&owner_b.transport),
     );
     try mintInPlace(
         &transport_a,
@@ -1945,25 +2030,24 @@ test "CR3a-2c3b prepared request rejects a live cross-binding transport splice" 
         reservation_a,
     );
     try mintInPlace(
-        &transport_b,
+        &owner_b.transport,
         &slot,
-        @intFromPtr(&transport_b),
-        @sizeOf(GenerationTransport),
+        @intFromPtr(&owner_b),
+        @sizeOf(OwnerB),
         reservation_b,
     );
 
     const receipt_a = try transport_a.prepareRequest(contract.RuntimeRequest.attachController());
-    var response_b: executed_response_mod.ExecutedResponse = .{};
     try std.testing.expectError(
         error.InvalidReceipt,
-        transport_b.executePreparedRequest(receipt_a, &response_b),
+        owner_b.transport.executePreparedRequest(receipt_a, &owner_b.response),
     );
-    try std.testing.expect(std.meta.eql(executed_response_mod.ExecutedResponse{}, response_b));
+    try std.testing.expect(std.meta.eql(executed_response_mod.ExecutedResponse{}, owner_b.response));
     try std.testing.expect(!slot.logicalClient().unusable);
     try transport_a.abortPreparedRequest(receipt_a);
 
     try terminalizeOwned(&transport_a, @intFromPtr(&transport_a));
-    try terminalizeOwned(&transport_b, @intFromPtr(&transport_b));
+    try terminalizeOwned(&owner_b.transport, @intFromPtr(&owner_b.transport));
     try slot.abortAttachmentBinding(&binding_a, reservation_a);
     try slot.abortAttachmentBinding(&binding_b, reservation_b);
 }
@@ -1983,34 +2067,37 @@ test "CR3a-2c3b stale prepared receipt fails after same-address transport reinca
 
     var binding: contract.PreparedAttachmentBinding = .{};
     var lease: @import("connection_lease.zig").ConnectionLease = .{};
-    var transport: GenerationTransport = .{};
-    const transport_addr = @intFromPtr(&transport);
+    const Owner = struct {
+        transport: GenerationTransport = .{},
+        response: executed_response_mod.ExecutedResponse = .{},
+    };
+    var owner: Owner = .{};
+    const transport_addr = @intFromPtr(&owner.transport);
     const first = try slot.reserveAttachmentBindingForTest(&binding, &lease, transport_addr);
-    try mintInPlace(&transport, &slot, transport_addr, @sizeOf(GenerationTransport), first);
-    const stale_receipt = try transport.prepareRequest(contract.RuntimeRequest.attachController());
-    try transport.abortPreparedRequest(stale_receipt);
-    const first_incarnation = transport.transport_incarnation;
-    try terminalizeOwned(&transport, transport_addr);
+    try mintInPlace(&owner.transport, &slot, @intFromPtr(&owner), @sizeOf(Owner), first);
+    const stale_receipt = try owner.transport.prepareRequest(contract.RuntimeRequest.attachController());
+    try owner.transport.abortPreparedRequest(stale_receipt);
+    const first_incarnation = owner.transport.transport_incarnation;
+    try terminalizeOwned(&owner.transport, transport_addr);
     try slot.abortAttachmentBinding(&binding, first);
 
     binding = .{};
     lease = .{};
-    transport = .{};
+    owner = .{};
     const second = try slot.reserveAttachmentBindingForTest(&binding, &lease, transport_addr);
-    try mintInPlace(&transport, &slot, transport_addr, @sizeOf(GenerationTransport), second);
-    try std.testing.expect(transport.transport_incarnation != first_incarnation);
-    var response: executed_response_mod.ExecutedResponse = .{};
+    try mintInPlace(&owner.transport, &slot, @intFromPtr(&owner), @sizeOf(Owner), second);
+    try std.testing.expect(owner.transport.transport_incarnation != first_incarnation);
     try std.testing.expectError(
         error.InvalidReceipt,
-        transport.executePreparedRequest(stale_receipt, &response),
+        owner.transport.executePreparedRequest(stale_receipt, &owner.response),
     );
-    try std.testing.expectError(error.InvalidReceipt, transport.abortPreparedRequest(stale_receipt));
-    try std.testing.expect(std.meta.eql(executed_response_mod.ExecutedResponse{}, response));
+    try std.testing.expectError(error.InvalidReceipt, owner.transport.abortPreparedRequest(stale_receipt));
+    try std.testing.expect(std.meta.eql(executed_response_mod.ExecutedResponse{}, owner.response));
     try std.testing.expect(!slot.logicalClient().unusable);
 
-    const fresh = try transport.prepareRequest(contract.RuntimeRequest.attachController());
-    try transport.abortPreparedRequest(fresh);
-    try terminalizeOwned(&transport, transport_addr);
+    const fresh = try owner.transport.prepareRequest(contract.RuntimeRequest.attachController());
+    try owner.transport.abortPreparedRequest(fresh);
+    try terminalizeOwned(&owner.transport, transport_addr);
     try slot.abortAttachmentBinding(&binding, second);
 }
 
@@ -2077,8 +2164,10 @@ test "CR3a-2c3b request allocation exact and partial transport-owner aliases are
 test "CR3a-2c3b response allocation alias is rejected before destination write" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const child_marker = "MARU_SESSION_HOST_RESPONSE_ALIAS_EXEC";
+    const case_marker = "MARU_SESSION_HOST_RESPONSE_ALIAS_CASE";
     const marker_ptr = c.getenv(child_marker) orelse return;
     const marker = std.mem.span(marker_ptr);
+    const strict_case = if (c.getenv(case_marker)) |raw| std.mem.span(raw) else "response_alias";
     if (std.mem.eql(u8, marker, "skip-in-aggregate-v1")) return;
     const child_mode = std.mem.eql(u8, marker, "execute-fixture-v1");
     if (!child_mode) {
@@ -2116,6 +2205,10 @@ test "CR3a-2c3b response allocation alias is rejected before destination write" 
             _ = c.close(stderr_pipe[0]);
             if (c.dup2(stderr_pipe[1], 2) < 0) c._exit(126);
             _ = c.close(stderr_pipe[1]);
+            var inherited_fd: c.fd_t = 3;
+            while (inherited_fd < getdtablesize()) : (inherited_fd += 1) {
+                if (inherited_fd != capability_pipe[0]) _ = c.close(inherited_fd);
+            }
             var capability_fd_env_buf: [96]u8 = undefined;
             const capability_fd_env = std.fmt.bufPrintZ(
                 &capability_fd_env_buf,
@@ -2128,9 +2221,16 @@ test "CR3a-2c3b response allocation alias is rejected before destination write" 
                 "MARU_SESSION_HOST_RESPONSE_ALIAS_CAP={x}",
                 .{capability},
             ) catch c._exit(126);
+            var case_env_buf: [128]u8 = undefined;
+            const case_env = std.fmt.bufPrintZ(
+                &case_env_buf,
+                "MARU_SESSION_HOST_RESPONSE_ALIAS_CASE={s}",
+                .{strict_case},
+            ) catch c._exit(126);
             const argv = [_:null]?[*:0]const u8{self_path_z.ptr};
             const child_env = [_:null]?[*:0]const u8{
                 "MARU_SESSION_HOST_RESPONSE_ALIAS_EXEC=execute-fixture-v1",
+                case_env.ptr,
                 capability_fd_env.ptr,
                 capability_env.ptr,
             };
@@ -2189,16 +2289,70 @@ test "CR3a-2c3b response allocation alias is rejected before destination write" 
             if (read_len > 0) stderr_total += @intCast(read_len);
         }
         try std.testing.expect(stderr_total > 0);
-        try std.testing.expect(std.mem.indexOf(
-            u8,
-            stderr_output[0..stderr_total],
-            "response payload allocator returned a canonical owner alias",
-        ) != null);
-        try std.testing.expect(std.mem.indexOf(
+        const expected_panic = if (std.mem.eql(u8, strict_case, "response_alias"))
+            "response payload allocator returned a canonical owner alias"
+        else
+            "prepared execution transaction cleanup failed";
+        try std.testing.expect(std.mem.indexOf(u8, stderr_output[0..stderr_total], expected_panic) != null);
+        if (!std.mem.eql(u8, strict_case, "response_alias")) {
+            const terminal_index = std.mem.indexOf(
+                u8,
+                stderr_output[0..stderr_total],
+                "B3_CLEANUP_AUTHORITY_TERMINAL",
+            ) orelse return error.TestUnexpectedResult;
+            const panic_index = std.mem.indexOf(
+                u8,
+                stderr_output[0..stderr_total],
+                expected_panic,
+            ) orelse return error.TestUnexpectedResult;
+            try std.testing.expect(terminal_index < panic_index);
+        }
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            std.mem.count(u8, stderr_output[0..stderr_total], "B3_REQUEST_BACKING_EXACT_FREE"),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            std.mem.count(u8, stderr_output[0..stderr_total], "B3_STRICT_REQUEST_EXACT"),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            std.mem.count(u8, stderr_output[0..stderr_total], "B3_NONCANONICAL_BACKING_FREED"),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            std.mem.count(u8, stderr_output[0..stderr_total], "B3_RESPONSE_PAYLOAD_FREED"),
+        );
+        if (std.mem.eql(u8, strict_case, "response_alias")) try std.testing.expect(std.mem.indexOf(
             u8,
             stderr_output[0..stderr_total],
             "FORGED_RESPONSE_ALIAS_FREED",
         ) == null);
+        if (std.mem.eql(u8, strict_case, "response_alias")) {
+            const row = B3ExecutionHarness.expected(.accepted_alias_ambiguous);
+            var transcript_buf: [512]u8 = undefined;
+            const expected_transcript = try std.fmt.bufPrint(
+                &transcript_buf,
+                "B3_STRICT_ROW request={s} storage={s} authority={s} connection={s} outcome={s} error={s} poison={s} response={s} request_free={s} payload_free={s} final_zero={}\n",
+                .{
+                    @tagName(row.request),
+                    if (row.storage_settled) "settled" else "unsettled",
+                    @tagName(row.authority),
+                    @tagName(row.connection),
+                    @tagName(row.outcome),
+                    @tagName(row.public_error),
+                    @tagName(row.first_poison),
+                    @tagName(row.response),
+                    @tagName(row.request_free),
+                    @tagName(row.payload_free),
+                    row.final_zero,
+                },
+            );
+            try std.testing.expectEqual(
+                @as(usize, 1),
+                std.mem.count(u8, stderr_output[0..stderr_total], expected_transcript),
+            );
+        }
         response_alias_fail_stop_completed = true;
         return;
     }
@@ -2235,35 +2389,83 @@ test "CR3a-2c3b response allocation alias is rejected before destination write" 
         @as(c_int, 0),
         c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
     );
-    // Prequeue the response so the post-fork fail-stop fixture has no helper thread whose runtime
-    // teardown could obscure whether the strict wrapper terminated.
-    try socket_server.writeAll(fds[1], response_wire);
-    defer _ = c.close(fds[1]);
+    var request_free = RequestBackingFreeProbe{ .parent = allocator };
     var client: client_mod.Client = .{
-        .allocator = allocator,
+        .allocator = request_free.allocator(),
         .fd = fds[0],
         .host_id = 0xE2,
-        .parser = framing.FrameParser.init(allocator),
+        .parser = framing.FrameParser.init(request_free.allocator()),
     };
     var slot: client_slot_mod.ClientSlot = undefined;
     try client_slot_mod.ClientSlot.initInPlace(&slot, allocator, &client, 0xE2);
     defer slot.deinit();
     var binding: contract.PreparedAttachmentBinding = .{};
     var lease: @import("connection_lease.zig").ConnectionLease = .{};
-    var transport: GenerationTransport = .{};
-    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, @intFromPtr(&transport));
-    try mintInPlace(&transport, &slot, @intFromPtr(&transport), @sizeOf(GenerationTransport), reservation);
-    var response: executed_response_mod.ExecutedResponse = .{};
-    var hostile = OperationAliasAllocator{
-        .parent = allocator,
-        .target = std.mem.asBytes(&response),
+    const Owner = struct {
+        transport: GenerationTransport = .{},
+        response: executed_response_mod.ExecutedResponse = .{},
     };
-    slot.current.guarded_allocator.parent = hostile.allocator();
-    // The request frame keeps this same allocator identity and delegates to its stable parent.
-    // Only response parsing is hostile.
-    const receipt = try transport.prepareRequest(contract.RuntimeRequest.attachController());
-    hostile.armed = true;
-    _ = transport.executePreparedRequest(receipt, &response) catch {};
+    var owner: Owner = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(
+        &binding,
+        &lease,
+        @intFromPtr(&owner.transport),
+    );
+    try mintInPlace(
+        &owner.transport,
+        &slot,
+        @intFromPtr(&owner),
+        @sizeOf(Owner),
+        reservation,
+    );
+    var hostile = OperationAliasAllocator{
+        .parent = request_free.allocator(),
+        .target = std.mem.asBytes(&owner.response),
+    };
+    if (std.mem.eql(u8, strict_case, "response_alias"))
+        slot.current.guarded_allocator.parent = hostile.allocator();
+    const receipt = try owner.transport.prepareRequest(contract.RuntimeRequest.attachController());
+    const canonical = (try slot.current.cleanup_registry.preparedRequestForReceipt(
+        reservation.cleanup,
+        reservation.identity,
+        @intFromPtr(&owner.transport),
+        owner.transport.transport_incarnation,
+        receipt,
+    )).?;
+    request_free.arm(&slot, reservation, canonical);
+    const canonical_frame: [*]const u8 = @ptrFromInt(canonical.descriptor.frame_addr);
+    var expected_request_buf: [4096]u8 = undefined;
+    if (canonical.descriptor.frame_len > expected_request_buf.len)
+        return error.TestUnexpectedResult;
+    @memcpy(
+        expected_request_buf[0..canonical.descriptor.frame_len],
+        canonical_frame[0..canonical.descriptor.frame_len],
+    );
+    var peer_state = B3ActualSocketPeer{
+        .fd = fds[1],
+        .expected_request = expected_request_buf[0..canonical.descriptor.frame_len],
+        .reply = response_wire,
+        .deadline_ms = B3ActualSocketPeer.monotonicMs() + 2_000,
+    };
+    _ = try std.Thread.spawn(.{}, B3ActualSocketPeer.run, .{&peer_state});
+    if (std.mem.eql(u8, strict_case, "response_alias")) {
+        hostile.armed = true;
+    } else {
+        const drift_kind: u8 = if (std.mem.eql(u8, strict_case, "cleanup_descriptor"))
+            1
+        else if (std.mem.eql(u8, strict_case, "cleanup_stage"))
+            2
+        else if (std.mem.eql(u8, strict_case, "allocator_restore"))
+            3
+        else if (std.mem.eql(u8, strict_case, "guard_end"))
+            4
+        else if (std.mem.eql(u8, strict_case, "ledger_end"))
+            5
+        else
+            return error.InvalidResponseAliasSubprocessMode;
+        slot.current.guarded_allocator.request_free_test_observer.cleanup_drift_kind = drift_kind;
+    }
+    _ = owner.transport.executePreparedRequest(receipt, &owner.response) catch {};
     c._exit(0);
 }
 
@@ -2297,29 +2499,32 @@ test "CR3a-2a pending flush callback invalidates response before request wire" {
     defer slot.deinit();
     var binding: contract.PreparedAttachmentBinding = .{};
     var lease: @import("connection_lease.zig").ConnectionLease = .{};
-    var transport: GenerationTransport = .{};
-    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, @intFromPtr(&transport));
-    try mintInPlace(&transport, &slot, @intFromPtr(&transport), @sizeOf(GenerationTransport), reservation);
-    const receipt = try transport.prepareRequest(contract.RuntimeRequest.attachController());
+    const Owner = struct {
+        transport: GenerationTransport = .{},
+        response: executed_response_mod.ExecutedResponse = .{},
+    };
+    var owner: Owner = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, @intFromPtr(&owner.transport));
+    try mintInPlace(&owner.transport, &slot, @intFromPtr(&owner), @sizeOf(Owner), reservation);
+    const receipt = try owner.transport.prepareRequest(contract.RuntimeRequest.attachController());
     slot.logicalClient().pending_outbound = .{
         .frame = try probe.allocator().dupe(u8, "older"),
         .stream_id = 9,
     };
-    var response: executed_response_mod.ExecutedResponse = .{};
-    probe.response = &response;
+    probe.response = &owner.response;
     probe.armed = true;
     try std.testing.expectError(
         error.InvalidResponseDestination,
-        transport.executePreparedRequest(receipt, &response),
+        owner.transport.executePreparedRequest(receipt, &owner.response),
     );
     probe.armed = false;
     try std.testing.expect(probe.mutated_after_preflight);
     try std.testing.expectError(
         error.InvalidReceipt,
-        transport.abortPreparedRequest(receipt),
+        owner.transport.abortPreparedRequest(receipt),
     );
-    response = .{};
-    try terminalizeOwned(&transport, @intFromPtr(&transport));
+    owner.response = .{};
+    try terminalizeOwned(&owner.transport, @intFromPtr(&owner.transport));
     try slot.abortAttachmentBinding(&binding, reservation);
 }
 
@@ -2343,43 +2548,47 @@ test "CR3a-2c3b pending flush callback cannot redirect canonical execute owners"
     defer slot.deinit();
     var binding: contract.PreparedAttachmentBinding = .{};
     var lease: @import("connection_lease.zig").ConnectionLease = .{};
-    var transport: GenerationTransport = .{};
-    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, @intFromPtr(&transport));
-    try mintInPlace(&transport, &slot, @intFromPtr(&transport), @sizeOf(GenerationTransport), reservation);
-    const receipt = try transport.prepareRequest(contract.RuntimeRequest.attachController());
+    const Owner = struct {
+        transport: GenerationTransport = .{},
+        response: executed_response_mod.ExecutedResponse = .{},
+    };
+    var owner: Owner = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, @intFromPtr(&owner.transport));
+    try mintInPlace(&owner.transport, &slot, @intFromPtr(&owner), @sizeOf(Owner), reservation);
+    const receipt = try owner.transport.prepareRequest(contract.RuntimeRequest.attachController());
     slot.logicalClient().pending_outbound = .{
         .frame = try probe.allocator().dupe(u8, "older"),
         .stream_id = 9,
     };
-    const canonical_slot_addr = transport.slot_addr;
-    var response: executed_response_mod.ExecutedResponse = .{};
-    probe.transport = &transport;
+    const canonical_slot_addr = owner.transport.slot_addr;
+    probe.transport = &owner.transport;
     probe.armed = true;
-    const result = try transport.executePreparedRequest(receipt, &response);
+    const result = try owner.transport.executePreparedRequest(receipt, &owner.response);
     switch (result) {
         .uncertain_or_connection_failure => {},
         else => return error.TestUnexpectedResult,
     }
     probe.armed = false;
     try std.testing.expect(probe.mutated_after_preflight);
-    try std.testing.expectEqual(@as(usize, 1), transport.slot_addr);
+    try std.testing.expectEqual(@as(usize, 1), owner.transport.slot_addr);
     try std.testing.expect(client_mod.Client.preparedBlockingRpcStorageSettled(
-        &transport.prepared_storage,
+        &owner.transport.prepared_storage,
     ));
-    transport.slot_addr = canonical_slot_addr;
+    owner.transport.slot_addr = canonical_slot_addr;
     try std.testing.expectEqual(
         executed_response_mod.DeinitOutcome.cleaned,
-        response.deinit(try slot.responseOwnerSeal(reservation)),
+        owner.response.deinit(try slot.responseOwnerSeal(reservation)),
     );
-    try terminalizeOwned(&transport, @intFromPtr(&transport));
+    try terminalizeOwned(&owner.transport, @intFromPtr(&owner.transport));
     try slot.abortAttachmentBinding(&binding, reservation);
 }
 
-test "CR3a-2c3b actual socket accepted response retains allocator captured before wire" {
+test "B3-0.1 accepted socket response settles request reusable and retains allocator" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     try client_slot_mod.ClientSlot.initializeProcessRuntime();
     const allocator = std.testing.allocator;
-    var probe = PoisonOrderAllocator{ .parent = allocator };
+    var request_free = RequestBackingFreeProbe{ .parent = allocator };
+    var probe = PoisonOrderAllocator{ .parent = request_free.allocator() };
     const response_wire = try framing.encodeFrame(
         allocator,
         .{ .kind = .response, .request_id = 1 },
@@ -2411,28 +2620,1372 @@ test "CR3a-2c3b actual socket accepted response retains allocator captured befor
     defer slot.deinit();
     var binding: contract.PreparedAttachmentBinding = .{};
     var lease: @import("connection_lease.zig").ConnectionLease = .{};
-    var transport: GenerationTransport = .{};
-    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, @intFromPtr(&transport));
-    try mintInPlace(&transport, &slot, @intFromPtr(&transport), @sizeOf(GenerationTransport), reservation);
-    const receipt = try transport.prepareRequest(contract.RuntimeRequest.attachController());
-    var response: executed_response_mod.ExecutedResponse = .{};
+    const Owner = struct {
+        transport: GenerationTransport = .{},
+        response: executed_response_mod.ExecutedResponse = .{},
+    };
+    var owner: Owner = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, @intFromPtr(&owner.transport));
+    try mintInPlace(&owner.transport, &slot, @intFromPtr(&owner), @sizeOf(Owner), reservation);
+    const receipt = try owner.transport.prepareRequest(contract.RuntimeRequest.attachController());
+    const canonical = (try slot.current.cleanup_registry.preparedRequestForReceipt(
+        reservation.cleanup,
+        reservation.identity,
+        @intFromPtr(&owner.transport),
+        owner.transport.transport_incarnation,
+        receipt,
+    )).?;
+    request_free.arm(
+        &slot,
+        reservation,
+        canonical,
+    );
     probe.armed = true;
-    const result = try transport.executePreparedRequest(receipt, &response);
+    const result = try owner.transport.executePreparedRequest(receipt, &owner.response);
     try std.testing.expect(result == .accepted);
     try std.testing.expect(probe.mutated_after_preflight);
+    try std.testing.expect(client_mod.Client.preparedBlockingRpcStorageSettled(
+        &owner.transport.prepared_storage,
+    ));
+    try std.testing.expectEqual(
+        @import("prepared_request_authority.zig").SettlementReadiness.settled,
+        try slot.current.cleanup_registry.preparedRequestSettlementReadiness(
+            reservation.cleanup,
+            reservation.identity,
+        ),
+    );
+    try slot.current.cleanup_registry.publishPreparedRequest(
+        reservation.cleanup,
+        reservation.identity,
+        canonical,
+    );
+    try slot.current.cleanup_registry.settlePreparedRequest(
+        reservation.cleanup,
+        reservation.identity,
+        canonical,
+        false,
+    );
+    try std.testing.expect(slot.logicalClient().firstPoisonReason() == null);
     try std.testing.expectEqual(
         @intFromPtr(@as(*anyopaque, @ptrCast(&slot.current.guarded_allocator))),
-        response.allocator_ptr,
+        owner.response.allocator_ptr,
     );
     try std.testing.expectEqual(
         executed_response_mod.DeinitOutcome.cleaned,
-        response.deinit(try slot.responseOwnerSeal(reservation)),
+        owner.response.deinit(try slot.responseOwnerSeal(reservation)),
     );
     try std.testing.expect(probe.captured_payload_free_seen);
+    try request_free.expectExactOnceBeforeAuthoritySettlement();
     probe.armed = false;
     client.allocator = probe.allocator();
-    try terminalizeOwned(&transport, @intFromPtr(&transport));
+    try terminalizeOwned(&owner.transport, @intFromPtr(&owner.transport));
     try slot.abortAttachmentBinding(&binding, reservation);
+}
+
+const B3ActualSocketScenario = enum {
+    eof_after_request,
+    partial_header_eof,
+    partial_payload_eof,
+};
+
+const B3ActualSocketPeerOutcome = enum {
+    pending,
+    exact,
+    deadline,
+    read_failure,
+    mismatch,
+    trailing_request,
+};
+
+const B3ActualSocketPeer = struct {
+    fd: c.fd_t,
+    expected_request: []const u8,
+    reply: []const u8,
+    deadline_ms: u64,
+    outcome: B3ActualSocketPeerOutcome = .pending,
+    request_exact: bool = false,
+    reply_write_failed: bool = false,
+
+    fn waitReadable(self: *const @This()) bool {
+        var ready = [_]c.pollfd{.{ .fd = self.fd, .events = c.POLL.IN, .revents = 0 }};
+        while (true) {
+            const now = monotonicMs();
+            if (now >= self.deadline_ms) return false;
+            const remaining: c_int = @intCast(@min(self.deadline_ms - now, @as(u64, std.math.maxInt(c_int))));
+            const rc = c.poll(&ready, ready.len, remaining);
+            if (rc > 0) return ready[0].revents & (c.POLL.IN | c.POLL.HUP | c.POLL.ERR) != 0;
+            if (rc == 0) return false;
+            if (posix.errno(rc) != .INTR) return false;
+        }
+    }
+
+    fn requestQueueQuiet(self: *const @This()) bool {
+        const quiet_deadline = @min(self.deadline_ms, monotonicMs() + 20);
+        while (true) {
+            var trailing: [1]u8 = undefined;
+            const trailing_count = c.recv(
+                self.fd,
+                &trailing,
+                trailing.len,
+                posix.MSG.PEEK | posix.MSG.DONTWAIT,
+            );
+            if (trailing_count > 0) return false;
+            if (trailing_count == 0) return true;
+            if (posix.errno(trailing_count) != .AGAIN) return false;
+            const now = monotonicMs();
+            if (now >= quiet_deadline) return true;
+            var ready = [_]c.pollfd{.{ .fd = self.fd, .events = c.POLL.IN, .revents = 0 }};
+            const remaining: c_int = @intCast(quiet_deadline - now);
+            const rc = c.poll(&ready, ready.len, remaining);
+            if (rc == 0) return true;
+            if (rc < 0 and posix.errno(rc) == .INTR) continue;
+            if (rc < 0) return false;
+        }
+    }
+
+    fn writeReply(self: *@This()) bool {
+        socket_server.setNoSigPipe(self.fd);
+        var offset: usize = 0;
+        while (offset < self.reply.len) {
+            const now = monotonicMs();
+            if (now >= self.deadline_ms) {
+                self.outcome = .deadline;
+                return false;
+            }
+            const written = c.send(
+                self.fd,
+                self.reply[offset..].ptr,
+                self.reply.len - offset,
+                posix.MSG.DONTWAIT,
+            );
+            if (written > 0) {
+                offset += @intCast(written);
+                continue;
+            }
+            if (written == 0) {
+                self.outcome = .read_failure;
+                return false;
+            }
+            switch (posix.errno(written)) {
+                .INTR => continue,
+                .AGAIN => {
+                    var ready = [_]c.pollfd{.{ .fd = self.fd, .events = c.POLL.OUT, .revents = 0 }};
+                    const remaining: c_int = @intCast(@min(
+                        self.deadline_ms - now,
+                        @as(u64, std.math.maxInt(c_int)),
+                    ));
+                    const rc = c.poll(&ready, ready.len, remaining);
+                    if (rc > 0 and ready[0].revents & (c.POLL.OUT | c.POLL.ERR | c.POLL.HUP) != 0)
+                        continue;
+                    self.outcome = if (rc == 0) .deadline else .read_failure;
+                    return false;
+                },
+                else => {
+                    self.outcome = .read_failure;
+                    return false;
+                },
+            }
+        }
+        return true;
+    }
+
+    fn run(self: *@This()) void {
+        defer _ = c.close(self.fd);
+        var received: [4096]u8 = undefined;
+        if (self.expected_request.len > received.len) {
+            self.outcome = .read_failure;
+            return;
+        }
+        var offset: usize = 0;
+        while (offset < self.expected_request.len) {
+            if (!self.waitReadable()) {
+                self.outcome = .deadline;
+                return;
+            }
+            const count = c.read(
+                self.fd,
+                received[offset..].ptr,
+                self.expected_request.len - offset,
+            );
+            if (count <= 0) {
+                self.outcome = .read_failure;
+                return;
+            }
+            offset += @intCast(count);
+        }
+        if (!std.mem.eql(u8, received[0..self.expected_request.len], self.expected_request)) {
+            self.outcome = .mismatch;
+            return;
+        }
+
+        // executePreparedRequest writes the complete canonical frame before it waits for a reply.
+        // Therefore a byte readable at this point is necessarily an unowned trailing request byte.
+        if (!self.requestQueueQuiet()) {
+            self.outcome = .trailing_request;
+            return;
+        }
+        self.request_exact = true;
+        if (builtin.is_test and c.getenv("MARU_SESSION_HOST_RESPONSE_ALIAS_EXEC") != null) {
+            const marker = "B3_STRICT_REQUEST_EXACT\n";
+            _ = c.write(2, marker.ptr, marker.len);
+        }
+        if (!self.writeReply()) {
+            self.reply_write_failed = true;
+            return;
+        }
+        self.outcome = .exact;
+    }
+
+    fn monotonicMs() u64 {
+        var ts: c.timespec = undefined;
+        _ = c.clock_gettime(.MONOTONIC, &ts);
+        return @as(u64, @intCast(ts.sec)) * 1000 +
+            @as(u64, @intCast(ts.nsec)) / std.time.ns_per_ms;
+    }
+};
+
+const B3AllocationFailureKind = enum { alloc, resize };
+
+const B3OrdinalAllocator = struct {
+    const FreeReceipt = struct { addr: usize = 0, len: usize = 0 };
+    parent: std.mem.Allocator,
+    kind: B3AllocationFailureKind,
+    fail_index: usize = std.math.maxInt(usize),
+    alloc_index: usize = 0,
+    resize_index: usize = 0,
+    induced_failure: bool = false,
+    induced_failure_count: usize = 0,
+    allocated_bytes: usize = 0,
+    freed_bytes: usize = 0,
+    corrupt_response: ?*executed_response_mod.ExecutedResponse = null,
+    corrupt_on_free_addr: usize = 0,
+    corrupt_on_free_len: usize = 0,
+    response_corrupted: bool = false,
+    drift_request_on_free_addr: usize = 0,
+    drift_request_addr: usize = 0,
+    drift_request_len: usize = 0,
+    request_drifted: bool = false,
+    free_receipts: [256]FreeReceipt = [_]FreeReceipt{.{}} ** 256,
+    free_receipt_count: usize = 0,
+    free_receipt_overflow: bool = false,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn armNext(self: *@This(), offset: usize) void {
+        self.fail_index = switch (self.kind) {
+            .alloc => self.alloc_index + offset,
+            .resize => self.resize_index + offset,
+        };
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        const ordinal = self.alloc_index;
+        self.alloc_index += 1;
+        if (self.kind == .alloc and ordinal == self.fail_index) {
+            self.induced_failure = true;
+            self.induced_failure_count += 1;
+            return null;
+        }
+        const result = self.parent.vtable.alloc(self.parent.ptr, len, alignment, ret_addr) orelse return null;
+        self.allocated_bytes += len;
+        return result;
+    }
+
+    fn shouldFailResize(self: *@This()) bool {
+        const ordinal = self.resize_index;
+        self.resize_index += 1;
+        if (self.kind == .resize and ordinal == self.fail_index) {
+            self.induced_failure = true;
+            self.induced_failure_count += 1;
+            return true;
+        }
+        return false;
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        if (self.shouldFailResize()) return false;
+        if (!self.parent.vtable.resize(self.parent.ptr, memory, alignment, new_len, ret_addr)) return false;
+        if (new_len >= memory.len) self.allocated_bytes += new_len - memory.len else self.freed_bytes += memory.len - new_len;
+        return true;
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        if (self.shouldFailResize()) return null;
+        const result = self.parent.vtable.remap(self.parent.ptr, memory, alignment, new_len, ret_addr) orelse return null;
+        if (new_len >= memory.len) self.allocated_bytes += new_len - memory.len else self.freed_bytes += memory.len - new_len;
+        return result;
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        if (self.free_receipt_count < self.free_receipts.len) {
+            self.free_receipts[self.free_receipt_count] = .{
+                .addr = @intFromPtr(memory.ptr),
+                .len = memory.len,
+            };
+            self.free_receipt_count += 1;
+        } else {
+            self.free_receipt_overflow = true;
+        }
+        if (!self.response_corrupted and self.corrupt_response != null and
+            @intFromPtr(memory.ptr) == self.corrupt_on_free_addr and
+            memory.len == self.corrupt_on_free_len)
+        {
+            self.corrupt_response.?.self_addr = 1;
+            self.response_corrupted = true;
+        }
+        if (!self.request_drifted and self.drift_request_on_free_addr != 0 and
+            @intFromPtr(memory.ptr) == self.drift_request_on_free_addr)
+        {
+            if (self.drift_request_addr == 0 or self.drift_request_len == 0)
+                @panic("B3 request drift descriptor missing");
+            const request: [*]u8 = @ptrFromInt(self.drift_request_addr);
+            request[self.drift_request_len - 1] ^= 1;
+            self.request_drifted = true;
+        }
+        self.freed_bytes += memory.len;
+        self.parent.vtable.free(self.parent.ptr, memory, alignment, ret_addr);
+    }
+};
+
+const B3Scenario = enum {
+    admission_rejected,
+    local_preflight_rejected,
+    pending_flush_ambiguous,
+    pending_flush_backing_drift,
+    issuer_exhausted_clean,
+    issuer_exhausted_cleanup_drift,
+    not_executed_reusable_connection_live,
+    not_executed_reusable_connection_terminal,
+    not_executed_terminal,
+    uncertain,
+    accepted_publication_failed_owned,
+    accepted_alias_ambiguous,
+    accepted_published,
+};
+
+const B3RequestClass = enum { none, prepared_only, exact_wire };
+const B3AuthorityClass = enum { untouched, reusable, terminal, fail_stop };
+const B3ConnectionClass = enum { keep, preserve_terminal, poison_local_invariant, fail_stop };
+const B3OutcomeClass = enum { typed_error, uncertain, accepted, fail_stop };
+const B3ErrorClass = enum { none, existing_typed, identity_exhausted, protocol_error, fail_stop };
+const B3PoisonClass = enum { none, preserve_existing, local_invariant };
+const B3ResponseClass = enum {
+    pristine,
+    uncertain_no_payload,
+    accepted_owned,
+    publication_failed_owned,
+    terminal_no_free,
+};
+const B3FreeClass = enum { zero, exact_once, no_free, transferred, multiple };
+
+const B3CallObservation = union(enum) {
+    result: contract.ExecuteResult,
+    failure: anyerror,
+
+    fn outcome(self: @This()) B3OutcomeClass {
+        return switch (self) {
+            .failure => .typed_error,
+            .result => |result| switch (result) {
+                .accepted => .accepted,
+                .uncertain_or_connection_failure => .uncertain,
+                .typed_reject => .typed_error,
+            },
+        };
+    }
+
+    fn publicError(self: @This()) B3ErrorClass {
+        return switch (self) {
+            .result => .none,
+            .failure => |err| if (err == error.IdentityExhausted)
+                .identity_exhausted
+            else if (err == error.ProtocolError)
+                .protocol_error
+            else
+                .existing_typed,
+        };
+    }
+};
+
+const B3Expected = struct {
+    scenario: B3Scenario,
+    request: B3RequestClass,
+    storage_settled: bool,
+    authority: B3AuthorityClass,
+    connection: B3ConnectionClass,
+    outcome: B3OutcomeClass,
+    public_error: B3ErrorClass,
+    first_poison: B3PoisonClass,
+    response: B3ResponseClass,
+    request_free: B3FreeClass,
+    payload_free: B3FreeClass,
+    final_zero: bool,
+};
+
+const B3Observed = B3Expected;
+
+const b3_expected_rows = [_]B3Expected{
+    .{ .scenario = .admission_rejected, .request = .none, .storage_settled = false, .authority = .untouched, .connection = .keep, .outcome = .typed_error, .public_error = .existing_typed, .first_poison = .none, .response = .pristine, .request_free = .zero, .payload_free = .zero, .final_zero = true },
+    .{ .scenario = .local_preflight_rejected, .request = .prepared_only, .storage_settled = true, .authority = .reusable, .connection = .keep, .outcome = .typed_error, .public_error = .existing_typed, .first_poison = .none, .response = .pristine, .request_free = .exact_once, .payload_free = .zero, .final_zero = true },
+    .{ .scenario = .pending_flush_ambiguous, .request = .prepared_only, .storage_settled = true, .authority = .reusable, .connection = .preserve_terminal, .outcome = .typed_error, .public_error = .existing_typed, .first_poison = .preserve_existing, .response = .pristine, .request_free = .exact_once, .payload_free = .zero, .final_zero = true },
+    .{ .scenario = .pending_flush_backing_drift, .request = .prepared_only, .storage_settled = true, .authority = .terminal, .connection = .poison_local_invariant, .outcome = .typed_error, .public_error = .existing_typed, .first_poison = .local_invariant, .response = .pristine, .request_free = .exact_once, .payload_free = .zero, .final_zero = true },
+    .{ .scenario = .issuer_exhausted_clean, .request = .prepared_only, .storage_settled = true, .authority = .terminal, .connection = .poison_local_invariant, .outcome = .typed_error, .public_error = .identity_exhausted, .first_poison = .local_invariant, .response = .pristine, .request_free = .exact_once, .payload_free = .zero, .final_zero = true },
+    .{ .scenario = .issuer_exhausted_cleanup_drift, .request = .prepared_only, .storage_settled = true, .authority = .terminal, .connection = .poison_local_invariant, .outcome = .typed_error, .public_error = .protocol_error, .first_poison = .local_invariant, .response = .pristine, .request_free = .exact_once, .payload_free = .zero, .final_zero = true },
+    .{ .scenario = .not_executed_reusable_connection_live, .request = .prepared_only, .storage_settled = true, .authority = .reusable, .connection = .keep, .outcome = .typed_error, .public_error = .existing_typed, .first_poison = .none, .response = .pristine, .request_free = .exact_once, .payload_free = .zero, .final_zero = true },
+    .{ .scenario = .not_executed_reusable_connection_terminal, .request = .prepared_only, .storage_settled = true, .authority = .reusable, .connection = .preserve_terminal, .outcome = .typed_error, .public_error = .existing_typed, .first_poison = .preserve_existing, .response = .pristine, .request_free = .exact_once, .payload_free = .zero, .final_zero = true },
+    .{ .scenario = .not_executed_terminal, .request = .prepared_only, .storage_settled = true, .authority = .terminal, .connection = .preserve_terminal, .outcome = .typed_error, .public_error = .existing_typed, .first_poison = .preserve_existing, .response = .pristine, .request_free = .exact_once, .payload_free = .zero, .final_zero = true },
+    .{ .scenario = .uncertain, .request = .exact_wire, .storage_settled = true, .authority = .terminal, .connection = .preserve_terminal, .outcome = .uncertain, .public_error = .none, .first_poison = .preserve_existing, .response = .uncertain_no_payload, .request_free = .exact_once, .payload_free = .zero, .final_zero = true },
+    .{ .scenario = .accepted_publication_failed_owned, .request = .exact_wire, .storage_settled = true, .authority = .terminal, .connection = .poison_local_invariant, .outcome = .typed_error, .public_error = .existing_typed, .first_poison = .local_invariant, .response = .publication_failed_owned, .request_free = .exact_once, .payload_free = .exact_once, .final_zero = true },
+    .{ .scenario = .accepted_alias_ambiguous, .request = .exact_wire, .storage_settled = true, .authority = .terminal, .connection = .fail_stop, .outcome = .fail_stop, .public_error = .fail_stop, .first_poison = .local_invariant, .response = .terminal_no_free, .request_free = .exact_once, .payload_free = .no_free, .final_zero = false },
+    .{ .scenario = .accepted_published, .request = .exact_wire, .storage_settled = true, .authority = .reusable, .connection = .keep, .outcome = .accepted, .public_error = .none, .first_poison = .none, .response = .accepted_owned, .request_free = .exact_once, .payload_free = .transferred, .final_zero = true },
+};
+
+const B3ExecutionHarness = struct {
+    const Lease = @typeInfo(
+        @typeInfo(@TypeOf(client_slot_mod.ClientSlot.reserveAttachmentBindingForTest)).@"fn".params[2].type.?,
+    ).pointer.child;
+    const Owner = struct {
+        transport: GenerationTransport = .{},
+        response: executed_response_mod.ExecutedResponse = .{},
+    };
+
+    self_addr: usize = 0,
+    allocator: std.mem.Allocator,
+    request_free: RequestBackingFreeProbe,
+    ordinal: B3OrdinalAllocator,
+    fds: [2]c.fd_t = .{ -1, -1 },
+    client: client_mod.Client = undefined,
+    slot: client_slot_mod.ClientSlot = undefined,
+    slot_initialized: bool = false,
+    binding: contract.PreparedAttachmentBinding = .{},
+    lease: Lease = .{},
+    owner: Owner = .{},
+    reservation: ?client_slot_mod.AttachmentBindingReservation = null,
+    transport_live: bool = false,
+    receipt: contract.PreparedCallReceipt = undefined,
+    canonical: ?@import("prepared_request_authority.zig").Prepared = null,
+    expected_request: []u8 = &.{},
+    peer_state: B3ActualSocketPeer = undefined,
+    peer: ?std.Thread = null,
+    peer_joined: bool = false,
+    response_cleaned: bool = false,
+    binding_cleaned: bool = false,
+    observed: ?B3Observed = null,
+
+    fn initInPlace(
+        out: *@This(),
+        allocator: std.mem.Allocator,
+        host_id: u128,
+        failure_kind: B3AllocationFailureKind,
+    ) !void {
+        out.* = .{
+            .allocator = allocator,
+            .request_free = .{ .parent = allocator },
+            .ordinal = .{ .parent = undefined, .kind = failure_kind },
+        };
+        out.self_addr = @intFromPtr(out);
+        errdefer out.deinit();
+        out.ordinal.parent = out.request_free.allocator();
+        try std.testing.expectEqual(
+            @as(c_int, 0),
+            c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &out.fds),
+        );
+        out.client = .{
+            .allocator = out.ordinal.allocator(),
+            .fd = out.fds[0],
+            .host_id = host_id,
+            .parser = framing.FrameParser.init(out.ordinal.allocator()),
+        };
+        try client_slot_mod.ClientSlot.initInPlace(&out.slot, allocator, &out.client, host_id);
+        out.slot_initialized = true;
+        out.fds[0] = -1;
+        const reservation = try out.slot.reserveAttachmentBindingForTest(
+            &out.binding,
+            &out.lease,
+            @intFromPtr(&out.owner.transport),
+        );
+        out.reservation = reservation;
+        try mintInPlace(
+            &out.owner.transport,
+            &out.slot,
+            @intFromPtr(&out.owner),
+            @sizeOf(Owner),
+            reservation,
+        );
+        out.transport_live = true;
+        out.receipt = try out.owner.transport.prepareRequest(
+            contract.RuntimeRequest.attachController(),
+        );
+        const canonical = (try out.slot.current.cleanup_registry.preparedRequestForReceipt(
+            reservation.cleanup,
+            reservation.identity,
+            @intFromPtr(&out.owner.transport),
+            out.owner.transport.transport_incarnation,
+            out.receipt,
+        )).?;
+        out.canonical = canonical;
+        out.request_free.arm(&out.slot, reservation, canonical);
+        out.expected_request = try allocator.dupe(
+            u8,
+            @as([*]const u8, @ptrFromInt(canonical.descriptor.frame_addr))[0..canonical.descriptor.frame_len],
+        );
+    }
+
+    fn startPeer(self: *@This(), reply: []const u8) !void {
+        return self.startPeerExpected(self.expected_request, reply);
+    }
+
+    fn startPeerExpected(
+        self: *@This(),
+        expected_request: []const u8,
+        reply: []const u8,
+    ) !void {
+        if (self.self_addr != @intFromPtr(self)) return error.InvalidState;
+        if (self.peer != null or self.fds[1] < 0) return error.InvalidState;
+        self.peer_state = .{
+            .fd = self.fds[1],
+            .expected_request = expected_request,
+            .reply = reply,
+            .deadline_ms = B3ActualSocketPeer.monotonicMs() + 2_000,
+        };
+        self.peer = try std.Thread.spawn(.{}, B3ActualSocketPeer.run, .{&self.peer_state});
+        self.fds[1] = -1;
+    }
+
+    fn armResponsePublicationDrift(self: *@This()) !void {
+        if (self.self_addr != @intFromPtr(self)) return error.InvalidState;
+        const canonical = self.canonical.?;
+        self.ordinal.corrupt_response = &self.owner.response;
+        self.ordinal.corrupt_on_free_addr = canonical.descriptor.frame_addr;
+        self.ordinal.corrupt_on_free_len = canonical.descriptor.frame_len;
+    }
+
+    fn armNotExecutedPendingInjection(
+        self: *@This(),
+        poison_before_execute: bool,
+        drift_request_before_execute: bool,
+    ) !void {
+        if (self.self_addr != @intFromPtr(self)) return error.InvalidState;
+        const client = self.slot.logicalClient();
+        const replacement = try client.allocator.dupe(u8, "replacement-pending");
+        self.slot.current.guarded_allocator.request_free_test_observer.inject_pending_before_execute = true;
+        self.slot.current.guarded_allocator.request_free_test_observer.pending_frame_addr =
+            @intFromPtr(replacement.ptr);
+        self.slot.current.guarded_allocator.request_free_test_observer.pending_frame_len = replacement.len;
+        self.slot.current.guarded_allocator.request_free_test_observer.poison_before_execute =
+            poison_before_execute;
+        self.slot.current.guarded_allocator.request_free_test_observer.drift_request_before_execute =
+            drift_request_before_execute;
+        self.slot.current.guarded_allocator.request_free_test_observer.force_not_executed =
+            poison_before_execute;
+    }
+
+    fn armPendingFlushBackingDrift(self: *@This()) ![]const u8 {
+        if (self.self_addr != @intFromPtr(self)) return error.InvalidState;
+        const bytes = "older-before-request-drift";
+        const client = self.slot.logicalClient();
+        const frame = try client.allocator.dupe(u8, bytes);
+        const canonical = self.canonical.?;
+        self.ordinal.drift_request_on_free_addr = @intFromPtr(frame.ptr);
+        self.ordinal.drift_request_addr = canonical.descriptor.frame_addr;
+        self.ordinal.drift_request_len = canonical.descriptor.frame_len;
+        client.pending_outbound = .{ .frame = frame, .stream_id = 9 };
+        return bytes;
+    }
+
+    fn expected(scenario: B3Scenario) B3Expected {
+        for (b3_expected_rows) |row| if (row.scenario == scenario) return row;
+        unreachable;
+    }
+
+    fn joinPeer(self: *@This()) void {
+        if (self.self_addr != @intFromPtr(self)) @panic("B3ExecutionHarness moved before peer join");
+        if (self.peer) |thread| {
+            if (!self.peer_joined) thread.join();
+            self.peer_joined = true;
+            self.peer = null;
+        }
+    }
+
+    fn settleReusable(self: *@This()) !void {
+        if (self.self_addr != @intFromPtr(self)) return error.InvalidState;
+        const reservation = self.reservation.?;
+        const canonical = self.canonical.?;
+        try self.slot.current.cleanup_registry.publishPreparedRequest(
+            reservation.cleanup,
+            reservation.identity,
+            canonical,
+        );
+        try self.slot.current.cleanup_registry.settlePreparedRequest(
+            reservation.cleanup,
+            reservation.identity,
+            canonical,
+            false,
+        );
+    }
+
+    fn settleAndClassifyAuthority(self: *@This()) !B3AuthorityClass {
+        const reservation = self.reservation.?;
+        const canonical = self.canonical.?;
+        self.slot.current.cleanup_registry.publishPreparedRequest(
+            reservation.cleanup,
+            reservation.identity,
+            canonical,
+        ) catch |err| switch (err) {
+            error.InvalidState => return .terminal,
+            else => return err,
+        };
+        try self.slot.current.cleanup_registry.settlePreparedRequest(
+            reservation.cleanup,
+            reservation.identity,
+            canonical,
+            false,
+        );
+        return .reusable;
+    }
+
+    fn observedRequestClass(self: *const @This()) B3RequestClass {
+        if (self.peer_joined and self.peer_state.request_exact and
+            std.mem.eql(u8, self.peer_state.expected_request, self.expected_request))
+            return .exact_wire;
+        if (self.request_free.exact_free_count != 0 or
+            client_mod.Client.preparedBlockingRpcStorageSettled(&self.owner.transport.prepared_storage))
+            return .prepared_only;
+        return .none;
+    }
+
+    fn observedConnectionClass(self: *@This()) B3ConnectionClass {
+        const reason = self.slot.logicalClient().firstPoisonReason() orelse return .keep;
+        return if (reason == .local_invariant_violation) .poison_local_invariant else .preserve_terminal;
+    }
+
+    fn observedPoisonClass(self: *@This()) B3PoisonClass {
+        const reason = self.slot.logicalClient().firstPoisonReason() orelse return .none;
+        return if (reason == .local_invariant_violation) .local_invariant else .preserve_existing;
+    }
+
+    fn observedResponseClass(self: *const @This()) B3ResponseClass {
+        if (self.owner.response.pristine()) return .pristine;
+        if (self.owner.response.lifecycle == .pristine) return .publication_failed_owned;
+        return switch (self.owner.response.lifecycle) {
+            .accepted => .accepted_owned,
+            .uncertain_or_connection_failure => .uncertain_no_payload,
+            .pristine => unreachable,
+            .typed_reject, .terminal => .terminal_no_free,
+        };
+    }
+
+    fn observedRequestFreeClass(self: *const @This()) B3FreeClass {
+        return switch (self.request_free.exact_free_count) {
+            0 => .zero,
+            1 => .exact_once,
+            else => .multiple,
+        };
+    }
+
+    fn observedPayloadFreeClass(self: *const @This()) B3FreeClass {
+        const observer = self.slot.current.guarded_allocator.request_free_test_observer;
+        if (self.ordinal.free_receipt_overflow) return .multiple;
+        var count: usize = 0;
+        if (observer.response_payload_addr != 0) {
+            for (self.ordinal.free_receipts[0..self.ordinal.free_receipt_count]) |receipt| {
+                if (receipt.addr == observer.response_payload_addr and
+                    receipt.len == observer.response_payload_len)
+                    count += 1;
+            }
+        }
+        if (count == 1) return .exact_once;
+        if (count > 1) return .multiple;
+        return if (self.observedResponseClass() == .accepted_owned) .transferred else .zero;
+    }
+
+    fn observeAuthority(self: *@This()) !B3AuthorityClass {
+        if (!client_mod.Client.preparedBlockingRpcStorageSettled(
+            &self.owner.transport.prepared_storage,
+        )) return .untouched;
+        return self.settleAndClassifyAuthority();
+    }
+
+    fn expectActualRow(
+        self: *@This(),
+        scenario: B3Scenario,
+        call: B3CallObservation,
+    ) !void {
+        if (self.observed != null) return error.InvalidState;
+        self.observed = B3Observed{
+            .scenario = scenario,
+            .request = self.observedRequestClass(),
+            .storage_settled = client_mod.Client.preparedBlockingRpcStorageSettled(
+                &self.owner.transport.prepared_storage,
+            ),
+            .authority = try self.observeAuthority(),
+            .connection = self.observedConnectionClass(),
+            .outcome = call.outcome(),
+            .public_error = call.publicError(),
+            .first_poison = self.observedPoisonClass(),
+            .response = self.observedResponseClass(),
+            .request_free = self.observedRequestFreeClass(),
+            .payload_free = self.observedPayloadFreeClass(),
+            .final_zero = false,
+        };
+    }
+
+    fn expectExactOperationReceipt(observer: anytype) !void {
+        try std.testing.expectEqual(@as(usize, 1), observer.registered_operation_begin_count);
+        try std.testing.expectEqual(@as(usize, 1), observer.registered_operation_end_count);
+        try std.testing.expectEqual(@as(u128, 0), observer.registered_operation_active_receipt);
+        try std.testing.expect(!observer.registered_operation_receipt_drift);
+        try std.testing.expect(observer.registered_operation_begin_receipts[0] != 0);
+        try std.testing.expectEqual(
+            observer.registered_operation_begin_receipts[0],
+            observer.registered_operation_end_receipts[0],
+        );
+    }
+
+    fn operationReceiptTranscriptExact(observer: anytype) bool {
+        if (observer.registered_operation_begin_count != observer.registered_operation_end_count or
+            observer.registered_operation_begin_count > observer.registered_operation_begin_receipts.len or
+            observer.registered_operation_active_receipt != 0 or
+            observer.registered_operation_receipt_drift)
+            return false;
+        for (0..observer.registered_operation_begin_count) |index| {
+            if (observer.registered_operation_begin_receipts[index] == 0 or
+                observer.registered_operation_begin_receipts[index] !=
+                    observer.registered_operation_end_receipts[index])
+                return false;
+        }
+        return true;
+    }
+
+    fn expectActualFinalZero(self: *const @This()) !void {
+        const observer = self.slot.current.guarded_allocator.request_free_test_observer;
+        try expectExactOperationReceipt(observer);
+        if (observer.cleanup_count != 0) {
+            try std.testing.expectEqual(@as(usize, 1), observer.cleanup_count);
+            try std.testing.expect(observer.guard_inactive);
+            try std.testing.expect(observer.allocator_scope_restored);
+            try std.testing.expect(observer.client_scope_restored);
+            try std.testing.expect(observer.ledger_ended);
+            try std.testing.expect(observer.cleanup_settled);
+        }
+    }
+
+    fn finishActualRow(self: *@This(), scenario: B3Scenario) !void {
+        if (self.observed == null or self.observed.?.scenario != scenario)
+            return error.InvalidState;
+        try self.expectActualFinalZero();
+        try self.cleanupBinding();
+        self.deinit();
+        self.observed.?.final_zero = true;
+        try std.testing.expectEqualDeep(expected(scenario), self.observed.?);
+    }
+
+    fn expectOperationRegistryRestored(self: *const @This()) !void {
+        try expectExactOperationReceipt(
+            self.slot.current.guarded_allocator.request_free_test_observer,
+        );
+    }
+
+    fn cleanupResponse(self: *@This()) !void {
+        if (self.self_addr != @intFromPtr(self)) return error.InvalidState;
+        if (self.response_cleaned) return;
+        if (self.owner.response.pristine()) {
+            self.response_cleaned = true;
+            return;
+        }
+        try std.testing.expectEqual(
+            executed_response_mod.DeinitOutcome.cleaned,
+            self.owner.response.deinit(try self.slot.responseOwnerSeal(self.reservation.?)),
+        );
+        self.response_cleaned = true;
+    }
+
+    fn cleanupBinding(self: *@This()) !void {
+        if (self.self_addr != @intFromPtr(self)) return error.InvalidState;
+        if (self.binding_cleaned or self.reservation == null) return;
+        if (self.transport_live) {
+            const operation_count_before = self.slot.current.guarded_allocator
+                .request_free_test_observer.registered_operation_begin_count;
+            terminalizeOwned(
+                &self.owner.transport,
+                @intFromPtr(&self.owner.transport),
+            ) catch |err| {
+                const operation = self.slot.current.guarded_allocator.request_free_test_observer;
+                try std.testing.expect(
+                    operation.registered_operation_begin_count > operation_count_before,
+                );
+                try std.testing.expect(operationReceiptTranscriptExact(operation));
+                try self.slot.abortAttachmentBinding(&self.binding, self.reservation.?);
+                self.transport_live = false;
+                self.binding_cleaned = true;
+                return err;
+            };
+            const operation = self.slot.current.guarded_allocator.request_free_test_observer;
+            try std.testing.expect(
+                operation.registered_operation_begin_count > operation_count_before,
+            );
+            try std.testing.expect(operationReceiptTranscriptExact(operation));
+            self.transport_live = false;
+        }
+        try self.slot.abortAttachmentBinding(&self.binding, self.reservation.?);
+        self.binding_cleaned = true;
+    }
+
+    fn deinit(self: *@This()) void {
+        if (self.self_addr == 0) return;
+        if (self.self_addr != @intFromPtr(self)) @panic("B3ExecutionHarness moved after init");
+        if (self.peer != null and !self.peer_joined and self.slot_initialized) {
+            _ = c.shutdown(self.slot.logicalClient().fd, c.SHUT.RDWR);
+        }
+        self.joinPeer();
+        if (self.fds[1] >= 0) _ = c.close(self.fds[1]);
+        if (self.fds[0] >= 0) _ = c.close(self.fds[0]);
+        if (self.slot_initialized) {
+            if (!self.response_cleaned and self.reservation != null)
+                self.cleanupResponse() catch @panic("B3 harness response cleanup failed");
+            if (!self.binding_cleaned and self.reservation != null)
+                self.cleanupBinding() catch @panic("B3 harness binding cleanup failed");
+            const operation = self.slot.current.guarded_allocator.request_free_test_observer;
+            if (!operationReceiptTranscriptExact(operation))
+                @panic("B3 harness operation registry did not return its exact receipt");
+            self.slot.deinit();
+            self.slot_initialized = false;
+        }
+        if (self.ordinal.allocated_bytes != self.ordinal.freed_bytes)
+            @panic("B3 harness allocator outstanding bytes did not return to zero");
+        if (self.expected_request.len != 0) {
+            self.allocator.free(self.expected_request);
+            self.expected_request = &.{};
+        }
+        self.self_addr = 0;
+    }
+};
+
+test "B3-0.4 actual socket uncertain settlement follows full request then EOF boundaries" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    inline for (std.enums.values(B3ActualSocketScenario)) |scenario| {
+        try client_slot_mod.ClientSlot.initializeProcessRuntime();
+        const allocator = std.testing.allocator;
+        const response_wire = try framing.encodeFrame(
+            allocator,
+            .{ .kind = .response, .request_id = 1 },
+            "payload",
+        );
+        defer allocator.free(response_wire);
+        var harness: B3ExecutionHarness = undefined;
+        try B3ExecutionHarness.initInPlace(
+            &harness,
+            allocator,
+            0xB30400 + @as(u128, @intFromEnum(scenario)),
+            .alloc,
+        );
+        defer harness.deinit();
+        const reply = switch (scenario) {
+            .eof_after_request => response_wire[0..0],
+            .partial_header_eof => response_wire[0..7],
+            .partial_payload_eof => response_wire[0 .. protocol.header_size + 1],
+        };
+        try harness.startPeer(reply);
+        const result = try harness.owner.transport.executePreparedRequest(
+            harness.receipt,
+            &harness.owner.response,
+        );
+        try harness.request_free.expectExecutionFinalZero();
+        harness.joinPeer();
+        try std.testing.expectEqual(B3ActualSocketPeerOutcome.exact, harness.peer_state.outcome);
+        switch (result) {
+            .uncertain_or_connection_failure => |executed| try std.testing.expect(
+                executed.matchesPrepared(harness.receipt),
+            ),
+            else => return error.TestUnexpectedResult,
+        }
+        try std.testing.expect(client_mod.Client.preparedBlockingRpcStorageSettled(
+            &harness.owner.transport.prepared_storage,
+        ));
+        const expected_poison: client_poison.ConnectionReason = switch (scenario) {
+            .eof_after_request => .connection_eof,
+            .partial_header_eof, .partial_payload_eof => .frame_malformed,
+        };
+        try std.testing.expectEqual(expected_poison, harness.slot.logicalClient().firstPoisonReason().?);
+        try harness.expectActualRow(.uncertain, .{ .result = result });
+        try harness.request_free.expectExactOnceBeforeAuthoritySettlement();
+        try harness.cleanupResponse();
+        try harness.finishActualRow(.uncertain);
+    }
+}
+
+test "B3-0.4 execute allocation fail index settles every actual socket attempt" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    inline for (std.enums.values(B3AllocationFailureKind)) |failure_kind| {
+        var reached_success = false;
+        var failure_count: usize = 0;
+        var saw_post_wire_failure = false;
+        var saw_terminal_failure = false;
+        var saw_recovered_resize_failure = false;
+        for (0..32) |fail_offset| {
+            try client_slot_mod.ClientSlot.initializeProcessRuntime();
+            const allocator = std.testing.allocator;
+            const response_payload = try allocator.alloc(u8, 64 * 1024);
+            defer allocator.free(response_payload);
+            @memset(response_payload, 0xA5);
+            const response_wire = try framing.encodeFrame(
+                allocator,
+                .{ .kind = .response, .request_id = 1 },
+                response_payload,
+            );
+            defer allocator.free(response_wire);
+            const host_id = 0xB30440 + @as(u128, fail_offset);
+            var harness: B3ExecutionHarness = undefined;
+            try B3ExecutionHarness.initInPlace(&harness, allocator, host_id, failure_kind);
+            defer harness.deinit();
+            try harness.startPeer(response_wire);
+            try std.testing.expectEqual(
+                @intFromPtr(&harness.ordinal),
+                @intFromPtr(harness.slot.current.guarded_allocator.parent.ptr),
+            );
+            harness.ordinal.armNext(fail_offset);
+            const observed: union(enum) {
+                result: contract.ExecuteResult,
+                failure: Error,
+            } = if (harness.owner.transport.executePreparedRequest(
+                harness.receipt,
+                &harness.owner.response,
+            )) |result|
+                .{ .result = result }
+            else |err|
+                .{ .failure = err };
+            try harness.request_free.expectExecutionFinalZero();
+            _ = c.shutdown(harness.slot.logicalClient().fd, c.SHUT.RDWR);
+            harness.joinPeer();
+            try std.testing.expect(client_mod.Client.preparedBlockingRpcStorageSettled(
+                &harness.owner.transport.prepared_storage,
+            ));
+            try harness.request_free.expectExactOnceBeforeAuthoritySettlement();
+            try std.testing.expect(!harness.slot.current.guarded_allocator.operation_guard_active);
+            if (harness.ordinal.induced_failure) {
+                try std.testing.expectEqual(@as(usize, 1), harness.ordinal.induced_failure_count);
+                failure_count += 1;
+                try std.testing.expectEqual(fail_offset + 1, failure_count);
+                try std.testing.expect(harness.peer_state.request_exact);
+                saw_post_wire_failure = true;
+            }
+
+            switch (observed) {
+                .result => |result| switch (result) {
+                    .accepted => {
+                        try std.testing.expectEqual(B3ActualSocketPeerOutcome.exact, harness.peer_state.outcome);
+                        if (harness.ordinal.induced_failure) {
+                            try std.testing.expect(harness.slot.logicalClient().firstPoisonReason() == null);
+                            if (failure_kind == .resize) saw_recovered_resize_failure = true;
+                        } else {
+                            reached_success = true;
+                        }
+                        const bytes = try harness.owner.response.borrowAccepted(
+                            try harness.slot.responseOwnerSeal(harness.reservation.?),
+                        );
+                        try std.testing.expectEqualSlices(u8, response_payload, bytes);
+                        if (!harness.ordinal.induced_failure) try harness.expectActualRow(
+                            .accepted_published,
+                            .{ .result = result },
+                        );
+                    },
+                    .uncertain_or_connection_failure => {
+                        try std.testing.expect(harness.peer_state.request_exact);
+                        if (harness.ordinal.induced_failure) {
+                            try std.testing.expectEqual(
+                                client_poison.ConnectionReason.local_resource_exhausted,
+                                harness.slot.logicalClient().firstPoisonReason().?,
+                            );
+                            saw_terminal_failure = true;
+                        }
+                        try std.testing.expectError(
+                            error.InvalidState,
+                            harness.slot.current.cleanup_registry.publishPreparedRequest(
+                                harness.reservation.?.cleanup,
+                                harness.reservation.?.identity,
+                                harness.canonical.?,
+                            ),
+                        );
+                    },
+                    .typed_reject => return error.TestUnexpectedResult,
+                },
+                .failure => {
+                    try std.testing.expect(harness.ordinal.induced_failure);
+                    if (harness.slot.logicalClient().firstPoisonReason() == null) {
+                        try harness.settleReusable();
+                    } else {
+                        try std.testing.expectEqual(
+                            client_poison.ConnectionReason.local_resource_exhausted,
+                            harness.slot.logicalClient().firstPoisonReason().?,
+                        );
+                        saw_terminal_failure = true;
+                        try std.testing.expectError(
+                            error.InvalidState,
+                            harness.slot.current.cleanup_registry.publishPreparedRequest(
+                                harness.reservation.?.cleanup,
+                                harness.reservation.?.identity,
+                                harness.canonical.?,
+                            ),
+                        );
+                    }
+                    try std.testing.expect(harness.owner.response.pristine());
+                },
+            }
+            try harness.cleanupResponse();
+            if (reached_success)
+                try harness.finishActualRow(.accepted_published)
+            else
+                try harness.cleanupBinding();
+            if (reached_success) break;
+        }
+        try std.testing.expect(reached_success);
+        try std.testing.expect(failure_count > 0);
+        try std.testing.expect(saw_post_wire_failure);
+        switch (failure_kind) {
+            .alloc => try std.testing.expect(saw_terminal_failure),
+            .resize => try std.testing.expect(saw_recovered_resize_failure),
+        }
+    }
+}
+
+test "B3-0.4 closed thirteen-row execution table is exhaustive and internally consistent" {
+    const b3_issuer_oracle = @import("b3_issuer_oracle.zig");
+    try std.testing.expectEqual(std.meta.fields(B3Scenario).len, b3_expected_rows.len);
+    var seen = [_]bool{false} ** std.meta.fields(B3Scenario).len;
+    for (b3_expected_rows) |expected| {
+        const index = @intFromEnum(expected.scenario);
+        try std.testing.expect(!seen[index]);
+        seen[index] = true;
+        if (expected.outcome == .accepted) {
+            try std.testing.expectEqual(B3AuthorityClass.reusable, expected.authority);
+            try std.testing.expectEqual(B3ConnectionClass.keep, expected.connection);
+            try std.testing.expect(expected.storage_settled);
+        }
+        if (expected.outcome == .uncertain) {
+            try std.testing.expectEqual(B3RequestClass.exact_wire, expected.request);
+            try std.testing.expectEqual(B3AuthorityClass.terminal, expected.authority);
+            try std.testing.expect(expected.storage_settled);
+        }
+        if (expected.authority == .fail_stop) {
+            try std.testing.expectEqual(B3OutcomeClass.fail_stop, expected.outcome);
+        }
+    }
+    for (seen) |present| try std.testing.expect(present);
+    inline for (std.enums.values(b3_issuer_oracle.Scenario)) |issuer_scenario| {
+        const aggregate_scenario: B3Scenario = switch (issuer_scenario) {
+            .clean => .issuer_exhausted_clean,
+            .cleanup_drift => .issuer_exhausted_cleanup_drift,
+        };
+        const row = B3ExecutionHarness.expected(aggregate_scenario);
+        const oracle = b3_issuer_oracle.expected(issuer_scenario);
+        try std.testing.expectEqualDeep(oracle, b3_issuer_oracle.Observation{
+            .scenario = issuer_scenario,
+            .request_prepared_only = row.request == .prepared_only,
+            .storage_settled = row.storage_settled,
+            .authority_terminal = row.authority == .terminal,
+            .connection_local_invariant = row.connection == .poison_local_invariant,
+            .public_error = if (row.public_error == .identity_exhausted)
+                .identity_exhausted
+            else
+                .protocol_error,
+            .first_poison_local_invariant = row.first_poison == .local_invariant,
+            .response_pristine = row.response == .pristine,
+            .request_free_exact_once = row.request_free == .exact_once,
+            .payload_never_observed = row.payload_free == .zero,
+            .final_zero = row.final_zero,
+        });
+    }
+    if (builtin.os.tag == .macos) {
+        try client_slot_mod.ClientSlot.initializeProcessRuntime();
+        var final_address_probe: B3ExecutionHarness = undefined;
+        try B3ExecutionHarness.initInPlace(
+            &final_address_probe,
+            std.testing.allocator,
+            0xB3047F,
+            .alloc,
+        );
+        defer final_address_probe.deinit();
+        var copied_probe = final_address_probe;
+        try std.testing.expectError(
+            error.InvalidState,
+            copied_probe.armNotExecutedPendingInjection(false, false),
+        );
+        try std.testing.expect(
+            !final_address_probe.slot.current.guarded_allocator.request_free_test_observer.inject_pending_before_execute,
+        );
+        try final_address_probe.owner.transport.abortPreparedRequest(final_address_probe.receipt);
+        try final_address_probe.cleanupResponse();
+        try final_address_probe.cleanupBinding();
+
+        try client_slot_mod.ClientSlot.initializeProcessRuntime();
+        var admission: B3ExecutionHarness = undefined;
+        try B3ExecutionHarness.initInPlace(
+            &admission,
+            std.testing.allocator,
+            0xB30480,
+            .alloc,
+        );
+        defer admission.deinit();
+        var outside_response: executed_response_mod.ExecutedResponse = .{};
+        const admission_call: B3CallObservation = if (client_slot_mod.executeGenerationRequest(.{
+            .request = admission.owner.transport.requestOperation(admission.receipt),
+            .response_out_addr = @intFromPtr(&outside_response),
+            .owner_addr = @intFromPtr(&admission.owner),
+            .owner_size = @sizeOf(B3ExecutionHarness.Owner),
+        })) |result| .{ .result = result } else |err| .{ .failure = err };
+        try std.testing.expect(admission_call == .failure);
+        try std.testing.expect(admission_call.failure == error.InvalidResponseDestination);
+        try std.testing.expect(!client_mod.Client.preparedBlockingRpcStorageSettled(
+            &admission.owner.transport.prepared_storage,
+        ));
+        try std.testing.expect(admission.slot.logicalClient().firstPoisonReason() == null);
+        try admission.expectActualRow(.admission_rejected, admission_call);
+        try admission.owner.transport.abortPreparedRequest(admission.receipt);
+        try admission.cleanupResponse();
+        try admission.finishActualRow(.admission_rejected);
+
+        try client_slot_mod.ClientSlot.initializeProcessRuntime();
+        var preflight: B3ExecutionHarness = undefined;
+        try B3ExecutionHarness.initInPlace(
+            &preflight,
+            std.testing.allocator,
+            0xB30481,
+            .alloc,
+        );
+        defer preflight.deinit();
+        preflight.owner.response.self_addr = 1;
+        const preflight_call: B3CallObservation = if (preflight.owner.transport.executePreparedRequest(
+            preflight.receipt,
+            &preflight.owner.response,
+        )) |result| .{ .result = result } else |err| .{ .failure = err };
+        try std.testing.expect(preflight_call == .failure);
+        try std.testing.expect(preflight_call.failure == error.InvalidResponseDestination);
+        preflight.owner.response = .{};
+        try preflight.request_free.expectExactOnceBeforeAuthoritySettlement();
+        try std.testing.expect(client_mod.Client.preparedBlockingRpcStorageSettled(
+            &preflight.owner.transport.prepared_storage,
+        ));
+        try std.testing.expect(preflight.slot.logicalClient().firstPoisonReason() == null);
+        try preflight.expectActualRow(.local_preflight_rejected, preflight_call);
+        try preflight.cleanupResponse();
+        try preflight.finishActualRow(.local_preflight_rejected);
+
+        try client_slot_mod.ClientSlot.initializeProcessRuntime();
+        var pending: B3ExecutionHarness = undefined;
+        try B3ExecutionHarness.initInPlace(
+            &pending,
+            std.testing.allocator,
+            0xB30482,
+            .alloc,
+        );
+        defer pending.deinit();
+        _ = c.close(pending.fds[1]);
+        pending.fds[1] = -1;
+        pending.slot.logicalClient().pending_outbound = .{
+            .frame = try pending.slot.logicalClient().allocator.dupe(u8, "older-frame"),
+            .stream_id = 9,
+        };
+        const pending_call: B3CallObservation = if (pending.owner.transport.executePreparedRequest(
+            pending.receipt,
+            &pending.owner.response,
+        )) |result| .{ .result = result } else |err| .{ .failure = err };
+        try std.testing.expect(pending_call == .failure);
+        try std.testing.expect(pending_call.failure == error.WriteFailed);
+        try pending.request_free.expectExactOnceBeforeAuthoritySettlement();
+        try std.testing.expect(client_mod.Client.preparedBlockingRpcStorageSettled(
+            &pending.owner.transport.prepared_storage,
+        ));
+        try std.testing.expect(pending.slot.logicalClient().firstPoisonReason() != null);
+        try pending.expectActualRow(.pending_flush_ambiguous, pending_call);
+        try pending.cleanupResponse();
+        try pending.finishActualRow(.pending_flush_ambiguous);
+
+        try client_slot_mod.ClientSlot.initializeProcessRuntime();
+        var pending_drift: B3ExecutionHarness = undefined;
+        try B3ExecutionHarness.initInPlace(
+            &pending_drift,
+            std.testing.allocator,
+            0xB30483,
+            .alloc,
+        );
+        defer pending_drift.deinit();
+        const older_bytes = try pending_drift.armPendingFlushBackingDrift();
+        try pending_drift.startPeerExpected(older_bytes, &.{});
+        const pending_drift_call: B3CallObservation = if (pending_drift.owner.transport.executePreparedRequest(
+            pending_drift.receipt,
+            &pending_drift.owner.response,
+        )) |result| .{ .result = result } else |err| .{ .failure = err };
+        try std.testing.expect(pending_drift_call == .failure);
+        try std.testing.expect(pending_drift_call.failure == error.InvalidPreparedRpc);
+        pending_drift.joinPeer();
+        try std.testing.expectEqual(
+            B3ActualSocketPeerOutcome.exact,
+            pending_drift.peer_state.outcome,
+        );
+        try std.testing.expect(pending_drift.ordinal.request_drifted);
+        try pending_drift.request_free.expectExecutionFinalZero();
+        try pending_drift.request_free.expectExactOnceBeforeAuthoritySettlement();
+        try std.testing.expect(client_mod.Client.preparedBlockingRpcStorageSettled(
+            &pending_drift.owner.transport.prepared_storage,
+        ));
+        try std.testing.expect(
+            pending_drift.slot.logicalClient().firstPoisonReason().? == .local_invariant_violation,
+        );
+        try pending_drift.expectActualRow(.pending_flush_backing_drift, pending_drift_call);
+        try pending_drift.cleanupResponse();
+        try pending_drift.finishActualRow(.pending_flush_backing_drift);
+
+        try client_slot_mod.ClientSlot.initializeProcessRuntime();
+        var not_executed: B3ExecutionHarness = undefined;
+        try B3ExecutionHarness.initInPlace(
+            &not_executed,
+            std.testing.allocator,
+            0xB30484,
+            .alloc,
+        );
+        defer not_executed.deinit();
+        try not_executed.armNotExecutedPendingInjection(false, false);
+        const not_executed_call: B3CallObservation = if (not_executed.owner.transport.executePreparedRequest(
+            not_executed.receipt,
+            &not_executed.owner.response,
+        )) |result| .{ .result = result } else |err| .{ .failure = err };
+        try std.testing.expect(not_executed_call == .failure);
+        try std.testing.expect(not_executed_call.failure == error.InvalidPreparedRpc);
+        try std.testing.expect(
+            not_executed.slot.current.guarded_allocator.request_free_test_observer.pending_injected,
+        );
+        try not_executed.request_free.expectExecutionFinalZero();
+        try not_executed.request_free.expectExactOnceBeforeAuthoritySettlement();
+        try std.testing.expect(client_mod.Client.preparedBlockingRpcStorageSettled(
+            &not_executed.owner.transport.prepared_storage,
+        ));
+        try std.testing.expect(not_executed.slot.logicalClient().firstPoisonReason() == null);
+        try not_executed.expectActualRow(.not_executed_reusable_connection_live, not_executed_call);
+        try not_executed.cleanupResponse();
+        try not_executed.finishActualRow(.not_executed_reusable_connection_live);
+
+        const TerminalNotExecutedCase = enum { reusable, terminal };
+        inline for (std.enums.values(TerminalNotExecutedCase)) |case| {
+            try client_slot_mod.ClientSlot.initializeProcessRuntime();
+            var terminal_not_executed: B3ExecutionHarness = undefined;
+            try B3ExecutionHarness.initInPlace(
+                &terminal_not_executed,
+                std.testing.allocator,
+                0xB30485 + @as(u128, @intFromEnum(case)),
+                .alloc,
+            );
+            defer terminal_not_executed.deinit();
+            try terminal_not_executed.armNotExecutedPendingInjection(
+                true,
+                case == .terminal,
+            );
+            const terminal_call: B3CallObservation = if (terminal_not_executed.owner.transport.executePreparedRequest(
+                terminal_not_executed.receipt,
+                &terminal_not_executed.owner.response,
+            )) |result| .{ .result = result } else |err| .{ .failure = err };
+            try std.testing.expect(terminal_call == .failure);
+            try std.testing.expect(terminal_call.failure == error.ConnectionClosed);
+            try std.testing.expect(
+                terminal_not_executed.slot.current.guarded_allocator.request_free_test_observer.pending_injected,
+            );
+            try terminal_not_executed.request_free.expectExecutionFinalZero();
+            try terminal_not_executed.request_free.expectExactOnceBeforeAuthoritySettlement();
+            try std.testing.expect(client_mod.Client.preparedBlockingRpcStorageSettled(
+                &terminal_not_executed.owner.transport.prepared_storage,
+            ));
+            try std.testing.expectEqual(
+                client_poison.ConnectionReason.transport_read_failure,
+                terminal_not_executed.slot.logicalClient().firstPoisonReason().?,
+            );
+            const scenario: B3Scenario = switch (case) {
+                .reusable => .not_executed_reusable_connection_terminal,
+                .terminal => .not_executed_terminal,
+            };
+            try terminal_not_executed.expectActualRow(scenario, terminal_call);
+            try terminal_not_executed.cleanupResponse();
+            try terminal_not_executed.finishActualRow(scenario);
+        }
+
+        try client_slot_mod.ClientSlot.initializeProcessRuntime();
+        const publication_wire = try framing.encodeFrame(
+            std.testing.allocator,
+            .{ .kind = .response, .request_id = 1 },
+            "publication-owned-payload",
+        );
+        defer std.testing.allocator.free(publication_wire);
+        var publication: B3ExecutionHarness = undefined;
+        try B3ExecutionHarness.initInPlace(
+            &publication,
+            std.testing.allocator,
+            0xB30483,
+            .alloc,
+        );
+        defer publication.deinit();
+        try publication.startPeer(publication_wire);
+        try publication.armResponsePublicationDrift();
+        const publication_call: B3CallObservation = if (publication.owner.transport.executePreparedRequest(
+            publication.receipt,
+            &publication.owner.response,
+        )) |result| .{ .result = result } else |err| .{ .failure = err };
+        try std.testing.expect(publication_call == .failure);
+        try std.testing.expect(publication_call.failure == error.InvalidResponseDestination);
+        publication.joinPeer();
+        try std.testing.expect(publication.ordinal.response_corrupted);
+        try publication.request_free.expectExecutionFinalZero();
+        try publication.request_free.expectExactOnceBeforeAuthoritySettlement();
+        try std.testing.expect(client_mod.Client.preparedBlockingRpcStorageSettled(
+            &publication.owner.transport.prepared_storage,
+        ));
+        try std.testing.expectEqual(
+            client_poison.ConnectionReason.local_invariant_violation,
+            publication.slot.logicalClient().firstPoisonReason().?,
+        );
+        try publication.expectActualRow(.accepted_publication_failed_owned, publication_call);
+        publication.owner.response = .{};
+        try publication.cleanupResponse();
+        try publication.finishActualRow(.accepted_publication_failed_owned);
+    }
+}
+
+test "B3-0.4 strict cleanup category requires a successful isolated dependency" {
+    const focused_marker = c.getenv("MARU_SESSION_HOST_B3_STRICT_GATE");
+    const aggregate_marker = c.getenv("MARU_SESSION_HOST_RESPONSE_ALIAS_EXEC");
+    if (focused_marker == null and aggregate_marker == null) return;
+    const focused_valid = if (focused_marker) |raw|
+        std.mem.eql(u8, std.mem.span(raw), "passed-by-dependency-v1")
+    else
+        false;
+    const aggregate_valid = if (aggregate_marker) |raw|
+        std.mem.eql(u8, std.mem.span(raw), "skip-in-aggregate-v1")
+    else
+        false;
+    try std.testing.expect(focused_valid or aggregate_valid);
+}
+
+test "B3-0.4 focused inventory sentinel is independent of test execution order" {
+    try std.testing.expectEqual(@as(usize, 13), b3_expected_rows.len);
+    const focused_marker = c.getenv("MARU_SESSION_HOST_B3_STRICT_GATE");
+    const aggregate_marker = c.getenv("MARU_SESSION_HOST_RESPONSE_ALIAS_EXEC");
+    if (focused_marker == null and aggregate_marker == null) return;
+    const focused_valid = if (focused_marker) |raw|
+        std.mem.eql(u8, std.mem.span(raw), "passed-by-dependency-v1")
+    else
+        false;
+    const aggregate_valid = if (aggregate_marker) |raw|
+        std.mem.eql(u8, std.mem.span(raw), "skip-in-aggregate-v1")
+    else
+        false;
+    try std.testing.expect(focused_valid or aggregate_valid);
 }
 
 test "CR3a-2c3b actual socket retires OOB observation before exact target publication" {
@@ -2479,22 +4032,25 @@ test "CR3a-2c3b actual socket retires OOB observation before exact target public
     defer slot.deinit();
     var binding: contract.PreparedAttachmentBinding = .{};
     var lease: @import("connection_lease.zig").ConnectionLease = .{};
-    var transport: GenerationTransport = .{};
+    const Owner = struct {
+        transport: GenerationTransport = .{},
+        response: executed_response_mod.ExecutedResponse = .{},
+    };
+    var owner: Owner = .{};
     const reservation = try slot.reserveAttachmentBindingForTest(
         &binding,
         &lease,
-        @intFromPtr(&transport),
+        @intFromPtr(&owner.transport),
     );
     try mintInPlace(
-        &transport,
+        &owner.transport,
         &slot,
-        @intFromPtr(&transport),
-        @sizeOf(GenerationTransport),
+        @intFromPtr(&owner),
+        @sizeOf(Owner),
         reservation,
     );
-    const receipt = try transport.prepareRequest(contract.RuntimeRequest.attachController());
-    var response: executed_response_mod.ExecutedResponse = .{};
-    const result = try transport.executePreparedRequest(receipt, &response);
+    const receipt = try owner.transport.prepareRequest(contract.RuntimeRequest.attachController());
+    const result = try owner.transport.executePreparedRequest(receipt, &owner.response);
     try std.testing.expect(result == .accepted);
     try std.testing.expectEqual(@as(usize, 1), slot.logicalClient().pending_stream.items.len);
     try std.testing.expectEqual(
@@ -2507,11 +4063,131 @@ test "CR3a-2c3b actual socket retires OOB observation before exact target public
     );
     try std.testing.expectEqual(
         executed_response_mod.DeinitOutcome.cleaned,
-        response.deinit(try slot.responseOwnerSeal(reservation)),
+        owner.response.deinit(try slot.responseOwnerSeal(reservation)),
     );
-    try terminalizeOwned(&transport, @intFromPtr(&transport));
+    try terminalizeOwned(&owner.transport, @intFromPtr(&owner.transport));
     try slot.abortAttachmentBinding(&binding, reservation);
 }
+
+const RequestBackingFreeProbe = struct {
+    parent: std.mem.Allocator,
+    slot: ?*client_slot_mod.ClientSlot = null,
+    reservation: ?client_slot_mod.AttachmentBindingReservation = null,
+    canonical: ?@import("prepared_request_authority.zig").Prepared = null,
+    target_addr: usize = 0,
+    target_len: usize = 0,
+    exact_free_count: usize = 0,
+    authority_was_executing: bool = false,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn arm(
+        self: *@This(),
+        slot: *client_slot_mod.ClientSlot,
+        reservation: client_slot_mod.AttachmentBindingReservation,
+        canonical: @import("prepared_request_authority.zig").Prepared,
+    ) void {
+        self.slot = slot;
+        self.reservation = reservation;
+        self.canonical = canonical;
+        self.target_addr = canonical.descriptor.frame_addr;
+        self.target_len = canonical.descriptor.frame_len;
+        slot.current.guarded_allocator.request_free_test_observer = .{
+            .target_addr = canonical.descriptor.frame_addr,
+            .target_len = canonical.descriptor.frame_len,
+            .descriptor_allocator_ptr = canonical.descriptor.allocator_ptr,
+            .descriptor_allocator_vtable = canonical.descriptor.allocator_vtable,
+        };
+    }
+
+    fn expectExactOnceBeforeAuthoritySettlement(self: *const @This()) !void {
+        try std.testing.expectEqual(@as(usize, 1), self.exact_free_count);
+        try std.testing.expect(self.authority_was_executing);
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            self.slot.?.current.guarded_allocator.request_free_test_observer.entry_count,
+        );
+        try std.testing.expect(
+            self.slot.?.current.guarded_allocator.request_free_test_observer.descriptor_exact,
+        );
+    }
+
+    fn expectExecutionFinalZero(self: *const @This()) !void {
+        const observer = self.slot.?.current.guarded_allocator.request_free_test_observer;
+        try std.testing.expectEqual(@as(usize, 1), observer.cleanup_count);
+        try std.testing.expect(observer.guard_inactive);
+        try std.testing.expect(observer.allocator_scope_restored);
+        try std.testing.expect(observer.client_scope_restored);
+        try std.testing.expect(observer.ledger_ended);
+        try std.testing.expect(observer.cleanup_settled);
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        return self.parent.vtable.alloc(self.parent.ptr, len, alignment, ret_addr);
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        return self.parent.vtable.resize(self.parent.ptr, memory, alignment, new_len, ret_addr);
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        return self.parent.vtable.remap(self.parent.ptr, memory, alignment, new_len, ret_addr);
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        const memory_addr = @intFromPtr(memory.ptr);
+        const strict_child = builtin.is_test and
+            c.getenv("MARU_SESSION_HOST_RESPONSE_ALIAS_EXEC") != null;
+        if (self.slot) |slot| {
+            const observer = slot.current.guarded_allocator.request_free_test_observer;
+            if (strict_child and observer.response_payload_addr != 0 and
+                memory_addr == observer.response_payload_addr and
+                memory.len == observer.response_payload_len)
+            {
+                const marker = "B3_RESPONSE_PAYLOAD_FREED\n";
+                _ = c.write(2, marker.ptr, marker.len);
+            }
+        }
+        if (memory_addr == self.target_addr and memory.len == self.target_len) {
+            self.exact_free_count += 1;
+            const reservation = self.reservation.?;
+            const canonical = self.canonical.?;
+            self.authority_was_executing = self.slot.?.current.cleanup_registry.executingRequestMatches(
+                reservation.cleanup,
+                reservation.identity,
+                canonical,
+            ) catch false;
+            const observer = self.slot.?.current.guarded_allocator.request_free_test_observer;
+            if (strict_child and
+                self.authority_was_executing and observer.entry_count == 1 and
+                observer.descriptor_exact)
+            {
+                const marker = "B3_REQUEST_BACKING_EXACT_FREE\n";
+                _ = c.write(2, marker.ptr, marker.len);
+            }
+        } else if (strict_child) {
+            const memory_end = std.math.add(usize, memory_addr, memory.len) catch std.math.maxInt(usize);
+            const target_end = std.math.add(usize, self.target_addr, self.target_len) catch
+                std.math.maxInt(usize);
+            if (memory_addr < target_end and self.target_addr < memory_end) {
+                const marker = "B3_NONCANONICAL_BACKING_FREED\n";
+                _ = c.write(2, marker.ptr, marker.len);
+            }
+        }
+        self.parent.vtable.free(self.parent.ptr, memory, alignment, ret_addr);
+    }
+};
 
 const PoisonOrderAllocator = struct {
     parent: std.mem.Allocator,
@@ -2524,6 +4200,7 @@ const PoisonOrderAllocator = struct {
     saw_poison_before_free: bool = false,
     reentry_rejected: bool = false,
     captured_payload_free_seen: bool = false,
+    payload_free_count: usize = 0,
 
     fn allocator(self: *@This()) std.mem.Allocator {
         return .{ .ptr = self, .vtable = &.{
@@ -2566,6 +4243,7 @@ const PoisonOrderAllocator = struct {
             self.captured_payload_free_seen = true;
         } else if (self.armed and self.client.?.unusable and !self.saw_poison_before_free) {
             self.saw_poison_before_free = true;
+            self.payload_free_count += 1;
             const unexpected = self.client.?.call("host.info", null) catch |err| blk: {
                 self.reentry_rejected = err == error.ConnectionClosed or err == error.AdminBusy;
                 break :blk null;

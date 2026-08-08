@@ -1355,10 +1355,11 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
             .baseline_count = 127,
             .baseline_digest = .{ 0xa8, 0x74, 0x00, 0x69, 0x5e, 0xef, 0x13, 0xe4, 0x46, 0x69, 0x0f, 0x65, 0x59, 0x53, 0xb7, 0x40, 0x2b, 0x30, 0x61, 0x22, 0xb7, 0xf1, 0x94, 0xf7, 0xf6, 0x1f, 0x74, 0x00, 0x68, 0x6e, 0xd8, 0xc9 },
             .containers = &.{ "ClientSlot", "EndedPurgePreparation" },
-            .optional_containers = &.{},
+            .optional_containers = &.{ "PreparedExecutionTxn", "PreparedExecutionCleanup", "RegisteredNodeOperation" },
             .allowed = &.{
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "compatibility" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "prepared_request_authority" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "client_poison" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "CapabilityProjectionError" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "CapabilityProjectionRequest" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationRequestError" },
@@ -1369,8 +1370,35 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationRequestExecute" },
                 .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationExecuteError" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "ExecuteDisposition" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "PreparedExecutionPhase" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "FailStopReason" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "PreparedExecutionSettlementTag" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "PreparedExecutionSettlement" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "SettlementOutcome" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "PreparedExecutionSnapshot" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "PreparedExecutionCanonical" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "PreparedExecutionTxn" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "identityFromCanonical" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "settlementMatchesOutcome" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "failStopPreparedExecution" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "RegisteredNodeLookup" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "RegisteredNodeOperation" },
+                .{ .parent = "RegisteredNodeOperation", .kind = "field", .visibility = "private", .modifier = "", .name = "node" },
+                .{ .parent = "RegisteredNodeOperation", .kind = "field", .visibility = "private", .modifier = "", .name = "registry_index" },
+                .{ .parent = "RegisteredNodeOperation", .kind = "field", .visibility = "private", .modifier = "", .name = "operation_id" },
+                .{ .parent = "RegisteredNodeOperation", .kind = "field", .visibility = "private", .modifier = "", .name = "pid" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "max_registered_node_operations" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "RegisteredNodeOperationEntry" },
+                .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "", .name = "registered_node_operation_mutex" },
+                .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "", .name = "registered_node_operations" },
+                .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "", .name = "registered_node_operation_free_stack" },
+                .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "", .name = "registered_node_operation_free_count" },
+                .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "", .name = "next_registered_node_operation_id" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "RegisteredNodeOperationReservation" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "reserveRegisteredNodeOperation" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "abortRegisteredNodeOperationReservation" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "publishRegisteredNodeOperation" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "resolveRegisteredNodeOperation" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "GenerationRequestOwner" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "streamOperationNodeIdle" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "beginRegisteredNodeOperation" },
@@ -1392,6 +1420,25 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "ResponsePayloadObserverBridge" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "failStopResponsePayloadProvenance" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "failStopResponsePayloadTransfer" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "PreparedExecutionCleanup" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "ExecutionSettlementIntent" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "settleExecutionAfterCleanup" },
+                .{ .parent = "PreparedExecutionCleanup", .kind = "const", .visibility = "private", .modifier = "", .name = "CleanupStage" },
+                .{ .parent = "PreparedExecutionCleanup", .kind = "const", .visibility = "private", .modifier = "", .name = "CleanupLifecycle" },
+                .{ .parent = "PreparedExecutionCleanup", .kind = "const", .visibility = "private", .modifier = "", .name = "CleanupFailure" },
+                .{ .parent = "PreparedExecutionCleanup", .kind = "const", .visibility = "private", .modifier = "", .name = "CleanupOutcome" },
+                .{ .parent = "PreparedExecutionCleanup", .kind = "field", .visibility = "private", .modifier = "", .name = "self_addr" },
+                .{ .parent = "PreparedExecutionCleanup", .kind = "field", .visibility = "private", .modifier = "", .name = "lifecycle" },
+                .{ .parent = "PreparedExecutionCleanup", .kind = "field", .visibility = "private", .modifier = "", .name = "stage" },
+                .{ .parent = "PreparedExecutionCleanup", .kind = "field", .visibility = "private", .modifier = "", .name = "first_failure_raw" },
+                .{ .parent = "PreparedExecutionCleanup", .kind = "fn", .visibility = "private", .modifier = "", .name = "init" },
+                .{ .parent = "PreparedExecutionCleanup", .kind = "fn", .visibility = "private", .modifier = "", .name = "advance" },
+                .{ .parent = "PreparedExecutionCleanup", .kind = "fn", .visibility = "private", .modifier = "", .name = "finish" },
+                .{ .parent = "PreparedExecutionCleanup", .kind = "fn", .visibility = "private", .modifier = "", .name = "finishOrFailStop" },
+                .{ .parent = "PreparedExecutionCleanup", .kind = "fn", .visibility = "private", .modifier = "", .name = "ensureFinishedOrFailStop" },
+                .{ .parent = "PreparedExecutionCleanup", .kind = "fn", .visibility = "private", .modifier = "", .name = "revalidateFinishing" },
+                .{ .parent = "PreparedExecutionCleanup", .kind = "fn", .visibility = "private", .modifier = "", .name = "rawValid" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "byteRangeFullyContained" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "byteRangesOverlap" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "issueGenerationResponseIncarnation" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "ScopeTokenAliasAllocator" },
@@ -1402,12 +1449,16 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "", .name = "ended_purge_quarantine_registry" },
                 .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "", .name = "process_runtime_pid" },
                 .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "", .name = "generation_response_incarnation_issuer" },
+                .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "threadlocal", .name = "prepared_execution_cleanup_active_addr" },
                 .{ .parent = "ClientSlot", .kind = "const", .visibility = "pub", .modifier = "", .name = "ProcessRuntimeInitError" },
                 .{ .parent = "ClientSlot", .kind = "const", .visibility = "pub", .modifier = "", .name = "EndedPurgeCommitError" },
                 .{ .parent = "ClientSlot", .kind = "const", .visibility = "pub", .modifier = "", .name = "EndedPurgeResult" },
                 .{ .parent = "ClientSlot", .kind = "const", .visibility = "private", .modifier = "", .name = "PreparedStreamOperationPermitConsume" },
                 .{ .parent = "ClientSlot", .kind = "const", .visibility = "private", .modifier = "", .name = "ExclusiveTeardownReservation" },
                 .{ .parent = "ClientSlot", .kind = "const", .visibility = "private", .modifier = "", .name = "RegisteredClientOperation" },
+                .{ .parent = "RegisteredClientOperation", .kind = "field", .visibility = "private", .modifier = "", .name = "operation_id" },
+                .{ .parent = "RegisteredClientOperation", .kind = "field", .visibility = "private", .modifier = "", .name = "registry_index" },
+                .{ .parent = "RegisteredClientOperation", .kind = "field", .visibility = "private", .modifier = "", .name = "pid" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "initializeProcessRuntime" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "commitEndedPurge" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "streamOperationPermitRawTagsValid" },
@@ -1426,6 +1477,42 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "EndedPurgePreparation", .kind = "fn", .visibility = "private", .modifier = "", .name = "rawTagsValid" },
                 .{ .parent = "EndedPurgePreparation", .kind = "fn", .visibility = "private", .modifier = "", .name = "sealForCommit" },
                 .{ .parent = "EndedPurgePreparation", .kind = "fn", .visibility = "private", .modifier = "", .name = "consumeAfterPermit" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "const", .visibility = "private", .modifier = "", .name = "InitError" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "const", .visibility = "private", .modifier = "", .name = "SettlementError" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "field", .visibility = "private", .modifier = "", .name = "self_addr" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "field", .visibility = "private", .modifier = "", .name = "node_addr" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "field", .visibility = "private", .modifier = "", .name = "operation_id" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "field", .visibility = "private", .modifier = "", .name = "reservation" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "field", .visibility = "private", .modifier = "", .name = "binding_identity" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "field", .visibility = "private", .modifier = "", .name = "canonical_prepared" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "field", .visibility = "private", .modifier = "", .name = "prepared_identity" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "field", .visibility = "private", .modifier = "", .name = "phase" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "field", .visibility = "private", .modifier = "", .name = "settlement" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "initBeforeBeginExecute" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "commitBeginExecute" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "revalidatePreWire" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "rollbackPreWire" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "retireIssuerExhausted" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "settlePostExecuteReusable" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "settlePostExecuteTerminal" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "failStopCleanupFailure" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "requireCleanupClosed" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "finishOrFailStop" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "ensureSettledOrFailStop" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "rawTagsValid" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "rawEmbeddedTagsValid" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "semanticPristine" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "ownerNode" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "snapshot" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "matchesSnapshot" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "canonicalExecuting" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "canonicalStillExact" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "canonicalStorage" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "postExecuteReady" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "publishReusable" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "publishTerminal" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "failStopSettlement" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "failStopAfterCallbackDrift" },
             },
         },
     };
@@ -1911,6 +1998,18 @@ test "CR3a-2a attachment cleanup registry stays node-local and callback-free" {
     };
     for (forbidden) |needle|
         try std.testing.expectEqual(@as(usize, 0), countOccurrences(source, needle));
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(source, "pub fn preparedRequestForReceipt("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(source, "pub fn executingRequestForReceipt("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(source, "fn requestForReceipt("),
+    );
 }
 
 test "CR3a-2c3b prepared request authority remains pointer-free node-local mechanics" {
@@ -2130,8 +2229,203 @@ test "CR3a-2c3b B3-0a response provenance has one strict production path" {
         countOccurrences(slot_product, ".transferPromotedResponse("),
     );
     try std.testing.expectEqual(
-        @as(usize, 2),
+        // Two response-provenance occurrences plus the B3-0 request transaction's closed
+        // settlement tag and projections. The response-specific entrypoint counts below remain 2.
+        @as(usize, 13),
         countIdentifierOutsideTopLevelTests(slot_product, "fail_stop_required"),
+    );
+    const prepared_execution_signatures = [_][]const u8{
+        "fn initBeforeBeginExecute(\n        self: *PreparedExecutionTxn,\n        operation: RegisteredNodeOperation,\n        request: GenerationRequestAbort,\n        identity: contract.BindingIdentity,\n        canonical: prepared_request_authority.Prepared,\n    ) PreparedExecutionTxn.InitError!void {",
+        "fn commitBeginExecute(self: *PreparedExecutionTxn, operation: RegisteredNodeOperation) void {",
+        "fn revalidatePreWire(\n        self: *PreparedExecutionTxn,\n        operation: RegisteredNodeOperation,\n    ) error{ InvalidOwner, InvalidReceipt }!void {",
+        "fn rollbackPreWire(self: *PreparedExecutionTxn, operation: RegisteredNodeOperation) SettlementError!SettlementOutcome {",
+        "fn retireIssuerExhausted(self: *PreparedExecutionTxn, operation: RegisteredNodeOperation) SettlementError!SettlementOutcome {",
+        "fn settlePostExecuteReusable(self: *PreparedExecutionTxn, operation: RegisteredNodeOperation) SettlementError!SettlementOutcome {",
+        "fn settlePostExecuteTerminal(\n        self: *PreparedExecutionTxn,\n        operation: RegisteredNodeOperation,\n        fallback_reason: client_poison.ConnectionReason,\n    ) SettlementError!SettlementOutcome {",
+        "fn finishOrFailStop(self: *PreparedExecutionTxn, operation: RegisteredNodeOperation, outcome: SettlementOutcome) void {",
+        "fn ensureSettledOrFailStop(self: *PreparedExecutionTxn, operation: RegisteredNodeOperation) void {",
+    };
+    for (prepared_execution_signatures) |signature|
+        try std.testing.expectEqual(@as(usize, 1), countOccurrences(slot_product, signature));
+    const removed_execution_helpers = [_][]const u8{
+        "ExecuteDisposition",
+        "rollbackExecutingRequest",
+        "terminalizeExecutingRequest",
+        "terminalizeExecutingRequestWithStorageCleanup",
+    };
+    for (removed_execution_helpers) |identifier|
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            countIdentifierOutsideTopLevelTests(slot_product, identifier),
+        );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(
+            slot_product,
+            "var execution_txn: PreparedExecutionTxn = .{};\n    defer execution_txn.ensureSettledOrFailStop(admission.operation);",
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(
+            slot_product,
+            "try execution_txn.initBeforeBeginExecute(\n        admission.operation,\n        request,\n        identity,\n        canonical,\n    );\n    execution_txn.commitBeginExecute(admission.operation);",
+        ),
+    );
+    const execute_generation_start = std.mem.indexOf(
+        u8,
+        slot_product,
+        "pub fn executeGenerationRequest(",
+    ) orelse return error.TestUnexpectedResult;
+    const execute_generation_source = slot_product[execute_generation_start..];
+    const containment_at = std.mem.indexOf(
+        u8,
+        execute_generation_source,
+        "if (!byteRangeFullyContained(\n        execution.response_out_addr,",
+    ) orelse return error.TestUnexpectedResult;
+    const owner_admission_at = std.mem.indexOf(
+        u8,
+        execute_generation_source,
+        "const admission = try beginGenerationRequestOwner(request, false);",
+    ) orelse return error.TestUnexpectedResult;
+    const response_pointer_at = std.mem.indexOf(
+        u8,
+        execute_generation_source,
+        "@ptrFromInt(execution.response_out_addr);",
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(containment_at < owner_admission_at);
+    try std.testing.expect(owner_admission_at < response_pointer_at);
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        countOccurrences(
+            execute_generation_source[0..response_pointer_at],
+            "byteRangeFullyContained(",
+        ),
+    );
+    const canonical_owner_at = std.mem.indexOf(
+        u8,
+        execute_generation_source[owner_admission_at..response_pointer_at],
+        "execution.owner_addr != admission.owner.owner_addr",
+    ) orelse return error.TestUnexpectedResult;
+    _ = canonical_owner_at;
+    const execute_generation_end = std.mem.indexOf(
+        u8,
+        execute_generation_source,
+        "\nfn responseDestinationValid(",
+    ) orelse return error.TestUnexpectedResult;
+    const execute_body = execute_generation_source[0..execute_generation_end];
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(
+            execute_body,
+            "var execution_cleanup: PreparedExecutionCleanup = undefined;",
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(execute_body, "execution_cleanup.init();"));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(execute_body, "defer execution_cleanup.ensureFinishedOrFailStop("));
+    try std.testing.expectEqual(@as(usize, 2), countOccurrences(execute_body, "execution_cleanup.finishOrFailStop("));
+    try std.testing.expectEqual(@as(usize, 21), countOccurrences(execute_body, "settleExecutionAfterCleanup("));
+    try std.testing.expectEqual(@as(usize, 2), countOccurrences(execute_body, ".{ .start = @intFromPtr(&execution_txn), .len = @sizeOf(PreparedExecutionTxn) },"));
+    try std.testing.expectEqual(@as(usize, 2), countOccurrences(execute_body, ".{ .start = @intFromPtr(&execution_cleanup), .len = @sizeOf(PreparedExecutionCleanup) },"));
+    try std.testing.expectEqual(@as(usize, 2), countOccurrences(execute_body, ".{ .start = @intFromPtr(&cleanup_expected_stage), .len = @sizeOf(PreparedExecutionCleanup.CleanupStage) },"));
+    try std.testing.expectEqual(@as(usize, 2), countOccurrences(execute_body, ".{ .start = @intFromPtr(&cleanup_completion), .len = @sizeOf(u8) },"));
+    try std.testing.expectEqual(@as(usize, 3), countOccurrences(execute_body, "execution_txn.rollbackPreWire"));
+    try std.testing.expectEqual(@as(usize, 0), countOccurrences(execute_body, "execution_txn.retireIssuerExhausted"));
+    try std.testing.expectEqual(@as(usize, 0), countOccurrences(execute_body, "execution_txn.settlePostExecuteTerminal"));
+    try std.testing.expectEqual(@as(usize, 0), countOccurrences(execute_body, "execution_txn.settlePostExecuteReusable"));
+    try std.testing.expectEqual(
+        @as(usize, 4),
+        countOccurrences(slot_product, "try self.requireCleanupClosed(operation);"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(
+            slot_product,
+            "fn requireCleanupClosed(self: *PreparedExecutionTxn, operation: RegisteredNodeOperation) SettlementError!void {\n        const node = self.ownerNode(operation) orelse return error.ProtocolError;",
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), countOccurrences(execute_body, "defer guard.endOperationGuard()"));
+    try std.testing.expectEqual(@as(usize, 0), countOccurrences(execute_body, "defer node.client.restoreGenerationAllocatorScope"));
+    try std.testing.expectEqual(@as(usize, 0), countOccurrences(execute_body, "defer payload_ledger.endOperation()"));
+    const settlement_seam_start = std.mem.indexOf(
+        u8,
+        slot_product,
+        "fn settleExecutionAfterCleanup(",
+    ) orelse return error.TestUnexpectedResult;
+    const settlement_seam_end = std.mem.indexOf(
+        u8,
+        slot_product[settlement_seam_start..],
+        "\n/// Executes the attach-compatible request",
+    ) orelse return error.TestUnexpectedResult;
+    const settlement_seam = slot_product[settlement_seam_start .. settlement_seam_start + settlement_seam_end];
+    const seam_cleanup_at = std.mem.indexOf(u8, settlement_seam, "cleanup.finishOrFailStop(") orelse return error.TestUnexpectedResult;
+    const seam_switch_at = std.mem.indexOf(u8, settlement_seam, "const outcome = switch (intent)") orelse return error.TestUnexpectedResult;
+    const seam_finish_at = std.mem.indexOf(u8, settlement_seam, "txn.finishOrFailStop(operation, outcome);") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(seam_cleanup_at < seam_switch_at);
+    try std.testing.expect(seam_switch_at < seam_finish_at);
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(settlement_seam, "txn.rollbackPreWire(operation)"));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(settlement_seam, "txn.retireIssuerExhausted(operation)"));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(settlement_seam, "txn.settlePostExecuteReusable(operation)"));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(settlement_seam, "txn.settlePostExecuteTerminal(operation, reason)"));
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(
+            slot_product,
+            "const RegisteredNodeOperation = struct {\n    node: *ClientNode,\n    registry_index: u16,\n    operation_id: u64,\n    pid: u32,\n};",
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        countOccurrences(slot_product, "self: *PreparedExecutionTxn, node: *ClientNode"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(
+            slot_product,
+            "registered_node_operation_mutex.unlock();\n    const expected = observed orelse return null;\n    while (!client_slot_registry_mutex.tryLock())",
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(
+            slot_product,
+            "const reservation = reserveRegisteredNodeOperation(lookup) catch return error.Busy;\n    errdefer abortRegisteredNodeOperationReservation(reservation);\n    // The sole nested order is ClientSlot registry -> operation registry publication.\n    while (!client_slot_registry_mutex.tryLock())",
+        ),
+    );
+    try std.testing.expectEqual(
+        // One declaration plus the nine direct-index expressions sealed below. Any alias,
+        // helper handoff, for/while scan, or extra lookup adds an unreviewed product use.
+        @as(usize, 10),
+        countIdentifierOutsideTopLevelTests(slot_product, "registered_node_operations"),
+    );
+    const registered_operation_direct_accesses = [_]struct {
+        expected: usize,
+        source: []const u8,
+    }{
+        .{ .expected = 1, .source = "var registered_node_operations:" },
+        .{ .expected = 1, .source = "registered_node_operations[index].state" },
+        .{ .expected = 1, .source = "registered_node_operations[index] = entry" },
+        .{ .expected = 2, .source = "&registered_node_operations[reservation.index]" },
+        .{ .expected = 2, .source = "registered_node_operations.len" },
+        .{ .expected = 1, .source = "const candidate = registered_node_operations[index];" },
+        .{ .expected = 1, .source = "const candidate = &registered_node_operations[index];" },
+        .{ .expected = 1, .source = "const entry = &registered_node_operations[index];" },
+    };
+    for (registered_operation_direct_accesses) |access|
+        try std.testing.expectEqual(access.expected, countOccurrences(slot_product, access.source));
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(
+            slot_product,
+            "registered_node_operation_free_count -= 1;\n    const index: usize = registered_node_operation_free_stack[registered_node_operation_free_count];",
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        countOccurrences(
+            slot_product,
+            "registered_node_operation_free_stack[registered_node_operation_free_count] =",
+        ),
     );
     try std.testing.expectEqual(
         @as(usize, 2),
@@ -2142,7 +2436,8 @@ test "CR3a-2c3b B3-0a response provenance has one strict production path" {
         countIdentifierOutsideTopLevelTests(slot_product, "failStopResponsePayloadTransfer"),
     );
     try std.testing.expectEqual(
-        @as(usize, 2),
+        // Two response strict wrappers plus the private B3-0 request transaction fail-stop.
+        @as(usize, 3),
         countOccurrences(slot_product, ") noreturn {"),
     );
     try std.testing.expectEqual(
@@ -2276,6 +2571,82 @@ test "CR3a-2c3b B3-0a response provenance has one strict production path" {
                 countIdentifierOutsideTopLevelTests(source, "payload_observation_generation"),
             );
     }
+}
+
+test "B3-0.4 focused product gate stays nonempty and dual-mode" {
+    const allocator = std.testing.allocator;
+    const transport_source = try readZigFileZ(
+        allocator,
+        "src/platform/macos/session_host/generation_transport.zig",
+    );
+    defer allocator.free(transport_source);
+    const build_source = try readZigFileZ(allocator, "build.zig");
+    defer allocator.free(build_source);
+
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(
+            transport_source,
+            "const B3ActualSocketScenario = enum {\n    eof_after_request,\n    partial_header_eof,\n    partial_payload_eof,\n};",
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(
+            transport_source,
+            "test \"B3-0.4 actual socket uncertain settlement follows full request then EOF boundaries\"",
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(
+            transport_source,
+            "test \"B3-0.4 execute allocation fail index settles every actual socket attempt\"",
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 2), countOccurrences(transport_source, "for (0..32) |fail_offset|"));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(transport_source, "const response_payload = try allocator.alloc(u8, 64 * 1024);"));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(transport_source, ".eof_after_request => .connection_eof"));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(transport_source, ".partial_header_eof, .partial_payload_eof => .frame_malformed"));
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(build_source, "\"test-session-host-b3-0-4\""),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(build_source, ".filters = &.{\"B3-0.4\"}"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(build_source, "std.builtin.OptimizeMode.Debug"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(build_source, "std.builtin.OptimizeMode.ReleaseFast"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countOccurrences(build_source, "run_b3_0_4_tests.addArg(\"--maru-expect-tests=8\")"),
+    );
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(transport_source, "const B3Scenario = enum {"));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(transport_source, "const b3_expected_rows = [_]B3Expected{"));
+    const table_start = std.mem.indexOf(u8, transport_source, "const b3_expected_rows = [_]B3Expected{") orelse
+        return error.TestUnexpectedResult;
+    const table_end = std.mem.indexOfPos(u8, transport_source, table_start, "\n};") orelse
+        return error.TestUnexpectedResult;
+    const table_source = transport_source[table_start .. table_end + 3];
+    try std.testing.expectEqual(@as(usize, 13), countOccurrences(table_source, ".scenario = ."));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(transport_source, "const B3ErrorClass = enum"));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(transport_source, "const B3ResponseClass = enum"));
+    try std.testing.expectEqual(@as(usize, 13), countOccurrences(table_source, ".final_zero = "));
+    try std.testing.expectEqual(@as(usize, 2), countOccurrences(transport_source, "MARU_SESSION_HOST_B3_STRICT_GATE"));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(build_source, "run_b3_0_4_tests.step.dependOn(&run_b3_strict_cleanup_tests.step)"));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(build_source, "run_b3_0_4_tests.step.dependOn(&run_b3_issuer_cleanup_tests.step)"));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(build_source, ".filters = &.{\"B3-0.1 pre-wire issuer exhaustion\"}"));
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        countOccurrences(build_source, "src/platform/macos/session_host/generation_transport.zig"),
+    );
 }
 
 test "external pump acquires storage claim before reading owned Client" {
@@ -6430,9 +6801,17 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
             countIdentifierOutsideTopLevelTests(source, "deinitPayloadOnly"),
         );
         try std.testing.expectEqual(
-            @as(usize, if (is_generation_transport or is_generation_attachment) 1 else 0),
+            @as(usize, if (is_generation_transport) 2 else if (is_generation_attachment) 1 else 0),
             countIdentifierOutsideTopLevelTests(source, "terminalizeOwned"),
         );
+        if (is_generation_transport) {
+            // The second lexical call is confined to the private B3ExecutionHarness used only by
+            // B3-0.4 tests; the public facade/product callsite remains the original single call.
+            try std.testing.expectEqual(
+                @as(usize, 1),
+                countIdentifierOutsideTopLevelTests(source, "B3ExecutionHarness"),
+            );
+        }
         const owned_helpers = [_]struct {
             name: []const u8,
             transport_count: usize,
@@ -7777,6 +8156,9 @@ fn expectClientSlotOperationReservationSchemas(
     };
     const registered_fields = [_]Field{
         .{ .name = "node", .type_name = "*ClientNode" },
+        .{ .name = "registry_index", .type_name = "u16" },
+        .{ .name = "operation_id", .type_name = "u64" },
+        .{ .name = "pid", .type_name = "u32" },
     };
     const exclusive_fields = [_]Field{
         .{ .name = "registry_entry", .type_name = "ClientSlotRegistryEntry" },

@@ -1955,6 +1955,10 @@ pub fn build(b: *std.Build) void {
     // install step을 거치지 않으므로 `zig build test* --prefix ...`가 사용자 설치 경로를 쓰거나 덮어쓰지 않는다.
     const run_session_host_tests = b.addSystemCommand(&.{"/usr/bin/env"});
     run_session_host_tests.addPrefixedArtifactArg("MARU_SESSION_HOST_PRODUCT_EXE=", exe);
+    const session_host_b3_0_4_step = b.step(
+        "test-session-host-b3-0-4",
+        "B3-0.4 attach execution transaction focused Debug and ReleaseFast gates",
+    );
     if (target.result.os.tag == .macos) {
         const ended_purge_orchestration_drift_test = addProjectTest(b, .{
             .root_module = b.createModule(.{
@@ -2015,6 +2019,95 @@ pub fn build(b: *std.Build) void {
         run_response_alias_fail_stop_test.expectExitCode(0);
         run_response_alias_fail_stop_test.setCwd(b.path("."));
         run_session_host_tests.step.dependOn(&run_response_alias_fail_stop_test.step);
+
+        // B3-0.4 is a Darwin product-path gate. Compile the exact same non-empty test inventory
+        // in both safety modes so a caller's top-level optimize flag cannot silently omit one.
+        inline for (.{
+            std.builtin.OptimizeMode.Debug,
+            std.builtin.OptimizeMode.ReleaseFast,
+        }) |b3_optimize| {
+            const b3_strict_cleanup_tests = addProjectTest(b, .{
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path(
+                        "src/platform/macos/session_host/generation_transport.zig",
+                    ),
+                    .target = target,
+                    .optimize = b3_optimize,
+                    .link_libc = true,
+                    .imports = &.{.{ .name = "maru", .module = maru_mod }},
+                }),
+                .filters = &.{"CR3a-2c3b response allocation alias"},
+            });
+            const run_b3_strict_cleanup_tests = b.addSystemCommand(&.{
+                "/usr/bin/env",
+                "-i",
+                "MARU_SESSION_HOST_RESPONSE_ALIAS_EXEC=run-isolated-v1",
+            });
+            run_b3_strict_cleanup_tests.addArtifactArg(b3_strict_cleanup_tests);
+            run_b3_strict_cleanup_tests.addArg("--maru-expect-tests=2");
+            run_b3_strict_cleanup_tests.expectExitCode(0);
+            run_b3_strict_cleanup_tests.setCwd(b.path("."));
+
+            const b3_issuer_cleanup_tests = addProjectTest(b, .{
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path(
+                        "src/platform/macos/session_host/client_slot.zig",
+                    ),
+                    .target = target,
+                    .optimize = b3_optimize,
+                    .link_libc = true,
+                    .imports = &.{.{ .name = "maru", .module = maru_mod }},
+                }),
+                .filters = &.{"B3-0.1 pre-wire issuer exhaustion"},
+            });
+            const run_b3_issuer_cleanup_tests = b.addSystemCommand(&.{ "/usr/bin/env", "-i" });
+            run_b3_issuer_cleanup_tests.addArtifactArg(b3_issuer_cleanup_tests);
+            run_b3_issuer_cleanup_tests.addArg("--maru-expect-tests=1");
+            run_b3_issuer_cleanup_tests.expectExitCode(0);
+            run_b3_issuer_cleanup_tests.setCwd(b.path("."));
+
+            const b3_0_4_tests = addProjectTest(b, .{
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path(
+                        "src/platform/macos/session_host/generation_transport.zig",
+                    ),
+                    .target = target,
+                    .optimize = b3_optimize,
+                    .link_libc = true,
+                    .imports = &.{.{ .name = "maru", .module = maru_mod }},
+                }),
+                .filters = &.{"B3-0.4"},
+            });
+            const run_b3_0_4_tests = b.addSystemCommand(&.{ "/usr/bin/env", "-i" });
+            run_b3_0_4_tests.addArg("MARU_SESSION_HOST_B3_STRICT_GATE=passed-by-dependency-v1");
+            run_b3_0_4_tests.addArtifactArg(b3_0_4_tests);
+            run_b3_0_4_tests.addArg("--maru-expect-tests=8");
+            run_b3_0_4_tests.expectExitCode(0);
+            run_b3_0_4_tests.setCwd(b.path("."));
+            run_b3_0_4_tests.step.dependOn(&run_b3_strict_cleanup_tests.step);
+            inline for (.{
+                "cleanup_descriptor",
+                "cleanup_stage",
+                "allocator_restore",
+                "guard_end",
+                "ledger_end",
+            }) |strict_case| {
+                const run_b3_cleanup_drift = b.addSystemCommand(&.{
+                    "/usr/bin/env",
+                    "-i",
+                    "MARU_SESSION_HOST_RESPONSE_ALIAS_EXEC=run-isolated-v1",
+                    "MARU_SESSION_HOST_RESPONSE_ALIAS_CASE=" ++ strict_case,
+                });
+                run_b3_cleanup_drift.addArtifactArg(b3_strict_cleanup_tests);
+                run_b3_cleanup_drift.addArg("--maru-expect-tests=2");
+                run_b3_cleanup_drift.expectExitCode(0);
+                run_b3_cleanup_drift.setCwd(b.path("."));
+                run_b3_0_4_tests.step.dependOn(&run_b3_cleanup_drift.step);
+            }
+            run_b3_0_4_tests.step.dependOn(&run_b3_issuer_cleanup_tests.step);
+            session_host_b3_0_4_step.dependOn(&run_b3_0_4_tests.step);
+            run_session_host_tests.step.dependOn(&run_b3_0_4_tests.step);
+        }
 
         const process_runtime_bootstrap_fixture = b.addExecutable(.{
             .name = "maru-session-host-process-runtime-bootstrap-fixture",

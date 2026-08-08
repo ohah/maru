@@ -68,6 +68,10 @@ jobs:
         with:
           version: 2026.2.7
           sha256: d23400ea220cfcbcd04856cf224dc6bc1a5e2a16e6c7365a433b7737c0774c23 # linux-x64 binary
+          # PR에서는 캐시를 **쓰지 않는다**(읽기는 유지). GitHub 캐시는 ref 스코프라 `refs/pull/N/merge`에
+          # 저장된 툴체인 캐시는 그 PR만 읽을 수 있고, PR이 닫히면 영영 못 읽으면서 한도(10GB)만 먹는다.
+          # 실측: 닫힌 PR 13개가 남긴 죽은 캐시 36개 = 4.9GB. main push는 그대로 저장해 모두가 읽는다.
+          cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Run the checks the change needs
         env:
           CODE: ${{ needs.changes.outputs.code }}
@@ -110,6 +114,7 @@ jobs:
         with:
           version: 2026.2.7
           sha256: f8becf318705e1bd91227ed0efee4f9fd988d1d5c66bb48e996f030792a0d3b7 # macos-arm64 binary
+          cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       # 제품 셰이더는 런타임 컴파일(`newLibraryWithSource:`)이라 MSL 문법이 깨져도 빌드·단위 테스트·Metal
       # 계약 테스트가 전부 통과하고 앱을 띄워야만 드러난다. 수 초짜리 컴파일 스모크로 그 사각지대를 닫는다.
       - name: Compile product Metal shaders
@@ -166,6 +171,7 @@ jobs:
         with:
           version: 2026.2.7
           sha256: f8becf318705e1bd91227ed0efee4f9fd988d1d5c66bb48e996f030792a0d3b7 # macos-arm64 binary
+          cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       # Zig 빌드 캐시. **실측**(로컬, session host Debug): 콜드 243초 → 웜 156초(-36%),
       # 캐시 크기 local 607MB + global 48MB. 그 절감분을 655MB 전송이 먹을 수 있어 **가장 무거운 두 잡에만**
       # 먼저 넣고 실제 효과를 본 뒤 확대한다(무작정 5개 잡에 붙이면 저장소 10GB 한도에서 서로 밀어낸다).
@@ -215,6 +221,7 @@ jobs:
         with:
           version: 2026.2.7
           sha256: f8becf318705e1bd91227ed0efee4f9fd988d1d5c66bb48e996f030792a0d3b7 # macos-arm64 binary
+          cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       # Zig 빌드 캐시. **실측**(로컬, session host Debug): 콜드 243초 → 웜 156초(-36%),
       # 캐시 크기 local 607MB + global 48MB. 그 절감분을 655MB 전송이 먹을 수 있어 **가장 무거운 두 잡에만**
       # 먼저 넣고 실제 효과를 본 뒤 확대한다(무작정 5개 잡에 붙이면 저장소 10GB 한도에서 서로 밀어낸다).
@@ -260,6 +267,7 @@ jobs:
         with:
           version: 2026.2.7
           sha256: f8becf318705e1bd91227ed0efee4f9fd988d1d5c66bb48e996f030792a0d3b7 # macos-arm64 binary
+          cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - run: bun install --cwd web --frozen-lockfile
       - run: mise run macos-mermaid-perf
       - name: Upload native Mermaid performance artifact
@@ -289,6 +297,7 @@ jobs:
         with:
           version: 2026.2.7
           sha256: f8becf318705e1bd91227ed0efee4f9fd988d1d5c66bb48e996f030792a0d3b7 # macos-arm64 binary
+          cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Verify real PTY slow-observer isolation and host RSS
         run: zig build test-session-host-slow-observer-macos
       - name: Upload session-host slow-observer artifact
@@ -317,6 +326,7 @@ jobs:
         with:
           version: 2026.2.7
           sha256: d23400ea220cfcbcd04856cf224dc6bc1a5e2a16e6c7365a433b7737c0774c23 # linux-x64 binary
+          cache_save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install libvterm
         run: sudo apt-get update && sudo apt-get install -y libvterm-dev

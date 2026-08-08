@@ -40,6 +40,9 @@ pub extern fn maru_macos_chrome_lab_smoke_render(
     glyph_count: usize,
     /// SB1 §5.2: 사이드바 배경 strip을 그리게 하는 폭(= terminal origin_x). 0이면 strip 없음(기존 시나리오).
     sidebar_width_px: u32,
+    /// SB1 §5.2: strip 색(0xAARRGGBB). **Zig가 토큰에서 준다** — `.m`이 색을 지어내면 제품에 없는 색이
+    /// 골든에 박혀, 리뷰어가 보는 화면이 제품과 달라진다(실제로 한 번 그렇게 찍혔다).
+    sidebar_bg: u32,
     /// SB1 §5.2: 그 strip의 바닥을 끊을 상태바 높이. **이 둘이 있어야 strip 클리핑이 Lab에서 그려진다** —
     /// 그전까지는 `.m`이 두 값을 0으로 박아 두어 §5.2가 자동 가드 없이 남아 있었다.
     status_bar_height_px: u32,

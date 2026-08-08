@@ -120,12 +120,15 @@ const State = struct {
     /// 슬롯을 공유하면 그때마다 한쪽이 취소돼 "가끔 스냅샷이 안 찍히는" 상태가 된다.
     snapshot_inflight: usize = 0,
     snapshot_result: ?SnapshotResult = null,
+    branches_inflight: usize = 0,
+    branches_result: ?BranchesResult = null,
 
     fn release(self: *State) void {
         if (self.refs.fetchSub(1, .acq_rel) != 1) return;
         if (self.result) |*r| r.deinit(self.allocator);
         if (self.diff_result) |*r| r.deinit(self.allocator);
         if (self.snapshot_result) |*r| r.deinit(self.allocator);
+        if (self.branches_result) |*r| r.deinit(self.allocator);
         const allocator = self.allocator;
         allocator.destroy(self);
     }
@@ -154,6 +157,19 @@ const Job = struct {
 };
 
 /// 턴 스냅샷 결과. `tree`가 비어 있으면 실패다(저장소가 아니거나 git이 거절).
+/// 로컬 브랜치 목록. `for-each-ref` 출력을 **줄 단위 그대로** 담는다 — 쪼개는 것은 소비자(순수 파서)가 한다.
+pub const BranchesResult = struct {
+    request_id: u64,
+    ok: bool = false,
+    /// `\n`으로 구분된 브랜치 이름들(owned). 실패면 빈 슬라이스.
+    text: []u8 = &.{},
+
+    pub fn deinit(self: *BranchesResult, allocator: std.mem.Allocator) void {
+        allocator.free(self.text);
+        self.text = &.{};
+    }
+};
+
 pub const SnapshotResult = struct {
     tree: []u8 = &.{},
     surface_id: u64 = 0,
@@ -311,6 +327,54 @@ pub const Backend = struct {
 
     /// 턴 스냅샷을 찍는다(별도 슬롯). 실패하면 그냥 안 찍힌 것이고, 다음 턴에 다시 시도한다 —
     /// 스냅샷 실패로 목록·diff가 영향을 받지 않게 결과 슬롯을 나눠 뒀다.
+    /// 로컬 브랜치 목록을 비동기로 읽는다. 읽기 전용이라 index/네트워크를 안 건드린다(git_command.branches 계약).
+    /// 이미 하나가 돌고 있거나 결과가 안 걷혔으면 **거절한다**(false) — 클릭 연타로 프로세스가 쌓이지 않게.
+    pub fn submitBranches(self: *Backend, git_exe: []const u8, repo: []const u8, request_id: u64) bool {
+        const state = self.state orelse return false;
+        state.mutex.lockUncancelable(state.io);
+        if (state.shutting_down or state.branches_inflight >= max_inflight or state.branches_result != null) {
+            state.mutex.unlock(state.io);
+            return false;
+        }
+        state.branches_inflight += 1;
+        _ = state.refs.fetchAdd(1, .monotonic);
+        state.mutex.unlock(state.io);
+
+        const job = state.allocator.create(Job) catch return self.abandonBranches();
+        job.* = .{ .state = state, .git_exe = &.{}, .repo = &.{}, .request_id = request_id };
+        job.git_exe = state.allocator.dupe(u8, git_exe) catch return self.releaseBranchesJob(job);
+        job.repo = state.allocator.dupe(u8, repo) catch return self.releaseBranchesJob(job);
+        const thread = std.Thread.spawn(.{}, branchesWorker, .{job}) catch return self.releaseBranchesJob(job);
+        thread.detach();
+        return true;
+    }
+
+    fn releaseBranchesJob(self: *Backend, job: *Job) bool {
+        const state = job.state;
+        state.allocator.free(job.git_exe);
+        state.allocator.free(job.repo);
+        state.allocator.destroy(job);
+        return self.abandonBranches();
+    }
+
+    fn abandonBranches(self: *Backend) bool {
+        const state = self.state orelse return false;
+        state.mutex.lockUncancelable(state.io);
+        state.branches_inflight -= 1;
+        state.mutex.unlock(state.io);
+        state.release();
+        return false;
+    }
+
+    pub fn takeBranchesResult(self: *Backend) ?BranchesResult {
+        const state = self.state orelse return null;
+        state.mutex.lockUncancelable(state.io);
+        defer state.mutex.unlock(state.io);
+        const result = state.branches_result orelse return null;
+        state.branches_result = null;
+        return result;
+    }
+
     pub fn submitSnapshot(
         self: *Backend,
         git_exe: []const u8,
@@ -427,6 +491,27 @@ fn snapshotWorker(job: *SnapshotJob) void {
     }
     state.snapshot_inflight -= 1;
     state.mutex.unlock(state.io);
+    state.release();
+}
+
+fn branchesWorker(job: *Job) void {
+    const state = job.state;
+    var result: BranchesResult = .{ .request_id = job.request_id };
+    if (run(state.allocator, .branches, job.git_exe, job.repo)) |out| {
+        result.text = out.bytes;
+        result.ok = true;
+    } else |_| {}
+
+    state.mutex.lockUncancelable(state.io);
+    // 걷어가지 않은 앞선 결과가 있으면 그것을 버리고 새것을 남긴다(최신이 맞다).
+    if (state.branches_result) |*old| old.deinit(state.allocator);
+    state.branches_result = result;
+    state.branches_inflight -= 1;
+    state.mutex.unlock(state.io);
+
+    state.allocator.free(job.git_exe);
+    state.allocator.free(job.repo);
+    state.allocator.destroy(job);
     state.release();
 }
 

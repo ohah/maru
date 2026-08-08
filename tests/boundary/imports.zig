@@ -67,7 +67,8 @@ const ExternalReflectionInventoryProof = struct {
 const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     .{ .path = "src/app/term_runtime_backend.zig", .count = 3, .digest_hex = "da55524e0da397637fae2ce52c0030719551a1ae2a931ae9cbd7bf9c8814a335" },
     .{ .path = "src/config/schema.zig", .count = 108, .digest_hex = "53943f2f20ec8e47ab22c0eb0c0206869e0ddb26e6ddb57ef02df1b2ae2d34c9" },
-    .{ .path = "src/platform/macos/git_backend.zig", .count = 2, .digest_hex = "2c0c8a5fd78388c85a7914123340b357829cbfc0ab92ab474df60d1639b8bb4f" },
+    // 브랜치 목록 잡(submitBranches/takeBranchesResult/branchesWorker)이 붙어 바뀐다. count는 2 그대로다.
+    .{ .path = "src/platform/macos/git_backend.zig", .count = 2, .digest_hex = "6a7538dfdc98ece9f85c70584a2500e505f7d278d84716190780585fa198a7d6" },
     // 모달 오버레이 집합이 `modalInputRole` 역할표에서 파생되면서 `@field(self.chrome_host, ...)` 접근
     // 하나가 제품 경로에 들어왔다(count 3 → 4). 그 reflection은 오버레이 필드를 이름으로 읽는 데만 쓰고
     // 다른 소유권을 만들지 않는다 — 손으로 유지하던 or 체인의 누락(`c822b336`)을 구조적으로 없애는 대가다.
@@ -140,7 +141,8 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     // SV4b 후속(스크롤바 layer 3 복원 + hover 게이트)으로 또 바뀐다. count는 4 그대로다.
     // 사이드바 스크롤바 hover 강조(커서는 안 바꾸고 alpha만)로 또 바뀐다. count는 4 그대로다.
     // 사이드바 셀 scissor 게이트 수정(밴드 배열 → 실제로 그릴 셀이 있는가)으로 또 바뀐다. count는 4 그대로다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "607efbe0b928750ae943ea76eff9e3942d0bbff00680e065016dd296659a7b47" },
+    // 상태바 브랜치 메뉴(요청·걷기·선택 주입)로 또 바뀐다. count는 4 그대로다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "7d070975d234028afd42a20484c0ba55d5976ba4c2a1c4d21bca1947f155c354" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

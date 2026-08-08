@@ -1353,6 +1353,16 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    두 새 artifact도 위 B3-0a의 `/usr/bin/env -i`, parent-minted pipe capability, inert collector, zero-test 방지 규율을 각각 독립 상속한다.
    env key는 correction의 `MARU_SESSION_HOST_RPC_REUSE_EXEC`, B3-6의 `MARU_SESSION_HOST_RPC_SUBSTRATE_EXEC`이며 각 key는
    `run-isolated-v1|execute-fixture-v1|skip-in-aggregate-v1` closed mode만 허용한다. 서로의 key/capability를 교차 수용하지 않는다.
+   B3-6 peer matrix의 `empty`는 response header 전 zero-byte EOF를 뜻한다. correct-id zero-length payload는 ownership-only 성공 후
+   reusable settlement하며 JSON/application 의미 판정은 0이다. exact peer cases는 bad magic, wrong major, invalid kind, wrong request id,
+   declared payload cap+1, truncated header, truncated payload, zero-byte EOF, actual allocation ordinal 전수와 correct-id empty payload다.
+   correct response 뒤 같은 socket write에 붙은 duplicate old-id response는 첫 cycle 정산 뒤 다음 cycle correlation loss로 terminal되고
+   두 번째 payload publication/rearm은 0이다. 미래 request id의 완전한 response를 악성 host가 미리 보내는 경우는 wire상 정상 future
+   response와 구분할 수 없는 compromised-peer 범위이며 local ownership gate의 증거로 세지 않는다.
+   B3-6 child stage pipe는 fixed-width `{version,case_id,nonce,stage}` record만 받고 `free_once -> authority_idle -> evidence_retired ->
+   rearm_precondition -> case_final` 순서를 exact 검증한다. stderr marker만으로는 성공하지 않으며 exec 126/127, nonce/case mismatch,
+   generic panic, stage 누락·중복·역전은 실패다. parent는 stderr/stage를 동시에 nonblocking drain하고 각 capture cap을 넘은 bytes도 EOF까지
+   discard-drain한다. overflow/truncation은 실패이며 absolute timeout 뒤 child를 kill하고 waitpid를 exact once 수행한다.
 
    request-side canonical transcript는 같은 binding entry의 `PreparedRequestAuthority` 하나가 소유한다. lifecycle은 raw tag를 먼저
    검사하는 `idle|prepared|executing|terminal`이고, seal은 transport/binding identity, request tag/family, request id/digest,

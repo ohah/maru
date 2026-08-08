@@ -21433,13 +21433,19 @@ pub const AppSession = struct {
             self.showNotice("브랜치가 없습니다");
             return;
         }
+        // **앵커가 있어야 연다.** 목록 읽기는 비동기라 그 사이 바가 사라질 수 있다(`status-bar.show` 끄기·
+        // quick terminal 전환). 그때 열면 앵커 없이 창 바닥에 붙어, 사용자는 누른 적 없는 메뉴를 보게 된다.
+        // 조용히 접는 게 맞다 — 클릭 대상이 화면에 없으므로 알릴 것도 없다.
         var anchor_x: f64 = 0;
-        var anchor_y: f64 = @floatFromInt(self.backing_height_px -| self.statusBarHeightPx());
+        var anchor_y: f64 = 0;
+        var anchored = false;
         for (self.statusBarTree().entries) |e| {
             if (e.id != @intFromEnum(chrome.components.status_bar.ItemId.git_branch)) continue;
             anchor_x = e.rect.x;
             anchor_y = e.rect.y;
+            anchored = true;
         }
+        if (!anchored) return;
         self.closeContextMenu();
         for (self.branch_menu_names[0..self.branch_menu_len], 0..) |name, i| self.context_menu_items_buf[i] = name;
         self.context_menu_items_len = self.branch_menu_len;
@@ -64329,6 +64335,17 @@ test "SB1: 브랜치 메뉴는 상태바를 덮지 않는다" {
     _ = try session.resize(1000, 700, 1000);
     _ = try session.tick();
 
+    // 이 테스트는 **앵커가 실제로 있을 때의 기하**를 보므로 상태바에 브랜치 항목을 세운다.
+    // (cwd 관측이 있어야 `termGitBranch`가 값을 낸다 — 테스트 실행 디렉터리가 git 저장소다.)
+    const term = session.activePane().activeTerm();
+    term.rt.observation.availability = .current;
+    term.rt.observation.cwd.clearRetainingCapacity();
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_ptr = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return error.SkipZigTest;
+    try term.rt.observation.cwd.appendSlice(allocator, std.mem.span(@as([*:0]u8, @ptrCast(cwd_ptr))));
+    session.metal_dirty = true;
+    _ = try session.tick();
+
     session.branch_menu_text = try allocator.dupe(u8, "main\nfeat/a\nfix/b\n");
     session.branch_menu_len = git_command.collectBranches(session.branch_menu_text, &session.branch_menu_names);
     session.openBranchMenu();
@@ -64376,6 +64393,38 @@ test "SB1: 브랜치 메뉴는 상태바를 덮지 않는다" {
     try std.testing.expect(found);
 }
 
+// SB1: **요청 중에 상태바가 사라지면 메뉴를 띄우면 안 된다.** 목록 읽기는 비동기라, 그 사이 사용자가
+// `status-bar.show`를 끄거나 quick terminal로 바뀌면 **클릭한 대상이 화면에서 없어진다.** 그때 결과가
+// 도착해 메뉴를 열면 앵커가 없어 창 바닥에 붙고, 사용자는 누른 적 없는 메뉴를 보게 된다.
+test "SB1: 브랜치 목록 요청 중 상태바가 사라지면 메뉴를 열지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1000, 700, 1000);
+    _ = try session.tick();
+
+    // 목록은 도착했는데 그 사이 바가 꺼졌다.
+    session.branch_menu_text = try allocator.dupe(u8, "main\nfeat/a\n");
+    session.branch_menu_len = git_command.collectBranches(session.branch_menu_text, &session.branch_menu_names);
+    session.loaded_config.config.status_bar.show = false;
+    session.metal_dirty = true;
+    _ = try session.tick();
+    try std.testing.expectEqual(@as(u32, 0), session.statusBarHeightPx()); // 전제: 바가 사라졌다
+
+    session.openBranchMenu();
+    try std.testing.expect(!session.branch_menu_open);
+    try std.testing.expect(!session.chrome_host.context_menu.open);
+}
+
 // SB1: **목록 버퍼를 해제하면 그것을 가리키던 메뉴도 닫아야 한다.** 메뉴 항목(`context_menu_items_buf`)은
 // `branch_menu_text`를 빌린다 — 해제하고 메뉴를 열어 두면 다음 draw가 해제된 메모리를 읽는다(UAF).
 // 재발행이 항상 뒤따르는 것도 아니다: 새 목록이 0개면 `openBranchMenu`가 알림만 띄우고 돌아온다.
@@ -64397,8 +64446,12 @@ test "SB1: 브랜치 목록 버퍼를 비우면 열린 메뉴도 닫힌다(dangl
 
     session.branch_menu_text = try allocator.dupe(u8, "main\nfeat/a\n");
     session.branch_menu_len = git_command.collectBranches(session.branch_menu_text, &session.branch_menu_names);
-    session.openBranchMenu();
-    try std.testing.expect(session.branch_menu_open);
+    // 메뉴가 열린 상태를 만든다. `openBranchMenu`를 쓰지 않는 이유는 그 함수가 **앵커(상태바 브랜치 항목)를
+    // 요구**하기 때문이다 — 이 테스트의 계약은 "해제하면 닫힌다"이지 "무엇이 열 수 있나"가 아니다.
+    for (session.branch_menu_names[0..session.branch_menu_len], 0..) |name, i| session.context_menu_items_buf[i] = name;
+    session.context_menu_items_len = session.branch_menu_len;
+    session.branch_menu_open = true;
+    session.chrome_host.context_menu.show(0, 0, session.branch_menu_len);
     try std.testing.expect(session.chrome_host.context_menu.open);
 
     // 버퍼를 비운다 — 이 시점에 메뉴가 열린 채면 항목 포인터가 해제된 메모리를 가리킨다.

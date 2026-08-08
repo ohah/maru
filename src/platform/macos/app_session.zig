@@ -4766,23 +4766,28 @@ pub const AppSession = struct {
             .backing_width_px = self.backing_width_px,
             .backing_height_px = self.backing_height_px,
             .sidebar_width_px = self.sidebar_width_px,
+            // 도크와 터미널이 **같은 상단 띠**에서 시작한다. 예전에는 도크만 28pt 고정 safety band를 따로
+            // 받았는데, 그러면 폰트를 키우거나 사이드바를 접어 `titlebar_strip_px`가 움직일 때 두 상단 바의
+            // 시작선이 갈렸다 — 아래 경계선(`chromeBarHeightPx`)을 맞춰 놔도 시작이 다르면 여전히 어긋나
+            // 보인다(사용자 보고). 28pt는 그 띠의 **하한**으로 `computeTitlebarStripPx` 안에 그대로 살아 있고
+            // (접힘이면 신호등 세로 높이인 30pt), 뷰와 무관하다는 계약도 그대로다.
             .titlebar_height_px = self.titlebar_strip_px,
-            // 도크의 시작선도 terminal font의 cell/titlebar metric을 입력으로 삼지 않는다. 예전에는
-            // explorer만 `titlebar_height_px`(= max(셀 높이, 28pt))로 떨어져, 폰트를 키우면 도크 시작선이
-            // 따라 내려가고 AI 세션과 2px씩 어긋났다. 기본 폰트에서 두 값이 우연히 같아 안 보였을 뿐이다.
-            // 모든 뷰가 같은 28pt native-title safety band에서 시작한다.
-            .dock_top_px = layout_math.ptToPx(titlebar_strip_min_pt, self.scale_milli),
             .status_bar_px = self.statusBarHeightPx(),
             .cell_width_px = self.cell_width_px,
             .cell_height_px = self.cell_height_px,
             .scale_milli = self.scale_milli,
             .divider_px = self.dividerThicknessPx(),
-            // view bar는 **도크의 chrome**이지 터미널의 chrome이 아니다. 예전에는 explorer/source-control만
-            // pane tab bar와 높이를 맞췄는데(terminal cell 높이 + padding), 그러면 같은 아이콘 줄이 뷰를
-            // 바꿀 때마다 오르내리고(사용자 보고: 실측 53px ↔ 80px) 터미널 폰트 크기가 도크 기하를 정하게
-            // 된다 — layering-and-portability가 금지하는 방향이다. 모든 뷰가 같은 Chrome logical metric을
-            // 쓰므로 뷰 전환이 아이콘 위치를 움직이지 않는다.
-            .view_bar_px = chrome.components.session_dock.types.DockMetrics.resolve(self.agentSessionDockScaleMilli()).view_switcher_h,
+            // view bar는 **도크의 chrome**이지 터미널의 chrome이 아니다. 그래서 예전 explorer 경로처럼
+            // `paneBarHeightPx`(terminal cell 높이 + padding)를 받지 않는다 — 그 식은 뷰마다 아이콘 줄이
+            // 오르내리게 했고(사용자 보고: 실측 53px ↔ 80px) 터미널 폰트가 도크 기하를 정하게 만든다
+            // (layering-and-portability 금지).
+            //
+            // 대신 두 바가 **공유 logical token**(`space.bar_height_pt`)을 통해 같은 높이를 낸다 —
+            // docs/agent-session-list.md §2.1.3이 "정렬이 필요하면 terminal 쪽이 아니라 두 chrome이 공유하는
+            // logical token을 새로 만든다"고 예고한 해법이다. 방향이 반대라는 점이 핵심이다: 도크가 터미널
+            // 식을 물려받는 게 아니라, 터미널 탭 바가 도크가 쓰던 40pt를 함께 본다. 모든 뷰가 이 값 하나를
+            // 쓰므로 뷰 전환도, 터미널 폰트 변경도 아이콘 위치를 움직이지 않는다.
+            .view_bar_px = self.chromeBarHeightPx(),
             .side = if (self.dock_initialized) self.dock.side else .right,
             .size_pt = if (self.dock_initialized) self.dock.size else 0,
             .visible = self.dockVisible(),
@@ -5079,21 +5084,55 @@ pub const AppSession = struct {
     }
 
     /// 상단 타이틀바 띠 높이(backing px). quick terminal(신호등 없음)=0. 접힘이면 터미널이 전폭이라 신호등 세로
-    /// 높이(collapsed_titlebar_min_pt)를 확보(겹침 방지), 펼침이면 한 줄(터미널이 사이드바 우측이라 신호등 아래 아님).
+    /// 높이(collapsed_titlebar_min_pt)를 확보(겹침 방지), 펼침이면 native-title safety band(titlebar_strip_min_pt).
     /// refreshCellMetrics(메트릭 변경)·toggleSidebarCollapsed(접힘 상태 변경)가 호출해 titlebar_strip_px에 보관한다.
+    ///
+    /// **이 띠는 폰트 독립이다.** 예전에는 `@max(cell_height, pt)`라 큰 폰트에서 셀 항이 이겼는데, 이 값은 도크
+    /// 시작선이기도 해서(`dock_layout`의 `titlebar_height_px`) terminal 폰트가 도크 rect를 밀어냈다 —
+    /// `font-scale-rects` fixture가 그걸 잡았다(14pt↔24pt 도크 rect 12px 이동). 확보해야 하는 것은 **신호등
+    /// 세로 높이**이지 터미널 한 줄이 아니므로, pt 하나면 충분하다(`chromeBarHeightPx`와 같은 규율).
     fn computeTitlebarStripPx(self: *const AppSession) u32 {
         if (self.chrome_minimal) return 0;
-        if (self.sidebar_collapsed) return @max(self.cell_height_px, layout_math.ptToPx(collapsed_titlebar_min_pt, self.scale_milli));
-        return @max(self.cell_height_px, layout_math.ptToPx(titlebar_strip_min_pt, self.scale_milli));
+        if (self.sidebar_collapsed) return layout_math.ptToPx(collapsed_titlebar_min_pt, self.scale_milli);
+        return layout_math.ptToPx(titlebar_strip_min_pt, self.scale_milli);
     }
 
-    /// per-pane 가로 탭 바의 backing 픽셀 높이 = cell 높이 + 위아래 tab_bar_pad_y_px 패딩(rich — 텍스트 세로 여유).
-    /// tui(pad=0)면 cell 1칸(기존). 제목은 origin_y를 pad_y만큼 내려 바 가운데에 둔다. paneTermRect가 이 높이만큼
-    /// 내려 터미널 영역을 잘라 바와 터미널 첫 줄이 안 겹친다. cell 높이 미상이면 0(바 없음).
+    /// 창 상단 chrome 바 하나의 backing 픽셀 높이. **터미널 pane 탭 바와 도크 뷰 스위처가 같이 쓴다** —
+    /// 두 바는 같은 y에서 시작하므로, 높이를 공유해야 아래 경계선이 한 줄로 맞는다(사용자 보고: 어긋남).
+    ///
+    /// 높이는 chrome 토큰(`space.bar_height_pt`)이 정한다 — 그것이 두 chrome이 공유하는 유일한 정렬 계약이기
+    /// 때문이다(docs/agent-session-list.md §2.1.3). **terminal cell을 `@max`로도 섞지 않는다**: 한때
+    /// `@max(pt, cell + 2*pad)`였는데 그러면 terminal 폰트가 도크 기하를 정하게 되어(layering-and-portability
+    /// 금지) `font-scale-rects` fixture가 실제로 깨졌다(14pt↔24pt 도크 rect 12px 이동, 1x↔2x 비례 이탈).
+    ///
+    /// 토큰이 0인 테마(tui)만 셀 파생으로 떨어진다. tui는 셀 격자 정렬이 정체성이고 탭 바 배경도 셀 한 행이라
+    /// 그 경로에서는 폰트 파생이 요구사항이다. 어느 쪽이든 두 바가 이 함수 하나를 쓰므로 정렬은 유지된다.
+    ///
+    /// cell 높이 미상이면 0(바 없음) — buildChromeTokens 읽기 전 가드.
+    fn chromeBarHeightPx(self: *const AppSession) u32 {
+        if (self.cell_height_px == 0) return 0;
+        const space = self.buildChromeTokens().space;
+        if (space.bar_height_pt > 0) return layout_math.ptToPx(space.bar_height_pt, self.scale_milli);
+        return self.cell_height_px +| (2 * @as(u32, space.tab_bar_pad_y_px));
+    }
+
+    /// chrome 바(탭 바·파일 헤더 밴드·주소 밴드) 안에서 텍스트 한 줄이 시작하는 세로 오프셋(바 상단 기준).
+    ///
+    /// **`tab_bar_pad_y_px`를 그대로 쓰면 안 된다** — 바 높이가 chrome token(`bar_height_pt`)에서 나오는
+    /// 테마에서는 `바 높이 = cell + 2*pad`가 성립하지 않는다. 그때 pad를 오프셋으로 쓰면 제목이 바 위쪽에
+    /// 붙는다(폰트가 작을수록 심해진다). 상태바가 쓰는 `(h -| cell_height) / 2`와 같은 식으로 실제 바 높이에서
+    /// 파생한다 — token이 0이라 셀 파생으로 떨어지는 tui에서는 이 식이 pad_y와 같은 값을 낸다(동작 보존).
+    fn chromeBarTextOffsetY(self: *const AppSession, bar_h: u32) u32 {
+        return (bar_h -| self.cell_height_px) / 2;
+    }
+
+    /// per-pane 가로 탭 바의 backing 픽셀 높이. 높이 자체는 도크 뷰 스위처와 공유하는 `chromeBarHeightPx`가
+    /// 정하고, 여기서는 **터미널 쪽 게이트만** 얹는다. 제목은 origin_y를 pad_y만큼 내려 바 가운데에 두고,
+    /// paneTermRect가 이 높이만큼 내려 터미널 영역을 잘라 바와 터미널 첫 줄이 안 겹친다.
     /// chrome_minimal(quick terminal minimal)이면 0 — 바를 안 예약해 paneTermRect/paneBarRect가 탭 바를 통째로 끈다.
     fn paneBarHeightPx(self: *const AppSession) u32 {
-        if (self.chrome_minimal or self.cell_height_px == 0) return 0; // cell 미상이면 0(바 없음, doc) — buildChromeTokens 읽기 전 가드
-        return self.cell_height_px + 2 * @as(u32, self.buildChromeTokens().space.tab_bar_pad_y_px);
+        if (self.chrome_minimal) return 0;
+        return self.chromeBarHeightPx();
     }
 
     const PaneGeometry = struct {
@@ -5310,7 +5349,7 @@ pub const AppSession = struct {
         const lay = chrome.components.text_field.fieldLayout(self.addr_field.view(), .{ .cols = @intCast(cols), .nav_end = @intCast(nav_end) });
         const caret_col: u32 = @min(lay.caret_col, cols -| 1); // 밴드 밖(cols 초과)이면 우경계로 상한 클램프
         const bar_h = pb.full.h;
-        const text_origin_y = pb.full.y + bar_h + @as(u32, self.buildChromeTokens().space.tab_bar_pad_y_px); // 렌더 band_text_origin_y와 동일
+        const text_origin_y = pb.full.y + bar_h + self.chromeBarTextOffsetY(bar_h); // 렌더 band_text_origin_y와 동일(밴드 높이 = bar_h)
         return .{
             .x = @intCast(pb.full.x + caret_col * cw),
             .y = @intCast(text_origin_y),
@@ -5392,10 +5431,10 @@ pub const AppSession = struct {
                 // buildPaneLabelDrawList: 이름이 col 1부터(좌패딩 1). 긴 이름은 말줄임되므로 caret을 라벨 세그먼트
                 // 우경계(label_cols-1, 마지막 칸은 탭과의 간격)로 clamp해 후보창이 라벨 밖(탭 위)으로 새지 않게.
                 const caret_col = @min(1 + qcols, if (pb.label_cols > 1) pb.label_cols - 1 else 1);
-                const pad_y = self.buildChromeTokens().space.tab_bar_pad_y_px;
+                const text_offset_y = self.chromeBarTextOffsetY(pb.full.h); // 렌더 text_origin_y와 같은 식
                 return .{
                     .x = @intCast(pb.full.x + (pb.grip_cols + caret_col) * cw), // 이름은 grip 핸들 뒤에서 시작
-                    .y = @intCast(pb.full.y + pad_y),
+                    .y = @intCast(pb.full.y + text_offset_y),
                     .w = @intCast(cw),
                     .h = @intCast(ch),
                 };
@@ -5408,10 +5447,10 @@ pub const AppSession = struct {
                 // clamp해 caret/후보창이 인접 탭 위로 새지 않게 한다(end_col<=start_col인 overflow 탭이면 m.cols 폴백).
                 const seg_end = if (seg.end_col > seg.start_col) seg.end_col else m.cols;
                 const caret_col = @min(seg.start_col + 1 + qcols, seg_end);
-                const pad_y = self.buildChromeTokens().space.tab_bar_pad_y_px;
+                const text_offset_y = self.chromeBarTextOffsetY(loc.pb.tabs.h); // 렌더 text_origin_y와 같은 식
                 return .{
                     .x = @intCast(loc.pb.tabs.x + caret_col * cw),
-                    .y = @intCast(loc.pb.tabs.y + pad_y),
+                    .y = @intCast(loc.pb.tabs.y + text_offset_y),
                     .w = @intCast(cw),
                     .h = @intCast(ch),
                 };
@@ -30767,8 +30806,9 @@ pub const AppSession = struct {
                 //    커서 suffix가 합쳐진 cells의 끝에 남도록 '터미널 frame들 앞'에 둔다. 바 없는 작은 pane은 건너뜀.
                 for (leaf_rects.items) |lr| {
                     const pb = self.paneBar(lr.rect, lr.leaf) orelse continue;
-                    // 제목/라벨을 위 패딩만큼 내려 바 가운데에. tui(pad=0)면 바 상단(full.y).
-                    const text_origin_y = pb.full.y + @as(u32, self.buildChromeTokens().space.tab_bar_pad_y_px);
+                    // 제목/라벨을 바 세로 가운데에. 바 높이에 폰트 독립 하한이 들어올 수 있으므로 pad가 아니라
+                    // 실제 바 높이에서 오프셋을 파생한다(chromeBarTextOffsetY — IME caret도 같은 식).
+                    const text_origin_y = pb.full.y + self.chromeBarTextOffsetY(pb.full.h);
 
                     // 1a-grip) pane grip 핸들(좌측, 항상 예약·항상 표시) — [full.x, full.x+grip_cols*cw)에 grip 글리프. pane
                     //     통째 드래그 손잡이(아래 마우스 arm과 같은 영역). 라벨·탭은 grip 뒤로 밀려 안 겹친다. muted 색.
@@ -30890,7 +30930,7 @@ pub const AppSession = struct {
                         ) catch null;
                         if (header_dl) |list| self.collectShaped(&collected, list, pane_frame_builder, .{ .pane = .{
                             .origin_x = band.band.x,
-                            .origin_y = band.band.y + @as(u32, self.buildChromeTokens().space.tab_bar_pad_y_px),
+                            .origin_y = band.band.y + self.chromeBarTextOffsetY(band.band.h),
                             .colors = tabbar_colors,
                         } });
                     }
@@ -30969,7 +31009,7 @@ pub const AppSession = struct {
                                 // 비활성 버튼 = dimRgb(grip 손잡이와 같은 흐린 톤). 렌더가 쓰는 nav_button_w/count는 hit-test와 같은 단일 소스.
                                 const button_fg: terminal.Color = .{ .rgb = self.appearance.theme.sidebar_foreground };
                                 const button_dim_fg: terminal.Color = .{ .rgb = dimRgb(self.appearance.theme.sidebar_foreground) };
-                                const band_text_origin_y = band_rect.y + @as(u32, self.buildChromeTokens().space.tab_bar_pad_y_px); // 탭 바 text_origin_y와 같은 pad_y
+                                const band_text_origin_y = band_rect.y + self.chromeBarTextOffsetY(band_rect.h); // 탭 바 text_origin_y와 같은 식
                                 if (coretext_frame_builder.buildPaneAddressBarDrawList(self.allocator, url, @intCast(addr_cols), addr_fg, edit_layout, caret_color, caret_text, can_back, can_fwd, button_fg, button_dim_fg, nav_button_w, nav_button_count)) |adl| {
                                     self.collectShaped(&collected, adl, pane_frame_builder, .{ .pane = .{ .origin_x = pb.full.x, .origin_y = band_text_origin_y, .colors = tabbar_colors } });
                                 } else |_| {} // draw 생성 OOM은 탭 바처럼 무시(밴드 배경만이라도)
@@ -56455,11 +56495,16 @@ test "paneGeometry owns bar body and contained grid for normal tiny minimal and 
     var session: AppSession = undefined;
     // paneBarHeightPx → buildChromeTokens가 appearance(theme·chrome_theme)를 읽으므로 undefined 세션에 명시 초기화한다
     // (chrome_theme=.tui → tab_bar_pad_y_px=3 → 바=cell+6). 이 테스트는 tui 셀 기하를 검증하므로 기본값(rich)과
-    // 무관하게 tui로 고정한다(rich면 pad_y=6 → 바=cell+12). undefined 필드 읽기 UB(0xaa 우연 green) 회피.
+    // 무관하게 tui로 고정한다(rich면 pad_y=8). undefined 필드 읽기 UB(0xaa 우연 green) 회피.
     session.appearance = config_mod.resolveAppearance(.{ .chrome_theme = .tui }) catch unreachable;
     session.chrome_minimal = false; // paneBarHeightPx가 읽는다(false=바 있음)
+    // 바 높이가 도크 뷰 스위처와 공유하는 chrome token(`space.bar_height_pt`)에서 나온 뒤로 `scale_milli`도
+    // 읽는다. 초기화하지 않으면 쓰레기 scale이 바 높이를 rect.h보다 크게 만들어 바가 통째로 사라지고
+    // (`bar == null`) 아래 `.?`가 panic한다 — 실제로 그렇게 터졌다. tui는 token이 0이라 셀 파생으로 떨어져
+    // 값 자체는 아래 기대값에 영향을 주지 않지만, rich 구간이 같은 세션을 이어 쓰므로 결정적 scale이 필요하다.
+    session.scale_milli = 1000;
     session.cell_width_px = 12;
-    session.cell_height_px = 12; // paneBarHeightPx = cell_height + 2*pad_y(tui 3) = 18
+    session.cell_height_px = 12; // tui는 token 0 → 셀 파생: cell_height + 2*pad_y(tui 3) = 18
     session.window_padding_px = .{}; // paneTermRect가 이제 padding을 읽는다 — 바 기하만 격리(undefined UB 회피)
 
     const rect: maru.session.SplitRect = .{ .x = 180, .y = 0, .w = 800, .h = 600 };
@@ -56497,11 +56542,13 @@ test "paneGeometry owns bar body and contained grid for normal tiny minimal and 
     try std.testing.expect(geometry.grid.x + geometry.grid.w <= body_right);
     try std.testing.expect(geometry.grid.y + geometry.grid.h <= body_bottom);
 
-    // rich는 tab bar padding이 더 크지만 같은 보수 관계를 유지한다.
+    // rich는 token(40pt)이 셀과 **무관하게** 바 높이를 정하므로 더 두껍지만, 같은 보수 관계를 유지한다.
+    // 이 구간이 token 경로의 회귀 가드다 — tui(token 0 = 셀 파생)만 검증하면 token이 죽어도 green이 된다.
     session.appearance = config_mod.resolveAppearance(.{ .chrome_theme = .rich }) catch unreachable;
     session.window_padding_px = .{};
     geometry = session.paneGeometry(rect);
     const rich_bar = geometry.bar.?;
+    try std.testing.expectEqual(@as(u32, 40), rich_bar.h); // token 40pt @1x — cell 12는 식에 안 들어간다
     try std.testing.expectEqual(rect.x, rich_bar.x);
     try std.testing.expectEqual(rect.y, rich_bar.y);
     try std.testing.expectEqual(rect.w, rich_bar.w);
@@ -71646,15 +71693,16 @@ test "세션 도크 스크롤바 드래그는 매 프레임 tree 재발행을 �
     try std.testing.expect(!session.agent_session_dock_scroll_drag.active);
 }
 
-// 이 테스트가 증명하는 것: 도크 view bar의 높이와 그 아래 content 시작선이 **도크 뷰와 터미널 폰트에
-// 모두 무관**하다.
+// 이 테스트가 증명하는 것 셋: (1) 도크 view bar의 높이와 그 아래 content 시작선이 **도크 뷰와 무관**하고,
+// (2) 그 높이가 **terminal pane 탭 바와 정확히 같으며**(두 바는 같은 y에서 시작하므로 이것이 곧 "아래
+// 경계선이 한 줄로 맞는다"이다 — 사용자 보고), (3) 두 값 어느 것도 **terminal 폰트를 따라가지 않는다**.
 //
-// 왜 터미널에서 중요한가 — view bar는 도크가 소유한 chrome이다. 예전에는 explorer/source-control만
-// terminal pane tab bar와 높이를 맞췄고(셀 높이 + padding), 그 결과 같은 아이콘 세 개가 AI 세션으로
-// 바꿀 때마다 위아래로 뛰었다(사용자 보고: 실측 53px ↔ 80px). 더 나쁜 것은 그 식에 terminal cell이
-// 들어 있어 **폰트 크기를 바꾸면 도크 아이콘 줄이 따라 움직였다**는 점이다 —
-// docs/layering-and-portability.md가 막으려는 방향이다.
-test "도크 view bar와 시작선은 뷰와 무관하고 터미널 셀에서 나오지 않는다" {
+// 왜 셋을 한 테스트에 묶는가 — 서로를 무너뜨리기 쉬운 요구이기 때문이다. 예전에는 explorer/source-control만
+// 탭 바 높이를 물려받아 (2)를 지켰고, 그 대가로 AI 세션으로 바꾸면 같은 아이콘 세 개가 위아래로 뛰었다
+// ((1) 위반, 실측 53px↔80px). 다음엔 (1)+(2)를 `@max(40pt, cell + 2*pad)`로 함께 잡았는데 이번엔 (3)이
+// 깨져 `font-scale-rects` fixture가 실패했다(14pt↔24pt 도크 rect 12px 이동). 지금은 두 바가 공유 chrome
+// token(`space.bar_height_pt`) 하나를 그대로 쓰므로 셋 다 성립한다. 한쪽만 고치면 여기서 걸린다.
+test "도크 view bar는 뷰·터미널 폰트와 무관하고 터미널 탭 바와 높이가 같다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -71671,38 +71719,40 @@ test "도크 view bar와 시작선은 뷰와 무관하고 터미널 셀에서 �
     session.dock_initialized = true;
     session.dock.presented = true;
 
-    const expected_h = chrome.components.session_dock.types.DockMetrics.resolve(session.agentSessionDockScaleMilli()).view_switcher_h;
-
     session.dock.view = .explorer;
     const explorer = session.dockGeometry();
     session.dock.view = .agent_sessions;
     const agent = session.dockGeometry();
 
-    try std.testing.expect(expected_h > 0);
-    try std.testing.expectEqual(expected_h, explorer.view_bar.h);
-    try std.testing.expectEqual(expected_h, agent.view_bar.h);
-    // 아이콘 줄과 그 아래 본문 시작선이 뷰 전환에서 한 픽셀도 움직이지 않는다.
+    // (1) 뷰 전환은 아이콘 줄도 그 아래 본문 시작선도 한 픽셀 움직이지 않는다.
+    try std.testing.expect(explorer.view_bar.h > 0);
     try std.testing.expectEqual(explorer.view_bar.y, agent.view_bar.y);
     try std.testing.expectEqual(explorer.view_bar.h, agent.view_bar.h);
     try std.testing.expectEqual(explorer.tree.y, agent.tree.y);
 
-    // 그리고 그 값은 terminal pane tab bar가 아니다 — 옛 explorer 경로가 쓰던 식이 살아 있으면 여기서
-    // 걸린다(기본 설정에서 80px vs 53px).
-    try std.testing.expect(expected_h != session.paneBarHeightPx());
+    // (2) 그 높이가 곧 terminal pane 탭 바 높이다.
+    try std.testing.expectEqual(session.paneBarHeightPx(), explorer.view_bar.h);
+    try std.testing.expectEqual(session.paneBarHeightPx(), agent.view_bar.h);
 
-    // `Cmd`+`+`/`-`의 명시적 zoom은 **의도적으로** 도크 전체를 함께 확대한다(docs/agent-session-list.md
-    // §2.1.1의 `SessionDockUiZoom`). 그러므로 여기서 고정할 것은 "안 변한다"가 아니라 **두 뷰가 같은
-    // Chrome metric을 계속 따라간다**는 쪽이다.
+    // 그 높이는 chrome token 값 **그대로**다 — 셀 항이 `@max`로도 섞이지 않는다.
+    const token_px = layout_math.ptToPx(session.buildChromeTokens().space.bar_height_pt, session.scale_milli);
+    try std.testing.expect(token_px > 0); // rich 기본 — 단언이 공허하지 않다
+    try std.testing.expectEqual(token_px, explorer.view_bar.h);
+
+    // (3) 폰트를 크게 바꿔도 바 높이도, 도크 시작선도, 그 아래 본문 시작선도 **한 픽셀 안 움직인다**.
+    // 이것이 `font-scale-rects` fixture가 요구하는 계약이며, 여기서 먼저 걸리게 해 둔다.
     const cell_before = session.cell_height_px;
-    session.setFontSize(session.appearance.font.size + 8);
-    try std.testing.expect(session.cell_height_px != cell_before);
-    const zoomed_h = chrome.components.session_dock.types.DockMetrics.resolve(session.agentSessionDockScaleMilli()).view_switcher_h;
-    try std.testing.expect(zoomed_h != expected_h); // zoom이 실제로 걸렸다(단언이 공허하지 않다)
+    session.setFontSize(session.appearance.font.size + 24);
+    try std.testing.expect(session.cell_height_px != cell_before); // 폰트가 실제로 바뀌었다
     session.dock.view = .explorer;
     const zoomed_explorer = session.dockGeometry();
     session.dock.view = .agent_sessions;
     const zoomed_agent = session.dockGeometry();
-    try std.testing.expectEqual(zoomed_h, zoomed_explorer.view_bar.h);
-    try std.testing.expectEqual(zoomed_h, zoomed_agent.view_bar.h);
+    try std.testing.expectEqual(explorer.view_bar.h, zoomed_explorer.view_bar.h);
+    try std.testing.expectEqual(explorer.view_bar.y, zoomed_explorer.view_bar.y); // 시작선도 그대로
+    try std.testing.expectEqual(explorer.tree.y, zoomed_explorer.tree.y);
+    try std.testing.expectEqual(zoomed_explorer.view_bar.h, zoomed_agent.view_bar.h);
     try std.testing.expectEqual(zoomed_explorer.tree.y, zoomed_agent.tree.y);
+    // 그리고 두 바는 폰트가 바뀐 뒤에도 여전히 서로 같다.
+    try std.testing.expectEqual(session.paneBarHeightPx(), zoomed_explorer.view_bar.h);
 }

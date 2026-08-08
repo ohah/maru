@@ -157,7 +157,12 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     // 잇는 것뿐이다.
     // 세션 재개를 로그인 셸 경유로 바꾸며 또 바뀐다(`buildResumeShellCommand`). count는 4 그대로다 —
     // spawn request의 command/args를 다르게 채울 뿐 Client 구성과는 무관하다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "04e9b108936d369ab6036c69c277e7161e750b3a370e37610f32f5c6af2a6531" },
+    // 상단 바 통일(터미널 탭 바 = 도크 뷰 스위처)로 또 바뀐다. 높이는 공유 chrome token `space.bar_height_pt`가,
+    // 시작선은 `titlebar_strip_px` 하나가 정한다(도크 전용 `dock_top_px` 제거). 둘 다 terminal cell을 `@max`로도
+    // 섞지 않는다 — 섞었더니 `font-scale-rects` fixture가 14pt↔24pt 도크 rect 12px 이동을 잡아냈다. count는 4
+    // 그대로다: `chromeBarHeightPx`·`chromeBarTextOffsetY`는 토큰 값과 rect 높이로 산술만 하고, 시작선 쪽은
+    // 입력 필드 하나를 뺀 것이라 어느 쪽도 필드를 이름으로 읽지 않는다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "ced97339b1cd3377c37a3198deb6d9a0c9721bb59682c2f6fbd08274b143d5bf" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

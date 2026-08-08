@@ -211,11 +211,10 @@ pub const Input = struct {
     backing_width_px: u32,
     backing_height_px: u32,
     sidebar_width_px: u32,
+    /// 창 상단 띠 높이(px). **terminal과 dock이 같이 쓴다** — 예전에는 dock만 별도 기준선(`dock_top_px`)을
+    /// 받아 terminal title strip이 커져도 제자리에 있었는데, 그러면 두 상단 바의 **시작선**이 갈려 아래
+    /// 경계선을 맞춰 놔도 여전히 어긋난다(사용자 보고). 기준선 하나만 남겨 그 갈래를 구조적으로 없앤다.
     titlebar_height_px: u32,
-    /// Right dock만 terminal title strip과 다른 상단 Chrome 기준선을 쓸 수 있다. 0이면
-    /// `titlebar_height_px`를 그대로 써서 explorer/source-control의 기존 기하를 보존한다.
-    /// Session Dock은 terminal font zoom과 독립된 28pt title safety band를 넘긴다.
-    dock_top_px: u32 = 0,
     cell_width_px: u32,
     cell_height_px: u32,
     scale_milli: u32,
@@ -225,9 +224,12 @@ pub const Input = struct {
     visible: bool,
     /// `size_pt == 0`일 때만 자동 기본 폭을 고르는 현재 view. 수동 폭은 계속 하나의 dock state가 소유한다.
     view: dock_panel.View = .explorer,
-    /// 뷰 스위처 바 높이(px). **pane 탭 바와 같은 값**을 받아 두 바의 아래 경계선이 한 줄로 맞는다
-    /// (docs/file-explorer.md §3.5). 탭 바 높이는 `cell_height + 2*pad`라 chrome 행의 배수가 아니므로
-    /// 여기서 파생하지 않고 호출자가 그 단일 출처(`paneBarHeightPx`)를 그대로 넘긴다. 0이면 바 없음.
+    /// 뷰 스위처 바 높이(px). 호출자가 **pane 탭 바와 같은 값**을 넘겨 두 바의 아래 경계선이 한 줄로 맞는다
+    /// (docs/file-explorer.md §3.5). 그 값은 chrome 행의 배수가 아니므로(폰트 독립 하한과 셀 파생 높이 중
+    /// 큰 쪽) 여기서 파생하지 않고 호출자가 공유 단일 출처(`chromeBarHeightPx`)를 그대로 넘긴다.
+    ///
+    /// 이 레이어는 그 값이 어디서 왔는지 알지 못하고 알 필요도 없다 — 높이 정책이 chrome token으로 옮겨간
+    /// 뒤에도 이 필드의 계약은 "호출자가 정한 바 높이, 0이면 바 없음"으로 그대로다.
     view_bar_px: u32 = 0,
     /// 창 바닥 상태표시줄 높이(px, 창 전폭). 0이면 상태바 없음 — 그때 `compute`의 모든 출력은 이 필드가
     /// 없던 때와 **같다**(S1은 0으로만 들어와 byte-identical, S2가 실제 높이로 뒤집는다).
@@ -258,18 +260,10 @@ pub fn compute(in: Input) Geometry {
     };
     if (!in.visible or available.w == 0 or available.h == 0) return .{ .workspace = available, .terminal = available, .status_bar = status_bar };
 
-    // Terminal title strip은 큰 terminal font에서 커질 수 있다. right Session Dock은 그
-    // implementation detail을 물려받지 않고 own Chrome point geometry에서 시작한다. bottom
-    // dock은 terminal 아래에 붙는 surface라 기존 `available`을 계속 쓴다.
-    // 상태바가 먹은 높이는 도크 기준선에도 그대로 반영한다 — `usable_h`가 단일 출처다.
-    const dock_top = if (in.dock_top_px == 0) in.titlebar_height_px else @min(in.dock_top_px, usable_h);
-    const dock_available = Rect{
-        .x = in.sidebar_width_px,
-        .y = dock_top,
-        .w = in.backing_width_px -| in.sidebar_width_px,
-        .h = usable_h -| dock_top,
-    };
-
+    // 도크는 terminal과 **같은 `available`**에서 시작한다. 예전에는 right dock만 별도 기준선을 받아
+    // terminal title strip이 커져도 제자리에 있었는데, 그러면 두 상단 바의 시작선이 갈린다 — 아래
+    // 경계선을 맞춰 놔도 시작이 다르면 여전히 어긋나 보인다(사용자 보고). 상태바가 먹은 높이는 `usable_h`가
+    // 이미 반영했으므로 기준선은 이 rect 하나로 끝난다.
     const scale = if (in.scale_milli == 0) 1000 else in.scale_milli;
     const requested_pt = if (in.size_pt != 0) in.size_pt else switch (in.side) {
         .right => defaultRightPtForView(in.view),
@@ -291,12 +285,12 @@ pub fn compute(in: Input) Geometry {
             if (dock_w == 0) break :right .{ .workspace = available, .terminal = available, .status_bar = status_bar };
             const term_w = available.w -| divider -| dock_w;
             const dock_x = available.x + term_w + divider;
-            const dock = Rect{ .x = dock_x, .y = dock_available.y, .w = dock_w, .h = dock_available.h };
+            const dock = Rect{ .x = dock_x, .y = available.y, .w = dock_w, .h = available.h };
             break :right fromDock(
                 available,
                 .{ .x = available.x, .y = available.y, .w = term_w, .h = available.h },
                 dock,
-                .{ .x = available.x + term_w, .y = dock_available.y, .w = divider, .h = dock_available.h },
+                .{ .x = available.x + term_w, .y = available.y, .w = divider, .h = available.h },
                 status_bar,
                 chrome_h,
                 dock_w,
@@ -440,13 +434,16 @@ test "낮은 도크에서는 뷰 바부터 접어 콘텐츠를 남긴다" {
     try std.testing.expectEqual(@as(u32, 76), roomy.tree.h);
 }
 
-test "right dock may keep a fixed Chrome origin while terminal title strip grows" {
-    const geometry = compute(.{
+// 도크와 terminal은 **같은 상단 기준선**에서 시작한다. 예전에는 right dock만 별도 `dock_top_px`를 받아
+// title strip이 커져도 제자리에 있었는데, 그러면 두 상단 바의 아래 경계선을 맞춰 놔도 시작이 갈려 여전히
+// 어긋나 보인다(사용자 보고). 호출자가 title strip을 어떤 식으로 정하든(폰트·사이드바 접힘) 이 레이어는
+// 그 값 하나만 쓴다 — 갈래가 없으므로 두 바는 항상 같은 y에서 시작한다.
+test "dock and terminal share one top origin whatever the title strip is" {
+    const tall = compute(.{
         .backing_width_px = 1600,
         .backing_height_px = 1000,
         .sidebar_width_px = 240,
-        .titlebar_height_px = 64, // large terminal font makes its own title strip taller.
-        .dock_top_px = 28, // Session Dock keeps the native Chrome safety band instead.
+        .titlebar_height_px = 64, // 큰 terminal font가 title strip을 키운 상태
         .cell_width_px = 10,
         .cell_height_px = 36,
         .scale_milli = 1000,
@@ -456,11 +453,38 @@ test "right dock may keep a fixed Chrome origin while terminal title strip grows
         .size_pt = 400,
         .visible = true,
     });
-    try std.testing.expectEqual(@as(u32, 64), geometry.terminal.y);
-    try std.testing.expectEqual(@as(u32, 28), geometry.dock.y);
-    try std.testing.expectEqual(@as(u32, 28), geometry.divider.y);
-    try std.testing.expectEqual(@as(u32, 40), geometry.view_bar.h);
-    try std.testing.expectEqual(@as(u32, 68), geometry.tree_content.y);
+    try std.testing.expectEqual(@as(u32, 64), tall.terminal.y);
+    try std.testing.expectEqual(tall.terminal.y, tall.dock.y); // 도크가 따라 내려온다
+    try std.testing.expectEqual(tall.terminal.y, tall.divider.y);
+    try std.testing.expectEqual(tall.dock.y, tall.view_bar.y); // view bar는 도크 최상단
+    try std.testing.expectEqual(@as(u32, 40), tall.view_bar.h);
+    try std.testing.expectEqual(@as(u32, 104), tall.tree_content.y); // 64 + 40
+
+    // 사이드바 접힘처럼 title strip이 **다른 값**으로 바뀌어도 갈래가 생기지 않는다.
+    var collapsed_in = @as(Input, .{
+        .backing_width_px = 1600,
+        .backing_height_px = 1000,
+        .sidebar_width_px = 0, // 접힘 = 사이드바 폭 0
+        .titlebar_height_px = 60, // 접힘 하한(30pt @2x)이 그대로 두 소비자에게 간다
+        .cell_width_px = 10,
+        .cell_height_px = 36,
+        .scale_milli = 1000,
+        .divider_px = 2,
+        .view_bar_px = 40,
+        .side = .right,
+        .size_pt = 400,
+        .visible = true,
+    });
+    const collapsed = compute(collapsed_in);
+    try std.testing.expectEqual(@as(u32, 60), collapsed.terminal.y);
+    try std.testing.expectEqual(collapsed.terminal.y, collapsed.dock.y);
+    try std.testing.expectEqual(collapsed.terminal.y, collapsed.divider.y);
+
+    // bottom 도크도 같은 기준선을 쓴다(원래 그랬고, 기준선 통합으로 깨지지 않았는지 고정한다).
+    collapsed_in.side = .bottom;
+    const bottom = compute(collapsed_in);
+    try std.testing.expectEqual(@as(u32, 60), bottom.terminal.y);
+    try std.testing.expectEqual(bottom.terminal.y + bottom.terminal.h, bottom.divider.y);
 }
 
 test "dock geometry collapses and clamps to leave a terminal floor" {
@@ -662,7 +686,7 @@ test "SB1-S1: status_bar_px는 작업영역·도크·divider를 그만큼 짧게
     try std.testing.expect(bar.divider.y + bar.divider.h <= bar.status_bar.y);
 
     // **right 도크도 같은 계약을 진다.** bottom만 보면 "세로로 자르는 쪽만 맞다"에 그친다 — right는 폭을
-    // 나누지만 높이는 `dock_available`에서 오므로 상태바를 침범할 수 있는 경로가 따로 있다.
+    // 나누지만 높이는 `available.h`를 통째로 받으므로 상태바를 침범할 수 있는 경로가 따로 있다.
     var right_in = base;
     right_in.side = .right;
     right_in.status_bar_px = 24;

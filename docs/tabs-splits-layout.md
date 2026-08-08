@@ -292,7 +292,10 @@ Term(가로 탭)뿐 아니라 **Pane 통째**를 사이드바(워크스페이스
   Term 1개 드래그(④)로 갈린다. ⠿를 **항상 표시**하는 이유(사용자 피드백): pane→워크스페이스 분리 드래그는 **Warp에 없는 maru
   기능**이라 손잡이를 늘 보여야 발견성이 유지된다(한때 Warp 벤치마킹으로 hover-only로 숨겼으나 — Warp는 grip 없는 모델이라
   부적합 — 되돌렸다). **호버 시 커서는 openHand(`CursorKind.grab`)** 로 바뀐다. 바 세로 패딩(`tab_bar_pad_y_px`)은 rich에서
-  8px(Warp식 넉넉한 바 높이). **라벨 세그먼트만으로는 부족**하다(custom_name 없는 pane은 라벨 폭이
+  8px이지만, **rich에서 바 높이는 `cell + 2*pad`가 아니다** — 도크 뷰 스위처와 경계선을 맞추려고 폰트 독립 token
+  (`space.bar_height_pt`, rich 40pt)이 높이를 정하고 pad는 텍스트 여백 의미만 남기 때문이다(단일 출처 `chromeBarHeightPx`,
+  [file-explorer.md](file-explorer.md) §3.5). token이 0인 tui만 셀 파생(`cell + 2*pad`)으로 떨어진다. 그래서 바 안 텍스트의
+  세로 오프셋도 pad가 아니라 실제 바 높이에서 파생한다(`chromeBarTextOffsetY`). **라벨 세그먼트만으로는 부족**하다(custom_name 없는 pane은 라벨 폭이
   0이라 잡을 자리가 없다 — `paneLabelCols`) → grip을 **이름 유무와 무관하게 항상 예약**해 모든 pane이 끌리게 한다(사용자
   결정). custom_name이 있으면 grip 뒤에 이름이 붙는다(`paneBar`가 `grip_cols`+`label_cols`로 탭 영역을 우측 offset). 같은
   탭바에서 "잡는 자리"로만 단위를 구분하므로 새 chrome가 필요 없다(`tab_drag_*`와 분리된 `pane_drag_*` arm; 좁은 바는 탭

@@ -47,10 +47,23 @@ N개 표시                                      [최신순 ⇄ 오래된순]
 0이면 그리지 않는다. 값은 스캔 시점 기준이므로 다음 refresh까지 갱신되지 않는다. Codex는 worker가 별도
 파일이 아니라 같은 rollout 트리에 섞여 있어 부모 세션과 연결할 규칙이 없으므로 이 표시의 대상이 아니다.
 
-정렬은 **최신순**이 기본이고 토글로 **오래된순**을 고른다. 정렬 키는 transcript의 마지막 활동 시각이며,
-그 값을 얻지 못하면 파일 mtime으로 폴백한다 — mtime은 대화 외의 이유(복사·도구의 메타 갱신)로도 밀리기
-때문에 내부 시각이 있으면 그쪽이 정확하다. 토글은 **표시 계층에서만** 방향을 바꾸고 스캔 순서는 항상
-최신 우선이다(부분 publish가 최신부터 차오르는 것과 같은 근거).
+정렬은 **최신순**이 기본이고 토글로 **오래된순**을 고른다. 토글은 header의 `로컬` provenance label과
+refresh 사이에 두어 새 행을 만들지 않는다 — 목록 높이를 뺏지 않으면서 정렬이 화면 상태의 일부임을 보인다.
+
+정렬 키는 **transcript의 마지막 활동 시각**이고, 그 값을 얻지 못하면 파일 mtime으로 폴백한다. 두 provider
+모두 각 줄 최상위에 RFC 3339 UTC `timestamp`를 싣는다. 실측(2026-08-08, 로컬 이력 362개):
+
+| | timestamp 보유 | mtime과의 차이(중앙값) | 최대 차이 |
+|---|---|---|---|
+| Claude | 39/40 | 17.2초 | **144시간** |
+| Codex | 40/40 | 0.0초 | 0초 |
+
+**mtime으로 정렬하면 362개 중 257개(70%)가 제자리가 아니다.** mtime은 대화 외의 이유(복사·도구의 메타
+갱신·백업 복원)로도 밀리므로 내부 시각이 있으면 그쪽이 정확하다. 40개 중 1개는 `timestamp`가 없어
+폴백이 필요하다 — 폴백은 선택이 아니라 실측된 요구다.
+
+토글은 **표시 계층에서만** 방향을 바꾸고 스캔 순서는 항상 최신 우선이다(부분 publish가 최신부터
+차오르는 것과 같은 근거). 방향은 앱 실행 중에만 유지하며 디스크에 쓰지 않는다.
 
 ### 2.1 Metal GPU card layout와 컴포넌트 경계
 
@@ -280,8 +293,9 @@ chrome이 공유하는 logical token(`chrome.tokens`의 `space.bar_height_pt`)�
   한쪽만 고정 chrome 위로 새는 결함이 생긴다. 카드/버튼 배경 quad는 generic paint가 이미 같은 published clip과
   교차시키며, component가 직접 만드는 장식 quad(그룹 count pill 등)도 같은 규율을 따른다.
 - `SessionDockHeader`는 title, displayed/recent count, host SVG와 `로컬`
-  provenance, refresh affordance만 소유한다. host+label은 72pt box 안에서 실제 glyph advance로
-  함께 중앙 정렬하고, refresh는 그 오른쪽 12pt gap 뒤의 24pt trailing slot에 둔다. refresh가 실행 중이면 같은 위치의
+  provenance, **정렬 토글**, refresh affordance만 소유한다. host+label은 72pt box 안에서 실제 glyph
+  advance로 함께 중앙 정렬하고, 정렬 토글은 refresh 앞의 trailing group에 놓아 두 control이 같은
+  logical safe inset 안에서 오른쪽으로 정렬된다. refresh는 그 오른쪽 12pt gap 뒤의 24pt trailing slot에 둔다. refresh가 실행 중이면 같은 위치의
   control은 muted·disabled registered refresh SVG로 바뀌며 다시 누른다고 worker를 더 만들지 않는다. 현재
   Chrome component에는 SVG transform/rotation 계약이 없으므로 terminal Unicode clock을 대체 spinner로
   쓰지 않는다. 그것은 1-cell ink라 클릭 순간 control이 작아 보이는 회귀를 만든다. refresh는
@@ -420,7 +434,7 @@ inline disclosure다. card click/Enter는 새 archive tab이나 terminal surface
   `⌘↵`/`⌘L`은 expanded ready state에서만 같은 intents를 호출하며, closed/loading/stale state에서는
   no-op이다. Escape는 search를 먼저 닫고, 그 다음 expanded card를 닫는다.
 
-- header의 `로컬`은 현재 사용자 홈 아래 provider log만 읽는다는 provenance label이며 host 선택기가 아니다. v1 정렬은 mtime 내림차순 하나로 고정한다. 탭 재진입은 현재 앱 실행 중의 snapshot을 즉시 보이고, 마지막 완료 scan 뒤 **15초** 안이면 새 refresh를 시작하지 않는다. `SessionDockHeader`의 refresh control은 이 TTL을 우회한다. worker가 실행 중이면 동일 rect의 muted registered refresh/disabled state로 바뀌고 추가 job을 만들지 않는다.
+- header의 `로컬`은 현재 사용자 홈 아래 provider log만 읽는다는 provenance label이며 host 선택기가 아니다. 정렬 방향은 header의 토글이 정하고(§2.3), 키는 transcript의 마지막 활동 시각이다. 탭 재진입은 현재 앱 실행 중의 snapshot을 즉시 보이고, 마지막 완료 scan 뒤 **15초** 안이면 새 refresh를 시작하지 않는다. `SessionDockHeader`의 refresh control은 이 TTL을 우회한다. worker가 실행 중이면 동일 rect의 muted registered refresh/disabled state로 바뀌고 추가 job을 만들지 않는다.
 - 도크 view bar의 `AI 세션`을 누르면 archive refresh를 요청한다. **refresh 중에는 직전 완료 snapshot과 current scroll/selection을 그대로 paint하고, 새 bounded scan 전체가 끝난 뒤에만 새 immutable snapshot으로 한 번에 교체한다.** AS3-c부터 교체 commit은 first partially-visible card의 exact identity와 intra-card pixel offset을 restore하고, identity가 없으면 기존 numeric offset만 새 상한에 clamp한다. 결과 큐의 OOM 등 새 snapshot을 publish할 수 없는 완료는 spinner만 끝내고 기존 목록과 scroll/selection을 유지하며 notice를 보인다. 따라서 새로 고침이 기존 목록을 비우거나 첫 record/중간 batch로 목록을 흔들지 않는다. 첫 진입처럼 이전 snapshot이 없을 때만 skeleton/진행 문구를 보이며, frame tick에서 파일 I/O를 하지 않는다. 창 재포커스와 새 provider session identity 감지는 같은 refresh를 요청하되, forced refresh는 5초 전역 throttle로 합친다. filesystem polling/watcher는 v1에 없다.
 - scope는 `현재 작업공간`, `현재 프로젝트`, `전체`다. 기본값은 `전체`이며 마지막 선택만 창 UI 상태로 보존한다. **`현재 작업공간`은 활성 워크스페이스 탭의 활성 local Term이 마지막으로 보고한 CWD를 worker가 canonicalize한 단일 root snapshot 아래에 `cwd`가 있는 기록**이다. 창 전역 탐색기 root와 다른 권위이므로, 다른 워크스페이스 탭의 폴더가 섞이지 않는다. `현재 프로젝트`는 같은 active Term CWD에서 worker가 찾은 canonical git root 아래 `cwd`가 있는 기록이며, local CWD 또는 git root가 없으면 각각 비활성화한다. `전체`는 모든 provider의 검증된 사용자 세션이다. remote/불명 `cwd`는 전체에서만 보인다. 도크 진입, scope click, 활성 workspace/pane/Term 전환 **및 같은 활성 pane의 CWD 보고 변경**에서 root snapshot을 갱신하며, 결과가 오기 전에는 이전 tab 또는 이전 CWD의 범위를 재사용하지 않는다. CWD 비교는 main actor의 메모리 observation만 사용하고 canonicalize·git walk는 worker만 수행한다. 이후 scope/search/scroll/frame은 그 메모리 snapshot만 읽는다.
 - 이 필터는 접근 제어가 아닌 표시 범위다. 경로는 provider log의 `cwd`를 canonicalize할 수 있을 때만 containment 비교하며, 실패·삭제·비로컬 값은 workspace/project에 억지로 넣지 않는다.

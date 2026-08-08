@@ -123,7 +123,10 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
     runs-on: macos-15
-    timeout-minutes: 15
+    # 15 → 25. AppSession 전수 스위트(아래 "Run the macOS AppSession test suite")가 붙으면서 늘렸다.
+    # 실측은 웜 캐시 로컬에서 2분 29초이고, 콜드 러너는 이 모듈을 필터 없이 처음 컴파일하므로 더 든다.
+    # 여유를 두되 무한정 매달리지는 않게 한다.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -172,6 +175,17 @@ jobs:
           path: tests/artifacts/perf/file-explorer.txt
           if-no-files-found: error
           retention-days: 14
+      # 위 두 스텝(provider·file-explorer)은 **이름 필터로 고른 몇 개**만 돈다. 그래서 지금까지
+      # `app_session.zig`의 나머지 판정자는 CI 어디에서도 실행되지 않았다 — 그 파일의 test 755개 중
+      # 639개(84%)가 `builtin.os.tag != .macos`면 SkipZigTest이고, `mise run check`를 도는 check job은
+      # ubuntu다. 즉 회귀 그물의 대부분이 개발자 로컬 macOS에만 있었다.
+      #
+      # 이 스텝이 그 공백을 닫는다. 같은 모듈(app_host_abi)을 필터 없이 통째로 돌려
+      # `app_session.test.*` 754개 중 751개가 실제로 실행된다(로컬 macOS 실측, SKIP 3개는 별도 게이트가
+      # 소유한 경로). 필터 스텝을 대체하지 않고 **추가**한다 — 그 둘은 탐색기·provider 신호가 무관한
+      # socket/WebKit flaky에 묻히지 않게 격리하는 전용 게이트이고(위 주석), 이 스텝은 전수 그물이다.
+      - name: Run the macOS AppSession test suite
+        run: mise run test-macos-app-host-abi
 
   # session-host live-upgrade fixture는 macOS에서만 활성화되고, Debug와 ReleaseFast는 서로 다른 결함을
   # 잡는 독립 컴파일이다(Debug는 safety check, ReleaseFast는 no-fail 경로). 둘을 한 job에 직렬로 두면

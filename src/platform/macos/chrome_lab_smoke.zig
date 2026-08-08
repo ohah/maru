@@ -123,6 +123,19 @@ pub fn main(init: std.process.Init) !void {
     // 나머지 시나리오는 0이라 기존 캡처와 바이트 동일하다.
     const sidebar_width_px: u32 = if (scenario_id == .sidebar_status_strip) 180 else 0;
     const status_bar_height_px: u32 = if (scenario_id == .sidebar_status_strip) 26 else 0;
+    // strip 색은 **제품의 파생 규칙**을 따른다 — `config/theme.zig`의 "sidebar_background는 배경 +24
+    // (코히어런트하게 살짝 밝게)". Lab 테마는 그 파생을 뭉개 sidebar_background를 배경과 **같은 값**으로
+    // 두고 있어(둘 다 20), 그대로 쓰면 strip이 배경에 묻혀 골든이 아무것도 못 본다. 색을 지어내는 대신
+    // 제품이 쓰는 식을 Lab 배경에 적용한다.
+    const sidebar_bg: u32 = if (scenario_id == .sidebar_status_strip) blk: {
+        const base = tokens.palette.get(.surface_bg);
+        const lift = struct {
+            fn f(v: u8) u32 {
+                return @min(@as(u32, v) + 24, 255);
+            }
+        }.f;
+        break :blk 0xFF00_0000 | (lift(base.r) << 16) | (lift(base.g) << 8) | lift(base.b);
+    } else 0;
 
     const frame = try lab.buildFrame(.{
         .id = scenario_id,
@@ -341,6 +354,7 @@ pub fn main(init: std.process.Init) !void {
         if (rich_glyphs.items.len > 0) rich_glyphs.items.ptr else null,
         rich_glyphs.items.len,
         sidebar_width_px,
+        sidebar_bg,
         status_bar_height_px,
         &native,
     );

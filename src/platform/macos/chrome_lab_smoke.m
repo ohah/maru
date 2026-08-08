@@ -69,6 +69,7 @@ void maru_macos_chrome_lab_smoke_render(
     /* SB1 §5.2: 0이 아니면 사이드바 배경 strip을 그리고 그 바닥을 상태바 높이만큼 끊는다.
        기존 시나리오는 둘 다 0을 넘겨 캡처가 바이트 동일하다. */
     uint32_t sidebar_width_px,
+    uint32_t sidebar_bg, /* Zig(토큰)가 준다 — `.m`은 색을 지어내지 않는다 */
     uint32_t status_bar_height_px,
     MaruChromeLabSmokeResult *result
 ) {
@@ -131,7 +132,7 @@ void maru_macos_chrome_lab_smoke_render(
         cells,
         cell_count,
         sidebar_width_px, // terminal_origin_x_px — >0이어야 `.m`이 사이드바 strip을 그린다
-        sidebar_width_px > 0 ? 0xFF1E222Au : 0u, // sidebar_bg(불투명) — alpha 0이면 strip을 안 그린다
+        sidebar_bg, // 토큰에서 온 strip 색 — alpha 0이면 strip을 안 그린다(기존 시나리오)
         NULL,
         0,
         0,

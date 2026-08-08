@@ -144,7 +144,7 @@ fn parseCodex(allocator: std.mem.Allocator, bytes: []const u8) !?Parsed {
             saw_meta = true;
             if (string(p.get("id"))) |value| session_id = copyInto(&session_id_buf, value);
             if (string(p.get("cwd"))) |value| cwd = copyInto(&cwd_buf, value);
-            is_user = if (string(p.get("thread_source"))) |value| std.mem.eql(u8, value, "user") else false;
+            is_user = codexIsUserThread(p);
             continue;
         }
         if (std.mem.eql(u8, kind, "turn_context")) {
@@ -169,7 +169,6 @@ fn parseCodex(allocator: std.mem.Allocator, bytes: []const u8) !?Parsed {
             last_assistant = copyInto(&last_assistant_buf, text);
         }
     }
-    // Older Codex files lacking thread_source are deliberately not guessed.
     if (!saw_meta or !is_user or session_id.len == 0) return null;
     const title = if (first_user.len > 0) first_user else "제목 없는 세션";
     const summary = if (last_user.len > 0) last_user else last_assistant;
@@ -256,6 +255,24 @@ fn stripCodexPrefix(text: []const u8) []const u8 {
     return std.mem.trim(u8, start, " \t\r\n");
 }
 
+/// Codex `session_meta.payload` 하나에서 "사용자 세션인가"를 판정한다(docs/agent-session-list.md §3.1).
+///
+/// 신호가 없으면 **포함**한다. `thread_source`는 최근 Codex가 추가한 필드라, 없다고 버리면 구버전에 남은
+/// 실제 사용자 대화가 통째로 사라진다(실측: 개발자 머신에서 67개가 전부 사용자 대화였고 모두
+/// `payload.id`를 갖고 있었다). 목록에서 조용히 사라진 세션은 사용자가 알아챌 방법이 없지만, worker가
+/// 섞이면 보고 무시할 수 있다 — 그래서 기본을 "제외"가 아니라 "포함"으로 둔다.
+///
+/// 호출자는 `session_meta`를 만날 때마다 이 값을 갱신한다. **한 파일에 `session_meta`가 여러 번 나오고**
+/// (실측 256개 중 123개), 그중 118개는 첫 메타가 `subagent`지만 마지막이 `user`인 정상 세션이다.
+/// 따라서 판정은 **마지막으로 관측한 메타**가 이긴다.
+fn codexIsUserThread(payload: std.json.ObjectMap) bool {
+    if (string(payload.get("thread_source")) orelse string(payload.get("threadSource"))) |value| {
+        return std.mem.eql(u8, value, "user");
+    }
+    if (object(payload.get("source"))) |source| return object(source.get("subagent")) == null;
+    return true;
+}
+
 test "Codex user session parses and worker is rejected" {
     const user =
         \\{"type":"session_meta","payload":{"id":"codex-1","cwd":"/repo","thread_source":"user"}}
@@ -272,6 +289,93 @@ test "Codex user session parses and worker is rejected" {
 
     const worker = "{\"type\":\"session_meta\",\"payload\":{\"id\":\"x\",\"thread_source\":\"subagent\"}}\n";
     try std.testing.expect((try parse(std.testing.allocator, .codex, worker)) == null);
+}
+
+test "Codex worker 판정: 신호 순서와 마지막 session_meta 우선" {
+    const a = std.testing.allocator;
+
+    // ① thread_source가 있으면 그 값이 이긴다.
+    const explicit_worker = "{\"type\":\"session_meta\",\"payload\":{\"id\":\"x\",\"thread_source\":\"subagent\"}}\n";
+    try std.testing.expect((try parse(a, .codex, explicit_worker)) == null);
+
+    // ② 필드가 없으면 2차 신호 source.subagent로 가른다.
+    const source_worker =
+        \\{"type":"session_meta","payload":{"id":"x","source":{"subagent":{"name":"w"}}}}
+        \\{"type":"event_msg","payload":{"type":"user_message","message":"hi"}}
+    ;
+    try std.testing.expect((try parse(a, .codex, source_worker)) == null);
+
+    // ③ 둘 다 없으면 **사용자 세션으로 포함**한다. 구버전 Codex가 여기 해당하며, 예전에는 통째로
+    //    버려졌다(실측 67개 소실). 목록에서 조용히 사라지는 쪽이 worker가 섞이는 쪽보다 나쁘다.
+    const legacy =
+        \\{"type":"session_meta","payload":{"id":"legacy-1","cwd":"/repo"}}
+        \\{"type":"event_msg","payload":{"type":"user_message","message":"오래된 요청"}}
+    ;
+    var legacy_parsed = (try parse(a, .codex, legacy)).?;
+    defer legacy_parsed.deinit(a);
+    try std.testing.expectEqualStrings("legacy-1", legacy_parsed.session_id);
+    try std.testing.expectEqualStrings("오래된 요청", legacy_parsed.title);
+
+    // ④ source는 있지만 subagent 키가 없으면 worker가 아니다.
+    const source_not_worker =
+        \\{"type":"session_meta","payload":{"id":"s1","source":{"cli":{}}}}
+        \\{"type":"event_msg","payload":{"type":"user_message","message":"요청"}}
+    ;
+    var s1 = (try parse(a, .codex, source_not_worker)).?;
+    defer s1.deinit(a);
+    try std.testing.expectEqualStrings("s1", s1.session_id);
+
+    // ⑤ **마지막 session_meta가 이긴다.** 한 파일에 메타가 여러 번 나오고 첫 것이 subagent, 마지막이
+    //    user인 경우가 실측 256개 중 118개다. 첫 메타로 확정하면 그 118개가 전부 사라진다.
+    const flip =
+        \\{"type":"session_meta","payload":{"id":"f1","thread_source":"subagent"}}
+        \\{"type":"event_msg","payload":{"type":"user_message","message":"worker turn"}}
+        \\{"type":"session_meta","payload":{"id":"f1","cwd":"/repo","thread_source":"user"}}
+        \\{"type":"event_msg","payload":{"type":"user_message","message":"사용자 요청"}}
+    ;
+    var flipped = (try parse(a, .codex, flip)).?;
+    defer flipped.deinit(a);
+    try std.testing.expectEqualStrings("f1", flipped.session_id);
+    try std.testing.expectEqualStrings("사용자 요청", flipped.summary);
+
+    // ⑥ 반대 방향도 마지막이 이긴다 — user로 시작해 worker로 끝나면 제외다.
+    const flip_back =
+        \\{"type":"session_meta","payload":{"id":"f2","thread_source":"user"}}
+        \\{"type":"event_msg","payload":{"type":"user_message","message":"요청"}}
+        \\{"type":"session_meta","payload":{"id":"f2","thread_source":"subagent"}}
+    ;
+    try std.testing.expect((try parse(a, .codex, flip_back)) == null);
+
+    // ⑦ session_meta가 아예 없으면 식별 근거가 없어 제외한다(포함 기본값의 예외).
+    const no_meta = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"고아\"}}\n";
+    try std.testing.expect((try parse(a, .codex, no_meta)) == null);
+}
+
+test "Claude 파서: content 배열·모델 변경·손상 줄·개행 없는 마지막 줄" {
+    const a = std.testing.allocator;
+
+    // message.text가 없고 content 배열만 있는 형태(실제 Claude transcript의 주 형태).
+    // 손상된 줄은 그 줄만 버리고 나머지는 계속 읽는다 — record를 추측해 만들지 않는다.
+    // 모델은 마지막으로 본 assistant message.model이 이긴다(세션 중 모델을 바꾸면 최신이 표시돼야 한다).
+    // 마지막 줄에 개행이 없어도 값을 잃지 않는다.
+    const fixture =
+        \\{"sessionId":"c-1","cwd":"/repo","type":"user","message":{"role":"user","content":[{"type":"text","text":"첫 요청"}]}}
+        \\{"type":"assistant","message":{"role":"assistant","model":"model-old","content":[{"type":"text","text":"응답1"}]}}
+        \\이건 JSON이 아니다
+        \\{"type":"assistant","message":{"role":"assistant","model":"model-new","content":[{"type":"text","text":"응답2"}]}}
+        \\{"type":"user","message":{"role":"user","content":[{"type":"text","text":"마지막 요청"}]}}
+    ;
+    var parsed = (try parse(a, .claude, fixture)).?;
+    defer parsed.deinit(a);
+    try std.testing.expectEqualStrings("c-1", parsed.session_id);
+    try std.testing.expectEqualStrings("첫 요청", parsed.title); // 명시 제목이 없으면 첫 사용자 메시지
+    try std.testing.expectEqualStrings("마지막 요청", parsed.summary);
+    try std.testing.expectEqualStrings("model-new", parsed.model);
+    try std.testing.expectEqual(@as(u32, 4), parsed.message_count); // 손상 줄은 세지 않는다
+
+    // sessionId가 없으면 안정 identity가 없으므로 제외한다.
+    const no_id = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"text\":\"x\"}}\n";
+    try std.testing.expect((try parse(a, .claude, no_id)) == null);
 }
 
 test "Claude title prefers explicit title then latest user summary" {

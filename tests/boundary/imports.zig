@@ -132,6 +132,8 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     // 도크 진입 seam 분리(`enterDockView`/`onDockViewPresented`/`shouldRefreshArchiveOnPresent`)와 아카이브
     // `partial` DTO 노출로 또 바뀐다. count는 4 그대로다 — 더한 것은 진입 훅과 스캐너 신호 전달뿐이고,
     // Client 구성이나 receiver 집합과는 무관하다.
+    // 세션 카드의 서브에이전트 개수 표시로 또 바뀐다. count는 4 그대로다 — 스캐너가 센 값을 메타 문구에
+    // 잇는 것뿐이다.
     // 상태바 blocked 항목·typed tree 상호작용으로 또 바뀐다. count는 4 그대로다.
     // 선택 해제 전이(⌘A 하이라이트가 트래킹 pane에서 안 지워지던 결함 — `clearSurfaceSelection`을 리포팅
     // 클릭·휠·타이핑·Esc에 배선)로 또 바뀐다. count는 4 그대로다 — 더한 것은 `select_clear` 명령 enqueue
@@ -149,6 +151,8 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     // 도크 진입 seam 분리(`enterDockView`/`onDockViewPresented`/`shouldRefreshArchiveOnPresent`)와 아카이브
     // `partial` DTO 노출로 또 바뀐다. count는 4 그대로다 — 더한 것은 진입 훅과 스캐너 신호 전달뿐이고,
     // Client 구성이나 receiver 집합과는 무관하다.
+    // 세션 카드의 서브에이전트 개수 표시로 또 바뀐다. count는 4 그대로다 — 스캐너가 센 값을 메타 문구에
+    // 잇는 것뿐이다.
     .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "2cb1f3bfd79c1e95995c467eca74cdd9087e0a2c667bd209dc3219846e1592a5" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },

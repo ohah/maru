@@ -381,7 +381,12 @@ pub fn main(init: std.process.Init) !void {
     // A text-free scenario is valid (the empty fixture deliberately has no glyphs). Whenever
     // the lowered fixture has text, however, the rich pass must receive at least one glyph.
     const rich_text_rasterized = !has_text or rich_glyphs.items.len > 0;
-    const success = native_ok and pixel_ok and valid_png and text_rasterized and rich_text_rasterized and rich_text_matches_artifact;
+    // **텍스트 요구는 시나리오마다 다르다.** strip 시나리오는 chrome을 내지 않는다(strip은 `.m`이 그린다)
+    // — 글자가 없는 것이 정상이므로 "래스터됐나"를 요구하면 정상 캡처가 실패한다(실제로 CI에서 그렇게 깨졌다).
+    // 대신 그 시나리오는 `pixel_ok`가 실질 가드다: strip이 안 그려지면 non_background_pixels가 0이라 잡힌다.
+    const requires_text = scenario_id != .sidebar_status_strip;
+    const text_ok = !requires_text or (text_rasterized and rich_text_rasterized and rich_text_matches_artifact);
+    const success = native_ok and pixel_ok and valid_png and text_ok;
     const summary = try renderSummary(allocator, scenario_name, font_variant, font_postscript_name, ppm_path, png_path, native, ppm, valid_png, gpu_quads.items.len, metal_fixture.cells.len, text_rasterized, rich_glyphs.items.len, rich_text_rasterized, rich_text_matches_artifact, font_usage, success);
     defer allocator.free(summary);
     try artifact_io.writeText(io, json_path, summary);

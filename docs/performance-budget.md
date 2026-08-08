@@ -89,6 +89,7 @@ diff를 읽을 때 두 가지를 강제한다. `--no-renames`는 rename 감지�
 | `core_resize_loop` | 2,000ms 이하 | 5,000회 resize/write 반복 | window resize, font size 변경, split/workspace restore가 storage 불변식을 깨지 않는지 본다. (1s→2s 상향: CI runner 부하 변동이 1s를 간헐 초과 — 구조 회귀 2배+는 여전히 잡는다.) |
 | `snapshot_serialize` | 1,000ms 이하 | 120x40 화면에 400행 출력 후 구조화 직렬화 200회 | 관측 가능성 도구가 너무 무거워져 hot path를 방해하지 않도록 감시한다. |
 | `scrollback_rewrap` | 2,000ms 이하 | 스크롤백을 cap(1,000행)까지 채운 뒤 "resize + 스크롤" 50회(지연/앵커 재-wrap 교대) | resize 후 처음 과거를 보는 순간 1회 일어나는 재-wrap 비용이 조용히 커지지 않게 고정한다. |
+| `core_find_scrollback` | 2,000ms 이하 | 5,000행 스크롤백(120열)에서 `findMatches` 20회(매치 1,111개) | 스크롤백 Find는 인덱스도 결과 캐시도 없이 검색어 키 입력마다·Find가 열린 채 출력이 있는 매 tick마다 core lock 아래에서 전체를 재스캔한다. 그 비용이 스크롤백 깊이에 **선형**으로 유지되는지 고정한다(측정상 증분 캐시 불필요 결론의 전제를 지킨다). |
 | `kitty_image_pipeline` | 2,000ms 이하 | 최악 근사(200 placement × 50 image)로 `buildGpuImages`+`planImageUploads` 1,000회 | 이미지가 있는 동안 매 frame 도는 파이프라인 비용의 회귀를 잡는다(측정상 캐시화 불필요 결론의 전제를 지킨다). |
 | `render_build_drawlist` | 2,000ms 이하 | 300×90 full-dirty·전 셀 장식 화면에서 `renderSnapshot`+`buildDrawList` 200회 | 렌더가 core_mutex를 잡은 채 dirty 셀을 복사하는 락-보유 구간의 상한 — 길어지면 I/O 스레드가 대기한다([io-render-threading.md §5](io-render-threading.md)). |
 | `render_build_scrolled` | 2,000ms 이하 | 같은 화면을 과거 스크롤(view_offset>0) 상태로 200회 | 과거를 보는 중 매 frame 도는 viewport 합성+복사(둘 다 락 안)의 정상 상태 비용을 잰다. |

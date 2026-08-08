@@ -248,7 +248,10 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
     //
     // 좁은 도크에서는 아예 내지 않는다. view는 이 노드의 유무만 보고 나머지 utility 배치를 정하므로
     // published tree가 단일 출처로 남는다.
-    const header_width: u32 = @intFromFloat(@max(0, props.viewport_px.width - @as(f32, @floatFromInt(m.root_inset))));
+    // header의 실제 폭은 viewport에서 root의 `padding.left`와 header 자신의 `margin.right`를 **둘 다**
+    // 뺀 값이다. 하나만 빼면 경계가 root_inset만큼 관대해져, 토글은 발행됐는데 제목 자리가 없는 구간이
+    // 그만큼 남는다.
+    const header_width: u32 = @intFromFloat(@max(0, props.viewport_px.width - @as(f32, @floatFromInt(m.root_inset * 2))));
     const sort_count: usize = @intFromBool(m.headerFitsSortToggle(header_width));
     const sort_nodes = buffers.nodes[nested_cursor + 3 + 4 ..][0..sort_count];
     if (sort_count == 1) sort_nodes[0] = tree.button(.{
@@ -1079,6 +1082,31 @@ test "SessionDock 좁은 도크는 정렬 토글을 발행하지 않는다" {
         .items = &items,
     });
     try std.testing.expect(wide.tree.find(NodeIds.sort_toggle) != null);
+
+    // 경계 바로 위/아래. header 폭은 viewport에서 root `padding.left`와 header `margin.right`를 둘 다
+    // 뺀 값이라(각 20pt) viewport 260이 딱 경계다. 하나만 빼는 회귀가 나면 259에서도 발행돼 여기서
+    // 걸린다.
+    var edge_in_storage = Built{};
+    const edge_in = try edge_in_storage.run(.{
+        .viewport_px = .{ .width = 260, .height = 480 },
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .snapshot_generation = 5,
+        .displayed_count = 1,
+        .items = &items,
+    });
+    try std.testing.expect(edge_in.tree.find(NodeIds.sort_toggle) != null);
+
+    var edge_out_storage = Built{};
+    const edge_out = try edge_out_storage.run(.{
+        .viewport_px = .{ .width = 259, .height = 480 },
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .snapshot_generation = 5,
+        .displayed_count = 1,
+        .items = &items,
+    });
+    try std.testing.expect(edge_out.tree.find(NodeIds.sort_toggle) == null);
 
     var narrow_storage = Built{};
     const narrow = try narrow_storage.run(.{

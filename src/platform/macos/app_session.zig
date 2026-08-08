@@ -4648,6 +4648,9 @@ pub const AppSession = struct {
         // 통째로 끄는 것과 같은 규율. §2 "항상 선다"는 도크·사이드바 **토글**(프레임마다 바뀌어
         // grid가 출렁이는 것)을 막는 규칙이고, 세션 생성 시 고정되는 이 모드는 그 대상이 아니다.
         if (self.chrome_minimal) return 0;
+        // 사용자가 끈 경우도 같은 자리에서 0으로 만든다 — 게이트가 여기 하나뿐이라 작업영역·도크·사이드바
+        // 뷰포트·strip·scissor가 전부 자동으로 따라온다(§5.4의 소비처 목록을 손댈 필요가 없다).
+        if (!self.loaded_config.config.status_bar.show) return 0;
         // **텍스트 행에 여백을 더한 높이와 고정 하한 중 큰 쪽.** 상단 타이틀바 띠(`computeTitlebarStripPx`)가
         // 쓰는 `@max(cell_height_px, 최소 pt)`와 같은 패턴이다.
         //
@@ -63501,6 +63504,40 @@ test "SB1: 상태바 경로 항목은 끝이 아니라 중간을 생략한다" {
     const pad = layout_math.ptToPx(status_bar_item_pad_pt, session.scale_milli);
     const published_w: u32 = @as(u32, @intFromFloat(entry.rect.width)) -| (2 * pad);
     try std.testing.expect(published_w < plain_w);
+}
+
+// SB1: **끄면 바가 사라지고 먹었던 높이가 되돌아온다.** 바는 창 높이를 실제로 깎으므로(§1), 끄는 것이
+// "안 그린다"에 그치면 행은 여전히 잃은 채 빈 띠만 남는다. 그래서 높이가 0이 되는 것과 **작업영역이
+// 그만큼 늘어나는 것**을 함께 본다 — 게이트가 `statusBarHeightPx` 하나뿐이라는 설계가 성립하는지의 검증이다.
+test "SB1: status-bar.show=false면 바가 사라지고 작업영역이 그만큼 돌아온다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1000, 700, 1000);
+    _ = session.pushNotificationHistory("MARU", "t", 0);
+    _ = try session.tick();
+
+    const bar_h = session.statusBarHeightPx();
+    try std.testing.expect(bar_h > 0); // 전제: 기본값은 켜짐이다
+    const term_h_on = session.termRect().h;
+    try std.testing.expect(session.statusBarTree().entries.len > 0);
+
+    session.loaded_config.config.status_bar.show = false;
+    session.metal_dirty = true;
+    _ = try session.tick();
+
+    try std.testing.expectEqual(@as(u32, 0), session.statusBarHeightPx());
+    try std.testing.expectEqual(@as(usize, 0), session.statusBarTree().entries.len); // 안 보이면 눌리지도 않는다
+    try std.testing.expectEqual(term_h_on + bar_h, session.termRect().h); // 먹었던 높이가 그대로 돌아온다
 }
 
 // SB1: **quick terminal(chrome_minimal)에는 상태바가 서지 않는다.** 이 모드는 chrome을 의도적으로

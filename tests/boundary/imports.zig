@@ -135,7 +135,7 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     // v169(셀이 자기 clip을 든다 — PaneFrameRole.dock_list 제거)로 또 바뀐다. count는 4 그대로다.
     // SV3b(소스 컨트롤 스크롤바 신규 + 발행 상태를 dock_list_scroll_*로 공유)로 또 바뀐다. count는 4 그대로다.
     // 상태바 경로 항목이 컴포넌트 단위 생략을 타면서 또 바뀐다. count는 4 그대로다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "d145fa30e3b5b9050ca21cef805308b834b0d6a7ca16e7665b6dfc2fa1f1a3da" },
+    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "126b28c8f2112f672d926d8809798e56a71e5b266a6e11a2439c3d797e0efeb0" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

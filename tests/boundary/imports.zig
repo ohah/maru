@@ -139,7 +139,8 @@ const external_reflection_inventory = [_]ExternalReflectionInventoryProof{
     // SV4b(사이드바 스크롤바 드래그 — capture·drag는 공유하고 대상만 태그)로 또 바뀐다. count는 4 그대로다.
     // SV4b 후속(스크롤바 layer 3 복원 + hover 게이트)으로 또 바뀐다. count는 4 그대로다.
     // 사이드바 스크롤바 hover 강조(커서는 안 바꾸고 alpha만)로 또 바뀐다. count는 4 그대로다.
-    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "d2bb5345c50a361c7a947501afbdbab2ff3915479070a51f8a5226b9efba4065" },
+    // 사이드바 셀 scissor 게이트 수정(밴드 배열 → 실제로 그릴 셀이 있는가)으로 또 바뀐다. count는 4 그대로다.
+    .{ .path = "src/platform/macos/app_session.zig", .count = 4, .digest_hex = "607efbe0b928750ae943ea76eff9e3942d0bbff00680e065016dd296659a7b47" },
     .{ .path = "src/session/dock_panel.zig", .count = 1, .digest_hex = "5a9539d23a5c98f9e23fbf61842cdb691335b12e7e07b949dafcf9e9b2d1c357" },
     .{ .path = "src/session/control_plane.zig", .count = 1, .digest_hex = "27ec80d82427390179358d369d5d2fd02320aed945436527235554d833f66e57" },
     .{ .path = "src/session/workspace.zig", .count = 1, .digest_hex = "d15b62332c9e7f47f421161958b07370924ffa4cefacf1203255160c2ea421dc" },

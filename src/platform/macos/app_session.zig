@@ -35941,7 +35941,11 @@ pub const AppSession = struct {
     fn chromeGeometrySnapshot(self: *const AppSession) metal_frame.ChromeGeometry {
         const scissor = sidebarScissorPx(
             self.backing_height_px,
-            self.sidebar_cells.items.len > 0,
+            // **밴드가 아니라 "사이드바에 그릴 셀이 있는가"다.** `self.sidebar_cells`는 tui 밴드만 담고
+            // 카드 제목은 별도 프레임(`sidebar_frame`)으로 간다 — rich 테마는 밴드가 GPU quad라 이 배열이
+            // 비고, 그래서 게이트가 항상 false가 되어 **scissor가 한 번도 안 걸렸다**. 그 결과 스크롤한
+            // 카드 제목이 상단 검색바 위로 샜다(rich가 기본이라 사실상 상시).
+            self.sidebar_width_px > 0 and self.tabs.items.len > 0,
             self.sidebar_header_height_px,
             self.sidebar_scroll_offset_px,
             self.dockGeometry().status_bar.h,
@@ -63784,6 +63788,42 @@ test "SB1-S3d: 상태바 배경은 bottom 버킷이어야 텍스트를 안 덮�
 // over 버킷(`.m`이 2/0/4 외를 전부 over로 보낸다)만이 사이드바 셀 뒤에 온다.
 // SB1 §5.3: 사이드바 셀 scissor. 이 계약은 `.m` 산술이라 **자동 가드가 없었다** — 문서 커버리지 표의
 // 마지막 ❌였다. 산술을 Zig로 옮겼으니 이제 순수 함수로 전부 덮인다.
+// 위 순수 함수는 처음부터 옳았다. **틀린 것은 호출처가 넘긴 값**이었고, 그래서 산술만 보는 단위
+// 테스트가 통과하는 동안 제품 화면에서는 스크롤한 카드 제목이 검색바 위로 샜다. 제품 경로에서
+// "그 값이 실제로 무엇이 되는가"를 본다 — 기본 테마(rich)로 돌린다는 점이 핵심이다.
+test "sidebar scissor engages on the product path even when bands are quads (rich)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionSized(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+
+    // 기본이 rich다 — 밴드가 GPU quad라 `sidebar_cells`(tui 밴드 배열)가 빈다. 옛 게이트는 그것을 보고
+    // "자를 셀이 없다"고 판정했지만, 카드 **제목**은 별도 프레임으로 실려 실제로는 그려지고 있었다.
+    try std.testing.expect(session.appearance.chrome_theme != .tui);
+    try std.testing.expect(session.sidebar_width_px > 0);
+    try std.testing.expect(session.sidebar_header_height_px > 0);
+
+    // 스크롤 전에는 자를 이유가 없다(헤더 위로 샌 것이 없다).
+    session.sidebar_scroll_offset_px = 0;
+    {
+        const geo = session.chromeGeometrySnapshot();
+        try std.testing.expectEqual(@as(u32, 0), geo.sidebar_scissor_top_px);
+    }
+
+    // 스크롤하면 **헤더 아래부터** 자른다. 옛 코드는 여기서 0을 내 렌더러가 scissor에 진입하지 못했다.
+    session.sidebar_scroll_offset_px = 10;
+    const geo = session.chromeGeometrySnapshot();
+    try std.testing.expectEqual(session.sidebar_header_height_px, geo.sidebar_scissor_top_px);
+    try std.testing.expect(geo.sidebar_scissor_bottom_px > geo.sidebar_scissor_top_px);
+
+    // 사이드바가 접히면(폭 0) 자를 대상이 없다 — 게이트를 넓히면서 이 축까지 잃으면 안 된다.
+    session.sidebar_width_px = 0;
+    const collapsed = session.chromeGeometrySnapshot();
+    try std.testing.expectEqual(@as(u32, 0), collapsed.sidebar_scissor_top_px);
+    try std.testing.expectEqual(@as(u32, 0), collapsed.sidebar_scissor_bottom_px);
+}
+
 test "SB1: 사이드바 scissor는 스크롤과 상태바 각각을 이유로 자르고, 아니면 안 자른다" {
     const S = AppSession.sidebarScissorPx;
 

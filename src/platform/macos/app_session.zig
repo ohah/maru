@@ -4215,10 +4215,15 @@ pub const AppSession = struct {
         const home = std.mem.span(home_z);
         if (home.len == 0) return;
         const owned = self.allocator.dupe(u8, home) catch return;
-        // 보여 줄 이전 완료 목록이 없을 때만 부분 진행을 요청한다 — 첫 진입에서 목록이 위에서부터
-        // 차오르게 한다(docs/agent-session-list.md §4.1). 이미 목록이 있으면 완성본 하나로 교체해야
+        // 보여 줄 이전 **완료** 목록이 없을 때만 부분 진행을 요청한다 — 첫 진입에서 목록이 위에서부터
+        // 차오르게 한다(docs/agent-session-list.md §4.1). 이미 완료 목록이 있으면 완성본 하나로 교체해야
         // refresh가 목록을 흔들지 않는다.
-        const wants_progress = self.agent_session_archive_records.items.len == 0;
+        //
+        // 판정에 `records.len`을 쓰면 안 된다. **부분 진행도 records를 채우기 때문**이다 — 부분만 받은
+        // 채 스캔이 취소되면(도크를 닫으면) 그 불완전한 목록이 "이전 목록 있음"으로 오인돼 다음 진입이
+        // 점진 경로를 타지 않고, 완료까지 그 상태로 머문다. `completed_ns`는 완료 스냅샷에서만 세워지므로
+        // "한 번이라도 완주했는가"의 정확한 신호다.
+        const wants_progress = self.agent_session_archive_completed_ns == 0;
         if (!self.agent_session_archive_backend.submit(owned, wants_progress)) {
             self.allocator.free(owned);
             return;

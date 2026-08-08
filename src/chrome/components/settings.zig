@@ -18,6 +18,7 @@ const props = @import("../props.zig");
 const input = @import("../input.zig");
 const modal_box = @import("modal_box.zig");
 const overlay_input = @import("overlay_input.zig"); // displayCols(EAW 표시폭) — 라벨 폭 측정(modal_box와 같은 규약)
+const scroll_area = @import("../ui/scroll_area.zig"); // SV5d: 스크롤 좌표 단일 출처(도크·탐색기와 같은 타입)
 const width = @import("../../width.zig"); // UTF-8 경계 절단/백스페이스 단일 출처(truncateToBoundary·dropLastCodepoint)
 const toggle = @import("toggle.zig");
 const input_box = @import("input_box.zig"); // 숫자 입력 박스(슬라이더 대체 — 프로그레스바 대신 직접 타이핑)
@@ -124,6 +125,15 @@ fn pickerLayout(p: props.ChromeProps, tk: *const tokens.Tokens) ?modal_box.Box {
 pub const State = struct {
     open: bool = false,
     selected: usize = 0,
+    /// 폼 목록의 세로 스크롤(**backing px**, SV5d). 휠·드래그가 선택과 무관하게 목록을 움직이므로
+    /// 저장한다 — SV5c까지는 창을 selected에서 매번 재파생해 상태가 없었다.
+    ///
+    /// **컴포넌트가 소유한다.** 렌더(`computeLayout`)가 이 값을 직접 보므로 host가 따로 든 offset과
+    /// 갈릴 자리가 없다. 알림 패널(`notifications.State.scroll`)이 쓰는 것과 같은 형태다.
+    scroll: scroll_area.State = .{},
+    /// follow가 마지막으로 반영한 선택 — 팔레트와 같은 이유로 **값 비교**다(섹션 전환처럼
+    /// `.selection_changed`를 안 내는 경로에서도 선택이 바뀐다).
+    followed_selected: ?usize = null,
     /// 좌측 네비에서 선택된 섹션 인덱스(폼은 이 섹션의 필드만 — config-gui §4). platform이 buildSectionList 순서와
     /// 맞춰 필터/라벨을 주입한다. 섹션 전환 시 selected=0으로(첫 필드).
     section: usize = 0,
@@ -441,7 +451,17 @@ fn maxVisible(p: props.ChromeProps) usize {
     return @max(@as(usize, 4), @as(usize, avail) -| 7); // 제목 2 + 위아래 여백 2 + 여유 3
 }
 
-fn computeLayout(sections: []const []const u8, rows: []const FieldRow, selected: usize, p: props.ChromeProps, tk: *const tokens.Tokens) ?Layout {
+/// 저장된 픽셀 offset을 **행 수**로 환산한다 — 폼 행은 높이가 균일(ch)해서 나눗셈으로 충분하다.
+/// 픽셀을 그대로 쓰지 않는 이유는 이 컴포넌트가 행 격자로 그리기 때문이다(부분 행이 없다).
+fn scrollRows(state: *const State, p: props.ChromeProps) usize {
+    const ch = @max(p.metrics.cell_height_px, 1);
+    return state.scroll.offset_y_px / ch;
+}
+
+/// `selected`는 더 이상 창을 정하지 않는다(SV5d) — 창은 저장된 offset에서 나오고, 선택이 창 밖으로
+/// 나가면 `ensureSelectedVisible`이 **미리** 당겨 둔다. 두 축을 여기서 함께 풀면 휠로 굴린 자리가
+/// 매 프레임 선택 쪽으로 되돌아간다.
+fn computeLayout(sections: []const []const u8, rows: []const FieldRow, state_scroll_rows: usize, p: props.ChromeProps, tk: *const tokens.Tokens) ?Layout {
     const cw = @max(p.metrics.cell_width_px, 1);
     const ch = @max(p.metrics.cell_height_px, 1);
     const ctrl_cols = controlCols(ch, cw);
@@ -457,7 +477,10 @@ fn computeLayout(sections: []const []const u8, rows: []const FieldRow, selected:
     const title_need = overlay_input.displayCols(title_text) + 12; // 제목 + 스크롤 위치 표식 여유
     const content_cols = @max(nav_cols + nav_gap_cols + form_content, title_need);
     const mv = maxVisible(p);
-    const win_start = overlay_input.windowStart(rows.len, mv, @min(selected, rows.len -| 1), 0); // 공유 윈도잉(prev=0 재파생)
+    // 창은 **저장된 offset**에서 나온다(SV5d). SV5c까지는 selected에서 매번 재파생했는데, 휠·드래그가
+    // 선택과 무관하게 목록을 움직이므로 그 방식으로는 표현할 수 없다. offset을 항목 단위로 환산하고,
+    // 선택이 창 밖이면 `ensureSelectedVisible`이 미리 당겨 둔다(그 규칙이 옛 `windowStart`를 대체한다).
+    const win_start = @min(state_scroll_rows, rows.len -| @min(rows.len, mv));
     const win_len = @min(rows.len, mv);
     // 박스 높이는 **항상 가용 최대(FullHeight)** — win_len(보이는 행 수) 대신 mv(maxVisible)로 고정해, 행이 적은
     // 섹션에서도 모달이 작아졌다 커졌다 하지 않고 화면 높이에 꽉 차게 한다(너비는 content_cols로 별도 고정 — #860).
@@ -592,7 +615,7 @@ pub fn view(
 ) !void {
     if (!state.open) return;
     if (state.picking) return renderPicker(state, p, tk, arena, out); // HSV picker 모드 — 폼 대신 그리드+스트립
-    const l = computeLayout(sections, rows, state.selected, p, tk) orelse return;
+    const l = computeLayout(sections, rows, scrollRows(state, p), p, tk) orelse return;
     const box = l.box;
     try modal_box.frame(box, p, arena, out);
     // 제목 — 검색 중이면 "검색: <쿼리><조합중>▏"(accent + caret), 아니면 "Settings" + 폼이 창보다 많으면 sel/total 위치 표식.
@@ -813,7 +836,7 @@ pub fn view(
 /// view의 caret_x와 같은 폭 규약(search_prompt + queryCols, EAW). preedit는 안 더한다(조합 글자는 query 끝 caret에 겹쳐 그려짐 — 단일 줄 append라 뒤 텍스트 없음).
 pub fn searchCaretRect(state: *const State, sections: []const []const u8, rows: []const FieldRow, p: props.ChromeProps, tk: *const tokens.Tokens) ?draw.Rect {
     if (!state.open or state.picking or !state.searching) return null;
-    const l = computeLayout(sections, rows, state.selected, p, tk) orelse return null;
+    const l = computeLayout(sections, rows, scrollRows(state, p), p, tk) orelse return null;
     const box = l.box;
     const caret_cols = overlay_input.displayCols(search_prompt) + overlay_input.displayCols(state.searchQuery());
     return .{
@@ -830,11 +853,46 @@ pub fn searchCaretRect(state: *const State, sections: []const []const u8, rows: 
 /// 여기서는 "어디에 얼마만큼"만 알려 준다. `searchCaretRect`가 caret 위치만 알려 주는 것과 같은 형태다.
 ///
 /// `win_start`는 selected에서 매번 재파생된 값이라 **저장되는 상태가 아니다**(팔레트와 같다 — SV5b).
+/// 키보드로 selected가 바뀐 뒤 host가 부른다 — 선택이 창 밖이면 **최소로** 당기고, 창 안이면
+/// 움직이지 않는다(휠·드래그로 굴린 자리를 존중한다). 옛 `windowStart(prev=0)`가 매 프레임 창을
+/// selected 쪽으로 되돌리던 것을 이 규칙이 대체한다(알림 패널과 같은 형태).
+pub fn ensureSelectedVisible(state: *State, sections: []const []const u8, rows: []const FieldRow, p: props.ChromeProps, tk: *const tokens.Tokens) void {
+    if (state.followed_selected) |seen| {
+        if (seen == state.selected) return; // 선택 그대로 — 굴린 자리를 지킨다
+    }
+    state.followed_selected = state.selected;
+    const l = computeLayout(sections, rows, scrollRows(state, p), p, tk) orelse return;
+    const ch = @max(p.metrics.cell_height_px, 1);
+    if (rows.len <= l.win_len) {
+        state.scroll = .{};
+        return;
+    }
+    const max_offset: u32 = @intCast((rows.len - l.win_len) * ch);
+    const top: u32 = @intCast(@min(state.selected, rows.len -| 1) * ch);
+    const bottom = top + ch;
+    var offset = @min(state.scroll.offset_y_px, max_offset);
+    if (top < offset) {
+        offset = top;
+    } else if (bottom > offset + @as(u32, @intCast(l.win_len)) * ch) {
+        offset = bottom - @as(u32, @intCast(l.win_len)) * ch;
+    }
+    state.scroll.offset_y_px = @min(offset, max_offset);
+}
+
+/// 휠 한 틱 = 행 하나(감각 보존). 상태는 픽셀이다. 스크롤할 게 없으면 false.
+pub fn scrollByRows(state: *State, sections: []const []const u8, rows: []const FieldRow, p: props.ChromeProps, tk: *const tokens.Tokens, lines: i64) bool {
+    const l = computeLayout(sections, rows, scrollRows(state, p), p, tk) orelse return false;
+    if (rows.len <= l.win_len) return false;
+    const ch = @max(p.metrics.cell_height_px, 1);
+    const max_offset: u32 = @intCast((rows.len - l.win_len) * ch);
+    return state.scroll.scrollByPx(-lines * @as(i64, ch), max_offset); // lines>0(위) → offset 감소
+}
+
 pub const ScrollView = struct { viewport: draw.Rect, total: usize, visible: usize, win_start: usize };
 
 pub fn scrollView(state: *const State, sections: []const []const u8, rows: []const FieldRow, p: props.ChromeProps, tk: *const tokens.Tokens) ?ScrollView {
     if (!state.open) return null;
-    const l = computeLayout(sections, rows, state.selected, p, tk) orelse return null;
+    const l = computeLayout(sections, rows, scrollRows(state, p), p, tk) orelse return null;
     if (rows.len <= l.win_len or l.win_len == 0) return null; // 안 넘침 — 막대 없음
     const box = l.box;
     return .{
@@ -1202,7 +1260,7 @@ pub fn handlePointer(
     if (ev.button != .left) return .consumed;
     // HSV picker 모드 — SV 그리드/hue 스트립 클릭·드래그로 s/v·h 선택, 박스 밖 클릭은 picker 취소(폼 복귀). 폼 hit-test 안 함.
     if (state.picking) return pickerPointer(ev, p, tk, state);
-    const l = computeLayout(sections, rows, state.selected, p, tk) orelse return .consumed;
+    const l = computeLayout(sections, rows, scrollRows(state, p), p, tk) orelse return .consumed;
     const box = l.box;
     // 드롭다운 팝업이 열려 있으면(모달) 폼 hit-test 대신 팝업만: down이 항목 위면 그 변형 선택+적용, 밖이면 닫기.
     // 앵커=선택 행의 축소 control rect(view와 같은 계산 — "보이는 == 클릭되는").
@@ -1535,7 +1593,7 @@ test "settings handlePointer: 박스 밖=닫기, toggle 클릭=.toggle, number(�
         .{ .label = "A", .kind = .{ .toggle = false } },
         .{ .label = "Size", .kind = .{ .number = .{ .value = 1, .min = 1, .max = 100 } } }, // 숫자 = 입력 박스 렌더
     };
-    const l = computeLayout(no_sections, &rows, s.selected, test_props, &tk).?;
+    const l = computeLayout(no_sections, &rows, scrollRows(&s, test_props), test_props, &tk).?;
 
     // 박스 밖(0,0) 좌클릭 → 닫기.
     try std.testing.expectEqual(Action.close, handlePointer(.{ .phase = .down, .x_px = 0, .y_px = 0 }, no_sections, &rows, no_items, test_props, &tk, &s));
@@ -1570,7 +1628,7 @@ test "settings handlePointer: 제목 행 클릭 → 검색 시작(.search_change
     var s = State{};
     s.show();
     const rows = [_]FieldRow{.{ .label = "A", .kind = .{ .toggle = false } }};
-    const l = computeLayout(no_sections, &rows, s.selected, test_props, &tk).?;
+    const l = computeLayout(no_sections, &rows, scrollRows(&s, test_props), test_props, &tk).?;
     const box = l.box;
     const ty: f64 = @floatFromInt(modal_box.rowY(box, 0)); // 제목 행(row 0)
     const tx: f64 = @floatFromInt(box.inner_x + 2);
@@ -1646,7 +1704,7 @@ test "settings nav: 섹션 라벨 렌더(선택 강조) + 네비 클릭 → sect
     try std.testing.expect(found_font and found_cursor);
 
     // 네비 영역(x < form_x) 섹션 1(Cursor) 행 클릭 → section_changed + section=1 + selected=0.
-    const l = computeLayout(&test_sections, &rows, s.selected, test_props, &tk).?;
+    const l = computeLayout(&test_sections, &rows, scrollRows(&s, test_props), test_props, &tk).?;
     const ny: f64 = @floatFromInt(modal_box.rowY(l.box, l.first_field_row + 1));
     s.selected = 0;
     const act = handlePointer(.{ .phase = .down, .x_px = @floatFromInt(l.box.inner_x + 4), .y_px = ny + 4 }, &test_sections, &rows, no_items, test_props, &tk, &s);
@@ -1762,7 +1820,7 @@ test "settings 좁은 창 → 렌더 안 함(겹침 회피), 편집 중 다른 �
     s.selected = 0;
     s.enterEdit("editing...");
     try std.testing.expect(s.editing);
-    const l = computeLayout(no_sections, &rows, s.selected, test_props, &tk).?;
+    const l = computeLayout(no_sections, &rows, scrollRows(&s, test_props), test_props, &tk).?;
     const c1 = fieldControlRect(l, 1); // 행1(toggle)
     _ = handlePointer(.{ .phase = .down, .x_px = @floatFromInt(l.form_x + 2), .y_px = @floatFromInt(c1.y + 4) }, no_sections, &rows, no_items, test_props, &tk, &s);
     try std.testing.expect(!s.editing); // 다른 행 클릭 → 편집 종료
@@ -2122,7 +2180,7 @@ test "settings 검색 IME 조합(preedit): query 뒤에 조합 글자 표시 + c
 
     // caret은 "검색: a" 끝(=조합 시작)에 있어 조합 글자 "가"를 덮는다 — searchCaretRect가 preedit를 안 더한다.
     const cr = searchCaretRect(&s, no_sections, &rows, test_props, &tk).?;
-    const l = computeLayout(no_sections, &rows, s.selected, test_props, &tk).?;
+    const l = computeLayout(no_sections, &rows, scrollRows(&s, test_props), test_props, &tk).?;
     const expect_cols = overlay_input.displayCols("검색: ") + overlay_input.displayCols("a");
     try std.testing.expectEqual(l.box.inner_x + @as(i32, @intCast(expect_cols * l.box.cw)), cr.x);
 
@@ -2312,17 +2370,34 @@ test "settings reserves the scrollbar gutter once and reports a viewport for the
     try std.testing.expectEqual(@as(usize, 0), sv.win_start);
     try std.testing.expect(sv.viewport.w > 0 and sv.viewport.h > 0);
 
-    // ③ 선택을 끝으로 옮기면 창이 따라간다(파생값의 증거).
+    // ③ **선택만 옮겨서는 창이 안 움직인다**(SV5d — offset이 저장된 값이 됐다). 휠로 굴린 자리를
+    //    존중하려면 그래야 한다. 창을 옮기는 것은 `ensureSelectedVisible`의 명시적 호출이다.
     s.selected = rows.len - 1;
+    const sv_still = scrollView(&s, &sections, rows, with_gutter, &tk).?;
+    try std.testing.expectEqual(@as(usize, 0), sv_still.win_start);
+    ensureSelectedVisible(&s, &sections, rows, with_gutter, &tk);
     const sv_end = scrollView(&s, &sections, rows, with_gutter, &tk).?;
     try std.testing.expect(sv_end.win_start > 0);
 
-    // ④ 안 넘치면 막대가 없다 — 트랙만 남은 막대를 그리지 않는다.
+    // ④ 이미 창 안이면 follow가 **움직이지 않는다** — 굴린 자리를 존중한다.
+    const held = s.scroll.offset_y_px;
+    ensureSelectedVisible(&s, &sections, rows, with_gutter, &tk);
+    try std.testing.expectEqual(held, s.scroll.offset_y_px);
+
+    // ⑤ 휠 한 틱은 행 하나만큼 움직이고 상한에서 멈춘다.
+    s.scroll = .{};
+    try std.testing.expect(scrollByRows(&s, &sections, rows, with_gutter, &tk, -1));
+    try std.testing.expectEqual(@as(u32, 16), s.scroll.offset_y_px);
+    _ = scrollByRows(&s, &sections, rows, with_gutter, &tk, -10_000);
+    const sv_max = scrollView(&s, &sections, rows, with_gutter, &tk).?;
+    try std.testing.expectEqual(rows.len - sv_max.visible, sv_max.win_start);
+
+    // ⑥ 안 넘치면 막대가 없다 — 트랙만 남은 막대를 그리지 않는다.
     const few: []const FieldRow = rows[0..1];
     s.selected = 0;
     try std.testing.expect(scrollView(&s, &sections, few, with_gutter, &tk) == null);
 
-    // ⑤ 닫혀 있으면 없다.
+    // ⑦ 닫혀 있으면 없다.
     s.open = false;
     try std.testing.expect(scrollView(&s, &sections, rows, with_gutter, &tk) == null);
 }

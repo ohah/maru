@@ -66,6 +66,10 @@ void maru_macos_chrome_lab_smoke_render(
     size_t shadow_count,
     const MaruAppHostGpuGlyph *glyphs,
     size_t glyph_count,
+    /* SB1 §5.2: 0이 아니면 사이드바 배경 strip을 그리고 그 바닥을 상태바 높이만큼 끊는다.
+       기존 시나리오는 둘 다 0을 넘겨 캡처가 바이트 동일하다. */
+    uint32_t sidebar_width_px,
+    uint32_t status_bar_height_px,
     MaruChromeLabSmokeResult *result
 ) {
     if (result == NULL) {
@@ -126,8 +130,8 @@ void maru_macos_chrome_lab_smoke_render(
         cell_height_px,
         cells,
         cell_count,
-        0,
-        0,
+        sidebar_width_px, // terminal_origin_x_px — >0이어야 `.m`이 사이드바 strip을 그린다
+        sidebar_width_px > 0 ? 0xFF1E222Au : 0u, // sidebar_bg(불투명) — alpha 0이면 strip을 안 그린다
         NULL,
         0,
         0,
@@ -156,7 +160,7 @@ void maru_macos_chrome_lab_smoke_render(
         0,
         glyphs,
         glyph_count,
-        0, // SB1: status_bar_height_px — lab은 상태바를 안 세운다(strip은 창 바닥까지)
+        status_bar_height_px, // SB1 §5.2: strip 바닥을 여기서 끊는다(0이면 창 바닥까지 = 기존 동작)
         0, 0, // 사이드바 셀 scissor — lab은 사이드바 셀을 안 그린다(bottom <= top → scissor 없음, v168)
         NULL, 0 // 셀 clip 표 — lab은 어떤 셀도 자르지 않는다(모든 clip_index=0, v169)
     );

@@ -58,6 +58,14 @@ const Case = struct {
 };
 
 const cases = [_]Case{
+    // SB1 §5.2 — 이 항목이 그 절의 ⚠️(자동 가드 없음)를 닫는다. Zig가 값을 싣는 것까지는 테스트가 있었지만
+    // **`.m`이 그 값으로 실제로 자르는지**는 아무도 안 봤다. 좌하단만 잘라 strip 바닥 경계 한 줄을 고정한다.
+    .{
+        .name = "sidebar-strip-stops-above-status-bar",
+        .capture = "sidebar-status-strip.ppm",
+        .contract = "사이드바 배경 strip이 창 바닥까지 가지 않고 상태바 높이만큼 위에서 끝난다(그 아래는 배경색)",
+        .rect = .{ .x = 0, .y = 660, .w = 200, .h = 60 },
+    },
     .{
         .name = "partial-scroll-cards",
         .capture = "partial-scroll.ppm",

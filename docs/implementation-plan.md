@@ -1392,11 +1392,11 @@ tree 교체에서 capture carry 누락(드래그가 첫 move에 죽음)·스크�
   paint 경로(layer 2, 카드 **아래**)로 내리면 gutter 예약이 **그 컴포넌트의 계약 변경**이 된다.
   그래서 둘로 나눈다.
 
-  - **SV4a — 발행 경로.** `appendSidebarScrollbar()`가 손으로 만드는 GpuQuad를 `tree.scrollArea` 선언
+  - **SV4a — 발행 경로(완료).** `appendSidebarScrollbar()`가 손으로 만드는 GpuQuad를 `tree.scrollArea` 선언
     + `ui_paint` + `chrome_draw_lowering`으로 교체하고, `sidebar.view`가 밴드 폭에서 gutter를 예약한다.
     **보이는 변화**: 카드 밴드가 gutter만큼 좁아진다(스크롤바가 나타나고 사라져도 폭은 안 변한다 —
     상시 예약이 [ScrollArea](scroll-area.md) §4의 규율이다).
-  - **SV4b — 드래그.** capture를 붙여 잡아 끌 수 있게 한다. **판단**: 사이드바와 도크 목록은 **동시에
+  - **SV4b — 드래그(완료).** capture를 붙여 잡아 끌 수 있게 한다. **판단**: 사이드바와 도크 목록은 **동시에
     보이므로** 발행 저장소는 각자 둔다. 그러나 한 번에 하나만 잡히므로 capture·`scroll_area.Drag`는
     공유하고 어느 쪽을 잡았는지만 태그한다 — SV3b가 상태까지 합친 근거("도크 뷰는 한 번에 하나만
     보인다")는 여기 적용되지 않는다. 근거가 다르면 결론도 다르게 적는다.

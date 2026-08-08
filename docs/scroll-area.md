@@ -17,7 +17,7 @@ pointer capture·drag 수명은 [Chrome 상호작용 이관](chrome-interaction-
 | Session Dock | backing px | `ui/scroll_area.zig`의 item window | 도크 published tree | dock interaction capture | 있음 |
 | 파일 탐색기 | backing px | 없음(행 슬라이스) | 같은 tree(`scrollArea` 선언) | `scroll_area.Drag` | 있음 |
 | 소스 컨트롤 | backing px | 없음 | 같은 tree(`scrollArea` 선언, 탐색기와 공유) | `scroll_area.Drag` | 있음 |
-| 사이드바 | backing px | 없음 | **host가 GPU quad 직접** | 없음(휠만) | 해당 없음 |
+| 사이드바 | backing px | 없음 | 같은 tree(`scrollArea` 선언) | `scroll_area.Drag`(도크와 공유, 대상 태그) | 있음 |
 | 알림 패널 | **item index** | 없음 | 컴포넌트가 직접 | 없음(휠·키만) | 해당 없음 |
 | 팔레트·세팅 | **item index** | 없음 | 없음 | 없음(선택 이동만) | 해당 없음 |
 | 탭 바 | **컬럼(가로)** | 없음 | ‹› 버튼 | 없음 | 해당 없음 |

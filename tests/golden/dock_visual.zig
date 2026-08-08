@@ -67,6 +67,21 @@ const cases = [_]Case{
         .rect = .{ .x = 0, .y = 660, .w = 200, .h = 60 },
     },
     .{
+        // 이 case가 생기기 전까지 **어떤 골든도 헤더를 보지 않았다.** crop이 전부 목록 영역(y≥200)에
+        // 있어서, 헤더 utility를 통째로 지워도 골든 전부가 통과했다. 실제로 정렬 토글을 추가한 PR에서
+        // 게이트가 아무 말도 하지 않았고, 사람이 캡처를 열어 보고서야 label이 상자 위쪽에 붙고 상자만
+        // 옆 utility보다 크다는 것을 알았다.
+        //
+        // crop은 헤더 오른쪽 utility 띠를 잡는다. `로컬` provenance · 정렬 토글 · refresh가 한 줄에
+        // 나란히 서고 서로 겹치지 않는지, 각자의 line box가 세로 중앙에 있는지가 한 사각형으로 판정된다.
+        // 셋의 가로 배치는 `headerUtilityWidth`의 역산 하나에서 나오므로, 그 식이 틀어지면 여기서 바로
+        // 드러난다.
+        .name = "header-utility-row",
+        .capture = "retained-list.ppm",
+        .contract = "헤더 오른쪽에 `로컬`·정렬 토글·refresh가 겹치지 않고 한 줄로 서며 각자 세로 중앙에 있다",
+        .rect = .{ .x = 240, .y = 20, .w = 240, .h = 60 },
+    },
+    .{
         .name = "partial-scroll-cards",
         .capture = "partial-scroll.ppm",
         .contract = "부분 스크롤된 카드 3행의 높이·간격이 DockMetrics대로다(축소되지 않는다)",

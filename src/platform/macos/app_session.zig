@@ -63542,8 +63542,23 @@ test "SB1: reload로 status-bar.show를 끄면 pane 크기도 새 값으로 다�
     try std.testing.expect(bar_on > 0); // 전제: 기본은 켜짐
     const pad_on = session.gridPadding().bottom;
 
+    // env는 프로세스 전역이라 **원래 값을 되돌린다** — 그냥 unset하면 MARU_CONFIG를 이미 쓰던 실행에서
+    // 뒤에 오는 테스트의 config 출처가 조용히 바뀐다(원인 찾기 어려운 교차 오염).
+    // getenv가 준 포인터는 environ 안을 가리키고 **setenv가 그 메모리를 덮을 수 있다** — 값을 먼저 복사한다.
+    var prev_buf: [1024]u8 = undefined;
+    const prev_cfg: ?[:0]const u8 = if (std.c.getenv("MARU_CONFIG")) |v| blk: {
+        const span = std.mem.span(v);
+        if (span.len >= prev_buf.len) break :blk null; // 너무 길면 복원 포기(테스트 환경에선 없다)
+        @memcpy(prev_buf[0..span.len], span);
+        prev_buf[span.len] = 0;
+        break :blk prev_buf[0..span.len :0];
+    } else null;
     _ = setenv("MARU_CONFIG", cfg_path.ptr, 1);
-    defer _ = unsetenv("MARU_CONFIG");
+    defer if (prev_cfg) |v| {
+        _ = setenv("MARU_CONFIG", v.ptr, 1);
+    } else {
+        _ = unsetenv("MARU_CONFIG");
+    };
     session.reloadConfig();
     _ = try session.tick();
 

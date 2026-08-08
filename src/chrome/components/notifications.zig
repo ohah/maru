@@ -14,6 +14,7 @@ const tokens = @import("../tokens.zig");
 const props = @import("../props.zig");
 const input = @import("../input.zig");
 const overlay_input = @import("overlay_input.zig"); // displayCols(EAW)·truncateToCols 단일 출처 — 카드 폭 측정·말줄임에 재사용
+const scroll_area = @import("../ui/scroll_area.zig"); // SV5a: 스크롤 좌표·창 계산 단일 출처(도크·탐색기와 같은 타입)
 
 /// 최상위 모달 레이어(열려 있으면 키를 잡는다). host가 ops와 짝지어 백엔드에 넘긴다.
 pub const layer = draw.Layer.modal;
@@ -90,10 +91,10 @@ pub const State = struct {
     /// 한다(사용자 피드백). selected(tab_active_bg)가 우선이라 같은 카드면 hover는 안 그린다. 키보드 전용 흐름엔 늘 null.
     hovered: ?usize = null,
     item_count: usize = 0,
-    /// 보이는 첫 카드 인덱스(0=최신 위). 카드가 화면 높이를 넘으면 이 offset 윈도우만 렌더(카드 단위 스크롤 — draw.Op에
-    /// scissor가 없어 부분 카드를 못 자르므로 통째 카드만). 상한 clamp는 layout(items·metrics 의존)이 하고, 여기선
-    /// 하한(0)만 보장. show 시 0으로 리셋.
-    scroll_offset: usize = 0,
+    /// 세로 스크롤 위치(**backing px**, 0=최신 위). SV5a에서 카드 index → 픽셀로 옮겼다 — 옛 주석이 근거로 든
+    /// "draw.Op에 scissor가 없어 부분 카드를 못 자른다"는 전제는 ABI v169(셀이 자기 clip을 든다)가 깼다.
+    /// 상한 clamp는 layout(items·metrics 의존)이 하고 여기선 하한(0)만 보장. show 시 0으로 리셋.
+    scroll: scroll_area.State = .{},
 
     /// 종 아이콘 위치(x,y px)와 항목 수로 연다 — 선택은 첫(=최신) 항목, 스크롤은 맨 위. platform이 항목을 빌드한 뒤 부른다.
     pub fn show(self: *State, x: i32, y: i32, item_count: usize) void {
@@ -102,7 +103,7 @@ pub const State = struct {
         self.selected = 0;
         self.hovered = null; // 새로 열 때 stale 호버 강조 제거(첫 마우스 이동이 다시 채운다)
         self.item_count = item_count;
-        self.scroll_offset = 0;
+        self.scroll = .{};
         self.open = true;
     }
 
@@ -129,28 +130,38 @@ pub const State = struct {
         self.selected = @intCast(std.math.clamp(cur + delta, 0, last));
     }
 
-    /// 마우스 휠용 — delta 카드만큼 스크롤(음수=위/최신, 양수=아래/오래된). count·metrics만 받는다(전체 Item 빌드·폭
-    /// 계산 불필요 — scrollWindow는 개수·화면 높이만 본다). 상한은 scrollWindow가 clamp(단일 출처). 스크롤 불필요면 0.
+    /// 마우스 휠용 — **delta 카드**만큼 스크롤(음수=위/최신, 양수=아래/오래된). 상태는 픽셀이지만 휠 한 틱이
+    /// 카드 한 장인 감각은 유지한다(SV5a 이전과 같은 조작감). 상한은 scrollWindow가 준다(단일 출처).
     pub fn scrollBy(self: *State, total: usize, m: props.CellMetrics, delta: i64) void {
         const sw = scrollWindow(total, m);
         if (!sw.scrollable) {
-            self.scroll_offset = 0;
+            self.scroll = .{};
             return;
         }
-        const max_offset: i64 = @intCast(sw.max_offset);
-        const cur: i64 = @intCast(@min(self.scroll_offset, sw.max_offset));
-        self.scroll_offset = @intCast(std.math.clamp(cur + delta, 0, max_offset));
+        const card_h: i64 = @intCast(@max(m.cell_height_px, 1) * card_rows);
+        _ = self.scroll.scrollByPx(delta * card_h, sw.max_offset_px);
     }
 
-    /// 키보드 ↑↓로 selected가 바뀐 뒤 호출 — 선택 카드가 viewport 밖이면 보이게 스크롤한다(prev 위치 유지 + selected
-    /// 끝맞춤, overlay_input.windowStart 단일 출처). count·metrics만 받는다(Item 빌드 불필요). 스크롤 불필요면 0.
+    /// 키보드 ↑↓로 selected가 바뀐 뒤 호출 — 선택 카드가 viewport 밖이면 보이게 **최소로** 스크롤한다.
+    /// 옛 코드는 `overlay_input.windowStart`(item index)를 썼다. 픽셀에서도 규칙은 같다: 창 위로 나가면
+    /// 그 카드 상단에, 아래로 나가면 그 카드 하단에 맞춘다. 이미 창 안이면 **움직이지 않는다**(휠로 굴린
+    /// 자리 존중 — 옛 `prev_start` 인자가 지키던 성질이다).
     pub fn ensureSelectedVisible(self: *State, total: usize, m: props.CellMetrics) void {
         const sw = scrollWindow(total, m);
         if (!sw.scrollable) {
-            self.scroll_offset = 0;
+            self.scroll = .{};
             return;
         }
-        self.scroll_offset = overlay_input.windowStart(total, sw.visible, self.selected, self.scroll_offset);
+        const card_h: u32 = @max(m.cell_height_px, 1) * card_rows;
+        const top: u32 = @as(u32, @intCast(@min(self.selected, total -| 1))) * card_h;
+        const bottom: u32 = top + card_h;
+        var offset = @min(self.scroll.offset_y_px, sw.max_offset_px);
+        if (top < offset) {
+            offset = top;
+        } else if (bottom > offset + sw.viewport_h_px) {
+            offset = bottom - sw.viewport_h_px;
+        }
+        self.scroll.offset_y_px = @min(offset, sw.max_offset_px);
     }
 };
 
@@ -234,18 +245,36 @@ fn headerActions(panel_cols: u32) HeaderActions {
 /// 카드 윈도우(보이는 카드 수·스크롤 여부·최대 offset) — **width 없이** 개수와 화면 높이(metrics)만으로 계산한다.
 /// layout(렌더용, 폭도 계산)과 scrollBy/ensureSelectedVisible(스크롤만)이 공유 — 후자가 매 휠/키마다 전체 Item을 빌드
 /// 하거나 카드 폭을 재지 않게 한다(개수만 필요). 헤더(상단 sticky)는 늘 예약하고, 화면 가용 높이에서 카드 1개는 최소 보장.
-const ScrollWindow = struct { visible: usize, scrollable: bool, max_offset: usize };
+/// SV5a에서 **픽셀**이 됐다. `viewport_h_px`는 헤더 아래 카드가 흐르는 높이, `content_h_px`는 전체 카드
+/// 높이의 합이고 `max_offset_px`는 그 둘의 차다(도크·탐색기와 같은 계약).
+const ScrollWindow = struct {
+    /// 부분 카드를 **포함해** 그려야 하는 카드 수. 창 첫 카드가 위로 밀린 만큼 한 장이 더 걸친다.
+    visible: usize,
+    scrollable: bool,
+    viewport_h_px: u32,
+    content_h_px: u32,
+    max_offset_px: u32,
+};
 
 fn scrollWindow(total: usize, m: props.CellMetrics) ScrollWindow {
     const ch = @max(m.cell_height_px, 1);
     const card_h = ch * card_rows;
     const header_h = ch * header_rows; // 상단 sticky 헤더는 늘 예약
     const avail_h = @max(card_h + header_h, props.workspaceRect(m).h -| 2 * ch); // workspace 위아래 1칸 여백
-    const max_card_area = avail_h -| header_h;
-    const max_visible: usize = @intCast(@max(@as(u32, 1), max_card_area / card_h));
-    const visible: usize = if (total == 0) 0 else @min(total, max_visible);
-    const scrollable = total > visible;
-    return .{ .visible = visible, .scrollable = scrollable, .max_offset = if (scrollable) total - visible else 0 };
+    const viewport_h_px = avail_h -| header_h;
+    const content_h_px: u32 = @intCast(@min(total, std.math.maxInt(u32) / @max(card_h, 1)) * card_h);
+    const scrollable = content_h_px > viewport_h_px;
+    const max_offset_px: u32 = if (scrollable) content_h_px - viewport_h_px else 0;
+    // 뷰포트를 덮는 최소 카드 수 + 밀린 첫 장 하나. 정확한 값은 offset을 아는 `layout`이 다시 좁힌다.
+    const cover: usize = @intCast((viewport_h_px + card_h - 1) / card_h);
+    const visible: usize = if (total == 0) 0 else @min(total, cover + 1);
+    return .{
+        .visible = visible,
+        .scrollable = scrollable,
+        .viewport_h_px = viewport_h_px,
+        .content_h_px = content_h_px,
+        .max_offset_px = max_offset_px,
+    };
 }
 
 /// 패널 레이아웃(스크롤 윈도우 포함) — **view·hitTest·panelRect 단일 출처**라 "보이는 카드 == 클릭되는 카드". 상단에
@@ -259,7 +288,9 @@ const Layout = struct {
     header_h: u32, // 헤더 밴드 높이(px) = ch × header_rows
     panel_cols: u32, // 박스 폭(칸)
     total: usize, // 전체 카드 수
-    first: usize, // 보이는 첫 카드 인덱스(scroll_offset clamp 결과)
+    first: usize, // 보이는 첫 카드 인덱스(픽셀 offset / card_h)
+    origin_shift_px: u32, // 첫 카드가 뷰포트 위로 밀린 픽셀(0이면 카드 경계에 딱 맞음)
+    viewport_h_px: u32, // 헤더 아래 카드가 흐르는 높이 — clip과 창 계산이 함께 쓴다
     visible: usize, // 보이는 카드 수(≤ total)
     scrollable: bool, // total > visible — 스크롤바·휠 활성
 };
@@ -291,16 +322,24 @@ fn layout(state: *const State, items: []const Item, p: props.ChromeProps) ?Layou
     const sw = scrollWindow(total, m); // 보이는 카드 수·스크롤 여부·max_offset(단일 출처)
     const workspace = props.workspaceRect(m);
     const bh = workspace.h;
-    const first = @min(state.scroll_offset, sw.max_offset);
+    // 픽셀 창 → 그릴 카드 구간(SV5a). 첫 카드는 `origin_shift_px`만큼 위로 밀려 부분만 보이고, 그 몫은
+    // 아래 clip이 자른다 — 탐색기·소스 컨트롤이 쓰는 것과 같은 형태다(창=start·count·shift).
+    const offset_px = @min(state.scroll.offset_y_px, sw.max_offset_px);
+    const first: usize = offset_px / card_h;
+    const origin_shift_px: u32 = offset_px % card_h;
 
     // 높이 — 빈 목록은 헤더 + 일러스트 영역, 아니면 헤더 + 보이는 카드. 스크롤 안 하는(항목 적은) 경우엔 min_panel_rows를
     // baseline으로 보장(헤더+카드 상단, 사이 여백=패널 배경). 스크롤되면 카드가 화면을 채워 baseline 불필요. baseline은
     // 화면(backing)을 넘기지 않게 cap(상하 1칸 여백 — scrollWindow와 동일). content_h는 이미 scrollWindow가 맞췄으므로
     // 그보다 작게 깎지 않는다(`@max`).
+    // 스크롤되면 패널은 **뷰포트 높이로 고정**된다 — 카드가 그 안에서 픽셀로 흐르므로 보이는 카드 수에
+    // 맞춰 높이를 재지 않는다(옛 카드 단위에서는 항상 정수 장이라 그 둘이 같았다).
     const content_h: u32 = if (total == 0)
         header_h + empty_body_rows * ch
+    else if (sw.scrollable)
+        header_h + sw.viewport_h_px
     else
-        header_h + @as(u32, @intCast(sw.visible)) * card_h;
+        header_h + sw.content_h_px;
     const box_h: u32 = if (total == 0 or sw.scrollable)
         content_h
     else
@@ -325,7 +364,9 @@ fn layout(state: *const State, items: []const Item, p: props.ChromeProps) ?Layou
         .panel_cols = box_w / cw,
         .total = total,
         .first = first,
-        .visible = sw.visible,
+        .origin_shift_px = origin_shift_px,
+        .viewport_h_px = if (sw.scrollable) sw.viewport_h_px else sw.content_h_px,
+        .visible = @min(sw.visible, total -| first),
         .scrollable = sw.scrollable,
     };
 }
@@ -368,12 +409,15 @@ pub fn hitTest(state: *const State, items: []const Item, p: props.ChromeProps, x
 
     // 카드 영역(헤더 아래): 보이는 vis번째 → 실제 인덱스 first+vis + 본문줄 우측 ✕인지.
     const rel_card_y = rel_y - @as(f64, @floatFromInt(l.header_h));
-    const card_area_h = @as(f64, @floatFromInt(l.visible)) * card_h;
+    const card_area_h = @as(f64, @floatFromInt(l.viewport_h_px));
     if (rel_card_y >= card_area_h) return .background; // 카드 아래 빈 여백(최소 높이 gap) — 무시
 
-    const vis_idx: usize = @min(@as(usize, @intFromFloat(rel_card_y / card_h)), l.visible - 1);
+    // 창이 픽셀로 밀렸으므로 클릭 y에 그 몫을 되더해야 **보이는 카드 == 클릭되는 카드**가 유지된다.
+    // 이 한 줄을 빼면 부분 카드가 걸린 순간부터 클릭이 한 장씩 어긋난다(SV5a).
+    const content_y = rel_card_y + @as(f64, @floatFromInt(l.origin_shift_px));
+    const vis_idx: usize = @min(@as(usize, @intFromFloat(content_y / card_h)), l.visible -| 1);
     const card_idx = l.first + vis_idx;
-    const within = rel_card_y - @as(f64, @floatFromInt(vis_idx)) * card_h;
+    const within = content_y - @as(f64, @floatFromInt(vis_idx)) * card_h;
     const line: u32 = @intFromFloat(within / @as(f64, @floatFromInt(l.ch))); // 0=제목줄, 1=본문줄
     if (line >= 1 and col >= l.panel_cols -| 2) return .{ .close = card_idx }; // 본문줄 우측 끝 ✕
     return .{ .card = card_idx };
@@ -458,13 +502,28 @@ pub fn view(
     // 마지막 카드 아래 구분선은 카드 영역 바닥과 패널 하단 사이에 빈 여백(min_panel_rows baseline gap)이 있을 때만 긋는다.
     // 스크롤 가능/딱 맞는 경우엔 box_h == header_h + visible*card_h라 카드 영역 바닥 = 패널 하단이고, 거기에 구분선을 그으면
     // 둥근 테두리(배경 quad corner_radii/border) 위로 1px 선이 겹쳐 보인다(리뷰 지적). gap이 있으면 surface_bg 여백 안에 떨어져 안전.
-    const card_area_bottom = body_top + @as(i32, @intCast(l.visible)) * card_h_i;
+    const card_area_bottom = body_top + @as(i32, @intCast(l.viewport_h_px));
     const has_gap_below = card_area_bottom < rect.y + @as(i32, @intCast(rect.h));
+    // 카드가 픽셀로 흐른다(SV5a): 창 첫 카드는 `origin_shift_px`만큼 위로 밀려 부분만 보이고, 그 몫과
+    // 바닥에 걸친 카드는 이 clip이 자른다. clip은 **그리지 않으므로** 카드 op보다 먼저 한 번만 낸다.
+    if (l.scrollable) {
+        try out.append(arena, .{ .clip = .{ .x = rect.x, .y = body_top, .w = rect.w, .h = l.viewport_h_px } });
+    }
+    // 카드 글자를 자를 뷰포트(SV5a). **텍스트는 `Op.Text.clip` 필드로 자른다** — 위에서 낸 `.clip` op은
+    // 오버레이 **셀 전체**의 프레임 clip이고, 셀 격자로 lowering하는 모달 경로(`metal_lowering.placeText`)가
+    // 글자를 버리는 판정은 이 필드를 본다(draw.zig `Text.clip` 주석이 그 계약이다). 두 채널을 혼동해
+    // 이 필드를 안 실었더니 카드 글자가 패널 박스를 넘어 그대로 찍혔다.
+    //
+    // 셀 단위라 origin이 밖이면 **행 통째로** 버린다 — 부분 행의 픽셀 잘림은 배경 quad가 담당한다.
+    const card_clip: ?draw.Rect = if (l.scrollable)
+        .{ .x = rect.x, .y = body_top, .w = rect.w, .h = l.viewport_h_px }
+    else
+        null;
     var vis: usize = 0;
     while (vis < l.visible) : (vis += 1) {
         const i = l.first + vis; // 실제 item 인덱스
         const it = items[i];
-        const card_y = body_top + @as(i32, @intCast(vis)) * card_h_i;
+        const card_y = body_top + @as(i32, @intCast(vis)) * card_h_i - @as(i32, @intCast(l.origin_shift_px));
         const fg: tokens.ColorRole = if (it.is_alive) .surface_fg else .muted_fg; // 닫힌 surface는 회색 dim
         // 카드 배경 강조(2행 높이): 키보드 선택=tab_active_bg(palette/context_menu 선택행과 동일)가 우선, 아니면 마우스
         // 호버=tab_hover_bg(선택과 다른 톤이라 마우스가 가리키는 항목을 구분 인식 — 사용자 피드백). 호버==선택이면 hover를
@@ -477,7 +536,7 @@ pub fn view(
         if (!it.is_read) {
             const dot = try arena.alloc(draw.Run, 1);
             dot[0] = .{ .text = "\u{25CF}" }; // ● U+25CF — BMP 기호라 폰트 보유(이모지 fallback 위험 없음)
-            try out.append(arena, .{ .text = .{ .origin = .{ .x = rect.x + cw, .y = card_y }, .runs = dot, .role = .focus_accent } });
+            try out.append(arena, .{ .text = .{ .origin = .{ .x = rect.x + cw, .y = card_y }, .runs = dot, .role = .focus_accent, .clip = card_clip } });
         }
         // 상대시간: 패널 우측에서 한 칸 안쪽. 제목은 시간/들여쓰기를 뺀 폭으로 말줄임(겹침 방지).
         const time_cols = overlay_input.displayCols(it.relative_time);
@@ -490,23 +549,23 @@ pub fn view(
         const title_text = try overlay_input.truncateToCols(arena, titleText(it), title_budget);
         const title_runs = try arena.alloc(draw.Run, 1);
         title_runs[0] = .{ .text = title_text };
-        try out.append(arena, .{ .text = .{ .origin = .{ .x = rect.x + @as(i32, @intCast(text_indent_cols)) * cw, .y = card_y }, .runs = title_runs, .role = fg } });
+        try out.append(arena, .{ .text = .{ .origin = .{ .x = rect.x + @as(i32, @intCast(text_indent_cols)) * cw, .y = card_y }, .runs = title_runs, .role = fg, .clip = card_clip } });
         if (time_shown) {
             const time_runs = try arena.alloc(draw.Run, 1);
             time_runs[0] = .{ .text = it.relative_time };
             const tx = rect.x + @as(i32, @intCast((panel_cols - time_cols - 1))) * cw;
-            try out.append(arena, .{ .text = .{ .origin = .{ .x = tx, .y = card_y }, .runs = time_runs, .role = .muted_fg } });
+            try out.append(arena, .{ .text = .{ .origin = .{ .x = tx, .y = card_y }, .runs = time_runs, .role = .muted_fg, .clip = card_clip } });
         }
         // 본문줄: 제목과 같은 들여쓰기, 우측 ✕(삭제) zone 1칸을 뺀 폭으로 말줄임.
         const body_budget: u32 = panel_cols -| text_indent_cols -| 2; // 우측 ✕ + 1칸 여백
         const body_text = try overlay_input.truncateToCols(arena, it.body, body_budget);
         const body_runs = try arena.alloc(draw.Run, 1);
         body_runs[0] = .{ .text = body_text };
-        try out.append(arena, .{ .text = .{ .origin = .{ .x = rect.x + @as(i32, @intCast(text_indent_cols)) * cw, .y = card_y + ch }, .runs = body_runs, .role = fg } });
+        try out.append(arena, .{ .text = .{ .origin = .{ .x = rect.x + @as(i32, @intCast(text_indent_cols)) * cw, .y = card_y + ch }, .runs = body_runs, .role = fg, .clip = card_clip } });
         // 본문줄 우측 끝에 삭제 ✕(개별 삭제) — hitTest의 close zone(본문줄, panel 우측 1칸)과 같은 col.
         const close_runs = try arena.alloc(draw.Run, 1);
         close_runs[0] = .{ .text = close_glyph };
-        try out.append(arena, .{ .text = .{ .origin = .{ .x = rect.x + @as(i32, @intCast(panel_cols -| 2)) * cw, .y = card_y + ch }, .runs = close_runs, .role = .muted_fg } });
+        try out.append(arena, .{ .text = .{ .origin = .{ .x = rect.x + @as(i32, @intCast(panel_cols -| 2)) * cw, .y = card_y + ch }, .runs = close_runs, .role = .muted_fg, .clip = card_clip } });
         // 카드 구분선 — 카드 사이엔 항상, 마지막 카드 아래엔 baseline gap이 있을 때만(has_gap_below) 1px 긋는다. 항목
         // 경계를 분명히 보이게 한다(사용자 피드백 — 예전엔 마지막 카드를 무조건 건너뛰었다). 마지막 카드 아래 선은 카드↔
         // 빈 여백 경계를 가르되, gap이 없으면(스크롤/딱 맞음) 패널 하단 테두리와 겹치므로 생략한다. `.rule`은 macOS no-op이라 `.fill`.
@@ -517,14 +576,15 @@ pub fn view(
 
     // 스크롤바 thumb(스크롤 가능할 때만) — 카드 영역(헤더 아래) 우측 가장자리에 얇은 막대. 위치/크기 = 보이는 비율.
     if (l.scrollable) {
-        const visible_i: i32 = @intCast(l.visible);
-        const total_i: i32 = @intCast(l.total);
-        const first_i: i32 = @intCast(l.first);
-        const card_area_h: i32 = card_h_i * visible_i;
-        const thumb_h = @max(ch, @divFloor(card_area_h * visible_i, total_i)); // 최소 1줄
+        // 비율은 **픽셀**로 잰다(SV5a). 옛 코드는 보이는 카드 수/전체 카드 수를 썼는데, 픽셀 창에서는
+        // 창에 걸친 부분 카드까지 `visible`에 세므로 그 분수가 1을 넘어 thumb이 트랙 밖으로 나간다.
+        const card_area_h: i32 = @intCast(l.viewport_h_px);
+        const content_i: i32 = @intCast(@max(l.total * l.card_h, 1));
+        const offset_i: i32 = @intCast(l.first * l.card_h + l.origin_shift_px);
+        const thumb_h = @max(ch, @divFloor(card_area_h * card_area_h, content_i)); // 최소 1줄
         // thumb을 카드 영역 안에 가둔다(헤더 아래) — 최소 높이로 키운 thumb이 max 스크롤에서 카드 영역 밖으로 삐져나가지 않게 clamp.
         const thumb_max_y = body_top + card_area_h - thumb_h;
-        const thumb_y = @min(body_top + @divFloor(card_area_h * first_i, total_i), thumb_max_y);
+        const thumb_y = @min(body_top + @divFloor(card_area_h * offset_i, content_i), thumb_max_y);
         const thumb_w: i32 = 2; // 얇은 막대
         const sb_x = rect.x + @as(i32, @intCast(rect.w)) - thumb_w;
         try out.append(arena, .{ .fill = .{ .rect = .{ .x = sb_x, .y = thumb_y, .w = @intCast(thumb_w), .h = @intCast(thumb_h) }, .role = .muted_fg } });
@@ -800,31 +860,41 @@ test "notifications 스크롤: 화면 넘으면 카드 윈도우(헤더 예약) 
 
     var s: State = .{};
     s.show(0, 0, items.len);
+    // 카드 높이 = cell 16 × card_rows. 픽셀 계약이라 이 값이 창 계산의 단위다(SV5a).
+    const card_px: u32 = 16 * card_rows;
     const l0 = layout(&s, items, p).?;
-    try std.testing.expectEqual(@as(usize, 1), l0.visible); // 한 장만 보임
     try std.testing.expect(l0.scrollable);
     try std.testing.expectEqual(@as(usize, 0), l0.first);
+    try std.testing.expectEqual(@as(u32, 0), l0.origin_shift_px); // 맨 위 — 밀린 몫 없음
+    try std.testing.expect(l0.visible >= 1);
 
-    // 휠 아래로 2 → offset 2(max_offset=total-visible=4). count·metrics만 받는다(Item 빌드 불필요).
+    // 휠 아래로 2 → **카드 2장 높이**만큼 픽셀이 움직인다(휠 한 틱 = 카드 한 장 감각은 유지).
     s.scrollBy(items.len, p.metrics, 2);
-    try std.testing.expectEqual(@as(usize, 2), s.scroll_offset);
+    try std.testing.expectEqual(2 * card_px, s.scroll.offset_y_px);
     // 보이는 첫 카드 클릭(헤더 아래) → 실제 인덱스 first(2)로 매핑(보이는==클릭되는).
     const rect = panelRect(&s, items, p).?;
     try std.testing.expectEqual(Hit{ .card = 2 }, hitTest(&s, items, p, @floatFromInt(rect.x + 8), @floatFromInt(rect.y + 16 + 4)).?);
 
-    // 상한/하한 clamp — 끝까지 내려도 4, 끝까지 올려도 0.
+    // 상한/하한 clamp — 끝은 content − viewport다(옛 카드 index 시절의 total − visible이 아니다).
+    const l_any = layout(&s, items, p).?;
+    const max_px: u32 = @as(u32, @intCast(items.len)) * card_px - l_any.viewport_h_px;
     s.scrollBy(items.len, p.metrics, 100);
-    try std.testing.expectEqual(@as(usize, 4), s.scroll_offset);
+    try std.testing.expectEqual(max_px, s.scroll.offset_y_px);
     s.scrollBy(items.len, p.metrics, -100);
-    try std.testing.expectEqual(@as(usize, 0), s.scroll_offset);
+    try std.testing.expectEqual(@as(u32, 0), s.scroll.offset_y_px);
 
-    // 키보드 선택 따라 스크롤 — selected가 viewport 밖이면 보이게 당긴다(visible=1이라 offset=selected).
+    // 키보드 선택 따라 스크롤 — 창 밖이면 **최소로** 당긴다. 아래로 나가면 그 카드 하단을 뷰포트 하단에 맞춘다.
     s.selected = 4;
     s.ensureSelectedVisible(items.len, p.metrics);
-    try std.testing.expectEqual(@as(usize, 4), s.scroll_offset);
+    try std.testing.expectEqual(5 * card_px - l_any.viewport_h_px, s.scroll.offset_y_px);
+    // 위로 나가면 그 카드 상단을 뷰포트 상단에 맞춘다.
     s.selected = 1;
     s.ensureSelectedVisible(items.len, p.metrics);
-    try std.testing.expectEqual(@as(usize, 1), s.scroll_offset);
+    try std.testing.expectEqual(1 * card_px, s.scroll.offset_y_px);
+    // 이미 창 안이면 **움직이지 않는다** — 휠로 굴린 자리를 존중한다(옛 prev_start가 지키던 성질).
+    const held = s.scroll.offset_y_px;
+    s.ensureSelectedVisible(items.len, p.metrics);
+    try std.testing.expectEqual(held, s.scroll.offset_y_px);
 
     // view: 헤더 + 보이는 1장 + 스크롤바 thumb(우측 끝 얇은 muted 막대)만 그린다.
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -840,19 +910,69 @@ test "notifications 스크롤: 화면 넘으면 카드 윈도우(헤더 예약) 
         if (op == .fill and op.fill.role == .divider) dividers += 1;
     }
     try std.testing.expect(saw_scrollbar); // 스크롤 가능 → thumb 표시
-    try std.testing.expectEqual(@as(usize, 1), card_titles); // 보이는 카드 1장만(윈도우)
-    // 스크롤(딱 맞음, baseline gap 없음)이면 마지막=유일 카드 아래 구분선을 생략한다 — 패널 하단 테두리와 겹치지 않게.
-    // 남는 구분선은 헤더 구분선 1개뿐(카드 사이 구분선은 보이는 카드가 1장이라 없음).
-    try std.testing.expectEqual(@as(usize, 1), dividers);
+    // 픽셀 창이라 창 경계에 걸친 카드가 한 장 더 그려질 수 있다 — 그 몫은 clip이 자른다(SV5a).
+    try std.testing.expect(card_titles >= 1);
+    try std.testing.expect(dividers >= 1);
 
-    // 최대 스크롤(offset=4)에서도 thumb이 카드 영역(헤더 아래)을 넘지 않는다.
-    s.scroll_offset = 4;
+    // 최대 스크롤에서도 thumb이 카드 영역(헤더 아래)을 넘지 않는다.
+    s.scroll.offset_y_px = max_px;
     out.clearRetainingCapacity();
     try view(&s, items, p, &tk, arena_state.allocator(), &out);
     const rect2 = panelRect(&s, items, p).?;
-    const card_area_bottom = rect2.y + 16 + 32; // header(16) + visible(1) × card_h(2×16)
+    const card_area_bottom = rect2.y + 16 + @as(i32, @intCast(l_any.viewport_h_px)); // header(16) + 뷰포트(픽셀 고정)
+    var saw_thumb = false;
     for (out.items) |op| {
-        if (op == .fill and op.fill.rect.w == 2) // 스크롤바 thumb
+        if (op == .fill and op.fill.rect.w == 2) { // 스크롤바 thumb
+            saw_thumb = true;
             try std.testing.expect(op.fill.rect.y + @as(i32, @intCast(op.fill.rect.h)) <= card_area_bottom);
+        }
     }
+    try std.testing.expect(saw_thumb);
+
+    // **보이는 카드 == 클릭되는 카드**가 부분 카드에서도 유지된다. 창이 반 장 밀린 상태에서 뷰포트 첫
+    // 픽셀은 여전히 그 밀린 카드다 — 클릭 y에 밀린 몫을 되더하지 않으면 여기서 한 장씩 어긋난다.
+    {
+        s.scroll.offset_y_px = card_px + card_px / 2; // 카드 1장 + 반 장
+        const l_part = layout(&s, items, p).?;
+        try std.testing.expectEqual(@as(usize, 1), l_part.first);
+        try std.testing.expectEqual(card_px / 2, l_part.origin_shift_px);
+        const r_part = panelRect(&s, items, p).?;
+        const top_hit = hitTest(&s, items, p, @floatFromInt(r_part.x + 8), @floatFromInt(r_part.y + 16 + 1));
+        try std.testing.expectEqual(Hit{ .card = 1 }, top_hit.?); // 반쯤 잘린 1번 카드
+    }
+
+    // **카드 글자가 자기 clip을 들고 나간다.** 셀 격자로 lowering하는 모달 경로는 `Op.Text.clip` 필드로
+    // 글자를 버린다 — 프레임 단위 `.clip` op만 내고 이 필드를 빼면 글자가 패널 박스를 넘어 그대로
+    // 찍힌다(실제로 그렇게 나갔다). 두 채널이 다르다는 사실을 여기서 고정한다.
+    {
+        s.scroll.offset_y_px = card_px;
+        out.clearRetainingCapacity();
+        try view(&s, items, p, &tk, arena_state.allocator(), &out);
+        var carried: usize = 0;
+        var bare: usize = 0;
+        const l_now = layout(&s, items, p).?;
+        const body_top_now = l_now.rect.y + @as(i32, @intCast(l_now.header_h));
+        for (out.items) |op| switch (op) {
+            .text => |t| {
+                if (t.origin.y < body_top_now) continue; // 헤더 줄(sticky)은 자르지 않는다
+                if (t.clip != null) carried += 1 else bare += 1;
+            },
+            else => {},
+        };
+        try std.testing.expect(carried > 0);
+        try std.testing.expectEqual(@as(usize, 0), bare); // 카드 영역 글자는 **하나도 빠짐없이** clip을 든다
+    }
+
+    // 부분 카드가 생기면 **clip이 반드시 함께 나온다.** 안 나오면 밀린 카드가 헤더 위로 새거나 패널
+    // 바닥을 넘는다 — 카드 단위 시절에는 없던 실패 모드다.
+    s.scroll.offset_y_px = card_px / 2;
+    out.clearRetainingCapacity();
+    try view(&s, items, p, &tk, arena_state.allocator(), &out);
+    const l_half = layout(&s, items, p).?;
+    try std.testing.expectEqual(card_px / 2, l_half.origin_shift_px);
+    var saw_clip = false;
+    for (out.items) |op| {
+        if (op == .clip) saw_clip = true;
+    }
+    try std.testing.expect(saw_clip);
 }

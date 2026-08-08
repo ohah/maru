@@ -21290,6 +21290,10 @@ pub const AppSession = struct {
 
     /// 컨텍스트/뷰옵션/터미널 메뉴 공통 teardown — hide + 대상·플래그 비움. 바깥 클릭·Esc 경로가 공유한다.
     fn clearBranchMenuText(self: *AppSession) void {
+        // **해제와 닫기를 묶는다.** 메뉴 항목(`context_menu_items_buf`)이 이 버퍼를 빌리므로, 열린 채로 해제하면
+        // 다음 draw가 해제된 메모리를 읽는다. 재발행이 늘 뒤따르지도 않는다 — 새 목록이 0개면 `openBranchMenu`가
+        // 알림만 띄우고 돌아온다.
+        if (self.branch_menu_open) self.closeContextMenu();
         if (self.branch_menu_text.len > 0) self.allocator.free(self.branch_menu_text);
         self.branch_menu_text = &.{};
         self.branch_menu_len = 0;
@@ -21299,6 +21303,14 @@ pub const AppSession = struct {
     /// git 실행은 백엔드 스레드라 클릭이 UI를 멈추지 않는다.
     fn requestBranchMenu(self: *AppSession) void {
         if (self.branch_menu_pending) return; // 연타로 프로세스가 쌓이지 않게
+        // 백엔드는 **지연 생성**이다(소스 컨트롤을 연 적 없으면 없다). 없으면 조용히 무시되던 것을 여기서 만든다 —
+        // `refreshGitStatus`와 같은 규율. 안 그러면 도크를 한 번도 안 연 사용자에겐 브랜치 클릭이 아무 일도 안 한다.
+        if (self.git_backend == null) {
+            self.git_backend = git_backend_mod.Backend.init(self.allocator, self.io) catch {
+                self.showNotice("git 백엔드를 시작하지 못했습니다");
+                return;
+            };
+        }
         var backend = &(self.git_backend orelse return);
         var exe_buf: [1024]u8 = undefined;
         const git_exe = git_backend_mod.locate(&exe_buf) orelse {
@@ -30057,6 +30069,17 @@ pub const AppSession = struct {
         self.updateFileTree() catch {}; // FP7: background scan 결과만 적용 + 다음 요청 제출(FS I/O는 worker 전용)
         self.updateFileTreeMutations(); // mutation completion memory queue only; at most one result per frame // path-pinned rename recreation is bounded to one visible WebView per frame
         self.drainGitStatus(); // 완료된 git 읽기를 싣는다(syscall 없음 — 큐에서 꺼내기만)
+        // MARU_FORCE_BRANCH_MENU=1 — 상태바 브랜치 항목을 누른 것처럼 목록을 요청해 헤드리스로 찍는다.
+        // **열릴 때까지 재시도한다**: 저장소 판정이 cwd 관측(OSC 7)에 달려 있어 첫 tick에는 아직 없다.
+        // 가짜 목록을 심지 않는다 — 실제 `for-each-ref` 결과로 열린다(requestBranchMenu가 연타를 막는다).
+        if (!self.branch_menu_open and std.c.getenv("MARU_FORCE_BRANCH_MENU") != null) {
+            // 브랜치 항목이 **선 뒤에만** 요청한다 — 그 전에는 저장소 판정이 실패해 오류 알림이 화면에 남는다.
+            for (self.statusBarTree().entries) |e| {
+                if (e.id != @intFromEnum(chrome.components.status_bar.ItemId.git_branch)) continue;
+                self.requestBranchMenu();
+                break;
+            }
+        }
         self.pollAgentKinds(); // 포그라운드 프로세스(claude/codex) polling — throttled, 각 Term agent_kind 갱신
         self.revalidateHoverLink(); // 커서가 멈춘 채 레이아웃이 바뀌었으면 stale 링크 밑줄을 내린다(hover는 마우스 이벤트로만 갱신됨)
         if (ft_on) ft_pre = std.Io.Clock.awake.now(self.io).nanoseconds; // pre(housekeeping) 끝 = titles 시작
@@ -64101,6 +64124,103 @@ test "SB1: reload로 status-bar.show를 끄면 pane 크기도 새 값으로 다�
     // 그리고 grid도 그만큼 늘었다(셸이 실제로 행을 받는다).
     const grid = layout_math.gridFromBacking(session.backing_width_px, session.backing_height_px, session.cell_width_px, session.cell_height_px, session.sidebar_width_px, session.gridPadding());
     try std.testing.expectEqual(grid.rows, session.last_resize_size.?.rows);
+}
+
+// SB1: **브랜치 메뉴가 상태바를 덮으면 안 된다.** 앵커가 창 맨 아래(바 항목)라, 클램프가 상태바를 모르면
+// 메뉴가 바 위로 깔려 브랜치·경로를 가린다. 컨텍스트 메뉴의 "하단 넘으면 위로"가 기준으로 쓰는
+// `workspaceRect`가 실제로 바를 뺀 값인지를 **좌표로** 확인한다(단언을 기하로 하지 산술을 다시 쓰지 않는다).
+test "SB1: 브랜치 메뉴는 상태바를 덮지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1000, 700, 1000);
+    _ = try session.tick();
+
+    session.branch_menu_text = try allocator.dupe(u8, "main\nfeat/a\nfix/b\n");
+    session.branch_menu_len = git_command.collectBranches(session.branch_menu_text, &session.branch_menu_names);
+    session.openBranchMenu();
+    try std.testing.expect(session.chrome_host.context_menu.open);
+
+    // 메뉴 x를 추정하지 않고 **훑는다** — 앵커는 브랜치 항목 유무·사이드바 클램프에 따라 달라진다.
+    // (처음엔 화면 한가운데를 찔렀는데 가로로 빗나가 아무 데서도 안 잡히는 헛 테스트였다. vacuity 가드가 잡았다.)
+    const h = session.statusBarHeightPx();
+    try std.testing.expect(h > 0);
+    const bar_top = session.backing_height_px -| h;
+    const props = session.buildChromeProps();
+    const items = session.contextMenuItems();
+
+    // ① 바 안에서는 어디를 찔러도 메뉴가 잡히면 안 된다(덮지 않는다).
+    var x: u32 = 0;
+    while (x < session.backing_width_px) : (x += 16) {
+        const hit = chrome.components.context_menu.itemAt(
+            &session.chrome_host.context_menu,
+            items,
+            props,
+            @floatFromInt(x),
+            @floatFromInt(bar_top + h / 2),
+        );
+        try std.testing.expect(hit == null);
+    }
+
+    // ② 바 바로 위에는 메뉴가 실제로 있어야 한다 — 없으면 ①이 헛돈 것이다.
+    var found = false;
+    var probe_y: u32 = bar_top -| 4;
+    outer: while (probe_y + 200 > bar_top and probe_y > 0) : (probe_y -|= 8) {
+        var px: u32 = 0;
+        while (px < session.backing_width_px) : (px += 16) {
+            if (chrome.components.context_menu.itemAt(
+                &session.chrome_host.context_menu,
+                items,
+                props,
+                @floatFromInt(px),
+                @floatFromInt(probe_y),
+            ) != null) {
+                found = true;
+                break :outer;
+            }
+        }
+    }
+    try std.testing.expect(found);
+}
+
+// SB1: **목록 버퍼를 해제하면 그것을 가리키던 메뉴도 닫아야 한다.** 메뉴 항목(`context_menu_items_buf`)은
+// `branch_menu_text`를 빌린다 — 해제하고 메뉴를 열어 두면 다음 draw가 해제된 메모리를 읽는다(UAF).
+// 재발행이 항상 뒤따르는 것도 아니다: 새 목록이 0개면 `openBranchMenu`가 알림만 띄우고 돌아온다.
+test "SB1: 브랜치 목록 버퍼를 비우면 열린 메뉴도 닫힌다(dangling 항목 방지)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1000, 700, 1000);
+    _ = try session.tick();
+
+    session.branch_menu_text = try allocator.dupe(u8, "main\nfeat/a\n");
+    session.branch_menu_len = git_command.collectBranches(session.branch_menu_text, &session.branch_menu_names);
+    session.openBranchMenu();
+    try std.testing.expect(session.branch_menu_open);
+    try std.testing.expect(session.chrome_host.context_menu.open);
+
+    // 버퍼를 비운다 — 이 시점에 메뉴가 열린 채면 항목 포인터가 해제된 메모리를 가리킨다.
+    session.clearBranchMenuText();
+    try std.testing.expect(!session.branch_menu_open);
+    try std.testing.expect(!session.chrome_host.context_menu.open);
 }
 
 // SB1: **브랜치를 고르면 우리가 checkout하지 않고 터미널에 명령을 넣는다.** 읽기 전용 계약

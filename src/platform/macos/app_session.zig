@@ -4215,7 +4215,11 @@ pub const AppSession = struct {
         const home = std.mem.span(home_z);
         if (home.len == 0) return;
         const owned = self.allocator.dupe(u8, home) catch return;
-        if (!self.agent_session_archive_backend.submit(owned)) {
+        // 보여 줄 이전 완료 목록이 없을 때만 부분 진행을 요청한다 — 첫 진입에서 목록이 위에서부터
+        // 차오르게 한다(docs/agent-session-list.md §4.1). 이미 목록이 있으면 완성본 하나로 교체해야
+        // refresh가 목록을 흔들지 않는다.
+        const wants_progress = self.agent_session_archive_records.items.len == 0;
+        if (!self.agent_session_archive_backend.submit(owned, wants_progress)) {
             self.allocator.free(owned);
             return;
         }
@@ -4240,16 +4244,24 @@ pub const AppSession = struct {
         // visibly reordering the archive list while JSONL is still scanning.
         var result = self.agent_session_archive_backend.takeResult() orelse return;
         defer result.deinit(self.allocator);
-        std.debug.assert(result.complete);
-        if (result.retain_previous) {
-            self.agent_session_archive_loading = false;
-            if (result.cancelled) {
+        switch (result.outcome) {
+            .completed, .partial_progress => {},
+            .cancelled => {
+                self.agent_session_archive_loading = false;
                 // A reopened dock requests again only after the cancelled worker has fully
                 // released its state. This makes the newest entry win without concurrent scans.
+                // 이 force 재요청은 **여기가 단독 소유자**다 — 도크 진입 훅은 force를 쓰지 않는다
+                // (양쪽이 쓰면 빠른 여닫기에서 `취소 → 재요청 → 취소`가 반복된다).
                 if (self.dockVisible() and self.dock.view == .agent_sessions) self.refreshAgentSessionArchive(true);
-            } else self.showNotice("새 세션 목록을 적용하지 못해 기존 목록을 유지했습니다.");
-            self.metal_dirty = true;
-            return;
+                self.metal_dirty = true;
+                return;
+            },
+            .retain_previous => {
+                self.agent_session_archive_loading = false;
+                self.showNotice("새 세션 목록을 적용하지 못해 기존 목록을 유지했습니다.");
+                self.metal_dirty = true;
+                return;
+            },
         }
         const prior_selected = if (self.agent_session_archive_selected) |index|
             if (index < self.agent_session_archive_records.items.len) &self.agent_session_archive_records.items[index] else null
@@ -4273,7 +4285,9 @@ pub const AppSession = struct {
         for (old_records.items) |*record| record.deinit(self.allocator);
         old_records.deinit(self.allocator);
         self.agent_session_archive_scroll.dropWheelResidue();
-        if (result.complete) {
+        // **부분 진행은 완료로 치지 않는다**(§4.1). `completed_ns`를 갱신하면 TTL 가드가 걸려 재스캔이
+        // 막히고 목록이 불완전한 채 고정되며, spinner를 끄면 아직 도는 스캔이 끝난 것처럼 보인다.
+        if (result.outcome == .completed) {
             self.agent_session_archive_loading = false;
             self.agent_session_archive_completed_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
         }

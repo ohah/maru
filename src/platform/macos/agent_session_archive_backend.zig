@@ -8,14 +8,29 @@ const builtin = @import("builtin");
 const maru = @import("maru");
 const archive = maru.session.agent_session_archive;
 
-pub const max_candidates_per_provider: usize = 4096;
-pub const max_records: usize = 500;
-/// The archive itself displays at most 500 verified records, so retaining more
-/// parse summaries would increase lookup cost without improving a refresh.
+/// 후보 수집은 디렉터리 순회와 `stat`뿐이라 개수 상한을 두지 않는다(실측 351개에 2.4 ms). 다만 손상된
+/// 트리에서 무한히 모으지 않도록 방어선만 둔다 — 실사용 규모의 수십 배다.
+pub const max_candidates_per_provider: usize = 65_536;
+/// 표시 상한도 같은 성격의 방어선이다. 예전 값 500은 목록을 실제로 자르는 값이 아니었고(실측: 도달조차
+/// 하지 않았다) 자르는 것은 read budget이었다.
+pub const max_records: usize = 65_536;
+/// 레코드당 요약이 약 250 B라 후보 전부를 담아도 수십 KB다(실측 351개 = 88 KB). 조회는 스캔 전체에서
+/// 3 ms 미만이라 상한을 낮게 둘 이유가 없다.
 pub const max_cache_entries: usize = max_records;
-pub const max_file_bytes: usize = 128 * 1024 * 1024;
-/// 한 refresh가 사용자 history를 전부 다시 해석해 UI를 장시간 막지 않게 하는 누적 read 상한.
-pub const max_total_bytes: usize = 512 * 1024 * 1024;
+/// 한 줄이 이보다 길면 그 줄만 버린다. 손상된 파일이 줄 버퍼를 무한히 키우는 것만 막는 방어이며,
+/// 정상 파일은 전부 통과한다(실측 최장 줄 6.85 MB).
+pub const max_line_bytes: usize = 16 * 1024 * 1024;
+/// 스트리밍 읽기 청크. 파일 크기와 무관하게 이 버퍼 하나만 쓴다.
+const read_chunk_bytes: usize = 64 * 1024;
+/// 첫 진입에서 부분 목록을 발행하는 최소 간격. 발행마다 main actor가 filter/projection/anchor 복원을
+/// 다시 하므로 너무 잦으면 그 자체가 비용이다. 실측 채움 속도는 첫 카드 6 ms, 20개 약 2초다.
+const progress_publish_interval_ms: i96 = 250;
+/// 그 간격 안이라도 이만큼 쌓이면 발행한다 — 초반이 촘촘해야 첫 화면이 빨리 찬다.
+const progress_publish_records: usize = 12;
+
+/// Codex worker 확정 경계. 여기까지 읽고도 `user` 신호를 한 번도 못 보면 worker로 보고 읽기를 멈춘다.
+/// 실측 `user` 메타 최대 위치(18.6 KiB)의 27배 여유다 — 좁게 잡으면 미래에 세션이 조용히 사라진다.
+const codex_worker_verdict_bytes: usize = 512 * 1024;
 
 /// Claude 세션이 돌린 서브에이전트 transcript 수의 상한. 디렉터리 항목만 세므로 비용은 순회뿐이지만,
 /// 손상되거나 비정상적으로 많은 디렉터리에서 무한히 세지 않도록 끊는다. UI는 초과를 `999+`로 보인다.
@@ -43,20 +58,35 @@ pub const Record = struct {
     }
 };
 
+/// 한 worker job이 main actor에게 돌려주는 **배타적** 결말. 예전에는 `complete`·`retain_previous`·
+/// `cancelled` bool 셋이었는데, 그 조합 여덟 가지 중 유효한 것은 아래 셋뿐이라 `assert(result.complete)`
+/// 같은 방어가 필요했다. 종류를 하나로 모으면 조합 폭발이 사라지고, 새 결말을 더해도 기존 불변식이
+/// 조용히 깨지지 않는다.
+pub const Outcome = enum {
+    /// 스캔이 끝나 새 immutable snapshot을 만들었다. `records` 소유권이 main actor로 넘어간다.
+    completed,
+    /// 스캔은 끝났지만 교체본을 enqueue하지 못했다(결과 큐 allocation 실패 등). main actor는 spinner를
+    /// 끄되 **이전 목록을 유지**한다.
+    retain_previous,
+    /// 취소된 세대다. 보이는 snapshot을 대체할 자격이 없다. main actor는 spinner를 끄고, 도크가 다시
+    /// 보이면 이 worker가 자원을 모두 놓은 뒤 최신 세대를 재요청한다.
+    cancelled,
+    /// **진행 중** 부분 목록이다(첫 진입에만 발행된다 — §4.1). 목록이 위에서부터 차오르게 하려는
+    /// 것이므로 main actor는 records를 그대로 반영하되 **완료로 취급하면 안 된다**:
+    /// TTL(`completed_ns`)을 갱신하면 재스캔이 막혀 목록이 불완전한 채 고정되고, "이전 snapshot 있음"
+    /// 판정에 쓰면 취소로 남은 부분 목록을 완성본으로 오인해 다음 진입이 점진 경로를 타지 않는다.
+    partial_progress,
+};
+
 pub const Result = struct {
     records: std.ArrayList(Record) = .empty,
+    /// 스캔이 사용자 이력의 일부만 훑었다. `outcome`과 **직교**한다 — 완료됐지만 일부만 본 경우가
+    /// 정상적으로 존재한다. **정책적 제외(worker 판정)는 여기 포함하지 않는다** — 정상 동작이 상시
+    /// 경고로 보이면 경고가 무의미해진다.
     partial: bool = false,
-    /// Each worker job publishes exactly one completed immutable snapshot. It
-    /// lets the UI retain its prior list while a refresh scans privately.
-    complete: bool = false,
-    /// The worker completed but could not enqueue an immutable replacement
-    /// (for example because the result queue allocation failed). The main
-    /// actor must clear its spinner yet retain the prior completed snapshot.
-    retain_previous: bool = false,
-    /// A cancelled generation is never allowed to replace the visible snapshot. The host uses
-    /// this truthful completion to clear its spinner and, if the dock was reopened, request the
-    /// newest generation after this worker has released its descriptors and allocations.
-    cancelled: bool = false,
+    /// 상한을 넘겨 버린 줄의 수. 개수만 담는다(경로·내용은 main actor로 올리지 않는다).
+    skipped_oversized_line: u32 = 0,
+    outcome: Outcome = .completed,
 
     pub fn deinit(self: *Result, allocator: std.mem.Allocator) void {
         for (self.records.items) |*record| record.deinit(allocator);
@@ -83,6 +113,9 @@ const State = struct {
     // refresh before discovery so it can replace the old source between a real pointer down and
     // the immutable replacement publication. The worker owns the wait; the main actor continues
     // rendering the retained snapshot throughout.
+    /// 이번 job이 부분 진행을 발행해도 되는가. main actor가 `submit` 시점에 "보여 줄 이전 완료 목록이
+    /// 없다"를 알려 준다. worker가 락 없이 읽으므로 atomic이다.
+    wants_progress: std.atomic.Value(bool) = .init(false),
     test_gate_enabled: std.atomic.Value(bool) = .init(false),
     test_gate_reached: std.atomic.Value(bool) = .init(false),
     test_gate_released: std.atomic.Value(bool) = .init(true),
@@ -153,13 +186,17 @@ pub const Backend = struct {
     }
 
     /// caller owns home on false; worker owns it on true.
-    pub fn submit(self: *Backend, home: []u8) bool {
+    /// `wants_progress`는 "이 스캔이 끝나기 전에도 부분 목록을 보여 달라"는 요청이다. 보여 줄 이전
+    /// 완료 목록이 없는 첫 진입에서만 켠다 — 이미 목록이 있으면 완성본 하나로 교체하는 편이 흔들림이
+    /// 없다(§4.1).
+    pub fn submit(self: *Backend, home: []u8, wants_progress: bool) bool {
         const state = self.state orelse return false;
         state.mutex.lockUncancelable(state.io);
         if (state.shutting_down or state.inflight) {
             state.mutex.unlock(state.io);
             return false;
         }
+        state.wants_progress.store(wants_progress, .release);
         state.inflight = true;
         const generation = state.next_generation;
         state.next_generation +%= 1;
@@ -217,7 +254,7 @@ pub const Backend = struct {
         if (state.results.items.len == 0) {
             if (!state.completion_without_snapshot) return null;
             state.completion_without_snapshot = false;
-            return .{ .complete = true, .retain_previous = true, .cancelled = state.completion_cancelled };
+            return .{ .outcome = if (state.completion_cancelled) .cancelled else .retain_previous };
         }
         return state.results.orderedRemove(0);
     }
@@ -296,6 +333,33 @@ fn waitForTestGate(state: *State, generation: u64) void {
         std.Io.sleep(state.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
     }
     state.test_gate_reached.store(false, .release);
+}
+
+/// 지금까지 모은 records의 **복사본**을 부분 진행으로 발행한다. 원본은 계속 쌓여야 하므로 소유권을
+/// 넘기지 않고 clone한다(레코드당 약 250 B라 복사가 싸다).
+///
+/// 발행에 실패하면 조용히 넘어간다 — 부분 진행은 최적화이지 계약이 아니다. 최종 `.completed`가 전체
+/// 목록을 싣는다.
+fn publishProgress(state: *State, generation: u64, result: *const Result) void {
+    var snapshot: Result = .{ .outcome = .partial_progress, .partial = result.partial };
+    snapshot.records.ensureTotalCapacity(state.allocator, result.records.items.len) catch return;
+    for (result.records.items) |record| {
+        const parsed = record.parsed.clone(state.allocator) catch break;
+        const path = state.allocator.dupe(u8, record.source_path) catch {
+            var owned = parsed;
+            owned.deinit(state.allocator);
+            break;
+        };
+        snapshot.records.appendAssumeCapacity(.{
+            .parsed = parsed,
+            .source_path = path,
+            .mtime_ns = record.mtime_ns,
+            .inode = record.inode,
+            .device = record.device,
+            .subagent_count = record.subagent_count,
+        });
+    }
+    if (!publish(state, generation, &snapshot)) snapshot.deinit(state.allocator);
 }
 
 fn publish(state: *State, generation: u64, result: *Result) bool {
@@ -411,7 +475,12 @@ fn scan(state: *State, home: []const u8, generation: u64) bool {
         }
     }.lessThan);
 
-    var remaining_bytes = max_total_bytes;
+    // 첫 진입(main actor가 보여 줄 이전 완료 목록이 없을 때)에만 목록이 위에서부터 차오르게 한다.
+    // 이전 완료본이 있으면 지금처럼 완성본 하나로만 교체해 refresh가 목록을 흔들지 않는다(§4.1).
+    const wants_progress = state.wants_progress.load(.acquire);
+    var last_publish_ns = std.Io.Clock.awake.now(io).nanoseconds;
+    var published_len: usize = 0;
+
     for (claude_candidates.items) |candidate| {
         if (cancelled(state, generation)) return false;
         if (result.records.items.len == max_records) {
@@ -423,7 +492,18 @@ fn scan(state: *State, home: []const u8, generation: u64) bool {
                 var owned = record;
                 owned.deinit(allocator);
             };
-        } else appendCandidateFile(state, candidate, generation, &result, &remaining_bytes);
+        } else appendCandidateFile(state, candidate, generation, &result);
+
+        if (!wants_progress) continue;
+        const grown = result.records.items.len - published_len;
+        if (grown == 0) continue;
+        const now_ns = std.Io.Clock.awake.now(io).nanoseconds;
+        const elapsed_ms = @divFloor(now_ns - last_publish_ns, std.time.ns_per_ms);
+        if (grown >= progress_publish_records or elapsed_ms >= progress_publish_interval_ms) {
+            publishProgress(state, generation, &result);
+            published_len = result.records.items.len;
+            last_publish_ns = now_ns;
+        }
     }
     std.mem.sort(Record, result.records.items, {}, struct {
         fn lessThan(_: void, a: Record, b: Record) bool {
@@ -435,7 +515,7 @@ fn scan(state: *State, home: []const u8, generation: u64) bool {
         result.records.shrinkRetainingCapacity(max_records);
         result.partial = true;
     }
-    result.complete = true;
+    result.outcome = .completed;
     if (cancelled(state, generation)) return false;
     return publish(state, generation, &result);
 }
@@ -559,10 +639,6 @@ fn appendCandidate(allocator: std.mem.Allocator, io: std.Io, dir: *std.Io.Dir, o
     defer if (!transferred) candidate.deinit(allocator);
     const stat = dir.statFile(io, open_name, .{ .follow_symlinks = false }) catch return;
     if (stat.kind != .file or stat.size == 0) return;
-    if (stat.size > max_file_bytes) {
-        partial.* = true;
-        return;
-    }
     candidate.mtime_ns = stat.mtime.nanoseconds;
     candidate.size = @intCast(stat.size);
     candidate.inode = stat.inode;
@@ -596,7 +672,13 @@ fn fileDevice(allocator: std.mem.Allocator, dir: std.Io.Dir, name: []const u8) ?
     return @intCast(stat.dev);
 }
 
-fn appendCandidateFile(state: *State, candidate: Candidate, generation: u64, result: *Result, remaining_bytes: *usize) void {
+/// 후보 파일 하나를 **줄 단위로 스트리밍**해 레코드로 만든다.
+///
+/// 예전에는 `allocator.alloc(u8, stat.size)`로 파일을 통째로 올렸다(피크 463 MB 실측). 그 할당을
+/// 방어하려고 파일당 128 MiB·refresh당 512 MiB read cap이 있었고, **그 cap이 목록을 잘랐다** — 게다가
+/// 캐시 히트는 budget을 쓰지 않으므로 refresh를 반복할수록 보이는 세션이 늘어나 결과가 비결정적이었다.
+/// 고정 64 KiB 버퍼로 바꾸면 메모리가 파일 크기와 무관해지고 그 cap들의 존재 이유가 사라진다.
+fn appendCandidateFile(state: *State, candidate: Candidate, generation: u64, result: *Result) void {
     const allocator = state.allocator;
     const io = state.io;
     if (cancelled(state, generation)) return;
@@ -604,23 +686,11 @@ fn appendCandidateFile(state: *State, candidate: Candidate, generation: u64, res
     defer file.close(io);
     const stat = file.stat(io) catch return;
     if (stat.inode != candidate.inode or openedDevice(file) != candidate.device) return;
-    if (stat.kind != .file or stat.size == 0 or stat.size > max_file_bytes) {
-        if (stat.size > max_file_bytes) result.partial = true;
-        return;
-    }
-    const size: usize = @intCast(stat.size);
-    if (size > remaining_bytes.*) {
-        result.partial = true;
-        return;
-    }
-    // Budget is charged before allocation/read so malformed input cannot turn a bounded refresh into an
-    // unbounded sequence of expensive parse attempts.
-    remaining_bytes.* -= size;
-    const bytes = allocator.alloc(u8, size) catch return;
-    defer allocator.free(bytes);
-    const n = file.readPositionalAll(io, bytes, 0) catch return;
-    if (cancelled(state, generation)) return;
-    var parsed = archive.parse(allocator, candidate.provider, bytes[0..n]) catch return orelse return;
+    if (stat.kind != .file or stat.size == 0) return;
+
+    var parser = archive.Parser.init(allocator, candidate.provider);
+    var parsed_opt = streamFileIntoParser(state, file, generation, &parser, result) catch return;
+    var parsed = parsed_opt orelse return;
     errdefer parsed.deinit(allocator);
     if (cancelled(state, generation)) return;
     canonicalizeParsedCwd(state, &parsed);
@@ -630,6 +700,74 @@ fn appendCandidateFile(state: *State, candidate: Candidate, generation: u64, res
         allocator.free(path);
         return;
     };
+    parsed_opt = null; // 소유권이 records로 넘어갔다
+}
+
+/// 파일을 64 KiB씩 읽어 개행으로 잘라 파서에 넘긴다. 청크 경계에 걸친 줄만 `pending`에 누적한다.
+///
+/// 취소 확인은 **청크 경계에서만** 한다 — 줄마다 확인하면 수십만 번 락을 잡아 main actor의
+/// `takeResult`를 굶긴다.
+fn streamFileIntoParser(
+    state: *State,
+    file: std.Io.File,
+    generation: u64,
+    parser: *archive.Parser,
+    result: *Result,
+) !?archive.Parsed {
+    const allocator = state.allocator;
+    const io = state.io;
+    var buf: [read_chunk_bytes]u8 = undefined;
+    var pending: std.ArrayList(u8) = .empty;
+    defer pending.deinit(allocator);
+    var offset: u64 = 0;
+    var dropped_line = false;
+    var worked_verdict = false;
+
+    while (true) {
+        const n = file.readPositional(io, &.{&buf}, offset) catch return null;
+        if (n == 0) break;
+        offset += n;
+        var rest: []const u8 = buf[0..n];
+        while (std.mem.indexOfScalar(u8, rest, '\n')) |nl| {
+            const piece = rest[0..nl];
+            rest = rest[nl + 1 ..];
+            if (pending.items.len == 0) {
+                parser.consumeLine(piece);
+            } else {
+                pending.appendSlice(allocator, piece) catch {
+                    pending.clearRetainingCapacity();
+                    dropped_line = true;
+                    continue;
+                };
+                parser.consumeLine(pending.items);
+                pending.clearRetainingCapacity();
+            }
+        }
+        if (rest.len > 0) {
+            if (pending.items.len + rest.len > max_line_bytes) {
+                // 손상 파일 방어. 그 줄만 버리고 다음 개행부터 다시 잇는다.
+                pending.clearRetainingCapacity();
+                dropped_line = true;
+            } else pending.appendSlice(allocator, rest) catch {
+                pending.clearRetainingCapacity();
+                dropped_line = true;
+            };
+        }
+        // Codex worker 조기 중단은 **경계를 지난 뒤 한 번만** 판정한다. 그 전에 판정하면
+        // `첫=subagent 마지막=user`인 정상 세션을 잘못 버린다(실측 256개 중 118개).
+        if (!worked_verdict and offset >= codex_worker_verdict_bytes) {
+            worked_verdict = true;
+            if (parser.isWorkerSoFar()) return null;
+        }
+        if (cancelled(state, generation)) return null;
+    }
+    // 마지막 줄에 개행이 없어도 값을 잃지 않는다.
+    if (pending.items.len > 0) parser.consumeLine(pending.items);
+    if (dropped_line) {
+        result.partial = true;
+        result.skipped_oversized_line +|= 1;
+    }
+    return parser.finish() catch null;
 }
 
 /// Provider JSONL may retain a lexical cwd reached through a symlink.  Scope
@@ -704,8 +842,7 @@ test "archive backend reports an enqueue failure without manufacturing an empty 
         var owned = result;
         owned.deinit(std.testing.allocator);
     }
-    try std.testing.expect(result.complete);
-    try std.testing.expect(result.retain_previous);
+    try std.testing.expectEqual(Outcome.retain_previous, result.outcome);
     try std.testing.expectEqual(@as(usize, 0), result.records.items.len);
     try std.testing.expect(backend.takeResult() == null);
 }
@@ -729,7 +866,7 @@ test "archive cancellation fences only the inflight generation and reports a ret
         var owned = result;
         owned.deinit(std.testing.allocator);
     }
-    try std.testing.expect(result.complete and result.retain_previous and result.cancelled);
+    try std.testing.expectEqual(Outcome.cancelled, result.outcome);
 }
 
 test "archive worker smoke gate waits without blocking the releasing actor" {
@@ -769,7 +906,7 @@ test "archive backend deinit releases a gated detached worker before allocator r
     var backend = try Backend.init(std.testing.allocator, std.testing.io);
     backend.setTestGate(true);
     const home = try std.testing.allocator.dupe(u8, "/nonexistent-maru-archive-home");
-    try std.testing.expect(backend.submit(home));
+    try std.testing.expect(backend.submit(home, false));
     var spins: usize = 0;
     while (!backend.testGateReached() and spins < 1_000) : (spins += 1) {
         std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
@@ -786,11 +923,11 @@ test "cancelled archive generation cannot publish a replacement snapshot" {
         state.results.deinit(std.testing.allocator);
     }
     state.cancelled_generation = 9;
-    var cancelled_result = Result{ .complete = true };
+    var cancelled_result = Result{ .outcome = .completed };
     try std.testing.expect(!publish(&state, 9, &cancelled_result));
     try std.testing.expectEqual(@as(usize, 0), state.results.items.len);
 
-    var latest_result = Result{ .complete = true };
+    var latest_result = Result{ .outcome = .completed };
     try std.testing.expect(publish(&state, 10, &latest_result));
     try std.testing.expectEqual(@as(usize, 1), state.results.items.len);
 }

@@ -75,7 +75,6 @@ pub const TransferOutcome = union(enum) {
 
 pub const RpcTransferOutcome = union(enum) {
     transferred,
-    rejected_safe_released: rpc_executed_response.RpcExecutedResponse.Error,
     fail_stop_required: PayloadFailStopReason,
 };
 
@@ -118,7 +117,40 @@ pub const Receipt = struct {
     }
 };
 
+pub const FailureReleaseOutcome = enum {
+    not_freed,
+    freed_clean,
+    freed_once_drifted,
+};
+
+const FailureReleaseStage = enum(u8) {
+    pristine,
+    ready,
+    free_committed,
+    consumed,
+    abandoned_no_free,
+};
+
 pub const Ledger = struct {
+    /// Final-address publication-failure cleanup transaction. `prepare` performs every fallible
+    /// ledger check before the caller publishes free-call evidence. `release` consumes the
+    /// transaction's cleanup authority before entering the allocator callback, so callback drift can never
+    /// authorize a second free.
+    pub const PreparedFailureRelease = struct {
+        self_addr: usize = 0,
+        ledger_addr: usize = 0,
+        receipt: Receipt = std.mem.zeroes(Receipt),
+        backing: BackingSnapshot = undefined,
+        stage: FailureReleaseStage = .pristine,
+        seal: u64 = 0,
+
+        pub fn pristineExact(self: *const @This()) bool {
+            return failureReleaseStageRawValid(&self.stage) and
+                self.self_addr == 0 and self.ledger_addr == 0 and
+                self.stage == .pristine and self.seal == 0;
+        }
+    };
+
     self_addr: usize = 0,
     authority: Authority = .{ .guard_addr = 0, .node_addr = 0, .operation_incarnation = 0 },
     authority_seal: Authority = .{ .guard_addr = 0, .node_addr = 0, .operation_incarnation = 0 },
@@ -322,6 +354,66 @@ pub const Ledger = struct {
             self.sealLedgerTerminalNoFree(.ledger_drift);
             return error.InvalidOwner;
         };
+    }
+
+    pub fn preparePromotedFailureRelease(
+        self: *Ledger,
+        receipt: Receipt,
+        out: *PreparedFailureRelease,
+    ) Error!void {
+        if (!out.pristineExact()) return error.InvalidOwner;
+        const entry = try self.entryForReceipt(receipt, .promoted_response);
+        entry.lifecycle = .retired;
+        const backing = self.captureBackingSnapshot() catch {
+            self.sealLedgerTerminalNoFree(.ledger_drift);
+            return error.InvalidOwner;
+        };
+        out.* = .{
+            .self_addr = @intFromPtr(out),
+            .ledger_addr = @intFromPtr(self),
+            .receipt = receipt,
+            .backing = backing,
+            .stage = .ready,
+        };
+        out.seal = failureReleaseSeal(out);
+    }
+
+    pub fn releasePreparedFailure(
+        self: *Ledger,
+        txn: *PreparedFailureRelease,
+    ) FailureReleaseOutcome {
+        if (!failureReleaseExact(txn, self, .ready) or
+            !self.backingSnapshotStillExact(txn.backing))
+        {
+            txn.* = .{};
+            return .not_freed;
+        }
+        const receipt = txn.receipt;
+        const backing = txn.backing;
+        txn.receipt = std.mem.zeroes(Receipt);
+        txn.stage = .free_committed;
+        txn.seal = failureReleaseSeal(txn);
+        if (receipt.len != 0)
+            allocatorFromIdentity(receipt.allocator).free(payloadFromReceipt(receipt));
+        if (!failureReleaseExact(txn, self, .free_committed) or
+            !self.backingSnapshotStillExact(backing))
+            return .freed_once_drifted;
+        txn.stage = .consumed;
+        txn.seal = failureReleaseSeal(txn);
+        return .freed_clean;
+    }
+
+    pub fn abandonPreparedFailureNoFree(
+        self: *Ledger,
+        txn: *PreparedFailureRelease,
+    ) void {
+        _ = self;
+        txn.* = .{};
+    }
+
+    pub fn promotedReceiptExact(self: *Ledger, receipt: Receipt) bool {
+        _ = self.entryForReceipt(receipt, .promoted_response) catch return false;
+        return true;
     }
 
     pub fn transferPromotedResponse(
@@ -682,9 +774,47 @@ fn allocatorFromIdentity(identity: AllocatorIdentity) std.mem.Allocator {
     };
 }
 
+fn failureReleaseExact(
+    txn: *const Ledger.PreparedFailureRelease,
+    ledger: *const Ledger,
+    stage: FailureReleaseStage,
+) bool {
+    return failureReleaseStageRawValid(&txn.stage) and
+        txn.self_addr == @intFromPtr(txn) and txn.ledger_addr == @intFromPtr(ledger) and
+        txn.stage == stage and txn.seal == failureReleaseSeal(txn);
+}
+
+fn failureReleaseStageRawValid(stage: *const FailureReleaseStage) bool {
+    return @as(*const u8, @ptrCast(stage)).* <= @intFromEnum(FailureReleaseStage.abandoned_no_free);
+}
+
+fn failureReleaseSeal(txn: *const Ledger.PreparedFailureRelease) u64 {
+    var hasher = std.hash.Wyhash.init(0x4d_52_53_48_46_52_45_4c);
+    hasher.update(std.mem.asBytes(&txn.self_addr));
+    hasher.update(std.mem.asBytes(&txn.ledger_addr));
+    hasher.update(std.mem.asBytes(&txn.receipt.ledger_addr));
+    hasher.update(std.mem.asBytes(&txn.receipt.index));
+    hasher.update(std.mem.asBytes(&txn.receipt.generation));
+    hasher.update(std.mem.asBytes(&txn.receipt.allocator.ptr_addr));
+    hasher.update(std.mem.asBytes(&txn.receipt.allocator.vtable_addr));
+    hasher.update(std.mem.asBytes(&txn.receipt.addr));
+    hasher.update(std.mem.asBytes(&txn.receipt.len));
+    hasher.update(std.mem.asBytes(&txn.backing.self_addr));
+    hasher.update(std.mem.asBytes(&txn.backing.semantic_digest));
+    hasher.update(std.mem.asBytes(&txn.backing.forbidden_digest));
+    const stage = @as(*const u8, @ptrCast(&txn.stage)).*;
+    hasher.update(std.mem.asBytes(&stage));
+    return hasher.final();
+}
+
 fn payloadFromEntry(entry: Entry) []u8 {
     if (entry.len == 0) return @constCast(&[_]u8{});
     return @as([*]u8, @ptrFromInt(entry.addr))[0..entry.len];
+}
+
+fn payloadFromReceipt(receipt: Receipt) []u8 {
+    if (receipt.len == 0) return @constCast(&[_]u8{});
+    return @as([*]u8, @ptrFromInt(receipt.addr))[0..receipt.len];
 }
 
 fn transferPromotedForTest(ledger: *Ledger, receipt: Receipt) Error!void {
@@ -1049,6 +1179,34 @@ test "B3-4/5 RPC ledger transfer rejects copied receipt without owner mutation" 
     ) == .fail_stop_required);
     try std.testing.expect(response.pristineExact());
     try ledger.endFailedRpcTransfer(.ledger_drift);
+}
+
+test "B3-4/5 RPC ledger transfer invalid failure stage stays pre-callback no-free" {
+    const allocator = std.testing.allocator;
+    var ledger: Ledger = .{};
+    try Ledger.initInPlace(&ledger, allocator, .{
+        .guard_addr = 0x7900,
+        .node_addr = 0x7A00,
+        .operation_incarnation = 113,
+    }, 1);
+    const payload = try allocator.dupe(u8, "rpc-failure-release");
+    const generation = try ledger.reserveObserved(payload.len, allocator);
+    try ledger.commitObserved(generation, payload, allocator);
+    const receipt = switch (ledger.classifyResponsePayloadProvenance(
+        generation,
+        payload,
+        allocator,
+        allocator,
+    )) {
+        .promoted => |value| value,
+        .fail_stop_required => return error.TestUnexpectedResult,
+    };
+    var release: Ledger.PreparedFailureRelease = .{};
+    try ledger.preparePromotedFailureRelease(receipt, &release);
+    @as(*u8, @ptrCast(&release.stage)).* = 0xFF;
+    try std.testing.expectEqual(FailureReleaseOutcome.not_freed, ledger.releasePreparedFailure(&release));
+    allocator.free(payload);
+    try ledger.endOperation();
 }
 
 test "B3-0a provenance classification uses exact generation and seals no-free reason" {

@@ -470,6 +470,45 @@ pub const Authority = struct {
         try self.transition(canonical, current_registry_incarnation, current_binding, .executing, .terminal, true);
     }
 
+    pub fn canonicalForRecovery(
+        self: *const Authority,
+        expected: Lifecycle,
+        current_registry_incarnation: u64,
+        current_binding: contract.BindingIdentity,
+    ) ?Canonical {
+        if (expected != .executing and expected != .published) return null;
+        if (!self.baseValid() or !self.activeExact() or self.lifecycle != expected or
+            self.registry_incarnation != current_registry_incarnation or
+            !self.binding.matches(current_binding)) return null;
+        return .{
+            .authority_addr = @intFromPtr(self),
+            .registry_incarnation = self.registry_incarnation,
+            .binding = current_binding,
+            .transport_addr = self.active.transport_addr,
+            .transport_incarnation = self.active.transport_incarnation,
+            .family = self.active.family,
+            .tag = self.active.tag,
+            .request_id = self.active.request_id,
+            .request_digest = self.active.request_digest,
+            .response_epoch = self.active.response_epoch,
+            .destination_addr = self.active.destination_addr,
+        };
+    }
+
+    pub fn commitExecutingTerminalNoFail(
+        self: *Authority,
+        canonical: Canonical,
+        current_registry_incarnation: u64,
+        current_binding: contract.BindingIdentity,
+    ) void {
+        if (!self.matches(canonical, .executing, current_registry_incarnation, current_binding))
+            @panic("RPC response recovery commit drifted");
+        self.lifecycle = .terminal;
+        self.canonical_present = 0;
+        self.active = std.mem.zeroes(Active);
+        self.seal = sealFor(self);
+    }
+
     fn prepareTransition(
         self: *Authority,
         canonical: Canonical,

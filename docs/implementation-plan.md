@@ -1033,8 +1033,9 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    registry-resolved canonical node operation pin 아래 exact `GenerationCapabilities` value projection을 구현했다. untrusted slot 주소는
    registry 비교 전 역참조하지 않고 owner-seal/capability enum의 invalid raw byte를 fail-close하며, facade production callsite 0과
    shared `RemoteRuntime` architecture raw-read exact baseline을 boundary gate로 고정했다.
-   **2c3b-2 request-side canonical authority는 구현·검증 완료했고 2c3b-3 response-side execution/ownership은 구현 전**이며 두 merge
-   gate를 섞지 않는다. 2c3b-2는 `RuntimeRequestTag -> RequestFamily -> role/phase -> method` 전수표와 닫힌 prepare/abort error,
+   **2c3b-2 request-side canonical authority는 구현·검증 완료했고 2c3b-3은 B3-4/5 private response-side
+   execution/ownership까지 완료했지만 B3-6 public aggregate exposure 전이라 전체 구현 중**이며 두 merge gate를 섞지 않는다.
+   2c3b-2는 `RuntimeRequestTag -> RequestFamily -> role/phase -> method` 전수표와 닫힌 prepare/abort error,
    같은 binding entry의 node-sealed `PreparedRequestAuthority`가 opaque `PreparedBlockingRpcStorage`의 frame descriptor·allocator
    provenance·incarnation·tag/id/digest를 한 transaction으로 pair-seal하는 경로까지 구현했다. 기존 attach-compatible execute도 이
    authority를 begin/revalidate/settle하도록 hardened했다. request allocation fail-index, scope token·owner/client-backing exact/partial
@@ -1189,7 +1190,7 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       `InvalidReceipt|InvalidOwner`에서 닫힘을 별도로 검증한다. B3-2 verdict를 cache/permit화하지 않는다. B3-3은 flush 전
       expected lifecycle `.prepared`, `beginPreparedRequestExecute` 뒤 flush 후 `.executing`으로 같은 receipt의 canonical transcript와
       current entry를 각각 새로 resolve해 동일 classifier를 다시 호출하며 post-flush 결과만 first-byte 권위로 쓴다. Debug·ReleaseFast
-      registry 3개와 product 2개, boundary 1개를 합친 exact 11-test focused gate와 전체 session-host 회귀가 완료 증거이며 다음 단계는 B3-3이다.
+      registry 3개와 product 2개, boundary 1개를 합친 exact 11-test focused gate와 전체 session-host 회귀가 완료 증거다.
    5. **B3-3 progress/execute integration (완료):** caller-final storage에 Client가 in-place 초기화·seal하는
       `PreparedRequestExecutionLease`와 closed
       `PreparedRequestWireProgress{request_zero_clean,prior_pending_ambiguous,request_maybe_written}`의 유일한 생산자가
@@ -1217,7 +1218,7 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       lease를 얻은 뒤에는 request backing과 두 authority를 모두 정산한 다음 fence를 마지막에 해제한다. 테스트 밖 제품 caller는
       B3-6 전까지 0이다. execution fence는 주소·generation 외 process-local checked-monotonic incarnation을 lease와 Client latch에
       함께 봉인하며 same-address reincarnation은 새 fence를 release하지 않고 fail-closed한다.
-   6. **B3-4/5 원자적 publication+borrow/finish:** published payload를 정리할 production 경로 없이 중간 병합하지 않는다.
+   6. **B3-4/5 원자적 publication+borrow/finish (완료):** published payload를 정리할 production 경로 없이 중간 병합하지 않는다.
       stack-final response publish, exact safe-free/ambiguous no-free,
       `published→borrowed→releasing` exact-once lexical borrow와 owner finish, 2회·64회 순차 RPC를 구현한다. `client.zig`는 기존 response
       loop를 request 재전송·request-id 증가 없는 `readPreparedResponseUnderExecutionLease`로 추출하고, 새

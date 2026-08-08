@@ -1491,7 +1491,15 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    `RpcExecutedResponse`·`RpcResponseBorrow`, payload allocation provenance/digest와 exact-once free의 byte-ownership SSOT다. 기존
    `executed_response.zig`와 `ExecutedResponseOwnerSeal`은 attach 결과 계약에 결합돼 있으므로 재사용하거나 변경하지 않는다.
    `attachment_cleanup_registry.zig`는 inline authority pointer를 노출하지 않고 current registry incarnation/binding/canonical을 resolve하는
-   transition facade만 제공하며 payload pointer·allocator·decoder를 Entry에 저장하지 않는다. `client_slot.zig`는 전체 product-shaped
+   transition facade만 제공하며 payload pointer·allocator·decoder를 Entry에 저장하지 않는다. parser/allocator callback 전에는 Entry가
+   request `executing`과 RPC response `executing` canonical을 함께 검증한 뒤 pointer-free `rpc_execution_recovery` reservation 하나를
+   final-address in-place로 봉인한다. 이 reservation은 새 protocol lifecycle이나 payload cleanup capability가 아니라, callback 뒤
+   caller stack의 composite txn·execution lease·publication scope가 drift해도 두 기존 authority를 terminal로 닫기 위한 exact-one
+   recovery permit이다. 정상 publication suffix는 이를 mutation 없이 consume/disarm하고, post-wire 실패 suffix는 byte disposition이
+   먼저 `terminal_clean|terminal_no_free|terminal_freed_once` 중 하나로 확정된 뒤 같은 Entry 안에서 두 authority terminal commit을
+   no-fail로 게시한다. reservation에는 allocator ptr/vtable·payload addr/len·ledger receipt를 저장하지 않으며 registry 밖으로 raw Entry/
+   authority pointer를 반환하지 않는다. registry/authority canonical 자체의 drift는 복구 가능한 caller-scratch drift 범위가 아니라
+   즉시 process fail-stop 범위다. `client_slot.zig`는 전체 product-shaped
    orchestration의 유일한 모듈이지만 하나의 장수 txn을 만들지 않는다. `PreparedRpcExecutionTxn`은 response read부터 atomic publication,
    request/ledger/lease 정산까지만 소유하고 그 뒤 종료한다. borrow begin은 별도 txn 타입 없이 fresh operation의 stack-local preflight와
    transition permit만 사용하고, 성공 반환 뒤 borrow lifetime은 `RpcResponseBorrow` receipt 하나만 소유한다. finish는 별도 fresh
@@ -1616,15 +1624,35 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    전에 frozen allocation receipt와 allocator identity/range/digest, destination pristine/disjoint, composite txn, execution lease/fence,
    current registered operation/registry incarnation/binding/canonical, authority `executing`, Client allocator/parser/fd/first-poison을 모두
    다시 검증한다. 이 post-callback publication gate 실패는 request가 이미 wire에 나갔으므로 reusable rollback이 아니다. destination
-   write authority와 payload free provenance를 독립 판정한다. `(destination exact,payload exact)`은 cleanup capability를 final-address finish
-   txn으로 옮기고 owner `free_committed`→node `free_call_committed` evidence→allocator callback 순으로 진행하며, callback 정상 복귀와
-   destination/txn exact 재검증 뒤에만 owner `terminal_clean`을 게시한다. `(destination exact,payload ambiguous)`는 destination에
+   write authority와 payload free provenance를 독립 판정한다. `(destination exact,payload exact)`은 cleanup capability를 ledger-owned
+   final-address `PreparedFailureRelease`로 옮긴다. fallible prepare는 promoted receipt와 ledger backing을 검증하고 entry를 callback-free
+   `retired`로 먼저 봉인한다. 그 뒤 node `free_call_committed` evidence를 게시하고 transaction 안의 callable allocator/range를 zero로
+   소비한 다음 allocator callback을 exact once 호출한다. callback 정상 복귀와 destination/transaction/ledger backing exact 재검증 뒤에만
+   destination owner `terminal_clean`을 게시한다. prepare가 실패하면 callback은 0이며 `freed_once`를 주장하지 않는다. callback이 이미
+   시작된 뒤 transaction 또는 backing이 drift하면 destination write 0, node `terminal_freed_once`로 닫아 second free를 금지한다.
+   `(destination exact,payload ambiguous)`는 destination에
    `terminal_no_free`를 봉인하고 free 0이다. `(destination invalid,payload exact)`는 destination write 0, node/txn-sealed free-committed
    evidence를 남기고 frozen receipt로 safe-free한 뒤 node 또는 여전히 exact한 txn의 `terminal_freed_once`로 수렴한다.
    `(destination invalid,payload ambiguous)`는 destination write/free 모두 0이고 node free record도 `empty`를 유지하며 authority
    terminal+connection poison만 남긴다. 네 분기 모두
    authority terminal+connection poison 뒤 private strict fail-stop으로 닫으며 destination-invalid evidence는 owner/cleanup capability가 아니다. owner
    seal 뒤 `commitPublishedNoFail`은 이 gate의 final-address permit을 소비하는 adjacency이며 그 사이 callback/allocation/raw lookup은 0이다.
+   이 실패 suffix는 callback이 변경할 수 있는 `PreparedRpcExecutionTxn`, execution lease 또는 publication scope를 authority recovery
+   권위로 다시 읽지 않는다. callback 전에 registry Entry에 arm한 pointer-free recovery reservation으로 두 authority를 terminalize하고,
+   Client가 보관한 active execution-fence/allocator-scope canonical로 connection poison과 scope/fence release를 끝낸다. caller token은
+   lookup identity일 뿐 복구 SSOT가 아니다. payload ledger cleanup 실패는 이미 확정한 no-free/freed-once evidence에 흡수하며 authority
+   terminal과 poison보다 앞선 조기 panic으로 빠지지 않는다. 정상 publication은 recovery reservation을 exact once disarm한 뒤에만
+   reusable authority를 게시한다.
+
+   이 복구 계약의 주소 신뢰 경계는 registry Entry가 검증해 반환한 recovery canonical이다. destination address는 current
+   reservation/binding/response authority와 다시 결속된 뒤에만 역참조한다. registry 자체를 임의 주소와 일치하는 값으로 함께 변조한
+   same-process arbitrary-memory 공격은 신뢰 가능한 terminal destination 자체가 사라지므로 terminal-before-fail-stop 복구 범위가 아니다.
+   반면 callback에 노출된 final-address payload cleanup token은 신뢰 경계가 아니다. token seal이 결속한
+   ledger/index/generation/range scalar가 drift하면 ledger address를 역참조하지 않고 free 0으로 닫는다. seal이 exact하면 봉인된 ledger
+   address에서 canonical entry를 조회하되, allocator/authority를 포함한 full receipt가 일치하지 않으면 payload를 역참조하거나 free하지
+   않는다. seal까지 재계산하는 악성 same-process 코드는
+   메모리 안전 drift fixture의 범위가 아니라 host process compromise로 분류한다. component test는 각 receipt scalar와 seal drift,
+   동일 token replay의 second free 0을 자동 검증한다.
 
    response allocation/publication 실패는 actual allocator·range·digest authority가 exact하면 response owner tombstone 뒤 safe-free하고,
    allocator mismatch, pointer range overflow, owner와 exact/partial alias처럼 free authority가 불명확하면 forged slice를 free하지 않는다.
@@ -1633,7 +1661,9 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    exact/partial disjoint여야 한다. begin-borrow는 그 시점의 operation/permit/output receipt storage를 검사하고, finish는 현재 borrow receipt,
    새 `RpcResponseFinishTxn`, releasing/finish permit과 fresh `RegisteredNodeOperation` storage만 같은 checked-add 규칙으로 검사한다. empty payload는 canonical accepted owner가 아니며 `{addr=0,len=0,allocator_present=0}` 그대로 terminal
    reject된다.
-   이 경우 private component helper만 node-sealed terminal evidence와 `fail_stop_required`를 만들 수 있다. B3-4/5는 이 outcome type을
+   이 경우 private component helper만 node-sealed terminal evidence와 `fail_stop_required`를 만들 수 있다. component의 closed 결과는 네
+   provenance 조합에 더해 exact/exact callback 이후 drift를 별도 absorbing 결과로 표현하며, pre-callback 실패와 post-callback drift를
+   같은 error로 합치지 않는다. B3-4/5는 이 outcome type을
    file-private로 유지하고 terminal-before-return source oracle 및 private `noreturn` fail-stop sink까지 닫되 public RPC destination과
    production callsite·isolated subprocess는 열지 않는다. B3-6이 public RPC destination의 exact-one production callsite를 열고 같은
    stack에서 outcome을 반환·저장하지 않은 채 즉시 fail-stop하는 subprocess 증거를 소유한다. B3-0a의 기존 attach-only production strict

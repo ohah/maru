@@ -715,11 +715,21 @@ pub fn build(b: *std.Build) void {
             "file tree production hot paths emit bounded counter artifact",
             // SV2-0 판정자. 같은 스텝에 두는 이유는 같은 하네스(실제 `AppSession`)를 쓰고, 탐색기
             // 신호가 무관한 socket/WebKit flaky에 묻히지 않아야 하기 때문이다(위 주석과 같은 이유).
-            "file tree row window is one arithmetic shared by follow, clamp, hit-test, and render",
+            // 이름은 SV2a에서 `row window` → `pixel window`로 바뀌었다(판정자를 픽셀 좌표로 옮김 —
+            // app_session.zig의 해당 test 주석). 필터가 그 rename을 따라가지 않아 이 판정자가
+            // 스텝에서 조용히 빠져 있었고, 러너는 남은 test만으로 green이었다. 아래 expect 개수 단언이
+            // 같은 사고를 다시 허용하지 않는다.
+            "file tree pixel window is one arithmetic shared by follow, clamp, hit-test, and render",
         },
     });
     const run_macos_file_explorer_perf_tests = b.addRunArtifact(macos_file_explorer_perf_tests);
     run_macos_file_explorer_perf_tests.setCwd(b.path("."));
+    // 이름 필터는 매치가 0개여도 러너가 "All 0 tests passed."로 exit 0이라, 판정자 이름이 바뀌거나
+    // 다른 파일로 옮겨가면 게이트가 **초록인 채로** 죽는다(실제로 위 SV2-0 판정자가 그렇게 빠져 있었다).
+    // 컴파일된 test 수를 못 박아 그 사고를 실패로 바꾼다. 7 = 위 필터 2개 + 이 모듈 그래프의
+    // 이름 없는 test 블록 5개(app_host_abi·app_session·session_host×2·control_socket).
+    // 숫자가 틀렸다고 나오면 먼저 **어느 판정자가 빠졌는지** 확인하고, 정당한 증감일 때만 갱신한다.
+    run_macos_file_explorer_perf_tests.addArg("--maru-expect-tests=7");
     const test_macos_file_explorer_perf_step = b.step("test-macos-file-explorer-perf", "Run the macOS AppSession file-explorer performance artifact gate");
     test_macos_file_explorer_perf_step.dependOn(&run_macos_file_explorer_perf_tests.step);
 
@@ -736,6 +746,9 @@ pub fn build(b: *std.Build) void {
     const run_provider_no_mutation_tests = b.addRunArtifact(provider_no_mutation_tests);
     run_provider_no_mutation_tests.setCwd(b.path("."));
     run_provider_no_mutation_tests.setEnvironmentVariable("MARU_TEST_PROVIDER_NO_MUTATION", "1");
+    // 위 file-explorer 스텝과 같은 이유로 개수를 못 박는다 — 이름 필터는 0개 매치도 green이라
+    // provider 무변경 계약이 조용히 게이트에서 빠질 수 있다. 10 = 위 필터 5개 + 이름 없는 test 블록 5개.
+    run_provider_no_mutation_tests.addArg("--maru-expect-tests=10");
     const test_provider_session_removal_step = b.step("test-provider-session-removal", "Verify provider continuity removal on the macOS product path");
     test_provider_session_removal_step.dependOn(&run_provider_no_mutation_tests.step);
 

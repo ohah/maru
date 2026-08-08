@@ -107,6 +107,11 @@ pub const Props = struct {
     search_cursor_visible: bool = false,
     loading: bool = false,
     refreshing: bool = false,
+    /// 스캔이 사용자 이력의 일부만 훑었다. read budget 소진, 크기 초과 파일, 읽기/parse 실패가 모두
+    /// 여기로 모인다. **정책적 제외(worker 판정)는 포함하지 않는다** — 정상 동작이 상시 경고로 보이면
+    /// 경고가 무의미해진다. 헤더가 이 값을 문구로 바꿔 "목록이 전부가 아니다"를 사용자에게 알린다
+    /// (docs/agent-session-list.md §4).
+    partial: bool = false,
     spinner_phase: u3 = 0,
     /// The host owns this stable identity and clears it atomically with detail/action capture
     /// when a snapshot replacement changes `(provider, session_id, device, inode)`.

@@ -62,8 +62,16 @@ pub fn view(props: types.Props, frame: build.Frame, state: interaction.Interacti
 
     const header = find(frame.tree, build.NodeIds.header) orelse return error.MissingRect;
     const dock_metrics = types.DockMetrics.resolve(props.scale_milli);
+    // 현재 snapshot과 scan 상태를 **분리해** 말한다(docs/agent-session-list.md §4). 예전 문구는
+    // `N개 표시 · 최근 500개`로 상한을 광고했는데, 실제로 목록을 자르는 것은 그 상한이 아니라 read
+    // budget이라 "500개 중 N개"가 사실과 달랐다. 잘렸으면 잘렸다고 말하고, 아니면 개수만 말한다.
     var count_buf: [48]u8 = undefined;
-    const count = std.fmt.bufPrint(&count_buf, "{d}개 표시 · 최근 {d}개", .{ props.displayed_count, props.recent_limit }) catch "";
+    const count = if (props.refreshing)
+        std.fmt.bufPrint(&count_buf, "{d}개 표시 · 분석 중", .{props.displayed_count}) catch ""
+    else if (props.partial)
+        std.fmt.bufPrint(&count_buf, "{d}개 표시 · 일부만 분석함", .{props.displayed_count}) catch ""
+    else
+        std.fmt.bufPrint(&count_buf, "{d}개 표시", .{props.displayed_count}) catch "";
     try writer.headerStack(header, "Agent 세션 기록", count);
     try writer.headerProvenance(header, host_label);
     // The in-flight state deliberately keeps the registered SVG at its idle optical size.  The
@@ -729,6 +737,74 @@ fn isSessionDockIcon(codepoint: u21) bool {
 fn find(snapshot: tree.UiRectTree, id: tree.UiId) ?tree.RectEntry {
     const index = snapshot.find(id) orelse return null;
     return snapshot.entries[index];
+}
+
+// 헤더 부제는 **현재 snapshot과 scan 상태를 분리해** 말해야 한다(docs/agent-session-list.md §4).
+// 예전 문구 `N개 표시 · 최근 500개`는 상한을 광고했지만, 실제로 목록을 자르는 것은 그 상한이 아니라
+// read budget이라 "500개 중 N개"가 사실과 달랐다. 그리고 scanner가 `partial`을 세고 있었는데도 그 값이
+// DTO에 없어 **잘렸다는 사실이 화면에 전혀 나타나지 않았다** — 사용자는 목록이 전부인 줄 알았다.
+test "SessionDock 헤더는 잘림과 분석 중을 개수와 분리해 말한다" {
+    const Case = struct { partial: bool, refreshing: bool, want: []const u8 };
+    const cases = [_]Case{
+        // 완료 + 전부 훑음 → 개수만. 상한을 광고하지 않는다.
+        .{ .partial = false, .refreshing = false, .want = "7개 표시" },
+        // 완료 + 일부만 훑음 → 사용자가 목록을 전부로 오해하지 않게 말한다.
+        .{ .partial = true, .refreshing = false, .want = "7개 표시 · 일부만 분석함" },
+        // 진행 중이면 잘림 여부는 아직 확정이 아니다. 분석 중이 이긴다.
+        .{ .partial = false, .refreshing = true, .want = "7개 표시 · 분석 중" },
+        .{ .partial = true, .refreshing = true, .want = "7개 표시 · 분석 중" },
+    };
+    for (cases) |case| {
+        const props = types.Props{
+            .viewport_px = .{ .width = 320, .height = 480 },
+            .cell_width_px = 8,
+            .cell_height_px = 16,
+            .snapshot_generation = 1,
+            .displayed_count = 7,
+            .partial = case.partial,
+            .refreshing = case.refreshing,
+            .items = &.{},
+        };
+        var nodes: [32]tree.UiNode = undefined;
+        var entries: [32]tree.RectEntry = undefined;
+        var layout_items: [32]@import("../../ui/layout.zig").Item = undefined;
+        var flex_scratch: [32]@import("../../ui/layout.zig").FlexScratch = undefined;
+        var child_rects: [32]@import("../../ui/layout.zig").UiRect = undefined;
+        var actions: [32]@import("ids.zig").Entry = undefined;
+        const frame = try build.build(props, .{
+            .nodes = &nodes,
+            .entries = &entries,
+            .layout_items = &layout_items,
+            .flex_scratch = &flex_scratch,
+            .child_rects = &child_rects,
+            .actions = &actions,
+        });
+        const tk = tokens.Tokens.rich(.{
+            .foreground = .{ .r = 240, .g = 240, .b = 240 },
+            .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
+            .sidebar_foreground = .{ .r = 220, .g = 220, .b = 220 },
+            .sidebar_active = .{ .r = 80, .g = 80, .b = 80 },
+            .search_match = .{ .r = 1, .g = 2, .b = 3 },
+            .search_match_current = .{ .r = 4, .g = 5, .b = 6 },
+            .selection = .{ .r = 7, .g = 8, .b = 9 },
+            .cursor = .{ .r = 10, .g = 11, .b = 12 },
+            .accent = .{ .r = 13, .g = 14, .b = 15 },
+        });
+        var ops: [64]draw.Op = undefined;
+        var runs: [64]draw.Run = undefined;
+        var text_bytes: [2048]u8 = undefined;
+        const out = try view(props, frame, .{}, &tk, .{ .ops = &ops, .runs = &runs, .text_bytes = &text_bytes });
+        var saw = false;
+        for (out.ops) |op| switch (op) {
+            .text => |t| {
+                for (t.runs) |run| {
+                    if (std.mem.eql(u8, run.text, case.want)) saw = true;
+                }
+            },
+            else => {},
+        };
+        try std.testing.expect(saw);
+    }
 }
 
 test "SessionDock view emits card paint and ellipsized semantic text from one tree" {

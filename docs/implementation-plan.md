@@ -1339,7 +1339,7 @@ restore 설정 alias, 과거 hook/mapping cleanup과 전용 환경변수 차단�
 
 > **AS4-c 보정(2026-08-03):** Codex·Claude resume/reveal AppKit fixture는 구현·검증됐지만 `exact-live`는 완료가 아니다. 일반 PTY child의 `KERN_PROCARGS2` 관측이 argv-only payload를 반환해 provider child 환경의 session ID를 읽지 못한 macOS POC 결과에 따라, path·mtime·활동시각 추측 또는 fixture-only mapping으로 action을 materialize하지 않는다. provider 공식 payload를 `MARU_PANE_ID`에 묶는 공통 mapping 설계가 승인되기 전까지 이 scenario는 차단 상태다.
 
-1. **AS1** — provider-neutral record와 Claude/Codex parser, title/summary/filter/sort/dedup/redaction의 synthetic fixture TDD. 계약([agent-session-list.md](agent-session-list.md) §4-3)이 요구하는 **streaming** parser는 AS5가 닫았다. 파일 전체를 한 버퍼에 올리던 구현(피크 실측 463 MB)과 그것을 방어하던 read cap들이 함께 사라졌다. **남은 잔여:** 정렬 키가 아직 mtime이다 — AS6가 닫는다.
+1. **AS1** — provider-neutral record와 Claude/Codex parser, title/summary/filter/sort/dedup/redaction의 synthetic fixture TDD. 계약([agent-session-list.md](agent-session-list.md) §4-3)이 요구하는 **streaming** parser는 AS5가 닫았다. 파일 전체를 한 버퍼에 올리던 구현(피크 실측 463 MB)과 그것을 방어하던 read cap들이 함께 사라졌다. 정렬 키의 마지막 갭(mtime 기준)은 AS6가 닫았다.
 2. **AS2** — worker-only discovery/parse, no-follow identity recheck, cancel/generation, 앱 실행 중만 유지하는 file-identity parse cache, immutable snapshot publish. no-follow open 후 device·inode 재검사와 memory-only identity cache를 제공하며, refresh 중에는 이전 완료 목록을 보존하고 새 scan 종료 뒤 한 번만 swap한다. **AS2-a는 구현됐다:** backend-owned request generation·cooperative cancel·cancelled publish 폐기와 dock 재진입 latest-wins 재요청을 제공한다. main thread는 cache snapshot render·queue apply만 하며 I/O/parse/정렬/wait=0이다. persistent metadata cache는 개인정보 정책 승인 전 범위 밖이다.
 
    **AS2-b(동시 parse≤4)는 보류다.** 실측(2026-08-08) 결과 전체 스캔 비용의 97.5%가 JSON parse이고 I/O는 1.2초이므로, 병렬화 이전에 read cap 제거와 점진 publish(AS5)가 사용자 체감을 결정한다. 병렬 pool은 AS5 이후 남은 시간을 재고 판단한다.
@@ -1358,14 +1358,19 @@ restore 설정 alias, 과거 hook/mapping cleanup과 전용 환경변수 차단�
    적대적 검증 세 라운드가 상한 분기 둘, `errdefer` 누수 둘, 부분 진행 큐 누적, 점진 발행 판정 오류를
    잡아 함께 고쳤다.
 4. **AS6 — 정렬 키와 방향 토글:** 계약([agent-session-list.md](agent-session-list.md) §2.3)이 정한
-   정렬을 이행한다. **미착수.**
-   - **AS6-a** 정렬 키를 transcript의 마지막 활동 시각으로 바꾼다. 두 provider 모두 각 줄 최상위에
-     RFC 3339 UTC `timestamp`를 싣는다. 얻지 못한 파일은 mtime으로 폴백한다 — 실측 40개 중 1개가
-     그렇다. **근거:** mtime으로 정렬하면 로컬 이력 362개 중 257개(70%)가 제자리가 아니고, Claude
-     쪽 최대 차이가 144시간이다(2026-08-08 실측).
-   - **AS6-b** header에 최신순/오래된순 토글을 둔다. `로컬` label과 refresh 사이의 trailing group에
-     놓아 새 행을 만들지 않는다. 방향은 표시 계층에서만 바꾸고 스캔 순서는 최신 우선을 유지한다.
-     앱 실행 중에만 유지하고 디스크에 쓰지 않는다.
+   정렬을 이행한다.
+   - **AS6-a는 구현됐다.** 정렬 키가 transcript의 마지막 활동 시각이다. 두 provider 모두 각 줄
+     최상위에 RFC 3339 UTC `timestamp`를 싣고(실측 200,025건이 모두 밀리초 3자리 `Z` 한 형태),
+     `Parser`가 그 **최댓값**을 남긴다 — 줄 순서가 시간 순이라는 보장이 없기 때문이다. 얻지 못한
+     파일은 mtime으로 폴백한다(실측 40개 중 1개). 카드의 `N분 전`도 같은 `lastActivityNs`를 읽어
+     목록 순서와 표시가 갈리지 않는다. **근거:** mtime으로 정렬하면 로컬 이력 362개 중 257개(70%)가
+     제자리가 아니고, Claude 쪽 최대 차이가 144시간이다(2026-08-08 실측).
+   - **AS6-b는 구현됐다.** header의 `로컬` label과 refresh 사이 trailing slot에 최신순/오래된순
+     토글이 있다. 방향은 표시 계층에서만 바꾸고(filtered index를 뒤집는다) 스캔 순서는 최신 우선을
+     유지한다. 앱 실행 중에만 유지하고 디스크에 쓰지 않는다. 최소 도크 폭(120pt)에서는 header
+     utility가 제목을 밀어내므로 좁은 폭에서는 토글을 발행하지 않는다.
+   - **잔여 gate:** 토글의 실제 pointer 왕복 AppKit fixture와 2× backing scale의 header utility
+     rect JSON은 아직 없다. 정렬 결과의 실제 이력 대조는 개인 데이터라 CI에 넣을 수 없다.
 5. **ML1** — `src/chrome/ui/layout.zig`가 typed `UiLength`와 border-box `UiRect`, measure callback, row/column flex, grow/shrink freeze 재분배, min/max, margin/padding/gap, justify/align-self, overflow clip result를 allocation 없이 계산한다. invalid/indefinite input은 error와 empty rect로 fail-close하며, pure test가 px/percent/auto/fill, tiny content, NaN/범위 오류, clip을 고정한다. 이는 한 parent의 sibling solver일 뿐 `UiTree`·draw/hit-test·제품 UI는 아직 만들지 않는다.
 6. **ML2a** — `src/chrome/ui/tree.zig`가 `container`/`card`/`text` value builder, global duplicate-id fail-close, bounded frame-buffer tree build, parent/clip ancestry와 nested rect offset overflow fail-close, successful-only rebuild counter를 pure test로 고정했다. 이 tree는 TUI cell/ANSI path를 읽지 않지만, draw/hit-test/focus/scroll 또는 제품 Session Dock은 아직 소비하지 않는다.
 7. **AS3** — scope와 snapshot-only search, 접이식 workspace group, 세 줄 카드의 데이터 투영과 AS3-a/AS3-b의 Metal component·published-tree pointer lifecycle은 구현됐다. AS3-c1은 `ui/scroll_area.zig`의 integer backing-pixel projection으로 partial visible range와 같은 content clip을 만들며, host가 terminal/sidebar/notification과 분리된 dock wheel residue로 이를 소비한다. AS3-c2는 snapshot 교체와 resize에서 first partially-visible card의 exact `{provider, session_id, device, inode}` anchor와 intra-card backing-pixel offset을 복원하고, identity가 없거나 group이 접혀 materialize되지 않으면 numeric offset만 새 상한에 clamp한다. PageUp/PageDown/Home/End는 search 비포커스에서 같은 state를 움직이고 residue를 비운다. `partial-scroll` Lab은 component→CoreText atlas→제품 Metal PPM/PNG/JSON readback을 고정하고, `expanded-scroll-anchor` isolated AppKit fixture는 실제 `NSView.scrollWheel`·refresh·새 published generation·전후 Metal capture를 확인한다. Lab은 fixture input이므로 actual `AppSession` worker/snapshot E2E를 뜻하지 않으며, 시각 결과가 바뀌는 PR은 이 capture를 `gh attach`로 PR 본문에 포함한다.

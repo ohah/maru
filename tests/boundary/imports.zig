@@ -555,10 +555,16 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .name = "writePreparedRequestExecution", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "observePreparedRequestTerminalSinkEof", .receiver_type = mutable, .class = .unchecked },
         .{ .name = "finishPreparedRequestExecution", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "restoreGenerationAllocatorScopeUnderExecutionLease", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "readPreparedResponseUnderExecutionLease", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "commitPreparedExecutionRecoveryPoisonNoFail", .receiver_type = mutable, .class = .unchecked },
+        .{ .name = "commitPreparedExecutionRecoveryCleanupNoFail", .receiver_type = mutable, .class = .unchecked },
 
         .{ .name = "endedPurgeFenceIntruded", .receiver_type = immutable, .class = .observation },
         .{ .name = "preparedRequestExecutionLeaseMatches", .receiver_type = immutable, .class = .observation },
         .{ .name = "preparedRequestExecutionPoisonReason", .receiver_type = immutable, .class = .observation },
+        .{ .name = "preparedExecutionRecoveryPoisonedForTest", .receiver_type = immutable, .class = .observation },
+        .{ .name = "revalidatePreparedResponsePublication", .receiver_type = immutable, .class = .observation },
     };
     try expectClientReceiverManifest(allocator, source, &manifest);
     const guarded = [_]ClientGuardProof{
@@ -1434,6 +1440,17 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "releasePreparedRequestExecutionLeaseCanonical" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "flushPendingOutboundForPreparedExecution" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "flushPendingOutboundBlockingWithOps" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "restoreGenerationAllocatorScopeUnderExecutionLease" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "readPreparedResponseUnderExecutionLease" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "commitPreparedExecutionRecoveryPoisonNoFail" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "preparedExecutionRecoveryPoisonedForTest" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "commitPreparedExecutionRecoveryCleanupNoFail" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "revalidatePreparedResponsePublication" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "restoreGenerationAllocatorScopeUnchecked" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "readCorrelatedPreparedResponse" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "readFrameWithAllocatorObservedUnderExecutionLease" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "readFrameWithAllocatorObservedUnchecked" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "poisonFrameRead" },
             },
         },
         .{
@@ -1441,7 +1458,13 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
             .baseline_count = 127,
             .baseline_digest = .{ 0xa8, 0x74, 0x00, 0x69, 0x5e, 0xef, 0x13, 0xe4, 0x46, 0x69, 0x0f, 0x65, 0x59, 0x53, 0xb7, 0x40, 0x2b, 0x30, 0x61, 0x22, 0xb7, 0xf1, 0x94, 0xf7, 0xf6, 0x1f, 0x74, 0x00, 0x68, 0x6e, 0xd8, 0xc9 },
             .containers = &.{ "ClientSlot", "EndedPurgePreparation" },
-            .optional_containers = &.{ "PreparedExecutionTxn", "PreparedExecutionCleanup", "RegisteredNodeOperation" },
+            .optional_containers = &.{
+                "PreparedExecutionTxn",
+                "PreparedExecutionCleanup",
+                "RegisteredNodeOperation",
+                "RpcPublicationPayloadCleanup",
+                "RpcPublicationFailureByteOutcome",
+            },
             .allowed = &.{
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "compatibility" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "prepared_request_authority" },
@@ -1617,6 +1640,48 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "B33DestinationOccupyingAllocator" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "B33CompositeScenario" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "runB33CompositeScenario" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "RpcPublicationPayloadCleanup" },
+                .{ .parent = "RpcPublicationPayloadCleanup", .kind = "field", .visibility = "private", .modifier = "", .name = "self_addr" },
+                .{ .parent = "RpcPublicationPayloadCleanup", .kind = "field", .visibility = "private", .modifier = "", .name = "receipt" },
+                .{ .parent = "RpcPublicationPayloadCleanup", .kind = "field", .visibility = "private", .modifier = "", .name = "failure_release" },
+                .{ .parent = "RpcPublicationPayloadCleanup", .kind = "field", .visibility = "private", .modifier = "", .name = "test_pre_release_stage_drift" },
+                .{ .parent = "RpcPublicationPayloadCleanup", .kind = "field", .visibility = "private", .modifier = "", .name = "armed" },
+                .{ .parent = "RpcPublicationPayloadCleanup", .kind = "field", .visibility = "private", .modifier = "", .name = "seal" },
+                .{ .parent = "RpcPublicationPayloadCleanup", .kind = "fn", .visibility = "private", .modifier = "", .name = "arm" },
+                .{ .parent = "RpcPublicationPayloadCleanup", .kind = "fn", .visibility = "private", .modifier = "", .name = "takeIfExact" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "rpcPublicationPayloadCleanupSeal" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "rpcPublicationFailureFreeEvidence" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "RpcPublicationFailureByteDisposition" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "RpcPublicationFailureByteOutcome" },
+                .{ .parent = "RpcPublicationFailureByteOutcome", .kind = "field", .visibility = "private", .modifier = "", .name = "disposition" },
+                .{ .parent = "RpcPublicationFailureByteOutcome", .kind = "field", .visibility = "private", .modifier = "", .name = "response_epoch" },
+                .{ .parent = "RpcPublicationFailureByteOutcome", .kind = "field", .visibility = "private", .modifier = "", .name = "free_evidence" },
+                .{ .parent = "RpcPublicationFailureByteOutcome", .kind = "field", .visibility = "private", .modifier = "", .name = "retire_clean_evidence" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "closeRpcPublicationDestinationNoFree" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "settleRpcPublicationFailureBytes" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "runB345RpcProduct" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "rpc_executed_response" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "RpcFreeEvidenceState" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "RpcFreeEvidenceRecord" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "rpcFreeEvidenceStateRawValid" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "rpcFreeEvidenceSeal" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "rpcFreeEvidenceFixture" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "rpcOwnerIdentity" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "rpcAuthorityCanonical" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "rpcTerminalEvidence" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "PreparedRpcPublicationScope" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "PreparedRpcExecutionMode" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "executePreparedRpcPrivate" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "publishPreparedRpcResponse" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "failStopRpcPublication" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "executePreparedRpcCorrelatedResponseForTest" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "RpcResponseDisposition" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "beginRpcResponseBorrowForTest" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "finishRpcResponseOwnedForTest" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "terminalizeBorrowedRpcResponseNoFree" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "failStopFreedRpcResponse" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "settlePostExecuteReusableUnderPublicationScope" },
+                .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "settlePostExecuteReusableUnchecked" },
             },
         },
     };
@@ -1631,6 +1696,11 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
             case.allowed,
         );
         try std.testing.expect(inventory.total_count >= case.baseline_count);
+        if (inventory.total_count > case.baseline_count + case.allowed.len)
+            std.debug.print(
+                "declaration budget exceeded for {s}: total={d} frozen={d} observed-baseline={d} allowed={d}\n",
+                .{ case.path, inventory.total_count, case.baseline_count, inventory.baseline_count, case.allowed.len },
+            );
         try std.testing.expect(inventory.total_count <= case.baseline_count + case.allowed.len);
         try std.testing.expectEqual(case.baseline_count, inventory.baseline_count);
         try std.testing.expectEqual(case.baseline_digest, inventory.baseline_digest);
@@ -2081,8 +2151,8 @@ test "CR3a-2a attachment cleanup registry stays node-local and callback-free" {
         "src/platform/macos/session_host/attachment_cleanup_registry.zig",
     );
     defer allocator.free(source);
-    // The fifth import is `builtin`, used only to make the destructive B3-3 epoch-exhaustion hook
-    // unreachable in production builds at the API boundary itself.
+    // The fifth import is `builtin`, shared by destructive B3-3/B3-4 test-only hooks so the
+    // production boundary never needs a second inline import.
     try std.testing.expectEqual(@as(usize, 5), countOccurrences(source, "@import("));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(source, "@import(\"std\")"));
     try std.testing.expectEqual(
@@ -2331,17 +2401,17 @@ test "CR3a-2c3b B3-0a response provenance has one strict production path" {
         countOccurrences(client_product, ".nextWithPayloadObserver("),
     );
     try std.testing.expectEqual(
-        @as(usize, 1),
-        countOccurrences(slot_product, ".classifyResponsePayloadProvenance("),
+        @as(usize, 2),
+        countIdentifierOutsideTopLevelTests(slot_product, "classifyResponsePayloadProvenance"),
     );
     try std.testing.expectEqual(
         @as(usize, 1),
         countOccurrences(slot_product, ".transferPromotedResponse("),
     );
     try std.testing.expectEqual(
-        // B3-3 adds the composite request/response transaction's two closed fail-stop branches;
-        // response-specific public entrypoint counts below remain unchanged.
-        @as(usize, 15),
+        // B3-3 adds the composite request/response transaction's closed fail-stop branches;
+        // B3-4/5 adds two publication-recovery terminal branches without another public entrypoint.
+        @as(usize, 17),
         countIdentifierOutsideTopLevelTests(slot_product, "fail_stop_required"),
     );
     const prepared_execution_signatures = [_][]const u8{
@@ -2548,8 +2618,9 @@ test "CR3a-2c3b B3-0a response provenance has one strict production path" {
         countIdentifierOutsideTopLevelTests(slot_product, "failStopResponsePayloadTransfer"),
     );
     try std.testing.expectEqual(
-        // Two response strict wrappers plus the private B3-0 request transaction fail-stop.
-        @as(usize, 3),
+        // Two response strict wrappers, the private B3-0 request transaction fail-stop, and the
+        // three reviewed B3-4/5 RPC publication/borrow terminal fail-stop boundaries.
+        @as(usize, 6),
         countOccurrences(slot_product, ") noreturn {"),
     );
     try std.testing.expectEqual(
@@ -2648,7 +2719,7 @@ test "CR3a-2c3b B3-0a response provenance has one strict production path" {
             countIdentifierOutsideTopLevelTests(source, "initAcceptedFromPromotedInPlace"),
         );
         try std.testing.expectEqual(
-            @as(usize, @intFromBool(is_ledger)) + @as(usize, @intFromBool(is_slot)),
+            @as(usize, @intFromBool(is_ledger)) + 2 * @as(usize, @intFromBool(is_slot)),
             countIdentifierOutsideTopLevelTests(source, "classifyResponsePayloadProvenance"),
         );
         try std.testing.expectEqual(
@@ -2667,8 +2738,10 @@ test "CR3a-2c3b B3-0a response provenance has one strict production path" {
             "abortObserved",
             "discardObserved",
         }) |name| {
+            const slot_count: usize = if (std.mem.eql(u8, name, "bindForbiddenRanges")) 2 else 1;
             try std.testing.expectEqual(
-                @as(usize, @intFromBool(is_ledger)) + @as(usize, @intFromBool(is_slot)),
+                @as(usize, @intFromBool(is_ledger)) +
+                    slot_count * @as(usize, @intFromBool(is_slot)),
                 countIdentifierOutsideTopLevelTests(source, name),
             );
         }
@@ -4074,10 +4147,10 @@ test "generation batch Client ownership mutations have one node-bound production
     try std.testing.expectEqual(@as(usize, 1), read_references);
     try std.testing.expectEqual(@as(usize, 1), prepare_references);
     try std.testing.expectEqual(@as(usize, 1), bind_references);
-    // Batch, one-shot initial snapshot, RPC prepare/execute는 purpose-tagged node-local
+    // Batch, one-shot initial snapshot, RPC prepare/execute/publication은 purpose-tagged node-local
     // allocator scope를 공유하며, 그 밖의 파일에는 raw allocator authority가 없다.
-    try std.testing.expectEqual(@as(usize, 4), begin_allocator_references);
-    try std.testing.expectEqual(@as(usize, 4), restore_allocator_references);
+    try std.testing.expectEqual(@as(usize, 5), begin_allocator_references);
+    try std.testing.expectEqual(@as(usize, 6), restore_allocator_references);
     try std.testing.expectEqual(@as(usize, 4), enter_callback_references);
     try std.testing.expectEqual(@as(usize, 4), leave_callback_references);
     // 모든 node-local mutation은 callback TLS를 한 공통 guard에서만 읽는다.
@@ -6884,7 +6957,7 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
             // the ended-purge destination range preflight; it still does not store or mint another
             // lease. Transport and external movable owners may not name the cleanup capability.
             const expected_lease_count: usize = if (is_client_slot)
-                8
+                11
             else if (is_host_adapter)
                 4
             else if (is_generation_attachment)
@@ -8681,6 +8754,11 @@ fn expectClientReceiverManifest(
             _ = expected.class;
             match_count += 1;
         }
+        if (match_count != 1)
+            std.debug.print("unreviewed public Client receiver: {s} ({s})\n", .{
+                tuple.name,
+                receiver_type,
+            });
         try std.testing.expectEqual(@as(usize, 1), match_count);
         found_count += 1;
     }

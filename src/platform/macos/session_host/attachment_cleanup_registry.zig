@@ -139,9 +139,28 @@ const Entry = struct {
     response_owner: contract.ExecutedResponseOwnerSeal = .{},
     prepared_request: prepared_request_authority.Authority = .{},
     rpc_response_authority: rpc_response_authority.Authority = .{},
+    rpc_execution_recovery: RpcExecutionRecovery = .{},
 
     fn clear(self: *Entry) void {
         self.* = .{};
+    }
+};
+
+const RpcExecutionRecovery = struct {
+    response_epoch: u64 = 0,
+
+    fn emptyExact(self: *const @This()) bool {
+        return self.response_epoch == 0;
+    }
+
+    fn exactFor(
+        self: *const @This(),
+        prepared: prepared_request_authority.Prepared,
+        response: rpc_response_authority.Canonical,
+    ) bool {
+        return self.response_epoch != 0 and self.response_epoch == response.response_epoch and
+            prepared.receipt.request_id == response.request_id and
+            prepared.receipt.request_digest == response.request_digest;
     }
 };
 
@@ -167,6 +186,7 @@ pub const AttachmentCleanupRegistry = struct {
     incarnation: u64 = 0,
     next_reservation_id: u64 = 1,
     live_count: usize = 0,
+    active_rpc_recovery_entry_plus_one: u16 = 0,
     lifecycle: RegistryLifecycle = .pristine,
     entries: [max_entries]Entry = [_]Entry{.{}} ** max_entries,
 
@@ -198,6 +218,7 @@ pub const AttachmentCleanupRegistry = struct {
             self.incarnation != 0 and
             self.next_reservation_id != 0 and
             self.live_count <= max_entries and
+            self.active_rpc_recovery_entry_plus_one <= max_entries and
             self.lifecycle == .live;
     }
 
@@ -547,6 +568,123 @@ pub const AttachmentCleanupRegistry = struct {
             entry.rpc_response_authority.terminalExactFor(self.incarnation, identity);
     }
 
+    pub const RpcExecutionRecoveryEvidence = struct {
+        request_terminal: bool,
+        response_terminal: bool,
+        recovery_empty: bool,
+    };
+
+    pub const RpcExecutionRecoveryCanonical = struct {
+        reservation: Reservation,
+        binding: contract.BindingIdentity,
+        prepared: prepared_request_authority.Prepared,
+        response: rpc_response_authority.Canonical,
+    };
+
+    fn armedRpcExecutionRecovery(
+        self: *AttachmentCleanupRegistry,
+        expected_response_lifecycle: rpc_response_authority.Lifecycle,
+    ) Error!RpcExecutionRecoveryCanonical {
+        if (!self.valid() or self.active_rpc_recovery_entry_plus_one == 0)
+            return error.InvalidState;
+        const index = self.active_rpc_recovery_entry_plus_one - 1;
+        if (index >= max_entries) return error.InvalidState;
+        const entry = &self.entries[index];
+        const binding = currentEntryBinding(entry, self.incarnation) orelse
+            return error.InvalidState;
+        if (!entry.prepared_request.rawLifecycleValid() or
+            entry.prepared_request.lifecycle != .executing or
+            entry.prepared_request.prepared_present != 1)
+            return error.InvalidState;
+        const prepared = entry.prepared_request.prepared;
+        if (!entry.prepared_request.matchesExecuting(prepared)) return error.InvalidState;
+        const response = entry.rpc_response_authority.canonicalForRecovery(
+            expected_response_lifecycle,
+            self.incarnation,
+            binding,
+        ) orelse return error.InvalidState;
+        if (!entry.rpc_execution_recovery.exactFor(prepared, response))
+            return error.InvalidState;
+        return .{
+            .reservation = .{
+                .registry_incarnation = self.incarnation,
+                .reservation_id = entry.reservation_id,
+                .entry_index = index,
+            },
+            .binding = binding,
+            .prepared = prepared,
+            .response = response,
+        };
+    }
+
+    pub fn rpcExecutionRecoveryCanonical(
+        self: *AttachmentCleanupRegistry,
+    ) Error!RpcExecutionRecoveryCanonical {
+        return self.armedRpcExecutionRecovery(.executing);
+    }
+
+    pub fn rpcExecutionRecoveryEvidenceForTest(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+    ) Error!RpcExecutionRecoveryEvidence {
+        if (!builtin.is_test) unreachable;
+        const entry = try self.exactEntry(reservation, identity);
+        return .{
+            .request_terminal = entry.prepared_request.terminalExact(),
+            .response_terminal = entry.rpc_response_authority.terminalExactFor(self.incarnation, identity),
+            .recovery_empty = entry.rpc_execution_recovery.emptyExact(),
+        };
+    }
+
+    /// Arms the canonical, pointer-free recovery correlation before response allocation can call
+    /// an allocator callback. It does not own payload bytes or caller scratch storage.
+    pub fn armRpcExecutionRecovery(
+        self: *AttachmentCleanupRegistry,
+        reservation: Reservation,
+        identity: contract.BindingIdentity,
+        prepared: prepared_request_authority.Prepared,
+        response: rpc_response_authority.Canonical,
+    ) Error!void {
+        const entry = try self.exactEntry(reservation, identity);
+        if (self.active_rpc_recovery_entry_plus_one != 0 or
+            !entry.rpc_execution_recovery.emptyExact() or
+            !entry.prepared_request.matchesExecuting(prepared) or
+            !entry.rpc_response_authority.matches(response, .executing, self.incarnation, identity))
+            return error.InvalidState;
+        entry.rpc_execution_recovery = .{
+            .response_epoch = response.response_epoch,
+        };
+        self.active_rpc_recovery_entry_plus_one = reservation.entry_index + 1;
+    }
+
+    pub fn commitRpcExecutionRecoveryDisarmNoFail(self: *AttachmentCleanupRegistry) void {
+        const canonical = self.armedRpcExecutionRecovery(.published) catch
+            @panic("RPC execution recovery disarm drifted");
+        const entry = self.exactEntry(canonical.reservation, canonical.binding) catch
+            @panic("RPC execution recovery disarm registry drifted");
+        entry.rpc_execution_recovery = .{};
+        self.active_rpc_recovery_entry_plus_one = 0;
+    }
+
+    /// The caller has already fixed the byte disposition. Validate both canonical authorities
+    /// before mutating either, then consume the recovery reservation and terminalize both without
+    /// allocation, callbacks, or caller-owned transaction state.
+    pub fn commitRpcExecutionRecoveryTerminalNoFail(self: *AttachmentCleanupRegistry) void {
+        const canonical = self.armedRpcExecutionRecovery(.executing) catch
+            @panic("RPC execution recovery authority drifted");
+        const entry = self.exactEntry(canonical.reservation, canonical.binding) catch
+            @panic("RPC execution recovery registry drifted");
+        entry.prepared_request.commitExecutingTerminalNoFail(canonical.prepared);
+        entry.rpc_response_authority.commitExecutingTerminalNoFail(
+            canonical.response,
+            self.incarnation,
+            canonical.binding,
+        );
+        entry.rpc_execution_recovery = .{};
+        self.active_rpc_recovery_entry_plus_one = 0;
+    }
+
     pub fn rollbackRpcResponseExecution(
         self: *AttachmentCleanupRegistry,
         reservation: Reservation,
@@ -761,7 +899,7 @@ pub const AttachmentCleanupRegistry = struct {
         reservation: Reservation,
         identity: contract.BindingIdentity,
     ) Error!rpc_response_authority.SettlementReadiness {
-        if (!@import("builtin").is_test) @compileError("test-only RPC response readiness");
+        if (!builtin.is_test) @compileError("test-only RPC response readiness");
         const entry = try self.exactEntry(reservation, identity);
         return entry.rpc_response_authority.settlementReadiness();
     }
@@ -918,7 +1056,7 @@ pub const AttachmentCleanupRegistry = struct {
             return if (self.self_addr == @intFromPtr(self)) .already_dead else .corrupt;
         }
         if (!self.valid()) return .corrupt;
-        if (self.live_count != 0) return .busy;
+        if (self.live_count != 0 or self.active_rpc_recovery_entry_plus_one != 0) return .busy;
         for (self.entries) |entry| {
             if (!entryLifecycleRawValid(&entry.lifecycle) or
                 !controllerAuthorityRawValid(&entry.controller_authority) or
@@ -926,6 +1064,7 @@ pub const AttachmentCleanupRegistry = struct {
                 entry.stream_id != 0 or entry.controller_authority != .unavailable or
                 entry.transport_owner.lifecycle != .pristine or
                 entry.response_owner.lifecycle != .pristine or
+                !entry.rpc_execution_recovery.emptyExact() or
                 !entry.rpc_response_authority.pristineExact())
                 return .corrupt;
         }
@@ -1023,7 +1162,8 @@ fn childAuthoritiesSettled(entry: *const Entry, registry_incarnation: u64) bool 
     const identity = currentEntryBinding(entry, registry_incarnation) orelse return false;
     return entry.transport_owner.settledExact() and entry.response_owner.settledExact() and
         entry.prepared_request.settledExact() and
-        entry.rpc_response_authority.settledExactFor(registry_incarnation, identity);
+        entry.rpc_response_authority.settledExactFor(registry_incarnation, identity) and
+        entry.rpc_execution_recovery.emptyExact();
 }
 
 fn dropAuthorityCanBegin(entry: *const Entry, registry_incarnation: u64) bool {
@@ -1553,6 +1693,48 @@ test "B3-3 registry terminal settlement rejects copied response canonical" {
         reserved.identity,
         response,
     );
+}
+
+test "B3-4/5 registry transition recovery terminalizes both executing authorities exact once" {
+    var registry: AttachmentCleanupRegistry = .{};
+    try AttachmentCleanupRegistry.initInPlace(&registry, 0xB345);
+    const reserved = try registry.reserve(fixtureSeed(0xB346, 0xB347));
+    try registry.bindStream(reserved.reservation, reserved.identity, 0xB348);
+    const prepared = fixturePrepared(
+        reserved.identity,
+        .observation,
+        .bound_observation,
+        0xB349,
+        0xB34A,
+        0xB34B,
+    );
+    try registry.publishPreparedRequest(reserved.reservation, reserved.identity, prepared);
+    const response = try registry.reserveRpcResponseExecution(
+        reserved.reservation,
+        reserved.identity,
+        prepared,
+        0xB34C,
+    );
+    try registry.beginPreparedRequestExecute(reserved.reservation, reserved.identity, prepared);
+    try registry.armRpcExecutionRecovery(
+        reserved.reservation,
+        reserved.identity,
+        prepared,
+        response,
+    );
+    try std.testing.expectError(error.InvalidState, registry.armRpcExecutionRecovery(
+        reserved.reservation,
+        reserved.identity,
+        prepared,
+        response,
+    ));
+    registry.commitRpcExecutionRecoveryTerminalNoFail();
+    try std.testing.expect(try registry.rpcExecutionAuthoritiesTerminalForTest(
+        reserved.reservation,
+        reserved.identity,
+    ));
+    try std.testing.expect(registry.entries[reserved.reservation.entry_index]
+        .rpc_execution_recovery.emptyExact());
 }
 
 test "B3-4/5 registry transition facade closes reusable response lifecycle" {

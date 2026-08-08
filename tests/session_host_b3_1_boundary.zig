@@ -107,7 +107,11 @@ test "B3-1 RPC authority remains leaf-owned while B3-3 opens only registry execu
             u8,
             path,
             "src/platform/macos/session_host/client_slot.zig",
-        )) 4 else 0;
+        )) 23 else if (std.mem.eql(
+            u8,
+            path,
+            "src/platform/macos/session_host/rpc_executed_response.zig",
+        )) 1 else 0;
         try std.testing.expectEqual(expected, count(source, "rpc_response_authority"));
     }
 }

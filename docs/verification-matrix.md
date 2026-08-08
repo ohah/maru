@@ -973,8 +973,8 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   mutation 없이 거부한다. 이 증거는 2c3a만 닫으며 capability/RPC/control/event/source-zero는 2c3b~e, raw field 제거는 2c4다.
   connection-wide buffered revoke는 generation 조회와 `Client` blocking/deadline RPC의 pre-flush gate를 함께 통과해야 하며,
   sibling RPC·detach가 pending mutation wire를 보내지 않는 socketpair 회귀를 포함한다.
-  2c3b는 부분 구현이다. 2c3b-1 capability facade와 2c3b-2 request-side authority는 구현·검증 완료했고, 2c3b-3 public RPC
-  response execution/ownership은 구현 전이다. 2c3b-2는 관측 가능한 wire/product behavior를 유지하면서 request authority와 기존
+  2c3b는 부분 구현이다. 2c3b-1 capability facade와 2c3b-2 request-side authority는 구현·검증 완료했고, 2c3b-3은 B3-4/5의
+  private RPC response execution/ownership까지 구현·검증했지만 B3-6 public aggregate exposure 전이므로 전체 완료가 아니다. 2c3b-2는 관측 가능한 wire/product behavior를 유지하면서 request authority와 기존
   attach-compatible response execution의 begin/revalidate/settle hardening까지만 닫는 gate다. 14-tag family/role/phase/method 전수표,
   node-entry `PreparedRequestAuthority` raw lifecycle과
   settledExact, opaque prepared storage와의 all-or-none prepare/abort, canonical frame descriptor·allocator provenance, registry-first
@@ -1120,7 +1120,7 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   scalar만 남으며, 기존 attach `transferPromotedResponse`의 signature·결과·free count 변화 0을 differential test로 고정한다. authority의
   named prepare/no-fail consume permit은 final-address·copy/move/replay·wrong-phase를 전수하고 registry 밖 callsite 0을 source oracle로
   고정한다. destination/payload 검증 실패의 4-cell matrix는 destination-invalid owner write 0과 payload-exact safe-free를 독립 단언한다.
-  B3-0a·B3-0·B3-1·B3-2·B3-3은 완료됐고 B3-4/5는 후속이다. B3-1은
+  B3-0a·B3-0·B3-1·B3-2·B3-3·B3-4/5는 완료됐고 B3-6 aggregate exposure가 후속이다. B3-1은
   Debug·ReleaseFast leaf 4개와 registry 2개, boundary 1개의 exact-count artifact를 완료 증거로 소유한다. B3-2는 Debug·ReleaseFast
   registry 3개와 product 2개, boundary 1개의 exact 11-test artifact를 완료 증거로 소유한다. 모든 내부 gate가
   Debug·ReleaseFast와 boundary에서 함께 green이 되기 전 `2c3b-3 완료`로 세지 않는다.

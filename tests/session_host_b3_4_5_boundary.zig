@@ -120,6 +120,12 @@ test "B3-4/5 transition permits remain leaf-owned and registry-mediated" {
     );
     try std.testing.expectEqual(@as(usize, 1), count(slot, "fn beginRpcResponseBorrowForTest("));
     try std.testing.expectEqual(@as(usize, 1), count(slot, "fn finishRpcResponseOwnedForTest("));
+    try std.testing.expectEqual(@as(usize, 0), count(slot, "RpcPublicationRecovery"));
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(registry_product, "pub const RpcExecutionRecoveryCanonical = struct"),
+    );
+    try std.testing.expectEqual(@as(usize, 1), count(slot, "fn failStopRpcPublication("));
     try std.testing.expectEqual(
         @as(usize, 1),
         count(slot, "fn executePreparedRpcCorrelatedResponseForTest("),
@@ -160,6 +166,74 @@ test "B3-4/5 transition permits remain leaf-owned and registry-mediated" {
         "publication.finish(",
         "finishPreparedRpcLeaseOrFailStop(",
     });
+    const fail_stop = between(
+        slot,
+        "fn failStopRpcPublication(",
+        "fn executePreparedRpcTerminalSink(",
+    ) orelse return error.TestExpectedEqual;
+    inline for (.{ "PreparedRpcExecutionTxn", "PreparedRequestExecutionLease", "PreparedRpcPublicationScope" }) |forbidden|
+        try std.testing.expectEqual(@as(usize, 0), countCodeTokens(fail_stop, forbidden));
+    try expectOrdered(fail_stop, &.{
+        "settleRpcPublicationFailureBytes(",
+        ".commitRpcExecutionRecoveryTerminalNoFail(",
+        ".commitPreparedExecutionRecoveryPoisonNoFail(",
+        ".commitPreparedExecutionRecoveryCleanupNoFail(",
+    });
+    try std.testing.expect(std.mem.lastIndexOf(u8, fail_stop, "@panic(").? >
+        std.mem.indexOf(u8, fail_stop, ".commitPreparedExecutionRecoveryPoisonNoFail(").?);
+    try std.testing.expectEqual(@as(usize, 0), count(fail_stop, ".free("));
+    try std.testing.expectEqual(@as(usize, 0), count(fail_stop, ".finishFailedTransfer("));
+    const byte_settlement = between(
+        slot,
+        "fn closeRpcPublicationDestinationNoFree(",
+        "fn failStopResponsePayloadProvenance(",
+    ) orelse return error.TestExpectedEqual;
+    inline for (.{
+        "destination_exact_payload_freed_clean",
+        "destination_exact_payload_no_free",
+        "destination_exact_payload_freed_once_drifted",
+        "destination_invalid_payload_freed_once",
+        "destination_invalid_payload_no_free",
+    }) |closed_disposition| try std.testing.expect(
+        count(byte_settlement, closed_disposition) >= 1,
+    );
+    inline for (.{
+        ".preparePromotedFailureRelease(",
+        ".commitFreeCall(",
+        ".releasePreparedFailure(",
+        ".terminalCleanAfterPublicationFailureInPlace(",
+        ".terminalNoFreeInPlace(",
+        ".abandonLiveNoFree(",
+        ".commitTerminalFreedOnce(",
+    }) |needle| try std.testing.expect(count(byte_settlement, needle) >= 1);
+    try std.testing.expectEqual(@as(usize, 0), count(byte_settlement, ".releasePromotedResponse("));
+    try std.testing.expectEqual(@as(usize, 0), count(byte_settlement, ".free("));
+    try std.testing.expectEqual(@as(usize, 0), count(byte_settlement, "@panic("));
+    const prepared_failure_release = between(
+        ledger,
+        "pub fn releasePreparedFailure(",
+        "pub fn abandonPreparedFailureNoFree(",
+    ) orelse return error.TestExpectedEqual;
+    try expectOrdered(prepared_failure_release, &.{
+        "txn.receipt = std.mem.zeroes(Receipt)",
+        "txn.stage = .free_committed",
+        ".free(payloadFromReceipt(receipt))",
+        "failureReleaseExact(txn, self, .free_committed)",
+        "txn.stage = .consumed",
+    });
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(prepared_failure_release, ".free(payloadFromReceipt(receipt))"),
+    );
+    try std.testing.expectEqual(@as(usize, 0), count(prepared_failure_release, "@panic("));
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(ledger_product, "fn failureReleaseStageRawValid("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        count(ledger_product, "@intFromEnum(txn.stage)"),
+    );
     const borrow_product = between(
         slot,
         "fn beginRpcResponseBorrowForTest(",

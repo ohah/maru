@@ -139,6 +139,14 @@ const GenerationGuardedAllocator = struct {
         response_payload_len: usize = 0,
         cleanup_drift_kind: u8 = 0,
         cleanup_drift_consumed: bool = false,
+        rpc_free_reentry_context: ?*anyopaque = null,
+        rpc_free_reentry_fn: ?*const fn (*anyopaque) void = null,
+        rpc_free_reentry_fired: bool = false,
+        rpc_publication_drift_kind: u8 = 0,
+        rpc_publication_txn_addr: usize = 0,
+        rpc_publication_lease_addr: usize = 0,
+        rpc_publication_scope_addr: usize = 0,
+        rpc_publication_drift_fired: bool = false,
     };
 
     parent: std.mem.Allocator,
@@ -236,6 +244,19 @@ const GenerationGuardedAllocator = struct {
             alignment,
             return_address,
         ) orelse return null;
+        if (builtin.is_test and !self.request_free_test_observer.rpc_publication_drift_fired) {
+            const observer = &self.request_free_test_observer;
+            const target_addr = switch (observer.rpc_publication_drift_kind) {
+                1 => observer.rpc_publication_txn_addr,
+                2 => observer.rpc_publication_lease_addr,
+                3 => observer.rpc_publication_scope_addr,
+                else => 0,
+            };
+            if (target_addr != 0) {
+                @as(*usize, @ptrFromInt(target_addr)).* = 1;
+                observer.rpc_publication_drift_fired = true;
+            }
+        }
         if (self.rejects(result, len)) {
             self.recordAliasRejection();
             return null;
@@ -309,6 +330,16 @@ const GenerationGuardedAllocator = struct {
         if (!self.client.?.enterGenerationAllocatorCallback())
             @panic("nested generation allocator free");
         defer self.client.?.leaveGenerationAllocatorCallbackUnchecked();
+        if (builtin.is_test and
+            @intFromPtr(memory.ptr) == self.request_free_test_observer.target_addr and
+            memory.len == self.request_free_test_observer.target_len and
+            !self.request_free_test_observer.rpc_free_reentry_fired)
+        {
+            if (self.request_free_test_observer.rpc_free_reentry_fn) |callback| {
+                self.request_free_test_observer.rpc_free_reentry_fired = true;
+                callback(self.request_free_test_observer.rpc_free_reentry_context.?);
+            }
+        }
         self.parent.vtable.free(
             self.parent.ptr,
             memory,
@@ -475,6 +506,308 @@ test "B3-4/5 RPC free evidence blocks ClientSlot teardown until exact retire" {
     try std.testing.expectEqual(DeinitOutcome.busy, slot.tryDeinit());
     try std.testing.expect(slot.current.rpc_free_evidence.retireFreeCall(1, evidence));
     try std.testing.expectEqual(DeinitOutcome.cleaned, slot.tryDeinit());
+}
+
+test "B3-4/5 RPC free evidence four-way publication failure disposition" {
+    const Fixture = struct {
+        fn canonical(
+            destination_addr: usize,
+            response_epoch: u64,
+        ) rpc_response_authority.Canonical {
+            return .{
+                .authority_addr = 0xB345_1000,
+                .registry_incarnation = 0xB345_1001,
+                .binding = .{
+                    .binding_incarnation = 0xB345_1002,
+                    .binding_storage_addr = 0xB345_1003,
+                    .destination_addr = destination_addr,
+                    .binding_reservation_id = 0xB345_1004,
+                    .slot_incarnation = 0xB345_1005,
+                    .node_incarnation = 0xB345_1006,
+                    .host_id = 0xB345_1007,
+                    .connection_generation = 1,
+                    .runtime_id = 0xB345_1008,
+                    .role = .controller,
+                    .pid = 0xB345_1009,
+                    .process_nonce = 0xB345_1010,
+                },
+                .transport_addr = 0xB345_1011,
+                .transport_incarnation = 0xB345_1012,
+                .family = .bound_observation,
+                .tag = .observation,
+                .request_id = 0xB345_1013,
+                .request_digest = 0xB345_1014,
+                .response_epoch = response_epoch,
+                .destination_addr = destination_addr,
+            };
+        }
+    };
+    const Probe = struct {
+        parent: std.mem.Allocator,
+        free_count: usize = 0,
+        drift_addr: usize = 0,
+
+        const vtable: std.mem.Allocator.VTable = .{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        };
+
+        fn allocator(self: *@This()) std.mem.Allocator {
+            return .{ .ptr = self, .vtable = &vtable };
+        }
+
+        fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            return self.parent.vtable.alloc(self.parent.ptr, len, alignment, ret);
+        }
+
+        fn resize(
+            ctx: *anyopaque,
+            memory: []u8,
+            alignment: std.mem.Alignment,
+            new_len: usize,
+            ret: usize,
+        ) bool {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            return self.parent.vtable.resize(
+                self.parent.ptr,
+                memory,
+                alignment,
+                new_len,
+                ret,
+            );
+        }
+
+        fn remap(
+            ctx: *anyopaque,
+            memory: []u8,
+            alignment: std.mem.Alignment,
+            new_len: usize,
+            ret: usize,
+        ) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            return self.parent.vtable.remap(
+                self.parent.ptr,
+                memory,
+                alignment,
+                new_len,
+                ret,
+            );
+        }
+
+        fn free(
+            ctx: *anyopaque,
+            memory: []u8,
+            alignment: std.mem.Alignment,
+            ret: usize,
+        ) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.free_count += 1;
+            if (self.drift_addr != 0) @as(*usize, @ptrFromInt(self.drift_addr)).* +%= 1;
+            self.parent.vtable.free(self.parent.ptr, memory, alignment, ret);
+        }
+    };
+    const Case = struct {
+        destination_exact: bool,
+        payload_exact: bool,
+        callback_drift: bool = false,
+        pre_release_drift: bool = false,
+    };
+    inline for (.{
+        Case{ .destination_exact = true, .payload_exact = true },
+        Case{ .destination_exact = true, .payload_exact = false },
+        Case{ .destination_exact = false, .payload_exact = true },
+        Case{ .destination_exact = false, .payload_exact = false },
+        Case{ .destination_exact = true, .payload_exact = true, .callback_drift = true },
+        Case{ .destination_exact = true, .payload_exact = true, .pre_release_drift = true },
+    }) |case| {
+        var probe: Probe = .{ .parent = std.testing.allocator };
+        const allocator = probe.allocator();
+        var ledger: response_payload_allocation.Ledger = .{};
+        try response_payload_allocation.Ledger.initInPlace(&ledger, allocator, .{
+            .guard_addr = 0xB345_2001,
+            .node_addr = 0xB345_2002,
+            .operation_incarnation = 0xB345_2003,
+        }, 1);
+        const payload = try allocator.dupe(u8, "rpc-publication-failure");
+        const generation = try ledger.reserveObserved(payload.len, allocator);
+        try ledger.commitObserved(generation, payload, allocator);
+        const receipt = switch (ledger.classifyResponsePayloadProvenance(
+            generation,
+            payload,
+            allocator,
+            allocator,
+        )) {
+            .promoted => |value| value,
+            .fail_stop_required => return error.TestUnexpectedResult,
+        };
+        var destination: RpcExecutedResponse = .{};
+        if (!case.destination_exact) destination.self_addr = 0xBAD0;
+        const destination_before = destination;
+        const canonical = Fixture.canonical(
+            @intFromPtr(&destination),
+            0xB345_2004,
+        );
+        var cleanup: RpcPublicationPayloadCleanup = .{};
+        try cleanup.arm(receipt);
+        if (!case.payload_exact) cleanup.self_addr +%= 1;
+        if (case.pre_release_drift) cleanup.test_pre_release_stage_drift = 1;
+        if (case.callback_drift)
+            probe.drift_addr = @intFromPtr(&cleanup.failure_release.self_addr);
+        var free_record: RpcFreeEvidenceRecord = .{};
+        const outcome = settleRpcPublicationFailureBytes(
+            &free_record,
+            &cleanup,
+            canonical,
+            .ledger_drift,
+        );
+        if (case.pre_release_drift) {
+            try std.testing.expectEqual(@as(usize, 0), probe.free_count);
+            try std.testing.expectEqual(
+                RpcPublicationFailureByteDisposition.destination_exact_payload_no_free,
+                outcome.disposition,
+            );
+            try std.testing.expectEqual(
+                rpc_executed_response.ByteSettlement.terminal_no_free,
+                destination.settlement,
+            );
+            try std.testing.expect(free_record.emptyExact());
+            allocator.free(payload);
+            try std.testing.expectEqual(@as(usize, 1), probe.free_count);
+        } else if (case.payload_exact) {
+            try std.testing.expectEqual(@as(usize, 1), probe.free_count);
+            if (case.destination_exact and !case.callback_drift) {
+                try std.testing.expectEqual(
+                    RpcPublicationFailureByteDisposition.destination_exact_payload_freed_clean,
+                    outcome.disposition,
+                );
+                try std.testing.expectEqual(
+                    rpc_executed_response.ByteSettlement.terminal_clean,
+                    destination.settlement,
+                );
+                try std.testing.expect(outcome.retire_clean_evidence);
+                try std.testing.expect(free_record.retireFreeCall(
+                    outcome.response_epoch,
+                    outcome.free_evidence,
+                ));
+            } else if (!case.destination_exact) {
+                try std.testing.expectEqual(
+                    RpcPublicationFailureByteDisposition.destination_invalid_payload_freed_once,
+                    outcome.disposition,
+                );
+                try std.testing.expectEqualDeep(destination_before, destination);
+                try std.testing.expect(free_record.exact(
+                    .terminal_freed_once,
+                    outcome.response_epoch,
+                    outcome.free_evidence,
+                ));
+            } else {
+                try std.testing.expectEqual(
+                    RpcPublicationFailureByteDisposition.destination_exact_payload_freed_once_drifted,
+                    outcome.disposition,
+                );
+                try std.testing.expectEqualDeep(destination_before, destination);
+                try std.testing.expect(free_record.exact(
+                    .terminal_freed_once,
+                    outcome.response_epoch,
+                    outcome.free_evidence,
+                ));
+            }
+        } else {
+            try std.testing.expectEqual(@as(usize, 0), probe.free_count);
+            try std.testing.expect(free_record.emptyExact());
+            if (case.destination_exact) {
+                try std.testing.expectEqual(
+                    RpcPublicationFailureByteDisposition.destination_exact_payload_no_free,
+                    outcome.disposition,
+                );
+                try std.testing.expectEqual(
+                    rpc_executed_response.ByteSettlement.terminal_no_free,
+                    destination.settlement,
+                );
+            } else {
+                try std.testing.expectEqual(
+                    RpcPublicationFailureByteDisposition.destination_invalid_payload_no_free,
+                    outcome.disposition,
+                );
+                try std.testing.expectEqualDeep(destination_before, destination);
+            }
+            try ledger.releasePromotedResponse(receipt);
+            try std.testing.expectEqual(@as(usize, 1), probe.free_count);
+        }
+        const free_count_after_settlement = probe.free_count;
+        _ = settleRpcPublicationFailureBytes(
+            &free_record,
+            &cleanup,
+            canonical,
+            .ledger_drift,
+        );
+        try std.testing.expectEqual(free_count_after_settlement, probe.free_count);
+        try ledger.endOperation();
+    }
+
+    inline for (1..14) |drift_kind| {
+        const allocator = std.testing.allocator;
+        var ledger: response_payload_allocation.Ledger = .{};
+        try response_payload_allocation.Ledger.initInPlace(&ledger, allocator, .{
+            .guard_addr = 0xB345_3001,
+            .node_addr = 0xB345_3002,
+            .operation_incarnation = 0xB345_3003,
+        }, 1);
+        const payload = try allocator.dupe(u8, "rpc-publication-forgery");
+        const generation = try ledger.reserveObserved(payload.len, allocator);
+        try ledger.commitObserved(generation, payload, allocator);
+        const receipt = switch (ledger.classifyResponsePayloadProvenance(
+            generation,
+            payload,
+            allocator,
+            allocator,
+        )) {
+            .promoted => |value| value,
+            .fail_stop_required => return error.TestUnexpectedResult,
+        };
+        var destination: RpcExecutedResponse = .{};
+        const canonical = Fixture.canonical(@intFromPtr(&destination), 0xB345_3004);
+        var cleanup: RpcPublicationPayloadCleanup = .{};
+        try cleanup.arm(receipt);
+        switch (drift_kind) {
+            1 => cleanup.self_addr +%= 1,
+            2 => cleanup.receipt.ledger_addr +%= 1,
+            3 => cleanup.receipt.generation +%= 1,
+            4 => cleanup.receipt.index +%= 1,
+            5 => cleanup.receipt.allocator.ptr_addr +%= 1,
+            6 => cleanup.receipt.allocator.vtable_addr +%= 1,
+            7 => cleanup.receipt.addr +%= 1,
+            8 => cleanup.receipt.len +%= 1,
+            9 => cleanup.receipt.zero_length = !cleanup.receipt.zero_length,
+            10 => cleanup.receipt.authority.guard_addr +%= 1,
+            11 => cleanup.receipt.authority.node_addr +%= 1,
+            12 => cleanup.receipt.authority.operation_incarnation +%= 1,
+            13 => cleanup.seal[0] ^= 1,
+            else => unreachable,
+        }
+        var free_record: RpcFreeEvidenceRecord = .{};
+        const outcome = settleRpcPublicationFailureBytes(
+            &free_record,
+            &cleanup,
+            canonical,
+            .ledger_drift,
+        );
+        try std.testing.expectEqual(
+            RpcPublicationFailureByteDisposition.destination_exact_payload_no_free,
+            outcome.disposition,
+        );
+        try std.testing.expect(free_record.emptyExact());
+        try std.testing.expect(ledger.promotedReceiptExact(receipt));
+        try std.testing.expectEqual(
+            rpc_executed_response.ByteSettlement.terminal_no_free,
+            destination.settlement,
+        );
+        try ledger.releasePromotedResponse(receipt);
+        try ledger.endOperation();
+    }
 }
 
 pub const StreamOperationKind = enum(u8) {
@@ -2674,7 +3007,7 @@ fn rpcTerminalEvidence(
     canonical: rpc_response_authority.Canonical,
     reason: client_poison.ConnectionReason,
 ) owner_seal.Digest {
-    var writer = owner_seal.Writer.init("maru.rpc-response-terminal-no-free.v1");
+    var writer = owner_seal.Writer.init("maru.rpc-response-publication-terminal.v1");
     writer.writeU64(canonical.registry_incarnation);
     writer.writeUsize(canonical.transport_addr);
     writer.writeU64(canonical.transport_incarnation);
@@ -2797,6 +3130,7 @@ const PreparedRpcPublicationScope = struct {
         destination: *RpcExecutedResponse,
         txn: *PreparedRpcExecutionTxn,
         lease: *client_mod.PreparedRequestExecutionLease,
+        payload_cleanup: *RpcPublicationPayloadCleanup,
         storage: *client_mod.PreparedBlockingRpcStorage,
     ) !void {
         if (self.self_addr != 0 or self.guard_active or self.allocator_active or self.ledger_active)
@@ -2808,6 +3142,7 @@ const PreparedRpcPublicationScope = struct {
             .{ .start = @intFromPtr(destination), .len = @sizeOf(RpcExecutedResponse) },
             .{ .start = @intFromPtr(txn), .len = @sizeOf(PreparedRpcExecutionTxn) },
             .{ .start = @intFromPtr(lease), .len = @sizeOf(client_mod.PreparedRequestExecutionLease) },
+            .{ .start = @intFromPtr(payload_cleanup), .len = @sizeOf(RpcPublicationPayloadCleanup) },
             .{ .start = @intFromPtr(storage), .len = @sizeOf(client_mod.PreparedBlockingRpcStorage) },
             .{ .start = @intFromPtr(node), .len = @sizeOf(ClientNode) },
             .{ .start = request.slot_addr, .len = @sizeOf(ClientSlot) },
@@ -2851,11 +3186,18 @@ const PreparedRpcPublicationScope = struct {
             .ledger = &self.ledger,
             .guard = guard,
         };
+        if (builtin.is_test) {
+            const test_observer = &guard.request_free_test_observer;
+            test_observer.rpc_publication_txn_addr = @intFromPtr(txn);
+            test_observer.rpc_publication_lease_addr = @intFromPtr(lease);
+            test_observer.rpc_publication_scope_addr = @intFromPtr(self);
+        }
         const forbidden = [_]response_payload_allocation.ForbiddenRange{
             .{ .start = @intFromPtr(self), .len = @sizeOf(@This()) },
             .{ .start = @intFromPtr(destination), .len = @sizeOf(RpcExecutedResponse) },
             .{ .start = @intFromPtr(txn), .len = @sizeOf(PreparedRpcExecutionTxn) },
             .{ .start = @intFromPtr(lease), .len = @sizeOf(client_mod.PreparedRequestExecutionLease) },
+            .{ .start = @intFromPtr(payload_cleanup), .len = @sizeOf(RpcPublicationPayloadCleanup) },
             .{ .start = @intFromPtr(storage), .len = @sizeOf(client_mod.PreparedBlockingRpcStorage) },
             .{ .start = @intFromPtr(node), .len = @sizeOf(ClientNode) },
             .{ .start = request.slot_addr, .len = @sizeOf(ClientSlot) },
@@ -2876,6 +3218,7 @@ const PreparedRpcPublicationScope = struct {
         destination: *RpcExecutedResponse,
         txn: *PreparedRpcExecutionTxn,
         lease: *client_mod.PreparedRequestExecutionLease,
+        payload_cleanup: *RpcPublicationPayloadCleanup,
         storage: *client_mod.PreparedBlockingRpcStorage,
     ) void {
         if (self.self_addr == 0) return;
@@ -2891,6 +3234,7 @@ const PreparedRpcPublicationScope = struct {
             .{ .start = @intFromPtr(destination), .len = @sizeOf(RpcExecutedResponse) },
             .{ .start = @intFromPtr(txn), .len = @sizeOf(PreparedRpcExecutionTxn) },
             .{ .start = @intFromPtr(lease), .len = @sizeOf(client_mod.PreparedRequestExecutionLease) },
+            .{ .start = @intFromPtr(payload_cleanup), .len = @sizeOf(RpcPublicationPayloadCleanup) },
             .{ .start = @intFromPtr(storage), .len = @sizeOf(client_mod.PreparedBlockingRpcStorage) },
             .{ .start = @intFromPtr(node), .len = @sizeOf(ClientNode) },
             .{ .start = request.slot_addr, .len = @sizeOf(ClientSlot) },
@@ -2905,6 +3249,7 @@ const PreparedRpcPublicationScope = struct {
             .{ .start = @intFromPtr(destination), .len = @sizeOf(RpcExecutedResponse) },
             .{ .start = @intFromPtr(txn), .len = @sizeOf(PreparedRpcExecutionTxn) },
             .{ .start = @intFromPtr(lease), .len = @sizeOf(client_mod.PreparedRequestExecutionLease) },
+            .{ .start = @intFromPtr(payload_cleanup), .len = @sizeOf(RpcPublicationPayloadCleanup) },
             .{ .start = @intFromPtr(storage), .len = @sizeOf(client_mod.PreparedBlockingRpcStorage) },
             .{ .start = @intFromPtr(node), .len = @sizeOf(ClientNode) },
             .{ .start = request.slot_addr, .len = @sizeOf(ClientSlot) },
@@ -2949,27 +3294,218 @@ const PreparedRpcPublicationScope = struct {
         self.guard_active = false;
         self.self_addr = 0;
     }
+};
 
-    fn finishFailedTransfer(
-        self: *@This(),
-        node: *ClientNode,
-        lease: *client_mod.PreparedRequestExecutionLease,
-        reason: response_payload_allocation.PayloadFailStopReason,
-    ) void {
-        if (!self.liveExact(node)) @panic("RPC publication failed scope drifted");
-        self.ledger.endFailedRpcTransfer(reason) catch
-            @panic("RPC publication failed ledger settlement drifted");
-        self.ledger_active = false;
-        node.client.restoreGenerationAllocatorScopeUnderExecutionLease(
-            &self.allocator_scope,
-            lease,
-        ) catch @panic("RPC publication failed allocator restore drifted");
-        self.allocator_active = false;
-        node.guarded_allocator.endOperationGuard();
-        self.guard_active = false;
-        self.self_addr = 0;
+const RpcPublicationPayloadCleanup = struct {
+    self_addr: usize = 0,
+    receipt: response_payload_allocation.Receipt = std.mem.zeroes(response_payload_allocation.Receipt),
+    failure_release: response_payload_allocation.Ledger.PreparedFailureRelease = .{},
+    test_pre_release_stage_drift: if (builtin.is_test) u8 else void = if (builtin.is_test) 0 else {},
+    armed: u8 = 0,
+    seal: owner_seal.Digest = [_]u8{0} ** 32,
+
+    fn arm(self: *@This(), receipt: response_payload_allocation.Receipt) !void {
+        if (self.self_addr != 0 or self.armed != 0 or
+            !std.meta.eql(self.receipt, std.mem.zeroes(response_payload_allocation.Receipt)) or
+            !self.failure_release.pristineExact() or !std.mem.allEqual(u8, &self.seal, 0) or
+            receipt.ledger_addr == 0 or receipt.generation == 0)
+            return error.InvalidOwner;
+        self.* = .{
+            .self_addr = @intFromPtr(self),
+            .receipt = receipt,
+            .armed = 1,
+        };
+        self.seal = rpcPublicationPayloadCleanupSeal(self);
+    }
+
+    fn takeIfExact(self: *@This()) ?response_payload_allocation.Receipt {
+        if (self.self_addr != @intFromPtr(self) or self.armed != 1 or
+            !self.failure_release.pristineExact() or
+            !std.mem.eql(u8, &self.seal, &rpcPublicationPayloadCleanupSeal(self))) return null;
+        const receipt = self.receipt;
+        self.* = .{};
+        return receipt;
     }
 };
+
+fn rpcPublicationPayloadCleanupSeal(cleanup: *const RpcPublicationPayloadCleanup) owner_seal.Digest {
+    var writer = owner_seal.Writer.init("maru.rpc-publication-payload-cleanup.v1");
+    writer.writeUsize(cleanup.self_addr);
+    writer.writeU8(cleanup.armed);
+    writer.writeUsize(cleanup.receipt.ledger_addr);
+    writer.writeU64(cleanup.receipt.generation);
+    writer.writeU16(cleanup.receipt.index);
+    writer.writeUsize(cleanup.receipt.addr);
+    writer.writeUsize(cleanup.receipt.len);
+    writer.writeBool(cleanup.receipt.zero_length);
+    return writer.finish();
+}
+
+fn rpcPublicationFailureFreeEvidence(
+    receipt: response_payload_allocation.Receipt,
+    response_epoch: u64,
+    reason: response_payload_allocation.PayloadFailStopReason,
+) owner_seal.Digest {
+    var writer = owner_seal.Writer.init("maru.rpc-publication-failure-free.v1");
+    writer.writeU64(response_epoch);
+    writer.writeUsize(receipt.ledger_addr);
+    writer.writeU64(receipt.generation);
+    writer.writeU16(receipt.index);
+    writer.writeUsize(receipt.addr);
+    writer.writeUsize(receipt.len);
+    writer.writeU8(@intFromEnum(reason));
+    return writer.finish();
+}
+
+const RpcPublicationFailureByteDisposition = enum {
+    destination_exact_payload_freed_clean,
+    destination_exact_payload_no_free,
+    destination_exact_payload_freed_once_drifted,
+    destination_invalid_payload_freed_once,
+    destination_invalid_payload_no_free,
+};
+
+const RpcPublicationFailureByteOutcome = struct {
+    disposition: RpcPublicationFailureByteDisposition,
+    response_epoch: u64,
+    free_evidence: owner_seal.Digest = [_]u8{0} ** 32,
+    retire_clean_evidence: bool = false,
+};
+
+fn closeRpcPublicationDestinationNoFree(
+    destination: *RpcExecutedResponse,
+    identity: rpc_executed_response.Identity,
+    response: rpc_response_authority.Canonical,
+) bool {
+    if (destination.pristineExact()) {
+        destination.terminalNoFreeInPlace(
+            identity,
+            rpcTerminalEvidence(response, .local_invariant_violation),
+        ) catch return false;
+        return true;
+    }
+    if (destination.liveScalarIdentityExact(identity)) {
+        destination.abandonLiveNoFree(identity) catch return false;
+        return true;
+    }
+    return false;
+}
+
+fn settleRpcPublicationFailureBytes(
+    free_record: *RpcFreeEvidenceRecord,
+    payload_cleanup: *RpcPublicationPayloadCleanup,
+    response: rpc_response_authority.Canonical,
+    reason: response_payload_allocation.PayloadFailStopReason,
+) RpcPublicationFailureByteOutcome {
+    const test_pre_release_stage_drift = if (builtin.is_test)
+        payload_cleanup.test_pre_release_stage_drift
+    else
+        0;
+    const destination: *RpcExecutedResponse = @ptrFromInt(response.destination_addr);
+    const identity = rpcOwnerIdentity(response);
+    const destination_pristine = destination.pristineExact();
+    const destination_live = destination.liveScalarIdentityExact(identity);
+    const receipt = payload_cleanup.takeIfExact() orelse {
+        if ((destination_pristine or destination_live) and
+            closeRpcPublicationDestinationNoFree(destination, identity, response))
+        {
+            return .{
+                .disposition = .destination_exact_payload_no_free,
+                .response_epoch = response.response_epoch,
+            };
+        }
+        return .{
+            .disposition = .destination_invalid_payload_no_free,
+            .response_epoch = response.response_epoch,
+        };
+    };
+    const ledger: *response_payload_allocation.Ledger = @ptrFromInt(receipt.ledger_addr);
+    if (!ledger.promotedReceiptExact(receipt) or destination_live) {
+        if ((destination_pristine or destination_live) and
+            closeRpcPublicationDestinationNoFree(destination, identity, response))
+        {
+            return .{
+                .disposition = .destination_exact_payload_no_free,
+                .response_epoch = response.response_epoch,
+            };
+        }
+        return .{
+            .disposition = .destination_invalid_payload_no_free,
+            .response_epoch = response.response_epoch,
+        };
+    }
+    ledger.preparePromotedFailureRelease(
+        receipt,
+        &payload_cleanup.failure_release,
+    ) catch {
+        if (closeRpcPublicationDestinationNoFree(destination, identity, response)) {
+            return .{
+                .disposition = .destination_exact_payload_no_free,
+                .response_epoch = response.response_epoch,
+            };
+        }
+        return .{
+            .disposition = .destination_invalid_payload_no_free,
+            .response_epoch = response.response_epoch,
+        };
+    };
+    const free_evidence = rpcPublicationFailureFreeEvidence(
+        receipt,
+        response.response_epoch,
+        reason,
+    );
+    if (!free_record.commitFreeCall(response.response_epoch, free_evidence)) {
+        ledger.abandonPreparedFailureNoFree(&payload_cleanup.failure_release);
+        if (closeRpcPublicationDestinationNoFree(destination, identity, response)) {
+            return .{
+                .disposition = .destination_exact_payload_no_free,
+                .response_epoch = response.response_epoch,
+            };
+        }
+        return .{
+            .disposition = .destination_invalid_payload_no_free,
+            .response_epoch = response.response_epoch,
+        };
+    }
+    if (builtin.is_test and test_pre_release_stage_drift != 0)
+        @as(*u8, @ptrCast(&payload_cleanup.failure_release.stage)).* = 0xFF;
+    const release = ledger.releasePreparedFailure(&payload_cleanup.failure_release);
+    if (release == .not_freed) {
+        _ = free_record.retireFreeCall(response.response_epoch, free_evidence);
+        if (closeRpcPublicationDestinationNoFree(destination, identity, response)) {
+            return .{
+                .disposition = .destination_exact_payload_no_free,
+                .response_epoch = response.response_epoch,
+            };
+        }
+        return .{
+            .disposition = .destination_invalid_payload_no_free,
+            .response_epoch = response.response_epoch,
+        };
+    }
+    if (release == .freed_clean and destination_pristine and destination.pristineExact()) {
+        destination.terminalCleanAfterPublicationFailureInPlace(
+            identity,
+            rpcTerminalEvidence(response, .local_invariant_violation),
+        ) catch {};
+        if (destination.terminalExact() and destination.settlement == .terminal_clean)
+            return .{
+                .disposition = .destination_exact_payload_freed_clean,
+                .response_epoch = response.response_epoch,
+                .free_evidence = free_evidence,
+                .retire_clean_evidence = true,
+            };
+    }
+    _ = free_record.commitTerminalFreedOnce(response.response_epoch, free_evidence);
+    return .{
+        .disposition = if (destination_pristine)
+            .destination_exact_payload_freed_once_drifted
+        else
+            .destination_invalid_payload_freed_once,
+        .response_epoch = response.response_epoch,
+        .free_evidence = free_evidence,
+    };
+}
 
 fn failStopResponsePayloadProvenance(
     reason: response_payload_allocation.PayloadFailStopReason,
@@ -3304,6 +3840,7 @@ fn executePreparedRpcPrivate(
         @ptrFromInt(request.prepared_storage_addr);
     var lease: client_mod.PreparedRequestExecutionLease = .{};
     var publication: PreparedRpcPublicationScope = .{};
+    var payload_cleanup: RpcPublicationPayloadCleanup = .{};
     if (mode == .correlated_response) publication.begin(
         node,
         admission.operation,
@@ -3311,6 +3848,7 @@ fn executePreparedRpcPrivate(
         destination,
         &txn,
         &lease,
+        &payload_cleanup,
         storage,
     ) catch |err| {
         const outcome = try txn.settlePreWire(admission.operation);
@@ -3401,8 +3939,22 @@ fn executePreparedRpcPrivate(
         lease_active = false;
         return err;
     };
-    publication.afterRequestWrite(node, request, destination, &txn, &lease, storage);
+    publication.afterRequestWrite(
+        node,
+        request,
+        destination,
+        &txn,
+        &lease,
+        &payload_cleanup,
+        storage,
+    );
     if (mode == .correlated_response) {
+        try node.cleanup_registry.armRpcExecutionRecovery(
+            request.reservation.cleanup,
+            identity,
+            txn.request.canonical_prepared,
+            txn.response,
+        );
         try publishPreparedRpcResponse(
             request,
             admission.operation,
@@ -3414,6 +3966,7 @@ fn executePreparedRpcPrivate(
             &lease,
             response_allocator,
             &publication,
+            &payload_cleanup,
         );
         lease_active = false;
         return;
@@ -3437,11 +3990,16 @@ fn publishPreparedRpcResponse(
     lease: *client_mod.PreparedRequestExecutionLease,
     response_allocator: std.mem.Allocator,
     publication: *PreparedRpcPublicationScope,
+    payload_cleanup: *RpcPublicationPayloadCleanup,
 ) !void {
-    const response = try node.client.readPreparedResponseUnderExecutionLease(
+    const response = node.client.readPreparedResponseUnderExecutionLease(
         lease,
         response_allocator,
         publication.observer(node),
+    ) catch failStopRpcPublication(
+        node,
+        payload_cleanup,
+        .ledger_drift,
     );
     const payload_receipt = switch (publication.ledger.classifyResponsePayloadProvenance(
         response.payload_observation_generation,
@@ -3451,14 +4009,16 @@ fn publishPreparedRpcResponse(
     )) {
         .promoted => |receipt| receipt,
         .fail_stop_required => |reason| failStopRpcPublication(
-            operation,
             node,
-            txn,
-            lease,
-            publication,
+            payload_cleanup,
             reason,
         ),
     };
+    payload_cleanup.arm(payload_receipt) catch failStopRpcPublication(
+        node,
+        payload_cleanup,
+        .ledger_drift,
+    );
     const executing_admission = node.cleanup_registry.executingRpcAdmission(
         request.reservation.cleanup,
         identity,
@@ -3467,26 +4027,16 @@ fn publishPreparedRpcResponse(
         request.receipt,
         bound_stream_id,
     ) catch {
-        publication.ledger.releasePromotedResponse(payload_receipt) catch
-            failStopResponsePayloadTransfer(.ledger_drift);
         failStopRpcPublication(
-            operation,
             node,
-            txn,
-            lease,
-            publication,
+            payload_cleanup,
             .ledger_drift,
         );
     };
     node.client.revalidatePreparedResponsePublication(lease, response_allocator) catch {
-        publication.ledger.releasePromotedResponse(payload_receipt) catch
-            failStopResponsePayloadTransfer(.ledger_drift);
         failStopRpcPublication(
-            operation,
             node,
-            txn,
-            lease,
-            publication,
+            payload_cleanup,
             .ledger_drift,
         );
     };
@@ -3494,14 +4044,9 @@ fn publishPreparedRpcResponse(
         txn.request.postExecuteReady(operation) == null or executing_admission.decision != .allowed or
         !std.meta.eql(executing_admission.canonical, txn.request.canonical_prepared))
     {
-        publication.ledger.releasePromotedResponse(payload_receipt) catch
-            failStopResponsePayloadTransfer(.ledger_drift);
         failStopRpcPublication(
-            operation,
             node,
-            txn,
-            lease,
-            publication,
+            payload_cleanup,
             .ledger_drift,
         );
     }
@@ -3510,36 +4055,32 @@ fn publishPreparedRpcResponse(
         identity,
         txn.response,
         &publication.publish_permit,
-    ) catch failStopResponsePayloadTransfer(.ledger_drift);
+    ) catch failStopRpcPublication(
+        node,
+        payload_cleanup,
+        .ledger_drift,
+    );
     switch (publication.ledger.transferPromotedRpcResponse(
         payload_receipt,
         destination,
         rpcOwnerIdentity(txn.response),
     )) {
         .transferred => {},
-        .rejected_safe_released => failStopRpcPublication(
-            operation,
-            node,
-            txn,
-            lease,
-            publication,
-            .ledger_drift,
-        ),
         .fail_stop_required => |reason| failStopRpcPublication(
-            operation,
             node,
-            txn,
-            lease,
-            publication,
+            payload_cleanup,
             reason,
         ),
     }
+    _ = payload_cleanup.takeIfExact() orelse
+        @panic("RPC publication payload cleanup consumption drifted");
     node.cleanup_registry.commitRpcResponsePublished(
         request.reservation.cleanup,
         identity,
         txn.response,
         &publication.publish_permit,
     );
+    node.cleanup_registry.commitRpcExecutionRecoveryDisarmNoFail();
     const outcome = txn.request.settlePostExecuteReusableUnderPublicationScope(operation) catch
         failStopPreparedExecution(.cleanup_failure);
     txn.request.finishOrFailStop(operation, outcome);
@@ -3549,23 +4090,57 @@ fn publishPreparedRpcResponse(
 }
 
 fn failStopRpcPublication(
-    operation: RegisteredNodeOperation,
     node: *ClientNode,
-    txn: *PreparedRpcExecutionTxn,
-    lease: *client_mod.PreparedRequestExecutionLease,
-    publication: *PreparedRpcPublicationScope,
+    payload_cleanup: *RpcPublicationPayloadCleanup,
     reason: response_payload_allocation.PayloadFailStopReason,
 ) noreturn {
-    publication.finishFailedTransfer(node, lease, reason);
-    node.client.poisonPreparedRequestExecution(lease, .local_invariant_violation) catch
-        @panic("RPC publication fail-stop poison drifted");
-    const outcome = txn.settlePostWriteTerminalWithLease(
-        operation,
-        .local_invariant_violation,
-        lease,
-    ) catch @panic("RPC publication fail-stop authority settlement drifted");
-    txn.request.finishOrFailStop(operation, outcome);
-    finishPreparedRpcLeaseOrFailStop(node, lease, txn, operation);
+    const recovery = node.cleanup_registry.rpcExecutionRecoveryCanonical() catch
+        @panic("RPC publication canonical recovery drifted");
+    const byte_outcome = settleRpcPublicationFailureBytes(
+        &node.rpc_free_evidence,
+        payload_cleanup,
+        recovery.response,
+        reason,
+    );
+    node.cleanup_registry.commitRpcExecutionRecoveryTerminalNoFail();
+    node.client.commitPreparedExecutionRecoveryPoisonNoFail(.local_invariant_violation);
+    node.client.commitPreparedExecutionRecoveryCleanupNoFail();
+    if (byte_outcome.retire_clean_evidence and
+        !node.rpc_free_evidence.retireFreeCall(
+            byte_outcome.response_epoch,
+            byte_outcome.free_evidence,
+        )) @panic("RPC publication clean free evidence retire drifted");
+    node.guarded_allocator.finishOperationGuard() catch
+        @panic("RPC publication recovery operation guard drifted");
+    if (builtin.is_test and
+        node.guarded_allocator.request_free_test_observer.rpc_publication_drift_fired)
+    {
+        const evidence = node.cleanup_registry.rpcExecutionRecoveryEvidenceForTest(
+            recovery.reservation,
+            recovery.binding,
+        ) catch @panic("RPC publication recovery evidence lookup failed");
+        if (!evidence.request_terminal) {
+            const diagnostic = "B3_RPC_RECOVERY_REQUEST_NOT_TERMINAL\n";
+            _ = c.write(2, diagnostic.ptr, diagnostic.len);
+        }
+        if (!evidence.response_terminal) {
+            const diagnostic = "B3_RPC_RECOVERY_RESPONSE_NOT_TERMINAL\n";
+            _ = c.write(2, diagnostic.ptr, diagnostic.len);
+        }
+        if (!evidence.recovery_empty) {
+            const diagnostic = "B3_RPC_RECOVERY_NOT_CONSUMED\n";
+            _ = c.write(2, diagnostic.ptr, diagnostic.len);
+        }
+        if (!node.client.preparedExecutionRecoveryPoisonedForTest()) {
+            const diagnostic = "B3_RPC_RECOVERY_NOT_POISONED\n";
+            _ = c.write(2, diagnostic.ptr, diagnostic.len);
+        }
+        if (!evidence.request_terminal or !evidence.response_terminal or
+            !evidence.recovery_empty or !node.client.preparedExecutionRecoveryPoisonedForTest())
+            @panic("RPC publication recovery evidence was incomplete");
+        const marker = "B3_RPC_PUBLICATION_RECOVERY_TERMINAL\n";
+        _ = c.write(2, marker.ptr, marker.len);
+    }
     @panic("RPC publication failed after terminal settlement");
 }
 
@@ -9272,7 +9847,7 @@ test "B3-3 private product wrapper writes exact request then terminal-settles bo
     slot.finishActiveAttachmentDrop(&owner.binding, reservation, &owner.lease);
 }
 
-test "B3-4/5 product publishes borrows and finishes 64 sequential correlated RPC responses" {
+fn runB345RpcProduct(drift_kind: u8) !void {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     try ClientSlot.initializeProcessRuntime();
     const allocator = std.testing.allocator;
@@ -9361,6 +9936,81 @@ test "B3-4/5 product publishes borrows and finishes 64 sequential correlated RPC
         .reservation = reservation,
         .receipt = prepared.receipt,
     };
+    var foreign_source = fixtureClient(allocator, 0xB3460);
+    var foreign_slot: ClientSlot = undefined;
+    try ClientSlot.initInPlace(&foreign_slot, allocator, &foreign_source, 0xB3460);
+    defer foreign_slot.deinit();
+    const ForeignOwner = struct {
+        transport_marker: u8 = 0,
+        storage: client_mod.PreparedBlockingRpcStorage = .{},
+        binding: contract.PreparedAttachmentBinding = .{},
+        lease: lease_mod.ConnectionLease = .{},
+    };
+    var foreign_owner: ForeignOwner = .{};
+    const foreign_reservation = try foreign_slot.reserveAttachmentBindingForTest(
+        &foreign_owner.binding,
+        &foreign_owner.lease,
+        0xB3461,
+    );
+    const foreign_identity = foreign_reservation.identity;
+    const foreign_attach_receipt = contract.PreparedCallReceipt.init(.{
+        .transport_incarnation = 0xB3462,
+        .request_id = 0xB3463,
+        .request_digest = 0xB3464,
+    }).?;
+    try foreign_owner.binding.pairRequest(foreign_attach_receipt);
+    try foreign_owner.binding.beginExecute(foreign_attach_receipt);
+    try foreign_slot.commitAttachmentBinding(
+        &foreign_owner.binding,
+        foreign_reservation,
+        contract.CorrelatedExecutedCall.init(
+            contract.ExecutedCallReceipt.fromPrepared(foreign_attach_receipt).?,
+            foreign_attach_receipt.request_id,
+        ).?,
+        92,
+        &foreign_owner.lease,
+    );
+    const foreign_transport_incarnation: u64 = 0xB3465;
+    const foreign_transport_seal = try foreign_slot.transportOwnerSeal(foreign_reservation);
+    try contract.TransportOwnerSeal.initInPlace(
+        foreign_transport_seal,
+        foreign_transport_incarnation,
+        @intFromPtr(&foreign_owner),
+        @sizeOf(ForeignOwner),
+        @intFromPtr(&foreign_owner.transport_marker),
+        @intFromPtr(&foreign_owner.storage),
+    );
+    const foreign_prepared = try prepareGenerationRequest(.{
+        .slot_addr = @intFromPtr(&foreign_slot),
+        .slot_incarnation = foreign_identity.slot_incarnation,
+        .node_incarnation = foreign_identity.node_incarnation,
+        .host_id = foreign_identity.host_id,
+        .pid = foreign_identity.pid,
+        .process_nonce = foreign_identity.process_nonce,
+        .transport_addr = @intFromPtr(&foreign_owner.transport_marker),
+        .owner_addr = @intFromPtr(&foreign_owner),
+        .owner_size = @sizeOf(ForeignOwner),
+        .transport_incarnation = foreign_transport_incarnation,
+        .owner_seal_addr = @intFromPtr(foreign_transport_seal),
+        .prepared_storage_addr = @intFromPtr(&foreign_owner.storage),
+        .bound_stream_id = 92,
+        .reservation = foreign_reservation,
+        .request = contract.RuntimeRequest.observation(),
+    });
+    const foreign_request: GenerationRequestAbort = .{
+        .slot_addr = @intFromPtr(&foreign_slot),
+        .slot_incarnation = foreign_identity.slot_incarnation,
+        .node_incarnation = foreign_identity.node_incarnation,
+        .host_id = foreign_identity.host_id,
+        .pid = foreign_identity.pid,
+        .process_nonce = foreign_identity.process_nonce,
+        .transport_addr = @intFromPtr(&foreign_owner.transport_marker),
+        .transport_incarnation = foreign_transport_incarnation,
+        .owner_seal_addr = @intFromPtr(foreign_transport_seal),
+        .prepared_storage_addr = @intFromPtr(&foreign_owner.storage),
+        .reservation = foreign_reservation,
+        .receipt = foreign_prepared.receipt,
+    };
     const Peer = struct {
         fn readExact(fd: c.fd_t, bytes: []u8) bool {
             var offset: usize = 0;
@@ -9402,11 +10052,84 @@ test "B3-4/5 product publishes borrows and finishes 64 sequential correlated RPC
     try std.testing.expect(slot.current.rpc_free_evidence.commitFreeCall(1, rpc_busy_evidence));
     try std.testing.expectError(error.Busy, beginGenerationRequestOwner(request, false));
     try std.testing.expect(slot.current.rpc_free_evidence.retireFreeCall(1, rpc_busy_evidence));
+    slot.current.guarded_allocator.request_free_test_observer.rpc_publication_drift_kind = drift_kind;
     try executePreparedRpcCorrelatedResponseForTest(request, 91, &owner.response);
     try std.testing.expectEqual(rpc_executed_response.ByteSettlement.live, owner.response.settlement);
+    const RpcFreeReentryProbe = struct {
+        slot: *ClientSlot,
+        same_request: GenerationRequestAbort,
+        foreign_request: GenerationRequestAbort,
+        binding: *contract.PreparedAttachmentBinding,
+        reservation: AttachmentBindingReservation,
+        lease: *lease_mod.ConnectionLease,
+        same_busy: bool = false,
+        foreign_busy: bool = false,
+        drop_busy: bool = false,
+        deinit_busy: bool = false,
+
+        fn run(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (beginGenerationRequestOwner(self.same_request, false)) |owner_result| {
+                endRegisteredNodeOperation(owner_result.operation);
+            } else |err| {
+                self.same_busy = err == error.Busy;
+            }
+            if (beginGenerationRequestOwner(self.foreign_request, false)) |owner_result| {
+                endRegisteredNodeOperation(owner_result.operation);
+            } else |err| {
+                self.foreign_busy = err == error.Busy;
+            }
+            self.slot.beginAttachmentDrop(
+                self.binding,
+                self.reservation,
+                self.lease,
+            ) catch |err| {
+                self.drop_busy = err == error.AdminBusy;
+            };
+            self.deinit_busy = self.slot.tryDeinit() == .busy;
+        }
+    };
+    var reentry_probe: RpcFreeReentryProbe = .{
+        .slot = &slot,
+        .same_request = request,
+        .foreign_request = foreign_request,
+        .binding = &owner.binding,
+        .reservation = reservation,
+        .lease = &owner.lease,
+    };
+    const free_observer = &slot.current.guarded_allocator.request_free_test_observer;
+    free_observer.target_addr = owner.response.payload_addr;
+    free_observer.target_len = owner.response.payload_len;
+    free_observer.descriptor_allocator_ptr = @intFromPtr(&slot.current.guarded_allocator);
+    free_observer.descriptor_allocator_vtable = @intFromPtr(&GenerationGuardedAllocator.allocator_vtable);
+    free_observer.rpc_free_reentry_context = &reentry_probe;
+    free_observer.rpc_free_reentry_fn = RpcFreeReentryProbe.run;
     var borrow: rpc_executed_response.RpcResponseBorrow = .{};
     try beginRpcResponseBorrowForTest(request, &owner.response, &borrow);
     try finishRpcResponseOwnedForTest(request, &owner.response, &borrow, .reusable);
+    try std.testing.expect(free_observer.rpc_free_reentry_fired);
+    try std.testing.expectEqual(@as(usize, 1), free_observer.entry_count);
+    try std.testing.expect(free_observer.descriptor_exact);
+    try std.testing.expect(reentry_probe.same_busy);
+    try std.testing.expect(reentry_probe.foreign_busy);
+    try std.testing.expect(reentry_probe.drop_busy);
+    try std.testing.expect(reentry_probe.deinit_busy);
+    free_observer.rpc_free_reentry_context = null;
+    free_observer.rpc_free_reentry_fn = null;
+    free_observer.target_addr = 0;
+    free_observer.target_len = 0;
+    try abortGenerationRequest(foreign_request);
+    try foreign_slot.beginAttachmentDrop(
+        &foreign_owner.binding,
+        foreign_reservation,
+        &foreign_owner.lease,
+    );
+    try foreign_transport_seal.terminalize(foreign_transport_incarnation);
+    foreign_slot.finishActiveAttachmentDrop(
+        &foreign_owner.binding,
+        foreign_reservation,
+        &foreign_owner.lease,
+    );
     try std.testing.expect(owner.response.terminalExact());
     try std.testing.expect(slot.current.rpc_free_evidence.emptyExact());
     for (&owner.repeated_responses) |*response_destination| {
@@ -9530,6 +10253,10 @@ test "B3-4/5 product publishes borrows and finishes 64 sequential correlated RPC
     try slot.beginAttachmentDrop(&owner.binding, reservation, &owner.lease);
     try transport_owner_seal.terminalize(transport_incarnation);
     slot.finishActiveAttachmentDrop(&owner.binding, reservation, &owner.lease);
+}
+
+test "B3-4/5 product publishes borrows and finishes 64 sequential correlated RPC responses" {
+    try runB345RpcProduct(0);
 }
 
 test "B3-3 private product wrapper rejects pending callback response occupation" {

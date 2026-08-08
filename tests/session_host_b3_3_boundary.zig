@@ -20,12 +20,12 @@ test "B3-3 private wrapper is the sole progress execute integration boundary" {
     try std.testing.expectEqual(@as(usize, 1), count(registry, "pub fn settleRpcResponseExecutionTerminal("));
     try std.testing.expectEqual(@as(usize, 1), count(registry, "pub fn exhaustRpcResponseEpochForTest("));
     try std.testing.expectEqual(@as(usize, 1), count(registry, "pub fn rpcExecutionAuthoritiesTerminalForTest("));
-    try std.testing.expectEqual(@as(usize, 2), count(registry, "if (!builtin.is_test) unreachable;"));
+    try std.testing.expectEqual(@as(usize, 3), count(registry, "if (!builtin.is_test) unreachable;"));
     try std.testing.expectEqual(@as(usize, 1), count(registry, ".exhaustNextEpochForTest("));
     try std.testing.expectEqual(@as(usize, 1), count(response_authority, "pub fn exhaustNextEpochForTest("));
     try std.testing.expectEqual(@as(usize, 1), count(response_authority, "if (!builtin.is_test) unreachable;"));
     try std.testing.expectEqual(@as(usize, 1), count(slot, ".preparedRpcAdmission("));
-    try std.testing.expectEqual(@as(usize, 1), count(slot, ".executingRpcAdmission("));
+    try std.testing.expectEqual(@as(usize, 2), count(slot, ".executingRpcAdmission("));
     try std.testing.expectEqual(@as(usize, 1), count(slot, ".reserveRpcResponseExecution("));
     try std.testing.expectEqual(@as(usize, 2), count(slot, ".rollbackRpcResponseExecution("));
     try std.testing.expectEqual(@as(usize, 3), count(slot, ".settleRpcResponseExecutionTerminal("));
@@ -33,7 +33,7 @@ test "B3-3 private wrapper is the sole progress execute integration boundary" {
     try std.testing.expectEqual(@as(usize, 1), count(slot, ".exhaustRpcResponseEpochForTest("));
     try std.testing.expectEqual(@as(usize, 1), count(slot, ".rpcExecutionAuthoritiesTerminalForTest("));
     try std.testing.expectEqual(@as(usize, 9), count(slot, "executePreparedRpcTerminalSink("));
-    try std.testing.expectEqual(@as(usize, 3), count(slot, "executePreparedRpcCorrelatedResponseForTest("));
+    try std.testing.expectEqual(@as(usize, 4), count(slot, "executePreparedRpcCorrelatedResponseForTest("));
     try std.testing.expectEqual(@as(usize, 0), count(transport, "PreparedRequestExecutionLease"));
     try std.testing.expectEqual(@as(usize, 0), count(transport, "executePreparedRpcTerminalSink"));
 

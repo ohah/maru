@@ -204,6 +204,15 @@ pub const Authority = struct {
         self.prepared = std.mem.zeroes(Prepared);
         self.seal = sealFor(self);
     }
+
+    pub fn commitExecutingTerminalNoFail(self: *Authority, prepared: Prepared) void {
+        if (!self.matchesExecuting(prepared))
+            @panic("prepared request recovery commit drifted");
+        self.lifecycle = .terminal;
+        self.prepared_present = 0;
+        self.prepared = std.mem.zeroes(Prepared);
+        self.seal = sealFor(self);
+    }
 };
 
 fn sealFor(authority: *const Authority) owner_seal.Digest {

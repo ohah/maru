@@ -8113,6 +8113,89 @@ pub const Client = struct {
         self.poisonWhilePreparedExecutionHeld(reason);
     }
 
+    /// Fail-stop-only suffix for a callback that corrupted its caller-owned lease token. The
+    /// canonical Client fields, not the token bytes, prove that the prepared execution fence is
+    /// still held. This method deliberately performs no public-fence entry and no allocation.
+    pub fn commitPreparedExecutionRecoveryPoisonNoFail(
+        self: *Client,
+        reason: client_poison.ConnectionReason,
+    ) void {
+        const lease_addr = self.prepared_request_execution_lease_addr;
+        const fence_addr = self.prepared_request_execution_fence_addr;
+        const fence_incarnation = self.prepared_request_execution_fence_incarnation;
+        const fence_identity = self.prepared_request_execution_fence_lease_identity;
+        if (lease_addr == 0 or fence_addr == 0 or fence_incarnation == 0 or fence_identity == 0 or
+            self.prepared_request_execution_fence_mode == .unbound or
+            (if (self.operation_fence) |fence| @intFromPtr(fence) else 0) != fence_addr or
+            (if (self.operation_fence) |fence| fence.fence_incarnation else 0) != fence_incarnation or
+            fence_identity != preparedExecutionFenceLeaseIdentity(
+                @intFromPtr(self),
+                fence_addr,
+                self.operation_fence_generation,
+                fence_incarnation,
+                lease_addr,
+            )) @panic("prepared execution recovery authority drifted");
+        self.poisonWhilePreparedExecutionHeld(reason);
+    }
+
+    pub fn preparedExecutionRecoveryPoisonedForTest(self: *const Client) bool {
+        if (!builtin.is_test) unreachable;
+        return self.first_poison_reason != null and self.unusable and self.fd == -1;
+    }
+
+    /// Completes the fail-stop cleanup from Client-owned canonical identities. Caller-owned
+    /// allocator-scope and lease tokens may already be corrupt, so they are only zeroed after the
+    /// corresponding canonical state has been consumed.
+    pub fn commitPreparedExecutionRecoveryCleanupNoFail(self: *Client) void {
+        const active_scope = self.active_generation_allocator_scope orelse
+            @panic("prepared execution recovery allocator scope missing");
+        if (active_scope.token_addr == 0 or active_scope.client_addr != @intFromPtr(self) or
+            active_scope.epoch == 0 or active_scope.purpose != .rpc_execute or
+            !allocatorEql(self.allocator, active_scope.installed_allocator) or
+            !self.parser.usesAllocator(active_scope.installed_allocator))
+            @panic("prepared execution recovery allocator scope drifted");
+        self.allocator = active_scope.previous_allocator;
+        self.parser.restoreAllocatorAfterDrift(active_scope.previous_allocator);
+        self.active_generation_allocator_scope = null;
+        const scope: *GenerationAllocatorScope = @ptrFromInt(active_scope.token_addr);
+        scope.* = .{ .lifecycle = .restored };
+
+        const lease_addr = self.prepared_request_execution_lease_addr;
+        const fence_addr = self.prepared_request_execution_fence_addr;
+        const fence_generation = self.operation_fence_generation;
+        const fence_incarnation = self.prepared_request_execution_fence_incarnation;
+        const fence_identity = self.prepared_request_execution_fence_lease_identity;
+        const fence_mode = self.prepared_request_execution_fence_mode;
+        if (lease_addr == 0 or fence_addr == 0 or fence_generation == 0 or
+            fence_incarnation == 0 or fence_identity == 0 or fence_mode == .unbound or
+            fence_identity != preparedExecutionFenceLeaseIdentity(
+                @intFromPtr(self),
+                fence_addr,
+                fence_generation,
+                fence_incarnation,
+                lease_addr,
+            )) @panic("prepared execution recovery fence drifted");
+        self.prepared_request_execution_lease_addr = 0;
+        self.prepared_request_execution_fence_addr = 0;
+        self.prepared_request_execution_fence_incarnation = 0;
+        self.prepared_request_execution_fence_lease_identity = 0;
+        self.prepared_request_execution_fence_mode = .unbound;
+        const lease: *PreparedRequestExecutionLease = @ptrFromInt(lease_addr);
+        lease.* = .{};
+        const fence: *ClientOperationFence = @ptrFromInt(fence_addr);
+        if (fence.fence_incarnation != fence_incarnation)
+            @panic("prepared execution recovery fence incarnation drifted");
+        const released = switch (fence_mode) {
+            .unbound => unreachable,
+            .acquired => fence.releaseExecutionLease(@intFromPtr(self), fence_generation),
+            .upgraded_shared => fence.downgradeExecutionLeaseToSingleShared(
+                @intFromPtr(self),
+                fence_generation,
+            ),
+        };
+        if (!released) @panic("prepared execution recovery fence release drifted");
+    }
+
     /// Executes only the request-write half of B3-3. Response correlation/publication remains
     /// closed until B3-4/5; every exit retires the authenticated request backing exactly once.
     pub fn writePreparedRequestExecution(

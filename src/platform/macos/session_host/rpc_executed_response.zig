@@ -86,6 +86,10 @@ pub const RpcExecutedResponse = struct {
         return std.mem.eql(u8, std.mem.asBytes(self), std.mem.asBytes(&RpcExecutedResponse{}));
     }
 
+    pub fn liveScalarIdentityExact(self: *const @This(), identity: Identity) bool {
+        return self.liveScalarExact(identity);
+    }
+
     pub fn initLiveInPlace(
         out: *RpcExecutedResponse,
         identity: Identity,
@@ -266,6 +270,27 @@ pub const RpcExecutedResponse = struct {
             .owner_incarnation = identity.response_epoch,
             .identity = identity,
             .settlement = .terminal_no_free,
+            .terminal_evidence = evidence,
+        };
+        out.seal = responseSeal(out);
+    }
+
+    /// Publishes a pointer-free terminal owner only after an external final-address cleanup
+    /// transaction has proved that its allocator callback returned coherently.
+    pub fn terminalCleanAfterPublicationFailureInPlace(
+        out: *RpcExecutedResponse,
+        identity: Identity,
+        evidence: owner_seal.Digest,
+    ) Error!void {
+        if (!out.pristineExact()) return error.DestinationOccupied;
+        if (!identity.valid() or identity.destination_addr != @intFromPtr(out) or
+            std.mem.allEqual(u8, &evidence, 0))
+            return error.InvalidIdentity;
+        out.* = .{
+            .self_addr = @intFromPtr(out),
+            .owner_incarnation = identity.response_epoch,
+            .identity = identity,
+            .settlement = .terminal_clean,
             .terminal_evidence = evidence,
         };
         out.seal = responseSeal(out);
@@ -765,6 +790,19 @@ test "B3-4/5 RPC owner terminal no-free keeps pointer-free absorbing evidence" {
     try std.testing.expectError(
         error.InvalidOwner,
         response.prepareBorrowInit(identity, &borrow, &permit),
+    );
+}
+
+test "B3-4/5 RPC owner terminal clean accepts only pristine external-free destination" {
+    var response: RpcExecutedResponse = .{};
+    const identity = fixtureIdentity(@intFromPtr(&response), 3);
+    const evidence = digestBytes("test.external-free", "evidence");
+    try response.terminalCleanAfterPublicationFailureInPlace(identity, evidence);
+    try std.testing.expect(response.terminalExact());
+    try std.testing.expectEqual(ByteSettlement.terminal_clean, response.settlement);
+    try std.testing.expectError(
+        error.DestinationOccupied,
+        response.terminalCleanAfterPublicationFailureInPlace(identity, evidence),
     );
 }
 

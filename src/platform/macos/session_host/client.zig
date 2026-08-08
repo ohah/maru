@@ -11412,6 +11412,24 @@ pub const Client = struct {
     pub fn sendScrollToBottom(self: *Client, stream_id: u64) ClientError!void {
         const operation_fence_held = try self.requireBlockingMode();
         defer if (operation_fence_held) self.endPublicMutation();
+        return self.sendScrollToBottomGuardedWithOps(stream_id, .posix_ops);
+    }
+
+    fn sendScrollToBottomWithOps(
+        self: *Client,
+        stream_id: u64,
+        ops: PreparedExecutionWriteOps,
+    ) ClientError!void {
+        const operation_fence_held = try self.requireBlockingMode();
+        defer if (operation_fence_held) self.endPublicMutation();
+        return self.sendScrollToBottomGuardedWithOps(stream_id, ops);
+    }
+
+    fn sendScrollToBottomGuardedWithOps(
+        self: *Client,
+        stream_id: u64,
+        ops: PreparedExecutionWriteOps,
+    ) ClientError!void {
         if (!self.async_scroll_to_bottom_v1) return;
         try self.flushPendingOutboundBlocking();
         const frame = framing.encodeFrame(
@@ -11420,10 +11438,7 @@ pub const Client = struct {
             "",
         ) catch return error.OutOfMemory;
         defer self.allocator.free(frame);
-        socket_server.writeAll(self.fd, frame) catch {
-            self.poison(.outbound_write_ambiguous);
-            return error.WriteFailed;
-        };
+        try self.writeBlockingStreamFrameWithOps(frame, ops);
     }
 
     /// RemoteRuntime의 ordered queue를 뒤따르는 blocking RPC 직전에 남은 core frame을 전량 보낸다. 응답은 없지만
@@ -11431,6 +11446,26 @@ pub const Client = struct {
     pub fn sendCoreCommand(self: *Client, stream_id: u64, payload: []const u8) ClientError!void {
         const operation_fence_held = try self.requireBlockingMode();
         defer if (operation_fence_held) self.endPublicMutation();
+        return self.sendCoreCommandGuardedWithOps(stream_id, payload, .posix_ops);
+    }
+
+    fn sendCoreCommandWithOps(
+        self: *Client,
+        stream_id: u64,
+        payload: []const u8,
+        ops: PreparedExecutionWriteOps,
+    ) ClientError!void {
+        const operation_fence_held = try self.requireBlockingMode();
+        defer if (operation_fence_held) self.endPublicMutation();
+        return self.sendCoreCommandGuardedWithOps(stream_id, payload, ops);
+    }
+
+    fn sendCoreCommandGuardedWithOps(
+        self: *Client,
+        stream_id: u64,
+        payload: []const u8,
+        ops: PreparedExecutionWriteOps,
+    ) ClientError!void {
         if (!self.runtime_core_command_v1) return;
         try self.flushPendingOutboundBlocking();
         const frame = framing.encodeFrame(
@@ -11439,10 +11474,31 @@ pub const Client = struct {
             payload,
         ) catch return error.OutOfMemory;
         defer self.allocator.free(frame);
-        socket_server.writeAll(self.fd, frame) catch {
-            self.poison(.outbound_write_ambiguous);
-            return error.WriteFailed;
-        };
+        try self.writeBlockingStreamFrameWithOps(frame, ops);
+    }
+
+    fn writeBlockingStreamFrameWithOps(
+        self: *Client,
+        frame: []const u8,
+        ops: PreparedExecutionWriteOps,
+    ) ClientError!void {
+        var offset: usize = 0;
+        while (offset < frame.len) {
+            switch (ops.writeFn(ops.context, self.fd, frame[offset..])) {
+                .interrupted => continue,
+                .would_block, .zero, .failed => {
+                    self.poison(.outbound_write_ambiguous);
+                    return error.WriteFailed;
+                },
+                .written => |written| {
+                    if (written == 0 or written > frame.len - offset) {
+                        self.poison(.local_invariant_violation);
+                        return error.WriteFailed;
+                    }
+                    offset += written;
+                },
+            }
+        }
     }
 
     /// pending outbound frame의 남은 wire bytes를 blocking으로 전량 보낸다. 부분 write마다 offset을 진전시켜 오류 뒤 같은 prefix를
@@ -12372,6 +12428,8 @@ const PreparedExecutionWriteProbe = struct {
     results: []const PreparedExecutionWriteResult,
     index: usize = 0,
     calls: usize = 0,
+    requested_lengths: [8]usize = [_]usize{0} ** 8,
+    requested_ptrs: [8]usize = [_]usize{0} ** 8,
 
     fn ops(self: *@This()) PreparedExecutionWriteOps {
         return .{ .context = self, .writeFn = write };
@@ -12379,6 +12437,10 @@ const PreparedExecutionWriteProbe = struct {
 
     fn write(ctx: ?*anyopaque, _: c.fd_t, bytes: []const u8) PreparedExecutionWriteResult {
         const self: *@This() = @ptrCast(@alignCast(ctx.?));
+        if (self.calls < self.requested_lengths.len) {
+            self.requested_lengths[self.calls] = bytes.len;
+            self.requested_ptrs[self.calls] = @intFromPtr(bytes.ptr);
+        }
         self.calls += 1;
         if (self.index >= self.results.len) return .failed;
         const result = self.results[self.index];
@@ -14414,6 +14476,92 @@ test "client request write failure invalidates the connection before another cal
     );
     try std.testing.expect(client.pending_outbound == null);
     try std.testing.expectError(error.ConnectionClosed, client.call("host.info", null));
+}
+
+fn checkBlockingControlInjectedWrite(
+    comptime core: bool,
+    results: []const PreparedExecutionWriteResult,
+    expect_failure: bool,
+) !void {
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var client: Client = .{
+        .allocator = testing.allocator,
+        .fd = fds[0],
+        .host_id = 0x2C3C,
+        .parser = framing.FrameParser.init(testing.allocator),
+        .async_scroll_to_bottom_v1 = true,
+        .runtime_core_command_v1 = true,
+    };
+    defer client.deinit();
+    var probe = PreparedExecutionWriteProbe{ .results = results };
+    const payload = if (core) "{\"op\":\"scroll_to_bottom\"}" else "";
+    const kind: protocol.Kind = if (core) .core_command else .scroll_to_bottom;
+    const expected_frame = try framing.encodeFrame(
+        testing.allocator,
+        .{ .kind = kind, .stream_id = 7, .major = protocol.version_major },
+        payload,
+    );
+    defer testing.allocator.free(expected_frame);
+    const result = if (core)
+        client.sendCoreCommandWithOps(7, "{\"op\":\"scroll_to_bottom\"}", probe.ops())
+    else
+        client.sendScrollToBottomWithOps(7, probe.ops());
+    if (expect_failure) {
+        try testing.expectError(error.WriteFailed, result);
+        try testing.expect(client.unusable);
+        try testing.expectEqual(
+            client_poison.ConnectionReason.outbound_write_ambiguous,
+            client.firstPoisonReason().?,
+        );
+    } else {
+        try result;
+        try testing.expect(!client.unusable);
+        try testing.expect(client.firstPoisonReason() == null);
+    }
+    try testing.expectEqual(results.len, probe.calls);
+    try testing.expectEqual(results.len, probe.index);
+    var remaining = expected_frame.len;
+    var previous_ptr: ?usize = null;
+    for (results, 0..) |write_result, index| {
+        try testing.expectEqual(remaining, probe.requested_lengths[index]);
+        if (previous_ptr) |ptr| try testing.expectEqual(ptr, probe.requested_ptrs[index]);
+        switch (write_result) {
+            .written => |written| {
+                remaining -= written;
+                previous_ptr = probe.requested_ptrs[index] + written;
+            },
+            .interrupted => previous_ptr = probe.requested_ptrs[index],
+            .would_block, .zero, .failed => previous_ptr = null,
+        }
+    }
+}
+
+test "2c3c-C3 blocking control write classifies zero partial and full deterministically" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    inline for (.{ false, true }) |core| {
+        const payload = if (core) "{\"op\":\"scroll_to_bottom\"}" else "";
+        const kind: protocol.Kind = if (core) .core_command else .scroll_to_bottom;
+        const frame = try framing.encodeFrame(
+            testing.allocator,
+            .{ .kind = kind, .stream_id = 7, .major = protocol.version_major },
+            payload,
+        );
+        defer testing.allocator.free(frame);
+        try testing.expect(frame.len > 2);
+
+        const zero = [_]PreparedExecutionWriteResult{.zero};
+        try checkBlockingControlInjectedWrite(core, &zero, true);
+        const one_then_fail = [_]PreparedExecutionWriteResult{ .{ .written = 1 }, .failed };
+        try checkBlockingControlInjectedWrite(core, &one_then_fail, true);
+        const almost_then_fail = [_]PreparedExecutionWriteResult{ .{ .written = frame.len - 1 }, .failed };
+        try checkBlockingControlInjectedWrite(core, &almost_then_fail, true);
+        const full = [_]PreparedExecutionWriteResult{.{ .written = frame.len }};
+        try checkBlockingControlInjectedWrite(core, &full, false);
+        const interrupted_then_full = [_]PreparedExecutionWriteResult{ .interrupted, .{ .written = frame.len } };
+        try checkBlockingControlInjectedWrite(core, &interrupted_then_full, false);
+    }
 }
 
 test "client response timeout is transient evidence and invalidates before another request" {

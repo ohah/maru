@@ -266,6 +266,14 @@ pub const GenerationAttachment = struct {
         return self.transport.sendControlNonBlocking(control);
     }
 
+    pub fn sendControl(
+        self: *GenerationAttachment,
+        control: contract.RuntimeControl,
+    ) generation_transport_mod.ControlError!void {
+        if (!self.valid() or self.lifecycle != .attached) return error.InvalidOwner;
+        return self.transport.sendControl(control);
+    }
+
     pub fn tryDeinit(
         self: *GenerationAttachment,
         adapter: *host_adapter_mod.HostAdapter,

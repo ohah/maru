@@ -2,7 +2,7 @@ const std = @import("std");
 
 const max_source_bytes = 8 * 1024 * 1024;
 
-test "CR3a-2c3c C1 control facade stays typed canonical through C2 wiring" {
+test "CR3a-2c3c control facade stays typed canonical through C3 wiring" {
     const allocator = std.testing.allocator;
     const contract = try readSource(allocator, "src/platform/macos/session_host/generation_attachment_contract.zig");
     defer allocator.free(contract);
@@ -49,7 +49,7 @@ test "CR3a-2c3c C1 control facade stays typed canonical through C2 wiring" {
     const attachment_control = between(
         attachment,
         "    pub fn sendControlNonBlocking(",
-        "    pub fn tryDeinit(",
+        "    pub fn sendControl(",
     ) orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(
         @as(usize, 1),
@@ -66,9 +66,30 @@ test "CR3a-2c3c C1 control facade stays typed canonical through C2 wiring" {
     inline for (.{ "client", "stream_id", "params", "json", "allocator" }) |forbidden|
         try std.testing.expectEqual(@as(usize, 0), count(attachment_control, forbidden));
 
-    // C2 opens exactly one generation nonblocking adapter. C3 blocking wiring and recovery
-    // resync remain separate, while legacy direct Client callsites stay explicit.
-    try std.testing.expectEqual(@as(usize, 0), count(runtime, ".sendControl("));
+    try std.testing.expectEqual(@as(usize, 1), count(attachment, "    pub fn sendControl("));
+    const attachment_blocking_control = between(
+        attachment,
+        "    pub fn sendControl(",
+        "    pub fn tryDeinit(",
+    ) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(attachment_blocking_control, "control: contract.RuntimeControl,"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(attachment_blocking_control, ") generation_transport_mod.ControlError!void"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(attachment_blocking_control, "self.transport.sendControl(control)"),
+    );
+    inline for (.{ "client", "stream_id", "params", "json", "allocator" }) |forbidden|
+        try std.testing.expectEqual(@as(usize, 0), count(attachment_blocking_control, forbidden));
+
+    // C2/C3 open exactly one generation adapter for each send mode. Recovery resync and
+    // legacy direct Client callsites stay explicit.
+    try std.testing.expectEqual(@as(usize, 1), count(runtime, ".sendControl("));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, ".sendControlNonBlocking("));
     const admission = between(runtime, "    fn admitControl(", "    fn normalizeGenerationControlError(") orelse
         return error.TestExpectedEqual;
@@ -76,11 +97,28 @@ test "CR3a-2c3c C1 control facade stays typed canonical through C2 wiring" {
         return error.TestExpectedEqual;
     try std.testing.expectEqual(@as(usize, 1), count(generation_arm, ".sendControlNonBlocking("));
     try std.testing.expectEqual(@as(usize, 0), count(generation_arm, "self.client.send"));
+    const blocking_admission = between(runtime, "    fn flushControlBlocking(", "    fn discardQueuedMutations(") orelse
+        return error.TestExpectedEqual;
+    const blocking_generation_arm = between(
+        blocking_admission,
+        "if (self.attachment == .generation)",
+        "        switch (control.op)",
+    ) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 1), count(blocking_generation_arm, ".sendControl("));
+    try std.testing.expectEqual(@as(usize, 0), count(blocking_generation_arm, "self.client.send"));
+    try std.testing.expectEqual(@as(usize, 0), count(blocking_generation_arm, "encodeParams"));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "self.client.sendScrollToBottomNonBlocking("));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "self.client.sendCoreCommandNonBlocking("));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "self.client.sendScrollToBottom("));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "self.client.sendCoreCommand("));
     try std.testing.expectEqual(@as(usize, 1), count(runtime, "self.client.sendResyncNonBlocking("));
+    const response_core = between(
+        runtime,
+        "    pub fn sendCoreCommandBlocking(",
+        "    pub fn sendMouseReport(",
+    ) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 1), count(response_core, "self.callOrdered(\"runtime.core_command\""));
+    try std.testing.expectEqual(@as(usize, 1), count(response_core, "core_command_wire.encodeParams("));
 }
 
 fn readSource(allocator: std.mem.Allocator, path: []const u8) ![]u8 {

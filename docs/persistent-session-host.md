@@ -976,6 +976,15 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    C3의 blocking flush는 queue의 control을 응답 없는 stream frame으로만 보내며 `RuntimeRequest.core_command` prepare/execute로
    fallback하지 않는다. 별도 제품 API `sendCoreCommandBlocking`의 response-bearing RPC 전환은 2c3e가 소유한다.
 
+   일반 blocking RPC는 retained input/control을 추월하지 않는다. teardown은 다음 두 규칙으로 닫는다.
+   `terminateBestEffort`만 blocking flush의 `OutOfMemory`(input frame 또는 control frame 준비) 뒤 runtime 파괴가 queued mutation을
+   의미상 대체하는 명시적 예외다.
+   이 경우 `RemoteRuntime`이 retained input/control을 먼저 폐기한 뒤 `runtime.terminate`를 시도하며, 폐기한 queue를 이후 재시도하지 않는다.
+   다른 flush 오류는 terminate RPC 0이다. `detachBestEffort`는 예외가 아니므로 flush 오류에서 detach RPC를 보내지 않는다.
+   `ConnectionClosed` 외의 OOM/Busy/authority/protocol 오류는 connection이 아직 live일 수 있으므로 shared connection을 fail-close해
+   host EOF가 controller lease를 회수하고, 이미 terminal인 `ConnectionClosed`만 그대로 종료한다. 따라서 detach가 retained control을
+   추월하는 wire는 0이다. terminate도 OOM 외 flush 오류에는 같은 fail-close 규칙을 적용하고 terminate RPC를 보내지 않는다.
+
    2c3c는 C1 facade substrate, C2 nonblocking queue 배선, C3 blocking flush 배선의 TDD gate로 나눈다. C1은 public facade와
    `ClientSlot` canonical adapter만 열어 제품 callsite 0을 유지한다. C2/C3은 generation arm의 scroll/core direct Client 호출을
    각각 제거하되 legacy arm의 기존 동작과 recovery-owned resync 경로는 유지한다. focused Debug·ReleaseFast gate는 control/raw nested

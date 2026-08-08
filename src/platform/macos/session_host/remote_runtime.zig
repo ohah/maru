@@ -755,7 +755,10 @@ pub const RemoteRuntime = struct {
     /// coalesce하고, 슬롯이 다른 frame으로 막혔으면 tick/input 경로가 다시 시도한다.
     pub fn requestScrollToBottom(self: *RemoteRuntime) client_mod.ClientError!void {
         if (!self.mutationAllowed()) return error.Unauthorized;
-        if (!self.client.async_scroll_to_bottom_v1) return;
+        switch (self.attachment) {
+            .legacy => if (!self.client.async_scroll_to_bottom_v1) return,
+            .generation => {},
+        }
         const barrier = self.direct_input.items.len;
         if (self.pending_controls.items.len > 0) {
             const last = self.pending_controls.items[self.pending_controls.items.len - 1];
@@ -774,9 +777,12 @@ pub const RemoteRuntime = struct {
     /// socket backpressure가 생겨도 다음 frame tick이 재시도하며, bounded cap을 넘으면 명시적으로 실패한다.
     pub fn queueCoreCommand(self: *RemoteRuntime, command: core_command_wire.Command) client_mod.ClientError!void {
         if (!self.mutationAllowed()) return error.Unauthorized;
-        if (!self.client.runtime_core_command_v1) {
-            if (command.isLegacyScroll()) return self.sendCoreCommandBlocking(command);
-            return;
+        switch (self.attachment) {
+            .legacy => if (!self.client.runtime_core_command_v1) {
+                if (command.isLegacyScroll()) return self.sendCoreCommandBlocking(command);
+                return;
+            },
+            .generation => {},
         }
         if (self.pending_controls.items.len >= max_pending_controls) return self.failControlAdmission();
         self.pending_controls.append(self.allocator, .{
@@ -807,6 +813,16 @@ pub const RemoteRuntime = struct {
 
     fn admitControl(self: *RemoteRuntime, control: PendingControl) client_mod.ClientError!bool {
         if (!self.mutationAllowed()) return error.Unauthorized;
+        if (self.attachment == .generation) {
+            const typed = switch (control.op) {
+                .scroll_to_bottom => generation_contract.RuntimeControl.scrollToBottom(),
+                .core_command => |command| generation_contract.RuntimeControl.coreCommand(
+                    projectGenerationCoreCommand(command),
+                ),
+            };
+            return self.attachment.generation.sendControlNonBlocking(typed) catch |err|
+                return normalizeGenerationControlError(err);
+        }
         return switch (control.op) {
             .scroll_to_bottom => self.client.sendScrollToBottomNonBlocking(self.attachment.streamId()) catch |err| switch (err) {
                 error.OutOfMemory => false,
@@ -820,6 +836,58 @@ pub const RemoteRuntime = struct {
                     else => return err,
                 };
             },
+        };
+    }
+
+    fn normalizeGenerationControlError(
+        err: @import("generation_transport.zig").ControlError,
+    ) client_mod.ClientError!bool {
+        // Product parity: a negotiated older host consumes unsupported best-effort controls
+        // without a wire fallback. Retryable local admission retains the queue.
+        return switch (err) {
+            error.Unsupported => true,
+            error.Busy, error.ResourceExhausted => false,
+            error.InvalidOwner, error.ProtocolError => error.ProtocolError,
+            error.Unauthorized => error.Unauthorized,
+            error.ConnectionClosed => error.ConnectionClosed,
+        };
+    }
+
+    fn projectGenerationCoreCommand(
+        command: core_command_wire.Command,
+    ) generation_contract.CoreCommandRequest {
+        return switch (command) {
+            .scroll => |value| .{ .scroll = value },
+            .scroll_to_bottom => .scroll_to_bottom,
+            .scroll_to_abs => |value| .{ .scroll_to_abs = value },
+            .scroll_to_offset => |value| .{ .scroll_to_offset = value },
+            .report_focus => |value| .{ .report_focus = value },
+            .set_cell_metrics => |value| .{ .set_cell_metrics = .{
+                .width = value.width,
+                .height = value.height,
+            } },
+            .set_default_colors => |value| .{ .set_default_colors = .{
+                .foreground = value.foreground,
+                .background = value.background,
+            } },
+            .set_config_palette => |value| .{ .set_config_palette = value },
+            .set_max_scrollback => |value| .{ .set_max_scrollback = value },
+            .set_ambiguous_wide => |value| .{ .set_ambiguous_wide = value },
+            .set_emoji_wide => |value| .{ .set_emoji_wide = value },
+            .set_default_cursor_shape => |value| .{ .set_default_cursor_shape = value },
+            .set_runtime_config => |value| .{ .set_runtime_config = .{
+                .max_scrollback = value.max_scrollback,
+                .ambiguous_wide = value.ambiguous_wide,
+                .emoji_wide = value.emoji_wide,
+                .palette = value.palette,
+                .foreground = value.default_colors.foreground,
+                .background = value.default_colors.background,
+                .cell_width = if (value.cell_metrics) |metrics| metrics.width else 0,
+                .cell_height = if (value.cell_metrics) |metrics| metrics.height else 0,
+                .cursor_shape = value.cursor_shape,
+            } },
+            .jump_to_prompt => |value| .{ .jump_to_prompt = value },
+            .reset_input_modes => .reset_input_modes,
         };
     }
 
@@ -2081,6 +2149,129 @@ test "remote runtime: extended core commands require capability while legacy scr
     try std.testing.expect(shouldSendCoreCommand(true, .{ .report_focus = false }));
 }
 
+test "CR3a-2c3c C2 projects every product core command into the closed generation control" {
+    const commands = [_]core_command_wire.Command{
+        .{ .scroll = -1 },
+        .scroll_to_bottom,
+        .{ .scroll_to_abs = 2 },
+        .{ .scroll_to_offset = 3 },
+        .{ .report_focus = true },
+        .{ .set_cell_metrics = .{ .width = 4, .height = 5 } },
+        .{ .set_default_colors = .{ .foreground = 6, .background = 7 } },
+        .{ .set_config_palette = .{null} ** 16 },
+        .{ .set_max_scrollback = 8 },
+        .{ .set_ambiguous_wide = true },
+        .{ .set_emoji_wide = false },
+        .{ .set_default_cursor_shape = 2 },
+        .{ .set_runtime_config = .{
+            .max_scrollback = 9,
+            .ambiguous_wide = true,
+            .emoji_wide = false,
+            .palette = .{null} ** 16,
+            .default_colors = .{ .foreground = 10, .background = 11 },
+            .cell_metrics = .{ .width = 12, .height = 13 },
+            .cursor_shape = 1,
+        } },
+        .{ .jump_to_prompt = -1 },
+        .reset_input_modes,
+    };
+    const expected = [_]generation_contract.CoreCommandRequest{
+        .{ .scroll = -1 },
+        .scroll_to_bottom,
+        .{ .scroll_to_abs = 2 },
+        .{ .scroll_to_offset = 3 },
+        .{ .report_focus = true },
+        .{ .set_cell_metrics = .{ .width = 4, .height = 5 } },
+        .{ .set_default_colors = .{ .foreground = 6, .background = 7 } },
+        .{ .set_config_palette = .{null} ** 16 },
+        .{ .set_max_scrollback = 8 },
+        .{ .set_ambiguous_wide = true },
+        .{ .set_emoji_wide = false },
+        .{ .set_default_cursor_shape = 2 },
+        .{ .set_runtime_config = .{
+            .max_scrollback = 9,
+            .ambiguous_wide = true,
+            .emoji_wide = false,
+            .palette = .{null} ** 16,
+            .foreground = 10,
+            .background = 11,
+            .cell_width = 12,
+            .cell_height = 13,
+            .cursor_shape = 1,
+        } },
+        .{ .jump_to_prompt = -1 },
+        .reset_input_modes,
+    };
+    try testing.expectEqual(
+        @as(usize, @typeInfo(core_command_wire.Command).@"union".fields.len),
+        commands.len,
+    );
+    try testing.expectEqual(
+        commands.len,
+        @typeInfo(generation_contract.CoreCommandRequest).@"union".fields.len,
+    );
+    for (commands, expected) |command, oracle| {
+        const projected = RemoteRuntime.projectGenerationCoreCommand(command);
+        try testing.expect(std.meta.eql(oracle, projected));
+        const decoded = generation_contract.RuntimeControl.coreCommand(projected).decode() orelse
+            return error.TestExpectedEqual;
+        try testing.expect(std.meta.eql(
+            oracle,
+            switch (decoded) {
+                .core_command => |value| value,
+                .scroll_to_bottom => return error.TestExpectedEqual,
+            },
+        ));
+    }
+    const without_metrics = RemoteRuntime.projectGenerationCoreCommand(.{
+        .set_runtime_config = .{
+            .max_scrollback = 14,
+            .ambiguous_wide = false,
+            .emoji_wide = true,
+            .palette = .{null} ** 16,
+            .default_colors = .{ .foreground = 15, .background = 16 },
+            .cell_metrics = null,
+            .cursor_shape = 2,
+        },
+    });
+    try testing.expect(std.meta.eql(
+        generation_contract.CoreCommandRequest{ .set_runtime_config = .{
+            .max_scrollback = 14,
+            .ambiguous_wide = false,
+            .emoji_wide = true,
+            .palette = .{null} ** 16,
+            .foreground = 15,
+            .background = 16,
+            .cell_width = 0,
+            .cell_height = 0,
+            .cursor_shape = 2,
+        } },
+        without_metrics,
+    ));
+}
+
+test "CR3a-2c3c C2 normalizes only unsupported and retryable generation control outcomes" {
+    try testing.expect(try RemoteRuntime.normalizeGenerationControlError(error.Unsupported));
+    try testing.expect(!(try RemoteRuntime.normalizeGenerationControlError(error.Busy)));
+    try testing.expect(!(try RemoteRuntime.normalizeGenerationControlError(error.ResourceExhausted)));
+    try testing.expectError(
+        error.ProtocolError,
+        RemoteRuntime.normalizeGenerationControlError(error.InvalidOwner),
+    );
+    try testing.expectError(
+        error.ProtocolError,
+        RemoteRuntime.normalizeGenerationControlError(error.ProtocolError),
+    );
+    try testing.expectError(
+        error.Unauthorized,
+        RemoteRuntime.normalizeGenerationControlError(error.Unauthorized),
+    );
+    try testing.expectError(
+        error.ConnectionClosed,
+        RemoteRuntime.normalizeGenerationControlError(error.ConnectionClosed),
+    );
+}
+
 test "remote runtime: new spawn config fails closed against a legacy daemon that would ignore the field" {
     var client = client_mod.Client{
         .allocator = std.testing.allocator,
@@ -2614,6 +2805,8 @@ test "remote runtime: actual GUI attach resource failure closes and preserves ex
     rr.pump_ended = false;
     rr.resync_needed = false;
     rr.observation = .{};
+    defer rr.direct_input.deinit(allocator);
+    defer rr.pending_controls.deinit(allocator);
     defer rr.observation.deinit(allocator);
     try rr.observation.replace(allocator, .{
         .availability = .current,
@@ -2777,7 +2970,7 @@ const SnapshotFreeReentryProbe = struct {
     }
 };
 
-test "CR3a-2c1 generation GUI attach applies an initial snapshot through its final owner" {
+test "CR3a-2c1 CR3a-2c3c C2 generation attach applies snapshot then admits typed control" {
     try host_adapter_mod.HostAdapter.initializeProcessRuntime();
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -2819,8 +3012,28 @@ test "CR3a-2c1 generation GUI attach applies an initial snapshot through its fin
     );
     defer allocator.free(snapshot);
     const Peer = struct {
-        fn run(fd: c.fd_t, response_wire: []const u8, snapshot_wire: []const u8) void {
+        fn run(
+            fd: c.fd_t,
+            response_wire: []const u8,
+            snapshot_wire: []const u8,
+            control_ok: *bool,
+            oom_retry_ok: *bool,
+            retry_control_ok: *bool,
+            scroll_and_suffix_ok: *bool,
+            unsupported_wire_zero: *bool,
+            release_filler: *std.atomic.Value(u8),
+            filler_drained: *std.atomic.Value(u8),
+            filler_len: *usize,
+        ) void {
             defer _ = c.close(fd);
+            var read_timeout = posix.timeval{ .sec = 10, .usec = 0 };
+            if (c.setsockopt(
+                fd,
+                c.SOL.SOCKET,
+                c.SO.RCVTIMEO,
+                &read_timeout,
+                @sizeOf(posix.timeval),
+            ) != 0) return;
             const peer_allocator = std.heap.page_allocator;
             const request = readPeerFrame(fd, peer_allocator) catch return;
             defer peer_allocator.free(request.payload);
@@ -2829,6 +3042,40 @@ test "CR3a-2c1 generation GUI attach applies an initial snapshot through its fin
                 return;
             socket_server.writeAll(fd, response_wire) catch return;
             socket_server.writeAll(fd, snapshot_wire) catch return;
+            const control = readPeerFrame(fd, peer_allocator) catch return;
+            defer peer_allocator.free(control.payload);
+            control_ok.* = control.header.kind == .core_command and
+                control.header.stream_id == 7 and
+                std.mem.indexOf(u8, control.payload, "\"op\":\"report_focus\"") != null;
+            const oom_retry = readPeerFrame(fd, peer_allocator) catch return;
+            defer peer_allocator.free(oom_retry.payload);
+            oom_retry_ok.* = oom_retry.header.kind == .core_command and
+                oom_retry.header.stream_id == 7 and
+                std.mem.indexOf(u8, oom_retry.payload, "\"direction\":1") != null;
+            while (release_filler.load(.acquire) == 0) std.atomic.spinLoopHint();
+            const filler = peer_allocator.alloc(u8, filler_len.*) catch return;
+            defer peer_allocator.free(filler);
+            readRemoteTestExact(fd, filler) catch return;
+            filler_drained.store(1, .release);
+            const input = readPeerFrame(fd, peer_allocator) catch return;
+            defer peer_allocator.free(input.payload);
+            const retry_control = readPeerFrame(fd, peer_allocator) catch return;
+            defer peer_allocator.free(retry_control.payload);
+            retry_control_ok.* = input.header.kind == .input_bytes and
+                input.header.stream_id == 7 and std.mem.eql(u8, input.payload, "A") and
+                retry_control.header.kind == .core_command and
+                retry_control.header.stream_id == 7 and
+                std.mem.indexOf(u8, retry_control.payload, "\"gained\":false") != null;
+            const scroll = readPeerFrame(fd, peer_allocator) catch return;
+            defer peer_allocator.free(scroll.payload);
+            const suffix = readPeerFrame(fd, peer_allocator) catch return;
+            defer peer_allocator.free(suffix.payload);
+            scroll_and_suffix_ok.* = scroll.header.kind == .scroll_to_bottom and
+                scroll.header.stream_id == 7 and scroll.payload.len == 0 and
+                suffix.header.kind == .input_bytes and suffix.header.stream_id == 7 and
+                std.mem.eql(u8, suffix.payload, "B");
+            var poll_fd = posix.pollfd{ .fd = fd, .events = c.POLL.IN, .revents = 0 };
+            unsupported_wire_zero.* = c.poll(@ptrCast(&poll_fd), 1, 100) == 0;
         }
     };
     var fds: [2]c.fd_t = undefined;
@@ -2836,13 +3083,41 @@ test "CR3a-2c1 generation GUI attach applies an initial snapshot through its fin
         @as(c_int, 0),
         c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds),
     );
-    var peer = try std.Thread.spawn(.{}, Peer.run, .{ fds[1], response, snapshot });
+    var client_fd_owned_by_adapter = false;
+    defer {
+        if (!client_fd_owned_by_adapter) _ = c.close(fds[0]);
+    }
+    var peer_fd_owned_by_thread = false;
+    defer {
+        if (!peer_fd_owned_by_thread) _ = c.close(fds[1]);
+    }
+    var control_ok = false;
+    var oom_retry_ok = false;
+    var retry_control_ok = false;
+    var scroll_and_suffix_ok = false;
+    var unsupported_wire_zero = false;
+    var release_filler = std.atomic.Value(u8).init(0);
+    var filler_drained = std.atomic.Value(u8).init(0);
+    var filler_len: usize = 0;
+    var peer = try std.Thread.spawn(.{}, Peer.run, .{
+        fds[1],                 response,        snapshot,        &control_ok, &oom_retry_ok, &retry_control_ok, &scroll_and_suffix_ok,
+        &unsupported_wire_zero, &release_filler, &filler_drained, &filler_len,
+    });
+    peer_fd_owned_by_thread = true;
+    var peer_joined = false;
+    defer {
+        release_filler.store(1, .release);
+        _ = c.shutdown(fds[0], c.SHUT.RDWR);
+        if (!peer_joined) peer.join();
+    }
     var client: client_mod.Client = .{
         .allocator = allocator,
         .fd = fds[0],
         .host_id = 1,
         .parser = framing.FrameParser.init(allocator),
         .attachment_capabilities = .{ .peer_attach_generation = true },
+        .async_scroll_to_bottom_v1 = true,
+        .runtime_core_command_v1 = true,
         .metadata_support = .supported,
         .compatibility_profile = @import("compatibility.zig").profileForMajor(
             protocol.version_major,
@@ -2850,6 +3125,7 @@ test "CR3a-2c1 generation GUI attach applies an initial snapshot through its fin
     };
     var adapter: host_adapter_mod.HostAdapter = undefined;
     try host_adapter_mod.HostAdapter.initInPlace(&adapter, allocator, &client);
+    client_fd_owned_by_adapter = true;
     defer adapter.deinit();
     var rr: RemoteRuntime = undefined;
     rr.client = adapter.logicalClient();
@@ -2866,6 +3142,8 @@ test "CR3a-2c1 generation GUI attach applies an initial snapshot through its fin
     rr.pump_ended = false;
     rr.resync_needed = false;
     rr.observation = .{};
+    defer rr.direct_input.deinit(allocator);
+    defer rr.pending_controls.deinit(allocator);
     defer rr.observation.deinit(allocator);
 
     var free_probe = SnapshotFreeReentryProbe{
@@ -2877,7 +3155,76 @@ test "CR3a-2c1 generation GUI attach applies an initial snapshot through its fin
     adapter.slot.current.guarded_allocator.parent = free_probe.allocator();
 
     try rr.attachAndAssemble(1, .{ .cols = 1, .rows = 1 });
+    var attachment_live = true;
+    defer {
+        if (attachment_live) {
+            rr.surface.deinit();
+            rr.attachment.deinitWithAdapter(&adapter);
+        }
+    }
+    try rr.queueCoreCommand(.{ .report_focus = true });
+    adapter.logicalClient().runtime_core_command_v1 = false;
+    try rr.queueCoreCommand(.{ .scroll = 1 });
+    try std.testing.expectEqual(@as(usize, 0), rr.pending_controls.items.len);
+    adapter.logicalClient().runtime_core_command_v1 = true;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    const saved_client_allocator = adapter.logicalClient().allocator;
+    adapter.logicalClient().allocator = failing.allocator();
+    const oom_result = rr.queueCoreCommand(.{ .jump_to_prompt = 1 });
+    adapter.logicalClient().allocator = saved_client_allocator;
+    try oom_result;
+    try std.testing.expectEqual(@as(usize, 1), rr.pending_controls.items.len);
+    try std.testing.expect(adapter.logicalClient().pending_outbound == null);
+    try std.testing.expect(!adapter.logicalClient().unusable);
+    while (!(try rr.pumpQueuedInput())) {}
+    filler_len = try fillRemoteTestSendBuffer(adapter.logicalClient().fd);
+    try std.testing.expectEqual(@as(usize, 1), try rr.sendInputNonBlocking("A"));
+    try rr.queueCoreCommand(.{ .report_focus = false });
+    try rr.requestScrollToBottom();
+    try rr.requestScrollToBottom();
+    try rr.sendInput("B");
+    // send-buffer 포화 뒤에도 커널이 첫 control 전체를 받아들일 수 있다. 남은
+    // queue 길이는 1 또는 2지만, 아래 peer oracle이 wire 순서를 끝까지 검증한다.
+    try std.testing.expect(rr.pending_controls.items.len >= 1);
+    try std.testing.expect(rr.pending_controls.items.len <= 2);
+    try std.testing.expect(adapter.logicalClient().pending_outbound != null);
+    release_filler.store(1, .release);
+    const drain_deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds +
+        10 * std.time.ns_per_s;
+    while (filler_drained.load(.acquire) == 0) {
+        if (std.Io.Clock.awake.now(std.testing.io).nanoseconds >= drain_deadline)
+            return error.PeerDrainTimedOut;
+        try std.Io.sleep(
+            std.testing.io,
+            std.Io.Duration.fromMilliseconds(1),
+            .awake,
+        );
+    }
+    const pending = &adapter.logicalClient().pending_outbound.?;
+    if (pending.offset == 0) {
+        try std.testing.expectEqual(
+            @as(isize, 1),
+            c.send(adapter.logicalClient().fd, pending.frame.ptr, 1, 0),
+        );
+        pending.offset = 1;
+    }
+    try std.testing.expect(pending.offset > 0 and pending.offset < pending.frame.len);
+    while (!(try rr.attachment.pumpPendingOutput(adapter.logicalClient()))) {}
+    try std.testing.expect(adapter.logicalClient().pending_outbound == null);
+    while (!(try rr.pumpQueuedInput())) {}
     peer.join();
+    peer_joined = true;
+    try std.testing.expect(control_ok);
+    try std.testing.expect(oom_retry_ok);
+    try std.testing.expect(retry_control_ok);
+    try std.testing.expect(scroll_and_suffix_ok);
+    try std.testing.expect(unsupported_wire_zero);
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        rr.queueCoreCommand(.{ .report_focus = true }),
+    );
+    try std.testing.expectEqual(@as(usize, 1), rr.pending_controls.items.len);
+    try std.testing.expect(adapter.logicalClient().unusable);
     try std.testing.expect(free_probe.fired);
     try std.testing.expectEqual(generation_attachment_mod.DeinitOutcome.busy, free_probe.outcome.?);
     try std.testing.expectEqual(
@@ -2889,6 +3236,7 @@ test "CR3a-2c1 generation GUI attach applies an initial snapshot through its fin
     try std.testing.expectEqual(@as(u21, 'x'), rr.attachment.screenPtr().?.grid.cells[0].codepoint);
     rr.surface.deinit();
     rr.attachment.deinitWithAdapter(&adapter);
+    attachment_live = false;
 }
 
 test "CR3a-2c3a generation revoke partial wire poisons the RemoteRuntime connection" {
@@ -4282,7 +4630,7 @@ test "remote runtime preserves input core-command input order under socket backp
     try testing.expectEqual(@as(usize, 0), rr.pending_controls.items.len);
 }
 
-test "remote runtime control cap overflow fail-closes instead of silently losing final state" {
+test "CR3a-2c3c C2 remote runtime control cap overflow fail-closes instead of silently losing final state" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var fds: [2]c.fd_t = undefined;
@@ -4317,7 +4665,7 @@ test "remote runtime control cap overflow fail-closes instead of silently losing
     try testing.expectEqual(@as(isize, 0), c.read(fds[1], &byte, byte.len));
 }
 
-test "remote runtime control allocation failure also fail-closes instead of silently losing final state" {
+test "CR3a-2c3c C2 remote runtime control allocation failure also fail-closes instead of silently losing final state" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var fds: [2]c.fd_t = undefined;

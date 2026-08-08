@@ -43,10 +43,56 @@ pub const Kind = enum {
     /// index에 넣고 비교해야 한다 — 실측으로 확인).
     snapshot_name_status,
     snapshot_numstat,
+    /// 로컬 브랜치 목록(`for-each-ref refs/heads/`). 상태바 브랜치 항목을 눌렀을 때 고를 목록이다.
+    ///
+    /// **왜 `branch --list`가 아닌가**: `branch`는 pager·색·컬럼을 타는 porcelain이라 출력이 설정과 터미널 폭에
+    /// 따라 흔들린다. `for-each-ref`는 plumbing이라 `--format`이 곧 계약이고 정렬도 우리가 정한다.
+    ///
+    /// **읽기 전용 계약 안이다**: refs를 읽기만 하고 index·작업트리·네트워크를 건드리지 않는다. 이 목록으로
+    /// 브랜치를 **바꾸는 일은 우리가 하지 않는다** — 고른 이름을 활성 터미널에 `git switch <name>`으로 넣어
+    /// 주고 실행은 사용자 셸이 한다(hook·dirty tree·충돌이 평소처럼 사용자에게 보인다).
+    branches,
     /// diff 본문 한쪽(원본)을 통째로: `git show <spec>`. spec은 `blobSpec`이 만든 `HEAD:<경로>` 또는 `:<경로>`다.
     /// **worktree 쪽은 이 경로로 읽지 않는다** — 디스크 파일을 그대로 읽으면 되고, git을 한 번 덜 띄운다.
     show_blob,
 };
+
+/// `for-each-ref` 출력을 브랜치 이름 슬라이스로 쪼갠다. **할당하지 않는다** — `out`을 채우고 개수를 돌려주며,
+/// 각 슬라이스는 `text`를 빌린다(호출자가 text를 살려 둬야 한다).
+///
+/// 빈 줄과 `\r`은 버린다(CRLF 저장소·마지막 개행). `out`이 차면 거기서 멈춘다 — 조용히 자르는 게 아니라
+/// 호출자가 `count == out.len`으로 "더 있다"를 알 수 있다.
+pub fn collectBranches(text: []const u8, out: [][]const u8) usize {
+    var n: usize = 0;
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |raw| {
+        if (n == out.len) break;
+        const line = if (raw.len > 0 and raw[raw.len - 1] == '\r') raw[0 .. raw.len - 1] else raw;
+        if (line.len == 0) continue;
+        out[n] = line;
+        n += 1;
+    }
+    return n;
+}
+
+/// 브랜치 전환 **명령 문자열**을 만든다(터미널에 넣어 줄 텍스트). 우리가 실행하지 않는다.
+///
+/// **개행을 붙이지 않는다.** 붙이면 그 순간 실행돼 dirty tree·hook 결과를 사용자가 보기 전에 일이 벌어진다.
+/// 엔터는 사용자가 친다 — 그래서 이 함수의 계약에 "개행 없음"이 포함된다.
+///
+/// 이름에 공백·따옴표 같은 셸 메타문자가 있으면 **null**을 돌려준다. git이 허용하는 refname에는 공백이
+/// 없지만, 목록이 손상됐을 때 우리가 셸에 이상한 것을 넣지 않도록 입구에서 막는다.
+pub fn branchSwitchCommand(name: []const u8, buf: []u8) ?[]const u8 {
+    if (name.len == 0) return null;
+    for (name) |c| {
+        if (c <= 0x20 or c == 0x7f) return null; // 제어문자·공백
+        switch (c) {
+            '\'', '"', '\\', '$', '`', ';', '&', '|', '<', '>', '(', ')', '{', '}', '*', '?', '[', ']', '!', '#', '~' => return null,
+            else => {},
+        }
+    }
+    return std.fmt.bufPrint(buf, "git switch {s}", .{name}) catch null;
+}
 
 /// `git show`에 넘길 blob 지정자를 `buf`에 만든다. 할당하지 않는다.
 ///
@@ -213,6 +259,21 @@ pub fn build(kind: Kind, git_exe: []const u8, repo: []const u8, arg: ?[]const u8
             buf[n] = "--no-textconv";
             n += 1;
             buf[n] = arg orelse ""; // 스냅샷 tree OID
+            n += 1;
+        },
+        .branches => {
+            buf[n] = "for-each-ref";
+            n += 1;
+            // 최근에 쓴 브랜치가 위로 — 브랜치가 많은 저장소에서 찾는 수고를 줄인다.
+            buf[n] = "--sort=-committerdate";
+            n += 1;
+            // 이름만. refname:short는 `refs/heads/` 접두를 뗀 값이다.
+            buf[n] = "--format=%(refname:short)";
+            n += 1;
+            // 상한을 둔다 — 브랜치 수백 개인 저장소에서 목록이 화면을 넘고 파싱 버퍼도 커진다.
+            buf[n] = "--count=200";
+            n += 1;
+            buf[n] = "refs/heads/";
             n += 1;
         },
         .show_blob => {
@@ -384,4 +445,57 @@ test "턴 스냅샷은 임시 index로만 돌고 작업트리를 건드리지 �
     try testing.expect(has(named, "deadbeef"));
     // 읽기 전용 계약은 여기에도 그대로 붙는다.
     try testing.expect(has(named, "core.pager=cat"));
+}
+
+test "브랜치 목록은 plumbing으로만 읽고 쓰기 동사를 쓰지 않는다" {
+    var buf: [max_argv][]const u8 = undefined;
+    const argv = build(.branches, "/usr/bin/git", "/repo", null, &buf);
+
+    try testing.expect(has(argv, "for-each-ref"));
+    try testing.expect(has(argv, "--format=%(refname:short)")); // 출력 형태가 곧 계약이다
+    try testing.expect(has(argv, "refs/heads/")); // 원격 ref는 목록에 넣지 않는다
+    try testing.expect(has(argv, "--count=200")); // 상한 — 브랜치 수백 개에서 화면·버퍼가 터지지 않게
+
+    // **쓰기 동사가 섞이면 안 된다.** 이 목록으로 브랜치를 바꾸는 일은 우리가 하지 않는다(터미널에 명령을 넣어 준다).
+    for ([_][]const u8{ "switch", "checkout", "branch", "reset", "commit", "push" }) |verb| {
+        try testing.expect(!has(argv, verb));
+    }
+}
+
+test "브랜치 목록 파싱: 빈 줄·CR을 버리고 버퍼가 차면 멈춘다" {
+    var out: [3][]const u8 = undefined;
+
+    const n = collectBranches("main\nfeat/a\r\n\nfix/b\n", &out);
+    try testing.expectEqual(@as(usize, 3), n);
+    try testing.expectEqualStrings("main", out[0]);
+    try testing.expectEqualStrings("feat/a", out[1]); // CR 제거
+    try testing.expectEqualStrings("fix/b", out[2]); // 빈 줄은 건너뜀
+
+    // 버퍼가 차면 멈춘다 — count == out.len이 "더 있다"의 신호다.
+    var small: [2][]const u8 = undefined;
+    try testing.expectEqual(@as(usize, 2), collectBranches("a\nb\nc\n", &small));
+
+    // 빈 입력은 0.
+    try testing.expectEqual(@as(usize, 0), collectBranches("", &out));
+    try testing.expectEqual(@as(usize, 0), collectBranches("\n\n", &out));
+}
+
+test "브랜치 전환 명령: 개행 없이 만들고 수상한 이름은 거절한다" {
+    var buf: [128]u8 = undefined;
+
+    const cmd = branchSwitchCommand("feat/status-bar", &buf).?;
+    try testing.expectEqualStrings("git switch feat/status-bar", cmd);
+    // **개행이 없어야 한다** — 붙으면 사용자가 보기 전에 실행된다.
+    try testing.expect(std.mem.indexOfScalar(u8, cmd, '\n') == null);
+
+    // 셸 메타문자·공백·제어문자는 거절(손상된 목록이 셸에 흘러들지 않게).
+    try testing.expect(branchSwitchCommand("a b", &buf) == null);
+    try testing.expect(branchSwitchCommand("a;x", &buf) == null);
+    try testing.expect(branchSwitchCommand("a$(x)", &buf) == null);
+    try testing.expect(branchSwitchCommand("a\nb", &buf) == null);
+    try testing.expect(branchSwitchCommand("", &buf) == null);
+
+    // 버퍼가 모자라면 null(조용히 자르지 않는다).
+    var tiny: [8]u8 = undefined;
+    try testing.expect(branchSwitchCommand("feat/very-long-name", &tiny) == null);
 }

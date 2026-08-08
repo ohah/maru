@@ -293,10 +293,12 @@ fn publish(state: *State, generation: u64, result: *Result) bool {
     defer state.mutex.unlock(state.io);
     if (state.shutting_down or state.cancelled_generation == generation) {
         result.deinit(state.allocator);
+        result.* = .{}; // 호출자의 defer가 다시 deinit해도 안전하도록 **빈 값**으로 남긴다.
         return false;
     }
     state.results.append(state.allocator, result.*) catch {
         result.deinit(state.allocator);
+        result.* = .{};
         return false;
     };
     result.* = .{};
@@ -371,7 +373,11 @@ fn scan(state: *State, home: []const u8, generation: u64) bool {
     const allocator = state.allocator;
     const io = state.io;
     var result: Result = .{};
-    errdefer result.deinit(allocator);
+    // `scan`은 error가 아니라 `bool`을 돌려주므로 **errdefer가 한 번도 실행되지 않는다**. 취소 확인마다
+    // 있는 `return false`는 error가 아니기 때문이다. 그래서 도크를 닫아 취소가 걸리면 그때까지 모은
+    // record가 통째로 누수됐다(도크를 여닫을 때마다 반복). `publish`는 성공하면 `result`를 빈 값으로
+    // 비우고 실패해도 빈 값으로 남기므로, 여기 `defer`는 어느 경로에서도 정확히 한 번만 해제한다.
+    defer result.deinit(allocator);
     var claude_candidates: std.ArrayList(Candidate) = .empty;
     defer {
         for (claude_candidates.items) |*candidate| candidate.deinit(allocator);

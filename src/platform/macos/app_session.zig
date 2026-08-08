@@ -4115,8 +4115,48 @@ pub const AppSession = struct {
         };
     }
 
+    /// 도크 진입에서 아카이브 스캔을 요청할지. 순수 판정이라 부작용 없이 테스트로 고정한다.
+    ///
+    /// **가시성이 첫 조건이다.** `setDockView`는 도크가 닫힌 상태에서도 불리므로(workspace restore 등),
+    /// 이 가드가 없으면 보이지도 않는 도크가 사용자 이력 전체를 스캔한다.
+    fn shouldRefreshArchiveOnPresent(dock_visible: bool, view: dock_panel.View) bool {
+        return dock_visible and view == .agent_sessions;
+    }
+
+    /// 도크에서 **이 뷰를 보여 준다**. 도크를 여는 모든 경로가 여기를 지난다.
+    ///
+    /// `setDockView`(전환)와 `onDockViewPresented`(진입)를 나누는 이유: 전환 함수는 "같은 뷰면 no-op"이
+    /// 맞지만, **진입은 같은 뷰여도 일어난다**. 둘을 한 함수에 두었더니 `dock.view`가 이미
+    /// `agent_sessions`인 채로 도크를 열면 맨 앞 조기 반환에 걸려 아카이브 스캔 요청이 아예 나가지
+    /// 않았다(도크를 떠날 때 `cancelAgentSessionArchive`가 진행 중 스캔을 취소하므로 닫았다 여는 흐름에서
+    /// 특히 잘 드러난다 — 목록도 스피너도 없이 비어 있고 새로 고침을 눌러야 나타났다).
+    fn enterDockView(self: *AppSession, view: dock_panel.View) void {
+        self.setDockView(view);
+        self.onDockViewPresented(view);
+    }
+
+    /// 진입 훅. 같은 뷰로 다시 들어와도 불린다.
+    ///
+    /// **가시성 가드가 필수다** — `setDockView`는 도크가 닫힌 상태에서도 불리므로(workspace restore 등),
+    /// 가드가 없으면 보이지도 않는 도크 때문에 사용자 이력 전체를 스캔한다.
+    ///
+    /// 스캔 요청은 **항상 `force = false`**로 한다. 취소된 세대의 재요청은 `updateAgentSessionArchive`가
+    /// 단독으로 소유한다(그쪽만 `force = true`). 양쪽이 force를 쓰면 도크를 빠르게 여닫을 때
+    /// `취소 → 재요청 → 취소`가 반복된다 — 취소 시 `agent_session_archive_completed_ns`가 갱신되지 않아
+    /// TTL 가드도 걸리지 않기 때문이다.
+    fn onDockViewPresented(self: *AppSession, view: dock_panel.View) void {
+        if (!shouldRefreshArchiveOnPresent(self.dockVisible(), view)) return;
+        self.refreshAgentSessionArchive(false);
+    }
+
     /// 뷰 전환. 같은 뷰면 no-op이라 불필요한 재그리기를 만들지 않는다. 트리를 떠날 때는 키보드 포커스도 함께
     /// 돌려준다 — 보이지 않는 트리가 키 입력을 계속 먹으면 안 된다(docs/file-explorer.md §3.5).
+    ///
+    /// **도크를 여는 경로는 이 함수를 직접 부르지 말고 `enterDockView`를 쓴다.** 여기 있는 조기 반환은
+    /// 재그리기 억제가 목적이라, 진입 부작용(스캔 요청)까지 함께 건너뛰면 안 된다.
+    ///
+    /// 이 함수를 그대로 쓰는 곳은 "전환만" 원하는 테스트다 — 진입 부작용 없이 상태만 세우려는 의도이므로
+    /// 남겨 둔다.
     fn setDockView(self: *AppSession, view: dock_panel.View) void {
         if (self.dock.view == view) return;
         // `dock.size == 0`은 view별 자동 폭 sentinel이다. 따라서 explorer(180pt)와
@@ -24152,7 +24192,7 @@ pub const AppSession = struct {
                 // 나중에 바가 커져도 트리 클릭에 먹히지 않게 한다(docs/file-explorer.md §3.5).
                 if (dg.view_bar.h > 0 and layout_math.pointInRect(x_px, y_px, dg.view_bar)) {
                     if (self.dockViewSlotAt(x_px, y_px)) |slot| {
-                        if (dockViewForSlot(slot)) |view| self.setDockView(view);
+                        if (dockViewForSlot(slot)) |view| self.enterDockView(view);
                     }
                     return; // 바 안의 여백 클릭도 트리로 흘려보내지 않는다.
                 }
@@ -33561,6 +33601,7 @@ pub const AppSession = struct {
             .search_cursor_visible = self.blink_visible,
             // The rich system-text worker follows the same truthful loading rule as archive
             // refresh: existing cards remain visible while its immutable artifact is pending.
+            .partial = self.agent_session_archive_partial,
             .loading = self.agent_session_archive_loading and self.agent_session_archive_records.items.len == 0,
             .refreshing = self.agent_session_archive_loading and self.agent_session_archive_records.items.len > 0,
             .spinner_phase = @intCast(self.agent_spin_frame & 7),
@@ -35336,7 +35377,7 @@ pub const AppSession = struct {
     fn openDockTo(self: *AppSession, view: dock_panel.View) void {
         self.dock.presented = true;
         self.dock.collapsed = false;
-        self.setDockView(view);
+        self.enterDockView(view);
         for (self.tabs.items) |tab| self.resizeTabPanes(tab);
         self.recomputeActivePaneRect();
         self.last_resize_size = null;
@@ -63205,6 +63246,28 @@ test "settings keybind stale unbind 정리: unbind한 chord를 다시 바인딩�
         reserved = true;
     };
     try std.testing.expect(reserved);
+}
+
+// 도크를 열면 아카이브 스캔이 요청되는가. 예전에는 `setDockView` 하나가 "전환"과 "진입"을 겸해서,
+// `dock.view`가 이미 `agent_sessions`인 채로 도크를 열면 맨 앞 조기 반환(`if (self.dock.view == view) return`)에
+// 걸려 스캔 요청이 아예 나가지 않았다 — 목록도 스피너도 없이 비었고 새로 고침을 눌러야 나타났다.
+// 도크를 떠날 때 진행 중 스캔이 취소되므로(cancelAgentSessionArchive) 닫았다 여는 흐름에서 특히 잘 드러났다.
+//
+// 실제 스캔은 사용자 홈 전체를 읽는 워커라 단위 테스트에서 돌릴 수 없다. 그래서 진입 판정을 순수 함수로
+// 분리해 그 규칙을 고정하고, 호출 경로는 `enterDockView` 하나로 모았다.
+test "도크 진입 판정: 보이는 도크의 agent_sessions에서만 아카이브 스캔을 요청한다" {
+    // 보이고 + agent_sessions → 요청.
+    try std.testing.expect(AppSession.shouldRefreshArchiveOnPresent(true, .agent_sessions));
+    // 같은 뷰로 다시 들어와도 판정은 같다. "전환이 없었다"는 이유로 스캔을 건너뛰면 안 된다 — 이 회귀가
+    // 첫 진입에 목록이 비어 있던 원인이다.
+    try std.testing.expect(AppSession.shouldRefreshArchiveOnPresent(true, .agent_sessions));
+    // 도크가 안 보이면 요청하지 않는다. setDockView는 workspace restore처럼 도크가 닫힌 상태에서도
+    // 불리므로, 이 가드가 없으면 보이지도 않는 도크가 사용자 이력 전체를 스캔한다.
+    try std.testing.expect(!AppSession.shouldRefreshArchiveOnPresent(false, .agent_sessions));
+    // 다른 뷰는 아카이브와 무관하다.
+    try std.testing.expect(!AppSession.shouldRefreshArchiveOnPresent(true, .explorer));
+    try std.testing.expect(!AppSession.shouldRefreshArchiveOnPresent(true, .source_control));
+    try std.testing.expect(!AppSession.shouldRefreshArchiveOnPresent(false, .explorer));
 }
 
 test "settings 검색 필터: 쿼리로 keybind/schema 행 필터 + 필터 후 인덱스가 올바른 액션에 매핑 (CS-4-4 검색)" {

@@ -84,8 +84,6 @@ pub const Result = struct {
     /// 정상적으로 존재한다. **정책적 제외(worker 판정)는 여기 포함하지 않는다** — 정상 동작이 상시
     /// 경고로 보이면 경고가 무의미해진다.
     partial: bool = false,
-    /// 상한을 넘겨 버린 줄의 수. 개수만 담는다(경로·내용은 main actor로 올리지 않는다).
-    skipped_oversized_line: u32 = 0,
     outcome: Outcome = .completed,
 
     pub fn deinit(self: *Result, allocator: std.mem.Allocator) void {
@@ -359,7 +357,25 @@ fn publishProgress(state: *State, generation: u64, result: *const Result) void {
             .subagent_count = record.subagent_count,
         });
     }
-    if (!publish(state, generation, &snapshot)) snapshot.deinit(state.allocator);
+    state.mutex.lockUncancelable(state.io);
+    defer state.mutex.unlock(state.io);
+    if (state.shutting_down or state.cancelled_generation == generation) {
+        snapshot.deinit(state.allocator);
+        return;
+    }
+    // 아직 안 가져간 부분 진행이 있으면 **쌓지 않고 대체한다**. 부분 진행은 최신 하나만 의미가 있고,
+    // 쌓이면 main actor가 낡은 목록마다 filter/projection/anchor 복원을 다시 한다. 첫 진입인데 캐시가
+    // 이미 따뜻한 경우(도크를 열자마자 닫고 다시 열면 그렇게 된다) 12개 누적 조건이 수 ms 안에 수십 번
+    // 걸리므로 가정이 아니라 실제로 도달하는 경로다.
+    if (state.results.items.len > 0) {
+        const last = &state.results.items[state.results.items.len - 1];
+        if (last.outcome == .partial_progress) {
+            last.deinit(state.allocator);
+            last.* = snapshot;
+            return;
+        }
+    }
+    state.results.append(state.allocator, snapshot) catch snapshot.deinit(state.allocator);
 }
 
 fn publish(state: *State, generation: u64, result: *Result) bool {
@@ -694,9 +710,13 @@ fn appendCandidateFile(state: *State, candidate: Candidate, generation: u64, res
     if (stat.kind != .file or stat.size == 0) return;
 
     var parser = archive.Parser.init(allocator, candidate.provider);
-    var parsed_opt = streamFileIntoParser(state, file, generation, &parser, result) catch return;
-    var parsed = parsed_opt orelse return;
-    errdefer parsed.deinit(allocator);
+    var parsed = (streamFileIntoParser(state, file, generation, &parser, result, max_line_bytes) catch return) orelse return;
+    // `errdefer`가 아니라 `defer`+플래그다. 이 함수는 `void`를 돌려주므로 `errdefer`는 **결코 실행되지
+    // 않는다** — 취소나 할당 실패로 빠져나갈 때마다 요약 하나가 통째로 샜다(도크를 닫을 때 발생하는
+    // 실사용 경로다).
+    var moved_to_result = false;
+    defer if (!moved_to_result) parsed.deinit(allocator);
+
     if (cancelled(state, generation)) return;
     canonicalizeParsedCwd(state, &parsed);
     cacheParsed(state, candidate, &parsed);
@@ -705,7 +725,7 @@ fn appendCandidateFile(state: *State, candidate: Candidate, generation: u64, res
         allocator.free(path);
         return;
     };
-    parsed_opt = null; // 소유권이 records로 넘어갔다
+    moved_to_result = true;
 }
 
 /// 파일을 64 KiB씩 읽어 개행으로 잘라 파서에 넘긴다. 청크 경계에 걸친 줄만 `pending`에 누적한다.
@@ -718,6 +738,9 @@ fn streamFileIntoParser(
     generation: u64,
     parser: *archive.Parser,
     result: *Result,
+    /// 한 줄의 상한. 제품은 항상 `max_line_bytes`를 넘긴다 — 파라미터인 것은 테스트가 수십 MB fixture
+    /// 없이 상한 분기를 재현하기 위해서다.
+    line_cap: usize,
 ) !?archive.Parsed {
     const allocator = state.allocator;
     const io = state.io;
@@ -727,8 +750,14 @@ fn streamFileIntoParser(
     var offset: u64 = 0;
     var dropped_line = false;
     var worked_verdict = false;
+    // 상한을 넘겨 버린 줄의 **나머지**를 다음 개행까지 건너뛴다. 이 상태가 없으면 버린 줄의 뒷부분이
+    // 다음 청크에서 `pending`이 빈 채로 개행을 만나 **독립된 줄로 오인**된다.
+    var skipping_rest_of_line = false;
 
     while (true) {
+        // 읽기 실패는 partial로 올리지 않는다. 스캔 도중 파일이 지워지거나 잘리는 것은 정상이고,
+        // 정상 동작이 상시 경고로 보이면 경고가 무의미해진다(§4). 진짜 누락인 요약 할당 실패는
+        // 아래 `finish` 경로에서 표시한다.
         const n = file.readPositional(io, &.{&buf}, offset) catch return null;
         if (n == 0) break;
         offset += n;
@@ -736,6 +765,17 @@ fn streamFileIntoParser(
         while (std.mem.indexOfScalar(u8, rest, '\n')) |nl| {
             const piece = rest[0..nl];
             rest = rest[nl + 1 ..];
+            if (skipping_rest_of_line) {
+                skipping_rest_of_line = false; // 버린 줄이 여기서 끝났다
+                continue;
+            }
+            // 상한은 **붙이기 전에** 본다. 이 검사를 개행 없는 경로에만 두면 줄의 끝이 청크 안에 있는
+            // 순간 `pending`이 상한 없이 커져 방어선이 실효를 잃는다.
+            if (pending.items.len + piece.len > line_cap) {
+                pending.clearRetainingCapacity();
+                dropped_line = true;
+                continue; // 줄이 여기서 끝났으니 건너뛸 나머지가 없다
+            }
             if (pending.items.len == 0) {
                 parser.consumeLine(piece);
             } else {
@@ -748,14 +788,16 @@ fn streamFileIntoParser(
                 pending.clearRetainingCapacity();
             }
         }
-        if (rest.len > 0) {
-            if (pending.items.len + rest.len > max_line_bytes) {
-                // 손상 파일 방어. 그 줄만 버리고 다음 개행부터 다시 잇는다.
+        if (rest.len > 0 and !skipping_rest_of_line) {
+            if (pending.items.len + rest.len > line_cap) {
+                // 손상 파일 방어. 그 줄만 버리고 **다음 개행까지 건너뛴 뒤** 다시 잇는다.
                 pending.clearRetainingCapacity();
                 dropped_line = true;
+                skipping_rest_of_line = true;
             } else pending.appendSlice(allocator, rest) catch {
                 pending.clearRetainingCapacity();
                 dropped_line = true;
+                skipping_rest_of_line = true;
             };
         }
         // Codex worker 조기 중단은 **경계를 지난 뒤 한 번만** 판정한다. 그 전에 판정하면
@@ -766,13 +808,16 @@ fn streamFileIntoParser(
         }
         if (cancelled(state, generation)) return null;
     }
-    // 마지막 줄에 개행이 없어도 값을 잃지 않는다.
-    if (pending.items.len > 0) parser.consumeLine(pending.items);
+    // 마지막 줄에 개행이 없어도 값을 잃지 않는다(버리는 중이던 줄은 제외).
+    if (pending.items.len > 0 and !skipping_rest_of_line) parser.consumeLine(pending.items);
     if (dropped_line) {
         result.partial = true;
-        result.skipped_oversized_line +|= 1;
     }
-    return parser.finish() catch null;
+    return parser.finish() catch {
+        // 요약 할당 실패도 누락이다 — 조용히 사라지지 않게 표시한다(§4).
+        result.partial = true;
+        return null;
+    };
 }
 
 /// Provider JSONL may retain a lexical cwd reached through a symlink.  Scope
@@ -970,6 +1015,114 @@ test "Claude 서브에이전트 개수: 형제 디렉터리 항목만 세고 없
     // 확장자 없는 입력은 제품 경로에 없다 — `sess-a`를 그대로 stem으로 보는 것이 자연스러운 동작이다.)
     try std.testing.expectEqual(@as(u32, 0), countClaudeSubagents(io, &project, "missing.jsonl"));
     try std.testing.expectEqual(@as(u32, 0), countClaudeSubagents(io, &project, ".jsonl"));
+}
+
+// 상한을 넘긴 줄을 버릴 때 **그 줄의 나머지까지** 건너뛰는가. 건너뛰지 않으면 뒷부분이 다음 청크에서
+// `pending`이 빈 채로 개행을 만나 독립된 줄로 오인된다 — 그 조각이 우연히 JSON 객체 모양이면 없는
+// 레코드를 만들어낼 수 있다. 적대적 검증 1회차에서 찾았다.
+/// 상한 초과 fixture를 만들어 스트리밍시킨다. `filler_bytes`가 상한을 얼마나 넘느냐에 따라 초과가
+/// **개행이 있는 청크**에서 걸리는지(줄 끝이 보이는 경우) **개행 없는 청크**에서 걸리는지가 갈리며,
+/// 둘은 서로 다른 분기다. 두 경우 모두 뒤따르는 정상 줄은 온전히 읽혀야 한다.
+fn expectOversizedLineDropped(line_cap: usize, filler_bytes: usize) !void {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // 거대한 줄의 **뒤쪽이 유효한 JSON처럼 보이게** 한다. 버린 줄의 나머지를 건너뛰지 않으면 그 조각이
+    // 독립된 줄로 파싱돼 sessionId가 잘못 잡힌다.
+    var big: std.ArrayList(u8) = .empty;
+    defer big.deinit(allocator);
+    try big.appendSlice(allocator, "{\"filler\":\"");
+    try big.appendNTimes(allocator, 'x', filler_bytes);
+    try big.appendSlice(allocator, "\"}{\"sessionId\":\"leaked\",\"type\":\"user\",\"message\":{\"role\":\"user\",\"text\":\"침입\"}}\n");
+    try big.appendSlice(allocator, "{\"sessionId\":\"real\",\"cwd\":\"/repo\",\"type\":\"user\",\"message\":{\"role\":\"user\",\"text\":\"정상 요청\"}}\n");
+    try tmp.dir.writeFile(io, .{ .sub_path = "big.jsonl", .data = big.items });
+
+    const file = try tmp.dir.openFile(io, "big.jsonl", .{});
+    defer file.close(io);
+
+    var state_storage: State = .{ .allocator = allocator, .io = io };
+    var parser = archive.Parser.init(allocator, .claude);
+    var result: Result = .{};
+    defer result.deinit(allocator);
+    // generation은 0이 아니어야 한다 — `State.cancelled_generation` 기본값이 0이라 0을 넘기면 첫 청크
+    // 경계에서 취소로 판정된다.
+    const parsed_opt = try streamFileIntoParser(&state_storage, file, 1, &parser, &result, line_cap);
+
+    // 긴 줄을 버렸다는 사실이 남는다.
+    try std.testing.expect(result.partial);
+    // 그리고 버린 줄의 뒷부분("leaked")이 아니라 **그다음 정상 줄**만 읽혔다.
+    var parsed = parsed_opt.?;
+    defer parsed.deinit(allocator);
+    try std.testing.expectEqualStrings("real", parsed.session_id);
+    try std.testing.expectEqualStrings("정상 요청", parsed.summary);
+}
+
+// 줄의 끝(개행)이 초과를 감지한 그 청크 안에 있는 경우. 이 분기에 상한 검사가 없으면 `pending`이
+// 상한과 무관하게 커져 방어선 자체가 무의미해진다.
+test "스트리밍: 줄 끝이 같은 청크에 보여도 상한 초과 줄은 버린다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // 줄 전체가 첫 청크(64 KiB) 안에 들어가므로 개행이 보이는 상태에서 초과가 걸린다.
+    try expectOversizedLineDropped(1024, 2048);
+}
+
+// 초과가 개행 없는 청크에서 걸리는 경우. 버린 줄의 **나머지**를 다음 개행까지 건너뛰지 않으면 그 꼬리가
+// 독립된 줄로 오인돼 "leaked"가 결과에 섞인다.
+test "스트리밍: 상한 초과가 줄 중간에서 걸리면 그 줄의 나머지까지 건너뛴다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // filler가 청크보다 커서 첫 개행을 만나기 전에 초과가 걸린다.
+    try expectOversizedLineDropped(1024, read_chunk_bytes * 3);
+}
+
+// 요약(`Parsed`)은 파싱된 뒤 `result.records`로 넘어가기 전까지 이 함수가 소유한다. 그 사이 어느
+// 할당이 실패해도 소유권이 공중에 뜨면 안 된다 — 예전 코드는 `void` 반환 함수에 `errdefer`를 걸어
+// 두었고, `errdefer`는 error 반환에만 동작하므로 **한 번도 실행되지 않았다**. 실패 지점을 하나씩 옮겨
+// 가며 전 구간을 훑는다.
+test "appendCandidateFile: 어느 할당이 실패해도 요약이 새지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "s.jsonl", .data =
+        \\{"sessionId":"s-1","cwd":"/repo","type":"user","message":{"role":"user","content":[{"type":"text","text":"요청"}]}}
+        \\{"type":"assistant","message":{"role":"assistant","model":"m","content":[{"type":"text","text":"응답"}]}}
+        \\
+    });
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_buf);
+    const path = try std.fs.path.join(std.testing.allocator, &.{ root_buf[0..root_len], "s.jsonl" });
+    defer std.testing.allocator.free(path);
+    const probe = try std.Io.Dir.cwd().openFile(io, path, .{ .follow_symlinks = false });
+    const probe_stat = try probe.stat(io);
+    const probe_device = openedDevice(probe);
+    probe.close(io);
+
+    const candidate: Candidate = .{
+        .provider = .claude,
+        .source_path = path,
+        .open_path = path,
+        .mtime_ns = probe_stat.mtime.nanoseconds,
+        .size = probe_stat.size,
+        .inode = probe_stat.inode,
+        .device = probe_device,
+        .subagent_count = 0,
+    };
+
+    var fail_index: usize = 0;
+    while (fail_index < 48) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        var state: State = .{ .allocator = failing.allocator(), .io = io };
+        var result: Result = .{};
+        appendCandidateFile(&state, candidate, 1, &result);
+        result.deinit(state.allocator);
+        for (state.cache.items) |*entry| entry.deinit(state.allocator);
+        state.cache.deinit(state.allocator);
+        state.results.deinit(state.allocator);
+        // 실패를 주입할 할당이 더 없으면 전 구간을 훑은 것이다.
+        if (failing.has_induced_failure == false and fail_index > 0) break;
+    }
 }
 
 test "archive scanner refuses a symlinked history directory" {

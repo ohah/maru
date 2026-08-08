@@ -211,18 +211,28 @@ pub fn parse(allocator: std.mem.Allocator, provider: Provider, bytes: []const u8
 }
 
 fn duplicateParsed(allocator: std.mem.Allocator, provider: Provider, session_id: []const u8, title: []const u8, summary: []const u8, cwd: []const u8, cwd_canonical: bool, model: []const u8, message_count: u32, verified_user: bool) !Parsed {
-    const out = Parsed{
+    // 필드 초기화식 안에 `try`를 늘어놓으면 앞서 성공한 dupe를 되돌릴 자리가 없다 — 뒤쪽 할당이
+    // 실패할 때마다 문자열이 통째로 샜다. 한 단계씩 잡고 각자 errdefer를 건다.
+    const session_copy = try allocator.dupe(u8, session_id);
+    errdefer allocator.free(session_copy);
+    const title_copy = try displayCopy(allocator, title, max_title_bytes);
+    errdefer allocator.free(title_copy);
+    const summary_copy = try displayCopy(allocator, summary, max_summary_bytes);
+    errdefer allocator.free(summary_copy);
+    const cwd_copy = try displayCopy(allocator, cwd, max_cwd_bytes);
+    errdefer allocator.free(cwd_copy);
+    const model_copy = try displayCopy(allocator, model, max_title_bytes);
+    return .{
         .provider = provider,
-        .session_id = try allocator.dupe(u8, session_id),
-        .title = try displayCopy(allocator, title, max_title_bytes),
-        .summary = try displayCopy(allocator, summary, max_summary_bytes),
-        .cwd = try displayCopy(allocator, cwd, max_cwd_bytes),
+        .session_id = session_copy,
+        .title = title_copy,
+        .summary = summary_copy,
+        .cwd = cwd_copy,
         .cwd_canonical = cwd_canonical,
-        .model = try displayCopy(allocator, model, max_title_bytes),
+        .model = model_copy,
         .message_count = message_count,
         .verified_user = verified_user,
     };
-    return out;
 }
 
 fn displayCopy(allocator: std.mem.Allocator, text: []const u8, max_len: usize) ![]u8 {

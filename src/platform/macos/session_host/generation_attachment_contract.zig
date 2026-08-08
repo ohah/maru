@@ -221,6 +221,7 @@ pub const TransportOwnerSeal = struct {
     owner_size: usize = 0,
     transport_addr: usize = 0,
     prepared_storage_addr: usize = 0,
+    rpc_response_addr: usize = 0,
     lifecycle: TransportOwnerLifecycle = .pristine,
 
     fn lifecycleRawValid(self: *const TransportOwnerSeal) bool {
@@ -242,9 +243,50 @@ pub const TransportOwnerSeal = struct {
         transport_addr: usize,
         prepared_storage_addr: usize,
     ) error{ InvalidState, InvalidIncarnation }!void {
+        return initCommon(
+            out,
+            incarnation,
+            owner_addr,
+            owner_size,
+            transport_addr,
+            prepared_storage_addr,
+            0,
+        );
+    }
+
+    pub fn initWithRpcResponseInPlace(
+        out: *TransportOwnerSeal,
+        incarnation: u64,
+        owner_addr: usize,
+        owner_size: usize,
+        transport_addr: usize,
+        prepared_storage_addr: usize,
+        rpc_response_addr: usize,
+    ) error{ InvalidState, InvalidIncarnation }!void {
+        if (rpc_response_addr == 0) return error.InvalidIncarnation;
+        return initCommon(
+            out,
+            incarnation,
+            owner_addr,
+            owner_size,
+            transport_addr,
+            prepared_storage_addr,
+            rpc_response_addr,
+        );
+    }
+
+    fn initCommon(
+        out: *TransportOwnerSeal,
+        incarnation: u64,
+        owner_addr: usize,
+        owner_size: usize,
+        transport_addr: usize,
+        prepared_storage_addr: usize,
+        rpc_response_addr: usize,
+    ) error{ InvalidState, InvalidIncarnation }!void {
         if (!out.lifecycleRawValid() or out.self_addr != 0 or out.incarnation != 0 or
             out.owner_addr != 0 or out.owner_size != 0 or out.transport_addr != 0 or
-            out.prepared_storage_addr != 0 or
+            out.prepared_storage_addr != 0 or out.rpc_response_addr != 0 or
             out.lifecycle != .pristine)
             return error.InvalidState;
         if (incarnation == 0 or owner_addr == 0 or owner_size == 0 or transport_addr == 0 or
@@ -258,6 +300,7 @@ pub const TransportOwnerSeal = struct {
             .owner_size = owner_size,
             .transport_addr = transport_addr,
             .prepared_storage_addr = prepared_storage_addr,
+            .rpc_response_addr = rpc_response_addr,
             .lifecycle = .live,
         };
     }
@@ -280,7 +323,7 @@ pub const TransportOwnerSeal = struct {
         return switch (self.lifecycle) {
             .pristine => self.self_addr == 0 and self.incarnation == 0 and
                 self.owner_addr == 0 and self.owner_size == 0 and self.transport_addr == 0 and
-                self.prepared_storage_addr == 0,
+                self.prepared_storage_addr == 0 and self.rpc_response_addr == 0,
             .terminal => self.self_addr == @intFromPtr(self) and self.incarnation != 0 and
                 self.ownerRangeValid() and
                 self.transport_addr != 0 and self.prepared_storage_addr != 0 and

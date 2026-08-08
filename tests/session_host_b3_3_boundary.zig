@@ -33,7 +33,7 @@ test "B3-3 private wrapper is the sole progress execute integration boundary" {
     try std.testing.expectEqual(@as(usize, 1), count(slot, ".exhaustRpcResponseEpochForTest("));
     try std.testing.expectEqual(@as(usize, 1), count(slot, ".rpcExecutionAuthoritiesTerminalForTest("));
     try std.testing.expectEqual(@as(usize, 9), count(slot, "executePreparedRpcTerminalSink("));
-    try std.testing.expectEqual(@as(usize, 4), count(slot, "executePreparedRpcCorrelatedResponseForTest("));
+    try std.testing.expectEqual(@as(usize, 3), count(slot, "executePreparedRpcCorrelatedResponseForTest("));
     try std.testing.expectEqual(@as(usize, 0), count(transport, "PreparedRequestExecutionLease"));
     try std.testing.expectEqual(@as(usize, 0), count(transport, "executePreparedRpcTerminalSink"));
 

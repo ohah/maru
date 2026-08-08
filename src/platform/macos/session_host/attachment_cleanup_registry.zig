@@ -894,12 +894,11 @@ pub const AttachmentCleanupRegistry = struct {
         return entry.prepared_request.settlementReadiness();
     }
 
-    pub fn rpcResponseSettlementReadinessForTest(
+    pub fn rpcResponseSettlementReadiness(
         self: *AttachmentCleanupRegistry,
         reservation: Reservation,
         identity: contract.BindingIdentity,
     ) Error!rpc_response_authority.SettlementReadiness {
-        if (!builtin.is_test) @compileError("test-only RPC response readiness");
         const entry = try self.exactEntry(reservation, identity);
         return entry.rpc_response_authority.settlementReadiness();
     }

@@ -1564,6 +1564,7 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "", .name = "process_runtime_pid" },
                 .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "", .name = "generation_response_incarnation_issuer" },
                 .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "threadlocal", .name = "prepared_execution_cleanup_active_addr" },
+                .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "threadlocal", .name = "finish_permit_alias_case_for_test" },
                 .{ .parent = "ClientSlot", .kind = "const", .visibility = "pub", .modifier = "", .name = "ProcessRuntimeInitError" },
                 .{ .parent = "ClientSlot", .kind = "const", .visibility = "pub", .modifier = "", .name = "EndedPurgeCommitError" },
                 .{ .parent = "ClientSlot", .kind = "const", .visibility = "pub", .modifier = "", .name = "EndedPurgeResult" },
@@ -1675,13 +1676,23 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "rpcTerminalEvidence" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "PreparedRpcPublicationScope" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "PreparedRpcExecutionMode" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "PreparedRpcFreeEvidenceRetirePermit" },
+                .{ .parent = "root", .kind = "const", .visibility = "pub", .modifier = "", .name = "GenerationRpcSubstrateExecute" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "ResponseDestination" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "RpcExecutionDestination" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "resolveResponseDestination" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "executeGenerationRpcSubstrate" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "canonicalRpcResponseAddress" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "executePreparedRpcPrivate" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "publishPreparedRpcResponse" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "failStopRpcPublication" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "executePreparedRpcCorrelatedResponseForTest" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "RpcResponseDisposition" },
-                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "beginRpcResponseBorrowForTest" },
-                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "finishRpcResponseOwnedForTest" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "failStopPermitAliasPreflight" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "FinishPermitRawStorage" },
+                .{ .parent = "root", .kind = "fn", .visibility = "pub", .modifier = "", .name = "armFinishPermitAliasForTest" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "beginRpcResponseBorrow" },
+                .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "finishRpcResponseOwned" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "terminalizeBorrowedRpcResponseNoFree" },
                 .{ .parent = "root", .kind = "fn", .visibility = "private", .modifier = "", .name = "failStopFreedRpcResponse" },
                 .{ .parent = "PreparedExecutionTxn", .kind = "fn", .visibility = "private", .modifier = "", .name = "settlePostExecuteReusableUnderPublicationScope" },
@@ -2475,12 +2486,18 @@ test "CR3a-2c3b B3-0a response provenance has one strict production path" {
     const response_pointer_at = std.mem.indexOf(
         u8,
         execute_generation_source,
-        "@ptrFromInt(execution.response_out_addr);",
+        "@ptrFromInt(\n        execution.response_out_addr,\n    );",
+    ) orelse return error.TestUnexpectedResult;
+    const canonical_destination_at = std.mem.indexOf(
+        u8,
+        execute_generation_source,
+        "resolveResponseDestination(admission.owner, .{ .attach = response_out })",
     ) orelse return error.TestUnexpectedResult;
     try std.testing.expect(containment_at < owner_admission_at);
     try std.testing.expect(owner_admission_at < response_pointer_at);
+    try std.testing.expect(response_pointer_at < canonical_destination_at);
     try std.testing.expectEqual(
-        @as(usize, 2),
+        @as(usize, 1),
         countOccurrences(
             execute_generation_source[0..response_pointer_at],
             "byteRangeFullyContained(",
@@ -2622,9 +2639,9 @@ test "CR3a-2c3b B3-0a response provenance has one strict production path" {
         countIdentifierOutsideTopLevelTests(slot_product, "failStopResponsePayloadTransfer"),
     );
     try std.testing.expectEqual(
-        // Two response strict wrappers, the private B3-0 request transaction fail-stop, and the
-        // three reviewed B3-4/5 RPC publication/borrow terminal fail-stop boundaries.
-        @as(usize, 6),
+        // Two response strict wrappers, the private B3-0 request transaction fail-stop, the three
+        // reviewed B3-4/5 RPC publication/borrow terminal boundaries, and one correction guard.
+        @as(usize, 7),
         countOccurrences(slot_product, ") noreturn {"),
     );
     try std.testing.expectEqual(
@@ -2833,7 +2850,7 @@ test "B3-0.4 focused product gate stays nonempty and dual-mode" {
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(build_source, "run_b3_0_4_tests.step.dependOn(&run_b3_issuer_cleanup_tests.step)"));
     try std.testing.expectEqual(@as(usize, 1), countOccurrences(build_source, ".filters = &.{\"B3-0.1 pre-wire issuer exhaustion\"}"));
     try std.testing.expectEqual(
-        @as(usize, 2),
+        @as(usize, 4),
         countOccurrences(build_source, "src/platform/macos/session_host/generation_transport.zig"),
     );
 }
@@ -6990,12 +7007,12 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
             countIdentifierOutsideTopLevelTests(source, "deinitPayloadOnly"),
         );
         try std.testing.expectEqual(
-            @as(usize, if (is_generation_transport) 2 else if (is_generation_attachment) 1 else 0),
+            @as(usize, if (is_generation_transport) 3 else if (is_generation_attachment) 1 else 0),
             countIdentifierOutsideTopLevelTests(source, "terminalizeOwned"),
         );
         if (is_generation_transport) {
-            // The second lexical call is confined to the private B3ExecutionHarness used only by
-            // B3-0.4 tests; the public facade/product callsite remains the original single call.
+            // Two lexical calls are confined to private test harnesses; the public facade/product
+            // callsite remains the original single call.
             try std.testing.expectEqual(
                 @as(usize, 1),
                 countIdentifierOutsideTopLevelTests(source, "B3ExecutionHarness"),
@@ -7006,7 +7023,9 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
             transport_count: usize,
             attachment_count: usize = 1,
         }{
-            .{ .name = "bindCommittedStreamOwned", .transport_count = 1 },
+            // The correction's actual-transport fixture is a top-level test helper and owns the
+            // second lexical call; there is still one product-facade callsite.
+            .{ .name = "bindCommittedStreamOwned", .transport_count = 2 },
             .{ .name = "beginControllerRevokeOwned", .transport_count = 1 },
             .{ .name = "finishControllerRevokeOwned", .transport_count = 1 },
             .{ .name = "mutationAllowedOwned", .transport_count = 1 },

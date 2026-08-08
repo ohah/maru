@@ -974,8 +974,8 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   connection-wide buffered revoke는 generation 조회와 `Client` blocking/deadline RPC의 pre-flush gate를 함께 통과해야 하며,
   sibling RPC·detach가 pending mutation wire를 보내지 않는 socketpair 회귀를 포함한다.
   2c3b는 부분 구현이다. 2c3b-1 capability facade와 2c3b-2 request-side authority는 구현·검증 완료했고, 2c3b-3은 B3-4/5의
-  private RPC response execution/ownership primitive까지 구현했지만 현재 64회 fixture가 one-shot response 배열을 소비하므로 single-slot
-  reusable-finish correction과 B3-6 internal aggregate strict completion 전에는 전체 완료가 아니다. 2c3b-2는 관측 가능한 wire/product behavior를 유지하면서 request authority와 기존
+  private RPC response execution/ownership primitive와 B3-4/5 single-slot reusable-finish correction까지 구현했다. B3-6 internal
+  aggregate strict completion 전에는 2c3b-3 전체 완료가 아니다. 2c3b-2는 관측 가능한 wire/product behavior를 유지하면서 request authority와 기존
   attach-compatible response execution의 begin/revalidate/settle hardening까지만 닫는 gate다. 14-tag family/role/phase/method 전수표,
   node-entry `PreparedRequestAuthority` raw lifecycle과
   settledExact, opaque prepared storage와의 all-or-none prepare/abort, canonical frame descriptor·allocator provenance, registry-first
@@ -1085,7 +1085,7 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   request backing final-zero를 단언한다.
   lease 내부 신규 mutex/atomic/TLS는 0이다. 기존 Client mutation fence에서 독립 진입은 execution state를 exact once 획득·해제하고,
   registry operation이 이미 가진 single shared pin은 `shared(1)→execution→shared(1)` CAS 승격·강등으로 node pin을 잃지 않는다.
-  B3-4/5는 published payload의 생성·정리 primitive를 구현했지만 one-shot `[63]` response 배열을 제거하는 single-slot correction이 필요하다.
+  B3-4/5는 published payload의 생성·정리 primitive와 one-shot `[63]` response 배열 제거, canonical inline single-slot correction을 완료했다.
   B3-6 internal aggregate strict completion은 production strict-wrapper subprocess까지 증거 수준을
   높인다. B3-4/5는 기존 response loop의 response-only 추출, 별도 `rpc_executed_response.zig` byte owner, registry-owned facade와
   `RpcResponseBorrow` in-place ABI, raw lifecycle 전수, published/borrowed drift를 추가로 닫는다. raw bytes는 owner 파일 내부
@@ -1162,9 +1162,11 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   allowlist뿐이며 production callsite는 0이라는 source oracle을 둔다.
   runtime stage tuple은 `A prepared/E prepared/R prepared → A consumed+idle/E prepared/R prepared →
   A consumed+idle/E consumed+empty/R prepared+owner terminal_clean+finish consumed → R consumed+slot pristine → operation release`다.
+  published·borrowed·releasing RPC authority 또는 nonempty free evidence가 남으면 attachment drop은 mutation 0의 `AdminBusy`이고,
+  reusable finish 뒤 `authority idle+evidence empty+slot pristine`에서만 다시 허용된다.
   layout gate는 `GenerationTransport.rpc_response` exact-one inline field와 outer-owner inclusion, prepared storage/binding/owner seal/attach
   response와의 exact/partial disjoint, response array/pointer/free-list 0, init pristine, 정상 deinit의
-  `slot pristine+authority idle+evidence empty`, permanent terminal의 fail-close 선행, size budget 준수를 Debug·ReleaseFast로 검사한다.
+  `slot pristine+authority idle+evidence empty`, permanent terminal의 fail-close 선행, `GenerationTransport <= 2048 bytes` size budget을 Debug·ReleaseFast로 검사한다.
   B3-6 boundary는 client-slot-internal `ResponseDestination=union(enum){attach:*ExecutedResponse,rpc:void}` exact type,
   기존 public `executePreparedRequest(receipt,*ExecutedResponse)` exact signature, generation-transport-file-private
   `executePreparedRpcSubstrate(receipt)`와 `.rpc` wrapper의 inline slot 접근 exact 1, facade 밖 direct slot 접근 0을 고정한다.
@@ -1185,9 +1187,8 @@ field 재초기화와 whole-runtime GUI pointer 교체는 허용하지 않는다
   `/usr/bin/env -i`, 독립 parent-minted pipe capability, inert collector, exact-count zero-test 방지를 적용하고
   `MARU_SESSION_HOST_RPC_REUSE_EXEC|MARU_SESSION_HOST_RPC_SUBSTRATE_EXEC`의 closed 3-mode를 교차 수용하지 않는다.
   bounded nonempty correct-id payload의 JSON/application semantic 오류는 payload semantic read 0인 이 gate가 아니라 2c3e decoder가 소유한다.
-  B3-0a·B3-0·B3-1·B3-2·B3-3은 완료됐고 B3-4/5는 primitive 구현 뒤 single-slot correction+private substrate ownership-only settlement path 필요,
-  B3-6은 internal aggregate strict completion
-  후속이다. correction 완료 전 B3-4/5 전체 완료를 주장하지 않는다. B3-1은
+  B3-0a·B3-0·B3-1·B3-2·B3-3·B3-4/5 correction은 완료됐고 B3-6 internal aggregate strict completion은
+  후속이다. B3-1은
   Debug·ReleaseFast leaf 4개와 registry 2개, boundary 1개의 exact-count artifact를 완료 증거로 소유한다. B3-2는 Debug·ReleaseFast
   registry 3개와 product 2개, boundary 1개의 exact 11-test artifact를 완료 증거로 소유한다. 모든 내부 gate가
   Debug·ReleaseFast와 boundary에서 함께 green이 되기 전 `2c3b-3 완료`로 세지 않는다.

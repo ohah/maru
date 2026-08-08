@@ -107,7 +107,7 @@ test "B3-1 RPC authority remains leaf-owned while B3-3 opens only registry execu
             u8,
             path,
             "src/platform/macos/session_host/client_slot.zig",
-        )) 23 else if (std.mem.eql(
+        )) 20 else if (std.mem.eql(
             u8,
             path,
             "src/platform/macos/session_host/rpc_executed_response.zig",

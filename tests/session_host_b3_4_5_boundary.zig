@@ -94,7 +94,7 @@ test "B3-4/5 transition permits remain leaf-owned and registry-mediated" {
         count(owner_product, "pub fn withBorrowedRpcResponseBytesForTest("),
     );
     try std.testing.expectEqual(
-        @as(usize, 1),
+        @as(usize, 2),
         count(owner_product, "@import(\"builtin\").is_test"),
     );
     try std.testing.expectEqual(
@@ -103,6 +103,47 @@ test "B3-4/5 transition permits remain leaf-owned and registry-mediated" {
     );
     try std.testing.expectEqual(@as(usize, 0), count(slot, "withBorrowedRpcResponseBytesForTest"));
     try std.testing.expectEqual(@as(usize, 0), count(ledger_product, "withBorrowedRpcResponseBytesForTest"));
+    try std.testing.expectEqual(@as(usize, 1), count(slot, "pub fn armFinishPermitAliasForTest("));
+    try std.testing.expectEqual(@as(usize, 1), count(transport, ".armFinishPermitAliasForTest("));
+    try std.testing.expectEqual(@as(usize, 1), count(owner, "pub fn triggerReusableRearmCommitForTest("));
+    try std.testing.expectEqual(@as(usize, 1), count(transport, ".triggerReusableRearmCommitForTest("));
+    try std.testing.expectEqual(@as(usize, 0), count(client, "armFinishPermitAliasForTest"));
+    try std.testing.expectEqual(@as(usize, 0), count(client, "triggerReusableRearmCommitForTest"));
+
+    var src_dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
+    defer src_dir.close(std.testing.io);
+    var walker = try src_dir.walk(allocator);
+    defer walker.deinit();
+    while (try walker.next(std.testing.io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig")) continue;
+        const path = try std.fmt.allocPrint(allocator, "src/{s}", .{entry.path});
+        defer allocator.free(path);
+        const source = try readSource(allocator, path);
+        defer allocator.free(source);
+        const is_slot = std.mem.eql(
+            u8,
+            path,
+            "src/platform/macos/session_host/client_slot.zig",
+        );
+        const is_transport = std.mem.eql(
+            u8,
+            path,
+            "src/platform/macos/session_host/generation_transport.zig",
+        );
+        const is_owner = std.mem.eql(
+            u8,
+            path,
+            "src/platform/macos/session_host/rpc_executed_response.zig",
+        );
+        try std.testing.expectEqual(
+            @as(usize, if (is_slot or is_transport) 1 else 0),
+            count(source, "armFinishPermitAliasForTest"),
+        );
+        try std.testing.expectEqual(
+            @as(usize, if (is_owner or is_transport) 1 else 0),
+            count(source, "triggerReusableRearmCommitForTest"),
+        );
+    }
 
     const response_only = between(
         client,
@@ -118,8 +159,8 @@ test "B3-4/5 transition permits remain leaf-owned and registry-mediated" {
         @as(usize, 1),
         count(productPrefix(slot), "@import(\"rpc_executed_response.zig\")"),
     );
-    try std.testing.expectEqual(@as(usize, 1), count(slot, "fn beginRpcResponseBorrowForTest("));
-    try std.testing.expectEqual(@as(usize, 1), count(slot, "fn finishRpcResponseOwnedForTest("));
+    try std.testing.expectEqual(@as(usize, 1), count(slot, "fn beginRpcResponseBorrow("));
+    try std.testing.expectEqual(@as(usize, 1), count(slot, "fn finishRpcResponseOwned("));
     try std.testing.expectEqual(@as(usize, 0), count(slot, "RpcPublicationRecovery"));
     try std.testing.expectEqual(
         @as(usize, 1),
@@ -133,7 +174,7 @@ test "B3-4/5 transition permits remain leaf-owned and registry-mediated" {
     const correlated_wrapper = between(
         slot,
         "fn executePreparedRpcCorrelatedResponseForTest(",
-        "const RpcResponseDisposition = enum",
+        "/// One ownership-only RPC cycle",
     ) orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(
         @as(usize, 1),
@@ -141,6 +182,32 @@ test "B3-4/5 transition permits remain leaf-owned and registry-mediated" {
     );
     try std.testing.expectEqual(@as(usize, 1), count(correlated_wrapper, ".correlated_response,"));
     try std.testing.expectEqual(@as(usize, 0), count(correlated_wrapper, ".terminal_sink,"));
+
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(productPrefix(transport), "@import(\"rpc_executed_response.zig\")"),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(productPrefix(transport), "rpc_response: rpc_executed_response.RpcExecutedResponse = .{}"),
+    );
+    try std.testing.expectEqual(@as(usize, 1), count(transport, "fn executePreparedRpcSubstrate("));
+    try std.testing.expectEqual(@as(usize, 0), count(transport, "pub fn executePreparedRpcSubstrate("));
+    const substrate = between(
+        transport,
+        "fn executePreparedRpcSubstrate(",
+        "comptime {",
+    ) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(substrate, "client_slot_mod.executeGenerationRpcSubstrate("),
+    );
+    try std.testing.expectEqual(@as(usize, 0), count(substrate, "&self.rpc_response"));
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        count(transport, "@intFromPtr(&out.rpc_response)"),
+    );
+    try std.testing.expectEqual(@as(usize, 0), count(slot, "@import(\"generation_transport.zig\")"));
 
     const publication = between(
         slot,
@@ -236,8 +303,8 @@ test "B3-4/5 transition permits remain leaf-owned and registry-mediated" {
     );
     const borrow_product = between(
         slot,
-        "fn beginRpcResponseBorrowForTest(",
-        "fn finishRpcResponseOwnedForTest(",
+        "fn beginRpcResponseBorrow(",
+        "fn finishRpcResponseOwned(",
     ) orelse return error.TestExpectedEqual;
     inline for (.{
         ".prepareRpcResponseBorrowed(",
@@ -253,7 +320,7 @@ test "B3-4/5 transition permits remain leaf-owned and registry-mediated" {
     });
     const finish_product = between(
         slot,
-        "fn finishRpcResponseOwnedForTest(",
+        "fn finishRpcResponseOwned(",
         "fn terminalizeBorrowedRpcResponseNoFree(",
     ) orelse return error.TestExpectedEqual;
     inline for (.{
@@ -261,8 +328,11 @@ test "B3-4/5 transition permits remain leaf-owned and registry-mediated" {
         ".commitFreeNoFail(",
         ".commitFreeCall(",
         ".freeCaptured(",
+        ".prepareRetireFreeCall(",
+        ".prepareReusableRearm(",
         ".finishCleanNoFail(",
-        ".retireFreeCall(",
+        ".commitEvidenceRetireNoFail(",
+        ".commitReusableRearmNoFail(",
     }) |needle| try std.testing.expectEqual(@as(usize, 1), count(finish_product, needle));
     try std.testing.expectEqual(@as(usize, 1), count(finish_product, ".prepareRpcResponseReleasing("));
     try std.testing.expectEqual(@as(usize, 1), count(finish_product, ".commitRpcResponseReleasing("));
@@ -274,9 +344,12 @@ test "B3-4/5 transition permits remain leaf-owned and registry-mediated" {
         ".commitFreeCall(",
         ".freeCaptured(",
         ".prepareRpcResponseReusable(",
+        ".prepareRetireFreeCall(",
+        ".prepareReusableRearm(",
         ".finishCleanNoFail(",
         ".commitRpcResponseReusable(",
-        ".retireFreeCall(",
+        ".commitEvidenceRetireNoFail(",
+        ".commitReusableRearmNoFail(",
     });
     const no_free = between(
         slot,

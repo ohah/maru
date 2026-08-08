@@ -1033,8 +1033,8 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
    registry-resolved canonical node operation pin 아래 exact `GenerationCapabilities` value projection을 구현했다. untrusted slot 주소는
    registry 비교 전 역참조하지 않고 owner-seal/capability enum의 invalid raw byte를 fail-close하며, facade production callsite 0과
    shared `RemoteRuntime` architecture raw-read exact baseline을 boundary gate로 고정했다.
-   **2c3b-2 request-side canonical authority는 구현·검증 완료했고 2c3b-3은 B3-4/5 private response-side
-   execution/ownership까지 구현했지만 single-slot reusable-finish correction과 B3-6 internal aggregate strict completion 전이라 전체 구현 중**이며
+   **2c3b-2 request-side canonical authority와 2c3b-3의 B3-4/5 private response-side
+   execution/ownership+single-slot reusable-finish correction은 구현·검증 완료했고, B3-6 internal aggregate strict completion 전이라 전체 구현 중**이며
    두 merge gate를 섞지 않는다.
    2c3b-2는 `RuntimeRequestTag -> RequestFamily -> role/phase -> method` 전수표와 닫힌 prepare/abort error,
    같은 binding entry의 node-sealed `PreparedRequestAuthority`가 opaque `PreparedBlockingRpcStorage`의 frame descriptor·allocator
@@ -1222,9 +1222,9 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       lease를 얻은 뒤에는 request backing과 두 authority를 모두 정산한 다음 fence를 마지막에 해제한다. 테스트 밖 제품 caller는
       B3-6 전까지 0이다. execution fence는 주소·generation 외 process-local checked-monotonic incarnation을 lease와 Client latch에
       함께 봉인하며 same-address reincarnation은 새 fence를 release하지 않고 fail-closed한다.
-   6. **B3-4/5 원자적 publication+borrow/finish (single-slot correction 필요):** published payload의 생성·정리 primitive는 구현·검증했지만,
-      현재 64회 fixture가 owner 안의 one-shot response 배열을 소비하므로 fixed-pool 비목표와 무제한 순차 RPC 저장 모델을 증명하지 못한다.
-      B3-6 전에 배열을 제거하고 canonical `GenerationTransport` inline single slot 하나로 correction한다. exact safe-free/ambiguous no-free,
+   6. **B3-4/5 원자적 publication+borrow/finish (single-slot correction 완료):** published payload 생성·정리 primitive와
+      canonical `GenerationTransport` inline single slot correction을 구현·검증했다. actual transport slot의 2회·64회 재사용,
+      exact safe-free/ambiguous no-free,
       `published→borrowed→releasing` exact-once lexical borrow와 owner finish, 2회·64회 순차 RPC를 구현한다. `client.zig`는 기존 response
       loop를 request 재전송·request-id 증가 없는 `readPreparedResponseUnderExecutionLease`로 추출하고, 새
       `rpc_executed_response.zig`가 반복 RPC byte owner/borrow receipt를 소유한다. 기존 attach `executed_response.zig`와 owner seal은
@@ -1287,6 +1287,9 @@ restore, host spawn, same-PID exec upgrade와는 별도 state machine이다.
       direct terminate/kill/control frame은 0이다. fd close에 따른 EOF-driven client detach/revoke는 exact once이며 daemon PID/runtime/PTY
       child는 생존해 fresh reattach와 output 연속성을 유지한다. disjoint 뒤에만 full payload live/digest 검증을 허용하며 이후 generic terminal-no-free
       alias 문구는 raw permit-reservation alias를 제외한다.
+      attachment drop은 prepared request와 RPC response readiness를 같은 canonical registry entry에서 확인해 published·borrowed·releasing 동안
+      mutation 0의 `AdminBusy`로 닫고, reusable finish의 `authority idle+evidence empty+slot pristine` 뒤에만 다시 허용한다.
+      `GenerationTransport` 크기는 Debug·ReleaseFast에서 2048 bytes 이하로 고정한다.
    7. **B3-6 internal aggregate strict completion:** 기존 public attach facade
       `executePreparedRequest(receipt,*ExecutedResponse)`의 signature/behavior를 유지한다. correction에서 연 private
       `executePreparedRpcSubstrate(receipt)` ownership-only private settlement path는 correction부터 client-slot module-public entry에서 `fail_stop_required`를 반환형에

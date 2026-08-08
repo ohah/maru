@@ -210,6 +210,31 @@ pub const Ledger = struct {
         self.forbidden_bound = true;
     }
 
+    /// Replaces the lexical alias set before the first payload observation. This is used
+    /// after request write settles its backing frame, whose address may validly be reused
+    /// by the response allocator.
+    pub fn rebindForbiddenRangesBeforeObservation(
+        self: *Ledger,
+        ranges: []const ForbiddenRange,
+    ) Error!void {
+        try self.validateActive();
+        if (self.entry_count != 0 or !self.forbidden_bound or
+            ranges.len == 0 or ranges.len > max_forbidden_ranges)
+            return error.InvalidOwner;
+        var replacement: [max_forbidden_ranges]ForbiddenRange =
+            @splat(.{ .start = 0, .len = 0 });
+        for (ranges, 0..) |range, index| {
+            if (range.len == 0) return error.InvalidOwner;
+            _ = std.math.add(usize, range.start, range.len) catch return error.InvalidOwner;
+            replacement[index] = range;
+        }
+        self.forbidden_ranges = replacement;
+        self.forbidden_count = ranges.len;
+        self.forbidden_seal = forbiddenRangesDigest(
+            self.forbidden_ranges[0..self.forbidden_count],
+        );
+    }
+
     pub fn abortObserved(self: *Ledger, generation: u64) Error!void {
         const entry = try self.entryForGeneration(generation, .reserved);
         entry.lifecycle = .retired;
@@ -888,6 +913,7 @@ fn rpcFixtureBinding(destination_addr: usize) contract.BindingIdentity {
 
 fn rpcFixtureIdentity(destination_addr: usize) rpc_executed_response.Identity {
     return .{
+        .authority_addr = 0x7180,
         .registry_incarnation = 83,
         .binding = rpcFixtureBinding(destination_addr),
         .transport_addr = 0x7200,
@@ -925,7 +951,9 @@ test "B3-4/5 RPC ledger transfer publishes owner and consumes promoted entry" {
     const identity = rpcFixtureIdentity(@intFromPtr(&response));
     try std.testing.expect(ledger.transferPromotedRpcResponse(receipt, &response, identity) == .transferred);
     var borrow: rpc_executed_response.RpcResponseBorrow = .{};
-    try response.prepareBorrow(identity, &borrow);
+    var borrow_init: rpc_executed_response.PreparedBorrowInit = .{};
+    try response.prepareBorrowInit(identity, &borrow, &borrow_init);
+    response.commitBorrowReceiptNoFail(identity, &borrow, &borrow_init);
     var finish: rpc_executed_response.RpcResponseFinishTxn = .{};
     try response.prepareFinish(identity, &borrow, &finish);
     response.commitFreeNoFail(identity, &borrow, &finish);

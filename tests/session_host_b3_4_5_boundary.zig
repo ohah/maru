@@ -10,6 +10,8 @@ test "B3-4/5 transition permits remain leaf-owned and registry-mediated" {
     defer allocator.free(registry);
     const slot = try readSource(allocator, "src/platform/macos/session_host/client_slot.zig");
     defer allocator.free(slot);
+    const client = try readSource(allocator, "src/platform/macos/session_host/client.zig");
+    defer allocator.free(client);
     const transport = try readSource(allocator, "src/platform/macos/session_host/generation_transport.zig");
     defer allocator.free(transport);
     const owner = try readSource(allocator, "src/platform/macos/session_host/rpc_executed_response.zig");
@@ -101,6 +103,120 @@ test "B3-4/5 transition permits remain leaf-owned and registry-mediated" {
     );
     try std.testing.expectEqual(@as(usize, 0), count(slot, "withBorrowedRpcResponseBytesForTest"));
     try std.testing.expectEqual(@as(usize, 0), count(ledger_product, "withBorrowedRpcResponseBytesForTest"));
+
+    const response_only = between(
+        client,
+        "pub fn readPreparedResponseUnderExecutionLease(",
+        "fn readCorrelatedPreparedResponse(",
+    ) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 1), count(response_only, ".readCorrelatedPreparedResponse("));
+    try std.testing.expectEqual(@as(usize, 0), count(response_only, "writePreparedRequestExecution"));
+    try std.testing.expectEqual(@as(usize, 0), count(response_only, "next_request_id +="));
+    try std.testing.expectEqual(@as(usize, 0), count(client, "@import(\"remote_runtime.zig\")"));
+
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(productPrefix(slot), "@import(\"rpc_executed_response.zig\")"),
+    );
+    try std.testing.expectEqual(@as(usize, 1), count(slot, "fn beginRpcResponseBorrowForTest("));
+    try std.testing.expectEqual(@as(usize, 1), count(slot, "fn finishRpcResponseOwnedForTest("));
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(slot, "fn executePreparedRpcCorrelatedResponseForTest("),
+    );
+    const correlated_wrapper = between(
+        slot,
+        "fn executePreparedRpcCorrelatedResponseForTest(",
+        "const RpcResponseDisposition = enum",
+    ) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        count(correlated_wrapper, "executePreparedRpcPrivate("),
+    );
+    try std.testing.expectEqual(@as(usize, 1), count(correlated_wrapper, ".correlated_response,"));
+    try std.testing.expectEqual(@as(usize, 0), count(correlated_wrapper, ".terminal_sink,"));
+
+    const publication = between(
+        slot,
+        "fn publishPreparedRpcResponse(",
+        "fn executePreparedRpcTerminalSink(",
+    ) orelse return error.TestExpectedEqual;
+    inline for (.{
+        ".readPreparedResponseUnderExecutionLease(",
+        ".classifyResponsePayloadProvenance(",
+        ".prepareRpcResponsePublished(",
+        ".transferPromotedRpcResponse(",
+        ".commitRpcResponsePublished(",
+    }) |needle| try std.testing.expectEqual(@as(usize, 1), count(publication, needle));
+    try expectOrdered(publication, &.{
+        ".readPreparedResponseUnderExecutionLease(",
+        ".classifyResponsePayloadProvenance(",
+        ".prepareRpcResponsePublished(",
+        ".transferPromotedRpcResponse(",
+        ".commitRpcResponsePublished(",
+        ".settlePostExecuteReusableUnderPublicationScope(",
+        "publication.finish(",
+        "finishPreparedRpcLeaseOrFailStop(",
+    });
+    const borrow_product = between(
+        slot,
+        "fn beginRpcResponseBorrowForTest(",
+        "fn finishRpcResponseOwnedForTest(",
+    ) orelse return error.TestExpectedEqual;
+    inline for (.{
+        ".prepareRpcResponseBorrowed(",
+        ".prepareBorrowInit(",
+        ".commitRpcResponseBorrowed(",
+        ".commitBorrowReceiptNoFail(",
+    }) |needle| try std.testing.expectEqual(@as(usize, 1), count(borrow_product, needle));
+    try expectOrdered(borrow_product, &.{
+        ".prepareRpcResponseBorrowed(",
+        ".prepareBorrowInit(",
+        ".commitRpcResponseBorrowed(",
+        ".commitBorrowReceiptNoFail(",
+    });
+    const finish_product = between(
+        slot,
+        "fn finishRpcResponseOwnedForTest(",
+        "/// Executes the attach-compatible request",
+    ) orelse return error.TestExpectedEqual;
+    inline for (.{
+        ".prepareFinish(",
+        ".commitFreeNoFail(",
+        ".commitFreeCall(",
+        ".freeCaptured(",
+        ".commitTerminalFreedOnce(",
+        ".finishCleanNoFail(",
+        ".retireFreeCall(",
+    }) |needle| try std.testing.expectEqual(@as(usize, 1), count(finish_product, needle));
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        count(finish_product, ".prepareRpcResponseReleasing("),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        count(finish_product, ".commitRpcResponseReleasing("),
+    );
+    try expectOrdered(finish_product, &.{
+        ".prepareFinish(",
+        ".prepareRpcResponseReleasing(",
+        ".commitFreeNoFail(",
+        ".commitRpcResponseReleasing(",
+        ".commitFreeCall(",
+        ".freeCaptured(",
+        ".prepareRpcResponseReusable(",
+        ".finishCleanNoFail(",
+        ".commitRpcResponseReusable(",
+        ".retireFreeCall(",
+    });
+    const evidence = between(
+        slot,
+        "pub const RpcFreeEvidenceRecord = struct",
+        "fn rpcFreeEvidenceSeal(",
+    ) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 0), count(evidence, "Allocator"));
+    try std.testing.expectEqual(@as(usize, 0), count(evidence, "payload_addr"));
+    try std.testing.expectEqual(@as(usize, 0), count(evidence, "payload_len"));
 }
 
 fn readSource(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
@@ -135,4 +251,19 @@ fn countCodeTokens(source: []const u8, needle: []const u8) usize {
         count_value += count(line, needle);
     }
     return count_value;
+}
+
+fn between(source: []const u8, start: []const u8, end: []const u8) ?[]const u8 {
+    const start_index = std.mem.indexOf(u8, source, start) orelse return null;
+    const end_index = std.mem.indexOfPos(u8, source, start_index + start.len, end) orelse return null;
+    return source[start_index..end_index];
+}
+
+fn expectOrdered(source: []const u8, needles: []const []const u8) !void {
+    var cursor: usize = 0;
+    for (needles) |needle| {
+        const index = std.mem.indexOfPos(u8, source, cursor, needle) orelse
+            return error.TestExpectedEqual;
+        cursor = index + needle.len;
+    }
 }

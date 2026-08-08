@@ -146,6 +146,13 @@ const PreparedBlockingRpc = struct {
         return digest == self.frame_digest;
     }
 
+    fn reusableTerminalFor(self: *const PreparedBlockingRpc, client: *const Client) bool {
+        return preparedLifecycleRawValid(self) and self.self_addr == @intFromPtr(self) and
+            self.incarnation != 0 and self.client_addr == 0 and self.request_id != 0 and
+            self.frame_digest == 0 and self.frame.len == 0 and
+            std.meta.eql(self.allocator, client.allocator) and self.lifecycle == .terminal;
+    }
+
     fn settle(self: *PreparedBlockingRpc) void {
         const allocator = self.allocator;
         const frame = self.frame;
@@ -6219,6 +6226,23 @@ pub const Client = struct {
     ) (ClientError || generation_batch_registry.Error)!void {
         const operation_fence_held = try self.beginPublicMutation();
         defer if (operation_fence_held) self.endPublicMutation();
+        return self.restoreGenerationAllocatorScopeUnchecked(scope);
+    }
+
+    pub fn restoreGenerationAllocatorScopeUnderExecutionLease(
+        self: *Client,
+        scope: *GenerationAllocatorScope,
+        lease: *PreparedRequestExecutionLease,
+    ) (ClientError || generation_batch_registry.Error)!void {
+        if (!self.preparedRequestExecutionLeaseAuthorityMatches(lease))
+            return error.InvalidState;
+        return self.restoreGenerationAllocatorScopeUnchecked(scope);
+    }
+
+    fn restoreGenerationAllocatorScopeUnchecked(
+        self: *Client,
+        scope: *GenerationAllocatorScope,
+    ) (ClientError || generation_batch_registry.Error)!void {
         const active = self.active_generation_allocator_scope orelse return error.InvalidState;
         if (!scope.rawDiscriminatorsValid() or scope.lifecycle != .active or
             !active.matchesToken(scope) or
@@ -7704,7 +7728,8 @@ pub const Client = struct {
     ) PreparedBlockingRpcError!void {
         const operation_fence_held = try self.requireBlockingMode();
         defer if (operation_fence_held) self.endPublicMutation();
-        if (out.self_addr != 0 or out.lifecycle != .pristine or out.frame.len != 0)
+        const pristine = out.self_addr == 0 and out.lifecycle == .pristine and out.frame.len == 0;
+        if (!pristine and !out.reusableTerminalFor(self))
             return error.DestinationOccupied;
         if (self.next_request_id == 0 or self.next_request_id == std.math.maxInt(u64))
             return error.InvalidPreparedRpc;

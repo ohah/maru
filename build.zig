@@ -2170,7 +2170,7 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"B3-4/5 RPC owner"},
         });
         const run_b3_4_5_owner_tests = b.addRunArtifact(b3_4_5_owner_tests);
-        run_b3_4_5_owner_tests.addArg("--maru-expect-tests=6");
+        run_b3_4_5_owner_tests.addArg("--maru-expect-tests=7");
         run_b3_4_5_owner_tests.setCwd(b.path("."));
         session_host_b3_4_5_step.dependOn(&run_b3_4_5_owner_tests.step);
 
@@ -2188,6 +2188,40 @@ pub fn build(b: *std.Build) void {
         run_b3_4_5_ledger_tests.addArg("--maru-expect-tests=3");
         run_b3_4_5_ledger_tests.setCwd(b.path("."));
         session_host_b3_4_5_step.dependOn(&run_b3_4_5_ledger_tests.step);
+
+        const b3_4_5_evidence_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/client_slot.zig",
+                ),
+                .target = target,
+                .optimize = b3_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"B3-4/5 RPC free evidence"},
+        });
+        const run_b3_4_5_evidence_tests = b.addRunArtifact(b3_4_5_evidence_tests);
+        run_b3_4_5_evidence_tests.addArg("--maru-expect-tests=3");
+        run_b3_4_5_evidence_tests.setCwd(b.path("."));
+        session_host_b3_4_5_step.dependOn(&run_b3_4_5_evidence_tests.step);
+
+        const b3_4_5_product_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(
+                    "src/platform/macos/session_host/client_slot.zig",
+                ),
+                .target = target,
+                .optimize = b3_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"B3-4/5 product"},
+        });
+        const run_b3_4_5_product_tests = b.addRunArtifact(b3_4_5_product_tests);
+        run_b3_4_5_product_tests.addArg("--maru-expect-tests=1");
+        run_b3_4_5_product_tests.setCwd(b.path("."));
+        session_host_b3_4_5_step.dependOn(&run_b3_4_5_product_tests.step);
 
         const b3_4_5_registry_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{

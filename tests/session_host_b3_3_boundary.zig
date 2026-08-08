@@ -33,21 +33,31 @@ test "B3-3 private wrapper is the sole progress execute integration boundary" {
     try std.testing.expectEqual(@as(usize, 1), count(slot, ".exhaustRpcResponseEpochForTest("));
     try std.testing.expectEqual(@as(usize, 1), count(slot, ".rpcExecutionAuthoritiesTerminalForTest("));
     try std.testing.expectEqual(@as(usize, 9), count(slot, "executePreparedRpcTerminalSink("));
+    try std.testing.expectEqual(@as(usize, 3), count(slot, "executePreparedRpcCorrelatedResponseForTest("));
     try std.testing.expectEqual(@as(usize, 0), count(transport, "PreparedRequestExecutionLease"));
     try std.testing.expectEqual(@as(usize, 0), count(transport, "executePreparedRpcTerminalSink"));
+
+    const terminal_wrapper = between(
+        slot,
+        "fn executePreparedRpcTerminalSink(",
+        "fn executePreparedRpcCorrelatedResponseForTest(",
+    ) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 1), count(terminal_wrapper, "executePreparedRpcPrivate("));
+    try std.testing.expectEqual(@as(usize, 1), count(terminal_wrapper, ".terminal_sink,"));
+    try std.testing.expectEqual(@as(usize, 0), count(terminal_wrapper, ".correlated_response,"));
 
     const wrapper_start = std.mem.indexOf(
         u8,
         slot,
-        "fn executePreparedRpcTerminalSink(",
+        "fn executePreparedRpcPrivate(",
     ) orelse return error.TestExpectedEqual;
-    const public_start = std.mem.indexOfPos(
+    const wrapper_end = std.mem.indexOfPos(
         u8,
         slot,
         wrapper_start,
-        "pub fn executeGenerationRequest(",
+        "fn publishPreparedRpcResponse(",
     ) orelse return error.TestExpectedEqual;
-    const wrapper = slot[wrapper_start..public_start];
+    const wrapper = slot[wrapper_start..wrapper_end];
     const prepared_admission = std.mem.indexOf(u8, wrapper, ".preparedRpcAdmission(") orelse
         return error.TestExpectedEqual;
     const init_txn = std.mem.indexOf(u8, wrapper, ".initBeforeReserve(") orelse

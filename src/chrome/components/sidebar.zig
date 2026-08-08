@@ -290,6 +290,20 @@ pub fn headerRows(header_height_px: u32, cell_height_px: u32) u32 {
     return @max(@as(u32, 2), header_height_px / cell_height_px);
 }
 
+/// 헤더의 두 밴드 경계. **아이콘 줄 = [0, icon_band_px), 검색 줄 = [icon_band_px, header_height_px).**
+///
+/// 예전에는 두 줄을 셀 row 인덱스로 갈랐는데(`headerRows() - 1`), 그러면 줄 위치가 terminal 폰트에 묶여 창 오른쪽
+/// 밴드(신호등 띠 / 탭 바)와 어긋난다(docs/file-explorer.md §3.5). 밴드는 platform이 그 두 바와 **같은 출처**
+/// (`titlebar_strip_px`, `chromeBarHeightPx`)에서 계산해 넘긴다 — chrome은 경계만 판정한다.
+///
+/// `icon_band_px`가 0이거나 헤더보다 크면 옛 동작(마지막 셀 줄이 검색)으로 떨어진다. 그 값은 platform이 아직
+/// 띠를 못 잡은 초기 프레임에서만 나오므로, 여기서 fail-close하면 헤더가 통째로 클릭 불가가 된다.
+pub fn headerSearchBandTop(header_height_px: u32, icon_band_px: u32, cell_height_px: u32) u32 {
+    if (icon_band_px > 0 and icon_band_px < header_height_px) return icon_band_px;
+    if (cell_height_px == 0) return 0;
+    return (headerRows(header_height_px, cell_height_px) - 1) * cell_height_px;
+}
+
 /// 사이드바 상단 헤더([0, header_h) 영역)의 어느 부분을 가리키는가. **아이콘 줄(row 0)**: 우측 아이콘 4개(셀 col
 /// cols-2=새 워크스페이스, cols-5=view options, cols-8=사이드바 접기, cols-11=알림 종(EAW 2칸이라 cols-11·cols-10 점유)),
 /// 좌측은 네이티브 신호등
@@ -297,7 +311,7 @@ pub fn headerRows(header_height_px: u32, cell_height_px: u32) u32 {
 /// 폭/cell 0·비유한·cols<13(아이콘 4개가 안 들어감)은 none. 영역 경계는 buildSidebarHeaderFrame이 glyph를 그리는 cell
 /// row/col(floor cols)과 정확히 같게 잡는다 — 안 그리면 hit-test도 none(그려진 것=클릭되는 것 단일 출처).
 pub const HeaderRegion = enum { none, search, view_options, new_workspace, toggle_sidebar, notifications };
-pub fn headerHit(x_px: f64, y_px: f64, sidebar_width_px: u32, cell_width_px: u32, cell_height_px: u32, header_height_px: u32) HeaderRegion {
+pub fn headerHit(x_px: f64, y_px: f64, sidebar_width_px: u32, cell_width_px: u32, cell_height_px: u32, header_height_px: u32, icon_band_px: u32) HeaderRegion {
     if (header_height_px == 0 or sidebar_width_px == 0 or cell_width_px == 0 or cell_height_px == 0) return .none;
     if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return .none;
     const h: f64 = @floatFromInt(header_height_px);
@@ -307,9 +321,15 @@ pub fn headerHit(x_px: f64, y_px: f64, sidebar_width_px: u32, cell_width_px: u32
     const ch: f64 = @floatFromInt(cell_height_px);
     const cols: u32 = sidebar_width_px / cell_width_px; // buildSidebarHeaderFrame과 같은 floor — 아이콘 col 정합
     if (cols < 13) return .none; // 헤더 glyph 4개(종·◧·⚙·+)가 안 들어가는 폭 — 안 그리면 hit-test도 none(단일 출처)
-    const search_row: u32 = headerRows(header_height_px, cell_height_px) - 1;
-    if (y_px >= @as(f64, @floatFromInt(search_row)) * ch) return .search; // 마지막 줄 = 검색(그려진 🔍/입력 줄)
-    if (y_px >= ch) return .none; // 아이콘 줄(0)과 검색 줄 사이 빈 줄
+    // 밴드 경계는 렌더(검색 frame origin)와 **같은 단일 출처**다 — 셀 row로 가르면 terminal 폰트에 묶여 오른쪽
+    // 탭 바와 어긋난다(docs/file-explorer.md §3.5).
+    const search_top: f64 = @floatFromInt(headerSearchBandTop(header_height_px, icon_band_px, cell_height_px));
+    if (y_px >= search_top) return .search; // 상단 바 밴드 = 검색(그려진 🔍/입력 줄)
+    // 아이콘 줄은 띠 밴드 **안에서 세로 중앙**에 한 셀 줄로 그려진다(렌더러가 `(띠 - 셀) / 2`만큼 내린다).
+    // hit도 그 사각형이어야 "그려진 것 = 클릭되는 것"이 성립한다 — 예전처럼 `[0, ch)`로 두면 띠가 셀보다 높은
+    // 만큼 클릭 영역이 아이콘보다 위로 밀린다. 띠 위아래로 남는 부분은 빈 영역 = 창 드래그다.
+    const icon_top: f64 = if (search_top > ch) (search_top - ch) / 2 else 0;
+    if (y_px < icon_top or y_px >= icon_top + ch) return .none;
     if (x_px >= @as(f64, @floatFromInt(cols - 3)) * cw) return .new_workspace; // 줄0 우측, 그려진 '+' col(cols-2) 포함 3칸 zone
     if (x_px >= @as(f64, @floatFromInt(cols - 6)) * cw) return .view_options; // 그려진 ⚙ col(cols-5) 포함 3칸 zone
     if (x_px >= @as(f64, @floatFromInt(cols - 9)) * cw) return .toggle_sidebar; // 그려진 ◧ col(cols-8) 포함 3칸 zone
@@ -597,21 +617,37 @@ test "sidebar hit-test: inSidebar·onResizeEdge·slotAt·headerHit·closeButton�
     // 우측 아이콘 4개 zone(3칸씩): new_workspace=col cols-2(x≥(cols-3)cw=136), view_options=cols-5(x≥112),
     // toggle_sidebar=cols-8(x≥88), notifications zone[cols-12,cols-9)=x≥64(종 글리프 cols-11·cols-10, 배지 cols-12 포함).
     // 좌측(<64)=신호등 영역(none).
-    try std.testing.expectEqual(HeaderRegion.search, headerHit(10, 15, 160, 8, 10, 20)); // 검색 줄(y≥10)
-    try std.testing.expectEqual(HeaderRegion.new_workspace, headerHit(150, 5, 160, 8, 10, 20)); // 줄0 우측 [136,160)
-    try std.testing.expectEqual(HeaderRegion.view_options, headerHit(120, 5, 160, 8, 10, 20)); // 줄0 ⚙ [112,136)
-    try std.testing.expectEqual(HeaderRegion.toggle_sidebar, headerHit(95, 5, 160, 8, 10, 20)); // 줄0 ◧ [88,112)
-    try std.testing.expectEqual(HeaderRegion.notifications, headerHit(70, 5, 160, 8, 10, 20)); // 줄0 종 [64,88)
-    try std.testing.expectEqual(HeaderRegion.none, headerHit(10, 5, 160, 8, 10, 20)); // 줄0 좌측 = 신호등 영역(<64)
-    try std.testing.expectEqual(HeaderRegion.none, headerHit(10, 25, 160, 8, 10, 20)); // 헤더 밖(y≥20)
-    try std.testing.expectEqual(HeaderRegion.none, headerHit(10, 10, 160, 8, 10, 0)); // 헤더 없음
+    try std.testing.expectEqual(HeaderRegion.search, headerHit(10, 15, 160, 8, 10, 20, 0)); // 검색 줄(y≥10)
+    try std.testing.expectEqual(HeaderRegion.new_workspace, headerHit(150, 5, 160, 8, 10, 20, 0)); // 줄0 우측 [136,160)
+    try std.testing.expectEqual(HeaderRegion.view_options, headerHit(120, 5, 160, 8, 10, 20, 0)); // 줄0 ⚙ [112,136)
+    try std.testing.expectEqual(HeaderRegion.toggle_sidebar, headerHit(95, 5, 160, 8, 10, 20, 0)); // 줄0 ◧ [88,112)
+    try std.testing.expectEqual(HeaderRegion.notifications, headerHit(70, 5, 160, 8, 10, 20, 0)); // 줄0 종 [64,88)
+    try std.testing.expectEqual(HeaderRegion.none, headerHit(10, 5, 160, 8, 10, 20, 0)); // 줄0 좌측 = 신호등 영역(<64)
+    try std.testing.expectEqual(HeaderRegion.none, headerHit(10, 25, 160, 8, 10, 20, 0)); // 헤더 밖(y≥20)
+    try std.testing.expectEqual(HeaderRegion.none, headerHit(10, 10, 160, 8, 10, 0, 0)); // 헤더 없음
     // 3줄 헤더(ch=10, header=30 → rows=3, search_row=2): row0=아이콘, row1=빈 줄(none), row2(y≥20)=검색.
-    try std.testing.expectEqual(HeaderRegion.new_workspace, headerHit(150, 5, 160, 8, 10, 30)); // 줄0 아이콘
-    try std.testing.expectEqual(HeaderRegion.none, headerHit(150, 15, 160, 8, 10, 30)); // 빈 가운데 줄(아이콘 col이어도 none)
-    try std.testing.expectEqual(HeaderRegion.search, headerHit(10, 25, 160, 8, 10, 30)); // 검색 줄(y≥20)
+    try std.testing.expectEqual(HeaderRegion.new_workspace, headerHit(150, 5, 160, 8, 10, 30, 0)); // 줄0 아이콘
+    try std.testing.expectEqual(HeaderRegion.none, headerHit(150, 15, 160, 8, 10, 30, 0)); // 빈 가운데 줄(아이콘 col이어도 none)
+    try std.testing.expectEqual(HeaderRegion.search, headerHit(10, 25, 160, 8, 10, 30, 0)); // 검색 줄(y≥20)
     // cols<13(너무 좁아 아이콘 4개가 안 들어감)이면 헤더 glyph가 안 그려지므로 클릭 무시(검색 무단 활성 방지).
-    try std.testing.expectEqual(HeaderRegion.none, headerHit(50, 15, 96, 8, 10, 20)); // w=96,cw=8 → cols=12<13
-    try std.testing.expectEqual(HeaderRegion.none, headerHit(35, 15, 40, 8, 10, 20)); // w=40,cw=8 → cols=5<13
+    try std.testing.expectEqual(HeaderRegion.none, headerHit(50, 15, 96, 8, 10, 20, 0)); // w=96,cw=8 → cols=12<13
+    try std.testing.expectEqual(HeaderRegion.none, headerHit(35, 15, 40, 8, 10, 20, 0)); // w=40,cw=8 → cols=5<13
+
+    // 밴드가 주어지면 경계는 **셀 격자가 아니라 그 밴드**다. 이것이 이 함수가 존재하는 이유다 — 셀 배수로 가르면
+    // 왼쪽 검색 줄이 창 오른쪽 탭 바와 어긋난다(docs/file-explorer.md §3.5).
+    // 띠=28, 헤더=68(=28+40), ch=10: 아이콘 줄=[9,19)(띠 중앙), 검색=[28,68).
+    try std.testing.expectEqual(HeaderRegion.search, headerHit(10, 30, 160, 8, 10, 68, 28)); // 상단 바 밴드 = 검색
+    try std.testing.expectEqual(HeaderRegion.search, headerHit(10, 67, 160, 8, 10, 68, 28)); // 밴드 끝 직전도 검색
+    try std.testing.expectEqual(HeaderRegion.new_workspace, headerHit(150, 14, 160, 8, 10, 68, 28)); // 띠 중앙 아이콘 줄
+    // 그려진 것 = 클릭되는 것: 아이콘은 띠 **중앙**에 그려지므로 띠 상단(y<9)·하단(y≥19)은 빈 영역이다.
+    // 예전 `[0, ch)` 판정을 남겨 두면 이 두 줄이 각각 new_workspace/none으로 뒤집힌다.
+    try std.testing.expectEqual(HeaderRegion.none, headerHit(150, 2, 160, 8, 10, 68, 28)); // 아이콘 위 = 창 드래그 영역
+    try std.testing.expectEqual(HeaderRegion.none, headerHit(150, 22, 160, 8, 10, 68, 28)); // 아이콘 아래 = 창 드래그 영역
+    // 밴드가 0이거나 헤더보다 크면 옛 셀 격자로 떨어진다(platform이 아직 띠를 못 잡은 초기 프레임 — fail-close하면
+    // 헤더가 통째로 클릭 불가가 된다).
+    try std.testing.expectEqual(@as(u32, 10), headerSearchBandTop(20, 0, 10)); // 밴드 없음 → 마지막 셀 줄
+    try std.testing.expectEqual(@as(u32, 10), headerSearchBandTop(20, 99, 10)); // 헤더보다 큰 밴드 → 마지막 셀 줄
+    try std.testing.expectEqual(@as(u32, 28), headerSearchBandTop(68, 28, 10)); // 정상 밴드
     // closeButton: ✕가 실제로 그려지는 **그 칸**이다. w=100·cw=8·gutter/inset 0이면 cols=12, close_col=9 → [72, 80).
     {
         const c = columns(100, 8, 0, 0, 0).?;

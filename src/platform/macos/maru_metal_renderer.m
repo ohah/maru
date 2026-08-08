@@ -1205,23 +1205,23 @@ bool maru_metal_renderer_draw(
             // 이모지(width=2, fallback)라 1.7×면 과대해 1.0×로 두고 maru_center_ink_vertically로 보이는 ink를 슬롯 중앙에
             // 맞췄으나(폰트/DPI마다 틀어지는 근사), 단색 합성은 fillCoverage가 슬롯 중앙에 직접 그려 그 보정이 불필요하다.
             const bool is_bell_icon = is_header && tc.row == 0u && tc.codepoint == MARU_ICON_BELL; // 단색 합성이라 코너 아이콘과 같은 1.7×로 통일
-            // 접힘(terminal_origin_x_px==0, 사이드바 폭 0)이면 헤더 줄0 글리프(◧ 펼치기 토글 + 알림 종 🔔 + 배지)가
-            // 신호등 옆에 단독으로 떠 신호등과 수직 정렬돼야 한다 — 셋을 모두 타이틀바 띠 [0, titlebar_strip_px] 안에 세로
-            // 중앙 배치한다(띠는 max(cell_h, 30pt)라 0.3ch nudge로는 위로 쏠렸다). 예전엔 ◧만 정렬했으나 접힘에도 알림 종을
-            // 유지하면서 종/배지도 같은 정렬이 필요해 헤더 줄0 전체로 일반화(사용자 피드백). 펼침 헤더(◧/⚙/+/종)는
-            // origin_x>0이라 신호등과 안 겹쳐 아래 py_nudge 경로(무영향).
-            const bool is_collapsed_header = is_header && tc.row == 0u && terminal_origin_x_px == 0u;
+            // 헤더 줄0 글리프(◧ 펼치기 토글 + ⚙ + `+` + 알림 종 🔔 + 배지)는 **펼침·접힘 모두** 타이틀바 띠
+            // [0, titlebar_strip_px] 안에 세로 중앙 배치한다 — 신호등과 같은 띠에 있으므로 그 띠가 정렬 기준이다.
+            //
+            // 예전에는 접힘(terminal_origin_x_px==0)에만 이 공식을 쓰고, 펼침에는 `0.30ch` nudge를 썼다. 그 nudge는
+            // 띠 높이와 무관한 근사라 폰트가 커지면 다시 어긋나고, 무엇보다 **왼쪽 사이드바 헤더만 다른 기준을 쓰게**
+            // 만들어 검색 줄이 오른쪽 탭 바와 갈리는 원인의 일부였다(docs/file-explorer.md §3.5, 사용자 보고).
+            // 이제 두 상태가 같은 식을 쓴다 — 접힘↔펼침 토글에 아이콘이 위아래로 튀지 않는다.
+            const bool is_header_icon_row = is_header && tc.row == 0u;
             const float glyph_scale_x = is_dock_toggle ? glyph_policy.scale_x : ((is_corner_icon || is_bell_icon) ? 1.7f : 1.0f);
             const float glyph_scale_y = is_dock_toggle ? glyph_policy.scale_y : ((is_corner_icon || is_bell_icon) ? 1.7f : 1.0f);
             float py_top;
-            if (is_collapsed_header && titlebar_strip_px > 0u) {
+            if (is_header_icon_row && titlebar_strip_px > 0u) {
                 const float strip = (float)titlebar_strip_px;
                 py_top = (strip > ch) ? (strip - ch) * 0.5f : 0.0f; // 띠 안 세로 중앙(신호등 정렬)
             } else {
-                // 헤더 줄0 아이콘(◧⚙+🔔)은 창 top에 붙어 위로 쏠리므로 같은 0.30ch만큼 아래로 내려 신호등/타이틀바
-                // 수직 중앙에 맞춘다. PUA 합성이라 모두 슬롯 중앙에 그려져 글리프별 보정 없이 같은 nudge로 정렬된다.
-                const float py_nudge = ((is_corner_icon || is_bell_icon) && !is_dock_toggle) ? ch * 0.30f : 0.0f;
-                py_top = (float)tc.origin_y + (float)tc.row * ch + py_nudge;
+                // 검색 줄은 자기 frame origin이 이미 상단 바 밴드 중앙이라(`row = 0`) 여기서 보정하지 않는다.
+                py_top = (float)tc.origin_y + (float)tc.row * ch;
             }
             // PUA 합성 아이콘은 fillCoverage가 슬롯(EAW width 폭) 중앙에 그리므로, 이모지 시절 종(width 2)의 슬롯 중심이
             // 셀 경계에 떨어져 1칸 아이콘과 반칸 어긋나 px_nudge(-0.5칸)로 보정하던 것이 불필요하다 — 합성 아이콘 중심이

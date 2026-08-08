@@ -229,6 +229,10 @@ backing 좌표를 바꾸지 않는다. 반면 명시적 `Cmd` font-size zoom은 
 **이 규칙은 `agent_sessions`만의 예외가 아니라 도크 전체의 것이다.** `explorer`·`source_control`도 같은 값을
 쓰며, 뷰를 바꾼다고 어떤 rect도 움직이지 않는다.
 
+**이 두 밴드는 창 전폭 계약이다.** 왼쪽 사이드바 헤더의 아이콘 줄·검색 줄도 같은 띠와 바를 쓴다 — 창 상단은 좌우가
+한 줄로 읽혀야 하고, 사이드바만 `cell_height` 배수에 묶여 있던 동안 검색 줄이 탭 바와 어긋났다(사용자 보고
+2026-08-09). 밴드 정의와 헤더 glyph의 밴드-중앙 배치는 [file-explorer.md](file-explorer.md) §3.5가 소유한다.
+
 **단, 상단 view switcher와 도크 시작선은 여기서 빠진다.** 둘 다 terminal 쪽과 한 줄로 맞아야 하기 때문이다.
 시작선은 terminal과 **같은 상단 띠**(`titlebar_strip_px` = 펼침 28pt / 접힘 30pt)를 쓴다 — 예전에는 도크만
 28pt 고정 band를 따로 받았는데, 그러면 사이드바를 접을 때 두 상단 바의 시작선이 갈려 아래 경계선을 맞춰

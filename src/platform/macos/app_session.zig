@@ -5224,6 +5224,37 @@ pub const AppSession = struct {
         return self.cell_height_px +| (2 * @as(u32, space.tab_bar_pad_y_px));
     }
 
+    /// 사이드바 상단 헤더 높이 = 신호등 띠 + 상단 바. 헤더의 두 줄(아이콘·검색)이 창 오른쪽의 두 밴드와 1:1로
+    /// 대응하므로 높이도 그 둘의 합이다 — 왼쪽만 다른 식을 쓰면 검색 줄과 탭 바가 어긋난다(docs/file-explorer.md §3.5).
+    /// `refreshCellMetrics`가 `sidebar_header_height_px`에 스탬프하고, 접힘 토글도 띠 높이가 바뀌므로 다시 스탬프한다.
+    fn sidebarHeaderHeightPx(self: *const AppSession) u32 {
+        if (self.cell_height_px == 0) return 0;
+        return self.titlebar_strip_px +| self.chromeBarHeightPx();
+    }
+
+    /// 헤더 검색 줄이 놓이는 밴드의 상단 y(= 띠 아래, 상단 바 시작). 렌더(검색 frame origin)·hit-test·caret이 공유하는
+    /// 단일 출처다 — 셋이 갈리면 "보이는 곳 ≠ 눌리는 곳"이 된다.
+    fn sidebarSearchBandTopPx(self: *const AppSession) u32 {
+        return self.titlebar_strip_px;
+    }
+
+    /// 헤더 아이콘 줄(🔔◧⚙+)의 세로 중앙 y — 띠 안 세로 중앙에 그려진 한 셀 줄의 가운데.
+    /// 렌더러(`maru_metal_renderer.m`의 띠 중앙 공식)·hit-test(`sidebar.headerHit`)와 **같은 기하**를 푼다.
+    fn sidebarHeaderIconRowCenterPx(self: *const AppSession) u32 {
+        const ch = self.cell_height_px;
+        const band = self.sidebarSearchBandTopPx();
+        const top = if (band > ch) (band - ch) / 2 else 0;
+        return top + ch / 2;
+    }
+
+    /// 검색 줄 glyph의 세로 origin — 상단 바 밴드 안 세로 중앙. `row = 0` frame과 짝이라 `py_top = origin_y`가 된다.
+    fn sidebarSearchGlyphOriginY(self: *const AppSession) u32 {
+        const bar_h = self.chromeBarHeightPx();
+        const ch = self.cell_height_px;
+        const centered = if (bar_h > ch) (bar_h - ch) / 2 else 0;
+        return self.sidebarSearchBandTopPx() +| centered;
+    }
+
     /// chrome 바(탭 바·파일 헤더 밴드·주소 밴드) 안에서 텍스트 한 줄이 시작하는 세로 오프셋(바 상단 기준).
     ///
     /// **`tab_bar_pad_y_px`를 그대로 쓰면 안 된다** — 바 높이가 chrome token(`bar_height_pt`)에서 나오는
@@ -21225,21 +21256,22 @@ pub const AppSession = struct {
         return .{ .truncated = line.truncated, .query = line.query, .preedit = line.preedit, .caret_col = caret };
     }
 
-    /// 검색 caret rect(헤더 검색 영역) — IME 후보창·커서 위치. 🔍(2칸)+공백 다음 입력 텍스트 폭만큼. 검색 줄(마지막
-    /// 줄)의 y. 줄 수는 headerRows 단일 소스(headerHit·buildSidebarHeaderDrawList과 동일 — 따로 계산하면 어긋난다).
+    /// 검색 caret rect(헤더 검색 영역) — IME 후보창·커서 위치. 🔍(2칸)+공백 다음 입력 텍스트 폭만큼. 세로 위치는
+    /// 검색 glyph와 **같은 단일 출처**(sidebarSearchGlyphOriginY — 상단 바 밴드 중앙)에서 온다. 예전에는 셀 row
+    /// (`headerRows - 1`)였는데, 렌더가 밴드로 옮겨 간 뒤에도 그대로 두면 caret만 옛 격자에 남는다.
     fn sidebarSearchCaretRect(self: *AppSession) ?chrome.draw.Rect {
         if (!self.sidebar_search_active or self.cell_width_px == 0 or self.cell_height_px == 0) return null;
         const cw = self.cell_width_px;
         const ch = self.cell_height_px;
         const cols = self.sidebar_width_px / cw;
-        const search_row = chrome.components.sidebar.headerRows(self.sidebar_header_height_px, ch) - 1;
+        const search_y = self.sidebarSearchGlyphOriginY();
         // caret 위치는 렌더(buildSidebarHeaderDrawList)의 tail 창 배치와 **같은 단일 출처**(sidebarSearchLine)에서 얻는다 —
         // 긴 검색어가 넘치면 caret은 tail 창 오른쪽 끝으로 오고, 안 넘치면 text_col+content 폭(기존과 동일). 이렇게 IME
         // 후보창이 잘린 caret을 따라와 사이드바 밖 터미널 pane 위로 뜨지 않는다(find.caretRect의 panel_cols 가드와 동형).
         const max_col: u16 = @intCast(cols -| 4);
         const caret_col = self.sidebarSearchLine(max_col).caret_col;
         if (caret_col >= max_col) return null; // 극단 좁음
-        return .{ .x = @intCast(@as(u32, caret_col) * cw), .y = @intCast(search_row * ch), .w = cw, .h = ch };
+        return .{ .x = @intCast(@as(u32, caret_col) * cw), .y = @intCast(search_y), .w = cw, .h = ch };
     }
 
     /// 점(x,y px)에 있는 rename 대상 — 사이드바 슬롯=워크스페이스, pane 라벨 세그먼트=pane, Term 탭=term. 없으면
@@ -22118,12 +22150,20 @@ pub const AppSession = struct {
         // 탭 슬롯 높이 = cell 높이 × 2.5(큰 슬롯). cell_height_px가 이미 위에서 갱신됐으므로
         // 그걸 쓴다 — 슬롯 높이도 cell 메트릭과 같은 단일 출처에서 파생한다.
         self.sidebar_slot_height_px = self.cell_height_px * sidebar_slot_height_ratio_milli / 1000;
-        self.sidebar_header_height_px = self.cell_height_px * sidebar_header_height_ratio_milli / 1000;
         self.sidebar_header_row_h_px = self.cell_height_px * sidebar_header_row_h_ratio_milli / 1000; // 그룹 헤더 row(얇은 한 줄; SG3b-2-ii)
         // 카드 높이는 줄 수 기반이라 cell·헤더 높이가 바뀔 때마다 함께 파생한다(줄 기하 공식은 chrome이 소유).
         self.sidebar_metrics = .init(self.cell_height_px, self.sidebar_header_row_h_px);
         // 상단 타이틀바 띠(신호등·헤더 아이콘 줄, 탭 바는 그 아래). 펼침=한 줄, 접힘=신호등 높이 확보(computeTitlebarStripPx).
         self.titlebar_strip_px = self.computeTitlebarStripPx();
+        // 헤더 높이는 **띠 + 상단 바**다 — 사이드바 헤더의 두 줄이 창 오른쪽의 두 밴드(신호등 띠 / pane 탭 바·도크 뷰
+        // 스위처)와 한 줄로 읽혀야 하기 때문이다(docs/file-explorer.md §3.5). 그래서 `titlebar_strip_px`·
+        // `chromeBarHeightPx` 뒤에 계산한다.
+        //
+        // 예전에는 `cell_height × 3.0`이었고 그래서 **왼쪽만 terminal 폰트에 묶여** 있었다: 14pt에서 검색 줄 중심이
+        // 45pt인데 탭 바 중심은 48pt였고, 헤더 하단 54pt와 상단 바 하단 68pt가 갈렸다. 고정 오차가 아니라 단위계
+        // 불일치라 폰트를 키우면 벌어진다(24pt면 헤더만 93pt). 오른쪽 두 바가 이미 쓰던 계약에서 사이드바 헤더만
+        // 빠져 있던 것이 원인이다(사용자 보고 2026-08-09).
+        self.sidebar_header_height_px = self.sidebarHeaderHeightPx();
         // 사이드바 폭/cell 폭이 바뀌면 밴드의 칸 환산(sidebar_cols)도 달라지므로 다시 만든다.
         self.rebuildSidebar() catch {};
         // 폰트/DPI 변경을 활성 surface 코어에 즉시 반영(kitty 자동 크기 advance용 — renderFrame 안전망보다
@@ -24522,7 +24562,7 @@ pub const AppSession = struct {
                 if (self.beginSidebarScrollbarGesture(x_px, y_px)) return;
                 // 상단 헤더: 새 워크스페이스 아이콘 → 새 탭(하단 "+"를 헤더로 이동), view options 아이콘 → 메뉴(P4),
                 // 검색 영역 → 검색 활성(P3). 헤더 밖(none)이면 카드 슬롯 hit-test(✕ 닫기 / 전환 + 드래그 재정렬).
-                const header_region = chrome.components.sidebar.headerHit(x_px, y_px, self.sidebar_width_px, self.cell_width_px, self.cell_height_px, self.sidebar_header_height_px);
+                const header_region = chrome.components.sidebar.headerHit(x_px, y_px, self.sidebar_width_px, self.cell_width_px, self.cell_height_px, self.sidebar_header_height_px, self.sidebarSearchBandTopPx());
                 switch (header_region) {
                     .new_workspace => _ = self.newTab() catch {},
                     .toggle_sidebar => self.toggleSidebarCollapsed(), // ◧ → 사이드바 접기(좌상단 펼치기 버튼만 남음)
@@ -26808,7 +26848,7 @@ pub const AppSession = struct {
         // 사이드바 영역 호버는 슬롯(또는 상단 헤더)을 추적한다(터미널 URL 호버 아님).
         if (self.inSidebar(x_px)) {
             // 상단 헤더(검색바·아이콘) 영역이면 슬롯 호버 해제 + 아이콘은 pointingHand·검색 영역은 I-beam.
-            const region = chrome.components.sidebar.headerHit(x_px, y_px, self.sidebar_width_px, self.cell_width_px, self.cell_height_px, self.sidebar_header_height_px);
+            const region = chrome.components.sidebar.headerHit(x_px, y_px, self.sidebar_width_px, self.cell_width_px, self.cell_height_px, self.sidebar_header_height_px, self.sidebarSearchBandTopPx());
             self.setHoveredHeaderRegion(region); // 아이콘이면 뒤에 호버 배경(검색·none이면 지움)
             if (region != .none) {
                 self.setHoveredSlot(null);
@@ -30832,8 +30872,18 @@ pub const AppSession = struct {
             defer if (sidebar_header_frame) |*hf| hf.deinit(self.allocator);
             if (builtin.os.tag == .macos) {
                 // 통합 수집: DrawList만 만들고 collect(.sidebar_header) — placeAndDistribute가 sidebar_header_frame을 채운다.
-                if (self.buildSidebarHeaderDrawList()) |maybe_dl| {
+                // 아이콘 줄은 origin (0,0)을 유지해야 렌더러가 헤더로 인식해 합성 아이콘을 1.7×로 굽는다(§3.5).
+                if (self.buildSidebarHeaderDrawList(.icons)) |maybe_dl| {
                     if (maybe_dl) |dl| self.collectShaped(&collected, dl, self.paneFrameBuilder(), .sidebar_header);
+                } else |_| {}
+                // 검색 줄은 상단 바 밴드 중앙에 자기 origin으로 놓인다 — 오른쪽 pane 탭 바·도크 뷰 스위처와 한 줄로
+                // 맞추기 위해서다(docs/file-explorer.md §3.5). `row = 0` frame이라 py_top이 곧 이 origin이 된다.
+                if (self.buildSidebarHeaderDrawList(.search)) |maybe_dl| {
+                    if (maybe_dl) |dl| self.collectShaped(&collected, dl, self.paneFrameBuilder(), .{ .sidebar_search = .{
+                        .origin_x = 0,
+                        .origin_y = self.sidebarSearchGlyphOriginY(),
+                        .colors = .{ .default_fg = self.appearance.theme.foreground },
+                    } });
                 } else |_| {}
             }
             // 최상위 모달 오버레이 frame(열렸을 때만, macOS). Notice·Find·Palette는 배타적이라 하나만 그린다(replace의
@@ -31984,7 +32034,7 @@ pub const AppSession = struct {
         // ① 사이드바 헤더(펼침): 3줄 헤더의 빈 영역.
         if (self.sidebar_width_px > 0 and self.sidebar_header_height_px > 0 and self.inSidebar(x_px)) {
             if (y_px >= @as(f64, @floatFromInt(self.sidebar_header_height_px))) return false;
-            return chrome.components.sidebar.headerHit(x_px, y_px, self.sidebar_width_px, self.cell_width_px, self.cell_height_px, self.sidebar_header_height_px) == .none;
+            return chrome.components.sidebar.headerHit(x_px, y_px, self.sidebar_width_px, self.cell_width_px, self.cell_height_px, self.sidebar_header_height_px, self.sidebarSearchBandTopPx()) == .none;
         }
         // ② 상단 타이틀바 띠(터미널 위, 또는 접힘 시 전체 폭): 한 줄. 접힘 ◧ 펼치기 버튼·알림 종 위면 드래그 아님(클릭).
         if (self.titlebar_strip_px > 0 and y_px < @as(f64, @floatFromInt(self.titlebar_strip_px))) {
@@ -34089,6 +34139,10 @@ pub const AppSession = struct {
     const CollectDest = union(enum) {
         sidebar,
         sidebar_header,
+        /// 사이드바 헤더 검색 줄 — 상단 바 밴드 중앙에 자기 px origin으로 놓인다(docs/file-explorer.md §3.5).
+        /// `.sidebar_header`와 달리 placement를 갖는 이유는 그 밴드가 셀 격자 배수가 아니기 때문이고, 갖더라도
+        /// 잃는 것이 없는 이유는 렌더러의 헤더 특수 처리(1.7× 확대·띠 정렬)가 전부 아이콘 줄 전용이기 때문이다.
+        sidebar_search: PanePlacement,
         overlay: PanePlacement,
         pane: PanePlacement,
         // 도크 접기/펴기 토글(우상단) — 위치는 .pane처럼 자유(origin_x/y)지만 아이콘 1.7× 확대(raster slot 키움)는 .sidebar_header와 공유한다. collectShaped 게이트가 이 태그도 확대 대상으로 본다.
@@ -35184,7 +35238,7 @@ pub const AppSession = struct {
             var rich_glyph_start: ?usize = null;
             if (c.measured_text) |*artifact| {
                 const placement: ?PanePlacement = switch (c.dest) {
-                    .pane, .dock_toggle, .status_bar => |p| p,
+                    .pane, .dock_toggle, .status_bar, .sidebar_search => |p| p,
                     else => null,
                 };
                 if (placement) |p| {
@@ -35230,7 +35284,7 @@ pub const AppSession = struct {
                 .sidebar => sidebar_frame.* = rf,
                 .sidebar_header => sidebar_header_frame.* = rf,
                 .overlay => |p| overlay_frame.* = .{ .frame = rf, .origin_x = p.origin_x, .origin_y = p.origin_y, .colors = p.colors, .clip_rect = p.clip_rect },
-                .pane, .dock_toggle, .status_bar => |p| {
+                .pane, .dock_toggle, .status_bar, .sidebar_search => |p| {
                     if (built_frames.append(self.allocator, rf)) |_| {
                         pane_frames.append(self.allocator, .{
                             .frame = rf,
@@ -36142,14 +36196,29 @@ pub const AppSession = struct {
         }) catch {};
     }
 
+    /// 헤더의 두 줄은 **서로 다른 밴드**에 놓이므로 draw list도 나뉜다(docs/file-explorer.md §3.5).
+    ///
+    /// 비대칭이 필수인 이유: 렌더러는 `origin == (0,0)`을 헤더 셀의 식별자로 쓰고, 그 판정이 `◧⚙+🔔`의 1.7× 합성
+    /// 아이콘 확대를 켠다. 그래서 **아이콘 줄은 origin을 옮길 수 없다** — 옮기면 아이콘이 셀 크기로 쪼그라든다.
+    /// 검색 줄은 렌더러의 헤더 특수 처리가 전부 `row == 0` 조건에 묶여 있어 원래도 아무것도 받지 않으므로, 자기
+    /// origin을 갖는 별도 frame으로 내보내도 잃는 것이 없다.
+    const HeaderPart = enum {
+        /// 신호등 띠 밴드에 놓이는 줄(🔔 ◧ ⚙ +). origin (0,0) 고정 — 렌더러가 띠 안 세로 중앙에 정렬한다.
+        icons,
+        /// 상단 바 밴드에 놓이는 줄(🔍 + 입력/placeholder/caret). `row = 0` + px origin으로 밴드 중앙에 온다.
+        search,
+    };
+
     /// 사이드바 헤더 glyph의 DrawList(접힘이면 좌상단 토글 — buildCollapsedToggleDrawList 위임; 조건 미달이면 null).
     /// 멀티 페인 통합(collectShaped)이 직접 써 통합 placeMultiPane으로 한 atlas 세대에 묶는다.
-    fn buildSidebarHeaderDrawList(self: *AppSession) !?renderer.DrawList {
+    fn buildSidebarHeaderDrawList(self: *AppSession, part: HeaderPart) !?renderer.DrawList {
         const cw = self.cell_width_px;
         if (cw == 0 or self.cell_height_px == 0 or self.tabs.items.len == 0) return null;
         // 접힘이면 헤더 대신 좌상단 펼치기 버튼만 — 사이드바 폭 0이라 터미널 좌상단에 겹쳐 그린다(replace가 커서 suffix
         // '앞'에 끼워 터미널 위에 보임). 헤더 높이·검색·카드는 없다(완전히 숨김 + 좌상단 버튼).
-        if (self.sidebar_collapsed) return self.buildCollapsedToggleDrawList();
+        // 접힘은 아이콘 파트가 대표해서 낸다 — 검색 줄이 없으므로 search 파트는 아무것도 내지 않는다(두 번 내면
+        // 같은 토글이 두 frame으로 겹쳐 그려진다).
+        if (self.sidebar_collapsed) return if (part == .icons) self.buildCollapsedToggleDrawList() else null;
         if (self.sidebar_header_height_px == 0) return null;
         const cols: u16 = @intCast(@min(self.sidebar_width_px / cw, @as(u32, std.math.maxInt(u16))));
         if (cols < 13) return null; // 검색 줄 + 우측 아이콘 4개(종/◧/⚙/+, 각 3칸 간격)가 들어갈 최소 폭(headerHit cols<13과 정합)
@@ -36161,8 +36230,9 @@ pub const AppSession = struct {
         // 헤더: 줄0(신호등 줄)은 좌측 네이티브 신호등(닫기·최소화·확대) 영역을 비우고 우측에 사이드바 접기(◧)·view
         // options(⚙)·새 워크스페이스(+) 아이콘. 검색은 신호등 아래 줄(search_row)에 🔍 + 입력/placeholder로 둔다(headerHit과
         // 같은 줄/우측 정렬 — view↔hitTest 단일 레이아웃). 줄 수는 headerRows 단일 소스(headerHit·caretRect과 동일).
-        const header_rows: u16 = @intCast(chrome.components.sidebar.headerRows(self.sidebar_header_height_px, self.cell_height_px));
-        const search_row: u16 = header_rows - 1; // 헤더 마지막 줄(신호등 아래)
+        // 두 파트 모두 자기 frame의 **첫 줄**이다. 검색 줄의 세로 위치는 셀 row가 아니라 frame origin
+        // (sidebarSearchGlyphOriginY — 상단 바 밴드 중앙)이 정한다.
+        const search_row: u16 = 0;
         // 줄0: 우측 아이콘 3개 — 사이드바 접기(◧ cols-8)·view options(⚙ cols-5)·새 워크스페이스(+ cols-2). 3칸 간격,
         // 우측 1칸 패딩(cols-1 비움). 아이콘이 ~1.7칸 폭이라 2칸 간격이면 서로 붙어 보여(사용자 피드백) 3칸으로 띄운다.
         // headerHit의 toggle/view_options/new_workspace zone과 같은 col(단일 레이아웃 소스).
@@ -36177,10 +36247,19 @@ pub const AppSession = struct {
         // 접힘 토글과 공유(접힘은 좌측 텍스트 배지 — round_badge=false). 1~9 숫자·10+ "9" cap은 원형 1칸 제약(docs §3).
         // 아이콘 glyph col은 sidebar.headerIconCol 단일 출처(배지·hit-test와 공유 — 종은 2칸 이모지라 별도 cols-12).
         const sb_icon = chrome.components.sidebar;
-        try self.appendBellAndBadge(&cells, cols - 12, fg, true); // 펼침: 종(cols-12) 우상단 원형 배지(흰 숫자 cols-10 + 빨강 원 quad)
-        try cells.append(self.allocator, .{ .row = 0, .col = @intCast(sb_icon.headerIconCol(.toggle_sidebar, cols)), .codepoint = sidebar_toggle_codepoint, .style = .{ .foreground = fg } });
-        try cells.append(self.allocator, .{ .row = 0, .col = @intCast(sb_icon.headerIconCol(.view_options, cols)), .codepoint = icons.codepoint(.gear), .style = .{ .foreground = fg } });
-        try cells.append(self.allocator, .{ .row = 0, .col = @intCast(sb_icon.headerIconCol(.new_workspace, cols)), .codepoint = icons.codepoint(.plus), .style = .{ .foreground = fg } });
+        if (part == .icons) {
+            try self.appendBellAndBadge(&cells, cols - 12, fg, true); // 펼침: 종(cols-12) 우상단 원형 배지(흰 숫자 cols-10 + 빨강 원 quad)
+            try cells.append(self.allocator, .{ .row = 0, .col = @intCast(sb_icon.headerIconCol(.toggle_sidebar, cols)), .codepoint = sidebar_toggle_codepoint, .style = .{ .foreground = fg } });
+            try cells.append(self.allocator, .{ .row = 0, .col = @intCast(sb_icon.headerIconCol(.view_options, cols)), .codepoint = icons.codepoint(.gear), .style = .{ .foreground = fg } });
+            try cells.append(self.allocator, .{ .row = 0, .col = @intCast(sb_icon.headerIconCol(.new_workspace, cols)), .codepoint = icons.codepoint(.plus), .style = .{ .foreground = fg } });
+            return renderer.DrawList{
+                .size = .{ .cols = cols, .rows = 1 },
+                .cursor = .{ .row = 0, .col = 0 },
+                .dirty = null,
+                .cells = try cells.toOwnedSlice(self.allocator),
+                .overlays = try self.allocator.alloc(renderer.DrawOverlay, 0),
+            };
+        }
         // 검색 줄: 🔍(EAW 2칸) + 입력 텍스트(query+preedit, EAW 한글 2칸), 비면 placeholder "Search"(muted).
         // 검색어는 blur(비활성)돼도 보존해 그대로 그린다 — 다시 클릭해 이어서 편집·필터(초안 보존). preedit은 활성일
         // 때만 존재. caret/IME 후보창은 sidebarSearchCaretRect가 잡는다(활성일 때만).
@@ -36225,7 +36304,7 @@ pub const AppSession = struct {
         }
 
         return renderer.DrawList{
-            .size = .{ .cols = cols, .rows = header_rows },
+            .size = .{ .cols = cols, .rows = 1 },
             .cursor = .{ .row = 0, .col = 0 },
             .dirty = null,
             .cells = try cells.toOwnedSlice(self.allocator),
@@ -59687,7 +59766,9 @@ test "기본값 리셋 토스트는 아무 클릭으로나 닫히고 그 뒤 버
         try std.testing.expect(cols >= 13); // 헤더 아이콘이 들어가는 폭이어야 의미 있는 검증
         const before = session.tabs.items.len;
         const plus_x: f64 = @floatFromInt(session.sidebar_width_px - 1); // 줄0 우단 = '+' zone
-        session.mouse(1, plus_x, 1, 0, 0);
+        // 아이콘 줄은 신호등 띠 안 **세로 중앙**이다(docs/file-explorer.md §3.5). 예전 y=1은 띠 상단이라, 띠가
+        // 셀보다 높은 지금은 아이콘 위 빈 영역(=창 드래그)에 떨어진다 — 그려진 자리를 클릭해야 한다.
+        session.mouse(1, plus_x, @floatFromInt(session.sidebarHeaderIconRowCenterPx()), 0, 0);
         try std.testing.expectEqual(before + 1, session.tabs.items.len);
     }
 }
@@ -62587,7 +62668,7 @@ test "③b: clicking the sidebar '+' button opens a new workspace" {
     // 아이콘은 줄0이므로 y는 cell_h 안(헤더 전체 높이의 절반은 3줄 헤더에선 빈 가운데 줄이라 none).
     const header_y: f64 = @as(f64, @floatFromInt(session.cell_height_px)) / 2;
     const new_ws_x: f64 = @as(f64, @floatFromInt(session.sidebar_width_px)) - 1;
-    try std.testing.expectEqual(chrome.components.sidebar.HeaderRegion.new_workspace, chrome.components.sidebar.headerHit(new_ws_x, header_y, session.sidebar_width_px, session.cell_width_px, session.cell_height_px, session.sidebar_header_height_px));
+    try std.testing.expectEqual(chrome.components.sidebar.HeaderRegion.new_workspace, chrome.components.sidebar.headerHit(new_ws_x, header_y, session.sidebar_width_px, session.cell_width_px, session.cell_height_px, session.sidebar_header_height_px, session.sidebarSearchBandTopPx()));
 
     // 새 워크스페이스 아이콘 호버 → pointingHand(link) affordance.
     try std.testing.expectEqual(CursorKind.link, session.hoverCursor(new_ws_x, header_y, 0));
@@ -62622,7 +62703,7 @@ test "sidebar search blurs when clicking outside it (terminal/card) — restores
     // 검색 줄(헤더 하단)을 클릭 → 검색 활성, 키 포커스가 검색으로 라우팅.
     const search_x: f64 = @as(f64, @floatFromInt(session.sidebar_width_px)) * 0.5;
     const search_y: f64 = @as(f64, @floatFromInt(session.sidebar_header_height_px)) * 0.8;
-    try std.testing.expectEqual(chrome.components.sidebar.HeaderRegion.search, chrome.components.sidebar.headerHit(search_x, search_y, session.sidebar_width_px, session.cell_width_px, session.cell_height_px, session.sidebar_header_height_px));
+    try std.testing.expectEqual(chrome.components.sidebar.HeaderRegion.search, chrome.components.sidebar.headerHit(search_x, search_y, session.sidebar_width_px, session.cell_width_px, session.cell_height_px, session.sidebar_header_height_px, session.sidebarSearchBandTopPx()));
     session.mouse(1, search_x, search_y, 0, 0);
     try std.testing.expect(session.sidebar_search_active);
     try std.testing.expectEqual(AppSession.InputFocus.sidebar_search, session.inputFocus());
@@ -62680,7 +62761,7 @@ test "view options menu: ⚙ toggles sidebar show-branch/folder, stays open, sig
     // ⚙ 아이콘(헤더 상단 우측 view_options zone [w-6cw, w-3cw), ⚙ col=cols-5) 클릭 → view options 메뉴 열림.
     const gear_x: f64 = @as(f64, @floatFromInt(session.sidebar_width_px)) - @as(f64, @floatFromInt(session.cell_width_px)) * 4;
     const gear_y: f64 = @as(f64, @floatFromInt(session.sidebar_header_height_px)) * 0.2; // 상단 아이콘 줄
-    try std.testing.expectEqual(chrome.components.sidebar.HeaderRegion.view_options, chrome.components.sidebar.headerHit(gear_x, gear_y, session.sidebar_width_px, session.cell_width_px, session.cell_height_px, session.sidebar_header_height_px));
+    try std.testing.expectEqual(chrome.components.sidebar.HeaderRegion.view_options, chrome.components.sidebar.headerHit(gear_x, gear_y, session.sidebar_width_px, session.cell_width_px, session.cell_height_px, session.sidebar_header_height_px, session.sidebarSearchBandTopPx()));
     session.mouse(1, gear_x, gear_y, 0, 0);
     try std.testing.expect(session.view_options_menu);
     try std.testing.expect(session.chrome_host.context_menu.open);
@@ -64648,7 +64729,7 @@ test "sidebar collapse toggle: hides (width 0, pt preserved) and the top-left bu
     if (cols >= 10) {
         const toggle_x: f64 = @as(f64, @floatFromInt(cols - 7)) * cw; // ◧ zone [cols-9, cols-6)
         const toggle_y: f64 = @as(f64, @floatFromInt(session.cell_height_px)) * 0.5;
-        try std.testing.expectEqual(chrome.components.sidebar.HeaderRegion.toggle_sidebar, chrome.components.sidebar.headerHit(toggle_x, toggle_y, session.sidebar_width_px, session.cell_width_px, session.cell_height_px, session.sidebar_header_height_px));
+        try std.testing.expectEqual(chrome.components.sidebar.HeaderRegion.toggle_sidebar, chrome.components.sidebar.headerHit(toggle_x, toggle_y, session.sidebar_width_px, session.cell_width_px, session.cell_height_px, session.sidebar_header_height_px, session.sidebarSearchBandTopPx()));
         session.mouse(1, toggle_x, toggle_y, 0, 0);
         try std.testing.expect(session.sidebar_collapsed);
     }
@@ -73233,4 +73314,95 @@ test "도크 view bar는 뷰·터미널 폰트와 무관하고 터미널 탭 바
     try std.testing.expectEqual(zoomed_explorer.tree.y, zoomed_agent.tree.y);
     // 그리고 두 바는 폰트가 바뀐 뒤에도 여전히 서로 같다.
     try std.testing.expectEqual(session.paneBarHeightPx(), zoomed_explorer.view_bar.h);
+}
+
+// 이 테스트가 증명하는 것: 사이드바 헤더의 두 줄이 창 오른쪽의 두 밴드와 **같은 좌표**에 있고, 그 정렬이
+// terminal 폰트 크기에 흔들리지 않는다.
+//
+// 왜 터미널에서 중요한가 — 사용자가 본 증상이 정확히 이것이다(2026-08-09): 오른쪽 도크 뷰 스위처와 pane 탭 바를
+// 한 줄로 맞추는 계약은 이미 있었는데 **왼쪽 사이드바 헤더만 빠져 있어서**, 검색 줄이 탭 바보다 위에 떠 있었다.
+// 원인은 오차가 아니라 단위계 불일치(`cell_height × 3.0` vs `titlebar_strip + bar_h`)라, 폰트를 키우면 어긋남이
+// 함께 커진다. 그래서 한 폰트에서의 좌표만 고정하면 이 회귀를 다시 놓친다 — 두 크기에서 같은 불변식을 건다.
+test "사이드바 헤더 검색 줄이 폰트 크기와 무관하게 상단 바와 같은 밴드에 있다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1920, 1200, 2000);
+
+    const Probe = struct {
+        fn check(s: *AppSession) !void {
+            const strip = s.titlebar_strip_px;
+            const bar = s.chromeBarHeightPx();
+            try std.testing.expect(strip > 0 and bar > 0); // 단언이 공허하지 않다
+
+            // (1) 헤더 높이 = 띠 + 상단 바. 따라서 헤더 하단과 오른쪽 상단 바 하단이 같은 줄이고,
+            //     그 아래에서 왼쪽 카드 목록과 오른쪽 본문이 같은 y에서 시작한다.
+            try std.testing.expectEqual(strip + bar, s.sidebar_header_height_px);
+
+            // (2) 검색 줄은 상단 바 밴드 안 세로 중앙이다 — 오른쪽 탭 바 제목과 같은 기준.
+            const search_y = s.sidebarSearchGlyphOriginY();
+            try std.testing.expectEqual(strip + (bar -| s.cell_height_px) / 2, search_y);
+            try std.testing.expect(search_y >= strip); // 띠를 침범하지 않는다
+            // 셀이 바보다 **작을 때만** 바 안에 들어간다. 큰 폰트에서는 셀이 40pt 바를 넘어 글자가 아래로
+            // 삐져나오는데, 이는 오른쪽 탭 바 제목이 이미 갖고 있는 한계와 **같은 원인**이다 — 바 높이는 폰트
+            // 무관 토큰인데 그 안의 텍스트만 terminal 셀 그리드로 그려지기 때문이다. 근본 해법은 그 텍스트를
+            // chrome measured 폰트로 옮기는 것이고(docs/file-explorer.md §3.5), 이 PR의 범위가 아니다.
+            // 그때까지는 **밴드 상단에 붙는다**(위로는 절대 안 넘친다)는 것이 계약이다.
+            if (s.cell_height_px <= bar) {
+                try std.testing.expect(search_y + s.cell_height_px <= strip + bar);
+            } else {
+                try std.testing.expectEqual(strip, search_y); // 넘치더라도 띠를 침범하지 않는다
+            }
+
+            // (3) 아이콘 줄은 띠 **안**에 들어가고 그 중앙에 온다 — 신호등과 같은 띠라 그 띠가 기준이다.
+            // 중앙은 ±1px 허용한다: 띠·셀 높이의 홀짝에 따라 정수 나눗셈이 한 픽셀을 버린다(구현 공식을
+            // 그대로 복제해 단언하면 계약이 아니라 산수를 테스트하게 된다).
+            const icon_center = s.sidebarHeaderIconRowCenterPx();
+            const icon_top = icon_center -| s.cell_height_px / 2;
+            if (s.cell_height_px <= strip) {
+                // 셀이 띠에 들어가면 띠 안 세로 중앙이다(±1px — 홀짝에 따라 정수 나눗셈이 한 픽셀을 버린다.
+                // 구현 공식을 그대로 복제해 단언하면 계약이 아니라 산수를 테스트하게 된다).
+                try std.testing.expect(icon_top + s.cell_height_px <= strip);
+                const half = strip / 2;
+                try std.testing.expect(icon_center + 1 >= half and icon_center <= half + 1);
+            } else {
+                // 큰 폰트에서 셀이 띠를 넘으면 위로는 안 넘치고 띠 상단에 붙는다(검색 줄과 같은 계약·같은 한계).
+                try std.testing.expectEqual(@as(u32, 0), icon_top);
+            }
+
+            // (4) hit-test가 그 밴드를 그대로 본다("그려진 것 = 클릭되는 것").
+            const hit = chrome.components.sidebar.headerHit(
+                @floatFromInt(s.sidebar_width_px / 2),
+                @floatFromInt(search_y + s.cell_height_px / 2),
+                s.sidebar_width_px,
+                s.cell_width_px,
+                s.cell_height_px,
+                s.sidebar_header_height_px,
+                s.sidebarSearchBandTopPx(),
+            );
+            try std.testing.expectEqual(chrome.components.sidebar.HeaderRegion.search, hit);
+        }
+    };
+
+    try Probe.check(session);
+
+    // 폰트를 크게 바꿔도 같은 불변식이 성립한다. 옛 `cell_height × 3.0`은 여기서 무너졌다 — 24pt 올리면
+    // 헤더만 혼자 커져 검색 줄이 상단 바 아래로 빠져나갔다.
+    const cell_before = session.cell_height_px;
+    const header_before = session.sidebar_header_height_px;
+    session.setFontSize(session.appearance.font.size + 24);
+    try std.testing.expect(session.cell_height_px != cell_before); // 폰트가 실제로 바뀌었다
+    try Probe.check(session);
+
+    // 헤더 높이 자체가 폰트에 **불변**이다(오른쪽 두 바와 같은 성질). 옛 식에서는 셀에 비례해 늘어났다.
+    try std.testing.expectEqual(header_before, session.sidebar_header_height_px);
 }

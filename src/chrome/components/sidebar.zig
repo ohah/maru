@@ -377,7 +377,9 @@ pub fn dragTargetSlot(y_px: f64, header_height_px: u32, rows: []const Row, m: Me
 /// 넘긴다. strip 배경·제목 glyph는 platform이 따로(밴드만 chrome). 활성 우선(활성 슬롯은 호버여도 활성 색). tabs
 /// 빈(사이드바 꺼짐)이거나 메트릭 0이면 무동작. 순수: tabs·hover 상태만 읽는다. out·op은 호출자 frame arena 소유.
 pub fn view(rows: []const Row, hovered_slot: ?usize, drop_slot: ?usize, p: props.ChromeProps, arena: std.mem.Allocator, out: *std.ArrayList(draw.Op)) !void {
-    const w = p.metrics.sidebar_width_px;
+    // 밴드는 스크롤바 gutter를 **뗀** 폭을 쓴다. 스크롤바가 카드 위(layer 3)가 아니라 같은 층에서 그려지면
+    // 밴드가 사이드바 폭을 다 먹을 때 그것을 덮는다 — 컨테이너가 자기 폭에서 예약하는 것이 §4의 규율이다.
+    const w = p.metrics.sidebar_width_px -| p.metrics.sidebar_scroll_gutter_px;
     // 카드 높이는 줄 수에서 나온다(Metrics) — 옛 고정 sidebar_slot_height_px는 밴드 기하의 입력이 아니다.
     const m = Metrics.init(p.metrics.cell_height_px, p.metrics.sidebar_header_row_h_px);
     if (w == 0 or m.line_h == 0 or rows.len == 0) return;

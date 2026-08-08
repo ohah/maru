@@ -15,6 +15,10 @@ pub const CellMetrics = struct {
     // 기본 0. 위 sidebar_slot_height_px와 이름이 비슷한 상단 사이드바 헤더(검색바·아이콘, 아래 문단)와는 다른 값이다.
     // 상단 헤더(검색바·아이콘) 높이는 platform이 hit-test(slotAt/headerHit)에 직접 넘기고 .m이 사이드바 셀 py_top에
     // 더한다 — 밴드 view는 슬롯 상대 좌표라 상단 헤더를 모른다(lowerSidebar의 rect.y/slot_h 행 역산과 일치).
+    /// 사이드바 우측에서 스크롤바가 **상시** 예약하는 폭(track 폭 + inset). 밴드·카드 텍스트가 이만큼
+    /// 좁아진다 — 스크롤바가 나타나고 사라져도 폭이 안 변해야 목록이 reflow하지 않는다
+    /// (docs/scroll-area.md §4). 0이면 예약 없음(스크롤바가 카드 위에 뜨던 옛 동작).
+    sidebar_scroll_gutter_px: u32 = 0,
     backing_width_px: u32,
     backing_height_px: u32,
     // 사이드바·titlebar만 뺀 전체 workspace rect. terminal·divider·전역 파일 도크를 모두 포함하며,

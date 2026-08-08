@@ -1385,6 +1385,21 @@ tree 교체에서 capture carry 누락(드래그가 첫 move에 죽음)·스크�
      "thumb 드래그가 이 목록을 움직이고 탐색기 offset은 그대로"를 본다.
 - **SV4 — 사이드바 이관.** 스크롤바가 host의 GPU quad라 발행 경로가 없다. 이관하면 사이드바도
   드래그 가능한 스크롤바를 얻는다(현재 휠 전용).
+
+  **앞의 셋과 성격이 다르다.** 탐색기·소스 컨트롤은 목록 렌더가 `app_session`에 있어 host 안에서
+  gutter를 뗄 수 있었다. 사이드바는 이미 제품 컴포넌트(`chrome/components/sidebar.zig`)가 밴드 op을
+  내고 그 폭을 `p.metrics.sidebar_width_px` 하나로 정한다 — 스크롤바를 카드 **위**(layer 3)에서 공용
+  paint 경로(layer 2, 카드 **아래**)로 내리면 gutter 예약이 **그 컴포넌트의 계약 변경**이 된다.
+  그래서 둘로 나눈다.
+
+  - **SV4a — 발행 경로.** `appendSidebarScrollbar()`가 손으로 만드는 GpuQuad를 `tree.scrollArea` 선언
+    + `ui_paint` + `chrome_draw_lowering`으로 교체하고, `sidebar.view`가 밴드 폭에서 gutter를 예약한다.
+    **보이는 변화**: 카드 밴드가 gutter만큼 좁아진다(스크롤바가 나타나고 사라져도 폭은 안 변한다 —
+    상시 예약이 [ScrollArea](scroll-area.md) §4의 규율이다).
+  - **SV4b — 드래그.** capture를 붙여 잡아 끌 수 있게 한다. **판단**: 사이드바와 도크 목록은 **동시에
+    보이므로** 발행 저장소는 각자 둔다. 그러나 한 번에 하나만 잡히므로 capture·`scroll_area.Drag`는
+    공유하고 어느 쪽을 잡았는지만 태그한다 — SV3b가 상태까지 합친 근거("도크 뷰는 한 번에 하나만
+    보인다")는 여기 적용되지 않는다. 근거가 다르면 결론도 다르게 적는다.
 - **SV5 — 알림·팔레트·세팅(판단 보류).** 셋은 이미 `overlay_input.windowStart`로 item-index windowing을
   공유한다. 흡수가 이득인지 그대로 두는 것이 옳은지는 SV1~SV4를 마친 뒤 실제 계약을 보고 정한다.
 - **SV6 — z 축 정리(판단은 이관 중, 변경은 별도 슬라이스).** 정렬 축 변경은 lowering을 지나는 모든 quad
